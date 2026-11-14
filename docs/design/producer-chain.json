@@ -1,0 +1,1986 @@
+{
+ "schema": 1,
+ "counts": {
+  "R": 8,
+  "X": 8,
+  "N": 12,
+  "NP": 33
+ },
+ "products": [
+  {
+   "id": "kP0RebaseDecision",
+   "label": "P0",
+   "token": "p0_rebase_decision",
+   "name": "re-base decision",
+   "backend": "RenderOnly",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "-",
+   "producer_files": [],
+   "producer_text": "",
+   "reserved": false,
+   "no_producer": true,
+   "no_producer_owner": "held by scaling/rebase (decision record, no skeleton fill); 102b trigger: P6 entrance-ahead producer row below",
+   "edges": []
+  },
+  {
+   "id": "kP1HalfLuma",
+   "label": "P1",
+   "token": "p1_half_luma",
+   "name": "half luma",
+   "backend": "Cpu",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B4",
+   "producer_files": [
+    "input/source_analysis/lane/LaneCpuProducts.h"
+   ],
+   "producer_text": "HalfLumaProducer",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": []
+  },
+  {
+   "id": "kP2VectorPair",
+   "label": "P2",
+   "token": "p2_vector_pair",
+   "name": "vector-engine pair",
+   "backend": "Ofa",
+   "variants": "NonIdentical",
+   "noOfaSubstitute": "kP2mMatcherPair",
+   "shortQueueSubstitute": null,
+   "lane": "L-B4",
+   "producer_files": [
+    "motion/estimation/MotionAheadProducer.cpp"
+   ],
+   "producer_text": "NVOF producer (MotionAheadProducer)",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP1HalfLuma",
+     "lags": [
+      0,
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "X",
+     "evidence": [
+      [
+       "motion/estimation/MotionAheadProducer.cpp",
+       28,
+       "bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH)"
+      ],
+      [
+       "motion/estimation/MotionAheadProducer.cpp",
+       492,
+       "if (!LumaAtTarget(job.luma, lumaBuffer, halfW, halfH))"
+      ],
+      [
+       "motion/estimation/MotionAheadProducer.cpp",
+       556,
+       "bool Producer::LumaAtTarget(const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& halfW, int& hal"
+      ]
+     ],
+     "kind": "recompute",
+     "note": "flag NotYetConsumed: C9",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP2mMatcherPair",
+   "label": "P2m",
+   "token": "p2m_matcher_pair",
+   "name": "matcher pair",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B4",
+   "producer_files": [
+    "motion/estimation/matcher/DejudderWarp.cpp"
+   ],
+   "producer_text": "matcher (DejudderWarp estimate)",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP1HalfLuma",
+     "lags": [
+      0,
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "X",
+     "evidence": [
+      [
+       "motion/estimation/matcher/DejudderWarp.cpp",
+       2701,
+       "bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int l"
+      ],
+      [
+       "motion/estimation/matcher/DejudderWarp.cpp",
+       2712,
+       "Pyramid(half, l1, l2, 0, levels);"
+      ],
+      [
+       "motion/estimation/matcher/DejudderWarp.cpp",
+       2715,
+       "bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)"
+      ]
+     ],
+     "kind": "recompute",
+     "note": "flag NotYetConsumed: C9",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP3AnalysisField",
+   "label": "P3",
+   "token": "p3_analysis_field",
+   "name": "analysis motion field",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B4",
+   "producer_files": [
+    "motion/estimation/matcher/DejudderWarp.cpp"
+   ],
+   "producer_text": "analysis field pass",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP1HalfLuma",
+     "lags": [
+      0,
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "X",
+     "evidence": [
+      [
+       "motion/estimation/matcher/DejudderWarp.cpp",
+       2701,
+       "bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int l"
+      ],
+      [
+       "motion/estimation/matcher/DejudderWarp.cpp",
+       2712,
+       "Pyramid(half, l1, l2, 0, levels);"
+      ],
+      [
+       "motion/estimation/matcher/DejudderWarp.cpp",
+       2715,
+       "bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)"
+      ]
+     ],
+     "kind": "recompute",
+     "note": "flag NotYetConsumed: C9",
+     "interim": ""
+    },
+    {
+     "input": "kP2VectorPair",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "N",
+     "evidence": [],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP4SourceStats",
+   "label": "P4",
+   "token": "p4_source_stats",
+   "name": "source stats",
+   "backend": "Cpu",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B4",
+   "producer_files": [
+    "input/source_analysis/lane/LaneCpuProducts.h"
+   ],
+   "producer_text": "SourceStatsProducer",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP1HalfLuma",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "input/source_analysis/lane/LaneCpuProducts.h",
+       292,
+       "|| job.inputData[0] == nullptr)"
+      ],
+      [
+       "input/source_analysis/lane/LaneCpuProducts.h",
+       304,
+       "if (job.out == nullptr || job.inputData[0] == nullptr || hh_ == 0)"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP5MonitorTiles",
+   "label": "P5",
+   "token": "p5_monitor_tiles",
+   "name": "monitor tiles",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "-",
+   "producer_files": [
+    "input/source_analysis/SourceResolutionMonitor.h"
+   ],
+   "producer_text": "tile pass + async readback",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": []
+  },
+  {
+   "id": "kP6EntranceAhead",
+   "label": "P6",
+   "token": "p6_entrance_ahead",
+   "name": "entrance output ahead",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "-",
+   "producer_files": [],
+   "producer_text": "entrance B-ahead",
+   "reserved": false,
+   "no_producer": true,
+   "no_producer_owner": "OWNER GAP: no lane in refs/129; 102b PRODUCER-NP-P6 (new row): trigger = the entrance-ahead owner fill is scheduled on the skeleton (scaling/rebase, product.entrance)",
+   "edges": [
+    {
+     "input": "kP0RebaseDecision",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kP3AnalysisField",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP7CameraFit",
+   "label": "P7",
+   "token": "p7_camera_fit",
+   "name": "camera fit",
+   "backend": "Cpu",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B6",
+   "producer_files": [
+    "motion/estimation/global_model/link/CameraExtension.cpp",
+    "motion/estimation/global_model/link/CameraFitWorker.cpp"
+   ],
+   "producer_text": "camera fit (CPU worker)",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP4SourceStats",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "X",
+     "evidence": [
+      [
+       "motion/estimation/global_model/link/CameraExtension.cpp",
+       161,
+       "SceneRead ReadScene(FrameAnalysis::Store* store, uint64_t seq, bool& have, bool& cut, bool& fade, CameraModel:"
+      ],
+      [
+       "motion/estimation/global_model/link/CameraExtension.cpp",
+       204,
+       "ReadScene(store, f.pairTo, have, cut, fade, &facts.picture);"
+      ],
+      [
+       "motion/estimation/global_model/link/CameraExtension.cpp",
+       221,
+       "ReadScene(store, f.pairTo, have, cut, fade, &d.facts.picture);"
+      ]
+     ],
+     "kind": "outside-acquire",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP2VectorPair",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": false,
+     "status": "X",
+     "evidence": [
+      [
+       "motion/estimation/global_model/link/CameraExtension.cpp",
+       239,
+       "if (!engine.FlowOf(seq, v))"
+      ],
+      [
+       "motion/estimation/global_model/link/CameraExtension.cpp",
+       480,
+       "if (!engine->SeedFieldOf(latest, sf) || sf.sourceGridW <= 0 || sf.sourceGridH <= 0)"
+      ],
+      [
+       "motion/estimation/global_model/link/CameraExtension.cpp",
+       629,
+       "if (engine->SeedFieldOf(s, sf))"
+      ]
+     ],
+     "kind": "outside-acquire",
+     "note": "undeclared external view: P2 via FlowOf (decision G-A3, ProductFlags ExternalView)",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP8CameraLabels",
+   "label": "P8",
+   "token": "p8_camera_labels",
+   "name": "camera labels",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B6",
+   "producer_files": [
+    "motion/estimation/global_model/link/CameraLabelFill.cpp"
+   ],
+   "producer_text": "camera label pass",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP7CameraFit",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "X",
+     "evidence": [
+      [
+       "motion/estimation/global_model/link/CameraLabelFill.cpp",
+       50,
+       "if (!m_link.CausalRecord(s))"
+      ],
+      [
+       "motion/estimation/global_model/link/CameraLabelFill.cpp",
+       82,
+       "const std::shared_ptr<const CameraModel::CameraMotion> rec = m_link.CausalRecord(seq);"
+      ],
+      [
+       "motion/estimation/global_model/link/CameraLabelFill.cpp",
+       116,
+       "const std::shared_ptr<const CameraModel::CameraMotion> rec = p7Sealed ? m_link.CausalRecord(seq) : nullptr;"
+      ]
+     ],
+     "kind": "partial",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP3AnalysisField",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "X",
+     "evidence": [
+      [
+       "motion/estimation/global_model/link/CameraLabelFill.cpp",
+       83,
+       "const std::shared_ptr<const FieldCopy> field = m_link.FieldOf(seq);"
+      ],
+      [
+       "motion/estimation/global_model/link/CameraLabelFill.cpp",
+       125,
+       "if (!m_device.Produce(*rec, m_link.FieldOf(seq).get(), target))"
+      ]
+     ],
+     "kind": "outside-acquire",
+     "note": "",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP9CameraSmoothed",
+   "label": "P9",
+   "token": "p9_camera_smoothed",
+   "name": "camera smoothed",
+   "backend": "Cpu",
+   "variants": "NonIdentical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": "kP7CameraFit",
+   "lane": "L-B4",
+   "producer_files": [
+    "motion/estimation/global_model/link/CameraLinkCore.cpp"
+   ],
+   "producer_text": "camera smoothing (CPU)",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP7CameraFit",
+     "lags": [
+      0
+     ],
+     "leads": [
+      2
+     ],
+     "declared": true,
+     "status": "X",
+     "evidence": [
+      [
+       "motion/estimation/global_model/link/CameraLinkCore.cpp",
+       358,
+       "const bool have = m_pool->Get(seq, e, true);"
+      ],
+      [
+       "motion/estimation/global_model/link/CameraLinkCore.cpp",
+       457,
+       "if (m_pool->Get(f.seq, e))"
+      ],
+      [
+       "motion/estimation/global_model/link/CameraLinkCore.cpp",
+       755,
+       "if (!m_pool->Get(seq, e))"
+      ]
+     ],
+     "kind": "outside-acquire",
+     "note": "",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP10GrainSplit",
+   "label": "P10",
+   "token": "grain.split",
+   "name": "grain split (shared)",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B2",
+   "producer_files": [
+    "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
+    "input/source_analysis/lane/LaneGpuProducts.cpp"
+   ],
+   "producer_text": "grain split pass",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP4SourceStats",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
+       496,
+       "const VpLaneProducts::GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
+      ],
+      [
+       "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
+       571,
+       "const VpLaneProducts::GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
+      ]
+     ],
+     "kind": "",
+     "note": "shared dispatcher read; its picture feeds the ownsTap (P10) tap build",
+     "interim": ""
+    },
+    {
+     "input": "kP13SourceRing",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "N",
+     "evidence": [],
+     "kind": "",
+     "note": "INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)); flag ViewIsActual: C9b",
+     "interim": "interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)"
+    }
+   ]
+  },
+  {
+   "id": "kP10cGrainSplitChroma",
+   "label": "P10c",
+   "token": "grain.split.chroma",
+   "name": "grain split (chroma planes)",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B2",
+   "producer_files": [],
+   "producer_text": "reserved (no producer: built with C10)",
+   "reserved": true,
+   "no_producer": true,
+   "no_producer_owner": "L-B2; ProductCatalog flag Reserved, built with C10; 102b PRODUCER-NP-P10C (new row)",
+   "edges": [
+    {
+     "input": "kP4SourceStats",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kP13SourceRing",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP11RegionBlockStats",
+   "label": "P11",
+   "token": "region_block_stats",
+   "name": "region block statistics",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B5",
+   "producer_files": [
+    "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
+    "input/source_analysis/lane/LaneGpuRegionKernel.cpp",
+    "input/source_analysis/lane/LaneGpuJobs.h"
+   ],
+   "producer_text": "region block statistics pass",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP10GrainSplit",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "input/source_analysis/lane/LaneGpuRegionKernel.cpp",
+       120,
+       "const GpuInput* p10 = c.Input(VpSkeleton::kP10GrainSplit);"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP4SourceStats",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "input/source_analysis/lane/LaneGpuRegionKernel.cpp",
+       141,
+       "const RegionEvidence::Rect pic = RegionEvidence::PictureOrFrame(c.picture, w, h);"
+      ]
+     ],
+     "kind": "",
+     "note": "P4 reaches the kernel as c.picture, set by the shared dispatcher (generic read, not per product)",
+     "interim": ""
+    },
+    {
+     "input": "kP13SourceRing",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "N",
+     "evidence": [],
+     "kind": "",
+     "note": "INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged))",
+     "interim": "interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)"
+    }
+   ]
+  },
+  {
+   "id": "kP12LightLevel",
+   "label": "P12",
+   "token": "p12_light_level",
+   "name": "light level",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B5",
+   "producer_files": [
+    "input/source_analysis/lane/LaneGpuLightKernel.cpp"
+   ],
+   "producer_text": "light level pass",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP11RegionBlockStats",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "input/source_analysis/lane/LaneGpuLightKernel.cpp",
+       174,
+       "const GpuInput* p11 = c.Input(VpSkeleton::kP11RegionBlockStats);"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP4SourceStats",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "input/source_analysis/lane/LaneGpuLightKernel.cpp",
+       192,
+       "const GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP13SourceRing",
+   "label": "P13",
+   "token": "p13_source_ring",
+   "name": "source ring (views)",
+   "backend": "RenderOnly",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "-",
+   "producer_files": [
+    "input/capture/SourcePlanes.h"
+   ],
+   "producer_text": "",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": []
+  },
+  {
+   "id": "kTdBlocks",
+   "label": "td.blocks",
+   "token": "td.blocks",
+   "name": "temporal detail blocks",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B2",
+   "producer_files": [
+    "repair/temporal_detail/TemporalDetailGpu.cpp"
+   ],
+   "producer_text": "reserved (engine: reset 2)",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP10GrainSplit",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "X",
+     "evidence": [
+      [
+       "repair/temporal_detail/TemporalDetailGpu.cpp",
+       97,
+       "GrainSplit::Gpu::Splitter split;"
+      ],
+      [
+       "repair/temporal_detail/TemporalDetailGpu.cpp",
+       394,
+       "const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(sharedSplit, w, h, g.B, g.scale, cu, 0, param"
+      ],
+      [
+       "repair/temporal_detail/TemporalDetailGpu.cpp",
+       424,
+       "const GrainSplit::Gpu::Frame& gs = shared ? *sharedSplit : m.split.Out();"
+      ]
+     ],
+     "kind": "recompute",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP11RegionBlockStats",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "N",
+     "evidence": [],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP13SourceRing",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "N",
+     "evidence": [],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kTdBlocks",
+     "lags": [
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "N",
+     "evidence": [],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kTdMemory",
+   "label": "td.memory",
+   "token": "td.memory",
+   "name": "temporal detail memory (budget-governed store)",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B2",
+   "producer_files": [],
+   "producer_text": "",
+   "reserved": false,
+   "no_producer": true,
+   "no_producer_owner": "102b PRODUCER-NP-TD (new row): TD engine phase 1 (doc 99 TD-P); lane L-B2",
+   "edges": [
+    {
+     "input": "kTdBlocks",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kP10GrainSplit",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kP3AnalysisField",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kP13SourceRing",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kTdAnchorPass",
+   "label": "td.anchor_pass",
+   "token": "td.anchor_pass",
+   "name": "temporal detail anchor pass",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B2",
+   "producer_files": [],
+   "producer_text": "reserved (engine: reset 2)",
+   "reserved": true,
+   "no_producer": true,
+   "no_producer_owner": "102b PRODUCER-NP-TD: TD engine phase 1; lane L-B2",
+   "edges": [
+    {
+     "input": "kP13SourceRing",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kP10GrainSplit",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kP11RegionBlockStats",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kTdMemory",
+     "lags": [
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kSourceIdentity",
+   "label": "P14",
+   "token": "p14_source_identity",
+   "name": "source identity (held state)",
+   "backend": "Cpu",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "-",
+   "producer_files": [
+    "input/source_analysis/identity/SourceIdPipeline.h"
+   ],
+   "producer_text": "",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP5MonitorTiles",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "input/source_analysis/identity/SourceIdPipeline.h",
+       126,
+       "ClassicalReading classical;"
+      ],
+      [
+       "input/source_analysis/identity/SourceIdPipeline.h",
+       214,
+       "ClassicalReading c = in.classical;"
+      ]
+     ],
+     "kind": "",
+     "note": "type-token match only: FrameInput.classical is a monitor snapshot copied by the call site, not an Acquire",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kSourceGeometry",
+   "label": "P14g",
+   "token": "source_geometry",
+   "name": "source geometry (held state)",
+   "backend": "Cpu",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "-",
+   "producer_files": [
+    "input/source_analysis/identity/SourceGeometryProduct.h"
+   ],
+   "producer_text": "",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP5MonitorTiles",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "N",
+     "evidence": [],
+     "kind": "",
+     "note": "flag ViewIsActual: C9b",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP7gCameraGuide",
+   "label": "P7g",
+   "token": "p7g_camera_guide",
+   "name": "camera guide",
+   "backend": "Cpu",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B6",
+   "producer_files": [
+    "motion/estimation/global_model/link/GuideLaneJob.cpp"
+   ],
+   "producer_text": "camera guide (camera worker)",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP7CameraFit",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "N",
+     "evidence": [],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP4SourceStats",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "N",
+     "evidence": [],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kCodingEvidence",
+   "label": "P16",
+   "token": "coding_evidence",
+   "name": "coding evidence (P16)",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B5",
+   "producer_files": [
+    "input/source_analysis/regions/CodingEvidence.cpp",
+    "control/skeleton/SkeletonModule.cpp"
+   ],
+   "producer_text": "reserved (fused with the region block statistics pass)",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP10GrainSplit",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "N",
+     "evidence": [],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP11RegionBlockStats",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "N",
+     "evidence": [],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP13SourceRing",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "N",
+     "evidence": [],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kCodingEvidence",
+     "lags": [
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "input/source_analysis/regions/CodingEvidence.cpp",
+       556,
+       "const VpSkeleton::AcquireResult r = memo->Acquire(VpSkeleton::kCodingEvidence, seq, VpSkeleton::AcquireForm::C"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kQualityPattern",
+   "label": "P15",
+   "token": "quality_pattern",
+   "name": "frame quality pattern (P15)",
+   "backend": "Cpu",
+   "variants": "NonIdentical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": "kQualityPatternCausal",
+   "lane": "L-B5",
+   "producer_files": [],
+   "producer_text": "reserved (lane CPU job)",
+   "reserved": true,
+   "no_producer": true,
+   "no_producer_owner": "102b TD-CORE-P15 PRODUCER BUILD (trigger: R2-9 P15-DECL landed + TD phase 1); lane L-B5",
+   "edges": [
+    {
+     "input": "kCodingEvidence",
+     "lags": [
+      0
+     ],
+     "leads": [
+      1,
+      2
+     ],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kQualityPattern",
+     "lags": [
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kP5MonitorTiles",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer; flag ViewIsActual: C9b",
+     "interim": ""
+    },
+    {
+     "input": "kSourceIdentity",
+     "lags": [
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kQualityPatternCausal",
+   "label": "P15c",
+   "token": "quality_pattern.causal",
+   "name": "frame quality pattern, causal (P15c)",
+   "backend": "Cpu",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B5",
+   "producer_files": [],
+   "producer_text": "reserved (lane CPU job)",
+   "reserved": true,
+   "no_producer": true,
+   "no_producer_owner": "102b TD-CORE-P15 PRODUCER BUILD (same job as P15); lane L-B5",
+   "edges": [
+    {
+     "input": "kCodingEvidence",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kQualityPatternCausal",
+     "lags": [
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kP5MonitorTiles",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer; flag ViewIsActual: C9b",
+     "interim": ""
+    },
+    {
+     "input": "kSourceIdentity",
+     "lags": [
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kRefinedField",
+   "label": "P3r",
+   "token": "refined_field",
+   "name": "refined field (P3r)",
+   "backend": "GpuCompute",
+   "variants": "NonIdentical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "-",
+   "producer_files": [],
+   "producer_text": "reserved (field refine pass after P3)",
+   "reserved": true,
+   "no_producer": true,
+   "no_producer_owner": "102b row 'P3r refined-field binding' (trigger: TD round, doc 99 phase TD-5 after P3b)",
+   "edges": [
+    {
+     "input": "kP3AnalysisField",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kP1HalfLuma",
+     "lags": [
+      0,
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kP8CameraLabels",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kTdAnchorRefs",
+   "label": "td.anchor_refs",
+   "token": "td.anchor_refs",
+   "name": "td anchor references",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B2",
+   "producer_files": [],
+   "producer_text": "reserved (engine: reset 2)",
+   "reserved": true,
+   "no_producer": true,
+   "no_producer_owner": "102b PRODUCER-NP-TD: TD engine phase 1; lane L-B2",
+   "edges": [
+    {
+     "input": "kP13SourceRing",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kQualityPattern",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kTdDelta",
+   "label": "td.delta",
+   "token": "td.delta",
+   "name": "td repair delta",
+   "backend": "GpuCompute",
+   "variants": "NonIdentical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B2",
+   "producer_files": [],
+   "producer_text": "reserved (engine: reset 2)",
+   "reserved": true,
+   "no_producer": true,
+   "no_producer_owner": "102b PRODUCER-NP-TD: TD engine phase 1; lane L-B2",
+   "edges": [
+    {
+     "input": "kTdBlocks",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kTdMemory",
+     "lags": [
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kP13SourceRing",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kTdMaps",
+   "label": "td.maps",
+   "token": "td.maps",
+   "name": "td consumer maps (U19 TdMapsView)",
+   "backend": "GpuCompute",
+   "variants": "NonIdentical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B2",
+   "producer_files": [],
+   "producer_text": "reserved (engine: reset 2)",
+   "reserved": true,
+   "no_producer": true,
+   "no_producer_owner": "102b PRODUCER-NP-TD: TD engine phase 1; lane L-B2",
+   "edges": [
+    {
+     "input": "kTdBlocks",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kP10GrainSplit",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kCodingEvidence",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    },
+    {
+     "input": "kRefinedField",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kTdTrailSummary",
+   "label": "td.trail_summary",
+   "token": "td.trail_summary",
+   "name": "td trail summary",
+   "backend": "Cpu",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B2",
+   "producer_files": [],
+   "producer_text": "reserved (engine: reset 2)",
+   "reserved": true,
+   "no_producer": true,
+   "no_producer_owner": "102b PRODUCER-NP-TD: TD engine phase 1; lane L-B2",
+   "edges": [
+    {
+     "input": "kTdBlocks",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "NP",
+     "evidence": [],
+     "kind": "",
+     "note": "no production producer",
+     "interim": ""
+    }
+   ]
+  }
+ ],
+ "scheduler": {
+  "ordering_edges": [
+   [
+    "kCodingEvidence",
+    "kQualityPattern"
+   ],
+   [
+    "kCodingEvidence",
+    "kQualityPatternCausal"
+   ],
+   [
+    "kCodingEvidence",
+    "kTdMaps"
+   ],
+   [
+    "kP0RebaseDecision",
+    "kP6EntranceAhead"
+   ],
+   [
+    "kP10GrainSplit",
+    "kCodingEvidence"
+   ],
+   [
+    "kP10GrainSplit",
+    "kP11RegionBlockStats"
+   ],
+   [
+    "kP10GrainSplit",
+    "kTdAnchorPass"
+   ],
+   [
+    "kP10GrainSplit",
+    "kTdBlocks"
+   ],
+   [
+    "kP10GrainSplit",
+    "kTdMaps"
+   ],
+   [
+    "kP10GrainSplit",
+    "kTdMemory"
+   ],
+   [
+    "kP11RegionBlockStats",
+    "kCodingEvidence"
+   ],
+   [
+    "kP11RegionBlockStats",
+    "kP12LightLevel"
+   ],
+   [
+    "kP11RegionBlockStats",
+    "kTdAnchorPass"
+   ],
+   [
+    "kP11RegionBlockStats",
+    "kTdBlocks"
+   ],
+   [
+    "kP13SourceRing",
+    "kCodingEvidence"
+   ],
+   [
+    "kP13SourceRing",
+    "kP10GrainSplit"
+   ],
+   [
+    "kP13SourceRing",
+    "kP10cGrainSplitChroma"
+   ],
+   [
+    "kP13SourceRing",
+    "kP11RegionBlockStats"
+   ],
+   [
+    "kP13SourceRing",
+    "kTdAnchorPass"
+   ],
+   [
+    "kP13SourceRing",
+    "kTdAnchorRefs"
+   ],
+   [
+    "kP13SourceRing",
+    "kTdBlocks"
+   ],
+   [
+    "kP13SourceRing",
+    "kTdDelta"
+   ],
+   [
+    "kP13SourceRing",
+    "kTdMemory"
+   ],
+   [
+    "kP1HalfLuma",
+    "kP2VectorPair"
+   ],
+   [
+    "kP1HalfLuma",
+    "kP2mMatcherPair"
+   ],
+   [
+    "kP1HalfLuma",
+    "kP3AnalysisField"
+   ],
+   [
+    "kP1HalfLuma",
+    "kP4SourceStats"
+   ],
+   [
+    "kP1HalfLuma",
+    "kRefinedField"
+   ],
+   [
+    "kP2VectorPair",
+    "kP3AnalysisField"
+   ],
+   [
+    "kP3AnalysisField",
+    "kP6EntranceAhead"
+   ],
+   [
+    "kP3AnalysisField",
+    "kP8CameraLabels"
+   ],
+   [
+    "kP3AnalysisField",
+    "kRefinedField"
+   ],
+   [
+    "kP3AnalysisField",
+    "kTdMemory"
+   ],
+   [
+    "kP4SourceStats",
+    "kP10GrainSplit"
+   ],
+   [
+    "kP4SourceStats",
+    "kP10cGrainSplitChroma"
+   ],
+   [
+    "kP4SourceStats",
+    "kP11RegionBlockStats"
+   ],
+   [
+    "kP4SourceStats",
+    "kP12LightLevel"
+   ],
+   [
+    "kP4SourceStats",
+    "kP7CameraFit"
+   ],
+   [
+    "kP4SourceStats",
+    "kP7gCameraGuide"
+   ],
+   [
+    "kP5MonitorTiles",
+    "kQualityPattern"
+   ],
+   [
+    "kP5MonitorTiles",
+    "kQualityPatternCausal"
+   ],
+   [
+    "kP5MonitorTiles",
+    "kSourceGeometry"
+   ],
+   [
+    "kP5MonitorTiles",
+    "kSourceIdentity"
+   ],
+   [
+    "kP7CameraFit",
+    "kP7gCameraGuide"
+   ],
+   [
+    "kP7CameraFit",
+    "kP8CameraLabels"
+   ],
+   [
+    "kP7CameraFit",
+    "kP9CameraSmoothed"
+   ],
+   [
+    "kP8CameraLabels",
+    "kRefinedField"
+   ],
+   [
+    "kQualityPattern",
+    "kTdAnchorRefs"
+   ],
+   [
+    "kRefinedField",
+    "kTdMaps"
+   ],
+   [
+    "kTdBlocks",
+    "kTdDelta"
+   ],
+   [
+    "kTdBlocks",
+    "kTdMaps"
+   ],
+   [
+    "kTdBlocks",
+    "kTdMemory"
+   ],
+   [
+    "kTdBlocks",
+    "kTdTrailSummary"
+   ]
+  ],
+  "temporal_edges": [
+   {
+    "from": "kP1HalfLuma",
+    "to": "kP2VectorPair",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kP1HalfLuma",
+    "to": "kP2mMatcherPair",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kP1HalfLuma",
+    "to": "kP3AnalysisField",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kP7CameraFit",
+    "to": "kP9CameraSmoothed",
+    "kind": "lead",
+    "n": 2
+   },
+   {
+    "from": "kTdBlocks",
+    "to": "kTdBlocks",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kTdMemory",
+    "to": "kTdAnchorPass",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kCodingEvidence",
+    "to": "kCodingEvidence",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kCodingEvidence",
+    "to": "kQualityPattern",
+    "kind": "lead",
+    "n": 1
+   },
+   {
+    "from": "kCodingEvidence",
+    "to": "kQualityPattern",
+    "kind": "lead",
+    "n": 2
+   },
+   {
+    "from": "kQualityPattern",
+    "to": "kQualityPattern",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kSourceIdentity",
+    "to": "kQualityPattern",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kQualityPatternCausal",
+    "to": "kQualityPatternCausal",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kSourceIdentity",
+    "to": "kQualityPatternCausal",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kP1HalfLuma",
+    "to": "kRefinedField",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kTdMemory",
+    "to": "kTdDelta",
+    "kind": "lag",
+    "n": 1
+   }
+  ],
+  "topological_order": [
+   "kP0RebaseDecision",
+   "kP13SourceRing",
+   "kP1HalfLuma",
+   "kP2VectorPair",
+   "kP2mMatcherPair",
+   "kP3AnalysisField",
+   "kP4SourceStats",
+   "kP10GrainSplit",
+   "kP10cGrainSplitChroma",
+   "kP11RegionBlockStats",
+   "kCodingEvidence",
+   "kP12LightLevel",
+   "kP5MonitorTiles",
+   "kP6EntranceAhead",
+   "kP7CameraFit",
+   "kP7gCameraGuide",
+   "kP8CameraLabels",
+   "kP9CameraSmoothed",
+   "kQualityPattern",
+   "kQualityPatternCausal",
+   "kRefinedField",
+   "kSourceGeometry",
+   "kSourceIdentity",
+   "kTdAnchorPass",
+   "kTdAnchorRefs",
+   "kTdBlocks",
+   "kTdDelta",
+   "kTdMaps",
+   "kTdMemory",
+   "kTdTrailSummary"
+  ],
+  "levels": {
+   "kP0RebaseDecision": 0,
+   "kP13SourceRing": 0,
+   "kP1HalfLuma": 0,
+   "kP2VectorPair": 1,
+   "kP2mMatcherPair": 1,
+   "kP3AnalysisField": 2,
+   "kP4SourceStats": 1,
+   "kP10GrainSplit": 2,
+   "kP10cGrainSplitChroma": 2,
+   "kP11RegionBlockStats": 3,
+   "kCodingEvidence": 4,
+   "kP12LightLevel": 4,
+   "kP5MonitorTiles": 0,
+   "kP6EntranceAhead": 3,
+   "kP7CameraFit": 2,
+   "kP7gCameraGuide": 3,
+   "kP8CameraLabels": 3,
+   "kP9CameraSmoothed": 3,
+   "kQualityPattern": 5,
+   "kQualityPatternCausal": 5,
+   "kRefinedField": 4,
+   "kSourceGeometry": 1,
+   "kSourceIdentity": 1,
+   "kTdAnchorPass": 4,
+   "kTdAnchorRefs": 6,
+   "kTdBlocks": 4,
+   "kTdDelta": 5,
+   "kTdMaps": 5,
+   "kTdMemory": 5,
+   "kTdTrailSummary": 5
+  },
+  "cycle_members": [],
+  "acyclic": true
+ },
+ "unowned_no_producer": [],
+ "test_only_references": [
+  {
+   "where": "modules/input/source_analysis/regions/RegionEvidence.h:570 ComputeGrain, :719 ComputeFrame",
+   "note": "GrainSplit::Compute CPU reference only (refs/128 item 5): no production caller; the GPU P11 pass reads P10 through the skeleton. Test-only until the P11 CPU form is needed (102b PRODUCER-NP-TD / L-B5)."
+  }
+ ]
+}
