@@ -228,6 +228,7 @@ ALLOW_UNTAGGED_REFS = [
 HOOK_MARK_RE = re.compile(r"//\s*VPV-HOOK(?![-\w])")
 MANIFEST_PATH = "docs/audit/hook-sites.json"
 BUDGET_PATH = "docs/audit/hook-budget.json"
+HOOK_LINES_PATH = "docs/audit/hook-lines-baseline.json"
 APPROVALS_PATH = "docs/audit/hook-approvals.json"
 TRIGGERS_PATH = "docs/audit/hook-triggers.json"
 TRAILER_KEY = "Hook-Trigger"
@@ -1304,6 +1305,35 @@ def untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_us
     return out
 
 
+def hook_lines_metric(tree, per_file, added_by_file, no_git, root):
+    """Bill hook LINES: added lines (vs Bill's baseline) carrying a hook, per production Bill file (the vp_footprint
+    definition). Under --no-git the whole file's hook lines. Blocks above docs/audit/hook-lines-baseline.json."""
+    files = {}
+    for r in per_file:
+        if r.get("bucket") != "production":
+            continue
+        try:
+            hs = vp_footprint.hook_line_set(tree.read(r["file"]))
+        except (OSError, KeyError):
+            continue
+        n = len(hs) if no_git else len(hs & added_by_file.get(r["file"], set()))
+        if n:
+            files[r["file"]] = n
+    base = None
+    try:
+        base = json.load(open(os.path.join(root, *HOOK_LINES_PATH.split("/")), encoding="utf-8"))
+    except (OSError, ValueError):
+        base = None
+    total = sum(files.values())
+    ceil = (base or {}).get("files", {})
+    over = []
+    if base is not None:
+        over = ["%s %d > ceiling %d" % (f, n, ceil.get(f, 0)) for f, n in sorted(files.items()) if n > ceil.get(f, 0)]
+        if total > base.get("total", 0):
+            over.append("TOTAL %d > baseline %d" % (total, base.get("total", 0)))
+    return {"files": files, "total": total, "baseline": None if base is None else base.get("total", 0), "over": over}
+
+
 def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, since=None):
     tree = Tree(root, rev)
     if not no_git and bill_tip_check(root, base_ref):
@@ -1377,7 +1407,9 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
         stale = [x for x in stale if x not in allow_used]
         sc["new"] = [x for x in sc["new"] if _new_site(x)]
         sc["approved"] = [x for x in sc["approved"] if _new_site(x)]
-    rc = 1 if (hits or unverified or (fail_untagged and untagged) or sc["new"] or sc["over"] or sc["expired"] or sc["unknown"] or
+    hl = hook_lines_metric(tree, per_file, added_by_file, no_git, root)
+    sc["hook_lines"] = hl
+    rc = 1 if (hl["over"] or hits or unverified or (fail_untagged and untagged) or sc["new"] or sc["over"] or sc["expired"] or sc["unknown"] or
                  sc["trigger_errors"] or sc["approval_missing"] or sc["budget_errors"] or untagged_vpv) else 0
     return {"base_ref": base_ref, "rev": rev, "since": since, "vp_slots": sorted(vp_slots), "site_checks": sc, "gated": {k: list(v) for k, v in gated.items()},
             "files": per_file, "counts": counts, "hits": hits, "unverified": unverified, "untagged": untagged, "untagged_vpv": untagged_vpv,
@@ -1444,6 +1476,17 @@ def render(res):
         sc["sites"], len(sc["new"]) + len(sc["approved"]), len(sc["approved"]), len(sc["removed"]), len(sc["over"]), sc["manifest"], sc["budget"],
         len(sc["expired"]), len(sc["unknown"]), len(sc["trigger_errors"]), len(sc["approval_missing"]), len(sc["budget_errors"]), temp,
         sc.get("trigger_source", "json only")))
+    hl = sc.get("hook_lines", {"files": {}, "total": 0, "baseline": None, "over": []})
+    if hl["baseline"] is None:
+        out.append("hook LINES: %d (no baseline at %s; run --write-hook-lines-baseline)" % (hl["total"], HOOK_LINES_PATH))
+    else:
+        out.append("hook LINES: %d (baseline %d, trend %+d)" % (hl["total"], hl["baseline"], hl["total"] - hl["baseline"]))
+    for f, n in sorted(hl["files"].items(), key=lambda x: -x[1])[:12]:
+        out.append("  hook lines %s %d" % (f, n))
+    for line in hl["over"]:
+        out.append("  OVER HOOK-LINES BASELINE " + line)
+    if hl["over"]:
+        out.append("FAIL (hook lines): Bill hook lines grew past the baseline; collapse lines into a seam. The baseline only shrinks.")
     out.append("hook gating: %d hook statements, %d unguarded, %d unverified markers, %d allowed, %d untagged; exit %d" % (
         hook_stmts, len(res["hits"]), len(res["unverified"]), len(res["allowed"]), len(res["untagged"]), res["rc"]))
     if sc["expired"] or sc["unknown"]:
@@ -1488,8 +1531,21 @@ def main(argv=None):
                                     "docstring, UNTAGGED VP-V REFERENCES")
     ap.add_argument("--write-manifest", action="store_true", help="(re)seed docs/audit/hook-sites.json from the tree")
     ap.add_argument("--write-budget", action="store_true", help="(re)seed docs/audit/hook-budget.json from the tree (ceilings = current counts)")
+    ap.add_argument("--write-hook-lines-baseline", action="store_true", help="write docs/audit/hook-lines-baseline.json; refused if it would grow")
     args = ap.parse_args(argv)
     res = run(args.root, args.base_ref, args.files, args.no_git, args.fail_untagged, args.rev, args.since)
+    if args.write_hook_lines_baseline:
+        hl = res["site_checks"]["hook_lines"]
+        if hl["over"]:
+            print("refusing to write a hook-lines baseline that grew: " + "; ".join(hl["over"]))
+            return 1
+        os.makedirs(os.path.join(args.root, "docs", "audit"), exist_ok=True)
+        with open(os.path.join(args.root, *HOOK_LINES_PATH.split("/")), "w", encoding="utf-8", newline="\n") as fh:
+            json.dump({"_note": "Bill hook LINES (added vs Bill baseline, hook-tagged, production) per file; ratchet, only shrinks (tools/check_hook_gating.py).",
+                       "base_ref": args.base_ref, "total": hl["total"], "files": dict(sorted(hl["files"].items()))}, fh, indent=1)
+            fh.write("\n")
+        print("wrote %s (%d files, %d lines)" % (HOOK_LINES_PATH, len(hl["files"]), hl["total"]))
+        return 0
     if args.write_manifest or args.write_budget:
         if args.rev:
             print("--write-* needs the working tree", file=sys.stderr)
