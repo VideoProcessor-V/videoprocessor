@@ -703,11 +703,11 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     ditherNextGate.Clear();
     // S-12BIT (refs/119 #51, #30): libplacebo's latched error flags (FBO, sampling, debanding, ...) and the float16 picture precision
     // are visible, and released in the Original pathway (a stale entry is a silent state in reverse). Here, not in ReportRenderErrors:
-    // that body is a pure move that never runs in Original. The flags are the previous frame's latch.
+    // that body is a pure move that never runs in Original. The flags are renderErrors (read above from the renderer: the previous frame's latch).
     static_assert(LibplaceboErrors::kFbo == PL_RENDER_ERR_FBO && LibplaceboErrors::kHooks == PL_RENDER_ERR_HOOKS &&
         LibplaceboErrors::kBlur == PL_RENDER_ERR_BLUR && LibplaceboErrors::kContrastRecovery == PL_RENDER_ERR_CONTRAST_RECOVERY,
         "LibplaceboErrors bit values must mirror enum pl_render_error");
-    SyncFallback(LibplaceboErrors::Latched(static_cast<int>(pl_renderer_get_errors(renderer).errors), pipelineSlots.OriginalPathway()));
+    SyncFallback(LibplaceboErrors::Latched(static_cast<int>(renderErrors.errors), pipelineSlots.OriginalPathway()));
 #if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
     constexpr bool laneHasFloat32Fbo = true;   // Beta lane (API 388)
 #else

@@ -14,6 +14,8 @@
 #include <VP-V/modules/control/diagnostics/LibplaceboErrors.h>
 #include <VP-V/modules/scaling/output/PicturePrecision.h>
 
+#include <fstream>
+#include <sstream>
 #include <string>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -22,6 +24,25 @@ namespace PicturePrecisionTest
 {
 	TEST_CLASS(PicturePrecisionTests)
 	{
+		static std::string ReadText(const std::string& path)
+		{
+			std::ifstream in(path, std::ios::binary);
+			std::ostringstream ss;
+			ss << in.rdbuf();
+			return ss.str();
+		}
+		static std::string RepositoryRoot()
+		{
+			std::string dir = __FILE__;   // 4 levels up: tests, VP-V, src, root
+			for (int i = 0; i < 4; ++i)
+			{
+				const size_t cut = dir.find_last_of("\\/");
+				if (cut == std::string::npos) break;
+				dir.resize(cut);
+			}
+			return dir;
+		}
+
 	public:
 		TEST_METHOD(FloatIntermediatesFollowTheSettingAlone)
 		{
@@ -86,6 +107,48 @@ namespace PicturePrecisionTest
 			FallbackCatalog::Sync(registry, PicturePrecision::Precision(true, false, -1));
 			Assert::IsFalse(registry.Engaged("libplacebo errors"));
 			Assert::IsFalse(registry.Engaged("picture precision"));
+		}
+
+		// Source pin (audit SHOULD 2): the wiring in CoreSegments.inl. fbo_float32 comes from the setting alone (no scaling.output
+		// slot), and both entries are synced in CollectFrameHooks (every pathway), never inside the pure-move ReportRenderErrors.
+		TEST_METHOD(TheCollectFrameHooksWiringIsPinned)
+		{
+			const std::string body = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\CoreSegments.inl");
+			Assert::IsFalse(body.empty(), L"CoreSegments.inl");
+			const size_t collect = body.find("LibplaceboVideoRenderer::Impl::CollectFrameHooks(");
+			Assert::IsTrue(collect != std::string::npos);
+			const std::string tail = body.substr(collect);
+			const size_t assign = tail.find("frameParams.fbo_float32 = PicturePrecision::FboFloat32(activeSettings.fboFloat32);");
+			Assert::IsTrue(assign != std::string::npos, L"fbo_float32 from the setting alone");
+			const size_t slot = tail.find("ScalingOutput", assign);
+			Assert::IsTrue(slot == std::string::npos || slot - assign > 200, L"no scaling.output slot in the assignment");
+			const size_t errors = tail.find("SyncFallback(LibplaceboErrors::Latched(static_cast<int>(renderErrors.errors), pipelineSlots.OriginalPathway()));");
+			const size_t precision = tail.find("SyncFallback(PicturePrecision::Precision(pipelineSlots.OriginalPathway(), laneHasFloat32Fbo, activeSettings.fboFloat32));");
+			Assert::IsTrue(errors != std::string::npos, L"libplacebo errors synced");
+			Assert::IsTrue(precision != std::string::npos, L"picture precision synced");
+			Assert::IsTrue(errors < assign && precision < assign, L"both syncs precede the render parameters");
+			const size_t read = tail.find("renderErrors = pl_renderer_get_errors(renderer);");
+			Assert::IsTrue(read != std::string::npos && read < errors, L"renderErrors is read before it is used");
+			// ReportRenderErrors stays a pure move: no pathway check, no precision sync.
+			const size_t report = body.find("LibplaceboVideoRenderer::Impl::ReportRenderErrors()");
+			Assert::IsTrue(report != std::string::npos && report < collect);
+			const std::string reportBody = body.substr(report, collect - report);
+			Assert::IsTrue(reportBody.find("PicturePrecision") == std::string::npos && reportBody.find("LibplaceboErrors") == std::string::npos);
+		}
+
+		// Audit SHOULD 5: the entry follows the CURRENT flag word every frame, so a transient flag cannot stick: once the renderer
+		// resets the latch (flags 0) the next sync releases it, with exactly one heading change each way.
+		TEST_METHOD(ALatchedFlagClearsOnResetAndCannotStick)
+		{
+			FallbackStatus::Registry registry;
+			Assert::IsFalse(FallbackCatalog::Sync(registry, LibplaceboErrors::Latched(0, false)), L"clean: nothing changes");
+			Assert::IsTrue(FallbackCatalog::Sync(registry, LibplaceboErrors::Latched(LibplaceboErrors::kDebanding, false)));
+			Assert::IsFalse(FallbackCatalog::Sync(registry, LibplaceboErrors::Latched(LibplaceboErrors::kDebanding, false)), L"latched: no repeat");
+			Assert::IsTrue(registry.Engaged("libplacebo errors"));
+			Assert::IsTrue(FallbackCatalog::Sync(registry, LibplaceboErrors::Latched(0, false)), L"reset: released");
+			Assert::IsFalse(registry.Engaged("libplacebo errors"));
+			Assert::IsFalse(FallbackCatalog::Sync(registry, LibplaceboErrors::Latched(0, false)), L"and stays released");
+			Assert::IsTrue(LibplaceboErrors::Latched(LibplaceboErrors::kBlur, false).reason.find("clears on renderer reset") != std::string::npos);
 		}
 
 		TEST_METHOD(DisabledHooksAreNotDoubleReported)
