@@ -281,11 +281,9 @@ namespace AdaptiveDownscaleStage
 				m == AdaptiveDownscale::MotionState::NoVectors ? "Motion-adapted blend: no vectors on this frame (plain blend)" :
 				"Motion-adapted blend: idle (the blend did not run on the last frame)");
 		}
-		// FIX-X5-CUT-P4: never a silent downgrade. The cut event could not be read from the source analysis (P4): the grain term
-		// snaps on the first frame only, not on later cuts (it eases to its target instead).
+		// FIX-X5-CUT-P4: never a silent downgrade. The shared P4 Acquire (get-or-compute) failed: no cut verdict this frame.
 		if (!module.CutAvailable())
-			lines.push_back("Adaptive downscale: cut event unavailable (" + module.CutCause() +
-				"); the grain term snaps on the first frame only");
+			lines.push_back("Adaptive downscale: no cut verdict this frame (" + module.CutCause() + ")");
 		const std::string td = TdProducts::StatusLine(TdProducts::Consumer::AdaptiveScaler, tdRead);
 		if (!td.empty())
 			lines.push_back(td);

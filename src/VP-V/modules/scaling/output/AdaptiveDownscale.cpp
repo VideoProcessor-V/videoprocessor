@@ -576,7 +576,7 @@ float rs_slope(float y)
 	}
 
 	// The cut event of the source frame about to advance: the shared one (P4 records acquired through the skeleton memo, judged by U7).
-	// Unavailable (no source, or a product that cannot be read): no cut is made here (the first frame still snaps in the pass), the
+	// Unavailable (the standard Acquire failed): no cut verdict this frame, the
 	// cause is kept and counted for the stage's status line and fallback entry.
 	bool Module::ResolveCut()
 	{

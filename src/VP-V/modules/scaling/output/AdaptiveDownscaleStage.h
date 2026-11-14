@@ -140,10 +140,9 @@ namespace AdaptiveDownscaleStage
 		FallbackCatalog::Decision Fallback() const
 		{
 			const FallbackCatalog::Decision base = FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
-			// FIX-X5-CUT-P4: the shared cut event (P4) unreadable: the grain term snaps on the first frame only (also on StatusLines()).
+			// FIX-X5-CUT-P4: the shared P4 Acquire (get-or-compute) failed: no cut verdict this frame (also on StatusLines()).
 			if (!base.engaged && requested && !module.CutAvailable())
-				return FallbackCatalog::Engaged("output scaling", "adaptive downscale: no cut event (" + module.CutCause() +
-					"); the grain term snaps on the first frame only");
+				return FallbackCatalog::Engaged("output scaling", "adaptive downscale: no cut verdict this frame (" + module.CutCause() + ")");
 			return base;
 		}
 

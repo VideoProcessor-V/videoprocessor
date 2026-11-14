@@ -8,10 +8,11 @@
 // renderer's skeleton memo (get-or-compute-and-publish, nobody computes a private mean), judged by U7
 // (VpUnit::CutFadeJudge::ClassifyEvents, the one classification every consumer derives). The frame's mean level is the P4 record's mean.
 //
-// A source frame the module has not advanced before (first frame, or after a Release) is a cut by definition and needs no read.
-// When a P4 record cannot be Acquired (no skeleton memo: the Original pathway or no analysis lane; the product unavailable with a
-// cause) the verdict is Unavailable: the module then snaps on the first frame only and the stage shows the cause (status line and
-// the "output scaling" fallback entry; never log-only). The private mean-luma step is gone, so no mean-step cut is made then.
+// A source frame the module has not advanced before (first frame, or after a Release) is a cut by definition (a definition, not a fallback).
+// The P4 record is ASKED FOR through the standard Acquire, which computes it through its owner fill when it is not published yet.
+// Only a genuine failure (no skeleton memo: the Original pathway or no analysis lane; the compute failed with a cause) gives an
+// Unavailable verdict: no cut verdict that frame, shown by the standard visible fallback (status line, "output scaling" fallback
+// entry, counter; never log-only). There is no private backup and no special snap path.
 //
 // Header-only, C++14. The pure decision (VerdictFrom) has no hub, memo or GPU dependency; P4CutSource() binds it to the current
 // frame's memo (render thread).
