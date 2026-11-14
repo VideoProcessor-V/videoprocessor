@@ -47,6 +47,12 @@
      "pattern": "p\\.grainCal = kGrainCal",
      "kind": "shared_function_use",
      "reason": "CPU reference model calls the owner function GrainSplit::Compute for tests (switch to GrainSplit::DefaultParams with the GPU fix) (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+     "pattern": "^\\s*constexpr (int|double) \\w+ = kGrainLaw\\.\\w+;",
+     "kind": "false_positive",
+     "reason": "reads the U1 grain law by name (GrainSplit::DefaultParams), not a private copy (B2 unit move, ND04; verified at r2/job1-b2 f2a63dd3e)"
     }
    ]
   },
@@ -150,6 +156,24 @@
      "pattern": "exp\\(-0\\.5 \\* d[xy] \\* d[xy]\\)",
      "kind": "false_positive",
      "reason": "Gaussian surround weight over the P11 block grid (J_surround), not a band split of the picture"
+    },
+    {
+     "file": "src/VP-V/modules/repair/temporal_detail/TemporalDetail.h",
+     "pattern": "^#include <VP-V/modules/repair/grain_split/GrainSplit\\.h>$",
+     "kind": "false_positive",
+     "reason": "include of the U1 grain law header: TD reads blockPx, no band-split copy (B2 unit move, ND04; verified at r2/job1-b2 f2a63dd3e)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+     "pattern": "^#include <VP-V/modules/repair/grain_split/GrainSplit\\.h>$",
+     "kind": "false_positive",
+     "reason": "include of the U1 grain law header: TR reads tile/sub-blocks/calibration/kappa, no band-split copy (B2 unit move, ND04; verified at r2/job1-b2 f2a63dd3e)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+     "pattern": "^\\s*constexpr double kSigma1 = VpUnit::BandFromBase::kSigmaFine, kSigma2 = VpUnit::BandFromBase::kSigmaBase, kSigma3 = VpUnit::BandFromBase::kSigmaLow;",
+     "kind": "false_positive",
+     "reason": "reads the U2 unit sigma table; band splits is a trailing comment (B2 unit move, ND04; verified at r2/job1-b2 f2a63dd3e)"
     }
    ]
   },
