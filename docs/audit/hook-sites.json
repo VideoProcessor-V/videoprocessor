@@ -52,8 +52,8 @@
   {
    "id": "CEW.cpp-0003",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 1459,
-   "end": 1459,
+   "start": 1458,
+   "end": 1458,
    "anchor": {
     "symbol": "ConfigEditorWindow::~ConfigEditorWindow",
     "before": [
@@ -75,8 +75,8 @@
   {
    "id": "CEW.cpp-0004",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 2010,
-   "end": 2010,
+   "start": 2009,
+   "end": 2009,
    "anchor": {
     "symbol": "ConfigEditorWindow::selectPage",
     "before": [
@@ -98,8 +98,8 @@
   {
    "id": "CEW.cpp-0005",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 2121,
-   "end": 2121,
+   "start": 2120,
+   "end": 2120,
    "anchor": {
     "symbol": "ConfigEditorWindow::runLoadMigrations",
     "before": [
@@ -121,8 +121,8 @@
   {
    "id": "CEW.cpp-0006",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 2606,
-   "end": 2606,
+   "start": 2605,
+   "end": 2605,
    "anchor": {
     "symbol": "ConfigEditorWindow::migrateProcessingToScaling",
     "before": [
@@ -144,8 +144,8 @@
   {
    "id": "CEW.cpp-0007",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 2622,
-   "end": 2622,
+   "start": 2621,
+   "end": 2621,
    "anchor": {
     "symbol": "ConfigEditorWindow::migrateProcessingToScaling",
     "before": [
@@ -167,8 +167,8 @@
   {
    "id": "CEW.cpp-0008",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 4481,
-   "end": 4481,
+   "start": 4480,
+   "end": 4480,
    "anchor": {
     "symbol": "ConfigEditorWindow::saveChanges",
     "before": [
@@ -190,8 +190,8 @@
   {
    "id": "CEW.cpp-0009",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 4777,
-   "end": 4777,
+   "start": 4776,
+   "end": 4776,
    "anchor": {
     "symbol": "ConfigEditorWindow::saveChanges",
     "before": [
@@ -213,8 +213,8 @@
   {
    "id": "CEW.cpp-0011",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 4989,
-   "end": 4989,
+   "start": 4988,
+   "end": 4988,
    "anchor": {
     "symbol": "ConfigEditorWindow::createShell",
     "before": [
@@ -236,8 +236,8 @@
   {
    "id": "CEW.cpp-0012",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 5269,
-   "end": 5269,
+   "start": 5268,
+   "end": 5268,
    "anchor": {
     "symbol": "ConfigEditorWindow::addNavigationButton",
     "before": [
@@ -259,8 +259,8 @@
   {
    "id": "CEW.cpp-0013",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 5448,
-   "end": 5448,
+   "start": 5447,
+   "end": 5447,
    "anchor": {
     "symbol": "ConfigEditorWindow::createStartupPage",
     "before": [
@@ -282,8 +282,8 @@
   {
    "id": "CEW.cpp-0014",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 5774,
-   "end": 5774,
+   "start": 5773,
+   "end": 5773,
    "anchor": {
     "symbol": "ConfigEditorWindow::createStartupPage",
     "before": [
@@ -305,8 +305,8 @@
   {
    "id": "CEW.cpp-0015",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 6017,
-   "end": 6017,
+   "start": 6016,
+   "end": 6016,
    "anchor": {
     "symbol": "const auto activeQueuePolicies = [this]() -> const QueuePoli",
     "before": [
@@ -328,8 +328,8 @@
   {
    "id": "CEW.cpp-0016",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 6114,
-   "end": 6114,
+   "start": 6113,
+   "end": 6113,
    "anchor": {
     "symbol": "Vpv::AddVpvProfileUseRows(sectionPrefix, title, list, rule, ",
     "before": [
@@ -351,8 +351,8 @@
   {
    "id": "CEW.cpp-0017",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 6575,
-   "end": 6575,
+   "start": 6574,
+   "end": 6574,
    "anchor": {
     "symbol": "connect(spin, qOverload<int>(&QSpinBox::valueChanged), this,",
     "before": [
@@ -374,8 +374,8 @@
   {
    "id": "CEW.cpp-0018",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 7185,
-   "end": 7185,
+   "start": 7184,
+   "end": 7184,
    "anchor": {
     "symbol": ", QueueLatency::MaxTargetLatencyMs, [](const QString& text)",
     "before": [
@@ -397,8 +397,8 @@
   {
    "id": "CEW.cpp-0020",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 10737,
-   "end": 10737,
+   "start": 10736,
+   "end": 10736,
    "anchor": {
     "symbol": "Vpv::AddVpvScalingRows(form, addChoice, addRendererAutoStatu",
     "before": [
@@ -420,8 +420,8 @@
   {
    "id": "CEW.cpp-0021",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11422,
-   "end": 11422,
+   "start": 11421,
+   "end": 11421,
    "anchor": {
     "symbol": "auto fallback = [this, sectionPrefix, section, preservePrese",
     "before": [
@@ -443,8 +443,8 @@
   {
    "id": "CEW.cpp-0022",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11600,
-   "end": 11600,
+   "start": 11599,
+   "end": 11599,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -466,8 +466,8 @@
   {
    "id": "CEW.cpp-0023",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11604,
-   "end": 11604,
+   "start": 11603,
+   "end": 11603,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -489,8 +489,8 @@
   {
    "id": "CEW.cpp-0024",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11610,
-   "end": 11610,
+   "start": 11609,
+   "end": 11609,
    "anchor": {
     "symbol": "const auto concreteChoice = [&](QString choice)",
     "before": [
@@ -512,8 +512,8 @@
   {
    "id": "CEW.cpp-0025",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11692,
-   "end": 11692,
+   "start": 11691,
+   "end": 11691,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -535,8 +535,8 @@
   {
    "id": "CEW.cpp-0026",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11710,
-   "end": 11710,
+   "start": 11709,
+   "end": 11709,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -558,8 +558,8 @@
   {
    "id": "CEW.cpp-0027",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11827,
-   "end": 11827,
+   "start": 11826,
+   "end": 11826,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -581,8 +581,8 @@
   {
    "id": "CEW.cpp-0028",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11936,
-   "end": 11936,
+   "start": 11935,
+   "end": 11935,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -604,8 +604,8 @@
   {
    "id": "CEW.cpp-0029",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12137,
-   "end": 12137,
+   "start": 12136,
+   "end": 12136,
    "anchor": {
     "symbol": "connect(queuePolicy, qOverload<int>(&QComboBox::currentIndex",
     "before": [
@@ -627,8 +627,8 @@
   {
    "id": "CEW.cpp-0030",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12149,
-   "end": 12149,
+   "start": 12148,
+   "end": 12148,
    "anchor": {
     "symbol": "connect(queuePolicy, qOverload<int>(&QComboBox::currentIndex",
     "before": [
@@ -650,8 +650,8 @@
   {
    "id": "CEW.cpp-0031",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12153,
-   "end": 12153,
+   "start": 12152,
+   "end": 12152,
    "anchor": {
     "symbol": "connect(queuePolicy, qOverload<int>(&QComboBox::currentIndex",
     "before": [
@@ -673,8 +673,8 @@
   {
    "id": "CEW.cpp-0032",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12288,
-   "end": 12288,
+   "start": 12287,
+   "end": 12287,
    "anchor": {
     "symbol": "ConfigEditorWindow::createProfilePage",
     "before": [
@@ -745,8 +745,8 @@
   {
    "id": "CEW.h-0003",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.h",
-   "start": 135,
-   "end": 135,
+   "start": 134,
+   "end": 134,
    "anchor": {
     "symbol": "originalPathwayOn",
     "before": [
@@ -761,30 +761,6 @@
     "    bool originalPathwayOn() const { return Vpv::ConfigOriginalPathwayOn([this](const QString& s, const QString& k) { return value(s, k); }); }   // VPV-HOOK"
    ],
    "text": "bool originalPathwayOn() const { return Vpv::ConfigOriginalPathwayOn([this](const QString& s, const QString& k) { return value(s, k); }); }",
-   "gate": "declaration",
-   "seam": null,
-   "expiry": null
-  },
-  {
-   "id": "CEW.h-0004",
-   "file": "src/VideoProcessor-Config/ConfigEditorWindow.h",
-   "start": 348,
-   "end": 349,
-   "anchor": {
-    "symbol": "",
-    "before": [
-     "QStringList monitors_;",
-     "QStackedWidget* pages_ = nullptr;"
-    ],
-    "after": [
-     "QWidget* navigation_ = nullptr;"
-    ]
-   },
-   "lines": [
-    "    Vpv::ConfigPageDirectory vpvPages_;   // VPV-HOOK",
-    "    Vpv::FunctionFormApi formApi_;   // VPV-HOOK"
-   ],
-   "text": "Vpv::ConfigPageDirectory vpvPages_; Vpv::FunctionFormApi formApi_;",
    "gate": "declaration",
    "seam": null,
    "expiry": null
@@ -1986,8 +1962,8 @@
   {
    "id": "LPVR.cpp-0003",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp",
-   "start": 694,
-   "end": 695,
+   "start": 695,
+   "end": 696,
    "anchor": {
     "symbol": "LibplaceboPluginVideoRenderer::QueryExtension",
     "before": [
@@ -6024,33 +6000,10 @@
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0033",
-   "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 134,
-   "end": 134,
-   "anchor": {
-    "symbol": "",
-    "before": [
-     "#include <sstream>",
-     "#include <VP-V/config/VpvRenderingDefaults.h> // unset VP-V keys' defaults (moved out of this file; one call site)"
-    ],
-    "after": [
-     "#pragma comment(lib, \"dxgi.lib\")"
-    ]
-   },
-   "lines": [
-    "#include <VP-V/config/VpvFormLayout.h>   // VPV-HOOK"
-   ],
-   "text": "#include <VP-V/config/VpvFormLayout.h>",
-   "gate": "declaration",
-   "seam": null,
-   "expiry": null
-  },
-  {
    "id": "CEW.cpp-0034",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 1326,
-   "end": 1326,
+   "start": 1325,
+   "end": 1325,
    "anchor": {
     "symbol": "document_",
     "before": [
@@ -6072,8 +6025,8 @@
   {
    "id": "CEW.cpp-0035",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 4966,
-   "end": 4966,
+   "start": 4965,
+   "end": 4965,
    "anchor": {
     "symbol": "ConfigEditorWindow::createShell",
     "before": [
@@ -6095,8 +6048,8 @@
   {
    "id": "CEW.cpp-0036",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 8957,
-   "end": 8957,
+   "start": 8956,
+   "end": 8956,
    "anchor": {
     "symbol": "ConfigEditorWindow::createProfilePage",
     "before": [
@@ -6118,8 +6071,8 @@
   {
    "id": "CEW.cpp-0037",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 15045,
-   "end": 15045,
+   "start": 15044,
+   "end": 15044,
    "anchor": {
     "symbol": "",
     "before": [
@@ -6137,33 +6090,35 @@
    "expiry": null
   },
   {
-   "id": "CEW.h-0006",
+   "id": "CEW.h-0007",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.h",
-   "start": 109,
-   "end": 109,
+   "start": 347,
+   "end": 349,
    "anchor": {
     "symbol": "",
     "before": [
-     "qintptr* result) override;",
-     "private:"
+     "QStringList monitors_;",
+     "QStackedWidget* pages_ = nullptr;"
     ],
     "after": [
-     "QWidget* createShell();"
+     "QWidget* navigation_ = nullptr;"
     ]
    },
    "lines": [
+    "    Vpv::ConfigPageDirectory vpvPages_;   // VPV-HOOK",
+    "    Vpv::FunctionFormApi formApi_;   // VPV-HOOK",
     "    friend struct Vpv::ConfigEditorAccess;   // VPV-HOOK (S4A A4: the editor's VP-V seams; ConfigEditorAccess.inl)"
    ],
-   "text": "friend struct Vpv::ConfigEditorAccess;",
+   "text": "Vpv::ConfigPageDirectory vpvPages_; Vpv::FunctionFormApi formApi_; friend struct Vpv::ConfigEditorAccess;",
    "gate": "declaration",
    "seam": null,
    "expiry": null
   },
   {
-   "id": "LPVR.cpp-0004",
+   "id": "LPVR.cpp-0002",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp",
    "start": 162,
-   "end": 162,
+   "end": 163,
    "anchor": {
     "symbol": "LoadPlugin",
     "before": [
@@ -6175,10 +6130,11 @@
     ]
    },
    "lines": [
-    "\t\tif (!Vpv::PluginGuard::CheckAndAttach(result.module, pairing)) return refuse(result.module, pairing); // VPV-HOOK"
+    "\t\tif (!Vpv::PluginGuard::Check(result.module, pairing)) return refuse(result.module, pairing); // VPV-HOOK",
+    "\t\tif (!Vpv::PluginGuard::Attach(result.module, pairing)) return refuse(result.module, pairing); // VPV-HOOK"
    ],
-   "text": "if (!Vpv::PluginGuard::CheckAndAttach(result.module, pairing)) return refuse(result.module, pairing);",
-   "gate": "unguarded",
+   "text": "if (!Vpv::PluginGuard::Check(result.module, pairing)) return refuse(result.module, pairing); if (!Vpv::PluginGuard::Attach(result.module, pairing)) return refuse(result.module, pairing);",
+   "gate": "allowed-enclosing",
    "seam": null,
    "expiry": null
   }
