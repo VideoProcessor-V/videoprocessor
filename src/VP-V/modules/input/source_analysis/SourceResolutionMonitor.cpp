@@ -65,9 +65,6 @@ if (tile < int(tiles) && g.y < ts) {
 			snprintf(text, sizeof(text), "%02u:%02u:%02u.%03u", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
 			return text;
 		}
-
-		// The upper median, an empty sample reading 1.0 (core/RobustStats.h, ND06).
-		double Median(std::vector<double> v) { return RobustStats::Median(std::move(v), RobustStats::MedianRule::Upper, 1.0); }
 	}
 
 	Monitor::Monitor()
@@ -1631,7 +1628,7 @@ if (tile < int(tiles) && g.y < ts) {
 		snapshot.frameRatio = frame.ratio;
 		snapshot.frameBlank = !frame.informative();
 		snapshot.frameBlack = frame.black;
-		snapshot.liveRatio = ratios.empty() ? 1.0 : Median(ratios);
+		snapshot.liveRatio = RobustStats::Median(ratios, RobustStats::MedianRule::Upper, 1.0);
 		// Latch precision (2026-10-17): the declared rate as the exact rendition behind it - an even
 		// size of the frame within SourceResolution::kSnapBins of this tile's sweep, the simplest ratio (SnapRatio):
 		// 128-px tiles at 1080 read a 540-line source as ~542, re-based 0.4 % off.
