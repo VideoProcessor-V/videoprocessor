@@ -259,7 +259,7 @@
    "kind": "class",
    "value": "AmbientSdrGpuTests",
    "category": "GpuWarp",
-   "file": "src/VP-V/tests/suite/AmbientAdaptationTests.cpp",
+   "file": "src/VP-V/modules/colour/display_mapping/tests/AmbientAdaptationTests.cpp",
    "note": "WARP unless VP_TEST_GPU=hardware."
   },
   {
@@ -280,7 +280,7 @@
    "kind": "method",
    "value": "AmbientSdrLiftTests::AmbientSdrLiftReachesTheCodes",
    "category": "Cpu",
-   "file": "src/VP-V/tests/suite/AmbientAdaptationTests.cpp",
+   "file": "src/VP-V/modules/colour/display_mapping/tests/AmbientAdaptationTests.cpp",
    "note": "Name mentions the GPU; the body is CPU only (reviewed)."
   },
   {
@@ -301,7 +301,7 @@
    "kind": "method",
    "value": "DvHostStageTests::GpuUnpackSessionLogsOnceAndSwitchesTheSessionToTheCpuOnce",
    "category": "Cpu",
-   "file": "src/VP-V/modules/colour/sdr_tone_shape/tests/DvHostStageTests.cpp",
+   "file": "src/VP-V/modules/colour/display_mapping/tests/DvHostStageTests.cpp",
    "note": "Name mentions the GPU; the body is CPU only (reviewed)."
   },
   {
