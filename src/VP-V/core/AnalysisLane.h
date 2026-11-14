@@ -827,6 +827,14 @@ public:
     uint64_t ExternalDeclined() const { return externalDeclined_; }
     // The render-device release fence's completed value for a product (lane polls it before reuse).
     void SetReleaseCompleted(std::function<uint64_t(ProductId)> f) { releaseCompleted_ = std::move(f); }
+    // QKP slice C (R14-73): the memo's ledgers. Set before the lane starts (SkeletonAcquireLane.h BindLaneToMemo). `reduced` is told on
+    // the render thread when a seal computed a DECLARED reduced form; `reused` on the worker when it skipped a frame the render thread
+    // made first (the sink must be thread-safe: the memo's Note* take its mutex).
+    void SetAheadSinks(std::function<void(ProductId)> reduced, std::function<void(ProductId)> reused)
+    {
+        sealReducedSink_ = std::move(reduced);
+        workerReusedSink_ = std::move(reused);
+    }
     // 70b G0: GPU live deferral. On, a GPU-compute product's live fill at the seal (OnRenderStart, BEFORE the
     // render lock: no GPU recording there) only reserves the live buffer and records a LivePending entry; the
     // render thread later calls RunDeferredLive(seq) at a GPU-legal phase (Entrance), which dispatches the
@@ -1698,6 +1706,10 @@ private:
         st->runner->SetReleaseCompleted([this](ProductId id) -> uint64_t {
             return releaseCompleted_ ? releaseCompleted_(id) : ~uint64_t(0);
         });
+        st->runner->SetWorkerReusedSink([this](ProductId id) {
+            if (workerReusedSink_)
+                workerReusedSink_(id);
+        });
         for (ILaneProducer* p : producers_)
             st->runner->Register(p);
         for (size_t i = 0; i < st->graph.nodes.size(); ++i) {
@@ -1856,8 +1868,11 @@ private:
                 ok = true;
             } else {
                 ok = RunCpuLive(st, n, seq, missing, dst, bytes, InputResolver());
-                if (ok && missing != 0)
+                if (ok && missing != 0) {
                     ++sealComputedReduced_;
+                    if (sealReducedSink_)
+                        sealReducedSink_(n.id);
+                }
             }
         } else if (liveFill_) {
             ok = liveFill_(n, seq, live, hdr, missing);
@@ -1992,6 +2007,8 @@ private:
     std::vector<ProductId> externalIds_;   // products published outside the lane (SetExternalProducts)
     uint64_t externalDeclined_ = 0;        // seal-time live fills of those products that were declined (nothing published in time)
     std::function<uint64_t(ProductId)> releaseCompleted_;
+    std::function<void(ProductId)> sealReducedSink_;
+    std::function<void(ProductId)> workerReusedSink_;
     std::vector<ProductFrameResult> empty_;
     std::string error_;
     double periodMs_ = 0.0;

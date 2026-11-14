@@ -72,6 +72,20 @@ inline void BindLaneToMemo(AnalysisLane& lane, SkeletonMemo& memo, LaneGpuHandle
         return LaneSlotSource::State::Absent;
     };
     src.dropped = [l](ProductId id) { return l->IsNode(id) && l->RegulatorDropped(id); };
+    // QKP slice C (R14-73): the memo's Acquire asks the lane to make a frame ahead of the render frame NOW (the lane's own claim: one
+    // copy; the worker skips it). AnalysisLane::AheadRun maps 1:1.
+    src.aheadNow = [l](ProductId id, uint64_t seq) {
+        const AnalysisLane::AheadRunResult r = l->RunAheadNow(id, seq);
+        LaneSlotSource::AheadNowResult out;
+        out.why = r.why;
+        switch (r.kind) {
+        case AnalysisLane::AheadRun::Ran: out.kind = LaneSlotSource::AheadNow::Ran; break;
+        case AnalysisLane::AheadRun::Claimed: out.kind = LaneSlotSource::AheadNow::Claimed; break;
+        case AnalysisLane::AheadRun::NotNode: out.kind = LaneSlotSource::AheadNow::NotNode; break;
+        case AnalysisLane::AheadRun::Declined: out.kind = LaneSlotSource::AheadNow::Declined; break;
+        }
+        return out;
+    };
     const LaneLeaseOf leases = leaseOf ? leaseOf : LaneLeaseOf([l](ProductId id) { return l->Lease(id); });
     src.copyPublished = [leases](ProductId id, uint64_t seq, std::vector<uint8_t>* copy) {
         const LaneLease lease = leases(id);
@@ -119,6 +133,7 @@ inline void BindLaneToMemo(AnalysisLane& lane, SkeletonMemo& memo, LaneGpuHandle
     // (counted sealComputed), so Acquire after the seal reuses it and the frame is computed once (AcquireCounters::Computed()).
     // The lookup is asked for a seal with every input present; a missing-input seal computes another result (its own form).
     SkeletonMemo* m = &memo;
+    lane.SetAheadSinks([m](ProductId id) { m->NoteSealComputedReduced(id); }, [m](ProductId id) { m->NoteWorkerReused(id); });
     lane.SetPublishedLookup([m](ProductId id, uint64_t seq, uint8_t* dst, size_t n) {
         if (m->CopyPublished(id, seq, dst, n)) {
             m->NoteSealReused(id);
@@ -133,6 +148,7 @@ inline void BindLaneToMemo(AnalysisLane& lane, SkeletonMemo& memo, LaneGpuHandle
 inline bool UnbindLaneFromMemo(AnalysisLane& lane, SkeletonMemo& memo)
 {
     lane.SetPublishedLookup(AnalysisLane::PublishedLookup());
+    lane.SetAheadSinks(nullptr, nullptr);
     const bool unbound = memo.UnbindLane(&lane);
     if (unbound)
         memo.SetGpuDispatcherPresent(false);
