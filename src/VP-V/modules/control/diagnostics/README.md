@@ -94,6 +94,12 @@ Ids engaged in code today (LibplaceboVideoRenderer.cpp): `capture GPU unpack`, `
 
 `SlotTiming.h` (core, header-only) is the per-slot GPU-time accumulator and 3090 projection; it is used only by PipelineSkeletonTests so far.
 
+### Compute-once detectors (`ComputeOnceReport.h`, `ComputeOnceModule.h`; core `ComputeOnce.h`, `GpuAttribution.h`, `GpuAttributionPl.h`)
+
+refs/129 addendum 2026-11-13, interface D:/codex/vp-handover/lead7/iface-L-DET.md. Detector 2: `VPV_COMPUTE_ONCE*` at each shared-unit entry point counts calls per (unit, variant, source frame) with the caller (return address, symbolised on report) and its frame scope (hub phase or lane job); the skeleton Acquire owner fills are folded in as `acquire:<product>`; private copies are HIDDEN-COPY rows. Detector 3: every GPU pass (VP dispatches via `GpuAttribution::Watch`, libplacebo render passes via the PassTimerHook info callback) is charged to an owner by step-name rules; unmatched steps are listed UNATTRIBUTED with their GPU time. Hub module `compute_once`: one Fallbacks status line while on and dirty (Ctrl+I, Config status, Ctrl+Alt+D), command `compute_once report`, and the full report in the log at GPU release / shutdown and every 30 s (the Ctrl+Alt+D log excerpt and the acceptance harness read it). On only with env `VP_DEBUG_COMPUTE_ONCE=1` (no config key); off costs one relaxed load and a branch per entry point (ComputeOnceTests::CostWhenOff logs the measured ns). Tests: `tests/ComputeOnceTests.cpp`; real-clip acceptance `ComputeOnceRealClipAcceptance` (RendererCaptureHarnessTests).
+
+Design goal and decisions (compute-once): prove every shared unit is computed at most once per frame and variant, and that no GPU pass is unowned, because "Overhead costs end-image quality" (owner, refs/owner-decisions 2026-11-13 13:36-13:38; principles/skeleton-products.md rule 5; doc 124 A1b). Decisions: diagnostic-only (env switch, no settings key, no pixel or decision change); unit tokens are the bare tools/check_shared_units.py ids so the static checker and the counters name the same units; entry-point lines live in module files only, never in Bill files (hook-line delta 0, 00-UNIVERSAL rule 4).
+
 ### Config keys actually read
 
 - `[shortcuts] state_report`: default Ctrl+Alt+D; empty = no shortcut; an invalid chord binds none and reports an error.
@@ -219,6 +225,11 @@ Forwarding headers (WP-17; removed in M2 step 0 with their includers): `src/Vide
 - `src/VP-V/modules/control/diagnostics/DiagnosticsReportRun.h`
 - `src/VP-V/modules/control/diagnostics/StatusExtension.h`
 - `src/VP-V/modules/control/diagnostics/StatusExtension.cpp`
+- `src/VP-V/modules/control/diagnostics/ComputeOnceReport.h`
+- `src/VP-V/modules/control/diagnostics/ComputeOnceModule.h`
+- `src/VP-V/core/ComputeOnce.h`
+- `src/VP-V/core/GpuAttribution.h`
+- `src/VP-V/core/GpuAttributionPl.h`
 - `src/VP-V/core/SlotTiming.h`
 - `src/VP-V/core/FallbackStatus.h`
 - `src/VideoProcessor-GUI/StatsOverlayWindow.cpp`

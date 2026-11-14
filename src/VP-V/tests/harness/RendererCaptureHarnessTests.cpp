@@ -44,6 +44,7 @@
 #include <vector>
 
 #include <VP-V/tests/support/DolbyVisionTunnelSender.h>
+#include <VP-V/tests/support/CpuSampleProfiler.h>
 #include <dv_loopback/DvLoopbackPattern.h>
 #include <dv_loopback/DvCaptureContainer.h>
 #include <VP-V/modules/control/diagnostics/RawCaptureCorpus.h>
@@ -5777,6 +5778,87 @@ namespace Tests
 				Assert::IsTrue(worst <= 64, (L"timeline pictures differ from the plain draw in " + std::to_wstring(worst) + L" pixels (at most 64)").c_str());
 			else if (worst > 64)
 				Logger::WriteMessage(("   KNOWN-GAP near-black: " + std::to_string(worst) + " pixels (threshold 64 not asserted)\n").c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(ComputeOnceRealClipAcceptance)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ComputeOnceRealClipAcceptance)
+		{
+			const HarnessScope harnessScope;
+			// COMPUTE-ONCE acceptance (refs/129 addendum 2026-11-13, iface-L-DET section 3): a real film clip through the
+			// default chain with the detectors on (VP_DEBUG_COMPUTE_ONCE=1, read by the renderer DLL's own copy of
+			// ComputeOnce.h when it first checks the flag: run this test in its own vstest process). The teardown report
+			// is parsed from the log:
+			//   detector 2: no shared unit computed twice for one (variant, source frame) - "duplicates 0";
+			//   detector 3: every GPU pass has an owner - "gpu-unattributed 0".
+			// Every DUPLICATE / HIDDEN-COPY / gap / UNATTRIBUTED line is printed with its callers.
+			if (!RequireHardwareOrSkip("ComputeOnceRealClipAcceptance")) return;
+			std::vector<std::vector<BYTE>> clip;
+			std::string error;
+			if (!LoadClipV210("tos_1920x800_24p", 72, clip, error))
+			{
+				const bool require = RealClip::Env("VP_TEST_REQUIRE_FOOTAGE") == "1";
+				Logger::WriteMessage(("SKIP-NO-FOOTAGE ComputeOnceRealClipAcceptance: " + error + "\n").c_str());
+				Assert::IsFalse(require, std::wstring(error.begin(), error.end()).c_str());
+				return;
+			}
+			SetEnvironmentVariableA("VP_DEBUG_COMPUTE_ONCE", "1");
+			g_harnessWindowWidth = 1920;
+			g_harnessWindowHeight = 1080;
+			g_harnessDvFrames = clip;
+			const int frames = static_cast<int>(clip.size());
+			FramePlan plan;
+			plan.rateNumerator = 24000;
+			plan.rateDenominator = 1001;
+			plan.step = [frames](int n) { FrameStep f; f.content = n % frames; return f; };
+			plan.captureTimes = { 4.0 };
+			// The CPU side (tools/compute_once/run_cpu_sample.ps1 sets VP_TEST_CPU_SAMPLE=1): reported, not asserted.
+			const bool cpuSample = RealClip::Env("VP_TEST_CPU_SAMPLE") == "1";
+			VpTest::CpuSampleProfiler cpu("VideoProcessorVPRenderer.dll");
+			if (cpuSample)
+				cpu.Start();
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.0, false, std::string(), false, &plan);
+			cpu.Stop();
+			SetEnvironmentVariableA("VP_DEBUG_COMPUTE_ONCE", nullptr);
+			if (cpuSample)
+				for (const std::string& l : cpu.Report())
+					Logger::WriteMessage(("   " + l + "\n").c_str());
+			// The last report in the log (an earlier periodic one is superseded).
+			size_t from = r.log.size();
+			for (size_t i = 0; i < r.log.size(); ++i)
+				if (r.log[i].find("Compute-once report (") != std::string::npos)
+					from = i;
+			std::string summary;
+			int printed = 0;
+			for (size_t i = from; i < r.log.size(); ++i)
+			{
+				const std::string& l = r.log[i];
+				if (l.find("Compute-once summary ") != std::string::npos)
+					summary = l;
+				if (l.find("Compute-once DUPLICATE ") != std::string::npos || l.find("Compute-once HIDDEN-COPY ") != std::string::npos
+					|| l.find("Compute-once gap ") != std::string::npos || l.find("Compute-once gpu UNATTRIBUTED ") != std::string::npos
+					|| l.find("Compute-once gpu HIDDEN-COPY ") != std::string::npos || l.find("Compute-once gpu owner ") != std::string::npos
+					|| l.find("Compute-once unit ") != std::string::npos)
+				{
+					Logger::WriteMessage(("   " + l + (l.empty() || l.back() != '\n' ? "\n" : "")).c_str());
+					++printed;
+				}
+			}
+			Logger::WriteMessage(("== compute-once real clip: presented " + std::string(r.presented ? "yes" : "NO") + ", " + std::to_string(printed)
+				+ " report rows; " + (summary.empty() ? std::string("NO SUMMARY\n") : summary + (summary.back() != '\n' ? "\n" : ""))).c_str());
+			Logger::WriteMessage(("   " + r.fallbacksStatus + "\n").c_str());
+			Assert::IsTrue(r.presented, L"the clip was presented");
+			Assert::IsFalse(summary.empty(), L"no compute-once report in the log (was VP_DEBUG_COMPUTE_ONCE read before this test?)");
+			auto field = [&summary](const char* name) {
+				const std::string key = std::string(" ") + name + " ";
+				const size_t at = summary.find(key);
+				return at == std::string::npos ? -1LL : std::atoll(summary.c_str() + at + key.size());
+			};
+			const long long duplicates = field("duplicates"), unattributed = field("gpu-unattributed"), passes = field("gpu-passes");
+			Assert::IsTrue(passes > 0, L"the GPU attribution saw no pass");
+			Assert::AreEqual(0LL, duplicates, L"shared units computed more than once per (variant, source frame): see the DUPLICATE lines");
+			Assert::AreEqual(0LL, unattributed, L"GPU passes without an owner: see the gpu UNATTRIBUTED lines");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(EntranceOnceRealClipAcceptance)

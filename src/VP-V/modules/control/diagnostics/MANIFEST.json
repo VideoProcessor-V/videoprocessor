@@ -8,6 +8,11 @@
   "live_files": [
     "src/VP-V/modules/control/diagnostics/DiagnosticOverrides.h",
     "src/VP-V/modules/control/diagnostics/DiagnosticOverridesModule.h",
+    "src/VP-V/modules/control/diagnostics/ComputeOnceReport.h",
+    "src/VP-V/modules/control/diagnostics/ComputeOnceModule.h",
+    "src/VP-V/core/ComputeOnce.h",
+    "src/VP-V/core/GpuAttribution.h",
+    "src/VP-V/core/GpuAttributionPl.h",
     "src/VP-V/modules/control/diagnostics/StateReport.cpp",
     "src/VP-V/modules/control/diagnostics/CrashState.cpp",
     "src/VP-V/modules/control/diagnostics/CrashState.h",

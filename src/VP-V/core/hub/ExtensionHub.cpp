@@ -3,6 +3,7 @@
 
 #include "ExtensionHub.h"
 #include "CurrentFrame.h"
+#include <VP-V/core/ComputeOnce.h>
 
 #include <atomic>
 #include <thread>
@@ -332,6 +333,8 @@ namespace Vpv
 		{
 			RecordCurrentFrame(c);   // L-CORE: before the fan-out, so every module (and the render's hooks) sees this frame
 			const bool fanOut = RE::PhaseFansOut(c.phase);
+			if (c.seq >= 0)
+				ComputeOnce::SetThreadFrame(c.seq, "hub", static_cast<int64_t>(c.phase));   // compute-once frame scope (no-op when off)
 			bool handled = false;
 			for (auto& m : modules_)
 				if (fanOut || !handled) { try { if (DispatchPhase(*m, c)) handled = true; } catch (...) { Contain(c, m->Name()); } }
