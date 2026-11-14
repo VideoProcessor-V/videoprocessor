@@ -1635,7 +1635,20 @@ namespace Vpv
 				t.presentLag = mh->presentLag.Value(now);
 				t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kPresentLag);
 			}
-			// H stays UNWIRED until the memo offers its declared fill history (requested from L-CORE / LEAD 14): named by Ctrl+Alt+D, never 0 as a value.
+			// H: the owner fills' declared reader lag (L-CORE accessor; 0 = none declared, a measurement). The lane graph's input lag edges join
+			// it through HistoryTermOf once the lane hands its graph here (TODO 102b QKP-B-LANE-GRAPH-H).
+			t.history = VpSkeleton::HistoryTermOf(nullptr, memo->DeclaredFillHistory());
+			t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kHistory);
+			// The active ahead consumers' declared needs (L-CORE accessor); none declared = fed, no consumer (aheadCompute 0 / NoConsumer).
+			std::vector<VpSkeleton::AheadDemand> demands;
+			for (const VpSkeleton::SkeletonMemo::AheadDemand& d : memo->ActiveAheadDemands())
+			{
+				VpSkeleton::AheadDemand ad;
+				ad.need = d.depth;
+				ad.consumer = d.form != 0 ? "owner fill (GPU)" : "owner fill (CPU)";
+				demands.push_back(ad);
+			}
+			VpSkeleton::SetAheadConsumers(t, demands);
 			const VpSkeleton::QueueWindow w = VpSkeleton::DeriveWindow(t, seq, memo->Epoch());
 			memo->SetWindow(w);
 			mh->board.Publish(w);
