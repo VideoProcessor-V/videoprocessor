@@ -336,7 +336,7 @@ namespace VpMotion
 			unsigned long long invalidated = 0;    // the vectors-valid state does not hold the pair (resync, gap, format change)
 			unsigned long long unscaled = 0;       // the source size the engine size derives from is not known yet
 			// W1-C3: the per-pair work (computed once per pair id, whatever the number of FlowOf calls): the lease builds (source-px
-			// conversion of the pair) and the cell-trust computations (FlowView::CellTrust, once per pair and tolerance).
+			// conversion of the pair) and the cell-trust computations (FlowView::CellTrust, once per direction and tolerance while the pair is the current lease).
 			unsigned long long conversions = 0;
 			unsigned long long trustComputes = 0;
 			// Of those computations, the planes worked out here instead of taken from the producer's extras (forward with extras: 0 each;

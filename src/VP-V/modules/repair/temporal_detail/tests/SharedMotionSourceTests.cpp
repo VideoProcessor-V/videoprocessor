@@ -342,7 +342,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual<unsigned long long>(r2.fbErrorRecomputes + 1, r3.fbErrorRecomputes, L"backward: no producer extra, error computed");
 			Assert::AreEqual<unsigned long long>(r2.costWeightRecomputes + 1, r3.costWeightRecomputes, L"backward: no producer extra, cost weights computed");
 			Assert::IsTrue(back.trust != a.trust);
-			// Computed once by the engine per pair, direction and tolerance, however often TD asked; none worked out by the adapter.
+			// Computed once by the engine per direction and tolerance while the pair is the current lease, however often TD asked; none by the adapter.
 			{   // WIP-DIAG (revert): why the second Forward(6) fails
 				const bool okDiag = source.Forward(6, b);
 				const auto sd = source.GetStats();

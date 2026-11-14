@@ -10,7 +10,7 @@
 //  * Backward(seq) = pair (seq -> seq - 1) on frame seq's grid: the pair's backward vectors.
 //  Vectors are in SOURCE pixels of the frame the producer saw (the engine's grid cell is 4 pixels of the producer's input, which is the
 //  source scaled by sourceWidth / flow.halfW); the host scales them to the re-based plane as for any source (the module never rescales).
-//  Trust per cell is the ENGINE's memo (FlowView::CellTrust / CellTrustBackward, computed once per pair and tolerance by the engine's FlowOf lease;
+//  Trust per cell is the ENGINE's memo (FlowView::CellTrust / CellTrustBackward, computed once per direction and tolerance while the pair is the engine's current FlowOf lease;
 //  this adapter holds no trust arithmetic, L-B6 WAIVER-B6-TD-TRUST). Both are in [0, 1]; a pair without a trust plane is not guessed at (absent:
 //  "the pair has no vectors or costs"). Camera() stays false (the camera model reaches TD through its own adapter).
 //
