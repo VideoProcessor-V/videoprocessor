@@ -812,5 +812,29 @@ class UntaggedVpReferenceTest(unittest.TestCase):
         self.assertNotIn("return", syms)
 
 
+class HookLinesTest(unittest.TestCase):
+    def test_hook_lines_metric_blocks_above_baseline(self):
+        NL = chr(10)
+        body = chr(9) * 2 + "if (!pipelineSlots.OriginalPathway()) { pipelineSlots.Prepass(); } // VPV-HOOK" + NL
+        with tempfile.TemporaryDirectory() as root:
+            _w(root, BILL, _bill(body))
+            _w(root, "src/VP-V/core/PipelineSlots.h", SLOTS)
+            rc, out = _run(root)
+            self.assertIn("hook LINES: 1 (no baseline", out)
+            rc, out = _run(root, extra=["--write-hook-lines-baseline"])
+            self.assertEqual(rc, 0, out)
+            rc, out = _run(root)
+            self.assertIn("hook LINES: 1 (baseline 1, trend +0)", out)
+            _w(root, BILL, _bill(body + body))
+            rc, out = _run(root)
+            self.assertEqual(rc, 1, out)
+            self.assertIn("OVER HOOK-LINES BASELINE", out)
+            rc, out = _run(root, extra=["--write-hook-lines-baseline"])
+            self.assertEqual(rc, 1)
+            _w(root, BILL, _bill(""))
+            rc, out = _run(root)
+            self.assertIn("hook LINES: 0 (baseline 1, trend -1)", out)
+
+
 if __name__ == "__main__":
     unittest.main()
