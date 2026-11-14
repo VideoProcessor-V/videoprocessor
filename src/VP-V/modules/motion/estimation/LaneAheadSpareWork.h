@@ -66,8 +66,10 @@ inline AcquireFn AcquireThrough(VpSkeleton::SkeletonMemo* memo)
 
 class LaneAheadSpareWork : public VpSkeleton::ISpareWork {
 public:
-    LaneAheadSpareWork(ILaneAheadEngine* engine, AcquireFn acquire, uint32_t graphOrder, int capacity = RingCapacity())
-        : m_engine(engine), m_acquire(std::move(acquire)), m_order(graphOrder), m_ring(capacity)
+    // `ring` is the ONE chain ring of ahead pairs, owned by the engine side (Dejudder::AheadSchedule holds it at wiring: 93-prep-B3Z s3 "ONE
+    // arbiter"; estimation README: Z1 maps onto AheadSchedule, not a second ring). The adapter only fills and consumes it.
+    LaneAheadSpareWork(ILaneAheadEngine* engine, AcquireFn acquire, uint32_t graphOrder, AheadRing& ring)
+        : m_engine(engine), m_acquire(std::move(acquire)), m_order(graphOrder), m_ring(ring)
     {
     }
 
@@ -140,11 +142,10 @@ public:
     }
 
     // A resync / seek / queue reset (host): the ring is discarded (counted), the decision starts over.
-    void Reset() { m_ring.Reset(); m_feed.Reset(); m_pairsWanted = 0; m_offeredFrame = 0; m_ranFrame = 0; }
+    void Reset() { m_ring.Reset(); m_pairsWanted = 0; m_offeredFrame = 0; m_ranFrame = 0; }
 
     AheadRing& Ring() { return m_ring; }
     const AheadRing& Ring() const { return m_ring; }
-    AheadFeed& Feed() { return m_feed; }
     const ReasonCounts& Reasons() const { return m_reasons; }
     const VpSkeleton::SpareMeasuredCost& PairCost() const { return m_cost; }
     unsigned long long Estimated() const { return m_estimated; }
@@ -199,8 +200,7 @@ private:
     ILaneAheadEngine* m_engine;
     AcquireFn m_acquire;
     uint32_t m_order;
-    AheadRing m_ring;
-    AheadFeed m_feed;
+    AheadRing& m_ring;
     VpSkeleton::SpareMeasuredCost m_cost;   // per pair; never decayed (R4)
     mutable ReasonCounts m_reasons;
     mutable int m_pairsWanted = 0;
