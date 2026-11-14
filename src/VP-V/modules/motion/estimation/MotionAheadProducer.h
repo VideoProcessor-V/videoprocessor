@@ -23,6 +23,8 @@
 #include <AnalysisLumaSource.h>
 #include <VP-V/core/LaneInterfaces.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
+#include <VP-V/modules/motion/estimation/ProducerJobs.h>
+#include <VP-V/modules/motion/estimation/EngineLumaRing.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/estimation/VectorProducts.h>
 #include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
@@ -348,7 +350,7 @@ namespace MotionAhead
 		std::deque<Job> jobs;
 		OnDemand::Queue requests;           // W2-C5b, under mutex: taken before `jobs`
 		RequestStats requestStats;          // under mutex
-		int requestStreak = 0;              // W2-C5b, under mutex: requests run in a row while a job waited
+		ProducerJobs::ChooserState chooser;   // W2-C5b, under mutex: requests run in a row while a job waited (ProducerJobs.h)
 		bool requestRunning = false;        // W2-C5b, under mutex: the worker is serving a request now
 		bool requestOwnsGeneration = false; // W2-C5b, worker only: a no-walk request set the slot's generation (no job since)
 		uint64_t lastJobMs = 0;             // W2-C5b, under mutex: NowMs() of the last look-ahead job (0 = none yet)
@@ -384,9 +386,12 @@ namespace MotionAhead
 		NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Medium;
 		std::unique_ptr<NvOpticalFlow::Engine> engine;
 		int sizeW = 0, sizeH = 0;
-		CComPtr<ID3D11Texture2D> lumaTex[2];   // previous / current (ping-pong)
+		// 105 s3.5: the engine-luma ring replaces the previous / current ping-pong: kLumaRingSlots textures, frames held by key
+		// (generation, sequence). The ring never sizes from the lead; 3 = N-1, N, N+1 (fits inside the 4-6 ahead cap).
+		enum : int { kLumaRingSlots = 3 };
+		CComPtr<ID3D11Texture2D> lumaTex[kLumaRingSlots];
+		EngineLumaRing lumaRing{ kLumaRingSlots, 0 };
 		CComPtr<ID3D11Texture2D> flowTex[2], costTex[2], flowRead[2], costRead[2];
-		int current = 0;
 		bool havePrevious = false;
 		uint64_t previousSequence = 0, previousGeneration = 0;
 		uint64_t hintSequence = UINT64_MAX, hintGeneration = 0;   // the "to" frame of the engine's last pair

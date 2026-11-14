@@ -2,6 +2,7 @@
 #include "MotionAheadProducer.h"
 
 #include <DebugLog.h>
+#include "ProducerJobs.h"
 #include <VP-V/core/PassTimerInbox.h>
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
@@ -211,7 +212,7 @@ namespace MotionAhead
 		engineReady = false;
 		sizeW = sizeH = 0;
 		consecutiveFailures = 0;
-		requestStreak = 0;           // W2-C5b
+		chooser = ProducerJobs::ChooserState();           // W2-C5b
 		requestRunning = requestOwnsGeneration = false;
 		lastJobMs = 0;
 		adoptOverWalk = requestResetHints = false;
@@ -265,8 +266,11 @@ namespace MotionAhead
 		VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserNvofProducer, false);
 		for (int i = 0; i < 2; ++i)
 		{
-			lumaTex[i].Release(); flowTex[i].Release(); costTex[i].Release(); flowRead[i].Release(); costRead[i].Release();
+			flowTex[i].Release(); costTex[i].Release(); flowRead[i].Release(); costRead[i].Release();
 		}
+		for (int i = 0; i < kLumaRingSlots; ++i)
+			lumaTex[i].Release();
+		lumaRing.Clear();
 		ReleaseRequestTextures();   // W2-C5b
 		sizeW = sizeH = 0;
 		havePrevious = false;
@@ -357,18 +361,25 @@ namespace MotionAhead
 				std::unique_lock<std::mutex> lock(mutex);
 				wake.wait(lock, [this] { return stopping || !requests.Empty() || !jobs.empty(); });
 				if (stopping) return;
-				// Requests first, but at most kMaxRequestStreak in a row while a job waits (W2-C5b audit: the walk is never starved).
-				if (!requests.Empty() && (jobs.empty() || requestStreak < kMaxRequestStreak))
+				// One pure chooser (ProducerJobs.h, 105 s3.3): requests first, but at most kMaxRequestStreak in a row while a job waits
+				// (W2-C5b audit: the walk is never starved). The streak counts only while a job waited (the dequeue-stall fix).
+				ProducerJobs::Queues queues;
+				queues.corePairs = jobs.size();
+				queues.onDemand = requests.Size();
+				const ProducerJobs::Choice choice = ProducerJobs::NextJob(queues, chooser, kMaxRequestStreak);
+				if (!choice.any)
+					continue;   // woken with nothing to do: never touch an empty queue
+				if (choice.cls == ProducerJobs::JobClass::OnDemand)
 				{
 					isRequest = requests.Pop(request);
-					++requestStreak;
 					requestRunning = isRequest;
+					if (!isRequest)
+						continue;
 				}
-				if (!isRequest)
+				else
 				{
-					if (!requests.Empty())
+					if (choice.fairness)
 						++requestStats.fairnessJobs;
-					requestStreak = 0;
 					job = std::move(jobs.front());
 					jobs.pop_front();
 				}
@@ -447,8 +458,11 @@ namespace MotionAhead
 		VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserNvofProducer, true);   // an open that fails below leaves it active without a declaration: shown by the skeleton
 		for (int i = 0; i < 2; ++i)
 		{
-			lumaTex[i].Release(); flowTex[i].Release(); costTex[i].Release(); flowRead[i].Release(); costRead[i].Release();
+			flowTex[i].Release(); costTex[i].Release(); flowRead[i].Release(); costRead[i].Release();
 		}
+		for (int i = 0; i < kLumaRingSlots; ++i)
+			lumaTex[i].Release();
+		lumaRing.Clear();
 		havePrevious = false;
 		const int gw = (halfW + 3) / 4, gh = (halfH + 3) / 4;
 		auto make = [&](int tw, int th, DXGI_FORMAT format, bool staging, CComPtr<ID3D11Texture2D>& tex) {
@@ -460,9 +474,15 @@ namespace MotionAhead
 			desc.CPUAccessFlags = staging ? D3D11_CPU_ACCESS_READ : 0;
 			return SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &tex));
 		};
+		for (int i = 0; i < kLumaRingSlots; ++i)
+			if (!make(halfW, halfH, NvOpticalFlow::Engine::InputFormat(), false, lumaTex[i]))
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				error = "cannot create its textures";
+				return false;
+			}
 		for (int i = 0; i < 2; ++i)
-			if (!make(halfW, halfH, NvOpticalFlow::Engine::InputFormat(), false, lumaTex[i]) ||
-				!make(gw, gh, NvOpticalFlow::Engine::FlowFormat(), false, flowTex[i]) ||
+			if (!make(gw, gh, NvOpticalFlow::Engine::FlowFormat(), false, flowTex[i]) ||
 				!make(gw, gh, NvOpticalFlow::Engine::CostFormat(), false, costTex[i]) ||
 				!make(gw, gh, NvOpticalFlow::Engine::FlowFormat(), true, flowRead[i]) ||
 				!make(gw, gh, NvOpticalFlow::Engine::CostFormat(), true, costRead[i]))
@@ -482,7 +502,9 @@ namespace MotionAhead
 		sizeW = halfW;
 		sizeH = halfH;
 		// MV7: the ring textures (2 sets) are this producer's VRAM; the governor counts them (VramUsers.h). The readback staging copies are system RAM: not counted.
-		VpSkeleton::VramUsers::Instance().DeclareFixed(this, VpSkeleton::kUserNvofProducer, NvOpticalFlow::RingBytes(halfW, halfH, false, false));
+		// The engine-luma ring holds kLumaRingSlots luma textures (RingBytes counts two): the extra ones are declared here too.
+		VpSkeleton::VramUsers::Instance().DeclareFixed(this, VpSkeleton::kUserNvofProducer,
+			NvOpticalFlow::RingBytes(halfW, halfH, false, false) + static_cast<uint64_t>(kLumaRingSlots - 2) * static_cast<uint64_t>(halfW) * static_cast<uint64_t>(halfH));
 		return true;
 	}
 
@@ -508,17 +530,22 @@ namespace MotionAhead
 		{
 			slot->SetGeneration(job.generation);
 			havePrevious = false;
+			lumaRing.ClearGenerationsOtherThan(job.generation);   // a new generation: no frame of the old one stays (pins too)
 		}
 		// A break the sequence does not show: no pair across it (MotionValidity step 1 F).
 		if (job.breakBefore)
 			havePrevious = false;
 		NoteWalkJob(job);   // W2-C5b
-		const int texIndex = havePrevious ? 1 - current : current;
+		// The engine-luma ring (105 s3.5): this frame's slot by key; the pair's first frame is looked up by key, never "the other one".
+		const int prevSlot = (havePrevious && previousGeneration == job.generation && previousSequence + 1 == job.sequence)
+			? lumaRing.Find(previousGeneration, previousSequence) : EngineLumaRing::kNoSlot;
+		const int texIndex = lumaRing.Acquire(job.generation, job.sequence);
+		if (texIndex == EngineLumaRing::kNoSlot) return false;
 		context->UpdateSubresource(lumaTex[texIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(halfW), 0);
 		bool ok = true;
-		if (havePrevious && previousGeneration == job.generation && previousSequence + 1 == job.sequence)
+		if (prevSlot != EngineLumaRing::kNoSlot)
 		{
-			const int prev = current;
+			const int prev = prevSlot;
 			// The temporal hints only when the engine's last pair ended at this pair's first frame
 			// (audit 2026-10-16: they carried across seeks, dropped jobs and size skips).
 			const bool continuous = hintSequence == previousSequence && hintGeneration == job.generation;
@@ -548,7 +575,6 @@ namespace MotionAhead
 			++stats.frames;
 			stats.lumaMs = lumaMs;
 		}
-		current = texIndex;
 		havePrevious = true;
 		previousSequence = job.sequence;
 		previousGeneration = job.generation;
@@ -811,6 +837,7 @@ namespace MotionAhead
 		{
 			slot->SetGeneration(rq.generation);
 			havePrevious = false;
+			lumaRing.ClearGenerationsOtherThan(rq.generation);   // a new generation: no frame of the old one stays
 			requestOwnsGeneration = true;
 		}
 		OnDemand::ChainState chain;
@@ -851,20 +878,34 @@ namespace MotionAhead
 			}
 			ID3D11Texture2D* texFrom = nullptr;
 			ID3D11Texture2D* texTo = nullptr;
-			int toIndex = current;
+			// The engine-luma ring (105 s3.5): frames by key. Chain pairs the chain's last frame with `to`; Adopt puts `from` and `to` in.
 			if (mode == Mode::Chain)
 			{
-				toIndex = 1 - current;
+				const int fromIndex = lumaRing.Find(previousGeneration, previousSequence);
+				const int toIndex = lumaRing.Acquire(rq.generation, rq.to);
+				if (fromIndex == EngineLumaRing::kNoSlot || toIndex == EngineLumaRing::kNoSlot)
+				{
+					engineRan = false;        // nothing ran: leaves the failure count alone
+					answer(Status::Failed);   // the chain's last frame is not held: no pair (cannot happen while the chain is valid)
+					return true;
+				}
 				context->UpdateSubresource(lumaTex[toIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(w), 0);
-				texFrom = lumaTex[current];
+				texFrom = lumaTex[fromIndex];
 				texTo = lumaTex[toIndex];
 			}
 			else if (mode == Mode::Adopt)
 			{
-				toIndex = 1 - current;
-				context->UpdateSubresource(lumaTex[current], 0, nullptr, requestLumaBuffer.data(), static_cast<UINT>(w), 0);
+				const int fromIndex = lumaRing.Acquire(rq.generation, rq.from);
+				const int toIndex = lumaRing.Acquire(rq.generation, rq.to);
+				if (fromIndex == EngineLumaRing::kNoSlot || toIndex == EngineLumaRing::kNoSlot || fromIndex == toIndex)
+				{
+					engineRan = false;
+					answer(Status::Failed);
+					return true;
+				}
+				context->UpdateSubresource(lumaTex[fromIndex], 0, nullptr, requestLumaBuffer.data(), static_cast<UINT>(w), 0);
 				context->UpdateSubresource(lumaTex[toIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(w), 0);
-				texFrom = lumaTex[current];
+				texFrom = lumaTex[fromIndex];
 				texTo = lumaTex[toIndex];
 			}
 			else
@@ -889,8 +930,6 @@ namespace MotionAhead
 				hintSequence = rq.to;
 				hintGeneration = rq.generation;
 			}
-			if (mode != Mode::OffChain)
-				current = toIndex;
 		}
 		// The chain now holds `to` (Chain / Adopt); an off-chain run leaves it for the walk.
 		if (mode != Mode::OffChain)
@@ -958,7 +997,7 @@ namespace MotionAhead
 		engineReady = false;
 		sizeW = sizeH = 0;
 		consecutiveFailures = 0;
-		requestStreak = 0;
+		chooser = ProducerJobs::ChooserState();
 		requestRunning = requestOwnsGeneration = false;
 		lastJobMs = 0;
 		adoptOverWalk = requestResetHints = false;
