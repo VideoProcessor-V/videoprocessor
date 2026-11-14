@@ -207,7 +207,7 @@ namespace AdmissionOverloadTest
 			Result r = Admit(f);
 			Assert::IsTrue(r.admitted[kP5MonitorTiles]);
 			Assert::IsTrue(r.aheadAdmitted[kP3AnalysisField] && r.aheadAdmitted[kP5MonitorTiles]);
-			Assert::AreEqual(kAheadCeiling, r.aheadFrames);
+			Assert::AreEqual(int(kAheadCeiling), r.aheadFrames);
 			Assert::AreEqual(uint64_t(kAheadCeiling) * (100 + 50) + 16 * 10, r.aheadNeedBytes);
 
 			f.vramGrantBytes = 1000;   // 1. the optional product moves to render time
@@ -215,7 +215,7 @@ namespace AdmissionOverloadTest
 			Assert::AreEqual(1u, r.aheadProductsDropped);
 			Assert::IsFalse(r.aheadAdmitted[kP5MonitorTiles]);
 			Assert::IsTrue(r.aheadAdmitted[kP3AnalysisField]);
-			Assert::AreEqual(kAheadCeiling, r.aheadFrames);
+			Assert::AreEqual(int(kAheadCeiling), r.aheadFrames);
 			Assert::IsTrue(r.aheadLine.find("fewer products early") != std::string::npos);
 
 			f.vramGrantBytes = 500;    // 2. fewer frames ahead
@@ -275,7 +275,7 @@ namespace AdmissionOverloadTest
 			f.vramGrantBytes = 2000;
 			f.aheadConsumers[0].need = kAheadCeiling + 3;
 			r = Admit(f);
-			Assert::AreEqual(kAheadCeiling, r.aheadFrames);
+			Assert::AreEqual(int(kAheadCeiling), r.aheadFrames);
 			Assert::IsTrue(r.aheadBound == AheadBound::Ceiling);
 			Assert::IsTrue(r.aheadComputeLine.find("ceiling " + std::to_string(kAheadCeiling)) != std::string::npos);
 		}
@@ -302,9 +302,10 @@ namespace AdmissionOverloadTest
 			f.aheadConsumers[2] = AheadConsumer{ "idle", false, kAheadCeiling };   // inactive: ignored
 			r = Admit(f);
 			Assert::AreEqual(5, r.aheadFrames, L"the max of the ACTIVE declared needs");
-			Assert::AreEqual(5, r.aheadComputeFrames);
+			Assert::AreEqual(5, r.aheadComputeLimit);
 			Assert::AreEqual(std::string("ahead compute 5 (by TD)"), r.aheadComputeLine);
-			Assert::IsFalse(r.aheadComputeShown, L"consumer-bound: Ctrl+Alt+D only");
+			Assert::IsFalse(r.aheadShortNotice, L"consumer-bound: Ctrl+Alt+D only");
+			Assert::IsFalse(r.aheadCeilingInfo);
 
 			f.aheadConsumers[1].active = false;
 			f.aheadConsumers[0].active = false;
@@ -313,23 +314,25 @@ namespace AdmissionOverloadTest
 
 			f.aheadConsumers[0] = AheadConsumer{ "TD", true, kAheadCeiling + 3 };
 			r = Admit(f);
-			Assert::AreEqual(kAheadCeiling, r.aheadFrames, L"a request above the ceiling gives the ceiling");
+			Assert::AreEqual(int(kAheadCeiling), r.aheadFrames, L"a request above the ceiling gives the ceiling");
 			Assert::AreEqual("ahead compute " + std::to_string(kAheadCeiling) + " (by TD; ceiling " + std::to_string(kAheadCeiling) + ")", r.aheadComputeLine);
-			Assert::IsTrue(r.aheadComputeShown);
+			Assert::IsTrue(r.aheadCeilingInfo, L"held at the owner's cap: Ctrl+I info line");
+			Assert::IsFalse(r.aheadShortNotice, L"the cap is the designed state, not a downgrade (lead 12 R3)");
 
 			f.aheadConsumers[0].need = 4;
 			f.queueAheadFrames = 3;
 			r = Admit(f);
 			Assert::AreEqual(3, r.aheadFrames, L"never more than the frames queued ahead");
 			Assert::AreEqual(std::string("ahead compute 3 (by TD; queue)"), r.aheadComputeLine);
+			Assert::IsTrue(r.aheadShortNotice, L"less than asked within the cap: visible notice");
 
 			f.queueAheadFrames = 15;
 			f.vramGrantBytes = 100 * 2 + 16 * 10;   // the budget plans lower than the need (S-B): 2 frames
 			r = Admit(f);
-			Assert::AreEqual(4, r.aheadComputeFrames);
+			Assert::AreEqual(4, r.aheadComputeLimit);
 			Assert::AreEqual(2, r.aheadFrames, L"the ceiling / the need is an upper bound, not a target");
 			Assert::AreEqual(std::string("ahead compute 2 (by TD; budget)"), r.aheadComputeLine);
-			Assert::IsTrue(r.aheadComputeShown);
+			Assert::IsTrue(r.aheadShortNotice);
 
 			f.mode = LatencyMode::Games;
 			f.queueFrames = 1;
