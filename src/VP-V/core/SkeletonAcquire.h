@@ -1467,7 +1467,7 @@ private:
     {
         const auto it = names_.find(id);
         if (it == names_.end() && IsReservedProduct(id))
-            return std::string(ReservedProductName(id)) + " (reserved)";
+            return std::string(ReservedProductName(id));   // the plain token: also the stable Fallbacks id suffix
         return it != names_.end() ? it->second : "product " + std::to_string(id);
     }
 

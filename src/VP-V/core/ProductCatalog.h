@@ -766,8 +766,7 @@ inline std::string RenderDoc()
         if (d.id == kNoProduct) {
             // An absent slot of a reserved id: a named row with no owner until its product lands (no unit, reader or size).
             s += "| " + std::to_string(slot) + " | " + ReservedProductName(ProductId(slot)) + " | reserved (no owner)"
-                 + " | - | - | - | - | - | - | - | - | - | - |
-";
+                 + " | - | - | - | - | - | - | - | - | - | - |\n";
             continue;
         }
         const ProductRow* row = RowOf(d.id);
