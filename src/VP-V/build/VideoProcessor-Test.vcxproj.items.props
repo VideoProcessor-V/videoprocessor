@@ -387,6 +387,7 @@
     <ClCompile Include="..\VP-V\tests\suite\Integration20261017Tests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\Hunt2MotionTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\PostMergeAudit20261017Tests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\NearDupUnitsTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\CaptureLayerAuditTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\DisplayRuleExpressionAuditTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\GuiAuditTests.cpp" />
