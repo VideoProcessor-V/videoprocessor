@@ -9,8 +9,10 @@
 #include <VP-V/core/Indicator.h>
 #include <VP-V/core/LaneLease.h>
 #include <VP-V/core/Products.h>
+#include <VP-V/core/SkeletonAcquire.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -94,6 +96,22 @@ namespace Vpv
 		// (the camera extension). SkeletonModule implements it and hands it out through Query(kExternalDemandQueryId). Any thread. The
 		// contract is SkeletonModule::SetExternalDemand / ClearExternalDemand (one entry per (host, owner), replaced by the next call).
 		constexpr const char* kExternalDemandQueryId = "vpv.skeleton.external_demand.v1";
+
+		// L-CORE (lead8/iface-L-CORE.md s2): a renderer's GET-OR-COMPUTE-AND-PUBLISH memo for a frame. `memo` is shared: it stays
+		// valid while held, also across a lane rebuild. `gpu` = the renderer's pl_gpu (opaque, null without one) for a GPU owner fill.
+		// Empty (Valid() false) = no skeleton module, the Original pathway, or an unknown renderer: the caller shows its visible
+		// "unavailable", never a private path.
+		struct FrameMemo
+		{
+			std::shared_ptr<VpSkeleton::SkeletonMemo> memo;
+			const void* host = nullptr;
+			uint64_t seq = 0;
+			uint64_t nextSeq = 0;
+			bool haveNext = false;
+			const void* gpu = nullptr;
+			bool Valid() const { return memo && host; }
+		};
+
 		struct IExternalDemand
 		{
 			virtual void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
@@ -105,6 +123,16 @@ namespace Vpv
 			// Generations are per lane (a new source size builds a new lane and restarts them): take a fresh lease per use, never install
 			// one across a rebuild with LaneLeaseNewer. Default: empty (an implementer without lanes).
 			virtual VpSkeleton::LaneLease LeaseFor(const void* /*host*/, VpSkeleton::ProductId /*product*/) { return VpSkeleton::LaneLease(); }
+			// L-CORE deliverables 1-2: the renderer's memo for frame `seq` (any thread). It exists with or without the analysis lane;
+			// never in the Original pathway. nextSeq / haveNext are filled from the hub's current frame when `seq` is the frame the
+			// renderer is rendering. Default: empty (an implementer without a memo).
+			virtual FrameMemo MemoFor(const void* /*host*/, uint64_t /*seq*/) { return FrameMemo(); }
+			// The OWNING unit's fill of (product, form), MODULE-WIDE: installed in every renderer's memo now and in every memo made
+			// later (registration rules of SkeletonMemo::RegisterOwnerFill: the catalog's unit only, one per (product, form)).
+			// Any thread; start-up is the usual place. Default: NotInCatalog (no memo to install it in).
+			virtual VpSkeleton::SkeletonMemo::Registration RegisterOwnerFill(VpSkeleton::ProductId, VpSkeleton::AcquireForm,
+				const std::string& /*unit*/, VpSkeleton::OwnerFill) { return VpSkeleton::SkeletonMemo::Registration::NotInCatalog; }
+			virtual bool UnregisterOwnerFill(VpSkeleton::ProductId, VpSkeleton::AcquireForm, const std::string& /*unit*/) { return false; }
 		protected:
 			~IExternalDemand() {}
 		};

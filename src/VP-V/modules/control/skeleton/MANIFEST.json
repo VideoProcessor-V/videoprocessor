@@ -34,7 +34,12 @@
     "src/VP-V/modules/input/source_analysis/tests/SourceFrameTapTests.cpp",
     "src/VP-V/core/SkeletonAcquire.h",
     "src/VP-V/core/SkeletonAcquireLane.h",
-    "src/VP-V/tests/SkeletonAcquireTests.cpp"
+    "src/VP-V/tests/SkeletonAcquireTests.cpp",
+    "src/VP-V/core/VariantShape.h",
+    "src/VP-V/core/MemoGpuGrant.h",
+    "src/VP-V/core/hub/CurrentFrame.h",
+    "src/VP-V/modules/control/skeleton/SkeletonAccess.h",
+    "src/VP-V/tests/SkeletonCoreContextTests.cpp"
   ],
   "components": {
     "files": {

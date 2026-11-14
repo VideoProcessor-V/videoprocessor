@@ -188,6 +188,33 @@ Tests: `CaptureRouteTableTests` (the recorded route table), `CaptureExtensionTes
 renderer, lookups during binding churn), plus the existing EarlyUpload* (with `EarlyUploadSecondReaderTests`, refs/105 5a), CaptureUnpackHookTests, DvTunnelUnpackHookTests,
 HookAmendmentTests and the renderer capture harness.
 
+## P13 source-plane views (L-CORE, 2026-11-14)
+
+`SourcePlanes.h` (header-only; hub observer `input.capture.source_planes`, registered after the skeleton module) is the owner of
+P13 for the planes ON THE RENDER DEVICE in the current render frame. Contract: `D:/codex/vp-handover/lead8/iface-L-CORE.md` s6.
+
+- Sources: the Entrance phase's `image` (the frame being rendered; existing seam, no Bill line) and `SourcePlanes::Offer(host,
+  set)` by another VP-V render-device uploader in the same render frame (e.g. the matcher's B upload). Offers are dropped at the
+  next Begin of the host; at most four frames per render frame.
+- Read: `Acquire(kP13SourceRing, seq, AcquireForm::Gpu, VariantKey{plane})` (plane 0/1 first plane = luma of YUV, 2 second, 3
+  third; stage 0 only). The result is a VIEW: `gpu.resource` = the `pl_tex`, 0 bytes, frame-scoped (released at the next seal),
+  render thread only; `SourcePlanes::FactsOf(result)` gives the set (planes, components, `pl_color_repr`, rgb, full range).
+- Declines say why: "seq not offered this frame", "plane absent", "RGB source has no luma plane", "no texture" (Acquire's
+  cause text and the skeleton's Fallbacks entry). Off the render thread: `asked off the render thread`.
+- Not in this slice: the queued-AHEAD ring of refs/118 Phase A/B (packed early-upload slots + the unpack kernel); it stays with
+  the D5 lane and will serve frames ahead behind the same key. Tests: `src/VP-V/tests/SkeletonCoreContextTests.cpp`
+  (`SourcePlaneProviderTests`).
+
+## Design goal, philosophy and decisions
+
+- P13 is "VIEWS of the unpacked planes of the queued frames (owned by queue/upload): 0 extra bytes" (core/Products.h P13): a
+  view never copies a plane; a reader that needs it later derives its own product in that frame (refs/118 s0, s3).
+- Every shared computation's inputs come through the skeleton (get-or-compute-and-publish, OWNER 11-12 17:26,
+  `D:/codex/vp-handover/refs/owner-decisions-2026-11-07.md:624`; producer chains, OWNER 11-12 22:26): the source planes are the
+  first such input, so the P1 GPU form and the bands read them through `Acquire(P13)` instead of a renderer texture.
+- No Bill line for the provider (COORDINATOR 11-14 04:44 option B, log:664); first slice = render-device views, queued-ahead
+  ring with the D5 lane (LEAD 8 2026-11-14 05:2x, lead8/iface-L-CORE.md s6).
+
 ## Known issues / open items
 
 - CPU fallback keeps 4:2:2 (CV210toP210) instead of 4:2:0 (item 44, low priority)

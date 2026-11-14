@@ -187,7 +187,8 @@ Nothing reads P10-P12 yet (the `skeleton.report` consumer only declares them).
 
 The one access path to a shared product (owner rule 2026-11-12: reuse if computed for that frame, else the OWNING unit
 computes it once and publishes it into the skeleton spot; nobody computes privately). Code: `core/SkeletonAcquire.h`
-(`SkeletonMemo`), `core/SkeletonAcquireLane.h` (`BindLaneToMemo`); the module owns one memo per lane bundle (`MemoOf(host)`).
+(`SkeletonMemo`), `core/SkeletonAcquireLane.h` (`BindLaneToMemo`); the module owns ONE MEMO PER RENDERER (`MemoOf(host)`,
+`MemoFor(host, seq)`), with or without the lane (L-CORE, below).
 
 - `Acquire(id, seq, AcquireForm::Cpu | Gpu, VariantKey = {})` -> `AcquireResult` {status Reused / FilledAtRead / Unavailable,
   cause, source LaneSlot / Memo, cpu + bytes or `GpuMemoHandle`, `pin`}. Order: the lane's slot (default variant; a GPU
@@ -220,6 +221,71 @@ Status lines (Ctrl+Alt+D), one per product asked:
 `skeleton acquire: <token> <n> reused (lane <a>, memo <b>), <f> filled at read, <u> unavailable; <cause> <count>...`,
 plus `skeleton acquire: owner registrations refused <n> (<last>)` and `skeleton acquire: <n> released GPU spot(s) held for
 a pending read fence`. Tests: `src/VP-V/tests/SkeletonAcquireTests.cpp`.
+
+## L-CORE: current frame, memo without the lane, axes, thread contract, P13 views (2026-11-14)
+
+Contract: `D:/codex/vp-handover/lead8/iface-L-CORE.md` (frozen v1). Zero Bill lines; no hook site, no hook-file line.
+
+- **Current frame** (`core/hub/CurrentFrame.h`): `ExtensionHub::OnFrame` records, before the fan-out, the frame a renderer is
+  rendering (host, seq, nextSeq, generation, phase, serial) on Begin / PlanOutputs / Entrance / CollectHooks / Draw /
+  AfterRender / AfterPresent. `Hub::ThisThreadFrame()` (sticky per thread: a hook's Run() inside the render sees it) and
+  `Hub::CurrentFrameOf(host)` (any thread, torn-free).
+- **Memo access** (`SkeletonAccess.h`): `Vpv::Skeleton::CurrentFrameMemo()` (render thread) and `MemoForHost(host, seq)`
+  (producer threads) over `IExternalDemand::MemoFor(host, seq)` -> `FrameMemo {memo (shared), host, seq, nextSeq, gpu}`.
+  Empty in the Original pathway (no memo is ever made there) and without the skeleton module.
+- **Without the lane**: the renderer's memo is made on the first `MemoFor` (or the first lane build) and sealed at EVERY Begin
+  (with a bound lane after the lane's seal, else directly). Owner fills are registered MODULE-WIDE through
+  `IExternalDemand::RegisterOwnerFill` (catalog unit only, one per (product, form), stage-0 defaults) and installed in every
+  memo, now and later; so a product with an owner fill is fillable on demand with analysis_lane off. A lane BINDS the memo
+  (`SkeletonMemo::BindLane`, token = the lane): its slots are the first source and its CPU live computes the fills while bound;
+  `StopBundle` / a rebuild's new bind / the bundle's end unbind by token (the module registrations stay). A graph rebuild and a
+  new resync era `Clear()` the memo. The memo's Unavailable entries are on the Fallbacks status with or without the lane;
+  `OnCommand("skeleton","status")` lists its counters when the lane is off. A GPU fill that allocates still needs the lane's
+  dispatcher and ledger grant: without a lane it is `no GPU dispatcher` (visible); views (`view`) need neither.
+- **Axes**: STAGE (`StageAfter(PipelineSlots::Id)`, 0 = source planes = every owner's default), CROP (source-pixel rectangle;
+  full frame / zero side = none), PARAM0 / PARAM1 (owner-defined thresholds), PRECISION values `kPrecisionUnorm16`,
+  `kPrecisionFloat32`, `kPrecisionFloat16` (not 12-bit safe; an owner with `pixelData` refuses it). `VariantKey::Hash()` is the
+  stable variant id (compute-once counters). `core/VariantShape.h` derives a variant's dims, ledger format and reserve bytes.
+- **Thread contract**: the render thread is declared at every Begin. CPU forms from any thread (pinned); a lane CPU product off
+  the render thread is its PUBLISHED bytes copied out through the lane lease (`reusedLaneCopy`), never a slot pointer and never
+  a recompute; GPU forms, render-bound fills (`renderThreadOnly`: the lane's CPU live computes) and lane slot reads off the render
+  thread are `WrongThread` (visible). The per-key guard is per memo instance. A fill must not hand a nested Acquire to another
+  thread and wait for it (a pool thread is not in the wait graph). Nested-fill input pins are held until the fill returns; a
+  lane-slot result pins the lane BUFFERS (a ring slot's content is the frame's while it is in the ring).
+- **Fill flags**: `frameScoped` (a one-render-frame VIEW, released at the next seal: P13), `view` (0 bytes: no dispatcher, no
+  grant), `keepFrames` (per-fill keep: 1 = the previous frame stays readable, e.g. the P1 GPU A/B pair), `declineReason`.
+- **GPU retire**: `SetFenceCompleted` is wired to "always complete": memo GPU spots are owner-made `pl_tex` objects on the
+  D3D11 backend, whose release with reads still queued is safe (the runtime keeps a resource alive until the GPU finished
+  with it), so a noted read never holds a spot past its release. `NoteGpuRead` stays the reader's call for a future backend.
+- **CPU memo spots** stay heap vectors made by the fill (G0 audit S6b): a fill runs only when the lane did not make the frame
+  (rare by design), the size is the owner's, and the arena is GPU-side; recorded in refs/102b (B1-MEMO-CPU-ARENA) with the
+  trigger "a CPU owner fill runs on > 1 % of frames on a real-clip replay (compute-once counters)".
+- **P13 source-plane views** (`modules/input/capture/SourcePlanes.h`, owner `input/capture`): the planes on the render device in
+  the current render frame (the Entrance image + `SourcePlanes::Offer` by other VP-V uploaders), `Acquire(kP13SourceRing, seq,
+  Gpu, {plane})`; declines say why. Tests: `src/VP-V/tests/SkeletonCoreContextTests.cpp`.
+
+## Design goal, philosophy and decisions
+
+Goal: every shared computation exists ONCE per frame, owned by its unit as a skeleton product; modules get-or-compute-and-publish
+through Acquire. The skeleton is the only place modules meet; it never computes a product itself, it routes to the owner.
+Decisions (provenance: decision log = `D:/codex/vp-handover/refs/owner-decisions-2026-11-07.md:<line>`):
+- GET-OR-COMPUTE-AND-PUBLISH per source frame; no private computation without publishing (OWNER 11-12 17:26, log:624).
+- Bands and the GPU half picture stored once per frame in a per-frame memo spot; private "does not fit" variants forbidden, the
+  owner makes and publishes the variant (OWNER 11-12 17:31, log:626).
+- Recursive rule: prerequisites of a fill are Acquired and published on the way; per-key re-entrancy, no lock across a fill
+  (OWNER 11-13 13:34, log:640).
+- Compute-once proof by three detectors; the Acquire counters are one of them (OWNER 11-13 13:36-13:38, log:641-642).
+- Skeleton economy: variants (size, sigma, plane, stage, precision) are AXES of one product, not new products (OWNER 11-14
+  04:22, log:655).
+- Cross-thread CPU-form Acquire allowed (pinned); GPU forms render thread (COORDINATOR 11-14 04:26 (a), log:657).
+- The memo / owner fill must work without analysis_lane; TD crop requests served once a CROP axis exists (COORDINATOR 11-14 04:30,
+  log:659); one core task "skeleton current-frame context" with no Bill line (option B; option A, a new Bill hook line, refused)
+  (COORDINATOR 11-14 04:44, log:664).
+- STAGE axis, stage 0 = source planes (COORDINATOR rulings on L-B3, lead7/iface-L-B3.md s5 b; log:651).
+- The P1 GPU form must be 12-bit safe, never R16F in 8-bit-scale codes (COORDINATOR 11-14 05:11, log:668; advisor A6,
+  refs/102 s0); hence the precision values and their 12-bit predicate.
+- P13 first slice = render-device plane views; the queued-ahead ring stays with the D5 lane (LEAD 8 2026-11-14 05:2x ruling on
+  the L-CORE rule-33 note, lead8/iface-L-CORE.md s6).
 
 ## Status and fallbacks
 
