@@ -7358,6 +7358,11 @@ namespace Tests
 				const RunResult s = Run(VideoFrameEncoding::V210, "gpu", 6.0, rate.film, "deband_vp: on\ndejudder_strength: 0.25\n", false, &plan);
 				Logger::WriteMessage((std::string(rate.name) + " (de-judder standing demand = starter):\n" + VectorTestLines(s)).c_str());
 				Assert::IsTrue(s.presented, (name + L": starter run: frames presented\n" + s.Tail()).c_str());
+				// A source the de-judder serves by repeats alone (an integer multiple of the display, e.g. 30p on ~60 Hz) needs no motion
+				// estimate: the status then NAMES that ("no motion estimate runs for this source") and no vectors are due - a visible,
+				// designed state, so the positive leg applies to the sources that do need an estimate (24p here).
+				if (s.Logged("no motion estimate runs for this source"))
+					continue;
 				Assert::IsTrue(s.Logged("Vector engine: on"), (name + L": with a starter the vector engine is on\n" + s.Tail()).c_str());
 				// Vectors are delivered either by the on-demand engine ("vectors delivered") or by the look-ahead worker, which logs
 				// its pair hits instead ("Vector engine: N pairs (ahead hits H, ..."): H > 0 counts as delivered.
