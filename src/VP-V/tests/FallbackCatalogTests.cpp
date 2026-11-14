@@ -259,6 +259,20 @@ namespace FallbackCatalogTest
 			Assert::AreEqual(std::string("texture restore"), TextureRestoreFailed(false, "x").id);
 		}
 
+		TEST_METHOD(SceneJudgeUnavailableIsVisibleAndReleases)
+		{
+			const Decision d = SceneJudgeUnavailable("detail pulse", true, "no frame analysis store");
+			Assert::IsTrue(d.engaged);
+			Assert::AreEqual(std::string("detail pulse scene judge"), d.id);
+			Assert::IsTrue(Has(d, "scene judge unavailable (no frame analysis store)"));
+			FallbackStatus::Registry registry;
+			Assert::IsTrue(Sync(registry, d));
+			Assert::IsTrue(registry.Engaged("detail pulse scene judge"));
+			Assert::IsTrue(Sync(registry, SceneJudgeUnavailable("detail pulse", false, "")));
+			Assert::IsFalse(registry.Engaged("detail pulse scene judge"));
+			Assert::AreEqual(std::string("texture restore scene judge"), SceneJudgeUnavailable("texture restore", false, "").id);
+		}
+
 		TEST_METHOD(CustomHooksNotLoadedListsTheFailedHooks)
 		{
 			const Decision none = CustomHooksNotLoaded({});
