@@ -18,9 +18,11 @@ commit that touches a guarded file class WITHOUT a WAIVER-<ID> trailer line in i
 
 Exit 0 clean; 1 with --strict when any commit is flagged; 2 on a checker error (bad range, git failure).
 A waiver is a line "WAIVER-<ID>: <why>" (ID = letters, digits, '-', '_', '.') at the start of a line.
-A flagged commit is also waived when docs/audit/waiver-ledger.json ({"entries": [{sha, waiver_id, gate_record}]}) lists
-its sha (7+ hex characters) AND the gate_record file (relative to --gate-root / VP_GATE_ROOT) exists; the summary prints
-"ledger-waived N" apart from trailer waivers. An entry whose gate record is missing or null waives nothing.
+A flagged commit is also waived when the ledger docs/audit/waiver-ledger.json AS COMMITTED AT THE RANGE TIP ({"entries":
+[{sha, waiver_id, gate_record}]}) lists its full 40-hex sha (unique; a malformed or duplicate entry is rc 2) AND the
+gate_record file, inside --gate-root / VP_GATE_ROOT (no absolute path, no ".."), is non-empty and has a verdict line with
+GRANT or GRANT-WITH-CONDITIONS naming the first 9 characters of the sha. The summary prints "ledger-waived N" apart from
+trailer waivers. A missing, null, empty or non-naming gate record waives nothing. --ledger FILE is for non-strict runs only.
 """
 import argparse
 import fnmatch
@@ -146,28 +148,97 @@ def late_waivers(msgs):
     return out
 
 
-def load_ledger(root, path=None):
-    """[{sha, waiver_id, gate_record}] from docs/audit/waiver-ledger.json ({"entries": [...]}); [] when absent."""
-    path = path or os.path.join(root, LEDGER_PATH)
-    if not os.path.isfile(path):
-        return []
+LEDGER_SHA_RX = re.compile(r"^[0-9a-f]{40}$")
+VERDICT_RX = re.compile(r"\bGRANT\b")
+REFUSE_RX = re.compile(r"\bREFUSE")
+
+
+def parse_ledger(text):
+    """Entries of a ledger text ({"entries": [...]}). Every sha must be exactly 40 lowercase hex characters and unique;
+    anything else raises RuntimeError (rc 2). Nothing is silently dropped."""
     try:
-        with open(path, encoding="utf-8-sig") as fh:
-            entries = json.load(fh)["entries"]
-        return [e for e in entries if isinstance(e, dict) and len(str(e.get("sha", ""))) >= 7]
-    except (OSError, ValueError, KeyError, TypeError) as e:
+        entries = json.loads(text.lstrip(chr(0xFEFF)))["entries"]
+    except (ValueError, KeyError, TypeError) as e:
         raise RuntimeError("cannot read %s: %s" % (LEDGER_PATH, e))
+    if not isinstance(entries, list):
+        raise RuntimeError("%s: entries is not a list" % LEDGER_PATH)
+    seen = set()
+    for i, e in enumerate(entries):
+        if not isinstance(e, dict):
+            raise RuntimeError("%s: entry %d is not an object" % (LEDGER_PATH, i))
+        sha = e.get("sha")
+        if not isinstance(sha, str) or not LEDGER_SHA_RX.match(sha):
+            raise RuntimeError("%s: entry %d sha %r is not 40 lowercase hex characters" % (LEDGER_PATH, i, sha))
+        if sha in seen:
+            raise RuntimeError("%s: duplicate sha %s" % (LEDGER_PATH, sha))
+        seen.add(sha)
+        rec = e.get("gate_record")
+        if rec is not None and not isinstance(rec, str):
+            raise RuntimeError("%s: entry %d gate_record is not a string or null" % (LEDGER_PATH, i))
+    return entries
+
+
+def tip_of(rng):
+    """The commit a range ends at (the right side of A..B; HEAD when that side is empty)."""
+    tip = rng.split("..")[-1] if ".." in rng else rng
+    return tip or "HEAD"
+
+
+def load_ledger(root, tip="HEAD", path=None):
+    """Ledger entries. By default read from the committed ledger at the range TIP (git show <tip>:docs/audit/waiver-ledger.json),
+    never from the working tree, so an uncommitted edit waives nothing. [] when that commit has no ledger. path: an explicit
+    file (non-strict runs only; main refuses it under --strict)."""
+    if path:
+        try:
+            with open(path, encoding="utf-8-sig") as fh:
+                return parse_ledger(fh.read())
+        except OSError as e:
+            raise RuntimeError("cannot read ledger %s: %s" % (path, e))
+    try:
+        git(root, "cat-file", "-e", "%s:%s" % (tip, LEDGER_PATH))
+    except RuntimeError:
+        return []
+    return parse_ledger(git(root, "show", "%s:%s" % (tip, LEDGER_PATH)))
 
 
 def ledger_entry(ledger, sha):
     for e in ledger:
-        if sha.startswith(str(e["sha"]).lower()):
+        if sha == e["sha"]:
             return e
     return None
 
 
-def gate_exists(gate_root, record):
-    return bool(record) and os.path.isfile(os.path.join(gate_root, record))
+def gate_check(gate_root, record, sha):
+    """(ok, why). The record must stay inside gate_root, be a non-empty file, and hold a verdict line (GRANT or
+    GRANT-WITH-CONDITIONS, no REFUSE) that names at least the first 9 characters of sha. An existing file alone waives nothing."""
+    if not record:
+        return False, "no gate_record"
+    parts = re.split(r"[\\/]+", record)
+    if os.path.isabs(record) or record[:1] in "/\\" or re.match(r"^[A-Za-z]:", record) or ".." in parts:
+        return False, "gate_record escapes the gate root"
+    root_real = os.path.realpath(gate_root)
+    full = os.path.realpath(os.path.join(root_real, record))
+    try:
+        inside = os.path.commonpath([root_real, full]) == root_real
+    except ValueError:
+        inside = False
+    if not inside:
+        return False, "gate_record escapes the gate root"
+    if not os.path.isfile(full):
+        return False, "gate file not found"
+    try:
+        with open(full, "rb") as fh:
+            text = fh.read(4 * 1024 * 1024).decode("utf-8", "replace")
+    except OSError as e:
+        return False, "gate file unreadable: %s" % e
+    if not text.strip():
+        return False, "gate file is empty"
+    key = sha[:9].lower()
+    for line in text.splitlines():
+        low = line.lower()
+        if key in low and VERDICT_RX.search(line) and not REFUSE_RX.search(line):
+            return True, ""
+    return False, "gate file has no GRANT verdict line naming %s" % key
 
 
 def scan(root, rng, ledger=None, gate_root=None):
@@ -187,11 +258,12 @@ def scan(root, rng, ledger=None, gate_root=None):
         if viol:
             ent = ledger_entry(ledger, sha)
             if ent is not None:
-                if gate_exists(gate_root, ent.get("gate_record")):
+                ok, why = gate_check(gate_root, ent.get("gate_record"), sha)
+                if ok:
                     notes.append("ledger-waived %s: gate record %s" % (ent.get("waiver_id", "?"), ent["gate_record"]))
                     viol, waived, ledger_waived = [], True, True
                 else:
-                    notes.append("ledger entry %s has MISSING gate record %r: still flagged" % (ent.get("waiver_id", "?"), ent.get("gate_record")))
+                    notes.append("ledger entry %s has MISSING gate record %r (%s): still flagged" % (ent.get("waiver_id", "?"), ent.get("gate_record"), why))
         results.append({"sha": sha[:9], "subject": subject, "violations": viol, "notes": notes, "waived": waived,
                         "ledger_waived": ledger_waived})
     return results
@@ -217,7 +289,11 @@ def main(argv=None):
         return 0 if ok else 2
     try:
         rng = a.range or default_range(a.root, a.base)
-        res = scan(a.root, rng, load_ledger(a.root, a.ledger), a.gate_root)
+        if a.ledger:
+            if a.strict:
+                raise RuntimeError("--ledger is refused under --strict: the ledger is read from the range tip commit")
+            print("ledger: %s (NOT the committed ledger)" % a.ledger)
+        res = scan(a.root, rng, load_ledger(a.root, tip_of(rng), a.ledger), a.gate_root)
     except RuntimeError as e:
         print("check_test_tamper: error: %s" % e)
         return 2
