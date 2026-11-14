@@ -250,6 +250,16 @@ class GitTests(unittest.TestCase):
                 ("sha: %s verdict: GRANT-WITH-CONDITIONS REFUSE\n" % bad, 1),
                 ("sha: %s verdict: NOGRANT\n" % bad, 1),  # word boundary
                 ("sha: %s verdict: GRANT\n" % bad[:8], 1),  # fewer than 9 characters
+                # N1: a Totals-style line that mixes GRANT with a negative word must not waive (case-insensitive)
+                ("Totals: GRANT 11 (a, b), DENY 1 (%s, unchanged)\n" % bad[:9], 1),
+                ("sha: %s verdict: GRANT but denied later\n" % bad, 1),
+                ("%s grant, Refused\n" % bad, 1),
+                ("%s GRANT, not granted\n" % bad, 1),
+                ("%s GRANT no-grant\n" % bad, 1),
+                ("%s GRANT No Grant\n" % bad, 1),
+                ("%s GRANT on hold\n" % bad, 1),
+                ("%s GRANT, Pending\n" % bad, 1),
+                ("%s GRANT withdrawn\n" % bad, 1),
                 ("| %s | row | GRANT |\n" % bad[:9], 0),  # 9 characters is enough
                 ("sha: %s verdict: GRANT-WITH-CONDITIONS\n" % bad, 0),
             ]
