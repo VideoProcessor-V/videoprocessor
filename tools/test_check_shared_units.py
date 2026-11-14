@@ -65,7 +65,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
 
     def test_every_unit_registered(self):
         ids = [e["id"] for e in csu.REGISTRY]
-        self.assertEqual(ids, ["U%d" % i for i in range(1, 13)] + ["U15", "U19", "U20", "U21", "U22"])   # U21: SID source geometry; U22: SK-W must-land check 2 (one motion engine instance)
+        self.assertEqual(ids, ["U%d" % i for i in range(1, 13)] + ["U15", "U19", "U20", "U21", "U22", "U23", "U24", "U25", "U26"])   # U21: SID source geometry; U22: SK-W must-land check 2 (one motion engine instance)
 
     def test_default_run_exits_zero_even_with_duplicates(self):
         rc, out = _run(["--root", self.root])
@@ -319,7 +319,7 @@ double b = VpUnit::BandFromBase::Weight(1, 2.0, 3) + std::exp(-0.5 * k * k);
         self.assertEqual(new["units"]["U2"]["baseline_duplicates"], 1)
 
     # ---- the real repository ------------------------------------------------------------------
-    FLOOR = {"U2": 11, "U3": 18, "U6": 0, "U7": 0}   # frozen floor: blocking units may only shrink from here
+    FLOOR = {"U2": 27, "U3": 21, "U6": 0, "U7": 0, "U23": 12, "U24": 73, "U25": 76, "U26": 25}   # frozen floor: blocking units may only shrink from here
 
     def _reference_baseline(self):
         for ref in ("integ/batch1",):
@@ -349,8 +349,20 @@ double b = VpUnit::BandFromBase::Weight(1, 2.0, 3) + std::exp(-0.5 * k * k);
             for uid, o in old.items():
                 if uid in cur and o.get("blocking"):
                     self.assertTrue(cur[uid]["blocking"], "%s lost blocking" % uid)
-                    self.assertLessEqual(cur[uid]["baseline_duplicates"], o["baseline_duplicates"],
+                    self.assertLessEqual(cur[uid]["baseline_duplicates"], max(o["baseline_duplicates"], self.FLOOR.get(uid, 0) if uid in ("U2", "U3") else 0),   # U2/U3: patterns widened by WAIVER-SCHK-OWNER (near-dup survey), FLOOR is the new ceiling
                                          "baseline of %s rose" % uid)
+
+
+class NearDupUnitPatternsTest(unittest.TestCase):
+    """U23-U26 and the widened U2/U3 signatures (near-dup survey ND02/ND03/ND05/ND06/ND07)."""
+    CASES = {"U23": "double a = 1.0 - std::exp(-dt / tau);", "U24": "auto s = 1.4826 * Median(v);",
+             "U25": "float t = Smoothstep(a, b, x);", "U26": "float y = 0.2126f * r;",
+             "U2": "constexpr double kSigmaFine = 1.0;", "U3": "uint32_t v = lq_tile_sum(x);"}
+
+    def test_each_pattern_fires(self):
+        reg = {u["id"]: u for u in csu.REGISTRY}
+        for uid, line in self.CASES.items():
+            self.assertTrue(any(r.search(line) for r in reg[uid]["signatures"]), uid)
 
 
 if __name__ == "__main__":

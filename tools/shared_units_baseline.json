@@ -10,7 +10,7 @@
   "U2": {
    "name": "gaussian_band_split",
    "blocking": true,
-   "baseline_duplicates": 11,
+   "baseline_duplicates": 27,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/input/source_analysis/regions/RegionEvidence.h",
@@ -113,7 +113,7 @@
   "U3": {
    "name": "half_luma_downsample",
    "blocking": true,
-   "baseline_duplicates": 18,
+   "baseline_duplicates": 21,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
@@ -473,6 +473,30 @@
    "name": "motion_engine_instance",
    "blocking": true,
    "baseline_duplicates": 0,
+   "known_false_positive": []
+  },
+  "U23": {
+   "name": "one_pole_alpha",
+   "blocking": true,
+   "baseline_duplicates": 12,
+   "known_false_positive": []
+  },
+  "U24": {
+   "name": "robust_stats",
+   "blocking": true,
+   "baseline_duplicates": 73,
+   "known_false_positive": []
+  },
+  "U25": {
+   "name": "ramp_clamp_smoothstep",
+   "blocking": true,
+   "baseline_duplicates": 76,
+   "known_false_positive": []
+  },
+  "U26": {
+   "name": "luma_from_rgb_weights",
+   "blocking": true,
+   "baseline_duplicates": 25,
    "known_false_positive": []
   }
  }
