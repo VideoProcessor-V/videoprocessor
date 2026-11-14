@@ -28,7 +28,8 @@ import tempfile
 PAT = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]|\r(?!\n)")
 TEXT_EXT = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hlsl", ".glsl", ".vert", ".frag", ".comp", ".py", ".ps1",
             ".cmd", ".bat", ".sh", ".md", ".txt", ".json", ".cfg", ".ini", ".xml", ".html", ".css", ".js", ".yml",
-            ".yaml", ".toml", ".props", ".targets", ".vcxproj", ".filters", ".sln", ".cmake", ".rc", ".def", ".iss")
+            ".yaml", ".toml", ".props", ".targets", ".vcxproj", ".filters", ".sln", ".cmake", ".rc", ".def", ".iss",
+            ".inl", ".idl", ".cs", ".inc", ".patch", ".diff", ".csv", ".gitattributes", ".gitignore")
 SKIP_EXT = (".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".dll", ".exe", ".lib", ".pdb", ".zip", ".7z",
             ".onnx", ".bin", ".pdf", ".ttf", ".otf", ".woff", ".woff2", ".mp4", ".mkv", ".obj", ".pyc")
 
@@ -67,16 +68,47 @@ def attr_binary(root, paths):
     return bad
 
 
+def looks_binary(path):
+    """Content sniff for extensionless files: real binaries are dense in control bytes, a corrupted text file is not."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8192)
+    except OSError:
+        return False
+    if head[:2] in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE) or not head:
+        return True
+    ctl = sum(1 for c in head if c < 32 and c not in (9, 10, 13))
+    return ctl * 20 > len(head)
+
+
+def select(root, names, git_binary):
+    """Known text extensions are ALWAYS scanned (git calls a .cpp with an early NUL binary: that is the corruption this
+    tool exists to find; .patch files are -text). Extensionless files are decided by content. Any other extension
+    follows git's binary detection, and in full-tree mode is not scanned at all."""
+    out = []
+    for n in names:
+        low = n.lower()
+        ext = os.path.splitext(low)[1]
+        if low.endswith(SKIP_EXT):
+            continue
+        path = os.path.join(root, n)
+        if ext in TEXT_EXT:
+            out.append(path)
+        elif not ext:
+            if not looks_binary(path):
+                out.append(path)
+        elif git_binary is not None and n not in git_binary:
+            out.append(path)
+    return out
+
+
 def changed_files(root, base):
     names = [n for n in git(root, "diff", "--name-only", "--diff-filter=ACMR", base + "..HEAD").splitlines() if n]
-    skip = binary_set(root, base) | attr_binary(root, names)
-    return [os.path.join(root, n) for n in names if n not in skip and not n.lower().endswith(SKIP_EXT)]
+    return select(root, names, binary_set(root, base) | attr_binary(root, names))
 
 
 def tracked_files(root):
-    names = [n for n in git(root, "ls-files").splitlines() if n.lower().endswith(TEXT_EXT)]
-    skip = attr_binary(root, names)
-    return [os.path.join(root, n) for n in names if n not in skip and not n.lower().endswith(SKIP_EXT)]
+    return select(root, [n for n in git(root, "ls-files").splitlines() if n], None)
 
 
 def walk(args):
@@ -93,7 +125,8 @@ def walk(args):
 def scan_file(f, out=print):
     hits = 0
     try:
-        raw = open(f, "rb").read()
+        with open(f, "rb") as fh:
+            raw = fh.read()
         if raw[:2] in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE):
             return 0  # UTF-16 text legitimately holds NULs
         s = raw.decode("utf-8", errors="replace")
@@ -130,6 +163,11 @@ def selftest():
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):  # a hit list must never be lost to a console codec error
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("paths", nargs="*")
     ap.add_argument("--root", default=None)
@@ -146,7 +184,11 @@ def main(argv=None):
     except RuntimeError as e:
         print("ctlscan: " + str(e))
         return 2
-    return scan(files)
+    try:
+        return scan(files)
+    except Exception as e:  # never exit 0 after a crash
+        print("ctlscan: ERROR " + ascii(e))
+        return 2
 
 
 if __name__ == "__main__":
