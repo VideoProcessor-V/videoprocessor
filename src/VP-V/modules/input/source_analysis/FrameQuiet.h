@@ -79,6 +79,14 @@ namespace FrameQuiet
 	class Deferred
 	{
 	public:
+		// The process-wide counters (refused fence signals) and this thread's late-copy count started before this
+		// instance: the status window watches what happens from now on, never an earlier owner's history.
+		Deferred()
+		{
+			lateSeen = LedDrive::DeferredCopies::ForThisThread().LateIssued();
+			refusedSeen = LedDrive::SignalFailures().load(std::memory_order_relaxed);
+		}
+
 		static Deferred& ForThisThread()
 		{
 			static thread_local Deferred instance;

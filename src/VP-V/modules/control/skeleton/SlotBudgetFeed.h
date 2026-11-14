@@ -67,7 +67,10 @@ namespace Vpv
 				{
 					// Until a render sample exists the budget is 0 (the slot reports NoBudget; the status says why) - never half a period of a guess.
 					budgetMs_ = budget_.Measured() ? budget_.BudgetMs(hz) : 0.0;
-					host.SetBudget(budgetMs_, declaredSliceMs_);
+					// Until a render sample exists the host keeps the budget it has (0 when nothing set one: the slot reports NoBudget as
+					// before); the feed writes only a measured budget, so it never zeroes one another owner of the host set.
+					if (budget_.Measured())
+						host.SetBudget(budgetMs_, declaredSliceMs_);
 					++budgetFeeds_;
 					budgetFed_ = true;
 					lastSource_ = f.sourceSequence;
