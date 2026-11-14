@@ -7291,6 +7291,25 @@ namespace Tests
 			return engineHere != 0;
 		}
 
+		// Vectors were delivered: the on-demand engine says so, or the look-ahead worker reports pair hits (periodic line, H > 0) or,
+		// at the end of the run, "pairs taken N" with N > 0 (the periodic line can be missed by a short run).
+		static bool VectorsDelivered(const RunResult& r)
+		{
+			if (r.Logged("Vector engine: vectors delivered"))
+				return true;
+			for (const std::string& line : r.log)
+			{
+				if (line.find("Vector engine: ") != std::string::npos && line.find("(ahead hits ") != std::string::npos &&
+					line.find("(ahead hits 0,") == std::string::npos)
+					return true;
+				const size_t at = line.find("Motion ahead: ");
+				const size_t taken = at == std::string::npos ? std::string::npos : line.find("pairs taken ", at);
+				if (taken != std::string::npos && std::atoll(line.c_str() + taken + 12) > 0)
+					return true;
+			}
+			return false;
+		}
+
 		static std::string VectorTestLines(const RunResult& r)
 		{
 			std::string out;
@@ -7339,6 +7358,7 @@ namespace Tests
 			struct Rate { const char* name; int numerator; int denominator; bool film; };
 			const Rate rates[] = { { "24p", 24000, 1001, true }, { "30p", 30000, 1001, false }, { "50p", 50000, 1000, false },
 				{ "60p", 60000, 1000, false }, { "59.94p", 60000, 1001, false } };
+			int positiveLegs = 0;
 			for (const Rate& rate : rates)
 			{
 				FramePlan plan;
@@ -7358,21 +7378,20 @@ namespace Tests
 				const RunResult s = Run(VideoFrameEncoding::V210, "gpu", 6.0, rate.film, "deband_vp: on\ndejudder_strength: 0.25\n", false, &plan);
 				Logger::WriteMessage((std::string(rate.name) + " (de-judder standing demand = starter):\n" + VectorTestLines(s)).c_str());
 				Assert::IsTrue(s.presented, (name + L": starter run: frames presented\n" + s.Tail()).c_str());
-				// A source the de-judder serves by repeats alone (an integer multiple of the display, e.g. 30p on ~60 Hz) needs no motion
-				// estimate: the status then NAMES that ("no motion estimate runs for this source") and no vectors are due - a visible,
-				// designed state, so the positive leg applies to the sources that do need an estimate (24p here).
-				if (s.Logged("no motion estimate runs for this source"))
+				// A source the de-judder serves by repeats alone (display rate an integer multiple of the source rate, e.g. 30p on ~60 Hz) or
+				// that is as fast as the display needs no motion estimate; derived from the measured display rate (never from a log string).
+				const double ratio = HarnessMonitorHz() / (double(rate.numerator) / double(rate.denominator));
+				const bool repeatServed = std::fabs(ratio - std::floor(ratio + 0.5)) < 0.02 * ratio || ratio < 1.25;
+				if (repeatServed)
+				{
+					Assert::IsFalse(VectorsDelivered(s), (name + L": a repeat-served source delivers no vectors\n" + s.Tail()).c_str());
 					continue;
+				}
+				++positiveLegs;
 				Assert::IsTrue(s.Logged("Vector engine: on"), (name + L": with a starter the vector engine is on\n" + s.Tail()).c_str());
-				// Vectors are delivered either by the on-demand engine ("vectors delivered") or by the look-ahead worker, which logs
-				// its pair hits instead ("Vector engine: N pairs (ahead hits H, ..."): H > 0 counts as delivered.
-				bool delivered = s.Logged("Vector engine: vectors delivered");
-				for (const std::string& line : s.log)
-					if (line.find("Vector engine: ") != std::string::npos && line.find("(ahead hits ") != std::string::npos &&
-						line.find("(ahead hits 0,") == std::string::npos)
-						delivered = true;
-				Assert::IsTrue(delivered, (name + L": with a starter vectors are delivered\n" + s.Tail()).c_str());
+				Assert::IsTrue(VectorsDelivered(s), (name + L": with a starter vectors are delivered\n" + s.Tail()).c_str());
 			}
+			Assert::IsTrue(positiveLegs >= 1, L"at least one rate reaches the positive starter leg (24p on a ~60 Hz display must)");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineGamesDepthOneEngagesAtOneAhead)
@@ -7381,6 +7400,7 @@ namespace Tests
 		TEST_METHOD(VectorEngineGamesDepthOneEngagesAtOneAhead)
 		{
 			const HarnessScope harnessScope;
+			// NOTE: the name is historical (it predates the low-latency rule): legs A and B now assert the look-ahead does NOT engage on a games queue.
 			// A games queue (queue_size 4, target_frames 2) is LOW LATENCY: no starter runs the vector engine there and the look-ahead
 			// gets no depth ("Motion ahead: ... off in low latency"). WAIVER-C1-10 (coordinator 2026-11-12 18:42, owner confirmed 18:47;
 			// lead 9 ruling 2026-11-14): the former premise (look-ahead engages at one ahead on a games queue, fed by the debander) is
@@ -7413,6 +7433,7 @@ namespace Tests
 			Assert::IsFalse(lowStarter.Logged("Motion ahead: engaged"), (L"B: no look-ahead in low latency\n" + lowStarter.Tail()).c_str());
 			Assert::IsTrue(normal.presented, (L"C: frames presented\n" + normal.Tail()).c_str());
 			Assert::IsTrue(normal.Logged("Motion ahead: engaged"), (L"C: a real starter engages the look-ahead on a Normal queue\n" + normal.Tail()).c_str());
+			Assert::IsTrue(VectorsDelivered(normal), (L"C: with a real starter vectors are delivered\n" + normal.Tail()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroStaysMotionFree)
