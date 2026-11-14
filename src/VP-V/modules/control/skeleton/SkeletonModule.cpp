@@ -11,6 +11,7 @@
 #include <VP-V/core/PassTimerInbox.h>
 #include <VP-V/core/PostPresentSpare.h>
 #include <VP-V/core/ReserveRows.h>
+#include <VP-V/core/SkeletonAcquireLane.h>
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
@@ -234,6 +235,31 @@ namespace Vpv
 						return false;
 					});
 				}
+				// B1 (refs/126 s1.2): the one GET-OR-COMPUTE-AND-PUBLISH path, on the lane's slots and its CPU live computes (one law). Without a
+				// dispatcher a GPU form is Unavailable(no GPU dispatcher), counted and on the status lines (never a consumer's private path).
+				memo.SetNames(&registry);
+				VpSkeleton::LaneGpuHandleOf gpuHandleOf;
+				if (SkeletonGpuDispatcher* disp = wiring.dispatcher)
+				{
+					// A GPU lane product reused through Acquire names the dispatcher's texture of that slot (term 0) and the fence to wait on.
+					gpuHandleOf = [disp](VpSkeleton::ProductId id, bool ring, int index, uint64_t fence, VpSkeleton::GpuMemoHandle* out) {
+						const VpLaneProducts::GpuProductTextures* set = disp->TexturesOf(id);
+						if (set == nullptr || index < 0)
+							return false;
+						const pl_tex tex = ring ? set->Ring(size_t(index), 0) : set->Live(size_t(index), 0);
+						if (tex == nullptr)
+							return false;
+						out->resource = const_cast<void*>(static_cast<const void*>(tex));
+						out->textureSet = set;
+						out->index = index;
+						out->ringSlot = ring;
+						out->fence = fence;
+						out->width = uint32_t(tex->params.w);
+						out->height = uint32_t(tex->params.h);
+						return true;
+					};
+				}
+				VpSkeleton::BindLaneToMemo(lane, memo, gpuHandleOf);
 			}
 
 			// The registry for a wiring, the measured source period and the queue frames (0 = the unmeasured defaults). Re-made at each
@@ -276,6 +302,7 @@ namespace Vpv
 			VpLaneProducts::HalfLumaProducer p1;
 			VpLaneProducts::SourceStatsProducer p4;
 			std::unique_ptr<VpLaneProducts::GpuComputeLaneJob> job10, job11, job12;   // null unless the GPU gap is on
+			VpSkeleton::SkeletonMemo memo;   // B1: declared before the lane (bound to it; destroyed after it)
 			AnalysisLane lane;
 			VpSkeleton::LaneWorkerThreads threads;
 			std::atomic<uint64_t> liveDeclined{ 0 };
@@ -533,6 +560,12 @@ namespace Vpv
 			const std::shared_ptr<HostState> st = hosts_.Find(host);
 			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
 			return b ? &b->lane : nullptr;
+		}
+		VpSkeleton::SkeletonMemo* SkeletonModule::MemoOf(const void* host) const
+		{
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
+			return b ? &b->memo : nullptr;
 		}
 		VpSkeleton::SpareHost* SkeletonModule::SpareOf(const void* host) const
 		{
@@ -1519,6 +1552,20 @@ namespace Vpv
 				b->lane.Configure(st.settings.lane, b->registry, consumers, gs, card, tier, seq, false);
 				b->lane.SetExternalProducts(outside);
 				{
+					// B1: the memo's GPU spots are budgeted against the VRAM ledger: the scratch-arena grant (T0 + extra) of this plan.
+					// No grant = GPU memo fills decline visibly (NoLedgerGrant), nothing is allocated outside the ledger.
+					bool memoGranted = false;
+					uint64_t memoBudget = 0;
+					if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
+						for (const uint16_t uid : { uint16_t(VpSkeleton::kUserScratchArena), uint16_t(VpSkeleton::kUserScratchArenaExtra) })
+							if (const VpSkeleton::UserGrant* g = ls->plan.governor.Find(uid))
+							{
+								memoGranted = memoGranted || g->bytes > 0;
+								memoBudget += g->bytes;
+							}
+					b->memo.SetGpuBudget(memoGranted, memoBudget);
+				}
+				{
 					// What the declared users still hold above their grant: planned as transient at the next Configure (once).
 					uint64_t shortfall = 0;
 					if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
@@ -1588,6 +1635,7 @@ namespace Vpv
 			for (int guard = 0; guard < 64 && (wait = b->lane.DeterministicWaitUs(seq, 0)) > 0; ++guard)
 				std::this_thread::sleep_for(std::chrono::microseconds(wait));   // N1: only a deterministic run or an explicit test wait
 			b->lane.OnRenderStart(seq, 0);
+			b->memo.OnSeal(seq);   // B1: the previous frame's memo spots are released (lifetime = frame)
 			{
 				std::lock_guard<std::mutex> cacheLock(st.sceneMutex);
 				st.sceneCacheValid = false;   // one frame's classification only
@@ -1744,6 +1792,8 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				const AnalysisLane& lane = b->lane;
 				for (const FallbackCatalog::Decision& d : lane.Fallbacks())
 					addDecision(d);
+				for (const FallbackCatalog::Decision& d : b->memo.Decisions())
+					addDecision(d);   // B1 G5: "skeleton acquire <product>" (cause, frame) while a product is not served
 				addDecision(FallbackCatalog::SkeletonGpuMemory(st.gpuMemoryNote));
 				if (gd != nullptr && st.gpuMemoryNote.empty())
 				{
@@ -1777,6 +1827,8 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				if (const std::shared_ptr<VpSkeleton::LaneState> laneState = lane.State())
 					addDecision(SkeletonModule::HistoryCapDecision(laneState->graph, b->configuredPeriodMs));
 				full = lane.StatusLines();
+				for (const std::string& memoLine : b->memo.StatusLines())
+					full.push_back(memoLine);   // B1: reused / filled at read / unavailable (cause) per product asked
 				// MV7 ledger (Ctrl+Alt+D): the VRAM users outside the product catalog, as the governor granted them (one line each; products are
 				// listed by the lane's own status). A user below level 0 also has its governor notice in "Analysis: ..." (plan.notice).
 				if (const std::shared_ptr<VpSkeleton::LaneState> laneState = lane.State())

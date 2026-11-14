@@ -183,6 +183,41 @@ R16 unorm, uploaded in row bands). Unit version `VpLaneProducts::kTapFormUnitVer
 P13 both change, and every consumer's `CheckFit` falls back visibly (WrongSize / Stale) instead of reading a plane of another provenance.
 Nothing reads P10-P12 yet (the `skeleton.report` consumer only declares them).
 
+## Acquire: get-or-compute-and-publish (B1, refs/126 s1.2)
+
+The one access path to a shared product (owner rule 2026-11-12: reuse if computed for that frame, else the OWNING unit
+computes it once and publishes it into the skeleton spot; nobody computes privately). Code: `core/SkeletonAcquire.h`
+(`SkeletonMemo`), `core/SkeletonAcquireLane.h` (`BindLaneToMemo`); the module owns one memo per lane bundle (`MemoOf(host)`).
+
+- `Acquire(id, seq, AcquireForm::Cpu | Gpu, VariantKey = {})` -> `AcquireResult` {status Reused / FilledAtRead / Unavailable,
+  cause, source LaneSlot / Memo, cpu + bytes or `GpuMemoHandle`, `pin`}. Order: the lane's slot (default variant; a GPU
+  lane product returns its dispatcher texture + producer fence) -> the frame's memo spot (a fill in flight is waited for) ->
+  the one owner fill, run once outside the lock and published. The pointers stay valid while the reader holds `pin`.
+- `RegisterOwnerFill(id, form, unit, fill)`: one fill per (product, form); `unit` must be the catalog's owning unit
+  (`ProductRows`, e.g. P1 / P4 = `input/source_analysis/lane`, P10 = `repair/grain_split`). Another unit, a product not in
+  the catalog, or a second registration is refused and counted; a replacement is explicit (`ReplaceOwnerFill`). The lane's
+  CPU live computes are the owner fills of their products (the seal's own law, `AnalysisLane::RunCpuLive`).
+- Variants: the owner declares the axes it serves (plane, size, scale, code unit, sigma, precision) and its own form; keys
+  are canonical (the owner's own value = default). An undeclared axis is refused: no private "does not fit" variant.
+- Lifetime: per frame. `OnSeal(seq)` (called after the lane's seal) releases the previous frame's spots; a released frame is
+  refused, never recomputed; frame numbers going back release everything. A GPU spot with a recorded read
+  (`NoteGpuRead`) is retired only after that fence completes (`SetFenceCompleted`).
+- Budget: GPU spots are reserved, before the fill, against the VRAM ledger grant of the plan's scratch arena users
+  (`kUserScratchArena` + `kUserScratchArenaExtra`, `SetGpuBudget` at each Configure). No grant = no GPU spot.
+- The seal reuses a default-variant CPU frame an Acquire reader published before it (copied, counted
+  `SealReusedPublished()`), only when no input is missing at the seal.
+
+Fallbacks (G5): while a product's last Acquire was Unavailable, the entry `skeleton acquire <product token>` is engaged
+with `<cause>, frame <seq>` (Ctrl+I line, Config status, Ctrl+Alt+D; released when it is served again). Causes: no owner
+fill, no GPU dispatcher, owner fill declined (false or an exception), dropped by the regulator, frame released, variant not
+served by the owner, VRAM ledger grant exceeded, no VRAM ledger grant, lane live fill pending, lane live fill failed, lane
+GPU texture not reachable, owner fill asked for its own product.
+
+Status lines (Ctrl+Alt+D), one per product asked:
+`skeleton acquire: <token> <n> reused (lane <a>, memo <b>), <f> filled at read, <u> unavailable; <cause> <count>...`,
+plus `skeleton acquire: owner registrations refused <n> (<last>)` and `skeleton acquire: <n> released GPU spot(s) held for
+a pending read fence`. Tests: `src/VP-V/tests/SkeletonAcquireTests.cpp`.
+
 ## Status and fallbacks
 
 Every downgrade is visible (Ctrl+I line, Ctrl+Alt+D, Config status); none is log-only. Strings (FallbackCatalog ids):
