@@ -29,6 +29,7 @@
 // once when it comes within aheadCompute (get-or-compute-and-publish at that point).
 // Header-only, C++14, no Windows, no GPU API.
 
+#include "AheadCeiling.h"
 #include "DelayBudget.h"
 #include "ProductGraph.h"
 #include "QueueFrames.h"
@@ -46,8 +47,8 @@
 
 namespace VpSkeleton {
 
-// The owner's ceiling on ahead COMPUTE (amendment 3): an upper bound, not a target (S-B may plan lower). The only named depth.
-constexpr uint16_t kAheadCeiling = 6;
+// The owner's ceiling on ahead COMPUTE (amendment 3), kAheadCeiling: AheadCeiling.h (one value for the window, S-3a's PlanAhead and the
+// motion look-ahead lead). An upper bound, not a target (S-B may plan lower). The only named depth.
 
 // What binds aheadCompute (shown: "ahead compute N (by <consumer>; ceiling 6 | budget | queue)").
 enum class AheadBinding : uint8_t { NoConsumer, Consumer, Ceiling, Queue, Budget };
@@ -194,6 +195,45 @@ inline AheadDemand MaxAheadNeed(const std::vector<AheadDemand>& active)
             best = d;
     return best;
 }
+// Feeds the ACTIVE consumers' declared needs into the terms (the largest one and who declared it; none = no active ahead consumer).
+inline void SetAheadConsumers(QueueWindowTerms& t, const std::vector<AheadDemand>& active)
+{
+    const AheadDemand d = MaxAheadNeed(active);
+    t.aheadNeed = d.need;
+    t.aheadNeedBy = d.consumer != nullptr ? d.consumer : "";
+    t.wired = uint8_t(t.wired | QueueWindowTerms::kAheadNeed);
+}
+
+// Slice C wiring (lead 11; OD 11-14, design s10): what the window hands S-3a's PlanAhead (core/AdmissionTable.h AdmissionFacts::
+// aheadConsumers and queueAheadFrames), so the scheduler computes the SAME aheadCompute as the window: the same active consumers
+// with their declared needs, the same queue frames ahead (the window's ahead, the bound DeriveWindow applies) and the same ceiling
+// (AheadCeiling.h). The window's own aheadCompute rides along so the wiring can check both agree before any mode or budget step
+// (S-3a's games / competitive zero and its S-B / S-C then only lower it, each shown).
+struct PlanAheadFeed {
+    std::vector<AheadDemand> activeConsumers;   // each active ahead consumer and its declared need (need 0 = not listed)
+    uint16_t queueAheadFrames = 0;              // frames queued ahead (the window's ahead)
+    uint16_t aheadCeiling = kAheadCeiling;      // the one ceiling (never a second copy at the call site)
+    uint16_t aheadCompute = 0;                  // the window's aheadCompute (before any plan)
+};
+inline PlanAheadFeed PlanAheadFeedOf(const QueueWindow& w, const std::vector<AheadDemand>& active)
+{
+    PlanAheadFeed f;
+    for (const AheadDemand& d : active)
+        if (d.need > 0)
+            f.activeConsumers.push_back(d);
+    f.queueAheadFrames = w.ahead;
+    f.aheadCompute = w.aheadCompute;
+    return f;
+}
+// The aheadCompute rule applied to a feed (the law S-3a's AheadCompute implements; the wiring's drift check compares the two).
+inline uint16_t AheadComputeOf(const PlanAheadFeed& f)
+{
+    uint16_t need = MaxAheadNeed(f.activeConsumers).need;
+    if (need > f.aheadCeiling)
+        need = f.aheadCeiling;
+    return need < f.queueAheadFrames ? need : f.queueAheadFrames;
+}
+
 // True when a cap (ceiling, queue or budget) binds: the Ctrl+I / Config status line is shown (no silent cap).
 inline bool AheadComputeCapped(const QueueWindow& w)
 {

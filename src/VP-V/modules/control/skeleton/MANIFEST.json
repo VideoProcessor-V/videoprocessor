@@ -38,6 +38,7 @@
     "src/VP-V/core/VariantShape.h",
     "src/VP-V/core/MemoGpuGrant.h",
     "src/VP-V/core/QueueWindow.h",
+    "src/VP-V/core/AheadCeiling.h",
     "src/VP-V/core/QueueFrames.h",
     "src/VP-V/core/VariantKey.h",
     "src/VP-V/tests/QueueWindowTests.cpp",

@@ -5,6 +5,7 @@
 #include <cstddef>
 
 #include <GeneralRate.h>
+#include <VP-V/core/AheadCeiling.h>
 
 // How far ahead the optical-flow engine works (docs/VP-nvof-ahead.md; owner
 // 2026-10-16: "by default accumulate the optical flow vectors to 4 frame max
@@ -125,18 +126,24 @@ namespace MotionAhead
 	// of it (the queue floor m_queueTargetFloor / LockedFilmQueueTarget, the engage threshold, the no-pair tracker) is unchanged: it is
 	// the MINIMUM the queue is kept deep enough for, never the source of the lead. Reading the lead there instead would feed the queue
 	// size back into its own floor (a ratchet: the queue could never shrink).
-	// The one cap is structural, not a setting: the P2 slot ring holds kP2RingPairs pairs (VectorEngineState::p2Slot and the
-	// standalone Producer::slot are built with it) and keeps kPairsKeptBehind of them for frames already at the render (the current pair (N-1, N)
-	// and the two Prune keeps behind it: VectorEngine.cpp P2().Prune(sequence - 2)); a lead above the rest would evict the pairs of the
-	// next frames to show before they are read (NVOF work thrown away, a matcher run instead). 13 = 217 ms at 60p, 542 ms at 24p.
+	// The structural bound: the P2 slot ring holds kP2RingPairs pairs (VectorEngineState::p2Slot and the standalone Producer::slot
+	// are built with it) and keeps kPairsKeptBehind of them for frames already at the render (the current pair (N-1, N) and the two
+	// Prune keeps behind it: VectorEngine.cpp P2().Prune(sequence - 2)); a lead above the rest would evict the pairs of the next frames
+	// to show before they are read (NVOF work thrown away, a matcher run instead). kRingMaxLead 13. Unchanged.
 	constexpr int kP2RingPairs = 16;
 	constexpr int kPairsKeptBehind = 3;
-	constexpr int kMaxLead = kP2RingPairs - kPairsKeptBehind;
+	constexpr int kRingMaxLead = kP2RingPairs - kPairsKeptBehind;
+	// The cap (BEHAVIOUR-CHANGE OD-11-14-AHEAD-CAP, owner question window 2026-11-14; lead10/design-queue-keyed-products.md s10): the
+	// look-ahead computes at most the ahead-compute ceiling, core/AheadCeiling.h kAheadCeiling 6, ahead of the render. BEFORE it was
+	// kRingMaxLead 13 (every queued frame up to the ring; 217 ms at 60p). The frames further down the queue get their pairs as they
+	// come within the lead (computed once, on approach). The queue length is not changed by it (the lane lead L still counts every
+	// queued frame); the ring keeps its size. 6 = 100 ms at 60p, 250 ms at 24p.
+	constexpr int kMaxLead = int(VpSkeleton::kAheadCeiling);
+	static_assert(kMaxLead >= 1 && kMaxLead <= kRingMaxLead, "the ahead-compute ceiling fits the P2 ring (else raise the ring, never evict)");
 	// The lead for a frame: 0 while the look-ahead is not running (depth 0: off, low latency, no engine, nothing queued; backward pairs
 	// keep their own current-frame-only rule in the walk), else the queued frames ahead, never below the depth, and never above kMaxLead
-	// (also when the depth is larger: 240p's time-based depth 16 is held to 13, else the pairs of the next frames would be evicted from
-	// the ring before they are read). Where the queue held exactly the depth (60p with 4 queued ahead) the lead is the depth: the old
-	// behaviour.
+	// (also when the depth is larger: 120p's time-based depth 8 and 240p's 16 are held to the ceiling). Where the queue held exactly the
+	// depth (60p with 4 queued ahead) the lead is the depth: the old behaviour.
 	inline int LeadFor(int depth, size_t queuedAhead)
 	{
 		if (depth <= 0)
@@ -145,7 +152,7 @@ namespace MotionAhead
 		return (std::min)(kMaxLead, (std::max)(depth, queued));
 	}
 	// refs/109 F1 (AUDIT-R, owner accepted 2026-11-11): the cap BINDS when the look-ahead runs and either the queue holds more frames
-	// ahead than kMaxLead (60p with the standard 250 ms queue: 14-15 ahead, lead 13) or the depth itself is above it (240p's 16).
+	// ahead than kMaxLead (60p with the standard 250 ms queue: 14-15 ahead, lead 6) or the depth itself is above it (120p's 8, 240p's 16).
 	// It was log-only (the "Motion ahead:" line, whose re-log key leaves the lead out); it is now visible (no silent fallbacks):
 	// the vector engine status line and the "motion_lookahead_capped" fallback entry, while it binds SUSTAINED (LeadCapTracker).
 	inline bool LeadCapped(int depth, size_t queuedAhead)
