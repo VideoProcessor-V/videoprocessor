@@ -315,6 +315,16 @@ namespace FallbackCatalog
 			"): its causal substitute runs");
 	}
 
+	// ECV (composed per-pixel vectors, modules/motion/estimation/composed): the chain could not reach the offsets the readers ask for because a pair is
+	// absent or stale, or the reverse pair is missing (the trust of that plane is then the pair trust only), or a byte budget refused a plane. `text` is
+	// VpComposed::Product::CurrentStatus().text. Released as soon as the last Prepare reached the whole plan.
+	inline Decision ComposedVectors(bool engaged, const std::string& text)
+	{
+		if (!engaged)
+			return Released("composed vectors");
+		return Engaged("composed vectors", text.empty() ? std::string("composed vectors reach fewer frames than asked") : text);
+	}
+
 	// SK-MV warm engine (protected tier): MotionEngineIdle released the matcher under video-memory pressure, which drops the de-judder's
 	// standing optical-flow demand until the pressure eases. Never silent.
 	inline Decision MotionEnginePressure(bool pressured)
@@ -984,6 +994,8 @@ namespace FallbackCatalog
 			// registered yet (declaration only), so every reader shows "frame pattern: not produced"; no behaviour reads the role.
 			{ "product.quality_pattern", "frame pattern record unavailable, stale or of another unit version: temporal detail and dither need show it as not produced and use their classical forms" },
 			{ "product.source_geometry", "source geometry record unavailable, stale or of another unit version: readers use the delivered raster and their classical forms" },
+			// ECV composed vectors (motion/estimation/composed): not produced or short of the asked offsets: the grain level and the neighbour warp use their single-frame / causal forms.
+			{ "product.composed_vectors", "composed vectors unavailable or short of the asked frames: readers use their single-frame forms (grain level) or their causal substitute (neighbour warp)" },
 		};
 		if (count)
 			*count = sizeof(kEntries) / sizeof(kEntries[0]);
