@@ -582,6 +582,24 @@ namespace Vpv
 			return MemoHostOf(host, false).get();
 		}
 
+		// QKP slice B: the lane lead's min-window over one host's CollectAhead samples (one copy: the lane host and the memo-only host both use it).
+		// Any thread, any rate: every call is a timestamped sample of the queue size; the result is the LOWEST size of the last window.
+		namespace
+		{
+			uint8_t LowestLeadSample(std::mutex& m, std::deque<Vpv::Skeleton::HostState::LeadSample>& window, uint64_t now, uint8_t size)
+			{
+				const uint64_t windowUs = static_cast<uint64_t>(VpSkeleton::kLeadWindowSeconds * 1e6);
+				uint8_t lowest = size;
+				std::lock_guard<std::mutex> lock(m);
+				window.push_back(Vpv::Skeleton::HostState::LeadSample{ now, size });
+				while (window.size() > 1 && window.front().us + windowUs < now)
+					window.pop_front();
+				for (const Vpv::Skeleton::HostState::LeadSample& smp : window)
+					lowest = (std::min)(lowest, smp.size);
+				return lowest;
+			}
+		}
+
 		// ---- L-CORE: the renderer's memo, with or without the lane (lead8/iface-L-CORE.md s2-s3) ----------------------------
 		struct MemoHost
 		{
@@ -603,6 +621,15 @@ namespace Vpv
 			// R2 (lead 12): the device side of the sanctioned GPU context of the memo's non-view GPU fills (gpu/OwnerGpuDevice.h): follows
 			// the renderer's pl_gpu (AttachMemoGpu / DetachMemoGpu), with or without the lane.
 			std::shared_ptr<OwnerGpuDevice> gpuDevice;
+			// QKP slice B (design s2.3 / s6): the feeds a memo-only host (no lane) still delivers, and the window derived from them at Begin.
+			std::mutex leadMutex;                                          // the lane lead's min-window (CollectAhead; any thread)
+			std::deque<Vpv::Skeleton::HostState::LeadSample> leadWindow;
+			std::atomic<uint64_t> lastQueueDepthUs{ 0 };                   // the last QueueDepth fact of this host
+			std::atomic<uint64_t> lastBeginUs{ 0 };                        // the previous Begin (the period for the stale test)
+			std::atomic<uint64_t> periodUs{ 0 };
+			std::atomic<uint64_t> lastPresentedSeq{ 0 };                   // AfterPresent: the last presented source seq (0 = none)
+			VpSkeleton::WindowPeak presentLag{ static_cast<uint64_t>(VpSkeleton::kLeadWindowSeconds * 1e6) };   // render thread: P
+			VpSkeleton::QueueWindowBoard board;                            // written once per Begin, any thread reads
 		};
 
 		namespace
@@ -654,7 +681,8 @@ namespace Vpv
 			if (!mh || mh->memo->LaneBound())
 				return;   // a bound lane plans the memo (its scratch-arena grant, Configure)
 			VpSkeleton::SkeletonMemo& memo = *mh->memo;
-			const uint64_t need = memo.GpuNeedBytes();
+			const std::vector<uint64_t> levels = memo.GpuNeedLevels();   // QKP B (amendment M6): one level per ahead-ladder step
+			const uint64_t need = levels.empty() ? 0u : levels.front();
 			const uint64_t vramVersion = VpSkeleton::VramUsers::Instance().Version();
 			const uint64_t binds = memo.LaneBinds();
 			++mh->framesSincePlan;
@@ -674,8 +702,13 @@ namespace Vpv
 				card = card_;
 			const bool known = need != 0 && (cardOverride_ || QueryCard(hosts_.Aux(host), card, why));
 			mh->cardWhy = known || need == 0 ? std::string() : why;
-			mh->grant = VpSkeleton::PlanMemoGpuGrant(card, known, VpSkeleton::VramUsers::Instance().Take().heldBytes, need);
+			mh->grant = VpSkeleton::PlanMemoGpuGrantLevels(card, known, VpSkeleton::VramUsers::Instance().Take().heldBytes, levels);
 			memo.SetGpuBudget(mh->grant.granted, mh->grant.bytes);
+			// The interim ahead plan (S-A / S-B only; S-C needs the delay budget feed): the first ladder step that fits the grant. Planning
+			// only: it constrains the NEXT acquires (NotPlannedAhead), never evicts what is attached.
+			VpSkeleton::AheadNeed an = memo.MakeAheadNeed(memo.Window());
+			an.grantBytes = mh->grant.granted ? mh->grant.bytes : 0u;
+			memo.SetAheadPlan(VpSkeleton::PlanAheadLadder(an));
 		}
 
 		namespace
@@ -897,13 +930,19 @@ namespace Vpv
 			{
 				// The render-ahead term (the host's one generic call at the render-ahead plan block, every planned frame): frames the plan keeps ahead
 				// of the present. Only while this renderer's lane is on; PublishRenderAhead is change-only (a compare-and-swap that leaves the other terms).
+				// QKP B: also for a renderer whose memo exists without the lane (the window needs R whatever the lane does).
 				const std::shared_ptr<HostState> st = hosts_.Find(f.host);
-				if (st && st->active.load(std::memory_order_acquire))
+				const std::shared_ptr<MemoHost> mhq = memoHosts_.Find(f.host);
+				if ((st && st->active.load(std::memory_order_acquire)) || mhq)
 				{
 					if (f.value >= 0.0)   // NaN and negative: the host has no value (no source period): unwired, never an old number
 					{
 						PublishRenderAhead(f.value);
-						st->lastQueueDepthUs.store(nowUs_(), std::memory_order_relaxed);
+						const uint64_t nowQ = nowUs_();
+						if (st)
+							st->lastQueueDepthUs.store(nowQ, std::memory_order_relaxed);
+						if (mhq)
+							mhq->lastQueueDepthUs.store(nowQ, std::memory_order_relaxed);
 					}
 					else
 						UnpublishRenderAhead();
@@ -1511,6 +1550,31 @@ namespace Vpv
 		// ---- queue (capture / queue threads) ----------------------------------------------------------
 		void SkeletonModule::OnQueue(const RE::QueueFacts& f)
 		{
+			// QKP B (design s3 / amendment M5): the memo's epoch moves AT the call (any thread, coalesced per Begin interval); a Drop discards
+			// its frames' spots. BacklogFlush is a timing restart, not a generation: nothing is released. Memo-only hosts included.
+			if (const std::shared_ptr<MemoHost> mhq = memoHosts_.Find(f.host))
+			{
+				using IC = VpSkeleton::SkeletonMemo::InvalidateCause;
+				switch (f.kind)
+				{
+				case RE::QueueEvent::Reset: mhq->memo->BumpEpoch(IC::Reset); break;
+				case RE::QueueEvent::LiveQueueReset: mhq->memo->BumpEpoch(IC::LiveQueueReset); break;
+				case RE::QueueEvent::Flush: mhq->memo->BumpEpoch(IC::Flush); break;
+				case RE::QueueEvent::Discontinuity: mhq->memo->BumpEpoch(IC::Discontinuity); break;
+				case RE::QueueEvent::Gap: mhq->memo->BumpEpoch(IC::Gap); break;
+				case RE::QueueEvent::FormatChange: mhq->memo->BumpEpoch(IC::FormatChange); break;
+				case RE::QueueEvent::Drop:
+					if (f.seq > 0 && f.frames != 0)
+					{
+						const uint64_t survivor = static_cast<uint64_t>(f.seq);
+						const uint64_t n = (std::min<uint64_t>)(f.frames, survivor);
+						for (uint64_t i = 0; i < n && i < kMaxDropsPerEvent; ++i)
+							mhq->memo->Discard(survivor - n + i);
+					}
+					break;
+				case RE::QueueEvent::BacklogFlush: break;
+				}
+			}
 			if (f.kind != RE::QueueEvent::Drop || f.seq <= 0 || f.frames == 0)
 				return;
 			const std::shared_ptr<HostState> st = hosts_.Find(f.host);
@@ -1535,6 +1599,54 @@ namespace Vpv
 			}
 		}
 
+		// QKP B (design s2): the queue window of this Begin, derived from the fed terms (R, L, W module-wide snapshot; P = the highest of the
+		// lead window of presented lag; H = the owner fills' declared history, plus the lane graph's lag edges once the lane reports them),
+		// handed to the memo BEFORE its seal and published to the board. Render thread, with or without the lane. A term nobody fed stays
+		// unwired (named by Ctrl+Alt+D), never a default.
+		void SkeletonModule::DeriveMemoWindow(const void* host, const std::shared_ptr<VpSkeleton::SkeletonMemo>& memo, uint64_t seq, const std::shared_ptr<HostState>& st)
+		{
+			const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host);
+			if (!mh)
+				return;
+			const uint64_t now = nowUs_();
+			// The period for the stale test of the render-ahead term: the Begin interval of this host (memo-only hosts have no lane period).
+			const uint64_t lastBegin = mh->lastBeginUs.exchange(now, std::memory_order_relaxed);
+			if (lastBegin != 0 && now > lastBegin && now - lastBegin <= 1000000u)
+			{
+				const uint64_t prev = mh->periodUs.load(std::memory_order_relaxed);
+				mh->periodUs.store(prev != 0 ? (prev * 9u + (now - lastBegin)) / 10u : now - lastBegin, std::memory_order_relaxed);
+			}
+			if (!(st && st->active.load(std::memory_order_acquire)) && (CurrentQueue().wired & QueueShape::kRenderAhead) != 0)
+			{
+				const uint64_t last = mh->lastQueueDepthUs.load(std::memory_order_relaxed);
+				const uint64_t period = mh->periodUs.load(std::memory_order_relaxed);
+				if (last != 0 && period != 0 && now > last + 8u * period)
+					UnpublishRenderAhead();   // the plan stopped: the term is unwired (named), never an old number
+			}
+			const QueueShape q = CurrentQueue();
+			VpSkeleton::QueueWindowTerms t;
+			if (q.wired & QueueShape::kRenderAhead) { t.renderAhead = uint16_t(CappedRenderAhead(q.renderAhead)); t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kRenderAhead); }
+			if (q.wired & QueueShape::kLaneLead) { t.laneLead = uint16_t((std::min<unsigned>)(q.laneLead, LaneLeadCap(q.renderAhead))); t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kLaneLead); }
+			if (q.wired & QueueShape::kLookAhead) { t.lookAheadWalk = q.lookAheadWalk; t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kLookAhead); }
+			const uint64_t presented = mh->lastPresentedSeq.load(std::memory_order_relaxed);
+			if (presented != 0)
+			{
+				mh->presentLag.Sample(now, uint16_t(seq > presented ? (std::min<uint64_t>)(seq - presented, 255u) : 0u));
+				t.presentLag = mh->presentLag.Value(now);
+				t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kPresentLag);
+			}
+			// H stays UNWIRED until the memo offers its declared fill history (requested from L-CORE / LEAD 14): named by Ctrl+Alt+D, never 0 as a value.
+			const VpSkeleton::QueueWindow w = VpSkeleton::DeriveWindow(t, seq, memo->Epoch());
+			memo->SetWindow(w);
+			mh->board.Publish(w);
+		}
+
+		const VpSkeleton::QueueWindowBoard* SkeletonModule::WindowBoardOf(const void* host) const
+		{
+			const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host);
+			return mh ? &mh->board : nullptr;   // valid while the host's memo table entry lives (render-thread / test use)
+		}
+
 		// ---- frame phases (render thread) -------------------------------------------------------------
 		bool SkeletonModule::OnFrame(RE::FrameContext& c)
 		{
@@ -1546,6 +1658,13 @@ namespace Vpv
 					const std::shared_ptr<HostState> q = hosts_.Find(c.host);
 					if (q && q->active.load(std::memory_order_acquire))
 						OnCollectAhead(*q, *static_cast<const RE::QueueView*>(c.phaseData));
+					else if (const std::shared_ptr<MemoHost> mhq = memoHosts_.Find(c.host))
+					{
+						// QKP B: a memo-only host delivers the lane lead term too (its window needs L).
+						const RE::QueueView& view = *static_cast<const RE::QueueView*>(c.phaseData);
+						const uint8_t size = view.size > 255u ? uint8_t(255) : uint8_t(view.size);
+						PublishLaneLead(double(LowestLeadSample(mhq->leadMutex, mhq->leadWindow, nowUs_(), size)));
+					}
 				}
 				return false;
 			}
@@ -1584,6 +1703,8 @@ namespace Vpv
 					memoSeal.seq = static_cast<uint64_t>(c.seq);
 					memoSeal.seals = memoSeal.memo->Seals();
 				}
+			if (memoSeal.memo)
+				DeriveMemoWindow(c.host, memoSeal.memo, memoSeal.seq, st);
 			if (!st || !st->active.load(std::memory_order_acquire) || c.seq <= 0)
 				return false;
 			const uint64_t epoch = VpFrameAnalysis::SourceFrameTap::Epoch();
@@ -1614,6 +1735,17 @@ namespace Vpv
 			// is issued here, after the submit and outside libplacebo's frame, for every host and before any early return below.
 			FrameQuiet::Deferred::EndThisFrame();
 			const std::shared_ptr<HostState> st = hosts_.Find(c.host);
+			if (c.seq > 0)
+				if (const std::shared_ptr<MemoHost> mhq = memoHosts_.Find(c.host))
+				{
+					// QKP B: the presented source seq (a repeat re-presents the same seq: only a forward move counts), with or without the lane.
+					const uint64_t pseq = static_cast<uint64_t>(c.seq);
+					if (pseq > mhq->lastPresentedSeq.load(std::memory_order_relaxed))
+					{
+						mhq->lastPresentedSeq.store(pseq, std::memory_order_relaxed);
+						mhq->memo->NotePresented(pseq);
+					}
+				}
 			if (!st || !st->active.load(std::memory_order_acquire) || c.seq <= 0)
 				return;
 			const VpSkeleton::SpareTrigger trigger = p.kind == RE::AfterPresentKind::AfterLastExtra ? VpSkeleton::SpareTrigger::AfterLastExtra :
@@ -1629,18 +1761,7 @@ namespace Vpv
 		void SkeletonModule::OnCollectAhead(HostState& st, const RE::QueueView& view)
 		{
 			const uint8_t size = view.size > 255u ? uint8_t(255) : uint8_t(view.size);
-			const uint64_t now = nowUs_();
-			const uint64_t windowUs = static_cast<uint64_t>(kLeadWindowSeconds * 1e6);
-			uint8_t lowest = size;
-			{
-				std::lock_guard<std::mutex> lock(st.leadMutex);
-				st.leadWindow.push_back(Vpv::Skeleton::HostState::LeadSample{ now, size });
-				while (st.leadWindow.size() > 1 && st.leadWindow.front().us + windowUs < now)
-					st.leadWindow.pop_front();
-				for (const Vpv::Skeleton::HostState::LeadSample& s : st.leadWindow)
-					lowest = (std::min)(lowest, s.size);
-			}
-			PublishLaneLead(double(lowest));
+			PublishLaneLead(double(LowestLeadSample(st.leadMutex, st.leadWindow, nowUs_(), size)));
 		}
 
 		void SkeletonModule::Begin(HostState& st, int64_t seqIn)
