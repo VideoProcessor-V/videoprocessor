@@ -1305,6 +1305,7 @@ if (tile < int(tiles) && g.y < ts) {
 		trackerV.Discontinuity(cause);
 		trackerH.Discontinuity(cause);
 		denseGrid.store(false, std::memory_order_release);
+		aheadRan.store(false, std::memory_order_release);   // a new stream: the look-ahead note is re-earned
 		coherenceV.clear();
 		coherenceH.clear();
 		kernelVotes.clear();
