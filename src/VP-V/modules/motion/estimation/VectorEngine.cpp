@@ -11,6 +11,8 @@
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/MotionRecordPublish.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/input/source_analysis/P1AcquireSource.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/motion/estimation/VectorEngineFallbackSync.h>
 
 #include <algorithm>
@@ -114,6 +116,14 @@ namespace VpMotion
 			// render-time fallback keeps the matcher's preset (medium).
 			const NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Slow;
 			producer->SetSlot(p2Slot);   // SK-MV: the producer publishes P2 into the engine's slot (it owns no store)
+			// L-B4 (a): the producer reads its engine luma from the skeleton's P1 (Acquire CPU form from its thread), never recomputes it.
+			{
+				const void* memoHost = host_;
+				producer->SetP1Source(std::make_shared<VpFrameAnalysis::P1AcquireSource>([memoHost](uint64_t seq) {
+					const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(memoHost, seq);
+					return fm.Valid() ? fm.memo->Acquire(VpSkeleton::kP1HalfLuma, seq, VpSkeleton::AcquireForm::Cpu) : VpSkeleton::AcquireResult();
+				}));
+			}
 			if (!startFailureInjected && d3d && d3d->device && producer->Start(d3d->device, preset))
 			{
 				motionProducerStartError.clear();

@@ -4,6 +4,7 @@
 #include <VP-V/modules/input/source_analysis/picture/shared/PictureRect.h>
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/estimation/GapSeed.h>
@@ -42,12 +43,9 @@ if (p.x < size.x && p.y < size.y) {
     else
 #endif
     {
-        ivec2 full = textureSize(src, 0);
-        float sum = 0.0;
-        for (int y = 0; y < 2; y++)
-            for (int x = 0; x < 2; x++)
-                sum += texelFetch(src, min(p * 2 + ivec2(x, y), full - ivec2(1)), 0).r;
-        v = sum * 0.25 * codes;
+        // The shared U3 accessor (HalfLuma.h): the same taps, edge clamp and (a + b + c + d) * 0.25 as the
+        // matcher's former private loop, then the code scale; the arithmetic order is unchanged.
+        v = vpu_half_luma(src, p) * codes;
 #ifdef FADE_APPLY
         // M4: B after the fade's global gain and offset (when active).
         vec4 fs = texelFetch(fade_state, ivec2(0), 0);
@@ -2706,8 +2704,11 @@ if (q.x < size.x && q.y < size.y) {
 		const bool withPlain = fade && plain;
 		const pl_shader_desc first[4] = { Sampled("src", luma, false), Storage("dst", half), Sampled("fade_state", fade, false),
 			Sampled("plain", plain, false) };
+		// The header carries the fade defines and the shared half-luma accessor (vpu_half_luma, unit U3).
+		const std::string header = std::string(withPlain ? "#define FADE_APPLY 1\n#define FADE_PLAIN 1\n" : fade ? "#define FADE_APPLY 1\n" : "") +
+			VpUnit::HalfLuma::Glsl();
 		return Dispatch(fade ? "VideoProcessor de-judder: half-resolution luma after the fade (M4)" : "VideoProcessor de-judder: half-resolution luma",
-				withPlain ? "#define FADE_APPLY 1\n#define FADE_PLAIN 1\n" : fade ? "#define FADE_APPLY 1\n" : nullptr, DOWNSAMPLE_BODY,
+				header.c_str(), DOWNSAMPLE_BODY,
 				first, withPlain ? 4 : fade ? 3 : 2, variables, 1, halfW, halfH, 16) &&
 			Pyramid(half, l1, l2, 0, levels);
 	}
