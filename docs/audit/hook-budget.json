@@ -33,7 +33,7 @@
   },
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": {
    "limit": 145,
-   "reverts_to": 142,
+   "reverts_to": 141,
    "until": [
     "P11b"
    ],
