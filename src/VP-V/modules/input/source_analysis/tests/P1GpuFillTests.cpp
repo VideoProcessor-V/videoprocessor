@@ -3,7 +3,7 @@
 //
 // P1 GPU fill (L-B4): the float emulation of the R16 unorm kernel equals the lane's CPU half-plane law bit for bit at 8/10/12/16
 // bits, odd sizes included; the Float32 variant equals the accessor's mean. CPU only (the kernel's GPU run is the coordinator's).
-#include <VP-V/modules/input/source_analysis/P1GpuFill.h>
+#include <VP-V/modules/input/source_analysis/lane/P1GpuFill.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <cstdint>
 #include <string>
