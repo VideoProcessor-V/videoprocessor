@@ -125,6 +125,22 @@ namespace PluginGuardTestsNs
 			Assert::IsFalse(Vpv::PluginGuard::Attach(self, reason), L"a Bill DLL has no attach export");
 		}
 
+		// S4A A5: the loaders' single call refuses exactly where Check or Attach would, with the same reason.
+		TEST_METHOD(CheckAndAttachRefusesANullOrForeignModuleWithTheSingleStepReason)
+		{
+			std::string reasonCombined, reasonCheck;
+			Assert::IsFalse(Vpv::PluginGuard::CheckAndAttach(nullptr, reasonCombined));
+			Assert::IsFalse(Vpv::PluginGuard::Check(nullptr, reasonCheck));
+			Assert::AreEqual(reasonCheck, reasonCombined);
+			HMODULE self = nullptr;
+			Assert::IsTrue(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCWSTR>(&Matching), &self) != FALSE);
+			reasonCombined.clear(); reasonCheck.clear();
+			Assert::IsFalse(Vpv::PluginGuard::CheckAndAttach(self, reasonCombined));
+			const bool checked = Vpv::PluginGuard::Check(self, reasonCheck);
+			if (!checked) Assert::AreEqual(reasonCheck, reasonCombined);
+		}
+
 		// A host that never attaches (Bill's executable) must get nullptr from the factory, never a renderer of this
 		// DLL's extended layouts. The factory logs which refusal it made, which tells it from the null-callback path
 		// without ever building a renderer. Process-global DLL state: when an earlier test of this process already
