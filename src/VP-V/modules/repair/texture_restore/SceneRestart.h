@@ -30,6 +30,14 @@ namespace VpDetailRestore
 		return store && store->PeekScene(sequence, scene);
 	}
 
+	// The reader used when Params::sceneReader is null: the skeleton's store. Tests replace it (a test seam: the unit tests run
+	// without a skeleton store); production never sets it.
+	inline SceneReaderFn& DefaultSceneReader()
+	{
+		static SceneReaderFn reader = &ReadSceneFromStore;
+		return reader;
+	}
+
 	struct SceneRestartAnswer
 	{
 		bool restart = true;     // cut, fade or no record
@@ -40,7 +48,7 @@ namespace VpDetailRestore
 	{
 		SceneRestartAnswer a;
 		FrameAnalysis::Scene scene;
-		const bool found = sequence != 0 && (reader ? reader : &ReadSceneFromStore)(sequence, scene);
+		const bool found = sequence != 0 && (reader ? reader : DefaultSceneReader())(sequence, scene);
 		a.fromRecord = found;
 		a.restart = !found || scene.cut || scene.fade;
 		return a;
