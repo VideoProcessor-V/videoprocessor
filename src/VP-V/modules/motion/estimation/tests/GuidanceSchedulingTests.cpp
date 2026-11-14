@@ -284,7 +284,6 @@ namespace VideoProcessorTest
 			link.AddPan(1);
 			CameraLink::GuidanceSettings s = On();
 			CameraLink::GuidanceScheduler sched(link, s);
-			sched.SetLag(2);
 			FakeCounts counts;
 			CameraLink::CameraGuidanceHook hook(sched, &counts, link);
 			FakeSink sink;
@@ -292,7 +291,10 @@ namespace VideoProcessorTest
 			c.pairSeq = 3;
 			c.nextPairSeconds = 1.0 / 24;
 			hook.BeforeEstimate(c, sink);
-			hook.AfterEstimate(3, true, reinterpret_cast<pl_tex>(static_cast<uintptr_t>(0x10)));
+			VpMotion::EstimateOutcome outcome;
+			outcome.guidanceUsed = true;
+			outcome.countsTex = reinterpret_cast<pl_tex>(static_cast<uintptr_t>(0x10));
+			hook.AfterEstimate(3, outcome);
 			Assert::AreEqual(uint64_t(0), sched.Counters().pairsJudged);
 			CameraLink::IGuidanceCountsSource::Done d;   // what GuidanceCountsRing delivers for an errored readback
 			d.pairSeq = 3;
