@@ -471,6 +471,40 @@ namespace AdmissionOverloadTest
 			Assert::IsNotNull(a.State().line);
 		}
 
+		// Lead 13 ruling (2026-11-14): FillOff is the optional fills' step (the grain split included while it is optional fill) and it is
+		// VISIBLE by name: the Ctrl+I line names each fill turned off, and the one-time notice fires once per engagement.
+		TEST_METHOD(FillOffNamesEachFillAndNoticesOnce)
+		{
+			const double period = 1000.0 / 60.0;
+			OverloadArbiter a;
+			const char* fills[] = { "grain split (shared)", "monitor tiles" };
+			a.SetOptionalFills(fills, 2);
+			std::string notice;
+			Assert::IsFalse(a.TakeFillNotice(&notice), L"no notice without overload");
+			Assert::IsTrue(a.FillLine().empty());
+
+			const SlotBudget over = Load(period, 0.7 * period, 0.4 * period);
+			double t = 0.0;
+			for (; a.State().step == OverloadStep::None && t <= 5000.0; t += period) a.Step(t, over, false, 0);
+			Assert::IsTrue(a.State().step == OverloadStep::FillOff);
+			const std::string line = a.State().line;
+			Assert::AreEqual(std::string("overload: optional fill off: grain split (shared), monitor tiles"), line);
+			Assert::IsTrue(a.TakeFillNotice(&notice), L"the one-time notice fires on FillOff");
+			Assert::AreEqual(std::string("optional fill off: grain split (shared), monitor tiles"), notice);
+			Assert::IsFalse(a.TakeFillNotice(&notice), L"once per engagement");
+
+			for (; a.State().step == OverloadStep::FillOff && t <= 20000.0; t += period) a.Step(t, over, false, 0);
+			Assert::IsTrue(uint8_t(a.State().step) > uint8_t(OverloadStep::FillOff));
+			Assert::IsTrue(a.FillLine().find("grain split (shared)") != std::string::npos, L"deeper stages keep the fills-off list");
+
+			const SlotBudget none = Load(period, 0.2 * period, 0.0);
+			for (; a.State().step != OverloadStep::None && t <= 200000.0; t += period) a.Step(t, none, false, 0);
+			Assert::IsTrue(a.State().step == OverloadStep::None);
+			Assert::IsTrue(a.FillLine().empty());
+			for (; a.State().step == OverloadStep::None && t <= 210000.0; t += period) a.Step(t, over, false, 0);
+			Assert::IsTrue(a.TakeFillNotice(&notice), L"re-armed for a new engagement");
+		}
+
 		// Recovery returns in reverse order, TD tiers one per stage; the extras stage is left when extras stop.
 		TEST_METHOD(RecoveryIsReverseOrder)
 		{
