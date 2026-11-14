@@ -1404,6 +1404,7 @@ for (int q = 0; q < 4; q++) {
 			{
 				const VpDetailRestore::SceneRestartAnswer scene = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader);
 				sceneRestart = scene.restart ? 1 : 0;
+				sceneUnavailable = !scene.fromRecord;
 				if (!scene.fromRecord)
 					++sceneMissing;
 			}

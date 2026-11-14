@@ -210,6 +210,15 @@ namespace FallbackCatalog
 			"; the frame is rendered without it") : Released("texture restore");
 	}
 
+	// Detail pulse / texture restore with no scene record for the frame (registered fix D8: no private fallback, the frame
+	// restarts the references, gain 1). `module` = "detail pulse" or "texture restore". Visible, never silent.
+	inline Decision SceneJudgeUnavailable(const char* module, bool unavailable, const std::string& why)
+	{
+		const std::string id = std::string(module) + " scene judge";
+		return unavailable ? Engaged(id.c_str(), "scene judge unavailable (" + why + "); references restart every frame") :
+			Released(id.c_str());
+	}
+
 	// Custom GLSL hooks that did not load (read, template, libplacebo rejection, no known
 	// //!HOOK stage) or that libplacebo disabled at runtime; the picture renders without them.
 	// Quantiser failures are reported by the dither entry instead. Lists at most 3 names.

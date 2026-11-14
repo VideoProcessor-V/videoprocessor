@@ -176,6 +176,9 @@ namespace TextureRestore
 		bool ScratchShort() const { return scratchShort; }
 		// Frames restarted because no scene group was readable (never judged privately).
 		unsigned long long SceneMissing() const { return sceneMissing; }
+		// The last judged frame had no scene record and restarted (shown in Ctrl+I / Config status, never silent).
+		bool SceneJudgeUnavailable() const { return sceneUnavailable; }
+		const char* SceneJudgeWhy() const { return VpDetailRestore::SceneUnavailableWhy(); }
 		// The source frame the references last advanced on (0 = none or a restart pending): a
 		// caller may apply this frame's decision to another picture of it (a de-judder extra)
 		// as a repeat, without advancing.
@@ -186,6 +189,7 @@ namespace TextureRestore
 		Impl* impl = nullptr;
 		std::string error;
 		unsigned long long failures = 0, frames = 0, sceneMissing = 0;
+		bool sceneUnavailable = false;
 		bool scratchShort = false;
 	};
 }

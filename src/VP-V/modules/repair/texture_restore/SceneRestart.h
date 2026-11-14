@@ -38,6 +38,12 @@ namespace VpDetailRestore
 		return reader;
 	}
 
+	// Why a scene group could not be read (for the visible "scene judge unavailable" status line; never silent).
+	inline const char* SceneUnavailableWhy()
+	{
+		return VpFrameAnalysis::SourceFrameTap::SingleStore() ? "scene group not sealed for the frame" : "no frame analysis store (frame_analysis_store off)";
+	}
+
 	struct SceneRestartAnswer
 	{
 		bool restart = true;     // cut, fade or no record

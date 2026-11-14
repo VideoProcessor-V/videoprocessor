@@ -834,6 +834,7 @@ if (p.x < sz.x && p.y < sz.y) {
 			{
 				const VpDetailRestore::SceneRestartAnswer scene = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader);
 				sceneRestart = scene.restart;
+				sceneUnavailable = !scene.fromRecord;
 				if (!scene.fromRecord)
 					++sceneMissing;
 			}

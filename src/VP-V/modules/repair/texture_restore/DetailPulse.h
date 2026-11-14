@@ -261,11 +261,15 @@ namespace DetailPulse
 		unsigned long long AheadFrames() const { return aheadUsed; }
 		// Frames restarted because no scene group was readable (never judged privately).
 		unsigned long long SceneMissing() const { return sceneMissing; }
+		// The last judged frame had no scene record and restarted (shown in Ctrl+I / Config status, never silent).
+		bool SceneJudgeUnavailable() const { return sceneUnavailable; }
+		const char* SceneJudgeWhy() const { return VpDetailRestore::SceneUnavailableWhy(); }
 
 	private:
 		struct Impl;
 		Impl* impl = nullptr;
 		std::string error;
 		unsigned long long failures = 0, frames = 0, aheadUsed = 0, sceneMissing = 0;
+		bool sceneUnavailable = false;
 	};
 }
