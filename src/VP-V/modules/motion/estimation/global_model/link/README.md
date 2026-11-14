@@ -20,6 +20,12 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 | K4 wiring (on P5a's contract) | `GuideLaneJob.*`, `GuidanceContext.h`, `GuidanceStatus.h`, `GuidanceTimers.h`, `GuidanceAdapter.*` | the guide lane job, the `PairContext` provider + flow resampler, skeleton-visible status, `motion.*` and `camera.*` PassTimers rows, the adapter that registers the ONE pre-estimate hook on the engine (P5a owns the call site: `VectorEngine::Estimate`) |
 | Ahead fit (`camera_ahead_fit`) | `AheadFlow.h`, the park in `CameraFitWorker.*`, `PollAhead` / `OnTimeSeal` in `CameraLinkCore.*` | the fit from the ahead NVOF pair (FlowOf), on-time publish (the d = 0 guide reads only this) or the lag bridge, visible counters ("Ahead fit" below) |
 
+## Design goal, philosophy and decisions
+- Goal: one camera model that explains the frame's global motion from the ENGINE's motion, at the engine's own cell grid, with nothing recomputed that the engine already holds.
+- Decision (L-B6, WAIVER-B6-CELLTRUST, 2026-11-14): the cell trust is the engine's memo (`FlowView::CellTrust`), copied on the render thread; the camera holds no trust arithmetic. The retired private recompute lives only as the test-side reference of the migration identity (bit-equal).
+- Decision (coordinator, 2026-11-14): reading P3 (the verified field) for the labels is deferred until P3 is published for real (L-B4); the camera fit worker reads P2/P4 CPU forms through Acquire once the contract lands (CPU forms are pinned by B1; GPU forms stay render-thread).
+- Dependency: the matcher global search (U10 items b, e) waits for L-B4.
+
 ## Skeleton products declared
 
 * P7 camera fit, P8 camera labels, P9 camera smoothed: K0 (`core/Products.h`). P8 is RGBA32F, 16 B per 16x16 block.
