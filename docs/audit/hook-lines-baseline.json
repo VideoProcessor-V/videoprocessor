@@ -1,0 +1,25 @@
+{
+ "_note": "Bill hook LINES (added vs Bill baseline, hook-tagged, production) per file; ratchet, only shrinks (tools/check_hook_gating.py).",
+ "base_ref": "a591ad3b5",
+ "total": 567,
+ "files": {
+  "src/VideoProcessor-Config/AppMain.cpp": 1,
+  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 116,
+  "src/VideoProcessor-Config/ConfigEditorWindow.h": 8,
+  "src/VideoProcessor-GUI/VideoProcessorApp.cpp": 6,
+  "src/VideoProcessor-GUI/VideoProcessorDlg.cpp": 4,
+  "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 3,
+  "src/VideoProcessor-Lib/AnalysisLumaSource.h": 1,
+  "src/VideoProcessor-Lib/ConfigSchema.h": 7,
+  "src/VideoProcessor-Lib/DebugLog.h": 21,
+  "src/VideoProcessor-Lib/IRenderer.h": 3,
+  "src/VideoProcessor-Lib/MainConfigSchema.h": 42,
+  "src/VideoProcessor-Lib/RendererProfileConfig.h": 56,
+  "src/VideoProcessor-Lib/UnifiedProfileRuntime.cpp": 6,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp": 5,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.h": 1,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 260,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 25,
+  "src/VideoProcessor-VPRenderer/LibplaceboPluginExports.cpp": 2
+ }
+}

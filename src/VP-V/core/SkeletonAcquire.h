@@ -44,17 +44,47 @@
 // Threads: the memo is thread-safe and fills run outside its lock (NO lock is held across an owner fill, so a fill may
 // Acquire its prerequisites: nested get-or-compute-and-publish, owner rule 2026-11-13). The re-entrancy guard is PER KEY
 // and cycles are detected BY KEY: a fill asking (directly or through other fills, on this thread or across threads that
-// wait for each other's fills) for a key whose fill is waiting on it is refused as Reentrant, never a deadlock. A lane-bound memo (SkeletonAcquireLane.h) reads the lane's
-// slots, a render-thread operation, so Acquire of a LANE product is render thread.
+// wait for each other's fills) for a key whose fill is waiting on it is refused as Reentrant, never a deadlock. The per-key
+// guard is per memo instance (a fill of memo A asking memo B for the same key is not a cycle). A fill must NOT hand a nested
+// Acquire to another thread and wait for it (a pool worker is not in the wait graph: that deadlock would not be detected).
+// L-CORE thread contract (lead8/iface-L-CORE.md s5, OD 11-14 04:26 (a)): the render thread is declared by the skeleton
+// (SetRenderThread, every Begin; none declared = every thread counts as the render thread, the B1 behaviour). CPU forms are
+// Acquire-able from ANY thread and pinned; a lane slot read is render-thread state, so off the render thread a lane CPU
+// product is served from its PUBLISHED bytes (copied out through the lane lease, counted reusedLaneCopy, never recomputed);
+// a GPU form and a render-thread-bound fill (OwnerFill::renderThreadOnly: the lane's CPU live computes) asked off the render
+// thread are Unavailable(WrongThread), visible. The memo exists per renderer with or without the analysis lane (the skeleton
+// module holds it); a lane BINDS it (BindLane) and unbinds by token (UnbindLane): the module registrations stay.
 namespace VpSkeleton {
 
 enum class AcquireForm : uint8_t { Cpu, Gpu };
 
 inline const char* Token(AcquireForm f) { return f == AcquireForm::Cpu ? "cpu" : "gpu"; }
 
-// The variant axes (refs/126 s1.2). A zero field is "the product's default"; VariantKey{} is the default variant (the
-// lane's form). Keys are CANONICAL before use (Canonical(): a field equal to the owner's declared default is 0, a size with
-// one zero side is no size), so two spellings of one variant share one spot.
+// The PRECISION axis values (L-CORE, advisor A6 + coordinator 2026-11-14 05:11; 00-UNIVERSAL rule 7 "12-BIT END TO END"):
+//   kPrecisionDefault  the owner's own form;
+//   kPrecisionUnorm16  R16 unorm at FULL 16-bit scale (msb-aligned code: 10-bit << 6, 12-bit << 4); exact for sources <= 14
+//                      bits including a 2x2 mean (2 extra fraction bits);
+//   kPrecisionFloat32  R32F in the plane's normalised units (0..1 as sampled);
+//   kPrecisionFloat16  R16F: an 11-bit mantissa, NOT 12-bit safe; never for pixel values (OwnerFill::pixelData refuses it).
+enum : uint8_t { kPrecisionDefault = 0, kPrecisionUnorm16 = 1, kPrecisionFloat32 = 2, kPrecisionFloat16 = 3 };
+
+inline const char* PrecisionName(uint8_t p)
+{
+    switch (p) {
+    case kPrecisionDefault: return "default";
+    case kPrecisionUnorm16: return "unorm16";
+    case kPrecisionFloat32: return "float32";
+    case kPrecisionFloat16: return "float16";
+    }
+    return "?";
+}
+// True when a pixel value stored at precision `p` keeps every code of a 12-bit pipeline (a 2x2 mean included).
+inline bool PrecisionTwelveBitSafe(uint8_t p) { return p == kPrecisionUnorm16 || p == kPrecisionFloat32; }
+
+// The variant axes (refs/126 s1.2; L-CORE adds STAGE, CROP, PARAM0/1 and the precision values). A zero field is "the
+// product's default"; VariantKey{} is the default variant (the lane's form). Keys are CANONICAL before use (Canonical(): a
+// field equal to the owner's declared default is 0, a size with one zero side is no size, a crop with a zero side or equal to
+// the owner's full frame is no crop), so two spellings of one variant share one spot. Contract: lead8/iface-L-CORE.md s4.
 struct VariantKey {
     uint8_t plane = 0;         // 0 = default plane (luma); 1.. = plane index + 1
     uint32_t width = 0;        // 0 = the product's own size
@@ -62,7 +92,16 @@ struct VariantKey {
     uint8_t scale = 0;         // GrainScale / pyramid level, 0 = default
     uint8_t codeUnit = 0;      // code-unit form (bits), 0 = default
     uint32_t sigmaMilli = 0;   // band sigma x 1000, 0 = default
-    uint8_t precision = 0;     // storage precision (e.g. 16 = fp16, 32 = fp32), 0 = default
+    uint8_t precision = 0;     // storage precision: kPrecision* above, 0 = default
+    // STAGE (coordinator ruling iface-L-B3 5b, OD 11-14 04:44): the pipeline position of the planes the variant is computed on.
+    // 0 = the SOURCE planes (as uploaded, before any slot) and every owner's default; StageAfter(slot) = the planes as they
+    // LEAVE pipeline slot `slot` (core/PipelineSlots.h Id: a stable identity, so a reorder of the slots keeps the key).
+    uint8_t stage = 0;
+    // CROP (OD 11-14 04:30, 04:44): a rectangle of the stage's planes in source pixels; cropW == 0 || cropH == 0 = none.
+    uint32_t cropX = 0, cropY = 0, cropW = 0, cropH = 0;
+    // PARAM0 / PARAM1 (lead 8 2026-11-14 05:2x for L-B5): generic owner-defined thresholds (e.g. P11 busy share lap_min / ext_min
+    // in 1/16 tap code). The owner documents their meaning in its catalog row / interface.
+    uint16_t param0 = 0, param1 = 0;
 
     enum : uint32_t {
         kAxisPlane = 1u << 0,
@@ -70,17 +109,35 @@ struct VariantKey {
         kAxisScale = 1u << 2,
         kAxisCodeUnit = 1u << 3,
         kAxisSigma = 1u << 4,
-        kAxisPrecision = 1u << 5
+        kAxisPrecision = 1u << 5,
+        kAxisStage = 1u << 6,
+        kAxisCrop = 1u << 7,
+        kAxisParam0 = 1u << 8,
+        kAxisParam1 = 1u << 9
     };
+
+    static uint8_t StageAfter(uint8_t pipelineSlotId) { return uint8_t(pipelineSlotId + 1u); }
+    // The pipeline slot whose output `stage` names (false = the source planes).
+    static bool StageSlot(uint8_t stage, uint8_t* slotId)
+    {
+        if (stage == 0)
+            return false;
+        if (slotId != nullptr)
+            *slotId = uint8_t(stage - 1u);
+        return true;
+    }
+    bool HasCrop() const { return cropW != 0 && cropH != 0; }
 
     bool IsDefault() const { return Axes() == 0u; }
     uint32_t Axes() const
     {
         return (plane ? uint32_t(kAxisPlane) : 0u) | (width && height ? uint32_t(kAxisSize) : 0u) | (scale ? uint32_t(kAxisScale) : 0u)
                | (codeUnit ? uint32_t(kAxisCodeUnit) : 0u) | (sigmaMilli ? uint32_t(kAxisSigma) : 0u)
-               | (precision ? uint32_t(kAxisPrecision) : 0u);
+               | (precision ? uint32_t(kAxisPrecision) : 0u) | (stage ? uint32_t(kAxisStage) : 0u)
+               | (HasCrop() ? uint32_t(kAxisCrop) : 0u) | (param0 ? uint32_t(kAxisParam0) : 0u) | (param1 ? uint32_t(kAxisParam1) : 0u);
     }
-    // `defaults`: the owner's own form (its plane / size / scale ...); a field equal to it means "the default".
+    // `defaults`: the owner's own form (its plane / size / scale ...); a field equal to it means "the default". The owner's
+    // full frame for the crop axis is defaults.width x defaults.height when given (a crop covering it is no crop).
     VariantKey Canonical(const VariantKey& defaults = VariantKey()) const
     {
         VariantKey k = *this;
@@ -91,7 +148,33 @@ struct VariantKey {
         if (k.codeUnit == defaults.codeUnit) k.codeUnit = 0;
         if (k.sigmaMilli == defaults.sigmaMilli) k.sigmaMilli = 0;
         if (k.precision == defaults.precision) k.precision = 0;
+        if (k.stage == defaults.stage) k.stage = 0;
+        if (k.param0 == defaults.param0) k.param0 = 0;
+        if (k.param1 == defaults.param1) k.param1 = 0;
+        const bool fullFrame = defaults.width != 0 && defaults.height != 0 && k.cropX == 0 && k.cropY == 0
+                               && k.cropW == defaults.width && k.cropH == defaults.height;
+        const bool sameAsDefault = k.cropX == defaults.cropX && k.cropY == defaults.cropY && k.cropW == defaults.cropW
+                                   && k.cropH == defaults.cropH;
+        if (!k.HasCrop() || fullFrame || sameAsDefault)
+            k.cropX = k.cropY = k.cropW = k.cropH = 0;
         return k;
+    }
+    // FNV-1a 64 over every field (call it on a canonical key): the stable id of a variant for counters, logs and the
+    // compute-once detector (iface-L-DET VPV_COMPUTE_ONCE variant). 0 for the default variant.
+    uint64_t Hash() const
+    {
+        if (IsDefault())
+            return 0;
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&h](uint64_t v, int bytes) {
+            for (int i = 0; i < bytes; ++i) {
+                h ^= (v >> (8 * i)) & 0xFFu;
+                h *= 1099511628211ull;
+            }
+        };
+        mix(plane, 1); mix(width, 4); mix(height, 4); mix(scale, 1); mix(codeUnit, 1); mix(sigmaMilli, 4); mix(precision, 1);
+        mix(stage, 1); mix(cropX, 4); mix(cropY, 4); mix(cropW, 4); mix(cropH, 4); mix(param0, 2); mix(param1, 2);
+        return h == 0 ? 1u : h;
     }
     std::string Text() const
     {
@@ -104,7 +187,11 @@ struct VariantKey {
         if (scale) add("scale", scale);
         if (codeUnit) add("code", codeUnit);
         if (sigmaMilli) add("sigma_milli", sigmaMilli);
-        if (precision) add("precision", precision);
+        if (precision) t += (t.empty() ? "" : ",") + std::string("precision=") + PrecisionName(precision);
+        if (stage) add("stage", stage);
+        if (HasCrop()) { add("crop_x", cropX); add("crop_y", cropY); add("crop_w", cropW); add("crop_h", cropH); }
+        if (param0) add("p0", param0);
+        if (param1) add("p1", param1);
         return t;
     }
 };
@@ -112,13 +199,16 @@ struct VariantKey {
 inline bool operator==(const VariantKey& a, const VariantKey& b)
 {
     return a.plane == b.plane && a.width == b.width && a.height == b.height && a.scale == b.scale && a.codeUnit == b.codeUnit
-           && a.sigmaMilli == b.sigmaMilli && a.precision == b.precision;
+           && a.sigmaMilli == b.sigmaMilli && a.precision == b.precision && a.stage == b.stage && a.cropX == b.cropX
+           && a.cropY == b.cropY && a.cropW == b.cropW && a.cropH == b.cropH && a.param0 == b.param0 && a.param1 == b.param1;
 }
 inline bool operator!=(const VariantKey& a, const VariantKey& b) { return !(a == b); }
 inline bool operator<(const VariantKey& a, const VariantKey& b)
 {
-    return std::make_tuple(a.plane, a.width, a.height, a.scale, a.codeUnit, a.sigmaMilli, a.precision)
-           < std::make_tuple(b.plane, b.width, b.height, b.scale, b.codeUnit, b.sigmaMilli, b.precision);
+    return std::make_tuple(a.plane, a.width, a.height, a.scale, a.codeUnit, a.sigmaMilli, a.precision, a.stage, a.cropX, a.cropY,
+                           a.cropW, a.cropH, a.param0, a.param1)
+           < std::make_tuple(b.plane, b.width, b.height, b.scale, b.codeUnit, b.sigmaMilli, b.precision, b.stage, b.cropX, b.cropY,
+                             b.cropW, b.cropH, b.param0, b.param1);
 }
 
 // A GPU form: an opaque resource of the skeleton's GPU dispatcher (texture / buffer / view), the fence value after which it
@@ -159,6 +249,7 @@ enum class AcquireCause : uint8_t {
     LaneFailed,          // the lane's deferred GPU live fill failed
     NoGpuHandle,         // the lane holds the GPU product but its texture is not reachable (dispatcher not configured)
     Reentrant,           // an owner fill asked for its own key, directly or through a cycle of fills (would wait for itself)
+    WrongThread,         // a GPU form, a render-thread-bound fill or a lane slot read asked off the render thread (L-CORE s5)
     CauseCount
 };
 
@@ -188,6 +279,7 @@ inline const char* Token(AcquireCause c)
     case AcquireCause::LaneFailed: return "lane live fill failed";
     case AcquireCause::NoGpuHandle: return "lane GPU texture not reachable";
     case AcquireCause::Reentrant: return "owner fill asked for its own product";
+    case AcquireCause::WrongThread: return "asked off the render thread";
     case AcquireCause::CauseCount: break;
     }
     return "?";
@@ -208,6 +300,7 @@ struct AcquireResult {
 
 // What the owner's fill is asked for.
 struct OwnerFillRequest {
+    const void* host = nullptr;   // the renderer whose memo asks (SkeletonMemo::SetHost; null in a standalone memo)
     ProductId id = kNoProduct;
     uint64_t seq = 0;
     AcquireForm form = AcquireForm::Cpu;
@@ -217,6 +310,7 @@ struct OwnerFillRequest {
 struct OwnerFillOutput {
     std::vector<uint8_t> bytes;
     GpuMemoHandle gpu;
+    std::string declineReason;   // a declining fill's reason: shown with the cause (LastCause, Fallbacks entry)
 };
 
 // The owning unit's fill of ONE (product, form). `memo` lets a fill get-or-compute its inputs through the same path.
@@ -225,8 +319,22 @@ class SkeletonMemo;
 struct OwnerFill {
     std::function<bool(const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput&)> fill;
     uint32_t variantAxes = 0;    // the VariantKey axes this owner serves (0 = the default variant only)
-    VariantKey defaults;         // the owner's own form (canonicalisation)
+    VariantKey defaults;         // the owner's own form (canonicalisation); defaults.stage must be 0 (the source planes)
     uint64_t reserveBytes = 0;   // GPU: bytes reserved against the ledger grant BEFORE the fill (a larger result re-checks)
+    // L-CORE (iface-L-CORE s5): the thread contract. A CPU fill runs on the asking thread (any thread) unless it touches render
+    // state (renderThreadOnly: the lane's CPU live computes); a GPU fill is ALWAYS render thread.
+    bool renderThreadOnly = false;
+    // Frame-scoped: the spot is a VIEW valid for one render frame (P13 plane views): released at the NEXT OnSeal whatever
+    // keepFrames is.
+    bool frameScoped = false;
+    // A GPU VIEW of something another unit owns (0 bytes, no texture made): needs neither the skeleton GPU dispatcher nor a
+    // ledger grant (nothing is allocated). Its result must carry gpu.bytes == 0.
+    bool view = false;
+    // The fill publishes PIXEL values: a Float16 precision request is refused (VariantUndeclared; 12-bit rule).
+    bool pixelData = false;
+    // Frames its spots are KEPT after their own frame (max with SetKeepFrames): 1 = frame n-1 stays readable while n renders
+    // (P1 GPU: the matcher's A is the previous frame's B, iface-L-B4). 0 = the owner's per-frame memo (OD 11-12 17:31).
+    uint8_t keepFrames = 0;
 };
 
 // The lane's slots as the first G2 source (SkeletonAcquireLane.h binds it). Default variant only.
@@ -238,8 +346,12 @@ struct LaneSlotSource {
         GpuMemoHandle gpu;
         std::shared_ptr<const void> pin;
     };
-    std::function<State(ProductId, uint64_t, AcquireForm, Read*)> read;
-    std::function<bool(ProductId)> dropped;   // regulator-dropped products
+    std::function<State(ProductId, uint64_t, AcquireForm, Read*)> read;   // render thread
+    std::function<bool(ProductId)> dropped;   // regulator-dropped products (render thread)
+    // Off the render thread (L-CORE s5): the CPU form's PUBLISHED bytes copied out through the lane's lease (never a slot
+    // pointer: a ring slot is recycled by the render thread). Present = `copy` holds them; NotLaneProduct / Absent otherwise.
+    std::function<State(ProductId, uint64_t, std::vector<uint8_t>* copy)> copyPublished;
+    const void* token = nullptr;   // the bound lane (BindLane / UnbindLane by token)
 };
 
 struct AcquireCounters {
@@ -247,6 +359,12 @@ struct AcquireCounters {
     uint64_t reusedMemo = 0;
     uint64_t filledAtRead = 0;
     uint64_t ownerFillCalls = 0;   // == filledAtRead + declined / over-budget fills: proves "computed once"
+    uint64_t reusedLaneCopy = 0;   // off the render thread: the lane's published bytes copied out (no recompute)
+    // L-CORE M5 (coordinator ruling on B1-SEAL-VIA-ACQUIRE): the seal's own CPU live fill, counted in the same ledger.
+    uint64_t sealComputed = 0;     // the seal computed the frame (no Acquire publication): published as the lane slot
+    uint64_t sealReused = 0;       // the seal copied an Acquire publication (computed once, by the owner fill)
+    // Frames COMPUTED for this product (any variant): owner fills that published + seal computes. The compute-once ledger.
+    uint64_t Computed() const { return filledAtRead + sealComputed; }
     uint64_t released = 0;
     uint64_t unavailable[size_t(AcquireCause::CauseCount)] = {};
     uint64_t Unavailable() const
@@ -288,7 +406,7 @@ public:
 
     // ---- setup ----
 
-    enum class Registration : uint8_t { Registered, Replaced, NotOwner, NotInCatalog, AlreadyRegistered };
+    enum class Registration : uint8_t { Registered, Replaced, NotOwner, NotInCatalog, AlreadyRegistered, BadDefaults };
     // G3: the ONE fill of (product, form). `unit` must be the catalog's owning unit (OwnerUnitOf); anything else is refused
     // and counted (Refusals, on the status lines). A second registration of a registered (product, form) is refused too:
     // a replacement (graph rebuild) is explicit, ReplaceOwnerFill.
@@ -300,15 +418,110 @@ public:
     {
         return Register(id, form, unit, std::move(fill), true);
     }
+    // Removes a module registration (the unit must be the owner). False = none was registered.
+    bool UnregisterOwnerFill(ProductId id, AcquireForm form, const std::string& unit)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        if (unit != OwnerUnitOf(id))
+            return false;
+        return owners_.erase(OwnerKey(id, form)) != 0;
+    }
     bool HasOwnerFill(ProductId id, AcquireForm form) const
     {
         std::lock_guard<std::mutex> g(mutex_);
-        return owners_.count(OwnerKey(id, form)) != 0;
+        return OwnerLocked(OwnerKey(id, form)) != nullptr;
+    }
+    // L-CORE: the lane BINDS the memo: its slots become the first G2 source and its fills (the lane's CPU live computes) take
+    // precedence over module registrations of the same (product, form) while bound. A second bind replaces the first (graph
+    // rebuild: the new bundle binds before the old one ends). A fill for a product outside the catalog is ignored.
+    void BindLane(LaneSlotSource src, std::map<std::pair<ProductId, AcquireForm>, OwnerFill> fills)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        lane_ = std::move(src);
+        laneOwners_.clear();
+        for (auto& kv : fills)
+            if (!OwnerUnitOf(kv.first.first).empty())
+                laneOwners_[OwnerKey(kv.first.first, kv.first.second)] = std::move(kv.second);
+        ++laneBinds_;
+    }
+    // The lane `token` ends: its source and fills are dropped, ONLY if it is still the bound one (a rebuild bound a newer lane
+    // first: nothing happens). Module registrations stay. True = unbound.
+    bool UnbindLane(const void* token)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        if (token == nullptr || lane_.token != token)
+            return false;
+        lane_ = LaneSlotSource();
+        laneOwners_.clear();
+        return true;
+    }
+    bool LaneBound() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return bool(lane_.read) || bool(lane_.copyPublished);
+    }
+    uint64_t LaneBinds() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return laneBinds_;
+    }
+    // The render thread (the skeleton, every Begin). Not declared = every thread counts as the render thread.
+    void SetRenderThread(std::thread::id id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        renderThread_ = id;
+    }
+    bool OnRenderThread() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return OnRenderThreadLocked();
+    }
+    // A frame whose memo spots were released (a request for it is FrameReleased).
+    bool Released(uint64_t seq) const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return haveReleased_ && seq <= releasedThrough_;
+    }
+    // The memo's declared GPU working set: every GPU owner fill that ALLOCATES (not a view) x (1 + its kept frames). The
+    // no-lane ledger grant is planned for it (MemoGpuGrant.h).
+    uint64_t GpuNeedBytes() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        uint64_t need = 0;
+        auto add = [&need](const std::map<uint32_t, OwnerFill>& m, const std::map<uint32_t, OwnerFill>* skip) {
+            for (const auto& kv : m) {
+                if ((kv.first & 1u) == 0u || kv.second.view)
+                    continue;   // CPU form, or a view (0 bytes)
+                if (skip != nullptr && skip->count(kv.first) != 0)
+                    continue;   // shadowed by the bound lane's fill
+                need += kv.second.reserveBytes * (1u + uint64_t(kv.second.keepFrames));
+            }
+        };
+        add(laneOwners_, nullptr);
+        add(owners_, &laneOwners_);
+        return need;
+    }
+    // OnSeal calls so far (the skeleton seals once per Begin: with the lane after its seal, else directly).
+    uint64_t Seals() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return seals_;
+    }
+    uint32_t KeepFrames() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return keepFrames_;
     }
     uint64_t Refusals() const
     {
         std::lock_guard<std::mutex> g(mutex_);
         return refusals_;
+    }
+    // The renderer this memo belongs to (handed to every fill as OwnerFillRequest::host).
+    void SetHost(const void* host)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        host_ = host;
     }
     void SetLaneSource(LaneSlotSource src)
     {
@@ -367,18 +580,44 @@ public:
     AcquireResult Acquire(ProductId id, uint64_t seq, AcquireForm form, const VariantKey& vIn = VariantKey())
     {
         std::unique_lock<std::mutex> lk(mutex_);
-        AcquireCounters& c = counters_[id];
-        const auto ow = owners_.find(OwnerKey(id, form));
-        const VariantKey v = vIn.Canonical(ow != owners_.end() ? ow->second.defaults : VariantKey());
+        const OwnerFill* ow = OwnerLocked(OwnerKey(id, form));
+        const VariantKey v = vIn.Canonical(ow != nullptr ? ow->defaults : VariantKey());
         const Key key{ id, seq, uint8_t(form), v };
+        const bool renderThread = OnRenderThreadLocked();
 
-        // Re-entrancy: an owner fill on this thread asking for the key it is filling would wait for itself.
-        for (const Key& k : FillingOnThisThread())
-            if (!(k < key) && !(key < k))
-                return Fail(c, id, seq, AcquireCause::Reentrant);
+        // Re-entrancy: an owner fill on this thread asking THIS memo for the key it is filling would wait for itself.
+        for (const FillingKey& k : FillingOnThisThread())
+            if (k.memo == this && !(k.key < key) && !(key < k.key))
+                return Fail(counters_[id], id, seq, AcquireCause::Reentrant);
 
-        // G2 (a): the lane's slot (default variant).
-        if (v.IsDefault() && lane_.read) {
+        // GPU forms are render thread (their textures and fences are the render pl_gpu's).
+        if (form == AcquireForm::Gpu && !renderThread)
+            return Fail(counters_[id], id, seq, AcquireCause::WrongThread);
+
+        // G2 (a'): off the render thread, a lane CPU product's PUBLISHED bytes (copied out through its lease).
+        if (v.IsDefault() && !renderThread && form == AcquireForm::Cpu && lane_.copyPublished) {
+            std::shared_ptr<std::vector<uint8_t>> copy = std::make_shared<std::vector<uint8_t>>();
+            const auto fn = lane_.copyPublished;
+            lk.unlock();   // the copy runs outside the lock (a lease read: any thread)
+            const LaneSlotSource::State s = fn(id, seq, copy.get());
+            lk.lock();
+            if (s == LaneSlotSource::State::Present && !copy->empty()) {
+                ++counters_[id].reusedLaneCopy;
+                AcquireResult r;
+                r.status = AcquireStatus::Reused;
+                r.source = AcquireSource::LaneSlot;
+                r.cpu = copy->data();
+                r.cpuBytes = copy->size();
+                r.pin = copy;
+                Served(id);
+                return r;
+            }
+            ow = OwnerLocked(OwnerKey(id, form));   // re-read after the unlock (a bind may have changed it)
+        }
+        AcquireCounters& c = counters_[id];
+
+        // G2 (a): the lane's slot (default variant), render thread.
+        if (v.IsDefault() && renderThread && lane_.read) {
             LaneSlotSource::Read rd;
             const LaneSlotSource::State s = lane_.read(id, seq, form, &rd);
             if (s == LaneSlotSource::State::Present) {
@@ -401,12 +640,10 @@ public:
                 return Fail(c, id, seq, AcquireCause::NoGpuHandle);
         }
 
-        // A frame whose memo was released is never recomputed (its lane slots, above, stay readable while the lane holds them).
-        if (haveReleased_ && seq <= releasedThrough_)
-            return Fail(c, id, seq, AcquireCause::FrameReleased);
-
-        // G2 (b): the memo spot; a fill in flight is waited for (computed once).
+        // G2 (b): the memo spot (a kept spot of a released frame included); a fill in flight is waited for (computed once).
         const auto it = memo_.find(key);
+        if (it == memo_.end() && haveReleased_ && seq <= releasedThrough_)
+            return Fail(c, id, seq, AcquireCause::FrameReleased);   // a released frame is never recomputed (lane slots above stay readable)
         if (it != memo_.end()) {
             const std::shared_ptr<Entry> e = it->second;
             if (e->state == Entry::Filling) {
@@ -426,19 +663,21 @@ public:
             return Fail(c, id, seq, e->cause == AcquireCause::None ? AcquireCause::OwnerDeclined : e->cause);
         }
 
-        if (lane_.dropped && lane_.dropped(id))
+        if (renderThread && lane_.dropped && lane_.dropped(id))
             return Fail(c, id, seq, AcquireCause::RegulatorDropped);
-        if (ow == owners_.end() || !ow->second.fill)
+        if (ow == nullptr || !ow->fill)
             return Fail(c, id, seq, AcquireCause::NoOwnerFill);
-        if ((v.Axes() & ~ow->second.variantAxes) != 0u)
+        if ((v.Axes() & ~ow->variantAxes) != 0u || (ow->pixelData && v.precision == kPrecisionFloat16))
             return Fail(c, id, seq, AcquireCause::VariantUndeclared);
+        if (ow->renderThreadOnly && !renderThread)
+            return Fail(c, id, seq, AcquireCause::WrongThread);
         uint64_t reserve = 0;
-        if (form == AcquireForm::Gpu) {
+        if (form == AcquireForm::Gpu && !ow->view) {
             if (!gpuPresent_)
                 return Fail(c, id, seq, AcquireCause::NoGpuDispatcher);
             if (!gpuGranted_)
                 return Fail(c, id, seq, AcquireCause::NoLedgerGrant);
-            reserve = ow->second.reserveBytes;
+            reserve = ow->reserveBytes;
             if (gpuBytes_ + reserve > gpuBudget_)
                 return Fail(c, id, seq, AcquireCause::OverBudget);
         }
@@ -450,20 +689,23 @@ public:
         e->id = id;
         e->gpuForm = form == AcquireForm::Gpu;
         e->filler = std::this_thread::get_id();
+        e->frameScoped = ow->frameScoped;
+        e->keep = ow->keepFrames;
         e->reserved = reserve;
         gpuBytes_ += reserve;
         memo_[key] = e;
         ++c.ownerFillCalls;
-        const OwnerFill fill = ow->second;   // a copy: a replacement during the fill does not invalidate it
+        const OwnerFill fill = *ow;   // a copy: a replacement / an unbind during the fill does not invalidate it
         lk.unlock();
         OwnerFillRequest req;
+        req.host = host_;
         req.id = id;
         req.seq = seq;
         req.form = form;
         req.variant = v;
         OwnerFillOutput out;
         bool ok = false;
-        FillingOnThisThread().push_back(key);
+        FillingOnThisThread().push_back(FillingKey{ this, key });
         try {
             ok = fill.fill(req, *this, out);
         } catch (...) {
@@ -474,6 +716,8 @@ public:
             ok = false;
         if (ok && form == AcquireForm::Gpu && !out.gpu.Valid())
             ok = false;
+        if (ok && fill.view && out.gpu.bytes != 0)
+            ok = false;   // a view allocates nothing: bytes would be outside the ledger
         lk.lock();
         AcquireCounters& c2 = counters_[id];
         AcquireCause cause = ok ? AcquireCause::None : AcquireCause::OwnerDeclined;
@@ -488,10 +732,14 @@ public:
             e->state = Entry::Declined;
             e->cause = cause;
             cv_.notify_all();
+            const std::string reason = out.declineReason;
             lk.unlock();
             out = OwnerFillOutput();   // released outside the lock
             lk.lock();
-            return Fail(counters_[id], id, seq, cause);
+            AcquireResult failed = Fail(counters_[id], id, seq, cause);
+            if (!reason.empty())
+                lastCause_[id] += " (" + reason + ")";
+            return failed;
         }
         e->bytes = std::move(out.bytes);
         e->gpu = std::move(out.gpu);
@@ -520,6 +768,17 @@ public:
             e->readFence = fence;
     }
 
+    // L-CORE M5: the bound lane's seal reports what it did with a CPU live fill (SkeletonAcquireLane.h's lookup).
+    void NoteSealComputed(ProductId id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        ++counters_[id].sealComputed;
+    }
+    void NoteSealReused(ProductId id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        ++counters_[id].sealReused;
+    }
     // The seal's question (SkeletonAcquireLane.h): did a reader publish the default CPU form of (id, seq)? Copies it.
     bool CopyPublished(ProductId id, uint64_t seq, uint8_t* dst, size_t n) const
     {
@@ -546,9 +805,15 @@ public:
             }
             haveSealed_ = true;
             lastSeal_ = seq;
+            ++seals_;
+            ReleaseIfLocked([](const Entry& e) { return e.frameScoped; }, drop);   // the previous render frame's views
             if (seq >= 1u + keepFrames_) {
                 const uint64_t through = seq - 1u - keepFrames_;
-                ReleaseIfLocked([through](const Entry& e) { return e.seq <= through; }, drop);
+                const uint32_t memoKeep = keepFrames_;
+                ReleaseIfLocked([seq, memoKeep](const Entry& e) {
+                    const uint64_t keep = e.keep > memoKeep ? e.keep : memoKeep;   // OwnerFill::keepFrames
+                    return seq >= 1u + keep && e.seq <= seq - 1u - keep;
+                }, drop);
                 if (!haveReleased_ || through > releasedThrough_)
                     releasedThrough_ = through;
                 haveReleased_ = true;
@@ -611,6 +876,9 @@ public:
                             + " reused (lane " + std::to_string(c.reusedLane) + ", memo " + std::to_string(c.reusedMemo) + "), "
                             + std::to_string(c.filledAtRead) + " filled at read, " + std::to_string(c.Unavailable())
                             + " unavailable";
+            if (c.sealComputed != 0 || c.sealReused != 0 || c.reusedLaneCopy != 0)
+                l += "; seal computed " + std::to_string(c.sealComputed) + ", seal reused " + std::to_string(c.sealReused)
+                     + ", copied off thread " + std::to_string(c.reusedLaneCopy);
             for (size_t k = 1; k < size_t(AcquireCause::CauseCount); ++k)
                 if (c.unavailable[k] != 0)
                     l += std::string("; ") + Token(AcquireCause(k)) + " " + std::to_string(c.unavailable[k]);
@@ -667,6 +935,8 @@ private:
         uint64_t seq = 0;
         bool gpuForm = false;
         bool orphaned = false;     // released from the memo (while filling or after): its bytes are no longer counted
+        bool frameScoped = false;  // OwnerFill::frameScoped: released at the next OnSeal
+        uint8_t keep = 0;          // OwnerFill::keepFrames
         uint64_t reserved = 0;     // GPU bytes counted in gpuBytes_
         uint64_t readFence = 0;    // NoteGpuRead
         std::thread::id filler;    // the thread running the fill (cycle detection while Filling)
@@ -692,10 +962,27 @@ private:
         return false;
     }
 
-    static std::vector<Key>& FillingOnThisThread()
+    struct FillingKey {
+        const SkeletonMemo* memo;
+        Key key;
+    };
+    // The fills this thread runs, by memo instance (G0 audit S2: one memo's fill asking another memo is not re-entrant).
+    static std::vector<FillingKey>& FillingOnThisThread()
     {
-        static thread_local std::vector<Key> keys;
+        static thread_local std::vector<FillingKey> keys;
         return keys;
+    }
+    const OwnerFill* OwnerLocked(uint32_t k) const
+    {
+        const auto l = laneOwners_.find(k);
+        if (l != laneOwners_.end())
+            return &l->second;
+        const auto m = owners_.find(k);
+        return m != owners_.end() ? &m->second : nullptr;
+    }
+    bool OnRenderThreadLocked() const
+    {
+        return renderThread_ == std::thread::id() || renderThread_ == std::this_thread::get_id();
     }
 
     Registration Register(ProductId id, AcquireForm form, const std::string& unit, OwnerFill fill, bool replace)
@@ -712,6 +999,11 @@ private:
             ++refusals_;
             refusalText_ = what + ": owned by " + owner;
             return Registration::NotOwner;
+        }
+        if (fill.defaults.stage != 0) {
+            ++refusals_;
+            refusalText_ = what + ": an owner's own form is the source planes (stage 0)";
+            return Registration::BadDefaults;
         }
         const uint32_t k = OwnerKey(id, form);
         const bool had = owners_.count(k) != 0;
@@ -795,7 +1087,12 @@ private:
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
-    std::map<uint32_t, OwnerFill> owners_;
+    std::map<uint32_t, OwnerFill> owners_;        // module registrations
+    std::map<uint32_t, OwnerFill> laneOwners_;    // the bound lane's fills (precedence while bound)
+    std::thread::id renderThread_;                // none = every thread counts as the render thread
+    uint64_t laneBinds_ = 0;
+    uint64_t seals_ = 0;
+    const void* host_ = nullptr;
     std::map<Key, std::shared_ptr<Entry>> memo_;
     std::vector<std::shared_ptr<Entry>> retired_;
     std::map<std::thread::id, std::shared_ptr<Entry>> waitingOn_;   // a thread -> the Filling entry it waits for (cycle detection)

@@ -66,7 +66,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
     def test_every_unit_registered(self):
         ids = [e["id"] for e in csu.REGISTRY]
         self.assertEqual(sorted(ids, key=lambda u: int(u[1:])),
-                         ["U%d" % i for i in range(1, 17)] + ["U18", "U19", "U20", "U21", "U22"])
+                         ["U%d" % i for i in range(1, 17)] + ["U18", "U19", "U20", "U21", "U22", "U23", "U24", "U25", "U26"])
         self.assertNotIn("U17", ids)   # U17 was never defined: reserved, unused (refs/126 s2)   # U21: SID source geometry; U22: SK-W must-land check 2 (one motion engine instance)
 
     def test_default_run_exits_zero_even_with_duplicates(self):
@@ -343,8 +343,8 @@ class CheckSharedUnitsTest(unittest.TestCase):
 
     # ---- the real repository ------------------------------------------------------------------
     # frozen floor (refs/126 B0, 2026-11-12): blocking units may only shrink from here
-    FLOOR = {"U1": 20, "U2": 11, "U3": 16, "U4": 5, "U5": 1, "U6": 0, "U7": 6, "U10": 19, "U13": 14,
-             "U14": 0, "U16": 0, "U18": 0, "U20": 0}
+    FLOOR = {"U1": 20, "U2": 27, "U3": 19, "U4": 5, "U5": 1, "U6": 0, "U7": 6, "U10": 19, "U13": 14,
+             "U14": 0, "U16": 0, "U18": 0, "U20": 0, "U23": 12, "U24": 73, "U25": 76, "U26": 25}
     RAISED_BY_B0 = {"U7": 6, "U10": 19}   # WAIVER-JOB1-U7 (X2 real copies, 0 -> 6, target 0 at B6, expires at B6); U10 13 -> 19 = X1 Dispatch lines un-suppressed (audit B0, target 0 at B6)
 
     def _reference_baseline(self):
@@ -376,8 +376,20 @@ class CheckSharedUnitsTest(unittest.TestCase):
                 if uid in cur and o.get("blocking"):
                     self.assertTrue(cur[uid]["blocking"], "%s lost blocking" % uid)
                     self.assertLessEqual(cur[uid]["baseline_duplicates"],
-                                         max(o["baseline_duplicates"], self.RAISED_BY_B0.get(uid, 0)),
+                                         max(o["baseline_duplicates"], self.RAISED_BY_B0.get(uid, 0), self.FLOOR.get(uid, 0) if uid in ("U2", "U3") else 0),   # U2/U3: patterns widened by WAIVER-SCHK-OWNER (near-dup survey), FLOOR is the new ceiling
                                          "baseline of %s rose" % uid)
+
+
+class NearDupUnitPatternsTest(unittest.TestCase):
+    """U23-U26 and the widened U2/U3 signatures (near-dup survey ND02/ND03/ND05/ND06/ND07)."""
+    CASES = {"U23": "double a = 1.0 - std::exp(-dt / tau);", "U24": "auto s = 1.4826 * Median(v);",
+             "U25": "float t = Smoothstep(a, b, x);", "U26": "float y = 0.2126f * r;",
+             "U2": "constexpr double kSigmaFine = 1.0;", "U3": "uint32_t v = lq_tile_sum(x);"}
+
+    def test_each_pattern_fires(self):
+        reg = {u["id"]: u for u in csu.REGISTRY}
+        for uid, line in self.CASES.items():
+            self.assertTrue(any(r.search(line) for r in reg[uid]["signatures"]), uid)
 
 
 if __name__ == "__main__":

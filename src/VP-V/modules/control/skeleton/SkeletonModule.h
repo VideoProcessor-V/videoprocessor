@@ -29,9 +29,11 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace VpMotion { class IVectorEngine; }   // modules/motion/estimation/VectorEngineInterface.h (the P5a engine)
@@ -45,6 +47,7 @@ namespace Vpv
 		namespace RE = RendererExtension;
 
 		struct HostState;   // per renderer (SkeletonModule.cpp)
+		struct MemoHost;    // per renderer: the GET-OR-COMPUTE-AND-PUBLISH memo, with or without a lane (SkeletonModule.cpp; L-CORE)
 		struct Bundle;      // the lane and its producers for one source size (SkeletonModule.cpp)
 		class SkeletonGpuDispatcher;   // gpu/SkeletonGpuDispatcher.h (libplacebo; not included here)
 		struct GpuSlotTag { const void* host = nullptr; };   // the per-renderer pl_gpu, kept as a HostSlots aux
@@ -83,9 +86,17 @@ namespace Vpv
 			size_t HostStates() const;
 			// The renderer's lane (null while there is none). Render thread / single-threaded tests only.
 			VpSkeleton::AnalysisLane* LaneOf(const void* host) const;
-			// B1 (refs/126 s1.2): the renderer's GET-OR-COMPUTE-AND-PUBLISH access path (Acquire / RegisterOwnerFill), bound to its lane
-			// (null while there is no lane). Memo spots live for one frame (released at the next seal). Render thread.
+			// B1 (refs/126 s1.2): the renderer's GET-OR-COMPUTE-AND-PUBLISH access path (Acquire / RegisterOwnerFill). L-CORE: the memo is
+			// the RENDERER's (made on the first MemoFor or lane build, never in the Original pathway) and exists with or without the lane;
+			// a lane binds it while it lives. Null = none made yet. Memo spots live for one frame (released at the next seal).
 			VpSkeleton::SkeletonMemo* MemoOf(const void* host) const;
+			// L-CORE (lead8/iface-L-CORE.md s2-s3): IExternalDemand's memo access and the module-wide owner registrations.
+			FrameMemo MemoFor(const void* host, uint64_t seq) override;
+			VpSkeleton::SkeletonMemo::Registration RegisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+				const std::string& unit, VpSkeleton::OwnerFill fill) override;
+			bool UnregisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form, const std::string& unit) override;
+			// Module-wide registrations held (tests / diagnostics).
+			size_t OwnerFillsRegistered() const;
 			// The renderer's post-present spare slot (null without host state). Render thread / single-threaded tests only.
 			VpSkeleton::SpareHost* SpareOf(const void* host) const;
 			// Dimensions of the current lane graph (0 x 0 without one).
@@ -305,6 +316,14 @@ namespace Vpv
 			std::function<uint64_t()> nowUs_;
 			Hub::HostSlots<HostState> hosts_;
 			Hub::HostSlots<GpuSlotTag> gpuSlots_;   // aux = the renderer's pl_gpu (GpuCreated), cleared at GpuReleased
+			Hub::HostSlots<MemoHost> memoHosts_;    // L-CORE: the renderers' memos (any thread; dropped at GpuReleased / Shutdown)
+			// L-CORE: the module-wide owner fills (IExternalDemand::RegisterOwnerFill), installed in every memo made.
+			mutable std::mutex ownerFillsMutex_;
+			std::map<std::pair<VpSkeleton::ProductId, VpSkeleton::AcquireForm>, std::pair<std::string, VpSkeleton::OwnerFill>> ownerFills_;
+			std::shared_ptr<VpSkeleton::SkeletonMemo> MemoHostOf(const void* host, bool create) const;
+			// L-CORE (102b P13-NO-LANE-GPU-ALLOC): the VRAM ledger grant and GPU presence of a memo no lane is bound to (render thread,
+			// at Begin). Re-planned when the need, the declared VRAM users or the binding changed, else every kNoLaneReplanFrames.
+			void PlanNoLaneGpu(const void* host);
 			bool cardOverride_ = false;
 			bool startWorkers_ = true;
 			struct ExternalEntry

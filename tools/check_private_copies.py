@@ -119,6 +119,27 @@ REGISTER_SYM = re.compile(r"\b(RegisterOwnerFill|RegisterCpuLiveCompute)\b")
 REGISTER_OWNERS = ("src/VP-V/core/", _M + "control/skeleton/", _M + "input/source_analysis/", _M + "motion/estimation/",
                    _M + "repair/grain_split/")
 
+_PRODUCT_ROW = re.compile(r'\{\s*(k[A-Za-z0-9_]+)\s*,\s*"([^"]+)"\s*,[^,]*,\s*"([^"]*)"\s*\}')
+
+
+def registration_owner_folders(root):
+    """REGISTER_OWNERS plus the folders ProductRows() of ProductCatalog.h declares for the products (rule d). The catalog is
+    the one place that says where each product lives, so a product whose owner is outside the fixed list (P13 SourceRing:
+    input/capture) is recognised from its row. Rows marked 'reserved' have no producer and add nothing."""
+    out = list(REGISTER_OWNERS)
+    p = os.path.join(root, "src/VP-V/core/ProductCatalog.h")
+    if os.path.isfile(p):
+        for m in _PRODUCT_ROW.finditer(strip_comments(read(p))):
+            if m.group(3).strip().lower().startswith("reserved"):
+                continue
+            folder = m.group(2).split()[0].strip("/")
+            if folder and not folder.startswith(".."):
+                f = _M + folder + "/"
+                if f not in out:
+                    out.append(f)
+    return tuple(out)
+
+
 # Rule b: product -> accessor regex (a consumer reads the product through one of these).
 ACCESSOR = {
     "kP10GrainSplit": r"GrainSplit::Gpu|\bgrain\.(Gpu|Cpu)\b|GrainPlane|GrainSplit::View|ViewGlsl|\bgrainSplit\b|\bparams\.grain\b",
@@ -239,8 +260,9 @@ def scan(root):
                     hits.append({"rule": "c", "site": o["id"], "file": rel, "line": ln,
                                  "text": "owner compute outside its folder, no publish path: " + line.strip()[:80],
                                  "product": o["product"]})
+    reg_owners = registration_owner_folders(root)
     for rel in files:
-        if REGISTER_SYM.search(code(rel)) and not rel.startswith(REGISTER_OWNERS):
+        if REGISTER_SYM.search(code(rel)) and not rel.startswith(reg_owners):
             ln = next(i for i, l in enumerate(code(rel).split(chr(10)), 1) if REGISTER_SYM.search(l))
             hits.append({"rule": "d", "site": "REG", "file": rel, "line": ln,
                          "text": "live-fill registration outside the owning folders", "product": "-"})

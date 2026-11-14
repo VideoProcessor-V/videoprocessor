@@ -91,6 +91,18 @@ class Synthetic(unittest.TestCase):
                           M + "repair/texture_restore/T.cpp": "auto* g = params.grain.Gpu(p);"})
         self.assertFalse([h for h in N1.scan(root) if h["rule"] == "b"])
 
+    def test_rule_d_owner_folders_come_from_the_product_rows(self):
+        cat = ('inline const std::vector<ProductRow>& ProductRows(){ static const std::vector<ProductRow> rows = {'
+               ' { kP13SourceRing, "input/capture (queue + early upload)", 0, "" },'
+               ' { kTdBlocks, "repair/temporal_detail", kX, "reserved (engine: reset 2)" } }; }')
+        reg = "d->RegisterOwnerFill(kP13SourceRing, 1);"
+        root = make_tree({"src/VP-V/core/ProductCatalog.h": cat, M + "input/capture/SourcePlanes.h": reg,
+                          M + "repair/temporal_detail/Stray.cpp": reg, M + "repair/other/Stray2.cpp": reg})
+        ds = sorted(h["file"] for h in N1.scan(root) if h["rule"] == "d")
+        self.assertEqual(ds, [M + "repair/other/Stray2.cpp", M + "repair/temporal_detail/Stray.cpp"])   # capture ok; reserved row and unknown folder are not owners
+        root = make_tree({M + "input/capture/SourcePlanes.h": reg})   # no catalog: the fixed list only
+        self.assertEqual([h["file"] for h in N1.scan(root) if h["rule"] == "d"], [M + "input/capture/SourcePlanes.h"])
+
     def test_rule_c_outside_owner_folder_only(self):
         call = "auto s = GrainSplit::Compute(y, 1, 8);"
         root = make_tree({M + "repair/temporal_detail/T.h": call, M + "repair/grain_split/G.h": call})

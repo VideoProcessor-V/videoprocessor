@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "ExtensionHub.h"
+#include "CurrentFrame.h"
 
+#include <atomic>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -171,6 +174,7 @@ namespace Vpv
 					hosts_.erase(f.host);
 				}
 				pathway_.Remove(f.host, true);
+				ForgetCurrentFrame(f.host);   // L-CORE: a renderer recreated at this address starts with no frame
 			}
 		}
 
@@ -216,9 +220,117 @@ namespace Vpv
 			}
 		}
 
+		// ---- L-CORE: the current render frame (CurrentFrame.h) ----------------------------------------------------------
+		namespace
+		{
+			// One host's record. Written by its render thread only; read by any thread through a sequence word (odd = writing).
+			struct FrameFact
+			{
+				explicit FrameFact(const void* h) : host(h) {}
+				const void* host;
+				std::atomic<uint64_t> version{ 0 };
+				std::atomic<int64_t> seq{ -1 }, nextSeq{ -1 }, generation{ 0 };
+				std::atomic<int> phase{ 0 };
+				std::atomic<uint64_t> serial{ 0 };
+			};
+			HostSlots<FrameFact>& Frames()
+			{
+				static HostSlots<FrameFact> frames;
+				return frames;
+			}
+			CurrentFrame& Sticky()
+			{
+				static thread_local CurrentFrame frame;
+				return frame;
+			}
+		}
+
+		CurrentFrame ThisThreadFrame() { return Sticky(); }
+
+		CurrentFrame CurrentFrameOf(const void* host)
+		{
+			CurrentFrame out;
+			const std::shared_ptr<FrameFact> f = Frames().Find(host);
+			if (!f)
+				return out;
+			for (int attempt = 0; attempt < 64; ++attempt)
+			{
+				const uint64_t v0 = f->version.load(std::memory_order_acquire);
+				if (v0 & 1u)
+				{
+					std::this_thread::yield();
+					continue;
+				}
+				out.host = host;
+				out.seq = f->seq.load(std::memory_order_relaxed);
+				out.nextSeq = f->nextSeq.load(std::memory_order_relaxed);
+				out.generation = f->generation.load(std::memory_order_relaxed);
+				out.phase = static_cast<RE::FramePhase>(f->phase.load(std::memory_order_relaxed));
+				out.serial = f->serial.load(std::memory_order_relaxed);
+				std::atomic_thread_fence(std::memory_order_acquire);
+				if (f->version.load(std::memory_order_relaxed) == v0)
+					return out;
+			}
+			return CurrentFrame();   // a writer kept the record busy: no frame rather than a torn one
+		}
+
+		void RecordCurrentFrame(const RE::FrameContext& c)
+		{
+			if (!c.host || c.seq < 0 || !PhaseRecordsCurrentFrame(c.phase))
+				return;
+			CurrentFrame& t = Sticky();
+			const bool begin = c.phase == RE::FramePhase::Begin;
+			const bool sameHost = t.host == c.host;
+			std::shared_ptr<FrameFact> f = Frames().Find(c.host);
+			if (!f)
+			{
+				f = std::make_shared<FrameFact>(c.host);
+				if (!Frames().Put(c.host, f))
+					f = Frames().Find(c.host);   // another thread put it first, or the table is full (null: thread record only)
+			}
+			uint64_t serial = sameHost ? t.serial : (f ? f->serial.load(std::memory_order_relaxed) : 0u);
+			if (begin)
+				++serial;
+			t.host = c.host;
+			t.seq = c.seq;
+			t.phase = c.phase;
+			t.serial = serial;
+			if (begin)
+				t.nextSeq = -1;
+			else if (c.nextSeq >= 0)
+				t.nextSeq = c.nextSeq;
+			if (!begin)
+				t.generation = c.generation;
+			else if (!sameHost)
+				t.generation = 0;
+			if (!f)
+				return;
+			const uint64_t v = f->version.load(std::memory_order_relaxed);
+			f->version.store(v + 1u, std::memory_order_relaxed);
+			std::atomic_thread_fence(std::memory_order_release);
+			f->seq.store(t.seq, std::memory_order_relaxed);
+			f->nextSeq.store(t.nextSeq, std::memory_order_relaxed);
+			f->generation.store(t.generation, std::memory_order_relaxed);
+			f->phase.store(static_cast<int>(t.phase), std::memory_order_relaxed);
+			f->serial.store(t.serial, std::memory_order_relaxed);
+			f->version.store(v + 2u, std::memory_order_release);
+		}
+
+		void ForgetCurrentFrame(const void* host)
+		{
+			if (!host)
+				return;
+			Frames().Remove(host, true);
+			if (Sticky().host == host)
+				Sticky() = CurrentFrame();
+		}
+
+		void ResetThisThreadFrameForTesting() { Sticky() = CurrentFrame(); }
+
 		// Take-over phases stop at the first module that returns true; fan-out phases (RE::PhaseFansOut) call every module.
 		bool ExtensionHub::OnFrame(RE::FrameContext& c)
 		{
+			RecordCurrentFrame(c);   // L-CORE: before the fan-out, so every module (and the render's hooks) sees this frame
 			const bool fanOut = RE::PhaseFansOut(c.phase);
 			bool handled = false;
 			for (auto& m : modules_)

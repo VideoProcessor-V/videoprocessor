@@ -12,6 +12,8 @@
 #include <VP-V/core/PostPresentSpare.h>
 #include <VP-V/core/ReserveRows.h>
 #include <VP-V/core/SkeletonAcquireLane.h>
+#include <VP-V/core/hub/CurrentFrame.h>
+#include <VP-V/core/MemoGpuGrant.h>
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
@@ -174,8 +176,9 @@ namespace Vpv
 		struct Bundle
 		{
 			Bundle(Dims d, uint64_t seq, const std::function<uint64_t()>& clock, const GpuWiring& gpuWiring,
+				std::shared_ptr<VpSkeleton::SkeletonMemo> hostMemo, VpSkeleton::LaneLeaseOf leaseOf,
 				VpSkeleton::ILaneProducer* qualityP15 = nullptr, VpSkeleton::ILaneProducer* qualityP15c = nullptr)
-				: dims(d), createdSeq(seq), wiring(gpuWiring),
+				: dims(d), createdSeq(seq), wiring(gpuWiring), memo(std::move(hostMemo)),
 				  // Without a GPU the registry is exactly the one the lane always used; with one, the tap form (P10 / P11 read
 				  // the tap plane, not the P13 ring that is RenderOnly and never filled: without this P10 is InputMissing).
 				  registry(MakeRegistry(gpuWiring, 0.0, 0)),
@@ -237,7 +240,7 @@ namespace Vpv
 				}
 				// B1 (refs/126 s1.2): the one GET-OR-COMPUTE-AND-PUBLISH path, on the lane's slots and its CPU live computes (one law). Without a
 				// dispatcher a GPU form is Unavailable(no GPU dispatcher), counted and on the status lines (never a consumer's private path).
-				memo.SetNames(&registry);
+				memo->SetNames(&registry);
 				VpSkeleton::LaneGpuHandleOf gpuHandleOf;
 				if (SkeletonGpuDispatcher* disp = wiring.dispatcher)
 				{
@@ -259,8 +262,13 @@ namespace Vpv
 						return true;
 					};
 				}
-				VpSkeleton::BindLaneToMemo(lane, memo, gpuHandleOf);
+				// L-CORE: the memo is the renderer's (it outlives this lane); off the render thread the lane's CPU products are read through
+				// `leaseOf` (the host's CURRENT bundle, held for the call: never this object after it ended).
+				VpSkeleton::BindLaneToMemo(lane, *memo, gpuHandleOf, std::move(leaseOf));
 			}
+			// The binding is dropped on the render thread by StopBundle / a rebuild's new bind; this is the safety net (by token: a newer
+			// lane's binding is kept).
+			~Bundle() { VpSkeleton::UnbindLaneFromMemo(lane, *memo); }
 
 			// The registry for a wiring, the measured source period and the queue frames (0 = the unmeasured defaults). Re-made at each
 			// Configure so the record histories follow the period and the queue; the GPU declarations do not depend on either.
@@ -302,7 +310,7 @@ namespace Vpv
 			VpLaneProducts::HalfLumaProducer p1;
 			VpLaneProducts::SourceStatsProducer p4;
 			std::unique_ptr<VpLaneProducts::GpuComputeLaneJob> job10, job11, job12;   // null unless the GPU gap is on
-			VpSkeleton::SkeletonMemo memo;   // B1: declared before the lane (bound to it; destroyed after it)
+			std::shared_ptr<VpSkeleton::SkeletonMemo> memo;   // B1 / L-CORE: the renderer's memo, declared before the lane (bound to it)
 			AnalysisLane lane;
 			VpSkeleton::LaneWorkerThreads threads;
 			std::atomic<uint64_t> liveDeclined{ 0 };
@@ -486,7 +494,10 @@ namespace Vpv
 			{
 				std::shared_ptr<Bundle> old = std::atomic_exchange(&st.bundle, std::shared_ptr<Bundle>());
 				if (old)
+				{
+					VpSkeleton::UnbindLaneFromMemo(old->lane, *old->memo);   // L-CORE: on the render thread, before anything else
 					old->threads.Stop();   // joined here, before anything the threads read goes away
+				}
 			}
 
 			// Destroys the GPU dispatcher (and everything it allocated). The bundle (whose lane and jobs point at it) goes first.
@@ -563,9 +574,167 @@ namespace Vpv
 		}
 		VpSkeleton::SkeletonMemo* SkeletonModule::MemoOf(const void* host) const
 		{
-			const std::shared_ptr<HostState> st = hosts_.Find(host);
-			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
-			return b ? &b->memo : nullptr;
+			return MemoHostOf(host, false).get();
+		}
+
+		// ---- L-CORE: the renderer's memo, with or without the lane (lead8/iface-L-CORE.md s2-s3) ----------------------------
+		struct MemoHost
+		{
+			explicit MemoHost(const void* h) : host(h), memo(std::make_shared<VpSkeleton::SkeletonMemo>()) {}
+			const void* host;
+			std::shared_ptr<VpSkeleton::SkeletonMemo> memo;
+			// Render thread (PlanNoLaneGpu): what the last no-lane grant was planned for.
+			bool planned = false;
+			uint64_t plannedNeed = 0, plannedVramVersion = 0, plannedBinds = 0;
+			uint32_t framesSincePlan = 0;
+			VpSkeleton::MemoGpuGrant grant;
+			std::string cardWhy;
+		};
+
+		namespace
+		{
+			constexpr uint32_t kNoLaneReplanFrames = 240;   // a re-read of the card's free memory without a lane (no per-frame DXGI query)
+		}
+
+		void SkeletonModule::PlanNoLaneGpu(const void* host)
+		{
+			const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host);
+			if (!mh || mh->memo->LaneBound())
+				return;   // a bound lane plans the memo (its scratch-arena grant, Configure)
+			VpSkeleton::SkeletonMemo& memo = *mh->memo;
+			const uint64_t need = memo.GpuNeedBytes();
+			const uint64_t vramVersion = VpSkeleton::VramUsers::Instance().Version();
+			const uint64_t binds = memo.LaneBinds();
+			++mh->framesSincePlan;
+			if (mh->planned && mh->plannedNeed == need && mh->plannedVramVersion == vramVersion && mh->plannedBinds == binds
+				&& mh->framesSincePlan < kNoLaneReplanFrames)
+				return;
+			mh->planned = true;
+			mh->plannedNeed = need;
+			mh->plannedVramVersion = vramVersion;
+			mh->plannedBinds = binds;
+			mh->framesSincePlan = 0;
+			// The render GPU is the "dispatcher" of a no-lane GPU fill (FrameMemo::gpu): present while the renderer's pl_gpu is known.
+			memo.SetGpuDispatcherPresent(gpuSlots_.Aux(host) != nullptr);
+			CardProfile card;
+			std::string why;
+			if (cardOverride_)
+				card = card_;
+			const bool known = need != 0 && (cardOverride_ || QueryCard(hosts_.Aux(host), card, why));
+			mh->cardWhy = known || need == 0 ? std::string() : why;
+			mh->grant = VpSkeleton::PlanMemoGpuGrant(card, known, VpSkeleton::VramUsers::Instance().Take().heldBytes, need);
+			memo.SetGpuBudget(mh->grant.granted, mh->grant.bytes);
+		}
+
+		namespace
+		{
+			// The product names of a memo made before any lane (the plain registry: the tokens do not depend on the period or queue).
+			const VpSkeleton::Registry& NameRegistry()
+			{
+				static const VpSkeleton::Registry reg = VpSkeleton::SkeletonProducts(false, false, 0.0, 0);
+				return reg;
+			}
+		}
+
+		std::shared_ptr<VpSkeleton::SkeletonMemo> SkeletonModule::MemoHostOf(const void* host, bool create) const
+		{
+			if (!host)
+				return nullptr;
+			if (const std::shared_ptr<MemoHost> m = memoHosts_.Find(host))
+				return m->memo;
+			if (!create)
+				return nullptr;
+			// Never in the Original pathway (no VP-V state: Original == Bill, zero cost).
+			if (Hub::ExtensionHub::Instance().OriginalPathway(host))
+				return nullptr;
+			// L-CORE M3: made and published UNDER the registration lock, so a RegisterOwnerFill running at the same time either sees this
+			// memo in the table (and installs into it) or ran before the copy below (and is in it): never neither. A second thread making the
+			// same host's memo finds the first one here.
+			std::lock_guard<std::mutex> lock(ownerFillsMutex_);
+			if (const std::shared_ptr<MemoHost> m = memoHosts_.Find(host))
+				return m->memo;
+			std::shared_ptr<MemoHost> made = std::make_shared<MemoHost>(host);
+			VpSkeleton::SkeletonMemo& memo = *made->memo;
+			memo.SetHost(host);
+			memo.SetNames(&NameRegistry());
+			// GPU retire: memo spots are owner-made pl_tex objects on the D3D11 backend, whose destruction with reads still queued is
+			// safe (the runtime keeps a resource alive until the GPU is done with it), so a noted read never holds a spot (G0 S4).
+			memo.SetFenceCompleted([]() { return ~uint64_t(0); });
+			for (const auto& kv : ownerFills_)
+				memo.RegisterOwnerFill(kv.first.first, kv.first.second, kv.second.first, kv.second.second);
+			Hub::HostSlots<MemoHost>& slots = const_cast<Hub::HostSlots<MemoHost>&>(memoHosts_);
+			if (!slots.Put(host, made))
+			{
+				if (const std::shared_ptr<MemoHost> other = memoHosts_.Find(host))
+					return other->memo;   // another thread made it first
+				return nullptr;          // the table is full (sixteen renderers): no memo, the caller's "unavailable" shows it
+			}
+			return made->memo;
+		}
+
+		FrameMemo SkeletonModule::MemoFor(const void* host, uint64_t seq)
+		{
+			FrameMemo fm;
+			fm.memo = MemoHostOf(host, true);
+			if (!fm.memo)
+				return FrameMemo();
+			fm.host = host;
+			fm.seq = seq;
+			const Hub::CurrentFrame cur = Hub::CurrentFrameOf(host);
+			if (cur.Valid() && cur.seq == static_cast<int64_t>(seq) && cur.nextSeq >= 0)
+			{
+				fm.nextSeq = static_cast<uint64_t>(cur.nextSeq);
+				fm.haveNext = true;
+			}
+			fm.gpu = gpuSlots_.Aux(host);
+			return fm;
+		}
+
+		VpSkeleton::SkeletonMemo::Registration SkeletonModule::RegisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+			const std::string& unit, VpSkeleton::OwnerFill fill)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			const std::string owner = VpSkeleton::SkeletonMemo::OwnerUnitOf(id);
+			if (owner.empty())
+				return Reg::NotInCatalog;
+			if (unit != owner)
+				return Reg::NotOwner;
+			if (fill.defaults.stage != 0)
+				return Reg::BadDefaults;
+			std::vector<std::shared_ptr<VpSkeleton::SkeletonMemo>> memos;
+			{
+				std::lock_guard<std::mutex> lock(ownerFillsMutex_);
+				const auto key = std::make_pair(id, form);
+				if (ownerFills_.count(key) != 0)
+					return Reg::AlreadyRegistered;
+				ownerFills_[key] = std::make_pair(unit, fill);
+				memoHosts_.ForEach([&memos](const void*, const std::shared_ptr<MemoHost>& m) { memos.push_back(m->memo); });
+			}
+			for (const std::shared_ptr<VpSkeleton::SkeletonMemo>& m : memos)
+				m->RegisterOwnerFill(id, form, unit, fill);
+			return Reg::Registered;
+		}
+
+		bool SkeletonModule::UnregisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form, const std::string& unit)
+		{
+			std::vector<std::shared_ptr<VpSkeleton::SkeletonMemo>> memos;
+			{
+				std::lock_guard<std::mutex> lock(ownerFillsMutex_);
+				const auto it = ownerFills_.find(std::make_pair(id, form));
+				if (it == ownerFills_.end() || it->second.first != unit)
+					return false;
+				ownerFills_.erase(it);
+				memoHosts_.ForEach([&memos](const void*, const std::shared_ptr<MemoHost>& m) { memos.push_back(m->memo); });
+			}
+			for (const std::shared_ptr<VpSkeleton::SkeletonMemo>& m : memos)
+				m->UnregisterOwnerFill(id, form, unit);
+			return true;
+		}
+
+		size_t SkeletonModule::OwnerFillsRegistered() const
+		{
+			std::lock_guard<std::mutex> lock(ownerFillsMutex_);
+			return ownerFills_.size();
 		}
 		VpSkeleton::SpareHost* SkeletonModule::SpareOf(const void* host) const
 		{
@@ -684,6 +853,7 @@ namespace Vpv
 				else
 					hosts_.Remove(f.host, true);
 				gpuSlots_.Remove(f.host, true);   // the pl_gpu is going away: the dispatcher was released by Teardown above
+				memoHosts_.Remove(f.host, true);  // L-CORE: the renderer's memo (a reader's pin keeps its spots until released)
 				EraseExternal(f.host);   // a renderer recreated at this address never inherits the old one's external demand
 				break;
 			}
@@ -756,10 +926,15 @@ namespace Vpv
 				{
 					const std::weak_ptr<HostState> weak = st;
 					st->sealLateHook = seal->Seals() > 0;   // added after the first frame: bound at the next era
-					seal->AddProvider(kName, [weak](const std::shared_ptr<VpIndicator::Indicator>& ind) {
+					seal->AddProvider(kName, [weak, this, host](const std::shared_ptr<VpIndicator::Indicator>& ind) {
 						if (const std::shared_ptr<HostState> s2 = weak.lock())
+						{
 							if (const std::shared_ptr<Bundle> b = std::atomic_load(&s2->bundle))
 								b->lane.BindIndicator(ind);
+							// G0 S4: a new resync era is a discontinuity: the renderer's memo spots are released (Clear).
+							if (const std::shared_ptr<VpSkeleton::SkeletonMemo> m = MemoHostOf(host, false))
+								m->Clear();
+						}
 					});
 					seal->Subscribe(kName, [weak](const std::shared_ptr<VpIndicator::Indicator>&, uint64_t seq, VpIndicator::CounterMask changed) {
 						if (const std::shared_ptr<HostState> s2 = weak.lock())
@@ -1304,6 +1479,33 @@ namespace Vpv
 			if (c.phase != RE::FramePhase::Begin && c.phase != RE::FramePhase::AfterRender)
 				return false;
 			const std::shared_ptr<HostState> st = hosts_.Find(c.host);
+			// L-CORE s3: the renderer's memo is sealed at every Begin with or without the lane. With a bound lane Begin() seals it after
+			// the lane's seal (the seal reuses a publication); otherwise (no lane, lane waiting, lane off) it is sealed here.
+			struct MemoSeal
+			{
+				std::shared_ptr<VpSkeleton::SkeletonMemo> memo;
+				uint64_t seq = 0;
+				uint64_t seals = 0;
+				SkeletonModule* self = nullptr;
+				const void* host = nullptr;
+				~MemoSeal()
+				{
+					if (memo && memo->Seals() == seals)
+					{
+						memo->SetRenderThread(std::this_thread::get_id());
+						memo->OnSeal(seq);   // releases the previous frame's GPU spots (their reserve) before the next grant
+						self->PlanNoLaneGpu(host);
+					}
+				}
+			} memoSeal;
+			memoSeal.self = this;
+			memoSeal.host = c.host;
+			if (c.phase == RE::FramePhase::Begin && c.seq > 0)
+				if ((memoSeal.memo = MemoHostOf(c.host, false)))
+				{
+					memoSeal.seq = static_cast<uint64_t>(c.seq);
+					memoSeal.seals = memoSeal.memo->Seals();
+				}
 			if (!st || !st->active.load(std::memory_order_acquire) || c.seq <= 0)
 				return false;
 			const uint64_t epoch = VpFrameAnalysis::SourceFrameTap::Epoch();
@@ -1424,7 +1626,20 @@ namespace Vpv
 			std::shared_ptr<Bundle> b = current;
 			if (rebuild)
 			{
-				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring,
+				std::shared_ptr<VpSkeleton::SkeletonMemo> hostMemo = MemoHostOf(st.host, true);
+				if (!hostMemo)
+					hostMemo = std::make_shared<VpSkeleton::SkeletonMemo>();   // memo table full: the lane keeps a memo of its own (not reachable by MemoFor)
+				const std::weak_ptr<HostState> weakSt = hosts_.Find(st.host);
+				VpSkeleton::LaneLeaseOf leaseOf = [weakSt](VpSkeleton::ProductId id) {
+					// Any thread: the host's CURRENT bundle is held for the call (the lease then holds the lane state).
+					if (const std::shared_ptr<HostState> s2 = weakSt.lock())
+						if (const std::shared_ptr<Bundle> cur = std::atomic_load(&s2->bundle))
+							return cur->lane.Lease(id);
+					return VpSkeleton::LaneLease();
+				};
+				if (current)
+					hostMemo->Clear();   // G0 S4: a graph rebuild is a discontinuity: every memo spot of the old graph is released
+				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring, hostMemo, std::move(leaseOf),
 					qualityP15_.load(std::memory_order_acquire), qualityP15c_.load(std::memory_order_acquire));
 				st.leadPeak = 0;   // a new lane: the best lead is measured again
 				st.leadPeakAtUs = now;
@@ -1563,7 +1778,7 @@ namespace Vpv
 								memoGranted = memoGranted || g->bytes > 0;
 								memoBudget += g->bytes;
 							}
-					b->memo.SetGpuBudget(memoGranted, memoBudget);
+					b->memo->SetGpuBudget(memoGranted, memoBudget);
 				}
 				{
 					// What the declared users still hold above their grant: planned as transient at the next Configure (once).
@@ -1635,7 +1850,8 @@ namespace Vpv
 			for (int guard = 0; guard < 64 && (wait = b->lane.DeterministicWaitUs(seq, 0)) > 0; ++guard)
 				std::this_thread::sleep_for(std::chrono::microseconds(wait));   // N1: only a deterministic run or an explicit test wait
 			b->lane.OnRenderStart(seq, 0);
-			b->memo.OnSeal(seq);   // B1: the previous frame's memo spots are released (lifetime = frame)
+			b->memo->SetRenderThread(std::this_thread::get_id());   // L-CORE s5: the render thread is declared at every Begin
+			b->memo->OnSeal(seq);   // B1: the previous frame's memo spots are released (lifetime = frame)
 			{
 				std::lock_guard<std::mutex> cacheLock(st.sceneMutex);
 				st.sceneCacheValid = false;   // one frame's classification only
@@ -1792,7 +2008,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				const AnalysisLane& lane = b->lane;
 				for (const FallbackCatalog::Decision& d : lane.Fallbacks())
 					addDecision(d);
-				for (const FallbackCatalog::Decision& d : b->memo.Decisions())
+				for (const FallbackCatalog::Decision& d : b->memo->Decisions())
 					addDecision(d);   // B1 G5: "skeleton acquire <product>" (cause, frame) while a product is not served
 				addDecision(FallbackCatalog::SkeletonGpuMemory(st.gpuMemoryNote));
 				if (gd != nullptr && st.gpuMemoryNote.empty())
@@ -1827,7 +2043,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				if (const std::shared_ptr<VpSkeleton::LaneState> laneState = lane.State())
 					addDecision(SkeletonModule::HistoryCapDecision(laneState->graph, b->configuredPeriodMs));
 				full = lane.StatusLines();
-				for (const std::string& memoLine : b->memo.StatusLines())
+				for (const std::string& memoLine : b->memo->StatusLines())
 					full.push_back(memoLine);   // B1: reused / filled at read / unavailable (cause) per product asked
 				// MV7 ledger (Ctrl+Alt+D): the VRAM users outside the product catalog, as the governor granted them (one line each; products are
 				// listed by the lane's own status). A user below level 0 also has its governor notice in "Analysis: ..." (plan.notice).
@@ -1943,11 +2159,20 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 			if (kind == RE::StatusKind::WorkerOk)
 				return;
 			const std::shared_ptr<HostState> st = hosts_.Find(ctx.host);
+			const bool laneShown = st && (st->active.load(std::memory_order_acquire) || st->reporting.load(std::memory_order_acquire));
+			if (!laneShown || !st->active.load(std::memory_order_acquire))
+			{
+				// L-CORE s3 (no silent fallbacks): without a lane the renderer's memo still shows its "skeleton acquire <product>" entries.
+				if (kind == RE::StatusKind::Fallbacks)
+					if (const std::shared_ptr<VpSkeleton::SkeletonMemo> m = MemoHostOf(ctx.host, false))
+						for (const FallbackCatalog::Decision& d : m->Decisions())
+							lines.push_back(d.id + ": " + d.reason);
+			}
 			if (!st)
 				return;
 			const bool active = st->active.load(std::memory_order_acquire);
 			if (!active && !st->reporting.load(std::memory_order_acquire))
-				return;   // off: no line anywhere
+				return;   // off: no lane line anywhere
 			std::lock_guard<std::mutex> lock(st->statusMutex);
 			if (kind == RE::StatusKind::Lines)
 			{
@@ -1969,6 +2194,9 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 			if (!st || !st->active.load(std::memory_order_acquire))
 			{
 				reply = "skeleton: off (analysis_lane = off, or the Original pathway)";
+				if (const std::shared_ptr<VpSkeleton::SkeletonMemo> m = MemoHostOf(ctx.host, false))
+					for (const std::string& l : m->StatusLines())
+						reply += "\n" + l;   // L-CORE: the memo works without the lane; its counters are shown
 				return true;
 			}
 			std::lock_guard<std::mutex> lock(st->statusMutex);

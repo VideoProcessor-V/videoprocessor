@@ -1,0 +1,64 @@
+{
+ "allow": [
+  {
+   "file": ".agents/skills/vp-release/scripts/build-vp.ps1",
+   "line": "& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Checkout 'artifacts\\release\\VideoProcessor\\prerequisites\\setup-runtime.ps1') -CheckOnly *> (Join-Path $evidence 'runtime-check.log",
+   "reason": "pre-existing at 6772f5fcb",
+   "row": "102b-PREEXISTING"
+  },
+  {
+   "file": "packaging/SETUP-RUNTIME.cmd",
+   "line": "\"%VP_POWERSHELL%\" -NoProfile -ExecutionPolicy Bypass -File \"%~dp0prerequisites\\setup-runtime.ps1\" %*",
+   "reason": "pre-existing at 6772f5fcb",
+   "row": "102b-PREEXISTING"
+  },
+  {
+   "file": "packaging/active-output-sweep/RUN_ACTIVE_OUTPUT_SWEEP.cmd",
+   "line": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0RUN_ACTIVE_OUTPUT_SWEEP.ps1\"",
+   "reason": "pre-existing at 6772f5fcb",
+   "row": "102b-PREEXISTING"
+  },
+  {
+   "file": "packaging/active-output-sweep/RUN_HDR_TONEMAP_SWEEP.cmd",
+   "line": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0RUN_ACTIVE_OUTPUT_SWEEP.ps1\" -Suite hdr",
+   "reason": "pre-existing at 6772f5fcb",
+   "row": "102b-PREEXISTING"
+  },
+  {
+   "file": "packaging/active-output-sweep/RUN_SDR_OUTPUT_SWEEP.cmd",
+   "line": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0RUN_ACTIVE_OUTPUT_SWEEP.ps1\" -Suite sdr",
+   "reason": "pre-existing at 6772f5fcb",
+   "row": "102b-PREEXISTING"
+  },
+  {
+   "file": "tools/eval/source_id/run_identity_eval.ps1",
+   "line": "$p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WindowStyle Hidden -PassThru",
+   "reason": "pre-existing at 6772f5fcb",
+   "row": "102b-PREEXISTING"
+  },
+  {
+   "file": "tools/soak/test_run_soak.ps1",
+   "line": "# Run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/soak/test_run_soak.ps1",
+   "reason": "pre-existing at 6772f5fcb",
+   "row": "102b-PREEXISTING"
+  },
+  {
+   "file": "tools/soak/test_run_soak.ps1",
+   "line": "$o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner @argList 2>&1 | Out-String",
+   "reason": "pre-existing at 6772f5fcb",
+   "row": "102b-PREEXISTING"
+  },
+  {
+   "file": "tools/test_build_identity.ps1",
+   "line": "$output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $generator -RepositoryRoot $tree -OutputFile $header -BuildInputs $Inputs 2>&1",
+   "reason": "pre-existing at 6772f5fcb",
+   "row": "102b-PREEXISTING"
+  },
+  {
+   "file": "tools/test_build_identity.ps1",
+   "line": "$null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $generator -RepositoryRoot $emptyTree -OutputFile (Join-Path $fixtureRoot 'gen\\empty.h') 2>&1",
+   "reason": "pre-existing at 6772f5fcb",
+   "row": "102b-PREEXISTING"
+  }
+ ]
+}

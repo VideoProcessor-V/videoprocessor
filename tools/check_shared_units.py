@@ -53,7 +53,9 @@ REGISTRY = [
                       r"exp\(\s*-0\.5", r"ceil\(\s*3(\.5)?(\.0)?\s*\*",
                       r"GAUSS_", r"HalfSigma", r"\bgp_w\b", r"LowWeightsGlsl",
                       r"GrainPreserve::kSplitSigma", r"separable\s+gauss",
-                      r"#\s*include\s*[<\"].*GrainSplit\.h"),
+                      r"#\s*include\s*[<\"].*GrainSplit\.h",
+                      # near-dup survey ND03 (lead 8): constants and tap/radius wrappers of the same Gaussian bands
+                      r"GaussTaps", r"Radius1\(", r"\bkSigma[123]\b", r"\bkSigma(Fine|Wide)\b"),
      "allow": _c(r"VpUnit::BandFromBase::\w+", r"vpu_band_from_base\w*",
                  r"BandFromBase\.h")},
     {"id": "U3", "name": "half_luma_downsample",
@@ -61,7 +63,9 @@ REGISTRY = [
      "signatures": _c(r"half[_ ]?luma", r"HalfLuma", r"LOW_HALF", r"downsample",
                       r"sum\s*>>\s*4", r"\+\s*2u?\)\s*>>\s*2",
                       r"2x2\s+box|box\s+average",
-                      r"0\.25\s*\*\s*\(", r"\*\s*0\.25"),
+                      r"0\.25\s*\*\s*\(", r"\*\s*0\.25",
+                      # near-dup survey ND02/ND08 (lead 8): output-luma tile and the (1,2,1)/4 structure luma
+                      r"lq_tile_", r"\(\s*r\s*\+\s*2\s*\*\s*g\s*\+\s*b\s*\+\s*2\s*\)\s*>>\s*2"),
      # VpLaneProducts::HalfLuma*: the owner's own lane API (HalfLumaBytes / HalfLumaRows), called, not recomputed (C9 4a);
      # kP1HalfLuma: the catalog's product id, naming the published product to read it (C9 4a).
      "allow": _c(r"VpUnit::HalfLuma::\w+", r"vpu_half_luma\w*", r"vpu_quarter_luma\w*",
@@ -173,6 +177,25 @@ REGISTRY = [
                       r"make_(unique|shared)<\s*(\w+::)*P2Slot\b",
                       r"\b(\w+::)*P2Slot\s+\w+\s*[;({=\[,)]",
                       r"\bSessions::(Opened|Closed)\s*\("),
+     "allow": []},
+    # U23-U26 (near-dup survey ND05/ND06/ND07/ND02, lead 8): the owners are the future core headers; baselines are the
+    # counts at introduction and only shrink.
+    {"id": "U23", "name": "one_pole_alpha",
+     "owning_unit": ["src/VP-V/core/OnePole"],
+     "signatures": _c(r"1(\.0f?)?\s*-\s*(std::)?exp\s*\(\s*-"),
+     "allow": []},
+    {"id": "U24", "name": "robust_stats",
+     "owning_unit": ["src/VP-V/core/RobustStats"],
+     "signatures": _c(r"\bMedian\w*\s*\(", r"\bMedianOf\b", r"1\.4826", r"\bnth_element\b",
+                      r"\bMad(Sigma)?\s*\(", r"\bPercentile\s*\(", r"\bQuantile\s*\("),
+     "allow": []},
+    {"id": "U25", "name": "ramp_clamp_smoothstep",
+     "owning_unit": ["src/VP-V/core/Ramp"],
+     "signatures": _c(r"\bClamp01\s*\(", r"\bSmoothstep\s*\(", r"\bRamp\s*\("),
+     "allow": []},
+    {"id": "U26", "name": "luma_from_rgb_weights",
+     "owning_unit": ["src/VP-V/core/LumaWeights"],
+     "signatures": _c(r"0\.2126", r"0\.7152", r"0\.0722", r"\bLumaOf\b", r"\bad_luma\b", r"\bvp_kr\b"),
      "allow": []},
 ]
 
