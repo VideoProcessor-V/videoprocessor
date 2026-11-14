@@ -184,7 +184,8 @@ namespace SchedulerS1Test
 			Jobs::JobRegistry reg;
 			FakeEngine eng;
 			FakeAcquire acq;
-			LaneAheadSpareWork p3(&eng, acq.Fn(), Jobs::GraphOrderOf(g, kP3AnalysisField));
+			AheadRing ring;
+			LaneAheadSpareWork p3(&eng, acq.Fn(), Jobs::GraphOrderOf(g, kP3AnalysisField), ring);
 			std::string why;
 			Assert::IsTrue(reg.Register(host, g, Decl(g, kP3AnalysisField, JobClass::Core), &p3, &why), std::wstring(why.begin(), why.end()).c_str());
 			Assert::AreEqual(size_t(1), host.Slot().WorkCount());
@@ -211,7 +212,8 @@ namespace SchedulerS1Test
 			Assert::IsTrue(why.find("not after its input") != std::string::npos);
 
 			// one job per product (compute once)
-			LaneAheadSpareWork p3Again(&eng, acq.Fn(), 2);
+			AheadRing p3AgainRing(RingCapacity());
+			LaneAheadSpareWork p3Again(&eng, acq.Fn(), 2, p3AgainRing);
 			Assert::IsFalse(reg.Register(host, g, Decl(g, kP3AnalysisField, JobClass::Core), &p3Again, &why));
 			Assert::IsTrue(why.find("already has a job") != std::string::npos);
 
@@ -262,7 +264,8 @@ namespace SchedulerS1Test
 		{
 			FakeEngine eng;
 			FakeAcquire acq;
-			LaneAheadSpareWork p3(&eng, acq.Fn(), 2, 2);
+			AheadRing p3Ring(2);
+			LaneAheadSpareWork p3(&eng, acq.Fn(), 2, p3Ring);
 			SpareHost host;
 			host.Slot().Register(&p3);
 			const int pattern[] = { 3, 2, 3, 2, 3, 2 };
@@ -294,7 +297,8 @@ namespace SchedulerS1Test
 		{
 			FakeEngine eng;
 			FakeAcquire acq;
-			LaneAheadSpareWork p3(&eng, acq.Fn(), 2, 2);
+			AheadRing p3Ring(2);
+			LaneAheadSpareWork p3(&eng, acq.Fn(), 2, p3Ring);
 			SpareHost host;
 			host.Slot().Register(&p3);
 			eng.render = 1;
@@ -323,7 +327,8 @@ namespace SchedulerS1Test
 			FakeEngine eng;
 			FakeAcquire acq;
 			acq.serve = false;
-			LaneAheadSpareWork p3(&eng, acq.Fn(), 2, 2);
+			AheadRing p3Ring(2);
+			LaneAheadSpareWork p3(&eng, acq.Fn(), 2, p3Ring);
 			SpareHost host;
 			host.Slot().Register(&p3);
 			Present(host, 1, false, 20.0);
@@ -347,7 +352,8 @@ namespace SchedulerS1Test
 			FakeEngine eng;
 			FakeAcquire acq;
 			eng.pairMs = 5.0;
-			LaneAheadSpareWork p3(&eng, acq.Fn(), 2, 1);   // depth 1: one unsplittable pair per slot
+			AheadRing p3Ring(1);
+			LaneAheadSpareWork p3(&eng, acq.Fn(), 2, p3Ring);   // depth 1: one unsplittable pair per slot
 			std::vector<int> order;
 			FunctionSpareWork fill(kP5MonitorTiles, SpareClass::Fill, 9);
 			fill.hasWork = [] { return true; };
@@ -381,7 +387,8 @@ namespace SchedulerS1Test
 		{
 			FakeEngine eng;
 			FakeAcquire acq;
-			LaneAheadSpareWork p3(&eng, acq.Fn(), 2);
+			AheadRing p3Ring(RingCapacity());
+			LaneAheadSpareWork p3(&eng, acq.Fn(), 2, p3Ring);
 			SpareHost host;
 			host.Slot().Register(&p3);
 			eng.in.lowLatency = true;
@@ -403,7 +410,8 @@ namespace SchedulerS1Test
 			FakeAcquire acq;
 			eng.in.producerRunning = false;
 			eng.in.nextPairP2Ready = false;
-			LaneAheadSpareWork p3(&eng, acq.Fn(), 2, 2);
+			AheadRing p3Ring(2);
+			LaneAheadSpareWork p3(&eng, acq.Fn(), 2, p3Ring);
 			SpareHost host;
 			host.Slot().Register(&p3);
 			Present(host, 1, false, 20.0);
@@ -426,7 +434,8 @@ namespace SchedulerS1Test
 			reg.SetOriginal(true);
 			FakeEngine eng;
 			FakeAcquire acq;
-			LaneAheadSpareWork p3(&eng, acq.Fn(), 2);
+			AheadRing p3Ring(RingCapacity());
+			LaneAheadSpareWork p3(&eng, acq.Fn(), 2, p3Ring);
 			Assert::IsFalse(reg.Register(host, g, Decl(g, kP3AnalysisField, JobClass::Core), &p3));
 			Assert::AreEqual(size_t(0), host.Slot().WorkCount());
 			Assert::AreEqual(1ull, reg.OriginalRefused());
