@@ -20,6 +20,7 @@
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuGrainKernel.h>
@@ -582,6 +583,12 @@ namespace Vpv
 		struct MemoHost
 		{
 			explicit MemoHost(const void* h) : host(h), memo(std::make_shared<VpSkeleton::SkeletonMemo>()) {}
+			// R2: the memo may outlive this (a reader's pin): it never keeps a pointer to the device that goes with it.
+			~MemoHost()
+			{
+				if (gpuDevice)
+					memo->SetGpuDevice(nullptr);
+			}
 			const void* host;
 			std::shared_ptr<VpSkeleton::SkeletonMemo> memo;
 			// Render thread (PlanNoLaneGpu): what the last no-lane grant was planned for.
@@ -590,7 +597,40 @@ namespace Vpv
 			uint32_t framesSincePlan = 0;
 			VpSkeleton::MemoGpuGrant grant;
 			std::string cardWhy;
+			// R2 (lead 12): the device side of the sanctioned GPU context of the memo's non-view GPU fills (gpu/OwnerGpuDevice.h): follows
+			// the renderer's pl_gpu (AttachMemoGpu / DetachMemoGpu), with or without the lane.
+			std::shared_ptr<OwnerGpuDevice> gpuDevice;
 		};
+
+		namespace
+		{
+			// R2: the memo's GPU device follows the renderer's pl_gpu. Render thread (GpuCreated) or under ownerFillsMutex_ at the memo's
+			// creation. Another pl_gpu at the same address = the old device died (its objects are forgotten, never destroyed).
+			void DetachMemoGpu(MemoHost& mh, bool gpuAlive);
+			void AttachMemoGpu(MemoHost& mh, const void* gpu)
+			{
+				if (gpu == nullptr || (mh.gpuDevice && mh.gpuDevice->OwnerGpu() == gpu))
+					return;
+				if (mh.gpuDevice)
+					DetachMemoGpu(mh, false);
+				mh.gpuDevice = std::make_shared<OwnerGpuDevice>(static_cast<pl_gpu>(gpu));
+				mh.memo->SetGpuDevice(mh.gpuDevice.get());
+			}
+			// The device goes: the memo stops handing the context out, releases every GPU spot (their textures go back to the device),
+			// then the device destroys them (alive) or forgets them (died).
+			void DetachMemoGpu(MemoHost& mh, bool gpuAlive)
+			{
+				if (!mh.gpuDevice)
+					return;
+				mh.memo->SetGpuDevice(nullptr);
+				if (!gpuAlive)
+					mh.gpuDevice->Abandon();
+				mh.memo->ReleaseGpuSpots();
+				if (gpuAlive)
+					mh.gpuDevice->Release();
+				mh.gpuDevice.reset();
+			}
+		}
 
 		namespace
 		{
@@ -663,6 +703,7 @@ namespace Vpv
 			memo.SetFenceCompleted([]() { return ~uint64_t(0); });
 			for (const auto& kv : ownerFills_)
 				memo.RegisterOwnerFill(kv.first.first, kv.first.second, kv.second.first, kv.second.second);
+			AttachMemoGpu(*made, gpuSlots_.Aux(host));   // R2: the sanctioned GPU context's device, when the pl_gpu is known
 			Hub::HostSlots<MemoHost>& slots = const_cast<Hub::HostSlots<MemoHost>&>(memoHosts_);
 			if (!slots.Put(host, made))
 			{
@@ -823,6 +864,11 @@ namespace Vpv
 				hosts_.SetAux(f.host, f.device);   // the raw device, for the video memory query only
 				gpuSlots_.SetAux(f.host, const_cast<void*>(static_cast<const void*>(f.gpu)));   // 70b G5: the renderer's pl_gpu (null in a unit test: no GPU products)
 				Reconcile(f.host, -1);
+				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
+				{
+					std::lock_guard<std::mutex> lock(ownerFillsMutex_);
+					AttachMemoGpu(*mh, f.gpu);   // R2: a memo made before the device was known gets its GPU context device now
+				}
 				break;
 			case RE::Lifecycle::SettingsApplied:
 				PublishLookAheadWalk(f.value);   // the host passes the motion look-ahead depth (frames) here: the one queue term it delivers
@@ -854,6 +900,8 @@ namespace Vpv
 				else
 					hosts_.Remove(f.host, true);
 				gpuSlots_.Remove(f.host, true);   // the pl_gpu is going away: the dispatcher was released by Teardown above
+				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
+					DetachMemoGpu(*mh, true);     // R2: the memo's GPU spots and the owner textures go while the device lives
 				memoHosts_.Remove(f.host, true);  // L-CORE: the renderer's memo (a reader's pin keeps its spots until released)
 				EraseExternal(f.host);   // a renderer recreated at this address never inherits the old one's external demand
 				break;
@@ -875,6 +923,8 @@ namespace Vpv
 				// A new renderer at the address of one that died without GpuReleased (a failed device create):
 				// the old state's seal hooks, tap and lane belong to the dead one.
 				Teardown(st, false, false);   // the dead renderer's device objects are not ours to destroy
+				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
+					DetachMemoGpu(*mh, false);   // R2: nor are its owner textures (forgotten, counted)
 				hosts_.Remove(host, false);
 				EraseExternal(host);          // nor is its external demand (declared for the dead renderer)
 				st.reset();
@@ -1479,6 +1529,10 @@ namespace Vpv
 			}
 			if (c.phase != RE::FramePhase::Begin && c.phase != RE::FramePhase::AfterRender)
 				return false;
+			if (c.phase == RE::FramePhase::AfterRender)
+				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(c.host))
+					if (mh->gpuDevice)
+						mh->gpuDevice->FlushReleases();   // R2: GPU-legal: the owner textures released at the seal are destroyed
 			const std::shared_ptr<HostState> st = hosts_.Find(c.host);
 			// L-CORE s3: the renderer's memo is sealed at every Begin with or without the lane. With a bound lane Begin() seals it after
 			// the lane's seal (the seal reuses a publication); otherwise (no lane, lane waiting, lane off) it is sealed here.

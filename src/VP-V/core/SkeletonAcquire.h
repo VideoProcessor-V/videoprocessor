@@ -3,6 +3,7 @@
 #pragma once
 
 #include "FallbackCatalog.h"
+#include "GpuAllocator.h"
 #include "ProductCatalog.h"
 #include "Products.h"
 #include "QueueWindow.h"
@@ -87,6 +88,74 @@ struct GpuMemoHandle {
     bool Valid() const { return resource != nullptr || view != nullptr; }
 };
 
+// R2 (lead 12): THE sanctioned GPU context of a non-view GPU owner fill. A fill that makes something on the GPU (not a VIEW of another
+// unit's texture) gets the render device, the dispatch and texture allocation ONLY through OwnerFillRequest::gpu, never by capturing
+// a pl_gpu of its own. The device side (IOwnerGpuDevice) is the skeleton GPU dispatcher (SkeletonGpuDispatcher; libplacebo stays
+// out of core: the handles are opaque here). Every texture the fill allocates is accounted against the fill's reserve
+// (OwnerFill::reserveBytes, itself reserved against the VRAM ledger grant BEFORE the fill): an allocation beyond it is refused,
+// counted (AcquireCounters::gpuAllocRefused) and worded (the fill's decline reason). The context is valid for the fill call only:
+// it is closed when the fill returns (Gpu() / Dispatch() null, Allocate refused), so a kept pointer gets nothing.
+class IOwnerGpuDevice {
+public:
+    virtual ~IOwnerGpuDevice() {}
+    virtual void* OwnerGpu() const = 0;        // the render pl_gpu (opaque in core)
+    virtual void* OwnerDispatch() const = 0;   // the dispatcher's pl_dispatch (opaque in core)
+    // One sampleable + storable texture of `shape`: out.resource = the pl_tex, out.width / height / format / bytes (ShapeBytes) set,
+    // out.keepAlive destroys it at the device's next GPU-legal phase (or forgets it when the device died). False: `why`.
+    virtual bool CreateOwnerTexture(const TexShape& shape, GpuMemoHandle& out, std::string& why) = 0;
+};
+
+class OwnerGpuContext {
+public:
+    OwnerGpuContext(IOwnerGpuDevice* device, uint64_t grantBytes) : device_(device), grant_(grantBytes) {}
+    OwnerGpuContext(const OwnerGpuContext&) = delete;
+    OwnerGpuContext& operator=(const OwnerGpuContext&) = delete;
+
+    void* Gpu() const { return open_ && device_ != nullptr ? device_->OwnerGpu() : nullptr; }
+    void* Dispatch() const { return open_ && device_ != nullptr ? device_->OwnerDispatch() : nullptr; }
+    // A texture of `shape`, accounted against the grant. False (nothing allocated): closed, no device, over the grant or refused by
+    // the device; `why` says which.
+    bool Allocate(const TexShape& shape, GpuMemoHandle& out, std::string& why)
+    {
+        out = GpuMemoHandle();
+        const uint64_t bytes = ShapeBytes(shape);
+        if (!open_) {
+            why = "the GPU context is used after its fill returned";
+        } else if (device_ == nullptr) {
+            why = "no skeleton GPU device";
+        } else if (bytes == 0) {
+            why = "an empty texture shape";
+        } else if (used_ + bytes > grant_) {
+            why = "a texture of " + std::to_string(bytes) + " bytes would pass the fill's reserve (" + std::to_string(used_) + " of "
+                  + std::to_string(grant_) + " used; OwnerFill::reserveBytes)";
+        } else if (device_->CreateOwnerTexture(shape, out, why)) {
+            out.bytes = bytes;
+            used_ += bytes;
+            ++made_;
+            return true;
+        }
+        out = GpuMemoHandle();
+        ++refused_;
+        lastRefusal_ = why;
+        return false;
+    }
+    uint64_t Granted() const { return grant_; }
+    uint64_t Used() const { return used_; }
+    uint64_t Made() const { return made_; }
+    uint64_t Refused() const { return refused_; }
+    const std::string& LastRefusal() const { return lastRefusal_; }
+    void Close() { open_ = false; }
+
+private:
+    IOwnerGpuDevice* device_ = nullptr;
+    uint64_t grant_ = 0;
+    uint64_t used_ = 0;
+    uint64_t made_ = 0;
+    uint64_t refused_ = 0;
+    std::string lastRefusal_;
+    bool open_ = true;
+};
+
 enum class AcquireStatus : uint8_t {
     Reused,         // G2: the lane's sealed / live-filled slot, or a memo published earlier for this frame
     FilledAtRead,   // G3: absent; the owner's fill ran now (once) and published it
@@ -169,6 +238,8 @@ struct OwnerFillRequest {
     uint64_t seq = 0;
     AcquireForm form = AcquireForm::Cpu;
     VariantKey variant;   // canonical
+    // R2: the sanctioned GPU context, set ONLY for a non-view GPU fill (null for CPU and view fills). Valid during the call only.
+    OwnerGpuContext* gpu = nullptr;
 };
 // What it produces: the CPU form (`bytes`) or the GPU form (`gpu`).
 struct OwnerFillOutput {
@@ -247,6 +318,11 @@ struct AcquireCounters {
     uint64_t invalidatedRecompute = 0;
     uint64_t discarded = 0;          // spots of dropped frames released (Discard)
     uint64_t planMiss = 0;           // an AHEAD fill measured above its reserve did not fit: refused, made at its render (s2.7 safety net)
+    // R2: textures non-view GPU fills made through their OwnerGpuContext, the bytes, and the allocations it refused (over the reserve,
+    // no device, device refusal).
+    uint64_t gpuAllocMade = 0;
+    uint64_t gpuAllocBytes = 0;
+    uint64_t gpuAllocRefused = 0;
     uint64_t Computed() const { return filledAtRead + sealComputed - invalidatedRecompute; }
     uint64_t released = 0;
     uint64_t unavailable[size_t(AcquireCause::CauseCount)] = {};
@@ -412,6 +488,39 @@ public:
     {
         std::lock_guard<std::mutex> g(mutex_);
         gpuPresent_ = present;
+    }
+    // R2: the device side of the sanctioned GPU context (the skeleton GPU dispatcher; null when it goes). Render thread.
+    void SetGpuDevice(IOwnerGpuDevice* device)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        gpuDevice_ = device;
+    }
+    // R2: the GPU device goes (dispatcher release / device lost): every GPU spot is released now, retired ones too (their textures
+    // are the device's), so no spot names a destroyed texture. Render thread, between fills.
+    void ReleaseGpuSpots()
+    {
+        std::vector<std::shared_ptr<Entry>> drop;
+        {
+            std::lock_guard<std::mutex> g(mutex_);
+            ReleaseIfLocked([](const Entry& e) { return e.gpuForm && e.state != Entry::Filling; }, drop);
+            for (auto it = retired_.begin(); it != retired_.end();) {
+                if ((*it)->gpuForm) {
+                    drop.push_back(*it);
+                    it = retired_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            for (auto it = stale_.begin(); it != stale_.end();) {
+                if ((*it)->gpuForm) {
+                    drop.push_back(*it);
+                    it = stale_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        drop.clear();   // outside the lock: the texture keep-alives run here
     }
     // THE QUEUE WINDOW (core/QueueWindow.h; design s2.3): the memo keeps a frame's spots while the frame is in the queue and
     // admits fills up to current + ahead. Spots are released at the seal when the frame has LEFT the queue:
@@ -792,6 +901,7 @@ public:
         memo_[key] = e;
         ++c.ownerFillCalls;
         const OwnerFill fill = *ow;   // a copy: a replacement / an unbind during the fill does not invalidate it
+        IOwnerGpuDevice* const gpuDevice = gpuDevice_;
         lk.unlock();
         OwnerFillRequest req;
         req.host = host_;
@@ -799,6 +909,12 @@ public:
         req.seq = seq;
         req.form = form;
         req.variant = v;
+        // R2: the one sanctioned GPU context, for a non-view GPU fill only, granted the fill's reserve.
+        std::unique_ptr<OwnerGpuContext> gpuContext;
+        if (form == AcquireForm::Gpu && !fill.view) {
+            gpuContext.reset(new OwnerGpuContext(gpuDevice, reserve));
+            req.gpu = gpuContext.get();
+        }
         OwnerFillOutput out;
         bool ok = false;
         FillingOnThisThread().push_back(FillingKey{ this, key });
@@ -808,6 +924,10 @@ public:
             ok = false;   // a throwing fill is a decline (counted, visible), never a stuck Filling entry
         }
         FillingOnThisThread().pop_back();
+        if (gpuContext)
+            gpuContext->Close();   // a kept pointer gets nothing after the fill
+        if (!ok && gpuContext && gpuContext->Refused() != 0 && out.declineReason.empty())
+            out.declineReason = gpuContext->LastRefusal();   // a refused allocation is worded with the decline
         if (ok && form == AcquireForm::Cpu && out.bytes.empty())
             ok = false;
         if (ok && form == AcquireForm::Gpu && !out.gpu.Valid())
@@ -816,6 +936,11 @@ public:
             ok = false;   // a view allocates nothing: bytes would be outside the ledger
         lk.lock();
         AcquireCounters& c2 = counters_[id];
+        if (gpuContext) {
+            c2.gpuAllocMade += gpuContext->Made();
+            c2.gpuAllocBytes += gpuContext->Used();
+            c2.gpuAllocRefused += gpuContext->Refused();
+        }
         AcquireCause cause = ok ? AcquireCause::None : AcquireCause::OwnerDeclined;
         if (ok && form == AcquireForm::Gpu && !e->orphaned && out.gpu.bytes > e->reserved
             && gpuBytes_ - e->reserved + out.gpu.bytes > gpuBudget_)
@@ -1002,6 +1127,9 @@ public:
                             + " unavailable";
             if (c.planMiss != 0)
                 l += "; plan miss " + std::to_string(c.planMiss);
+            if (c.gpuAllocMade != 0 || c.gpuAllocRefused != 0)
+                l += "; gpu textures made " + std::to_string(c.gpuAllocMade) + " (" + std::to_string(c.gpuAllocBytes)
+                     + " bytes), refused " + std::to_string(c.gpuAllocRefused);
             if (c.aheadFilled != 0 || c.aheadReused != 0 || c.invalidatedRecompute != 0 || c.discarded != 0)
                 l += "; ahead fills " + std::to_string(c.aheadFilled) + ", ahead reused " + std::to_string(c.aheadReused)
                      + ", recomputed after invalidation " + std::to_string(c.invalidatedRecompute) + ", discarded "
@@ -1280,6 +1408,7 @@ private:
     LaneSlotSource lane_;
     std::function<uint64_t()> fenceCompleted_;
     bool gpuPresent_ = false;
+    IOwnerGpuDevice* gpuDevice_ = nullptr;   // R2: the sanctioned GPU context's device (SetGpuDevice)
     bool gpuGranted_ = false;
     uint64_t gpuBudget_ = 0;
     uint64_t gpuBytes_ = 0;
