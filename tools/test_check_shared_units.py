@@ -264,6 +264,12 @@ class CheckSharedUnitsTest(unittest.TestCase):
         d = json.load(open(os.path.join(self.root, "tools", "shared_units_baseline.json")))
         self.assertEqual(d["units"]["U2"]["baseline_duplicates"], 0)
 
+    def test_extensionless_owner_stem_owns_its_header(self):
+        self.assertTrue(csu._inside("src/VP-V/core/OnePole.h", "src/VP-V/core/OnePole"))
+        self.assertTrue(csu._inside("src/VP-V/core/OnePole", "src/VP-V/core/OnePole"))
+        self.assertFalse(csu._inside("src/VP-V/core/OnePoleX.h", "src/VP-V/core/OnePole"))
+        self.assertFalse(csu._inside("src/VP-V/core/Other.h", "src/VP-V/core/OnePole"))
+
     # ---- review fixes -------------------------------------------------------------------------
     def test_star_continuation_counts_only_inside_a_block_comment(self):
         _w(self.root, "src/VP-V/modules/repair/c/Star.h",

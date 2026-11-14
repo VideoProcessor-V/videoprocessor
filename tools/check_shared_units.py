@@ -234,7 +234,10 @@ def _iter_files(root):
 
 
 def _inside(rel, unit):
-    return rel == unit or rel.startswith(unit.rstrip("/") + "/")
+    # An owner may be a folder ("src/VP-V/core/x/"), a file, or an extensionless unit stem ("src/VP-V/core/OnePole"), which
+    # owns its header/source ("OnePole.h"): without that its own lines counted as outside hits (NDU 11-14).
+    return (rel == unit or rel.startswith(unit.rstrip("/") + "/")
+            or (not unit.endswith("/") and rel in [unit + e for e in (".h", ".hpp", ".inl", ".cpp")]))
 
 
 def _comment_flags(lines):
