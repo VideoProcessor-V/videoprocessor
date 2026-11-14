@@ -307,6 +307,8 @@ namespace SkeletonRegulatorTestsNs
 			size_t fill = 0;
 			for (ProductId id = 0; id < kSkeletonProductEnd; ++id)
 			{
+				if (IsReservedProduct(id))   // R14-97 M4: an absent slot is no regulator product
+					continue;
 				const Tier t = id % 3 == 0 ? Tier::T0 : (id % 3 == 1 ? Tier::T1 : Tier::T2);
 				all.push_back(P(id, t, true, true, 0.5));
 				fill += IsOptionalFill(id) ? 1u : 0u;
@@ -390,8 +392,12 @@ namespace SkeletonRegulatorTestsNs
 		{
 			std::vector<ProductId> fill;
 			for (ProductId id = 0; id < kSkeletonProductEnd; ++id)
+			{
+				if (IsReservedProduct(id))
+					Assert::IsFalse(IsOptionalFill(id), L"a reserved id is never optional fill (R14-97 M4)");
 				if (IsOptionalFill(id))
 					fill.push_back(id);
+			}
 			const std::vector<ProductId> want = { kP5MonitorTiles, kP6EntranceAhead, kP9CameraSmoothed, kP10cGrainSplitChroma, kP12LightLevel };
 			Assert::IsTrue(fill == want, L"the optional fill set");
 			Assert::IsFalse(IsOptionalFill(kNoProduct));

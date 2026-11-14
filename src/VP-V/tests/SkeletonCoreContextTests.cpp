@@ -1101,4 +1101,74 @@ namespace SkeletonCoreContextTestsNs
 			}
 		}
 	};
+	// R14-97 M3: the reserved ids of the fixed product-id table (30 band_memo, 32 focus_map, 33 room_light, 34 composed_vectors) are ABSENT
+	// slots: no declaration, no reads, fail closed everywhere a name could reach them.
+	TEST_CLASS(ReservedProductIdTests)
+	{
+	public:
+		TEST_METHOD(TheSkeletonRegistryIsValidWithFourAbsentSlots)
+		{
+			const Registry reg = SkeletonProducts();
+			const char* why = "";
+			Assert::IsTrue(reg.Validate(&why), L"valid with absent slots");
+			Assert::IsTrue(reg.Size() == size_t(kSkeletonProductEnd), L"Size() is the id span");
+			Assert::IsTrue(reg.ReservedAbsent() == 4u && kReservedProductCount == 4u, L"four reserved slots");
+			for (ProductId id : kReservedProductIds)
+			{
+				Assert::IsTrue(IsReservedProduct(id) && !reg.Has(id), L"absent: Has() is false");
+				Assert::IsTrue(reg.All()[id].id == kNoProduct && reg.All()[id].inputCount == 0, L"no declaration, no reads");
+				Assert::IsTrue(ReservedProductName(id)[0] != '\0', L"named");
+			}
+			Assert::IsTrue(reg.Has(kEdgeMap) && kEdgeMap == 31, L"edge_map keeps the fixed id 31");
+		}
+
+		TEST_METHOD(ARealDeclarationAtAReservedIdIsRejected)
+		{
+			std::vector<ProductDecl> d = SkeletonProducts().All();
+			d[kBandMemo] = detail::Make(kBandMemo, "band_memo", "band memo", Backend::Cpu, 1, Tier::T1, 0, 0);
+			const char* why = "";
+			Assert::IsFalse(Registry(d).Validate(&why), L"a declaration at a reserved id is refused");
+			Assert::IsTrue(std::string(why).find("reserved") != std::string::npos, L"with the reason");
+		}
+
+		TEST_METHOD(AnInputNamingAReservedIdIsRejected)
+		{
+			std::vector<ProductDecl> d = SkeletonProducts().All();
+			detail::AddInput(d[kP4SourceStats], kFocusMap, 0);
+			const char* why = "";
+			Assert::IsFalse(Registry(d).Validate(&why), L"an input naming an absent slot fails closed");
+			Assert::IsTrue(std::string(why).find("unknown input") != std::string::npos, L"unknown input product");
+		}
+
+		TEST_METHOD(AConsumerNamingAReservedIdMakesTheGraphInvalid)
+		{
+			ConsumerDecl c;
+			c.id = 1;
+			c.name = "reserved reader";
+			AddConsume(c, kRoomLight);
+			GraphSettings gs;
+			const Graph g = BuildGraph(SkeletonProducts(), std::vector<ConsumerDecl>(1, c), gs);
+			Assert::IsFalse(g.valid, L"a consumer of an unlanded product is refused, visibly");
+			Assert::IsTrue(g.error != nullptr && g.error[0] != '\0', L"with a plain reason");
+		}
+
+		TEST_METHOD(AcquireOfAReservedIdDeclinesVisibly)
+		{
+			SkeletonMemo m;
+			for (ProductId id : kReservedProductIds)
+			{
+				const AcquireResult r = m.Acquire(id, 5, AcquireForm::Cpu);
+				Assert::IsTrue(r.status == AcquireStatus::Unavailable && r.cause == AcquireCause::NoOwnerFill, L"declined, no owner");
+				const std::string why = m.LastCause(id);
+				Assert::IsTrue(why.find("reserved") != std::string::npos && why.find(ReservedProductName(id)) != std::string::npos,
+					L"the cause says reserved and names the product");
+			}
+			const std::vector<std::string> lines = m.StatusLines();
+			bool listed = false;
+			for (const std::string& l : lines)
+				listed = listed || (l.find("reserved product ids") != std::string::npos && l.find("band_memo") != std::string::npos
+					&& l.find("composed_vectors") != std::string::npos);
+			Assert::IsTrue(listed, L"the Ctrl+Alt+D status lists the reserved ids and names");
+		}
+	};
 }
