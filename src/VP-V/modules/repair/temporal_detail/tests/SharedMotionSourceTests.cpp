@@ -315,10 +315,17 @@ namespace VideoProcessorTest
 			// The producer's extras do not change the trust (forward), and the pair's two directions differ (the test is not vacuous).
 			TemporalDetail::MotionPair a, b, back;
 			source.SetConsistencyPixels(2.0f);
+			// Restored against the engine memo (was fbErrorComputed 0/1/2): each (pair, direction, tolerance) is computed ONCE, by the engine
+			// (its trustComputes counter), none by the adapter; the lease is per pair, so each of these three first asks is one compute.
+			const unsigned long long computes0 = rig.engine.FlowReads().trustComputes;
 			Assert::IsTrue(source.Forward(5, a));
+			Assert::AreEqual<unsigned long long>(computes0 + 1, rig.engine.FlowReads().trustComputes, L"forward, producer extras: one engine compute");
 			Assert::IsTrue(source.Forward(6, b));
+			Assert::AreEqual<unsigned long long>(computes0 + 2, rig.engine.FlowReads().trustComputes, L"forward, no producer extras: one engine compute");
 			Assert::IsTrue(a.trust == b.trust);
+			Assert::IsTrue(a.vx == b.vx && a.vy == b.vy, L"the vectors are the same pair's, whichever pair carried the extras");
 			Assert::IsTrue(source.Backward(5, back));
+			Assert::AreEqual<unsigned long long>(computes0 + 3, rig.engine.FlowReads().trustComputes, L"backward: one engine compute");
 			Assert::IsTrue(back.trust != a.trust);
 			// Computed once by the engine per pair, direction and tolerance, however often TD asked; none worked out by the adapter.
 			{   // WIP-DIAG (revert): why the second Forward(6) fails

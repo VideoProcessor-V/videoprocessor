@@ -382,6 +382,19 @@ namespace VideoProcessorTest
 			CameraLink::AheadCopy offCopy;
 			Assert::IsTrue(CameraLink::CopyAhead(ViewWithExtras(p, off, 3), 3, 1.5f, offCopy) == CameraLink::AheadRefusal::None);
 			Assert::IsFalse(offCopy.haveProducerGlobal, L"a vote made with general off is not taken");
+			// Restored (was: other arithmetic gives the same trust): extras of another trust block / cell size / unit, or one plane missing, change
+			// nothing the camera reads; the trust is still the engine memo, equal to the plain view's.
+			for (int c = 0; c < 4; ++c)
+			{
+				VpMotion::FlowView other = ViewWithExtras(p, f, 3);
+				if (c == 0) other.extrasBlockPx = 16;
+				if (c == 1) other.extrasCellPx = 8;
+				if (c == 2) other.extrasUnitsPerEnginePx = 16.0;
+				if (c == 3) other.fbError = nullptr;
+				CameraLink::AheadCopy otherCopy;
+				Assert::IsTrue(CameraLink::CopyAhead(other, 3, 1.5f, otherCopy) == CameraLink::AheadRefusal::None);
+				Assert::IsTrue(otherCopy.trust == without.trust, L"other arithmetic in the extras: the trust is still the memo's");
+			}
 		}
 
 		// W1-C3 cost line: the camera's per-pair copy + prior at the engine grids of a 1080p source (240 x 135 cells) and a 2160p source
