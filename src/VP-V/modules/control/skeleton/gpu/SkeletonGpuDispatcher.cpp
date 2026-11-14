@@ -603,6 +603,13 @@ namespace Vpv
 
 		double SkeletonGpuDispatcher::MeasuredMs(VpSkeleton::ProductId id) const
 		{
+			// FIX-S0-COST: the mean device ms per FRAME over all timed passes (the sum of a frame's passes), not the last single pass.
+			const auto it = m_products.find(id);
+			return it == m_products.end() ? 0.0 : it->second.cost.MeanFrameMs();
+		}
+
+		double SkeletonGpuDispatcher::LastPassMs(VpSkeleton::ProductId id) const
+		{
 			const auto it = m_products.find(id);
 			return it == m_products.end() ? 0.0 : double(it->second.lastNs) / 1.0e6;
 		}

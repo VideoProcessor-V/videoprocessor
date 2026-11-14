@@ -183,6 +183,24 @@ R16 unorm, uploaded in row bands). Unit version `VpLaneProducts::kTapFormUnitVer
 P13 both change, and every consumer's `CheckFit` falls back visibly (WrongSize / Stale) instead of reading a plane of another provenance.
 Nothing reads P10-P12 yet (the `skeleton.report` consumer only declares them).
 
+## Scheduler budget feed and the IC-2 contract (S0)
+
+Design goal: one core-first slot per SOURCE frame (render first, then core jobs, derived products, the TD share, extras; the gap scheduler only mops up
+leftovers). Decision of record: owner 2026-11-12 15:13 (refs/owner-decisions-2026-11-07.md:612), design refs/122 (N1 the budget was never fed, N2 one
+render budget). The frozen types and rules R1-R10 live in `core/SchedulerContract.h`; `OnDemand::RenderBudget` is now an alias of the ONE
+`VpSkeleton::RenderBudget` there (bit-identical, one copy).
+
+- `SlotBudgetFeed.h` (pure, source-agnostic) feeds `SpareHost::SetBudget` once per source frame: budget = period - render EWMA - period/10 (the measured
+  source rate; the nominal one only while unmeasured), and writes the slot's use (EWMA) plus the declared TD slice to `Presenter::spareSlotMs` (R2).
+  The Original pathway is never budgeted and never written.
+- `SlotBudgetFeedHost.h` adapts the host: the render ms is the module clock (`timing.lastRenderOnlyMs`, biased high = conservative; labelled "render
+  (module clock)"), the measured rate is cached from the Entrance fan-out, the nominal rate is the lane period. A real host `renderMs` seam is the later
+  registered upgrade (only the adapter changes).
+- Status (rule 5): one line, "spare slot: budget X ms (render (module clock) Y ms, period Z ms), used U ms, outcome ..." or "no budget (render not
+  measured / source rate unknown / no present seen yet)" or "off (Original pathway: not budgeted)". Never a silent NoBudget.
+- FIX-S0-COST: `SkeletonGpuDispatcher::MeasuredMs` is the per-frame SUM of all passes (`GpuProductCost::MeanFrameMs`), no longer the last single pass; the
+  gap planner and the slot predict the real job cost (`LastPassMs` keeps the old number for diagnostics).
+
 ## Status and fallbacks
 
 Every downgrade is visible (Ctrl+I line, Ctrl+Alt+D, Config status); none is log-only. Strings (FallbackCatalog ids):
