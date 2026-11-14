@@ -41,7 +41,7 @@ namespace QueueKeyedTimelineTestsNs
 		uint16_t depth;      // render-ahead depth the plan keeps (R)
 		uint16_t queued;     // frames queued ahead of the render (the lane lead L)
 		uint16_t walk;       // look-ahead walk W (inside the queue)
-		uint64_t holdUs;     // the decaying-peak hold (the lane lead's rule; the test's clock)
+		uint64_t holdUs;     // the decaying-peak hold: the lane lead's window (core kLeadWindowSeconds; P uses the same, A1)
 	};
 
 	TEST_CLASS(QueueKeyedTimelineTests)
@@ -49,8 +49,11 @@ namespace QueueKeyedTimelineTestsNs
 	public:
 		TEST_METHOD(RenderAheadLookAheadAndFlushTimeline)
 		{
+			// The render clock is the display's refresh period, swept (no fixed rate): a non-60 display and a 59.94 one.
+			for (double refreshHz : { 50.0, 59.94 })
 			for (uint16_t D : { uint16_t(2), uint16_t(3), uint16_t(5) }) {
-				const Host h{ D, uint16_t(D + 3), uint16_t(D + 1), 2000000 };
+				const double clockPeriodUs = 1e6 / refreshHz;
+				const Host h{ D, uint16_t(D + 3), uint16_t(D + 1), SecondsToUs(kLeadWindowSeconds) };
 				SkeletonMemo m;
 				std::atomic<int> calls{ 0 };
 				OwnerFill f;
@@ -68,7 +71,7 @@ namespace QueueKeyedTimelineTestsNs
 				const uint64_t first = 100, last = 160, flushAt = 130;
 				int refills = 0;
 				for (uint64_t t = first; t <= last; ++t) {
-					const uint64_t nowUs = t * 16683;   // ~60 Hz render clock
+					const uint64_t nowUs = uint64_t(double(t) * clockPeriodUs);   // the swept display's render clock
 					if (t == flushAt) {
 						m.Invalidate(SkeletonMemo::InvalidateCause::Flush);   // the queue flushed: everything attached goes
 						++epoch;

@@ -102,18 +102,22 @@ namespace QueueWindowTestsNs
 
 		TEST_METHOD(WindowPeakHoldsThroughADipAndShrinksAfterASustainedFall)
 		{
-			const uint64_t hold = 10000000;   // the caller's window (the lane lead's), in microseconds; the window does not choose it
+			// The caller's window: the lane lead's (core kLeadWindowSeconds; P uses the same, A1); the window does not choose it.
+			// Every time below is in tenths of that hold, so the test follows the constant.
+			const uint64_t hold = SecondsToUs(kLeadWindowSeconds);
+			const uint64_t u = hold / 10u;
+			Assert::IsTrue(u > 1u, L"the hold is long enough to sample in tenths");
 			WindowPeak p(hold);
 			p.Sample(0, 6);
-			p.Sample(1000000, 2);   // a dip
-			p.Sample(2000000, 6);
-			Assert::AreEqual<int>(6, p.Value(3000000), L"a dip shorter than the hold keeps the peak");
-			for (uint64_t t = 3000000; t <= 14000000; t += 1000000)
+			p.Sample(1 * u, 2);   // a dip
+			p.Sample(2 * u, 6);
+			Assert::AreEqual<int>(6, p.Value(3 * u), L"a dip shorter than the hold keeps the peak");
+			for (uint64_t t = 3 * u; t <= 14 * u; t += u)
 				p.Sample(t, 3);   // a sustained fall
-			Assert::AreEqual<int>(6, p.Value(11000000), L"still within the hold of the last 6");
-			Assert::AreEqual<int>(3, p.Value(12500000), L"after the hold the window follows the fall");
-			p.Sample(13000000, 9);
-			Assert::AreEqual<int>(9, p.Value(13000001), L"a rise is taken at once");
+			Assert::AreEqual<int>(6, p.Value(11 * u), L"still within the hold of the last 6");
+			Assert::AreEqual<int>(3, p.Value(12 * u + u / 2), L"after the hold the window follows the fall");
+			p.Sample(13 * u, 9);
+			Assert::AreEqual<int>(9, p.Value(13 * u + 1), L"a rise is taken at once");
 		}
 
 		// QW-T8 .. QW-T11 (amendment 3): aheadCompute = min(max declared need of the ACTIVE consumers, kAheadCeiling, queue ahead).
