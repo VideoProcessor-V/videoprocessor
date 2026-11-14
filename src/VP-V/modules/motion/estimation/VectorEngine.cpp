@@ -258,6 +258,9 @@ namespace VpMotion
 		const auto now = std::chrono::steady_clock::now();
 		// refs/109 F1: the lead's cap is noted every frame (the log key above leaves the lead out; the status line shows it).
 		motionLeadCap.Note(MotionAhead::LeadCapped(ahead.depth, static_cast<size_t>((std::max)(0, ahead.available))));
+		motionLeadShort.Note(MotionAhead::LeadShortOfDepth(ahead.depth));   // R3: only a request above the ceiling is a fallback
+		if (MotionAhead::LeadShortOfDepth(ahead.depth))
+			motionLeadAsked = ahead.depth;
 		if (motionAheadLogged != key && (!levelOnly || now - motionAheadLoggedAt >= std::chrono::seconds(5)))
 		{
 			motionAheadLogged = key;
@@ -321,15 +324,19 @@ namespace VpMotion
 					(ditherKey & 1) ? "yes" : "no", (ditherKey & 2) ? "yes" : "no", (ditherKey & 4) ? "yes" : "no");
 			}
 		}
-		// refs/109 F1: the cap is shown while the forward look-ahead runs and it binds sustained. Synced only when it changes, outside
-		// VectorEngineFallbackSync (VectorEngineTests pins that group's exact per-frame sync counts, WAIVER-T1-01).
-		const bool leadCapShown = motionLeadCap.sustained && vectorDemand.mode == VectorDemand::Mode::Forward;
-		if (leadCapShown != motionLeadCapShown)
+		// refs/109 F1 + R3 (lead 12): while the forward look-ahead runs, the lead at the ceiling with more queued (sustained) is the
+		// DESIGNED state: the status / Ctrl+I info text only. The "motion_lookahead_capped" entry is engaged only while the depth asks
+		// for MORE than the ceiling gives (sustained). Synced only when it changes, outside VectorEngineFallbackSync (VectorEngineTests
+		// pins that group's exact per-frame sync counts, WAIVER-T1-01).
+		const bool forward = vectorDemand.mode == VectorDemand::Mode::Forward;
+		const bool leadAtCeiling = motionLeadCap.sustained && forward;
+		const bool leadShortShown = motionLeadShort.sustained && forward;
+		if (leadShortShown != motionLeadCapShown)
 		{
-			motionLeadCapShown = leadCapShown;
-			host.SyncFallback(FallbackCatalog::MotionLookaheadCapped(leadCapShown, MotionAhead::kMaxLead));
+			motionLeadCapShown = leadShortShown;
+			host.SyncFallback(FallbackCatalog::MotionLookaheadCapped(leadShortShown, MotionAhead::kMaxLead, motionLeadAsked));
 		}
-		const std::string line = VectorDemand::StatusLine(vectorDemand, leadCapShown ? MotionAhead::kMaxLead : 0);
+		const std::string line = VectorDemand::StatusLine(vectorDemand, leadAtCeiling ? MotionAhead::kMaxLead : 0);
 		if (line != vectorEngineLogged)
 		{
 			vectorEngineLogged = line;

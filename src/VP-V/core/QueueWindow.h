@@ -205,15 +205,18 @@ inline void SetAheadConsumers(QueueWindowTerms& t, const std::vector<AheadDemand
 }
 
 // Slice C wiring (lead 11; OD 11-14, design s10): what the window hands S-3a's PlanAhead (core/AdmissionTable.h AdmissionFacts::
-// aheadConsumers and queueAheadFrames), so the scheduler computes the SAME aheadCompute as the window: the same active consumers
+// aheadConsumers and queueAheadFrames), so the scheduler computes the SAME ahead-compute limit as the window: the same active consumers
 // with their declared needs, the same queue frames ahead (the window's ahead, the bound DeriveWindow applies) and the same ceiling
 // (AheadCeiling.h). The window's own aheadCompute rides along so the wiring can check both agree before any mode or budget step
 // (S-3a's games / competitive zero and its S-B / S-C then only lower it, each shown).
+// R3 (lead 12): the feed carries BOTH depths, each named for what it is:
+//   queueAheadFrames   = L + W, the frames queued ahead (the window's ahead: the bound DeriveWindow applies; not L alone);
+//   aheadComputeLimit  = min(max active consumer request, kAheadCeiling 6, queueAheadFrames): how far ahead work is COMPUTED.
 struct PlanAheadFeed {
-    std::vector<AheadDemand> activeConsumers;   // each active ahead consumer and its declared need (need 0 = not listed)
-    uint16_t queueAheadFrames = 0;              // frames queued ahead (the window's ahead)
+    std::vector<AheadDemand> activeConsumers;   // each active ahead consumer and its declared request (need 0 = not listed)
+    uint16_t queueAheadFrames = 0;              // L + W: the frames queued ahead (the window's ahead)
     uint16_t aheadCeiling = kAheadCeiling;      // the one ceiling (never a second copy at the call site)
-    uint16_t aheadCompute = 0;                  // the window's aheadCompute (before any plan)
+    uint16_t aheadComputeLimit = 0;             // the window's aheadCompute (before any plan): min(request, ceiling, queue)
 };
 inline PlanAheadFeed PlanAheadFeedOf(const QueueWindow& w, const std::vector<AheadDemand>& active)
 {
@@ -222,11 +225,11 @@ inline PlanAheadFeed PlanAheadFeedOf(const QueueWindow& w, const std::vector<Ahe
         if (d.need > 0)
             f.activeConsumers.push_back(d);
     f.queueAheadFrames = w.ahead;
-    f.aheadCompute = w.aheadCompute;
+    f.aheadComputeLimit = w.aheadCompute;
     return f;
 }
-// The aheadCompute rule applied to a feed (the law S-3a's AheadCompute implements; the wiring's drift check compares the two).
-inline uint16_t AheadComputeOf(const PlanAheadFeed& f)
+// The ahead-compute limit applied to a feed (the law S-3a's AheadCompute implements; the wiring's drift check compares the two).
+inline uint16_t AheadComputeLimitOf(const PlanAheadFeed& f)
 {
     uint16_t need = MaxAheadNeed(f.activeConsumers).need;
     if (need > f.aheadCeiling)

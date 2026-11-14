@@ -154,10 +154,18 @@ namespace MotionAhead
 	// refs/109 F1 (AUDIT-R, owner accepted 2026-11-11): the cap BINDS when the look-ahead runs and either the queue holds more frames
 	// ahead than kMaxLead (60p with the standard 250 ms queue: 14-15 ahead, lead 6) or the depth itself is above it (120p's 8, 240p's 16).
 	// It was log-only (the "Motion ahead:" line, whose re-log key leaves the lead out); it is now visible (no silent fallbacks):
-	// the vector engine status line and the "motion_lookahead_capped" fallback entry, while it binds SUSTAINED (LeadCapTracker).
+	// the vector engine status line while it binds SUSTAINED (LeadCapTracker); the fallback entry only as LeadShortOfDepth below.
+	// R3 (lead 12, on OD 11-14): the lead held at the ceiling while MORE are queued is the DESIGNED state (the owner's 6), not a
+	// downgrade: it is the Ctrl+I info line only (VectorDemand::StatusLine), no fallback entry. LeadCapped says it binds at all.
 	inline bool LeadCapped(int depth, size_t queuedAhead)
 	{
 		return depth > 0 && (depth > kMaxLead || queuedAhead > static_cast<size_t>(kMaxLead));
+	}
+	// The consumer gets LESS than it asked: its declared depth (motion_ahead_frames at the rate, DepthAt: 120p's 8, 240p's 16) is above
+	// the ceiling. Only this is the visible "motion_lookahead_capped" entry (no silent fallbacks), while it holds sustained.
+	inline bool LeadShortOfDepth(int depth)
+	{
+		return depth > kMaxLead;
 	}
 	// The queue level swings by a frame as frames arrive and are shown: the visible state changes only after kLeadCapRun frames in a
 	// row either way (the same 24-frame run as the global-pair miss, VectorEngine::NoteGlobalPair). Render thread.

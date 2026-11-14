@@ -63,7 +63,9 @@ namespace VpMotion
 		uint64_t vectorProducerFirstSubmit = 0;
 		bool vectorProducerSkipSustained = false;
 		// refs/109 F1: the look-ahead lead held at MotionAhead::kMaxLead (PlanProducer notes it per frame; UpdateVectorEngine shows it).
-		MotionAhead::LeadCapTracker motionLeadCap;
+		MotionAhead::LeadCapTracker motionLeadCap;     // binds at all: the Ctrl+I info text (R3: the designed state at the ceiling)
+		MotionAhead::LeadCapTracker motionLeadShort;   // the depth asks more than the ceiling: the fallback entry (MotionAhead::LeadShortOfDepth)
+		int motionLeadAsked = 0;                       // that depth (the request), named in the entry
 		bool motionLeadCapShown = false;   // the "motion_lookahead_capped" entry as last synced (synced on change only)
 
 		// ---- W2-C1 (B9): the one motion-engine state (VectorDemand::MotionEngineStatus; IVectorEngine::State / Work) ----------
