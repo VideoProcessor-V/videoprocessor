@@ -353,7 +353,7 @@ namespace QueueKeyedTimelineTestsNs
 				m.Acquire(kP10GrainSplit, s, AcquireForm::Cpu);
 			const uint64_t releasedBefore = m.CountersOf(kP10GrainSplit).released;
 			AheadPlan p;
-			p.depth.push_back(std::make_pair(uint16_t(kP10GrainSplit), uint16_t(0)));
+			p.depth.push_back(AheadPlan::Entry{ uint16_t(kP10GrainSplit), 0, 0 });
 			p.step = AheadStep::ShorterQueue;
 			p.line = "memo ahead plan: shorter queue";
 			m.SetAheadPlan(p);
