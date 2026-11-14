@@ -11,11 +11,22 @@
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
 
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
+
+#if __has_include(<VP-V/modules/scaling/output/AdaptiveDownscaleCut.h>)
+#define X5AB_TIP_CUT 1
+#include <VP-V/modules/scaling/output/AdaptiveDownscaleCut.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
+#endif
 
 namespace VideoProcessorTest
 {
@@ -610,4 +621,6 @@ namespace VideoProcessorTest
 				L"no memo on this thread: visible Unavailable");
 		}
 	};
+
+#include "X5AbCaptureTests.inl"
 }
