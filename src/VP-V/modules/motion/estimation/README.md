@@ -397,3 +397,11 @@ Design goal (refs/129 L-B4; iface-L-CORE sections 4-7; refs/128): the half luma 
 - P7 slot bytes: written and read by the ONE codec `CameraLink::EncodeRecordPod` / `DecodeRecordPod` (`global_model/link/CameraRecordPool.h`, magic CRD1; tests `tests/CameraRecordPodTests.cpp`: round-trip, refusal, FixedLagSmoother parity). Blocks and objects stay in the camera store, not the slot. A P9 owner fill fed from the P7 slot does NOT exist yet (open, 102b L-B4-P9-FILL).
 - Settings: none new (no Config key, no default; the P1 read is a seam, not a switch).
 - Fallback visibility: the producer keeps its private HalfLuma8 only for RGB / full-range formats (OwnDecode) and on a P1 miss (Unread); both are counted in `P1AcquireSource`, with no on-screen consumer yet (102b row L-B4-P1-COUNTERS-NO-CONSUMER).
+
+## FlowOf lease window (QKP slice E, design-queue-keyed-products s9.3)
+
+`VectorEngine::FlowOf` keeps a map of leases keyed (from, to, scale), not one. The bound is the host's derived queue window
+(`SetQueueWindowBoard`; core/QueueWindow.h): a lease whose frame is older than current - back leaves, never because a newer pair was
+asked. A pair no longer in the P2 slot drops its lease (a lease never extends P2 retention); a vectors-valid or board epoch move drops
+all. A view is valid until its pair leaves the window or an invalidation. Shown by `LeaseWindowLine()`: "vector lease window not fed" (no
+board: today's single lease) or "vector lease window capped by the P2 ring: behind 3 / ahead 13" (102b VE-P2-RETENTION, owner L-B4).
