@@ -313,8 +313,8 @@ Decisions (provenance: decision log = `D:/codex/vp-handover/refs/owner-decisions
   (lane or not), `DeriveMemoWindow` sets the memo window and publishes the `QueueWindowBoard` before the memo's seal, every OnQueue
   kind but BacklogFlush bumps the memo epoch AT the call and a Drop discards its seqs, and the no-lane VRAM grant asks for one level
   per ahead-ladder step (never 0 while a level fits) with the interim S-A / S-B ahead plan applied. H and the active ahead need are
-  UNWIRED until the memo offers its declared fill history / active ahead demands (TODO, 102b row QKP-B-MEMO-ACCESSORS, trigger
-  "L-CORE accessor tip"); they are named by Ctrl+Alt+D ("not fed: ...") and the Fallbacks line `skeleton_queue_window`, never a silent 0.
+  fed from the memo's DeclaredFillHistory() / ActiveAheadDemands() (L-CORE); the lane graph's lag edges join H later (102b QKP-B-LANE-GRAPH-H).
+  A term nobody feeds is named by Ctrl+Alt+D ("not fed: ...") and the Fallbacks line `skeleton_queue_window`, never a silent 0.
 Times are EST (UTC = EST + 5 h); transcript session cf1d27fa-e9e0-4e7a-b3a8-9416d0edfd34 (D:/codex/vp-handover/TRANSCRIPT-INDEX.md).
 
 ## Scheduler budget feed and the IC-2 contract (S0)
