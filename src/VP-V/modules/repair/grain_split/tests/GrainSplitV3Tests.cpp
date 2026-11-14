@@ -18,6 +18,7 @@
 
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
+#include <VP-V/tests/support/GrainReferenceModel.h>
 
 #include <algorithm>
 #include <cmath>
@@ -569,6 +570,28 @@ namespace GrainSplitV3TestsNs
 			Plane flat(40, 30, 123.0);
 			const Plane fh = GrainSplit::V3HalfBlur(GrainSplit::V3Half(flat), 5.0);
 			Require(std::fabs(GrainSplit::V3LowAt(fh, 17, 11) - 123.0) < 1e-9, "constant plane through half blur and low read");
+		}
+
+		// B3 band memo oracle: BandFromPlane (box 2x2 + Bill's LowWeight law) equals the consumers' private reference (GrainModel::Low)
+		// bit for bit, keeps a constant plane constant and has unit DC gain, at the three consumer sigmas, odd sizes included.
+		TEST_METHOD(BandFromPlaneMatchesConsumerReferenceAndIsNormalised)
+		{
+			const double sigmas[3] = { GrainPreserve::kLowSigma, GrainPreserve::kSplitSigma, 9.0 };
+			for (double sg : sigmas)
+			{
+				GrainModel::Image img(67, 45);
+				std::mt19937 rng(7);
+				for (double& x : img.v) x = static_cast<double>(rng() % 1024);
+				int hw = 0, hh = 0;
+				const std::vector<double> band = VpUnit::BandFromBase::BandFromPlane(img.v, img.w, img.h, sg, &hw, &hh);
+				const GrainModel::Image ref = GrainModel::Low(img, sg);
+				Require(hw == ref.w && hh == ref.h && band.size() == ref.v.size(), "band size is the half grid");
+				double worst = 0.0;
+				for (size_t i = 0; i < band.size(); ++i) worst = (std::max)(worst, std::fabs(band[i] - ref.v[i]));
+				Require(worst == 0.0, "BandFromPlane == GrainModel::Low");
+				const std::vector<double> flat = VpUnit::BandFromBase::BandFromPlane(std::vector<double>(67 * 45, 321.0), 67, 45, sg);
+				for (double x : flat) Require(std::fabs(x - 321.0) < 1e-9, "constant plane stays constant");
+			}
 		}
 	};
 }
