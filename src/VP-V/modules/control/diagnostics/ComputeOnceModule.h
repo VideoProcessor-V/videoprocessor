@@ -14,7 +14,15 @@
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/modules/control/diagnostics/ComputeOnceReport.h>
 
+// A TU without the pch (HubBootstrap.cpp) may already have <windows.h> without NOMINMAX: keep the min/max macros
+// away from DebugLogRetention.h's std::numeric_limits<>::max() and restore them after.
+#pragma push_macro("min")
+#pragma push_macro("max")
+#undef min
+#undef max
 #include <DebugLog.h>
+#pragma pop_macro("max")
+#pragma pop_macro("min")
 
 #include <chrono>
 #include <memory>
