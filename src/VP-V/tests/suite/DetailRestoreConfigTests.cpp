@@ -177,7 +177,10 @@ namespace DetailRestoreConfigTestsNs
 		{
 			std::vector<SourceResolution::Spectrum> spectra(tiles.size());
 			for (size_t i = 0; i < tiles.size(); ++i)
+			{
 				Assert::IsTrue(SourceResolution::Analyse(tiles[i].data(), kTile, kTile, spectra[i], 1023));
+				spectra[i].coding = VpUnit::CodingEvidence::MeasureTile(tiles[i].data(), kTile, kTile, 1023);
+			}
 			SourceResolution::Thresholds t;
 			t.codeMaximum = 1023;
 			return SourceResolution::ReadFrame(spectra, t);

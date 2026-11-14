@@ -989,6 +989,7 @@ namespace VideoProcessorTest
 						tile[i] = static_cast<float>(std::round((std::min)(1.0, (std::max)(0.0, v)) * 1023.0) / 1023.0);
 					}
 					SourceResolution::Analyse(tile.data(), kTile, kTile, spectra[p], 1023);
+					spectra[p].coding = VpUnit::CodingEvidence::MeasureTile(tile.data(), kTile, kTile, 1023);
 				}
 				SourceResolution::Thresholds th;
 				SourceResolution::SetTileCentres(places, th);
@@ -1013,6 +1014,7 @@ namespace VideoProcessorTest
 						tile[i] = static_cast<float>(std::round((std::min)(1.0, (std::max)(0.0, v)) * 1023.0) / 1023.0);
 					}
 					SourceResolution::Analyse(tile.data(), kTile, kTile, spectra[p], 1023);
+					spectra[p].coding = VpUnit::CodingEvidence::MeasureTile(tile.data(), kTile, kTile, 1023);
 				}
 				SourceResolution::Thresholds th;
 				SourceResolution::SetTileCentres(places, th);
@@ -2653,6 +2655,7 @@ namespace VideoProcessorTest
 							places[i].x0, places[i].y0, tile, i % 2 ? 0.55 : 0.35);
 						SrcExact::Quantise(v, 0.0, codes.data());
 						Assert::IsTrue(SourceResolution::Analyse(codes.data(), tile, tile, spectra[i], 1023));
+						spectra[i].coding = VpUnit::CodingEvidence::MeasureTile(codes.data(), tile, tile, 1023);
 					}
 					for (bool fixes : { false, true })
 					{

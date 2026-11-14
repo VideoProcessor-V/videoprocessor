@@ -148,7 +148,10 @@ namespace VideoProcessorTest
 		{
 			std::vector<SourceResolution::Spectrum> spectra(tiles.size());
 			for (size_t i = 0; i < tiles.size(); ++i)
+			{
 				Assert::IsTrue(SourceResolution::Analyse(tiles[i].data(), kTile, kTile, spectra[i], codeMax));
+				spectra[i].coding = VpUnit::CodingEvidence::MeasureTile(tiles[i].data(), kTile, kTile, codeMax);
+			}
 			SourceResolution::Thresholds t;
 			t.codeMaximum = codeMax;
 			if (!textGuard) t.textBand = 0.0;
@@ -556,7 +559,7 @@ namespace VideoProcessorTest
 				return t; });
 			char line[200];
 			snprintf(line, sizeof(line), "clean: quality %.2f blockiness %.2f band %.3f bits %.1f | blocked: quality %.2f blockiness %.2f band %.3f\n",
-				clean.bitrateQuality, clean.blockiness, clean.bandShare, clean.effectiveBits, blocked.bitrateQuality, blocked.blockiness, blocked.bandShare);
+				clean.bitrateQuality, clean.coding.blockiness, clean.bandShare, clean.effectiveBits, blocked.bitrateQuality, blocked.coding.blockiness, blocked.bandShare);
 			Logger::WriteMessage(line);
 			Assert::IsTrue(clean.bitrateQuality > 0.8, L"a clean frame reads clean");
 			Assert::IsTrue(blocked.bitrateQuality < 0.5, L"a blocked frame reads below 0.5 (spec 4)");
@@ -739,13 +742,14 @@ namespace VideoProcessorTest
 								const auto start = std::chrono::steady_clock::now();
 								SourceResolution::Analyse(tile.data(), kTile, kTile, spectrum, codeMax);
 								analyseMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+								spectrum.coding = VpUnit::CodingEvidence::MeasureTile(tile.data(), kTile, kTile, codeMax);
 								spectra.push_back(std::move(spectrum));
 							}
 						SourceResolution::Thresholds t;
 						t.codeMaximum = codeMax;
 						const SourceResolution::FrameReading r = SourceResolution::ReadFrame(spectra, t);
 						char name[160];
-						snprintf(name, sizeof(name), "%.10s f%lld %s [q %.2f bits %.1f blk %.2f band %.3f]", clip.file.c_str(), frameIndex, c.name.c_str(), r.bitrateQuality, r.effectiveBits, r.blockiness, r.bandShare);
+						snprintf(name, sizeof(name), "%.10s f%lld %s [q %.2f bits %.1f blk %.2f band %.3f]", clip.file.c_str(), frameIndex, c.name.c_str(), r.bitrateQuality, r.effectiveBits, r.coding.blockiness, r.bandShare);
 						Log(name, r);
 						if (c.ratio >= 1.0) peakNative = (std::max)(peakNative, r.peakiness);
 						else peakUpscale = (std::max)(peakUpscale, r.peakiness);
@@ -869,6 +873,7 @@ namespace VideoProcessorTest
 									tile[static_cast<size_t>(yy) * kTile + xx] = y[static_cast<size_t>(Y0 + yy) * W + X0 + xx] / static_cast<float>(codeMax);
 							SourceResolution::Spectrum spectrum;
 							SourceResolution::Analyse(tile.data(), kTile, kTile, spectrum, codeMax);
+							spectrum.coding = VpUnit::CodingEvidence::MeasureTile(tile.data(), kTile, kTile, codeMax);
 							spectra.push_back(std::move(spectrum));
 						}
 					SourceResolution::Thresholds t;
@@ -1504,7 +1509,7 @@ namespace VideoProcessorTest
 			const SourceResolution::FrameReading b = ReadScene(studio);
 			char line[160];
 			snprintf(line, sizeof(line), "flat animation: quality %.2f (blockiness %.2f, band %.3f); white studio: quality %.2f (band %.3f)\n",
-				a.bitrateQuality, a.blockiness, a.bandShare, b.bitrateQuality, b.bandShare);
+				a.bitrateQuality, a.coding.blockiness, a.bandShare, b.bitrateQuality, b.bandShare);
 			Logger::WriteMessage(line);
 			Assert::IsTrue(a.bitrateQuality >= 0.8, L"clean flat animation is not poor");
 			Assert::IsTrue(b.bitrateQuality >= 0.8, L"a clean white studio is not poor");
@@ -1783,7 +1788,10 @@ namespace VideoProcessorTest
 		{
 			std::vector<SourceResolution::Spectrum> spectra(tiles.size());
 			for (size_t i = 0; i < tiles.size(); ++i)
+			{
 				Assert::IsTrue(SourceResolution::Analyse(tiles[i].data(), kTile, kTile, spectra[i], codeMax));
+				spectra[i].coding = VpUnit::CodingEvidence::MeasureTile(tiles[i].data(), kTile, kTile, codeMax);
+			}
 			SourceResolution::Thresholds t;
 			t.codeMaximum = codeMax;
 			t.codingFixes = fixes;
@@ -1903,7 +1911,7 @@ namespace VideoProcessorTest
 				const auto k = ReadCodingMode(clean, true);
 				char line[220];
 				snprintf(line, sizeof(line), "ratio %.3f: coded quality %.2f blockiness %.2f (earlier %.2f / %.2f) | clean quality %.2f blockiness %.2f band %.3f\n",
-					ratio, c.bitrateQuality, c.blockiness, cOld.bitrateQuality, cOld.blockiness, k.bitrateQuality, k.blockiness, k.bandShare);
+					ratio, c.bitrateQuality, c.coding.blockiness, cOld.bitrateQuality, cOld.coding.blockiness, k.bitrateQuality, k.coding.blockiness, k.bandShare);
 				Logger::WriteMessage(line);
 				Assert::IsTrue(c.bitrateQuality < 0.5, L"a coded picture reads low quality at any upscale");
 				Assert::IsTrue(k.bitrateQuality > 0.8, L"a clean upscale reads clean");
@@ -1912,7 +1920,7 @@ namespace VideoProcessorTest
 			}
 			// Native texture (the synthetic scene, with grain) is not a grid.
 			const SourceResolution::FrameReading texture = ReadScene([&](unsigned seed) { return Tile(Scene(seed), 1.0, kLanczos3, 1.0 / 255.0, 1023, seed); });
-			Assert::IsTrue(texture.blockiness < 1.25, L"native texture reads unblocked");
+			Assert::IsTrue(texture.coding.blockiness < 1.25, L"native texture reads unblocked");
 			// A slow gradient steps one code at a fixed period (here every 10 px) along one axis:
 			// quantisation, not a coding grid.
 			std::vector<std::vector<float>> slow;
@@ -1924,7 +1932,7 @@ namespace VideoProcessorTest
 						t[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round(400.0 + (x + seed) / 10.0) / 1023.0);
 				slow.push_back(t);
 			}
-			Assert::IsTrue(ReadCodingMode(slow, true).blockiness < 1.1, L"a slow one-axis gradient is not blocked");
+			Assert::IsTrue(ReadCodingMode(slow, true).coding.blockiness < 1.1, L"a slow one-axis gradient is not blocked");
 		}
 
 		// M3: band edges count with noise, toggles and a soft upscaled edge; grain on a flat
@@ -1987,7 +1995,7 @@ namespace VideoProcessorTest
 							if (x < 255) steps[static_cast<size_t>(x)] += 3.0 / width;
 						}
 					double found = 0.0;
-					const double blockiness = SourceResolution::GridBlockiness(steps, found);
+					const double blockiness = VpUnit::CodingEvidence::GridBlockiness(steps, found);
 					char line[120];
 					snprintf(line, sizeof(line), "grid %.1f px, %d px wide: blockiness %.2f at %.2f px\n", period, width, blockiness, found);
 					Logger::WriteMessage(line);
@@ -1999,10 +2007,10 @@ namespace VideoProcessorTest
 			std::vector<double> edge(255, 1.0);
 			edge[100] = 40.0;
 			double found = 0.0;
-			Assert::IsTrue(SourceResolution::GridBlockiness(edge, found) < 1.05, L"one edge is not a grid");
+			Assert::IsTrue(VpUnit::CodingEvidence::GridBlockiness(edge, found) < 1.05, L"one edge is not a grid");
 			std::vector<double> wave(255);
 			for (int x = 0; x < 255; ++x) wave[static_cast<size_t>(x)] = 1.0 + 0.3 * std::sin(x * 0.05);
-			Assert::IsTrue(SourceResolution::GridBlockiness(wave, found) < 1.1, L"smooth variation is not a grid");
+			Assert::IsTrue(VpUnit::CodingEvidence::GridBlockiness(wave, found) < 1.1, L"smooth variation is not a grid");
 		}
 
 		TEST_METHOD(DescribeIsGeneral)

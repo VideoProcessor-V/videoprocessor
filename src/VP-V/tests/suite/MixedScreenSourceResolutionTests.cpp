@@ -303,6 +303,7 @@ namespace VideoProcessorTest
 						}
 					}
 					Assert::IsTrue(SourceResolution::Analyse(tile.data(), kTile, kTile, spectra[i], 1023));
+					spectra[i].coding = VpUnit::CodingEvidence::MeasureTile(tile.data(), kTile, kTile, 1023);
 				}
 				return spectra;
 			}
