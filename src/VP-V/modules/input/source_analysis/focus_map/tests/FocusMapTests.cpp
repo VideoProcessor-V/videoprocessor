@@ -283,8 +283,7 @@ namespace VideoProcessorTest
 				}
 				Check(ok == reps, "every live frame was built");
 				char msg[256];
-				std::snprintf(msg, sizeof(msg), "BENCH focus_map CPU form 3840x2160 (%dx%d blocks): isolated ComputeGrid %.3f ms/frame; live Acquire fill %.3f ms/frame (incl. fake-input copies)
-",
+				std::snprintf(msg, sizeof(msg), "BENCH focus_map CPU form 3840x2160 (%dx%d blocks): isolated ComputeGrid %.3f ms/frame; live Acquire fill %.3f ms/frame (incl. fake-input copies)\n",
 					g.gw, g.gh, isolatedMs, liveMs / reps);
 				Logger::WriteMessage(msg);
 			}
