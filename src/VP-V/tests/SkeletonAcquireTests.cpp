@@ -357,6 +357,8 @@ namespace SkeletonAcquireTestsNs
 			m.ReplaceOwnerFill(kP10GrainSplit, AcquireForm::Gpu, kGrainUnit, f2);
 			Assert::IsTrue(m.Acquire(kP10GrainSplit, 1, AcquireForm::Gpu, other).cause == AcquireCause::OverBudget, L"over budget");
 			Assert::AreEqual(1, calls, L"the fill did not run");
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 1, AcquireForm::Gpu, other).cause == AcquireCause::OverBudget, L"the frame's decline is kept");
+			Assert::AreEqual(1, calls, L"the kept decline did not ask the owner again");
 			Assert::IsTrue(AnyDecision(m.Decisions(), ("skeleton acquire product " + std::to_string(kP10GrainSplit)).c_str(), "VRAM ledger grant exceeded"), L"Fallbacks decision");
 
 			// A reader recorded a GPU read up to fence 50: the released spot is held until the fence completes.
@@ -728,6 +730,94 @@ namespace SkeletonAcquireTestsNs
 			Assert::IsTrue(waited.status == AcquireStatus::Reused && waited.source == AcquireSource::Memo, L"the other waited for the one fill and reused it");
 			Assert::IsTrue(st->outerA.status == AcquireStatus::FilledAtRead && st->outerB.status == AcquireStatus::FilledAtRead, L"both outer fills complete");
 			Assert::IsTrue(st->aCalls.load() == 1 && st->bCalls.load() == 1, L"each computed once");
+		}
+
+		// Three threads: T0's fill of A is in flight (held open); T1 and T2 both wait on that one in-flight key. Two waiters on one
+		// key is not a cycle: neither is refused (no false Reentrant), both reuse the single fill.
+		TEST_METHOD(TwoWaitersOnOneInFlightKeyAreNotACycle)
+		{
+			struct S {
+				SkeletonMemo m;
+				std::atomic<bool> aStarted{ false }, release{ false };
+				std::atomic<int> aCalls{ 0 };
+				AcquireResult r0, r1, r2;
+			};
+			auto st = std::make_shared<S>();
+			S* p = st.get();
+			OwnerFill fa;
+			fa.fill = [p](const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput& out) {
+				p->aCalls.fetch_add(1);
+				p->aStarted = true;
+				WaitFlag(p->release);
+				Fill8(out, 0x66);
+				return true;
+			};
+			st->m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, fa);
+			const bool ran = RunsWithin([st]() {
+				std::thread t0([st]() { st->r0 = st->m.Acquire(kP10GrainSplit, 4, AcquireForm::Cpu); });
+				WaitFlag(st->aStarted);
+				std::thread t1([st]() { st->r1 = st->m.Acquire(kP10GrainSplit, 4, AcquireForm::Cpu); });
+				std::thread t2([st]() { st->r2 = st->m.Acquire(kP10GrainSplit, 4, AcquireForm::Cpu); });
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));   // let both waiters block on the in-flight fill
+				st->release = true;
+				t0.join();
+				t1.join();
+				t2.join();
+			}, 15000);
+			Assert::IsTrue(ran, L"two waiters on one in-flight key complete");
+			Assert::IsTrue(st->r0.status == AcquireStatus::FilledAtRead, L"the filler filled");
+			Assert::IsTrue(st->r1.status == AcquireStatus::Reused && st->r2.status == AcquireStatus::Reused, L"both waiters reuse the one fill");
+			Assert::IsTrue(st->r1.cause != AcquireCause::Reentrant && st->r2.cause != AcquireCause::Reentrant, L"no false Reentrant");
+			Assert::AreEqual(1, st->aCalls.load(), L"computed once");
+			Assert::AreEqual(size_t(0), size_t(st->m.CountersOf(kP10GrainSplit).unavailable[size_t(AcquireCause::Reentrant)]), L"no Reentrant counted");
+		}
+
+		// The cycle of CycleAcrossThreads, but the filler whose inner request is refused DECLINES (returns false): the other waiter
+		// (blocked on that filler's key) is woken with the cause (OwnerDeclined) and does not hang.
+		TEST_METHOD(CycleWhereTheRefusedFillerDeclinesWakesTheOtherWaiter)
+		{
+			struct S {
+				SkeletonMemo m;
+				std::atomic<bool> aStarted{ false }, bStarted{ false };
+				AcquireResult innerB, innerA, outerA, outerB;
+			};
+			auto st = std::make_shared<S>();
+			S* p = st.get();
+			OwnerFill fa;
+			fa.fill = [p](const OwnerFillRequest& r, SkeletonMemo& memo, OwnerFillOutput& out) {
+				p->aStarted = true;
+				WaitFlag(p->bStarted);
+				p->innerB = memo.Acquire(kP11RegionBlockStats, r.seq, AcquireForm::Cpu);
+				if (!p->innerB.Ok())
+					return false;   // the refused filler declines
+				Fill8(out, 0x77);
+				return true;
+			};
+			OwnerFill fb;
+			fb.fill = [p](const OwnerFillRequest& r, SkeletonMemo& memo, OwnerFillOutput& out) {
+				p->bStarted = true;
+				WaitFlag(p->aStarted);
+				p->innerA = memo.Acquire(kP10GrainSplit, r.seq, AcquireForm::Cpu);
+				if (!p->innerA.Ok())
+					return false;   // the refused filler declines
+				Fill8(out, 0x88);
+				return true;
+			};
+			st->m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, fa);
+			st->m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, fb);
+			const bool ran = RunsWithin([st]() {
+				std::thread t1([st]() { st->outerA = st->m.Acquire(kP10GrainSplit, 7, AcquireForm::Cpu); });
+				std::thread t2([st]() { st->outerB = st->m.Acquire(kP11RegionBlockStats, 7, AcquireForm::Cpu); });
+				t1.join();
+				t2.join();
+			}, 15000);
+			Assert::IsTrue(ran, L"the cycle with a declining refused filler does not deadlock");
+			const bool aRefused = st->innerA.cause == AcquireCause::Reentrant;
+			const bool bRefused = st->innerB.cause == AcquireCause::Reentrant;
+			Assert::IsTrue(aRefused != bRefused, L"exactly one inner request closes the cycle");
+			const AcquireResult& woken = aRefused ? st->innerB : st->innerA;
+			Assert::IsTrue(woken.status == AcquireStatus::Unavailable && woken.cause == AcquireCause::OwnerDeclined, L"the other waiter wakes with the cause (OwnerDeclined)");
+			Assert::IsTrue(st->outerA.cause == AcquireCause::OwnerDeclined && st->outerB.cause == AcquireCause::OwnerDeclined, L"both outer requests see the decline");
 		}
 	};
 }
