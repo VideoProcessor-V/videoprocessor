@@ -392,5 +392,18 @@ class NearDupUnitPatternsTest(unittest.TestCase):
             self.assertTrue(any(r.search(line) for r in reg[uid]["signatures"]), uid)
 
 
+class FocusAcquireAllowTest(unittest.TestCase):
+    """L-FOCUS: Acquire(kP11RegionBlockStats) is a consumer read of the published product; a line that computes block
+    statistics and only mentions the id stays counted."""
+    def test_acquire_argument_allowed_computation_still_counted(self):
+        with tempfile.TemporaryDirectory() as r:
+            f = "src/VP-V/modules/repair/focus/Use.cpp"
+            _w(r, f, "auto* b = memo.Acquire(VpSkeleton::kP11RegionBlockStats, form);\n"
+                     "auto* c = memo.Acquire(kP11RegionBlockStats, form);\n"
+                     "float blockMean = Sum(p) / n; // kP11RegionBlockStats\n")
+            h = _unit(csu.scan(r), "U4")["hits"]
+            self.assertEqual([x["line"] for x in h if x["role"] == "duplicate"], [3])
+
+
 if __name__ == "__main__":
     unittest.main()
