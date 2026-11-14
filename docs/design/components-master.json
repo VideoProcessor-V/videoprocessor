@@ -1008,6 +1008,7 @@
         "shaders/SSimDownscaler.glsl",
         "shaders/SSimSuperRes.glsl",
         "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.h",
+        "src/VP-V/modules/scaling/output/PicturePrecision.h",
         "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp",
         "src/VP-V/modules/scaling/output/NlsMaskMapping.h"
       ],
@@ -1572,6 +1573,7 @@
       "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/modules/control/diagnostics/DiagnosticOverrides.h",
+        "src/VP-V/modules/control/diagnostics/LibplaceboErrors.h",
         "src/VP-V/modules/control/diagnostics/DiagnosticOverridesModule.h",
         "src/VP-V/modules/control/diagnostics/StateReport.cpp",
         "src/VP-V/modules/control/diagnostics/CrashState.cpp",
