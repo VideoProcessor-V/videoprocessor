@@ -58,6 +58,8 @@ namespace VpFrameAnalysis
 				m_unread.fetch_add(1, std::memory_order_relaxed);
 				return false;
 			}
+			// Bit depth: every lane tap view is msbShift 6 (10-bit codes <<6), the only shift Engine8Half is exact for; the lane
+			// publishes no other view, and an RGB / full-range view never reaches here (refused above as OwnDecode).
 			// The memo / slot bytes are byte-addressed: copy the half plane out aligned (the pin holds them only for this call).
 			std::vector<uint16_t> half(static_cast<size_t>(w) * h);
 			std::memcpy(half.data(), r.cpu, halfBytes);
@@ -71,6 +73,9 @@ namespace VpFrameAnalysis
 			return true;
 		}
 
+		// Threading + lifetime: ReadEngine8 runs on the producer thread; the AcquireFn the owner supplies (VectorEngine) captures
+		// only the renderer host key (host_), which outlives the producer (VectorEngine owns it and stops the producer first).
+		// The counters have no on-screen consumer yet: register 102b row L-B4-P1-COUNTERS-NO-CONSUMER.
 		uint64_t Acquired() const { return m_acquired.load(std::memory_order_relaxed); }
 		uint64_t Unread() const { return m_unread.load(std::memory_order_relaxed); }
 		uint64_t OwnDecode() const { return m_ownDecode.load(std::memory_order_relaxed); }   // refused: producer keeps its own codes

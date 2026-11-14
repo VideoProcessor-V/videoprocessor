@@ -7,15 +7,18 @@
 // the picture rectangle. Per-block arrays and object lists are NOT in the slot (they stay in the camera store); a decoded record
 // therefore has empty blocks/objects, exactly like FixedLagSmoother's own copies.
 // The P7 publisher (CameraLane / CameraFitWorker, lane L-B6) must use this same codec. Pure, header-only, C++14, no Windows, no GPU.
-// Layout: little-endian by construction (memcpy of IEEE doubles on a little-endian host; static_assert below), version byte first.
+// Layout: little-endian by construction (memcpy of IEEE doubles; every VP-V target, x64 MSVC, is little-endian; the static_assert below pins the double format), version byte first.
 #pragma once
 
 #include <cstdint>
 #include <cstring>
 #include <cstddef>
+#include <limits>
 #include <utility>
 
 #include "CameraMotion.h"
+
+static_assert(sizeof(double) == 8 && std::numeric_limits<double>::is_iec559, "P7SlotCodec: IEEE-754 binary64 doubles required");
 
 namespace CameraModel
 {
