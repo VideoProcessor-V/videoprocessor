@@ -374,7 +374,7 @@ namespace Tests
 
 		TEST_METHOD(UnarmedNeverReadsTheSchedule)
 		{
-			const std::string path = TempFile("vp_resync_schedule_env_test2.txt", "at 1s seek" + std::string(1, char(10)));
+			const std::string path = TempFile("vp_resync_schedule_env_test2.txt", "at 1s seek\r" + std::string(1, char(10)));
 			ResyncInject inj(Env("", path));
 			Assert::IsFalse(inj.Armed());
 			Assert::AreEqual<size_t>(0, inj.ScheduleRemaining());
@@ -391,7 +391,7 @@ namespace Tests
 			ResyncInject missing(Env("1", "Z:/no/such/schedule.txt"));
 			Assert::IsTrue(missing.Armed() && !missing.ScheduleError().empty());
 			Assert::IsTrue(missing.StatusText().find("NOT loaded") != std::string::npos);
-			const std::string path = TempFile("vp_resync_schedule_env_test3.txt", "at 1s nonsense" + std::string(1, char(10)));
+			const std::string path = TempFile("vp_resync_schedule_env_test3.txt", "at 1s nonsense\r" + std::string(1, char(10)));
 			ResyncInject bad(Env("1", path));
 			Assert::IsFalse(bad.ScheduleError().empty());
 			Assert::IsTrue(bad.StatusText().find("NOT loaded") != std::string::npos);
