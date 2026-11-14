@@ -10,12 +10,9 @@
 //  * Backward(seq) = pair (seq -> seq - 1) on frame seq's grid: the pair's backward vectors.
 //  Vectors are in SOURCE pixels of the frame the producer saw (the engine's grid cell is 4 pixels of the producer's input, which is the
 //  source scaled by sourceWidth / flow.halfW); the host scales them to the re-based plane as for any source (the module never rescales).
-//  Trust per cell is the ENGINE's memo (FlowView::CellTrust / CellTrustBackward, computed once per pair by the engine's FlowOf lease; this
-//  adapter holds no trust arithmetic, L-B6 WAIVER-B6-TD-TRUST). It is the de-judder's own engine-trust weighting (OpticalFlowTrust), not a raw cost scale: the cell's block cost weight
-//  (Flow::costWeight for the forward direction, the same CostWeights maths on the backward costs; cost judged against the pair's own median and
-//  spread) times the engine's forward/backward consistency weight (Flow::fbError, FallOff from the matcher's consistency limit to twice it;
-//  the backward direction swaps the two fields). Both are in [0, 1], 1 = as sure as the engine usually is; a pair without them is not guessed
-//  at (absent: "the pair has no vectors or costs"). Camera() stays false (the camera model reaches TD through its own adapter).
+//  Trust per cell is the ENGINE's memo (FlowView::CellTrust / CellTrustBackward, computed once per pair and tolerance by the engine's FlowOf lease;
+//  this adapter holds no trust arithmetic, L-B6 WAIVER-B6-TD-TRUST). Both are in [0, 1]; a pair without a trust plane is not guessed at (absent:
+//  "the pair has no vectors or costs"). Camera() stays false (the camera model reaches TD through its own adapter).
 //
 // ABSENT is visible: a pair that is not in the slot, is stale (the vectors-valid state moved: MotionValidity::PairValid), or does not fit
 // the source size answers false (TD takes its causal substitute) and is counted by kind; a sustained run raises the "td motion" entry

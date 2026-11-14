@@ -367,6 +367,9 @@ namespace VideoProcessorTest
 			Assert::IsTrue(withExtras.haveProducerGlobal);
 			Assert::IsFalse(without.haveProducerGlobal);
 			Assert::IsTrue(withExtras.trust == without.trust, L"the producer's extras do not change the engine trust");
+			bool someBelowOne = false;
+			for (const float v : withExtras.trust) someBelowOne = someBelowOne || v < 1.0f;
+			Assert::IsTrue(someBelowOne, L"the inputs exercise the weighting");
 			float g[4] = {}, second[4] = {};
 			MotionAhead::FlowGlobal(without.forward, without.forwardCost, without.gridW, without.gridH, g, second);
 			for (int k = 0; k < 4; ++k)
