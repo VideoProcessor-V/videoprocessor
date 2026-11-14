@@ -360,6 +360,11 @@ struct AcquireCounters {
     uint64_t filledAtRead = 0;
     uint64_t ownerFillCalls = 0;   // == filledAtRead + declined / over-budget fills: proves "computed once"
     uint64_t reusedLaneCopy = 0;   // off the render thread: the lane's published bytes copied out (no recompute)
+    // L-CORE M5 (coordinator ruling on B1-SEAL-VIA-ACQUIRE): the seal's own CPU live fill, counted in the same ledger.
+    uint64_t sealComputed = 0;     // the seal computed the frame (no Acquire publication): published as the lane slot
+    uint64_t sealReused = 0;       // the seal copied an Acquire publication (computed once, by the owner fill)
+    // Frames COMPUTED for this product (any variant): owner fills that published + seal computes. The compute-once ledger.
+    uint64_t Computed() const { return filledAtRead + sealComputed; }
     uint64_t released = 0;
     uint64_t unavailable[size_t(AcquireCause::CauseCount)] = {};
     uint64_t Unavailable() const
@@ -763,6 +768,17 @@ public:
             e->readFence = fence;
     }
 
+    // L-CORE M5: the bound lane's seal reports what it did with a CPU live fill (SkeletonAcquireLane.h's lookup).
+    void NoteSealComputed(ProductId id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        ++counters_[id].sealComputed;
+    }
+    void NoteSealReused(ProductId id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        ++counters_[id].sealReused;
+    }
     // The seal's question (SkeletonAcquireLane.h): did a reader publish the default CPU form of (id, seq)? Copies it.
     bool CopyPublished(ProductId id, uint64_t seq, uint8_t* dst, size_t n) const
     {
@@ -860,6 +876,9 @@ public:
                             + " reused (lane " + std::to_string(c.reusedLane) + ", memo " + std::to_string(c.reusedMemo) + "), "
                             + std::to_string(c.filledAtRead) + " filled at read, " + std::to_string(c.Unavailable())
                             + " unavailable";
+            if (c.sealComputed != 0 || c.sealReused != 0 || c.reusedLaneCopy != 0)
+                l += "; seal computed " + std::to_string(c.sealComputed) + ", seal reused " + std::to_string(c.sealReused)
+                     + ", copied off thread " + std::to_string(c.reusedLaneCopy);
             for (size_t k = 1; k < size_t(AcquireCause::CauseCount); ++k)
                 if (c.unavailable[k] != 0)
                     l += std::string("; ") + Token(AcquireCause(k)) + " " + std::to_string(c.unavailable[k]);

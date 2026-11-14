@@ -647,6 +647,12 @@ namespace Vpv
 			// Never in the Original pathway (no VP-V state: Original == Bill, zero cost).
 			if (Hub::ExtensionHub::Instance().OriginalPathway(host))
 				return nullptr;
+			// L-CORE M3: made and published UNDER the registration lock, so a RegisterOwnerFill running at the same time either sees this
+			// memo in the table (and installs into it) or ran before the copy below (and is in it): never neither. A second thread making the
+			// same host's memo finds the first one here.
+			std::lock_guard<std::mutex> lock(ownerFillsMutex_);
+			if (const std::shared_ptr<MemoHost> m = memoHosts_.Find(host))
+				return m->memo;
 			std::shared_ptr<MemoHost> made = std::make_shared<MemoHost>(host);
 			VpSkeleton::SkeletonMemo& memo = *made->memo;
 			memo.SetHost(host);
@@ -654,11 +660,8 @@ namespace Vpv
 			// GPU retire: memo spots are owner-made pl_tex objects on the D3D11 backend, whose destruction with reads still queued is
 			// safe (the runtime keeps a resource alive until the GPU is done with it), so a noted read never holds a spot (G0 S4).
 			memo.SetFenceCompleted([]() { return ~uint64_t(0); });
-			{
-				std::lock_guard<std::mutex> lock(ownerFillsMutex_);
-				for (const auto& kv : ownerFills_)
-					memo.RegisterOwnerFill(kv.first.first, kv.first.second, kv.second.first, kv.second.second);
-			}
+			for (const auto& kv : ownerFills_)
+				memo.RegisterOwnerFill(kv.first.first, kv.first.second, kv.second.first, kv.second.second);
 			Hub::HostSlots<MemoHost>& slots = const_cast<Hub::HostSlots<MemoHost>&>(memoHosts_);
 			if (!slots.Put(host, made))
 			{

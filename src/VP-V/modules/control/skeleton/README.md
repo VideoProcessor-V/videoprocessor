@@ -260,6 +260,15 @@ Contract: `D:/codex/vp-handover/lead8/iface-L-CORE.md` (frozen v1). Zero Bill li
 - **CPU memo spots** stay heap vectors made by the fill (G0 audit S6b): a fill runs only when the lane did not make the frame
   (rare by design), the size is the owner's, and the arena is GPU-side; recorded in refs/102b (B1-MEMO-CPU-ARENA) with the
   trigger "a CPU owner fill runs on > 1 % of frames on a real-clip replay (compute-once counters)".
+- **Seal ledger** (audit M5): the bound lane's seal reuses an Acquire publication (`sealReused`) and, when it computes, its slot is the
+  publication (`sealComputed`; Acquire after the seal returns that slot): `AcquireCounters::Computed()` = filled at read + seal computed
+  <= 1 per frame per product, in both orders (tests `SealAcquireComputeOnceTests`). A missing-input seal computes its own form and is not
+  looked up (another result). Status lines add `seal computed <n>, seal reused <n>, copied off thread <n>`.
+- **Memo creation** (audit M3): made and published under the module's registration lock, so a concurrent `RegisterOwnerFill` never
+  misses a memo and one host never gets two memos (`MemoHostConcurrencyTests`).
+- **No-lane GPU grant**: `core/MemoGpuGrant.h` `PlanMemoGpuGrant` (the scratch-arena ledger user; the other VP-V users' current holdings
+  fixed), planned at Begin by `PlanNoLaneGpu` when the need, the declared VRAM users or the binding changed (else every 240 frames);
+  no grant = `no VRAM ledger grant`, visible.
 - **P13 source-plane views** (`modules/input/capture/SourcePlanes.h`, owner `input/capture`): the planes on the render device in
   the current render frame (the Entrance image + `SourcePlanes::Offer` by other VP-V uploaders), `Acquire(kP13SourceRing, seq,
   Gpu, {plane})`; declines say why. Tests: `src/VP-V/tests/SkeletonCoreContextTests.cpp`.
@@ -286,6 +295,11 @@ Decisions (provenance: decision log = `D:/codex/vp-handover/refs/owner-decisions
   refs/102 s0); hence the precision values and their 12-bit predicate.
 - P13 first slice = render-device plane views; the queued-ahead ring stays with the D5 lane (LEAD 8 2026-11-14 05:2x ruling on
   the L-CORE rule-33 note, lead8/iface-L-CORE.md s6).
+- GPU fills that allocate must work without the lane (default config): a no-lane VRAM ledger grant, same rule (LEAD 8 2026-11-14
+  ~05:45, 102b P13-NO-LANE-GPU-ALLOC).
+- The seal keeps the shared RunCpuLive law ONLY IF it reuses an Acquire publication and its own compute is the publication, computed
+  <= 1 per frame (COORDINATOR ruling on G0 S6, lead9/lead9-state.md 07:05 entry; 102b B1-SEAL-VIA-ACQUIRE).
+Times are EST (UTC = EST + 5 h); transcript session cf1d27fa-e9e0-4e7a-b3a8-9416d0edfd34 (D:/codex/vp-handover/TRANSCRIPT-INDEX.md).
 
 ## Status and fallbacks
 

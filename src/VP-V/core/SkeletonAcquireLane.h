@@ -114,8 +114,19 @@ inline void BindLaneToMemo(AnalysisLane& lane, SkeletonMemo& memo, LaneGpuHandle
     memo.BindLane(std::move(src), std::move(fills));
     memo.SetGpuDispatcherPresent(lane.HasGpuDispatcher());
 
+    // L-CORE M5 (coordinator ruling on B1-SEAL-VIA-ACQUIRE): the seal (1) REUSES a frame an Acquire reader published (copy, counted
+    // sealReused) and (2) when it computes, its result IS the publication: the lane slot is the memo's first source for that frame
+    // (counted sealComputed), so Acquire after the seal reuses it and the frame is computed once (AcquireCounters::Computed()).
+    // The lookup is asked for a seal with every input present; a missing-input seal computes another result (its own form).
     SkeletonMemo* m = &memo;
-    lane.SetPublishedLookup([m](ProductId id, uint64_t seq, uint8_t* dst, size_t n) { return m->CopyPublished(id, seq, dst, n); });
+    lane.SetPublishedLookup([m](ProductId id, uint64_t seq, uint8_t* dst, size_t n) {
+        if (m->CopyPublished(id, seq, dst, n)) {
+            m->NoteSealReused(id);
+            return true;
+        }
+        m->NoteSealComputed(id);
+        return false;
+    });
 }
 
 // The lane's end (the bundle that owns it goes): drops exactly this lane's binding (a newer bound lane is kept).
