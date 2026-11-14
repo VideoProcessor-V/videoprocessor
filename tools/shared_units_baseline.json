@@ -3,9 +3,52 @@
  "units": {
   "U1": {
    "name": "grain_estimate",
-   "blocking": false,
-   "baseline_duplicates": 37,
-   "known_false_positive": []
+   "blocking": true,
+   "baseline_duplicates": 20,
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp",
+     "pattern": "noiseLevel",
+     "kind": "false_positive",
+     "reason": "noiseLevel is a rounding-floor threshold (flatSpreadCodes x code step), not a grain estimate (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h",
+     "pattern": "noiseLevel",
+     "kind": "false_positive",
+     "reason": "noiseLevel is a rounding-floor threshold (flatSpreadCodes x code step), not a grain estimate (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/regions/RegionEvidence.h",
+     "pattern": "split\\.f\\.get|GrainView",
+     "kind": "false_positive",
+     "reason": "GrainView reads the P10 Wiener share f: a consumer read (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/temporal_detail/TemporalDetail.h",
+     "pattern": "kSignificanceLo|kGrainBudget|kCleanKappa|significanceLo|baseGrainSigmas",
+     "kind": "false_positive",
+     "reason": "consumer threshold in units of the shared grain level / holder of the shared N (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
+     "pattern": "std::vector<double> N;",
+     "kind": "false_positive",
+     "reason": "holder of the shared block grain level N, not an estimate (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+     "pattern": "kGrainExcess|kTextureMargin|kTextureSigLo|kLowChangeNoise",
+     "kind": "false_positive",
+     "reason": "TR thresholds in grain-level units, not an estimator (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
+     "pattern": "p\\.grainCal = kGrainCal",
+     "kind": "shared_function_use",
+     "reason": "CPU reference model calls the owner function GrainSplit::Compute for tests (switch to GrainSplit::DefaultParams with the GPU fix) (refs/126 s3, B0)"
+    }
+   ]
   },
   "U2": {
    "name": "gaussian_band_split",
@@ -113,7 +156,7 @@
   "U3": {
    "name": "half_luma_downsample",
    "blocking": true,
-   "baseline_duplicates": 21,
+   "baseline_duplicates": 19,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
@@ -158,12 +201,6 @@
      "reason": "exponential smoothing factor of a quality/bits statistic, not a 2x2 box"
     },
     {
-     "file": "src/VP-V/modules/repair/deband/VpDebander.cpp",
-     "pattern": "0\\.25 \\* \\(texture",
-     "kind": "residual",
-     "reason": "GLSL, no byte-identity proof without GPU: debander 2x2 box average of the low band"
-    },
-    {
      "file": "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
      "pattern": "0\\.25 \\* \\(",
      "kind": "residual",
@@ -180,13 +217,19 @@
      "pattern": "kP1HalfLuma",
      "kind": "false_positive",
      "reason": "the refined_field contract lists P1 (half luma) as an input reference, not a downsample"
+    },
+    {
+     "file": "src/VP-V/modules/repair/deband/VpDebander.cpp",
+     "pattern": "avg = 0\\.25 \\* \\(texture",
+     "kind": "false_positive",
+     "reason": "4-tap ring average around the pixel (deband sampling), not a downsample (refs/126 s3, B0)"
     }
    ]
   },
   "U4": {
    "name": "block_statistics",
-   "blocking": false,
-   "baseline_duplicates": 19,
+   "blocking": true,
+   "baseline_duplicates": 5,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
@@ -205,14 +248,63 @@
      "pattern": "kP10GrainSplit, VpSkeleton::kP11RegionBlockStats",
      "kind": "false_positive",
      "reason": "owner/coordinator-approved 2026-11-08, product-id reference, not a U4 law copy (names P11 in the VRAM shed status)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/lane/LaneGpuJobs.h",
+     "pattern": "\\bkP11RegionBlockStats\\b",
+     "kind": "false_positive",
+     "reason": "the lane hosts the P11 GPU kernel: product-id reference (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/lane/LaneGpuLightKernel.cpp",
+     "pattern": "\\bkP11RegionBlockStats\\b",
+     "kind": "false_positive",
+     "reason": "the lane hosts the P11 GPU kernel: product-id reference (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/lane/LaneGpuRegionKernel.cpp",
+     "pattern": "region block statistics|kP11RegionBlockStats",
+     "kind": "false_positive",
+     "reason": "the lane hosts the P11 GPU kernel (co-owner of U4) (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/lane/LaneGpuRegionKernel.h",
+     "pattern": "\\bkP11RegionBlockStats\\b",
+     "kind": "false_positive",
+     "reason": "the lane hosts the P11 GPU kernel (co-owner of U4) (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/grain_split/",
+     "pattern": "block|e1|BlockMeans",
+     "kind": "false_positive",
+     "reason": "P10 own block energies e1/e2/e3: inside the U1 owner, part of the split law (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
+     "pattern": "BlockState|m_blocks",
+     "kind": "false_positive",
+     "reason": "BlockState is TD per-block temporal slot state: name collision, not block statistics (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
+     "pattern": "P11 region block stats",
+     "kind": "false_positive",
+     "reason": "cost-name string (refs/126 s3, B0)"
     }
    ]
   },
   "U5": {
    "name": "laplacian_ringing",
-   "blocking": false,
-   "baseline_duplicates": 2,
-   "known_false_positive": []
+   "blocking": true,
+   "baseline_duplicates": 1,
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
+     "pattern": "grainLo = 2\\.0f",
+     "kind": "false_positive",
+     "reason": "config field (grainLo/grainHi thresholds); the real copy is the Laplacian pass (X5), which the regex misses (refs/126 s3, B0)"
+    }
+   ]
   },
   "U6": {
    "name": "histogram_apl",
@@ -284,7 +376,7 @@
   "U7": {
    "name": "cut_fade_flash_judge",
    "blocking": true,
-   "baseline_duplicates": 0,
+   "baseline_duplicates": 6,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/input/signal/HdrInference.cpp",
@@ -388,7 +480,8 @@
      "kind": "false_positive",
      "reason": "carries the frame's mean luma (8-bit codes) read back from the scalar pass as data; the cut rule is CutFadeJudge::MeanStepCut / MeanStepCutLine"
     }
-   ]
+   ],
+   "waiver": "WAIVER-JOB1-U7 (coordinator, job1): 0 -> 6 is a new detection of REAL X2 copies (kCutShare/kFadeStepShare), not a loosened rule; target 0 at B6, expires at B6"
   },
   "U8": {
    "name": "active_picture_rect",
@@ -429,9 +522,53 @@
   },
   "U10": {
    "name": "global_motion",
-   "blocking": false,
-   "baseline_duplicates": 36,
-   "known_false_positive": []
+   "blocking": true,
+   "baseline_duplicates": 19,
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/core/FallbackPlainText.h",
+     "pattern": "vector_engine_global",
+     "kind": "false_positive",
+     "reason": "user text (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/core/FrameAnalysisStore.h",
+     "pattern": "globalX",
+     "kind": "false_positive",
+     "reason": "record field of the published motion summary (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/control/skeleton/SkeletonFacts.h",
+     "pattern": "EngineGlobal",
+     "kind": "false_positive",
+     "reason": "consumer read of IVectorEngine::EngineGlobal (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
+     "pattern": "EngineGlobal\\(",
+     "kind": "false_positive",
+     "reason": "consumer read of IVectorEngine::EngineGlobal (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/motion/consumers/DejudderPolicy.h",
+     "pattern": "EngineGlobalSourcePixels",
+     "kind": "shared_function_use",
+     "reason": "unit conversion of the engine global (not an estimate) (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
+     "pattern": "engineGlobal|opticalFlowGlobal",
+     "kind": "false_positive",
+     "reason": "matcher consumes the engine global / its settings (a read, not an estimate) (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h",
+     "pattern": "engineGlobal|opticalFlowGlobal",
+     "kind": "false_positive",
+     "reason": "matcher consumes the engine global / its settings (a read, not an estimate) (refs/126 s3, B0)"
+    }
+   ],
+   "waiver": "X1 made fully visible (audit B0): the matcher Dispatch-label lines 4012-4062 are no longer suppressed (13 -> 19); target 0 at refs/126 B6"
   },
   "U11": {
    "name": "camera_fit",
@@ -459,13 +596,38 @@
   },
   "U20": {
    "name": "chroma_upsample_polyphase",
-   "blocking": false,
-   "baseline_duplicates": 8,
-   "known_false_positive": []
+   "blocking": true,
+   "baseline_duplicates": 0,
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/core/ChromaSiting.h",
+     "pattern": "namespace ChromaSiting",
+     "kind": "shared_function_use",
+     "reason": "the shared siting law itself (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/rebase/SourceRebase.cpp",
+     "pattern": "ChromaSiting",
+     "kind": "shared_function_use",
+     "reason": "call of the shared siting law (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/identity/chain/",
+     "pattern": "[Pp]olyphase",
+     "kind": "false_positive",
+     "reason": "source-identity polyphase EVIDENCE proposer (detection), not a chroma upsample (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
+     "pattern": "[Ll]anczos",
+     "kind": "false_positive",
+     "reason": "candidate scaler kernels for kernel inversion (re-base detection); code-reuse note: one core kernel table later (refs/126 s3, B0)"
+    }
+   ]
   },
   "U21": {
    "name": "source_geometry",
-   "blocking": false,
+   "blocking": true,
    "baseline_duplicates": 0,
    "known_false_positive": []
   },
@@ -475,29 +637,80 @@
    "baseline_duplicates": 0,
    "known_false_positive": []
   },
+  "U13": {
+   "name": "coding_evidence",
+   "blocking": true,
+   "baseline_duplicates": 14,
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/input/source_analysis/identity/quality_pattern/QualityPatternRecord.h",
+     "pattern": "gridPhase",
+     "kind": "false_positive",
+     "reason": "P15 record field names (held state in identity), not a recomputation (refs/126 s3, B0)"
+    }
+   ]
+  },
+  "U18": {
+   "name": "codec_model",
+   "blocking": true,
+   "baseline_duplicates": 0,
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
+     "pattern": "dead_zone|kDeadZone|deadZone",
+     "kind": "false_positive",
+     "reason": "gain-hysteresis dead zone of the pulse gain, not a codec quantisation bound (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/DetailPulse.h",
+     "pattern": "dead_zone|kDeadZone|deadZone",
+     "kind": "false_positive",
+     "reason": "gain-hysteresis dead zone of the pulse gain, not a codec quantisation bound (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+     "pattern": "dead zone",
+     "kind": "false_positive",
+     "reason": "gain dead zone comment, not a codec quantisation bound (refs/126 s3, B0)"
+    }
+   ]
+  },
+  "U14": {
+   "name": "trail_compose",
+   "known_false_positive": [],
+   "blocking": true,
+   "baseline_duplicates": 0
+  },
+  "U16": {
+   "name": "lighting_fit",
+   "known_false_positive": [],
+   "blocking": true,
+   "baseline_duplicates": 0
+  },
   "U23": {
    "name": "one_pole_alpha",
+   "known_false_positive": [],
    "blocking": true,
-   "baseline_duplicates": 12,
-   "known_false_positive": []
+   "baseline_duplicates": 12
   },
   "U24": {
    "name": "robust_stats",
+   "known_false_positive": [],
    "blocking": true,
-   "baseline_duplicates": 73,
-   "known_false_positive": []
+   "baseline_duplicates": 73
   },
   "U25": {
    "name": "ramp_clamp_smoothstep",
+   "known_false_positive": [],
    "blocking": true,
-   "baseline_duplicates": 76,
-   "known_false_positive": []
+   "baseline_duplicates": 76
   },
   "U26": {
    "name": "luma_from_rgb_weights",
+   "known_false_positive": [],
    "blocking": true,
-   "baseline_duplicates": 25,
-   "known_false_positive": []
+   "baseline_duplicates": 25
   }
- }
+ },
+ "note": "refs/126 B0 (2026-11-12): all registered units blocking at the measured true count; baselines only shrink. U10 baseline = the matcher D1 global search (X1, file-level owner scope), 0 at refs/126 B6. U7 6 = DetailPulse/TextureRestore private cut/fade shares (X2). U13 14 = SourceResolutionDetector private blockiness (real). U17 is undefined/reserved. U10 = 19 after the audit fix (Dispatch-label lines un-suppressed)."
 }
