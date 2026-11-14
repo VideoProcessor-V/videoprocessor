@@ -380,6 +380,25 @@ namespace ComposedVectorsTest
 			for (const double x : xs)
 				Assert::AreEqual(-2.0, (double)Product::Value(pl, x, 31.0).dx, 1e-3);
 		}
+		TEST_METHOD(DefaultFormIsTheBlockFieldAndWarpIsTheOneSampler)
+		{
+			FakeSource src;   // +1 px per forward step
+			Product p(&src);
+			ActivateBoth(p);
+			Assert::AreEqual(kBlockStep, p.Step());   // owner R14-16: block field by default, not per pixel
+			p.Prepare(100);
+			PlanePtr pl;
+			Assert::IsTrue(p.Acquire(100, Dir::Ahead, 3, pl) == Got::Ok);
+			Assert::AreEqual(kBlockStep, pl->step);
+			Assert::AreEqual(kW / kBlockStep, pl->w);
+			const Plane::Warped w = pl->Warp(64.0, 32.0);
+			Assert::IsTrue(w.valid);
+			Assert::AreEqual(67.0, w.x, 1e-3);   // three forward steps of +1 px
+			Assert::AreEqual(32.0, w.y, 1e-3);
+			Assert::IsTrue(w.trust > 0.99f);
+			Assert::IsFalse(pl->Warp(-1.0, 10.0).valid);                 // outside the frame
+			Assert::IsFalse(pl->Warp(kW + 5.0, 10.0).valid);
+		}
 		TEST_METHOD(PartialBudgetKeepsWhatFitsAndSaysWhy)
 		{
 			FakeSource src;

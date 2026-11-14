@@ -29,14 +29,15 @@
 // shares). Plane k builds on plane k - 1 (get-or-compute-and-publish, recursive, rule 2). The grid step (source px per output cell) is a
 // variant axis of the ONE product: the FINEST step any active reader declares is computed, coarser readers sample it bilinearly (Sample).
 //
-// COST. The CPU form at step 1 is a REFERENCE only (4K: 14 planes x 8.3 M px per frame is not a render-time budget); readers run it at their own step
-// (block field = step > 1, Plane::At is the shared bilinear sampler for coarser readers) until the GPU form exists. Form / step contract: a plane is
+// COST / FORM (owner R14-16). The product form is a BLOCK field (kBlockStep = 8 source px per cell: 4K = 480 x 270 cells, 14 planes x 0.13 M cells per
+// frame) read through the ONE shared warp sampler Plane::Warp (bilinear Plane::At underneath). The CPU per-pixel form (step 1) is a REFERENCE only
+// (4K: 14 planes x 8.3 M px per frame is not a render-time budget); a reader may ask for a finer step (SetReaderStep), the finest active step wins. Form / step contract: a plane is
 // ALWAYS a raster of `step` source px per cell with trust and uncertainty; step 1 = per pixel; a GPU form must publish the same fields at the same step.
 // CALLERS NOT BUILT HERE: the IPairSource adapter over the P2 slot / CellTrust memo / MotionValidity (the grain-level and TD lanes) and the Invalidate()
 // call at every epoch cause (MotionValidity epoch change) are wired by those lanes; this product exposes the seams.
 //
-// GPU. This is the CPU reference and the product contract; the GPU form (rows of the per-pixel chain in one dispatch per offset) is the
-// register row ECV-GPU-FORM (trigger: S-3c T3 start). Header-only, C++14, no Windows headers. Render / lane thread, one caller at a time
+// GPU. This is the CPU form and the product contract; a GPU form of the block field (one dispatch per offset, same fields, same step) is a later
+// step (102b ECV-GPU-FORM closed by decision R14-16: block field + one shared warp sampler). Header-only, C++14, no Windows headers. Render / lane thread, one caller at a time
 // (the lane serialises; the class holds no lock).
 
 #include "ComposedVectorPlan.h"
@@ -92,6 +93,10 @@ public:
 
 enum class Dir : uint8_t { Back = 0, Ahead = 1 };
 
+// The product form (owner R14-16): a BLOCK field of kBlockStep source px per cell, read through the ONE shared warp sampler (Plane::Warp). Per-pixel
+// (step 1) stays selectable per reader (SetReaderStep) as the reference form only.
+constexpr int kBlockStep = 8;
+
 struct Sampled
 {
     float dx = 0.0f, dy = 0.0f, trust = 0.0f, unc = 0.0f;
@@ -140,6 +145,27 @@ struct Plane
         s.trust = mix(trust);
         s.unc = mix(unc);
         return s;
+    }
+
+    // THE shared warp sampler (owner R14-16): where the chain of source position (x, y) lands in the reference frame, with its trust and uncertainty.
+    // Every reader (P10g, TemporalDetail, the chain itself) reads the field only through this; `valid` is false outside the frame, for a dead chain
+    // (trust 0) and when the landing leaves the frame (never a guessed vector).
+    struct Warped
+    {
+        double x = 0.0, y = 0.0;
+        float trust = 0.0f, unc = 0.0f;
+        bool valid = false;
+    };
+    Warped Warp(double x, double y) const
+    {
+        Warped r;
+        const Sampled s = At(x, y);
+        r.trust = s.trust;
+        r.unc = s.unc;
+        r.x = x + s.dx;
+        r.y = y + s.dy;
+        r.valid = s.trust > 0.0f && r.x >= 0.0 && r.y >= 0.0 && r.x <= srcW && r.y <= srcH;
+        return r;
     }
 };
 
@@ -531,10 +557,10 @@ private:
     const IPairSource* m_source = nullptr;
     Config m_cfg;
     int m_w = 0, m_h = 0;
-    int m_step = 1;
+    int m_step = kBlockStep;
     bool m_active[static_cast<size_t>(Reader::kCount)] = { false, false };
     Need m_need[static_cast<size_t>(Reader::kCount)][2] = {};
-    int m_readerStep[static_cast<size_t>(Reader::kCount)] = { 1, 1 };
+    int m_readerStep[static_cast<size_t>(Reader::kCount)] = { kBlockStep, kBlockStep };
     bool m_lowLatency = false;
     unsigned m_queuedAhead = 0, m_keptBehind = 0;
     std::map<Key, PlanePtr> m_planes;

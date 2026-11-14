@@ -12,9 +12,9 @@ Unit: motion/estimation (sub-folder `composed/`, submodule of slot `motion.estim
 
 No config key is read. Code defaults (hand-checked): depth 8 back + 4 ahead (TD up to `VpSkeleton::kAheadCeiling` = 6), low latency 10 back + 0 ahead, back ceiling 16, landing tolerance `consistencyPx = 1.0` source px (trust 1 up to it, 0 from twice it), `noReverseTrust = 0.5`, byte budget unbounded.
 
-## Form / step contract
+## Form / step contract (owner decision R14-16)
 
-A plane is ALWAYS a raster of `step` source px per cell holding displacement (dx, dy, source px), trust 0..1 and uncertainty (px), per (frame, direction, offset k). Step 1 = per pixel; the finest step any active reader declares is computed (one product, step is a variant axis); coarser readers sample it with `Plane::At` (bilinear). A GPU form (register row ECV-GPU-FORM) must publish the same fields at the same step. The CPU form at step 1 is a reference only (4K: 14 planes x 8.3 M px per frame).
+The product form is a BLOCK field, read through ONE shared warp sampler. A plane is ALWAYS a raster of `step` source px per cell holding displacement (dx, dy, source px), trust 0..1 and uncertainty (px), per (frame, direction, offset k). The default step is `kBlockStep` = 8 (4K = 480 x 270 cells). Every reader (P10g, TemporalDetail, the chain) reads a plane only through `Plane::Warp(x, y)` (landing position, trust, uncertainty, `valid`; bilinear `Plane::At` underneath). A reader may ask for a finer step (`SetReaderStep`; step 1 = per pixel, a CPU reference form); the finest active step is computed (one product, step is a variant axis). A GPU form of the block field must publish the same fields at the same step (102b ECV-GPU-FORM, closed by R14-16).
 
 ## Degradations (never silent, rule 25)
 
