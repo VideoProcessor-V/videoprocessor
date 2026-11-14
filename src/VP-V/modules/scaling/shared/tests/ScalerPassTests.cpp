@@ -438,6 +438,94 @@ namespace ScalerPassTestsNs
 			pl_tex_destroy(gpu, &ctex);
 		}
 
+		TEST_METHOD(ScalerGpuMigrationIdentityFaithfulOrtho)
+		{
+			// ScalerPass(ortho, down first, integer window, antiring) == the faithful ortho branch's libplacebo call
+			// sequence as AdaptiveDownscale makes it (quoted here: vertical pass over whole columns ox..ox+w, then
+			// the offset rect), rgba32f picture, bit for bit.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			const int sw = 100, sh = 60, dw = 48, dh = 27;
+			const float sx0 = 2.5f, sy0 = 1.5f, sx1 = 98.5f, sy1 = 54.5f;
+			std::vector<float> px(static_cast<size_t>(sw) * sh * 4);
+			const Image base = MakeImage(sw, sh);
+			for (size_t i = 0; i < base.v.size(); ++i)
+			{
+				px[i * 4] = static_cast<float>(base.v[i]);
+				px[i * 4 + 1] = static_cast<float>(1.0 - base.v[i]);
+				px[i * 4 + 2] = static_cast<float>(base.v[i] * base.v[i]);
+				px[i * 4 + 3] = 1.0f;
+			}
+			pl_tex tex = UploadRaw(gpu, sw, sh, "rgba32f", px.data());
+			Assert::IsNotNull(tex);
+			const float antiring = 0.5f;
+
+			// the quoted sequence
+			const int ox = static_cast<int>(std::floor(sx0));
+			const int w = (std::max)(1, static_cast<int>(std::ceil(sx1)) - ox);
+			const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_LINEAR);
+			pl_fmt f32 = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, caps);
+			Assert::IsNotNull(f32);
+			pl_tex mid = nullptr, want = nullptr;
+			pl_tex_params tp{};
+			tp.format = f32; tp.sampleable = true; tp.renderable = true; tp.blit_src = true;
+			tp.w = w; tp.h = dh;
+			Assert::IsTrue(pl_tex_recreate(gpu, &mid, &tp));
+			tp.w = dw; tp.h = dh;
+			Assert::IsTrue(pl_tex_recreate(gpu, &want, &tp));
+			pl_shader_obj lut[2] = {};
+			for (int pass = 0; pass < 2; ++pass)
+			{
+				pl_shader sh = pl_dispatch_begin(dev.dispatch);
+				pl_sample_src src{};
+				src.components = 4;
+				if (pass == 0)
+				{
+					src.tex = tex;
+					src.rect = { static_cast<float>(ox), sy0, static_cast<float>(ox + w), sy1 };
+					src.new_w = w;
+					src.new_h = dh;
+				}
+				else
+				{
+					src.tex = mid;
+					src.rect = { sx0 - ox, 0.0f, sx1 - ox, static_cast<float>(dh) };
+					src.new_w = dw;
+					src.new_h = dh;
+				}
+				pl_sample_filter_params filter{};
+				filter.filter = pl_filter_lanczos;
+				filter.antiring = antiring;
+				filter.lut = &lut[pass];
+				pl_dispatch_params dp{};
+				dp.shader = &sh;
+				dp.target = pass == 0 ? mid : want;
+				Assert::IsTrue(pl_shader_sample_ortho2(sh, &src, &filter) && pl_dispatch_finish(dev.dispatch, &dp));
+			}
+
+			ScalerPass::Module pass;
+			ScalerPass::Settings st;
+			st.filter = Lanczos(3);
+			st.axis = ScalerPass::Axis::Both;
+			st.order = ScalerPass::Order::DownFirst;
+			st.antiring = antiring;
+			st.precision = ScalerPass::Precision::F32;
+			ScalerPass::Source s;
+			s.tex = tex; s.x0 = sx0; s.y0 = sy0; s.x1 = sx1; s.y1 = sy1;
+			pl_tex got = nullptr;
+			Assert::IsTrue(pass.Apply(gpu, dev.dispatch, s, dw, dh, st, got), Wide(pass.LastError()).c_str());
+			std::vector<uint8_t> a, b;
+			Assert::IsTrue(DownloadBytes(gpu, want, a) && DownloadBytes(gpu, got, b));
+			Assert::IsTrue(a == b, L"ScalerPass == the faithful ortho call sequence, bit for bit");
+			pass.Release(gpu);
+			pl_shader_obj_destroy(&lut[0]);
+			pl_shader_obj_destroy(&lut[1]);
+			pl_tex_destroy(gpu, &mid);
+			pl_tex_destroy(gpu, &want);
+			pl_tex_destroy(gpu, &tex);
+		}
+
 		TEST_METHOD(ScalerGpuPolarFlatStaysFlatAndIsDeterministic)
 		{
 			GpuDevice dev;
