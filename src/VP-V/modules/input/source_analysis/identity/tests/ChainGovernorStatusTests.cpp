@@ -178,6 +178,34 @@ namespace Tests
 			Assert::AreEqual(std::string("Source identity: acquiring, 7.2 of 15.0 nats; SID safety rules: off"), Line(in));
 		}
 
+		// S-3f a (MUST-2): the default OFF state is visible on the status line and in the detail;
+		// the ON states are unchanged; the Original pathway (estimator not running) gets no clause.
+		TEST_METHOD(TheOffStateOfTheSafetyRulesIsVisibleAndTheOnStatesAreUnchanged)
+		{
+			const std::string clause = "; SID safety rules: off";
+			Input in = Running();
+			in.record.applied[0] = GeoFx::AppliedAxis(1920, 3840, 5);
+			in.record.applied[1] = GeoFx::AppliedAxis(1080, 2160, 5);
+			in.record.applied[0].conf = in.record.applied[1].conf = 0.99f;
+			Assert::IsFalse(in.safetyRules);
+			Assert::IsTrue(Line(in).find(clause) != std::string::npos, L"off: the line says so");
+			const std::string detail = SourceIdentity::Chain::ChainDetailText(in);
+			Assert::IsTrue(detail.find(clause) != std::string::npos, L"off: the detail embeds the line");
+			Assert::IsTrue(detail.find("safety rules on") == std::string::npos, L"off: no 'safety rules on' block");
+			Assert::IsTrue(Line(in).find("upscale latch") == std::string::npos, L"off: no latch clause");
+			in.safetyRules = true;
+			Assert::IsTrue(Line(in).find("SID safety rules: off") == std::string::npos, L"on: not the off text");
+			Assert::IsTrue(Line(in).find("; no upscale latch") != std::string::npos, L"on, no latch: unchanged");
+			in.latchNx = 1920;
+			in.latchNy = 1080;
+			Assert::IsTrue(Line(in).find("; upscale latch 1920x1080") != std::string::npos, L"on, latched: unchanged");
+			Assert::IsTrue(SourceIdentity::Chain::ChainDetailText(in).find("safety rules on") != std::string::npos);
+			Input original;
+			original.off = "Original pathway";
+			Assert::IsTrue(Line(original).find("safety rules") == std::string::npos, L"Original pathway: no clause");
+			Assert::AreEqual(std::string("Source identity: classical only (Original pathway)"), Line(original));
+		}
+
 		TEST_METHOD(AnEstimatorThatDoesNotRunSaysWhyTheClassicalPathDecides)
 		{
 			Input in;
