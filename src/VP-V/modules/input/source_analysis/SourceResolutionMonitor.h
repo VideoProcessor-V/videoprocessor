@@ -74,6 +74,9 @@ namespace SourceResolutionMonitor
 		// the why is the Acquire token. Shown in Describe (never silent).
 		bool codingUnavailable = false;
 		std::string codingWhy;
+		// The look-ahead worker has judged frames: it reads the ratio only, its coding readings are NEUTRAL there (no P16 acquire; the
+		// cut/latch distribution is not its input). Shown in Describe so the look-ahead's coding-blindness is never silent.
+		bool aheadCodingNeutral = false;
 		double coherenceV = 0.0, coherenceH = 0.0;
 		unsigned long long frames = 0, cuts = 0, discontinuities = 0;
 		double cutSpan = 0.0;          // seconds between the frames the last cut was found between
@@ -700,6 +703,7 @@ namespace SourceResolutionMonitor
 		unsigned long long lastCuts = 0;
 		double qualitySmoothed = -1.0, bitsSmoothed = 0.0;
 		uint64_t codingSeq = 0;   // worker only: the memo sequence of a frame the host did not number
+		std::atomic<bool> aheadRan{ false };   // the look-ahead worker analysed a frame (coding neutral there)
 		bool codingUnavailableNow = false;   // worker only: the latest frame's P16 acquire failed
 		std::string codingWhyNow;
 		Snapshot snapshot;

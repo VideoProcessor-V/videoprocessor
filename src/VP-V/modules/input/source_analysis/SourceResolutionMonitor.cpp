@@ -338,6 +338,8 @@ if (tile < int(tiles) && g.y < ts) {
 				SourceResolution::Analyse(&tiles[static_cast<size_t>(i) * size * size], size, size, spectra[static_cast<size_t>(i)], 1023);
 			SourceResolution::Thresholds thresholds;
 			thresholds.latchFixes = LatchFixes();
+			thresholds.codingUnavailable = true;   // the look-ahead reads the ratio only: no P16 acquire, coding neutral, no distribution
+			aheadRan.store(true, std::memory_order_release);
 			if (!textGuard.load(std::memory_order_acquire)) thresholds.textBand = 0.0;
 			thresholds.mixedGuard = mixedGuard.load(std::memory_order_acquire);
 			thresholds.codingFixes = codingFixes.load(std::memory_order_acquire);
@@ -1381,6 +1383,7 @@ if (tile < int(tiles) && g.y < ts) {
 		thresholds.codingFixes = codingFixes.load(std::memory_order_acquire);
 		const bool fixes = LatchFixes();
 		thresholds.latchFixes = fixes;
+		thresholds.codingUnavailable = codingUnavailableNow;   // P16: the h3-latch distribution is then unknown, never "moved"
 		thresholds.blackLevel = j.blackLevel;
 		// The tiles' positions (the overlay spread) and the base grid for the frame signature:
 		// switching between the base and the dense grid is neither a cut nor a new shot.
@@ -1696,6 +1699,7 @@ if (tile < int(tiles) && g.y < ts) {
 		VpUnit::SourceQuality::Store(snapshot, qualitySmoothed, bitsSmoothed);   // U12
 		snapshot.codingUnavailable = codingUnavailableNow;
 		snapshot.codingWhy = codingWhyNow;
+		snapshot.aheadCodingNeutral = aheadRan.load(std::memory_order_acquire);
 		snapshot.coherenceV = frame.vertical.coherence;
 		snapshot.coherenceH = frame.horizontal.coherence;
 		snapshot.cuts = tracker.Cuts();
@@ -2719,7 +2723,8 @@ if (tile < int(tiles) && g.y < ts) {
 		snprintf(line, sizeof(line), "Source resolution: %s (declared %s, confidence %.2f); bitrate quality %.2f%s%s",
 			liveText.c_str(), declaredText.c_str(), s.confidence, s.bitrateQuality, bits, autoText);
 		std::string text = line;
-		if (s.codingUnavailable) text += "; coding evidence unavailable (" + s.codingWhy + ")";   // P16 not acquired: shown, never silent
+		if (s.codingUnavailable) text += "; coding evidence unavailable (" + s.codingWhy + "); source latch: distribution unavailable";   // P16 not acquired: shown, never silent
+		if (s.aheadCodingNeutral) text += "; look-ahead reads the ratio only (coding evidence not measured there)";
 		return text;
 	}
 

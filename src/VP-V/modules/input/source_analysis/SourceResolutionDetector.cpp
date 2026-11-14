@@ -644,6 +644,7 @@ namespace SourceResolution
 	FrameReading ReadFrame(const std::vector<Spectrum>& tiles, const Thresholds& t)
 	{
 		FrameReading frame;
+		frame.distributionUnavailable = t.codingUnavailable;
 		frame.tiles = static_cast<int>(tiles.size());
 		if (tiles.empty()) return frame;
 		const int n = tiles.front().n;
@@ -1147,7 +1148,11 @@ namespace SourceResolution
 			return;
 		}
 		const double moved = DistributionChange(lastDistribution, frame.distribution);
-		const bool distributionMoved = moved < 0.0 || moved >= s.distributionMinimum;
+		// P16: an unmeasurable distribution (coding evidence not acquired) is UNKNOWN, never "moved": the old reading of an empty
+		// distribution (moved < 0 counts as moved) would silently flip the latch's cut rule whenever the product is missing.
+		const bool distributionUnknown = frame.distributionUnavailable;
+		if (distributionUnknown) ++distributionUnavailableSteps;
+		const bool distributionMoved = !distributionUnknown && (moved < 0.0 || moved >= s.distributionMinimum);
 		FrameEvidence ev;
 		bool covered = false;
 		if (look && *look && sequence != 0 && lastPatternSequence != 0 && sequence > lastPatternSequence)
@@ -1166,7 +1171,7 @@ namespace SourceResolution
 		else
 		{
 			strong = distributionMoved && CutRule(decorrelation, jump, motionBefore, s);
-			nearMiss = distributionMoved && !strong && (moved < 0.0 || moved >= s.nearDistributionMinimum) &&
+			nearMiss = distributionMoved && !strong && (!distributionUnknown && (moved < 0.0 || moved >= s.nearDistributionMinimum)) &&
 				NearRule(decorrelation, jump, motionBefore, s);
 		}
 		if (strong || nearMiss)

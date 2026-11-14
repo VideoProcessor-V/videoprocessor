@@ -190,6 +190,9 @@ namespace SourceResolution
 		//   - FrameReading::pattern / black / quantisationFloor are filled (the tracker's shape-aware
 		//     cut test, the real-black engage, the level-aware native test).
 		bool latchFixes = true;
+		// P16: the coding evidence (and so the code histograms behind the h3-latch luma distribution) was NOT acquired for this
+		// frame (no memo, declined, released). The distribution change is then UNKNOWN, never "moved" (FrameReading::distributionUnavailable).
+		bool codingUnavailable = false;
 		// The signal's black (normalised): limited range 16 << (bits - 8), full range 0.
 		double blackLevel = 64.0 / 1023.0;
 		// Flat: the tile's spread at most this many codes (the rounding / dither floor) ...
@@ -284,6 +287,9 @@ namespace SourceResolution
 		// bins of the code range, summing to 1; empty = unknown). Position-free: a pan, a scroll or a
 		// camera move keeps it; a cut to another shot changes it.
 		std::vector<double> distribution;
+		// P16 coding evidence not acquired (Thresholds::codingUnavailable): distribution is empty because it could not be measured, not
+		// because the picture has none. The cut test then judges the distribution change UNKNOWN: it is never counted as "moved".
+		bool distributionUnavailable = false;
 		double blackLevel = 64.0 / 1023.0;
 		double noiseLevel = 2.0 / 1023.0;   // the rounding floor of a level (flatSpreadCodes)
 		// A real black: every tile flat at or near black (not only uninformative - a dark scene is).
@@ -568,6 +574,8 @@ namespace SourceResolution
 		// Cut candidates dropped as a flash / not confirmed (diagnostic).
 		unsigned long long Flashes() const { return flashes; }
 		unsigned long long CoveredSteps() const { return coveredSteps; }
+		// Cut judgements made with the luma distribution unavailable (P16 not acquired): none of them counted a distribution move.
+		unsigned long long DistributionUnavailableSteps() const { return distributionUnavailableSteps; }
 		// Native readings left out as within the rounding floor (latchFixes).
 		unsigned long long FloorStarved() const { return floorStarved; }
 		double Candidate() const;                                // the window's evidence so far
@@ -616,7 +624,7 @@ namespace SourceResolution
 			double seconds = 0.0, span = 0.0, motionBefore = 0.0;
 			uint64_t from = 0, to = 0;   // the step's sequences (look-ahead re-check)
 		} pending;
-		unsigned long long moments = 0, flashes = 0, coveredSteps = 0;
+		unsigned long long moments = 0, flashes = 0, coveredSteps = 0, distributionUnavailableSteps = 0;
 		double lastMomentSpan = 0.0, lastCutSeconds = -1.0;
 		void ConfirmCut(double cutSeconds, double span);
 		void CutFixesStep(const FrameReading& frame, double seconds, uint64_t sequence, const EvidenceSource* look);
