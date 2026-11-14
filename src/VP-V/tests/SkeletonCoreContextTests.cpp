@@ -339,6 +339,15 @@ namespace SkeletonCoreContextTestsNs
 			Assert::IsTrue(VariantReserveBytes(p1, full, 1, TexFormat::R16F) == 960u * 540u * 4u, L"float32 = R32F");
 			p1.precision = kPrecisionUnorm16;
 			Assert::IsFalse(VariantTexShape(p1, full, 4, TexFormat::RGBA16F, &s), L"no 4-channel unorm16 in the ledger: refused");
+			// N2 (waiver gate batch 10): float16 is not 12-bit safe: no ledger format for it, for any channel count or product.
+			for (unsigned ch : { 1u, 2u, 4u }) {
+				TexFormat f16 = TexFormat::R32F;
+				Assert::IsFalse(TexFormatOf(kPrecisionFloat16, ch, TexFormat::R32F, &f16), L"float16 refused by the ledger");
+				Assert::IsTrue(f16 == TexFormat::R32F, L"and nothing written");
+			}
+			VariantKey half16;
+			half16.precision = kPrecisionFloat16;
+			Assert::IsFalse(VariantTexShape(half16, full, 1, TexFormat::R16, &s), L"a float16 variant has no shape: the owner declines it");
 		}
 	};
 
