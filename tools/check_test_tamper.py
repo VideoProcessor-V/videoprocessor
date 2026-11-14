@@ -18,6 +18,9 @@ commit that touches a guarded file class WITHOUT a WAIVER-<ID> trailer line in i
 
 Exit 0 clean; 1 with --strict when any commit is flagged; 2 on a checker error (bad range, git failure).
 A waiver is a line "WAIVER-<ID>: <why>" (ID = letters, digits, '-', '_', '.') at the start of a line.
+A flagged commit is also waived when docs/audit/waiver-ledger.json ({"entries": [{sha, waiver_id, gate_record}]}) lists
+its sha (7+ hex characters) AND the gate_record file (relative to --gate-root / VP_GATE_ROOT) exists; the summary prints
+"ledger-waived N" apart from trailer waivers. An entry whose gate record is missing or null waives nothing.
 """
 import argparse
 import fnmatch
@@ -29,9 +32,13 @@ import sys
 
 WAIVER_RX = re.compile(r"^WAIVER-[A-Za-z0-9_.\-]+(\s*:.*)?\s*$", re.M)
 CHECKER_GLOBS = ["tools/check_*.py", "tools/run_compliance.py", "tools/compliance_lib.py", "tools/ctlscan.py",
-                 "tools/test_ctlscan.py"]
+                 "tools/test_ctlscan.py", "tools/test_check_test_tamper.py"]
 BASELINE_GLOBS = ["tools/*baseline*.json", "docs/audit/*baseline*.json", "docs/audit/*budget*.json",
-                  "tools/*budget*.json"]
+                  "tools/*budget*.json", "docs/audit/waiver-ledger.json"]
+# Ledger of commits whose waiver was gated but not written in the required trailer form (R14-108). A commit counts as
+# ledger-waived only if its sha is listed AND its gate_record file exists under the gate root (VP_GATE_ROOT or --gate-root).
+LEDGER_PATH = "docs/audit/waiver-ledger.json"
+DEFAULT_GATE_ROOT = "D:/codex/vp-handover"
 ALLOW_RX = re.compile(r"ALLOW_SITES|CoverageAllowList|known_false_positive|\bALLOW\s*=|\"allow\w*\"\s*:")
 
 
@@ -139,7 +146,33 @@ def late_waivers(msgs):
     return out
 
 
-def scan(root, rng):
+def load_ledger(root, path=None):
+    """[{sha, waiver_id, gate_record}] from docs/audit/waiver-ledger.json ({"entries": [...]}); [] when absent."""
+    path = path or os.path.join(root, LEDGER_PATH)
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            entries = json.load(fh)["entries"]
+        return [e for e in entries if isinstance(e, dict) and len(str(e.get("sha", ""))) >= 7]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise RuntimeError("cannot read %s: %s" % (LEDGER_PATH, e))
+
+
+def ledger_entry(ledger, sha):
+    for e in ledger:
+        if sha.startswith(str(e["sha"]).lower()):
+            return e
+    return None
+
+
+def gate_exists(gate_root, record):
+    return bool(record) and os.path.isfile(os.path.join(gate_root, record))
+
+
+def scan(root, rng, ledger=None, gate_root=None):
+    ledger = ledger or []
+    gate_root = gate_root or os.environ.get("VP_GATE_ROOT") or DEFAULT_GATE_ROOT
     results = []
     shas = git(root, "rev-list", "--no-merges", "--reverse", rng).split()
     msgs = {sha: git(root, "show", "-s", "--format=%B", sha) for sha in shas}
@@ -150,7 +183,17 @@ def scan(root, rng):
             msg += "\nWAIVER-LATE: waived by a later 'Waives:' commit"
         viol, notes, waived = judge(commit_files(root, sha), msg)
         subject = msg.strip().splitlines()[0][:80] if msg.strip() else ""
-        results.append({"sha": sha[:9], "subject": subject, "violations": viol, "notes": notes, "waived": waived})
+        ledger_waived = False
+        if viol:
+            ent = ledger_entry(ledger, sha)
+            if ent is not None:
+                if gate_exists(gate_root, ent.get("gate_record")):
+                    notes.append("ledger-waived %s: gate record %s" % (ent.get("waiver_id", "?"), ent["gate_record"]))
+                    viol, waived, ledger_waived = [], True, True
+                else:
+                    notes.append("ledger entry %s has MISSING gate record %r: still flagged" % (ent.get("waiver_id", "?"), ent.get("gate_record")))
+        results.append({"sha": sha[:9], "subject": subject, "violations": viol, "notes": notes, "waived": waived,
+                        "ledger_waived": ledger_waived})
     return results
 
 
@@ -162,6 +205,8 @@ def main(argv=None):
     ap.add_argument("--strict", action="store_true")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--gate-root", default=None, help="folder that holds the ledger's gate_record files (default VP_GATE_ROOT or %s)" % DEFAULT_GATE_ROOT)
+    ap.add_argument("--ledger", default=None, help="ledger file to use instead of <root>/%s" % LEDGER_PATH)
     a = ap.parse_args(argv)
     if a.selftest:
         f = [{"path": "tools/check_x.py", "status": "M", "added": ["a"], "removed": []}]
@@ -172,7 +217,7 @@ def main(argv=None):
         return 0 if ok else 2
     try:
         rng = a.range or default_range(a.root, a.base)
-        res = scan(a.root, rng)
+        res = scan(a.root, rng, load_ledger(a.root, a.ledger), a.gate_root)
     except RuntimeError as e:
         print("check_test_tamper: error: %s" % e)
         return 2
@@ -180,7 +225,9 @@ def main(argv=None):
     if a.json:
         print(json.dumps({"range": rng, "commits": len(res), "flagged": len(bad), "results": res}, indent=1))
     else:
-        print("test tamper: range %s, %d commit(s), %d flagged, %d waived" % (rng, len(res), len(bad), sum(1 for r in res if r["waived"])))
+        nled = sum(1 for r in res if r["ledger_waived"])
+        print("test tamper: range %s, %d commit(s), %d flagged, %d waived (%d by trailer), ledger-waived %d" % (
+            rng, len(res), len(bad), sum(1 for r in res if r["waived"]), sum(1 for r in res if r["waived"] and not r["ledger_waived"]), nled))
         for r in res:
             for n in r["notes"]:
                 print("  note %s %s" % (r["sha"], n))
