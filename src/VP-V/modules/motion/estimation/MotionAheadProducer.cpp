@@ -490,9 +490,9 @@ namespace MotionAhead
 	{
 		const auto started = std::chrono::steady_clock::now();
 		int halfW = 0, halfH = 0;
-		VPV_COMPUTE_ONCE_PRIVATE_AT("U3", job.sequence, "motion_ahead");
 		if (!LumaAtTarget(job.luma, lumaBuffer, halfW, halfH))
 			return true;   // not a readable frame, or a size this producer does not make: nothing published (the consumer takes the matcher path, shown as a fallback)
+		VPV_COMPUTE_ONCE_PRIVATE_AT("U3", job.sequence, "motion_ahead");   // counted only when the private luma was computed
 		const double lumaMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 		if (!EnsureSize(halfW, halfH)) return false;
 		ReleaseStaleRequestTextures(halfW, halfH);   // W2-C5b
@@ -795,12 +795,12 @@ namespace MotionAhead
 		int w = 0, h = 0;
 		if (!testEngine)
 		{
-			VPV_COMPUTE_ONCE_PRIVATE_AT("U3", rq.to, "motion_ahead_request");
 			if (!LumaAtTarget(rq.lumaTo, lumaBuffer, w, h))
 			{
 				answer(Status::Failed);   // not a readable frame / a size not made: nothing to run, not an engine failure
 				return true;
 			}
+			VPV_COMPUTE_ONCE_PRIVATE_AT("U3", rq.to, "motion_ahead_request");   // counted only when the private luma was computed
 			engineRan = true;   // EnsureSize may open the engine: from here on a failure is the engine's
 			if (!EnsureSize(w, h))
 			{

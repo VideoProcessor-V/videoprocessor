@@ -92,12 +92,12 @@ inline void QuarterFromHalf(const uint16_t* half, uint32_t hw, uint32_t hh, uint
 // The live-fill form: the whole product at once. False when the frame is invalid or the buffer short.
 inline bool ComputeHalfLuma(const SourceFrameView& v, uint8_t* out, size_t outBytes)
 {
-    VPV_COMPUTE_ONCE("U3", ::ComputeOnce::Variant(v.width, v.height));
     if (!v.Valid() || out == nullptr)
         return false;
     const Dims d{ v.width, v.height };
     if (outBytes < HalfLumaBytes(d))
         return false;
+    VPV_COMPUTE_ONCE("U3", ::ComputeOnce::Variant(v.width, v.height));   // counted only when the product is computed
     const uint32_t hw = HalfDim(v.width);
     const uint32_t hh = HalfDim(v.height);
     uint16_t* half = reinterpret_cast<uint16_t*>(out);
