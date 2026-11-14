@@ -14,6 +14,7 @@
 #include <VP-V/modules/input/source_analysis/P1AcquireSource.h>
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/motion/estimation/VectorEngineFallbackSync.h>
+#include <VP-V/core/QueueWindow.h>
 
 #include <algorithm>
 #include <chrono>
@@ -829,7 +830,10 @@ namespace VpMotion
 		++flowReads_.requests;
 		auto absent = [this](unsigned long long& counter) {
 			++counter;
-			flowLease_.reset();   // nothing valid: hold nothing (the next view is built from the slot again)
+			// Not fed (no board): today's single lease, nothing valid holds nothing. Fed: the window keeps the other pairs' leases (an
+			// absent read of one pair never drops a pair still inside the window; an epoch move does, below).
+			if (queueBoard_.load(std::memory_order_acquire) == nullptr)
+				leaseCounters_.droppedSingle += flowLeases_.size(), flowLeases_.clear();
 			return false;
 		};
 		if (!LoopProducer() || motionLowLatencyNoVectors)
@@ -853,7 +857,58 @@ namespace VpMotion
 		if (sourceWidth <= 0)
 			return absent(flowReads_.unscaled);
 		const double scale = static_cast<double>(sourceWidth) / flow->halfW;   // source px per engine px (a ratio, never a constant)
-		if (!flowLease_ || flowLease_->flow != flow || flowLease_->from != from || flowLease_->to != to || flowLease_->scale != scale)
+		// ---- QKP slice E: the lease window (design s9.3) ----
+		const uint64_t validityEpoch = motionValidity.Epoch();
+		const VpSkeleton::QueueWindowBoard* const board = queueBoard_.load(std::memory_order_acquire);
+		VpSkeleton::QueueWindow win;
+		const bool fed = board != nullptr && board->Read(&win);
+		const uint64_t boardEpoch = fed ? win.epoch : 0;
+		for (const auto& kv : flowLeases_)
+			if (kv.second->validityEpoch != validityEpoch || kv.second->boardEpoch != boardEpoch)
+			{
+				leaseCounters_.droppedEpoch += flowLeases_.size();   // an invalidation drops every lease (VE-T3)
+				flowLeases_.clear();
+				break;
+			}
+		if (fed)
+		{
+			// The SAME bound as the frame memo: frames older than current - back leave (back = H + max(R, P), derived, no constant).
+			const uint64_t floorSeq = win.current > win.back ? win.current - win.back : 0;
+			for (auto it = flowLeases_.begin(); it != flowLeases_.end();)
+			{
+				if (it->second->to < floorSeq)
+				{
+					++leaseCounters_.evictedWindow;
+					it = flowLeases_.erase(it);
+				}
+				else
+					++it;
+			}
+		}
+		else
+			for (auto it = flowLeases_.begin(); it != flowLeases_.end();)
+			{
+				if (std::get<0>(it->first) != from || std::get<1>(it->first) != to)   // no board: the single lease (today's behaviour, SHOWN)
+				{
+					++leaseCounters_.droppedSingle;
+					it = flowLeases_.erase(it);
+				}
+				else
+					++it;
+			}
+		// The P2 slot must still hold the pair: a pruned pair drops its lease (a lease never extends P2 retention, VE-T6).
+		for (auto it = flowLeases_.begin(); it != flowLeases_.end();)
+		{
+			if (!FindCurrent(it->second->from, it->second->to))
+			{
+				++leaseCounters_.droppedPruned;
+				it = flowLeases_.erase(it);
+			}
+			else
+				++it;
+		}
+		std::shared_ptr<FlowLease>& slot = flowLeases_[LeaseKey(from, to, scale)];
+		if (!slot || slot->flow != flow)
 		{
 			auto lease = std::make_shared<FlowLease>();
 			++flowReads_.conversions;   // W1-C3: once per pair id (a repeated FlowOf of the same pair reuses the lease)
@@ -864,6 +919,8 @@ namespace VpMotion
 			lease->from = from;
 			lease->to = to;
 			lease->scale = scale;
+			lease->validityEpoch = validityEpoch;
+			lease->boardEpoch = boardEpoch;
 			const size_t cells = static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH);
 			lease->x.resize(cells);
 			lease->y.resize(cells);
@@ -872,14 +929,16 @@ namespace VpMotion
 				lease->x[i] = static_cast<float>(flow->forward[i * 2] / 32.0 * scale);
 				lease->y[i] = static_cast<float>(flow->forward[i * 2 + 1] / 32.0 * scale);
 			}
-			flowLease_ = std::move(lease);
+			slot = std::move(lease);
 		}
+		const std::shared_ptr<FlowLease>& flowLease_ = slot;
 		out.x = flowLease_->x.data();
 		out.y = flowLease_->y.data();
 		out.gridW = flow->gridW;
 		out.gridH = flow->gridH;
 		out.blockSize = 4.0 * scale;   // a cell is 4 x 4 engine px
-		// The original payload, not a copy: the lease keeps `flow` (and so these arrays) alive until the next FlowOf call.
+		// The original payload, not a copy: the lease keeps `flow` (and so these arrays) alive while the pair is inside the lease window
+		// (until it leaves it or an invalidation; no board: until the next FlowOf of another pair).
 		const size_t flowCells = static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH);
 		out.rawForward = flow->forward.data();
 		out.rawBackward = flow->backward.size() >= flowCells * 2 ? flow->backward.data() : nullptr;
@@ -912,7 +971,7 @@ namespace VpMotion
 		out.extrasBlockPx = MotionAhead::Flow::kBlockPx;
 		out.extrasCellPx = NvOpticalFlow::Engine::Grid;
 		out.extrasUnitsPerEnginePx = 32.0;   // FbError reads S10.5
-		out.trustMemo = flowLease_.get();
+		out.trustMemo = flowLease_.get();   // valid for the view's life: the pair stays leased until it leaves the window or an invalidation
 		++flowReads_.served;
 		return true;
 	}
@@ -969,6 +1028,29 @@ namespace VpMotion
 		}
 		trustOk = OpticalFlowTrust::CellTrust(*blockCost, blocksX, blocksY, *cellError, f.gridW, f.gridH, grid, blockPx, toleranceEnginePx, trust);
 		return trustOk ? trust.data() : nullptr;
+	}
+
+	VectorEngine::LeaseCounters VectorEngine::Leases() const
+	{
+		std::lock_guard<std::mutex> lock(flowMutex_);
+		LeaseCounters c = leaseCounters_;
+		c.live = flowLeases_.size();
+		const VpSkeleton::QueueWindowBoard* const board = queueBoard_.load(std::memory_order_acquire);
+		VpSkeleton::QueueWindow win;
+		c.window = (board != nullptr && board->Read(&win)) ? win.back : 0;
+		return c;
+	}
+
+	std::string VectorEngine::LeaseWindowLine() const
+	{
+		const VpSkeleton::QueueWindowBoard* const board = queueBoard_.load(std::memory_order_acquire);
+		VpSkeleton::QueueWindow win;
+		if (board == nullptr || !board->Read(&win))
+			return "vector lease window not fed";   // VE-T5: the single lease, engaged
+		if (win.back > MotionAhead::kPairsKeptBehind || win.ahead > MotionAhead::kRingMaxLead)
+			return "vector lease window capped by the P2 ring: behind " + std::to_string(MotionAhead::kPairsKeptBehind) +
+				" / ahead " + std::to_string(MotionAhead::kRingMaxLead);   // VE-P2-RETENTION (102b, L-B4)
+		return std::string();
 	}
 
 	VectorEngine::FlowReadCounters VectorEngine::FlowReads() const
