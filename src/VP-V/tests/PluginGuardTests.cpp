@@ -128,17 +128,19 @@ namespace PluginGuardTestsNs
 		// S4A A5: the loaders' single call refuses exactly where Check or Attach would, with the same reason.
 		TEST_METHOD(CheckAndAttachRefusesANullOrForeignModuleWithTheSingleStepReason)
 		{
-			std::string reasonCombined, reasonCheck;
-			Assert::IsFalse(Vpv::PluginGuard::CheckAndAttach(nullptr, reasonCombined));
-			Assert::IsFalse(Vpv::PluginGuard::Check(nullptr, reasonCheck));
-			Assert::AreEqual(reasonCheck, reasonCombined);
+			// Unconditional: the combined call must equal the two steps it replaces, name a reason, and refuse.
 			HMODULE self = nullptr;
 			Assert::IsTrue(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 				reinterpret_cast<LPCWSTR>(&Matching), &self) != FALSE);
-			reasonCombined.clear(); reasonCheck.clear();
-			Assert::IsFalse(Vpv::PluginGuard::CheckAndAttach(self, reasonCombined));
-			const bool checked = Vpv::PluginGuard::Check(self, reasonCheck);
-			if (!checked) Assert::AreEqual(reasonCheck, reasonCombined);
+			for (const HMODULE module : { static_cast<HMODULE>(nullptr), self })
+			{
+				std::string combined, steps;
+				const bool stepsAccepted = Vpv::PluginGuard::Check(module, steps) && Vpv::PluginGuard::Attach(module, steps);
+				Assert::IsFalse(Vpv::PluginGuard::CheckAndAttach(module, combined));
+				Assert::IsFalse(stepsAccepted);
+				Assert::IsFalse(combined.empty(), L"a refusal names its reason");
+				Assert::AreEqual(steps, combined);
+			}
 		}
 
 		// A host that never attaches (Bill's executable) must get nullptr from the factory, never a renderer of this
