@@ -1030,6 +1030,17 @@ inline void AppendSourceGeometryProduct(std::vector<ProductDecl>& decls)
 // sample per source pixel in 10-bit codes (sample x 1023; R32F rather than r16f so a 12-bit source stays exact). A per-frame GPU memo filled by
 // the owner fill (regions/EdgeMapFill.h) from the P13 ring views; the producer is the owner fill, there is no lane job. Readers acquire it
 // (get-or-compute-and-publish): the focus map and the L-B5 busy-edge share; others may follow.
+// Appends absent slots (default ProductDecl, id kNoProduct) until the next declaration lands at `upTo`; every padded id must be reserved.
+inline void PadReservedUntil(std::vector<ProductDecl>& decls, ProductId upTo)
+{
+    while (decls.size() < size_t(upTo)) {
+        assert(IsReservedProduct(ProductId(decls.size())));
+        decls.push_back(ProductDecl());
+    }
+}
+
+// Pads the reserved ids before (30) and after (32..34) edge_map, so EVERY caller that completes the skeleton set (SkeletonProducts, RegionEvidence)
+// gets the same id-indexed registry of Size() == kSkeletonProductEnd.
 inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
 {
     using detail::AddInput;
@@ -1042,7 +1053,9 @@ inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
     AddInput(p, kP13SourceRing, 0);
     AddTerm(p, 0, 4);   // one R32F sample per source pixel (shift 0 = the full plane)
     p.refRenderMs = 0.05f;
+    PadReservedUntil(decls, kEdgeMap);
     decls.push_back(p);
+    PadReservedUntil(decls, kSkeletonProductEnd);
 }
 
 // p7g_camera_guide (doc 56, K4-1; claimed as id 20 by CameraGuideProduct.h, registered here): the measurement plan for pair N is a
@@ -1299,15 +1312,6 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
     decls.push_back(ts);
 }
 
-// Appends absent slots (default ProductDecl, id kNoProduct) until the next declaration lands at `upTo`; every padded id must be reserved.
-inline void PadReservedUntil(std::vector<ProductDecl>& decls, ProductId upTo)
-{
-    while (decls.size() < size_t(upTo)) {
-        assert(IsReservedProduct(ProductId(decls.size())));
-        decls.push_back(ProductDecl());
-    }
-}
-
 // The registry the skeleton runs with: the first products, the camera products, then P10..P13, the TemporalDetail
 // products, P14, p7g, the temporal-detail engine products and P14g source_geometry, in fixed id order. THE one assembly point.
 // `compactGrain` / `compactChroma`: the GRANTED storage of P10 (luma) and P10c (chroma planes).
@@ -1326,9 +1330,7 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double s
     AppendCameraGuideProduct(d);
     AppendTemporalDetailEngineProducts(d, sourcePeriodMs, queueFrames);
     AppendSourceGeometryProduct(d);   // wave S2: P14g, appended after the doc 72 list
-    PadReservedUntil(d, kEdgeMap);    // id 30 band_memo: reserved, absent slot
-    AppendEdgeMapProduct(d);          // L-B5 / rule 3: fixed id 31, after source_geometry
-    PadReservedUntil(d, kSkeletonProductEnd);   // ids 32..34: reserved, absent slots (Size() == kSkeletonProductEnd)
+    AppendEdgeMapProduct(d);          // L-B5 / rule 3: fixed id 31, after source_geometry; pads reserved ids 30 and 32..34 (Size() == kSkeletonProductEnd)
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }
