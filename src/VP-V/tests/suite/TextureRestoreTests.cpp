@@ -1133,7 +1133,8 @@ namespace TextureRestoreTestsNs
 				for (int y = 0; y < kH; ++y)
 					for (int x = 0; x < kW; ++x) f.at(x, y) = a.at(x + 4, y);
 				const Image in = Quantised(Dctq(Sum(f, Grain(kW, kH, 1.5 * kCode8, true, rng)), IsI(t, 8) ? 4.0 : 24.0));
-				const TextureRestore::Params p = Frame(1100 + t);
+				TextureRestore::Params p = Frame(1100 + t);
+				p.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module
 				char what[64];
 				snprintf(what, sizeof(what), "frame %d", t);
 				check(in, p, what);
@@ -1163,7 +1164,8 @@ namespace TextureRestoreTestsNs
 			for (int t = 0; t < 6; ++t)
 			{
 				const Image in = Quantised(Dctq(Sum(a, Grain(kW, kH, 1.5 * kCode8, true, rng)), IsI(t, 8) ? 4.0 : 24.0));
-				const TextureRestore::Params p = Frame(1200 + t);
+				TextureRestore::Params p = Frame(1200 + t);
+				p.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module
 				pl_tex tex = UploadLuma(gpu, in);
 				pl_frame out{};
 				Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), p, out), Wide(module.LastError()).c_str());

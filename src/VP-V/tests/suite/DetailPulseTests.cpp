@@ -819,6 +819,7 @@ namespace DetailPulseTestsNs
 					DetailPulse::Module module;
 					Model model;
 					Settings s;
+					s.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module (SHOULD 5)
 					s.picture = { b[0] / static_cast<float>(w), b[1] / static_cast<float>(h),
 						(b[2] + 1) / static_cast<float>(w), (b[3] + 1) / static_cast<float>(h) };
 					double worst = 0.0, barWorst = 0.0;
@@ -1022,6 +1023,7 @@ namespace DetailPulseTestsNs
 			DetailPulse::Module module;
 			Model model;
 			Settings s;
+			s.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module (SHOULD 5)
 			double worstRepeat = 0.0, worst = 0.0;
 			std::vector<pl_tex> textures;
 			for (int k = 0; k < static_cast<int>(c.frames.size()); ++k)
@@ -1060,6 +1062,8 @@ namespace DetailPulseTestsNs
 			DetailPulse::Module module;
 			Model model;
 			Settings s, half;
+			s.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module (SHOULD 5)
+			half.sceneReader = &NoCutReader;
 			half.planeLines = (h + 1) / 2;
 			double worstMain = 0.0, worstForeign = 0.0;
 			std::vector<pl_tex> textures;
@@ -1107,6 +1111,7 @@ namespace DetailPulseTestsNs
 			DetailPulse::Module module;
 			Model model;
 			Settings s;
+			s.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module (SHOULD 5)
 			double worst = 0.0, worstSpread = 0.0;
 			std::vector<pl_tex> textures;
 			for (int f = 0; f < static_cast<int>(c.frames.size()); ++f)
@@ -1275,6 +1280,7 @@ namespace DetailPulseTestsNs
 					DetailPulse::Module fast, orig;
 					Model model;
 					Settings s;
+					s.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module (SHOULD 5)
 					for (int k = 0; k < static_cast<int>(c.frames.size()); ++k)
 					{
 						const uint64_t seq = static_cast<uint64_t>(k) + 1;
@@ -1549,6 +1555,7 @@ namespace DetailPulseTestsNs
 				{
 					Model model;
 					Settings s;
+					s.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module (SHOULD 5)
 					std::vector<double> hout;
 					double meanLoss = 0.0, worstLoss = 0.0, iGain = 1.0, gmax = 1.0;
 					bool lowered = false;
