@@ -264,6 +264,13 @@ Contract: `D:/codex/vp-handover/lead8/iface-L-CORE.md` (frozen v1). Zero Bill li
   publication (`sealComputed`; Acquire after the seal returns that slot): `AcquireCounters::Computed()` = filled at read + seal computed
   <= 1 per frame per product, in both orders (tests `SealAcquireComputeOnceTests`). A missing-input seal computes its own form and is not
   looked up (another result). Status lines add `seal computed <n>, seal reused <n>, copied off thread <n>`.
+- **Lane ahead seam + declared-demand accessors** (QKP, R14-61 / R14-73): `LaneSlotSource::aheadNow` lets the memo ask the bound lane to
+  make a frame AHEAD of the sealed one (default CPU form only, after the NotQueued / NotPlannedAhead / plan / stall / dropped admission,
+  lock released for the ask): `Ran` serves the lane slot (`laneAheadMade`), `Claimed` = `LanePending`, `Declined` = `OwnerDeclined` with the
+  lane's reason in the cause text, `NotNode` = the normal path (re-entered once, the lane is not asked twice). `NoteSealComputedReduced` /
+  `NoteWorkerReused` count lane frames per product (status line `lane frames: ...`). `DeclaredFillHistory()` (largest declared reader
+  lag, frames) and `ActiveAheadDemands()` (fills declaring an ahead depth) are read-only. Counting bases never mix: lane frames, history
+  frames, and the VRAM bytes of `AheadNeed(gpuOnly)`. `UnbindLane` / `BindLane` are render thread only.
 - **Memo creation** (audit M3): made and published under the module's registration lock, so a concurrent `RegisterOwnerFill` never
   misses a memo and one host never gets two memos (`MemoHostConcurrencyTests`).
 - **No-lane GPU grant**: `core/MemoGpuGrant.h` `PlanMemoGpuGrant` (the scratch-arena ledger user; the other VP-V users' current holdings
