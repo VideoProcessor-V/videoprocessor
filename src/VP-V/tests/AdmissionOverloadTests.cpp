@@ -199,8 +199,9 @@ namespace AdmissionOverloadTest
 			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
 			f.aheadBytes[kP3AnalysisField] = 100;
 			f.aheadBytes[kP5MonitorTiles] = 50;
-			f.aheadWantFrames = 6;
+			f.aheadConsumers[0] = AheadConsumer{ "TD", true, 6 };   // OD 11-14: aheadCompute from the declared need (6 = the ceiling itself)
 			f.queueFrames = 16;
+			f.queueAheadFrames = 15;
 			f.queueBytesPerFrame = 10;
 			f.vramGrantBytes = 2000;
 			Result r = Admit(f);
@@ -256,14 +257,73 @@ namespace AdmissionOverloadTest
 			r = Admit(f);
 			Assert::AreEqual(0, r.queueFrames, L"competitive: no queueing added");
 
-			f.mode = LatencyMode::Standard;   // the structural lead ceiling binds visibly (G7)
+			f.mode = LatencyMode::Standard;   // the ahead ceiling binds visibly (G7; OD 11-14 kAheadCeiling replaces kMaxLead 13)
 			f.queueFrames = 16;
 			f.vramGrantBytes = 2000;
-			f.aheadMaxFrames = 4;
+			f.aheadConsumers[0].need = 9;
 			r = Admit(f);
-			Assert::AreEqual(4, r.aheadFrames);
-			Assert::IsTrue(r.aheadAtMaxLead);
-			Assert::IsTrue(r.aheadLine.find("structural ceiling") != std::string::npos);
+			Assert::AreEqual(kAheadCeiling, r.aheadFrames);
+			Assert::IsTrue(r.aheadBound == AheadBound::Ceiling);
+			Assert::IsTrue(r.aheadComputeLine.find("ceiling 6") != std::string::npos);
+		}
+
+		// OD 11-14 (lead10/design-queue-keyed-products.md s10): aheadCompute = min(max over ACTIVE consumers of the declared need,
+		// kAheadCeiling 6, queue frames ahead); 0 with no active consumer; a ceiling, not a target (the budget may plan lower); the binding
+		// consumer and the bound (ceiling | budget | queue) are on the Ctrl+Alt+D line, and on Ctrl+I / Config status when ceiling or budget bind.
+		TEST_METHOD(AheadComputeIsTheLargestActiveNeedUnderTheCeiling)
+		{
+			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
+			f.aheadBytes[kP3AnalysisField] = 100;
+			f.queueFrames = 16;
+			f.queueAheadFrames = 15;
+			f.queueBytesPerFrame = 10;
+			f.vramGrantBytes = 100000;
+
+			Result r = Admit(f);   // no consumer at all: nothing ahead
+			Assert::AreEqual(0, r.aheadFrames);
+			Assert::IsTrue(r.aheadBound == AheadBound::NoConsumer);
+			Assert::AreEqual(std::string("ahead compute 0 (no active consumer)"), r.aheadComputeLine);
+
+			f.aheadConsumers[0] = AheadConsumer{ "motion", true, 4 };
+			f.aheadConsumers[1] = AheadConsumer{ "TD", true, 5 };
+			f.aheadConsumers[2] = AheadConsumer{ "idle", false, 6 };   // inactive: ignored
+			r = Admit(f);
+			Assert::AreEqual(5, r.aheadFrames, L"the max of the ACTIVE declared needs");
+			Assert::AreEqual(5, r.aheadComputeFrames);
+			Assert::AreEqual(std::string("ahead compute 5 (by TD)"), r.aheadComputeLine);
+			Assert::IsFalse(r.aheadComputeShown, L"consumer-bound: Ctrl+Alt+D only");
+
+			f.aheadConsumers[1].active = false;
+			f.aheadConsumers[0].active = false;
+			r = Admit(f);
+			Assert::AreEqual(0, r.aheadFrames, L"no ACTIVE consumer gives 0");
+
+			f.aheadConsumers[0] = AheadConsumer{ "TD", true, 9 };
+			r = Admit(f);
+			Assert::AreEqual(6, r.aheadFrames, L"a request of 9 gives the ceiling 6");
+			Assert::AreEqual(std::string("ahead compute 6 (by TD; ceiling 6)"), r.aheadComputeLine);
+			Assert::IsTrue(r.aheadComputeShown);
+
+			f.aheadConsumers[0].need = 4;
+			f.queueAheadFrames = 3;
+			r = Admit(f);
+			Assert::AreEqual(3, r.aheadFrames, L"never more than the frames queued ahead");
+			Assert::AreEqual(std::string("ahead compute 3 (by TD; queue)"), r.aheadComputeLine);
+
+			f.queueAheadFrames = 15;
+			f.vramGrantBytes = 100 * 2 + 16 * 10;   // the budget plans lower than the need (S-B): 2 frames
+			r = Admit(f);
+			Assert::AreEqual(4, r.aheadComputeFrames);
+			Assert::AreEqual(2, r.aheadFrames, L"6 / the need is a ceiling, not a target");
+			Assert::AreEqual(std::string("ahead compute 2 (by TD; budget)"), r.aheadComputeLine);
+			Assert::IsTrue(r.aheadComputeShown);
+
+			f.mode = LatencyMode::Games;
+			f.queueFrames = 1;
+			f.queueAheadFrames = 0;
+			r = Admit(f);
+			Assert::AreEqual(0, r.aheadFrames);
+			Assert::AreEqual(std::string("ahead compute 0 (by TD; games: backward-only)"), r.aheadComputeLine);
 		}
 
 		TEST_METHOD(CostMarksFollowControlConfigRule4)
