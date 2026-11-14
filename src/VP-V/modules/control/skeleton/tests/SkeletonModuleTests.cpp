@@ -2130,9 +2130,14 @@ namespace SkeletonModuleTestsNs
 		struct FeedImpl
 		{
 			std::atomic<size_t> queuedFutureFrames{ 0 };
-			std::atomic<int> motionAheadDepth{ 0 };
-			std::atomic<bool> motionAheadBackward{ false };
-			std::shared_ptr<FeedProducer> motionProducer = std::make_shared<FeedProducer>();
+			struct   // P11b: the walk reads these through impl.vectorEngine; the flat names below are references so the test bodies read unchanged
+			{
+				std::atomic<int> motionAheadDepth{ 0 };
+				std::atomic<bool> motionAheadBackward{ false };
+				std::shared_ptr<FeedProducer> motionProducer = std::make_shared<FeedProducer>();
+			} vectorEngine;
+			std::atomic<int>& motionAheadDepth = vectorEngine.motionAheadDepth;
+			std::shared_ptr<FeedProducer>& motionProducer = vectorEngine.motionProducer;
 		};
 		struct Forward : RE::IRendererExtension
 		{
