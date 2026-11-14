@@ -324,6 +324,12 @@
      "reason": "Stats field declaration; APL only in the comment naming the P4 source"
     },
     {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscaleCut.h",
+     "pattern": "float apl = -1\\.0f;|v\\.apl = static_cast<float>\\(cur\\.mean\\) / 257\\.0f;",
+     "kind": "false_positive",
+     "reason": "CutVerdict field and the 16->8-bit code conversion of the Acquired P4 SourceStatsRecord mean; no private mean or histogram; anchored to these exact forms so a new private law in this file is still caught"
+    },
+    {
      "file": "src/VP-V/core/FrameAnalysisStore.h",
      "pattern": "kHistogramBins|histogram\\{\\}|histogram, mean/APL|average picture level",
      "kind": "false_positive",
