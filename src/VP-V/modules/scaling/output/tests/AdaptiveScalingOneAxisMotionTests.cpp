@@ -542,4 +542,72 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 	};
+
+	// FIX-X5-CUT-P4 (CPU): the grain term's cut event is the shared one, derived from the two P4 records by U7 (VerdictFrom), and a P4
+	// record that cannot be read is an Unavailable verdict with its cause (never a silent mean-luma step, never a made-up cut).
+	TEST_CLASS(AdaptiveScalingCutP4Tests)
+	{
+	public:
+		static VpLaneProducts::SourceStatsRecord FlatRecord(uint32_t mean, uint32_t spreadLow, uint32_t spreadHigh, uint32_t bin)
+		{
+			VpLaneProducts::SourceStatsRecord r;
+			r.pixelCount = 1000;
+			r.mean = mean;
+			r.p01 = spreadLow;
+			r.p99 = spreadHigh;
+			r.hist[bin] = 1000;   // one populated bin: a different bin on the next frame is disjoint (a cut)
+			return r;
+		}
+
+		TEST_METHOD(AdaptiveScalingCutP4FirstFrameIsACutWithoutPreviousRecord)
+		{
+			int asked = 0;
+			const AdaptiveDownscale::CutVerdict v = AdaptiveDownscale::VerdictFrom(0, 5,
+				[&](uint64_t seq, VpLaneProducts::SourceStatsRecord& rec, std::string&)
+				{
+					++asked;
+					rec = FlatRecord(257 * 100, 1000, 60000, 3);
+					return seq == 5;
+				});
+			Assert::IsTrue(v.state == AdaptiveDownscale::CutVerdict::State::Known && v.cut, L"first frame: a cut");
+			Assert::AreEqual(1, asked, L"only the current record is read");
+			Assert::IsTrue(std::fabs(v.apl - 100.0f) < 0.01f, L"APL = the P4 mean in 8-bit codes");
+		}
+
+		TEST_METHOD(AdaptiveScalingCutP4JudgesTheTwoRecordsWithU7)
+		{
+			auto reader = [](uint32_t prevBin, uint32_t curBin)
+			{
+				return [=](uint64_t seq, VpLaneProducts::SourceStatsRecord& rec, std::string&)
+				{
+					rec = FlatRecord(257 * 100, 1000, 60000, seq == 10 ? prevBin : curBin);
+					return true;
+				};
+			};
+			const AdaptiveDownscale::CutVerdict same = AdaptiveDownscale::VerdictFrom(10, 11, reader(3, 3));
+			Assert::IsTrue(same.state == AdaptiveDownscale::CutVerdict::State::Known && !same.cut, L"same histogram: no cut");
+			const AdaptiveDownscale::CutVerdict cut = AdaptiveDownscale::VerdictFrom(10, 11, reader(3, 40));
+			Assert::IsTrue(cut.state == AdaptiveDownscale::CutVerdict::State::Known && cut.cut, L"disjoint histograms: a cut");
+		}
+
+		TEST_METHOD(AdaptiveScalingCutP4UnavailableRecordIsVisibleNotACut)
+		{
+			const AdaptiveDownscale::CutVerdict none = AdaptiveDownscale::VerdictFrom(10, 11,
+				[](uint64_t, VpLaneProducts::SourceStatsRecord&, std::string& cause) { cause = "P4 source stats unavailable: no owner fill"; return false; });
+			Assert::IsTrue(none.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !none.cut, L"unavailable, no cut");
+			Assert::IsTrue(none.cause.find("no owner fill") != std::string::npos, L"the cause is carried");
+			const AdaptiveDownscale::CutVerdict noPrev = AdaptiveDownscale::VerdictFrom(10, 11,
+				[](uint64_t seq, VpLaneProducts::SourceStatsRecord& rec, std::string& cause)
+				{
+					if (seq == 10) { cause = "P4 source stats unavailable: frame released"; return false; }
+					rec = FlatRecord(257 * 100, 1000, 60000, 3);
+					return true;
+				});
+			Assert::IsTrue(noPrev.state == AdaptiveDownscale::CutVerdict::State::Unavailable, L"previous record missing: unavailable");
+			// Without a memo (no skeleton, the Original pathway) the production source answers Unavailable with its cause.
+			const AdaptiveDownscale::CutVerdict noMemo = AdaptiveDownscale::P4CutSource()(10, 11);
+			Assert::IsTrue(noMemo.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !noMemo.cause.empty(),
+				L"no memo on this thread: visible Unavailable");
+		}
+	};
 }

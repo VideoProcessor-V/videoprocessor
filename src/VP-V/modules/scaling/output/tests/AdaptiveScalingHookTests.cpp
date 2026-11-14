@@ -5,6 +5,8 @@
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 
+#include <set>
+
 namespace VideoProcessorTest
 {
 	TEST_CLASS(AdaptiveScalingHookTests)
@@ -80,6 +82,16 @@ namespace VideoProcessorTest
 
 			AdaptiveDownscale::Module module;
 			uint64_t sequence = 0;
+			// FIX-X5-CUT-P4: the cut event is the shared one (P4 through U7), not a private mean luma step. This harness has no
+			// skeleton memo, so it states the cuts of its own scenes (dark -> grain, grain -> brighter) as the P4 verdict.
+			std::set<uint64_t> cutSequences;
+			module.SetCutSource([&cutSequences](uint64_t, uint64_t seq)
+			{
+				AdaptiveDownscale::CutVerdict v;
+				v.state = AdaptiveDownscale::CutVerdict::State::Known;
+				v.cut = cutSequences.count(seq) != 0;
+				return v;
+			});
 			auto render = [&](pl_tex src, int ow, int oh, bool withModule, const AdaptiveDownscale::Settings& st,
 				bool gammaLight, bool advance)
 			{
@@ -174,6 +186,7 @@ namespace VideoProcessorTest
 			// (grey -> bright noise) snaps again.
 			AdaptiveDownscale::Settings grain;
 			render(dark, 256, 160, true, grain, false, true);
+			cutSequences.insert(sequence + 1);
 			render(grainy, 256, 160, true, grain, false, true);
 			const auto noisy = grainNow(grainy, grain);
 			render(clean, 256, 160, true, grain, false, true);
@@ -181,6 +194,7 @@ namespace VideoProcessorTest
 			for (int i = 0; i < 120; ++i)
 				render(clean, 256, 160, true, grain, false, true);
 			const auto manyClean = grainNow(clean, grain);
+			cutSequences.insert(sequence + 1);
 			render(brighter, 256, 160, true, grain, false, true);
 			const auto afterCut = grainNow(brighter, grain);
 			std::snprintf(line, sizeof(line), "grain: noise %.3f (valid %d, luma %.1f, w %.3f), clean 1 frame %.3f, 120 frames %.3f, cut to noise %.3f (luma %.1f)\n",
