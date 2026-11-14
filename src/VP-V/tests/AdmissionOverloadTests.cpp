@@ -192,7 +192,8 @@ namespace AdmissionOverloadTest
 		}
 
 		// Owner answer via lead 11 (2026-11-14): the ahead work is sized to the VRAM grant in order - fewer products early, then fewer frames
-		// ahead, the queue shortened only last and never below the 200 ms floor; nothing evicted, every step on the line.
+		// ahead, the queue shortened only last and never below the MODE's own minimum queue (no 200 ms floor: coordinator 2026-11-14 ruling via
+		// lead 11, design s9 :168-176); games/competitive queues never touched; nothing evicted, every step on the line.
 		TEST_METHOD(AheadPlanFollowsTheGrantInOrder)
 		{
 			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
@@ -222,24 +223,47 @@ namespace AdmissionOverloadTest
 			Assert::AreEqual(16, r.queueFrames, L"the queue is untouched while fewer frames ahead suffice");
 			Assert::IsTrue(r.aheadLine.find("fewer frames ahead") != std::string::npos);
 
-			f.vramGrantBytes = 225;    // 3. LAST: the queue, down to ceil(200 ms / period) = 12 frames at 60 Hz
+			f.vramGrantBytes = 225;    // 3. LAST: the queue, only as far as the grant needs (1 ahead x 100 + 12 x 10 = 220)
 			r = Admit(f);
 			Assert::AreEqual(1, r.aheadFrames);
 			Assert::AreEqual(12, r.queueFrames);
 			Assert::AreEqual(4, r.queueFramesDropped);
 			Assert::IsTrue(r.aheadLine.find("queue shortened") != std::string::npos);
 
-			f.vramGrantBytes = 150;    // over at every floor: nothing early, the queue stays at its floor, visible
+			f.vramGrantBytes = 150;    // below 200 ms at 60 Hz is allowed: 100 + 5 x 10 = 150 fits
+			r = Admit(f);
+			Assert::IsFalse(r.aheadOverGrant);
+			Assert::AreEqual(5, r.queueFrames, L"no 200 ms floor on S-C");
+
+			f.vramGrantBytes = 110;    // over at the mode's floor (DelayBudget::kMinimumDepth): nothing early, visible
 			r = Admit(f);
 			Assert::IsTrue(r.aheadOverGrant);
-			Assert::AreEqual(12, r.queueFrames, L"never below the floor");
+			Assert::AreEqual(DelayBudget::kMinimumDepth, r.queueFrames, L"never below the mode's minimum queue");
+			Assert::IsTrue(r.aheadLine.find("limited by VRAM at the queue floor") != std::string::npos);
 			Assert::IsFalse(r.aheadAdmitted[kP3AnalysisField]);
 			Assert::IsTrue(r.admitted[kP3AnalysisField], L"core still admitted: it fills at its own render (never evicted)");
 			Assert::IsTrue(r.aheadLine.find("ahead work at render") != std::string::npos);
 
 			f.mode = LatencyMode::Games;
+			f.queueFrames = 1;
 			r = Admit(f);
 			Assert::AreEqual(0, r.aheadFrames, L"games: no look-ahead work");
+			Assert::AreEqual(1, r.queueFrames, L"games: S-C is a no-op, never a raise");
+			Assert::AreEqual(0, r.queueFramesDropped);
+
+			f.mode = LatencyMode::Competitive;
+			f.queueFrames = 0;
+			r = Admit(f);
+			Assert::AreEqual(0, r.queueFrames, L"competitive: no queueing added");
+
+			f.mode = LatencyMode::Standard;   // the structural lead ceiling binds visibly (G7)
+			f.queueFrames = 16;
+			f.vramGrantBytes = 2000;
+			f.aheadMaxFrames = 4;
+			r = Admit(f);
+			Assert::AreEqual(4, r.aheadFrames);
+			Assert::IsTrue(r.aheadAtMaxLead);
+			Assert::IsTrue(r.aheadLine.find("structural ceiling") != std::string::npos);
 		}
 
 		TEST_METHOD(CostMarksFollowControlConfigRule4)
