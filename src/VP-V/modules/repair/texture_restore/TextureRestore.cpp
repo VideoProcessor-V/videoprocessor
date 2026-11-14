@@ -273,44 +273,11 @@ bool carry(ivec2 t, out vec2 uv)
 #endif
 )GLSL";
 
-		const char* const FRAME_HEADER = R"GLSL(
-shared vec2 s_acc[256];
-)GLSL";
+		// The frame's restart flag for the REF pass: the shared judge's verdict (U7 via the P4 scene group, SceneRestart.h) or a
+		// forced restart. The retired private tile-change cut and two-step fade judge lived here (registered fix D8).
 		const char* const FRAME_BODY = R"GLSL(
-uint li = gl_LocalInvocationIndex;
-ivec2 ts = textureSize(stats_cur, 0);
-int n = ts.x * ts.y;
-vec2 acc = vec2(0.0);
-for (int i = int(li); i < n; i += 256) {
-    ivec2 t = ivec2(i % ts.x, i / ts.x);
-    acc.y += texelFetch(stats_cur, t, 0).w;
-    vec4 g = texelFetch(grain, t, 0);
-    // The tile's low band changed (along the vector where trusted; STATS).
-    if (restart_all < 0.5 && g.z > allow2 + LOWN * g.y)
-        acc.x += 1.0;
-}
-s_acc[li] = acc;
-barrier();
-for (uint s = 128u; s > 0u; s >>= 1u) {
-    if (li < s)
-        s_acc[li] += s_acc[li + s];
-    barrier();
-}
-if (li == 0u) {
-    float count = float(n);
-    float mean = s_acc[0].y / max(count, 1.0);
-    vec4 old = texelFetch(state_old, ivec2(0), 0);
-    vec4 st;
-    if (restart_all > 0.5) {
-        st = vec4(1.0, mean, mean, 1.0);
-    } else {
-        float d0 = mean - old.y, d1 = old.y - old.z;
-        bool fade = old.w >= 2.0 && abs(d0) > fade_step && abs(d1) > fade_step && d0 * d1 > 0.0;
-        bool cut = s_acc[0].x > cut_share * count;
-        st = vec4((cut || fade) ? 1.0 : 0.0, mean, old.y, min(old.w + 1.0, 2.0));
-    }
-    imageStore(state_out, ivec2(0), st);
-}
+if (gl_LocalInvocationIndex == 0u)
+    imageStore(state_out, ivec2(0), vec4(restart_all > 0.5 ? 1.0 : 0.0, 0.0, 0.0, 0.0));
 )GLSL";
 
 		const char* const REF_HEADER = R"GLSL(
@@ -860,9 +827,18 @@ if (p.x < sz.x && p.y < sz.y) {
 			const double eight = EightBitStep(params.colorDepth);
 			const double allowCodes = MeanAllowanceCodes(params.bitrateQuality, params.colorDepth);
 			const float allow2 = static_cast<float>(allowCodes * allowCodes * cu * cu);
-			const float fadeStep = static_cast<float>(kFadeStepShare * allowCodes * cu);
-			const float cutShare = static_cast<float>(kCutShare);
-			const float restartF = restartAll ? 1.0f : 0.0f;
+			// The cut / fade verdict: the shared judge's, from the scene group (U7 over P4; registered fix D8). A frame with no
+			// readable group restarts (no private fallback) and is counted.
+			bool sceneRestart = false;
+			if (!restartAll)
+			{
+				const VpDetailRestore::SceneRestartAnswer scene = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader);
+				sceneRestart = scene.restart;
+				sceneUnavailable = !scene.fromRecord;
+				if (!scene.fromRecord)
+					++sceneMissing;
+			}
+			const float restartF = restartAll || sceneRestart ? 1.0f : 0.0f;
 			const float fg = static_cast<float>(std::pow(kGrainFloorCodes8 * eight * cu, 2.0));
 			const float ft = static_cast<float>(std::pow(kTextureFloorCodes8 * eight * cu, 2.0));
 			const float dec = static_cast<float>(Decay(params.sourceHz));
@@ -905,12 +881,9 @@ if (p.x < sz.x && p.y < sz.y) {
 			}
 			// 6: FRAME.
 			{
-				const std::string header = lowDef + FRAME_HEADER;
-				const pl_shader_desc d[4] = { Sampled("stats_cur", m.statsA), Sampled("grain", m.grain), Sampled("state_old", m.state[m.cur]),
-					Storage("state_out", m.state[next]) };
-				const pl_shader_var v[4] = { { pl_var_float("allow2"), &allow2, true }, { pl_var_float("fade_step"), &fadeStep, true },
-					{ pl_var_float("cut_share"), &cutShare, true }, { pl_var_float("restart_all"), &restartF, true } };
-				if (!Pass(dispatch, "VideoProcessor texture restore: cuts and fades", header, FRAME_BODY, d, 4, v, 4, 1, 1, sizeof(float) * 2 * 256))
+				const pl_shader_desc d[1] = { Storage("state_out", m.state[next]) };
+				const pl_shader_var v[1] = { { pl_var_float("restart_all"), &restartF, true } };
+				if (!Pass(dispatch, "VideoProcessor texture restore: restart flag", std::string(), FRAME_BODY, d, 1, v, 1, 1, 1, 0))
 					return fail("the cut pass failed");
 			}
 			// 7: REF.

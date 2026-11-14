@@ -2,6 +2,13 @@
 
 Unit: **repair** | side: input | order: 90 | status: **built** | hook point: prepass
 
+## Design goal, philosophy and decisions
+
+- Goal: even out the detail the encoder spent unevenly across a GOP, from the picture's own bands, without ever copying content between frames or averaging grain away.
+- Philosophy: one judgement of "the picture changed" for the whole player. These two modules do not keep a cut or fade judge of their own: a cut or fade is the shared judge's verdict (unit U7, CutFadeJudge over two P4 records), read from the skeleton's scene group. No scene group for a frame means restart (gain 1), counted and visible, never a private rule.
+- Decision D8 (registered fix, owner confirmed; before/after in the lane's FIX-B6-D8 record): the earlier private tile-change cut and two-step mean-ramp fade laws are retired. The old laws remain only as test references in `tests/support` (`DetailPulseModel.h`, `TextureRestoreModel.h`), so the A/B stays reproducible.
+- Consequence to watch: the shared judge uses histogram distance on whole frames, not tile shares, and has no vector-aware veto; a vector-explained pan no longer needs one because it moves histograms little.
+
 ## Purpose / why
 
 Long-memory add-on on A's output: texture restore (~2 s peak-hold fine-band reference along vectors) and breathing reduction (detail_pulse_stabilise, the GOP pulse). Premium, needs an efficiency rebuild (9.8 ms at 4K on the 3050 Ti).
@@ -24,7 +31,7 @@ Two independent modules run in one slot, in this order: detail pulse stabilise (
 
 - Constants and helpers shared with the model: `kDefaultCap` 1.35, `kCapMin`/`kCapMax` 1.0..1.5, `kDefaultFast`, `Scale`, `WindowFrames` (0.17 s of history), `Gain`, `VetoWeight`, `TrustWeight`, `LumaWeights`.
 - `Params`: `cap`, `colorDepth`, `planeLines` (re-based height), `sourceHz`, `bitrateQuality`, the optional `field` with `fieldScale`/`fieldScaleX`, `sequence`, `lumaSystem`/`codeLevels` (a one-plane RGB picture is stabilised on its luma), `fast` (detail_pulse_fast).
-- `Module::Apply`: a new consecutive `sequence` measures two luma bands per 32 px tile, advances the GPU history ring and decides gains. A repeat of the same sequence applies the stored decision to the picture given, with that picture's own bands. A non-consecutive sequence, a geometry change, a cut or a fade restarts the history (gain 1).
+- `Module::Apply`: a new consecutive `sequence` measures two luma bands per 32 px tile, advances the GPU history ring and decides gains. A repeat of the same sequence applies the stored decision to the picture given, with that picture's own bands. A non-consecutive sequence, a geometry change, a cut or a fade restarts the history (gain 1). The cut / fade verdict is the shared judge's (U7 over P4, read from the skeleton scene group by `SceneRestart.h`; registered fix D8); a frame whose scene group is not readable restarts and is counted (`SceneMissing()`), never judged privately.
 - `ApplyForeign`: the current decision on a picture of another geometry; never advances the history.
 - `MeasureAhead(..., next frame, debander, deband params)`: optional look-ahead. It measures the next source frame's bands, debanded first through `VpDebander` slot `kSlotLookAhead` when the debander runs. A second overload takes a bare luma texture.
 - `Forget()`, `Release(gpu)`, `LastError()`, `Failures()`, `Frames()`, `HistorySequence()`, `HistoryFrames()`, `AheadFrames()`. `SetPassTimers` / `PassTimes`: GPU pass timing for tests.
@@ -33,7 +40,7 @@ Two independent modules run in one slot, in this order: detail pulse stabilise (
 
 - Constants shared with the model (bands 1 / 2.5 / 6 px, 16 px tiles x `Scale`, 2 s hold half-life, focus and pull gates), `kDefaultCap` 1.5, `kCapMin`/`kCapMax` 1.0..2.0.
 - `Params`: `cap`, `colorDepth`, `planeLines`, `sourceHz`, `bitrateQuality`, `field`/`fieldScale`/`fieldScaleX`, `sequence`.
-- `Module::Apply`: eight passes. Half-resolution low bands; tile statistics; grain level; cuts and fades; references and gains; apply. A repeat reuses its frame's gains with its own low bands (`lowRepeat`) and never advances the references. A `cap` of 1.0 returns the input itself and restarts the references when the cap rises.
+- `Module::Apply`: eight passes. Half-resolution low bands; tile statistics; grain level; restart flag (the shared judge's verdict); references and gains; apply. A repeat reuses its frame's gains with its own low bands (`lowRepeat`) and never advances the references. A `cap` of 1.0 returns the input itself and restarts the references when the cap rises.
 - `ApplyForeign`, `Forget()`, `Release(gpu)`, `LastError()`, `Failures()`, `Frames()`, `HistorySequence()`.
 
 ### Data flow
@@ -197,3 +204,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Private GPU textures (skeleton rule)
 
 This module still creates its own GPU textures (see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). Its per-frame half-resolution temporaries (half, tmp, and the foreign-geometry trio) come from the shared scratch arena when Params::arena is set (SA1); its persistent state (low bands, tile statistics, references, gains, output) stays private and migrates in SA6/SA7/SA8/SA12.
+
+## Scene judge (detail pulse and texture restore)
+
+- Decision (L-B6, WAIVER-B6-D8-MODELS; source: lead 9 ruling on D8 and audit-L-B6 SHOULD 8; 2026-11-14T13:25Z): both modules read the shared cut/fade verdict (U7, the frame analysis scene group via `SceneReader`); their private tile-change laws are deleted and kept only as the test reference `TileJudgeReference`. The scene group is read with Peek, so with `frame_analysis_store` off, or a frame whose group is not sealed, there is no verdict: the references restart every frame (visibly: the "<module> scene judge" fallback, Ctrl+I). Detail pulse and texture restore therefore need `frame_analysis_store` on to keep their history. The shared vector veto (P7) is not yet inside U7; the D8 switch stays parked behind it.

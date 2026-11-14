@@ -295,7 +295,7 @@ for (int i = int(li); i < n; i += 256) {
     if (s.x + s.y >= floor_energy && b.x >= 0.5 && b.w > 0.5)
         a1 += vec4(s.x, s.y, 1.0, 0.0);
     if (b.w > -0.5)
-        a2 += vec4(s.z, b.z > cut_codes ? 1.0 : 0.0, b.y > 0.5 ? 1.0 : 0.0, 1.0);
+        a2 += vec4(s.z, 0.0, 0.0, 1.0);
 }
 vec4 t1 = reduce4(a1);
 vec4 t2 = reduce4(a2);
@@ -314,23 +314,11 @@ if (li == 0u) {
     float e1 = measured ? t3.x / t1.z : 0.0;
     float e2 = measured ? t3.y / t1.z : 0.0;
     float my = t2.x / max(t2.w, 1.0);
-    float cut_share = t2.y / max(t2.w, 1.0);
-    float u_share = t2.z / max(t2.w, 1.0);
 #ifdef AHEAD
     imageStore(ring, ivec2(RING + 1, 0), vec4(e1, e2, my, 1.0));
 #else
-    bool cut = n_valid > 0 && cut_share > cut_share_min;
-#ifdef FIELD
-    cut = cut && u_share > 0.5;
-#endif
-    bool fade = false;
-    if (n_valid >= 2) {
-        float p1 = imageLoad(ring, ivec2((cur + RING - 1) % RING, 0)).z;
-        float p2 = imageLoad(ring, ivec2((cur + RING - 2) % RING, 0)).z;
-        float d0 = my - p1, d1 = p1 - p2;
-        fade = abs(d0) >= fade_codes && abs(d1) >= fade_codes && d0 * d1 > 0.0;
-    }
-    bool restart = n_valid == 0 || cut || fade;
+    // The cut / fade verdict is the shared judge's (scene_restart, from the P4 scene group); no private judge here.
+    bool restart = n_valid == 0 || scene_restart > 0;
     vec2 e = vec2(e1, e2);
     vec2 r = e;
     if (!restart) {
@@ -355,7 +343,7 @@ if (li == 0u) {
     if (!restart && measured)
         g = vec2(gain_law(r.x, e.x), gain_law(r.y, e.y));
     imageStore(ring, ivec2(cur, 0), vec4(e1, e2, my, restart ? 2.0 : 1.0));
-    imageStore(ring, ivec2(RING, 0), vec4(g, restart ? 1.0 : 0.0, cut_share));
+    imageStore(ring, ivec2(RING, 0), vec4(g, restart ? 1.0 : 0.0, 0.0));
 #endif
 }
 )GLSL";
@@ -1192,7 +1180,7 @@ for (int q = 0; q < 4; q++) {
 		// lowTex (read back by the measure pass and by the apply pass after it).
 		bool MeasureAndReduce(pl_dispatch dispatch, pl_tex luma, const Params& params, const Constants& c,
 			pl_tex statsOut, pl_tex weightOut, pl_tex prevStats, pl_tex ring,
-			bool ahead, int cur, int nValid, int nUse, bool aheadValid, std::string& error, pl_tex lowTex = nullptr)
+			bool ahead, int cur, int nValid, int nUse, int sceneRestart, bool aheadValid, std::string& error, pl_tex lowTex = nullptr)
 		{
 			const bool fast = params.fast && lowTex;
 			if (fast && !LowPass(dispatch, luma, c, lowTex, !ahead, error))
@@ -1240,8 +1228,6 @@ for (int q = 0; q < 4; q++) {
 				const float floorEnergy = static_cast<float>(FloorEnergy(params.colorDepth));
 				const float winsorise = static_cast<float>(kWinsorise);
 				const float cutCodes = static_cast<float>(CutCodes(params.bitrateQuality, params.colorDepth));
-				const float cutShare = static_cast<float>(kCutShare);
-				const float fadeCodes = static_cast<float>(FadeCodes(params.colorDepth));
 				const float decay = static_cast<float>(DecayPerFrame(params.sourceHz));
 				const float deadZone = static_cast<float>(kDeadZone);
 				const float cap = static_cast<float>(ClampCap(params.cap));
@@ -1249,25 +1235,24 @@ for (int q = 0; q < 4; q++) {
 				const int aheadOn = aheadValid ? 1 : 0;
 				const pl_shader_desc d[3] = { Sampled("stats_in", statsOut), Sampled("weight_in", weightOut),
 					Storage("ring", ring, PL_DESC_ACCESS_READWRITE) };
-				const pl_shader_var v[14] = {
+				const pl_shader_var v[12] = {
 					{ pl_var_float("floor_energy"), &floorEnergy, true },
 					{ pl_var_float("winsorise"), &winsorise, true },
 					{ pl_var_float("cut_codes"), &cutCodes, true },
-					{ pl_var_float("cut_share_min"), &cutShare, true },
-					{ pl_var_float("fade_codes"), &fadeCodes, true },
 					{ pl_var_float("decay"), &decay, true },
 					{ pl_var_float("dead_zone"), &deadZone, true },
 					{ pl_var_float("cap"), &cap, true },
 					{ pl_var_float("ahead_ratio"), &aheadRatio, true },
 					{ pl_var_int("cur"), &cur, true },
 					{ pl_var_int("n_valid"), &nValid, true },
+					{ pl_var_int("scene_restart"), &sceneRestart, true },
 					{ pl_var_int("n_use"), &nUse, true },
 					{ pl_var_int("ahead_valid"), &aheadOn, true } };
 				std::string header = "#define RING " + std::to_string(kRingSlots) + "\n" + REDUCE_HEADER;
 				if (ahead) header = "#define AHEAD 1\n" + header;
 				if (useField) header = "#define FIELD 1\n" + header;
 				if (!Compute(dispatch, ahead ? "VideoProcessor detail pulse: reduce (look-ahead)" : "VideoProcessor detail pulse: reduce",
-					header, REDUCE_BODY, d, 3, v, 13, sizeof(float) * 1024, 1, 1, ahead ? -1 : 1))
+					header, REDUCE_BODY, d, 3, v, 12, sizeof(float) * 1024, 1, 1, ahead ? -1 : 1))
 				{
 					error = "the reduce pass failed";
 					return false;
@@ -1412,9 +1397,20 @@ for (int q = 0; q < 4; q++) {
 			const int nUse = (std::min)(nValid, WindowFrames(params.sourceHz));
 			const bool aheadValid = m.aheadSequence != 0 && params.sequence != 0 && m.aheadSequence == params.sequence + 1 &&
 				m.aheadGeometry == c.geometry;
+			// The cut / fade verdict: the shared judge's, read from the scene group (U7 over P4; registered fix D8). A frame
+			// with no readable group restarts (no private fallback) and is counted.
+			int sceneRestart = 0;
+			if (nValid > 0)
+			{
+				const VpDetailRestore::SceneRestartAnswer scene = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader);
+				sceneRestart = scene.restart ? 1 : 0;
+				sceneUnavailable = !scene.fromRecord;
+				if (!scene.fromRecord)
+					++sceneMissing;
+			}
 			if (!MeasureAndReduce(dispatch, luma, params, c, m.stats[next], m.weight,
 				consecutive && m.stats[m.statsIndex] ? m.stats[m.statsIndex] : nullptr, m.ring,
-				false, slot, nValid, nUse, aheadValid, error, params.fast ? m.low : nullptr))
+				false, slot, nValid, nUse, sceneRestart, aheadValid, error, params.fast ? m.low : nullptr))
 			{
 				++failures;
 				m.decided = false;
@@ -1520,7 +1516,7 @@ for (int q = 0; q < 4; q++) {
 		}
 		m.aheadSequence = 0;
 		if (!MeasureAndReduce(dispatch, luma, params, c, m.aheadStats, m.aheadWeight, nullptr, m.ring,
-			true, 0, 0, 0, false, error, params.fast ? m.low : nullptr))
+			true, 0, 0, 0, 0, false, error, params.fast ? m.low : nullptr))
 		{
 			++failures;
 			return false;
@@ -1560,7 +1556,7 @@ for (int q = 0; q < 4; q++) {
 		}
 		m.aheadSequence = 0;
 		if (!MeasureAndReduce(dispatch, luma, params, c, m.aheadStats, m.aheadWeight, nullptr, m.ring,
-			true, 0, 0, 0, false, error, params.fast ? m.low : nullptr))
+			true, 0, 0, 0, 0, false, error, params.fast ? m.low : nullptr))
 		{
 			++failures;
 			return false;

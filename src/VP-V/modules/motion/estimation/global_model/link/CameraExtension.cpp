@@ -230,7 +230,7 @@ namespace Vpv
 			// AHEAD FIT: the ahead pair of `seq` from the engine (render thread: FlowOf's contract), copied at once (the view dies at the
 			// next FlowOf) with its whole-frame motion, worked out exactly as the engine does for its own record (MotionAhead::FlowGlobal on
 			// the forward vectors and costs, one engine cell = cellEnginePx x enginePxToSource source px, usable at ambiguity < 0.9).
-			CameraLink::AheadRefusal TakeAhead(VpMotion::IVectorEngine& engine, uint64_t seq, CameraLink::AheadCopy& out)
+			CameraLink::AheadRefusal TakeAhead(VpMotion::IVectorEngine& engine, uint64_t seq, float trustToleranceEnginePx, CameraLink::AheadCopy& out)
 			{
 				// G-A3 (audit F1): the epoch is read BEFORE and AFTER FlowOf; FieldEra may move from another thread in between, and then the pair's
 				// provenance is unknown: refused and counted (aheadEpochRace), never stamped with a guess.
@@ -241,7 +241,7 @@ namespace Vpv
 				const uint64_t e1 = engine.FieldEra();
 				if (e0 != e1)
 					return CameraLink::AheadRefusal::EpochMoved;
-				const CameraLink::AheadRefusal r = CameraLink::CopyAhead(v, seq, out);
+				const CameraLink::AheadRefusal r = CameraLink::CopyAhead(v, seq, trustToleranceEnginePx, out);
 				if (r != CameraLink::AheadRefusal::None)
 					return r;
 				out.epoch = e0;
@@ -505,7 +505,7 @@ namespace Vpv
 				// AHEAD FIT: the ahead pair is COPIED on the render thread (FlowOf's contract, the epoch read around it); the camera worker
 				// converts it at the native cell grid with the engine cell trust (the matcher's own consistency limit) and puts the record's
 				// outputs on the seed's 16-px grid (the grid that sizes the camera graph). The on-time target is the skeleton lane (below).
-				st.core->SetAheadSource([engine](uint64_t seq, CameraLink::AheadCopy& out) { return TakeAhead(*engine, seq, out); },
+				st.core->SetAheadSource([engine](uint64_t seq, float tol, CameraLink::AheadCopy& out) { return TakeAhead(*engine, seq, tol, out); },
 					[sp, store](const CameraLink::FieldCopy& f, CameraLink::PairDescription& d) { return DescribeAhead(*sp, store, f, d); },
 					[](CameraLink::AheadCopy& c) { AheadGlobal(c); });
 				st.core->SetAheadGrid(sf.sourceGridW, sf.sourceGridH);

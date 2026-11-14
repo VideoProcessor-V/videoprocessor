@@ -262,7 +262,6 @@ namespace CameraLink
 		job.stamp = copy->stamp;
 		job.ahead = true;
 		job.aheadCopy = copy;
-		job.aheadConsistency = m_aheadConsistency;
 		job.outGridW = m_aheadGridW;
 		job.outGridH = m_aheadGridH;
 		PairDescription d;
@@ -319,7 +318,7 @@ namespace CameraLink
 				break;   // back-pressure: ask again at the next phase (never a drop)
 			const uint64_t seq = m_aheadNext;
 			AheadCopy copy;
-			const AheadRefusal r = m_aheadSource(seq, copy);
+			const AheadRefusal r = m_aheadSource(seq, m_aheadConsistency, copy);
 			if (r == AheadRefusal::NoPair)
 				break;   // not computed yet: normal until the producer gets there; a frame the render reaches without one takes the seed
 			if (r != AheadRefusal::None)
