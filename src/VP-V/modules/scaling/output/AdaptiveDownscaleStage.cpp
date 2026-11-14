@@ -284,7 +284,7 @@ namespace AdaptiveDownscaleStage
 		// FIX-X5-CUT-P4: never a silent downgrade. The cut event could not be read from the source analysis (P4): the grain term
 		// snaps on the first frame only, not on later cuts (it eases to its target instead).
 		if (!module.CutAvailable())
-			lines.push_back("Adaptive downscale: cut detection unavailable (" + module.CutCause() +
+			lines.push_back("Adaptive downscale: cut event unavailable (" + module.CutCause() +
 				"); the grain term snaps on the first frame only");
 		const std::string td = TdProducts::StatusLine(TdProducts::Consumer::AdaptiveScaler, tdRead);
 		if (!td.empty())

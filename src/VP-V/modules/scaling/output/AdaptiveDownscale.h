@@ -301,7 +301,7 @@ namespace AdaptiveDownscale
 		bool valid = false;
 		float grainScale = 1.0f;
 		float meanW = 0.0f;     // w_base x mean(1 - edge) x grain_scale
-		float meanLuma = 0.0f;  // the newest advanced frame's APL (8-bit codes) from the P4 record; 0 when P4 was unavailable
+		float meanLuma = 0.0f;  // the newest advanced frame's mean (8-bit codes) from the P4 record; 0 when P4 was unavailable
 	};
 
 	// Stage 8b (docs/VP-stage8b-upscale-blend.md): the same module upscaling a
@@ -438,7 +438,7 @@ namespace AdaptiveDownscale
 		bool cutAvailable = true;
 		std::string cutCause;
 		unsigned long long cutUnavailableFrames = 0;
-		float lastApl = -1.0f;
+		float lastMeanCodes = -1.0f;
 		float frameSeconds = 1.0f / 24.0f;
 		bool sourceDownscales = true;
 		pl_gpu gpu = nullptr;

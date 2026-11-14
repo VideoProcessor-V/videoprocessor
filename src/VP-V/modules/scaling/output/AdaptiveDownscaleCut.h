@@ -6,7 +6,7 @@
 // CUT. The cut used to come from a private mean luma of the measure pass (a step of more than 20 codes, U7 MeanStepCut); it is now
 // the shared cut event: the two P4 source-stats records (the previous advanced source frame and this one), ACQUIRED through the
 // renderer's skeleton memo (get-or-compute-and-publish, nobody computes a private mean), judged by U7
-// (VpUnit::CutFadeJudge::ClassifyEvents, the one classification every consumer derives). The frame's APL is the P4 record's mean.
+// (VpUnit::CutFadeJudge::ClassifyEvents, the one classification every consumer derives). The frame's mean level is the P4 record's mean.
 //
 // A source frame the module has not advanced before (first frame, or after a Release) is a cut by definition and needs no read.
 // When a P4 record cannot be Acquired (no skeleton memo: the Original pathway or no analysis lane; the product unavailable with a
@@ -32,7 +32,7 @@ namespace AdaptiveDownscale
 		enum class State : uint8_t { Known, Unavailable };
 		State state = State::Unavailable;
 		bool cut = false;
-		float apl = -1.0f;      // the frame's APL in 8-bit codes (P4 mean / 257); negative: not read
+		float p4MeanCodes = -1.0f;   // the P4 record's mean in 8-bit codes (mean / 257); negative: not read
 		std::string cause;      // Unavailable: why (shown with the fallback)
 	};
 
@@ -51,7 +51,7 @@ namespace AdaptiveDownscale
 			v.cause = cause.empty() ? "P4 source stats unavailable" : cause;
 			return v;
 		}
-		v.apl = static_cast<float>(cur.mean) / 257.0f;
+		v.p4MeanCodes = static_cast<float>(cur.mean) / 257.0f;
 		if (prevSequence == 0)
 		{
 			v.state = CutVerdict::State::Known;
