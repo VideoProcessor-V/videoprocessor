@@ -485,8 +485,9 @@ namespace Vpv
 			++m_counters.laneChunks;
 			ProductState& ps = m_products[node.id];
 			PollTimer(ps);
-			if (job.header != nullptr && ps.lastNs != 0)
-				job.header->costUs = uint32_t((std::min<uint64_t>)(ps.lastNs / 1000u, 0xFFFFFFFFull));
+			// FIX-S0-COST: the header's cost is the frame's pass SUM (the mean ms per frame over all timed passes), not the last single pass.
+			if (job.header != nullptr && ps.cost.timedFrames != 0)
+				job.header->costUs = uint32_t((std::min<double>)(ps.cost.MeanFrameMs() * 1000.0, 4294967295.0));
 
 			const bool ownsTap = node.id == VpSkeleton::kP10GrainSplit;
 			const uint32_t bands = ownsTap ? VpLaneProducts::TapBands(m_dims) : 0u;
