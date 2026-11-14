@@ -106,6 +106,7 @@ protected:
         qintptr* result) override;
 
 private:
+    friend struct Vpv::ConfigEditorAccess;   // VPV-HOOK (S4A A4: the editor's VP-V seams; ConfigEditorAccess.inl)
     QWidget* createShell();
     QWidget* createStartupPage();
     QWidget* createDisplayPage();

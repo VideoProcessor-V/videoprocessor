@@ -13,6 +13,9 @@
 
 #include <functional>
 
+class ConfigEditorWindow;
+class QComboBox;
+
 namespace Vpv
 {
 	class FunctionEditorKit : public ConfigPageHost::EditorKit
@@ -94,4 +97,13 @@ namespace Vpv
 		{ return profileSectionsFn ? profileSectionsFn(root) : QStringList(); }
 		ConfigPageHost::EditorKit* editorKit() override { return &kit; }
 	};
+
+	// S4A A4 (refs/112 pattern P2): the editor's VP-V seams, defined in ConfigEditorAccess.inl (included once, at the end
+	// of ConfigEditorWindow.cpp). The editor names this struct as its only friend line for them.
+	struct ConfigEditorAccess
+	{
+		static void BindFormApi(::ConfigEditorWindow& window);
+		static void BuildVpvPages(::ConfigEditorWindow& window);
+	};
+	void ApplyMotionAheadText(QComboBox* motionAhead);
 }
