@@ -32,6 +32,7 @@
 #include "DelayBudget.h"
 #include "ProductGraph.h"
 #include "QueueFrames.h"
+#include "SchedulerContract.h"
 #include "VariantKey.h"
 
 #include <atomic>
@@ -308,13 +309,14 @@ private:
 // planned depth = AcquireCause::NotPlannedAhead, made at its render) and asks the VRAM ledger for ONE LEVEL PER LADDER STEP
 // (SkeletonMemo::GpuNeedLevels), so a short grant gives the largest plan that fits, never 0 (amendment M6).
 
-// The class of an ahead job, in shed order (S-A sheds Fill first, then Derived, then the ahead part of the TD Slice; Core keeps at
-// least the depth its consumers declared). S3's JobDecl names this enum.
-enum class JobClass : uint8_t { Fill, Derived, Slice, Core };
-
+// The class of an ahead job is the scheduler contract's VpSkeleton::JobClass (core/SchedulerContract.h, IC-2: Unpack, Core, Derived,
+// Slice, Fill); there is one enum. The ladder's shed order is written out below, never taken from the enum values: S-A sheds Fill
+// first, then Derived, then the ahead part of the TD Slice; Core and Unpack are never shed (R4), they keep at least the depth their
+// consumers declared (S-B).
 inline const char* Token(JobClass c)
 {
     switch (c) {
+    case JobClass::Unpack: return "unpack";
     case JobClass::Fill: return "fill";
     case JobClass::Derived: return "derived";
     case JobClass::Slice: return "slice";
@@ -322,6 +324,9 @@ inline const char* Token(JobClass c)
     }
     return "?";
 }
+
+// Core and Unpack are never shed for memory (SchedulerContract R4): S-B shrinks them only down to their declared depth.
+inline bool KeepsDeclaredDepth(JobClass c) { return c == JobClass::Core || c == JobClass::Unpack; }
 
 struct AheadCost {
     uint16_t id = 0;                // ProductId
@@ -442,7 +447,7 @@ inline std::vector<AheadPlan> AheadLadderStates(const AheadNeed& n)
     for (uint16_t d = A; d > 0; --d) {
         bool changed = false;
         for (size_t i = 0; i < n.costs.size(); ++i)
-            if (n.costs[i].cls == JobClass::Core && depth[i] >= d && uint32_t(d) - 1u >= n.costs[i].declaredDepth) {
+            if (KeepsDeclaredDepth(n.costs[i].cls) && depth[i] >= d && uint32_t(d) - 1u >= n.costs[i].declaredDepth) {
                 depth[i] = uint16_t(d - 1u);
                 changed = true;
             }
