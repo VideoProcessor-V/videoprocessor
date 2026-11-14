@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Indicator.h"
+#include "QueueFrames.h"
 #include "RingContract.h"
 
 #include <algorithm>
@@ -89,6 +90,7 @@ enum : ProductId {
     kTdTrailSummary,      // 28 td.trail_summary: per-frame CPU summary for source identity / status
     // Wave S2 (SID lead request, doc 78 section 6): appended after the doc 72 list, never before it.
     kSourceGeometry,      // 29 source_geometry (P14g): HELD-STATE measured + applied source geometry (SourceGeometry unit v1)
+    kEdgeMap,             // 31 edge_map (per-frame memo; readers: L-FOCUS focus map, AdaptiveDownscale Sobel ramp (X5); later deband guard, occlusion, TD); lead 8 allocation 31, 05:2x 11-14
     kSkeletonProductEnd
 };
 
@@ -1044,7 +1046,7 @@ constexpr uint8_t kRecordHistoryMax = static_cast<uint8_t>(kSlotCountMax - kRing
 // Frames the configured queue holds: render-ahead R + lane lead L + the look-ahead walk (the GraphSettings terms the skeleton knows).
 inline unsigned QueueFramesFor(unsigned renderAhead, unsigned laneLead, unsigned lookAheadFrames)
 {
-    return renderAhead + laneLead + lookAheadFrames;
+    return unsigned(VpSkeleton::QueueFrames(renderAhead, laneLead, lookAheadFrames));   // THE one R + L + W (QueueFrames.h)
 }
 // max(floor, queue_multiple x queue_frames x period). Unmeasured (period <= 0): the floor (HistoryFramesFor then declares the cap).
 inline double RecordHistorySeconds(double floorSeconds, double queueMultiple, unsigned queueFrames, double sourcePeriodMs)

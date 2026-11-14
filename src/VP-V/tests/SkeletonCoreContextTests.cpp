@@ -309,6 +309,14 @@ namespace SkeletonCoreContextTestsNs
 			VariantKey half;
 			half.precision = kPrecisionFloat16;
 			Assert::IsTrue(m.Acquire(kP10GrainSplit, 1, AcquireForm::Cpu, half).cause == AcquireCause::VariantUndeclared, L"pixel data never at fp16");
+			{
+				// N2 (waiver gate batch 12): a non-pixelData owner that declares the precision axis is declined at fp16 too.
+				std::atomic<int> calls2{ 0 };
+				m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, CpuFill(&calls2, 0x44, VariantKey::kAxisPrecision));
+				Assert::IsTrue(m.Acquire(kP11RegionBlockStats, 1, AcquireForm::Cpu, half).cause == AcquireCause::VariantUndeclared, L"fp16 refused for every owner, pixelData or not");
+				Assert::IsTrue(calls2.load() == 0, L"and the fill never ran");
+				Assert::IsTrue(Has(m.LastCause(kP11RegionBlockStats), "variant not served"), L"and the decline is visible: the cause text says so");
+			}
 			VariantKey p0;
 			p0.param0 = 3;
 			Assert::IsTrue(m.Acquire(kP10GrainSplit, 1, AcquireForm::Cpu, p0).cause == AcquireCause::VariantUndeclared, L"an undeclared axis is refused, visibly");
@@ -339,6 +347,15 @@ namespace SkeletonCoreContextTestsNs
 			Assert::IsTrue(VariantReserveBytes(p1, full, 1, TexFormat::R16F) == 960u * 540u * 4u, L"float32 = R32F");
 			p1.precision = kPrecisionUnorm16;
 			Assert::IsFalse(VariantTexShape(p1, full, 4, TexFormat::RGBA16F, &s), L"no 4-channel unorm16 in the ledger: refused");
+			// N2 (waiver gate batch 10): float16 is not 12-bit safe: no ledger format for it, for any channel count or product.
+			for (unsigned ch : { 1u, 2u, 4u }) {
+				TexFormat f16 = TexFormat::R32F;
+				Assert::IsFalse(TexFormatOf(kPrecisionFloat16, ch, TexFormat::R32F, &f16), L"float16 refused by the ledger");
+				Assert::IsTrue(f16 == TexFormat::R32F, L"and nothing written");
+			}
+			VariantKey half16;
+			half16.precision = kPrecisionFloat16;
+			Assert::IsFalse(VariantTexShape(half16, full, 1, TexFormat::R16, &s), L"a float16 variant has no shape: the owner declines it");
 		}
 	};
 
