@@ -260,9 +260,9 @@ bool ReadShortcutsGlobalActions(const ConfigFile& config, std::set<std::string>&
 	std::string& error)
 {
 	actions.clear();
-	std::string value;
-	const bool present = config.TryGetString("shortcuts", "global_actions", value);
-	const std::string raw = EffectiveGlobalActions(present, value);
+	const std::string raw = GlobalActionsForConfig(
+		[&config](const char* section, const char* key, std::string& out)
+		{ return config.TryGetString(section, key, out); });
 	std::string unknown;
 	if (!MainConfigSchema::ShortcutGlobalActionsValid(raw, unknown))
 	{

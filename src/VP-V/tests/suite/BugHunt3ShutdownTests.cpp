@@ -27,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -380,6 +381,33 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("state_report"), EffectiveGlobalActions(false, "ignored"));
 			Assert::AreEqual(std::string(""), EffectiveGlobalActions(false, "", false));
 			Assert::AreEqual(std::string("toggle_noui"), EffectiveGlobalActions(true, "toggle_noui", false));
+		}
+
+		// R14-34 (principle 8): the Original pathway installs no default global hook; VP-V pathways do;
+		// an explicit value wins everywhere.
+		TEST_METHOD(OriginalPathwayInstallsNoDefaultGlobalHook)
+		{
+			auto make = [](std::map<std::string, std::string> values)
+			{
+				return [values](const char* section, const char* key, std::string& out)
+				{
+					const auto it = values.find(std::string(section) + "." + key);
+					if (it == values.end()) return false;
+					out = it->second;
+					return true;
+				};
+			};
+			Assert::AreEqual(std::string("state_report"), GlobalActionsForConfig(make({})));
+			Assert::AreEqual(std::string("state_report"),
+				GlobalActionsForConfig(make({ { "vpv.pipeline_original_pathway", "off" } })));
+			Assert::AreEqual(std::string(""),
+				GlobalActionsForConfig(make({ { "vpv.pipeline_original_pathway", "on" } })));
+			Assert::AreEqual(std::string(""),
+				GlobalActionsForConfig(make({ { "vprenderer.pipeline_original_pathway", " On " } })));
+			Assert::AreEqual(std::string("toggle_noui"),
+				GlobalActionsForConfig(make({ { "vpv.pipeline_original_pathway", "on" }, { "shortcuts.global_actions", "toggle_noui" } })));
+			Assert::AreEqual(std::string(""),
+				GlobalActionsForConfig(make({ { "shortcuts.global_actions", "" } })));
 		}
 
 		// S-3f b follow-up (no silent fallbacks): a failed background-hook start is one more entry

@@ -101,6 +101,27 @@ inline std::string EffectiveGlobalActions(bool keyPresent, const std::string& va
 	return defaultApplies ? std::string(kDefaultGlobalActions) : std::string();
 }
 
+// The list for a configuration. tryGet(section, key, out) is the config read (true = key present).
+// Pathway gate (lead 14 R14-34, principle 8): the Original pathway ([vpv] then [vprenderer]
+// pipeline_original_pathway = on) is Bill's behaviour, so the default global action does not
+// apply there and no low-level keyboard hook is installed by default; an explicit
+// global_actions value is still the user's and is honoured in every pathway.
+template <class TryGet>
+std::string GlobalActionsForConfig(TryGet&& tryGet)
+{
+	std::string pathway;
+	const bool known = tryGet("vpv", "pipeline_original_pathway", pathway) ||
+		tryGet("vprenderer", "pipeline_original_pathway", pathway);
+	std::string lower;
+	for (char c : pathway)
+		if (c != ' ' && c != '	')
+			lower += static_cast<char>((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c);
+	const bool original = known && lower == "on";
+	std::string value;
+	const bool present = tryGet("shortcuts", "global_actions", value);
+	return EffectiveGlobalActions(present, value, !original);
+}
+
 // Chords other branches already use for compiled defaults that are not on
 // this branch yet. A new default must not take them; when the feature is
 // merged its entry moves into kShortcutDefaults.
