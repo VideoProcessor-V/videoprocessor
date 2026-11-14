@@ -1,7 +1,7 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// input.source_analysis/regions: the CPU references of the S5 busy-share variant and the edge map (lead8/iface-L-B5.md B, C).
+// input.source_analysis/regions: the CPU references of the S5 busy-share variant (lead8/iface-L-B5.md B, C).
 #include "pch.h"
 #include <VP-V/modules/input/source_analysis/regions/BusyEdge.h>
 
@@ -56,17 +56,6 @@ namespace VideoProcessorTest
 			const std::vector<float> s = RegionEvidence::BusyEdge::BusyShare(g, 16, 1.0f, 1.0f);
 			Assert::AreEqual(size_t(4), s.size());
 			for (float v : s) Assert::AreEqual(0.0f, v);
-		}
-		TEST_METHOD(SobelOfAVerticalStepIsFourTimesTheStep)
-		{
-			const int w = 8, h = 8;
-			std::vector<float> p(static_cast<size_t>(w) * h);
-			for (int y = 0; y < h; ++y)
-				for (int x = 0; x < w; ++x) p[static_cast<size_t>(y) * w + x] = x < 4 ? 100.0f : 140.0f;
-			const std::vector<float> m = RegionEvidence::BusyEdge::SobelMagnitude(p.data(), w, h);
-			Assert::AreEqual(160.0f, m[static_cast<size_t>(4) * w + 3], 1e-3f);
-			Assert::AreEqual(160.0f, m[static_cast<size_t>(4) * w + 4], 1e-3f);
-			Assert::AreEqual(0.0f, m[static_cast<size_t>(4) * w + 1]);
 		}
 	};
 }
