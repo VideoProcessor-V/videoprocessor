@@ -188,3 +188,15 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Private GPU textures (skeleton rule)
 
 This module still creates its own GPU textures (see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): per-render temporaries move to the shared scratch arena (src/VP-V/core/ScratchArena.h) and kept state to skeleton product nodes.
+
+## FIX-12BIT-1 before/after (S-12BIT, refs/119 #29)
+
+`fbo_float32` is decided by the setting alone, no longer by the `scaling.output` slot. Measured values are filled in at TRAIN-1.
+
+| Case | Before | After | Expected | Measured |
+|---|---|---|---|---|
+| 10-bit picture, Beta lane, `fbo_float32` auto, slot on | f32 intermediates | f32 intermediates | 0 code difference | pending TRAIN-1 |
+| 10-bit picture, Beta lane, slot off (profile with `scaling.output` off) | f16 intermediates (up to about 1 code of 12-bit error near white) | f32 intermediates | 0 codes at 10-bit output; 12-bit path gains the precision | pending TRAIN-1 |
+| Slot-off bandwidth (FBO read/write) | f16 | f32, about 2x intermediate bandwidth for those profiles | GPU frame-time rise only for slot-off profiles, to be timed on the laptop RTX 3050 Ti | pending TRAIN-1 |
+| Stable 7.360 lane | f16 (no flag) | f16, now labelled "picture precision ... below 12-bit" | label shown, no pixel change | pending TRAIN-1 |
+| `SyncFallback` cost per frame | none | two compares plus a registry sync, no string work when unchanged | below measurement noise | pending TRAIN-1 |
