@@ -344,6 +344,34 @@
   ]
  },
  {
+  "id": "scaling.shared",
+  "order": 125,
+  "status": "placeholder",
+  "hook_point": "host",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [
+    "byte-identical with no caller"
+   ],
+   "isolation": [
+    "ScalerPass model tests; GPU vs CPU model; migration identity vs AdaptiveDownscale faithful-ortho"
+   ],
+   "contract": [],
+   "chain": []
+  },
+  "fallback_entry": "Scaler pass: caller's own path (<reason>)",
+  "missing": [
+   "contract",
+   "chain"
+  ]
+ },
+ {
   "id": "motion.vector_delivery",
   "order": 130,
   "status": "partial",
