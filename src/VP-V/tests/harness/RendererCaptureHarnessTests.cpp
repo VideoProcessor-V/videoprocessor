@@ -7376,10 +7376,12 @@ namespace Tests
 		TEST_METHOD(VectorEngineGamesDepthOneEngagesAtOneAhead)
 		{
 			const HarnessScope harnessScope;
-			// A games queue (queue_size 4, target_frames 2) keeps one frame ahead: with a starter the look-ahead engages
-			// at one ahead and the vectors are forward. WAIVER-C1-10 (coordinator 2026-11-12 18:42; owner 18:47): deband_vp alone is no
-			// starter (W2-C1 B9), so leg A asserts the NoStarter contract on the same queue (the look-ahead gets no depth) and leg B,
-			// with the de-judder's standing demand as the starter, keeps the original two assertions unchanged.
+			// A games queue (queue_size 4, target_frames 2) is LOW LATENCY: no starter runs the vector engine there and the look-ahead
+			// gets no depth ("Motion ahead: ... off in low latency"). WAIVER-C1-10 (coordinator 2026-11-12 18:42, owner confirmed 18:47;
+			// lead 9 ruling 2026-11-14): the former premise (look-ahead engages at one ahead on a games queue, fed by the debander) is
+			// obsolete; legs A and B assert the NoStarter contract on that queue (deband_vp alone, then even with the de-judder demand),
+			// and leg C (new, positive) asserts a mode WITH a real starter - the de-judder standing demand on a Normal queue at a
+			// cadence-eligible 24p source - engages the look-ahead.
 			if (!RequireHardwareOrSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			if (VectorTestSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			g_harnessApplySnapshot = true;
@@ -7387,22 +7389,25 @@ namespace Tests
 			const RunResult none = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
 				"deband_vp: on\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
 			g_harnessQueueTarget = 2;
-			// The starter leg runs a source the de-judder standing demand is eligible for (24p on the machine's own display, the
-			// cadence case; at a matched 60p source the de-judder never starts the engine).
 			const FramePlan starterPlan = RatePlan(HarnessMonitorHz() * 0.4);
-			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+			const RunResult lowStarter = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
 				"deband_vp: on\ndejudder_strength: 0.25\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n", false, &starterPlan);
-			g_harnessApplySnapshot = false;
 			g_harnessQueueTarget = 0;
-			Logger::WriteMessage(("deband_vp only (no starter):\n" + VectorTestLines(none)).c_str());
-			Assert::IsTrue(none.presented, (L"no starter: frames presented\n" + none.Tail()).c_str());
-			Assert::IsTrue(NoStarterStatusLogged(none), (L"no starter: the status names the NoStarter contract\n" + none.Tail()).c_str());
-			Assert::AreEqual(0, MotionAheadDepthLines(none), (L"no starter: no look-ahead depth\n" + none.Tail()).c_str());
-			Assert::IsFalse(none.Logged("Motion ahead: engaged"), (L"no starter: no look-ahead\n" + none.Tail()).c_str());
-			Logger::WriteMessage(("de-judder standing demand (starter):\n" + VectorTestLines(r)).c_str());
-			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
-			Assert::IsTrue(r.Logged("Motion ahead: engaged"), (L"the look-ahead engaged at one ahead\n" + r.Tail()).c_str());
-			Assert::IsTrue(r.Logged("vectors delivered (forward"), (L"forward vectors delivered\n" + r.Tail()).c_str());
+			const RunResult normal = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+				"deband_vp: on\ndejudder_strength: 0.25\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n", false, &starterPlan);
+			g_harnessApplySnapshot = false;
+			Logger::WriteMessage(("A deband_vp only (no starter):\n" + VectorTestLines(none)).c_str());
+			Logger::WriteMessage(("B low latency with the de-judder demand:\n" + VectorTestLines(lowStarter)).c_str());
+			Logger::WriteMessage(("C Normal queue with a real starter:\n" + VectorTestLines(normal)).c_str());
+			Assert::IsTrue(none.presented, (L"A: frames presented\n" + none.Tail()).c_str());
+			Assert::IsTrue(NoStarterStatusLogged(none), (L"A: the status names the NoStarter contract\n" + none.Tail()).c_str());
+			Assert::AreEqual(0, MotionAheadDepthLines(none), (L"A: no look-ahead depth\n" + none.Tail()).c_str());
+			Assert::IsFalse(none.Logged("Motion ahead: engaged"), (L"A: no look-ahead\n" + none.Tail()).c_str());
+			Assert::IsTrue(lowStarter.presented, (L"B: frames presented\n" + lowStarter.Tail()).c_str());
+			Assert::AreEqual(0, MotionAheadDepthLines(lowStarter), (L"B: low latency gives the look-ahead no depth\n" + lowStarter.Tail()).c_str());
+			Assert::IsFalse(lowStarter.Logged("Motion ahead: engaged"), (L"B: no look-ahead in low latency\n" + lowStarter.Tail()).c_str());
+			Assert::IsTrue(normal.presented, (L"C: frames presented\n" + normal.Tail()).c_str());
+			Assert::IsTrue(normal.Logged("Motion ahead: engaged"), (L"C: a real starter engages the look-ahead on a Normal queue\n" + normal.Tail()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroStaysMotionFree)
