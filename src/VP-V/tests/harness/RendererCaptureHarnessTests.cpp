@@ -5791,7 +5791,9 @@ namespace Tests
 			// ComputeOnce.h when it first checks the flag: run this test in its own vstest process). The teardown report
 			// is parsed from the log:
 			//   detector 2: no shared unit computed twice for one (variant, source frame) - "duplicates 0";
-			//   detector 3: every GPU pass has an owner - "gpu-unattributed 0".
+			//   detector 3: every GPU pass has an owner - "gpu-unattributed 0";
+			//   no gap (seq < 0), no hidden copy on CPU or GPU, the expected units counted, a seeded GPU rule matched.
+			// VP_COMPUTE_ONCE_BASELINE=1 is the BEFORE run: the hidden copies must be non-zero (the baseline is reported).
 			// Every DUPLICATE / HIDDEN-COPY / gap / UNATTRIBUTED line is printed with its callers.
 			if (!RequireHardwareOrSkip("ComputeOnceRealClipAcceptance")) return;
 			std::vector<std::vector<BYTE>> clip;
@@ -5839,7 +5841,8 @@ namespace Tests
 				if (l.find("Compute-once DUPLICATE ") != std::string::npos || l.find("Compute-once HIDDEN-COPY ") != std::string::npos
 					|| l.find("Compute-once gap ") != std::string::npos || l.find("Compute-once gpu UNATTRIBUTED ") != std::string::npos
 					|| l.find("Compute-once gpu HIDDEN-COPY ") != std::string::npos || l.find("Compute-once gpu owner ") != std::string::npos
-					|| l.find("Compute-once unit ") != std::string::npos)
+					|| l.find("Compute-once unit ") != std::string::npos || l.find("Compute-once not-instrumented ") != std::string::npos
+					|| l.find("Compute-once gpu rule-unmatched ") != std::string::npos)
 				{
 					Logger::WriteMessage(("   " + l + (l.empty() || l.back() != '\n' ? "\n" : "")).c_str());
 					++printed;
@@ -5856,9 +5859,48 @@ namespace Tests
 				return at == std::string::npos ? -1LL : std::atoll(summary.c_str() + at + key.size());
 			};
 			const long long duplicates = field("duplicates"), unattributed = field("gpu-unattributed"), passes = field("gpu-passes");
+			const long long gaps = field("gaps"), hidden = field("hidden-copies"), gpuHidden = field("gpu-hidden-copies");
+			const long long rulesMatched = field("gpu-rules-matched"), privateRulesMatched = field("gpu-private-rules-matched");
+			// Non-vacuity (audit L-DET MUST 2): the units the default chain runs on this clip each have a counted row. The set
+			// is VP_COMPUTE_ONCE_EXPECT (comma-separated ids) when given, else the default-on units below.
+			std::string expect = RealClip::Env("VP_COMPUTE_ONCE_EXPECT");
+			if (expect.empty())
+				expect = "U3,U4,U6,U7,U8,U9,U10";
+			std::string missing;
+			for (size_t at = 0; at <= expect.size();)
+			{
+				size_t end = expect.find(',', at);
+				if (end == std::string::npos)
+					end = expect.size();
+				const std::string unit = expect.substr(at, end - at);
+				at = end + 1;
+				if (unit.empty())
+					continue;
+				bool seen = false;
+				for (size_t i = from; i < r.log.size() && !seen; ++i)
+					seen = r.log[i].find("Compute-once unit " + unit + " variant ") != std::string::npos;
+				if (!seen)
+					missing += (missing.empty() ? "" : " ") + unit;
+			}
+			const bool baseline = RealClip::Env("VP_COMPUTE_ONCE_BASELINE") == "1";
+			Logger::WriteMessage(("== compute-once " + std::string(baseline ? "BEFORE (baseline)" : "AFTER") + ": hidden-copies cpu "
+				+ std::to_string(hidden) + " gpu " + std::to_string(gpuHidden) + ", gaps " + std::to_string(gaps) + ", gpu rules matched "
+				+ std::to_string(rulesMatched) + " (private " + std::to_string(privateRulesMatched) + "), expected units missing: "
+				+ (missing.empty() ? std::string("none") : missing) + "\n").c_str());
 			Assert::IsTrue(passes > 0, L"the GPU attribution saw no pass");
+			Assert::IsTrue(rulesMatched > 0, L"no seeded GPU rule matched a pass (the attribution rules see nothing)");
+			Assert::IsTrue(missing.empty(), std::wstring(L"expected units never counted (mis-keyed or not run): ").append(missing.begin(), missing.end()).c_str());
+			Assert::AreEqual(0LL, gaps, L"units noted without a source frame (seq < 0): see the gap lines");
+			if (baseline)
+			{
+				// BEFORE: the known private copies must be SEEN, so the AFTER zero is not vacuous. Reported, not hidden.
+				Assert::IsTrue(hidden + gpuHidden > 0, L"BEFORE run: no hidden copy detected (the private-copy rows see nothing)");
+				return;
+			}
 			Assert::AreEqual(0LL, duplicates, L"shared units computed more than once per (variant, source frame): see the DUPLICATE lines");
 			Assert::AreEqual(0LL, unattributed, L"GPU passes without an owner: see the gpu UNATTRIBUTED lines");
+			Assert::AreEqual(0LL, hidden, L"CPU hidden copies of shared units: see the HIDDEN-COPY lines");
+			Assert::AreEqual(0LL, gpuHidden, L"GPU hidden copies of shared units: see the gpu HIDDEN-COPY lines");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(EntranceOnceRealClipAcceptance)

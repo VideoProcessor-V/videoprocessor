@@ -8,7 +8,8 @@
 # owners and UNATTRIBUTED hot functions, the summaries) from the TRX into -Summary.
 # The GPU is taken through D:\codex\GPU-QUIET (mkdir + owner.txt) only when no train waits for it, and released after the
 # vstest process has exited.
-#   powershell -NoProfile -ExecutionPolicy Bypass -File tools\compute_once\run_cpu_sample.ps1 -Summary D:\...\co.txt
+#   The same steps as inline commands (the way to run them): src/VP-V/modules/control/diagnostics/README.md,
+#   section "Compute-once detectors", "Run the real-clip acceptance".
 param(
 	[string]$Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
 	[string]$ResultsDir = '',
