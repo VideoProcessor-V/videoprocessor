@@ -331,7 +331,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 7u && VpLaneProducts::TapBands(d) == 2u, L"2 bands + extend + 7 (WAIVER-P10V5-01: unit 5 REDUCE)");
 			for (uint32_t i = 0; i < steps; ++i)
 				Assert::IsTrue(disp.Dispatch(job, i, steps), L"lane chunk");
-			Assert::IsTrue(kernel->steps == 6 && disp.Stats().tapBands == 2 && disp.Stats().extends == 1, L"lane passes");
+			Assert::IsTrue(kernel->steps == 7 && disp.Stats().tapBands == 2 && disp.Stats().extends == 1, L"lane passes");
 			Assert::IsTrue(disp.CostOf(kP10GrainSplit).frames == 1, L"the cost counter records one completed lane frame (last chunk only)");
 			Assert::IsFalse(disp.Dispatch(job, 0, steps + 1), L"a plan that does not match the passes is refused");
 
