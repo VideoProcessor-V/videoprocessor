@@ -98,3 +98,14 @@ today, so no switch is byte-identical yet).
   reference), `View`, `Smooth`, `Stamp`, `CostAt`, `AppendProducts`.
 - `RegionEvidenceGlsl.h`: stats pass, consumer accessor, float mirrors (`StatsGridMirror`, `PackSource`).
 - Tests: [tests/README.md](tests/README.md).
+
+## BusyEdge (L-B5, in progress): S5 busy share and edge map
+
+Design goal: one computation of the debander guard's busy share (P11 term S5, variant axes: canonical lap_min / ext_min thresholds and
+plane) and one per-pixel Sobel edge map (ProductId kEdgeMap, consumers AdaptiveDownscale and L-FOCUS, later P11 gmax), both owner-filled
+in source_analysis and read by consumers through Acquire. Philosophy: the arithmetic is MOVED from VpDebander / AdaptiveDownscale, not
+copied; a private pass is deleted in the same commit as its consumer's switch.
+Status: BusyEdge.h (CPU reference and tolerance oracle) and BusyEdgeGlsl.h (shader mirrors) exist with BusyEdgeTests (registered, not
+yet run). The GPU owner fills and the consumer switches wait for L-CORE's OwnerFillRequest::gpu context (r2/lcore-qwin); until then no
+consumer is switched and no private pass is removed.
+Settings: none added (no new keys); thresholds are the debander's existing lap_min / ext_min.
