@@ -413,10 +413,10 @@ if (p.x < GS_W && p.y < GS_H) {
 			}
 		}
 
-		// ND03: the law's one band Gaussian (GrainSplit::BandRadius / BandWeight).
-		int GaussRadius(double sigma) { return GrainSplit::BandRadius(sigma); }
+		// ND03: the law's one band Gaussian (the U2 unit's VpUnit::BandFromBase::BandRadius / BandWeight).
+		int GaussRadius(double sigma) { return VpUnit::BandFromBase::BandRadius(sigma); }
 
-		double GaussWeight(int k, double sigma) { return GrainSplit::BandWeight(k, sigma); }
+		double GaussWeight(int k, double sigma) { return VpUnit::BandFromBase::BandWeight(k, sigma); }
 
 		void Splitter::Release(pl_gpu gpu)
 		{

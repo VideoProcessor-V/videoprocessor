@@ -60,11 +60,11 @@ namespace TextureRestore
 
 	// --- Shared constants (shader and CPU model) ---
 	constexpr double kReferenceHz = 23.976;    // the content rate when it is unknown
-	// ND03 / ND04: the band sigmas and the grain constants are repair.grain_split's ONE law (GrainSplit::DefaultParams),
-	// read here by name, never copied (the values are unchanged: 1 / 2.5 / 6 px, 16 px tile, 4 sub-blocks, 4 quiet, 2,
-	// 2.2 / 3.8, kappa 2).
+	// ND03: the band sigmas are the U2 unit's table (VpUnit::BandFromBase::kSigma*: 1 / 2.5 / 6 px). ND04: the grain
+	// constants are repair.grain_split's ONE law (GrainSplit::DefaultParams: 16 px tile, 4 sub-blocks, 4 quiet, 2,
+	// 2.2 / 3.8, kappa 2). Read here by name, never copied; the values are unchanged.
 	constexpr GrainSplit::Params kGrainLaw = GrainSplit::DefaultParams();
-	constexpr double kSigma1 = kGrainLaw.sigmaFine, kSigma2 = kGrainLaw.sigmaBase, kSigma3 = kGrainLaw.sigmaLow;   // band splits (px at <= 2160 lines)
+	constexpr double kSigma1 = VpUnit::BandFromBase::kSigmaFine, kSigma2 = VpUnit::BandFromBase::kSigmaBase, kSigma3 = VpUnit::BandFromBase::kSigmaLow;   // band splits (px at <= 2160 lines)
 	constexpr double kTilePx = kGrainLaw.blockPx;                     // tile size at <= 2160 lines (x GrainScale)
 	constexpr int kSubBlocks = kGrainLaw.subBlocks;                   // per tile axis (16 sub-blocks)
 	constexpr int kQuietSubBlocks = kGrainLaw.quietSubBlocks;         // the quietest sub-blocks averaged for the grain level
@@ -102,9 +102,9 @@ namespace TextureRestore
 		const int sub = (std::max)(1, static_cast<int>(std::lround(kTilePx * scale / kSubBlocks)));
 		return sub * kSubBlocks;
 	}
-	// The band Gaussians are the grain split law's one band Gaussian (ND03: GrainSplit::BandRadius / BandWeight; FIX-B2-ND03).
-	inline int Radius1(double scale) { return GrainSplit::BandRadius(kSigma1 * scale); }
-	inline double Weight1(int k, double scale) { return GrainSplit::BandWeight(k, kSigma1 * scale); }
+	// The band Gaussians are the U2 unit's one band Gaussian (ND03: VpUnit::BandFromBase::BandRadius / BandWeight; FIX-B2-ND03).
+	inline int Radius1(double scale) { return VpUnit::BandFromBase::BandRadius(kSigma1 * scale); }
+	inline double Weight1(int k, double scale) { return VpUnit::BandFromBase::BandWeight(k, kSigma1 * scale); }
 	// The half-resolution sigma of a full-resolution split (the 2x2 box adds 0.25 px^2 per axis).
 	inline double HalfSigma(double sigma) { return VpUnit::BandFromBase::HalfSigma(sigma); }
 	inline int HalfRadius(double sigma) { return VpUnit::BandFromBase::Radius(VpUnit::BandFromBase::HalfSigma(sigma), 3.5, true, 1e-9); }

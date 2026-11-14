@@ -67,9 +67,10 @@ namespace GrainSplit
 	// The split's law (texture_restore's values). Sigmas are multiplied by the caller's scale.
 	struct Params
 	{
-		double sigmaFine = 1.0;        // D1 = Y - G(sigmaFine) Y (fine band), D2 = G(sigmaFine) Y - base (mid band)
-		double sigmaBase = 2.5;        // base = G(sigmaBase) Y
-		double sigmaLow = 6.0;         // D3 = base - G(sigmaLow) Y (low-mid band, for focus measures)
+		// The band sigmas are the U2 unit's table (VpUnit::BandFromBase::kSigma*; WAIVER-B2-U2-UNITMOVE).
+		double sigmaFine = VpUnit::BandFromBase::kSigmaFine;   // D1 = Y - G(sigmaFine) Y (fine band), D2 = G(sigmaFine) Y - base (mid band)
+		double sigmaBase = VpUnit::BandFromBase::kSigmaBase;   // base = G(sigmaBase) Y
+		double sigmaLow = VpUnit::BandFromBase::kSigmaLow;     // D3 = base - G(sigmaLow) Y (low-mid band, for focus measures)
 		int subBlocks = 4;             // grain level: sub-blocks per block axis
 		int quietSubBlocks = 4;        // the quietest sub-blocks averaged
 		int neighbourhood = 2;         // minimum over (2 n + 1)^2 blocks
@@ -95,11 +96,8 @@ namespace GrainSplit
 	// never keeps its own copy of the constants (OD 11-14 04:30; ND03 / ND04). constexpr so readers keep compile-time
 	// constants (array bounds, shader defines) that are reads of this table.
 	constexpr Params DefaultParams() { return Params(); }
-	// ND03: the ONE band Gaussian of the law (the producer's): radius ceil(3 sigma), at least one tap each side, no epsilon;
-	// the normalised taps are VpUnit::BandFromBase::Weight. Every reader of the band sigmas (GrainSplitGpu, texture_restore,
-	// detail_pulse) calls this, never its own Radius flags.
-	inline int BandRadius(double sigma) { return VpUnit::BandFromBase::Radius(sigma, 3.0, true, 0.0); }
-	inline double BandWeight(int k, double sigma) { return VpUnit::BandFromBase::Weight(k, sigma, BandRadius(sigma)); }
+	// ND03: the ONE band Gaussian of the law lives in the U2 unit (VpUnit::BandFromBase::BandRadius / BandWeight); every
+	// reader of the band sigmas (GrainSplitGpu, texture_restore, detail_pulse) calls it, never its own Radius flags.
 	// The code scale of a depth relative to ten bits (2^(bits-10)); the energy scale is its square.
 	inline double DepthScale(int bits) { return std::ldexp(1.0, bits - 10); }
 

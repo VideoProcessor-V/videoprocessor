@@ -62,6 +62,19 @@ namespace BandFromBase
 	// The half-resolution sigma of a full-resolution split.
 	inline double HalfSigma(double sigma) { return std::sqrt(sigma * sigma - 0.25) / 2.0; }
 
+	// The band sigma table (px at <= 2160 lines; every caller multiplies by its own scale). The single owner of these
+	// values: repair.grain_split's Params defaults, texture_restore's kSigma1/2/3, detail_pulse's kSigmaFine and the
+	// temporal detail model read them from here (WAIVER-B2-U2-UNITMOVE; values unchanged, so the law version stays 1).
+	constexpr double kSigmaFine = 1.0;   // fine band: D1 = Y - G(fine) Y
+	constexpr double kSigmaBase = 2.5;   // base = G(base) Y
+	constexpr double kSigmaLow = 6.0;    // low-mid band: D3 = base - G(low) Y
+	// The ONE band Gaussian of the full-resolution split (the producer's rule, the same as Blur below): radius
+	// ceil(3 sigma), at least one tap each side, no epsilon; the normalised taps are Weight() of that radius.
+	// Identical to the readers' former private rules (ceil(3 sigma - 1e-9) with or without the minimum) at every
+	// scale they run (FIX-B2-ND03; pinned by BandFromBaseUnitMoveTests).
+	inline int BandRadius(double sigma) { return Radius(sigma, 3.0, true, 0.0); }
+	inline double BandWeight(int k, double sigma) { return Weight(k, sigma, BandRadius(sigma)); }
+
 	// CPU reference: separable Gaussian of a w x h plane, edges replicated, fixed summation order (rows across,
 	// then columns down). sigma <= 0 returns the input.
 	inline std::vector<double> Blur(const std::vector<double>& in, int w, int h, double sigma)

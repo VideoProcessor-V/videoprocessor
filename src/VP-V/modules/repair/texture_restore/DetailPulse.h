@@ -4,7 +4,6 @@
 
 #include <vprenderer/GrainPreserve.h>
 #include <VP-V/modules/repair/deband/VpDebander.h>
-#include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 
 #include <algorithm>
@@ -56,7 +55,7 @@ namespace DetailPulse
 	constexpr double kCapMin = 1.0, kCapMax = 1.5;
 
 	// Band sigmas in plane px at 2160 lines and below (x Scale() above).
-	constexpr double kSigmaFine = GrainSplit::DefaultParams().sigmaFine;   // ND03: the grain split law's fine sigma
+	constexpr double kSigmaFine = VpUnit::BandFromBase::kSigmaFine;   // ND03: the U2 unit's fine sigma (the grain split law's)
 	constexpr double kSigmaWide = 2.5;
 	// The tile: the measure and apply passes' 32 x 32 work block (16 x 16 threads, 2 x 2 px each).
 	constexpr int kTilePx = 32;
@@ -91,10 +90,10 @@ namespace DetailPulse
 	constexpr double kMaxScale = 2.5;
 
 	inline double Scale(double planeLines) { return (std::min)(GrainPreserve::GrainScale(planeLines), kMaxScale); }
-	// The fine band's Gaussian is the grain split law's one band Gaussian (ND03: GrainSplit::BandRadius, ceil(3 sigma), at
+	// The fine band's Gaussian is the U2 unit's one band Gaussian (ND03: VpUnit::BandFromBase::BandRadius, ceil(3 sigma), at
 	// least one tap; FIX-B2-ND03: the same radius as the old ceil(3 sigma - 1e-9), no minimum, at every scale this module runs).
-	inline int FineRadius(double scale) { return GrainSplit::BandRadius(kSigmaFine * scale); }
-	inline double FineWeight(int i, double scale) { return GrainSplit::BandWeight(i, kSigmaFine * scale); }
+	inline int FineRadius(double scale) { return VpUnit::BandFromBase::BandRadius(kSigmaFine * scale); }
+	inline double FineWeight(int i, double scale) { return VpUnit::BandFromBase::BandWeight(i, kSigmaFine * scale); }
 	inline double WideSigma(double scale) { return kSigmaWide * scale; }
 	inline double ClampCap(double cap) { return (std::max)(kCapMin, (std::min)(kCapMax, cap)); }
 	inline double RateHz(double sourceHz) { return sourceHz > 0.0 ? sourceHz : kReferenceHz; }
