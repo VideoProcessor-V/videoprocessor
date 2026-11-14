@@ -4,8 +4,9 @@
 // repair.grain_split / GrainLevel: the CPU reference law "v5" of the multi-frame grain level product P10g (refs/120,
 // brief-S-3c phase T2, owner decisions OD:604 / OD:605 / OD:650 and the 11-14 answers). CPU model only: no GPU kernel
 // exists or is written here (design rule 11-14 14:00: no grain-separation step without its measured 4K cost and its
-// budget share; lead14\design-grain-chain-cost.md did not exist when this file was written, so the budget share column
-// of CostRows() is "unset" and every cost is an ESTIMATE from refs/120 s5 / study-borrowed-grain s4, s7).
+// budget share). lead14\design-grain-chain-cost.md (11-14 14:0x) is the source of CostRows(); every cost is an ESTIMATE, nothing
+// measured. The budget there (5.4 ms 4K laptop incl. 0.4 reserve; core 5.0) is a PROPOSAL: the owner has not set it, so the
+// share is computed only when a caller passes a budget (kProposedBudget4kMs is that proposal, not a decision).
 //
 // What is in this file (all in the unit of P10's N: codes^2 of D = Y - G(base) Y, ten-bit-equivalent via Params::split.sourceBits):
 //   L1  NLF_t  temporal noise level function: the CROSS form I_r = E_r - C_r (E = <D_t,D_t>, C = <D_t, W D_t-1>) on every trusted
@@ -24,8 +25,8 @@
 //              is the unit-4 law EXACTLY (bit identical; Result carries copies of the unit-4 planes).
 //   Fallbacks are VISIBLE data in Result (mode, reason, trusted share, counters): the T3 product turns them into the Ctrl+I line,
 //              Config status and Ctrl+Alt+D (rule "no silent fallbacks"); nothing here is log-only.
-//   B   neighbour-window Wiener (owner 11-14 METHOD): 8 back + 4 ahead (low latency 6 back, 10 back only once per-pixel composed
-//              vectors exist), leave-one-out residual weights, per-frequency 8x8 DCT Wiener on the neighbour mean (4 half-shifts),
+//   B   neighbour-window Wiener (owner 11-14 METHOD): 8 back + 4 ahead (low latency 6 back, 10 back only once the per-pixel vector
+//              product exists), leave-one-out residual weights, per-frequency 8x8 DCT Wiener on the neighbour mean (4 half-shifts),
 //              PSD shape from flat tiles. A pixel with fewer than 2 usable neighbours takes the L1+L2 gains exactly.
 //
 // Shared-product table (N1 by signature; this file is a CONSUMER of shared products, the stand-ins are marked):
@@ -52,13 +53,16 @@ namespace GrainLevel
 	using GrainSplit::Plane;
 	using GrainSplit::Split;
 
+	// Clamp to [0, 1] (local: this file owns no shared clamp/ramp unit).
+	inline double Unit01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
+
 	// The law of this file. Bump on ANY change of the law or of the Result layout (the T3 GPU form and its parity tests pin it).
 	constexpr uint32_t kLawVersion = 5;   // "CPU law v5" of brief-S-3c T2 (L1 NLF_t + L2 gate + guards + B neighbour window)
 
 	// ---- cost ledger (design rule: every step states its 4K cost and its budget share) --------------------------------------
 	// ms ranges are ESTIMATES on the 3050 Ti laptop (idle GPU) from refs/120 s5 and study-borrowed-grain s4 / s7; NOTHING here is
 	// measured (no GPU kernel exists yet). budgetShare is unset until the owner sets the single grain-separation budget
-	// (lead14\design-grain-chain-cost.md); BudgetShare() turns a row into a fraction once a budget exists.
+	// (lead14\design-grain-chain-cost.md s2 proposes 5.4 ms; NOT set by the owner); BudgetShare() turns a row into a fraction once a budget exists.
 	struct CostRow
 	{
 		const char* step;
@@ -71,14 +75,17 @@ namespace GrainLevel
 		static const CostRow rows[] = {
 			{ "L1 NLF_t cross sums (1/4 of blocks, fused in APPLY)", 0.04, 0.08, 0.01, 0.02, "refs/120 s5 row 1 (ESTIMATE)" },
 			{ "L2 coherence gate (half-res pass)",                   0.06, 0.11, 0.02, 0.03, "refs/120 s5 row 2 (ESTIMATE)" },
-			{ "NLF_t histogram + decay (merged into LEVEL)",         0.02, 0.04, 0.02, 0.04, "refs/120 s5 row 3 (ESTIMATE)" },
+			{ "NLF_t level table + decay (merged into LEVEL)",         0.02, 0.04, 0.01, 0.02, "refs/120 s5 row 3 (ESTIMATE)" },
 			{ "vector field upload + extra fetch",                   0.00, 0.01, 0.00, 0.01, "refs/120 s5 row 4 (ESTIMATE)" },
-			{ "B neighbour window 8+4 (K=12, DCT Wiener, shared warps)", 2.8, 2.8, 0.68, 0.68, "study-borrowed-grain s7 (ESTIMATE; owner OD 11-14)" },
+			{ "B neighbour window 8+4 (K=12, DCT Wiener, shared warps)", 2.5, 3.9, 0.63, 0.97, "design-grain-chain-cost row 8: point 2.9 / 0.73 (ESTIMATE)" },
+			{ "B low latency 10 back + 0 ahead (replaces the row above)", 2.2, 3.5, 0.55, 0.88, "design-grain-chain-cost row 9: point 2.6 (ESTIMATE)" },
+			{ "B low latency interim back-6 (replaces the row above)", 1.6, 2.8, 0.40, 0.69, "design-grain-chain-cost row 9i: point 1.9 (ESTIMATE)" },
 			{ "single-frame fallback (unit-4 law, nothing added)",   0.00, 0.00, 0.00, 0.00, "by construction" },
 		};
 		count = static_cast<int>(sizeof(rows) / sizeof(rows[0]));
 		return rows;
 	}
+	constexpr double kProposedBudget4kMs = 5.4;   // PROPOSAL (design-grain-chain-cost s2), owner has not set it
 	// Fraction of a budget (ms) a row's upper estimate takes at 4K; negative when no budget is set (budgetMs <= 0).
 	inline double BudgetShare(const CostRow& r, double budgetMs) { return budgetMs > 0.0 ? r.ms4kHi / budgetMs : -1.0; }
 
@@ -126,8 +133,8 @@ namespace GrainLevel
 		double mirrorMinEnergy = 0.5;        // I_r at least this fraction of the reference: there IS non-repeating energy (unambiguous)
 		// B (owner METHOD 11-14)
 		int backFrames = 8, aheadFrames = 4;            // standard
-		int lowLatencyBack = 6;                          // low latency without per-pixel composed vectors (option B back-6)
-		int lowLatencyBackPerPixel = 10;                 // low latency once per-pixel composed vectors exist (+0 ahead)
+		int llBack = 6;                                  // low latency without the per-pixel vector product (option B back-6)
+		int llBackPerPixel = 10;                         // low latency once the per-pixel vector product exists (+0 ahead)
 		double neighbourKappa = 1.0;                     // Wiener kappa on the neighbour mean ("kappa about 1 on the harness N")
 		double looGate = 4.0;                            // leave-one-out gate: boxmean5x5(r^2) <= looGate (N + V)
 		int minNeighbours = 2;                           // fewer usable neighbours: the L1+L2 gains exactly
@@ -421,7 +428,13 @@ namespace GrainLevel
 			}
 			r.ageFrames = age_;
 			if (temporal) RunTemporal(u4, dCur, ctx, r);
-			else FillSingle(u4, r, why);
+			else
+			{
+				FillSingle(u4, r, why);
+				// A gap (engine off, untrusted pair, fade) still AGES the history by the frame period: the half-life is in seconds,
+				// so a frame without evidence is not free. Resets already emptied it.
+				if (ctx.reset == Reset::None && ctx.sourceHz > 0.0) acc_.Decay(DecayPerFrame(p_.halfLifeSeconds, ctx.sourceHz));
+			}
 			prevD_ = dCur;
 			hasPrev_ = true;
 			return r;
@@ -540,7 +553,7 @@ namespace GrainLevel
 						for (int i = -1; i <= 1; ++i) { const double dv = dCur.get(x + i, y + j); e += dv * dv; }
 					e /= 9.0;
 					const double N = r.Nb[static_cast<size_t>(y / B) * bwB + static_cast<size_t>(x / B)];
-					const double f = GrainSplit::Clamp01(1.0 - p_.split.kappa * N / (std::max)(e, floorE));
+					const double f = Unit01(1.0 - p_.split.kappa * N / (std::max)(e, floorE));
 					double g = 0.0, hh = 0.0;
 					RegionBilinear(reg, gReg, x, y, g);
 					double fp = f + g * (1.0 - f);
@@ -565,11 +578,11 @@ namespace GrainLevel
 	// ---- B: the neighbour window (owner METHOD 11-14: 8 back + 4 ahead) ----------------------------------------------------------
 	struct Window { int back = 0, ahead = 0; };
 	// The window the law asks for. availableAhead = the queue's real look-ahead (the ahead count never exceeds it). Low latency:
-	// 0 ahead and 6 back (option B back-6), or 10 back only once per-pixel composed vectors exist.
+	// 0 ahead and 6 back (option B back-6), or 10 back only once the per-pixel vector product exists.
 	inline Window WindowFor(const Params& p, bool lowLatency, bool perPixelVectors, int availableAhead)
 	{
 		Window wd;
-		if (lowLatency) { wd.back = perPixelVectors ? p.lowLatencyBackPerPixel : p.lowLatencyBack; wd.ahead = 0; return wd; }
+		if (lowLatency) { wd.back = perPixelVectors ? p.llBackPerPixel : p.llBack; wd.ahead = 0; return wd; }
 		wd.back = p.backFrames;
 		wd.ahead = (std::max)(0, (std::min)(p.aheadFrames, availableAhead));
 		return wd;
@@ -596,17 +609,19 @@ namespace GrainLevel
 	// Orthonormal 8x8 DCT-II basis, basis[k][n].
 	inline const double* DctBasis()
 	{
-		static double tab[64];
-		static bool init = false;
-		if (!init)
+		struct Table
 		{
-			const double pi = 3.14159265358979323846;
-			for (int k = 0; k < 8; ++k)
-				for (int n = 0; n < 8; ++n)
-					tab[k * 8 + n] = (k == 0 ? std::sqrt(1.0 / 8.0) : std::sqrt(2.0 / 8.0)) * std::cos(pi * (2 * n + 1) * k / 16.0);
-			init = true;
-		}
-		return tab;
+			double v[64];
+			Table()
+			{
+				const double pi = 3.14159265358979323846;
+				for (int k = 0; k < 8; ++k)
+					for (int n = 0; n < 8; ++n)
+						v[k * 8 + n] = (k == 0 ? std::sqrt(1.0 / 8.0) : std::sqrt(2.0 / 8.0)) * std::cos(pi * (2 * n + 1) * k / 16.0);
+			}
+		};
+		static const Table table;   // C++11 magic static: thread-safe one-time init
+		return table.v;
 	}
 	inline void Dct8x8(const double* in, double* out)
 	{
@@ -782,7 +797,7 @@ namespace GrainLevel
 					{
 						const double c2 = co[k] * co[k];
 						const double V = shape[k] * nt / kt;
-						const double g = c2 > 0.0 ? GrainSplit::Clamp01(1.0 - p.neighbourKappa * V / c2) : 0.0;
+						const double g = c2 > 0.0 ? Unit01(1.0 - p.neighbourKappa * V / c2) : 0.0;
 						co[k] *= g;
 					}
 					Idct8x8(co, rec);
