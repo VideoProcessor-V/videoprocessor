@@ -31,6 +31,9 @@
 // Future codecs (AV1, VVC, LCEVC): their switch behaviour (e.g. an LCEVC enhancement layer can
 // drop independently of its base, a quality step without a resolution step) must be MEASURED on
 // real material; this detector carries no codec-specific constants.
+#include "../../../../core/Ramp.h"
+#include "../../../../core/RobustStats.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -246,24 +249,11 @@ namespace SourceIdentity
 	private:
 		bool Valid(const QualitySample& q) const { return !q.blank && !q.fade && q.apl >= s_.darkApl; }
 
-		static double Clamp01Local(double x) { return x > 0.0 ? (x < 1.0 ? x : 1.0) : 0.0; }
+		static double Clamp01Local(double x) { return ::RampMath::Clamp01NanToZero(x); }   // core/Ramp.h (ND07)
 
-		static double Median(std::vector<double> v)
-		{
-			if (v.empty())
-				return 0.0;
-			std::sort(v.begin(), v.end());
-			const size_t n = v.size();
-			return (n % 2 == 1) ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
-		}
-
-		static double Mad(const std::vector<double>& v, double median)
-		{
-			std::vector<double> d;
-			for (size_t i = 0; i < v.size(); ++i)
-				d.push_back(std::fabs(v[i] - median));
-			return Median(d);
-		}
+		// Median / MAD: core/RobustStats.h (ND06), rule MeanOfMiddle.
+		static double Median(const std::vector<double>& v) { return RobustStats::Median(v); }
+		static double Mad(const std::vector<double>& v, double median) { return RobustStats::MadAbout(v, median); }
 
 		void Trim(int64_t now)
 		{

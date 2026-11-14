@@ -259,6 +259,7 @@
         "source_resolution_latch_fixes",
         "source_resolution_cut_fixes",
         "source_geometry_detect",
+        "source_resolution_frame_bound",
         "source_resolution_engage_max_wait_s",
         "source_resolution_crossfade_s",
         "source_resolution_release_fade_s",
@@ -313,6 +314,7 @@
           "source_coding_fixes": "off",
           "source_resolution_latch_fixes": "off",
           "source_resolution_cut_fixes": "off",
+          "source_resolution_frame_bound": "off",
           "active_picture_startup_hold": "off",
           "frame_analysis_store": "off"
         }

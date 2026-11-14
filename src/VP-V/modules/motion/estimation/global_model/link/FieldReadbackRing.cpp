@@ -273,11 +273,19 @@ namespace CameraLink
 			if (e.native)
 			{
 				const int idx = static_cast<int>(&e - m_entries.data());
-				if (!m_native || !m_native->Ready(idx))
-					break;   // the event query says the copy is not done: never wait (and keep request order)
+				const LedDrive::ReadState state = m_native ? m_native->Poll(idx) : LedDrive::ReadState::Pending;
+				if (state == LedDrive::ReadState::Pending)
+					break;   // DXGI_ERROR_WAS_STILL_DRAWING: the copy is not done: never wait (and keep request order)
 				tmp.resize(PlaneBytes(e.gridW, e.gridH) * 2 / sizeof(float));
-				if (!m_native->Read(idx, tmp.data()))
-					break;   // DXGI_ERROR_WAS_STILL_DRAWING: try again next poll
+				if (state == LedDrive::ReadState::Failed || !m_native->Read(idx, tmp.data()))
+				{
+					// An error HRESULT, not "still drawing": freed and counted as failed (CameraLinkCore turns
+					// it into a readback event), never an entry that stays in flight forever.
+					m_lastError = "native readback copy reported a device error";
+					Release(e);
+					++m_stats.failed;
+					continue;
+				}
 				base = tmp.data();
 			}
 			else if (pl_buf_poll(m_gpu, e.buf, 0))

@@ -42,6 +42,7 @@
 
 #include <VP-V/core/Ancestry.h>
 #include <VP-V/core/Products.h>
+#include <VP-V/core/Ramp.h>
 #include <VP-V/modules/input/source_analysis/light_level/LightLevelLut.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraMotion.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
@@ -153,9 +154,9 @@ namespace RegionEvidence
 		static constexpr double invM1 = 6.277394636015326, invM2 = 0.012683313515655966, m2 = 78.84375;
 	};
 
-	template <class T> inline T Clamp01(T v) { return v < T(0) ? T(0) : (v > T(1) ? T(1) : v); }
-	// Linear ramp lo..hi; a degenerate ramp (hi <= lo) is a step at hi (never NaN).
-	template <class T> inline T Ramp(T v, T lo, T hi) { return hi > lo ? Clamp01((v - lo) / (hi - lo)) : (v >= hi ? T(1) : T(0)); }
+	// core/Ramp.h (ND07).
+	template <class T> inline T Clamp01(T v) { return RampMath::Clamp01(v); }
+	template <class T> inline T Ramp(T v, T lo, T hi) { return ::RampMath::Ramp(v, lo, hi); }
 
 	// Display luminance (nits) of a 10-bit studio luma code. SDR: white * v^2.4 (BTB -> 0, WTW above white kept);
 	// PQ: ST 2084 EOTF of v clamped 0..1; HLG: BT.2100 inverse OETF and a 1000-nit luma OOTF (gamma 1.2).

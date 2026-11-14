@@ -41,6 +41,7 @@ namespace FallbackPlainText
 			{ "subtitle detection", "Subtitle detection is falling behind and skipping work" },
 			{ "SDR tone shape", "The SDR tone shape was not applied" },
 			{ "output scaling", "The output scaler was replaced by a simpler one" },
+			{ "native readback", "Some graphics-card readbacks use a simpler ready check, so analysis results may arrive later" },
 			{ "early upload", "Early upload of frames to the graphics card is off" },
 			{ "early upload frames", "Early upload is holding fewer frames than requested" },
 			{ "picture precision", "The picture is processed in 16-bit float steps (below 12-bit precision)" },
