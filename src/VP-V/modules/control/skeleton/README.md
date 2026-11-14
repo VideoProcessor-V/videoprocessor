@@ -183,6 +183,44 @@ R16 unorm, uploaded in row bands). Unit version `VpLaneProducts::kTapFormUnitVer
 P13 both change, and every consumer's `CheckFit` falls back visibly (WrongSize / Stale) instead of reading a plane of another provenance.
 Nothing reads P10-P12 yet (the `skeleton.report` consumer only declares them).
 
+## Acquire: get-or-compute-and-publish (B1, refs/126 s1.2)
+
+The one access path to a shared product (owner rule 2026-11-12: reuse if computed for that frame, else the OWNING unit
+computes it once and publishes it into the skeleton spot; nobody computes privately). Code: `core/SkeletonAcquire.h`
+(`SkeletonMemo`), `core/SkeletonAcquireLane.h` (`BindLaneToMemo`); the module owns one memo per lane bundle (`MemoOf(host)`).
+
+- `Acquire(id, seq, AcquireForm::Cpu | Gpu, VariantKey = {})` -> `AcquireResult` {status Reused / FilledAtRead / Unavailable,
+  cause, source LaneSlot / Memo, cpu + bytes or `GpuMemoHandle`, `pin`}. Order: the lane's slot (default variant; a GPU
+  lane product returns its dispatcher texture + producer fence) -> the frame's memo spot (a fill in flight is waited for) ->
+  the one owner fill, run once outside the lock and published. The pointers stay valid while the reader holds `pin`.
+- `RegisterOwnerFill(id, form, unit, fill)`: one fill per (product, form); `unit` must be the catalog's owning unit
+  (`ProductRows`, e.g. P1 / P4 = `input/source_analysis/lane`, P10 = `repair/grain_split`). Another unit, a product not in
+  the catalog, or a second registration is refused and counted; a replacement is explicit (`ReplaceOwnerFill`). The lane's
+  CPU live computes are the owner fills of their products (the seal's own law, `AnalysisLane::RunCpuLive`).
+- Nested (owner 2026-11-13, recursive rule): an owner fill obtains every prerequisite through `Acquire` (computed by ITS owner
+  and published on the way). No lock is held across a fill; the re-entrancy guard is per key and cycles are detected by
+  key, on one thread or across threads waiting for each other's fills: the closing request is `Reentrant`, never a deadlock.
+- Variants: the owner declares the axes it serves (plane, size, scale, code unit, sigma, precision) and its own form; keys
+  are canonical (the owner's own value = default). An undeclared axis is refused: no private "does not fit" variant.
+- Lifetime: per frame. `OnSeal(seq)` (called after the lane's seal) releases the previous frame's spots; a released frame is
+  refused, never recomputed; frame numbers going back release everything. A GPU spot with a recorded read
+  (`NoteGpuRead`) is retired only after that fence completes (`SetFenceCompleted`).
+- Budget: GPU spots are reserved, before the fill, against the VRAM ledger grant of the plan's scratch arena users
+  (`kUserScratchArena` + `kUserScratchArenaExtra`, `SetGpuBudget` at each Configure). No grant = no GPU spot.
+- The seal reuses a default-variant CPU frame an Acquire reader published before it (copied, counted
+  `SealReusedPublished()`), only when no input is missing at the seal.
+
+Fallbacks (G5): while a product's last Acquire was Unavailable, the entry `skeleton acquire <product token>` is engaged
+with `<cause>, frame <seq>` (Ctrl+I line, Config status, Ctrl+Alt+D; released when it is served again). Causes: no owner
+fill, no GPU dispatcher, owner fill declined (false or an exception), dropped by the regulator, frame released, variant not
+served by the owner, VRAM ledger grant exceeded, no VRAM ledger grant, lane live fill pending, lane live fill failed, lane
+GPU texture not reachable, owner fill asked for its own product.
+
+Status lines (Ctrl+Alt+D), one per product asked:
+`skeleton acquire: <token> <n> reused (lane <a>, memo <b>), <f> filled at read, <u> unavailable; <cause> <count>...`,
+plus `skeleton acquire: owner registrations refused <n> (<last>)` and `skeleton acquire: <n> released GPU spot(s) held for
+a pending read fence`. Tests: `src/VP-V/tests/SkeletonAcquireTests.cpp`.
+
 ## Status and fallbacks
 
 Every downgrade is visible (Ctrl+I line, Ctrl+Alt+D, Config status); none is log-only. Strings (FallbackCatalog ids):
@@ -254,6 +292,31 @@ vstest.console.exe x64\Release\VideoProcessor-Test.dll /Logger:trx /TestCaseFilt
 
 Read the TRX summary line (vstest prints none for this DLL). A WARP test that needs a `pl_gpu` through `SkeletonModule` itself (dispatcher built from `GpuCreated`
 with a real device, status lines of the engaged states) is not written yet: the fixture does not give a module a `pl_gpu`.
+
+### Design goal, philosophy and decisions (Acquire)
+
+Goal: every shared computation exists once per frame, owned by its unit, published into its skeleton spot; readers get it
+instead of recomputing (no private copy, no private "does not fit" variant, no silent fallback). Provenance: transcript session
+cf1d27fa-e9e0-4e7a-b3a8-9416d0edfd34 (see D:/codex/vp-handover/TRANSCRIPT-INDEX.md); times are given EST (UTC = EST + 5 h); decision log
+refs/owner-decisions-2026-11-07.md (line numbers below).
+
+- Get-or-compute-and-publish: reuse the shared predicate if already calculated for the frame, else the owner computes it and loads it
+  into the skeleton spot. Source: owner, 2026-11-12 17:26 EST (22:26 UTC), decision log line 624 ("they reuse the shared skeleton
+  predicates if they have already been calculated. if not the predicate that is generated is loaded into the skeleton spot as well").
+  Implemented by `Acquire` + `RegisterOwnerFill` (order: lane slot -> memo spot -> the one owner fill).
+- Recursive: prerequisites of a missing product are taken from the skeleton or published to their own spots on the way (an owner fill
+  calls `Acquire`, not its upstream compute). Source: owner, 2026-11-13 13:34 EST (18:34 UTC), decision log line 640. Therefore the
+  per-key re-entrancy guard, no lock across a fill, by-key cycle detection across threads (the closing request is `Reentrant`), and the
+  tests NestedFillPublishesThePrerequisite, CycleOnOneThreadIsDetectedByKey, CycleAcrossThreadsIsDetectedNotDeadlocked,
+  TwoWaitersOnOneInFlightKeyAreNotACycle, CycleWhereTheRefusedFillerDeclinesWakesTheOtherWaiter.
+- Owner makes the variant: a variant a reader needs is declared by the owner and published under a canonical key; an undeclared axis is
+  refused. Source: owner, 2026-11-12 17:31 EST, doc 124 A1/A1b / refs/126 s7 #2 (principles/skeleton-products.md rule 4).
+- Visible fallbacks: an Unavailable Acquire engages the `skeleton acquire <product>` entry (Ctrl+I, Config status, Ctrl+Alt+D). Source:
+  standing owner rule "no silent fallbacks" (memory vp-no-silent-fallbacks; 00-UNIVERSAL rule 5, doc 124 D1/D2).
+- Compute-once is measured, not assumed: per-product counters (`AcquireCounters`: ownerFillCalls <= 1 per frame/variant). Source: owner,
+  2026-11-13 13:36-13:38 EST, decision log lines 641-642.
+- Pins: a result's pointers are valid while the reader holds `pin`; lane-slot pointers pin the buffers, not the ring-slot CONTENT
+  (valid only while the pin is held; a reader must not keep the pointer past it). Design decision of B1 (lead 7 brief 130, rules 1-2).
 
 ## Why "skeleton first"
 
