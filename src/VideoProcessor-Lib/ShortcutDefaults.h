@@ -43,6 +43,7 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <set>
 #include <string>
 
 struct ShortcutDefault
@@ -120,6 +121,22 @@ std::string GlobalActionsForConfig(TryGet&& tryGet)
 	std::string value;
 	const bool present = tryGet("shortcuts", "global_actions", value);
 	return EffectiveGlobalActions(present, value, !original);
+}
+
+// What a live configuration publication does to the global-action set (R14-45 MUST-3). With
+// replaceAccelerators the accelerator replacement installs the staged set itself (returns false).
+// Without it (ApplyProfiles / ResetQueues, shortcuts retained) the staged set still applies, so a live switch of
+// pipeline_original_pathway removes the default global hook at once (Original == Bill) and the
+// switch back re-installs it. Returns true when the host must restart the background observer;
+// `next` is then the set to adopt. Only the actions set is touched, never the accelerators.
+inline bool GlobalActionsOnPublish(bool replaceAccelerators, const std::set<std::string>& current,
+	const std::set<std::string>& staged, std::set<std::string>& next)
+{
+	next = current;
+	if (replaceAccelerators || staged == current)
+		return false;
+	next = staged;
+	return true;
 }
 
 // Chords other branches already use for compiled defaults that are not on

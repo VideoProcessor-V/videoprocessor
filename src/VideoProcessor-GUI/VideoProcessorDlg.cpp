@@ -5385,6 +5385,18 @@ bool CVideoProcessorDlg::PublishStagedConfiguration(bool replaceAccelerators)
 		}
 	}
 
+	// R14-45 MUST-3: shortcuts retained, but the staged global-action set still applies live (a switch of
+	// pipeline_original_pathway removes or restores the default global hook at once).
+	{
+		std::set<std::string> nextGlobalActions;
+		if (GlobalActionsOnPublish(replaceAccelerators, m_shortcutsGlobalActions,
+			m_stagedRuntimeSettings.shortcutsGlobalActions, nextGlobalActions))
+		{
+			m_shortcutsGlobalActions = std::move(nextGlobalActions);
+			StartGlobalShortcutObserver();
+			DebugLog::Log("Shortcut global actions applied live: %zu action(s)", m_shortcutsGlobalActions.size());
+		}
+	}
 	PublishStagedRuntimeSettings();
 	m_configurationSnapshot =
 		CaptureConfigurationSnapshot(*m_stagedConfiguration);
