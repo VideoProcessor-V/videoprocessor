@@ -34,10 +34,61 @@
 #include <string>
 #include <vector>
 
-#pragma comment(lib, "dbghelp.lib")
-
 namespace ComputeOnceReport
 {
+	// DbgHelp is loaded on demand (as CrashState.cpp's minidump writer does): the renderer has no load-time dbghelp
+	// import. <dbghelp.h> is included for the types only. Loaded once on first use while the detector is on and kept
+	// for the process lifetime (never freed: SymInitialize state lives in it). Missing -> callers print as
+	// "<module>+0x<offset>" and the report and the Fallbacks line say so (no silent downgrade).
+	struct DbgHelpApi
+	{
+		typedef DWORD(WINAPI* GetOptionsFn)();
+		typedef DWORD(WINAPI* SetOptionsFn)(DWORD);
+		typedef BOOL(WINAPI* InitializeFn)(HANDLE, PCSTR, BOOL);
+		typedef BOOL(WINAPI* FromAddrFn)(HANDLE, DWORD64, PDWORD64, PSYMBOL_INFO);
+		typedef BOOL(WINAPI* LineFromAddrFn)(HANDLE, DWORD64, PDWORD, PIMAGEHLP_LINE64);
+		GetOptionsFn getOptions = nullptr;
+		SetOptionsFn setOptions = nullptr;
+		InitializeFn initialize = nullptr;
+		FromAddrFn fromAddr = nullptr;
+		LineFromAddrFn lineFromAddr = nullptr;
+		const char* missing = nullptr;   // why symbols are unavailable; null when all entry points resolved
+	};
+
+	inline const DbgHelpApi& DbgHelp()
+	{
+		static const DbgHelpApi api = []() {
+			DbgHelpApi a;
+			const HMODULE dll = LoadLibraryW(L"dbghelp.dll");
+			if (!dll)
+			{
+				a.missing = "dbghelp.dll not loadable";
+				return a;
+			}
+			a.getOptions = reinterpret_cast<DbgHelpApi::GetOptionsFn>(GetProcAddress(dll, "SymGetOptions"));
+			a.setOptions = reinterpret_cast<DbgHelpApi::SetOptionsFn>(GetProcAddress(dll, "SymSetOptions"));
+			a.initialize = reinterpret_cast<DbgHelpApi::InitializeFn>(GetProcAddress(dll, "SymInitialize"));
+			a.fromAddr = reinterpret_cast<DbgHelpApi::FromAddrFn>(GetProcAddress(dll, "SymFromAddr"));
+			a.lineFromAddr = reinterpret_cast<DbgHelpApi::LineFromAddrFn>(GetProcAddress(dll, "SymGetLineFromAddr64"));
+			if (!a.getOptions || !a.setOptions || !a.initialize || !a.fromAddr || !a.lineFromAddr)
+			{
+				a.missing = "dbghelp.dll lacks a Sym* entry point";
+				a.fromAddr = nullptr;
+				a.lineFromAddr = nullptr;
+			}
+			return a;
+		}();
+		return api;
+	}
+
+	// The visible note when symbols are unavailable; empty when DbgHelp resolved.
+	inline std::string SymbolsUnavailableText()
+	{
+		const DbgHelpApi& api = DbgHelp();
+		return api.missing ? std::string("symbols unavailable (") + api.missing + "): callers shown as <module>+0x<offset>"
+			: std::string();
+	}
+
 	inline const char* PhaseName(int64_t phase)
 	{
 		static const char* const kNames[] = { "Convert", "AfterPublish", "CollectAhead", "QueueTarget", "Begin", "PlanOutputs",
@@ -70,13 +121,15 @@ namespace ComputeOnceReport
 			return "?";
 		static std::mutex m;   // DbgHelp is single-threaded
 		std::lock_guard<std::mutex> lock(m);
-		static const bool ready = []() {
-			SymSetOptions(SymGetOptions() | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+		const DbgHelpApi& api = DbgHelp();
+		static const bool ready = [&api]() {
+			if (api.missing)
+				return false;
+			api.setOptions(api.getOptions() | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
 			// A second SymInitialize of this process (another DbgHelp user) fails; the symbols already loaded still serve.
-			SymInitialize(GetCurrentProcess(), nullptr, TRUE);
+			api.initialize(GetCurrentProcess(), nullptr, TRUE);
 			return true;
 		}();
-		(void)ready;
 		const DWORD64 a = reinterpret_cast<DWORD64>(address);
 		char buffer[sizeof(SYMBOL_INFO) + 512] = {};
 		SYMBOL_INFO* info = reinterpret_cast<SYMBOL_INFO*>(buffer);
@@ -84,12 +137,12 @@ namespace ComputeOnceReport
 		info->MaxNameLen = 511;
 		DWORD64 displacement = 0;
 		char text[1024] = {};
-		if (SymFromAddr(GetCurrentProcess(), a, &displacement, info))
+		if (ready && api.fromAddr(GetCurrentProcess(), a, &displacement, info))
 		{
 			IMAGEHLP_LINE64 line = {};
 			line.SizeOfStruct = sizeof(line);
 			DWORD lineDisp = 0;
-			if (SymGetLineFromAddr64(GetCurrentProcess(), a, &lineDisp, &line) && line.FileName)
+			if (api.lineFromAddr(GetCurrentProcess(), a, &lineDisp, &line) && line.FileName)
 			{
 				const char* file = line.FileName;
 				for (const char* p = line.FileName; *p; ++p)
@@ -234,6 +287,9 @@ namespace ComputeOnceReport
 					+ (rule.unit.empty() ? std::string() : " unit " + rule.unit));
 		for (const Uncounted& u : NotInstrumented())
 			out.push_back(std::string("Compute-once not-instrumented ") + u.unit + " " + u.name + ": " + u.why + " (trigger: " + u.trigger + ")");
+		const std::string noSymbols = SymbolsUnavailableText();
+		if (!noSymbols.empty())
+			out.push_back("Compute-once " + noSymbols);
 		const Totals t = Count();
 		out.push_back("Compute-once summary units " + std::to_string(t.units) + " duplicates " + std::to_string(t.duplicates)
 			+ " hidden-copies " + std::to_string(t.hiddenCopies) + " gaps " + std::to_string(t.gaps) + " gpu-frames "
@@ -251,9 +307,11 @@ namespace ComputeOnceReport
 		if (!ComputeOnce::Enabled())
 			return std::string();
 		const Totals t = Count();
+		const std::string noSymbols = SymbolsUnavailableText();
 		if (t.duplicates == 0 && t.gpuUnattributed == 0 && t.gaps == 0 && t.hiddenCopies == 0 && t.gpuHiddenCopies == 0)
-			return std::string();
+			return noSymbols.empty() ? std::string() : "compute-once: " + noSymbols;
 		return "compute-once: " + std::to_string(t.duplicates) + " duplicate units, " + std::to_string(t.hiddenCopies + t.gpuHiddenCopies)
-			+ " hidden copies, " + std::to_string(t.gpuUnattributed) + " unattributed passes, " + std::to_string(t.gaps) + " coverage gaps";
+			+ " hidden copies, " + std::to_string(t.gpuUnattributed) + " unattributed passes, " + std::to_string(t.gaps) + " coverage gaps"
+			+ (noSymbols.empty() ? std::string() : ", " + noSymbols);
 	}
 }

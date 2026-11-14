@@ -104,6 +104,10 @@ Coverage (audit L-DET MUST 4 / 5). GPU work outside libplacebo has no pl_dispatc
 
 Acceptance asserts (ComputeOnceRealClipAcceptance): duplicates 0, gaps 0 (a seq<0 note fails), hidden copies 0 on CPU and GPU, gpu-unattributed 0, and non-vacuity: the default-on units of the clip each have a counted row and gpu-passes > 0. With `VP_COMPUTE_ONCE_BASELINE=1` it is the BEFORE run instead: it records the hidden-copy counts and asserts they are non-zero (the known private copies, so the AFTER zero is not vacuous).
 
+`VP_COMPUTE_ONCE_EXPECT` (test env, optional, comma-separated unit ids such as `U3,U4`) replaces the expected-unit set of the non-vacuity check; unset, the default set `U3,U4,U6,U7,U8,U9,U10` is used. The test always logs the set it used (`== compute-once expected units: ...`). Acceptance and gate runs leave it unset; a narrowed set needs its own waiver (WAIVER-LDET-1 condition).
+
+Caller symbols: `ComputeOnceReport.h` loads `dbghelp.dll` on demand (LoadLibrary/GetProcAddress, as CrashState's minidump writer does), so the renderer has no load-time dbghelp import. If it cannot be loaded or lacks a `Sym*` entry point, callers print as `<module>+0x<offset>` and the report carries `Compute-once symbols unavailable (...)` and the Fallbacks line says so.
+
 CPU sampling (`CpuSampleProfiler.h`, test-only) is ADVISORY: it suspends threads briefly and scans stack words for return addresses, so a hot function can be missed or mis-owned; it never gates.
 
 Run the real-clip acceptance (after an x64 Release build, on GPU-QUIET, from a PowerShell prompt at the repository root):
