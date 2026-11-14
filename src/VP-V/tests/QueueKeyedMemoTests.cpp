@@ -208,8 +208,8 @@ namespace QueueKeyedMemoTestsNs
 			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, FrameFill(&calls));
 			Render(m, 10, Terms(0, 0, 0, 1, 2));   // ahead = L + W = 1 + 2 = 3
 			Assert::IsTrue(m.Acquire(kP10GrainSplit, 13, AcquireForm::Cpu).Ok(), L"current + ahead admitted");
-			const AcquireResult far = m.Acquire(kP10GrainSplit, 14, AcquireForm::Cpu);
-			Assert::IsTrue(far.cause == AcquireCause::NotQueued && calls.load() == 1, L"refused, the fill not called");
+			const AcquireResult farRes = m.Acquire(kP10GrainSplit, 14, AcquireForm::Cpu);
+			Assert::IsTrue(farRes.cause == AcquireCause::NotQueued && calls.load() == 1, L"refused, the fill not called");
 			bool engaged = false;
 			for (const FallbackCatalog::Decision& d : m.Decisions())
 				engaged = engaged || (d.engaged && Has(d.reason, "not in the queue"));
