@@ -734,6 +734,7 @@ protected:
 	// and the ids already announced by a one-time notice this session.
 	std::string m_lastFallbacksHeading;
 	FallbackStatus::Notices m_fallbackNotices;
+	std::string m_shortcutObserverFallback;   // host-owned Fallbacks entry while the global key hook cannot start
 	void UpdateFallbacksStatus(const std::string& heading);
 	void ShowFallbackNotice(const std::string& id, const std::string& heading);
 	std::string m_intentLogKeys[4];             // the last logged state per function

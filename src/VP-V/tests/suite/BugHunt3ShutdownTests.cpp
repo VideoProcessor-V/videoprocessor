@@ -17,6 +17,7 @@
 #include <SessionEndShutdown.h>
 #include <ShortcutChord.h>
 #include <ShortcutDefaults.h>
+#include <VP-V/core/FallbackStatus.h>
 #include <VP-V/modules/drive/projector_control/ConnectionTest.h>
 #include <VP-V/modules/drive/projector_control/LedShutdownRestore.h>
 #include <VP-V/modules/drive/projector_control/ProjectorDriver.h>
@@ -367,6 +368,34 @@ namespace VideoProcessorTest
 			const ShortcutDefault* report = FindShortcutDefault("state_report");
 			Assert::IsTrue(report != nullptr);
 			Assert::AreEqual(std::string("Ctrl+Alt+D"), std::string(report->chord));
+		}
+
+		// S-3f b follow-up: the absent-key default lives in one Lib function. Absent -> default,
+		// present (even empty) -> the file's value, and the pathway gate is the one bool.
+		TEST_METHOD(GlobalActionsDefaultAppliesOnlyWhileTheKeyIsAbsent)
+		{
+			Assert::AreEqual(std::string("state_report"), EffectiveGlobalActions(false, ""));
+			Assert::AreEqual(std::string(""), EffectiveGlobalActions(true, ""));
+			Assert::AreEqual(std::string("config_editor"), EffectiveGlobalActions(true, "config_editor"));
+			Assert::AreEqual(std::string("state_report"), EffectiveGlobalActions(false, "ignored"));
+			Assert::AreEqual(std::string(""), EffectiveGlobalActions(false, "", false));
+			Assert::AreEqual(std::string("toggle_noui"), EffectiveGlobalActions(true, "toggle_noui", false));
+		}
+
+		// S-3f b follow-up (no silent fallbacks): a failed background-hook start is one more entry
+		// in the Fallbacks heading, announced once.
+		TEST_METHOD(AFailedKeyHookIsAVisibleFallbackEntry)
+		{
+			const FallbackStatus::Entry e{ "global shortcuts", "hook could not start" };
+			Assert::AreEqual(std::string("Fallbacks engaged: global shortcuts (hook could not start)"),
+				FallbackStatus::AppendEntry("Fallbacks engaged: none", e));
+			Assert::AreEqual(std::string("Fallbacks engaged: global shortcuts (hook could not start)"),
+				FallbackStatus::AppendEntry("", e));
+			Assert::AreEqual(std::string("Fallbacks engaged: render-ahead (off); global shortcuts (hook could not start)"),
+				FallbackStatus::AppendEntry("Fallbacks engaged: render-ahead (off)", e));
+			FallbackStatus::Notices notices;
+			Assert::AreEqual(size_t(1), notices.Take(FallbackStatus::AppendEntry("", e)).size());
+			Assert::AreEqual(size_t(0), notices.Take(FallbackStatus::AppendEntry("", e)).size());
 		}
 
 		// SH9: a remote-editing Config's title still identifies VP's editor.

@@ -102,6 +102,14 @@ namespace FallbackStatus
 		return ids;
 	}
 
+	// A heading with one more (host-owned) entry; "none" or empty is replaced by the entry.
+	inline std::string AppendEntry(const std::string& heading, const Entry& entry)
+	{
+		if (heading.empty() || Ids(heading).empty())
+			return Format({ entry });
+		return heading + kSeparator + entry.id + (entry.reason.empty() ? std::string() : " (" + entry.reason + ")");
+	}
+
 	// The engaged fallbacks of one component (thread-safe). Engage/Release return true when the
 	// heading changed, so the caller can log once.
 	class Registry

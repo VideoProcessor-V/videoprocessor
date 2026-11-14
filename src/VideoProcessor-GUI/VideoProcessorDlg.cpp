@@ -254,15 +254,15 @@ bool ReadShortcutsGlobalHotkeys(const ConfigFile& config, bool& enabled,
 
 // Bug hunt 3 (SH6): [shortcuts] global_actions - the [shortcuts] action keys
 // that act while another application has focus. Default (key absent):
-// ShortcutDefaults.h kDefaultGlobalActions (state_report); an explicit empty
+// ShortcutDefaults.h EffectiveGlobalActions (state_report); an explicit empty
 // value means none.
 bool ReadShortcutsGlobalActions(const ConfigFile& config, std::set<std::string>& actions,
 	std::string& error)
 {
 	actions.clear();
-	std::string raw;
-	if (!config.TryGetString("shortcuts", "global_actions", raw))
-		raw = kDefaultGlobalActions;
+	std::string value;
+	const bool present = config.TryGetString("shortcuts", "global_actions", value);
+	const std::string raw = EffectiveGlobalActions(present, value);
 	std::string unknown;
 	if (!MainConfigSchema::ShortcutGlobalActionsValid(raw, unknown))
 	{
@@ -2576,6 +2576,11 @@ void CVideoProcessorDlg::StartGlobalShortcutObserver()
 			m_interfaceMode == ApplicationInterface::Mode::Modern ? 1 : 0,
 			m_hideUI ? 1 : 0, m_shortcutsForegroundOnly ? 1 : 0,
 			m_shortcutsGlobalHotkeys ? 1 : 0, m_shortcutsGlobalActions.size());
+		if (!m_shortcutObserverFallback.empty())
+		{
+			m_shortcutObserverFallback.clear();   // nothing wanted any more: the entry no longer applies
+			PublishActiveProfileStatus();
+		}
 		return;
 	}
 
@@ -2585,6 +2590,18 @@ void CVideoProcessorDlg::StartGlobalShortcutObserver()
 		"Background shortcut observer %s (%zu global bindings, config_only=%d)",
 		observerStarted ? "started" : "unavailable",
 		observedAccelerators.size(), sameProcessOnly ? 1 : 0);
+	// No silent fallback (rule 5): a failed start is a visible entry in the Fallbacks heading
+	// (Ctrl+I, Config status, Ctrl+Alt+D bundle) and a one-time notice, not log-only.
+	const std::string note = observerStarted ? std::string() :
+		"the background keyboard hook could not start; keys work only while VP has focus";
+	if (note != m_shortcutObserverFallback)
+	{
+		m_shortcutObserverFallback = note;
+		if (!note.empty() && !m_fallbackNotices.Take(
+			FallbackStatus::AppendEntry(std::string(), { "global shortcuts", note })).empty())
+			ShowFallbackNotice("global shortcuts", note);
+		PublishActiveProfileStatus();
+	}
 }
 
 void CVideoProcessorDlg::StopGlobalShortcutObserver()
@@ -14342,7 +14359,8 @@ void CVideoProcessorDlg::PublishActiveProfileStatus()
         outputAvailable && outputStatus.calibrationLutAttached,
         outputAvailable ? outputStatus.calibrationConfigIdentity : 0,
         outputAvailable ? outputStatus.calibrationConfigPath : std::string(), snapshot->configuration.get(),
-        m_lastFallbacksHeading);
+        m_shortcutObserverFallback.empty() ? m_lastFallbacksHeading :
+		FallbackStatus::AppendEntry(m_lastFallbacksHeading, { "global shortcuts", m_shortcutObserverFallback }));
 }
 
 // r6 fix 7 (vp-no-silent-fallbacks): the renderer's "Fallbacks engaged" heading, polled with the

@@ -36,12 +36,14 @@
 // report-a-problem key (state_report, Ctrl+Alt+D) is the one default global
 // action, so a problem can be reported from whatever application has focus.
 // The default applies only while [shortcuts] global_actions is ABSENT; an
-// explicit (even empty) value is the user's and replaces it. For MPC file playback, keep VP's keys off
+// explicit (even empty) value is the user's and replaces it.
+// For MPC file playback, keep VP's keys off
 // MPC's own (Alt+Enter, Ctrl+1..4 and Ctrl+I are MPC keys too) or leave
 // them non-global.
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <string>
 
 struct ShortcutDefault
 {
@@ -87,6 +89,17 @@ constexpr ShortcutDefault kShortcutDefaults[] = {
 
 // [shortcuts] global_actions when the key is absent (comma-separated action names).
 constexpr const char* kDefaultGlobalActions = "state_report";
+
+// The list the host acts on: the file's value when the key is present (even empty),
+// else the default. defaultApplies is the ONE place a pathway gate goes (whether
+// the default hook installs in the Original pathway is pending lead 14).
+inline std::string EffectiveGlobalActions(bool keyPresent, const std::string& value,
+	bool defaultApplies = true)
+{
+	if (keyPresent)
+		return value;
+	return defaultApplies ? std::string(kDefaultGlobalActions) : std::string();
+}
 
 // Chords other branches already use for compiled defaults that are not on
 // this branch yet. A new default must not take them; when the feature is
