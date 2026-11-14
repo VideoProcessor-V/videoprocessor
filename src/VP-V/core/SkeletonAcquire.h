@@ -5,12 +5,15 @@
 #include "FallbackCatalog.h"
 #include "ProductCatalog.h"
 #include "Products.h"
+#include "QueueWindow.h"
+#include "VariantKey.h"
 
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -36,6 +39,10 @@
 //
 // Lifetime: memo spots live for their frame. OnSeal(seq) releases every memo of frames older than seq - keepFrames
 // (keepFrames 0 = discarded when the next frame seals: the owner's per-frame memo, owner-decisions 2026-11-12 17:31).
+// QUEUE-KEYED (lead10/design-queue-keyed-products.md, owner 2026-11-14 08:33 EST): with a QueueWindow (SetWindow) a spot stays
+// attached to ITS frame until the frame has left the queue (f < min(seal - back, presented - history)); a fill beyond
+// current + ahead is NotQueued, beyond the planned ahead depth NotPlannedAhead (SetAheadPlan); a dropped frame is Discard()ed, a
+// discontinuity Invalidate()s everything (owner Q1 a). Nothing attached to a queued frame is ever evicted to make room (owner Q2).
 // A request for a released frame is refused (FrameReleased), never silently recomputed. A result carries a PIN: the bytes /
 // handle stay valid while the reader holds it, even past OnSeal. A GPU spot whose recorded read fence (NoteGpuRead) is not
 // complete yet (SetFenceCompleted) is retired only when it completes: its keep-alive is not dropped under a GPU read.
@@ -60,156 +67,7 @@ enum class AcquireForm : uint8_t { Cpu, Gpu };
 
 inline const char* Token(AcquireForm f) { return f == AcquireForm::Cpu ? "cpu" : "gpu"; }
 
-// The PRECISION axis values (L-CORE, advisor A6 + coordinator 2026-11-14 05:11; 00-UNIVERSAL rule 7 "12-BIT END TO END"):
-//   kPrecisionDefault  the owner's own form;
-//   kPrecisionUnorm16  R16 unorm at FULL 16-bit scale (msb-aligned code: 10-bit << 6, 12-bit << 4); exact for sources <= 14
-//                      bits including a 2x2 mean (2 extra fraction bits);
-//   kPrecisionFloat32  R32F in the plane's normalised units (0..1 as sampled);
-//   kPrecisionFloat16  R16F: an 11-bit mantissa, NOT 12-bit safe; never for pixel values (OwnerFill::pixelData refuses it).
-enum : uint8_t { kPrecisionDefault = 0, kPrecisionUnorm16 = 1, kPrecisionFloat32 = 2, kPrecisionFloat16 = 3 };
-
-inline const char* PrecisionName(uint8_t p)
-{
-    switch (p) {
-    case kPrecisionDefault: return "default";
-    case kPrecisionUnorm16: return "unorm16";
-    case kPrecisionFloat32: return "float32";
-    case kPrecisionFloat16: return "float16";
-    }
-    return "?";
-}
-// True when a pixel value stored at precision `p` keeps every code of a 12-bit pipeline (a 2x2 mean included).
-inline bool PrecisionTwelveBitSafe(uint8_t p) { return p == kPrecisionUnorm16 || p == kPrecisionFloat32; }
-
-// The variant axes (refs/126 s1.2; L-CORE adds STAGE, CROP, PARAM0/1 and the precision values). A zero field is "the
-// product's default"; VariantKey{} is the default variant (the lane's form). Keys are CANONICAL before use (Canonical(): a
-// field equal to the owner's declared default is 0, a size with one zero side is no size, a crop with a zero side or equal to
-// the owner's full frame is no crop), so two spellings of one variant share one spot. Contract: lead8/iface-L-CORE.md s4.
-struct VariantKey {
-    uint8_t plane = 0;         // 0 = default plane (luma); 1.. = plane index + 1
-    uint32_t width = 0;        // 0 = the product's own size
-    uint32_t height = 0;
-    uint8_t scale = 0;         // GrainScale / pyramid level, 0 = default
-    uint8_t codeUnit = 0;      // code-unit form (bits), 0 = default
-    uint32_t sigmaMilli = 0;   // band sigma x 1000, 0 = default
-    uint8_t precision = 0;     // storage precision: kPrecision* above, 0 = default
-    // STAGE (coordinator ruling iface-L-B3 5b, OD 11-14 04:44): the pipeline position of the planes the variant is computed on.
-    // 0 = the SOURCE planes (as uploaded, before any slot) and every owner's default; StageAfter(slot) = the planes as they
-    // LEAVE pipeline slot `slot` (core/PipelineSlots.h Id: a stable identity, so a reorder of the slots keeps the key).
-    uint8_t stage = 0;
-    // CROP (OD 11-14 04:30, 04:44): a rectangle of the stage's planes in source pixels; cropW == 0 || cropH == 0 = none.
-    uint32_t cropX = 0, cropY = 0, cropW = 0, cropH = 0;
-    // PARAM0 / PARAM1 (lead 8 2026-11-14 05:2x for L-B5): generic owner-defined thresholds (e.g. P11 busy share lap_min / ext_min
-    // in 1/16 tap code). The owner documents their meaning in its catalog row / interface.
-    uint16_t param0 = 0, param1 = 0;
-
-    enum : uint32_t {
-        kAxisPlane = 1u << 0,
-        kAxisSize = 1u << 1,
-        kAxisScale = 1u << 2,
-        kAxisCodeUnit = 1u << 3,
-        kAxisSigma = 1u << 4,
-        kAxisPrecision = 1u << 5,
-        kAxisStage = 1u << 6,
-        kAxisCrop = 1u << 7,
-        kAxisParam0 = 1u << 8,
-        kAxisParam1 = 1u << 9
-    };
-
-    static uint8_t StageAfter(uint8_t pipelineSlotId) { return uint8_t(pipelineSlotId + 1u); }
-    // The pipeline slot whose output `stage` names (false = the source planes).
-    static bool StageSlot(uint8_t stage, uint8_t* slotId)
-    {
-        if (stage == 0)
-            return false;
-        if (slotId != nullptr)
-            *slotId = uint8_t(stage - 1u);
-        return true;
-    }
-    bool HasCrop() const { return cropW != 0 && cropH != 0; }
-
-    bool IsDefault() const { return Axes() == 0u; }
-    uint32_t Axes() const
-    {
-        return (plane ? uint32_t(kAxisPlane) : 0u) | (width && height ? uint32_t(kAxisSize) : 0u) | (scale ? uint32_t(kAxisScale) : 0u)
-               | (codeUnit ? uint32_t(kAxisCodeUnit) : 0u) | (sigmaMilli ? uint32_t(kAxisSigma) : 0u)
-               | (precision ? uint32_t(kAxisPrecision) : 0u) | (stage ? uint32_t(kAxisStage) : 0u)
-               | (HasCrop() ? uint32_t(kAxisCrop) : 0u) | (param0 ? uint32_t(kAxisParam0) : 0u) | (param1 ? uint32_t(kAxisParam1) : 0u);
-    }
-    // `defaults`: the owner's own form (its plane / size / scale ...); a field equal to it means "the default". The owner's
-    // full frame for the crop axis is defaults.width x defaults.height when given (a crop covering it is no crop).
-    VariantKey Canonical(const VariantKey& defaults = VariantKey()) const
-    {
-        VariantKey k = *this;
-        if (k.width == 0 || k.height == 0 || (k.width == defaults.width && k.height == defaults.height))
-            k.width = k.height = 0;
-        if (k.plane == defaults.plane) k.plane = 0;
-        if (k.scale == defaults.scale) k.scale = 0;
-        if (k.codeUnit == defaults.codeUnit) k.codeUnit = 0;
-        if (k.sigmaMilli == defaults.sigmaMilli) k.sigmaMilli = 0;
-        if (k.precision == defaults.precision) k.precision = 0;
-        if (k.stage == defaults.stage) k.stage = 0;
-        if (k.param0 == defaults.param0) k.param0 = 0;
-        if (k.param1 == defaults.param1) k.param1 = 0;
-        const bool fullFrame = defaults.width != 0 && defaults.height != 0 && k.cropX == 0 && k.cropY == 0
-                               && k.cropW == defaults.width && k.cropH == defaults.height;
-        const bool sameAsDefault = k.cropX == defaults.cropX && k.cropY == defaults.cropY && k.cropW == defaults.cropW
-                                   && k.cropH == defaults.cropH;
-        if (!k.HasCrop() || fullFrame || sameAsDefault)
-            k.cropX = k.cropY = k.cropW = k.cropH = 0;
-        return k;
-    }
-    // FNV-1a 64 over every field (call it on a canonical key): the stable id of a variant for counters, logs and the
-    // compute-once detector (iface-L-DET VPV_COMPUTE_ONCE variant). 0 for the default variant.
-    uint64_t Hash() const
-    {
-        if (IsDefault())
-            return 0;
-        uint64_t h = 1469598103934665603ull;
-        auto mix = [&h](uint64_t v, int bytes) {
-            for (int i = 0; i < bytes; ++i) {
-                h ^= (v >> (8 * i)) & 0xFFu;
-                h *= 1099511628211ull;
-            }
-        };
-        mix(plane, 1); mix(width, 4); mix(height, 4); mix(scale, 1); mix(codeUnit, 1); mix(sigmaMilli, 4); mix(precision, 1);
-        mix(stage, 1); mix(cropX, 4); mix(cropY, 4); mix(cropW, 4); mix(cropH, 4); mix(param0, 2); mix(param1, 2);
-        return h == 0 ? 1u : h;
-    }
-    std::string Text() const
-    {
-        if (IsDefault())
-            return "default";
-        std::string t;
-        auto add = [&t](const char* k, uint64_t v) { t += (t.empty() ? "" : ",") + std::string(k) + "=" + std::to_string(v); };
-        if (plane) add("plane", plane);
-        if (width && height) { add("w", width); add("h", height); }
-        if (scale) add("scale", scale);
-        if (codeUnit) add("code", codeUnit);
-        if (sigmaMilli) add("sigma_milli", sigmaMilli);
-        if (precision) t += (t.empty() ? "" : ",") + std::string("precision=") + PrecisionName(precision);
-        if (stage) add("stage", stage);
-        if (HasCrop()) { add("crop_x", cropX); add("crop_y", cropY); add("crop_w", cropW); add("crop_h", cropH); }
-        if (param0) add("p0", param0);
-        if (param1) add("p1", param1);
-        return t;
-    }
-};
-
-inline bool operator==(const VariantKey& a, const VariantKey& b)
-{
-    return a.plane == b.plane && a.width == b.width && a.height == b.height && a.scale == b.scale && a.codeUnit == b.codeUnit
-           && a.sigmaMilli == b.sigmaMilli && a.precision == b.precision && a.stage == b.stage && a.cropX == b.cropX
-           && a.cropY == b.cropY && a.cropW == b.cropW && a.cropH == b.cropH && a.param0 == b.param0 && a.param1 == b.param1;
-}
-inline bool operator!=(const VariantKey& a, const VariantKey& b) { return !(a == b); }
-inline bool operator<(const VariantKey& a, const VariantKey& b)
-{
-    return std::make_tuple(a.plane, a.width, a.height, a.scale, a.codeUnit, a.sigmaMilli, a.precision, a.stage, a.cropX, a.cropY,
-                           a.cropW, a.cropH, a.param0, a.param1)
-           < std::make_tuple(b.plane, b.width, b.height, b.scale, b.codeUnit, b.sigmaMilli, b.precision, b.stage, b.cropX, b.cropY,
-                             b.cropW, b.cropH, b.param0, b.param1);
-}
+// VariantKey and the precision axis values: core/VariantKey.h (split out so core/QueueWindow.h can name a variant).
 
 // A GPU form: an opaque resource of the skeleton's GPU dispatcher (texture / buffer / view), the fence value after which it
 // is readable, and a keep-alive the memo holds until the frame is released AND its last recorded read fence completed.
@@ -250,6 +108,9 @@ enum class AcquireCause : uint8_t {
     NoGpuHandle,         // the lane holds the GPU product but its texture is not reachable (dispatcher not configured)
     Reentrant,           // an owner fill asked for its own key, directly or through a cycle of fills (would wait for itself)
     WrongThread,         // a GPU form, a render-thread-bound fill or a lane slot read asked off the render thread (L-CORE s5)
+    NotQueued,           // the frame is beyond the queue window (seq > current + ahead): not a fill (design s2.3)
+    NotPlannedAhead,     // the frame is beyond the product's planned ahead depth (SetAheadPlan; design s2.7): made at its render
+    PresentsStalled,     // presents stopped advancing past the window (design s9.0 A3 / audit S3): ahead demand stops, nothing evicted
     CauseCount
 };
 
@@ -280,6 +141,9 @@ inline const char* Token(AcquireCause c)
     case AcquireCause::NoGpuHandle: return "lane GPU texture not reachable";
     case AcquireCause::Reentrant: return "owner fill asked for its own product";
     case AcquireCause::WrongThread: return "asked off the render thread";
+    case AcquireCause::NotQueued: return "frame not in the queue yet";
+    case AcquireCause::NotPlannedAhead: return "not planned this far ahead (made at its render)";
+    case AcquireCause::PresentsStalled: return "presents stalled: no work ahead until they move";
     case AcquireCause::CauseCount: break;
     }
     return "?";
@@ -311,6 +175,9 @@ struct OwnerFillOutput {
     std::vector<uint8_t> bytes;
     GpuMemoHandle gpu;
     std::string declineReason;   // a declining fill's reason: shown with the cause (LastCause, Fallbacks entry)
+    // PER-RESULT lifetime (design s2.3): Frame = a one-render-frame VIEW (released at the next seal, e.g. P13 of the render
+    // frame); Window = kept with its frame in the queue (an owned ahead texture); FillDefault = OwnerFill::frameScoped.
+    enum class Scope : uint8_t { FillDefault, Frame, Window } scope = Scope::FillDefault;
 };
 
 // The owning unit's fill of ONE (product, form). `memo` lets a fill get-or-compute its inputs through the same path.
@@ -335,6 +202,15 @@ struct OwnerFill {
     // Frames its spots are KEPT after their own frame (max with SetKeepFrames): 1 = frame n-1 stays readable while n renders
     // (P1 GPU: the matcher's A is the previous frame's B, iface-L-B4). 0 = the owner's per-frame memo (OD 11-12 17:31).
     uint8_t keepFrames = 0;
+    // Queue-keyed products (design s2.3): the DECLARED reader lag of this product's consumers (P1 GPU: 1 = frame n - 1 is read
+    // while n renders). An input of the window's history term H (the skeleton folds it in); the memo keeps a spot at least this
+    // many frames behind the release edge. keepFrames above is the same declaration under its B1 name (the larger one counts).
+    uint8_t historyFrames = 0;
+    uint8_t DeclaredHistory() const { return historyFrames > keepFrames ? historyFrames : keepFrames; }
+    // The S3 admission link (design s2.7): the class of this product's ahead work (shed order) and the ahead depth its consumers
+    // declared (a Core product keeps at least this much when memory is short).
+    JobClass jobClass = JobClass::Core;
+    uint16_t aheadDepth = 0;
 };
 
 // The lane's slots as the first G2 source (SkeletonAcquireLane.h binds it). Default variant only.
@@ -364,7 +240,14 @@ struct AcquireCounters {
     uint64_t sealComputed = 0;     // the seal computed the frame (no Acquire publication): published as the lane slot
     uint64_t sealReused = 0;       // the seal copied an Acquire publication (computed once, by the owner fill)
     // Frames COMPUTED for this product (any variant): owner fills that published + seal computes. The compute-once ledger.
-    uint64_t Computed() const { return filledAtRead + sealComputed; }
+    // Queue-keyed products (design s2.4/2.5): fills of a frame AHEAD of the render frame, render-time reuses of such a fill, and
+    // the recompute of a frame after an invalidation (counted apart, so the compute-once ledger stays readable).
+    uint64_t aheadFilled = 0;
+    uint64_t aheadReused = 0;
+    uint64_t invalidatedRecompute = 0;
+    uint64_t discarded = 0;          // spots of dropped frames released (Discard)
+    uint64_t planMiss = 0;           // an AHEAD fill measured above its reserve did not fit: refused, made at its render (s2.7 safety net)
+    uint64_t Computed() const { return filledAtRead + sealComputed - invalidatedRecompute; }
     uint64_t released = 0;
     uint64_t unavailable[size_t(AcquireCause::CauseCount)] = {};
     uint64_t Unavailable() const
@@ -482,24 +365,20 @@ public:
         std::lock_guard<std::mutex> g(mutex_);
         return haveReleased_ && seq <= releasedThrough_;
     }
-    // The memo's declared GPU working set: every GPU owner fill that ALLOCATES (not a view) x (1 + its kept frames). The
-    // no-lane ledger grant is planned for it (MemoGpuGrant.h).
-    uint64_t GpuNeedBytes() const
+    // The memo's GPU working set as VRAM ledger LEVELS (amendment A5 / audit M6): one level per step of THE ahead ladder
+    // (QueueWindow.h AheadLadderStates over the registered allocating GPU fills and the current window), non-increasing, so a short
+    // grant gives the largest plan that fits, never 0. `mode` / `lower` = the S-C inputs (QueueWindow.h). The top level is the full
+    // window (GpuNeedBytes).
+    std::vector<uint64_t> GpuNeedLevels(QueueMode mode = QueueMode::Normal, LowerQueueStep lower = LowerQueueStep()) const
     {
         std::lock_guard<std::mutex> g(mutex_);
-        uint64_t need = 0;
-        auto add = [&need](const std::map<uint32_t, OwnerFill>& m, const std::map<uint32_t, OwnerFill>* skip) {
-            for (const auto& kv : m) {
-                if ((kv.first & 1u) == 0u || kv.second.view)
-                    continue;   // CPU form, or a view (0 bytes)
-                if (skip != nullptr && skip->count(kv.first) != 0)
-                    continue;   // shadowed by the bound lane's fill
-                need += kv.second.reserveBytes * (1u + uint64_t(kv.second.keepFrames));
-            }
-        };
-        add(laneOwners_, nullptr);
-        add(owners_, &laneOwners_);
-        return need;
+        AheadNeed n = AheadNeedLocked(window_, mode, std::move(lower), true);
+        return AheadLevels(n);
+    }
+    uint64_t GpuNeedBytes() const
+    {
+        const std::vector<uint64_t> levels = GpuNeedLevels();
+        return levels.empty() ? 0u : levels.front();
     }
     // OnSeal calls so far (the skeleton seals once per Begin: with the lane after its seal, else directly).
     uint64_t Seals() const
@@ -533,6 +412,172 @@ public:
     {
         std::lock_guard<std::mutex> g(mutex_);
         gpuPresent_ = present;
+    }
+    // THE QUEUE WINDOW (core/QueueWindow.h; design s2.3): the memo keeps a frame's spots while the frame is in the queue and
+    // admits fills up to current + ahead. Spots are released at the seal when the frame has LEFT the queue:
+    //   f < min(seal - back, presented - history)   (the presented edge only when present facts were delivered)
+    // never to make room. A window set once turns the admission on: a fill beyond the window is NotQueued (visible, counted).
+    // The skeleton sets it at every Begin (slice B); SetKeepFrames below stays the B1 / test form (back only, no admission).
+    void SetWindow(const QueueWindow& w)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        keepFrames_ = w.back;
+        ahead_ = w.ahead;
+        history_ = w.history;
+        presentKnown_ = w.presentKnown;
+        presented_ = w.presented;
+        windowSet_ = true;
+        window_ = w;
+    }
+    QueueWindow Window() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return window_;
+    }
+    // The last presented source frame (the AfterPresent feed); a frame is kept until it was presented (minus history).
+    void NotePresented(uint64_t seq)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        if (!presentKnown_ || seq > presented_)
+            presented_ = seq;
+        presentKnown_ = true;
+    }
+    // A DROPPED frame (never rendered): its spots are released, every other frame is untouched (design s2.5).
+    void Discard(uint64_t seq)
+    {
+        std::vector<std::shared_ptr<Entry>> drop;
+        {
+            std::lock_guard<std::mutex> g(mutex_);
+            for (auto& kv : memo_)
+                if (kv.second->seq == seq && kv.second->state == Entry::Ready)
+                    ++counters_[kv.second->id].discarded;
+            ReleaseIfLocked([seq](const Entry& e) { return e.seq == seq; }, drop);
+            RetireCompletedLocked(drop);
+        }
+        drop.clear();
+    }
+    // A DISCONTINUITY (flush, reset, live-queue reset, discontinuity, gap, format change): every spot of every frame is released
+    // (ahead frames, the presenter queue, the history), the epoch moves, and the next fill of a released key is counted as
+    // invalidatedRecompute. The vector-validity rule: one valid state, invalidated at discontinuities (design s2.5, owner Q1 a).
+    enum class InvalidateCause : uint8_t { Flush, Reset, LiveQueueReset, Discontinuity, Gap, FormatChange, Count };
+    static const char* InvalidateToken(InvalidateCause c)
+    {
+        switch (c) {
+        case InvalidateCause::Flush: return "flush";
+        case InvalidateCause::Reset: return "reset";
+        case InvalidateCause::LiveQueueReset: return "live queue reset";
+        case InvalidateCause::Discontinuity: return "discontinuity";
+        case InvalidateCause::Gap: return "gap";
+        case InvalidateCause::FormatChange: return "format change";
+        case InvalidateCause::Count: break;
+        }
+        return "?";
+    }
+    // Any thread (the queue thread's OnQueue, amendment A4 / audit M5): the epoch moves AT ONCE, so an Acquire that follows (on any
+    // thread, before the next Begin) never sees a pre-flush spot: an entry of an older epoch is absent. Its bytes are released at the
+    // next seal (OnSeal), never under the caller's lock. Coalesced per Begin interval: Reset then Flush is ONE discontinuity.
+    void BumpEpoch(InvalidateCause cause)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        if (cause < InvalidateCause::Count)
+            ++invalidations_[size_t(cause)];
+        if (bumpedThisInterval_)
+            return;
+        bumpedThisInterval_ = true;
+        ++discontinuities_;
+        invalidatedKeys_.clear();   // only the latest discontinuity's keys are a recompute "after invalidation"
+        for (const auto& kv : memo_)
+            if (kv.second->state == Entry::Ready && kv.second->epoch == epoch_)
+                invalidatedKeys_.insert(kv.first);
+        ++epoch_;
+        haveReleased_ = false;   // the numbering may restart after a discontinuity: nothing older is refused
+        releasedThrough_ = 0;
+        haveSealed_ = false;     // admission waits for the next seal's window
+    }
+    void Invalidate(InvalidateCause cause) { BumpEpoch(cause); }
+    uint64_t Discontinuities() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return discontinuities_;
+    }
+    uint64_t Epoch() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return epoch_;
+    }
+    // The S3 admission link (design s2.7). What the memo's ahead work costs for `w`: one AheadCost per registered GPU fill that
+    // allocates (its declared reserve, or the measured bytes of its last result when larger) and per CPU fill that has run (its
+    // measured bytes; CPU bytes are not in the VRAM grant, listed for the cost ledger with bytesPerFrame 0 for the VRAM plan).
+    AheadNeed MakeAheadNeed(const QueueWindow& w, QueueMode mode = QueueMode::Normal, LowerQueueStep lower = LowerQueueStep()) const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return AheadNeedLocked(w, mode, std::move(lower), false);
+    }
+    // `gpuOnly`: the VRAM view (GPU allocating fills, back = max(window back, the fills' declared history)).
+    AheadNeed AheadNeedLocked(const QueueWindow& w, QueueMode mode, LowerQueueStep lower, bool gpuOnly) const
+    {
+        AheadNeed n;
+        n.window = w;
+        if (!windowSet_) {
+            n.window.ahead = ahead_;
+            n.window.aheadCompute = 0;   // no window: the render frame only
+        }
+        n.grantBytes = gpuGranted_ ? gpuBudget_ : 0u;
+        n.heldBytes = gpuBytes_;
+        n.mode = mode;
+        n.lowerQueueStep = std::move(lower);
+        uint16_t back = n.window.back > keepFrames_ ? n.window.back : uint16_t(keepFrames_);
+        std::map<uint32_t, const OwnerFill*> all;
+        for (const auto& kv : owners_)
+            all[kv.first] = &kv.second;
+        for (const auto& kv : laneOwners_)
+            all[kv.first] = &kv.second;   // the bound lane's fill shadows a module registration
+        for (const auto& kv : all) {
+            const OwnerFill& f = *kv.second;
+            const bool gpu = (kv.first & 1u) != 0u;
+            if (gpu && f.view)
+                continue;   // 0 bytes
+            AheadCost c;
+            c.id = uint16_t(kv.first >> 1);
+            c.form = gpu ? uint8_t(1) : uint8_t(0);
+            const auto m = measuredBytes_.find(kv.first);
+            const uint64_t measured = m != measuredBytes_.end() ? m->second : 0u;
+            if (gpu) {
+                c.bytesPerFrame = measured > f.reserveBytes ? measured : f.reserveBytes;
+                c.measured = measured != 0;
+                if (f.DeclaredHistory() > back)
+                    back = f.DeclaredHistory();
+            } else {
+                if (gpuOnly || measured == 0)
+                    continue;   // a CPU fill costs no VRAM; one that never ran costs nothing known yet
+                c.measured = true;
+            }
+            c.cls = f.jobClass;
+            c.declaredDepth = f.aheadDepth;
+            n.costs.push_back(c);
+        }
+        if (gpuOnly)
+            n.window.back = back;
+        return n;
+    }
+    // The plan the admission made (S3's PlanAhead / the interim PlanAheadLadder): an Acquire that would FILL a frame further ahead
+    // of the render frame than its product's planned depth is NotPlannedAhead (visible, counted; the frame is made at its render).
+    // A product the plan does not name keeps the window's ahead. Spots already attached are never released by a plan.
+    void SetAheadPlan(const AheadPlan& plan)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        plan_ = plan;
+        planSet_ = true;
+    }
+    AheadPlan Plan() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return plan_;
+    }
+    uint64_t Invalidations(InvalidateCause c) const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return c < InvalidateCause::Count ? invalidations_[size_t(c)] : 0u;
     }
     void SetKeepFrames(uint32_t frames)
     {
@@ -641,7 +686,20 @@ public:
         }
 
         // G2 (b): the memo spot (a kept spot of a released frame included); a fill in flight is waited for (computed once).
-        const auto it = memo_.find(key);
+        auto it = memo_.find(key);
+        if (it != memo_.end() && it->second->epoch != epoch_ && it->second->state != Entry::Filling) {
+            // A spot of an older epoch (a discontinuity since): absent for every reader. Its bytes go at the next seal.
+            Entry& old = *it->second;
+            if (old.gpuForm)
+                gpuBytes_ -= old.reserved;
+            else
+                cpuBytes_ -= old.bytes.size();
+            old.reserved = 0;
+            old.orphaned = true;
+            stale_.push_back(it->second);
+            memo_.erase(it);
+            it = memo_.end();
+        }
         if (it == memo_.end() && haveReleased_ && seq <= releasedThrough_)
             return Fail(c, id, seq, AcquireCause::FrameReleased);   // a released frame is never recomputed (lane slots above stay readable)
         if (it != memo_.end()) {
@@ -657,12 +715,33 @@ public:
             }
             if (e->state == Entry::Ready) {
                 ++c.reusedMemo;
+                if (e->ahead && !e->aheadReuseCounted && haveSealed_ && seq <= lastSeal_) {
+                    ++c.aheadReused;   // an ahead fill reused once its frame renders (or later): the same spot
+                    e->aheadReuseCounted = true;
+                }
                 return ResultOf(e, AcquireStatus::Reused);
             }
             // Declined for this frame: the same cause, the owner is not asked twice for one frame.
             return Fail(c, id, seq, e->cause == AcquireCause::None ? AcquireCause::OwnerDeclined : e->cause);
         }
 
+        // Admission (design s2.3): a fill for a frame beyond the queue window is refused, never run.
+        if (windowSet_ && haveSealed_ && seq > lastSeal_ + uint64_t(ahead_))
+            return Fail(c, id, seq, AcquireCause::NotQueued);
+        // amendment 3: inside the queue but beyond the computed depth: not yet; computed once when it comes within aheadCompute.
+        if (windowSet_ && haveSealed_ && seq > lastSeal_ + uint64_t(window_.aheadCompute))
+            return Fail(c, id, seq, AcquireCause::NotPlannedAhead);
+        if (planSet_ && haveSealed_ && seq > lastSeal_) {
+            uint16_t d = 0;
+            if (plan_.Has(uint16_t(id), v.Hash(), &d) && seq - lastSeal_ > uint64_t(d))
+                return Fail(c, id, seq, AcquireCause::NotPlannedAhead);
+        }
+        // Stalled presents (audit S3): the presented frame lags the render by more than the queue holds by structure (H + R + 1 + ahead;
+        // P itself grows in a stall, so it is not the yardstick): ahead demand stops (visible), nothing is evicted.
+        if (windowSet_ && presentKnown_ && haveSealed_ && seq > lastSeal_ && lastSeal_ > presented_
+            && lastSeal_ - presented_ > uint64_t(window_.history) + uint64_t(window_.renderAhead) + 1u + uint64_t(ahead_)) {
+            return Fail(c, id, seq, AcquireCause::PresentsStalled);
+        }
         if (renderThread && lane_.dropped && lane_.dropped(id))
             return Fail(c, id, seq, AcquireCause::RegulatorDropped);
         if (ow == nullptr || !ow->fill)
@@ -690,7 +769,9 @@ public:
         e->gpuForm = form == AcquireForm::Gpu;
         e->filler = std::this_thread::get_id();
         e->frameScoped = ow->frameScoped;
-        e->keep = ow->keepFrames;
+        e->keep = ow->DeclaredHistory();
+        e->ahead = haveSealed_ && seq > lastSeal_;
+        e->epoch = epoch_;
         e->reserved = reserve;
         gpuBytes_ += reserve;
         memo_[key] = e;
@@ -732,6 +813,16 @@ public:
             e->state = Entry::Declined;
             e->cause = cause;
             cv_.notify_all();
+            if (cause == AcquireCause::OverBudget && e->ahead && !e->orphaned) {
+                // The s2.7 safety net: an AHEAD fill measured above its reserve is a plan miss. Its key is not kept declined, so the
+                // frame is made at its own render; nothing already attached to a queued frame is released.
+                ++c2.planMiss;
+                const auto self = memo_.find(key);
+                if (self != memo_.end() && self->second == e)
+                    memo_.erase(self);
+                measuredBytes_[OwnerKey(id, form)] = out.gpu.bytes > measuredBytes_[OwnerKey(id, form)] ? out.gpu.bytes
+                                                                                                        : measuredBytes_[OwnerKey(id, form)];
+            }
             const std::string reason = out.declineReason;
             lk.unlock();
             out = OwnerFillOutput();   // released outside the lock
@@ -741,6 +832,14 @@ public:
                 lastCause_[id] += " (" + reason + ")";
             return failed;
         }
+        {
+            uint64_t& mb = measuredBytes_[OwnerKey(id, form)];   // the measured size, for AheadNeed (the cost ledger's input)
+            const uint64_t got = form == AcquireForm::Gpu ? out.gpu.bytes : uint64_t(out.bytes.size());
+            if (got > mb)
+                mb = got;
+        }
+        if (out.scope != OwnerFillOutput::Scope::FillDefault)
+            e->frameScoped = out.scope == OwnerFillOutput::Scope::Frame;   // per-result lifetime (design s2.3)
         e->bytes = std::move(out.bytes);
         e->gpu = std::move(out.gpu);
         if (!e->orphaned) {
@@ -752,6 +851,10 @@ public:
         }
         e->state = Entry::Ready;
         ++c2.filledAtRead;
+        if (e->ahead)
+            ++c2.aheadFilled;
+        if (!invalidatedKeys_.empty() && invalidatedKeys_.erase(key) != 0)
+            ++c2.invalidatedRecompute;   // the frame was computed before the invalidation: counted apart
         cv_.notify_all();
         Served(id);
         return ResultOf(e, AcquireStatus::FilledAtRead);
@@ -807,15 +910,20 @@ public:
             lastSeal_ = seq;
             ++seals_;
             ReleaseIfLocked([](const Entry& e) { return e.frameScoped; }, drop);   // the previous render frame's views
-            if (seq >= 1u + keepFrames_) {
-                const uint64_t through = seq - 1u - keepFrames_;
-                const uint32_t memoKeep = keepFrames_;
-                ReleaseIfLocked([seq, memoKeep](const Entry& e) {
-                    const uint64_t keep = e.keep > memoKeep ? e.keep : memoKeep;   // OwnerFill::keepFrames
-                    return seq >= 1u + keep && e.seq <= seq - 1u - keep;
-                }, drop);
-                if (!haveReleased_ || through > releasedThrough_)
-                    releasedThrough_ = through;
+            {
+                const uint64_t ep = epoch_;
+                ReleaseIfLocked([ep](const Entry& e) { return e.epoch != ep; }, drop);   // spots of an older epoch (BumpEpoch)
+                bumpedThisInterval_ = false;
+                for (auto& s : stale_)
+                    drop.push_back(s);
+                stale_.clear();
+            }
+            // A frame has left the queue below the edge (design s2.3): f < min(seal - back, presented - history).
+            const uint64_t edge = EdgeLocked(seq, 0);
+            if (edge > 0) {
+                ReleaseIfLocked([this, seq](const Entry& e) { return e.seq < EdgeLocked(seq, e.keep); }, drop);
+                if (!haveReleased_ || edge - 1u > releasedThrough_)
+                    releasedThrough_ = edge - 1u;
                 haveReleased_ = true;
             }
             RetireCompletedLocked(drop);
@@ -876,6 +984,12 @@ public:
                             + " reused (lane " + std::to_string(c.reusedLane) + ", memo " + std::to_string(c.reusedMemo) + "), "
                             + std::to_string(c.filledAtRead) + " filled at read, " + std::to_string(c.Unavailable())
                             + " unavailable";
+            if (c.planMiss != 0)
+                l += "; plan miss " + std::to_string(c.planMiss);
+            if (c.aheadFilled != 0 || c.aheadReused != 0 || c.invalidatedRecompute != 0 || c.discarded != 0)
+                l += "; ahead fills " + std::to_string(c.aheadFilled) + ", ahead reused " + std::to_string(c.aheadReused)
+                     + ", recomputed after invalidation " + std::to_string(c.invalidatedRecompute) + ", discarded "
+                     + std::to_string(c.discarded);
             if (c.sealComputed != 0 || c.sealReused != 0 || c.reusedLaneCopy != 0)
                 l += "; seal computed " + std::to_string(c.sealComputed) + ", seal reused " + std::to_string(c.sealReused)
                      + ", copied off thread " + std::to_string(c.reusedLaneCopy);
@@ -883,6 +997,22 @@ public:
                 if (c.unavailable[k] != 0)
                     l += std::string("; ") + Token(AcquireCause(k)) + " " + std::to_string(c.unavailable[k]);
             lines.push_back(l);
+        }
+        if (planSet_ && !plan_.line.empty())
+            lines.push_back("skeleton acquire: " + plan_.line);
+        if (windowSet_)
+            lines.push_back("skeleton acquire: window back " + std::to_string(keepFrames_) + ", ahead " + std::to_string(ahead_)
+                            + ", history " + std::to_string(history_) + ", frames " + std::to_string(window_.Frames()) + ", epoch "
+                            + std::to_string(epoch_) + (presentKnown_ ? ", presented " + std::to_string(presented_) : ", present facts not fed")
+                            + (window_.wired != QueueWindowTerms::kAll ? "; not fed: " + NotFed(window_.wired) : std::string())
+                            + "; " + AheadComputeText(window_));
+        {
+            std::string inv;
+            for (size_t k = 0; k < size_t(InvalidateCause::Count); ++k)
+                if (invalidations_[k] != 0)
+                    inv += std::string(inv.empty() ? "" : ", ") + InvalidateToken(InvalidateCause(k)) + " " + std::to_string(invalidations_[k]);
+            if (!inv.empty())
+                lines.push_back("skeleton acquire: invalidated (" + inv + ")");
         }
         if (!retired_.empty())
             lines.push_back("skeleton acquire: " + std::to_string(retired_.size()) + " released GPU spot(s) held for a pending read fence"
@@ -936,7 +1066,10 @@ private:
         bool gpuForm = false;
         bool orphaned = false;     // released from the memo (while filling or after): its bytes are no longer counted
         bool frameScoped = false;  // OwnerFill::frameScoped: released at the next OnSeal
-        uint8_t keep = 0;          // OwnerFill::keepFrames
+        uint64_t epoch = 0;        // the memo epoch it was filled in (an older one is absent: BumpEpoch)
+        uint8_t keep = 0;          // OwnerFill::DeclaredHistory()
+        bool ahead = false;        // filled while its frame was ahead of the render frame
+        bool aheadReuseCounted = false;
         uint64_t reserved = 0;     // GPU bytes counted in gpuBytes_
         uint64_t readFence = 0;    // NoteGpuRead
         std::thread::id filler;    // the thread running the fill (cycle detection while Filling)
@@ -971,6 +1104,19 @@ private:
     {
         static thread_local std::vector<FillingKey> keys;
         return keys;
+    }
+    // The release edge at seal `seq` for a spot declaring `entryKeep` history frames: frames below it have left the queue.
+    uint64_t EdgeLocked(uint64_t seq, uint8_t entryKeep) const
+    {
+        const uint64_t back = keepFrames_ > entryKeep ? keepFrames_ : entryKeep;
+        uint64_t edge = seq >= back ? seq - back : 0u;
+        if (presentKnown_) {
+            const uint64_t hist = history_ > entryKeep ? history_ : entryKeep;
+            const uint64_t pe = presented_ >= hist ? presented_ - hist : 0u;
+            if (pe < edge)
+                edge = pe;   // a frame not yet presented (minus its history readers) is still in the queue
+        }
+        return edge;
     }
     const OwnerFill* OwnerLocked(uint32_t k) const
     {
@@ -1092,6 +1238,22 @@ private:
     std::thread::id renderThread_;                // none = every thread counts as the render thread
     uint64_t laneBinds_ = 0;
     uint64_t seals_ = 0;
+    // The queue window (SetWindow; design s2.3).
+    bool windowSet_ = false;
+    uint16_t ahead_ = 0;
+    uint16_t history_ = 0;
+    bool presentKnown_ = false;
+    uint64_t presented_ = 0;
+    QueueWindow window_;
+    uint64_t epoch_ = 0;
+    uint64_t discontinuities_ = 0;
+    bool bumpedThisInterval_ = false;
+    std::vector<std::shared_ptr<Entry>> stale_;   // old-epoch spots taken out by an Acquire: destroyed at the next seal
+    uint64_t invalidations_[size_t(InvalidateCause::Count)] = {};
+    std::set<Key> invalidatedKeys_;
+    std::map<uint32_t, uint64_t> measuredBytes_;   // the largest result size per (product, form)
+    AheadPlan plan_;
+    bool planSet_ = false;
     const void* host_ = nullptr;
     std::map<Key, std::shared_ptr<Entry>> memo_;
     std::vector<std::shared_ptr<Entry>> retired_;
