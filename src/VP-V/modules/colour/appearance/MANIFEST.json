@@ -7,7 +7,6 @@
   "code_location": "module (ambient adaptation config/logic, SdrAmbientLift; slot placeholder)",
   "live_files": [
     "src/VP-V/modules/colour/appearance/SdrAmbientLift.h",
-    "src/VP-V/modules/colour/appearance/AmbientAdaptation.h",
     "src/VP-V/modules/colour/appearance/AmbientConfig.h"
   ],
   "components": {
@@ -39,6 +38,7 @@
   "fallback_entry": "Appearance: off (shader failed)",
   "forwarding_headers": [
     "src/VideoProcessor-Lib/AmbientAdaptation.h",
-    "src/VideoProcessor-Lib/AmbientConfig.h"
+    "src/VideoProcessor-Lib/AmbientConfig.h",
+    "src/VP-V/modules/colour/appearance/AmbientAdaptation.h"
   ]
 }

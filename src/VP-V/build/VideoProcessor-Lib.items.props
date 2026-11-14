@@ -88,7 +88,7 @@
     <ClInclude Include="IntentInterpreterObserver.h" />
     <ClInclude Include="IntentInterpreterSupport.h" />
     <ClInclude Include="..\VP-V\modules\input\queue_timing\QueueLookahead.h" />
-    <ClInclude Include="..\VP-V\modules\colour\appearance\AmbientAdaptation.h" />
+    <ClInclude Include="..\VP-V\modules\colour\display_mapping\AmbientAdaptation.h" />
     <ClInclude Include="BlackIntent.h" />
     <ClInclude Include="DisplayIntent.h" />
     <ClInclude Include="DisplayProfile.h" />

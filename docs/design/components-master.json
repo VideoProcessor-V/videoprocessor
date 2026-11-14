@@ -1180,12 +1180,8 @@
       "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h",
-        "src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h",
         "shaders/SDR tone shape.glsl",
-        "shaders/DV trims.glsl",
-        "src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h",
-        "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h",
-        "src/VP-V/modules/colour/sdr_tone_shape/DvHostStage.h"
+        "shaders/DV trims.glsl"
       ],
       "components": {
         "files": {
@@ -1245,7 +1241,6 @@
       "code_location": "module (ambient adaptation config/logic, SdrAmbientLift; slot placeholder)",
       "live_files": [
         "src/VP-V/modules/colour/appearance/SdrAmbientLift.h",
-        "src/VP-V/modules/colour/appearance/AmbientAdaptation.h",
         "src/VP-V/modules/colour/appearance/AmbientConfig.h"
       ],
       "components": {
