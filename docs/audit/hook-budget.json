@@ -32,7 +32,7 @@
    "note": "HA-CFG09-BillPresets: +1 Bill-preset accessor (HELD-CFG-09, owner 19:21 allowance), back to 31 at the re-graft"
   },
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": {
-   "limit": 145,
+   "limit": 141,
    "reverts_to": 142,
    "until": [
     "P11b"
