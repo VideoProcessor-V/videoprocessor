@@ -124,6 +124,13 @@
   },
   {
    "kind": "class",
+   "value": "CaptureWideLumaTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/input/capture/tests/CaptureWideLumaTests.cpp",
+   "note": "S-2a: GpuRgbUnpack wide R12 luma vs the CPU axis law; WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
    "value": "DejudderHookTests",
    "category": "GpuWarp",
    "file": "src/VP-V/modules/motion/consumers/tests/DejudderHookTests.cpp",

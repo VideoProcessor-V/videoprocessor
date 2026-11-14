@@ -272,7 +272,7 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 	custom.descriptors = descriptors;
 	custom.num_descriptors = lumaOnly ? 2 : 3;
 	custom.variables = variables;
-	custom.num_variables = 5;
+	custom.num_variables = 6;
 	custom.compute = true;
 	custom.compute_group_size[0] = 16;
 	custom.compute_group_size[1] = 16;
