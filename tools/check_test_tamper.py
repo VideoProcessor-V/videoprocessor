@@ -111,10 +111,28 @@ def default_range(root, base):
     raise RuntimeError("no base ref found; pass --range or --base")
 
 
+WAIVES_RX = re.compile(r"^Waives:\s*([0-9a-f]{7,40})\s*$", re.M)
+
+
+def late_waivers(msgs):
+    """{sha prefixes} named by a "Waives: <sha>" line in a commit that itself carries a WAIVER-<ID> trailer: a missed waiver is
+    added by a follow-up commit (no history rewrite). The waiving commit is still judged on its own."""
+    out = set()
+    for m in msgs:
+        if has_waiver(m):
+            out.update(WAIVES_RX.findall(m))
+    return out
+
+
 def scan(root, rng):
     results = []
-    for sha in git(root, "rev-list", "--no-merges", "--reverse", rng).split():
-        msg = git(root, "show", "-s", "--format=%B", sha)
+    shas = git(root, "rev-list", "--no-merges", "--reverse", rng).split()
+    msgs = {sha: git(root, "show", "-s", "--format=%B", sha) for sha in shas}
+    late = late_waivers(msgs.values())
+    for sha in shas:
+        msg = msgs[sha]
+        if any(sha.startswith(w) for w in late) and not has_waiver(msg):
+            msg += "\nWAIVER-LATE: waived by a later 'Waives:' commit"
         viol, notes, waived = judge(commit_files(root, sha), msg)
         subject = msg.strip().splitlines()[0][:80] if msg.strip() else ""
         results.append({"sha": sha[:9], "subject": subject, "violations": viol, "notes": notes, "waived": waived})

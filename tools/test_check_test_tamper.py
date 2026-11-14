@@ -77,6 +77,27 @@ class GitTests(unittest.TestCase):
             self.assertEqual(T.main(["--root", r, "--range", base + "..HEAD", "--strict"]), 1)
             self.assertEqual(T.main(["--root", r, "--range", "nonsense..HEAD", "--strict"]), 2)
 
+    def test_follow_up_waives_an_earlier_commit_without_history_rewrite(self):
+        with tempfile.TemporaryDirectory() as r:
+            self._g(r, "init", "-q")
+            os.makedirs(os.path.join(r, "tools"))
+            p = os.path.join(r, "tools", "check_a.py")
+            open(p, "w").write("x=1\n")
+            self._g(r, "add", "-A")
+            self._g(r, "commit", "-qm", "base")
+            base = subprocess.run(["git", "-C", r, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+            open(p, "w").write("x=2\n")
+            self._g(r, "commit", "-qam", "bad")
+            bad = subprocess.run(["git", "-C", r, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+            rng = base + "..HEAD"
+            self.assertEqual(T.main(["--root", r, "--range", rng, "--strict"]), 1)
+            self._g(r, "commit", "--allow-empty", "-qm", "late waiver\n\nWAIVER-T9: why\nWaives: " + bad[:9])
+            self.assertEqual(T.main(["--root", r, "--range", rng, "--strict"]), 0)
+            # a Waives: line without a WAIVER trailer, or naming another commit, waives nothing
+            self._g(r, "commit", "--allow-empty", "-qm", "noise\n\nWaives: " + bad[:9])
+            self.assertEqual(T.main(["--root", r, "--range", rng, "--strict"]), 0)
+            self.assertEqual(T.late_waivers(["x\nWaives: abcdef1"]), set())
+
     def test_selftest(self):
         self.assertEqual(T.main(["--selftest"]), 0)
 
