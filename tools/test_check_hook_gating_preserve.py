@@ -45,12 +45,21 @@ class PreserveTemporary(base.CheckHookGatingTest):
         self.assertEqual(d["files"][BILL], n)
         self.assertNotIn("temporary", d)
 
+    def test_count_above_the_temporary_limit_still_fails(self):
+        n = self._count()
+        base._w(self.root, chg.BUDGET_PATH, json.dumps({"files": {BILL: n - 2}, "temporary": {
+            BILL: {"limit": n - 1, "reverts_to": n - 2, "until": ["re-graft"], "note": "x"}}}))
+        rc, out = base._run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("temporary budget", out)
+
 
 # only the two new tests, not the inherited suite
 def load_tests(loader, tests, pattern):
     s = unittest.TestSuite()
     s.addTests(loader.loadTestsFromNames(["test_check_hook_gating_preserve.PreserveTemporary.test_pending_block_is_kept_and_files_holds_reverts_to",
-                                          "test_check_hook_gating_preserve.PreserveTemporary.test_block_not_needed_any_more_is_dropped"]))
+                                          "test_check_hook_gating_preserve.PreserveTemporary.test_block_not_needed_any_more_is_dropped",
+                                          "test_check_hook_gating_preserve.PreserveTemporary.test_count_above_the_temporary_limit_still_fails"]))
     return s
 
 
