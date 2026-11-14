@@ -244,7 +244,7 @@ Contract: `D:/codex/vp-handover/lead8/iface-L-CORE.md` (frozen v1). Zero Bill li
   dispatcher and ledger grant: without a lane it is `no GPU dispatcher` (visible); views (`view`) need neither.
 - **Axes**: STAGE (`StageAfter(PipelineSlots::Id)`, 0 = source planes = every owner's default), CROP (source-pixel rectangle;
   full frame / zero side = none), PARAM0 / PARAM1 (owner-defined thresholds), PRECISION values `kPrecisionUnorm16`,
-  `kPrecisionFloat32`, `kPrecisionFloat16` (not 12-bit safe; an owner with `pixelData` refuses it). `VariantKey::Hash()` is the
+  `kPrecisionFloat32`, `kPrecisionFloat16` (not 12-bit safe; EVERY owner refuses it with `VariantUndeclared`, visibly, and the ledger has no format for it). `VariantKey::Hash()` is the
   stable variant id (compute-once counters). `core/VariantShape.h` derives a variant's dims, ledger format and reserve bytes.
 - **Thread contract**: the render thread is declared at every Begin. CPU forms from any thread (pinned); a lane CPU product off
   the render thread is its PUBLISHED bytes copied out through the lane lease (`reusedLaneCopy`), never a slot pointer and never

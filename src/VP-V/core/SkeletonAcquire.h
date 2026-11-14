@@ -878,7 +878,7 @@ public:
             return Fail(c, id, seq, AcquireCause::RegulatorDropped);
         if (ow == nullptr || !ow->fill)
             return Fail(c, id, seq, AcquireCause::NoOwnerFill);
-        if ((v.Axes() & ~ow->variantAxes) != 0u || (ow->pixelData && v.precision == kPrecisionFloat16))
+        if ((v.Axes() & ~ow->variantAxes) != 0u || v.precision == kPrecisionFloat16)  // float16 is not 12-bit safe: every owner declines it, visibly (N2)
             return Fail(c, id, seq, AcquireCause::VariantUndeclared);
         if (ow->renderThreadOnly && !renderThread)
             return Fail(c, id, seq, AcquireCause::WrongThread);
