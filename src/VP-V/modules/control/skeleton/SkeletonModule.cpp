@@ -1635,6 +1635,9 @@ namespace Vpv
 				t.presentLag = mh->presentLag.Value(now);
 				t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kPresentLag);
 			}
+			// BASIS (R14-67): H and the ahead need count CPU AND GPU fills, views included: the window is about frames any reader may still
+			// hold or compute ahead, whatever the form. The VRAM view (GPU allocating fills only, views excluded) stays in GpuNeedLevels, a different
+			// question that must not be mixed into these terms.
 			// H: the owner fills' declared reader lag (L-CORE accessor; 0 = none declared, a measurement). The lane graph's input lag edges join
 			// it through HistoryTermOf once the lane hands its graph here (TODO 102b QKP-B-LANE-GRAPH-H).
 			t.history = VpSkeleton::HistoryTermOf(nullptr, memo->DeclaredFillHistory());
