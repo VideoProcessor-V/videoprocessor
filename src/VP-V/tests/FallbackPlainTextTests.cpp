@@ -29,7 +29,7 @@ namespace FallbackPlainTextTest
 				"vector producer", "motion engine", "motion look-ahead", "motion_lookahead_capped", "source resolution look-ahead", "timeline",
 				"source resolution held", "source geometry detect",
 				"dither vectors matcher", "dither vectors on demand", "dither vectors own search", "dither vectors unvalidated",
-				"dither motion compensation" };
+				"dither motion compensation", "picture precision", "libplacebo errors" };
 			const std::string unknownPrefix = "A processing step was switched off";
 			for (const char* id : ids)
 			{

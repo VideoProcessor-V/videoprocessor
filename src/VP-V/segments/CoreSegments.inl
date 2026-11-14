@@ -701,12 +701,24 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     dejudderNextVectorsFrom = 0;
     VpResync::TakeIfDriving(resync, resyncDrive, VpResync::Reader::SigmaDelta);   // R3: checked by stamps above
     ditherNextGate.Clear();
+    // S-12BIT (refs/119 #51, #30): libplacebo's latched error flags (FBO, sampling, debanding, ...) and the float16 picture precision
+    // are visible, and released in the Original pathway (a stale entry is a silent state in reverse). Here, not in ReportRenderErrors:
+    // that body is a pure move that never runs in Original. The flags are renderErrors (read above from the renderer: the previous frame's latch).
+    static_assert(LibplaceboErrors::kFbo == PL_RENDER_ERR_FBO && LibplaceboErrors::kHooks == PL_RENDER_ERR_HOOKS &&
+        LibplaceboErrors::kBlur == PL_RENDER_ERR_BLUR && LibplaceboErrors::kContrastRecovery == PL_RENDER_ERR_CONTRAST_RECOVERY,
+        "LibplaceboErrors bit values must mirror enum pl_render_error");
+    SyncFallback(LibplaceboErrors::Latched(static_cast<int>(renderErrors.errors), pipelineSlots.OriginalPathway()));
+#if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
+    constexpr bool laneHasFloat32Fbo = true;   // Beta lane (API 388)
+#else
+    constexpr bool laneHasFloat32Fbo = false;  // Stable 7.360: no float32 intermediate switch
+#endif
+    SyncFallback(PicturePrecision::Precision(pipelineSlots.OriginalPathway(), laneHasFloat32Fbo, activeSettings.fboFloat32));
 #if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
     // S2: every FBO in rgba32f (exact highlights; +bandwidth). Auto: on everywhere, the
     // low-latency path too (owner 2026-10-16: higher precision is the default; half-float
     // there was never agreed). Off by hand only.
-    frameParams.fbo_float32 = AdaptiveDownscaleStage::FboFloat32(activeSettings.fboFloat32,
-        pipelineSlots.Runs(PipelineSlots::Id::ScalingOutput));
+    frameParams.fbo_float32 = PicturePrecision::FboFloat32(activeSettings.fboFloat32);   // S-12BIT: the setting alone, not the scaling.output slot
 #endif
     // Only a quantiser submitted with this frame replaces libplacebo's dither (audit 2026-10-16:
     // a sigma-delta left out of the frame for its domain still cleared the dither).
