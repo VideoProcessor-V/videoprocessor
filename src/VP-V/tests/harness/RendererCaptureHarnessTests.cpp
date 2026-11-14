@@ -7359,7 +7359,14 @@ namespace Tests
 				Logger::WriteMessage((std::string(rate.name) + " (de-judder standing demand = starter):\n" + VectorTestLines(s)).c_str());
 				Assert::IsTrue(s.presented, (name + L": starter run: frames presented\n" + s.Tail()).c_str());
 				Assert::IsTrue(s.Logged("Vector engine: on"), (name + L": with a starter the vector engine is on\n" + s.Tail()).c_str());
-				Assert::IsTrue(s.Logged("Vector engine: vectors delivered"), (name + L": with a starter vectors are delivered\n" + s.Tail()).c_str());
+				// Vectors are delivered either by the on-demand engine ("vectors delivered") or by the look-ahead worker, which logs
+				// its pair hits instead ("Vector engine: N pairs (ahead hits H, ..."): H > 0 counts as delivered.
+				bool delivered = s.Logged("Vector engine: vectors delivered");
+				for (const std::string& line : s.log)
+					if (line.find("Vector engine: ") != std::string::npos && line.find("(ahead hits ") != std::string::npos &&
+						line.find("(ahead hits 0,") == std::string::npos)
+						delivered = true;
+				Assert::IsTrue(delivered, (name + L": with a starter vectors are delivered\n" + s.Tail()).c_str());
 			}
 		}
 
@@ -7380,8 +7387,11 @@ namespace Tests
 			const RunResult none = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
 				"deband_vp: on\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
 			g_harnessQueueTarget = 2;
+			// The starter leg runs a source the de-judder standing demand is eligible for (24p on the machine's own display, the
+			// cadence case; at a matched 60p source the de-judder never starts the engine).
+			const FramePlan starterPlan = RatePlan(HarnessMonitorHz() * 0.4);
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
-				"deband_vp: on\ndejudder_strength: 0.25\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
+				"deband_vp: on\ndejudder_strength: 0.25\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n", false, &starterPlan);
 			g_harnessApplySnapshot = false;
 			g_harnessQueueTarget = 0;
 			Logger::WriteMessage(("deband_vp only (no starter):\n" + VectorTestLines(none)).c_str());
@@ -7540,7 +7550,7 @@ namespace Tests
 			// dither are named as without vectors (WAIVER-THSM-02; the control, with a starter, serves the sigma-delta).
 			if (!RequireHardwareOrSkip("VectorEngineSmoothMotionKeepsAnalysis")) return;
 			if (VectorTestSkip("VectorEngineSmoothMotionKeepsAnalysis")) return;
-			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
+			const FramePlan plan = RatePlan(HarnessMonitorHz() * 0.4);
 			// The sigma-delta shader is found through VP_TEST_SHADER_DIR (as TemporalDitherChoiceControlsTheSigmaDelta does).
 			const std::string here = Here();
 			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
