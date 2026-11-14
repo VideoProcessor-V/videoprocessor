@@ -30,14 +30,6 @@
     "re-graft"
    ],
    "note": "HA-CFG09-BillPresets: +1 Bill-preset accessor (HELD-CFG-09, owner 19:21 allowance), back to 31 at the re-graft"
-  },
-  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": {
-   "limit": 145,
-   "reverts_to": 142,
-   "until": [
-    "P11b"
-   ],
-   "note": "coordinator re-ruling 2026-11-12 (via Lead 6, P4 opus gate MUST-2 + Phase 3 gate SHOULD-2): ONE temporary LVR ceiling of 145 until P11b, replacing the stacked P5c / R12 / Phase3 / P4 allowances; P11b brings LVR to <= 143 and removes this entry in the same commit. Count on r2/phase3-on-p4 = 145 (P4 e-i -3 transitional reads; Phase 3 R11 + R14 + the one R12 block; HA-P4f-S3 / HA-P4g-S3). p4-fg alone counts 146 and lands only stacked with Phase 3."
   }
  }
 }
