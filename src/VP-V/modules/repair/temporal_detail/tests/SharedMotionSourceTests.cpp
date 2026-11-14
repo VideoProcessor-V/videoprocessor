@@ -322,6 +322,9 @@ namespace VideoProcessorTest
 			Assert::AreEqual<unsigned long long>(computes0 + 1, rig.engine.FlowReads().trustComputes, L"forward, producer extras: one engine compute");
 			Assert::IsTrue(source.Forward(6, b));
 			Assert::AreEqual<unsigned long long>(computes0 + 2, rig.engine.FlowReads().trustComputes, L"forward, no producer extras: one engine compute");
+			Assert::AreEqual(a.trust.size(), b.trust.size());
+			for (size_t i = 0; i < a.trust.size(); ++i)
+				Assert::AreEqual(b.trust[i], a.trust[i], 0.0f, L"bit-equal to the recompute path");
 			Assert::IsTrue(a.trust == b.trust);
 			Assert::IsTrue(a.vx == b.vx && a.vy == b.vy, L"the vectors are the same pair's, whichever pair carried the extras");
 			Assert::IsTrue(source.Backward(5, back));

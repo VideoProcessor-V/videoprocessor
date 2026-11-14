@@ -306,6 +306,7 @@ namespace VideoProcessorTest
 			for (size_t i = 0; i < a.trust.size(); ++i)
 				Assert::AreEqual(memo[i], a.trust[i], 0.0f, L"the copy is the memo, bit for bit");
 			const std::vector<float> ref = Mv5Trust(a, 1.5f);
+			Assert::AreEqual(ref.size(), a.trust.size());
 			for (size_t i = 0; i < a.trust.size(); ++i)
 				Assert::AreEqual(ref[i], a.trust[i], 0.0f, L"bit-equal to MV5's costWeight x fbError");
 			// A view whose memo cannot form the trust (no memo, as a fake or an older engine): Incomplete, never a guessed trust.
@@ -367,8 +368,15 @@ namespace VideoProcessorTest
 			Assert::IsTrue(withExtras.haveProducerGlobal);
 			Assert::IsFalse(without.haveProducerGlobal);
 			Assert::IsTrue(withExtras.trust == without.trust, L"the producer's extras do not change the engine trust");
+			const std::vector<float> ref = Mv5Trust(without, 1.5f);
+			Assert::AreEqual(without.trust.size(), withExtras.trust.size());
 			bool someBelowOne = false;
-			for (const float v : withExtras.trust) someBelowOne = someBelowOne || v < 1.0f;
+			for (size_t i = 0; i < without.trust.size(); ++i)
+			{
+				Assert::AreEqual(without.trust[i], withExtras.trust[i], 0.0f, L"the extras path is bit-equal to the recompute path");
+				Assert::AreEqual(ref[i], withExtras.trust[i], 0.0f);
+				someBelowOne = someBelowOne || withExtras.trust[i] < 1.0f;
+			}
 			Assert::IsTrue(someBelowOne, L"the inputs exercise the weighting");
 			float g[4] = {}, second[4] = {};
 			MotionAhead::FlowGlobal(without.forward, without.forwardCost, without.gridW, without.gridH, g, second);
