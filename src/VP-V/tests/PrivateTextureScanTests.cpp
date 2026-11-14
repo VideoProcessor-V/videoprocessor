@@ -198,6 +198,9 @@ namespace PrivateTextureScanTestsNs
 				const std::wstring message = Widen(rel) + L": an owner fill names pl_gpu: take the device through OwnerFillRequest::gpu"
 					L" (core/SkeletonAcquire.h OwnerGpuContext), never a captured pl_gpu";
 				Assert::IsTrue(text.find("pl_gpu") == std::string::npos, message.c_str());
+				// Audit S4: nor a dispatch of its own (the context's Dispatch() is the one). A guard, not a proof: a stronger pattern
+				// is an S-CHK checker change through the lead.
+				Assert::IsTrue(text.find("pl_dispatch") == std::string::npos, message.c_str());
 			}
 			Assert::IsTrue(fillFiles >= 2, L"the scan found the memo and at least one fill");
 		}

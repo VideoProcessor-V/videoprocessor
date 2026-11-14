@@ -589,5 +589,39 @@ namespace VectorDemandTest
 			Assert::IsTrue(d.mode == Mode::Off && d.reason == Reason::Disabled && d.served == 0 && d.unserved == 0 &&
 				!d.estimate && !d.producer && !d.lowLatencyAllowed);
 		}
+
+		// R3 (audit S5): the composed cap state as the vector engine reads it, frame by frame. 60p with the standard queue (depth 4,
+		// 14 queued ahead): the designed state, the info text only, never the entry. 120p (depth 8): the entry, naming the 8 asked.
+		TEST_METHOD(LeadCapStateShowsInfoAtTheCeilingAndTheEntryOnlyWhenShort)
+		{
+			const unsigned run = MotionAhead::LeadCapTracker::kLeadCapRun;
+			const int depth60 = MotionAhead::DepthAt(4, 60.0);
+			MotionAhead::LeadCapState s60;
+			for (unsigned i = 0; i < run; ++i)
+				s60.Note(depth60, 14);
+			Assert::IsTrue(s60.InfoShown(true), L"60p / 250 ms: the ceiling binds sustained: the info text");
+			Assert::IsFalse(s60.EntryShown(true), L"60p / 250 ms: the depth is served in full: no fallback entry");
+			Assert::IsFalse(s60.InfoShown(false) || s60.EntryShown(false), L"not forward: neither");
+			Assert::AreEqual(0, s60.asked, L"nothing asked above the ceiling");
+
+			const int depth120 = MotionAhead::DepthAt(4, 120.0);
+			MotionAhead::LeadCapState s120;
+			for (unsigned i = 0; i + 1 < run; ++i)
+				s120.Note(depth120, 20);
+			Assert::IsFalse(s120.EntryShown(true), L"not yet sustained");
+			s120.Note(depth120, 20);
+			Assert::IsTrue(s120.EntryShown(true) && s120.InfoShown(true), L"120p: the entry (and the info text)");
+			Assert::AreEqual(depth120, s120.asked, L"the depth asked is kept for the entry");
+			const FallbackCatalog::Decision e = FallbackCatalog::MotionLookaheadCapped(s120.EntryShown(true), MotionAhead::kMaxLead, s120.asked);
+			Assert::IsTrue(e.engaged && e.reason.find("(" + std::to_string(depth120) + ")") != std::string::npos, L"the entry names 8");
+
+			// Back to 60p: the entry is released only after a sustained free run (no toggling with the queue level).
+			for (unsigned i = 0; i + 1 < run; ++i)
+				s120.Note(depth60, 14);
+			Assert::IsTrue(s120.EntryShown(true), L"held until a full free run");
+			s120.Note(depth60, 14);
+			Assert::IsFalse(s120.EntryShown(true), L"released");
+			Assert::IsTrue(s120.InfoShown(true), L"the info text stays while the ceiling binds");
+		}
 	};
 }
