@@ -321,6 +321,13 @@ namespace VideoProcessorTest
 			Assert::IsTrue(source.Backward(5, back));
 			Assert::IsTrue(back.trust != a.trust);
 			// Computed once by the engine per pair, direction and tolerance, however often TD asked; none worked out by the adapter.
+			{   // WIP-DIAG (revert): why the second Forward(6) fails
+				const bool okDiag = source.Forward(6, b);
+				const auto sd = source.GetStats();
+				char diag[300];
+				snprintf(diag, sizeof(diag), "DIAG Forward(6) ok=%d hits=%llu absent=%llu stale=%llu unfit=%llu why=%s", okDiag ? 1 : 0, (unsigned long long)sd.hits, (unsigned long long)sd.absent, (unsigned long long)sd.stale, (unsigned long long)sd.unfit, source.CurrentDecision().reason.c_str());
+				Logger::WriteMessage(diag);
+			}
 			Assert::IsTrue(source.Forward(6, b));
 			Assert::IsTrue(source.Backward(6, back));
 			const unsigned long long before = rig.engine.FlowReads().trustComputes;
