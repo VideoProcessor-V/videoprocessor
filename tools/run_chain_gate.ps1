@@ -176,7 +176,13 @@ if ($rigNoTiming.Count -gt 0) {
 $markers = @(Select-String -Path $trx -Pattern 'SKIP-[A-Z-]+ [A-Za-z0-9_]+' -AllMatches | ForEach-Object { $_.Matches } |
     ForEach-Object { $_.Value } | Sort-Object -Unique)
 $markers | ForEach-Object { "  marker: $_" }
-$noGpu = @($markers | Where-Object { $_ -like "SKIP-NO-GPU *" -or $_ -like "SKIP-NO-HARDWARE *" })
+# A skipped GPU-required test passes natively (CppUnitTest has no Inconclusive), so the gate fails on every marker that means
+# GPU evidence was not produced: no GPU/hardware, no baseline renderer (identity-vs-baseline tests), incompatible baseline, no
+# motion engine, no filter clip. Corpus/footage/loopback skips are listed as not run but do not fail (inputs the rig may lack).
+$gpuEvidence = @("SKIP-NO-GPU *", "SKIP-NO-HARDWARE *", "SKIP-NO-BASELINE *", "SKIP-INCOMPATIBLE-BASELINE *", "SKIP-NO-ENGINE *", "SKIP-NO-CLIP *")
+$noGpu = @($markers | Where-Object { $m = $_; @($gpuEvidence | Where-Object { $m -like $_ }).Count -gt 0 })
+$noGpu | ForEach-Object { "  GPU evidence missing (skipped, fails the gate): $_" }
+$markers | Where-Object { $_ -like "SKIP-NO-CORPUS *" -or $_ -like "SKIP-NO-FOOTAGE *" -or $_ -like "SKIP-NO-LOOPBACK *" } | ForEach-Object { "  evidence not run (corpus/footage input absent): $_" }
 $noTiming = @()
 if ($onScreenRequested) {
     $noTiming = @($markers | Where-Object { $_ -like "SKIP-NO-DISPLAY-TIMING *" })
