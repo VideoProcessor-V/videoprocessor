@@ -112,6 +112,7 @@ def load_json(path):
 
 
 def save_json(path, data):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(data, fh, indent=1, sort_keys=True)
         fh.write("\n")

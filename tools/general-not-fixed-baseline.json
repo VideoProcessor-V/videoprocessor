@@ -1,0 +1,37 @@
+{
+ "classes": {
+  "rate": 37,
+  "size": 6
+ },
+ "files": {
+  "src/VP-V/core/DelayBudgetLadder.h": 1,
+  "src/VP-V/core/ReserveRows.h": 2,
+  "src/VP-V/core/ResyncCause.h": 1,
+  "src/VP-V/modules/control/config/VpvSchemaKeys.h": 1,
+  "src/VP-V/modules/control/config/config_pages/VpvProfileUseRows.h": 5,
+  "src/VP-V/modules/control/config/config_pages/VpvSection.cpp": 1,
+  "src/VP-V/modules/control/config/config_pages/VpvTierTable.generated.h": 2,
+  "src/VP-V/modules/control/diagnostics/DiagnosticHistory.h": 1,
+  "src/VP-V/modules/control/diagnostics/RawCaptureRecorder.cpp": 1,
+  "src/VP-V/modules/control/diagnostics/StateReport.cpp": 2,
+  "src/VP-V/modules/control/skeleton/SkeletonModule.cpp": 1,
+  "src/VP-V/modules/drive/led_compensation/LedDriveConfig.h": 5,
+  "src/VP-V/modules/drive/led_compensation/LedDriveModule.h": 1,
+  "src/VP-V/modules/drive/led_compensation/config_ui/LedDrivePage.cpp": 3,
+  "src/VP-V/modules/input/queue_timing/IngressPolicy.inl": 1,
+  "src/VP-V/modules/input/queue_timing/PulldownDetector.h": 1,
+  "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp": 1,
+  "src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp": 2,
+  "src/VP-V/modules/input/source_analysis/identity/SourceIdReplay.h": 1,
+  "src/VP-V/modules/motion/consumers/DejudderPolicy.h": 3,
+  "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h": 1,
+  "src/VP-V/modules/repair/temporal_detail/TemporalDetail.h": 1,
+  "src/VP-V/modules/repair/texture_restore/DetailPulse.h": 1,
+  "src/VP-V/modules/repair/texture_restore/TextureRestore.h": 1,
+  "src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp": 1,
+  "src/VP-V/modules/scaling/output/AdaptiveDownscale.h": 1,
+  "src/VP-V/nets/NetRunner.h": 1
+ },
+ "tool": "N4 general-not-fixed",
+ "total": 43
+}
