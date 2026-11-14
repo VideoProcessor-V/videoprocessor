@@ -692,6 +692,57 @@ public:
             n.window.back = back;
         return n;
     }
+    // QKP-BCE read-only accessors (R14-61). Both read the registered owner fills (the bound lane's fill shadows a module's) under
+    // the memo mutex and change nothing.
+    // The window history term H's owner input: the largest DECLARED reader lag (OwnerFill::DeclaredHistory) of any registered
+    // fill, CPU or GPU, view or not; 0 when no owner declares one.
+    uint16_t DeclaredFillHistory() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        uint16_t h = 0;
+        for (const auto& kv : owners_) {
+            const OwnerFill* f = &kv.second;
+            const auto l = laneOwners_.find(kv.first);
+            if (l != laneOwners_.end())
+                f = &l->second;
+            if (f->DeclaredHistory() > h)
+                h = f->DeclaredHistory();
+        }
+        for (const auto& kv : laneOwners_)
+            if (kv.second.DeclaredHistory() > h)
+                h = kv.second.DeclaredHistory();
+        return h;
+    }
+    // One declared ahead demand: a registered fill whose consumers declared an ahead depth (OwnerFill::aheadDepth > 0).
+    struct AheadDemand {
+        uint16_t id = 0;     // ProductId
+        uint8_t form = 0;    // 0 = CPU, 1 = GPU
+        uint16_t depth = 0;  // the declared ahead depth in frames
+        JobClass cls = JobClass::Core;
+    };
+    // The kAheadNeed term's input: every registered fill (lane fill shadowing a module's) declaring an ahead depth > 0, ordered
+    // by owner key. Empty = no consumer (aheadCompute stays 0 / NoConsumer upstream).
+    std::vector<AheadDemand> ActiveAheadDemands() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        std::map<uint32_t, const OwnerFill*> all;
+        for (const auto& kv : owners_)
+            all[kv.first] = &kv.second;
+        for (const auto& kv : laneOwners_)
+            all[kv.first] = &kv.second;
+        std::vector<AheadDemand> out;
+        for (const auto& kv : all) {
+            if (kv.second->aheadDepth == 0)
+                continue;
+            AheadDemand d;
+            d.id = uint16_t(kv.first >> 1);
+            d.form = (kv.first & 1u) != 0u ? uint8_t(1) : uint8_t(0);
+            d.depth = kv.second->aheadDepth;
+            d.cls = kv.second->jobClass;
+            out.push_back(d);
+        }
+        return out;
+    }
     // The plan the admission made (S3's PlanAhead / the interim PlanAheadLadder): an Acquire that would FILL a frame further ahead
     // of the render frame than its product's planned depth is NotPlannedAhead (visible, counted; the frame is made at its render).
     // A product the plan does not name keeps the window's ahead. Spots already attached are never released by a plan.
