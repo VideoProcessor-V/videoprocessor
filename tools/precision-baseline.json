@@ -2,7 +2,7 @@
  "classes": {
   "A": 27,
   "O": 31,
-  "R": 43,
+  "R": 46,
   "T": 2,
   "U": 62
  },
@@ -30,7 +30,7 @@
   "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h": 3,
   "src/VP-V/nets/NetPackage.h": 1,
   "src/VP-V/nets/PlNetRunner.cpp": 2,
-  "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 11,
+  "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 14,
   "src/VideoProcessor-Lib/DisplayMonitorInventory.h": 1,
   "src/VideoProcessor-Lib/DolbyVisionTunnelInput.h": 1,
   "src/VideoProcessor-Lib/P210FrameLayout.h": 2,
@@ -258,5 +258,5 @@
   }
  },
  "tool": "N2 precision",
- "total": 165
+ "total": 168
 }
