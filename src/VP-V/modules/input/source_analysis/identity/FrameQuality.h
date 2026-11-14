@@ -53,9 +53,6 @@ namespace SourceIdentity
 			{
 				VpUnit::BandFromBase::BlurTaps<float>(src, dst, w, h, taps, VpUnit::BandFromBase::EdgeMode::Reflect);
 			}
-
-			// The upper median (core/RobustStats.h, ND06).
-			inline double Median(const std::vector<double>& v) { return RobustStats::Median(v, RobustStats::MedianRule::Upper); }
 		}
 
 		// `luma`: T x T samples normalised 0..1 (the monitor's tile, before the code-range scaling). 8-bit units = x255.
@@ -116,7 +113,7 @@ namespace SourceIdentity
 					residual.push_back(hp[i]);
 			if (residual.size() < 64)
 				return out;
-			const double med = detail::Median(residual);
+			const double med = RobustStats::Median(residual, RobustStats::MedianRule::Upper);
 			out.sigma = RobustStats::MadSigma(RobustStats::MadAbout(residual, med, RobustStats::MedianRule::Upper));
 			out.coverage = static_cast<double>(residual.size()) / static_cast<double>(n);
 			out.valid = true;
@@ -159,7 +156,7 @@ namespace SourceIdentity
 				lastNoise_ = -1.0;
 				if (!sigmas.empty())
 				{
-					const double sigma = detail::Median(sigmas);
+					const double sigma = RobustStats::Median(sigmas, RobustStats::MedianRule::Upper);
 					lastNoise_ = sigma;
 					history_.push_back(sigma);
 					while (history_.size() > s_.referenceWindow)

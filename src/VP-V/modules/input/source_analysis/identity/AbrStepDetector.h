@@ -142,14 +142,14 @@ namespace SourceIdentity
 			std::vector<double> qPre, qPost;
 			for (size_t i = 0; i < pre.size(); ++i) qPre.push_back(samples_[pre[i]].quality);
 			for (size_t i = 0; i < post.size(); ++i) qPost.push_back(samples_[post[i]].quality);
-			const double medPre = Median(qPre);
-			const double medPost = Median(qPost);
+			const double medPre = RobustStats::Median(qPre);   // core/RobustStats.h (ND06), MeanOfMiddle
+			const double medPost = RobustStats::Median(qPost);
 			const double delta = medPost - medPre;
 			const double magnitude = std::fabs(delta);
 			if (magnitude < s_.minStep)
 				return false;
-			const double madPre = Mad(qPre, medPre);
-			const double madPost = Mad(qPost, medPost);
+			const double madPre = RobustStats::MadAbout(qPre, medPre);
+			const double madPost = RobustStats::MadAbout(qPost, medPost);
 			if (madPre > s_.stableMad || madPost > s_.stableMad)
 				return false;
 
@@ -183,7 +183,7 @@ namespace SourceIdentity
 				for (size_t i = 0; i < post.size(); ++i)
 					if (samples_[post[i]].deliveredRatio > 0.0) rPost.push_back(samples_[post[i]].deliveredRatio);
 				if (rPre.size() >= minN && rPost.size() >= minN)
-					ratioStep = Median(rPost) - Median(rPre);
+					ratioStep = RobustStats::Median(rPost) - RobustStats::Median(rPre);
 			}
 			const bool ratioMoved = std::fabs(ratioStep) >= s_.minRatioStep;
 
@@ -251,9 +251,6 @@ namespace SourceIdentity
 
 		static double Clamp01Local(double x) { return ::RampMath::Clamp01NanToZero(x); }   // core/Ramp.h (ND07)
 
-		// Median / MAD: core/RobustStats.h (ND06), rule MeanOfMiddle.
-		static double Median(const std::vector<double>& v) { return RobustStats::Median(v); }
-		static double Mad(const std::vector<double>& v, double median) { return RobustStats::MadAbout(v, median); }
 
 		void Trim(int64_t now)
 		{

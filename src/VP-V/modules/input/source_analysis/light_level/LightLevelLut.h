@@ -93,13 +93,13 @@ namespace LightLevel
 
 		inline double Eotf(double e)
 		{
-			e = std::min(1.0, std::max(0.0, e));
+			e = RampMath::Clamp01NanToZero(e);
 			const double p = std::pow(e, 1.0 / M2);
 			return Ceiling * std::pow(std::max(p - C1, 0.0) / (C2 - C3 * p), 1.0 / M1);
 		}
 		inline double Oetf(double nits)
 		{
-			const double y = std::pow(std::min(1.0, std::max(0.0, nits / Ceiling)), M1);
+			const double y = std::pow(RampMath::Clamp01NanToZero(nits / Ceiling), M1);
 			return std::pow((C1 + C2 * y) / (1.0 + C3 * y), M2);
 		}
 	}
@@ -222,11 +222,11 @@ namespace LightLevel
 			double operator()(double nits, double dstPeak) const
 			{
 				if (identity) return nits;
-				const double e1 = std::min(1.0, std::max(0.0, (pq::Oetf(nits) - minLum) / range));   // clipped, mirrors light_level_ref.py
+				const double e1 = RampMath::Clamp01NanToZero((pq::Oetf(nits) - minLum) / range);   // clipped, mirrors light_level_ref.py
 				double e2 = e1;
 				if (e1 >= ks)
 				{
-					const double t = std::min(1.0, std::max(0.0, (e1 - ks) / (1.0 - ks))), t2 = t * t, t3 = t2 * t;
+					const double t = RampMath::Clamp01NanToZero((e1 - ks) / (1.0 - ks)), t2 = t * t, t3 = t2 * t;
 					e2 = (2.0 * t3 - 3.0 * t2 + 1.0) * ks + (t3 - 2.0 * t2 + t) * (1.0 - ks) + (-2.0 * t3 + 3.0 * t2) * maxT;
 				}
 				const double e3 = e2 + minT * std::pow(1.0 - e2, 4.0);

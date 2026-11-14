@@ -154,8 +154,6 @@ namespace CameraModel
 				return s.best;
 			}
 
-			double Median(const std::vector<float>& v) { return RobustStats::Median(v); }   // core/RobustStats.h (ND06)
-
 			size_t PlanIndex(const MeasurementPlan& p, int bx, int by, double s2m)
 			{
 				if (p.blockSize <= 0) return static_cast<size_t>(Clamp(by, 0, p.gridH - 1)) * static_cast<size_t>(p.gridW) + static_cast<size_t>(Clamp(bx, 0, p.gridW - 1));
@@ -366,8 +364,8 @@ namespace CameraModel
 						if (prevValid) { cand.push_back(previous->vx[i]); cand.push_back(previous->vy[i]); }
 						if (haveGlobal) { cand.push_back(static_cast<float>(gx * s2m)); cand.push_back(static_cast<float>(gy * s2m)); }
 						if (guided && eligible) { cand.push_back(static_cast<float>(plan->predX[pi] * s2m)); cand.push_back(static_cast<float>(plan->predY[pi] * s2m)); }
-						const double medx = nbx.empty() ? fvx[i] : Median(nbx);
-						const double medy = nby.empty() ? fvy[i] : Median(nby);
+						const double medx = nbx.empty() ? fvx[i] : RobustStats::Median(nbx);   // core/RobustStats.h (ND06)
+						const double medy = nby.empty() ? fvy[i] : RobustStats::Median(nby);
 						const int ox = windowOrigin(bx * kBlock, from.w, fullW), oy = windowOrigin(by * kBlock, from.h, fullW);
 						double bestScore = 1e30, bestSad = 0, bvx = fvx[i], bvy = fvy[i];
 						auto consider = [&](double vx, double vy)

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <VP-V/core/Ramp.h>   // ND07
 
 // Delta 13 (owner 2026-10-13, docs/VP-delta-11-shadow-boost.md): SDR tone
 // shape and headroom. Tone-mapped HDR looks better than native SDR because
@@ -48,7 +49,7 @@ namespace SdrToneShape
 	// The strength the shader gets: 0 without the knee.
 	inline double EffectiveStrength(const Settings& settings)
 	{
-		return settings.knee ? std::min(1.0, std::max(0.0, settings.kneeStrength)) : 0.0;
+		return settings.knee ? RampMath::Clamp01NanToZero(settings.kneeStrength) : 0.0;
 	}
 
 	// The contrast recovery the shader gets: auto follows the profile's
