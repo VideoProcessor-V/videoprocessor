@@ -106,7 +106,6 @@ protected:
         qintptr* result) override;
 
 private:
-    friend struct Vpv::ConfigEditorAccess;   // VPV-HOOK (S4A A4: the editor's VP-V seams; ConfigEditorAccess.inl)
     QWidget* createShell();
     QWidget* createStartupPage();
     QWidget* createDisplayPage();
@@ -347,6 +346,7 @@ private:
     QStackedWidget* pages_ = nullptr;
     Vpv::ConfigPageDirectory vpvPages_;   // VPV-HOOK
     Vpv::FunctionFormApi formApi_;   // VPV-HOOK
+    friend struct Vpv::ConfigEditorAccess;   // VPV-HOOK (S4A A4: the editor's VP-V seams; ConfigEditorAccess.inl)
     QWidget* navigation_ = nullptr;
     QLabel* status_ = nullptr;
 	QLabel* effectSummary_ = nullptr;

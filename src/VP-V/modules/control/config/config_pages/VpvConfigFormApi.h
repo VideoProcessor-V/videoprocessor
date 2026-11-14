@@ -10,6 +10,7 @@
 //                      the EditorKit default (null / empty / false).
 
 #include <VideoProcessor-Config/ConfigPageHost.h>
+#include <VP-V/modules/control/config/config_pages/VpvFormLayout.h>   // S4A: the editor reaches it through here, not by an include line of its own
 
 #include <functional>
 

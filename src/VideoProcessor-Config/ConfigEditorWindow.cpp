@@ -131,7 +131,6 @@
 #include <set>
 #include <sstream>
 #include <VP-V/config/VpvRenderingDefaults.h>   // unset VP-V keys' defaults (moved out of this file; one call site)
-#include <VP-V/config/VpvFormLayout.h>   // VPV-HOOK
 
 #pragma comment(lib, "dxgi.lib")
 
