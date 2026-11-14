@@ -13,9 +13,7 @@
 
 #include <chrono>
 #include <cstdio>
-#include <cstring>
 #include <memory>
-#include <string>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -283,6 +281,9 @@ namespace VideoProcessorTest
 		{
 			EngineRig rig(192);
 			auto withExtras = MakeFlow(96, 48);
+			// Some cells whose backward vector is NOT the forward one's return (3 px off, beyond twice the tolerance): the engine trust is then not all 1,
+			// the equality with the retired recompute is not vacuous, and the two directions of the pair differ.
+			for (size_t i = 0; i < withExtras->backward.size() / 2; i += 9) withExtras->backward[i * 2] = static_cast<int16_t>(96);
 			MotionAhead::FlowExtras(*withExtras);
 			Assert::IsFalse(withExtras->fbError.empty());
 			auto without = std::make_shared<MotionAhead::Flow>(*withExtras);
@@ -345,15 +346,6 @@ namespace VideoProcessorTest
 			Assert::AreEqual<unsigned long long>(r2.costWeightRecomputes + 1, r3.costWeightRecomputes, L"backward: no producer extra, cost weights computed");
 			Assert::IsTrue(back.trust != a.trust);
 			// Computed once by the engine per direction and tolerance while the pair is the current lease, however often TD asked; none by the adapter.
-			{   // WIP-DIAG (revert): why the second Forward(6) fails
-				const bool okDiag = source.Forward(6, b);
-				const auto sd = source.GetStats();
-				char diag[300];
-				snprintf(diag, sizeof(diag), "DIAG Forward(6) ok=%d hits=%llu absent=%llu stale=%llu unfit=%llu why=%s", okDiag ? 1 : 0, (unsigned long long)sd.hits, (unsigned long long)sd.absent, (unsigned long long)sd.stale, (unsigned long long)sd.unfit, source.CurrentDecision().reason.c_str());
-				Logger::WriteMessage(diag);
-				std::wstring wdiag(diag, diag + strlen(diag));
-				Assert::IsTrue(okDiag, wdiag.c_str());   // WIP-DIAG: the failure carries the reason (Logger output is not kept for this test)
-			}
 			Assert::IsTrue(source.Forward(6, b));
 			Assert::IsTrue(source.Backward(6, back));
 			const unsigned long long before = rig.engine.FlowReads().trustComputes;
