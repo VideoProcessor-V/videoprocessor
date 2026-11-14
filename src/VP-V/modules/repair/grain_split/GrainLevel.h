@@ -40,10 +40,13 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
@@ -137,6 +140,11 @@ namespace GrainLevel
 		int llBackPerPixel = 10;                         // low latency once the per-pixel vector product exists (+0 ahead)
 		double neighbourKappa = 1.0;                     // Wiener kappa on the neighbour mean ("kappa about 1 on the harness N")
 		double looGate = 4.0;                            // leave-one-out gate: boxmean5x5(r^2) <= looGate (N + V)
+		// C8 repeated-frame gate (floor design s15): a neighbour that is a near-bit-identical repeat of the current frame carries the
+		// SAME grain, so averaging it keeps the grain in the clean picture; it leaves B's set. Setting grain_repeat_gate (on|off).
+		bool repeatGate = true;
+		double repeatFrac = 0.005;                       // quiet block: mean (W_k - D_t)^2 <= this x N (measured: true repeats 0.000, 0 false fires; 0.05 false-fired)
+		double repeatShare = 0.9;                        // a neighbour is a repeat when this share of its judged blocks is quiet
 		int dctShifts = 4;                               // tile grids averaged: 4 = half-shifts (0,0) (4,0) (0,4) (4,4); 2 = (0,0) (4,4). MEASUREMENT knob (B-S0), default unchanged, NOT a user setting
 		int minNeighbours = 2;                           // fewer usable neighbours: the L1+L2 gains exactly
 		double psdFlatFactor = 1.5;                      // a tile is flat when mean d^2 <= factor N
@@ -603,6 +611,7 @@ namespace GrainLevel
 		Plane cleanD, grainD;       // cleanD + grainD = D_t exactly
 		Plane keff;                 // neighbours kept per pixel (0 where the L1+L2 gains were used)
 		int pixels = 0, fallbackPixels = 0, usedNeighbours = 0, droppedCrossEpoch = 0;
+		int droppedRepeat = 0;      // C8: repeated frames that left the set (visible: FallbackCatalog::GrainRepeatGate)
 		bool psdWhite = false;      // no flat tiles: the white PSD shape was used (visible)
 		double meanKeff = 0.0;      // over the non-fallback pixels
 	};
@@ -693,6 +702,44 @@ namespace GrainLevel
 	// The neighbour-window Wiener of the current band. u4 = the unit-4 split (provides D, N via t1.Nb and the shares), t1 = the
 	// L1+L2 Result of the same frame (its f gives the fallback; its s1 + s2 are used verbatim at fallback pixels), nb = the
 	// candidate neighbours (only those of the current frame's epoch and inside the window count). curEpoch: the current epoch id.
+	// Parses grain_repeat_gate (on|off). Unknown text keeps the default (on) and says so; nothing is silent.
+	inline bool ParseRepeatGate(const std::string& raw, bool& value, std::string& problem)
+	{
+		std::string v;
+		for (char ch : raw) if (ch != ' ' && ch != '\t') v.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+		if (v == "on") { value = true; return true; }
+		if (v == "off") { value = false; return true; }
+		problem = "grain_repeat_gate '" + raw + "' is not valid (on|off); kept on";
+		value = true;
+		return false;
+	}
+
+	// C8: is the warped neighbour a near-bit-identical repeat of the current band? Per block (needs at least a quarter of its
+	// pixels valid) the mean squared residual against N; the neighbour is a repeat when repeatShare of the judged blocks are quiet.
+	inline bool IsRepeat(const Warped& wk, const Plane& dCur, const std::vector<double>& Nb, int B, int bw, const Params& p)
+	{
+		const int w = dCur.w, h = dCur.h, bh = (h + B - 1) / B;
+		std::vector<double> sum(static_cast<size_t>(bw) * bh, 0.0);
+		std::vector<int> cnt(static_cast<size_t>(bw) * bh, 0);
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+			{
+				const size_t i = static_cast<size_t>(y) * w + x;
+				if (!wk.valid[i]) continue;
+				const double r = wk.v.v[i] - dCur.v[i];
+				const size_t b = static_cast<size_t>(y / B) * bw + static_cast<size_t>(x / B);
+				sum[b] += r * r; ++cnt[b];
+			}
+		int judged = 0, quiet = 0;
+		for (size_t b = 0; b < sum.size() && b < Nb.size(); ++b)
+		{
+			if (cnt[b] < (B * B) / 4) continue;
+			++judged;
+			if (sum[b] / cnt[b] <= p.repeatFrac * Nb[b]) ++quiet;
+		}
+		return judged > 0 && quiet >= p.repeatShare * judged;
+	}
+
 	inline NeighbourResult NeighbourWiener(const Split& u4, const Result& t1, const std::vector<Neighbour>& nb, int curEpoch, const Window& win, const Params& p)
 	{
 		const int w = u4.w, h = u4.h, B = u4.B, bw = u4.bw;
@@ -713,7 +760,9 @@ namespace GrainLevel
 			if (n.epoch != curEpoch) { ++out.droppedCrossEpoch; continue; }
 			const bool behind = n.offset < 0;
 			if (n.offset == 0 || (behind ? -n.offset > win.back : n.offset > win.ahead)) continue;
-			warps.push_back(WarpBicubic(*n.d, n.field, w, h));
+			Warped wk = WarpBicubic(*n.d, n.field, w, h);
+			if (p.repeatGate && IsRepeat(wk, dCur, t1.Nb, B, bw, p)) { ++out.droppedRepeat; continue; }
+			warps.push_back(std::move(wk));
 		}
 		out.usedNeighbours = static_cast<int>(warps.size());
 		const int K = static_cast<int>(warps.size());

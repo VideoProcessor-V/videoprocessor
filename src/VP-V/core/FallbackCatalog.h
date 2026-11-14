@@ -1022,6 +1022,16 @@ namespace FallbackCatalog
 			"and the render upload");
 	}
 
+	// P10g C8 repeated-frame gate: neighbour frames that repeat the current frame (paused / duplicated picture) left the B window so their
+	// copy of the grain is not averaged into the clean picture. Engaged only while it dropped a frame; Released when the setting is off.
+	inline Decision GrainRepeatGate(bool settingOn, int droppedRepeats, int neighboursLeft, int minNeighbours)
+	{
+		if (!settingOn || droppedRepeats <= 0)
+			return Released("grain_repeat_gate");
+		return Engaged("grain_repeat_gate", "grain: " + std::to_string(droppedRepeats) + " repeated neighbour frame(s) left the window ("
+			+ std::to_string(neighboursLeft) + " left); " + (neighboursLeft < minNeighbours ? "fewer than the minimum, the L1+L2 gains run" : "the rest still average"));
+	}
+
 	inline Decision ProductFallback(const char* id, const std::string& why)
 	{
 		const ProductEntry* e = FindProductEntry(id);
