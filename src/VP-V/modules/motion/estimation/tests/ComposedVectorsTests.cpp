@@ -7,6 +7,7 @@
 #endif
 #include "CppUnitTest.h"
 
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/composed/ComposedVectors.h>
 
 #include <map>
@@ -247,6 +248,14 @@ namespace ComposedVectorsTest
 			PlanePtr pl;
 			Assert::IsTrue(p.Acquire(100, Dir::Ahead, 3, pl) == Got::Ok);
 			Assert::AreEqual(0.0, (double)Product::Value(pl, kW - 8.0, 32.0).trust, 1e-6);
+			// A pixel that stays inside is NOT killed: at k = 1 the left edge lands at x = 48 and keeps full trust and the 40 px displacement.
+			Assert::IsTrue(p.Acquire(100, Dir::Ahead, 1, pl) == Got::Ok);
+			Assert::IsTrue(Product::Value(pl, 8.0, 32.0).trust > 0.99f);
+			Assert::AreEqual(40.0, (double)Product::Value(pl, 8.0, 32.0).dx, 1e-3);
+			Assert::AreEqual(0.0, (double)Product::Value(pl, kW - 8.0, 32.0).trust, 1e-6);
+			// Positions outside the frame have no value.
+			Assert::AreEqual(0.0, (double)Product::Value(pl, -1.0, 10.0).trust, 1e-6);
+			Assert::AreEqual(0.0, (double)Product::Value(pl, kW + 5.0, 10.0).trust, 1e-6);
 		}
 		TEST_METHOD(InvalidateDropsEveryPlane)
 		{
@@ -293,11 +302,14 @@ namespace ComposedVectorsTest
 			p.Prepare(100);
 			p.Prepare(101);
 			p.Prune(101, 101);
+			Assert::AreEqual((size_t)14, p.PlaneCount());   // only frame 101's 8 + 6 planes remain
+			Assert::AreEqual((uint64_t)14, p.GetStats().evictions);
 			PlanePtr pl;
 			const uint64_t before = p.GetStats().planesComputed;
 			Assert::IsTrue(p.Acquire(101, Dir::Back, 1, pl) == Got::Ok);
-			Assert::AreEqual(before, p.GetStats().planesComputed);
-			Assert::IsTrue(p.GetStats().evictions > 0);
+			Assert::AreEqual(before, p.GetStats().planesComputed);   // frame 101 is shared
+			Assert::IsTrue(p.Acquire(100, Dir::Back, 1, pl) == Got::Ok);
+			Assert::AreEqual(before + 1, p.GetStats().planesComputed);   // frame 100 was released: recomputed
 		}
 		TEST_METHOD(NoReaderComputesNothing)
 		{
@@ -308,6 +320,87 @@ namespace ComposedVectorsTest
 			const Reached r = p.Prepare(100);
 			Assert::AreEqual(0, (int)r.back + (int)r.ahead);
 			Assert::AreEqual(0, src.calls);
+		}
+		TEST_METHOD(ReverseAbsentDegradesVisiblyAndIsNotCached)
+		{
+			FakeSource src;
+			src.missing[std::make_pair((uint64_t)99, (uint64_t)100)] = true;   // back k = 1 has its forward pair 100 -> 99 but no reverse 99 -> 100
+			Product p(&src);
+			ActivateBoth(p);
+			Reached r = p.Prepare(100);
+			Assert::AreEqual(8, (int)r.back);
+			Assert::AreEqual(8, (int)r.degradedBack);    // the degradation propagates down the chain
+			Assert::AreEqual(0, (int)r.degradedAhead);
+			PlanePtr pl;
+			Assert::IsTrue(p.Acquire(100, Dir::Back, 1, pl) == Got::Ok);
+			Assert::IsTrue(pl->degraded);
+			Assert::AreEqual(0.5, (double)Product::Value(pl, 64, 32).trust, 1e-3);   // pair trust 1 x noReverseTrust 0.5
+			Assert::AreEqual(2.0, (double)Product::Value(pl, 64, 32).unc, 1e-3);    // 2 x consistencyPx
+			Assert::AreEqual(-1.0, (double)Product::Value(pl, 64, 32).dx, 1e-3);   // the displacement is still the pair's
+			Assert::AreEqual((size_t)6, p.PlaneCount());                           // only the 6 ahead planes are kept
+			const Product::Status st = p.CurrentStatus();
+			Assert::IsTrue(st.engaged);
+			Assert::IsTrue(st.text.find("without a reverse pair") != std::string::npos);
+			Assert::IsTrue(p.GetStats().reverseAbsent >= 8);
+			src.missing.clear();   // the reverse pair arrives
+			r = p.Prepare(100);
+			Assert::AreEqual(0, (int)r.degradedBack);
+			Assert::IsTrue(p.Acquire(100, Dir::Back, 1, pl) == Got::Ok);
+			Assert::IsFalse(pl->degraded);
+			Assert::AreEqual(1.0, (double)Product::Value(pl, 64, 32).trust, 1e-3);
+			Assert::IsFalse(p.CurrentStatus().engaged);
+		}
+		TEST_METHOD(QueueCapThroughPrepareIsVisible)
+		{
+			FakeSource src;
+			Product p(&src);
+			ActivateBoth(p);
+			p.SetWindow(2, 20);   // two frames queued ahead
+			const Reached r = p.Prepare(100);
+			Assert::AreEqual(2, (int)r.ahead);
+			Assert::AreEqual(8, (int)r.back);
+			Assert::IsTrue(p.CurrentPlan().note.find("2 of 6 frames ahead") != std::string::npos);
+			Assert::IsFalse(p.CurrentStatus().engaged);   // a plan cap is the plan's own note, not an absent pair
+		}
+		TEST_METHOD(CoarseStepPlaneIsSampledBilinearlyByFinerAndCoarserReaders)
+		{
+			FakeSource src;
+			Product p(&src);
+			p.SetSourceSize(kW, kH);
+			p.SetWindow(10, 20);
+			p.Activate(Reader::P10gGrainLevel, true);
+			p.SetReaderStep(Reader::P10gGrainLevel, 8);
+			p.Prepare(100);
+			PlanePtr pl;
+			Assert::IsTrue(p.Acquire(100, Dir::Back, 2, pl) == Got::Ok);
+			Assert::AreEqual(8, pl->step);
+			Assert::AreEqual(kW / 8, pl->w);
+			// Any position inside the frame (also between cell centres and near the border) reads the uniform -2 px.
+			const double xs[] = { 0.5, 3.0, 11.9, 64.0, 127.5 };
+			for (const double x : xs)
+				Assert::AreEqual(-2.0, (double)Product::Value(pl, x, 31.0).dx, 1e-3);
+		}
+		TEST_METHOD(PartialBudgetKeepsWhatFitsAndSaysWhy)
+		{
+			FakeSource src;
+			Product::Config c;
+			c.budgetBytes = 300000;   // a 128 x 64 plane is 131072 bytes: two fit
+			Product p(&src, c);
+			ActivateBoth(p);
+			const Reached r = p.Prepare(100);
+			Assert::AreEqual(2, (int)r.back);
+			Assert::IsTrue(r.backWhy == Got::Budget);
+			Assert::AreEqual((size_t)2, p.PlaneCount());
+			Assert::IsTrue(p.GetStats().bytes <= 300000);
+			Assert::IsTrue(p.CurrentStatus().engaged);
+		}
+		TEST_METHOD(FallbackDecisionRoundTrips)
+		{
+			Assert::IsFalse(FallbackCatalog::ComposedVectors(false, "").engaged);
+			const FallbackCatalog::Decision d = FallbackCatalog::ComposedVectors(true, "composed vectors reach 3 of 8");
+			Assert::IsTrue(d.engaged);
+			Assert::IsTrue(d.reason.find("3 of 8") != std::string::npos);
+			Assert::IsNotNull(FallbackCatalog::FindProductEntry("product.composed_vectors"));
 		}
 		TEST_METHOD(BudgetRefusalIsVisible)
 		{

@@ -29,6 +29,12 @@
 // shares). Plane k builds on plane k - 1 (get-or-compute-and-publish, recursive, rule 2). The grid step (source px per output cell) is a
 // variant axis of the ONE product: the FINEST step any active reader declares is computed, coarser readers sample it bilinearly (Sample).
 //
+// COST. The CPU form at step 1 is a REFERENCE only (4K: 14 planes x 8.3 M px per frame is not a render-time budget); readers run it at their own step
+// (block field = step > 1, Plane::At is the shared bilinear sampler for coarser readers) until the GPU form exists. Form / step contract: a plane is
+// ALWAYS a raster of `step` source px per cell with trust and uncertainty; step 1 = per pixel; a GPU form must publish the same fields at the same step.
+// CALLERS NOT BUILT HERE: the IPairSource adapter over the P2 slot / CellTrust memo / MotionValidity (the grain-level and TD lanes) and the Invalidate()
+// call at every epoch cause (MotionValidity epoch change) are wired by those lanes; this product exposes the seams.
+//
 // GPU. This is the CPU reference and the product contract; the GPU form (rows of the per-pixel chain in one dispatch per offset) is the
 // register row ECV-GPU-FORM (trigger: S-3c T3 start). Header-only, C++14, no Windows headers. Render / lane thread, one caller at a time
 // (the lane serialises; the class holds no lock).
@@ -101,6 +107,9 @@ struct Plane
     int srcW = 0, srcH = 0;
     int w = 0, h = 0;
     std::vector<float> dx, dy, trust, unc;
+    // True when a step of the chain had no REVERSE pair (the newest queued frame has none yet): the trust is the pair trust x kNoReverseTrust and the
+    // uncertainty carries 2 x consistencyPx instead of the measured landing error. Such a plane is returned but never cached (recomputed once the pair exists).
+    bool degraded = false;
 
     size_t Bytes() const { return (dx.size() + dy.size() + trust.size() + unc.size()) * sizeof(float); }
     // The reference frame of this plane (the frame the displacements point into).
@@ -160,6 +169,7 @@ inline const char* GotName(Got g)
 struct Reached
 {
     uint16_t back = 0, ahead = 0;   // contiguous valid offsets 1..n computed for the frame
+    uint16_t degradedBack = 0, degradedAhead = 0;   // of those, planes built without a reverse pair (pair trust only; visible in Status)
     Got backWhy = Got::Ok, aheadWhy = Got::Ok;
     std::string lastWhy;            // the adapter's plain reason for the last absent pair
 };
@@ -167,7 +177,7 @@ struct Reached
 struct Stats
 {
     uint64_t planesComputed = 0, planeHits = 0;
-    uint64_t outOfPlan = 0, chainBreaks = 0, badGeometry = 0, budgetRefused = 0;
+    uint64_t outOfPlan = 0, chainBreaks = 0, badGeometry = 0, budgetRefused = 0, reverseAbsent = 0;
     uint64_t invalidations = 0, stepRebuilds = 0, evictions = 0;
     uint64_t bytes = 0;             // the kept planes
 };
@@ -179,6 +189,9 @@ public:
     {
         // Landing consistency |V_ab(q) + V_ba(r)| in SOURCE px: weight 1 up to this, 0 from twice it (OpticalFlowTrust::FallOff, the engine's shape).
         double consistencyPx = 1.0;
+        // Weight of a step whose reverse pair is absent (no landing check possible): the pair trust is multiplied by this and the uncertainty grows as if the
+        // landing error were at its zero-trust edge (2 x consistencyPx). Never a silent fallback: Reached::degraded*, Status and the Ctrl+I decision say so.
+        double noReverseTrust = 0.5;
         // Upper bound of the kept planes (bytes). 0 = unbounded. A refused plane is visible (Stats.budgetRefused, Status).
         uint64_t budgetBytes = 0;
     };
@@ -248,7 +261,7 @@ public:
         const Dir dirs[2] = { Dir::Back, Dir::Ahead };
         for (const Dir d : dirs) {
             const uint16_t want = d == Dir::Back ? plan.back : plan.ahead;
-            uint16_t got = 0;
+            uint16_t got = 0, degraded = 0;
             Got why = Got::Ok;
             for (uint16_t k = 1; k <= want; ++k) {
                 PlanePtr p;
@@ -256,8 +269,11 @@ public:
                 if (why != Got::Ok)
                     break;
                 got = k;
+                if (p && p->degraded)
+                    ++degraded;
             }
             (d == Dir::Back ? r.back : r.ahead) = got;
+            (d == Dir::Back ? r.degradedBack : r.degradedAhead) = degraded;
             (d == Dir::Back ? r.backWhy : r.aheadWhy) = why;
         }
         m_last = r;
@@ -322,9 +338,14 @@ public:
         const Plan plan = CurrentPlan();
         const bool backShort = m_last.back < plan.back && m_last.backWhy != Got::Ok;
         const bool aheadShort = m_last.ahead < plan.ahead && m_last.aheadWhy != Got::Ok;
-        if (!backShort && !aheadShort)
+        const unsigned noRev = static_cast<unsigned>(m_last.degradedBack) + m_last.degradedAhead;
+        if (!backShort && !aheadShort && noRev == 0)
             return s;
         s.engaged = true;
+        if (!backShort && !aheadShort) {
+            s.text = "composed vectors: " + std::to_string(noRev) + " planes without a reverse pair (pair trust only)";
+            return s;
+        }
         s.text = "composed vectors reach " + std::to_string(m_last.back) + " of " + std::to_string(plan.back) + " frames back and " +
                  std::to_string(m_last.ahead) + " of " + std::to_string(plan.ahead) + " ahead (" +
                  (m_last.lastWhy.empty() ? std::string(GotName(backShort ? m_last.backWhy : m_last.aheadWhy)) : m_last.lastWhy) + ")";
@@ -402,9 +423,11 @@ private:
         }
         const uint64_t a = dir == Dir::Back ? t - (k - 1u) : t + (k - 1u);
         const uint64_t b = dir == Dir::Back ? t - k : t + k;
+        // The forward step pair is required; the REVERSE pair (the landing check) may be absent for the newest queued frame: then the step runs on the pair
+        // trust alone, flagged degraded (visible), not cached. An adapter that serves both (the engine serves a pair in both directions) never degrades.
         PairField ab, ba;
         std::string reason;
-        if (!m_source->Adjacent(a, b, ab, &reason) || !ab.Usable() || !m_source->Adjacent(b, a, ba, &reason) || !ba.Usable()) {
+        if (!m_source->Adjacent(a, b, ab, &reason) || !ab.Usable()) {
             ++m_stats.chainBreaks;
             if (why) *why = reason.empty() ? std::string("a pair of the chain is absent") : reason;
             return Got::PairAbsent;
@@ -424,10 +447,16 @@ private:
         p->srcH = m_h;
         p->w = (m_w + m_step - 1) / m_step;
         p->h = (m_h + m_step - 1) / m_step;
-        ComposeStep(prev.get(), ab, ba, *p);
-        m_stats.bytes += p->Bytes();
+        const bool haveBa = m_source->Adjacent(b, a, ba, nullptr) && ba.Usable();
+        ComposeStep(prev.get(), ab, haveBa ? &ba : nullptr, *p);
+        p->degraded = !haveBa || (prev && prev->degraded);
         ++m_stats.planesComputed;
         out = p;
+        if (p->degraded) {
+            ++m_stats.reverseAbsent;
+            return Got::Ok;   // served, not kept: recomputed when the reverse pair exists
+        }
+        m_stats.bytes += p->Bytes();
         m_planes[key] = out;
         return Got::Ok;
     }
@@ -453,7 +482,9 @@ private:
         return s;
     }
 
-    void ComposeStep(const Plane* prev, const PairField& ab, const PairField& ba, Plane& out) const
+    // u_n = u_{n-1} + (1 - trust) x cellPx + e: carried PER PIXEL OF THE CURRENT FRAME along its own chain (prev->unc[idx]); TemporalDetailModel samples
+    // u_{n-1} at p + Vb(p) in the neighbour frame's grid. Both accumulate the same terms; the per-pixel chain is the same quantity without a resample.
+    void ComposeStep(const Plane* prev, const PairField& ab, const PairField* ba, Plane& out) const
     {
         const size_t n = static_cast<size_t>(out.w) * out.h;
         out.dx.assign(n, 0.0f);
@@ -479,12 +510,19 @@ private:
                 const double rx = qx + v.dx, ry = qy + v.dy;
                 if (!(rx >= 0.0 && ry >= 0.0 && rx <= out.srcW && ry <= out.srcH))
                     continue;
-                const Sampled w = SampleField(ba, rx, ry);
-                const float e = std::sqrt((v.dx + w.dx) * (v.dx + w.dx) + (v.dy + w.dy) * (v.dy + w.dy));
                 const float cellTrust = (std::min)((std::max)(v.trust, 0.0f), 1.0f);
+                float e, consistency;
+                if (ba) {
+                    const Sampled w = SampleField(*ba, rx, ry);
+                    e = std::sqrt((v.dx + w.dx) * (v.dx + w.dx) + (v.dy + w.dy) * (v.dy + w.dy));
+                    consistency = OpticalFlowTrust::FallOff(tol, 2.0f * tol, e);
+                } else {
+                    e = 2.0f * tol;
+                    consistency = static_cast<float>(m_cfg.noReverseTrust);
+                }
                 out.dx[idx] = pdx + v.dx;
                 out.dy[idx] = pdy + v.dy;
-                out.trust[idx] = ptr * cellTrust * OpticalFlowTrust::FallOff(tol, 2.0f * tol, e);
+                out.trust[idx] = ptr * cellTrust * consistency;
                 out.unc[idx] = pun + (1.0f - cellTrust) * static_cast<float>(ab.cellPx) + e;
             }
         }

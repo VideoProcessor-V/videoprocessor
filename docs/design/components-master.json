@@ -520,6 +520,7 @@
         "src/VP-V/modules/motion/estimation/longpair/README.md",
         "src/VP-V/modules/motion/estimation/composed/ComposedVectorPlan.h",
         "src/VP-V/modules/motion/estimation/composed/ComposedVectors.h",
+        "src/VP-V/modules/motion/estimation/composed/README.md",
         "src/VP-V/modules/motion/estimation/tests/ComposedVectorsTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/FieldRefineTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/FieldRefineWarpTests.cpp",

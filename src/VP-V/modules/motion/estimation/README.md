@@ -409,4 +409,5 @@ Depth: 8 back + 4 ahead, low latency 10 + 0; ahead = max active reader need capp
 (`Plan::note`, `Product::CurrentStatus`). Provenance: lead12\proof-weaktex-BC.md s11; register row ENGINE-COMPOSED-VECTORS. Its ProductId is the FIXED id 34
 `kComposedVectors` (owner R14-95 fixed id table, `core/Products.h`); it stays in `kReservedProductIds` (an absent registry slot, no catalog row) until
 its registry decl and reader row land (lead ruling SHOULD S3), so the pinned product counts do not move. CPU reference; GPU form = register row ECV-GPU-FORM (trigger S-3c T3).
+Details: `composed/README.md`.
 Tests: `tests/ComposedVectorsTests.cpp`.
