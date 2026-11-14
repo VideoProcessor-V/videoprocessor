@@ -1492,11 +1492,11 @@ namespace VideoProcessorTest
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			struct Case { const char* name; int clean; bool boost; double lines; bool crop; uint64_t pin; };
 			const Case cases[] = {
-				{ "cleaner", 1, false, 1080.0, false, 0x0ull },
-				{ "single-frame template", 0, false, 1080.0, false, 0x0ull },
-				{ "boost", 1, true, 1080.0, false, 0x0ull },
-				{ "4320 lines (scale 2)", 1, false, 4320.0, false, 0x0ull },
-				{ "active-picture crop", 1, false, 1080.0, true, 0x0ull },
+				{ "cleaner", 1, false, 1080.0, false, 0x741024ba588a1431ull },
+				{ "single-frame template", 0, false, 1080.0, false, 0xdbabc20e752ba037ull },
+				{ "boost", 1, true, 1080.0, false, 0xa3fe074ff293bcd5ull },
+				{ "4320 lines (scale 2)", 1, false, 4320.0, false, 0x478b1e7426b6c11full },
+				{ "active-picture crop", 1, false, 1080.0, true, 0x587d99624b647447ull },
 			};
 			const ActiveRect cropRect{ 0, 8, kW, kH - 8 };
 			const std::vector<Plane> frames = Stream(16, "IBBBPBBB", 0.37, 0.21, 11u, 1.2);
