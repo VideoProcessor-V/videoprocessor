@@ -121,7 +121,7 @@ Per renderer profile (display-rule overrides): `adaptive_downscale`, `adaptive_w
 
 ### Fallbacks a user sees
 
-- `picture precision` under "Fallbacks engaged": the libplacebo intermediates are float16 (Stable 7.360 lane, or `fbo_float32` off). Synced every frame from `ReportRenderErrors` (VP-V/segments/CoreSegments.inl), not in the Original pathway.
+- `picture precision` under "Fallbacks engaged": the libplacebo intermediates are float16 (Stable 7.360 lane, or `fbo_float32` off). Synced every frame from `CollectFrameHooks` (VP-V/segments/CoreSegments.inl; ReportRenderErrors stays a pure move), and released in the Original pathway.
 - `output scaling` under "Fallbacks engaged" (`FallbackCatalog::OutputScaling`): adaptive downscale on but SSimDownscaler not in the shader list (libplacebo's downscaler), or the blend failed on the GPU on the last frame (plain SSIM). Engaged through `AdaptiveDownscaleStage::Stage::Fallback` (the fix after the WP-13 move; findings 2026-10-25).
 - The custom-shader status line also says "Adaptive downscale: needs SSimDownscaler" / "idle" / "measuring".
 - The grain map not used with an unknown NLS shader: per-frame grain (logged once). A designed path, not a downgrade.

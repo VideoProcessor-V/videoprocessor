@@ -184,18 +184,6 @@ void LibplaceboVideoRenderer::Impl::ReportRenderErrors()
         PublishCustomShaderStatus();
     dynamicDrive.OnHookErrors(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
     extendedRange.NoteDisabledHooks(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
-    // S-12BIT (refs/119 #51): libplacebo's other latched error flags (FBO, sampling, debanding, ...) were silent; they now
-    // show as one visible entry, and the picture precision (float16 on the Stable lane or with fbo_float32 off) with them.
-    static_assert(LibplaceboErrors::kFbo == PL_RENDER_ERR_FBO && LibplaceboErrors::kHooks == PL_RENDER_ERR_HOOKS &&
-        LibplaceboErrors::kBlur == PL_RENDER_ERR_BLUR && LibplaceboErrors::kContrastRecovery == PL_RENDER_ERR_CONTRAST_RECOVERY,
-        "LibplaceboErrors bit values must mirror enum pl_render_error");
-    SyncFallback(LibplaceboErrors::Latched(static_cast<int>(hookErrors.errors)));
-#if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
-    constexpr bool laneHasFloat32Fbo = true;   // Beta lane (API 388)
-#else
-    constexpr bool laneHasFloat32Fbo = false;  // Stable 7.360: no float32 intermediate switch
-#endif
-    SyncFallback(PicturePrecision::Precision(pipelineSlots.OriginalPathway(), laneHasFloat32Fbo, activeSettings.fboFloat32));
     // output.calibration_lut (VP stage, R1): a disabled or failing hook reverts to libplacebo's
     // target LUT for the rest of the session, visibly (skeleton audit item 5).
     {
@@ -713,6 +701,19 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     dejudderNextVectorsFrom = 0;
     VpResync::TakeIfDriving(resync, resyncDrive, VpResync::Reader::SigmaDelta);   // R3: checked by stamps above
     ditherNextGate.Clear();
+    // S-12BIT (refs/119 #51, #30): libplacebo's latched error flags (FBO, sampling, debanding, ...) and the float16 picture precision
+    // are visible, and released in the Original pathway (a stale entry is a silent state in reverse). Here, not in ReportRenderErrors:
+    // that body is a pure move that never runs in Original. The flags are the previous frame's latch.
+    static_assert(LibplaceboErrors::kFbo == PL_RENDER_ERR_FBO && LibplaceboErrors::kHooks == PL_RENDER_ERR_HOOKS &&
+        LibplaceboErrors::kBlur == PL_RENDER_ERR_BLUR && LibplaceboErrors::kContrastRecovery == PL_RENDER_ERR_CONTRAST_RECOVERY,
+        "LibplaceboErrors bit values must mirror enum pl_render_error");
+    SyncFallback(LibplaceboErrors::Latched(static_cast<int>(pl_renderer_get_errors(renderer).errors), pipelineSlots.OriginalPathway()));
+#if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
+    constexpr bool laneHasFloat32Fbo = true;   // Beta lane (API 388)
+#else
+    constexpr bool laneHasFloat32Fbo = false;  // Stable 7.360: no float32 intermediate switch
+#endif
+    SyncFallback(PicturePrecision::Precision(pipelineSlots.OriginalPathway(), laneHasFloat32Fbo, activeSettings.fboFloat32));
 #if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
     // S2: every FBO in rgba32f (exact highlights; +bandwidth). Auto: on everywhere, the
     // low-latency path too (owner 2026-10-16: higher precision is the default; half-float

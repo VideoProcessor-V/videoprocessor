@@ -71,6 +71,23 @@ namespace PicturePrecisionTest
 			Assert::IsTrue(d.reason.find("sampling") == std::string::npos);
 		}
 
+		TEST_METHOD(OriginalPathwayReleasesTheEntries)
+		{
+			const int flags = LibplaceboErrors::kFbo | LibplaceboErrors::kSampling;
+			Assert::IsTrue(LibplaceboErrors::Latched(flags, false).engaged);
+			const FallbackCatalog::Decision off = LibplaceboErrors::Latched(flags, true);
+			Assert::IsFalse(off.engaged, L"a stale entry must release in Original");
+			Assert::AreEqual(std::string("libplacebo errors"), off.id);
+			FallbackStatus::Registry registry;
+			FallbackCatalog::Sync(registry, LibplaceboErrors::Latched(flags, false));
+			FallbackCatalog::Sync(registry, PicturePrecision::Precision(false, false, -1));
+			Assert::IsTrue(registry.Engaged("libplacebo errors") && registry.Engaged("picture precision"));
+			FallbackCatalog::Sync(registry, LibplaceboErrors::Latched(flags, true));
+			FallbackCatalog::Sync(registry, PicturePrecision::Precision(true, false, -1));
+			Assert::IsFalse(registry.Engaged("libplacebo errors"));
+			Assert::IsFalse(registry.Engaged("picture precision"));
+		}
+
 		TEST_METHOD(DisabledHooksAreNotDoubleReported)
 		{
 			Assert::IsFalse(LibplaceboErrors::Latched(LibplaceboErrors::kHooks).engaged, L"hooks have their own entry");

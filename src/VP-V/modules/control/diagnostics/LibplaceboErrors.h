@@ -53,6 +53,12 @@ namespace LibplaceboErrors
 		if (shown == 0)
 			return FallbackCatalog::Released("libplacebo errors");
 		return FallbackCatalog::Engaged("libplacebo errors",
-			"libplacebo latched an internal error and renders a reduced pass: " + Names(shown));
+			"libplacebo latched an internal error and renders a reduced pass (clears on renderer reset): " + Names(shown));
+	}
+
+	// The Original pathway is Bill's own: nothing of VP's is reported there, and a stale entry is released.
+	inline FallbackCatalog::Decision Latched(int errors, bool originalPathway)
+	{
+		return Latched(originalPathway ? 0 : errors);
 	}
 }
