@@ -33,6 +33,7 @@ TOOLS = [
     ("N3_fallback", "check_fallback_coverage.py", ["--strict"], True),
     ("N4_general", "check_general_not_fixed.py", ["--strict"], True),
     ("N6_launchers", "check_launcher_workarounds.py", ["--strict"], False),
+    ("ctlscan", "ctlscan.py", [], True),
 ]
 
 
