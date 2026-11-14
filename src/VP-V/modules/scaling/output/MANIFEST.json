@@ -8,6 +8,7 @@
   "live_files": [
     "src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
     "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
+    "src/VP-V/modules/scaling/output/AdaptiveDownscaleCut.h",
     "src/VP-V/modules/scaling/output/DownscaleLight.h",
     "shaders/SSimDownscaler.glsl",
     "shaders/SSimSuperRes.glsl",
