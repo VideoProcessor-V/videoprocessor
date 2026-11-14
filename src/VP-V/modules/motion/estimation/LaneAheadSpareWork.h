@@ -168,7 +168,7 @@ public:
             "picture %llu; last: %s",
             KeyStateText(in.key, in.autoAccepted), m_ring.Held(), m_ring.Capacity(), m_renderSaved, m_renderFallback,
             m_ring.Discarded(DiscardCause::Drop), m_ring.Discarded(DiscardCause::Resync), m_ring.Discarded(DiscardCause::NextDiffers),
-            m_ring.Discarded(DiscardCause::EpochMoved), m_ring.Discarded(DiscardCause::PictureArea), ReasonName(m_reasons.Last()));
+            m_ring.Discarded(DiscardCause::EpochMoved), m_ring.Discarded(DiscardCause::PictureChanged), ReasonName(m_reasons.Last()));
         std::string s(buf);
         if (m_sourceNotServed > 0) s += std::string("; source ring not served ") + std::to_string(m_sourceNotServed) + " (" + VpSkeleton::Token(m_lastSourceCause) + ")";
         return s;

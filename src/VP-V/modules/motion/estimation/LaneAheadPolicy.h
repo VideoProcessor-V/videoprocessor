@@ -269,7 +269,7 @@ enum class DiscardCause : uint8_t {
     Drop,              // a frame the ring held a pair for was passed without being consumed (dropped / skipped frame)
     Resync,            // queue reset / seek / resync (host)
     EpochMoved,        // the right pair, made in another validity epoch
-    PictureArea,       // the active picture changed after the estimate (host)
+    PictureChanged,    // the active picture changed after the estimate (host; 93-prep-B3Z s4 cause "picture area")
     LeaseLost,         // the host lost the entry's slot texture
     Count
 };
@@ -281,7 +281,7 @@ inline const char* DiscardCauseName(DiscardCause c)
     case DiscardCause::Drop: return "drop";
     case DiscardCause::Resync: return "resync";
     case DiscardCause::EpochMoved: return "epoch moved";
-    case DiscardCause::PictureArea: return "picture";
+    case DiscardCause::PictureChanged: return "picture";
     case DiscardCause::LeaseLost: return "lease lost";
     default: return "?";
     }
@@ -346,7 +346,7 @@ public:
         return false;
     }
 
-    // Host-detected causes (Resync, PictureArea, LeaseLost) and the internal ones: every entry goes, counted per entry.
+    // Host-detected causes (Resync, PictureChanged, LeaseLost) and the internal ones: every entry goes, counted per entry.
     void Discard(DiscardCause c)
     {
         m_discarded[static_cast<size_t>(c)] += static_cast<unsigned long long>(m_count);

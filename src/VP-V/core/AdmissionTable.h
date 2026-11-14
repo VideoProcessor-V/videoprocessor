@@ -25,6 +25,8 @@
 #include <VP-V/core/Products.h>
 #include <VP-V/core/SchedulerContract.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -58,6 +60,15 @@ struct AdmissionFacts {
     double tdWantMs = 0.0;                 // TD's wanted share (its full tier)
     bool p10Proven = false;                // the ledger row "P10 <= 2 ms at 4K" is recorded (Q4)
     bool estimated = false;                // the costs are estimates (no VP run on this card yet), shown
+    // Ahead memory (owner answer via lead 11, 2026-11-14; lead10/design-queue-keyed-products.md s2.7): the VRAM ledger grant for ahead spots and
+    // what one demanded ahead frame of each product holds (the s2.7 per-frame memo set at the current geometry, e.g. P13 luma 3 B/px ...).
+    uint64_t vramGrantBytes = 0;           // 0 = no grant known: no ahead planning (the memo's own OverBudget refusal stays the backstop)
+    uint64_t aheadBytes[kProductCount] = {};   // bytes per demanded ahead frame (0 = the product holds nothing ahead)
+    int aheadWantFrames = 0;               // frames ahead the consumers want (L of the window; derived from the queue, never fixed)
+    int aheadMinFrames = 1;                // the core floor of frames ahead (below it ahead core fills at render, visibly)
+    int queueFrames = 0;                   // frames the queue holds now
+    uint64_t queueBytesPerFrame = 0;       // bytes each queued frame holds regardless of ahead demand (early-upload slot etc.)
+    double queueFloorMs = 200.0;           // the queue is never shortened below this latency (AVR-safe floor, owner 91 C :17)
 };
 
 struct Result {
@@ -72,8 +83,67 @@ struct Result {
     bool tdReduced = false;                // the slice is below TD's minimum: TD runs its reduced tier
     bool coreOver = false;                 // core alone exceeds the budget (the overload arbiter acts; core is never dropped)
     uint32_t unmeasuredCore = 0;
+    // Ahead plan (owner answer via lead 11: plan to the grant, never evict; steps in order, each visible)
+    bool aheadAdmitted[kProductCount] = {};   // computed early for frames ahead (else at its own render, through the same Acquire)
+    int aheadFrames = 0;                   // frames ahead demanded
+    int queueFrames = 0;                   // the queue length the plan asks for (== facts.queueFrames unless step 3 shortened it)
+    uint64_t aheadNeedBytes = 0;           // what the plan holds (ahead spots + queued frames)
+    uint32_t aheadProductsDropped = 0;     // step 1: optional products moved from early to render time
+    int aheadFramesDropped = 0;            // step 2
+    int queueFramesDropped = 0;            // step 3 (latency change, shown)
+    bool aheadOverGrant = false;           // still over the grant at every floor: ahead core fills at render (visible)
+    std::string aheadLine;                 // the ahead plan line (Ctrl+I / Config status / Ctrl+Alt+D)
     std::string line;                      // Ctrl+I / Config status / Ctrl+Alt+D
 };
+
+// The ahead plan's bytes: queued frames + ahead spots of the products computed early.
+inline uint64_t AheadNeedBytes(const AdmissionFacts& f, const Result& r, int aheadFrames, int queueFrames)
+{
+    uint64_t perFrame = 0;
+    for (size_t i = 0; i < kProductCount; ++i)
+        if (r.aheadAdmitted[i]) perFrame += f.aheadBytes[i];
+    return uint64_t(aheadFrames > 0 ? aheadFrames : 0) * perFrame + uint64_t(queueFrames > 0 ? queueFrames : 0) * f.queueBytesPerFrame;
+}
+
+// Sizes the ahead work to the VRAM grant (owner answer via lead 11, 2026-11-14): first fewer products computed early (optional fill first, the
+// highest product id first; core last never), then fewer frames ahead down to the core floor, and only as the LAST step a shorter queue (a
+// latency change, never below the AVR-safe floor). Never evicts: what is not planned early is filled at its own render through the same Acquire.
+inline void PlanAhead(const AdmissionFacts& f, Result& r)
+{
+    r.queueFrames = f.queueFrames;
+    r.aheadFrames = f.aheadWantFrames > 0 ? f.aheadWantFrames : 0;
+    if (f.mode == LatencyMode::Competitive || f.mode == LatencyMode::Games) r.aheadFrames = 0;   // R9: no look-ahead work
+    for (size_t i = 0; i < kProductCount; ++i) r.aheadAdmitted[i] = r.admitted[i] && f.aheadBytes[i] > 0 && r.aheadFrames > 0;
+    char buf[240] = {};
+    if (f.vramGrantBytes == 0 || r.aheadFrames == 0) {
+        r.aheadNeedBytes = AheadNeedBytes(f, r, r.aheadFrames, r.queueFrames);
+        std::snprintf(buf, sizeof(buf), "ahead plan: %d frame(s)%s", r.aheadFrames,
+            r.aheadFrames == 0 ? "" : " (no VRAM grant known: not planned; a spot over the grant is refused at fill and made at render)");
+        r.aheadLine = buf;
+        return;
+    }
+    auto fits = [&] { return AheadNeedBytes(f, r, r.aheadFrames, r.queueFrames) <= f.vramGrantBytes; };
+    // 1. fewer products early: optional (non-core) first, highest id first
+    for (size_t k = kProductCount; k-- > 0 && !fits();)
+        if (r.aheadAdmitted[k] && r.cls[k] != JobClass::Core && r.cls[k] != JobClass::Unpack) { r.aheadAdmitted[k] = false; ++r.aheadProductsDropped; }
+    // 2. fewer frames ahead, down to the core floor
+    const int floorAhead = f.aheadMinFrames > 0 ? f.aheadMinFrames : 1;
+    while (!fits() && r.aheadFrames > floorAhead) { --r.aheadFrames; ++r.aheadFramesDropped; }
+    // 3. LAST: a shorter queue, never below the floor latency and never below what the ahead frames need (ahead + the render frame)
+    const int floorQueue = f.periodMs > 0.0 ? int(std::ceil(f.queueFloorMs / f.periodMs - 1e-9)) : r.queueFrames;
+    const int minQueue = (std::max)(floorQueue, r.aheadFrames + 1);
+    while (!fits() && r.queueFrames > minQueue) { --r.queueFrames; ++r.queueFramesDropped; }
+    r.aheadOverGrant = !fits();
+    if (r.aheadOverGrant)
+        for (size_t i = 0; i < kProductCount; ++i) r.aheadAdmitted[i] = false;   // nothing early: every frame fills at its own render
+    r.aheadNeedBytes = AheadNeedBytes(f, r, r.aheadOverGrant ? 0 : r.aheadFrames, r.queueFrames);
+    std::snprintf(buf, sizeof(buf), "ahead plan: %d frame(s), %.1f of %.1f MB%s%s%s%s", r.aheadOverGrant ? 0 : r.aheadFrames,
+        double(r.aheadNeedBytes) / 1048576.0, double(f.vramGrantBytes) / 1048576.0,
+        r.aheadProductsDropped > 0 ? "; fewer products early" : "", r.aheadFramesDropped > 0 ? "; fewer frames ahead" : "",
+        r.queueFramesDropped > 0 ? "; queue shortened (latency lower)" : "",
+        r.aheadOverGrant ? "; over the grant at every floor: ahead work at render" : "");
+    r.aheadLine = buf;
+}
 
 // The class of a product at Configure: the static class, with P10 promoted to core once proven (Q4).
 inline StaticClass ClassOf(ProductId id, const AdmissionFacts& f)
@@ -108,6 +178,7 @@ inline Result Admit(const AdmissionFacts& f)
     if (f.mode == LatencyMode::Competitive) {
         std::snprintf(buf, sizeof(buf), "admission (competitive): no slot work (latency 0)");
         r.line = buf;
+        PlanAhead(f, r);
         return r;
     }
 
@@ -155,6 +226,7 @@ inline Result Admit(const AdmissionFacts& f)
         fillUnmeasured > 0 ? std::to_string(fillUnmeasured).c_str() : "");
     r.line = buf;
     if (!rb.Measured() || !(hz > 0.0)) r.line += "; no budget (render or source rate not measured)";
+    PlanAhead(f, r);
     return r;
 }
 
