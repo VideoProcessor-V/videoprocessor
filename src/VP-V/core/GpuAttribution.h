@@ -56,6 +56,8 @@ namespace GpuAttribution
 		static const char* const kPrivate[][3] = {
 			{ "motion (D1", "dejudder", "U10" },
 			{ "deband: grain split", "deband", "U1" },
+			{ "deband: grain guard", "deband", "U5" },   // VpDebander.cpp GUARD_BODY pass (refs/126 s3: the one REAL U5 site)
+			{ "adaptive downscale: measure", "adaptive_downscale", "U5" },   // MEASURE_BODY flat-pixel energy, also the U4 edge term (refs/126 s4 X5)
 			{ "texture restore: half", "texture_restore", "U3" },
 			{ "texture restore: low bands", "texture_restore", "U2" },
 			{ "texture restore: tile statistics", "texture_restore", "U4" },

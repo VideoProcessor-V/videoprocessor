@@ -137,7 +137,6 @@ namespace ComputeOnceReport
 	inline const std::vector<Uncounted>& NotInstrumented()
 	{
 		static const std::vector<Uncounted> list = {
-			{ "U5", "laplacian_ringing", "no implementation in the tree", "the first U5 producer commit" },
 			{ "U13", "coding_evidence", "the P16 owner fill is not on this branch (r2/job1-core); merged, the Acquire fold-in counts it as acquire:coding_evidence",
 				"the L-P16 merge (add VPV_COMPUTE_ONCE(\"U13\") at the fill)" },
 			{ "U14", "trail_compose", "no implementation (TD shared function, not built)", "the TD build package that adds it" },
