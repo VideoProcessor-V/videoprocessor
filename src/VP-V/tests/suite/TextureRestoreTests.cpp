@@ -1020,6 +1020,7 @@ namespace TextureRestoreTestsNs
 					const Image in = Quantised(Dctq(Sum(f, Grain(kW, kH, 1.5 * kCode8, true, rng)), IsI(t, 8) ? 4.0 : 24.0));
 					pl_tex tex = UploadLuma(gpu, in);
 					TextureRestore::Params p = Frame(900 + t);
+					p.sceneReader = &NoCutReader;   // D8: module and model follow the same shared verdict (no cut)
 					if (withField) { p.field = fieldTex; p.fieldScale = 1.0; }
 					pl_frame out{};
 					Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), p, out), Wide(module.LastError()).c_str());
