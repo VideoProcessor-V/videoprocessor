@@ -274,8 +274,8 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(PassTextFingerprintIsPinned)
 		{
-			// WAIVER-P10V3-01: 0x41cef8707edf809d (v2) -> 0x8949becef0aab5c9 (v3). WAIVER-P10V4-01 (refs/116b): -> 0x7fe213d86466cc12 (unit 4: LEVEL pass, NLF cap, depth scale).
-			constexpr uint64_t kPinned = 0x7fe213d86466cc12ull;
+			// WAIVER-P10V3-01: 0x41cef8707edf809d (v2) -> 0x8949becef0aab5c9 (v3). WAIVER-P10V4-01 (refs/116b): -> 0x7fe213d86466cc12 (unit 4: LEVEL pass, NLF cap, depth scale). WAIVER-P10V5-01 (refs/127 A1): -> 0xf33e0215cda77a66 (unit 5: STATS per 16x16 chunk + REDUCE).
+			constexpr uint64_t kPinned = 0xf33e0215cda77a66ull;
 			Assert::IsTrue(GrainSplit::Gpu::FullShaderFingerprint() == kPinned, L"Full pass GLSL fingerprint");
 		}
 	};

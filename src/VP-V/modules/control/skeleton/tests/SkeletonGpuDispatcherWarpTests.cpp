@@ -92,7 +92,7 @@ namespace VideoProcessorTest
 		}
 
 		// A P10 stand-in with the real Full layout (split rgba32f per pixel + blocks rgba32f per 16 px cell) and the
-		// splitter's six steps: step 0 copies the extended plane's codes into the split texture, the others record nothing.
+		// splitter's seven steps (unit 5): step 0 copies the extended plane's codes into the split texture, the others record nothing.
 		class CopyKernel : public VpLaneProducts::IProductKernel
 		{
 		public:

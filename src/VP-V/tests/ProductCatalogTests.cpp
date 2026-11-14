@@ -425,8 +425,9 @@ namespace ProductCatalogTestsNs
 			// WAIVER-P10V3-01 (rule 28): an INTENDED unit-version bump 2 -> 3 with the v3 law (refs/116; ProductCatalog.h
 			// kExpectedGrainSplitUnit = 3 in the same package), not a weakening: the assertion still pins one exact value.
 			// WAIVER-P10V4-01 (coordinator brief 2026-11-12): unit-version bump 3 -> 4 with the NLF cap (refs/116b), still one exact value.
-			Assert::AreEqual(4u, RowOf(kP10GrainSplit)->unitVersion);
-			Assert::AreEqual(4u, RowOf(kP10cGrainSplitChroma)->unitVersion);
+			// WAIVER-P10V5-01 (refs/127 A1): unit-version bump 4 -> 5 (STATS per chunk + REDUCE), still one exact value.
+			Assert::AreEqual(5u, RowOf(kP10GrainSplit)->unitVersion);
+			Assert::AreEqual(5u, RowOf(kP10cGrainSplitChroma)->unitVersion);
 
 			FallbackCatalog::Decision bad;
 			Assert::IsFalse(VerifyUnit(kP7CameraFit, CameraLink::kCameraUnitVersion + 1, &bad));

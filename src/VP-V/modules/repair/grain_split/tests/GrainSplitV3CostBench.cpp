@@ -36,7 +36,7 @@ namespace GrainSplitV3CostBenchNs
 
 	constexpr int kWarm = 20;
 	constexpr int kTimed = 120;
-	constexpr int kPasses = 6;   // WAIVER-P10V4-01: unit 4 adds the LEVEL pass (was 5)
+	constexpr int kPasses = 7;   // WAIVER-P10V4-01: unit 4 adds the LEVEL pass (was 5); WAIVER-P10V5-01: unit 5 adds REDUCE (was 6)
 
 	void LogLine(const std::string& s) { Logger::WriteMessage(s.c_str()); }
 
@@ -131,7 +131,7 @@ public:
 			for (Storage storage : { Storage::Compact, Storage::Full })
 			{
 				VpLaneProducts::GrainSplitKernel kernel(storage);
-				Assert::AreEqual(static_cast<uint32_t>(kPasses), static_cast<uint32_t>(kernel.Steps(dims)), L"six steps");
+				Assert::AreEqual(static_cast<uint32_t>(kPasses), static_cast<uint32_t>(kernel.Steps(dims)), L"seven steps");
 				const ProductTexLayout layout = kernel.Layout(dims);
 				std::vector<pl_tex> outs;
 				for (const TexTerm& t : layout.terms)
@@ -177,7 +177,7 @@ public:
 					}
 				}
 				const char* name = storage == Storage::Full ? "Full" : "Compact";
-				static const char* kPassName[kPasses] = { "HALF+across", "DOWN", "STATS", "LEVEL", "NMIN", "APPLY" };
+				static const char* kPassName[kPasses] = { "HALF+across", "DOWN", "STATS", "REDUCE", "LEVEL", "NMIN", "APPLY" };
 				for (int s = 0; s < kPasses; ++s)
 				{
 					const Stat st = StatOf(perPass[s]);
