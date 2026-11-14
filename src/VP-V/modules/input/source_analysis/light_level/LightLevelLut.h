@@ -37,6 +37,8 @@
 #include <string>
 #include <vector>
 
+#include <VP-V/core/Ramp.h>
+
 #include "LightLevelSettings.h"
 
 namespace LightLevel
@@ -111,13 +113,8 @@ namespace LightLevel
 			double Pa = 0, Pb = 0, Qa = 0, Qb = 0, Qc = 0;
 			bool identity = true;
 
-			static double Mix(double a, double b, double t) { return a + (b - a) * t; }
-			static double Smoothstep(double e0, double e1, double x)
-			{
-				if (e0 == e1) return x >= e0 ? 1.0 : 0.0;
-				const double t = std::min(std::max((x - e0) / (e1 - e0), 0.0), 1.0);
-				return t * t * (3.0 - 2.0 * t);
-			}
+			static double Mix(double a, double b, double t) { return RampMath::Mix(a, b, t); }   // core/Ramp.h (ND07)
+			static double Smoothstep(double e0, double e1, double x) { return RampMath::Smoothstep(e0, e1, x, RampMath::SmoothRule::StepWhenEqual); }
 
 			Spline(double srcPeak, double dstPeak, double srcMin, double dstMin,
 				const std::array<double, ToneMappingTuning::Count>& c)
