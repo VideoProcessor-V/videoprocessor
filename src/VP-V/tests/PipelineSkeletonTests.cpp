@@ -86,12 +86,24 @@ namespace PipelineSkeletonTestsNs
 				Assert::IsTrue(names.insert(info.name).second, L"duplicate name");
 				Assert::IsTrue(PipelineSlots::FromName(info.name) == info.id);
 			}
-			// Pixel-path slots are ordered by side: input < processing < output < control.
+			// Ids are append-only (StageAfter keys use uint8(slot id)), so the pipeline order is the
+			// `order` field: DefaultOrder() lists every slot once, strictly increasing in it, ordered by
+			// side: input < processing < output < control.
+			const std::vector<Id> designed = PipelineSlots::DefaultOrder();
+			Assert::AreEqual(PipelineSlots::Slots().size(), designed.size(), L"DefaultOrder must list every slot once");
 			int previous = 0;
-			for (const auto& info : PipelineSlots::Slots())
+			for (Id id : designed)
 			{
-				Assert::IsTrue(info.order > previous, L"table not in pipeline order");
+				const PipelineSlots::Info& info = PipelineSlots::Get(id);
+				Assert::IsTrue(info.order > previous, L"default order not in pipeline order");
 				previous = info.order;
+			}
+			// The slots that existed before the appended ones keep their table position.
+			int lastOld = 0;
+			for (size_t i = 0; i < static_cast<size_t>(Id::ColourDmPre); ++i)
+			{
+				Assert::IsTrue(PipelineSlots::Slots()[i].order > lastOld, L"original slots out of order");
+				lastOld = PipelineSlots::Slots()[i].order;
 			}
 		}
 
