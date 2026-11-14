@@ -1798,18 +1798,31 @@ namespace Tests
 				{ "v210 23.976", VideoFrameEncoding::V210, true } };
 			g_harnessPlainConfig = true;   // restored by HarnessScope
 			// DIV-ORIG-01 (CLOSED 2026-11-11): VP_TEST_ADAPTER is honoured only by VP-V's renderer; Bill's build
-			// renders on the default adapter. Unset for BOTH renders so both use the same adapter; restored below.
+			// has no adapter selection and renders on the default adapter. Bill's render therefore always runs
+			// with the variable cleared; ours runs on the SAME adapter: the requested name is applied to ours
+			// only when Bill's default adapter matches it (name match), else both stay on the default adapter
+			// and the TRX says so. Unset variable = both on the default adapter, as before. Restored below.
 			const std::string savedAdapter = HarnessEnvText("VP_TEST_ADAPTER");
 			_putenv_s("VP_TEST_ADAPTER", "");
-			// The adapter each render used: the renderer's "libplacebo initialized: D3D11 on <gpu>, ..." line.
+			// The adapter each render used, from that render's own log: "libplacebo DXGI adapter: name=<gpu> luid=..."
+			// (Bill's build logs only this one), else VP-V's "libplacebo initialized: D3D11 on <gpu>, ..." line.
 			auto adapterLine = [] {
-				const std::string key = "libplacebo initialized: D3D11 on ";
+				const std::string dxgiKey = "libplacebo DXGI adapter: name=";
+				const std::string initKey = "libplacebo initialized: D3D11 on ";
 				std::lock_guard<std::mutex> guard(g_logMutex);
 				for (const std::string& line : g_log)
 				{
-					const size_t at = line.find(key);
+					const size_t at = line.find(dxgiKey);
 					if (at == std::string::npos) continue;
-					const size_t from = at + key.size();
+					const size_t from = at + dxgiKey.size();
+					const size_t end = line.find(" luid=", from);
+					return line.substr(from, end == std::string::npos ? std::string::npos : end - from);
+				}
+				for (const std::string& line : g_log)
+				{
+					const size_t at = line.find(initKey);
+					if (at == std::string::npos) continue;
+					const size_t from = at + initKey.size();
 					const size_t comma = line.find(',', from);
 					return line.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
 				}
@@ -1818,19 +1831,28 @@ namespace Tests
 			std::string failures;
 			for (const Case& c : cases)
 			{
-				g_harnessRendererDll.clear();
-				const std::string a = StillPictureHash(c.encoding, "standard", c.film, ours);
-				const std::string adapterOurs = adapterLine();
+				// Bill first (default adapter, variable cleared), so its adapter name is known for ours.
 				// The harness adds a [vpv] section itself when VP_TEST_ENTRANCE_ONCE=1: not for Bill's build.
 				const std::string savedOnce = HarnessEnvText("VP_TEST_ENTRANCE_ONCE");
 				_putenv_s("VP_TEST_ENTRANCE_ONCE", "");
+				_putenv_s("VP_TEST_ADAPTER", "");
 				g_harnessRendererDll = bill;
 				const std::string b = StillPictureHash(c.encoding, "standard", c.film, theirs);
 				const std::string adapterBill = adapterLine();
 				g_harnessRendererDll.clear();
 				_putenv_s("VP_TEST_ENTRANCE_ONCE", savedOnce.c_str());
+				// Ours: the requested adapter only when it is the one Bill rendered on.
+				const bool sameByName = !savedAdapter.empty() && adapterBill.find(savedAdapter) != std::string::npos;
+				_putenv_s("VP_TEST_ADAPTER", sameByName ? savedAdapter.c_str() : "");
+				const std::string a = StillPictureHash(c.encoding, "standard", c.film, ours);
+				const std::string adapterOurs = adapterLine();
+				_putenv_s("VP_TEST_ADAPTER", "");
 				Logger::WriteMessage((std::string("== ") + c.name + ": ours (original) " + a + ", bill " + b + "\n").c_str());
 				Logger::WriteMessage((std::string("   adapter: ours ") + adapterOurs + ", bill " + adapterBill + "\n").c_str());
+				if (!savedAdapter.empty())
+					Logger::WriteMessage((std::string("   VP_TEST_ADAPTER=") + savedAdapter + (sameByName
+						? ": matches Bill's default adapter, applied to both\n"
+						: ": Bill's build cannot select an adapter and its default does not match; both left on the default adapter\n")).c_str());
 				const std::string vsBill = std::string(c.name) + " vs bill";
 				if (a.empty() || b.empty())
 					failures += std::string(c.name) + ": a capture is missing; ";
