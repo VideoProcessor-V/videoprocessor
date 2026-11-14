@@ -7308,14 +7308,30 @@ namespace Tests
 			return true;
 		}
 
+		// WAIVER-C1-10 (coordinator 2026-11-12 18:42, owner confirmed 18:47): the W2-C1 starter rule. The status of an engine that no
+		// starter runs names the reason ("idle (no starter)", "loaded idle for hiccup repair (no starter runs it)" or "loaded, not
+		// running (no starter runs it)") and lists the unserved consumers "... without vectors (...)".
+		static bool NoStarterStatusLogged(const RunResult& r)
+		{
+			for (const std::string& line : r.log)
+				if (line.find("Vector engine: ") != std::string::npos && line.find("no starter") != std::string::npos &&
+					line.find("without vectors") != std::string::npos)
+					return true;
+			return false;
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineDeliversAtEveryRate)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(VectorEngineDeliversAtEveryRate)
 		{
 			const HarnessScope harnessScope;
-			// Shipped defaults (no de-judder), VP's debander on as the vector consumer: the vector
-			// engine runs on demand at every source rate and delivers vectors; no de-judder extras ran.
+			// WAIVER-C1-10 (coordinator 2026-11-12 18:42; owner 2026-11-12 18:47: deband_vp alone does not start the motion engine):
+			// the former premise ("VP's debander on as the vector consumer; the engine runs on demand") is obsolete since W2-C1 (B9).
+			// Leg A, shipped defaults (no de-judder), VP's debander on as a REUSE-ONLY consumer: the NoStarter contract holds at every
+			// rate (status names "no starter" with the deband hold without vectors, no engine on, no vectors delivered, no extras).
+			// Leg B, the de-judder's standing demand (dejudder_strength) as a real starter: the engine engages and delivers vectors
+			// (the positive case). The old no-extras asserts stay on leg A only: a starter by definition activates the de-judder.
 			// The signal rate is the source rate; the display is the machine's own (the engine keys on
 			// the source, never on the display: 30p on 60 Hz and 24p on 24 Hz are source-rate cases).
 			if (!RequireHardwareOrSkip("VectorEngineDeliversAtEveryRate")) return;
@@ -7329,15 +7345,21 @@ namespace Tests
 				plan.rateNumerator = rate.numerator;
 				plan.rateDenominator = rate.denominator;
 				plan.step = [](int n) { FrameStep f; f.content = n; return f; };
-				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, rate.film, "deband_vp: on\n", false, &plan);
 				const std::wstring name = HarnessWide(rate.name);
-				Logger::WriteMessage((std::string(rate.name) + ":\n" + VectorTestLines(r)).c_str());
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, rate.film, "deband_vp: on\n", false, &plan);
+				Logger::WriteMessage((std::string(rate.name) + " (deband_vp only, no starter):\n" + VectorTestLines(r)).c_str());
 				Assert::IsTrue(r.presented, (name + L": frames presented\n" + r.Tail()).c_str());
-				Assert::IsTrue(r.Logged("Vector engine: on"), (name + L": the vector engine is on\n" + r.Tail()).c_str());
-				Assert::IsTrue(r.Logged("Vector engine: vectors delivered"), (name + L": vectors delivered\n" + r.Tail()).c_str());
+				Assert::IsTrue(NoStarterStatusLogged(r), (name + L": the status names the NoStarter contract (deband hold without vectors)\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Vector engine: on"), (name + L": deband_vp alone does not turn the engine on\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Vector engine: vectors delivered"), (name + L": no vectors delivered without a starter\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("De-judder extras:"), (name + L": no extras ran\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("De-judder: active"), (name + L": the de-judder never active\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("Interpolation: interpolating"), (name + L": no interpolation ran\n" + r.Tail()).c_str());
+				const RunResult s = Run(VideoFrameEncoding::V210, "gpu", 6.0, rate.film, "deband_vp: on\ndejudder_strength: 0.25\n", false, &plan);
+				Logger::WriteMessage((std::string(rate.name) + " (de-judder standing demand = starter):\n" + VectorTestLines(s)).c_str());
+				Assert::IsTrue(s.presented, (name + L": starter run: frames presented\n" + s.Tail()).c_str());
+				Assert::IsTrue(s.Logged("Vector engine: on"), (name + L": with a starter the vector engine is on\n" + s.Tail()).c_str());
+				Assert::IsTrue(s.Logged("Vector engine: vectors delivered"), (name + L": with a starter vectors are delivered\n" + s.Tail()).c_str());
 			}
 		}
 
@@ -7347,17 +7369,27 @@ namespace Tests
 		TEST_METHOD(VectorEngineGamesDepthOneEngagesAtOneAhead)
 		{
 			const HarnessScope harnessScope;
-			// A games queue (queue_size 4, target_frames 2) keeps one frame ahead: the look-ahead engages
-			// at one ahead and the vectors are forward.
+			// A games queue (queue_size 4, target_frames 2) keeps one frame ahead: with a starter the look-ahead engages
+			// at one ahead and the vectors are forward. WAIVER-C1-10 (coordinator 2026-11-12 18:42; owner 18:47): deband_vp alone is no
+			// starter (W2-C1 B9), so leg A asserts the NoStarter contract on the same queue (the look-ahead gets no depth) and leg B,
+			// with the de-judder's standing demand as the starter, keeps the original two assertions unchanged.
 			if (!RequireHardwareOrSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			if (VectorTestSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			g_harnessApplySnapshot = true;
 			g_harnessQueueTarget = 2;   // the harness sets the target itself after the snapshot (SetQueueFramePolicy)
-			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+			const RunResult none = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
 				"deband_vp: on\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
+			g_harnessQueueTarget = 2;
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+				"deband_vp: on\ndejudder_strength: 0.25\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
 			g_harnessApplySnapshot = false;
 			g_harnessQueueTarget = 0;
-			Logger::WriteMessage(VectorTestLines(r).c_str());
+			Logger::WriteMessage(("deband_vp only (no starter):\n" + VectorTestLines(none)).c_str());
+			Assert::IsTrue(none.presented, (L"no starter: frames presented\n" + none.Tail()).c_str());
+			Assert::IsTrue(NoStarterStatusLogged(none), (L"no starter: the status names the NoStarter contract\n" + none.Tail()).c_str());
+			Assert::AreEqual(0, MotionAheadDepthLines(none), (L"no starter: no look-ahead depth\n" + none.Tail()).c_str());
+			Assert::IsFalse(none.Logged("Motion ahead: engaged"), (L"no starter: no look-ahead\n" + none.Tail()).c_str());
+			Logger::WriteMessage(("de-judder standing demand (starter):\n" + VectorTestLines(r)).c_str());
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("Motion ahead: engaged"), (L"the look-ahead engaged at one ahead\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("vectors delivered (forward"), (L"forward vectors delivered\n" + r.Tail()).c_str());
@@ -7504,8 +7536,8 @@ namespace Tests
 		TEST_METHOD(VectorEngineSmoothMotionKeepsAnalysis)
 		{
 			const HarnessScope harnessScope;
-			// With libplacebo's smooth motion as the motion engine the analysis consumers are still served
-			// (forward) and the output dither is named as without vectors.
+			// With libplacebo's smooth motion as the motion engine VP's engine has no starter: the source consumers and the output
+			// dither are named as without vectors (WAIVER-THSM-02; the control, with a starter, serves the sigma-delta).
 			if (!RequireHardwareOrSkip("VectorEngineSmoothMotionKeepsAnalysis")) return;
 			if (VectorTestSkip("VectorEngineSmoothMotionKeepsAnalysis")) return;
 			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
@@ -7548,7 +7580,17 @@ namespace Tests
 			Assert::IsTrue(controlServed, (L"control: the sigma-delta ran and is served (check the Sigma-delta lines above)\n" + control.Tail()).c_str());
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("Motion engine: libplacebo smooth motion"), (L"smooth motion is the engine\n" + r.Tail()).c_str());
-			Assert::IsTrue(r.Logged("Vector engine: on (forward)"), (L"a source consumer is served\n" + r.Tail()).c_str());
+			// WAIVER-THSM-02 (coordinator 2026-11-12 18:42; owner 2026-11-12 18:47): under owner decision D (2026-11-11) and the
+			// motion-engine exclusivity, libplacebo's smooth motion owns the output and no starter runs VP's engine, so the reuse-only
+			// source consumers are NAMED as without vectors (a visible fallback), not served. The former assertion ("Vector engine: on
+			// (forward)" - a source consumer is served) is replaced by that naming; the control and the dither assertion stay.
+			bool sourceNamedWithout = false;
+			for (const std::string& line : r.log)
+				if (line.find("Vector engine: ") != std::string::npos && line.find("without vectors") != std::string::npos &&
+					(line.find("source monitor") != std::string::npos || line.find("entrance segment") != std::string::npos) &&
+					line.find("Vector engine: on (forward)") == std::string::npos)
+					sourceNamedWithout = true;
+			Assert::IsTrue(sourceNamedWithout, (L"the source consumers are named as without vectors under smooth motion (no starter)\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("output dither without vectors") || r.fallbacksStatus.find("output dither") != std::string::npos,
 				(L"output dither is named as without vectors\n" + r.Tail() + HarnessWide(r.fallbacksStatus)).c_str());
 		}
