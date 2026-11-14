@@ -75,6 +75,9 @@ namespace PipelineSlots
 			c.needLight = Light::Target;
 			c.modifies = id != Id::DriveLedMeasure;
 			break;
+		// DV display mapping placeholders (DVDM): no pass yet, so they change nothing and may sit anywhere in their zone;
+		// this keeps every existing custom order valid (rules 2 and 3b). Real contracts arrive with the passes.
+		case Id::ColourDmPre: case Id::ColourDmCurve: case Id::ColourDmTrims: break;
 		case Id::OutputCalibrationLut: c.needLight = Light::Target; c.giveLight = Light::Codes; c.modifies = true; break;
 		default:
 			// Host, libplacebo-internal, quantiser and presentation slots stay where they are.
