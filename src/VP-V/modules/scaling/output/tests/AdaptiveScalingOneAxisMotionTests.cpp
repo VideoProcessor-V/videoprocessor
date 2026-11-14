@@ -571,7 +571,7 @@ namespace VideoProcessorTest
 				});
 			Assert::IsTrue(v.state == AdaptiveDownscale::CutVerdict::State::Known && v.cut, L"first frame: a cut");
 			Assert::AreEqual(1, asked, L"only the current record is read");
-			Assert::IsTrue(std::fabs(v.p4MeanCodes - 100.0f) < 0.01f, L"the P4 mean in 8-bit codes");
+			Assert::IsTrue(std::fabs(v.apl - 100.0f) < 0.01f, L"APL = the P4 mean in 8-bit codes");
 		}
 
 		TEST_METHOD(AdaptiveScalingCutP4JudgesTheTwoRecordsWithU7)
