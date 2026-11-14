@@ -197,7 +197,7 @@ public:
 			{
 				SkeletonGpuDispatcher disp(gpu, false);
 				disp.AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(new VpLaneProducts::GrainSplitKernel(Storage::Compact)));
-				Registry reg = VpLaneProducts::TapFormProducts(SkeletonProducts());
+				Registry reg = VpLaneProducts::TapFormProducts(SkeletonProducts(true));
 				ConsumerDecl cd;
 				cd.id = 1;
 				AddConsume(cd, kP10GrainSplit);
@@ -209,6 +209,7 @@ public:
 				e.id = kP10GrainSplit; e.backend = Backend::GpuCompute; e.grant = Grant::Lane;
 				plan.entries.push_back(e);
 				const bool configured = disp.Configure(graph, reg, plan, dims);
+				if (!configured) LogLine(std::string("V3 cost dispatcher configure failed: ") + disp.LastError());
 				Assert::IsTrue(configured, L"dispatcher configure (live form)");
 				if (configured)
 				{

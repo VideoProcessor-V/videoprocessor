@@ -22782,7 +22782,7 @@ releaseDriftBaseRetention =
 		}
 
 		RendererExtension::NotifyEntrance(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(nextSourceSequence), static_cast<int64_t>(frameGeneration), &renderImage, &target, width, height, cadenceRepeat, captureRateHz);   // VPV-HOOK: the Entrance phase (GPU work, entrance planning; fan-out, observers only)
-		if (!pipelineSlots.OriginalPathway()) { PlanEntrance(renderImage, target, image, sourceSequence, captureRateHz, nominalSourceRateHz, state); }   // VPV-HOOK P4 e: the entrance planner (EntrancePlanner.inl): re-base factor, deband and detail-restore parameters; nothing in Original
+		PlanEntrance(renderImage, target, image, sourceSequence, captureRateHz, nominalSourceRateHz, state);   // VPV-HOOK P4 e: the entrance planner (EntrancePlanner.inl): re-base factor, deband and detail-restore parameters; owner REVERT 2026-11-12: called in Original too (feeds the source-resolution monitor as before P4, 77fe0397e); the body stops before the VP-V stages there
 
 		const HdrPeakAnalysisCrop::Decision hdrPeakAnalysisDecision =
 			ApplyHdrPeakAnalysisCrop(frameGeneration, sourceSequence,
