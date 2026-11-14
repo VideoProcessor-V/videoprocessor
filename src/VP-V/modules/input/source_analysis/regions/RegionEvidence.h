@@ -536,6 +536,7 @@ namespace RegionEvidence
 		m[kBrightness] = s[kMeanY];
 		m[kVisibility] = s[kVisibilityStat];
 		const int code = static_cast<int>(s[kAuxCameraCode] + T(0.5));
+		// PRECISION-OK 119#60: bit 2 of a camera label code (flag extraction, not a picture sample)
 		if ((code >> 2) & 1) flags |= kTinyMover;
 		m[kFlags] = T(static_cast<int>(flags));
 		m[kCameraConfidence] = s[kAuxCameraConfidence];

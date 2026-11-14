@@ -73,7 +73,8 @@ REGISTRY = [
     {"id": "U4", "name": "block_statistics",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/regions"],
      "signatures": _c(r"block[_ ]?(mean|var|stats|stat)", r"structure[_ ]?tensor"),
-     "allow": _c(r"vpu_block_stats")},
+     # kP11RegionBlockStats: the catalog product id, naming the published product to Acquire it (same precedent as kP1HalfLuma); allowed ONLY as the argument of Acquire(...), so a line that computes block statistics and merely mentions the id is still counted.
+     "allow": _c(r"vpu_block_stats", r"Acquire\s*\(\s*(VpSkeleton::)?kP11RegionBlockStats")},
     {"id": "U5", "name": "laplacian_ringing",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/regions"],
      "signatures": _c(r"laplac"),
@@ -233,7 +234,10 @@ def _iter_files(root):
 
 
 def _inside(rel, unit):
-    return rel == unit or rel.startswith(unit.rstrip("/") + "/")
+    # An owner may be a folder ("src/VP-V/core/x/"), a file, or an extensionless unit stem ("src/VP-V/core/OnePole"), which
+    # owns its header/source ("OnePole.h"): without that its own lines counted as outside hits (NDU 11-14).
+    return (rel == unit or rel.startswith(unit.rstrip("/") + "/")
+            or (not unit.endswith("/") and rel in [unit + e for e in (".h", ".hpp", ".inl", ".cpp")]))
 
 
 def _comment_flags(lines):
