@@ -127,14 +127,8 @@ namespace TemporalDetail
 			std::vector<double> e1, e2, e3, F, q, N;
 		};
 
-		inline GrainSplit::Params SplitParams()
-		{
-			GrainSplit::Params p;
-			p.sigmaFine = kSigmaFine; p.sigmaBase = kSigmaBase; p.sigmaLow = kSigmaLow;
-			p.subBlocks = kSubBlocks; p.quietSubBlocks = kQuietSubBlocks; p.neighbourhood = kGrainNeighbourhood;
-			p.grainCal = kGrainCal; p.kappa = kWienerKappa; p.energyFloor = kEnergyFloor;
-			return p;
-		}
+		// The one law of repair.grain_split (the GPU module's memo variant uses the same).
+		inline GrainSplit::Params SplitParams() { return GrainSplit::DefaultParams(); }
 
 		inline Analysis Analyse(const Plane& y, double scale, int B)
 		{
@@ -570,7 +564,7 @@ namespace TemporalDetail
 	{
 		const int w = A.w, h = A.h, B = m_B, bw = A.bw, bh = A.bh;
 		const int P = (std::max)(4, 2 * static_cast<int>(std::floor(0.5 * kCleanPatchPx * m_scale + 0.5)));
-		const double sigma = kSigmaBase * m_scale;
+		const double sigma = GrainSplit::DefaultParams().sigmaBase * m_scale;
 		if (m_basis.P != P || m_basis.sigma != sigma) m_basis = Detail::MakeCleanBasis(P, sigma);
 		const Detail::CleanBasis& cb = m_basis;
 		const size_t PP = static_cast<size_t>(P) * P, nb = static_cast<size_t>(bw) * bh;

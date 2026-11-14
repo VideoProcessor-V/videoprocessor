@@ -15,6 +15,7 @@
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
+#include <VP-V/modules/repair/grain_split/GrainSplitVariantOwner.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailGpu.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailModel.h>
 
@@ -229,6 +230,26 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 		return s;
 	}
 
+	// WAIVER-B2-TD-OWNSPLIT: the module computes no grain split of its own; with no fitting shared product it Acquires the
+	// owner's variant from the skeleton memo. The rig is the test's skeleton side: the source-plane stand-in (behind the P13
+	// signature), repair.grain_split's variant owner registered on a memo with a GPU dispatcher and a budget. Per frame:
+	// Begin (the source plane published) before the modules run, End (the frame sealed, the plane retired) after them.
+	// One rig per stream: a sealed frame is never served again (FrameReleased).
+	struct MemoRig
+	{
+		GrainSplit::Gpu::SourcePlaneStandIn planes;
+		GrainSplit::Gpu::VariantOwner owner;
+		VpSkeleton::SkeletonMemo memo;
+		explicit MemoRig(GpuDevice& dev) : owner(dev.Gpu(), dev.dispatch, &planes)
+		{
+			memo.SetGpuDispatcherPresent(true);
+			memo.SetGpuBudget(true, uint64_t(1) << 32);
+			Assert::IsTrue(owner.Register(memo) == VpSkeleton::SkeletonMemo::Registration::Registered, L"the grain split owner registers its fill");
+		}
+		void Begin(uint64_t seq, pl_tex tex) { planes.Publish(seq, 0, tex, LumaFrame(tex).repr.bits); }
+		void End(uint64_t seq) { memo.OnSeal(seq); planes.AfterRender(); }
+	};
+
 	struct Compare
 	{
 		double worst = 0.0, meanAbs = 0.0;
@@ -276,6 +297,8 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 		model.SetTuning(tune);
 		MatchResult r;
 		double changed = 0.0;
+		MemoRig rig(dev);
+		GrainSplit::Gpu::Splitter cropSplit;
 		for (size_t t = 0; t < frames.size(); ++t)
 		{
 			Gpu::Params p = base;
@@ -292,8 +315,32 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 			in.motion = &motion;
 			if (hook) hook(static_cast<int>(t), p, in);
 			pl_tex tex = UploadLuma(gpu, frames[t]);
+			p.memo = &rig.memo;
+			// An active-picture crop is a variant the owner does not serve (VariantUndeclared): the producer side supplies the
+			// cropped plane's split as the shared product, as a lane does (the same law, scale and code unit the module reads).
+			const ActiveRect rect = p.active.Resolve(w, h);
+			const bool whole = rect.left == 0 && rect.top == 0 && rect.right == w && rect.bottom == h;
+			RegionEvidence::GrainProduct cropProduct;
+			pl_tex cropTex = nullptr;
+			if (!whole && !p.grain.Valid())
+			{
+				Plane crop(rect.Width(), rect.Height());
+				for (int y = 0; y < crop.h; ++y)
+					for (int x = 0; x < crop.w; ++x) crop.at(x, y) = frames[t].at(rect.left + x, rect.top + y);
+				cropTex = UploadLuma(gpu, crop);
+				const double scale = Scale(p.planeLines > 0.0 ? p.planeLines : h);
+				GrainSplit::Gpu::Options o;
+				o.seq = t;
+				Assert::IsTrue(cropSplit.Compute(gpu, dev.dispatch, cropTex, 0, VpvGpu::CodeUnit(cropTex, LumaFrame(cropTex).repr.bits, p.colorDepth), scale,
+					GrainSplit::Gpu::BlockFor(scale), GrainSplit::DefaultParams(), o), Wide(cropSplit.LastError()).c_str());
+				cropProduct.gpu[0] = &cropSplit.Out();
+				p.grain = RegionEvidence::GrainView(&cropProduct);
+				p.grainSeq = t;
+			}
+			rig.Begin(t, tex);
 			pl_frame out{};
 			const bool ok = module.Apply(gpu, dev.dispatch, LumaFrame(tex), p, out);
+			rig.End(t);
 			Assert::IsTrue(ok, Wide(module.LastError()).c_str());
 			r.gpu.push_back(DownloadLuma(gpu, out.planes[0].texture));
 			r.model.push_back(model.Process(in));
@@ -307,9 +354,11 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 			r.maxOverShare = (std::max)(r.maxOverShare, static_cast<double>(c.over) / static_cast<double>(w * h));
 			changed += c.changed;
 			pl_tex_destroy(gpu, &tex);
+			if (cropTex) pl_tex_destroy(gpu, &cropTex);
 		}
 		r.changedShare = changed / static_cast<double>(frames.size());
 		module.Release(gpu);
+		cropSplit.Release(gpu);
 		pl_tex_destroy(gpu, &bwdTex);
 		pl_tex_destroy(gpu, &fwdTex);
 		return r;
@@ -366,6 +415,7 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 		GrainSplit::Gpu::Frame tampered;
 		const double cu = 64.0 / 65535.0;
 		TdGrainRun r;
+		MemoRig rig(dev);
 		for (size_t t = 0; t < frames.size(); ++t)
 		{
 			pl_tex tex = UploadLuma(gpu, frames[t]);
@@ -430,8 +480,12 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 			if (kind != TdShared::Absent) gp.grain = RegionEvidence::GrainView(&product);
 			if (kind == TdShared::StaleSeq || kind == TdShared::StaleVersion) gp.grainSeq = t;
 			if (kind == TdShared::Shed) gp.grainShed = true;
+			gp.memo = &rig.memo;
 			pl_frame o{};
-			Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o), Wide(module.LastError()).c_str());
+			rig.Begin(t, tex);
+			const bool ok = module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o);
+			rig.End(t);
+			Assert::IsTrue(ok, Wide(module.LastError()).c_str());
 			r.out.push_back(DownloadLuma(gpu, o.planes[0].texture));
 			r.status.push_back(module.LastGrainStatus());
 			const FallbackCatalog::Decision d = module.GrainFallbackDecision();
@@ -457,12 +511,11 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 	}
 
 	// SA6: the same grainy stream through one module, with or without the scratch arena. Frame t reads a shared Full grain product
-	// (built on that frame's luma) when sharedAt(t), else the module computes its own split. The arena counters are read before
-	// the arena is released.
+	// (built on that frame's luma) when sharedAt(t), else the owner's memo variant. The arena counters are read before the arena
+	// is released.
 	struct TdArenaRun
 	{
 		std::vector<Plane> out;
-		std::vector<bool> ownHeld;
 		std::vector<std::string> status;
 		unsigned long long failures = 0;
 		uint64_t acquired = 0, exhausted = 0;
@@ -483,6 +536,7 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 		Gpu::Module module;
 		GrainSplit::Gpu::Splitter producer;
 		TdArenaRun r;
+		MemoRig rig(dev);
 		for (size_t t = 0; t < frames.size(); ++t)
 		{
 			pl_tex tex = UploadLuma(gpu, frames[t]);
@@ -500,20 +554,23 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 			gp.contentHz = contentHz;
 			gp.backward.tex = bwdTex;
 			if (shared) gp.grain = RegionEvidence::GrainView(&product);
+			gp.memo = &rig.memo;
 			if (useArena)
 			{
 				gp.arena = &arena;
 				arena.BeginFrame();
 			}
 			pl_frame o{};
-			Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o), Wide(module.LastError()).c_str());
+			rig.Begin(t, tex);
+			const bool ok = module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o);
+			rig.End(t);
+			Assert::IsTrue(ok, Wide(module.LastError()).c_str());
 			if (useArena)
 			{
 				Assert::IsFalse(module.ScratchShort(), L"no shortage");
 				Assert::IsFalse(arena.FrameDecision().engaged, L"scratch_arena released");
 			}
 			r.out.push_back(DownloadLuma(gpu, o.planes[0].texture));
-			r.ownHeld.push_back(module.OwnSplitHeld());
 			r.status.push_back(module.Status());
 			pl_tex_destroy(gpu, &tex);
 		}
@@ -730,6 +787,7 @@ namespace VideoProcessorTest
 
 			pl_gpu gpu = dev.Gpu();
 			Gpu::Module module;
+			MemoRig rig(dev);
 			const MotionPair bwd = MotionPair::Uniform(kW, kH, 16.0, 0.0, 0.0);
 			pl_tex bwdTex = UploadPair(gpu, bwd);
 			pl_frame first{}, again{};
@@ -740,7 +798,9 @@ namespace VideoProcessorTest
 				gp.settings = Steady();
 				gp.seq = static_cast<uint64_t>(t);
 				gp.backward.tex = bwdTex;
+				gp.memo = &rig.memo;
 				pl_frame out{};
+				rig.Begin(gp.seq, tex);
 				Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, out), Wide(module.LastError()).c_str());
 				if (t == 2)
 				{
@@ -750,6 +810,7 @@ namespace VideoProcessorTest
 					const Plane b = DownloadLuma(gpu, again.planes[0].texture);
 					Assert::IsTrue(first.planes[0].texture == again.planes[0].texture && a.v == b.v, L"a repeat returns the last output");
 				}
+				rig.End(gp.seq);
 				pl_tex_destroy(gpu, &tex);
 			}
 			module.Release(gpu);
@@ -770,6 +831,7 @@ namespace VideoProcessorTest
 			for (int run = 0; run < 2; ++run)
 			{
 				Gpu::Module module;
+				MemoRig rig(dev);
 				for (size_t t = 0; t < frames.size(); ++t)
 				{
 					pl_tex tex = UploadLuma(gpu, frames[t]);
@@ -777,8 +839,12 @@ namespace VideoProcessorTest
 					gp.settings = Steady();
 					gp.seq = t;
 					gp.backward.tex = bwdTex;
+					gp.memo = &rig.memo;
 					pl_frame out{};
-					Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, out), Wide(module.LastError()).c_str());
+					rig.Begin(t, tex);
+					const bool ok = module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, out);
+					rig.End(t);
+					Assert::IsTrue(ok, Wide(module.LastError()).c_str());
 					outs[run].push_back(DownloadLuma(gpu, out.planes[0].texture));
 					pl_tex_destroy(gpu, &tex);
 				}
@@ -795,9 +861,9 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(TemporalDetailGpuReadsTheSharedGrainSplit)
 		{
-			// Owner rule (one producer, many readers): with the shared grain.split product of the frame the module computes no
-			// split of its own and the output is bit-identical to its own-split output; a product that does not fit (another
-			// block size) falls back visibly.
+			// Owner rule (one producer, many readers): with the shared grain.split product of the frame the module reads it,
+			// and the output is bit-identical to the output on the owner's memo variant (no shared product); a product that
+			// does not fit (another block size) falls back visibly.
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			pl_gpu gpu = dev.Gpu();
@@ -805,6 +871,7 @@ namespace VideoProcessorTest
 			pl_tex bwdTex = UploadPair(gpu, MotionPair::Uniform(kW, kH, 16.0, -0.3, 0.0));
 			Gpu::Module own, reader;
 			GrainSplit::Gpu::Splitter producer, wrong;
+			MemoRig rig(dev);
 			for (size_t t = 0; t < frames.size(); ++t)
 			{
 				pl_tex tex = UploadLuma(gpu, frames[t]);
@@ -813,10 +880,14 @@ namespace VideoProcessorTest
 				gp.seq = t;
 				gp.planeLines = 1080.0;
 				gp.backward.tex = bwdTex;
+				gp.memo = &rig.memo;
 				pl_frame a{}, b{};
-				Assert::IsTrue(own.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, a), Wide(own.LastError()).c_str());
+				rig.Begin(t, tex);
+				const bool okOwn = own.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, a);
+				rig.End(t);
+				Assert::IsTrue(okOwn, Wide(own.LastError()).c_str());
 				const Plane pa = DownloadLuma(gpu, a.planes[0].texture);
-				Assert::IsTrue(own.Status().find("own grain split") != std::string::npos, L"no product: the module's own split, visible");
+				Assert::IsTrue(own.Status().find("memo variant") != std::string::npos, L"no product: the owner's memo variant, visible");
 				Assert::IsTrue(producer.Compute(gpu, dev.dispatch, tex, 0, 64.0 / 65535.0, 1.0, 16), Wide(producer.LastError()).c_str());
 				RegionEvidence::GrainProduct shared;
 				shared.gpu[0] = &producer.Out();
@@ -824,21 +895,26 @@ namespace VideoProcessorTest
 				Assert::IsTrue(gp.grain.Valid() && !gp.grain.CpuValid(), L"the GPU form alone makes a readable product");
 				Assert::IsTrue(reader.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, b), Wide(reader.LastError()).c_str());
 				const Plane pb = DownloadLuma(gpu, b.planes[0].texture);
-				Assert::IsTrue(reader.Status().find("own grain split") == std::string::npos, L"the shared product is read");
-				Assert::IsTrue(pa.v == pb.v, L"bit-identical to the module's own split");
+				Assert::IsTrue(reader.Status().find("memo variant") == std::string::npos, L"the shared product is read");
+				Assert::IsTrue(pa.v == pb.v, L"bit-identical to the owner's memo variant");
 				pl_tex_destroy(gpu, &tex);
 			}
 			{
 				pl_tex tex = UploadLuma(gpu, frames[0]);
 				Assert::IsTrue(wrong.Compute(gpu, dev.dispatch, tex, 0, 64.0 / 65535.0, 1.0, 32));
 				Gpu::Module m;
+				MemoRig misfitRig(dev);
 				Gpu::Params gp;
 				gp.settings = Steady();
+				gp.memo = &misfitRig.memo;
 				RegionEvidence::GrainProduct misfit;
 				misfit.gpu[0] = &wrong.Out();
 				gp.grain = RegionEvidence::GrainView(&misfit);
 				pl_frame o{};
-				Assert::IsTrue(m.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o), Wide(m.LastError()).c_str());
+				misfitRig.Begin(0, tex);
+				const bool ok = m.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o);
+				misfitRig.End(0);
+				Assert::IsTrue(ok, Wide(m.LastError()).c_str());
 				Assert::IsTrue(m.Status().find("does not fit") != std::string::npos, L"a product that does not fit falls back visibly");
 				m.Release(gpu);
 				pl_tex_destroy(gpu, &tex);
@@ -849,8 +925,8 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(TemporalDetailGpuGrainProductAbsentFallsBackVisibly)
 		{
-			// No shared product (no view, or a view of a product with neither form): the module runs its own Full split, says so
-			// (status, LastGrainStatus Missing, the "grain split (temporal detail)" fallback engaged).
+			// No shared product (no view, or a view of a product with neither form): the module reads the owner's memo variant
+			// (Full), says so (status, LastGrainStatus Missing, the "grain split (temporal detail)" fallback engaged).
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			const std::vector<Plane> frames = TdGrainFrames();
@@ -861,7 +937,7 @@ namespace VideoProcessorTest
 				{
 					Assert::IsTrue(r.status[t] == GrainSplit::GrainStatus::Missing, L"absent product: Missing");
 					Assert::IsTrue(r.engaged[t] && r.id[t] == "grain split (temporal detail)", L"the fallback is engaged and named");
-					Assert::IsTrue(r.text[t].find("own grain split") != std::string::npos, L"status names the own grain split");
+					Assert::IsTrue(r.text[t].find("grain split: memo variant, filled at read") != std::string::npos, L"status names the memo variant");
 				}
 			}
 		}
@@ -869,7 +945,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(TemporalDetailGpuGrainProductMisfitFallsBackAsWrongSize)
 		{
 			// A product of another block size, another code unit or another component does not fit: WrongSize, engaged, status
-			// "does not fit"; the output equals the own-split output (the own split is what runs).
+			// "does not fit"; the output equals the memo-variant output (the owner's variant is what is read).
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			const std::vector<Plane> frames = TdGrainFrames();
@@ -883,13 +959,13 @@ namespace VideoProcessorTest
 					Assert::IsTrue(r.engaged[t], L"the fallback is engaged");
 					Assert::IsTrue(r.text[t].find("does not fit") != std::string::npos, L"status says the shared product does not fit");
 				}
-				Assert::IsTrue(WorstDiff(own.out, r.out) == 0.0, L"a misfit product is not read: the output is the own-split output");
+				Assert::IsTrue(WorstDiff(own.out, r.out) == 0.0, L"a misfit product is not read: the output is the memo-variant output");
 			}
 		}
 
 		TEST_METHOD(TemporalDetailGpuFittingFullProductIsReadThroughTheAccessor)
 		{
-			// A fitting Full product: Ring, the fallback released, no "own grain split", output bit-identical to the own split.
+			// A fitting Full product: Ring, the fallback released, no "memo variant", output bit-identical to the memo variant's.
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			const std::vector<Plane> frames = TdGrainFrames();
@@ -899,9 +975,9 @@ namespace VideoProcessorTest
 			{
 				Assert::IsTrue(shared.status[t] == GrainSplit::GrainStatus::Ring, L"fitting product: Ring");
 				Assert::IsTrue(!shared.engaged[t], L"the fallback is released");
-				Assert::IsTrue(shared.text[t].find("own grain split") == std::string::npos, L"the shared product is read");
+				Assert::IsTrue(shared.text[t].find("memo variant") == std::string::npos, L"the shared product is read");
 			}
-			Assert::IsTrue(WorstDiff(own.out, shared.out) == 0.0, L"bit-identical to the own split");
+			Assert::IsTrue(WorstDiff(own.out, shared.out) == 0.0, L"bit-identical to the memo variant");
 		}
 
 		TEST_METHOD(TemporalDetailGpuCompactProductIsReadWithinOneCode)
@@ -916,7 +992,7 @@ namespace VideoProcessorTest
 			for (size_t t = 0; t < frames.size(); ++t)
 			{
 				Assert::IsTrue(compact.status[t] == GrainSplit::GrainStatus::Ring && !compact.engaged[t], L"Compact product: Ring, released");
-				Assert::IsTrue(compact.text[t].find("own grain split") == std::string::npos, L"the Compact product is read");
+				Assert::IsTrue(compact.text[t].find("memo variant") == std::string::npos, L"the Compact product is read");
 			}
 			const double worst = WorstDiff(full.out, compact.out);
 			LogF("temporal detail: Compact vs Full shared product, worst output difference %.5f codes", worst);
@@ -928,7 +1004,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(TemporalDetailGpuGrainFallbackRecoversAutomatically)
 		{
 			// absent -> fits -> absent -> misfit -> fits, on one module: engaged, released, engaged, engaged, released. The
-			// status is recomputed every frame, and (Full products being bit-identical to the own split) the output never differs.
+			// status is recomputed every frame, and (Full products being bit-identical to the memo variant) the output never differs.
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			const std::vector<Plane> frames = TdGrainFrames();
@@ -943,7 +1019,7 @@ namespace VideoProcessorTest
 				else if (seq[t] == TdShared::WrongBlock) Assert::IsTrue(r.status[t] == GrainSplit::GrainStatus::WrongSize, L"WrongSize");
 				else Assert::IsTrue(r.status[t] == GrainSplit::GrainStatus::Ring, L"Ring");
 			}
-			for (size_t t = 0; t < 6; ++t)   // frames before the Compact one are exact (Full or own); Compact is within one code
+			for (size_t t = 0; t < 6; ++t)   // frames before the Compact one are exact (Full or memo variant); Compact is within one code
 				Assert::IsTrue(r.out[t].v == own.out[t].v, L"no visible change across the switches");
 			Assert::IsTrue(WorstDiff(own.out, r.out) <= kCompactVsFullMaxCodes, L"a Compact frame in the sequence stays within the measured bound");
 		}
@@ -966,6 +1042,7 @@ namespace VideoProcessorTest
 			{
 				const std::vector<Plane>& in = run ? b : a;
 				Gpu::Module module;
+				MemoRig rig(dev);
 				for (size_t t = 0; t < in.size(); ++t)
 				{
 					pl_tex tex = UploadLuma(gpu, in[t]);
@@ -974,8 +1051,12 @@ namespace VideoProcessorTest
 					gp.seq = t;
 					gp.contentHz = kHz;
 					gp.backward.tex = bwdTex;
+					gp.memo = &rig.memo;
 					pl_frame out{};
-					Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, out), Wide(module.LastError()).c_str());
+					rig.Begin(t, tex);
+					const bool ok = module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, out);
+					rig.End(t);
+					Assert::IsTrue(ok, Wide(module.LastError()).c_str());
 					(run ? ob : oa).push_back(DownloadLuma(gpu, out.planes[0].texture));
 					if (run == 0)
 						for (size_t i = 0; i < in[t].v.size(); ++i) { copied += oa.back().v[i] == in[t].v[i] ? 1 : 0; ++total; }
@@ -1074,6 +1155,7 @@ namespace VideoProcessorTest
 				}
 				pl_tex bwdTex = UploadPair(gpu, MotionPair::Uniform(w, h, 16.0, -0.5, -0.25));
 				Gpu::Module module;
+				MemoRig rig(dev);
 				std::vector<double> msAdmit, msOther;
 				for (int k = 0; k < 48; ++k)
 				{
@@ -1082,12 +1164,17 @@ namespace VideoProcessorTest
 					gp.seq = static_cast<uint64_t>(k);
 					gp.contentHz = kHz;
 					gp.backward.tex = bwdTex;
+					gp.memo = &rig.memo;
 					pl_frame out{};
+					rig.Begin(gp.seq, texs[static_cast<size_t>(k % 8)]);
 					pl_gpu_finish(gpu);
+					// The timed span includes the owner's variant fill (no shared product here): the module's whole cost.
 					const auto t0 = std::chrono::steady_clock::now();
-					Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(texs[static_cast<size_t>(k % 8)]), gp, out), Wide(module.LastError()).c_str());
+					const bool ok = module.Apply(gpu, dev.dispatch, LumaFrame(texs[static_cast<size_t>(k % 8)]), gp, out);
 					pl_gpu_finish(gpu);
 					const auto t1 = std::chrono::steady_clock::now();
+					rig.End(gp.seq);
+					Assert::IsTrue(ok, Wide(module.LastError()).c_str());
 					Gpu::Counters c;
 					module.ReadCounters(gpu, c);
 					if (k >= 8) (c.admitted ? msAdmit : msOther).push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
@@ -1106,7 +1193,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(TemporalDetailGpuStaleProductFallsBackVisibly)
 		{
 			// A shared product computed for another source frame, or by another version of the grain split unit, is STALE:
-			// the module runs its own split (output equal to the own-split output), the entry is engaged and named, and the
+			// the module reads the owner's memo variant (output equal to the memo-variant output), the entry is engaged and named, and the
 			// next frame with a fitting product recovers by itself.
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
@@ -1120,7 +1207,7 @@ namespace VideoProcessorTest
 					Assert::IsTrue(r.status[t] == GrainSplit::GrainStatus::Stale, L"stale product: Stale");
 					Assert::IsTrue(r.engaged[t] && r.id[t] == "grain split (temporal detail)", L"engaged and named");
 				}
-				Assert::IsTrue(WorstDiff(own.out, r.out) == 0.0, L"a stale product is not read: the output is the own-split output");
+				Assert::IsTrue(WorstDiff(own.out, r.out) == 0.0, L"a stale product is not read: the output is the memo-variant output");
 			}
 			const TdGrainRun rec = RunTdGrain(dev, frames, [](size_t t) { return t < 2 ? TdShared::StaleSeq : t < 5 ? TdShared::Full : TdShared::StaleVersion; });
 			for (size_t t = 0; t < frames.size(); ++t)
@@ -1134,7 +1221,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(TemporalDetailGpuShedProductFallsBackVisibly)
 		{
 			// The governor dropped the product (Params::grainShed): even a fitting product is not read, the status is Shed, the
-			// entry is engaged, and the output is the own-split output; recovery when it is back.
+			// entry is engaged, and the output is the memo-variant output; recovery when it is back.
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			const std::vector<Plane> frames = TdGrainFrames();
@@ -1153,15 +1240,15 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(TemporalDetailGpuArenaIsByteIdentical)
 		{
-			// SA6: the accumulators, the delta and the own split's intermediates from the scratch arena change nothing: the same
-			// stream through a module without an arena and with one gives exactly equal planes (own split every frame, the shared
-			// product every frame, and the product from frame 3 on).
+			// SA6: the accumulators and the delta from the scratch arena change nothing: the same stream through a module without
+			// an arena and with one gives exactly equal planes (the memo variant every frame, the shared product every frame, and
+			// the product from frame 3 on).
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			const std::vector<Plane> frames = TdGrainFrames();
 			struct Case { const char* name; std::function<bool(size_t)> shared; };
 			const Case cases[] = {
-				{ "own split", [](size_t) { return false; } },
+				{ "memo variant", [](size_t) { return false; } },
 				{ "shared product", [](size_t) { return true; } },
 				{ "product from frame 3", [](size_t t) { return t >= 3; } } };
 			for (const Case& c : cases)
@@ -1194,12 +1281,13 @@ namespace VideoProcessorTest
 			{
 				VpSkeleton::PlTexBackend backend(gpu);
 				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
-				// 0: an empty plan; 1: a plan whose tier (T0) is below the module's (T1): shed (the own split's T0 request is admitted).
+				// 0: an empty plan; 1: a plan whose tier (T0) is below the module's (T1): shed.
 				if (tierCase == 0)
 					arena.Reserve(VpSkeleton::PlanArena(std::vector<VpSkeleton::ArenaRequest>(), VpSkeleton::Tier::T2));
 				else
 					arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T0));
 				Gpu::Module module;
+				MemoRig rig(dev);
 				pl_tex tex0 = UploadLuma(gpu, frames[0]), tex1 = UploadLuma(gpu, frames[1]);
 				Gpu::Params gp;
 				gp.settings = Steady();
@@ -1207,10 +1295,14 @@ namespace VideoProcessorTest
 				gp.planeLines = 1080.0;
 				gp.backward.tex = bwdTex;
 				gp.arena = &arena;
+				gp.memo = &rig.memo;
 				pl_frame out{};
 				arena.BeginFrame();
 				const unsigned long long before = module.Failures();
-				Assert::IsFalse(module.Apply(gpu, dev.dispatch, LumaFrame(tex0), gp, out), L"no scratch texture: Apply fails");
+				rig.Begin(0, tex0);
+				const bool shortOk = module.Apply(gpu, dev.dispatch, LumaFrame(tex0), gp, out);
+				rig.End(0);
+				Assert::IsFalse(shortOk, L"no scratch texture: Apply fails");
 				Assert::IsTrue(module.ScratchShort(), L"ScratchShort");
 				Assert::IsTrue(module.LastError().find("scratch memory short") != std::string::npos, Wide(module.LastError()).c_str());
 				Assert::IsTrue(module.Failures() == before + 1, L"one failure counted");
@@ -1223,6 +1315,7 @@ namespace VideoProcessorTest
 				Assert::IsFalse(arena.FrameDecision().engaged, L"released after BeginFrame");
 				gp.seq = 1;
 				pl_frame out2{};
+				rig.Begin(1, tex1);
 				Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex1), gp, out2), Wide(module.LastError()).c_str());
 				Assert::IsFalse(module.ScratchShort(), L"recovered");
 				Assert::IsFalse(arena.FrameDecision().engaged, L"no shortage after recovery");
@@ -1231,7 +1324,9 @@ namespace VideoProcessorTest
 				Gpu::Params pf = gp;
 				pf.arena = nullptr;
 				pl_frame outF{};
-				Assert::IsTrue(fresh.Apply(gpu, dev.dispatch, LumaFrame(tex1), pf, outF), Wide(fresh.LastError()).c_str());
+				const bool okFresh = fresh.Apply(gpu, dev.dispatch, LumaFrame(tex1), pf, outF);
+				rig.End(1);
+				Assert::IsTrue(okFresh, Wide(fresh.LastError()).c_str());
 				Assert::IsTrue(got.v == DownloadLuma(gpu, outF.planes[0].texture).v, L"the recovered frame equals a private-texture module's");
 				Logger::WriteMessage(tierCase == 0 ? "empty plan: visible, recovered" : "tier shed: visible, recovered");
 				module.Release(gpu);
@@ -1243,36 +1338,149 @@ namespace VideoProcessorTest
 			pl_tex_destroy(gpu, &bwdTex);
 		}
 
-		TEST_METHOD(TemporalDetailGpuReleasesTheOwnSplitOnceTheSharedProductFits)
+		TEST_METHOD(TemporalDetailGpuAcquiresTheVariantOncePerFrame)
 		{
-			// SA6: the module's own split output is freed after the shared product has fitted for kSplitReleaseSeconds of content (at
-			// the measured rate: 4 frames at 4 Hz), and comes back (visibly: the own-split fallback) when the product drops out.
+			// WAIVER-B2-TD-OWNSPLIT (a), replacing the own-split hold/release assertions: with no shared product the split is
+			// the owner's memo variant, Acquired ONCE per frame (filled at read by the first reader) and Reused by the second
+			// reader of the same frame and variant; the two readers' outputs are bit-identical; frames with a fitting shared
+			// product Acquire nothing. Both the arena and the private mode.
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
 			const std::vector<Plane> frames = Stream(12, "IBBBPBBB", 0.3, 0.0, 29u, 1.2);
-			const int hold = Frames(Gpu::kSplitReleaseSeconds, 4.0);
-			Assert::AreEqual(4, hold, L"1 s at 4 Hz");
+			pl_tex bwdTex = UploadPair(gpu, MotionPair::Uniform(kW, kH, 16.0, -0.3, 0.0));
 			for (int useArena = 0; useArena < 2; ++useArena)
 			{
-				const TdArenaRun r = RunTdArena(dev, frames, useArena != 0, [](size_t t) { return t >= 3 && t < 10; }, 4.0);
+				VpSkeleton::PlTexBackend backend(gpu);
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+				if (useArena) Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(Gpu::Module::ArenaRequests(gpu, kW, kH, 1080.0), VpSkeleton::Tier::T2)), L"arena reserve");
+				MemoRig rig(dev);
+				Gpu::Module first, second;
+				GrainSplit::Gpu::Splitter producer;
+				uint64_t variantFrames = 0;
 				for (size_t t = 0; t < frames.size(); ++t)
 				{
 					const bool shared = t >= 3 && t < 10;
-					const int streak = shared ? static_cast<int>(t) - 2 : 0;   // consecutive shared frames up to and including t
-					const bool expectHeld = !shared || streak < hold;
-					Assert::IsTrue(r.ownHeld[t] == expectHeld, (L"own split held at frame " + std::to_wstring(t) + (useArena ? L" (arena)" : L"")).c_str());
-					Assert::IsTrue(shared == (r.status[t].find("own grain split") == std::string::npos), L"the status names the own split exactly while it runs");
+					pl_tex tex = UploadLuma(gpu, frames[t]);
+					RegionEvidence::GrainProduct product;
+					if (shared)
+					{
+						Assert::IsTrue(producer.Compute(gpu, dev.dispatch, tex, 0, 64.0 / 65535.0, 1.0, 16), Wide(producer.LastError()).c_str());
+						product.gpu[0] = &producer.Out();
+					}
+					Gpu::Params gp;
+					gp.settings = Steady();
+					gp.seq = t;
+					gp.planeLines = 1080.0;
+					gp.contentHz = 4.0;
+					gp.backward.tex = bwdTex;
+					gp.memo = &rig.memo;
+					if (shared) gp.grain = RegionEvidence::GrainView(&product);
+					if (useArena) { gp.arena = &arena; arena.BeginFrame(); }
+					pl_frame a{}, b{};
+					rig.Begin(t, tex);
+					const bool okA = first.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, a);
+					const VpSkeleton::AcquireStatus statusA = first.LastAcquireStatus();
+					const VpSkeleton::AcquireCause causeA = first.LastAcquireCause();
+					const Plane pa = okA ? DownloadLuma(gpu, a.planes[0].texture) : Plane(kW, kH);
+					const bool okB = second.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, b);
+					const VpSkeleton::AcquireStatus statusB = second.LastAcquireStatus();
+					rig.End(t);
+					Assert::IsTrue(okA, Wide(first.LastError()).c_str());
+					Assert::IsTrue(okB, Wide(second.LastError()).c_str());
+					Assert::IsTrue(causeA == VpSkeleton::AcquireCause::None, L"no refusal");
+					if (!shared)
+					{
+						++variantFrames;
+						Assert::IsTrue(statusA == VpSkeleton::AcquireStatus::FilledAtRead, (L"the first reader fills the variant at frame " + std::to_wstring(t)).c_str());
+						Assert::IsTrue(statusB == VpSkeleton::AcquireStatus::Reused, (L"the second reader reuses it at frame " + std::to_wstring(t)).c_str());
+						Assert::IsTrue(first.Status().find("grain split: memo variant, filled at read") != std::string::npos, L"the status names the variant");
+						Assert::IsTrue(second.Status().find("grain split: memo variant, reused") != std::string::npos, L"the status names the reuse");
+					}
+					else
+						Assert::IsTrue(first.Status().find("memo variant") == std::string::npos && second.Status().find("memo variant") == std::string::npos,
+							L"a fitting shared product: no variant");
+					Assert::IsTrue(pa.v == DownloadLuma(gpu, b.planes[0].texture).v, L"both readers produce the same planes");
+					pl_tex_destroy(gpu, &tex);
 				}
+				const VpSkeleton::AcquireCounters c = rig.memo.CountersOf(VpSkeleton::kP10GrainSplit);
+				LogF("variant frames %.0f: filled at read %.0f, reused %.0f, owner computes %.0f", static_cast<double>(variantFrames),
+					static_cast<double>(c.filledAtRead), static_cast<double>(c.reusedMemo), static_cast<double>(rig.owner.Computes()));
+				Assert::AreEqual(uint64_t(5), variantFrames, L"frames 0-2 and 10-11 have no shared product");
+				Assert::AreEqual(variantFrames, c.filledAtRead, L"Acquired once per frame");
+				Assert::AreEqual(variantFrames, c.reusedMemo, L"Reused by the second reader");
+				Assert::AreEqual(variantFrames, rig.owner.Computes(), L"the owner computed each frame's variant once");
+				first.Release(gpu);
+				second.Release(gpu);
+				producer.Release(gpu);
+				arena.Release();
 			}
+			pl_tex_destroy(gpu, &bwdTex);
+		}
+
+		TEST_METHOD(TemporalDetailGpuRefusesVisiblyWithoutAVariant)
+		{
+			// WAIVER-B2-TD-OWNSPLIT (c): no shared product and (1) no skeleton memo: Apply fails, "no skeleton memo", nothing
+			// computed; (2) an active-picture crop: the owner serves no crop variant, so the module refuses VariantUndeclared
+			// (Apply fails, the cause named) and the memo is never asked; (3) the same crop with the cropped plane's split as
+			// the shared product runs.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			const std::vector<Plane> frames = Stream(2, "IB", 0.3, 0.0, 29u, 1.2);
+			pl_tex bwdTex = UploadPair(gpu, MotionPair::Uniform(kW, kH, 16.0, -0.3, 0.0));
+			pl_tex tex = UploadLuma(gpu, frames[0]);
+			{
+				Gpu::Module m;
+				Gpu::Params gp;
+				gp.settings = Steady();
+				gp.backward.tex = bwdTex;
+				pl_frame o{};
+				const unsigned long long before = m.Failures();
+				Assert::IsFalse(m.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o), L"no memo: Apply fails");
+				Assert::IsTrue(m.LastError().find("no skeleton memo") != std::string::npos, Wide(m.LastError()).c_str());
+				Assert::IsTrue(m.Failures() == before + 1, L"the failure is counted");
+				m.Release(gpu);
+			}
+			{
+				MemoRig rig(dev);
+				Gpu::Module m;
+				Gpu::Params gp;
+				gp.settings = Steady();
+				gp.backward.tex = bwdTex;
+				gp.memo = &rig.memo;
+				gp.active = ActiveRect{ 0, 8, kW, kH - 8 };
+				pl_frame o{};
+				rig.Begin(0, tex);
+				const bool ok = m.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o);
+				rig.End(0);
+				Assert::IsFalse(ok, L"crop, no shared product: Apply fails");
+				Assert::IsTrue(m.LastAcquireCause() == VpSkeleton::AcquireCause::VariantUndeclared, L"the refusal is VariantUndeclared");
+				Assert::IsTrue(m.LastError().find("variant not served by the owner") != std::string::npos, Wide(m.LastError()).c_str());
+				const VpSkeleton::AcquireCounters c = rig.memo.CountersOf(VpSkeleton::kP10GrainSplit);
+				Assert::AreEqual(uint64_t(0), c.filledAtRead + c.reusedMemo + c.ownerFillCalls, L"the memo is never asked for a crop");
+				Assert::AreEqual(uint64_t(0), rig.owner.Computes(), L"nothing computed");
+				m.Release(gpu);
+			}
+			{
+				Gpu::Params p;
+				p.settings = Steady();
+				const MatchResult r = RunMatch(dev, frames, 0.3, 0.0, p, Model::Tuning(), [&](int, Gpu::Params& gp, Model::FrameIn& in) {
+					gp.active = ActiveRect{ 0, 8, kW, kH - 8 }; in.active = gp.active;
+				});
+				Assert::IsTrue(r.worst <= 0.125, L"a crop with its shared product runs and follows the model");
+			}
+			pl_tex_destroy(gpu, &tex);
+			pl_tex_destroy(gpu, &bwdTex);
 		}
 
 		TEST_METHOD(TemporalDetailGpuTextureBytesCountsTheArenaTemporaries)
 		{
-			// SA6: with the temporaries in the arena the module's own bytes drop by 40 per pixel (own split bands 16, two
-			// accumulators 2 x 8, delta 8); the default form is the private-texture form, unchanged.
+			// SA6: with the temporaries in the arena the module's own bytes drop by 24 per pixel (two accumulators 2 x 8, delta 8;
+			// the module holds no grain split of its own any more); the default form is the private-texture form, unchanged.
 			const uint64_t priv = Gpu::Module::TextureBytes(3840, 2160, 2160), inArena = Gpu::Module::TextureBytes(3840, 2160, 2160, kSlots, true);
 			Assert::IsTrue(priv == Gpu::Module::TextureBytes(3840, 2160, 2160, kSlots, false), L"the default is the private form");
-			Assert::IsTrue(priv - inArena == uint64_t(40) * 3840 * 2160, L"40 bytes per pixel move to the arena");
+			Assert::IsTrue(priv - inArena == uint64_t(24) * 3840 * 2160, L"24 bytes per pixel move to the arena");
 		}
 
 		TEST_METHOD(TemporalDetailGpuOutputIdentityPins)

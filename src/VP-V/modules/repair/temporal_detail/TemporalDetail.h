@@ -16,20 +16,16 @@
 #include <string>
 #include <vector>
 
+#include <VP-V/modules/repair/grain_split/GrainSplit.h>
+
 namespace TemporalDetail
 {
 	// --- Shared constants (CPU model and shaders) ---
 	constexpr double kReferenceHz = 23.976;     // the content rate when it is unknown
-	constexpr double kBlockPx = 16.0;           // block edge at <= 2160 lines (x Scale)
-	constexpr int kSubBlocks = 4;               // per block axis (grain-level sub-blocks)
-	constexpr int kQuietSubBlocks = 4;          // the quietest sub-blocks averaged for the grain level
-	constexpr int kGrainNeighbourhood = 2;      // grain level: minimum over (2 x 2 + 1)^2 blocks
-	constexpr double kSigmaFine = 1.0;          // D1 = Y - G(kSigmaFine x Scale) Y
-	constexpr double kSigmaBase = 2.5;          // base = G(kSigmaBase x Scale) Y
-	constexpr double kSigmaLow = 6.0;           // E3 band = G(base) - G(kSigmaLow x Scale)
-	constexpr double kGrainCal = 2.2;           // pure grain reads about its own energy (quiet sub-blocks read low)
-	constexpr double kWienerKappa = 2.0;        // f = clamp(1 - kappa N / e3x3, 0, 1)
-	constexpr double kEnergyFloor = 1e-3;       // codes^2, added to q and to divisions
+	constexpr double kBlockPx = GrainSplit::DefaultParams().blockPx;   // block edge at <= 2160 lines (x Scale): the grain split law's (ND04)
+	// The grain split's law (sigmas, sub-blocks, quiet sub-blocks, neighbourhood, calibration, kappa) is the ONE law of
+	// repair.grain_split, GrainSplit::DefaultParams() (OD 11-14 04:30; ND04): no copy of it here.
+	constexpr double kEnergyFloor = 1e-3;       // codes^2, added to q and to divisions (this module's own floor)
 	constexpr int kSlots = 5;                   // K past slots (one more, the future slot, in queued modes)
 	constexpr uint32_t kUnitVersion = 1;        // THIS module's code is still v1 (td.analysis / td.refstore / td.admission layouts, 5 slots, ~415 MB at 4K); v2 is the doc 72 contract in repair/temporal_detail/products (TdProducts::kUnitVersion, the catalog's kExpectedTemporalDetailUnit) and is raised here only when the v2 engine replaces this code. The v1 GPU module (TemporalDetailGpu) is not wired into the renderer today (no call site outside its own tests).
 	constexpr int kMaxFutureFrames = 8;         // future frames the model looks at
@@ -97,8 +93,10 @@ namespace TemporalDetail
 	constexpr double kCameraMinConfidence = 0.5;         // the model ignores a camera view below this
 
 	inline double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+	// ND07: equal edges are a step at e0 (the LightLevelLut rule); otherwise unchanged.
 	inline double Smoothstep(double e0, double e1, double x)
 	{
+		if (e1 == e0) return x >= e0 ? 1.0 : 0.0;
 		const double t = Clamp((x - e0) / (e1 - e0), 0.0, 1.0);
 		return t * t * (3.0 - 2.0 * t);
 	}
