@@ -41,6 +41,7 @@ enum class StepOutcome : uint8_t {
 struct LaneProductCounters {
     std::atomic<uint64_t> published{ 0 };
     std::atomic<uint64_t> staleSkips{ 0 };
+    std::atomic<uint64_t> workerReused{ 0 };     // QKP slice C: of staleSkips, frames the render thread made first (RunAheadNow): the worker skipped, nothing recomputed
     std::atomic<uint64_t> latePublishes{ 0 };
     std::atomic<uint64_t> skippedDropped{ 0 };   // source frame unknown or dropped
     std::atomic<uint64_t> cancelled{ 0 };        // the seal (or the plan) took a running job
@@ -277,6 +278,8 @@ private:
         case ClaimResult::Stale:
             st.nextSeq = seq + 1u;
             st.counters.staleSkips.fetch_add(1, std::memory_order_relaxed);
+            if (st.set->RenderMade(seq))
+                st.counters.workerReused.fetch_add(1, std::memory_order_relaxed);
             *out = StepOutcome::Late;
             return false;
         case ClaimResult::TooEarly:

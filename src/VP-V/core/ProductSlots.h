@@ -275,6 +275,8 @@ public:
     {
         for (std::atomic<uint32_t>& pin : livePins_)
             pin.store(0, std::memory_order_relaxed);
+        for (std::atomic<uint64_t>& m : renderMade_)
+            m.store(0, std::memory_order_relaxed);
         for (uint16_t i = 0; i < ring_; ++i) {
             SlotWord w;
             w.seq = i;   // = biased(i - ring): frame i is the slot's first claimable frame
@@ -294,6 +296,13 @@ public:
     // The tier plan's grant: without a lane, a missing result is expected, not counted.
     void SetLaneGranted(bool granted) { laneGranted_.store(granted, std::memory_order_relaxed); }
     bool LaneGranted() const { return laneGranted_.load(std::memory_order_relaxed); }
+    // QKP slice C (design s2.4 / s9.4 b): a frame the RENDER thread made through AnalysisLane::RunAheadNow carries a per-(slot, seq) mark
+    // (any thread). The lane worker that later finds the slot taken counts it WorkerReused (not a plain stale skip), and the seal of that
+    // frame counts it reused. A mark is the frame's seq + 1 in a small table by seq: a collision only forgets an older mark (an undercount
+    // of a reuse, never a wrong frame).
+    static constexpr size_t kRenderMadeMarks = 16;
+    void MarkRenderMade(uint64_t seq) { renderMade_[size_t(seq % kRenderMadeMarks)].store(seq + 1u, std::memory_order_release); }
+    bool RenderMade(uint64_t seq) const { return renderMade_[size_t(seq % kRenderMadeMarks)].load(std::memory_order_acquire) == seq + 1u; }
 
     // Any thread: the decoded word of the slot that frame `seq` maps to (diagnostics, tests).
     SlotWord WordFor(uint64_t seq) const { return Unpack(slots_[SlotOf(seq)].word.load(std::memory_order_acquire)); }
@@ -938,6 +947,7 @@ private:
     std::vector<std::atomic<uint32_t>> livePins_;   // lane readers pinning each live buffer (PinRef)
     SlotCounters counters_;
     std::atomic<bool> laneGranted_{ true };
+    std::array<std::atomic<uint64_t>, kRenderMadeMarks> renderMade_;
 };
 
 // A lane job's pinned inputs (one per declared input), released by Unpin.
