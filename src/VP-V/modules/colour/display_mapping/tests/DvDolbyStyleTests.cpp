@@ -12,7 +12,7 @@
 
 #include <libplacebo/tone_mapping.h>
 #include <libplacebo/shaders/colorspace.h>
-#include <VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h>
+#include <VP-V/modules/colour/display_mapping/DvDolbyStyle.h>
 
 #include <cmath>
 #include <random>

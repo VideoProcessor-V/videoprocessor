@@ -8,11 +8,11 @@
 -->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="..\VP-V\tests\suite\DolbyVisionTrimsTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DolbyVisionTrimsTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\FileSideDataTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SceneDescriptorTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\ContentIntentTests.cpp" />
-    <ClCompile Include="..\VP-V\tests\suite\AmbientAdaptationTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\AmbientAdaptationTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\BlackIntentTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\DisplayIntentTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedIntentLimitsTests.cpp" />
@@ -471,9 +471,9 @@
     </ClCompile>
     <ClCompile Include="..\VP-V\tests\suite\HookSegmentTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\TextureRestoreTests.cpp" />
-    <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvTrimSelectionTests.cpp" />
-    <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvDolbyStyleTests.cpp" />
-    <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvHostStageTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvTrimSelectionTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvDolbyStyleTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvHostStageTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvSignalL8HoldTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncEventTests.cpp" />
