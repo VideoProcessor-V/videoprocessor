@@ -1274,5 +1274,53 @@ namespace VideoProcessorTest
 			Assert::IsTrue(priv == Gpu::Module::TextureBytes(3840, 2160, 2160, kSlots, false), L"the default is the private form");
 			Assert::IsTrue(priv - inArena == uint64_t(40) * 3840 * 2160, L"40 bytes per pixel move to the arena");
 		}
+
+		TEST_METHOD(TemporalDetailGpuOutputIdentityPins)
+		{
+			// WAIVER-B2-TD-OWNSPLIT (b): the module's output planes on the existing fixtures, hashed (FNV-1a over the 1/64-code
+			// samples). The pins were recorded on the binary BEFORE the own split was deleted (its own GrainSplit::Params equal
+			// GrainSplit::DefaultParams()); after it the split comes from the owner's variant (Acquire), and the pixels must not move.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			struct Case { const char* name; int clean; bool boost; double lines; bool crop; uint64_t pin; };
+			const Case cases[] = {
+				{ "cleaner", 1, false, 1080.0, false, 0x0ull },
+				{ "single-frame template", 0, false, 1080.0, false, 0x0ull },
+				{ "boost", 1, true, 1080.0, false, 0x0ull },
+				{ "4320 lines (scale 2)", 1, false, 4320.0, false, 0x0ull },
+				{ "active-picture crop", 1, false, 1080.0, true, 0x0ull },
+			};
+			const ActiveRect cropRect{ 0, 8, kW, kH - 8 };
+			const std::vector<Plane> frames = Stream(16, "IBBBPBBB", 0.37, 0.21, 11u, 1.2);
+			bool allPinned = true, allMatch = true;
+			for (const Case& c : cases)
+			{
+				Gpu::Params p;
+				p.settings = Steady();
+				p.settings.boost = c.boost;
+				p.templateClean = c.clean != 0;
+				Model::Tuning tune;
+				tune.templateClean = c.clean != 0;
+				const MatchResult r = RunMatch(dev, frames, 0.37, 0.21, p, tune, [&](int, Gpu::Params& gp, Model::FrameIn& in) {
+					gp.planeLines = c.lines; in.planeLines = c.lines;
+					if (c.crop) { gp.active = cropRect; in.active = cropRect; }
+				});
+				uint64_t hsh = 0xcbf29ce484222325ull;
+				for (const Plane& o : r.gpu)
+					for (double v : o.v)
+					{
+						const uint32_t q = static_cast<uint32_t>(std::lround(v * 64.0));
+						for (int b = 0; b < 4; ++b) { hsh ^= (q >> (8 * b)) & 0xffu; hsh *= 0x100000001b3ull; }
+					}
+				char line[200];
+				std::snprintf(line, sizeof line, "identity pin %s: 0x%016llx (pinned 0x%016llx)", c.name, static_cast<unsigned long long>(hsh),
+					static_cast<unsigned long long>(c.pin));
+				Logger::WriteMessage(line);
+				allPinned = allPinned && c.pin != 0;
+				allMatch = allMatch && hsh == c.pin;
+			}
+			Assert::IsTrue(allPinned, L"every identity pin is recorded");
+			Assert::IsTrue(allMatch, L"the output planes equal the pinned (pre-change) planes bit for bit");
+		}
 	};
 }
