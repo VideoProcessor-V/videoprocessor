@@ -295,6 +295,12 @@ Chain tests:
 - label-detector / identification net (round 2; owner idea: identification net feeding the kernel-matched re-base)
 - estimator gap analysis vs ground truth (item 8)
 
+### P16 coding evidence (moved out of the detector)
+
+The coding measure (block grid, banding, effective bits) lives in `regions/CodingEvidence.*` (product P16 `kCodingEvidence`, see
+[regions/README.md](regions/README.md)). The detector's `Spectrum::coding` and `FrameReading::coding` carry it; the monitor acquires it
+per frame through the skeleton memo. Without a memo the coding readings are neutral and `Describe` shows "coding evidence unavailable".
+
 ## Where the code lives (live file list)
 
 Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).

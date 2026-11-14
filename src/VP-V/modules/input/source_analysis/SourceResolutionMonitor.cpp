@@ -1,6 +1,7 @@
 #include <pch.h>
 #include "SourceResolutionMonitor.h"
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/input/source_analysis/regions/CodingEvidence.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h>
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
 #include <VP-V/modules/scaling/geometry/SourceGeometrySet.h>
@@ -1342,6 +1343,11 @@ if (tile < int(tiles) && g.y < ts) {
 		const int pixels = T * T;
 		std::vector<float> luma(static_cast<size_t>(pixels));
 		std::vector<std::vector<float>> codeTiles(static_cast<size_t>(j.tiles));   // for the kernel fit
+		auto codingPack = std::make_shared<VpUnit::CodingEvidence::TilePack>();   // P16 kCodingEvidence: the owner measures the coding of these tiles
+		codingPack->tiles = j.tiles;
+		codingPack->tileSize = T;
+		codingPack->codeMaximum = j.codeMaximum;
+		codingPack->luma.reserve(static_cast<size_t>(j.tiles) * pixels);
 		for (int t = 0; t < j.tiles; ++t)
 		{
 			const float* src = j.values.data() + static_cast<size_t>(t) * pixels;
@@ -1352,6 +1358,21 @@ if (tile < int(tiles) && g.y < ts) {
 			}
 			SourceResolution::Analyse(luma.data(), T, T, spectra[static_cast<size_t>(t)], j.codeMaximum);
 			codeTiles[static_cast<size_t>(t)] = luma;
+			codingPack->luma.insert(codingPack->luma.end(), luma.begin(), luma.end());
+		}
+		{
+			// P16 through the skeleton's Acquire (the one path; no private measurement): the sole store owner is the renderer's identity
+			// (as SetChainTap's discovery). Not acquired = the coding readings stay neutral and Describe says why.
+			const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
+			const uint64_t memoSeq = j.sequence != 0 ? j.sequence : ++codingSeq;
+			std::vector<VpUnit::CodingEvidence::TileMeasure> measured;
+			std::string why;
+			const bool got = owners.size() == 1 && VpUnit::CodingEvidence::Hub::Instance().AcquireTiles(owners[0], memoSeq, codingPack, measured, why);
+			if (!got && owners.size() != 1) why = owners.empty() ? "no renderer" : "several renderers";
+			codingUnavailableNow = !got || measured.size() != spectra.size();
+			codingWhyNow = codingUnavailableNow ? (why.empty() ? "tile count" : why) : std::string();
+			if (!codingUnavailableNow)
+				for (size_t t = 0; t < spectra.size(); ++t) spectra[t].coding = std::move(measured[t]);
 		}
 		SourceResolution::Thresholds thresholds;
 		thresholds.codeMaximum = j.codeMaximum;
@@ -1673,6 +1694,8 @@ if (tile < int(tiles) && g.y < ts) {
 			}
 		}
 		VpUnit::SourceQuality::Store(snapshot, qualitySmoothed, bitsSmoothed);   // U12
+		snapshot.codingUnavailable = codingUnavailableNow;
+		snapshot.codingWhy = codingWhyNow;
 		snapshot.coherenceV = frame.vertical.coherence;
 		snapshot.coherenceH = frame.horizontal.coherence;
 		snapshot.cuts = tracker.Cuts();
@@ -2695,7 +2718,9 @@ if (tile < int(tiles) && g.y < ts) {
 			snprintf(autoText, sizeof(autoText), "; auto %s", autoRatio < 1.0 ? ("re-based to " + SourceResolution::Describe(autoRatio, s.nativeHeight)).c_str() : "native");
 		snprintf(line, sizeof(line), "Source resolution: %s (declared %s, confidence %.2f); bitrate quality %.2f%s%s",
 			liveText.c_str(), declaredText.c_str(), s.confidence, s.bitrateQuality, bits, autoText);
-		return line;
+		std::string text = line;
+		if (s.codingUnavailable) text += "; coding evidence unavailable (" + s.codingWhy + ")";   // P16 not acquired: shown, never silent
+		return text;
 	}
 
 	std::string Describe(const Snapshot& s, double autoRatio, bool autoSelected)

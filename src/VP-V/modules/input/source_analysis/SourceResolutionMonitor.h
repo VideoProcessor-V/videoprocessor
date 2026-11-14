@@ -70,6 +70,10 @@ namespace SourceResolutionMonitor
 		double frameQuality = 1.0;
 		double frameNoise = -1.0;
 		double effectiveBits = 0.0;    // spec 2d (0 = unknown)
+		// P16 kCodingEvidence not acquired for the frame (no skeleton memo / owner declined): the readings above stay neutral;
+		// the why is the Acquire token. Shown in Describe (never silent).
+		bool codingUnavailable = false;
+		std::string codingWhy;
 		double coherenceV = 0.0, coherenceH = 0.0;
 		unsigned long long frames = 0, cuts = 0, discontinuities = 0;
 		double cutSpan = 0.0;          // seconds between the frames the last cut was found between
@@ -187,6 +191,10 @@ namespace SourceResolutionMonitor
 		void InjectResultForTest(const Snapshot& result, uint64_t sequence);
 		static constexpr size_t kHeldCap = 16;
 		static constexpr size_t kJobQueueCap = 4;
+		// The worker's lag behind the renderer in FRAMES, derived from the queue depth: a frame waits behind up to kJobQueueCap queued
+		// jobs, is analysed as one more, and the memo releases a frame at the Begin after keepFrames (+1). Used as the keepFrames of
+		// the P16 coding-evidence fill (a frame inside this window is served, one outside is visibly unavailable).
+		static constexpr size_t kLatencyFrames = kJobQueueCap + 2;
 		// R3 (resync_event on), render thread before Frame(): the Indicator's stream key of the frame
 		// (its era and FULL count; 0 = not driven, the default). Tile copies and worker jobs carry the
 		// key they were taken under; one taken under another key (a frame of the source before a FULL
@@ -691,6 +699,9 @@ namespace SourceResolutionMonitor
 		std::deque<std::pair<double, double>> coherence;     // (seconds, min axis coherence)
 		unsigned long long lastCuts = 0;
 		double qualitySmoothed = -1.0, bitsSmoothed = 0.0;
+		uint64_t codingSeq = 0;   // worker only: the memo sequence of a frame the host did not number
+		bool codingUnavailableNow = false;   // worker only: the latest frame's P16 acquire failed
+		std::string codingWhyNow;
 		Snapshot snapshot;
 		SourceHistory::Log historyLog;
 		uint64_t historyRotateBytes = 0;

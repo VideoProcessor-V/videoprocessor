@@ -255,6 +255,8 @@
         "src/VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h",
         "src/VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.cpp",
         "src/VP-V/modules/input/source_analysis/identity/SourceGeometryProduct.h",
+        "src/VP-V/modules/input/source_analysis/regions/CodingEvidence.h",
+        "src/VP-V/modules/input/source_analysis/regions/CodingEvidence.cpp",
         "src/VP-V/modules/input/source_analysis/regions/RegionEvidence.h",
         "src/VP-V/modules/input/source_analysis/regions/RegionEvidenceGlsl.h",
         "src/VP-V/modules/input/source_analysis/regions/README.md",
