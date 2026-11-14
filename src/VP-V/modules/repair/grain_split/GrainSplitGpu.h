@@ -160,17 +160,17 @@ namespace GrainSplit
 			// short (grain split)..." (no private temporaries are made instead; the caller falls back visibly).
 			bool Compute(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B,
 				const Params& params, const Options& options);
-			// The six passes of Compute as separate calls (70b lane form: one chunk per pass): Step(0..5) with the SAME arguments
-			// and options on every call records exactly Compute's dispatches in order (half, low, grain level, minimum, Wiener
+			// The seven passes of Compute as separate calls (70b lane form: one chunk per pass): Step(0..6) with the SAME arguments
+			// and options on every call records exactly Compute's dispatches in order (half, low, grain level per chunk, per-block reduce, noise level, minimum, Wiener
 			// share), so Compute == the step loop byte for byte. sigmaBase and sigmaLow x scale must be >= GrainSplit::kV3MinLowSigma
 			// ("invalid law" otherwise); a device whose shared memory is below the passes' need is refused with the numbers. Step 0 validates and resolves the outputs and intermediates
 			// (private textures survive between steps and gaps; with options.arena the CALLER holds the arena scope kArenaScope
-			// across the six steps); Out() is valid after step 5. A failing or out-of-order step returns false and ends the run.
-			static constexpr uint32_t StepCount() { return 6; }
+			// across the seven steps); Out() is valid after step 6. A failing or out-of-order step returns false and ends the run.
+			static constexpr uint32_t StepCount() { return 7; }
 			bool Step(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B, const Params& params,
 				const Options& options, uint32_t step);
-			// The scratch-arena requests of one Compute (scope kArenaScope, owner "grain_split", T0): two half-size rg32f planes and
-			// the rgba32f block grid (the same for both layouts).
+			// The scratch-arena requests of one Compute (scope kArenaScope, owner "grain_split", T0): two half-size rg32f planes,
+			// the rgba32f per-(sub-block, chunk) partial sums of the grain level pass and the rgba32f block grid (the same for both layouts).
 			static std::vector<VpSkeleton::ArenaRequest> ArenaRequests(pl_gpu gpu, int w, int h, int B, GrainSplit::Storage storage);
 			bool ScratchShort() const { return m_scratchShort; }
 			// "" or why the requested Compact storage was replaced by Full (ChooseStorage); StorageDecision() is the
@@ -188,7 +188,7 @@ namespace GrainSplit
 			const std::string& LastError() const { return m_error; }
 
 		private:
-			// The run of the step API: set by step 0, cleared after step 4 or on a failure.
+			// The run of the step API: set by step 0, cleared after the last step or on a failure.
 			struct Run
 			{
 				bool active = false;
@@ -196,12 +196,12 @@ namespace GrainSplit
 				bool compact = false;
 				GrainSplit::Storage storage = GrainSplit::Storage::Full;
 				int w = 0, h = 0, bw = 0, bh = 0;
-				pl_tex tmp = nullptr, low = nullptr, quiet = nullptr, level = nullptr, blocks = nullptr, outFull = nullptr, outA = nullptr, outB = nullptr;
+				pl_tex tmp = nullptr, low = nullptr, part = nullptr, quiet = nullptr, level = nullptr, blocks = nullptr, outFull = nullptr, outA = nullptr, outB = nullptr;
 			};
 			bool Begin(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, int B, const Params& params, const Options& options,
 				double scale);
 			Run m_run;
-			pl_tex m_tmp = nullptr, m_low = nullptr, m_quiet = nullptr, m_level = nullptr, m_blocks = nullptr, m_outFull = nullptr, m_outA = nullptr, m_outB = nullptr;
+			pl_tex m_tmp = nullptr, m_low = nullptr, m_part = nullptr, m_quiet = nullptr, m_level = nullptr, m_blocks = nullptr, m_outFull = nullptr, m_outA = nullptr, m_outB = nullptr;
 			Frame m_out;
 			std::string m_error;
 			bool m_scratchShort = false;

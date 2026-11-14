@@ -197,3 +197,11 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Private GPU textures (skeleton rule)
 
 This module still creates its own GPU textures (see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). Its per-frame half-resolution temporaries (half, tmp, and the foreign-geometry trio) come from the shared scratch arena when Params::arena is set (SA1); its persistent state (low bands, tile statistics, references, gains, output) stays private and migrates in SA6/SA7/SA8/SA12.
+
+## Design goal, philosophy and decisions
+
+- Goal: restore texture and calm the GOP pulse without touching grain, on the same grain law the rest of the pipeline uses.
+- One law, read not copied (RULES-0525 rule 20, ND03 / ND04, L-B2): the band sigmas (1 / 2.5 / 6 px), the tile edge (16 px), the sub-block, quiet-sub-block and neighbourhood counts, the two grain calibrations (2.2 / 3.8) and kappa are fields of repair.grain_split's `GrainSplit::DefaultParams()` (constexpr). `TextureRestore.h` names them (`kGrainLaw`), it keeps no literal of its own; values are unchanged.
+- One band Gaussian (ND03): `Radius1` / `Weight1` and detail pulse's `FineRadius` / `FineWeight` call `GrainSplit::BandRadius` / `BandWeight`, the producer's rule (ceil(3 sigma), at least one tap, no epsilon). Registered FIX-B2-ND03 (D:\codex\vp-handover\lead8): the old flags (texture restore: minimum one, eps 1e-9; detail pulse: no minimum, eps 1e-9) give the same radius at every scale either module runs, so pixels are unchanged; the frozen-copy tests still hold.
+- Smoothstep with equal edges is a step at e0 (ND07, the LightLevelLut rule; FIX-B2-ND07); no call site uses equal edges today.
+- Detail pulse's wide sigma (`kSigmaWide` 2.5) and its band memo route are lane L-B3's (kBandMemo), not changed here.

@@ -50,7 +50,7 @@ namespace GrainSplit
 	// layouts. Bump on ANY change of the law, the passes or a layout: a published frame carries it (Gpu::Frame::version),
 	// the GLSL embeds it as a define GS_UNIT_VERSION, and a reader refuses a frame of another version (stale, visible
 	// fallback, automatic recovery once a frame of the current version arrives).
-	constexpr uint32_t kUnitVersion = 4;   // 4: N capped by the frame noise level function (refs/116b); 2: Compact blocks carry the band energies (e1, e2); 3: the v3 law (the two low
+	constexpr uint32_t kUnitVersion = 5;   // 5: STATS per 16x16 chunk + REDUCE, same law and bits (refs/127 A1, WAIVER-P10V5-01); 4: N capped by the frame noise level function (refs/116b); 2: Compact blocks carry the band energies (e1, e2); 3: the v3 law (the two low
 	                                       // bands at half resolution, refs/116; WAIVER-P10V3-01 covers the v2 pins)
 
 	struct Plane
@@ -85,7 +85,21 @@ namespace GrainSplit
 		// law (energyFloor, the level key floor, the luma range) is stated in ten-bit-equivalent units and scaled by
 		// the depth: codes x 2^(bits-10), energies x 2^(2 (bits-10)). Never a hard-coded depth.
 		int sourceBits = 10;
+		// ND04 (the readers' constants of the same law, read from here, never copied): the block edge at <= 2160 lines (x the
+		// grain scale; BlockFor / texture_restore's TilePx), and texture_restore's mid-band calibration (its D2 grain level:
+		// pure grain reads about its own energy). Neither changes this product's pixels.
+		double blockPx = 16.0;
+		double grainCal2 = 3.8;
 	};
+	// The one law of the shared product: every reader and the owner's variant fill (GrainSplitVariantOwner.h) use it; a module
+	// never keeps its own copy of the constants (OD 11-14 04:30; ND03 / ND04). constexpr so readers keep compile-time
+	// constants (array bounds, shader defines) that are reads of this table.
+	constexpr Params DefaultParams() { return Params(); }
+	// ND03: the ONE band Gaussian of the law (the producer's): radius ceil(3 sigma), at least one tap each side, no epsilon;
+	// the normalised taps are VpUnit::BandFromBase::Weight. Every reader of the band sigmas (GrainSplitGpu, texture_restore,
+	// detail_pulse) calls this, never its own Radius flags.
+	inline int BandRadius(double sigma) { return VpUnit::BandFromBase::Radius(sigma, 3.0, true, 0.0); }
+	inline double BandWeight(int k, double sigma) { return VpUnit::BandFromBase::Weight(k, sigma, BandRadius(sigma)); }
 	// The code scale of a depth relative to ten bits (2^(bits-10)); the energy scale is its square.
 	inline double DepthScale(int bits) { return std::ldexp(1.0, bits - 10); }
 
