@@ -315,6 +315,7 @@ namespace SkeletonCoreContextTestsNs
 				m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, CpuFill(&calls2, 0x44, VariantKey::kAxisPrecision));
 				Assert::IsTrue(m.Acquire(kP11RegionBlockStats, 1, AcquireForm::Cpu, half).cause == AcquireCause::VariantUndeclared, L"fp16 refused for every owner, pixelData or not");
 				Assert::IsTrue(calls2.load() == 0, L"and the fill never ran");
+				Assert::IsTrue(Has(m.LastCause(kP11RegionBlockStats), "variant not served"), L"and the decline is visible: the cause text says so");
 			}
 			VariantKey p0;
 			p0.param0 = 3;
