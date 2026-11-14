@@ -176,6 +176,45 @@ namespace SchedulerS2Test
 			Assert::IsFalse(p12.jobbed, L"P12 is an Acquire live fill, not a job");
 		}
 
+		// PRE-C2 (review MUST): with every runner measured (predictUs 400) and a budget that fits all three, the Fill runs every frame and only
+		// after both the Core job (P3) and the Derived job (P3r) of that frame; P3 runs before P3r. Checked per frame.
+		TEST_METHOD(FillRunsOnlyAfterCoreAndDerivedWhenMeasured)
+		{
+			Clock clock;
+			std::vector<ProductId> log;
+			FakeRunner p3, p3r, fill;
+			p3.log = &log; p3r.log = &log; fill.log = &log;
+			p3.chunksPerJob = p3r.chunksPerJob = fill.chunksPerJob = 1;
+			Work wFill(&fill, DeclOf(kP5MonitorTiles, JobClass::Fill, 1), clock.Fn());
+			Work wP3r(&p3r, DeclOf(kRefinedField, JobClass::Derived, 3), clock.Fn());
+			Work wP3(&p3, DeclOf(kP3AnalysisField, JobClass::Core, 2), clock.Fn());
+			SpareHost host;
+			host.Slot().Register(wFill.AsSpare());
+			host.Slot().Register(wP3r.AsSpare());
+			host.Slot().Register(wP3.AsSpare());
+			for (uint64_t f = 1; f <= 4; ++f)
+			{
+				p3.NewFrame(f); p3r.NewFrame(f); fill.NewFrame(f);
+				wFill.Wake(); wP3r.Wake(); wP3.Wake();
+				const size_t start = log.size();
+				host.NotePresented(f, false);
+				host.SetBudget(20.0);
+				host.Fire(SpareTrigger::PostPresentNoExtras);
+				Assert::AreEqual(size_t(3), log.size() - start, L"all three jobs run in this frame");
+				const size_t none = static_cast<size_t>(-1);
+				size_t at3 = none, at3r = none, atFill = none;
+				for (size_t i = start; i < log.size(); ++i)
+				{
+					if (log[i] == kP3AnalysisField) at3 = i;
+					else if (log[i] == kRefinedField) at3r = i;
+					else if (log[i] == kP5MonitorTiles) atFill = i;
+				}
+				Assert::IsTrue(at3 != none && at3r != none && atFill != none, L"every job ran this frame (the Fill included)");
+				Assert::IsTrue(at3 < at3r, L"P3 runs before P3r");
+				Assert::IsTrue(atFill > at3 && atFill > at3r, L"the Fill runs after both the Core and the Derived job of this frame");
+			}
+		}
+
 		// S2-T4: P10 is optional fill until <= 2 ms at 4K is proven, then core (doc 91 C :119; Q4).
 		TEST_METHOD(P10ClassFollowsProof)
 		{
