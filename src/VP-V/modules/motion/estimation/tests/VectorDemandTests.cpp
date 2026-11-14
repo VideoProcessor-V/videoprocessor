@@ -303,13 +303,18 @@ namespace VectorDemandTest
 			// 60p, 250 ms queue: 15 frames, 14 queued after the current one; the depth is 4 (66.7 ms at 60 Hz).
 			const int depth60 = MotionAhead::DepthAt(4, 60.0);
 			Assert::AreEqual(4, depth60);
-			Assert::AreEqual(13, MotionAhead::kMaxLead);
-			Assert::AreEqual(13, MotionAhead::LeadFor(depth60, 14), L"14 queued ahead: the lead stops at 13");
+			// OD 11-14 (BEHAVIOUR-CHANGE OD-11-14-AHEAD-CAP): the cap is the ahead-compute ceiling, was the P2 ring's 13.
+			Assert::AreEqual(int(VpSkeleton::kAheadCeiling), MotionAhead::kMaxLead);
+			Assert::AreEqual(13, MotionAhead::kRingMaxLead, L"the ring's bound is unchanged");
+			Assert::AreEqual(MotionAhead::kMaxLead, MotionAhead::LeadFor(depth60, 14), L"14 queued ahead: the lead stops at the ceiling");
 			Assert::IsTrue(MotionAhead::LeadCapped(depth60, 14), L"the cap binds at 60p / 250 ms");
 			Assert::IsTrue(MotionAhead::LeadCapped(depth60, 15));
-			Assert::IsFalse(MotionAhead::LeadCapped(depth60, 13), L"exactly 13 ahead: every queued frame is computed");
+			Assert::IsTrue(MotionAhead::LeadCapped(depth60, 13), L"13 ahead (the old ring cap): now capped too");
+			Assert::IsFalse(MotionAhead::LeadCapped(depth60, static_cast<size_t>(MotionAhead::kMaxLead)),
+				L"exactly kMaxLead ahead: every queued frame is computed");
 			Assert::IsFalse(MotionAhead::LeadCapped(0, 20), L"no look-ahead (depth 0): nothing is capped");
-			Assert::IsTrue(MotionAhead::LeadCapped(MotionAhead::DepthAt(4, 240.0), 0), L"240p's depth 16 is held to 13");
+			Assert::IsTrue(MotionAhead::LeadCapped(MotionAhead::DepthAt(4, 240.0), 0), L"240p's depth 16 is held to the ceiling");
+			Assert::IsTrue(MotionAhead::LeadCapped(MotionAhead::DepthAt(4, 120.0), 0), L"120p's depth 8 is held to the ceiling");
 
 			MotionAhead::LeadCapTracker t;
 			for (unsigned i = 0; i + 1 < MotionAhead::LeadCapTracker::kLeadCapRun; ++i)
@@ -330,7 +335,7 @@ namespace VectorDemandTest
 			const Decision forward = Decide(Make({ Consumer::GrainMap }));
 			Assert::IsTrue(forward.mode == Mode::Forward);
 			Assert::AreEqual(StatusLine(forward), StatusLine(forward, 0), L"not capped: the line is unchanged");
-			Assert::AreEqual(StatusLine(forward) + "; look-ahead lead capped at 13 frames (more are queued ahead)",
+			Assert::AreEqual(StatusLine(forward) + "; look-ahead lead capped at " + std::to_string(MotionAhead::kMaxLead) + " frames (more are queued ahead)",
 				StatusLine(forward, MotionAhead::kMaxLead));
 			const Decision idle = Decide(Make({}));
 			Assert::AreEqual(StatusLine(idle), StatusLine(idle, MotionAhead::kMaxLead), L"no forward look-ahead: no cap text");
@@ -338,7 +343,8 @@ namespace VectorDemandTest
 			const FallbackCatalog::Decision on = FallbackCatalog::MotionLookaheadCapped(true, MotionAhead::kMaxLead);
 			Assert::IsTrue(on.engaged);
 			Assert::AreEqual(std::string("motion_lookahead_capped"), on.id);
-			Assert::IsTrue(on.reason.find("13 frames ahead") != std::string::npos, L"the reason names the cap");
+			Assert::IsTrue(on.reason.find(std::to_string(MotionAhead::kMaxLead) + " frames ahead") != std::string::npos, L"the reason names the cap");
+			Assert::IsTrue(on.reason.find("ahead-compute ceiling") != std::string::npos, L"and says it is the ceiling (OD 11-14)");
 			const FallbackCatalog::Decision off = FallbackCatalog::MotionLookaheadCapped(false, MotionAhead::kMaxLead);
 			Assert::IsFalse(off.engaged);
 			Assert::AreEqual(std::string("motion_lookahead_capped"), off.id);
