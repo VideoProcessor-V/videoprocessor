@@ -30,7 +30,7 @@
 // variant axis of the ONE product: the FINEST step any active reader declares is computed, coarser readers sample it bilinearly (Sample).
 //
 // COST / FORM (owner R14-16). The product form is a BLOCK field (kBlockStep = 8 source px per cell: 4K = 480 x 270 cells, 14 planes x 0.13 M cells per
-// frame) read through the shared plane sampler: Plane::At (bilinear) and its landing form Plane::Warp (what the readers call). The chain itself samples the adjacent PAIR fields (SampleField), not planes; Product::Value is a thin wrapper of Plane::At. The CPU per-pixel form (step 1) is a REFERENCE only
+// frame) read through the shared plane sampler: Plane::At (bilinear) and its landing form Plane::Warp (what the readers call). Product::Value now goes through Plane::Warp. ComposeStep (the PRODUCER, not a consumer path) samples the adjacent PAIR fields (SampleField: PairField is the engine's input, not a plane) and reads the previous plane cell by cell on the same grid; no reader ever calls it. The CPU per-pixel form (step 1) is a REFERENCE only
 // (4K: 14 planes x 8.3 M px per frame is not a render-time budget); a reader may ask for a finer step (SetReaderStep), the finest active step wins. Form / step contract: a plane is
 // ALWAYS a raster of `step` source px per cell with trust and uncertainty; step 1 = per pixel; a GPU form must publish the same fields at the same step.
 // CALLERS NOT BUILT HERE: the IPairSource adapter over the P2 slot / CellTrust memo / MotionValidity (the grain-level and TD lanes) and the Invalidate()
@@ -379,9 +379,22 @@ public:
     }
 
     // A pure helper for tests and for readers that need a single point: the composed value of pixel (x, y) of frame t at offset k, or trust 0.
+    // It goes through the shared sampler Plane::Warp (landing form), so a dead chain or a landing outside the frame reads as trust 0 here too.
     static Sampled Value(const PlanePtr& p, double x, double y)
     {
-        return p ? p->At(x, y) : Sampled();
+        if (!p)
+            return Sampled();
+        const Sampled raw = p->At(x, y);
+        const Plane::Warped w = p->Warp(x, y);
+        Sampled s = raw;
+        if (w.valid) {
+            s.dx = static_cast<float>(w.x - x);
+            s.dy = static_cast<float>(w.y - y);
+        } else {
+            s.trust = 0.0f;
+        }
+        s.unc = w.unc;
+        return s;
     }
 
 private:

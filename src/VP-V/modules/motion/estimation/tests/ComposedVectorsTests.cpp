@@ -399,6 +399,30 @@ namespace ComposedVectorsTest
 			Assert::IsFalse(pl->Warp(-1.0, 10.0).valid);                 // outside the frame
 			Assert::IsFalse(pl->Warp(kW + 5.0, 10.0).valid);
 		}
+		TEST_METHOD(WarpIsInvalidForADeadChainAndForALandingOutsideTheFrame)
+		{
+			FakeSource src;
+			src.fwdDx = 40.0;   // 40 px per step
+			Product p(&src);
+			ActivateBoth(p);
+			p.Prepare(100);
+			PlanePtr pl;
+			Assert::IsTrue(p.Acquire(100, Dir::Ahead, 1, pl) == Got::Ok);
+			Assert::IsTrue(pl->Warp(8.0, 32.0).valid);                     // lands at 48, inside
+			Assert::AreEqual(48.0, pl->Warp(8.0, 32.0).x, 1e-3);
+			const Plane::Warped dead = pl->Warp(kW - 8.0, 32.0);           // the chain left the frame: trust 0
+			Assert::IsFalse(dead.valid);
+			Assert::AreEqual(0.0, (double)dead.trust, 1e-6);
+			// Landing outside the frame with a live trust: hand-built plane, +10 px at the right edge.
+			Plane q;
+			q.step = 8; q.srcW = kW; q.srcH = kH; q.w = kW / 8; q.h = kH / 8;
+			const size_t n = static_cast<size_t>(q.w) * q.h;
+			q.dx.assign(n, 10.0f); q.dy.assign(n, 0.0f); q.trust.assign(n, 1.0f); q.unc.assign(n, 2.0f);
+			Assert::IsTrue(q.Warp(64.0, 32.0).valid);
+			Assert::IsFalse(q.Warp(kW - 2.0, 32.0).valid);                 // lands at kW + 8
+			Assert::AreEqual(0.0, (double)Product::Value(std::make_shared<const Plane>(q), kW - 2.0, 32.0).trust, 1e-6);
+			Assert::AreEqual(2.0, (double)q.Warp(kW - 2.0, 32.0).unc, 1e-6);   // the uncertainty is still reported
+		}
 		TEST_METHOD(PartialBudgetKeepsWhatFitsAndSaysWhy)
 		{
 			FakeSource src;
