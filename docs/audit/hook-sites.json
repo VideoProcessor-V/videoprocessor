@@ -1,7 +1,7 @@
 {
  "_note": "a site = one maximal run of consecutive VPV-HOOK lines (vp_footprint hook_line_set widened to any line carrying `// VPV-HOOK`) in a Bill-owned file (present at the base ref, outside src/VP-V/); matched by file + whitespace-insensitive text; the anchor (enclosing symbol, Bill lines before / after) is for the re-graft script; seam / expiry are filled by hand from refs/107-host-seams-plan.md s2; regenerate with `python -I tools/check_hook_gating.py --write-manifest` (matches sites by file and text, identical-text duplicates by anchor then nearest line then order; keeps their ids, hand-filled seam / expiry and order; never reuses a dropped id)",
  "base_ref": "a591ad3b5",
- "generated_at": "2026-11-12",
+ "generated_at": "2026-11-14",
  "sites": [
   {
    "id": "BPT.cpp-0001",
@@ -50,154 +50,10 @@
    "expiry": null
   },
   {
-   "id": "AM.cpp-0001",
-   "file": "src/VideoProcessor-Config/AppMain.cpp",
-   "start": 12,
-   "end": 12,
-   "anchor": {
-    "symbol": "",
-    "before": [
-     "#include \"Resource.h\"",
-     "#include \"VpTheme.h\""
-    ],
-    "after": [
-     "#include <ConfigurationRpcProtocol.h>"
-    ]
-   },
-   "lines": [
-    "#include <VP-V/config/VpvConfigProviders.h>   // VPV-HOOK"
-   ],
-   "text": "#include <VP-V/config/VpvConfigProviders.h>",
-   "gate": "declaration",
-   "seam": null,
-   "expiry": null
-  },
-  {
-   "id": "AM.cpp-0002",
-   "file": "src/VideoProcessor-Config/AppMain.cpp",
-   "start": 342,
-   "end": 342,
-   "anchor": {
-    "symbol": "wWinMain",
-    "before": [
-     "QApplication app(argc, __argv);",
-     "ConfigWheelGuard::install();"
-    ],
-    "after": [
-     "if (UpdateLauncher::InstallationPending())"
-    ]
-   },
-   "lines": [
-    "    Vpv::RegisterConfigProviders();   // VPV-HOOK (before the first editor is created)"
-   ],
-   "text": "Vpv::RegisterConfigProviders();",
-   "gate": "allowed",
-   "seam": null,
-   "expiry": null
-  },
-  {
-   "id": "CEW.cpp-0001",
-   "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 135,
-   "end": 138,
-   "anchor": {
-    "symbol": "",
-    "before": [
-     "#include <VP-V/config/VpvSection.h> // VP-V section hook (src/VP-V/config/README.md)",
-     "#include <VP-V/config/VpvRenderingDefaults.h> // unset VP-V keys' defaults (moved out of this file; one call site)"
-    ],
-    "after": [
-     "#pragma comment(lib, \"dxgi.lib\")"
-    ]
-   },
-   "lines": [
-    "#include <VP-V/config/VpvDitherChoiceSet.h>   // VPV-HOOK",
-    "#include \"ConfigPageHost.h\"   // VPV-HOOK",
-    "#include <VP-V/config/VpvConfigPages.h>   // VPV-HOOK",
-    "#include <VP-V/config/VpvFormLayout.h>   // VPV-HOOK"
-   ],
-   "text": "#include <VP-V/config/VpvDitherChoiceSet.h> #include \"ConfigPageHost.h\" #include <VP-V/config/VpvConfigPages.h> #include <VP-V/config/VpvFormLayout.h>",
-   "gate": "declaration",
-   "seam": null,
-   "expiry": null
-  },
-  {
-   "id": "CEW.cpp-0002",
-   "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 1330,
-   "end": 1379,
-   "anchor": {
-    "symbol": "document_",
-    "before": [
-     "resize(1120, 700);",
-     "setMinimumSize(760, 540);"
-    ],
-    "after": [
-     "loadConfiguration();"
-    ]
-   },
-   "lines": [
-    "    // VPV-HOOK",
-    "    formApi_.valueFn = [this](const QString& section, const QString& key) { return value(section, key); };",
-    "    formApi_.setValueFn = [this](const QString& section, const QString& key, const QString& text)",
-    "    {",
-    "        if (!document_) return;",
-    "        if (text.isEmpty()) document_->RemoveKnown(section.toStdString(), key.toStdString().c_str());",
-    "        else document_->SetKnown(section.toStdString(), key.toStdString().c_str(), text.toLocal8Bit().constData());",
-    "        if (centralWidget()) markDirty();",
-    "    };",
-    "    formApi_.markDirtyFn = [this] { markDirty(); };",
-    "    formApi_.profileSectionsFn = [this](const QString& root) { return profileSections(root); };",
-    "    // The editor's own field helpers and services for provider pages (ConfigPageHost::EditorKit).",
-    "    Vpv::FunctionEditorKit& kit = formApi_.kit;",
-    "    kit.valueFn = [this](const QString& s, const QString& k, const QString& fallback) { return value(s, k, fallback); };",
-    "    kit.bindTextFn = [this](const QString& s, const QString& k, const QString& fallback) { return bindTextField(s, k, fallback); };",
-    "    kit.bindChoiceFn = [this](const QString& s, const QString& k, const QStringList& values, const QStringList& labels) { return bindChoiceField(s, k, values, labels); };",
-    "    kit.bindCheckFn = [this](const QString& label, const QString& s, const QString& k, bool on) { return bindCheckField(label, s, k, on); };",
-    "    kit.controlNameFn = [](const QString& s, const QString& k) { return controlName(s, k); };",
-    "    kit.helpLabelFn = [](const QString& text) { return helpLabel(text); };",
-    "    kit.createCardFn = [this](const QString& title, const QString& help, QWidget* content) { return createCard(title, help, content); };",
-    "    kit.createPageFn = [this](const QString& title, const QString& help, QWidget* body) { return createPage(title, help, body); };",
-    "    kit.createCardGridFn = [] { return static_cast<QWidget*>(new ResponsiveCardGrid); };",
-    "    kit.addCardFn = [](QWidget* grid, QWidget* card) { static_cast<ResponsiveCardGrid*>(grid)->addCard(card); };",
-    "    kit.setKnownFn = [this](const QString& s, const QString& k, const QString& text)",
-    "    {",
-    "        if (!document_) return;",
-    "        if (!document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toLocal8Bit().constData()))",
-    "        {",
-    "            document_->AddSection(s.toStdString());",
-    "            document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toLocal8Bit().constData());",
-    "        }",
-    "    };",
-    "    kit.removeKnownFn = [this](const QString& s, const QString& k) { if (document_) document_->RemoveKnown(s.toStdString(), k.toStdString().c_str()); };",
-    "    kit.configPathFn = [this] { return configPath_; };",
-    "    kit.markDirtyFn = [this](QObject* edited)",
-    "    {",
-    "        if (edited && edited->objectName().startsWith(QStringLiteral(\"config.\")))",
-    "            editOrder_[edited->objectName()] = ++editSerial_;",
-    "        markDirty();",
-    "    };",
-    "    kit.windowFn = [this] { return static_cast<QWidget*>(this); };",
-    "    kit.currentPageFn = [this] { return pages_ ? pages_->currentWidget() : nullptr; };",
-    "    kit.settingsPreviewFn = [] { return sandboxPreview(); };",
-    "    kit.noTargetFn = [this] { return noTarget_; };",
-    "    kit.remoteTargetFn = [this] { return ConfigPageHost::EditorKit::RemoteTarget{ remoteClient_ != nullptr, remoteHost_, remotePort_ }; };",
-    "    kit.documentDirtyFn = [this] { return dirty_; };",
-    "    kit.discardEditsFn = [this] { discardEdits(); };",
-    "    kit.setStatusFn = [this](const QString& text) { setStatus(text); };",
-    "    kit.setWarningStatusFn = [this](const QString& text) { setWarningStatus(text); };",
-    "    // VPV-HOOK-END"
-   ],
-   "text": "formApi_.valueFn = [this](const QString& section, const QString& key) { return value(section, key); }; formApi_.setValueFn = [this](const QString& section, const QString& key, const QString& text) { if (!document_) return; if (text.isEmpty()) document_->RemoveKnown(section.toStdString(), key.toStdString().c_str()); else document_->SetKnown(section.toStdString(), key.toStdString().c_str(), text.toLocal8Bit().constData()); if (centralWidget()) markDirty(); }; formApi_.markDirtyFn = [this] { markDirty(); }; formApi_.profileSectionsFn = [this](const QString& root) { return profileSections(root); }; Vpv::FunctionEditorKit& kit = formApi_.kit; kit.valueFn = [this](const QString& s, const QString& k, const QString& fallback) { return value(s, k, fallback); }; kit.bindTextFn = [this](const QString& s, const QString& k, const QString& fallback) { return bindTextField(s, k, fallback); }; kit.bindChoiceFn = [this](const QString& s, const QString& k, const QStringList& values, const QStringList& labels) { return bindChoiceField(s, k, values, labels); }; kit.bindCheckFn = [this](const QString& label, const QString& s, const QString& k, bool on) { return bindCheckField(label, s, k, on); }; kit.controlNameFn = [](const QString& s, const QString& k) { return controlName(s, k); }; kit.helpLabelFn = [](const QString& text) { return helpLabel(text); }; kit.createCardFn = [this](const QString& title, const QString& help, QWidget* content) { return createCard(title, help, content); }; kit.createPageFn = [this](const QString& title, const QString& help, QWidget* body) { return createPage(title, help, body); }; kit.createCardGridFn = [] { return static_cast<QWidget*>(new ResponsiveCardGrid); }; kit.addCardFn = [](QWidget* grid, QWidget* card) { static_cast<ResponsiveCardGrid*>(grid)->addCard(card); }; kit.setKnownFn = [this](const QString& s, const QString& k, const QString& text) { if (!document_) return; if (!document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toLocal8Bit().constData())) { document_->AddSection(s.toStdString()); document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toLocal8Bit().constData()); } }; kit.removeKnownFn = [this](const QString& s, const QString& k) { if (document_) document_->RemoveKnown(s.toStdString(), k.toStdString().c_str()); }; kit.configPathFn = [this] { return configPath_; }; kit.markDirtyFn = [this](QObject* edited) { if (edited && edited->objectName().startsWith(QStringLiteral(\"config.\"))) editOrder_[edited->objectName()] = ++editSerial_; markDirty(); }; kit.windowFn = [this] { return static_cast<QWidget*>(this); }; kit.currentPageFn = [this] { return pages_ ? pages_->currentWidget() : nullptr; }; kit.settingsPreviewFn = [] { return sandboxPreview(); }; kit.noTargetFn = [this] { return noTarget_; }; kit.remoteTargetFn = [this] { return ConfigPageHost::EditorKit::RemoteTarget{ remoteClient_ != nullptr, remoteHost_, remotePort_ }; }; kit.documentDirtyFn = [this] { return dirty_; }; kit.discardEditsFn = [this] { discardEdits(); }; kit.setStatusFn = [this](const QString& text) { setStatus(text); }; kit.setWarningStatusFn = [this](const QString& text) { setWarningStatus(text); };",
-   "gate": "non-pathway",
-   "seam": null,
-   "expiry": null
-  },
-  {
    "id": "CEW.cpp-0003",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 1512,
-   "end": 1512,
+   "start": 1458,
+   "end": 1458,
    "anchor": {
     "symbol": "ConfigEditorWindow::~ConfigEditorWindow",
     "before": [
@@ -219,8 +75,8 @@
   {
    "id": "CEW.cpp-0004",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 2063,
-   "end": 2063,
+   "start": 2009,
+   "end": 2009,
    "anchor": {
     "symbol": "ConfigEditorWindow::selectPage",
     "before": [
@@ -242,8 +98,8 @@
   {
    "id": "CEW.cpp-0005",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 2174,
-   "end": 2174,
+   "start": 2120,
+   "end": 2120,
    "anchor": {
     "symbol": "ConfigEditorWindow::runLoadMigrations",
     "before": [
@@ -265,8 +121,8 @@
   {
    "id": "CEW.cpp-0006",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 2659,
-   "end": 2659,
+   "start": 2605,
+   "end": 2605,
    "anchor": {
     "symbol": "ConfigEditorWindow::migrateProcessingToScaling",
     "before": [
@@ -288,8 +144,8 @@
   {
    "id": "CEW.cpp-0007",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 2675,
-   "end": 2675,
+   "start": 2621,
+   "end": 2621,
    "anchor": {
     "symbol": "ConfigEditorWindow::migrateProcessingToScaling",
     "before": [
@@ -311,8 +167,8 @@
   {
    "id": "CEW.cpp-0008",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 4534,
-   "end": 4534,
+   "start": 4480,
+   "end": 4480,
    "anchor": {
     "symbol": "ConfigEditorWindow::saveChanges",
     "before": [
@@ -334,8 +190,8 @@
   {
    "id": "CEW.cpp-0009",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 4830,
-   "end": 4830,
+   "start": 4776,
+   "end": 4776,
    "anchor": {
     "symbol": "ConfigEditorWindow::saveChanges",
     "before": [
@@ -355,68 +211,10 @@
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0010",
-   "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 5019,
-   "end": 5054,
-   "anchor": {
-    "symbol": "ConfigEditorWindow::createShell",
-    "before": [
-     "QStringLiteral(\"vprenderer.motion\")));",
-     "const int displayPageIndex = pages_->addWidget(createDisplayPage());"
-    ],
-    "after": [
-     "auto* navGroup = new QButtonGroup(root);"
-    ]
-   },
-   "lines": [
-    "    // VPV-HOOK",
-    "    vpvPages_.reset();",
-    "    vpvPages_.appendProviderPages(pages_, formApi_);   // sub-pages first, so the VP-V page can link them",
-    "    // VP-V section hook (owner 2026-10-24; src/VP-V/config/README.md). The whole VP-V section lives in src/VP-V/config/;",
-    "    // this block and the \"VP-V\" navigation leaf below are its only footprint in this file.",
-    "    {",
-    "        Vpv::Host vpvHost;",
-    "        vpvHost.value = [this](const QString& section, const QString& key) { return value(section, key); };",
-    "        vpvHost.setValue = [this](const QString& section, const QString& key, const QString& text)",
-    "        {",
-    "            if (!document_) return;",
-    "            if (text.isEmpty()) document_->RemoveKnown(section.toStdString(), key.toStdString().c_str());",
-    "            else document_->SetKnown(section.toStdString(), key.toStdString().c_str(), text.toLocal8Bit().constData());",
-    "            markDirty();",
-    "            // The pathway decides which Dithering choices the Scaling page offers.",
-    "            if (key == QStringLiteral(\"pipeline_original_pathway\"))",
-    "                pathwayRefreshers_.refresh();",
-    "        };",
-    "        vpvHost.profileSections = [this](const QString& root) { return profileSections(root); };",
-    "        vpvHost.upstreamControlName = [](const QString& key) { return controlName(QStringLiteral(\"vprenderer\"), key); };",
-    "        vpvHost.upstreamRoot = pages_;",
-    "        vpvHost.subPages = [this](const QString& unitId)",
-    "        {",
-    "            std::vector<Vpv::SubPage> subs;",
-    "            for (const auto& sub : vpvPages_.subPagesOf(QStringLiteral(\"VP-V\"), unitId))",
-    "                subs.push_back({ sub.name, sub.name, sub.description });",
-    "            return subs;",
-    "        };",
-    "        vpvHost.openPage = [this](const QString& pageName) { selectPage(pageName); };",
-    "        vpvHost.bothPathwayCards = [this] { return Vpv::BothPathwayCards(formApi_.kit); };",
-    "        vpvHost.unitCards = [this](const QString& unitId) { return vpvPages_.takeUnitCards(unitId); };",
-    "        vpvPages_.append(pages_, QStringLiteral(\"VP-V\"), createPage(QStringLiteral(\"VP-V\"),",
-    "            QStringLiteral(\"Everything VP-V adds, by unit: one tier per unit plus a global tier, each unit's settings, and the fallbacks engaged.\"),",
-    "            Vpv::CreateSection(vpvHost)));",
-    "    }",
-    "    // VPV-HOOK-END"
-   ],
-   "text": "vpvPages_.reset(); vpvPages_.appendProviderPages(pages_, formApi_); { Vpv::Host vpvHost; vpvHost.value = [this](const QString& section, const QString& key) { return value(section, key); }; vpvHost.setValue = [this](const QString& section, const QString& key, const QString& text) { if (!document_) return; if (text.isEmpty()) document_->RemoveKnown(section.toStdString(), key.toStdString().c_str()); else document_->SetKnown(section.toStdString(), key.toStdString().c_str(), text.toLocal8Bit().constData()); markDirty(); if (key == QStringLiteral(\"pipeline_original_pathway\")) pathwayRefreshers_.refresh(); }; vpvHost.profileSections = [this](const QString& root) { return profileSections(root); }; vpvHost.upstreamControlName = [](const QString& key) { return controlName(QStringLiteral(\"vprenderer\"), key); }; vpvHost.upstreamRoot = pages_; vpvHost.subPages = [this](const QString& unitId) { std::vector<Vpv::SubPage> subs; for (const auto& sub : vpvPages_.subPagesOf(QStringLiteral(\"VP-V\"), unitId)) subs.push_back({ sub.name, sub.name, sub.description }); return subs; }; vpvHost.openPage = [this](const QString& pageName) { selectPage(pageName); }; vpvHost.bothPathwayCards = [this] { return Vpv::BothPathwayCards(formApi_.kit); }; vpvHost.unitCards = [this](const QString& unitId) { return vpvPages_.takeUnitCards(unitId); }; vpvPages_.append(pages_, QStringLiteral(\"VP-V\"), createPage(QStringLiteral(\"VP-V\"), QStringLiteral(\"Everything VP-V adds, by unit: one tier per unit plus a global tier, each unit's settings, and the fallbacks engaged.\"), Vpv::CreateSection(vpvHost))); }",
-   "gate": "non-pathway",
-   "seam": null,
-   "expiry": null
-  },
-  {
    "id": "CEW.cpp-0011",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 5077,
-   "end": 5077,
+   "start": 4988,
+   "end": 4988,
    "anchor": {
     "symbol": "ConfigEditorWindow::createShell",
     "before": [
@@ -438,8 +236,8 @@
   {
    "id": "CEW.cpp-0012",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 5357,
-   "end": 5357,
+   "start": 5268,
+   "end": 5268,
    "anchor": {
     "symbol": "ConfigEditorWindow::addNavigationButton",
     "before": [
@@ -461,8 +259,8 @@
   {
    "id": "CEW.cpp-0013",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 5536,
-   "end": 5536,
+   "start": 5447,
+   "end": 5447,
    "anchor": {
     "symbol": "ConfigEditorWindow::createStartupPage",
     "before": [
@@ -484,8 +282,8 @@
   {
    "id": "CEW.cpp-0014",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 5862,
-   "end": 5862,
+   "start": 5773,
+   "end": 5773,
    "anchor": {
     "symbol": "ConfigEditorWindow::createStartupPage",
     "before": [
@@ -507,8 +305,8 @@
   {
    "id": "CEW.cpp-0015",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 6105,
-   "end": 6105,
+   "start": 6016,
+   "end": 6016,
    "anchor": {
     "symbol": "const auto activeQueuePolicies = [this]() -> const QueuePoli",
     "before": [
@@ -530,8 +328,8 @@
   {
    "id": "CEW.cpp-0016",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 6202,
-   "end": 6202,
+   "start": 6113,
+   "end": 6113,
    "anchor": {
     "symbol": "Vpv::AddVpvProfileUseRows(sectionPrefix, title, list, rule, ",
     "before": [
@@ -553,8 +351,8 @@
   {
    "id": "CEW.cpp-0017",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 6663,
-   "end": 6663,
+   "start": 6574,
+   "end": 6574,
    "anchor": {
     "symbol": "connect(spin, qOverload<int>(&QSpinBox::valueChanged), this,",
     "before": [
@@ -576,8 +374,8 @@
   {
    "id": "CEW.cpp-0018",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 7273,
-   "end": 7273,
+   "start": 7184,
+   "end": 7184,
    "anchor": {
     "symbol": ", QueueLatency::MaxTargetLatencyMs, [](const QString& text)",
     "before": [
@@ -597,46 +395,10 @@
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0019",
-   "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 9045,
-   "end": 9058,
-   "anchor": {
-    "symbol": "ConfigEditorWindow::createProfilePage",
-    "before": [
-     "auto* motionAhead = addChoice(QStringLiteral(\"Motion vectors computed ahead\"), QStringLiteral(\"motion_ahead_frames\"),",
-     "{ QStringLiteral(\"4\"), QStringLiteral(\"0\") });"
-    ],
-    "after": [
-     "{"
-    ]
-   },
-   "lines": [
-    "        // VPV-HOOK",
-    "        // B1 (owner 2026-11-10, doc 91 C): the value is the minimum; the look-ahead runs every frame queued ahead.",
-    "        motionAhead->setItemText(motionAhead->findData(QStringLiteral(\"4\")), QStringLiteral(\"On (looks ahead across the queued frames)\"));",
-    "        motionAhead->setItemText(motionAhead->findData(QStringLiteral(\"0\")), QStringLiteral(\"Off\"));",
-    "        // Settings guide audit 2026-10-24: the forced 5-frame queue minimum is gone (r6 fix 2) and the",
-    "        // look-ahead is a time (r6 fix 3), so the old \"holds at least 5\" text was wrong.",
-    "        motionAhead->setToolTip(QStringLiteral(",
-    "            \"NVIDIA GPUs: the optical-flow engine computes the motion ahead of the picture on its own hardware, off \"",
-    "            \"the render path. On: the look-ahead runs every frame queued ahead of render (up to 13 frames); the value \"",
-    "            \"is the minimum the queue keeps for it (about 67 ms: 2 frames at 24p, 4 at 50/60p). It never lengthens \"",
-    "            \"the queue beyond that minimum; on a short queue it looks less far ahead, and with no frames ahead the \"",
-    "            \"de-judder estimates at render time or holds. The low-latency queue switches it off. Off, or other GPUs: \"",
-    "            \"VP's matcher at render time.\"));",
-    "        // VPV-HOOK-END"
-   ],
-   "text": "motionAhead->setItemText(motionAhead->findData(QStringLiteral(\"4\")), QStringLiteral(\"On (looks ahead across the queued frames)\")); motionAhead->setItemText(motionAhead->findData(QStringLiteral(\"0\")), QStringLiteral(\"Off\")); motionAhead->setToolTip(QStringLiteral( \"NVIDIA GPUs: the optical-flow engine computes the motion ahead of the picture on its own hardware, off \" \"the render path. On: the look-ahead runs every frame queued ahead of render (up to 13 frames); the value \" \"is the minimum the queue keeps for it (about 67 ms: 2 frames at 24p, 4 at 50/60p). It never lengthens \" \"the queue beyond that minimum; on a short queue it looks less far ahead, and with no frames ahead the \" \"de-judder estimates at render time or holds. The low-latency queue switches it off. Off, or other GPUs: \" \"VP's matcher at render time.\"));",
-   "gate": "non-pathway",
-   "seam": null,
-   "expiry": null
-  },
-  {
    "id": "CEW.cpp-0020",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 10838,
-   "end": 10838,
+   "start": 10736,
+   "end": 10736,
    "anchor": {
     "symbol": "Vpv::AddVpvScalingRows(form, addChoice, addRendererAutoStatu",
     "before": [
@@ -658,8 +420,8 @@
   {
    "id": "CEW.cpp-0021",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11523,
-   "end": 11523,
+   "start": 11421,
+   "end": 11421,
    "anchor": {
     "symbol": "auto fallback = [this, sectionPrefix, section, preservePrese",
     "before": [
@@ -681,8 +443,8 @@
   {
    "id": "CEW.cpp-0022",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11701,
-   "end": 11701,
+   "start": 11599,
+   "end": 11599,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -704,8 +466,8 @@
   {
    "id": "CEW.cpp-0023",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11705,
-   "end": 11705,
+   "start": 11603,
+   "end": 11603,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -727,8 +489,8 @@
   {
    "id": "CEW.cpp-0024",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11711,
-   "end": 11711,
+   "start": 11609,
+   "end": 11609,
    "anchor": {
     "symbol": "const auto concreteChoice = [&](QString choice)",
     "before": [
@@ -750,8 +512,8 @@
   {
    "id": "CEW.cpp-0025",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11793,
-   "end": 11793,
+   "start": 11691,
+   "end": 11691,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -773,8 +535,8 @@
   {
    "id": "CEW.cpp-0026",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11811,
-   "end": 11811,
+   "start": 11709,
+   "end": 11709,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -796,8 +558,8 @@
   {
    "id": "CEW.cpp-0027",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11928,
-   "end": 11928,
+   "start": 11826,
+   "end": 11826,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -819,8 +581,8 @@
   {
    "id": "CEW.cpp-0028",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12037,
-   "end": 12037,
+   "start": 11935,
+   "end": 11935,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -842,8 +604,8 @@
   {
    "id": "CEW.cpp-0029",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12238,
-   "end": 12238,
+   "start": 12136,
+   "end": 12136,
    "anchor": {
     "symbol": "connect(queuePolicy, qOverload<int>(&QComboBox::currentIndex",
     "before": [
@@ -865,8 +627,8 @@
   {
    "id": "CEW.cpp-0030",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12250,
-   "end": 12250,
+   "start": 12148,
+   "end": 12148,
    "anchor": {
     "symbol": "connect(queuePolicy, qOverload<int>(&QComboBox::currentIndex",
     "before": [
@@ -888,8 +650,8 @@
   {
    "id": "CEW.cpp-0031",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12254,
-   "end": 12254,
+   "start": 12152,
+   "end": 12152,
    "anchor": {
     "symbol": "connect(queuePolicy, qOverload<int>(&QComboBox::currentIndex",
     "before": [
@@ -911,8 +673,8 @@
   {
    "id": "CEW.cpp-0032",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12389,
-   "end": 12389,
+   "start": 12287,
+   "end": 12287,
    "anchor": {
     "symbol": "ConfigEditorWindow::createProfilePage",
     "before": [
@@ -1004,34 +766,10 @@
    "expiry": null
   },
   {
-   "id": "CEW.h-0004",
-   "file": "src/VideoProcessor-Config/ConfigEditorWindow.h",
-   "start": 347,
-   "end": 348,
-   "anchor": {
-    "symbol": "",
-    "before": [
-     "QStringList monitors_;",
-     "QStackedWidget* pages_ = nullptr;"
-    ],
-    "after": [
-     "QWidget* navigation_ = nullptr;"
-    ]
-   },
-   "lines": [
-    "    Vpv::ConfigPageDirectory vpvPages_;   // VPV-HOOK",
-    "    Vpv::FunctionFormApi formApi_;   // VPV-HOOK"
-   ],
-   "text": "Vpv::ConfigPageDirectory vpvPages_; Vpv::FunctionFormApi formApi_;",
-   "gate": "declaration",
-   "seam": null,
-   "expiry": null
-  },
-  {
    "id": "CEW.h-0005",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.h",
-   "start": 401,
-   "end": 401,
+   "start": 402,
+   "end": 402,
    "anchor": {
     "symbol": "",
     "before": [
@@ -1124,8 +862,8 @@
   {
    "id": "CEWT.cpp-0004",
    "file": "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp",
-   "start": 12594,
-   "end": 12594,
+   "start": 12595,
+   "end": 12595,
    "anchor": {
     "symbol": "main",
     "before": [
@@ -1147,8 +885,8 @@
   {
    "id": "CEWT.cpp-0005",
    "file": "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp",
-   "start": 12610,
-   "end": 12610,
+   "start": 12611,
+   "end": 12611,
    "anchor": {
     "symbol": "main",
     "before": [
@@ -1170,8 +908,8 @@
   {
    "id": "CEWT.cpp-0006",
    "file": "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp",
-   "start": 12885,
-   "end": 12887,
+   "start": 12886,
+   "end": 12888,
    "anchor": {
     "symbol": "main",
     "before": [
@@ -1193,37 +931,10 @@
    "expiry": null
   },
   {
-   "id": "VPA.cpp-0001",
-   "file": "src/VideoProcessor-GUI/VideoProcessorApp.cpp",
-   "start": 1438,
-   "end": 1442,
-   "anchor": {
-    "symbol": "CVideoProcessorApp::InitInstance",
-    "before": [
-     "return FALSE;",
-     "}"
-    ],
-    "after": [
-     "// Resolve startup-only logging configuration before rotation and before"
-    ]
-   },
-   "lines": [
-    "\t// VPV-HOOK",
-    "\t// C15: the one recent-lines ring (control\\diagnostics\\CrashState) listens to",
-    "\t// DebugLog from the first line, as DebugLog's own ring did.",
-    "\tCrashState::InstallLogRing();",
-    "\t// VPV-HOOK-END"
-   ],
-   "text": "CrashState::InstallLogRing();",
-   "gate": "non-pathway",
-   "seam": null,
-   "expiry": null
-  },
-  {
    "id": "VPA.cpp-0002",
    "file": "src/VideoProcessor-GUI/VideoProcessorApp.cpp",
-   "start": 1531,
-   "end": 1531,
+   "start": 1525,
+   "end": 1525,
    "anchor": {
     "symbol": "recorder.Start(folder, []",
     "before": [
@@ -2245,30 +1956,6 @@
    ],
    "text": "#include <VP-V/abi/VpvPluginGuard.h>",
    "gate": "declaration",
-   "seam": null,
-   "expiry": null
-  },
-  {
-   "id": "LPVR.cpp-0002",
-   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp",
-   "start": 162,
-   "end": 163,
-   "anchor": {
-    "symbol": "LoadPlugin",
-    "before": [
-     "return refuse(result.module, \"VP Renderer DLL refused: flavor mismatch (Beta/non-Beta folder swapped).\");",
-     "}"
-    ],
-    "after": [
-     "result.startupReadiness = reinterpret_cast<VideoProcessorLibplaceboGetStartupReadinessFn>("
-    ]
-   },
-   "lines": [
-    "\t\tif (!Vpv::PluginGuard::Check(result.module, pairing)) return refuse(result.module, pairing); // VPV-HOOK",
-    "\t\tif (!Vpv::PluginGuard::Attach(result.module, pairing)) return refuse(result.module, pairing); // VPV-HOOK"
-   ],
-   "text": "if (!Vpv::PluginGuard::Check(result.module, pairing)) return refuse(result.module, pairing); if (!Vpv::PluginGuard::Attach(result.module, pairing)) return refuse(result.module, pairing);",
-   "gate": "allowed-enclosing",
    "seam": null,
    "expiry": null
   },
@@ -6309,6 +5996,145 @@
    ],
    "text": "RendererExtension::NotifyEntrance(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(nextSourceSequence), static_cast<int64_t>(frameGeneration), &renderImage, &target, width, height, cadenceRepeat, captureRateHz); PlanEntrance(renderImage, target, image, sourceSequence, captureRateHz, nominalSourceRateHz, state);",
    "gate": "allowed",
+   "seam": null,
+   "expiry": null
+  },
+  {
+   "id": "CEW.cpp-0034",
+   "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
+   "start": 1325,
+   "end": 1325,
+   "anchor": {
+    "symbol": "document_",
+    "before": [
+     "resize(1120, 700);",
+     "setMinimumSize(760, 540);"
+    ],
+    "after": [
+     "loadConfiguration();"
+    ]
+   },
+   "lines": [
+    "    Vpv::ConfigEditorAccess::BindFormApi(*this);   // VPV-HOOK"
+   ],
+   "text": "Vpv::ConfigEditorAccess::BindFormApi(*this);",
+   "gate": "non-pathway",
+   "seam": null,
+   "expiry": null
+  },
+  {
+   "id": "CEW.cpp-0035",
+   "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
+   "start": 4965,
+   "end": 4965,
+   "anchor": {
+    "symbol": "ConfigEditorWindow::createShell",
+    "before": [
+     "QStringLiteral(\"vprenderer.motion\")));",
+     "const int displayPageIndex = pages_->addWidget(createDisplayPage());"
+    ],
+    "after": [
+     "auto* navGroup = new QButtonGroup(root);"
+    ]
+   },
+   "lines": [
+    "    Vpv::ConfigEditorAccess::BuildVpvPages(*this);   // VPV-HOOK (provider sub-pages, then the VP-V page)"
+   ],
+   "text": "Vpv::ConfigEditorAccess::BuildVpvPages(*this);",
+   "gate": "non-pathway",
+   "seam": null,
+   "expiry": null
+  },
+  {
+   "id": "CEW.cpp-0036",
+   "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
+   "start": 8956,
+   "end": 8956,
+   "anchor": {
+    "symbol": "ConfigEditorWindow::createProfilePage",
+    "before": [
+     "auto* motionAhead = addChoice(QStringLiteral(\"Motion vectors computed ahead\"), QStringLiteral(\"motion_ahead_frames\"),",
+     "{ QStringLiteral(\"4\"), QStringLiteral(\"0\") });"
+    ],
+    "after": [
+     "{"
+    ]
+   },
+   "lines": [
+    "        Vpv::ApplyMotionAheadText(motionAhead);   // VPV-HOOK"
+   ],
+   "text": "Vpv::ApplyMotionAheadText(motionAhead);",
+   "gate": "non-pathway",
+   "seam": null,
+   "expiry": null
+  },
+  {
+   "id": "CEW.cpp-0037",
+   "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
+   "start": 15044,
+   "end": 15044,
+   "anchor": {
+    "symbol": "",
+    "before": [
+     "QAccessible::updateAccessibility(&changed);",
+     "}"
+    ],
+    "after": []
+   },
+   "lines": [
+    "#include <VP-V/modules/control/config/config_pages/ConfigEditorAccess.inl>   // VPV-HOOK (S4A A4: the editor's VP-V seams)"
+   ],
+   "text": "#include <VP-V/modules/control/config/config_pages/ConfigEditorAccess.inl>",
+   "gate": "declaration",
+   "seam": null,
+   "expiry": null
+  },
+  {
+   "id": "CEW.h-0007",
+   "file": "src/VideoProcessor-Config/ConfigEditorWindow.h",
+   "start": 347,
+   "end": 349,
+   "anchor": {
+    "symbol": "",
+    "before": [
+     "QStringList monitors_;",
+     "QStackedWidget* pages_ = nullptr;"
+    ],
+    "after": [
+     "QWidget* navigation_ = nullptr;"
+    ]
+   },
+   "lines": [
+    "    Vpv::ConfigPageDirectory vpvPages_;   // VPV-HOOK",
+    "    Vpv::FunctionFormApi formApi_;   // VPV-HOOK",
+    "    friend struct Vpv::ConfigEditorAccess;   // VPV-HOOK (S4A A4: the editor's VP-V seams; ConfigEditorAccess.inl)"
+   ],
+   "text": "Vpv::ConfigPageDirectory vpvPages_; Vpv::FunctionFormApi formApi_; friend struct Vpv::ConfigEditorAccess;",
+   "gate": "declaration",
+   "seam": null,
+   "expiry": null
+  },
+  {
+   "id": "LPVR.cpp-0002",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp",
+   "start": 162,
+   "end": 163,
+   "anchor": {
+    "symbol": "LoadPlugin",
+    "before": [
+     "return refuse(result.module, \"VP Renderer DLL refused: flavor mismatch (Beta/non-Beta folder swapped).\");",
+     "}"
+    ],
+    "after": [
+     "result.startupReadiness = reinterpret_cast<VideoProcessorLibplaceboGetStartupReadinessFn>("
+    ]
+   },
+   "lines": [
+    "\t\tif (!Vpv::PluginGuard::Check(result.module, pairing)) return refuse(result.module, pairing); // VPV-HOOK",
+    "\t\tif (!Vpv::PluginGuard::Attach(result.module, pairing)) return refuse(result.module, pairing); // VPV-HOOK"
+   ],
+   "text": "if (!Vpv::PluginGuard::Check(result.module, pairing)) return refuse(result.module, pairing); if (!Vpv::PluginGuard::Attach(result.module, pairing)) return refuse(result.module, pairing);",
+   "gate": "allowed-enclosing",
    "seam": null,
    "expiry": null
   }
