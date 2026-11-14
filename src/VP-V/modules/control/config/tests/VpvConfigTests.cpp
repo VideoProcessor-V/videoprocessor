@@ -1133,7 +1133,8 @@ namespace
 		ConfigEditorWindow window(path, 0, true);
 		auto note = [&](const char* key) { return control<QLabel>(window, Vpv::ObjectName(QStringLiteral("setby.line.") + QString::fromLatin1(key)))->text(); };
 		// A tier-locked setting names its master and the value.
-		require(note("deband_vp") == QStringLiteral("Set by the Repair tier (Low): Off"), ("tier-locked: " + S(note("deband_vp"))).c_str());
+		// DPTR-W1/W2 (coordinator 2026-11-12 09:58; owner-decisions): the default Repair tier collapses to Classic while the tiers are identical, so the master reads (Classic).
+		require(note("deband_vp") == QStringLiteral("Set by the Repair tier (Classic): Off"), ("tier-locked: " + S(note("deband_vp"))).c_str());
 		// A setting nothing sets: the built-in default; one the profile writes: you.
 		require(note("adaptive_upscale") == QStringLiteral("Set by you: On"), ("you (toggle): " + S(note("adaptive_upscale"))).c_str());
 		require(note("rebase_kernel_match").startsWith(QStringLiteral("Set by VP's built-in default: ")), ("built-in: " + S(note("rebase_kernel_match"))).c_str());

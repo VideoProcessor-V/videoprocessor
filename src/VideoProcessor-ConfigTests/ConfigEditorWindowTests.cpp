@@ -11279,6 +11279,7 @@ static const std::map<std::string, const char*>& CoverageAllowList()
         { "renderer:frame_analysis_store", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.frame_analysis_store); also read from [vprenderer]" },
         { "renderer:resync_event", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.resync_event); also read from [vprenderer]" },
         { "renderer:hdr_inference", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.hdr_inference); also read from [vprenderer]" },
+        { "renderer:optical_flow_on_demand", "VP-V motion row not yet built (rule 32: no Config row without a VP-V motion-rows seam or a HOOK-APPROVAL; 102b OPTICAL-FLOW-ON-DEMAND-CONFIG-ROW, planned VP-V > Advanced); a profile key, default auto = off; documented in the Config README" },
         { "renderer:source_geometry_detect", "VP-V row (rule 32): edited in the picked [vprenderer.*] profile by the VP-V page's Re-base card (vpv.scaling.source_geometry_detect); no row on Bill's pages" },
     };
     return allowList;

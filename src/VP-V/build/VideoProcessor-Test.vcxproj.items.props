@@ -401,6 +401,8 @@
     </ClCompile>
     <ClCompile Include="..\VP-V\tests\suite\HdrInferenceTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SharedUnitsW1Tests.cpp" />
+    <ClCompile Include="..\VP-V\tests\QueueWindowTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\QueueKeyedTimelineTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SourceResolutionDetectorTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\MixedScreenSourceResolutionTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SourceResolutionLatchTests.cpp" />
@@ -736,6 +738,12 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\tests\SkeletonCoreContextTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\SkeletonRenderAheadLifetimeTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\QueueKeyedMemoTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\lane\LaneGpuProducts.cpp">

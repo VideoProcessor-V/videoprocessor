@@ -493,6 +493,11 @@ namespace Tests
             // scenarios; the unambiguous ones must agree, the rest are listed in the test output.
             const Canvas canvas(600, 108, 7, 100, 500);
             const Canvas other(600, 108, 99, 600, 900);
+            // HF item 3 (refs/r2-composite-reds-locate2.md part 1 red 2; held fix per coordinator 18:34): the pair canvas 100-500 vs 600-900
+            // has a similar spread (spread 393, dMean 453, dSpread 90: |dSpread|*4 = 360 <= 393), which the U7 judge (CutFadeJudge.h) treats as a FLASH look-alike
+            // (cut=false), so that row is a listed divergence (mustAgree=false) and an unambiguous hard cut with a clearly different
+            // spread (canvas 600-720, spread about 120 vs 393) is the strict row. The judge is unchanged.
+            const Canvas farther(600, 108, 99, 600, 720);
             const LumaGrid a = canvas.Window(100);
             auto blend = [](const LumaGrid& x, const LumaGrid& y, int percent)
             {
@@ -509,7 +514,8 @@ namespace Tests
             };
             struct Scenario { const wchar_t* name; LumaGrid next; bool mustAgree; };
             const Scenario scenarios[] = {
-                { L"hard cut", other.Window(100), true },
+                { L"hard cut, look-alike spread (judge: flash look-alike, documented divergence)", other.Window(100), false },
+                { L"hard cut, clearly different spread", farther.Window(100), true },
                 { L"pan 1 cell", canvas.Window(99), true },
                 { L"pan 8 cells", canvas.Window(92), true },
                 { L"hold", a, true },

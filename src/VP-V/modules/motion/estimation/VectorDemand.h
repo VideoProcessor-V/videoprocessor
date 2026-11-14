@@ -370,13 +370,14 @@ namespace VectorDemand
 			s += "; " + UnservedText(d);
 		return s;
 	}
-	// refs/109 F1: the status line plus the look-ahead cap while it binds. `cappedLead` = MotionAhead::kMaxLead when the lead is held
-	// at it (VectorEngine: sustained, forward look-ahead), else 0 (the line above, unchanged).
+	// refs/109 F1: the status line plus the look-ahead depth while the ceiling binds. `cappedLead` = MotionAhead::kMaxLead when the lead
+	// is held at it (VectorEngine: sustained, forward look-ahead), else 0 (the line above, unchanged). R3 (lead 12): at the owner's
+	// ceiling this is the DESIGNED state, worded as information (the Ctrl+I line), not as a downgrade.
 	inline std::string StatusLine(const Decision& d, int cappedLead)
 	{
 		std::string s = StatusLine(d);
 		if (cappedLead > 0 && d.mode == Mode::Forward && !s.empty())
-			s += "; look-ahead lead capped at " + std::to_string(cappedLead) + " frames (more are queued ahead)";
+			s += "; look-ahead computes " + std::to_string(cappedLead) + " frames ahead (the ahead-compute ceiling; more are queued)";
 		return s;
 	}
 	// The whole-frame motion statistics every source-statistics consumer reads (source monitor fast-pan,

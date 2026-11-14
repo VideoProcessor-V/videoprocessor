@@ -244,7 +244,7 @@ Contract: `D:/codex/vp-handover/lead8/iface-L-CORE.md` (frozen v1). Zero Bill li
   dispatcher and ledger grant: without a lane it is `no GPU dispatcher` (visible); views (`view`) need neither.
 - **Axes**: STAGE (`StageAfter(PipelineSlots::Id)`, 0 = source planes = every owner's default), CROP (source-pixel rectangle;
   full frame / zero side = none), PARAM0 / PARAM1 (owner-defined thresholds), PRECISION values `kPrecisionUnorm16`,
-  `kPrecisionFloat32`, `kPrecisionFloat16` (not 12-bit safe; an owner with `pixelData` refuses it). `VariantKey::Hash()` is the
+  `kPrecisionFloat32`, `kPrecisionFloat16` (not 12-bit safe; EVERY owner refuses it with `VariantUndeclared`, visibly, and the ledger has no format for it). `VariantKey::Hash()` is the
   stable variant id (compute-once counters). `core/VariantShape.h` derives a variant's dims, ledger format and reserve bytes.
 - **Thread contract**: the render thread is declared at every Begin. CPU forms from any thread (pinned); a lane CPU product off
   the render thread is its PUBLISHED bytes copied out through the lane lease (`reusedLaneCopy`), never a slot pointer and never
@@ -438,6 +438,7 @@ One place that owns VP's shared GPU temporaries (doc 51 section 3). Per-render t
 
 - Core (pure C++14, no GPU): `src/VP-V/core/GpuAllocator.h` (TexFormat, TexShape, `PlanArena`, `ScratchArenaUser`, `ArenaGrantFor`, `ProductTextures`, `VramLedgerLines`) and `src/VP-V/core/ScratchArena.h` (`ScratchArena<Backend>`).
 - Product-store backend: `GpuProductTexBackend.h` (this folder: the `ProductTextures` backend of the lane GPU products P10/P11/P12; creates product textures, host readback only where the format supports it, records why a create failed). The skeleton dispatcher also owns the small constant textures of those kernels (stand-ins, the light level LUT) through `IStaticTextures`: kernels never create textures.
+- Owner-fill GPU device (R2, lead 12): `gpu/OwnerGpuDevice.h`, one per renderer with its memo (lane or no lane). It is the device side of THE sanctioned GPU context of non-view GPU owner fills (`core/SkeletonAcquire.h` `OwnerGpuContext`: `OwnerFillRequest::gpu`, set only for a non-view GPU fill, valid for the call): the render pl_gpu, its own pl_dispatch and texture creation through `GpuProductTexBackend.h`, every texture accounted against the fill's `reserveBytes` (refused above it, counted and worded). No fill captures a pl_gpu of its own (`PrivateTextureScanTests::OwnerFillsTakeNoPrivateGpu`). Textures handed back at the seal are destroyed at AfterRender; at GpuReleased the memo releases its GPU spots first, a dead device's are forgotten (counted).
 - Backend: `PlTexBackend.h` (this folder, header-only, libplacebo: `pl_find_fmt` with fixed caps sampleable|storable, `pl_tex_create`/`pl_tex_destroy`).
 - Governor: user `kUserScratchArena`, levels [plan(T2), plan(T1), plan(T0), 0] (equal levels dropped), tier T1, not lossless. `Residency::Transient` products are not ring products (no lane grant, no governor user); the arena user counts them.
 - Determinism: the plan does not depend on request order; the k-th Acquire of a shape in a scope gets pool slot k; Acquire never allocates.

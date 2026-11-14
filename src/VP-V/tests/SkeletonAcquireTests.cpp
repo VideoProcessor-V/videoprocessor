@@ -819,5 +819,152 @@ namespace SkeletonAcquireTestsNs
 			Assert::IsTrue(woken.status == AcquireStatus::Unavailable && woken.cause == AcquireCause::OwnerDeclined, L"the other waiter wakes with the cause (OwnerDeclined)");
 			Assert::IsTrue(st->outerA.cause == AcquireCause::OwnerDeclined && st->outerB.cause == AcquireCause::OwnerDeclined, L"both outer requests see the decline");
 		}
+
+		// R2 (lead 12): THE sanctioned GPU context. A non-view GPU fill gets it (and only it: no pl_gpu of its own), CPU and view fills
+		// get none; its textures are accounted against the fill's reserve (refused above it, counted, worded with the decline); it is
+		// worded; without a device it allocates nothing and says so.
+		TEST_METHOD(OwnerGpuContextIsSanctionedAndAccounted)
+		{
+			struct FakeDevice : IOwnerGpuDevice
+			{
+				int gpu = 0, dispatch = 0, texture = 0;
+				int created = 0;
+				std::vector<TexShape> shapes;
+				void* OwnerGpu() const override { return const_cast<int*>(&gpu); }
+				void* OwnerDispatch() const override { return const_cast<int*>(&dispatch); }
+				bool CreateOwnerTexture(const TexShape& shape, GpuMemoHandle& out, std::string&) override
+				{
+					++created;
+					shapes.push_back(shape);
+					out.resource = &texture;
+					out.width = shape.w;
+					out.height = shape.h;
+					out.keepAlive = std::make_shared<int>(created);
+					return true;
+				}
+			} device;
+			const TexShape plane{ 16, 8, TexFormat::R16 };   // 256 bytes
+			const uint64_t planeBytes = ShapeBytes(plane);
+			Assert::AreEqual<uint64_t>(256, planeBytes);
+
+			SkeletonMemo m;
+			m.SetNames(nullptr);
+			m.SetGpuDispatcherPresent(true);
+			m.SetGpuBudget(true, 1u << 20);
+			m.SetGpuDevice(&device);
+
+			// A non-view GPU fill: the context is there, names the device's handles, allocates within the reserve.
+			int ran = 0;
+			OwnerFill made;
+			made.reserveBytes = planeBytes;
+			made.fill = [&](const OwnerFillRequest& r, SkeletonMemo&, OwnerFillOutput& out) {
+				++ran;
+				Assert::IsNotNull(r.gpu, L"a non-view GPU fill gets the sanctioned context");
+				Assert::IsTrue(r.gpu->Gpu() == &device.gpu && r.gpu->Dispatch() == &device.dispatch, L"the device's pl_gpu and pl_dispatch");
+				Assert::AreEqual<uint64_t>(planeBytes, r.gpu->Granted(), L"granted exactly the fill's reserve");
+				std::string why;
+				if (!r.gpu->Allocate(plane, out.gpu, why))
+					return false;
+				GpuMemoHandle second;
+				Assert::IsFalse(r.gpu->Allocate(plane, second, why), L"a second texture would pass the reserve: refused");
+				Assert::IsTrue(why.find("reserve") != std::string::npos, L"and worded");
+				Assert::IsFalse(second.Valid(), L"nothing handed out");
+				return true;
+			};
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Gpu, kGrainUnit, made);
+			const AcquireResult a = m.Acquire(kP10GrainSplit, 1, AcquireForm::Gpu);
+			Assert::IsTrue(a.status == AcquireStatus::FilledAtRead && a.gpu.Valid(), L"published");
+			Assert::AreEqual<uint64_t>(planeBytes, a.gpu.bytes, L"the texture's bytes are the ledger's ShapeBytes");
+			Assert::AreEqual(1, device.created, L"one texture made through the device");
+			Assert::AreEqual<uint64_t>(planeBytes, m.GpuBytes(), L"budgeted against the grant");
+			const AcquireCounters c = m.CountersOf(kP10GrainSplit);
+			Assert::IsTrue(c.gpuAllocMade == 1 && c.gpuAllocBytes == planeBytes && c.gpuAllocRefused == 1, L"made / refused counted");
+			Assert::IsTrue(AnyLine(m.StatusLines(), "gpu textures made 1"), L"on the status lines");
+			Assert::AreEqual(1, ran);
+
+			// A fill whose texture is above its reserve declines with the context's reason (closing: OwnerGpuContextClosesAndAccumulates).
+			OwnerFill greedy;
+			greedy.reserveBytes = planeBytes - 1u;
+			greedy.fill = [&](const OwnerFillRequest& r, SkeletonMemo&, OwnerFillOutput& out) {
+				std::string why;
+				return r.gpu != nullptr && r.gpu->Allocate(plane, out.gpu, why);
+			};
+			m.ReplaceOwnerFill(kP10GrainSplit, AcquireForm::Gpu, kGrainUnit, greedy);
+			const AcquireResult g = m.Acquire(kP10GrainSplit, 2, AcquireForm::Gpu);
+			Assert::IsTrue(g.cause == AcquireCause::OwnerDeclined, L"a texture above the reserve: the fill declines");
+			Assert::AreEqual(1, device.created, L"the device was never asked");
+			Assert::IsTrue(m.LastCause(kP10GrainSplit).find("reserve") != std::string::npos, L"the decline names the reserve");
+
+			// A view fill and a CPU fill get no context.
+			int viewSeen = -1, cpuSeen = -1;
+			OwnerFill view;
+			view.view = true;
+			view.fill = [&](const OwnerFillRequest& r, SkeletonMemo&, OwnerFillOutput& out) {
+				viewSeen = r.gpu != nullptr ? 1 : 0;
+				static int other = 0;
+				out.gpu.view = &other;
+				return true;
+			};
+			m.RegisterOwnerFill(kP1HalfLuma, AcquireForm::Gpu, kLaneUnit, view);
+			Assert::IsTrue(m.Acquire(kP1HalfLuma, 3, AcquireForm::Gpu).Ok());
+			Assert::AreEqual(0, viewSeen, L"a view allocates nothing: no context");
+			OwnerFill cpu;
+			cpu.fill = [&](const OwnerFillRequest& r, SkeletonMemo&, OwnerFillOutput& out) {
+				cpuSeen = r.gpu != nullptr ? 1 : 0;
+				out.bytes.assign(4, 1);
+				return true;
+			};
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, cpu);
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 3, AcquireForm::Cpu).Ok());
+			Assert::AreEqual(0, cpuSeen, L"a CPU fill: no context");
+
+			// No device: the context exists (the fill is non-view) but hands out nothing and says why.
+			m.SetGpuDevice(nullptr);
+			std::string noDeviceWhy;
+			bool sawNullGpu = false;
+			OwnerFill orphan;
+			orphan.reserveBytes = planeBytes;
+			orphan.fill = [&](const OwnerFillRequest& r, SkeletonMemo&, OwnerFillOutput& out) {
+				sawNullGpu = r.gpu != nullptr && r.gpu->Gpu() == nullptr && r.gpu->Dispatch() == nullptr;
+				return r.gpu != nullptr && r.gpu->Allocate(plane, out.gpu, noDeviceWhy);
+			};
+			m.ReplaceOwnerFill(kP10GrainSplit, AcquireForm::Gpu, kGrainUnit, orphan);
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 4, AcquireForm::Gpu).cause == AcquireCause::OwnerDeclined, L"declined");
+			Assert::IsTrue(sawNullGpu && noDeviceWhy.find("no skeleton GPU device") != std::string::npos, L"no device: nothing, worded");
+			Assert::AreEqual(1, device.created);
+		}
+
+		// R2: the context on its own: closed = nothing; an empty shape is refused; the grant is cumulative.
+		TEST_METHOD(OwnerGpuContextClosesAndAccumulates)
+		{
+			struct CountingDevice : IOwnerGpuDevice
+			{
+				int handle = 0, created = 0;
+				void* OwnerGpu() const override { return const_cast<int*>(&handle); }
+				void* OwnerDispatch() const override { return const_cast<int*>(&handle); }
+				bool CreateOwnerTexture(const TexShape&, GpuMemoHandle& out, std::string&) override
+				{
+					++created;
+					out.resource = &handle;
+					return true;
+				}
+			} device;
+			const TexShape small{ 4, 4, TexFormat::R8 };   // 16 bytes
+			OwnerGpuContext c(&device, 3u * ShapeBytes(small));
+			GpuMemoHandle h;
+			std::string why;
+			for (int i = 0; i < 3; ++i)
+				Assert::IsTrue(c.Allocate(small, h, why), L"three fit the grant");
+			Assert::IsFalse(c.Allocate(small, h, why), L"the fourth does not: the grant is cumulative");
+			Assert::IsFalse(c.Allocate(TexShape{ 0, 4, TexFormat::R8 }, h, why), L"an empty shape is refused");
+			Assert::IsTrue(c.Used() == 3u * ShapeBytes(small) && c.Made() == 3u && c.Refused() == 2u);
+			c.Close();
+			Assert::IsTrue(c.Gpu() == nullptr && c.Dispatch() == nullptr, L"closed: no device handles");
+			OwnerGpuContext wide(&device, 1u << 20);
+			wide.Close();
+			Assert::IsFalse(wide.Allocate(small, h, why), L"closed: nothing allocated");
+			Assert::IsTrue(why.find("after its fill returned") != std::string::npos, L"worded");
+			Assert::AreEqual(3, device.created, L"the device was asked only within the grant and while open");
+		}
 	};
 }
