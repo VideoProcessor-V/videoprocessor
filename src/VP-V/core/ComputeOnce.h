@@ -48,7 +48,7 @@ namespace ComputeOnce
 		template<class T> struct Flag { static std::atomic<int> value; };
 		template<class T> std::atomic<int> Flag<T>::value{ -1 };
 
-		inline int ReadEnvironment()
+		__declspec(noinline) inline int ReadEnvironment()
 		{
 			char* v = nullptr;
 			size_t n = 0;
@@ -296,7 +296,8 @@ namespace ComputeOnce
 	inline Registry& Global() { return detail::Global<void>::registry; }
 
 	// ---- the entry-point calls (only reached when Enabled()) ---------------------------------------------------------
-	inline void Note(const char* unit, int64_t seq, uint64_t variant, const char* privateSite, const void* returnAddress)
+	// Kept out of line: inlined, its std::string temporaries give every caller a frame, a security cookie and spills even when off.
+	__declspec(noinline) inline void Note(const char* unit, int64_t seq, uint64_t variant, const char* privateSite, const void* returnAddress)
 	{
 		Caller c;
 		c.address = returnAddress;
