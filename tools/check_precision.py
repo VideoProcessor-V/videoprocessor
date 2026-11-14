@@ -43,7 +43,7 @@ SHIFT = re.compile(r">>\s*(2|4|6)\b")
 # A named constant equal to an axis shift (2/4/6) counts exactly like the literal (rule 19: renaming the
 # literal to a constant of the same value is not a fix).
 SHIFT_CONST_DEF = re.compile(r"\b(?:constexpr|const)\s+(?:static\s+)?(?:inline\s+)?[\w:]+\s+(\w+)\s*=\s*(?:2|4|6)\s*[;,]")
-SHIFT_CTX = re.compile(r"luma|chroma|plane|sample|code|word|y10|intensity|p010", re.I)
+SHIFT_CTX = re.compile(r"luma|chroma|plane|sample|code|word|y10|intensity|p010", re.I)
 U8 = re.compile(r"uint8_t\s*\*|vector\s*<\s*(std::)?uint8_t")
 U8_CTX = re.compile(r"pixel|plane|luma|chroma", re.I)
 TAG = re.compile(r"PRECISION-OK\s+\S+:\s*\S")

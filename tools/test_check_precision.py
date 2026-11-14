@@ -63,6 +63,13 @@ class ClassifyTests(unittest.TestCase):
         src = "constexpr int kMode = 3;\nconstexpr int kBits = 6;\nauto a = luma >> kMode;\nauto b = flags >> kBits;\n"
         self.assertEqual(N2.scan_text("a.cpp", src, {}), [])
 
+    def test_code_word_is_shift_context(self):
+        # the context pattern once held a backspace byte, so "code" never matched
+        self.assertEqual(N2.classify_line("v = (code >> 2) & 1;"), ["shift"])
+        self.assertEqual(N2.classify_line("v = evenCode >> 6;"), ["shift"])
+        self.assertEqual(N2.classify_line("v = flags >> 2;"), [])
+        self.assertNotIn(b"", open(N2.__file__, "rb").read())
+
     def test_u8(self):
         self.assertEqual(N2.classify_line("std::vector<uint8_t> pixelBuf;"), ["u8"])
         self.assertEqual(N2.classify_line("std::vector<uint8_t> blob;"), [])
