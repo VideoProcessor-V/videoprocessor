@@ -323,7 +323,9 @@ struct AcquireCounters {
     uint64_t sealReused = 0;       // the seal copied an Acquire publication (computed once, by the owner fill)
     // QKP slice C (R14-73). COUNTING BASIS of these three: LANE FRAMES of ONE product (a count of (product, frame) events). They are
     // not the declared history H (DeclaredFillHistory: frames of reader lag) and not the VRAM bytes basis of AheadNeed (gpuOnly).
-    uint64_t laneAheadMade = 0;        // frames the lane made on a memo request ahead of the render frame (aheadNow = Ran, made now)
+    // aheadNow = Ran and the slot readable: made on this request. (A worker publishing between the slot read and the ask also
+    // answers Ran: that frame is then counted here though it was made by the worker; rare, and it is never counted twice.)
+    uint64_t laneAheadMade = 0;
     uint64_t sealComputedReduced = 0;  // seal live fills that computed nothing because the frame was already made (ahead or published)
     uint64_t workerReused = 0;         // the lane's worker skipped a frame the render thread had made first (nothing recomputed)
     // Frames COMPUTED for this product (any variant): owner fills that published + seal computes. The compute-once ledger.
@@ -420,7 +422,8 @@ public:
         ++laneBinds_;
     }
     // The lane `token` ends: its source and fills are dropped, ONLY if it is still the bound one (a rebuild bound a newer lane
-    // first: nothing happens). Module registrations stay. True = unbound.
+    // first: nothing happens). Module registrations stay. True = unbound. RENDER THREAD ONLY (like BindLane): the Acquire ahead
+    // branch asks the lane with the memo lock released and relies on this never running concurrently with it.
     bool UnbindLane(const void* token)
     {
         std::lock_guard<std::mutex> g(mutex_);
@@ -821,7 +824,8 @@ public:
 
     // ---- G1-G5 ----
 
-    AcquireResult Acquire(ProductId id, uint64_t seq, AcquireForm form, const VariantKey& vIn = VariantKey())
+    // `laneAheadTried` (internal): set by the memo's own re-entry after the lane said NotNode, so the lane is asked once.
+    AcquireResult Acquire(ProductId id, uint64_t seq, AcquireForm form, const VariantKey& vIn = VariantKey(), bool laneAheadTried = false)
     {
         std::unique_lock<std::mutex> lk(mutex_);
         const OwnerFill* ow = OwnerLocked(OwnerKey(id, form));
@@ -944,7 +948,7 @@ public:
         if (renderThread && lane_.dropped && lane_.dropped(id))
             return Fail(c, id, seq, AcquireCause::RegulatorDropped);
         // QKP slice C: a lane product AHEAD of the render frame (admitted above) is made by the lane's own claim, not twice.
-        if (renderThread && v.IsDefault() && form == AcquireForm::Cpu && lane_.aheadNow && lane_.read && haveSealed_ && seq > lastSeal_) {
+        if (renderThread && v.IsDefault() && form == AcquireForm::Cpu && !laneAheadTried && lane_.aheadNow && lane_.read && haveSealed_ && seq > lastSeal_) {
             const auto ahead = lane_.aheadNow;
             lk.unlock();   // the lane runs its compute outside the memo lock (the lane's inputs may Acquire)
             const LaneSlotSource::AheadNowResult ar = ahead(id, seq);
@@ -959,7 +963,8 @@ public:
             }
             if (ar.kind == LaneSlotSource::AheadNow::Ran) {
                 LaneSlotSource::Read rd;
-                if (lane_.read(id, seq, form, &rd) == LaneSlotSource::State::Present) {
+                // The lock was released: a lane unbind in that window leaves no read (the render thread owns UnbindLane / BindLane).
+                if (lane_.read && lane_.read(id, seq, form, &rd) == LaneSlotSource::State::Present) {
                     ++c.laneAheadMade;
                     ++c.reusedLane;
                     AcquireResult r;
@@ -973,7 +978,10 @@ public:
                 }
                 return Fail(c, id, seq, AcquireCause::LanePending);   // told Ran but the slot is not readable yet: visible, retried
             }
-            // NotNode: not a lane product; the owner fill below.
+            // NotNode: not a lane product. The lock was released, so the owner and the memo may have changed (an unbind erased the
+            // owner map node; another thread inserted this key): start over through the normal path with the lane not asked again.
+            lk.unlock();
+            return Acquire(id, seq, form, vIn, true);
         }
         if (ow == nullptr || !ow->fill)
             return Fail(c, id, seq, AcquireCause::NoOwnerFill);
