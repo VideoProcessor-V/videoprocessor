@@ -21,6 +21,7 @@
 // GetHealth() and FallbackCatalog::VectorProducer show the state.
 
 #include <AnalysisLumaSource.h>
+#include <VP-V/core/LaneInterfaces.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/estimation/VectorProducts.h>
@@ -236,6 +237,11 @@ namespace MotionAhead
 		// The engine input size the de-judder searches at (its half size, or a
 		// quarter with the half-size inner matcher); 0 = the frame's half size.
 		void SetTargetSize(int w, int h) { targetW.store(w, std::memory_order_release); targetH.store(h, std::memory_order_release); }
+		// L-B4 (a): the frame's P1 (the skeleton's half luma) is the source of the 8-bit engine luma, read through this reader
+		// (Acquire(kP1HalfLuma, seq, Cpu) from this thread); null / a miss / a format whose engine codes differ from P1's
+		// (RGB, full-range 4:2:x: FIX-B4-RGB) = the producer's own HalfLuma8 decode. Any thread.
+		void SetP1Source(std::shared_ptr<VpSkeleton::IP1Source> source)
+		{ std::lock_guard<std::mutex> lock(p1Mutex); p1Source = std::move(source); }
 		uint64_t LastSubmitted() const { return lastSubmitted.load(std::memory_order_acquire); }
 		// Fixed-constant batch B3 (2026-10-18): the pending submissions follow the depth in use
 		// (MotionAhead::PendingJobsFor: 6 at the default depth, as before).
@@ -324,7 +330,7 @@ namespace MotionAhead
 		void Answer(OnDemand::Pending& pending, OnDemand::PairResult result);
 		// The frame's 8-bit luma at the engine size (HalfLuma8, then the quarter step when the target asks for it).
 		// False = nothing to do: not a readable frame, or a size this producer does not make.
-		bool LumaAtTarget(const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& w, int& h);
+		bool LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& w, int& h);
 		// One engine run on (a, b) at w x h, read back into a new Flow with its global motion and trust extras. ran = the
 		// engine itself succeeded (the readback may still fail). False = failed (error set).
 		bool RunPair(ID3D11Texture2D* a, ID3D11Texture2D* b, int w, int h, bool continuous, uint64_t timedSequence, bool& ran,
@@ -362,6 +368,8 @@ namespace MotionAhead
 		}
 		std::atomic<bool> generalRates{ true };
 		std::atomic<int> targetW{ 0 }, targetH{ 0 };
+		std::mutex p1Mutex;                                 // guards p1Source (set from the render thread, read by the worker)
+		std::shared_ptr<VpSkeleton::IP1Source> p1Source;
 		std::vector<uint8_t> quarterBuffer;
 		std::string error;
 		Stats stats;
