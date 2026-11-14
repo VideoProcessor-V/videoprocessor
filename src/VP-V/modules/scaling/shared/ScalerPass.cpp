@@ -88,9 +88,11 @@ namespace ScalerPass
 	// ortho sampler turns an all-positive kernel (radius == radius_zero) into
 	// half-as-many hardware-bilinear fetches whose sub-texel fraction is only
 	// ~8-bit, costing ~1 code at 10-bit. This kernel gives the identical
-	// weights but a -1e-12 tail on (1,1.5) (far below fp16/fp32 LUT resolution
-	// and removed by normalisation), so radius > radius_zero and the exact
-	// one-tap-per-texel path runs. Weights are unchanged for every practical purpose.
+	// weights but a -1e-12 tail on (1,1.5): that is far below fp16/fp32 LUT
+	// resolution (the filter LUT stores it as a ~zero weight; it is not removed,
+	// it is just negligible), and it makes radius > radius_zero so the exact
+	// one-tap-per-texel path runs (about 4x the texture reads of the 2-fetch path).
+	// ExactTapsTaken() verifies this on the built filter; it is checked, not assumed.
 	double HermiteExactWeight(const pl_filter_ctx*, double x)
 	{
 		x = x < 0 ? -x : x;
@@ -98,6 +100,21 @@ namespace ScalerPass
 		return x < 1.5 ? -1e-12 : 0.0;
 	}
 	const pl_filter_function kHermiteExact = { "hermite_exact", 2.0f, false, {}, {}, HermiteExactWeight };
+
+	// True when libplacebo's ortho sampler will NOT use the half-fetch hardware-bilinear
+	// path for this filter (it does so exactly when radius == radius_zero).
+	bool ExactTapsTaken(const pl_filter_config& cfg)
+	{
+		pl_filter_params fp{};
+		fp.config = cfg;
+		fp.lut_entries = 64;
+		fp.row_stride_align = 4;
+		pl_filter f = pl_filter_generate(nullptr, &fp);
+		if (!f) return false;
+		const bool exact = f->radius != f->radius_zero;
+		pl_filter_free(&f);
+		return exact;
+	}
 
 	pl_filter_config FilterConfig(const ScalerKernels::Spec& spec)
 	{
@@ -203,6 +220,8 @@ namespace ScalerPass
 		if (!ensure(textures[slot], outW, outH)) return fail("texture allocation failed");
 
 		const pl_filter_config cfg = FilterConfig(st.filter);
+		if (st.filter.kind == ScalerKernels::Kind::Hermite && !ExactTapsTaken(cfg))
+			return fail("Hermite did not take the exact-tap ortho path (hardware-bilinear half fetches would cost ~1 code)");
 		bool ok = true;
 		if (polar)
 			ok = Polar(dispatch, src.tex, textures[slot], ax0, ay0, ax1, ay1, outW, outH, cfg, st.antiring, &luts[slot][0]);
