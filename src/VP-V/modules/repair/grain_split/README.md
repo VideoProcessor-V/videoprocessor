@@ -61,6 +61,10 @@ Computed once per frame; readers never recompute it.
 
 None. The split's law is fixed (texture_restore's constants); readers choose what they do with it.
 
+Band memo (grain.band): Settings: none. It adds no setting; it reads the same fixed law.
+
+Landing: the L-B3 lane lands as one unit. The band memo commit (bd7e7ee3c) is red on its own (the consumers and the GPU owner fill follow once the L-CORE GPU context and the L-B4 P1 Float32 variant exist), so do not cherry-pick it alone.
+
 ## Storage layouts and the read accessor (SA2)
 
 The GPU product has two layouts behind an either/or switch (`GrainSplit::Storage`, `Options.storage` of `Splitter::Compute`;
