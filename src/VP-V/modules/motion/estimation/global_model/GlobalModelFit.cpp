@@ -5,6 +5,7 @@
 // Pure C++14, deterministic: fixed loop orders, double sums, splitmix64, no clocks except the
 // injected Config::clock, no unordered containers, no threads.
 #include "GlobalModelFit.h"
+#include <VP-V/core/Ramp.h>
 
 #include <algorithm>
 #include <atomic>
@@ -36,7 +37,7 @@ namespace CameraModel
 		const double kSqrt2 = 1.4142135623730951;
 
 		inline bool FiniteF(float v) { return IsFiniteBits(v); }
-		inline double Clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
+		inline double Clamp01(double v) { return ::RampMath::Clamp01(v); }   // core/Ramp.h (ND07)
 
 		// Expected vector precision of a pair (source px): the caller's, else a quarter px per 16 px of block size.
 		inline double PairPrecision(const PairInput& in) { return in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0; }

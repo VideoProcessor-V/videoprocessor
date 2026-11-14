@@ -1,5 +1,7 @@
 #pragma once
 
+#include <VP-V/core/LumaWeights.h>
+
 #include "NetFusion.h"
 #include "NetRunner.h"
 
@@ -57,7 +59,7 @@ namespace VpNets
 		//   light domain is barrier R8, checked by its stage contract only.
 		struct PostKernelOptions
 		{
-			float kr = 0.2126f, kb = 0.0722f;   // BT.709
+			float kr = static_cast<float>(LumaCoeff::kBt709Kr), kb = static_cast<float>(LumaCoeff::kBt709Kb);   // BT.709 (core/LumaWeights.h, ND02)
 			float rangeScale = 1.0f, rangeOffset = 0.0f;   // hook luma -> the trained range
 			float mulOut = 1.0f, mulSrc = 1.0f;
 		};

@@ -1,5 +1,7 @@
 #include <pch.h>
 #include "SourceResolutionMonitor.h"
+#include <VP-V/core/LumaWeights.h>
+#include <VP-V/core/RobustStats.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h>
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
@@ -38,7 +40,7 @@ if (tile < int(tiles) && g.y < ts) {
     vec2 origin = (tile % 2) == 0 ? pair.xy : pair.zw;
     ivec2 p = clamp(ivec2(origin) + ivec2(x, g.y), ivec2(0), textureSize(src, 0) - ivec2(1));
     vec4 c = texelFetch(src, p, 0);
-    float v = is_rgb > 0.5 ? dot(c.rgb, vec3(0.2126, 0.7152, 0.0722)) : c.r;
+    float v = is_rgb > 0.5 ? dot(c.rgb, )GLSL" VP_LUMA_BT709_VEC3_TEXT R"GLSL() : c.r;
     int idx = (tile * ts + g.y) * ts + x;
 #ifdef SR_IMG
     imageStore(out_img, ivec2(idx % SR_IMG, idx / SR_IMG), vec4(v));
@@ -63,12 +65,8 @@ if (tile < int(tiles) && g.y < ts) {
 			return text;
 		}
 
-		double Median(std::vector<double> v)
-		{
-			if (v.empty()) return 1.0;
-			std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
-			return v[v.size() / 2];
-		}
+		// The upper median, an empty sample reading 1.0 (core/RobustStats.h, ND06).
+		double Median(std::vector<double> v) { return RobustStats::Median(std::move(v), RobustStats::MedianRule::Upper, 1.0); }
 	}
 
 	Monitor::Monitor()

@@ -11,6 +11,7 @@
 // stale age - change only the upstream policy, never VP's).
 // Callers that still say AlphaQueuePolicy::X get these through AlphaQueuePolicyVpCompat.h.
 
+#include <VP-V/core/OnePole.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <DisplayRefreshRatePolicy.h>
 
@@ -201,7 +202,7 @@ namespace VpQueueRules
 		{
 			if (!timeConstant || !CaptureRateBounds::Accepts(sourceRateHz))
 				return kLegacyWeight;
-			return 1.0 - std::exp(-1.0 / (sourceRateHz * kSmoothingSeconds));
+			return OnePole::AlphaPerFrame(kSmoothingSeconds, sourceRateHz);   // core/OnePole.h (ND05)
 		}
 
 		// targetFraction (VP-V delay budget, ADR-0020): the sub-frame part of the queue's time

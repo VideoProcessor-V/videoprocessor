@@ -884,7 +884,7 @@ namespace SourceIdentity
 				for (size_t i = 0; i < v.size(); ++i)
 					dev[i] = std::abs(v[i] - med);
 				const double mad = MedianOf(dev.data(), static_cast<int>(dev.size()));
-				const double tau = (std::max)(s_.contradictionMin, 3.0 * 1.4826 * mad);
+				const double tau = (std::max)(s_.contradictionMin, 3.0 * RobustStats::kMadToSigma * mad);
 				const bool dipMajority = med < s_.majorityDip;
 				std::vector<double> kept;
 				int contradict = 0;
@@ -924,7 +924,7 @@ namespace SourceIdentity
 						for (size_t i = 0; i < segMed.size(); ++i)
 							d2[i] = std::abs(segMed[i] - m2);
 						const double mad2 = MedianOf(d2.data(), static_cast<int>(d2.size()));
-						const double tau2 = (std::max)(s_.contradictionMin, 3.0 * 1.4826 * mad2);
+						const double tau2 = (std::max)(s_.contradictionMin, 3.0 * RobustStats::kMadToSigma * mad2);
 						const bool dip2 = m2 < s_.majorityDip;
 						int bad = 0;
 						for (size_t i = 0; i < segMed.size(); ++i)

@@ -21,6 +21,8 @@
 // Open (not built): the optional BT.2390 surround gamma between owner-set
 // dark and lit endpoints (design section 4, "Adaptation").
 
+#include <VP-V/core/OnePole.h>
+
 #include <IntentDescriptor.h>
 
 #include <algorithm>
@@ -158,9 +160,7 @@ namespace AmbientAdapt
 
         static double Alpha(double dt, double tau)
         {
-            if (!(tau > 0.0))
-                return 1.0;
-            return 1.0 - std::exp(-dt / tau);
+            return OnePole::AlphaFor(dt, tau, OnePole::DtRule::AsGiven);   // core/OnePole.h (ND05); callers clamp dt >= 0
         }
 
         double Median() const

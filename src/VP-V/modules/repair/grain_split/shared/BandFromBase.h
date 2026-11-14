@@ -62,6 +62,52 @@ namespace BandFromBase
 	// The half-resolution sigma of a full-resolution split.
 	inline double HalfSigma(double sigma) { return std::sqrt(sigma * sigma - 0.25) / 2.0; }
 
+	// Border handling of the CPU blur: Replicate (clamp to the edge) or Reflect (mirror about the edge sample, no
+	// repeat of it: -1 -> 1, n -> n-2; the identity-chain tile blur). ND03: one blur, an edge-mode axis.
+	enum class EdgeMode { Replicate, Reflect };
+
+	inline int ReflectIndex(int i, int n)
+	{
+		if (i < 0) i = -i;
+		if (i >= n) i = 2 * (n - 1) - i;
+		return i < 0 ? 0 : (i >= n ? n - 1 : i);
+	}
+
+	// The normalised taps -r..r of Weight(), as the element type of a blur (float or double).
+	template <class T> inline std::vector<T> Taps(double sigma, double factor, bool minOne, double eps)
+	{
+		const int r = Radius(sigma, factor, minOne, eps);
+		std::vector<T> t(static_cast<size_t>(2 * r + 1));
+		for (int i = -r; i <= r; ++i) t[static_cast<size_t>(i + r)] = static_cast<T>(Weight(i, sigma, r));
+		return t;
+	}
+
+	// Separable convolution of a w x h plane with `taps` (odd length), rows across then columns down, each output
+	// summed over taps in index order -r..r in the element type T (the fixed order every private copy used).
+	template <class T> inline void BlurTaps(const std::vector<T>& src, std::vector<T>& dst, int w, int h, const std::vector<T>& taps, EdgeMode edge)
+	{
+		const int r = static_cast<int>(taps.size() / 2);
+		auto at = [edge](int i, int n) { return edge == EdgeMode::Reflect ? ReflectIndex(i, n) : (std::max)(0, (std::min)(n - 1, i)); };
+		std::vector<T> tmp(src.size());
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+			{
+				T a = T(0);
+				for (int k = -r; k <= r; ++k)
+					a += taps[static_cast<size_t>(k + r)] * src[static_cast<size_t>(y) * w + at(x + k, w)];
+				tmp[static_cast<size_t>(y) * w + x] = a;
+			}
+		dst.resize(src.size());
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+			{
+				T a = T(0);
+				for (int k = -r; k <= r; ++k)
+					a += taps[static_cast<size_t>(k + r)] * tmp[static_cast<size_t>(at(y + k, h)) * w + x];
+				dst[static_cast<size_t>(y) * w + x] = a;
+			}
+	}
+
 	// CPU reference: separable Gaussian of a w x h plane, edges replicated, fixed summation order (rows across,
 	// then columns down). sigma <= 0 returns the input.
 	inline std::vector<double> Blur(const std::vector<double>& in, int w, int h, double sigma)

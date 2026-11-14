@@ -30,6 +30,7 @@
 #include "LightLevelLut.h"
 
 #include <VP-V/core/Ancestry.h>
+#include <VP-V/core/OnePole.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 
 #include <GeneralRate.h>
@@ -134,8 +135,7 @@ namespace LightLevel
 		// The one-pole weight of one frame: tau 0.3 s at the 60 Hz reference, held in time above it (the repo's rate rule).
 		inline double TemporalAlpha(const Params& p)
 		{
-			const double alpha60 = 1.0 - std::exp(-1.0 / (p.tauSeconds * GeneralRate::kFrameCountReferenceHz));
-			return GeneralRate::PerFrameWeight(alpha60, p.frameRateHz);
+			return OnePole::PerFrameAt(p.tauSeconds, p.frameRateHz);   // core/OnePole.h (ND05)
 		}
 
 		// ---- the per-block law (T = double reference, T = float GLSL mirror) ----------------------------------------------

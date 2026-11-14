@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include <VP-V/core/RobustStats.h>
 #include <vprenderer/CaptureTimestampGap.h>
 #include <VideoFrameEncoding.h>
 
@@ -607,10 +608,8 @@ namespace DejudderPolicy
 		double Floor() const
 		{
 			if (count == 0) return 0.0;
-			std::vector<double> sorted(values, values + count);
 			const size_t k = count < 20 ? 0 : count / 20;
-			std::nth_element(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(k), sorted.end());
-			return sorted[k];
+			return RobustStats::NthSmallest(std::vector<double>(values, values + count), k);   // core/RobustStats.h (ND06)
 		}
 
 	private:

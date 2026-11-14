@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <vector>
 
+#include <VP-V/core/Ramp.h>
 #include <VP-V/modules/input/source_analysis/identity/shared/SourceQuality.h>
 
 namespace SourceIdentity
@@ -73,7 +74,7 @@ namespace SourceIdentity
 		}
 	}
 
-	inline double Clamp01(double x) { return x > 0.0 ? (x < 1.0 ? x : 1.0) : 0.0; }
+	inline double Clamp01(double x) { return ::RampMath::Clamp01NanToZero(x); }   // core/Ramp.h (ND07)
 
 	struct Vote
 	{

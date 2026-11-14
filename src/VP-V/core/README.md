@@ -22,6 +22,10 @@ Header-only and pure: no libplacebo, no Windows, C++14. The renderer and the CPU
 | `ResyncCause.h` | Resync vocabulary: `Level`, `Cause` (with tokens and plain text), `RefusalReason` |
 | `Indicator.h` | The central Indicator: counters, stamps derived from a ring of events, readers (`Observe`); `LastCauseIn(counter, fromExclusive, toInclusive, cause, detail*)` returns the latest retained event's cause for an exact counter (false when none, or when the interval is older than the ring) |
 | `Ancestry.h` | Ancestor references, headers and the pure validator for derived products |
+| `OnePole.h` | One-pole smoothing weight: dt rule, seconds / ms / per-frame forms (rule 20, ND05) |
+| `RobustStats.h` | Median (Upper / MeanOfMiddle), MAD, MAD-sigma, quantile with explicit rank rules (ND06) |
+| `Ramp.h` | `RampMath`: Clamp01 (NaN pass / to 0), Ramp, Smoothstep (two edge rules), Mix (ND07) |
+| `LumaWeights.h` | BT.709 luma constants, their GLSL text macros, and `LumaCoeff::ForSystem` (ND02) |
 | `FrameSeal.h` | `VpSeal::FrameSeal`: the ONE owner of the Indicator seal. On a new era it registers every provider (resync Drive, R2 motion readers, the lane handle, ...) before the first Observe, then seals once per frame and fans (seq, changed) out to subscribers (Drive latch, lane regulator). `AnalysisLane` holds the Indicator by shared handle (`BindIndicator`) and, with `SetExternalSeal(true)`, takes `OnSealed(seq, changed)` instead of sealing; the storm hold reaches its regulator through `SetStormHold` (T0) |
 | `FrameAnalysisValidity.h` | `VpFrameAnalysis::RecordValid(indicator, recordSeq, useSeq, mask)`: per-record temporal validity from the Indicator's stamps (FrameAnalysisStore itself unchanged; no private frame history added) |
 | `Products.h` | Skeleton S0 registry: product declarations (inputs with lag, backend, history, size, honoured counters, tier, residency, variants) the first products P0-P6 (+ P2m matcher pair) and the camera products P7-P9 (`SkeletonProducts()` is the one assembly point); look-ahead inputs (`InputRef::lead`, `AddLead`) with a `shortQueueSubstitute`; component consumer declarations |

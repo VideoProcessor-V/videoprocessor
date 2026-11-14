@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include <pch.h>
 #include "LedCharacterize.h"
+#include <VP-V/core/RobustStats.h>
 
 #include <algorithm>
 #include <cmath>
@@ -13,13 +14,7 @@ namespace Calibration
 {
 	namespace
 	{
-		double Median(std::vector<double> v)
-		{
-			if (v.empty()) return 0.0;
-			std::sort(v.begin(), v.end());
-			const size_t n = v.size();
-			return n % 2 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
-		}
+		double Median(std::vector<double> v) { return RobustStats::Median(std::move(v)); }   // core/RobustStats.h (ND06)
 
 		std::vector<double> IsotonicUnweighted(const std::vector<double>& y)
 		{
