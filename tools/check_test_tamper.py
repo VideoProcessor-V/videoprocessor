@@ -150,7 +150,7 @@ def late_waivers(msgs):
 
 LEDGER_SHA_RX = re.compile(r"^[0-9a-f]{40}$")
 VERDICT_RX = re.compile(r"\bGRANT\b")
-REFUSE_RX = re.compile(r"\bREFUSE")
+NEGATIVE_RX = re.compile(r"\b(?:deny|denied|refuse|refused|refusal|hold|pending|withdrawn|no[- ]?grant|not[- ]grant(?:ed)?)\b|\bnogrant", re.I)
 
 
 def parse_ledger(text):
@@ -210,7 +210,7 @@ def ledger_entry(ledger, sha):
 
 def gate_check(gate_root, record, sha):
     """(ok, why). The record must stay inside gate_root, be a non-empty file, and hold a verdict line (GRANT or
-    GRANT-WITH-CONDITIONS, no REFUSE) that names at least the first 9 characters of sha. An existing file alone waives nothing."""
+    GRANT-WITH-CONDITIONS, and no negative word such as DENY, DENIED, REFUSE, HOLD, PENDING, WITHDRAWN, NO-GRANT or NOT GRANTED, case-insensitive) that names at least the first 9 characters of sha. An existing file alone waives nothing."""
     if not record:
         return False, "no gate_record"
     parts = re.split(r"[\\/]+", record)
@@ -236,7 +236,7 @@ def gate_check(gate_root, record, sha):
     key = sha[:9].lower()
     for line in text.splitlines():
         low = line.lower()
-        if key in low and VERDICT_RX.search(line) and not REFUSE_RX.search(line):
+        if key in low and VERDICT_RX.search(line) and not NEGATIVE_RX.search(line):
             return True, ""
     return False, "gate file has no GRANT verdict line naming %s" % key
 
