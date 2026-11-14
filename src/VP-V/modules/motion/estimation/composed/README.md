@@ -14,7 +14,7 @@ No config key is read. Code defaults (hand-checked): depth 8 back + 4 ahead (TD 
 
 ## Form / step contract (owner decision R14-16)
 
-The product form is a BLOCK field, read through ONE shared warp sampler. A plane is ALWAYS a raster of `step` source px per cell holding displacement (dx, dy, source px), trust 0..1 and uncertainty (px), per (frame, direction, offset k). The default step is `kBlockStep` = 8 (4K = 480 x 270 cells). Every reader (P10g, TemporalDetail, the chain) reads a plane only through `Plane::Warp(x, y)` (landing position, trust, uncertainty, `valid`; bilinear `Plane::At` underneath). A reader may ask for a finer step (`SetReaderStep`; step 1 = per pixel, a CPU reference form); the finest active step is computed (one product, step is a variant axis). A GPU form of the block field must publish the same fields at the same step (102b ECV-GPU-FORM, closed by R14-16).
+The product form is a BLOCK field, read through the shared plane sampler. A plane is ALWAYS a raster of `step` source px per cell holding displacement (dx, dy, source px), trust 0..1 and uncertainty (px), per (frame, direction, offset k). The default step is `kBlockStep` = 8 (4K = 480 x 270 cells). Readers (P10g, TemporalDetail) read a plane through `Plane::Warp(x, y)` (the chain samples the adjacent pair fields with `SampleField`, `Product::Value` wraps `Plane::At`) (landing position, trust, uncertainty, `valid`; bilinear `Plane::At` underneath). A reader may ask for a finer step (`SetReaderStep`; step 1 = per pixel, a CPU reference form); the finest active step is computed (one product, step is a variant axis). A GPU form of the block field must publish the same fields at the same step (102b ECV-GPU-FORM, closed by R14-16).
 
 ## Degradations (never silent, rule 25)
 

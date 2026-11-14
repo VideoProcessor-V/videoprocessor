@@ -30,14 +30,14 @@
 // variant axis of the ONE product: the FINEST step any active reader declares is computed, coarser readers sample it bilinearly (Sample).
 //
 // COST / FORM (owner R14-16). The product form is a BLOCK field (kBlockStep = 8 source px per cell: 4K = 480 x 270 cells, 14 planes x 0.13 M cells per
-// frame) read through the ONE shared warp sampler Plane::Warp (bilinear Plane::At underneath). The CPU per-pixel form (step 1) is a REFERENCE only
+// frame) read through the shared plane sampler: Plane::At (bilinear) and its landing form Plane::Warp (what the readers call). The chain itself samples the adjacent PAIR fields (SampleField), not planes; Product::Value is a thin wrapper of Plane::At. The CPU per-pixel form (step 1) is a REFERENCE only
 // (4K: 14 planes x 8.3 M px per frame is not a render-time budget); a reader may ask for a finer step (SetReaderStep), the finest active step wins. Form / step contract: a plane is
 // ALWAYS a raster of `step` source px per cell with trust and uncertainty; step 1 = per pixel; a GPU form must publish the same fields at the same step.
 // CALLERS NOT BUILT HERE: the IPairSource adapter over the P2 slot / CellTrust memo / MotionValidity (the grain-level and TD lanes) and the Invalidate()
 // call at every epoch cause (MotionValidity epoch change) are wired by those lanes; this product exposes the seams.
 //
 // GPU. This is the CPU form and the product contract; a GPU form of the block field (one dispatch per offset, same fields, same step) is a later
-// step (102b ECV-GPU-FORM closed by decision R14-16: block field + one shared warp sampler). Header-only, C++14, no Windows headers. Render / lane thread, one caller at a time
+// step (102b ECV-GPU-FORM closed by decision R14-16: block field + shared plane sampler). Header-only, C++14, no Windows headers. Render / lane thread, one caller at a time
 // (the lane serialises; the class holds no lock).
 
 #include "ComposedVectorPlan.h"
@@ -93,7 +93,7 @@ public:
 
 enum class Dir : uint8_t { Back = 0, Ahead = 1 };
 
-// The product form (owner R14-16): a BLOCK field of kBlockStep source px per cell, read through the ONE shared warp sampler (Plane::Warp). Per-pixel
+// The product form (owner R14-16): a BLOCK field of kBlockStep source px per cell, read through the shared plane sampler (Plane::At / Plane::Warp). Per-pixel
 // (step 1) stays selectable per reader (SetReaderStep) as the reference form only.
 constexpr int kBlockStep = 8;
 
@@ -147,7 +147,7 @@ struct Plane
         return s;
     }
 
-    // THE shared warp sampler (owner R14-16): where the chain of source position (x, y) lands in the reference frame, with its trust and uncertainty.
+    // The shared landing sampler of a plane (owner R14-16; the ONE reader-facing entry, built on At): where the chain of source position (x, y) lands in the reference frame, with its trust and uncertainty.
     // Every reader (P10g, TemporalDetail, the chain itself) reads the field only through this; `valid` is false outside the frame, for a dead chain
     // (trust 0) and when the landing leaves the frame (never a guessed vector).
     struct Warped
