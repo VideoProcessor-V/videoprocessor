@@ -158,6 +158,8 @@ inline const std::vector<ProductRow>& ProductRows()
         // Wave S2: P14g source_geometry is HELD STATE like P14: the source-resolution side (single writer) publishes it on each evaluation, no lane
         // producer, no live fill; its readers take the latest sealed record (lag 1) and fall back visibly when it is absent or stale.
         { kSourceGeometry, "input/source_analysis/identity", kExpectedSourceGeometryUnit, "" },
+        // lead 8 allocation 30, 11-14: grain.band is a per-frame MEMO spot (stored once per frame, discarded after), owner fill = repair/grain_split via Acquire.
+        { kBandMemo, "repair/grain_split", kExpectedGrainSplitUnit, "band memo owner fill (Acquire)" },
     };
     return rows;
 }

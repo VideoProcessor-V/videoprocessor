@@ -137,19 +137,13 @@ namespace BandFromBase
 			"        acc += vpu_band_from_base_w(i) * texelFetch(src, clamp(q + ivec2(0, i), ivec2(0), hi), 0);\n    return acc;\n}\n";
 		return s;
 	}
-	// CPU reference of the shared low band (B3): the 2x2 box half plane (edge clamp), then Bill's Gaussian law
+	// CPU reference of the shared low band (B3). Input is the HALF-resolution plane (P1, the shared half_luma_downsample
+	// product, acquired from the skeleton; this unit holds no 2x2 box of its own). Applies Bill's Gaussian law
 	// (GrainPreserve::LowWeight / LowRadius at the FULL-resolution sigma) across then down at half resolution, edges replicated.
-	// This is the oracle of the skeleton band memo's GPU fill and of every consumer that read a private copy of it.
-	inline std::vector<double> BandFromPlane(const std::vector<double>& in, int w, int h, double sigma, int* halfW = nullptr, int* halfH = nullptr)
+	// Oracle of the skeleton band memo's GPU fill and of every consumer that read a private copy of it.
+	inline std::vector<double> BandFromHalf(const std::vector<double>& box, int hw, int hh, double sigma)
 	{
-		const int hw = (w + 1) / 2, hh = (h + 1) / 2;
-		if (halfW) *halfW = hw;
-		if (halfH) *halfH = hh;
-		auto at = [&](int x, int y) { return in[static_cast<size_t>((std::max)(0, (std::min)(h - 1, y))) * w + static_cast<size_t>((std::max)(0, (std::min)(w - 1, x)))]; };
-		std::vector<double> box(static_cast<size_t>(hw) * hh), t(box.size()), o(box.size());
-		for (int y = 0; y < hh; ++y)
-			for (int x = 0; x < hw; ++x)
-				box[static_cast<size_t>(y) * hw + x] = 0.25 * (at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1));
+		std::vector<double> t(box.size()), o(box.size());
 		const int r = GrainPreserve::LowRadius(sigma);
 		std::vector<double> k(static_cast<size_t>(2 * r + 1));
 		for (int i = -r; i <= r; ++i) k[static_cast<size_t>(i + r)] = GrainPreserve::LowWeight(i, sigma);
