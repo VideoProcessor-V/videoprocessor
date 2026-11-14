@@ -331,14 +331,16 @@ namespace QueueWindowTestsNs
 				const PlanAheadFeed f = PlanAheadFeedOf(w, k.active);
 				Assert::AreEqual<uint16_t>(kAheadCeiling, f.aheadCeiling, L"THE ceiling, never a call-site copy");
 				Assert::AreEqual<uint16_t>(w.ahead, f.queueAheadFrames, L"the queue frames ahead are the window's");
-				Assert::AreEqual<uint16_t>(w.aheadCompute, f.aheadCompute, L"the window's own aheadCompute rides along");
-				Assert::AreEqual<uint16_t>(w.aheadCompute, AheadComputeOf(f), L"the law on the feed == the window's aheadCompute");
+				Assert::AreEqual<uint16_t>(w.aheadCompute, f.aheadComputeLimit, L"the window's own aheadCompute rides along, named the limit");
+				Assert::AreEqual<uint16_t>(w.aheadCompute, AheadComputeLimitOf(f), L"the law on the feed == the window's aheadCompute");
+				Assert::IsTrue(f.aheadComputeLimit <= f.queueAheadFrames && f.aheadComputeLimit <= f.aheadCeiling,
+					L"R3: both are carried, the limit never above the queue frames ahead (L + W) or the ceiling");
 				for (const AheadDemand& d : f.activeConsumers)
 					Assert::IsTrue(d.need > 0, L"an inactive consumer is not handed over");
 				if (k.binding == AheadBinding::NoConsumer)
-					Assert::AreEqual<uint16_t>(0, AheadComputeOf(f), L"no active consumer: 0");
+					Assert::AreEqual<uint16_t>(0, AheadComputeLimitOf(f), L"no active consumer: 0");
 				if (k.binding == AheadBinding::Ceiling)
-					Assert::AreEqual<uint16_t>(kAheadCeiling, AheadComputeOf(f), L"a larger need is held to the ceiling");
+					Assert::AreEqual<uint16_t>(kAheadCeiling, AheadComputeLimitOf(f), L"a larger need is held to the ceiling");
 			}
 		}
 	};

@@ -315,6 +315,12 @@ namespace VectorDemandTest
 			Assert::IsFalse(MotionAhead::LeadCapped(0, 20), L"no look-ahead (depth 0): nothing is capped");
 			Assert::IsTrue(MotionAhead::LeadCapped(MotionAhead::DepthAt(4, 240.0), 0), L"240p's depth 16 is held to the ceiling");
 			Assert::IsTrue(MotionAhead::LeadCapped(MotionAhead::DepthAt(4, 120.0), 0), L"120p's depth 8 is held to the ceiling");
+			// R3 (lead 12): the ceiling with more queued is the DESIGNED state (info line only); the entry only when the depth asks more.
+			Assert::IsFalse(MotionAhead::LeadShortOfDepth(depth60), L"60p / 250 ms: the depth (4) is served in full: no fallback entry");
+			Assert::IsFalse(MotionAhead::LeadShortOfDepth(MotionAhead::kMaxLead), L"a depth of exactly the ceiling is served in full");
+			Assert::IsTrue(MotionAhead::LeadShortOfDepth(MotionAhead::DepthAt(4, 120.0)), L"120p's 8 gets 6: less than asked: the entry");
+			Assert::IsTrue(MotionAhead::LeadShortOfDepth(MotionAhead::DepthAt(4, 240.0)), L"240p's 16 gets 6: the entry");
+			Assert::IsFalse(MotionAhead::LeadShortOfDepth(0), L"no look-ahead: nothing asked");
 
 			MotionAhead::LeadCapTracker t;
 			for (unsigned i = 0; i + 1 < MotionAhead::LeadCapTracker::kLeadCapRun; ++i)
@@ -335,8 +341,9 @@ namespace VectorDemandTest
 			const Decision forward = Decide(Make({ Consumer::GrainMap }));
 			Assert::IsTrue(forward.mode == Mode::Forward);
 			Assert::AreEqual(StatusLine(forward), StatusLine(forward, 0), L"not capped: the line is unchanged");
-			Assert::AreEqual(StatusLine(forward) + "; look-ahead lead capped at " + std::to_string(MotionAhead::kMaxLead) + " frames (more are queued ahead)",
-				StatusLine(forward, MotionAhead::kMaxLead));
+			Assert::AreEqual(StatusLine(forward) + "; look-ahead computes " + std::to_string(MotionAhead::kMaxLead) +
+				" frames ahead (the ahead-compute ceiling; more are queued)", StatusLine(forward, MotionAhead::kMaxLead),
+				L"R3: at the ceiling the line is information, not a downgrade");
 			const Decision idle = Decide(Make({}));
 			Assert::AreEqual(StatusLine(idle), StatusLine(idle, MotionAhead::kMaxLead), L"no forward look-ahead: no cap text");
 
@@ -345,6 +352,11 @@ namespace VectorDemandTest
 			Assert::AreEqual(std::string("motion_lookahead_capped"), on.id);
 			Assert::IsTrue(on.reason.find(std::to_string(MotionAhead::kMaxLead) + " frames ahead") != std::string::npos, L"the reason names the cap");
 			Assert::IsTrue(on.reason.find("ahead-compute ceiling") != std::string::npos, L"and says it is the ceiling (OD 11-14)");
+			const int asked120 = MotionAhead::DepthAt(4, 120.0);
+			const FallbackCatalog::Decision short120 = FallbackCatalog::MotionLookaheadCapped(true, MotionAhead::kMaxLead, asked120);
+			Assert::IsTrue(short120.engaged);
+			Assert::IsTrue(short120.reason.find("depth asks (" + std::to_string(asked120) + ")") != std::string::npos,
+				L"R3: the entry names what the consumer asked for");
 			const FallbackCatalog::Decision off = FallbackCatalog::MotionLookaheadCapped(false, MotionAhead::kMaxLead);
 			Assert::IsFalse(off.engaged);
 			Assert::AreEqual(std::string("motion_lookahead_capped"), off.id);
