@@ -495,6 +495,14 @@ public:
         std::lock_guard<std::mutex> g(mutex_);
         gpuDevice_ = device;
     }
+    // R2 (audit S1): textures a reader still pinned when the device went: forgotten by the device (never destroyed through a device
+    // that may be gone; the driver frees them with the device). Counted here and on the status lines (not silent).
+    void NoteGpuForgotten(uint64_t textures, uint64_t bytes)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        gpuForgotten_ += textures;
+        gpuForgottenBytes_ += bytes;
+    }
     // R2: the GPU device goes (dispatcher release / device lost): every GPU spot is released now, retired ones too (their textures
     // are the device's), so no spot names a destroyed texture. Render thread, between fills.
     void ReleaseGpuSpots()
@@ -1119,6 +1127,9 @@ public:
     {
         std::lock_guard<std::mutex> g(mutex_);
         std::vector<std::string> lines;
+        if (gpuForgotten_ != 0)
+            lines.push_back("skeleton acquire: " + std::to_string(gpuForgotten_) + " owner GPU texture(s) (" + std::to_string(gpuForgottenBytes_)
+                            + " bytes) were still pinned when the GPU device went: left to the device's teardown");
         for (const auto& kv : counters_) {
             const AcquireCounters& c = kv.second;
             std::string l = "skeleton acquire: " + NameOfLocked(kv.first) + " " + std::to_string(c.reusedLane + c.reusedMemo)
@@ -1409,6 +1420,7 @@ private:
     std::function<uint64_t()> fenceCompleted_;
     bool gpuPresent_ = false;
     IOwnerGpuDevice* gpuDevice_ = nullptr;   // R2: the sanctioned GPU context's device (SetGpuDevice)
+    uint64_t gpuForgotten_ = 0, gpuForgottenBytes_ = 0;   // R2 audit S1: pinned owner textures left to the device's teardown
     bool gpuGranted_ = false;
     uint64_t gpuBudget_ = 0;
     uint64_t gpuBytes_ = 0;

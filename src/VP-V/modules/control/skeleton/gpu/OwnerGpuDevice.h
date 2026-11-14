@@ -44,6 +44,8 @@ namespace Vpv
 			};
 
 			explicit OwnerGpuDevice(pl_gpu gpu) : m_gpu(gpu), m_backend(gpu), m_pool(std::make_shared<Pool>()) {}
+			// Audit S2: no libplacebo call here (as SkeletonModule's own teardown at process end, Teardown(.., gpuAlive false): the device
+			// may already be gone). The lifecycle releases it first (GpuReleased / Shutdown -> DetachMemoGpu -> Release).
 			~OwnerGpuDevice() override { Close(); }
 			OwnerGpuDevice(const OwnerGpuDevice&) = delete;
 			OwnerGpuDevice& operator=(const OwnerGpuDevice&) = delete;

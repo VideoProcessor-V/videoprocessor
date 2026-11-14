@@ -257,10 +257,7 @@ namespace VpMotion
 		const bool levelOnly = ahead.reason == MotionAhead::Reason::Active || ahead.reason == MotionAhead::Reason::ShallowQueue;
 		const auto now = std::chrono::steady_clock::now();
 		// refs/109 F1: the lead's cap is noted every frame (the log key above leaves the lead out; the status line shows it).
-		motionLeadCap.Note(MotionAhead::LeadCapped(ahead.depth, static_cast<size_t>((std::max)(0, ahead.available))));
-		motionLeadShort.Note(MotionAhead::LeadShortOfDepth(ahead.depth));   // R3: only a request above the ceiling is a fallback
-		if (MotionAhead::LeadShortOfDepth(ahead.depth))
-			motionLeadAsked = ahead.depth;
+		motionLeadCap.Note(ahead.depth, static_cast<size_t>((std::max)(0, ahead.available)));   // R3: info vs entry (LeadCapState)
 		if (motionAheadLogged != key && (!levelOnly || now - motionAheadLoggedAt >= std::chrono::seconds(5)))
 		{
 			motionAheadLogged = key;
@@ -329,12 +326,12 @@ namespace VpMotion
 		// for MORE than the ceiling gives (sustained). Synced only when it changes, outside VectorEngineFallbackSync (VectorEngineTests
 		// pins that group's exact per-frame sync counts, WAIVER-T1-01).
 		const bool forward = vectorDemand.mode == VectorDemand::Mode::Forward;
-		const bool leadAtCeiling = motionLeadCap.sustained && forward;
-		const bool leadShortShown = motionLeadShort.sustained && forward;
+		const bool leadAtCeiling = motionLeadCap.InfoShown(forward);
+		const bool leadShortShown = motionLeadCap.EntryShown(forward);
 		if (leadShortShown != motionLeadCapShown)
 		{
 			motionLeadCapShown = leadShortShown;
-			host.SyncFallback(FallbackCatalog::MotionLookaheadCapped(leadShortShown, MotionAhead::kMaxLead, motionLeadAsked));
+			host.SyncFallback(FallbackCatalog::MotionLookaheadCapped(leadShortShown, MotionAhead::kMaxLead, motionLeadCap.asked));
 		}
 		const std::string line = VectorDemand::StatusLine(vectorDemand, leadAtCeiling ? MotionAhead::kMaxLead : 0);
 		if (line != vectorEngineLogged)

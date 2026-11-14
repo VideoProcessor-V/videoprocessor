@@ -628,6 +628,14 @@ namespace Vpv
 				mh.memo->ReleaseGpuSpots();
 				if (gpuAlive)
 					mh.gpuDevice->Release();
+				// Audit S1: what a reader still pins is forgotten (not destroyed through a device that is going): counted and shown.
+				const OwnerGpuDevice::Stats left = mh.gpuDevice->GetStats();
+				if (left.live != 0)
+				{
+					mh.memo->NoteGpuForgotten(left.live, left.liveBytes);
+					DebugLog::Log("Skeleton: %llu owner GPU texture(s) (%llu bytes) still pinned when the GPU device went: left to its teardown",
+						static_cast<unsigned long long>(left.live), static_cast<unsigned long long>(left.liveBytes));
+				}
 				mh.gpuDevice.reset();
 			}
 		}
@@ -861,6 +869,14 @@ namespace Vpv
 			switch (f.kind)
 			{
 			case RE::Lifecycle::GpuCreated:
+				// Audit S3: a memo device still attached at GpuCreated belongs to a renderer that never sent GpuReleased (a dead device,
+				// whatever the new pl_gpu's address): abandoned before the new one is known, so a same-address pl_gpu is never mistaken
+				// for it (its pl_dispatch is forgotten, not reused). Covers a memo-only host too (no lane state).
+				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
+				{
+					std::lock_guard<std::mutex> lock(ownerFillsMutex_);
+					DetachMemoGpu(*mh, false);
+				}
 				hosts_.SetAux(f.host, f.device);   // the raw device, for the video memory query only
 				gpuSlots_.SetAux(f.host, const_cast<void*>(static_cast<const void*>(f.gpu)));   // 70b G5: the renderer's pl_gpu (null in a unit test: no GPU products)
 				Reconcile(f.host, -1);

@@ -165,7 +165,7 @@ namespace VpvRenderer
 		// docs/VP-nvof-ahead.md (owner 2026-10-16): how many source frames ahead the
 		// optical-flow engine works at least (0 = off); off in low latency; never more than queued.
 		// B1 (owner 2026-11-10, doc 91 C): the MINIMUM (queue floor + engage threshold); the look-ahead runs
-		// every frame queued ahead up to MotionAhead::kMaxLead (MotionAhead::LeadFor).
+		// every frame queued ahead up to MotionAhead::kMaxLead (MotionAhead::LeadFor): the ahead-compute ceiling 6 (OD 11-14).
 		int motionAheadFrames = MotionAhead::kDefaultDepth;
 		// The engine is the established default (owner 2026-10-16); off = the matcher only.
 		bool opticalFlow = true;

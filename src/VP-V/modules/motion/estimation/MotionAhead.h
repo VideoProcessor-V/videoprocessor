@@ -182,6 +182,25 @@ namespace MotionAhead
 		}
 	};
 
+	// R3 (audit S5): the cap's two views composed, noted once per frame by PlanProducer and read by UpdateVectorEngine: the INFO
+	// text (the ceiling binds sustained: the designed state) and the fallback ENTRY (the depth asks more than the ceiling, sustained),
+	// with the depth asked for the entry's words. Both only while the forward look-ahead runs. Render thread.
+	struct LeadCapState
+	{
+		LeadCapTracker atCeiling;      // LeadCapped: binds at all
+		LeadCapTracker shortOfDepth;   // LeadShortOfDepth: the consumer gets less than it asks
+		int asked = 0;                 // the last depth above the ceiling
+		void Note(int depth, size_t queuedAhead)
+		{
+			atCeiling.Note(LeadCapped(depth, queuedAhead));
+			shortOfDepth.Note(LeadShortOfDepth(depth));
+			if (LeadShortOfDepth(depth))
+				asked = depth;
+		}
+		bool InfoShown(bool forward) const { return forward && atCeiling.sustained; }
+		bool EntryShown(bool forward) const { return forward && shortOfDepth.sustained; }
+	};
+
 	// The queue (current frame plus the frames after it) that holds `depth` ahead.
 	inline size_t QueueFramesFor(int depth) { return static_cast<size_t>((std::max)(0, depth)) + 1; }
 	// The producer's pending submissions before the oldest is dropped: 6 at the default depth
