@@ -49,6 +49,21 @@ class JudgeTests(unittest.TestCase):
         self.assertTrue(T.judge([F("src/a.cpp", add=["// ALLOW_SITES += 1"])], "m")[0])
         self.assertEqual(T.judge([F("src/a.cpp", add=["int x;"])], "m")[0], [])
 
+    def test_product_rows_folder_change_is_a_rule_19_change(self):
+        row = '        { kP10GrainSplit, "repair/grain_split", kExpectedGrainSplitUnit, "grain split pass" },'
+        moved = '        { kP10GrainSplit, "repair/elsewhere", kExpectedGrainSplitUnit, "grain split pass" },'
+        cat = "src/VP-V/core/ProductCatalog.h"
+        v, _, _ = T.judge([F(cat, add=[moved], rem=[row])], "m")
+        self.assertEqual(v[0][0], "register_owner")
+        v, _, _ = T.judge([F(cat, add=[moved])], "m")
+        self.assertEqual(v[0][0], "register_owner")
+        v, _, w = T.judge([F(cat, add=[moved], rem=[row])], "m" + chr(10) + chr(10) + "WAIVER-X: r")
+        self.assertEqual((v, w), ([], True))
+        v, _, _ = T.judge([F(cat, add=["inline int Other();"])], "m")
+        self.assertEqual(v, [])
+        v, _, _ = T.judge([F("src/VP-V/core/Other.h", add=[moved])], "m")
+        self.assertEqual(v, [])
+
     def test_waiver_needs_line_start(self):
         self.assertFalse(T.has_waiver("fix mentions WAIVER-X inline"))
         self.assertTrue(T.has_waiver("a\nWAIVER-X"))

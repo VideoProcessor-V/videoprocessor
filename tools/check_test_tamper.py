@@ -12,6 +12,7 @@ commit that touches a guarded file class WITHOUT a WAIVER-<ID> trailer line in i
   checker    tools/check_*.py, tools/run_compliance.py (any change needs a waiver)
   baseline   tools/*baseline*.json, docs/audit/*baseline*.json, *budget*.json (a change that only
                                                        REMOVES lines, i.e. a shrink, passes with a note)
+  register_owner  an added/edited/removed ProductRows() row in src/VP-V/core/ProductCatalog.h (its folder is a register owner)
   allowlist  a changed line, in any other file, naming ALLOW_SITES, CoverageAllowList,
              known_false_positive or an ALLOW list/entry (removal-only passes with a note)
 
@@ -33,6 +34,13 @@ BASELINE_GLOBS = ["tools/*baseline*.json", "docs/audit/*baseline*.json", "docs/a
 ALLOW_RX = re.compile(r"ALLOW_SITES|CoverageAllowList|known_false_positive|\bALLOW\s*=|\"allow\w*\"\s*:")
 
 
+# A ProductRows() row of src/VP-V/core/ProductCatalog.h: { kPn, "<owner folder>", ... }. The folder names the register owner
+# (check_private_copies rule d derives its owner folders from it), so any added/edited/removed row moves who may register a
+# product: a rule-19 change (S-CHK2, SCHK-REGOWNERS condition).
+PRODUCT_ROW_RX = re.compile(r'^\s*\{\s*k[A-Za-z0-9_]+\s*,\s*"[^"]*"\s*,')
+PRODUCT_CATALOG = "src/VP-V/core/ProductCatalog.h"
+
+
 def classify(path):
     if any(fnmatch.fnmatch(path, g) for g in CHECKER_GLOBS):
         return "checker"
@@ -41,6 +49,10 @@ def classify(path):
     if "/tests/" in path or path.endswith(("Tests.cpp", "Test.cpp")) or "/VideoProcessor-Test/" in path:
         return "test"
     return "other"
+
+
+def path_is_catalog(path):
+    return path == PRODUCT_CATALOG
 
 
 def has_waiver(message):
@@ -68,7 +80,9 @@ def judge(files, message):
             else:
                 viol.append(("baseline", f["path"], "baseline changed (+%d/-%d)" % (len(add), len(rem))))
         else:
-            if [l for l in add if ALLOW_RX.search(l)]:
+            if path_is_catalog(f["path"]) and [l for l in add + rem if PRODUCT_ROW_RX.search(l)]:
+                viol.append(("register_owner", f["path"], "ProductRows owner folder changed (moves the N1 rule d register owners)"))
+            elif [l for l in add if ALLOW_RX.search(l)]:
                 viol.append(("allowlist", f["path"], "allow-list line added/edited"))
             elif [l for l in rem if ALLOW_RX.search(l)]:
                 notes.append("allow-list removal: " + f["path"])
