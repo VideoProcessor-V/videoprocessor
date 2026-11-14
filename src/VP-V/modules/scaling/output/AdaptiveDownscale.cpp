@@ -106,7 +106,7 @@ if (q.x < size.x && q.y < size.y) {
 
 		// One workgroup: the frame's totals, the ramp, the smoothing and the
 		// cut snap, into the persistent state (r grain_scale, g mean(1 - edge),
-		// b unused (0; the frame's mean level is the P4 mean, read on the CPU), a initialised).
+		// b unused (0; the frame's mean luma is the P4 APL, read on the CPU), a initialised).
 		// The cut is the shared cut event (cut_in, from P4 through AdaptiveDownscaleCut.h).
 		const char* const FINAL_HEADER = R"GLSL(
 shared vec4 ad_total[256];
@@ -589,13 +589,13 @@ float rs_slope(float y)
 		{
 			cutAvailable = true;
 			cutCause.clear();
-			lastMeanCodes = verdict.p4MeanCodes;
+			lastApl = verdict.apl;
 			return verdict.cut;
 		}
 		cutAvailable = false;
 		cutCause = verdict.cause;
 		++cutUnavailableFrames;
-		lastMeanCodes = -1.0f;
+		lastApl = -1.0f;
 		return false;
 	}
 
@@ -709,7 +709,7 @@ float rs_slope(float y)
 			stats.valid = true;
 			stats.grainScale = values[0];
 			stats.meanW = upscale.on ? upscale.wBase * values[0] : settings.wBase * values[1] * values[0];
-			stats.meanLuma = lastMeanCodes > 0.0f ? lastMeanCodes : 0.0f;   // the P4 mean of the newest advanced frame (not a private mean)
+			stats.meanLuma = lastApl > 0.0f ? lastApl : 0.0f;   // the P4 APL of the newest advanced frame (not a private mean)
 		};
 		if (NativeStatsReadback())
 		{
