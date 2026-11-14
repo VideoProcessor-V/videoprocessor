@@ -5864,8 +5864,11 @@ namespace Tests
 			// Non-vacuity (audit L-DET MUST 2): the units the default chain runs on this clip each have a counted row. The set
 			// is VP_COMPUTE_ONCE_EXPECT (comma-separated ids) when given, else the default-on units below.
 			std::string expect = RealClip::Env("VP_COMPUTE_ONCE_EXPECT");
+			const bool expectFromEnv = !expect.empty();
 			if (expect.empty())
 				expect = "U3,U4,U6,U7,U8,U9,U10";
+			// WAIVER-LDET-1 condition: the run reports the expected-unit set it used (a narrowed set needs its own waiver).
+			Logger::WriteMessage(("== compute-once expected units: " + expect + (expectFromEnv ? " (from VP_COMPUTE_ONCE_EXPECT, NOT the default set)\n" : " (default set, VP_COMPUTE_ONCE_EXPECT unset)\n")).c_str());
 			std::string missing;
 			for (size_t at = 0; at <= expect.size();)
 			{
