@@ -230,7 +230,7 @@ public:
 					}
 					const Stat st = StatOf(wall);
 					LogLine(Fmt("V3 cost %.0fx%.0f B %.0f ", w, h, B) + "Compact live form (tap upload + extend + 6 passes + finish): wall ms" +
-						Fmt(" mean %.4f p95 %.4f max %.4f; dispatcher MeasuredMs (last pass) %.4f", st.mean, st.p95, st.peak, disp.MeasuredMs(kP10GrainSplit)));
+						Fmt(" mean %.4f p95 %.4f max %.4f; dispatcher LastPassMs %.4f", st.mean, st.p95, st.peak, disp.LastPassMs(kP10GrainSplit)));
 				}
 				disp.Release();
 			}

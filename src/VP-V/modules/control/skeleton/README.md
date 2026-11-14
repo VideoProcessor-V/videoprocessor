@@ -301,6 +301,30 @@ Decisions (provenance: decision log = `D:/codex/vp-handover/refs/owner-decisions
   <= 1 per frame (COORDINATOR ruling on G0 S6, lead9/lead9-state.md 07:05 entry; 102b B1-SEAL-VIA-ACQUIRE).
 Times are EST (UTC = EST + 5 h); transcript session cf1d27fa-e9e0-4e7a-b3a8-9416d0edfd34 (D:/codex/vp-handover/TRANSCRIPT-INDEX.md).
 
+## Scheduler budget feed and the IC-2 contract (S0)
+
+Design goal: one core-first slot per SOURCE frame (render first, then core jobs, derived products, the TD share, extras; the gap scheduler only mops up
+leftovers). Decision of record: owner 2026-11-12 15:13 (refs/owner-decisions-2026-11-07.md:612), design refs/122 (N1 the budget was never fed, N2 one
+render budget). The frozen types and rules R1-R10 live in `core/SchedulerContract.h`; `OnDemand::RenderBudget` is now an alias of the ONE
+`VpSkeleton::RenderBudget` there (bit-identical, one copy).
+
+- `SlotBudgetFeed.h` (pure, source-agnostic) feeds `SpareHost::SetBudget` once per source frame: budget = period - render EWMA - period/10 (the measured
+  source rate; the nominal one only while unmeasured), and writes the slot's use (EWMA) plus the declared TD slice to `Presenter::spareSlotMs` (R2).
+  The Original pathway is never budgeted and never written.
+- `SlotBudgetFeedHost.h` adapts the host: the render ms is the module clock (`timing.lastRenderOnlyMs`, biased high = conservative; labelled "render
+  (module clock)"), the measured rate is cached from the Entrance fan-out, the nominal rate is the lane period. A real host `renderMs` seam is the later
+  registered upgrade (only the adapter changes).
+- Budget before the first render sample is 0 (not half a period): the slot reports NoBudget and the status line says "render (module clock) not
+  measured"; no budget is invented. The host-renderMs departure from the brief is registered as S0-HOST-RENDERMS (refs/102b, trigger: S-P11B Phase 4 fold).
+- `SkeletonGpuDispatcher::MeasuredMs` is the per-frame SUM of all timed passes (FIX-S0-COST); `LastPassMs` is the last single pass (diagnostics; its
+  reader is the GrainSplitV3 cost bench). The lane job header's `costUs` uses the same frame sum.
+- Provenance (rule 17): the ONE RenderBudget body moved verbatim from OnDemandEstimate.h into core/SchedulerContract.h (T1 asserts bit-identity with the
+  frozen old body); the feed and adapter are new VP-V files; no Bill file is touched except SkeletonModule.cpp (VP-V's own host module, +5/-2).
+- Status (rule 5): one line, "spare slot: budget X ms (render (module clock) Y ms, period Z ms), used U ms, outcome ..." or "no budget (render not
+  measured / source rate unknown / no present seen yet)" or "off (Original pathway: not budgeted)". Never a silent NoBudget.
+- FIX-S0-COST: `SkeletonGpuDispatcher::MeasuredMs` is the per-frame SUM of all passes (`GpuProductCost::MeanFrameMs`), no longer the last single pass; the
+  gap planner and the slot predict the real job cost (`LastPassMs` keeps the old number for diagnostics).
+
 ## Status and fallbacks
 
 Every downgrade is visible (Ctrl+I line, Ctrl+Alt+D, Config status); none is log-only. Strings (FallbackCatalog ids):
