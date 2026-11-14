@@ -30,6 +30,7 @@ namespace GpuAttribution
 		std::string owner;     // a ProductCatalog token, or "pathway:<name>"
 		Kind kind = Kind::Owner;
 		std::string unit;      // PrivateCopy: the shared unit recomputed (a bare "U<n>" id)
+		mutable uint64_t hits = 0;   // passes charged by this rule (the report's non-vacuity rows; under the registry mutex)
 	};
 
 	struct OwnerRow { std::string owner; uint64_t passes = 0; uint64_t ns = 0; };
@@ -146,6 +147,7 @@ namespace GpuAttribution
 		uint64_t UnattributedPasses() const { std::lock_guard<std::mutex> lock(mutex_); return unattributedPasses_; }
 		void NoteFrame() { std::lock_guard<std::mutex> lock(mutex_); ++frames_; }
 		uint64_t Frames() const { std::lock_guard<std::mutex> lock(mutex_); return frames_; }
+		std::vector<Rule> Rules() const { std::lock_guard<std::mutex> lock(mutex_); return rules_; }
 		void Reset()
 		{
 			std::lock_guard<std::mutex> lock(mutex_);
@@ -153,6 +155,8 @@ namespace GpuAttribution
 			unattributed_.clear();
 			private_.clear();
 			passes_ = unattributedPasses_ = frames_ = 0;
+			for (const Rule& r : rules_)
+				r.hits = 0;
 		}
 
 	private:
@@ -172,6 +176,7 @@ namespace GpuAttribution
 		}
 		void Charge(const Rule& r, const std::string& step, const char* description, uint64_t ns, std::string& owner)
 		{
+			++r.hits;
 			if (r.kind == Kind::PrivateCopy)
 				AddStep(private_, step, r.owner, r.unit, description, ns);
 			// The pass's owner: the first VP owner of its steps, else the pathway.
@@ -213,5 +218,16 @@ namespace GpuAttribution
 	{
 		if (ComputeOnce::Enabled())
 			Global().Note(steps, numSteps, description, ns, defaultOwner);
+	}
+
+	// One GPU pass issued outside libplacebo (raw D3D11 Dispatch, NVOF Execute): counted and attributed to its owner,
+	// untimed (ms 0) - no pl_dispatch callback exists for it. One line after the submit; off = one relaxed load.
+	inline void NoteExternal(const char* step, const char* owner)
+	{
+		if (ComputeOnce::Enabled())
+		{
+			const char* steps[1] = { step };
+			Global().Note(steps, 1, step, 0, owner);
+		}
 	}
 }

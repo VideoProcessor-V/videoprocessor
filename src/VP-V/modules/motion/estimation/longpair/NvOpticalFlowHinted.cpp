@@ -5,6 +5,7 @@
 
 #include "../../../../../../3rdparty/nvidia-optical-flow/nvOpticalFlowD3D11.h"
 
+#include <VP-V/core/GpuAttribution.h>
 #include <cstring>
 #include <memory>
 
@@ -152,6 +153,7 @@ namespace NvOpticalFlow
 		output.outputCostBuffer = static_cast<NvOFGPUBufferHandle>(cost);
 		output.bwdOutputCostBuffer = static_cast<NvOFGPUBufferHandle>(bwdCost);
 		const NV_OF_STATUS status = List(functions)->nvOFExecute(static_cast<NvOFHandle>(handle), &input, &output);
+		GpuAttribution::NoteExternal("nvof hinted execute", "longpair_nvof");   // compute-once detector 3: NVOF pass
 		if (status != NV_OF_SUCCESS)
 		{
 			char text[256] = {};

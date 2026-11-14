@@ -11,6 +11,7 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
+#include <VP-V/core/GpuAttribution.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -559,6 +560,7 @@ namespace CameraModel
 		auto run = [&](Kernel k, UINT x, UINT y) {
 			ctx->CSSetShader(im.cs[k].Get(), nullptr, 0);
 			ctx->Dispatch(x, y, 1);
+			GpuAttribution::NoteExternal(kEntry[k], "photometric_refine");   // compute-once detector 3: raw D3D11 pass
 		};
 		run(kClear, 64, 1);
 		run(kCand, static_cast<UINT>((w + 63) / 64), static_cast<UINT>((h + 63) / 64));

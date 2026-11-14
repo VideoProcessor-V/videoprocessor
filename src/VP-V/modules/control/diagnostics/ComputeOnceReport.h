@@ -12,7 +12,10 @@
 //   Compute-once gpu owner <owner> passes <n> ms <avg per pass>
 //   Compute-once gpu UNATTRIBUTED "<step>" passes <n> ms <avg> in "<description>"
 //   Compute-once gpu HIDDEN-COPY "<step>" unit <unit> owner <owner> passes <n> ms <avg>
+//   Compute-once gpu rule-unmatched "<pattern>" owner <owner> [unit <unit>]   (a seeded rule no pass matched this run)
+//   Compute-once not-instrumented <unit> <name>: <why> (trigger: <when it gains a counter>)
 //   Compute-once summary units <n> duplicates <n> hidden-copies <n> gaps <n> gpu-frames <n> gpu-passes <n> gpu-owners <n> gpu-unattributed <n>
+//     gpu-hidden-copies <n> gpu-rules <n> gpu-rules-matched <n> gpu-private-rules-matched <n> not-instrumented <n>
 // A caller reads "<symbol>+0x<off> [<file>:<line>] @<context>"; symbols come from DbgHelp when the PDB is beside the
 // module, else "<module>+0x<offset>". Built only on demand (status command, teardown log, the 30 s log while on).
 
@@ -128,6 +131,26 @@ namespace ComputeOnceReport
 		return s.empty() ? std::string("-") : s;
 	}
 
+	// The shared units WITHOUT a counter (audit L-DET MUST 5, rule 5: absence is printed, not silent). Each has a 102b row
+	// (refs/102b, "L-DET uninstrumented units"); a unit leaves this list in the commit that gives it a counter.
+	struct Uncounted { const char* unit; const char* name; const char* why; const char* trigger; };
+	inline const std::vector<Uncounted>& NotInstrumented()
+	{
+		static const std::vector<Uncounted> list = {
+			{ "U5", "laplacian_ringing", "no implementation in the tree", "the first U5 producer commit" },
+			{ "U13", "coding_evidence", "P16 reserved (fused with the region block statistics pass), no producer", "the P16 fill package" },
+			{ "U14", "trail_compose", "no implementation (TD shared function, not built)", "the TD build package that adds it" },
+			{ "U15", "field_refine", "RefinedFieldProducer unbound (Bound() false), no compute", "the producer binding commit" },
+			{ "U16", "lighting_fit", "no implementation (TD shared function, not built)", "the TD build package that adds it" },
+			{ "U18", "codec_model", "no implementation (TD shared function, not built)", "the TD build package that adds it" },
+			{ "U19", "td_maps_view", "read-only accessor, computes nothing", "a compute added behind the view" },
+			{ "U21", "source_geometry", "read-only view of P14g, computes nothing", "a compute added behind the view" },
+			{ "U22", "motion_engine_instance", "an instance, not a per-frame compute: the SK-MV one-engine guard (NvOpticalFlow::Sessions) counts it",
+				"a second engine type outside the guard" },
+		};
+		return list;
+	}
+
 	inline bool IsPrivate(const ComputeOnce::UnitRow& r) { return r.variant.compare(0, 8, "private:") == 0; }
 
 	struct Totals
@@ -135,6 +158,7 @@ namespace ComputeOnceReport
 		size_t units = 0, duplicates = 0, hiddenCopies = 0, gaps = 0;
 		uint64_t gpuFrames = 0, gpuPasses = 0;
 		size_t gpuOwners = 0, gpuUnattributed = 0, gpuHiddenCopies = 0;
+		size_t gpuRules = 0, gpuRulesMatched = 0, gpuPrivateRulesMatched = 0;
 	};
 
 	inline Totals Count()
@@ -155,6 +179,16 @@ namespace ComputeOnceReport
 		t.gpuOwners = g.Owners().size();
 		t.gpuUnattributed = g.Unattributed().size();
 		t.gpuHiddenCopies = g.PrivateCopies().size();
+		for (const GpuAttribution::Rule& r : g.Rules())
+		{
+			++t.gpuRules;
+			if (r.hits > 0)
+			{
+				++t.gpuRulesMatched;
+				if (r.kind == GpuAttribution::Kind::PrivateCopy)
+					++t.gpuPrivateRulesMatched;
+			}
+		}
 		return t;
 	}
 
@@ -194,11 +228,20 @@ namespace ComputeOnceReport
 		for (const GpuAttribution::StepRow& s : gpu.PrivateCopies())
 			out.push_back("Compute-once gpu HIDDEN-COPY \"" + s.step + "\" unit " + s.unit + " owner " + s.owner + " passes "
 				+ std::to_string(s.passes) + " ms " + Ms(s.ns, s.passes));
+		for (const GpuAttribution::Rule& rule : gpu.Rules())
+			if (rule.hits == 0)
+				out.push_back("Compute-once gpu rule-unmatched \"" + rule.pattern + "\" owner " + rule.owner
+					+ (rule.unit.empty() ? std::string() : " unit " + rule.unit));
+		for (const Uncounted& u : NotInstrumented())
+			out.push_back(std::string("Compute-once not-instrumented ") + u.unit + " " + u.name + ": " + u.why + " (trigger: " + u.trigger + ")");
 		const Totals t = Count();
 		out.push_back("Compute-once summary units " + std::to_string(t.units) + " duplicates " + std::to_string(t.duplicates)
 			+ " hidden-copies " + std::to_string(t.hiddenCopies) + " gaps " + std::to_string(t.gaps) + " gpu-frames "
 			+ std::to_string(t.gpuFrames) + " gpu-passes " + std::to_string(t.gpuPasses) + " gpu-owners " + std::to_string(t.gpuOwners)
-			+ " gpu-unattributed " + std::to_string(t.gpuUnattributed) + " gpu-hidden-copies " + std::to_string(t.gpuHiddenCopies));
+			+ " gpu-unattributed " + std::to_string(t.gpuUnattributed) + " gpu-hidden-copies " + std::to_string(t.gpuHiddenCopies)
+			+ " gpu-rules " + std::to_string(t.gpuRules) + " gpu-rules-matched " + std::to_string(t.gpuRulesMatched)
+			+ " gpu-private-rules-matched " + std::to_string(t.gpuPrivateRulesMatched)
+			+ " not-instrumented " + std::to_string(NotInstrumented().size()));
 		return out;
 	}
 
