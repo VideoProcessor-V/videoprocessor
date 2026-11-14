@@ -130,12 +130,12 @@ namespace Tests
 			in.record.applied[1] = GeoFx::AppliedAxis(1080, 2160, 5);
 			in.record.applied[1].sharpen.present = true;
 			in.record.applied[0].conf = in.record.applied[1].conf = 0.99f;
-			Assert::AreEqual(std::string("Source identity: 1080 -> 2160 lanczos-like + sharpening, confident"), Line(in));
+			Assert::AreEqual(std::string("Source identity: 1080 -> 2160 lanczos-like + sharpening, confident; SID safety rules: off"), Line(in));
 			in.record.applied[1].sharpen.present = false;
 			in.record.applied[0].kernelIndex = in.record.applied[1].kernelIndex = -1;
-			Assert::AreEqual(std::string("Source identity: 1080 -> 2160 kernel unsure, confident"), Line(in));
+			Assert::AreEqual(std::string("Source identity: 1080 -> 2160 kernel unsure, confident; SID safety rules: off"), Line(in));
 			in.shadow = true;
-			Assert::AreEqual(std::string("Source identity: 1080 -> 2160 kernel unsure, confident [shadow: would-be, classical decides]"), Line(in));
+			Assert::AreEqual(std::string("Source identity: 1080 -> 2160 kernel unsure, confident; SID safety rules: off [shadow: would-be, classical decides]"), Line(in));
 		}
 
 		TEST_METHOD(NativeAndDisagreeingAxesAreSaidPlainly)
@@ -144,11 +144,11 @@ namespace Tests
 			in.record.applied[0] = GeoFx::AppliedAxis(3840, 3840, -1);
 			in.record.applied[1] = GeoFx::AppliedAxis(2160, 2160, -1);
 			in.record.applied[0].conf = in.record.applied[1].conf = 0.97f;
-			Assert::AreEqual(std::string("Source identity: native, confident"), Line(in));
+			Assert::AreEqual(std::string("Source identity: native, confident; SID safety rules: off"), Line(in));
 			in.record.applied[0] = GeoFx::AppliedAxis(1920, 3840, 1);   // bicubic
 			in.record.applied[1] = GeoFx::AppliedAxis(1440, 2160, 8);   // spline36
 			in.record.applied[0].conf = in.record.applied[1].conf = 0.98f;
-			Assert::AreEqual(std::string("Source identity: H 1920 -> 3840 bicubic-like; V 1440 -> 2160 spline-like, confident (axes differ)"), Line(in));
+			Assert::AreEqual(std::string("Source identity: H 1920 -> 3840 bicubic-like; V 1440 -> 2160 spline-like, confident (axes differ); SID safety rules: off"), Line(in));
 		}
 
 		TEST_METHOD(OneConfidentAxisAndTheOtherUnsure)
@@ -158,7 +158,7 @@ namespace Tests
 			in.record.applied[0].conf = 0.99f;
 			in.record.measured[1] = GeoFx::MeasuredAxis(GG::LatchState::Abstain, 0, 2160);
 			in.record.measured[1].reasonBits = SourceIdentity::Chain::kReasonDark;
-			Assert::AreEqual(std::string("Source identity: H 1080 -> 2160 lanczos-like, confident; V unsure (dark)"), Line(in));
+			Assert::AreEqual(std::string("Source identity: H 1080 -> 2160 lanczos-like, confident; V unsure (dark); SID safety rules: off"), Line(in));
 		}
 
 		TEST_METHOD(NoPowerHoldAndAcquiringHaveTheirOwnWords)
@@ -167,15 +167,15 @@ namespace Tests
 			in.record.measured[0] = GeoFx::MeasuredAxis(GG::LatchState::Abstain, 0, 3840);
 			in.record.measured[1] = GeoFx::MeasuredAxis(GG::LatchState::Abstain, 0, 2160);
 			in.record.measured[0].reasonBits = SourceIdentity::Chain::kReasonDark | SourceIdentity::Chain::kReasonFlat;
-			Assert::AreEqual(std::string("Source identity: unsure (dark, flat)"), Line(in));
+			Assert::AreEqual(std::string("Source identity: unsure (dark, flat); SID safety rules: off"), Line(in));
 			in.record.measured[1].state = GG::LatchState::Hold;
-			Assert::AreEqual(std::string("Source identity: holding (overlay)"), Line(in));
+			Assert::AreEqual(std::string("Source identity: holding (overlay); SID safety rules: off"), Line(in));
 			in.record.measured[0] = GeoFx::MeasuredAxis(GG::LatchState::Provisional, 960, 3840);
 			in.record.measured[0].llr = 7.2f;
 			in.record.measured[0].reasonBits = 0;
 			in.record.measured[1] = GeoFx::MeasuredAxis(GG::LatchState::Provisional, 540, 2160);
 			in.record.measured[1].llr = 3.0f;
-			Assert::AreEqual(std::string("Source identity: acquiring, 7.2 of 15.0 nats"), Line(in));
+			Assert::AreEqual(std::string("Source identity: acquiring, 7.2 of 15.0 nats; SID safety rules: off"), Line(in));
 		}
 
 		TEST_METHOD(AnEstimatorThatDoesNotRunSaysWhyTheClassicalPathDecides)

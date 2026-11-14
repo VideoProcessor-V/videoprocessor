@@ -2729,8 +2729,8 @@ namespace Tests
 				Assert::IsTrue(Tests::ChainFx::SameBytes(runs[0][i], runs[1][i]), L"off: record bytes identical to the default");
 			Assert::IsTrue(status[0] == status[1], L"off: the status line is identical");
 			Assert::IsTrue(detail[0] == detail[1], L"off: Ctrl+Alt+D is identical");
-			Assert::IsTrue(status[0].find("upscale latch") == std::string::npos && detail[0].find("safety rules") == std::string::npos,
-				L"off: nothing of the latch is shown");
+			Assert::IsTrue(status[0].find("upscale latch") == std::string::npos && detail[0].find("safety rules on") == std::string::npos,
+				L"off: no 'safety rules on' block and no latch clause (the one-line 'SID safety rules: off' is allowed)");
 			Assert::IsTrue(status[0].find("deferred") == std::string::npos && detail[0].find("deferred") == std::string::npos,
 				L"off: nothing of the N1 deferral is shown");
 		}
