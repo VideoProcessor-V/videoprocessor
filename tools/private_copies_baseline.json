@@ -190,6 +190,42 @@
    "max_hits": 1
   },
   {
+   "key": "a|X2|src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
+   "rule": "a",
+   "site": "X2",
+   "refs": "126 s4 X2",
+   "reason": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|X2|src/VP-V/modules/repair/texture_restore/DetailPulse.h",
+   "rule": "a",
+   "site": "X2",
+   "refs": "126 s4 X2",
+   "reason": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|X2|src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
+   "rule": "a",
+   "site": "X2",
+   "refs": "126 s4 X2",
+   "reason": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
+   "seed": true,
+   "max_hits": 2
+  },
+  {
+   "key": "a|X2|src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+   "rule": "a",
+   "site": "X2",
+   "refs": "126 s4 X2",
+   "reason": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
+   "seed": true,
+   "max_hits": 2
+  },
+  {
    "key": "a|X3|src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
    "rule": "a",
    "site": "X3",

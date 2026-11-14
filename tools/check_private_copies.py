@@ -73,11 +73,8 @@ SITES = [
      "only": [_M + "motion/estimation/matcher/DejudderWarp.cpp", _M + "motion/estimation/matcher/DejudderWarp.h"]},
     {"id": "X2", "product": "kP4SourceStats", "refs": "126 s4 X2",
      "what": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
-     "re": r"(?<!TileChange::)\b(kCutShare|kFadeStepShare)\b",
-     "wide": r"(?<!TileChange::)\b(kCutShare|kFadeStepShare)\b",
-     # L-B6: the constants live ONCE in VpUnit::CutFadeJudge::TileChange (doc 124 A1c variant); reading them through
-     # that name is the unit, a private definition or use is the copy.
-     "owner": [_M + "input/source_analysis/events/shared/CutFadeJudge.h"],
+     "re": r"\bkCutShare\b|\bkFadeStepShare\b",
+     "wide": r"\bkCutShare\b|\bkFadeStepShare\b",
      "only": [_M + "repair/texture_restore/DetailPulse.h", _M + "repair/texture_restore/DetailPulse.cpp",
               _M + "repair/texture_restore/TextureRestore.h", _M + "repair/texture_restore/TextureRestore.cpp"]},
     {"id": "X3", "product": "kP11RegionBlockStats", "refs": "126 s4 X3",

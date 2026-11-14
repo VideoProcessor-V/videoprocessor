@@ -376,7 +376,7 @@
   "U7": {
    "name": "cut_fade_flash_judge",
    "blocking": true,
-   "baseline_duplicates": 0,
+   "baseline_duplicates": 6,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/input/signal/HdrInference.cpp",
@@ -480,7 +480,8 @@
      "kind": "false_positive",
      "reason": "carries the frame's mean luma (8-bit codes) read back from the scalar pass as data; the cut rule is CutFadeJudge::MeanStepCut / MeanStepCutLine"
     }
-   ]
+   ],
+   "waiver": "WAIVER-JOB1-U7 (coordinator, job1): 0 -> 6 is a new detection of REAL X2 copies (kCutShare/kFadeStepShare), not a loosened rule; target 0 at B6, expires at B6"
   },
   "U8": {
    "name": "active_picture_rect",

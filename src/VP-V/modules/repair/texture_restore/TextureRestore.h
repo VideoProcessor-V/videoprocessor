@@ -2,7 +2,6 @@
 
 #include <VP-V/core/ScratchArena.h>
 #include <VP-V/modules/control/skeleton/PlTexBackend.h>
-#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 
 #include <libplacebo/renderer.h>
@@ -78,7 +77,8 @@ namespace TextureRestore
 	constexpr double kGrainFloorCodes8 = 0.25, kTextureFloorCodes8 = 0.25;   // RMS floors, 8-bit codes
 	constexpr double kMeanAllowance = 1.0;     // low-band change allowance (RMS), x CodingNoiseCodes8
 	constexpr double kLowChangeNoise = 4.0;    // ... plus this many mid-band grain levels (the low band's grain, noisy)
-	// kCutShare / kFadeStepShare: ONE definition, VpUnit::CutFadeJudge::TileChange (U7 variant, L-B6).
+	constexpr double kCutShare = 0.5;          // share of tiles changed: a cut (all references restart)
+	constexpr double kFadeStepShare = 0.5;     // frame mean ramp per frame (x the allowance) over two frames: a fade
 	constexpr double kEnergyEps = 1e-6;        // codes^2
 
 	inline double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }

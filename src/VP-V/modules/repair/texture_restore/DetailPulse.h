@@ -3,7 +3,6 @@
 #include <libplacebo/renderer.h>
 
 #include <vprenderer/GrainPreserve.h>
-#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/repair/deband/VpDebander.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 
@@ -45,7 +44,7 @@
 //    allowance (VetoCodes). The tile statistics are motion-tolerant: a small displacement
 //    hardly changes a tile's mean or spread, new content or a flash does. w is bilinear
 //    between tile centres.
-//  - Cut: more than the tile-change cut share (U7 TileChange) of the tiles changed beyond CutCodes (with a field: and more
+//  - Cut: more than kCutShare of the tiles changed beyond CutCodes (with a field: and more
 //    than half of the tiles mostly untrusted). Fade: the frame mean luma moved by FadeCodes
 //    or more in the same direction on two consecutive frames. Either restarts the history
 //    (gain 1 on that frame), as do Forget(), a non-consecutive sequence or a geometry change.
@@ -82,7 +81,7 @@ namespace DetailPulse
 	constexpr double kTrustMin = 0.5;
 	constexpr double kVetoUntrustedShare = 0.25;
 	constexpr double kCutMul = 3.0;      // x VetoCodes
-	// kCutShare: ONE definition, VpUnit::CutFadeJudge::TileChange (U7 variant, L-B6).
+	constexpr double kCutShare = 0.5;
 	constexpr double kFadeCodes8 = 0.25;
 	constexpr double kAheadMaxRatio = 2.5;
 	constexpr int kRingSlots = 128;      // per-frame history slots (the window is far shorter)

@@ -91,7 +91,7 @@ REGISTRY = [
                       r"\bfade_on\b", r"f?abs\(1\.0f? - g\)", r"hist_d\s*>\s*cut_hist", r"luma_mean\s*-\s*prev",
                       # refs/126 s4 X2: DetailPulse's and TextureRestore's private tile-change cut / fade judges
                       r"kCutShare", r"kFadeStepShare"),
-     "allow": _c(r"(VpUnit::)?CutFadeJudge::TileChange::\w+", r"CutFadeJudge::", r"shared/CutFadeJudge\.h")},
+     "allow": _c(r"CutFadeJudge::", r"shared/CutFadeJudge\.h")},
     {"id": "U8", "name": "active_picture_rect",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/picture"],
      "signatures": _c(r"\bPictureArea\b"),

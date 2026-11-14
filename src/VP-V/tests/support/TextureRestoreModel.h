@@ -410,10 +410,10 @@ namespace TextureRestoreModel
 				const double mean = sum / (std::max)(count, 1.0);
 				if (!restartAll)
 				{
-					const double fs = VpUnit::CutFadeJudge::TileChange::kFadeStepShare * allow;
+					const double fs = kFadeStepShare * allow;
 					const double d0 = mean - m1, d1 = m1 - m2;
 					const bool fade = hist >= 2 && std::fabs(d0) > fs && std::fabs(d1) > fs && d0 * d1 > 0.0;
-					const bool cut = nchanged > VpUnit::CutFadeJudge::TileChange::kCutShare * count;
+					const bool cut = nchanged > kCutShare * count;
 					lastCut = cut || fade;
 					flag = cut || fade;
 				}

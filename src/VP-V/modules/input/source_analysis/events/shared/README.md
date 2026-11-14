@@ -10,8 +10,6 @@ The one cut / fade / flash decision (doc 62, section 1.2 U7): `CutFadeJudge.h`, 
 - Identity: no unit version bump (additive, byte-identical). The assembled matcher and AdaptiveDownscale kernels were proven textually identical to the base kernels; the fragment hashes are pinned in `SharedUnitsW1Tests` (`ResidualKernelTextIsTheTextTheConsumersCarried`) and the existing GPU tests (`DejudderHookTests`, `EstimatorHookTests`, the AdaptiveDownscale GPU tests) are the behavioural identity gate.
 - Not migrated: SRM `FrameCutJudge`, LED look-ahead and the SA3 reader switch come later. The matcher's fade APPLICATION (B x gain + offset in its half-luma pass, reading `fade_state`) is a consumer of the fade state this unit writes, not a second judgement.
 
-- Variant `TileChange` (L-B6, doc 124 A1c): the tile-change cut / fade judge DetailPulse and TextureRestore decide on the GPU (share of 16-px tiles changed): `TileChange::kCutShare` and `kFadeStepShare` have their ONE definition here (moved unchanged, 0.5 / 0.5; no behaviour change, no version bump). Unifying it with the histogram judge is a separate later decision. The per-frame shared GPU form (computed once, read by DP and TR) waits for GPU verification (102b row).
-
 Unit: input/source_analysis (events/shared)
 
 ## Settings

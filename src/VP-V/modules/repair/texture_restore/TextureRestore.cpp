@@ -860,8 +860,8 @@ if (p.x < sz.x && p.y < sz.y) {
 			const double eight = EightBitStep(params.colorDepth);
 			const double allowCodes = MeanAllowanceCodes(params.bitrateQuality, params.colorDepth);
 			const float allow2 = static_cast<float>(allowCodes * allowCodes * cu * cu);
-			const float fadeStep = static_cast<float>(VpUnit::CutFadeJudge::TileChange::kFadeStepShare * allowCodes * cu);
-			const float cutShare = static_cast<float>(VpUnit::CutFadeJudge::TileChange::kCutShare);
+			const float fadeStep = static_cast<float>(kFadeStepShare * allowCodes * cu);
+			const float cutShare = static_cast<float>(kCutShare);
 			const float restartF = restartAll ? 1.0f : 0.0f;
 			const float fg = static_cast<float>(std::pow(kGrainFloorCodes8 * eight * cu, 2.0));
 			const float ft = static_cast<float>(std::pow(kTextureFloorCodes8 * eight * cu, 2.0));
