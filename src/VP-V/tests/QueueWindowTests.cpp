@@ -307,5 +307,39 @@ namespace QueueWindowTestsNs
 			capped.aheadCap = uint16_t(w.aheadCompute - 3u);   // S-C lowered the cap below every product's depth
 			Assert::IsTrue(WithAheadPlan(w, capped).aheadCompute == w.aheadCompute - 3u, L"the S-C cap binds too");
 		}
+
+		// Slice C wiring (lead 11; OD 11-14, design s10): the feed the window hands S-3a's PlanAhead carries the ACTIVE consumers with
+		// their declared needs, the queue frames ahead and THE ceiling, and the law applied to it gives the window's own aheadCompute
+		// (one law, no drift) for every binding: consumer, ceiling, queue and none. Inactive (need 0) consumers are not handed over.
+		TEST_METHOD(PlanAheadFeedGivesTheWindowsAheadCompute)
+		{
+			const uint16_t c = kAheadCeiling;
+			struct Case { uint16_t laneLead; std::vector<AheadDemand> active; AheadBinding binding; };
+			const Case cases[] = {
+				{ uint16_t(c + 4u), { AheadDemand{ uint16_t(c - 2u), "camera" }, AheadDemand{ uint16_t(c - 1u), "temporal detail" } }, AheadBinding::Consumer },
+				{ uint16_t(c + 4u), { AheadDemand{ uint16_t(c + 3u), "temporal detail" } }, AheadBinding::Ceiling },
+				{ uint16_t(c - 3u), { AheadDemand{ uint16_t(c - 1u), "camera" } }, AheadBinding::Queue },
+				{ uint16_t(c + 4u), { AheadDemand{ 0, "idle" } }, AheadBinding::NoConsumer },
+				{ uint16_t(c + 4u), {}, AheadBinding::NoConsumer },
+			};
+			for (const Case& k : cases) {
+				QueueWindowTerms t = Terms(1, 1, 0, k.laneLead, 0);
+				SetAheadConsumers(t, k.active);
+				Assert::IsTrue((t.wired & QueueWindowTerms::kAheadNeed) != 0, L"the consumers are fed (an empty list = none active)");
+				const QueueWindow w = DeriveWindow(t, 100, 0);
+				Assert::IsTrue(w.aheadBinding == k.binding, L"the binding");
+				const PlanAheadFeed f = PlanAheadFeedOf(w, k.active);
+				Assert::AreEqual<uint16_t>(kAheadCeiling, f.aheadCeiling, L"THE ceiling, never a call-site copy");
+				Assert::AreEqual<uint16_t>(w.ahead, f.queueAheadFrames, L"the queue frames ahead are the window's");
+				Assert::AreEqual<uint16_t>(w.aheadCompute, f.aheadCompute, L"the window's own aheadCompute rides along");
+				Assert::AreEqual<uint16_t>(w.aheadCompute, AheadComputeOf(f), L"the law on the feed == the window's aheadCompute");
+				for (const AheadDemand& d : f.activeConsumers)
+					Assert::IsTrue(d.need > 0, L"an inactive consumer is not handed over");
+				if (k.binding == AheadBinding::NoConsumer)
+					Assert::AreEqual<uint16_t>(0, AheadComputeOf(f), L"no active consumer: 0");
+				if (k.binding == AheadBinding::Ceiling)
+					Assert::AreEqual<uint16_t>(kAheadCeiling, AheadComputeOf(f), L"a larger need is held to the ceiling");
+			}
+		}
 	};
 }
