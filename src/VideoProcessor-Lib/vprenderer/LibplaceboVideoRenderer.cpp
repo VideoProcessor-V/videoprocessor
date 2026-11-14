@@ -5150,8 +5150,6 @@ struct LibplaceboVideoRenderer::Impl
 	bool& vpTimelineActive = dejudderPolicy.vpTimelineActive;
 	bool& vpSkipOutput = dejudderPolicy.vpSkipOutput;
 	double& vpOutputPhase = dejudderPolicy.vpOutputPhase;
-	std::atomic<bool>& vpQueueErrorReset = dejudderPolicy.vpQueueErrorReset;
-	DisplayRateHold& timelineDisplayRateHold = dejudderPolicy.timelineDisplayRateHold;
 	// VPV-HOOK-END
 	unsigned long long motionEngineIdleReleasesLogged = 0;
 	unsigned long long dejudderEstimates = 0;
@@ -5707,18 +5705,9 @@ struct LibplaceboVideoRenderer::Impl
 	VpMotion::VectorEngine vectorEngine{ this, &VpMotion::InvalidateHost<Impl> };   // registered for IVectorEngine (vpv.vector_engine.v1) under this host; queue-event invalidations reach RequestMotionInvalidate
 	VectorDemand::Decision& vectorDemand = vectorEngine.vectorDemand;
 	std::atomic<int>& queueAheadCapacity = vectorEngine.queueAheadCapacity;
-	std::atomic<bool>& motionAheadBackward = vectorEngine.motionAheadBackward;
-	std::atomic<bool>& motionAheadEngaged = vectorEngine.motionAheadEngaged;
-	uint64_t& motionAheadEngagedGeneration = vectorEngine.motionAheadEngagedGeneration;
-	bool& motionAheadPrevKnown = vectorEngine.motionAheadPrevKnown;
-	uint64_t& motionAheadPrevGeneration = vectorEngine.motionAheadPrevGeneration;
-	DejudderPolicy::MotionAheadFrame& motionAheadPrev = vectorEngine.motionAheadPrev;
-	std::shared_ptr<MotionAhead::Producer>& motionProducer = vectorEngine.motionProducer;
 	MotionValidity::State& motionValidity = vectorEngine.motionValidity;
 	using MotionShadowField = VpMotion::VectorEngineState::MotionShadowField;
 	VpMotion::MotionSegment<MotionShadowField>& motionSegment = vectorEngine.motionSegment;
-	std::atomic<int>& motionAheadDepth = vectorEngine.motionAheadDepth;
-	std::atomic<int>& motionAheadConfigured = vectorEngine.motionAheadConfigured;
 	std::atomic<double>& motionHandoffMaxMs = vectorEngine.motionHandoffMaxMs;
 	std::atomic<double>& motionHandoffTotalMs = vectorEngine.motionHandoffTotalMs;
 	std::atomic<unsigned long long>& motionHandoffCount = vectorEngine.motionHandoffCount;
@@ -24944,7 +24933,7 @@ releaseDriftBaseRetention =
 	VpMotion::PhaseTimelineView phaseTimelineView{ dejudderPolicy };
 	VpMotion::DejudderHostBinding dejudderBinding{ this, VpMotion::DejudderBindingSpec{ &dejudderView, &phaseTimelineView,
 		[](void* self, RendererExtension::OutputPlan& plan) { return static_cast<Impl*>(self)->PlanVpOutputs(plan); },
-		[](void* self) { static_cast<Impl*>(self)->vpQueueErrorReset.store(true, std::memory_order_release); }, this } };
+		[](void* self) { static_cast<Impl*>(self)->dejudderPolicy.vpQueueErrorReset.store(true, std::memory_order_release); }, this } };
 	// VPV-HOOK-END
 	Vpv::Capture::HostBinding captureBinding{ this, Vpv::Capture::MakeCaptureHost(*this) };   // P10: last member (registered last, removed first)   // VPV-HOOK
 	Vpv::HostState vpv;   // P11a-0: the S8 state anchor (data only, no binding; core/hub/HostState.h)   // VPV-HOOK

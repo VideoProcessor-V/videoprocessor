@@ -62,7 +62,7 @@ namespace MotionAhead
 	{
 		if (!impl)
 			return;
-		const auto producer = std::atomic_load(&impl->motionProducer);
+		const auto producer = std::atomic_load(&impl->vectorEngine.motionProducer);
 		if (!producer || !producer->Running())
 			return;   // engine off: zero work
 		auto& engine = impl->vectorEngine;
@@ -103,7 +103,7 @@ namespace MotionAhead
 		typename Engine::OnDemandStaged staged;
 		if (!engine.TakeStagedOnDemand(staged))
 			return;   // nothing staged this cycle (off, engine off, no accepted pair): zero work
-		const auto producer = std::atomic_load(&impl->motionProducer);
+		const auto producer = std::atomic_load(&impl->vectorEngine.motionProducer);
 		if (!producer || !producer->Running())
 			return;
 		engine.NoteOnDemandCycle(staged.pairRateHz, staged.dequeueWaitMs);
@@ -140,7 +140,7 @@ namespace MotionAhead
 	{
 		if (!impl || queue.size() < 2)
 			return;
-		const auto producer = std::atomic_load(&impl->motionProducer);
+		const auto producer = std::atomic_load(&impl->vectorEngine.motionProducer);
 		if (!producer || !producer->Running())
 			return;   // engine off: zero work
 		const auto& a = queue[0];
