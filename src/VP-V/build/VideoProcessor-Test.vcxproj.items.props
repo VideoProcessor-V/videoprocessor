@@ -954,6 +954,9 @@
     <ClCompile Include="..\VP-V\modules\repair\grain_split\tests\GrainLevelDetailLossTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\repair\grain_split\tests\GrainLevelShiftBench.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\repair\grain_split\tests\GrainNodeTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
