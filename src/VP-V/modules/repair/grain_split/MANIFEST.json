@@ -8,6 +8,9 @@
   "code_location": "migrated",
   "live_files": [
     "src/VP-V/modules/repair/grain_split/GrainSplit.h",
+    "src/VP-V/modules/repair/grain_split/GrainLevel.h",
+    "src/VP-V/modules/repair/grain_split/tests/GrainLevelLawTests.cpp",
+    "src/VP-V/modules/repair/grain_split/tests/GrainLevelDetailLossTests.cpp",
     "src/VP-V/modules/repair/grain_split/GrainCameraRefine.h",
     "src/VP-V/modules/repair/grain_split/tests/GrainCameraRefineTests.cpp",
     "src/VP-V/modules/repair/grain_split/GrainSplitGpu.h",
