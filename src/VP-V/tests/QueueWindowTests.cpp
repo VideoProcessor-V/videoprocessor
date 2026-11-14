@@ -10,18 +10,24 @@
 //   QW-T2b a window that shrinks never makes the memo release a frame that is still queued (the presented edge);
 //   QW-T6 EQUALITY with the shared terms: Frames() == FramesInFlight(0, W, H, max(R, P), L) and QueueFrames is THE R + L + W count
 //         (audit S5 / M1: one derivation);
-//   the board: a published window is read back whole from another thread.
+//   the board: a published window is read back whole from another thread;
+//   S-C's law (audit MUST 2): DelayBudget::NextLowerQueueFrames steps down one feasible frame at a time to kMinimumDepth, the total
+//         delay unchanged; a plan below aheadCompute binds the window as Budget, shown (audit SHOULD 7).
 // CPU only, every test bounded.
 
+#include <VP-V/core/DelayBudget.h>
 #include <VP-V/core/FramesInFlight.h>
 #include <VP-V/core/ProductGraph.h>
 #include <VP-V/core/QueueFrames.h>
 #include <VP-V/core/QueueWindow.h>
 #include <VP-V/core/SkeletonAcquire.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -182,9 +188,10 @@ namespace QueueWindowTestsNs
 					Assert::IsTrue(a.Ok() && calls.load() == 1, L"computed once on approach");
 				m.Acquire(kP10GrainSplit, s, AcquireForm::Cpu);   // the render of s (frames up to far - 1 are not demanded otherwise)
 			}
-			// QW-T13: the keep window is the full queue back (H + max(R, P) = 4), not the compute depth.
+			// QW-T13: the keep window is the full queue back (H + max(R, P)), not the compute depth.
 			const QueueWindow w = DeriveWindow(t, far, 0);
-			Assert::IsTrue(w.back == 4u && m.KeepFrames() == w.back, L"keep spans the full queue back");
+			const unsigned queueBack = unsigned(t.history) + (std::max)(unsigned(t.renderAhead), unsigned(t.presentLag));
+			Assert::IsTrue(w.back == queueBack && w.back > w.aheadCompute && m.KeepFrames() == w.back, L"keep spans the full queue back");
 			Assert::IsTrue(m.Acquire(kP10GrainSplit, far - w.back, AcquireForm::Cpu).status == AcquireStatus::Reused, L"frame far - back still attached");
 		}
 
@@ -243,6 +250,62 @@ namespace QueueWindowTestsNs
 			reader.join();
 			Assert::IsFalse(torn.load(), L"never a torn window");
 			Assert::IsTrue(board.Read(&w) && w.current == 20000, L"the last one");
+		}
+
+		// S-C's law (audit MUST 2): the DELAY BUDGET gives each lower step for the same inputs. Design depth first, then one frame
+		// down per step to kMinimumDepth, then no step; fixed + queue + padding stays budgetMs and the padding grows. Swept rates.
+		TEST_METHOD(DelayBudgetNextLowerQueueFramesKeepsTheTotal)
+		{
+			for (double display : { 50.0, 59.94, 120.0 })
+				for (double rate : { 23.976, 25.0, 29.97 }) {
+					DelayBudget::Inputs in;
+					in.sourceFps = rate;
+					in.refreshHz = display;
+					in.processingMs = DelayBudget::kProcessingAllowanceMs;
+					in.budgetMs = DelayBudget::RecommendedBudgetMs(in, std::vector<double>{ rate });   // the design depth fits exactly
+					DelayBudget::Plan plan = DelayBudget::Compute(in);
+					Assert::IsTrue(plan.feasible && plan.queueFrames == DelayBudget::kDesignDepth, L"the recommended budget gives the design depth");
+					int steps = 0;
+					DelayBudget::Plan lower;
+					while (DelayBudget::NextLowerQueueFrames(in, plan.queueFrames, &lower)) {
+						Assert::AreEqual(plan.queueFrames - 1, lower.queueFrames, L"one frame down per step");
+						Assert::IsTrue(lower.paddingMs > plan.paddingMs, L"the padding makes up the frame given up");
+						Assert::IsTrue(std::abs(lower.fixedMs + lower.queueMs + lower.paddingMs - in.budgetMs) <= 1e-6, L"the total stays budgetMs");
+						Assert::IsTrue(lower.degraded && lower.feasible, L"a lower step is a visible degradation, still feasible");
+						plan = lower;
+						++steps;
+					}
+					Assert::AreEqual(DelayBudget::kMinimumDepth, plan.queueFrames, L"stops at kMinimumDepth");
+					Assert::AreEqual(DelayBudget::kDesignDepth - DelayBudget::kMinimumDepth, steps, L"every step taken once");
+					Assert::IsFalse(DelayBudget::NextLowerQueueFrames(in, DelayBudget::kMinimumDepth, &lower), L"never below the floor");
+					DelayBudget::Inputs unfed = in;
+					unfed.sourceFps = 0.0;
+					Assert::IsFalse(DelayBudget::NextLowerQueueFrames(unfed, DelayBudget::kDesignDepth, &lower), L"no rate measured: no step");
+				}
+		}
+
+		// Audit SHOULD 7 (no silent cap): a plan that computes fewer frames ahead than the window's aheadCompute binds the window as
+		// Budget, and the cap is shown; a plan at full depth leaves the window as it was.
+		TEST_METHOD(APlanBelowAheadComputeBindsTheWindowAsBudget)
+		{
+			QueueWindowTerms t = Terms(1, 1, 0, kAheadCeiling, 0);
+			t.aheadNeed = kAheadCeiling;
+			t.aheadNeedBy = "camera";
+			const QueueWindow w = DeriveWindow(t, 50, 0);
+			Assert::IsTrue(w.aheadCompute == kAheadCeiling && w.aheadBinding != AheadBinding::Budget, L"the window before any plan");
+			AheadPlan full;
+			full.aheadCap = w.aheadCompute;
+			full.depth.push_back(AheadPlan::Entry{ uint16_t(kP10GrainSplit), 0, w.aheadCompute });
+			const QueueWindow same = WithAheadPlan(w, full);
+			Assert::IsTrue(same.aheadCompute == w.aheadCompute && same.aheadBinding == w.aheadBinding, L"a full-depth plan binds nothing");
+			AheadPlan shorter = full;
+			shorter.depth[0].depth = uint16_t(w.aheadCompute - 2u);
+			const QueueWindow bound = WithAheadPlan(w, shorter);
+			Assert::IsTrue(bound.aheadCompute == w.aheadCompute - 2u && bound.aheadBinding == AheadBinding::Budget, L"the plan's depth, bound by the budget");
+			Assert::IsTrue(AheadComputeCapped(bound) && AheadComputeText(bound).find("budget") != std::string::npos, L"the cap is shown");
+			AheadPlan capped = full;
+			capped.aheadCap = uint16_t(w.aheadCompute - 3u);   // S-C lowered the cap below every product's depth
+			Assert::IsTrue(WithAheadPlan(w, capped).aheadCompute == w.aheadCompute - 3u, L"the S-C cap binds too");
 		}
 	};
 }
