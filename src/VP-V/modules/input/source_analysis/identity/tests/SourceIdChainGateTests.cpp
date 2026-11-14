@@ -462,6 +462,27 @@ namespace Tests
 			Assert::IsTrue(m.SourceIdConsensus(), L"leaving the Original pathway the requested mode takes effect again");
 		}
 
+		// S-3f a (OD:630(1), doc 91 E :36): the chain safety rules (R2 + R3 + R5 + R7) and the ABR latch trigger are OFF in every launch
+		// path. A freshly built Monitor never takes them, and with the SID mode On plus the r2 event feed (MenuHold, AbrStep) posted the
+		// estimator keeps the rules off, counts no latch activity and shows no latch clause. Only an explicit setter turns them on.
+		TEST_METHOD(TheSafetyRulesAndTheAbrLatchTriggerAreOffByDefault)
+		{
+			SidGate::Mon m;
+			GeoFx::G::HeldState geo;
+			m.SetGeometrySource(&geo);
+			Assert::IsFalse(SourceIdentity::Chain::EstimatorSettings().safetyRules, L"the settings default is off");
+			m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+			Assert::IsFalse(m.ChainEstimatorRef().StatusInput().safetyRules, L"on a fresh Monitor the rules are off");
+			m.ChainEstimatorRef().NoteEvent(SourceIdentity::Chain::EstimatorEvent::MenuHold, 1);
+			m.ChainEstimatorRef().NoteEvent(SourceIdentity::Chain::EstimatorEvent::AbrStep, 1);
+			SidGate::Script(m, geo, 10.0);
+			const SourceIdentity::Chain::ChainStatusInput in = m.ChainEstimatorRef().StatusInput();
+			Assert::IsFalse(in.safetyRules, L"still off after a run with the r2 events posted");
+			Assert::AreEqual<uint64_t>(0, in.latch.entries + in.latch.heldBack + in.latch.nonConventional, L"no latch activity");
+			Assert::IsTrue(m.ChainEstimatorRef().DetailText().find("safety rules on") == std::string::npos, L"Ctrl+Alt+D shows no latch block");
+			Assert::IsTrue(m.ChainEstimatorRef().StatusLine().find("upscale latch") == std::string::npos, L"Ctrl+I shows no latch clause");
+		}
+
 		// SID r2 (L6 / missing test): a consensus reading of ONE axis below native is held (two axes are required unless the single-axis
 		// switch is on), and the hold is visible in the status line while it lasts, not only in the debug log.
 		TEST_METHOD(ASingleAxisRebaseIsHeldAndVisibleInTheStatus)
