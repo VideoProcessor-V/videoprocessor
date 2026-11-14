@@ -24933,7 +24933,7 @@ releaseDriftBaseRetention =
 	VpMotion::PhaseTimelineView phaseTimelineView{ dejudderPolicy };
 	VpMotion::DejudderHostBinding dejudderBinding{ this, VpMotion::DejudderBindingSpec{ &dejudderView, &phaseTimelineView,
 		[](void* self, RendererExtension::OutputPlan& plan) { return static_cast<Impl*>(self)->PlanVpOutputs(plan); },
-		[](void* self) { static_cast<Impl*>(self)->dejudderPolicy.vpQueueErrorReset.store(true, std::memory_order_release); }, this } };
+		[](void* self) { static_cast<Impl*>(self)->dejudderPolicy.vpQueueErrorReset.store(true, std::memory_order_release); }, this } };   // VPV-HOOK
 	// VPV-HOOK-END
 	Vpv::Capture::HostBinding captureBinding{ this, Vpv::Capture::MakeCaptureHost(*this) };   // P10: last member (registered last, removed first)   // VPV-HOOK
 	Vpv::HostState vpv;   // P11a-0: the S8 state anchor (data only, no binding; core/hub/HostState.h)   // VPV-HOOK
