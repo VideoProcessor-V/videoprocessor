@@ -200,3 +200,7 @@ Tiers: not tiered.
 ### Unit 4 costs and residuals (refs/116b)
 
 The LEVEL pass adds about 0.04-0.1 ms (one 256-thread workgroup over the block grid) and 128 B (the 8x1 rgba32f level table; not yet counted in `PrivateBytes`). With fewer than one valid level bin the cap is absent and N is the local value (no visible indicator yet). Residual classes: dense texture keeps its detail by the owner ruling (texture wins); the GPU LEVEL table is covered only indirectly (through `V3GpuMatchesCpuReference` N error) and the 12-bit GPU case is not covered: 102b row P10U4-GPU12.
+
+## Band memo (job 1, L-B3; product grain.band, id 30)
+
+`grain.band` is the per-frame band memo of this unit (lead 8 allocation 30, 11-14): the ONE low-band blur that the interpolator, the debander and detail pulse each computed privately (shared units U2 / U3). Key = (frame, stage, full-resolution sigma in milli, plane); half-resolution float32 plane units; read bilinearly at p/2; discarded after the frame. The band takes its half plane from P1 (the shared half-luma product, Float32 variant) and applies Bill's unchanged law (`GrainPreserve::LowWeight` / `LowRadius` / `LowWeightsGlsl`); this unit holds no 2x2 box of its own. `shared/BandFromBase.h` `BandFromHalf` is the CPU oracle. State: registry row and oracle landed; the GPU owner fill and the consumer switches wait for the L-CORE GPU owner-fill context and the P1 Float32 variant (102b row LB3-BAND-MEMO-GPU). Source: lead 8 iface-L-B3 rulings a-e; principles/skeleton-products.md rule 4.
