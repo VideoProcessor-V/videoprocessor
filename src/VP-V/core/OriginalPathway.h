@@ -51,6 +51,7 @@ namespace OriginalPathway
 			{ "resync_event", "off", "input.signal" },   // R1: no resync shadow
 			{ "source_resolution_latch_fixes", "off", "input.source_analysis" },
 			{ "source_resolution_cut_fixes", "off", "input.source_analysis" },
+			{ "source_resolution_frame_bound", "off", "input.source_analysis" },
 			{ "deband_vp", "off", "repair.deband" },
 			{ "deband_vp_exclusive", "off", "repair.deband" },
 			{ "deband_grain", "on", "repair.deband" },

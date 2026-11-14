@@ -4,6 +4,7 @@
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <VP-V/modules/drive/led_compensation/LedRawTransfer.h>
 #include <VP-V/modules/drive/led_measure/LedLookahead.h>
+#include <VP-V/modules/drive/led_measure/NativeReadback.h>
 #include <DebugLog.h>
 #include <DisplayRefreshRatePolicy.h>
 
@@ -336,6 +337,19 @@ namespace LedDrive
 	}
 
 	void DynamicDriveFrame::CollectMeasurements()
+	{
+		LedDrive::DeferredCopies& deferred = LedDrive::DeferredCopies::ForThisThread();
+		if (deferred.Armed() && deferred.Defer(collectAlive, this, -1, &DynamicDriveFrame::CollectDeferredThunk))
+			return;   // runs at the frame's end, after the submit
+		CollectMeasurementsNow();
+	}
+
+	void DynamicDriveFrame::CollectDeferredThunk(void* self, int)
+	{
+		static_cast<DynamicDriveFrame*>(self)->CollectMeasurementsNow();
+	}
+
+	void DynamicDriveFrame::CollectMeasurementsNow()
 	{
 		const std::shared_ptr<LedDriveModule> led = std::atomic_load(&module);
 		if (!led)

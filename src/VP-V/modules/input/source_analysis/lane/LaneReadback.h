@@ -10,8 +10,9 @@
 #include <vector>
 
 // Skeleton S6 (design B4, "non-blocking P5 readback"): a fixed ring of staging buffers. The render
-// thread copies a finished GPU product into a Free staging buffer, polls an event query, and maps
-// without waiting once it is done. Nothing here blocks: a busy map is retried later and counted.
+// thread copies a finished GPU product into a Free staging buffer, polls the device's non-blocking
+// QueryDone (a D3D11 host may answer it with a DO_NOT_WAIT Map of the staging copy, as
+// drive/led_measure/NativeReadback.h; not an event query), and maps without waiting once it is done. Nothing here blocks: a busy map is retried later and counted.
 // The staging count is fixed at build (the host derives it from the measured readback latency in
 // frames + 1). Pure C++14; the host owns the device.
 namespace VpLaneProducts {
@@ -59,7 +60,7 @@ public:
         return false;
     }
 
-    // Copying buffers whose event query is done become Ready (non-blocking).
+    // Copying buffers whose QueryDone reports done become Ready (non-blocking).
     void Poll()
     {
         if (device_ == nullptr)
