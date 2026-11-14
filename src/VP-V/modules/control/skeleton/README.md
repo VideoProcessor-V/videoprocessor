@@ -297,7 +297,7 @@ with a real device, status lines of the engaged states) is not written yet: the 
 
 Goal: every shared computation exists once per frame, owned by its unit, published into its skeleton spot; readers get it
 instead of recomputing (no private copy, no private "does not fit" variant, no silent fallback). Provenance: transcript session
-cf1d27fa-e9e0-4e7a-b3a8-9416d0edfd34 (see D:\codexp-handover\TRANSCRIPT-INDEX.md); times are given EST (UTC = EST + 5 h); decision log
+cf1d27fa-e9e0-4e7a-b3a8-9416d0edfd34 (see D:/codex/vp-handover/TRANSCRIPT-INDEX.md); times are given EST (UTC = EST + 5 h); decision log
 refs/owner-decisions-2026-11-07.md (line numbers below).
 
 - Get-or-compute-and-publish: reuse the shared predicate if already calculated for the frame, else the owner computes it and loads it
