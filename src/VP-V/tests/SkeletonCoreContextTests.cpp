@@ -74,7 +74,10 @@ namespace SkeletonCoreContextTestsNs
 	template <class F>
 	bool RunsWithin(F f, int ms)
 	{
-		std::future<void> done = std::async(std::launch::async, f);
+		// A detached runner: a deadlock FAILS the test (a std::async future would block in its destructor and hang the run).
+		auto p = std::make_shared<std::promise<void>>();
+		std::future<void> done = p->get_future();
+		std::thread([p, f]() mutable { f(); p->set_value(); }).detach();
 		return done.wait_for(std::chrono::milliseconds(ms)) == std::future_status::ready;
 	}
 
@@ -685,6 +688,106 @@ namespace SkeletonCoreContextTestsNs
 			Assert::IsTrue(r1.Ok() && r2.Ok() && r1.gpu.resource == &luma && r2.gpu.resource == r1.gpu.resource, L"the offered plane itself");
 			Assert::IsTrue(SourcePlanes::FactsOf(r1) == SourcePlanes::FactsOf(r2), L"one offered set");
 			SourcePlanes::Forget(&host);
+		}
+	};
+
+	// L-CORE M5 (coordinator ruling on 102b B1-SEAL-VIA-ACQUIRE): the seal and Acquire together compute a frame ONCE, in both orders.
+	TEST_CLASS(SealAcquireComputeOnceTests)
+	{
+	public:
+		TEST_METHOD(AcquireThenSealComputesOnce)
+		{
+			MiniLane r;
+			Assert::IsTrue(r.lane.Active(), L"built");
+			SkeletonMemo m;
+			BindLaneToMemo(r.lane, m);
+			r.lane.OnSourceFrame(r.View(0));   // the lane has not run (no pump): the frame exists nowhere
+			const AcquireResult a = m.Acquire(kP4SourceStats, 0, AcquireForm::Cpu);
+			Assert::IsTrue(a.status == AcquireStatus::FilledAtRead, L"the owner fill computed and published it");
+			const std::vector<uint8_t> published(a.cpu, a.cpu + a.cpuBytes);
+			r.lane.OnRenderStart(0, 4000);   // the seal finds the publication
+			const AcquireCounters c = m.CountersOf(kP4SourceStats);
+			Assert::IsTrue(c.sealReused == 1 && c.sealComputed == 0 && c.Computed() == 1, L"seal reused: computed once");
+			Assert::IsTrue(m.CountersOf(kP1HalfLuma).Computed() == 1, L"its input too");
+			const AcquireResult after = m.Acquire(kP4SourceStats, 0, AcquireForm::Cpu);
+			const AnalysisLane::ProductRead lr = r.lane.ReadOf(kP4SourceStats, 0);
+			Assert::IsTrue(after.source == AcquireSource::LaneSlot && after.cpu == lr.cpu, L"after the seal: the slot itself");
+			Assert::IsTrue(std::vector<uint8_t>(after.cpu, after.cpu + after.cpuBytes) == published, L"same bytes as the publication");
+			Assert::IsTrue(m.CountersOf(kP4SourceStats).Computed() == 1, L"still once");
+		}
+
+		TEST_METHOD(SealThenAcquireComputesOnce)
+		{
+			MiniLane r;
+			Assert::IsTrue(r.lane.Active(), L"built");
+			SkeletonMemo m;
+			BindLaneToMemo(r.lane, m);
+			r.lane.OnSourceFrame(r.View(0));
+			r.lane.OnRenderStart(0, 4000);   // no publication: the seal computes (its result is the publication: the slot)
+			const AcquireCounters c = m.CountersOf(kP4SourceStats);
+			Assert::IsTrue(c.sealComputed == 1 && c.sealReused == 0 && c.Computed() == 1, L"the seal computed once");
+			const AcquireResult a1 = m.Acquire(kP4SourceStats, 0, AcquireForm::Cpu);
+			const AcquireResult a2 = m.Acquire(kP4SourceStats, 0, AcquireForm::Cpu);
+			const AnalysisLane::ProductRead lr = r.lane.ReadOf(kP4SourceStats, 0);
+			Assert::IsTrue(a1.status == AcquireStatus::Reused && a1.source == AcquireSource::LaneSlot && a1.cpu == lr.cpu && a2.cpu == a1.cpu,
+				L"Acquire reuses the seal's result (same pointer)");
+			const AcquireCounters c2 = m.CountersOf(kP4SourceStats);
+			Assert::IsTrue(c2.ownerFillCalls == 0 && c2.Computed() == 1, L"computed once in all");
+			bool shown = false;
+			for (const std::string& l : m.StatusLines())
+				shown = shown || Has(l, "seal computed 1");
+			Assert::IsTrue(shown, L"shown on the status lines");
+		}
+	};
+
+	// L-CORE M3: memos made and owner fills registered from many threads at once: every memo gets every fill, one memo per host,
+	// bounded (a deadlock fails the test instead of hanging it).
+	TEST_CLASS(MemoHostConcurrencyTests)
+	{
+	public:
+		TEST_METHOD(ConcurrentMemoCreationAndRegistration)
+		{
+			Vpv::Skeleton::SkeletonModule sk([](ConfigFile&) { return false; });
+			int hosts[8] = {};
+			std::atomic<int> calls{ 0 };
+			struct Reg { ProductId id; const char* unit; };
+			const Reg regs[4] = { { kP10GrainSplit, kGrainUnit }, { kP11RegionBlockStats, kRegionUnit }, { kP1HalfLuma, kLaneUnit },
+				{ kP4SourceStats, kLaneUnit } };
+			std::atomic<int> registered{ 0 };
+			std::atomic<bool> mismatch{ false };
+			const bool ran = RunsWithin([&]() {
+				std::vector<std::thread> ts;
+				for (int t = 0; t < 8; ++t)
+					ts.emplace_back([&, t]() {
+						for (int j = 0; j < 200; ++j) {
+							int* h = &hosts[(t + j) % 8];
+							const Vpv::Skeleton::FrameMemo fm = sk.MemoFor(h, uint64_t(j + 1));
+							if (!fm.Valid() || sk.MemoOf(h) != fm.memo.get())
+								mismatch = true;
+							if (t < 4 && j == 50 + t * 7)
+								if (sk.RegisterOwnerFill(regs[t].id, AcquireForm::Cpu, regs[t].unit, CpuFill(&calls, uint8_t(t)))
+									== SkeletonMemo::Registration::Registered)
+									registered.fetch_add(1);
+						}
+					});
+				for (std::thread& th : ts)
+					th.join();
+			}, 20000);
+			Assert::IsTrue(ran, L"no deadlock");
+			Assert::IsFalse(mismatch.load(), L"one memo per host, the same one every time");
+			Assert::AreEqual(4, registered.load(), L"each registration once");
+			for (int i = 0; i < 8; ++i) {
+				SkeletonMemo* m = sk.MemoOf(&hosts[i]);
+				Assert::IsTrue(m != nullptr, L"memo made");
+				for (const Reg& r : regs)
+					Assert::IsTrue(m->HasOwnerFill(r.id, AcquireForm::Cpu), L"every memo got every fill, whatever the interleaving");
+			}
+			for (int i = 0; i < 8; ++i) {
+				RE::LifecycleFacts rel;
+				rel.host = &hosts[i];
+				rel.kind = RE::Lifecycle::GpuReleased;
+				sk.OnLifecycle(rel);
+			}
 		}
 	};
 
