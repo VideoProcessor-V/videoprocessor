@@ -343,7 +343,7 @@ namespace VideoProcessorTest
 				return true;
 			});
 			Assert::IsTrue(disp.DispatchLive(n, 8, 0, Header(), 0u), L"live fill");
-			Assert::IsTrue(kernel->steps == 12 && disp.Stats().tapBands == 4 && disp.Stats().extends == 2, L"same passes, live");
+			Assert::IsTrue(kernel->steps == 14 && disp.Stats().tapBands == 4 && disp.Stats().extends == 2, L"same passes, live");
 			Assert::IsTrue(disp.CostOf(kP10GrainSplit).frames == 2, L"the cost counter records the live frame too");
 			Assert::IsTrue(disp.CostOf(kP11RegionBlockStats).frames == 0, L"a product without a kernel has an empty cost");
 
