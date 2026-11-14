@@ -89,6 +89,8 @@ enum : ProductId {
     kTdTrailSummary,      // 28 td.trail_summary: per-frame CPU summary for source identity / status
     // Wave S2 (SID lead request, doc 78 section 6): appended after the doc 72 list, never before it.
     kSourceGeometry,      // 29 source_geometry (P14g): HELD-STATE measured + applied source geometry (SourceGeometry unit v1)
+    // Job #1 L-FOCUS (owner 2026-11-12 22:16 / 22:18): the per-region defocus level + focus-change flag, built from shared units only.
+    kFocusMap,            // 30 here, lead 8 allocation 32 after kBandMemo 30 / kEdgeMap 31 land (sequential enum) focus_map (P17): per P11 block (defocus, focus change, confidence, flags); owner input/source_analysis/focus_map
     kSkeletonProductEnd
 };
 
@@ -991,6 +993,35 @@ inline void AppendSourceGeometryProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p);
 }
 
+// P17 focus_map (owner 2026-11-12 22:16 / 22:18): a screen pass, cheap, before TD. Per P11 block: defocus level (band energy ratio over
+// the P11 energies), focus-change flag (defocus delta along the P2 motion, P7 camera translation where P2 is absent) and confidence.
+// Declared inputs: P11 v2 (stats + E1/E2/E3/N), P10 (the band memo spot: the grain split's bands, read only through Acquire), P2 and
+// P7 (motion), own previous frame (history 1). It owns no statistic: every input is read through Acquire by its OWNER'S fill; the
+// owner fill here obtains each prerequisite the same way (nested Acquire publishes it). HARD TD RULE (owner 22:16): never import detail
+// sharper than the current frame's focus state into a region whose focus changed; the TD consumer row is DECLARED only (no wiring).
+constexpr uint32_t kFocusMapBytesPerBlock = 8;   // rgba16f: defocus, change, confidence, flags
+inline void AppendFocusMapProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    ProductDecl p = Make(kFocusMap, "focus_map", "focus map (defocus / focus change)", Backend::GpuCompute, 1, Tier::T1,
+                         Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis) | Bit(kSettingsMotion));
+    p.sourceFrame = true;
+    AddInput(p, kP11RegionBlockStats, 0);
+    AddInput(p, kP11RegionBlockStats, 1);    // the previous frame's block statistics: the focus-change reference (read, never copied)
+    AddInput(p, kP10GrainSplit, 0);
+    AddInput(p, kP2VectorPair, 0);
+    AddInput(p, kP7CameraFit, 0);
+    AddTerm(p, 4, kFocusMapBytesPerBlock);   // the 16 px cell: exact at 1080p, an upper bound at 4K/8K (32/64 px blocks)
+    // No history of its own: the previous frame's defocus is a pure function of P11(seq - 1) (lag-1 edge above), so the map of a frame
+    // never depends on which frame was asked first (determinism), and no copy of the previous map exists.
+    p.missingInputForm = true;               // without P2 / P7 the change flag reads 0 motion and says so (flags), never absent
+    p.refRenderMs = 0.05f;                   // estimate only (a per-block screen pass); the measured bench replaces it
+    decls.push_back(p);
+}
+
 // p7g_camera_guide (doc 56, K4-1; claimed as id 20 by CameraGuideProduct.h, registered here): the measurement plan for pair N is a
 // pure function of camera(N) = P7(N) and P4(N), known ahead and declared as a lane product. d = 0 (refs 93-prep-cam-d0): the fit of
 // the SAME pair, published on time from the ahead field before the matcher of N runs; a pair whose camera is not ready in time runs
@@ -1263,6 +1294,7 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double s
     AppendCameraGuideProduct(d);
     AppendTemporalDetailEngineProducts(d, sourcePeriodMs, queueFrames);
     AppendSourceGeometryProduct(d);   // wave S2: P14g, appended after the doc 72 list
+    AppendFocusMapProduct(d);         // job #1 L-FOCUS: appended after P14g
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }

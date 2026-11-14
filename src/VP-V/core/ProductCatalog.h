@@ -86,6 +86,7 @@ constexpr uint32_t kExpectedRebaseUnit = 1;
 constexpr uint32_t kExpectedHalfLumaUnit = 1;
 constexpr uint32_t kExpectedMonitorUnit = 1;
 constexpr uint32_t kExpectedSourceIdentityUnit = 1;
+constexpr uint32_t kExpectedFocusMapUnit = 1;         // FocusMap (P17 focus_map, job #1 L-FOCUS): input/source_analysis/focus_map/FocusMap.h
 constexpr uint32_t kExpectedSourceGeometryUnit = 1;   // SourceGeometry (P14g source_geometry, doc 78 section 6): input/source_analysis/identity/SourceGeometryProduct.h
 // The temporal-detail engine products (doc 72; repair/temporal_detail/products states the same numbers in TdProducts and a test
 // compares them): U13 CodingEvidence, QualityPattern, U15 FieldRefine and U19 TdMapsView at 1.
@@ -158,6 +159,9 @@ inline const std::vector<ProductRow>& ProductRows()
         // Wave S2: P14g source_geometry is HELD STATE like P14: the source-resolution side (single writer) publishes it on each evaluation, no lane
         // producer, no live fill; its readers take the latest sealed record (lag 1) and fall back visibly when it is absent or stale.
         { kSourceGeometry, "input/source_analysis/identity", kExpectedSourceGeometryUnit, "" },
+        // P17 focus_map (L-FOCUS): no lane producer; the OWNER FILL (focus_map/FocusMapFill.h, RegisterOwnerFill) makes it at the first Acquire
+        // and every later reader of the frame reuses it. Its prerequisites (P11, P10 bands, P2, P7) are obtained the same way.
+        { kFocusMap, "input/source_analysis/focus_map", kExpectedFocusMapUnit, "" },
     };
     return rows;
 }
@@ -382,6 +386,15 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         r.back().family = "temporal detail";
         r.push_back(MakeRow(27, "source geometry status", "VP-V/core/StatusText", PathwayUnit::Output, 95, {}, own,
                             "product.source_geometry", false, { kSourceGeometry }));
+        // P17 focus_map (L-FOCUS, owner 2026-11-12 22:16 / 22:18): the screen pass reads the shared units only (P11 block stats and band
+        // energies, the P10 band spot, the P2 pair, the P7 camera fit) and is the live-fill owner of its own product (first reader, repair 15,
+        // after the temporal-detail camera / engine rows at repair 12-14 so it never becomes the live-fill owner of P7 or another shared product). The temporal-detail row below is DECLARED ONLY (no wiring: the owner's focus rule, refs/126 FOCUS MAP, is
+        // reviewed first; rule 33 if it conflicts). Absent product = every reader acts as without a focus map and says so.
+        r.push_back(MakeRow(28, "focus map (screen pass)", "VP-V/modules/input/source_analysis/focus_map", PathwayUnit::Repair, 15,
+                            { kP11RegionBlockStats, kP10GrainSplit, kP2VectorPair, kP7CameraFit }, own, "product.focus_map"));
+        r.push_back(MakeRow(29, "temporal detail (focus map read path)", "VP-V/modules/repair/temporal_detail/products",
+                            PathwayUnit::Repair, 16, { kFocusMap }, own, "product.focus_map"));
+        r.back().family = "temporal detail";
         // VectorDemand consumers: ids and reads from VectorDemandProducts.h
         for (int i = 0; i < VectorDemand::kConsumerCount; ++i) {
             const VectorDemand::Consumer c = VectorDemand::ConsumerAt(i);
@@ -607,6 +620,10 @@ inline const std::vector<ConsumerFlag>& ConsumerFlags()
         { uint16_t(kCatalogConsumerIdBase + 8), kP5MonitorTiles, FlagKind::ViewIsActual, "C9b",
           "pixel evidence = the SourceFrameTap view (modules/input/source_analysis/identity/chain/ChainEstimator.cpp UpdateTap)" },
         { uint16_t(kCatalogConsumerIdBase + 8), kP4SourceStats, FlagKind::NotRead, "D6-D8", "no P4 read in the identity tree" },
+        // L-FOCUS: the temporal-detail focus read path is DECLARED ONLY. Wiring waits for the owner's focus rule review (refs/126 FOCUS MAP; owner
+        // 2026-11-12 22:16: never import detail sharper than the current frame's focus state into a region whose focus changed). Rule 33 if the
+        // rule conflicts with the TD design.
+        { uint16_t(kCatalogConsumerIdBase + 29), kFocusMap, FlagKind::NotYetConsumed, "TD focus rule", "declared read path only: no TD wiring until the owner focus rule is reviewed" },
         // B3-Z Z-DECL (lead 2026-11-11, no declaration change): the render-time readers of the matcher field. The synthesis consumers and the
         // detail pulse / texture restore / adaptive downscale rows read the LIVE matcher field (dejudder->Field()) at render and do not
         // declare P3; the lane P3 declarations land with the matcher-ahead ring (B3-Z Z1-Z3) and lane-time refinement (C9b).

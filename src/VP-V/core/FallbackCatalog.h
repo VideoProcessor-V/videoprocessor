@@ -948,6 +948,9 @@ namespace FallbackCatalog
 			// registered yet (declaration only), so every reader shows "frame pattern: not produced"; no behaviour reads the role.
 			{ "product.quality_pattern", "frame pattern record unavailable, stale or of another unit version: temporal detail and dither need show it as not produced and use their classical forms" },
 			{ "product.source_geometry", "source geometry record unavailable, stale or of another unit version: readers use the delivered raster and their classical forms" },
+			// Focus map (P17, job #1 L-FOCUS; input/source_analysis/focus_map): the per-region defocus / focus-change record could not be made for
+			// this frame (an input product was unavailable): readers act as without a focus map (temporal detail keeps its classical form).
+			{ "product.focus_map", "focus map unavailable for this frame (an input product was not served): readers act as without a focus map" },
 		};
 		if (count)
 			*count = sizeof(kEntries) / sizeof(kEntries[0]);

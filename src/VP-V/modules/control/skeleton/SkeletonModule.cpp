@@ -17,6 +17,7 @@
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/input/source_analysis/focus_map/FocusMapFill.h>
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuGrainKernel.h>
@@ -260,6 +261,17 @@ namespace Vpv
 					};
 				}
 				VpSkeleton::BindLaneToMemo(lane, memo, gpuHandleOf);
+				// L-FOCUS: the owner fill of kFocusMap (input/source_analysis/focus_map); the frame size is the lane graph's.
+				{
+					FocusMap::FillConfig focus;
+					const Dims frame = dims;
+					focus.geometry = [frame](uint64_t, int& w, int& h) {
+						w = int(frame.width);
+						h = int(frame.height);
+						return w > 0 && h > 0;
+					};
+					memo.RegisterOwnerFill(VpSkeleton::kFocusMap, VpSkeleton::AcquireForm::Cpu, FocusMap::kUnitPath, FocusMap::MakeOwnerFill(focus));
+				}
 			}
 
 			// The registry for a wiring, the measured source period and the queue frames (0 = the unmeasured defaults). Re-made at each
