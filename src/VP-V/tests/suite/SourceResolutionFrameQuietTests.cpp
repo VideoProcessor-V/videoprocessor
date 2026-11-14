@@ -281,6 +281,7 @@ namespace VideoProcessorTest
 		struct BoundRun
 		{
 			uint64_t engagedAt = 0;
+			unsigned long long cancelled = 0;
 			std::string why;
 			unsigned long long reactive = 0;
 			unsigned long long verified = 0;
@@ -290,7 +291,7 @@ namespace VideoProcessorTest
 
 		// A frame-bound run (D = 8) with a clear lower reading every 10 frames. cutAt != 0: the look-ahead reports that cut from
 		// 6 frames before it (its worker finished). cutAt == 0: no look-ahead at all (the reactive fallback).
-		BoundRun RunBoundEngage(uint64_t cutAt, unsigned lagSeed)
+		BoundRun RunBoundEngage(uint64_t cutAt, unsigned lagSeed, double aheadRatio = 0.5, uint64_t lastFrame = 600)
 		{
 			Monitor m;
 			m.SetFrameBound(true, 8);
@@ -304,7 +305,7 @@ namespace VideoProcessorTest
 				s.confidence = 0.9; s.frames = frames;
 				return s;
 			};
-			for (uint64_t seq = 1; seq <= 600 && out.engagedAt == 0; ++seq)
+			for (uint64_t seq = 1; seq <= lastFrame && out.engagedAt == 0; ++seq)
 			{
 				const double seconds = static_cast<double>(seq) * 0.0625;
 				if (seq % 10 == 0) { m.NoteSubmittedForTest(seq); pending.push_back(seq); }
@@ -321,7 +322,7 @@ namespace VideoProcessorTest
 				if (cutAt != 0 && seq + 6 >= cutAt)
 				{
 					Monitor::AheadState a;
-					a.eventSequence = cutAt; a.targetSequence = cutAt + 1; a.ready = true; a.informative = true; a.ratio = 0.5;
+					a.eventSequence = cutAt; a.targetSequence = cutAt + 1; a.ready = true; a.informative = true; a.ratio = aheadRatio;
 					m.SetAheadForTest(a, seq + 6);
 				}
 				std::string why;
@@ -333,6 +334,7 @@ namespace VideoProcessorTest
 			}
 			out.reactive = m.EngagedReactive();
 			out.verified = m.Ahead().verified;
+			out.cancelled = m.Ahead().cancelled;
 			out.describe = SourceResolutionMonitor::Describe(m.Read(), 0.5, true);
 			return out;
 		}
@@ -345,7 +347,7 @@ namespace VideoProcessorTest
 				const uint64_t cut = cuts[seed - 1];
 				const BoundRun a = RunBoundEngage(cut, seed);
 				const BoundRun b = RunBoundEngage(cut, seed + 100);   // the worker's timing differs, the decisions do not
-				Logger::WriteMessage(("seed " + std::to_string(seed) + ": cut " + std::to_string(cut) + " engaged at " + std::to_string(a.engagedAt) + " (" + a.why + ")
+				Logger::WriteMessage(("seed " + std::to_string(seed) + ": cut " + std::to_string(cut) + " engaged at " + std::to_string(a.engagedAt) + " (" + a.why + ")\
 ").c_str());
 				Assert::AreEqual<unsigned long long>(cut, a.engagedAt, L"engaged on the cut frame itself");
 				Assert::IsTrue(a.why.find("look-ahead verified") != std::string::npos, L"through the look-ahead, not the reactive trigger");
@@ -368,7 +370,7 @@ namespace VideoProcessorTest
 		// armed, and a frame with no VP native work flushes nothing: pl_gpu_flush is never called.
 		TEST_METHOD(OriginalMakesNoPlGpuFlushCallsAtTheHostLevel)
 		{
-			const std::string renderer = ReadText(RepositoryRoot() + "\src\VideoProcessor-Lib\vprenderer\LibplaceboVideoRenderer.cpp");
+			const std::string renderer = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
 			Assert::IsTrue(renderer.find("if (!pipelineSlots.OriginalPathway()) { PlanEntrance(renderImage, target, image, sourceSequence,") != std::string::npos,
 				L"the only caller of the planner (the only Arm) is behind the Original gate");
 			FrameQuiet::Deferred& frameQuiet = FrameQuiet::Deferred::ForThisThread();
@@ -376,6 +378,38 @@ namespace VideoProcessorTest
 			for (int i = 0; i < 50; ++i) FrameQuiet::Deferred::EndThisFrame();   // the seam handler on frames nothing armed
 			Assert::AreEqual(before, frameQuiet.Flushes(), L"no flush on an unarmed frame");
 			Assert::AreEqual<unsigned long long>(0, frameQuiet.MissedEnds());
+		}
+
+		// Negative look-ahead: the shot after the cut is native (ratio 1.0), so the cut does NOT engage; it is cancelled and counted.
+		TEST_METHOD(ALookAheadThatSeesANativeNextShotCancelsTheEngageAtTheCut)
+		{
+			const BoundRun r = RunBoundEngage(131, 7, 1.0, 140);   // stops 9 frames past the cut
+			Assert::AreEqual<unsigned long long>(0, r.engagedAt, L"no engage on or after the cut");
+			Assert::AreEqual<unsigned long long>(1, r.cancelled, L"the cancel is counted");
+			Assert::AreEqual<unsigned long long>(0, r.verified);
+			Assert::AreEqual<unsigned long long>(0, r.reactive, L"and no reactive engage replaced it");
+		}
+
+		// End once per Begin: the second End of a frame is a no-op, and a frame whose End never came (a throw / cancel before the
+		// AfterPresent seam) is ended exactly once by the next Arm and counted, never submitted twice.
+		TEST_METHOD(EachBeginIsSubmittedExactlyOnceIncludingAnAbandonedFrame)
+		{
+			Monitor m;
+			FrameQuiet::Deferred d;
+			const pl_frame f = NoPlanes();
+			d.Arm(nullptr);
+			d.Begin(m, nullptr, f, 1, 24.0, true, 0.0);
+			d.EndFrame();
+			d.EndFrame();   // a second End
+			Assert::AreEqual<unsigned long long>(1, m.SubmitSkipped(), L"one submit for the one Begin");
+			d.Arm(nullptr);
+			d.Begin(m, nullptr, f, 2, 24.0, true, 0.0);
+			d.Arm(nullptr);   // the frame was abandoned (a throw / cancel before the seam)
+			Assert::AreEqual<unsigned long long>(1, d.MissedEnds(), L"the abandoned frame is counted");
+			Assert::AreEqual<unsigned long long>(2, m.SubmitSkipped(), L"made up once, outside the new frame");
+			d.EndFrame();
+			d.EndFrame();
+			Assert::AreEqual<unsigned long long>(2, m.SubmitSkipped(), L"nothing is submitted twice");
 		}
 	};
 }
