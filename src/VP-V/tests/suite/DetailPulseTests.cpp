@@ -926,6 +926,7 @@ namespace DetailPulseTestsNs
 					const uint64_t seq = static_cast<uint64_t>(k) + 1;
 					DetailPulse::Params p;
 					p.sequence = seq;
+					p.sceneReader = &NoCutReader;   // own device, no PulseGpu fixture default: the module must read the model's verdict
 					p.field = useField ? fieldTex : nullptr;
 					if (ahead && k + 1 < static_cast<int>(c.frames.size()) && k > 0)
 					{

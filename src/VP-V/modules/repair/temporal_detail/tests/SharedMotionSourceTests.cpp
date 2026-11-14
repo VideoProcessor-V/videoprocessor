@@ -13,7 +13,9 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <memory>
+#include <string>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -349,6 +351,8 @@ namespace VideoProcessorTest
 				char diag[300];
 				snprintf(diag, sizeof(diag), "DIAG Forward(6) ok=%d hits=%llu absent=%llu stale=%llu unfit=%llu why=%s", okDiag ? 1 : 0, (unsigned long long)sd.hits, (unsigned long long)sd.absent, (unsigned long long)sd.stale, (unsigned long long)sd.unfit, source.CurrentDecision().reason.c_str());
 				Logger::WriteMessage(diag);
+				std::wstring wdiag(diag, diag + strlen(diag));
+				Assert::IsTrue(okDiag, wdiag.c_str());   // WIP-DIAG: the failure carries the reason (Logger output is not kept for this test)
 			}
 			Assert::IsTrue(source.Forward(6, b));
 			Assert::IsTrue(source.Backward(6, back));
