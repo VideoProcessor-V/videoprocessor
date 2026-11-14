@@ -11,7 +11,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <VP-V/modules/colour/sdr_tone_shape/DvHostStage.h>
+#include <VP-V/modules/colour/display_mapping/DvHostStage.h>
 #include <VP-V/modules/input/signal/DvGpuUnpackSession.h>
 #include <VP-V/segments/OutputSegments.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
