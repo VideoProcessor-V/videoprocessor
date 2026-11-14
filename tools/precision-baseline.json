@@ -1,0 +1,262 @@
+{
+ "classes": {
+  "A": 27,
+  "O": 31,
+  "R": 46,
+  "T": 2,
+  "U": 62
+ },
+ "files": {
+  "src/VP-V/core/GpuAllocator.h": 11,
+  "src/VP-V/core/LaneInterfaces.h": 1,
+  "src/VP-V/modules/control/skeleton/PlTexBackend.h": 8,
+  "src/VP-V/modules/control/skeleton/SkeletonModule.cpp": 2,
+  "src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp": 1,
+  "src/VP-V/modules/input/capture/EarlyUpload.cpp": 1,
+  "src/VP-V/modules/input/signal/DvTunnelTapLaw.h": 5,
+  "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp": 3,
+  "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.h": 2,
+  "src/VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h": 4,
+  "src/VP-V/modules/input/source_analysis/lane/shared/EngineLumaGpu.cpp": 2,
+  "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp": 8,
+  "src/VP-V/modules/motion/estimation/MotionAheadProducer.h": 4,
+  "src/VP-V/modules/motion/estimation/NvOpticalFlow.h": 1,
+  "src/VP-V/modules/motion/estimation/longpair/LongPairService.cpp": 2,
+  "src/VP-V/modules/motion/estimation/longpair/LongPairService.h": 3,
+  "src/VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h": 4,
+  "src/VP-V/modules/repair/deband/VpDebander.cpp": 2,
+  "src/VP-V/modules/repair/grain_split/GrainNode.h": 1,
+  "src/VP-V/modules/repair/grain_split/GrainSplitGpu.cpp": 1,
+  "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h": 3,
+  "src/VP-V/nets/NetPackage.h": 1,
+  "src/VP-V/nets/PlNetRunner.cpp": 2,
+  "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 14,
+  "src/VideoProcessor-Lib/DisplayMonitorInventory.h": 1,
+  "src/VideoProcessor-Lib/DolbyVisionTunnelInput.h": 1,
+  "src/VideoProcessor-Lib/P210FrameLayout.h": 2,
+  "src/VideoProcessor-Lib/SceneDetector.cpp": 2,
+  "src/VideoProcessor-Lib/SubtitleBoxDetector.cpp": 4,
+  "src/VideoProcessor-Lib/dv_loopback/DvLoopbackAnalyzer.cpp": 1,
+  "src/VideoProcessor-Lib/dv_loopback/DvLoopbackPattern.h": 3,
+  "src/VideoProcessor-Lib/filesource/FileMediaTypeAdapter.h": 3,
+  "src/VideoProcessor-Lib/magewell/MagewellCaptureDevice.cpp": 12,
+  "src/VideoProcessor-Lib/microsoft_directshow/live_source_filter/CBufferedLiveSourceVideoOutputPin.cpp": 7,
+  "src/VideoProcessor-Lib/microsoft_directshow/live_source_filter/WindowsOcrSubtitleDetector.cpp": 1,
+  "src/VideoProcessor-Lib/microsoft_directshow/video_renderers/DirectShowGenericHDRVideoRenderer.cpp": 3,
+  "src/VideoProcessor-Lib/microsoft_directshow/video_renderers/DirectShowGenericHDRVideoRenderer.h": 2,
+  "src/VideoProcessor-Lib/video_frame_formatter/CDeckLinkRGBToP010VideoFrameFormatter.cpp": 3,
+  "src/VideoProcessor-Lib/video_frame_formatter/CDeckLinkRGBToP010VideoFrameFormatter.h": 1,
+  "src/VideoProcessor-Lib/video_frame_formatter/CR12BtoRGB48VideoFrameFormatter.AVX2.cpp": 1,
+  "src/VideoProcessor-Lib/video_frame_formatter/CR12BtoRGB48VideoFrameFormatter.Common.h": 1,
+  "src/VideoProcessor-Lib/video_frame_formatter/CR210toRGB48VideoFrameFormatter.AVX2.cpp": 1,
+  "src/VideoProcessor-Lib/video_frame_formatter/CRGBDolbyVisionTunnelFormatter.cpp": 1,
+  "src/VideoProcessor-Lib/video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h": 1,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp": 3,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.h": 3,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 22,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 3
+ },
+ "seed_refs119": {
+  "A": 28,
+  "O": 8,
+  "R": 13,
+  "T": 10,
+  "note": "refs/119 sweep at 6772f5fcb; U = hit file not yet keyed to a refs/119 row (to classify)"
+ },
+ "sites": {
+  "src/VP-V/core/GpuAllocator.h": {
+   "class": "R",
+   "row": "119#17"
+  },
+  "src/VP-V/core/LaneInterfaces.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VP-V/modules/control/skeleton/PlTexBackend.h": {
+   "class": "R",
+   "row": "119#17"
+  },
+  "src/VP-V/modules/control/skeleton/SkeletonModule.cpp": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VP-V/modules/input/capture/EarlyUpload.cpp": {
+   "class": "A",
+   "row": "119#21"
+  },
+  "src/VP-V/modules/input/signal/DvTunnelTapLaw.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp": {
+   "class": "R",
+   "row": "119#6"
+  },
+  "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VP-V/modules/input/source_analysis/lane/shared/EngineLumaGpu.cpp": {
+   "class": "O",
+   "row": "119#5"
+  },
+  "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp": {
+   "class": "R",
+   "row": "119#4"
+  },
+  "src/VP-V/modules/motion/estimation/MotionAheadProducer.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VP-V/modules/motion/estimation/NvOpticalFlow.h": {
+   "class": "O",
+   "row": "119#5"
+  },
+  "src/VP-V/modules/motion/estimation/longpair/LongPairService.cpp": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VP-V/modules/motion/estimation/longpair/LongPairService.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h": {
+   "class": "A",
+   "row": "119#36"
+  },
+  "src/VP-V/modules/repair/deband/VpDebander.cpp": {
+   "class": "T",
+   "row": "119#14"
+  },
+  "src/VP-V/modules/repair/grain_split/GrainNode.h": {
+   "class": "R",
+   "row": "119#17"
+  },
+  "src/VP-V/modules/repair/grain_split/GrainSplitGpu.cpp": {
+   "class": "R",
+   "row": "119#17"
+  },
+  "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VP-V/nets/NetPackage.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VP-V/nets/PlNetRunner.cpp": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": {
+   "class": "R",
+   "row": "119#1"
+  },
+  "src/VideoProcessor-Lib/DisplayMonitorInventory.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/DolbyVisionTunnelInput.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/P210FrameLayout.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/SceneDetector.cpp": {
+   "class": "O",
+   "row": "119#7"
+  },
+  "src/VideoProcessor-Lib/SubtitleBoxDetector.cpp": {
+   "class": "O",
+   "row": "119#8"
+  },
+  "src/VideoProcessor-Lib/dv_loopback/DvLoopbackAnalyzer.cpp": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/dv_loopback/DvLoopbackPattern.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/filesource/FileMediaTypeAdapter.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/magewell/MagewellCaptureDevice.cpp": {
+   "class": "O",
+   "row": "119#40"
+  },
+  "src/VideoProcessor-Lib/microsoft_directshow/live_source_filter/CBufferedLiveSourceVideoOutputPin.cpp": {
+   "class": "O",
+   "row": "119#43"
+  },
+  "src/VideoProcessor-Lib/microsoft_directshow/live_source_filter/WindowsOcrSubtitleDetector.cpp": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/microsoft_directshow/video_renderers/DirectShowGenericHDRVideoRenderer.cpp": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/microsoft_directshow/video_renderers/DirectShowGenericHDRVideoRenderer.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/video_frame_formatter/CDeckLinkRGBToP010VideoFrameFormatter.cpp": {
+   "class": "O",
+   "row": "119#12"
+  },
+  "src/VideoProcessor-Lib/video_frame_formatter/CDeckLinkRGBToP010VideoFrameFormatter.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/video_frame_formatter/CR12BtoRGB48VideoFrameFormatter.AVX2.cpp": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/video_frame_formatter/CR12BtoRGB48VideoFrameFormatter.Common.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/video_frame_formatter/CR210toRGB48VideoFrameFormatter.AVX2.cpp": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/video_frame_formatter/CRGBDolbyVisionTunnelFormatter.cpp": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  },
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": {
+   "class": "A",
+   "row": "119#20"
+  },
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": {
+   "class": "U",
+   "row": "UNCLASSIFIED"
+  }
+ },
+ "tool": "N2 precision",
+ "total": 168
+}

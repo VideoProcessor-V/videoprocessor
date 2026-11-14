@@ -133,7 +133,7 @@ def ratchet(counts, baseline):
     return grown, shrunk
 
 
-def run_ratchet(name, scan, argv, default_baseline, extra_doc="", per_class=None):
+def run_ratchet(name, scan, argv, default_baseline, extra_doc="", per_class=None, extra_fn=None):
     """Generic main. scan(root) -> hits [{file,line,text,...}] (already waiver-filtered).
     per_class(hits) -> {class: count} optional extra baseline section that must also only shrink."""
     ap = argparse.ArgumentParser(description=name)
@@ -157,7 +157,10 @@ def run_ratchet(name, scan, argv, default_baseline, extra_doc="", per_class=None
             if grown or cgrown:
                 print("%s: refusing to write a baseline that grew: %s" % (name, grown or cgrown))
                 return 1
-            save_json(bpath, {"tool": name, "total": len(hits), "files": counts, "classes": classes})
+            data = {"tool": name, "total": len(hits), "files": counts, "classes": classes}
+            if extra_fn:
+                data.update(extra_fn(base, hits))
+            save_json(bpath, data)
             print("%s: baseline written (%d hits, %d files) -> %s" % (name, len(hits), len(counts), bpath))
             return 0
         if base is None:
