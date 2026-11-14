@@ -46,6 +46,10 @@ namespace ComputeOnceTestsNs
 	{
 		VPV_COMPUTE_ONCE_AT("U3.half_luma", i, 0);
 	}
+	// The CostWhenOff baseline: the same noinline call with no entry point. A plain store keeps the call (an inlinable empty
+	// lambda was folded away, so the baseline read 0 ns and the call itself was charged to the detector).
+	int g_emptySink = 0;
+	__declspec(noinline) void EntryEmpty(int i) { g_emptySink = i; }
 
 	struct EnabledScope
 	{
@@ -335,8 +339,7 @@ namespace ComputeOnceTestsNs
 					fn(i);
 				return std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count() / count;
 			};
-			auto empty = [](int) {};
-			void (*emptyFn)(int) = empty;
+			void (*emptyFn)(int) = &EntryEmpty;
 			double best = 1e9, bestEmpty = 1e9;
 			for (int round = 0; round < 3; ++round)
 			{
