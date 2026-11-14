@@ -564,7 +564,7 @@ namespace DetailRestoreConfigTestsNs
 			Assert::IsTrue(core.find("ResetEntrancePlan();") != std::string::npos, L"the Original switch resets the planner outputs");
 		}
 
-		// P4 opus gate MUST-1 (owner E3): the planner is not called in the Original pathway, so a LIVE switch VP-V -> Original must
+		// P4 opus gate MUST-1 (owner E3): the planner stops before the VP-V stages in the Original pathway, so a LIVE switch VP-V -> Original must
 		// leave no VP-V work and no stale VP-V state behind. ResetEntrancePlan (called once by the settings seam when Original is
 		// selected) reproduces the side effects the pre-P4 Original planner pass had: no source look-ahead walk (sourceAutoActive
 		// false: the render loop's AddRef of queued frames and RunAheadWalk read it), the monitor's selection native and its P0 status
@@ -583,8 +583,6 @@ namespace DetailRestoreConfigTestsNs
 				"rebaseFactor = rebaseFactorX = 1.0;",
 				"rebaseFade = 1.0;",
 				"detailPulseRuns = textureRestoreRuns = false;",
-				"sourceAutoActive.store(false, std::memory_order_release);",
-				"sourceMonitor.SetSelection(\"native\");",
 				"rebaseP0Status.Clear();",
 				"SyncFallback(FallbackCatalog::RebasePaused(false,",
 				"detailPulse.Forget();",
@@ -595,7 +593,11 @@ namespace DetailRestoreConfigTestsNs
 			};
 			for (const char* r : required)
 				Assert::IsTrue(body.find(r) != std::string::npos, Wide(std::string("the Original reset does: ") + r).c_str());
-			// The look-ahead consumers read the same flag the reset clears.
+			// HF item 1 MUST 2 (coordinator 2026-11-12 18:35, owner 'exactly as before' P4): the planner runs in Original again and sets the
+			// monitor's selection and the auto flag itself, so the reset must NOT overwrite them (the selection persists as configured).
+			Assert::IsTrue(body.find("SetSelection(") == std::string::npos && body.find("sourceAutoActive.store(") == std::string::npos,
+				L"the reset leaves the monitor's selection and the auto flag to the planner");
+			// The look-ahead consumers read the flag the planner sets (also in Original).
 			const std::string lvr = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
 			Assert::IsTrue(lvr.find("sourceAutoActive.load(") != std::string::npos, L"the render loop's look-ahead reads sourceAutoActive");
 			// Called on the Original branch of the settings seam, after the pathway fact is set.

@@ -382,14 +382,15 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 }
 }
 
-// The Original pathway never calls PlanEntrance (guarded at the call site), so a live switch to it would leave the last VP-V plan
+// The Original pathway calls PlanEntrance again (owner REVERT 2026-11-12, exactly as before P4, 77fe0397e): there it feeds the
+// source-resolution monitor, sets its selection and the auto flag and stops before the VP-V stages, so the monitor's selection and
+// sourceAutoActive are NOT touched here (they persist as configured). A live switch to Original would still leave the last VP-V plan
 // in the members the renderer's other consumers read (the repeat-reuse extension, the adaptive frame, the crossfade branches).
 // The settings seam (UpdatePipelineSlots) calls this once when Original is selected: native factors, no crossfade, no debander or
 // detail-restore parameters. Idempotent; all values are the members' initial values.
-// P4 opus gate MUST-1: it also reproduces the side effects the Original-mode planner pass had before P4 (owner E3: no VP-V
-// work and no stale VP-V state in Original): the source look-ahead walk is stopped (sourceAutoActive), the monitor's selection
-// is native and its P0 status cleared, an engaged re-base pause fallback is released, and the detail pulse / texture restore
-// histories are forgotten ("a stage that stopped running starts over" on the return to VP-V).
+// P4 opus gate MUST-1 (kept): no stale VP-V state in Original (owner E3): the P0 status is cleared, an engaged re-base pause fallback
+// is released, and the detail pulse / texture restore histories are forgotten ("a stage that stopped running starts over" on the
+// return to VP-V).
 void LibplaceboVideoRenderer::Impl::ResetEntrancePlan()
 {
 	rebaseFactor = rebaseFactorX = 1.0;
@@ -399,8 +400,6 @@ void LibplaceboVideoRenderer::Impl::ResetEntrancePlan()
 	detailPulseRuns = textureRestoreRuns = false;
 	detailPulseParams = DetailPulse::Params();
 	textureRestoreParams = TextureRestore::Params();
-	sourceAutoActive.store(false, std::memory_order_release);
-	vpv.sourceAnalysis.sourceMonitor.SetSelection("native");
 	rebaseP0Status.Clear();
 	SyncFallback(FallbackCatalog::RebasePaused(false, rebasePauseSeconds, sourceRebase.LastError()));
 	detailPulse.Forget();
