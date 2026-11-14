@@ -679,9 +679,9 @@ bool AnalysisLumaSource::SampleUnchecked(int x, int y, AnalysisLumaSample& resul
 			return bigEndian ? ReadBigEndian32(pixel) : ReadLittleEndian32(pixel);
 		};
 		const int pair = x & ~1;
-		result.luma = static_cast<uint16_t>(DolbyVisionTunnelUnpackReference::Intensity(word(x), shift) >> 6);
-		result.chromaU = static_cast<uint16_t>(DolbyVisionTunnelUnpackReference::Chroma(word(pair), shift) >> 6);
-		result.chromaV = static_cast<uint16_t>(DolbyVisionTunnelUnpackReference::Chroma(word(pair + 1), shift) >> 6);
+		result.luma = static_cast<uint16_t>(DolbyVisionTunnelUnpackReference::Intensity(word(x), shift) >> kAxisFractionBits);
+		result.chromaU = static_cast<uint16_t>(DolbyVisionTunnelUnpackReference::Chroma(word(pair), shift) >> kAxisFractionBits);
+		result.chromaV = static_cast<uint16_t>(DolbyVisionTunnelUnpackReference::Chroma(word(pair + 1), shift) >> kAxisFractionBits);
 		if (fullRangeYuv)
 		{
 			// As the decoded planes: full-range DV codes to the limited domain.

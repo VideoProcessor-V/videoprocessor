@@ -91,6 +91,13 @@ namespace DvTunnelTapLaw
 		return static_cast<uint16_t>(TapCode(pixel, container, alignment, fullRange) << 4);
 	}
 
+	// S-2a: the tap on the unit's analysis axis (Q6 = 10-bit axis * 64): the 12-bit tap carries two fraction bits, and
+	// Floor10FromQ6 of it is the legacy ten-bit value. Same number as Tap16 by the shared shift law (pinned by the tests).
+	inline uint32_t TapAxisQ6(uint16_t tap12)
+	{
+		return Vpv::AnalysisDomain::AxisQ6(tap12, Vpv::AnalysisDomain::CodeMaximum(kBits));
+	}
+
 	// The legacy ten-bit tap (AnalysisLumaSource's Sample().luma today), derived from the 12-bit tap: the
 	// limited code >> 2. Exact when limited; when full range the CPU maps the ten-bit code, so it may differ
 	// by one code (see the tests).

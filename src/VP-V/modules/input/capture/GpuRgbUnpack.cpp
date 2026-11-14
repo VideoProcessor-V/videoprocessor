@@ -3,6 +3,8 @@
 
 #include <libplacebo/shaders/custom.h>
 
+#include <VP-V/modules/input/source_analysis/AnalysisAxis10.h>
+
 namespace
 {
 	// The raw frame is uploaded as rgba8: one texel per 4 source bytes, unorm8
@@ -56,9 +58,16 @@ if (g.x < pairs / 4 && g.y < frame_height) {
 #endif
             // The matcher's luma: the CPU formatter's 12-to-10 scale and Q16
             // full-range Y (10-bit code << 6).
-            ivec3 t = ivec3((p * 1023u + 2047u) / 4095u);
-            int y10 = ru_clamp10((cy.x * t.x + cy.y * t.y + cy.z * t.z + 32768) >> 16);
-            imageStore(dst_luma, at, vec4(ru_u16(uint(y10) << 6), 0.0, 0.0, 1.0));
+            if (luma_wide != 0) {
+                // S-2a (default off): the 12-bit luma carried as Q6 fractions on the 10-bit axis (AnalysisAxis10.h,
+                // au_axis_q6_scale); the default branch below stays the CPU formatter's law, bit for bit.
+                int y12 = clamp((cy.x * int(p.x) + cy.y * int(p.y) + cy.z * int(p.z) + 32768) >> 16, 0, 4095);
+                imageStore(dst_luma, at, vec4(ru_u16(uint(au_axis_q6_scale(y12, 4095))), 0.0, 0.0, 1.0));
+            } else {
+                ivec3 t = ivec3((p * 1023u + 2047u) / 4095u);
+                int y10 = ru_clamp10((cy.x * t.x + cy.y * t.y + cy.z * t.z + 32768) >> 16);
+                imageStore(dst_luma, at, vec4(ru_u16(uint(y10) << 6), 0.0, 0.0, 1.0));
+            }
         }
     }
 }
@@ -243,17 +252,20 @@ bool GpuRgbUnpack::Unpack(VideoFrameEncoding encoding, bool bt2020, const void* 
 	const int bigEndian = encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R10b ||
 		encoding == VideoFrameEncoding::ARGB_8BIT ? 1 : 0;
 	const pl_shader_desc descriptors[3] = { Sampled("raw", source), Storage("dst_luma", luma), Storage("dst_rgb", rgb) };
-	pl_shader_var variables[5] = {
+	const int lumaWide = wideLuma ? 1 : 0;
+	pl_shader_var variables[6] = {
 		{ pl_var_int("pairs"), &pairs, false },
 		{ pl_var_int("frame_width"), &width, false },
 		{ pl_var_int("frame_height"), &height, false },
 		{ pl_var_int("big_endian"), &bigEndian, false },
-		{ pl_var_ivec3("cy"), cy, false } };
+		{ pl_var_ivec3("cy"), cy, false },
+		{ pl_var_int("luma_wide"), &lumaWide, false } };
 	pl_custom_shader custom{};
 	custom.description = r12 ? "VideoProcessor capture: R12 to RGB (GPU)" : r10 ? "VideoProcessor capture: R10 to RGB (GPU)" :
 		rgb8 ? "VideoProcessor capture: 8-bit RGB (GPU)" : "VideoProcessor capture: r210 to RGB (GPU)";
-	static const std::string lumaOnlyHeader = std::string("#define LUMA_ONLY 1\n") + RGB_UNPACK_HEADER;
-	custom.header = lumaOnly ? lumaOnlyHeader.c_str() : RGB_UNPACK_HEADER;
+	static const std::string fullHeader = std::string(RGB_UNPACK_HEADER) + Vpv::AnalysisDomain::AxisGlsl();
+	static const std::string lumaOnlyHeader = std::string("#define LUMA_ONLY 1\n") + fullHeader;
+	custom.header = lumaOnly ? lumaOnlyHeader.c_str() : fullHeader.c_str();
 	custom.body = r12 ? R12_BODY : r10 ? R10_BODY : rgb8 ? RGB8_BODY : R210_BODY;
 	custom.input = PL_SHADER_SIG_NONE;
 	custom.output = PL_SHADER_SIG_NONE;

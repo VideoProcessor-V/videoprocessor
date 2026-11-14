@@ -70,9 +70,14 @@ public:
 	const std::string& Error() const { return error; }
 	void SetHostReadableForTest(bool on) { hostReadable = on; }
 	void SetTimerForTest(pl_timer t) { timer = t; }
+	// S-2a: R12 matcher luma as Q6 fractions on the 10-bit axis (AnalysisAxis10.h). Default off = the CPU formatter's
+	// ten-bit law bit for bit (CaptureUnpackHookTests); turning it on from the renderer is a Bill-file call site
+	// (rule 33, reported), so only the unit/tests use it now.
+	void SetWideLuma(bool on) { wideLuma = on; }
 
 private:
 	bool hostReadable = false;
+	bool wideLuma = false;
 	pl_timer timer = nullptr;
 	pl_gpu gpu = nullptr;
 	pl_dispatch dispatch = nullptr;

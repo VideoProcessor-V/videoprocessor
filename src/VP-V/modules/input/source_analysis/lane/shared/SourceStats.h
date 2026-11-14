@@ -24,6 +24,8 @@
 #include <cstring>
 #include <vector>
 
+#include "../../AnalysisAxis10.h" // S-2a: bin = HistBinFromQ6, centre = BinCenterQ6 (one decode law, rule 20)
+
 namespace VpUnit
 {
 namespace SourceStats
@@ -153,7 +155,7 @@ public:
             uint64_t rs = 0;
             for (uint32_t x = 0; x < hw_; ++x) {
                 const uint32_t s = r[x];
-                ++hist_[s >> 6];
+                ++hist_[Vpv::AnalysisDomain::HistBinFromQ6(s)];
                 rs += s;
                 colSum_[x] += s;
                 if (s < min_)
@@ -247,7 +249,7 @@ private:
     uint32_t Percentile(uint64_t target) const
     {
         const int i = FirstBinReaching<uint64_t>(hist_, static_cast<int>(kHistBins), target);
-        return ((i >= 0 ? static_cast<uint32_t>(i) : kHistBins - 1u) << 6) | 32u;
+        return Vpv::AnalysisDomain::BinCenterQ6(i >= 0 ? static_cast<uint32_t>(i) : kHistBins - 1u);
     }
 
     uint32_t hw_ = 0, hh_ = 0, bw_ = 0, bh_ = 0;

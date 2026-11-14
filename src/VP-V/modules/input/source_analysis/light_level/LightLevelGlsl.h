@@ -10,6 +10,8 @@
 //
 // light_level_lut_fetch(code10) mirrors LightLevel::Fetch: index clamped to [0, 1023], linear interpolation between
 // integer codes written as a + (b - a) * t (same arithmetic as the CPU). Pixel data are never clamped; only the index.
+// S-2a: code10 is a float on the analysis axis (AnalysisAxis10.h): a 12-bit source passes Q6/64 fractions (multiples of 1/4), a
+// 10-bit source an integer, and the interpolation serves both; nothing here is re-tuned.
 #pragma once
 
 namespace LightLevel

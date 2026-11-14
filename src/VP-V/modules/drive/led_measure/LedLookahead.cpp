@@ -1,5 +1,6 @@
 #include <pch.h>
 #include "LedLookahead.h"
+#include <VP-V/modules/input/source_analysis/AnalysisAxis10.h> // S-2a: the axis maximum (one constant, rule 20)
 
 
 #include <algorithm>
@@ -62,8 +63,8 @@ namespace LedDrive
 		const bool full = range >= 0 ? range == 1 : (remapped || LumaIsFullRange(luma));
 		for (int code = 0; code < LUMA_CODES; ++code)
 		{
-			const double sourceCode = remapped ? (code - 64.0) * 1023.0 / 876.0 : code;
-			const double signal = full ? sourceCode / 1023.0 : (sourceCode - 64.0) / 876.0;
+			const double sourceCode = remapped ? (code - 64.0) * static_cast<double>(Vpv::AnalysisDomain::kAxisMax) / 876.0 : code;
+			const double signal = full ? sourceCode / static_cast<double>(Vpv::AnalysisDomain::kAxisMax) : (sourceCode - 64.0) / 876.0;
 			const int index = static_cast<int>(std::lround(
 				std::max(0.0, std::min(signal, 1.0)) * (RAW_TRANSFER_SIZE - 1)));
 			table[code] = transfer[index];

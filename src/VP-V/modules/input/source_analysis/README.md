@@ -289,6 +289,19 @@ Contract tests:
 Chain tests:
 - srcres latch + crossfade checks
 
+## Design goal, philosophy and decisions
+
+- ONE analysis-luma decode unit (`AnalysisAxis10.h`, re-exported by `AnalysisLumaDomain.h`): 12-bit is carried as FRACTIONS on the
+  10-bit axis (Q6 = axis * 64, the 16-bit lane scale), so every threshold keeps its 10-bit meaning and 10-bit sources stay
+  bit/decision identical (COORDINATOR 2026-11-14 08:40 EST, `D:/codex/vp-handover/refs/owner-decisions-2026-11-07.md:691`: "Q1 shared analysis-luma decode (12-bit as fractions on 10-bit axis)").
+- 12-bit comes only through the DV tunnel (OWNER 2026-11-14 08:30 EST, same file: "neither Magewell nor DeckLink captures 12-bit directly;
+  12-bit comes through the DV TUNNEL, sent as 8-bit RGB, recovered by VP's DV unpack"); the tap is `DvTunnelTapLaw.h` (`TapAxisQ6`).
+- Bill's CPU fallback and his `Round12To10` stay Original (08:40: "Bill fallback = Original + 'below 12-bit' label"); the unit holds a
+  twin of the law and the tests pin the two together. Sample() stays ten-bit integer (a fraction field would change Bill's struct, rule 33).
+- Doc 91 A (verbatim): "Fewer, consolidated modules (fewer places for bugs, easier audits)"; "compute once / skip if present; no duplicate work".
+- Cost (estimate, nothing built or run in this slice): the decode is one shift per sample, no allocation; at 4K (8.3 M luma samples)
+  and 1080p (2.1 M) it replaces the existing `>> 6` / `<< 6` instructions one for one, so the added cost is zero; the GPU wide-luma branch is off by default.
+
 ## Known issues / open items
 
 - blind kernel estimation for the re-base (item 18)

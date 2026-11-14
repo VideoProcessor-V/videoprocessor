@@ -215,6 +215,10 @@ P13 for the planes ON THE RENDER DEVICE in the current render frame. Contract: `
 - No Bill line for the provider (COORDINATOR 11-14 04:44 option B, log:664); first slice = render-device views, queued-ahead
   ring with the D5 lane (LEAD 8 2026-11-14 05:2x, lead8/iface-L-CORE.md s6).
 
+- S-2a: `GpuRgbUnpack::SetWideLuma(true)` writes the R12 matcher luma as Q6 fractions on the 10-bit axis (`AnalysisAxis10.h`);
+  default off keeps the CPU formatter's ten-bit law bit for bit. 12-bit arrives only through the DV tunnel (OWNER 2026-11-14 08:30 EST,
+  `D:/codex/vp-handover/refs/owner-decisions-2026-11-07.md:691`); enabling it from the renderer needs a Bill-file call site (rule 33, open).
+
 ## Known issues / open items
 
 - CPU fallback keeps 4:2:2 (CV210toP210) instead of 4:2:0 (item 44, low priority)
