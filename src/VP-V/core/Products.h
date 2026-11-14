@@ -90,7 +90,7 @@ enum : ProductId {
     kTdTrailSummary,      // 28 td.trail_summary: per-frame CPU summary for source identity / status
     // Wave S2 (SID lead request, doc 78 section 6): appended after the doc 72 list, never before it.
     kSourceGeometry,      // 29 source_geometry (P14g): HELD-STATE measured + applied source geometry (SourceGeometry unit v1)
-    kEdgeMap,             // 31 edge_map (per-frame memo; readers: L-FOCUS focus map, AdaptiveDownscale Sobel ramp (X5); later deband guard, occlusion, TD); lead 8 allocation 31, 05:2x 11-14
+    kEdgeMap,             // dense id 30, allocation 31: edge_map (per-frame memo of the source-luma Sobel; readers: L-FOCUS focus map, L-B5 busy-edge; later deband guard, occlusion, TD; the AdaptiveDownscale ramp is NOT a reader, R14-64/X5); lead 8 allocation 31, 05:2x 11-14
     kSkeletonProductEnd
 };
 
@@ -993,6 +993,25 @@ inline void AppendSourceGeometryProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p);
 }
 
+// edge_map (allocation 31, dense id 30; lead 8, owner reinstated 11-14, rule 3): the 3x3 Sobel gradient magnitude of the source luma, one R32F
+// sample per source pixel in 10-bit codes (sample x 1023; R32F rather than r16f so a 12-bit source stays exact). A per-frame GPU memo filled by
+// the owner fill (regions/EdgeMapFill.h) from the P13 ring views; the producer is the owner fill, there is no lane job. Readers acquire it
+// (get-or-compute-and-publish): the focus map and the L-B5 busy-edge share; others may follow.
+inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    ProductDecl p = Make(kEdgeMap, "edge_map", "edge map (source luma Sobel)", Backend::GpuCompute, 1, Tier::T0,
+                         Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
+    p.sourceFrame = true;
+    AddInput(p, kP13SourceRing, 0);
+    AddTerm(p, 0, 4);   // one R32F sample per source pixel (shift 0 = the full plane)
+    p.refRenderMs = 0.05f;
+    decls.push_back(p);
+}
+
 // p7g_camera_guide (doc 56, K4-1; claimed as id 20 by CameraGuideProduct.h, registered here): the measurement plan for pair N is a
 // pure function of camera(N) = P7(N) and P4(N), known ahead and declared as a lane product. d = 0 (refs 93-prep-cam-d0): the fit of
 // the SAME pair, published on time from the ahead field before the matcher of N runs; a pair whose camera is not ready in time runs
@@ -1265,6 +1284,7 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double s
     AppendCameraGuideProduct(d);
     AppendTemporalDetailEngineProducts(d, sourcePeriodMs, queueFrames);
     AppendSourceGeometryProduct(d);   // wave S2: P14g, appended after the doc 72 list
+    AppendEdgeMapProduct(d);          // L-B5 / rule 3: dense id 30 (allocation 31), after source_geometry
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }
