@@ -62,7 +62,7 @@ Chain tests:
 ## DV metadata additions (feat/dv-l8, 2026-10-24)
 
 - `DvSignalLevels.h`: L9 (source primary index) and L10 (custom target displays) parsed into the
-  DM, so L8 trims can be resolved (`colour/sdr_tone_shape/DvTrimSelection.h`).
+  DM, so L8 trims can be resolved (`colour/display_mapping/DvTrimSelection.h`).
 - `DvMetadataHold.h` (no silent fallbacks): a picture whose DM is rejected keeps the previous DM
   only for a bounded hold (0.25 s at the measured rate). After it: TRANSPORT damage (CRC / length
   / continuation failures, truncation) shows static/base metadata (matrices, source range,

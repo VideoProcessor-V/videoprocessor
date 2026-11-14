@@ -22,7 +22,7 @@ member it describes. No setting, log line, status text or fallback entry changes
 
 | Adapter | Module | Owns |
 |---|---|---|
-| `src/VP-V/modules/colour/sdr_tone_shape/DvHostStage.h` | `colour.sdr_tone_shape` (uses `input.signal` headers) | trims hook + state, Dolby-style curve switch + status, L1 log, reference conditions, compare capture recorder, tunnel deband-skip flags |
+| `src/VP-V/modules/colour/display_mapping/DvHostStage.h` | `colour.sdr_tone_shape` (uses `input.signal` headers) | trims hook + state, Dolby-style curve switch + status, L1 log, reference conditions, compare capture recorder, tunnel deband-skip flags |
 | `src/VP-V/modules/input/signal/DvGpuUnpackSession.h` | `input.signal` | the GPU unpack object (per device), first-success log, de-judder failure count + 5 s log, the one-time session fallback entry |
 
 Both are header-only (the renderer is compiled by two projects, VPRenderer and VPRendererBeta, and

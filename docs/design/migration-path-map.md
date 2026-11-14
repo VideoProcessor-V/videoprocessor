@@ -11,16 +11,9 @@ the old path until M2 so files on active branches keep building.
 
 | Old path | New path | Commit | Note |
 |---|---|---|---|
-| `src/VideoProcessor-Lib/AmbientAdaptation.h` | `src/VP-V/modules/colour/appearance/AmbientAdaptation.h` | cddb6dbb9 | fwd |
-| `src/VP-V/modules/colour/appearance/AmbientAdaptation.h` | `src/VP-V/modules/colour/appearance/AmbientAdaptation.h` | cddb6dbb9 | fwd |
 | `src/VideoProcessor-Lib/AmbientConfig.h` | `src/VP-V/modules/colour/appearance/AmbientConfig.h` | cddb6dbb9 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp` | `src/VP-V/modules/colour/extended_range/ExtendedRange.cpp` | 4a7a73c0e |  |
 | `src/VideoProcessor-Lib/vprenderer/ExtendedRange.h` | `src/VP-V/modules/colour/extended_range/ExtendedRange.h` | 4a7a73c0e | fwd |
-| `src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h` | `src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h` | d58d0b4c0 | fwd |
-| `src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h` | `src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h` | d58d0b4c0 | fwd |
-| `src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h` | `src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h` | afc9490d8 | fwd |
-| `src/VP-V/modules/colour/sdr_tone_shape/DvHostStage.h` | `src/VP-V/modules/colour/sdr_tone_shape/DvHostStage.h` | 5a5a2db12 | fwd |
-| `src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h` | `src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h` | afc9490d8 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/SdrToneShape.h` | `src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h` | d58d0b4c0 | fwd |
 | `src/VP-V/config/VpvConfigFormApi.h` | `src/VP-V/modules/control/config/config_pages/VpvConfigFormApi.h` | 369672a10 | fwd |
 | `src/VP-V/config/VpvConfigPages.h` | `src/VP-V/modules/control/config/config_pages/VpvConfigPages.h` | 369672a10 | fwd |

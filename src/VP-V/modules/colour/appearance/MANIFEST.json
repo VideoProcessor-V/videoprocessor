@@ -37,8 +37,6 @@
   "fallback_when_missing": "Failure -> off, previous gamma boost/saturation restored.",
   "fallback_entry": "Appearance: off (shader failed)",
   "forwarding_headers": [
-    "src/VideoProcessor-Lib/AmbientAdaptation.h",
-    "src/VideoProcessor-Lib/AmbientConfig.h",
-    "src/VP-V/modules/colour/appearance/AmbientAdaptation.h"
+    "src/VideoProcessor-Lib/AmbientConfig.h"
   ]
 }
