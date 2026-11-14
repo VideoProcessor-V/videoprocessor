@@ -406,6 +406,107 @@ namespace SkeletonCoreContextTestsNs
 		}
 	};
 
+	TEST_CLASS(SkeletonLaneAheadSeamTests)
+	{
+	public:
+		// A fake lane: absent until its aheadNow ran, then Present with 8 bytes.
+		struct FakeLane {
+			std::atomic<int> asked{ 0 };
+			std::atomic<bool> made{ false };
+			LaneSlotSource::AheadNow kind = LaneSlotSource::AheadNow::Ran;
+			const char* why = "";
+			std::vector<uint8_t> bytes = std::vector<uint8_t>(8, 0x5A);
+			LaneSlotSource Source()
+			{
+				LaneSlotSource src;
+				src.read = [this](ProductId, uint64_t, AcquireForm, LaneSlotSource::Read* rd) {
+					if (!made.load())
+						return LaneSlotSource::State::Absent;
+					rd->cpu = bytes.data();
+					rd->cpuBytes = bytes.size();
+					return LaneSlotSource::State::Present;
+				};
+				src.aheadNow = [this](ProductId, uint64_t) {
+					asked.fetch_add(1);
+					LaneSlotSource::AheadNowResult r;
+					r.kind = kind;
+					r.why = why;
+					if (kind == LaneSlotSource::AheadNow::Ran)
+						made = true;
+					return r;
+				};
+				return src;
+			}
+		};
+
+		TEST_METHOD(RanServesTheLaneSlotAndCountsOneMadeFrame)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11));
+			FakeLane lane;
+			m.SetLaneSource(lane.Source());
+			m.OnSeal(10);
+			const AcquireResult a = m.Acquire(kP10GrainSplit, 12, AcquireForm::Cpu);
+			Assert::IsTrue(a.status == AcquireStatus::Reused && a.source == AcquireSource::LaneSlot && a.cpu != nullptr && a.cpu[0] == 0x5A, L"the lane's slot is served");
+			Assert::IsTrue(lane.asked.load() == 1 && calls.load() == 0, L"the lane was asked once, the owner fill never ran (computed once)");
+			const AcquireCounters c = m.CountersOf(kP10GrainSplit);
+			Assert::IsTrue(c.laneAheadMade == 1 && c.Computed() == 1, L"one made frame in the compute-once ledger");
+		}
+
+		TEST_METHOD(ClaimedIsLanePendingDeclinedIsVisibleNotNodeFallsBack)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11));
+			FakeLane lane;
+			m.SetLaneSource(lane.Source());
+			m.OnSeal(10);
+			lane.kind = LaneSlotSource::AheadNow::Claimed;
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 12, AcquireForm::Cpu).cause == AcquireCause::LanePending, L"claimed by a worker: pending, no wait");
+			lane.kind = LaneSlotSource::AheadNow::Declined;
+			lane.why = "lane GPU ahead: not at a GPU-legal phase";
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 13, AcquireForm::Cpu).cause == AcquireCause::OwnerDeclined, L"declined");
+			Assert::IsTrue(Has(m.LastCause(kP10GrainSplit), "GPU-legal phase"), L"the lane's reason is in the cause text");
+			lane.kind = LaneSlotSource::AheadNow::NotNode;
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 14, AcquireForm::Cpu).status == AcquireStatus::FilledAtRead && calls.load() == 1, L"not a lane product: the owner fill");
+			Assert::IsTrue(m.CountersOf(kP10GrainSplit).laneAheadMade == 0, L"none of these made a lane frame");
+		}
+
+		TEST_METHOD(TheRenderFrameAndEarlierNeverAskTheLane)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11));
+			FakeLane lane;
+			m.SetLaneSource(lane.Source());
+			m.OnSeal(10);
+			m.Acquire(kP10GrainSplit, 10, AcquireForm::Cpu);
+			Assert::IsTrue(lane.asked.load() == 0, L"seq == sealed frame is not ahead: the normal path");
+		}
+
+		TEST_METHOD(SealReducedAndWorkerReusedAreCountedPerProductInLaneFrames)
+		{
+			SkeletonMemo m;
+			m.NoteSealComputedReduced(kP10GrainSplit);
+			m.NoteSealComputedReduced(kP10GrainSplit);
+			m.NoteWorkerReused(kP10GrainSplit);
+			m.NoteWorkerReused(kP11RegionBlockStats);
+			const AcquireCounters c = m.CountersOf(kP10GrainSplit);
+			Assert::IsTrue(c.sealComputedReduced == 2 && c.workerReused == 1 && c.Computed() == 0, L"counted, and not frames computed");
+			Assert::IsTrue(m.CountersOf(kP11RegionBlockStats).workerReused == 1 && m.CountersOf(kP11RegionBlockStats).sealComputedReduced == 0, L"per product");
+			Assert::IsTrue(AnyLineHas(m.StatusLines(), "seal computed reduced 2") && AnyLineHas(m.StatusLines(), "worker reused 1"), L"shown on the status line");
+		}
+
+		static bool AnyLineHas(const std::vector<std::string>& lines, const char* part)
+		{
+			for (const auto& l : lines)
+				if (Has(l, part))
+					return true;
+			return false;
+		}
+	};
+
 	TEST_CLASS(SkeletonThreadContractTests)
 	{
 	public:
