@@ -109,6 +109,7 @@ namespace SchedulerS2Test
 		{
 			Clock clock;
 			FakeRunner p11, p16;
+			p11.predictUs = p16.predictUs = 0;   // PRE-C2 fixture: no device-cost prediction, so each job is genuinely unmeasured until its first run
 			Work w11(&p11, DeclOf(kP11RegionBlockStats, JobClass::Core, 4), clock.Fn());
 			Work w16(&p16, DeclOf(kCodingEvidence, JobClass::Core, 5), clock.Fn());
 			SpareHost host;
@@ -142,6 +143,7 @@ namespace SchedulerS2Test
 			Clock clock;
 			std::vector<ProductId> log;
 			FakeRunner p3, p3r, fill;
+			p3.predictUs = p3r.predictUs = fill.predictUs = 0;   // PRE-C2 fixture: no device-cost prediction, so each job is genuinely unmeasured until its first run
 			p3.log = &log; p3r.log = &log; fill.log = &log;
 			p3.chunksPerJob = p3r.chunksPerJob = fill.chunksPerJob = 1;
 			Work wFill(&fill, DeclOf(kP5MonitorTiles, JobClass::Fill, 1), clock.Fn());
