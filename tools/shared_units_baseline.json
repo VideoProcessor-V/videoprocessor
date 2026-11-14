@@ -318,6 +318,12 @@
      "reason": "FIX-X5-CUT-P4: stores and reports the P4 record's mean taken from the CutVerdict; no histogram or private mean (the GPU pass computes none)"
     },
     {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
+     "pattern": "float meanLuma = 0\\.0f;\\s+// the newest advanced frame's APL",
+     "kind": "false_positive",
+     "reason": "Stats field declaration; APL only in the comment naming the P4 source"
+    },
+    {
      "file": "src/VP-V/core/FrameAnalysisStore.h",
      "pattern": "kHistogramBins|histogram\\{\\}|histogram, mean/APL|average picture level",
      "kind": "false_positive",
