@@ -154,7 +154,7 @@
 #include <IntentInterpreterObserver.h>
 #include <VP-V/abi/RendererAbiBridge.h> // VPV-HOOK
 #include <IntentInterpreterSupport.h>
-#include <VP-V/modules/colour/display_mapping/AmbientAdaptation.h>
+#include <AmbientAdaptation.h>
 #include <BlackIntent.h>
 #include <DisplayIntent.h>
 #include <MotionConfig.h>
@@ -210,7 +210,7 @@
 #include <libplacebo/options.h>
 #include <libplacebo/tone_mapping.h>
 #include <libplacebo/shaders/colorspace.h>
-#include <VP-V/modules/colour/display_mapping/DvHostStage.h>   // WP-14: the DV glue (trims, Dolby-style curve, hold, capture)
+#include <VP-V/modules/colour/sdr_tone_shape/DvHostStage.h>   // WP-14: the DV glue (trims, Dolby-style curve, hold, capture)
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders/custom.h>
 #include <libplacebo/utils/upload.h>

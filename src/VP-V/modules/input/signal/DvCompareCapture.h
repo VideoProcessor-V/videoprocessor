@@ -35,7 +35,7 @@
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <EOTF.h>
-#include <VP-V/modules/colour/display_mapping/DvTrimSelection.h>
+#include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
 #include <VP-V/modules/input/signal/DvMetadataHold.h>
 
 #include <cstdio>

@@ -38,7 +38,7 @@
 // come from the picture's hdr.avg_pq_y / max_pq_y (L1); when they are absent the renderer says
 // "L1 missing -> mid-range fallback" in the status (the curve then uses the range's middle). BTB / WTW: below-black residuals are carried
 // around the trims and the curve continues above the scene peak with its end slope.
-#include <VP-V/modules/colour/display_mapping/DvTrimSelection.h>
+#include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
 
 #include <cmath>
 #include <cstdio>

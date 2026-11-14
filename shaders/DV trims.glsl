@@ -8,7 +8,7 @@
  * the renderer for the Dolby Vision tunnel only, not as a standard shader.
  * Hooked at PREOUTPUT (after tone mapping and the encode to the output's
  * signal). The reference is DolbyVisionTrims::ApplyPixel
- * (src/VP-V/modules/colour/display_mapping/DolbyVisionTrims.h); the two must stay
+ * (src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h); the two must stay
  * identical.
  *
  *   dv_slope, dv_offset, dv_power  the CDL on PQ(Y) / PQ(peak)
@@ -29,7 +29,7 @@
  *   dv_lms00 .. dv_lms22      output linear RGB -> LMS (the output primaries to BT.2100 LMS)
  *   dv_ilms00 .. dv_ilms22    its inverse (computed once on the CPU)
  * With L8 the reference is DvTrimSelection::ApplyPixel
- * (src/VP-V/modules/colour/display_mapping/DvTrimSelection.h).
+ * (src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h).
  *
  * Copyright (C) 2026 Victor McPherson
  * SPDX-License-Identifier: GPL-3.0-only

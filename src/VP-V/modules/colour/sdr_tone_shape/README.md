@@ -200,9 +200,9 @@ GPU (not run by agents): `DolbyVisionTrimShaderMatchesItsReference`,
 Code location: **partly migrated** (M2 step 6; the shaders stay in `shaders/`, the runtime layout). The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
 - `src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h`
-- `src/VP-V/modules/colour/display_mapping/DolbyVisionTrims.h`
-- `src/VP-V/modules/colour/display_mapping/DvTrimSelection.h`
-- `src/VP-V/modules/colour/display_mapping/DvDolbyStyle.h`
+- `src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h`
+- `src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h`
+- `src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h`
 - `shaders/SDR tone shape.glsl`
 - `shaders/DV trims.glsl`
 
