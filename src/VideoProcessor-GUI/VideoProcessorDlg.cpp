@@ -253,14 +253,16 @@ bool ReadShortcutsGlobalHotkeys(const ConfigFile& config, bool& enabled,
 }
 
 // Bug hunt 3 (SH6): [shortcuts] global_actions - the [shortcuts] action keys
-// that act while another application has focus. Empty (none) by default.
+// that act while another application has focus. Default (key absent):
+// ShortcutDefaults.h kDefaultGlobalActions (state_report); an explicit empty
+// value means none.
 bool ReadShortcutsGlobalActions(const ConfigFile& config, std::set<std::string>& actions,
 	std::string& error)
 {
 	actions.clear();
 	std::string raw;
 	if (!config.TryGetString("shortcuts", "global_actions", raw))
-		return true;
+		raw = kDefaultGlobalActions;
 	std::string unknown;
 	if (!MainConfigSchema::ShortcutGlobalActionsValid(raw, unknown))
 	{

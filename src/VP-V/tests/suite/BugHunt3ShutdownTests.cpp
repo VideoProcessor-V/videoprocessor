@@ -357,6 +357,18 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("everything"), unknown);
 		}
 
+		// S-3f b (owner Q4): the report key is the one default global action; the default is a valid list,
+		// names only state_report, and that action keeps Ctrl+Alt+D.
+		TEST_METHOD(TheReportKeyIsTheOneDefaultGlobalAction)
+		{
+			std::string unknown;
+			Assert::AreEqual(std::string("state_report"), std::string(kDefaultGlobalActions));
+			Assert::IsTrue(MainConfigSchema::ShortcutGlobalActionsValid(kDefaultGlobalActions, unknown));
+			const ShortcutDefault* report = FindShortcutDefault("state_report");
+			Assert::IsTrue(report != nullptr);
+			Assert::AreEqual(std::string("Ctrl+Alt+D"), std::string(report->chord));
+		}
+
 		// SH9: a remote-editing Config's title still identifies VP's editor.
 		TEST_METHOD(RemoteConfigTitlePassesTheFocusCheck)
 		{

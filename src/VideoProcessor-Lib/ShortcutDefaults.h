@@ -28,10 +28,15 @@
 // dialog manager cannot turn it into a close; the background observer never
 // sees it unless the user marks it global.
 //
-// Bug hunt 3 (SH6): no default is global. While another application (MPC-HC,
-// a browser) has focus VP acts on - and swallows - no key, unless the user
-// lists the action in [shortcuts] global_actions (or turns global_hotkeys on,
-// which marks every binding global). For MPC file playback, keep VP's keys off
+// Bug hunt 3 (SH6): no shortcut is global except the one named in
+// kDefaultGlobalActions. While another application (MPC-HC, a browser) has
+// focus VP acts on - and swallows - no other key, unless the user lists the
+// action in [shortcuts] global_actions (or turns global_hotkeys on, which
+// marks every binding global). S-3f b (owner decision 2026-11-11 Q4): the
+// report-a-problem key (state_report, Ctrl+Alt+D) is the one default global
+// action, so a problem can be reported from whatever application has focus.
+// The default applies only while [shortcuts] global_actions is ABSENT; an
+// explicit (even empty) value is the user's and replaces it. For MPC file playback, keep VP's keys off
 // MPC's own (Alt+Enter, Ctrl+1..4 and Ctrl+I are MPC keys too) or leave
 // them non-global.
 #include <array>
@@ -79,6 +84,9 @@ constexpr ShortcutDefault kShortcutDefaults[] = {
 	// first (the separate renderer file is the legacy fallback).
 	{ "display_rules_auto",      "Ctrl+Shift+F4", true },       // was F4 (SH7)
 };
+
+// [shortcuts] global_actions when the key is absent (comma-separated action names).
+constexpr const char* kDefaultGlobalActions = "state_report";
 
 // Chords other branches already use for compiled defaults that are not on
 // this branch yet. A new default must not take them; when the feature is
