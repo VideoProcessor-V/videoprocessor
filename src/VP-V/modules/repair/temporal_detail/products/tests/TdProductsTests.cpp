@@ -88,7 +88,8 @@ namespace Tests
 				Assert::AreEqual(27, int(kTdMaps));
 				Assert::AreEqual(28, int(kTdTrailSummary));
 				Assert::AreEqual(29, int(kSourceGeometry), L"wave S2: P14g source_geometry is appended after the doc 72 list");
-				Assert::AreEqual(30, int(kSkeletonProductEnd));
+				Assert::AreEqual(30, int(kFocusMap), L"L-FOCUS appends one id after source_geometry");
+				Assert::AreEqual(31, int(kSkeletonProductEnd));
 				Assert::AreEqual(size_t(kSkeletonProductEnd), reg.Size());
 				// The v1 names are aliases of the v2 ids.
 				Assert::AreEqual(int(kTdBlocks), int(kTdAnalysis));

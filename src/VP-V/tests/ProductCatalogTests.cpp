@@ -17,6 +17,7 @@
 #include <VP-V/modules/input/source_analysis/identity/SourceGeometryProduct.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdProduct.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
+#include <VP-V/modules/input/source_analysis/focus_map/FocusMap.h>
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
@@ -186,6 +187,7 @@ namespace ProductCatalogTestsNs
 				{ kTdDelta, "temporal detail" },
 				{ kTdMaps, "temporal detail" },
 				{ kTdTrailSummary, "temporal detail" },
+				{ kFocusMap, "focus map (screen pass)" },   // L-FOCUS: its own screen-pass row is the first reader (repair 15)
 			};
 			const Registry reg = SkeletonProducts();
 			Assert::AreEqual(size_t(kSkeletonProductEnd) - 4u, sizeof(expected) / sizeof(expected[0]),
@@ -395,6 +397,7 @@ namespace ProductCatalogTestsNs
 				{ kTdAdmission, TdProducts::kUnitVersion },
 				{ kSourceIdentity, SourceIdentity::kUnitVersion },
 				{ kSourceGeometry, SourceGeometry::kUnitVersion },
+				{ kFocusMap, FocusMap::kUnitVersion },
 				{ kP10GrainSplit, GrainSplit::kUnitVersion }, { kP10cGrainSplitChroma, GrainSplit::kUnitVersion },
 			};
 			for (const Pair& p : pairs) {

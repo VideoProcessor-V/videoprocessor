@@ -55,7 +55,8 @@ namespace Tests
 				Assert::IsTrue(reg.Validate(&why), L"dense ids, inputs known");
 				Assert::AreEqual(28, int(kTdTrailSummary), L"the doc 72 list ends at 28");
 				Assert::AreEqual(29, int(kSourceGeometry), L"the new id follows it");
-				Assert::AreEqual(30, int(kSkeletonProductEnd));
+				Assert::AreEqual(30, int(kFocusMap), L"L-FOCUS appends one id after source_geometry");
+				Assert::AreEqual(31, int(kSkeletonProductEnd));
 				Assert::AreEqual(size_t(kSkeletonProductEnd), reg.Size());
 				Assert::AreEqual(std::string("source_geometry"), std::string(reg.Get(kSourceGeometry).token));
 			}
