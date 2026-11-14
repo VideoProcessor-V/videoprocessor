@@ -8,6 +8,8 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/modules/input/source_analysis/regions/CodingEvidence.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 
 #include <cmath>
 #include <memory>
@@ -118,7 +120,7 @@ namespace VideoProcessorTest
 			ProviderGuard guard;
 			auto memo = std::make_shared<VpSkeleton::SkeletonMemo>();
 			Assert::IsTrue(memo->RegisterOwnerFill(VpSkeleton::kCodingEvidence, VpSkeleton::AcquireForm::Cpu, CE::kUnitPath,
-				CE::MakeOwnerFill(CE::Hub::Instance())) == VpSkeleton::SkeletonMemo::Registration::Registered, L"owner registered");
+				CE::MakeOwnerFill(CE::Hub::Instance(), 0)) == VpSkeleton::SkeletonMemo::Registration::Registered, L"owner registered");
 			CE::Hub::Instance().SetMemoProvider([memo](const void*) { return memo; });
 			const std::vector<std::vector<float>> src = { Clean(6), Blocked(7) };
 			std::vector<CE::TileMeasure> got;
@@ -160,13 +162,97 @@ namespace VideoProcessorTest
 		TEST_METHOD(FillDeclinesWhenNothingIsStaged)
 		{
 			CE::Hub hub;
-			const VpSkeleton::OwnerFill f = CE::MakeOwnerFill(hub);
+			const VpSkeleton::OwnerFill f = CE::MakeOwnerFill(hub, 0);
 			VpSkeleton::SkeletonMemo m;
 			VpSkeleton::OwnerFillRequest req;
 			req.id = VpSkeleton::kCodingEvidence;
 			req.seq = 5;
 			VpSkeleton::OwnerFillOutput out;
 			Assert::IsFalse(f.fill(req, m, out), L"declined, never invented");
+		}
+
+		// keepFrames = the monitor's worker latency (derived from its queue depth): a frame lagging inside the window is served,
+		// one past it is visibly unavailable (frame released), never recomputed and never neutral-without-a-reason.
+		TEST_METHOD(LaggingMonitorFrameInsideTheWindowIsServedOutsideIsVisiblyUnavailable)
+		{
+			ProviderGuard guard;
+			const uint8_t keep = static_cast<uint8_t>(SourceResolutionMonitor::Monitor::kLatencyFrames);
+			Assert::IsTrue(keep >= SourceResolutionMonitor::Monitor::kJobQueueCap + 1, L"the window covers the queue plus the frame in analysis");
+			auto memo = std::make_shared<VpSkeleton::SkeletonMemo>();
+			Assert::IsTrue(memo->RegisterOwnerFill(VpSkeleton::kCodingEvidence, VpSkeleton::AcquireForm::Cpu, CE::kUnitPath,
+				CE::MakeOwnerFill(CE::Hub::Instance(), keep)) == VpSkeleton::SkeletonMemo::Registration::Registered, L"owner registered");
+			CE::Hub::Instance().SetMemoProvider([memo](const void*) { return memo; });
+			const std::vector<std::vector<float>> src = { Blocked(21), Clean(22) };
+			std::vector<CE::TileMeasure> got;
+			std::string why;
+			memo->OnSeal(10 + keep);   // the renderer is `keep` frames past frame 10: the monitor is exactly as late as allowed
+			Assert::IsTrue(CE::Hub::Instance().AcquireTiles(this, 10, PackOf(src), got, why), L"a frame inside the window is served");
+			Assert::AreEqual(size_t(2), got.size());
+			memo->OnSeal(11 + keep);   // one frame later it is outside
+			std::vector<CE::TileMeasure> late;
+			std::string lateWhy;
+			Assert::IsFalse(CE::Hub::Instance().AcquireTiles(this, 9, PackOf(src), late, lateWhy), L"a frame outside the window is refused");
+			Assert::IsTrue(late.empty(), L"no tiles are invented");
+			Assert::IsTrue(lateWhy == VpSkeleton::Token(VpSkeleton::AcquireCause::FrameReleased), L"the reason is the visible token, not silence");
+		}
+
+		// h3-latch distribution: with the coding evidence not acquired the distribution change is UNKNOWN, never "moved". The old
+		// behaviour (an empty distribution reads as moved) is kept for a distribution that is empty for other reasons, so it is compared.
+		TEST_METHOD(UnavailableDistributionIsUnknownNeverMoved)
+		{
+			auto pattern = [](bool ramp) {
+				std::vector<double> p(16);
+				for (int i = 0; i < 16; ++i)
+				{
+					const double u = (i - 7.5) / 7.5;
+					p[size_t(i)] = ramp ? 0.3 + 0.4 * double(i) / 15.0 : 0.35 + 0.4 * u * u;   // zero linear correlation: decorrelation 1
+				}
+				return p;
+			};
+			auto frame = [&](bool ramp, const std::vector<double>& distribution, bool unavailable, double mean) {
+				SourceResolution::FrameReading f;
+				f.tiles = 16;
+				f.pattern = pattern(ramp);
+				f.patternFlat.assign(16, 0);
+				f.distribution = distribution;
+				f.distributionUnavailable = unavailable;
+				f.mean = mean;
+				f.signature = mean;
+				return f;
+			};
+			std::vector<double> low(32, 0.0), high(32, 0.0), same(32, 1.0 / 32.0);
+			low[4] = 1.0;
+			high[24] = 1.0;
+			auto moments = [&](const std::vector<double>& before, const std::vector<double>& after, bool unavailable) {
+				SourceResolution::Tracker::Settings st;
+				st.latchFixes = true;
+				st.cutFixes = true;
+				SourceResolution::Tracker t(st);
+				t.Update(frame(true, before, unavailable, 0.5), 0.0, false);
+				t.Update(frame(false, after, unavailable, 0.486), 0.04, false);
+				return t.CutMoments();
+			};
+			Assert::AreEqual(0ULL, moments(same, same, false), L"measured, distribution unchanged: no cut (the pan guard)");
+			Assert::AreEqual(1ULL, moments(low, high, false), L"measured, distribution moved: a cut");
+			Assert::AreEqual(1ULL, moments({}, {}, false), L"the old reading of an empty distribution: counted as moved");
+			Assert::AreEqual(0ULL, moments({}, {}, true), L"coding unavailable: unknown, never moved, no silent flip");
+			Assert::AreEqual(0ULL, moments(low, high, true), L"coding unavailable on either side: unknown");
+			// The tracker counts the unknown judgements and ReadFrame carries the flag.
+			SourceResolution::Tracker::Settings st;
+			SourceResolution::Tracker t(st);
+			t.Update(frame(true, {}, true, 0.5), 0.0, false);
+			t.Update(frame(false, {}, true, 0.486), 0.04, false);
+			Assert::IsTrue(t.DistributionUnavailableSteps() >= 1, L"the unknown judgement is counted");
+			SourceResolution::Thresholds th;
+			th.codingUnavailable = true;
+			Assert::IsTrue(SourceResolution::ReadFrame(std::vector<SourceResolution::Spectrum>(), th).distributionUnavailable, L"ReadFrame carries it");
+			// ... and it is shown, never silent.
+			SourceResolutionMonitor::Snapshot snap;
+			snap.reading = true;
+			snap.codingUnavailable = true;
+			snap.codingWhy = "no skeleton memo";
+			const std::string text = SourceResolutionMonitor::Describe(snap, 1.0, false);
+			Assert::IsTrue(text.find("source latch: distribution unavailable") != std::string::npos, L"the visible flag");
 		}
 
 		TEST_METHOD(StagingIsBounded)
