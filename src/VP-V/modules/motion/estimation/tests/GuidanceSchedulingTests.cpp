@@ -281,7 +281,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(AFailedCountsReadbackIsJudgedWithoutCountsAndShownInTheStatus)
 		{
 			FakeLink link;
-			link.AddPan(1);
+			link.AddPan(3);   // d = 0: pair 3 reads camera(3)
 			CameraLink::GuidanceSettings s = On();
 			CameraLink::GuidanceScheduler sched(link, s);
 			FakeCounts counts;
