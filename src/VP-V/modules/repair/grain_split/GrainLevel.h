@@ -603,6 +603,37 @@ namespace GrainLevel
 	// (kept, no block test). Unknown (the default config, no producer fact exists): the block test decides.
 	enum class RepeatFact { Unknown, Repeat, Distinct };
 
+	// C8-PROD (R14-59): the producer's capture bit of one frame: "this frame repeats the previous captured frame" (the always-on ingress
+	// 64-row signature, FrameAnalysis::Cadence::captureRepeat). Missing = no bit (store off, non-capture source, record late/evicted/stale
+	// epoch); the caller maps every non-Ok store read to Missing.
+	enum class CaptureBit { Missing, Same, Different };
+
+	// bits[i] belongs to the frame at window position i (ascending time); cur is the current frame's position. Fills one RepeatFact per
+	// position: a neighbour repeats the current frame when EVERY bit between them (the later frame of each consecutive pair) is Same;
+	// any Different makes it Distinct (trusted, kept); otherwise (a Missing in the chain) Unknown, and the block test is the backup.
+	// bitsFromProducer receives how many neighbours were decided by a bit (Same or Different chain), for the Ctrl+Alt+D source line.
+	inline std::vector<RepeatFact> ResolveRepeatFacts(const std::vector<CaptureBit>& bits, int cur, int* decidedByBits = nullptr)
+	{
+		const int n = static_cast<int>(bits.size());
+		std::vector<RepeatFact> out(static_cast<size_t>(n), RepeatFact::Unknown);
+		int decided = 0;
+		for (int i = 0; i < n; ++i)
+		{
+			if (i == cur || cur < 0 || cur >= n) continue;
+			const int lo = i < cur ? i + 1 : cur + 1, hi = i < cur ? cur : i;   // the pairs (k-1, k) for k in [lo, hi]
+			bool different = false, missing = false;
+			for (int k = lo; k <= hi; ++k)
+			{
+				if (bits[static_cast<size_t>(k)] == CaptureBit::Different) different = true;
+				else if (bits[static_cast<size_t>(k)] == CaptureBit::Missing) missing = true;
+			}
+			if (different) { out[static_cast<size_t>(i)] = RepeatFact::Distinct; ++decided; }
+			else if (!missing) { out[static_cast<size_t>(i)] = RepeatFact::Repeat; ++decided; }
+		}
+		if (decidedByBits) *decidedByBits = decided;
+		return out;
+	}
+
 	struct Neighbour
 	{
 		const Plane* d = nullptr;

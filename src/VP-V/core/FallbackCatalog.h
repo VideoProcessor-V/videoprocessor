@@ -1044,6 +1044,16 @@ namespace FallbackCatalog
 		return "grain separation: repeat facts unavailable: block test (" + std::to_string(droppedByBlockTest) + " repeated neighbour frame(s) dropped)";
 	}
 
+	// C8-PROD Ctrl+Alt+D line: where the repeat facts came from and what each path dropped. source: bits = the producer capture bit decided
+	// every neighbour, mixed = some, block test = none (bit Missing / stale / store off / non-capture source).
+	inline std::string GrainSepRepeatDiagLine(bool keyOff, int offered, int droppedByFacts, int droppedByBlockTest, int blockTestRuns)
+	{
+		if (keyOff) return "grain separation repeat gate: off";
+		const char* source = offered <= 0 ? "no neighbours" : blockTestRuns <= 0 ? "capture bit" : blockTestRuns >= offered ? "block test" : "capture bit + block test";
+		return std::string("grain separation repeat gate: source ") + source + ", droppedByFacts " + std::to_string(droppedByFacts) +
+			", droppedByBlockTest " + std::to_string(droppedByBlockTest) + ", blockTestRuns " + std::to_string(blockTestRuns);
+	}
+
 	inline Decision ProductFallback(const char* id, const std::string& why)
 	{
 		const ProductEntry* e = FindProductEntry(id);
