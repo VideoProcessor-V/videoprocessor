@@ -4,6 +4,8 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/core/LumaWeights.h>
+#include <VP-V/modules/input/source_analysis/light_level/LightLevelBlocks.h>
+#include <VP-V/nets/RgbLumaDelta.h>
 #include <VP-V/core/OnePole.h>
 #include <VP-V/core/Ramp.h>
 #include <VP-V/core/RobustStats.h>
@@ -232,6 +234,79 @@ namespace NearDupUnitsTest
 					for (size_t i = 0; i < a.size(); ++i) Assert::IsTrue(SameBits(a[i], b[i]));
 					for (int i = -5; i < T + 5; ++i) Assert::AreEqual(OldReflect(i, T), ReflectIndex(i, T));
 				}
+		}
+
+		// FIX (registered): LightLevel::Blocks::TemporalAlpha for tau < 0 or NaN. Old: 1 - exp(-1/(tau*60)) gave a negative
+		// (tau < 0) or NaN weight; new: "no smoothing", 1 (every OnePole entry). tau = 0 gave 1 before and still does.
+		TEST_METHOD(LightLevelTemporalAlphaFixAndIdentity)
+		{
+			LightLevel::Blocks::Params p;
+			for (double rate : { 0.0, 24.0, 30.0, 50.0, 60.0, 100.0, 120.0, 240.0 })
+			{
+				p.frameRateHz = rate;
+				for (double tau : { 0.0, -0.3, -1.0, std::nan("") })
+				{
+					p.tauSeconds = tau;
+					Assert::AreEqual(1.0, LightLevel::Blocks::TemporalAlpha(p));
+				}
+				for (double tau : { 0.05, 0.1, 0.3, 1.0, 5.0 })
+				{
+					p.tauSeconds = tau;
+					const double alpha60 = 1.0 - std::exp(-1.0 / (tau * GeneralRate::kFrameCountReferenceHz));
+					Assert::IsTrue(SameBits(GeneralRate::PerFrameWeight(alpha60, rate), LightLevel::Blocks::TemporalAlpha(p)));
+				}
+			}
+		}
+
+		TEST_METHOD(NanAndSmallDomainRules)
+		{
+			const double nan = std::nan("");
+			Assert::IsTrue(std::isnan(RampMath::Clamp01(nan)));              // passes NaN through (the template copies)
+			Assert::AreEqual(0.0, RampMath::Clamp01NanToZero(nan));
+			Assert::IsTrue(std::isnan(RampMath::Ramp(nan, 0.0, 1.0)));
+			// StepWhenNotAscending: NaN edge -> a step; StepWhenEqual: NaN edges are "not equal" -> the ramp (NaN out).
+			Assert::AreEqual(OldSmoothDither(nan, 1.0, 0.5), RampMath::Smoothstep(nan, 1.0, 0.5));
+			Assert::IsTrue(SameBits(OldSmoothLightLevel(nan, 1.0, 0.5), RampMath::Smoothstep(nan, 1.0, 0.5, RampMath::SmoothRule::StepWhenEqual)) ||
+				(std::isnan(OldSmoothLightLevel(nan, 1.0, 0.5)) && std::isnan(RampMath::Smoothstep(nan, 1.0, 0.5, RampMath::SmoothRule::StepWhenEqual))));
+			Assert::IsTrue(std::isnan(RampMath::Smoothstep(0.0, 1.0, nan)) == std::isnan(OldSmoothDither(0.0, 1.0, nan)));
+		}
+
+		TEST_METHOD(MedianFloatAndMedianOfMatchTheOldCopies)
+		{
+			for (size_t n : { size_t(1), size_t(2), size_t(5), size_t(6), size_t(33) })
+			{
+				const std::vector<double> d = Series(n, 11);
+				std::vector<float> f;
+				for (double x : d) f.push_back(static_cast<float>(x));
+				std::vector<double> fd(f.begin(), f.end());
+				Assert::IsTrue(SameBits(OldMedianMean(fd), RobustStats::Median(f)));
+				Assert::IsTrue(SameBits(OldMedianUpper(fd), RobustStats::Median(f, RobustStats::MedianRule::Upper, 1.0)));
+				Assert::IsTrue(SameBits(OldMedianMean(d), RobustStats::MedianOf(d.data(), static_cast<int>(n))));
+			}
+			Assert::AreEqual(7.0, RobustStats::MedianOf(nullptr, 0, RobustStats::MedianRule::MeanOfMiddle, 7.0));
+		}
+
+		TEST_METHOD(LumaFromRgbPassTextIsUnchanged)
+		{
+			const std::string expected =
+				"//!PARAM vp_kr\n//!TYPE float\n//!MINIMUM 0.0\n//!MAXIMUM 1.0\n0.2126\n\n"
+				"//!PARAM vp_kb\n//!TYPE float\n//!MINIMUM 0.0\n//!MAXIMUM 1.0\n0.0722\n\n"
+				"//!PARAM vp_range_scale\n//!TYPE float\n//!MINIMUM 0.0\n//!MAXIMUM 2.0\n1.0\n\n"
+				"//!PARAM vp_range_offset\n//!TYPE float\n//!MINIMUM -1.0\n//!MAXIMUM 1.0\n0.0\n\n"
+				"//!DESC VP luma from RGB (the net's trained range)\n"
+				"//!HOOK RGB\n"
+				"//!BIND HOOKED\n"
+				"//!COMPONENTS 1\n"
+				"\n"
+				"vec4 hook() {\n"
+				"    ivec2 p = ivec2(HOOKED_pos * HOOKED_size);\n"
+				"    vec4 c = texelFetch(HOOKED_raw, p, 0) * HOOKED_mul;\n"
+				"    float y = vp_kr * c.x + (1.0 - vp_kr - vp_kb) * c.y + vp_kb * c.z;\n"
+				"    return vec4(y * vp_range_scale + vp_range_offset, 0.0, 0.0, 1.0);\n"
+				"}\n";
+			Assert::AreEqual(expected, std::string(VpNets::kLumaFromRgbPass));
+			// The splice used by the source-resolution shader: the text of the old literal.
+			Assert::AreEqual(std::string("vec3(0.2126, 0.7152, 0.0722)"), std::string(VP_LUMA_BT709_VEC3_TEXT));
 		}
 
 		TEST_METHOD(ReplicateBlurMatchesTheDoubleReference)
