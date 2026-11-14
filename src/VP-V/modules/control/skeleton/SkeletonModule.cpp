@@ -2370,6 +2370,14 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 						for (const FallbackCatalog::Decision& d : m->Decisions())
 							lines.push_back(d.id + ": " + d.reason);
 			}
+			// QKP B (rule 5): a window term nobody feeds is shown, never a silent zero (the memo's window, lane or not).
+			if (kind == RE::StatusKind::Fallbacks)
+				if (const std::shared_ptr<VpSkeleton::SkeletonMemo> mw = MemoHostOf(ctx.host, false))
+				{
+					const VpSkeleton::QueueWindow w = mw->Window();
+					if (w.wired != 0 && w.wired != VpSkeleton::QueueWindowTerms::kAll)
+						lines.push_back("skeleton_queue_window: not fed: " + VpSkeleton::NotFed(w.wired) + " (those terms read 0 until delivered)");
+				}
 			if (!st)
 				return;
 			const bool active = st->active.load(std::memory_order_acquire);
