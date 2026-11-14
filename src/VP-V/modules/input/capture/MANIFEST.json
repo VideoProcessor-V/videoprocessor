@@ -8,6 +8,8 @@
   "live_files": [
     "src/VP-V/modules/input/capture/GpuCaptureUnpack.cpp",
     "src/VP-V/modules/input/capture/GpuCaptureUnpack.h",
+    "src/VP-V/modules/input/capture/SourceUnpackGpu.cpp",
+    "src/VP-V/modules/input/capture/SourceUnpackGpu.h",
     "src/VP-V/modules/input/capture/GpuRgbUnpack.cpp",
     "src/VP-V/modules/input/capture/GpuRgbUnpack.h",
     "src/VideoProcessor-Lib/vprenderer/AlphaNativeRgbIngress.h",

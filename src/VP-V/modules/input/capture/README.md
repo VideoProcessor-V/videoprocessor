@@ -69,6 +69,7 @@ formatters are Bill's and are used as they are.
   by one compute pass into the planes the CPU formatters write (P210: 16-bit luma + interleaved
   CbCr at every row), bit-exact; `Supports`, `Unpack(encoding, data, rowBytes, w, h, planes,
   uploaded)`, `Error`.
+- `SourceUnpack::SourceUnpackGpu` (D5-QK K1, design-check-P13-MOVE s3; NOT wired yet, no caller): the P13 unpack kernel. One compute pass writes ONE luma plane, R16 unorm MSB-aligned, from a raw early-upload rgba8 frame (or host bytes): P010/P210 (word>>6<<6), v210 (Y field<<6), UYVY/HDYC (byte<<8), DV tunnel (12-bit intensity<<4, full range via DvTunnelTapLaw::BuildRangeTable). `Packing`, `SourceBits` (10/8/12, the plane carries it), `Request`, `Validate`, `Unpack(request, data, uploaded, &out)`, `LastCause`/`CauseName` (every refusal named, shown by the caller, never log-only). Unpack only: never extends (the P10 reflect law stays P10 reader-side), never fused (D2). Decode laws are the existing CPU decoders, pinned by `SourceUnpackGpuTests` (WARP) against `AnalysisLumaSource::Sample().luma<<6` and `DvTunnelTapLaw::Tap16`. Near-duplicate note (rule 20): the V210/UYVY field extraction mirrors `GpuCaptureUnpack`, which writes P210 luma+chroma planes; the owner fill (Track Q) decides whether `capture_path: gpu` reads P13 for luma instead (one copy).
 - `GpuRgbUnpack` - `native_rgb_ingest`: R12B / R12L / R210 / R10b / R10l / ARGB / BGRA unpacked to
   an rgba16 picture plus the de-judder matcher's r16 luma (exactly the CPU formatter's Y);
   `Supports`, `Is8Bit`, `FullRange`, `ColorDepth`, `BitShift`, `Unpack(..., lumaOnly, uploaded)`.
@@ -240,6 +241,8 @@ VP files (in this folder):
 
 - `src/VP-V/modules/input/capture/GpuCaptureUnpack.h`
 - `src/VP-V/modules/input/capture/GpuCaptureUnpack.cpp`
+- `src/VP-V/modules/input/capture/SourceUnpackGpu.h`
+- `src/VP-V/modules/input/capture/SourceUnpackGpu.cpp`
 - `src/VP-V/modules/input/capture/GpuRgbUnpack.h`
 - `src/VP-V/modules/input/capture/GpuRgbUnpack.cpp`
 - `src/VP-V/modules/input/capture/UploadReuse.h`
