@@ -87,7 +87,6 @@ struct AdmissionFacts {
     uint64_t aheadBytes[kProductCount] = {};   // bytes per demanded ahead frame (0 = the product holds nothing ahead)
     AheadConsumer aheadConsumers[kMaxAheadConsumers] = {};   // the ahead consumers and their declared needs (inactive ones are ignored)
     int queueAheadFrames = 0;              // frames queued ahead of the render (the queue's L term; DelayBudget owns it, never fixed here)
-    int aheadMaxFrames = kAheadCeiling;    // the ahead ceiling (clamped to kAheadCeiling; <= 0 = kAheadCeiling); SHOWN when it binds (G7)
     int aheadMinFrames = 1;                // the core floor of frames ahead (below it ahead core fills at render, visibly)
     int queueFrames = 0;                   // frames the queue holds now
     uint64_t queueBytesPerFrame = 0;       // bytes each queued frame holds regardless of ahead demand (early-upload slot etc.)
@@ -148,7 +147,7 @@ inline int AheadCompute(const AdmissionFacts& f, Result& r)
     }
     r.aheadBound = need > 0 ? AheadBound::Consumer : AheadBound::NoConsumer;
     if (f.mode == LatencyMode::Competitive || f.mode == LatencyMode::Games) need = 0;   // R9: no look-ahead work (backward-only tier)
-    const int ceiling = f.aheadMaxFrames > 0 ? (std::min)(f.aheadMaxFrames, kAheadCeiling) : kAheadCeiling;
+    const int ceiling = kAheadCeiling;   // the one ahead ceiling (SHOWN when it binds, G7)
     if (need > ceiling) { need = ceiling; r.aheadBound = AheadBound::Ceiling; }
     const int queueAhead = f.queueAheadFrames > 0 ? f.queueAheadFrames : 0;
     if (need > queueAhead) { need = queueAhead; r.aheadBound = AheadBound::Queue; }
@@ -159,7 +158,7 @@ inline int AheadCompute(const AdmissionFacts& f, Result& r)
 // The Ctrl+Alt+D ahead compute line; also shown on Ctrl+I / Config status when the ceiling or the budget binds.
 inline void AheadComputeLine(const AdmissionFacts& f, Result& r)
 {
-    const int ceiling = f.aheadMaxFrames > 0 ? (std::min)(f.aheadMaxFrames, kAheadCeiling) : kAheadCeiling;
+    const int ceiling = kAheadCeiling;   // the one ahead ceiling (SHOWN when it binds, G7)
     const int frames = r.aheadOverGrant ? 0 : r.aheadFrames;
     const char* by = r.aheadBy != nullptr ? r.aheadBy : "?";
     char buf[160] = {};
