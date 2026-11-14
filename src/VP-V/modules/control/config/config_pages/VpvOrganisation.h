@@ -80,7 +80,7 @@ namespace Vpv
 			{ "input", "signal", "Signal and content", "What kind of signal it is, and labels the profile rules can use.", false, false, {
 				{ K::Toggle, "source_range" }, { K::Toggle, "intent_content" } } },
 			{ "input", "plumbing", "Capture plumbing (expert)", "When each captured frame is copied to the GPU. Normal viewing never needs it.", true, false, {
-				{ K::Toggle, "capture_upload" } } },
+				{ K::Toggle, "capture_upload" }, { K::Text, "source_resolution_frame_bound" } } },
 			{ "input", "content_tuning", "Content labels: tuning", "How long a label (film, video, sports) is held before it may change.", true, false, {
 				{ K::Row, "intent_content_hold_seconds" } },
 				{ L::Feature, "Content labels", "intent_content", nullptr, "off", "off" } },
@@ -144,8 +144,7 @@ namespace Vpv
 				"Finds a picture that was upscaled before VP (a 1080p film sent at 4K) and works from its real size. The tier "
 				"turns re-base on (Low and above); the slider sets how much evidence it needs.", false, false, {
 				{ K::Row, "picture_preset_box" }, { K::Toggle, "rebase_kernel_match" }, { K::Toggle, "source_resolution_text_guard" },
-				{ K::Toggle, "source_resolution_mixed_guard" }, { K::Text, "source_geometry_detect" },
-				{ K::Row, "source_resolution_frame_bound" } },
+				{ K::Toggle, "source_resolution_mixed_guard" }, { K::Text, "source_geometry_detect" } },
 				{ L::Feature, "re-base (the Scaling tier, Low or above)", "source_resolution", nullptr, "!auto", "auto" } },
 			{ "scaling", "grain", "Grain-aware downscale", "VP's downscale blend that keeps film grain true.", false, false, {
 				{ K::Toggle, "adaptive_faithful" }, { K::Toggle, "adaptive_grain_map" }, { K::Toggle, "ssim_bitrate_aware" } },
