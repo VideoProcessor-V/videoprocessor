@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// input.source_analysis/regions: the CPU reference of the owner-filled S5 busy-share variant (lead8/iface-L-B5.md section B):
-//   BusyShare: the share of "busy" pixels per consumer block (VpDebander GUARD_BODY arithmetic, moved).
-// In the plane's own code units (callers pass 10-bit tap codes); border = clamp to edge. Header-only, C++14, no Windows or
+// input.source_analysis/regions: the CPU reference of two owner-filled shared derivables (lead8/iface-L-B5.md sections B and C):
+//   BusyShare      the S5 variant of P11: the share of "busy" pixels per consumer block (VpDebander GUARD_BODY arithmetic, moved),
+//   SobelMagnitude the edge map: per-pixel 3x3 Sobel gradient magnitude of the source luma (AdaptiveDownscale's edge input, moved).
+// Both are in the plane's own code units (callers pass 10-bit tap codes); border = clamp to edge. Header-only, C++14, no Windows or
 // libplacebo headers. The GLSL mirrors are the owner's lane kernel; these are the tolerance oracle and the tests' reference.
 #include <algorithm>
 #include <cmath>
@@ -65,6 +66,25 @@ namespace RegionEvidence
 							count += 1.0;
 						}
 					out[static_cast<size_t>(by) * gw + bx] = static_cast<float>(busy / (std::max)(count, 1.0));
+				}
+			return out;
+		}
+
+		// The edge map: |G| = sqrt(gx^2 + gy^2), 3x3 Sobel (1,2,1 / -1,0,1), one component.
+		inline std::vector<float> SobelMagnitude(const float* luma, int w, int h)
+		{
+			PlaneGroup g;
+			g.w = w; g.h = h; g.n = 1; g.comp[0] = luma;
+			std::vector<float> out(static_cast<size_t>(w) * h, 0.0f);
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+				{
+					const float a = g.At(0, x - 1, y - 1), b = g.At(0, x, y - 1), c = g.At(0, x + 1, y - 1);
+					const float d = g.At(0, x - 1, y), f = g.At(0, x + 1, y);
+					const float i = g.At(0, x - 1, y + 1), j = g.At(0, x, y + 1), k = g.At(0, x + 1, y + 1);
+					const float gx = (c + 2.0f * f + k) - (a + 2.0f * d + i);
+					const float gy = (i + 2.0f * j + k) - (a + 2.0f * b + c);
+					out[static_cast<size_t>(y) * w + x] = std::sqrt(gx * gx + gy * gy);
 				}
 			return out;
 		}
