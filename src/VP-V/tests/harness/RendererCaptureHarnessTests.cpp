@@ -1797,18 +1797,29 @@ namespace Tests
 			const Case cases[] = { { "v210 59.94", VideoFrameEncoding::V210, false },
 				{ "v210 23.976", VideoFrameEncoding::V210, true } };
 			g_harnessPlainConfig = true;   // restored by HarnessScope
-			// DIV-ORIG-01 (CLOSED 2026-11-11): VP_TEST_ADAPTER is honoured only by VP-V's renderer; Bill's build
-			// has no adapter selection and renders on the default adapter. Bill's render therefore always runs
-			// with the variable cleared; ours runs on the SAME adapter: the requested name is applied to ours
-			// only when Bill's default adapter matches it (name match), else both stay on the default adapter
-			// and the TRX says so. Unset variable = both on the default adapter, as before. Restored below.
-			const std::string savedAdapter = HarnessEnvText("VP_TEST_ADAPTER");
+			// DIV-ORIG-01 (CLOSED 2026-11-11), owner decision R14-49: a SAME-ADAPTER comparison on the Windows
+			// default adapter. VP_TEST_ADAPTER is honoured only by VP-V's renderer and Bill's build has no adapter
+			// selection, so the variable is cleared for BOTH renders (it never steers ours here). Each render's
+			// adapter is parsed from its own log and the test requires both parsed and equal.
+			// VP_TEST_ADAPTER and VP_TEST_ENTRANCE_ONCE are restored even when an assert throws.
+			struct EnvRestore
+			{
+				std::string adapter, once;
+				EnvRestore() : adapter(HarnessEnvText("VP_TEST_ADAPTER")), once(HarnessEnvText("VP_TEST_ENTRANCE_ONCE")) {}
+				~EnvRestore()
+				{
+					_putenv_s("VP_TEST_ADAPTER", adapter.c_str());
+					_putenv_s("VP_TEST_ENTRANCE_ONCE", once.c_str());
+				}
+			} envRestore;
 			_putenv_s("VP_TEST_ADAPTER", "");
 			// The adapter each render used, from that render's own log: "libplacebo DXGI adapter: name=<gpu> luid=..."
 			// (Bill's build logs only this one), else VP-V's "libplacebo initialized: D3D11 on <gpu>, ..." line.
-			auto adapterLine = [] {
+			// Returns false (name empty) when neither line is present: a parse failure is never a match.
+			auto adapterLine = [](std::string& name) {
 				const std::string dxgiKey = "libplacebo DXGI adapter: name=";
 				const std::string initKey = "libplacebo initialized: D3D11 on ";
+				name.clear();
 				std::lock_guard<std::mutex> guard(g_logMutex);
 				for (const std::string& line : g_log)
 				{
@@ -1816,7 +1827,8 @@ namespace Tests
 					if (at == std::string::npos) continue;
 					const size_t from = at + dxgiKey.size();
 					const size_t end = line.find(" luid=", from);
-					return line.substr(from, end == std::string::npos ? std::string::npos : end - from);
+					name = line.substr(from, end == std::string::npos ? std::string::npos : end - from);
+					return !name.empty();
 				}
 				for (const std::string& line : g_log)
 				{
@@ -1824,42 +1836,53 @@ namespace Tests
 					if (at == std::string::npos) continue;
 					const size_t from = at + initKey.size();
 					const size_t comma = line.find(',', from);
-					return line.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
+					name = line.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
+					return !name.empty();
 				}
-				return std::string("(not logged)");
+				return false;
 			};
 			std::string failures;
 			for (const Case& c : cases)
 			{
-				// Bill first (default adapter, variable cleared), so its adapter name is known for ours.
+				// Bill first, then ours, both with the variable cleared (default adapter).
 				// The harness adds a [vpv] section itself when VP_TEST_ENTRANCE_ONCE=1: not for Bill's build.
-				const std::string savedOnce = HarnessEnvText("VP_TEST_ENTRANCE_ONCE");
 				_putenv_s("VP_TEST_ENTRANCE_ONCE", "");
 				_putenv_s("VP_TEST_ADAPTER", "");
 				g_harnessRendererDll = bill;
 				const std::string b = StillPictureHash(c.encoding, "standard", c.film, theirs);
-				const std::string adapterBill = adapterLine();
+				std::string adapterBill;
+				const bool billParsed = adapterLine(adapterBill);
 				g_harnessRendererDll.clear();
-				_putenv_s("VP_TEST_ENTRANCE_ONCE", savedOnce.c_str());
-				// Ours: the requested adapter only when it is the one Bill rendered on.
-				const bool sameByName = !savedAdapter.empty() && adapterBill.find(savedAdapter) != std::string::npos;
-				_putenv_s("VP_TEST_ADAPTER", sameByName ? savedAdapter.c_str() : "");
-				const std::string a = StillPictureHash(c.encoding, "standard", c.film, ours);
-				const std::string adapterOurs = adapterLine();
+				_putenv_s("VP_TEST_ENTRANCE_ONCE", envRestore.once.c_str());
 				_putenv_s("VP_TEST_ADAPTER", "");
+				const std::string a = StillPictureHash(c.encoding, "standard", c.film, ours);
+				std::string adapterOurs;
+				const bool oursParsed = adapterLine(adapterOurs);
 				Logger::WriteMessage((std::string("== ") + c.name + ": ours (original) " + a + ", bill " + b + "\n").c_str());
-				Logger::WriteMessage((std::string("   adapter: ours ") + adapterOurs + ", bill " + adapterBill + "\n").c_str());
-				if (!savedAdapter.empty())
-					Logger::WriteMessage((std::string("   VP_TEST_ADAPTER=") + savedAdapter + (sameByName
-						? ": matches Bill's default adapter, applied to both\n"
-						: ": Bill's build cannot select an adapter and its default does not match; both left on the default adapter\n")).c_str());
+				Logger::WriteMessage((std::string("   adapter: ours ") + (oursParsed ? adapterOurs : std::string("(not logged)")) +
+					", bill " + (billParsed ? adapterBill : std::string("(not logged)")) + "\n").c_str());
+				if (!envRestore.adapter.empty())
+					Logger::WriteMessage((std::string("   VP_TEST_ADAPTER=") + envRestore.adapter +
+						" ignored by this test: both renders ran on the Windows default adapter\n").c_str());
+				if (!billParsed)
+				{
+					Logger::WriteMessage((std::string("   ADAPTER-NOT-PARSED bill: ") + c.name + "\n").c_str());
+					failures += std::string(c.name) + ": Bill's adapter was not logged (unverified); ";
+				}
+				if (!oursParsed)
+				{
+					Logger::WriteMessage((std::string("   ADAPTER-NOT-PARSED ours: ") + c.name + "\n").c_str());
+					failures += std::string(c.name) + ": our adapter was not logged (unverified); ";
+				}
+				if (billParsed && oursParsed && adapterBill != adapterOurs)
+					failures += std::string(c.name) + ": the two renders used different adapters (ours " + adapterOurs +
+						", bill " + adapterBill + "); ";
 				const std::string vsBill = std::string(c.name) + " vs bill";
 				if (a.empty() || b.empty())
 					failures += std::string(c.name) + ": a capture is missing; ";
 				else if (a != b && !allowed(vsBill))
 					failures += vsBill + ": the Original pathway output differs (" + a + " vs " + b + "); ";
 			}
-			_putenv_s("VP_TEST_ADAPTER", savedAdapter.c_str());
 			Assert::IsTrue(failures.empty(), WideOf(failures).c_str());
 		}
 
