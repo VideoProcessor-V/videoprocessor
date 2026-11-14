@@ -222,6 +222,9 @@ namespace ComputeOnceTestsNs
 			Assert::AreEqual<uint32_t>(1, rows[0].maxPerFrame);
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuPassesAreAttributedOrListedWithTheirCost)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")   // registry only: no GPU device
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GpuPassesAreAttributedOrListedWithTheirCost)
 		{
 			EnabledScope on;
@@ -253,6 +256,9 @@ namespace ComputeOnceTestsNs
 			Assert::IsTrue(AnyLineStarts(lines, "Compute-once gpu owner camera_model passes 1 "));
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuRulesFirstVpOwnerWinsAndPrivateCopiesAreListed)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")   // registry only: no GPU device
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GpuRulesFirstVpOwnerWinsAndPrivateCopiesAreListed)
 		{
 			EnabledScope on;
