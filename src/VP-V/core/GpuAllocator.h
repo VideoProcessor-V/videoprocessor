@@ -38,17 +38,17 @@ namespace VpSkeleton {
 
 // ---- texture formats and shapes ----
 
-enum class TexFormat : uint8_t { R8, R16, RG16, R16F, RG16F, RGBA16F, R32F, RG32F, RGBA32F };
+enum class TexFormat : uint8_t { R8, R16, RG16, R16F, RG16F, RGBA16F, R32F, RG32F, RGBA32F };  // PRECISION-OK 119#17: format enum vocabulary; names every depth up to 32F, narrows nothing
 
 inline uint32_t BytesPerTexel(TexFormat f)
 {
     switch (f) {
-    case TexFormat::R8: return 1;
+    case TexFormat::R8: return 1;  // PRECISION-OK 119#17: byte-size table row, exact for the R8 format
     case TexFormat::R16: return 2;
     case TexFormat::RG16: return 4;
-    case TexFormat::R16F: return 2;
-    case TexFormat::RG16F: return 4;
-    case TexFormat::RGBA16F: return 8;
+    case TexFormat::R16F: return 2;  // PRECISION-OK 119#17: byte-size table row, exact for 2 x 16F
+    case TexFormat::RG16F: return 4;  // PRECISION-OK 119#17: byte-size table row, exact for 2 x 2 x 16F
+    case TexFormat::RGBA16F: return 8;  // PRECISION-OK 119#17: byte-size table row, exact for 4 x 16F
     case TexFormat::R32F: return 4;
     case TexFormat::RG32F: return 8;
     case TexFormat::RGBA32F: return 16;
@@ -59,12 +59,12 @@ inline uint32_t BytesPerTexel(TexFormat f)
 inline const char* Token(TexFormat f)
 {
     switch (f) {
-    case TexFormat::R8: return "r8";
+    case TexFormat::R8: return "r8";  // PRECISION-OK 119#17: format token name, no conversion
     case TexFormat::R16: return "r16";
     case TexFormat::RG16: return "rg16";
-    case TexFormat::R16F: return "r16f";
-    case TexFormat::RG16F: return "rg16f";
-    case TexFormat::RGBA16F: return "rgba16f";
+    case TexFormat::R16F: return "r16f";  // PRECISION-OK 119#17: format token name, no conversion
+    case TexFormat::RG16F: return "rg16f";  // PRECISION-OK 119#17: format token name, no conversion
+    case TexFormat::RGBA16F: return "rgba16f";  // PRECISION-OK 119#17: format token name, no conversion
     case TexFormat::R32F: return "r32f";
     case TexFormat::RG32F: return "rg32f";
     case TexFormat::RGBA32F: return "rgba32f";
@@ -75,7 +75,7 @@ inline const char* Token(TexFormat f)
 struct TexShape {
     uint32_t w = 0;
     uint32_t h = 0;
-    TexFormat fmt = TexFormat::R8;
+    TexFormat fmt = TexFormat::R8;  // PRECISION-OK 119#17: default member value only; every producer sets its own format, no conversion
 };
 
 inline bool operator==(const TexShape& a, const TexShape& b) { return a.w == b.w && a.h == b.h && a.fmt == b.fmt; }
@@ -315,7 +315,7 @@ inline ArenaGrant ArenaGrantFor(const std::vector<ArenaRequest>& requests, uint6
 // are always derived from the source dims.
 struct TexTerm {
     uint8_t shift = 0;
-    TexFormat fmt = TexFormat::R8;
+    TexFormat fmt = TexFormat::R8;  // PRECISION-OK 119#17: default member value only; every term names its own format, no conversion
     // Optional absolute size (both > 0): the ACTUAL plane dims of a product whose geometry is not a plain shift of
     // the source (a chroma plane): the runtime path uses what the plane really is, never an assumed subsampling.
     uint32_t absW = 0;
