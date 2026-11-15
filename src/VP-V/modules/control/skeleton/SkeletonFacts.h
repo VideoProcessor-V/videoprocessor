@@ -44,6 +44,7 @@ namespace Vpv
 		struct SceneFacts
 		{
 			bool valid = false;               // both P4 records were readable
+			const char* why = "";             // when !valid: the cause token (AcquireCause) or a short reason; static text, never freed
 			bool cut = false, cutPossible = false, fade = false, flash = false;
 			uint32_t histDistance = 0;        // 0..65535
 			bool fullBetween = false;         // RESERVED, always false: scene events come from P4 alone; resync / validity is the P5a MotionValidity facade's
@@ -64,6 +65,7 @@ namespace Vpv
 			bool known = false;               // cut / fade are answered (false: the frame has no sealed pair of P4 records yet)
 			bool cut = false, fade = false;
 			From from = From::None;
+			const char* why = "";             // when !known: why (AcquireCause token, "no store owner", "no analysis lane"); static text
 		};
 
 		// What the scene product did (any thread; relaxed counters copied out).
@@ -122,6 +124,7 @@ namespace Vpv
 			// lane (analysis_lane off, no source yet) or the graph does not hold the product: the caller uses its own path, visibly.
 			// Generations are per lane (a new source size builds a new lane and restarts them): take a fresh lease per use, never install
 			// one across a rebuild with LaneLeaseNewer. Default: empty (an implementer without lanes).
+			virtual SceneAnswer SceneOf(const void* /*host*/, uint64_t /*seq*/) const { return SceneAnswer(); }
 			virtual VpSkeleton::LaneLease LeaseFor(const void* /*host*/, VpSkeleton::ProductId /*product*/) { return VpSkeleton::LaneLease(); }
 			// L-CORE deliverables 1-2: the renderer's memo for frame `seq` (any thread). It exists with or without the analysis lane;
 			// never in the Original pathway. nextSeq / haveNext are filled from the hub's current frame when `seq` is the frame the

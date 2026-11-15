@@ -1224,13 +1224,25 @@ namespace Vpv
 			const std::shared_ptr<HostState> st = hosts_.Find(host);
 			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
 			if (!b || seq < 2)
+			{
+				out.why = !b ? "no analysis lane" : "no previous frame";
 				return false;
-			const AnalysisLane::ProductRead cur = b->lane.ReadOf(VpSkeleton::kP4SourceStats, seq);
-			const AnalysisLane::ProductRead prev = b->lane.ReadOf(VpSkeleton::kP4SourceStats, seq - 1);
+			}
+			// GET-OR-COMPUTE-AND-PUBLISH (OD 11-12 17:26 / 11-13 13:34): P4 of both frames is ASKED for through the renderer's memo, not peeked.
+			// A sealed / live slot is served through the lane binder exactly as ReadOf did; a frame AHEAD of the seal makes P4 in the lane's own
+			// slot now (or reuses the published one, never twice); off the render thread the lane's published bytes are copied. Both results
+			// stay alive (their pins) until both records are decoded.
+			const VpSkeleton::AcquireResult cur = b->memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
+			const VpSkeleton::AcquireResult prev = b->memo->Acquire(VpSkeleton::kP4SourceStats, seq - 1, VpSkeleton::AcquireForm::Cpu);
 			VpLaneProducts::SourceStatsRecord a, c;
-			if (cur.cpu == nullptr || prev.cpu == nullptr || !VpLaneProducts::ReadSourceStats(prev.cpu, prev.cpuBytes, &a) ||
+			if (!cur.Ok() || !prev.Ok() || cur.cpu == nullptr || prev.cpu == nullptr || cur.cpuBytes != VpLaneProducts::kStatsBytes ||
+				prev.cpuBytes != VpLaneProducts::kStatsBytes || !VpLaneProducts::ReadSourceStats(prev.cpu, prev.cpuBytes, &a) ||
 				!VpLaneProducts::ReadSourceStats(cur.cpu, cur.cpuBytes, &c))
+			{
+				const VpSkeleton::AcquireResult& bad = !cur.Ok() ? cur : prev;
+				out.why = !bad.Ok() ? VpSkeleton::Token(bad.cause) : "P4 record unreadable";
 				return false;
+			}
 			// Scene EVENTS (cut / fade / flash) are scene facts: classified from the two P4 records alone. This function reads NO validity source
 			// (no VpIndicator::TemporalValid, no Indicator at all): whether a vector pair is usable across a resync is answered only by the P5a
 			// MotionValidity facade (coordinator ruling 2026-11-08; tools/test_check_shared_units.py test_scene_facts_reads_no_validity_source).
@@ -1272,7 +1284,11 @@ namespace Vpv
 			{
 				SceneFacts f;
 				if (!SceneFactsOf(st.host, seq, f) || !f.valid)
+				{
+					if (answer)
+						answer->why = f.why;
 					return false;
+				}
 				cut = f.cut;
 				fade = f.fade;
 				std::lock_guard<std::mutex> lock(st.sceneMutex);
@@ -1310,7 +1326,10 @@ namespace Vpv
 			SceneAnswer a;
 			const std::shared_ptr<HostState> st = hosts_.Find(host);
 			if (!st)
+			{
+				a.why = "unknown renderer";
 				return a;
+			}
 			if (FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(host))
 			{
 				FrameAnalysis::Scene scene;

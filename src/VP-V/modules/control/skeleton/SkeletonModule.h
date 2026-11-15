@@ -174,7 +174,7 @@ namespace Vpv
 			// from another thread would race those writes (torn counters, a facts entry read while it is stored). Not guarded on purpose: a lock
 			// on the per-frame feed path would cost every frame for a reader that must sit on the render thread anyway (it consumes the facts
 			// for the frame being rendered). Another thread that needs the numbers reads the status lines (Ctrl+I, the command), which are
-			// published under the status mutex. SceneFactsOf is render-thread-only for the same reason (it reads the lane's slots at the seal).
+			// published under the status mutex. SceneFactsOf goes through the memo's Acquire, which serves a published copy off the render thread (see SceneOf).
 			FeedCounters FeedCountersOf(const void* host) const;
 			bool EngineFieldFactsOf(const void* host, uint64_t seq, EngineFieldFacts& out) const;
 			// Tests: the retry step the module runs at every Begin and AfterRender (the P1 inputs are published by the lane's own threads).
@@ -184,9 +184,11 @@ namespace Vpv
 			// The SCENE PRODUCT (W1-C7): cut / fade of frame `seq` against `seq - 1`, the one reader every consumer uses (the camera extension's
 			// ReadScene reads the same store group). Order: the frame-analysis store's scene group (published by this module at the seal of
 			// `seq`); else classified from the two P4 records now (SceneFactsOf), written into the store when it holds the frame's record. The
-			// answer is identical with frame_analysis_store off (nothing to read, always live). RENDER THREAD for the live path (it reads the
-			// lane's slots); the store path is any thread. known = false when neither answers.
-			SceneAnswer SceneOf(const void* host, uint64_t seq) const;
+			// answer is identical with frame_analysis_store off (nothing to read, always live). The live path GETS-OR-COMPUTES the two P4 records
+			// through the renderer's memo (Acquire): a frame AHEAD of the seal has its P4 made in the lane's slot now or reuses the published
+			// one, off the render thread the lane's published bytes are copied, so the path is no longer render-thread-only (the look-ahead
+			// walk of the LED reads it). known = false only on a genuine failure; SceneAnswer::why names it (AcquireCause token, no lane ...).
+			SceneAnswer SceneOf(const void* host, uint64_t seq) const override;
 			SceneCounters SceneCountersOf(const void* host) const;
 
 			// The queue the lane graph is sized for: the terms the record histories are derived from (render-ahead R, lane lead L,
