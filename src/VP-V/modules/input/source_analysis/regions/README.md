@@ -99,6 +99,39 @@ today, so no switch is byte-identical yet).
 - `RegionEvidenceGlsl.h`: stats pass, consumer accessor, float mirrors (`StatsGridMirror`, `PackSource`).
 - Tests: [tests/README.md](tests/README.md).
 
+## P16 coding evidence (`CodingEvidence.h/.cpp`, U13)
+
+**Design goal.** One measure of how the source picture was coded: block grid, banding, effective bit depth. Previously
+SourceResolutionDetector held a private copy (MeasureCoding, GridBlockiness, BandEdgeBlock, EffectiveBitsOf); U13 counted 14
+duplicates. The code was MOVED here, not copied; the detector keeps no coding law.
+
+**Philosophy.** Modules adapt to the shared product (owner rule, D8). The detector reads `kCodingEvidence` through
+`SkeletonMemo::Acquire` only. Without a memo (the Original pathway, no skeleton module) coding evidence is UNAVAILABLE and the
+detector's readings stay neutral (bitrateQuality 1.0, effectiveBits 0, bandShare 0, blockiness 1.0); the monitor's Describe line
+says "coding evidence unavailable (<reason>)". It is never measured privately (no silent fallback). The one fallback (rules 1/5,
+rule 25 addendum): when NO renderer store exists at all (a standalone monitor in tests/tools, or a renderer torn down or re-created
+while jobs are still queued) the monitor calls this unit's `Hub::MeasureWithoutMemo`, the same `MeasurePack` the owner fill runs,
+counted (`Hub::MeasuredWithoutMemo`, `Snapshot::codingWithoutMemoFrames`) and shown in Describe: "coding evidence measured by its
+owner without a memo (no renderer store; N frame(s))". Its result equals the pre-P16 per-tile measure (CodingEvidenceTests).
+
+**Lifetime.** `Hub::Instance()` is a leaked heap object (never destroyed, so a module destructor in static destruction still
+finds it). The memo provider is called under a shared lock; `SetMemoProvider` returns a token and `ClearMemoProvider(token)`
+takes the lock exclusively, so once `~SkeletonModule` has cleared, no call into it is running, and it clears only its own
+installation (a newer module's provider is kept).
+
+**Decisions.**
+- Form: CPU, per monitor frame seq, the default variant; bytes = Header + one record per tile (`Serialise` / `Deserialise`, magic PCE1).
+  The per-8x8 GPU declaration of P16 (Products.h) is untouched; a GPU per-8x8 form later is a FORM/size variant of this same product
+  for temporal detail (one unit, rule 20), not a second estimator.
+- Fill input: the monitor stages its tile pack for the seq (`Hub::Stage`); the owner fill measures it. The hub is a module-level seam
+  whose memo provider is set from this unit's own block in SkeletonModule.cpp (no Bill hook line). L-CORE's MemoFor replaces only the provider.
+- Seq: the monitor's frame sequence. The fill declares keepFrames = the monitor's worker latency; a lagging monitor frame inside
+  that window fills once at read (the memo's release is per owner, P16-LATCH-EVIDENCE); one older is refused (FrameReleased) and
+  shown as unavailable.
+
+**Provenance.** Algorithms: Hunt 2 M2 (effective bits, Hill number of order 4 over 16-code windows), M3 (grid finder, band-edge
+blocks), specs 1b / 2d; code moved verbatim from SourceResolutionDetector.cpp at f61d18823. Tests: tests/CodingEvidenceTests.cpp.
+
 ## BusyEdge (L-B5, in progress): S5 busy share and edge map
 
 Design goal: one computation of the debander guard's busy share (P11 term S5, variant axes: canonical lap_min / ext_min thresholds and

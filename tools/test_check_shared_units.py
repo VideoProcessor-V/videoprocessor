@@ -349,7 +349,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
 
     # ---- the real repository ------------------------------------------------------------------
     # frozen floor (refs/126 B0, 2026-11-12): blocking units may only shrink from here
-    FLOOR = {"U1": 20, "U2": 27, "U3": 19, "U4": 5, "U5": 1, "U6": 0, "U7": 6, "U10": 19, "U13": 14,
+    FLOOR = {"U1": 20, "U2": 27, "U3": 19, "U4": 5, "U5": 1, "U6": 0, "U7": 6, "U10": 19, "U13": 0,
              "U14": 0, "U16": 0, "U18": 0, "U20": 0, "U23": 12, "U24": 73, "U25": 76, "U26": 25}
     RAISED_BY_B0 = {"U7": 6, "U10": 19}   # WAIVER-JOB1-U7 (X2 real copies, 0 -> 6, target 0 at B6, expires at B6); U10 13 -> 19 = X1 Dispatch lines un-suppressed (audit B0, target 0 at B6)
 

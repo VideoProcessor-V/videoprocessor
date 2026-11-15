@@ -29,6 +29,8 @@
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuJobs.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuLightKernel.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuRegionKernel.h>
+#include <VP-V/modules/input/source_analysis/regions/CodingEvidence.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 
 #include <d3d11.h>
 #include <dxgi1_4.h>
@@ -553,10 +555,23 @@ namespace Vpv
 		SkeletonModule::SkeletonModule(Skeleton::ConfigLoader loader, std::function<uint64_t()> nowUs)
 			: loader_(std::move(loader)), nowUs_(nowUs ? std::move(nowUs) : std::function<uint64_t()>(SteadyUs))
 		{
+			// P16: the coding evidence hub finds a host's memo through the module's per-renderer memo (L-CORE MemoFor). The token lets
+			// the destructor clear only its own installation; the hub calls the lambda under a lock the clear waits on (no call after ~).
+			codingProviderToken_ = VpUnit::CodingEvidence::Hub::Instance().SetMemoProvider([this](const void* host) -> std::shared_ptr<VpSkeleton::SkeletonMemo> {
+				return MemoFor(host, 0).memo;
+			});
+			// P16 kCodingEvidence owner fill (CPU per-tile form; lead8/iface-P16.md): the one measure of the source picture's coding, module-wide
+			// (installed in every renderer's memo). keepFrames covers the monitor's worker latency (derived, SourceResolutionMonitor).
+			RegisterOwnerFill(VpSkeleton::kCodingEvidence, VpSkeleton::AcquireForm::Cpu, VpUnit::CodingEvidence::kUnitPath,
+				VpUnit::CodingEvidence::MakeOwnerFill(VpUnit::CodingEvidence::Hub::Instance(),
+					static_cast<uint8_t>(SourceResolutionMonitor::Monitor::kLatencyFrames)));
 		}
 
 		SkeletonModule::~SkeletonModule()
 		{
+			// First, before any member goes: returns only when no provider call into this module is running; a newer module's provider stays.
+			VpUnit::CodingEvidence::Hub::Instance().ClearMemoProvider(codingProviderToken_);
+			UnregisterOwnerFill(VpSkeleton::kCodingEvidence, VpSkeleton::AcquireForm::Cpu, VpUnit::CodingEvidence::kUnitPath);
 			std::vector<std::shared_ptr<HostState>> all;
 			hosts_.ForEach([&all](const void*, const std::shared_ptr<HostState>& st) { all.push_back(st); });
 			for (const std::shared_ptr<HostState>& st : all)

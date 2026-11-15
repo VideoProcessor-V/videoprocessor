@@ -70,6 +70,18 @@ namespace SourceResolutionMonitor
 		double frameQuality = 1.0;
 		double frameNoise = -1.0;
 		double effectiveBits = 0.0;    // spec 2d (0 = unknown)
+		// P16 kCodingEvidence not acquired for the frame (no skeleton memo / owner declined): the readings above stay neutral;
+		// the why is the Acquire token. Shown in Describe (never silent).
+		bool codingUnavailable = false;
+		std::string codingWhy;
+		// P16's visible fallback: no renderer store existed for the latest frame, so its coding evidence was measured by the owning unit
+		// directly (CodingEvidence::Hub::MeasureWithoutMemo), not acquired from a memo; the count is this monitor's such frames. Shown in
+		// Describe (never silent).
+		bool codingWithoutMemo = false;
+		unsigned long long codingWithoutMemoFrames = 0;
+		// The look-ahead worker has judged frames: it reads the ratio only, its coding readings are NEUTRAL there (no P16 acquire; the
+		// cut/latch distribution is not its input). Shown in Describe so the look-ahead's coding-blindness is never silent.
+		bool aheadCodingNeutral = false;
 		double coherenceV = 0.0, coherenceH = 0.0;
 		unsigned long long frames = 0, cuts = 0, discontinuities = 0;
 		double cutSpan = 0.0;          // seconds between the frames the last cut was found between
@@ -201,6 +213,10 @@ namespace SourceResolutionMonitor
 		void InjectResultForTest(const Snapshot& result, uint64_t sequence);
 		static constexpr size_t kHeldCap = 16;
 		static constexpr size_t kJobQueueCap = 4;
+		// The worker's lag behind the renderer in FRAMES, derived from the queue depth: a frame waits behind up to kJobQueueCap queued
+		// jobs, is analysed as one more, and the memo releases a frame at the Begin after keepFrames (+1). Used as the keepFrames of
+		// the P16 coding-evidence fill (a frame inside this window is served, one outside is visibly unavailable).
+		static constexpr size_t kLatencyFrames = kJobQueueCap + 2;
 		// R3 (resync_event on), render thread before Frame(): the Indicator's stream key of the frame
 		// (its era and FULL count; 0 = not driven, the default). Tile copies and worker jobs carry the
 		// key they were taken under; one taken under another key (a frame of the source before a FULL
@@ -716,6 +732,12 @@ namespace SourceResolutionMonitor
 		std::deque<std::pair<double, double>> coherence;     // (seconds, min axis coherence)
 		unsigned long long lastCuts = 0;
 		double qualitySmoothed = -1.0, bitsSmoothed = 0.0;
+		uint64_t codingSeq = 0;   // worker only: the memo sequence of a frame the host did not number
+		std::atomic<bool> aheadRan{ false };   // the look-ahead worker analysed a frame (coding neutral there)
+		bool codingUnavailableNow = false;   // worker only: the latest frame's P16 acquire failed
+		std::string codingWhyNow;
+		bool codingWithoutMemoNow = false;   // worker only: the latest frame took P16's no-store fallback (visible)
+		unsigned long long codingWithoutMemoFrames = 0;   // worker only: frames that took it (shown)
 		Snapshot snapshot;
 		SourceHistory::Log historyLog;
 		uint64_t historyRotateBytes = 0;

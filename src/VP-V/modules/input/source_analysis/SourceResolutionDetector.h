@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "regions/CodingEvidence.h"
+
 // Stage 12 step B (docs/VP-stage12-build-plan.md; owner 2026-10-15): the
 // effective resolution of the source - the height an upstream upscaler started
 // from - as a reading only. Nothing acts on it yet (step C).
@@ -41,22 +43,9 @@ namespace SourceResolution
 		// Mirror coherence per candidate source rate m / n (index m): near 0
 		// for real detail, high where the picture was resampled from rate m / n.
 		std::vector<double> mirrorVertical, mirrorHorizontal;
-		// Coding (spec 1b / 2d): the code histogram, blocking (boundary step
-		// against the others at the 8 / 16 px periods; 1 = none), the mean
-		// step, and the 8x8 blocks that are flat or hold one band edge.
-		std::vector<unsigned> histogram;
-		double blockiness = 1.0, gradient = 0.0;
-		int blocks = 0, bandEdges = 0, flatBlocks = 0;
-		// Hunt 2 M2/M3 (source_coding_fixes, Thresholds::codingFixes): the robust readings.
-		// flatHistogram: codes of the low-activity 8x8 blocks only (range up to
-		// 2^(bits - 5) codes: ramps of an upscale and texture left out). blockinessRobust:
-		// the coding grid found at any period from 8 px to an eighth of the tile (an
-		// upscaled 8/16-px grid at 8 / r px), any phase, its boundary up to 3 px wide,
-		// against the other phases, on both axes (the weaker); blockPeriod is that period (0 = none). bandEdgesRobust:
-		// 8x8 blocks holding a band edge with two dominant levels, ramp or noise allowed.
-		std::vector<unsigned> flatHistogram;
-		double blockinessRobust = 1.0, blockPeriod = 0.0;
-		int bandEdgesRobust = 0;
+		// Coding (spec 1b / 2d, hunt 2 M2/M3): the tile's coding measure, owned by the regions unit (P16 kCodingEvidence;
+		// regions/CodingEvidence.h). Set by the monitor from its Acquire; Analyse does not measure it.
+		VpUnit::CodingEvidence::TileMeasure coding;
 		// Overlay text (owner 2026-10-16, subtitles drawn by the player at the output
 		// resolution over an upscaled picture): the share of the tile's sharp steps
 		// (neighbours a third of the range apart) inside its densest band a quarter of the
@@ -89,7 +78,6 @@ namespace SourceResolution
 	// `codeMaximum` is the source's code range (1023 for 10-bit) for the coding
 	// measures; the tile should sit on the frame's 16-pixel grid.
 	bool Analyse(const float* luma, int stride, int n, Spectrum& out, int codeMaximum = 1023);
-	void MeasureCoding(const float* luma, int stride, int n, int codeMaximum, Spectrum& out);
 
 	struct Thresholds
 	{
@@ -202,6 +190,9 @@ namespace SourceResolution
 		//   - FrameReading::pattern / black / quantisationFloor are filled (the tracker's shape-aware
 		//     cut test, the real-black engage, the level-aware native test).
 		bool latchFixes = true;
+		// P16: the coding evidence (and so the code histograms behind the h3-latch luma distribution) was NOT acquired for this
+		// frame (no memo, declined, released). The distribution change is then UNKNOWN, never "moved" (FrameReading::distributionUnavailable).
+		bool codingUnavailable = false;
 		// The signal's black (normalised): limited range 16 << (bits - 8), full range 0.
 		double blackLevel = 64.0 / 1023.0;
 		// Flat: the tile's spread at most this many codes (the rounding / dither floor) ...
@@ -273,7 +264,8 @@ namespace SourceResolution
 		// the picture really uses (8 for 8-bit content in a 10-bit signal,
 		// also after a curve such as SDR re-encoded to PQ); 0 = unknown.
 		double bitrateQuality = 1.0, effectiveBits = 0.0;
-		double blockiness = 1.0, bandShare = 0.0;
+		double bandShare = 0.0;
+		VpUnit::CodingEvidence::FrameCoding coding;   // the owner's reduction (the three readings above are copies of it)
 		double peakiness = 0.0;   // the largest over the tiles (Peakiness)
 		// Mixed screen (Thresholds::mixedGuard): the frame read lower but holds native-resolution
 		// content (a UI around or over the video); ratio, ratioV and ratioH were set to native.
@@ -295,6 +287,9 @@ namespace SourceResolution
 		// bins of the code range, summing to 1; empty = unknown). Position-free: a pan, a scroll or a
 		// camera move keeps it; a cut to another shot changes it.
 		std::vector<double> distribution;
+		// P16 coding evidence not acquired (Thresholds::codingUnavailable): distribution is empty because it could not be measured, not
+		// because the picture has none. The cut test then judges the distribution change UNKNOWN: it is never counted as "moved".
+		bool distributionUnavailable = false;
 		double blackLevel = 64.0 / 1023.0;
 		double noiseLevel = 2.0 / 1023.0;   // the rounding floor of a level (flatSpreadCodes)
 		// A real black: every tile flat at or near black (not only uninformative - a dark scene is).
@@ -316,24 +311,6 @@ namespace SourceResolution
 	// One frame from its tiles: the informative tiles' coherence curves
 	// averaged per axis; a lower ratio only when both axes were resampled.
 	FrameReading ReadFrame(const std::vector<Spectrum>& tiles, const Thresholds& thresholds = {});
-	// The coding readings alone (part of ReadFrame).
-	void ReadCoding(const std::vector<Spectrum>& tiles, FrameReading& frame, bool codingFixes = true);
-
-	// Hunt 2 M2: the effective bits of a code histogram: 16-code windows with at least 256
-	// pixels whose neighbouring windows hold within 3x as many (a smooth envelope: a narrow
-	// grain peak is no coarse step), each window's occupancy as a Hill number of order 4
-	// ((sum p^4)^(-1/3) / 16: equally used codes count fully, rarely used ones - an upscale's
-	// ramp values - little); the median window. 0 when no window can be judged.
-	double EffectiveBitsOf(const std::vector<unsigned long long>& histogram);
-	// Hunt 2 M3: the coding-grid blockiness of one axis's mean absolute step per position
-	// (`steps[x]` between x and x + 1). Returns 1 when no grid stands out; `period` gets the
-	// grid's period in pixels (0 = none).
-	double GridBlockiness(const std::vector<double>& steps, double& period);
-	// Hunt 2 M3: an 8x8 block (row-major codes) holds a band edge: two dominant levels a
-	// minimum to maximum step apart, at least 85 % of the block within a code of them (or
-	// on the ramp between), split along a line (few transitions after a 3x3 majority).
-	bool BandEdgeBlock(const int* block, int minimumStep, int maximumStep);
-
 	// Variable-bitrate streams (owner 2026-10-16): a starved frame can lose an
 	// upscale's mirror coherence and read "none found" (1) without holding any
 	// real detail. Real detail above a source rate r shows as picture power
@@ -597,6 +574,8 @@ namespace SourceResolution
 		// Cut candidates dropped as a flash / not confirmed (diagnostic).
 		unsigned long long Flashes() const { return flashes; }
 		unsigned long long CoveredSteps() const { return coveredSteps; }
+		// Cut judgements made with the luma distribution unavailable (P16 not acquired): none of them counted a distribution move.
+		unsigned long long DistributionUnavailableSteps() const { return distributionUnavailableSteps; }
 		// Native readings left out as within the rounding floor (latchFixes).
 		unsigned long long FloorStarved() const { return floorStarved; }
 		double Candidate() const;                                // the window's evidence so far
@@ -645,7 +624,7 @@ namespace SourceResolution
 			double seconds = 0.0, span = 0.0, motionBefore = 0.0;
 			uint64_t from = 0, to = 0;   // the step's sequences (look-ahead re-check)
 		} pending;
-		unsigned long long moments = 0, flashes = 0, coveredSteps = 0;
+		unsigned long long moments = 0, flashes = 0, coveredSteps = 0, distributionUnavailableSteps = 0;
 		double lastMomentSpan = 0.0, lastCutSeconds = -1.0;
 		void ConfirmCut(double cutSeconds, double span);
 		void CutFixesStep(const FrameReading& frame, double seconds, uint64_t sequence, const EvidenceSource* look);

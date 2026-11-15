@@ -44,7 +44,8 @@
 // attached to ITS frame until the frame has left the queue (f < min(seal - back, presented - history)); a fill beyond
 // current + ahead is NotQueued, beyond the planned ahead depth NotPlannedAhead (SetAheadPlan); a dropped frame is Discard()ed, a
 // discontinuity Invalidate()s everything (owner Q1 a). Nothing attached to a queued frame is ever evicted to make room (owner Q2).
-// A request for a released frame is refused (FrameReleased), never silently recomputed. A result carries a PIN: the bytes /
+// A request for a released frame is refused (FrameReleased), never silently recomputed; "released" is per owner (a frame inside
+// an owner's DeclaredHistory() window that nobody filled yet fills once at read). A result carries a PIN: the bytes /
 // handle stay valid while the reader holds it, even past OnSeal. A GPU spot whose recorded read fence (NoteGpuRead) is not
 // complete yet (SetFenceCompleted) is retired only when it completes: its keep-alive is not dropped under a GPU read.
 // GPU bytes are budgeted against the VRAM ledger grant (SetGpuBudget; reserved BEFORE the fill); CPU bytes are counted.
@@ -894,7 +895,7 @@ public:
             memo_.erase(it);
             it = memo_.end();
         }
-        if (it == memo_.end() && haveReleased_ && seq <= releasedThrough_)
+        if (it == memo_.end() && ReleasedForOwnerLocked(seq, ow))
             return Fail(c, id, seq, AcquireCause::FrameReleased);   // a released frame is never recomputed (lane slots above stay readable)
         if (it != memo_.end()) {
             const std::shared_ptr<Entry> e = it->second;
@@ -1395,6 +1396,20 @@ private:
                 edge = pe;   // a frame not yet presented (minus its history readers) is still in the queue
         }
         return edge;
+    }
+    // P16-LATCH-EVIDENCE: is frame `seq` released FOR THIS OWNER? OnSeal keeps an owner's spots down to EdgeLocked(seal, its
+    // DeclaredHistory()), so a frame inside that window that no reader has filled yet is not released for the owner either: it
+    // fills once at read (a lagging reader inside the declared window, e.g. the source-resolution monitor's worker), and a frame
+    // below the owner's edge is refused (FrameReleased), never recomputed. An owner declaring no history uses the memo's line
+    // unchanged; the owner's edge is never above it, so this only ever serves frames the owner's own spots would still hold.
+    bool ReleasedForOwnerLocked(uint64_t seq, const OwnerFill* ow) const
+    {
+        if (!haveReleased_ || seq > releasedThrough_)
+            return false;
+        const uint8_t keep = ow != nullptr ? ow->DeclaredHistory() : uint8_t(0);
+        if (keep == 0u || !haveSealed_)
+            return true;
+        return seq < EdgeLocked(lastSeal_, keep);
     }
     const OwnerFill* OwnerLocked(uint32_t k) const
     {

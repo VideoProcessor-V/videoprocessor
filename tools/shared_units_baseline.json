@@ -700,7 +700,7 @@
   "U13": {
    "name": "coding_evidence",
    "blocking": true,
-   "baseline_duplicates": 14,
+   "baseline_duplicates": 0,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/input/source_analysis/identity/quality_pattern/QualityPatternRecord.h",
@@ -772,5 +772,5 @@
    "baseline_duplicates": 21
   }
  },
- "note": "refs/126 B0 (2026-11-12): all registered units blocking at the measured true count; baselines only shrink. U10 baseline = the matcher D1 global search (X1, file-level owner scope), 0 at refs/126 B6. U7 0 at L-B6 (the X2 DetailPulse/TextureRestore private cut/fade shares are removed; was 6). U13 14 = SourceResolutionDetector private blockiness (real). U17 is undefined/reserved. U10 = 19 after the audit fix (Dispatch-label lines un-suppressed)."
+ "note": "refs/126 B0 (2026-11-12): all registered units blocking at the measured true count; baselines only shrink. U10 baseline = the matcher D1 global search (X1, file-level owner scope), 0 at refs/126 B6. U7 0 at L-B6 (the X2 DetailPulse/TextureRestore private cut/fade shares are removed; was 6). U13 0 (P16 coding evidence moved to regions, df03734f7). U17 is undefined/reserved. U10 = 19 after the audit fix (Dispatch-label lines un-suppressed)."
 }

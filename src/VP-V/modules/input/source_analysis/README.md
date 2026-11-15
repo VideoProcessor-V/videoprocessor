@@ -25,7 +25,7 @@ VP owns two file pairs in this folder (moved by `git mv` in M2 step 10): `Source
 ### Public API (VP)
 
 - `SourceResolutionDetector.h`, namespace `SourceResolution` (pure CPU maths, standard library only):
-  - `Analyse(luma, stride, n, Spectrum&, codeMaximum)`: one n x n tile (values 0..1) into a `Spectrum` (mirror-coherence curves per axis, coding measures, text band, sharp steps, periodic peak, bars, tile mean). `MeasureCoding` is the coding part alone.
+  - `Analyse(luma, stride, n, Spectrum&, codeMaximum)`: one n x n tile (values 0..1) into a `Spectrum` (mirror-coherence curves per axis, text band, sharp steps, periodic peak, bars, tile mean) plus the coding measure of the tile (`Spectrum::coding`, filled by the P16 owner through the skeleton's Acquire; see "P16 coding evidence"). `MeasureCoding` / `GridBlockiness` MOVED to `regions/CodingEvidence` (`VpUnit::CodingEvidence::MeasureTile` / `GridBlockiness`).
   - `ReadFrame(tiles, Thresholds)`: the tiles of one frame into a `FrameReading` (ratio, per-axis `ratioV`/`ratioH`, informative/text/periodic/bar tiles, the mixed-screen guard's result, bitrate quality, effective bits, black). `Thresholds` carries `textBand`, `mixedGuard`, `codingFixes`, `latchFixes`, `blackLevel`, the tile centres and the signature tiles.
   - Helpers: `PlaceTiles` (the base 4 x 2 grid, plus two rows when dense), `TileSize` (with the latch fixes: 128 at 1080, 256 at 2160), `Informative`, `FindPeak`, `DetailAbove`, `AxisFrame`, `SnapRatio`, `PatternChange`, `Describe`.
   - `Tracker`: the conservative declared value. It needs `minimumShots` and `minimumSeconds` of agreeing evidence (defaults 3 shots, 10 s; set by `SetEvidence`). Also `SetLatchFixes`, `SetCutFixes`, `Update`, `Discontinuity`, `Ratio`, `Candidate`, `Cuts`. `Tracker::CutJudge` and `FrameCutJudge` are the cut judges.
@@ -322,6 +322,15 @@ Chain tests:
 - blind kernel estimation for the re-base (item 18)
 - label-detector / identification net (round 2; owner idea: identification net feeding the kernel-matched re-base)
 - estimator gap analysis vs ground truth (item 8)
+
+### P16 coding evidence (moved out of the detector)
+
+The coding measure (block grid, banding, effective bits) lives in `regions/CodingEvidence.*` (product P16 `kCodingEvidence`, see
+[regions/README.md](regions/README.md)). The detector's `Spectrum::coding` and `FrameReading::coding` carry it; the monitor acquires it
+per frame through the skeleton memo. Without a memo the coding readings are neutral and `Describe` shows "coding evidence unavailable".
+With no renderer store at all (a standalone monitor, or a renderer torn down while jobs are queued) the monitor takes the visible
+fallback `CodingEvidence::Hub::MeasureWithoutMemo` (the owner's own measure, counted, and shown in `Describe` as "coding evidence
+measured by its owner without a memo"); with a renderer present, a failed Acquire leaves the evidence unavailable and visible.
 
 ## Where the code lives (live file list)
 

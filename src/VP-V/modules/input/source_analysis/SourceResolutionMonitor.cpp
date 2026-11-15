@@ -3,6 +3,7 @@
 #include <VP-V/core/LumaWeights.h>
 #include <VP-V/core/RobustStats.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/input/source_analysis/regions/CodingEvidence.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h>
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
 #include <VP-V/modules/scaling/geometry/SourceGeometrySet.h>
@@ -332,6 +333,8 @@ if (tile < int(tiles) && g.y < ts) {
 				SourceResolution::Analyse(&tiles[static_cast<size_t>(i) * size * size], size, size, spectra[static_cast<size_t>(i)], 1023);
 			SourceResolution::Thresholds thresholds;
 			thresholds.latchFixes = LatchFixes();
+			thresholds.codingUnavailable = true;   // the look-ahead reads the ratio only: no P16 acquire, coding neutral, no distribution
+			aheadRan.store(true, std::memory_order_release);
 			if (!textGuard.load(std::memory_order_acquire)) thresholds.textBand = 0.0;
 			thresholds.mixedGuard = mixedGuard.load(std::memory_order_acquire);
 			thresholds.codingFixes = codingFixes.load(std::memory_order_acquire);
@@ -1367,6 +1370,7 @@ if (tile < int(tiles) && g.y < ts) {
 		trackerV.Discontinuity(cause);
 		trackerH.Discontinuity(cause);
 		denseGrid.store(false, std::memory_order_release);
+		aheadRan.store(false, std::memory_order_release);   // a new stream: the look-ahead note is re-earned
 		coherenceV.clear();
 		coherenceH.clear();
 		kernelVotes.clear();
@@ -1407,6 +1411,11 @@ if (tile < int(tiles) && g.y < ts) {
 		const int pixels = T * T;
 		std::vector<float> luma(static_cast<size_t>(pixels));
 		std::vector<std::vector<float>> codeTiles(static_cast<size_t>(j.tiles));   // for the kernel fit
+		auto codingPack = std::make_shared<VpUnit::CodingEvidence::TilePack>();   // P16 kCodingEvidence: the owner measures the coding of these tiles
+		codingPack->tiles = j.tiles;
+		codingPack->tileSize = T;
+		codingPack->codeMaximum = j.codeMaximum;
+		codingPack->luma.reserve(static_cast<size_t>(j.tiles) * pixels);
 		for (int t = 0; t < j.tiles; ++t)
 		{
 			const float* src = j.values.data() + static_cast<size_t>(t) * pixels;
@@ -1417,6 +1426,37 @@ if (tile < int(tiles) && g.y < ts) {
 			}
 			SourceResolution::Analyse(luma.data(), T, T, spectra[static_cast<size_t>(t)], j.codeMaximum);
 			codeTiles[static_cast<size_t>(t)] = luma;
+			codingPack->luma.insert(codingPack->luma.end(), luma.begin(), luma.end());
+		}
+		{
+			// P16 through the skeleton's Acquire (the one path; no private measurement; the only exception is the visible, owner-called
+			// no-store fallback below): the sole store owner is the renderer's identity
+			// (as SetChainTap's discovery). Not acquired = the coding readings stay neutral and Describe says why.
+			const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
+			const uint64_t memoSeq = j.sequence != 0 ? j.sequence : ++codingSeq;
+			std::vector<VpUnit::CodingEvidence::TileMeasure> measured;
+			std::string why;
+			// The shared input is ABSENT (no renderer store at all: a standalone monitor - the latch tests, tools - or a renderer torn
+			// down / re-created while jobs are still queued): the VISIBLE fallback calls the owning unit (rules 1/5, rule 25 addendum),
+			// the same MeasurePack its owner fill runs, counted there and here and shown in Describe. Not a private measurement.
+			// With a renderer present a failed acquire stays unavailable and visible.
+			const bool noStore = owners.empty();
+			bool got = false;
+			if (noStore)
+			{
+				got = VpUnit::CodingEvidence::Hub::Instance().MeasureWithoutMemo(*codingPack, measured);
+				if (!got) why = "tile pack unreadable";
+			}
+			else if (owners.size() == 1)
+				got = VpUnit::CodingEvidence::Hub::Instance().AcquireTiles(owners[0], memoSeq, codingPack, measured, why);
+			else
+				why = "several renderers";
+			codingWithoutMemoNow = noStore && got;
+			if (codingWithoutMemoNow) ++codingWithoutMemoFrames;
+			codingUnavailableNow = !got || measured.size() != spectra.size();
+			codingWhyNow = codingUnavailableNow ? (why.empty() ? "tile count" : why) : std::string();
+			if (!codingUnavailableNow)
+				for (size_t t = 0; t < spectra.size(); ++t) spectra[t].coding = std::move(measured[t]);
 		}
 		SourceResolution::Thresholds thresholds;
 		thresholds.codeMaximum = j.codeMaximum;
@@ -1425,6 +1465,7 @@ if (tile < int(tiles) && g.y < ts) {
 		thresholds.codingFixes = codingFixes.load(std::memory_order_acquire);
 		const bool fixes = LatchFixes();
 		thresholds.latchFixes = fixes;
+		thresholds.codingUnavailable = codingUnavailableNow;   // P16: the h3-latch distribution is then unknown, never "moved"
 		thresholds.blackLevel = j.blackLevel;
 		// The tiles' positions (the overlay spread) and the base grid for the frame signature:
 		// switching between the base and the dense grid is neither a cut nor a new shot.
@@ -1738,6 +1779,11 @@ if (tile < int(tiles) && g.y < ts) {
 			}
 		}
 		VpUnit::SourceQuality::Store(snapshot, qualitySmoothed, bitsSmoothed);   // U12
+		snapshot.codingUnavailable = codingUnavailableNow;
+		snapshot.codingWhy = codingWhyNow;
+		snapshot.codingWithoutMemo = codingWithoutMemoNow;
+		snapshot.codingWithoutMemoFrames = codingWithoutMemoFrames;
+		snapshot.aheadCodingNeutral = aheadRan.load(std::memory_order_acquire);
 		snapshot.coherenceV = frame.vertical.coherence;
 		snapshot.coherenceH = frame.horizontal.coherence;
 		snapshot.cuts = tracker.Cuts();
@@ -2776,7 +2822,12 @@ if (tile < int(tiles) && g.y < ts) {
 			snprintf(autoText, sizeof(autoText), "; auto %s", autoRatio < 1.0 ? ("re-based to " + SourceResolution::Describe(autoRatio, s.nativeHeight)).c_str() : "native");
 		snprintf(line, sizeof(line), "Source resolution: %s (declared %s, confidence %.2f); bitrate quality %.2f%s%s",
 			liveText.c_str(), declaredText.c_str(), s.confidence, s.bitrateQuality, bits, autoText);
-		return line;
+		std::string text = line;
+		if (s.codingUnavailable) text += "; coding evidence unavailable (" + s.codingWhy + "); source latch: distribution unavailable";   // P16 not acquired: shown, never silent
+		if (s.codingWithoutMemo || s.codingWithoutMemoFrames > 0)   // P16's no-store fallback: shown, never silent
+			text += "; coding evidence measured by its owner without a memo (no renderer store; " + std::to_string(s.codingWithoutMemoFrames) + " frame(s))";
+		if (s.aheadCodingNeutral) text += "; look-ahead reads the ratio only (coding evidence not measured there)";
+		return text;
 	}
 
 	std::string Describe(const Snapshot& s, double autoRatio, bool autoSelected)

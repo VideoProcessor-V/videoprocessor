@@ -100,6 +100,7 @@
     <ClInclude Include="GuiLifecyclePolicy.h" />
     <ClInclude Include="..\VP-V\modules\input\signal\HdrInference.h" />
     <ClInclude Include="..\VP-V\modules\input\source_analysis\SourceResolutionDetector.h" />
+    <ClInclude Include="..\VP-V\modules\input\source_analysis\regions\CodingEvidence.h" />
     <ClInclude Include="..\VP-V\modules\motion\estimation\VectorStore.h" />
     <ClInclude Include="..\VP-V\modules\motion\estimation\MotionValidity.h" />
     <ClInclude Include="..\VP-V\modules\motion\consumers\InterpolationPolicy.h" />
@@ -186,6 +187,7 @@
     <ClCompile Include="filesource\FileSideData.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\HdrInference.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceResolutionDetector.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\regions\CodingEvidence.cpp" />
     <ClCompile Include="..\VP-V\modules\scaling\rebase\KernelInverse.cpp" />
     <ClCompile Include="dv_loopback\DvLoopbackAnalyzer.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\RawCaptureRecorder.cpp" />

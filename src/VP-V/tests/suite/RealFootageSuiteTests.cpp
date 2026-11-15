@@ -2781,6 +2781,7 @@ namespace RealFootage
 							for (int c = 0; c < tile; ++c)
 								values[static_cast<size_t>(r) * tile + c] = static_cast<float>(y[static_cast<size_t>(places[p].y0 + r) * W + places[p].x0 + c] * 4) / 1023.0f;
 						SourceResolution::Analyse(values.data(), tile, tile, spectra[p], 1023);
+						spectra[p].coding = VpUnit::CodingEvidence::MeasureTile(values.data(), tile, tile, 1023);
 					}
 					SourceResolution::Thresholds th;
 					SourceResolution::SetTileCentres(places, th);
