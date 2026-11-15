@@ -9,17 +9,22 @@
 //    arithmetic of IsBusy() is VpDebander GUARD_BODY, moved.
 //    Descriptors: bz_src (sampled, plane size, up to bz_ncomp meaningful components, nearest, clamp: the consumer's planes),
 //                 bz_out (storage r16f, cell grid size, write-only; R = share).
-//    Uniforms:    int bz_block (cell edge px), int bz_ncomp (1..3), float bz_scale (codes per texel unit: the tap form
-//                 65535 / 64), float bz_lap, float bz_ext (thresholds in codes).
+//    Uniforms:    int bz_block (cell edge px), int bz_ncomp (1..3), float bz_scale (codes per texel unit: kSourceTapCodesPerUnit),
+//                 float bz_lap, float bz_ext (thresholds in codes).
 // 2. EdgeMapHeaderGlsl() + EdgeMapBodyGlsl(): the edge map, a 16 x 16 group reads its 18 x 18 tile once.
-//    Descriptors: em_src (sampled, plane size, luma in .x), em_out (storage r16f, plane size, write-only).
-//    Uniforms:    float em_scale (codes per texel unit).
+//    Descriptors: em_src (sampled, plane size, luma in .x), em_out (storage r32f, plane size, write-only).
+//    Uniforms:    float em_scale (codes per texel unit: kSourceTapCodesPerUnit).
 #pragma once
 
 #include <string>
 
 namespace RegionEvidence
 {
+	// THE tap form of the source planes (both products of this unit use it, so the busy share and the edge map agree in code units):
+	// a normalised 16-bit container sample -> 10-bit codes, 65535 / 64 (the 10 bits at the top of the container, as the stats pass
+	// reads the same planes, RegionEvidenceGlsl.h). Unrounded, so a 12-bit source keeps its two fractional bits (rule 7).
+	static constexpr float kSourceTapCodesPerUnit = 65535.0f / 64.0f;
+
 	inline std::string BusyShareHeaderGlsl()
 	{
 		return R"GLSL(
