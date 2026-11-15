@@ -8,6 +8,7 @@
 #include <libplacebo/shaders/sampling.h>
 
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <VP-V/modules/drive/led_measure/NativeReadback.h>
@@ -90,19 +91,14 @@ if (li == 0u)
 )GLSL";
 
 		// 8b: a luma doubler's output (exactly 2x the source crop) back to the
-		// source resolution, 2x2 box in the picture's own light domain.
+		// source resolution in the picture's own light domain. The mean is the shared
+		// unit U3 (VpUnit::HalfLuma::GlslRgbaAt, lane/shared/HalfLuma.h; moved unchanged:
+		// the same taps, clamp, order and scale as the former private loop).
 		const char* const HALVE_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
-if (q.x < size.x && q.y < size.y) {
-    ivec2 sz = textureSize(src, 0);
-    ivec2 p = ivec2(origin) + q * 2;
-    vec4 s = vec4(0.0);
-    for (int y = 0; y < 2; y++)
-        for (int x = 0; x < 2; x++)
-            s += texelFetch(src, clamp(p + ivec2(x, y), ivec2(0), sz - ivec2(1)), 0);
-    imageStore(dst, q, s * 0.25);
-}
+if (q.x < size.x && q.y < size.y)
+    imageStore(dst, q, vpu_half_luma_rgba_at(src, ivec2(origin), q));
 )GLSL";
 
 		// One workgroup: the frame's totals, the ramp, the smoothing and the
@@ -780,7 +776,8 @@ float rs_slope(float y)
 			const float halveOrigin[2] = { static_cast<float>(hx0), static_cast<float>(hy0) };
 			const pl_shader_desc d[2] = { Sampled("src", p->tex, false), Storage("dst", lowres) };
 			const pl_shader_var v[1] = { { pl_var_vec2("origin"), halveOrigin, true } };
-			if (!Compute(p->dispatch, "VideoProcessor adaptive upscale: doubler to source resolution", nullptr,
+			static const std::string halveHeader = VpUnit::HalfLuma::GlslRgbaAt();
+			if (!Compute(p->dispatch, "VideoProcessor adaptive upscale: doubler to source resolution", halveHeader.c_str(),
 				HALVE_BODY, d, 2, v, 1, (lw + 15) / 16, (lh + 15) / 16))
 			{
 				++failures;
