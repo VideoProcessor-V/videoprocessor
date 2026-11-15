@@ -189,8 +189,12 @@ REGISTRY = [
      # C6-2 U24: RobustStatsShaders.h holds the GPU twins (GLSL vpu_median_upper, HLSL VP_MAD_TO_SIGMA) of the same owner.
      "owning_unit": ["src/VP-V/core/RobustStats", "src/VP-V/core/RobustStatsShaders"],
      "signatures": _c(r"\bMedian\w*\s*\(", r"\bMedianOf\b", r"1\.4826", r"\bnth_element\b",
-                      r"\bMad(Sigma)?\s*\(", r"\bPercentile\s*\(", r"\bQuantile\s*\("),
-     "allow": _c(r"RobustStats::\w+", r"core/RobustStats(Shaders)?\.h", r"\bvpu_median_\w*", r"\bVP_MAD_TO_SIGMA\b")},
+                      r"\bMad(Sigma)?\s*\(", r"\bPercentile\s*\(", r"\bQuantile\s*\(",
+                      # C6-2 C8 (review MUST-1/SHOULD-2): the sorted[size() / 2] Upper-median idiom, and any vpu_median_ name
+                      # (a call is allowed below; a pasted `float vpu_median_...(` definition outside the owner stays a duplicate).
+                      r"\[\s*[\w.>()-]*\bsize\(\)\s*/\s*2u?\s*\]", r"\bvpu_median_\w*\s*\("),
+     "allow": _c(r"RobustStats::\w+", r"core/RobustStats(Shaders)?\.h", r"(?<!float )\bvpu_median_\w*\s*\(",
+                 r"\bVP_MAD_TO_SIGMA\b")},
     {"id": "U25", "name": "ramp_clamp_smoothstep",
      "owning_unit": ["src/VP-V/core/Ramp"],
      "signatures": _c(r"\bClamp01\s*\(", r"\bSmoothstep\s*\(", r"\bRamp\s*\("),

@@ -409,8 +409,8 @@ class NearDupUnitPatternsTest(unittest.TestCase):
 
     def test_u24_owner_calls_are_consumers_private_order_statistics_duplicates(self):
         # C6-2 U24: a RobustStats:: call is a consumer; a bare nth_element, a private Median or an inline 1.4826 stays a
-        # duplicate, also on a line that also calls the owner. The shader twins' names (vpu_median_upper, VP_MAD_TO_SIGMA)
-        # and the include are no hit at all; the shaders header is part of the owner.
+        # duplicate, also on a line that also calls the owner. A vpu_median_upper call is a consumer (a signature since C8);
+        # VP_MAD_TO_SIGMA and the include are no hit at all; the shaders header is part of the owner.
         with tempfile.TemporaryDirectory() as r:
             f = "src/VP-V/modules/repair/c/Rs.cpp"
             _w(r, f, "double m = RobustStats::Median(v, RobustStats::MedianRule::Upper);\n"
@@ -424,9 +424,26 @@ class NearDupUnitPatternsTest(unittest.TestCase):
             _w(r, "src/VP-V/core/RobustStatsShaders.h", "static const double VP_MAD_TO_SIGMA = 1.4826L;\n")
             res = _unit(csu.scan(r, baseline={"units": {}}), "U24")
             role = {h["line"]: h["role"] for h in res["hits"] if h["file"] == f}
-            self.assertEqual(role, {1: "consumer", 2: "duplicate", 3: "consumer", 4: "duplicate", 5: "duplicate"})
+            self.assertEqual(role, {1: "consumer", 2: "duplicate", 3: "consumer", 4: "duplicate", 5: "duplicate",
+                                    7: "consumer"})
             self.assertFalse([h for h in res["hits"] if h["file"].endswith("RobustStatsShaders.h")])
             self.assertEqual(res["inside_owner"], 1)
+
+    def test_u24_size_half_idiom_and_pasted_gpu_median_definition_are_duplicates(self):
+        # C6-2 C8 (review MUST-1, SHOULD-2): sorted[x.size() / 2] is a private Upper median; a vpu_median_ CALL is a
+        # consumer, a `float vpu_median_...(` DEFINITION outside the owner is a pasted copy.
+        with tempfile.TemporaryDirectory() as r:
+            f = "src/VP-V/modules/repair/c/Half.h"
+            _w(r, f, "rec->grain = rms[rms.size() / 2];\n"
+                     "auto m = s->v[s->v.size()/2u];\n"
+                     "vec2 med = vec2(vpu_median_upper(xs, n), vpu_median_upper(ys, n));\n"
+                     "float vpu_median_upper(float a[9], int n)\n"
+                     "float m = vpu_median_upper(xs, n);\n"
+                     "auto h = v[n / 2];\n"
+                     "size_t k = v.size() / 2;\n")
+            res = _unit(csu.scan(r, baseline={"units": {}}), "U24")
+            role = {h["line"]: h["role"] for h in res["hits"] if h["file"] == f}
+            self.assertEqual(role, {1: "duplicate", 2: "duplicate", 3: "consumer", 4: "duplicate", 5: "consumer"})
 
 
 class FocusAcquireAllowTest(unittest.TestCase):
