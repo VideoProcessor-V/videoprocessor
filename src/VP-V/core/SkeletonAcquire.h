@@ -448,7 +448,13 @@ public:
     std::vector<uint64_t> GpuNeedLevels(QueueMode mode = QueueMode::Normal, const DelayBudget::Inputs* budget = nullptr) const
     {
         std::lock_guard<std::mutex> g(mutex_);
-        AheadNeed n = AheadNeedLocked(window_, mode, budget, true);
+        // The memo's OWN window: before the first SetWindow there is none, so the render frame only (nothing ahead).
+        QueueWindow own = window_;
+        if (!windowSet_) {
+            own.ahead = ahead_;
+            own.aheadCompute = 0;
+        }
+        AheadNeed n = AheadNeedLocked(own, mode, budget, true);
         return AheadLevels(n);
     }
     uint64_t GpuNeedBytes() const
@@ -643,14 +649,12 @@ public:
         return AheadNeedLocked(w, mode, budget, false);
     }
     // `gpuOnly`: the VRAM view (GPU allocating fills, back = max(window back, the fills' declared history)).
+    // `w` is described as given: the Configure-time admission (S-3a S3) plans a window BEFORE the memo has one set, so the memo's
+    // no-window state never overrides the caller's window (GpuNeedLevels applies it to the memo's own window).
     AheadNeed AheadNeedLocked(const QueueWindow& w, QueueMode mode, const DelayBudget::Inputs* budget, bool gpuOnly) const
     {
         AheadNeed n;
         n.window = w;
-        if (!windowSet_) {
-            n.window.ahead = ahead_;
-            n.window.aheadCompute = 0;   // no window: the render frame only
-        }
         n.grantBytes = gpuGranted_ ? gpuBudget_ : 0u;
         n.heldBytes = gpuBytes_;
         n.mode = mode;
