@@ -8,6 +8,7 @@
 #include <VP-V/modules/motion/estimation/EngineLumaRing.h>
 
 #include <set>
+#include "CppUnitTest.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 

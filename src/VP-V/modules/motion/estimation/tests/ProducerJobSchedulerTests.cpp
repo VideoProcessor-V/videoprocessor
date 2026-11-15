@@ -7,6 +7,7 @@
 // dequeue-stall fix); an empty queue chooses nothing.
 #include "pch.h"
 #include <VP-V/modules/motion/estimation/ProducerJobs.h>
+#include "CppUnitTest.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
