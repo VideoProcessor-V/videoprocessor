@@ -328,7 +328,7 @@ struct AcquireCounters {
     // aheadNow = Ran and the slot readable: made on this request. (A worker publishing between the slot read and the ask also
     // answers Ran: that frame is then counted here though it was made by the worker; rare, and it is never counted twice.)
     uint64_t laneAheadMade = 0;
-    uint64_t sealComputedReduced = 0;  // seal live fills that computed nothing because the frame was already made (ahead or published)
+    uint64_t sealComputedReduced = 0;  // seal live fills COMPUTED in the reduced (missing-input) form: a compute, not a reuse
     uint64_t workerReused = 0;         // the lane's worker skipped a frame the render thread had made first (nothing recomputed)
     // Frames COMPUTED for this product (any variant): owner fills that published + seal computes. The compute-once ledger.
     // Queue-keyed products (design s2.4/2.5): fills of a frame AHEAD of the render frame, render-time reuses of such a fill, and
@@ -1136,7 +1136,9 @@ public:
         std::lock_guard<std::mutex> g(mutex_);
         ++counters_[id].sealReused;
     }
-    // QKP slice C (R14-73): the lane's seal computed nothing for (id) because the frame was already made (ahead claim / published).
+    // QKP slice C (R14-73): the lane's seal COMPUTED a frame of (id) in its REDUCED form (an input was missing at the seal, so the
+    // law ran with that input absent: AnalysisLane.h's seal live fill, `missing != 0`). A compute, not a reuse: it is a different
+    // result from the full form, so it is counted apart from sealComputed and Computed() (the published-lookup is never asked).
     void NoteSealComputedReduced(ProductId id)
     {
         std::lock_guard<std::mutex> g(mutex_);
