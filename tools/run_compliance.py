@@ -29,6 +29,7 @@ TOOLS = [
     ("test_categories", "check_test_categories.py", [], False),
     ("private_copies", "check_private_copies.py", ["--strict"], False),
     ("test_tamper", "check_test_tamper.py", ["--strict"], False),
+    ("producer_chain", "producer_chain.py", ["--check"], False),   # 15d J3 (ii): a stale producer-chain table = exit 1
     ("N2_precision", "check_precision.py", ["--strict"], True),
     ("N3_fallback", "check_fallback_coverage.py", ["--strict"], True),
     ("N4_general", "check_general_not_fixed.py", ["--strict"], True),
