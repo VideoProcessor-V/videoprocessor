@@ -193,6 +193,11 @@ namespace TextureRestore
 		// the sum of their strengths (the mean graded strength = SceneSoftStrengthSum() / SceneSoftResets()).
 		unsigned long long SceneSoftResets() const { return sceneSoftResets; }
 		double SceneSoftStrengthSum() const { return sceneSoftStrengthSum; }
+		// cut_soft_reset, no silent fallbacks (M3): the scene groups read lately were all provisional, so the switch cannot act
+		// (VpDetailRestore::SoftResetWatch; the status line says "soft reset: on (inactive: provisional verdicts only)"), and the
+		// frames the rule would have fired on had their verdict been confirmed.
+		bool SceneSoftResetInactive() const { return softWatch.Inactive(); }
+		unsigned long long SceneSoftWaiting() const { return softWatch.waiting; }
 		// The source frame the references last advanced on (0 = none or a restart pending): a
 		// caller may apply this frame's decision to another picture of it (a de-judder extra)
 		// as a repeat, without advancing.
@@ -205,6 +210,7 @@ namespace TextureRestore
 		unsigned long long failures = 0, frames = 0, sceneMissing = 0, scenePartials = 0, sceneFadeRestarts = 0;
 		unsigned long long sceneSoftResets = 0;
 		double sceneSoftStrengthSum = 0.0;
+		VpDetailRestore::SoftResetWatch softWatch;
 		bool sceneUnavailable = false;
 		const char* sceneWhy = nullptr;
 		float lastHistoryKeep = 1.0f;

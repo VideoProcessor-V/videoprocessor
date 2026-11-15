@@ -1334,6 +1334,7 @@ for (int q = 0; q < 4; q++) {
 
 	void Module::Forget()
 	{
+		softWatch.Forget();   // cut_soft_reset M3: a stage that starts over judges confirmation afresh
 		if (!impl) return;
 		impl->decided = false;
 		impl->behind = 0;
@@ -1435,6 +1436,7 @@ for (int q = 0; q < 4; q++) {
 					++sceneSoftResets;
 					sceneSoftStrengthSum += scene.strength;
 				}
+				softWatch.Note(scene);   // M3: provisional groups only = the switch is inert, shown on the status line
 				lastHistoryKeep = scene.historyKeep;
 			}
 			if (!MeasureAndReduce(dispatch, luma, params, c, m.stats[next], m.weight,

@@ -510,8 +510,9 @@ namespace Vpv
 					"(a high bar), detail pulse and texture restore shrink their history instead of carrying the old scene's detail; "
 					"below the bar nothing happens, because mid-scene firing would be worse than the vectors' own quick recovery. "
 					"A confirmed cut still starts over and a fade still shrinks the history, whatever this says. Off: no soft "
-					"reset (shown as \"soft reset: off\" on the detail pulse / texture restore status lines). The bar is provisional "
-					"until the D8 truth run.\n\n") : QString();
+					"reset (shown as \"soft reset: off\" on the detail pulse / texture restore status lines). It acts only on "
+					"confirmed verdicts: where they stay provisional (low latency) the lines read \"soft reset: on (inactive: "
+					"provisional verdicts only)\". The bar is provisional until the D8 truth run.\n\n") : QString();
 			combo->setToolTip(what + QStringLiteral("Key %1 (renderer profile). Slot: %2. See docs/settings/VP-settings-reference.md.")
 				.arg(key, slot ? Q(slot->name) : Q(toggle.slot)) +
 				(retiring ? QStringLiteral("\n\n") + RetirementTip(table, *retiring) : QString()));

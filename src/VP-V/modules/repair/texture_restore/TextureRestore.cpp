@@ -570,6 +570,7 @@ if (p.x < sz.x && p.y < sz.y) {
 
 	void Module::Forget()
 	{
+		softWatch.Forget();   // cut_soft_reset M3: a stage that starts over judges confirmation afresh
 		if (impl) impl->forget = true;
 	}
 
@@ -855,6 +856,7 @@ if (p.x < sz.x && p.y < sz.y) {
 					++sceneSoftResets;
 					sceneSoftStrengthSum += scene.strength;
 				}
+				softWatch.Note(scene);   // M3: provisional groups only = the switch is inert, shown on the status line
 				lastHistoryKeep = scene.historyKeep;
 			}
 			const float restartF = restartAll || sceneRestart ? 1.0f : 0.0f;

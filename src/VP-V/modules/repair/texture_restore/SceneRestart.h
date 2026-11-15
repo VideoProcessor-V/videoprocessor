@@ -97,6 +97,11 @@ namespace VpDetailRestore
 		float historyKeep = 0.0f;
 		bool fadePartial = false;        // a fade with its keep: no restart, the history reduced by historyKeep
 		bool fadeWithoutKeep = false;    // a fade group without the v3 keep (fadeKeep < 0): FULL restart instead, shown (rule 5)
+		// cut_soft_reset, no silent fallbacks (review softreset r1 M3): the group was read but its verdict is PROVISIONAL (frame
+		// seq + 1 not yet seen: low latency, a thin lane), so no soft reset can fire on it; softWaiting = softReset on and the rule
+		// would have fired had the verdict been confirmed (counted, never acted on).
+		bool provisional = false;
+		bool softWaiting = false;
 	};
 
 	// U7 v2 (U7-accuracy): `cut` is the scene group's DELIVERED cut (once per confirmed cut; normally one frame late, later only when the
@@ -126,7 +131,40 @@ namespace VpDetailRestore
 		if (a.softPartial)
 			a.historyKeep = VpUnit::CutFadeJudge::SoftResetKeep(soft);
 		a.strength = a.restart ? 1.0f : soft;
+		a.provisional = found && !scene.confirmed;
+		a.softWaiting = softReset && found && !scene.confirmed && !a.restart && !a.fadePartial &&
+			VpUnit::CutFadeJudge::SoftResetStrength(true, scene.cutPossible, scene.cut || scene.cutHere, scene.flash, scene.fade,
+				scene.cutStrength) > 0.0f;
 		return a;
+	}
+
+	// cut_soft_reset, no silent fallbacks (review softreset r1 M3; owner rule "every automatic downgrade visible"): the soft reset
+	// fires only on CONFIRMED verdicts and, unlike the cut, is never delivered late. Where the scene groups a consumer reads stay
+	// provisional (low latency, a lane too thin for frame seq + 1's record at render), the switch is on but cannot act: the status
+	// line says so. kSoftResetInactiveGroups consecutive provisional groups (no confirmed one among them) enter that state; the first
+	// confirmed group leaves it. A lone provisional group in an ordinary lane does not flip the status line (logged on change).
+	constexpr int kSoftResetInactiveGroups = 12;
+
+	struct SoftResetWatch
+	{
+		int provisionalRun = 0;            // consecutive readable provisional groups (0 after a confirmed one), capped at the bar
+		unsigned long long waiting = 0;    // frames the rule would have fired on had their verdict been confirmed
+		void Note(const SceneRestartAnswer& a)
+		{
+			if (!a.fromRecord)
+				return;   // no group: counted as missing by the consumer; says nothing about confirmation
+			provisionalRun = a.provisional ? (provisionalRun < kSoftResetInactiveGroups ? provisionalRun + 1 : provisionalRun) : 0;
+			waiting += a.softWaiting ? 1u : 0u;
+		}
+		bool Inactive() const { return provisionalRun >= kSoftResetInactiveGroups; }
+		void Forget() { provisionalRun = 0; }
+	};
+
+	// The soft-reset part of the detail pulse / texture restore status lines (Ctrl+I processing list): "" when on and able to act,
+	// ", soft reset: off" when switched off, ", soft reset: on (inactive: provisional verdicts only)" when on but inert (M3).
+	inline const char* SoftResetStatusText(bool softReset, bool inactive)
+	{
+		return !softReset ? ", soft reset: off" : inactive ? ", soft reset: on (inactive: provisional verdicts only)" : "";
 	}
 
 	// Why a fade restarted although fades are partial resets (shown in the scene judge's fallback line; never silent).
