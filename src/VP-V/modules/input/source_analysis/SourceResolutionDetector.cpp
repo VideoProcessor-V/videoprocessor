@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "SourceResolutionDetector.h"
+#include <VP-V/core/OnePole.h>
 
 #include <algorithm>
 #include <cmath>
@@ -1201,7 +1202,7 @@ namespace SourceResolution
 		}
 		else
 		{
-			const double a = s.cutMotionSeconds > 0.0 ? 1.0 - std::exp(-(std::max)(0.0, dt) / s.cutMotionSeconds) : 1.0;
+			const double a = OnePole::AlphaFor((std::max)(0.0, dt), s.cutMotionSeconds, OnePole::DtRule::AsGiven);
 			cutJudge.motion += a * (decorrelation - cutJudge.motion);
 		}
 		KeepPattern(frame, seconds, sequence);
@@ -1559,7 +1560,7 @@ namespace SourceResolution
 				last = pattern;
 				return true;
 			}
-			const double a = s.cutMotionSeconds > 0.0 ? 1.0 - std::exp(-per / s.cutMotionSeconds) : 1.0;
+			const double a = OnePole::AlphaFor(per, s.cutMotionSeconds, OnePole::DtRule::AsGiven);
 			motion += a * (decorrelation - motion);
 			last = pattern;
 			return false;

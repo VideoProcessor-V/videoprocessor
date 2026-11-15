@@ -275,11 +275,7 @@ namespace AdaptiveDownscale
 		if (!(cropHeight > 0.0f) || !(frameSeconds > 0.0f)) return 0.0f;
 		return std::sqrt(vx * vx + vy * vy) / cropHeight / frameSeconds;
 	}
-	// The one-pole's coefficient per source frame (1 = no smoothing).
-	inline float MotionAlpha(float frameSeconds, float smoothMs)
-	{
-		return smoothMs > 0.0f ? 1.0f - std::exp(-frameSeconds * 1000.0f / smoothMs) : 1.0f;
-	}
+	// The one-pole's coefficient per source frame is OnePole::AlphaForMs(frameSeconds * 1000.0f, smoothMs, AsGiven) (1 = no smoothing).
 	// One source frame of the map for one block: reset (first map, a cut, a resize) takes the target.
 	inline float MotionStep(float previousAlongVector, float target, float alpha, bool reset)
 	{

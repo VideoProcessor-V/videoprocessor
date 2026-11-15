@@ -7,6 +7,7 @@
 #include <libplacebo/shaders/custom.h>
 #include <libplacebo/shaders/sampling.h>
 
+#include <VP-V/core/OnePole.h>
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
@@ -926,8 +927,7 @@ float rs_slope(float y)
 			const bool writeStats = native ? statsSlot >= 0 : advance > 0.5f && readback && !readbackPending;
 			const float writeStatsF = writeStats ? 1.0f : 0.0f;
 			const float total = static_cast<float>(w) * static_cast<float>(h);
-			const float alpha = settings.grainSmoothMs > 0.0f ?
-				1.0f - std::exp(-frameSeconds * 1000.0f / settings.grainSmoothMs) : 1.0f;
+			const float alpha = OnePole::AlphaForMs(frameSeconds * 1000.0f, settings.grainSmoothMs, OnePole::DtRule::AsGiven);
 			pl_buffer_var outVar{};
 			outVar.var = pl_var_vec4("ad_out");
 			outVar.layout = pl_std430_layout(0, &outVar.var);
@@ -1035,8 +1035,7 @@ float rs_slope(float y)
 		const bool first = resized || mapSequence == 0;
 		const int next = 1 - mapIndex;
 		const float firstF = first ? 1.0f : 0.0f;
-		const float alpha = settings.grainMapSmoothMs > 0.0f ?
-			1.0f - std::exp(-frameSeconds * 1000.0f / settings.grainMapSmoothMs) : 1.0f;
+		const float alpha = OnePole::AlphaForMs(frameSeconds * 1000.0f, settings.grainMapSmoothMs, OnePole::DtRule::AsGiven);
 		const pl_shader_desc d[6] = { Sampled("field", gf.field, false), Sampled("grain_error", gf.error, false),
 			Sampled("frame_trust", gf.frameTrust, false), Sampled("state", state, false),
 			Sampled("map_in", map[mapIndex], false), Storage("map_out", map[next]) };
@@ -1105,7 +1104,7 @@ float rs_slope(float y)
 		const bool first = resized || motionSequence == 0 || !motionReady || sequence != motionSequence + 1;
 		const int next = 1 - motionIndex;
 		const float firstF = first ? 1.0f : 0.0f;
-		const float alpha = MotionAlpha(frameSeconds, settings.motionSmoothMs);
+		const float alpha = OnePole::AlphaForMs(frameSeconds * 1000.0f, settings.motionSmoothMs, OnePole::DtRule::AsGiven);
 		const float cropH = motion.sourceCrop.y1 - motion.sourceCrop.y0;
 		const pl_shader_desc d[5] = { Sampled("field", motion.field, false), Sampled("frame_trust", motion.frameTrust, false),
 			Sampled("state", state, false), Sampled("map_in", motionMap[motionIndex], false), Storage("map_out", motionMap[next]) };

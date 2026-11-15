@@ -23,6 +23,7 @@
 // Also here (kept from the former latch file): MakeFieldEvidence + the kernel equivalence-class pick, ConfFromLlr, KernelConfidence.
 //
 // Header-only, standard library only, C++14, no clock (time = source time in EvalContext), deterministic.
+#include <VP-V/core/OnePole.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceGeometryProduct.h>
 
 #include <VP-V/modules/input/source_analysis/identity/SourceIdVote.h>
@@ -44,7 +45,7 @@ namespace SourceIdentity
 		struct ReadingSettings
 		{
 			double kernelConfMin = 0.5;            // a kernel is VERIFIED (re-base may use it) at or above this confidence
-			double kernelMarginScale = 0.05;       // family margin (ln units) -> confidence 1 - exp(-margin / scale); only without per-kernel T
+			double kernelMarginScale = 0.05;       // family margin (ln units) -> confidence OnePole::AlphaFor(margin, scale); only without per-kernel T
 			double kernelClassMargin = 0.05;       // kernels whose T is within this (ln units) of the best form ONE equivalence class; placeholder until CAL
 			double kernelDipMax = -0.15;           // the best kernel must dip at least this much (= ProbeSettings::seenThreshold) to count as verified
 			double phaseTolerance = 0.25;          // measured phase moves smaller than this are no change (= VerifierSettings::phaseStep)
@@ -182,7 +183,7 @@ namespace SourceIdentity
 		{
 			if (!(familyMargin > 0.0) || !(scale > 0.0))
 				return 0.0;
-			return 1.0 - std::exp(-familyMargin / scale);
+			return OnePole::AlphaFor(familyMargin, scale, OnePole::DtRule::AsGiven);
 		}
 
 		// Builds the reading's evidence from ChainEvidence's output for ONE axis after Submit. `verify` (optional) gives the sub-sample
