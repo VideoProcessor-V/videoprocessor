@@ -132,8 +132,8 @@ namespace DecodeOwnerIdentityTestsNs
 		Assert::IsTrue(a.luma.p1 == b.luma.p1 && a.luma.p50 == b.luma.p50 && a.luma.p99 == b.luma.p99, (name + L" percentiles").c_str());
 		Assert::IsTrue(a.range.btb == b.range.btb && a.range.wtw == b.range.wtw, (name + L" btb/wtw").c_str());
 		Assert::IsTrue(a.range.nearBlack == b.range.nearBlack && a.range.clipped == b.range.clipped, (name + L" near-black/clipped").c_str());
-		Assert::IsTrue(a.grain.rms == b.grain.rms && a.grain.confidence == b.grain.confidence, (name + L" grain").c_str());
-		Assert::IsTrue(a.grain.blocks == b.grain.blocks && a.grain.flatBlocks == b.grain.flatBlocks, (name + L" grain blocks").c_str());
+		// No grain comparison: jb2 (c359c921d, unit-5 grain split) retired the Reducer's CPU grain estimate, so Measured has
+		// no grain field; grain is the grain split unit's product, not this reducer's.
 	}
 
 	TEST_CLASS(DecodeOwnerIdentityTests)
