@@ -365,6 +365,36 @@ namespace AdmissionOverloadTest
 			Assert::AreEqual(std::string("ahead compute 0 (by TD; games: backward-only)"), r.aheadComputeLine);
 		}
 
+		// Gate GWC C1 (lead17 gate-S3A-schk, ba21dfe76): a PARTIAL S-C stop at the admission level. One frame queued ahead, so S-B cannot
+		// shrink P3 below its declared 1 frame; the first S-C step (DelayBudget 4 -> 3 queued) takes the ahead cap to 0 and fits any grant in
+		// [150, 249] bytes (P3 100 + P5 50 at the render frame only), so the ladder stops there: queue 3, one frame given up, 0 frames ahead.
+		TEST_METHOD(PartialShorterQueueStopsAtTheFirstStepThatFits)
+		{
+			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
+			f.aheadBytes[kP3AnalysisField] = 100;
+			f.aheadBytes[kP5MonitorTiles] = 50;
+			f.aheadFeed.activeConsumers = { AheadDemand{ kAheadCeiling, "TD" } };
+			f.aheadFeed.queueAheadFrames = 1;
+			f.delayBudget.budgetMs = 250.0;
+			f.delayBudget.sourceFps = 60.0;
+			f.delayBudget.refreshHz = 60.0;
+			f.delayBudgetFed = true;
+			const int designQueue = DelayBudget::Compute(f.delayBudget).queueFrames;
+			Assert::AreEqual(DelayBudget::kDesignDepth, designQueue);
+			f.queueFrames = designQueue;
+			for (uint64_t grant : { uint64_t(150), uint64_t(200), uint64_t(249) })
+			{
+				f.vramGrantBytes = grant;
+				const Result r = Admit(f);
+				Assert::IsFalse(r.aheadOverGrant, L"the first S-C step fits: not at the floor");
+				Assert::AreEqual(3, r.queueFrames, L"one S-C step: 4 -> 3 queued, then the ladder stops");
+				Assert::AreEqual(1, r.queueFramesDropped);
+				Assert::AreEqual(0, r.aheadFrames, L"the shorter queue leaves no frame ahead");
+				Assert::IsTrue(r.queueFrames > DelayBudget::kMinimumDepth, L"stopped above the floor (partial)");
+				Assert::IsTrue(r.aheadLine.find("queue shortened") != std::string::npos);
+			}
+		}
+
 		// C4 s3a MUST 1 (102b LCORE-QW-AHEAD-FEED-CALLER): the admission reads THE window's feed (QueueWindow.h PlanAheadFeed, built by
 		// PlanAheadFeedOf). A window aheadComputeLimit that agrees with the law is no drift; one that differs (window 3, need 6, queue 15:
 		// the law gives 6) is DRIFT, flagged and named with both values on the Ctrl+Alt+D line (rule 5), and the plan follows the law.
