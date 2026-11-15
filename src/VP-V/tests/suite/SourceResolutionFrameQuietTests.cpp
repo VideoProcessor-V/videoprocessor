@@ -390,6 +390,51 @@ namespace VideoProcessorTest
 			Assert::AreEqual<unsigned long long>(0, frameQuiet.MissedEnds());
 		}
 
+		// C1 landing gate MUST-1: the REAL Original call pattern. PlanEntrance runs on every Original frame, but the R12
+		// AfterPresent seam (the only End) is skipped there, so an Arm on an Original frame is never ended: from frame 2 on
+		// each one counted a missed End and engaged "native readback" with a reason that changed every frame (a fallbacks
+		// log line and a VpEvent per frame). Bill's pathway has no such entry. Pinned two ways: the planner's frame-quiet
+		// prologue keeps the Arm and the decision out of Original and releases the entry there; and over 50 Original
+		// frames (Begin with frame_bound off, the release, never an End) nothing is missed, flushed or re-engaged.
+		TEST_METHOD(OriginalFramesNeverArmSoNoMissedEndAndNoReadbackStatusChurn)
+		{
+			const std::string planner = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntrancePlanner.inl");
+			Assert::IsFalse(planner.empty(), L"the planner source");
+			const size_t from = planner.find("FrameQuiet::Deferred::ForThisThread();");
+			const size_t to = planner.find("// Stage 12 step A: the re-base factor for this frame");
+			Assert::IsTrue(from != std::string::npos && to != std::string::npos && from < to, L"the frame-quiet prologue");
+			const std::string prologue = planner.substr(from, to - from);
+			const size_t original = prologue.find("if (pipelineSlots.OriginalPathway())");
+			const size_t vpBranch = original == std::string::npos ? std::string::npos : prologue.find("\n\telse", original);
+			const size_t arm = prologue.find("frameQuiet.Arm(");
+			const size_t take = prologue.find("frameQuiet.TakeDecision()");
+			Assert::IsTrue(original != std::string::npos && vpBranch != std::string::npos && arm != std::string::npos &&
+				take != std::string::npos && vpBranch < arm && vpBranch < take,
+				L"Arm and TakeDecision run only outside the Original pathway (the seam that ends an armed frame is skipped there)");
+			const std::string originalBranch = prologue.substr(original, vpBranch - original);
+			Assert::IsTrue(originalBranch.find("SyncFallback(FallbackCatalog::NativeReadback(0, 0))") != std::string::npos,
+				L"Original releases the native readback entry (Bill has none)");
+			Assert::AreEqual<size_t>(0, CountOf(originalBranch, "TakeDecision"), L"no frame-quiet decision is taken in Original");
+
+			FallbackStatus::Registry fallbacks;
+			Assert::IsTrue(FallbackCatalog::Sync(fallbacks, FallbackCatalog::NativeReadback(0, 1)), L"a VP frame before the switch left it engaged");
+			FrameQuiet::Deferred quiet;
+			Monitor m;
+			const pl_frame f = NoPlanes();
+			size_t headingChanges = 0;
+			for (uint64_t s = 1; s <= 50; ++s)
+			{
+				quiet.Begin(m, nullptr, f, s, 24.0, false, static_cast<double>(s) / 24.0);   // frame_bound off in Original: inline, nothing pending
+				if (FallbackCatalog::Sync(fallbacks, FallbackCatalog::NativeReadback(0, 0))) ++headingChanges;   // the Original release
+			}
+			Assert::AreEqual<size_t>(1, headingChanges, L"released once at the switch, then no event and no log line per frame");
+			Assert::IsFalse(fallbacks.Engaged("native readback"));
+			Assert::AreEqual<unsigned long long>(0, quiet.MissedEnds(), L"no missed End is counted in Original");
+			Assert::AreEqual<unsigned long long>(0, quiet.Flushes());
+			Assert::IsTrue(quiet.TakeDecision().id.empty(), L"no End ran, so no decision exists");
+			Assert::AreEqual(-1.0, quiet.Seconds(), L"wall-clock monitor mode, as before C1");
+		}
+
 		// Negative look-ahead: the shot after the cut is native (ratio 1.0), so the cut does NOT engage; it is cancelled and counted.
 		TEST_METHOD(ALookAheadThatSeesANativeNextShotCancelsTheEngageAtTheCut)
 		{
