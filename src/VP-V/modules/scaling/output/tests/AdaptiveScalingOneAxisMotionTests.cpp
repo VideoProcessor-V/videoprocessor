@@ -10,6 +10,7 @@
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
+#include <VP-V/core/OnePole.h>
 
 #include <cmath>
 #include <cstring>
@@ -133,13 +134,13 @@ namespace VideoProcessorTest
 		TEST_METHOD(MotionStepIsAOnePoleThatResets)
 		{
 			using namespace AdaptiveDownscale;
-			const float alpha = MotionAlpha(1.0f / 24.0f, 250.0f);
+			const float alpha = OnePole::AlphaForMs((1.0f / 24.0f) * 1000.0f, 250.0f, OnePole::DtRule::AsGiven);
 			Assert::AreEqual(1.0f - std::exp(-1000.0f / 24.0f / 250.0f), alpha, 1e-6f);
-			Assert::AreEqual(1.0f, MotionAlpha(1.0f / 24.0f, 0.0f), L"0 ms: no smoothing");
+			Assert::AreEqual(1.0f, OnePole::AlphaForMs((1.0f / 24.0f) * 1000.0f, 0.0f, OnePole::DtRule::AsGiven), L"0 ms: no smoothing");
 			// Same time constant at 24 and 60 fps: after 1 s both are within 1 % of each other.
 			float v24 = 1.0f, v60 = 1.0f;
-			for (int i = 0; i < 24; ++i) v24 = MotionStep(v24, 0.0f, MotionAlpha(1.0f / 24.0f, 250.0f), false);
-			for (int i = 0; i < 60; ++i) v60 = MotionStep(v60, 0.0f, MotionAlpha(1.0f / 60.0f, 250.0f), false);
+			for (int i = 0; i < 24; ++i) v24 = MotionStep(v24, 0.0f, OnePole::AlphaForMs((1.0f / 24.0f) * 1000.0f, 250.0f, OnePole::DtRule::AsGiven), false);
+			for (int i = 0; i < 60; ++i) v60 = MotionStep(v60, 0.0f, OnePole::AlphaForMs((1.0f / 60.0f) * 1000.0f, 250.0f, OnePole::DtRule::AsGiven), false);
 			Assert::AreEqual(v24, v60, 0.01f);
 			Assert::AreEqual(0.25f, MotionStep(1.0f, 0.25f, alpha, true), L"a cut takes the target");
 			const float one = MotionStep(1.0f, 0.0f, alpha, false);
@@ -422,7 +423,7 @@ namespace VideoProcessorTest
 			frame(field1, 1);   // a repeat of the same source frame: the map stands
 			frame(field2, 2);
 			t = read();
-			const float alpha = AdaptiveDownscale::MotionAlpha(1.0f / 24.0f, 250.0f);
+			const float alpha = OnePole::AlphaForMs((1.0f / 24.0f) * 1000.0f, 250.0f, OnePole::DtRule::AsGiven);
 			for (int y = 0; y < bh; ++y)
 				for (int x = 0; x < bw; ++x)
 				{

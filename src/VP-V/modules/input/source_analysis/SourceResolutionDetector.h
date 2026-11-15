@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include <VP-V/core/OnePole.h>
+
 #include "regions/CodingEvidence.h"
 
 // Stage 12 step B (docs/VP-stage12-build-plan.md; owner 2026-10-15): the
@@ -525,7 +527,7 @@ namespace SourceResolution
 					motion = (std::max)(motion, s.cutMotionAfterCut);
 				else
 				{
-					const double a = s.cutMotionSeconds > 0.0 ? 1.0 - std::exp(-(std::max)(0.0, seconds) / s.cutMotionSeconds) : 1.0;
+					const double a = OnePole::AlphaFor((std::max)(0.0, seconds), s.cutMotionSeconds, OnePole::DtRule::AsGiven);
 					motion += a * (decorrelation - motion);
 				}
 				return cut;

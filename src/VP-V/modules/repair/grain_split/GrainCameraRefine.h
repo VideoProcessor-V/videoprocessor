@@ -7,7 +7,7 @@
 // K5-0 inventory (2026-11-07, branch r1cam/units, base fork/integ/batch1):
 //   * Today's smoothing site is the grain-map pass of the adaptive scaling stage: scaling/output/AdaptiveDownscale.cpp, MAP_BODY
 //     (the 8-3 per-block map, one dispatch per SOURCE frame, 16x16 blocks, ping-pong textures map_in / map_out; host side
-//     AdaptiveDownscale::Update "grain map"; alpha = 1 - exp(-frameSeconds*1000/grainMapSmoothMs)). Per block:
+//     AdaptiveDownscale::Update "grain map"; alpha = OnePole::AlphaForMs(frameSeconds * 1000, grainMapSmoothMs, AsGiven)). Per block:
 //       trusted  (frame trust ok and field.z > 0.5): previous value fetched NEAREST at floor((c - f.xy)/16), clamped to the grid,
 //                  out = reset || !prev.valid ? target : mix(prev, target, alpha), valid = 1;
 //       untrusted: previous value fetched at the SAME block (c), out = reset ? 1 : prev, valid = 0 (no new measurement).
