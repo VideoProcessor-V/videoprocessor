@@ -40,6 +40,8 @@ public:
 
 	struct Stats
 	{
+		// hits / misses count BOTH the pair reads (Get) and the frame-keyed reads (GetTo, the P2 CPU form); the form's own served /
+		// declined counts are the engine's (VectorEngine::P2CpuFormServed / Declined).
 		unsigned long long stored = 0, hits = 0, misses = 0, stale = 0, evicted = 0, cleared = 0;
 		uint64_t newestTo = 0;   // the furthest frame with a stored pair
 	};

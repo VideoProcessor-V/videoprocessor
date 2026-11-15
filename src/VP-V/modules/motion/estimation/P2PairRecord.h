@@ -4,7 +4,7 @@
 // motion/estimation: the CPU FORM of the P2 vector pair (kP2VectorPair, AcquireForm::Cpu) = the pair's identity and the whole-frame
 // motion the producer worked out for it (the engine global, forward [0] and backward [1], D1 format, plus the second layer).
 // The flow arrays are NOT part of the form: they stay behind FlowOf / P2View (one copy, rule 1).
-// ONE codec (EncodeP2PairRecord / DecodeP2PairRecord): the owner fill (P2CpuForm.cpp) writes it, every reader decodes it
+// ONE codec (EncodeP2PairRecord / DecodeP2PairRecord): the owner fill (P2CpuForm.h) writes it, every reader decodes it
 // (CameraRecordPool.h CRD1 pattern: magic, exact size, refusal on anything else).
 // Header-only; C++14; no dependencies on the producer or the skeleton.
 #pragma once

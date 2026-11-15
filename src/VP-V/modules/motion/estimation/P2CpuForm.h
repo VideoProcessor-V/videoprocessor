@@ -5,9 +5,10 @@
 // motion/estimation: the OWNER FILL of kP2VectorPair for AcquireForm::Cpu (B-prereq (a); lead18/coreplan-B-prereq-P2global-pyramid.md
 // section (a)): the pair that ENDS at the asked frame, as a P2PairRecord (identity + generation + the producer's global / second,
 // D1 format). The skeleton lane's slot is header-only (a CPU read of an Ofa product is Absent there), so this unit serves the form.
-// It reads the engine's P2 slot through IVectorEngine::P2Pairs() (the engine of the asking renderer, found through the hub's
-// kVectorEngineQueryId directory); it never reads the producer and never starts the producer or the matcher (doc 91 D).
-// Any thread (the slot has its own mutex; the fill is not renderThreadOnly: the camera / pyramid workers read it, ruling 2026-11-14 04:26).
+// It reads the engine's P2 slot through IVectorEngine::P2RecordEndingAt() (the engine of the asking renderer, found through the hub's
+// kVectorEngineQueryId directory; the engine applies the generation check and owns the Flow layout, so this header never sees
+// MotionAhead::Flow); it never reads the producer and never starts the producer or the matcher (doc 91 D).
+// Any thread (the slot has its own mutex; the fill is not renderThreadOnly: the C8-10 / camera workers read it, ruling 2026-11-14 04:26).
 // Declines are VISIBLE: the reason text rides the Acquire's OwnerDeclined cause and the engine's debug line counts them
 // (NoteP2CpuFormRead); a consumer's absent pair feeds the existing no-pair-ahead path (NoPairTracker -> FallbackCatalog::Motion).
 // Header-only, C++14 (the EdgeMapFill.h pattern; HubBootstrap registers the module with one call).
@@ -29,26 +30,6 @@ namespace VpMotion
 {
 	static constexpr const char* kP2CpuFormUnit = "motion/estimation";   // the catalog's kP2VectorPair owner
 
-	// Builds the record of the pair ending at `to` from a view. False (with `why`) = declined: no bound view or no pair for `to`
-	// in the current generation. Pure over the view (the unit tests call it without a skeleton).
-	inline bool ReadP2PairRecord(const P2View& view, uint64_t to, P2PairRecord& out, std::string& why)
-	{
-		if (!view.Bound())
-		{
-			why = "p2 cpu form: no pair store";
-			return false;
-		}
-		uint64_t from = 0, generation = 0;
-		const MotionAhead::FlowPtr flow = view.FindTo(to, from, generation);
-		if (!flow)
-		{
-			why = "p2 cpu form: no pair ahead for frame " + std::to_string(to) + " (generation " + std::to_string(view.Generation()) + ")";
-			return false;
-		}
-		out = MakeP2PairRecord(from, to, generation, flow->global, flow->second, flow->globalSet, flow->globalGeneral);
-		return true;
-	}
-
 	// `engineOf` answers the engine of a host (null = absent); the default goes through the hub's directory.
 	using P2EngineOf = std::function<IVectorEngine*(const void* host)>;
 
@@ -64,7 +45,7 @@ namespace VpMotion
 		VpSkeleton::OwnerFill f;
 		f.variantAxes = 0;
 		f.renderThreadOnly = false;   // the slot's own mutex: any thread may read (pinned by a test)
-		f.keepFrames = 1;             // the camera / pyramid reader lags the render frame by a frame
+		f.keepFrames = 1;             // a lag-1 reader (C8-10 / camera) trails the render frame by a frame
 		f.fill = [engineOf](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
 			IVectorEngine* engine = engineOf ? engineOf(req.host) : P2DefaultEngineOf(req.host);
 			if (engine == nullptr)
@@ -74,7 +55,7 @@ namespace VpMotion
 			}
 			P2PairRecord rec;
 			std::string why;
-			if (!ReadP2PairRecord(engine->P2Pairs(), req.seq, rec, why))
+			if (!engine->P2RecordEndingAt(req.seq, rec, why))
 			{
 				engine->NoteP2CpuFormRead(false);
 				out.declineReason = why;

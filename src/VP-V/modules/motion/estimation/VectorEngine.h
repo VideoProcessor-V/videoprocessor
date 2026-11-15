@@ -184,6 +184,8 @@ namespace VpMotion
 		VectorDemand::MotionEngineWork Work() const override;
 		// B-prereq (a): the P2 slot's read-only view and the P2 CPU form's read counts (served / declined; atomics, any thread).
 		VpMotion::P2View P2Pairs() const override { return P2(); }
+		// The P2 CPU form's reader (VectorEngine.cpp: FindTo + the C2a-F 2 generation check + MakeP2PairRecord).
+		bool P2RecordEndingAt(uint64_t to, VpMotion::P2PairRecord& out, std::string& why) const override;
 		void NoteP2CpuFormRead(bool served) const override
 		{
 			(served ? p2CpuFormServed_ : p2CpuFormDeclined_).fetch_add(1, std::memory_order_relaxed);

@@ -58,6 +58,34 @@ namespace VpMotion
 		}
 	}
 
+	// B-prereq (a): the P2 CPU form's reader. Any thread: the slot has its own mutex and the validity counts are atomics.
+	bool VectorEngine::P2RecordEndingAt(uint64_t to, P2PairRecord& out, std::string& why) const
+	{
+		const P2View view = P2();
+		if (!view.Bound())
+		{
+			why = "p2 cpu form: no pair store";
+			return false;
+		}
+		uint64_t from = 0, pairGeneration = 0;
+		const MotionAhead::FlowPtr flow = view.FindTo(to, from, pairGeneration);
+		if (!flow)
+		{
+			why = "p2 cpu form: no pair ahead for frame " + std::to_string(to) + " (generation " + std::to_string(view.Generation()) + ")";
+			return false;
+		}
+		// C2a-F 2: the slot keeps a pair computed before a resync / seek / queue reset / format change until the producer's
+		// asynchronous re-key; never serve its global.
+		if (!motionValidity.PairGenerationCurrent(pairGeneration))
+		{
+			why = "p2 cpu form: pair from generation " + std::to_string(pairGeneration) + " (current "
+				+ std::to_string(motionValidity.StreamGeneration()) + ")";
+			return false;
+		}
+		out = MakeP2PairRecord(from, to, pairGeneration, flow->global, flow->second, flow->globalSet, flow->globalGeneral);
+		return true;
+	}
+
 	VectorDemand::MotionEngineWork VectorEngine::Work() const
 	{
 		VectorDemand::MotionEngineWork w = motionEngineWork;
@@ -526,6 +554,9 @@ namespace VpMotion
 		class EngineDirectory : public IVectorEngineDirectory
 		{
 		public:
+			// The raw pointer outlives the lock by CONTRACT: the engine's destructor removes it (Remove) and a caller that uses the
+			// pointer off the render thread (the P2 CPU form's owner fill) relies on its workers / the skeleton memo's off-thread
+			// fills having stopped before the renderer destroys its engine. A caller that cannot rely on that uses WithEngine.
 			IVectorEngine* EngineFor(const void* host) override
 			{
 				std::lock_guard<std::mutex> lock(mutex_);
