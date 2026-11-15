@@ -36,7 +36,8 @@ class RepoSeeds(unittest.TestCase):
         cls.sites = {h["site"] for h in cls.hits}
 
     def test_every_d_and_x_site_detected(self):
-        for sid in ["D1", "D2", "D3", "D4", "D5", "D6", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]:
+        # D4 detects 0 at the tip after its retarget (gate-15a-D4: K2 FitEntryOf); proven by Synthetic.test_d4_* instead.
+        for sid in ["D1", "D2", "D3", "D5", "D6", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]:
             self.assertIn(sid, self.sites, sid + " not detected at the tip")
 
     def test_x1_is_file_level_inside_the_owner_folder(self):
@@ -69,6 +70,22 @@ class Synthetic(unittest.TestCase):
         })
         hs = [h for h in N1.scan(root) if h["site"] == "D2"]
         self.assertEqual([h["file"] for h in hs], [M + "repair/x/Use.h"])
+
+    def test_d4_second_field_read_in_the_label_fill_hits(self):
+        # gate-15a-D4 fixtures: a field read other than the fit entry's own field in the label fill / producer files hits;
+        # the one pool read FitEntryOf does not; FlowOf outside the four files (CameraExtension.cpp) is not D4.
+        fill = M + "motion/estimation/global_model/link/CameraLabelFill.cpp"
+        prod = M + "motion/estimation/global_model/link/CameraLabelProducer.h"
+        for text in ("auto f = m_link.FieldOf(seq);",
+                     "VerifiedField v = vectorEngine.FieldOf(seq, f);",
+                     "const auto* fld = dejudder->Field();"):
+            root = make_tree({fill: text})
+            self.assertEqual([h["file"] for h in N1.scan(root) if h["site"] == "D4"], [fill], text)
+        root = make_tree({prod: "auto p = engine.Acquire(VpSkeleton::kP3AnalysisField, form);"})
+        self.assertEqual([h["file"] for h in N1.scan(root) if h["site"] == "D4"], [prod])
+        root = make_tree({fill: "const bool ok = m_link.FitEntryOf(seq, rec, field);",
+                          M + "motion/estimation/global_model/link/CameraExtension.cpp": "auto fl = engine.FlowOf(a, b);"})
+        self.assertFalse([h for h in N1.scan(root) if h["site"].startswith("D4")])
 
     def test_comments_do_not_hit(self):
         root = make_tree({M + "repair/temporal_detail/TemporalDetailModel.h": "// m_prevGin\n/* double guard */\nint ok;"})
