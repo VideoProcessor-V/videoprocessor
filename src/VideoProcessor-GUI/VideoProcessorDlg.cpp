@@ -2576,11 +2576,6 @@ void CVideoProcessorDlg::StartGlobalShortcutObserver()
 			m_interfaceMode == ApplicationInterface::Mode::Modern ? 1 : 0,
 			m_hideUI ? 1 : 0, m_shortcutsForegroundOnly ? 1 : 0,
 			m_shortcutsGlobalHotkeys ? 1 : 0, m_shortcutsGlobalActions.size());
-		if (!m_shortcutObserverFallback.empty())
-		{
-			m_shortcutObserverFallback.clear();   // nothing wanted any more: the entry no longer applies
-			PublishActiveProfileStatus();
-		}
 		return;
 	}
 
@@ -2590,18 +2585,6 @@ void CVideoProcessorDlg::StartGlobalShortcutObserver()
 		"Background shortcut observer %s (%zu global bindings, config_only=%d)",
 		observerStarted ? "started" : "unavailable",
 		observedAccelerators.size(), sameProcessOnly ? 1 : 0);
-	// No silent fallback (rule 5): a failed start is a visible entry in the Fallbacks heading
-	// (Ctrl+I, Config status, Ctrl+Alt+D bundle) and a one-time notice, not log-only.
-	const std::string note = observerStarted ? std::string() :
-		"the background keyboard hook could not start; keys work only while VP has focus";
-	if (note != m_shortcutObserverFallback)
-	{
-		m_shortcutObserverFallback = note;
-		if (!note.empty() && !m_fallbackNotices.Take(
-			FallbackStatus::AppendEntry(std::string(), { "global shortcuts", note })).empty())
-			ShowFallbackNotice("global shortcuts", note);
-		PublishActiveProfileStatus();
-	}
 }
 
 void CVideoProcessorDlg::StopGlobalShortcutObserver()
@@ -5385,18 +5368,6 @@ bool CVideoProcessorDlg::PublishStagedConfiguration(bool replaceAccelerators)
 		}
 	}
 
-	// R14-45 MUST-3: shortcuts retained, but the staged global-action set still applies live (a switch of
-	// pipeline_original_pathway removes or restores the default global hook at once).
-	{
-		std::set<std::string> nextGlobalActions;
-		if (GlobalActionsOnPublish(replaceAccelerators, m_shortcutsGlobalActions,
-			m_stagedRuntimeSettings.shortcutsGlobalActions, nextGlobalActions))
-		{
-			m_shortcutsGlobalActions = std::move(nextGlobalActions);
-			StartGlobalShortcutObserver();
-			DebugLog::Log("Shortcut global actions applied live: %zu action(s)", m_shortcutsGlobalActions.size());
-		}
-	}
 	PublishStagedRuntimeSettings();
 	m_configurationSnapshot =
 		CaptureConfigurationSnapshot(*m_stagedConfiguration);
@@ -14371,8 +14342,7 @@ void CVideoProcessorDlg::PublishActiveProfileStatus()
         outputAvailable && outputStatus.calibrationLutAttached,
         outputAvailable ? outputStatus.calibrationConfigIdentity : 0,
         outputAvailable ? outputStatus.calibrationConfigPath : std::string(), snapshot->configuration.get(),
-        m_shortcutObserverFallback.empty() ? m_lastFallbacksHeading :
-		FallbackStatus::AppendEntry(m_lastFallbacksHeading, { "global shortcuts", m_shortcutObserverFallback }));
+        m_lastFallbacksHeading);
 }
 
 // r6 fix 7 (vp-no-silent-fallbacks): the renderer's "Fallbacks engaged" heading, polled with the
