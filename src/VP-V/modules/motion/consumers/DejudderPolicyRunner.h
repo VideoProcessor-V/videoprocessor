@@ -85,6 +85,9 @@ namespace VpMotion
 		{
 			if (activeSettings.vectorDemand && vectorDemand.mode != VectorDemand::Mode::Off)
 				host.PublishDejudderStatus(false);   // the vector engine's line stays on the stats
+			else if (!activeSettings.vectorDemand && (!activeSettings.engineOffForced.empty() ||
+				(!activeSettings.pipelineOriginalPathway && !VectorDemand::OffLine(vectorDemand).empty())))
+				host.PublishDejudderStatus(false);   // batch B: "motion engine off (setting)" / "de-judder off: motion engine off" (a status line, never an entry)
 			else
 				host.ClearStatusIfPublished();   // if (dejudderStatusTick != 0) { tick = 0; clear the line under its lock }
 			return DecisionOutcome::SettledOff;
@@ -95,7 +98,6 @@ namespace VpMotion
 		in.strengthEven = activeSettings.dejudderStrengthEven;
 		in.evenIncludes1001 = activeSettings.dejudderEvenIncludes1001;
 		in.occlusionMask = activeSettings.occlusionMask;
-		in.occlusionMaskServed = (vectorDemand.refused & (1u << static_cast<int>(VectorDemand::Consumer::OcclusionMask))) == 0;   // W2-C1: reuse-only
 		in.grainMap = adaptiveGrainMapWanted;
 		in.lowLatency = host.LowLatency();
 		in.sourceHz = sourceHz;

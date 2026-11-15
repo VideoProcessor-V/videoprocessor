@@ -37,6 +37,30 @@ ROW("off-status-cleared", { s.dejudderStatusTick=1; },
 	"",
 	0ull, 0ull,
 	"" })
+// Batch B (WAIVER-B1-ENGINE-02, new rows; recorded from the copy's mirrored settled-off branch): engine OFF by the setting is a
+// status line (published, never cleared) when the resolver forced a sub-selection off or a want is named; the Original pathway
+// with nothing forced clears it exactly as before (off-status-cleared).
+ROW("off-engine-off-forced-line", { s.activeSettings.vectorDemand=false; s.activeSettings.engineOffForced="de-judder off: motion engine off"; },
+	{ R::Off, false, 0.0f, 0, false, I::Off, 0, false, false, 1.0f, 0, false, O::SettledOff, false, false, false, false, 2, false,
+	"",
+	"",
+	"",
+	0ull, 0ull,
+	"" })
+ROW("off-engine-off-wants-line", { s.activeSettings.vectorDemand=false; s.vectorDemand.wants=1u<<static_cast<int>(VectorDemand::Consumer::GrainMap); },
+	{ R::Off, false, 0.0f, 0, false, I::Off, 0, false, false, 1.0f, 0, false, O::SettledOff, false, false, false, false, 2, false,
+	"",
+	"",
+	"",
+	0ull, 0ull,
+	"" })
+ROW("off-engine-off-original-cleared", { s.activeSettings.vectorDemand=false; s.activeSettings.pipelineOriginalPathway=true; s.vectorDemand.wants=1u<<static_cast<int>(VectorDemand::Consumer::GrainMap); s.dejudderStatusTick=1; },
+	{ R::Off, false, 0.0f, 0, false, I::Off, 0, false, false, 1.0f, 0, false, O::SettledOff, false, false, false, false, 0, true,
+	"",
+	"",
+	"",
+	0ull, 0ull,
+	"" })
 ROW("s05-23976-on-60", { DJ24 },
 	{ R::Active, true, 0.5f, 0, false, I::Off, 2.5025025025025025, false, false, 1.0f, 2.5025025025025025, false, O::PairCheck, false, false, false, false, 2, false,
 	"off",

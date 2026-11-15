@@ -56,6 +56,13 @@ namespace VpMotion
 			e.motionEngineStatus = VectorDemand::DeriveEngineStatus(f);
 			if (e.motionCameraGated)
 				e.motionEngineStatus.affected |= 1u << static_cast<int>(VectorDemand::Consumer::CameraFit);
+			if (e.motionCameraGated && e.motionEngineStatus.reasons == 0)
+			{
+				// A gated camera fit alone must not leave a blank reason (an empty "motion engine off: ;" entry): name the gate's cause.
+				const auto r = e.motionOpticalFlow ? VectorDemand::MotionEngineReason::NvofUnavailable : VectorDemand::MotionEngineReason::OpticalFlowOff;
+				e.motionEngineStatus.reasons = 1u << static_cast<int>(r);
+				e.motionEngineStatus.reason = r;
+			}
 		}
 	}
 
@@ -283,28 +290,28 @@ namespace VpMotion
 	{
 		const int cameraFit = static_cast<int>(VectorDemand::Consumer::CameraFit);
 		const ULONGLONG now = GetTickCount64();
-		// W2-C1: the camera fit (a starter) reads only the optical-flow seed (SeedFieldOf): with optical flow off, or while the producer's
-		// failed start waits for its back-off, the matcher alone would give it nothing, so it does not start the engine (its own
+		// W2-C1: the camera fit reads only the optical-flow seed (SeedFieldOf): with optical flow off, or while the producer's
+		// failed start waits for its back-off, the matcher alone would give it nothing, so its want is not registered (its own
 		// "camera fit needs the optical-flow seed" status shows; the "motion engine" entry names it).
 		const bool cameraWanted = cameraFitWanted_.load(std::memory_order_acquire) || input.wants[cameraFit];
 		motionOpticalFlow = facts.opticalFlow;   // this frame's setting (PlanProducer refreshes it too)
 		motionCameraGated = cameraWanted && (!motionOpticalFlow ||
 			(motionProducerStartRetry.Recovering() && now < motionProducerStartRetry.RetryAtMs()));
+		// Batch B (plan-motion-engine-switch.md (b)): optical-flow pairs are EXPECTED when the optical-flow producer is configured and
+		// has not failed to start (previous-frame facts: the planner's motion_ahead_frames, -1 = not planned yet = expected). With none
+		// expected the field consumers use the matcher fallback and the statistics consumers are named unserved (VectorDemand::Decide).
+		VectorDemand::Input decided = input;
+		decided.pairsExpected = facts.opticalFlow && !motionProducerStartFailed && !motionEngineFacts.producerRecovering &&
+			motionAheadSetting != 0;
+		decided.pairsDeliberatelyOff = !facts.opticalFlow || motionAheadSetting == 0;   // a setting, not a fault (M4)
 		if ((cameraWanted && !input.wants[cameraFit]) || (motionCameraGated && input.wants[cameraFit]))
 		{
-			VectorDemand::Input merged = input;   // the camera fit asked for the field: one more consumer of the same decision
-			merged.wants[cameraFit] = !motionCameraGated;
-			vectorDemand = VectorDemand::Decide(merged);
+			decided.wants[cameraFit] = !motionCameraGated;   // the camera fit asked for the field: one more consumer of the same decision
 		}
-		else
-			vectorDemand = VectorDemand::Decide(input);
-		// W2-C1: refused starts are counted, and the engine state is derived from this decision.
-		for (int i = 0; i < VectorDemand::kConsumerCount; ++i)
-			if ((vectorDemand.refused & (1u << i)) != 0)
-				++motionEngineWork.refusedStarts[i];
+		vectorDemand = VectorDemand::DecideForHost(decided);   // smooth motion and competitive low latency: Off with the reason (plan (b)/(d4))
+		// W2-C1: the engine state is derived from this decision (batch B: no starter gate, no refused starts).
 		motionEngineFacts.vectorDemand = facts.vectorDemandSetting;
 		motionEngineFacts.decision = vectorDemand;
-		motionEngineFacts.starterEngaged = input.starterEngaged || (vectorDemand.served & VectorDemand::StarterMask()) != 0;
 		motionEngineFacts.frame = ++motionEngineFrame;
 		RefreshEngineStatus(*this, now);
 		if (!facts.vectorDemandSetting)

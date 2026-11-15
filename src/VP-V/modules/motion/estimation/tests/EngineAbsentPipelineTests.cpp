@@ -3,17 +3,22 @@
 //
 // W2-C1 (C1-4, B9 "one motion-engine state"): the engine-absent pipeline. Pure CPU, 600 frames per scenario, every want ON. Each
 // frame runs the renderer's per-frame order with the product code: VectorEngine::PlanProducer (null device) -> the VectorDemand
-// input (RunDejudderPolicy's starter rule, DejudderPolicyRunner.inl) -> VectorEngine::UpdateVectorEngine (VectorDemand::Decide,
+// input (VectorDemandInput: the synthesis wants follow the settings) -> VectorEngine::UpdateVectorEngine (VectorDemand::DecideForHost,
 // the engine state, the fallback entries) -> RunDejudderDecision (DejudderDecisionRunnerHost.h) -> the pair check and estimate.
 // The matcher's own counter sites live in renderer files (EngineKeeper.inl warm-up, VectorEngineEstimate.inl create / estimate,
 // DejudderPolicyRunner.inl analysis estimate); they are modelled here at the decision level with the same conditions: a warm-up
 // creates the matcher, a PairCheck outcome creates it if absent and estimates once, an analysis PairCheck counts once more. The
-// producer's counters (producerStarts / producerPairs) and refusedStarts are the engine's own (Work()).
+// producer's counters (producerStarts / producerPairs) are the engine's own (Work()).
 //
 // Scenarios: (1) optical_flow off; (2) NVIDIA optical flow unavailable (VectorEngine::FailProducerStartsForTesting, rule 25);
-// (3) libplacebo smooth motion; (4) competitive low latency (no queue ahead); (5) nothing absent. Every scenario runs with all
-// starters off (no motion work at all, every reuse-only want refused and named); (1) and (2) also with the de-judder on (Degraded:
-// the matcher runs, the producer never starts), (3) and (4) with it on too (the de-judder cannot act there: still nothing runs).
+// (3) libplacebo smooth motion; (4) competitive low latency (no queue ahead); (5) nothing absent.
+// Batch B (lead18 plan-motion-engine-switch.md, WAIVER-B1-ENGINE-01): the engine is ONE switch (vector_demand), there is no starter.
+// - Engine OFF (the setting) x every scenario, with the de-judder, hiccup smoothing and the mask on in the user's settings: the Q3
+//   resolver (SlotSwitchSettings::ApplyEngineOff, as PostLoad runs it) forces them off visibly; no motion work at all; every want
+//   is named in the "motion engine off (setting)" line; no Fallbacks entry (Q2).
+// - Engine ON: (5) serves every want (no matcher while pairs are expected); (1) and (2) run the named matcher fallback (Degraded);
+//   (1)-(4) with the de-judder on as before. The CPU rig has no device, so the producer never starts: a served engine is Degraded
+//   for want of a running producer (the producer's first frames: no entry), On on a GPU.
 // Built without the test project's precompiled header (as VectorEngineTests): keep windows.h from defining min/max.
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -23,6 +28,7 @@
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/motion/consumers/tests/DejudderDecisionRunnerHost.h>
+#include <VP-V/core/SlotSwitchSettings.h>
 
 #include <atomic>
 #include <map>
@@ -67,11 +73,24 @@ namespace EngineAbsentPipelineTest
 			MatcherModel matcher;
 			DejudderPolicy::Reason dejudderReason = DejudderPolicy::Reason::Off;
 			std::map<std::string, FallbackCatalog::Decision> entries;
+			DejudderDecisionLegacy::Settings settings;   // the settings after the Q3 resolver
 		};
 
-		bool IsReuseOnly(C c) { return !VectorDemand::IsStarter(c); }
+		// Batch B: the rig's always-on wants: every non-synthesis consumer the renderer's input can register (the camera fit is declared
+		// by the camera link, SetCameraFitWanted, and gated on its own: VectorEngineTests). The synthesis wants follow the settings.
+		bool AlwaysWanted(C c) { return VectorDemand::DomainOf(c) != VectorDemand::Domain::Synthesis && c != C::CameraFit; }
+		unsigned AlwaysWantedBits()
+		{
+			unsigned bits = 0;
+			for (int i = 0; i < VectorDemand::kConsumerCount; ++i)
+				if (AlwaysWanted(VectorDemand::ConsumerAt(i)))
+					bits |= 1u << i;
+			return bits;
+		}
+		unsigned StatisticsBits() { return (1u << static_cast<int>(C::SourceMonitorPan)) | (1u << static_cast<int>(C::MotionIntent)); }
 
-		Result RunScenario(Scenario sc, bool startersOn, int frames = 600)
+		// engineOn = the vector_demand setting; dejudderOn = the user's de-judder (strength 1), hiccup smoothing and occlusion mask.
+		Result RunScenario(Scenario sc, bool engineOn, bool dejudderOn, int frames = 600)
 		{
 			VectorEngine engine;
 			FakeHost host;
@@ -85,11 +104,13 @@ namespace EngineAbsentPipelineTest
 
 			DejudderDecisionRunner::Rig rig;
 			DejudderDecisionLegacy::Facts f;
-			f.activeSettings.dejudderStrength = startersOn ? 1.0 : 0.0;
+			f.activeSettings.dejudderStrength = dejudderOn ? 1.0 : 0.0;
 			f.activeSettings.interpolation = InterpolationPolicy::Mode::Off;
-			f.activeSettings.interpolationFillGaps = startersOn;   // hiccup repair (the rig's default is on)
-			f.activeSettings.occlusionMask = true;                 // a reuse-only want
-			f.activeSettings.vectorDemand = true;
+			f.activeSettings.interpolationFillGaps = dejudderOn;   // hiccup repair (the rig's default is on)
+			f.activeSettings.occlusionMask = dejudderOn;           // a de-judder extra (synthesis want)
+			f.activeSettings.vectorDemand = engineOn;
+			// Q3: PostLoad's resolver (VpvRendererSettings.cpp), so OFF forces the sub-selections off with its line.
+			f.activeSettings.engineOffForced = ::SlotSwitchSettings::DescribeEngineOff(::SlotSwitchSettings::ApplyEngineOff(f.activeSettings));
 			f.adaptiveGrainMapWanted = true;
 			f.sourceHz = 23.976;
 			f.measuredDisplayHz = 60.0;
@@ -119,25 +140,24 @@ namespace EngineAbsentPipelineTest
 				pin.gpu = nullptr;
 				engine.PlanProducer(pin);
 
-				// 2. The demand input (VectorDemandInput, LVR:5847): every want ON; the starter wants follow the settings.
+				// 2. The demand input (VectorDemandInput, LVR:5735): enabled = vector_demand; every non-synthesis want ON; the
+				// synthesis wants follow the (resolved) settings. Batch B: no starter rule.
 				VectorDemand::Input in;
-				in.enabled = true;
+				in.enabled = f.activeSettings.vectorDemand;
 				in.slotsRun = true;
 				in.lowLatency = lowLatency;
 				in.queueAheadCapacity = lowLatency ? 0 : 4;
 				in.smoothMotion = smoothMotion;
 				for (int i = 0; i < VectorDemand::kConsumerCount; ++i)
-					in.wants[i] = IsReuseOnly(VectorDemand::ConsumerAt(i));
-				in.wants[static_cast<int>(C::DejudderExtras)] = f.activeSettings.dejudderStrength > 0.0;
+					in.wants[i] = AlwaysWanted(VectorDemand::ConsumerAt(i));
+				in.wants[static_cast<int>(C::DejudderExtras)] = f.activeSettings.dejudderStrength > 0.0 || f.activeSettings.dejudderStrengthEven > 0.0;
+				in.wants[static_cast<int>(C::Interpolator)] = f.activeSettings.interpolation != InterpolationPolicy::Mode::Off;
 				in.wants[static_cast<int>(C::HiccupRepair)] = f.activeSettings.interpolationFillGaps;
-				// RunDejudderPolicy's starter rule (DejudderPolicyRunner.inl): the standing de-judder, the interpolator, a gap fill.
-				const bool dejudderStanding = m.held && f.activeSettings.dejudderStrength > 0.0 &&
-					DejudderPolicy::CanEngageOrAcquiring(reason, false);
-				in.starterEngaged = dejudderStanding || rig.st.interpolating || f.vpGapFillStandalone;
+				in.wants[static_cast<int>(C::OcclusionMask)] = f.activeSettings.occlusionMask;
 
 				// 3. UpdateVectorEngine (the decision, the state, the entries).
 				VectorEngine::UpdateFacts facts;
-				facts.vectorDemandSetting = true;
+				facts.vectorDemandSetting = f.activeSettings.vectorDemand;
 				facts.sigmaDeltaRanLast = true;
 				facts.opticalFlow = opticalFlow;
 				engine.NoteVramRelease(rig.motionEngineIdle.Pressured() && !m.held);
@@ -182,6 +202,7 @@ namespace EngineAbsentPipelineTest
 			r.matcher = m;
 			r.dejudderReason = rig.st.dejudderReason;
 			r.entries = host.last;
+			r.settings = f.activeSettings;
 			return r;
 		}
 
@@ -196,8 +217,19 @@ namespace EngineAbsentPipelineTest
 
 		bool Contains(const std::string& text, const std::string& part) { return text.find(part) != std::string::npos; }
 
-		// Starters off: nothing runs, every reuse-only want is refused (or unserved for its own reason) and named.
-		void AssertNoMotionWork(const Result& r, Scenario sc)
+		void AssertNoMatcherWork(const Result& r)
+		{
+			Assert::AreEqual(0ull, static_cast<unsigned long long>(r.matcher.creates + r.matcher.estimates + r.matcher.warmUps +
+				r.matcher.analysisEstimates), L"no matcher work");
+			Assert::AreEqual(0ull, static_cast<unsigned long long>(r.work.matcherCreates + r.work.matcherEstimates + r.work.warmUps +
+				r.work.analysisEstimates), L"no renderer counter moved");
+		}
+
+		// Batch B (was AssertNoMotionWork for "starters off"): engine OFF by the setting. Nothing runs (zero matcher and producer work),
+		// the de-judder / hiccup smoothing / mask the user had on are forced off with the Q3 line, every want is named in the OFF line,
+		// and nothing is a Fallbacks entry (Q2). The reasons: VectorDemandOff, plus LowLatency in scenario 4 (competitive without
+		// vectors; it leads, enum order).
+		void AssertEngineOffRunsNothing(const Result& r, Scenario sc)
 		{
 			Assert::AreEqual(0ull, static_cast<unsigned long long>(r.matcher.creates), L"matcherCreates");
 			Assert::AreEqual(0ull, static_cast<unsigned long long>(r.matcher.estimates), L"matcherEstimates");
@@ -207,53 +239,144 @@ namespace EngineAbsentPipelineTest
 				r.work.analysisEstimates), L"no renderer counter moved");
 			Assert::AreEqual(0ull, static_cast<unsigned long long>(r.work.producerStarts), L"producerStarts");
 			Assert::AreEqual(0ull, static_cast<unsigned long long>(r.work.producerPairs), L"producerPairs");
+			Assert::IsFalse(r.decision.producer || r.decision.estimate, L"the decision starts nothing");
+			Assert::AreEqual(0u, r.decision.served, L"nothing served");
 			Assert::IsTrue(r.state.state == S::Off, L"state Off");
-			Assert::IsTrue(r.state.reason == R::NoStarter, L"leading reason NoStarter");
-			Assert::IsTrue(r.state.Has(R::LowLatency) == (sc == Scenario::CompetitiveLowLatency), L"the low-latency bit only in scenario 4");
-			const std::string engineText = Entry(r, "motion engine").reason;
-			Assert::IsTrue(Entry(r, "motion engine").engaged, L"the motion engine entry is engaged");
-			Assert::IsTrue(Contains(engineText, "motion engine off: "), W(engineText).c_str());
-			Assert::IsTrue(Contains(engineText, "take their non-motion path"), W(engineText).c_str());
-			const FallbackCatalog::Decision& demand = Entry(r, "vector_engine");
-			Assert::IsTrue(demand.engaged, L"the vector_engine entry is engaged");
+			Assert::IsTrue(r.state.Has(R::VectorDemandOff), L"VectorDemandOff");
+			Assert::IsFalse(r.state.Has(R::NoStarter), L"NoStarter is never derived");
+			const bool competitive = sc == Scenario::CompetitiveLowLatency;
+			Assert::IsTrue(r.state.Has(R::LowLatency) == competitive, L"the low-latency bit only in scenario 4");
+			Assert::IsTrue(r.state.reason == (competitive ? R::LowLatency : R::VectorDemandOff), L"leading reason");
+			Assert::AreEqual(0u, r.state.affected, L"nothing affected");
+			Assert::IsFalse(FallbackCatalog::MotionEngine(r.state).engaged, L"Q2: the motion engine entry is released");
+			for (const auto& e : r.entries)
+				Assert::IsFalse(e.second.engaged, W("Q2: no Fallbacks entry: " + e.first + ": " + e.second.reason).c_str());
+			const std::string off = VectorDemand::OffLine(r.decision);
+			Assert::IsTrue(off.compare(0, 29, "motion engine off (setting): ") == 0, W(off).c_str());
+			Assert::IsTrue(Contains(off, " use their non-motion path"), W(off).c_str());
 			for (int i = 0; i < VectorDemand::kConsumerCount; ++i)
 			{
 				const C c = VectorDemand::ConsumerAt(i);
-				if (!IsReuseOnly(c))
+				if (!AlwaysWanted(c))
 					continue;
 				const std::string name = VectorDemand::Name(c);
-				Assert::IsTrue(Contains(engineText, name), W("motion engine entry names " + name + ": " + engineText).c_str());
-				Assert::IsTrue(Contains(demand.reason, name), W("vector_engine entry names " + name + ": " + demand.reason).c_str());
-				if (sc == Scenario::SmoothMotion && c == C::SigmaDelta)
-				{
-					// Smooth motion owns the output: unserved for that reason, not a refused start.
-					Assert::AreEqual(0ull, static_cast<unsigned long long>(r.work.refusedStarts[i]), L"output dither: not refused");
-					Assert::IsTrue(Contains(demand.reason, "output dither without vectors (libplacebo smooth motion owns output)"),
-						W(demand.reason).c_str());
-					continue;
-				}
-				Assert::AreEqual(600ull, static_cast<unsigned long long>(r.work.refusedStarts[i]), W("refusedStarts " + name).c_str());
+				Assert::IsTrue(Contains(off, name), W("the OFF line names " + name + ": " + off).c_str());
 			}
-			Assert::IsTrue(Contains(demand.reason, "without vectors (no starter runs the motion engine)"), W(demand.reason).c_str());
+			Assert::AreEqual(AlwaysWantedBits(), r.decision.wants, L"exactly the always-on wants: the forced synthesis wants are gone");
+			// Q3: the resolver forced the de-judder (and its mask) and hiccup smoothing off, visibly.
+			Assert::AreEqual(std::string("de-judder off: motion engine off; hiccup smoothing off: motion engine off"), r.settings.engineOffForced);
+			Assert::IsTrue(r.settings.dejudderStrength == 0.0 && !r.settings.interpolationFillGaps && !r.settings.occlusionMask &&
+				r.settings.interpolation == InterpolationPolicy::Mode::Off, L"the sub-selections are off");
+			Assert::IsTrue(r.dejudderReason == DejudderPolicy::Reason::Off, L"the de-judder is off");
 		}
 	}
 
 	TEST_CLASS(EngineAbsentPipelineTests)
 	{
 	public:
-		TEST_METHOD(StartersOffOpticalFlowOffRunsNothing) { AssertNoMotionWork(RunScenario(Scenario::OpticalFlowOff, false), Scenario::OpticalFlowOff); }
-		TEST_METHOD(StartersOffNvofUnavailableRunsNothing) { AssertNoMotionWork(RunScenario(Scenario::NvofUnavailable, false), Scenario::NvofUnavailable); }
-		TEST_METHOD(StartersOffSmoothMotionRunsNothing) { AssertNoMotionWork(RunScenario(Scenario::SmoothMotion, false), Scenario::SmoothMotion); }
-		TEST_METHOD(StartersOffCompetitiveLowLatencyRunsNothing)
+		// Batch B: the five StartersOff* become EngineOff x scenario (the user's de-judder, hiccup smoothing and mask ON in the file).
+		TEST_METHOD(EngineOffOpticalFlowOffRunsNothing) { AssertEngineOffRunsNothing(RunScenario(Scenario::OpticalFlowOff, false, true), Scenario::OpticalFlowOff); }
+		TEST_METHOD(EngineOffNvofUnavailableRunsNothing) { AssertEngineOffRunsNothing(RunScenario(Scenario::NvofUnavailable, false, true), Scenario::NvofUnavailable); }
+		TEST_METHOD(EngineOffSmoothMotionRunsNothing) { AssertEngineOffRunsNothing(RunScenario(Scenario::SmoothMotion, false, true), Scenario::SmoothMotion); }
+		TEST_METHOD(EngineOffCompetitiveLowLatencyRunsNothing)
 		{
-			AssertNoMotionWork(RunScenario(Scenario::CompetitiveLowLatency, false), Scenario::CompetitiveLowLatency);
+			AssertEngineOffRunsNothing(RunScenario(Scenario::CompetitiveLowLatency, false, true), Scenario::CompetitiveLowLatency);
 		}
-		TEST_METHOD(StartersOffNothingAbsentRunsNothing) { AssertNoMotionWork(RunScenario(Scenario::NothingAbsent, false), Scenario::NothingAbsent); }
+		TEST_METHOD(EngineOffNothingAbsentRunsNothing) { AssertEngineOffRunsNothing(RunScenario(Scenario::NothingAbsent, false, true), Scenario::NothingAbsent); }
+
+		// Q3 (owner 2026-11-15): the same source and settings, engine ON: the de-judder acts; engine OFF: it is off, with its line.
+		TEST_METHOD(EngineOffTurnsTheDejudderOffWithItsLine)
+		{
+			const Result on = RunScenario(Scenario::NothingAbsent, true, true);
+			Assert::IsTrue(on.dejudderReason == DejudderPolicy::Reason::Active, L"engine on: the de-judder acts (23.976 on 60 Hz)");
+			Assert::AreEqual(std::string(), on.settings.engineOffForced, L"engine on: nothing forced");
+			const Result off = RunScenario(Scenario::NothingAbsent, false, true);
+			Assert::IsTrue(off.dejudderReason == DejudderPolicy::Reason::Off, L"engine off: de-judder off");
+			Assert::IsTrue(Contains(off.settings.engineOffForced, "de-judder off: motion engine off"), W(off.settings.engineOffForced).c_str());
+			Assert::IsTrue(Contains(off.settings.engineOffForced, "hiccup smoothing off: motion engine off"), W(off.settings.engineOffForced).c_str());
+			const Result plain = RunScenario(Scenario::NothingAbsent, false, false);
+			Assert::AreEqual(std::string(), plain.settings.engineOffForced, L"nothing was on: nothing forced, no Q3 line");
+			Assert::IsTrue(Contains(VectorDemand::OffLine(plain.decision), "motion engine off (setting): "), L"the OFF line still names the wants");
+		}
+
+		// Engine ON, nothing absent, the de-judder off: every want is served with no starter; while pairs are expected the matcher costs
+		// nothing (no render-time estimate). The CPU rig has no device: the producer is wanted but cannot start (Degraded, no entry).
+		TEST_METHOD(EngineOnNothingAbsentServesEveryWant)
+		{
+			const Result r = RunScenario(Scenario::NothingAbsent, true, false);
+			Assert::AreEqual(AlwaysWantedBits(), r.decision.served, L"every want served");
+			Assert::AreEqual(0u, r.decision.unserved, L"nothing unserved");
+			Assert::IsTrue(r.decision.mode == VectorDemand::Mode::Forward && r.decision.producer, L"forward, the producer wanted");
+			Assert::IsFalse(r.decision.estimate || r.decision.matcherFallback, L"pairs expected: no matcher estimate");
+			AssertNoMatcherWork(r);
+			Assert::IsTrue(r.state.state == S::Degraded && r.state.reasons == 0u, L"rig: the producer cannot start (no device): first frames");
+			Assert::IsFalse(r.state.Has(R::NoStarter), L"NoStarter is never derived");
+			Assert::IsFalse(Entry(r, "motion engine").engaged, L"no hard absence: released");
+			Assert::IsFalse(Entry(r, "vector_engine").engaged, L"every want served: released");
+			Assert::AreEqual(std::string("Vector engine: on (forward) for output dither, grain map, deband hold, detail pulse, entrance segment, "
+				"source monitor, intent, texture restore, residual stabilise, temporal detail"), VectorDemand::StatusLine(r.decision));
+		}
+
+		TEST_METHOD(EngineOnNothingAbsentWithTheDejudderRunsItsEstimate)
+		{
+			const Result r = RunScenario(Scenario::NothingAbsent, true, true);
+			Assert::IsTrue(r.dejudderReason == DejudderPolicy::Reason::Active, L"the de-judder acts");
+			Assert::AreEqual(AlwaysWantedBits(), r.decision.served, L"every want served");
+			Assert::IsTrue(r.decision.producer && !r.decision.matcherFallback, L"the producer wanted, no fallback");
+			Assert::AreEqual(1ull, static_cast<unsigned long long>(r.matcher.creates), L"one matcher, kept (no churn)");
+			Assert::IsTrue(r.matcher.estimates >= 590, L"the de-judder estimates (nearly) every frame");
+			Assert::AreEqual(0ull, static_cast<unsigned long long>(r.matcher.analysisEstimates), L"the de-judder's own estimate, not an analysis one");
+			Assert::IsFalse(Entry(r, "vector_engine").engaged, L"every want served: released");
+		}
+
+		// Engine ON, optical flow off, the de-judder off: the named matcher fallback serves the field consumers (Degraded, deliberate:
+		// no motion engine entry); the statistics consumers have no matcher form: named in Ctrl+I, not an entry (deliberate, review M4).
+		TEST_METHOD(EngineOnOpticalFlowOffUsesTheNamedMatcherFallback)
+		{
+			const Result r = RunScenario(Scenario::OpticalFlowOff, true, false);
+			Assert::IsTrue(r.state.state == S::Degraded && r.state.reason == R::OpticalFlowOff, L"Degraded, optical flow off");
+			Assert::IsTrue(r.decision.matcherFallback && r.decision.estimate, L"the matcher fallback");
+			Assert::IsTrue(r.decision.pairsDeliberatelyOff, L"a setting");
+			Assert::AreEqual(AlwaysWantedBits() & ~StatisticsBits(), r.decision.served, L"the field consumers served by the matcher");
+			Assert::AreEqual(StatisticsBits(), r.decision.noPairs, L"the statistics consumers: no pairs");
+			Assert::AreEqual(StatisticsBits(), r.decision.unserved);
+			Assert::AreEqual(std::string("Vector engine: on (forward; matcher fallback, no optical-flow pairs) for output dither, grain map, "
+				"deband hold, detail pulse, entrance segment, texture restore, residual stabilise, temporal detail; source monitor, intent "
+				"without vectors (no optical-flow pairs (optical flow off or not running))"), VectorDemand::StatusLine(r.decision),
+				L"the fallback and the unserved consumers are named (Ctrl+I)");
+			Assert::AreEqual(0ull, static_cast<unsigned long long>(r.work.producerStarts), L"no producer with optical flow off");
+			Assert::AreEqual(1ull, static_cast<unsigned long long>(r.matcher.creates), L"one matcher, kept");
+			Assert::IsTrue(r.matcher.analysisEstimates >= 590, L"the fallback estimates (nearly) every frame");
+			Assert::AreEqual(r.matcher.estimates, r.matcher.analysisEstimates, L"every estimate is the fallback's (the de-judder is off)");
+			Assert::IsFalse(Entry(r, "motion engine").engaged, L"optical flow off is deliberate: released");
+			Assert::IsFalse(Entry(r, "vector_engine").engaged, L"deliberate no-pairs: not an entry (M4)");
+		}
+
+		// Engine ON, NVIDIA optical flow unavailable, the de-judder off: the start fails (a fault): the matcher fallback runs, the motion
+		// engine entry names the block searches, and the statistics consumers without pairs are a vector_engine entry.
+		TEST_METHOD(EngineOnNvofUnavailableUsesTheNamedMatcherFallback)
+		{
+			const Result r = RunScenario(Scenario::NvofUnavailable, true, false);
+			Assert::IsTrue(r.state.state == S::Degraded && r.state.reason == R::NvofUnavailable, L"Degraded, NVOF unavailable");
+			Assert::IsTrue(r.decision.matcherFallback && r.decision.estimate, L"the matcher fallback");
+			Assert::IsFalse(r.decision.pairsDeliberatelyOff, L"a fault, not a setting");
+			Assert::AreEqual(StatisticsBits(), r.decision.noPairs);
+			Assert::AreEqual(0ull, static_cast<unsigned long long>(r.work.producerStarts), L"the start failed");
+			Assert::AreEqual(1ull, static_cast<unsigned long long>(r.matcher.creates), L"one matcher, kept");
+			Assert::IsTrue(r.matcher.analysisEstimates >= 590, L"the fallback estimates from the frame after the failed start");
+			const FallbackCatalog::Decision& e = Entry(r, "motion engine");
+			Assert::IsTrue(e.engaged, L"the motion engine entry is engaged");
+			Assert::IsTrue(Contains(e.reason, "motion engine degraded: NVIDIA optical flow is not available"), W(e.reason).c_str());
+			Assert::IsTrue(Contains(e.reason, "use the block searches without optical-flow pairs"), W(e.reason).c_str());
+			const FallbackCatalog::Decision& v = Entry(r, "vector_engine");
+			Assert::IsTrue(v.engaged, L"the statistics consumers without pairs: visible");
+			Assert::AreEqual(std::string("source monitor, intent without vectors (no optical-flow pairs (optical flow off or not running))"), v.reason);
+		}
 
 		// (1) with the de-judder on: the matcher runs alone (Degraded, deliberate: the entry stays released), the producer never starts.
 		TEST_METHOD(DejudderOnOpticalFlowOffIsDegradedWithoutTheProducer)
 		{
-			const Result r = RunScenario(Scenario::OpticalFlowOff, true);
+			const Result r = RunScenario(Scenario::OpticalFlowOff, true, true);
 			Assert::IsTrue(r.dejudderReason == DejudderPolicy::Reason::Active, L"the de-judder acts (23.976 on 60 Hz)");
 			Assert::IsTrue(r.state.state == S::Degraded, L"Degraded");
 			Assert::IsTrue(r.state.reason == R::OpticalFlowOff, L"leading reason OpticalFlowOff");
@@ -262,14 +385,19 @@ namespace EngineAbsentPipelineTest
 			Assert::AreEqual(1ull, static_cast<unsigned long long>(r.matcher.creates), L"one matcher, kept (no churn)");
 			Assert::IsTrue(r.matcher.estimates >= 590, L"the matcher estimates (nearly) every frame");
 			Assert::IsFalse(Entry(r, "motion engine").engaged, L"optical flow off is deliberate: the entry is released");
-			Assert::IsTrue(r.decision.refused == 0, L"a starter runs: no refused start at the end");
+			// Batch B: was `decision.refused == 0` (the refused field is gone): the field consumers are served by the named matcher
+			// fallback, the statistics consumers named without pairs, and no vector_engine entry (deliberate, M4).
+			Assert::IsTrue(r.decision.matcherFallback, L"the matcher fallback serves the field consumers");
+			Assert::AreEqual(AlwaysWantedBits() & ~StatisticsBits(), r.decision.served, L"every field consumer served");
+			Assert::AreEqual(StatisticsBits(), r.decision.noPairs, L"the statistics consumers named without pairs");
+			Assert::IsFalse(Entry(r, "vector_engine").engaged, L"deliberate no-pairs: not an entry");
 		}
 
 		// (2) with the de-judder on: the producer's start fails (the seam), the matcher runs; the entry names the block searches.
 		// One failed start: the retry back-off is 5 s of real time (GetTickCount64) and the 600 frames run in well under that.
 		TEST_METHOD(DejudderOnNvofUnavailableIsDegradedAndVisible)
 		{
-			const Result r = RunScenario(Scenario::NvofUnavailable, true);
+			const Result r = RunScenario(Scenario::NvofUnavailable, true, true);
 			Assert::IsTrue(r.dejudderReason == DejudderPolicy::Reason::Active, L"the de-judder acts (23.976 on 60 Hz)");
 			Assert::IsTrue(r.state.state == S::Degraded, L"Degraded");
 			Assert::IsTrue(r.state.reason == R::NvofUnavailable, L"leading reason NvofUnavailable");
@@ -280,12 +408,15 @@ namespace EngineAbsentPipelineTest
 			Assert::IsTrue(e.engaged, L"the motion engine entry is engaged");
 			Assert::IsTrue(Contains(e.reason, "motion engine degraded: NVIDIA optical flow is not available"), W(e.reason).c_str());
 			Assert::IsTrue(Contains(e.reason, "use the block searches without optical-flow pairs"), W(e.reason).c_str());
+			// Batch B: the failed start is a fault, so the statistics consumers without pairs are a visible entry too.
+			Assert::IsTrue(Entry(r, "vector_engine").engaged, L"statistics without pairs (a fault): an entry");
+			Assert::IsTrue(r.decision.matcherFallback, L"the matcher fallback serves the field consumers");
 		}
 
 		// (3) and (4) with the de-judder on: it cannot act there (SmoothMotion / LowLatency reasons), so nothing starts the engine.
 		TEST_METHOD(DejudderOnSmoothMotionStillRunsNothing)
 		{
-			const Result r = RunScenario(Scenario::SmoothMotion, true);
+			const Result r = RunScenario(Scenario::SmoothMotion, true, true);
 			Assert::IsTrue(r.dejudderReason == DejudderPolicy::Reason::SmoothMotion, L"the de-judder yields to smooth motion");
 			Assert::AreEqual(0ull, static_cast<unsigned long long>(r.matcher.creates + r.matcher.estimates + r.matcher.warmUps +
 				r.matcher.analysisEstimates), L"no matcher work");
@@ -294,7 +425,7 @@ namespace EngineAbsentPipelineTest
 		}
 		TEST_METHOD(DejudderOnCompetitiveLowLatencyStillRunsNothing)
 		{
-			const Result r = RunScenario(Scenario::CompetitiveLowLatency, true);
+			const Result r = RunScenario(Scenario::CompetitiveLowLatency, true, true);
 			Assert::IsTrue(r.dejudderReason == DejudderPolicy::Reason::LowLatency, L"the de-judder is off in low latency");
 			Assert::AreEqual(0ull, static_cast<unsigned long long>(r.matcher.creates + r.matcher.estimates + r.matcher.warmUps +
 				r.matcher.analysisEstimates), L"no matcher work");

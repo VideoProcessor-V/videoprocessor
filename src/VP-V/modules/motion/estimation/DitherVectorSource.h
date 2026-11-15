@@ -258,7 +258,7 @@ namespace DitherVectors
 		}
 	};
 	// The motion engine is off AS A WHOLE (doc 91 D 2026-11-11 06:15: one control): the vector_demand switch off, or the motion
-	// slots off (pipeline_slots_off). NOT the engine's demand states (no starter, no consumer, interlaced, smooth motion): there
+	// slots off (pipeline_slots_off). NOT the engine's demand states (no consumer, interlaced, smooth motion): there
 	// the output-domain search (step 4, inside the sigma-delta) still measures the motion, so compensation stays on.
 	inline bool EngineFullyOff(bool vectorDemandEnabled, bool motionSlotsRun)
 	{

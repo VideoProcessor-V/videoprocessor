@@ -408,7 +408,7 @@ namespace VpMotion
 			double budgetMs = 0.0, renderMs = 0.0;   // the last budget issued with; the measured render time (EWMA)
 		};
 		OnDemandCounters OnDemandReads() const;
-		// The C1 state gate (C5b opus gate MUST 2): no request work while the engine's one state is Off (vector_demand off, no starter,
+		// The C1 state gate (C5b opus gate MUST 2): no request work while the engine's one state is Off (vector_demand off, no want,
 		// interlaced, smooth motion, VRAM release, ...). Render thread (State() is derived there, with its one-frame lag).
 		bool OnDemandStateOn() const { return motionEngineStatus.state != VectorDemand::MotionEngineState::Off; }
 		// ---- W2-C5b commit 4: the dequeue issues, the estimate fills (OnDemandIssue.h; VectorEngineEstimate.inl) -----------

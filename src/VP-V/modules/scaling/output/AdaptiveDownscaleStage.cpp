@@ -66,6 +66,7 @@ namespace AdaptiveDownscaleStage
 		failuresSeen = module.Failures();
 		requested = upscaleBlend || downscaleOn;
 		ssimMissing = false;
+		vectorUser = false;   // set below by the hybrid forms that really register on this frame
 		// SSimSuperRes takes the grain term through alpha only when the blend runs (its
 		// vp_grain_strength; 0 otherwise).
 		// One-axis: SuperRes takes the (zero) grain term through alpha whatever the setting, so it
@@ -137,6 +138,7 @@ namespace AdaptiveDownscaleStage
 					"faithful only (one-axis upscale; CNN doubler skipped)" : "both axes (CNN + faithful blend)");
 			}
 			module.SetUpscale(up);
+			vectorUser = frame.vectorsRun;   // batch B Q1: the hybrid upscaler reads the motion (residual hold, grain map, motion-adapted blend)
 			module.ClearGrainField();
 			const MotionSource m = host.motion();
 			SetResidualMotion(module, frame, m);
@@ -193,6 +195,7 @@ namespace AdaptiveDownscaleStage
 				// 8-3: the matcher's field for this source frame, when it ran for it (A->B, estimated
 				// at upload); the map follows NLS's own map (bundled NLS / NLS+ only; otherwise the
 				// scalar).
+				vectorUser = frame.vectorsRun;   // batch B Q1: the hybrid downscaler reads the motion (residual hold, grain map, motion-adapted blend)
 				module.ClearGrainField();
 				const MotionSource m = host.motion();
 				SetResidualMotion(module, frame, m);

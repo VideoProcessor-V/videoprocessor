@@ -305,6 +305,31 @@ namespace FallbackCatalogTest
 				CustomHooksNotLoaded({ "a", "b", "c" }).reason);
 		}
 
+		// Batch B review M2: a gated camera fit alone (nothing else wants vectors) is Off with the gate's cause named; Off with an affected
+		// consumer is an entry even for the deliberate OpticalFlowOff reason (only Degraded-by-setting is released). Never a blank reason.
+		TEST_METHOD(MotionEngineOffForAGatedCameraFitNamesTheCause)
+		{
+			using VectorDemand::MotionEngineReason;
+			using VectorDemand::MotionEngineState;
+			VectorDemand::MotionEngineStatus st;
+			st.state = MotionEngineState::Off;
+			st.affected = 1u << static_cast<int>(VectorDemand::Consumer::CameraFit);
+			st.reason = MotionEngineReason::OpticalFlowOff;
+			st.reasons = 1u << static_cast<int>(MotionEngineReason::OpticalFlowOff);
+			const Decision of = MotionEngine(st);
+			Assert::IsTrue(of.engaged, L"off with the camera fit affected: engaged");
+			Assert::AreEqual(std::string("motion engine off: optical flow is off (the matcher runs alone); camera fit take their non-motion path"),
+				of.reason);
+			st.reason = MotionEngineReason::NvofUnavailable;
+			st.reasons = 1u << static_cast<int>(MotionEngineReason::NvofUnavailable);
+			Assert::AreEqual(std::string("motion engine off: NVIDIA optical flow is not available; camera fit take their non-motion path"),
+				MotionEngine(st).reason, L"the start back-off gate names NVOF");
+			st.state = MotionEngineState::Degraded;
+			st.reason = MotionEngineReason::OpticalFlowOff;
+			st.reasons = 1u << static_cast<int>(MotionEngineReason::OpticalFlowOff);
+			Assert::IsFalse(MotionEngine(st).engaged, L"degraded by the setting alone: released (unchanged)");
+		}
+
 		// Bug hunt 35 #1: the vector producer restarts with a back-off instead of stopping for the
 		// session, and the stop is visible to every vector consumer while it waits.
 		TEST_METHOD(VectorProducerRestartBackOffAndEntry)

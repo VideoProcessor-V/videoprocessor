@@ -166,8 +166,7 @@ namespace VectorEngineTest
 			VectorDemand::Input in;
 			in.enabled = true;
 			in.slotsRun = true;
-			in.queueAheadCapacity = 4;
-			in.starterEngaged = true;   // W2-C1: a starter runs the engine (reuse-only consumers are served then)
+			in.queueAheadCapacity = 4;   // batch B: no starter input (the ON engine serves every want)
 			in.wants[static_cast<int>(c)] = true;
 			return in;
 		}
@@ -235,28 +234,100 @@ namespace VectorEngineTest
 		}
 
 		// W2-C1: the engine state is derived in the same UpdateVectorEngine call that decides (no lag for the decision part).
-		TEST_METHOD(UpdateDerivesTheEngineStateAndCountsRefusedStarts)
+		// Batch B (WAIVER-B1-ENGINE-01): was UpdateDerivesTheEngineStateAndCountsRefusedStarts. No starter gate and no refused-start
+		// counter: the hard Off case (entry engaged, the consumer affected) moves to an interlaced source; the same want on a
+		// progressive source is served and the engine is Degraded until its producer runs (the producer's first frames, no entry).
+		TEST_METHOD(UpdateDerivesTheEngineState)
 		{
 			VectorEngine engine;
 			FakeHost host;
 			VectorEngine::UpdateFacts facts;
 			facts.vectorDemandSetting = true;
 			VectorDemand::Input in = OneConsumer(VectorDemand::Consumer::DetailPulse);
-			in.starterEngaged = false;
+			in.interlaced = true;
 			engine.UpdateVectorEngine(in, facts, host);
 			VectorDemand::MotionEngineStatus st = engine.State();
-			Assert::IsTrue(st.state == VectorDemand::MotionEngineState::Off && st.reason == VectorDemand::MotionEngineReason::NoStarter, L"no starter: off");
-			Assert::AreEqual(1u << static_cast<int>(VectorDemand::Consumer::DetailPulse), st.affected, L"the refused consumer is affected");
+			Assert::IsTrue(st.state == VectorDemand::MotionEngineState::Off && st.reason == VectorDemand::MotionEngineReason::Interlaced, L"interlaced: off");
+			Assert::AreEqual(1u << static_cast<int>(VectorDemand::Consumer::DetailPulse), st.affected, L"the unserved consumer is affected");
 			Assert::AreEqual(1ull, static_cast<unsigned long long>(st.frame));
-			Assert::AreEqual(1ull, static_cast<unsigned long long>(engine.Work().refusedStarts[static_cast<int>(VectorDemand::Consumer::DetailPulse)]));
+			Assert::AreEqual(std::string("motion engine"), host.fallbackIds[4]);
 			Assert::IsTrue(host.fallbackEngaged[4], L"the motion engine entry is engaged");
-			in.starterEngaged = true;
+			Assert::IsTrue(host.fallbackEngaged[0], L"the vector_engine entry names the interlaced consumer");
+			in.interlaced = false;
 			engine.UpdateVectorEngine(in, facts, host);
 			st = engine.State();
-			Assert::IsTrue(st.reason != VectorDemand::MotionEngineReason::NoStarter, L"a starter: not NoStarter");
+			Assert::IsTrue(engine.vectorDemand.Serves(VectorDemand::Consumer::DetailPulse) && engine.vectorDemand.producer, L"served, the producer wanted");
+			Assert::IsTrue(st.state == VectorDemand::MotionEngineState::Degraded, L"degraded until the producer runs");
+			Assert::IsFalse(st.Has(VectorDemand::MotionEngineReason::NoStarter), L"NoStarter is never derived");
+			Assert::AreEqual(1u << static_cast<int>(VectorDemand::Consumer::DetailPulse), st.affected, L"served by a degraded engine: affected");
 			Assert::AreEqual(2ull, static_cast<unsigned long long>(st.frame));
-			Assert::AreEqual(1ull, static_cast<unsigned long long>(engine.Work().refusedStarts[static_cast<int>(VectorDemand::Consumer::DetailPulse)]), L"not refused again");
+			Assert::AreEqual<size_t>(10, host.fallbackIds.size());
+			Assert::AreEqual(std::string("motion engine"), host.fallbackIds[9]);
+			Assert::IsFalse(host.fallbackEngaged[9], L"the producer's first frames: no entry");
+			Assert::IsFalse(host.fallbackEngaged[5], L"served: vector_engine released");
 			Assert::AreEqual(0ull, static_cast<unsigned long long>(engine.Work().producerPairs), L"no producer: no pairs");
+		}
+
+		// Batch B: optical-flow pairs are expected only with optical flow on, a producer that did not fail to start and is not recovering,
+		// and motion_ahead_frames != 0 (VectorEngine.cpp UpdateVectorEngine). Without them the field consumers use the matcher fallback;
+		// a deliberate cause (a setting) is not a vector_engine entry (review M4), a failed start is.
+		TEST_METHOD(WithoutPairsTheEngineUsesTheMatcherFallback)
+		{
+			{
+				VectorEngine engine;
+				FakeHost host;
+				VectorEngine::UpdateFacts facts;
+				facts.vectorDemandSetting = true;
+				facts.opticalFlow = false;
+				engine.UpdateVectorEngine(OneConsumer(VectorDemand::Consumer::GrainMap), facts, host);
+				Assert::IsTrue(engine.vectorDemand.Serves(VectorDemand::Consumer::GrainMap), L"optical flow off: still served");
+				Assert::IsTrue(engine.vectorDemand.matcherFallback && engine.vectorDemand.estimate, L"optical flow off: the matcher fallback");
+				Assert::IsTrue(engine.vectorDemand.pairsDeliberatelyOff, L"optical flow off: deliberate");
+				const VectorDemand::MotionEngineStatus st = engine.State();
+				Assert::IsTrue(st.state == VectorDemand::MotionEngineState::Degraded && st.reason == VectorDemand::MotionEngineReason::OpticalFlowOff);
+				Assert::IsFalse(host.fallbackEngaged[4], L"optical_flow off is deliberate: no motion engine entry");
+				Assert::IsFalse(host.fallbackEngaged[0], L"served by the fallback: no vector_engine entry");
+				Assert::IsTrue(VectorDemand::StatusLine(engine.vectorDemand).find("matcher fallback") != std::string::npos, L"named in Ctrl+I");
+
+				engine.UpdateVectorEngine(OneConsumer(VectorDemand::Consumer::SourceMonitorPan), facts, host);
+				Assert::IsTrue(engine.vectorDemand.reason == VectorDemand::Reason::NoPairs, L"statistics alone: no pairs");
+				Assert::IsFalse(FallbackCatalog::VectorEngine(engine.vectorDemand).engaged, L"deliberate: named in Ctrl+I, not an entry");
+				Assert::IsTrue(VectorDemand::StatusLine(engine.vectorDemand).find("source monitor without vectors") != std::string::npos);
+			}
+			{
+				VectorEngine engine;
+				FakeHost host;
+				VectorEngine::UpdateFacts facts;
+				facts.vectorDemandSetting = true;
+				engine.motionProducerStartFailed = true;   // NVOF did not start (a fault, not a setting)
+				engine.UpdateVectorEngine(OneConsumer(VectorDemand::Consumer::GrainMap), facts, host);
+				Assert::IsTrue(engine.vectorDemand.matcherFallback, L"failed start: the matcher fallback");
+				Assert::IsFalse(engine.vectorDemand.pairsDeliberatelyOff, L"failed start: not deliberate");
+				const VectorDemand::MotionEngineStatus st = engine.State();
+				Assert::IsTrue(st.state == VectorDemand::MotionEngineState::Degraded && st.Has(VectorDemand::MotionEngineReason::NvofUnavailable));
+				Assert::IsTrue(host.fallbackEngaged[4], L"failed start: the motion engine entry is engaged");
+				engine.UpdateVectorEngine(OneConsumer(VectorDemand::Consumer::SourceMonitorPan), facts, host);
+				const FallbackCatalog::Decision f = FallbackCatalog::VectorEngine(engine.vectorDemand);
+				Assert::IsTrue(f.engaged, L"failed start: the unserved statistics consumer is an entry");
+				Assert::IsTrue(f.reason.find("source monitor without vectors (no optical-flow pairs") != std::string::npos);
+			}
+			{
+				VectorEngine engine;
+				FakeHost host;
+				VectorEngine::UpdateFacts facts;
+				facts.vectorDemandSetting = true;
+				engine.motionAheadSetting = 0;   // motion_ahead_frames 0: no producer pairs by the setting
+				engine.UpdateVectorEngine(OneConsumer(VectorDemand::Consumer::GrainMap), facts, host);
+				Assert::IsTrue(engine.vectorDemand.matcherFallback && engine.vectorDemand.pairsDeliberatelyOff, L"ahead 0: deliberate fallback");
+			}
+			{
+				VectorEngine engine;
+				FakeHost host;
+				VectorEngine::UpdateFacts facts;
+				facts.vectorDemandSetting = true;
+				engine.UpdateVectorEngine(OneConsumer(VectorDemand::Consumer::GrainMap), facts, host);
+				Assert::IsFalse(engine.vectorDemand.matcherFallback || engine.vectorDemand.estimate, L"pairs expected (not planned yet): no fallback");
+			}
 		}
 
 		TEST_METHOD(SwitchingDemandOffReleasesTheEntriesOnce)
@@ -461,6 +532,14 @@ namespace VectorEngineTest
 			Assert::IsTrue(engine.vectorDemand.mode == VectorDemand::Mode::Off, L"gated: idle");
 			Assert::IsFalse(engine.vectorDemand.Serves(VectorDemand::Consumer::CameraFit));
 			Assert::IsTrue((engine.State().affected & (1u << static_cast<int>(VectorDemand::Consumer::CameraFit))) != 0, L"the camera fit is named affected");
+			// Batch B review M2: the gated camera fit alone names the gate's cause (never a blank "motion engine off: ;" reason).
+			Assert::IsTrue(engine.State().state == VectorDemand::MotionEngineState::Off, L"gated alone: off");
+			Assert::IsTrue(engine.State().reason == VectorDemand::MotionEngineReason::OpticalFlowOff, L"gated alone: optical flow off is the reason");
+			Assert::AreEqual(1u << static_cast<int>(VectorDemand::MotionEngineReason::OpticalFlowOff), engine.State().reasons);
+			Assert::AreEqual(std::string("motion engine"), host.fallbackIds[4]);
+			Assert::IsTrue(host.fallbackEngaged[4], L"gated alone: the motion engine entry is engaged");
+			Assert::AreEqual(std::string("motion engine off: optical flow is off (the matcher runs alone); camera fit take their non-motion path"),
+				FallbackCatalog::MotionEngine(engine.State()).reason, L"the entry names the gate's cause and the camera fit");
 			facts.opticalFlow = true;
 			engine.UpdateVectorEngine(none, facts, host);
 			Assert::IsTrue(engine.vectorDemand.Serves(VectorDemand::Consumer::CameraFit), L"optical flow on: the camera fit starts it");

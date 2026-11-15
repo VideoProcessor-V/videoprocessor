@@ -74,6 +74,10 @@ namespace DejudderDecisionLegacy
 		bool cadenceClassFixes = true;
 		bool vectorDemand = true;
 		bool generalRateFixes = true;
+		// Batch B (WAIVER-B1-ENGINE-02): the two fields the product runner's settled-off branch now reads
+		// (DejudderPolicyRunner.h; VpvRendererFields.h defaults).
+		bool pipelineOriginalPathway = false;
+		std::string engineOffForced;
 	};
 
 	// The neutral inputs. "Prior" fields are the state the frame starts from (set once by Begin; a
@@ -256,6 +260,9 @@ namespace DejudderDecisionLegacy
 			{
 				if (activeSettings.vectorDemand && vectorDemand.mode != VectorDemand::Mode::Off)
 					PublishDejudderStatus();   // the vector engine's line stays on the stats
+				else if (!activeSettings.vectorDemand && (!activeSettings.engineOffForced.empty() ||
+					(!activeSettings.pipelineOriginalPathway && !VectorDemand::OffLine(vectorDemand).empty())))
+					PublishDejudderStatus();   // batch B (mirrors the product): "motion engine off (setting)" / "de-judder off: motion engine off"
 				else if (dejudderStatusTick != 0)
 				{
 					dejudderStatusTick = 0;
@@ -268,8 +275,7 @@ namespace DejudderDecisionLegacy
 			in.strength = activeSettings.dejudderStrength;
 			in.strengthEven = activeSettings.dejudderStrengthEven;
 			in.evenIncludes1001 = activeSettings.dejudderEvenIncludes1001;
-			in.occlusionMask = activeSettings.occlusionMask;
-			in.occlusionMaskServed = (vectorDemand.refused & (1u << static_cast<int>(VectorDemand::Consumer::OcclusionMask))) == 0;   // W2-C1: reuse-only
+			in.occlusionMask = activeSettings.occlusionMask;   // batch B: occlusionMaskServed retired with the starter gate (mirrors the product)
 			in.grainMap = adaptiveGrainMapWanted;
 			in.lowLatency = lowLatency;   // COPY
 			in.sourceHz = sourceHz;

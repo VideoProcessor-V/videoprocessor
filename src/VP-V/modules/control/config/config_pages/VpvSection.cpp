@@ -638,6 +638,10 @@ namespace Vpv
 			if (!root) return found;
 			const QRegularExpression name(QStringLiteral("^config\\.vprenderer\\.%1(\\.[^.]+)?$").arg(QRegularExpression::escape(key)));
 			for (QWidget* w : root->findChildren<QWidget*>(name)) found << w;
+			// A VP-V toggle (AddToggleRow) is named "vpv.<unit>.<key>", not "config.vprenderer.<key>".
+			const QRegularExpression toggleName(QStringLiteral("^vpv\\.[^.]+\\.%1(\\.[^.]+)?$").arg(QRegularExpression::escape(key)));
+			for (QWidget* w : root->findChildren<QWidget*>(toggleName))
+				if (!found.contains(w)) found << w;
 			// The row's label goes with it.
 			for (QWidget* f : RowFields(root, key))
 				if (auto* form = qobject_cast<QFormLayout*>(f->parentWidget()->layout()))
@@ -704,7 +708,11 @@ namespace Vpv
 				break;
 			case LockKind::Feature:
 				locked = EffectiveOff(state, spec);
-				why = lock->onMain ? TurnsOnLine(spec) : QStringLiteral("Used only when %1 is on (Main).").arg(Q(spec.master));
+				// A Main card that locks only some of its keys stays visible with those keys greyed in place.
+				if (lock->onMain && !spec.lockKeys.empty())
+					why = QStringLiteral("Used only when %1 is on.").arg(Q(spec.master));
+				else
+					why = lock->onMain ? TurnsOnLine(spec) : QStringLiteral("Used only when %1 is on (Main).").arg(Q(spec.master));
 				if (locked) lock->unusedBecause = QStringLiteral("%1 is off").arg(Q(spec.master));
 				break;
 			}
@@ -1953,6 +1961,14 @@ namespace Vpv
 					}
 				group->setVisible(any);
 			}
+			// Batch B (c): Bill's motion_engine row is the choice of motion source (VP's vectors or libplacebo smooth motion), so its
+			// label says so; label text only, no Bill line changes (his "Motion handling" label stays in his file).
+			for (QWidget* root : { state->host.upstreamRoot, state->root })
+				for (QWidget* field : RowFields(root, QStringLiteral("motion_engine")))
+					if (field->parentWidget())
+						if (auto* form = qobject_cast<QFormLayout*>(field->parentWidget()->layout()))
+							if (auto* label = qobject_cast<QLabel*>(form->labelForField(field)))
+								label->setText(QStringLiteral("Motion source (VP or smooth motion)"));
 		}
 
 		// The Rendering page after the moves: Bill's sections stay as his themed cards; every other

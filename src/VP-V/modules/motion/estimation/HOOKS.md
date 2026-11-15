@@ -164,8 +164,8 @@ failure is counted, logged (first 20, then every 100th) and raised as the fallba
 
 | Where | Line(s) | What |
 |---|---|---|
-| `consumers/DejudderPolicyRunner.inl` (VP-V module, existing VPV-HOOK block; not in the renderer's `VectorDemandInput`) | the `UpdateVectorEngine` call | `vectorFacts.opticalFlow`, `vectorInput.starterEngaged = dejudderStanding \|\| interpolating \|\| vpGapFillStandalone`, `NoteVramRelease(keeper pressured && !dejudder)`; `analysisEstimate` counted after `RunDejudderEstimate` |
-| `consumers/DejudderPolicyRunner.h`, `tests/DejudderDecisionLegacyCopy.h` | the policy input | `occlusionMaskServed` from `vectorDemand.refused` |
+| `consumers/DejudderPolicyRunner.inl` (VP-V module, existing VPV-HOOK block; not in the renderer's `VectorDemandInput`) | the `UpdateVectorEngine` call | `vectorFacts.opticalFlow`, `vectorInput.pairsExpected` (set inside `VectorEngine::UpdateVectorEngine`; the starter gate `starterEngaged` is retired), `NoteVramRelease(keeper pressured && !dejudder)`; `analysisEstimate` counted after `RunDejudderEstimate` |
+| `consumers/DejudderPolicyRunner.h`, `tests/DejudderDecisionLegacyCopy.h` | the policy input | (none: `occlusionMaskServed` is retired with the starter gate) |
 | `estimation/EngineKeeper.inl` | the keeper | `NoteVramRelease(Pressured() && !engineHeld)` |
 | `estimation/VectorEngineEstimate.inl` | matcher create site; after `vectorEngine.Estimate` | `++matcherCreates`, `NoteVramRelease(false)`, `DeclareStepped(kUserMotionMatcher)` + `MarkActive`; `++matcherEstimates` (not warm-ups) |
 | `consumers/PhaseTimeline.inl` `ReleaseDejudder` (outside the C1 region, noted in Z3) | after `dejudder.reset()` | `VramUsers::Release(this, kUserMotionMatcher)` |

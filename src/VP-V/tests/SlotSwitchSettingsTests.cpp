@@ -204,5 +204,53 @@ namespace VpvTests
 				Assert::IsTrue(PipelineSlots::Get(id).status != PipelineSlots::Status::Placeholder);
 			}
 		}
+
+		// Batch B Q3 (lead18 plan-motion-engine-switch.md; WAIVER-B1-ENGINE-03, an addition): the motion engine is one switch. With
+		// vector_demand off the resolver forces exactly the five de-judder / hiccup keys off (the consumers block's upstream form for
+		// them), touches nothing else, and says what it forced; with vector_demand on it changes nothing.
+		TEST_METHOD(EngineOffForcesTheDejudderAndHiccupOffVisibly)
+		{
+			FakeSettings on;
+			const ::SlotSwitchSettings::EngineOffForced none = ::SlotSwitchSettings::ApplyEngineOff(on);
+			Assert::IsFalse(none.Any(), L"engine on: nothing forced");
+			Assert::IsTrue(on.ConsumersOn() && on.EstimationOn() && on.QueueOn() && on.unrelated, L"engine on: nothing changed");
+			Assert::AreEqual(std::string(), ::SlotSwitchSettings::DescribeEngineOff(none), L"nothing forced: no line");
+
+			FakeSettings off;
+			off.vectorDemand = false;
+			const ::SlotSwitchSettings::EngineOffForced forced = ::SlotSwitchSettings::ApplyEngineOff(off);
+			Assert::IsTrue(forced.dejudder && forced.hiccup && forced.Any(), L"both sub-selections were on");
+			Assert::IsTrue(off.dejudderStrength == 0.0 && off.dejudderStrengthEven == 0.0, L"de-judder strengths 0");
+			Assert::IsTrue(off.interpolation == InterpolationPolicy::Mode::Off, L"interpolation off");
+			Assert::IsFalse(off.interpolationFillGaps, L"hiccup smoothing off");
+			Assert::IsFalse(off.occlusionMask, L"the occlusion mask off");
+			Assert::IsTrue(off.dejudderSourceWarpCatmull && off.interpolationFallback == InterpolationPolicy::Fallback::Blend,
+				L"only the five keys: the warp filter and the fallback are kept");
+			Assert::IsTrue(off.QueueOn() && off.renderAhead && off.unrelated && off.opticalFlow && off.motionAheadFrames == 4,
+				L"nothing outside the five keys changes");
+			Assert::AreEqual(std::string("de-judder off: motion engine off; hiccup smoothing off: motion engine off"),
+				::SlotSwitchSettings::DescribeEngineOff(forced));
+
+			FakeSettings dejudderOnly;
+			dejudderOnly.vectorDemand = false;
+			dejudderOnly.interpolationFillGaps = false;
+			Assert::AreEqual(std::string("de-judder off: motion engine off"),
+				::SlotSwitchSettings::DescribeEngineOff(::SlotSwitchSettings::ApplyEngineOff(dejudderOnly)), L"only what was on is named");
+			FakeSettings hiccupOnly;
+			hiccupOnly.vectorDemand = false;
+			hiccupOnly.dejudderStrength = hiccupOnly.dejudderStrengthEven = 0.0;
+			hiccupOnly.interpolation = InterpolationPolicy::Mode::Off;
+			hiccupOnly.occlusionMask = false;
+			Assert::AreEqual(std::string("hiccup smoothing off: motion engine off"),
+				::SlotSwitchSettings::DescribeEngineOff(::SlotSwitchSettings::ApplyEngineOff(hiccupOnly)));
+			FakeSettings maskOnly = hiccupOnly;
+			maskOnly.interpolationFillGaps = false;
+			maskOnly.occlusionMask = true;
+			const ::SlotSwitchSettings::EngineOffForced m = ::SlotSwitchSettings::ApplyEngineOff(maskOnly);
+			Assert::IsTrue(m.dejudder && !m.hiccup && !maskOnly.occlusionMask, L"the mask alone counts as the de-judder's (forced off)");
+			FakeSettings nothing = maskOnly;
+			nothing.occlusionMask = false;
+			Assert::IsFalse(::SlotSwitchSettings::ApplyEngineOff(nothing).Any(), L"nothing on: nothing forced (an empty line)");
+		}
 	};
 }
