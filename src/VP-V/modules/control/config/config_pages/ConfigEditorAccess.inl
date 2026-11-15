@@ -12,6 +12,7 @@
 // Included only by ConfigEditorWindow.cpp; nothing here runs unless the editor calls it.
 
 #include <VP-V/modules/control/config/config_pages/VpvSection.h>
+#include <VP-V/core/AheadCeiling.h>
 
 namespace Vpv
 {
@@ -113,12 +114,13 @@ namespace Vpv
 		motionAhead->setItemText(motionAhead->findData(QStringLiteral("0")), QStringLiteral("Off"));
 		// Settings guide audit 2026-10-24: the forced 5-frame queue minimum is gone (r6 fix 2) and the
 		// look-ahead is a time (r6 fix 3), so the old "holds at least 5" text was wrong.
+		// C2 gate SHOULD 3 (rule 6): the ceiling in the text is VpSkeleton::kAheadCeiling, never a literal.
 		motionAhead->setToolTip(QStringLiteral(
 			"NVIDIA GPUs: the optical-flow engine computes the motion ahead of the picture on its own hardware, off "
-			"the render path. On: the look-ahead runs every frame queued ahead of render (up to the ahead-compute ceiling, 6 frames); the value "
+			"the render path. On: the look-ahead runs every frame queued ahead of render (up to the ahead-compute ceiling, %1 frames); the value "
 			"is the minimum the queue keeps for it (about 67 ms: 2 frames at 24p, 4 at 50/60p). It never lengthens "   // GENERAL-REF: worked example in user-facing text; the depth is derived from the measured content rate
 			"the queue beyond that minimum; on a short queue it looks less far ahead, and with no frames ahead the "
 			"de-judder estimates at render time or holds. The low-latency queue switches it off. Off, or other GPUs: "
-			"VP's matcher at render time."));
+			"VP's matcher at render time.").arg(VpSkeleton::kAheadCeiling));
 	}
 }

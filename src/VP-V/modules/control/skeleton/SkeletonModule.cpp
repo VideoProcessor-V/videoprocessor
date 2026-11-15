@@ -1134,7 +1134,10 @@ namespace Vpv
 					hosts_.Remove(f.host, true);
 				gpuSlots_.Remove(f.host, true);   // the pl_gpu is going away: the dispatcher was released by Teardown above
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
+				{
+					std::lock_guard<std::mutex> lock(ownerFillsMutex_);   // as at GpuCreated (C2 gate SHOULD 2): one lock context for the memo's device
 					DetachMemoGpu(*mh, true);     // R2: the memo's GPU spots and the owner textures go while the device lives
+				}
 				memoHosts_.Remove(f.host, true);  // L-CORE: the renderer's memo (a reader's pin keeps its spots until released)
 				EraseExternal(f.host);   // a renderer recreated at this address never inherits the old one's external demand
 				break;
