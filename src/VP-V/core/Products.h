@@ -1035,7 +1035,7 @@ inline void AppendSourceGeometryProduct(std::vector<ProductDecl>& decls)
 }
 
 // edge_map (fixed id 31; lead 8, owner reinstated 11-14, rule 3): the 3x3 Sobel gradient magnitude of the source luma, one R32F
-// sample per source pixel in 10-bit codes (sample x 1023; R32F rather than r16f so a 12-bit source stays exact). A per-frame GPU memo filled by
+// sample per source pixel in 10-bit codes (the one tap form, RegionEvidence::kSourceTapCodesPerUnit; R32F rather than r16f so a 12-bit source stays exact). A per-frame GPU memo filled by
 // the owner fill (regions/EdgeMapFill.h) from the P13 ring views; the producer is the owner fill, there is no lane job. Readers acquire it
 // (get-or-compute-and-publish): the focus map and the L-B5 busy-edge share; others may follow.
 // Appends absent slots (default ProductDecl, id kNoProduct) until the next declaration lands at `upTo`; every padded id must be reserved.
