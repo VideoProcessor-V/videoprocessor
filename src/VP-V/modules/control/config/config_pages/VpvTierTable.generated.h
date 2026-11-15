@@ -164,7 +164,6 @@ namespace Vpv
                 u.toggles.push_back({ "render_ahead", "De-judder: render ahead (under test)", { "off", "on" }, "output.presentation" });
                 u.toggles.push_back({ "interpolation_fallback", "Where motion is not trusted: hold or blend", { "hold", "blend" }, "motion.consumers" });
                 u.toggles.push_back({ "intent_motion", "Ease the de-judder per shot (only ever lower)", { "on", "off" }, "motion.consumers" });
-                u.toggles.push_back({ "cut_soft_reset", "Soft reset on a near-cut (high bar)", { "on", "off" }, "repair.texture_restore" });
                 u.planned.push_back({ "motion_ahead_ms", "Motion look-ahead in milliseconds (time-based)", "motion.estimation" });
                 t.units.push_back(u);
             }
@@ -208,6 +207,7 @@ namespace Vpv
                 u.toggles.push_back({ "deband_vp_exclusive", "VP deband replaces libplacebo's", { "on", "off" }, "repair.deband" });
                 u.toggles.push_back({ "detail_pulse_fast", "Detail pulse: fast path", { "on", "off" }, "repair.texture_restore" });
                 u.toggles.push_back({ "low_bitrate_handling", "Deband reacts to compression", { "auto", "off", "on" }, "repair.deband" });
+                u.toggles.push_back({ "cut_soft_reset", "Soft reset on a near-cut (high bar)", { "on", "off" }, "repair.texture_restore" });
                 u.planned.push_back({ "encoding_repair", "Encoding repair (net A or VP restore)", "repair.encoding" });
                 t.units.push_back(u);
             }

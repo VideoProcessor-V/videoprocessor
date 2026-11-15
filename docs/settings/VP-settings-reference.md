@@ -238,11 +238,6 @@ areas meet. Change one only to reproduce a bug report.
 | `intent_motion`, `_policy`, `_min`, `_min_shot_s` | May scale your de-judder strength DOWN per shot (never up). | off |
 | `intent_ease_s` | How the intent features ease in at a cut. | 1.5 s |
 
-### 3.5 Scene changes (VP-V > Motion > Advanced, "Scene changes: soft reset")
-| Key | What it does | Why it exists | Default | Cost |
-|---|---|---|---|---|
-| `cut_soft_reset` | When the scene judge is very sure a frame is a near-cut that is not a confirmed cut (a high bar), detail pulse and texture restore shrink their history instead of carrying the old scene's detail. Below the bar nothing happens. A confirmed cut still starts over and a fade still shrinks the history either way. Off: "soft reset: off" on their status lines. | Owner 2026-11-15: partial reset only at high confidence; mid-scene firing would be worse than the vectors' own quick recovery. The bar is provisional until the D8 truth run. | on | none |
-
 ---
 
 ## 4. Repair
@@ -273,6 +268,11 @@ then breathing reduction and texture restore. Grain is never removed or averaged
 | `detail_pulse_fast` | The same picture in about half the GPU time. | Efficiency. | on | saves time |
 | `texture_restore` | Separates grain from scene texture per area, and raises both toward the best-coded reference along the motion (about 2 s memory). | Recovers texture that the stream smeared. | off (on only by explicit choice; no tier turns it on) | **high** (9.8 ms at 4K on the laptop until its efficiency pass) |
 | `texture_restore_cap` | The most texture is raised (x1.00-2.00). | A safety limit. | 1.50 | none |
+
+### 4.4 Scene changes (VP-V > Repair > Advanced, "Scene changes: soft reset")
+| Key | What it does | Why it exists | Default | Cost |
+|---|---|---|---|---|
+| `cut_soft_reset` | When the scene judge is very sure a frame is a near-cut that is not a confirmed cut (a high bar), detail pulse and texture restore shrink their history instead of carrying the old scene's detail. Below the bar nothing happens. A confirmed cut still starts over and a fade still shrinks the history either way. Off: "soft reset: off" on their status lines. | Owner 2026-11-15: partial reset only at high confidence; mid-scene firing would be worse than the vectors' own quick recovery. The bar is provisional until the D8 truth run. The scene detector itself stays automatic with no setting (owner 2026-11-15 12:20). | on | none |
 
 ---
 

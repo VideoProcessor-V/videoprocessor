@@ -301,15 +301,6 @@
             "off"
           ],
           "slot": "motion.consumers"
-        },
-        {
-          "key": "cut_soft_reset",
-          "label": "Soft reset on a near-cut (high bar)",
-          "values": [
-            "on",
-            "off"
-          ],
-          "slot": "repair.texture_restore"
         }
       ],
       "planned": [
@@ -412,6 +403,15 @@
             "on"
           ],
           "slot": "repair.deband"
+        },
+        {
+          "key": "cut_soft_reset",
+          "label": "Soft reset on a near-cut (high bar)",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "repair.texture_restore"
         }
       ],
       "planned": [
