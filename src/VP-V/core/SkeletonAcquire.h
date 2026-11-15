@@ -261,6 +261,10 @@ struct OwnerFill {
     uint32_t variantAxes = 0;    // the VariantKey axes this owner serves (0 = the default variant only)
     VariantKey defaults;         // the owner's own form (canonicalisation); defaults.stage must be 0 (the source planes)
     uint64_t reserveBytes = 0;   // GPU: bytes reserved against the ledger grant BEFORE the fill (a larger result re-checks)
+    // GPU, an owner that serves the size / scale axes: the reserve of the ASKED variant (canonical key), in place of reserveBytes
+    // for that fill (reserved BEFORE it, and the grant of its OwnerGpuContext). Empty = reserveBytes for every variant. A pure
+    // function of the key (it is called under the memo lock); reserveBytes stays the ahead planner's figure until a fill is measured.
+    std::function<uint64_t(const VariantKey&)> reserveFor;
     // L-CORE (iface-L-CORE s5): the thread contract. A CPU fill runs on the asking thread (any thread) unless it touches render
     // state (renderThreadOnly: the lane's CPU live computes); a GPU fill is ALWAYS render thread.
     bool renderThreadOnly = false;
@@ -992,7 +996,7 @@ public:
                 return Fail(c, id, seq, AcquireCause::NoGpuDispatcher);
             if (!gpuGranted_)
                 return Fail(c, id, seq, AcquireCause::NoLedgerGrant);
-            reserve = ow->reserveBytes;
+            reserve = ow->reserveFor ? ow->reserveFor(v) : ow->reserveBytes;
             if (gpuBytes_ + reserve > gpuBudget_)
                 return Fail(c, id, seq, AcquireCause::OverBudget);
         }
