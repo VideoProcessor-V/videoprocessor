@@ -703,7 +703,8 @@ public:
         // The inputs are pinned BEFORE the claim (a claim abandoned for a missing input would leave the frame Stale for the worker).
         Header scratch;
         LaneInputs pins;
-        if (!st->table->LaneAncestors(id, seq, scratch, pins)) {
+        // countWaits false: this is the render thread; the wait dedupe entries belong to the lane worker, which counts the wait once.
+        if (!st->table->LaneAncestors(id, seq, scratch, pins, /*countWaits*/ false)) {
             out.why = "an input is not published yet";
             return out;
         }
