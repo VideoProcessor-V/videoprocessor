@@ -10,6 +10,7 @@
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
+#include <VP-V/core/OnePole.h>
 #include <VP-V/core/hub/CurrentFrame.h>
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
