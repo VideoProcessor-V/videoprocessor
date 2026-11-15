@@ -79,10 +79,10 @@ integrator's node/settings, not here.
 N and e3 stay fp32 (they exceed the fp16 range); f and the base (the plane value, 0..1) are unorm16; s1, s2 are half floats in
 codes (11 significant bits). `Fits` needs `splitB` for a Compact frame only. `Compact(const Frame*)` tells the layout.
 
-**Intermediates (v3).** tmp, low (both half-size rg32f) and quiet (the rgba32f block grid) are temporaries, the same in both layouts. With `Options.arena` set they come from the shared scratch arena
-(scope `kArenaScope` = 0x0201, owner `grain_split`, tier T0, acquired in the fixed order tmp, low, quiet, scope closed by an
+**Intermediates (v3; unit 5 adds part).** tmp, low (both half-size rg32f), part (the rgba32f per-(sub-block, chunk) partial sums, `PartialSize` = bw x sub x span by bh x sub x span) and quiet (the rgba32f block grid) are temporaries, the same in both layouts. With `Options.arena` set they come from the shared scratch arena
+(scope `kArenaScope` = 0x0201, owner `grain_split`, tier T0, acquired in the fixed order tmp, low, part, quiet, scope closed by an
 RAII guard). The Full product is its own rgba32f texture (or `Targets.split`), not an arena temporary.
-`Splitter::ArenaRequests(gpu, w, h, B, storage)` lists the requests (both layouts: half rg32f x2 + block rgba32f x1 = 3 acquires).
+`Splitter::ArenaRequests(gpu, w, h, B, storage)` lists the requests (both layouts: half rg32f x2 + part rgba32f x1 + block rgba32f x1 = 4 acquires); `Gpu::WorkingBytes(w, h, B, sub)` is their byte total, built from the same shapes (the lane kernel's `PrivateBytes` reads it).
 A null handle makes `Compute` return false with `LastError()` starting `scratch memory short (grain split)` and
 `ScratchShort()` true (reset on every Compute); no private temporaries are made then and the arena's `scratch_arena` fallback is
 engaged (visible), recovering on the first frame after a larger plan is reserved. `Options.targets` (split, splitB, blocks) lets a
@@ -108,7 +108,7 @@ Derived bounds: s1, s2 <= 2^-11 relative (0.03 codes at 64, asserted <= 0.05); b
 | 3840 x 2160 | 32 | 120 x 68 | 132,840,960 B (126.7 MiB) | 66,485,760 B (63.4 MiB) | 50 % |
 | 7680 x 4320 | 64 | 120 x 68 | 530,972,160 B (506.4 MiB) | 265,551,360 B (253.3 MiB) | 50 % |
 
-Scratch (arena, shared across scopes, not per slot), v3, the same for both layouts: two half-size rg32f planes = 2 x (w/2 x h/2) x 8 B = 4 B/px, plus 16 B/block (quiet): 8,424,960 B at 1080p, 33,308,160 B at 4K, 132,840,960 B at 8K (the lane form holds two splitters). `GrainNode.h` `StorageLedgerLines` still counts the v2 scratch (Full 16 B/px, Compact 32 B/px): known stale, not edited in this package.
+Scratch (arena, shared across scopes, not per slot), unit 5, the same for both layouts (`Gpu::WorkingBytes`): two half-size rg32f planes = 2 x (w/2 x h/2) x 8 B = 4 B/px, plus part (480 x 272 rgba32f at the three sizes below: 120 x 68 blocks x sub 4 x span 1, = 2,088,960 B), plus 16 B/block (quiet): 8,294,400 + 2,088,960 + 130,560 = 10,513,920 B at 1080p, 33,177,600 + 2,088,960 + 130,560 = 35,397,120 B at 4K, 132,710,400 + 2,088,960 + 130,560 = 134,929,920 B at 8K (the lane form holds two splitters). The 8 x 1 rgba32f level table (128 B) is private and not counted. `GrainNode.h` `StorageLedgerLines` still counts the v2 scratch (Full 16 B/px, Compact 32 B/px): known stale, not edited in this package.
 
 ## Host call sites (for the wiring package; renderer-side, not in SA1/SA2)
 

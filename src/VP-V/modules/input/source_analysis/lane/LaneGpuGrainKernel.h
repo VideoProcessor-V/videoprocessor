@@ -30,8 +30,9 @@ namespace VpLaneProducts
 		bool Step(KernelContext& c, uint32_t step) override;
 		void Release(pl_gpu gpu) override;
 		std::string LastError() const override { return m_error; }
-		// Working set of one Splitter (the arena-free layout of GrainSplitGpu v3): two half-size rg32f planes plus the block
-		// grid, the same for both layouts; two Splitters (lane + live).
+		// Working set of one Splitter (the arena-free layout, unit 5): GrainSplit::Gpu::WorkingBytes = two half-size rg32f
+		// planes, the rgba32f `part` partial sums and the block grid, the same for both layouts; the lane form counts two
+		// Splitters (lane + live).
 		uint64_t PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const override;
 		std::vector<FallbackCatalog::Decision> Fallbacks() const override;
 

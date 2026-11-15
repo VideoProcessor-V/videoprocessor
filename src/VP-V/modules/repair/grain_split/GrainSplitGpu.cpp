@@ -411,6 +411,32 @@ if (p.x < GS_W && p.y < GS_H) {
 				*pw = bw * sub * span;
 				*ph = bh * sub * span;
 			}
+			// The shapes of the four working intermediates (tmp + low half-size, part, quiet block grid): the one source of
+			// ArenaRequests and WorkingBytes.
+			struct WorkingShapes
+			{
+				int hw = 0, hh = 0, pw = 0, ph = 0, bw = 0, bh = 0;
+			};
+			WorkingShapes WorkingOf(int w, int h, int B, int sub)
+			{
+				WorkingShapes s;
+				s.hw = HalfOf(w);
+				s.hh = HalfOf(h);
+				s.bw = (w + B - 1) / B;
+				s.bh = (h + B - 1) / B;
+				PartialSize(s.bw, s.bh, B, sub, &s.pw, &s.ph);
+				return s;
+			}
+		}
+
+		uint64_t WorkingBytes(int w, int h, int B, int sub)
+		{
+			if (w < 1 || h < 1 || B < 1 || sub < 1)
+				return 0;
+			const WorkingShapes s = WorkingOf(w, h, B, sub);
+			return 2u * uint64_t(s.hw) * uint64_t(s.hh) * 8u   // tmp + low, rg32f
+				+ uint64_t(s.pw) * uint64_t(s.ph) * 16u        // part, rgba32f
+				+ uint64_t(s.bw) * uint64_t(s.bh) * 16u;       // quiet, rgba32f
 		}
 
 		// ND03: the law's one band Gaussian (the U2 unit's VpUnit::BandFromBase::BandRadius / BandWeight).
@@ -490,20 +516,18 @@ if (p.x < GS_W && p.y < GS_H) {
 			if (!gpu || w < 1 || h < 1 || B < 1 || !VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 2), &t2) ||
 				!VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 4), &t4))
 				return r;
-			const int bw = (w + B - 1) / B, bh = (h + B - 1) / B;
+			const WorkingShapes s = WorkingOf(w, h, B, Params().subBlocks);   // the same shapes as WorkingBytes
 			VpSkeleton::ArenaRequest a;
 			a.scope = kArenaScope;
 			a.owner = kArenaOwner;
 			a.tier = VpSkeleton::Tier::T0;
-			a.shape.w = static_cast<uint32_t>(HalfOf(w)); a.shape.h = static_cast<uint32_t>(HalfOf(h)); a.shape.fmt = t2;
+			a.shape.w = static_cast<uint32_t>(s.hw); a.shape.h = static_cast<uint32_t>(s.hh); a.shape.fmt = t2;
 			a.count = 2;   // tmp (across) + low (Gb, G6) at half resolution
 			r.push_back(a);
-			int pw = 0, ph = 0;
-			PartialSize(bw, bh, B, Params().subBlocks, &pw, &ph);
-			a.shape.w = static_cast<uint32_t>(pw); a.shape.h = static_cast<uint32_t>(ph); a.shape.fmt = t4;
+			a.shape.w = static_cast<uint32_t>(s.pw); a.shape.h = static_cast<uint32_t>(s.ph); a.shape.fmt = t4;
 			a.count = 1;   // part = the grain level pass's per-(sub-block, chunk) partial sums
 			r.push_back(a);
-			a.shape.w = static_cast<uint32_t>(bw); a.shape.h = static_cast<uint32_t>(bh); a.shape.fmt = t4;
+			a.shape.w = static_cast<uint32_t>(s.bw); a.shape.h = static_cast<uint32_t>(s.bh); a.shape.fmt = t4;
 			a.count = 1;   // quiet = (quiet, e3, e1, e2) per block
 			r.push_back(a);
 			return r;

@@ -208,6 +208,13 @@ namespace GrainSplit
 			std::string m_storageNote;
 		};
 
+		// Bytes of one Splitter's working set at w x h, block edge B, `sub` sub-blocks per block axis: the four intermediates
+		// of Splitter::ArenaRequests (built from the same shapes, so the two cannot drift): tmp + low (half-size rg32f, 8 B per
+		// texel), part (the grain level pass's rgba32f partial sums, PartialSize = bw*sub*span x bh*sub*span, 16 B) and quiet
+		// (the rgba32f block grid, 16 B). The product textures are the caller's slots and the levelBins x 1 level table is
+		// not counted. 0 for a degenerate size.
+		uint64_t WorkingBytes(int w, int h, int B, int sub);
+
 		// The Gaussian weights of GrainSplit::Gauss (radius max(1, ceil(3 sigma)), normalised over the taps).
 		int GaussRadius(double sigma);
 		double GaussWeight(int k, double sigma);
