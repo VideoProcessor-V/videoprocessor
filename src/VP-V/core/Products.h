@@ -90,7 +90,7 @@ enum : ProductId {
     kTdTrailSummary,      // 28 td.trail_summary: per-frame CPU summary for source identity / status
     // Wave S2 (SID lead request, doc 78 section 6): appended after the doc 72 list, never before it.
     kSourceGeometry,      // 29 source_geometry (P14g): HELD-STATE measured + applied source geometry (SourceGeometry unit v1)
-    kEdgeMap,             // dense id 30, allocation 31: edge_map (per-frame memo of the source-luma Sobel; readers: L-FOCUS focus map, L-B5 busy-edge; later deband guard, occlusion, TD; the AdaptiveDownscale ramp is NOT a reader, R14-64/X5); lead 8 allocation 31, 05:2x 11-14
+    kEdgeMap,             // allocation 31 (C3 fixed id table): edge_map (per-frame memo of the source-luma Sobel; readers: L-FOCUS focus map, L-B5 busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3); frozen 17:19; 102b X5-EDGEMAP-CJ3, KEDGEMAP-RULE3 UPDATE :523); later deband guard, occlusion, TD); lead 8 allocation 31, 05:2x 11-14
     kSkeletonProductEnd
 };
 
