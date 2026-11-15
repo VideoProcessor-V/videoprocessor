@@ -614,6 +614,9 @@ inline const std::vector<ConsumerFlag>& ConsumerFlags()
         // Chroma from luma reads the source frame's planes as the render-time pl_frame of the same frame (a view of P13's data).
         { uint16_t(kCatalogConsumerIdBase + 11), kP13SourceRing, FlagKind::ViewIsActual, "C9b",
           "render-time source pl_frame (scaling/chroma_upscale/ChromaCflGpu.cpp CflModule::Apply)" },
+        // The debander declares P3 and reads the live matcher field at render through its Params (a view of P3's data).
+        { uint16_t(kCatalogConsumerIdBase + 2), kP3AnalysisField, FlagKind::ViewIsActual, "C9b",
+          "live matcher field read at render (repair/deband/VpDebander.cpp Params.field / grainError, filled by segments/EntrancePlanner.inl LiveFieldInto)" },
         // B3-Z Z-DECL (lead 2026-11-11, no declaration change): the render-time readers of the matcher field. The synthesis consumers and the
         // detail pulse / texture restore / adaptive downscale rows read the LIVE matcher field (dejudder->Field()) at render and do not
         // declare P3; the lane P3 declarations land with the matcher-ahead ring (B3-Z Z1-Z3) and lane-time refinement (C9b).

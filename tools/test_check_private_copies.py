@@ -270,6 +270,17 @@ class Synthetic(unittest.TestCase):
         self.assertTrue(self._view_tree(11, "kP13SourceRing", None, f, {"ChromaCflGpu.cpp": sig}, note))
         self.assertTrue(self._view_tree(11, "kP13SourceRing", "ViewIsActual", f, {"ChromaCflGpu.cpp": sig}, "no file named"))
 
+    def test_c7_p3_params_field_only_with_the_view_flag_in_the_note_file(self):
+        # gate-15c-X8-row2-P3-r2 fixtures (a)-(d).
+        use = {"VpDebander.cpp": "const bool haveField = params.field != nullptr;"}
+        note = "live matcher field read at render (repair/deband/VpDebander.cpp Params.field)"
+        f = "repair/deband"
+        self.assertTrue(self._view_tree(2, "kP3AnalysisField", None, f, use, note))                          # (a) no flag
+        self.assertTrue(self._view_tree(2, "kP3AnalysisField", "NotRead", f, use, note))                     # (b) NotRead
+        self.assertTrue(self._view_tree(2, "kP3AnalysisField", "ViewIsActual", f, use,
+                                        "live matcher field (repair/deband/Other.cpp)"))                     # (c) other file
+        self.assertFalse(self._view_tree(2, "kP3AnalysisField", "ViewIsActual", f, use, note))               # (d)
+
     def test_bad_root_is_exit_2(self):
         self.assertEqual(N1.main(["--root", tempfile.mkdtemp()]), 2)
 
