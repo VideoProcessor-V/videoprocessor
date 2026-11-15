@@ -11,6 +11,7 @@
     "src/VP-V/modules/control/diagnostics/DiagnosticOverridesModule.h",
     "src/VP-V/modules/control/diagnostics/StateReport.cpp",
     "src/VP-V/modules/control/diagnostics/CrashState.cpp",
+    "src/VP-V/modules/control/diagnostics/ExeLogRing.cpp",
     "src/VP-V/modules/control/diagnostics/CrashState.h",
     "src/VP-V/modules/control/diagnostics/StateReport.h",
     "src/VP-V/modules/control/diagnostics/StateReportSettings.h",
