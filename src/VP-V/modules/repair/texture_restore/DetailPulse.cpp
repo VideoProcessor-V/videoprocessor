@@ -2,6 +2,7 @@
 #include "DetailPulse.h"
 
 #include <vprenderer/GrainPreserve.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 
 #include <libplacebo/dispatch.h>
 
@@ -138,8 +139,8 @@ void load_low(ivec2 qb, ivec2 hi, ivec2 hhi)
     ivec2 ob = qb - ivec2(1 + GP_R);
     for (int i = int(li); i < RB * RB; i += 256) {
         ivec2 b = clamp(ob + ivec2(i % RB, i / RB), ivec2(0), hhi) * 2;
-        sbox[i] = 0.25 * (code_at(clamp(b, PIC_LO(hi), PIC_HI(hi))) + code_at(clamp(b + ivec2(1, 0), PIC_LO(hi), PIC_HI(hi))) +
-                          code_at(clamp(b + ivec2(0, 1), PIC_LO(hi), PIC_HI(hi))) + code_at(clamp(b + ivec2(1, 1), PIC_LO(hi), PIC_HI(hi))));
+        sbox[i] = vpu_half_luma_mean4(code_at(clamp(b, PIC_LO(hi), PIC_HI(hi))), code_at(clamp(b + ivec2(1, 0), PIC_LO(hi), PIC_HI(hi))),
+                                      code_at(clamp(b + ivec2(0, 1), PIC_LO(hi), PIC_HI(hi))), code_at(clamp(b + ivec2(1, 1), PIC_LO(hi), PIC_HI(hi))));
     }
     barrier();
     for (int i = int(li); i < RB * HL; i += 256) {
@@ -295,7 +296,7 @@ for (int i = int(li); i < n; i += 256) {
     if (s.x + s.y >= floor_energy && b.x >= 0.5 && b.w > 0.5)
         a1 += vec4(s.x, s.y, 1.0, 0.0);
     if (b.w > -0.5)
-        a2 += vec4(s.z, b.z > cut_codes ? 1.0 : 0.0, b.y > 0.5 ? 1.0 : 0.0, 1.0);
+        a2 += vec4(s.z, 0.0, 0.0, 1.0);
 }
 vec4 t1 = reduce4(a1);
 vec4 t2 = reduce4(a2);
@@ -314,23 +315,11 @@ if (li == 0u) {
     float e1 = measured ? t3.x / t1.z : 0.0;
     float e2 = measured ? t3.y / t1.z : 0.0;
     float my = t2.x / max(t2.w, 1.0);
-    float cut_share = t2.y / max(t2.w, 1.0);
-    float u_share = t2.z / max(t2.w, 1.0);
 #ifdef AHEAD
     imageStore(ring, ivec2(RING + 1, 0), vec4(e1, e2, my, 1.0));
 #else
-    bool cut = n_valid > 0 && cut_share > cut_share_min;
-#ifdef FIELD
-    cut = cut && u_share > 0.5;
-#endif
-    bool fade = false;
-    if (n_valid >= 2) {
-        float p1 = imageLoad(ring, ivec2((cur + RING - 1) % RING, 0)).z;
-        float p2 = imageLoad(ring, ivec2((cur + RING - 2) % RING, 0)).z;
-        float d0 = my - p1, d1 = p1 - p2;
-        fade = abs(d0) >= fade_codes && abs(d1) >= fade_codes && d0 * d1 > 0.0;
-    }
-    bool restart = n_valid == 0 || cut || fade;
+    // The cut / fade verdict is the shared judge's (scene_restart, from the P4 scene group); no private judge here.
+    bool restart = n_valid == 0 || scene_restart > 0;
     vec2 e = vec2(e1, e2);
     vec2 r = e;
     if (!restart) {
@@ -355,7 +344,7 @@ if (li == 0u) {
     if (!restart && measured)
         g = vec2(gain_law(r.x, e.x), gain_law(r.y, e.y));
     imageStore(ring, ivec2(cur, 0), vec4(e1, e2, my, restart ? 2.0 : 1.0));
-    imageStore(ring, ivec2(RING, 0), vec4(g, restart ? 1.0 : 0.0, cut_share));
+    imageStore(ring, ivec2(RING, 0), vec4(g, restart ? 1.0 : 0.0, 0.0));
 #endif
 }
 )GLSL";
@@ -518,7 +507,7 @@ ivec2 ob = q0 - ivec2(GP_R);
 // The 2x2 boxes at the clamped half-resolution positions (GrainModel::Low).
 for (int i = int(li); i < LR * LR; i += 256) {
     vec4 q = quad_codes(clamp(ob + ivec2(i % LR, i / LR), ivec2(0), hhi) * 2, isz);
-    sm[(i / LR) * LRP + i % LR] = 0.25 * (q.x + q.y + q.z + q.w);
+    sm[(i / LR) * LRP + i % LR] = vpu_half_luma_mean4(q.x, q.y, q.z, q.w);
 }
 barrier();
 // The horizontal Gaussian on every box row, at this block's columns: a thread per row and 8
@@ -1047,7 +1036,7 @@ for (int q = 0; q < 4; q++) {
 			c.tilesY = (c.geometry.h + kTilePx - 1) / kTilePx;
 			c.bandHeader = "#define R1 " + std::to_string(c.r1) + "\n" + "#define RING " + std::to_string(kRingSlots) + "\n" +
 				WeightsGlsl("fw", "FW_R", c.r1, FineWeight, c.geometry.scale) +
-				GrainPreserve::LowWeightsGlsl(WideSigma(c.geometry.scale)) + BAND_HEADER + LOW_HEADER;
+				GrainPreserve::LowWeightsGlsl(WideSigma(c.geometry.scale)) + BAND_HEADER + VpUnit::HalfLuma::GlslMean4() + LOW_HEADER;
 			const int sw = kTilePx + 2 * c.r1, hl = kTilePx / 2 + 2, rb = hl + 2 * c.gpR;
 			c.bandShmem = sizeof(float) * (sw * sw + sw * kTilePx + hl * hl + 1024 + rb * rb + rb * hl);
 			c.halfW = (c.geometry.w + 1) / 2;
@@ -1061,7 +1050,8 @@ for (int q = 0; q < 4; q++) {
 				QUAD_FUNCS + BAND_FUNCS_FAST;
 			c.lowHeader = "#define GP_R " + std::to_string(c.gpR) + "\n" + gather + LOW_HEADER_FAST +
 				BlockedConvGlsl("gp_across8", c.gpR, LowWeightAt, WideSigma(c.geometry.scale), 8, "1", true) +
-				BlockedConvGlsl("gp_down4", c.gpR, LowWeightAt, WideSigma(c.geometry.scale), 4, "LTP", false) + QUAD_FUNCS;
+				BlockedConvGlsl("gp_down4", c.gpR, LowWeightAt, WideSigma(c.geometry.scale), 4, "LTP", false) + QUAD_FUNCS +
+				VpUnit::HalfLuma::GlslMean4();
 			c.fastShmem = sizeof(float) * (sw * (sw + 1) + sw * (kTilePx + 1) + hl * hl + 9);
 			const int lr = kLowTile + 2 * c.gpR;
 			c.lowShmem = sizeof(float) * (lr * (lr + 1) + lr * (kLowTile + 1));
@@ -1192,7 +1182,7 @@ for (int q = 0; q < 4; q++) {
 		// lowTex (read back by the measure pass and by the apply pass after it).
 		bool MeasureAndReduce(pl_dispatch dispatch, pl_tex luma, const Params& params, const Constants& c,
 			pl_tex statsOut, pl_tex weightOut, pl_tex prevStats, pl_tex ring,
-			bool ahead, int cur, int nValid, int nUse, bool aheadValid, std::string& error, pl_tex lowTex = nullptr)
+			bool ahead, int cur, int nValid, int nUse, int sceneRestart, bool aheadValid, std::string& error, pl_tex lowTex = nullptr)
 		{
 			const bool fast = params.fast && lowTex;
 			if (fast && !LowPass(dispatch, luma, c, lowTex, !ahead, error))
@@ -1240,8 +1230,6 @@ for (int q = 0; q < 4; q++) {
 				const float floorEnergy = static_cast<float>(FloorEnergy(params.colorDepth));
 				const float winsorise = static_cast<float>(kWinsorise);
 				const float cutCodes = static_cast<float>(CutCodes(params.bitrateQuality, params.colorDepth));
-				const float cutShare = static_cast<float>(kCutShare);
-				const float fadeCodes = static_cast<float>(FadeCodes(params.colorDepth));
 				const float decay = static_cast<float>(DecayPerFrame(params.sourceHz));
 				const float deadZone = static_cast<float>(kDeadZone);
 				const float cap = static_cast<float>(ClampCap(params.cap));
@@ -1249,25 +1237,24 @@ for (int q = 0; q < 4; q++) {
 				const int aheadOn = aheadValid ? 1 : 0;
 				const pl_shader_desc d[3] = { Sampled("stats_in", statsOut), Sampled("weight_in", weightOut),
 					Storage("ring", ring, PL_DESC_ACCESS_READWRITE) };
-				const pl_shader_var v[14] = {
+				const pl_shader_var v[12] = {
 					{ pl_var_float("floor_energy"), &floorEnergy, true },
 					{ pl_var_float("winsorise"), &winsorise, true },
 					{ pl_var_float("cut_codes"), &cutCodes, true },
-					{ pl_var_float("cut_share_min"), &cutShare, true },
-					{ pl_var_float("fade_codes"), &fadeCodes, true },
 					{ pl_var_float("decay"), &decay, true },
 					{ pl_var_float("dead_zone"), &deadZone, true },
 					{ pl_var_float("cap"), &cap, true },
 					{ pl_var_float("ahead_ratio"), &aheadRatio, true },
 					{ pl_var_int("cur"), &cur, true },
 					{ pl_var_int("n_valid"), &nValid, true },
+					{ pl_var_int("scene_restart"), &sceneRestart, true },
 					{ pl_var_int("n_use"), &nUse, true },
 					{ pl_var_int("ahead_valid"), &aheadOn, true } };
 				std::string header = "#define RING " + std::to_string(kRingSlots) + "\n" + REDUCE_HEADER;
 				if (ahead) header = "#define AHEAD 1\n" + header;
 				if (useField) header = "#define FIELD 1\n" + header;
 				if (!Compute(dispatch, ahead ? "VideoProcessor detail pulse: reduce (look-ahead)" : "VideoProcessor detail pulse: reduce",
-					header, REDUCE_BODY, d, 3, v, 13, sizeof(float) * 1024, 1, 1, ahead ? -1 : 1))
+					header, REDUCE_BODY, d, 3, v, 12, sizeof(float) * 1024, 1, 1, ahead ? -1 : 1))
 				{
 					error = "the reduce pass failed";
 					return false;
@@ -1412,9 +1399,20 @@ for (int q = 0; q < 4; q++) {
 			const int nUse = (std::min)(nValid, WindowFrames(params.sourceHz));
 			const bool aheadValid = m.aheadSequence != 0 && params.sequence != 0 && m.aheadSequence == params.sequence + 1 &&
 				m.aheadGeometry == c.geometry;
+			// The cut / fade verdict: the shared judge's, read from the scene group (U7 over P4; registered fix D8). A frame
+			// with no readable group restarts (no private fallback) and is counted.
+			int sceneRestart = 0;
+			if (nValid > 0)
+			{
+				const VpDetailRestore::SceneRestartAnswer scene = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader);
+				sceneRestart = scene.restart ? 1 : 0;
+				sceneUnavailable = !scene.fromRecord;
+				if (!scene.fromRecord)
+					++sceneMissing;
+			}
 			if (!MeasureAndReduce(dispatch, luma, params, c, m.stats[next], m.weight,
 				consecutive && m.stats[m.statsIndex] ? m.stats[m.statsIndex] : nullptr, m.ring,
-				false, slot, nValid, nUse, aheadValid, error, params.fast ? m.low : nullptr))
+				false, slot, nValid, nUse, sceneRestart, aheadValid, error, params.fast ? m.low : nullptr))
 			{
 				++failures;
 				m.decided = false;
@@ -1520,7 +1518,7 @@ for (int q = 0; q < 4; q++) {
 		}
 		m.aheadSequence = 0;
 		if (!MeasureAndReduce(dispatch, luma, params, c, m.aheadStats, m.aheadWeight, nullptr, m.ring,
-			true, 0, 0, 0, false, error, params.fast ? m.low : nullptr))
+			true, 0, 0, 0, 0, false, error, params.fast ? m.low : nullptr))
 		{
 			++failures;
 			return false;
@@ -1560,7 +1558,7 @@ for (int q = 0; q < 4; q++) {
 		}
 		m.aheadSequence = 0;
 		if (!MeasureAndReduce(dispatch, luma, params, c, m.aheadStats, m.aheadWeight, nullptr, m.ring,
-			true, 0, 0, 0, false, error, params.fast ? m.low : nullptr))
+			true, 0, 0, 0, 0, false, error, params.fast ? m.low : nullptr))
 		{
 			++failures;
 			return false;

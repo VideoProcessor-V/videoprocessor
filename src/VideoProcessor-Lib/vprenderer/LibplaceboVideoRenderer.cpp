@@ -7640,6 +7640,7 @@ struct LibplaceboVideoRenderer::Impl
 				WideToUtf8(negotiatedDisplayDeviceName)) << "\",\n"
 			<< "  \"authoritative_stage\": \"after-render-before-present\",\n"
 			<< "  \"pixel_format\": \"R10G10B10A2_UNORM\",\n"
+			// PRECISION-OK 119#61: diagnostic string text describing a PNG mapping, not code
 			<< "  \"png_mapping\": \"R10 code c stored as 16-bit (c<<6)|(c>>4); recover with value>>6\",\n"
 			<< "  \"width\": " << desc.Width << ",\n"
 			<< "  \"height\": " << desc.Height << ",\n"

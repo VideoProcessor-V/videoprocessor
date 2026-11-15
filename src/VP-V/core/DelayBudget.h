@@ -52,6 +52,9 @@ namespace DelayBudget
 		// the queue's steering oscillates about it (delay-gate measurement 2026-10-24: the worst
 		// case is one refresh above the hold at every rate).
 		int displayPhaseRefreshes = 1;
+		// The deepest queue the plan may choose (a MAX-depth input, lead10/design-queue-keyed-products.md s2.7 S-C): the
+		// design depth unless the scheduler asked for a lower ladder step (NextLowerQueueFrames). Never above kDesignDepth.
+		int maxDepth = kDesignDepth;
 	};
 
 	// Every fixed cost of the total delay, in one place (the planner, the recommended value and
@@ -119,7 +122,7 @@ namespace DelayBudget
 		const double available = in.budgetMs - plan.fixedMs;
 		// A tiny tolerance so an exact fit (e.g. 4 x 41.6667 ms) is not lost to rounding.
 		const int fit = available > 0.0 ? static_cast<int>(std::floor(available / period + kExactFitTolerance)) : 0;
-		plan.queueFrames = (std::min)(fit, kDesignDepth);
+		plan.queueFrames = (std::min)(fit, (std::min)(kDesignDepth, (std::max)(0, in.maxDepth)));
 		plan.feasible = plan.queueFrames >= kMinimumDepth;
 		if (!plan.feasible)
 		{
@@ -135,6 +138,24 @@ namespace DelayBudget
 			static_cast<size_t>(std::floor(holdFrames + kExactFitTolerance)));
 		plan.holdFraction = (std::max)(0.0, holdFrames - static_cast<double>(plan.queueTargetFrames));
 		return plan;
+	}
+
+	// S-C, the LAST step of the memory ladder (lead10/design-queue-keyed-products.md s2.7, OWNER Q2 2026-11-14): the next LOWER
+	// ladder step below `currentFrames` for the SAME inputs. The budget, and so the total delay, is unchanged: the padding grows
+	// by what the queue gives up (the AVR setting never moves), so the step costs look-ahead, not latency. Never below
+	// kMinimumDepth: false when there is no lower feasible step (at the floor, or the budget itself is not feasible). The
+	// scheduler never does its own frame arithmetic: it asks here.
+	inline bool NextLowerQueueFrames(Inputs in, int currentFrames, Plan* lower)
+	{
+		if (currentFrames - 1 < kMinimumDepth)
+			return false;
+		in.maxDepth = currentFrames - 1;
+		const Plan p = Compute(in);
+		if (!p.feasible || p.queueFrames >= currentFrames)
+			return false;
+		if (lower != nullptr)
+			*lower = p;
+		return true;
 	}
 
 	// The total delay that gives the design depth (4 frames) at the slowest of the rates the

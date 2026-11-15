@@ -173,10 +173,25 @@ foreach ($name in $knownFailures.Keys) {
 if ($rigNoTiming.Count -gt 0) {
     "Chain gate: $($rigNoTiming.Count) of those failure(s) (including suspected) are 'rig: no display timing' (the display gave VP no frame statistics; timing tests are invalid on this rig, see the WARNING at the start)"
 }
-$markers = @(Select-String -Path $trx -Pattern 'SKIP-[A-Z-]+ [A-Za-z0-9_]+' -AllMatches | ForEach-Object { $_.Matches } |
-    ForEach-Object { $_.Value } | Sort-Object -Unique)
+# Markers: "SKIP-<KIND> <name>", the colon form "SKIP-<KIND>: <text>" (normalised to a space) and the "SKIPPED: <text>" lines
+# the net runner tests log. Nothing that skipped is silent: every marker is echoed and classified below.
+$markers = @(Select-String -Path $trx -Pattern 'SKIP-[A-Z-]+[ :]+[A-Za-z0-9_]+|SKIPPED[ :][^\r\n<]{0,80}' -AllMatches | ForEach-Object { $_.Matches } |
+    ForEach-Object { ($_.Value -replace '^(SKIP-[A-Z-]+):\s*', '$1 ') } | Sort-Object -Unique)
 $markers | ForEach-Object { "  marker: $_" }
-$noGpu = @($markers | Where-Object { $_ -like "SKIP-NO-GPU *" -or $_ -like "SKIP-NO-HARDWARE *" })
+# A skipped GPU-required test passes natively (CppUnitTest has no Inconclusive), so the gate fails on every marker that means
+# GPU evidence was not produced: no GPU/hardware, no baseline renderer (identity-vs-baseline tests), incompatible baseline, no
+# original shader/motion engine/filter clip, and "SKIPPED" lines that name the GPU switch or timer queries.
+$gpuEvidence = @("SKIP-NO-GPU *", "SKIP-NO-HARDWARE *", "SKIP-NO-BASELINE *", "SKIP-INCOMPATIBLE-BASELINE *", "SKIP-NO-ORIGINAL *", "SKIP-NO-ENGINE *", "SKIP-NO-CLIP *",
+    "SKIPPED*VP_TEST_GPU*", "SKIPPED*timer quer*")
+$noGpu = @($markers | Where-Object { $m = $_; @($gpuEvidence | Where-Object { $m -like $_ }).Count -gt 0 })
+$noGpu | ForEach-Object { "  GPU evidence missing (skipped, fails the gate): $_" }
+# Inputs the rig may lack, display-limited checks and opt-ins: listed as not run, not failed. Anything else is listed too.
+$notRunKinds = @("SKIP-NO-CORPUS *", "SKIP-NO-FOOTAGE *", "SKIP-NO-LOOPBACK *", "SKIP-NO-RECORDINGS *", "SKIP-NO-METER *", "SKIP-NO-PROJECTOR *",
+    "SKIP-READBACK *", "SKIP-PQ-OUTPUT *", "SKIP-OPT-IN *", "SKIP-NO-DISPLAY-TIMING *", "SKIPPED*")
+$markers | Where-Object { $m = $_; $noGpu -notcontains $m } | ForEach-Object {
+    $isNotRun = @($notRunKinds | Where-Object { $m -like $_ }).Count -gt 0
+    if ($isNotRun) { "  evidence not run (input absent / display or opt-in limited): $m" } else { "  unclassified skip marker (not run, review): $m" }
+}
 $noTiming = @()
 if ($onScreenRequested) {
     $noTiming = @($markers | Where-Object { $_ -like "SKIP-NO-DISPLAY-TIMING *" })

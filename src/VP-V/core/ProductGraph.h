@@ -603,13 +603,14 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
             }
         }
     g.leadChainWarning = reg.LeadChainWarningText(g.leadChainReads);
-    g.framesInFlight = size_t(gs.queueDepth) + gs.lookAheadWalk + maxHistory + R + gs.laneLead + 1u
+    g.framesInFlight = size_t(gs.queueDepth) + QueueFramesFor(R, gs.laneLead, gs.lookAheadWalk) + maxHistory + 1u
                        + maxLead + K;
     g.valid = true;
     return g;
 }
 
-// The configured queue's frames: R + L + the look-ahead walk (the term the record histories are derived from, Products.h).
+// The configured queue's frames: R + L + the look-ahead walk (the term the record histories are derived from, Products.h). A
+// GraphSettings overload of the 3-term VpSkeleton::QueueFrames (QueueFrames.h), which it reaches through QueueFramesFor.
 inline unsigned QueueFrames(const GraphSettings& gs) { return QueueFramesFor(gs.renderAhead, gs.laneLead, gs.lookAheadWalk); }
 
 // The visible cap note for the record histories of the products THIS graph holds ("" when none is capped or none is in the closure).

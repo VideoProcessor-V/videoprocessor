@@ -539,6 +539,13 @@ namespace Vpv
 					"and 960x720) that are recognised and named in the hold note and log but never re-based. conventional: only the "
 					"sizes re-base may apply. Or a list of ids (hdv_1440x1080, dvcprohd_1280x1080, dvcprohd_960x720, 1920x1080, ...). "
 					"This changes what is named, never what is applied; unknown ids are ignored and shown as a status line." },
+				// fx/dv-frame-quiet (refs/121 decision (i)): decisions on source time, a fixed frame delay behind the picture.
+				{ "source_resolution_frame_bound", "Source resolution: decide on a fixed frame delay (on | off)", "on",
+					"Default on (VP-V path only; the Original pathway never runs the source-resolution monitor). The source "
+					"resolution reading is decided a fixed 8 frames behind the picture (about a third of a second at 24p) and "
+					"its GPU work runs after the frame is submitted, so the same clip gives the same picture every time and "
+					"the work cannot disturb the frame in flight. The switch lands on the next cut, read ahead. Off: the earlier "
+					"mode, where the decision arrives whenever the GPU finishes." },
 			};
 			for (const TextRowSpec& r : kRows)
 				if (std::string(r.key) == key) return &r;

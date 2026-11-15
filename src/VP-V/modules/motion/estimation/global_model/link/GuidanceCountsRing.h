@@ -27,8 +27,13 @@ namespace CameraLink
 		bool Request(uint64_t pairSeq, pl_tex counts) override;
 		size_t Poll(std::vector<Done>& out) override;
 		uint64_t Dropped() const { return m_dropped; }
+		// Readbacks that reported an error (not "still drawing"). Each one is also delivered by Poll as a Done with
+		// failed = true and no counts, so the scheduler judges the pair and shows the failure (StatusLines).
+		uint64_t Failed() const { return m_failed; }
 
 	private:
+		struct Entry;
+		void Fail(Done& d, Entry* e, unsigned long hr);
 		struct Entry { pl_buf buf = nullptr; bool busy = false; bool native = false; uint64_t seq = 0; };
 		pl_gpu m_gpu;
 		pl_log m_log;
@@ -36,5 +41,7 @@ namespace CameraLink
 		bool m_nativeTried = false;
 		std::vector<Entry> m_entries;
 		uint64_t m_dropped = 0;
+		uint64_t m_failed = 0;
+		bool m_failureLogged = false;
 	};
 }

@@ -2203,12 +2203,15 @@ namespace SkeletonModuleTestsNs
 				Assert::AreEqual(5, int(u.used.laneLead));
 				Assert::IsTrue(u.used.laneLead >= 1);
 
-				// 20 queued ahead: the motion lead stops at kMaxLead (13, its pair ring); the lane is fed the real 20 and caps only to
-				// its own ring-slot budget (shown by the skeleton when it binds).
+				// 20 queued ahead: the motion lead stops at kMaxLead (the ahead-compute ceiling, OD 11-14; was the pair ring's 13); the
+				// lane is fed the real 20 and caps only to its own ring-slot budget (shown by the skeleton when it binds).
 				u = Feed(rig, impl, 4, 20, seq);
 				Assert::AreEqual(MotionAhead::kMaxLead, impl.motionProducer->lead);
+				Assert::AreEqual(int(VpSkeleton::kAheadCeiling), impl.motionProducer->lead, L"the motion lead is held to THE ceiling");
 				Assert::AreEqual(20, int(u.fed.laneLead));
 				Assert::AreEqual(int((std::min)(20u, SkeletonModule::LaneLeadCap(0))), int(u.used.laneLead));
+				Assert::IsTrue(int(u.used.laneLead) > impl.motionProducer->lead,
+					L"OD 11-14: the queue term L still counts the queued frames; only the compute depth is capped");
 
 				// No producer (motion off): the feed still runs.
 				impl.motionProducer.reset();

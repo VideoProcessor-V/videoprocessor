@@ -165,7 +165,7 @@ namespace VpvRenderer
 		// docs/VP-nvof-ahead.md (owner 2026-10-16): how many source frames ahead the
 		// optical-flow engine works at least (0 = off); off in low latency; never more than queued.
 		// B1 (owner 2026-11-10, doc 91 C): the MINIMUM (queue floor + engage threshold); the look-ahead runs
-		// every frame queued ahead up to MotionAhead::kMaxLead (MotionAhead::LeadFor).
+		// every frame queued ahead up to MotionAhead::kMaxLead (MotionAhead::LeadFor): the ahead-compute ceiling 6 (OD 11-14).
 		int motionAheadFrames = MotionAhead::kDefaultDepth;
 		// The engine is the established default (owner 2026-10-16); off = the matcher only.
 		bool opticalFlow = true;
@@ -307,6 +307,10 @@ namespace VpvRenderer
 		// cuts, the switch at a cut / real black / fast pan / low-detail moment or a crossfade, a
 		// short release fade; off = the behaviour before (and no fades).
 		bool sourceResolutionLatchFixes = true;
+		// fx/dv-frame-quiet (refs/121): [vprenderer] source_resolution_frame_bound (default on, VP-V path only; the Original
+		// pathway never runs the monitor): the monitor decides on a fixed frame count (D = 8) of source time and its GPU work
+		// runs after the submit, so the picture does not depend on readback timing; off = the earlier timing-dependent mode.
+		bool sourceResolutionFrameBound = true;
 		// h3-latch 2026-10-18: [vprenderer] source_resolution_cut_fixes (default on, with the latch fixes):
 		// camera moves, scrolls, dark passes and flashes are not cuts, same-level shot / reverse-shot cuts
 		// are, and shots also need part of the evidence time (SourceResolution::Tracker::Settings::cutFixes).
