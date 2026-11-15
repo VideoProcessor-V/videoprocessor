@@ -2,6 +2,7 @@
 
 #include <VP-V/core/ScratchArena.h>
 #include <VP-V/modules/control/skeleton/PlTexBackend.h>
+#include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 #include <VP-V/modules/repair/texture_restore/SceneRestart.h>
 
@@ -60,14 +61,18 @@ namespace TextureRestore
 
 	// --- Shared constants (shader and CPU model) ---
 	constexpr double kReferenceHz = 23.976;    // the content rate when it is unknown
-	constexpr double kSigma1 = 1.0, kSigma2 = 2.5, kSigma3 = 6.0;   // band splits (px at <= 2160 lines)
-	constexpr double kTilePx = 16.0;           // tile size at <= 2160 lines (x GrainScale)
-	constexpr int kSubBlocks = 4;              // per tile axis (16 sub-blocks)
-	constexpr int kQuietSubBlocks = 4;         // the quietest sub-blocks averaged for the grain level
-	constexpr int kGrainNeighbourhood = 2;     // grain level: the minimum over (2 x 2 + 1)^2 tiles
-	constexpr double kGrainCal1 = 2.2, kGrainCal2 = 3.8;   // pure grain reads about its own energy
+	// ND03: the band sigmas are the U2 unit's table (VpUnit::BandFromBase::kSigma*: 1 / 2.5 / 6 px). ND04: the grain
+	// constants are repair.grain_split's ONE law (GrainSplit::DefaultParams: 16 px tile, 4 sub-blocks, 4 quiet, 2,
+	// 2.2 / 3.8, kappa 2). Read here by name, never copied; the values are unchanged.
+	constexpr GrainSplit::Params kGrainLaw = GrainSplit::DefaultParams();
+	constexpr double kSigma1 = VpUnit::BandFromBase::kSigmaFine, kSigma2 = VpUnit::BandFromBase::kSigmaBase, kSigma3 = VpUnit::BandFromBase::kSigmaLow;   // band splits (px at <= 2160 lines)
+	constexpr double kTilePx = kGrainLaw.blockPx;                     // tile size at <= 2160 lines (x GrainScale)
+	constexpr int kSubBlocks = kGrainLaw.subBlocks;                   // per tile axis (16 sub-blocks)
+	constexpr int kQuietSubBlocks = kGrainLaw.quietSubBlocks;         // the quietest sub-blocks averaged for the grain level
+	constexpr int kGrainNeighbourhood = kGrainLaw.neighbourhood;      // grain level: the minimum over (2 x 2 + 1)^2 tiles
+	constexpr double kGrainCal1 = kGrainLaw.grainCal, kGrainCal2 = kGrainLaw.grainCal2;   // pure grain reads about its own energy
 	constexpr double kGrainExcess = 1.25;      // texture = the energy above this many grain levels
-	constexpr double kWienerKappa = 2.0;       // pixel split: texture where the local energy exceeds kappa x grain
+	constexpr double kWienerKappa = kGrainLaw.kappa;                  // pixel split: texture where the local energy exceeds kappa x grain
 	constexpr double kGrainMargin = 0.35;      // grain gain dead zone (relative: the peak-hold of a noisy estimate)
 	constexpr double kTextureMargin = 0.5;     // texture gain dead zone (grain levels of the band)
 	constexpr double kFocusLo = 0.15, kFocusHi = 0.21;    // F: none (step blur 2.5 px) .. full (1.7 px)
@@ -81,8 +86,10 @@ namespace TextureRestore
 	constexpr double kEnergyEps = 1e-6;        // codes^2
 
 	inline double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+	// ND07: equal edges are a step at e0 (the LightLevelLut rule); otherwise unchanged.
 	inline double Smoothstep(double e0, double e1, double x)
 	{
+		if (e1 == e0) return x >= e0 ? 1.0 : 0.0;
 		const double t = Clamp((x - e0) / (e1 - e0), 0.0, 1.0);
 		return t * t * (3.0 - 2.0 * t);
 	}
@@ -94,9 +101,9 @@ namespace TextureRestore
 		const int sub = (std::max)(1, static_cast<int>(std::lround(kTilePx * scale / kSubBlocks)));
 		return sub * kSubBlocks;
 	}
-	// The band Gaussians are the shared U2 law (VpUnit::BandFromBase).
-	inline int Radius1(double scale) { return VpUnit::BandFromBase::Radius(kSigma1 * scale, 3.0, true, 1e-9); }
-	inline double Weight1(int k, double scale) { return VpUnit::BandFromBase::Weight(k, kSigma1 * scale, Radius1(scale)); }
+	// The band Gaussians are the U2 unit's one band Gaussian (ND03: VpUnit::BandFromBase::BandRadius / BandWeight; FIX-B2-ND03).
+	inline int Radius1(double scale) { return VpUnit::BandFromBase::BandRadius(kSigma1 * scale); }
+	inline double Weight1(int k, double scale) { return VpUnit::BandFromBase::BandWeight(k, kSigma1 * scale); }
 	// The half-resolution sigma of a full-resolution split (the 2x2 box adds 0.25 px^2 per axis).
 	inline double HalfSigma(double sigma) { return VpUnit::BandFromBase::HalfSigma(sigma); }
 	inline int HalfRadius(double sigma) { return VpUnit::BandFromBase::Radius(VpUnit::BandFromBase::HalfSigma(sigma), 3.5, true, 1e-9); }

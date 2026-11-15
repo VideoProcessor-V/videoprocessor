@@ -68,7 +68,7 @@ namespace FrameAnalysis
 		kIdentity = 1u << 0,
 		kLuma = 1u << 1,      // histogram, mean/APL, percentiles
 		kRange = 1u << 2,     // BTB / WTW / near-black / clipped occupancy
-		kGrain = 1u << 3,     // grain / noise estimate (flat blocks); never used to remove grain
+		kGrain = 1u << 3,     // reserved bit, never set: the retired CPU flat-block measure (WAIVER-B2-ORPHAN-GRAIN, 2026-11-14); P10 is the one source
 		kChroma = 1u << 4,    // optional chroma summary (placeholder: not produced yet)
 		kMotion = 1u << 5,    // motion summary + vectors-valid (written by the motion segment)
 		kCadence = 1u << 6,   // repeat-of-previous, cadence phase, film clock
@@ -76,7 +76,7 @@ namespace FrameAnalysis
 		kLabels = 1u << 8,    // ID-net / encoding labels v1 (placeholder: not produced yet)
 		kCamera = 1u << 9,    // global camera model record (Plan 19), written by the motion segment
 	};
-	constexpr uint32_t kMeasuredGroups = kLuma | kRange | kGrain;
+	constexpr uint32_t kMeasuredGroups = kLuma | kRange;
 
 	struct Rect
 	{
@@ -126,13 +126,6 @@ namespace FrameAnalysis
 		double clipped = 0.0;
 	};
 
-	struct GrainEstimate
-	{
-		double rms = 0.0;               // noise/grain RMS in studio codes (flat-block method)
-		double confidence = 0.0;        // 0..1: share of blocks flat enough to measure
-		uint32_t blocks = 0, flatBlocks = 0;
-	};
-
 	struct ChromaSummary
 	{
 		double meanSaturation = 0.0, peakSaturation = 0.0;
@@ -178,7 +171,6 @@ namespace FrameAnalysis
 		Identity id;
 		LumaStats luma;
 		RangeOccupancy range;
-		GrainEstimate grain;
 		ChromaSummary chroma;
 		MotionSummary motion;
 		Cadence cadence;
@@ -361,16 +353,14 @@ namespace FrameAnalysis
 			return m_epoch;
 		}
 
-		// The producer's measured groups (luma, range, grain). False when the record is gone.
-		bool PublishMeasured(uint64_t seq, uint32_t groups, const LumaStats& luma, const RangeOccupancy& range,
-			const GrainEstimate& grain)
+		// The producer's measured groups (luma, range). False when the record is gone.
+		bool PublishMeasured(uint64_t seq, uint32_t groups, const LumaStats& luma, const RangeOccupancy& range)
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			Slot* slot = FindLocked(seq);
 			if (!slot) return false;
 			if (groups & kLuma) slot->record.luma = luma;
 			if (groups & kRange) slot->record.range = range;
-			if (groups & kGrain) slot->record.grain = grain;
 			slot->record.valid |= groups & kMeasuredGroups;
 			++m_counters.published;
 			return true;
@@ -461,7 +451,6 @@ namespace FrameAnalysis
 			const uint32_t measured = source->record.valid & kMeasuredGroups;
 			slot->record.luma = source->record.luma;
 			slot->record.range = source->record.range;
-			slot->record.grain = source->record.grain;
 			slot->record.valid |= measured | kCadence;
 			slot->record.cadence.repeatOfPrevious = true;
 			slot->record.cadence.repeatOf = source->record.cadence.repeatOfPrevious ?

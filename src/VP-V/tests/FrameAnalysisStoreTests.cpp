@@ -43,7 +43,7 @@ namespace FrameAnalysisStoreTestsNs
 
 	void Measure(Store& store, uint64_t seq, uint16_t code)
 	{
-		Assert::IsTrue(store.PublishMeasured(seq, kMeasuredGroups, Stats(code), RangeOccupancy{}, GrainEstimate{}));
+		Assert::IsTrue(store.PublishMeasured(seq, kMeasuredGroups, Stats(code), RangeOccupancy{}));
 	}
 
 	TEST_CLASS(FrameAnalysisStoreTests)
@@ -68,7 +68,7 @@ namespace FrameAnalysisStoreTestsNs
 			Assert::IsTrue(store.Read(10, Use::SingleFrame, kIdentity, record) == ReadStatus::Ok);
 			Assert::AreEqual(int(276), record.id.picture.top);
 			Measure(store, 10, 500);
-			Assert::IsTrue(store.Read(10, Use::Temporal, kLuma | kRange | kGrain, record) == ReadStatus::Ok);
+			Assert::IsTrue(store.Read(10, Use::Temporal, kLuma | kRange, record) == ReadStatus::Ok);
 			Assert::AreEqual(uint32_t(100), record.luma.histogram[500]);
 			Assert::IsTrue(record.Complete());
 		}
@@ -186,7 +186,7 @@ namespace FrameAnalysisStoreTestsNs
 			Assert::AreEqual(uint64_t(1), store.Snapshot().evicted);
 			store.Release(4);
 			Assert::IsTrue(store.Read(4, Use::SingleFrame, kIdentity, record) == ReadStatus::Missing);
-			Assert::IsFalse(store.PublishMeasured(4, kMeasuredGroups, Stats(1), RangeOccupancy{}, GrainEstimate{}));
+			Assert::IsFalse(store.PublishMeasured(4, kMeasuredGroups, Stats(1), RangeOccupancy{}));
 		}
 
 		TEST_METHOD(DisabledStoreServesNothing)
@@ -293,8 +293,7 @@ namespace FrameAnalysisStoreTestsNs
 				for (uint64_t s = 1; s <= 20000; ++s)
 				{
 					store.Begin(Id(s), kMeasuredGroups);
-					store.PublishMeasured(s, kMeasuredGroups, Stats(static_cast<uint16_t>(s % 1000)), RangeOccupancy{},
-						GrainEstimate{});
+					store.PublishMeasured(s, kMeasuredGroups, Stats(static_cast<uint16_t>(s % 1000)), RangeOccupancy{});
 					head.store(s);
 					if (s % 997 == 0) store.Invalidate(Discontinuity::DroppedFrame);
 				}

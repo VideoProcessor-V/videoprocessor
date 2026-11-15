@@ -72,14 +72,11 @@ namespace VpLaneProducts
 
 	uint64_t GrainSplitKernel::PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const
 	{
-		const uint64_t B = uint64_t(RegionEvidence::BlockSizeFor(int(dims.height)));
-		const uint64_t px = uint64_t(dims.width) * dims.height;
-		const uint64_t blocks = ((uint64_t(dims.width) + B - 1) / B) * ((uint64_t(dims.height) + B - 1) / B);
-		// v3 (refs/116): two half-size rg32f planes (tmp, low) = 4 B per plane px, plus the rgba32f block grid (quiet); the
-		// product textures are the slot's, not private.
-		const uint64_t halfPx = ((uint64_t(dims.width) + 1u) / 2u) * ((uint64_t(dims.height) + 1u) / 2u);
-		const uint64_t one = 2u * halfPx * 8u + blocks * 16u;
-		(void)px;
+		// Unit 5: the Splitter's four private intermediates, from the same shapes as Splitter::ArenaRequests (tmp + low
+		// half-size rg32f, the rgba32f `part` partial sums of the grain level pass, the rgba32f block grid `quiet`); the product
+		// textures are the slot's, not private. Step() runs with GrainSplit::Params(), so sub = its subBlocks.
+		const int B = RegionEvidence::BlockSizeFor(int(dims.height));
+		const uint64_t one = GrainSplit::Gpu::WorkingBytes(int(dims.width), int(dims.height), B, GrainSplit::Params().subBlocks);
 		return laneForm ? 2u * one : one;
 	}
 

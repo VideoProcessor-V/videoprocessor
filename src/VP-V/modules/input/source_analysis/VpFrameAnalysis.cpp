@@ -174,10 +174,6 @@ namespace VpFrameAnalysis
 	Reducer::Reducer(const FrameAnalysis::Rect& picture, const std::array<uint16_t, 1024>& studio)
 		: m_picture(picture), m_studio(studio)
 	{
-		const int blocks = (std::max)(0, picture.Width() / kGrainBlock);
-		m_blockSum.assign(static_cast<size_t>(blocks), 0);
-		m_blockSumSq.assign(static_cast<size_t>(blocks), 0);
-		m_blockExcluded.assign(static_cast<size_t>(blocks), 0);
 	}
 
 	void Reducer::AddRow(int y, const uint16_t* codes)
@@ -185,43 +181,13 @@ namespace VpFrameAnalysis
 		if (!codes || y < m_picture.top || y >= m_picture.bottom || m_picture.Empty())
 			return;
 		const int width = m_picture.Width();
-		const int blocks = static_cast<int>(m_blockSum.size());
-		// The grain bands start at the picture's top; a last partial band is left out.
-		const bool inBand = (y - m_picture.top) < (m_picture.Height() / kGrainBlock) * kGrainBlock;
 		for (int i = 0; i < width; ++i)
 		{
 			const uint16_t code = m_studio[codes[i] & 0x3ff];
 			++m_histogram[code];
 			m_sum += code;
-			const int block = i / kGrainBlock;
-			if (inBand && block < blocks)
-			{
-				m_blockSum[static_cast<size_t>(block)] += code;
-				m_blockSumSq[static_cast<size_t>(block)] += static_cast<uint64_t>(code) * code;
-				if (code <= FrameAnalysis::kNearBlackMax || code >= FrameAnalysis::kClippedMin)
-					m_blockExcluded[static_cast<size_t>(block)] = 1;
-			}
 		}
 		m_samples += static_cast<uint64_t>(width);
-		if (inBand && ++m_bandRows == kGrainBlock)
-			FlushBand();
-	}
-
-	void Reducer::FlushBand()
-	{
-		constexpr double n = kGrainBlock * kGrainBlock;
-		for (size_t b = 0; b < m_blockSum.size(); ++b)
-		{
-			++m_blocks;
-			if (!m_blockExcluded[b])
-			{
-				const double mean = m_blockSum[b] / n;
-				m_blockVariance.push_back(static_cast<float>((std::max)(0.0, m_blockSumSq[b] / n - mean * mean)));
-			}
-			m_blockSum[b] = m_blockSumSq[b] = 0;
-			m_blockExcluded[b] = 0;
-		}
-		m_bandRows = 0;
 	}
 
 	Measured Reducer::Finish()
@@ -257,23 +223,6 @@ namespace VpFrameAnalysis
 			out.range.wtw = wtw / total;
 			out.range.nearBlack = nearBlack / total;
 			out.range.clipped = clipped / total;
-		}
-		out.grain.blocks = m_blocks;
-		if (!m_blockVariance.empty())
-		{
-			std::vector<float> variance = m_blockVariance;
-			const size_t decile = variance.size() / 10;
-			std::nth_element(variance.begin(), variance.begin() + decile, variance.end());
-			const double floor = variance[decile];
-			out.grain.rms = std::sqrt(floor);
-			// "Equally flat": within twice the flattest decile's variance (plus a quarter code^2 so a
-			// clean synthetic picture is not all-or-nothing); 20% of the blocks gives full confidence.
-			const double limit = 2.0 * floor + 0.25;
-			uint32_t flat = 0;
-			for (float v : m_blockVariance)
-				flat += v <= limit ? 1u : 0u;
-			out.grain.flatBlocks = flat;
-			out.grain.confidence = m_blocks ? (std::min)(1.0, flat / (0.2 * m_blocks)) : 0.0;
 		}
 		return out;
 	}
@@ -433,8 +382,7 @@ namespace VpFrameAnalysis
 			return;
 		Measured measured;
 		if (Reduce(job.source, job.identity.picture, measured))
-			store.PublishMeasured(job.identity.seq, FrameAnalysis::kMeasuredGroups, measured.luma, measured.range,
-				measured.grain);
+			store.PublishMeasured(job.identity.seq, FrameAnalysis::kMeasuredGroups, measured.luma, measured.range);
 	}
 
 	void Producer::Start()

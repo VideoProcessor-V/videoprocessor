@@ -4,7 +4,7 @@
 // WP-23 producer (src/VP-V/modules/input/source_analysis/VpFrameAnalysis.*): the single shared
 // luma decode equals Sample().luma at every pixel for every format; the reductions equal a plain
 // reference over Sample() (histogram exact, means within 1e-6 relative) incl. BTB/WTW codes; the
-// range model (one studio mapping); the grain estimate on known noise; the async producer (records
+// range model (one studio mapping); the async producer (records
 // late until published, drop-oldest when behind with a visible reason, repeats). CPU only.
 
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
@@ -301,31 +301,6 @@ namespace FrameAnalysisProducerTestsNs
 				if (kind != Kind::R210)
 					Assert::IsTrue(measured.range.clipped > 0.0, KindName(kind));
 			}
-		}
-
-		TEST_METHOD(GrainEstimateOnKnownNoise)
-		{
-			// A flat P010 picture at code 500 with uniform noise in [-12, 12]: sigma = sqrt((25^2-1)/12) = 7.21.
-			Frame frame = Make(Kind::P010, 0);
-			std::vector<uint8_t>& data = *frame.bytes;
-			for (int y = 0; y < kHeight; ++y)
-				for (int x = 0; x < kWidth; ++x)
-					Put16(&data[static_cast<size_t>(y) * frame.source.rowBytes + static_cast<size_t>(x) * 2],
-						static_cast<uint16_t>((500 + Noise(x, y, 7, 12)) << 6));
-			VpFrameAnalysis::Measured measured;
-			Assert::IsTrue(VpFrameAnalysis::Reduce(frame.source, Rect{ 0, 0, kWidth, kHeight }, measured));
-			// The flattest decile of 8x8 sample variances sits a little below sigma.
-			Assert::IsTrue(measured.grain.rms > 5.5 && measured.grain.rms < 7.5, std::to_wstring(measured.grain.rms).c_str());
-			Assert::IsTrue(measured.grain.confidence > 0.9);
-			Assert::AreEqual(uint32_t((kWidth / 8) * (kHeight / 8)), measured.grain.blocks);
-			// Noise-free: rms 0. Near-black blocks are left out (crushed noise is not grain).
-			for (int y = 0; y < kHeight; ++y)
-				for (int x = 0; x < kWidth; ++x)
-					Put16(&data[static_cast<size_t>(y) * frame.source.rowBytes + static_cast<size_t>(x) * 2],
-						static_cast<uint16_t>((x < kWidth / 2 ? 70 : 500) << 6));
-			Assert::IsTrue(VpFrameAnalysis::Reduce(frame.source, Rect{ 0, 0, kWidth, kHeight }, measured));
-			Assert::AreEqual(0.0, measured.grain.rms, 1e-9);
-			Assert::AreEqual(uint32_t((kWidth / 16) * (kHeight / 8)), measured.grain.flatBlocks);
 		}
 
 		TEST_METHOD(ProducerPublishesAsynchronously)

@@ -4,7 +4,7 @@
   "U1": {
    "name": "grain_estimate",
    "blocking": true,
-   "baseline_duplicates": 20,
+   "baseline_duplicates": 7,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp",
