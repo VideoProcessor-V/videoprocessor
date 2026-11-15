@@ -26,6 +26,7 @@
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/motion/estimation/MotionAheadWalk.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
@@ -2307,6 +2308,168 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual(uint64_t(0), state.sourceAnalysis.sourceMonitorSequence);
 			Assert::IsFalse(state.sourceAnalysis.sourceMonitorHistorySet);
 			Assert::IsFalse(state.sourceAnalysis.sourceMonitorDvLogged);
+		}
+	};
+
+	// 15c-c8 (coordinator ruling 2026-11-15 13:53 EST, log:831; the TD fill rule's shape): an ENABLED LED drive's demand turns on the P4
+	// analysis lane and the frame-analysis store it needs, visibly on Ctrl+I, only while it is registered; nothing turns on without a
+	// consumer; never in the Original pathway; the configuration is never changed.
+	TEST_CLASS(SkeletonDemandRaiseTests)
+	{
+	public:
+		// The LED drive's declaration (LedDriveModule::DeclareSceneDemand): P4 at lag 0 and lag 1.
+		static std::vector<VpSkeleton::ConsumerDecl> LedConsumers()
+		{
+			VpSkeleton::ConsumerDecl d;
+			d.id = 0x0600;
+			d.name = "LED look-ahead cut";
+			VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 0);
+			VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 1);
+			return std::vector<VpSkeleton::ConsumerDecl>(1, d);
+		}
+
+		static Vpv::Skeleton::IExternalDemand* DemandOf(Rig& rig)
+		{
+			Vpv::Skeleton::IExternalDemand* demand =
+				static_cast<Vpv::Skeleton::IExternalDemand*>(rig.sk.Query(Vpv::Skeleton::kExternalDemandQueryId));
+			Assert::IsNotNull(demand);
+			return demand;
+		}
+
+		TEST_METHOD(AnEnabledLedDemandTurnsAnOffLaneAndItsStoreOnVisiblyAndItsWithdrawalTurnsThemOff)
+		{
+			Rig rig(Lane("off"));
+			VpFrameAnalysis::Host store;   // the renderer's store, registered before the module knows the renderer (as at start-up)
+			store.Owner(rig.Host()).Configure(false);   // frame_analysis_store off
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			rig.Life(RE::Lifecycle::SettingsApplied, 0);
+			for (int64_t s = 1; s <= 2; ++s)
+				rig.Frame(s);
+			Assert::IsNull(rig.sk.LaneOf(rig.Host()), L"analysis_lane off and no consumer: no lane");
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), "skeleton="), L"off: no lane line");
+			Assert::IsFalse(store.Enabled(), L"frame_analysis_store off and no consumer: no store");
+
+			int led = 0;
+			DemandOf(rig)->SetRaisingExternalDemand(rig.Host(), &led, LedConsumers(), {}, "LED drive");
+			Assert::AreEqual(std::string("LED drive"), rig.sk.RaiseReasonOf(rig.Host()));
+			for (int64_t s = 3; s <= 8; ++s)
+				rig.Frame(s);
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			Assert::IsNotNull(lane, L"the LED's demand turned the lane on");
+			const std::shared_ptr<VpSkeleton::LaneState> laneState = lane->State();
+			Assert::IsTrue(laneState != nullptr && laneState->graph.valid);
+			Assert::IsTrue(laneState->graph.Has(VpSkeleton::kP4SourceStats), L"the P4 the LED reads is in the graph");
+			Assert::IsFalse(laneState->graph.Has(VpSkeleton::kP10GrainSplit) || laneState->graph.Has(VpSkeleton::kP11RegionBlockStats) ||
+				laneState->graph.Has(VpSkeleton::kP12LightLevel), L"no consumer of the GPU products: none is made");
+			Assert::IsTrue(store.Enabled(), L"and the store that feeds it");
+			Assert::IsTrue(store.RaisedByDemand(), L"on only for the demand (the configuration stays off)");
+			const std::vector<std::string> ctrlI = rig.Lines(RE::StatusKind::Lines);
+			Assert::IsTrue(Has(ctrlI, "skeleton=analysis lane on (demand: LED drive)"), L"Ctrl+I names the consumer");
+			Assert::IsTrue(Has(ctrlI, "frame-analysis store on (demand: LED drive)"), L"and the store raised for it");
+			const std::string full = rig.Command();
+			Assert::IsTrue(full.find("Analysis lane: on (demand: LED drive; analysis_lane = off in the configuration, unchanged)") != std::string::npos);
+			Assert::IsTrue(full.find("Frame-analysis store: on (demand: LED drive") != std::string::npos);
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_gpu_device"), L"no GPU products by design, not a missing device");
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_engine_feed"), L"P4 only: no engine feed is started for it");
+
+			DemandOf(rig)->ClearExternalDemand(rig.Host(), &led);   // the drive is disabled (LedDriveModule::Stop)
+			rig.Frame(9);
+			Assert::IsNull(rig.sk.LaneOf(rig.Host()), L"withdrawn: back to the configured off");
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), "skeleton="));
+			Assert::IsFalse(store.Enabled(), L"and the store too");
+			Assert::IsFalse(Tap::StoreDemanded(rig.Host()));
+			Assert::IsTrue(rig.sk.RaiseReasonOf(rig.Host()).empty());
+		}
+
+		TEST_METHOD(NoConsumerOrAPlainDeclarationTurnsNothingOn)
+		{
+			Rig rig(Lane("off"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			rig.Life(RE::Lifecycle::SettingsApplied, 0);
+			int empty = 0, plain = 0;
+			DemandOf(rig)->SetRaisingExternalDemand(rig.Host(), &empty, {}, {}, "LED drive");   // a raise with no consumer
+			DemandOf(rig)->SetExternalDemand(rig.Host(), &plain, LedConsumers(), {});           // a consumer that does not raise
+			for (int64_t s = 1; s <= 6; ++s)
+				rig.Frame(s);
+			Assert::IsNull(rig.sk.LaneOf(rig.Host()), L"nothing turns on without a raising consumer");
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), "skeleton="));
+			Assert::IsFalse(Tap::StoreDemanded(rig.Host()), L"no store demand either");
+			Assert::IsTrue(rig.sk.RaiseReasonOf(rig.Host()).empty());
+			DemandOf(rig)->ClearExternalDemand(rig.Host(), &empty);
+			DemandOf(rig)->ClearExternalDemand(rig.Host(), &plain);
+		}
+
+		TEST_METHOD(TheOriginalPathwayIsNeverRaised)
+		{
+			Rig rig(Lane("off"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			rig.Life(RE::Lifecycle::SettingsApplied, 1);   // the Original pathway
+			int led = 0;
+			DemandOf(rig)->SetRaisingExternalDemand(rig.Host(), &led, LedConsumers(), {}, "LED drive");
+			for (int64_t s = 1; s <= 6; ++s)
+				rig.Frame(s);
+			Assert::IsNull(rig.sk.LaneOf(rig.Host()), L"Original: no lane, whatever is declared");
+			Assert::IsTrue(rig.Lines(RE::StatusKind::Lines).empty(), L"Original: no line");
+			Assert::IsFalse(Tap::StoreDemanded(rig.Host()), L"Original: no store demand");
+			rig.Life(RE::Lifecycle::GpuCreated);   // a reconcile without the renderer's word keeps the last word (Original)
+			rig.Frame(7);
+			Assert::IsNull(rig.sk.LaneOf(rig.Host()));
+			Assert::IsFalse(Tap::StoreDemanded(rig.Host()));
+
+			rig.Life(RE::Lifecycle::SettingsApplied, 0);   // back to the VP-V pathway: the registered demand raises now
+			for (int64_t s = 8; s <= 13; ++s)
+				rig.Frame(s);
+			Assert::IsNotNull(rig.sk.LaneOf(rig.Host()));
+			Assert::IsTrue(Tap::StoreDemanded(rig.Host()));
+			rig.Life(RE::Lifecycle::SettingsApplied, 1);   // Original again: dropped at once
+			Assert::IsNull(rig.sk.LaneOf(rig.Host()));
+			Assert::IsFalse(Tap::StoreDemanded(rig.Host()));
+			rig.Frame(14);
+			Assert::IsNull(rig.sk.LaneOf(rig.Host()));
+			DemandOf(rig)->ClearExternalDemand(rig.Host(), &led);
+		}
+
+		TEST_METHOD(AConfiguredLaneKeepsItsModeAndAShadowLaneIsRaisedToOn)
+		{
+			{
+				Rig rig(Lane("on"));
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				rig.Life(RE::Lifecycle::SettingsApplied, 0);
+				int led = 0;
+				DemandOf(rig)->SetRaisingExternalDemand(rig.Host(), &led, LedConsumers(), {}, "LED drive");
+				for (int64_t s = 1; s <= 6; ++s)
+					rig.Frame(s);
+				VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+				Assert::IsNotNull(lane);
+				Assert::IsTrue(lane->State()->graph.Has(VpSkeleton::kP10GrainSplit), L"configured on: the report is unchanged");
+				Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), "(demand: LED drive)"), L"the lane is on by configuration, not raised");
+				Assert::IsTrue(Tap::StoreDemanded(rig.Host()), L"the store is still demanded (it may be off in the configuration)");
+				DemandOf(rig)->ClearExternalDemand(rig.Host(), &led);
+				rig.Frame(7);
+				Assert::IsNotNull(rig.sk.LaneOf(rig.Host()), L"withdrawn: the configured lane stays");
+				Assert::IsFalse(Tap::StoreDemanded(rig.Host()));
+			}
+			{
+				Rig rig(Lane("shadow"));
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				rig.Life(RE::Lifecycle::SettingsApplied, 0);
+				int led = 0;
+				DemandOf(rig)->SetRaisingExternalDemand(rig.Host(), &led, LedConsumers(), {}, "LED drive");
+				for (int64_t s = 1; s <= 6; ++s)
+					rig.Frame(s);
+				Assert::IsNotNull(rig.sk.LaneOf(rig.Host()));
+				Assert::IsFalse(rig.sk.LaneOf(rig.Host())->ShadowOnly(), L"shadow results are not used: raised to on");
+				Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), "skeleton=analysis lane on (demand: LED drive)"));
+				Assert::IsTrue(rig.Command().find("analysis_lane = shadow in the configuration, unchanged") != std::string::npos);
+				DemandOf(rig)->ClearExternalDemand(rig.Host(), &led);
+				rig.Frame(7);
+				Assert::IsTrue(rig.sk.LaneOf(rig.Host()) == nullptr || rig.sk.LaneOf(rig.Host())->ShadowOnly(), L"withdrawn: shadow again");
+			}
 		}
 	};
 }
