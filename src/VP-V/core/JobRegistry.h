@@ -155,6 +155,9 @@ public:
             if (e.work != nullptr) host.Slot().Unregister(e.work);
         m_entries.clear();
         m_cpuJobs = 0;
+        // A refusal belongs to the graph it was made against: the status line starts clean (Refused() keeps the total; audit SHOULD 4).
+        m_refusedThisGraph = 0;
+        m_lastRefusal.clear();
     }
 
     const std::vector<Entry>& Entries() const { return m_entries; }
@@ -182,7 +185,7 @@ public:
             "queued-ahead source ring)%s%s",
             m_mode == ScheduleMode::CoreFirst ? "core first" : "shared gap", unsigned(Count(JobClass::Core)), unsigned(Count(JobClass::Derived)),
             unsigned(Count(JobClass::Slice)), unsigned(Count(JobClass::Fill)), unsigned(m_cpuJobs),
-            m_refused > 0 ? "; refused: " : "", m_refused > 0 ? m_lastRefusal.c_str() : "");
+            m_refusedThisGraph > 0 ? "; refused: " : "", m_refusedThisGraph > 0 ? m_lastRefusal.c_str() : "");
         return buf;
     }
 
@@ -190,6 +193,7 @@ private:
     bool Refuse(const std::string& why)
     {
         ++m_refused;
+        ++m_refusedThisGraph;
         m_lastRefusal = why;
         return false;
     }
@@ -200,6 +204,7 @@ private:
     ICpuJobSink* m_cpuSink = nullptr;
     size_t m_cpuJobs = 0;
     unsigned long long m_refused = 0;
+    unsigned long long m_refusedThisGraph = 0;   // since the last Clear (the status line)
     unsigned long long m_originalRefused = 0;
     std::string m_lastRefusal;
 };

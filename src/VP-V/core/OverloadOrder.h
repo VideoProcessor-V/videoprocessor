@@ -68,7 +68,9 @@ inline double OverloadLoad(const SlotBudget& b)
 class OverloadArbiter {
 public:
     OverloadArbiter() { Reset(); }
-    // State().line may point into this arbiter (the FillOff line names the fills), so it is not copied.
+    // State().line may point into this arbiter (the FillOff line names the fills), so it is not copied. Single-thread contract (the render
+    // thread): the `line` of any OverloadState copy (Step's return value included) is valid only until the next SetOptionalFills / Step /
+    // Reset on this arbiter; a caller that keeps the text past that copies it (std::string(state.line)) (audit SHOULD 1).
     OverloadArbiter(const OverloadArbiter&) = delete;
     OverloadArbiter& operator=(const OverloadArbiter&) = delete;
 
