@@ -540,7 +540,11 @@ namespace MotionAhead
 		const int prevSlot = (havePrevious && previousGeneration == job.generation && previousSequence + 1 == job.sequence)
 			? lumaRing.Find(previousGeneration, previousSequence) : EngineLumaRing::kNoSlot;
 		const int texIndex = lumaRing.Acquire(job.generation, job.sequence);
-		if (texIndex == EngineLumaRing::kNoSlot) return false;
+		if (texIndex == EngineLumaRing::kNoSlot)
+		{
+			NoteRingMiss("the engine-luma ring could not hold the frame");
+			return false;
+		}
 		context->UpdateSubresource(lumaTex[texIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(halfW), 0);
 		bool ok = true;
 		if (prevSlot != EngineLumaRing::kNoSlot)
@@ -883,8 +887,9 @@ namespace MotionAhead
 			{
 				const int fromIndex = lumaRing.Find(previousGeneration, previousSequence);
 				const int toIndex = lumaRing.Acquire(rq.generation, rq.to);
-				if (fromIndex == EngineLumaRing::kNoSlot || toIndex == EngineLumaRing::kNoSlot)
+				if (fromIndex == EngineLumaRing::kNoSlot || toIndex == EngineLumaRing::kNoSlot || fromIndex == toIndex)
 				{
+					NoteRingMiss("the engine-luma ring lost the chain's last frame");
 					engineRan = false;        // nothing ran: leaves the failure count alone
 					answer(Status::Failed);   // the chain's last frame is not held: no pair (cannot happen while the chain is valid)
 					return true;
@@ -899,6 +904,7 @@ namespace MotionAhead
 				const int toIndex = lumaRing.Acquire(rq.generation, rq.to);
 				if (fromIndex == EngineLumaRing::kNoSlot || toIndex == EngineLumaRing::kNoSlot || fromIndex == toIndex)
 				{
+					NoteRingMiss("the engine-luma ring could not hold the adopted pair");
 					engineRan = false;
 					answer(Status::Failed);
 					return true;
@@ -957,6 +963,16 @@ namespace MotionAhead
 		result.flow = flow;
 		answer(Status::Ready);
 		return true;
+	}
+
+	void Producer::NoteRingMiss(const char* what)
+	{
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			++requestStats.ringMisses;
+			error = what;   // Ctrl+I / Config status name it (no silent fallback)
+		}
+		DebugLog::Log("Motion ahead: %s", what);
 	}
 
 	bool Producer::WalkActiveLocked() const

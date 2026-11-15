@@ -277,6 +277,8 @@ namespace MotionAhead
 			unsigned long long staleGeneration = 0, forcedOffChain = 0, fairnessJobs = 0, droppedBehindRequests = 0;
 			// staleJobs: look-ahead jobs of a generation older than one a no-walk request already started - skipped (re-check S1).
 			unsigned long long adoptLostPairs = 0, hintsLost = 0, staleJobs = 0;
+			// ringMisses: an engine-luma ring lookup/acquire failed (cannot happen while the chain is valid; counted, logged, named in Error()).
+			unsigned long long ringMisses = 0;
 			double lastQueuedMs = 0.0, lastRunMs = 0.0, runMsSum = 0.0;
 		};
 		// At most this many requests in a row while a look-ahead job waits; then one job runs (the walk is never starved).
@@ -327,6 +329,7 @@ namespace MotionAhead
 		// consecutive-failure count; a Late / FromSlot / nothing-to-run answer does not).
 		bool ProcessRequest(OnDemand::Pending& pending, bool& engineRan);
 		void NoteWalkJob(const Job& job);                 // W2-C5b: the walk's bookkeeping (adoptLostPairs, hintsLost, lastJobMs)
+		void NoteRingMiss(const char* what);              // ph1: counted, logged, named in Error(); called with the mutex NOT held
 		bool WalkActiveLocked() const;                    // W2-C5b, under mutex
 		void ReleaseStaleRequestTextures(int w, int h);   // W2-C5b: the off-chain textures go on an engine size change
 		void Answer(OnDemand::Pending& pending, OnDemand::PairResult result);
