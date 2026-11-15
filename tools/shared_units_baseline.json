@@ -378,6 +378,18 @@
      "reason": "CutVerdict field and the 16->8-bit code conversion of the Acquired P4 SourceStatsRecord mean; no private mean or histogram; anchored to these exact forms so a new private law in this file is still caught"
     },
     {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscaleCut.h",
+     "pattern": "^\\s*std::string aplCause;\\s+// the APL was not read: why \\(shown; not a cut fault\\)$",
+     "kind": "false_positive",
+     "reason": "WAIVER-X5DUP-FP-ANCHORS: CutVerdict string field holding the memo Acquire's failure cause; APL only in its trailing comment; no histogram or mean is computed"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp",
+     "pattern": "^\\s*lines\\.push_back\\(\"Adaptive downscale: APL not read \\(\" \\+ module\\.AplCause\\(\\) \\+ \"\\)\"\\);$",
+     "kind": "false_positive",
+     "reason": "WAIVER-X5DUP-FP-ANCHORS: status-line text reporting that the P4 Acquire failed (no-silent-fallback rule); APL only in the string; no computation"
+    },
+    {
      "file": "src/VP-V/core/FrameAnalysisStore.h",
      "pattern": "kHistogramBins|histogram\\{\\}|histogram, mean/APL|average picture level",
      "kind": "false_positive",
@@ -545,6 +557,36 @@
      "pattern": "float meanLuma = 0\\.0f;",
      "kind": "false_positive",
      "reason": "carries the frame's mean luma (8-bit codes) read back from the scalar pass as data; the cut rule is CutFadeJudge::MeanStepCut / MeanStepCutLine"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
+     "pattern": "^\\s*\\+\\+cutFadeFrames;\\s+// no snap on a fade \\(owner 09:20: partial reset, never a restart\\)$",
+     "kind": "false_positive",
+     "reason": "WAIVER-X5DUP-FP-ANCHORS: diagnostic counter increment; the fade flag is the skeleton scene product's Scene::fade carried in the CutVerdict (ResolveCut), no judgement here"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
+     "pattern": "^\\s*unsigned long long CutFadeFrames\\(\\) const \\{ return cutFadeFrames; \\}$",
+     "kind": "false_positive",
+     "reason": "WAIVER-X5DUP-FP-ANCHORS: accessor of the diagnostic fade-without-snap counter; no judgement"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
+     "pattern": "^\\s*unsigned long long cutFadeFrames = 0;$",
+     "kind": "false_positive",
+     "reason": "WAIVER-X5DUP-FP-ANCHORS: member declaration of the diagnostic fade-without-snap counter; no judgement"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscaleCut.h",
+     "pattern": "^\\s*inline CutSource SceneCutSource\\(\\)$",
+     "kind": "false_positive",
+     "reason": "WAIVER-X5DUP-FP-ANCHORS: name of the reader that returns the skeleton scene product's published groups (FrameAnalysis::Store::PeekScene -> VerdictFromScene reads Scene::cut/cutLate/fade); it classifies nothing and calls no CutFadeJudge law"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp",
+     "pattern": "^\\s*module\\.SetCutSource\\(AdaptiveDownscale::SceneCutSource\\(\\)\\);$",
+     "kind": "false_positive",
+     "reason": "WAIVER-X5DUP-FP-ANCHORS: call site binding the scene-product reader to the module; no judgement"
     }
    ],
    "waiver": "WAIVER-JOB1-U7 EXPIRED at B6: the X2 copies are removed (L-B6), U7 measures 0 and the baseline is lowered 6 -> 0 (WAIVER-LB6-U7, gate C3)"
