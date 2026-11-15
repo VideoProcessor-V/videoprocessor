@@ -1915,6 +1915,79 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(rig.sk.SceneFactsOf(rig.Host(), 1, f), L"there is no frame before 1");
 		}
 
+		// U7 v3 (102b U7-MULTIFRAME-FADE-LAW): the scene product's fade is the pair law OR the multi-frame run, and the run the
+		// skeleton keeps in its ring equals one fold over the stream (the D8 harness's copy). Then one frame is not classified (a gap): the
+		// next frame rebuilds the run from the lane's older P4 records, counted as exact or reduced, and an exact rebuild changes nothing.
+		TEST_METHOD(ASlowFadeThroughTheSceneProductEqualsTheStreamFold)
+		{
+			const int frames = 60, gap = 40;
+			Rig rig(Lane("on"), size_t(frames) + 4);
+			for (int s = 0; s < frames + 4; ++s)
+			{
+				const double g = s <= 4 ? 1.0 : (std::max)(0.25, 1.0 - 0.75 * (s - 4) / 50.0);   // static, then a 50-frame fade
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const uint32_t h = (x * 73856093u) ^ (y * 19349663u) ^ (uint32_t(s) * 83492791u);
+						const double v = 64.0 + g * (double(128 + 12 * x) - 64.0) + double(int(h % 17u) - 8);
+						rig.store[size_t(s) * kW * kH + y * kW + x] = uint16_t((std::min)(1023.0, (std::max)(0.0, std::floor(v + 0.5))));
+					}
+			}
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			VpUnit::CutFadeJudge::FadeRun stream;
+			int compared = 0;
+			for (int64_t s = 1; s <= frames; ++s)
+			{
+				rig.Ingress(s);
+				if (s == 1)
+					rig.Deliver(1);
+				rig.Deliver(uint64_t(s) + 1);
+				rig.Begin(s);
+				if (s >= 2)
+				{
+					VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+					const VpSkeleton::AnalysisLane::ProductRead cur = lane->ReadOf(VpSkeleton::kP4SourceStats, uint64_t(s));
+					const VpSkeleton::AnalysisLane::ProductRead prev = lane->ReadOf(VpSkeleton::kP4SourceStats, uint64_t(s) - 1);
+					VpLaneProducts::SourceStatsRecord a, c;
+					if (prev.cpu && cur.cpu && VpLaneProducts::ReadSourceStats(prev.cpu, prev.cpuBytes, &a) &&
+						VpLaneProducts::ReadSourceStats(cur.cpu, cur.cpuBytes, &c))
+					{
+						const VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, false, false);
+						const bool expected = VpUnit::CutFadeJudge::FoldFadeRun(a, c, e, stream) || e.fade;
+						if (s != gap)
+						{
+							const Vpv::Skeleton::SceneCounters before = rig.sk.SceneCountersOf(rig.Host());
+							Vpv::Skeleton::SceneFacts f;
+							Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), uint64_t(s), f));
+							Assert::AreEqual(e.cut, f.pairCut, L"the pair cut is the pair law's (the delivered cut is the sequence law's since U7ACC)");
+							Assert::AreEqual(e.flash, f.pairFlash);
+							const Vpv::Skeleton::SceneCounters after = rig.sk.SceneCountersOf(rig.Host());
+							const uint64_t rebuilt = after.fadeRunRebuilt - before.fadeRunRebuilt;
+							const uint64_t reduced = after.fadeRunReduced - before.fadeRunReduced;
+							if (s == gap + 1)
+							{
+								Assert::AreEqual(uint64_t(1), rebuilt + reduced, L"the frame after the gap missed its ring entry: counted once");
+								if (rebuilt == 1)
+									Assert::AreEqual(expected, f.fade, L"an exact rebuild equals the stream fold");
+							}
+							else
+							{
+								Assert::AreEqual(uint64_t(0), rebuilt + reduced, L"in order, the ring is the path");
+								if (s < gap)
+									Assert::AreEqual(expected, f.fade, L"the ring path equals one fold over the stream");
+							}
+							++compared;
+						}
+					}
+				}
+				rig.After(s);
+			}
+			Assert::IsTrue(compared >= frames / 2, L"the lane served the P4 pairs");
+			const Vpv::Skeleton::SceneCounters end = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(uint64_t(0), end.published + end.notReady, L"no store: only this test classified (the gap is real)");
+		}
+
 		TEST_METHOD(AClaimFailureIsExplainedAndTheBackwardModeSaysItIsExpected)
 		{
 			Assert::IsTrue(Vpv::Skeleton::ClaimFailedNote(0, true).empty(), L"nothing to explain");
