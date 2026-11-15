@@ -138,7 +138,7 @@ namespace AdaptiveDownscaleStage
 		FallbackCatalog::Decision Fallback() const
 		{
 			const FallbackCatalog::Decision base = FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
-			// FIX-X5-CUT-P4: the shared P4 Acquire (get-or-compute) failed: no cut verdict this frame (also on StatusLines()).
+			// FIX-X5-CUT-P4 / C5: no scene group (the skeleton's scene product) for this frame: no cut verdict this frame (also on StatusLines()).
 			if (!base.engaged && requested && !module.CutAvailable())
 				return FallbackCatalog::Engaged("output scaling", "adaptive downscale: no cut verdict this frame (" + module.CutCause() + ")");
 			return base;

@@ -25,9 +25,10 @@
 //   edge_hi), and the per-frame grain term: Laplacian energy where the
 //   gradient is below edge_lo, shadow-weighted, reduced on the GPU into a
 //   persistent 1x1 state with the ramp grain_lo..grain_hi -> grain_floor..1,
-//   one-pole smoothing (grain_smooth_ms) and a snap on a cut (the shared cut event:
-//   the P4 records acquired through the skeleton memo and judged by U7, see
-//   AdaptiveDownscaleCut.h; FIX-X5-CUT-P4). No read-back on the render path.
+//   one-pole smoothing (grain_smooth_ms) and a snap on a cut (the delivered
+//   confirmed cut of the skeleton's scene product, U7 v2/v3, read from the
+//   frame-analysis store; never on a fade; see AdaptiveDownscaleCut.h;
+//   FIX-X5-CUT-P4, C5). No read-back on the render path.
 // - Blend hook, PL_HOOK_POST_KERNEL, after the user hooks (the SSIM shader's
 //   passes): the blend above. Alpha is passed through (Stage 10b keeps its
 //   out-of-range remainder in its own texture, not in alpha).
@@ -370,16 +371,20 @@ namespace AdaptiveDownscale
 		// Per render: settings, the source frame it shows and its duration.
 		// The grain state advances only on a new source sequence.
 		void SetFrame(const Settings& settings, uint64_t sourceSequence, float frameSeconds);
-		// FIX-X5-CUT-P4: where the cut event of a new source frame comes from (the stage sets P4CutSource(); tests set their own).
-		void SetCutSource(CutSource source) { cutSource = std::move(source); cutRecords.Clear(); cutResolved = false; }
+		// FIX-X5-CUT-P4 / C5: where the cut event of a new source frame comes from (the stage sets CutFromSceneProduct(), the skeleton's
+		// scene product; tests set their own).
+		void SetCutSource(CutSource source) { cutSource = std::move(source); cutResolved = false; cutContinuous = false; }
 		bool HasCutSource() const { return static_cast<bool>(cutSource); }
-		// Audit x5dup M3: the previous advanced frame's P4 record, kept here (the memo releases it at the next seal). The stage hands
-		// it to P4CutSource(&module.CutRecords()); the module commits it on each advance and clears it at discontinuities.
-		CutRecordCache& CutRecords() { return cutRecords; }
 		// False when the last asked cut event could not be read (cutCause says why; no cut is made then, visibly).
 		bool CutAvailable() const { return cutAvailable; }
 		const std::string& CutCause() const { return cutCause; }
 		unsigned long long CutUnavailableFrames() const { return cutUnavailableFrames; }
+		// C5: advances whose scene group said fade (no snap: partial-reset territory), and snaps on a cut delivered late (normally
+		// one source frame after the cut; Scene::cutLate). Status and tests.
+		unsigned long long FadeNoSnapFrames() const { return fadeNoSnapFrames; }
+		unsigned long long CutLateSnaps() const { return cutLateSnaps; }
+		// The APL of the last asked frame was not read (the P4 Acquire failed): why. Empty when read. Not a cut fault.
+		const std::string& AplCause() const { return aplCause; }
 		// The SSIM shader's condition for this frame: the source crop is
 		// taller than the destination rectangle.
 		void SetSourceDownscales(bool value) { sourceDownscales = value; }
@@ -405,8 +410,9 @@ namespace AdaptiveDownscale
 		MapState LastMapState() const { return mapState; }
 		// Stream robustness (owner 2026-10-14): a discontinuity - the map no
 		// longer follows the content and starts over (consumers see NoField).
-		// Audit x5dup M3: the kept previous P4 record is forgotten too (vector-validity rule: no history across a discontinuity).
-		void ForgetMap() { mapReady = false; mapSequence = 0; mapState = MapState::NoField; residualSequence = 0; residualPrevValid = false; motionReady = false; motionSequence = 0; cutRecords.Clear(); cutResolved = false; }   // gate B-S2: the next frame asks the cut again
+		// C5: the next frame's cut is read from its own scene group only (no scan of the frames since the last advance: vector-validity
+		// rule, no history across a discontinuity).
+		void ForgetMap() { mapReady = false; mapSequence = 0; mapState = MapState::NoField; residualSequence = 0; residualPrevValid = false; motionReady = false; motionSequence = 0; cutContinuous = false; cutResolved = false; }   // gate B-S2: the next frame asks the cut again
 		// The newest map (r = grain scale per block, g = trusted); tests.
 		pl_tex GrainMap() const { return mapReady ? map[mapIndex] : nullptr; }
 		bool hostReadableMap = false;   // tests: the map can be downloaded
@@ -441,8 +447,9 @@ namespace AdaptiveDownscale
 		uint64_t sequence = 0;
 		uint64_t advancedSequence = 0;
 		CutSource cutSource;
-		CutRecordCache cutRecords;
-		// Audit x5dup S3: the verdict asked for (sequence, advancedSequence), reused when the frame did not advance after it (a failed
+		// C5: true after an advance with no discontinuity since: the next cut ask covers the frames since advancedSequence.
+		bool cutContinuous = false;
+		// Audit x5dup S3: the verdict asked for (sequence, previous), reused when the frame did not advance after it (a failed
 		// final dispatch): not asked or counted twice.
 		bool cutResolved = false;
 		uint64_t cutResolvedSequence = 0;
@@ -451,6 +458,9 @@ namespace AdaptiveDownscale
 		bool cutAvailable = true;
 		std::string cutCause;
 		unsigned long long cutUnavailableFrames = 0;
+		unsigned long long fadeNoSnapFrames = 0;
+		unsigned long long cutLateSnaps = 0;
+		std::string aplCause;
 		float lastApl = -1.0f;
 		float frameSeconds = 1.0f / 24.0f;
 		bool sourceDownscales = true;

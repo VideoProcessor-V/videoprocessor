@@ -2,29 +2,41 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// FIX-X5-CUT-P4 (102b row X5-CUT-P4; design-EDGEMAP-DOMAIN-AXIS s4b): the adaptive downscale's grain term snaps to its target on a
-// CUT. The cut used to come from a private mean luma of the measure pass (a step of more than 20 codes, U7 MeanStepCut); it is now
-// the shared cut event: the two P4 source-stats records (the previous advanced source frame and this one), ACQUIRED through the
-// renderer's skeleton memo (get-or-compute-and-publish, nobody computes a private mean), judged by U7
-// (VpUnit::CutFadeJudge::ClassifyEvents, the one classification every consumer derives). The frame's APL is the P4 record's mean.
+// FIX-X5-CUT-P4 (102b row X5-CUT-P4; design-EDGEMAP-DOMAIN-AXIS s4b), moved onto the skeleton SCENE PRODUCT in C5 (audit x5dup MUST 1):
+// the adaptive downscale's grain term snaps to its target on a CUT. The cut is the shared one, judged ONCE per frame by the skeleton
+// (U7 v2/v3: VpUnit::CutFadeJudge::CutTracker over the P4 record sequence, SkeletonModule::FillScene) and published at the frame's seal
+// as the frame-analysis store's scene group (FrameAnalysis::Scene). This file only READS that group (Store::PeekScene of the renderer's
+// own store, the same read DetailPulse / TextureRestore and the content-intent observers do): no classification here, no ClassifyEvents
+// call, no private copy of a P4 record, no second computation of the scene product (producer chains, OD 2026-11-15 10:02).
 //
-// A source frame the module has not advanced before (first frame, or after a Release) is a cut by definition (a definition, not a fallback).
-// The P4 record is ASKED FOR through the standard Acquire, which computes it through its owner fill when it is not published yet.
-// Only a genuine failure (no skeleton memo: the Original pathway or no analysis lane; the compute failed with a cause) gives an
-// Unavailable verdict: no cut verdict that frame, shown by the standard visible fallback (status line, "output scaling" fallback
-// entry, counter; never log-only). There is no private backup and no special snap path.
+// Snap rule (owner 2026-11-15 08:35: high firing bar, precision first; false cuts equally unacceptable):
+// - snap on the DELIVERED confirmed cut only (FrameAnalysis::Scene::cut: once per confirmed cut, normally with the group of the frame
+//   after the cut, cutLate; a provisional verdict never delivers one). The grain term therefore snaps one source frame after the cut's
+//   first frame in the normal case (Scene::cutLate); that frame is smoothed from the old scene's term, as every scene-product consumer is.
+// - a source frame the module has not advanced before (first frame, after a Release) is a cut by definition (a definition, not a fallback).
+// - frames the module did not advance through (the renderer showed a later source frame) are read too, within the store's ring: a cut
+//   the product delivered with a skipped frame's group is not lost. Groups that are not there (never sealed) are not a cut and not a fault:
+//   the product itself does not judge across a gap (the tracker re-primes, partStart is never a cut).
+// - NO snap on a fade (owner 2026-11-15 09:20: fades are a partial reset, never a restart). Choice recorded for C5: the grain term keeps
+//   its one-pole smoothing through a fade; it does NOT apply Scene::fadeKeep (an owner option, refs\102b row X5-FADE-KEEP proposed). The
+//   fade flag is carried for diagnostics only.
+// - a missing scene group of the CURRENT frame (no memo / Original pathway, no store for the renderer, the store off, the group not
+//   sealed) is the visible Unavailable: no cut verdict, no snap, cause shown (status line, "output scaling" fallback entry, counter).
+//   There is no private re-classification and no backup path.
 //
-// The previous frame's record is KEPT by the module (CutRecordCache, audit x5dup M3), not re-asked from the memo: the memo releases a
-// frame at the next seal. Only the current frame is acquired; the cache is cleared at discontinuities.
+// The frame's APL (the scalar's diagnostic mean luma) is read from the current frame's P4 record through the renderer's skeleton memo
+// (the standard Acquire: get-or-compute-and-publish). It is not part of the cut; a failed read leaves the APL unread (aplCause, shown).
 //
-// Header-only, C++14. The pure decision (VerdictFrom) has no hub, memo or GPU dependency; VerdictFromMemo() runs it on a memo;
-// P4CutSource() binds it to the current frame's memo (render thread).
+// Header-only, C++14. The pure decision (VerdictFromScene) has no hub, memo, store or GPU dependency; CutFromSceneProduct() binds it to the
+// renderer's store and memo of the current frame (render thread).
 
+#include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
-#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
+#include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -35,127 +47,102 @@ namespace AdaptiveDownscale
 	{
 		enum class State : uint8_t { Known, Unavailable };
 		State state = State::Unavailable;
-		bool cut = false;
+		bool cut = false;       // snap the grain term: the scene product's delivered cut, or the first frame
+		bool first = false;     // no previous advanced frame: a cut by definition (never scored as a true or a false cut)
+		bool cutLate = false;   // the delivered cut belongs to an earlier frame (Scene::cutLate, or a skipped frame's group)
+		uint64_t cutGroup = 0;  // the source frame whose scene group delivered the cut (0: none)
+		bool fade = false;      // the current group says fade: NO snap (partial-reset territory; diagnostics only)
 		float apl = -1.0f;      // the frame's APL in 8-bit codes (P4 mean / 257); negative: not read
 		std::string cause;      // Unavailable: why (shown with the fallback)
+		std::string aplCause;   // the mean luma was not read: why (shown; not a cut fault)
 	};
 
 	// (previous advanced source sequence, this source sequence): 0 = none before. Render thread.
 	using CutSource = std::function<CutVerdict(uint64_t, uint64_t)>;
 
-	// Audit x5dup M3: the P4 record of the previous ADVANCED source frame, kept by the module. The skeleton memo releases a frame's
-	// spots at the next seal (keepFrames may be 0) and answers a released frame with FrameReleased, never a recompute, so re-asking
-	// the memo for the previous frame would leave every verdict Unavailable. Only the CURRENT frame is asked from the memo; its record
-	// is offered here and becomes the previous one when the module advances to that frame (Commit). Cleared at every discontinuity
-	// (Release, a stream discontinuity: the vector-validity rule): the next frame then asks the memo for the previous record through
-	// the standard Acquire, and a refusal there is the visible Unavailable (no cut verdict that frame), never a private recompute.
-	// Render thread (owned by the module, like the CutSource).
-	struct CutRecordCache
-	{
-		// The current frame's record was read (VerdictFrom).
-		void Offer(uint64_t sequence, const VpLaneProducts::SourceStatsRecord& record)
-		{
-			pendingSequence = sequence;
-			pending = record;
-			pendingValid = true;
-		}
-		// The module advanced to `sequence`: its offered record (if any) is now the previous one; none offered = nothing kept.
-		void Commit(uint64_t sequence)
-		{
-			valid = pendingValid && pendingSequence == sequence;
-			if (valid)
-			{
-				previousSequence = sequence;
-				previous = pending;
-			}
-			pendingValid = false;
-		}
-		// The kept record of `sequence`, or null when it is not the one kept.
-		const VpLaneProducts::SourceStatsRecord* Previous(uint64_t sequence) const
-		{
-			return valid && sequence != 0 && previousSequence == sequence ? &previous : nullptr;
-		}
-		void Clear()
-		{
-			valid = false;
-			pendingValid = false;
-			previousSequence = 0;
-			pendingSequence = 0;
-		}
-		bool Holds() const { return valid; }
-
-	private:
-		VpLaneProducts::SourceStatsRecord previous, pending;
-		uint64_t previousSequence = 0;
-		uint64_t pendingSequence = 0;
-		bool valid = false;
-		bool pendingValid = false;
-	};
-
-	// `read(seq, record, cause)` fills the P4 record of source frame `seq` (false + cause when it cannot). With a `cache`, the current
-	// record is offered to it and the previous record is taken from it when it holds that frame (the memo is asked only on a miss).
-	template <class Read>
-	inline CutVerdict VerdictFrom(uint64_t prevSequence, uint64_t sequence, Read&& read, CutRecordCache* cache = nullptr)
+	// `readScene(seq, scene)` reads the published scene group of source frame `seq` (false: none). `reach` = how many frames back the
+	// store can still hold (its ring depth; 0 = read only the current frame). `missingWhy` = the cause when the current group is missing.
+	template <class ReadScene>
+	inline CutVerdict VerdictFromScene(uint64_t prevSequence, uint64_t sequence, ReadScene&& readScene, size_t reach,
+		const std::string& missingWhy)
 	{
 		CutVerdict v;
-		VpLaneProducts::SourceStatsRecord cur, prev;
-		std::string cause;
-		if (!read(sequence, cur, cause))
-		{
-			v.cause = cause.empty() ? "P4 source stats unavailable" : cause;
-			return v;
-		}
-		if (cache != nullptr)
-			cache->Offer(sequence, cur);
-		v.apl = static_cast<float>(cur.mean) / 257.0f;
 		if (prevSequence == 0)
 		{
 			v.state = CutVerdict::State::Known;
 			v.cut = true;   // the first source frame: the grain term starts at its target
+			v.first = true;
 			return v;
 		}
-		const VpLaneProducts::SourceStatsRecord* kept = cache != nullptr ? cache->Previous(prevSequence) : nullptr;
-		if (kept == nullptr)
+		FrameAnalysis::Scene own;
+		if (!readScene(sequence, own))
 		{
-			if (!read(prevSequence, prev, cause))
-			{
-				const std::string why = cause.empty() ? std::string("P4 source stats of the previous frame unavailable") : cause;
-				v.cause = cache != nullptr ? why + " (previous record not kept: a discontinuity, or the previous frame had none)" : why;
-				return v;
-			}
-			kept = &prev;
+			v.cause = missingWhy.empty() ? std::string("scene group not readable") : missingWhy;
+			return v;
 		}
 		v.state = CutVerdict::State::Known;
-		v.cut = VpUnit::CutFadeJudge::ClassifyEvents(*kept, cur, false, false).cut;
+		v.fade = own.fade;
+		if (own.cut)
+		{
+			v.cut = true;
+			v.cutLate = own.cutLate;
+			v.cutGroup = sequence;
+			return v;
+		}
+		// Frames between the previous advance and this one that the module did not advance through: a cut their groups delivered.
+		if (sequence > prevSequence + 1 && reach > 0)
+		{
+			uint64_t from = prevSequence + 1;
+			if (sequence - from > reach)
+				from = sequence - static_cast<uint64_t>(reach);
+			for (uint64_t d = from; d < sequence; ++d)
+			{
+				FrameAnalysis::Scene skipped;
+				if (readScene(d, skipped) && skipped.cut)
+				{
+					v.cut = true;
+					v.cutLate = true;
+					v.cutGroup = d;
+					break;
+				}
+			}
+		}
 		return v;
 	}
 
-	// One verdict through a skeleton memo: Acquire (CPU form) of kP4SourceStats, the standard get-or-compute-and-publish.
-	inline CutVerdict VerdictFromMemo(VpSkeleton::SkeletonMemo& memo, uint64_t prevSequence, uint64_t sequence, CutRecordCache* cache)
+	// Why the current frame's scene group could not be read, for the renderer's store (null: none registered).
+	inline std::string SceneMissingWhy(const FrameAnalysis::Store* store, uint64_t sequence)
 	{
-		return VerdictFrom(prevSequence, sequence,
-			[&memo](uint64_t seq, VpLaneProducts::SourceStatsRecord& rec, std::string& cause)
-			{
-				const VpSkeleton::AcquireResult r = memo.Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
-				if (!r.Ok())
-				{
-					cause = std::string("P4 source stats unavailable: ") + VpSkeleton::Token(r.cause);
-					return false;
-				}
-				if (!VpLaneProducts::ReadSourceStats(r.cpu, r.cpuBytes, &rec))
-				{
-					cause = "P4 source stats record unreadable";
-					return false;
-				}
-				return true;
-			}, cache);
+		if (store == nullptr)
+			return "no frame analysis store for this renderer (no scene product to read)";
+		if (!store->Enabled())
+			return "frame analysis store off (frame_analysis_store=off): no scene product to read";
+		return "scene group not sealed for source frame " + std::to_string(sequence);
 	}
 
-	// The production source: the current frame's skeleton memo, with the module's record cache (null: no cache, the previous record
-	// is asked from the memo too). The cache must outlive the returned source (the module owns both).
-	inline CutSource P4CutSource(CutRecordCache* cache = nullptr)
+	// The frame's APL from its P4 record through the memo (Acquire, CPU form: the standard get-or-compute-and-publish).
+	inline void ReadAplFromMemo(VpSkeleton::SkeletonMemo& memo, uint64_t sequence, CutVerdict& v)
 	{
-		return [cache](uint64_t prevSequence, uint64_t sequence)
+		const VpSkeleton::AcquireResult r = memo.Acquire(VpSkeleton::kP4SourceStats, sequence, VpSkeleton::AcquireForm::Cpu);
+		if (!r.Ok())
+		{
+			v.aplCause = std::string("P4 source stats unavailable: ") + VpSkeleton::Token(r.cause);
+			return;
+		}
+		VpLaneProducts::SourceStatsRecord cur;
+		if (!VpLaneProducts::ReadSourceStats(r.cpu, r.cpuBytes, &cur))
+		{
+			v.aplCause = "P4 source stats record unreadable";
+			return;
+		}
+		v.apl = static_cast<float>(cur.mean) / 257.0f;
+	}
+
+	// The production source: the renderer of the frame this thread renders (Hub::ThisThreadFrame through the skeleton's memo lookup),
+	// its frame-analysis store's scene groups, and its memo for the APL.
+	inline CutSource CutFromSceneProduct()
+	{
+		return [](uint64_t prevSequence, uint64_t sequence)
 		{
 			const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::CurrentFrameMemo();
 			if (!fm.Valid())
@@ -165,7 +152,12 @@ namespace AdaptiveDownscale
 				v.cause = "no skeleton memo for this renderer: Original pathway or analysis lane off (expected there, not a fault)";
 				return v;
 			}
-			return VerdictFromMemo(*fm.memo, prevSequence, sequence, cache);
+			const FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(fm.host);
+			CutVerdict v = VerdictFromScene(prevSequence, sequence,
+				[store](uint64_t seq, FrameAnalysis::Scene& scene) { return store != nullptr && store->PeekScene(seq, scene); },
+				store != nullptr ? store->Depth() : 0, SceneMissingWhy(store, sequence));
+			ReadAplFromMemo(*fm.memo, sequence, v);
+			return v;
 		};
 	}
 }
