@@ -35,6 +35,7 @@
 #include <VP-V/core/DelayBudget.h>
 #include <VP-V/core/LaneSpareWork.h>
 #include <VP-V/core/Products.h>
+#include <VP-V/core/QueueWindow.h>
 #include <VP-V/core/SchedulerContract.h>
 
 #include <algorithm>
@@ -42,6 +43,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace VpSkeleton {
 namespace Admission {
@@ -91,13 +93,15 @@ struct AdmissionFacts {
     uint64_t aheadBytes[kProductCount] = {};   // bytes per demanded ahead frame (0 = the product holds nothing ahead)
     AheadConsumer aheadConsumers[kMaxAheadConsumers] = {};   // the ahead consumers and their declared needs (inactive ones are ignored)
     int queueAheadFrames = 0;              // L + W: the frames queued ahead of the render (DelayBudget / QueueFrames own it, never fixed here)
-    int aheadMinFrames = 1;                // the core floor of frames ahead (below it ahead core fills at render, visibly)
-    int queueFrames = 0;                   // frames the queue holds now
-    uint64_t queueBytesPerFrame = 0;       // bytes each queued frame holds regardless of ahead demand (early-upload slot etc.)
-    // S-C floor = the active MODE's own minimum queue, never a 200 ms floor (coordinator 2026-11-14 ruling, owner correction; lead10/
-    // design-queue-keyed-products.md s9 :168-176): standard/AVR-safe = the DelayBudget ladder floor; games 1 and competitive 0 are never touched
-    // (S-C is a no-op there and never a raise). The 200 ms AVR-safe tier is a CEILING owned by DelayBudget: the plan only ever shortens.
-    int queueMinFrames = DelayBudget::kMinimumDepth;
+    int queueBackFrames = 0;               // the window's back term (H + max(R, P)): frames behind the render each ahead product also holds
+    int aheadMinFrames = 1;                // the core declared depth (S-B never shrinks Core / Unpack below it; the ladder's declaredDepth)
+    int queueFrames = 0;                   // frames the queue holds now (the result while the ladder takes no S-C step)
+    // S-C (the LAST step) is THE ladder's (QueueWindow.h PlanAheadLadder): DelayBudget's next lower step for the SAME delay budget (total delay
+    // unchanged), never below DelayBudget::kMinimumDepth, standard / AVR-safe only, never a raise; games 1 and competitive 0 are never touched
+    // (coordinator 2026-11-14 ruling, owner correction; lead10/design-queue-keyed-products.md s9 :168-176). Not fed = no S-C step (shown).
+    // The 200 ms AVR-safe tier is its budgetMs: a CEILING owned by DelayBudget, never a floor.
+    DelayBudget::Inputs delayBudget;
+    bool delayBudgetFed = false;
 };
 
 struct Result {
@@ -114,12 +118,13 @@ struct Result {
     uint32_t unmeasuredCore = 0;
     // Ahead plan (owner answer via lead 11: plan to the grant, never evict; steps in order, each visible)
     bool aheadAdmitted[kProductCount] = {};   // computed early for frames ahead (else at its own render, through the same Acquire)
-    int aheadFrames = 0;                   // frames ahead demanded
-    int queueFrames = 0;                   // the queue length the plan asks for (== facts.queueFrames unless step 3 shortened it)
-    uint64_t aheadNeedBytes = 0;           // what the plan holds (ahead spots + queued frames)
-    uint32_t aheadProductsDropped = 0;     // step 1: optional products moved from early to render time
-    int aheadFramesDropped = 0;            // step 2
-    int queueFramesDropped = 0;            // step 3 (look-ahead shorter; DelayBudget padding keeps the total delay, shown)
+    int aheadFrames = 0;                   // frames ahead demanded (the plan's deepest depth)
+    int queueFrames = 0;                   // the queue length the plan asks for (the ladder's DelayBudget plan when S-C ran, else facts.queueFrames)
+    uint64_t aheadNeedBytes = 0;           // what the plan holds (AheadBytes of the ladder state: back + render + planned ahead, per product)
+    uint32_t aheadProductsDropped = 0;     // S-A: optional products moved from early to render time
+    int aheadFramesDropped = 0;            // S-B (and the ahead cap S-C lowered)
+    int queueFramesDropped = 0;            // S-C (look-ahead shorter; DelayBudget padding keeps the total delay, shown)
+    AheadPlan aheadPlan;                   // THE ladder's plan (QueueWindow.h PlanAheadLadder), for the memo (SkeletonMemo::SetAheadPlan)
     int aheadRequest = 0;                  // the largest ACTIVE consumer request (before the ceiling)
     int aheadComputeLimit = 0;             // min(aheadRequest, kAheadCeiling, queueAheadFrames): the ahead-compute limit, before the budget
     AheadBound aheadBound = AheadBound::NoConsumer;   // what bound the final ahead frames (Budget when S-B or the grant cut it)
@@ -132,34 +137,77 @@ struct Result {
     std::string line;                      // Ctrl+I / Config status / Ctrl+Alt+D
 };
 
-// The ahead plan's bytes: queued frames + ahead spots of the products computed early.
-inline uint64_t AheadNeedBytes(const AdmissionFacts& f, const Result& r, int aheadFrames, int queueFrames)
+// The window's feed for these facts (QueueWindow.h PlanAheadFeed): the ACTIVE consumers with their declared needs and the frames queued ahead.
+inline PlanAheadFeed AheadFeedOf(const AdmissionFacts& f)
 {
-    uint64_t perFrame = 0;
-    for (size_t i = 0; i < kProductCount; ++i)
-        if (r.aheadAdmitted[i]) perFrame += f.aheadBytes[i];
-    return uint64_t(aheadFrames > 0 ? aheadFrames : 0) * perFrame + uint64_t(queueFrames > 0 ? queueFrames : 0) * f.queueBytesPerFrame;
-}
-
-// aheadCompute (OD 11-14, design s10): min(max over active consumers of the declared need, the ceiling, the queue frames ahead). Game modes
-// compute nothing ahead (R9). Sets aheadRequest, aheadComputeLimit, aheadBound and aheadBy.
-inline int AheadCompute(const AdmissionFacts& f, Result& r)
-{
-    int need = 0;
-    r.aheadBy = nullptr;
+    PlanAheadFeed feed;
     for (size_t i = 0; i < kMaxAheadConsumers; ++i) {
         const AheadConsumer& c = f.aheadConsumers[i];
-        if (c.active && c.need > need) { need = c.need; r.aheadBy = c.name; }
+        if (c.active && c.need > 0)
+            feed.activeConsumers.push_back(AheadDemand{ Sat16(uint32_t(c.need)), c.name != nullptr ? c.name : "?" });
     }
-    r.aheadRequest = need;
-    r.aheadBound = need > 0 ? AheadBound::Consumer : AheadBound::NoConsumer;
-    if (f.mode == LatencyMode::Competitive || f.mode == LatencyMode::Games) need = 0;   // R9: no look-ahead work (backward-only tier)
-    const int ceiling = int(kAheadCeiling);   // the one ahead ceiling (shown on Ctrl+I when it binds, G7)
-    if (need > ceiling) { need = ceiling; r.aheadBound = AheadBound::Ceiling; }
-    const int queueAhead = f.queueAheadFrames > 0 ? f.queueAheadFrames : 0;
-    if (need > queueAhead) { need = queueAhead; r.aheadBound = AheadBound::Queue; }
-    r.aheadComputeLimit = need;
-    return need;
+    feed.queueAheadFrames = Sat16(uint32_t(f.queueAheadFrames > 0 ? f.queueAheadFrames : 0));
+    return feed;
+}
+
+// aheadCompute (OD 11-14, design s10): THE law QueueWindow.h AheadComputeLimitOf applies to the feed (min(max active need, kAheadCeiling,
+// queue frames ahead); 0 with no active consumer), never a second copy. Game modes compute nothing ahead (R9). Sets aheadRequest,
+// aheadComputeLimit, aheadBound and aheadBy.
+inline int AheadCompute(const AdmissionFacts& f, Result& r)
+{
+    const PlanAheadFeed feed = AheadFeedOf(f);
+    const AheadDemand top = MaxAheadNeed(feed.activeConsumers);
+    r.aheadRequest = int(top.need);
+    r.aheadBy = top.need > 0 ? top.consumer : nullptr;
+    if (top.need == 0) {
+        r.aheadBound = AheadBound::NoConsumer;
+        r.aheadComputeLimit = 0;
+        return 0;
+    }
+    if (f.mode == LatencyMode::Competitive || f.mode == LatencyMode::Games) {   // R9: no look-ahead work (backward-only tier)
+        r.aheadBound = AheadBound::Consumer;
+        r.aheadComputeLimit = 0;
+        return 0;
+    }
+    const uint16_t limit = AheadComputeLimitOf(feed);
+    const uint16_t held = top.need < feed.aheadCeiling ? top.need : feed.aheadCeiling;
+    r.aheadBound = limit < held ? AheadBound::Queue : (top.need > feed.aheadCeiling ? AheadBound::Ceiling : AheadBound::Consumer);
+    r.aheadComputeLimit = int(limit);
+    return int(limit);
+}
+
+inline QueueMode QueueModeOf(LatencyMode m)
+{
+    return m == LatencyMode::Games ? QueueMode::Games : (m == LatencyMode::Competitive ? QueueMode::Competitive : QueueMode::Normal);
+}
+
+// What the admission hands THE ladder (QueueWindow.h AheadNeed): the window (back, queued ahead, the computed depth), the grant, the mode, the
+// delay budget, and one AheadCost per product computed early (its bytes per frame, its class, Core / Unpack keeping the declared depth).
+inline AheadNeed AdmissionAheadNeed(const AdmissionFacts& f, const Result& r)
+{
+    AheadNeed n;
+    n.window.back = Sat16(uint32_t(f.queueBackFrames > 0 ? f.queueBackFrames : 0));
+    n.window.ahead = Sat16(uint32_t(f.queueAheadFrames > 0 ? f.queueAheadFrames : 0));
+    n.window.aheadCompute = Sat16(uint32_t(r.aheadFrames > 0 ? r.aheadFrames : 0));
+    n.window.aheadBy = r.aheadBy != nullptr ? r.aheadBy : "";
+    n.grantBytes = f.vramGrantBytes;
+    n.mode = QueueModeOf(f.mode);
+    n.budget = f.delayBudget;
+    n.budgetFed = f.delayBudgetFed;
+    const int floorAhead = f.aheadMinFrames > 0 ? (std::min)(f.aheadMinFrames, r.aheadFrames) : 0;
+    for (size_t i = 0; i < kProductCount; ++i) {
+        if (!r.aheadAdmitted[i]) continue;
+        AheadCost c;
+        c.id = uint16_t(i);
+        c.form = 1;   // GPU spot
+        c.bytesPerFrame = f.aheadBytes[i];
+        c.msPerFrame = f.measured[i] && f.costMs[i] > 0.0 ? f.costMs[i] : 0.0;
+        c.measured = f.measured[i];
+        c.cls = r.cls[i];
+        c.declaredDepth = KeepsDeclaredDepth(c.cls) ? Sat16(uint32_t(floorAhead > 0 ? floorAhead : 0)) : uint16_t(0);
+        n.costs.push_back(c);
+    }
+    return n;
 }
 
 // The Ctrl+Alt+D ahead compute line. Ceiling-bound: Ctrl+I info only (designed state). Less than asked within the cap: visible notice.
@@ -186,47 +234,57 @@ inline void AheadComputeLine(const AdmissionFacts& f, Result& r)
     r.aheadShortNotice = !gameMode && frames < (std::min)(r.aheadRequest, ceiling);
 }
 
-// Sizes the ahead work to the VRAM grant (owner answer via lead 11, 2026-11-14): first fewer products computed early (optional fill first, the
-// highest product id first; core last never), then fewer frames ahead down to the core floor, and only as the LAST step a shorter queue (a
-// look-ahead change, never below the mode's own minimum queue; never in games/competitive; never a raise). Never evicts: what is not planned early is filled at its own render through the same Acquire.
+// Sizes the ahead work to the VRAM grant (owner answer via lead 11, 2026-11-14) with THE ladder, QueueWindow.h PlanAheadLadder (one copy of
+// the law; audit MUST 1): S-A fewer products computed early (Fill, then Derived, then Slice; Core / Unpack never), S-B fewer frames ahead
+// down to the declared core depth, and only as the LAST step S-C DelayBudget's next lower queue step (total delay unchanged, never below
+// kMinimumDepth, never in games / competitive, never a raise). Never evicts: what is not planned early is filled at its own render through
+// the same Acquire. This function only maps the facts onto the ladder and its result onto the lines.
 inline void PlanAhead(const AdmissionFacts& f, Result& r)
 {
     r.queueFrames = f.queueFrames;
     r.aheadFrames = AheadCompute(f, r);   // a ceiling, not a target: S-B below may plan fewer
     for (size_t i = 0; i < kProductCount; ++i) r.aheadAdmitted[i] = r.admitted[i] && f.aheadBytes[i] > 0 && r.aheadFrames > 0;
+    const AheadNeed n = AdmissionAheadNeed(f, r);
     char buf[240] = {};
     if (f.vramGrantBytes == 0 || r.aheadFrames == 0) {
-        r.aheadNeedBytes = AheadNeedBytes(f, r, r.aheadFrames, r.queueFrames);
+        r.aheadNeedBytes = AheadBytes(n, std::vector<uint16_t>(n.costs.size(), n.window.aheadCompute));
         std::snprintf(buf, sizeof(buf), "ahead plan: %d frame(s)%s", r.aheadFrames,
             r.aheadFrames == 0 ? "" : " (no VRAM grant known: not planned; a spot over the grant is refused at fill and made at render)");
         r.aheadLine = buf;
         AheadComputeLine(f, r);
         return;
     }
-    auto fits = [&] { return AheadNeedBytes(f, r, r.aheadFrames, r.queueFrames) <= f.vramGrantBytes; };
-    // 1. fewer products early: optional (non-core) first, highest id first
-    for (size_t k = kProductCount; k-- > 0 && !fits();)
-        if (r.aheadAdmitted[k] && r.cls[k] != JobClass::Core && r.cls[k] != JobClass::Unpack) { r.aheadAdmitted[k] = false; ++r.aheadProductsDropped; }
-    // 2. fewer frames ahead, down to the core floor
-    const int floorAhead = f.aheadMinFrames > 0 ? f.aheadMinFrames : 1;
-    while (!fits() && r.aheadFrames > floorAhead) { --r.aheadFrames; ++r.aheadFramesDropped; }
-    // 3. LAST: a shorter queue (look-ahead), standard/AVR-safe only, never below the mode's minimum queue nor what the ahead frames need
-    // (ahead + the render frame). One frame per step stands in for DelayBudget's next lower ladder step at wiring (s9 S-C).
-    if (f.mode == LatencyMode::Standard || f.mode == LatencyMode::AvrSafe) {
-        const int minQueue = (std::max)(f.queueMinFrames, r.aheadFrames + 1);
-        while (!fits() && r.queueFrames > minQueue) { --r.queueFrames; ++r.queueFramesDropped; }
+    const int requested = r.aheadFrames;
+    const int startQueue = n.budgetFed ? DelayBudget::Compute(n.budget).queueFrames : 0;
+    r.aheadPlan = PlanAheadLadder(n);
+    const AheadPlan& p = r.aheadPlan;
+    r.aheadOverGrant = p.bytes > n.grantBytes;   // only the AtLatencyFloor state can be over: shown, ahead work at render
+    int deepest = 0;
+    for (size_t k = 0; k < p.depth.size(); ++k) {
+        const int d = (std::min)(int(p.depth[k].depth), int(p.aheadCap));
+        const size_t id = p.depth[k].id;
+        if (d == 0) {
+            if (id < kProductCount && r.aheadAdmitted[id] && !KeepsDeclaredDepth(r.cls[id])) ++r.aheadProductsDropped;
+            if (id < kProductCount) r.aheadAdmitted[id] = false;
+        }
+        if (d > deepest) deepest = d;
     }
-    r.aheadOverGrant = !fits();
+    r.aheadFrames = deepest;
+    r.aheadFramesDropped = requested > deepest ? requested - deepest : 0;
+    if (n.mode == QueueMode::Normal && p.queue.feasible) {
+        r.queueFrames = p.queue.queueFrames;
+        r.queueFramesDropped = startQueue > p.queue.queueFrames ? startQueue - p.queue.queueFrames : 0;
+    }
     if (r.aheadFramesDropped > 0 || r.aheadOverGrant) r.aheadBound = AheadBound::Budget;
     if (r.aheadOverGrant)
         for (size_t i = 0; i < kProductCount; ++i) r.aheadAdmitted[i] = false;   // nothing early: every frame fills at its own render
-    r.aheadNeedBytes = AheadNeedBytes(f, r, r.aheadOverGrant ? 0 : r.aheadFrames, r.queueFrames);
+    r.aheadNeedBytes = r.aheadOverGrant ? AheadBytes(n, std::vector<uint16_t>(n.costs.size(), uint16_t(0))) : p.bytes;
     std::snprintf(buf, sizeof(buf), "ahead plan: %d frame(s), %.1f of %.1f MB%s%s%s%s", r.aheadOverGrant ? 0 : r.aheadFrames,
         double(r.aheadNeedBytes) / 1048576.0, double(f.vramGrantBytes) / 1048576.0,
         r.aheadProductsDropped > 0 ? "; fewer products early" : "", r.aheadFramesDropped > 0 ? "; fewer frames ahead" : "",
         r.queueFramesDropped > 0 ? "; queue shortened (less look-ahead)" : "",
         r.aheadOverGrant ? "; limited by VRAM at the queue floor: ahead work at render" : "");
-    r.aheadLine = buf;
+    r.aheadLine = std::string(buf) + "; " + p.line;   // the ladder's own line (its step, the queue and padding, why S-C stopped)
     AheadComputeLine(f, r);
 }
 
