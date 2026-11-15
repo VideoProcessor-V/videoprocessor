@@ -7,7 +7,11 @@
 namespace VpComposed {
 
 // The ONE shared image-plane warp sampler (owner S-T1 Q1 11-14: the warp is BICUBIC, Catmull-Rom; R14-95). Every reader that resamples an image plane
-// at a landing from Plane::Warp (P10g grain level, TemporalDetail) calls this; nobody keeps a private bicubic. `P` needs int w, h and double at(x, y).
+// at a landing from Plane::Warp (P10g grain level, TemporalDetail) calls this. `P` needs int w, h and double at(x, y).
+// The Catmull-Rom (Keys a = -0.5) weight law is CubicWeights (rule 20): repair/temporal_detail/TemporalDetailModel.h (Detail::MakeTaps; its
+// edge-clamped SampleTaps is its own footprint rule) takes its weights here, global_model/PhotometricRefine.cpp samples through SampleBicubic.
+// One CPU copy remains, an open item to move: scaling/chroma_upscale/ChromaCfl.h CatmullRomWeights (ECV-BICUBIC-CHROMA, lead18 c5-fix-ecv3).
+// GPU shaders keep their own HLSL form of the law.
 // False when any of the 16 taps lies outside the frame or the position is not finite (the footprint rule: no clamped taps). CPU reference of the GPU neighbour-warp product.
 inline void CubicWeights(double t, double* w)
 {

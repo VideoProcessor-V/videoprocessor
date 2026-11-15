@@ -41,7 +41,8 @@
 //     uncertainty raster; Plane::Warp gives the landing. The owner decision does not concern this interpolation (S-T1 compared IMAGE warps).
 //   - the IMAGE warp sampler: SampleBicubic (WarpSampler.h, Catmull-Rom, no clamped taps) resamples a neighbour image plane at that landing;
 //     Plane::SampleLanded = Warp + SampleBicubic. This is the neighbour-warp sampler of the owner decision: every reader (P10g grain level,
-//     TemporalDetail) calls it; nobody keeps a private warp or a private bicubic (rule 1).
+//     TemporalDetail) calls it for neighbour warps (rule 1). Its weights CubicWeights are the one Catmull-Rom law (rule 20): TemporalDetailModel's
+//     taps and PhotometricRefine's sampler use them; the one CPU copy left, ChromaCfl.h CatmullRomWeights, is an open item to move (WarpSampler.h).
 // A landing that is not valid (trust 0, or outside the frame) still carries the dx / dy the chain held (Plane::At, Warped.x / .y): a reader that
 // reads dx / dy directly must check trust (or Warped.valid) first; Product::Value reports such a point as trust 0.
 //
