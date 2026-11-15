@@ -22,6 +22,7 @@
 // dark and lit endpoints (design section 4, "Adaptation").
 
 #include <VP-V/core/OnePole.h>
+#include <VP-V/core/RobustStats.h>
 
 #include <IntentDescriptor.h>
 
@@ -87,7 +88,7 @@ namespace AmbientAdapt
             m_windowNext = (m_windowNext + 1) % kMedianWindow;
             if (m_windowCount < kMedianWindow)
                 ++m_windowCount;
-            const double target = std::log2(Median() + kLuxOffset);
+            const double target = std::log2(RobustStats::MedianOf(m_window, m_windowCount) + kLuxOffset);
             if (!m_haveState)
             {
                 m_state = target;
@@ -161,17 +162,6 @@ namespace AmbientAdapt
         static double Alpha(double dt, double tau)
         {
             return OnePole::AlphaFor(dt, tau, OnePole::DtRule::AsGiven);   // core/OnePole.h (ND05); callers clamp dt >= 0
-        }
-
-        double Median() const
-        {
-            double sorted[kMedianWindow];
-            for (int i = 0; i < m_windowCount; ++i)
-                sorted[i] = m_window[i];
-            std::sort(sorted, sorted + m_windowCount);
-            if (m_windowCount % 2 == 1)
-                return sorted[m_windowCount / 2];
-            return 0.5 * (sorted[m_windowCount / 2 - 1] + sorted[m_windowCount / 2]);
         }
 
         Settings m_settings;

@@ -84,7 +84,7 @@ namespace CameraModel
 		int minPixels = 2000;
 		bool fadeTerms = true;                      // solve gain/offset with the geometry (I(W(x)) = gain * T(x) + offset)
 		bool translationOnly = false;               // false: Translation models refine 2 parameters, every other type a 4-parameter similarity correction
-		double huberK = 1.345;                      // Huber threshold in robust sigmas (1.4826 x median |r|)
+		double huberK = 1.345;                      // Huber threshold in robust sigmas (RobustStats::kMadToSigma x median |r|)
 		double minScaleCodes = 0.5;                 // floor of the robust sigma (8-bit-equivalent codes)
 		double minGradientCodes = 4;                // |T(x+1)-T(x-1)| + |T(y+1)-T(y-1)| below this: not a gradient pixel
 		double borderLumaPx = 3;                    // margin inside the active picture
