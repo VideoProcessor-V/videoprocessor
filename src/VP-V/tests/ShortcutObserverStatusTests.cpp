@@ -334,5 +334,49 @@ namespace ShortcutObserverStatusTest
 			Assert::AreEqual(1, r.observer.starts);
 			Assert::IsTrue(r.extension.PlanInForce().wanted);
 		}
+
+		// The executable's reader (FileFactsReader): the pathway in force is read once, from the first readable
+		// file (a [vpv] change takes effect at the next start); the [shortcuts] keys follow the file.
+		TEST_METHOD(ThePathwayInForceIsReadOnce)
+		{
+			std::string text = "[shortcuts]\nshow_profiles: Ctrl+P\n";   // a VP-V pathway, global_actions absent
+			bool readable = false;
+			ShortcutObserverStatus::FileFactsReader read([&](ConfigFile& config)
+				{
+					if (!readable)
+						return false;
+					config = LoadText(text);
+					return true;
+				});
+			ShortcutObserverStatus::Facts facts;
+			Assert::IsFalse(read(facts), L"not readable: no facts, and no pathway read yet");
+			readable = true;
+			Assert::IsTrue(read(facts));
+			Assert::IsTrue(facts.defaultApplies);
+			// A switch to the Original pathway is saved: it takes effect at the next start.
+			text = "[vpv]\npipeline_original_pathway: on\n";
+			Assert::IsTrue(read(facts));
+			Assert::IsTrue(facts.defaultApplies, L"the pathway in force is still a VP-V pathway");
+			// An explicit value applies at once.
+			text = "[vpv]\npipeline_original_pathway: on\n[shortcuts]\nglobal_actions:\n";
+			Assert::IsTrue(read(facts));
+			Assert::IsFalse(facts.defaultApplies);
+			// A process that started in the Original pathway gets no default hook before its next start.
+			text = "[vpv]\npipeline_original_pathway: on\n";
+			ShortcutObserverStatus::FileFactsReader original([&](ConfigFile& config)
+				{
+					config = LoadText(text);
+					return true;
+				});
+			Assert::IsTrue(original(facts));
+			Assert::IsFalse(facts.defaultApplies);
+			text = "[vpv]\npipeline_original_pathway: off\n";
+			Assert::IsTrue(original(facts));
+			Assert::IsFalse(facts.defaultApplies, L"Original == Bill until the next start");
+			// FromConfig: the two-argument form takes the pathway in force, the one-argument form the file's own.
+			Assert::IsTrue(ShortcutObserverStatus::FromConfig(LoadText("[vpv]\npipeline_original_pathway: on\n"), false).defaultApplies);
+			Assert::IsFalse(ShortcutObserverStatus::FromConfig(LoadText("[shortcuts]\nshow_profiles: Ctrl+P\n"), true).defaultApplies);
+			Assert::IsFalse(ShortcutObserverStatus::FromConfig(LoadText("[vpv]\npipeline_original_pathway: on\n")).defaultApplies);
+		}
 	};
 }
