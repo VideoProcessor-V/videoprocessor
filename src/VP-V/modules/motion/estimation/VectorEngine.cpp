@@ -302,7 +302,8 @@ namespace VpMotion
 		VectorDemand::Input decided = input;
 		decided.pairsExpected = facts.opticalFlow && !motionProducerStartFailed && !motionEngineFacts.producerRecovering &&
 			motionAheadSetting != 0;
-		decided.pairsDeliberatelyOff = !facts.opticalFlow || motionAheadSetting == 0;   // a setting, not a fault (M4)		if ((cameraWanted && !input.wants[cameraFit]) || (motionCameraGated && input.wants[cameraFit]))
+		decided.pairsDeliberatelyOff = !facts.opticalFlow || motionAheadSetting == 0;   // a setting, not a fault (M4)
+		if ((cameraWanted && !input.wants[cameraFit]) || (motionCameraGated && input.wants[cameraFit]))
 		{
 			decided.wants[cameraFit] = !motionCameraGated;   // the camera fit asked for the field: one more consumer of the same decision
 		}
