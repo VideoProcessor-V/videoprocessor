@@ -11,7 +11,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 
 | Count | Value |
 |---|---|
-| Modules | 47 |
+| Modules | 48 |
 | Documented rows | 394 |
 | VP-V keys in code (outside Bill's schema lists) | 389 |
 | of which documented | 389 |
@@ -48,6 +48,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Scaling | `scaling.refine` | placeholder | [README](../../src/VP-V/modules/scaling/refine/README.md) | 0 | 1 | 0/1 |
 | Scaling | `scaling.chroma_upscale` | placeholder | [README](../../src/VP-V/modules/scaling/chroma_upscale/README.md) | 1 | 2 | 1/2 |
 | Scaling | `scaling.chroma_upscale.basic` | draft | [README](../../src/VP-V/modules/scaling/chroma_upscale/basic/README.md) | 1 | 0 | 0/0 |
+| Scaling | `scaling.shared` | placeholder | [README](../../src/VP-V/modules/scaling/shared/README.md) | 0 | 0 | 0/0 |
 | Scaling | `scaling.geometry` | built | [README](../../src/VP-V/modules/scaling/geometry/README.md) | 5 | 8 | 1/8 |
 | Scaling | `scaling.output` | partial | [README](../../src/VP-V/modules/scaling/output/README.md) | 29 | 30 | 29/30 |
 | Colour | `colour.dm_pre` | placeholder | [README](../../src/VP-V/modules/colour/dm_pre/README.md) | 0 | 0 | 0/0 |
@@ -243,7 +244,7 @@ Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain
 
 ## Scaling
 
-Modules: `scaling.rebase`, `scaling.route_4k`, `scaling.refine`, `scaling.chroma_upscale`, `scaling.chroma_upscale.basic`, `scaling.geometry`, `scaling.output`.
+Modules: `scaling.rebase`, `scaling.route_4k`, `scaling.refine`, `scaling.chroma_upscale`, `scaling.chroma_upscale.basic`, `scaling.shared`, `scaling.geometry`, `scaling.output`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
