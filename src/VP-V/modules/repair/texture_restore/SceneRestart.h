@@ -3,7 +3,7 @@
 #pragma once
 
 // The restart decision of detail_pulse_stabilise and texture_restore (registered fix D8, WAIVER-B6-D8-MODELS): a cut or a fade
-// starts the references over. The judgement is the shared unit U7 (CutFadeJudge::ClassifyEvents over the two P4 records), read from
+// starts the references over. The judgement is the shared unit U7 (CutFadeJudge v2: the sequence law's delivered cut, the pair fade), read from
 // the SCENE group the skeleton published for the source frame (FrameAnalysis::Store::PeekScene via Acquire semantics: read only,
 // never classifies, never starts a producer). The modules' private tile-change judges (share of changed tiles, two-step mean ramp)
 // are gone.
@@ -48,15 +48,20 @@ namespace VpDetailRestore
 	{
 		bool restart = true;     // cut, fade or no record
 		bool fromRecord = false; // false: the record was missing (restart by the no-private-fallback rule)
+		float strength = 1.0f;   // how far to start over, 0..1: 1 on a restart; with softReset, the U7 v2 cut strength of a non-cut
 	};
 
-	inline SceneRestartAnswer SceneRestartOf(uint64_t sequence, SceneReaderFn reader)
+	// U7 v2 (U7-accuracy): `cut` is the scene group's DELIVERED cut (once per confirmed cut, one frame late at most; FrameAnalysis::Scene).
+	// Consumers keep the HARD reset on it (owner ruling Q4). softReset (default OFF, behind each consumer's switch) also reports the cut
+	// strength of a frame that is not a cut, for a partial start-over; the restart decision itself is unchanged by it.
+	inline SceneRestartAnswer SceneRestartOf(uint64_t sequence, SceneReaderFn reader, bool softReset = false)
 	{
 		SceneRestartAnswer a;
 		FrameAnalysis::Scene scene;
 		const bool found = sequence != 0 && (reader ? reader : DefaultSceneReader())(sequence, scene);
 		a.fromRecord = found;
 		a.restart = !found || scene.cut || scene.fade;
+		a.strength = a.restart ? 1.0f : softReset && scene.cutStrength > 0.0f ? (scene.cutStrength < 1.0f ? scene.cutStrength : 1.0f) : 0.0f;
 		return a;
 	}
 }

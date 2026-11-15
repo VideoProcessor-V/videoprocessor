@@ -164,6 +164,18 @@ namespace FrameAnalysis
 		bool cut = false;
 		bool fade = false;
 		SceneOrigin origin = SceneOrigin::None;   // consumers needing a cut read one value
+		// U7 v2 (the sequence law, VpUnit::CutFadeJudge::CutTracker, U7-accuracy). The law needs frame seq + 1 to confirm a cut, which is
+		// not sealed when frame seq is, so `cut` above is the DELIVERED restart signal: written once with the group and never rewritten,
+		// it fires exactly once per confirmed cut, at the cut frame when its successor was already there, else one frame late (cutLate:
+		// the cut is at seq - 1). The frame's own verdict is cutHere (rewritten by the Vp producer when frame seq + 1 confirms it;
+		// confirmed says which). A provisional verdict never delivers a cut. flash = a lighting flash (not a cut); cutPossible = a cut
+		// candidate (cut, flash or vetoed); cutStrength 0..1 (1 = cut).
+		bool cutLate = false;
+		bool cutHere = false;
+		bool confirmed = false;
+		bool flash = false;
+		bool cutPossible = false;
+		float cutStrength = 0.0f;
 	};
 
 	struct Labels

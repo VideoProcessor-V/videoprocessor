@@ -17,6 +17,7 @@
 #include <VP-V/core/MemoGpuGrant.h>
 #include <VP-V/modules/control/skeleton/SlotBudgetFeedHost.h>
 #include <VP-V/core/VramUsers.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/core/FrameAnalysisStore.h>
@@ -415,6 +416,25 @@ namespace Vpv
 			uint64_t sceneCacheSeq = 0;
 			bool sceneCacheValid = false;
 			bool sceneCacheCut = false, sceneCacheFade = false;
+			bool sceneCacheFlash = false, sceneCacheCutPossible = false, sceneCacheConfirmed = false, sceneCacheLate = false, sceneCacheHere = false;
+			float sceneCacheStrength = 0.0f;
+			// U7 v2 (CutFadeJudge sequence law, U7-accuracy): the tracker over this renderer's P4 records in frame order, the newest frame it
+			// holds (with a fingerprint of that record, so a frame number reused after a seek re-primes it) and the recent verdicts by frame
+			// (with their record fingerprints). All under sceneMutex. A verdict is provisional until frame seq + 1 was judged with it.
+			struct SceneVerdictSlot
+			{
+				bool used = false;
+				uint64_t seq = 0;
+				uint64_t print = 0;
+				VpUnit::CutFadeJudge::CutVerdict v;   // known = false until judged
+				bool deliveredOwn = false;            // this frame's own cut went out with its group (confirmed at its publish)
+			};
+			static constexpr size_t kSceneVerdicts = 16;
+			std::unique_ptr<VpUnit::CutFadeJudge::CutTracker> sceneTracker;
+			bool sceneTrackerPrimed = false;
+			uint64_t sceneTrackerNewest = 0, sceneTrackerNewestPrint = 0;
+			SceneVerdictSlot sceneVerdicts[kSceneVerdicts];
+			std::atomic<uint64_t> sceneConfirmed{ 0 }, sceneProvisional{ 0 }, sceneReprimes{ 0 }, sceneRepublished{ 0 };
 			uint64_t feedEra = 0;
 			bool feedHadEra = false;
 			uint64_t feedLastEngineSeq = 0;      // the last field seq handled (published, slipped or given up)
@@ -446,6 +466,147 @@ namespace Vpv
 
 		namespace
 		{
+			// U7 v2 (U7-accuracy): the scene sequence judge over the lane's P4 records. Render thread (ReadOf), under st.sceneMutex.
+			constexpr uint64_t kScenePrimeFrames = 8;   // frames pushed before `seq` when the tracker starts over (ref 4 + context 3 + 1)
+			using SceneSlot = HostState::SceneVerdictSlot;
+
+			bool ReadP4(Bundle& b, uint64_t seq, VpLaneProducts::SourceStatsRecord* out)
+			{
+				if (seq == 0)
+					return false;
+				const AnalysisLane::ProductRead r = b.lane.ReadOf(VpSkeleton::kP4SourceStats, seq);
+				return r.cpu != nullptr && VpLaneProducts::ReadSourceStats(r.cpu, r.cpuBytes, out);
+			}
+
+			// FNV-1a over the record's histogram, cells and counts: a frame number reused for another picture (a seek) is seen.
+			uint64_t RecordPrint(const VpLaneProducts::SourceStatsRecord& r)
+			{
+				uint64_t h = 1469598103934665603ull;
+				const auto mix = [&h](uint32_t v) { h ^= v; h *= 1099511628211ull; };
+				for (uint32_t v : r.hist)
+					mix(v);
+				for (uint32_t v : r.cells)
+					mix(v);
+				mix(r.gridFound);
+				mix(r.pixelCount);
+				return h;
+			}
+
+			// Pushes frame `s` into the tracker; the confirmed verdict it returns for the frame before goes into that frame's slot and onto
+			// `done` (the caller rewrites those Vp groups in the store).
+			void PushScene(HostState& st, uint64_t s, const VpLaneProducts::SourceStatsRecord& r, uint64_t print, std::vector<uint64_t>* done)
+			{
+				const VpUnit::CutFadeJudge::CutVerdict v = st.sceneTracker->Push(s, r);
+				if (v.known)
+				{
+					SceneSlot& d = st.sceneVerdicts[v.seq % HostState::kSceneVerdicts];
+					if (d.used && d.seq == v.seq)
+					{
+						d.v = v;
+						if (done)
+							done->push_back(v.seq);
+					}
+				}
+				SceneSlot& n = st.sceneVerdicts[s % HostState::kSceneVerdicts];
+				n.deliveredOwn = n.used && n.seq == s && n.print == print && n.deliveredOwn;   // the same picture again keeps its delivery
+				n.used = true;
+				n.seq = s;
+				n.print = print;
+				n.v = VpUnit::CutFadeJudge::CutVerdict();
+				st.sceneTrackerPrimed = true;
+				st.sceneTrackerNewest = s;
+				st.sceneTrackerNewestPrint = print;
+			}
+
+			// An older frame than the tracker holds (and no kept verdict): judged on a tracker of its own, the renderer's stays where it is.
+			VpUnit::CutFadeJudge::CutVerdict JudgeSceneApart(Bundle& b, uint64_t seq)
+			{
+				std::unique_ptr<VpUnit::CutFadeJudge::CutTracker> t(new VpUnit::CutFadeJudge::CutTracker());
+				t->Reset();
+				VpUnit::CutFadeJudge::CutVerdict out;
+				bool lastWasSeq = false;
+				VpLaneProducts::SourceStatsRecord r;
+				for (uint64_t s = seq > kScenePrimeFrames ? seq - kScenePrimeFrames : 1; s <= seq + 1; ++s)
+				{
+					if (!ReadP4(b, s, &r))
+						continue;
+					const VpUnit::CutFadeJudge::CutVerdict v = t->Push(s, r);
+					if (v.known && v.seq == seq)
+						out = v;
+					lastWasSeq = s == seq;
+				}
+				if (!out.known && lastWasSeq)
+					out = t->Provisional();
+				return out;
+			}
+
+			// The sequence verdict of `seq` (known = false: its record is not readable). Feeds the renderer's tracker up to `seq` (contiguous
+			// extension, else a re-prime from seq - 8) and one frame past it when frame seq + 1 is readable, so the verdict is confirmed; else
+			// it is provisional (judged without its successor) and counted. `done` gets the frames whose confirmed verdict arrived now.
+			// Caller holds st.sceneMutex.
+			VpUnit::CutFadeJudge::CutVerdict SceneVerdictLocked(HostState& st, Bundle& b, uint64_t seq, std::vector<uint64_t>* done)
+			{
+				VpLaneProducts::SourceStatsRecord rec;
+				if (!ReadP4(b, seq, &rec))
+					return VpUnit::CutFadeJudge::CutVerdict();
+				const uint64_t print = RecordPrint(rec);
+				SceneSlot& own = st.sceneVerdicts[seq % HostState::kSceneVerdicts];
+				const bool ownSame = own.used && own.seq == seq && own.print == print;
+				if (ownSame && own.v.known && own.v.confirmed)
+					return own.v;   // judged before with the same record
+				if (!st.sceneTracker)
+					st.sceneTracker.reset(new VpUnit::CutFadeJudge::CutTracker());
+				bool reprime = true;
+				if (st.sceneTrackerPrimed)
+				{
+					if (seq < st.sceneTrackerNewest)
+					{
+						if (!(own.used && own.seq == seq))
+							return JudgeSceneApart(b, seq);
+						// else: the same frame number holds another record (a seek renumbered): start over at `seq`
+					}
+					else if (seq - st.sceneTrackerNewest <= kScenePrimeFrames)
+					{
+						VpLaneProducts::SourceStatsRecord last;
+						reprime = !(ReadP4(b, st.sceneTrackerNewest, &last) && RecordPrint(last) == st.sceneTrackerNewestPrint);
+					}
+				}
+				VpLaneProducts::SourceStatsRecord r;
+				if (reprime)
+				{
+					st.sceneTracker->Reset();
+					st.sceneTrackerPrimed = false;
+					st.sceneReprimes.fetch_add(1, std::memory_order_relaxed);
+					for (uint64_t s = seq > kScenePrimeFrames ? seq - kScenePrimeFrames : 1; s < seq; ++s)
+						if (ReadP4(b, s, &r))
+							PushScene(st, s, r, RecordPrint(r), done);
+				}
+				else
+				{
+					for (uint64_t s = st.sceneTrackerNewest + 1; s < seq; ++s)
+						if (ReadP4(b, s, &r))
+							PushScene(st, s, r, RecordPrint(r), done);   // an unreadable frame between ends the part (the tracker's rule)
+				}
+				if (!st.sceneTrackerPrimed || st.sceneTrackerNewest != seq)
+					PushScene(st, seq, rec, print, done);
+				if (ReadP4(b, seq + 1, &r))
+					PushScene(st, seq + 1, r, RecordPrint(r), done);
+				SceneSlot& mine = st.sceneVerdicts[seq % HostState::kSceneVerdicts];
+				if (mine.used && mine.seq == seq && mine.v.known && mine.v.confirmed)
+				{
+					st.sceneConfirmed.fetch_add(1, std::memory_order_relaxed);
+					return mine.v;
+				}
+				// seq is the tracker's pending frame (seq + 1 was not readable): judged without its successor.
+				const VpUnit::CutFadeJudge::CutVerdict v = st.sceneTracker->Provisional();
+				mine.used = true;
+				mine.seq = seq;
+				mine.print = print;
+				mine.v = v;
+				st.sceneProvisional.fetch_add(1, std::memory_order_relaxed);
+				return v;
+			}
+
 			// Takes the pending views of `st` and gives the ones that fit `b` to its lane. Any thread (the
 			// pending mutex serialises); frames of another size are not analysed (counted as evicted).
 			void DrainPending(HostState& st, Bundle& b)
@@ -550,13 +711,39 @@ namespace Vpv
 		}
 
 		// ---- construction -------------------------------------------------------------------------
+		namespace
+		{
+			// U7-accuracy (owner ruling Q5): vector validity is invalidated at CONFIRMED cuts. The P5a facade asks this through its scene
+			// seam (MotionValidity::State::ConfirmedCutReader); the answer is the scene group the skeleton published: confirmed && cutHere (the
+			// frame's own verdict, judged with frame seq + 1). A provisional verdict refuses nothing.
+			bool ConfirmedCutAt(uint64_t seq)
+			{
+				FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::SingleStore();
+				FrameAnalysis::Scene s;
+				return store != nullptr && store->PeekScene(seq, s) && s.confirmed && s.cutHere;
+			}
+			// Live skeleton modules: the seam is cleared when the last one goes (it is ours only while one lives).
+			std::atomic<int>& SceneSeamUsers()
+			{
+				static std::atomic<int> users{ 0 };
+				return users;
+			}
+		}
+
 		SkeletonModule::SkeletonModule(Skeleton::ConfigLoader loader, std::function<uint64_t()> nowUs)
 			: loader_(std::move(loader)), nowUs_(nowUs ? std::move(nowUs) : std::function<uint64_t()>(SteadyUs))
 		{
+			SceneSeamUsers().fetch_add(1, std::memory_order_acq_rel);
+			MotionValidity::State::ConfirmedCutReader().store(&ConfirmedCutAt, std::memory_order_release);
 		}
 
 		SkeletonModule::~SkeletonModule()
 		{
+			if (SceneSeamUsers().fetch_sub(1, std::memory_order_acq_rel) == 1)
+			{
+				MotionValidity::State::ConfirmedCutFn ours = &ConfirmedCutAt;
+				MotionValidity::State::ConfirmedCutReader().compare_exchange_strong(ours, nullptr, std::memory_order_acq_rel);
+			}
 			std::vector<std::shared_ptr<HostState>> all;
 			hosts_.ForEach([&all](const void*, const std::shared_ptr<HostState>& st) { all.push_back(st); });
 			for (const std::shared_ptr<HostState>& st : all)
@@ -1198,76 +1385,141 @@ namespace Vpv
 				FeedEngine(*st, true);
 		}
 
-		// The scene of `seq` against `seq - 1`: the two P4 records, classified by the shared unit. This is the classification only; the SCENE PRODUCT
-		// (SceneOf / FillScene below) stores its cut / fade in the frame-analysis store's scene group once per frame and serves readers from there.
+		// The scene of `seq`: the sequence law's verdict (U7 v2, the renderer's CutTracker over the P4 records) and the pair law's fade over
+		// `seq - 1` -> `seq`. This is the classification only; the SCENE PRODUCT (SceneOf / FillScene below) stores its delivered cut / fade
+		// in the frame-analysis store's scene group once per frame and serves readers from there.
+		namespace
+		{
+			// SceneFactsOf's body; `done` (may be nullptr) gets the frames whose confirmed sequence verdict arrived in this call.
+			bool SceneFactsFor(HostState& st, Bundle& bundle, uint64_t seq, SceneFacts& out, std::vector<uint64_t>* done)
+			{
+				out = SceneFacts();
+				if (seq < 2)
+					return false;
+				const AnalysisLane::ProductRead cur = bundle.lane.ReadOf(VpSkeleton::kP4SourceStats, seq);
+				const AnalysisLane::ProductRead prev = bundle.lane.ReadOf(VpSkeleton::kP4SourceStats, seq - 1);
+				VpLaneProducts::SourceStatsRecord a, c;
+				if (cur.cpu == nullptr || prev.cpu == nullptr || !VpLaneProducts::ReadSourceStats(prev.cpu, prev.cpuBytes, &a) ||
+					!VpLaneProducts::ReadSourceStats(cur.cpu, cur.cpuBytes, &c))
+					return false;
+				// Scene EVENTS (cut / fade / flash) are scene facts: classified from the P4 records alone. This function reads NO validity source
+				// (no VpIndicator::TemporalValid, no Indicator at all): whether a vector pair is usable across a resync is answered only by the P5a
+				// MotionValidity facade (coordinator ruling 2026-11-08; tools/test_check_shared_units.py test_scene_facts_reads_no_validity_source).
+				const VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, false, false);
+				// U7 v2: cut / flash / cutPossible / strength from the sequence law (the renderer's tracker); the fade stays the pair law's.
+				VpUnit::CutFadeJudge::CutVerdict v;
+				{
+					std::lock_guard<std::mutex> lock(st.sceneMutex);
+					v = SceneVerdictLocked(st, bundle, seq, done);
+				}
+				if (!v.known)
+					return false;
+				out.valid = true;
+				out.cut = v.cut;
+				out.cutPossible = v.candidate;
+				out.flash = v.flash;
+				out.confirmed = v.confirmed;
+				out.gridLaw = v.gridLaw;
+				out.cutStrength = v.strength;
+				out.pairCut = e.cut;
+				out.pairCutPossible = e.cutPossible;
+				out.pairFlash = e.flash;
+				out.fade = e.fade;
+				out.histDistance = e.histDistance;
+				out.prevMean = a.mean;
+				out.curMean = c.mean;
+				out.prevSpread = a.p99 > a.p01 ? a.p99 - a.p01 : 0u;
+				out.curSpread = c.p99 > c.p01 ? c.p99 - c.p01 : 0u;
+				out.rectFound = c.rectFound != 0;
+				out.rectX0 = c.rectX0;
+				out.rectY0 = c.rectY0;
+				out.rectX1 = c.rectX1;
+				out.rectY1 = c.rectY1;
+				return true;
+			}
+		}
+
 		bool SkeletonModule::SceneFactsOf(const void* host, uint64_t seq, SceneFacts& out) const
 		{
 			out = SceneFacts();
 			const std::shared_ptr<HostState> st = hosts_.Find(host);
 			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
-			if (!b || seq < 2)
+			if (!b)
 				return false;
-			const AnalysisLane::ProductRead cur = b->lane.ReadOf(VpSkeleton::kP4SourceStats, seq);
-			const AnalysisLane::ProductRead prev = b->lane.ReadOf(VpSkeleton::kP4SourceStats, seq - 1);
-			VpLaneProducts::SourceStatsRecord a, c;
-			if (cur.cpu == nullptr || prev.cpu == nullptr || !VpLaneProducts::ReadSourceStats(prev.cpu, prev.cpuBytes, &a) ||
-				!VpLaneProducts::ReadSourceStats(cur.cpu, cur.cpuBytes, &c))
-				return false;
-			// Scene EVENTS (cut / fade / flash) are scene facts: classified from the two P4 records alone. This function reads NO validity source
-			// (no VpIndicator::TemporalValid, no Indicator at all): whether a vector pair is usable across a resync is answered only by the P5a
-			// MotionValidity facade (coordinator ruling 2026-11-08; tools/test_check_shared_units.py test_scene_facts_reads_no_validity_source).
-			const VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, false, false);
-			out.valid = true;
-			out.cut = e.cut;
-			out.cutPossible = e.cutPossible;
-			out.fade = e.fade;
-			out.flash = e.flash;
-			out.histDistance = e.histDistance;
-			out.prevMean = a.mean;
-			out.curMean = c.mean;
-			out.prevSpread = a.p99 > a.p01 ? a.p99 - a.p01 : 0u;
-			out.curSpread = c.p99 > c.p01 ? c.p99 - c.p01 : 0u;
-			out.rectFound = c.rectFound != 0;
-			out.rectX0 = c.rectX0;
-			out.rectY0 = c.rectY0;
-			out.rectX1 = c.rectX1;
-			out.rectY1 = c.rectY1;
-			return true;
+			return SceneFactsFor(*st, *b, seq, out, nullptr);
 		}
 
-		// The scene product's one fill: classify from the two P4 records (SceneFactsOf), write the store's scene group when the store holds the
-		// frame's record. The same body serves the seal (Begin) and a reader that arrives before the seal / with no record.
+		// The scene product's one fill: judge the frame (SceneFactsFor), decide the delivered cut, write the store's scene group when the store
+		// holds the frame's record and confirm the provisional groups of earlier frames. The same body serves the seal (Begin) and a reader that
+		// arrives before the seal / with no record.
 		bool SkeletonModule::FillScene(HostState& st, uint64_t seq, SceneAnswer* answer) const
 		{
-			bool cut = false, fade = false;
+			FrameAnalysis::Scene scene;
+			scene.origin = FrameAnalysis::SceneOrigin::Vp;
 			bool cached = false;
 			{
 				std::lock_guard<std::mutex> lock(st.sceneMutex);
 				if (st.sceneCacheValid && st.sceneCacheSeq == seq)
 				{
-					cut = st.sceneCacheCut;
-					fade = st.sceneCacheFade;
+					scene.cut = st.sceneCacheCut;
+					scene.fade = st.sceneCacheFade;
+					scene.cutLate = st.sceneCacheLate;
+					scene.cutHere = st.sceneCacheHere;
+					scene.flash = st.sceneCacheFlash;
+					scene.cutPossible = st.sceneCacheCutPossible;
+					scene.confirmed = st.sceneCacheConfirmed;
+					scene.cutStrength = st.sceneCacheStrength;
 					cached = true;
 				}
 			}
+			// U7 v2: frames whose confirmed verdict arrived with this frame (normally seq - 1); their Vp groups are rewritten below.
+			std::vector<uint64_t> done;
 			if (!cached)
 			{
+				const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
 				SceneFacts f;
-				if (!SceneFactsOf(st.host, seq, f) || !f.valid)
+				if (!b || !SceneFactsFor(st, *b, seq, f, &done) || !f.valid)
 					return false;
-				cut = f.cut;
-				fade = f.fade;
 				std::lock_guard<std::mutex> lock(st.sceneMutex);
+				// Delivery (FrameAnalysis::Scene::cut): this frame's confirmed cut now, else frame seq - 1's confirmed cut that did not go
+				// out with its own group (it was provisional then): exactly once per cut, one frame late at most. A provisional verdict
+				// never delivers a cut (on the footage it holds false cuts the successor removes: refs/102b U7-accuracy).
+				const HostState::SceneVerdictSlot& before = st.sceneVerdicts[(seq - 1) % HostState::kSceneVerdicts];
+				const bool late = before.used && before.seq == seq - 1 && before.v.known && before.v.confirmed && before.v.cut && !before.deliveredOwn;
+				HostState::SceneVerdictSlot& own = st.sceneVerdicts[seq % HostState::kSceneVerdicts];
+				const bool now = f.confirmed && f.cut;
+				if (now && own.used && own.seq == seq)
+					own.deliveredOwn = true;
+				scene.cut = now || late;
+				scene.cutLate = late;
+				scene.cutHere = f.cut;
+				scene.fade = f.fade;
+				scene.flash = f.flash;
+				scene.cutPossible = f.cutPossible;
+				scene.confirmed = f.confirmed;
+				scene.cutStrength = f.cutStrength;
 				st.sceneCacheSeq = seq;
 				st.sceneCacheValid = true;
-				st.sceneCacheCut = cut;
-				st.sceneCacheFade = fade;
+				st.sceneCacheCut = scene.cut;
+				st.sceneCacheFade = scene.fade;
+				st.sceneCacheLate = scene.cutLate;
+				st.sceneCacheHere = scene.cutHere;
+				st.sceneCacheFlash = scene.flash;
+				st.sceneCacheCutPossible = scene.cutPossible;
+				st.sceneCacheConfirmed = scene.confirmed;
+				st.sceneCacheStrength = scene.cutStrength;
 			}
 			if (answer)
 			{
 				answer->known = true;
-				answer->cut = cut;
-				answer->fade = fade;
+				answer->cut = scene.cut;
+				answer->fade = scene.fade;
+				answer->cutLate = scene.cutLate;
+				answer->cutHere = scene.cutHere;
+				answer->flash = scene.flash;
+				answer->cutPossible = scene.cutPossible;
+				answer->confirmed = scene.confirmed;
+				answer->cutStrength = scene.cutStrength;
 			}
 			if (cached)
 				st.sceneCacheHits.fetch_add(1, std::memory_order_relaxed);
@@ -1277,12 +1529,35 @@ namespace Vpv
 			if (FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(st.host))
 				if (store->Enabled())
 				{
-					FrameAnalysis::Scene scene;
-					scene.cut = cut;
-					scene.fade = fade;
-					scene.origin = FrameAnalysis::SceneOrigin::Vp;
 					if (store->PublishScene(seq, scene))
 						st.scenePublished.fetch_add(1, std::memory_order_relaxed);
+					// The confirmation of earlier frames (one frame late at most): only a PROVISIONAL group this module wrote is rewritten
+					// (another producer's group, or one already confirmed, is left alone); its fade is kept.
+					if (seq > 1)
+						done.push_back(seq - 1);
+					for (const uint64_t d : done)
+					{
+						if (d == seq)
+							continue;
+						FrameAnalysis::Scene old;
+						if (!store->PeekScene(d, old) || old.origin != FrameAnalysis::SceneOrigin::Vp || old.confirmed)
+							continue;
+						VpUnit::CutFadeJudge::CutVerdict v;
+						{
+							std::lock_guard<std::mutex> lock(st.sceneMutex);
+							const HostState::SceneVerdictSlot& slot = st.sceneVerdicts[d % HostState::kSceneVerdicts];
+							if (!(slot.used && slot.seq == d && slot.v.known && slot.v.confirmed))
+								continue;
+							v = slot.v;
+						}
+						old.cutHere = v.cut;   // the delivered `cut` / cutLate stay as written (exactly once per cut)
+						old.flash = v.flash;
+						old.cutPossible = v.candidate;
+						old.cutStrength = v.strength;
+						old.confirmed = true;
+						if (store->PublishScene(d, old))
+							st.sceneRepublished.fetch_add(1, std::memory_order_relaxed);
+					}
 				}
 			return true;
 		}
@@ -1301,6 +1576,12 @@ namespace Vpv
 					a.known = true;
 					a.cut = scene.cut;
 					a.fade = scene.fade;
+					a.cutLate = scene.cutLate;
+					a.cutHere = scene.cutHere;
+					a.flash = scene.flash;
+					a.cutPossible = scene.cutPossible;
+					a.confirmed = scene.confirmed;
+					a.cutStrength = scene.cutStrength;
 					a.from = SceneAnswer::From::Store;
 					st->sceneStoreReads.fetch_add(1, std::memory_order_relaxed);
 					return a;
@@ -1330,6 +1611,10 @@ namespace Vpv
 				c.liveFills = st->sceneLiveFills.load(std::memory_order_relaxed);
 				c.cacheHits = st->sceneCacheHits.load(std::memory_order_relaxed);
 				c.unknown = st->sceneUnknown.load(std::memory_order_relaxed);
+				c.confirmed = st->sceneConfirmed.load(std::memory_order_relaxed);
+				c.provisional = st->sceneProvisional.load(std::memory_order_relaxed);
+				c.reprimes = st->sceneReprimes.load(std::memory_order_relaxed);
+				c.republished = st->sceneRepublished.load(std::memory_order_relaxed);
 			}
 			return c;
 		}
@@ -1942,7 +2227,8 @@ namespace Vpv
 				if (sceneStore->Enabled())
 				{
 					FrameAnalysis::Scene already;
-					if (sceneStore->PeekScene(seq, already))
+					// U7 v2: a provisional group of this module's own (written by an early reader before frame seq + 1 existed) is judged again.
+					if (sceneStore->PeekScene(seq, already) && !(already.origin == FrameAnalysis::SceneOrigin::Vp && !already.confirmed))
 						st.sceneAlready.fetch_add(1, std::memory_order_relaxed);
 					else if (!sceneStore->HasRecord(seq) || !FillScene(st, seq, nullptr))
 						st.sceneNotReady.fetch_add(1, std::memory_order_relaxed);   // no record to write into, or no pair of P4 records: counted, not classified for nothing

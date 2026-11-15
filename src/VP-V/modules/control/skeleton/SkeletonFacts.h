@@ -38,13 +38,19 @@ namespace Vpv
 			bool p3Published = false;         // the analysis field slot (P3)
 		};
 
-		// The scene of frame `seq` against the previous frame, derived from the two P4 records exactly as every consumer does
-		// (VpUnit::CutFadeJudge::ClassifyEvents; the classification is derived, the cut / fade verdict is also stored once per frame by SceneOf's publisher). The raw record values are given so a reader can
-		// run the fade fit (CutFadeJudge::FadeFit) with its own scaling. Codes are the 16-bit half-plane sample codes of the P4 record.
+		// The scene of frame `seq` against the previous frame. U7 v2 (U7-accuracy): cut / flash / cutPossible / cutStrength are the SEQUENCE
+		// law's verdict (VpUnit::CutFadeJudge::CutTracker over this renderer's P4 records, frames seq - 8 .. seq + 1); fade stays the v1 pair
+		// law (ClassifyEvents over the two records), and the v1 pair cut / flash / cutPossible are kept as pair* for diagnostics. The verdict
+		// is stored once per frame by SceneOf's publisher. The raw record values are given so a reader can run the fade fit
+		// (CutFadeJudge::FadeFit) with its own scaling. Codes are the 16-bit half-plane sample codes of the P4 record.
 		struct SceneFacts
 		{
 			bool valid = false;               // both P4 records were readable
 			bool cut = false, cutPossible = false, fade = false, flash = false;
+			bool confirmed = false;           // the verdict saw frame seq + 1 (false = provisional, rewritten at the next frame's seal)
+			bool gridLaw = false;             // the 32 x 18 grid judged it (false: no grid, the v1 pair law)
+			float cutStrength = 0.0f;         // 0..1, 1 = cut
+			bool pairCut = false, pairCutPossible = false, pairFlash = false;   // the v1 pair law on the two records (diagnostic only)
 			uint32_t histDistance = 0;        // 0..65535
 			bool fullBetween = false;         // RESERVED, always false: scene events come from P4 alone; resync / validity is the P5a MotionValidity facade's
 			bool continuityBetween = false;   // RESERVED, always false (see above)
@@ -57,12 +63,15 @@ namespace Vpv
 		// SCENE as a skeleton product (W1-C7): what a reader of "cut / fade of frame `seq`" gets from SkeletonModule::SceneOf. The product is
 		// sealed per frame: the module publishes it into the frame-analysis store at the frame's seal (once; skipped when present). `from`
 		// says where this answer came from: Store = the record's scene group; Live = filled from the two P4 records now (the store is off, has
-		// no record for the frame, or the frame is not sealed yet). Both give the same cut / fade (one classification, ClassifyEvents).
+		// no record for the frame, or the frame is not sealed yet). Both give the same answer (one judge: SceneFacts above).
 		struct SceneAnswer
 		{
 			enum class From : uint8_t { None, Store, Live };
 			bool known = false;               // cut / fade are answered (false: the frame has no sealed pair of P4 records yet)
-			bool cut = false, fade = false;
+			bool cut = false, fade = false;   // cut = the DELIVERED restart signal (FrameAnalysis::Scene::cut: once per cut, one frame late at most)
+			bool cutLate = false, cutHere = false;                        // U7 v2: FrameAnalysis::Scene
+			bool flash = false, cutPossible = false, confirmed = false;   // U7 v2 (SceneFacts above)
+			float cutStrength = 0.0f;
 			From from = From::None;
 		};
 
@@ -76,6 +85,9 @@ namespace Vpv
 			uint64_t liveFills = 0;       // SceneOf answered by classifying the P4 records now (and filled the store when it holds the record)
 			uint64_t cacheHits = 0;       // SceneOf answered from this frame's live classification (no second classification)
 			uint64_t unknown = 0;         // SceneOf could not answer
+			// U7 v2: verdicts judged with frame seq + 1, verdicts given without it (provisional), tracker restarts (a seek, a gap, a
+			// renumbered frame) and earlier Vp groups rewritten when their confirmation arrived.
+			uint64_t confirmed = 0, provisional = 0, reprimes = 0, republished = 0;
 		};
 
 		// What the engine feed did (render thread): shown on the status lines, read by tests.

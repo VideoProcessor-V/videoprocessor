@@ -695,7 +695,8 @@ inline Registry FirstProducts()
     ProductDecl p4 = Make(kP4SourceStats, "p4_source_stats", "source stats", Backend::Cpu, 1, Tier::T0, content,
                           Bit(kSettingsAnalysis));
     AddInput(p4, kP1HalfLuma, 0);
-    p4.size.fixedBytes = 8192;   // today's producer layout (VpLaneProducts::kStatsBytes); 16384 when SA3 adds the LED cells and HDR grid
+    // today's producer layout (VpLaneProducts::kStatsBytes; v2 adds the 32x18 cell means, 6472 bytes used); 16384 when SA3 adds the HDR grid
+    p4.size.fixedBytes = 8192;
     p4.residency = Residency::SystemRam;
     p4.missingInputForm = true;   // stats of a frame need no history to start
     p4.refRenderMs = 0.4f;

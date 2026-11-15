@@ -392,10 +392,30 @@ namespace MotionValidity
 		// continuity and settings[motion]: a look-ahead copy queued before a FULL whose pair
 		// spans it is refused whatever the epoch says. Unbound: Adjacent only (the caller keeps
 		// the epoch form of PairValid).
+		// U7-accuracy (owner ruling Q5), bound or not: a pair whose `b` the scene product CONFIRMED as a cut (ConfirmedCutReader) is
+		// refused too, and counted (ConfirmedCutRefusals). No reader set, or no confirmed verdict yet: nothing is refused on the scene.
+		//
+		// The scene seam: true when frame `seq` is a CONFIRMED cut (the first frame of the new shot). Set by the scene producer's module
+		// (the skeleton, SkeletonModule: FrameAnalysis::Scene confirmed && cutHere); null = no scene veto (tests, no skeleton).
+		using ConfirmedCutFn = bool (*)(uint64_t seq);
+		static std::atomic<ConfirmedCutFn>& ConfirmedCutReader()
+		{
+			static std::atomic<ConfirmedCutFn> reader{ nullptr };
+			return reader;
+		}
 		bool PairValidAt(uint64_t a, uint64_t b) const
 		{
-			return Adjacent(a, b) && SpanStatus(a, b) != SpanState::Invalid;   // C2a-F 1: Unknown (unbound) refuses nothing
+			if (!(Adjacent(a, b) && SpanStatus(a, b) != SpanState::Invalid))   // C2a-F 1: Unknown (unbound) refuses nothing
+				return false;
+			const ConfirmedCutFn reader = ConfirmedCutReader().load(std::memory_order_acquire);
+			if (reader != nullptr && reader(b))
+			{
+				confirmedCutRefusals.fetch_add(1, std::memory_order_relaxed);
+				return false;
+			}
+			return true;
 		}
+		uint64_t ConfirmedCutRefusals() const noexcept { return confirmedCutRefusals.load(std::memory_order_relaxed); }
 
 		// Bound: the Indicator's stamp of seq (true). Unbound: false and `out` untouched (M2 P5a-5, IVectorEngine::FieldOf).
 		bool StampAt(uint64_t seq, VpIndicator::Stamp& out) const
@@ -619,6 +639,7 @@ namespace MotionValidity
 		std::atomic<uint64_t> covered{ 0 };    // requests covered by a seal or by Unbind; requests != covered = pending
 		std::atomic<int> lastRequest{ static_cast<int>(Cause::Resync) };   // the most recent request's cause
 		std::atomic<uint64_t> unbindMoves{ 0 };
+		mutable std::atomic<uint64_t> confirmedCutRefusals{ 0 };   // U7-accuracy: pairs refused at a confirmed cut
 
 		mutable std::mutex keptMutex;
 		uint64_t lastKept = 0, previousKept = 0, keptEpoch = 0;
