@@ -320,7 +320,7 @@ namespace PrivateTextureScanTestsNs
 	//      never a member / field, a parameter, an alias, a non-const local or a cast of anything else; pl_dispatch_t (the struct
 	//      behind it) is never named;
 	//   3. every pl_dispatch_* function (the parameter / info structs aside) is called, on a first argument that is such a
-	//      local, the cast itself or req.gpu->Dispatch();
+	//      local in its scope (declared before the call, in a block still open there), the cast itself or req.gpu->Dispatch();
 	//   4. such a local appears only as that first argument: it is never declared again, assigned, captured or handed on (a
 	//      helper is handed the cast itself).
 	std::string OwnerFillDispatchFault(const std::string& text)
@@ -334,13 +334,35 @@ namespace PrivateTextureScanTestsNs
 		};
 		std::vector<std::string> locals;   // the context's const dispatch locals
 		std::vector<size_t> localDecls;    // the token of each one's name at its declaration
+		std::vector<size_t> localEnds;     // the `}` that closes the block each one is declared in (t.size(): none)
 		for (size_t i = 0; i < t.size(); ++i)
 			if (ContextDispatchLocalAt(t, i))
 			{
+				size_t end = i;
+				for (int depth = 0; end < t.size(); ++end)
+				{
+					if (t[end].s == "{")
+						++depth;
+					else if (t[end].s == "}")
+					{
+						if (depth == 0)
+							break;
+						--depth;
+					}
+				}
 				locals.push_back(t[i + 2].s);
 				localDecls.push_back(i + 2);
+				localEnds.push_back(end);
 			}
 		const auto isLocal = [&locals](const std::string& s) { return std::find(locals.begin(), locals.end(), s) != locals.end(); };
+		// The local `s` is in scope at token u: one of its declarations precedes u inside a block that is still open there (the
+		// same name elsewhere in the file, e.g. a member reached from another function, is not the context's).
+		const auto localInScope = [&locals, &localDecls, &localEnds](const std::string& s, size_t u) {
+			for (size_t k = 0; k < locals.size(); ++k)
+				if (locals[k] == s && localDecls[k] < u && u < localEnds[k])
+					return true;
+			return false;
+		};
 		for (size_t i = 0; i < t.size(); ++i)
 		{
 			const std::string& s = t[i].s;
@@ -374,7 +396,7 @@ namespace PrivateTextureScanTestsNs
 						break;
 				}
 				const size_t len = end - (i + 2);
-				const bool context = (len == 1 && isLocal(t[i + 2].s))
+				const bool context = (len == 1 && localInScope(t[i + 2].s, i + 2))
 					|| (len == kContextCastTokens && TokensAre(t, i + 2, kContextCast))
 					|| (len == kContextCallTokens && TokensAre(t, i + 2, kContextCall));
 				if (!context)
