@@ -5,6 +5,7 @@
 #include <VP-V/modules/input/source_analysis/AnalysisAxis10.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
+#include <VP-V/core/RobustStats.h>
 
 #include <algorithm>
 #include <chrono>

@@ -5,7 +5,8 @@
 // D3DCompile (IEEE strictness). Doubles use only the SM 5.0 base double ops (add, mul, min, max, compare,
 // float <-> double conversion); division, reciprocal, square root and floor are built from float seeds with Newton
 // steps / exact corrections, so no device needs the 11.1 extended double instructions (checked at Init on the
-// disassembly). Each piece is one raw literal (the MSVC literal limit); they are concatenated at compile time.
+// disassembly). Each piece is one raw literal (the MSVC literal limit); they are concatenated at compile time,
+// after RobustStats::kMadToSigmaHlsl (core/RobustStatsShaders.h: VP_MAD_TO_SIGMA, the MAD -> sigma factor; C6-2 U24).
 static const char* const kRefineHlsl[] = {
 R"HLSL(
 cbuffer RefineCB : register(b0)
@@ -474,7 +475,7 @@ void CSMedian(uint gi : SV_GroupIndex)
 		return;
 	}
 	double med = asdouble(gsMedSel[1], gsMedSel[0]);
-	PutD(S_SIGMA, max(gMinScale, 1.4826L * med));
+	PutD(S_SIGMA, max(gMinScale, VP_MAD_TO_SIGMA * med));
 	uState[S_OKCOUNT] = uint2(count, 0);
 	if (uState[S_STOP].y != 0) uState[S_STOP] = uint2(1, 1);
 }

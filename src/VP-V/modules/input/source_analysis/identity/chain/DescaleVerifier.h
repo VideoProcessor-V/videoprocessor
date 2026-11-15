@@ -533,7 +533,7 @@ namespace SourceIdentity
 				{
 					for (int r = 0; r < nref; ++r)
 						col[static_cast<size_t>(r)] = perRef[static_cast<size_t>(r) * static_cast<size_t>(nl) + static_cast<size_t>(i)];
-					base[i] = MedianOf(col.data(), nref);
+					base[i] = RobustStats::MedianOf(col.data(), nref);
 				}
 				return true;
 			}
@@ -599,7 +599,7 @@ namespace SourceIdentity
 							vals[static_cast<size_t>(w) * static_cast<size_t>(nl) + static_cast<size_t>(i)]
 								= std::log(best / base[static_cast<size_t>(w) * static_cast<size_t>(nl) + static_cast<size_t>(i)]);
 						}
-					const double T = TrimmedMeanOf(vals.data(), nWin * nl, s_.trimFraction);
+					const double T = RobustStats::TrimmedMeanOf(vals.data(), nWin * nl, s_.trimFraction);
 					const bool better = !have || T < tBest || (T == tBest && std::abs(d) < std::abs(nBest - nC));
 					if (better)
 					{
@@ -676,7 +676,7 @@ namespace SourceIdentity
 						}
 						vals[static_cast<size_t>(i)] = std::log(best / base[static_cast<size_t>(i)]);
 					}
-					const double T = TrimmedMeanOf(vals.data(), nl, s_.trimFraction);
+					const double T = RobustStats::TrimmedMeanOf(vals.data(), nl, s_.trimFraction);
 					bool better = bestNi < 0 || T < bestT;
 					if (!better && T == bestT)
 						better = std::abs(ns[ni] - n0) < std::abs(ns[static_cast<size_t>(bestNi)] - n0);
@@ -700,7 +700,7 @@ namespace SourceIdentity
 					{
 						for (int i = 0; i < nl; ++i)
 							vals[static_cast<size_t>(i)] = std::log(scanS[static_cast<size_t>(bestNi) * stride + static_cast<size_t>(q) * static_cast<size_t>(nl) + static_cast<size_t>(i)] / base[static_cast<size_t>(i)]);
-						famT[static_cast<int>(Kernel(reps[q]).family)] = TrimmedMeanOf(vals.data(), nl, s_.trimFraction);
+						famT[static_cast<int>(Kernel(reps[q]).family)] = RobustStats::TrimmedMeanOf(vals.data(), nl, s_.trimFraction);
 					}
 					for (int f = 0; f < kFamilyCount; ++f)
 						famOrder[f] = f;
@@ -760,7 +760,7 @@ namespace SourceIdentity
 								: sb->s[static_cast<size_t>(i)];
 							vals[static_cast<size_t>(i)] = std::log(s / base[static_cast<size_t>(i)]);
 						}
-						const double T = TrimmedMeanOf(vals.data(), nl, s_.trimFraction);
+						const double T = RobustStats::TrimmedMeanOf(vals.data(), nl, s_.trimFraction);
 						if (!have || T < best.T)
 						{
 							have = true;
@@ -850,14 +850,14 @@ namespace SourceIdentity
 						}
 						if (nv < 1)
 							continue;
-						const double baseMs = MedianOf(refCol.data(), nv);
+						const double baseMs = RobustStats::MedianOf(refCol.data(), nv);
 						const double levelMs = (segSum[g] / static_cast<double>(segRows[g]) + e2) / dofv;
 						cr.segStat[cell] = 0.5 * std::log(levelMs / baseMs);
 						cr.segBase[cell] = std::sqrt(baseMs);
 					}
 				}
-				cr.floorCodes = TrimmedMeanOf(cr.lineRms.data(), nl, s_.trimFraction);
-				cr.baselineMedian = MedianOf(cr.lineBase.data(), nl);
+				cr.floorCodes = RobustStats::TrimmedMeanOf(cr.lineRms.data(), nl, s_.trimFraction);
+				cr.baselineMedian = RobustStats::MedianOf(cr.lineBase.data(), nl);
 				cr.exactDone = true;
 				return 0u;
 			}

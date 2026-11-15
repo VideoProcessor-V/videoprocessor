@@ -99,7 +99,7 @@ namespace SourceIdentity
 					stds[static_cast<size_t>(j)] = std::sqrt(v / static_cast<double>(ls.length));
 				}
 				out.meanCode = sumMean / static_cast<double>(nl);
-				out.medianLineStd = MedianOf(stds.data(), nl);
+				out.medianLineStd = RobustStats::MedianOf(stds.data(), nl);
 
 				// Synthetic upscale of every line: N' output pixels from the N real ones.
 				const KernelInfo& ki = Kernel(ps.kernel);
@@ -185,7 +185,7 @@ namespace SourceIdentity
 				const int minGate = (std::max)(ps.minGateLinesFloor, static_cast<int>(std::ceil(ps.minGateFraction * static_cast<double>(cr.lineCount))));
 				if (out.gatedLines >= minGate)
 				{
-					out.stat = TrimmedMeanOf(gated.data(), out.gatedLines, ps.trimFraction);
+					out.stat = RobustStats::TrimmedMeanOf(gated.data(), out.gatedLines, ps.trimFraction);
 					out.seen = out.stat <= ps.seenThreshold;
 				}
 				if (!out.seen)

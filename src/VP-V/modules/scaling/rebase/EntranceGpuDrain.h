@@ -12,7 +12,9 @@
 // One drain follows the last entrance run: BeforeRender consumes the note, so a second call before
 // the next entrance run does nothing. Render thread only (no locking).
 
+#include "../../../core/RobustStats.h"
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstdio>
 #include <functional>
@@ -90,12 +92,14 @@ namespace EntranceGpuDrain
 	private:
 		std::string Summarise(Mode mode) const
 		{
-			std::vector<double> sorted = samples;
-			std::sort(sorted.begin(), sorted.end());
-			const auto at = [&](double q) { return sorted[static_cast<size_t>(q * static_cast<double>(sorted.size() - 1))]; };
+			// Called with at least 20 samples (BeforeRender), so the quantiles never take their empty fallback.
+			assert(!samples.empty());
+			const double p50 = RobustStats::Quantile(samples, 0.5, RobustStats::RankRule::FloorIndex);
+			const double p99 = RobustStats::Quantile(samples, 0.99, RobustStats::RankRule::FloorIndex);
+			const double maxMs = *std::max_element(samples.begin(), samples.end());
 			char text[200];
 			std::snprintf(text, sizeof(text), "Entrance GPU drain (%s): CPU wait p50 %.3f ms, p99 %.3f ms, max %.3f ms over %zu renders",
-				Name(mode), at(0.5), at(0.99), sorted.back(), sorted.size());
+				Name(mode), p50, p99, maxMs, samples.size());
 			return text;
 		}
 

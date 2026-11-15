@@ -407,6 +407,77 @@ class NearDupUnitPatternsTest(unittest.TestCase):
         for uid, line in self.CASES.items():
             self.assertTrue(any(r.search(line) for r in reg[uid]["signatures"]), uid)
 
+    def test_u24_owner_calls_are_consumers_private_order_statistics_duplicates(self):
+        # C6-2 U24: a RobustStats:: call is a consumer; a bare nth_element, a private Median or an inline 1.4826 stays a
+        # duplicate, also on a line that also calls the owner. A vpu_median_upper call is a consumer (a signature since C8);
+        # VP_MAD_TO_SIGMA and the include are no hit at all; the shaders header is part of the owner.
+        with tempfile.TemporaryDirectory() as r:
+            f = "src/VP-V/modules/repair/c/Rs.cpp"
+            _w(r, f, "double m = RobustStats::Median(v, RobustStats::MedianRule::Upper);\n"
+                     "std::nth_element(v.begin(), v.begin() + n / 2, v.end());\n"
+                     "double s = RobustStats::MadSigma(RobustStats::MadAboutOf(p, n, m));\n"
+                     "double t = 1.4826 * Median(w);\n"
+                     "double u = RobustStats::Median(v) + Median(w);\n"
+                     "#include <VP-V/core/RobustStatsShaders.h>\n"
+                     "vec2 med = vec2(vpu_median_upper(xs, nn), vpu_median_upper(ys, nn));\n"
+                     "PutD(S_SIGMA, max(gMinScale, VP_MAD_TO_SIGMA * med));\n")
+            _w(r, "src/VP-V/core/RobustStatsShaders.h", "static const double VP_MAD_TO_SIGMA = 1.4826L;\n")
+            res = _unit(csu.scan(r, baseline={"units": {}}), "U24")
+            role = {h["line"]: h["role"] for h in res["hits"] if h["file"] == f}
+            self.assertEqual(role, {1: "consumer", 2: "duplicate", 3: "consumer", 4: "duplicate", 5: "duplicate",
+                                    7: "consumer"})
+            self.assertFalse([h for h in res["hits"] if h["file"].endswith("RobustStatsShaders.h")])
+            self.assertEqual(res["inside_owner"], 1)
+
+    def test_u24_size_half_idiom_and_pasted_gpu_median_definition_are_duplicates(self):
+        # C6-2 C8 (review MUST-1, SHOULD-2): sorted[x.size() / 2] is a private Upper median; a vpu_median_ CALL is a
+        # consumer, a `float vpu_median_...(` DEFINITION outside the owner is a pasted copy.
+        with tempfile.TemporaryDirectory() as r:
+            f = "src/VP-V/modules/repair/c/Half.h"
+            _w(r, f, "rec->grain = rms[rms.size() / 2];\n"
+                     "auto m = s->v[s->v.size()/2u];\n"
+                     "vec2 med = vec2(vpu_median_upper(xs, n), vpu_median_upper(ys, n));\n"
+                     "float vpu_median_upper(float a[9], int n)\n"
+                     "float m = vpu_median_upper(xs, n);\n"
+                     "auto h = v[n / 2];\n"
+                     "size_t k = v.size() / 2;\n")
+            res = _unit(csu.scan(r, baseline={"units": {}}), "U24")
+            role = {h["line"]: h["role"] for h in res["hits"] if h["file"] == f}
+            self.assertEqual(role, {1: "duplicate", 2: "duplicate", 3: "consumer", 4: "duplicate", 5: "consumer"})
+
+    def test_u24_floor_index_quantile_idiom_is_a_duplicate(self):
+        # 102b U24-FLOORINDEX-QUANTILE-COPIES: sorted[size_t(q * (size() - 1))] (the two copies moved in C9, verbatim, and
+        # the reversed operand order) is a private FloorIndex Quantile; the owner call is a consumer; a last-element or
+        # 2-D index without the q * (size() - 1) product is no hit.
+        with tempfile.TemporaryDirectory() as r:
+            f = "src/VP-V/modules/repair/c/Q.h"
+            _w(r, f, "const auto at = [&](double q) { return sorted[static_cast<size_t>(q * static_cast<double>(sorted.size() - 1))]; };\n"
+                     "const double thr = sorted[static_cast<size_t>(0.3 * static_cast<double>(sorted.size() - 1))];\n"
+                     "double p = v[static_cast<size_t>((v.size() - 1) * q)];\n"
+                     "const double t = RobustStats::Quantile(e, 0.3, RobustStats::RankRule::FloorIndex);\n"
+                     "double last = v[v.size() - 1];\n"
+                     "float f = px[static_cast<size_t>(y) * w + x];\n")
+            res = _unit(csu.scan(r, baseline={"units": {}}), "U24")
+            role = {h["line"]: h["role"] for h in res["hits"] if h["file"] == f}
+            self.assertEqual(role, {1: "duplicate", 2: "duplicate", 3: "duplicate", 4: "consumer"})
+
+    def test_u24_floor_index_quantile_with_a_local_count_is_a_duplicate(self):
+        # C6-2 C11 (gate SHOULD-1): sorted[size_t(q * (n - 1))] with a local count, both operand orders and the
+        # static_cast<double>(n - 1) form, is a private FloorIndex Quantile; 2-D indexes (a '+' in the index), a plain
+        # last element and the owner call are not duplicates.
+        with tempfile.TemporaryDirectory() as r:
+            f = "src/VP-V/modules/repair/c/Qn.h"
+            _w(r, f, "const double p = s[static_cast<size_t>(0.9 * static_cast<double>(n - 1))];\n"
+                     "auto v = t[size_t(q * (count - 1))];\n"
+                     "auto w = t[size_t((m_n - 1) * q)];\n"
+                     "subY = SubPel(costs[(by - 1) * n + bx], best, costs[(by + 1) * n + bx]);\n"
+                     "const int64_t d = int64_t(half[size_t(y - 1) * hw_ + x]) - 2 * int64_t(s);\n"
+                     "double last = v[n - 1];\n"
+                     "const double t = RobustStats::Quantile(e, 0.9, RobustStats::RankRule::FloorIndex);\n")
+            res = _unit(csu.scan(r, baseline={"units": {}}), "U24")
+            role = {h["line"]: h["role"] for h in res["hits"] if h["file"] == f}
+            self.assertEqual(role, {1: "duplicate", 2: "duplicate", 3: "duplicate", 7: "consumer"})
+
 
 class RampAllowTest(unittest.TestCase):
     """C6-1 U25: RampMath:: calls are consumers; a bare or other-namespace Smoothstep/Clamp01 stays a duplicate."""

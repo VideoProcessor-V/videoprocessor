@@ -186,10 +186,23 @@ REGISTRY = [
      "signatures": _c(r"1(\.0f?)?\s*-\s*(std::)?exp\s*\(\s*-"),
      "allow": []},
     {"id": "U24", "name": "robust_stats",
-     "owning_unit": ["src/VP-V/core/RobustStats"],
+     # C6-2 U24: RobustStatsShaders.h holds the GPU twins (GLSL vpu_median_upper, HLSL VP_MAD_TO_SIGMA) of the same owner.
+     "owning_unit": ["src/VP-V/core/RobustStats", "src/VP-V/core/RobustStatsShaders"],
      "signatures": _c(r"\bMedian\w*\s*\(", r"\bMedianOf\b", r"1\.4826", r"\bnth_element\b",
-                      r"\bMad(Sigma)?\s*\(", r"\bPercentile\s*\(", r"\bQuantile\s*\("),
-     "allow": []},
+                      r"\bMad(Sigma)?\s*\(", r"\bPercentile\s*\(", r"\bQuantile\s*\(",
+                      # C6-2 C8 (review MUST-1/SHOULD-2): the sorted[size() / 2] Upper-median idiom, and any vpu_median_ name
+                      # (a call is allowed below; a pasted `float vpu_median_...(` definition outside the owner stays a duplicate).
+                      r"\[\s*[\w.>()-]*\bsize\(\)\s*/\s*2u?\s*\]", r"\bvpu_median_\w*\s*\(",
+                      # 102b U24-FLOORINDEX-QUANTILE-COPIES: the FloorIndex quantile idiom sorted[size_t(q * (size() - 1))]
+                      # (either operand order) = RobustStats::Quantile(v, q, RankRule::FloorIndex).
+                      r"\[[^\[\]]*\*[^\[\]]*\bsize\(\)\s*-\s*1\b[^\[\]]*\]",
+                      r"\[[^\[\]]*\bsize\(\)\s*-\s*1\s*\)*\s*\*[^\[\]]*\]",
+                      # C6-2 C11 (gate SHOULD-1): the same quantile with a local count, sorted[size_t(q * (n - 1))], either operand
+                      # order. An index holding a '+' is excluded: the 2-D image form a[(y - 1) * w + x] is no hit.
+                      r"\[[^\[\]+]*\*[^\[\]+]*\(\s*[A-Za-z_][\w.>-]*\s*-\s*1\s*\)[^\[\]+]*\]",
+                      r"\[[^\[\]+]*\(\s*[A-Za-z_][\w.>-]*\s*-\s*1\s*\)\s*\)*\s*\*[^\[\]+]*\]"),
+     "allow": _c(r"RobustStats::\w+", r"core/RobustStats(Shaders)?\.h", r"(?<!float )\bvpu_median_\w*\s*\(",
+                 r"\bVP_MAD_TO_SIGMA\b")},
     {"id": "U25", "name": "ramp_clamp_smoothstep",
      "owning_unit": ["src/VP-V/core/Ramp"],
      # C6-1 U25 C8: an optional explicit template argument list (Smoothstep<T>(, Clamp01<double>() is the same call.

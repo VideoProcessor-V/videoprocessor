@@ -10,6 +10,8 @@
 #include <climits>
 #include <cmath>
 #include <cstring>
+#include <utility>
+#include <VP-V/core/RobustStats.h>
 
 namespace VpUnit
 {
@@ -136,9 +138,7 @@ namespace CodingEvidence
 			double total = 0.0;
 			for (double v : steps) total += v;
 			if (total <= 0.0) return false;
-			std::vector<double> sorted(steps);
-			std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
-			const double median = sorted[sorted.size() / 2];
+			const double median = RobustStats::Median(steps, RobustStats::MedianRule::Upper);
 			const double meanStep = total / steps.size();
 			const double coherence = std::fabs(signedSum) / (total * n);
 			return median <= 0.1 * meanStep && coherence > 0.9;
@@ -148,20 +148,6 @@ namespace CodingEvidence
 		out.blockinessRobust = (std::max)(usedH, usedV);
 		out.blockPeriod = usedH >= usedV ? periodH : periodV;
 		return out;
-	}
-
-	namespace
-	{
-		double Median(std::vector<double> v)
-		{
-			if (v.empty()) return 0.0;
-			const size_t mid = v.size() / 2;
-			std::nth_element(v.begin(), v.begin() + mid, v.end());
-			double m = v[mid];
-			if (v.size() % 2 == 0)
-				m = 0.5 * (m + *std::max_element(v.begin(), v.begin() + mid));
-			return m;
-		}
 	}
 
 	double GridBlockiness(const std::vector<double>& steps, double& period)
@@ -198,11 +184,11 @@ namespace CodingEvidence
 				if (bins[static_cast<size_t>(b)].size() >= 6)
 				{
 					ok[static_cast<size_t>(b)] = 1;
-					m[static_cast<size_t>(b)] = Median(bins[static_cast<size_t>(b)]);
+					m[static_cast<size_t>(b)] = RobustStats::Median(bins[static_cast<size_t>(b)]);
 					valid.push_back(m[static_cast<size_t>(b)]);
 				}
 			if (valid.size() < 6) continue;
-			const double inner = Median(valid);
+			const double inner = RobustStats::Median(valid);
 			ex.assign(static_cast<size_t>(B), 0.0);
 			for (int b = 0; b < B; ++b)
 				if (ok[static_cast<size_t>(b)]) ex[static_cast<size_t>(b)] = (std::max)(0.0, m[static_cast<size_t>(b)] - inner);
@@ -345,8 +331,7 @@ namespace CodingEvidence
 			if (fourth > 0.0) shares.push_back(std::pow(fourth, -1.0 / 3.0) / 16.0);
 		}
 		if (shares.empty()) return 0.0;
-		std::nth_element(shares.begin(), shares.begin() + shares.size() / 2, shares.end());
-		const double share = (std::max)(1.0 / 16.0, (std::min)(1.0, shares[shares.size() / 2]));
+		const double share = (std::max)(1.0 / 16.0, (std::min)(1.0, RobustStats::Median(std::move(shares), RobustStats::MedianRule::Upper)));
 		return std::log2(static_cast<double>(histogram.size())) + std::log2(share);
 	}
 
@@ -417,8 +402,7 @@ namespace CodingEvidence
 			}
 			if (!shares.empty())
 			{
-				std::nth_element(shares.begin(), shares.begin() + shares.size() / 2, shares.end());
-				const double share = (std::max)(1.0 / 16.0, shares[shares.size() / 2]);
+				const double share = (std::max)(1.0 / 16.0, RobustStats::Median(std::move(shares), RobustStats::MedianRule::Upper));
 				frame.effectiveBits = std::log2(static_cast<double>(histogram.size())) + std::log2(share);
 			}
 		}

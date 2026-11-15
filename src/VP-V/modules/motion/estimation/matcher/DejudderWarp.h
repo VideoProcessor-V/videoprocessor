@@ -58,6 +58,10 @@ namespace Dejudder
 	// block's vector, or with PIXEL_TRUSTED_VECTORS defined only trusted
 	// blocks' (a failed block follows its trusted neighbours).
 	const char* FieldAllGlsl();
+	// Test-only (C6-2 U24 golden text): the median header of the second sweep and the D3 smoothing header,
+	// both built from core/RobustStatsShaders.h kMedianUpper9Glsl.
+	const char* SweepMedianGlslForTest();
+	const char* SmoothHeaderGlslForTest();
 
 
 	struct Planes

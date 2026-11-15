@@ -22,6 +22,7 @@
 
 #include <AnalysisLumaSource.h>
 #include <VP-V/core/LaneInterfaces.h>
+#include <VP-V/core/RobustStats.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/estimation/ProducerJobs.h>
 #include <VP-V/modules/motion/estimation/EngineLumaRing.h>
@@ -108,9 +109,7 @@ namespace MotionAhead
 		const size_t cells = static_cast<size_t>(gridW) * gridH;
 		if (gridW <= 0 || gridH <= 0 || vectors.size() < cells * 2 || costs.size() < cells) return;
 		// Confident cells: cost at or below the field's median (the engine's own ranking).
-		std::vector<uint8_t> sorted(costs.begin(), costs.begin() + cells);
-		std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
-		const uint8_t costLimit = sorted[sorted.size() / 2];
+		const uint8_t costLimit = RobustStats::NthSmallest(std::vector<uint8_t>(costs.begin(), costs.begin() + cells), cells / 2);
 		std::vector<int> votes(static_cast<size_t>(kBins) * kBins, 0);
 		long confident = 0;
 		auto binOf = [kRange](int16_t v) { return static_cast<int>(std::lround(v / 32.0 / 4.0 * 2.0)) + 2 * kRange; };

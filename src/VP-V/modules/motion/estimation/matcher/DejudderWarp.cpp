@@ -10,6 +10,7 @@
 #include <VP-V/modules/motion/estimation/GapSeed.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
+#include <VP-V/core/RobustStatsShaders.h>
 
 #include <chrono>
 
@@ -747,19 +748,9 @@ bool static_scene()
 }
 )GLSL";
 
-		const char* const MEDIAN_GLSL = R"GLSL(
-float median_(float a[9], int n)
-{
-    for (int i = 1; i < 9; i++) {
-        if (i >= n) break;
-        float x = a[i];
-        int j = i - 1;
-        while (j >= 0 && a[j] > x) { a[j + 1] = a[j]; j--; }
-        a[j + 1] = x;
-    }
-    return a[n / 2];
-}
-)GLSL";
+		// The Upper median of up to nine values: the GPU twin owned by core/RobustStatsShaders.h (C6-2 U24),
+		// `float vpu_median_upper(float a[9], int n)`; the same text as the former private median_ copy.
+		const char* const MEDIAN_GLSL = RobustStats::kMedianUpper9Glsl;
 
 		// 11a E1: the second sweep. Candidates in half-resolution pixels: the
 		// block's own first-sweep result, its eight neighbours', its previous-
@@ -806,7 +797,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
         cand[nc++] = gv.xy * 4.0;
     if (use_of != 0)
         cand[nc++] = texelFetch(of_vec, b, 0).xy;
-    vec2 med = nn > 0 ? vec2(median_(xs, nn), median_(ys, nn)) : cand[0];
+    vec2 med = nn > 0 ? vec2(vpu_median_upper(xs, nn), vpu_median_upper(ys, nn)) : cand[0];
     vec2 best = cand[0];
     float best_sad = sad_sub(o, best);
     float best_score = best_sad / 144.0 + lambda * 2.0 * length(best - med);
@@ -974,7 +965,7 @@ if (run && li < nc)
     rf_sads[sub * 16 + li] = rf_sad_sub(sub, o, cand[li]);
 pb_sync();
 if (run && lead) {
-    vec2 med = nn > 0 ? vec2(median_(xs, nn), median_(ys, nn)) : cand[0];
+    vec2 med = nn > 0 ? vec2(vpu_median_upper(xs, nn), vpu_median_upper(ys, nn)) : cand[0];
     vec2 best = cand[0];
     float best_sad = rf_sads[sub * 16];
     float best_score = best_sad / 144.0 + lambda * 2.0 * length(best - med);
@@ -1551,7 +1542,7 @@ if (i == 0u) {
 )GLSL";
 
 		// D3: median smoothing of the trusted field (see Settings).
-		const char* const SMOOTH_HEADER = R"GLSL(
+		const std::string SMOOTH_HEADER = std::string(R"GLSL(
 ivec2 half_size_;
 float from_at(ivec2 p) { return texelFetch(from_half, clamp(p, ivec2(0), half_size_ - ivec2(1)), 0).r; }
 float to_lin(vec2 p) { return texture(to_half, (p + vec2(0.5)) / vec2(half_size_)).r; }
@@ -1564,19 +1555,7 @@ float sad_sub(ivec2 o, vec2 v)
             s += abs(from_at(p) - to_lin(vec2(p) + v));
         }
     return s;
-}
-float median_(float a[9], int n)
-{
-    for (int i = 1; i < 9; i++) {
-        if (i >= n) break;
-        float x = a[i];
-        int j = i - 1;
-        while (j >= 0 && a[j] > x) { a[j + 1] = a[j]; j--; }
-        a[j + 1] = x;
-    }
-    return a[n / 2];
-}
-)GLSL";
+})GLSL") + RobustStats::kMedianUpper9Glsl;   // the median of the D3 smoothing: core/RobustStatsShaders.h (C6-2 U24)
 
 		const char* const SMOOTH_BODY = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
@@ -1602,7 +1581,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
         }
     vec4 o = f;
     if (n >= 5) {
-        vec2 med = vec2(median_(xs, n), median_(ys, n));
+        vec2 med = vec2(vpu_median_upper(xs, n), vpu_median_upper(ys, n));
         if (f.z > 0.5) {
             if (length(f.xy - med) > 1.0)
                 o.xy = med;   // an outlier: the neighbours' motion, still trusted
@@ -4470,13 +4449,23 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const pl_shader_desc smoothDesc[4] = {
 			Sampled("raw", raw, false), Sampled("from_half", halfA, false),
 			Sampled("to_half", halfB, true), Storage("dst", field) };
-		return Dispatch("VideoProcessor de-judder: vector smoothing (D3)", SMOOTH_HEADER, SMOOTH_BODY,
+		return Dispatch("VideoProcessor de-judder: vector smoothing (D3)", SMOOTH_HEADER.c_str(), SMOOTH_BODY,
 			smoothDesc, 4, variables, 1, blocksX, blocksY, 8);
 	}
 
 	const char* FieldVectorGlsl()
 	{
 		return WARP_HEADER;
+	}
+
+	const char* SweepMedianGlslForTest()
+	{
+		return MEDIAN_GLSL;
+	}
+
+	const char* SmoothHeaderGlslForTest()
+	{
+		return SMOOTH_HEADER.c_str();
 	}
 
 	std::string WarpHeader(const Settings& settings, bool split, bool camera)

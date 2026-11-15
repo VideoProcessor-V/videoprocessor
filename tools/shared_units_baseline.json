@@ -774,9 +774,58 @@
   },
   "U24": {
    "name": "robust_stats",
-   "known_false_positive": [],
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp",
+     "pattern": "^\\s*uint16_t Percentile\\(const std::array<uint32_t, FrameAnalysis::kHistogramBins>& ",
+     "kind": "false_positive",
+     "reason": "U6 histogram-bin cumulative percentile, not U24: the smallest histogram bin reaching a cumulative count (U6 law, SourceStats::FirstBinReaching), not a sorted-sample order statistic (plan lead18/coreplan-C6-2-U24.md (d), planner ruling 2026-11-15; renaming U6 code is out of slice) [definition]"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp",
+     "pattern": "luma\\.p1 = Percentile\\(m_histogram, m_samples, 0\\.01\\);",
+     "kind": "false_positive",
+     "reason": "U6 histogram-bin cumulative percentile, not U24: the smallest histogram bin reaching a cumulative count (U6 law, SourceStats::FirstBinReaching), not a sorted-sample order statistic (plan lead18/coreplan-C6-2-U24.md (d), planner ruling 2026-11-15; renaming U6 code is out of slice) [p1 call]"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp",
+     "pattern": "luma\\.p50 = Percentile\\(m_histogram, m_samples, 0\\.50\\);",
+     "kind": "false_positive",
+     "reason": "U6 histogram-bin cumulative percentile, not U24: the smallest histogram bin reaching a cumulative count (U6 law, SourceStats::FirstBinReaching), not a sorted-sample order statistic (plan lead18/coreplan-C6-2-U24.md (d), planner ruling 2026-11-15; renaming U6 code is out of slice) [p50 call]"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp",
+     "pattern": "luma\\.p99 = Percentile\\(m_histogram, m_samples, 0\\.99\\);",
+     "kind": "false_positive",
+     "reason": "U6 histogram-bin cumulative percentile, not U24: the smallest histogram bin reaching a cumulative count (U6 law, SourceStats::FirstBinReaching), not a sorted-sample order statistic (plan lead18/coreplan-C6-2-U24.md (d), planner ruling 2026-11-15; renaming U6 code is out of slice) [p99 call]"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/lane/shared/SourceStats.h",
+     "pattern": "rec->p01 = Percentile\\(\\(n \\+ 99u\\) / 100u\\);",
+     "kind": "false_positive",
+     "reason": "U6 histogram-bin cumulative percentile, not U24: the smallest histogram bin reaching a cumulative count (U6 law, SourceStats::FirstBinReaching), not a sorted-sample order statistic (plan lead18/coreplan-C6-2-U24.md (d), planner ruling 2026-11-15; renaming U6 code is out of slice) [p01 call]"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/lane/shared/SourceStats.h",
+     "pattern": "rec->p50 = Percentile\\(\\(n \\+ 1u\\) / 2u\\);",
+     "kind": "false_positive",
+     "reason": "U6 histogram-bin cumulative percentile, not U24: the smallest histogram bin reaching a cumulative count (U6 law, SourceStats::FirstBinReaching), not a sorted-sample order statistic (plan lead18/coreplan-C6-2-U24.md (d), planner ruling 2026-11-15; renaming U6 code is out of slice) [p50 call]"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/lane/shared/SourceStats.h",
+     "pattern": "rec->p99 = Percentile\\(\\(n \\* 99u \\+ 99u\\) / 100u\\);",
+     "kind": "false_positive",
+     "reason": "U6 histogram-bin cumulative percentile, not U24: the smallest histogram bin reaching a cumulative count (U6 law, SourceStats::FirstBinReaching), not a sorted-sample order statistic (plan lead18/coreplan-C6-2-U24.md (d), planner ruling 2026-11-15; renaming U6 code is out of slice) [p99 call]"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/lane/shared/SourceStats.h",
+     "pattern": "^\\s*uint32_t Percentile\\(uint64_t target\\) const$",
+     "kind": "false_positive",
+     "reason": "U6 histogram-bin cumulative percentile, not U24: the smallest histogram bin reaching a cumulative count (U6 law, SourceStats::FirstBinReaching), not a sorted-sample order statistic (plan lead18/coreplan-C6-2-U24.md (d), planner ruling 2026-11-15; renaming U6 code is out of slice) [definition]"
+    }
+   ],
    "blocking": true,
-   "baseline_duplicates": 60
+   "baseline_duplicates": 0
   },
   "U25": {
    "name": "ramp_clamp_smoothstep",

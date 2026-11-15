@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include <VP-V/core/RobustStats.h>
+
 #include "GlobalModelGeometry.h"
 #include <VP-V/modules/motion/estimation/composed/WarpSampler.h>
 
@@ -293,9 +295,7 @@ namespace CameraModel
 					degenerate = true;
 					break;
 				}
-				const size_t mid = ABS.size() / 2;
-				std::nth_element(ABS.begin(), ABS.begin() + static_cast<std::ptrdiff_t>(mid), ABS.end());
-				sigma = std::max(o.minScaleCodes, 1.4826 * ABS[mid]);
+				sigma = std::max(o.minScaleCodes, RobustStats::MadSigma(RobustStats::MedianInPlace(ABS, RobustStats::MedianRule::Upper)));
 				if (done)
 					break;
 
