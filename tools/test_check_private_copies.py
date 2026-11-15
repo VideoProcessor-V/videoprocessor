@@ -39,7 +39,9 @@ class RepoSeeds(unittest.TestCase):
         # X2 left this list at C6-1 U25 C10: the copy was REMOVED by D8 (d51e276c3, L-B6), see test_x2_removed_* below.
         # D4 detects 0 at the tip after its retarget (gate-15a-D4: K2 FitEntryOf); proven by Synthetic.test_d4_* instead.
         # D6 detects 0 at the tip after 15c C6 (the decode moved to the one decode owner); proven by Synthetic.test_d6_* instead.
-        for sid in ["D1", "D2", "D3", "D5", "X1", "X3", "X4", "X5", "X6", "X7", "X8"]:
+        # D2 and D3 detect 0 at the tip after their retargets (gate-15a-D2, gate-15a-D3-*); they are proven by the planted
+        # fixtures in Synthetic.test_d2_* / test_d3_* instead (WAIVER-PC-FIXTURES-01).
+        for sid in ["D1", "D5", "X1", "X3", "X4", "X5", "X6", "X7", "X8"]:
             self.assertIn(sid, self.sites, sid + " not detected at the tip")
 
     def test_x2_removed_at_the_tip(self):
@@ -123,6 +125,31 @@ class Synthetic(unittest.TestCase):
         self.assertEqual(hs, [("D6", vfa), ("D6", vfa), ("D6~moved", host)])
         root = make_tree({vfa: "if (fmt == P010 && source.MapsToLimitedDomain()) {}", host: "const bool f = s.CodesFullRange();"})
         self.assertFalse([h for h in N1.scan(root) if h["site"].startswith("D6")])
+
+    def test_d2_planted_copies_hit_and_memo_reads_do_not(self):
+        # gate-15a-D2 fixtures (a)-(d).
+        owner = M + "motion/estimation/VectorEngine.cpp"
+        root = make_tree({
+            M + "repair/x/Qualified.h": "float t = OpticalFlowTrust::CellTrust(fwd, bwd, tol);",          # (a)
+            M + "repair/x/Using.h": "using namespace OpticalFlowTrust;\nfloat t = CellTrust(fwd, bwd, tol);",  # (b)
+            M + "repair/x/Alias.h": "namespace oft = OpticalFlowTrust;\nfloat t = oft::CellTrust(f, b, t);",   # (b) alias form
+            M + "repair/x/Reader.h": "const float* a = v.CellTrust(x);\nconst float* b = view.CellTrustBackward(x);",  # (c)
+            owner: "out = OpticalFlowTrust::CellTrust(fwd, bwd, tol);",                                     # (d)
+        })
+        hs = sorted({h["file"] for h in N1.scan(root) if h["site"] == "D2"})
+        self.assertEqual(hs, sorted([M + "repair/x/Qualified.h", M + "repair/x/Using.h", M + "repair/x/Alias.h"]))
+
+    def test_d3_planted_second_caller_hits_and_plumbing_does_not(self):
+        # gate-15a-D3-ditherVectorsOwn / -l1Available fixtures.
+        root = make_tree({
+            M + "output/x/Copy.h": "std::string s = VpMotion::OutputDomainSearch::Glsl();",
+            M + "output/x/Pass.h": "const char* p = OutputDomainSearch::BlockSearchPassGlsl();",
+            M + "control/config/Settings.cpp": "if (settings.ditherVectorsOwn) {}\nbool l1Available = own && ok;",
+            M + "motion/estimation/fallback/OutputDomainSearchGlsl.h": "inline std::string Glsl(){ return OutputDomainSearch::LumaQuarterPassGlsl(); }",
+            M + "output/dither/VpShaderInclude.h": "text = VpMotion::OutputDomainSearch::Glsl();",
+        })
+        hs = sorted({h["file"] for h in N1.scan(root) if h["site"] == "D3"})
+        self.assertEqual(hs, sorted([M + "output/x/Copy.h", M + "output/x/Pass.h"]))
 
     def test_comments_do_not_hit(self):
         root = make_tree({M + "repair/temporal_detail/TemporalDetailModel.h": "// m_prevGin\n/* double guard */\nint ok;"})
