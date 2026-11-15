@@ -565,7 +565,41 @@ private:
     bool hasPending_ = false;
 };
 
-// ---- the veto detector's rule (HdrVetoCutDetector) ---------------------------------------------------------------------
+// ---- the soft reset on a high-confidence non-cut candidate (cut_soft_reset; C5 batch B) --------------------------------------
+// Owner 2026-11-15 08:35 EST (question window, U7 Q4; refs\owner-decisions-2026-11-07.md): "need the bar fairly high here. Mid scene
+// firing is a major problem and the motion vectors correct themselves fairly quickly even without a reset." So a full restart
+// stays for the delivered cut only. A frame whose CONFIRMED verdict is a candidate that is neither a cut nor a flash, and that is not
+// a fade frame (the fade law owns those with its own partial reset, unconditional), gets a PARTIAL reset only when its strength
+// reaches kSoftResetBar; below the bar there is no reset at all. A provisional verdict never fires (as it never delivers a cut).
+// Additive: no output of the unit changes (the verdict, the strength and the scene product are as before), so kUnitVersion stays 3.
+// What can fire today: the T2 strength is min(1, L / bar_T2) and a candidate passed the spike bar (L >= bar_T2) or the hard rule, so
+// a spike candidate's strength is 1; the candidates that are neither cut nor flash are the ones vetoed by "no cut right after a flash".
+// PROVISIONAL BAR (pending the D8 truth run; D8PARTIAL "soft" fields): 1.0, the highest value a strength takes, i.e. only a vetoed
+// candidate whose residual fully passed the cut law's spike bar. Lower it only from D8 / U7DIAG truth, with zero soft resets off the
+// labelled cuts on the cut-free rows (pan, flash, fade, static); precision first.
+constexpr float kSoftResetBar = 1.0f;     // PROVISIONAL pending the D8 truth run (owner 08:35: "the threshold for firing should be high")
+// How much of the history a soft reset of strength s removes: keep = 1 - kSoftResetDepth * s (amplitude; energy holders square it).
+// PROVISIONAL with the bar: half the amplitude at full strength, so a soft reset is never a restart (owner 08:35: partial for
+// high-but-not-certain confidence, full restart for confirmed cuts only).
+constexpr float kSoftResetDepth = 0.5f;
+
+// The soft-reset strength of one frame's verdict: its strength when the rule fires, else 0. `cut` = the frame is a cut (its own
+// verdict or the delivered cut); `fade` = the frame is a fade frame.
+inline float SoftResetStrength(bool confirmed, bool candidate, bool cut, bool flash, bool fade, float strength)
+{
+    if (!confirmed || !candidate || cut || flash || fade || !(strength >= kSoftResetBar))
+        return 0.0f;
+    return strength < 1.0f ? strength : 1.0f;
+}
+
+// The history keep of a soft reset of strength s (1 = no reduction): 1 - kSoftResetDepth * s, s clamped to [0, 1].
+inline float SoftResetKeep(float softStrength)
+{
+    const float s = softStrength > 0.0f ? (softStrength < 1.0f ? softStrength : 1.0f) : 0.0f;
+    return 1.0f - kSoftResetDepth * s;
+}
+
+// ---- the veto detector's rule (HdrVetoCutDetector)---------------------------------------------------------------------
 
 // The veto detector's thresholds, tuned on the HFR clips sampled at 10-20 Hz (the single source; HdrVetoCutDetector aliases them).
 constexpr float kGridDifference = 24.0f;          // mean absolute difference of the 16 x 9 cell means (10-bit codes)
