@@ -313,6 +313,7 @@ if (t.x < ts.x && t.y < ts.y) {
             old = ref_bi(uv);
 #endif
         old *= dec;
+        old.xyz *= fade_keep2;   // U7 v3 partial reset: the energies only (w = F is a focus ratio, contrast-free); 1 off a fade
         if (gt.z > allow2 + LOWN * gt.y) restart = true;
         if (F < PULL_LO * old.w) restart = true;
         if (T2 + ft < MID_LO * (old.z + ft)) restart = true;
@@ -829,7 +830,8 @@ if (p.x < sz.x && p.y < sz.y) {
 			const float allow2 = static_cast<float>(allowCodes * allowCodes * cu * cu);
 			// The cut / fade verdict: the shared judge's, from the scene group (U7 over P4; registered fix D8). A frame with no
 			// readable group restarts (no private fallback) and is counted. U7 v3: a fade is a partial reset: the references (energies)
-			// are reduced by the frame's fade keep squared, as one more decay step (`dec` below); a fade group without a keep restarts, shown.
+			// (energies, old.xyz) are reduced by the frame's fade keep squared, one more decay step (fade_keep2 below; the focus ratio
+			// old.w is contrast-free and keeps its own decay); a fade group without a keep restarts, shown.
 			bool sceneRestart = false;
 			double historyKeep2 = 1.0;
 			if (!restartAll)
@@ -852,7 +854,8 @@ if (p.x < sz.x && p.y < sz.y) {
 			const float restartF = restartAll || sceneRestart ? 1.0f : 0.0f;
 			const float fg = static_cast<float>(std::pow(kGrainFloorCodes8 * eight * cu, 2.0));
 			const float ft = static_cast<float>(std::pow(kTextureFloorCodes8 * eight * cu, 2.0));
-			const float dec = static_cast<float>(Decay(params.sourceHz) * historyKeep2);   // U7 v3: x the fade keep^2 (1 off a fade)
+			const float dec = static_cast<float>(Decay(params.sourceHz));
+			const float fadeKeep2 = static_cast<float>(historyKeep2);   // U7 v3: the fade keep^2 on the energies (1 off a fade)
 			const float sigFloor = static_cast<float>(std::pow(CodingNoiseCodes8(params.bitrateQuality) * eight * cu, 2.0));
 			const float capF = static_cast<float>(cap);
 			const float planeSize[2] = { static_cast<float>(w), static_cast<float>(h) };
@@ -913,9 +916,10 @@ if (p.x < sz.x && p.y < sz.y) {
 				d[nd++] = Storage("ref_out", m.ref[next]);
 				d[nd++] = Storage("gains_out", m.gains);
 				if (useField) d[nd++] = Sampled("field", params.field);
-				pl_shader_var v[9];
+				pl_shader_var v[10];
 				int nv = 0;
 				v[nv++] = { pl_var_float("allow2"), &allow2, true };
+				v[nv++] = { pl_var_float("fade_keep2"), &fadeKeep2, true };
 				v[nv++] = { pl_var_float("fg"), &fg, true };
 				v[nv++] = { pl_var_float("ft"), &ft, true };
 				v[nv++] = { pl_var_float("dec"), &dec, true };

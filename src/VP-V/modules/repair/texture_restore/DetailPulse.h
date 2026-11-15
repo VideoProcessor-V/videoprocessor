@@ -50,8 +50,8 @@
 //  - Cut / fade: the shared unit U7's verdict for the source frame (CutFadeJudge over the P4
 //    records, read from the skeleton's scene group, SceneRestart.h; registered fix D8). A cut
 //    restarts the history (gain 1 on that frame); a fade (U7 v3, owner 2026-11-15) does NOT:
-//    every reference is scaled by the frame's fade keep squared per frame of its age (the energy
-//    the faded picture still explains), so the gain law compares like with like through the
+//    every reference is scaled by the product of the fade keeps squared of the frames after it
+//    (ring row 1; the energy the faded picture still explains), so the gain law compares like with like through the
 //    fade and pre-fade detail is not carried. Restarts also come from Forget(), a non-consecutive sequence, a
 //    geometry change and a frame whose scene group is not readable (no private fallback; counted
 //    by SceneMissing()). CutCodes remains only the look-ahead agreement level.

@@ -319,22 +319,24 @@ if (li == 0u) {
     imageStore(ring, ivec2(RING + 1, 0), vec4(e1, e2, my, 1.0));
 #else
     // The cut verdict is the shared judge's (scene_restart, from the P4 scene group); no private judge here. A fade is no
-    // restart (U7 v3 partial reset): fade_keep2 (the frame's fade keep squared: e holds energies) reduces every reference per
-    // frame of its age, i.e. the frame's own fade step carried over the short window (exact for a steady fade), and the
-    // look-ahead reference by one step; 1 = none.
+    // restart (U7 v3 partial reset): a reference of age j is scaled by the product of the fade keeps squared (e holds energies)
+    // of the j frames after it, i.e. this frame's fade_keep2 and the keep2 each newer ring slot stored in row 1 when it was
+    // written: exactly the history the fade has reduced. The look-ahead reference takes this frame's step; 1 = none.
     bool restart = n_valid == 0 || scene_restart > 0;
     vec2 e = vec2(e1, e2);
     vec2 r = e;
     if (!restart) {
         float dec = 1.0;
+        float kp = fade_keep2;   // the keep2 of the frame after the reference (this frame first)
         for (int j = 1; j <= n_use; j++) {
             vec4 s = imageLoad(ring, ivec2((cur + RING - j) % RING, 0));
-            dec *= decay * fade_keep2;
+            dec *= decay * kp;
             if (s.w < 0.5)
                 break;
             r = max(r, s.xy * dec);
             if (s.w > 1.5)
                 break;
+            kp = imageLoad(ring, ivec2((cur + RING - j) % RING, 1)).x;   // that slot's own keep2, for the next older reference
         }
         if (ahead_valid > 0) {
             vec4 a = imageLoad(ring, ivec2(RING + 1, 0));
@@ -347,6 +349,7 @@ if (li == 0u) {
     if (!restart && measured)
         g = vec2(gain_law(r.x, e.x), gain_law(r.y, e.y));
     imageStore(ring, ivec2(cur, 0), vec4(e1, e2, my, restart ? 2.0 : 1.0));
+    imageStore(ring, ivec2(cur, 1), vec4(restart ? 1.0 : fade_keep2, 0.0, 0.0, 0.0));   // U7 v3: this frame's keep2 (row 1)
     imageStore(ring, ivec2(RING, 0), vec4(g, restart ? 1.0 : 0.0, 0.0));
 #endif
 }
@@ -1153,10 +1156,11 @@ for (int q = 0; q < 4; q++) {
 			if (ring) return true;
 			pl_fmt f = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE));
 			if (!f) return false;
-			std::string zero(sizeof(float) * 4 * (kRingSlots + 2), '\0');
+			// Row 0: the ring, the decision, the look-ahead. Row 1 (U7 v3 partial reset): each ring slot's fade keep^2.
+			std::string zero(sizeof(float) * 4 * (kRingSlots + 2) * 2, '\0');
 			pl_tex_params tp{};
 			tp.w = kRingSlots + 2;
-			tp.h = 1;
+			tp.h = 2;
 			tp.format = f;
 			tp.sampleable = true;
 			tp.storable = true;

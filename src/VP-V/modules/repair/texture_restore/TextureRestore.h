@@ -46,7 +46,7 @@
 //     previous frame (per pixel, along the vector when there is one) by more than the
 //     coding-noise allowance and the grain's share of it, on untrusted blocks, on a focus pull (F or the mid band's texture fell beyond what coding
 //     explains), on cuts / Forget / non-consecutive sequences. A fade (U7 v3, owner 2026-11-15) is no restart: the references
-//     are scaled by the frame's fade keep squared (one more decay step), so the history shrinks with the fading picture.
+//     energies are scaled by the frame's fade keep squared (one more decay step; the focus ratio F is not), so the history shrinks with the fading picture.
 //  6. Gains per tile, clamped to [1, cap], with dead zones for the estimators' noise:
 //     grain gG = sqrt((N1ref + fg) / ((N1 + fg)(1 + kGrainMargin))) on the grain part of D1;
 //     texture gTb = sqrt((Tb_ref + ft) / (Tb + kTextureMargin x Nb + ft)) on the texture parts of
