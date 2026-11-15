@@ -173,24 +173,14 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	vectorFacts.vectorDemandSetting = activeSettings.vectorDemand; vectorFacts.sigmaDeltaRanLast = sigmaDeltaRanLast;
 	vectorFacts.ditherVectorsOwn = activeSettings.ditherVectorsOwn;
 	vectorFacts.opticalFlow = activeSettings.opticalFlow;   // W2-C1: the camera fit's gate (this frame)
-	// W2-C1 (B9): a starter runs the engine - the de-judder in its standing class (its extras configured, matcher held, a reason
-	// that can act now or at the next transient, or a cadence being acquired), the interpolator, or hiccup repair filling a gap.
-	// Reuse-only consumers (sigma-delta, detail pulse, deband hold, source monitor, the occlusion mask, ...) are served only then
-	// (previous-frame state, like the wants). The mask's own matcher never counts: it would keep itself served.
+	// Batch B (plan-motion-engine-switch.md): the engine is ONE switch (vector_demand); any registered want is served, there is no
+	// starter. The wants are previous-frame state (VectorDemandInput).
 	VectorDemand::Input vectorInput = VectorDemandInput(interlaced);
 	// W2-C8 (C8-FINDING): the sigma-delta asks the engine for vectors only when its motion compensation can use them (the
 	// configured motion_compensation of the loaded quantiser; DitherVectorSource.h). A VP-V predicate here, not in Bill's file.
 	vectorInput.wants[static_cast<int>(VectorDemand::Consumer::SigmaDelta)] =
 		VpMotion::DitherVectors::SigmaDeltaWantsVectors(vectorInput.wants[static_cast<int>(VectorDemand::Consumer::SigmaDelta)],
 			CustomHookChain::QuantizerOn(customHooks, "motion_compensation"));
-	const bool dejudderStanding = dejudder && (activeSettings.dejudderStrength > 0.0 || activeSettings.dejudderStrengthEven > 0.0) &&
-		DejudderPolicy::CanEngageOrAcquiring(dejudderReason, pulldownAcquiring);
-	vectorInput.starterEngaged = dejudderStanding || interpolating || vpGapFillStandalone;
-	// W2-C1 (coordinator 2026-11-11): an engine that exists without a starter is named in the status (kept idle for hiccup repair:
-	// fill_gaps on outside the low-latency queue, where the keeper keeps it; otherwise held until its release).
-	vectorInput.engineLoaded = dejudder && !vectorInput.starterEngaged;
-	vectorInput.engineLoadedForHiccupRepair = vectorInput.engineLoaded && activeSettings.interpolationFillGaps &&
-		!lowLatencyQueueActive.load(std::memory_order_acquire);
 	// The governor's release is a state of this frame: a held matcher is not released (the keeper's latch alone would stay set).
 	vectorEngine.NoteVramRelease(vectorEstimate.motionEngineIdle.Pressured() && !dejudder);
 	vectorEngine.UpdateVectorEngine(vectorInput, vectorFacts, vectorHost);

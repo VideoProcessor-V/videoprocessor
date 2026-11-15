@@ -85,19 +85,14 @@ namespace VectorDemand
 	}
 
 	enum class Mode { Off, Forward, Backward };
-	// W2-C1 (B9): NoStarter appended (no index moved): reuse-only consumers want vectors but no starter runs the engine.
-	enum class Reason { Disabled, SlotsOff, NoConsumer, Interlaced, SmoothMotionExclusive, Forward, ForwardShallow, BackwardDepth0, NoStarter };
+	// W2-C1 (B9): NoStarter appended (no index moved). Batch B (motion engine switch): the starter gate is retired, so NoStarter is
+	// retired, never derived; the value stays (append-only enum, tests and logs name it). NoPairs appended: statistics consumers
+	// without optical-flow pairs (the matcher cannot make their whole-frame global).
+	enum class Reason { Disabled, SlotsOff, NoConsumer, Interlaced, SmoothMotionExclusive, Forward, ForwardShallow, BackwardDepth0, NoStarter, NoPairs };
 
-	// W2-C1 (B9, owner 2026-11-10): the only consumers that may START the motion engine (matcher or producer): de-judder standing
-	// demand (de-judder extras; the interpolator is de-judder family), hiccup repair and the camera fit. Every other consumer is
-	// reuse-only: it reads the vectors a starter made this frame, else takes its non-motion path visibly (Reason::NoStarter).
-	inline unsigned StarterMask()
-	{
-		return (1u << static_cast<int>(Consumer::DejudderExtras)) | (1u << static_cast<int>(Consumer::Interpolator)) |
-			(1u << static_cast<int>(Consumer::HiccupRepair)) | (1u << static_cast<int>(Consumer::CameraFit));
-	}
-	inline bool IsStarter(Consumer c) { return (StarterMask() & (1u << static_cast<int>(c))) != 0; }
-
+	// The motion engine is ONE ON/OFF switch (vector_demand, default ON; lead18 plan-motion-engine-switch.md). ON: every consumer that
+	// registers a vector want is served (the starter gate of W2-C1 is gone). The matcher is the fallback of the ON engine while no
+	// optical-flow pairs are expected (optical flow off, NVOF start failed, producer recovering).
 	struct Input
 	{
 		bool enabled = false;
@@ -107,14 +102,10 @@ namespace VectorDemand
 		bool smoothMotion = false;
 		bool interlaced = false;
 		bool wants[kConsumerCount] = {};
-		// W2-C1: a starter runs the engine this frame (set by the host from the de-judder standing class, the hiccup warm and the
-		// camera want). Reuse-only consumers are served only while it is true; a served CameraFit want engages it by itself.
-		bool starterEngaged = false;
-		// W2-C1 (coordinator 2026-11-11): the motion engine exists while no starter runs it this frame (kept loaded and idle for hiccup
-		// repair, or held until its release). Wording only: the status never says "idle (no starter)" while an engine exists, it names
-		// why the engine is loaded. Serving is unchanged (an idle engine makes no vectors).
-		bool engineLoaded = false;
-		bool engineLoadedForHiccupRepair = false;
+		// Previous-frame facts say optical-flow pairs will exist (optical_flow on, producer start not failed, not recovering,
+		// motion_ahead_frames > 0). False: the matcher fallback serves the source-field consumers; the statistics consumers have no
+		// matcher form and go visibly without vectors (Reason::NoPairs).
+		bool pairsExpected = true;
 	};
 
 	struct Decision
@@ -130,23 +121,33 @@ namespace VectorDemand
 		// and only synthesis consumers want vectors (their own policies decide).
 		bool smoothMotion = false;
 		bool synthesisOnly = false;
-		// W2-C1: the starter consumers that want vectors (bit per Consumer, synthesis included), and the reuse-only consumers left
-		// unserved because no starter ran (each is a refused start: MotionEngineWork::refusedStarts).
-		unsigned starters = 0;
-		unsigned refused = 0;
-		// W2-C1: copied from Input (wording of the NoStarter status only).
-		bool engineLoaded = false;
-		bool engineLoadedForHiccupRepair = false;
+		// Every consumer that registered a want (bit per Consumer, synthesis included), whether or not the engine is enabled: the OFF
+		// status line names them ("motion engine off (setting): <consumers> use their non-motion path").
+		unsigned wants = 0;
+		// Statistics consumers left unserved because no optical-flow pairs are expected (visible: UnservedWhy).
+		unsigned noPairs = 0;
+		// The matcher serves the source-field consumers because no pairs are expected (the fallback of the ON engine).
+		bool matcherFallback = false;
 		bool Serves(Consumer c) const { return (served & (1u << static_cast<int>(c))) != 0; }
 	};
 
 	inline Consumer ConsumerAt(int i) { return static_cast<Consumer>(i); }
 
+	// The consumers whose vectors can come from the matcher alone (a GPU field made at render time, no pairs): the camera fit.
+	inline unsigned MatcherFieldMask() { return 1u << static_cast<int>(Consumer::CameraFit); }
+
 	inline Decision DecideWith(const Input& in, bool analysisUnderSmoothMotion)
 	{
 		Decision d;
-		d.engineLoaded = in.engineLoaded;
-		d.engineLoadedForHiccupRepair = in.engineLoaded && in.engineLoadedForHiccupRepair;
+		unsigned wanted = 0;   // non-synthesis wants
+		for (int i = 0; i < kConsumerCount; ++i)
+		{
+			if (!in.wants[i])
+				continue;
+			d.wants |= 1u << i;
+			if (DomainOf(ConsumerAt(i)) != Domain::Synthesis)
+				wanted |= 1u << i;
+		}
 		if (!in.enabled)
 			return d;
 		if (!in.slotsRun)
@@ -154,37 +155,12 @@ namespace VectorDemand
 			d.reason = Reason::SlotsOff;
 			return d;
 		}
-		bool anyWant = false;
-		unsigned wanted = 0;   // non-synthesis wants
-		unsigned starterWants = 0;
-		unsigned synthesisReuse = 0;   // W2-C1 (C1-4): reuse-only synthesis wants (the occlusion mask): refused like the others without a starter
-		for (int i = 0; i < kConsumerCount; ++i)
-		{
-			if (!in.wants[i])
-				continue;
-			anyWant = true;
-			if (IsStarter(ConsumerAt(i)))
-				starterWants |= 1u << i;
-			if (DomainOf(ConsumerAt(i)) != Domain::Synthesis)
-				wanted |= 1u << i;
-			else if (!IsStarter(ConsumerAt(i)))
-				synthesisReuse |= 1u << i;
-		}
 		d.reason = Reason::NoConsumer;
-		if (!anyWant)
+		if (d.wants == 0)
 			return d;
-		d.starters = starterWants;
 		if (wanted == 0)
 		{
-			d.synthesisOnly = true;
-			// W2-C1 (C1-4): the occlusion mask alone, with no starter running, is a refused start (its own matcher never runs):
-			// DejudderPolicy reads the refusal (occlusionMaskServed), and the status names it.
-			if (synthesisReuse != 0 && !in.starterEngaged)
-			{
-				d.refused = synthesisReuse;
-				d.unserved = synthesisReuse;
-				d.reason = Reason::NoStarter;
-			}
+			d.synthesisOnly = true;   // synthesis consumers decide for themselves (their own policies)
 			return d;
 		}
 		d.smoothMotion = in.smoothMotion;
@@ -213,16 +189,20 @@ namespace VectorDemand
 				return d;
 			}
 		}
-		// W2-C1: reuse-only consumers are served only while a starter runs the engine this frame (a served camera fit is one).
-		const bool engaged = in.starterEngaged || (served & StarterMask()) != 0;
-		if (!engaged)
+		// No optical-flow pairs expected (optical flow off, producer start failed or recovering): the statistics consumers read the
+		// global of a producer pair, which the matcher cannot make. They go visibly without vectors; the others fall back to the matcher.
+		unsigned statsServed = 0;
+		for (int i = 0; i < kConsumerCount; ++i)
+			if ((served & (1u << i)) != 0 && DomainOf(ConsumerAt(i)) == Domain::SourceStatistics)
+				statsServed |= 1u << i;
+		if (!in.pairsExpected && statsServed != 0)
 		{
-			d.refused = (served & ~StarterMask()) | synthesisReuse;   // C1-4: the occlusion mask too (never in served)
-			d.unserved |= d.refused;
-			served &= StarterMask();
+			d.noPairs = statsServed;
+			d.unserved |= statsServed;
+			served &= ~statsServed;
 			if (served == 0)
 			{
-				d.reason = Reason::NoStarter;
+				d.reason = Reason::NoPairs;
 				return d;
 			}
 		}
@@ -231,25 +211,12 @@ namespace VectorDemand
 		// capacity >= 1) uses those already-queued frames (ForwardShallow, EngageAhead bounded by the capacity).
 		if (in.lowLatency && in.queueAheadCapacity == 0)
 		{
-			unsigned stats = 0;
-			for (int i = 0; i < kConsumerCount; ++i)
-				if ((served & (1u << i)) != 0 && DomainOf(ConsumerAt(i)) == Domain::SourceStatistics)
-					stats |= 1u << i;
+			const unsigned stats = served & statsServed;
 			d.unserved |= served & ~stats;
-			// W2-C1 (B9): the backward pair serves only the statistics consumers, which are reuse-only. When the starter that engaged
-			// them was a served field consumer (the camera fit), it needs a frame ahead and is dropped here, so no starter runs the
-			// engine: the statistics are refused visibly (NoStarter), never served from a pair nobody produces.
-			if (stats != 0 && !in.starterEngaged && (stats & StarterMask()) == 0)
-			{
-				d.refused |= stats | synthesisReuse;
-				d.unserved |= d.refused;
-				d.reason = Reason::NoStarter;
-				return d;
-			}
 			d.served = stats;
 			d.mode = Mode::Backward;
 			d.reason = Reason::BackwardDepth0;
-			d.producer = (stats & StarterMask()) != 0;   // W2-C1: statistics are reuse-only (never a starter)
+			d.producer = stats != 0;   // the backward pair serves the statistics consumers: it runs while any is served
 			d.estimate = false;
 			d.lowLatencyAllowed = true;
 			return d;
@@ -262,14 +229,16 @@ namespace VectorDemand
 			d.reason = Reason::ForwardShallow;
 			d.lowLatencyAllowed = true;
 		}
-		// A render-time estimate only for the starter consumers that need a GPU field (source field, output: the camera fit);
-		// the reuse-only consumers read what a starter made and cost no matcher run of their own.
+		// The producer runs while any consumer is served. The render-time matcher estimate serves the camera fit always (it needs the
+		// matcher's own field) and the other source-field / output consumers only while no pairs are expected (the matcher is the
+		// fallback of the ON engine: it costs nothing while pairs exist).
 		unsigned fieldMask = 0;
 		for (int i = 0; i < kConsumerCount; ++i)
 			if (DomainOf(ConsumerAt(i)) == Domain::SourceField || DomainOf(ConsumerAt(i)) == Domain::Output)
 				fieldMask |= 1u << i;
-		d.estimate = (served & StarterMask() & fieldMask) != 0;
-		d.producer = (served & StarterMask()) != 0;
+		d.producer = served != 0;
+		d.estimate = (served & fieldMask) != 0 && (!in.pairsExpected || (served & MatcherFieldMask()) != 0);
+		d.matcherFallback = !in.pairsExpected && (served & fieldMask & ~MatcherFieldMask()) != 0;
 		return d;
 	}
 
@@ -290,8 +259,8 @@ namespace VectorDemand
 	{
 		if (d.reason == Reason::Interlaced)
 			return "interlaced";
-		if ((d.refused & (1u << static_cast<int>(c))) != 0)
-			return "no starter runs the motion engine";
+		if ((d.noPairs & (1u << static_cast<int>(c))) != 0)
+			return "no optical-flow pairs (optical flow off or not running)";
 		if (d.smoothMotion && (d.reason == Reason::SmoothMotionExclusive || DomainOf(c) == Domain::Output))
 			return "libplacebo smooth motion owns output";
 		return "needs a frame ahead";
@@ -341,6 +310,15 @@ namespace VectorDemand
 		return s;
 	}
 
+	// Engine OFF by the setting (vector_demand off; Q2: a status line, NOT a Fallbacks-engaged entry; empty when no consumer wants
+	// vectors, and the Original pathway never shows it): "motion engine off (setting): <consumers> use their non-motion path".
+	inline std::string OffLine(const Decision& d)
+	{
+		if (d.wants == 0)
+			return std::string();
+		return "motion engine off (setting): " + NamesOf(d.wants) + " use their non-motion path";
+	}
+
 	inline std::string StatusLine(const Decision& d)
 	{
 		if (d.reason == Reason::Disabled)
@@ -351,15 +329,8 @@ namespace VectorDemand
 			return d.synthesisOnly ? "Vector engine: idle (served by de-judder/interpolator policies)" :
 				"Vector engine: idle (no consumer)";
 		std::string s = "Vector engine: ";
-		if (d.reason == Reason::NoStarter)
-		{
-			// W2-C1 (coordinator 2026-11-11): an engine that exists is named with the reason it is loaded, never "idle (no starter)".
-			const char* state = d.engineLoadedForHiccupRepair ? "loaded idle for hiccup repair (no starter runs it); " :
-				d.engineLoaded ? "loaded, not running (no starter runs it); " : "idle (no starter); ";
-			return s + state + UnservedText(d);
-		}
 		if (d.mode == Mode::Forward)
-			s += "on (forward)";
+			s += d.matcherFallback ? "on (forward; matcher fallback, no optical-flow pairs)" : "on (forward)";
 		else if (d.mode == Mode::Backward)
 			s += "backward pairs (no frame ahead)";
 		else
@@ -403,13 +374,13 @@ namespace VectorDemand
 	}
 
 	// ---- W2-C1 (B9): the ONE global motion-engine state every consumer reads (IVectorEngine::State) --------------------------
-	// Off = no starter engaged, or a hard absence; Degraded = a starter runs the matcher without NVOF pairs; On = a starter and a
-	// running producer. Pure data here (light header: VectorEngineInterface.h includes it); VectorEngine derives it once per frame
+	// Off = nothing wants vectors, or a hard absence; Degraded = the engine runs the matcher without NVOF pairs; On = a running
+	// producer (batch B: the starter gate is retired, any registered want runs the engine). Pure data here (light header: VectorEngineInterface.h includes it); VectorEngine derives it once per frame
 	// (DeriveEngineStatus below) from the Decision and the producer facts. Reasons are appended only (bit = 1 << reason).
 	enum class MotionEngineState : uint8_t { On, Degraded, Off };
 	enum class MotionEngineReason : uint8_t
 	{
-		None, NoStarter, OpticalFlowOff, LowLatency, ProducerRecovering, NvofUnavailable, SmoothMotion, VramRelease, Resync,
+		None, NoStarter /* retired, never derived (batch B) */, OpticalFlowOff, LowLatency, ProducerRecovering, NvofUnavailable, SmoothMotion, VramRelease, Resync,
 		Interlaced, VectorDemandOff
 	};
 	constexpr int kMotionEngineReasonCount = 11;
@@ -419,18 +390,15 @@ namespace VectorDemand
 		MotionEngineState state = MotionEngineState::Off;
 		MotionEngineReason reason = MotionEngineReason::None;   // the leading reason (the first in enum order of `reasons`)
 		unsigned reasons = 0;    // bit (1 << MotionEngineReason) per reason that holds
-		unsigned starters = 0;   // bit (1 << Consumer) per starter engaged
 		unsigned affected = 0;   // bit (1 << Consumer) per consumer without full motion: unserved, or served by a degraded engine
 		uint64_t frame = 0;      // the frame the status was derived at
 		bool Has(MotionEngineReason r) const { return (reasons & (1u << static_cast<int>(r))) != 0; }
 	};
 
-	// What the engine did (monotonic counters, render thread; zero-cost to read). refusedStarts[c] = frames a reuse-only consumer c
-	// wanted vectors while no starter ran (Decision::refused).
+	// What the engine did (monotonic counters, render thread; zero-cost to read).
 	struct MotionEngineWork
 	{
 		uint64_t matcherCreates = 0, matcherEstimates = 0, warmUps = 0, analysisEstimates = 0, producerStarts = 0, producerPairs = 0;
-		uint64_t refusedStarts[kConsumerCount] = {};
 	};
 
 	inline const char* StateWord(MotionEngineState s)
@@ -443,7 +411,7 @@ namespace VectorDemand
 		switch (r)
 		{
 		case MotionEngineReason::None: return "";
-		case MotionEngineReason::NoStarter: return "no starter (de-judder, hiccup repair or camera fit) runs it";
+		case MotionEngineReason::NoStarter: return "no starter runs it (retired)";
 		case MotionEngineReason::OpticalFlowOff: return "optical flow is off (the matcher runs alone)";
 		case MotionEngineReason::LowLatency: return "low latency";
 		case MotionEngineReason::ProducerRecovering: return "the optical-flow producer is recovering";
@@ -462,7 +430,6 @@ namespace VectorDemand
 	{
 		bool vectorDemand = true;         // the vector_demand setting (off = the Original pathway)
 		Decision decision;                // this frame's VectorDemand decision
-		bool starterEngaged = false;      // a starter runs the engine (Input::starterEngaged or a served camera fit)
 		bool opticalFlow = true;          // the optical_flow setting
 		bool lowLatency = false;
 		bool lowLatencyNoVectors = false; // low latency without the vectors path (competitive, field consumers)
@@ -479,8 +446,6 @@ namespace VectorDemand
 		MotionEngineStatus st;
 		st.frame = f.frame;
 		const Decision& d = f.decision;
-		const unsigned starters = d.starters | (d.served & StarterMask());
-		st.starters = f.starterEngaged ? starters : 0u;
 		unsigned r = 0;
 		const auto bit = [](MotionEngineReason x) { return 1u << static_cast<int>(x); };
 		if (!f.vectorDemand)
@@ -494,10 +459,11 @@ namespace VectorDemand
 		if (f.lowLatency && f.lowLatencyNoVectors)
 			r |= bit(MotionEngineReason::LowLatency);
 		const bool hardOff = r != 0;
-		if (!f.starterEngaged)
-			r |= bit(MotionEngineReason::NoStarter);
+		// Batch B: the engine runs while any consumer registered a want (NoStarter is never derived). Nothing wanting vectors: Off, no
+		// reason, nothing affected.
+		const bool wanted = d.wants != 0 && d.reason != Reason::SlotsOff;
 		bool degraded = false;
-		if (!hardOff && f.starterEngaged)
+		if (!hardOff && wanted)
 		{
 			if (!f.opticalFlow)
 			{
@@ -525,13 +491,13 @@ namespace VectorDemand
 				degraded = true;
 			}
 			if (!degraded && !f.producerRunning)
-				degraded = true;   // a starter runs the matcher while the producer has not started yet (its first frame)
+				degraded = true;   // the matcher runs while the producer has not started yet (its first frame)
 		}
 		st.reasons = r;
 		// A hard off (VRAM release, low latency without vectors ...) leaves the decision's served consumers without motion too: affected,
 		// so the "motion engine" entry names them (never a silent fallback).
 		st.affected = d.unserved | ((degraded || hardOff) ? d.served : 0u);
-		st.state = (hardOff || !f.starterEngaged) ? MotionEngineState::Off : degraded ? MotionEngineState::Degraded : MotionEngineState::On;
+		st.state = (hardOff || !wanted) ? MotionEngineState::Off : degraded ? MotionEngineState::Degraded : MotionEngineState::On;
 		for (int i = 0; i < kMotionEngineReasonCount; ++i)
 			if ((r & (1u << i)) != 0)
 			{

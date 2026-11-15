@@ -326,8 +326,10 @@ namespace FallbackCatalog
 	}
 
 	// W2-C1 (B9): the motion engine's one state (VectorDemand::MotionEngineStatus, VectorEngine::State()). Engaged while a consumer
-	// that wants vectors is without full motion: the engine is off (no starter runs it, or a hard absence) or degraded (a starter
-	// runs the block searches without optical-flow pairs). Released when on, when nothing wants vectors, and when the only cause
+	// that wants vectors is without full motion: the engine is off (a hard absence: smooth motion, video memory pressure, ...) or
+	// degraded (the consumers run the block searches without optical-flow pairs). Batch B: the engine is one switch and any registered
+	// want runs it; the deliberate "motion engine off (setting)" line is NOT an entry (Q2: a user's choice, not a fallback; it is the
+	// Ctrl+I / Config status line). Released when on, when nothing wants vectors, and when the only cause
 	// is a deliberate setting (optical_flow off) or the producer's own first frames (reason None; the "motion" entry covers a
 	// producer that never runs). It absorbs the reason part of "motion engine pressure" (that id stays one release as an alias).
 	inline Decision MotionEngine(const VectorDemand::MotionEngineStatus& st)
