@@ -68,7 +68,7 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(N2.classify_line("v = (code >> 2) & 1;"), ["shift"])
         self.assertEqual(N2.classify_line("v = evenCode >> 6;"), ["shift"])
         self.assertEqual(N2.classify_line("v = flags >> 2;"), [])
-        self.assertNotIn(b"", open(N2.__file__, "rb").read())
+        self.assertNotIn(bytes([8]), open(N2.__file__, "rb").read())
 
     def test_u8(self):
         self.assertEqual(N2.classify_line("std::vector<uint8_t> pixelBuf;"), ["u8"])

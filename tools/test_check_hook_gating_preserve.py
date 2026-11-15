@@ -47,8 +47,11 @@ class PreserveTemporary(base.CheckHookGatingTest):
 
     def test_count_above_the_temporary_limit_still_fails(self):
         n = self._count()
-        base._w(self.root, chg.BUDGET_PATH, json.dumps({"files": {BILL: n - 2}, "temporary": {
-            BILL: {"limit": n - 1, "reverts_to": n - 2, "until": ["re-graft"], "note": "x"}}}))
+        self.assertGreaterEqual(n, 2)
+        self._prime(n - 2, n - 1)  # --write-budget itself (rc 0 asserted in _prime) must keep the block
+        d = self._budget()
+        self.assertEqual(d["temporary"][BILL]["limit"], n - 1)
+        self.assertEqual(d["files"][BILL], n - 2)
         rc, out = base._run(self.root)
         self.assertEqual(rc, 1, out)
         self.assertIn("temporary budget", out)
