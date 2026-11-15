@@ -141,5 +141,37 @@ namespace VideoProcessorTest
 			}
 			Assert::IsTrue(smoothed > 0, L"the window produced smoothed parameters (not a vacuous comparison)");
 		}
+
+		// Gate condition on WAIVER-B4-P7CODEC: a ModelType / Reason byte outside its enum is refused and the target untouched;
+		// the last enumerator of each is still accepted. Byte offsets follow EncodeRecordPod's order: magic 4, seq / pairFrom /
+		// pairTo / pairSeconds / resyncGeneration / rebaseGeneration 6 x 8 = 52, valid @52, params.type @53, reason @54,
+		// flags @55, params.h 9 x 8 @56, smoothedParams.type @128.
+		TEST_METHOD(OutOfRangeModelTypeOrReasonIsRefused)
+		{
+			const CameraMotion a = PodRec(21);
+			std::vector<uint8_t> buf;
+			const size_t n = PodEncode(a, buf);
+			Assert::IsTrue(n > 129);
+			Assert::AreEqual<uint8_t>(uint8_t(a.params.type), buf[53], L"offset of params.type");
+			Assert::AreEqual<uint8_t>(uint8_t(a.reason), buf[54], L"offset of reason");
+			Assert::AreEqual<uint8_t>(uint8_t(a.smoothedParams.type), buf[128], L"offset of smoothedParams.type");
+			const size_t offsets[] = { 53, 54, 128 };
+			const uint8_t lasts[] = { uint8_t(ModelType::Homography), uint8_t(Reason::Disabled), uint8_t(ModelType::Homography) };
+			for (int k = 0; k < 3; ++k)
+			{
+				std::vector<uint8_t> bad = buf;
+				bad[offsets[k]] = uint8_t(lasts[k] + 1);
+				CameraMotion b;
+				b.seq = 999;
+				Assert::IsFalse(CameraLink::DecodeRecordPod(bad.data(), n, b), L"one past the last enumerator");
+				Assert::AreEqual<uint64_t>(999u, b.seq, L"a refused decode leaves the target untouched");
+				bad[offsets[k]] = 0xFF;
+				Assert::IsFalse(CameraLink::DecodeRecordPod(bad.data(), n, b), L"0xFF");
+				Assert::AreEqual<uint64_t>(999u, b.seq);
+				bad[offsets[k]] = lasts[k];
+				Assert::IsTrue(CameraLink::DecodeRecordPod(bad.data(), n, b), L"the last enumerator is accepted");
+				Assert::AreEqual<uint64_t>(21u, b.seq);
+			}
+		}
 	};
 }

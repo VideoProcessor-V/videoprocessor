@@ -45,6 +45,7 @@ namespace VpFrameAnalysis
 		P1AcquireSource(const P1AcquireSource&) = delete;
 		P1AcquireSource& operator=(const P1AcquireSource&) = delete;
 
+		// PRECISION-OK 119#5: the motion engine's design 8-bit input view (IP1Source::ReadEngine8, Engine8Half = HalfLuma.h law; P1 itself stays 16-bit)
 		bool ReadEngine8(uint64_t seq, const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& hw, int& hh,
 			VpSkeleton::P1ReadKind& how) override
 		{
