@@ -116,7 +116,7 @@ namespace Vpv
 		motionAhead->setToolTip(QStringLiteral(
 			"NVIDIA GPUs: the optical-flow engine computes the motion ahead of the picture on its own hardware, off "
 			"the render path. On: the look-ahead runs every frame queued ahead of render (up to the ahead-compute ceiling, 6 frames); the value "
-			"is the minimum the queue keeps for it (about 67 ms: 2 frames at 24p, 4 at 50/60p). It never lengthens "
+			"is the minimum the queue keeps for it (about 67 ms: 2 frames at 24p, 4 at 50/60p). It never lengthens "   // GENERAL-REF: worked example in user-facing text; the depth is derived from the measured content rate
 			"the queue beyond that minimum; on a short queue it looks less far ahead, and with no frames ahead the "
 			"de-judder estimates at render time or holds. The low-latency queue switches it off. Off, or other GPUs: "
 			"VP's matcher at render time."));
