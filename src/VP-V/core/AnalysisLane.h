@@ -798,6 +798,7 @@ public:
         const int idx = st->IndexOf(id);
         if (idx < 0 || !st->bufs[size_t(idx)] || n != st->bufs[size_t(idx)]->Bytes())
             return false;
+        const ::ComputeOnce::FrameScope frameScope(static_cast<int64_t>(seq), "lane", static_cast<int64_t>(id));   // compute-once: the owner form's frame (req.seq)
         VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(id))).c_str(), seq, ::ComputeOnce::Variant(0));   // compute-once: the Acquire CPU owner form
         return RunCpuLive(*st, st->graph.nodes[size_t(idx)], seq, 0u, dst, n, inputOf);
     }
