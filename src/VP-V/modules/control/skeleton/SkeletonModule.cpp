@@ -2161,8 +2161,11 @@ namespace Vpv
 				report.name = "skeleton.report";
 				const VpSkeleton::ProductId consumed[] = { VpSkeleton::kP1HalfLuma, VpSkeleton::kP4SourceStats, VpSkeleton::kP10GrainSplit,
 					VpSkeleton::kP11RegionBlockStats, VpSkeleton::kP12LightLevel };
+				// U7 v2: the scene sequence judge reads P4 back to seq - kScenePrimeFrames (the re-prime window, the gap check against the
+				// tracker's newest frame, a late reader's verdict): declared as a lag so the graph keeps those records (P4 history 1 alone
+				// left them out of the ring: a frame without a record lost the cut after it, and a late reader judged without context).
 				for (VpSkeleton::ProductId p : consumed)
-					VpSkeleton::AddConsume(report, p);
+					VpSkeleton::AddConsume(report, p, p == VpSkeleton::kP4SourceStats ? uint8_t(kScenePrimeFrames) : uint8_t(0));
 				std::vector<ConsumerDecl> consumers{ report };
 				// SK-W stage D: the consumers other components declared (the camera link): their products and ancestors join the graph.
 				std::vector<VpSkeleton::ProductId> outside;
