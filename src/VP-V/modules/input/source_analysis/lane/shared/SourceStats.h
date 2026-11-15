@@ -24,6 +24,7 @@
 #include <cstring>
 #include <vector>
 
+#include "../../../../../core/RobustStats.h"   // C6-2 U24: the grain median (Upper rule)
 #include "../../AnalysisAxis10.h" // S-2a: bin = HistBinFromQ6, centre = BinCenterQ6 (one decode law, rule 20)
 
 namespace VpUnit
@@ -239,8 +240,7 @@ public:
             if (blockN_[b] != 0)
                 rms.push_back(Isqrt64(blockSq_[b] / blockN_[b]));
         if (!rms.empty()) {
-            std::sort(rms.begin(), rms.end());
-            rec->grain = rms[rms.size() / 2];
+            rec->grain = static_cast<uint32_t>(RobustStats::MedianInPlace(rms, RobustStats::MedianRule::Upper));   // = sorted[n / 2], exact
         }
     }
 
