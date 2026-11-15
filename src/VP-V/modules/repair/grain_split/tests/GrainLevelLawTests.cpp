@@ -347,7 +347,7 @@ namespace GrainLevelLawTestsNs
 				Require(GrainLevel::BudgetShare(rows[i], 0.0) < 0.0, "budget share unset without a budget");
 			}
 			Require(rows[4].ms4kLo == 2.5 && rows[4].ms4kHi == 3.9, "B 8+4 row = design-grain-chain-cost row 8 band");
-			Log("share of the PROPOSED 5.4 ms budget (owner has not set it): B 8+4 upper " + std::to_string(GrainLevel::BudgetShare(rows[4], GrainLevel::kProposedBudget4kMs)));
+			Log("share of the owner 4.5 ms budget: B 8+4 upper " + std::to_string(GrainLevel::BudgetShare(rows[4], GrainLevel::kOwnerBudget4kMs)));
 		}
 	};
 }

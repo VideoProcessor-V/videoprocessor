@@ -5,8 +5,8 @@
 // brief-S-3c phase T2, owner decisions OD:604 / OD:605 / OD:650 and the 11-14 answers). CPU model only: no GPU kernel
 // exists or is written here (design rule 11-14 14:00: no grain-separation step without its measured 4K cost and its
 // budget share). lead14\design-grain-chain-cost.md (11-14 14:0x) is the source of CostRows(); every cost is an ESTIMATE, nothing
-// measured. The budget there (5.4 ms 4K laptop incl. 0.4 reserve; core 5.0) is a PROPOSAL: the owner has not set it, so the
-// share is computed only when a caller passes a budget (kProposedBudget4kMs is that proposal, not a decision).
+// measured. The budget is the OWNER'S: 4.5 ms at 4K on the laptop with a 12% step-down (11-14), so the
+// share is computed from kOwnerBudget4kMs unless a caller passes another.
 //
 // What is in this file (all in the unit of P10's N: codes^2 of D = Y - G(base) Y, ten-bit-equivalent via Params::split.sourceBits):
 //   L1  NLF_t  temporal noise level function: the CROSS form I_r = E_r - C_r (E = <D_t,D_t>, C = <D_t, W D_t-1>) on every trusted
@@ -50,6 +50,7 @@
 #include <utility>
 #include <vector>
 
+#include <VP-V/modules/motion/estimation/composed/ComposedVectors.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 
 namespace GrainLevel
@@ -65,8 +66,8 @@ namespace GrainLevel
 
 	// ---- cost ledger (design rule: every step states its 4K cost and its budget share) --------------------------------------
 	// ms ranges are ESTIMATES on the 3050 Ti laptop (idle GPU) from refs/120 s5 and study-borrowed-grain s4 / s7; NOTHING here is
-	// measured (no GPU kernel exists yet). budgetShare is unset until the owner sets the single grain-separation budget
-	// (lead14\design-grain-chain-cost.md s2 proposes 5.4 ms; NOT set by the owner); BudgetShare() turns a row into a fraction once a budget exists.
+	// measured (no GPU kernel exists yet). the single grain-separation budget is the owner's
+	// (11-14: 4.5 ms 4K laptop, 12% step-down; the older 5.4 ms proposal is superseded); BudgetShare() turns a row into a fraction of a budget (ms).
 	struct CostRow
 	{
 		const char* step;
@@ -89,7 +90,8 @@ namespace GrainLevel
 		count = static_cast<int>(sizeof(rows) / sizeof(rows[0]));
 		return rows;
 	}
-	constexpr double kProposedBudget4kMs = 5.4;   // PROPOSAL (design-grain-chain-cost s2), owner has not set it
+	constexpr double kOwnerBudget4kMs = 4.5;       // owner 11-14 (supersedes the 5.4 ms proposal of design-grain-chain-cost s2)
+	constexpr double kBudgetStepDown = 0.12;       // owner 11-14: the budget steps down 12% when it is exceeded
 	// Fraction of a budget (ms) a row's upper estimate takes at 4K; negative when no budget is set (budgetMs <= 0).
 	inline double BudgetShare(const CostRow& r, double budgetMs) { return budgetMs > 0.0 ? r.ms4kHi / budgetMs : -1.0; }
 
@@ -178,34 +180,8 @@ namespace GrainLevel
 		size_t At(int x, int y) const { return static_cast<size_t>(y / B) * bw + static_cast<size_t>(x / B); }
 	};
 
-	// Catmull-Rom weights for the fraction t at taps -1, 0, 1, 2.
-	inline void CubicWeights(double t, double* w)
-	{
-		const double t2 = t * t, t3 = t2 * t;
-		w[0] = -0.5 * t3 + t2 - 0.5 * t;
-		w[1] = 1.5 * t3 - 2.5 * t2 + 1.0;
-		w[2] = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
-		w[3] = 0.5 * t3 - 0.5 * t2;
-	}
-
-	// One bicubic sample; false when any of the 16 taps lies outside the frame (the footprint rule: no clamped taps).
-	inline bool SampleBicubic(const Plane& p, double sx, double sy, double& out)
-	{
-		const int x0 = static_cast<int>(std::floor(sx)), y0 = static_cast<int>(std::floor(sy));
-		if (x0 - 1 < 0 || y0 - 1 < 0 || x0 + 2 >= p.w || y0 + 2 >= p.h) return false;
-		double wx[4], wy[4];
-		CubicWeights(sx - x0, wx);
-		CubicWeights(sy - y0, wy);
-		double acc = 0.0;
-		for (int j = 0; j < 4; ++j)
-		{
-			double row = 0.0;
-			for (int i = 0; i < 4; ++i) row += wx[i] * p.at(x0 - 1 + i, y0 - 1 + j);
-			acc += wy[j] * row;
-		}
-		out = acc;
-		return true;
-	}
+	// Rule 1: the bicubic sampler is the ONE shared one (VpComposed::SampleBicubic, composed/ComposedVectors.h); no private copy here.
+	inline bool SampleBicubic(const Plane& p, double sx, double sy, double& out) { return VpComposed::SampleBicubic(p, sx, sy, out); }
 
 	// The reference plane warped to the current frame by a block field. valid[i] = 1 where the block is trusted and the bicubic
 	// footprint is inside the frame. THE CPU stand-in of the shared neighbour-warp product.
@@ -226,6 +202,25 @@ namespace GrainLevel
 				if (!f.trusted[b]) continue;
 				double s = 0.0;
 				if (!SampleBicubic(ref, x + f.vx[b], y + f.vy[b], s)) continue;
+				o.v.at(x, y) = s;
+				o.valid[static_cast<size_t>(y) * w + x] = 1;
+			}
+		return o;
+	}
+
+	// The production warp (R14-95): the reference plane resampled at each pixel's landing from the ECV plane (VpComposed::Plane::Warp, the ONE shared
+	// vector sampler) with the ONE shared bicubic. valid[i] = 1 where the chain is alive, the landing is in the frame and the 16-tap footprint fits.
+	// WarpBicubic above (a private BlockField) stays only as the CPU test stand-in until the consumer reads ECV planes.
+	inline Warped WarpFromComposed(const Plane& ref, const VpComposed::Plane& ecv, int w, int h)
+	{
+		Warped o;
+		o.v = Plane(w, h, 0.0);
+		o.valid.assign(static_cast<size_t>(w) * h, 0);
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+			{
+				double s = 0.0;
+				if (!ecv.SampleLanded(ref, x, y, s)) continue;
 				o.v.at(x, y) = s;
 				o.valid[static_cast<size_t>(y) * w + x] = 1;
 			}
