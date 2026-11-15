@@ -35,6 +35,7 @@ namespace Vpv
             t.defaults.push_back({ "texture_restore", "off" });
             t.defaults.push_back({ "detail_pulse_stabilise", "off" });
             t.defaults.push_back({ "detail_pulse_fast", "on" });
+            t.defaults.push_back({ "cut_soft_reset", "on" });
             t.defaults.push_back({ "source_resolution", "auto" });
             t.defaults.push_back({ "rebase_kernel_match", "off" });
             t.defaults.push_back({ "adaptive_downscale", "off" });
@@ -163,6 +164,7 @@ namespace Vpv
                 u.toggles.push_back({ "render_ahead", "De-judder: render ahead (under test)", { "off", "on" }, "output.presentation" });
                 u.toggles.push_back({ "interpolation_fallback", "Where motion is not trusted: hold or blend", { "hold", "blend" }, "motion.consumers" });
                 u.toggles.push_back({ "intent_motion", "Ease the de-judder per shot (only ever lower)", { "on", "off" }, "motion.consumers" });
+                u.toggles.push_back({ "cut_soft_reset", "Soft reset on a near-cut (high bar)", { "on", "off" }, "repair.texture_restore" });
                 u.planned.push_back({ "motion_ahead_ms", "Motion look-ahead in milliseconds (time-based)", "motion.estimation" });
                 t.units.push_back(u);
             }

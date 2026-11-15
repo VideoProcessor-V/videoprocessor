@@ -121,6 +121,12 @@ namespace Vpv
 				{ K::Row, "intent_motion_policy" }, { K::Row, "intent_motion_min" }, { K::Row, "intent_motion_min_shot_s" },
 				{ K::Row, "intent_ease_s" } },
 				{ L::Feature, "Per-shot easing", "intent_motion", nullptr, "off", "off" } },
+			// C5 batch B (lead 19: the register's "Input > Advanced (scene events)" resolved to VP-V Motion; owner 2026-11-15 08:35).
+			{ "motion", "scene_events", "Scene changes: soft reset",
+				"At a confirmed cut detail pulse and texture restore start over; on a fade they shrink their history. With the soft "
+				"reset on, a near-cut the judge is very sure of (a high bar) shrinks it too; below the bar nothing happens. Used only "
+				"while detail pulse or texture restore is on.", true, false, {
+				{ K::Toggle, "cut_soft_reset" } } },
 			{ "motion", "internals", "Motion estimator (measured, leave alone)",
 				"The estimator's measured internals. Normal viewing never needs these.", true, true, {
 				{ K::Section, "dejudderEstimation" } } },

@@ -742,6 +742,7 @@
         },
         "tools": [],
         "config_keys": [
+          "cut_soft_reset",
           "detail_pulse_cap",
           "detail_pulse_fast",
           "detail_pulse_stabilise",

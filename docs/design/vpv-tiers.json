@@ -57,6 +57,7 @@
     "texture_restore": "off",
     "detail_pulse_stabilise": "off",
     "detail_pulse_fast": "on",
+    "cut_soft_reset": "on",
     "source_resolution": "auto",
     "rebase_kernel_match": "off",
     "adaptive_downscale": "off",
@@ -300,6 +301,15 @@
             "off"
           ],
           "slot": "motion.consumers"
+        },
+        {
+          "key": "cut_soft_reset",
+          "label": "Soft reset on a near-cut (high bar)",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "repair.texture_restore"
         }
       ],
       "planned": [

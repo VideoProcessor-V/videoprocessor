@@ -832,11 +832,13 @@ if (p.x < sz.x && p.y < sz.y) {
 			// readable group restarts (no private fallback) and is counted. U7 v3: a fade is a partial reset: the references (energies)
 			// (energies, old.xyz) are reduced by the frame's fade keep squared, one more decay step (fade_keep2 below; the focus ratio
 			// old.w is contrast-free and keeps its own decay); a fade group without a keep restarts, shown.
+			// cut_soft_reset (Params::softReset): a soft reset takes the SAME keep path (historyKeep = SoftResetKeep), counted apart.
 			bool sceneRestart = false;
 			double historyKeep2 = 1.0;
 			if (!restartAll)
 			{
-				const VpDetailRestore::SceneRestartAnswer scene = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader);
+				const VpDetailRestore::SceneRestartAnswer scene = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader,
+					params.softReset);
 				sceneRestart = scene.restart;
 				sceneUnavailable = !scene.fromRecord || scene.fadeWithoutKeep;
 				sceneWhy = scene.fadeWithoutKeep ? VpDetailRestore::SceneFadeWithoutKeepWhy() : nullptr;
@@ -844,10 +846,14 @@ if (p.x < sz.x && p.y < sz.y) {
 					++sceneMissing;
 				if (scene.fadeWithoutKeep)
 					++sceneFadeRestarts;
-				if (scene.fadePartial)
-				{
+				if (scene.fadePartial || scene.softPartial)
 					historyKeep2 = static_cast<double>(scene.historyKeep) * scene.historyKeep;
+				if (scene.fadePartial)
 					++scenePartials;
+				if (scene.softPartial)
+				{
+					++sceneSoftResets;
+					sceneSoftStrengthSum += scene.strength;
 				}
 				lastHistoryKeep = scene.historyKeep;
 			}

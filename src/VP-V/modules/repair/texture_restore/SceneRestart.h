@@ -16,12 +16,18 @@
 // unknown history) and is counted as missing (visible in the module's SceneMissing(), cause in SceneUnavailableWhy()). Tests inject
 // the reader through Params::sceneReader or DefaultSceneReader().
 //
+// Soft reset (cut_soft_reset, default on; owner 2026-11-15 08:35 U7 Q4 "the bar fairly high"): a high-confidence non-cut candidate
+// gets a PARTIAL reset through the same history-keep multiply as a fade (softPartial, historyKeep = CutFadeJudge::SoftResetKeep);
+// the rule and its PROVISIONAL bar are the shared unit's (CutFadeJudge::SoftResetStrength, kSoftResetBar). Below the bar: nothing.
+// The fade partial reset is not behind the switch.
+//
 // Header-only, C++14.
 
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/hub/CurrentFrame.h>
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 
 #include <atomic>
 #include <cstdint>
@@ -73,14 +79,20 @@ namespace VpDetailRestore
 		return VpFrameAnalysis::SourceFrameTap::SingleStore() ? "scene group not sealed for the frame" : "no frame analysis store (frame_analysis_store off)";
 	}
 
+	// cut_soft_reset's built-in default (owner U7 Q4 / settings register row 9: on, at a high bar).
+	constexpr bool kDefaultCutSoftReset = true;
+
 	struct SceneRestartAnswer
 	{
 		bool restart = true;     // cut or no record; U7 v3: a fade is NOT a restart (partial reset), except a fade group without its keep
 		bool fromRecord = false; // false: the record was missing (restart by the no-private-fallback rule)
-		float strength = 1.0f;   // how far to start over, 0..1: 1 on a restart; with softReset, the U7 v2 cut strength of a non-cut
+		// How far to start over, 0..1: 1 on a restart; with softReset, the soft-reset strength when the rule fired (softPartial),
+		// else 0 (below the bar: no reset).
+		float strength = 1.0f;
+		bool softPartial = false;   // softReset on and the rule fired: no restart, the history reduced by historyKeep (SoftResetKeep)
 		// U7 v3, the partial reset on fades (owner 2026-11-15 09:20; 102b U7-FADE-NO-HARDRESTART): the share of the history the
 		// consumer keeps on this frame, amplitude domain (VpUnit::CutFadeJudge::FrameFadeKeep; energy holders apply its square).
-		// 1 on a frame that is no fade, 0 on a restart. Consumers multiply their history by it on every frame (a product over the
+		// 1 on a frame that is no fade (SoftResetKeep on a soft reset), 0 on a restart. Consumers multiply their history by it on every frame (a product over the
 		// fade: the history shrinks monotonically as the picture fades, so pre-fade detail is not carried into the new scene).
 		float historyKeep = 0.0f;
 		bool fadePartial = false;        // a fade with its keep: no restart, the history reduced by historyKeep
@@ -89,9 +101,10 @@ namespace VpDetailRestore
 
 	// U7 v2 (U7-accuracy): `cut` is the scene group's DELIVERED cut (once per confirmed cut; normally one frame late, later only when the
 	// frame after the cut had no scene group; FrameAnalysis::Scene). Consumers keep the HARD reset on it (owner ruling Q4). softReset
-	// (default OFF) also reports the cut strength of a frame that is not a cut, for a partial start-over; the restart decision itself is
-	// unchanged by it. No consumer has a switch for it yet: DetailPulse and TextureRestore call with the default (OFF); the per-consumer
-	// switches are deferred (refs/102b, U7-accuracy row "soft reset switch").
+	// (the consumers pass Params::softReset = cut_soft_reset, default on; the argument's default stays off for the CPU models and
+	// harnesses) adds the soft reset: on a frame that is no restart and no fade, CutFadeJudge::SoftResetStrength of its group (confirmed,
+	// candidate, not cut / cutHere / flash / fade, strength >= kSoftResetBar) > 0 gives softPartial with historyKeep =
+	// SoftResetKeep(strength); the consumer multiplies its history by it exactly as by a fade keep. The restart decision is unchanged.
 	// U7 v3: a fade no longer restarts. A fade group carries fadeKeep (the producer's FrameFadeKeep): the answer is no restart with
 	// historyKeep = fadeKeep (fadePartial). A fade group WITHOUT a keep (a producer before v3) restarts, flagged fadeWithoutKeep: the
 	// consumer shows it as its scene judge fallback (FallbackCatalog::SceneJudgeUnavailable, why = SceneFadeWithoutKeepWhy()).
@@ -106,7 +119,13 @@ namespace VpDetailRestore
 		a.restart = !found || scene.cut || a.fadeWithoutKeep;
 		a.fadePartial = found && !a.restart && scene.fade;
 		a.historyKeep = a.restart ? 0.0f : a.fadePartial ? (scene.fadeKeep < 1.0f ? scene.fadeKeep : 1.0f) : 1.0f;
-		a.strength = a.restart ? 1.0f : softReset && scene.cutStrength > 0.0f ? (scene.cutStrength < 1.0f ? scene.cutStrength : 1.0f) : 0.0f;
+		const float soft = softReset && found && !a.restart && !a.fadePartial ?
+			VpUnit::CutFadeJudge::SoftResetStrength(scene.confirmed, scene.cutPossible, scene.cut || scene.cutHere, scene.flash, scene.fade,
+				scene.cutStrength) : 0.0f;
+		a.softPartial = soft > 0.0f;
+		if (a.softPartial)
+			a.historyKeep = VpUnit::CutFadeJudge::SoftResetKeep(soft);
+		a.strength = a.restart ? 1.0f : soft;
 		return a;
 	}
 

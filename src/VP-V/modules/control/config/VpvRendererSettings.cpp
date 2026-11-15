@@ -389,7 +389,9 @@ namespace VpvRendererSettings
 			std::make_pair("deband_grain", &settings.debandGrain),
 			std::make_pair("deband_vp_exclusive", &settings.debandVpExclusive),
 			std::make_pair("detail_pulse_stabilise", &settings.detailPulseStabilise),
-			std::make_pair("detail_pulse_fast", &settings.detailPulseFast) })
+			std::make_pair("detail_pulse_fast", &settings.detailPulseFast),
+			// C5 batch B (owner 2026-11-15 08:35 U7 Q4): the soft reset of detail pulse / texture restore, default on.
+			std::make_pair("cut_soft_reset", &settings.cutSoftReset) })
 		{
 			if (!tryChoice(toggle.first, raw))
 				continue;
@@ -1208,6 +1210,7 @@ namespace VpvRendererSettings
 			<< settings.detailPulseFast << '|'
 			<< settings.textureRestore << '|'
 			<< settings.textureRestoreCap << '|'
+			<< settings.cutSoftReset << '|'
 			<< settings.debandGrain << '|'
 			<< settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|'
@@ -1410,6 +1413,7 @@ namespace VpvRendererSettings
 		changed(current.detailPulseFast != next.detailPulseFast, "detail_pulse_fast");
 		changed(current.textureRestore != next.textureRestore, "texture_restore");
 		changed(current.textureRestoreCap != next.textureRestoreCap, "texture_restore_cap");
+		changed(current.cutSoftReset != next.cutSoftReset, "cut_soft_reset");
 		changed(current.adaptive.residualGrainGuard != next.adaptive.residualGrainGuard, "residual_stabilise_grain_guard");
 		changed(current.adaptive.motionAdaptive != next.adaptive.motionAdaptive, "adaptive_motion");
 		changed(current.interpolation != next.interpolation, "interpolation");
@@ -1558,6 +1562,7 @@ namespace VpvRendererSettings
 		<< "detail_pulse_fast=" << (s.detailPulseFast ? "on" : "off") << "\n"
 		<< "texture_restore=" << (s.textureRestore ? "statistical" : "off") << "\n"
 		<< "texture_restore_cap=" << s.textureRestoreCap << "\n"
+		<< "cut_soft_reset=" << (s.cutSoftReset ? "on" : "off") << "\n"
 		<< "deband_grain=" << (s.debandGrain ? "on" : "off") << "\n"
 		<< "residual_stabilise_grain_guard=" << (s.adaptive.residualGrainGuard ? "on" : "off") << "\n"
 		<< "adaptive_motion=" << (s.adaptive.motionAdaptive ? "on" : "off") << "\n"

@@ -244,6 +244,9 @@ namespace VpvRenderer
 		bool detailPulseFast = DetailPulse::kDefaultFast;
 		bool textureRestore = false;
 		double textureRestoreCap = TextureRestore::kDefaultCap;
+		// cut_soft_reset (C5 batch B, default on; owner 2026-11-15 08:35 U7 Q4): detail pulse and texture restore reduce their
+		// history on a high-confidence non-cut candidate (bar CutFadeJudge::kSoftResetBar, provisional); off = no soft reset.
+		bool cutSoftReset = VpDetailRestore::kDefaultCutSoftReset;
 		bool dejudderSourceWarpCatmull = true;
 		// Hunt 2 M1: nls_sampling. catmull (default): the NLS / NLS+ warp samples the
 		// source with a separable Catmull-Rom widened by the map's local minification

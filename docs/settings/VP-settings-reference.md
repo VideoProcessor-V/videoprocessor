@@ -238,6 +238,11 @@ areas meet. Change one only to reproduce a bug report.
 | `intent_motion`, `_policy`, `_min`, `_min_shot_s` | May scale your de-judder strength DOWN per shot (never up). | off |
 | `intent_ease_s` | How the intent features ease in at a cut. | 1.5 s |
 
+### 3.5 Scene changes (VP-V > Motion > Advanced, "Scene changes: soft reset")
+| Key | What it does | Why it exists | Default | Cost |
+|---|---|---|---|---|
+| `cut_soft_reset` | When the scene judge is very sure a frame is a near-cut that is not a confirmed cut (a high bar), detail pulse and texture restore shrink their history instead of carrying the old scene's detail. Below the bar nothing happens. A confirmed cut still starts over and a fade still shrinks the history either way. Off: "soft reset: off" on their status lines. | Owner 2026-11-15: partial reset only at high confidence; mid-scene firing would be worse than the vectors' own quick recovery. The bar is provisional until the D8 truth run. | on | none |
+
 ---
 
 ## 4. Repair
