@@ -878,12 +878,9 @@ namespace SourceIdentity
 						v.push_back(cr.lineStat[static_cast<size_t>(j)]);
 						who.push_back(j);
 					}
-				const double med = MedianOf(v.data(), static_cast<int>(v.size()));
+				const double med = RobustStats::MedianOf(v.data(), static_cast<int>(v.size()));
 				ce.median = med;
-				std::vector<double> dev(v.size());
-				for (size_t i = 0; i < v.size(); ++i)
-					dev[i] = std::abs(v[i] - med);
-				const double mad = MedianOf(dev.data(), static_cast<int>(dev.size()));
+				const double mad = RobustStats::MadAboutOf(v.data(), static_cast<int>(v.size()), med);
 				const double tau = (std::max)(s_.contradictionMin, 3.0 * RobustStats::kMadToSigma * mad);
 				const bool dipMajority = med < s_.majorityDip;
 				std::vector<double> kept;
@@ -915,15 +912,12 @@ namespace SourceIdentity
 								col.push_back(cr.segStat[cell]);
 						}
 						if (col.size() >= 3)
-							segMed.push_back(MedianOf(col.data(), static_cast<int>(col.size())));
+							segMed.push_back(RobustStats::MedianOf(col.data(), static_cast<int>(col.size())));
 					}
 					if (segMed.size() >= 4)
 					{
-						const double m2 = MedianOf(segMed.data(), static_cast<int>(segMed.size()));
-						std::vector<double> d2(segMed.size());
-						for (size_t i = 0; i < segMed.size(); ++i)
-							d2[i] = std::abs(segMed[i] - m2);
-						const double mad2 = MedianOf(d2.data(), static_cast<int>(d2.size()));
+						const double m2 = RobustStats::MedianOf(segMed.data(), static_cast<int>(segMed.size()));
+						const double mad2 = RobustStats::MadAboutOf(segMed.data(), static_cast<int>(segMed.size()), m2);
 						const double tau2 = (std::max)(s_.contradictionMin, 3.0 * RobustStats::kMadToSigma * mad2);
 						const bool dip2 = m2 < s_.majorityDip;
 						int bad = 0;
@@ -945,7 +939,7 @@ namespace SourceIdentity
 					ce.reason |= kReasonLowDetail;
 					return;
 				}
-				ce.stat = TrimmedMeanOf(kept.data(), static_cast<int>(kept.size()), s_.trimFraction);
+				ce.stat = RobustStats::TrimmedMeanOf(kept.data(), static_cast<int>(kept.size()), s_.trimFraction);
 				ce.statValid = true;
 				ce.increment = ClampD(nulls_.LogLikelihoodRatio(ce.cls, ce.stat), s_.incrementMin, s_.incrementMax);
 				ce.informative = true;

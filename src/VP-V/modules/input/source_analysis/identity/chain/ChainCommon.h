@@ -103,30 +103,6 @@ namespace SourceIdentity
 			return Hash32(Hash32(lo ^ 0x9e3779b9u) + Hash32(hi + 0x7f4a7c15u) * 31u + salt * 0x85ebca77u);
 		}
 
-		// Median of n values (n >= 1); copies and sorts, so the input is untouched. Even n: mean of the two middle values.
-		inline double MedianOf(const double* v, int n)
-		{
-			return RobustStats::MedianOf(v, n);   // core/RobustStats.h (ND06), MeanOfMiddle
-		}
-
-		// Mean after dropping floor(trim * n) values from each end of the sorted sample (ascending summation order).
-		inline double TrimmedMeanOf(const double* v, int n, double trim)
-		{
-			if (n <= 0)
-				return 0.0;
-			std::vector<double> t(v, v + n);
-			std::sort(t.begin(), t.end());
-			int k = static_cast<int>(std::floor(trim * static_cast<double>(n)));
-			if (k < 0)
-				k = 0;
-			if (n - 2 * k <= 0)
-				k = 0;
-			double s = 0.0;
-			for (int i = k; i < n - k; ++i)
-				s += t[static_cast<size_t>(i)];
-			return s / static_cast<double>(n - 2 * k);
-		}
-
 		inline double ClampD(double x, double lo, double hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
 		inline int RoundToInt(double x) { return static_cast<int>(std::floor(x + 0.5)); }
