@@ -128,6 +128,10 @@ struct Result {
                                                // reader, so it is in OptionalFillIds and FillOff stops it at the same step as its readers
     uint32_t tdFollowing = 0;              // how many TD products follow their optional readers
     uint32_t tdFollowingOn = 0;            // of those, admitted (with a reader)
+    uint32_t tdNotMadeCompetitive = 0;     // competitive: demanded TD products not made (no slot work)
+    // A consumer that demands TD products and runs without them (competitive; games with TD off). Empty = none. The wiring hands it to
+    // FallbackCatalog::SkeletonAdmission and Syncs the Fallbacks registry: Ctrl+I / Config status / one-time notice (rule 5).
+    std::string consumerDowngrade;
     double budgetMs = 0.0;                 // the slot budget (RenderBudget law)
     double coreMs = 0.0;                   // measured core cost (unmeasured core counted 0, named in the line)
     double sliceMs = 0.0;                  // the TD slice declared to the slot
@@ -375,6 +379,16 @@ inline Result Admit(const AdmissionFacts& f)
     if (f.mode == LatencyMode::Competitive) {
         std::snprintf(buf, sizeof(buf), "admission (competitive): no slot work (latency 0)");
         r.line = buf;
+        // S3A-COMP (owner answer 2026-11-15 via lead 18): competitive makes NO TD products. A consumer that demands them (TD itself, or
+        // another consumer with TD off) runs without them: that downgrade is SHOWN through the existing Fallbacks path (consumerDowngrade
+        // -> FallbackCatalog::SkeletonAdmission -> Ctrl+I / Config status / one-time notice; rule 5), never only in this line.
+        for (size_t i = 0; i < kProductCount; ++i)
+            if (f.present[i] && r.cls[i] == JobClass::Slice && r.jobbed[i]) ++r.tdNotMadeCompetitive;
+        if (r.tdNotMadeCompetitive > 0) {
+            r.consumerDowngrade = "competitive (latency 0): TD products " + std::to_string(r.tdNotMadeCompetitive) + " demanded by " +
+                (TdOn(f) ? "TD" : "another consumer") + " not made (no slot work); the consumer runs without them";
+            r.line += "; " + r.consumerDowngrade;
+        }
         PlanAhead(f, r);
         return r;
     }
@@ -533,9 +547,13 @@ inline Result Admit(const AdmissionFacts& f)
     if (r.tdFollowing > 0)
         r.line += "; TD off: TD products " + std::to_string(r.tdFollowing) + " read only by optional fills, " +
             std::to_string(r.tdFollowingOn) + " on with them (they stop when their readers stop)";
-    if (r.tdOptionalInGames > 0)
+    if (r.tdOptionalInGames > 0) {
         r.line += "; TD off (games): TD products " + std::to_string(r.tdOptionalInGames) +
             " demanded by another consumer are optional fill, not made (games runs no optional fill)";
+        // the consumer's downgrade, shown through the same Fallbacks entry as competitive (S3A-COMP / S3A-GAMES; rule 5)
+        r.consumerDowngrade = "games (queue 1): TD products " + std::to_string(r.tdOptionalInGames) +
+            " demanded by another consumer not made (optional fill; games runs none); the consumer runs without them";
+    }
     if (!rb.Measured() || !(hz > 0.0)) r.line += "; no budget (render or source rate not measured)";
     PlanAhead(f, r);
     return r;

@@ -56,6 +56,7 @@ namespace FallbackPlainText
 			{ "motion look-ahead", "Some frames went without optical-flow look-ahead" },
 			{ "motion_lookahead_capped", "The motion look-ahead covers fewer frames than its depth asks for" },
 			{ "source resolution look-ahead", "Some frames had their source resolution judged on arrival only" },
+			{ "skeleton_admission", "In this low-latency mode the temporal detail results are not made, so the steps that read them run without them" },
 		};
 		for (const Entry& e : table)
 			if (id == e.id)

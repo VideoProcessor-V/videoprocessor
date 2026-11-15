@@ -354,6 +354,7 @@ Every downgrade is visible (Ctrl+I line, Ctrl+Alt+D, Config status); none is log
 | `skeleton_gpu_gap` | `GPU lane work runs ahead of the present` | `skeleton_gpu_gap = after_render` |
 | `skeleton_gpu_gap_off` | `GPU lane work off (skeleton_gpu_gap = off): the GPU products are not made ahead` | dispatcher exists, gap off |
 | `skeleton_gpu_shed` | `VRAM shed: <products> lost the lane ring (not enough free video memory); made in the render only` | the tier plan refused a GPU product its ring (`GrantWhy::OverBudget`) |
+| `skeleton_admission` | `competitive (latency 0): TD products N demanded by <TD / another consumer> not made (no slot work); the consumer runs without them` (games, TD off: `games (queue 1): TD products N demanded by another consumer not made (optional fill; games runs none); the consumer runs without them`) | `core/AdmissionTable.h` `Result::consumerDowngrade` is non-empty (S3A-COMP / S3A-GAMES, owner answers 2026-11-15 via lead 18; Admit has no production caller yet, 102b :489, so the wiring package syncs it) |
 | `skeleton_gpu_memory` | `GPU products not made: private working memory N MiB exceeds the free video memory M MiB (WxH)` | the dispatcher's private working memory alone (below) is larger than the free video memory at a graph build |
 | `skeleton_gpu_failed` | `dispatch failed N time(s): <LastError>` | the dispatcher's failure counter is non-zero |
 | `skeleton_gpu_chroma` | `P10c declined: chroma needs the source ring (M2 P10)` | a dispatcher exists |

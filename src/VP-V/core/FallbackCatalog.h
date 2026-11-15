@@ -818,6 +818,13 @@ namespace FallbackCatalog
 		return products.empty() ? Released("skeleton_gpu_shed")
 		                        : Engaged("skeleton_gpu_shed", "VRAM shed: " + products + " lost the lane ring (not enough free video memory); made in the render only");
 	}
+	// S-3a admission (core/AdmissionTable.h Result::consumerDowngrade; owner answer 2026-11-15 via lead 18, S3A-COMP): a consumer demands
+	// TD products the latency mode does not make (competitive: no slot work; games with TD off: optional fill, games runs none), so it runs
+	// without them. `note` is the admission's text; empty = no such consumer.
+	inline Decision SkeletonAdmission(const std::string& note)
+	{
+		return note.empty() ? Released("skeleton_admission") : Engaged("skeleton_admission", note);
+	}
 	// The GPU products' private working memory (tap ring, grain-split working textures: not shed by the governor) does not
 	// fit in the free video memory: the GPU products are not made at all (the consumers keep their own computation).
 	inline Decision SkeletonGpuMemory(const std::string& why)
