@@ -112,7 +112,7 @@ namespace AdaptiveDownscaleStage
 
 		bool UpscaleThisFrame() const { return upscaleThisFrame; }
 		// Batch B Q1 (plan-motion-engine-switch.md): a hybrid scaler (the adaptive downscale or the upscale form) registered on this frame
-		// and motion can run: it is a vector user, so it registers a vector want (the host adds it to the GrainMap want, DejudderPolicyRunner.inl).
+		// and motion can run: it is a vector user, so it registers a vector want (the host sets the ResidualStabilise want, DejudderPolicyRunner.inl).
 		// Separate from grainMapWanted, which also asks the estimate for the grain error map (only with the grain map or motion-adaptive on).
 		bool UsesVectors() const { return vectorUser; }
 		// Stage 8b on a one-axis upscale this frame (faithful only; the prescaler dropped).
