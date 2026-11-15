@@ -145,3 +145,88 @@ namespace P1AcquireSourceTestsNs
 		}
 	};
 }
+
+// L-B4 audit SHOULDs 1-3 (P1AcquireSource guards):
+//   1. a reader whose P1 is built from another tap depth (msbShift 4, SourceViewOf12) refuses every read before any Acquire;
+//   2. a P1 result whose size is not exactly HalfLumaBytes(dims) (the half plane alone, or a larger buffer) is refused (Unread);
+//   3. memo reads of one frame are counted apart: one FilledAtRead, the rest MemoReused (labelled LiveFill, not LanePublished).
+namespace P1AcquireSourceTestsNs
+{
+	TEST_CLASS(P1AcquireSourceGuardTests)
+	{
+	public:
+		TEST_METHOD(AnotherTapShiftIsRefusedBeforeAcquire)
+		{
+			const Frame f = Make(Kind::P010, 4);
+			SkeletonMemo memo;
+			P1Owner owner;
+			owner.source = f.source;
+			Assert::IsTrue(owner.Register(memo));
+			int acquires = 0;
+			VpFrameAnalysis::P1AcquireSource reader([&](uint64_t seq) {
+				++acquires;
+				return memo.Acquire(kP1HalfLuma, seq, AcquireForm::Cpu);
+			}, 4);
+			std::vector<uint8_t> out;
+			int w = 0, h = 0;
+			P1ReadKind how = P1ReadKind::LiveFill;
+			Assert::IsFalse(reader.ReadEngine8(3, f.source, out, w, h, how), L"msbShift 4: Engine8Half is not exact");
+			Assert::IsTrue(how == P1ReadKind::None);
+			Assert::AreEqual<uint64_t>(1u, reader.OwnDecode());
+			Assert::AreEqual<uint64_t>(0u, reader.Acquired());
+			Assert::AreEqual(0, acquires, L"no Acquire for a refused depth");
+			Assert::AreEqual(0, owner.fills.load(), L"no P1 build for a refused depth");
+			// The same frame through a shift-6 reader reads (the guard is the shift, not the frame).
+			VpFrameAnalysis::P1AcquireSource ten([&memo](uint64_t seq) { return memo.Acquire(kP1HalfLuma, seq, AcquireForm::Cpu); });
+			Assert::IsTrue(ten.ReadEngine8(3, f.source, out, w, h, how));
+		}
+
+		TEST_METHOD(AP1ResultOfAnotherSizeIsRefused)
+		{
+			const Frame f = Make(Kind::P010, 5);
+			const Dims dims{ static_cast<uint32_t>(f.source.width), static_cast<uint32_t>(f.source.height) };
+			const size_t sizes[] = { VpLaneProducts::HalfLumaHalfBytes(dims), VpLaneProducts::HalfLumaBytes(dims) + 2u };
+			for (size_t n : sizes)
+			{
+				SkeletonMemo memo;
+				OwnerFill fill;
+				fill.fill = [n](const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput& o) {
+					o.bytes.assign(n, 0x40);
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(kP1HalfLuma, AcquireForm::Cpu, SkeletonMemo::OwnerUnitOf(kP1HalfLuma),
+					std::move(fill)) == SkeletonMemo::Registration::Registered);
+				VpFrameAnalysis::P1AcquireSource reader([&memo](uint64_t seq) { return memo.Acquire(kP1HalfLuma, seq, AcquireForm::Cpu); });
+				std::vector<uint8_t> out;
+				int w = 0, h = 0;
+				P1ReadKind how = P1ReadKind::LiveFill;
+				Assert::IsFalse(reader.ReadEngine8(9, f.source, out, w, h, how), L"size != HalfLumaBytes(dims)");
+				Assert::IsTrue(how == P1ReadKind::None);
+				Assert::AreEqual<uint64_t>(1u, reader.Unread());
+				Assert::AreEqual<uint64_t>(0u, reader.Acquired());
+			}
+		}
+
+		TEST_METHOD(MemoFillAndReuseAreCountedApart)
+		{
+			const Frame f = Make(Kind::P010, 6);
+			SkeletonMemo memo;
+			P1Owner owner;
+			owner.source = f.source;
+			Assert::IsTrue(owner.Register(memo));
+			VpFrameAnalysis::P1AcquireSource reader([&memo](uint64_t seq) { return memo.Acquire(kP1HalfLuma, seq, AcquireForm::Cpu); });
+			std::vector<uint8_t> out;
+			int w = 0, h = 0;
+			for (int i = 0; i < 12; ++i)
+			{
+				P1ReadKind how = P1ReadKind::None;
+				Assert::IsTrue(reader.ReadEngine8(11, f.source, out, w, h, how));
+				Assert::IsTrue(how == P1ReadKind::LiveFill, L"a memo result is never labelled LanePublished");
+			}
+			Assert::AreEqual(1, owner.fills.load());
+			Assert::AreEqual<uint64_t>(1u, reader.FilledAtRead(), L"the first read ran the one fill");
+			Assert::AreEqual<uint64_t>(11u, reader.MemoReused(), L"the other eleven reused it");
+			Assert::AreEqual<uint64_t>(12u, reader.Acquired());
+		}
+	};
+}
