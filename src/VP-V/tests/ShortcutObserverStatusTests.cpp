@@ -122,7 +122,7 @@ namespace ShortcutObserverStatusTest
 				noticesShown += static_cast<int>(notices.Take(heading).size());
 			}
 			Assert::AreEqual(1, noticesShown);
-			Assert::AreEqual(3, r.reads);             // read every tick: the file is followed, a switch applies at once
+			Assert::AreEqual(3, r.reads);             // read every tick: the [shortcuts] keys are followed (the pathway: FileFactsReader, once)
 			Assert::AreEqual(1, r.observer.starts);   // started once: the plan did not change
 		}
 
@@ -307,7 +307,7 @@ namespace ShortcutObserverStatusTest
 			Assert::AreEqual(static_cast<int>(FCONTROL | FSHIFT), static_cast<int>(r.observer.started.modifiers));
 			Assert::AreEqual(static_cast<int>(VK_F9), static_cast<int>(r.observer.started.key));
 			Assert::IsTrue(r.extension.PlanInForce() == r.observer.started);
-			// A switch to the Original pathway (no default there): stopped at once.
+			// An explicit empty value (none): stopped at once (a pathway switch waits for the next start: FileFactsReader).
 			r.facts.defaultApplies = false;
 			DialogExtension::OnTimer();
 			Assert::IsFalse(r.observer.running);
