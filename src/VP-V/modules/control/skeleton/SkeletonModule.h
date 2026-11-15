@@ -180,8 +180,9 @@ namespace Vpv
 			bool EngineFieldFactsOf(const void* host, uint64_t seq, EngineFieldFacts& out) const;
 			// Tests: the retry step the module runs at every Begin and AfterRender (the P1 inputs are published by the lane's own threads).
 			void RetryEngineFeedForTesting(const void* host);
-			// The scene of frame `seq` (render thread, after the seal of `seq`): the U7 v2 sequence verdict over the P4 records around it, the
-			// pair fade against `seq - 1` (SkeletonFacts.h SceneFacts). False when a record is not readable.
+			// The scene of frame `seq` (normally the render thread, after the seal of `seq`): the U7 v2 sequence verdict over the P4 records
+			// around it, the pair fade against `seq - 1` (SkeletonFacts.h SceneFacts). The pair is asked for through the memo (get-or-compute);
+			// off the render thread every record is the lane's published copy. False when a record is not readable (SceneFacts::why names it).
 			bool SceneFactsOf(const void* host, uint64_t seq, SceneFacts& out) const;
 			// The SCENE PRODUCT (W1-C7): cut / fade of frame `seq` against `seq - 1`, the one reader every consumer uses (the camera extension's
 			// ReadScene reads the same store group). Order: the frame-analysis store's scene group (published by this module at the seal of

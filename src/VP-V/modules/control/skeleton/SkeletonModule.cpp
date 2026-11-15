@@ -494,7 +494,10 @@ namespace Vpv
 
 		namespace
 		{
-			// U7 v2 (U7-accuracy): the scene sequence judge over the lane's P4 records. Render thread (ReadOf), under st.sceneMutex.
+			// U7 v2 (U7-accuracy): the scene sequence judge over the lane's P4 records, under st.sceneMutex. Render thread: ReadOf (a peek,
+			// never a compute). Off the render thread (15c-code: the LED look-ahead walk asks SceneOf there) ReadOf would race the lane's
+			// render-thread state, so the record comes from the memo, which off the render thread serves the lane's PUBLISHED bytes (Acquire
+			// G2 a') and never runs the lane's render-thread compute.
 			constexpr uint64_t kScenePrimeFrames = 8;   // frames pushed before `seq` when the tracker starts over (ref 4 + context 3 + 1)
 			using SceneSlot = HostState::SceneVerdictSlot;
 
@@ -502,6 +505,12 @@ namespace Vpv
 			{
 				if (seq == 0)
 					return false;
+				if (b.memo && !b.memo->OnRenderThread())
+				{
+					const VpSkeleton::AcquireResult a = b.memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
+					return a.Ok() && a.cpu != nullptr && a.cpuBytes == VpLaneProducts::kStatsBytes &&
+						VpLaneProducts::ReadSourceStats(a.cpu, a.cpuBytes, out);
+				}
 				const AnalysisLane::ProductRead r = b.lane.ReadOf(VpSkeleton::kP4SourceStats, seq);
 				return r.cpu != nullptr && VpLaneProducts::ReadSourceStats(r.cpu, r.cpuBytes, out);
 			}
