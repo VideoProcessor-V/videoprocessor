@@ -6,7 +6,8 @@ Usage: python -I tools/check_hook_gating.py [--base-ref a591ad3b5] [--root PATH]
                                             [--files F...] [--json] [--fail-untagged] [--no-git]
 
 --base-ref is BILL's tip (the file-ownership baseline; a ref whose tree contains src/VP-V/ is refused). To see only
-what a branch ADDED, use --since <merge-base> (hits, untagged lines and new sites on added lines only).
+what a branch ADDED, use --since <merge-base> (hits, untagged lines and new sites on added lines only; unverified
+VPV-GATED markers and their gated-marker-unverified call sites are always reported, wherever they are).
 
 Bill-owned files = the files present at --base-ref (Bill's tip, the vp_footprint.py convention: every file
 outside src/VP-V/) that are production code (vp_footprint.bucket_of == "production"; tests and project files
@@ -1398,8 +1399,10 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
             return s["line"] in since_added.get(s["file"], set())
         def _new_site(s):
             return any(n in since_added.get(s["file"], set()) for n in range(s["start"], s["end"] + 1))
-        hits = [h for h in hits if _new(h)]
-        unverified = [u for u in unverified if u["file"] in since_added and _new(u)]
+        # A VPV-GATED marker lives in src/VP-V (outside since_added) and its body can lose the early return
+        # without any Bill line changing: unverified markers are a whole-tree invariant (0 at a green base), so
+        # they and their call sites are kept under --since (HOOKGATE-CHECKER-HOLES (1)).
+        hits = [h for h in hits if _new(h) or h["class"] == "gated-marker-unverified"]
         untagged = [u for u in untagged if _new(u)]
         untagged_vpv = untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_used)
         stale = [x for x in stale if x not in allow_used]
