@@ -105,6 +105,18 @@ namespace Vpv
 				return false;
 			}
 
+			// 15c-c8: a consumer that reads the engine's pair or field (published by the engine feed, never made by the lane).
+			bool ReadsEngineProduct(const VpSkeleton::ConsumerDecl& c)
+			{
+				for (size_t i = 0; i < c.count; ++i)
+				{
+					const VpSkeleton::ProductId p = c.consumes[i].product;
+					if (p == VpSkeleton::kP2VectorPair || p == VpSkeleton::kP2mMatcherPair || p == VpSkeleton::kP3AnalysisField)
+						return true;
+				}
+				return false;
+			}
+
 			std::atomic<unsigned long long>& DispatchersCreated()
 			{
 				static std::atomic<unsigned long long> n{ 0 };
@@ -406,7 +418,7 @@ namespace Vpv
 			size_t externalConsumers = 0;        // consumers declared from outside, in the current graph
 			size_t externalDuplicates = 0;       // declared ids that were already taken (ignored, shown)
 			bool wantsCameraFit = false;         // an external consumer reads a camera product
-			bool feedNeeded = false;             // the graph holds P2m / P3 for an external consumer: the engine feed runs
+			bool feedNeeded = false;             // an external consumer reads P2 / P2m / P3 or a camera product: the engine feed runs
 			bool fitWantedPushed = false;        // IVectorEngine::SetCameraFitWanted(true) was sent
 			// 15c-c8 (render thread, Reconcile): the raising consumers that turned this lane on (empty = the lane runs as configured) and
 			// the configured mode beside it. A raised lane is On with no GPU dispatcher, and its report reads only P1 / P4.
@@ -1993,7 +2005,12 @@ namespace Vpv
 				st.externalConsumers = consumers.size() - 1;
 				st.externalDuplicates = duplicates;
 				st.wantsCameraFit = wantsFit;
-				st.feedNeeded = st.externalConsumers != 0;
+				// 15c-c8: the engine feed runs for an external consumer that reads the engine's pair / field or a camera product (whose inputs they
+				// are), not for every external consumer: the LED drive reads P4 only, and a feed without a reader is work (and an "engine feed"
+				// notice) with no consumer.
+				st.feedNeeded = false;
+				for (size_t i = 1; i < consumers.size(); ++i)
+					st.feedNeeded = st.feedNeeded || ReadsEngineProduct(consumers[i]) || ReadsCameraProduct(consumers[i]);
 				if (st.feedNeeded)
 					for (VpSkeleton::ProductId p : { VpSkeleton::kP2VectorPair, VpSkeleton::kP2mMatcherPair, VpSkeleton::kP3AnalysisField })
 					{
