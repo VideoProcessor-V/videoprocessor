@@ -9,6 +9,7 @@
     "src/VP-V/modules/input/source_analysis/AnalysisLumaDomain.h",
     "src/VP-V/modules/input/source_analysis/AnalysisAxis10.h",
     "src/VP-V/modules/input/source_analysis/tests/AnalysisLumaDomainTests.cpp",
+    "src/VP-V/modules/input/source_analysis/tests/DecodeOwnerIdentityTests.cpp",
     "src/VP-V/modules/input/source_analysis/tests/AnalysisAxisConsumerTests.cpp",
     "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp",
     "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h",

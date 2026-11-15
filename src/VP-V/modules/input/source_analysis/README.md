@@ -316,6 +316,18 @@ Chain tests:
 - Doc 91 A (verbatim): "Fewer, consolidated modules (fewer places for bugs, easier audits)"; "compute once / skip if present; no duplicate work".
 - Cost (estimate, nothing built or run in this slice): the decode is one shift per sample, no allocation; at 4K (8.3 M luma samples)
   and 1080p (2.1 M) it replaces the existing `>> 6` / `<< 6` instructions one for one, so the added cost is zero; the GPU wide-luma branch is off by default.
+- ONE decoder for RGB and full-range 4:2:x too (15c C6, checker site D6). OWNER ANSWER 2026-11-15 (3), lead18/coreplan-C10-15c-PC-regions.md
+  commit C6: "the central one should be able to be changed to accommodate for this". So the central decoder was extended instead of
+  keeping the producer's copy as a named exception: the decode owner (Bill's `AnalysisLumaSource` sampler + its VP-V face
+  `AnalysisLumaDomain.h`) now carries `Vpv::AnalysisDomain::NeedsLumaPlane`, `DecodeSharedLuma` (the frame's shared plane of
+  Sample().luma, 10-bit codes) and `StudioLumaMap` (the one sampler-code -> studio-code map, `FullLumaToLimited(code, 1)` when
+  `CodesFullRange()`). The range question has ONE function, the owner's `CodesFullRange()` (the producer's wrapper
+  `SamplerCodesAreFullRange` is deleted). No lossy switch, no EPE trade-off: the result is IDENTICAL, pinned by
+  `tests/DecodeOwnerIdentityTests.cpp` (the producer's former private decode frozen as the oracle, byte-equal planes, equal maps and
+  equal Measured records on R210 / R12B / R12L / BGRA / full-range P010, decoded DV, v210 and every other synthetic kind; both
+  pathways, BT.709 and BT.2020). Bit depths are unchanged: the plane holds the sampler's 10-bit codes (msbShift 6) as before; R12
+  sources reach the plane through Sample()'s 10-bit law exactly as before; the 12-bit packed-DV view (`SourceViewOf12`, msbShift 4)
+  is untouched; nothing is narrowed. Cost: none added (the same loop, moved; header-inline).
 
 ## Known issues / open items
 

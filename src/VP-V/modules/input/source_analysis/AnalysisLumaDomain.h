@@ -33,6 +33,8 @@
 // limited domain. PrepareAnalysisFrame sets it only together with limitedDomain.
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 #include <ColorSpace.h>
@@ -165,3 +167,70 @@ inline AnalysisLumaRange AnalysisLumaSource::CodesRange() const
 {
 	return MapsToLimitedDomain() ? AnalysisLumaRange::Limited : range;
 }
+
+// ---- 15c C6 (owner answer 3, 2026-11-15: "the central one should be able to be changed to accommodate for this") ----
+// The decode owner's analysis output for every format, RGB and full-range 4:2:x included: the frame's shared luma plane
+// (AnalysisLumaPlane, Sample(x, y).luma of every pixel, 10-bit codes) and the one sampler-code -> studio-code map. Moved
+// here from VpFrameAnalysis.cpp, where the producer kept its own copy (checker site D6): same formats, same per-row
+// decoder / per-pixel sampler order, same luma law, same range map, same rounding (FullLumaToLimited above), same 10-bit
+// depth. VpFrameAnalysis re-exports DecodeSharedLuma and StudioLumaMap and reads them; it decodes nothing itself.
+// Bit identity against the producer's former private decode: tests/DecodeOwnerIdentityTests.cpp.
+namespace Vpv { namespace AnalysisDomain
+{
+	// True when the source's luma has to be decoded into the shared plane: its Sample().luma is not already a readable
+	// 10-bit plane. The 16-bit plane formats (P010, P210, decoded DV 4:2:2) at limited range are read in place; at full
+	// range (fullRangeYuv) Sample() maps their codes, so they are decoded like every other format.
+	inline bool NeedsLumaPlane(const AnalysisLumaSource& source)
+	{
+		const bool planeFormat = source.format == AnalysisLumaFormat::P010 || source.format == AnalysisLumaFormat::P210 ||
+			source.format == AnalysisLumaFormat::DecodedDolbyVision422;
+		return source.IsValid() && !(planeFormat && !source.fullRangeYuv);
+	}
+
+	// Fills and publishes the source's shared plane once (the first caller that claims it): each row through the
+	// row decoder (SampleLumaRow), else pixel by pixel through Sample(). False when there is nothing to do (no plane,
+	// already claimed or published, an invalid source) or a pixel cannot be read (the plane is then never published and
+	// every reader keeps decoding for itself).
+	inline bool DecodeSharedLuma(const AnalysisLumaSource& source)
+	{
+		AnalysisLumaPlane* plane = source.sharedLuma.get();
+		if (!plane || !source.IsValid() || plane->Ready() || !plane->TryClaim())
+			return false;
+		const int width = source.width, height = source.height;
+		plane->Bind(source);
+		// resize, not assign: a recycled plane of the same size keeps its storage and is not
+		// zero-filled (every element is written below).
+		plane->codes.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
+		for (int y = 0; y < height; ++y)
+		{
+			uint16_t* row = plane->codes.data() + static_cast<size_t>(y) * static_cast<size_t>(width);
+			if (source.SampleLumaRow(0, y, width, row))
+				continue;
+			for (int x = 0; x < width; ++x)
+			{
+				AnalysisLumaSample sample;
+				if (!source.Sample(x, y, sample))
+				{
+					plane->codes.clear();
+					plane->codes.shrink_to_fit();
+					return false;
+				}
+				row[x] = sample.luma;
+			}
+		}
+		plane->Publish();
+		return true;
+	}
+
+	// Sample().luma code (0..1023) -> 10-bit studio code: the identity when the codes are already studio codes, else
+	// (CodesFullRange: Bill's delivered full-range codes, Original pathway) the full -> limited luma law above with one
+	// rounding. The single range conversion for every VP analysis consumer (FrameAnalysis::Store records).
+	inline std::array<uint16_t, 1024> StudioLumaMap(const AnalysisLumaSource& source)
+	{
+		std::array<uint16_t, 1024> map{};
+		const bool full = source.CodesFullRange();
+		for (int code = 0; code < 1024; ++code)
+			map[static_cast<size_t>(code)] = full ? FullLumaToLimited(code, 1) : static_cast<uint16_t>(code);
+		return map;
+	}
+} }
