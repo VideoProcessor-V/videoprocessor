@@ -36,7 +36,7 @@ warning line when off), Fallbacks engaged; then one tab per unit, each with **Ma
 | Tab | Main | Advanced |
 |---|---|---|
 | Input | Capture; Signal and content; Total delay | Capture plumbing (expert); Content labels: tuning; Readouts (diagnostics) |
-| Motion | **tier**; De-judder amount (your taste); Motion engine and hiccup repair; Render ahead; Per-shot easing | Set by the Motion tier; Set by the de-judder amount (the 8 slider fields); De-judder shaping (yours: fade matching, pulldown, vector options); Render ahead: tuning; Per-shot easing: tuning; Motion estimator (measured) |
+| Motion | **tier**; Motion engine (the one on/off switch; greys the next two when off); De-judder amount (your taste); Hiccup repair; Render ahead; Per-shot easing | Set by the Motion tier; Set by the de-judder amount (the 8 slider fields); De-judder shaping (yours: fade matching, pulldown, vector options); Render ahead: tuning; Per-shot easing: tuning; Motion estimator (measured) |
 | Repair | **tier**; Deband | Set by the Repair tier; Texture restore and detail pulse: limits |
 | Scaling | **tier**; Re-base (your picture slider; used only while re-base is on); Grain-aware downscale (used only while it is on); Grain-aware upscale | Set by the Scaling tier; Re-base evidence; Re-base timing (re-base on); Scaler steadiness (expert); Grain-aware scaler thresholds (measured) |
 | Colour | Dolby Vision (trims); Range and precision; SDR tone shape; Room-light adaptation; Tone mapping and display (Bill's pages) | SDR tone shape: values; Room-light adaptation: values |
