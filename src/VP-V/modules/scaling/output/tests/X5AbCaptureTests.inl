@@ -10,6 +10,12 @@
 // Output (all under VP_X5AB_OUT): <side>.csv (one row per frame) and <case>-<side>.y10 (sampled 10-bit luma of the output, every
 // 2nd pixel in x and y, uint16 little endian, frame after frame). Frames are 8-bit RGB from ffmpeg (tools/x5ab-extract.ps1).
 // Cut column: tip = the P4/U7 verdict the module used; base = the old rule re-derived from Stats.meanLuma (|step| > 20 codes).
+// Every row is one source-frame ADVANCE, so cut=1 on a row is one grain-term snap (the per-consumer reset impact of a cut verdict).
+// cut_state (owner-intent fix 2026-11-15: false cuts are counted, not only misses): tip = first (no previous advanced frame: a cut
+// by definition, never scored as a true or a false cut), known (U7 judged the P4 pair), unavailable (no verdict, no snap) or
+// unasked (the module did not ask: a harness fault); base = derived. The before side must run THIS text too (carry this file's
+// commit onto the before branch). Scoring is not done here: tools/x5ab-score.ps1 reads both sides' CSVs and a hand-marked truth
+// list (tests/README.md, "X5 cut A/B").
 // gpu_ms is wall time of one render plus pl_gpu_finish (includes the upload); VRAM is not measured by this harness.
 // Hardware GPU only: set VP_TEST_GPU=hardware.
 
@@ -87,7 +93,7 @@
 
 			std::ofstream csv(outDir + "\\" + side + ".csv", std::ios::app);
 			Assert::IsTrue(csv.good(), L"cannot open the CSV");
-			csv << "case,side,frame,seq,valid,grain_scale,mean_w,mean_luma,cut,cut_rule,hash64,gpu_ms\n";
+			csv << "case,side,frame,seq,valid,grain_scale,mean_w,mean_luma,cut,cut_rule,cut_state,hash64,gpu_ms\n";
 
 			for (const auto& c : cases)
 			{
@@ -98,6 +104,7 @@
 				AdaptiveDownscale::Module module;
 				uint64_t sequence = 0;
 				std::map<uint64_t, int> tipCut;   // sequence -> cut flag the module was given (tip only)
+				std::map<uint64_t, const char*> tipState;   // sequence -> first / known / unavailable (tip only)
 #ifdef X5AB_TIP_CUT
 				std::map<uint64_t, VpLaneProducts::SourceStatsRecord> records;
 				module.SetCutSource([&](uint64_t prev, uint64_t seq)
@@ -111,6 +118,7 @@
 							return true;
 						});
 					tipCut[seq] = v.cut ? 1 : 0;
+					tipState[seq] = v.state != AdaptiveDownscale::CutVerdict::State::Known ? "unavailable" : (prev == 0 ? "first" : "known");
 					return v;
 				});
 #endif
@@ -203,18 +211,21 @@
 						}
 					int cut;
 					const char* rule;
+					const char* state;
 #ifdef X5AB_TIP_CUT
 					cut = tipCut.count(sequence) ? tipCut[sequence] : 0;
 					rule = "p4_u7";
+					state = tipState.count(sequence) ? tipState[sequence] : "unasked";
 #else
 					cut = (prevMean >= 0.0f && std::fabs(stats.meanLuma - prevMean) > 20.0f) ? 1 : 0;
 					rule = "meanstep20_derived";
+					state = "derived";
 #endif
 					prevMean = stats.meanLuma;
 					char row[320];
-					std::snprintf(row, sizeof(row), "%s,%s,%d,%llu,%d,%.6f,%.6f,%.3f,%d,%s,%016llx,%.3f\n", c.name.c_str(), side.c_str(), f,
+					std::snprintf(row, sizeof(row), "%s,%s,%d,%llu,%d,%.6f,%.6f,%.3f,%d,%s,%s,%016llx,%.3f\n", c.name.c_str(), side.c_str(), f,
 						static_cast<unsigned long long>(sequence), stats.valid ? 1 : 0, stats.grainScale, stats.meanW, stats.meanLuma, cut, rule,
-						static_cast<unsigned long long>(hash), ms);
+						state, static_cast<unsigned long long>(hash), ms);
 					csv << row;
 				}
 			}
