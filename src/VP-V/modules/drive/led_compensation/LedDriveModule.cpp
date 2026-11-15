@@ -6,7 +6,7 @@
 #include <DebugLog.h>
 
 #include <VP-V/core/Products.h>
-#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
+#include <VP-V/modules/control/skeleton/SkeletonFacts.h>   // Demand(); not SkeletonAccess.h (hub header: no libplacebo in Lib)
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 
 #include <algorithm>

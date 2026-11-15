@@ -3,6 +3,7 @@
 
 #include "ExtensionHub.h"
 #include "CurrentFrame.h"
+#include "HubQuery.h"
 #include <VP-V/core/ComputeOnce.h>
 
 #include <atomic>
@@ -36,6 +37,11 @@ namespace Vpv
 				}
 				void* Query(const char* iid) override { return ExtensionHub::Instance().Query(iid); }
 			};
+
+			// HubQuery.h: code without the hub header (VideoProcessor-Lib) reaches this hub's Query through the slot. Installed at
+			// static initialisation of this object file, which is compiled into every binary that has the hub.
+			void* QueryThisHub(const char* iid) { return ExtensionHub::Instance().Query(iid); }
+			const bool kQuerySlotInstalled = (QuerySlot().store(&QueryThisHub, std::memory_order_release), true);
 		}
 
 		// A throwing module never stops the modules after it; the fault is reported with its name.

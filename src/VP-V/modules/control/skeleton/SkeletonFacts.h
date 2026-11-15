@@ -10,6 +10,7 @@
 #include <VP-V/core/LaneLease.h>
 #include <VP-V/core/Products.h>
 #include <VP-V/core/SkeletonAcquire.h>
+#include <VP-V/core/hub/HubQuery.h>
 
 #include <cstdint>
 #include <memory>
@@ -181,6 +182,13 @@ namespace Vpv
 		protected:
 			~IExternalDemand() {}
 		};
+
+		// The skeleton module's demand entry (null without it). One module-list scan. Through the hub's query slot (core/hub/HubQuery.h),
+		// so VideoProcessor-Lib code (the LED drive, SceneRecordReader), which cannot include ExtensionHub.h, asks the same hub.
+		inline IExternalDemand* Demand()
+		{
+			return static_cast<IExternalDemand*>(Hub::QueryHub(kExternalDemandQueryId));
+		}
 
 		// The visible explanation of FeedCounters::claimFailed (empty while none). `backward` = the lane runs without a look-ahead lead (low-latency /
 		// backward pairs, lane lead 0): the engine's pair (N-1, N) is only complete AFTER frame N was sealed, so the slot is already taken and the field

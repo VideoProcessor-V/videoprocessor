@@ -33,11 +33,7 @@ namespace Vpv
 {
 	namespace Skeleton
 	{
-		// The skeleton module's demand entry (null without it). One module-list scan.
-		inline IExternalDemand* Demand()
-		{
-			return static_cast<IExternalDemand*>(Hub::ExtensionHub::Instance().Query(kExternalDemandQueryId));
-		}
+		// Demand() (the skeleton module's demand entry) is in SkeletonFacts.h, through the hub's query slot.
 
 		inline FrameMemo MemoForHost(const void* host, uint64_t seq)
 		{

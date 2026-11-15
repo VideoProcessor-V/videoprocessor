@@ -20,7 +20,7 @@
 // Header-only, C++14.
 
 #include <VP-V/core/FrameAnalysisStore.h>
-#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
+#include <VP-V/modules/control/skeleton/SkeletonFacts.h>   // Demand(), SceneAnswer; not SkeletonAccess.h (hub header: no libplacebo in Lib)
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 
 #include <cstdint>
