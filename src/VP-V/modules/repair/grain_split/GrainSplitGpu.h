@@ -33,8 +33,14 @@
 #include <VP-V/core/FallbackCatalog.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
+
+namespace VpSkeleton
+{
+	class OwnerGpuContext;   // core/SkeletonAcquire.h: the sanctioned GPU context of a GPU owner fill
+}
 
 namespace GrainSplit
 {
@@ -134,13 +140,61 @@ namespace GrainSplit
 		// (B), blocks = bw x bh rgba32f (both layouts). Never destroyed by the Splitter.
 		struct Targets { pl_tex split = nullptr, splitB = nullptr, blocks = nullptr; };
 
+		// Intermediates supplied by the caller: all five or none, and never with an arena. tmp + low = half size (HalfOf w x
+		// HalfOf h), two-channel float; part = the grain level pass's partial sums and quiet = the block grid, four-channel float;
+		// level = the levelBins x 1 noise level table, four-channel float. Never destroyed by the Splitter (the context entry below
+		// makes them through a fill's GPU context).
+		struct Scratch
+		{
+			pl_tex tmp = nullptr, low = nullptr, part = nullptr, quiet = nullptr, level = nullptr;
+			bool Any() const { return tmp || low || part || quiet || level; }
+			bool All() const { return tmp && low && part && quiet && level; }
+		};
+
 		struct Options
 		{
 			GrainSplit::Storage storage = GrainSplit::Storage::Full;
 			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena = nullptr;   // intermediates; null = private textures
+			Scratch scratch;    // caller-supplied intermediates (all or none; not with an arena); none = the arena or private textures
 			Targets targets;
 			uint64_t seq = 0;   // the source frame this split is for: stamped into Frame::seq
 			pl_timer timer = nullptr;   // optional: device time of every pass (the skeleton dispatcher's cost measurement)
+		};
+
+		// THE size law of a Compute made through a fill's GPU context (Full layout): every texture it makes. The four working
+		// intermediates have the shapes of ArenaRequests / WorkingBytes (one source, WorkingOf in GrainSplitGpu.cpp), plus the
+		// levelBins x 1 level table and the two outputs (split w x h, blocks bw x bh). t2 / t4 are the device's two- and four-
+		// channel float formats; the defaults (rg32f / rgba32f) size an owner's reserve before any device is asked. Bytes() is the
+		// sum the context is granted; Valid() is false for a degenerate size or law (nothing is made then).
+		struct ContextShapes
+		{
+			VpSkeleton::TexShape tmp, low, part, quiet, level, split, blocks;
+			bool Valid() const
+			{
+				for (const VpSkeleton::TexShape* s : { &tmp, &low, &part, &quiet, &level, &split, &blocks })
+					if (s->w == 0 || s->h == 0)
+						return false;
+				return true;
+			}
+			uint64_t Bytes() const
+			{
+				if (!Valid())
+					return 0;
+				uint64_t b = 0;
+				for (const VpSkeleton::TexShape* s : { &tmp, &low, &part, &quiet, &level, &split, &blocks })
+					b += VpSkeleton::ShapeBytes(*s);
+				return b;
+			}
+		};
+		ContextShapes ContextShapesOf(int w, int h, int B, const Params& params, VpSkeleton::TexFormat t2 = VpSkeleton::TexFormat::RG32F,
+			VpSkeleton::TexFormat t4 = VpSkeleton::TexFormat::RGBA32F);
+
+		// What a context Compute made: the keep-alive of every texture (the context's device frees each once the last holder
+		// lets go: never the Splitter, never the caller) and their accounted bytes.
+		struct ContextHold
+		{
+			std::vector<std::shared_ptr<void>> keep;
+			uint64_t bytes = 0;
 		};
 
 		class Splitter
@@ -160,6 +214,15 @@ namespace GrainSplit
 			// short (grain split)..." (no private temporaries are made instead; the caller falls back visibly).
 			bool Compute(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B,
 				const Params& params, const Options& options);
+			// The same split made ENTIRELY through a fill's GPU context (core/SkeletonAcquire.h OwnerGpuContext; valid during the
+			// fill only): the device and the dispatch are the context's, and every texture (both outputs, the four intermediates
+			// and the level table: ContextShapesOf) is ctx.Allocate'd, accounted against the fill's reserve; `hold` keeps them
+			// alive and the device frees them. Full layout, no arena, no private texture (Release has nothing to free). False with
+			// LastError on any refusal (a closed context, a format the device lacks, an allocation over the reserve: the
+			// context's reason), and `hold` is then empty. Out() is valid while `hold` is held. Byte-identical to
+			// Compute(gpu, dispatch, plane, ..., Options{seq}) on the same inputs (GrainUnitGpuTests).
+			bool Compute(VpSkeleton::OwnerGpuContext& ctx, pl_tex plane, int component, double codeUnit, double scale, int B,
+				const Params& params, uint64_t seq, ContextHold& hold);
 			// The seven passes of Compute as separate calls (70b lane form: one chunk per pass): Step(0..6) with the SAME arguments
 			// and options on every call records exactly Compute's dispatches in order (half, low, grain level per chunk, per-block reduce, noise level, minimum, Wiener
 			// share), so Compute == the step loop byte for byte. sigmaBase and sigmaLow x scale must be >= GrainSplit::kV3MinLowSigma

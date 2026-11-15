@@ -11,6 +11,7 @@
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/core/ComputeOnce.h>
+#include <VP-V/core/SkeletonAcquire.h>
 
 #include <algorithm>
 #include <cmath>
@@ -440,6 +441,29 @@ if (p.x < GS_W && p.y < GS_H) {
 				+ uint64_t(s.bw) * uint64_t(s.bh) * 16u;       // quiet, rgba32f
 		}
 
+		ContextShapes ContextShapesOf(int w, int h, int B, const Params& params, VpSkeleton::TexFormat t2, VpSkeleton::TexFormat t4)
+		{
+			ContextShapes c;
+			if (w < 1 || h < 1 || B < 1 || params.subBlocks < 1 || params.levelBins < 1)
+				return c;   // all empty: not Valid, 0 bytes
+			const WorkingShapes s = WorkingOf(w, h, B, params.subBlocks);   // the shapes of ArenaRequests / WorkingBytes and of Begin
+			const auto shape = [](int sw, int sh, VpSkeleton::TexFormat f) {
+				VpSkeleton::TexShape t;
+				t.w = static_cast<uint32_t>(sw);
+				t.h = static_cast<uint32_t>(sh);
+				t.fmt = f;
+				return t;
+			};
+			c.tmp = shape(s.hw, s.hh, t2);
+			c.low = shape(s.hw, s.hh, t2);
+			c.part = shape(s.pw, s.ph, t4);
+			c.quiet = shape(s.bw, s.bh, t4);
+			c.level = shape(params.levelBins, 1, t4);
+			c.split = shape(w, h, t4);         // Full: (s1, s2, f, base)
+			c.blocks = shape(s.bw, s.bh, t4);  // (N, e3, 0, 0)
+			return c;
+		}
+
 		// ND03: the law's one band Gaussian (the U2 unit's VpUnit::BandFromBase::BandRadius / BandWeight).
 		int GaussRadius(double sigma) { return VpUnit::BandFromBase::BandRadius(sigma); }
 
@@ -547,6 +571,75 @@ if (p.x < GS_W && p.y < GS_H) {
 			for (uint32_t i = 0; i < StepCount(); ++i)
 				if (!Step(gpu, dispatch, plane, component, codeUnit, scale, B, params, options, i))
 					return false;
+			return true;
+		}
+
+		bool Splitter::Compute(VpSkeleton::OwnerGpuContext& ctx, pl_tex plane, int component, double codeUnit, double scale, int B,
+			const Params& params, uint64_t seq, ContextHold& hold)
+		{
+			hold = ContextHold();
+			m_out = Frame();
+			m_error.clear();
+			m_scratchShort = false;
+			// The context's device and dispatch (null once the fill returned, or with no skeleton GPU device): the unit's kernels
+			// run on them; nothing here keeps either.
+			const pl_gpu gpu = static_cast<pl_gpu>(ctx.Gpu());
+			const pl_dispatch dispatch = static_cast<pl_dispatch>(ctx.Dispatch());
+			if (!gpu || !dispatch)
+			{
+				m_error = "grain split: no GPU context (used after its fill returned, or no skeleton GPU device)";
+				return false;
+			}
+			if (!plane)
+			{
+				m_error = "grain split: invalid input";
+				return false;
+			}
+			VpSkeleton::TexFormat t2 = VpSkeleton::TexFormat::RG32F, t4 = VpSkeleton::TexFormat::RGBA32F;
+			if (!VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 2), &t2) || !VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 4), &t4))
+			{
+				m_error = "grain split: rg32f / rgba32f is not a context texture format";
+				return false;
+			}
+			const ContextShapes shapes = ContextShapesOf(plane->params.w, plane->params.h, B, params, t2, t4);
+			if (!shapes.Valid())
+			{
+				m_error = "grain split: invalid input";
+				return false;
+			}
+			Options o;
+			o.storage = GrainSplit::Storage::Full;
+			o.seq = seq;
+			struct Want
+			{
+				const VpSkeleton::TexShape* shape;
+				pl_tex* tex;
+				const char* name;
+			};
+			const Want want[7] = {
+				{ &shapes.tmp, &o.scratch.tmp, "tmp" }, { &shapes.low, &o.scratch.low, "low" }, { &shapes.part, &o.scratch.part, "part" },
+				{ &shapes.quiet, &o.scratch.quiet, "quiet" }, { &shapes.level, &o.scratch.level, "level table" },
+				{ &shapes.split, &o.targets.split, "split" }, { &shapes.blocks, &o.targets.blocks, "blocks" },
+			};
+			for (const Want& item : want)
+			{
+				VpSkeleton::GpuMemoHandle made;
+				std::string why;
+				if (!ctx.Allocate(*item.shape, made, why) || made.resource == nullptr)
+				{
+					m_error = std::string("grain split: the ") + item.name + " texture was refused: " + why;
+					hold = ContextHold();   // what was made goes back to the device
+					return false;
+				}
+				*item.tex = static_cast<pl_tex>(made.resource);
+				hold.keep.push_back(made.keepAlive);
+				hold.bytes += made.bytes;
+			}
+			if (!Compute(gpu, dispatch, plane, component, codeUnit, scale, B, params, o))
+			{
+				hold = ContextHold();
+				return false;
+			}
 			return true;
 		}
 
@@ -794,7 +887,27 @@ if (p.x < GS_W && p.y < GS_H) {
 			pl_tex tmp = nullptr, low = nullptr, part = nullptr, quiet = nullptr, levelTex = nullptr;
 			int pw = 0, ph = 0;
 			PartialSize(bw, bh, B, params.subBlocks, &pw, &ph);
-			if (options.arena)
+			const Scratch& sc = options.scratch;
+			if (sc.Any() && (!sc.All() || options.arena))
+			{
+				m_error = "grain split: caller intermediates are all five or none, and never with an arena";
+				return false;
+			}
+			if (sc.All())
+			{
+				// The caller's intermediates (the context entry's: made through a fill's GPU context). Nothing private is made.
+				if (!usable(sc.tmp, hw, hh, f2) || !usable(sc.low, hw, hh, f2) || !usable(sc.part, pw, ph, f4) || !usable(sc.quiet, bw, bh, f4) ||
+					!usable(sc.level, params.levelBins, 1, f4))
+				{
+					m_error = "grain split: unusable intermediate texture";
+					return false;
+				}
+				tmp = sc.tmp;
+				low = sc.low;
+				part = sc.part;
+				quiet = sc.quiet;
+			}
+			else if (options.arena)
 			{
 				// The private temporaries of the non-arena path are not used any more: free them.
 				for (pl_tex* t : { &m_tmp, &m_low, &m_part, &m_quiet })
@@ -833,12 +946,17 @@ if (p.x < GS_W && p.y < GS_H) {
 				part = m_part;
 				quiet = m_quiet;
 			}
-			if (!Ensure(gpu, m_level, params.levelBins, 1, f4))
+			if (sc.All())
+				levelTex = sc.level;
+			else
 			{
-				m_error = "grain split: no rgba32f noise level table";
-				return false;
+				if (!Ensure(gpu, m_level, params.levelBins, 1, f4))
+				{
+					m_error = "grain split: no rgba32f noise level table";
+					return false;
+				}
+				levelTex = m_level;
 			}
-			levelTex = m_level;
 			// Outputs: the caller's targets, else the Splitter's own.
 			pl_tex outA = nullptr, outB = nullptr, outFull = nullptr, blocksTex = tg.blocks;
 			if (compact)
