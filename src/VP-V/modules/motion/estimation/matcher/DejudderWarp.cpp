@@ -109,15 +109,6 @@ if (b.x < blocks.x && b.y < blocks.y) {
 }
 )GLSL";
 
-		// One pyramid step (half -> 1/8, 1/8 -> 1/32 source): the shared unit U3's 4x4 variant level body
-		// (VpUnit::HalfLuma::GlslBox4x4LevelBody, U3 one copy, owner 2026-11-15), byte-identical to the former private
-		// body (HalfLumaUnitTests pins it). BBP-B B1: read through the P1 owner's pyramid level body (P1GpuFill.h, the same
-		// string), the one reference the owner fill and the matcher share.
-		const std::string& PyramidBody()
-		{
-			return VpFrameAnalysis::P1Gpu::MatcherPyramidLevelBody();
-		}
-
 		// Block search from -> to on half-resolution luma. The vector v says
 		// where the block's content is in `to`: from(p) ~ to(p + v).
 		const char* const SEARCH_HEADER = R"GLSL(
@@ -2368,6 +2359,7 @@ if (q.x < size.x && q.y < size.y) {
 
 	MotionWarp::~MotionWarp()
 	{
+		ReleaseBorrowed();   // L-B4: the product's textures are borrowed, never destroyed here; the scratch ones go back to their slots
 		for (pl_tex* tex : { &halfA, &halfB, &l1A, &l1B, &l2A, &l2B, &halfK, &l1K, &l2K, &forward, &backward,
 			&field, &frameTrust, &occlusion[0], &occlusion[1], &grainError, &warpedLuma, &warpedChroma, &processedLuma, &processedChroma,
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
@@ -2695,6 +2687,10 @@ if (q.x < size.x && q.y < size.y) {
 	bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int levels,
 		pl_tex plain)
 	{
+		// L-B4 (BBP-B B3): without the fade this is the owner's law (P1Gpu::BuildPyramidInto, the one code copy; also what the
+		// product's fallback runs). The fade exception (M4) keeps the matcher's own half pass below, then the same pyramid levels.
+		if (!fade)
+			return BuildOwnPyramid(luma, half, l1, l2, fullRange, -1, levels);
 		const float codes = VpFrameAnalysis::P1Gpu::MatcherCodes(lumaInCodes, fullRange);
 		const pl_shader_var variables[1] = { { pl_var_float("codes"), &codes, true } };
 		const bool withPlain = fade && plain;
@@ -2711,12 +2707,138 @@ if (q.x < size.x && q.y < size.y) {
 
 	bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)
 	{
-		const pl_shader_desc second[2] = { Sampled("src", half, false), Storage("dst", l1) };
-		const pl_shader_desc third[2] = { Sampled("src", l1, false), Storage("dst", l2) };
-		return (from >= 1 || levels < 1 || Dispatch("VideoProcessor de-judder: luma pyramid 1/8", nullptr, PyramidBody().c_str(),
-				second, 2, nullptr, 0, l1W, l1H, 8)) &&
-			(from >= 2 || levels < 2 || Dispatch("VideoProcessor de-judder: luma pyramid 1/32", nullptr, PyramidBody().c_str(),
-				third, 2, nullptr, 0, l2W, l2H, 8));
+		return BuildOwnPyramid(nullptr, half, l1, l2, false, from, levels);
+	}
+
+	// The owner's pyramid law (P1Gpu::BuildPyramidInto) run through this matcher's own Dispatch into its own scratch textures:
+	// the non-fade Downsample, Pyramid, and the visible fallback product.matcher_pyramid (B3).
+	bool MotionWarp::BuildOwnPyramid(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, int from, int levels)
+	{
+		const float codes = VpFrameAnalysis::P1Gpu::MatcherCodes(lumaInCodes, fullRange);
+		const VpFrameAnalysis::P1Gpu::PyramidPassRunner run = [this](const VpFrameAnalysis::P1Gpu::PyramidPass& pass) -> bool
+		{
+			const pl_shader_desc d[2] = { Sampled("src", pass.src, false), Storage("dst", pass.dst) };
+			float passCodes = pass.codes;
+			const pl_shader_var v[1] = { { pl_var_float("codes"), &passCodes, true } };
+			return Dispatch(pass.description, pass.header.empty() ? nullptr : pass.header.c_str(), pass.body->c_str(), d, 2,
+				pass.hasCodes ? v : nullptr, pass.hasCodes ? 1 : 0, pass.width, pass.height, pass.group);
+		};
+		return VpFrameAnalysis::P1Gpu::BuildPyramidInto(run, luma, codes, half, l1, l2, from, levels);
+	}
+
+	void MotionWarp::ReleaseBorrowed()
+	{
+		pl_tex* slot[6] = { &halfA, &l1A, &l2A, &halfB, &l1B, &l2B };
+		for (int i = 0; i < 6; ++i)
+		{
+			if (parkedOwn[i])
+			{
+				*slot[i] = parkedOwn[i];
+				parkedOwn[i] = nullptr;
+			}
+			pins[i].reset();
+		}
+		pyramidBound = false;
+	}
+
+	void MotionWarp::ReleaseBorrowedB()
+	{
+		pl_tex* slot[3] = { &halfB, &l1B, &l2B };
+		for (int i = 0; i < 3; ++i)
+			if (parkedOwn[3 + i])
+			{
+				*slot[i] = parkedOwn[3 + i];
+				parkedOwn[3 + i] = nullptr;
+			}
+	}
+
+	// B3: the corrected B of the fade exception (M4) is rebuilt in the matcher's own scratch from the fade state; the plain B stays
+	// what it was (in the K set without the product, the product's own level with it: the next A acquires it by sequence).
+	bool MotionWarp::RebuildBWithFade(const Planes& b, pl_tex fadeTex, int levels)
+	{
+		if (pyramidBound)
+		{
+			const pl_tex plain = halfB;   // the product's plain B half
+			ReleaseBorrowedB();           // B's slots are the matcher's own scratch again; the pins keep the product alive
+			return Downsample(b.luma, halfB, l1B, l2B, b.fullRange, fadeTex, levels, plain);
+		}
+		KeepPlainBInK();
+		return Downsample(b.luma, halfB, l1B, l2B, b.fullRange, fadeTex, levels, halfK);
+	}
+
+	// B3: A's and B's levels (levelsA / levelsB) from the shared product, bound where the matcher reads them. True = all bound.
+	// False = nothing bound: the matcher builds its own (the product's source is absent: silent, as before; not served: the visible
+	// row product.matcher_pyramid via PyramidFallbackWhy()).
+	bool MotionWarp::BindProductPyramid(const Planes& a, const Planes& b, int levelsA, int levelsB)
+	{
+		pyramidBound = false;
+		if (!pyramidSource || a.sequence == 0 || b.sequence == 0 || a.sequence == b.sequence || !a.luma || !b.luma)
+		{
+			pyramidFallbackWhy.clear();
+			return false;
+		}
+		pl_tex* slot[6] = { &halfA, &l1A, &l2A, &halfB, &l1B, &l2B };
+		const int sizes[3][2] = { { halfW, halfH }, { l1W, l1H }, { l2W, l2H } };
+		const int base = innerOfLowRes ? 2 : 1;   // the levels this instance's half / 1/8 / 1/32 are in the product (1,3,5 / 2,4,6)
+		pl_tex got[6] = {};
+		std::shared_ptr<const void> held[6];
+		std::string why;
+		bool configured = true;
+		for (int side = 0; side < 2 && configured && why.empty(); ++side)
+		{
+			const Planes& p = side ? b : a;
+			const int levels = side ? levelsB : levelsA;
+			const void* src = innerOfLowRes ? productLuma[side] : static_cast<const void*>(p.luma);
+			for (int lv = 0; lv <= levels && configured && why.empty(); ++lv)
+			{
+				const int i = side * 3 + lv;
+				const VpMotion::MatcherPyramid::Level r = pyramidSource(p.sequence, base + 2 * lv, src);
+				if (r.state == VpMotion::MatcherPyramid::Level::State::NotConfigured)
+				{
+					configured = false;
+					break;
+				}
+				if (r.state != VpMotion::MatcherPyramid::Level::State::Product || !r.tex)
+				{
+					why = r.cause.empty() ? std::string("not served") : r.cause;
+					break;
+				}
+				const pl_tex t = static_cast<pl_tex>(r.tex);
+				const pl_tex own = parkedOwn[i] ? parkedOwn[i] : *slot[i];
+				const pl_fmt f = t->params.format, of = own ? own->params.format : nullptr;
+				if (t->params.w != sizes[lv][0] || t->params.h != sizes[lv][1])
+					why = "the shared level has another size than the matcher's";
+				else if (!t->params.sampleable || !f || !of || settings.hostReadable ||
+					(f != of && (f->type != of->type || f->num_components != of->num_components ||
+						f->component_depth[0] != of->component_depth[0])) || !(f->caps & PL_FMT_CAP_LINEAR))
+					why = "the shared level has another format than the matcher's";
+				else
+				{
+					got[i] = t;
+					held[i] = r.pin;
+				}
+			}
+		}
+		if (!configured)
+		{
+			pyramidFallbackWhy.clear();
+			return false;
+		}
+		if (!why.empty())
+		{
+			pyramidFallbackWhy = why;
+			return false;
+		}
+		pyramidFallbackWhy.clear();
+		for (int i = 0; i < 6; ++i)
+			if (got[i])
+			{
+				parkedOwn[i] = *slot[i];
+				*slot[i] = got[i];
+				pins[i] = held[i];
+			}
+		pyramidBound = true;
+		return true;
 	}
 
 	void MotionWarp::KeepPlainBInK()
@@ -3532,6 +3654,11 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		inner->SetPictureArea(innerPicture[0], innerPicture[1], innerPicture[2], innerPicture[3]);
 		inner->innerOfLowRes = true;
 		inner->lumaInCodes = true;
+		// B3: the inner reads levels 2 / 4 / 6 of the same frames, only when this instance read the product (one level of nesting:
+		// an inner of the inner builds its own).
+		inner->SetPyramidSource(pyramidBound && !innerOfLowRes ? pyramidSource : VpMotion::MatcherPyramid::Source());
+		inner->productLuma[0] = a.luma;
+		inner->productLuma[1] = b.luma;
 		inner->timingParent = this;
 		if (inner->passTiming != passTiming || inner->passDrain != passDrain)
 			inner->SetPassTiming(passTiming, passDrain);
@@ -3828,8 +3955,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			return false;
 		// The uncorrected B stays in the K set for the next pair's A.
 		const int levels = keptLevels;
-		KeepPlainBInK();
-		return Downsample(b.luma, halfB, l1B, l2B, b.fullRange, fadeState, levels, halfK);
+		return RebuildBWithFade(b, fadeState, levels);   // KeepPlainBInK() without the product (B3)
 	}
 
 	bool MotionWarp::Estimate(const Planes& a, const Planes& b, int occlusionSlot, bool wantGrainError)
@@ -3843,6 +3969,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		cameraGuidanceUse = CameraGuidanceUse();
 		if (inner)
 			inner->cameraGuidanceUse = CameraGuidanceUse();
+		ReleaseBorrowed();   // B3: last pair's product levels go back; this pair's are bound after EnsureTextures
 		estimated = false;
 		// F2: cleared on EVERY Estimate, for this instance and its lowRes inners (an Estimate that fails before the inner
 		// runs must not leave the inner's last "seeded" standing); set below only where the seed stands in for the first sweep.
@@ -3887,28 +4014,35 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		// 2026-10-15: A is the last pair's B (the same source frame, no gap or
 		// resync since - those forget it): its uncorrected planes are kept, so
 		// A's are those exactly; only missing pyramid levels are built.
-		const bool reuseA = a.sequence != 0 && a.sequence == keptSequence && a.fullRange == keptFullRange;
+		// L-B4 (BBP-B B3): the levels come from the shared product when it is served (A = the last pair's B is then Acquire(a.seq),
+		// the same bytes); otherwise the matcher builds its own through the owner's law, with today's reuse of the last pair's B.
+		const bool productBound = BindProductPyramid(a, b, levelsA, levelsB);
+		const bool reuseA = !productBound && keptOwned && a.sequence != 0 && a.sequence == keptSequence && a.fullRange == keptFullRange;
 		keptSequence = 0;
-		if (reuseA)
+		if (!productBound)
 		{
-			if (keptInK)
+			if (reuseA)
 			{
-				std::swap(halfA, halfK);
-				std::swap(l1A, l1K);
-				std::swap(l2A, l2K);
+				if (keptInK)
+				{
+					std::swap(halfA, halfK);
+					std::swap(l1A, l1K);
+					std::swap(l2A, l2K);
+				}
+				else
+				{
+					std::swap(halfA, halfB);
+					std::swap(l1A, l1B);
+					std::swap(l2A, l2B);
+				}
 			}
-			else
-			{
-				std::swap(halfA, halfB);
-				std::swap(l1A, l1B);
-				std::swap(l2A, l2B);
-			}
+			if (!(reuseA ? Pyramid(halfA, l1A, l2A, keptLevels, levelsA) : Downsample(a.luma, halfA, l1A, l2A, a.fullRange, nullptr, levelsA)) ||
+				!Downsample(b.luma, halfB, l1B, l2B, b.fullRange, nullptr, levelsB))
+				return false;
 		}
-		if (!(reuseA ? Pyramid(halfA, l1A, l2A, keptLevels, levelsA) : Downsample(a.luma, halfA, l1A, l2A, a.fullRange, nullptr, levelsA)) ||
-			!Downsample(b.luma, halfB, l1B, l2B, b.fullRange, nullptr, levelsB))
-			return false;
 		reusedPlanesForTest += reuseA ? 1 : 0;
 		keptSequence = b.sequence;
+		keptOwned = !productBound;
 		keptInK = false;
 		keptLevels = levelsB;
 		keptFullRange = b.fullRange;
@@ -3927,8 +4061,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// 2026-10-14: at 4K the weights fell towards the hold in a fade).
 			if (settings.fadeMatch && inner && inner->FadeStateTexture())
 			{
-				KeepPlainBInK();
-				if (!Downsample(b.luma, halfB, l1B, l2B, b.fullRange, inner->FadeStateTexture(), levelsB, halfK))
+				if (!RebuildBWithFade(b, inner->FadeStateTexture(), levelsB))   // KeepPlainBInK() without the product (B3)
 					return false;
 			}
 		}

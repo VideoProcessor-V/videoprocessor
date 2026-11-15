@@ -363,6 +363,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			++vectorEngine.motionGapUnseeded;
 	}
 	SyncFallback(vectorEstimate.SnapshotLeaseDecision(GetTickCount64()));   // SK-MV: a lost snapshot lease is shown while recent
+	dejudder->SetPyramidSource(vectorEngine.MatcherPyramidSource());   // L-B4 (BBP-B B3): the shared luma pyramid read seam
 	dejudder->SetFieldSource(&vectorEstimate);   // SK-MV pass-through (TEMPORARY until P5c): Field/FrameTrust/SubField read the shared view
 	dejudderLiveFieldFrom = 0;   // the live outputs are being replaced
 	motionSegment.Retract(VpMotion::Direction::Forward);
@@ -506,6 +507,9 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			noPairShown ? noPairCause : FallbackCatalog::NoPairCause::None));
 		// SK-MV: the one-engine guard is visible (Ctrl+I / Fallbacks) while more than one Engine session is open on one GPU. Synced here,
 		// not in VectorEngineFallbackSync (VectorEngineTests pins that group's exact sync counts, WAIVER-T1-01).
+		// L-B4 (BBP-B B3): the matcher built its own luma pyramid because the shared one was not served (visible, never log-only).
+		SyncFallback(dejudder->PyramidFallbackWhy().empty() ? FallbackCatalog::Released("product.matcher_pyramid") :
+			FallbackCatalog::ProductFallback("product.matcher_pyramid", dejudder->PyramidFallbackWhy()));
 		SyncFallback(FallbackCatalog::NvofSessions(NvOpticalFlow::Sessions::MostOpenOnOneGpu(NvOpticalFlow::SessionKind::Engine),
 			NvOpticalFlow::Sessions::Violations()));
 	}

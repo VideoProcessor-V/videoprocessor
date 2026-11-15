@@ -193,7 +193,7 @@ if (p.x < size.x && p.y < size.y) {
 	}
 
 	// The 4x4 level body (levels 3..6): the shared unit U3's VpUnit::HalfLuma::GlslBox4x4LevelBody (one copy, owner
-	// 2026-11-15), the body the matcher's PyramidBody() already referenced. No uniform, no header; work group 8 x 8.
+	// 2026-11-15), the body the matcher's former PyramidBody() referenced (B3: the matcher now runs it through BuildPyramidInto). No uniform, no header; work group 8 x 8.
 	inline const std::string& MatcherPyramidLevelBody()
 	{
 		static const std::string body = VpUnit::HalfLuma::GlslBox4x4LevelBody();

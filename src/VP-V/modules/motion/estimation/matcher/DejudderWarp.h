@@ -7,6 +7,7 @@
 #include <map>
 #include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
 #include <GeneralRate.h>
+#include <VP-V/modules/motion/estimation/matcher/MatcherPyramidSource.h>
 
 namespace MotionAhead { struct Flow; }
 namespace CameraModel { struct GuidanceFrame; }
@@ -664,6 +665,21 @@ namespace Dejudder
 		// set, or in the K set when the fade correction rewrote the B set.
 		void KeepPlainBInK();
 		pl_tex halfK = nullptr, l1K = nullptr, l2K = nullptr;
+		// L-B4 (BBP-B B3): the pyramid levels read from the shared product. Slots 0..2 = A's half / 1/8 / 1/32, 3..5 = B's. A bound
+		// slot holds the product's texture (borrowed: never destroyed here) and parkedOwn[i] keeps the matcher's own scratch texture
+		// of that slot until ReleaseBorrowed(); pins keep the product alive until the next Estimate.
+		bool BindProductPyramid(const Planes& a, const Planes& b, int levelsA, int levelsB);
+		void ReleaseBorrowed();
+		void ReleaseBorrowedB();
+		bool RebuildBWithFade(const Planes& b, pl_tex fadeTex, int levels);
+		bool BuildOwnPyramid(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, int from, int levels);
+		VpMotion::MatcherPyramid::Source pyramidSource;
+		std::string pyramidFallbackWhy;
+		bool pyramidBound = false;        // this Estimate read the product
+		bool keptOwned = false;           // the last pair's B planes are the matcher's own (reusable as the next A)
+		pl_tex parkedOwn[6] = {};
+		std::shared_ptr<const void> pins[6];
+		const void* productLuma[2] = { nullptr, nullptr };   // the lowRes inner: the outer's source luma (A, B) the product was made from
 		uint64_t keptSequence = 0;
 		uint64_t historyRestarts = 0;   // Hunt 2 04 M1: pairs not chained to the last estimate
 		bool keptInK = false;
@@ -825,6 +841,13 @@ namespace Dejudder
 		// producer (null = none). Used when it matches the half size; then no engine
 		// work happens at render time. Cleared by each Estimate.
 		void SetExternalFlow(std::shared_ptr<const MotionAhead::Flow> flow) { externalFlow = std::move(flow); }
+		// L-B4 (BBP-B B3): the shared luma pyramid read seam (null = the matcher builds its own, as before). The engine sets it;
+		// Estimate reads the levels it needs from the product, and on a product that is not served builds its own pyramid through
+		// the owner's law function (P1Gpu::BuildPyramidInto) and shows it: PyramidFallbackWhy() non-empty = engage the row
+		// product.matcher_pyramid ("matcher builds its own pyramid: <cause>"), empty = released.
+		void SetPyramidSource(VpMotion::MatcherPyramid::Source source) { pyramidSource = std::move(source); }
+		const std::string& PyramidFallbackWhy() const { return pyramidFallbackWhy; }
+		bool PyramidFromProduct() const { return pyramidBound; }
 		// Plan 19 phase 2 (global camera model, global_model/CameraGuidanceGpu.h): the measurement plan's
 		// guidance for the NEXT Estimate (null or inactive = today's matcher exactly; nothing bound or
 		// dispatched). Cleared by each Estimate. A low-resolution inner receives it scaled.

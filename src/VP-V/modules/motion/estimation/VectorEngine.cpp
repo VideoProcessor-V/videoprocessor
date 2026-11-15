@@ -12,6 +12,7 @@
 #include <VP-V/modules/motion/estimation/MotionRecordPublish.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/P1AcquireSource.h>
+#include <VP-V/modules/input/source_analysis/lane/P1GpuFill.h>
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/motion/estimation/VectorEngineFallbackSync.h>
 
@@ -1259,6 +1260,46 @@ namespace VpMotion
 		std::snprintf(line, sizeof(line), "on demand: issued %llu, served %llu, late %llu, no budget %llu, uncached %llu",
 			c.issued, c.served, c.late, c.noBudget, c.uncached);
 		return line;
+	}
+
+	MatcherPyramid::Source VectorEngine::MatcherPyramidSource() const
+	{
+		const void* memoHost = host_;
+		return [memoHost](uint64_t seq, int level, const void* lumaTex) -> MatcherPyramid::Level
+		{
+			MatcherPyramid::Level out;   // NotConfigured
+			const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(memoHost, seq);
+			if (!fm.Valid() || lumaTex == nullptr || level < 1 || level > 6)
+				return out;
+			out.state = MatcherPyramid::Level::State::Unavailable;
+			// The named exception (U3): the product is made from the shared P13 luma plane; any other luma (native RGB structure
+			// luma, DV unpack output) keeps the matcher's own pyramid, shown with this cause.
+			const VpSkeleton::AcquireResult plane = fm.memo->Acquire(VpSkeleton::kP13SourceRing, seq, VpSkeleton::AcquireForm::Gpu);
+			if (!plane.Ok() || !plane.gpu.Valid())
+			{
+				out.cause = "no shared source luma for this frame";
+				return out;
+			}
+			if (plane.gpu.resource != lumaTex)
+			{
+				out.cause = "named exception: the matcher's luma is not the shared source plane";
+				return out;
+			}
+			const VpSkeleton::AcquireResult r = fm.memo->Acquire(VpSkeleton::kP1HalfLuma, seq, VpSkeleton::AcquireForm::Gpu,
+				VpFrameAnalysis::P1Gpu::MatcherPyramidKey(static_cast<uint8_t>(level)));
+			if (!r.Ok() || !r.gpu.Valid() || r.gpu.resource == nullptr)
+			{
+				const std::string why = fm.memo->LastCause(VpSkeleton::kP1HalfLuma);
+				out.cause = why.empty() ? std::string(VpSkeleton::Token(r.cause)) : why;
+				return out;
+			}
+			out.state = MatcherPyramid::Level::State::Product;
+			out.tex = r.gpu.resource;
+			out.pin = r.pin;
+			// The texture must outlive this call: the handle's keepAlive (the memo spot) is held with the pin.
+			out.pin = std::make_shared<std::pair<std::shared_ptr<const void>, std::shared_ptr<void>>>(r.pin, r.gpu.keepAlive);
+			return out;
+		};
 	}
 
 	std::string VectorEngine::ProducerStatusSegment() const

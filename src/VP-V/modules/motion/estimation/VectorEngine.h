@@ -20,6 +20,7 @@
 #include <VP-V/modules/motion/estimation/OnDemandEstimate.h>
 #include <VP-V/modules/motion/estimation/ProducerPlan.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
+#include <VP-V/modules/motion/estimation/matcher/MatcherPyramidSource.h>
 #include <VP-V/modules/motion/estimation/VectorEngineState.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <IntentInterpreterObserver.h>
@@ -446,6 +447,10 @@ namespace VpMotion
 		// The Ctrl+I segment of the look-ahead producer's ring misses (register 115 #13 / #35: never log-only):
 		// "engine-luma ring misses N (last: <words>)"; empty with no producer or no miss.
 		std::string ProducerStatusSegment() const;
+		// L-B4 (BBP-B B3): the matcher's read seam for the shared luma pyramid (kP1HalfLuma, Gpu, MatcherPyramidKey(level)) of the
+		// renderer registered under this engine's host. NotConfigured without a skeleton memo for the frame (nothing to fall back
+		// from); Unavailable with the cause when the product is asked and not served (the matcher then shows product.matcher_pyramid).
+		MatcherPyramid::Source MatcherPyramidSource() const;
 
 	private:
 		void NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence, uint64_t epochAtChoice);
