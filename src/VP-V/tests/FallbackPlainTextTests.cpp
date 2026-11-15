@@ -28,6 +28,7 @@ namespace FallbackPlainTextTest
 				"early upload frames", "capture extension", "native readback", "vector_engine", "vector_engine_producer", "vector_engine_global",
 				"vector producer", "motion engine", "motion look-ahead", "motion_lookahead_capped", "source resolution look-ahead", "timeline",
 				"source resolution held", "source geometry detect",
+				"composed vectors",
 				"dither vectors matcher", "dither vectors on demand", "dither vectors own search", "dither vectors unvalidated",
 				"dither motion compensation", "picture precision", "libplacebo errors" };
 			const std::string unknownPrefix = "A processing step was switched off";
