@@ -3,15 +3,24 @@
 //
 // Registered fix D8 (doc FIX-B6-D8 before/after table): detail_pulse_stabilise (DP) and texture_restore (TR) restart on the SHARED
 // cut / fade verdict (U7 CutFadeJudge::ClassifyEvents over the two P4 records, read from the frame analysis store's scene group)
-// instead of their retired private tile judges. This harness measures, on real clips from VP_TEST_CLIP_MANIFEST and on a synthetic
-// fade and a synthetic flash, how often the two decisions agree, and gates it:
+// instead of their retired private tile judges. The target is TRUTH (owner ruling 2026-11-15): labelled real cuts and fades, not
+// the retired tile law. This harness measures, on real clips from VP_TEST_CLIP_MANIFEST and on a synthetic fade and a synthetic
+// flash, how often the SHARED restart decision agrees with the truth, and gates it:
 //   - per frame: decode (RealClipLibrary, 8-bit gray), P1 half luma + P4 source stats at the clip size (the lane's own functions),
 //     U7 verdict for seq >= 2 (prev, cur, false, false: exactly the skeleton's SceneFactsOf), published into a FrameAnalysis::Store
 //     registered as the one SourceFrameTap store (the harness plays the skeleton's seal; the skeleton itself is not run);
+//   - truth per frame of the part (TruthRestarts), scored on the part's frames AFTER its first (the first frame has no prior
+//     frame, so no detector decision exists there; excluded for DP and TR alike, never an automatic agree): the manifest's cuts_s frames;
+//     the manifest's fade_in / fade_out events (t0..t1 s): every frame whose pair with the previous frame spans part of the ramp,
+//     i.e. t(k) > t0 and t(k-1) < t1 (the generator's ffmpeg fade filter); synthetic fade: FadeGain(k) != FadeGain(k-1);
+//     synthetic flash: no restart (a flash is not a restart). Labels are never invented: a real clip needs cuts_s or cut_free.
+//     tos_24p_3min carries cut labels only, so its rows measure cut truth only;
 //   - the CPU models twice: the retired TileJudgeReference law (sceneReader null) and the shared verdict (ReadSceneFromStore);
-//     restarts and agreement are counted, and the picture difference on the frames where the decisions differ;
+//     the shared decision is compared with the truth (truth agree / miss / extra); the retired-law agreement, restarts and the
+//     picture difference on the frames where the two decisions differ are information columns only;
 //   - the GPU modules with the store on (Params::sceneReader null -> DefaultSceneReader -> ReadSceneFromStore): SceneMissing().
-// Gate per row: agreement >= 99.5 % for each module and SceneMissing == 0 for each GPU module.
+// Gate per row: truth agreement >= 99.5 % (kAgreementGatePct, the owner's value) for each module and SceneMissing == 0 for each
+// GPU module. Rows whose law misses slow fades or calls a flash a cut are red until the U7 fixes land (102b); not loosened here.
 // Rows go to the CSV at VP_TEST_D8_OUT (header written when the file is new) and to the test log.
 // Skips VISIBLY (SKIP-NO-GPU / SKIP-NO-FOOTAGE marker, a failure under VP_TEST_REQUIRE_GPU / _FOOTAGE / _ALL) when the GPU is not
 // the hardware adapter (VP_TEST_GPU=hardware), the device cannot be created, or the manifest / clip / ffmpeg is missing.
@@ -110,11 +119,21 @@ namespace D8SceneJudgeAgreementNs
 	struct ModuleRow
 	{
 		int frames = 0, oldRestarts = 0, sharedRestarts = 0, agree = 0, differ = 0;
+		int truthFrames = 0, truthAgree = 0, truthMiss = 0, truthExtra = 0;   // the shared decision against the truth (the gate)
 		double diffMax = 0.0, diffSum = 0.0;
 		double diffPixels = 0.0;
 		unsigned long long sceneMissing = 0;
 		double msOld = 0.0, msShared = 0.0, msGpu = 0.0;
-		double AgreementPct() const { return frames > 0 ? 100.0 * agree / frames : 0.0; }
+		double AgreementPct() const { return frames > 0 ? 100.0 * agree / frames : 0.0; }   // retired law: information only
+		// Over the scored frames only (the part's frames after its first: see TruthRestarts).
+		double TruthAgreementPct() const { return truthFrames > 0 ? 100.0 * truthAgree / truthFrames : 0.0; }
+		void CountTruth(bool shared, bool truth)
+		{
+			++truthFrames;
+			if (shared == truth) ++truthAgree;
+			else if (truth) ++truthMiss;
+			else ++truthExtra;
+		}
 		double DiffMean() const { return diffPixels > 0.0 ? diffSum / diffPixels : 0.0; }
 	};
 
@@ -133,19 +152,64 @@ namespace D8SceneJudgeAgreementNs
 	struct RowFacts
 	{
 		std::string row, part, device;
-		int planeW = 0, planeH = 0, u7Cuts = 0, u7Fades = 0, u7Flashes = 0, truthCuts = 0;
+		std::string truthLabels;   // where the truth comes from (no commas: a CSV field)
+		int planeW = 0, planeH = 0, u7Cuts = 0, u7Fades = 0, u7Flashes = 0, truthRestarts = 0;
 		double decodeMs = 0.0;
 	};
+
+	// Truth restart per frame of the part [begin, end) (index k - begin): see the file comment. Index 0 (the part's first frame)
+	// stays 0 and is NOT scored: it has no prior frame, so no detector decision exists there.
+	inline std::vector<char> TruthRestarts(const RealClip::Clip& clip, Synthetic synthetic, int begin, int end, double hz,
+		std::string& labels)
+	{
+		Assert::IsTrue(end > begin, L"D8 truth: the part has frames");
+		std::vector<char> truth(static_cast<size_t>(end - begin), 0);
+		if (synthetic == Synthetic::Fade)
+		{
+			labels = "synthetic fade gain";
+			for (int k = begin + 1; k < end; ++k)
+				if (FadeGain(k) != FadeGain(k - 1)) truth[static_cast<size_t>(k - begin)] = 1;
+			return truth;
+		}
+		if (synthetic == Synthetic::Flash)
+		{
+			labels = "synthetic flash (no restart)";
+			return truth;
+		}
+		Assert::IsTrue(clip.hasCuts || clip.cutFree,
+			Wide("D8 truth: clip " + clip.id + " has neither cuts_s nor cut_free in the manifest; truth is not invented").c_str());
+		Assert::IsTrue(hz > 0.0, Wide("D8 truth: clip " + clip.id + " has no rate").c_str());
+		labels = clip.hasCuts ? "manifest cuts_s" : "manifest cut_free";
+		for (double c : clip.cuts)
+		{
+			const int f = static_cast<int>(std::floor(c * hz + 0.5));
+			if (f > begin && f < end) truth[static_cast<size_t>(f - begin)] = 1;
+		}
+		int fades = 0;
+		for (const RealClip::Event& e : clip.events)
+		{
+			if (e.type != "fade_in" && e.type != "fade_out") continue;
+			Assert::IsNotNull(e.json, L"D8 truth: the fade event's record");
+			const double t0 = e.json->Num("t0", -1.0), t1 = e.json->Num("t1", -1.0);
+			Assert::IsTrue(t0 >= 0.0 && t1 > t0, Wide("D8 truth: clip " + clip.id + " has a " + e.type + " event without t0 < t1").c_str());
+			++fades;
+			for (int k = begin + 1; k < end; ++k)
+				if (k / hz > t0 && (k - 1) / hz < t1) truth[static_cast<size_t>(k - begin)] = 1;
+		}
+		labels += fades > 0 ? " + manifest fade events (" + std::to_string(fades) + ")" : " (cut labels only)";
+		return truth;
+	}
 
 	inline void WriteRow(const RowFacts& f, const char* module, const ModuleRow& r)
 	{
 		char line[1024];
 		snprintf(line, sizeof(line),
-			"%s,%s,%s,%d,%d,%d,%.3f,%d,%.4f,%.4f,%llu,n/a,%dx%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%s",
+			"%s,%s,%s,%d,%d,%d,%.3f,%d,%.4f,%.4f,%llu,n/a,%dx%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.3f,%d,%d,%s,%s",
 			f.row.c_str(), f.part.c_str(), module, r.frames, r.oldRestarts, r.sharedRestarts, r.AgreementPct(), r.differ,
-			r.diffMax, r.DiffMean(), r.sceneMissing, f.planeW, f.planeH, f.u7Cuts, f.u7Fades, f.u7Flashes, f.truthCuts,
+			r.diffMax, r.DiffMean(), r.sceneMissing, f.planeW, f.planeH, f.u7Cuts, f.u7Fades, f.u7Flashes, f.truthRestarts,
 			r.frames ? r.msOld / r.frames : 0.0, r.frames ? r.msShared / r.frames : 0.0, r.frames ? r.msGpu / r.frames : 0.0,
-			r.frames ? f.decodeMs / r.frames : 0.0, f.device.c_str());
+			r.frames ? f.decodeMs / r.frames : 0.0, r.TruthAgreementPct(), r.truthMiss, r.truthExtra, f.truthLabels.c_str(),
+			f.device.c_str());
 		Logger::WriteMessage((std::string("D8ROW ") + line + "\n").c_str());
 		std::string path = RealClip::Env("VP_TEST_D8_OUT");
 		if (path.empty())
@@ -165,7 +229,8 @@ namespace D8SceneJudgeAgreementNs
 		if (std::ftell(file) == 0)
 			std::fputs("clip,part,module,frames,old_judge_restarts,shared_judge_restarts,agreement_pct,frames_differing,"
 				"picture_diff_max_code10,picture_diff_mean_code10,scene_missing,cell_trust_ms_per_frame,plane,u7_cuts,u7_fades,"
-				"u7_flashes,truth_events,model_old_ms_per_frame,model_shared_ms_per_frame,gpu_ms_per_frame,decode_p4_ms_per_frame,device\r\n",
+				"u7_flashes,truth_restarts,model_old_ms_per_frame,model_shared_ms_per_frame,gpu_ms_per_frame,decode_p4_ms_per_frame,"
+				"truth_agree_pct,truth_miss,truth_extra,truth_labels,device\r\n",
 				file);
 		std::fputs(line, file);
 		std::fputs("\r\n", file);
@@ -284,15 +349,8 @@ namespace D8SceneJudgeAgreementNs
 		facts.part = std::to_string(part + 1) + "/" + std::to_string(parts) + " [" + std::to_string(begin) + "-" + std::to_string(end) + ")";
 		facts.device = g.device;
 		facts.planeW = pw; facts.planeH = ph;
-		if (synthetic == Synthetic::None)
-			for (double c : clip->cuts)
-			{
-				const int f = static_cast<int>(std::floor(c * hz + 0.5));
-				if (f > begin && f < end) ++facts.truthCuts;
-			}
-		else
-			for (int k = begin + 1; k < end; ++k)
-				if (synthetic == Synthetic::Flash ? FlashFrame(k) : (FadeGain(k) != FadeGain(k - 1))) ++facts.truthCuts;
+		const std::vector<char> truth = TruthRestarts(*clip, synthetic, begin, end, hz, facts.truthLabels);
+		for (char t : truth) facts.truthRestarts += t ? 1 : 0;
 
 		ModuleRow dp, tr;
 		DetailPulseModel::Model dpOld, dpShared;
@@ -376,6 +434,7 @@ namespace D8SceneJudgeAgreementNs
 				++dp.frames;
 				dp.oldRestarts += fo.restart ? 1 : 0;
 				dp.sharedRestarts += fs.restart ? 1 : 0;
+				if (k > begin) dp.CountTruth(fs.restart, truth[static_cast<size_t>(k - begin)] != 0);
 				if (fo.restart == fs.restart) ++dp.agree;
 				else { ++dp.differ; AddDiff(dp, fo.out, fs.out); }
 			}
@@ -396,6 +455,7 @@ namespace D8SceneJudgeAgreementNs
 				++tr.frames;
 				tr.oldRestarts += ro ? 1 : 0;
 				tr.sharedRestarts += rs ? 1 : 0;
+				if (k > begin) tr.CountTruth(rs, truth[static_cast<size_t>(k - begin)] != 0);
 				if (ro == rs) ++tr.agree;
 				else { ++tr.differ; AddDiff(tr, oo, os); }
 			}
@@ -437,15 +497,17 @@ namespace D8SceneJudgeAgreementNs
 		WriteRow(facts, "DP", dp);
 		WriteRow(facts, "TR", tr);
 		Assert::AreEqual(end - begin, dp.frames, L"D8: every frame of the part was processed");
-		char text[512];
-		snprintf(text, sizeof(text), "D8 %s part %s: DP agreement %.3f %% (%d differ), SceneMissing %llu; TR agreement %.3f %% (%d differ), "
-			"SceneMissing %llu (gate: >= %.1f %%, 0 missing)", rowName, facts.part.c_str(), dp.AgreementPct(), dp.differ, dp.sceneMissing,
-			tr.AgreementPct(), tr.differ, tr.sceneMissing, kAgreementGatePct);
+		char text[768];
+		snprintf(text, sizeof(text), "D8 %s part %s, truth %d restarts (%s): DP truth agreement %.3f %% (miss %d, extra %d), "
+			"SceneMissing %llu; TR truth agreement %.3f %% (miss %d, extra %d), SceneMissing %llu (gate: >= %.1f %% vs truth, 0 missing); "
+			"retired-law agreement (information) DP %.3f %%, TR %.3f %%", rowName, facts.part.c_str(), facts.truthRestarts,
+			facts.truthLabels.c_str(), dp.TruthAgreementPct(), dp.truthMiss, dp.truthExtra, dp.sceneMissing, tr.TruthAgreementPct(),
+			tr.truthMiss, tr.truthExtra, tr.sceneMissing, kAgreementGatePct, dp.AgreementPct(), tr.AgreementPct());
 		Logger::WriteMessage((std::string(text) + "\n").c_str());
 		Assert::AreEqual(0ull, dp.sceneMissing, Wide(text).c_str());
 		Assert::AreEqual(0ull, tr.sceneMissing, Wide(text).c_str());
-		Assert::IsTrue(dp.AgreementPct() >= kAgreementGatePct, Wide(text).c_str());
-		Assert::IsTrue(tr.AgreementPct() >= kAgreementGatePct, Wide(text).c_str());
+		Assert::IsTrue(dp.TruthAgreementPct() >= kAgreementGatePct, Wide(text).c_str());
+		Assert::IsTrue(tr.TruthAgreementPct() >= kAgreementGatePct, Wide(text).c_str());
 	}
 }
 
