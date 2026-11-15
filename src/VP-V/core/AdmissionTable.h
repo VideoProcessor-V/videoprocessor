@@ -13,8 +13,11 @@
 //  - Optional fill (P5, P6, P9, P10c, P12-as-job, long pair) admitted ONCE at Configure from the ledger (doc 91 C :79); an UNMEASURED optional
 //    product is not admitted and says "not measured" (S3-T4; rule 5).
 //  - P10 (grain split) is optional fill until <= 2 ms at 4K is proven, then core (doc 91 C :119 D7; coordinator 2026-11-14 08:22 via lead 10, Q4).
-//  - TD's products (td.*, Slice class) are the TD slice's own jobs, admitted with the slice and costed inside it; never optional fill, never in
-//    the FillOff list (owner OD:391 2026-11-11 07:45 "never core, never TD"; 115 #47 / #59). Every id has an explicit class (StaticClassOf).
+//  - TD's products (td.*, Slice class) are filled on ACTIVE-CONSUMER DEMAND only (owner correction 2026-11-15; present = the run-time graph
+//    of the active consumers, DemandFromGraph). TD ON: the TD slice's own jobs, admitted with the slice and costed inside it; never optional
+//    fill, never in the FillOff list, never shed (owner OD:391 2026-11-11 07:45 "never core, never TD"; 115 #47 / #59). TD OFF: no fill,
+//    unless another active consumer demands one; then it is filled for that consumer through the fill admission. Every id has an explicit
+//    class (StaticClassOf).
 //  - TD reserved slice: derived at Configure from the MEASURED remainder (budget - core), never a fixed number (coordinator 2026-11-14 08:22
 //    via lead 10, Q3); below TD's minimum TD shows its reduced tier (the line says so). The 3090 "4K ~8 ms + P10" is a design figure, never
 //    a constant here; 3090 numbers are estimates until a VP run there (feedback-no-waiting-on-3090) and are shown as "estimated".
@@ -78,7 +81,7 @@ struct AdmissionFacts {
     double renderMs = 0.0;                 // the measured render EWMA (RenderBudget)
     double costMs[kProductCount] = {};     // the ledger's measured per-frame cost of each product at the current geometry
     bool measured[kProductCount] = {};     // costMs[i] is a measurement
-    bool present[kProductCount] = {};      // the product is in the run-time graph (a node): nothing else is admitted
+    bool present[kProductCount] = {};      // the product is in the run-time graph (a node; DemandFromGraph): nothing else is admitted
     LatencyMode mode = LatencyMode::Standard;
     double tdMinMs = 0.0;                  // TD's own minimum tier (its ladder; 0 = TD not running)
     double tdWantMs = 0.0;                 // TD's wanted share (its full tier)
@@ -292,6 +295,17 @@ inline StaticClass ClassOf(ProductId id, const AdmissionFacts& f)
     return StaticClassOf(id);
 }
 
+// TD is ON when TD itself is an active consumer: it declares its tiers (tdMinMs / tdWantMs; both 0 = TD not running, AdmissionFacts).
+inline bool TdOn(const AdmissionFacts& f) { return f.tdMinMs > 0.0 || f.tdWantMs > 0.0; }
+
+// Consumer demand (owner correction 2026-11-15, C4 s3a): `present` is THE run-time graph's node set (ProductGraph.h BuildGraph over the
+// ACTIVE consumers' declarations: a product is a node only when an active consumer's read reaches it, directly or as an input). The one
+// mapping from the shared graph to the admission; an invalid graph demands nothing (its error is shown by the graph's owner).
+inline void DemandFromGraph(const Graph& g, AdmissionFacts& f)
+{
+    for (size_t i = 0; i < kProductCount; ++i) f.present[i] = g.valid && g.Has(ProductId(i));
+}
+
 // The settings cost mark from measured ms at the 4K30 laptop reference (control-config rule 4: < 0.5 "+", 0.5-2 "++", > 2 "+++"; none untimed).
 inline const char* CostMark(double ms, bool measured)
 {
@@ -345,12 +359,19 @@ inline Result Admit(const AdmissionFacts& f)
         r.tdReduced = r.sliceMs < f.tdMinMs;
         left -= r.sliceMs;
     }
-    // The TD products (Slice class, LaneSpareWork.h StaticClassOf) are the slice's OWN jobs (OD:391 (2)/(3); 115 #47 / #59): admitted with
-    // TD, costed inside sliceMs (never on top of it, never from fill leftovers), never "not measured" fill and never in the FillOff list
-    // (OptionalFillIds). A short slice is TD's own reduced tier (tdReduced, shown), never a TD product switched off.
-    uint32_t sliceJobs = 0;
+    // The TD products (Slice class, LaneSpareWork.h StaticClassOf) are filled on DEMAND only (owner correction 2026-11-15, C4 s3a): a
+    // product is present only when an active consumer's read reaches it (the run-time graph, DemandFromGraph); nothing absent is filled.
+    //  - TD ON (TdOn: TD is an active consumer): the slice's OWN jobs (OD:391 (2)/(3); 115 #47 / #59): admitted with TD, costed inside
+    //    sliceMs (never on top of it, never from fill leftovers), never "not measured" fill and never in the FillOff list (OptionalFillIds).
+    //    A short slice is TD's own reduced tier (tdReduced, shown), never a TD product switched off.
+    //  - TD OFF: there is no TD slice to run them in. A TD product still present is demanded by ANOTHER active consumer and is filled for
+    //    that consumer through the same fill admission below (Fill class, measured, from the remainder; "everything else optional fill",
+    //    OD:391 (1)); the line names them. TD off and no other consumer = not present = no fill.
+    const bool tdOn = TdOn(f);
+    uint32_t sliceJobs = 0, tdForOthers = 0;
     for (size_t i = 0; i < kProductCount; ++i) {
         if (!f.present[i] || r.cls[i] != JobClass::Slice || !r.jobbed[i]) continue;
+        if (!tdOn) { r.cls[i] = JobClass::Fill; ++tdForOthers; continue; }
         r.admitted[i] = true;
         ++sliceJobs;
     }
@@ -375,13 +396,22 @@ inline Result Admit(const AdmissionFacts& f)
         fillUnmeasured > 0 ? std::to_string(fillUnmeasured).c_str() : "");
     r.line = buf;
     if (sliceJobs > 0) r.line += "; TD jobs " + std::to_string(sliceJobs) + " in the TD slice";
+    if (tdForOthers > 0) {
+        uint32_t on = 0;
+        for (size_t i = 0; i < kProductCount; ++i)
+            if (f.present[i] && r.admitted[i] && StaticClassOf(ProductId(i)).cls == JobClass::Slice) ++on;
+        r.line += "; TD off: TD products " + std::to_string(tdForOthers) + " demanded by another consumer, " + std::to_string(on) +
+            " filled for it";
+    }
     if (!rb.Measured() || !(hz > 0.0)) r.line += "; no budget (render or source rate not measured)";
     PlanAhead(f, r);
     return r;
 }
 
 // The optional fills the admission turned on: what the wiring hands OverloadArbiter::SetOptionalFills (core/OverloadOrder.h), so FillOff
-// switches off optional extras only (OD:391 (2): never core, never TD). Fill class only: a Core, Derived or Slice (TD) product is never listed.
+// switches off optional extras only (OD:391 (2): never core, never TD). Fill class only: a Core, Derived or Slice (TD) product is never listed;
+// with TD ON no TD product is listed. With TD OFF a TD product filled for another consumer is that consumer's optional fill (owner
+// correction 2026-11-15: never shed only while TD is on).
 inline std::vector<ProductId> OptionalFillIds(const Result& r)
 {
     std::vector<ProductId> ids;
