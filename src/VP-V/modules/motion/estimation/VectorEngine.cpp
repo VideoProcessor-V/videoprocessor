@@ -888,7 +888,7 @@ namespace VpMotion
 		else
 			for (auto it = flowLeases_.begin(); it != flowLeases_.end();)
 			{
-				if (std::get<0>(it->first) != from || std::get<1>(it->first) != to)   // no board: the single lease (today's behaviour, SHOWN)
+				if (std::get<0>(it->first) != from || std::get<1>(it->first) != to)   // no board: the single lease (today's behaviour; not displayed yet, 102b QKP-E-HOST-WIRING)
 				{
 					++leaseCounters_.droppedSingle;
 					it = flowLeases_.erase(it);
