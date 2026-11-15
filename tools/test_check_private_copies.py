@@ -36,7 +36,8 @@ class RepoSeeds(unittest.TestCase):
         cls.sites = {h["site"] for h in cls.hits}
 
     def test_every_d_and_x_site_detected(self):
-        for sid in ["D1", "D2", "D3", "D4", "D5", "D6", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]:
+        # D6 detects 0 at the tip after 15c C6 (the decode moved to the one decode owner); proven by Synthetic.test_d6_* instead.
+        for sid in ["D1", "D2", "D3", "D4", "D5", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]:
             self.assertIn(sid, self.sites, sid + " not detected at the tip")
 
     def test_x1_is_file_level_inside_the_owner_folder(self):
@@ -69,6 +70,19 @@ class Synthetic(unittest.TestCase):
         })
         hs = [h for h in N1.scan(root) if h["site"] == "D2"]
         self.assertEqual([h["file"] for h in hs], [M + "repair/x/Use.h"])
+
+    def test_d6_planted_private_decode_hits(self):
+        # D6 planted fixtures (15c C6): a private RGB / full-range decode returning to the producer hits D6; the old wrapper name
+        # anywhere else hits D6~moved; asking the owner's query API (MapsToLimitedDomain) does not.
+        vfa = M + "input/source_analysis/VpFrameAnalysis.cpp"
+        host = M + "input/source_analysis/VpFrameAnalysisHost.h"
+        root = make_tree({vfa: "static bool SamplerCodesAreFullRange(const S& s){ return s.CodesFullRange(); }\n"
+                               "const bool full = source.fullRangeYuv;",
+                          host: "const bool f = VpFrameAnalysis::SamplerCodesAreFullRange(s);"})
+        hs = sorted((h["site"], h["file"]) for h in N1.scan(root) if h["site"].startswith("D6"))
+        self.assertEqual(hs, [("D6", vfa), ("D6", vfa), ("D6~moved", host)])
+        root = make_tree({vfa: "if (fmt == P010 && source.MapsToLimitedDomain()) {}", host: "const bool f = s.CodesFullRange();"})
+        self.assertFalse([h for h in N1.scan(root) if h["site"].startswith("D6")])
 
     def test_comments_do_not_hit(self):
         root = make_tree({M + "repair/temporal_detail/TemporalDetailModel.h": "// m_prevGin\n/* double guard */\nint ok;"})
