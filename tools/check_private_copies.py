@@ -49,8 +49,10 @@ SITES = [
      "owner": [_M + "motion/estimation/VectorEngine.cpp", _M + "motion/estimation/OpticalFlowTrust.h",
                _M + "motion/estimation/VectorEngineInterface.h"]},
     {"id": "D3", "product": "kP2VectorPair", "refs": "122 s9 D3",
-     "what": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
-     "re": r"\bditherVectorsOwn\b|\bl1Available\b"},
+     "what": "a second caller of the output-domain search (private copy of the sigma-delta's own vector search)",
+     # gate-15a-D3-ditherVectorsOwn / -l1Available: all four search functions; owner scope by FILE (not motion/estimation/).
+     "re": r"\bOutputDomainSearch::(Glsl|LumaQuarterPassGlsl|LumaCoarsePassGlsl|BlockSearchPassGlsl)\s*\(",
+     "owner": [_M + "motion/estimation/fallback/OutputDomainSearchGlsl.h", _M + "output/dither/VpShaderInclude.h"]},
     {"id": "D3s", "product": "kP2VectorPair", "refs": "122 s9 D3",
      "what": "sigma-delta shader own block search pass", "raw": True,
      "re": r"full search within",
