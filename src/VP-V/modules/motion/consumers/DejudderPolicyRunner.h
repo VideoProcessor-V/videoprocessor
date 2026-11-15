@@ -85,6 +85,9 @@ namespace VpMotion
 		{
 			if (activeSettings.vectorDemand && vectorDemand.mode != VectorDemand::Mode::Off)
 				host.PublishDejudderStatus(false);   // the vector engine's line stays on the stats
+			else if (!activeSettings.vectorDemand && (!activeSettings.engineOffForced.empty() ||
+				(!activeSettings.pipelineOriginalPathway && !VectorDemand::OffLine(vectorDemand).empty())))
+				host.PublishDejudderStatus(false);   // batch B: "motion engine off (setting)" / "de-judder off: motion engine off" (a status line, never an entry)
 			else
 				host.ClearStatusIfPublished();   // if (dejudderStatusTick != 0) { tick = 0; clear the line under its lock }
 			return DecisionOutcome::SettledOff;

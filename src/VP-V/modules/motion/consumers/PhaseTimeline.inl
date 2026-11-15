@@ -311,6 +311,20 @@ void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
 		if (!vectorLine.empty())
 			text += (text.empty() ? std::string() : std::string("; ")) + vectorLine;
 	}
+	else
+	{
+		// Batch B (plan-motion-engine-switch.md (b), Q2): the engine OFF by the setting is a status line, never a "Fallbacks engaged" entry
+		// (a user's choice), and never shown on the Original pathway (it IS Bill's, the engine off there) or with the motion slots off
+		// (CoreSegments shows those). What the user had on that this forced off (Q3) follows.
+		if (!activeSettings.pipelineOriginalPathway && MotionVectorsRun())
+		{
+			const std::string offLine = VectorDemand::OffLine(vectorDemand);
+			if (!offLine.empty())
+				text += (text.empty() ? std::string() : std::string("; ")) + offLine;
+		}
+		if (!activeSettings.engineOffForced.empty())
+			text += (text.empty() ? std::string() : std::string("; ")) + activeSettings.engineOffForced;
+	}
 	// S2PH1-S3B C4: the look-ahead producer's engine-luma ring misses (never log-only; empty with none).
 	const std::string producerSegment = vectorEngine.ProducerStatusSegment();
 	if (!producerSegment.empty())
