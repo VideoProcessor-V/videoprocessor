@@ -6,8 +6,9 @@
 // exists, nothing fills it yet). Pure CPU, no state of its own beyond the caller's ChooserState, header only, C++14.
 //
 // Order (105 O1): a core pair whose deadline slack is under two service times goes first; otherwise on-demand requests go first,
-// but at most `maxRequestStreak` in a row WHILE a core or long job waits (the walk is never starved); a long pair only when no
-// request and no core pair waits. The streak counts only choices made while a job waited: requests served on an idle walk do
+// but at most `maxRequestStreak` in a row WHILE a core job waits (the walk is never starved); a long pair only when no
+// request and no core pair waits - it NEVER overtakes a waiting request (O1: "long pair last, never while a request waits"), so
+// only a core pair may break a request streak. The streak counts only choices made while a core job waited: requests served on an idle walk do
 // not use it up (the C5b dequeue-stall fix - the old counter ran up on an idle walk, so the first job to arrive overtook a
 // waiting request at once and a request burst after it lost its priority).
 #pragma once
@@ -26,7 +27,7 @@ namespace MotionAhead
 			bool Any() const { return corePairs + onDemand + longPairs != 0; }
 		};
 
-		// The caller's state, kept under its own lock: requests chosen in a row while a core or long job waited.
+		// The caller's state, kept under its own lock: requests chosen in a row while a core job waited.
 		struct ChooserState { int requestStreak = 0; };
 
 		struct Choice
@@ -49,7 +50,8 @@ namespace MotionAhead
 			if (!queues.Any())
 				return choice;
 			choice.any = true;
-			const bool otherWaits = queues.corePairs != 0 || queues.longPairs != 0;
+			// Only a core pair may overtake a waiting request (O1); a long pair never does, so it does not count as "waiting" here.
+			const bool otherWaits = queues.corePairs != 0;
 			if (queues.onDemand != 0)
 			{
 				const bool urgentCore = queues.corePairs != 0 && CoreIsUrgent(coreSlackMs, serviceMs);
@@ -60,8 +62,9 @@ namespace MotionAhead
 						++state.requestStreak;
 					return choice;
 				}
-				// A job overtakes a waiting request: by urgency, or because the streak bound is reached.
-				choice.cls = queues.corePairs != 0 ? JobClass::CorePair : JobClass::LongPair;
+				// A core job overtakes a waiting request: by urgency, or because the streak bound is reached (otherWaits = a core pair
+				// is queued, so this branch always has one).
+				choice.cls = JobClass::CorePair;
 				choice.urgent = urgentCore;
 				choice.fairness = !urgentCore;
 				state.requestStreak = 0;
