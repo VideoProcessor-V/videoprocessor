@@ -50,6 +50,10 @@ Header-only and pure: no Windows, C++14; no libplacebo except the two shared-uni
 | `GapScheduler.h` | Skeleton S4: render-thread idle-gap scheduler, fixed class priority (render-ahead extras, early-upload wraps, lane compute), deterministic order, never starts a chunk that does not fit |
 | `SchedulerContract.h` | S0 / IC-2: the FROZEN scheduler contract (JobClass, JobDecl, JobCost, SlotBudget, OverloadStep/State, ScheduleMode, rules R1-R10) and the ONE `RenderBudget` (period - render EWMA - period/10; moved here from `OnDemandEstimate.h`, which keeps an alias) |
 | `PostPresentSpare.h` | B3-Z Z2: the ONE post-present spare slot per SOURCE frame (TD design 99 s3.3; `SpareSourceKey`: a cadence repeat keeps its film frame's key; `SpareHost` = the renderer's side, owned per renderer by SkeletonModule and driven by the one R12 AfterPresent seam call (refs/107 S5; 0 per-feature LVR sites), budget 0 until C5b): generic hook, budget in / used ms out, fixed class order (unpack, core, TD slice, fill); core work is row-split or deferred, never capNoFit-skipped; costs are each work's own measurement (`SpareMeasuredCost`); one slot per source frame, whichever trigger point fires first (that outcome consumes the key); a starved unmeasured core work goes first next slot |
+| `JobRegistry.h` | S-3a S1: the ONE registration path of a scheduled job (every job is a skeleton product fill): graphOrder = index in `Graph::nodes` (a hand-set order is refused), work Id/Class/Order must match the `JobDecl`, Derived after its lag-0 inputs, one job per product, CoreFirst only (SharedGap = S5), Original registers nothing, P13 refused as an Unpack job (views end at AfterRender; S3A-UNPACK-SLOT), cpu jobs go to the CPU lane through `ICpuJobSink`; refusals counted and on the status line |
+| `LaneSpareWork.h` | S-3a S2: ONE adapter of a lane job that is both `ISpareWork` (core-first slot: steps the runner to the publish, cost = max(CPU, device prediction), never decayed) and `IGapWork` (THE gap-chunk law `LaneGapChunk.h`, the one `LaneComputeGapWork` calls), so `precompute_schedule` = shared_gap (R10) runs the same registrations; `GapEligible` (core_first: backfill = Fill only); `StaticClassOf` (doc 91 C :79 core set; P10 fill until proven; P12 Derived-live, no job; td.* Slice, owner OD:391; every id explicit, no default class). AnalysisLane.h registration move pending (hot file) |
+| `AdmissionTable.h` | S-3a S3 (pure; wiring pending): Configure-time admission from MEASURED ledger costs + the measured source rate: core always admitted (over budget = visible, the arbiter acts), TD slice = min(TD want, measured remainder) with a reduced-tier line below TD's minimum, optional fill only when measured and fitting, games = no fill / no TD slice, competitive = no slot work; cost marks +/++/+++ (control-config rule 4). `PlanAhead`: aheadCompute = min(max ACTIVE consumer declared need, `kAheadCeiling` 6, queue frames ahead), 0 with no active consumer (OD 11-14, design s10; a ceiling, not a target), computed by `QueueWindow.h` `AheadComputeLimitOf`, then sized to the VRAM grant by THE ladder `QueueWindow.h` `PlanAheadLadder` (one copy of the law: S-A fewer products early -> S-B fewer frames ahead -> S-C DelayBudget's next lower queue step last, never below `kMinimumDepth`, never in games/competitive; never evict); `aheadComputeLine` names the binding consumer and ceiling / budget / queue; the consumers and the frames queued ahead arrive as THE window's feed (`AdmissionFacts::aheadFeed` = `QueueWindow.h` `PlanAheadFeed`, built by `PlanAheadFeedOf`), and a window `aheadComputeLimit` that differs from the law is drift, shown on that line. The td.* products are Slice class: the TD slice's own jobs, admitted with it and costed inside it, never optional fill; `OptionalFillIds` (Fill class only) is the FillOff list (owner OD:391) |
+| `OverloadOrder.h` | S-3a S4 (pure; wiring pending): the ONE overload arbiter, fixed order FillOff -> TdStepDown (one TD tier per stage) -> ExtrasStepDown -> CoreDeferred -> FeatureOff, down after 2 s over, up after 5 s under u - 0.10 (u = (render + slot used) / (period - period/10)); `ExtrasAllowed` is what the render-ahead gate ladder reads instead of its own controller; one line per state |
 | `Regulator.h` | Skeleton S5: the slack regulator, the ladder of lane/in-render/dropped states, margin on render-only time, dwell, multiplicative back-off, death-spiral guard, traces and notice |
 | `AnalysisLane.h` | Skeleton S3-S7 facade: the ONE object the renderer holds (null when off): settings keys, per-graph state swapped by `shared_ptr`, host hooks (listed at its top), worker threads, status lines and fallbacks |
 | `StatusText.h` | VP's status text: the renderer's `vp` module lines (generic `GetModuleStatus` entry), the Ctrl+I rows, crash-state and report lines, content/room/key-override/nets wording (WP-11) |
@@ -192,6 +196,29 @@ skeleton passes it as `ownUsageBytes` (re-planned, not counted twice). Declared 
 enhancers, DejudderWarp's own optical-flow textures (MV2: removed with SK-MV), the camera model's guidance textures.** The guard `MarkActive` names an active module that
 declared nothing (`skeleton_vram_users`); the modules above do not call `MarkActive` yet, so the guard cannot see them. Ctrl+Alt+D lists each declared user
 ("VRAM T0 optical-flow engines: 6.4 MB level 0").
+
+## Core-first scheduler (S-3a): design goal, philosophy and decisions
+
+Goal: ONE core-first slot per SOURCE frame - render first, then core shared jobs, derived products, the TD reserved share, extras; the gap only
+mops up leftovers (owner 2026-11-12 15:13, refs/owner-decisions-2026-11-07.md:612 (1); principles/output-presentation.md rule 4). Every job is a
+skeleton product fill (owner correction 2026-11-12T20:01:26Z [cf1d27fa]: "Anything shared is shared and anything needing deriving that is of
+use should have a skeleton spot"). Built on S0's frozen IC-2 contract (`SchedulerContract.h`).
+
+Decisions (provenance):
+- Order inside the slot = class, then the run-time graph order, then product id; graphOrder is never hand-set (IC-2 R3; brief S-3a S1).
+- Core is never shed for time (doc 91 C :79, owner 2026-11-11 07:45): row-split by whole units or deferred one slot, never cost-decayed (R4).
+  A single matcher pair is one unit: deferred when it does not fit, never "split" into an overrun.
+- No production Unpack job until the queued-ahead source ring lands; frames are unpacked in the render as now, visibly (coordinator
+  2026-11-14 08:22 via lead 10, Q1; 102b S3A-UNPACK-SLOT).
+- Pair source planes are Acquired from `kP13SourceRing`, never held as a lane copy (rule 1; coordinator ruling via lead 10, 2026-11-14). The
+  call needs Acquire for frames AHEAD of the render frame (seq N+1 .. N+D): that is the queue-keyed products fix, which S1 wiring waits for.
+- P3b is a direction AXIS of P3 (VariantKey), not a new ProductId (coordinator 2026-11-14 08:22 via lead 10, Q2).
+- The TD slice on the laptop is derived at Configure from the measured remainder, never a fixed number (Q3, same ruling).
+- P10 is optional fill until <= 2 ms at 4K is proven, then core (Q4, same ruling; doc 91 C :119).
+- The slot matcher (`motion_estimate_ahead_spare` auto) turns on once the S1 acceptance row is recorded, shown in status (Q5, same ruling).
+- Overload: TD steps down BEFORE de-judder extras, one arbiter, visible (OD:612 (3)); the gate ladder reads `ExtrasAllowed` (IC-2 R7).
+- Nothing in the Original pathway: nothing registered, the budget never fed (IC-2 R9). No literal rate, cadence or resolution (rule 6).
+- Tests: `tests/SchedulerS1Tests.cpp`, `tests/SchedulerS2Tests.cpp`, `tests/AdmissionOverloadTests.cpp` (all CPU).
 
 ## Status and fallbacks
 

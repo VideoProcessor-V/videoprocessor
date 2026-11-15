@@ -205,10 +205,11 @@ inline void SetAheadConsumers(QueueWindowTerms& t, const std::vector<AheadDemand
 }
 
 // Slice C wiring (lead 11; OD 11-14, design s10): what the window hands S-3a's PlanAhead (core/AdmissionTable.h AdmissionFacts::
-// aheadConsumers and queueAheadFrames), so the scheduler computes the SAME ahead-compute limit as the window: the same active consumers
-// with their declared needs, the same queue frames ahead (the window's ahead, the bound DeriveWindow applies) and the same ceiling
-// (AheadCeiling.h). The window's own aheadCompute rides along so the wiring can check both agree before any mode or budget step
-// (S-3a's games / competitive zero and its S-B / S-C then only lower it, each shown).
+// aheadFeed, this struct itself: no parallel consumer list there), so the scheduler computes the SAME ahead-compute limit as the window:
+// the same active consumers with their declared needs, the same queue frames ahead (the window's ahead, the bound DeriveWindow applies)
+// and the same ceiling (AheadCeiling.h). The window's own aheadCompute rides along and S-3a's AheadCompute checks both agree before any
+// mode or budget step (a difference is drift, shown on its Ctrl+Alt+D line); S-3a's games / competitive zero and its S-B / S-C then only
+// lower it, each shown.
 // R3 (lead 12): the feed carries BOTH depths, each named for what it is:
 //   queueAheadFrames   = L + W, the frames queued ahead (the window's ahead: the bound DeriveWindow applies; not L alone);
 //   aheadComputeLimit  = min(max active consumer request, kAheadCeiling 6, queueAheadFrames): how far ahead work is COMPUTED.

@@ -206,6 +206,9 @@ DECLARATION_PATHS = _c(
     r"Settings?[^/]*Catalog",
     r"/products/[^/]*Contracts\.h$")   # refs/126 s3: product contract lists are declarations
 OUTPUT_DOMAIN_PATHS = _c(r"^src/VP-V/modules/drive/led_", r"^src/VP-V/modules/output/")
+# A line of switch case LABELS only (`case kP11RegionBlockStats: case kCodingEvidence:`) names catalog ids to branch on; it computes
+# nothing, so it is a declaration (PREC2-S3A audit MUST 5). A label line with a statement after it is scanned as code.
+CASE_LABEL_LINE = re.compile(r"^\s*(case\s+[A-Za-z_][\w:]*\s*:\s*)+(//.*)?$")
 ROLES = ("declaration", "consumer", "output_domain", "bill",
          "known_false_positive", "duplicate")
 
@@ -300,7 +303,7 @@ def _strip_allowed(entry, text):
 def classify(entry, rel, text, kfps, comment=False):
     if _is_bill(rel):
         return "bill", ""
-    if comment or any(p.search(rel) for p in DECLARATION_PATHS):
+    if comment or any(p.search(rel) for p in DECLARATION_PATHS) or CASE_LABEL_LINE.match(text):
         return "declaration", ""
     stripped, used = _strip_allowed(entry, text)
     # A line that holds an accessor AND a private signature is still a duplicate.

@@ -50,6 +50,16 @@ inline bool ParseKey(const char* text, SpareKey& out)
 // auto resolves to off today (owner Q2).
 inline bool KeyOn(SpareKey k) { return k == SpareKey::On; }
 
+// S-3a S1 (coordinator 2026-11-14 08:22 via lead 10, Q5): auto = ON once the S1 acceptance row (render ms saved, no added late presents) is
+// recorded, shown in status. The host passes `autoAccepted` from that row; without it auto stays off exactly as KeyOn says.
+inline bool KeyOn(SpareKey k, bool autoAccepted) { return k == SpareKey::On || (k == SpareKey::Auto && autoAccepted); }
+
+inline const char* KeyStateText(SpareKey k, bool autoAccepted)
+{
+    if (k == SpareKey::Auto) return autoAccepted ? "auto (on: S1 acceptance recorded)" : "auto (off until the S1 acceptance row)";
+    return KeyName(k);
+}
+
 constexpr int kDepthTarget = 4;   // TD design point
 constexpr int kDepthMin = 2;      // the ring holds at least two pairs
 
@@ -95,6 +105,7 @@ enum class Reason : uint8_t {
     RingFull,       // depth already held
     P2NotReady,     // E3: the producer runs and the pair's P2 is not in its slot yet
     NoSpare,        // the slot's budget did not fit the matcher (set by the host from the slot's report)
+    SourceNotServed,   // S-3a S1: Acquire(P13 source ring) of a pair frame was Unavailable in the slot (its owner serves no view there)
     Count
 };
 
@@ -110,6 +121,7 @@ inline const char* ReasonName(Reason r)
     case Reason::RingFull: return "depth held";
     case Reason::P2NotReady: return "P2 not ready";
     case Reason::NoSpare: return "no spare";
+    case Reason::SourceNotServed: return "source ring not served in the slot";
     default: return "?";
     }
 }
@@ -127,6 +139,7 @@ struct Input {
     int held = 0;                 // pairs already in the ring (chained from the render pair)
     bool producerRunning = false;
     bool nextPairP2Ready = true;  // the first pair to estimate has its P2 in the slot
+    bool autoAccepted = false;    // S-3a S1 / Q5: auto resolves to on (KeyOn(key, autoAccepted)); false = today's rule
 };
 
 struct Decision {
@@ -138,7 +151,7 @@ struct Decision {
 inline Decision Decide(const Input& in)
 {
     Decision d;
-    if (!KeyOn(in.key)) { d.reason = Reason::Off; return d; }
+    if (!KeyOn(in.key, in.autoAccepted)) { d.reason = Reason::Off; return d; }
     if (in.competitive) { d.reason = Reason::Competitive; return d; }
     if (in.lowLatency) { d.reason = Reason::LowLatency; return d; }
     if (!in.matcherActive) { d.reason = Reason::EngineOff; return d; }
@@ -245,6 +258,207 @@ private:
     unsigned long long m_counts[static_cast<size_t>(AfterEstimateResult::Count)] = {};
     unsigned long long m_byPath[2] = {};
 };
+
+// ---- Z1: the chain ring (refs 93-prep-B3Z s3, rules E1 / E12; S-3a S1) ----
+// The ONE arbiter of ahead pairs: entries strictly chained (entry k.to == entry k+1.from, E1), each pair held at most once (compute once),
+// each keyed by the epoch it was made in (E12). At depth 1 it behaves as Dejudder::AheadSchedule's one-pair entry (hit = the front pair with
+// its epoch; anything else = a miss that discards every entry, the render estimates the pair as today). Pure bookkeeping: the textures live in
+// the host's slots (Entry::extra, the matcher's SnapshotForWarp(slot)). Each entry carries its PHYSICAL slot (the host textures never move
+// when the front is consumed): FreeSlot() names the slot a new estimate writes, Push(k, slot) records it, SlotAt(i) / Consume(..., &slot) give
+// it back (PREC2-S3A audit MUST 3: a ring position is not a slot once the front has been consumed).
+enum class DiscardCause : uint8_t {
+    NextDiffers = 0,   // the frame after the render frame is not the entry's `to` (replaced frame / chain broken)
+    Drop,              // a frame the ring held a pair for was passed without being consumed (dropped / skipped frame)
+    Resync,            // queue reset / seek / resync (host)
+    EpochMoved,        // the right pair, made in another validity epoch
+    PictureChanged,    // the active picture changed after the estimate (host; 93-prep-B3Z s4 cause "picture area")
+    LeaseLost,         // the host lost the entry's slot texture
+    Count
+};
+
+inline const char* DiscardCauseName(DiscardCause c)
+{
+    switch (c) {
+    case DiscardCause::NextDiffers: return "next differs";
+    case DiscardCause::Drop: return "drop";
+    case DiscardCause::Resync: return "resync";
+    case DiscardCause::EpochMoved: return "epoch moved";
+    case DiscardCause::PictureChanged: return "picture";
+    case DiscardCause::LeaseLost: return "lease lost";
+    default: return "?";
+    }
+}
+
+enum class PushResult : uint8_t { Held = 0, BadKey, NotChained, AlreadyHeld, Full, BadSlot, Count };
+
+class AheadRing {
+public:
+    // The owner's ahead cap (OD-11-14-AHEAD-CAP, RULEBOOK s4 "Ahead work is capped at 4-6 frames"): kAheadCeilingLead, never the P2 ring's 13.
+    static constexpr int kCapacityMax = kAheadCeilingLead;
+
+    explicit AheadRing(int capacity = RingCapacity()) { SetCapacity(capacity); }
+
+    // The ring's depth target (bounded to [1, kCapacityMax]); a smaller capacity drops the deepest entries, and every entry from the first one
+    // whose slot is beyond the new capacity (the chain stays a prefix, never a hole), each counted as Drop: never silent.
+    void SetCapacity(int capacity)
+    {
+        m_capacity = capacity < 1 ? 1 : (capacity > kCapacityMax ? kCapacityMax : capacity);
+        int keep = m_count < m_capacity ? m_count : m_capacity;
+        for (int i = 0; i < keep; ++i)
+            if (m_slots[static_cast<size_t>(i)] >= m_capacity) { keep = i; break; }
+        while (m_count > keep) { --m_count; ++m_discarded[static_cast<size_t>(DiscardCause::Drop)]; }
+    }
+    int Capacity() const { return m_capacity; }
+    int Held() const { return m_count; }
+    bool Empty() const { return m_count == 0; }
+    const EntryKey& At(int i) const { return m_entries[static_cast<size_t>(i)]; }
+    // The host slot entry i was estimated into (its textures stay there however the front moves).
+    int SlotAt(int i) const { return m_slots[static_cast<size_t>(i)]; }
+    // The lowest slot in [0, Capacity()) no held entry uses: where the next estimate writes. -1 = none free (the ring is full).
+    int FreeSlot() const
+    {
+        for (int s = 0; s < m_capacity; ++s)
+            if (!SlotUsed(s)) return s;
+        return -1;
+    }
+    // The frame the next pair starts from (the back's `to`; 0 = empty: the host starts at the render frame's next).
+    uint64_t BackTo() const { return m_count > 0 ? m_entries[static_cast<size_t>(m_count - 1)].to : 0; }
+    bool Holds(uint64_t from, uint64_t to) const
+    {
+        for (int i = 0; i < m_count; ++i)
+            if (m_entries[static_cast<size_t>(i)].from == from && m_entries[static_cast<size_t>(i)].to == to) return true;
+        return false;
+    }
+
+    // Holds k in the lowest free slot (FreeSlot()).
+    PushResult Push(const EntryKey& k) { return Push(k, FreeSlot()); }
+    // Holds k as estimated into host slot `slot` (FreeSlot() when the estimate was made); a slot outside the capacity or already used by a
+    // held entry is refused (BadSlot), so two held pairs never share one slot's textures.
+    PushResult Push(const EntryKey& k, int slot)
+    {
+        PushResult r = PushResult::Held;
+        if (!k.Valid()) r = PushResult::BadKey;
+        else if (Holds(k.from, k.to)) r = PushResult::AlreadyHeld;
+        else if (m_count > 0 && k.from != BackTo()) r = PushResult::NotChained;
+        else if (m_count >= m_capacity) r = PushResult::Full;
+        else if (slot < 0 || slot >= m_capacity || SlotUsed(slot)) r = PushResult::BadSlot;
+        ++m_push[static_cast<size_t>(r)];
+        if (r == PushResult::Held) {
+            m_slots[static_cast<size_t>(m_count)] = slot;
+            m_entries[static_cast<size_t>(m_count++)] = k;
+        }
+        return r;
+    }
+
+    // At the render frame's estimate of (from, to) in `epoch`: true = the front entry is that pair from that epoch (taken; the render reads
+    // its slot, `*slot`, no estimate). False = the render estimates now; entries the render passed are discarded as Drop, a front entry of
+    // another pair or epoch discards the whole chain (E1: never a chain with a hole).
+    bool Consume(uint64_t from, uint64_t to, uint64_t epoch, int* slot = nullptr)
+    {
+        if (slot != nullptr) *slot = -1;
+        while (m_count > 0 && m_entries[0].from < from) { PopFront(); ++m_discarded[static_cast<size_t>(DiscardCause::Drop)]; }
+        if (m_count == 0) { ++m_sequential; m_consumedEpoch = 0; return false; }
+        const EntryKey& f = m_entries[0];
+        if (f.from == from && f.to == to && epoch != 0 && f.epoch == epoch) {
+            m_consumedEpoch = f.epoch;
+            if (slot != nullptr) *slot = m_slots[0];
+            PopFront();
+            ++m_hits;
+            return true;
+        }
+        Discard(f.from == from && f.to == to ? DiscardCause::EpochMoved : DiscardCause::NextDiffers);
+        ++m_sequential;
+        m_consumedEpoch = 0;
+        return false;
+    }
+
+    // Host-detected causes (Resync, PictureChanged, LeaseLost) and the internal ones: every entry goes, counted per entry.
+    void Discard(DiscardCause c)
+    {
+        m_discarded[static_cast<size_t>(c)] += static_cast<unsigned long long>(m_count);
+        m_count = 0;
+    }
+    void Reset() { Discard(DiscardCause::Resync); }
+
+    unsigned long long Hits() const { return m_hits; }
+    unsigned long long Sequential() const { return m_sequential; }   // render-time estimates (no entry to take)
+    unsigned long long Discarded(DiscardCause c) const { return m_discarded[static_cast<size_t>(c)]; }
+    unsigned long long Pushed(PushResult r) const { return m_push[static_cast<size_t>(r)]; }
+    uint64_t ConsumedEpoch() const { return m_consumedEpoch; }
+
+private:
+    // The entries move down; each keeps its own slot (the textures do not move).
+    void PopFront()
+    {
+        for (int i = 1; i < m_count; ++i) {
+            m_entries[static_cast<size_t>(i - 1)] = m_entries[static_cast<size_t>(i)];
+            m_slots[static_cast<size_t>(i - 1)] = m_slots[static_cast<size_t>(i)];
+        }
+        --m_count;
+    }
+    bool SlotUsed(int slot) const
+    {
+        for (int i = 0; i < m_count; ++i)
+            if (m_slots[static_cast<size_t>(i)] == slot) return true;
+        return false;
+    }
+
+    EntryKey m_entries[kCapacityMax];
+    int m_slots[kCapacityMax] = {};
+    int m_capacity = 1;
+    int m_count = 0;
+    uint64_t m_consumedEpoch = 0;
+    unsigned long long m_hits = 0, m_sequential = 0;
+    unsigned long long m_discarded[static_cast<size_t>(DiscardCause::Count)] = {};
+    unsigned long long m_push[static_cast<size_t>(PushResult::Count)] = {};
+};
+
+// ---- Z3: the engine-side feed of held entries (refs 93-prep-B3Z s3 "AheadFieldSeqs", s5 "Feed") ----
+// FeedEngine publishes EVERY held entry not yet published, ascending; the published frame number is monotonic, so an entry is fed once.
+// Pure: the host publishes the slot for each `to` returned.
+class AheadFeed {
+public:
+    // The `to` frames of held entries not yet published, ascending (written to out[0..n), n returned; at most `max`). `slots` (optional,
+    // room for `max`) gets each entry's PHYSICAL host slot, AheadRing::SlotAt(i): a ring position is not a slot once the front has been
+    // consumed (PREC2-S3A MUST 3; C4 s3a SHOULD 2), so the host publishes the texture the pair was estimated into.
+    int Pending(const AheadRing& ring, uint64_t* out, int max, int* slots = nullptr) const
+    {
+        int n = 0;
+        for (int i = 0; i < ring.Held() && n < max; ++i)
+            if (ring.At(i).to > m_lastPublished) {
+                if (slots != nullptr) slots[n] = ring.SlotAt(i);
+                out[n++] = ring.At(i).to;
+            }
+        return n;
+    }
+    void MarkPublished(uint64_t to) { if (to > m_lastPublished) { m_lastPublished = to; ++m_published; } }
+    void Reset() { m_lastPublished = 0; }
+    uint64_t LastPublished() const { return m_lastPublished; }
+    unsigned long long Published() const { return m_published; }
+
+private:
+    uint64_t m_lastPublished = 0;
+    unsigned long long m_published = 0;
+};
+
+// ---- VRAM per tier of the ring (risk row of brief S-3a S1; geometry upper bound of 93-prep-B3Z s7) ----
+// Per held entry: the matcher's OWN outputs only - the 16 px block field (rgba32f, 16 B per block) + the 4 sub-vectors per block (64 B) + the
+// half-resolution pixel mask (R16, 2 B per half-res pixel). The pair's source planes are NOT held here: they are Acquired from the P13 source
+// ring (one copy, rule 1; coordinator ruling via lead 10, 2026-11-14), so their bytes are on P13's owner's ledger line, never on this one.
+// Derived from the dimensions, never a table.
+inline uint64_t EntryFieldBytes(uint32_t width, uint32_t height)
+{
+    const uint64_t bw = (uint64_t(width) + 15u) / 16u, bh = (uint64_t(height) + 15u) / 16u;
+    const uint64_t hw = (uint64_t(width) + 1u) / 2u, hh = (uint64_t(height) + 1u) / 2u;
+    return bw * bh * (16u + 64u) + hw * hh * 2u;
+}
+inline uint64_t RingVramBytes(uint32_t width, uint32_t height, int depth)
+{
+    return depth <= 0 ? 0u : uint64_t(depth) * EntryFieldBytes(width, height);
+}
+// What P13's owner would add per queued frame held to the slot when it extends the ring (the named owner change, S3A-UNPACK-SLOT /
+// P13-AHEAD-VIEWS): 16-bit luma + 4:2:0 16-bit chroma = 3 B per source pixel. Reported for the ledger; not allocated by this unit.
+inline uint64_t SourceRingFrameBytes(uint32_t width, uint32_t height) { return uint64_t(width) * uint64_t(height) * 3u; }
 
 }   // namespace LaneAhead
 }   // namespace VpMotion

@@ -4,6 +4,7 @@
 
 #include "GapScheduler.h"
 #include "Indicator.h"
+#include "LaneGapChunk.h"
 #include "LaneInterfaces.h"
 #include "LaneLease.h"
 #include "LaneRunner.h"
@@ -335,12 +336,7 @@ private:
 // calls runner.Step(id, budget) on the render thread.
 // ---------------------------------------------------------------------------------------------
 
-inline bool LaneStepProgressed(StepOutcome o)
-{
-    return o == StepOutcome::Ran || o == StepOutcome::Published || o == StepOutcome::Late
-           || o == StepOutcome::Abandoned;
-}
-
+// LaneStepProgressed and the gap-chunk law: core/LaneGapChunk.h (one copy; S-3a's LaneSpareWork gap face calls the same law).
 class LaneComputeGapWork : public IGapWork {
 public:
     LaneComputeGapWork(LaneRunner* runner, ProductId id, Tier tier, double heavyMs, std::function<uint64_t()> nowUs)
@@ -352,32 +348,14 @@ public:
     uint16_t Id() const override { return id_; }
     Tier WorkTier() const override { return tier_; }
     double HeavyMs() const override { return heavyMs_; }
-    bool HasWork() const override { return !idle_ && runner_ != nullptr && runner_->Laned(id_); }
-    // The larger of the last measured CPU time of a Step and the producer's own device-cost prediction
-    // (a GPU-compute Step only records: its CPU time says nothing about the chunk's GPU time). The
-    // measured part decays through OnCapNoFit, so one jittery over-cap Step cannot starve the product.
-    uint32_t PredictUs() const override
-    {
-        const uint32_t p = runner_ != nullptr ? runner_->PredictChunkUs(id_) : 0u;
-        return std::max(lastUs_, p);
-    }
-    void OnCapNoFit() override { lastUs_ /= 2u; }   // halves per gap: an over-cap outlier is forgotten in a few gaps
-    void RunChunk(uint32_t budgetUs) override
-    {
-        const uint64_t t0 = nowUs_ ? nowUs_() : 0u;
-        const StepOutcome o = runner_->Step(id_, budgetUs);
-        const uint64_t t1 = nowUs_ ? nowUs_() : 0u;
-        ++chunks_;
-        if (LaneStepProgressed(o)) {
-            const uint64_t dt = t1 > t0 ? t1 - t0 : 0u;
-            lastUs_ = dt > 0xFFFFFFFFull ? 0xFFFFFFFFu : uint32_t(dt);
-        } else {
-            idle_ = true;   // nothing to do until the next gap (Wake)
-        }
-    }
+    bool HasWork() const override { return !gap_.idle && runner_ != nullptr && runner_->Laned(id_); }
+    // The gap-chunk law (core/LaneGapChunk.h): predict = max(measured, device prediction), halving on cap-no-fit, one Step per chunk.
+    uint32_t PredictUs() const override { return gap_.PredictUs(runner_, id_); }
+    void OnCapNoFit() override { gap_.OnCapNoFit(); }
+    void RunChunk(uint32_t budgetUs) override { gap_.RunChunk(runner_, id_, budgetUs, nowUs_); }
 
-    void Wake() { idle_ = false; }
-    uint64_t Chunks() const { return chunks_; }
+    void Wake() { gap_.Wake(); }
+    uint64_t Chunks() const { return gap_.chunks; }
 
 private:
     LaneRunner* runner_;
@@ -385,9 +363,7 @@ private:
     Tier tier_;
     double heavyMs_;
     std::function<uint64_t()> nowUs_;
-    bool idle_ = false;
-    uint32_t lastUs_ = 0;
-    uint64_t chunks_ = 0;
+    LaneGapChunk gap_;
 };
 
 // ---------------------------------------------------------------------------------------------

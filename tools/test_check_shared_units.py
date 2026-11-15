@@ -342,6 +342,16 @@ class CheckSharedUnitsTest(unittest.TestCase):
         _w(self.root, "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h", "block_stats\n")
         self.assertEqual(_unit(csu.scan(self.root), "U4")["duplicates"], 0)
 
+    def test_case_label_lines_are_declarations_statements_are_not(self):
+        # PREC2-S3A MUST 5: a line of case labels naming a catalog id is a declaration; a label followed by code is still scanned.
+        _w(self.root, "src/VP-V/core/Classes.h",
+           "    case kP7CameraFit: case kP11RegionBlockStats: case kCodingEvidence:\n"
+           "    case kP11RegionBlockStats:   // the region block stats id\n"
+           "    case kP11RegionBlockStats: return block_stats(x);\n"
+           "    switch (id) { case kP11RegionBlockStats: block_mean(y); }\n")
+        hits = [(h["line"], h["role"]) for h in _unit(csu.scan(self.root), "U4")["hits"]]
+        self.assertEqual(hits, [(1, "declaration"), (2, "declaration"), (3, "duplicate"), (4, "duplicate")])
+
     def test_repo_known_false_positives_each_carry_a_reason(self):
         for uid, u in csu.load_baseline(ROOT)["units"].items():
             for k in u.get("known_false_positive", []):
