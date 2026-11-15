@@ -49,6 +49,10 @@ namespace VectorDemandTest
 			Consumer::TextureRestore, Consumer::ResidualStabilise, Consumer::TemporalDetail };
 	}
 
+	// The pure-decision layer: Decide() = DecideWith(in, kAnalysisUnderSmoothMotion). Production (VectorEngine::UpdateVectorEngine,
+	// VectorEngine.cpp) calls VectorDemand::DecideForHost, NOT Decide(): under libplacebo smooth motion and in competitive low latency
+	// the host decides Off with the reason (batch B plan (b)/(d4); VectorDemandHostTests below pins that). The Decide() expectations
+	// here (analysis under smooth motion, backward pairs at depth 0) stay as they are until Decide() is folded into DecideForHost (102b).
 	TEST_CLASS(VectorDemandTests)
 	{
 	public:
@@ -773,6 +777,141 @@ namespace VectorDemandTest
 			s120.Note(depth60, 14);
 			Assert::IsFalse(s120.EntryShown(true), L"released");
 			Assert::IsTrue(s120.InfoShown(true), L"the info text stays while the ceiling binds");
+		}
+	};
+
+	// WAIVER-B1-ENGINE-05 (review-b1-fin M1): the decision the engine HOST acts on, VectorDemand::DecideForHost (VectorEngine.cpp:310).
+	// Plan (b) "Hard Off: SmoothMotion, LowLatency (competitive)" and (d4) "smooth motion / competitive = Off with the reason"; owner
+	// 2026-11-12 18:47 (smooth motion on: VP's engine stays off, the dither uses its own visible fallback search); doc 91 C / register
+	// 115 G6 "keep Competitive motion-free" (WAIVER-C1-08). The engine facts mirror the host: lowLatencyNoVectors = lowLatency &&
+	// !decision.lowLatencyAllowed (VectorEngine.cpp:95).
+	TEST_CLASS(VectorDemandHostTests)
+	{
+	public:
+		TEST_METHOD(SmoothMotionIsOffWithTheReasonAndNamesEveryConsumer)
+		{
+			Input in = Make({ Consumer::DejudderExtras, Consumer::GrainMap, Consumer::MotionIntent, Consumer::SigmaDelta });
+			in.smoothMotion = true;
+			const Decision d = DecideForHost(in);
+			Assert::IsTrue(d.mode == Mode::Off, L"off");
+			Assert::IsTrue(d.reason == Reason::SmoothMotionExclusive, L"smooth motion owns output exclusively");
+			Assert::AreEqual(0u, d.served, L"served 0");
+			Assert::AreEqual(Bit(Consumer::GrainMap) | Bit(Consumer::MotionIntent) | Bit(Consumer::SigmaDelta), d.unserved,
+				L"every non-synthesis want unserved (synthesis never in served / unserved)");
+			Assert::IsFalse(d.producer, L"no producer");
+			Assert::IsFalse(d.estimate, L"no render-time estimate");
+			Assert::IsFalse(d.lowLatencyAllowed, L"not a low-latency path");
+			const std::string why = "output dither, grain map, intent without vectors (libplacebo smooth motion owns output)";
+			Assert::AreEqual(why, UnservedText(d), L"Ctrl+I names each consumer with why");
+			Assert::AreEqual("Vector engine: off; " + why, StatusLine(d));
+			const FallbackCatalog::Decision f = FallbackCatalog::VectorEngine(d);
+			Assert::IsTrue(f.engaged, L"a visible Fallbacks entry");
+			Assert::AreEqual(why, f.reason);
+
+			EngineFacts facts;
+			facts.decision = d;
+			facts.producerRunning = false;
+			const MotionEngineStatus st = DeriveEngineStatus(facts);
+			Assert::IsTrue(st.state == MotionEngineState::Off, L"hard off");
+			Assert::IsTrue(st.reason == MotionEngineReason::SmoothMotion, L"reason SmoothMotion");
+			Assert::AreEqual(d.unserved, st.affected, L"the unserved consumers are affected");
+			const FallbackCatalog::Decision m = FallbackCatalog::MotionEngine(st);
+			Assert::IsTrue(m.engaged, L"the motion engine entry is engaged");
+			Assert::AreEqual(std::string("motion engine off: libplacebo smooth motion owns output; output dither, grain map, intent take their "
+				"non-motion path"), m.reason);
+
+			for (Consumer c : kNonSynthesis)
+			{
+				Input one = Make({ c });
+				one.smoothMotion = true;
+				const Decision x = DecideForHost(one);
+				Assert::IsTrue(x.mode == Mode::Off && x.reason == Reason::SmoothMotionExclusive, L"each alone: off, exclusive");
+				Assert::AreEqual(0u, x.served);
+				Assert::AreEqual(Bit(c), x.unserved);
+				Assert::IsFalse(x.producer || x.estimate || x.lowLatencyAllowed, L"each alone: nothing starts");
+				Assert::AreEqual(std::string(Name(c)) + " without vectors (libplacebo smooth motion owns output)", UnservedText(x));
+			}
+		}
+
+		TEST_METHOD(CompetitiveLowLatencyIsMotionFreeOffWithTheReason)
+		{
+			Input in = Make({ Consumer::SourceMonitorPan, Consumer::MotionIntent, Consumer::DebandHold });
+			in.lowLatency = true;
+			in.queueAheadCapacity = 0;
+			const Decision d = DecideForHost(in);
+			Assert::IsTrue(d.mode == Mode::Off, L"competitive: off (no backward pair)");
+			Assert::AreEqual(0u, d.served, L"served 0");
+			Assert::AreEqual(Bit(Consumer::SourceMonitorPan) | Bit(Consumer::MotionIntent) | Bit(Consumer::DebandHold), d.unserved,
+				L"every consumer goes without vectors, the statistics consumers too");
+			Assert::IsFalse(d.producer, L"no producer");
+			Assert::IsFalse(d.estimate, L"no estimate");
+			Assert::IsFalse(d.lowLatencyAllowed, L"lowLatencyAllowed false: the host sets lowLatencyNoVectors");
+			// The "why" word is left to the Decide() fold (review L1: it still reads the backward-pair cause); pinned here: the line is
+			// Off and names every consumer as without vectors.
+			const std::string s = StatusLine(d);
+			Assert::IsTrue(s.compare(0, 20, "Vector engine: off; ") == 0, (L"off line: " + std::wstring(s.begin(), s.end())).c_str());
+			Assert::IsTrue(s.find("deband hold, source monitor, intent without vectors (") != std::string::npos, L"each named without vectors");
+			Assert::IsTrue(s.find("backward") == std::string::npos, L"no backward-pair wording");
+			const FallbackCatalog::Decision f = FallbackCatalog::VectorEngine(d);
+			Assert::IsTrue(f.engaged, L"a visible Fallbacks entry");
+			Assert::AreEqual(UnservedText(d), f.reason);
+
+			EngineFacts facts;
+			facts.decision = d;
+			facts.lowLatency = in.lowLatency;
+			facts.lowLatencyNoVectors = in.lowLatency && !d.lowLatencyAllowed;   // VectorEngine.cpp:95
+			const MotionEngineStatus st = DeriveEngineStatus(facts);
+			Assert::IsTrue(facts.lowLatencyNoVectors, L"the host's low-latency-without-vectors fact holds");
+			Assert::IsTrue(st.state == MotionEngineState::Off, L"hard off");
+			Assert::IsTrue(st.reason == MotionEngineReason::LowLatency, L"reason LowLatency");
+			Assert::AreEqual(d.unserved, st.affected, L"every consumer affected");
+			const FallbackCatalog::Decision m = FallbackCatalog::MotionEngine(st);
+			Assert::IsTrue(m.engaged, L"the motion engine entry is engaged");
+			Assert::AreEqual(std::string("motion engine off: low latency; deband hold, source monitor, intent take their non-motion path"), m.reason);
+
+			for (Consumer c : kNonSynthesis)
+			{
+				Input one = Make({ c });
+				one.lowLatency = true;
+				one.queueAheadCapacity = 0;
+				const Decision x = DecideForHost(one);
+				Assert::IsTrue(x.mode == Mode::Off, L"each alone: off");
+				Assert::AreEqual(0u, x.served);
+				Assert::AreEqual(Bit(c), x.unserved);
+				Assert::IsFalse(x.producer || x.estimate || x.lowLatencyAllowed, L"each alone: motion-free");
+				Assert::IsTrue(UnservedText(x).compare(0, std::string(Name(c)).size() + 18, std::string(Name(c)) + " without vectors (") == 0,
+					L"each alone: named without vectors");
+			}
+		}
+
+		TEST_METHOD(GamesAndOrdinaryInputsDecideAsDecide)
+		{
+			// Plan (b): games (capacity >= 1, ForwardShallow) and every input without smooth motion and outside competitive decide exactly
+			// as the pure layer: DecideForHost changes only those two cases.
+			for (int capacity = 1; capacity <= 8; ++capacity)
+			{
+				Input in = Make({ Consumer::GrainMap, Consumer::DebandHold, Consumer::SourceMonitorPan });
+				in.lowLatency = true;
+				in.queueAheadCapacity = capacity;
+				const Decision h = DecideForHost(in);
+				Assert::IsTrue(Same(h, Decide(in)), L"games: identical to Decide()");
+				Assert::IsTrue(h.mode == Mode::Forward && h.reason == Reason::ForwardShallow && h.lowLatencyAllowed, L"games: forward shallow");
+				Assert::IsTrue(h.producer, L"games: the producer runs");
+			}
+			for (int i = 0; i < kConsumerCount; ++i)
+			{
+				Input in = Make({ ConsumerAt(i), Consumer::DetailPulse });
+				Assert::IsTrue(Same(DecideForHost(in), Decide(in)), L"ordinary: identical");
+				Input noPairs = in;
+				noPairs.pairsExpected = false;
+				Assert::IsTrue(Same(DecideForHost(noPairs), Decide(noPairs)), L"no pairs: identical");
+				Input il = in;
+				il.interlaced = true;
+				Assert::IsTrue(Same(DecideForHost(il), Decide(il)), L"interlaced: identical");
+				Input off = in;
+				off.enabled = false;
+				Assert::IsTrue(Same(DecideForHost(off), Decide(off)), L"disabled: identical");
+			}
 		}
 	};
 }
