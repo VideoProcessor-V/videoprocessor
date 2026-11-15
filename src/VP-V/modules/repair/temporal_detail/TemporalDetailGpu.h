@@ -77,6 +77,10 @@ namespace TemporalDetail
 			// U7 v3 partial reset (owner 2026-11-15): the fade's history keep (FrameAnalysis::Scene::fadeKeep, 0..1). A fade is NO reset:
 			// every stored slot's keep is multiplied by it (the tab texture's row 1). < 0 = not given: that fade resets ("reset: fade (no keep)").
 			float fadeKeep = -1.0f;
+			// cut_soft_reset (the model's FrameIn::sceneRestart; review softreset r1 L1): the production consumers' scene answer, as
+			// SharedSceneSource copies it. given: it replaces cut / fade / fadeKeep; a fade or a soft reset scales every stored slot's
+			// keep by historyKeep through the same fade_keep (no shader change), its restart resets with its cause.
+			SceneRestartInput sceneRestart;
 			ActiveRect active;             // the active picture in this plane (empty = whole plane); bars are copied unchanged
 			MotionTex backward;            // pair (seq -> seq - 1) on frame seq's grid; absent = motion lost
 			MotionTex forward;             // pair (seq - 1 -> seq), optional (uncertainty only)

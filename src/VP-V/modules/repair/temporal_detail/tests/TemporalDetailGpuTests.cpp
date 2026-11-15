@@ -1531,5 +1531,73 @@ namespace VideoProcessorTest
 			Assert::IsTrue(allPinned, L"every identity pin is recorded");
 			Assert::IsTrue(allMatch, L"the output planes equal the pinned (pre-change) planes bit for bit");
 		}
+
+		TEST_METHOD(TemporalDetailGpuSceneRestartInputFollowsTheModel)
+		{
+			// WAIVER-C5-SOFTRESET-TD (cut_soft_reset in temporal detail; review D:\codex\vp-handover\batchB\review-softreset-r1.md L1):
+			// the production consumers' scene answer (SceneRestartInput, as SharedSceneSource copies it from SceneRestartOf) on the GPU
+			// follows the model: a soft reset (keep 0.5) and a fade (keep 0.8) scale the stored slots through the one fade_keep (no
+			// reset), a cut answer resets; outputs within the resets test's match tolerance. Both statuses name the soft reset and carry
+			// the consumers' note after the status.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Plane> frames = Stream(22, "IBBBPBBB", 0.5, 0.0, 17u, 1.2);
+			auto answer = [](int t) {
+				SceneRestartInput s;
+				s.given = true;
+				if (t == 9) { s.softPartial = true; s.historyKeep = 0.5; s.strength = 1.0; }
+				if (t == 13) { s.fadePartial = true; s.historyKeep = 0.8; }
+				if (t == 17) { s.restart = true; s.historyKeep = 0.0; }
+				return s;
+			};
+			Gpu::Params p;
+			p.settings = Steady();
+			Model::Tuning tune;
+			const MatchResult r = RunMatch(dev, frames, 0.5, 0.0, p, tune, [&](int t, Gpu::Params& gp, Model::FrameIn& in) {
+				gp.sceneRestart = answer(t);
+				in.sceneRestart = answer(t);
+			});
+			LogF("scene answers: worst %.4f codes, worst frame mean %.5f", r.worst, r.worstMean);
+			Assert::IsTrue(r.worst <= 0.125 && r.worstMean <= 0.005 && r.maxOverShare <= 0.0, L"the GPU follows the model through the scene answers");
+
+			// The statuses, model and GPU: the soft reset named; the consumers' note right after the status.
+			pl_gpu gpu = dev.Gpu();
+			Gpu::Module module;
+			Model model(Steady());
+			const MotionPair bwd = MotionPair::Uniform(kW, kH, 16.0, 0.0, 0.0);
+			FieldMotionSource motion;
+			for (int t = 0; t < 4; ++t) motion.SetBackward(static_cast<uint64_t>(t), bwd);
+			pl_tex bwdTex = UploadPair(gpu, bwd);
+			for (int t = 0; t < 4; ++t)
+			{
+				SceneRestartInput s;
+				s.given = true;
+				if (t == 2) { s.softPartial = true; s.historyKeep = 0.5; s.strength = 1.0; }
+				if (t == 3) s.statusNote = ", soft reset: off";
+				pl_tex tex = UploadLuma(gpu, frames[static_cast<size_t>(t)]);
+				Gpu::Params gp;
+				gp.settings = Steady();
+				gp.seq = static_cast<uint64_t>(t);
+				gp.backward.tex = bwdTex;
+				gp.sceneRestart = s;
+				pl_frame out{};
+				Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, out), Wide(module.LastError()).c_str());
+				Model::FrameIn in;
+				in.luma = frames[static_cast<size_t>(t)];
+				in.seq = static_cast<uint64_t>(t);
+				in.motion = &motion;
+				in.sceneRestart = s;
+				model.Process(in);
+				const char* expect = t == 2 ? "soft reset: partial" : t == 3 ? "ok, soft reset: off" : nullptr;
+				if (expect)
+				{
+					Assert::IsTrue(module.Status().find(expect) == 0, Wide(module.Status()).c_str());
+					Assert::IsTrue(model.Diag().status.find(expect) == 0, Wide(model.Diag().status).c_str());
+				}
+				pl_tex_destroy(gpu, &tex);
+			}
+			module.Release(gpu);
+			pl_tex_destroy(gpu, &bwdTex);
+		}
 	};
 }

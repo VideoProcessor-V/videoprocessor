@@ -39,6 +39,11 @@ namespace TemporalDetail
 		int fadePartials = 0;          // U7 v3: fade frames that reduced the store (no reset); not in operator== (diagnostic)
 		double fadeKeep = 1.0;         // U7 v3: this frame's fade keep (1 = no fade)
 		std::vector<double> historyKeep;   // U7 v3, per block: the keep of the slot it transferred from (1 = none / no reduction)
+		// cut_soft_reset (FrameIn::sceneRestart; review softreset r1 L1): soft-reset frames that reduced the store (no reset), this
+		// frame's soft-reset keep (1 = none) and the strength that fired (0 = none). Not in operator== (diagnostic), as the fade fields.
+		int softPartials = 0;
+		double softKeep = 1.0;
+		double softStrength = 0.0;
 		// per block, raster
 		std::vector<double> weight, boost, target, ageSeconds, uncertainty, baseMatch, corr, corrGate, stronger,
 			highBand, focus, referee, evidence, rebounds, q, qref, hard;
@@ -182,7 +187,8 @@ namespace TemporalDetail
 			double hc[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };   // composed homography current -> source (picture-centred)
 			bool camChain = true;           // every hop since the source had a usable camera model
 			// U7 v3 partial reset on fades: the product of the fade keeps (FrameIn::fadeKeep) of the frames since this slot was admitted;
-			// it scales every transfer from this slot (1 = the slot's picture still has its contrast; a fade to black: 0).
+			// it scales every transfer from this slot (1 = the slot's picture still has its contrast; a fade to black: 0). A soft reset
+			// (cut_soft_reset, FrameIn::sceneRestart) multiplies it the same way (its keep SoftResetKeep, 0.5 at strength 1).
 			double keep = 1.0;
 		};
 
@@ -376,6 +382,10 @@ namespace TemporalDetail
 			// U7 v3 partial reset (owner 2026-11-15): the fade's history keep, FrameAnalysis::Scene::fadeKeep (0..1, amplitude). A fade is
 			// NO reset: every stored slot's keep is multiplied by it. < 0 = not given: a fade without it resets (visible: "reset: fade (no keep)").
 			double fadeKeep = -1.0;
+			// cut_soft_reset (C5 batch B; review softreset r1 L1): the production consumers' scene answer (TemporalDetail.h; filled by
+			// SharedSceneSource from VpDetailRestore::SceneRestartOf, the rule and its bar U7's). given: it replaces cut / fade / fadeKeep:
+			// its restart resets (cause shown); a fade or a soft reset is NO reset, every stored slot's keep times historyKeep (one path).
+			SceneRestartInput sceneRestart;
 			const IMotionSource* motion = nullptr;
 			std::vector<FutureFrame> future;   // queued modes: seq + 1, seq + 2, ... (the referee and future slot)
 			std::vector<double> quality;       // optional per-block bitrate quality 0..1 on the active picture's block grid (empty = neutral 1)
@@ -825,6 +835,7 @@ namespace TemporalDetail
 		c.luma = Detail::Crop(in.luma, r);
 		c.seq = in.seq; c.contentHz = in.contentHz; c.planeLines = in.planeLines; c.stamps = in.stamps;
 		c.cut = in.cut; c.fade = in.fade; c.fadeKeep = in.fadeKeep; c.quality = in.quality; c.blockGates = in.blockGates;
+		c.sceneRestart = in.sceneRestart;   // cut_soft_reset: the consumers' scene answer, as the flags
 		const Detail::OffsetMotionSource shifted(in.motion, r.left, r.top);
 		c.motion = in.motion ? &shifted : nullptr;
 		std::vector<Plane> futures;
@@ -875,13 +886,26 @@ namespace TemporalDetail
 			else if (in.stamps.rebaseH != m_stamps.rebaseH && PolicyOf(Counter::RebaseH) == ReaderPolicy::Reset) reason = "stamp rebaseH";
 			else if (in.stamps.rebaseV != m_stamps.rebaseV && PolicyOf(Counter::RebaseV) == ReaderPolicy::Reset) reason = "stamp rebaseV";
 		}
-		if (in.cut) reason = "cut";
+		// cut_soft_reset (review softreset r1 L1): with FrameIn::sceneRestart the production consumers' answer decides (the shared judge's
+		// verdict and the soft-reset rule at its bar, never re-decided here); its restart is a reset with its cause. A partial reset
+		// without a usable keep resets too (visible), as a fade without its keep does below.
+		const SceneRestartInput& scene = in.sceneRestart;
+		if (scene.given)
+		{
+			if (scene.restart) reason = !scene.fromRecord ? "scene (no record)" : scene.fadeWithoutKeep ? "fade (no keep)" : "cut";
+			else if ((scene.fadePartial || scene.softPartial) && !(scene.historyKeep >= 0.0)) reason = "scene (no keep)";
+		}
+		else if (in.cut) reason = "cut";
 		else if (in.fade && !(in.fadeKeep >= 0.0)) reason = "fade (no keep)";   // a producer before U7 v3: the old full reset, shown
 		if (reason) Reset(reason);
 		// U7 v3 partial reset (owner 2026-11-15): a fade with its keep reduces every stored slot by it (below, before admission).
-		const bool fadePartial = !reason && in.fade;
-		const double fadeKeep = fadePartial ? Clamp(in.fadeKeep, 0.0, 1.0) : 1.0;
-		std::string status = reason ? std::string("reset: ") + reason : fadePartial ? std::string("fade: partial reset") : std::string("ok");
+		const bool fadePartial = !reason && (scene.given ? scene.fadePartial : in.fade);
+		const double fadeKeep = fadePartial ? Clamp(scene.given ? scene.historyKeep : in.fadeKeep, 0.0, 1.0) : 1.0;
+		// cut_soft_reset: a soft reset reduces the store through the SAME keep (historyKeep = SoftResetKeep(strength)); never a reset.
+		const bool softPartial = !reason && scene.given && !fadePartial && scene.softPartial;
+		const double softKeep = softPartial ? Clamp(scene.historyKeep, 0.0, 1.0) : 1.0;
+		std::string status = reason ? std::string("reset: ") + reason : fadePartial ? std::string("fade: partial reset") :
+			softPartial ? std::string("soft reset: partial") : std::string("ok");
 		m_w = w; m_h = h; m_B = B; m_scale = scale;
 
 		const int bw = (w + B - 1) / B, bh = (h + B - 1) / B, nb = bw * bh;
@@ -1096,7 +1120,8 @@ namespace TemporalDetail
 			}
 
 		// --- U7 v3 partial reset: this frame's fade keep scales every stored slot (the GPU's admission pass, tab row 1) ---
-		for (Source& s : m_slots) s.keep *= fadeKeep;
+		// cut_soft_reset: a soft reset's keep takes the same multiply (fade and soft reset are exclusive: one of the two factors is 1).
+		for (Source& s : m_slots) s.keep *= fadeKeep * softKeep;
 
 		// --- Admission of the current frame as a slot (eviction: no live blocks, else the oldest that has faded) ---
 		bool admitted = false;
@@ -1165,10 +1190,11 @@ namespace TemporalDetail
 
 		// --- Pass 2: weights (limiter), retire, boost, contributions ---
 		Diagnostics d;
-		d.status = status + gateNote;
+		d.status = status + (scene.given && scene.statusNote ? scene.statusNote : "") + gateNote;   // cut_soft_reset: the consumers' note
 		d.bw = bw; d.bh = bh; d.blockPx = B; d.scale = scale;
 		d.resets = m_diag.resets; d.refreshes = m_diag.refreshes; d.retires = m_diag.retires; d.frames = m_diag.frames + 1;
 		d.fadePartials = m_diag.fadePartials + (fadePartial ? 1 : 0); d.fadeKeep = fadeKeep;
+		d.softPartials = m_diag.softPartials + (softPartial ? 1 : 0); d.softKeep = softKeep; d.softStrength = softPartial ? scene.strength : 0.0;
 		d.historyKeep.assign(static_cast<size_t>(nb), 1.0);
 		auto sized = [&](std::vector<double>& v) { v.assign(static_cast<size_t>(nb), 0.0); };
 		sized(d.weight); sized(d.boost); sized(d.target); sized(d.ageSeconds); sized(d.uncertainty); sized(d.baseMatch); sized(d.corr);

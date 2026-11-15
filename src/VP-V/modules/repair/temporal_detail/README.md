@@ -5,6 +5,7 @@ Unit **repair** | replaces `repair.texture_restore` (order 90) | status **draft*
 ## Design goal, philosophy and decisions
 - Goal: temporal detail from the engine's shared motion and trust, never a private estimate of either.
 - Decision (L-B6, WAIVER-B6-TD-TRUST; source: lead 8 brief and lane L-B6 commits 1eb3e66ce..; 2026-11-14T13:25Z): `SharedMotionSource` reads BOTH directions of the cell trust from the engine memo (`FlowView::CellTrust` / `CellTrustBackward`) through a `FlowOf` seam; its own recompute (CostWeights + FbError + CellTrust) is deleted. The old arithmetic remains only as the test-side reference of the migration identity test (both directions, bit-equal). The adapter has no production host wiring yet (tests only); the host passes the engine `FlowOf` when it is wired.
+- Decision (C5 batch B, `cut_soft_reset`; review D:\codex\vp-handover\batchB\review-softreset-r1.md L1, plan lead19\c5-softreset.md item 2 "(and TD model)"; owner 2026-11-15 08:35 EST U7 Q4 "need the bar fairly high here. Mid scene firing is a major problem", 09:20 fades: no full restart, history gently reduced): temporal detail reads the SAME soft-reset product as detail pulse and texture restore. `SharedSceneSource` (SharedSceneSource.h) calls `VpDetailRestore::SceneRestartOf(seq, reader, cut_soft_reset)` once per new frame and copies the answer field for field into `SceneRestartInput` (TemporalDetail.h: restart, fromRecord, fadeWithoutKeep, fadePartial, softPartial, historyKeep, strength, the consumers' status note) for `Model::FrameIn::sceneRestart` / `Gpu::Params::sceneRestart`. The rule, the bar `kSoftResetBar` and the depth `kSoftResetDepth` stay U7's (CutFadeJudge.h); nothing here re-decides them. A soft reset is no reset: every stored slot's keep is multiplied by `historyKeep` (`SoftResetKeep`, 0.5 at strength 1) through the fade keep's multiply (GPU: the same `fade_keep`, no shader change). The adapter is a separate header so the model stays free of the renderer hub (tools/td-cli). Like `SharedMotionSource`, it has no production host wiring yet (tests only).
 
 
 ## Purpose
@@ -143,6 +144,23 @@ host fills, later from `core/Indicator` (doc 25 §A2). Policies: `full`, `contin
 invalid) and `rebase[H|V]` reset; `settings[repair]` resets only for
 mode/max_age changes (strength/boost change the target); `timing` is ignored. Cuts reset the store. A fade does not (U7 v3, owner 2026-11-15: partial reset on fades): every stored slot's keep is multiplied by the frame's fade keep (`FrameIn::fadeKeep` / `Params::fadeKeep`, from `FrameAnalysis::Scene::fadeKeep`; GPU: row 1 of the slot table) and its transfers are scaled by it; an admitted slot starts at 1. A fade without a keep resets ("reset: fade (no keep)").
 
+The production consumers' scene answer (`cut_soft_reset`, C5 batch B): with `FrameIn::sceneRestart` / `Params::sceneRestart` given
+(filled by `SharedSceneSource` from `VpDetailRestore::SceneRestartOf`, exactly what detail pulse and texture restore act on), it
+replaces the cut / fade / fadeKeep flags. Its restart resets with its cause: "reset: cut", "reset: fade (no keep)", or
+"reset: scene (no record)" for a frame without a readable scene group (the consumers restart there too; never a private judgement). A
+fade answer is the fade's partial reset above. A soft reset (the shared rule fired on a CONFIRMED near-cut candidate at
+`CutFadeJudge::kSoftResetBar`; never provisionally, never below the bar, never on a cut, a flash or a fade frame) is NO reset: every
+stored slot's keep is multiplied by its `historyKeep` (`SoftResetKeep`, 0.5 at strength 1) through the same multiply, once; status
+"soft reset: partial"; Diagnostics `softPartials` / `softKeep` / `softStrength`. A partial answer without a usable keep resets
+("reset: scene (no keep)"). The consumers' note follows the status ("ok, soft reset: off"; ", soft reset: on (inactive: provisional
+verdicts only)" while the scene groups stay provisional). Not given: the flags, byte-identical to before.
+
+Known interplay (both partial resets, fade and soft; code reading, not yet measured): the keep scales the block weights `c.w`, and the
+template grain budget is computed from those weights (`beta = min(1, grainBudget / amp)`, amp linear in `c.w`). Where one keep k
+scales every contributing block and the budget binds, the reduction is cancelled in full while `beta <= k`, in part while
+`k < beta < 1`, and shows in full only where `beta = 1` (the amplitude limit aside). TD is not wired; changing that interplay is a
+law change of the model and its shaders (TemporalDetailShaders.h), outside this switch.
+
 ## Declared products (core/Products.h)
 
 The module's former private descriptors (TemporalDetailProducts.h) were retired: its products are registered in
@@ -230,6 +248,8 @@ move of the same arithmetic; it is left as an open item of SA6.
 | scratch memory short (arena empty, T1 shed by the governor, nested scope, other thread) | `Apply` returns false for the frame: `LastError()` "temporal detail: scratch memory short (...)", `ScratchShort()`, the arena's catalog entry "scratch_arena" naming `temporal_detail` or `grain_split`, the failure counted in `Failures()`; the host renders the frame as it was; the next frame restarts the store (the skipped frame breaks the sequence) and recovers by itself once a larger plan is reserved |
 | fewer reference slots (memory tier) | `Status()` "store N of 5 slots (memory tier)" |
 | look-ahead / camera model not on the GPU path | `Status()` "not on GPU: ..." |
+| no readable scene group for the frame (scene answer given) | "reset: scene (no record)" (model status and `Status()`), counted in `SharedSceneSource::Missing()` |
+| `cut_soft_reset` off, or on but inert (only provisional verdicts) | the consumers' note after the status: ", soft reset: off" / ", soft reset: on (inactive: provisional verdicts only)"; `SharedSceneSource::SoftResetInactive()`, `SoftWaiting()` |
 
 ## Tests
 
@@ -237,6 +257,11 @@ Classes `TemporalDetailGpuTests` (GPU passes on WARP in the CPU tier unless `VP_
 (CPU model). SA6: `TemporalDetailGpuArenaIsByteIdentical` (arena output equals private output: memo variant, shared product, product
 from frame 3), `TemporalDetailGpuArenaShortageIsVisibleAndRecovers` (empty plan and tier shed), `TemporalDetailGpuTextureBytesCountsTheArenaTemporaries` (CPU). WAIVER-B2-TD-OWNSPLIT: `TemporalDetailGpuAcquiresTheVariantOncePerFrame` (Acquired once per frame, Reused by the second reader, owner computes once), `TemporalDetailGpuRefusesVisiblyWithoutAVariant` (no memo; crop -> VariantUndeclared, memo never asked), `TemporalDetailGpuOutputIdentityPins` (output hashes recorded before the own split was deleted, incl. an active-picture crop; must not move). Test helpers run a `MemoRig` (source-plane stand-in + variant owner + memo). Command:
 `vstest.console.exe x64\Release\VideoProcessor-Test.dll /TestCaseFilter:"Name~TemporalDetailGpu" /Logger:trx` (read the TRX counters).
+`cut_soft_reset` (WAIVER-C5-SOFTRESET-TD): `SoftResetTests::TemporalDetail*` (CPU; texture_restore/tests/SoftResetTests.cpp, next to
+the detail pulse / texture restore pins: the adapter copies the consumers' answer field for field; off = no soft reset and the
+pictures of a stream without the candidate; on = one soft reset at the candidate, every slot stored before it at half its keep; never
+below the bar or provisionally, the inactive note shown; a fade stays the fade; a cut and a missing group reset with their causes; a
+soft reset gives exactly the pictures of a fade at the same keep) and `TemporalDetailGpuSceneRestartInputFollowsTheModel` (WARP).
 
 ## Determinism, generality, known limits
 
@@ -299,7 +324,9 @@ GPU textures): grain split (repair.grain_split, GrainSplitGpu) -> MEAS -> COMPOS
 -> ADMIT (one workgroup) -> CLEAN (4 parity classes of DCT patches; work only on admission frames) -> store slot ->
 WEIGHT -> PROJ -> TRANSFER -> GUARD sums / EMA / pool -> counters -> APPLY. Deterministic (fixed reduction trees, no
 atomics, no barrier in varying flow). Matches the model to 1/64 code (the output's quantisation) on WARP over I/B pans,
-both template variants, resets / repeats / motion loss, the 2-slot tier and letterbox / pillarbox pictures. Not on the GPU
+both template variants, resets / repeats / motion loss, the 2-slot tier and letterbox / pillarbox pictures. The consumers' scene
+answer (`Params::sceneRestart`) follows the model's decision line for line; a fade or a soft reset reaches the slots through the one
+`fade_keep` of the admission pass (tab row 1). Not on the GPU
 yet: the queued-mode future slot / referee and the camera homography chain (the model without them is what runs).
 
 Memory (TextureBytes, exact for the allocation): 3840x2160 **945 MiB** at 5 slots (grain split 253 MiB, slot atlas 396,
@@ -317,11 +344,15 @@ block (the warp is near a translation per block, ~10x fewer reads).
 Renderer call sites needed (after the Bill merge; none made): (1) add GrainSplitGpu.cpp and TemporalDetailGpu.cpp to
 VideoProcessor-VPRenderer(.Beta).vcxproj; (2) in the prepass after the re-base (texture_restore's position), when
 `temporal_detail = steady`: `Module::Apply(gpu, dispatch, rebasedFrame, params, out)` with seq / content rate / plane lines
-/ Indicator stamps / cut-fade flags / the active picture rect / backward (and forward) vector textures scaled to the
-re-based plane; on false render the frame as it was and show "Temporal detail: inactive (<reason>)"; (3) `Forget()` on the
+/ Indicator stamps / the scene answer `params.sceneRestart = SharedSceneSource::Read(seq)` (the production reader and
+`cut_soft_reset`, in place of the cut / fade flags) / the active picture rect / backward (and forward) vector textures scaled to the
+re-based plane; on false render the frame as it was and show "Temporal detail: inactive (<reason>)"; (3) `Forget()` (and
+`SharedSceneSource::Forget()`) on the
 existing Forget triggers; (4) `FieldMotionSource::Prune(presented)` (or the host's own vector ring) per presented frame;
 (5) the memory tier from the card profile (`SlotsForBudget`); (6) settings keys into RendererProfileConfig / Config /
-slots.json with the migration in "Migration" below.
+slots.json with the migration in "Migration" below (`cut_soft_reset` is the existing detail pulse / texture restore key, not a
+new one); (7) the scene read declared in the module's ConsumerRow (ProductCatalog.h row 10: `kP4SourceStats`, as detail pulse /
+texture restore).
 
 ## Tests and shaders
 
