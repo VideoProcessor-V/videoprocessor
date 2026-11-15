@@ -260,6 +260,7 @@ inline void VpvDumpRendererSettings(const RendererSettings& s, std::ostream& o)
 	Put(o, "sourceResolutionLatchFixes", s.sourceResolutionLatchFixes);
 	Put(o, "sourceResolutionCutFixes", s.sourceResolutionCutFixes);
 	Put(o, "sourceGeometryDetect", s.sourceGeometryDetect);
+	Put(o, "sourceResolutionFrameBound", s.sourceResolutionFrameBound);
 	Put(o, "activePictureStartupHold", s.activePictureStartupHold);
 	Put(o, "sourceResolutionEngageMaxWait", s.sourceResolutionEngageMaxWait);
 	Put(o, "sourceResolutionCrossfade", s.sourceResolutionCrossfade);

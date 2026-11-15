@@ -130,12 +130,7 @@
 #include <regex>
 #include <set>
 #include <sstream>
-#include <VP-V/config/VpvSection.h>   // VP-V section hook (src/VP-V/config/README.md)
 #include <VP-V/config/VpvRenderingDefaults.h>   // unset VP-V keys' defaults (moved out of this file; one call site)
-#include <VP-V/config/VpvDitherChoiceSet.h>   // VPV-HOOK
-#include "ConfigPageHost.h"   // VPV-HOOK
-#include <VP-V/config/VpvConfigPages.h>   // VPV-HOOK
-#include <VP-V/config/VpvFormLayout.h>   // VPV-HOOK
 
 #pragma comment(lib, "dxgi.lib")
 
@@ -1327,56 +1322,7 @@ ConfigEditorWindow::ConfigEditorWindow(QString configPath, quintptr ownerHandle,
     // instead of raising the minimum size.
     resize(1120, 700);
     setMinimumSize(760, 540);
-    // VPV-HOOK
-    formApi_.valueFn = [this](const QString& section, const QString& key) { return value(section, key); };
-    formApi_.setValueFn = [this](const QString& section, const QString& key, const QString& text)
-    {
-        if (!document_) return;
-        if (text.isEmpty()) document_->RemoveKnown(section.toStdString(), key.toStdString().c_str());
-        else document_->SetKnown(section.toStdString(), key.toStdString().c_str(), text.toLocal8Bit().constData());
-        if (centralWidget()) markDirty();
-    };
-    formApi_.markDirtyFn = [this] { markDirty(); };
-    formApi_.profileSectionsFn = [this](const QString& root) { return profileSections(root); };
-    // The editor's own field helpers and services for provider pages (ConfigPageHost::EditorKit).
-    Vpv::FunctionEditorKit& kit = formApi_.kit;
-    kit.valueFn = [this](const QString& s, const QString& k, const QString& fallback) { return value(s, k, fallback); };
-    kit.bindTextFn = [this](const QString& s, const QString& k, const QString& fallback) { return bindTextField(s, k, fallback); };
-    kit.bindChoiceFn = [this](const QString& s, const QString& k, const QStringList& values, const QStringList& labels) { return bindChoiceField(s, k, values, labels); };
-    kit.bindCheckFn = [this](const QString& label, const QString& s, const QString& k, bool on) { return bindCheckField(label, s, k, on); };
-    kit.controlNameFn = [](const QString& s, const QString& k) { return controlName(s, k); };
-    kit.helpLabelFn = [](const QString& text) { return helpLabel(text); };
-    kit.createCardFn = [this](const QString& title, const QString& help, QWidget* content) { return createCard(title, help, content); };
-    kit.createPageFn = [this](const QString& title, const QString& help, QWidget* body) { return createPage(title, help, body); };
-    kit.createCardGridFn = [] { return static_cast<QWidget*>(new ResponsiveCardGrid); };
-    kit.addCardFn = [](QWidget* grid, QWidget* card) { static_cast<ResponsiveCardGrid*>(grid)->addCard(card); };
-    kit.setKnownFn = [this](const QString& s, const QString& k, const QString& text)
-    {
-        if (!document_) return;
-        if (!document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toLocal8Bit().constData()))
-        {
-            document_->AddSection(s.toStdString());
-            document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toLocal8Bit().constData());
-        }
-    };
-    kit.removeKnownFn = [this](const QString& s, const QString& k) { if (document_) document_->RemoveKnown(s.toStdString(), k.toStdString().c_str()); };
-    kit.configPathFn = [this] { return configPath_; };
-    kit.markDirtyFn = [this](QObject* edited)
-    {
-        if (edited && edited->objectName().startsWith(QStringLiteral("config.")))
-            editOrder_[edited->objectName()] = ++editSerial_;
-        markDirty();
-    };
-    kit.windowFn = [this] { return static_cast<QWidget*>(this); };
-    kit.currentPageFn = [this] { return pages_ ? pages_->currentWidget() : nullptr; };
-    kit.settingsPreviewFn = [] { return sandboxPreview(); };
-    kit.noTargetFn = [this] { return noTarget_; };
-    kit.remoteTargetFn = [this] { return ConfigPageHost::EditorKit::RemoteTarget{ remoteClient_ != nullptr, remoteHost_, remotePort_ }; };
-    kit.documentDirtyFn = [this] { return dirty_; };
-    kit.discardEditsFn = [this] { discardEdits(); };
-    kit.setStatusFn = [this](const QString& text) { setStatus(text); };
-    kit.setWarningStatusFn = [this](const QString& text) { setWarningStatus(text); };
-    // VPV-HOOK-END
+    Vpv::ConfigEditorAccess::BindFormApi(*this);   // VPV-HOOK
     loadConfiguration();
     runLoadMigrations();
     if (!testMode_ && !noTarget_) loadDiscoveryCache();
@@ -5016,42 +4962,7 @@ QWidget* ConfigEditorWindow::createShell()
         QStringLiteral("Configure smooth motion and field-aware deinterlacing. Changes apply after renderer restart."),
         QStringLiteral("vprenderer.motion")));
     const int displayPageIndex = pages_->addWidget(createDisplayPage());
-    // VPV-HOOK
-    vpvPages_.reset();
-    vpvPages_.appendProviderPages(pages_, formApi_);   // sub-pages first, so the VP-V page can link them
-    // VP-V section hook (owner 2026-10-24; src/VP-V/config/README.md). The whole VP-V section lives in src/VP-V/config/;
-    // this block and the "VP-V" navigation leaf below are its only footprint in this file.
-    {
-        Vpv::Host vpvHost;
-        vpvHost.value = [this](const QString& section, const QString& key) { return value(section, key); };
-        vpvHost.setValue = [this](const QString& section, const QString& key, const QString& text)
-        {
-            if (!document_) return;
-            if (text.isEmpty()) document_->RemoveKnown(section.toStdString(), key.toStdString().c_str());
-            else document_->SetKnown(section.toStdString(), key.toStdString().c_str(), text.toLocal8Bit().constData());
-            markDirty();
-            // The pathway decides which Dithering choices the Scaling page offers.
-            if (key == QStringLiteral("pipeline_original_pathway"))
-                pathwayRefreshers_.refresh();
-        };
-        vpvHost.profileSections = [this](const QString& root) { return profileSections(root); };
-        vpvHost.upstreamControlName = [](const QString& key) { return controlName(QStringLiteral("vprenderer"), key); };
-        vpvHost.upstreamRoot = pages_;
-        vpvHost.subPages = [this](const QString& unitId)
-        {
-            std::vector<Vpv::SubPage> subs;
-            for (const auto& sub : vpvPages_.subPagesOf(QStringLiteral("VP-V"), unitId))
-                subs.push_back({ sub.name, sub.name, sub.description });
-            return subs;
-        };
-        vpvHost.openPage = [this](const QString& pageName) { selectPage(pageName); };
-        vpvHost.bothPathwayCards = [this] { return Vpv::BothPathwayCards(formApi_.kit); };
-        vpvHost.unitCards = [this](const QString& unitId) { return vpvPages_.takeUnitCards(unitId); };
-        vpvPages_.append(pages_, QStringLiteral("VP-V"), createPage(QStringLiteral("VP-V"),
-            QStringLiteral("Everything VP-V adds, by unit: one tier per unit plus a global tier, each unit's settings, and the fallbacks engaged."),
-            Vpv::CreateSection(vpvHost)));
-    }
-    // VPV-HOOK-END
+    Vpv::ConfigEditorAccess::BuildVpvPages(*this);   // VPV-HOOK (provider sub-pages, then the VP-V page)
     auto* navGroup = new QButtonGroup(root);
     navGroup->setExclusive(true);
     const auto addLeaf = [this, navLayout, navGroup](const QString& title, int page)
@@ -9042,20 +8953,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "takes over whenever the engine has no vectors."));
         auto* motionAhead = addChoice(QStringLiteral("Motion vectors computed ahead"), QStringLiteral("motion_ahead_frames"),
             { QStringLiteral("4"), QStringLiteral("0") });
-        // VPV-HOOK
-        // B1 (owner 2026-11-10, doc 91 C): the value is the minimum; the look-ahead runs every frame queued ahead.
-        motionAhead->setItemText(motionAhead->findData(QStringLiteral("4")), QStringLiteral("On (looks ahead across the queued frames)"));
-        motionAhead->setItemText(motionAhead->findData(QStringLiteral("0")), QStringLiteral("Off"));
-        // Settings guide audit 2026-10-24: the forced 5-frame queue minimum is gone (r6 fix 2) and the
-        // look-ahead is a time (r6 fix 3), so the old "holds at least 5" text was wrong.
-        motionAhead->setToolTip(QStringLiteral(
-            "NVIDIA GPUs: the optical-flow engine computes the motion ahead of the picture on its own hardware, off "
-            "the render path. On: the look-ahead runs every frame queued ahead of render (up to 13 frames); the value "
-            "is the minimum the queue keeps for it (about 67 ms: 2 frames at 24p, 4 at 50/60p). It never lengthens "
-            "the queue beyond that minimum; on a short queue it looks less far ahead, and with no frames ahead the "
-            "de-judder estimates at render time or holds. The low-latency queue switches it off. Off, or other GPUs: "
-            "VP's matcher at render time."));
-        // VPV-HOOK-END
+        Vpv::ApplyMotionAheadText(motionAhead);   // VPV-HOOK
         {
             // The engine as mutually exclusive buttons (owner 2026-10-16); the drop-down holds the value.
             auto* sourceButtons = new QWidget;
@@ -15142,3 +15040,5 @@ void ConfigEditorWindow::setWarningStatus(const QString& message)
     QAccessibleEvent changed(status_, QAccessible::NameChanged);
     QAccessible::updateAccessibility(&changed);
 }
+
+#include <VP-V/modules/control/config/config_pages/ConfigEditorAccess.inl>   // VPV-HOOK (S4A A4: the editor's VP-V seams)

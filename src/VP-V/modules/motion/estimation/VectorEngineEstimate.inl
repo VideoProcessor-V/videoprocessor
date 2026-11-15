@@ -295,11 +295,11 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	Dejudder::Planes sa = a, sb = b;
 	sa.sequence = aSequence;
 	sb.sequence = bSequence;
-	if (motionProducer && motionProducer->Running() && !vectorEstimate.motionEngineWarming)
+	if (vectorEngine.motionProducer && vectorEngine.motionProducer->Running() && !vectorEstimate.motionEngineWarming)
 	{
 		int engineW = 0, engineH = 0;
 		if (dejudder->EngineInputSize(engineW, engineH))
-			motionProducer->SetTargetSize(engineW, engineH);
+			vectorEngine.motionProducer->SetTargetSize(engineW, engineH);
 		// MotionValidity step 1 D: a stored pair only for adjacent frames of the current
 		// epoch (otherwise the matcher runs).
 		MotionAhead::FlowPtr flow = motionValidity.PairServes(aSequence, bSequence, motionValidity.EpochOfLastKept(),
@@ -432,7 +432,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 				"optical-flow engine (computed ahead, camera from the engine)" : "optical-flow engine (computed ahead)") :
 			dejudder->OpticalFlowUsed() ? "optical-flow engine" :
 			!dejudder->GetSettings().opticalFlow ? "block searches (optical_flow off)" :
-			dejudder->NoPairAhead() ? (!motionProducer && (vectorEngine.motionAheadSetting == 0 || vectorEngine.motionLowLatencyNoVectors) ?
+			dejudder->NoPairAhead() ? (!vectorEngine.motionProducer && (vectorEngine.motionAheadSetting == 0 || vectorEngine.motionLowLatencyNoVectors) ?
 				"block searches (no optical-flow look-ahead by setting: motion_ahead_frames 0 or the low-latency path)" :
 				"block searches (no optical-flow pair computed ahead)") : "block searches (no engine)";
 		if (motionSourceLogged != source)
@@ -446,7 +446,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		// Silent-fallbacks batch: the matcher standing in for the optical-flow engine is visible.
 		const bool flowFailed = !dejudder->OpticalFlowUsed() && !dejudder->ExternalFlowUsed() &&
 			!dejudder->OpticalFlowError().empty();
-		const bool producerStopped = motionProducer && !motionProducer->Running();
+		const bool producerStopped = vectorEngine.motionProducer && !vectorEngine.motionProducer->Running();
 		// SK-MV (MV2): the P2m path is shown, with its SPECIFIC cause. A sustained run (longer than the look-ahead depth at the measured
 		// rate, never fewer than NoPairTracker::kFloor) or a sustained partial miss ratio is the visible "motion" entry; a single miss (the
 		// start-up fill, a refill) is a counter only. A deliberate choice (motion_ahead_frames 0, the low-latency path) is informational
@@ -461,18 +461,18 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			vectorEngine.motionNoPair.Reset();
 		if (noPairNow)
 		{
-			if (!motionProducer && (vectorEngine.motionAheadSetting == 0 || vectorEngine.motionLowLatencyNoVectors))
+			if (!vectorEngine.motionProducer && (vectorEngine.motionAheadSetting == 0 || vectorEngine.motionLowLatencyNoVectors))
 				noPairCause = FallbackCatalog::NoPairCause::Deliberate;
-			else if (!motionProducer)
+			else if (!vectorEngine.motionProducer)
 			{
 				noPairCause = FallbackCatalog::NoPairCause::ProducerNotRunning;
 				noPairDetail = vectorEngine.motionProducerStartError.empty() ? std::string("not started yet (waiting for frames ahead)") :
 					vectorEngine.motionProducerStartError;
 			}
-			else if (!motionProducer->Running())
+			else if (!vectorEngine.motionProducer->Running())
 			{
 				noPairCause = FallbackCatalog::NoPairCause::ProducerNotRunning;
-				noPairDetail = motionProducer->Error();
+				noPairDetail = vectorEngine.motionProducer->Error();
 			}
 			else if (dejudder->PairSizeMismatch())
 				noPairCause = FallbackCatalog::NoPairCause::SizeMismatch;
@@ -502,7 +502,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			noPairDetail = vectorEngine.motionNoPairDetail.empty() ? how : vectorEngine.motionNoPairDetail + "; " + how;
 		}
 		SyncFallback(FallbackCatalog::Motion(dejudder->GetSettings().opticalFlow, flowFailed, producerStopped,
-			flowFailed ? dejudder->OpticalFlowError() : producerStopped ? motionProducer->Error() : noPairShown ? noPairDetail : std::string(),
+			flowFailed ? dejudder->OpticalFlowError() : producerStopped ? vectorEngine.motionProducer->Error() : noPairShown ? noPairDetail : std::string(),
 			noPairShown ? noPairCause : FallbackCatalog::NoPairCause::None));
 		// SK-MV: the one-engine guard is visible (Ctrl+I / Fallbacks) while more than one Engine session is open on one GPU. Synced here,
 		// not in VectorEngineFallbackSync (VectorEngineTests pins that group's exact sync counts, WAIVER-T1-01).
@@ -515,7 +515,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		vectorEngine.NoteVectorsDelivered(false, onDemandPair ? "engine on demand" : dejudder->ExternalFlowUsed() ? "engine ahead" : dejudder->OpticalFlowUsed() ? "engine" : "matcher");   // VPV-HOOK
 	}
 	static GeneralRate::LogInterval motionAheadStatsLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
-	if (motionProducer && dejudderEstimates + 1 >= 24 && motionAheadStatsLog.DueOr((dejudderEstimates + 1) == 24))   // as the other periodic logs (audit 2026-10-16)
+	if (vectorEngine.motionProducer && dejudderEstimates + 1 >= 24 && motionAheadStatsLog.DueOr((dejudderEstimates + 1) == 24))   // as the other periodic logs (audit 2026-10-16)
 	{
 		std::string counts;
 		for (size_t n = 0; n < queuedAheadCounts.size(); ++n)
@@ -524,7 +524,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			if (c) counts += (counts.empty() ? "" : " ") + std::to_string(n) + (n == 9 ? "+" : "") + ":" + std::to_string(c);
 		}
 		DebugLog::Log("Motion ahead: frames queued ahead when taken (count:frames) %s", counts.c_str());
-		const auto ps = motionProducer->GetStats();
+		const auto ps = vectorEngine.motionProducer->GetStats();
 		const unsigned long long handoffs = motionHandoffCount.load(std::memory_order_relaxed);
 		DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms, on the worker), %llu dropped; pairs taken %llu, missed %llu; render-loop hand-off mean %.3f ms, max %.3f ms",
 			ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, vectorEngine.motionAheadHits, vectorEngine.motionAheadMisses,

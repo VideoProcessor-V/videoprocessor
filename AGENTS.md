@@ -1,5 +1,25 @@
 # VideoProcessor repository guidance
 
+## VP-V fork (read first)
+
+This checkout is the VP-V fork. Where this section and the upstream text below
+disagree, this section wins.
+
+- The repository of record is the VideoProcessor-V fork (git remote `fork`).
+  Push only there.
+- Pull requests to `billslack2/videoprocessor` only with the owner's explicit
+  OK. Never push to, or open pull requests against,
+  `enchywastaken/videoprocessor`.
+- This workstation has no E: drive. Create worktrees under
+  `D:\codex\videoprocessor`; never on C: or inside an existing checkout.
+- Magewell SDK on this workstation:
+  `C:\Program Files\MWCaptureSDK 3.3.1.1596\SDKv3` (pass it as
+  `/p:MagewellSdkRoot=...`).
+- Team rules, plans and handover live in `D:\codex\vp-handover`
+  (`TEAM-RULES.md`, `INTEGRATOR-RULES.md`,
+  `124-core-principles-compliance.md`).
+- Never deploy unless the owner asks.
+
 ## Source and GitHub
 
 - There is no authoritative local source checkout. Preserve existing checkouts

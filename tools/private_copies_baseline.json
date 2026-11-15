@@ -190,42 +190,6 @@
    "max_hits": 1
   },
   {
-   "key": "a|X2|src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
-   "rule": "a",
-   "site": "X2",
-   "refs": "126 s4 X2",
-   "reason": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
-   "seed": true,
-   "max_hits": 1
-  },
-  {
-   "key": "a|X2|src/VP-V/modules/repair/texture_restore/DetailPulse.h",
-   "rule": "a",
-   "site": "X2",
-   "refs": "126 s4 X2",
-   "reason": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
-   "seed": true,
-   "max_hits": 1
-  },
-  {
-   "key": "a|X2|src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
-   "rule": "a",
-   "site": "X2",
-   "refs": "126 s4 X2",
-   "reason": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
-   "seed": true,
-   "max_hits": 2
-  },
-  {
-   "key": "a|X2|src/VP-V/modules/repair/texture_restore/TextureRestore.h",
-   "rule": "a",
-   "site": "X2",
-   "refs": "126 s4 X2",
-   "reason": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
-   "seed": true,
-   "max_hits": 2
-  },
-  {
    "key": "a|X3|src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
    "rule": "a",
    "site": "X3",
@@ -326,15 +290,6 @@
   },
   {
    "key": "b|X8|src/VP-V/modules/motion/estimation/MotionAheadProducer#kP2VectorPair",
-   "rule": "b",
-   "site": "X8",
-   "refs": "126 s4 X8",
-   "reason": "declared product read never made, or owner compute without publish",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
-   "key": "b|X8|src/VP-V/modules/motion/estimation/matcher/DejudderWarp#kP1HalfLuma",
    "rule": "b",
    "site": "X8",
    "refs": "126 s4 X8",
@@ -481,15 +436,6 @@
    "key": "c|C-halfluma|src/VP-V/modules/repair/grain_split/GrainSplit.h",
    "rule": "c",
    "site": "C-halfluma",
-   "refs": "126 s1.3 / N1 (c)",
-   "reason": "owner compute called outside its owning folder with no publish/Acquire path in the statement window; goes to 0 when the unit reads the skeleton product (B1+)",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
-   "key": "c|C-trust|src/VP-V/modules/repair/temporal_detail/SharedMotionSource.h",
-   "rule": "c",
-   "site": "C-trust",
    "refs": "126 s1.3 / N1 (c)",
    "reason": "owner compute called outside its owning folder with no publish/Acquire path in the statement window; goes to 0 when the unit reads the skeleton product (B1+)",
    "seed": false,

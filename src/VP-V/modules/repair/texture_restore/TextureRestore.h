@@ -4,6 +4,7 @@
 #include <VP-V/modules/control/skeleton/PlTexBackend.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
+#include <VP-V/modules/repair/texture_restore/SceneRestart.h>
 
 #include <libplacebo/renderer.h>
 
@@ -82,8 +83,6 @@ namespace TextureRestore
 	constexpr double kGrainFloorCodes8 = 0.25, kTextureFloorCodes8 = 0.25;   // RMS floors, 8-bit codes
 	constexpr double kMeanAllowance = 1.0;     // low-band change allowance (RMS), x CodingNoiseCodes8
 	constexpr double kLowChangeNoise = 4.0;    // ... plus this many mid-band grain levels (the low band's grain, noisy)
-	constexpr double kCutShare = 0.5;          // share of tiles changed: a cut (all references restart)
-	constexpr double kFadeStepShare = 0.5;     // frame mean ramp per frame (x the allowance) over two frames: a fade
 	constexpr double kEnergyEps = 1e-6;        // codes^2
 
 	inline double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -117,7 +116,7 @@ namespace TextureRestore
 		const double q = Clamp(bitrateQuality, 0.0, 1.0);
 		return 0.5 + 2.5 * (1.0 - q);
 	}
-	// The low-band change allowance (RMS of the change; also the fade step's unit), in the signal's codes.
+	// The low-band change allowance (RMS of the change), in the signal's codes.
 	inline double MeanAllowanceCodes(double bitrateQuality, int colorDepth)
 	{
 		return kMeanAllowance * CodingNoiseCodes8(bitrateQuality) * EightBitStep(colorDepth);
@@ -142,6 +141,8 @@ namespace TextureRestore
 		double fieldScaleX = 0.0;
 		uint64_t sequence = 0;
 		VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena = nullptr;  // SA1: null = private textures as before
+		// The reader of the source frame's scene group (the shared cut / fade verdict, U7 via P4); null = the skeleton's store.
+		VpDetailRestore::SceneReaderFn sceneReader = nullptr;
 	};
 
 	// SA1: the scratch arena scopes (one per Apply / ApplyForeign call) and the temporaries they ask for.
@@ -180,6 +181,11 @@ namespace TextureRestore
 		unsigned long long Frames() const { return frames; }
 		// True when the LAST Apply / ApplyForeign failed because the scratch arena had no texture.
 		bool ScratchShort() const { return scratchShort; }
+		// Frames restarted because no scene group was readable (never judged privately).
+		unsigned long long SceneMissing() const { return sceneMissing; }
+		// The last judged frame had no scene record and restarted (shown in Ctrl+I / Config status, never silent).
+		bool SceneJudgeUnavailable() const { return sceneUnavailable; }
+		const char* SceneJudgeWhy() const { return VpDetailRestore::SceneUnavailableWhy(); }
 		// The source frame the references last advanced on (0 = none or a restart pending): a
 		// caller may apply this frame's decision to another picture of it (a de-judder extra)
 		// as a repeat, without advancing.
@@ -189,7 +195,8 @@ namespace TextureRestore
 		struct Impl;
 		Impl* impl = nullptr;
 		std::string error;
-		unsigned long long failures = 0, frames = 0;
+		unsigned long long failures = 0, frames = 0, sceneMissing = 0;
+		bool sceneUnavailable = false;
 		bool scratchShort = false;
 	};
 }

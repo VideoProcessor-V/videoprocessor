@@ -4,6 +4,7 @@
 #include <DebugLog.h>
 #include <VP-V/core/PassTimerInbox.h>
 #include <VP-V/core/VramUsers.h>
+#include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 
 #include <dxgi.h>
@@ -489,7 +490,7 @@ namespace MotionAhead
 	{
 		const auto started = std::chrono::steady_clock::now();
 		int halfW = 0, halfH = 0;
-		if (!LumaAtTarget(job.luma, lumaBuffer, halfW, halfH))
+		if (!LumaAtTarget(job.sequence, job.luma, lumaBuffer, halfW, halfH))
 			return true;   // not a readable frame, or a size this producer does not make: nothing published (the consumer takes the matcher path, shown as a fallback)
 		const double lumaMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 		if (!EnsureSize(halfW, halfH)) return false;
@@ -553,10 +554,19 @@ namespace MotionAhead
 		previousGeneration = job.generation;
 		return ok;
 	}
-	bool Producer::LumaAtTarget(const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& halfW, int& halfH)
+	bool Producer::LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& halfW, int& halfH)
 	{
-		if (!HalfLuma8(luma, buffer, halfW, halfH))
-			return false;   // not a readable frame: nothing to do, not a failure
+		// The engine half: the skeleton's P1 (one decode per frame, Acquire from this thread) when it has the frame and the
+		// codes are the engine's; else the producer's own decode (RGB / full-range: FIX-B4-RGB; no source or a miss: shown).
+		std::shared_ptr<VpSkeleton::IP1Source> p1;
+		{
+			std::lock_guard<std::mutex> lock(p1Mutex);
+			p1 = p1Source;
+		}
+		VpSkeleton::P1ReadKind how = VpSkeleton::P1ReadKind::None;
+		if (!(p1 && luma.IsValid() && p1->ReadEngine8(sequence, luma, buffer, halfW, halfH, how) && how != VpSkeleton::P1ReadKind::None))
+			if (!HalfLuma8(luma, buffer, halfW, halfH))
+				return false;   // not a readable frame: nothing to do, not a failure
 		// The de-judder's engine size: the half size, or half again (its inner matcher).
 		const int tw = targetW.load(std::memory_order_acquire), th = targetH.load(std::memory_order_acquire);
 		if (tw > 0 && th > 0 && !(tw == halfW && th == halfH))
@@ -564,16 +574,7 @@ namespace MotionAhead
 			if (tw != (halfW + 1) / 2 || th != (halfH + 1) / 2)
 				return false;   // a size this producer does not make: nothing published (the consumer takes the matcher path, shown as a fallback)
 			quarterBuffer.resize(static_cast<size_t>(tw) * th);
-			for (int y = 0; y < th; ++y)
-			{
-				const uint8_t* r0 = &buffer[static_cast<size_t>((std::min)(2 * y, halfH - 1)) * halfW];
-				const uint8_t* r1 = &buffer[static_cast<size_t>((std::min)(2 * y + 1, halfH - 1)) * halfW];
-				for (int x = 0; x < tw; ++x)
-				{
-					const int x0 = (std::min)(2 * x, halfW - 1), x1 = (std::min)(2 * x + 1, halfW - 1);
-					quarterBuffer[static_cast<size_t>(y) * tw + x] = static_cast<uint8_t>((r0[x0] + r0[x1] + r1[x0] + r1[x1] + 2) / 4);
-				}
-			}
+			VpLaneProducts::Engine8Quarter(buffer.data(), static_cast<uint32_t>(halfW), static_cast<uint32_t>(halfH), quarterBuffer.data());   // the shared quarter law
 			buffer.swap(quarterBuffer);
 			halfW = tw;
 			halfH = th;
@@ -791,7 +792,7 @@ namespace MotionAhead
 		int w = 0, h = 0;
 		if (!testEngine)
 		{
-			if (!LumaAtTarget(rq.lumaTo, lumaBuffer, w, h))
+			if (!LumaAtTarget(rq.to, rq.lumaTo, lumaBuffer, w, h))
 			{
 				answer(Status::Failed);   // not a readable frame / a size not made: nothing to run, not an engine failure
 				return true;
@@ -841,7 +842,7 @@ namespace MotionAhead
 			if (mode != Mode::Chain)
 			{
 				int fw = 0, fh = 0;
-				if (!LumaAtTarget(rq.lumaFrom, requestLumaBuffer, fw, fh) || fw != w || fh != h)
+				if (!LumaAtTarget(rq.from, rq.lumaFrom, requestLumaBuffer, fw, fh) || fw != w || fh != h)
 				{
 					engineRan = false;        // nothing ran: leaves the failure count alone
 					answer(Status::Failed);   // the two frames are not one size: no pair

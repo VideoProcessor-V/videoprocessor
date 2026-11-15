@@ -2,9 +2,12 @@
 
 #include <libplacebo/renderer.h>
 
+#include <VP-V/core/LumaWeights.h>
+
 #include <vprenderer/GrainPreserve.h>
 #include <VP-V/modules/repair/deband/VpDebander.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
+#include <VP-V/modules/repair/texture_restore/SceneRestart.h>
 
 #include <algorithm>
 #include <cmath>
@@ -44,10 +47,11 @@
 //    allowance (VetoCodes). The tile statistics are motion-tolerant: a small displacement
 //    hardly changes a tile's mean or spread, new content or a flash does. w is bilinear
 //    between tile centres.
-//  - Cut: more than kCutShare of the tiles changed beyond CutCodes (with a field: and more
-//    than half of the tiles mostly untrusted). Fade: the frame mean luma moved by FadeCodes
-//    or more in the same direction on two consecutive frames. Either restarts the history
-//    (gain 1 on that frame), as do Forget(), a non-consecutive sequence or a geometry change.
+//  - Cut / fade: the shared unit U7's verdict for the source frame (CutFadeJudge over the P4
+//    records, read from the skeleton's scene group, SceneRestart.h; registered fix D8). Either
+//    restarts the history (gain 1 on that frame), as do Forget(), a non-consecutive sequence, a
+//    geometry change and a frame whose scene group is not readable (no private fallback; counted
+//    by SceneMissing()). CutCodes remains only the look-ahead agreement level.
 //  - Output Y' = Y + w ((g1 - 1) D1 + (g2 - 1) D2); chroma planes pass through.
 namespace DetailPulse
 {
@@ -81,8 +85,6 @@ namespace DetailPulse
 	constexpr double kTrustMin = 0.5;
 	constexpr double kVetoUntrustedShare = 0.25;
 	constexpr double kCutMul = 3.0;      // x VetoCodes
-	constexpr double kCutShare = 0.5;
-	constexpr double kFadeCodes8 = 0.25;
 	constexpr double kAheadMaxRatio = 2.5;
 	constexpr int kRingSlots = 128;      // per-frame history slots (the window is far shorter)
 	// The band passes keep their neighbourhoods in shared memory, sized for the sigmas at this
@@ -114,7 +116,6 @@ namespace DetailPulse
 		return kVetoNoiseMul * GrainPreserve::CodingNoiseCodes(bitrateQuality) * EightBitStep(colorDepth);
 	}
 	inline double CutCodes(double bitrateQuality, int colorDepth) { return kCutMul * VetoCodes(bitrateQuality, colorDepth); }
-	inline double FadeCodes(int colorDepth) { return kFadeCodes8 * EightBitStep(colorDepth); }
 	// The gain law (gain_law in the shader).
 	inline double Gain(double reference, double energy, double cap)
 	{
@@ -167,6 +168,8 @@ namespace DetailPulse
 		// bar edge is no unsharp-mask edge: no undershoot into the bars, no overshoot beside them),
 		// and the bars come out as the source. PictureBounds() has the rounding.
 		pl_rect2df picture{};
+		// The reader of the source frame's scene group (the shared cut / fade verdict, U7 via P4); null = the skeleton's store.
+		VpDetailRestore::SceneReaderFn sceneReader = nullptr;
 	};
 
 	// The active picture in plane px, inclusive (x0, y0, x1, y1): the pixels wholly inside the
@@ -192,23 +195,10 @@ namespace DetailPulse
 
 	// Hunt 3 F8: Kr, Kg, Kb of a YCbCr system (the luma of an RGB picture). Inline: adaptive
 	// scaling uses it too (bug hunt 33 F3).
+	// The table lives in core/LumaWeights.h (ND02); this forwards to it.
 	inline void LumaWeights(enum pl_color_system system, enum pl_color_primaries primaries, double out[3])
 	{
-		double kr = 0.2126, kb = 0.0722;
-		switch (system)
-		{
-		case PL_COLOR_SYSTEM_BT_601: kr = 0.299; kb = 0.114; break;
-		case PL_COLOR_SYSTEM_BT_2020_NC:
-		case PL_COLOR_SYSTEM_BT_2020_C: kr = 0.2627; kb = 0.0593; break;
-		case PL_COLOR_SYSTEM_SMPTE_240M: kr = 0.212; kb = 0.087; break;
-		case PL_COLOR_SYSTEM_BT_709: break;
-		default:
-			if (primaries == PL_COLOR_PRIM_BT_2020) { kr = 0.2627; kb = 0.0593; }
-			break;
-		}
-		out[0] = kr;
-		out[1] = 1.0 - kr - kb;
-		out[2] = kb;
+		LumaCoeff::ForSystem(system, primaries, out);
 	}
 
 	// Diagnostics (tests, one GPU at a time): GPU time per pass kind - 0 measure, 1 reduce,
@@ -259,11 +249,17 @@ namespace DetailPulse
 		uint64_t HistorySequence() const;
 		int HistoryFrames() const;
 		unsigned long long AheadFrames() const { return aheadUsed; }
+		// Frames restarted because no scene group was readable (never judged privately).
+		unsigned long long SceneMissing() const { return sceneMissing; }
+		// The last judged frame had no scene record and restarted (shown in Ctrl+I / Config status, never silent).
+		bool SceneJudgeUnavailable() const { return sceneUnavailable; }
+		const char* SceneJudgeWhy() const { return VpDetailRestore::SceneUnavailableWhy(); }
 
 	private:
 		struct Impl;
 		Impl* impl = nullptr;
 		std::string error;
-		unsigned long long failures = 0, frames = 0, aheadUsed = 0;
+		unsigned long long failures = 0, frames = 0, aheadUsed = 0, sceneMissing = 0;
+		bool sceneUnavailable = false;
 	};
 }

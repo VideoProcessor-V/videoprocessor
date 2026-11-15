@@ -23,4 +23,10 @@
       <Private>false</Private>
     </ProjectReference>
   </ItemGroup>
+  <ItemGroup>
+    <!-- S4A A5: static InstallLogRing (replaces the call in VideoProcessorApp.cpp). -->
+    <ClCompile Include="..\VP-V\modules\control\diagnostics\ExeLogRing.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+  </ItemGroup>
 </Project>

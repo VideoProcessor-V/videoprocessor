@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <VP-V/core/Ramp.h>   // ND07
 #include <vector>
 
 // VP's per-vsync interpolation timeline (docs/VP-interpolator-50-60-plan.md, Stage B):
@@ -104,7 +105,7 @@ namespace InterpolationTimeline
 		StandaloneGapDecision d;
 		if (!dejudderActive)
 			return d;
-		const float s = std::isfinite(effectiveStrength) ? (std::min)(1.0f, (std::max)(0.0f, effectiveStrength)) : 1.0f;
+		const float s = std::isfinite(effectiveStrength) ? RampMath::Clamp01NanToZero(effectiveStrength) : 1.0f;
 		d.keepActive = true;
 		d.strength = effectiveStrength;
 		d.phaseScale = s;

@@ -63,7 +63,7 @@ REGISTRY = [
      "signatures": _c(r"half[_ ]?luma", r"HalfLuma", r"LOW_HALF", r"downsample",
                       r"sum\s*>>\s*4", r"\+\s*2u?\)\s*>>\s*2",
                       r"2x2\s+box|box\s+average",
-                      r"0\.25\s*\*\s*\(", r"\*\s*0\.25",
+                      r"0\.25\s*\*\s*\(", r"\*\s*0\.25\b",
                       # near-dup survey ND02/ND08 (lead 8): output-luma tile and the (1,2,1)/4 structure luma
                       r"lq_tile_", r"\(\s*r\s*\+\s*2\s*\*\s*g\s*\+\s*b\s*\+\s*2\s*\)\s*>>\s*2"),
      # VpLaneProducts::HalfLuma*: the owner's own lane API (HalfLumaBytes / HalfLumaRows), called, not recomputed (C9 4a);
@@ -73,7 +73,8 @@ REGISTRY = [
     {"id": "U4", "name": "block_statistics",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/regions"],
      "signatures": _c(r"block[_ ]?(mean|var|stats|stat)", r"structure[_ ]?tensor"),
-     "allow": _c(r"vpu_block_stats")},
+     # kP11RegionBlockStats: the catalog product id, naming the published product to Acquire it (same precedent as kP1HalfLuma); allowed ONLY as the argument of Acquire(...), so a line that computes block statistics and merely mentions the id is still counted.
+     "allow": _c(r"vpu_block_stats", r"Acquire\s*\(\s*(VpSkeleton::)?kP11RegionBlockStats")},
     {"id": "U5", "name": "laplacian_ringing",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/regions"],
      "signatures": _c(r"laplac"),
@@ -121,7 +122,7 @@ REGISTRY = [
     {"id": "U13", "name": "coding_evidence",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/regions"],
      "signatures": _c(r"blockiness", r"block[_ ]?hash", r"grid[_ ]?phase", r"copy[_ ]?share"),
-     "allow": _c(r"vpu_coding_evidence\w*", r"VpUnit::CodingEvidence::\w+", r"kCodingEvidence")},
+     "allow": _c(r"vpu_coding_evidence\w*", r"VpUnit::CodingEvidence::\w+", r"\bkCodingEvidence\b")},
     {"id": "U14", "name": "trail_compose",
      "owning_unit": ["src/VP-V/modules/motion/estimation", "src/VP-V/modules/repair/temporal_detail"],
      "signatures": _c(r"compos\w*[_ ]?(motion|vector|field|trail)", r"ComposeField"),
@@ -132,7 +133,7 @@ REGISTRY = [
      "allow": _c(r"vpu_lighting_fit\w*")},
     {"id": "U18", "name": "codec_model",
      "owning_unit": ["src/VP-V/modules/repair/temporal_detail"],
-     "signatures": _c(r"dead[_ ]?zone", r"quanti[sz]ation[_ ]?(bound|bin|interval)", r"qcs", r"pocs"),
+     "signatures": _c(r"dead[_ ]?zone", r"quanti[sz]ation[_ ]?(bound|bin|interval)", r"\bqcs\b", r"\bpocs\b"),
      "allow": _c(r"vpu_codec_model\w*")},
     # U15 FieldRefine (doc 72 sections 2 and 9): the one DMVR / BDOF / PROF-style refinement of a motion field (error surface over a
     # small offset window). Blocking from birth, baseline 0. refined_field (product id 24) is declared by the W1-RES catalog: consumers
@@ -233,7 +234,10 @@ def _iter_files(root):
 
 
 def _inside(rel, unit):
-    return rel == unit or rel.startswith(unit.rstrip("/") + "/")
+    # An owner may be a folder ("src/VP-V/core/x/"), a file, or an extensionless unit stem ("src/VP-V/core/OnePole"), which
+    # owns its header/source ("OnePole.h"): without that its own lines counted as outside hits (NDU 11-14).
+    return (rel == unit or rel.startswith(unit.rstrip("/") + "/")
+            or (not unit.endswith("/") and rel in [unit + e for e in (".h", ".hpp", ".inl", ".cpp")]))
 
 
 def _comment_flags(lines):

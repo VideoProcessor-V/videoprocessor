@@ -39,6 +39,8 @@
 // or libplacebo headers (the colour depth is an argument; SigmaDeltaDomain::Domain::color supplies it at integration).
 #pragma once
 
+#include <VP-V/core/OnePole.h>
+#include <VP-V/core/Ramp.h>
 #include <VP-V/core/Products.h>
 #include <VP-V/modules/input/source_analysis/light_level/LightLevelLut.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
@@ -72,13 +74,7 @@ namespace DitherNeed
 		double tauSeconds = 0.25;  // smoothing time constant
 	};
 
-	template <class T> inline T Smoothstep(T e0, T e1, T x)
-	{
-		if (!(e1 > e0)) return x >= e0 ? T(1) : T(0);
-		T t = (x - e0) / (e1 - e0);
-		t = t < T(0) ? T(0) : (t > T(1) ? T(1) : t);
-		return t * t * (T(3) - T(2) * t);
-	}
+	template <class T> inline T Smoothstep(T e0, T e1, T x) { return RampMath::Smoothstep(e0, e1, x); }   // core/Ramp.h (ND07)
 
 	// One link code step in the 10-bit code scale: 2^(10 - colorBits) (8 -> 4, 10 -> 1).
 	inline double QOut(int colorBits)
@@ -90,8 +86,7 @@ namespace DitherNeed
 	// Smoothing coefficient of one frame interval; dt <= 0 (unknown) = no smoothing.
 	inline double AlphaFor(double dtSeconds, double tauSeconds)
 	{
-		if (!(dtSeconds > 0.0) || !(tauSeconds > 0.0)) return 1.0;
-		return 1.0 - std::exp(-dtSeconds / tauSeconds);
+		return OnePole::AlphaFor(dtSeconds, tauSeconds);   // core/OnePole.h (ND05): dt <= 0 = no smoothing
 	}
 
 	// Visibility gate of one LINK step at an input level (V, Sout from the LUT).

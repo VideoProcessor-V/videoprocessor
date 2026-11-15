@@ -1,12 +1,16 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Shared unit U2 "band split (extra sigma)" (doc 62 section 1.2): the one separable-Gaussian law every band split
-// uses. A consumer that needs a band of the picture at a sigma it chooses takes the radius, the normalised weights
-// and the half-resolution sigma from here instead of keeping a private copy; the CPU reference blur and the GLSL
-// emitter (`vpu_band_from_base_*`) are built from the same Radius()/Weight(), so they cannot drift apart.
+// Shared unit U2 "band split (extra sigma)" (doc 62 section 1.2). The unit carries TWO separable-Gaussian laws, each
+// used by named entries only:
+//   Law 1 (this unit's own, Radius()/Weight()): the CPU reference blur and the GLSL emitter (`vpu_band_from_base_*`) are
+//     built from it, so they cannot drift apart. A consumer that needs a band of the picture at a sigma it chooses takes
+//     the radius, the normalised weights and the half-resolution sigma from here instead of keeping a private copy.
+//   Law 2 (Bill's low-band law, GrainPreserve::LowRadius / LowWeight, called unchanged): used ONLY by BandFromHalf (the
+//     CPU oracle of the grain band, B3). Radius = max(kLowRadius, ceil(kLowRadius * hs / hs0 - 1e-9)) with hs the half
+//     sigma of the full-resolution sigma and hs0 that of kLowSigma; weights are the normalised Gaussian at the half sigma.
 //
-// Law (unchanged from the private copies it replaces, bit for bit):
+// Law 1 (unchanged from the private copies it replaces, bit for bit):
 //   radius  r = ceil(factor * sigma - eps), at least 1 when minOne
 //   weight  w(k) = exp(-0.5 k k / (sigma sigma)) / sum_{i=-r..r} exp(-0.5 i i / (sigma sigma))   (sum in index order -r..r)
 //   half-resolution sigma of a full-resolution sigma (the 2x2 box adds 0.25 px^2 per axis):
@@ -25,6 +29,8 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+
+#include <vprenderer/GrainPreserve.h>   // Bill's low-band law (LowWeight/LowRadius), called UNCHANGED
 
 namespace VpUnit
 {
@@ -74,6 +80,52 @@ namespace BandFromBase
 	// scale they run (FIX-B2-ND03; pinned by BandFromBaseUnitMoveTests).
 	inline int BandRadius(double sigma) { return Radius(sigma, 3.0, true, 0.0); }
 	inline double BandWeight(int k, double sigma) { return Weight(k, sigma, BandRadius(sigma)); }
+
+	// Border handling of the CPU blur: Replicate (clamp to the edge) or Reflect (mirror about the edge sample, no
+	// repeat of it: -1 -> 1, n -> n-2; the identity-chain tile blur). ND03: one blur, an edge-mode axis.
+	enum class EdgeMode { Replicate, Reflect };
+
+	inline int ReflectIndex(int i, int n)
+	{
+		if (i < 0) i = -i;
+		if (i >= n) i = 2 * (n - 1) - i;
+		return i < 0 ? 0 : (i >= n ? n - 1 : i);
+	}
+
+	// The normalised taps -r..r of Weight(), as the element type of a blur (float or double).
+	template <class T> inline std::vector<T> Taps(double sigma, double factor, bool minOne, double eps)
+	{
+		const int r = Radius(sigma, factor, minOne, eps);
+		std::vector<T> t(static_cast<size_t>(2 * r + 1));
+		for (int i = -r; i <= r; ++i) t[static_cast<size_t>(i + r)] = static_cast<T>(Weight(i, sigma, r));
+		return t;
+	}
+
+	// Separable convolution of a w x h plane with `taps` (odd length), rows across then columns down, each output
+	// summed over taps in index order -r..r in the element type T (the fixed order every private copy used).
+	template <class T> inline void BlurTaps(const std::vector<T>& src, std::vector<T>& dst, int w, int h, const std::vector<T>& taps, EdgeMode edge)
+	{
+		const int r = static_cast<int>(taps.size() / 2);
+		auto at = [edge](int i, int n) { return edge == EdgeMode::Reflect ? ReflectIndex(i, n) : (std::max)(0, (std::min)(n - 1, i)); };
+		std::vector<T> tmp(src.size());
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+			{
+				T a = T(0);
+				for (int k = -r; k <= r; ++k)
+					a += taps[static_cast<size_t>(k + r)] * src[static_cast<size_t>(y) * w + at(x + k, w)];
+				tmp[static_cast<size_t>(y) * w + x] = a;
+			}
+		dst.resize(src.size());
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+			{
+				T a = T(0);
+				for (int k = -r; k <= r; ++k)
+					a += taps[static_cast<size_t>(k + r)] * tmp[static_cast<size_t>(at(y + k, h)) * w + x];
+				dst[static_cast<size_t>(y) * w + x] = a;
+			}
+	}
 
 	// CPU reference: separable Gaussian of a w x h plane, edges replicated, fixed summation order (rows across,
 	// then columns down). sigma <= 0 returns the input.
@@ -147,6 +199,32 @@ namespace BandFromBase
 			"    for (int i = -VPU_BAND_FROM_BASE_R; i <= VPU_BAND_FROM_BASE_R; i++)\n"
 			"        acc += vpu_band_from_base_w(i) * texelFetch(src, clamp(q + ivec2(0, i), ivec2(0), hi), 0);\n    return acc;\n}\n";
 		return s;
+	}
+	// CPU reference of the shared low band (B3). Input is the HALF-resolution plane (P1, the shared half_luma_downsample
+	// product, acquired from the skeleton; this unit holds no 2x2 box of its own). Applies Bill's Gaussian law
+	// (GrainPreserve::LowWeight / LowRadius at the FULL-resolution sigma) across then down at half resolution, edges replicated.
+	// Oracle of the skeleton band memo's GPU fill and of every consumer that read a private copy of it.
+	inline std::vector<double> BandFromHalf(const std::vector<double>& box, int hw, int hh, double sigma)
+	{
+		std::vector<double> t(box.size()), o(box.size());
+		const int r = GrainPreserve::LowRadius(sigma);
+		std::vector<double> k(static_cast<size_t>(2 * r + 1));
+		for (int i = -r; i <= r; ++i) k[static_cast<size_t>(i + r)] = GrainPreserve::LowWeight(i, sigma);
+		for (int y = 0; y < hh; ++y)
+			for (int x = 0; x < hw; ++x)
+			{
+				double a = 0.0;
+				for (int i = -r; i <= r; ++i) a += k[static_cast<size_t>(i + r)] * box[static_cast<size_t>(y) * hw + (std::max)(0, (std::min)(hw - 1, x + i))];
+				t[static_cast<size_t>(y) * hw + x] = a;
+			}
+		for (int y = 0; y < hh; ++y)
+			for (int x = 0; x < hw; ++x)
+			{
+				double a = 0.0;
+				for (int i = -r; i <= r; ++i) a += k[static_cast<size_t>(i + r)] * t[static_cast<size_t>((std::max)(0, (std::min)(hh - 1, y + i))) * hw + x];
+				o[static_cast<size_t>(y) * hw + x] = a;
+			}
+		return o;
 	}
 }
 }

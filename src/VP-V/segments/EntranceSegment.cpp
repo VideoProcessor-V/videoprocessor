@@ -877,6 +877,10 @@ namespace EntranceSegment
 				frame = pulsed;
 				b.detailPulseInactive->clear();
 				host.ReleaseFallback("detail pulse");
+				{
+					const FallbackCatalog::Decision sj = FallbackCatalog::SceneJudgeUnavailable("detail pulse", detailPulse.SceneJudgeUnavailable(), detailPulse.SceneJudgeWhy());
+					if (sj.engaged) host.EngageFallback(sj.id, sj.reason); else host.ReleaseFallback(sj.id.c_str());
+				}
 			}
 			else
 			{
@@ -889,10 +893,14 @@ namespace EntranceSegment
 				*b.detailPulseInactive = detailPulse.LastError();
 				const FallbackCatalog::Decision d = FallbackCatalog::DetailPulseFailed(true, detailPulse.LastError());
 				host.EngageFallback(d.id, d.reason);
+				host.ReleaseFallback("detail pulse scene judge");   // the module did not run: its judge status is stale
 			}
 		}
 		else
+		{
 			host.ReleaseFallback("detail pulse");   // switched off or not applicable: nothing failed
+			host.ReleaseFallback("detail pulse scene judge");
+		}
 		if (textureRestoreRuns())
 		{
 			pl_frame restored{};
@@ -901,6 +909,10 @@ namespace EntranceSegment
 				frame = restored;
 				b.textureRestoreInactive->clear();
 				host.ReleaseFallback("texture restore");
+				{
+					const FallbackCatalog::Decision sj = FallbackCatalog::SceneJudgeUnavailable("texture restore", textureRestore.SceneJudgeUnavailable(), textureRestore.SceneJudgeWhy());
+					if (sj.engaged) host.EngageFallback(sj.id, sj.reason); else host.ReleaseFallback(sj.id.c_str());
+				}
 			}
 			else
 			{
@@ -911,10 +923,14 @@ namespace EntranceSegment
 				*b.textureRestoreInactive = textureRestore.LastError();
 				const FallbackCatalog::Decision d = FallbackCatalog::TextureRestoreFailed(true, textureRestore.LastError());
 				host.EngageFallback(d.id, d.reason);
+				host.ReleaseFallback("texture restore scene judge");   // the module did not run: its judge status is stale
 			}
 		}
 		else
+		{
 			host.ReleaseFallback("texture restore");
+			host.ReleaseFallback("texture restore scene judge");
+		}
 	}
 
 	// detail_pulse_stabilise's look-ahead (optional): the next source frame's band energies when

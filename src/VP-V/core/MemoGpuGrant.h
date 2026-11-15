@@ -59,4 +59,44 @@ inline MemoGpuGrant PlanMemoGpuGrant(const CardProfile& card, bool cardKnown, ui
     return g;
 }
 
+// The same plan over LEVELS (amendment A5 / audit M6): `levels` = SkeletonMemo::GpuNeedLevels() (one per ahead-ladder step,
+// non-increasing). The governor sheds the memo user level by level, so a card that cannot hold the full window grants the largest
+// level that fits (never 0 while a level fits). `need` in the result is the top level, `bytes` the granted level.
+inline MemoGpuGrant PlanMemoGpuGrantLevels(const CardProfile& card, bool cardKnown, uint64_t othersHeld, const std::vector<uint64_t>& levels)
+{
+    MemoGpuGrant g;
+    g.need = levels.empty() ? 0u : levels.front();
+    g.cardKnown = cardKnown;
+    if (!cardKnown || g.need == 0)
+        return g;
+    VramUser memo;
+    memo.id = kUserScratchArena;
+    memo.name = "skeleton memo (no lane)";
+    memo.tier = Tier::T0;
+    memo.shedOrder = 200;
+    memo.lossless = false;
+    for (uint64_t l : levels) {
+        if (!memo.levels.empty() && l >= memo.levels.back())
+            continue;
+        memo.levels.push_back(l);
+        memo.levelText.push_back(memo.levels.size() == 1 ? nullptr : "memo ahead plan stepped down");
+    }
+    if (memo.levels.back() != 0) {
+        memo.levels.push_back(0);
+        memo.levelText.push_back("memo GPU spots off");
+    }
+    GovernorInput in;
+    in.card = card;
+    in.ownUsageBytes = othersHeld;
+    in.transientBytes = othersHeld;
+    in.users.push_back(memo);
+    const GovernorPlan plan = PlanVram(in);
+    g.budget = plan.budgetBytes;
+    if (const UserGrant* u = plan.Find(kUserScratchArena)) {
+        g.bytes = u->bytes;
+        g.granted = u->bytes > 0;
+    }
+    return g;
+}
+
 }  // namespace VpSkeleton
