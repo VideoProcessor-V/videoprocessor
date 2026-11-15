@@ -10,6 +10,8 @@
 // Axis convention (as the Indicator port): axis 0 = horizontal (the lines are picture ROWS and run along x),
 // axis 1 = vertical (the lines are picture COLUMNS and run along y). All coordinates along an axis are
 // relative to the start of the ACTIVE rectangle (bars excluded), never to the frame.
+#include "../../../../../core/RobustStats.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -104,13 +106,7 @@ namespace SourceIdentity
 		// Median of n values (n >= 1); copies and sorts, so the input is untouched. Even n: mean of the two middle values.
 		inline double MedianOf(const double* v, int n)
 		{
-			if (n <= 0)
-				return 0.0;
-			std::vector<double> t(v, v + n);
-			std::sort(t.begin(), t.end());
-			if ((n & 1) != 0)
-				return t[static_cast<size_t>(n / 2)];
-			return 0.5 * (t[static_cast<size_t>(n / 2 - 1)] + t[static_cast<size_t>(n / 2)]);
+			return RobustStats::MedianOf(v, n);   // core/RobustStats.h (ND06), MeanOfMiddle
 		}
 
 		// Mean after dropping floor(trim * n) values from each end of the sorted sample (ascending summation order).

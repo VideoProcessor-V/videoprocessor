@@ -80,5 +80,12 @@ namespace Vpv
 				reinterpret_cast<VpvAbiFn>(GetProcAddress(module, kVpvAbiExport)) : nullptr;
 			return CheckAbiFunction(function, reason);
 		}
+
+		// The loaders' one call (S4A A5: one Bill line instead of two): Check, then Attach; `reason` names the first
+		// step that refused. Same order, same reasons and same early exit as the two calls it replaces.
+		inline bool CheckAndAttach(HMODULE module, std::string& reason)
+		{
+			return Check(module, reason) && Attach(module, reason);
+		}
 	}
 }

@@ -262,7 +262,6 @@ namespace CameraLink
 		job.stamp = copy->stamp;
 		job.ahead = true;
 		job.aheadCopy = copy;
-		job.aheadConsistency = m_aheadConsistency;
 		job.outGridW = m_aheadGridW;
 		job.outGridH = m_aheadGridH;
 		PairDescription d;
@@ -319,7 +318,7 @@ namespace CameraLink
 				break;   // back-pressure: ask again at the next phase (never a drop)
 			const uint64_t seq = m_aheadNext;
 			AheadCopy copy;
-			const AheadRefusal r = m_aheadSource(seq, copy);
+			const AheadRefusal r = m_aheadSource(seq, m_aheadConsistency, copy);
 			if (r == AheadRefusal::NoPair)
 				break;   // not computed yet: normal until the producer gets there; a frame the render reaches without one takes the seed
 			if (r != AheadRefusal::None)
@@ -603,7 +602,17 @@ namespace CameraLink
 		if (m_ring)
 		{
 			std::vector<std::shared_ptr<FieldCopy>> ready;
+			const uint64_t failedBefore = m_ring->Stats().failed;
 			m_ring->Poll(ready);
+			const uint64_t failedNow = m_ring->Stats().failed;
+			if (failedNow > failedBefore)
+			{
+				// A copy that reported an error (not "still drawing") was freed: shown like a failed request.
+				m_counters.readbackDropped.fetch_add(failedNow - failedBefore, std::memory_order_relaxed);
+				m_events.fetch_or(1u << kEvReadback, std::memory_order_relaxed);
+				if (m_producer)
+					m_producer->NoteReset();   // a hole in the pair chain
+			}
 			FramePhaseFacts none;
 			SubmitReady(ready, none);
 		}

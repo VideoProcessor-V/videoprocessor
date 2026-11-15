@@ -293,6 +293,7 @@ RegionSample region_evidence(ivec2 blk)
     r.brightness = s0.x;
     r.visibility = s4.z;
     int code = int(aux.z + 0.5);
+    // PRECISION-OK 119#60: bit 2 of a camera label code (flag extraction, not a picture sample)
     if (((code >> 2) & 1) != 0) flags |= 8;
     r.flags = flags;
     r.camera_confidence = aux.y;

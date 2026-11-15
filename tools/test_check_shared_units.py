@@ -264,6 +264,12 @@ class CheckSharedUnitsTest(unittest.TestCase):
         d = json.load(open(os.path.join(self.root, "tools", "shared_units_baseline.json")))
         self.assertEqual(d["units"]["U2"]["baseline_duplicates"], 0)
 
+    def test_extensionless_owner_stem_owns_its_header(self):
+        self.assertTrue(csu._inside("src/VP-V/core/OnePole.h", "src/VP-V/core/OnePole"))
+        self.assertTrue(csu._inside("src/VP-V/core/OnePole", "src/VP-V/core/OnePole"))
+        self.assertFalse(csu._inside("src/VP-V/core/OnePoleX.h", "src/VP-V/core/OnePole"))
+        self.assertFalse(csu._inside("src/VP-V/core/Other.h", "src/VP-V/core/OnePole"))
+
     # ---- review fixes -------------------------------------------------------------------------
     def test_star_continuation_counts_only_inside_a_block_comment(self):
         _w(self.root, "src/VP-V/modules/repair/c/Star.h",
@@ -400,6 +406,19 @@ class NearDupUnitPatternsTest(unittest.TestCase):
         reg = {u["id"]: u for u in csu.REGISTRY}
         for uid, line in self.CASES.items():
             self.assertTrue(any(r.search(line) for r in reg[uid]["signatures"]), uid)
+
+
+class FocusAcquireAllowTest(unittest.TestCase):
+    """L-FOCUS: Acquire(kP11RegionBlockStats) is a consumer read of the published product; a line that computes block
+    statistics and only mentions the id stays counted."""
+    def test_acquire_argument_allowed_computation_still_counted(self):
+        with tempfile.TemporaryDirectory() as r:
+            f = "src/VP-V/modules/repair/focus/Use.cpp"
+            _w(r, f, "auto* b = memo.Acquire(VpSkeleton::kP11RegionBlockStats, form);\n"
+                     "auto* c = memo.Acquire(kP11RegionBlockStats, form);\n"
+                     "float blockMean = Sum(p) / n; // kP11RegionBlockStats\n")
+            h = _unit(csu.scan(r), "U4")["hits"]
+            self.assertEqual([x["line"] for x in h if x["role"] == "duplicate"], [3])
 
 
 if __name__ == "__main__":

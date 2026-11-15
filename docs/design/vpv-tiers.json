@@ -570,7 +570,10 @@
         "colour.tone_gamut",
         "colour.extended_range",
         "colour.sdr_tone_shape",
-        "colour.appearance"
+        "colour.appearance",
+        "colour.dm_pre",
+        "colour.dm_curve",
+        "colour.dm_trims"
       ],
       "tiers": [],
       "untiered_reason": "libplacebo does the colour in every tier; the cheaper combined HDR->SDR LUT for Classic/Low is not yet implemented.",

@@ -210,6 +210,15 @@ namespace FallbackCatalog
 			"; the frame is rendered without it") : Released("texture restore");
 	}
 
+	// Detail pulse / texture restore with no scene record for the frame (registered fix D8: no private fallback, the frame
+	// restarts the references, gain 1). `module` = "detail pulse" or "texture restore". Visible, never silent.
+	inline Decision SceneJudgeUnavailable(const char* module, bool unavailable, const std::string& why)
+	{
+		const std::string id = std::string(module) + " scene judge";
+		return unavailable ? Engaged(id.c_str(), "scene judge unavailable (" + why + "); references restart every frame") :
+			Released(id.c_str());
+	}
+
 	// Custom GLSL hooks that did not load (read, template, libplacebo rejection, no known
 	// //!HOOK stage) or that libplacebo disabled at runtime; the picture renders without them.
 	// Quantiser failures are reported by the dither entry instead. Lists at most 3 names.
@@ -590,6 +599,31 @@ namespace FallbackCatalog
 		return Engaged("output scaling", ssimShaderMissing ?
 			"libplacebo downscaler (SSimDownscaler not in the shader list)" :
 			"plain SSIM (adaptive downscale failed on the GPU)");
+	}
+	// Native GPU readbacks (drive/led_measure/NativeReadback.h, fx/dv-frame-quiet): a device without a D3D11
+	// fence polls the staging copy with a non-waiting map instead (the readiness is less exact), and a copy
+	// issued by a LATER frame's flush than its own (the host's post-frame flush did not run) arrives a frame
+	// late. Both are named; neither is log-only.
+	// framesNotEnded (C1 gate SHOULD-4): frames whose post-frame end (the AfterPresent seam) never ran, ended at the next frame's
+	// start instead; named apart from late copies, since such a frame may have had no copy at all.
+	inline Decision NativeReadback(unsigned liveWithoutFence, unsigned long long copiesIssuedLate, unsigned long long signalsRefused = 0,
+		unsigned long long framesNotEnded = 0)
+	{
+		if (liveWithoutFence == 0 && copiesIssuedLate == 0 && signalsRefused == 0 && framesNotEnded == 0)
+			return Released("native readback");
+		std::string reason;
+		if (liveWithoutFence > 0)
+			reason = "no D3D11 fence on this device, " + std::to_string(liveWithoutFence) + " readback(s) poll a non-waiting map instead";
+		if (copiesIssuedLate > 0)
+			reason += std::string(reason.empty() ? "" : " and ") + std::to_string(copiesIssuedLate) +
+				" readback copy(ies) were issued a frame late (the post-frame flush did not run)";
+		if (signalsRefused > 0)
+			reason += std::string(reason.empty() ? "" : " and ") + "the driver refused " + std::to_string(signalsRefused) +
+				" fence signal(s), so those readbacks poll a non-waiting map instead";
+		if (framesNotEnded > 0)
+			reason += std::string(reason.empty() ? "" : " and ") + std::to_string(framesNotEnded) +
+				" frame(s) skipped the post-frame end, so their end ran at the start of the next frame";
+		return Engaged("native readback", reason);
 	}
 	inline Decision EarlyUpload(bool requested, bool open, const std::string& error)
 	{

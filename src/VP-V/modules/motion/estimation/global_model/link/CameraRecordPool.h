@@ -78,7 +78,13 @@ namespace CameraLink
 		return w.ok ? w.n : 0;
 	}
 
-	// Decodes into `m` (blocks left null). False on a bad magic or a short buffer.
+	// The last enumerators of the two enums the slot stores as bytes (CameraMotion.h): a stored byte above them is not a
+	// value of the enum. Keep these in step when an enumerator is appended.
+	constexpr uint8_t kRecordPodLastModelType = uint8_t(CameraModel::ModelType::Homography);
+	constexpr uint8_t kRecordPodLastReason = uint8_t(CameraModel::Reason::Disabled);
+
+	// Decodes into `m` (blocks left null). False on a bad magic, a short buffer, or a ModelType / Reason byte outside its
+	// enum (the target is then untouched).
 	inline bool DecodeRecordPod(const uint8_t* in, size_t bytes, CameraModel::CameraMotion& m)
 	{
 		detail::Reader r(in, bytes);
@@ -88,13 +94,20 @@ namespace CameraLink
 		x.seq = r.Get<uint64_t>(); x.pairFrom = r.Get<uint64_t>(); x.pairTo = r.Get<uint64_t>(); x.pairSeconds = r.Get<double>();
 		x.resyncGeneration = r.Get<uint64_t>(); x.rebaseGeneration = r.Get<uint64_t>();
 		x.valid = r.Get<uint8_t>() != 0;
-		x.params.type = static_cast<CameraModel::ModelType>(r.Get<uint8_t>());
-		x.reason = static_cast<CameraModel::Reason>(r.Get<uint8_t>());
+		const uint8_t type = r.Get<uint8_t>();
+		const uint8_t reason = r.Get<uint8_t>();
+		if (type > kRecordPodLastModelType || reason > kRecordPodLastReason)
+			return false;
+		x.params.type = static_cast<CameraModel::ModelType>(type);
+		x.reason = static_cast<CameraModel::Reason>(reason);
 		const uint8_t flags = r.Get<uint8_t>();
 		x.seededFromNext = (flags & 1) != 0; x.bridged = (flags & 2) != 0; x.inFade = (flags & 4) != 0;
 		x.smoothed = (flags & 8) != 0; x.labelsOnGpu = (flags & 16) != 0;
 		for (int i = 0; i < 9; ++i) x.params.h[i] = r.Get<double>();
-		x.smoothedParams.type = static_cast<CameraModel::ModelType>(r.Get<uint8_t>());
+		const uint8_t smoothedType = r.Get<uint8_t>();
+		if (smoothedType > kRecordPodLastModelType)
+			return false;
+		x.smoothedParams.type = static_cast<CameraModel::ModelType>(smoothedType);
 		for (int i = 0; i < 9; ++i) x.smoothedParams.h[i] = r.Get<double>();
 		x.rates.logScale = r.Get<double>(); x.rates.angle = r.Get<double>(); x.rates.tx = r.Get<double>(); x.rates.ty = r.Get<double>();
 		x.confidence = r.Get<double>();

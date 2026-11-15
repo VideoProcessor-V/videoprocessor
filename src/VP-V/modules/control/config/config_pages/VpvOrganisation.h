@@ -80,7 +80,7 @@ namespace Vpv
 			{ "input", "signal", "Signal and content", "What kind of signal it is, and labels the profile rules can use.", false, false, {
 				{ K::Toggle, "source_range" }, { K::Toggle, "intent_content" } } },
 			{ "input", "plumbing", "Capture plumbing (expert)", "When each captured frame is copied to the GPU. Normal viewing never needs it.", true, false, {
-				{ K::Toggle, "capture_upload" } } },
+				{ K::Toggle, "capture_upload" }, { K::Text, "source_resolution_frame_bound" } } },
 			{ "input", "content_tuning", "Content labels: tuning", "How long a label (film, video, sports) is held before it may change.", true, false, {
 				{ K::Row, "intent_content_hold_seconds" } },
 				{ L::Feature, "Content labels", "intent_content", nullptr, "off", "off" } },

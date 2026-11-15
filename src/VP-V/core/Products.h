@@ -90,8 +90,39 @@ enum : ProductId {
     kTdTrailSummary,      // 28 td.trail_summary: per-frame CPU summary for source identity / status
     // Wave S2 (SID lead request, doc 78 section 6): appended after the doc 72 list, never before it.
     kSourceGeometry,      // 29 source_geometry (P14g): HELD-STATE measured + applied source geometry (SourceGeometry unit v1)
-    kSkeletonProductEnd
+    // THE fixed id table of the wave-S2 products (owner decision R14-95, 11-14; this file's owner is L-CORE). Explicit numbers: nobody else
+    // reassigns them, a lane lands its product by declaring it under its number (and removes the number from kReservedProductIds).
+    // Id 30 (lead 8 allocation 30, 11-14; lead 12 R1: ids fixed, no renumbering) is NOT registered: a GpuCompute product is registered only
+    // with its owner fill (R13-8, 102b B3-ID30-EXCLUSIONS); the fill and the id land together (102b LB3-BAND-MEMO-GPU).
+    kBandMemo = 30,       // 30 band_memo (BandMemo; implementation not landed on this line: RESERVED)
+    kEdgeMap = 31,        // 31 edge_map (C3 fixed id table; per-frame memo of the source-luma Sobel; readers: L-FOCUS focus map, L-B5 busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3); frozen 17:19; 102b X5-EDGEMAP-CJ3, KEDGEMAP-RULE3 UPDATE :523); later deband guard, occlusion, TD); lead 8 allocation 31, 05:2x 11-14
+    kFocusMap = 32,       // 32 focus_map (L-FOCUS; RESERVED until it lands)
+    kRoomLight = 33,      // 33 room_light (DV block; RESERVED until it lands)
+    kComposedVectors = 34,// 34 composed_vectors (RESERVED until it lands)
+    kSkeletonProductEnd = 35
 };
+static_assert(kSourceGeometry == 29 && kBandMemo == kSourceGeometry + 1 && kSkeletonProductEnd == kComposedVectors + 1,
+              "the fixed product-id table: 29 source_geometry, 30..34 as listed, End 35");
+
+// Ids of the fixed table whose product has not landed: the registry has an ABSENT slot there (a default ProductDecl with id kNoProduct: no
+// token, no inputs, no reader row, no catalog row), so ids stay indexes and Size() == kSkeletonProductEnd. Registry::Validate accepts an
+// absent slot ONLY at a listed id and rejects a real declaration at a listed id; Has() is false for an absent slot, so any input naming one
+// fails closed ("unknown input product"). The lane that lands a product declares it under its fixed number and deletes the number here.
+constexpr ProductId kReservedProductIds[] = { kBandMemo, kFocusMap, kRoomLight, kComposedVectors };
+constexpr size_t kReservedProductCount = sizeof(kReservedProductIds) / sizeof(kReservedProductIds[0]);
+constexpr bool IsReservedProduct(ProductId id)
+{
+    for (ProductId r : kReservedProductIds)
+        if (r == id)
+            return true;
+    return false;
+}
+// The planned token of a reserved id (shown in the product-graph doc and the Ctrl+Alt+D status line; "" for any other id).
+constexpr const char* ReservedProductName(ProductId id)
+{
+    return id == kBandMemo ? "band_memo" : id == kFocusMap ? "focus_map" : id == kRoomLight ? "room_light"
+         : id == kComposedVectors ? "composed_vectors" : "";
+}
 
 // v1 names of ids 16-18 (kept so existing readers compile; the tokens and contracts are the v2 ones above).
 constexpr ProductId kTdAnalysis = kTdBlocks;
@@ -395,7 +426,14 @@ public:
     Registry() = default;
     explicit Registry(std::vector<ProductDecl> decls) : decls_(std::move(decls)) {}
 
-    size_t Size() const { return decls_.size(); }
+    size_t Size() const { return decls_.size(); }   // id span: declared products plus absent slots of reserved ids
+    size_t ReservedAbsent() const
+    {
+        size_t n = 0;
+        for (size_t i = 0; i < decls_.size(); ++i)
+            n += decls_[i].id == kNoProduct && IsReservedProduct(ProductId(i)) ? 1u : 0u;
+        return n;
+    }
     bool Has(ProductId id) const { return id < decls_.size() && decls_[id].id == id; }
     const ProductDecl& Get(ProductId id) const { return decls_[id]; }
     const std::vector<ProductDecl>& All() const { return decls_; }
@@ -416,6 +454,10 @@ public:
         };
         for (size_t i = 0; i < decls_.size(); ++i) {
             const ProductDecl& d = decls_[i];
+            if (d.id == kNoProduct && IsReservedProduct(ProductId(i)))
+                continue;   // an absent slot of a reserved id: no declaration, no reads, nothing to check
+            if (IsReservedProduct(ProductId(i)))
+                return fail("a declaration sits at a reserved product id (remove the id from kReservedProductIds when its product lands)");
             if (d.id != i)
                 return fail("product ids are not dense");
             if (d.inputCount > kMaxInputs || d.overflow)
@@ -992,6 +1034,38 @@ inline void AppendSourceGeometryProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p);
 }
 
+// edge_map (fixed id 31; lead 8, owner reinstated 11-14, rule 3): the 3x3 Sobel gradient magnitude of the source luma, one R32F
+// sample per source pixel in 10-bit codes (the one tap form, RegionEvidence::kSourceTapCodesPerUnit; R32F rather than r16f so a 12-bit source stays exact). A per-frame GPU memo filled by
+// the owner fill (regions/EdgeMapFill.h) from the P13 ring views; the producer is the owner fill, there is no lane job. Readers acquire it
+// (get-or-compute-and-publish): the focus map and the L-B5 busy-edge share; others may follow.
+// Appends absent slots (default ProductDecl, id kNoProduct) until the next declaration lands at `upTo`; every padded id must be reserved.
+inline void PadReservedUntil(std::vector<ProductDecl>& decls, ProductId upTo)
+{
+    while (decls.size() < size_t(upTo)) {
+        assert(IsReservedProduct(ProductId(decls.size())));
+        decls.push_back(ProductDecl());
+    }
+}
+
+// Pads the reserved ids before (30) and after (32..34) edge_map, so EVERY caller that completes the skeleton set (SkeletonProducts, RegionEvidence)
+// gets the same id-indexed registry of Size() == kSkeletonProductEnd.
+inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    ProductDecl p = Make(kEdgeMap, "edge_map", "edge map (source luma Sobel)", Backend::GpuCompute, 1, Tier::T0,
+                         Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
+    p.sourceFrame = true;
+    AddInput(p, kP13SourceRing, 0);
+    AddTerm(p, 0, 4);   // one R32F sample per source pixel (shift 0 = the full plane)
+    p.refRenderMs = 0.05f;
+    PadReservedUntil(decls, kEdgeMap);
+    decls.push_back(p);
+    PadReservedUntil(decls, kSkeletonProductEnd);
+}
+
 // p7g_camera_guide (doc 56, K4-1; claimed as id 20 by CameraGuideProduct.h, registered here): the measurement plan for pair N is a
 // pure function of camera(N) = P7(N) and P4(N), known ahead and declared as a lane product. d = 0 (refs 93-prep-cam-d0): the fit of
 // the SAME pair, published on time from the ahead field before the matcher of N runs; a pair whose camera is not ready in time runs
@@ -1264,6 +1338,7 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double s
     AppendCameraGuideProduct(d);
     AppendTemporalDetailEngineProducts(d, sourcePeriodMs, queueFrames);
     AppendSourceGeometryProduct(d);   // wave S2: P14g, appended after the doc 72 list
+    AppendEdgeMapProduct(d);          // L-B5 / rule 3: fixed id 31, after source_geometry; pads reserved ids 30 and 32..34 (Size() == kSkeletonProductEnd)
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }

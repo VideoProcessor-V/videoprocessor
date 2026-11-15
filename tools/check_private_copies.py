@@ -142,7 +142,7 @@ def registration_owner_folders(root):
 
 # Rule b: product -> accessor regex (a consumer reads the product through one of these).
 ACCESSOR = {
-    "kP10GrainSplit": r"GrainSplit::Gpu|\bgrain\.(Gpu|Cpu)\b|GrainPlane|GrainSplit::View|ViewGlsl|\bgrainSplit\b|\bparams\.grain\b",
+    "kP10GrainSplit": r"Acquire\(\s*(VpSkeleton::)?kP10GrainSplit|GrainSplit::Gpu|\bgrain\.(Gpu|Cpu)\b|GrainPlane|GrainSplit::View|ViewGlsl|\bgrainSplit\b|\bparams\.grain\b",
     "kP11RegionBlockStats": r"RegionBlockStats|\bblockStats\b|\bregionBlock\w*",
     "kP12LightLevel": r"LightLevel|\blightLevel\b",
     "kP13SourceRing": r"SourceRing|\bsourceRing\b|SourceFrameView",

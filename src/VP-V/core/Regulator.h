@@ -4,6 +4,7 @@
 
 #include "Indicator.h"
 #include "Products.h"
+#include "RobustStats.h"
 
 #include <algorithm>
 #include <array>
@@ -428,12 +429,6 @@ private:
         }
     }
 
-    static double Percentile(std::vector<double>& sorted, double q)
-    {
-        const size_t n = sorted.size();
-        return sorted[size_t(std::floor(q * double(n - 1)))];
-    }
-
     void EndWindow(uint64_t seq)
     {
         lastSeq_ = seq;
@@ -442,11 +437,10 @@ private:
         std::vector<double> r(render_);
         slack_.clear();
         render_.clear();
-        std::sort(s.begin(), s.end());
-        std::sort(r.begin(), r.end());
-        const double slackLow = Percentile(s, 0.05);
-        const double p50 = Percentile(r, 0.50);
-        const double p99 = Percentile(r, 0.99);
+        // core/RobustStats.h (ND06): the FloorIndex rank rule, sorted[floor(q * (n - 1))], as the private Percentile was.
+        const double slackLow = RobustStats::Quantile(s, 0.05, RobustStats::RankRule::FloorIndex);
+        const double p50 = RobustStats::Quantile(r, 0.50, RobustStats::RankRule::FloorIndex);
+        const double p99 = RobustStats::Quantile(std::move(r), 0.99, RobustStats::RankRule::FloorIndex);
         const double spread = std::max(0.0, p99 - p50);
 
         // Margin from the render-only spread; the long EMA is frozen after a back-off.

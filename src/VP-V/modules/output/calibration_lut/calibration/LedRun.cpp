@@ -3,6 +3,7 @@
 #include <pch.h>
 
 #include "LedRun.h"
+#include <VP-V/core/RobustStats.h>
 
 #include <algorithm>
 #include <chrono>
@@ -26,13 +27,7 @@ namespace Calibration
 			return SteadySeconds(std::chrono::steady_clock::now());
 		}
 
-		double MedianOf(std::vector<double> v)
-		{
-			if (v.empty()) return 0.0;
-			std::sort(v.begin(), v.end());
-			const size_t n = v.size();
-			return n % 2 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
-		}
+		double MedianOf(std::vector<double> v) { return RobustStats::Median(std::move(v)); }   // core/RobustStats.h (ND06)
 
 		std::wstring WidePath(const std::string& text)
 		{

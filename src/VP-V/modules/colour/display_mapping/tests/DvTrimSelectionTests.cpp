@@ -9,7 +9,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
+#include <VP-V/modules/colour/display_mapping/DvTrimSelection.h>
 
 #include <cmath>
 #include <cstring>
