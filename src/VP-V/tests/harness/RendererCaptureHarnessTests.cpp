@@ -3039,7 +3039,15 @@ namespace Tests
 				// so the same still picture gave one of two codes in either mode (off and on swapped them
 				// run to run). The occlusion mask alone keeps the estimate on film (B uploaded, the reuse
 				// path exercised) without extras: every present is a main one.
-				const std::string extra = std::string("dejudder_strength: 0\nocclusion_mask: on\nefficiency_fixes: ") + (fixes ? "on" : "off") +
+				// WAIVER-FIXA-EF-01 (2026-11-15, premise only; assertions unchanged): since W2-C1 C1-4 (3472fd439, VectorDemand.h
+				// "the occlusion mask alone, with no starter running, is a refused start"; DejudderPolicy::Decide reads
+				// occlusionMaskServed) the mask alone no longer runs the estimate, so neither run estimated and the first
+				// assertion below failed at base 8b8883528 and at C4. The estimate gets the de-judder's standing demand
+				// (dejudder_strength 0.25, as T-TH-SM-01 9056bddea did for the same W2-C1 cause). Gate r3's concern: the run is
+				// off screen (onScreen false: never fullscreen), where the extras hold for want of display timing ("timing not
+				// known: display rate"), and render_ahead is pinned off (no open-loop extras), so every present is a main one.
+				// If a machine does present extras off screen (r3 saw it at strength 1.0), the identity assertion below shows it.
+				const std::string extra = std::string("dejudder_strength: 0.25\nocclusion_mask: on\nrender_ahead: off\nefficiency_fixes: ") + (fixes ? "on" : "off") +
 					"\n[vprenderer.Default]\ndithering: off\ndeband: off\n";
 				const RunResult r = Run(VideoFrameEncoding::V210, capturePath, 4.5, true, extra, false, &plan);
 				Assert::IsFalse(r.captureMetadata.empty(), (std::wstring(name) + L": capture written\n" + r.Tail()).c_str());
