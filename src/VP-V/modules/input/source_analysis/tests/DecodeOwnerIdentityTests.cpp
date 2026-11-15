@@ -18,6 +18,7 @@
 #include "CppUnitTest.h"
 
 #include <AnalysisLumaSource.h>
+#include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
 #include <VP-V/tests/SyntheticAnalysisFrames.h>
 
@@ -133,7 +134,39 @@ namespace DecodeOwnerIdentityTestsNs
 		Assert::IsTrue(a.range.btb == b.range.btb && a.range.wtw == b.range.wtw, (name + L" btb/wtw").c_str());
 		Assert::IsTrue(a.range.nearBlack == b.range.nearBlack && a.range.clipped == b.range.clipped, (name + L" near-black/clipped").c_str());
 		// No grain comparison: jb2 (c359c921d, unit-5 grain split) retired the Reducer's CPU grain estimate, so Measured has
-		// no grain field; grain is the grain split unit's product, not this reducer's.
+		// no grain field; grain is the grain split unit's product, not this reducer's. SameGrain below asserts it on that path.
+	}
+
+	// Grain on jb2's replacement path (coordinator ruling on WAIVER-C5-15C6-GRAIN-RETIRED): the grain split laws over the
+	// owner's plane equal the same laws over the oracle's plane, every band, the Wiener share, the clean / grain planes and
+	// every block level and energy, exactly. Both the production CPU law (Compute, v3) and the V2 A/B baseline (ComputeV2).
+	GrainSplit::Plane GrainInput(const std::vector<uint16_t>& codes)
+	{
+		GrainSplit::Plane y(kWidth, kHeight);
+		for (size_t i = 0; i < codes.size() && i < y.v.size(); ++i)
+			y.v[i] = static_cast<double>(codes[i]);
+		return y;
+	}
+
+	void SameSplit(const GrainSplit::Split& a, const GrainSplit::Split& b, const std::wstring& name)
+	{
+		Assert::IsTrue(a.w == b.w && a.h == b.h && a.bw == b.bw && a.bh == b.bh && a.B == b.B, (name + L" grain geometry").c_str());
+		const GrainSplit::Plane* pa[] = { &a.base, &a.d1, &a.d2, &a.d3, &a.f, &a.s1, &a.s2, &a.clean, &a.grain };
+		const GrainSplit::Plane* pb[] = { &b.base, &b.d1, &b.d2, &b.d3, &b.f, &b.s1, &b.s2, &b.clean, &b.grain };
+		for (size_t i = 0; i < sizeof(pa) / sizeof(pa[0]); ++i)
+			Assert::IsTrue(pa[i]->w == pb[i]->w && pa[i]->h == pb[i]->h && pa[i]->v == pb[i]->v,
+				(name + L" grain plane " + std::to_wstring(i)).c_str());
+		Assert::IsTrue(a.N == b.N, (name + L" grain level N").c_str());
+		Assert::IsTrue(a.e1 == b.e1 && a.e2 == b.e2 && a.e3 == b.e3, (name + L" grain block energies").c_str());
+		Assert::IsFalse(a.N.empty(), (name + L" grain has blocks").c_str());
+	}
+
+	void SameGrain(const std::vector<uint16_t>& oracle, const std::vector<uint16_t>& owner, const std::wstring& name)
+	{
+		const GrainSplit::Plane yo = GrainInput(oracle), yw = GrainInput(owner);
+		SameSplit(GrainSplit::Compute(yo, 1.0, 16), GrainSplit::Compute(yw, 1.0, 16), name + L" (v3)");
+		SameSplit(GrainSplit::ComputeV2(yo, 1.0, 16, GrainSplit::ParamsV2()), GrainSplit::ComputeV2(yw, 1.0, 16, GrainSplit::ParamsV2()),
+			name + L" (V2)");
 	}
 
 	TEST_CLASS(DecodeOwnerIdentityTests)
@@ -194,6 +227,7 @@ namespace DecodeOwnerIdentityTestsNs
 									Name(kind, limited, bt2020, frame, L"plane size").c_str());
 								Assert::IsTrue(std::memcmp(x.data(), y.data(), x.size() * sizeof(uint16_t)) == 0,
 									Name(kind, limited, bt2020, frame, L"plane bytes").c_str());
+								SameGrain(x, y, Name(kind, limited, bt2020, frame, L"grain split"));
 								Assert::IsNotNull(owner.SharedLumaRow(0), Name(kind, limited, bt2020, frame, L"published").c_str());
 								Assert::IsFalse(Vpv::AnalysisDomain::DecodeSharedLuma(owner),
 									Name(kind, limited, bt2020, frame, L"decoded once").c_str());
