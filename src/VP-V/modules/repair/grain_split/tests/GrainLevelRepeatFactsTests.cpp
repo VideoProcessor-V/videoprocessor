@@ -6,9 +6,9 @@
 #endif
 #include "CppUnitTest.h"
 
-// P10g C8 (floor design s15) with the per-neighbour RepeatFact tri-state: producer facts decide without the block test, Unknown runs the
-// block test, frozen-12 and dup2 rows, still and aerial-crop rows with 0 false fires on both paths, threshold clamp, gate off, status text.
-// CPU only, deterministic, synthetic frames. New tests only (a new file; no existing test touched).
+// P10g C8 (floor design s15) with the per-neighbour RepeatFact tri-state: the block test is PRIMARY (owner OD:744) and runs for every
+// neighbour not named Repeat; a Repeat fact only adds a drop, a Distinct fact never vetoes the test. Frozen-12 and dup2 rows, still and
+// aerial-crop rows with 0 false fires on both paths, threshold clamp, gate off, status text. CPU only, deterministic, synthetic frames.
 
 #include <VP-V/modules/repair/grain_split/GrainLevel.h>
 #include <VP-V/core/FallbackCatalog.h>
@@ -87,16 +87,21 @@ namespace GrainLevelRepeatFactsNs
 	TEST_CLASS(GrainLevelRepeatFactsTests)
 	{
 	public:
-		TEST_METHOD(FactsDecideWithoutTheBlockTest)
+		TEST_METHOD(BlockTestIsPrimaryFactsSupport)
 		{
 			Rig s;
 			const std::vector<uint32_t> seeds = { 91, 90, 92, 93 };
 			const GrainLevel::NeighbourResult a = Run(s, 2.0, false, 90, seeds, { RepeatFact::Distinct, RepeatFact::Repeat, RepeatFact::Distinct, RepeatFact::Distinct }, GrainLevel::Params());
-			Require(a.droppedByFacts == 1 && a.droppedByBlockTest == 0 && a.blockTestRuns == 0 && a.usedNeighbours == 3, "facts name the repeat: no block test runs");
+			Require(a.droppedByFacts == 1 && a.droppedByBlockTest == 0 && a.blockTestRuns == 3 && a.usedNeighbours == 3, "a Repeat fact drops its neighbour without a test; the block test still runs for the three Distinct ones and keeps them");
 			const GrainLevel::NeighbourResult b = Run(s, 2.0, false, 90, seeds, {}, GrainLevel::Params());
 			Require(b.droppedByFacts == 0 && b.droppedByBlockTest == 1 && b.blockTestRuns == 4 && b.usedNeighbours == 3, "facts Unknown: the block test ran for all four and found the repeat");
 			const GrainLevel::NeighbourResult c = Run(s, 2.0, false, 90, seeds, { RepeatFact::Distinct, RepeatFact::Distinct, RepeatFact::Distinct, RepeatFact::Distinct }, GrainLevel::Params());
-			Require(c.droppedRepeat == 0 && c.usedNeighbours == 4, "a Distinct fact is trusted: kept, no block test (the producer owns that claim)");
+			Require(c.droppedRepeat == 1 && c.droppedByBlockTest == 1 && c.blockTestRuns == 4 && c.usedNeighbours == 3, "a Distinct fact never vetoes the block test: the exact repeat the bit called Distinct is dropped");
+			Require(c.droppedByFacts == 0 && c.repeatJudged == 4 && c.repeatJudged == b.repeatJudged && c.blockTestRuns == b.blockTestRuns && c.droppedByBlockTest == b.droppedByBlockTest,
+				"Distinct facts give the same block-test verdict as Unknown facts (the bit does not change the test)");
+			// positive: one Distinct neighbour that really is distinct still gets the block test, which judges and keeps it
+			const GrainLevel::NeighbourResult d = Run(s, 2.0, false, 90, { 91 }, { RepeatFact::Distinct }, GrainLevel::Params());
+			Require(d.offered == 1 && d.blockTestRuns == 1 && d.repeatJudged == 1 && d.droppedRepeat == 0 && d.usedNeighbours == 1, "a single Distinct neighbour still runs the block test and is kept");
 		}
 
 		TEST_METHOD(Frozen12AndDup2OnBothPaths)
