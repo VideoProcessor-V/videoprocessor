@@ -442,7 +442,7 @@ namespace Vpv
 			// Delivery (audit U7ACC MUST 3): cuts delivered late (with a later frame's group), of them more than one frame late (frame
 			// c + 1 had no group: dropped, unsealed or no record), and the newest frame a fill judged (the late search starts there).
 			std::atomic<uint64_t> sceneLate{ 0 }, sceneLateGap{ 0 };
-			std::atomic<uint64_t> sceneNoGrid{ 0 };   // confirmed verdicts given by the no-grid fallback (the v1 pair law: plane under 32 x 18)
+			std::atomic<uint64_t> sceneNoGrid{ 0 };   // no-grid fallback verdicts (the v1 pair law: plane under 32 x 18), counted per tracker push (re-primes push again)
 			bool sceneHasFilled = false;
 			uint64_t sceneLastFilled = 0;
 			uint64_t feedEra = 0;
@@ -733,7 +733,8 @@ namespace Vpv
 			// frame's own verdict, judged with frame seq + 1). A provisional verdict refuses nothing.
 			// Vector pairs the veto let through because their frame had no confirmed verdict yet (process-wide, as the seam), and of them
 			// the pairs into a frame later CONFIRMED as a cut (vectors across a real cut were used before the verdict: one frame of the
-			// one-frame-late law). A small ring of the recent unjudged frames links the two; shown on "Skeleton scene:".
+			// one-frame-late law). A small ring of the recent unjudged frames links the two; shown on "Skeleton scene:". Approximate:
+			// every ask counts (a frame asked twice counts twice), and a link older than kUnjudgedRing frames is lost.
 			constexpr size_t kUnjudgedRing = 32;
 			std::atomic<uint64_t>& ScenePairsUnjudged() { static std::atomic<uint64_t> n{ 0 }; return n; }
 			std::atomic<uint64_t>& ScenePairsAcrossLateCut() { static std::atomic<uint64_t> n{ 0 }; return n; }
