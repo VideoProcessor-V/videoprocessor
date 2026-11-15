@@ -103,6 +103,17 @@ namespace ScalerPass
 		}
 		const pl_filter_function kHermiteExact = { "hermite_exact", 2.0f, false, {}, {}, HermiteExactWeight };
 
+		// Bilinear (triangle, 1 - |x| on [0,1]) is all-positive too, so it had the same ~1 code
+		// hardware-bilinear error (C4 union WARP TRX: 1.0084 codes at 2.22x, upsc1 SHOULD 6). The same
+		// -1e-12 tail on (1,1.5) keeps the weights and makes the exact one-tap-per-texel path run.
+		double BilinearExactWeight(const pl_filter_ctx*, double x)
+		{
+			x = x < 0 ? -x : x;
+			if (x < 1.0) return 1.0 - x;
+			return x < 1.5 ? -1e-12 : 0.0;
+		}
+		const pl_filter_function kBilinearExact = { "bilinear_exact", 2.0f, false, {}, {}, BilinearExactWeight };
+
 		// True when libplacebo's ortho sampler will NOT use the half-fetch hardware-bilinear
 		// path for this filter (it does so exactly when radius == radius_zero).
 		bool ExactTapsTaken(const pl_filter_config& cfg)
@@ -121,6 +132,13 @@ namespace ScalerPass
 		// The Hermite config is a constant (FilterConfig ignores the spec's parameters for it), so
 		// the filter is generated once, not on every Apply on the render thread.
 		bool HermiteTakesExactTaps(const pl_filter_config& cfg)
+		{
+			static const bool exact = ExactTapsTaken(cfg);
+			return exact;
+		}
+
+		// The Bilinear config is a constant too (no spec parameters).
+		bool BilinearTakesExactTaps(const pl_filter_config& cfg)
 		{
 			static const bool exact = ExactTapsTaken(cfg);
 			return exact;
@@ -146,7 +164,10 @@ namespace ScalerPass
 			c = pl_filter_hermite;
 			c.kernel = &kHermiteExact;
 			break;
-		case ScalerKernels::Kind::Bilinear: c = pl_filter_bilinear; break;
+		case ScalerKernels::Kind::Bilinear:
+			c = pl_filter_bilinear;
+			c.kernel = &kBilinearExact;
+			break;
 		default: c = pl_filter_ewa_lanczossharp; break;
 		}
 		return c;
@@ -233,6 +254,8 @@ namespace ScalerPass
 		const pl_filter_config cfg = FilterConfig(st.filter);
 		if (st.filter.kind == ScalerKernels::Kind::Hermite && !HermiteTakesExactTaps(cfg))
 			return fail("Hermite did not take the exact-tap ortho path (hardware-bilinear half fetches would cost ~1 code)");
+		if (st.filter.kind == ScalerKernels::Kind::Bilinear && !BilinearTakesExactTaps(cfg))
+			return fail("Bilinear did not take the exact-tap ortho path (hardware-bilinear half fetches would cost ~1 code)");
 		bool ok = true;
 		if (polar)
 			ok = Polar(dispatch, src.tex, textures[slot], ax0, ay0, ax1, ay1, outW, outH, cfg, st.antiring, &luts[slot][0]);

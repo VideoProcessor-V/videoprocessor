@@ -71,6 +71,9 @@ model. Each decision cites the owner lines of refs/123 N0.
   resolution, but it makes radius > radius_zero. Cost: about 4x the texture reads of the 2-fetch path. `Apply` checks this once on an
   equivalent generated filter and REFUSES visibly (`LastError`, "did not take the exact-tap ortho path") if the exact path would not run.
   This tail trick is temporary: it expires when the explicit fork flag lands (102b UPSC1-EXACT-TAPS-FLAG).
+- Bilinear (triangle) takes the same exact-tap path by the same tail trick (`bilinear_exact`, 1 - |x| with a -1e-12 tail on (1, 1.5)),
+  with the same once-only check and visible refusal. Reason: the C4 union WARP TRX measured 1.0084 codes at 10-bit for `other kernel 2.22x`
+  on the hardware-bilinear path (upsc1 SHOULD 6). The same 102b expiry applies.
 
 ## Migration identity (proved by tests, B0 does not switch any user)
 
@@ -89,10 +92,10 @@ Nothing was built or run when this slice was written (code-only; the build + TRX
 libplacebo are not modelled by the reference (parity tests use antiring 0 and equal-axis polar checks), and the bench (1080 to 2160 luma)
 has no number yet.
 
-- Hermite exact-tap fix (6ea4251e1/c502b30ba): not yet shown on a TRX. `ScalerGpuParityAtTheBriefsRatios` must pass on the fixed tip.
-- Bilinear (radius 1 == radius_zero) still takes libplacebo's hardware-bilinear path, with the same ~8-bit sub-texel fraction. It
-  passes parity at the one tested 2.22x case only. Either confirm it at every factor in the parity TRX, or tie it to 102b
-  UPSC1-EXACT-TAPS-FLAG. The tolerance stays 1 code.
+- Hermite exact-tap fix (6ea4251e1/c502b30ba): shown on the C4 union WARP TRX (`other kernel 2.22x` Hermite 0.0124 codes).
+- Bilinear: it took libplacebo's hardware-bilinear path and FAILED parity on the C4 union WARP TRX (1.0084 codes at 2.22x). It now
+  takes the exact-tap path (see above). `ScalerGpuParityAtTheBriefsRatios` must pass on the fixed tip (WARP and NVIDIA). Bilinear is
+  tested at the one 2.22x case only; the other factors stay open under 102b UPSC1-EXACT-TAPS-FLAG. The tolerance stays 1 code.
 
 ## How to build / test
 
