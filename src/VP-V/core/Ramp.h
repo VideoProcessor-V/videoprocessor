@@ -5,13 +5,15 @@
 #include <algorithm>
 
 // ONE set of clamp / ramp / smoothstep / mix helpers (rule 20, ND07). Private copies existed in the light-level
-// LUT, dither need, region evidence, source-identity vote, step detector and global-model fit; they differ only in
-// two small rules, kept as explicit axes so every site stays bit-identical:
+// LUT, dither need, region evidence, source-identity vote, step detector, global-model fit, grain split, temporal
+// detail and texture restore (DetailPulse called Bill's GrainPreserve::Smoothstep); they differ only in small rules,
+// kept as explicit axes so every site stays bit-identical:
 //   * Clamp01 passes NaN through (as the template copies did); Clamp01NanToZero maps NaN to 0 (the vote / step copies).
-//   * Smoothstep's degenerate edge: StepWhenEqual (e0 == e1 is a step at e0; a reversed e1 < e0 ramps downwards)
-//     or StepWhenNotAscending (any e1 <= e0 is a step at e0, the dither-need rule).
-//     or Unguarded (no edge guard: the ONE no-guard smoothstep of TemporalDetail, TextureRestore and DetailPulse;
-//     exactly Bill's GrainPreserve::Smoothstep law, t = max(0, min(1, q)), so a NaN ratio q gives t = 1, never NaN).
+//   * Smoothstep has THREE edge rules (SmoothRule):
+//     - StepWhenEqual: e0 == e1 is a step at e0; a reversed e1 < e0 ramps downwards (the light-level LUT rule);
+//     - StepWhenNotAscending: any e1 <= e0 is a step at e0 (the dither-need rule, the default);
+//     - Unguarded: no edge guard, the ONE no-guard smoothstep of TemporalDetail, TextureRestore and DetailPulse;
+//       exactly Bill's GrainPreserve::Smoothstep law, t = max(0, min(1, q)), so a NaN ratio q gives t = 1, never NaN.
 // The two guarded Smoothstep rules are a registered rule-20 VARIANT (unifying changes a reversed edge in the light-level LUT: a FIX, deferred).
 // Unguarded is bit-identical to Bill's formula for every input and to the old ternary-clamp copies for every non-NaN q
 // (C6-1 U25 ruling 5b: NaN-safe, DetailPulse output unchanged; NaN never propagates toward pixels).
