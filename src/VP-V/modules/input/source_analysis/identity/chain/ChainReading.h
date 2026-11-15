@@ -22,7 +22,7 @@
 //
 // Also here (kept from the former latch file): MakeFieldEvidence + the kernel equivalence-class pick, ConfFromLlr, KernelConfidence.
 //
-// Header-only, standard library only, C++14, no clock (time = source time in EvalContext), deterministic.
+// Header-only, standard library + VP-V core headers, C++14, no clock (time = source time in EvalContext), deterministic.
 #include <VP-V/core/OnePole.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceGeometryProduct.h>
 
