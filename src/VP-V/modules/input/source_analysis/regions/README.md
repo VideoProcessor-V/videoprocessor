@@ -125,7 +125,25 @@ installation (a newer module's provider is kept).
   for temporal detail (one unit, rule 20), not a second estimator.
 - Fill input: the monitor stages its tile pack for the seq (`Hub::Stage`); the owner fill measures it. The hub is a module-level seam
   whose memo provider is set from this unit's own block in SkeletonModule.cpp (no Bill hook line). L-CORE's MemoFor replaces only the provider.
-- Seq: the monitor's frame sequence (a frame older than the memo's keep window is refused and shown as unavailable).
+- Seq: the monitor's frame sequence. The fill declares keepFrames = the monitor's worker latency; a lagging monitor frame inside
+  that window fills once at read (the memo's release is per owner, P16-LATCH-EVIDENCE); one older is refused (FrameReleased) and
+  shown as unavailable.
 
 **Provenance.** Algorithms: Hunt 2 M2 (effective bits, Hill number of order 4 over 16-code windows), M3 (grid finder, band-edge
 blocks), specs 1b / 2d; code moved verbatim from SourceResolutionDetector.cpp at f61d18823. Tests: tests/CodingEvidenceTests.cpp.
+
+## BusyEdge (L-B5, in progress): S5 busy share and edge map
+
+Design goal: one computation of the debander guard's busy share (P11 term S5, variant axes: canonical lap_min / ext_min thresholds and
+plane) and one per-pixel Sobel edge map (ProductId kEdgeMap, consumers AdaptiveDownscale and L-FOCUS, later P11 gmax), both owner-filled
+in source_analysis and read by consumers through Acquire. Philosophy: the arithmetic is MOVED from VpDebander / AdaptiveDownscale, not
+copied; a private pass is deleted in the same commit as its consumer's switch.
+Status: BusyEdge.h (CPU reference and tolerance oracle) and BusyEdgeGlsl.h (shader mirrors, one tap form kSourceTapCodesPerUnit) exist
+with BusyEdgeTests. The kEdgeMap owner fill (EdgeMapFill.h, on L-CORE's OwnerFillRequest::gpu) is built; its MODULE is
+registered at start-up (HubBootstrap) and the FILL at the first observed Entrance size (reserve derived from the source luma size, rule 6) with EdgeMapFillTests (registration, reserve, CPU declines; the GPU
+parity test is owed before the first reader row, 102b KEDGEMAP-RULE3). It has NO reader yet, so it never runs; no consumer is switched and
+every private pass (debander guard, AdaptiveDownscale measure) is still present. Decisions: R14-66 (lead 14, 2026-11-14 20:54Z,
+lead14-state.md:102) registers kEdgeMap under rule 3, first reader L-FOCUS; R14-64 (lead 14, 2026-11-14 ~21:10Z, lead14-state.md:89)
+kept X5 private, superseded by the owner's ruling of 2026-11-14 ~17:00 EST (design-EDGEMAP-DOMAIN-AXIS rev 2, 102b X5-EDGEMAP-CJ3): X5
+acquires a kEdgeMap stage variant in CJ-3.
+Settings: none added (no new keys); thresholds are the debander's existing lap_min / ext_min.

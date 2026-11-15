@@ -85,7 +85,7 @@ namespace VpMotion
 		// Bug hunt 2026-10-17 (timing_continuity_fixes): the last good measurement is held
 		// while a cadence reset zeroes it (DisplayRateHold); the monitor's rate only when
 		// nothing was measured since start or a mode change. Render thread.
-		DisplayRateHold timelineDisplayRateHold;
+		mutable DisplayRateHold timelineDisplayRateHold; // train2: TimelineDisplayHz() const mutates it (was a reference alias before S-P11B)
 		// W1-C2a MUST 2: the `motion-history` reader the apply point takes from is VectorEngineState::motionResyncReaders
 		// (the readers the resync "motion" provider registers); the separate, never-registered copy here was removed.
 	};

@@ -10,8 +10,12 @@
 //                      the EditorKit default (null / empty / false).
 
 #include <VideoProcessor-Config/ConfigPageHost.h>
+#include <VP-V/modules/control/config/config_pages/VpvFormLayout.h>   // S4A: the editor reaches it through here, not by an include line of its own
 
 #include <functional>
+
+class ConfigEditorWindow;
+class QComboBox;
 
 namespace Vpv
 {
@@ -94,4 +98,13 @@ namespace Vpv
 		{ return profileSectionsFn ? profileSectionsFn(root) : QStringList(); }
 		ConfigPageHost::EditorKit* editorKit() override { return &kit; }
 	};
+
+	// S4A A4 (refs/112 pattern P2): the editor's VP-V seams, defined in ConfigEditorAccess.inl (included once, at the end
+	// of ConfigEditorWindow.cpp). The editor names this struct as its only friend line for them.
+	struct ConfigEditorAccess
+	{
+		static void BindFormApi(::ConfigEditorWindow& window);
+		static void BuildVpvPages(::ConfigEditorWindow& window);
+	};
+	void ApplyMotionAheadText(QComboBox* motionAhead);
 }

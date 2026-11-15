@@ -1797,47 +1797,92 @@ namespace Tests
 			const Case cases[] = { { "v210 59.94", VideoFrameEncoding::V210, false },
 				{ "v210 23.976", VideoFrameEncoding::V210, true } };
 			g_harnessPlainConfig = true;   // restored by HarnessScope
-			// DIV-ORIG-01 (CLOSED 2026-11-11): VP_TEST_ADAPTER is honoured only by VP-V's renderer; Bill's build
-			// renders on the default adapter. Unset for BOTH renders so both use the same adapter; restored below.
-			const std::string savedAdapter = HarnessEnvText("VP_TEST_ADAPTER");
+			// DIV-ORIG-01 (CLOSED 2026-11-11), owner decision R14-49: a SAME-ADAPTER comparison on the Windows
+			// default adapter. VP_TEST_ADAPTER is honoured only by VP-V's renderer and Bill's build has no adapter
+			// selection, so the variable is cleared for BOTH renders (it never steers ours here). Each render's
+			// adapter is parsed from its own log and the test requires both parsed and equal.
+			// VP_TEST_ADAPTER and VP_TEST_ENTRANCE_ONCE are restored even when an assert throws.
+			struct EnvRestore
+			{
+				std::string adapter, once;
+				EnvRestore() : adapter(HarnessEnvText("VP_TEST_ADAPTER")), once(HarnessEnvText("VP_TEST_ENTRANCE_ONCE")) {}
+				~EnvRestore()
+				{
+					_putenv_s("VP_TEST_ADAPTER", adapter.c_str());
+					_putenv_s("VP_TEST_ENTRANCE_ONCE", once.c_str());
+				}
+			} envRestore;
 			_putenv_s("VP_TEST_ADAPTER", "");
-			// The adapter each render used: the renderer's "libplacebo initialized: D3D11 on <gpu>, ..." line.
-			auto adapterLine = [] {
-				const std::string key = "libplacebo initialized: D3D11 on ";
+			// The adapter each render used, from that render's own log: "libplacebo DXGI adapter: name=<gpu> luid=..."
+			// (Bill's build logs only this one), else VP-V's "libplacebo initialized: D3D11 on <gpu>, ..." line.
+			// Returns false (name empty) when neither line is present: a parse failure is never a match.
+			auto adapterLine = [](std::string& name) {
+				const std::string dxgiKey = "libplacebo DXGI adapter: name=";
+				const std::string initKey = "libplacebo initialized: D3D11 on ";
+				name.clear();
 				std::lock_guard<std::mutex> guard(g_logMutex);
 				for (const std::string& line : g_log)
 				{
-					const size_t at = line.find(key);
+					const size_t at = line.find(dxgiKey);
 					if (at == std::string::npos) continue;
-					const size_t from = at + key.size();
-					const size_t comma = line.find(',', from);
-					return line.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
+					const size_t from = at + dxgiKey.size();
+					const size_t end = line.find(" luid=", from);
+					name = line.substr(from, end == std::string::npos ? std::string::npos : end - from);
+					return !name.empty();
 				}
-				return std::string("(not logged)");
+				for (const std::string& line : g_log)
+				{
+					const size_t at = line.find(initKey);
+					if (at == std::string::npos) continue;
+					const size_t from = at + initKey.size();
+					const size_t comma = line.find(',', from);
+					name = line.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
+					return !name.empty();
+				}
+				return false;
 			};
 			std::string failures;
 			for (const Case& c : cases)
 			{
-				g_harnessRendererDll.clear();
-				const std::string a = StillPictureHash(c.encoding, "standard", c.film, ours);
-				const std::string adapterOurs = adapterLine();
+				// Bill first, then ours, both with the variable cleared (default adapter).
 				// The harness adds a [vpv] section itself when VP_TEST_ENTRANCE_ONCE=1: not for Bill's build.
-				const std::string savedOnce = HarnessEnvText("VP_TEST_ENTRANCE_ONCE");
 				_putenv_s("VP_TEST_ENTRANCE_ONCE", "");
+				_putenv_s("VP_TEST_ADAPTER", "");
 				g_harnessRendererDll = bill;
 				const std::string b = StillPictureHash(c.encoding, "standard", c.film, theirs);
-				const std::string adapterBill = adapterLine();
+				std::string adapterBill;
+				const bool billParsed = adapterLine(adapterBill);
 				g_harnessRendererDll.clear();
-				_putenv_s("VP_TEST_ENTRANCE_ONCE", savedOnce.c_str());
+				_putenv_s("VP_TEST_ENTRANCE_ONCE", envRestore.once.c_str());
+				_putenv_s("VP_TEST_ADAPTER", "");
+				const std::string a = StillPictureHash(c.encoding, "standard", c.film, ours);
+				std::string adapterOurs;
+				const bool oursParsed = adapterLine(adapterOurs);
 				Logger::WriteMessage((std::string("== ") + c.name + ": ours (original) " + a + ", bill " + b + "\n").c_str());
-				Logger::WriteMessage((std::string("   adapter: ours ") + adapterOurs + ", bill " + adapterBill + "\n").c_str());
+				Logger::WriteMessage((std::string("   adapter: ours ") + (oursParsed ? adapterOurs : std::string("(not logged)")) +
+					", bill " + (billParsed ? adapterBill : std::string("(not logged)")) + "\n").c_str());
+				if (!envRestore.adapter.empty())
+					Logger::WriteMessage((std::string("   VP_TEST_ADAPTER=") + envRestore.adapter +
+						" ignored by this test: both renders ran on the Windows default adapter\n").c_str());
+				if (!billParsed)
+				{
+					Logger::WriteMessage((std::string("   ADAPTER-NOT-PARSED bill: ") + c.name + "\n").c_str());
+					failures += std::string(c.name) + ": Bill's adapter was not logged (unverified); ";
+				}
+				if (!oursParsed)
+				{
+					Logger::WriteMessage((std::string("   ADAPTER-NOT-PARSED ours: ") + c.name + "\n").c_str());
+					failures += std::string(c.name) + ": our adapter was not logged (unverified); ";
+				}
+				if (billParsed && oursParsed && adapterBill != adapterOurs)
+					failures += std::string(c.name) + ": the two renders used different adapters (ours " + adapterOurs +
+						", bill " + adapterBill + "); ";
 				const std::string vsBill = std::string(c.name) + " vs bill";
 				if (a.empty() || b.empty())
 					failures += std::string(c.name) + ": a capture is missing; ";
 				else if (a != b && !allowed(vsBill))
 					failures += vsBill + ": the Original pathway output differs (" + a + " vs " + b + "); ";
 			}
-			_putenv_s("VP_TEST_ADAPTER", savedAdapter.c_str());
 			Assert::IsTrue(failures.empty(), WideOf(failures).c_str());
 		}
 
@@ -4330,6 +4375,9 @@ namespace Tests
 			still.rateNumerator = 24000;
 			still.captureAtSeconds = 2.5;
 			still.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			// The first render can stall for seconds while shaders compile (another process on
+			// the GPU, a cold cache): the capture is asked again until the renderer accepts it.
+			still.retryRefusedCapture = true;
 			auto hashOf = [&](const std::string& extra, const wchar_t* name, RunResult& r) {
 				r = Run(VideoFrameEncoding::R210, "standard", 3.5, true, extra + settings, false, &still);
 				Assert::IsTrue(r.presented, (std::wstring(name) + L": frames presented\n" + r.Tail()).c_str());
@@ -4365,16 +4413,33 @@ namespace Tests
 			Assert::AreEqual(cpuHash, fallbackHash, L"the CPU fallback presents the same codes");
 			// DM loss in every mode: black while the header is untrusted, the
 			// picture back after it (never the packed pixels or a stale picture).
+			// The damaged window is counted from the first picture the renderer analysed with a
+			// CRC-valid header (the DV lock), not from the first frame sent: while the first render
+			// stalls (shader compile, a busy GPU) the renderer's queue drops the early frames, and
+			// a window counted from the start fell before any lock (no DV lock: SDR passthrough, no
+			// black; or the whole run before the first presented frame). The run is long enough
+			// for a 5 s start-up stall plus the window and the restore.
 			FramePlan loss;
 			loss.rateNumerator = 24000;
-			loss.step = [](int n) { return FrameStep{ true, n >= 36 && n < 60 ? 1 : 0, 0 }; };
+			loss.step = [lockN = -1](int n) mutable {
+				if (n == 0)
+					lockN = -1;   // one plan serves the three modes: each run counts from its own lock
+				if (lockN < 0)
+				{
+					std::lock_guard<std::mutex> guard(g_logMutex);
+					for (const std::string& line : g_log)
+						if (line.find("Dolby Vision RGB tunnel: CRC-validated") != std::string::npos) { lockN = n; break; }
+				}
+				const int m = lockN < 0 ? 0 : n - lockN;
+				return FrameStep{ true, lockN >= 0 && m >= 36 && m < 60 ? 1 : 0, 0 }; };
 			for (int mode = 0; mode < 3; ++mode)
 			{
 				SetEnvironmentVariableW(L"VP_TEST_DV_UNPACK_FAIL", mode == 2 ? L"1" : nullptr);
 				const wchar_t* name = mode == 0 ? L"loss, CPU" : mode == 1 ? L"loss, GPU" : L"loss, GPU failing";
-				const RunResult r = Run(VideoFrameEncoding::R210, "standard", 4.0, true,
+				const RunResult r = Run(VideoFrameEncoding::R210, "standard", 12.0, true,
 					std::string(mode == 0 ? "dv_tunnel_gpu_unpack: off\n" : "dv_tunnel_gpu_unpack: on\n") + settings, false, &loss);
 				Assert::IsTrue(r.presented, (std::wstring(name) + L": frames presented\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Dolby Vision RGB tunnel: CRC-validated"), (std::wstring(name) + L": the DV lock before the loss window\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("Dolby Vision transition: presenting black"), (std::wstring(name) + L": black on DM loss\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("Dolby Vision transition: trusted DV picture restored"), (std::wstring(name) + L": picture restored\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("Alpha conversion failed"), (std::wstring(name) + L": no conversion failure\n" + r.Tail()).c_str());
@@ -7291,6 +7356,25 @@ namespace Tests
 			return engineHere != 0;
 		}
 
+		// Vectors were delivered: the on-demand engine says so, or the look-ahead worker reports pair hits (periodic line, H > 0) or,
+		// at the end of the run, "pairs taken N" with N > 0 (the periodic line can be missed by a short run).
+		static bool VectorsDelivered(const RunResult& r)
+		{
+			if (r.Logged("Vector engine: vectors delivered"))
+				return true;
+			for (const std::string& line : r.log)
+			{
+				if (line.find("Vector engine: ") != std::string::npos && line.find("(ahead hits ") != std::string::npos &&
+					line.find("(ahead hits 0,") == std::string::npos)
+					return true;
+				const size_t at = line.find("Motion ahead: ");
+				const size_t taken = at == std::string::npos ? std::string::npos : line.find("pairs taken ", at);
+				if (taken != std::string::npos && std::atoll(line.c_str() + taken + 12) > 0)
+					return true;
+			}
+			return false;
+		}
+
 		static std::string VectorTestLines(const RunResult& r)
 		{
 			std::string out;
@@ -7308,14 +7392,30 @@ namespace Tests
 			return true;
 		}
 
+		// WAIVER-C1-10 (coordinator 2026-11-12 18:42, owner confirmed 18:47): the W2-C1 starter rule. The status of an engine that no
+		// starter runs names the reason ("idle (no starter)", "loaded idle for hiccup repair (no starter runs it)" or "loaded, not
+		// running (no starter runs it)") and lists the unserved consumers "... without vectors (...)".
+		static bool NoStarterStatusLogged(const RunResult& r)
+		{
+			for (const std::string& line : r.log)
+				if (line.find("Vector engine: ") != std::string::npos && line.find("no starter") != std::string::npos &&
+					line.find("without vectors") != std::string::npos)
+					return true;
+			return false;
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineDeliversAtEveryRate)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(VectorEngineDeliversAtEveryRate)
 		{
 			const HarnessScope harnessScope;
-			// Shipped defaults (no de-judder), VP's debander on as the vector consumer: the vector
-			// engine runs on demand at every source rate and delivers vectors; no de-judder extras ran.
+			// WAIVER-C1-10 (coordinator 2026-11-12 18:42; owner 2026-11-12 18:47: deband_vp alone does not start the motion engine):
+			// the former premise ("VP's debander on as the vector consumer; the engine runs on demand") is obsolete since W2-C1 (B9).
+			// Leg A, shipped defaults (no de-judder), VP's debander on as a REUSE-ONLY consumer: the NoStarter contract holds at every
+			// rate (status names "no starter" with the deband hold without vectors, no engine on, no vectors delivered, no extras).
+			// Leg B, the de-judder's standing demand (dejudder_strength) as a real starter: the engine engages and delivers vectors
+			// (the positive case). The old no-extras asserts stay on leg A only: a starter by definition activates the de-judder.
 			// The signal rate is the source rate; the display is the machine's own (the engine keys on
 			// the source, never on the display: 30p on 60 Hz and 24p on 24 Hz are source-rate cases).
 			if (!RequireHardwareOrSkip("VectorEngineDeliversAtEveryRate")) return;
@@ -7323,22 +7423,54 @@ namespace Tests
 			struct Rate { const char* name; int numerator; int denominator; bool film; };
 			const Rate rates[] = { { "24p", 24000, 1001, true }, { "30p", 30000, 1001, false }, { "50p", 50000, 1000, false },
 				{ "60p", 60000, 1000, false }, { "59.94p", 60000, 1001, false } };
+			int positiveLegs = 0;
 			for (const Rate& rate : rates)
 			{
 				FramePlan plan;
 				plan.rateNumerator = rate.numerator;
 				plan.rateDenominator = rate.denominator;
 				plan.step = [](int n) { FrameStep f; f.content = n; return f; };
-				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, rate.film, "deband_vp: on\n", false, &plan);
 				const std::wstring name = HarnessWide(rate.name);
-				Logger::WriteMessage((std::string(rate.name) + ":\n" + VectorTestLines(r)).c_str());
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, rate.film, "deband_vp: on\n", false, &plan);
+				Logger::WriteMessage((std::string(rate.name) + " (deband_vp only, no starter):\n" + VectorTestLines(r)).c_str());
 				Assert::IsTrue(r.presented, (name + L": frames presented\n" + r.Tail()).c_str());
-				Assert::IsTrue(r.Logged("Vector engine: on"), (name + L": the vector engine is on\n" + r.Tail()).c_str());
-				Assert::IsTrue(r.Logged("Vector engine: vectors delivered"), (name + L": vectors delivered\n" + r.Tail()).c_str());
+				Assert::IsTrue(NoStarterStatusLogged(r), (name + L": the status names the NoStarter contract (deband hold without vectors)\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Vector engine: on"), (name + L": deband_vp alone does not turn the engine on\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Vector engine: vectors delivered"), (name + L": no vectors delivered without a starter\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("De-judder extras:"), (name + L": no extras ran\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("De-judder: active"), (name + L": the de-judder never active\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("Interpolation: interpolating"), (name + L": no interpolation ran\n" + r.Tail()).c_str());
+				const RunResult s = Run(VideoFrameEncoding::V210, "gpu", 6.0, rate.film, "deband_vp: on\ndejudder_strength: 0.25\n", false, &plan);
+				Logger::WriteMessage((std::string(rate.name) + " (de-judder standing demand = starter):\n" + VectorTestLines(s)).c_str());
+				Assert::IsTrue(s.presented, (name + L": starter run: frames presented\n" + s.Tail()).c_str());
+				// A source the de-judder serves by repeats alone (display rate an integer multiple of the source rate, e.g. 30p on ~60 Hz) or
+				// that is as fast as the display needs no motion estimate; derived from the measured display rate (never from a log string).
+				const double ratio = HarnessMonitorHz() / (double(rate.numerator) / double(rate.denominator));
+				// Video (50 Hz and up, 49 Hz with the 2% tolerance: DejudderPolicy kVideoRateFloorHz) is never de-juddered on any display; a film-like
+				// source on a display that is an integer multiple of it is served by repeats. Both follow from the measured rates, at any display rate.
+				const double sourceHz = double(rate.numerator) / double(rate.denominator);
+				const bool videoClass = sourceHz >= 49.0;
+				const bool repeatServed = videoClass || std::fabs(ratio - std::floor(ratio + 0.5)) < 0.02 * ratio || ratio < 1.25;
+				if (repeatServed)
+				{
+					Assert::IsFalse(VectorsDelivered(s), (name + L": a repeat-served source delivers no vectors\n" + s.Tail()).c_str());
+					continue;
+				}
+				++positiveLegs;
+				Assert::IsTrue(s.Logged("Vector engine: on"), (name + L": with a starter the vector engine is on\n" + s.Tail()).c_str());
+				Assert::IsTrue(VectorsDelivered(s), (name + L": with a starter vectors are delivered\n" + s.Tail()).c_str());
 			}
+			// Every film-like rate that is not repeat-served on this display must reach the positive leg (24p on a ~60 Hz display does);
+			// on a display that is an integer multiple of every film rate (e.g. 120 Hz) the product serves all of them by repeats and none is due.
+			int expectedPositive = 0;
+			for (const Rate& rate : rates)
+			{
+				const double hz = double(rate.numerator) / double(rate.denominator);
+				const double r = HarnessMonitorHz() / hz;
+				if (!(hz >= 49.0 || std::fabs(r - std::floor(r + 0.5)) < 0.02 * r || r < 1.25))
+					++expectedPositive;
+			}
+			Assert::AreEqual(expectedPositive, positiveLegs, L"every non-repeat-served film-like rate reached the positive starter leg");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineGamesDepthOneEngagesAtOneAhead)
@@ -7347,20 +7479,40 @@ namespace Tests
 		TEST_METHOD(VectorEngineGamesDepthOneEngagesAtOneAhead)
 		{
 			const HarnessScope harnessScope;
-			// A games queue (queue_size 4, target_frames 2) keeps one frame ahead: the look-ahead engages
-			// at one ahead and the vectors are forward.
+			// NOTE: the name is historical (it predates the low-latency rule): legs A and B now assert the look-ahead does NOT engage on a games queue.
+			// A games queue (queue_size 4, target_frames 2) is LOW LATENCY: no starter runs the vector engine there and the look-ahead
+			// gets no depth ("Motion ahead: ... off in low latency"). WAIVER-C1-10 (coordinator 2026-11-12 18:42, owner confirmed 18:47;
+			// lead 9 ruling 2026-11-14): the former premise (look-ahead engages at one ahead on a games queue, fed by the debander) is
+			// obsolete; legs A and B assert the NoStarter contract on that queue (deband_vp alone, then even with the de-judder demand),
+			// and leg C (new, positive) asserts a mode WITH a real starter - the de-judder standing demand on a Normal queue at a
+			// cadence-eligible 24p source - engages the look-ahead.
 			if (!RequireHardwareOrSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			if (VectorTestSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			g_harnessApplySnapshot = true;
 			g_harnessQueueTarget = 2;   // the harness sets the target itself after the snapshot (SetQueueFramePolicy)
-			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+			const RunResult none = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
 				"deband_vp: on\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
-			g_harnessApplySnapshot = false;
+			g_harnessQueueTarget = 2;
+			const FramePlan starterPlan = RatePlan(HarnessMonitorHz() * 0.4);
+			const RunResult lowStarter = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+				"deband_vp: on\ndejudder_strength: 0.25\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n", false, &starterPlan);
 			g_harnessQueueTarget = 0;
-			Logger::WriteMessage(VectorTestLines(r).c_str());
-			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
-			Assert::IsTrue(r.Logged("Motion ahead: engaged"), (L"the look-ahead engaged at one ahead\n" + r.Tail()).c_str());
-			Assert::IsTrue(r.Logged("vectors delivered (forward"), (L"forward vectors delivered\n" + r.Tail()).c_str());
+			const RunResult normal = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+				"deband_vp: on\ndejudder_strength: 0.25\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n", false, &starterPlan);
+			g_harnessApplySnapshot = false;
+			Logger::WriteMessage(("A deband_vp only (no starter):\n" + VectorTestLines(none)).c_str());
+			Logger::WriteMessage(("B low latency with the de-judder demand:\n" + VectorTestLines(lowStarter)).c_str());
+			Logger::WriteMessage(("C Normal queue with a real starter:\n" + VectorTestLines(normal)).c_str());
+			Assert::IsTrue(none.presented, (L"A: frames presented\n" + none.Tail()).c_str());
+			Assert::IsTrue(NoStarterStatusLogged(none), (L"A: the status names the NoStarter contract\n" + none.Tail()).c_str());
+			Assert::AreEqual(0, MotionAheadDepthLines(none), (L"A: no look-ahead depth\n" + none.Tail()).c_str());
+			Assert::IsFalse(none.Logged("Motion ahead: engaged"), (L"A: no look-ahead\n" + none.Tail()).c_str());
+			Assert::IsTrue(lowStarter.presented, (L"B: frames presented\n" + lowStarter.Tail()).c_str());
+			Assert::AreEqual(0, MotionAheadDepthLines(lowStarter), (L"B: low latency gives the look-ahead no depth\n" + lowStarter.Tail()).c_str());
+			Assert::IsFalse(lowStarter.Logged("Motion ahead: engaged"), (L"B: no look-ahead in low latency\n" + lowStarter.Tail()).c_str());
+			Assert::IsTrue(normal.presented, (L"C: frames presented\n" + normal.Tail()).c_str());
+			Assert::IsTrue(normal.Logged("Motion ahead: engaged"), (L"C: a real starter engages the look-ahead on a Normal queue\n" + normal.Tail()).c_str());
+			Assert::IsTrue(VectorsDelivered(normal), (L"C: with a real starter vectors are delivered\n" + normal.Tail()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroStaysMotionFree)
@@ -7504,11 +7656,11 @@ namespace Tests
 		TEST_METHOD(VectorEngineSmoothMotionKeepsAnalysis)
 		{
 			const HarnessScope harnessScope;
-			// With libplacebo's smooth motion as the motion engine the analysis consumers are still served
-			// (forward) and the output dither is named as without vectors.
+			// With libplacebo's smooth motion as the motion engine VP's engine has no starter: the source consumers and the output
+			// dither are named as without vectors (WAIVER-THSM-02; the control, with a starter, serves the sigma-delta).
 			if (!RequireHardwareOrSkip("VectorEngineSmoothMotionKeepsAnalysis")) return;
 			if (VectorTestSkip("VectorEngineSmoothMotionKeepsAnalysis")) return;
-			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
+			const FramePlan plan = RatePlan(HarnessMonitorHz() * 0.4);
 			// The sigma-delta shader is found through VP_TEST_SHADER_DIR (as TemporalDitherChoiceControlsTheSigmaDelta does).
 			const std::string here = Here();
 			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
@@ -7548,7 +7700,17 @@ namespace Tests
 			Assert::IsTrue(controlServed, (L"control: the sigma-delta ran and is served (check the Sigma-delta lines above)\n" + control.Tail()).c_str());
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("Motion engine: libplacebo smooth motion"), (L"smooth motion is the engine\n" + r.Tail()).c_str());
-			Assert::IsTrue(r.Logged("Vector engine: on (forward)"), (L"a source consumer is served\n" + r.Tail()).c_str());
+			// WAIVER-THSM-02 (coordinator 2026-11-12 18:42; owner 2026-11-12 18:47): under owner decision D (2026-11-11) and the
+			// motion-engine exclusivity, libplacebo's smooth motion owns the output and no starter runs VP's engine, so the reuse-only
+			// source consumers are NAMED as without vectors (a visible fallback), not served. The former assertion ("Vector engine: on
+			// (forward)" - a source consumer is served) is replaced by that naming; the control and the dither assertion stay.
+			bool sourceNamedWithout = false;
+			for (const std::string& line : r.log)
+				if (line.find("Vector engine: ") != std::string::npos && line.find("without vectors") != std::string::npos &&
+					(line.find("source monitor") != std::string::npos || line.find("entrance segment") != std::string::npos) &&
+					line.find("Vector engine: on (forward)") == std::string::npos)
+					sourceNamedWithout = true;
+			Assert::IsTrue(sourceNamedWithout, (L"the source consumers are named as without vectors under smooth motion (no starter)\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("output dither without vectors") || r.fallbacksStatus.find("output dither") != std::string::npos,
 				(L"output dither is named as without vectors\n" + r.Tail() + HarnessWide(r.fallbacksStatus)).c_str());
 		}

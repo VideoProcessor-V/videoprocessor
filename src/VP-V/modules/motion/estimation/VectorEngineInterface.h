@@ -99,6 +99,10 @@ namespace VpMotion
 		// OpticalFlowTrust::CellTrust of the pair's forward direction (gridW x gridH) with the matcher's consistency limit in engine px;
 		// null when the pair has no backward vectors or no forward costs (never guessed). Valid until the next FlowOf.
 		virtual const float* CellTrust(float toleranceEnginePx) const = 0;
+		// L-B6 (WAIVER-B6-TD-TRUST): the same for the BACKWARD direction (pair (to -> from) on the `to` frame's grid): the backward costs'
+		// block weights times FbError(backward, forward). Computed by the engine like the forward plane, once per tolerance while the pair is the current lease;
+		// null when the pair has no backward vectors / costs or the memo has none (a fake, an older engine). Same lifetime as CellTrust.
+		virtual const float* CellTrustBackward(float /*toleranceEnginePx*/) const { return nullptr; }
 	};
 
 	// A CPU-resident flow view (for temporalSeed); null planes when the flow is GPU-only.
@@ -140,10 +144,11 @@ namespace VpMotion
 		const float* fbError = nullptr;
 		int extrasCellPx = 0;
 		double extrasUnitsPerEnginePx = 0;
-		// The engine's per-cell trust (OpticalFlowTrust::CellTrust), computed once per pair id and tolerance by the lease; null when
+		// The engine's per-cell trust (OpticalFlowTrust::CellTrust), computed by the lease once per direction and tolerance, for as long as the pair is the engine's current lease (another pair's FlowOf drops the memo); null when
 		// the view has no memo or the pair has no backward vectors / forward costs.
 		const IFlowTrustMemo* trustMemo = nullptr;
 		const float* CellTrust(float toleranceEnginePx) const { return trustMemo ? trustMemo->CellTrust(toleranceEnginePx) : nullptr; }
+		const float* CellTrustBackward(float toleranceEnginePx) const { return trustMemo ? trustMemo->CellTrustBackward(toleranceEnginePx) : nullptr; }
 	};
 
 	class IPreEstimateHook;

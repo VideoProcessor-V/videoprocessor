@@ -68,6 +68,7 @@ namespace CameraModel
 	void LabelGridMirror(const LabelConstants& k, const float* field, const float* aux, int overlayMin, std::vector<float>& out4);
 
 	inline int CodeLabel(float code) { return static_cast<int>(code + 0.5f) & 3; }
+	// PRECISION-OK 119#60: bit 2 of a camera label code (flag extraction, not a picture sample)
 	inline int CodeTiny(float code) { return (static_cast<int>(code + 0.5f) >> 2) & 1; }
 	inline int CodeZero(float code) { return (static_cast<int>(code + 0.5f) >> 3) & 1; }
 

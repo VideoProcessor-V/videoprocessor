@@ -1,12 +1,11 @@
 {
  "_note": "Bill hook LINES (added vs Bill baseline, hook-tagged, production) per file; ratchet, only shrinks (tools/check_hook_gating.py).",
  "base_ref": "a591ad3b5",
- "total": 567,
+ "total": 459,
  "files": {
-  "src/VideoProcessor-Config/AppMain.cpp": 1,
-  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 116,
+  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 14,
   "src/VideoProcessor-Config/ConfigEditorWindow.h": 8,
-  "src/VideoProcessor-GUI/VideoProcessorApp.cpp": 6,
+  "src/VideoProcessor-GUI/VideoProcessorApp.cpp": 1,
   "src/VideoProcessor-GUI/VideoProcessorDlg.cpp": 4,
   "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 3,
   "src/VideoProcessor-Lib/AnalysisLumaSource.h": 1,

@@ -222,6 +222,69 @@ namespace VideoProcessorTest
 			Assert::IsNull(none.CellTrust(1.5f));
 		}
 
+		// L-B6 migration identity (WAIVER-B6-CELLTRUST condition): the camera's retired private recompute (AheadCellTrust: CostWeights on the
+		// forward costs, FbError of the two directions, CellTrust at the matcher's tolerance, units rescaled to S10.5) is reproduced HERE as
+		// the reference (test code, not product code) from the raw arrays the view serves, and the ENGINE memo FlowView::CellTrust must equal
+		// it bit for bit, for pairs with and without the producer's extras and for several tolerances. A difference would be a behaviour
+		// change of the camera trust (a registered fix), not a refactor.
+		TEST_METHOD(TheEngineMemoTrustEqualsTheRetiredPrivateRecompute)
+		{
+			const int w = 320, h = 180, gw = (w + 3) / 4, gh = (h + 3) / 4;
+			uint32_t r = 2468u;
+			auto rnd = [&r]() { r = r * 1664525u + 1013904223u; return r >> 8; };
+			for (int withExtras = 0; withExtras < 2; ++withExtras)
+			{
+				Rig rig;
+				auto flow = std::make_shared<MotionAhead::Flow>();
+				flow->halfW = w;
+				flow->halfH = h;
+				flow->gridW = gw;
+				flow->gridH = gh;
+				const size_t cells = static_cast<size_t>(gw) * gh;
+				for (size_t i = 0; i < cells; ++i)
+				{
+					const int fx = static_cast<int>(rnd() % 200) - 100 + 150, fy = static_cast<int>(rnd() % 200) - 100 - 60;
+					flow->forward.push_back(static_cast<int16_t>(fx));
+					flow->forward.push_back(static_cast<int16_t>(fy));
+					flow->backward.push_back(static_cast<int16_t>(-fx + static_cast<int>(rnd() % 64) - 32));
+					flow->backward.push_back(static_cast<int16_t>(-fy + static_cast<int>(rnd() % 64) - 32));
+					flow->forwardCost.push_back(static_cast<uint8_t>(rnd() % 60));
+					flow->backwardCost.push_back(static_cast<uint8_t>(rnd() % 60));
+				}
+				if (withExtras)
+				{
+					MotionAhead::FlowGlobals(*flow, true);
+					MotionAhead::FlowExtras(*flow);
+				}
+				rig.engine.p2Slot->Publish(11, 12, rig.engine.p2Slot->Generation(), flow);
+				rig.engine.motionValidity.NoteKept(12);
+				VpMotion::FlowView view;
+				Assert::IsTrue(rig.engine.FlowOf(12, view));
+				const int grid = NvOpticalFlow::Engine::Grid, block = MotionAhead::Flow::kBlockPx;
+				const int blocksX = (w + block - 1) / block, blocksY = (h + block - 1) / block;
+				const float tolerances[] = { 0.5f, 1.5f, 2.0f, 3.0f };
+				for (float tol : tolerances)
+				{
+					// The retired recompute, from the view's own raw arrays (S10.5, so no unit rescale is needed here).
+					std::vector<float> blockCost, cellError, reference;
+					Assert::IsTrue(OpticalFlowTrust::CostWeights(std::vector<uint8_t>(view.forwardCost, view.forwardCost + cells), gw, gh, grid, block,
+						blocksX, blocksY, blockCost));
+					Assert::IsTrue(OpticalFlowTrust::FbError(std::vector<int16_t>(view.rawForward, view.rawForward + cells * 2),
+						std::vector<int16_t>(view.rawBackward, view.rawBackward + cells * 2), gw, gh, grid, cellError));
+					Assert::IsTrue(OpticalFlowTrust::CellTrust(blockCost, blocksX, blocksY, cellError, gw, gh, grid, block, tol, reference));
+					const float* memo = view.CellTrust(tol);
+					Assert::IsNotNull(memo);
+					bool someBelowOne = false;
+					for (size_t i = 0; i < cells; ++i)
+					{
+						Assert::AreEqual(reference[i], memo[i], 0.0f, L"the engine memo equals the retired private recompute, bit for bit");
+						someBelowOne = someBelowOne || memo[i] < 1.0f;
+					}
+					Assert::IsTrue(someBelowOne, L"the inputs exercise the weighting");
+				}
+			}
+		}
+
 		TEST_METHOD(AfterAResyncTheAnswerIsFalseAndCounted)
 		{
 			Rig rig;

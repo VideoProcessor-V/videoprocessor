@@ -91,6 +91,15 @@ class Synthetic(unittest.TestCase):
                           M + "repair/texture_restore/T.cpp": "auto* g = params.grain.Gpu(p);"})
         self.assertFalse([h for h in N1.scan(root) if h["rule"] == "b"])
 
+    def test_rule_b_acquire_of_the_product_is_a_read(self):
+        cat = ('inline const std::vector<ConsumerRow>& ConsumerRows(){ r.push_back(MakeRow(1, "texture restore", '
+               '"VP-V/modules/repair/texture_restore", PathwayUnit::Repair, 30, { kP10GrainSplit }, own, "k")); }')
+        for read in ("auto* g = memo.Acquire(kP10GrainSplit, form);", "auto* g = memo.Acquire(VpSkeleton::kP10GrainSplit, form);"):
+            root = make_tree({"src/VP-V/core/ProductCatalog.h": cat, M + "repair/texture_restore/T.cpp": read})
+            self.assertFalse([h for h in N1.scan(root) if h["rule"] == "b"], read)
+        root = make_tree({"src/VP-V/core/ProductCatalog.h": cat, M + "repair/texture_restore/T.cpp": "int kP10GrainSplit = 0;"})
+        self.assertTrue([h for h in N1.scan(root) if h["rule"] == "b"])   # naming the id is not a read
+
     def test_rule_d_owner_folders_come_from_the_product_rows(self):
         cat = ('inline const std::vector<ProductRow>& ProductRows(){ static const std::vector<ProductRow> rows = {'
                ' { kP13SourceRing, "input/capture (queue + early upload)", 0, "" },'

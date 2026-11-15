@@ -197,7 +197,7 @@ public:
 			{
 				SkeletonGpuDispatcher disp(gpu, false);
 				disp.AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(new VpLaneProducts::GrainSplitKernel(Storage::Compact)));
-				Registry reg = VpLaneProducts::TapFormProducts(SkeletonProducts());
+				Registry reg = VpLaneProducts::TapFormProducts(SkeletonProducts(true));
 				ConsumerDecl cd;
 				cd.id = 1;
 				AddConsume(cd, kP10GrainSplit);
@@ -209,6 +209,7 @@ public:
 				e.id = kP10GrainSplit; e.backend = Backend::GpuCompute; e.grant = Grant::Lane;
 				plan.entries.push_back(e);
 				const bool configured = disp.Configure(graph, reg, plan, dims);
+				if (!configured) LogLine(std::string("V3 cost dispatcher configure failed: ") + disp.LastError());
 				Assert::IsTrue(configured, L"dispatcher configure (live form)");
 				if (configured)
 				{
@@ -229,7 +230,7 @@ public:
 					}
 					const Stat st = StatOf(wall);
 					LogLine(Fmt("V3 cost %.0fx%.0f B %.0f ", w, h, B) + "Compact live form (tap upload + extend + 6 passes + finish): wall ms" +
-						Fmt(" mean %.4f p95 %.4f max %.4f; dispatcher MeasuredMs (last pass) %.4f", st.mean, st.p95, st.peak, disp.MeasuredMs(kP10GrainSplit)));
+						Fmt(" mean %.4f p95 %.4f max %.4f; dispatcher LastPassMs %.4f", st.mean, st.p95, st.peak, disp.LastPassMs(kP10GrainSplit)));
 				}
 				disp.Release();
 			}

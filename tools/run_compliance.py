@@ -27,7 +27,7 @@ TOOLS = [
     ("config_placement", "check_config_placement.py", [], False),
     ("module_manifests", "check_module_manifests.py", [], False),
     ("test_categories", "check_test_categories.py", [], False),
-    ("private_copies", "check_private_copies.py", [], False),
+    ("private_copies", "check_private_copies.py", ["--strict"], False),
     ("test_tamper", "check_test_tamper.py", ["--strict"], False),
     ("N2_precision", "check_precision.py", ["--strict"], True),
     ("N3_fallback", "check_fallback_coverage.py", ["--strict"], True),

@@ -10,7 +10,7 @@
 //
 // Threading: the render-loop thread, outside renderMutex (as before). The LookAheadFailures counter
 // (Impl::motionAheadFailures) is touched by that thread only; no atomics.
-// Hardening (P5a-rest): impl.motionProducer is a shared_ptr published with std::atomic_store; the walk takes
+// Hardening (P5a-rest): impl.vectorEngine.motionProducer is a shared_ptr published with std::atomic_store; the walk takes
 // ONE std::atomic_load copy per frame and null-checks and submits through it. PlanProducer runs on this same
 // OS thread (RenderLocked is called only from RenderLoop), so no race existed; the copy keeps the walk safe
 // should a writer ever run elsewhere (the retirement writer runs only after the render thread is joined).
@@ -79,17 +79,17 @@ namespace MotionAhead
 			laneContext.phaseData = &laneView;
 			RendererExtension::Frame(laneContext);
 		}
-		const auto aheadProducer = std::atomic_load(&impl->motionProducer);
+		const auto aheadProducer = std::atomic_load(&impl->vectorEngine.motionProducer);
 		if (!aheadProducer)
 			return;
 		// B1 (owner 2026-11-10, doc 91 C): the frames taken are the LEAD, every frame queued ahead (the render loop's one count,
 		// queuedFutureFrames, stored by the same pass just before this call), never below the depth, at most MotionAhead::kMaxLead;
 		// 0 while the depth is 0. Backward pairs (depth 0) keep the current frame only. The producer's pending capacity follows the
 		// lead (SetLead, every pass, so a stopped look-ahead hands its capacity back to the depth's).
-		const int aheadDepth = impl->motionAheadDepth.load(std::memory_order_acquire);
+		const int aheadDepth = impl->vectorEngine.motionAheadDepth.load(std::memory_order_acquire);
 		const int lead = MotionAhead::LeadFor(aheadDepth, queuedAhead);
 		aheadProducer->SetLead(lead);
-		if (aheadDepth > 0 || impl->motionAheadBackward.load(std::memory_order_acquire))
+		if (aheadDepth > 0 || impl->vectorEngine.motionAheadBackward.load(std::memory_order_acquire))
 		{
 			const size_t depth = static_cast<size_t>(lead);
 			const uint64_t last = aheadProducer->LastSubmitted();
@@ -124,28 +124,28 @@ namespace MotionAhead
 			// no work (no pair could be used before its frames are shown).
 			const size_t queuedAhead = impl.queuedFutureFrames.load(std::memory_order_acquire);
 			const size_t engageAhead = impl.activeSettings.vectorDemand ?
-				static_cast<size_t>(VectorDemand::EngageAhead(impl.motionAheadConfigured.load(std::memory_order_acquire),
+				static_cast<size_t>(VectorDemand::EngageAhead(impl.vectorEngine.motionAheadConfigured.load(std::memory_order_acquire),
 					impl.queueAheadCapacity.load(std::memory_order_acquire))) :
-				static_cast<size_t>((std::max)(1, impl.motionAheadConfigured.load(std::memory_order_acquire)));
-			const bool backwardPairs = impl.motionAheadBackward.load(std::memory_order_acquire);   // vector engine: engaged while it runs
+				static_cast<size_t>((std::max)(1, impl.vectorEngine.motionAheadConfigured.load(std::memory_order_acquire)));
+			const bool backwardPairs = impl.vectorEngine.motionAheadBackward.load(std::memory_order_acquire);   // vector engine: engaged while it runs
 			// A break always disengages and the next pass must see 4 queued ahead again (a re-engage
 			// in the same pass would skip the refill wait: the reset test, 2026-10-16).
-			if (impl.motionAheadEngaged &&
-				(queuedAhead == 0 || generation != impl.motionAheadEngagedGeneration))
+			if (impl.vectorEngine.motionAheadEngaged &&
+				(queuedAhead == 0 || generation != impl.vectorEngine.motionAheadEngagedGeneration))
 			{
-				impl.motionAheadEngaged = false;
+				impl.vectorEngine.motionAheadEngaged = false;
 				DebugLog::Log("Motion ahead: waiting for %zu frames queued ahead (%s)", engageAhead,
 					queuedAhead == 0 ? "the queue holds none" : "the sequence broke: skip, seek or reset");
 			}
-			else if (!impl.motionAheadEngaged && queuedAhead >= engageAhead && !backwardPairs)
+			else if (!impl.vectorEngine.motionAheadEngaged && queuedAhead >= engageAhead && !backwardPairs)
 			{
-				impl.motionAheadEngaged = true;
-				impl.motionAheadEngagedGeneration = generation;
+				impl.vectorEngine.motionAheadEngaged = true;
+				impl.vectorEngine.motionAheadEngagedGeneration = generation;
 				DebugLog::Log("Motion ahead: engaged (%zu frames queued ahead, lead %d%s)", queuedAhead,
-					MotionAhead::LeadFor(impl.motionAheadDepth.load(std::memory_order_acquire), queuedAhead),
+					MotionAhead::LeadFor(impl.vectorEngine.motionAheadDepth.load(std::memory_order_acquire), queuedAhead),
 					impl.vectorDemand.lowLatencyAllowed ? "; vector engine: shallow queue" : "");
 			}
-			const bool framesAhead = impl.motionAheadEngaged || backwardPairs;
+			const bool framesAhead = impl.vectorEngine.motionAheadEngaged || backwardPairs;
 			// A frame's time as the dequeue reads it (the film clock when pulldown is locked,
 			// else the capture timestamp; 0 = not known).
 			LARGE_INTEGER aheadQpcFrequency{};
@@ -160,7 +160,7 @@ namespace MotionAhead
 			for (Queued& ahead : view.frames)
 			{
 				const auto& aheadState = *ahead.state;
-				const auto producer = std::atomic_load(&impl.motionProducer);   // hardening: one copy per frame
+				const auto producer = std::atomic_load(&impl.vectorEngine.motionProducer);   // hardening: one copy per frame
 				if (!framesAhead || !aheadState.displayMode || !producer) continue;
 				// The luma source keeps the frame's own buffer alive for the producer's worker.
 				const auto prepared = Impl::PrepareFrameAnalysis(ahead.frame, aheadState, ahead.converted, ahead.analysis,
@@ -186,14 +186,14 @@ namespace MotionAhead
 				const double aheadRateHz = ahead.filmHz > 0.0 ? ahead.filmHz :
 					view.measuredFrameRate.load(std::memory_order_relaxed) > 0.0 ? view.measuredFrameRate.load(std::memory_order_relaxed) :
 					aheadState.displayMode->RefreshRateHz();
-				const bool havePrev = impl.motionAheadPrevKnown && impl.motionAheadPrevGeneration == generation;
+				const bool havePrev = impl.vectorEngine.motionAheadPrevKnown && impl.vectorEngine.motionAheadPrevGeneration == generation;
 				const bool breakBefore = DejudderPolicy::MotionAheadBreakBefore(ahead.gapBefore, ahead.filmUpdate,
 					impl.activeSettings.timingContinuityFixes, aheadRateHz, aheadState.dolbyVisionTunnel,
-					havePrev, impl.motionAheadPrev, aheadFrame, impl.activeSettings.motionHistoryFixes);
+					havePrev, impl.vectorEngine.motionAheadPrev, aheadFrame, impl.activeSettings.motionHistoryFixes);
 				producer->Submit(ahead.sourceSequence, generation, prepared.source, breakBefore);
-				impl.motionAheadPrevKnown = true;
-				impl.motionAheadPrevGeneration = generation;
-				impl.motionAheadPrev = aheadFrame;
+				impl.vectorEngine.motionAheadPrevKnown = true;
+				impl.vectorEngine.motionAheadPrevGeneration = generation;
+				impl.vectorEngine.motionAheadPrev = aheadFrame;
 			}
 		}
 		catch (const std::exception& e)

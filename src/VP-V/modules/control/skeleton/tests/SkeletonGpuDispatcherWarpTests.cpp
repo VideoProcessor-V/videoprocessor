@@ -333,6 +333,9 @@ namespace VideoProcessorTest
 				Assert::IsTrue(disp.Dispatch(job, i, steps), L"lane chunk");
 			Assert::IsTrue(kernel->steps == 6 && disp.Stats().tapBands == 2 && disp.Stats().extends == 1, L"lane passes");
 			Assert::IsTrue(disp.CostOf(kP10GrainSplit).frames == 1, L"the cost counter records one completed lane frame (last chunk only)");
+			// S0 / FIX-S0-COST: the dispatcher's planning cost is the per-frame pass SUM (CostOf mean), never the last single pass.
+			Assert::IsTrue(disp.MeasuredMs(kP10GrainSplit) == disp.CostOf(kP10GrainSplit).MeanFrameMs(), L"MeasuredMs is the per-frame mean of all passes");
+			Assert::IsTrue(disp.MeasuredMs(kP10GrainSplit) + 1e-9 >= disp.LastPassMs(kP10GrainSplit), L"the frame sum is never below one pass");
 			Assert::IsFalse(disp.Dispatch(job, 0, steps + 1), L"a plan that does not match the passes is refused");
 
 			// The live form of another frame (8) with the same content: its own tap upload (all bands) and extend.

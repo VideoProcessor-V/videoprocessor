@@ -7,6 +7,8 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
+#include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/repair/temporal_detail/SharedMotionSource.h>
 
 #include <chrono>
@@ -20,6 +22,26 @@ namespace VideoProcessorTest
 	TEST_CLASS(SharedMotionSourceTests)
 	{
 	public:
+		// L-B6 (WAIVER-B6-TD-TRUST): the adapter reads its trust from the ENGINE memo, so the tests run over a real (producer-less) engine:
+		// the P2 slot, the vectors-valid state and FlowOf are the engine's. `sourceW` = the source width the engine size is noted for.
+		struct EngineRig
+		{
+			VpMotion::VectorEngine engine;
+			explicit EngineRig(int sourceW)
+			{
+				engine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+				engine.NoteFlowSourceWidth(sourceW);
+			}
+			std::shared_ptr<VpMotion::P2Slot> Slot() { return engine.p2Slot; }
+			bool Publish(uint64_t from, uint64_t to, const MotionAhead::FlowPtr& flow) { return engine.p2Slot->Publish(from, to, engine.p2Slot->Generation(), flow); }
+			VpMotion::P2View View() { return VpMotion::P2View(engine.p2Slot); }
+			TemporalDetail::SharedMotionSource::FlowOfFn FlowOf()
+			{
+				VpMotion::VectorEngine* e = &engine;
+				return [e](uint64_t seq, VpMotion::FlowView& out) { return e->FlowOf(seq, out); };
+			}
+		};
+
 		static std::shared_ptr<MotionAhead::Flow> MakeFlow(int halfW, int halfH)
 		{
 			auto flow = std::make_shared<MotionAhead::Flow>();
@@ -46,21 +68,18 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(ItReturnsTheSamePairAndVectorsTheSharedViewHoldsForThatPair)
 		{
-			auto slot = std::make_shared<VpMotion::P2Slot>(16);
-			slot->SetGeneration(1);
+			EngineRig rig(192);   // the producer worked at half the source: the source is 192 wide, so a producer pixel is 2 source pixels
 			const auto flow = MakeFlow(96, 48);
 			MotionAhead::FlowExtras(*flow);   // the producer's worker does this: the de-judder's cost and consistency weights
-			Assert::IsTrue(slot->Publish(4, 5, 1, flow));
-			MotionValidity::State validity;
-			validity.NoteKept(4);
-			validity.NoteKept(5);
-			// The producer worked at half the source: the source is 192 wide, so a producer pixel is 2 source pixels.
-			TemporalDetail::SharedMotionSource source(VpMotion::P2View(slot), &validity);
+			Assert::IsTrue(rig.Publish(4, 5, flow));
+			rig.engine.motionValidity.NoteKept(4);
+			rig.engine.motionValidity.NoteKept(5);
+			TemporalDetail::SharedMotionSource source(rig.View(), &rig.engine.motionValidity, rig.FlowOf());
 			source.SetSourceSize(192, 96);
 			TemporalDetail::MotionPair fwd, bwd;
 			Assert::IsTrue(source.Forward(5, fwd), L"Forward(seq) is the pair (seq - 1 -> seq)");
 			Assert::IsTrue(source.Backward(5, bwd), L"Backward(seq) is the pair (seq -> seq - 1)");
-			const MotionAhead::FlowPtr held = VpMotion::P2View(slot).Find(4, 5);   // what the shared view holds for the same pair
+			const MotionAhead::FlowPtr held = rig.View().Find(4, 5);   // what the shared view holds for the same pair
 			Assert::IsTrue(held == flow);
 			Assert::AreEqual(held->gridW, fwd.gridW);
 			Assert::AreEqual(held->gridH, fwd.gridH);
@@ -103,8 +122,7 @@ namespace VideoProcessorTest
 		// rest keeps it; an inconsistent pair (forward and backward disagree by more than twice the limit) is not trusted anywhere.
 		TEST_METHOD(AnUnsurePatchLosesTrustAndAnInconsistentPairIsNotTrusted)
 		{
-			auto slot = std::make_shared<VpMotion::P2Slot>(16);
-			slot->SetGeneration(1);
+			EngineRig rig(128);
 			auto flow = std::make_shared<MotionAhead::Flow>();
 			flow->halfW = 64;
 			flow->halfH = 64;
@@ -118,11 +136,10 @@ namespace VideoProcessorTest
 				for (int cx = 0; cx < 4; ++cx)
 					flow->forwardCost[static_cast<size_t>(cy) * 16 + cx] = 250;   // the top-left 4 x 4 cells (2 x 2 blocks): the engine is far less sure
 			MotionAhead::FlowExtras(*flow);
-			Assert::IsTrue(slot->Publish(1, 2, 1, flow));
-			MotionValidity::State validity;
-			validity.NoteKept(1);
-			validity.NoteKept(2);
-			TemporalDetail::SharedMotionSource source(VpMotion::P2View(slot), &validity);
+			Assert::IsTrue(rig.Publish(1, 2, std::make_shared<MotionAhead::Flow>(*flow)));
+			rig.engine.motionValidity.NoteKept(1);
+			rig.engine.motionValidity.NoteKept(2);
+			TemporalDetail::SharedMotionSource source(rig.View(), &rig.engine.motionValidity, rig.FlowOf());
 			source.SetSourceSize(128, 128);
 			TemporalDetail::MotionPair fwd;
 			Assert::IsTrue(source.Forward(2, fwd));
@@ -137,10 +154,11 @@ namespace VideoProcessorTest
 			}
 			flow->forwardCost.assign(cells, 10);
 			MotionAhead::FlowExtras(*flow);
-			auto slot2 = std::make_shared<VpMotion::P2Slot>(16);
-			slot2->SetGeneration(1);
-			Assert::IsTrue(slot2->Publish(1, 2, 1, flow));
-			TemporalDetail::SharedMotionSource inconsistent(VpMotion::P2View(slot2), &validity);
+			EngineRig rig2(128);   // a fresh engine: the lease and its trust memo belong to the pair as published
+			Assert::IsTrue(rig2.Publish(1, 2, std::make_shared<MotionAhead::Flow>(*flow)));
+			rig2.engine.motionValidity.NoteKept(1);
+			rig2.engine.motionValidity.NoteKept(2);
+			TemporalDetail::SharedMotionSource inconsistent(rig2.View(), &rig2.engine.motionValidity, rig2.FlowOf());
 			inconsistent.SetSourceSize(128, 128);
 			TemporalDetail::MotionPair bad;
 			Assert::IsTrue(inconsistent.Forward(2, bad));
@@ -157,8 +175,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(HigherCostOrHigherInconsistencyNeverGivesHigherTrust)
 		{
 			auto trustAt = [](bool forward, uint8_t patchCost, float inconsistentPx, size_t cell) {
-				auto slot = std::make_shared<VpMotion::P2Slot>(16);
-				slot->SetGeneration(1);
+				EngineRig rig(128);
 				auto flow = std::make_shared<MotionAhead::Flow>();
 				flow->halfW = 64;
 				flow->halfH = 64;
@@ -175,11 +192,10 @@ namespace VideoProcessorTest
 						costs[static_cast<size_t>(cy) * 16 + cx] = patchCost;   // one de-judder block (2 x 2 cells)
 				vectors[(8 * 16 + 8) * 2] = static_cast<int16_t>(inconsistentPx * 32.0f);
 				MotionAhead::FlowExtras(*flow);
-				Assert::IsTrue(slot->Publish(1, 2, 1, flow));
-				MotionValidity::State validity;
-				validity.NoteKept(1);
-				validity.NoteKept(2);
-				TemporalDetail::SharedMotionSource source(VpMotion::P2View(slot), &validity);
+				Assert::IsTrue(rig.Publish(1, 2, flow));
+				rig.engine.motionValidity.NoteKept(1);
+				rig.engine.motionValidity.NoteKept(2);
+				TemporalDetail::SharedMotionSource source(rig.View(), &rig.engine.motionValidity, rig.FlowOf());
 				source.SetSourceSize(128, 128);
 				TemporalDetail::MotionPair out;
 				Assert::IsTrue(forward ? source.Forward(2, out) : source.Backward(2, out));
@@ -229,71 +245,155 @@ namespace VideoProcessorTest
 			Assert::IsTrue(deep.CurrentDecision().engaged, L"20 in a row shows");
 		}
 
-		// W1-C3: the forward direction reads the producer's Flow::fbError (worked out once on its worker) instead of recomputing it; the
-		// trust is bit-equal to the recompute path (same FbError on the same fields). The backward direction has no producer extra and
-		// still computes (counted).
-		TEST_METHOD(TheForwardTrustReadsTheProducersErrorAndIsBitEqualToTheRecompute)
+		// L-B6 MIGRATION IDENTITY (WAIVER-B6-TD-TRUST, rule 28 condition): TD held its own copy of the engine trust (CostWeights + FbError +
+		// CellTrust per direction, the forward direction taking the producer's extras when present). That arithmetic is gone from the
+		// adapter; HERE it is the TEST-SIDE REFERENCE (the old recompute, verbatim) and the engine memo the adapter now reads must equal it
+		// bit for bit, in BOTH directions, with and without the producer's extras, at the default and a handed-over tolerance. Any
+		// difference is a behaviour change (a registered fix with before/after), never a tolerance widening.
+		static std::vector<float> OldTdRecompute(const MotionAhead::Flow& f, bool forward, float tolerance)
 		{
-			auto slot = std::make_shared<VpMotion::P2Slot>(16);
-			slot->SetGeneration(1);
+			const std::vector<int16_t>& vec = forward ? f.forward : f.backward;
+			const std::vector<uint8_t>& cost = forward ? f.forwardCost : f.backwardCost;
+			const std::vector<int16_t>& other = forward ? f.backward : f.forward;
+			const size_t cells = static_cast<size_t>(f.gridW) * f.gridH;
+			std::vector<float> cellErrorLocal, blockCost, trust;
+			const std::vector<float>* cellError = &cellErrorLocal;
+			if (forward && f.fbError.size() == cells)
+				cellError = &f.fbError;
+			else
+				Assert::IsTrue(OpticalFlowTrust::FbError(vec, other, f.gridW, f.gridH, NvOpticalFlow::Engine::Grid, cellErrorLocal));
+			const int blocksX = (f.halfW + MotionAhead::Flow::kBlockPx - 1) / MotionAhead::Flow::kBlockPx;
+			const int blocksY = (f.halfH + MotionAhead::Flow::kBlockPx - 1) / MotionAhead::Flow::kBlockPx;
+			const std::vector<float>* costBlocks = nullptr;
+			if (forward && f.blocksX == blocksX && f.blocksY == blocksY && f.costWeight.size() == static_cast<size_t>(blocksX) * blocksY)
+				costBlocks = &f.costWeight;
+			else
+			{
+				Assert::IsTrue(OpticalFlowTrust::CostWeights(cost, f.gridW, f.gridH, NvOpticalFlow::Engine::Grid, MotionAhead::Flow::kBlockPx, blocksX, blocksY, blockCost));
+				costBlocks = &blockCost;
+			}
+			Assert::IsTrue(OpticalFlowTrust::CellTrust(*costBlocks, blocksX, blocksY, *cellError, f.gridW, f.gridH, NvOpticalFlow::Engine::Grid,
+				MotionAhead::Flow::kBlockPx, tolerance, trust));
+			return trust;
+		}
+
+		TEST_METHOD(TheEngineMemoTrustEqualsTheRetiredPrivateRecomputeBothDirections)
+		{
+			EngineRig rig(192);
 			auto withExtras = MakeFlow(96, 48);
+			// Some cells whose backward vector is NOT the forward one's return (3 px off, beyond twice the tolerance): the engine trust is then not all 1,
+			// the equality with the retired recompute is not vacuous, and the two directions of the pair differ.
+			for (size_t i = 0; i < withExtras->backward.size() / 2; i += 9) withExtras->backward[i * 2] = static_cast<int16_t>(96);
 			MotionAhead::FlowExtras(*withExtras);
 			Assert::IsFalse(withExtras->fbError.empty());
-			auto recompute = std::make_shared<MotionAhead::Flow>(*withExtras);
-			recompute->fbError.clear();   // the same pair without the producer's error: Take works it out
-			Assert::IsTrue(slot->Publish(4, 5, 1, withExtras));
-			Assert::IsTrue(slot->Publish(5, 6, 1, recompute));
-			MotionValidity::State validity;
-			validity.NoteKept(4);
-			validity.NoteKept(5);
-			validity.NoteKept(6);
-			TemporalDetail::SharedMotionSource source(VpMotion::P2View(slot), &validity);
+			auto without = std::make_shared<MotionAhead::Flow>(*withExtras);
+			without->fbError.clear();
+			without->costWeight.clear();
+			without->blocksX = without->blocksY = 0;
+			Assert::IsTrue(rig.Publish(4, 5, withExtras));
+			Assert::IsTrue(rig.Publish(5, 6, without));
+			rig.engine.motionValidity.NoteKept(4);
+			rig.engine.motionValidity.NoteKept(5);
+			rig.engine.motionValidity.NoteKept(6);
+			TemporalDetail::SharedMotionSource source(rig.View(), &rig.engine.motionValidity, rig.FlowOf());
 			source.SetSourceSize(192, 96);
+			for (const float tolerance : { 2.0f, 1.5f })
+			{
+				source.SetConsistencyPixels(tolerance);
+				for (const uint64_t seq : { uint64_t(5), uint64_t(6) })
+				{
+					const MotionAhead::FlowPtr held = rig.View().Find(seq - 1, seq);
+					Assert::IsTrue(held != nullptr);
+					for (const bool forward : { true, false })
+					{
+						TemporalDetail::MotionPair got;
+						Assert::IsTrue(forward ? source.Forward(seq, got) : source.Backward(seq, got));
+						const std::vector<float> reference = OldTdRecompute(*held, forward, tolerance);
+						Assert::AreEqual(reference.size(), got.trust.size());
+						for (size_t i = 0; i < reference.size(); ++i)
+							Assert::AreEqual(reference[i], got.trust[i], 0.0f, L"the engine memo is bit-equal to the retired recompute");
+					}
+				}
+			}
+			// The producer's extras do not change the trust (forward), and the pair's two directions differ (the test is not vacuous).
 			TemporalDetail::MotionPair a, b, back;
+			source.SetConsistencyPixels(2.0f);
+			// Engine-side successor of fbErrorComputed 0/1/2 (forward with the producer's extras: planes taken, 0 recomputed; forward without:
+			// recomputed; backward: no producer extra, recomputed). The engine counts the planes it worked out itself (FlowReads()
+			// fbErrorRecomputes / costWeightRecomputes: VectorEngine.cpp FlowLease::Trust). The engine memo is ONE lease at a time, so each of
+			// these three asks is on another pair than the one before it: every ask is a compute after a lease switch (not a first ask of a
+			// remembered pair); the repeat asks below are the memo hits.
+			const VpMotion::VectorEngine::FlowReadCounters r0 = rig.engine.FlowReads();
 			Assert::IsTrue(source.Forward(5, a));
-			Assert::AreEqual<uint64_t>(0, source.GetStats().fbErrorComputed, L"forward: the producer's error, not recomputed");
+			const VpMotion::VectorEngine::FlowReadCounters r1 = rig.engine.FlowReads();
+			Assert::AreEqual<unsigned long long>(r0.trustComputes + 1, r1.trustComputes, L"forward, producer extras: one engine compute (after a lease switch)");
+			Assert::AreEqual<unsigned long long>(r0.fbErrorRecomputes + 0, r1.fbErrorRecomputes, L"forward: the producer's error, not recomputed");
+			Assert::AreEqual<unsigned long long>(r0.costWeightRecomputes + 0, r1.costWeightRecomputes, L"forward: the producer's cost weights, not recomputed");
 			Assert::IsTrue(source.Forward(6, b));
-			Assert::AreEqual<uint64_t>(1, source.GetStats().fbErrorComputed, L"no producer error: computed here");
+			const VpMotion::VectorEngine::FlowReadCounters r2 = rig.engine.FlowReads();
+			Assert::AreEqual<unsigned long long>(r1.trustComputes + 1, r2.trustComputes, L"forward, no producer extras: one engine compute (after a lease switch)");
+			Assert::AreEqual<unsigned long long>(r1.fbErrorRecomputes + 1, r2.fbErrorRecomputes, L"no producer error: computed by the engine");
+			Assert::AreEqual<unsigned long long>(r1.costWeightRecomputes + 1, r2.costWeightRecomputes, L"no producer cost weights: computed by the engine");
 			Assert::AreEqual(a.trust.size(), b.trust.size());
 			for (size_t i = 0; i < a.trust.size(); ++i)
 				Assert::AreEqual(b.trust[i], a.trust[i], 0.0f, L"bit-equal to the recompute path");
-			Assert::IsTrue(a.vx == b.vx && a.vy == b.vy);
+			Assert::IsTrue(a.trust == b.trust);
+			Assert::IsTrue(a.vx == b.vx && a.vy == b.vy, L"the vectors are the same pair's, whichever pair carried the extras");
 			Assert::IsTrue(source.Backward(5, back));
-			Assert::AreEqual<uint64_t>(2, source.GetStats().fbErrorComputed, L"backward: no producer extra, computed");
+			const VpMotion::VectorEngine::FlowReadCounters r3 = rig.engine.FlowReads();
+			Assert::AreEqual<unsigned long long>(r2.trustComputes + 1, r3.trustComputes, L"backward: one engine compute (after a lease switch)");
+			Assert::AreEqual<unsigned long long>(r2.fbErrorRecomputes + 1, r3.fbErrorRecomputes, L"backward: no producer extra, error computed");
+			Assert::AreEqual<unsigned long long>(r2.costWeightRecomputes + 1, r3.costWeightRecomputes, L"backward: no producer extra, cost weights computed");
+			Assert::IsTrue(back.trust != a.trust);
+			// Computed once by the engine per direction and tolerance while the pair is the current lease, however often TD asked; none by the adapter.
+			Assert::IsTrue(source.Forward(6, b));
+			Assert::IsTrue(source.Backward(6, back));
+			const unsigned long long before = rig.engine.FlowReads().trustComputes;
+			for (int r = 0; r < 5; ++r)
+			{
+				Assert::IsTrue(source.Forward(6, b));
+				Assert::IsTrue(source.Backward(6, back));
+			}
+			Assert::AreEqual(before, rig.engine.FlowReads().trustComputes, L"repeat asks are memo hits (the engine counts computes)");
+			// No engine handle: no trust, absent (never guessed).
+			TemporalDetail::SharedMotionSource noTrust(rig.View(), &rig.engine.motionValidity);
+			noTrust.SetSourceSize(192, 96);
+			TemporalDetail::MotionPair none;
+			Assert::IsFalse(noTrust.Forward(5, none));
+			Assert::AreEqual<uint64_t>(1, noTrust.GetStats().unfit);
 		}
 
-		// W1-C3 cost line: TD's per-pair forward Take with the error recomputed (before) and read from the producer (after), at the engine
-		// grids of a 1080p and a 2160p source. Logged, never gated (timing).
-		TEST_METHOD(CostLineForwardTakeBeforeAndAfter)
+		// Cost line: TD's per-pair Take (cold: the engine computes the memo; warm: the memo is read) at the engine grids of a 1080p and a
+		// 2160p source. Logged, never gated (timing); the compute count is exact.
+		TEST_METHOD(CostLineTakeColdAndWarmFromTheEngineMemo)
 		{
 			const int sizes[2][2] = { { 960, 540 }, { 1920, 1080 } };
 			for (int s = 0; s < 2; ++s)
 			{
-				auto slot = std::make_shared<VpMotion::P2Slot>(16);
-				slot->SetGeneration(1);
-				auto withExtras = MakeFlow(sizes[s][0], sizes[s][1]);
-				MotionAhead::FlowExtras(*withExtras);
-				auto recompute = std::make_shared<MotionAhead::Flow>(*withExtras);
-				recompute->fbError.clear();
-				Assert::IsTrue(slot->Publish(4, 5, 1, recompute));
-				Assert::IsTrue(slot->Publish(5, 6, 1, withExtras));
-				TemporalDetail::SharedMotionSource source(VpMotion::P2View(slot), nullptr);
+				EngineRig rig(sizes[s][0] * 2);
+				auto flow = MakeFlow(sizes[s][0], sizes[s][1]);
+				MotionAhead::FlowExtras(*flow);
+				Assert::IsTrue(rig.Publish(4, 5, flow));
+				rig.engine.motionValidity.NoteKept(4);
+				rig.engine.motionValidity.NoteKept(5);
+				TemporalDetail::SharedMotionSource source(rig.View(), &rig.engine.motionValidity, rig.FlowOf());
 				source.SetSourceSize(sizes[s][0] * 2, sizes[s][1] * 2);
 				const int reps = 20;
 				TemporalDetail::MotionPair out;
 				double sink = 0;
 				const auto t0 = std::chrono::steady_clock::now();
-				for (int r = 0; r < reps; ++r) { source.Forward(5, out); sink += out.trust.empty() ? 0.0 : out.trust[0]; }
+				Assert::IsTrue(source.Forward(5, out));
+				sink += out.trust[0];
 				const auto t1 = std::chrono::steady_clock::now();
-				for (int r = 0; r < reps; ++r) { source.Forward(6, out); sink += out.trust.empty() ? 0.0 : out.trust[0]; }
+				for (int r = 0; r < reps; ++r) { source.Forward(5, out); sink += out.trust.empty() ? 0.0 : out.trust[0]; }
 				const auto t2 = std::chrono::steady_clock::now();
-				const double before = std::chrono::duration<double, std::milli>(t1 - t0).count() / reps;
-				const double after = std::chrono::duration<double, std::milli>(t2 - t1).count() / reps;
+				const double cold = std::chrono::duration<double, std::milli>(t1 - t0).count();
+				const double warm = std::chrono::duration<double, std::milli>(t2 - t1).count() / reps;
 				char line[256];
-				std::snprintf(line, sizeof(line), "W1C3_COST td forward Take grid=%dx%d before_ms=%.3f after_ms=%.3f (sink %.1f)",
-					withExtras->gridW, withExtras->gridH, before, after, sink);
+				std::snprintf(line, sizeof(line), "W1C3_COST td forward Take grid=%dx%d cold_ms=%.3f warm_ms=%.3f (sink %.1f)",
+					flow->gridW, flow->gridH, cold, warm, sink);
 				Logger::WriteMessage(line);
-				Assert::AreEqual<uint64_t>(static_cast<uint64_t>(reps), source.GetStats().fbErrorComputed, L"only the recompute pair computed");
+				Assert::AreEqual(1ull, rig.engine.FlowReads().trustComputes, L"one engine compute, however often TD asked");
 			}
 		}
 
@@ -301,13 +401,14 @@ namespace VideoProcessorTest
 		// generation does (resync_event off: the validity is unbound).
 		TEST_METHOD(APairOfAnOlderStreamGenerationIsStaleAfterTheNextKeptFrame)
 		{
-			auto slot = std::make_shared<VpMotion::P2Slot>(16);
-			MotionValidity::State validity;
+			EngineRig rig(192);
+			MotionValidity::State& validity = rig.engine.motionValidity;
+			auto slot = rig.Slot();
 			slot->SetGeneration(validity.StreamGeneration());
 			validity.NoteKept(1);
 			validity.NoteKept(2);
 			Assert::IsTrue(slot->Publish(1, 2, slot->Generation(), MakeFlow(96, 48)));
-			TemporalDetail::SharedMotionSource source(VpMotion::P2View(slot), &validity);
+			TemporalDetail::SharedMotionSource source(rig.View(), &validity, rig.FlowOf());
 			source.SetSourceSize(192, 96);
 			TemporalDetail::MotionPair out;
 			Assert::IsTrue(source.Forward(2, out), L"control: served in its own stream generation");
@@ -327,12 +428,12 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(AMissingStaleOrUnfitPairIsAbsentCountedAndVisible)
 		{
-			auto slot = std::make_shared<VpMotion::P2Slot>(16);
-			slot->SetGeneration(1);
-			MotionValidity::State validity;
+			EngineRig rig(192);
+			auto slot = rig.Slot();
+			MotionValidity::State& validity = rig.engine.motionValidity;
 			validity.NoteKept(1);
 			validity.NoteKept(2);
-			TemporalDetail::SharedMotionSource source(VpMotion::P2View(slot), &validity);
+			TemporalDetail::SharedMotionSource source(rig.View(), &validity, rig.FlowOf());
 			TemporalDetail::MotionPair out;
 			// Missing: no pair in the slot.
 			source.SetSourceSize(192, 96);
@@ -340,8 +441,8 @@ namespace VideoProcessorTest
 			Assert::AreEqual<uint64_t>(1, source.GetStats().absent);
 			Assert::IsFalse(out.valid);
 			// Unfit: a pair exists but the source size is not known.
-			Assert::IsTrue(slot->Publish(1, 2, 1, MakeFlow(96, 48)));
-			TemporalDetail::SharedMotionSource unknownSize(VpMotion::P2View(slot), &validity);
+			Assert::IsTrue(slot->Publish(1, 2, slot->Generation(), MakeFlow(96, 48)));
+			TemporalDetail::SharedMotionSource unknownSize(rig.View(), &validity, rig.FlowOf());
 			Assert::IsFalse(unknownSize.Forward(2, out), L"the source size is not known: absent, not guessed");
 			Assert::AreEqual<uint64_t>(1, unknownSize.GetStats().unfit);
 			// Served, then the vectors-valid state moves (a resync): the same pair is STALE.

@@ -146,9 +146,6 @@ ALLOW_CALLEES = [
      "reason": "the ABI attach / extension query (abi\\RendererAbiBridge.h, VpvPluginGuard.h): the plumbing through which the "
                "VP-V settings module (and the Original overlay) reach the renderer at all; no pathway can run without it. "
                "Proof: LibplaceboPluginProxyTests, BillIdenticalSchemaTests."},
-    {"callee": r"VpStatusText::SetExtensionLines",
-     "reason": "status text only (control\\diagnostics): appends the extensions' status lines to the status dialog; writes "
-               "nothing the pipeline reads. Proof: StatusExtensionTests (Original = no extension lines)."},
     {"callee": r"PassTimers::Inbox::Motion\(\)\.DrainInto",
      "reason": "pass-timer telemetry drain (control\\diagnostics PassTimers): a pure observer of timing records; writes nothing "
                "Bill reads. Proof: PassTimersTests."},
@@ -161,10 +158,6 @@ ALLOW_CALLEES = [
      "reason": "teardown of the FX-RB warm-up worker (scaling\\rebase RebaseWarmupJob.h): the worker starts only on the VP-V "
                "pathway (its Frame() call carries !pipelineSlots.OriginalPathway()), but a live switch to Original must still "
                "stop a running worker at GPU release; no worker = no effect. Proof: RebaseWarmupGateTests."},
-    {"callee": r"captures\.OnFrameRendered",
-     "reason": "rendered-output capture requests (control\\diagnostics CaptureRequests): a pure observer of the finished frame "
-               "for screenshots / tests; writes nothing the pipeline reads. OriginalPathwayByteIdenticalToBill itself reads the "
-               "Original picture through it. Proof: RendererCaptureHarnessTests."},
     {"callee": r"VpDiagnostics::(TestAdapterFromEnvironment|D3D11DebugFromEnvironment)",
      "reason": "TEST / DEBUG ENVIRONMENT switches (control\\diagnostics DiagnosticsAdapter.h): VP_TEST_ADAPTER / VP_D3D11_DEBUG are "
                "unset in production, so the call does nothing; the capture harness decides the adapter for BOTH renders (refs/106, "
@@ -184,6 +177,11 @@ ALLOW_SITES = [
     {"file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp", "pattern": r"deviceParams\.adapter = testAdapter",
      "reason": "the VP_TEST_ADAPTER result applied to Bill's device parameters: set only when the test environment names an "
                "adapter (unset in production and by the capture harness for both renders); see the VpDiagnostics callee entry."},
+    {"file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp", "pattern": r"\bPlanEntrance\(renderImage\b",
+     "reason": "owner REVERT 2026-11-12 (r2/p4-original-srcres-feed): the P4 e-i move stopped feeding the source-resolution monitor in "
+               "Original; pre-P4 (77fe0397e) that feed ran in Original. In Original the body feeds and configures the monitor and "
+               "returns before any VP-V stage (EntrancePlanner.inl). Proof: EntranceHookTests "
+               "TheEntranceSiteSitsBeforeTheEntranceDecisionsAndOutsideTheDrawCallback. CONFIRMED by the coordinator 2026-11-12 18:34 (rule 9; full pre-P4 Original behaviour: feed, sourceAutoActive, AutoFactors, kernel ID)."},
     {"file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp", "pattern": r"\bdetailPulse\b", "symbol": "detailPulse",
      "reason": "name collision, not a VP-V reference: a ConfigEditorWindow.cpp LOCAL named detailPulse (lines 10230-10231) shares its "
                "spelling with the EntranceSegment.h:114 member (DPTR-OFF, r2/dptr-off). Granted by the coordinator, "
@@ -1573,6 +1571,18 @@ def main(argv=None):
                             "). Ratchet: lower a value when a site is collapsed into a seam; never raise one without a HOOK-APPROVAL "
                             "id (rule 32). A file not listed has a ceiling of 0.",
                    "base_ref": args.base_ref, "generated_at": datetime.date.today().isoformat(), "files": dict(sorted(counts.items()))}
+            # Keep the hand-written `temporary` blocks (HA-xx allowances with a trigger): a file whose count is above its
+            # reverts_to still needs the block, and `files` carries reverts_to, never the temporarily raised count. A block
+            # whose file now counts <= reverts_to is no longer needed and is dropped with its files entry = the count.
+            old_budget = load_json(Tree(args.root), BUDGET_PATH) or {}
+            kept = {}
+            for f, tmp in sorted((old_budget.get("temporary") or {}).items()):
+                if counts.get(f, 0) > int(tmp["reverts_to"]):
+                    kept[f] = tmp
+                    counts[f] = int(tmp["reverts_to"])
+            if kept:
+                doc["files"] = dict(sorted(counts.items()))
+                doc["temporary"] = kept
             os.makedirs(os.path.join(args.root, "docs", "audit"), exist_ok=True)
             with open(os.path.join(args.root, *BUDGET_PATH.split("/")), "w", encoding="utf-8") as fh:
                 json.dump(doc, fh, indent=1)

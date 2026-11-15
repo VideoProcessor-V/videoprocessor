@@ -16,9 +16,29 @@
 // kTdDelta / kTdMaps): every TD method writes td.delta, this slot applies it, and the slot never moves.
 #pragma once
 
+#include <VP-V/modules/input/source_analysis/FrameQuiet.h>   // fx/dv-frame-quiet
+
 void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame& target, const pl_frame& image, uint64_t sourceSequence,
 	double captureRateHz, double nominalSourceRateHz, const VideoState& state)
 {
+	// fx/dv-frame-quiet (refs/121): VP issues no native D3D11 work inside libplacebo's frame. Arm here (VP pathways only); the R12 AfterPresent
+	// seam ends the frame (the monitor's tile pass + copy, the hooks' deferred copies, one flush only if that work ran).
+	FrameQuiet::Deferred& frameQuiet = FrameQuiet::Deferred::ForThisThread();
+	if (pipelineSlots.OriginalPathway())
+	{
+		// C1 gate MUST-1 (Bill's behaviour restored): the AfterPresent seam is skipped in Original, so a frame armed here would
+		// never be ended (a missed End and a "native readback" engage per frame). Nothing defers in Original (frame_bound off,
+		// OriginalPathway.h; LED and adaptive statistics off): no frame-quiet window opens, the monitor runs inline with this
+		// gpu as before C1, and the entry Bill does not have is released (silent when it is not engaged).
+		frameQuiet.OriginalFrame(d3d11 ? d3d11->gpu : nullptr);
+		SyncFallback(FallbackCatalog::NativeReadback(0, 0));
+	}
+	else
+	{
+		frameQuiet.Arm(d3d11 ? d3d11->gpu : nullptr);
+		const FallbackCatalog::Decision quietDecision = frameQuiet.TakeDecision();
+		if (!quietDecision.id.empty()) SyncFallback(quietDecision);   // visible: native readback without fences / late copies
+	}
 // Stage 12 step A: the re-base factor for this frame. Geometry above
 // stays in native pixels; the factor applies where libplacebo samples
 // the source (the render call, the de-judder's source-warp extras) and
@@ -54,7 +74,8 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		}
 		else if (vpv.sourceAnalysis.sourceMonitor.StreamKey() != 0)
 			vpv.sourceAnalysis.sourceMonitor.SetStreamKey(0);
-		vpv.sourceAnalysis.sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage, sourceSequence, now);
+		frameQuiet.Begin(vpv.sourceAnalysis.sourceMonitor, rebaseDispatch, renderImage, sourceSequence,
+			SourceRateHz(state) > 0.0 ? SourceRateHz(state) : captureRateHz, activeSettings.sourceResolutionFrameBound, now);
 		if (renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && !vpv.sourceAnalysis.sourceMonitorDvLogged)
 		{
 			// 2026-10-17: no longer skipped as a packed signal.
@@ -80,7 +101,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		// Per axis (owner 2026-10-16): the uniform factor when engaged, else the width
 		// and height factors of a source upscaled in one direction.
 		vpv.sourceAnalysis.sourceMonitor.AutoFactors(luma ? luma->params.w : 0, nativeHeight, activeSettings.sourceResolutionAutoMinConfidence,
-			why, wantedX, wanted, -1.0, sourceSequence);
+			why, wantedX, wanted, frameQuiet.Seconds(), sourceSequence);
 		if (!why.empty())
 		{
 			const SourceResolutionMonitor::Snapshot snap = vpv.sourceAnalysis.sourceMonitor.Read();
@@ -104,6 +125,11 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 				(activeSettings.rebaseKernelMatch ? "none identified (the polar filter)" : "off (rebase_kernel_match off)"));
 		}
 	}
+	// Owner REVERT 2026-11-12 (exactly as before P4, 77fe0397e): in Original the monitor feed, its settings, the auto flag, the auto factors and
+	// the kernel identification above ran; they still do. Everything below (re-base, deband, detail pulse, texture restore) is VP-V work that
+	// does nothing in Original (owner E3); ResetEntrancePlan keeps the outputs native.
+	if (pipelineSlots.OriginalPathway())
+		return;
 	const bool temporal = temporalRenderer.Active();
 	// Audit 2026-10-16: a failed re-base renders the native frame while the blend, the SSIM gate
 	// and the debander were set up for the re-based one; after a failure the re-base pauses for
@@ -146,7 +172,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 	rebaseFade = 1.0;
 	if (activeSettings.sourceResolution == "auto" && activeSettings.sourceResolutionLatchFixes && !temporal && !rebasePaused)
 	{
-		const SourceResolutionMonitor::Monitor::Transition tr = vpv.sourceAnalysis.sourceMonitor.AutoTransition();
+		const SourceResolutionMonitor::Monitor::Transition tr = vpv.sourceAnalysis.sourceMonitor.AutoTransition(frameQuiet.Seconds());
 		if (tr.Active() && std::fabs(tr.toX - rebaseFactorX) < 1e-9 && std::fabs(tr.toY - rebaseFactor) < 1e-9)
 		{
 			rebaseFade = tr.weight;
@@ -168,7 +194,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		double fadeUs = 0.0;
 		if (fadeAllowed)
 		{
-			const SourceResolutionMonitor::Monitor::Transition tr = vpv.sourceAnalysis.sourceMonitor.AutoTransition();
+			const SourceResolutionMonitor::Monitor::Transition tr = vpv.sourceAnalysis.sourceMonitor.AutoTransition(frameQuiet.Seconds());
 			if (tr.Active() && std::fabs(tr.toX - rebaseFactorX) < 1e-9 && std::fabs(tr.toY - rebaseFactor) < 1e-9)
 				fadeUs = tr.duration * 1.0e6;   // the length the monitor asks for; its clock is not used
 		}
@@ -377,14 +403,15 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 }
 }
 
-// The Original pathway never calls PlanEntrance (guarded at the call site), so a live switch to it would leave the last VP-V plan
+// The Original pathway calls PlanEntrance again (owner REVERT 2026-11-12, exactly as before P4, 77fe0397e): there it feeds the
+// source-resolution monitor, sets its selection and the auto flag and stops before the VP-V stages, so the monitor's selection and
+// sourceAutoActive are NOT touched here (they persist as configured). A live switch to Original would still leave the last VP-V plan
 // in the members the renderer's other consumers read (the repeat-reuse extension, the adaptive frame, the crossfade branches).
 // The settings seam (UpdatePipelineSlots) calls this once when Original is selected: native factors, no crossfade, no debander or
 // detail-restore parameters. Idempotent; all values are the members' initial values.
-// P4 opus gate MUST-1: it also reproduces the side effects the Original-mode planner pass had before P4 (owner E3: no VP-V
-// work and no stale VP-V state in Original): the source look-ahead walk is stopped (sourceAutoActive), the monitor's selection
-// is native and its P0 status cleared, an engaged re-base pause fallback is released, and the detail pulse / texture restore
-// histories are forgotten ("a stage that stopped running starts over" on the return to VP-V).
+// P4 opus gate MUST-1 (kept): no stale VP-V state in Original (owner E3): the P0 status is cleared, an engaged re-base pause fallback
+// is released, and the detail pulse / texture restore histories are forgotten ("a stage that stopped running starts over" on the
+// return to VP-V).
 void LibplaceboVideoRenderer::Impl::ResetEntrancePlan()
 {
 	rebaseFactor = rebaseFactorX = 1.0;
@@ -394,8 +421,6 @@ void LibplaceboVideoRenderer::Impl::ResetEntrancePlan()
 	detailPulseRuns = textureRestoreRuns = false;
 	detailPulseParams = DetailPulse::Params();
 	textureRestoreParams = TextureRestore::Params();
-	sourceAutoActive.store(false, std::memory_order_release);
-	vpv.sourceAnalysis.sourceMonitor.SetSelection("native");
 	rebaseP0Status.Clear();
 	SyncFallback(FallbackCatalog::RebasePaused(false, rebasePauseSeconds, sourceRebase.LastError()));
 	detailPulse.Forget();

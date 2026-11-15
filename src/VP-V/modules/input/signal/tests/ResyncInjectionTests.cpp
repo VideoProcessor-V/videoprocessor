@@ -476,7 +476,7 @@ namespace Tests
 			s.p7Wanted = true;
 			s.aheadFit = true;
 			core.OnSettings(s);
-			core.SetAheadSource([](uint64_t, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
+			core.SetAheadSource([](uint64_t, float, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
 			VpMotion::VectorEngine* engine = &rig.engine;
 			core.SetP2EpochSource([engine]() { return engine->FieldEra(); });   // as CameraExtension wires it (IVectorEngine::FieldEra)
 			core.AttachOnTime(SourceOf(onTime), "test lane");

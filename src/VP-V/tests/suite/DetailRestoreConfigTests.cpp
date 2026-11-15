@@ -438,7 +438,8 @@ namespace DetailRestoreConfigTestsNs
 			// before the entrance hook, so the monitor read still precedes entrance.Run.
 			const std::string planner = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntrancePlanner.inl");
 			Assert::IsFalse(planner.empty(), L"the entrance planner source");
-			const size_t monitorRead = planner.find("sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage,");
+			// fx/dv-frame-quiet: the monitor read is fed through frameQuiet.Begin (FrameQuiet.h calls monitor.Frame / FrameBegin).
+			const size_t monitorRead = planner.find("frameQuiet.Begin(vpv.sourceAnalysis.sourceMonitor, rebaseDispatch, renderImage,");
 			const size_t planSite = text.find("PlanEntrance(renderImage, target, image, sourceSequence,");
 			const size_t monitor = monitorRead != std::string::npos && planSite != std::string::npos ? planSite : std::string::npos;
 			const size_t renderOwned = planSite == std::string::npos ? std::string::npos : text.find("NlsHookRecovery::RenderOwned(", planSite);
@@ -446,8 +447,13 @@ namespace DetailRestoreConfigTestsNs
 			// M2 P4 g: the draw (the second RenderOwned lambda, where the entrance hook runs) is Impl::DrawFrame in
 			// segments/EntranceHostMembers.inl; the lambda inside the RenderOwned call returns it, so the entrance still runs
 			// after the planner call (and the monitor read in it).
-			const size_t drawCall = text.find("return DrawFrame(source, destination, parameters, image, sourceSequence,", renderOwned);
-			Assert::IsTrue(drawCall != std::string::npos && drawCall - renderOwned < 4000, L"the render call's draw lambda calls DrawFrame");
+			// HF item 5 (refs/r2-composite-reds-locate2.md part 1 red 3; 3f84ffdb7 turned the inline draw lambda into the named lambda
+			// drawFrame defined BEFORE the render call, which receives it as its last argument): same ordering claim - the named lambda
+			// calls DrawFrame and is the render call's draw callback, so the entrance still runs after the planner call.
+			const size_t drawLambda = renderOwned == std::string::npos ? std::string::npos : text.rfind("return DrawFrame(source, destination, parameters, image, sourceSequence,", renderOwned);
+			const size_t drawArgument = text.find("}, drawFrame);", renderOwned);
+			Assert::IsTrue(drawLambda != std::string::npos && renderOwned - drawLambda < 4000 && drawLambda > planSite &&
+				drawArgument != std::string::npos && drawArgument - renderOwned < 4000, L"the render call's draw callback (the drawFrame lambda) calls DrawFrame");
 			const std::string hostMembers = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntranceHostMembers.inl");
 			Assert::IsFalse(hostMembers.empty(), L"the entrance host members source");
 			const size_t drawFrame = hostMembers.find("bool LibplaceboVideoRenderer::Impl::DrawFrame(");
@@ -562,7 +568,7 @@ namespace DetailRestoreConfigTestsNs
 			Assert::IsTrue(core.find("ResetEntrancePlan();") != std::string::npos, L"the Original switch resets the planner outputs");
 		}
 
-		// P4 opus gate MUST-1 (owner E3): the planner is not called in the Original pathway, so a LIVE switch VP-V -> Original must
+		// P4 opus gate MUST-1 (owner E3): the planner stops before the VP-V stages in the Original pathway, so a LIVE switch VP-V -> Original must
 		// leave no VP-V work and no stale VP-V state behind. ResetEntrancePlan (called once by the settings seam when Original is
 		// selected) reproduces the side effects the pre-P4 Original planner pass had: no source look-ahead walk (sourceAutoActive
 		// false: the render loop's AddRef of queued frames and RunAheadWalk read it), the monitor's selection native and its P0 status
@@ -581,8 +587,6 @@ namespace DetailRestoreConfigTestsNs
 				"rebaseFactor = rebaseFactorX = 1.0;",
 				"rebaseFade = 1.0;",
 				"detailPulseRuns = textureRestoreRuns = false;",
-				"sourceAutoActive.store(false, std::memory_order_release);",
-				"sourceMonitor.SetSelection(\"native\");",
 				"rebaseP0Status.Clear();",
 				"SyncFallback(FallbackCatalog::RebasePaused(false,",
 				"detailPulse.Forget();",
@@ -593,7 +597,11 @@ namespace DetailRestoreConfigTestsNs
 			};
 			for (const char* r : required)
 				Assert::IsTrue(body.find(r) != std::string::npos, Wide(std::string("the Original reset does: ") + r).c_str());
-			// The look-ahead consumers read the same flag the reset clears.
+			// HF item 1 MUST 2 (coordinator 2026-11-12 18:35, owner 'exactly as before' P4): the planner runs in Original again and sets the
+			// monitor's selection and the auto flag itself, so the reset must NOT overwrite them (the selection persists as configured).
+			Assert::IsTrue(body.find("SetSelection(") == std::string::npos && body.find("sourceAutoActive.store(") == std::string::npos,
+				L"the reset leaves the monitor's selection and the auto flag to the planner");
+			// The look-ahead consumers read the flag the planner sets (also in Original).
 			const std::string lvr = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
 			Assert::IsTrue(lvr.find("sourceAutoActive.load(") != std::string::npos, L"the render loop's look-ahead reads sourceAutoActive");
 			// Called on the Original branch of the settings seam, after the pathway fact is set.
@@ -643,6 +651,38 @@ namespace DetailRestoreConfigTestsNs
 				L"off the Original pathway the helper is R1 with the motion_history_fixes clause");
 			Assert::IsTrue(text.find("motionValidity.Current(dejudderEstimatedEpoch) && sourceSequence != 0)") == std::string::npos,
 				L"the old gate is gone");
+		}
+
+		// L-B6 audit MUST 1: the scene-judge fallback wiring in the entrance segment. The release of "detail pulse scene judge" belongs in
+		// the braced else of "switched off or not applicable" (a brace-less else once ran it every frame and hid the fallback), the engage
+		// follows each successful Apply, and a failed Apply releases the stale status.
+		TEST_METHOD(SceneJudgeFallbackWiringInTheEntranceSegment)
+		{
+			const std::string text = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntranceSegment.cpp");
+			Assert::IsFalse(text.empty(), L"the entrance segment source");
+			for (const char* module : { "detail pulse", "texture restore" })
+			{
+				const std::string name = module;
+				const std::string releaseOff = "host.ReleaseFallback(\"" + name + "\");";
+				const std::string releaseJudge = "host.ReleaseFallback(\"" + name + " scene judge\");";
+				const std::string engage = "FallbackCatalog::SceneJudgeUnavailable(\"" + name + "\"";
+				Assert::IsTrue(text.find(engage) != std::string::npos, L"the judge status is built after Apply");
+				// The last plain release of the module id is in the off branch: a brace must open the else before it, and the judge release
+				// must follow it before the block closes.
+				const size_t off = text.rfind(releaseOff);
+				Assert::IsTrue(off != std::string::npos, L"the off-branch release");
+				const size_t elseAt = text.rfind("else", off);
+				Assert::IsTrue(elseAt != std::string::npos && text.find('{', elseAt) < off, L"the off branch is braced");
+				const size_t judgeAt = text.find(releaseJudge, off);
+				Assert::IsTrue(judgeAt != std::string::npos && text.find('}', off) > judgeAt, L"the judge release is inside that braced off branch");
+				// The failed-Apply branch releases the stale status (engage of the failure comes first).
+				const std::string failed = name == "detail pulse" ? "FallbackCatalog::DetailPulseFailed(true" : "FallbackCatalog::TextureRestoreFailed(true";
+				const size_t failAt = text.find(failed);
+				Assert::IsTrue(failAt != std::string::npos, L"the failure engage");
+				const size_t closeAt = text.find('}', failAt);
+				const size_t staleRelease = text.find(releaseJudge, failAt);
+				Assert::IsTrue(staleRelease != std::string::npos && staleRelease < closeAt, L"a failed Apply releases the scene-judge status");
+			}
 		}
 	};
 }

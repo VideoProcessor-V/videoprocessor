@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <VP-V/core/Ramp.h>   // ND07: min(1, max(0, x)) is Clamp01NanToZero (NaN -> 0)
 
 #include "CameraMotion.h"
 
@@ -102,7 +103,7 @@ namespace CameraModel
 				const double threshold = m_weight > 0.0 ? policy.threshold - policy.hysteresis : policy.threshold;
 				const double width = policy.blendWidth > 0.0 ? policy.blendWidth : 1e-9;
 				double t = (record->confidence - threshold) / width;
-				t = (std::min)(1.0, (std::max)(0.0, t));
+				t = RampMath::Clamp01NanToZero(t);
 				switch (policy.curve)
 				{
 				case BlendCurve::Linear: target = t; break;
@@ -115,7 +116,7 @@ namespace CameraModel
 			if (delta > step) m_weight += step;
 			else if (delta < -step) m_weight -= step;
 			else m_weight = target;
-			m_weight = (std::min)(1.0, (std::max)(0.0, m_weight));
+			m_weight = RampMath::Clamp01NanToZero(m_weight);
 			return m_weight;
 		}
 

@@ -303,13 +303,24 @@ namespace VectorDemandTest
 			// 60p, 250 ms queue: 15 frames, 14 queued after the current one; the depth is 4 (66.7 ms at 60 Hz).
 			const int depth60 = MotionAhead::DepthAt(4, 60.0);
 			Assert::AreEqual(4, depth60);
-			Assert::AreEqual(13, MotionAhead::kMaxLead);
-			Assert::AreEqual(13, MotionAhead::LeadFor(depth60, 14), L"14 queued ahead: the lead stops at 13");
+			// OD 11-14 (BEHAVIOUR-CHANGE OD-11-14-AHEAD-CAP): the cap is the ahead-compute ceiling, was the P2 ring's 13.
+			Assert::AreEqual(int(VpSkeleton::kAheadCeiling), MotionAhead::kMaxLead);
+			Assert::AreEqual(13, MotionAhead::kRingMaxLead, L"the ring's bound is unchanged");
+			Assert::AreEqual(MotionAhead::kMaxLead, MotionAhead::LeadFor(depth60, 14), L"14 queued ahead: the lead stops at the ceiling");
 			Assert::IsTrue(MotionAhead::LeadCapped(depth60, 14), L"the cap binds at 60p / 250 ms");
 			Assert::IsTrue(MotionAhead::LeadCapped(depth60, 15));
-			Assert::IsFalse(MotionAhead::LeadCapped(depth60, 13), L"exactly 13 ahead: every queued frame is computed");
+			Assert::IsTrue(MotionAhead::LeadCapped(depth60, 13), L"13 ahead (the old ring cap): now capped too");
+			Assert::IsFalse(MotionAhead::LeadCapped(depth60, static_cast<size_t>(MotionAhead::kMaxLead)),
+				L"exactly kMaxLead ahead: every queued frame is computed");
 			Assert::IsFalse(MotionAhead::LeadCapped(0, 20), L"no look-ahead (depth 0): nothing is capped");
-			Assert::IsTrue(MotionAhead::LeadCapped(MotionAhead::DepthAt(4, 240.0), 0), L"240p's depth 16 is held to 13");
+			Assert::IsTrue(MotionAhead::LeadCapped(MotionAhead::DepthAt(4, 240.0), 0), L"240p's depth 16 is held to the ceiling");
+			Assert::IsTrue(MotionAhead::LeadCapped(MotionAhead::DepthAt(4, 120.0), 0), L"120p's depth 8 is held to the ceiling");
+			// R3 (lead 12): the ceiling with more queued is the DESIGNED state (info line only); the entry only when the depth asks more.
+			Assert::IsFalse(MotionAhead::LeadShortOfDepth(depth60), L"60p / 250 ms: the depth (4) is served in full: no fallback entry");
+			Assert::IsFalse(MotionAhead::LeadShortOfDepth(MotionAhead::kMaxLead), L"a depth of exactly the ceiling is served in full");
+			Assert::IsTrue(MotionAhead::LeadShortOfDepth(MotionAhead::DepthAt(4, 120.0)), L"120p's 8 gets 6: less than asked: the entry");
+			Assert::IsTrue(MotionAhead::LeadShortOfDepth(MotionAhead::DepthAt(4, 240.0)), L"240p's 16 gets 6: the entry");
+			Assert::IsFalse(MotionAhead::LeadShortOfDepth(0), L"no look-ahead: nothing asked");
 
 			MotionAhead::LeadCapTracker t;
 			for (unsigned i = 0; i + 1 < MotionAhead::LeadCapTracker::kLeadCapRun; ++i)
@@ -330,15 +341,22 @@ namespace VectorDemandTest
 			const Decision forward = Decide(Make({ Consumer::GrainMap }));
 			Assert::IsTrue(forward.mode == Mode::Forward);
 			Assert::AreEqual(StatusLine(forward), StatusLine(forward, 0), L"not capped: the line is unchanged");
-			Assert::AreEqual(StatusLine(forward) + "; look-ahead lead capped at 13 frames (more are queued ahead)",
-				StatusLine(forward, MotionAhead::kMaxLead));
+			Assert::AreEqual(StatusLine(forward) + "; look-ahead computes " + std::to_string(MotionAhead::kMaxLead) +
+				" frames ahead (the ahead-compute ceiling; more are queued)", StatusLine(forward, MotionAhead::kMaxLead),
+				L"R3: at the ceiling the line is information, not a downgrade");
 			const Decision idle = Decide(Make({}));
 			Assert::AreEqual(StatusLine(idle), StatusLine(idle, MotionAhead::kMaxLead), L"no forward look-ahead: no cap text");
 
 			const FallbackCatalog::Decision on = FallbackCatalog::MotionLookaheadCapped(true, MotionAhead::kMaxLead);
 			Assert::IsTrue(on.engaged);
 			Assert::AreEqual(std::string("motion_lookahead_capped"), on.id);
-			Assert::IsTrue(on.reason.find("13 frames ahead") != std::string::npos, L"the reason names the cap");
+			Assert::IsTrue(on.reason.find(std::to_string(MotionAhead::kMaxLead) + " frames ahead") != std::string::npos, L"the reason names the cap");
+			Assert::IsTrue(on.reason.find("ahead-compute ceiling") != std::string::npos, L"and says it is the ceiling (OD 11-14)");
+			const int asked120 = MotionAhead::DepthAt(4, 120.0);
+			const FallbackCatalog::Decision short120 = FallbackCatalog::MotionLookaheadCapped(true, MotionAhead::kMaxLead, asked120);
+			Assert::IsTrue(short120.engaged);
+			Assert::IsTrue(short120.reason.find("depth asks (" + std::to_string(asked120) + ")") != std::string::npos,
+				L"R3: the entry names what the consumer asked for");
 			const FallbackCatalog::Decision off = FallbackCatalog::MotionLookaheadCapped(false, MotionAhead::kMaxLead);
 			Assert::IsFalse(off.engaged);
 			Assert::AreEqual(std::string("motion_lookahead_capped"), off.id);
@@ -570,6 +588,40 @@ namespace VectorDemandTest
 			const Decision d = Decide(in);
 			Assert::IsTrue(d.mode == Mode::Off && d.reason == Reason::Disabled && d.served == 0 && d.unserved == 0 &&
 				!d.estimate && !d.producer && !d.lowLatencyAllowed);
+		}
+
+		// R3 (audit S5): the composed cap state as the vector engine reads it, frame by frame. 60p with the standard queue (depth 4,
+		// 14 queued ahead): the designed state, the info text only, never the entry. 120p (depth 8): the entry, naming the 8 asked.
+		TEST_METHOD(LeadCapStateShowsInfoAtTheCeilingAndTheEntryOnlyWhenShort)
+		{
+			const unsigned run = MotionAhead::LeadCapTracker::kLeadCapRun;
+			const int depth60 = MotionAhead::DepthAt(4, 60.0);
+			MotionAhead::LeadCapState s60;
+			for (unsigned i = 0; i < run; ++i)
+				s60.Note(depth60, 14);
+			Assert::IsTrue(s60.InfoShown(true), L"60p / 250 ms: the ceiling binds sustained: the info text");
+			Assert::IsFalse(s60.EntryShown(true), L"60p / 250 ms: the depth is served in full: no fallback entry");
+			Assert::IsFalse(s60.InfoShown(false) || s60.EntryShown(false), L"not forward: neither");
+			Assert::AreEqual(0, s60.asked, L"nothing asked above the ceiling");
+
+			const int depth120 = MotionAhead::DepthAt(4, 120.0);
+			MotionAhead::LeadCapState s120;
+			for (unsigned i = 0; i + 1 < run; ++i)
+				s120.Note(depth120, 20);
+			Assert::IsFalse(s120.EntryShown(true), L"not yet sustained");
+			s120.Note(depth120, 20);
+			Assert::IsTrue(s120.EntryShown(true) && s120.InfoShown(true), L"120p: the entry (and the info text)");
+			Assert::AreEqual(depth120, s120.asked, L"the depth asked is kept for the entry");
+			const FallbackCatalog::Decision e = FallbackCatalog::MotionLookaheadCapped(s120.EntryShown(true), MotionAhead::kMaxLead, s120.asked);
+			Assert::IsTrue(e.engaged && e.reason.find("(" + std::to_string(depth120) + ")") != std::string::npos, L"the entry names 8");
+
+			// Back to 60p: the entry is released only after a sustained free run (no toggling with the queue level).
+			for (unsigned i = 0; i + 1 < run; ++i)
+				s120.Note(depth60, 14);
+			Assert::IsTrue(s120.EntryShown(true), L"held until a full free run");
+			s120.Note(depth60, 14);
+			Assert::IsFalse(s120.EntryShown(true), L"released");
+			Assert::IsTrue(s120.InfoShown(true), L"the info text stays while the ceiling binds");
 		}
 	};
 }

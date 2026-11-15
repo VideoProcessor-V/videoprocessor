@@ -1,5 +1,6 @@
 #pragma once
 
+#include <VP-V/core/OnePole.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <VP-V/modules/drive/led_measure/FrameStats.h>
 
@@ -423,7 +424,7 @@ namespace LedDrive
 		double Step(double elapsedMs)
 		{
 			if (settleMs > 0.0 && elapsedMs > 0.0)
-				value += (target - value) * (1.0 - std::exp(-elapsedMs / settleMs));
+				value += (target - value) * OnePole::AlphaForMs(elapsedMs, settleMs);   // core/OnePole.h (ND05)
 			return value;
 		}
 		// Where it will be aheadMs from now heading for `toward`.

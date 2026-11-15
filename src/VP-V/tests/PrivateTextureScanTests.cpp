@@ -176,5 +176,40 @@ namespace PrivateTextureScanTestsNs
 			Assert::IsFalse(CreatesTexturePrivately("bool EnsureSize(int w, int h);"));
 			Assert::IsFalse(CreatesTexturePrivately("MyEnsure(x);"));
 		}
+
+		// R2 (lead 12): no owner fill captures a pl_gpu of its own. A file that defines or handles an owner fill (names
+		// OwnerFillRequest) takes the device only through OwnerFillRequest::gpu (the sanctioned OwnerGpuContext): it never names
+		// pl_gpu. The memo itself (core/SkeletonAcquire.h, whose comments name the type) is the one exception. The whole VP-V tree
+		// is scanned (tests excluded).
+		TEST_METHOD(OwnerFillsTakeNoPrivateGpu)
+		{
+			std::vector<std::string> files;
+			Walk("src/VP-V", files);
+			Assert::IsTrue(!files.empty(), L"the scan found no source files: repository root is wrong");
+			size_t fillFiles = 0;
+			for (const std::string& rel : files)
+			{
+				const std::string text = SettingsTestSupport::ReadFile(Native(rel));
+				if (text.find("OwnerFillRequest") == std::string::npos)
+					continue;
+				++fillFiles;
+				if (rel == "src/VP-V/core/SkeletonAcquire.h")
+					continue;
+				const std::wstring message = Widen(rel) + L": an owner fill names pl_gpu: take the device through OwnerFillRequest::gpu"
+					L" (core/SkeletonAcquire.h OwnerGpuContext), never a captured pl_gpu";
+				Assert::IsTrue(text.find("pl_gpu") == std::string::npos, message.c_str());
+				// Audit S4: nor a dispatch of its own (the context's Dispatch() is the one). A guard, not a proof: a stronger pattern
+				// is an S-CHK checker change through the lead. C3 (lead 17 R17-22): a fill may RUN on the context's dispatch
+				// (pl_dispatch_begin / compute), so the guard forbids creating or destroying one, and a fill that uses pl_dispatch_*
+				// must obtain it from req.gpu->Dispatch().
+				const std::wstring dispatchMessage = Widen(rel) + L": an owner fill owns a pl_dispatch, or uses one not taken from"
+					L" req.gpu->Dispatch() (core/SkeletonAcquire.h OwnerGpuContext)";
+				Assert::IsTrue(text.find("pl_dispatch_create") == std::string::npos, dispatchMessage.c_str());
+				Assert::IsTrue(text.find("pl_dispatch_destroy") == std::string::npos, dispatchMessage.c_str());
+				if (text.find("pl_dispatch") != std::string::npos)
+					Assert::IsTrue(text.find("req.gpu->Dispatch()") != std::string::npos, dispatchMessage.c_str());
+			}
+			Assert::IsTrue(fillFiles >= 2, L"the scan found the memo and at least one fill");
+		}
 	};
 }
