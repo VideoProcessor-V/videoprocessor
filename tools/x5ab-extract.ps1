@@ -14,7 +14,8 @@ Synthetic clips (from tos_24p_3min): 'cut' = a hard splice of two scenes at fram
 -Set all adds the six grain/image cases (hdr4k, hdr2k, sdr1080, sdrlin, cropbaked, sdrmeridian). At 120 frames each clip is about 240 MB (1260x528) or 330 MB (1260x720).
 
 Truth list <Out>\x5ab-truth.txt (read by tools/x5ab-score.ps1), one line per case:  case|kind|truth cut frames|status|note
-  kind = cut / flash / pan / fade / other (the pass rule: zero false cuts on pan, flash and fade; no missed truth cut on cut).
+  kind = cut / flash / pan / fade / other (the pass rule, tools/x5ab-score.ps1: zero false cuts and zero missed truth cuts on EVERY
+  clip; the four kinds cut, flash, pan and fade must all be present; a cut line needs a truth frame).
   truth cut frames = comma-separated clip frame indices of the FIRST frame of each new shot (empty = no cut).
   status = synthetic (no cut by construction: one still frame) or UNMARKED (live footage: a person watches the clip, confirms the
   construction splice and adds any real cut inside it, then sets status to marked:<who>:<date>). The scorer refuses UNMARKED lines.

@@ -26,6 +26,7 @@
 #define X5AB_TIP_CUT 1
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleCut.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
+#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>   // the X5 A/B harness models the scene product with U7's CutTracker
 #endif
 
 namespace VideoProcessorTest

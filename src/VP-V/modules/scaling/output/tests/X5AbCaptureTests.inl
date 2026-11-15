@@ -9,13 +9,20 @@
 // One list line per case:  case|raw rgb24 file|w|h|out w|out h|transfer gamma22/pq|light gamma/linear|frames
 // Output (all under VP_X5AB_OUT): <side>.csv (one row per frame) and <case>-<side>.y10 (sampled 10-bit luma of the output, every
 // 2nd pixel in x and y, uint16 little endian, frame after frame). Frames are 8-bit RGB from ffmpeg (tools/x5ab-extract.ps1).
-// Cut column: tip = the P4/U7 verdict the module used; base = the old rule re-derived from Stats.meanLuma (|step| > 20 codes).
+// Cut column: tip = the verdict the module used, read from the SCENE PRODUCT (C5, audit x5dup MUST 1/2: FrameAnalysis::Scene
+// groups produced by the shared U7 law VpUnit::CutFadeJudge::CutTracker over this clip's P4 records, sealed in frame order and
+// delivered as SkeletonModule::FillScene delivers them for contiguous frames: a confirmed cut goes out once, with the group of the
+// frame after it, cutLate; the module reads them through AdaptiveDownscale::VerdictFromScene, the production rule); base = the old
+// rule re-derived from Stats.meanLuma (|step| > 20 codes). The harness models only the skeleton's delivery (no lane, no store; the
+// real stage with the memo and store bound is gate B-S3) and no fade law (x5dup never snaps on a fade).
 // Every row is one source-frame ADVANCE, so cut=1 on a row is one grain-term snap (the per-consumer reset impact of a cut verdict).
 // cut_state (owner-intent fix 2026-11-15: false cuts are counted, not only misses): tip = first (no previous advanced frame: a cut
-// by definition, never scored as a true or a false cut), known (U7 judged the P4 pair), unavailable (no verdict, no snap) or
-// unasked (the module did not ask: a harness fault); base = derived. The before side must run THIS text too (carry this file's
-// commit onto the before branch). Scoring is not done here: tools/x5ab-score.ps1 reads both sides' CSVs and a hand-marked truth
-// list (tests/README.md, "X5 cut A/B").
+// by definition, never scored as a true or a false cut), known (the frame's scene group was read), unavailable (no verdict, no
+// snap) or unasked (the module did not ask: a harness fault); base = derived. cut_here / confirmed = the frame's OWN U7 verdict in
+// its group after the run (confirmed by the next frame; the last frame stays provisional), cut_late = the snap delivered a cut of an
+// earlier frame; base: '-'. Rows are written when a clip ends (cut_here is final then). A short clip fails the case.
+// The before side must run THIS text too (carry this file's commit onto the before branch). Scoring is not done here:
+// tools/x5ab-score.ps1 reads both sides' CSVs, the list file and a hand-marked truth list (tests/README.md, "X5 cut A/B").
 // gpu_ms is wall time of one render plus pl_gpu_finish (includes the upload); VRAM is not measured by this harness.
 // Hardware GPU only: set VP_TEST_GPU=hardware.
 
@@ -61,6 +68,65 @@
 			for (size_t i = 0; i < bytes; ++i) { h ^= p[i]; h *= 1099511628211ull; }
 			return h;
 		}
+
+#ifdef X5AB_TIP_CUT
+		// The scene product of one clip: U7's CutTracker (the shared law, unchanged) pushed once per frame in order, and the groups the
+		// skeleton's seal writes for contiguous frames with no look-ahead (SkeletonModule::FillScene): the frame's provisional verdict
+		// (cutHere, confirmed), rewritten when the next frame confirms it; the delivered `cut` once per confirmed cut: now when the
+		// verdict is final at once (the no-grid pair-law fallback), else with the next frame's group (cutLate). No classification here.
+		struct SceneProductModel
+		{
+			VpUnit::CutFadeJudge::CutTracker tracker;
+			std::map<uint64_t, FrameAnalysis::Scene> groups;
+			std::map<uint64_t, bool> delivered;   // cut frames already delivered (exactly once per cut)
+
+			void Seal(uint64_t seq, const VpLaneProducts::SourceStatsRecord& rec)
+			{
+				FrameAnalysis::Scene s;
+				s.origin = FrameAnalysis::SceneOrigin::Vp;
+				const auto done = tracker.Push(seq, rec);   // the CONFIRMED verdict of the previous frame (known = false: none)
+				if (done.known)
+				{
+					const auto it = groups.find(done.seq);
+					if (it != groups.end() && !it->second.confirmed)
+					{
+						it->second.cutHere = done.cut;
+						it->second.flash = done.flash;
+						it->second.cutPossible = done.candidate;
+						it->second.cutStrength = done.strength;
+						it->second.confirmed = true;
+					}
+					if (done.cut && !delivered[done.seq])
+					{
+						delivered[done.seq] = true;
+						s.cut = true;
+						s.cutLate = true;
+					}
+				}
+				const auto own = tracker.Provisional();
+				s.cutHere = own.cut;
+				s.flash = own.flash;
+				s.cutPossible = own.candidate;
+				s.cutStrength = own.strength;
+				s.confirmed = own.confirmed;
+				if (own.known && own.confirmed && own.cut && !delivered[seq])
+				{
+					delivered[seq] = true;
+					s.cut = true;   // final at once: delivered with its own group (cut = now || late, one snap)
+				}
+				groups[seq] = s;
+			}
+
+			bool Read(uint64_t seq, FrameAnalysis::Scene& scene) const
+			{
+				const auto it = groups.find(seq);
+				if (it == groups.end())
+					return false;
+				scene = it->second;
+				return true;
+			}
+		};
+#endif
 	}
 
 	TEST_CLASS(X5AbCaptureTests)
@@ -93,7 +159,7 @@
 
 			std::ofstream csv(outDir + "\\" + side + ".csv", std::ios::app);
 			Assert::IsTrue(csv.good(), L"cannot open the CSV");
-			csv << "case,side,frame,seq,valid,grain_scale,mean_w,mean_luma,cut,cut_rule,cut_state,hash64,gpu_ms\n";
+			csv << "case,side,frame,seq,valid,grain_scale,mean_w,mean_luma,cut,cut_rule,cut_state,cut_here,confirmed,cut_late,hash64,gpu_ms\n";
 
 			for (const auto& c : cases)
 			{
@@ -105,20 +171,20 @@
 				uint64_t sequence = 0;
 				std::map<uint64_t, int> tipCut;   // sequence -> cut flag the module was given (tip only)
 				std::map<uint64_t, const char*> tipState;   // sequence -> first / known / unavailable (tip only)
+				std::map<uint64_t, int> tipLate;   // sequence -> the snap delivered an earlier frame's cut (tip only)
+				std::vector<std::string> rows;   // written when the clip ends (cut_here / confirmed are final then)
+				std::vector<uint64_t> rowSeqs;
 #ifdef X5AB_TIP_CUT
-				std::map<uint64_t, VpLaneProducts::SourceStatsRecord> records;
+				X5AbSupport::SceneProductModel scene;
 				module.SetCutSource([&](uint64_t prev, uint64_t seq)
 				{
-					AdaptiveDownscale::CutVerdict v = AdaptiveDownscale::VerdictFrom(prev, seq,
-						[&](uint64_t s, VpLaneProducts::SourceStatsRecord& rec, std::string& cause)
-						{
-							const auto it = records.find(s);
-							if (it == records.end()) { cause = "harness: no record"; return false; }
-							rec = it->second;
-							return true;
-						});
+					// The production read rule (AdaptiveDownscaleCut.h) over the modelled groups; reach = a default store ring.
+					AdaptiveDownscale::CutVerdict v = AdaptiveDownscale::VerdictFromScene(prev, seq,
+						[&scene](uint64_t s, FrameAnalysis::Scene& g) { return scene.Read(s, g); },
+						FrameAnalysis::RingDepth(4, 4), "harness: no scene group for frame " + std::to_string(seq));
 					tipCut[seq] = v.cut ? 1 : 0;
-					tipState[seq] = v.state != AdaptiveDownscale::CutVerdict::State::Known ? "unavailable" : (prev == 0 ? "first" : "known");
+					tipLate[seq] = v.cutLate ? 1 : 0;
+					tipState[seq] = v.state != AdaptiveDownscale::CutVerdict::State::Known ? "unavailable" : (v.first ? "first" : "known");
 					return v;
 				});
 #endif
@@ -130,7 +196,8 @@
 				for (int f = 0; f < c.frames; ++f)
 				{
 					raw.read(reinterpret_cast<char*>(rgb.data()), static_cast<std::streamsize>(rgb.size()));
-					if (raw.gcount() != static_cast<std::streamsize>(rgb.size())) break;   // short clip: fewer frames
+					// A short clip fails the case (audit x5dup MUST 2: rows must equal the list's frame count; no silent truncation).
+					Assert::IsTrue(raw.gcount() == static_cast<std::streamsize>(rgb.size()), L"short clip: fewer frames than the list says");
 					for (size_t i = 0, n = static_cast<size_t>(c.w) * c.h; i < n; ++i)
 					{
 						rgba[i * 4 + 0] = rgb[i * 3 + 0];
@@ -156,7 +223,7 @@
 						VpLaneProducts::SourceStatsRecord rec;
 						Assert::IsTrue(VpUnit::SourceStats::ComputeRecord(half.data(), hw, hh, buf, sizeof(buf)), L"P4 record compute");
 						Assert::IsTrue(VpUnit::SourceStats::ReadRecord(buf, sizeof(buf), &rec), L"P4 record read");
-						records[sequence + 1] = rec;
+						scene.Seal(sequence + 1, rec);   // the frame's seal (before it renders): its scene group is published
 					}
 #endif
 					pl_tex_params sp{};
@@ -212,10 +279,12 @@
 					int cut;
 					const char* rule;
 					const char* state;
+					std::string late = "-";
 #ifdef X5AB_TIP_CUT
 					cut = tipCut.count(sequence) ? tipCut[sequence] : 0;
-					rule = "p4_u7";
+					rule = "u7_scene";
 					state = tipState.count(sequence) ? tipState[sequence] : "unasked";
+					late = tipLate.count(sequence) && tipLate[sequence] ? "1" : "0";
 #else
 					cut = (prevMean >= 0.0f && std::fabs(stats.meanLuma - prevMean) > 20.0f) ? 1 : 0;
 					rule = "meanstep20_derived";
@@ -223,10 +292,24 @@
 #endif
 					prevMean = stats.meanLuma;
 					char row[320];
-					std::snprintf(row, sizeof(row), "%s,%s,%d,%llu,%d,%.6f,%.6f,%.3f,%d,%s,%s,%016llx,%.3f\n", c.name.c_str(), side.c_str(), f,
-						static_cast<unsigned long long>(sequence), stats.valid ? 1 : 0, stats.grainScale, stats.meanW, stats.meanLuma, cut, rule,
-						state, static_cast<unsigned long long>(hash), ms);
-					csv << row;
+					// cut_here / confirmed: filled in when the clip ends (marker @HERE@).
+					std::snprintf(row, sizeof(row), "%s,%s,%d,%llu,%d,%.6f,%.6f,%.3f,%d,%s,%s,@HERE@,%s,%016llx,%.3f\n", c.name.c_str(),
+						side.c_str(), f, static_cast<unsigned long long>(sequence), stats.valid ? 1 : 0, stats.grainScale, stats.meanW,
+						stats.meanLuma, cut, rule, state, late.c_str(), static_cast<unsigned long long>(hash), ms);
+					rows.push_back(row);
+					rowSeqs.push_back(sequence);
+				}
+				for (size_t i = 0; i < rows.size(); ++i)
+				{
+					std::string here = "-,-";
+#ifdef X5AB_TIP_CUT
+					FrameAnalysis::Scene g;
+					if (scene.Read(rowSeqs[i], g))
+						here = std::string(g.cutHere ? "1" : "0") + "," + (g.confirmed ? "1" : "0");
+#endif
+					std::string& text = rows[i];
+					text.replace(text.find("@HERE@"), 6, here);
+					csv << text;
 				}
 			}
 			csv.flush();
