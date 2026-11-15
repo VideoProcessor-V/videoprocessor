@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
 # Composed vectors: per-pixel chain of the engine's adjacent pairs (ENGINE-COMPOSED-VECTORS)
 
-Unit: motion/estimation (sub-folder `composed/`, submodule of slot `motion.estimation`). Skeleton product `composed_vectors` (`kComposedVectors`, lane product, Cpu reference, T1, history 8, input P2 lag 0), made by `VpComposed::Product` (the planes) with a per-frame handle in the registry. Readers: P10g multi-frame grain level and TemporalDetail's neighbour warp (owner 2026-11-14, option B weak texture; lead12\proof-weaktex-BC.md s11; register row ENGINE-COMPOSED-VECTORS).
+Unit: motion/estimation (sub-folder `composed/`, submodule of slot `motion.estimation`). Skeleton product `composed_vectors` at the FIXED id 34 (`kComposedVectors`, owner R14-95 fixed id table, `core/Products.h`), made by `VpComposed::Product` (the planes). The id is still in `kReservedProductIds` (an absent registry slot, no catalog row) until its registry decl (lane product, Cpu reference, T1, history 8, input P2 lag 0, a per-frame handle) and its reader row land (lead ruling SHOULD S3). Readers: P10g multi-frame grain level and TemporalDetail's neighbour warp (owner 2026-11-14, option B weak texture; lead12\proof-weaktex-BC.md s11; register row ENGINE-COMPOSED-VECTORS).
 
 ## Settings
 
