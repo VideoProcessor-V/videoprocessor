@@ -133,4 +133,24 @@ namespace MotionAhead
 		size_t capacity_, pinCapacity_;
 		std::vector<Entry> entries_;   // oldest first
 	};
+
+	// The walk pair's first frame (105 s3.5). `chained` = the chain says (N-1, N) is a pair (it holds N-1 of this generation);
+	// `slot` = the ring's slot of N-1, or kNoSlot. Lost() = chained but the ring no longer holds N-1: the caller counts and
+	// names it (Producer::NoteRingMiss with PairStartLostText(); register 115 #13 / #35), never a silent skip.
+	struct PairStart
+	{
+		int slot = EngineLumaRing::kNoSlot;
+		bool chained = false;
+		bool Lost() const { return chained && slot == EngineLumaRing::kNoSlot; }
+	};
+	inline PairStart FindPairStart(const EngineLumaRing& ring, bool havePrevious, uint64_t previousGeneration, uint64_t previousSequence,
+		uint64_t generation, uint64_t sequence)
+	{
+		PairStart start;
+		start.chained = havePrevious && previousGeneration == generation && previousSequence + 1 == sequence;
+		if (start.chained)
+			start.slot = ring.Find(previousGeneration, previousSequence);
+		return start;
+	}
+	inline const char* PairStartLostText() { return "the engine-luma ring lost the pair's first frame"; }
 }

@@ -212,7 +212,6 @@ namespace MotionAhead
 		engineReady = false;
 		sizeW = sizeH = 0;
 		consecutiveFailures = 0;
-		chooser = ProducerJobs::ChooserState();           // W2-C5b
 		requestRunning = requestOwnsGeneration = false;
 		lastJobMs = 0;
 		adoptOverWalk = requestResetHints = false;
@@ -355,18 +354,17 @@ namespace MotionAhead
 		for (;;)
 		{
 			Job job;
-			OnDemand::Pending request;   // W2-C5b: an on-demand request is taken before the look-ahead jobs
+			OnDemand::Pending request;   // W2-C5b: an on-demand request, taken after the waiting look-ahead (core) jobs
 			bool isRequest = false;
 			{
 				std::unique_lock<std::mutex> lock(mutex);
 				wake.wait(lock, [this] { return stopping || !requests.Empty() || !jobs.empty(); });
 				if (stopping) return;
-				// One pure chooser (ProducerJobs.h, 105 s3.3): requests first, but at most kMaxRequestStreak in a row while a job waits
-				// (W2-C5b audit: the walk is never starved). The streak counts only while a job waited (the dequeue-stall fix).
+				// One pure chooser (ProducerJobs.h, 105 s3.3): core pair > on-demand request > long pair (register 115 #57).
 				ProducerJobs::Queues queues;
 				queues.corePairs = jobs.size();
 				queues.onDemand = requests.Size();
-				const ProducerJobs::Choice choice = ProducerJobs::NextJob(queues, chooser, kMaxRequestStreak);
+				const ProducerJobs::Choice choice = ProducerJobs::NextJob(queues);
 				if (!choice.any)
 					continue;   // woken with nothing to do: never touch an empty queue
 				if (choice.cls == ProducerJobs::JobClass::OnDemand)
@@ -378,8 +376,8 @@ namespace MotionAhead
 				}
 				else
 				{
-					if (choice.fairness)
-						++requestStats.fairnessJobs;
+					if (choice.requestWaited)
+						++requestStats.coreAheadOfRequests;
 					job = std::move(jobs.front());
 					jobs.pop_front();
 				}
@@ -537,8 +535,12 @@ namespace MotionAhead
 			havePrevious = false;
 		NoteWalkJob(job);   // W2-C5b
 		// The engine-luma ring (105 s3.5): this frame's slot by key; the pair's first frame is looked up by key, never "the other one".
-		const int prevSlot = (havePrevious && previousGeneration == job.generation && previousSequence + 1 == job.sequence)
-			? lumaRing.Find(previousGeneration, previousSequence) : EngineLumaRing::kNoSlot;
+		// The chain says (N-1, N) is a pair but the ring lost N-1: counted and named (register 115 #13 / #35), never a silent skip;
+		// no pair, and the chain continues from this frame.
+		const PairStart start = FindPairStart(lumaRing, havePrevious, previousGeneration, previousSequence, job.generation, job.sequence);
+		if (start.Lost())
+			NoteRingMiss(PairStartLostText());
+		const int prevSlot = start.slot;
 		const int texIndex = lumaRing.Acquire(job.generation, job.sequence);
 		if (texIndex == EngineLumaRing::kNoSlot)
 		{
@@ -970,7 +972,8 @@ namespace MotionAhead
 		{
 			std::lock_guard<std::mutex> lock(mutex);
 			++requestStats.ringMisses;
-			error = what;   // Ctrl+I / Config status name it (no silent fallback)
+			requestStats.lastRingMiss = what;   // the Ctrl+I segment (VectorEngine::ProducerStatusSegment) shows the count and these words
+			error = what;
 		}
 		DebugLog::Log("Motion ahead: %s", what);
 	}
@@ -1013,7 +1016,6 @@ namespace MotionAhead
 		engineReady = false;
 		sizeW = sizeH = 0;
 		consecutiveFailures = 0;
-		chooser = ProducerJobs::ChooserState();
 		requestRunning = requestOwnsGeneration = false;
 		lastJobMs = 0;
 		adoptOverWalk = requestResetHints = false;
@@ -1045,7 +1047,12 @@ namespace MotionAhead
 		if (job.breakBefore)
 			havePrevious = false;
 		NoteWalkJob(job);
-		const bool pairs = havePrevious && previousGeneration == job.generation && previousSequence + 1 == job.sequence;
+		bool pairs = havePrevious && previousGeneration == job.generation && previousSequence + 1 == job.sequence;
+		if (pairs && testEngine->lostPairStart && testEngine->lostPairStart(job.sequence, job.generation))
+		{
+			NoteRingMiss(PairStartLostText());   // Process's FindPairStart(...).Lost() path: counted, named, no pair
+			pairs = false;
+		}
 		const bool ok = testEngine->job ? testEngine->job(job.sequence, job.generation) : true;
 		if (ok && pairs)
 			slot->Publish(previousSequence, job.sequence, job.generation, std::make_shared<Flow>());
