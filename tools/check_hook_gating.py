@@ -31,7 +31,9 @@ Every hook STATEMENT inside a function body of a Bill-owned production file must
             `const bool originalPathway = OriginalPathwayOf(<x>.host);` or `... =
             Vpv::Hub::ExtensionHub::Instance().OriginalPathway(<x>.host);`, no other receiver chain); any earlier
             block, call or assignment leaves the marker unverified.
-            A marker without that early return is a hit ("gated-marker-unverified").
+            A marker without that early return is a hit ("gated-marker-unverified"). Every definition is
+            verified and reported on its own (also two of one name in different files); a call of a name with
+            several definitions is gated only when all of them are verified.
   allowed   its callee is in ALLOW_CALLEES or the site is in ALLOW_SITES (reason required; reported).
   inert     a declaration without a call, a guard line itself, a brace / comment / preprocessor line.
 Anything else is a hit ("unguarded"): file:line, exit 1.
@@ -613,8 +615,12 @@ def allowed_callee(text):
 
 
 def gated_callee(text, gated):
-    for name, (rel, line, verified) in gated.items():
+    """(name, file, line, verified) of the VPV-GATED function the text calls, or None. A call is matched by name, so a
+    name with several VPV-GATED definitions counts as verified only when every one of them is; the definition reported
+    is then the first unverified one (HG-GATED-NAME-COLLISION)."""
+    for name, defs in gated.items():
         if re.search(r"\b%s\s*\(" % re.escape(name), text):
+            rel, line, verified = next((d for d in defs if not d[2]), defs[0])
             return name, rel, line, verified
     return None
 
@@ -679,7 +685,10 @@ def guarded(stmt, vp_slots, gated=None):
 # ---------------------------------------------------------------- gated callees
 
 def gated_markers(tree, files):
-    """{name: (file, line, verified)} for every `// VPV-GATED` function definition in `files`."""
+    """{name: [(file, line, verified), ...]} for every `// VPV-GATED` function definition in `files`, sorted by file and
+    line. EVERY definition of a name is kept and verified on its own: keyed by the short name alone, the definition
+    read last hid the others (HG-GATED-NAME-COLLISION: OnQueue in DejudderExtension.cpp was hidden by OnQueue in
+    VectorEngineExtension.cpp, so a lost early return there would have passed)."""
     out = {}
     pre = tree.grep_l("VPV-GATED")
     if pre is not None:
@@ -712,8 +721,8 @@ def gated_markers(tree, files):
                             continue
                         name = m.group(1).split("::")[-1]
                         verified = gated_guard_first(ch)
-                        out[name] = (rel, ch.start, verified)
-    return out
+                        out.setdefault(name, []).append((rel, ch.start, verified))
+    return {name: sorted(defs) for name, defs in out.items()}
 
 
 # ---------------------------------------------------------------- the check
@@ -1413,9 +1422,10 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
                 allowed.append(s)
         if r["bucket"] == "production":
             untagged.extend(r["untagged"])
-    for name, (rel, line, verified) in gated.items():
-        if not verified:
-            unverified.append({"file": rel, "line": line, "class": "gated-marker-unverified", "text": name})
+    for name, defs in gated.items():
+        for rel, line, verified in defs:   # every definition, also of a name defined in several files
+            if not verified:
+                unverified.append({"file": rel, "line": line, "class": "gated-marker-unverified", "text": name})
     texts = [s["text"] for r in per_file for s in r["statements"] if r["bucket"] == "production"]
     for k, e in enumerate(ALLOW_CALLEES):
         if ("callee", k) not in allow_used and any(re.search(r"\b(?:" + e["callee"] + r")\s*\(", t) for t in texts):
@@ -1454,7 +1464,7 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
     sc["hook_lines"] = hl
     rc = 1 if (hl["over"] or hits or unverified or (fail_untagged and untagged) or sc["new"] or sc["over"] or sc["expired"] or sc["unknown"] or
                  sc["trigger_errors"] or sc["approval_missing"] or sc["budget_errors"] or untagged_vpv) else 0
-    return {"base_ref": base_ref, "rev": rev, "since": since, "vp_slots": sorted(vp_slots), "site_checks": sc, "gated": {k: list(v) for k, v in gated.items()},
+    return {"base_ref": base_ref, "rev": rev, "since": since, "vp_slots": sorted(vp_slots), "site_checks": sc, "gated": {k: [list(d) for d in v] for k, v in gated.items()},
             "files": per_file, "counts": counts, "hits": hits, "unverified": unverified, "untagged": untagged, "untagged_vpv": untagged_vpv,
             "allowed": allowed, "allow_used": {"%s:%d" % k: v for k, v in allow_used.items()}, "stale_allow": stale, "rc": rc}
 
@@ -1484,8 +1494,9 @@ def render(res):
             out.append("  allow-list untagged ref [%d] %s <%s>: %s" % (res["allow_used"].get("untag:%d" % k, 0), e["file"], e["text"].strip()[:70], e["reason"]))
     for kind, k in res["stale_allow"]:
         out.append("  stale allow-list entry (no site uses it, may be deleted): %s %d" % (kind, k))
-    for name, (rel, line, verified) in sorted(res["gated"].items()):
-        out.append("  VPV-GATED %s (%s:%d) %s" % (name, rel, line, "verified" if verified else "NOT VERIFIED"))
+    for name, defs in sorted(res["gated"].items()):
+        for rel, line, verified in defs:
+            out.append("  VPV-GATED %s (%s:%d) %s" % (name, rel, line, "verified" if verified else "NOT VERIFIED"))
     out.append("  classes (every bucket incl. tests, whole files, before the --since filter; not the gate): " +
                ", ".join("%s %d" % (k, v) for k, v in sorted(c.items())))
     out.append("  gate: %d unguarded (production files%s, incl. unverified-marker call sites), %d unverified markers" % (
