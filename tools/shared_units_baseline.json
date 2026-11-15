@@ -180,7 +180,7 @@
   "U3": {
    "name": "half_luma_downsample",
    "blocking": true,
-   "baseline_duplicates": 9,
+   "baseline_duplicates": 3,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
@@ -196,9 +196,9 @@
     },
     {
      "file": "src/VP-V/modules/motion/consumers/FrameInterpolator.cpp",
-     "pattern": "low_half_|LOW_HALF|LOW_A|LOW_B",
-     "kind": "residual",
-     "reason": "interpolator low band: GLSL float 2x2 box feeding the Bill low-band Gaussian; byte identity needs a GPU run, not available in this wave"
+     "pattern": "^DEFINE_LOWBI\\(low_half_[ab], low_[ab]\\)$|^#define LOW_[AB]\\(P\\) low_half_[ab]\\(\\(P\\) \\* 0\\.5\\)$|^\\s*const char\\* const LOW_HALF_BODY = R\"GLSL\\($|Compute\\(dispatch, description, halfHeader, LOW_HALF_BODY, passHalf,",
+     "kind": "false_positive",
+     "reason": "names only: DEFINE_LOWBI(low_half_a/b) (:171/:172) instantiate a BILINEAR read (mix of 4 taps at fractional weights) of the half-resolution low band, and LOW_A/LOW_B (:174/:175) call it at p * 0.5 (a coordinate scale); the LOW_HALF_BODY raw-string opener (:329) and its Compute call in LowBand (:500). The 2x2 box itself calls the shared accessor vpu_half_luma_rgba_at(src, ivec2(0), q) (:333, header VpUnit::HalfLuma::GlslRgbaAt() :498) since r2/u3-one-copy b6584ab9b; no private box remains"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
