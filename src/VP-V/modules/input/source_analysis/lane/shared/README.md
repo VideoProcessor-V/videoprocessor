@@ -7,19 +7,26 @@ The one 2x2 box law of the half / quarter luma pyramid behind product P1 (doc 62
 - Taps: `Tap0(x, n) = min(2x, n-1)`, `Tap1(x, n) = min(2x+1, n-1)` (odd edges replicate), summed `Box4(a, b, c, d)` in that fixed order.
 - Finishing: `FinishP1(sum) = (sum + 2) >> 2` (half and quarter, 16-bit-scaled samples) and `FinishEngine8(sum) = min(255, sum >> 4)`
   (10-bit codes to the 8-bit mean code / 4, the optical-flow engine view).
-- GLSL entries (the same taps, tap order a, b, c, d and `(a + b + c + d) * 0.25` mean):
+- GLSL entries (the same taps, tap order a, b, c, d and `(a + b + c + d) * 0.25` mean). One body: every texture entry is
+  emitted by `Detail::GlslBox` with the one mean `Detail::kGlslMean`; the entries differ only in value type / channel
+  select, source origin and edge rule (min vs clamp). The emitted text is byte-identical to the former hand-written
+  bodies (pinned by `HalfLumaUnitTests::FoldedGlslEntriesAreByteIdenticalToTheFormerBodies`), so `kUnitVersion` stays 1.
   - `Glsl()`: `vpu_half_luma` / `vpu_quarter_luma` (R channel). Consumers: the matcher's DOWNSAMPLE_BODY
     (`DejudderWarp.cpp`, since 5b43fc22a) and the P1 GPU fill (`P1GpuFill.h`).
   - `GlslComponent()`: `vpu_half_luma_comp(src, q, comp)` (any one channel). Consumer: grain split v3 HALF pass
     (`GrainSplitGpu.cpp`).
   - `GlslRgbaAt()`: `vpu_half_luma_rgba_at(src, origin, q)` (all four channels, source offset `origin`, taps clamped to
-    [0, size - 1]). Consumer: the output downscaler's doubler-halving HALVE_BODY (`AdaptiveDownscale.cpp`, 7db0b0631).
+    [0, size - 1]). Consumers: the output downscaler's doubler-halving HALVE_BODY (`AdaptiveDownscale.cpp`, 7db0b0631)
+    and the interpolator's low-band LOW_HALF_BODY (`FrameInterpolator.cpp`, origin 0).
+  - `GlslMean4()`: `vpu_half_luma_mean4(a, b, c, d)` (the mean alone, for consumers whose four taps are not plain
+    texture fetches; the taps stay the consumer's). Consumer: texture restore's DetailPulse low band (`load_low` sbox and
+    `LOW_BODY_FAST`, `DetailPulse.cpp`).
 
 Consumers migrated (identity, proven in their test files): the lane producer (`LaneCpuProducts.h` HalfLumaRows / QuarterFromHalf,
 `LaneProductsTests.cpp`) and the NVOF producer's 8-bit box (`MotionAheadProducer.cpp` HalfLuma8, `VectorStoreTests.cpp`).
-GPU consumers above were moved with the arithmetic unchanged (same taps and order). Not migrated (GPU float shader, no
-byte-identity proof without a GPU run): the interpolator's LOW_HALF_BODY (`FrameInterpolator.cpp`); recorded as a residual
-in `tools/shared_units_baseline.json`.
+GPU consumers above were moved with the arithmetic unchanged (same taps, order and IEEE operations, so bit-identical). Not
+migrated: the output-domain search's 4x4 output-luma box (`OutputDomainSearchGlsl.h`, an mpv user shader pinned byte-identical
+to `shaders/Temporal sigma-delta.glsl`; see `tools/shared_units_baseline.json`).
 
 Determinism: integer arithmetic, fixed tap order. Any change of the grid, tap order, rounding or an existing GLSL entry's name
 bumps `kUnitVersion`. Adding a new entry with the same law (as `GlslComponent` and `GlslRgbaAt` were) is additive and does

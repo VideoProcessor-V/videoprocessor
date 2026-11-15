@@ -71,18 +71,37 @@ namespace HalfLuma
 	// GLSL accessors (the contract). Both read an R-channel luma texture with texelFetch, q in output coordinates, second
 	// taps clamped to the texture edge. vpu_quarter_luma takes the HALF texture. GlslComponent() adds the same law for any
 	// channel (vpu_half_luma_comp; used by the grain split v3 HALF pass, which serves luma and semi-planar chroma).
+	//
+	// ONE GLSL body (U3 one copy, gate-u3fix SHOULD): every GLSL entry is emitted by Detail::GlslBox from the same tap
+	// lines, the fixed tap order a, b, c, d and the one mean expression Detail::kGlslMean (the GLSL form of MeanF). The
+	// entries differ only on three axes: the value type and channel select (.r, [comp], all four), the source origin, and
+	// the edge rule (min to the last sample, or clamp to [0, size - 1] when an origin is added). The text each entry emits
+	// is byte-identical to its former hand-written body (HalfLumaUnitTests pins it), so kUnitVersion stays.
+	namespace Detail
+	{
+		// The one GLSL mean of the four taps: the sum in the fixed order a, b, c, d, then x 1/4 (MeanF).
+		constexpr const char* kGlslMean = "(a + b + c + d) * 0.25";
+
+		// `type signature { hi; p0 = tap0; p1 = tap1; a..d = texelFetch(...)select; return kGlslMean; }`.
+		inline std::string GlslBox(const char* type, const char* signature, const char* tap0, const char* tap1,
+			const char* select)
+		{
+			const char* const names[4] = { "a", "b", "c", "d" };
+			const char* const taps[4] = { "p0.x, p0.y", "p1.x, p0.y", "p0.x, p1.y", "p1.x, p1.y" };
+			std::string s = std::string(type) + " " + signature + "\n{\n"
+				"    ivec2 hi = textureSize(src, 0) - ivec2(1);\n"
+				"    ivec2 p0 = " + tap0 + ";\n"
+				"    ivec2 p1 = " + tap1 + ";\n";
+			for (int i = 0; i < 4; ++i)
+				s += std::string("    ") + type + " " + names[i] + " = texelFetch(src, ivec2(" + taps[i] + "), 0)" + select + ";\n";
+			return s + "    return " + kGlslMean + ";\n}\n";
+		}
+	}
+
 	inline std::string Glsl()
 	{
-		return std::string("#define VPU_HALF_LUMA_VERSION ") + std::to_string(kUnitVersion) + "\n"
-			"float vpu_half_luma(sampler2D src, ivec2 q)\n{\n"
-			"    ivec2 hi = textureSize(src, 0) - ivec2(1);\n"
-			"    ivec2 p0 = min(q * 2, hi);\n"
-			"    ivec2 p1 = min(q * 2 + ivec2(1), hi);\n"
-			"    float a = texelFetch(src, ivec2(p0.x, p0.y), 0).r;\n"
-			"    float b = texelFetch(src, ivec2(p1.x, p0.y), 0).r;\n"
-			"    float c = texelFetch(src, ivec2(p0.x, p1.y), 0).r;\n"
-			"    float d = texelFetch(src, ivec2(p1.x, p1.y), 0).r;\n"
-			"    return (a + b + c + d) * 0.25;\n}\n"
+		return std::string("#define VPU_HALF_LUMA_VERSION ") + std::to_string(kUnitVersion) + "\n" +
+			Detail::GlslBox("float", "vpu_half_luma(sampler2D src, ivec2 q)", "min(q * 2, hi)", "min(q * 2 + ivec2(1), hi)", ".r") +
 			"float vpu_quarter_luma(sampler2D halfSrc, ivec2 q)\n{\n"
 			"    return vpu_half_luma(halfSrc, q);\n}\n";
 	}
@@ -90,31 +109,28 @@ namespace HalfLuma
 	// The existing entries above are unchanged, so kUnitVersion stays.
 	inline std::string GlslComponent()
 	{
-		return std::string("float vpu_half_luma_comp(sampler2D src, ivec2 q, int comp)\n{\n"
-			"    ivec2 hi = textureSize(src, 0) - ivec2(1);\n"
-			"    ivec2 p0 = min(q * 2, hi);\n"
-			"    ivec2 p1 = min(q * 2 + ivec2(1), hi);\n"
-			"    float a = texelFetch(src, ivec2(p0.x, p0.y), 0)[comp];\n"
-			"    float b = texelFetch(src, ivec2(p1.x, p0.y), 0)[comp];\n"
-			"    float c = texelFetch(src, ivec2(p0.x, p1.y), 0)[comp];\n"
-			"    float d = texelFetch(src, ivec2(p1.x, p1.y), 0)[comp];\n"
-			"    return (a + b + c + d) * 0.25;\n}\n");
+		return Detail::GlslBox("float", "vpu_half_luma_comp(sampler2D src, ivec2 q, int comp)", "min(q * 2, hi)",
+			"min(q * 2 + ivec2(1), hi)", "[comp]");
 	}
 	// Additive (U3 one copy, owner 2026-11-15): the same taps, order and mean on all four channels, output sample q read
 	// at source offset `origin` (origin + q * 2), taps clamped to [0, size - 1]. Moved from the output downscaler's
 	// private doubler-halving pass (AdaptiveDownscale HALVE_BODY, which summed a, b, c, d in this order from 0 and scaled
-	// by 0.25). The existing entries above are unchanged, so kUnitVersion stays.
+	// by 0.25). Consumers: AdaptiveDownscale HALVE_BODY, the interpolator's LOW_HALF_BODY (origin 0). The existing
+	// entries above are unchanged, so kUnitVersion stays.
 	inline std::string GlslRgbaAt()
 	{
-		return std::string("vec4 vpu_half_luma_rgba_at(sampler2D src, ivec2 origin, ivec2 q)\n{\n"
-			"    ivec2 hi = textureSize(src, 0) - ivec2(1);\n"
-			"    ivec2 p0 = clamp(origin + q * 2, ivec2(0), hi);\n"
-			"    ivec2 p1 = clamp(origin + q * 2 + ivec2(1), ivec2(0), hi);\n"
-			"    vec4 a = texelFetch(src, ivec2(p0.x, p0.y), 0);\n"
-			"    vec4 b = texelFetch(src, ivec2(p1.x, p0.y), 0);\n"
-			"    vec4 c = texelFetch(src, ivec2(p0.x, p1.y), 0);\n"
-			"    vec4 d = texelFetch(src, ivec2(p1.x, p1.y), 0);\n"
-			"    return (a + b + c + d) * 0.25;\n}\n");
+		return Detail::GlslBox("vec4", "vpu_half_luma_rgba_at(sampler2D src, ivec2 origin, ivec2 q)",
+			"clamp(origin + q * 2, ivec2(0), hi)", "clamp(origin + q * 2 + ivec2(1), ivec2(0), hi)", "");
+	}
+	// Additive (U3 one copy, owner 2026-11-15): the mean alone, for a consumer whose four taps are not plain texture
+	// fetches (texture restore's DetailPulse reads them through its own picture-clamped code_at / quad_codes; the taps
+	// stay the consumer's, the 2x2 law is this one). Same order and mean as every entry above (kGlslMean); moved from
+	// DetailPulse load_low (`0.25 * (a + b + c + d)`) and LOW_BODY_FAST (`0.25 * (q.x + q.y + q.z + q.w)`): x * 0.25 and
+	// 0.25 * x are the same IEEE product, so the move is bit-identical. Additive, kUnitVersion stays.
+	inline std::string GlslMean4()
+	{
+		return std::string("float vpu_half_luma_mean4(float a, float b, float c, float d)\n{\n"
+			"    return ") + Detail::kGlslMean + ";\n}\n";
 	}
 }
 }
