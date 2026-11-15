@@ -181,6 +181,10 @@ namespace ScalerPassTestsNs
 			Assert::IsTrue(MaxDiff(a, b) < 1e-9);
 		}
 
+		// Category Cpu: the body is the CPU ScalerReference model only (no device); the GPU section follows the class.
+		BEGIN_TEST_METHOD_ATTRIBUTE(ScalerReferenceDeterministic)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(ScalerReferenceDeterministic)
 		{
 			const Image im = MakeImage(33, 21);
