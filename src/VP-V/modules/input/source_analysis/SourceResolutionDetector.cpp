@@ -7,6 +7,9 @@
 #include <climits>
 #include <limits>
 #include <cstdio>
+#include <cassert>
+#include <utility>
+#include <VP-V/core/RobustStats.h>
 
 namespace SourceResolution
 {
@@ -311,8 +314,7 @@ namespace SourceResolution
 				peak = (std::max)(peak, (*power)[static_cast<size_t>(k)]);
 			}
 			if (band.empty()) continue;
-			std::nth_element(band.begin(), band.begin() + band.size() / 2, band.end());
-			const double median = band[band.size() / 2];
+			const double median = RobustStats::Median(std::move(band), RobustStats::MedianRule::Upper);
 			result = (std::max)(result, median > 0.0 ? peak / median : 0.0);
 		}
 		return result;
@@ -465,8 +467,7 @@ namespace SourceResolution
 		peak.ratio = (best + offset) / n;
 		{
 			std::vector<double> body(curve.begin() + from, curve.begin() + to + 1);
-			std::nth_element(body.begin(), body.begin() + body.size() / 2, body.end());
-			peak.floor = body.empty() ? 0.0 : body[body.size() / 2];
+			peak.floor = body.empty() ? 0.0 : RobustStats::Median(std::move(body), RobustStats::MedianRule::Upper);
 		}
 		return peak;
 	}
@@ -491,8 +492,8 @@ namespace SourceResolution
 			const int to = (std::min)(n - 1, static_cast<int>(std::floor(t.maximumRatio * n)));
 			if (curve.size() != static_cast<size_t>(n) || to < from) return 0.0;
 			std::vector<double> body(curve.begin() + from, curve.begin() + to + 1);
-			std::nth_element(body.begin(), body.begin() + body.size() / 2, body.end());
-			return body[body.size() / 2];
+			assert(!body.empty());
+			return RobustStats::Median(std::move(body), RobustStats::MedianRule::Upper);
 		}
 
 		// Mixed screens (Thresholds::mixedGuard; owner 2026-10-16): the frame read lower on the
@@ -572,8 +573,7 @@ namespace SourceResolution
 			// a menu) are partly coherent and can make up half of the candidates; the resampled
 			// tiles themselves agree within ~0.15 decades, so the quartile moves them little.
 			const size_t quartile = reference.size() / 4;
-			std::nth_element(reference.begin(), reference.begin() + quartile, reference.end());
-			const double resampled = reference[quartile];
+			const double resampled = RobustStats::NthSmallest(reference, quartile);
 			const int count = static_cast<int>(tiles.size());
 			// Each tile's centre (normalised): the explicit centres, else the gridColumns layout.
 			std::vector<float> cx(tiles.size()), cy(tiles.size());
@@ -1364,10 +1364,9 @@ namespace SourceResolution
 			if (streakLong && haveLastNative && shot == lastNativeShot && !renditionMode &&
 				declared >= 1.0)
 			{
-				std::vector<double> sorted = streakDetail;
-				std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+				const double streakMedian = RobustStats::Median(streakDetail, RobustStats::MedianRule::Upper);
 				const double before = DetailAbove(lastNative, streakRatio);
-				if (!std::isinf(before) && before - sorted[sorted.size() / 2] >= settings.renditionDetailDrop)
+				if (!std::isinf(before) && before - streakMedian >= settings.renditionDetailDrop)
 				{
 					// The older (native) evidence belonged to the other rendition.
 					while (!window.empty() && window.front().seconds < streakStart) window.pop_front();
@@ -1431,8 +1430,7 @@ namespace SourceResolution
 		for (const Sample& s : window)
 			if (s.ratio < 1.0 && std::fabs(s.ratio - ratio) <= settings.tolerance && !std::isinf(s.detail)) levels.push_back(s.detail);
 		if (levels.empty()) return std::numeric_limits<double>::infinity();
-		std::nth_element(levels.begin(), levels.begin() + levels.size() / 2, levels.end());
-		return levels[levels.size() / 2];
+		return RobustStats::Median(std::move(levels), RobustStats::MedianRule::Upper);
 	}
 
 	int Tracker::Shots() const

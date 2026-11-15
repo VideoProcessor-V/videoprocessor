@@ -5,6 +5,7 @@
 #include <VP-V/modules/input/source_analysis/AnalysisAxis10.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
+#include <VP-V/core/RobustStats.h>
 
 #include <algorithm>
 #include <chrono>
@@ -261,10 +262,7 @@ namespace VpFrameAnalysis
 		out.grain.blocks = m_blocks;
 		if (!m_blockVariance.empty())
 		{
-			std::vector<float> variance = m_blockVariance;
-			const size_t decile = variance.size() / 10;
-			std::nth_element(variance.begin(), variance.begin() + decile, variance.end());
-			const double floor = variance[decile];
+			const double floor = RobustStats::NthSmallest(m_blockVariance, m_blockVariance.size() / 10);
 			out.grain.rms = std::sqrt(floor);
 			// "Equally flat": within twice the flattest decile's variance (plus a quarter code^2 so a
 			// clean synthetic picture is not all-or-nothing); 20% of the blocks gives full confidence.

@@ -63,8 +63,8 @@ namespace SourceIdentity
 		uint64_t seq = 0;             // sequence of the boundary sample
 		int64_t timeUs = 0;           // source time of the boundary (first sample on the new level)
 		AbrDirection direction = AbrDirection::Drop;
-		double magnitude = 0.0;       // |median(post) - median(pre)| of quality
-		double ratioStep = 0.0;       // median(post) - median(pre) of the delivered ratio (0 = none)
+		double magnitude = 0.0;       // |median of the post window - median of the pre window| of quality
+		double ratioStep = 0.0;       // median of the post window - median of the pre window of the delivered ratio (0 = none)
 		double confidence = 0.0;      // 0..1
 		bool onGrid = false;          // the boundary lies on the measured segment grid
 		bool cutConfound = false;     // it sat on a cut and was emitted anyway (ratio step or grid)
