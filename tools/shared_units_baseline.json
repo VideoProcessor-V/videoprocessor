@@ -180,7 +180,7 @@
   "U3": {
    "name": "half_luma_downsample",
    "blocking": true,
-   "baseline_duplicates": 19,
+   "baseline_duplicates": 17,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
@@ -223,12 +223,6 @@
      "pattern": "0\\.25 \\* \\(",
      "kind": "false_positive",
      "reason": "exponential smoothing factor of a quality/bits statistic, not a 2x2 box"
-    },
-    {
-     "file": "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
-     "pattern": "0\\.25 \\* \\(",
-     "kind": "residual",
-     "reason": "GLSL, no byte-identity proof without GPU: DetailPulse load_low sbox 2x2 box (line 141) and the 2x2 mean at line 521"
     },
     {
      "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
