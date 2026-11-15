@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "GlobalModelGeometry.h"
+#include <VP-V/core/RobustStatsShaders.h>
 
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "dxguid.lib")   // IID_ID3D11ShaderReflection
@@ -71,6 +72,16 @@ namespace CameraModel
 			std::string why;
 			ComPtr<ID3DBlob> blob[kKernels];
 		};
+		// The one compile source: RobustStats::kMadToSigmaHlsl (VP_MAD_TO_SIGMA, the GPU twin of RobustStats::kMadToSigma,
+		// core/RobustStatsShaders.h, C6-2 U24) followed by the kernel pieces.
+		std::string RefineHlslSource()
+		{
+			std::string src = RobustStats::kMadToSigmaHlsl;
+			for (size_t i = 0; i < sizeof(kRefineHlsl) / sizeof(kRefineHlsl[0]); ++i)
+				src += kRefineHlsl[i];
+			return src;
+		}
+
 		Blobs& SharedBlobs()
 		{
 			static Blobs b;
@@ -85,9 +96,7 @@ namespace CameraModel
 			{
 				b.done = true;
 				b.ok = true;
-				std::string src;
-				for (size_t i = 0; i < sizeof(kRefineHlsl) / sizeof(kRefineHlsl[0]); ++i)
-					src += kRefineHlsl[i];
+				const std::string src = RefineHlslSource();
 				for (int e = 0; e < kKernels && b.ok; ++e)
 				{
 					ComPtr<ID3DBlob> err;
@@ -145,6 +154,11 @@ namespace CameraModel
 			slot[0] = static_cast<uint32_t>(bits);
 			slot[1] = static_cast<uint32_t>(bits >> 32);
 		}
+	}
+
+	std::string RefineHlslSourceForTest()
+	{
+		return RefineHlslSource();
 	}
 
 	// ---- input: CPU upload --------------------------------------------------------------------------------------

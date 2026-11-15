@@ -102,6 +102,9 @@ namespace CameraModel
 
 	// One per producer worker (owns its shaders and scratch on that worker's device). NOT thread-safe; the device
 	// context is the caller's (the producer worker's immediate context).
+	// Test-only (C6-2 U24): the exact HLSL text handed to D3DCompile (RobustStats::kMadToSigmaHlsl + the kernels).
+	std::string RefineHlslSourceForTest();
+
 	class PhotometricRefinerGpu
 	{
 	public:

@@ -332,7 +332,7 @@ mean Huber cost before / after on the same pixels and sigma, correction in sourc
   every other type a 4-parameter similarity correction composed onto the model (`W(p) <- W(p) o W(d)^-1`, type kept),
   plus photometric gain/offset (`RefineOptions::fadeTerms`). Pixels: the `targetPixels` (50k) strongest-gradient inlier pixels,
   chosen by a gradient-bin threshold with ties in raster order (deterministic). Huber weights (1.345 robust sigma,
-  sigma = 1.4826 median |r|, floor 0.5 code), Keys bicubic sampling of frame N without clamping (a tap outside the plane
+  sigma = `RobustStats::kMadToSigma` (1.4826) x the Upper median of |r| via `RobustStats::MedianInPlace` on the persistent scratch buffer (no allocation per pass; C6-2 U24), floor 0.5 code), Keys bicubic sampling of frame N without clamping (a tap outside the plane
   drops the pixel), at most `maxIterations` (4) steps, stop when no corner moves more than 0.001 engine px.
   `RefineResult::lastStepPx` reports the last step (source px); the tests require it below the bias target (0.02 source
   px at 1080, 0.04 at 4K), so a run that ends on the iteration cap has stopped moving at the accuracy that matters.
@@ -357,7 +357,7 @@ mean Huber cost before / after on the same pixels and sigma, correction in sourc
   `PhotometricRefinerGpu` (`PhotometricRefineGpu.h/.cpp`, kernels in `PhotometricRefineGpuShaders.inl`) runs the same
   algorithm as D3D11 cs_5_0 compute on the producer worker's own device (`MotionAheadProducer.cpp` CreateDevice): candidate
   pass + 4096-bin gradient histogram, threshold bin with raster-order ties via a row prefix, then per Gauss-Newton pass the
-  residuals, an exact radix-select median of |r|, the Huber normal equations as a fixed-order tree reduction and a
+  residuals, an exact radix-select median of |r| (the GPU Upper-median twin; its factor is `VP_MAD_TO_SIGMA` from `core/RobustStatsShaders.h` `kMadToSigmaHlsl`, prepended to the source by the host: compiled DXBC of all 12 kernels byte-identical to the former inline literal, checked with D3DCompile 2026-11-15), the Huber normal equations as a fixed-order tree reduction and a
   one-thread solve / inverse-compositional update, the verification sums last. All passes are dispatched up front (passes
   after convergence are no-ops): one submission, ONE readback, collectable later (`Submit` / `Collect(wait = false)`).
   Doubles use SM 5.0 base ops only (no 11.1 double extensions: division / reciprocal / square root by Newton steps from

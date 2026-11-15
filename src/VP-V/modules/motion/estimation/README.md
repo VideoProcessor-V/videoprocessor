@@ -10,6 +10,8 @@ Estimate motion on the ORIGINAL frame (source raster, before re-base/repair) wit
 
 Checked against the code 2026-10-25 (M2 pass). The estimator itself (`Dejudder::MotionWarp::Estimate` and its searches) is compiled from `src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp`, with its class in `src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h`; the renderer host (`src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp`) owns every instance and wires the settings, the producer and the validity state.
 
+Robust statistics (C6-2 U24, plan lead18/coreplan-C6-2-U24.md, 2026-11-15): the matcher's neighbour median (second sweep, D3 smoothing) is the owner's GPU twin `vpu_median_upper` (`core/RobustStatsShaders.h` `kMedianUpper9Glsl`, the former private `median_` text byte for byte apart from the name; the two private copies are gone); `MotionAheadProducer` and the photometric refinement call `RobustStats` on the CPU. Golden text test: `suite/RobustStatsTests`.
+
 ### Public API
 
 - `NvOpticalFlow::Engine` (`NvOpticalFlow.h/.cpp`): wraps NVIDIA's D3D11 optical-flow interface. `Open(device, context, w, h, preset, costs)` loads `nvofapi64.dll` from System32 at run time (nothing shipped; MIT headers in `3rdparty/nvidia-optical-flow`), needs API 5.0, opens a 4 x 4 grid, both directions, optional costs. `Run(from, to, fwd, bwd, fwdCost, bwdCost, result, continuous)` takes R8_UNORM inputs and writes R16G16_SINT S10.5 vectors and R8_UINT costs; `continuous` enables the engine's temporal hints. `LastError()` gives the reason for any failure (driver missing, API too old, no engine on this GPU / busy, init or execute failed, texture not accepted).

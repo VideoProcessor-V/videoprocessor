@@ -5,6 +5,8 @@
 
 #include <VP-V/core/RobustStats.h>
 #include <VP-V/core/RobustStatsShaders.h>
+#include <VP-V/modules/motion/estimation/global_model/PhotometricRefineGpu.h>
+#include <VP-V/modules/motion/estimation/matcher/DejudderWarp.h>
 
 #include <algorithm>
 #include <cmath>
@@ -40,12 +42,58 @@ float median_(float a[9], int n)
 }
 )GLSL";
 
+	// DejudderWarp.cpp SMOOTH_HEADER (D3 smoothing) before C6-2 U24, verbatim.
+	const char* const kPreChangeDejudderSmoothHeader = R"GLSL(
+ivec2 half_size_;
+float from_at(ivec2 p) { return texelFetch(from_half, clamp(p, ivec2(0), half_size_ - ivec2(1)), 0).r; }
+float to_lin(vec2 p) { return texture(to_half, (p + vec2(0.5)) / vec2(half_size_)).r; }
+float sad_sub(ivec2 o, vec2 v)
+{
+    float s = 0.0;
+    for (int y = -2; y < 10; y++)
+        for (int x = -2; x < 10; x++) {
+            ivec2 p = o + ivec2(x, y);
+            s += abs(from_at(p) - to_lin(vec2(p) + v));
+        }
+    return s;
+}
+float median_(float a[9], int n)
+{
+    for (int i = 1; i < 9; i++) {
+        if (i >= n) break;
+        float x = a[i];
+        int j = i - 1;
+        while (j >= 0 && a[j] > x) { a[j + 1] = a[j]; j--; }
+        a[j + 1] = x;
+    }
+    return a[n / 2];
+}
+)GLSL";
+
 	std::string Unix(const std::string& s)
 	{
 		std::string o;
 		for (char c : s)
 			if (c != '\r') o.push_back(c);
 		return o;
+	}
+
+	// The documented C6-2 U24 rename, the only allowed difference: every `median_(` becomes `vpu_median_upper(`.
+	std::string Renamed(const std::string& s)
+	{
+		std::string o = Unix(s);
+		const std::string from = "median_(", to = "vpu_median_upper(";
+		for (size_t at = o.find(from); at != std::string::npos; at = o.find(from, at + to.size()))
+			o.replace(at, from.size(), to);
+		return o;
+	}
+
+	size_t Count(const std::string& s, const std::string& what)
+	{
+		size_t n = 0;
+		for (size_t at = s.find(what); at != std::string::npos; at = s.find(what, at + what.size()))
+			++n;
+		return n;
 	}
 
 	TEST_CLASS(RobustStatsUnit)
@@ -229,6 +277,23 @@ float median_(float a[9], int n)
 			const size_t eq = h.find('=');
 			Assert::IsTrue(eq != std::string::npos);
 			Assert::AreEqual(kMadToSigma, std::stod(h.substr(eq + 1)));
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(HostShaderTextsEqualThePreChangeTextApartFromTheRename)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(HostShaderTextsEqualThePreChangeTextApartFromTheRename)
+		{
+			// C5: the matcher's two headers are built from kMedianUpper9Glsl; the text handed to the shader compiler is the
+			// pre-change text with only `median_` -> `vpu_median_upper` (golden, byte for byte).
+			Assert::AreEqual(Renamed(kPreChangeDejudderMedianGlsl), Unix(Dejudder::SweepMedianGlslForTest()));
+			Assert::AreEqual(Renamed(kPreChangeDejudderSmoothHeader), Unix(Dejudder::SmoothHeaderGlslForTest()));
+			// PhotometricRefine HLSL: kMadToSigmaHlsl first, the factor used exactly once, no inline 1.4826 literal left.
+			const std::string hlsl = CameraModel::RefineHlslSourceForTest();
+			Assert::IsTrue(hlsl.compare(0, std::strlen(kMadToSigmaHlsl), kMadToSigmaHlsl) == 0);
+			Assert::AreEqual(size_t(1), Count(hlsl, "1.4826"));                       // the declaration only
+			Assert::AreEqual(size_t(1), Count(hlsl, "max(gMinScale, VP_MAD_TO_SIGMA * med)"));
+			Assert::AreEqual(size_t(2), Count(hlsl, "VP_MAD_TO_SIGMA"));               // declaration + the one use
 		}
 	};
 }
