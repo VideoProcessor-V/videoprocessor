@@ -63,8 +63,6 @@ None. The split's law is fixed (texture_restore's constants); readers choose wha
 
 Band memo (grain.band): Settings: none. It adds no setting; it reads the same fixed law.
 
-Landing: the L-B3 lane lands as one unit. The band memo commit (bd7e7ee3c) is red on its own (the consumers and the GPU owner fill follow once the L-CORE GPU context and the L-B4 P1 Float32 variant exist), so do not cherry-pick it alone.
-
 ## Storage layouts and the read accessor (SA2)
 
 The GPU product has two layouts behind an either/or switch (`GrainSplit::Storage`, `Options.storage` of `Splitter::Compute`;
@@ -207,4 +205,4 @@ The LEVEL pass adds about 0.04-0.1 ms (one 256-thread workgroup over the block g
 
 ## Band memo (job 1, L-B3; product grain.band, id 30)
 
-`grain.band` is the per-frame band memo of this unit (lead 8 allocation 30, 11-14): the ONE low-band blur that the interpolator, the debander and detail pulse each computed privately (shared units U2 / U3). Key = (frame, stage, full-resolution sigma in milli, plane); half-resolution float32 plane units; read bilinearly at p/2; discarded after the frame. The band takes its half plane from P1 (the shared half-luma product, Float32 variant) and applies Bill's unchanged law (`GrainPreserve::LowWeight` / `LowRadius` / `LowWeightsGlsl`); this unit holds no 2x2 box of its own. `shared/BandFromBase.h` `BandFromHalf` is the CPU oracle. State: registry row and oracle landed; the GPU owner fill and the consumer switches wait for the L-CORE GPU owner-fill context and the P1 Float32 variant (102b row LB3-BAND-MEMO-GPU). Source: lead 8 iface-L-B3 rulings a-e; principles/skeleton-products.md rule 4.
+`grain.band` is the planned per-frame band memo of this unit (lead 8 allocation 30, 11-14): the ONE low-band blur that the interpolator, the debander and detail pulse each computed privately (shared units U2 / U3). Key = (frame, stage, full-resolution sigma in milli, plane); half-resolution float32 plane units; read bilinearly at p/2; discarded after the frame. The band takes its half plane from P1 (the shared half-luma product, Float32 variant) and applies Bill's unchanged law (`GrainPreserve::LowWeight` / `LowRadius` / `LowWeightsGlsl`); this unit holds no 2x2 box of its own. `shared/BandFromBase.h` `BandFromHalf` is the CPU oracle. State: only the CPU oracle has landed. Id 30 is reserved in the fixed id table and is NOT registered (no registry declaration, no catalog row): a GpuCompute product is registered only together with its owner fill (R13-8; 102b B3-ID30-EXCLUSIONS). The declaration, the GPU owner fill and the consumer switches land together once the L-CORE GPU owner-fill context and the P1 Float32 variant exist (102b row LB3-BAND-MEMO-GPU). Source: lead 8 iface-L-B3 rulings a-e; principles/skeleton-products.md rule 4.

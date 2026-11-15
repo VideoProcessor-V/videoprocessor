@@ -89,7 +89,8 @@ enum : ProductId {
     kTdTrailSummary,      // 28 td.trail_summary: per-frame CPU summary for source identity / status
     // Wave S2 (SID lead request, doc 78 section 6): appended after the doc 72 list, never before it.
     kSourceGeometry,      // 29 source_geometry (P14g): HELD-STATE measured + applied source geometry (SourceGeometry unit v1)
-    kBandMemo,            // 30 grain.band: per-frame band memo (key frame/stage/sigma/plane), unit repair/grain_split; consumers interpolator, debander, DetailPulse (lead 8 allocation 30, 11-14)
+    // Id 30 is RESERVED for grain.band (lead 8 allocation 30, 11-14; lead 12 R1: ids fixed, no renumbering). It is NOT registered: a GpuCompute
+    // product is registered only with its owner fill (R13-8, 102b B3-ID30-EXCLUSIONS); the fill and the id land together (102b LB3-BAND-MEMO-GPU).
     kSkeletonProductEnd
 };
 
@@ -992,24 +993,6 @@ inline void AppendSourceGeometryProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p);
 }
 
-// grain.band (lead 8 allocation 30, 11-14; L-B3): the per-frame BAND MEMO of the grain unit. Owner fill (repair/grain_split) via Acquire; one entry
-// per (frame, stage, sigma, plane), kept for the frame and discarded after; it is the one low-band / half-plane blur that the interpolator, the
-// debander and DetailPulse each computed privately (shared units U2 / U3). Half resolution float32 (4 B per half-res cell), reads P1 (the half plane).
-inline void AppendBandMemoProduct(std::vector<ProductDecl>& decls)
-{
-    using detail::AddInput;
-    using detail::AddTerm;
-    using detail::Make;
-    using namespace VpIndicator;
-    ProductDecl p = Make(kBandMemo, "grain.band", "grain band memo (per frame)", Backend::GpuCompute, 1, Tier::T1,
-                         Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
-    p.sourceFrame = true;
-    AddInput(p, kP1HalfLuma, 0);
-    AddTerm(p, 1, 4);   // per plane-component, half resolution, float32
-    p.refRenderMs = 0.3f;
-    decls.push_back(p);
-}
-
 // p7g_camera_guide (doc 56, K4-1; claimed as id 20 by CameraGuideProduct.h, registered here): the measurement plan for pair N is a
 // pure function of camera(N) = P7(N) and P4(N), known ahead and declared as a lane product. d = 0 (refs 93-prep-cam-d0): the fit of
 // the SAME pair, published on time from the ahead field before the matcher of N runs; a pair whose camera is not ready in time runs
@@ -1282,7 +1265,6 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double s
     AppendCameraGuideProduct(d);
     AppendTemporalDetailEngineProducts(d, sourcePeriodMs, queueFrames);
     AppendSourceGeometryProduct(d);   // wave S2: P14g, appended after the doc 72 list
-    AppendBandMemoProduct(d);         // lead 8 allocation 30, 11-14
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }

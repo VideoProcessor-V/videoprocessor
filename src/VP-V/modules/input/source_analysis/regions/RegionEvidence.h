@@ -895,7 +895,6 @@ namespace RegionEvidence
 			AppendCameraGuideProduct(decls);
 			AppendTemporalDetailEngineProducts(decls);   // R1-W1-RES (doc 72): p7g and the engine products complete the skeleton set
 			AppendSourceGeometryProduct(decls);          // wave S2: P14g source_geometry (id 29) closes the skeleton set
-			AppendBandMemoProduct(decls);                // lead 8 allocation 30: grain.band per-frame memo
 		}
 		ProductIds ids;
 		ids.grainSplit = kP10GrainSplit;
