@@ -638,6 +638,10 @@ namespace Vpv
 			if (!root) return found;
 			const QRegularExpression name(QStringLiteral("^config\\.vprenderer\\.%1(\\.[^.]+)?$").arg(QRegularExpression::escape(key)));
 			for (QWidget* w : root->findChildren<QWidget*>(name)) found << w;
+			// A VP-V toggle (AddToggleRow) is named "vpv.<unit>.<key>", not "config.vprenderer.<key>".
+			const QRegularExpression toggleName(QStringLiteral("^vpv\\.[^.]+\\.%1(\\.[^.]+)?$").arg(QRegularExpression::escape(key)));
+			for (QWidget* w : root->findChildren<QWidget*>(toggleName))
+				if (!found.contains(w)) found << w;
 			// The row's label goes with it.
 			for (QWidget* f : RowFields(root, key))
 				if (auto* form = qobject_cast<QFormLayout*>(f->parentWidget()->layout()))

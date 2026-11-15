@@ -348,7 +348,7 @@ so Config reloads the moved rows.
 - **Locks (master -> derived):** Tier / Slider / Defaults cards are greyed "Set by <master>" until
   their Custom box is ticked (auto-ticked when the values differ; unticking puts the master's values
   back); Feature cards are greyed "Used only when <feature> is on". Per-key locks set Config's own
-  `derivedSetting` property so a profile reload keeps them greyed.
+  `derivedSetting` property so a profile reload keeps them greyed. A Feature lock finds its keys both as Config rows (`config.vprenderer.<key>`) and as VP-V toggles (`vpv.<unit>.<key>`), so the hiccup card's lock greys the toggle too.
 - **One live control per key:** rows of keys a VP-V toggle owns are hidden wherever they are, in
   both pathways; tier keys' rows live in "Set by the tier" (`vpvKeyHome`) and are their one control.
   The Original pathway disables the whole VP-V page (every VP addition is off) and shows a note;
