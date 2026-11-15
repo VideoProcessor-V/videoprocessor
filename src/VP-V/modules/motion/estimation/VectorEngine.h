@@ -443,6 +443,9 @@ namespace VpMotion
 		// The Ctrl+I segment (the de-judder's stats line): "on demand: issued N, served N, late N, no budget N, uncached N";
 		// empty while nothing was issued or skipped (off / auto: nothing shown, nothing changed).
 		std::string OnDemandStatusSegment() const;
+		// The Ctrl+I segment of the look-ahead producer's ring misses (register 115 #13 / #35: never log-only):
+		// "engine-luma ring misses N (last: <words>)"; empty with no producer or no miss.
+		std::string ProducerStatusSegment() const;
 
 	private:
 		void NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence, uint64_t epochAtChoice);

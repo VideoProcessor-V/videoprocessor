@@ -1260,4 +1260,14 @@ namespace VpMotion
 			c.issued, c.served, c.late, c.noBudget, c.uncached);
 		return line;
 	}
+
+	std::string VectorEngine::ProducerStatusSegment() const
+	{
+		if (!motionProducer)
+			return std::string();
+		const MotionAhead::Producer::RequestStats s = motionProducer->GetRequestStats();
+		if (s.ringMisses == 0)
+			return std::string();
+		return "engine-luma ring misses " + std::to_string(s.ringMisses) + " (last: " + s.lastRingMiss + ")";
+	}
 }

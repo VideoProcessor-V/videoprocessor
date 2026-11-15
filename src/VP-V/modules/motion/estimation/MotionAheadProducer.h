@@ -23,6 +23,8 @@
 #include <AnalysisLumaSource.h>
 #include <VP-V/core/LaneInterfaces.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
+#include <VP-V/modules/motion/estimation/ProducerJobs.h>
+#include <VP-V/modules/motion/estimation/EngineLumaRing.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/estimation/VectorProducts.h>
 #include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
@@ -258,8 +260,9 @@ namespace MotionAhead
 
 		// W2-C5b: an ON-DEMAND pair for a render-time consumer (OnDemandEstimate.h). Any thread; never blocks on the worker:
 		// a pair already in the slot answers FromSlot at once (zero work); not running / stopping / restarting answers
-		// Unavailable; budgetMs <= 0 answers NoBudget; else the request is queued AHEAD of the look-ahead jobs (at most
-		// OnDemand::Queue::kMaxPending; the oldest is answered Refused) and the worker answers it. Adjacent pairs are also
+		// Unavailable; budgetMs <= 0 answers NoBudget; else the request is queued (at most OnDemand::Queue::kMaxPending; the
+		// oldest is answered Refused) and the worker answers it AFTER the waiting look-ahead (core) pairs and before any long
+		// pair (ProducerJobs.h: core > on-demand > long pair, register 115 #57). Adjacent pairs are also
 		// published into the P2 slot (compute once); gap pairs are returned only (P2 stays adjacency-only).
 		OnDemand::PairFuture Request(OnDemand::PairRequest request);
 		struct RequestStats
@@ -268,17 +271,19 @@ namespace MotionAhead
 			unsigned long long chainRuns = 0, adoptRuns = 0, offChainRuns = 0;   // engine runs by OnDemand::Mode
 			// Audit fixes (W2-C5b stage 1): staleGeneration - answered Late, the stream moved to a newer generation after the
 			// request was issued (in `late` too); forcedOffChain - a request of a NEWER generation than the walk has reached ran
-			// off the chain (the walk owns the generation change); fairnessJobs - look-ahead jobs run ahead of a waiting request
-			// by the streak bound (kMaxRequestStreak); droppedBehindRequests - look-ahead jobs dropped (Stats::dropped) while
+			// off the chain (the walk owns the generation change); coreAheadOfRequests - look-ahead (core) pairs run while a
+			// request waited (the core-first order, ProducerJobs.h); droppedBehindRequests - look-ahead jobs dropped (Stats::dropped) while
 			// requests were being served; adoptLostPairs - walk pairs lost because an Adopt moved the chain past the walk's next
 			// frame (it re-seeds); hintsLost - walk pairs run without the temporal hints because a request run reset them.
-			unsigned long long staleGeneration = 0, forcedOffChain = 0, fairnessJobs = 0, droppedBehindRequests = 0;
+			unsigned long long staleGeneration = 0, forcedOffChain = 0, coreAheadOfRequests = 0, droppedBehindRequests = 0;
 			// staleJobs: look-ahead jobs of a generation older than one a no-walk request already started - skipped (re-check S1).
 			unsigned long long adoptLostPairs = 0, hintsLost = 0, staleJobs = 0;
+			// ringMisses: an engine-luma ring lookup/acquire failed, the walk pair's first frame included (cannot happen while the
+			// chain is valid; counted, logged, named in Error() and lastRingMiss; the Ctrl+I segment VectorEngine::ProducerStatusSegment).
+			unsigned long long ringMisses = 0;
+			std::string lastRingMiss;   // the last miss's words ("" = none)
 			double lastQueuedMs = 0.0, lastRunMs = 0.0, runMsSum = 0.0;
 		};
-		// At most this many requests in a row while a look-ahead job waits; then one job runs (the walk is never starved).
-		enum : int { kMaxRequestStreak = 2 };          // enum constants: ODR-safe in C++14 when bound to a const&
 		// The walk counts as present while a job waits or one ran within this long (ms); a request then never moves the
 		// slot's generation (the walk owns it) - a newer-generation request runs off the chain instead.
 		enum : uint64_t { kWalkIdleMs = 1000 };
@@ -286,11 +291,14 @@ namespace MotionAhead
 
 		// W2-C5b test seam (OnDemandEstimateTests, CPU): a producer with no D3D11 device and no engine. The worker runs as
 		// usual (the same queue, priority and chain rules); a look-ahead job calls `job` and a request's engine run calls
-		// `request` (fill the Flow; false = the run failed). Start() clears the seam.
+		// `request` (fill the Flow; false = the run failed). `lostPairStart` (optional) stands in for the engine-luma ring
+		// missing the walk pair's first frame (FindPairStart(...).Lost() in Process): true = lost for this job, which then takes
+		// Process's miss path (NoteRingMiss, no pair, the chain continues from this frame). Start() clears the seam.
 		struct TestEngine
 		{
 			std::function<bool(uint64_t sequence, uint64_t generation)> job;
 			std::function<bool(const OnDemand::PairRequest& request, OnDemand::Mode mode, Flow& flow)> request;
+			std::function<bool(uint64_t sequence, uint64_t generation)> lostPairStart;
 		};
 		bool StartForTest(std::shared_ptr<TestEngine> engine);
 
@@ -325,6 +333,7 @@ namespace MotionAhead
 		// consecutive-failure count; a Late / FromSlot / nothing-to-run answer does not).
 		bool ProcessRequest(OnDemand::Pending& pending, bool& engineRan);
 		void NoteWalkJob(const Job& job);                 // W2-C5b: the walk's bookkeeping (adoptLostPairs, hintsLost, lastJobMs)
+		void NoteRingMiss(const char* what);              // ph1: counted, logged, named in Error(); called with the mutex NOT held
 		bool WalkActiveLocked() const;                    // W2-C5b, under mutex
 		void ReleaseStaleRequestTextures(int w, int h);   // W2-C5b: the off-chain textures go on an engine size change
 		void Answer(OnDemand::Pending& pending, OnDemand::PairResult result);
@@ -346,9 +355,8 @@ namespace MotionAhead
 		std::condition_variable wake;
 		unsigned consecutiveFailures = 0;   // under mutex
 		std::deque<Job> jobs;
-		OnDemand::Queue requests;           // W2-C5b, under mutex: taken before `jobs`
+		OnDemand::Queue requests;           // W2-C5b, under mutex: taken after waiting `jobs` (core first, ProducerJobs.h)
 		RequestStats requestStats;          // under mutex
-		int requestStreak = 0;              // W2-C5b, under mutex: requests run in a row while a job waited
 		bool requestRunning = false;        // W2-C5b, under mutex: the worker is serving a request now
 		bool requestOwnsGeneration = false; // W2-C5b, worker only: a no-walk request set the slot's generation (no job since)
 		uint64_t lastJobMs = 0;             // W2-C5b, under mutex: NowMs() of the last look-ahead job (0 = none yet)
@@ -384,9 +392,12 @@ namespace MotionAhead
 		NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Medium;
 		std::unique_ptr<NvOpticalFlow::Engine> engine;
 		int sizeW = 0, sizeH = 0;
-		CComPtr<ID3D11Texture2D> lumaTex[2];   // previous / current (ping-pong)
+		// 105 s3.5: the engine-luma ring replaces the previous / current ping-pong: kLumaRingSlots textures, frames held by key
+		// (generation, sequence). The ring never sizes from the lead; 3 = N-1, N, N+1 (fits inside the 4-6 ahead cap).
+		enum : int { kLumaRingSlots = 3 };
+		CComPtr<ID3D11Texture2D> lumaTex[kLumaRingSlots];
+		EngineLumaRing lumaRing{ kLumaRingSlots, 0 };
 		CComPtr<ID3D11Texture2D> flowTex[2], costTex[2], flowRead[2], costRead[2];
-		int current = 0;
 		bool havePrevious = false;
 		uint64_t previousSequence = 0, previousGeneration = 0;
 		uint64_t hintSequence = UINT64_MAX, hintGeneration = 0;   // the "to" frame of the engine's last pair

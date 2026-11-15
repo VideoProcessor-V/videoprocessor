@@ -3,7 +3,8 @@
 //
 // W2-C5b (refs\93-prep-C5b.md section 6): the on-demand estimate entry. The CPU tests pin the request queue, the
 // once-only answer, the chain-mode choice and the producer's worker rules through its test engine seam (no D3D11 device,
-// no optical-flow session): a request is taken before queued look-ahead jobs, an abandoned or late request does no
+// no optical-flow session): a request is taken after the waiting look-ahead (core) jobs (register 115 #57: core >
+// on-demand > long pair; S2PH1-S3B C4), a lost pair-start frame is counted and shown, an abandoned or late request does no
 // engine work, Stop answers every waiting request, adjacent pairs are published once into the P2 slot and gap pairs are
 // returned only.
 #include "pch.h"
@@ -274,7 +275,8 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0ull, s.ready);
 		}
 
-		TEST_METHOD(ARequestIsTakenBeforeQueuedLookAheadJobs)
+		// Register 115 #57 (core > on-demand > long pair): the waiting look-ahead jobs run first, then the request.
+		TEST_METHOD(ARequestIsTakenAfterTheQueuedLookAheadJobs)
 		{
 			MotionAhead::Producer producer;
 			Trace trace;
@@ -293,10 +295,13 @@ namespace VideoProcessorTest
 			Assert::IsTrue(r.flow && r.flow->halfW == 11);
 			Assert::IsTrue(WaitCalls(trace, 4));
 			const std::vector<long long> order = trace.Order();
+			Assert::AreEqual(size_t(4), order.size());
 			Assert::AreEqual(1ll, order[0]);
-			Assert::AreEqual(-11ll, order[1], L"the request ran before jobs 2 and 3");
-			Assert::AreEqual(2ll, order[2]);
+			Assert::AreEqual(2ll, order[1], L"core first: job 2 ran before the waiting request");
+			Assert::AreEqual(3ll, order[2], L"core first: job 3 ran before the waiting request");
+			Assert::AreEqual(-11ll, order[3], L"the request ran once no core job waited");
 			producer.Stop();
+			Assert::AreEqual(2ull, producer.GetRequestStats().coreAheadOfRequests, L"both jobs counted: a request waited");
 		}
 
 		TEST_METHOD(AnAbandonedOrLateRequestDoesNoEngineWork)
@@ -503,10 +508,10 @@ namespace VideoProcessorTest
 			Assert::AreEqual(size_t(2), trace.Order().size());
 		}
 
-		// Audit MUST 2: at most kMaxRequestStreak requests in a row while a job waits; dropped jobs are counted.
-		TEST_METHOD(AStreakOfRequestsLetsAWaitingLookAheadJobRun)
+		// Audit MUST 2 (the walk is never starved), under register 115 #57 (core > on-demand): a look-ahead job that arrives
+		// during a burst of requests runs before every request still waiting, and is counted.
+		TEST_METHOD(ALookAheadJobArrivingDuringRequestsRunsBeforeTheWaitingOnes)
 		{
-			Assert::AreEqual(2, static_cast<int>(MotionAhead::Producer::kMaxRequestStreak), L"the order below assumes a streak of two");
 			MotionAhead::Producer producer;
 			Trace trace;
 			Gate gate;
@@ -521,12 +526,12 @@ namespace VideoProcessorTest
 			AnalysisLumaSource luma;
 			producer.Submit(1, 1, luma);
 			Assert::IsTrue(gate.WaitEntered());
-			producer.Submit(2, 1, luma);
 			PairFuture a = producer.Request(Pair(10, 11));
 			PairFuture b = producer.Request(Pair(11, 12));
 			gate.Open();
-			Assert::IsTrue(requestGate.WaitEntered(), L"the first request is running");
-			PairFuture c = producer.Request(Pair(12, 13));   // waiting behind b while job 2 waits
+			Assert::IsTrue(requestGate.WaitEntered(), L"the first request is running (no core job waited)");
+			producer.Submit(2, 1, luma);                     // a core job arrives while b waits
+			PairFuture c = producer.Request(Pair(12, 13));   // and a third request
 			requestGate.Open();
 			Assert::IsTrue(a.WaitFor(5000.0) && b.WaitFor(5000.0) && c.WaitFor(5000.0));
 			Assert::IsTrue(WaitCalls(trace, 5));
@@ -535,10 +540,39 @@ namespace VideoProcessorTest
 			Assert::AreEqual(size_t(5), order.size());
 			Assert::AreEqual(1ll, order[0]);
 			Assert::AreEqual(-11ll, order[1]);
-			Assert::AreEqual(-12ll, order[2]);
-			Assert::AreEqual(2ll, order[3], L"the job runs after two requests although a third waits");
+			Assert::AreEqual(2ll, order[2], L"core first: the job runs before the two requests still waiting");
+			Assert::AreEqual(-12ll, order[3]);
 			Assert::AreEqual(-13ll, order[4]);
-			Assert::AreEqual(1ull, producer.GetRequestStats().fairnessJobs);
+			Assert::AreEqual(1ull, producer.GetRequestStats().coreAheadOfRequests, L"the one core job that ran while a request waited");
+		}
+
+		// S2PH1-S3B C4 (register 115 #13 / #35): the engine-luma ring losing the walk pair's first frame is counted, named
+		// (Error(), lastRingMiss) and shown on the Ctrl+I segment - never a silent skip; no pair, and the chain continues.
+		TEST_METHOD(ALostPairStartFrameIsCountedNamedAndShown)
+		{
+			VpMotion::VectorEngine engine;
+			Assert::AreEqual(std::string(), engine.ProducerStatusSegment(), L"no producer: nothing shown");
+			engine.motionProducer = std::make_shared<MotionAhead::Producer>();
+			MotionAhead::Producer& producer = *engine.motionProducer;
+			Trace trace;
+			auto seam = Seam(trace);
+			seam->lostPairStart = [](uint64_t sequence, uint64_t) { return sequence == 3; };   // the ring lost frame 2
+			Assert::IsTrue(producer.StartForTest(seam));
+			Assert::AreEqual(std::string(), engine.ProducerStatusSegment(), L"no miss: nothing shown");
+			AnalysisLumaSource luma;
+			for (uint64_t s = 1; s <= 4; ++s) producer.Submit(s, 1, luma);
+			Assert::IsTrue(WaitCalls(trace, 4));
+			producer.Stop();
+			const MotionAhead::Producer::RequestStats s = producer.GetRequestStats();
+			Assert::AreEqual(1ull, s.ringMisses, L"counted once");
+			Assert::AreEqual(std::string("the engine-luma ring lost the pair's first frame"), s.lastRingMiss);
+			Assert::AreEqual(std::string("the engine-luma ring lost the pair's first frame"), producer.Error(), L"named in Error()");
+			Assert::IsTrue(producer.Take(1, 2) != nullptr, L"the pair before the miss");
+			Assert::IsTrue(producer.Take(2, 3) == nullptr, L"no pair across the lost frame");
+			Assert::IsTrue(producer.Take(3, 4) != nullptr, L"the chain continues from the frame after the miss");
+			Assert::AreEqual(2ull, producer.GetStats().pairs);
+			Assert::AreEqual(std::string("engine-luma ring misses 1 (last: the engine-luma ring lost the pair's first frame)"),
+				engine.ProducerStatusSegment(), L"the Ctrl+I segment");
 		}
 
 		TEST_METHOD(LookAheadJobsDroppedWhileRequestsAreServedAreCounted)
@@ -1178,8 +1212,10 @@ namespace VideoProcessorTest
 				rq.lumaFrom = source(1);
 				rq.lumaTo = source(3);
 				PairFuture gap = walk.Request(rq);
-				walk.Submit(4, generation, source(4));   // queued behind the request
+				// Core first (register 115 #57): a job queued before the worker took the request would now run FIRST, so job 4 is
+				// submitted once the request ran (the order the old request-first rule always gave; S2PH1-S3B C4).
 				Assert::IsTrue(gap.WaitFor(5000.0) && gap.Get().status == Status::Ready, L"the gap pair was served");
+				walk.Submit(4, generation, source(4));   // after the off-chain run
 				Assert::IsTrue(waitPairs(walk, 3), L"the walk paired (3,4)");
 				const MotionAhead::FlowPtr walked = walk.Take(3, 4);
 				Assert::IsTrue(walked && same(*walked, *cold.flow), L"the walk's next pair is byte-equal to the cold pair");

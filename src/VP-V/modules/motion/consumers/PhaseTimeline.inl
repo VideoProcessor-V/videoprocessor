@@ -311,6 +311,10 @@ void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
 		if (!vectorLine.empty())
 			text += (text.empty() ? std::string() : std::string("; ")) + vectorLine;
 	}
+	// S2PH1-S3B C4: the look-ahead producer's engine-luma ring misses (never log-only; empty with none).
+	const std::string producerSegment = vectorEngine.ProducerStatusSegment();
+	if (!producerSegment.empty())
+		text += (text.empty() ? std::string() : std::string("; ")) + producerSegment;
 	// W2-C8: where the sigma-delta's vectors came from (DitherVectorSource.h); the held entries age out here too.
 	if (VpMotion::DitherVectors::Tracker* ditherVectors = VpMotion::DitherVectors::Registry::Find(this))
 	{
