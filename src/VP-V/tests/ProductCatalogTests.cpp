@@ -188,8 +188,8 @@ namespace ProductCatalogTestsNs
 				{ kTdTrailSummary, "temporal detail" },
 			};
 			const Registry reg = SkeletonProducts();
-			Assert::AreEqual(size_t(kSkeletonProductEnd) - 5u, sizeof(expected) / sizeof(expected[0]),
-				L"every product but the matcher pair, the two held-state records (source identity, source geometry), the causal quality pattern and the band memo (grain.band: a per-frame memo, consumers declared when L-B3 wires them) has an expectation");
+			Assert::AreEqual(size_t(kSkeletonProductEnd) - 4u, sizeof(expected) / sizeof(expected[0]),
+				L"every product but the matcher pair, the two held-state records (source identity, source geometry) and the causal quality pattern has an expectation");
 			// The causal quality pattern is a substitute (read as P15 by its declared id): nobody reads it by its own id.
 			Assert::IsNull(LiveFillOwner(kQualityPatternCausal));
 			for (const Expect& e : expected) {
@@ -218,7 +218,7 @@ namespace ProductCatalogTestsNs
 			for (const ProductDecl& d : reg.All())
 				if (ConsumersOf(d.id).empty() && d.backend != Backend::RenderOnly)
 					++unread;
-			Assert::AreEqual(size_t(3), unread, L"the matcher pair, the causal quality pattern (substitutes read by the declared id) and the band memo (no consumer row until the L-B3 consumers land)");
+			Assert::AreEqual(size_t(2), unread, L"the matcher pair and the causal quality pattern (substitutes read by the declared id)");
 
 			// Over the ACTIVE consumers: with the temporal-detail camera row off, P7's owner is the next lag-0 reader.
 			std::vector<uint16_t> active;
