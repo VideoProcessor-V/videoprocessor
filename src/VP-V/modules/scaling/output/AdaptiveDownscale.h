@@ -371,7 +371,7 @@ namespace AdaptiveDownscale
 		// Per render: settings, the source frame it shows and its duration.
 		// The grain state advances only on a new source sequence.
 		void SetFrame(const Settings& settings, uint64_t sourceSequence, float frameSeconds);
-		// FIX-X5-CUT-P4 / C5: where the cut event of a new source frame comes from (the stage sets CutFromSceneProduct(), the skeleton's
+		// FIX-X5-CUT-P4 / C5: where the cut event of a new source frame comes from (the stage sets SceneCutSource(), the skeleton's
 		// scene product; tests set their own).
 		void SetCutSource(CutSource source) { cutSource = std::move(source); cutResolved = false; cutContinuous = false; }
 		bool HasCutSource() const { return static_cast<bool>(cutSource); }
@@ -381,7 +381,7 @@ namespace AdaptiveDownscale
 		unsigned long long CutUnavailableFrames() const { return cutUnavailableFrames; }
 		// C5: advances whose scene group said fade (no snap: partial-reset territory), and snaps on a cut delivered late (normally
 		// one source frame after the cut; Scene::cutLate). Status and tests.
-		unsigned long long FadeNoSnapFrames() const { return fadeNoSnapFrames; }
+		unsigned long long CutFadeFrames() const { return cutFadeFrames; }
 		unsigned long long CutLateSnaps() const { return cutLateSnaps; }
 		// The APL of the last asked frame was not read (the P4 Acquire failed): why. Empty when read. Not a cut fault.
 		const std::string& AplCause() const { return aplCause; }
@@ -458,7 +458,7 @@ namespace AdaptiveDownscale
 		bool cutAvailable = true;
 		std::string cutCause;
 		unsigned long long cutUnavailableFrames = 0;
-		unsigned long long fadeNoSnapFrames = 0;
+		unsigned long long cutFadeFrames = 0;
 		unsigned long long cutLateSnaps = 0;
 		std::string aplCause;
 		float lastApl = -1.0f;

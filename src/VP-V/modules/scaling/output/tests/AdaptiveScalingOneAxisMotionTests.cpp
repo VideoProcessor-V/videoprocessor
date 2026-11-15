@@ -669,7 +669,7 @@ namespace VideoProcessorTest
 			store.SetEnabled(false);
 			Assert::IsTrue(AdaptiveDownscale::SceneMissingWhy(&store, 11).find("store off") != std::string::npos);
 			// Without a memo (no skeleton, the Original pathway) the production source answers Unavailable with its cause.
-			const AdaptiveDownscale::CutVerdict noMemo = AdaptiveDownscale::CutFromSceneProduct()(10, 11);
+			const AdaptiveDownscale::CutVerdict noMemo = AdaptiveDownscale::SceneCutSource()(10, 11);
 			Assert::IsTrue(noMemo.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !noMemo.cause.empty() && !noMemo.cut,
 				L"no memo on this thread: visible Unavailable");
 		}

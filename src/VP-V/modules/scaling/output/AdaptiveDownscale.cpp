@@ -601,7 +601,7 @@ float rs_slope(float y)
 			cutAvailable = true;
 			cutCause.clear();
 			if (verdict.fade && !verdict.cut)
-				++fadeNoSnapFrames;   // no snap on a fade (owner 09:20: partial reset, never a restart)
+				++cutFadeFrames;   // no snap on a fade (owner 09:20: partial reset, never a restart)
 			if (verdict.cut && verdict.cutLate)
 				++cutLateSnaps;
 			cutResolvedValue = verdict.cut;

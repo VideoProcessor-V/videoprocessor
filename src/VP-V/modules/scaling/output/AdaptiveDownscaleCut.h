@@ -27,7 +27,7 @@
 // The frame's APL (the scalar's diagnostic mean luma) is read from the current frame's P4 record through the renderer's skeleton memo
 // (the standard Acquire: get-or-compute-and-publish). It is not part of the cut; a failed read leaves the APL unread (aplCause, shown).
 //
-// Header-only, C++14. The pure decision (VerdictFromScene) has no hub, memo, store or GPU dependency; CutFromSceneProduct() binds it to the
+// Header-only, C++14. The pure decision (VerdictFromScene) has no hub, memo, store or GPU dependency; SceneCutSource() binds it to the
 // renderer's store and memo of the current frame (render thread).
 
 #include <VP-V/core/FrameAnalysisStore.h>
@@ -54,7 +54,7 @@ namespace AdaptiveDownscale
 		bool fade = false;      // the current group says fade: NO snap (partial-reset territory; diagnostics only)
 		float apl = -1.0f;      // the frame's APL in 8-bit codes (P4 mean / 257); negative: not read
 		std::string cause;      // Unavailable: why (shown with the fallback)
-		std::string aplCause;   // the mean luma was not read: why (shown; not a cut fault)
+		std::string aplCause;   // the APL was not read: why (shown; not a cut fault)
 	};
 
 	// (previous advanced source sequence, this source sequence): 0 = none before. Render thread.
@@ -140,7 +140,7 @@ namespace AdaptiveDownscale
 
 	// The production source: the renderer of the frame this thread renders (Hub::ThisThreadFrame through the skeleton's memo lookup),
 	// its frame-analysis store's scene groups, and its memo for the APL.
-	inline CutSource CutFromSceneProduct()
+	inline CutSource SceneCutSource()
 	{
 		return [](uint64_t prevSequence, uint64_t sequence)
 		{
