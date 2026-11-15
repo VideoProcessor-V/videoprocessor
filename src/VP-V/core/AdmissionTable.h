@@ -53,14 +53,9 @@ namespace Admission {
 constexpr size_t kProductCount = size_t(kSkeletonProductEnd);
 
 // The ahead ceiling is VpSkeleton::kAheadCeiling (core/AheadCeiling.h; lead 12 ruling R3): one value, no local copy.
-constexpr size_t kMaxAheadConsumers = 8;
-
-// One ahead consumer (TD, motion vectors, ...): its declared ahead need (usually 4; TD 4 at full strength, up to 6 if required).
-struct AheadConsumer {
-    const char* name = nullptr;
-    bool active = false;
-    int need = 0;
-};
+// The ahead consumers (TD, motion vectors, ...; each one's declared need, usually 4, TD 4 at full strength, up to 6 if required) and the
+// frames queued ahead reach the admission as THE window's feed, QueueWindow.h PlanAheadFeed (built at wiring by PlanAheadFeedOf(window,
+// active consumers)): one feed, no parallel consumer list here (C4 s3a MUST 1, 102b LCORE-QW-AHEAD-FEED-CALLER).
 
 // What bound the ahead compute (shown; no silent cap).
 enum class AheadBound : uint8_t { NoConsumer = 0, Consumer, Ceiling, Queue, Budget };
@@ -93,8 +88,10 @@ struct AdmissionFacts {
     // what one demanded ahead frame of each product holds (the s2.7 per-frame memo set at the current geometry, e.g. P13 luma 3 B/px ...).
     uint64_t vramGrantBytes = 0;           // 0 = no grant known: no ahead planning (the memo's own OverBudget refusal stays the backstop)
     uint64_t aheadBytes[kProductCount] = {};   // bytes per demanded ahead frame (0 = the product holds nothing ahead)
-    AheadConsumer aheadConsumers[kMaxAheadConsumers] = {};   // the ahead consumers and their declared needs (inactive ones are ignored)
-    int queueAheadFrames = 0;              // L + W: the frames queued ahead of the render (DelayBudget / QueueFrames own it, never fixed here)
+    // THE window's feed (QueueWindow.h PlanAheadFeed / PlanAheadFeedOf): the ACTIVE consumers with their declared needs, queueAheadFrames
+    // (L + W, the frames queued ahead of the render; DelayBudget / QueueFrames own it, never fixed here) and the window's own
+    // aheadComputeLimit (0 = not fed: no drift check).
+    PlanAheadFeed aheadFeed;
     int queueBackFrames = 0;               // the window's back term (H + max(R, P)): frames behind the render each ahead product also holds
     int aheadMinFrames = 1;                // the core declared depth (S-B never shrinks Core / Unpack below it; the ladder's declaredDepth)
     int queueFrames = 0;                   // frames the queue holds now (the result while the ladder takes no S-C step)
@@ -134,30 +131,20 @@ struct Result {
     bool aheadCeilingInfo = false;         // held at the owner's cap: the DESIGNED state, a Ctrl+I info line only (no notice, no fallback)
     bool aheadShortNotice = false;         // the consumer gets LESS than it asked within the cap (queue or budget): visible notice
     std::string aheadComputeLine;          // Ctrl+Alt+D: "ahead compute N (by <consumer>; ceiling 6 | budget | queue)"
+    bool aheadFeedDrift = false;           // the window's aheadComputeLimit differs from the limit the plan computes (shown on the line)
+    int windowAheadComputeLimit = 0;       // the window's value when it drifted (0 = not fed or no drift)
     bool aheadOverGrant = false;           // still over the grant at every floor: ahead core fills at render (visible)
     std::string aheadLine;                 // the ahead plan line (Ctrl+I / Config status / Ctrl+Alt+D)
     std::string line;                      // Ctrl+I / Config status / Ctrl+Alt+D
 };
 
-// The window's feed for these facts (QueueWindow.h PlanAheadFeed): the ACTIVE consumers with their declared needs and the frames queued ahead.
-inline PlanAheadFeed AheadFeedOf(const AdmissionFacts& f)
-{
-    PlanAheadFeed feed;
-    for (size_t i = 0; i < kMaxAheadConsumers; ++i) {
-        const AheadConsumer& c = f.aheadConsumers[i];
-        if (c.active && c.need > 0)
-            feed.activeConsumers.push_back(AheadDemand{ Sat16(uint32_t(c.need)), c.name != nullptr ? c.name : "?" });
-    }
-    feed.queueAheadFrames = Sat16(uint32_t(f.queueAheadFrames > 0 ? f.queueAheadFrames : 0));
-    return feed;
-}
-
-// aheadCompute (OD 11-14, design s10): THE law QueueWindow.h AheadComputeLimitOf applies to the feed (min(max active need, kAheadCeiling,
-// queue frames ahead); 0 with no active consumer), never a second copy. Game modes compute nothing ahead (R9). Sets aheadRequest,
-// aheadComputeLimit, aheadBound and aheadBy.
+// aheadCompute (OD 11-14, design s10): THE law QueueWindow.h AheadComputeLimitOf applies to the window's feed (min(max active need,
+// kAheadCeiling, queue frames ahead); 0 with no active consumer), never a second copy. Game modes compute nothing ahead (R9). Sets
+// aheadRequest, aheadComputeLimit, aheadBound and aheadBy; a window aheadComputeLimit that differs from the law's value is DRIFT, shown on
+// the Ctrl+Alt+D line (rule 5: never silent), and the plan follows the law.
 inline int AheadCompute(const AdmissionFacts& f, Result& r)
 {
-    const PlanAheadFeed feed = AheadFeedOf(f);
+    const PlanAheadFeed& feed = f.aheadFeed;
     const AheadDemand top = MaxAheadNeed(feed.activeConsumers);
     r.aheadRequest = int(top.need);
     r.aheadBy = top.need > 0 ? top.consumer : nullptr;
@@ -172,6 +159,10 @@ inline int AheadCompute(const AdmissionFacts& f, Result& r)
         return 0;
     }
     const uint16_t limit = AheadComputeLimitOf(feed);
+    if (feed.aheadComputeLimit != 0 && feed.aheadComputeLimit != limit) {
+        r.aheadFeedDrift = true;
+        r.windowAheadComputeLimit = int(feed.aheadComputeLimit);
+    }
     const uint16_t held = top.need < feed.aheadCeiling ? top.need : feed.aheadCeiling;
     r.aheadBound = limit < held ? AheadBound::Queue : (top.need > feed.aheadCeiling ? AheadBound::Ceiling : AheadBound::Consumer);
     r.aheadComputeLimit = int(limit);
@@ -189,7 +180,7 @@ inline AheadNeed AdmissionAheadNeed(const AdmissionFacts& f, const Result& r)
 {
     AheadNeed n;
     n.window.back = Sat16(uint32_t(f.queueBackFrames > 0 ? f.queueBackFrames : 0));
-    n.window.ahead = Sat16(uint32_t(f.queueAheadFrames > 0 ? f.queueAheadFrames : 0));
+    n.window.ahead = f.aheadFeed.queueAheadFrames;
     n.window.aheadCompute = Sat16(uint32_t(r.aheadFrames > 0 ? r.aheadFrames : 0));
     n.window.aheadBy = r.aheadBy != nullptr ? r.aheadBy : "";
     n.grantBytes = f.vramGrantBytes;
@@ -231,6 +222,8 @@ inline void AheadComputeLine(const AdmissionFacts& f, Result& r)
         std::snprintf(buf, sizeof(buf), "ahead compute %d (by %s%s)", frames, by, bound);
     }
     r.aheadComputeLine = buf;
+    if (r.aheadFeedDrift)   // the window and the plan disagree: visible, never a silent pick (rule 5)
+        r.aheadComputeLine += "; window ahead compute " + std::to_string(r.windowAheadComputeLimit) + " != plan " + std::to_string(r.aheadComputeLimit);
     const bool gameMode = f.mode == LatencyMode::Competitive || f.mode == LatencyMode::Games;   // backward-only tier by design
     r.aheadCeilingInfo = r.aheadRequest > ceiling;
     r.aheadShortNotice = !gameMode && frames < (std::min)(r.aheadRequest, ceiling);

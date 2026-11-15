@@ -201,8 +201,8 @@ namespace AdmissionOverloadTest
 			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
 			f.aheadBytes[kP3AnalysisField] = 100;
 			f.aheadBytes[kP5MonitorTiles] = 50;
-			f.aheadConsumers[0] = AheadConsumer{ "TD", true, kAheadCeiling };   // OD 11-14: aheadCompute from the declared need (= the ceiling itself)
-			f.queueAheadFrames = 15;
+			f.aheadFeed.activeConsumers = { AheadDemand{ kAheadCeiling, "TD" } };   // OD 11-14: aheadCompute from the declared need (= the ceiling itself)
+			f.aheadFeed.queueAheadFrames = 15;
 			// The delay budget the ladder's S-C steps through (rates as test inputs): 250 ms, 60 / 60 Hz -> fixed (2 + 1) refreshes, 4 queued.
 			f.delayBudget.budgetMs = 250.0;
 			f.delayBudget.sourceFps = 60.0;
@@ -236,7 +236,7 @@ namespace AdmissionOverloadTest
 
 			// 3. LAST: the queue. With 2 frames queued ahead the ahead cap follows the shorter queue (ahead - frames given up): S-B leaves P3 at
 			// its declared 1 (250), the first S-C step keeps cap 1 (250), the second (queue 2) takes the cap to 0 (100 + 50 = 150).
-			f.queueAheadFrames = 2;
+			f.aheadFeed.queueAheadFrames = 2;
 			f.vramGrantBytes = 260;
 			r = Admit(f);
 			Assert::AreEqual(1, r.aheadFrames);
@@ -266,7 +266,7 @@ namespace AdmissionOverloadTest
 			Assert::AreEqual(0, r.queueFramesDropped);
 			Assert::IsTrue(r.aheadLine.find("delay budget not fed") != std::string::npos);
 			f.delayBudgetFed = true;
-			f.queueAheadFrames = 15;
+			f.aheadFeed.queueAheadFrames = 15;
 
 			f.mode = LatencyMode::AvrSafe;   // the 200 ms AVR-safe tier is a CEILING: the plan only shortens; its S-C floor is kMinimumDepth
 			f.delayBudget.budgetMs = 200.0;
@@ -276,12 +276,12 @@ namespace AdmissionOverloadTest
 			r = Admit(f);
 			Assert::AreEqual(avrQueue, r.queueFrames, L"AVR-safe: the plan never lengthens the queue past the 200 ms tier");
 			Assert::IsTrue(r.queueFrames * f.periodMs <= 200.0 + 1e-9);
-			f.queueAheadFrames = 2;
+			f.aheadFeed.queueAheadFrames = 2;
 			f.vramGrantBytes = 100;
 			r = Admit(f);
 			Assert::AreEqual(DelayBudget::kMinimumDepth, r.queueFrames, L"AVR-safe: S-C floor = the ladder floor");
 			Assert::IsTrue(r.queueFrames <= avrQueue);
-			f.queueAheadFrames = 15;
+			f.aheadFeed.queueAheadFrames = 15;
 
 			f.mode = LatencyMode::Games;
 			f.queueFrames = 1;
@@ -299,7 +299,7 @@ namespace AdmissionOverloadTest
 			f.delayBudget.budgetMs = 250.0;
 			f.queueFrames = designQueue;
 			f.vramGrantBytes = 2000;
-			f.aheadConsumers[0].need = kAheadCeiling + 3;
+			f.aheadFeed.activeConsumers[0].need = uint16_t(kAheadCeiling + 3);
 			r = Admit(f);
 			Assert::AreEqual(int(kAheadCeiling), r.aheadFrames);
 			Assert::IsTrue(r.aheadBound == AheadBound::Ceiling);
@@ -314,7 +314,7 @@ namespace AdmissionOverloadTest
 			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
 			f.aheadBytes[kP3AnalysisField] = 100;
 			f.queueFrames = 16;
-			f.queueAheadFrames = 15;
+			f.aheadFeed.queueAheadFrames = 15;
 			f.vramGrantBytes = 100000;
 
 			Result r = Admit(f);   // no consumer at all: nothing ahead
@@ -322,9 +322,8 @@ namespace AdmissionOverloadTest
 			Assert::IsTrue(r.aheadBound == AheadBound::NoConsumer);
 			Assert::AreEqual(std::string("ahead compute 0 (no active consumer)"), r.aheadComputeLine);
 
-			f.aheadConsumers[0] = AheadConsumer{ "motion", true, 4 };
-			f.aheadConsumers[1] = AheadConsumer{ "TD", true, 5 };
-			f.aheadConsumers[2] = AheadConsumer{ "idle", false, kAheadCeiling };   // inactive: ignored
+			// the window's feed lists the ACTIVE consumers only (PlanAheadFeedOf); a listed consumer requesting nothing (need 0) is ignored
+			f.aheadFeed.activeConsumers = { AheadDemand{ 4, "motion" }, AheadDemand{ 5, "TD" }, AheadDemand{ 0, "idle" } };
 			r = Admit(f);
 			Assert::AreEqual(5, r.aheadFrames, L"the max of the ACTIVE declared needs");
 			Assert::AreEqual(5, r.aheadComputeLimit);
@@ -332,26 +331,25 @@ namespace AdmissionOverloadTest
 			Assert::IsFalse(r.aheadShortNotice, L"consumer-bound: Ctrl+Alt+D only");
 			Assert::IsFalse(r.aheadCeilingInfo);
 
-			f.aheadConsumers[1].active = false;
-			f.aheadConsumers[0].active = false;
+			f.aheadFeed.activeConsumers = { AheadDemand{ 0, "idle" } };   // motion and TD inactive: no longer in the feed
 			r = Admit(f);
 			Assert::AreEqual(0, r.aheadFrames, L"no ACTIVE consumer gives 0");
 
-			f.aheadConsumers[0] = AheadConsumer{ "TD", true, kAheadCeiling + 3 };
+			f.aheadFeed.activeConsumers = { AheadDemand{ uint16_t(kAheadCeiling + 3), "TD" } };
 			r = Admit(f);
 			Assert::AreEqual(int(kAheadCeiling), r.aheadFrames, L"a request above the ceiling gives the ceiling");
 			Assert::AreEqual("ahead compute " + std::to_string(kAheadCeiling) + " (by TD; ceiling " + std::to_string(kAheadCeiling) + ")", r.aheadComputeLine);
 			Assert::IsTrue(r.aheadCeilingInfo, L"held at the owner's cap: Ctrl+I info line");
 			Assert::IsFalse(r.aheadShortNotice, L"the cap is the designed state, not a downgrade (lead 12 R3)");
 
-			f.aheadConsumers[0].need = 4;
-			f.queueAheadFrames = 3;
+			f.aheadFeed.activeConsumers[0].need = 4;
+			f.aheadFeed.queueAheadFrames = 3;
 			r = Admit(f);
 			Assert::AreEqual(3, r.aheadFrames, L"never more than the frames queued ahead");
 			Assert::AreEqual(std::string("ahead compute 3 (by TD; queue)"), r.aheadComputeLine);
 			Assert::IsTrue(r.aheadShortNotice, L"less than asked within the cap: visible notice");
 
-			f.queueAheadFrames = 15;
+			f.aheadFeed.queueAheadFrames = 15;
 			f.vramGrantBytes = 100 * (1 + 2);   // the budget plans lower than the need (S-B, THE ladder's bytes: render + 2 ahead): 2 frames
 			r = Admit(f);
 			Assert::AreEqual(4, r.aheadComputeLimit);
@@ -361,10 +359,42 @@ namespace AdmissionOverloadTest
 
 			f.mode = LatencyMode::Games;
 			f.queueFrames = 1;
-			f.queueAheadFrames = 0;
+			f.aheadFeed.queueAheadFrames = 0;
 			r = Admit(f);
 			Assert::AreEqual(0, r.aheadFrames);
 			Assert::AreEqual(std::string("ahead compute 0 (by TD; games: backward-only)"), r.aheadComputeLine);
+		}
+
+		// C4 s3a MUST 1 (102b LCORE-QW-AHEAD-FEED-CALLER): the admission reads THE window's feed (QueueWindow.h PlanAheadFeed, built by
+		// PlanAheadFeedOf). A window aheadComputeLimit that agrees with the law is no drift; one that differs (window 3, need 6, queue 15:
+		// the law gives 6) is DRIFT, flagged and named with both values on the Ctrl+Alt+D line (rule 5), and the plan follows the law.
+		TEST_METHOD(WindowFeedDriftIsShownWithBothValues)
+		{
+			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
+			f.aheadBytes[kP3AnalysisField] = 100;
+			f.queueFrames = 16;
+			f.vramGrantBytes = 100000;
+			QueueWindow w;
+			w.ahead = 15;
+			w.aheadCompute = kAheadCeiling;   // what the window derived for the same consumer: agrees with the law
+			f.aheadFeed = PlanAheadFeedOf(w, { AheadDemand{ kAheadCeiling, "TD" } });
+			Result r = Admit(f);
+			Assert::IsFalse(r.aheadFeedDrift, L"window and plan agree");
+			Assert::AreEqual(int(kAheadCeiling), r.aheadComputeLimit);
+			Assert::AreEqual(std::string("ahead compute ") + std::to_string(kAheadCeiling) + " (by TD)", r.aheadComputeLine);
+
+			f.aheadFeed.aheadComputeLimit = 3;   // the window says 3 for need 6, queue 15
+			r = Admit(f);
+			Assert::IsTrue(r.aheadFeedDrift);
+			Assert::AreEqual(3, r.windowAheadComputeLimit);
+			Assert::AreEqual(int(kAheadCeiling), r.aheadComputeLimit, L"the plan follows the law, never a silent pick of the window value");
+			Assert::AreEqual(int(kAheadCeiling), r.aheadFrames);
+			Assert::IsTrue(r.aheadComputeLine.find("window ahead compute 3 != plan " + std::to_string(kAheadCeiling)) != std::string::npos,
+				L"both values on the Ctrl+Alt+D line");
+
+			f.aheadFeed.aheadComputeLimit = 0;   // not fed: no drift check
+			r = Admit(f);
+			Assert::IsFalse(r.aheadFeedDrift);
 		}
 
 		TEST_METHOD(CostMarksFollowControlConfigRule4)
