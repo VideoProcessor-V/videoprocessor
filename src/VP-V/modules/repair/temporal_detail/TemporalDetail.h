@@ -274,6 +274,28 @@ namespace TemporalDetail
 		bool operator!=(const StampView& o) const { return !(*this == o); }
 	};
 
+	// --- The frame's scene, as the production consumers read it (README "Indicator stamps and resets") ---
+	// cut_soft_reset in temporal detail (C5 batch B; review softreset r1 L1, plan lead19\c5-softreset.md item 2 "(and TD model)"):
+	// detail pulse and texture restore act on VpDetailRestore::SceneRestartAnswer (texture_restore/SceneRestart.h: the shared judge's
+	// verdict, U7, read from the skeleton's scene product, with cut_soft_reset's rule CutFadeJudge::SoftResetStrength at its high bar
+	// kSoftResetBar and the keep SoftResetKeep). SharedSceneSource (SharedSceneSource.h) copies that same answer here field for field;
+	// this module decides no cut, fade or soft reset of its own. given = false: the host's cut / fade / fadeKeep flags (as before).
+	// Plain data on purpose: the CPU model stays free of the renderer hub (tools/td-cli compiles TemporalDetailModel.h on its own).
+	struct SceneRestartInput
+	{
+		bool given = false;
+		bool restart = false;          // the store resets: the delivered cut, no readable scene group, or a fade group without its keep
+		bool fromRecord = true;        // false: no readable scene group (status "reset: scene (no record)")
+		bool fadeWithoutKeep = false;  // the restart is a fade group without its keep (status "reset: fade (no keep)")
+		bool fadePartial = false;      // a fade with its keep: NO reset, every stored slot's keep is multiplied by historyKeep
+		bool softPartial = false;      // cut_soft_reset on and the shared rule fired: NO reset, the same keep path as a fade
+		double historyKeep = 1.0;      // amplitude 0..1 (1 = no reduction): the fade's keep, or SoftResetKeep(strength)
+		double strength = 0.0;         // the soft reset's strength (> 0 only with softPartial; diagnostics)
+		// The consumers' soft-reset status text (VpDetailRestore::SoftResetStatusText; review softreset r1 M3): "" when on and able
+		// to act, ", soft reset: off", or ", soft reset: on (inactive: provisional verdicts only)". Appended to the status line.
+		const char* statusNote = "";
+	};
+
 	// What a reader does when a counter changes (design doc 25 A7).
 	enum class ReaderPolicy { Reset, Hold, Absorb, Relatch, Crossfade, Ignore };
 	enum class Counter { Full, Continuity, RebaseH, RebaseV, SettingsRepair, Timing };

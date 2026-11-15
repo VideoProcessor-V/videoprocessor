@@ -304,11 +304,22 @@ namespace TemporalDetail
 				else if (params.stamps.rebaseH != m.stamps.rebaseH && PolicyOf(Counter::RebaseH) == ReaderPolicy::Reset) reason = "stamp rebaseH";
 				else if (params.stamps.rebaseV != m.stamps.rebaseV && PolicyOf(Counter::RebaseV) == ReaderPolicy::Reset) reason = "stamp rebaseV";
 			}
-			if (params.cut) reason = "cut";
+			// cut_soft_reset (the model's; review softreset r1 L1): with Params::sceneRestart the production consumers' answer decides;
+			// its restart is a reset with its cause, a partial reset without a usable keep resets too (visible).
+			const SceneRestartInput& scene = params.sceneRestart;
+			if (scene.given)
+			{
+				if (scene.restart) reason = !scene.fromRecord ? "scene (no record)" : scene.fadeWithoutKeep ? "fade (no keep)" : "cut";
+				else if ((scene.fadePartial || scene.softPartial) && !(scene.historyKeep >= 0.0)) reason = "scene (no keep)";
+			}
+			else if (params.cut) reason = "cut";
 			else if (params.fade && !(params.fadeKeep >= 0.0f)) reason = "fade (no keep)";   // a producer before U7 v3: the old full reset, shown
 			// U7 v3 partial reset (the model's): a fade with its keep scales every stored slot's keep (admission pass, tab row 1).
-			const bool fadePartial = !reason && params.fade;
-			const float vFadeKeep = fadePartial ? (std::min)(1.0f, (std::max)(0.0f, params.fadeKeep)) : 1.0f;
+			const bool fadePartial = !reason && (scene.given ? scene.fadePartial : params.fade);
+			// cut_soft_reset (the model's): a soft reset scales them through the SAME fade_keep (historyKeep = SoftResetKeep(strength)).
+			const bool softPartial = !reason && scene.given && !fadePartial && scene.softPartial;
+			const float frameKeep = scene.given ? static_cast<float>(scene.historyKeep) : params.fadeKeep;
+			const float vFadeKeep = fadePartial || softPartial ? (std::min)(1.0f, (std::max)(0.0f, frameKeep)) : 1.0f;
 			const bool haveFrame = m.haveFrame && !reason;
 			const bool reset = !haveFrame;
 			const bool haveBwd = params.backward.tex != nullptr;
@@ -655,7 +666,9 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 			m.havePrevG = true;
 			m.prevSeq = params.seq;
 			m.stamps = params.stamps;
-			m_status = reason ? std::string("reset: ") + reason : (motionLost ? std::string("motion lost") : fadePartial ? std::string("fade: partial reset") : std::string("ok"));
+			m_status = reason ? std::string("reset: ") + reason : (motionLost ? std::string("motion lost") : fadePartial ? std::string("fade: partial reset") :
+				softPartial ? std::string("soft reset: partial") : std::string("ok"));
+			if (scene.given && scene.statusNote) m_status += scene.statusNote;   // cut_soft_reset: the consumers' note (the model's order)
 			if (params.blockGates) m_status += bgTex ? "; block gates" : "; block gates rejected (size/format)";
 			if (!shared) m_status += params.grain.Gpu(RegionEvidence::GrainPlane::Luma) ? "; own grain split (the shared product does not fit)" : "; own grain split";
 			if (K < kSlots) m_status += "; store " + std::to_string(K) + " of " + std::to_string(kSlots) + " slots (memory tier)";
