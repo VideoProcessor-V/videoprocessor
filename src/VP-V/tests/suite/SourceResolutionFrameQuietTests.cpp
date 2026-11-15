@@ -267,7 +267,7 @@ namespace VideoProcessorTest
 			Assert::IsFalse(deferred.TakeDecision().engaged, L"clear after the window, nothing new");
 		}
 
-		// Original pathway: PlanEntrance is never called, so nothing arms and nothing flushes.
+		// A frame nothing armed (the seam handler on an unarmed frame): nothing flushes, no End is counted as missed.
 		TEST_METHOD(AFrameThatWasNeverArmedFlushesNothingAndAddsNoDecision)
 		{
 			FrameQuiet::Deferred deferred;
@@ -373,8 +373,9 @@ namespace VideoProcessorTest
 
 		// Original (owner REVERT 2026-11-12, bda439bd9): PlanEntrance runs in Original on purpose (it feeds the source-resolution
 		// monitor as before P4, 77fe0397e) and its body returns before any VP-V stage. source_resolution_frame_bound is off there,
-		// so Begin runs the monitor inline and leaves nothing pending; with no deferred LED copies an End then flushes nothing:
-		// pl_gpu_flush is never called, armed or not.
+		// so Begin runs the monitor inline and leaves nothing pending. C1 gate SHOULD-1: the REAL Original pattern is
+		// OriginalFrame() with no End (the AfterPresent seam is skipped in Original): no flush, no decision, no missed End.
+		// The Arm + End pairs this test used to call "Original" are a VP-pathway frame with no VP native work; kept, so named.
 		TEST_METHOD(OriginalMakesNoPlGpuFlushCallsAtTheHostLevel)
 		{
 			const std::string renderer = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
@@ -385,8 +386,15 @@ namespace VideoProcessorTest
 			const unsigned long long before = frameQuiet.Flushes();
 			for (int i = 0; i < 50; ++i) FrameQuiet::Deferred::EndThisFrame();   // the seam handler on frames nothing armed
 			Assert::AreEqual(before, frameQuiet.Flushes(), L"no flush on an unarmed frame");
-			for (int i = 0; i < 50; ++i) { frameQuiet.Arm(nullptr); FrameQuiet::Deferred::EndThisFrame(); }   // Original: armed, nothing pending, no copies
-			Assert::AreEqual(before, frameQuiet.Flushes(), L"no flush on an armed frame with no VP native work (Original)");
+			for (int i = 0; i < 50; ++i)   // Original: OriginalFrame only, never an End (the seam is skipped there)
+			{
+				frameQuiet.OriginalFrame(nullptr);
+				Assert::IsTrue(frameQuiet.TakeDecision().id.empty(), L"no frame-quiet decision on an Original frame");
+			}
+			Assert::AreEqual(before, frameQuiet.Flushes(), L"no flush on an Original frame (never armed, never ended)");
+			Assert::AreEqual<unsigned long long>(0, frameQuiet.MissedEnds(), L"no missed End is counted in Original");
+			for (int i = 0; i < 50; ++i) { frameQuiet.Arm(nullptr); FrameQuiet::Deferred::EndThisFrame(); }   // a VP-pathway frame: armed, nothing pending, no copies
+			Assert::AreEqual(before, frameQuiet.Flushes(), L"no flush on an armed frame with no VP native work (VP pathway)");
 			Assert::AreEqual<unsigned long long>(0, frameQuiet.MissedEnds());
 		}
 
