@@ -10,11 +10,16 @@
 #include <VP-V/modules/input/source_analysis/regions/CodingEvidence.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
+#include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <memory>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -261,6 +266,121 @@ namespace VideoProcessorTest
 			for (uint64_t s = 1; s <= 40; ++s)
 				hub.Stage(s, PackOf({ Clean(1) }));
 			Assert::IsTrue(hub.Staged(1) == nullptr && hub.Staged(40) != nullptr, L"the oldest are dropped");
+		}
+
+		// audit-P16 MUST 1: the no-store fallback calls the OWNER (MeasurePack, the owner fill's own measure), is counted, and its
+		// result equals the pre-P16 per-tile measure (MeasureTile per tile) and the memo product.
+		TEST_METHOD(NoStoreFallbackIsTheOwnersMeasureAndIsCounted)
+		{
+			CE::Hub hub;   // a private hub: the process-wide one is untouched
+			const std::vector<std::vector<float>> src = { Clean(12), Blocked(13), Clean(14) };
+			std::vector<CE::TileMeasure> got;
+			Assert::AreEqual(0ull, hub.MeasuredWithoutMemo(), L"nothing counted yet");
+			Assert::IsTrue(hub.MeasureWithoutMemo(*PackOf(src), got), L"measured by the owner");
+			Assert::AreEqual(size_t(3), got.size());
+			for (size_t i = 0; i < src.size(); ++i)
+				Assert::IsTrue(Same(got[i], CE::MeasureTile(src[i].data(), kN, kN, 1023)), L"equals the pre-P16 per-tile measure");
+			Assert::AreEqual(1ull, hub.MeasuredWithoutMemo(), L"counted");
+			auto memo = std::make_shared<VpSkeleton::SkeletonMemo>();
+			Assert::IsTrue(memo->RegisterOwnerFill(VpSkeleton::kCodingEvidence, VpSkeleton::AcquireForm::Cpu, CE::kUnitPath,
+				CE::MakeOwnerFill(hub, 0)) == VpSkeleton::SkeletonMemo::Registration::Registered, L"owner registered");
+			hub.SetMemoProvider([memo](const void*) { return memo; });
+			std::vector<CE::TileMeasure> viaMemo;
+			std::string why;
+			Assert::IsTrue(hub.AcquireTiles(this, 21, PackOf(src), viaMemo, why), L"acquired");
+			Assert::AreEqual(got.size(), viaMemo.size());
+			for (size_t i = 0; i < got.size(); ++i)
+				Assert::IsTrue(Same(got[i], viaMemo[i]), L"the fallback equals the memo product");
+			Assert::AreEqual(1ull, hub.MeasuredWithoutMemo(), L"an acquire is not a fallback");
+			CE::TilePack bad;
+			bad.tiles = 2;
+			bad.tileSize = kN;   // no pixels
+			Assert::IsFalse(hub.MeasureWithoutMemo(bad, got), L"a malformed pack is refused");
+			Assert::AreEqual(1ull, hub.MeasuredWithoutMemo(), L"and not counted");
+		}
+
+		// audit-P16 MUST 1: a monitor with no renderer store takes the fallback and SHOWS it (snapshot flag, count, Describe line).
+		TEST_METHOD(StandaloneMonitorShowsTheNoStoreFallback)
+		{
+			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(), L"precondition: no renderer store registered in this process");
+			const unsigned long long before = CE::Hub::Instance().MeasuredWithoutMemo();
+			SourceResolutionMonitor::Monitor m;
+			const int T = SourceResolutionMonitor::Monitor::kTile;
+			std::mt19937 rng(5);
+			std::normal_distribution<double> n(0.5, 0.12);
+			for (int f = 0; f < 2; ++f)
+			{
+				std::vector<float> tiles(size_t(8) * T * T);
+				for (float& v : tiles) v = static_cast<float>(std::round((std::min)(1.0, (std::max)(0.0, n(rng))) * 1023.0) / 1023.0);
+				m.AnalyseTilesForTest(tiles, 8, 0.04 * f, 1920, 1080);
+			}
+			const SourceResolutionMonitor::Snapshot s = m.Read();
+			Assert::IsTrue(s.codingWithoutMemo, L"the latest frame took the fallback");
+			Assert::AreEqual(2ull, s.codingWithoutMemoFrames, L"both frames counted");
+			Assert::IsFalse(s.codingUnavailable, L"evidence present (as before P16)");
+			Assert::IsTrue(CE::Hub::Instance().MeasuredWithoutMemo() >= before + 2, L"counted at the owner");
+			const std::string text = SourceResolutionMonitor::Describe(s, 1.0, false);
+			Assert::IsTrue(text.find("coding evidence measured by its owner without a memo") != std::string::npos, L"shown, never silent");
+		}
+
+		// audit-P16 SHOULD 2: a module's destructor clears only its own provider; a newer module's stays installed.
+		TEST_METHOD(ClearingAnOlderProviderKeepsTheNewer)
+		{
+			CE::Hub hub;
+			auto memo = std::make_shared<VpSkeleton::SkeletonMemo>();
+			Assert::IsTrue(memo->RegisterOwnerFill(VpSkeleton::kCodingEvidence, VpSkeleton::AcquireForm::Cpu, CE::kUnitPath,
+				CE::MakeOwnerFill(hub, 0)) == VpSkeleton::SkeletonMemo::Registration::Registered, L"owner registered");
+			const uint64_t older = hub.SetMemoProvider([](const void*) { return std::shared_ptr<VpSkeleton::SkeletonMemo>(); });
+			const uint64_t newer = hub.SetMemoProvider([memo](const void*) { return memo; });
+			Assert::IsTrue(older != 0 && newer != 0 && older != newer, L"distinct tokens");
+			hub.ClearMemoProvider(older);   // the older module's destructor
+			std::vector<CE::TileMeasure> got;
+			std::string why;
+			Assert::IsTrue(hub.AcquireTiles(this, 3, PackOf({ Clean(15) }), got, why), L"the newer provider is kept");
+			hub.ClearMemoProvider(newer);
+			Assert::IsFalse(hub.AcquireTiles(this, 4, PackOf({ Clean(15) }), got, why), L"its own clear removes it");
+			Assert::IsTrue(why == "no skeleton memo", L"visible reason");
+			Assert::AreEqual(uint64_t(0), hub.SetMemoProvider(nullptr), L"no provider, no token");
+		}
+
+		// audit-P16 SHOULD 1: the clear (in ~SkeletonModule) waits for a provider call already running, so the lambda's module is never
+		// used after its destructor has passed the clear.
+		TEST_METHOD(ClearWaitsForAnInFlightProviderCall)
+		{
+			CE::Hub hub;
+			std::atomic<bool> inCall{ false }, release{ false }, cleared{ false };
+			const uint64_t token = hub.SetMemoProvider([&](const void*) {
+				inCall.store(true);
+				const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+				while (!release.load() && std::chrono::steady_clock::now() < until)
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				return std::shared_ptr<VpSkeleton::SkeletonMemo>();
+			});
+			const std::shared_ptr<CE::TilePack> pack = PackOf({ Clean(16) });
+			std::thread reader([&hub, &pack, this]() {
+				std::vector<CE::TileMeasure> got;
+				std::string why;
+				hub.AcquireTiles(this, 5, pack, got, why);
+			});
+			const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+			while (!inCall.load() && std::chrono::steady_clock::now() < until)
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			const bool started = inCall.load();
+			std::thread clearer([&hub, &cleared, token]() {
+				hub.ClearMemoProvider(token);
+				cleared.store(true);
+			});
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));   // the clear has had time to return if it did not wait
+			const bool clearedDuringCall = cleared.load();
+			release.store(true);
+			reader.join();
+			clearer.join();
+			Assert::IsTrue(started, L"the provider call was running");
+			Assert::IsFalse(clearedDuringCall, L"the clear waited for the running call");
+			Assert::IsTrue(cleared.load(), L"and returned once it finished");
+			std::vector<CE::TileMeasure> got;
+			std::string why;
+			Assert::IsFalse(hub.AcquireTiles(this, 6, pack, got, why), L"no call after the clear");
 		}
 	};
 }
