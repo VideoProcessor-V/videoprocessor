@@ -153,7 +153,9 @@ ACCESSOR = {
     "kP13SourceRing": r"SourceRing|\bsourceRing\b|SourceFrameView",
     "kP3AnalysisField": r"AnalysisField|\banalysisField\b",
     "kP4SourceStats": r"SourceStats|\bsourceStats\b",
-    "kP2VectorPair": r"VectorPair|\bP2\b|MotionIntent",
+    # gate-15a-X8-row13-P2: + the engine-view reads of the producer's pair. NOT the MotionAhead::Flow type (a private producer
+    # constructing its own Flow would satisfy the accessor).
+    "kP2VectorPair": r"VectorPair|\bP2\b|MotionIntent|\bSetExternalFlow\s*\(|\bFlowOf\s*\(|\bSeedFieldOf\s*\(|\bFlowView\b",
     "kP1HalfLuma": r"HalfLuma",
 }
 _ENUM_RE = re.compile(r"\b(k[A-Z]\w+)\b")

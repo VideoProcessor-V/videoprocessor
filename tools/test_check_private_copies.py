@@ -194,6 +194,17 @@ class Synthetic(unittest.TestCase):
         self.assertEqual(x8({"src/VP-V/core/ProductCatalog.h": cat(owner="input/capture"), prod: pub}),
                          ["kP1HalfLuma", "kP2VectorPair"])                                              # not under the owner folder
 
+    def test_x8_p2_read_through_set_external_flow(self):
+        # gate-15a-X8-row13-P2 fixtures: SetExternalFlow( is a P2 read; using only the MotionAhead::Flow type is not.
+        cat = ('r.push_back(MakeRow(13, "matcher / motion warp", "VP-V/modules/motion/estimation/matcher/DejudderWarp", '
+               'PathwayUnit::Motion, 20, { kP2VectorPair }, own, "product.motion_warp"));')
+        w = M + "motion/estimation/matcher/DejudderWarp.h"
+
+        def x8(text):
+            return [h for h in N1.scan(make_tree({"src/VP-V/core/ProductCatalog.h": cat, w: text})) if h["site"] == "X8"]
+        self.assertFalse(x8("void SetExternalFlow(std::shared_ptr<const MotionAhead::Flow> flow);"))
+        self.assertTrue(x8("std::shared_ptr<MotionAhead::Flow> own = std::make_shared<MotionAhead::Flow>();"))
+
     def test_bad_root_is_exit_2(self):
         self.assertEqual(N1.main(["--root", tempfile.mkdtemp()]), 2)
 
