@@ -303,6 +303,14 @@ public:
     static constexpr size_t kRenderMadeMarks = 16;
     void MarkRenderMade(uint64_t seq) { renderMade_[size_t(seq % kRenderMadeMarks)].store(seq + 1u, std::memory_order_release); }
     bool RenderMade(uint64_t seq) const { return renderMade_[size_t(seq % kRenderMadeMarks)].load(std::memory_order_acquire) == seq + 1u; }
+    // Withdraw the mark of frame `seq` when its Publish failed (RunAheadNow: "the seal took the frame first"): the frame was not made
+    // by the render, so neither the worker (workerReused) nor the seal (aheadSealReused) may count it reused. Only this frame's own
+    // mark is cleared (a newer frame's mark in the same entry is kept).
+    void ClearRenderMade(uint64_t seq)
+    {
+        uint64_t expected = seq + 1u;
+        renderMade_[size_t(seq % kRenderMadeMarks)].compare_exchange_strong(expected, 0u, std::memory_order_acq_rel, std::memory_order_acquire);
+    }
 
     // Any thread: the decoded word of the slot that frame `seq` maps to (diagnostics, tests).
     SlotWord WordFor(uint64_t seq) const { return Unpack(slots_[SlotOf(seq)].word.load(std::memory_order_acquire)); }

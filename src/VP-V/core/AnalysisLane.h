@@ -767,6 +767,7 @@ public:
         const PublishResult pr = set.Publish(t);
         pins.Unpin();
         if (pr != PublishResult::Published) {
+            set.ClearRenderMade(seq);   // not made by the render after all: no reuse may be counted for it (audit S3)
             out.why = "the seal took the frame first";
             return out;
         }
