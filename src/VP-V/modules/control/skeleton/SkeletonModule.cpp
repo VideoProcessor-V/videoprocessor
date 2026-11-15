@@ -69,6 +69,7 @@ namespace Vpv
 			using VpSkeleton::kLeadWindowSeconds;     // source time the lane-lead feed keeps its lowest value over (core/QueueFrames.h)
 			using VpSkeleton::kLeadPeakHoldSeconds;   // the lane lead's best value is held this long, then decays to the lead in use
 			constexpr size_t kFactsRing = 64;           // engine-field facts kept (frames)
+			constexpr size_t kSceneRunRing = 8;         // U7 fade runs kept (frames; storage only, the law has no frame count)
 			constexpr unsigned kFeedRetries = 8;        // publish attempts per field before it is given up (Begin + AfterRender per frame)
 
 			uint64_t SteadyUs()
@@ -445,6 +446,16 @@ namespace Vpv
 			std::atomic<uint64_t> sceneNoGrid{ 0 };   // no-grid fallback verdicts (the v1 pair law: plane under 32 x 18), counted per tracker push (re-primes push again)
 			bool sceneHasFilled = false;
 			uint64_t sceneLastFilled = 0;
+			// U7's multi-frame fade law (VpUnit::CutFadeJudge::FadeRun, unit version 3): per classified frame, the run that ends at its P4
+			// record (written by SceneFactsOf, under its own mutex). An entry is used only when it ends at the very record the next pair starts
+			// from, so a seek that restarts the frame numbering never continues an old run.
+			struct SceneRunEntry
+			{
+				uint64_t seq = 0;
+				VpUnit::CutFadeJudge::FadeRun run;
+			};
+			std::mutex sceneRunMutex;
+			SceneRunEntry sceneRuns[kSceneRunRing];
 			uint64_t feedEra = 0;
 			bool feedHadEra = false;
 			uint64_t feedLastEngineSeq = 0;      // the last field seq handled (published, slipped or given up)
@@ -1448,11 +1459,53 @@ namespace Vpv
 				FeedEngine(*st, true);
 		}
 
-		// The scene of `seq`: the sequence law's verdict (U7 v2, the renderer's CutTracker over the P4 records) and the pair law's fade over
-		// `seq - 1` -> `seq`. This is the classification only; the SCENE PRODUCT (SceneOf / FillScene below) stores its delivered cut / fade
-		// in the frame-analysis store's scene group once per frame and serves readers from there.
+		// The scene of `seq`: the sequence law's verdict (U7 v2, the renderer's CutTracker over the P4 records) and the fade over `seq - 1` ->
+		// `seq` (U7 v3: the pair law's OR the multi-frame law's, SceneRunBefore / FoldFadeRun). This is the classification only; the SCENE
+		// PRODUCT (SceneOf / FillScene below) stores its delivered cut / fade in the frame-analysis store's scene group once per frame and
+		// serves readers from there.
 		namespace
 		{
+			// The U7 fade run that ends at P4(seq - 1) = `prev` (get-or-compute, rule 2): the ring's entry when it ends at that very record
+			// (the seal classifies every frame in order, so this is the normal case); else rebuilt forward from the older P4 records the lane
+			// still holds (at most kSceneRunRing - 1 pairs back, inside the P4 read lag kScenePrimeFrames, starting from a ring entry that
+			// ends at the oldest of them, or from an empty run); nothing older readable: an empty run, i.e. the pair law alone for this pair.
+			// Caller holds st.sceneRunMutex.
+			VpUnit::CutFadeJudge::FadeRun SceneRunBefore(HostState& st, Bundle& b, uint64_t seq, const VpLaneProducts::SourceStatsRecord& prev)
+			{
+				using VpUnit::CutFadeJudge::FadeRun;
+				const auto entryEndingAt = [&st](uint64_t s, const VpLaneProducts::SourceStatsRecord& r, FadeRun& out) {
+					const HostState::SceneRunEntry& en = st.sceneRuns[static_cast<size_t>(s % kSceneRunRing)];
+					if (en.seq != s || !VpUnit::CutFadeJudge::FadeRunEndsAt(en.run, r))
+						return false;
+					out = en.run;
+					return true;
+				};
+				FadeRun run;
+				if (entryEndingAt(seq - 1, prev, run))
+					return run;
+				// recs[i] = P4(seq - 1 - i); the oldest one is P4(oldest).
+				std::vector<VpLaneProducts::SourceStatsRecord> recs(1, prev);
+				uint64_t oldest = seq - 1;
+				FadeRun start;
+				while (recs.size() < kSceneRunRing && oldest > 1)
+				{
+					VpLaneProducts::SourceStatsRecord older;
+					if (!ReadP4(b, oldest - 1, &older))
+						break;
+					recs.push_back(older);
+					--oldest;
+					if (entryEndingAt(oldest, recs.back(), start))
+						break;
+				}
+				run = start;
+				for (size_t i = recs.size() - 1; i > 0; --i)
+				{
+					const VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(recs[i], recs[i - 1], false, false);
+					VpUnit::CutFadeJudge::FoldFadeRun(recs[i], recs[i - 1], e, run);
+				}
+				return run;
+			}
+
 			// SceneFactsOf's body; `done` (may be nullptr) gets the frames whose confirmed sequence verdict arrived in this call.
 			bool SceneFactsFor(HostState& st, Bundle& bundle, uint64_t seq, SceneFacts& out, std::vector<uint64_t>* done)
 			{
@@ -1468,8 +1521,19 @@ namespace Vpv
 				// Scene EVENTS (cut / fade / flash) are scene facts: classified from the P4 records alone. This function reads NO validity source
 				// (no VpIndicator::TemporalValid, no Indicator at all): whether a vector pair is usable across a resync is answered only by the P5a
 				// MotionValidity facade (coordinator ruling 2026-11-08; tools/test_check_shared_units.py test_scene_facts_reads_no_validity_source).
-				const VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, false, false);
-				// U7 v2: cut / flash / cutPossible / strength from the sequence law (the renderer's tracker); the fade stays the pair law's.
+				VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, false, false);
+				{
+					// U7 v3: the multi-frame fade law folds this pair into the run that ends at P4(seq - 1); the run that ends here is kept for
+					// seq + 1. The run is ended by the pair law's cut / flash (the law as designed: one record pair at a time, independent of
+					// the sequence verdict's one-frame delivery); a sequence-law cut still restarts every consumer whatever the fade says.
+					std::lock_guard<std::mutex> runLock(st.sceneRunMutex);
+					VpUnit::CutFadeJudge::FadeRun run = SceneRunBefore(st, bundle, seq, a);
+					e.fade = VpUnit::CutFadeJudge::FoldFadeRun(a, c, e, run) || e.fade;
+					HostState::SceneRunEntry& kept = st.sceneRuns[static_cast<size_t>(seq % kSceneRunRing)];
+					kept.seq = seq;
+					kept.run = run;
+				}
+				// U7 v2: cut / flash / cutPossible / strength from the sequence law (the renderer's tracker).
 				VpUnit::CutFadeJudge::CutVerdict v;
 				{
 					std::lock_guard<std::mutex> lock(st.sceneMutex);

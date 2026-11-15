@@ -9,6 +9,16 @@
 //   record pair  cut when the lane saw a FULL indicator; otherwise histogram distance > 0.50 is a cut (a shifted histogram
 //                of kept spread is a flash), > 0.25 or a continuity slip is "cut possible", a small same-sign step of
 //                mean and spread is a fade                                              (ClassifyEvents)
+//   fade run     (v3, 102b U7-MULTIFRAME-FADE-LAW) a slow fade moves each pair by much less than spread / 64, so the
+//                pair law alone misses most of it. A run is the consecutive record pairs whose p99 moves one way (a pair whose
+//                p99 holds stays in it; a cut, a flash, a reversal or a mean jump >= spread / 4 ends it; a repeated record leaves
+//                it as it is). A pair inside a run of two or more pairs is a fade when its mean and p99 both moved the run's way
+//                and the run, from its first record to this one, is a gain about a plausible black: the black implied by mean
+//                and p99 lies in FadeFit's window (kFadeMinBlack .. kFadeMaxBlack, 8-bit-like codes) and the gain differs from 1
+//                by more than kFadeRunMinGain. No frame rate, fade length or window length enters: the evidence is the
+//                accumulated gain, so a fade of any length at any rate is found once it has scaled the picture by 2 %. The
+//                caller keeps one FadeRun per stream and folds every pair in order; the pair law's fade still counts on its own
+//                                                                                       (FoldFadeRun)
 //   veto grid    cut = (grid difference >= G and histogram distance >= H) or histogram distance >= H_alone;
 //                entering or leaving black is a cut                                    (GridHistCut)
 //   fade fit     the matcher's M4 law on two frames' mean / spread: gain = clamp(sa / sb, 0.5, 2), offset = ma - gain * mb,
@@ -629,6 +639,91 @@ inline FadeOut FadeFit(const FadeIn& in, const FadeParams& p = FadeParams())
     o.offset = in.meanA - o.gain * in.meanB;
     o.step = d;
     return o;
+}
+
+// ---- the multi-frame fade law (unit version 3) ---------------------------------------------------------------------------
+
+constexpr double kFadeRunMinGain = 0.02;      // |1 - gain| of the run (first record -> this one) above this: the picture was scaled
+constexpr double kP4CodesPerEightBit = 256.0; // P4 records hold 16-bit half-plane codes: one 8-bit-like code = 256 P4 codes
+constexpr uint32_t kFadeRunMinPairs = 2;      // a run needs two pairs (as FadeFit needs the previous pair's step): one pair is not a ramp
+
+// The run that ends at one record (the caller keeps one per stream, starting empty). end* name that record, so a run is only
+// continued by the pair that starts there (a restarted frame numbering or a skipped frame starts a new run).
+struct FadeRun {
+    int32_t direction = 0;      // +1 the picture brightens (p99 rises), -1 it darkens, 0 no run
+    uint32_t pairs = 0;         // pairs in the run
+    uint32_t baseMean = 0;      // the run's first record: mean and p99 (P4 codes)
+    uint32_t baseP99 = 0;
+    uint32_t refSpread = 0;     // the largest p99 - p01 inside the run (the mean-jump limit's reference)
+    uint32_t endPixels = 0;     // the record the run ends at
+    uint32_t endMean = 0, endP01 = 0, endP50 = 0, endP99 = 0;
+};
+
+inline bool FadeRunEndsAt(const FadeRun& run, const SourceStats::Record& r)
+{
+    return run.endPixels == r.pixelCount && run.endMean == r.mean && run.endP01 == r.p01 && run.endP50 == r.p50 && run.endP99 == r.p99;
+}
+
+inline void FadeRunEndAt(FadeRun& run, const SourceStats::Record& r)
+{
+    run.endPixels = r.pixelCount;
+    run.endMean = r.mean;
+    run.endP01 = r.p01;
+    run.endP50 = r.p50;
+    run.endP99 = r.p99;
+}
+
+// Fold the pair (prev, cur), whose pair verdict is `e` (ClassifyEvents on the same two records), into `run` (the run ending at
+// prev; any other run is dropped first). Returns the multi-frame fade verdict of the pair; the frame's fade is this OR e.fade.
+inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur, const EventSignals& e, FadeRun& run)
+{
+    if (!FadeRunEndsAt(run, prev))
+        run = FadeRun();
+    if (e.cut || e.flash) {
+        run = FadeRun();
+        FadeRunEndAt(run, cur);
+        return false;
+    }
+    const int64_t dMean = int64_t(cur.mean) - int64_t(prev.mean);
+    const int64_t dP99 = int64_t(cur.p99) - int64_t(prev.p99);
+    if (dMean == 0 && dP99 == 0 && e.histDistance == 0) {
+        FadeRunEndAt(run, cur);   // a repeated record: nothing changed, the run stays as it is
+        return false;
+    }
+    const uint32_t spreadPrev = prev.p99 > prev.p01 ? prev.p99 - prev.p01 : 0u;
+    const uint32_t spreadCur = cur.p99 > cur.p01 ? cur.p99 - cur.p01 : 0u;
+    const uint32_t spread = (std::max)(1u, (std::max)(spreadPrev, spreadCur));
+    const int32_t dir = dP99 > 0 ? 1 : dP99 < 0 ? -1 : 0;
+    const int64_t aMean = dMean < 0 ? -dMean : dMean;
+    const bool continues = run.direction != 0 && (dir == run.direction || dir == 0) &&
+        aMean * kFadeMaxDiv < int64_t((std::max)(run.refSpread, spread));
+    if (!continues) {
+        run = FadeRun();
+        if (dir == 0 || aMean * kFadeMaxDiv >= int64_t(spread)) {   // nothing to start from, or a jump: no ramp starts here
+            FadeRunEndAt(run, cur);
+            return false;
+        }
+        run.direction = dir;
+        run.baseMean = prev.mean;
+        run.baseP99 = prev.p99;
+        run.refSpread = spread;
+    }
+    ++run.pairs;
+    run.refSpread = (std::max)(run.refSpread, spread);
+    FadeRunEndAt(run, cur);
+    if (run.pairs < kFadeRunMinPairs || dir != run.direction || dMean * run.direction <= 0)
+        return false;
+    // A gain about a black b: (cur - b) = g * (base - b) for both the mean and the p99.
+    const double m0 = double(run.baseMean), p0 = double(run.baseP99), m1 = double(cur.mean), p1 = double(cur.p99);
+    const double den = (p0 - p1) - (m0 - m1);
+    if (den == 0.0)
+        return false;
+    const double black = (m1 * p0 - m0 * p1) / den;
+    if (!(black > double(kFadeMinBlack) * kP4CodesPerEightBit && black < double(kFadeMaxBlack) * kP4CodesPerEightBit) || p0 <= black ||
+        m0 <= black)
+        return false;
+    const double gain = (p1 - black) / (p0 - black);
+    return std::fabs(1.0 - gain) > kFadeRunMinGain && (gain - 1.0) * double(run.direction) > 0.0 && (m1 - m0) * double(run.direction) > 0.0;
 }
 
 // ---- the matcher's trust cut (M3) and AdaptiveDownscale's mean-step cut -------------------------------------------------------

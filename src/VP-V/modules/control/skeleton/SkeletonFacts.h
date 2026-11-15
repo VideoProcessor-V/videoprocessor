@@ -39,10 +39,11 @@ namespace Vpv
 		};
 
 		// The scene of frame `seq` against the previous frame. U7 v2 (U7-accuracy): cut / flash / cutPossible / cutStrength are the SEQUENCE
-		// law's verdict (VpUnit::CutFadeJudge::CutTracker over this renderer's P4 records, frames seq - 8 .. seq + 1); fade stays the v1 pair
-		// law (ClassifyEvents over the two records), and the v1 pair cut / flash / cutPossible are kept as pair* for diagnostics. The verdict
-		// is stored once per frame by SceneOf's publisher. The raw record values are given so a reader can run the fade fit
-		// (CutFadeJudge::FadeFit) with its own scaling. Codes are the 16-bit half-plane sample codes of the P4 record.
+		// law's verdict (VpUnit::CutFadeJudge::CutTracker over this renderer's P4 records, frames seq - 8 .. seq + 1), and the v1 pair cut /
+		// flash / cutPossible are kept as pair* for diagnostics. `fade` (U7 v3, 102b U7-MULTIFRAME-FADE-LAW) is the pair law's fade
+		// (ClassifyEvents over the two records) OR the multi-frame law's (CutFadeJudge::FoldFadeRun over the run of earlier pairs that ends
+		// at the previous record). The verdict is stored once per frame by SceneOf's publisher. The raw record values are given so a reader
+		// can run the fade fit (CutFadeJudge::FadeFit) with its own scaling. Codes are the 16-bit half-plane sample codes of the P4 record.
 		struct SceneFacts
 		{
 			bool valid = false;               // both P4 records were readable
