@@ -239,6 +239,7 @@ inline void VpvDumpRendererSettings(const RendererSettings& s, std::ostream& o)
 	Put(o, "detailPulseFast", s.detailPulseFast);
 	Put(o, "textureRestore", s.textureRestore);
 	Put(o, "textureRestoreCap", s.textureRestoreCap);
+	Put(o, "cutSoftReset", s.cutSoftReset);
 	Put(o, "dejudderSourceWarpCatmull", s.dejudderSourceWarpCatmull);
 	Put(o, "nlsSamplingCatmull", s.nlsSamplingCatmull);
 	Put(o, "temporalDither", s.temporalDither);

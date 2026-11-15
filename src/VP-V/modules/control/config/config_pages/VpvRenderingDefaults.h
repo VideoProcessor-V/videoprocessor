@@ -121,6 +121,7 @@ inline bool IsVpvOnlyKey(const QString& key)
         "cut_cntr_level",
         "cut_jump",
         "cut_lead",
+        "cut_soft_reset",
         "cut_threshold",
         "dark",
         "deadband",
@@ -581,6 +582,7 @@ inline bool IsVpvChoiceKey(const QString& key)
         "capture_path",
         "capture_upload",
         "cnn_residual_stabilise",
+        "cut_soft_reset",
         "deband_grain",
         "deband_vp",
         "deband_vp_exclusive",
@@ -713,6 +715,7 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
             // Detail pulse stabilisation and texture restore (docs/VP-detail-restore.md).
             // detail_pulse_stabilise default OFF (owner 2026-11-11 19:39, doc 91 :106; TD precursor, on only by explicit choice).
             { "detail_pulse_stabilise", "off" }, { "detail_pulse_fast", "on" }, { "texture_restore", "off" },
+            { "cut_soft_reset", "on" },   // C5 batch B (owner 2026-11-15 08:35 U7 Q4): default on, high bar
             // Intent remainder (2026-10-17): all experimental, default off.
             { "intent_motion", "off" }, { "intent_motion_policy", "display" }, { "ambient_adapt", "off" },
             { "intent_black", "off" }, { "intent_display", "off" } };

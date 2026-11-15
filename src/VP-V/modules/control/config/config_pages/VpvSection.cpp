@@ -504,7 +504,16 @@ namespace Vpv
 				combo->addItem(shown, Q(v));
 			}
 			const SlotInfo* slot = table.Slot(toggle.slot);
-			combo->setToolTip(QStringLiteral("Key %1 (renderer profile). Slot: %2. See docs/settings/VP-settings-reference.md.")
+			// A toggle whose effect needs more than its label (C5 batch B: cut_soft_reset, owner 2026-11-15 08:35 U7 Q4).
+			const QString what = std::string(toggle.key) == "cut_soft_reset" ?
+				QStringLiteral("Default on. When the scene judge is very sure a frame is a near-cut that is not a confirmed cut "
+					"(a high bar), detail pulse and texture restore shrink their history instead of carrying the old scene's detail; "
+					"below the bar nothing happens, because mid-scene firing would be worse than the vectors' own quick recovery. "
+					"A confirmed cut still starts over and a fade still shrinks the history, whatever this says. Off: no soft "
+					"reset (shown as \"soft reset: off\" on the detail pulse / texture restore status lines). It acts only on "
+					"confirmed verdicts: where they stay provisional (low latency) the lines read \"soft reset: on (inactive: "
+					"provisional verdicts only)\". The bar is provisional until the D8 truth run.\n\n") : QString();
+			combo->setToolTip(what + QStringLiteral("Key %1 (renderer profile). Slot: %2. See docs/settings/VP-settings-reference.md.")
 				.arg(key, slot ? Q(slot->name) : Q(toggle.slot)) +
 				(retiring ? QStringLiteral("\n\n") + RetirementTip(table, *retiring) : QString()));
 			form->addRow(label, combo);

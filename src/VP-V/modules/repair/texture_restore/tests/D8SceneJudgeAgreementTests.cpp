@@ -38,6 +38,12 @@
 // Diagnostic output (WAIVER-D8-FRAME-DUMP, additive, output only; no gate reads it): VP_D8_FRAME_DUMP=<dir> writes one CSV per
 // row part, <dir>\d8-frames-<row>-part<N>of<M>.csv, one line per frame of the part (truth label, U7 verdict and its scores, the
 // DP / TR restart decisions). Unset: nothing is written.
+// Soft reset diagnostics (WAIVER-C5-SOFTRESET-D8DIAG, additive, output only; no gate reads them): the U7 soft-reset rule
+// (CutFadeJudge::SoftResetStrength, bar kSoftResetBar, PROVISIONAL) evaluated on every CONFIRMED verdict of the part (the verdict
+// of seq - 1 that arrives with frame seq; this harness publishes provisional groups, so the modules themselves never fire here):
+// soft resets, those within one frame of a manifest cut and those off it (false fires), the mean graded strength on non-cut
+// frames, and the eligible frames (confirmed candidate, not cut / flash / fade) at or above 0.5 / 0.75 / 0.9 / the bar; plus the
+// GPU modules' own SceneSoftResets(). On the D8PARTIAL line and as D8ROW / CSV columns, so the truth run can set the bar.
 // Not covered: the skeleton's real seal timing, look-ahead (MeasureAhead), vector fields (cell-trust column is n/a).
 // GpuHardware: long real-clip rows, split into parts so that each test method stays within one GPU chunk.
 
@@ -207,6 +213,11 @@ namespace D8SceneJudgeAgreementNs
 		std::string truthLabels;   // where the truth comes from (no commas: a CSV field)
 		int planeW = 0, planeH = 0, u7Cuts = 0, u7Fades = 0, u7Flashes = 0, truthRestarts = 0, truthFades = 0;
 		double decodeMs = 0.0;
+		// WAIVER-C5-SOFTRESET-D8DIAG: the soft-reset rule on the part's confirmed verdicts (see the file comment). Output only.
+		int softResets = 0, softAtTruth = 0, softOffTruth = 0, softNonCut = 0, softEligible = 0;
+		int softEligible50 = 0, softEligible75 = 0, softEligible90 = 0, softEligibleBar = 0;
+		double softNonCutStrengthSum = 0.0;
+		double SoftNonCutMeanStrength() const { return softNonCut > 0 ? softNonCutStrengthSum / softNonCut : 0.0; }
 	};
 
 	// Truth restart per frame of the part [begin, end) (index k - begin): see the file comment. Index 0 (the part's first frame)
@@ -267,7 +278,11 @@ namespace D8SceneJudgeAgreementNs
 			r.frames ? f.decodeMs / r.frames : 0.0, r.TruthAgreementPct(), r.truthMiss, r.truthExtra, f.truthLabels.c_str(),
 			f.device.c_str(), r.fadeFrames, r.fadePartial, r.fadeRestarts, r.partialOutsideFade, r.fadeKeepEndMin, r.fadeOutKeep,   // WAIVER-U7FADE-PARTIAL
 			r.fadeMissed, r.PartialTruthAgreementPct(), r.TileRestartShareMean(), r.tileRestartShareMax);   // WAIVER-U7FADE-PARTIAL-2
-		Logger::WriteMessage((std::string("D8ROW ") + line + "\n").c_str());
+		char soft[256];   // WAIVER-C5-SOFTRESET-D8DIAG: the soft-reset columns (the rule on the part's confirmed verdicts; output only)
+		snprintf(soft, sizeof(soft), ",%d,%d,%d,%.4f,%d,%d", f.softResets, f.softAtTruth, f.softOffTruth, f.SoftNonCutMeanStrength(),
+			f.softEligible, f.softEligibleBar);
+		const std::string row = std::string(line) + soft;
+		Logger::WriteMessage((std::string("D8ROW ") + row + "\n").c_str());
 		std::string path = RealClip::Env("VP_TEST_D8_OUT");
 		if (path.empty())
 		{
@@ -289,9 +304,10 @@ namespace D8SceneJudgeAgreementNs
 				"u7_flashes,truth_restarts,model_old_ms_per_frame,model_shared_ms_per_frame,gpu_ms_per_frame,decode_p4_ms_per_frame,"
 				"truth_agree_pct,truth_miss,truth_extra,truth_labels,device,fade_frames,fade_partial_frames,fade_restarts,partial_outside_fade,"
 "fade_keep_end_min,fade_out_keep,fade_missed,partial_truth_agree_pct,tr_tile_restart_share_on_fades_mean,"
-				"tr_tile_restart_share_on_fades_max\r\n",
+				"tr_tile_restart_share_on_fades_max,"
+				"soft_resets,soft_at_truth_cut,soft_off_truth,noncut_mean_graded_strength,soft_eligible,soft_eligible_at_bar\r\n",   // WAIVER-C5-SOFTRESET-D8DIAG
 				file);
-		std::fputs(line, file);
+		std::fputs(row.c_str(), file);
 		std::fputs("\r\n", file);
 		std::fclose(file);
 	}
@@ -495,6 +511,8 @@ namespace D8SceneJudgeAgreementNs
 		std::vector<uint16_t> view(static_cast<size_t>(W) * H), plane(static_cast<size_t>(pw) * ph);
 		VpLaneProducts::SourceStatsRecord prev, cur;
 		bool havePrev = false;
+		uint64_t softFrameSeq = 0;                    // WAIVER-C5-SOFTRESET-D8DIAG: the last frame's seq, fade and delivered cut
+		bool softFade = false, softDelivered = false;
 		for (int k = 0; k < end; ++k)
 		{
 			const auto t0 = std::chrono::steady_clock::now();
@@ -526,6 +544,43 @@ namespace D8SceneJudgeAgreementNs
 			const VpLaneProducts::SourceStatsRecord dumpPrev = prev;
 			// WAIVER-U7ACC-D8-DELIVERY: the confirmed verdict of seq - 1 arrives with this frame's record.
 			const VpUnit::CutFadeJudge::CutVerdict confirmedPrev = tracker.Push(seq, cur);
+			// WAIVER-C5-SOFTRESET-D8DIAG: the soft-reset rule on the confirmed verdict of seq - 1 (frame k - 1), with that frame's
+			// fade and delivered cut (softFade / softDelivered still hold frame seq - 1's values here). Output only.
+			if (confirmedPrev.known && confirmedPrev.seq + 1u == seq && confirmedPrev.seq >= 2)
+			{
+				const bool prevFade = softFrameSeq == confirmedPrev.seq && softFade;
+				const bool prevCut = confirmedPrev.cut || (softFrameSeq == confirmedPrev.seq && softDelivered);
+				const float s = confirmedPrev.strength;
+				if (!prevCut)
+				{
+					++facts.softNonCut;
+					facts.softNonCutStrengthSum += s;
+				}
+				if (confirmedPrev.confirmed && confirmedPrev.candidate && !prevCut && !confirmedPrev.flash && !prevFade)
+				{
+					++facts.softEligible;
+					facts.softEligible50 += s >= 0.5f ? 1 : 0;
+					facts.softEligible75 += s >= 0.75f ? 1 : 0;
+					facts.softEligible90 += s >= 0.9f ? 1 : 0;
+					facts.softEligibleBar += s >= VpUnit::CutFadeJudge::kSoftResetBar ? 1 : 0;
+				}
+				if (VpUnit::CutFadeJudge::SoftResetStrength(confirmedPrev.confirmed, confirmedPrev.candidate, prevCut, confirmedPrev.flash,
+						prevFade, s) > 0.0f)
+				{
+					++facts.softResets;
+					bool nearCut = false;   // within one frame of a manifest cut (truth index = frame - begin)
+					for (int d = -1; d <= 1; ++d)
+					{
+						const int i = (k - 1) + d - begin;
+						if (i >= 0 && i < static_cast<int>(truth.size()) && truth[static_cast<size_t>(i)] != 0) nearCut = true;
+					}
+					if (nearCut) ++facts.softAtTruth;
+					else ++facts.softOffTruth;
+				}
+			}
+			softFrameSeq = seq;
+			softFade = false;
+			softDelivered = false;
 			if (seq >= 2)
 			{
 				Assert::IsTrue(havePrev, L"D8: the pair's previous P4");
@@ -546,6 +601,8 @@ namespace D8SceneJudgeAgreementNs
 				facts.u7Cuts += delivered ? 1 : 0;
 				facts.u7Fades += fade ? 1 : 0;
 				facts.u7Flashes += (confirmedPrev.known && confirmedPrev.flash) ? 1 : 0;
+				softFade = fade;              // WAIVER-C5-SOFTRESET-D8DIAG: this frame's fade / delivered cut for the next frame's rule
+				softDelivered = delivered;
 			}
 			prev = cur;
 			havePrev = true;
@@ -668,6 +725,8 @@ namespace D8SceneJudgeAgreementNs
 		// WAIVER-U7FADE-PARTIAL: the GPU modules' partial resets (information) and fade restarts for want of a keep (gated: 0).
 		const unsigned long long dpGpuPartials = dpGpu.ScenePartials(), trGpuPartials = trGpu.ScenePartials();
 		const unsigned long long dpGpuFadeRestarts = dpGpu.SceneFadeRestarts(), trGpuFadeRestarts = trGpu.SceneFadeRestarts();
+		// WAIVER-C5-SOFTRESET-D8DIAG: the GPU modules' own soft resets (default on; information: the harness's groups are provisional).
+		const unsigned long long dpGpuSoft = dpGpu.SceneSoftResets(), trGpuSoft = trGpu.SceneSoftResets();
 		dpGpu.Release(g.gpu);
 		trGpu.Release(g.gpu);
 		for (pl_tex& t : inputs) pl_tex_destroy(g.gpu, &t);
@@ -699,7 +758,14 @@ namespace D8SceneJudgeAgreementNs
 			dp.fadeKeepEndMin, dp.fadeOutKeep, dp.PartialTruthAgreementPct(), tr.fadePartial, tr.fadeMissed, tr.fadeRestarts,
 			tr.partialOutsideFade, tr.fadeKeepEndMin, tr.fadeOutKeep, tr.PartialTruthAgreementPct(), tr.TileRestartShareMean(),
 			tr.tileRestartShareMax, dpGpuPartials, trGpuPartials, dpGpuFadeRestarts, trGpuFadeRestarts, kAgreementGatePct, kFadeOutKeepMax);
-		Logger::WriteMessage((std::string(partial) + "\n").c_str());
+		char softText[512];   // WAIVER-C5-SOFTRESET-D8DIAG: the soft-reset fields (information; no gate reads them)
+		snprintf(softText, sizeof(softText), " | soft (U7 rule on confirmed verdicts, PROVISIONAL bar %.2f, information): soft resets %d "
+			"(within 1 frame of a truth cut %d, off truth %d), non-cut frames %d, mean graded strength on non-cut frames %.4f, eligible %d "
+			"(>= 0.5: %d, >= 0.75: %d, >= 0.9: %d, >= bar: %d) | GPU soft resets DP %llu TR %llu",
+			static_cast<double>(VpUnit::CutFadeJudge::kSoftResetBar), facts.softResets, facts.softAtTruth, facts.softOffTruth,
+			facts.softNonCut, facts.SoftNonCutMeanStrength(), facts.softEligible, facts.softEligible50, facts.softEligible75,
+			facts.softEligible90, facts.softEligibleBar, dpGpuSoft, trGpuSoft);
+		Logger::WriteMessage((std::string(partial) + softText + "\n").c_str());
 		Assert::IsTrue(dp.PartialTruthAgreementPct() >= kAgreementGatePct, Wide(partial).c_str());   // WAIVER-U7FADE-PARTIAL-2
 		Assert::IsTrue(tr.PartialTruthAgreementPct() >= kAgreementGatePct, Wide(partial).c_str());   // WAIVER-U7FADE-PARTIAL-2
 		Assert::AreEqual(0, dp.fadeRestarts, Wide(partial).c_str());

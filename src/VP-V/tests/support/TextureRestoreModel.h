@@ -224,6 +224,9 @@ namespace TextureRestoreModel
 		// U7 v3 partial reset (the module's): the last frame was a fade with its keep (no restart) and the keep applied (amplitude).
 		bool LastWasFadePartial() const { return lastFadePartial; }
 		double LastHistoryKeep() const { return lastHistoryKeep; }
+		// WAIVER-C5-SOFTRESET-ON (cut_soft_reset, the module's): the last frame was a soft reset, and the count (SceneSoftResets()).
+		bool LastWasSoftPartial() const { return lastSoftPartial; }
+		unsigned long long SoftResets() const { return softResets; }
 		bool LastWasRepeat() const { return lastRepeat; }
 		int TileW() const { return tw; }
 		int TileH() const { return th; }
@@ -244,6 +247,7 @@ namespace TextureRestoreModel
 			lastCut = false;
 			lastRepeat = false;
 			lastFadePartial = false;
+			lastSoftPartial = false;
 			lastHistoryKeep = 1.0;
 			const double cap = EffectiveCap(p.cap);
 			if (!(cap > 1.0))
@@ -282,6 +286,8 @@ namespace TextureRestoreModel
 
 	private:
 		bool have = false, forget = false, lastCut = false, lastRepeat = false, lastFadePartial = false;
+		bool lastSoftPartial = false;              // WAIVER-C5-SOFTRESET-ON
+		unsigned long long softResets = 0;         // WAIVER-C5-SOFTRESET-ON: the module's SceneSoftResets()
 		double lastHistoryKeep = 1.0;
 		uint64_t sequence = 0;
 		int tw = 0, th = 0, tilePx = 16, width = 0, height = 0;
@@ -431,12 +437,15 @@ namespace TextureRestoreModel
 					{
 						// The shared judge's verdict (no record = restart, as the module). U7 v3: a fade with its keep is a partial
 						// reset (the references take one more decay step, keep^2), not a restart.
-						const VpDetailRestore::SceneRestartAnswer sa = VpDetailRestore::SceneRestartOf(p.sequence, p.sceneReader);
+						// WAIVER-C5-SOFTRESET-ON: with the module's soft reset switch (Params::softReset), through the same keep.
+						const VpDetailRestore::SceneRestartAnswer sa = VpDetailRestore::SceneRestartOf(p.sequence, p.sceneReader, p.softReset);
 						lastCut = sa.restart;
 						flag = lastCut;
 						lastFadePartial = sa.fadePartial;
+						lastSoftPartial = sa.softPartial;
+						softResets += sa.softPartial ? 1u : 0u;
 						lastHistoryKeep = sa.historyKeep;
-						if (sa.fadePartial)
+						if (sa.fadePartial || sa.softPartial)
 							keep2 = static_cast<double>(sa.historyKeep) * sa.historyKeep;
 					}
 					else

@@ -1334,6 +1334,7 @@ for (int q = 0; q < 4; q++) {
 
 	void Module::Forget()
 	{
+		softWatch.Forget();   // cut_soft_reset M3: a stage that starts over judges confirmation afresh
 		if (!impl) return;
 		impl->decided = false;
 		impl->behind = 0;
@@ -1412,11 +1413,13 @@ for (int q = 0; q < 4; q++) {
 			// The cut / fade verdict: the shared judge's, read from the scene group (U7 over P4; registered fix D8). A frame
 			// with no readable group restarts (no private fallback) and is counted. U7 v3: a fade is a partial reset (the history
 			// reduced by its keep, squared for the energies the ring holds); a fade group without a keep restarts, shown.
+			// cut_soft_reset (Params::softReset): a soft reset takes the SAME keep path (historyKeep = SoftResetKeep), counted apart.
 			int sceneRestart = 0;
 			float historyKeep2 = 1.0f;
 			if (nValid > 0)
 			{
-				const VpDetailRestore::SceneRestartAnswer scene = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader);
+				const VpDetailRestore::SceneRestartAnswer scene = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader,
+					params.softReset);
 				sceneRestart = scene.restart ? 1 : 0;
 				sceneUnavailable = !scene.fromRecord || scene.fadeWithoutKeep;
 				sceneWhy = scene.fadeWithoutKeep ? VpDetailRestore::SceneFadeWithoutKeepWhy() : nullptr;
@@ -1424,11 +1427,16 @@ for (int q = 0; q < 4; q++) {
 					++sceneMissing;
 				if (scene.fadeWithoutKeep)
 					++sceneFadeRestarts;
-				if (scene.fadePartial)
-				{
+				if (scene.fadePartial || scene.softPartial)
 					historyKeep2 = scene.historyKeep * scene.historyKeep;
+				if (scene.fadePartial)
 					++scenePartials;
+				if (scene.softPartial)
+				{
+					++sceneSoftResets;
+					sceneSoftStrengthSum += scene.strength;
 				}
+				softWatch.Note(scene);   // M3: provisional groups only = the switch is inert, shown on the status line
 				lastHistoryKeep = scene.historyKeep;
 			}
 			if (!MeasureAndReduce(dispatch, luma, params, c, m.stats[next], m.weight,

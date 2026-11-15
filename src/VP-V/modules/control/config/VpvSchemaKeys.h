@@ -155,6 +155,7 @@ namespace ProfileSchemaHooks
 			if (key == "detail_pulse_fast") return V(IsChoice(value, { "on", "off" }));
 			if (key == "texture_restore") return V(IsChoice(value, { "off", "statistical" }));
 			if (key == "texture_restore_cap") return V(IsNumberInRange(value, 1.0, 2.0));
+			if (key == "cut_soft_reset") return V(IsChoice(value, { "on", "off" }));   // C5 batch B: soft reset on high-confidence non-cuts
 			if (key == "source_class") return V(IsChoice(value, { "legacy", "measured" }));
 			// Content recognition (intent interpreter item 1, 2026-10-17): default off;
 			// a new class is taken after this many seconds, at a cut.

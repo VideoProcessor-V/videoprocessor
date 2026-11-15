@@ -12,6 +12,7 @@
     "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
     "src/VP-V/modules/repair/texture_restore/SceneRestart.h",
     "src/VP-V/modules/repair/texture_restore/tests/D8SceneJudgeAgreementTests.cpp",
+    "src/VP-V/modules/repair/texture_restore/tests/SoftResetTests.cpp",
     "src/VP-V/segments/EntranceSegment.cpp",
     "src/VP-V/segments/EntranceSegment.h",
     "docs/VP-detail-restore.md"
@@ -31,6 +32,7 @@
     },
     "tools": [],
     "config_keys": [
+      "cut_soft_reset",
       "detail_pulse_cap",
       "detail_pulse_fast",
       "detail_pulse_stabilise",

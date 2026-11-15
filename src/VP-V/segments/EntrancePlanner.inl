@@ -347,9 +347,11 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 				// composed picture) is stabilised on its luma in the source's codes.
 				p.lumaSystem = image.repr.sys;
 				p.codeLevels = image.repr.levels;
+				p.softReset = activeSettings.cutSoftReset;   // cut_soft_reset (C5 batch B; shown below when off or inert, M3)
 				char text[200];
 				if (detailPulseInactive.empty())
-					snprintf(text, sizeof(text), "Detail pulse stabilise: on (cap %.2f)", p.cap);
+					snprintf(text, sizeof(text), "Detail pulse stabilise: on (cap %.2f%s)", p.cap,
+						VpDetailRestore::SoftResetStatusText(p.softReset, detailPulse.SceneSoftResetInactive()));
 				else
 					snprintf(text, sizeof(text), "Detail pulse stabilise: inactive (%s)", detailPulseInactive.c_str());
 				pulseState = text;
@@ -367,9 +369,11 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 				p.fieldScale = fieldScale;
 				p.fieldScaleX = fieldScaleX;
 				p.sequence = sourceSequence;
+				p.softReset = activeSettings.cutSoftReset;   // cut_soft_reset (C5 batch B; shown below when off or inert, M3)
 				char text[200];
 				if (textureRestoreInactive.empty())
-					snprintf(text, sizeof(text), "Texture restore: statistical (cap %.2f)", p.cap);
+					snprintf(text, sizeof(text), "Texture restore: statistical (cap %.2f%s)", p.cap,
+						VpDetailRestore::SoftResetStatusText(p.softReset, textureRestore.SceneSoftResetInactive()));
 				else
 					snprintf(text, sizeof(text), "Texture restore: inactive (%s)", textureRestoreInactive.c_str());
 				restoreState = text;

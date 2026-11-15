@@ -12,9 +12,9 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Count | Value |
 |---|---|
 | Modules | 48 |
-| Documented rows | 394 |
-| VP-V keys in code (outside Bill's schema lists) | 389 |
-| of which documented | 389 |
+| Documented rows | 395 |
+| VP-V keys in code (outside Bill's schema lists) | 390 |
+| of which documented | 390 |
 | of which undocumented (appendix A) | 0 |
 | Documented keys with no code entry (appendix B) | 0 |
 
@@ -40,7 +40,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Repair | `repair.grain_split` | draft | [README](../../src/VP-V/modules/repair/grain_split/README.md) | 0 | 0 | 0/0 |
 | Repair | `repair.grain_split.shared.band_from_base` | draft | [README](../../src/VP-V/modules/repair/grain_split/shared/README.md) | 0 | 0 | 0/0 |
 | Repair | `repair.temporal_detail` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/README.md) | 5 | 5 | 5/5 |
-| Repair | `repair.texture_restore` | built | [README](../../src/VP-V/modules/repair/texture_restore/README.md) | 5 | 5 | 5/5 |
+| Repair | `repair.texture_restore` | built | [README](../../src/VP-V/modules/repair/texture_restore/README.md) | 6 | 6 | 6/6 |
 | Repair | `repair.temporal_detail.products` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/products/README.md) | 1 | 0 | 0/0 |
 | Repair | `repair.temporal_detail.shared` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/shared/README.md) | 0 | 0 | 0/0 |
 | Scaling | `scaling.rebase` | built | [README](../../src/VP-V/modules/scaling/rebase/README.md) | 2 | 4 | 2/4 |
@@ -225,6 +225,7 @@ Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
+| `cut_soft_reset` | `repair.texture_restore` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on |  | VP-V > Motion > Advanced > Scene changes: soft reset | n/a (VP-only): unchanged by the Original pathway (detail pulse and texture restore never run there) | Detail pulse and texture restore shrink their history on a near-cut the scene judge is very sure of (high bar, provisional until the D8 truth run); below the bar nothing happens; a cut still restarts, a fade still shrinks it. Off: status lines read "soft reset: off" | same on all (not tiered) |
 | `deband_grain` | `repair.deband` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | off | VP-V > Proposed retirement > Experiments that lost, and superseded switches | Original pathway sets `on` (ADR-0019) | Whether libplacebo's debander adds synthetic grain (off: none; VP's dither does that job). proposed for retirement (group B) | same on all (not tiered) |
 | `deband_vp` | `repair.deband` | profile ([vprenderer.Default] and matching profiles) | enum | off, auto, on | off | off | VP-V > Repair > Advanced > Set by the Repair tier | Original pathway sets `off` (ADR-0019) | VP's own debander, before any scaling: safe on HDR and leaves texture and grain alone; auto = only as strong as the source needs | Repair Classic=off; Repair Low=off; Repair Mid=on; Repair Upper=on |
 | `deband_vp_exclusive` | `repair.deband` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Repair > Main > Deband; also VP Renderer > Rendering > Fixes under test (upstream copy greyed while VP-V is on) | Original pathway sets `off` (ADR-0019) | While VP's debander runs with its grain guard, libplacebo's automatic deband (deband_strength auto) is off; an explicit strength (light / default) is kept; off = both run. status line: deband: libplacebo deband (VP debander failed: <error>) | same on all (not tiered) |

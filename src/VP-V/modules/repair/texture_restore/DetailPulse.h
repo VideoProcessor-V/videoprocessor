@@ -174,6 +174,9 @@ namespace DetailPulse
 		pl_rect2df picture{};
 		// The reader of the source frame's scene group (the shared cut / fade verdict, U7 via P4); null = the skeleton's store.
 		VpDetailRestore::SceneReaderFn sceneReader = nullptr;
+		// cut_soft_reset (default on): the soft reset on a high-confidence non-cut candidate (SceneRestart.h; the bar is
+		// CutFadeJudge::kSoftResetBar, provisional). Off = no soft reset; cuts restart and fades reduce exactly as before.
+		bool softReset = VpDetailRestore::kDefaultCutSoftReset;
 	};
 
 	// The active picture in plane px, inclusive (x0, y0, x1, y1): the pixels wholly inside the
@@ -264,12 +267,24 @@ namespace DetailPulse
 		unsigned long long ScenePartials() const { return scenePartials; }
 		unsigned long long SceneFadeRestarts() const { return sceneFadeRestarts; }
 		float LastHistoryKeep() const { return lastHistoryKeep; }
+		// cut_soft_reset: frames whose history was reduced by a soft reset (no restart; 0 with Params::softReset off), and the
+		// sum of their strengths (the mean graded strength = SceneSoftStrengthSum() / SceneSoftResets()).
+		unsigned long long SceneSoftResets() const { return sceneSoftResets; }
+		double SceneSoftStrengthSum() const { return sceneSoftStrengthSum; }
+		// cut_soft_reset, no silent fallbacks (M3): the scene groups read lately were all provisional, so the switch cannot act
+		// (VpDetailRestore::SoftResetWatch; the status line says "soft reset: on (inactive: provisional verdicts only)"), and the
+		// frames the rule would have fired on had their verdict been confirmed.
+		bool SceneSoftResetInactive() const { return softWatch.Inactive(); }
+		unsigned long long SceneSoftWaiting() const { return softWatch.waiting; }
 
 	private:
 		struct Impl;
 		Impl* impl = nullptr;
 		std::string error;
 		unsigned long long failures = 0, frames = 0, aheadUsed = 0, sceneMissing = 0, scenePartials = 0, sceneFadeRestarts = 0;
+		unsigned long long sceneSoftResets = 0;
+		double sceneSoftStrengthSum = 0.0;
+		VpDetailRestore::SoftResetWatch softWatch;
 		bool sceneUnavailable = false;
 		const char* sceneWhy = nullptr;
 		float lastHistoryKeep = 1.0f;
