@@ -117,6 +117,38 @@ class CheckHookGatingTest(unittest.TestCase):
         self.assertIn("UNVERIFIED VPV-GATED marker", out)
         self.assertIn("1 unguarded, 1 unverified markers", out)
 
+    def _gated_body(self, body):
+        _w(self.root, "src/VP-V/modules/motion/estimation/Lease.h",
+           "struct State\n{\n\tbool EndLease(Ctx& c)   // VPV-GATED\n\t{\n" + body + "\t}\n};\n")
+        _w(self.root, BILL, _bill("\t\tvectorEstimate.EndLease(ctx);   // VPV-HOOK\n"))
+        return _run(self.root)
+
+    def test_red_hg2_an_early_return_after_effects_is_unverified(self):
+        for name, body in (
+                ("calls first", "\t\tDoWork();\n\t\tResetAll();\n\t\tif (originalPathway) return false;\n\t\treturn true;\n"),
+                ("conditional effect first", "\t\tif (x) DoWork();\n\t\tif (originalPathway) return false;\n\t\treturn true;\n"),
+                ("block first", "\t\tif (x)\n\t\t{\n\t\t\tn = 1;\n\t\t}\n\t\tif (originalPathway) return false;\n\t\treturn true;\n"),
+                ("assignment first", "\t\tcount = 0;\n\t\tif (originalPathway) return false;\n\t\treturn true;\n"),
+                ("non-pathway call in a declaration", "\t\tconst bool originalPathway = DoWork(c.host);\n\t\tif (originalPathway) return false;\n\t\treturn true;\n"),
+                ("pathway query plus an effect", "\t\tconst bool originalPathway = OriginalPathwayOf(c.host); DoWork();\n\t\tif (originalPathway) return false;\n\t\treturn true;\n")):
+            with self.subTest(name):
+                rc, out = self._gated_body(body)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("UNVERIFIED VPV-GATED marker", out)
+                self.assertIn("1 unguarded, 1 unverified markers", out)
+
+    def test_hg2_guard_first_after_inert_declarations_is_verified(self):
+        for name, body in (
+                ("guard first", "\t\tif (originalPathway) return false;\n\t\tDoWork();\n\t\treturn true;\n"),
+                ("after declarations without calls", "\t\tint n = 0;\n\t\tbool ok;\n\t\tif (originalPathway) return false;\n\t\tDoWork();\n\t\treturn true;\n"),
+                ("braced return", "\t\tif (originalPathway)\n\t\t{\n\t\t\treturn false;\n\t\t}\n\t\tDoWork();\n\t\treturn true;\n"),
+                ("predicate from the pathway query", "\t\tconst bool originalPathway = OriginalPathwayOf(c.host);\n\t\tif (originalPathway) return false;\n\t\tDoWork();\n\t\treturn true;\n"),
+                ("predicate from the hub query", "\t\tconst bool originalPathway = Vpv::Hub::ExtensionHub::Instance().OriginalPathway(c.host);\n\t\tif (originalPathway) return false;\n\t\treturn true;\n")):
+            with self.subTest(name):
+                rc, out = self._gated_body(body)
+                self.assertEqual(rc, 0, out)
+                self.assertIn("VPV-GATED EndLease (src/VP-V/modules/motion/estimation/Lease.h:3) verified", out)
+
     def test_declarations_includes_and_context_fills_are_inert(self):
         body = ("\t\tRendererExtension::IngressContext ic; ic.host = this; ic.seq = static_cast<int64_t>(seq);   // VPV-HOOK\n"
                 "\t\tif (RendererExtension::DecideIngress(ic) && ic.drop) return;   // VPV-HOOK\n"
