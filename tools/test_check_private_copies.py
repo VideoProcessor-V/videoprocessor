@@ -214,6 +214,107 @@ class Synthetic(unittest.TestCase):
                   open(os.path.join(root, N1.BASELINE), "w"))
         self.assertEqual(N1.main(["--update-baseline", "--root", root]), 1)
 
+    def test_d3s_search_pass_outside_the_owner_file(self):
+        # gate-15a-D3s fixtures: a SAVE MV / LUMAQ / LUMAC pass in a shader or in a non-owner header raw string hits;
+        # the old comment wording and the owner file do not.
+        owner = M + "motion/estimation/fallback/OutputDomainSearchGlsl.h"
+        root = make_tree({
+            "shaders/Fixture.glsl": "//!HOOK OUTPUT\n//!SAVE MV\nvoid hook(){}\n",
+            M + "output/dither/Copy.h": 'const char* k = R"(\n//!SAVE LUMAQ\n//!DESC copy\n)";\n',
+            "shaders/Comment.glsl": "/* full search within the block */\n//!SAVE SIGMA_DELTA_STATE\n",
+            owner: 'const char* p = R"(\n//!SAVE LUMAQ\n)";\nconst char* q = R"(\n//!SAVE LUMAC\n//!SAVE MV\n)";\n',
+        })
+        hs = sorted(h["file"] for h in N1.scan(root) if h["site"] == "D3s")
+        self.assertEqual(hs, sorted(["shaders/Fixture.glsl", M + "output/dither/Copy.h"]))
+
+    def test_x8_owner_edge_excuses_only_its_row_and_product(self):
+        # gate-15a-X8-row14-P2 fixtures: the producer row's P2 edge holds only with the computed-flow publish in the named file,
+        # under the product's owner folder; it never excuses the row's other products or another row.
+        prod = M + "motion/estimation/MotionAheadProducer.cpp"
+        pub = "void R(){ slot->Publish(previousSequence, job.sequence, job.generation, flow); }"
+
+        def cat(row_id=14, folder="VP-V/modules/motion/estimation/MotionAheadProducer", owner="motion/estimation"):
+            return ('inline const std::vector<ProductRow>& ProductRows(){ static const std::vector<ProductRow> rows = {'
+                    ' { kP2VectorPair, "' + owner + '", kExpectedVectorUnit, "NVOF producer (MotionAheadProducer)" } }; }\n'
+                    'r.push_back(MakeRow(' + str(row_id) + ', "optical-flow producer", "' + folder + '", PathwayUnit::Input, 5, '
+                    '{ kP1HalfLuma, kP2VectorPair }, own, "product.nvof_producer"));')
+
+        def x8(files):
+            return sorted(h["product"] for h in N1.scan(make_tree(files)) if h["site"] == "X8")
+        self.assertEqual(x8({"src/VP-V/core/ProductCatalog.h": cat(), prod: pub}), ["kP1HalfLuma"])   # P1 still governed
+        self.assertEqual(x8({"src/VP-V/core/ProductCatalog.h": cat(),
+                             prod: "void R(){ slot->Publish(a, b, c, std::make_shared<Flow>()); }"}),
+                         ["kP1HalfLuma", "kP2VectorPair"])                                              # empty publish only
+        self.assertEqual(x8({"src/VP-V/core/ProductCatalog.h": cat(), prod: "// " + pub}),
+                         ["kP1HalfLuma", "kP2VectorPair"])                                              # writer in a comment
+        self.assertEqual(x8({"src/VP-V/core/ProductCatalog.h": cat(),
+                             M + "motion/estimation/MotionAheadProducerNew.cpp": pub}),
+                         ["kP1HalfLuma", "kP2VectorPair"])                                              # file renamed
+        self.assertEqual(x8({"src/VP-V/core/ProductCatalog.h": cat(row_id=13), prod: pub}),
+                         ["kP1HalfLuma", "kP2VectorPair"])                                              # another row id
+        self.assertEqual(x8({"src/VP-V/core/ProductCatalog.h": cat(owner="input/capture"), prod: pub}),
+                         ["kP1HalfLuma", "kP2VectorPair"])                                              # not under the owner folder
+
+    def test_x8_p2_read_through_set_external_flow(self):
+        # gate-15a-X8-row13-P2 fixtures: SetExternalFlow( is a P2 read; using only the MotionAhead::Flow type is not.
+        cat = ('r.push_back(MakeRow(13, "matcher / motion warp", "VP-V/modules/motion/estimation/matcher/DejudderWarp", '
+               'PathwayUnit::Motion, 20, { kP2VectorPair }, own, "product.motion_warp"));')
+        w = M + "motion/estimation/matcher/DejudderWarp.h"
+
+        def x8(text):
+            return [h for h in N1.scan(make_tree({"src/VP-V/core/ProductCatalog.h": cat, w: text})) if h["site"] == "X8"]
+        self.assertFalse(x8("void SetExternalFlow(std::shared_ptr<const MotionAhead::Flow> flow);"))
+        self.assertTrue(x8("std::shared_ptr<MotionAhead::Flow> own = std::make_shared<MotionAhead::Flow>();"))
+
+    @staticmethod
+    def _view_tree(row_id, prod, flag_kind, folder, files, note="n"):
+        cat = ('r.push_back(MakeRow(' + str(row_id) + ', "row", "VP-V/modules/' + folder + '", PathwayUnit::Repair, 30, '
+               '{ ' + prod + ' }, own, "product.x"));\n')
+        if flag_kind:
+            cat += ('inline const std::vector<ConsumerFlag>& ConsumerFlags(){ static const std::vector<ConsumerFlag> flags = {\n'
+                    '  { uint16_t(kCatalogConsumerIdBase + ' + str(row_id) + '), ' + prod + ', FlagKind::' + flag_kind
+                    + ', "D8", "' + note + '" },\n }; return flags; }\n')
+        tree = {"src/VP-V/core/ProductCatalog.h": cat}
+        tree.update({M + folder + "/" + k: v for k, v in files.items()})
+        return [h for h in N1.scan(make_tree(tree)) if h["site"] == "X8"]
+
+    def test_c7_p4_view_accessor_needs_a_view_flag(self):
+        # gate-15c-X8-rows0-1-P4 fixtures: the call-site form is accepted only with a ViewIsActual / ExternalView flag of that
+        # (row, product); NotRead, no flag or a flag of another row never excuse; the judge's own definition is not a call site.
+        call = {"T.cpp": "auto s = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader);"}
+        self.assertFalse(self._view_tree(1, "kP4SourceStats", "ViewIsActual", "repair/texture_restore", call))
+        self.assertFalse(self._view_tree(1, "kP4SourceStats", "ExternalView", "repair/texture_restore", call))
+        self.assertTrue(self._view_tree(1, "kP4SourceStats", "NotRead", "repair/texture_restore", call))
+        self.assertTrue(self._view_tree(1, "kP4SourceStats", None, "repair/texture_restore", call))
+        self.assertTrue(self._view_tree(1, "kP4SourceStats", "ViewIsActual", "repair/texture_restore",
+                                        {"SceneRestart.h": "inline SceneRestartAnswer SceneRestartOf(uint64_t sequence, F r);"
+                                                           " bool p = store->PeekScene(sequence, scene);"}))
+        self.assertTrue(self._view_tree(1, "kP4SourceStats", "ViewIsActual", "repair/texture_restore",
+                                        {"T.cpp": "// SceneRestartOf(params.sequence, r);"}))   # a comment is not a call
+
+    def test_c7_p13_view_accessor_only_in_the_note_file(self):
+        # gate-15c-X8-row11-P13 fixtures: the broad pl_frame form is accepted only with the ViewIsActual flag AND in the file the
+        # flag note names; the same signature in another member file, a NotRead flag or no flag leave the X8 hit.
+        sig = "bool CflModule::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& p, pl_frame& r);"
+        note = "render-time source pl_frame (scaling/chroma_upscale/ChromaCflGpu.cpp CflModule::Apply)"
+        f = "scaling/chroma_upscale"
+        self.assertFalse(self._view_tree(11, "kP13SourceRing", "ViewIsActual", f, {"ChromaCflGpu.cpp": sig}, note))
+        self.assertTrue(self._view_tree(11, "kP13SourceRing", "ViewIsActual", f, {"basic/BasicChromaGpu.cpp": sig}, note))
+        self.assertTrue(self._view_tree(11, "kP13SourceRing", "NotRead", f, {"ChromaCflGpu.cpp": sig}, note))
+        self.assertTrue(self._view_tree(11, "kP13SourceRing", None, f, {"ChromaCflGpu.cpp": sig}, note))
+        self.assertTrue(self._view_tree(11, "kP13SourceRing", "ViewIsActual", f, {"ChromaCflGpu.cpp": sig}, "no file named"))
+
+    def test_c7_p3_params_field_only_with_the_view_flag_in_the_note_file(self):
+        # gate-15c-X8-row2-P3-r2 fixtures (a)-(d).
+        use = {"VpDebander.cpp": "const bool haveField = params.field != nullptr;"}
+        note = "live matcher field read at render (repair/deband/VpDebander.cpp Params.field)"
+        f = "repair/deband"
+        self.assertTrue(self._view_tree(2, "kP3AnalysisField", None, f, use, note))                          # (a) no flag
+        self.assertTrue(self._view_tree(2, "kP3AnalysisField", "NotRead", f, use, note))                     # (b) NotRead
+        self.assertTrue(self._view_tree(2, "kP3AnalysisField", "ViewIsActual", f, use,
+                                        "live matcher field (repair/deband/Other.cpp)"))                     # (c) other file
+        self.assertFalse(self._view_tree(2, "kP3AnalysisField", "ViewIsActual", f, use, note))               # (d)
+
     def test_bad_root_is_exit_2(self):
         self.assertEqual(N1.main(["--root", tempfile.mkdtemp()]), 2)
 

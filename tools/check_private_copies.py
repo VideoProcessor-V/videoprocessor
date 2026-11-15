@@ -42,17 +42,22 @@ SITES = [
      "wide": r"\bm_prevGin\b",
      "only": [_M + "repair/temporal_detail/TemporalDetailModel.h"]},
     {"id": "D2", "product": "kP2VectorPair", "refs": "122 s9 D2",
-     "what": "per-consumer CellTrust (optical-flow trust recomputed outside the engine)",
-     "re": r"\bOpticalFlowTrust::CellTrust\b|\bCellTrust\s*\(",
+     "what": "OpticalFlowTrust::CellTrust computed outside the engine (memo reads via FlowView::CellTrust are the shared product); "
+             "overlaps rule c C-trust (folder scope), both kept",
+     # gate-15a-D2: the qualified call plus the alias forms (an unqualified CellTrust( after `using namespace` / an alias).
+     "re": r"\bOpticalFlowTrust::CellTrust\s*\(|\busing\s+namespace\s+OpticalFlowTrust\b|\bnamespace\s+\w+\s*=\s*OpticalFlowTrust\b",
      "owner": [_M + "motion/estimation/VectorEngine.cpp", _M + "motion/estimation/OpticalFlowTrust.h",
                _M + "motion/estimation/VectorEngineInterface.h"]},
     {"id": "D3", "product": "kP2VectorPair", "refs": "122 s9 D3",
-     "what": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
-     "re": r"\bditherVectorsOwn\b|\bl1Available\b"},
+     "what": "a second caller of the output-domain search (private copy of the sigma-delta's own vector search)",
+     # gate-15a-D3-ditherVectorsOwn / -l1Available: all four search functions; owner scope by FILE (not motion/estimation/).
+     "re": r"\bOutputDomainSearch::(Glsl|LumaQuarterPassGlsl|LumaCoarsePassGlsl|BlockSearchPassGlsl)\s*\(",
+     "owner": [_M + "motion/estimation/fallback/OutputDomainSearchGlsl.h", _M + "output/dither/VpShaderInclude.h"]},
     {"id": "D3s", "product": "kP2VectorPair", "refs": "122 s9 D3",
-     "what": "sigma-delta shader own block search pass", "raw": True,
-     "re": r"full search within",
-     "only": ["shaders/Temporal sigma-delta.glsl"]},
+     "what": "an own output-domain search pass (SAVE MV / LUMAQ / LUMAC) outside the motion module", "raw": True,
+     # gate-15a-D3s: every scanned file (shaders AND src/VP-V headers: the passes live as C++ raw strings), owner by file.
+     "re": r"^\s*//!SAVE\s+(MV|LUMAQ|LUMAC)\b",
+     "owner": [_M + "motion/estimation/fallback/OutputDomainSearchGlsl.h"]},
     {"id": "D4", "product": "kP8CameraLabels", "refs": "122 s9 D4",
      "what": "camera labels read a field other than the P7 pool entry's fit field (CameraLink::FitEntryOf)",
      # gate-15a-D4 RETARGET (unseeded): any second field read in the label fill / producer files. NO wide: FlowOf / SeedFieldOf
@@ -69,7 +74,9 @@ SITES = [
      # is D5~moved. Not `>>\s*6\b` (UTF-8 in nets/NetJson.h, the EngineLumaGpu.hlsl owner unit).
      "wide": r"<<\s*(\w+(\.|->))?msbShift\b",
      "owner": ["src/VP-V/core/LaneInterfaces.h"],
-     "only": [_M + "input/source_analysis/VpFrameAnalysis.cpp", _M + "input/source_analysis/lane/LaneGpuProducts.cpp"]},
+     # gate-15c-D5 (a): + the producer's planar16 private CPU luma decode (MotionAheadProducer.cpp:64, 102b MAP-RGB-LUMA-PROXY).
+     "only": [_M + "input/source_analysis/VpFrameAnalysis.cpp", _M + "input/source_analysis/lane/LaneGpuProducts.cpp",
+              _M + "motion/estimation/MotionAheadProducer.cpp"]},
     {"id": "D6", "product": "kP13SourceRing", "refs": "122 s9 D6 / doc 91 D C9",
      "what": "C9 producer own RGB / full-range luma decode (named exception until EPE is compared)",
      "re": r"\bSamplerCodesAreFullRange\b|\bfullRangeYuv\b|\bCodesFullRange\b",
@@ -95,9 +102,12 @@ SITES = [
      "wide": r"\bSPLIT_TENSOR_BODY\b",
      "only": [_M + "repair/deband/VpDebander.cpp"]},
     {"id": "X5", "product": "kP11RegionBlockStats", "refs": "126 s4 X5",
-     "what": "adaptive downscale own Sobel / Laplacian maps",
-     "re": r"\bsobel\w*|\blaplac\w*|\bgrain(Lo|Hi)\b|\bedge(Lo|Hi)\b", "ic": True,
-     "only": [_M + "scaling/output/AdaptiveDownscale.h"]},
+     "what": "adaptive downscale own Sobel / Laplacian maps (MEASURE_BODY region statistics)",
+     # gate-15c-X5: the real copy is the .cpp MEASURE_BODY (body signatures, not the symbol alone); the .h settings lines were FP.
+     # wide = the body signatures only (DetailPulse.cpp has its own MEASURE_BODY / FAST_MEASURE_BODY symbol).
+     "re": r"\bMEASURE_BODY\b|\blength\(vec2\(gx,\s*gy\)\)|abs\(4\.0 \* e - b - d - f - h\)",
+     "wide": r"\blength\(vec2\(gx,\s*gy\)\)|abs\(4\.0 \* e - b - d - f - h\)",
+     "only": [_M + "scaling/output/AdaptiveDownscale.cpp"]},
     {"id": "X6", "product": "kP11RegionBlockStats", "refs": "126 s4 X6",
      "what": "source-resolution detector own flat-block test",
      "re": r"\bhi\s*-\s*lo\s*<=\s*flat\b|\bflat\s*=",
@@ -156,10 +166,62 @@ ACCESSOR = {
     "kP13SourceRing": r"SourceRing|\bsourceRing\b|SourceFrameView",
     "kP3AnalysisField": r"AnalysisField|\banalysisField\b",
     "kP4SourceStats": r"SourceStats|\bsourceStats\b",
-    "kP2VectorPair": r"VectorPair|\bP2\b|MotionIntent",
+    # gate-15a-X8-row13-P2: + the engine-view reads of the producer's pair. NOT the MotionAhead::Flow type (a private producer
+    # constructing its own Flow would satisfy the accessor).
+    "kP2VectorPair": r"VectorPair|\bP2\b|MotionIntent|\bSetExternalFlow\s*\(|\bFlowOf\s*\(|\bSeedFieldOf\s*\(|\bFlowView\b",
     "kP1HalfLuma": r"HalfLuma",
 }
 _ENUM_RE = re.compile(r"\b(k[A-Z]\w+)\b")
+
+# Rule b owner edges (gate-15a-X8-row14-P2): a row that is the PRODUCER of a product it declares (the live-fill ownership edge)
+# reads nothing through an accessor; it writes. An edge excuses ONLY that exact (row id, product) pair, never the row's other
+# products, and holds only if the file is a member of the row folder, lies under the product's ProductRows owner folder and the
+# writer regex matches its comment-stripped code (the computed result is published); otherwise the X8 hit is emitted.
+OWNER_EDGES = {
+    (14, "kP2VectorPair"): {"file": _M + "motion/estimation/MotionAheadProducer.cpp",
+                            "writer": r"\bslot->Publish\s*\([^;]*,\s*flow\s*\)\s*;"},
+}
+
+
+# Rule b view reads (C7; gate-15c-X8-rows0-1-P4 and the rows 2 / 11 gates): a call-site form that is too broad for ACCESSOR is
+# accepted ONLY for a (row, product) whose ConsumerFlags entry in ProductCatalog.h is ViewIsActual / ExternalView (NotRead /
+# NotYetConsumed never excuse), matched in that row's folder; with note_file, only in a member file whose path ends with a file
+# path the flag note names.
+VIEW_ACCESSOR = {
+    "kP4SourceStats": {"re": r"\bSceneRestartOf\s*\(\s*params\.sequence\b"},
+    # gate-15c-X8-row11-P13: narrowed to the Apply signature taking the source pl_frame, and only in the file the flag note names.
+    "kP13SourceRing": {"re": r"\bApply\s*\([^)]*const pl_frame&\s*source\b", "note_file": True},
+    # gate-15c-X8-row2-P3-r2: params.field has 7 hits tree-wide, so only in the file the flag note names (VpDebander.cpp).
+    "kP3AnalysisField": {"re": r"\bparams\.field\b", "note_file": True},
+}
+VIEW_KINDS = ("ViewIsActual", "ExternalView")
+_FLAG_RE = re.compile(r'\{\s*uint16_t\(\s*kCatalogConsumerIdBase\s*\+\s*(\d+)\s*\)\s*,\s*(k\w+)\s*,\s*FlagKind::(\w+)\s*,'
+                      r'\s*"([^"]*)"\s*,\s*"([^"]*)"')
+_NOTE_FILE = re.compile(r"[\w./-]+\.(?:h|hpp|cpp|inl)\b")
+
+
+def consumer_flags(root):
+    """{(row id, product): (kind, note)} from the kCatalogConsumerIdBase + N entries of ConsumerFlags() in ProductCatalog.h."""
+    out = {}
+    p = os.path.join(root, "src/VP-V/core/ProductCatalog.h")
+    if os.path.isfile(p):
+        for m in _FLAG_RE.finditer(strip_comments(read(p))):
+            out[(int(m.group(1)), m.group(2))] = (m.group(3), m.group(5))
+    return out
+
+
+def product_owner_folders(root):
+    """{product: 'src/VP-V/modules/<folder>/'} from ProductRows() of ProductCatalog.h (rows marked 'reserved' are skipped)."""
+    out = {}
+    p = os.path.join(root, "src/VP-V/core/ProductCatalog.h")
+    if os.path.isfile(p):
+        for m in _PRODUCT_ROW.finditer(strip_comments(read(p))):
+            if m.group(3).strip().lower().startswith("reserved"):
+                continue
+            folder = m.group(2).split()[0].strip("/")
+            if folder and not folder.startswith(".."):
+                out.setdefault(m.group(1), _M + folder + "/")
+    return out
 
 
 def strip_comments(text):
@@ -274,6 +336,27 @@ def scan(root):
             ln = next(i for i, l in enumerate(code(rel).split(chr(10)), 1) if REGISTER_SYM.search(l))
             hits.append({"rule": "d", "site": "REG", "file": rel, "line": ln,
                          "text": "live-fill registration outside the owning folders", "product": "-"})
+    owners = product_owner_folders(root)
+
+    def owner_edge_holds(rid, pr, members):
+        e = OWNER_EDGES.get((rid, pr))
+        if not e:
+            return False
+        own = owners.get(pr)
+        return bool(e["file"] in members and own and e["file"].startswith(own) and re.search(e["writer"], code(e["file"])))
+
+    flags = consumer_flags(root)
+
+    def view_read_holds(rid, pr, members):
+        va, fl = VIEW_ACCESSOR.get(pr), flags.get((rid, pr))
+        if not va or not fl or fl[0] not in VIEW_KINDS:
+            return False
+        cand = members
+        if va.get("note_file"):
+            named = _NOTE_FILE.findall(fl[1])
+            cand = [r for r in members if any(r.endswith("/" + n) for n in named)]
+        return any(re.search(va["re"], code(r)) for r in cand)
+
     for rid, name, folder, prods in consumer_rows(root):
         fdir = "src/" + folder
         members = [r for r in files if r.startswith(fdir + "/")] or [r for r in files if r.startswith(fdir)]
@@ -284,7 +367,8 @@ def scan(root):
         blob = "\n".join(code(r) for r in members)
         for pr in prods:
             acc = ACCESSOR.get(pr)
-            if acc and not re.search(acc, blob):
+            if acc and not re.search(acc, blob) and not owner_edge_holds(rid, pr, members) \
+                    and not view_read_holds(rid, pr, members):
                 hits.append({"rule": "b", "site": "X8", "file": fdir, "line": 0, "product": pr,
                              "text": "row %d '%s' declares %s but no file reads it" % (rid, name, pr)})
     return hits

@@ -311,8 +311,10 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         r.push_back(MakeRow(1, "texture restore", "VP-V/modules/repair/texture_restore", PathwayUnit::Repair, 30,
                             { kP10GrainSplit, kP11RegionBlockStats, kP4SourceStats }, own, "product.texture_restore", false,
                             { kSourceIdentity }));
+        // No P12 read today (the debander computes no light level); it is re-declared when the WP4b/5b luminance-adaptive threshold
+        // reads P12 through the accessor (102b DEBAND-P12-WP4B, doc 115 item 24).
         r.push_back(MakeRow(2, "debander (with hold)", "VP-V/modules/repair/deband", PathwayUnit::Repair, 40,
-                            { kP10GrainSplit, kP11RegionBlockStats, kP12LightLevel, kP3AnalysisField }, own,
+                            { kP10GrainSplit, kP11RegionBlockStats, kP3AnalysisField }, own,
                             "product.debander", true, { kSourceIdentity }));
         // Contrast recovery gates itself off on a clean high-bitrate source (get out of the way): it reads only the held record.
         r.push_back(MakeRow(18, "contrast recovery need", "VP-V/modules/repair", PathwayUnit::Repair, 55,
@@ -598,7 +600,8 @@ inline const std::vector<ConsumerFlag>& ConsumerFlags()
         { uint16_t(kCatalogConsumerIdBase + 0), kP4SourceStats, FlagKind::NotRead, "D10", "private cut / fade logic" },
         { uint16_t(kCatalogConsumerIdBase + 1), kP10GrainSplit, FlagKind::NotRead, "C10", "private bands (TextureRestore.h)" },
         { uint16_t(kCatalogConsumerIdBase + 1), kP11RegionBlockStats, FlagKind::NotRead, "C10", "private 16-px tiles" },
-        { uint16_t(kCatalogConsumerIdBase + 1), kP4SourceStats, FlagKind::NotRead, "D10", "private cut / fade logic" },
+        { uint16_t(kCatalogConsumerIdBase + 1), kP4SourceStats, FlagKind::ViewIsActual, "D8",
+          "P4 via the scene group (repair/texture_restore/SceneRestart.h SceneRestartOf; U7 over two P4 records, SkeletonModule.cpp ClassifyEvents)" },
         // AUDIT-R2 F1 (B3-Z Z2): the optical-flow producer, the matcher and source identification print their declared reads as actual
         // otherwise. The producer and the matcher keep private half-luma copies (the P2 / P2m -> P1 product flags above); the matcher's M3
         // histogram is the shared unit U6 computed privately in its trust pass, not the P4 product; identification's chain reads the
@@ -610,6 +613,12 @@ inline const std::vector<ConsumerFlag>& ConsumerFlags()
         { uint16_t(kCatalogConsumerIdBase + 8), kP5MonitorTiles, FlagKind::ViewIsActual, "C9b",
           "pixel evidence = the SourceFrameTap view (modules/input/source_analysis/identity/chain/ChainEstimator.cpp UpdateTap)" },
         { uint16_t(kCatalogConsumerIdBase + 8), kP4SourceStats, FlagKind::NotRead, "D6-D8", "no P4 read in the identity tree" },
+        // Chroma from luma reads the source frame's planes as the render-time pl_frame of the same frame (a view of P13's data).
+        { uint16_t(kCatalogConsumerIdBase + 11), kP13SourceRing, FlagKind::ViewIsActual, "C9b",
+          "render-time source pl_frame (scaling/chroma_upscale/ChromaCflGpu.cpp CflModule::Apply)" },
+        // The debander declares P3 and reads the live matcher field at render through its Params (a view of P3's data).
+        { uint16_t(kCatalogConsumerIdBase + 2), kP3AnalysisField, FlagKind::ViewIsActual, "C9b",
+          "live matcher field read at render (repair/deband/VpDebander.cpp Params.field / grainError, filled by segments/EntrancePlanner.inl LiveFieldInto)" },
         // B3-Z Z-DECL (lead 2026-11-11, no declaration change): the render-time readers of the matcher field. The synthesis consumers and the
         // detail pulse / texture restore / adaptive downscale rows read the LIVE matcher field (dejudder->Field()) at render and do not
         // declare P3; the lane P3 declarations land with the matcher-ahead ring (B3-Z Z1-Z3) and lane-time refinement (C9b).

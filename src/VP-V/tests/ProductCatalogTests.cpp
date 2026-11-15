@@ -753,14 +753,16 @@ namespace ProductCatalogTestsNs
 					Assert::Fail(L"NotYetConsumed / Reserved are product flags");
 				}
 			}
-			// Detail pulse (id 0) and texture restore (id 1): all three declared reads (P10, P11, P4) are flagged, the held identity read is not.
+			// Detail pulse (id 0) and texture restore (id 1): P10 and P11 are flagged not read for both; DP's P4 is not read, TR's P4 is a
+			// view through the scene group (WAIVER-15C-ROWS, gate-15c-X8-rows0-1-P4: row 1 GRANT, row 0 REFUSED); the held identity read is not flagged.
 			size_t dpTr = 0;
 			for (const ConsumerFlag& f : ConsumerFlags())
 				if ((f.consumerId == kCatalogConsumerIdBase + 0 || f.consumerId == kCatalogConsumerIdBase + 1) && f.kind == FlagKind::NotRead)
 					++dpTr;
-			Assert::AreEqual(size_t(6), dpTr, L"DP and TR each: P10, P11, P4 not read today");
+			Assert::AreEqual(size_t(5), dpTr, L"DP: P10, P11, P4 not read today; TR: P10, P11 not read today");
 			// WAIVER-B3Z-02 (coordinator approved 2026-11-12): NotRead = DP / TR 6 + producer P1 + matcher P1, P4 + identification P4 = 10.
-			Assert::AreEqual(size_t(10), cNotRead, L"DP / TR's six + the F1 rows (782 P1, 781 P1 / P4, 776 P4)");
+			// WAIVER-15C-ROWS (gate-15c-X8-rows0-1-P4): TR P4 NotRead -> ViewIsActual, so DP / TR 5 + the four F1 rows = 9.
+			Assert::AreEqual(size_t(9), cNotRead, L"DP / TR's five + the F1 rows (782 P1, 781 P1 / P4, 776 P4)");
 			const uint16_t idProducer = uint16_t(kCatalogConsumerIdBase + 14), idMatcher = uint16_t(kCatalogConsumerIdBase + 13),
 				idIdentity = uint16_t(kCatalogConsumerIdBase + 8);
 			for (const ProductId p : { kP1HalfLuma })
@@ -771,17 +773,37 @@ namespace ProductCatalogTestsNs
 			Assert::AreEqual(std::string("D6-D8"), std::string(ConsumerFlagOf(idIdentity, kP4SourceStats)->item), L"776 P4: register item D6-D8");
 			Assert::AreEqual(std::string("D8"), std::string(ConsumerFlagOf(idMatcher, kP4SourceStats)->item), L"781 P4: register item D8");
 			Assert::IsTrue(ConsumerFlagOf(idIdentity, kP5MonitorTiles) && ConsumerFlagOf(idIdentity, kP5MonitorTiles)->kind == FlagKind::ViewIsActual);
-			for (const ConsumerFlag& f : ConsumerFlags())
-				if (f.input == kP4SourceStats && (f.consumerId == kCatalogConsumerIdBase + 0 || f.consumerId == kCatalogConsumerIdBase + 1))
-					Assert::AreEqual(std::string("D10"), std::string(f.item), L"DP / TR P4: the D10 reader switch (C7 landed without it)");
+			// WAIVER-15C-ROWS (gate-15c-X8-rows0-1-P4): DP P4 stays the D10 reader switch (NotRead); TR P4 is the scene-group view (D8).
+			const uint16_t idDp = uint16_t(kCatalogConsumerIdBase + 0), idTr = uint16_t(kCatalogConsumerIdBase + 1),
+				idCfl = uint16_t(kCatalogConsumerIdBase + 11);
+			Assert::IsTrue(ConsumerFlagOf(idDp, kP4SourceStats) && ConsumerFlagOf(idDp, kP4SourceStats)->kind == FlagKind::NotRead, L"DP P4 not read");
+			Assert::AreEqual(std::string("D10"), std::string(ConsumerFlagOf(idDp, kP4SourceStats)->item), L"DP P4: the D10 reader switch (C7 landed without it)");
+			Assert::IsTrue(ConsumerFlagOf(idTr, kP4SourceStats) && ConsumerFlagOf(idTr, kP4SourceStats)->kind == FlagKind::ViewIsActual, L"TR P4: view");
+			Assert::AreEqual(std::string("D8"), std::string(ConsumerFlagOf(idTr, kP4SourceStats)->item), L"TR P4: register item D8");
+			Assert::IsTrue(std::string(ConsumerFlagOf(idTr, kP4SourceStats)->note).find("SceneRestart.h SceneRestartOf") != std::string::npos,
+				L"TR P4: the view is the scene group (SceneRestartOf)");
+			// WAIVER-15C-ROWS (gate-15c-X8-row11-P13): chroma from luma reads P13's data as the render-time source pl_frame (view, C9b).
+			Assert::IsTrue(ConsumerFlagOf(idCfl, kP13SourceRing) && ConsumerFlagOf(idCfl, kP13SourceRing)->kind == FlagKind::ViewIsActual, L"CfL P13: view");
+			Assert::AreEqual(std::string("C9b"), std::string(ConsumerFlagOf(idCfl, kP13SourceRing)->item), L"CfL P13: register item C9b");
+			Assert::IsTrue(std::string(ConsumerFlagOf(idCfl, kP13SourceRing)->note).find("ChromaCflGpu.cpp CflModule::Apply") != std::string::npos,
+				L"CfL P13: the note names the file the N1 view rule checks");
+			// WAIVER-15C-ROWS (gate-15c-X8-row2-P3-r2): the debander's declared P3 read is the live matcher field through its Params (view, C9b).
+			const uint16_t idDeband = uint16_t(kCatalogConsumerIdBase + 2);
+			Assert::IsTrue(ConsumerFlagOf(idDeband, kP3AnalysisField) && ConsumerFlagOf(idDeband, kP3AnalysisField)->kind == FlagKind::ViewIsActual, L"deband P3: view");
+			Assert::AreEqual(std::string("C9b"), std::string(ConsumerFlagOf(idDeband, kP3AnalysisField)->item), L"deband P3: register item C9b");
+			Assert::IsTrue(std::string(ConsumerFlagOf(idDeband, kP3AnalysisField)->note).find("repair/deband/VpDebander.cpp") != std::string::npos,
+				L"deband P3: the note names the file the N1 view rule checks");
 			// The exact P3 set: 4 synthesis consumers + DP, TR, adaptive downscale read the live matcher field at render (external view);
 			// the camera fit reads P3 through SeedFieldOf (view); identification reads P5 through the tap (view). 10 + 7 + 2 = 19.
+			// WAIVER-15C-ROWS: + TR P4 (view, scene group) + CfL P13 (view, source pl_frame): NotRead 9 + external 7 + views 4 = 20.
+			// WAIVER-15C-ROWS (row 2 P3 r2): + deband P3 (view, live matcher field): NotRead 9 + external 7 + views 5 = 21.
 			Assert::AreEqual(size_t(7), cExt, L"synthesis x4 + DP + TR + adaptive downscale: P3 read at render");
-			Assert::AreEqual(size_t(2), cViews, L"camera fit: P3 via SeedFieldOf; identification: P5 via the tap");   // WAIVER-B3Z-02 (coordinator approved 2026-11-12)
-			Assert::AreEqual(size_t(19), ConsumerFlags().size());   // WAIVER-B3Z-02 (coordinator approved 2026-11-12)
+			Assert::AreEqual(size_t(5), cViews, L"camera fit: P3 via SeedFieldOf; identification: P5 via the tap; TR: P4 via the scene group; CfL: P13 via the source pl_frame; deband: P3 via Params.field");   // WAIVER-B3Z-02 (coordinator approved 2026-11-12); WAIVER-15C-ROWS
+			Assert::AreEqual(size_t(21), ConsumerFlags().size());   // WAIVER-B3Z-02 (coordinator approved 2026-11-12); WAIVER-15C-ROWS
 			for (const ConsumerFlag& f : ConsumerFlags())
-				if (f.kind != FlagKind::NotRead && !(f.consumerId == idIdentity && f.input == kP5MonitorTiles))
-					Assert::IsTrue(f.input == kP3AnalysisField, L"the view / external-view consumer flags are the P3 render-time reads (and 776 P5)");
+				if (f.kind != FlagKind::NotRead && !(f.consumerId == idIdentity && f.input == kP5MonitorTiles)
+					&& !(f.consumerId == idTr && f.input == kP4SourceStats) && !(f.consumerId == idCfl && f.input == kP13SourceRing))
+					Assert::IsTrue(f.input == kP3AnalysisField, L"the view / external-view consumer flags are the P3 render-time reads (and 776 P5, TR P4, CfL P13)");
 
 			// 4b. AUDIT-R2 F1 rule: a read of a product without a producer is never actual, and an unwired row reads nothing.
 			const Registry regF1 = SkeletonProducts();

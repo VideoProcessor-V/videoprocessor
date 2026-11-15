@@ -10,112 +10,13 @@
    "max_hits": 7
   },
   {
-   "key": "a|D2|src/VP-V/modules/motion/estimation/VectorEngine.h",
+   "key": "a|D5|src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
    "rule": "a",
-   "site": "D2",
-   "refs": "122 s9 D2",
-   "reason": "per-consumer CellTrust (optical-flow trust recomputed outside the engine)",
+   "site": "D5",
+   "refs": "122 s9 D5 / gate-15c-D5 (a)",
+   "reason": "optical-flow producer planar16 private CPU luma decode (words[x] >> 6, HalfLuma8 input); 102b MAP-RGB-LUMA-PROXY / CB slice B0",
    "seed": true,
    "max_hits": 1
-  },
-  {
-   "key": "a|D2|src/VP-V/modules/motion/estimation/global_model/link/AheadFlow.h",
-   "rule": "a",
-   "site": "D2",
-   "refs": "122 s9 D2",
-   "reason": "per-consumer CellTrust (optical-flow trust recomputed outside the engine)",
-   "seed": true,
-   "max_hits": 2
-  },
-  {
-   "key": "a|D2|src/VP-V/modules/repair/temporal_detail/SharedMotionSource.h",
-   "rule": "a",
-   "site": "D2",
-   "refs": "122 s9 D2",
-   "reason": "per-consumer CellTrust (optical-flow trust recomputed outside the engine)",
-   "seed": true,
-   "max_hits": 1
-  },
-  {
-   "key": "a|D3s|shaders/Temporal sigma-delta.glsl",
-   "rule": "a",
-   "site": "D3s",
-   "refs": "122 s9 D3",
-   "reason": "sigma-delta shader own block search pass",
-   "seed": true,
-   "max_hits": 2
-  },
-  {
-   "key": "a|D3|src/VP-V/modules/control/config/VpvRendererFields.h",
-   "rule": "a",
-   "site": "D3",
-   "refs": "122 s9 D3",
-   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
-   "seed": true,
-   "max_hits": 1
-  },
-  {
-   "key": "a|D3|src/VP-V/modules/control/config/VpvRendererSettings.cpp",
-   "rule": "a",
-   "site": "D3",
-   "refs": "122 s9 D3",
-   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
-   "seed": true,
-   "max_hits": 6
-  },
-  {
-   "key": "a|D3|src/VP-V/modules/control/config/VpvSettingsDump.h",
-   "rule": "a",
-   "site": "D3",
-   "refs": "122 s9 D3",
-   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
-   "seed": true,
-   "max_hits": 1
-  },
-  {
-   "key": "a|D3|src/VP-V/modules/motion/consumers/DejudderPolicyRunner.inl",
-   "rule": "a",
-   "site": "D3",
-   "refs": "122 s9 D3",
-   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
-   "seed": true,
-   "max_hits": 2
-  },
-  {
-   "key": "a|D3|src/VP-V/modules/motion/estimation/DitherVectorSourceHost.inl",
-   "rule": "a",
-   "site": "D3",
-   "refs": "122 s9 D3",
-   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
-   "seed": true,
-   "max_hits": 1
-  },
-  {
-   "key": "a|D3|src/VP-V/modules/motion/estimation/VectorEngine.cpp",
-   "rule": "a",
-   "site": "D3",
-   "refs": "122 s9 D3",
-   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
-   "seed": true,
-   "max_hits": 1
-  },
-  {
-   "key": "a|D3|src/VP-V/modules/motion/estimation/VectorEngine.h",
-   "rule": "a",
-   "site": "D3",
-   "refs": "122 s9 D3",
-   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
-   "seed": true,
-   "max_hits": 1
-  },
-  {
-   "key": "a|D3|src/VP-V/modules/output/presentation/RenderAheadPolicy.h",
-   "rule": "a",
-   "site": "D3",
-   "refs": "122 s9 D3",
-   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
-   "seed": true,
-   "max_hits": 15
   },
   {
    "key": "a|X1|src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
@@ -154,11 +55,11 @@
    "max_hits": 2
   },
   {
-   "key": "a|X5|src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
+   "key": "a|X5|src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
    "rule": "a",
    "site": "X5",
    "refs": "126 s4 X5",
-   "reason": "adaptive downscale own Sobel / Laplacian maps",
+   "reason": "MEASURE_BODY Sobel + Laplacian region stats: slice 18 (P31 gradient, P10/P11 grain)",
    "seed": true,
    "max_hits": 4
   },
@@ -235,24 +136,6 @@
    "max_hits": 1
   },
   {
-   "key": "b|X8|src/VP-V/modules/motion/estimation/MotionAheadProducer#kP2VectorPair",
-   "rule": "b",
-   "site": "X8",
-   "refs": "126 s4 X8",
-   "reason": "declared product read never made, or owner compute without publish",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
-   "key": "b|X8|src/VP-V/modules/motion/estimation/matcher/DejudderWarp#kP2VectorPair",
-   "rule": "b",
-   "site": "X8",
-   "refs": "126 s4 X8",
-   "reason": "declared product read never made, or owner compute without publish",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
    "key": "b|X8|src/VP-V/modules/output/dither#kP3AnalysisField",
    "rule": "b",
    "site": "X8",
@@ -263,24 +146,6 @@
   },
   {
    "key": "b|X8|src/VP-V/modules/repair/deband#kP11RegionBlockStats",
-   "rule": "b",
-   "site": "X8",
-   "refs": "126 s4 X8",
-   "reason": "declared product read never made, or owner compute without publish",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
-   "key": "b|X8|src/VP-V/modules/repair/deband#kP12LightLevel",
-   "rule": "b",
-   "site": "X8",
-   "refs": "126 s4 X8",
-   "reason": "declared product read never made, or owner compute without publish",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
-   "key": "b|X8|src/VP-V/modules/repair/deband#kP3AnalysisField",
    "rule": "b",
    "site": "X8",
    "refs": "126 s4 X8",
@@ -316,25 +181,7 @@
    "max_hits": 1
   },
   {
-   "key": "b|X8|src/VP-V/modules/repair/texture_restore#kP4SourceStats",
-   "rule": "b",
-   "site": "X8",
-   "refs": "126 s4 X8",
-   "reason": "declared product read never made, or owner compute without publish",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
    "key": "b|X8|src/VP-V/modules/scaling/adaptive_downscale#-",
-   "rule": "b",
-   "site": "X8",
-   "refs": "126 s4 X8",
-   "reason": "declared product read never made, or owner compute without publish",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
-   "key": "b|X8|src/VP-V/modules/scaling/chroma_upscale#kP13SourceRing",
    "rule": "b",
    "site": "X8",
    "refs": "126 s4 X8",
