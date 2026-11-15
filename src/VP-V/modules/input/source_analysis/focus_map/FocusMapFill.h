@@ -176,7 +176,7 @@ namespace FocusMap
 			uint64_t np = 0, nm = 0, nc = 0, ns = 0;
 			for (size_t i = 0; i < blocks.size(); ++i)
 			{
-				if (prevReleased)   // the cause of this block's kNoPrevious: retention, not absence
+				if (prevReleased && (blocks[i].flags & kNoPrevious) != 0)   // the cause of this block's kNoPrevious: retention, not absence
 					blocks[i].flags = static_cast<uint16_t>(blocks[i].flags | kNoPreviousRetained);
 				blocks[i].flags = static_cast<uint16_t>(blocks[i].flags | interimFlag);
 				Pack(blocks[i], out.bytes.data() + i * kBytesPerBlock);
