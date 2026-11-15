@@ -1,12 +1,16 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Shared unit U2 "band split (extra sigma)" (doc 62 section 1.2): the one separable-Gaussian law every band split
-// uses. A consumer that needs a band of the picture at a sigma it chooses takes the radius, the normalised weights
-// and the half-resolution sigma from here instead of keeping a private copy; the CPU reference blur and the GLSL
-// emitter (`vpu_band_from_base_*`) are built from the same Radius()/Weight(), so they cannot drift apart.
+// Shared unit U2 "band split (extra sigma)" (doc 62 section 1.2). The unit carries TWO separable-Gaussian laws, each
+// used by named entries only:
+//   Law 1 (this unit's own, Radius()/Weight()): the CPU reference blur and the GLSL emitter (`vpu_band_from_base_*`) are
+//     built from it, so they cannot drift apart. A consumer that needs a band of the picture at a sigma it chooses takes
+//     the radius, the normalised weights and the half-resolution sigma from here instead of keeping a private copy.
+//   Law 2 (Bill's low-band law, GrainPreserve::LowRadius / LowWeight, called unchanged): used ONLY by BandFromHalf (the
+//     CPU oracle of the grain band, B3). Radius = max(kLowRadius, ceil(kLowRadius * hs / hs0 - 1e-9)) with hs the half
+//     sigma of the full-resolution sigma and hs0 that of kLowSigma; weights are the normalised Gaussian at the half sigma.
 //
-// Law (unchanged from the private copies it replaces, bit for bit):
+// Law 1 (unchanged from the private copies it replaces, bit for bit):
 //   radius  r = ceil(factor * sigma - eps), at least 1 when minOne
 //   weight  w(k) = exp(-0.5 k k / (sigma sigma)) / sum_{i=-r..r} exp(-0.5 i i / (sigma sigma))   (sum in index order -r..r)
 //   half-resolution sigma of a full-resolution sigma (the 2x2 box adds 0.25 px^2 per axis):
