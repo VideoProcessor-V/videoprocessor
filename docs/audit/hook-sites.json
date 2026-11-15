@@ -768,8 +768,8 @@
   {
    "id": "CEW.h-0005",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.h",
-   "start": 402,
-   "end": 402,
+   "start": 401,
+   "end": 401,
    "anchor": {
     "symbol": "",
     "before": [
@@ -6059,7 +6059,7 @@
    "id": "CEW.h-0007",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.h",
    "start": 347,
-   "end": 349,
+   "end": 348,
    "anchor": {
     "symbol": "",
     "before": [
@@ -6072,8 +6072,7 @@
    },
    "lines": [
     "    Vpv::ConfigPageDirectory vpvPages_;   // VPV-HOOK",
-    "    Vpv::FunctionFormApi formApi_;   // VPV-HOOK",
-    "    friend struct Vpv::ConfigEditorAccess;   // VPV-HOOK (S4A A4: the editor's VP-V seams; ConfigEditorAccess.inl)"
+    "    Vpv::FunctionFormApi formApi_; friend struct Vpv::ConfigEditorAccess;   // VPV-HOOK"
    ],
    "text": "Vpv::ConfigPageDirectory vpvPages_; Vpv::FunctionFormApi formApi_; friend struct Vpv::ConfigEditorAccess;",
    "gate": "declaration",
