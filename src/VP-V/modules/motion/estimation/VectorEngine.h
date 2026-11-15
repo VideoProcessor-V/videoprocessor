@@ -515,7 +515,7 @@ namespace VpMotion
 		mutable std::atomic<unsigned long long> p2CpuFormServed_{ 0 }, p2CpuFormDeclined_{ 0 };   // B-prereq (a): the P2 CPU form's reads
 		mutable std::mutex p2CpuFormWhyMutex_;
 		mutable std::string p2CpuFormLastWhy_;       // the last decline's reason (under p2CpuFormWhyMutex_)
-		unsigned long long p2CpuFormRecorded_ = 0;   // served + declined at the last DiagnosticHistory record (render thread)
+		unsigned long long p2CpuFormRecorded_ = 0;   // declines at the last DiagnosticHistory record (render thread)
 		std::atomic<int> flowSourceWidth_{ 0 };   // the source width the engine size was last made for (ServeStatistics)
 		InvalidateSink invalidateSink_ = nullptr;
 		const IMatcherView* matcher_ = nullptr;

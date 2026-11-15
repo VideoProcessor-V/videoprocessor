@@ -407,15 +407,14 @@ namespace VpMotion
 					fr.requests, fr.served, fr.requests - fr.served, fr.noProducer, fr.noPair, fr.invalidated, fr.unscaled);
 			if (P2CpuFormServed() + P2CpuFormDeclined())   // the P2 CPU form's reads (the declines feed the no-pair-ahead path)
 				DebugLog::Log("Vector engine: P2 CPU form reads served %llu, declined %llu", P2CpuFormServed(), P2CpuFormDeclined());
-			// BBP-A-COUNTS-CTRLALTD: the report's history gets the counts too (never log-only), when they changed since the last record.
-			const unsigned long long p2Served = P2CpuFormServed(), p2Declined = P2CpuFormDeclined();
-			if (p2Served + p2Declined != p2CpuFormRecorded_)
+			// BBP-A-COUNTS-CTRLALTD: the report's history gets the declines too (never log-only), only when they rose since the last
+			// record (served-only reads every frame would otherwise fill the decision ring every 5 s).
+			const unsigned long long p2Declined = P2CpuFormDeclined();
+			if (p2Declined != p2CpuFormRecorded_)
 			{
-				p2CpuFormRecorded_ = p2Served + p2Declined;
-				const std::string p2Segment = P2CpuFormStatusSegment();
-				DiagnosticHistory::Global().RecordDecision("vector-engine-p2-cpu-form",
-					(p2Segment.empty() ? std::string("P2 CPU form served ") + std::to_string(p2Served) + ", declined 0" : p2Segment).c_str(),
-					static_cast<int64_t>(p2Served), static_cast<int64_t>(p2Declined), 0.0, 0.0);
+				p2CpuFormRecorded_ = p2Declined;
+				DiagnosticHistory::Global().RecordDecision("vector-engine-p2-cpu-form", P2CpuFormStatusSegment().c_str(),
+					static_cast<int64_t>(P2CpuFormServed()), static_cast<int64_t>(p2Declined), 0.0, 0.0);
 			}
 		}
 	}
