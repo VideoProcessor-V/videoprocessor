@@ -1003,8 +1003,8 @@
   {
    "id": "VPD.cpp-0003",
    "file": "src/VideoProcessor-GUI/VideoProcessorDlg.cpp",
-   "start": 18142,
-   "end": 18142,
+   "start": 18144,
+   "end": 18144,
    "anchor": {
     "symbol": "CVideoProcessorDlg::OnTimer",
     "before": [
@@ -1016,9 +1016,9 @@
     ]
    },
    "lines": [
-    "\t\tDialogExtension::OnTimer();   // VPV-HOOK"
+    "\t\tDialogExtension::OnTimer({ m_interfaceMode == ApplicationInterface::Mode::Modern, m_hideUI, m_shortcutsForegroundOnly, m_shortcutsGlobalHotkeys, m_shortcutsGlobalActions.size(), GlobalShortcutObserver::IsRunning() });   // VPV-HOOK"
    ],
-   "text": "DialogExtension::OnTimer();",
+   "text": "DialogExtension::OnTimer({ m_interfaceMode == ApplicationInterface::Mode::Modern, m_hideUI, m_shortcutsForegroundOnly, m_shortcutsGlobalHotkeys, m_shortcutsGlobalActions.size(), GlobalShortcutObserver::IsRunning() });",
    "gate": "non-pathway",
    "seam": null,
    "expiry": null
