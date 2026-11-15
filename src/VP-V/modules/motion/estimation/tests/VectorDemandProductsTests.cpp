@@ -42,9 +42,12 @@ namespace VectorDemandProductsTestsNs
 			noEngine.ofaPresent = false;
 			std::vector<ConsumerDecl> cs;
 			size_t checked = 0;
+			// Batch B fold (WAIVER-B1-ENGINE-06): the third dimension was the retired analysis-under-smooth-motion flag
+			// (DecideWith(in, under)); it now sweeps Input::pairsExpected, so every input of the one decision is covered and the
+			// count is unchanged.
 			for (int flags = 0; flags < 32; ++flags)
 				for (int ahead = 0; ahead <= 2; ++ahead)
-					for (int under = 0; under <= 1; ++under)
+					for (int pairs = 0; pairs <= 1; ++pairs)
 						for (unsigned wants = 0; wants < (1u << kConsumerCount); ++wants) {
 							// The three camera consumers (bits 11..13) are covered as a group (none / all) to keep the sweep size; the camera fit (bit 14,
 							// Consumer::CameraFit: a source-field consumer) is swept on its own, so all four combinations of {group, fit} are checked.
@@ -59,9 +62,10 @@ namespace VectorDemandProductsTestsNs
 							in.smoothMotion = (flags & 8) != 0;
 							in.interlaced = (flags & 16) != 0;
 							in.queueAheadCapacity = ahead;
+							in.pairsExpected = pairs != 0;
 							for (int i = 0; i < kConsumerCount; ++i)
 								in.wants[i] = (wants & (1u << i)) != 0;
-							const Decision d = DecideWith(in, under != 0);
+							const Decision d = DecideForHost(in);
 							cs.clear();
 							DeclareConsumers(d, cs);
 							const Graph g = BuildGraph(reg, cs, gs);
@@ -74,10 +78,13 @@ namespace VectorDemandProductsTestsNs
 								Assert::IsTrue(m.Has(VpSkeleton::kP2mMatcherPair));
 								Assert::IsFalse(m.Has(VpSkeleton::kP2VectorPair));
 							}
-							Assert::AreEqual(uint8_t(d.mode == Mode::Backward ? 0 : 1), LaneLeadFor(d, 1));
+							// Batch B fold (WAIVER-B1-ENGINE-06): was LaneLeadFor(d, 1) == (Backward ? 0 : 1); LaneLeadFor is retired with
+							// the backward pairs. Depth 0 in low latency (competitive) is motion-free now: nothing declared, no pair.
+							if (in.lowLatency && ahead == 0)
+								Assert::IsTrue(cs.empty() && !g.Has(VpSkeleton::kP2VectorPair), L"competitive: motion-free, nothing declared");
 							++checked;
 						}
-			// 32 flag sets x 3 queue depths x 2 under-load x 2^11 original wants x 2 camera-group states (none / all) x 2 camera-fit states.
+			// 32 flag sets x 3 queue depths x 2 pairs-expected states x 2^11 original wants x 2 camera-group states (none / all) x 2 camera-fit states.
 			// Count change coordinator-approved 2026-11-08 (an extension of the sweep, no assertion weakened).
 			Assert::AreEqual((size_t(32 * 3 * 2) << kOriginalConsumerCount) * 2 * 2, checked);
 		}
@@ -100,19 +107,23 @@ namespace VectorDemandProductsTestsNs
 			Input in;
 			in.enabled = true;
 			in.slotsRun = true;
-			in.smoothMotion = true;   // the output consumer is unserved under smooth motion
+			// Batch B fold (WAIVER-B1-ENGINE-06): was smoothMotion = true ("the output consumer is unserved under smooth motion", the
+			// retired analysis-under-smooth-motion semantics; smooth motion now leaves every consumer unserved). The one unserved
+			// consumer is now the statistics consumer without optical-flow pairs; one unserved, one synthesis, two served, as before.
+			in.pairsExpected = false;   // the statistics consumer is unserved without optical-flow pairs
 			in.wants[int(Consumer::SigmaDelta)] = true;
 			in.wants[int(Consumer::MotionIntent)] = true;
 			in.wants[int(Consumer::GrainMap)] = true;
 			in.wants[int(Consumer::DejudderExtras)] = true;   // synthesis: never declared
-			// WAIVER-C1-09, amended by WAIVER-B1-ENGINE-01: the starter precondition is gone (batch B: the ON engine serves every
-			// reuse-only want); the count (2) and the order are unchanged.
-			const Decision d = Decide(in);
+			// WAIVER-C1-09, amended by WAIVER-B1-ENGINE-01 (the starter precondition is gone: the ON engine serves every reuse-only
+			// want) and WAIVER-B1-ENGINE-06 (the unserved consumer): the count (2) and the consumer order are checked as before.
+			const Decision d = DecideForHost(in);
+			Assert::AreEqual(1u << int(Consumer::MotionIntent), d.unserved, L"the statistics consumer is unserved (no pairs)");
 			std::vector<ConsumerDecl> cs;
 			DeclareConsumers(d, cs);
 			Assert::AreEqual(size_t(2), cs.size());
-			Assert::AreEqual(int(kConsumerIdBase + int(Consumer::GrainMap)), int(cs[0].id));
-			Assert::AreEqual(int(kConsumerIdBase + int(Consumer::MotionIntent)), int(cs[1].id));
+			Assert::AreEqual(int(kConsumerIdBase + int(Consumer::SigmaDelta)), int(cs[0].id));
+			Assert::AreEqual(int(kConsumerIdBase + int(Consumer::GrainMap)), int(cs[1].id));
 		}
 	};
 }

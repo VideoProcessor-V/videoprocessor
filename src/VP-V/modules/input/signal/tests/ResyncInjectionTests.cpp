@@ -170,7 +170,7 @@ namespace Tests
 			// generation by design (the ahead pairs after it are kept; the producer's breakBefore makes no pair across it).
 			if (kind != Kind::Gap)
 				Assert::IsFalse(rig.Flow(5), L"the pair published before the event is refused after the next kept frame (generation)");
-			// C2a-F 2: the shared reader of ServeStatistics (both directions) and the de-judder estimate (VectorEngineEstimate.inl),
+			// C2a-F 2: the shared reader of ServeStatistics (forward; its backward leg is retired) and the de-judder estimate (VectorEngineEstimate.inl),
 			// VectorEngineState::FindCurrent, refuses the same pair; the slot itself still holds it (control).
 			{
 				bool stale = false;
