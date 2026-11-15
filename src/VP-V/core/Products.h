@@ -98,7 +98,7 @@ enum : ProductId {
     kEdgeMap = 31,        // 31 edge_map (C3 fixed id table; per-frame memo of the source-luma Sobel; readers: L-FOCUS focus map, L-B5 busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3); frozen 17:19; 102b X5-EDGEMAP-CJ3, KEDGEMAP-RULE3 UPDATE :523); later deband guard, occlusion, TD); lead 8 allocation 31, 05:2x 11-14
     kFocusMap = 32,       // 32 focus_map (L-FOCUS; RESERVED until it lands)
     kRoomLight = 33,      // 33 room_light (DV block; RESERVED until it lands)
-    kComposedVectors = 34,// 34 composed_vectors (RESERVED until it lands)
+    kComposedVectors = 34,// 34 composed_vectors (ECV: VpComposed::Product, modules/motion/estimation/composed; the code has landed, the id stays RESERVED until its registry decl + reader row land, lead ruling SHOULD S3)
     kSkeletonProductEnd = 35
 };
 static_assert(kSourceGeometry == 29 && kBandMemo == kSourceGeometry + 1 && kSkeletonProductEnd == kComposedVectors + 1,
