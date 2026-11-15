@@ -2997,12 +2997,40 @@ namespace Tests
 				{ "1920x1080", "Resync (on): re-base H+V stamp", L"both" },
 				{ "1440x1080", "Resync (on): re-base H+V stamp", L"anamorphic" },
 			};
+			// WAIVER-RSAX-01 (fix-B, lead 19): the re-base warm-up (FX-RB, scaling/rebase/RebaseWarmup.h) holds a re-base to a NEW
+			// plane size on the native path until its shaders are compiled, visibly ("Re-base pending shader warm-up"). The capture
+			// is at a fixed 2.5 s, so a cold variant made the first (off) run capture the HELD native frame (its hash = the native
+			// still's) and the second (on) run, on the cache the first filled, the re-based one: two different pictures compared.
+			// As SourceResolutionRebasesThroughTheRenderer's FX-RBT pre-warm: each axis variant runs once first, untimed and
+			// unasserted, until 3 s after its re-base starts (the harness shader cache is then warm); and every compared capture
+			// must now follow the re-base's start in its run's log, so a capture of a held (native) frame fails instead of
+			// passing or failing by timing. The off == on comparison is unchanged.
+			FramePlan warmPlan = plan;
+			warmPlan.captureAtSeconds = -1.0;   // the pre-warm takes no capture
+			auto rebasedBeforeCapture = [](const RunResult& r, const std::string& rebased) {
+				size_t rebaseAt = std::string::npos, captureAt = std::string::npos;
+				for (size_t i = 0; i < r.log.size(); ++i)
+				{
+					if (rebaseAt == std::string::npos && r.log[i].find(rebased) != std::string::npos) rebaseAt = i;
+					if (captureAt == std::string::npos && r.log[i].find("Rendered-output capture complete") != std::string::npos) captureAt = i;
+				}
+				return rebaseAt != std::string::npos && captureAt != std::string::npos && rebaseAt < captureAt;
+			};
 			for (const Axis& a : axes)
 			{
 				const std::string key = std::string("source_resolution: ") + a.setting + "\n";
+				const std::string rebased = std::string("Re-base: 3840x2160 -> ") + a.setting + " ";
+				const RunResult warm = Run(VideoFrameEncoding::V210, "gpu", 30.0, false,
+					"[vpv]\nresync_event: off\n[vprenderer.Default]\ndithering: off\ndeband: off\n" + key, false, &warmPlan, rebased, 3.0);
+				Logger::WriteMessage((std::wstring(L"pre-warm ") + a.name + L": re-base seen after " +
+					(warm.stopSeenSeconds >= 0.0 ? std::to_wstring(warm.stopSeenSeconds) + L" s" : std::wstring(L"never (30 s)")) + L"\n").c_str());
 				const std::string baseHash = hashOf("[vpv]\nresync_event: off\n", a.name, key);
+				Assert::IsTrue(rebasedBeforeCapture(last, rebased),
+					(std::wstring(a.name) + L": off: the capture follows the re-base's start (not a held native frame)\n" + last.Tail()).c_str());
 				Assert::AreEqual(baseHash, hashOf("[vpv]\nresync_event: on\n", a.name, key),
 					(std::wstring(a.name) + L": a fixed re-base is identical with on").c_str());
+				Assert::IsTrue(rebasedBeforeCapture(last, rebased),
+					(std::wstring(a.name) + L": on: the capture follows the re-base's start (not a held native frame)\n" + last.Tail()).c_str());
 				Assert::IsTrue(last.Logged(a.logged), (std::wstring(a.name) + L": the moved axes are stamped\n" + last.Tail()).c_str());
 			}
 			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
