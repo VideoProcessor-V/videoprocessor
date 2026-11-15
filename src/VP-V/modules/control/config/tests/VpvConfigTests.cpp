@@ -1833,6 +1833,35 @@ namespace
 		require(saved.contains("29.97: 31") && !saved.contains("\n29: "),
 			("the old key 29 was not dropped in favour of the explicit 29.97" + shown).c_str());
 	}
+
+	// Batch B (lead18 plan-motion-engine-switch.md (c) + Q3; WAIVER-B1-ENGINE-03, an addition): the motion engine is one switch
+	// (vector_demand). Off greys the de-judder amount and the hiccup repair switches in place with "Used only when the motion engine
+	// is on."; on frees them. The defaults (engine on) leave them usable (testMastersAndFit's motion_preset_box check).
+	void testMotionEngineOffGreysDejudderAndHiccup()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir);
+		ConfigEditorWindow window(path, 0, true);
+		auto* engine = control<QComboBox>(window, Vpv::ObjectName("motion.vector_demand"));
+		auto* amount = control<QWidget>(window, QStringLiteral("config.vprenderer.motion_preset_box"));
+		auto* hiccup = control<QComboBox>(window, Vpv::ObjectName("motion.interpolation_fill_gaps"));
+		require(amount->isEnabled(), "engine on (default): the de-judder amount is usable");
+		require(hiccup->isEnabled(), "engine on (default): hiccup repair is usable");
+		const int off = engine->findData(QStringLiteral("off"));
+		require(off >= 0, "the Motion engine switch offers off");
+		engine->setCurrentIndex(off);
+		QCoreApplication::processEvents();
+		const QString why = QStringLiteral("Used only when the motion engine is on");
+		require(!amount->isEnabled() && amount->toolTip().startsWith(why),
+			("engine off greys the de-judder amount and says why: " + amount->toolTip().toStdString()).c_str());
+		require(!hiccup->isEnabled() && hiccup->toolTip().startsWith(why),
+			("engine off greys hiccup repair and says why: " + hiccup->toolTip().toStdString()).c_str());
+		const int on = engine->findData(QStringLiteral("on"));
+		require(on >= 0, "the Motion engine switch offers on");
+		engine->setCurrentIndex(on);
+		QCoreApplication::processEvents();
+		require(amount->isEnabled() && hiccup->isEnabled(), "engine on again frees both");
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -1868,5 +1897,6 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: queue rows on the VP-V card, look-ahead Auto kept", testQueueRowsOnTheVpvCard);
 	failures += run("VP-V: the moved load-time migrations still apply", testLoadMigrationsMoved);
 	failures += run("VP-V: the moved refresh-key migration rewrites the NTSC band keys", testRefreshKeyMigrationMoved);
+	failures += run("VP-V: motion engine off greys the de-judder amount and hiccup repair (batch B)", testMotionEngineOffGreysDejudderAndHiccup);
 	return failures;
 }
