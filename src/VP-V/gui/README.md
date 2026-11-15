@@ -11,7 +11,9 @@ VP's parts of the executable's GUI, out of `VideoProcessorDlg.cpp` and `StatsOve
 
 The wording and order live in `core/StatusText.h` (pure, CPU-tested). Tests:
 `tests/StatusTextTests.cpp` (pure) and `tests/VpStatusAdapterTests.cpp` (old dialog code vs the
-adapter, byte for byte, for representative states).
+adapter, byte for byte, for representative states); `tests/ShortcutObserverStatusTests.cpp` (the
+"global shortcuts" entry: wanted + failed gives one entry and one notice, none in the Original pathway
+or while the hook runs).
 
 Adding a VP status line: give the renderer's module a new key in `core/StatusText.h` (no plugin
 API change), read it in `VpStatusAdapter.h`, add its row or crash-state key there, and add a
