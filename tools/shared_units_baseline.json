@@ -499,12 +499,6 @@
      "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
     },
     {
-     "file": "src/VP-V/modules/motion/estimation/global_model/P7SlotCodec.h",
-     "pattern": "fadeGain/Offset, picture|detail::Put<double>\\(p, m\\.fadeGain\\)|r\\.fadeGain = detail::Get<double>\\(p\\);",
-     "kind": "false_positive",
-     "reason": "P7 slot codec serialises the unit fade gain as data (slot size, Put, Get); no judge (B4, lines 27/59/95 at 2fbadbeeb)"
-    },
-    {
      "file": "src/VP-V/modules/motion/estimation/global_model/CameraMotion.h",
      "pattern": "scene cut",
      "kind": "false_positive",
