@@ -182,6 +182,14 @@ namespace VpMotion
 		VectorDemand::MotionEngineStatus State() const override { return motionEngineStatus; }
 		// Work: the counters, with the producer's pairs (stopped producers' pairs kept in motionEnginePairsBase).
 		VectorDemand::MotionEngineWork Work() const override;
+		// B-prereq (a): the P2 slot's read-only view and the P2 CPU form's read counts (served / declined; atomics, any thread).
+		VpMotion::P2View P2Pairs() const override { return P2(); }
+		void NoteP2CpuFormRead(bool served) const override
+		{
+			(served ? p2CpuFormServed_ : p2CpuFormDeclined_).fetch_add(1, std::memory_order_relaxed);
+		}
+		unsigned long long P2CpuFormServed() const { return p2CpuFormServed_.load(std::memory_order_relaxed); }
+		unsigned long long P2CpuFormDeclined() const { return p2CpuFormDeclined_.load(std::memory_order_relaxed); }
 		// The VRAM governor's release of the motion engine (the de-judder's keeper feeds it; render thread).
 		void NoteVramRelease(bool released) { motionVramRelease = released; }
 		// The keeper's counters (warm-ups, analysis estimates, matcher creates); render thread.
@@ -485,6 +493,7 @@ namespace VpMotion
 		mutable std::atomic<unsigned long long> flowFbErrorRecomputes_{ 0 };
 		mutable std::atomic<unsigned long long> flowCostWeightRecomputes_{ 0 };
 		mutable std::atomic<unsigned long long> flowTrustComputes_{ 0 };   // W1-C3: FlowLease::CellTrust computations (FlowReads().trustComputes)
+		mutable std::atomic<unsigned long long> p2CpuFormServed_{ 0 }, p2CpuFormDeclined_{ 0 };   // B-prereq (a): the P2 CPU form's reads
 		std::atomic<int> flowSourceWidth_{ 0 };   // the source width the engine size was last made for (ServeStatistics)
 		InvalidateSink invalidateSink_ = nullptr;
 		const IMatcherView* matcher_ = nullptr;

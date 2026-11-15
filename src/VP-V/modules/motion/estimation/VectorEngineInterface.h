@@ -10,6 +10,7 @@
 
 #include <VP-V/core/Indicator.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
+#include <VP-V/modules/motion/estimation/VectorProducts.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
 
 #include <libplacebo/gpu.h>
@@ -239,6 +240,13 @@ namespace VpMotion
 		// State() and take their non-motion path when it is not On / Degraded. Defaults: Off / None and zero work (existing fakes).
 		virtual VectorDemand::MotionEngineStatus State() const { return VectorDemand::MotionEngineStatus(); }
 		virtual VectorDemand::MotionEngineWork Work() const { return VectorDemand::MotionEngineWork(); }
+
+		// B-prereq (a): the read-only view of the engine's P2 slot (the NVOF pair + its global), for the P2 CPU form's owner fill
+		// (P2CpuForm.cpp). Any thread (the slot has its own mutex); an unbound view (default: a fake, an older engine) finds nothing,
+		// so the fill declines with its visible reason. NoteP2CpuFormRead counts one read (served / declined) for the engine's
+		// debug line; default: ignored. Any thread (atomics).
+		virtual VpMotion::P2View P2Pairs() const { return VpMotion::P2View(); }
+		virtual void NoteP2CpuFormRead(bool /*served*/) const {}
 	};
 
 	// What Query(kVectorEngineQueryId) returns. EngineFor(host) = the engine of that renderer (host = the pointer the

@@ -377,6 +377,8 @@ namespace VpMotion
 			if (fr.requests)
 				DebugLog::Log("Vector engine: flow reads %llu, served %llu, absent %llu (no producer %llu, no pair %llu, invalidated %llu, size unknown %llu)",
 					fr.requests, fr.served, fr.requests - fr.served, fr.noProducer, fr.noPair, fr.invalidated, fr.unscaled);
+			if (P2CpuFormServed() + P2CpuFormDeclined())   // the P2 CPU form's reads (the declines feed the no-pair-ahead path)
+				DebugLog::Log("Vector engine: P2 CPU form reads served %llu, declined %llu", P2CpuFormServed(), P2CpuFormDeclined());
 		}
 	}
 

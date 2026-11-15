@@ -103,6 +103,23 @@ public:
 		++stats.hits;
 		return true;
 	}
+	// The pair that ENDS at `to` (the newest `from` when several, current generation only), without the caller knowing `from`
+	// (the P2 CPU form's reader asks for a frame, not a pair). A hit/miss like Get.
+	bool GetTo(uint64_t to, Entry& out)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		for (auto it = entries.rbegin(); it != entries.rend(); ++it)   // largest from first
+		{
+			if (it->second.to == to && it->second.generation == generation)
+			{
+				out = it->second;
+				++stats.hits;
+				return true;
+			}
+		}
+		++stats.misses;
+		return false;
+	}
 	bool Has(uint64_t from, uint64_t to) const
 	{
 		std::lock_guard<std::mutex> lock(mutex);
