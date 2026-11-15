@@ -2840,7 +2840,30 @@ namespace Tests
 			Assert::IsTrue(on.Logged("Detail pulse stabilise: on") && on.Logged("Texture restore: statistical"), (L"on: the stages are set up\n" + on.Tail()).c_str());
 			Assert::IsFalse(on.Logged("Detail pulse stabilise failed") || on.Logged("Texture restore failed"), (L"on: no failure\n" + on.Tail()).c_str());
 			Assert::IsTrue(off.sourceStatus.find("Source resolution:") == 0, L"the monitor read the source (off)");
-			Assert::AreEqual(off.sourceStatus, on.sourceStatus, L"the source-resolution monitor's reading is identical with the stages on");
+			// WAIVER-DRSM-01 (fix-B, lead 19): the READING is compared (effective size, bitrate quality, bits, the auto state, the
+			// notes, the frame-bound mode and its D), exactly as before. Since FX-DV (bd3508448, 2026-11-14, after this test) the
+			// status line also carries the frame-bound lane's timing-loss counters ("held, dropped, stale, jobs dropped, copies
+			// skipped, waits missed, clock steps back" and "analyses were lost to timing"), which count how late the worker's
+			// results arrived (source_analysis/README.md "Frame-bound mode": GPU and thread timing, shown, never hidden); they are
+			// not the monitor's reading, and the stages' extra GPU work legitimately moves them (C4 rch06 and rchB04: waits missed
+			// 1 off, 2 on, identical readings and identical input digests). Only that counter span is left out of the comparison;
+			// both full lines stay in the log above.
+			auto readingOf = [](std::string s) {
+				const std::string head = "; frame-bound D=", tail = "clock steps back ";
+				const size_t at = s.find(head);
+				if (at == std::string::npos) return s;
+				const size_t colon = s.find(':', at + head.size());
+				const size_t clock = s.find(tail, at);
+				if (colon == std::string::npos || clock == std::string::npos) return s;
+				size_t end = clock + tail.size();
+				while (end < s.size() && std::isdigit(static_cast<unsigned char>(s[end]))) ++end;
+				s.erase(colon, end - colon);   // keeps "; frame-bound D=<n>"
+				const std::string lost = " (analyses were lost to timing: this run is not reproducible)";
+				const size_t l = s.find(lost);
+				if (l != std::string::npos) s.erase(l, lost.size());
+				return s;
+			};
+			Assert::AreEqual(readingOf(off.sourceStatus), readingOf(on.sourceStatus), L"the source-resolution monitor's reading is identical with the stages on");
 			g_harnessWidth = savedW;
 			g_harnessHeight = savedH;
 		}
