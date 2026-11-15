@@ -192,25 +192,34 @@ namespace AdmissionOverloadTest
 		}
 
 		// Owner answer via lead 11 (2026-11-14): the ahead work is sized to the VRAM grant in order - fewer products early, then fewer frames
-		// ahead, the queue shortened only last and never below the MODE's own minimum queue (no 200 ms floor: coordinator 2026-11-14 ruling via
+		// ahead, the queue shortened only last and never below the delay budget's minimum (no 200 ms floor: coordinator 2026-11-14 ruling via
 		// lead 11, design s9 :168-176); games/competitive queues never touched; nothing evicted, every step on the line.
+		// PREC2-S3A MUST 1: the plan is THE ladder's (QueueWindow.h PlanAheadLadder): bytes per product = bytesPerFrame x (1 + back + depth),
+		// S-A sheds Fill first, S-B keeps the core's declared depth (aheadMinFrames 1), S-C is DelayBudget's next lower step for the same budget.
 		TEST_METHOD(AheadPlanFollowsTheGrantInOrder)
 		{
 			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
 			f.aheadBytes[kP3AnalysisField] = 100;
 			f.aheadBytes[kP5MonitorTiles] = 50;
 			f.aheadConsumers[0] = AheadConsumer{ "TD", true, kAheadCeiling };   // OD 11-14: aheadCompute from the declared need (= the ceiling itself)
-			f.queueFrames = 16;
 			f.queueAheadFrames = 15;
-			f.queueBytesPerFrame = 10;
+			// The delay budget the ladder's S-C steps through (rates as test inputs): 250 ms, 60 / 60 Hz -> fixed (2 + 1) refreshes, 4 queued.
+			f.delayBudget.budgetMs = 250.0;
+			f.delayBudget.sourceFps = 60.0;
+			f.delayBudget.refreshHz = 60.0;
+			f.delayBudgetFed = true;
+			const int designQueue = DelayBudget::Compute(f.delayBudget).queueFrames;
+			Assert::AreEqual(DelayBudget::kDesignDepth, designQueue);
+			f.queueFrames = designQueue;
 			f.vramGrantBytes = 2000;
 			Result r = Admit(f);
 			Assert::IsTrue(r.admitted[kP5MonitorTiles]);
 			Assert::IsTrue(r.aheadAdmitted[kP3AnalysisField] && r.aheadAdmitted[kP5MonitorTiles]);
 			Assert::AreEqual(int(kAheadCeiling), r.aheadFrames);
-			Assert::AreEqual(uint64_t(kAheadCeiling) * (100 + 50) + 16 * 10, r.aheadNeedBytes);
+			Assert::AreEqual(uint64_t(1 + kAheadCeiling) * (100 + 50), r.aheadNeedBytes);
+			Assert::AreEqual(designQueue, r.queueFrames);
 
-			f.vramGrantBytes = 1000;   // 1. the optional product moves to render time
+			f.vramGrantBytes = 1000;   // 1. the optional product moves to render time (S-A: 7 x 100 + 1 x 50 = 750)
 			r = Admit(f);
 			Assert::AreEqual(1u, r.aheadProductsDropped);
 			Assert::IsFalse(r.aheadAdmitted[kP5MonitorTiles]);
@@ -218,45 +227,61 @@ namespace AdmissionOverloadTest
 			Assert::AreEqual(int(kAheadCeiling), r.aheadFrames);
 			Assert::IsTrue(r.aheadLine.find("fewer products early") != std::string::npos);
 
-			f.vramGrantBytes = 500;    // 2. fewer frames ahead
+			f.vramGrantBytes = 500;    // 2. fewer frames ahead (S-B: (1 + 3) x 100 + 50 = 450)
 			r = Admit(f);
 			Assert::AreEqual(3, r.aheadFrames);
-			Assert::AreEqual(16, r.queueFrames, L"the queue is untouched while fewer frames ahead suffice");
+			Assert::AreEqual(designQueue, r.queueFrames, L"the queue is untouched while fewer frames ahead suffice");
+			Assert::AreEqual(0, r.queueFramesDropped);
 			Assert::IsTrue(r.aheadLine.find("fewer frames ahead") != std::string::npos);
 
-			f.vramGrantBytes = 225;    // 3. LAST: the queue, only as far as the grant needs (1 ahead x 100 + 12 x 10 = 220)
+			// 3. LAST: the queue. With 2 frames queued ahead the ahead cap follows the shorter queue (ahead - frames given up): S-B leaves P3 at
+			// its declared 1 (250), the first S-C step keeps cap 1 (250), the second (queue 2) takes the cap to 0 (100 + 50 = 150).
+			f.queueAheadFrames = 2;
+			f.vramGrantBytes = 260;
 			r = Admit(f);
 			Assert::AreEqual(1, r.aheadFrames);
-			Assert::AreEqual(12, r.queueFrames);
-			Assert::AreEqual(4, r.queueFramesDropped);
-			Assert::IsTrue(r.aheadLine.find("queue shortened") != std::string::npos);
-
-			f.vramGrantBytes = 150;    // below 200 ms at 60 Hz is allowed: 100 + 5 x 10 = 150 fits
+			Assert::AreEqual(designQueue, r.queueFrames, L"S-B suffices: no S-C step");
+			f.vramGrantBytes = 225;
 			r = Admit(f);
 			Assert::IsFalse(r.aheadOverGrant);
-			Assert::AreEqual(5, r.queueFrames, L"no 200 ms floor on S-C");
+			Assert::AreEqual(DelayBudget::kMinimumDepth, r.queueFrames);
+			Assert::AreEqual(designQueue - DelayBudget::kMinimumDepth, r.queueFramesDropped);
+			Assert::AreEqual(0, r.aheadFrames, L"the shorter queue leaves no frame ahead");
+			Assert::IsTrue(r.aheadLine.find("queue shortened") != std::string::npos);
 
-			f.vramGrantBytes = 110;    // over at the mode's floor (DelayBudget::kMinimumDepth): nothing early, visible
+			f.vramGrantBytes = 100;    // over at the delay budget's floor (DelayBudget::kMinimumDepth): nothing early, visible
 			r = Admit(f);
 			Assert::IsTrue(r.aheadOverGrant);
-			Assert::AreEqual(DelayBudget::kMinimumDepth, r.queueFrames, L"never below the mode's minimum queue");
+			Assert::AreEqual(DelayBudget::kMinimumDepth, r.queueFrames, L"never below the delay budget's minimum queue");
 			Assert::IsTrue(r.aheadLine.find("limited by VRAM at the queue floor") != std::string::npos);
 			Assert::IsFalse(r.aheadAdmitted[kP3AnalysisField]);
 			Assert::IsTrue(r.admitted[kP3AnalysisField], L"core still admitted: it fills at its own render (never evicted)");
 			Assert::IsTrue(r.aheadLine.find("ahead work at render") != std::string::npos);
 
+			f.delayBudgetFed = false;   // no delay budget: no S-C step, and the line says why
+			f.vramGrantBytes = 225;
+			r = Admit(f);
+			Assert::IsTrue(r.aheadOverGrant);
+			Assert::AreEqual(designQueue, r.queueFrames, L"no budget fed: the queue is not touched");
+			Assert::AreEqual(0, r.queueFramesDropped);
+			Assert::IsTrue(r.aheadLine.find("delay budget not fed") != std::string::npos);
+			f.delayBudgetFed = true;
+			f.queueAheadFrames = 15;
+
 			f.mode = LatencyMode::AvrSafe;   // the 200 ms AVR-safe tier is a CEILING: the plan only shortens; its S-C floor is kMinimumDepth
-			const int avrQueue = int(200.0 / f.periodMs + 1e-9);   // the tier's queue (DelayBudget owns it); derived from the measured period
+			f.delayBudget.budgetMs = 200.0;
+			const int avrQueue = DelayBudget::Compute(f.delayBudget).queueFrames;   // the tier's queue (DelayBudget owns it)
 			f.queueFrames = avrQueue;
-			f.queueAheadFrames = avrQueue - 1;
 			f.vramGrantBytes = 2000;
 			r = Admit(f);
 			Assert::AreEqual(avrQueue, r.queueFrames, L"AVR-safe: the plan never lengthens the queue past the 200 ms tier");
 			Assert::IsTrue(r.queueFrames * f.periodMs <= 200.0 + 1e-9);
-			f.vramGrantBytes = 110;
+			f.queueAheadFrames = 2;
+			f.vramGrantBytes = 100;
 			r = Admit(f);
 			Assert::AreEqual(DelayBudget::kMinimumDepth, r.queueFrames, L"AVR-safe: S-C floor = the ladder floor");
 			Assert::IsTrue(r.queueFrames <= avrQueue);
+			f.queueAheadFrames = 15;
 
 			f.mode = LatencyMode::Games;
 			f.queueFrames = 1;
@@ -271,7 +296,8 @@ namespace AdmissionOverloadTest
 			Assert::AreEqual(0, r.queueFrames, L"competitive: no queueing added");
 
 			f.mode = LatencyMode::Standard;   // the ahead ceiling binds visibly (G7; OD 11-14 kAheadCeiling replaces kMaxLead 13)
-			f.queueFrames = 16;
+			f.delayBudget.budgetMs = 250.0;
+			f.queueFrames = designQueue;
 			f.vramGrantBytes = 2000;
 			f.aheadConsumers[0].need = kAheadCeiling + 3;
 			r = Admit(f);
@@ -289,7 +315,6 @@ namespace AdmissionOverloadTest
 			f.aheadBytes[kP3AnalysisField] = 100;
 			f.queueFrames = 16;
 			f.queueAheadFrames = 15;
-			f.queueBytesPerFrame = 10;
 			f.vramGrantBytes = 100000;
 
 			Result r = Admit(f);   // no consumer at all: nothing ahead
@@ -327,7 +352,7 @@ namespace AdmissionOverloadTest
 			Assert::IsTrue(r.aheadShortNotice, L"less than asked within the cap: visible notice");
 
 			f.queueAheadFrames = 15;
-			f.vramGrantBytes = 100 * 2 + 16 * 10;   // the budget plans lower than the need (S-B): 2 frames
+			f.vramGrantBytes = 100 * (1 + 2);   // the budget plans lower than the need (S-B, THE ladder's bytes: render + 2 ahead): 2 frames
 			r = Admit(f);
 			Assert::AreEqual(4, r.aheadComputeLimit);
 			Assert::AreEqual(2, r.aheadFrames, L"the ceiling / the need is an upper bound, not a target");
