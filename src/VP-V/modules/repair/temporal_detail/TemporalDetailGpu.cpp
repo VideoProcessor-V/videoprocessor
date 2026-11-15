@@ -294,7 +294,10 @@ namespace TemporalDetail
 				else if (params.stamps.rebaseV != m.stamps.rebaseV && PolicyOf(Counter::RebaseV) == ReaderPolicy::Reset) reason = "stamp rebaseV";
 			}
 			if (params.cut) reason = "cut";
-			else if (params.fade) reason = "fade";
+			else if (params.fade && !(params.fadeKeep >= 0.0f)) reason = "fade (no keep)";   // a producer before U7 v3: the old full reset, shown
+			// U7 v3 partial reset (the model's): a fade with its keep scales every stored slot's keep (admission pass, tab row 1).
+			const bool fadePartial = !reason && params.fade;
+			const float vFadeKeep = fadePartial ? (std::min)(1.0f, (std::max)(0.0f, params.fadeKeep)) : 1.0f;
 			const bool haveFrame = m.haveFrame && !reason;
 			const bool reset = !haveFrame;
 			const bool haveBwd = params.backward.tex != nullptr;
@@ -334,7 +337,7 @@ namespace TemporalDetail
 			const int arows = (K + acols - 1) / acols;
 			ok = ok && Ensure(gpu, m.atlasPix, acols * w, arows * h, h4) && Ensure(gpu, m.atlasBase, acols * w, arows * h, baseFmt);
 			for (int i = 0; ok && i < 2; ++i)
-				ok = Ensure(gpu, m.mot[i], kbw, g.bh, f4) && Ensure(gpu, m.tab[i], K + 2, 1, f4) && Ensure(gpu, m.state[i], 8 * g.bw, g.bh, f4);
+				ok = Ensure(gpu, m.mot[i], kbw, g.bh, f4) && Ensure(gpu, m.tab[i], K + 2, 2, f4) && Ensure(gpu, m.state[i], 8 * g.bw, g.bh, f4);
 			if (ok && params.templateClean)
 				ok = (useArena || (Ensure(gpu, m.acc[0], w, h, f2) && Ensure(gpu, m.acc[1], w, h, f2))) && Ensure(gpu, m.patches, g.npx, g.npy, f2);
 			if (ok && !m.counters[0])
@@ -494,7 +497,7 @@ namespace TemporalDetail
 				Var("peak_decay", &vPeak), Var("inv_fxf", &vInvXf), Var("f_run", &vRun), Var("rise", &vRise), Var("fall", &vFall),
 				Var("strength", &vStrength), Var("boost_max", &vBoost), Var("alpha", &vAlpha), Var("g_fall", &vGFall),
 				Var("g_rise", &vGRise), Var("bwd_bpx", &vBwdBpx), Var("fwd_bpx", &vFwdBpx), Var("grain_budget", &vBudget),
-				Var("guard_share", &vShare), Var("clean_kappa", &vKappa) };
+				Var("guard_share", &vShare), Var("clean_kappa", &vKappa), Var("fade_keep", &vFadeKeep) };
 			const int nv = static_cast<int>(sizeof(vars) / sizeof(vars[0]));
 
 			const int pgx = (w + 15) / 16, pgy = (h + 15) / 16, bgx = (g.bw + 15) / 16, bgy = (g.bh + 15) / 16;
@@ -641,7 +644,7 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 			m.havePrevG = true;
 			m.prevSeq = params.seq;
 			m.stamps = params.stamps;
-			m_status = reason ? std::string("reset: ") + reason : (motionLost ? std::string("motion lost") : std::string("ok"));
+			m_status = reason ? std::string("reset: ") + reason : (motionLost ? std::string("motion lost") : fadePartial ? std::string("fade: partial reset") : std::string("ok"));
 			if (params.blockGates) m_status += bgTex ? "; block gates" : "; block gates rejected (size/format)";
 			if (!shared)
 				m_status += std::string("; grain split: memo variant, ") + VpSkeleton::Token(m_acquireStatus) +

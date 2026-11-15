@@ -12,6 +12,9 @@
 //   grain      median over 8x8 blocks of the RMS second difference
 //   distance   half the L1 distance of two normalised histograms (HalfL1Distance), the input of U7
 //   coarse     the matcher's 16-bin luma histogram of the 1/32 level (CoarseBin / CoarseL1 and its GLSL, the M3 cut input)
+//   grid       (v2) the mean of each of 32 x 18 cells of the half plane, cell (gx, gy) = rows [gy*hh/18, (gy+1)*hh/18) and
+//              columns [gx*hw/32, (gx+1)*hw/32), integer floor of sum / count (16-bit codes); gridFound = 0 when a cell is
+//              empty (a plane under 32 x 18): the structure input of U7's cut law (CutFadeJudge::ScorePair)
 // Determinism: integer sums in a fixed row order; a finished record never depends on how the rows were chunked.
 //
 // Header-only, C++14, no Windows or GPU headers.
@@ -33,9 +36,13 @@ namespace SourceStats
 {
 // Bump on ANY change of the record layout, the bin law, the percentile law, the rect rule or the grain law
 // (P4's ProductDecl expected number, core/ProductCatalog.h kExpectedStatsUnit, and every stored record carry it).
-constexpr uint32_t kUnitVersion = 1;
+// v2 (U7-accuracy, 2026-11-15): the 32 x 18 cell grid appended after the histogram (earlier offsets unchanged).
+constexpr uint32_t kUnitVersion = 2;
 constexpr uint32_t kRecordVersion = kUnitVersion;
 constexpr uint32_t kHistBins = 1024;      // top 10 bits of the 16-bit half-plane sample
+constexpr uint32_t kGridCols = 32;        // the cell grid (v2)
+constexpr uint32_t kGridRows = 18;
+constexpr uint32_t kGridCells = kGridCols * kGridRows;
 constexpr uint32_t kRecordBytes = 8192;   // the declared fixed size of P4
 constexpr uint32_t kGrainBlock = 8;       // grain: 8x8 blocks of the half plane
 constexpr uint32_t kRectFractionShift = 4; // rect threshold = p1 + (p99 - p1) / 16
@@ -95,8 +102,10 @@ struct Record {
     uint32_t rectX1 = 0;
     uint32_t rectY1 = 0;
     uint32_t grain = 0;       // median over 8x8 blocks of the RMS second difference (16-bit codes)
-    uint32_t reserved[2] = { 0, 0 };
+    uint32_t gridFound = 0;   // (v2) 1: every cell of `cells` has pixels; 0: the plane is under 32 x 18, cells are zero
+    uint32_t reserved = 0;
     uint32_t hist[kHistBins] = {};
+    uint32_t cells[kGridCells] = {};   // (v2) row-major cell means (16-bit codes), see "grid" above
 };
 static_assert(sizeof(Record) <= kRecordBytes, "the stats record must fit the P4 buffer");
 
@@ -144,6 +153,17 @@ public:
         bh_ = (hh + kGrainBlock - 1u) / kGrainBlock;
         blockSq_.assign(size_t(bw_) * bh_, 0);
         blockN_.assign(size_t(bw_) * bh_, 0);
+        // The cell grid (v2): row y -> cell row gy with gy*hh/18 <= y < (gy+1)*hh/18 (columns likewise with 32).
+        std::memset(cellSum_, 0, sizeof(cellSum_));
+        std::memset(cellN_, 0, sizeof(cellN_));
+        rowCell_.assign(hh, 0);
+        colCell_.assign(hw, 0);
+        for (uint32_t gy = 0; gy < kGridRows; ++gy)
+            for (uint32_t y = uint32_t(uint64_t(gy) * hh / kGridRows); y < uint32_t(uint64_t(gy + 1u) * hh / kGridRows); ++y)
+                rowCell_[y] = gy;
+        for (uint32_t gx = 0; gx < kGridCols; ++gx)
+            for (uint32_t x = uint32_t(uint64_t(gx) * hw / kGridCols); x < uint32_t(uint64_t(gx + 1u) * hw / kGridCols); ++x)
+                colCell_[x] = gx;
     }
 
     void AddRows(const uint16_t* half, uint32_t rowBegin, uint32_t rowEnd)
@@ -154,11 +174,15 @@ public:
             const uint16_t* r = half + size_t(y) * hw_;
             const bool vInterior = y >= 1u && y + 1u < hh_;
             uint64_t rs = 0;
+            uint64_t* cellRow = cellSum_ + size_t(rowCell_[y]) * kGridCols;
+            uint32_t* cellRowN = cellN_ + size_t(rowCell_[y]) * kGridCols;
             for (uint32_t x = 0; x < hw_; ++x) {
                 const uint32_t s = r[x];
                 ++hist_[Vpv::AnalysisDomain::HistBinFromQ6(s)];
                 rs += s;
                 colSum_[x] += s;
+                cellRow[colCell_[x]] += s;
+                ++cellRowN[colCell_[x]];
                 if (s < min_)
                     min_ = s;
                 if (s > max_)
@@ -242,6 +266,16 @@ public:
         if (!rms.empty()) {
             rec->grain = static_cast<uint32_t>(RobustStats::MedianInPlace(rms, RobustStats::MedianRule::Upper));   // = sorted[n / 2], exact
         }
+        // The cell grid (v2): found only when every cell has pixels (a plane of at least 32 x 18).
+        bool allCells = true;
+        for (uint32_t c = 0; c < kGridCells; ++c)
+            if (cellN_[c] == 0)
+                allCells = false;
+        if (allCells) {
+            rec->gridFound = 1;
+            for (uint32_t c = 0; c < kGridCells; ++c)
+                rec->cells[c] = uint32_t(cellSum_[c] / cellN_[c]);
+        }
     }
 
 private:
@@ -259,6 +293,9 @@ private:
     uint32_t max_ = 0;
     std::vector<uint64_t> rowSum_, colSum_, blockSq_;
     std::vector<uint32_t> blockN_;
+    uint64_t cellSum_[kGridCells] = {};
+    uint32_t cellN_[kGridCells] = {};
+    std::vector<uint32_t> rowCell_, colCell_;
 };
 
 // The one-shot form over a half plane (hw x hh uint16, tightly packed): the record, rest of `out` zero. False on bad input.

@@ -24,6 +24,7 @@ namespace FallbackPlainTextTest
 		{
 			const char* ids[] = { "dither", "BTB/WTW", "re-base", "re-base warm-up", "detail pulse", "texture restore", "deband", "motion",
 				"motion consumers", "presentation", "refresh rate", "calibration LUT", "calibration patch", "output range",
+				"skeleton_scene_veto", "skeleton_scene_no_grid",
 				"output request", "geometry", "subtitle detection", "SDR tone shape", "output scaling", "early upload",
 				"early upload frames", "capture extension", "native readback", "vector_engine", "vector_engine_producer", "vector_engine_global",
 				"vector producer", "motion engine", "motion look-ahead", "motion_lookahead_capped", "source resolution look-ahead", "timeline",

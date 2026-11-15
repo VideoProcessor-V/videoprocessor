@@ -4,7 +4,7 @@ Unit: **motion** | side: input | order: 50 | status: **built** | hook point: pre
 
 ## Purpose / why
 
-Estimate motion on the ORIGINAL frame (source raster, before re-base/repair) with the NVIDIA optical-flow engine (NVOF) seeding VP's matcher, with a time-based look-ahead, and keep ONE vectors-valid state that every consumer obeys (invalidated at cuts, drops, repeats, drift, resyncs).
+Estimate motion on the ORIGINAL frame (source raster, before re-base/repair) with the NVIDIA optical-flow engine (NVOF) seeding VP's matcher, with a time-based look-ahead, and keep ONE vectors-valid state that every consumer obeys (invalidated at drops, repeats, drift and resyncs by `MotionValidity`'s spans, and at CONFIRMED scene cuts through its scene seam: `MotionValidity::State::ConfirmedCutReader`, set by the skeleton to the published scene group's `confirmed && cutHere`; `PairValidAt` refuses such a pair and counts it in `ConfirmedCutRefusals()`. U7-accuracy, owner ruling Q5; a provisional cut verdict refuses nothing, and without a skeleton there is no scene veto).
 
 ## How the code works
 

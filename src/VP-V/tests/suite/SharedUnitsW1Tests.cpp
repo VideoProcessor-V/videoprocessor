@@ -235,7 +235,7 @@ namespace SharedUnitsW1TestsNs2
 		TEST_METHOD(UnitVersionsAreStampedAndMatchTheCatalog)
 		{
 			Assert::AreEqual(VpSkeleton::Catalog::kExpectedStatsUnit, VpUnit::SourceStats::kUnitVersion);
-			Assert::AreEqual(1u, VpUnit::CutFadeJudge::kUnitVersion);
+			Assert::AreEqual(3u, VpUnit::CutFadeJudge::kUnitVersion);   // WAIVER-U7ACC-STATS-V2: 2 = the T2 sequence law; WAIVER-U7FADE-V3: 3 = the fade law + partial reset
 			Assert::AreEqual(1u, VpUnit::PictureRect::kUnitVersion);
 			Assert::AreEqual(1u, VpUnit::SourceQuality::kUnitVersion);
 			Assert::AreEqual(VpUnit::SourceStats::kUnitVersion, VpUnit::SourceStats::kRecordVersion);
@@ -399,6 +399,29 @@ namespace SharedUnitsW1TestsNs2
 			Assert::IsTrue(e.flash && !e.cut && e.cutPossible);
 		}
 
+		// WAIVER-U7ACC-STRUCTURE (U7-accuracy, opus test-diff review SHOULD 2, a new test): the structure correlation centres each
+		// gradient component on its own mean. Pooled under one mean, a left-to-right ramp and a top-to-bottom ramp correlated (0.74)
+		// and a real cut between them was read as a lighting change.
+		TEST_METHOD(StructureCorrelationSeparatesOrthogonalRampsAndKeepsAGainChange)
+		{
+			using namespace VpUnit::CutFadeJudge;
+			Grid across, down, textured, dimmed;
+			uint32_t x = 12345u;
+			for (int gy = 0; gy < kGridH; ++gy)
+				for (int gx = 0; gx < kGridW; ++gx)
+				{
+					across.g[gy][gx] = 40.0 + 5.0 * gx;
+					down.g[gy][gx] = 200.0 - 8.0 * gy;
+					x = x * 1664525u + 1013904223u;
+					textured.g[gy][gx] = 20.0 + double((x >> 16) % 200u);
+					dimmed.g[gy][gx] = 0.6 * textured.g[gy][gx];
+				}
+			across.valid = down.valid = textured.valid = dimmed.valid = true;
+			Assert::IsTrue(StructureCorrelation(across, down) < kSameStructure, L"orthogonal ramps: a new structure");
+			Assert::IsTrue(StructureCorrelation(textured, dimmed) >= kSameStructure, L"a gain change keeps the structure");
+			Assert::IsTrue(StructureCorrelation(textured, textured) > 0.999, L"the same grid");
+		}
+
 		TEST_METHOD(GridHistRuleAndMeanAbsDifference)
 		{
 			using namespace VpUnit::CutFadeJudge;
@@ -500,7 +523,9 @@ namespace SharedUnitsW1TestsNs2
 			Assert::AreEqual(0x28b8a668c74cf3dbull, Fnv1a(VpUnit::CutFadeJudge::TrustCutRegionalLine()));
 			Assert::AreEqual(0x10da1f9152c0e32cull, Fnv1a(VpUnit::CutFadeJudge::TrustCutPlainLine()));
 			Assert::AreEqual(0x6b5eb81113219c2cull, Fnv1a(VpUnit::CutFadeJudge::MeanStepCutLine()));
-			Assert::AreEqual(1u, VpUnit::CutFadeJudge::kUnitVersion, L"additive, byte-identical: no unit version bump");
+			// WAIVER-U7ACC-STATS-V2: the kernel pieces above are unchanged; version 2 is the T2 sequence law, not these texts.
+			// WAIVER-U7FADE-V3: version 3 is the CPU fade law and its keep; the kernel pieces above are still unchanged.
+			Assert::AreEqual(3u, VpUnit::CutFadeJudge::kUnitVersion, L"kernel text byte-identical; 2 = the T2 sequence law, 3 = the CPU fade law + partial reset");
 		}
 
 		TEST_METHOD(FadeFitIsIdenticalToTheFrozenCopy)

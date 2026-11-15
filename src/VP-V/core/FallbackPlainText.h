@@ -40,6 +40,8 @@ namespace FallbackPlainText
 			{ "output request", "The requested output format was rejected by the display path" },
 			{ "geometry", "The picture is using a safe fit instead of the requested shape" },
 			{ "subtitle detection", "Subtitle detection is falling behind and skipping work" },
+			{ "skeleton_scene_veto", "Motion matching is not stopped at scene changes on this renderer; only its own continuity checks apply" },
+			{ "skeleton_scene_no_grid", "Scene changes in this small picture are judged by the simpler two-frame test" },
 			{ "SDR tone shape", "The SDR tone shape was not applied" },
 			{ "output scaling", "The output scaler was replaced by a simpler one" },
 			{ "native readback", "Some graphics-card readbacks use a simpler ready check, so analysis results may arrive later" },

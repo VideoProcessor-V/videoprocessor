@@ -12,7 +12,17 @@
 //   auto fm = Vpv::Skeleton::MemoForHost(host, seq);       // a producer thread that knows its renderer and frame
 //
 // Empty FrameMemo = no skeleton module, the Original pathway, no frame recorded on this thread, or an unknown renderer.
+//
+// The SCENE PRODUCT the same way (owner 2026-11-14 17:38 "Ask the skeleton for it same as everything else"; C5 x5dup MUST 1):
+//
+//   FrameAnalysis::Scene s; const char* why = nullptr;
+//   if (Vpv::Skeleton::SceneGroupOf(host, seq, s, &why)) { ... }   // render thread: get-or-compute-and-publish (SkeletonModule::SceneOf)
+//   else                                                    { visible "unavailable" with `why` }
+//
+// It reads the store's scene group, else classifies the frame now and publishes it, so the answer is the same with
+// frame_analysis_store off. A consumer never peeks the store for its CURRENT frame's scene.
 
+#include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/hub/CurrentFrame.h>
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/modules/control/skeleton/SkeletonFacts.h>
@@ -48,6 +58,45 @@ namespace Vpv
 				fm.haveNext = true;
 			}
 			return fm;
+		}
+
+		// The scene product of frame `seq` of `host` (SkeletonModule::SceneOf through IExternalDemand). known = false: no skeleton
+		// module / Original pathway, an unknown renderer, or the frame has no sealed pair of P4 records to classify.
+		inline SceneAnswer SceneOf(const void* host, uint64_t seq)
+		{
+			IExternalDemand* d = host != nullptr ? Demand() : nullptr;
+			return d != nullptr ? d->SceneOf(host, seq) : SceneAnswer();
+		}
+
+		// The same answer in the store's scene-group form (FrameAnalysis::Scene), for consumers whose rule is written on it. `origin`
+		// is not carried by the answer and stays None. False = not answered; `why` (optional) gets the visible cause.
+		inline bool SceneGroupOf(const void* host, uint64_t seq, FrameAnalysis::Scene& out, const char** why = nullptr)
+		{
+			IExternalDemand* d = host != nullptr ? Demand() : nullptr;
+			if (d == nullptr)
+			{
+				if (why)
+					*why = host != nullptr ? "no skeleton module (Original pathway): no scene product" : "no renderer frame on this thread: no scene product";
+				return false;
+			}
+			const SceneAnswer a = d->SceneOf(host, seq);
+			if (!a.known)
+			{
+				if (why)
+					*why = "the skeleton could not classify the frame (no sealed pair of P4 records: analysis lane off, unknown renderer or not primed yet)";
+				return false;
+			}
+			out = FrameAnalysis::Scene();
+			out.cut = a.cut;
+			out.fade = a.fade;
+			out.cutLate = a.cutLate;
+			out.cutHere = a.cutHere;
+			out.confirmed = a.confirmed;
+			out.flash = a.flash;
+			out.cutPossible = a.cutPossible;
+			out.cutStrength = a.cutStrength;
+			out.fadeKeep = a.fadeKeep;
+			return true;
 		}
 	}
 }

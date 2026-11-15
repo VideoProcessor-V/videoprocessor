@@ -82,6 +82,29 @@ namespace MotionValidityTest
 			Assert::IsTrue(state.SpanStatus(1, 2) == Span::Unknown, L"unbound again");
 		}
 
+		// WAIVER-U7ACC-VECTOR-VETO (owner ruling Q5): a CONFIRMED cut at b refuses the pair (a, b) and is counted; the seam is
+		// process-wide, so the test restores whatever was bound before it.
+		static bool CutAtFive(uint64_t seq) { return seq == 5; }
+		TEST_METHOD(AConfirmedCutRefusesThePairEndingOnItAndIsCounted)
+		{
+			auto& reader = MotionValidity::State::ConfirmedCutReader();
+			const MotionValidity::State::ConfirmedCutFn before = reader.load();
+			MotionValidity::State state;
+			reader.store(&CutAtFive);
+			const bool cutPair = state.PairValidAt(4, 5);
+			const bool nextPair = state.PairValidAt(5, 6);
+			const bool farPair = state.PairValidAt(4, 6);
+			const uint64_t refusals = state.ConfirmedCutRefusals();
+			reader.store(before);
+			Assert::IsFalse(cutPair, L"the pair across the confirmed cut is refused");
+			Assert::IsTrue(nextPair, L"the pair after the cut is valid");
+			Assert::IsFalse(farPair, L"adjacency refuses first (not counted as a cut refusal)");
+			Assert::AreEqual(1ull, static_cast<unsigned long long>(refusals), L"one refusal, counted");
+			reader.store(nullptr);
+			Assert::IsTrue(state.PairValidAt(4, 5), L"no reader: the cut seam refuses nothing");
+			reader.store(before);
+		}
+
 		TEST_METHOD(SpanStatusIsValidForSpansOfOneTwoAndAGopWithoutChange)
 		{
 			MotionValidity::State state;

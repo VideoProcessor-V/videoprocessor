@@ -418,12 +418,15 @@ for (uint s = 128u; s > 0u; s >>= 1u) {
 }
 if (li == 0u) {
     int refreshes = td_ci[0];
-    float live[TD_K], ids[TD_K], age[TD_K], cleaned[TD_K];
+    float live[TD_K], ids[TD_K], age[TD_K], cleaned[TD_K], keep[TD_K];
     int nlive = 0;
     for (int k = 0; k < TD_K; k++) {
         vec4 t = texelFetch(tab_old, ivec2(k, 0), 0);
         bool l = t.x > 0.5 && slots_valid > 0.5;
         live[k] = l ? 1.0 : 0.0; ids[k] = t.y; age[k] = t.z + 1.0; cleaned[k] = t.w;
+        // U7 v3 partial reset (row 1 = each slot's keep, the model's Source::keep): a live slot keeps its product times this frame's
+        // fade keep (1 off a fade); a slot that is not live carries none (read only for live slots: row 1 is written with row 0).
+        keep[k] = l ? texelFetch(tab_old, ivec2(k, 1), 0).x * fade_keep : 1.0;
         if (l) nlive++;
     }
     float nextId = reset > 0.5 ? 0.0 : texelFetch(tab_old, ivec2(TD_K, 0), 0).z;
@@ -447,7 +450,7 @@ if (li == 0u) {
             if (cur < 0)
                 for (int k = TD_K - 1; k >= 0; k--)
                     if (live[k] < 0.5) cur = k;
-            live[cur] = 1.0; ids[cur] = nextId; nextId += 1.0; age[cur] = 0.0; cleaned[cur] = TD_TEMPLATE_CLEAN;
+            live[cur] = 1.0; ids[cur] = nextId; nextId += 1.0; age[cur] = 0.0; cleaned[cur] = TD_TEMPLATE_CLEAN; keep[cur] = 1.0;
             nlive++;
             admitted = true;
         }
@@ -465,6 +468,7 @@ if (li == 0u) {
         nextId -= idBase;
     }
     for (int k = 0; k < TD_K; k++) imageStore(tab_out, ivec2(k, 0), vec4(live[k], ids[k], age[k], cleaned[k]));
+    for (int k = 0; k < TD_K; k++) imageStore(tab_out, ivec2(k, 1), vec4(live[k] > 0.5 ? keep[k] : 1.0, 0.0, 0.0, 0.0));
     imageStore(tab_out, ivec2(TD_K, 0), vec4(admitted ? 1.0 : 0.0, float(cur), nextId, float(refreshes)));
     imageStore(tab_out, ivec2(TD_K + 1, 0), vec4(float(victim), float(nlive), 0.0, 0.0));
 }
@@ -700,6 +704,7 @@ if (b.x < TD_BW && b.y < TD_BH) {
         if (!td_live_new(prev)) prev = -1;
         xf = prev >= 0 ? st.xf : 1.0;
         if (a < 0) cwv = 0.0;
+        else cwv *= texelFetch(tab_new, ivec2(a, 1), 0).x;   // U7 v3 partial reset: the slot's keep (the model's c.w *= keep)
     }
     float coefs[TD_K];
     for (int k = 0; k < TD_K; k++) coefs[k] = 0.0;

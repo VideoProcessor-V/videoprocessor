@@ -102,12 +102,13 @@ view (R8_UNORM, half or quarter) the NVOF engine takes.
 
 # SourceStats (shared unit U6, `VpUnit::SourceStats`)
 
-The one law of the P4 source-stats record (doc 62, section 1.2 U6): `SourceStats.h`, `kUnitVersion = 1` (= the record version and
+The one law of the P4 source-stats record (doc 62, section 1.2 U6): `SourceStats.h`, `kUnitVersion = 2` (= the record version and
 `kExpectedStatsUnit`). Moved unchanged from `LaneCpuProducts.h`; the lane names (`SourceStatsRecord`, `StatsAccumulator`,
-`ComputeSourceStats`, ...) are aliases of it.
+`ComputeSourceStats`, ...) are aliases of it. v2 (U7-accuracy) appends the cell grid; every v1 field keeps its offset and law.
 
 - Record (8 KB): 1024-bin histogram (top 10 bits of the 16-bit half plane), mean, min/max, p1/p50/p99 (bin centre), evidence rect
-  (rows/cols above p1 + (p99 - p1) / 16; NOT Bill's active picture, that is U8), grain (median 8x8 block RMS second difference).
+  (rows/cols above p1 + (p99 - p1) / 16; NOT Bill's active picture, that is U8), grain (median 8x8 block RMS second difference),
+  and (v2) the 32 x 18 cell means of the half plane (`cells`, `gridFound` = 0 under 32 x 18): the structure input of U7's cut law.
 - Shared small laws: `FirstBinReaching` (percentile / p99.9 scan), `HistBin10` (N-bin histogram of 10-bit codes), `Histogram10`,
   `HalfL1Distance` (the input of U7).
 - Migrated (identity): the lane producer and live fill (`LaneProductsTests`, `AnalysisLaneTests`), the `VpFrameAnalysis` percentile scan,
@@ -135,7 +136,7 @@ Unit: input/source_analysis (lane/shared)
 | (none) | | | |
 
 ## Products
-P1 half + quarter luma (U3, version 1) and P4 source stats (U6, version 1 = `kExpectedStatsUnit`). A reader built against another
+P1 half + quarter luma (U3, version 1) and P4 source stats (U6, version 2 = `kExpectedStatsUnit`). A reader built against another
 version engages the consumer's reduced path (FallbackCatalog `product.*`); the veto and the lane classifier have no reduced path of their own.
 
 ## Status and fallbacks

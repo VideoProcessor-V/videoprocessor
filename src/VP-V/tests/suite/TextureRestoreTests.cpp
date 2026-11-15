@@ -913,7 +913,7 @@ namespace TextureRestoreTestsNs
 		pl_dispatch dispatch = nullptr;
 		~GpuDevice()
 		{
-			VpDetailRestore::DefaultSceneReader() = &VpDetailRestore::ReadSceneFromStore;
+			VpDetailRestore::DefaultSceneReader() = &VpDetailRestore::ReadSceneFromSkeleton;   // the production default (C5)
 			if (dispatch) pl_dispatch_destroy(&dispatch);
 			if (d3d11) pl_d3d11_destroy(&d3d11);
 			if (log) pl_log_destroy(&log);

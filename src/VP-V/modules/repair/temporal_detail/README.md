@@ -141,7 +141,7 @@ revealed regions (the better-validated of past/future, never both summed).
 Each frame carries a `StampView` (full, continuity, rebase H/V, settings[repair]) that the
 host fills, later from `core/Indicator` (doc 25 §A2). Policies: `full`, `continuity` (pairs spanning a slip are
 invalid) and `rebase[H|V]` reset; `settings[repair]` resets only for
-mode/max_age changes (strength/boost change the target); `timing` is ignored. Cuts and fades reset the store.
+mode/max_age changes (strength/boost change the target); `timing` is ignored. Cuts reset the store. A fade does not (U7 v3, owner 2026-11-15: partial reset on fades): every stored slot's keep is multiplied by the frame's fade keep (`FrameIn::fadeKeep` / `Params::fadeKeep`, from `FrameAnalysis::Scene::fadeKeep`; GPU: row 1 of the slot table) and its transfers are scaled by it; an admitted slot starts at 1. A fade without a keep resets ("reset: fade (no keep)").
 
 ## Declared products (core/Products.h)
 

@@ -180,14 +180,16 @@ namespace Vpv
 			bool EngineFieldFactsOf(const void* host, uint64_t seq, EngineFieldFacts& out) const;
 			// Tests: the retry step the module runs at every Begin and AfterRender (the P1 inputs are published by the lane's own threads).
 			void RetryEngineFeedForTesting(const void* host);
-			// The scene of frame `seq` against `seq - 1` from the two P4 records (render thread, after the seal of `seq`). False when a record is not readable.
+			// The scene of frame `seq` (render thread, after the seal of `seq`): the U7 v2 sequence verdict over the P4 records around it, the
+			// pair fade against `seq - 1` (SkeletonFacts.h SceneFacts). False when a record is not readable.
 			bool SceneFactsOf(const void* host, uint64_t seq, SceneFacts& out) const;
 			// The SCENE PRODUCT (W1-C7): cut / fade of frame `seq` against `seq - 1`, the one reader every consumer uses (the camera extension's
 			// ReadScene reads the same store group). Order: the frame-analysis store's scene group (published by this module at the seal of
 			// `seq`); else classified from the two P4 records now (SceneFactsOf), written into the store when it holds the frame's record. The
 			// answer is identical with frame_analysis_store off (nothing to read, always live). RENDER THREAD for the live path (it reads the
 			// lane's slots); the store path is any thread. known = false when neither answers.
-			SceneAnswer SceneOf(const void* host, uint64_t seq) const;
+			// Also IExternalDemand::SceneOf, the entry module code outside the skeleton uses (Vpv::Skeleton::SceneOf, SkeletonAccess.h).
+			SceneAnswer SceneOf(const void* host, uint64_t seq) const override;
 			SceneCounters SceneCountersOf(const void* host) const;
 
 			// The queue the lane graph is sized for: the terms the record histories are derived from (render-ahead R, lane lead L,

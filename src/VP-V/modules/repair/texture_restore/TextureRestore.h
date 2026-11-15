@@ -46,7 +46,8 @@
 //     vectors where they are trusted; restarted where the low band (L2) changed since the
 //     previous frame (per pixel, along the vector when there is one) by more than the
 //     coding-noise allowance and the grain's share of it, on untrusted blocks, on a focus pull (F or the mid band's texture fell beyond what coding
-//     explains), on cuts / fades / Forget / non-consecutive sequences.
+//     explains), on cuts / Forget / non-consecutive sequences. A fade (U7 v3, owner 2026-11-15) is no restart: the references
+//     energies are scaled by the frame's fade keep squared (one more decay step; the focus ratio F is not), so the history shrinks with the fading picture.
 //  6. Gains per tile, clamped to [1, cap], with dead zones for the estimators' noise:
 //     grain gG = sqrt((N1ref + fg) / ((N1 + fg)(1 + kGrainMargin))) on the grain part of D1;
 //     texture gTb = sqrt((Tb_ref + ft) / (Tb + kTextureMargin x Nb + ft)) on the texture parts of
@@ -178,7 +179,13 @@ namespace TextureRestore
 		unsigned long long SceneMissing() const { return sceneMissing; }
 		// The last judged frame had no scene record and restarted (shown in Ctrl+I / Config status, never silent).
 		bool SceneJudgeUnavailable() const { return sceneUnavailable; }
-		const char* SceneJudgeWhy() const { return VpDetailRestore::SceneUnavailableWhy(); }
+		const char* SceneJudgeWhy() const { return sceneWhy ? sceneWhy : VpDetailRestore::SceneUnavailableWhy(); }
+		// U7 v3 partial reset on fades (SceneRestart.h): fade frames whose references were reduced (no restart), fade frames restarted
+		// because their group had no keep (shown through SceneJudgeUnavailable / SceneJudgeWhy), and the last judged frame's keep
+		// (amplitude, 1 = no fade, 0 = restart).
+		unsigned long long ScenePartials() const { return scenePartials; }
+		unsigned long long SceneFadeRestarts() const { return sceneFadeRestarts; }
+		float LastHistoryKeep() const { return lastHistoryKeep; }
 		// The source frame the references last advanced on (0 = none or a restart pending): a
 		// caller may apply this frame's decision to another picture of it (a de-judder extra)
 		// as a repeat, without advancing.
@@ -188,8 +195,10 @@ namespace TextureRestore
 		struct Impl;
 		Impl* impl = nullptr;
 		std::string error;
-		unsigned long long failures = 0, frames = 0, sceneMissing = 0;
+		unsigned long long failures = 0, frames = 0, sceneMissing = 0, scenePartials = 0, sceneFadeRestarts = 0;
 		bool sceneUnavailable = false;
+		const char* sceneWhy = nullptr;
+		float lastHistoryKeep = 1.0f;
 		bool scratchShort = false;
 	};
 }

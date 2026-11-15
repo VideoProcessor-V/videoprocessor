@@ -37,7 +37,7 @@
 //  - History: a GPU ring of (E1, E2, mean luma, flag) per source frame. Reference per band
 //    R = max(E, max over the run of E_j x DecayPerFrame^j) over the last WindowFrames() frames
 //    (seconds converted with the content rate), stopping at the frame that started the run
-//    (a cut, a fade, a restart). Optional look-ahead: the next source frame's energies when
+//    (a cut or another restart). Optional look-ahead: the next source frame's energies when
 //    the caller measured them (MeasureAhead) and they are comparable (same mean luma within
 //    the cut level, energy ratio within kAheadMaxRatio).
 //  - Gain per band: Gain(R, E, cap) = 1 inside the dead zone (R / E <= 1 + kDeadZone),
@@ -49,8 +49,11 @@
 //    hardly changes a tile's mean or spread, new content or a flash does. w is bilinear
 //    between tile centres.
 //  - Cut / fade: the shared unit U7's verdict for the source frame (CutFadeJudge over the P4
-//    records, read from the skeleton's scene group, SceneRestart.h; registered fix D8). Either
-//    restarts the history (gain 1 on that frame), as do Forget(), a non-consecutive sequence, a
+//    records, read from the skeleton's scene group, SceneRestart.h; registered fix D8). A cut
+//    restarts the history (gain 1 on that frame); a fade (U7 v3, owner 2026-11-15) does NOT:
+//    every reference is scaled by the product of the fade keeps squared of the frames after it
+//    (ring row 1; the energy the faded picture still explains), so the gain law compares like with like through the
+//    fade and pre-fade detail is not carried. Restarts also come from Forget(), a non-consecutive sequence, a
 //    geometry change and a frame whose scene group is not readable (no private fallback; counted
 //    by SceneMissing()). CutCodes remains only the look-ahead agreement level.
 //  - Output Y' = Y + w ((g1 - 1) D1 + (g2 - 1) D2); chroma planes pass through.
@@ -254,13 +257,21 @@ namespace DetailPulse
 		unsigned long long SceneMissing() const { return sceneMissing; }
 		// The last judged frame had no scene record and restarted (shown in Ctrl+I / Config status, never silent).
 		bool SceneJudgeUnavailable() const { return sceneUnavailable; }
-		const char* SceneJudgeWhy() const { return VpDetailRestore::SceneUnavailableWhy(); }
+		const char* SceneJudgeWhy() const { return sceneWhy ? sceneWhy : VpDetailRestore::SceneUnavailableWhy(); }
+		// U7 v3 partial reset on fades (SceneRestart.h): fade frames whose history was reduced (no restart), fade frames restarted
+		// because their group had no keep (shown through SceneJudgeUnavailable / SceneJudgeWhy), and the last judged frame's keep
+		// (amplitude, 1 = no fade, 0 = restart).
+		unsigned long long ScenePartials() const { return scenePartials; }
+		unsigned long long SceneFadeRestarts() const { return sceneFadeRestarts; }
+		float LastHistoryKeep() const { return lastHistoryKeep; }
 
 	private:
 		struct Impl;
 		Impl* impl = nullptr;
 		std::string error;
-		unsigned long long failures = 0, frames = 0, aheadUsed = 0, sceneMissing = 0;
+		unsigned long long failures = 0, frames = 0, aheadUsed = 0, sceneMissing = 0, scenePartials = 0, sceneFadeRestarts = 0;
 		bool sceneUnavailable = false;
+		const char* sceneWhy = nullptr;
+		float lastHistoryKeep = 1.0f;
 	};
 }
