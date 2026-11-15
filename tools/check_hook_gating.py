@@ -27,8 +27,10 @@ Every hook STATEMENT inside a function body of a Bill-owned production file must
   gated     it calls a function whose definition carries `// VPV-GATED` on its signature line (or the line
             above) and whose body the checker verified: `if (<positive predicate, || - joined>) return ...;`
             (predicate from the list above) at the body's top level, preceded only by inert statements
-            (declarations without calls, and `const bool originalPathway = <...>OriginalPathway[Of](<x>.host);`,
-            the guard's own predicate); any earlier block, call or assignment leaves the marker unverified.
+            (declarations without calls, and the guard's own predicate in one of its two house forms,
+            `const bool originalPathway = OriginalPathwayOf(<x>.host);` or `... =
+            Vpv::Hub::ExtensionHub::Instance().OriginalPathway(<x>.host);`, no other receiver chain); any earlier
+            block, call or assignment leaves the marker unverified.
             A marker without that early return is a hit ("gated-marker-unverified").
   allowed   its callee is in ALLOW_CALLEES or the site is in ALLOW_SITES (reason required; reported).
   inert     a declaration without a call, a guard line itself, a brace / comment / preprocessor line.
@@ -573,12 +575,17 @@ def _positive_early_return(ch):
     return positive_guard(c[0]) and bool(re.match(r"^\s*(?:\{\s*)?return\b", body))
 
 
-# The one call allowed before a VPV-GATED guard: the declaration of the guard's own predicate from the pathway query
-# (house form `const bool originalPathway = OriginalPathwayOf(ic.host);` or
-# `... = Vpv::Hub::ExtensionHub::Instance().OriginalPathway(f.host);`). Nothing else may share the statement.
+# The one call allowed before a VPV-GATED guard: the declaration of the guard's own predicate from the pathway query,
+# in exactly one of the two house forms: the plain (unqualified) free call `const bool originalPathway =
+# OriginalPathwayOf(ic.host);`, or the hub singleton `... = Vpv::Hub::ExtensionHub::Instance().OriginalPathway(f.host);`.
+# No other receiver, call or qualifier may precede the query: a receiver chain such as `ResetAll().OriginalPathway(c.host)`
+# or `Flush()->Drain().OriginalPathway(c.host)` would hide an effect inside the admitted declaration (HG2-RECEIVER-CHAIN,
+# gate C-T3). Every accepted text is also accepted by the previous pattern (a tightening). Nothing else may share the
+# statement.
 PATHWAY_QUERY_DECL_RE = re.compile(
     r"^(?:const\s+)?bool\s+(?:originalPathway|pipelineOriginalPathway)\s*=\s*"
-    r"(?:[A-Za-z_][\w:]*(?:\(\s*\))?(?:\.|->))*(?:[\w:]+::)?OriginalPathway(?:Of)?\(\s*[A-Za-z_][\w]*(?:(?:\.|->)\w+)*\s*\)\s*;?\s*$")
+    r"(?:OriginalPathwayOf|Vpv::Hub::ExtensionHub::Instance\(\s*\)\.OriginalPathway)"
+    r"\(\s*[A-Za-z_][\w]*(?:(?:\.|->)\w+)*\s*\)\s*;?\s*$")
 
 
 def gated_guard_first(func):
@@ -591,7 +598,7 @@ def gated_guard_first(func):
         if ch.kind == "open":
             return False
         if PATHWAY_QUERY_DECL_RE.match(ch.text.strip()):
-            continue   # `const bool originalPathway = <...>OriginalPathway[Of](<x>.host);`: the guard's own predicate
+            continue   # `const bool originalPathway = OriginalPathwayOf(<x>.host);` or the hub form: the guard's own predicate
         pieces = [p.strip() for p in ch.text.split(";") if p.strip()]
         if not all(_inert_piece(p, set()) for p in pieces):
             return False
