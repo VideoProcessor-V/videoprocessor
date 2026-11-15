@@ -278,9 +278,23 @@ namespace Vpv
 		// is the largest, so reserve = VariantReserveBytes(level 1, luma). Registered on the first size and re-registered only when
 		// that largest size changes (like EdgeMapModule); a host is forgotten at GpuReleased / Shutdown. Nothing is registered
 		// before a size is known (an Acquire then is a visible NoOwnerFill). Cost per frame: one short lock and a lookup.
+		class P1GpuModule;
+		// The registered module (owned by the hub); null before registration and after the hub destroyed it (the destructor
+		// clears it: a test reset of the hub's modules leaves no dangling pointer for NoteP1GpuSourceLuma).
+		static std::atomic<P1GpuModule*>& RegisteredP1GpuModule()
+		{
+			static std::atomic<P1GpuModule*> module{ nullptr };
+			return module;
+		}
+
 		class P1GpuModule : public Hub::ISkeletonModule
 		{
 		public:
+			~P1GpuModule() override
+			{
+				P1GpuModule* self = this;
+				RegisteredP1GpuModule().compare_exchange_strong(self, nullptr, std::memory_order_acq_rel);
+			}
 			const char* Name() const override { return "input.source_analysis.p1_gpu"; }
 			void OnLifecycle(RE::LifecycleFacts& f) override
 			{
@@ -383,13 +397,6 @@ namespace Vpv
 			uint64_t tried_ = 0;
 			std::atomic<bool> registered_{ false };
 		};
-
-		// The registered module (owned by the hub, which keeps its modules for the process lifetime); null before registration.
-		static std::atomic<P1GpuModule*>& RegisteredP1GpuModule()
-		{
-			static std::atomic<P1GpuModule*> module{ nullptr };
-			return module;
-		}
 
 		// Start-up only (HubBootstrap), after the skeleton module; idempotent.
 		void RegisterP1GpuModule()
