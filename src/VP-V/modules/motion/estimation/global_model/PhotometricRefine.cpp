@@ -12,6 +12,7 @@
 #include <cmath>
 
 #include "GlobalModelGeometry.h"
+#include <VP-V/modules/motion/estimation/composed/WarpSampler.h>
 
 namespace CameraModel
 {
@@ -27,33 +28,25 @@ namespace CameraModel
 			uint32_t Code(int x, int y) const { return static_cast<uint32_t>(d[static_cast<size_t>(y) * stride + x]); }
 		};
 
-		// Keys cubic (a = -0.5) weights of the taps at -1, 0, 1, 2 for a fraction t in [0, 1).
-		inline void KeysWeights(double t, double* wt)
+		// The raw codes of a Plane as the shared sampler's image (int w, h; double at(x, y)); the scale k is applied once to the
+		// sum below, as before, not per tap.
+		template <typename Pix>
+		struct RawCodes
 		{
-			wt[0] = ((-0.5 * t + 1.0) * t - 0.5) * t;
-			wt[1] = (1.5 * t - 2.5) * t * t + 1.0;
-			wt[2] = ((-1.5 * t + 2.0) * t + 0.5) * t;
-			wt[3] = (0.5 * t - 0.5) * t * t;
-		}
+			const Plane<Pix>& p;
+			int w, h;
+			double at(int x, int y) const { return static_cast<double>(p.d[static_cast<size_t>(y) * p.stride + x]); }
+		};
 
-		// Sample at continuous pixel coordinates (u, v) (pixel centres at integers). False when a tap would leave the plane
-		// (no clamping: a clamped sample biases the solution) or the position is not finite.
+		// Sample at continuous pixel coordinates (u, v) (pixel centres at integers): Keys cubic a = -0.5 = Catmull-Rom, through the
+		// ONE shared sampler VpComposed::SampleBicubic (composed/WarpSampler.h; rule 20). Its footprint rule is this one: false when a
+		// tap would leave the plane (no clamping: a clamped sample biases the solution) or the position is not finite.
 		template <typename Pix>
 		inline bool SampleBicubic(const Plane<Pix>& p, double u, double v, double* out)
 		{
-			if (!(u >= 1.0 && v >= 1.0 && u < p.w - 2.0 && v < p.h - 2.0))
-				return false;
-			const int x0 = static_cast<int>(u), y0 = static_cast<int>(v);
-			double wx[4], wy[4];
-			KeysWeights(u - x0, wx);
-			KeysWeights(v - y0, wy);
-			const Pix* row = p.d + static_cast<size_t>(y0 - 1) * p.stride + (x0 - 1);
 			double acc = 0;
-			for (int r = 0; r < 4; ++r)
-			{
-				const Pix* q = row + static_cast<size_t>(r) * p.stride;
-				acc += wy[r] * (wx[0] * q[0] + wx[1] * q[1] + wx[2] * q[2] + wx[3] * q[3]);
-			}
+			if (!VpComposed::SampleBicubic(RawCodes<Pix>{ p, p.w, p.h }, u, v, acc))
+				return false;
 			*out = acc * p.k;
 			return true;
 		}

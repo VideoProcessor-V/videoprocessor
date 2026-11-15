@@ -55,6 +55,7 @@ namespace FallbackPlainText
 			{ "motion engine", "The motion engine is off or reduced, so steps that reuse its motion use their simpler path" },
 			{ "motion look-ahead", "Some frames went without optical-flow look-ahead" },
 			{ "motion_lookahead_capped", "The motion look-ahead covers fewer frames than its depth asks for" },
+			{ "composed vectors", "Motion followed across several frames reaches fewer frames than asked; the steps that use it work from fewer frames" },
 			{ "source resolution look-ahead", "Some frames had their source resolution judged on arrival only" },
 			{ "skeleton_admission", "In this low-latency mode the temporal detail results are not made, so the steps that read them run without them" },
 		};

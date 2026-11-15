@@ -399,3 +399,17 @@ Design goal (refs/129 L-B4; iface-L-CORE sections 4-7; refs/128): the half luma 
 - P7 slot bytes: written and read by the ONE codec `CameraLink::EncodeRecordPod` / `DecodeRecordPod` (`global_model/link/CameraRecordPool.h`, magic CRD1; tests `tests/CameraRecordPodTests.cpp`: round-trip, refusal, FixedLagSmoother parity). Blocks and objects stay in the camera store, not the slot. A P9 owner fill fed from the P7 slot does NOT exist yet (open, 102b L-B4-P9-FILL).
 - Settings: none new (no Config key, no default; the P1 read is a seam, not a switch).
 - Fallback visibility: the producer keeps its private HalfLuma8 only for RGB / full-range formats (OwnDecode) and on a P1 miss (Unread); both are counted in `P1AcquireSource`, with no on-screen consumer yet (102b row L-B4-P1-COUNTERS-NO-CONSUMER).
+
+## Composed vectors (ENGINE-COMPOSED-VECTORS, OD 11-14)
+
+`composed/ComposedVectors.h` + `composed/ComposedVectorPlan.h`: the shared per-pixel composed vectors of frame t to t-k (back) and t+k (ahead),
+chained from the engine's ADJACENT pairs (`d_k(p) = d_{k-1}(p) + V(p + d_{k-1}(p))`, bilinear per pixel) with a trust (pair CellTrust x landing
+consistency FallOff) and an uncertainty in px (the TemporalDetail rule, `repair/temporal_detail/TemporalDetailModel.h`). Readers: P10g grain level and
+TemporalDetail (owner 2026-11-14, option B weak texture: ONE shared neighbour-warp product, current frame excluded). Pairs and trust come only through
+`IPairSource` (shared P2 / CellTrust memo, MotionValidity epochs; the adapter mirrors `SharedMotionSource`); no matcher, no private trust map (rules 21, N1).
+Depth: 8 back + 4 ahead, low latency 10 + 0; ahead = max active reader need capped by `VpSkeleton::kAheadCeiling` and the queue; every cap is visible
+(`Plan::note`, `Product::CurrentStatus`). Provenance: lead12\proof-weaktex-BC.md s11; register row ENGINE-COMPOSED-VECTORS. Its ProductId is the FIXED id 34
+`kComposedVectors` (owner R14-95 fixed id table, `core/Products.h`); it stays in `kReservedProductIds` (an absent registry slot, no catalog row) until
+its registry decl and reader row land (lead ruling SHOULD S3), so the pinned product counts do not move. CPU reference; GPU form = register row ECV-GPU-FORM (trigger S-3c T3).
+Details: `composed/README.md`.
+Tests: `tests/ComposedVectorsTests.cpp`.

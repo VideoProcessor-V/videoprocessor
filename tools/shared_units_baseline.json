@@ -53,6 +53,12 @@
      "pattern": "^\\s*constexpr (int|double) \\w+ = kGrainLaw\\.\\w+;",
      "kind": "false_positive",
      "reason": "reads the U1 grain law by name (GrainSplit::DefaultParams), not a private copy (B2 unit move, ND04; verified at r2/job1-b2 f2a63dd3e)"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/composed/ComposedVectorPlan.h",
+     "pattern": "^enum class Reader : uint8_t \\{ P10gGrainLevel = 0, TemporalDetail, kCount \\};$|^\\s*case Reader::P10gGrainLevel: return \"grain level\";$",
+     "kind": "false_positive",
+     "reason": "reader identity of the composed-vectors depth law (enum Reader::P10gGrainLevel :35 and its Ctrl+I display name \"grain level\" :40): names the P10g reader, computes no grain estimate (ECV3 audit c5-audit-ecv3.md; WAIVER-ECV-U1-KFP)"
     }
    ]
   },
@@ -737,7 +743,14 @@
   },
   "U14": {
    "name": "trail_compose",
-   "known_false_positive": [],
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/core/FallbackPlainText.h",
+     "pattern": "^\\s*\\{ \"composed vectors\", \"Motion followed across several frames reaches fewer frames than asked; the steps that use it work from fewer frames\" \\},$",
+     "kind": "false_positive",
+     "reason": "user text: the one-time notice row keyed by the fixed FallbackCatalog id \"composed vectors\" (FallbackCatalog.h:324-325); composes no vectors (precedent U10 vector_engine_global row, refs/126 s3 B0; WAIVER-C5-N3-ECV3-U14)"
+    }
+   ],
    "blocking": true,
    "baseline_duplicates": 0
   },
