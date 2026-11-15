@@ -82,38 +82,49 @@ namespace ScalerPass
 			}
 			return true;
 		}
-	}
 
-	// Hermite (cubic B=C=0): 1 - 3x^2 + 2x^3 on [0,1], zero beyond. libplacebo's
-	// ortho sampler turns an all-positive kernel (radius == radius_zero) into
-	// half-as-many hardware-bilinear fetches whose sub-texel fraction is only
-	// ~8-bit, costing ~1 code at 10-bit. This kernel gives the identical
-	// weights but a -1e-12 tail on (1,1.5): that is far below fp16/fp32 LUT
-	// resolution (the filter LUT stores it as a ~zero weight; it is not removed,
-	// it is just negligible), and it makes radius > radius_zero so the exact
-	// one-tap-per-texel path runs (about 4x the texture reads of the 2-fetch path).
-	// ExactTapsTaken() verifies this on the built filter; it is checked, not assumed.
-	double HermiteExactWeight(const pl_filter_ctx*, double x)
-	{
-		x = x < 0 ? -x : x;
-		if (x < 1.0) return 1.0 - 3.0 * x * x + 2.0 * x * x * x;
-		return x < 1.5 ? -1e-12 : 0.0;
-	}
-	const pl_filter_function kHermiteExact = { "hermite_exact", 2.0f, false, {}, {}, HermiteExactWeight };
+		// Hermite (cubic B=C=0): 1 - 3x^2 + 2x^3 on [0,1], zero beyond. libplacebo's
+		// ortho sampler turns an all-positive kernel (radius == radius_zero) into
+		// half-as-many hardware-bilinear fetches whose sub-texel fraction is only
+		// ~8-bit, costing ~1 code at 10-bit. This kernel gives the identical
+		// weights but a -1e-12 tail on (1,1.5): that is far below fp16/fp32 LUT
+		// resolution (the filter LUT stores it as a ~zero weight; it is not removed,
+		// it is just negligible), and it makes radius > radius_zero so the exact
+		// one-tap-per-texel path runs (about 4x the texture reads of the 2-fetch path).
+		// ExactTapsTaken() checks this on an EQUIVALENT filter (same kernel, window and
+		// radius; the sampler's own filter has 256 LUT entries and blur = inv_scale, and blur
+		// scales radius and radius_zero alike, so the comparison is the same); it is checked,
+		// not assumed. The real fix is an explicit fork flag (102b UPSC1-EXACT-TAPS-FLAG).
+		double HermiteExactWeight(const pl_filter_ctx*, double x)
+		{
+			x = x < 0 ? -x : x;
+			if (x < 1.0) return 1.0 - 3.0 * x * x + 2.0 * x * x * x;
+			return x < 1.5 ? -1e-12 : 0.0;
+		}
+		const pl_filter_function kHermiteExact = { "hermite_exact", 2.0f, false, {}, {}, HermiteExactWeight };
 
-	// True when libplacebo's ortho sampler will NOT use the half-fetch hardware-bilinear
-	// path for this filter (it does so exactly when radius == radius_zero).
-	bool ExactTapsTaken(const pl_filter_config& cfg)
-	{
-		pl_filter_params fp{};
-		fp.config = cfg;
-		fp.lut_entries = 64;
-		fp.row_stride_align = 4;
-		pl_filter f = pl_filter_generate(nullptr, &fp);
-		if (!f) return false;
-		const bool exact = f->radius != f->radius_zero;
-		pl_filter_free(&f);
-		return exact;
+		// True when libplacebo's ortho sampler will NOT use the half-fetch hardware-bilinear
+		// path for this filter (it does so exactly when radius == radius_zero).
+		bool ExactTapsTaken(const pl_filter_config& cfg)
+		{
+			pl_filter_params fp{};
+			fp.config = cfg;
+			fp.lut_entries = 64;
+			fp.row_stride_align = 4;
+			pl_filter f = pl_filter_generate(nullptr, &fp);
+			if (!f) return false;
+			const bool exact = f->radius != f->radius_zero;
+			pl_filter_free(&f);
+			return exact;
+		}
+
+		// The Hermite config is a constant (FilterConfig ignores the spec's parameters for it), so
+		// the filter is generated once, not on every Apply on the render thread.
+		bool HermiteTakesExactTaps(const pl_filter_config& cfg)
+		{
+			static const bool exact = ExactTapsTaken(cfg);
+			return exact;
+		}
 	}
 
 	pl_filter_config FilterConfig(const ScalerKernels::Spec& spec)
@@ -220,7 +231,7 @@ namespace ScalerPass
 		if (!ensure(textures[slot], outW, outH)) return fail("texture allocation failed");
 
 		const pl_filter_config cfg = FilterConfig(st.filter);
-		if (st.filter.kind == ScalerKernels::Kind::Hermite && !ExactTapsTaken(cfg))
+		if (st.filter.kind == ScalerKernels::Kind::Hermite && !HermiteTakesExactTaps(cfg))
 			return fail("Hermite did not take the exact-tap ortho path (hardware-bilinear half fetches would cost ~1 code)");
 		bool ok = true;
 		if (polar)
