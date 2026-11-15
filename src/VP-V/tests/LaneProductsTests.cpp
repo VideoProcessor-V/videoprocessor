@@ -990,7 +990,7 @@ namespace HalfLumaUnitTestsNs
 					}
 
 				// HalfLumaRows (the P1 half plane) against the old form, every row band.
-				const uint32_t hw = HalfDim(width), hh = HalfDim(height);
+				const uint32_t hw = VpLaneProducts::HalfDim(width), hh = VpLaneProducts::HalfDim(height);
 				std::vector<uint16_t> reference(size_t(hw) * hh);
 				for (uint32_t yy = 0; yy < hh; ++yy)
 				{
@@ -1005,8 +1005,8 @@ namespace HalfLumaUnitTestsNs
 					}
 				}
 				std::vector<uint16_t> out(reference.size(), 0xCDCDu);
-				HalfLumaRows(v, out.data(), 0, 1);
-				HalfLumaRows(v, out.data(), 1, hh);
+				VpLaneProducts::HalfLumaRows(v, out.data(), 0, 1);
+				VpLaneProducts::HalfLumaRows(v, out.data(), 1, hh);
 				Assert::IsTrue(out == reference, (L"HalfLumaRows == the old expression's half plane" + at).c_str());
 			}
 		}
