@@ -116,10 +116,12 @@ public:
                 m_reasons.Note(Reason::SourceNotServed);
                 break;
             }
-            const int slot = m_ring.Held();
+            // The physical slot no held pair uses (audit MUST 3: never the ring position, which moves when the front is consumed).
+            const int slot = m_ring.FreeSlot();
+            if (slot < 0) { ++m_pushRefused; break; }
             const double ms = m_engine->Estimate(k, slot, fromPlanes, toPlanes);
             if (!(ms >= 0.0)) { ++m_failed; if (done == 0) return -1.0; break; }
-            if (m_ring.Push(k) != PushResult::Held) { ++m_pushRefused; break; }
+            if (m_ring.Push(k, slot) != PushResult::Held) { ++m_pushRefused; break; }
             m_cost.Note(ms);
             used += ms;
             ++done;
@@ -131,11 +133,11 @@ public:
         return used;
     }
 
-    // The render frame's estimate of (from, to): true = taken from the ring (no render-time P3); false = estimate now (counted with the
-    // reason the slot last gave: the visible fallback).
-    bool ConsumeAtRender(uint64_t from, uint64_t to, uint64_t epoch)
+    // The render frame's estimate of (from, to): true = taken from the ring (no render-time P3), `*slot` = the host slot the pair was
+    // estimated into (the render reads that slot); false = estimate now (counted with the reason the slot last gave: the visible fallback).
+    bool ConsumeAtRender(uint64_t from, uint64_t to, uint64_t epoch, int* slot = nullptr)
     {
-        if (m_ring.Consume(from, to, epoch)) { ++m_renderSaved; return true; }
+        if (m_ring.Consume(from, to, epoch, slot)) { ++m_renderSaved; return true; }
         ++m_renderFallback;
         ++m_fallbackBy[static_cast<size_t>(m_reasons.Last())];
         return false;
@@ -155,6 +157,7 @@ public:
     unsigned long long RenderFallbackBy(Reason r) const { return m_fallbackBy[static_cast<size_t>(r)]; }
     unsigned long long Failed() const { return m_failed; }
     unsigned long long AlreadyHeld() const { return m_alreadyHeld; }
+    unsigned long long PushRefused() const { return m_pushRefused; }
     unsigned long long SourceNotServed() const { return m_sourceNotServed; }
     VpSkeleton::AcquireCause LastSourceCause() const { return m_lastSourceCause; }
 
@@ -170,6 +173,10 @@ public:
             m_ring.Discarded(DiscardCause::Drop), m_ring.Discarded(DiscardCause::Resync), m_ring.Discarded(DiscardCause::NextDiffers),
             m_ring.Discarded(DiscardCause::EpochMoved), m_ring.Discarded(DiscardCause::PictureChanged), ReasonName(m_reasons.Last()));
         std::string s(buf);
+        // Every other way a pair is lost or not made is on the line too (audit SHOULD 4: no log-only counts).
+        if (m_ring.Discarded(DiscardCause::LeaseLost) > 0) s += "; lease lost " + std::to_string(m_ring.Discarded(DiscardCause::LeaseLost));
+        if (m_pushRefused > 0) s += "; push refused " + std::to_string(m_pushRefused);
+        if (m_failed > 0) s += "; estimate failed " + std::to_string(m_failed);
         if (m_sourceNotServed > 0) s += std::string("; source ring not served ") + std::to_string(m_sourceNotServed) + " (" + VpSkeleton::Token(m_lastSourceCause) + ")";
         return s;
     }

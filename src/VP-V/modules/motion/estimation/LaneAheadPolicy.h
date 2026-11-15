@@ -263,7 +263,9 @@ private:
 // The ONE arbiter of ahead pairs: entries strictly chained (entry k.to == entry k+1.from, E1), each pair held at most once (compute once),
 // each keyed by the epoch it was made in (E12). At depth 1 it behaves as Dejudder::AheadSchedule's one-pair entry (hit = the front pair with
 // its epoch; anything else = a miss that discards every entry, the render estimates the pair as today). Pure bookkeeping: the textures live in
-// the host's slots (Entry::extra, the matcher's SnapshotForWarp(slot)); the slot of an entry is its ring position.
+// the host's slots (Entry::extra, the matcher's SnapshotForWarp(slot)). Each entry carries its PHYSICAL slot (the host textures never move
+// when the front is consumed): FreeSlot() names the slot a new estimate writes, Push(k, slot) records it, SlotAt(i) / Consume(..., &slot) give
+// it back (PREC2-S3A audit MUST 3: a ring position is not a slot once the front has been consumed).
 enum class DiscardCause : uint8_t {
     NextDiffers = 0,   // the frame after the render frame is not the entry's `to` (replaced frame / chain broken)
     Drop,              // a frame the ring held a pair for was passed without being consumed (dropped / skipped frame)
@@ -287,24 +289,38 @@ inline const char* DiscardCauseName(DiscardCause c)
     }
 }
 
-enum class PushResult : uint8_t { Held = 0, BadKey, NotChained, AlreadyHeld, Full, Count };
+enum class PushResult : uint8_t { Held = 0, BadKey, NotChained, AlreadyHeld, Full, BadSlot, Count };
 
 class AheadRing {
 public:
-    static constexpr int kCapacityMax = kStructuralMaxLead;
+    // The owner's ahead cap (OD-11-14-AHEAD-CAP, RULEBOOK s4 "Ahead work is capped at 4-6 frames"): kAheadCeilingLead, never the P2 ring's 13.
+    static constexpr int kCapacityMax = kAheadCeilingLead;
 
     explicit AheadRing(int capacity = RingCapacity()) { SetCapacity(capacity); }
 
-    // The ring's depth target (bounded to [1, kCapacityMax]); a smaller capacity drops the deepest entries (counted as Drop: never silent).
+    // The ring's depth target (bounded to [1, kCapacityMax]); a smaller capacity drops the deepest entries, and every entry from the first one
+    // whose slot is beyond the new capacity (the chain stays a prefix, never a hole), each counted as Drop: never silent.
     void SetCapacity(int capacity)
     {
-        m_capacity = capacity < 1 ? 1 : (capacity > kStructuralMaxLead ? kStructuralMaxLead : capacity);
-        while (m_count > m_capacity) { --m_count; ++m_discarded[static_cast<size_t>(DiscardCause::Drop)]; }
+        m_capacity = capacity < 1 ? 1 : (capacity > kCapacityMax ? kCapacityMax : capacity);
+        int keep = m_count < m_capacity ? m_count : m_capacity;
+        for (int i = 0; i < keep; ++i)
+            if (m_slots[static_cast<size_t>(i)] >= m_capacity) { keep = i; break; }
+        while (m_count > keep) { --m_count; ++m_discarded[static_cast<size_t>(DiscardCause::Drop)]; }
     }
     int Capacity() const { return m_capacity; }
     int Held() const { return m_count; }
     bool Empty() const { return m_count == 0; }
     const EntryKey& At(int i) const { return m_entries[static_cast<size_t>(i)]; }
+    // The host slot entry i was estimated into (its textures stay there however the front moves).
+    int SlotAt(int i) const { return m_slots[static_cast<size_t>(i)]; }
+    // The lowest slot in [0, Capacity()) no held entry uses: where the next estimate writes. -1 = none free (the ring is full).
+    int FreeSlot() const
+    {
+        for (int s = 0; s < m_capacity; ++s)
+            if (!SlotUsed(s)) return s;
+        return -1;
+    }
     // The frame the next pair starts from (the back's `to`; 0 = empty: the host starts at the render frame's next).
     uint64_t BackTo() const { return m_count > 0 ? m_entries[static_cast<size_t>(m_count - 1)].to : 0; }
     bool Holds(uint64_t from, uint64_t to) const
@@ -314,28 +330,38 @@ public:
         return false;
     }
 
-    PushResult Push(const EntryKey& k)
+    // Holds k in the lowest free slot (FreeSlot()).
+    PushResult Push(const EntryKey& k) { return Push(k, FreeSlot()); }
+    // Holds k as estimated into host slot `slot` (FreeSlot() when the estimate was made); a slot outside the capacity or already used by a
+    // held entry is refused (BadSlot), so two held pairs never share one slot's textures.
+    PushResult Push(const EntryKey& k, int slot)
     {
         PushResult r = PushResult::Held;
         if (!k.Valid()) r = PushResult::BadKey;
         else if (Holds(k.from, k.to)) r = PushResult::AlreadyHeld;
         else if (m_count > 0 && k.from != BackTo()) r = PushResult::NotChained;
         else if (m_count >= m_capacity) r = PushResult::Full;
+        else if (slot < 0 || slot >= m_capacity || SlotUsed(slot)) r = PushResult::BadSlot;
         ++m_push[static_cast<size_t>(r)];
-        if (r == PushResult::Held) m_entries[static_cast<size_t>(m_count++)] = k;
+        if (r == PushResult::Held) {
+            m_slots[static_cast<size_t>(m_count)] = slot;
+            m_entries[static_cast<size_t>(m_count++)] = k;
+        }
         return r;
     }
 
     // At the render frame's estimate of (from, to) in `epoch`: true = the front entry is that pair from that epoch (taken; the render reads
-    // its slot, no estimate). False = the render estimates now; entries the render passed are discarded as Drop, a front entry of another
-    // pair or epoch discards the whole chain (E1: never a chain with a hole).
-    bool Consume(uint64_t from, uint64_t to, uint64_t epoch)
+    // its slot, `*slot`, no estimate). False = the render estimates now; entries the render passed are discarded as Drop, a front entry of
+    // another pair or epoch discards the whole chain (E1: never a chain with a hole).
+    bool Consume(uint64_t from, uint64_t to, uint64_t epoch, int* slot = nullptr)
     {
+        if (slot != nullptr) *slot = -1;
         while (m_count > 0 && m_entries[0].from < from) { PopFront(); ++m_discarded[static_cast<size_t>(DiscardCause::Drop)]; }
         if (m_count == 0) { ++m_sequential; m_consumedEpoch = 0; return false; }
         const EntryKey& f = m_entries[0];
         if (f.from == from && f.to == to && epoch != 0 && f.epoch == epoch) {
             m_consumedEpoch = f.epoch;
+            if (slot != nullptr) *slot = m_slots[0];
             PopFront();
             ++m_hits;
             return true;
@@ -361,13 +387,24 @@ public:
     uint64_t ConsumedEpoch() const { return m_consumedEpoch; }
 
 private:
+    // The entries move down; each keeps its own slot (the textures do not move).
     void PopFront()
     {
-        for (int i = 1; i < m_count; ++i) m_entries[static_cast<size_t>(i - 1)] = m_entries[static_cast<size_t>(i)];
+        for (int i = 1; i < m_count; ++i) {
+            m_entries[static_cast<size_t>(i - 1)] = m_entries[static_cast<size_t>(i)];
+            m_slots[static_cast<size_t>(i - 1)] = m_slots[static_cast<size_t>(i)];
+        }
         --m_count;
     }
+    bool SlotUsed(int slot) const
+    {
+        for (int i = 0; i < m_count; ++i)
+            if (m_slots[static_cast<size_t>(i)] == slot) return true;
+        return false;
+    }
 
-    EntryKey m_entries[kStructuralMaxLead];
+    EntryKey m_entries[kCapacityMax];
+    int m_slots[kCapacityMax] = {};
     int m_capacity = 1;
     int m_count = 0;
     uint64_t m_consumedEpoch = 0;
