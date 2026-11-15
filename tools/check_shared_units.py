@@ -192,8 +192,12 @@ REGISTRY = [
      "allow": []},
     {"id": "U25", "name": "ramp_clamp_smoothstep",
      "owning_unit": ["src/VP-V/core/Ramp"],
-     "signatures": _c(r"\bClamp01\s*\(", r"\bSmoothstep\s*\(", r"\bRamp\s*\("),
-     "allow": []},
+     # C6-1 U25 C8: an optional explicit template argument list (Smoothstep<T>(, Clamp01<double>() is the same call.
+     "signatures": _c(r"\bClamp01\s*(?:<[^<>()]*>\s*)?\(", r"\bSmoothstep\s*(?:<[^<>()]*>\s*)?\(",
+                      r"\bRamp\s*(?:<[^<>()]*>\s*)?\("),
+     # C6-1 U25: calls of the owner's RampMath API are consumers (IGNORECASE like every allow; the alternation tries
+     # the longer Clamp01NanToZero first). A private Clamp01/Smoothstep/Ramp or another namespace's copy stays a duplicate.
+     "allow": _c(r"RampMath::(?:Clamp01NanToZero|Clamp01|Ramp|Smoothstep|SmoothRule::\w+)")},
     {"id": "U26", "name": "luma_from_rgb_weights",
      "owning_unit": ["src/VP-V/core/LumaWeights"],
      "signatures": _c(r"0\.2126", r"0\.7152", r"0\.0722", r"\bLumaOf\b", r"\bad_luma\b", r"\bvp_kr\b"),

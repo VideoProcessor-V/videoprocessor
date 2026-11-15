@@ -18,6 +18,7 @@
 #include <VP-V/modules/repair/grain_split/GrainSplitVariantOwner.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailGpu.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailModel.h>
+#include <VP-V/core/Ramp.h>
 
 #include <libplacebo/d3d11.h>
 #include <libplacebo/dispatch.h>
@@ -56,7 +57,7 @@ namespace TemporalDetailGpuTestsNs
 	double Pulse(double t)
 	{
 		const double m = t - 64.0 * std::floor(t / 64.0);
-		return 1.0 - Smoothstep(13.0, 16.0, std::fabs(m - 32.0));
+		return 1.0 - RampMath::Smoothstep<double>(13.0, 16.0, std::fabs(m - 32.0), RampMath::SmoothRule::Unguarded);
 	}
 	double Master(double x, double y)
 	{

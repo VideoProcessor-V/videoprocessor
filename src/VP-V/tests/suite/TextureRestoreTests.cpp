@@ -5,6 +5,7 @@
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
 
 #include <VP-V/modules/repair/texture_restore/TextureRestore.h>
+#include <VP-V/core/Ramp.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 
 #include <VP-V/modules/control/skeleton/PlTexBackend.h>
@@ -866,7 +867,7 @@ namespace TextureRestoreTestsNs
 					worstChange = (std::min)(worstChange, change);
 					int gated = 0;
 					for (const TextureRestoreModel::TileDebug& d : model.Debug())
-						gated += TextureRestore::Smoothstep(TextureRestore::kFocusLo, TextureRestore::kFocusHi, d.F) < 0.5 ? 1 : 0;
+						gated += RampMath::Smoothstep<double>(TextureRestore::kFocusLo, TextureRestore::kFocusHi, d.F, RampMath::SmoothRule::Unguarded) < 0.5 ? 1 : 0;
 					defocused += static_cast<double>(gated) / model.Debug().size() / N;
 					if (types[i] == 'I') iChange = (std::max)(iChange, std::fabs(change));
 					if (types[i] == 'B')

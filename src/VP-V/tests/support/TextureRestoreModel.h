@@ -11,6 +11,7 @@
 // and optionally the de-judder field), Forget() at discontinuities.
 
 #include <VP-V/modules/repair/texture_restore/TextureRestore.h>
+#include <VP-V/core/Ramp.h>
 
 #include <algorithm>
 #include <cmath>
@@ -485,11 +486,11 @@ namespace TextureRestoreModel
 					const double gG = Clamp(std::sqrt((r.x + fg) / ((sN1 + fg) * (1.0 + kGrainMargin))), 1.0, cap);
 					double gT1 = Clamp(std::sqrt((r.y + ft) / (T1 + kTextureMargin * sN1 + ft)), 1.0, cap);
 					double gT2 = Clamp(std::sqrt((r.z + ft) / (T2 + kTextureMargin * sN2 + ft)), 1.0, cap);
-					const double w = Smoothstep(kFocusLo, kFocusHi, F) * Smoothstep(kFocusLo, kFocusHi, r.w) *
-						Smoothstep(kPullLo, kPullHi, F / (std::max)(r.w, 1e-30)) *
-						Smoothstep(kMidLossLo, kMidLossHi, (T2 + ft) / (r.z + ft)) *
-						Smoothstep(kTextureSigLo, kTextureSigHi, r.z / (sN2 + sf)) *
-						Smoothstep(kTextureSigLo, kTextureSigHi, T2 / (sN2 + sf));
+					const double w = RampMath::Smoothstep<double>(kFocusLo, kFocusHi, F, RampMath::SmoothRule::Unguarded) * RampMath::Smoothstep<double>(kFocusLo, kFocusHi, r.w, RampMath::SmoothRule::Unguarded) *
+						RampMath::Smoothstep<double>(kPullLo, kPullHi, F / (std::max)(r.w, 1e-30), RampMath::SmoothRule::Unguarded) *
+						RampMath::Smoothstep<double>(kMidLossLo, kMidLossHi, (T2 + ft) / (r.z + ft), RampMath::SmoothRule::Unguarded) *
+						RampMath::Smoothstep<double>(kTextureSigLo, kTextureSigHi, r.z / (sN2 + sf), RampMath::SmoothRule::Unguarded) *
+						RampMath::Smoothstep<double>(kTextureSigLo, kTextureSigHi, T2 / (sN2 + sf), RampMath::SmoothRule::Unguarded);
 					gT1 = 1.0 + (gT1 - 1.0) * w;
 					gT2 = 1.0 + (gT2 - 1.0) * w;
 					Vec4& g = newGains.at(tx, ty);

@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -62,6 +63,21 @@ namespace NearDupUnitsTest
 		if (!(e1 > e0)) return x >= e0 ? 1.0 : 0.0;
 		double t = (x - e0) / (e1 - e0);
 		t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);
+		return t * t * (3.0 - 2.0 * t);
+	}
+
+	// Bill's GrainPreserve::Smoothstep (vprenderer/GrainPreserve.h), reproduced: the DetailPulse law (NaN ratio -> t = 1).
+	double OldSmoothBill(double e0, double e1, double x)
+	{
+		const double t = (std::max)(0.0, (std::min)(1.0, (x - e0) / (e1 - e0)));
+		return t * t * (3.0 - 2.0 * t);
+	}
+
+	// The old TemporalDetail / TextureRestore private copy (ternary clamp, NaN passes).
+	double OldSmoothTemporalDetail(double e0, double e1, double x)
+	{
+		const double q = (x - e0) / (e1 - e0);
+		const double t = q < 0.0 ? 0.0 : (q > 1.0 ? 1.0 : q);
 		return t * t * (3.0 - 2.0 * t);
 	}
 
@@ -185,6 +201,89 @@ namespace NearDupUnitsTest
 			Assert::AreEqual(0.0, RampMath::Ramp(1.0, 2.0, 2.0));
 			Assert::AreEqual(0.5, RampMath::Ramp(1.5, 1.0, 2.0));
 			Assert::IsTrue(SameBits(2.0 + (6.0 - 2.0) * 0.3, RampMath::Mix(2.0, 6.0, 0.3)));
+		}
+
+		// C6-1 U25 (ruling 5b): Unguarded is the ONE no-guard smoothstep, bit-identical to Bill's GrainPreserve law for
+		// every input (DetailPulse unchanged) and to the old TemporalDetail/TextureRestore copy for every non-NaN ratio.
+		TEST_METHOD(RampUnguardedMatchesBillAndTheTemporalDetailCopy)
+		{
+			using RampMath::SmoothRule;
+			const double nan = std::nan("");
+			const double inf = std::numeric_limits<double>::infinity();
+			auto unguarded = [](double e0, double e1, double x) { return RampMath::Smoothstep(e0, e1, x, SmoothRule::Unguarded); };
+
+			// Bill's law, bitwise: NaN x, +/-Inf x, e0 == e1 (x <, ==, >), reversed edges, NaN and infinite edges.
+			const double cases[][3] = {
+				{ 0.0, 1.0, nan }, { 0.0, 1.0, inf }, { 0.0, 1.0, -inf }, { -2.0, 3.0, inf }, { -2.0, 3.0, -inf },
+				{ 0.5, 0.5, 0.25 }, { 0.5, 0.5, 0.5 }, { 0.5, 0.5, 0.75 }, { 0.0, 0.0, -1.0 }, { 0.0, 0.0, 0.0 }, { 0.0, 0.0, 1.0 },
+				{ 1.0, 0.0, -0.5 }, { 1.0, 0.0, 0.25 }, { 1.0, 0.0, 0.75 }, { 1.0, 0.0, 1.5 }, { 4.0, 2.0, 3.0 },
+				{ nan, 1.0, 0.5 }, { 0.0, nan, 0.5 }, { nan, nan, nan }, { inf, inf, 1.0 }, { -inf, inf, 0.0 } };
+			for (const auto& c : cases)
+			{
+				const double got = unguarded(c[0], c[1], c[2]);
+				Assert::IsTrue(SameBits(OldSmoothBill(c[0], c[1], c[2]), got));
+				Assert::IsFalse(std::isnan(got));   // NaN never propagates toward pixels
+			}
+			// NaN ratio -> exactly 1.0 (Bill's law); the old TemporalDetail copy gave NaN there (the only change).
+			Assert::IsTrue(SameBits(1.0, unguarded(0.0, 1.0, nan)));
+			Assert::IsTrue(SameBits(1.0, unguarded(0.5, 0.5, 0.5)));   // 0 / 0
+			Assert::IsTrue(std::isnan(OldSmoothTemporalDetail(0.0, 1.0, nan)));
+
+			// -0.0 ratio: +0 from every form.
+			Assert::IsTrue(SameBits(0.0, unguarded(0.0, -1.0, 0.0)));
+			Assert::IsTrue(SameBits(OldSmoothTemporalDetail(0.0, -1.0, 0.0), unguarded(0.0, -1.0, 0.0)));
+
+			// 1e4-point finite sweep (ascending, reversed and equal edges): memcmp-identical to both references.
+			const std::vector<double> s = Series(10000, 25u);
+			for (size_t i = 0; i < s.size(); ++i)
+			{
+				const double x = s[i];
+				const double e0 = s[(i * 7 + 3) % s.size()] * 0.25;
+				const double e1 = (i % 3 == 0) ? e0 + 1.5 : ((i % 3 == 1) ? e0 - 0.75 : e0);
+				const double got = unguarded(e0, e1, x);
+				Assert::IsTrue(SameBits(OldSmoothBill(e0, e1, x), got));
+				const double q = (x - e0) / (e1 - e0);
+				if (!std::isnan(q))
+					Assert::IsTrue(SameBits(OldSmoothTemporalDetail(e0, e1, x), got));
+				else
+					Assert::IsTrue(SameBits(1.0, got));
+			}
+			// The float instantiation follows the same law.
+			Assert::IsTrue(SameBits(1.0f, RampMath::Smoothstep(0.0f, 1.0f, std::nanf(""), SmoothRule::Unguarded)));
+		}
+
+		// Plan (e): every rule at the degenerate and reversed edges and NaN x, plus the clamps.
+		TEST_METHOD(RampRulesAtDegenerateEdges)
+		{
+			using RampMath::SmoothRule;
+			const double nan = std::nan("");
+			Assert::AreEqual(0.0, RampMath::Clamp01(-1.0));
+			Assert::AreEqual(0.5, RampMath::Clamp01(0.5));
+			Assert::AreEqual(1.0, RampMath::Clamp01(2.0));
+			Assert::IsTrue(std::isnan(RampMath::Clamp01(nan)));
+			Assert::AreEqual(0.0, RampMath::Clamp01NanToZero(nan));
+			Assert::AreEqual(1.0, RampMath::Ramp(2.0, 2.0, 2.0));   // hi == lo: a step at hi
+			Assert::AreEqual(0.0, RampMath::Ramp(1.9, 2.0, 2.0));
+			Assert::AreEqual(1.0, RampMath::Ramp(1.5, 3.0, 1.0));   // hi < lo: a step at hi
+			Assert::AreEqual(0.0, RampMath::Ramp(0.5, 3.0, 1.0));
+			// e0 == e1: the guarded rules step at e0; Unguarded follows Bill (x < e0 -> 0, x == e0 -> 0/0 -> 1, x > e0 -> 1).
+			for (SmoothRule r : { SmoothRule::StepWhenEqual, SmoothRule::StepWhenNotAscending })
+			{
+				Assert::AreEqual(0.0, RampMath::Smoothstep(0.5, 0.5, 0.25, r));
+				Assert::AreEqual(1.0, RampMath::Smoothstep(0.5, 0.5, 0.5, r));
+				Assert::AreEqual(1.0, RampMath::Smoothstep(0.5, 0.5, 0.75, r));
+			}
+			Assert::AreEqual(0.0, RampMath::Smoothstep(0.5, 0.5, 0.25, SmoothRule::Unguarded));
+			Assert::AreEqual(1.0, RampMath::Smoothstep(0.5, 0.5, 0.5, SmoothRule::Unguarded));
+			Assert::AreEqual(1.0, RampMath::Smoothstep(0.5, 0.5, 0.75, SmoothRule::Unguarded));
+			// e1 < e0: StepWhenEqual and Unguarded ramp downwards; StepWhenNotAscending steps at e0.
+			Assert::AreEqual(OldSmoothLightLevel(1.0, 0.0, 0.25), RampMath::Smoothstep(1.0, 0.0, 0.25, SmoothRule::StepWhenEqual));
+			Assert::AreEqual(OldSmoothBill(1.0, 0.0, 0.25), RampMath::Smoothstep(1.0, 0.0, 0.25, SmoothRule::Unguarded));
+			Assert::AreEqual(0.0, RampMath::Smoothstep(1.0, 0.0, 0.25, SmoothRule::StepWhenNotAscending));
+			// NaN x: the guarded rules keep their old results; Unguarded -> 1 (Bill).
+			Assert::IsTrue(std::isnan(RampMath::Smoothstep(0.0, 1.0, nan, SmoothRule::StepWhenEqual)) == std::isnan(OldSmoothLightLevel(0.0, 1.0, nan)));
+			Assert::IsTrue(std::isnan(RampMath::Smoothstep(0.0, 1.0, nan, SmoothRule::StepWhenNotAscending)) == std::isnan(OldSmoothDither(0.0, 1.0, nan)));
+			Assert::AreEqual(1.0, RampMath::Smoothstep(0.0, 1.0, nan, SmoothRule::Unguarded));
 		}
 
 		TEST_METHOD(LumaWeightsTextEqualsTheConstants)

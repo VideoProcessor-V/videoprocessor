@@ -780,9 +780,40 @@
   },
   "U25": {
    "name": "ramp_clamp_smoothstep",
-   "known_false_positive": [],
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
+     "pattern": "\\bsmoothstep\\s*\\(",
+     "kind": "false_positive",
+     "reason": "GLSL built-in smoothstep() in shader text (:1888/:2021/:2058/:3370 at C6-1 U25 C7): the shading language's own law, not a private copy; core/Ramp.h keeps the GLSL built-in (no GLSL twin). Case-sensitive, lowercase only: a C++ Smoothstep/Clamp01/Ramp line without a GLSL smoothstep still counts (the 20 covered lines carry no C++ form, checked at C7). Follow-up 102b: the built-in is undefined when e0 >= e1"
+    },
+    {
+     "file": "src/VP-V/modules/repair/deband/VpDebander.cpp",
+     "pattern": "\\bsmoothstep\\s*\\(",
+     "kind": "false_positive",
+     "reason": "GLSL built-in smoothstep() in shader text (:60/:74/:107 at C6-1 U25 C7): the shading language's own law, not a private copy; core/Ramp.h keeps the GLSL built-in (no GLSL twin). Case-sensitive, lowercase only: a C++ Smoothstep/Clamp01/Ramp line without a GLSL smoothstep still counts (the 20 covered lines carry no C++ form, checked at C7). Follow-up 102b: the built-in is undefined when e0 >= e1"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
+     "pattern": "\\bsmoothstep\\s*\\(",
+     "kind": "false_positive",
+     "reason": "GLSL built-in smoothstep() in shader text (:234/:236/:713/:715 at C6-1 U25 C7): the shading language's own law, not a private copy; core/Ramp.h keeps the GLSL built-in (no GLSL twin). Case-sensitive, lowercase only: a C++ Smoothstep/Clamp01/Ramp line without a GLSL smoothstep still counts (the 20 covered lines carry no C++ form, checked at C7). Follow-up 102b: the built-in is undefined when e0 >= e1 (DetailPulse untrusted_share = 0)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
+     "pattern": "\\bsmoothstep\\s*\\(",
+     "kind": "false_positive",
+     "reason": "GLSL built-in smoothstep() in shader text (:326-:330 at C6-1 U25 C7): the shading language's own law, not a private copy; core/Ramp.h keeps the GLSL built-in (no GLSL twin). Case-sensitive, lowercase only: a C++ Smoothstep/Clamp01/Ramp line without a GLSL smoothstep still counts (the 20 covered lines carry no C++ form, checked at C7). Follow-up 102b: the built-in is undefined when e0 >= e1"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
+     "pattern": "\\bsmoothstep\\s*\\(",
+     "kind": "false_positive",
+     "reason": "GLSL built-in smoothstep() in shader text (:75/:129/:175/:394 at C6-1 U25 C7): the shading language's own law, not a private copy; core/Ramp.h keeps the GLSL built-in (no GLSL twin). Case-sensitive, lowercase only: a C++ Smoothstep/Clamp01/Ramp line without a GLSL smoothstep still counts (the 20 covered lines carry no C++ form, checked at C7). Follow-up 102b: the built-in is undefined when e0 >= e1"
+    }
+   ],
    "blocking": true,
-   "baseline_duplicates": 76
+   "baseline_duplicates": 0
   },
   "U26": {
    "name": "luma_from_rgb_weights",

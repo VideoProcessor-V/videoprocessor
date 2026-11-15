@@ -30,6 +30,7 @@
 // C++14-compatible, no Windows headers.
 #pragma once
 
+#include <VP-V/core/Ramp.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
 #include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
@@ -230,7 +231,7 @@ namespace ChromaUpscale
 				const double aa = cov / (vY + eps);
 				a.at(x, y) = aa;
 				b.at(x, y) = mC - aa * mY;
-				r.rho2.at(x, y) = GrainSplit::Clamp01(cov * cov / ((vY + eps) * (vC + eps)));
+				r.rho2.at(x, y) = RampMath::Clamp01<double>(cov * cov / ((vY + eps) * (vC + eps)));
 				double lo = 1e300, hi = -1e300;
 				for (int j = -clampR; j <= clampR; ++j)
 					for (int i = -clampR; i <= clampR; ++i)
@@ -327,7 +328,7 @@ namespace ChromaUpscale
 					const Plane& cc = c == 0 ? ccB : ccR;
 					const Plane& gr = c == 0 ? gB : gR;
 					const double A = CatmullRomAt(g.a, u, v), Bv = CatmullRomAt(g.b, u, v);
-					const double M = GrainSplit::Clamp01(CatmullRomAt(g.rho2, u, v));
+					const double M = RampMath::Clamp01<double>(CatmullRomAt(g.rho2, u, v));
 					const double base = CatmullRomAt(cc, u, v);
 					const double LO = CatmullRomAt(g.lo, u, v), HI = CatmullRomAt(g.hi, u, v);
 					const double G = CatmullRomAt(gr, u, v);

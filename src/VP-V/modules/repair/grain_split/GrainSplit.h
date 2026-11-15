@@ -32,6 +32,7 @@
 #include <memory>
 #include <vector>
 
+#include <VP-V/core/Ramp.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 
@@ -111,8 +112,6 @@ namespace GrainSplit
 		std::vector<double> N;         // block grain level (codes^2 of D)
 		std::vector<double> e1, e2, e3; // block means of d1^2, d2^2, d3^2 (codes^2; raster block order)
 	};
-
-	inline double Clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
 
 	// Block means of d1^2, d2^2, d3^2 over each B x B block (edge blocks partial), raster order, double sums.
 	inline void BlockMeans(Split& a, const Plane& d1, const Plane& d2, const Plane& d3)
@@ -344,7 +343,7 @@ namespace GrainSplit
 					for (int i = -1; i <= 1; ++i) { const double dv = d.get(xx + i, yy + j); e += dv * dv; }
 				e /= 9.0;
 				const double N = a.N[static_cast<size_t>(yy / B) * a.bw + (xx / B)];
-				const double f = Clamp01(1.0 - p.kappa * N / (std::max)(e, p.energyFloor));
+				const double f = RampMath::Clamp01<double>(1.0 - p.kappa * N / (std::max)(e, p.energyFloor));
 				a.f.at(xx, yy) = f;
 				a.s1.at(xx, yy) = f * a.d1.at(xx, yy);
 				a.s2.at(xx, yy) = f * a.d2.at(xx, yy);
@@ -434,7 +433,7 @@ namespace GrainSplit
 					for (int i = -1; i <= 1; ++i) { const double dv = d.get(xx + i, yy + j); e += dv * dv; }
 				e /= 9.0;
 				const double N = a.N[static_cast<size_t>(yy / B) * a.bw + (xx / B)];
-				const double f = Clamp01(1.0 - p.kappa * N / (std::max)(e, floorE));
+				const double f = RampMath::Clamp01<double>(1.0 - p.kappa * N / (std::max)(e, floorE));
 				a.f.at(xx, yy) = f;
 				a.s1.at(xx, yy) = f * a.d1.at(xx, yy);
 				a.s2.at(xx, yy) = f * a.d2.at(xx, yy);

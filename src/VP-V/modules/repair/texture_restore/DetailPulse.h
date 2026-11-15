@@ -3,6 +3,7 @@
 #include <libplacebo/renderer.h>
 
 #include <VP-V/core/LumaWeights.h>
+#include <VP-V/core/Ramp.h>
 
 #include <vprenderer/GrainPreserve.h>
 #include <VP-V/modules/repair/deband/VpDebander.h>
@@ -126,11 +127,11 @@ namespace DetailPulse
 	}
 	inline double VetoWeight(double change, double vetoCodes)
 	{
-		return 1.0 - GrainPreserve::Smoothstep(vetoCodes, 2.0 * vetoCodes, change);
+		return 1.0 - RampMath::Smoothstep<double>(vetoCodes, 2.0 * vetoCodes, change, RampMath::SmoothRule::Unguarded);
 	}
 	inline double TrustWeight(double untrustedShare)
 	{
-		return 1.0 - GrainPreserve::Smoothstep(0.0, kVetoUntrustedShare, untrustedShare);
+		return 1.0 - RampMath::Smoothstep<double>(0.0, kVetoUntrustedShare, untrustedShare, RampMath::SmoothRule::Unguarded);
 	}
 
 	struct Params

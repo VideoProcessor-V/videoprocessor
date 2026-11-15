@@ -93,13 +93,6 @@ namespace TemporalDetail
 	constexpr double kCameraMinConfidence = 0.5;         // the model ignores a camera view below this
 
 	inline double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
-	// ND07: equal edges are a step at e0 (the LightLevelLut rule); otherwise unchanged.
-	inline double Smoothstep(double e0, double e1, double x)
-	{
-		if (e1 == e0) return x >= e0 ? 1.0 : 0.0;
-		const double t = Clamp((x - e0) / (e1 - e0), 0.0, 1.0);
-		return t * t * (3.0 - 2.0 * t);
-	}
 
 	// Frames of a duration at the measured content rate (round, minimum 1). hz <= 0: the reference rate.
 	inline int Frames(double seconds, double hz)

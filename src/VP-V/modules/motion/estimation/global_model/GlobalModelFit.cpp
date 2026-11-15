@@ -37,7 +37,6 @@ namespace CameraModel
 		const double kSqrt2 = 1.4142135623730951;
 
 		inline bool FiniteF(float v) { return IsFiniteBits(v); }
-		inline double Clamp01(double v) { return ::RampMath::Clamp01(v); }   // core/Ramp.h (ND07)
 
 		// Expected vector precision of a pair (source px): the caller's, else a quarter px per 16 px of block size.
 		inline double PairPrecision(const PairInput& in) { return in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0; }
@@ -394,7 +393,7 @@ namespace CameraModel
 				}
 			const double sx = std::sqrt(vx / sw) / (0.3 * f.pic.Width());
 			const double sy = std::sqrt(vy / sw) / (0.3 * f.pic.Height());
-			return Clamp01(std::min(sx, sy));
+			return RampMath::Clamp01<double>(std::min(sx, sy));
 		}
 
 		// Temporal noise floor per similarity-rate component (per second): one vector precision as a
@@ -581,10 +580,10 @@ namespace CameraModel
 			// Signal: the trusted share of vectors the camera explains, 0 at inlierShareLo, full at inlierShareHi.
 			// A camera behind many movers (a crowd under a pan) explains about half the vectors and is still the
 			// dominant motion when no other motion competes; a competing motion is the ambiguity signal's job.
-			const double rawShare = f.trustSum > 0 ? Clamp01(inlierMass / f.trustSum) : 0.0;
+			const double rawShare = f.trustSum > 0 ? RampMath::Clamp01<double>(inlierMass / f.trustSum) : 0.0;
 			{
 				const double lo = c.inlierShareLo, span = std::max(1e-6, c.inlierShareHi - c.inlierShareLo);
-				sg.inlierShare = f.trustSum > 0 ? Clamp01((inlierMass / f.trustSum - lo) / span) : 0.0;
+				sg.inlierShare = f.trustSum > 0 ? RampMath::Clamp01<double>((inlierMass / f.trustSum - lo) / span) : 0.0;
 			}
 			const double rms = inlierMass > 0 ? std::sqrt(resSq / inlierMass) : 0.0;
 			{
@@ -732,10 +731,10 @@ namespace CameraModel
 						{
 							const double dev = MaxCornerDifference(Compose(B, model), IdentityParams(model.type), f.pic);
 							const double tol = 4.0 * f.prec / f.diag;
-							devTerm = 1.0 - Clamp01(dev / tol);
+							devTerm = 1.0 - RampMath::Clamp01<double>(dev / tol);
 						}
 						const double shareTerm = std::min(1.0, bShare / (0.7 * rawShare + 1e-9));
-						sg.inverse = Clamp01(devTerm * shareTerm);
+						sg.inverse = RampMath::Clamp01<double>(devTerm * shareTerm);
 					}
 				}
 			}
@@ -749,7 +748,7 @@ namespace CameraModel
 				{
 					double fl[4];
 					TemporalFloor(f.prec, in.picture, in.pairSeconds, fl);
-					sg.temporal = Clamp01(F.m_temporal.Consistency(in.pairSeconds, rates, c.temporalNoiseFloor ? fl : nullptr));
+					sg.temporal = RampMath::Clamp01<double>(F.m_temporal.Consistency(in.pairSeconds, rates, c.temporalNoiseFloor ? fl : nullptr));
 				}
 			}
 
@@ -774,7 +773,7 @@ namespace CameraModel
 			// its confidence is halved and scaled by how far the signal fell below its gate, so it stays < 0.5.
 			if (c.verdictGatesConfidence && (rec.reason == Reason::Ambiguous || rec.reason == Reason::InverseMismatch))
 			{
-				const double g = rec.reason == Reason::Ambiguous ? Clamp01(sg.ambiguity / 0.35) : Clamp01(sg.inverse / 0.3);
+				const double g = rec.reason == Reason::Ambiguous ? RampMath::Clamp01<double>(sg.ambiguity / 0.35) : RampMath::Clamp01<double>(sg.inverse / 0.3);
 				rec.confidence *= 0.5 * g;
 			}
 		}
@@ -1154,7 +1153,7 @@ namespace CameraModel
 					}
 				}
 				const double ratio = inlierCount > 0 ? static_cast<double>(bestSup) / inlierCount : 1.0;
-				ambA = searchCompetitor ? 1.0 - Clamp01(ratio / 0.5) : 1.0;
+				ambA = searchCompetitor ? 1.0 - RampMath::Clamp01<double>(ratio / 0.5) : 1.0;
 			}
 
 			CM_PROF_MARK(4);
@@ -1233,16 +1232,16 @@ namespace CameraModel
 						}
 					Ly.mass = mass;
 					Ly.border = allRingShare > 0 ? (mass > 0 ? (ring / mass) / allRingShare : 0.0) : 1.0;
-					Ly.share = f.trustSum > 0 ? Clamp01(mass / f.trustSum) : 0.0;
+					Ly.share = f.trustSum > 0 ? RampMath::Clamp01<double>(mass / f.trustSum) : 0.0;
 					if (haveRef)
 					{
 						const double d = MaxCornerDifference(p, refScaled, f.pic) * f.diag;
 						const double tol = 4.0 * f.prec + 0.25 * refMax + floorPx;
 						const double q = d / tol;
 						Ly.f = std::max(c.continuityFloor, std::exp(-q * q));
-						Ly.a = 1.0 - 0.5 * Clamp01(std::fabs(Ly.share - st.refShare) / std::max(st.refShare, 0.1));
+						Ly.a = 1.0 - 0.5 * RampMath::Clamp01<double>(std::fabs(Ly.share - st.refShare) / std::max(st.refShare, 0.1));
 					}
-					Ly.score = Ly.count * Ly.f * (0.25 + 0.75 * Clamp01(Ly.border)) * Ly.a;
+					Ly.score = Ly.count * Ly.f * (0.25 + 0.75 * RampMath::Clamp01<double>(Ly.border)) * Ly.a;
 				};
 				fillLayer(L[0], cdA.model, cdA.inl, cdA.inlierCount);
 				std::vector<uint8_t> maskB;
@@ -1315,17 +1314,17 @@ namespace CameraModel
 				// without the continuity factor, and a record on layer A is never more lenient than the support-based value.
 				if (L[1].present)
 				{
-					const double sa = L[0].count * (0.25 + 0.75 * Clamp01(L[0].border)) * L[0].a;
-					const double sb = L[1].count * (0.25 + 0.75 * Clamp01(L[1].border)) * L[1].a;
+					const double sa = L[0].count * (0.25 + 0.75 * RampMath::Clamp01<double>(L[0].border)) * L[0].a;
+					const double sb = L[1].count * (0.25 + 0.75 * RampMath::Clamp01<double>(L[1].border)) * L[1].a;
 					const double hi = std::max(sa, sb), lo = std::min(sa, sb);
-					const double scoreAmb = hi > 0 ? 1.0 - Clamp01((lo / hi) / 0.5) : 0.0;
+					const double scoreAmb = hi > 0 ? 1.0 - RampMath::Clamp01<double>((lo / hi) / 0.5) : 0.0;
 					ambiguity = ci == 1 ? scoreAmb : std::min(ambiguity, scoreAmb);
 				}
 				// ForegroundSuspect: the FINAL camera layer touches no border, explains < 3/4 of the vectors and has no agreeing reference.
 				if (L[ci].border < c.borderVetoRatio && L[ci].share < 0.75 && !(haveRef && L[ci].f >= 0.8))
 				{
 					flags |= 8;
-					ambiguity = std::min(ambiguity, 0.34 * Clamp01(L[ci].border / c.borderVetoRatio));
+					ambiguity = std::min(ambiguity, 0.34 * RampMath::Clamp01<double>(L[ci].border / c.borderVetoRatio));
 				}
 				if (held)
 					flags |= 16;
@@ -1333,7 +1332,7 @@ namespace CameraModel
 					flags |= 32;
 				if (haveRef)
 					flags |= 64;
-				cam->sg.border = Clamp01(L[ci].border);
+				cam->sg.border = RampMath::Clamp01<double>(L[ci].border);
 				cam->sg.continuity = haveRef ? L[ci].f : 0.5;
 
 				int newSwapAge = -1;
