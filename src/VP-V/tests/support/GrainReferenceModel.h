@@ -245,7 +245,7 @@ namespace GrainModel
 		return out;
 	}
 
-	// GUARD_BODY's busy test at (x, y): the Laplacian above lapMin, or a strict local
+	// The guard's busy test at (x, y) (RegionEvidence::BusyEdge::IsBusy, the owner's BusyShareBodyGlsl): the Laplacian above lapMin, or a strict local
 	// extremum along x, y or a diagonal by more than extMin on both sides.
 	inline bool GuardBusy(const Image& img, int x, int y, double lapMin, double extMin)
 	{
@@ -263,7 +263,7 @@ namespace GrainModel
 	}
 
 	// VpDebander per frame (no vectors: BODY without HOLD / GRAIN), with the spatial
-	// grain guard (GUARD_BODY + SPATIAL_GUARD) when lapMin > 0 (levels from
+	// grain guard (RegionEvidence::BusyEdge::IsBusy busy share + SPATIAL_GUARD) when lapMin > 0 (levels from
 	// GrainPreserve::GuardLaplacianCodes / GuardExtremumCodes). Values in codes.
 	inline Image Deband(const Image& img, double thr, double radius, double lapMin, double extMin)
 	{

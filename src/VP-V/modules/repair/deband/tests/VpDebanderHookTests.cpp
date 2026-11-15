@@ -567,6 +567,7 @@ namespace VideoProcessorTest
 					const int gw = (w + 15) / 16, gh = (h + 15) / 16;
 					Assert::AreEqual(gw, guard->params.w);
 					Assert::AreEqual(gh, guard->params.h);
+					Assert::IsTrue(guard->params.blit_src, L"the guard texture is blittable (its format lacks PL_FMT_CAP_BLITTABLE on this device)");
 					const pl_fmt fmt = guard->params.format;
 					pl_tex_params rp{};
 					rp.w = gw; rp.h = gh; rp.format = fmt; rp.host_readable = true; rp.blit_dst = true;

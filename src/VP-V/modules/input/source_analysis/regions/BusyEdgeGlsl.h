@@ -9,8 +9,9 @@
 //    arithmetic of IsBusy() is VpDebander GUARD_BODY, moved.
 //    Descriptors: bz_src (sampled, plane size, up to bz_ncomp meaningful components, nearest, clamp: the consumer's planes),
 //                 bz_out (storage r16f, cell grid size, write-only; R = share).
-//    Uniforms:    int bz_block (cell edge px), int bz_ncomp (1..3), float bz_scale (codes per texel unit: kSourceTapCodesPerUnit),
-//                 float bz_lap, float bz_ext (thresholds in codes).
+//    Uniforms:    int bz_block (cell edge px), int bz_ncomp (1..3), float bz_scale (codes per texel unit, per consumer:
+//                 kSourceTapCodesPerUnit for source-plane taps in 10-bit codes; 1 for the VpDebander guard, whose taps stay in the
+//                 plane's normalised units), float bz_lap, float bz_ext (thresholds in the same units as the scaled taps).
 // 2. EdgeMapHeaderGlsl() + EdgeMapBodyGlsl(): the edge map, a 16 x 16 group reads its 18 x 18 tile once.
 //    Descriptors: em_src (sampled, plane size, luma in .x), em_out (storage r32f, plane size, write-only).
 //    Uniforms:    float em_scale (codes per texel unit: kSourceTapCodesPerUnit).

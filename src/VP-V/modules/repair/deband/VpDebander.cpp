@@ -500,7 +500,7 @@ if (b.x < size.x && b.y < size.y) {
 				gp.format = StorableLike(gpu, pl_find_named_fmt(gpu, "r32f"));
 				gp.sampleable = true;
 				gp.storable = true;
-				gp.blit_src = true;   // read back by the guard parity test
+				gp.blit_src = gp.format && (gp.format->caps & PL_FMT_CAP_BLITTABLE) != 0;   // read back by the guard parity test where blittable
 				if (!gp.format || !pl_tex_recreate(gpu, &guard[slot][plane], &gp))
 				{
 					error = "no grain guard texture";

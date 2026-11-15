@@ -5,7 +5,8 @@
 // input.source_analysis/regions: the CPU reference of two owner-filled shared derivables (lead8/iface-L-B5.md sections B and C):
 //   BusyShare      the S5 variant of P11: the share of "busy" pixels per consumer block (VpDebander GUARD_BODY arithmetic, moved),
 //   SobelMagnitude the edge map: per-pixel 3x3 Sobel gradient magnitude of the source luma (AdaptiveDownscale's edge input, moved).
-// Both are in the plane's own code units (callers pass 10-bit tap codes); border = clamp to edge. Header-only, C++14, no Windows or
+// Both are in the caller's tap units (10-bit tap codes for source planes; the VpDebander guard oracle passes normalised taps with
+// thresholds in the same units); border = clamp to edge. Header-only, C++14, no Windows or
 // libplacebo headers. The GLSL mirrors are the owner's lane kernel; these are the tolerance oracle and the tests' reference.
 #include <algorithm>
 #include <cmath>
