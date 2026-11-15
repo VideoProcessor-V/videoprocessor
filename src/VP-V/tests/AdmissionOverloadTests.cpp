@@ -595,7 +595,8 @@ namespace AdmissionOverloadTest
 
 		// Owner correction 2026-11-15 (C4 s3a), case 3 of 3: TD OFF but another active consumer depends on TD products (e.g. the dither
 		// need read path on td.maps, the chroma read path on td.delta): the graph carries those nodes, and exactly those are filled for that
-		// consumer through the fill admission, costed in the fill; the TD products nobody reads are not filled; the line names it.
+		// consumer and never shed (owner decision 2026-11-15 06:58): Derived class with the chain that reads them, costed in core, never
+		// optional fill; the TD products nobody reads are not filled; the line names it.
 		TEST_METHOD(TdOffWithAnotherActiveConsumerFillsWhatItDemands)
 		{
 			const ProductId td[] = { kTdBlocks, kTdMemory, kTdAnchorPass, kTdAnchorRefs, kTdDelta, kTdMaps, kTdTrailSummary };
@@ -617,12 +618,17 @@ namespace AdmissionOverloadTest
 				const bool demanded = id == kTdMaps || id == kTdDelta;
 				Assert::AreEqual(demanded, f.present[id]);
 				Assert::AreEqual(demanded, r.admitted[id], demanded ? L"filled for the consumer that depends on it" : L"nobody reads it: no fill");
-				if (demanded) Assert::IsTrue(r.cls[id] == JobClass::Fill, L"no TD slice to run in: the fill admission fills it");
+				Assert::AreEqual(demanded, r.filledForConsumer[id]);
+				if (demanded) Assert::IsTrue(r.cls[id] == JobClass::Derived, L"no TD slice: filled for its consumer with the chain, never as fill");
 			}
 			Assert::AreEqual(0.0, r.sliceMs);
-			Assert::AreEqual(r0.fillMs + 0.2, r.fillMs, 1e-9, L"costed in the fill, from the remainder");
-			Assert::AreEqual(FillOn(f, r0) + 2, FillOn(f, r));
-			Assert::IsTrue(r.line.find("TD off: TD products 2 demanded by another consumer, 2 filled for it") != std::string::npos);
+			Assert::AreEqual(r0.coreMs + 0.2, r.coreMs, 1e-9, L"costed with the core chain that reads them");
+			Assert::AreEqual(0.2, r.filledForConsumerMs, 1e-9);
+			Assert::AreEqual(r0.fillMs, r.fillMs, 1e-9, L"never from the optional fill");
+			Assert::AreEqual(FillOn(f, r0), FillOn(f, r));
+			const std::vector<ProductId> offFills = OptionalFillIds(r);
+			for (ProductId id : td) Assert::IsTrue(std::find(offFills.begin(), offFills.end(), id) == offFills.end(), L"never in FillOff's list");
+			Assert::IsTrue(r.line.find("TD off: TD products 2 filled for another consumer (0.20 ms in core, never shed)") != std::string::npos);
 			Assert::IsTrue(r.line.find("TD jobs") == std::string::npos);
 
 			// the same demand with TD ON: the slice's own jobs again (case 1), never optional fill
@@ -633,6 +639,107 @@ namespace AdmissionOverloadTest
 				Assert::IsTrue(on.admitted[id] && on.cls[id] == JobClass::Slice);
 			const std::vector<ProductId> fills = OptionalFillIds(on);
 			for (ProductId id : td) Assert::IsTrue(std::find(fills.begin(), fills.end(), id) == fills.end());
+		}
+
+		// Owner decision 2026-11-15 06:58 (C4 s3a), (a): TD OFF, TD products another ACTIVE consumer depends on are filled for it and NEVER
+		// shed: under a cost sweep that turns every optional fill off, and with the arbiter engaged at FillOff on the admission's own list,
+		// each demanded TD product stays admitted (Derived, run with the core chain), never in the list or the FillOff line; an unmeasured
+		// one is still filled and shown as "some core not measured"; the TD products nobody reads are not filled.
+		TEST_METHOD(TdOffDemandedTdProductsAreNeverShedUnderFillOff)
+		{
+			const ProductId td[] = { kTdBlocks, kTdMemory, kTdAnchorPass, kTdAnchorRefs, kTdDelta, kTdMaps, kTdTrailSummary };
+			const ProductId demandedIds[] = { kTdMaps, kTdDelta };
+			const Registry reg = SkeletonProducts();
+			bool sawAllFillOff = false;
+			for (double scale = 1.0; scale <= 8.0; scale *= 1.25)
+			{
+				AdmissionFacts f = Facts(60.0, 6.0, scale);
+				f.tdMinMs = 0.0;   // TD is not an active consumer
+				f.tdWantMs = 0.0;
+				for (ProductId id : demandedIds) Put(f, id, 0.5 * scale, true);   // another active consumer's reads (graph nodes)
+				Assert::IsFalse(TdOn(f));
+				const Result r = Admit(f);
+				for (ProductId id : td)
+				{
+					const bool demanded = id == kTdMaps || id == kTdDelta;
+					Assert::AreEqual(demanded, r.admitted[id], demanded ? L"TD off, demanded: filled for its consumer" : L"nobody reads it: no fill");
+					if (!demanded) continue;
+					Assert::IsTrue(r.filledForConsumer[id]);
+					Assert::IsTrue(r.cls[id] == JobClass::Derived, L"never optional fill");
+					Assert::IsTrue(SpareClassOf(r.cls[id]) == SpareClass::Core, L"run with the chain in the slot, never as fill");
+					Assert::IsFalse(r.notMeasured[id]);
+				}
+				const std::vector<ProductId> fills = OptionalFillIds(r);
+				for (ProductId id : td)
+					Assert::IsTrue(std::find(fills.begin(), fills.end(), id) == fills.end(), L"never in the FillOff list");
+				if (FillOn(f, r) == 0) sawAllFillOff = true;
+
+				std::vector<const char*> names;
+				for (ProductId id : fills) names.push_back(reg.Get(id).token);
+				OverloadArbiter a;
+				a.SetOptionalFills(names.empty() ? nullptr : names.data(), names.size());
+				const double period = f.periodMs;
+				const SlotBudget over = Load(period, 0.7 * period, 0.4 * period);
+				for (double t = 0.0; a.State().step == OverloadStep::None && t <= 5000.0; t += period) a.Step(t, over, false, 2);
+				Assert::IsTrue(a.State().step == OverloadStep::FillOff);
+				Assert::IsFalse(FillAllowed(a.State()), L"optional fill is off");
+				const std::string line = std::string(a.State().line) + " " + a.FillLine();
+				for (ProductId id : td)
+					Assert::IsTrue(line.find(reg.Get(id).token) == std::string::npos, L"FillOff never names a TD product");
+			}
+			Assert::IsTrue(sawAllFillOff, L"the sweep reaches the state where every optional fill is off; the demanded TD products stay filled");
+
+			// unmeasured: an optional fill would be left out as "not measured"; a demanded TD product is filled anyway, and shown
+			AdmissionFacts u = Facts(60.0, 6.0, 1.0);
+			u.tdMinMs = 0.0;
+			u.tdWantMs = 0.0;
+			Put(u, kTdMaps, 0.5, false);
+			const Result ru = Admit(u);
+			Assert::IsTrue(ru.admitted[kTdMaps] && ru.cls[kTdMaps] == JobClass::Derived);
+			Assert::IsFalse(ru.notMeasured[kTdMaps]);
+			Assert::AreEqual(1u, ru.unmeasuredCore);
+			Assert::IsTrue(ru.line.find("some core not measured") != std::string::npos);
+			Assert::IsTrue(ru.line.find("TD off: TD products 1 filled for another consumer") != std::string::npos);
+		}
+
+		// Owner decision 2026-11-15 06:58 (C4 s3a), (b) + (c) in games: games has no optional fill, yet a TD product another active consumer
+		// depends on is filled for it (before the fix it was Fill class and so not filled at all in games); with no consumer, none is filled.
+		// Competitive (no slot work at all) is unchanged: nothing is admitted.
+		TEST_METHOD(TdOffGamesFillsOnlyWhatAnotherConsumerDependsOn)
+		{
+			const ProductId td[] = { kTdBlocks, kTdMemory, kTdAnchorPass, kTdAnchorRefs, kTdDelta, kTdMaps, kTdTrailSummary };
+			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
+			f.tdMinMs = 0.0;
+			f.tdWantMs = 0.0;
+			f.mode = LatencyMode::Games;
+			for (ProductId id : td) { f.costMs[id] = 0.1; f.measured[id] = true; }   // measured, so only demand decides
+			f.present[kTdMaps] = true;                                                // another active consumer's read
+			const Result r = Admit(f);
+			Assert::AreEqual(0, FillOn(f, r), L"games: no optional fill");
+			for (ProductId id : td)
+			{
+				const bool demanded = id == kTdMaps;
+				Assert::AreEqual(demanded, r.admitted[id], demanded ? L"games, TD off, demanded: filled for its consumer" : L"no consumer: no fill");
+				Assert::AreEqual(demanded, r.filledForConsumer[id]);
+			}
+			Assert::IsTrue(r.cls[kTdMaps] == JobClass::Derived);
+			Assert::IsTrue(OptionalFillIds(r).empty(), L"nothing for FillOff to shed");
+			Assert::AreEqual(0.0, r.sliceMs);
+			Assert::IsTrue(r.line.find("TD off: TD products 1 filled for another consumer (0.10 ms in core, never shed)") != std::string::npos);
+
+			// (c) games, TD off, no consumer reads a TD product: none is present, none is filled
+			AdmissionFacts none = f;
+			none.present[kTdMaps] = false;
+			const Result rn = Admit(none);
+			for (ProductId id : td) Assert::IsFalse(rn.admitted[id] || rn.filledForConsumer[id]);
+			Assert::AreEqual(r.coreMs - 0.1, rn.coreMs, 1e-9);
+			Assert::IsTrue(rn.line.find("TD off") == std::string::npos);
+
+			// competitive: no slot work at all, unchanged by the fix
+			AdmissionFacts comp = f;
+			comp.mode = LatencyMode::Competitive;
+			const Result rc = Admit(comp);
+			for (size_t i = 0; i < kProductCount; ++i) Assert::IsFalse(rc.admitted[i]);
 		}
 	};
 
