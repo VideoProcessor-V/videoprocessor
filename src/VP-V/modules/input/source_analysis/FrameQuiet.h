@@ -93,7 +93,7 @@ namespace FrameQuiet
 			return instance;
 		}
 
-		// Every render, before pl_render_image (PlanEntrance, not run in the Original pathway): native copies a hook
+		// Every render, before pl_render_image (PlanEntrance; it runs in the Original pathway too, owner REVERT 2026-11-12, where nothing is pending and no copies are recorded, so End() flushes nothing): native copies a hook
 		// records are issued by End(). An End() that never came (the seam was not reached) is made up now, outside
 		// the new frame's libplacebo work, and counted (MissedEnds, visible through the decision).
 		void Arm(pl_gpu gpu)
