@@ -13,13 +13,15 @@
 //  - Slot face: Run(0) steps the runner until the job publishes (or stops progressing); the cost is the larger of the measured CPU time and the
 //    producer's own device-cost prediction (a GPU-compute Step only records: its CPU time says nothing about the GPU time), an EWMA per job,
 //    never cost-decayed in the slot (R4). One job per source frame: the runner publishes each frame once (compute once).
-//  - Gap face: today's LaneComputeGapWork law, unchanged (one chunk per call; the measured part halves on capNoFit, the GAP's starvation rule).
+//  - Gap face: THE gap-chunk law (core/LaneGapChunk.h, shared with LaneComputeGapWork: one chunk per call; the measured part halves on
+//    capNoFit, the GAP's starvation rule). One copy, never a private one (audit MUST 2).
 //  - Gap eligibility (S2-T1): in core_first the gap carries only backfill (Fill); Core / Derived / Slice / Unpack never go to RunGap.
 //  - StaticClassOf: the class of a lane product until S3's admission table decides it at Configure from measured costs (doc 91 C :79 fixed
 //    core set; P10 optional fill until its 4K cost <= 2 ms is proven, coordinator 2026-11-14 08:22 via lead 10 Q4 / doc 91 C :119; P12 is
 //    Derived-live: an Acquire live fill, not a job).
 // Pure C++14 apart from the runner type (a template parameter, so tests drive a fake).
 
+#include <VP-V/core/LaneGapChunk.h>
 #include <VP-V/core/LaneInterfaces.h>
 #include <VP-V/core/LaneRunner.h>
 #include <VP-V/core/SchedulerContract.h>
@@ -62,11 +64,6 @@ inline StaticClass StaticClassOf(ProductId id)
 inline bool GapEligible(const JobDecl& d, ScheduleMode mode)
 {
     return mode == ScheduleMode::SharedGap || d.cls == JobClass::Fill;
-}
-
-inline bool LaneStepMadeProgress(StepOutcome o)
-{
-    return o == StepOutcome::Ran || o == StepOutcome::Published || o == StepOutcome::Late || o == StepOutcome::Abandoned;
 }
 
 // ISpareWork::Class() and IGapWork::Class() share a signature with different return types, so one class cannot override both directly: each
@@ -114,7 +111,7 @@ public:
         for (int i = 0; i < kMaxStepsPerRun; ++i) {
             const uint32_t pred = runner_->PredictChunkUs(decl_.product);
             const StepOutcome o = runner_->Step(decl_.product, kWholeJobBudgetUs);
-            if (!LaneStepMadeProgress(o)) break;
+            if (!LaneStepProgressed(o)) break;
             progressed = true;
             deviceUs += double(pred);
             ++slotSteps_;
@@ -130,32 +127,20 @@ public:
         return ms;
     }
 
-    // ---- IGapWork (gap scheduler; today's LaneComputeGapWork law) ----
+    // ---- IGapWork (gap scheduler; THE gap-chunk law, core/LaneGapChunk.h, the one LaneComputeGapWork calls) ----
     GapClass GapClassOfJob() const override { return GapClass::LaneCompute; }
     Tier WorkTier() const override { return tier_; }
     double HeavyMs() const override { return heavyMs_; }
-    uint32_t PredictUs() const override
-    {
-        const uint32_t p = runner_ != nullptr ? runner_->PredictChunkUs(decl_.product) : 0u;
-        return (std::max)(gapLastUs_, p);
-    }
-    void OnCapNoFit() override { gapLastUs_ /= 2u; }
+    uint32_t PredictUs() const override { return gap_.PredictUs(runner_, decl_.product); }
+    void OnCapNoFit() override { gap_.OnCapNoFit(); }
     void RunChunk(uint32_t budgetUs) override
     {
-        const uint64_t t0 = nowUs_ ? nowUs_() : 0u;
-        const StepOutcome o = runner_->Step(decl_.product, budgetUs);
-        const uint64_t t1 = nowUs_ ? nowUs_() : 0u;
-        ++gapChunks_;
-        if (LaneStepMadeProgress(o)) {
-            const uint64_t dt = t1 > t0 ? t1 - t0 : 0u;
-            gapLastUs_ = dt > 0xFFFFFFFFull ? 0xFFFFFFFFu : uint32_t(dt);
-        } else {
-            idle_ = true;
-        }
+        gap_.RunChunk(runner_, decl_.product, budgetUs, nowUs_);
+        if (gap_.idle) idle_ = true;
     }
 
-    void Wake() { idle_ = false; }
-    uint64_t GapChunks() const { return gapChunks_; }
+    void Wake() { idle_ = false; gap_.Wake(); }
+    uint64_t GapChunks() const { return gap_.chunks; }
     uint64_t SlotRuns() const { return slotRuns_; }
     uint64_t SlotSteps() const { return slotSteps_; }
     uint64_t SlotPublished() const { return slotPublished_; }
@@ -173,9 +158,8 @@ private:
     std::function<uint64_t()> nowUs_;
     Tier tier_;
     double heavyMs_;
-    bool idle_ = false;
-    uint32_t gapLastUs_ = 0;
-    uint64_t gapChunks_ = 0;
+    bool idle_ = false;   // either face found nothing to do this frame (Wake clears it)
+    LaneGapChunk gap_;    // the gap face's state under the shared law
     SpareMeasuredCost slotCost_;
     uint64_t slotRuns_ = 0, slotSteps_ = 0, slotPublished_ = 0, slotIdle_ = 0;
 };
