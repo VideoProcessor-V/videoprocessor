@@ -395,6 +395,36 @@ namespace AdmissionOverloadTest
 			}
 		}
 
+		// C4 s3a SHOULD 1 (lead17 opus-audit-s3a-inc): with no S-C step the queue result is the frames the queue holds now
+		// (facts.queueFrames), never replaced by DelayBudget's own value; only a real S-C step (below the delay budget's start) changes it.
+		TEST_METHOD(NoShorterQueueStepKeepsTheQueueHeldNow)
+		{
+			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
+			f.aheadBytes[kP3AnalysisField] = 100;
+			f.aheadFeed.activeConsumers = { AheadDemand{ 4, "TD" } };
+			f.aheadFeed.queueAheadFrames = 15;
+			f.delayBudget.budgetMs = 250.0;
+			f.delayBudget.sourceFps = 60.0;
+			f.delayBudget.refreshHz = 60.0;
+			f.delayBudgetFed = true;
+			const int designQueue = DelayBudget::Compute(f.delayBudget).queueFrames;
+			f.queueFrames = designQueue - 1;   // the queue holds fewer than the delay budget's plan right now
+			f.vramGrantBytes = 100000;         // ample: the ladder takes no step
+			Result r = Admit(f);
+			Assert::AreEqual(designQueue - 1, r.queueFrames, L"no S-C step: the queue held now, not DelayBudget's value");
+			Assert::AreEqual(0, r.queueFramesDropped);
+			Assert::IsTrue(r.aheadLine.find("queue shortened") == std::string::npos);
+
+			f.aheadFeed.queueAheadFrames = 1;   // a real S-C step (the GWC C1 shape) still sets the stepped queue
+			f.aheadBytes[kP5MonitorTiles] = 50;
+			f.aheadFeed.activeConsumers = { AheadDemand{ kAheadCeiling, "TD" } };
+			f.vramGrantBytes = 150;
+			f.queueFrames = designQueue;
+			r = Admit(f);
+			Assert::AreEqual(designQueue - 1, r.queueFrames, L"the first S-C step: 4 -> 3");
+			Assert::AreEqual(1, r.queueFramesDropped);
+		}
+
 		// C4 s3a MUST 1 (102b LCORE-QW-AHEAD-FEED-CALLER): the admission reads THE window's feed (QueueWindow.h PlanAheadFeed, built by
 		// PlanAheadFeedOf). A window aheadComputeLimit that agrees with the law is no drift; one that differs (window 3, need 6, queue 15:
 		// the law gives 6) is DRIFT, flagged and named with both values on the Ctrl+Alt+D line (rule 5), and the plan follows the law.

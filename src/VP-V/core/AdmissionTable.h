@@ -266,9 +266,11 @@ inline void PlanAhead(const AdmissionFacts& f, Result& r)
     }
     r.aheadFrames = deepest;
     r.aheadFramesDropped = requested > deepest ? requested - deepest : 0;
-    if (n.mode == QueueMode::Normal && p.queue.feasible) {
+    // Only an S-C step (a queue below the delay budget's start) changes the queue; with no step the result stays facts.queueFrames (the
+    // frames the queue holds now), never replaced by DelayBudget's own value (C4 s3a SHOULD 1).
+    if (n.mode == QueueMode::Normal && p.queue.feasible && p.queue.queueFrames < startQueue) {
         r.queueFrames = p.queue.queueFrames;
-        r.queueFramesDropped = startQueue > p.queue.queueFrames ? startQueue - p.queue.queueFrames : 0;
+        r.queueFramesDropped = startQueue - p.queue.queueFrames;
     }
     if (r.aheadFramesDropped > 0 || r.aheadOverGrant) r.aheadBound = AheadBound::Budget;
     if (r.aheadOverGrant)
