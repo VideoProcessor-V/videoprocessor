@@ -624,10 +624,6 @@ inline const std::vector<ConsumerFlag>& ConsumerFlags()
         { uint16_t(kCatalogConsumerIdBase + 8), kP5MonitorTiles, FlagKind::ViewIsActual, "C9b",
           "pixel evidence = the SourceFrameTap view (modules/input/source_analysis/identity/chain/ChainEstimator.cpp UpdateTap)" },
         { uint16_t(kCatalogConsumerIdBase + 8), kP4SourceStats, FlagKind::NotRead, "D6-D8", "no P4 read in the identity tree" },
-        // L-FOCUS: the temporal-detail focus read path is DECLARED ONLY. Wiring waits for the owner's focus rule review (refs/126 FOCUS MAP; owner
-        // 2026-11-12 22:16: never import detail sharper than the current frame's focus state into a region whose focus changed). Rule 33 if the
-        // rule conflicts with the TD design.
-        { uint16_t(kCatalogConsumerIdBase + 29), kFocusMap, FlagKind::NotYetConsumed, "TD focus rule", "declared read path only: no TD wiring until the owner focus rule is reviewed" },
         // B3-Z Z-DECL (lead 2026-11-11, no declaration change): the render-time readers of the matcher field. The synthesis consumers and the
         // detail pulse / texture restore / adaptive downscale rows read the LIVE matcher field (dejudder->Field()) at render and do not
         // declare P3; the lane P3 declarations land with the matcher-ahead ring (B3-Z Z1-Z3) and lane-time refinement (C9b).
@@ -678,6 +674,10 @@ inline const std::vector<UnwiredConsumer>& UnwiredConsumers()
         { uint16_t(kCatalogConsumerIdBase + 24), "TD", "no renderer call site (engine reserved)" },
         { uint16_t(kCatalogConsumerIdBase + 25), "TD", "no renderer call site (engine reserved)" },
         { uint16_t(kCatalogConsumerIdBase + 26), "TD", "no renderer call site" },
+        // L-FOCUS: the temporal-detail focus read path is DECLARED ONLY. Wiring waits for the owner's focus rule review (refs/126 FOCUS MAP;
+        // owner 2026-11-12 22:16: never import detail sharper than the current frame's focus state into a region whose focus changed). Rule 33
+        // if the rule conflicts with the TD design. (An unwired ROW, not a NotYetConsumed consumer flag: that kind is a product flag only.)
+        { uint16_t(kCatalogConsumerIdBase + 29), "TD focus rule", "no renderer call site (declared read path only)" },
     };
     return rows;
 }
