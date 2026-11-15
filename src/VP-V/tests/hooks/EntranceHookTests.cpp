@@ -256,7 +256,7 @@ namespace EntranceHookTest
 			const size_t kernelId = planner.find("sourceRebase.SetKernel(identified)", evidence == std::string::npos ? 0 : evidence);
 			const size_t originalStop = planner.find("if (pipelineSlots.OriginalPathway())", evidence == std::string::npos ? 0 : evidence);
 			const size_t firstStage = planner.find("const bool temporal = temporalRenderer.Active();", evidence == std::string::npos ? 0 : evidence);
-			Assert::IsTrue(planner.find("sourceMonitor.Frame(") < evidence && evidence < autoActive && autoActive < autoFactors &&
+			Assert::IsTrue(planner.find("frameQuiet.Begin(vpv.sourceAnalysis.sourceMonitor,") < evidence && evidence < autoActive && autoActive < autoFactors &&
 				autoFactors < kernelId && kernelId < originalStop && originalStop < firstStage,
 				L"in Original the planner feeds and configures the monitor, sets the auto flag, reads the auto factors and identifies the kernel (exactly as before P4, 77fe0397e), then returns before the re-base / repair stages");
 			const size_t monitor = stepA;
