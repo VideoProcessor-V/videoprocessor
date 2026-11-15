@@ -86,7 +86,7 @@ constexpr uint32_t kExpectedRebaseUnit = 1;
 constexpr uint32_t kExpectedHalfLumaUnit = 1;
 constexpr uint32_t kExpectedMonitorUnit = 1;
 constexpr uint32_t kExpectedSourceIdentityUnit = 1;
-constexpr uint32_t kExpectedFocusMapUnit = 1;         // FocusMap (P17 focus_map, job #1 L-FOCUS): input/source_analysis/focus_map/FocusMap.h
+constexpr uint32_t kExpectedFocusMapUnit = 2;         // FocusMap (P17 focus_map, job #1 L-FOCUS): input/source_analysis/focus_map/FocusMap.h (v2: the edge law, FOCUS-EDGEMAP-SWITCH)
 constexpr uint32_t kExpectedSourceGeometryUnit = 1;   // SourceGeometry (P14g source_geometry, doc 78 section 6): input/source_analysis/identity/SourceGeometryProduct.h
 // The temporal-detail engine products (doc 72; repair/temporal_detail/products states the same numbers in TdProducts and a test
 // compares them): U13 CodingEvidence, QualityPattern, U15 FieldRefine and U19 TdMapsView at 1.
@@ -161,7 +161,7 @@ inline const std::vector<ProductRow>& ProductRows()
         { kSourceGeometry, "input/source_analysis/identity", kExpectedSourceGeometryUnit, "" },
         { kEdgeMap, "input/source_analysis/regions", kExpectedRegionUnit, "edge map pass (per-frame memo); readers: focus map, busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3))" },
         // P17 focus_map (L-FOCUS, fixed id 32): no lane producer; the OWNER FILL (focus_map/FocusMapFill.h, RegisterOwnerFill) makes it at the
-        // first Acquire and every later reader of the frame reuses it. Its prerequisites (P11, P10 bands, P2, P7) are obtained the same way.
+        // first Acquire and every later reader of the frame reuses it. Its prerequisites (kEdgeMap, P11, P10 bands, P2, P7) are obtained the same way.
         { kFocusMap, "input/source_analysis/focus_map", kExpectedFocusMapUnit, "" },
     };
     return rows;
@@ -387,14 +387,15 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         r.back().family = "temporal detail";
         r.push_back(MakeRow(27, "source geometry status", "VP-V/core/StatusText", PathwayUnit::Output, 95, {}, own,
                             "product.source_geometry", false, { kSourceGeometry }));
-        // P17 focus_map (L-FOCUS, owner 2026-11-12 22:16 / 22:18): the screen pass reads the shared units only (the P11 block stats and band
-        // energies, the P10 band spot, the P2 pair, the P7 camera fit). Placed at repair 23: after the temporal-detail camera / engine rows
+        // P17 focus_map (L-FOCUS, owner 2026-11-12 22:16 / 22:18): the screen pass reads the shared units only (the kEdgeMap Sobel |G|, its
+        // sharpness input since FOCUS-EDGEMAP-SWITCH, owner 11-14 05:25 "built ON the edge map"; the P11 block stats and band energies, the
+        // P10 band spot, the P2 pair, the P7 camera fit). It is the first (so the live-fill owner) reader of kEdgeMap. Placed at repair 23: after the temporal-detail camera / engine rows
         // (repair 12-14) AND the detail-pulse camera read (repair 20-22), so it never becomes the live-fill owner of P7 (with or without the
         // TD camera row active) or of another shared product, and clear of the source geometry read path (repair 15). The temporal-detail
         // row below (repair 24, the focus map's first reader) is DECLARED ONLY (no wiring: the owner's focus rule, refs/126 FOCUS MAP, is
         // reviewed first; rule 33 if it conflicts). Absent product = every reader acts as without a focus map and says so.
         r.push_back(MakeRow(28, "focus map (screen pass)", "VP-V/modules/input/source_analysis/focus_map", PathwayUnit::Repair, 23,
-                            { kP11RegionBlockStats, kP10GrainSplit, kP2VectorPair, kP7CameraFit }, own, "product.focus_map"));
+                            { kEdgeMap, kP11RegionBlockStats, kP10GrainSplit, kP2VectorPair, kP7CameraFit }, own, "product.focus_map"));
         r.push_back(MakeRow(29, "temporal detail (focus map read path)", "VP-V/modules/repair/temporal_detail/products",
                             PathwayUnit::Repair, 24, { kFocusMap }, own, "product.focus_map"));
         r.back().family = "temporal detail";

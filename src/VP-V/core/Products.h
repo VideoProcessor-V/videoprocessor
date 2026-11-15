@@ -1067,9 +1067,11 @@ inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
 }
 
 // P17 focus_map (fixed id 32; owner 2026-11-12 22:16 / 22:18): a screen pass, cheap, before TD. Per P11 block: defocus level, focus-change
-// flag (defocus delta along the P2 motion, P7 camera translation where P2 is absent) and confidence. The sharpness input is the P11 band
-// energy ratio (interim; 102b FOCUS-EDGEMAP-SWITCH). Declared inputs: P11 v2 (stats + E1/E2/E3/N; lag 0 and lag 1), P10, P2 and P7.
-// It owns no statistic: every input is read through Acquire by its OWNER'S fill; the owner fill here obtains each prerequisite the
+// flag (defocus delta along the P2 motion, P7 camera translation where P2 is absent) and confidence. The SHARPNESS input is the shared edge
+// map (kEdgeMap 31; owner 11-14 05:25 "focus map built ON the edge map"; registered fix FOCUS-EDGEMAP-SWITCH, unit v2): the per-block
+// peak Sobel energy over the P11 band energy. While the edge map has no CPU form the fill uses the P11 band-energy law (the interim, v1)
+// and says so on every block (FocusMap::kSharpnessInterim) and on the Fallbacks list. Declared inputs: kEdgeMap (lag 0 and lag 1), P11 v2
+// (stats + E1/E2/E3/N; lag 0 and lag 1), P10, P2 and P7. It owns no statistic: every input is read through Acquire by its OWNER'S fill; the owner fill here obtains each prerequisite the
 // same way (nested Acquire publishes it). HARD TD RULE (owner 22:16): never import detail sharper than the current frame's focus state into
 // a region whose focus changed; the TD consumer row is DECLARED only (no wiring). Pads nothing before it (31 is edge_map) and the reserved
 // tail (33..34) after it: it closes the fixed id table.
@@ -1083,6 +1085,9 @@ inline void AppendFocusMapProduct(std::vector<ProductDecl>& decls)
     ProductDecl p = Make(kFocusMap, "focus_map", "focus map (defocus / focus change)", Backend::GpuCompute, 1, Tier::T1,
                          Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis) | Bit(kSettingsMotion));
     p.sourceFrame = true;
+    AddInput(p, kEdgeMap, 0);                // the sharpness input (owner 11-14 05:25): per-block Sobel energy, read through Acquire
+    AddInput(p, kEdgeMap, 1);                // ... and the previous frame's: the change reference under the same law (never mixed); needs
+                                             // the edge map's CPU owner fill to keep one frame (102b FOCUS-EDGEMAP-SWITCH follow-up)
     AddInput(p, kP11RegionBlockStats, 0);
     AddInput(p, kP11RegionBlockStats, 1);    // the previous frame's block statistics: the focus-change reference (read, never copied);
                                              // needs the P11 owner fill's keepFrames >= 1 (102b FOCUS-P11-LAG1-RETENTION), else kNoPreviousRetained
@@ -1090,8 +1095,9 @@ inline void AppendFocusMapProduct(std::vector<ProductDecl>& decls)
     AddInput(p, kP2VectorPair, 0);
     AddInput(p, kP7CameraFit, 0);
     AddTerm(p, 4, kFocusMapBytesPerBlock);   // the 16 px cell: exact at 1080p, an upper bound at 4K/8K (32/64 px blocks)
-    // No history of its own: the previous frame's defocus is a pure function of P11(seq - 1) (lag-1 edge above), so the map of a frame
-    // never depends on which frame was asked first (determinism), and no copy of the previous map exists.
+    // No history of its own: the previous frame's defocus is a pure function of P11(seq - 1) and, under the edge law, kEdgeMap(seq - 1)
+    // (lag-1 edges above; one law per frame pair), so the map of a frame never depends on which frame was asked first (determinism),
+    // and no copy of the previous map exists.
     p.missingInputForm = true;               // without P2 / P7 the change flag reads 0 motion and says so (flags), never absent
     p.refRenderMs = 0.05f;                   // estimate only (a per-block screen pass); the measured bench replaces it
     PadReservedUntil(decls, kFocusMap);

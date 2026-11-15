@@ -3,6 +3,13 @@
 //
 // input.source_analysis/focus_map: the OWNER FILL of kFocusMap (CPU form). Every input is obtained through Acquire, which publishes
 // anything missing (the recursive rule); the fill measures nothing itself and keeps no state.
+//   kEdgeMap (seq) the SHARPNESS input (owner 11-14 05:25; FOCUS-EDGEMAP-SWITCH, unit v2): the shared Sobel |G| per source pixel, reduced
+//                  per P11 block (EdgeSums) -> the edge law. Not served on the CPU (C3: the edge map's only owner fill is the GPU form,
+//                  regions/EdgeMapFill.h, so a CPU Acquire is NoOwnerFill) or of the wrong size = the INTERIM law (P11 band energies)
+//                  for BOTH frames of the pair, kSharpnessInterim on every block, counted (Stats::sharpnessInterim) and on the
+//                  Fallbacks list with the cause ("sharpness: P11 interim, edge map pending"). Never a private gradient.
+//   kEdgeMap (seq - 1) the previous frame's, under the edge law only: absent = kNoPrevious (never compared across two laws);
+//                  RELEASED = kNoPrevious + kNoPreviousRetained, as for P11 below
 //   P11 (seq)      the block statistics (bands E1 / E2 / E3 and N are inside them)  -> required, else the fill declines (visible)
 //   P11 (seq - 1)  the previous frame's statistics: the focus-change reference       -> absent = kNoPrevious; RELEASED (the P11 owner
 //                  kept no spot for frame seq - 1: its owner fill must declare keepFrames >= 1, 102b FOCUS-P11-LAG1-RETENTION) =
@@ -11,7 +18,8 @@
 //                  (RegionEvidence.h), which is kNoSplit on that block, so the full P10 CPU form is never forced only to set a flag
 //   P2  (seq)      the backward vector grid (kP2BytesPerCell per cell; the cell edge is derived from the payload size) -> absent = P7 below
 //   P7  (seq)      the camera translation (FocusMap::kP7Bytes)                          -> absent = zero motion + kNoMotion (visible)
-// A previous-frame defocus is a pure function of P11(seq - 1), so the map of a frame never depends on which frame was asked first.
+// A previous-frame defocus is a pure function of P11(seq - 1) (and kEdgeMap(seq - 1) under the edge law), so the map of a frame never
+// depends on which frame was asked first.
 // The frame geometry is supplied by the host through FillConfig::geometry (SkeletonModule: the lane graph's frame size); the fill
 // refuses without it.
 #pragma once
@@ -42,6 +50,11 @@ namespace FocusMap
 			std::atomic<uint64_t> fills{ 0 }, noPrevious{ 0 }, noMotion{ 0 }, cameraMotion{ 0 }, noSplit{ 0 };
 			std::atomic<uint64_t> noPreviousRetained{ 0 };
 			std::atomic<bool> lastNoPreviousRetained{ false };
+			// FOCUS-EDGEMAP-SWITCH: fills that used the edge law / the interim law, and the latest fill's state + the edge map's cause
+			// (an AcquireCause value; AcquireCause::None with lastSharpnessInterim = the CPU form was served at the wrong size).
+			std::atomic<uint64_t> edgeLaw{ 0 }, sharpnessInterim{ 0 };
+			std::atomic<bool> lastSharpnessInterim{ false };
+			std::atomic<uint8_t> lastEdgeCause{ 0 };
 		};
 		std::shared_ptr<Stats> stats = std::make_shared<Stats>();
 	};
@@ -109,6 +122,33 @@ namespace FocusMap
 				prevReleased = PreviousReleased(pp);
 			}
 
+			// FOCUS-EDGEMAP-SWITCH: the sharpness input is the shared edge map, through Acquire (the owner's fill makes it; never a private
+			// gradient). Only a CPU form of exactly width x height float32 is read; anything else is the interim law, visibly.
+			const size_t edgeNeed = static_cast<size_t>(w) * static_cast<size_t>(h) * sizeof(float);
+			std::vector<float> e2, e4, pe2, pe4;
+			EdgeInput edge, prevEdge;
+			const AcquireResult re = memo.Acquire(kEdgeMap, req.seq, AcquireForm::Cpu);
+			const bool edgeServed = re.Ok() && re.cpu != nullptr && re.cpuBytes == edgeNeed;
+			if (edgeServed)
+			{
+				EdgeSums(g, re.cpu, e2, e4);
+				edge.sum2 = e2.data();
+				edge.sum4 = e4.data();
+				if (havePrev)
+				{
+					const AcquireResult rp = memo.Acquire(kEdgeMap, req.seq - 1, AcquireForm::Cpu);
+					if (rp.Ok() && rp.cpu != nullptr && rp.cpuBytes == edgeNeed)
+					{
+						EdgeSums(g, rp.cpu, pe2, pe4);
+						prevEdge.sum2 = pe2.data();
+						prevEdge.sum4 = pe4.data();
+					}
+					else
+						prevReleased = prevReleased || PreviousReleased(rp);   // no reference under the edge law: ComputeGrid gives kNoPrevious
+				}
+			}
+			const uint16_t interimFlag = edgeServed ? uint16_t(0) : uint16_t(kSharpnessInterim);
+
 			std::vector<uint8_t> p2;
 			const size_t p2Need = static_cast<size_t>(g.p2gw) * g.p2gh * kP2BytesPerCell;
 			bool haveP2 = false;
@@ -130,13 +170,15 @@ namespace FocusMap
 			}
 
 			std::vector<Block> blocks;
-			ComputeGrid(cfg.params, g, cur.data(), havePrev ? prev.data() : nullptr, haveP2 ? p2.data() : nullptr, haveP7 ? p7 : nullptr, false, blocks);
+			ComputeGrid(cfg.params, g, cur.data(), havePrev ? prev.data() : nullptr, haveP2 ? p2.data() : nullptr, haveP7 ? p7 : nullptr, false, blocks,
+				edge, prevEdge);
 			out.bytes.assign(blocks.size() * kBytesPerBlock, 0);
 			uint64_t np = 0, nm = 0, nc = 0, ns = 0;
 			for (size_t i = 0; i < blocks.size(); ++i)
 			{
 				if (prevReleased)   // the cause of this block's kNoPrevious: retention, not absence
 					blocks[i].flags = static_cast<uint16_t>(blocks[i].flags | kNoPreviousRetained);
+				blocks[i].flags = static_cast<uint16_t>(blocks[i].flags | interimFlag);
 				Pack(blocks[i], out.bytes.data() + i * kBytesPerBlock);
 				const uint16_t fl = blocks[i].flags;
 				np += (fl & kNoPrevious) ? 1 : 0;
@@ -153,6 +195,9 @@ namespace FocusMap
 				cfg.stats->noSplit += ns;
 				if (prevReleased) ++cfg.stats->noPreviousRetained;
 				cfg.stats->lastNoPreviousRetained.store(prevReleased);
+				if (edgeServed) ++cfg.stats->edgeLaw; else ++cfg.stats->sharpnessInterim;
+				cfg.stats->lastSharpnessInterim.store(!edgeServed);
+				cfg.stats->lastEdgeCause.store(static_cast<uint8_t>(re.Ok() ? AcquireCause::None : re.cause));
 			}
 			return true;
 		};
@@ -166,16 +211,25 @@ namespace FocusMap
 
 	// The focus map's own Fallbacks line ("product.focus_map", FallbackCatalog ProductEntries), next to the memo's "skeleton acquire"
 	// lines: engaged when the owner fill is NOT registered (the registration result is passed in: a refused registration is never
-	// silent, audit SHOULD 5) or when the latest fill had no previous-frame reference because P11(seq - 1) was released (retention
-	// missing, MUST 3). Released otherwise.
+	// silent, audit SHOULD 5), when the latest fill had no previous-frame reference because its frame was released (retention missing,
+	// MUST 3), or when the latest fill ran the INTERIM sharpness law because the edge map was not served on the CPU (FOCUS-EDGEMAP-SWITCH:
+	// "sharpness: P11 interim, edge map pending", with the edge map's cause). Several causes are joined on the one line. Released otherwise.
 	inline FallbackCatalog::Decision StatusDecision(const FillConfig::Stats* s, bool registered, const std::string& registrationWhy = std::string())
 	{
 		if (!registered)
 			return FallbackCatalog::ProductFallback("product.focus_map", "the focus map owner fill is not registered ("
 				+ (registrationWhy.empty() ? std::string("refused") : registrationWhy) + ")");
+		std::string why;
 		if (s && s->lastNoPreviousRetained.load())
-			return FallbackCatalog::ProductFallback("product.focus_map", "no focus-change reference: the previous frame's region block statistics were released ("
-				+ std::to_string(s->noPreviousRetained.load()) + " fill(s); the P11 owner keeps no frame behind, keepFrames 0)");
-		return FallbackCatalog::Released("product.focus_map");
+			why = "no focus-change reference: the previous frame's spot was released (" + std::to_string(s->noPreviousRetained.load())
+				+ " fill(s); its owner keeps no frame behind, keepFrames 0)";
+		if (s && s->lastSharpnessInterim.load())
+		{
+			const VpSkeleton::AcquireCause c = static_cast<VpSkeleton::AcquireCause>(s->lastEdgeCause.load());
+			why += std::string(why.empty() ? "" : "; ") + "sharpness: P11 interim, edge map pending (edge_map CPU form: "
+				+ (c == VpSkeleton::AcquireCause::None ? std::string("served at another size") : std::string(VpSkeleton::Token(c))) + "; "
+				+ std::to_string(s->sharpnessInterim.load()) + " interim fill(s))";
+		}
+		return why.empty() ? FallbackCatalog::Released("product.focus_map") : FallbackCatalog::ProductFallback("product.focus_map", why);
 	}
 }

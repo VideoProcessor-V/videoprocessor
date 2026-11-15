@@ -8,6 +8,7 @@ The per-region defocus level and the focus-change flag: one skeleton product (`k
 ## Inputs (declared edges; every one read through `Acquire`, which publishes a missing one)
 | edge | product | used for | when absent |
 |---|---|---|---|
+| lag 0 and lag 1 | kEdgeMap (31, regions unit) | the SHARPNESS input (edge law, unit v2): per-block sums of the Sobel energy; lag 1 = the change reference under the same law | not served on the CPU (C3: GPU-only owner fill) or another size: the interim law for both frames, `kSharpnessInterim` on every block, Fallbacks line "sharpness: P11 interim, edge map pending"; lag 1 absent under the edge law: `kNoPrevious` (released: + `kNoPreviousRetained`) |
 | lag 0 and lag 1 | P11 region block statistics | band energies E1 / E2 / E3, grain level N, coverage; lag 1 = the focus-change reference | no P11: the fill declines (visible); no lag 1: `kNoPrevious`; lag 1 RELEASED (retention missing): `kNoPrevious` + `kNoPreviousRetained`, counted, `product.focus_map` Fallbacks line |
 | lag 0 | P10 grain split | a declared edge only, not Acquired: P11 carries N = -1 without a split | `kNoSplit` on that block (fine = E1) |
 | lag 0 | P2 vector pair | backward vector per cell (the cell edge is derived from the payload size), mean per block | P7 below |
@@ -16,10 +17,32 @@ The per-region defocus level and the focus-change flag: one skeleton product (`k
 The band memo (iface-L-B3, `grain.band`, id 30) is not an edge: it is a RESERVED absent slot of the C3 table, and P11 already carries the
 P10 band energies (the edge is added when band_memo lands).
 
-## Law
-`fine = max(E1 - N, 0)`, `ratio = fine / (fine + E2 + E3 + eps)`, `defocus = 1 - Ramp(ratio, 0.35, 0.75)`, `confidence = Ramp(total, 2, 30)`.
+## Law (unit v2)
+One law per frame pair; the delta never compares two laws.
+- EDGE LAW (the edge map is served on the CPU for the frame): per P11 block `S2 = sum |G|^2`, `S4 = sum |G|^4` over the block's pixels
+  of kEdgeMap; `peak = S4 / S2` (the energy-weighted |G|^2, about 0.7 x the edge-crest |G|^2 whatever share of the block the edge
+  covers, so it does not depend on the block size); `sharp = max(peak - 48 N, 0)` (48 N = the white-noise grain floor of `peak`);
+  `ratio = sharp / (48 total + eps)`; `defocus = 1 - Ramp(ratio, 0.05, 0.6)`. A Gaussian-blurred step edge of sigma b gives
+  ratio ~ 0.6 / b^2. The 0.05 / 0.6 ramp is PROVISIONAL (that model, not yet fitted on real clips: 102b FOCUS-EDGE-LAW-CALIBRATE).
+- INTERIM LAW (v1, the edge map not served): `fine = max(E1 - N, 0)`, `ratio = fine / (fine + E2 + E3 + eps)`,
+  `defocus = 1 - Ramp(ratio, 0.35, 0.75)`.
+- Both: `total = fine + E2 + E3`, `confidence = Ramp(total, 2, 30)`, coverage >= 0.5.
 `delta = defocus - defocus(source block in the previous frame, found by the motion)`; `kChanged` when `|delta| >= 0.25` and both
 confidences >= 0.3; `kSharper` when `delta < 0`. Packed 8 B per P11 block: u16 defocus, s16 delta (s1.15), u16 confidence, u16 flags.
+
+## Registered fix FOCUS-EDGEMAP-SWITCH (owner-decisions 11-14 05:25; 102b FOCUS-EDGEMAP-SWITCH)
+| | before (r2/job1-focus e4b184625, unit v1) | after (this lane, unit v2) |
+|---|---|---|
+| sharpness input | P11 band energies E1 / E2 / E3 (fine-band share of the band energy) | kEdgeMap through `Acquire(kEdgeMap, seq, Cpu)` (and seq - 1): the peak Sobel energy over the P11 band energy |
+| declared edges | P11 (0, 1), P10, P2, P7 | + kEdgeMap (0, 1); catalog row 28 reads kEdgeMap (the focus map is its first reader) |
+| edge map not served on the CPU (every frame on C3) | n/a | the v1 law, bit for bit, plus `kSharpnessInterim` on every block and the Fallbacks line |
+| confidence, change flag, motion, packing | as v1 | unchanged |
+Equivalence / intended difference, proven by the queued FocusMapTests: (1) with no kEdgeMap CPU fill, every block equals the v1 result
+except the added `kSharpnessInterim` bit, and every existing v1 assertion keeps its value; (2) with an edge-map owner fill serving
+`BusyEdge::SobelMagnitude` of a synthetic picture, the defocus falls monotonically as the picture is blurred, a rack focus is flagged
+exactly in the changed half, and the edge map is built once per frame (fill count); (3) the edge law and the interim law are never mixed
+across the delta (edge served for seq but not seq - 1: `kNoPrevious`, no change flag). The GLSL mirror (FocusMapGlsl.h) mirrors v1 only;
+the v2 GPU mirror is owed with a GPU form (none is registered).
 
 ## HARD TD RULE (owner 11-12 22:16)
 Never import detail sharper than the current frame's focus state into a region whose focus changed. The temporal-detail consumer row
@@ -47,9 +70,11 @@ No setting is added: the thresholds are `FocusMap::Params` constants of the law 
 
 ## Design goal and provenance
 Owner 2026-11-12 22:16 / 22:18: know per region how defocused the source is and when the focus changes (rack focus), so temporal detail
-never imports sharper detail into a region whose focus changed. Interim sharpness measure = the shared P10 band energies carried by P11;
-by owner ruling (owner-decisions 11-14 05:25, "focus map built ON the edge map"; 102b FOCUS-EDGEMAP-SWITCH) the sharpness input becomes
-`kEdgeMap` (id 31) as a registered FIX with a before/after description. Never a private gradient.
+never imports sharper detail into a region whose focus changed. By owner ruling (owner-decisions 11-14 05:25, "focus map built ON the
+edge map"; 102b FOCUS-EDGEMAP-SWITCH) the sharpness input IS `kEdgeMap` (id 31), read through Acquire (the registered fix above). The
+edge map has no CPU form on C3 (its owner fill is GPU-only), so the CPU fill runs the interim law (the shared P10 band energies carried by
+P11) visibly until a kEdgeMap CPU form (or a kFocusMap GPU form reading the GPU edge map) lands: 102b FOCUS-EDGEMAP-CPU-FORM. Never a
+private gradient.
 
 ## Files
 `FocusMap.h` CPU reference (the tolerance oracle) | `FocusMapGlsl.h` the GPU mirror | `FocusMapFill.h` the owner fill (CPU form) |
