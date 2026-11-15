@@ -71,6 +71,7 @@ namespace Vpv
             t.slotList.push_back({ "scaling.rebase", "Re-base (entrance stage 2a)", "scaling", "built", 60, "re-base precision: <the re-base's float-intermediate note>" });
             t.slotList.push_back({ "repair.encoding", "Encoding repair (entrance stage 1)", "repair", "placeholder", 70, "Repair: bypassed (net fingerprint mismatch / missing weights / DV IPT input)" });
             t.slotList.push_back({ "repair.deband", "Deband", "repair", "built", 80, "deband: libplacebo deband (VP debander failed: <error>) / VP deband: off on the DV tunnel planes (no deband after decode yet)" });
+            t.slotList.push_back({ "colour.dm_pre", "DV display mapping: pre (RGB input)", "colour", "placeholder", 85, "DV display mapping (pre): off (<reason>)" });
             t.slotList.push_back({ "repair.texture_restore", "Texture restore + breathing add-on", "repair", "built", 90, "Texture restore: inactive (<reason>)" });
             t.slotList.push_back({ "scaling.route_4k", "4K route (entrance stage 2b)", "scaling", "placeholder", 100, "4K route: off (<reason>)" });
             t.slotList.push_back({ "scaling.refine", "Refine net", "scaling", "placeholder", 110, "Refine: bypassed (fingerprint mismatch / group underperforms / low latency)" });
@@ -80,8 +81,10 @@ namespace Vpv
             t.slotList.push_back({ "scaling.geometry", "Geometry", "scaling", "built", 150, "Geometry: NLS safe fit (hook failure)" });
             t.slotList.push_back({ "scaling.output", "Output scaling (hybrid SSIM + D)", "scaling", "partial", 160, "Output scaling: Lanczos (hybrid unavailable: <reason>)" });
             t.slotList.push_back({ "colour.tone_gamut", "Tone + gamut map", "colour", "built", 170, "Tone map: libplacebo (combined LUT missing)" });
+            t.slotList.push_back({ "colour.dm_curve", "DV display mapping: curve", "colour", "placeholder", 172, "DV display mapping (curve): off (<reason>)" });
             t.slotList.push_back({ "colour.extended_range", "BTB/WTW preservation", "colour", "built", 175, "BTB/WTW: clipped (<reason>)" });
             t.slotList.push_back({ "colour.sdr_tone_shape", "SDR tone shape + DV trims", "colour", "built", 200, "DV tone mapping: <why>: bt2390[ + trims] | Dolby Vision trims: <state> | SDR tone shape: not applied (<why>)" });
+            t.slotList.push_back({ "colour.dm_trims", "DV display mapping: trims", "colour", "placeholder", 205, "DV display mapping (trims): off (<reason>)" });
             t.slotList.push_back({ "colour.appearance", "Stage 13 appearance (CAM16)", "colour", "placeholder", 210, "Appearance: off (shader failed)" });
             t.slotList.push_back({ "drive.led_measure", "LED measurement", "drive", "built", 220, "LED measurement (<reason>; the LED follows the last statistics)" });
             t.slotList.push_back({ "drive.led_compensation", "LED compensation (adaptive gamma)", "drive", "built", 230, "LED drive (held at full: picture compensation unavailable (<reason>))" });
@@ -260,6 +263,9 @@ namespace Vpv
                 u.slotIds.push_back("colour.extended_range");
                 u.slotIds.push_back("colour.sdr_tone_shape");
                 u.slotIds.push_back("colour.appearance");
+                u.slotIds.push_back("colour.dm_pre");
+                u.slotIds.push_back("colour.dm_curve");
+                u.slotIds.push_back("colour.dm_trims");
                 u.toggles.push_back({ "dv_trims", "Dolby Vision trims for your display", { "on", "off" }, "colour.sdr_tone_shape" });
                 u.toggles.push_back({ "preserve_extended_range", "Keep below-black and above-white (SDR)", { "on", "off" }, "colour.extended_range" });
                 u.toggles.push_back({ "sdr_tone_shape", "SDR tone shape", { "off", "knee" }, "colour.sdr_tone_shape" });

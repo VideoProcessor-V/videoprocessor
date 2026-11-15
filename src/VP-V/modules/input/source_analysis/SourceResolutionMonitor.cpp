@@ -1,5 +1,7 @@
 #include <pch.h>
 #include "SourceResolutionMonitor.h"
+#include <VP-V/core/LumaWeights.h>
+#include <VP-V/core/RobustStats.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h>
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
@@ -39,7 +41,7 @@ if (tile < int(tiles) && g.y < ts) {
     vec2 origin = (tile % 2) == 0 ? pair.xy : pair.zw;
     ivec2 p = clamp(ivec2(origin) + ivec2(x, g.y), ivec2(0), textureSize(src, 0) - ivec2(1));
     vec4 c = texelFetch(src, p, 0);
-    float v = is_rgb > 0.5 ? dot(c.rgb, vec3(0.2126, 0.7152, 0.0722)) : c.r;
+    float v = is_rgb > 0.5 ? dot(c.rgb, )GLSL" VP_LUMA_BT709_VEC3_TEXT R"GLSL() : c.r;
     int idx = (tile * ts + g.y) * ts + x;
 #ifdef SR_IMG
     imageStore(out_img, ivec2(idx % SR_IMG, idx / SR_IMG), vec4(v));
@@ -62,13 +64,6 @@ if (tile < int(tiles) && g.y < ts) {
 			char text[32];
 			snprintf(text, sizeof(text), "%02u:%02u:%02u.%03u", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
 			return text;
-		}
-
-		double Median(std::vector<double> v)
-		{
-			if (v.empty()) return 1.0;
-			std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
-			return v[v.size() / 2];
 		}
 	}
 
@@ -449,6 +444,7 @@ if (tile < int(tiles) && g.y < ts) {
 		out.heldStale = heldStale.load(std::memory_order_relaxed);
 		out.jobsDropped = jobsDropped.load(std::memory_order_relaxed);
 		out.submitSkipped = submitSkipped.load(std::memory_order_relaxed);
+		out.engagedReactive = engagedReactive.load(std::memory_order_relaxed);
 		out.waitsMissed = waitsMissed.load(std::memory_order_relaxed);
 		out.clockStepsBack = clockStepsBack.load(std::memory_order_relaxed);
 		return out;
@@ -936,13 +932,8 @@ if (tile < int(tiles) && g.y < ts) {
 		return std::string();
 	}
 
-	void Monitor::Frame(pl_gpu g, pl_dispatch dispatch, const pl_frame& source, uint64_t sourceSequence, double seconds)
+	void Monitor::PrepareGpu(pl_gpu g)
 	{
-		if (!g || !dispatch) return;
-		const bool bound = frameBound.load(std::memory_order_acquire);
-		// Frame-bound: the monitor's source clock (monotone) and the results this frame may see.
-		const double raw = seconds;   // the frame's own source seconds (the trackers' clock)
-		if (bound) seconds = BeginBoundFrame(sourceSequence, seconds);
 		if (gpu && gpu != g) Release(gpu);
 		gpu = g;
 		if (!nativeTried)
@@ -956,14 +947,27 @@ if (tile < int(tiles) && g.y < ts) {
 			else
 				DebugLog::Log("Source resolution: the non-blocking tile readback is unavailable (not D3D11 or no staging); libplacebo's readback");
 		}
+	}
+
+	void Monitor::CollectFinished(double seconds, bool bound)
+	{
 		LedDrive::NativeTexReadback* const native = Native(nativeHolder);
 
-		// Collect finished copies (never waits: D3D11, the copy's event query and a DO_NOT_WAIT
-		// map; elsewhere libplacebo's poll).
+		// Collect finished copies (never waits: D3D11, a DO_NOT_WAIT map of the staging copy;
+		// elsewhere libplacebo's poll). A copy that reports an error (not "still drawing") is
+		// released as a failed readback, shown as the monitor's error, never kept busy forever.
 		for (int i = 0; i < 2; ++i)
 		{
 			if (!busy[i]) continue;
-			if (native ? !native->Ready(i) : pl_buf_poll(gpu, ring[i], 0)) continue;
+			bool nativeFailed = false;
+			if (native)
+			{
+				const LedDrive::ReadState state = native->Poll(i);
+				if (state == LedDrive::ReadState::Pending) continue;
+				nativeFailed = state == LedDrive::ReadState::Failed;
+			}
+			else if (pl_buf_poll(gpu, ring[i], 0))
+				continue;
 			Job done = pendingMeta[i];
 			const size_t count = static_cast<size_t>(done.tiles) * done.tileSize * done.tileSize;
 			bool ok = false;
@@ -972,10 +976,14 @@ if (tile < int(tiles) && g.y < ts) {
 				// Whole rows of the R32F image, then trimmed to the tiles' samples.
 				const int rows = static_cast<int>((count + kReadbackWidth - 1) / kReadbackWidth);
 				done.values.resize(static_cast<size_t>(rows) * kReadbackWidth);
-				if (!native->Read(i, done.values.data(), kReadbackWidth * sizeof(float), rows))
-					continue;   // still drawing after all: the next frame takes it
-				done.values.resize(count);
-				ok = true;
+				if (nativeFailed || !native->Read(i, done.values.data(), kReadbackWidth * sizeof(float), rows))
+					DebugLog::Log("Source resolution: the native tile readback reported an error (HRESULT 0x%08lx)",
+						static_cast<unsigned long>(native->LastError()));
+				else
+				{
+					done.values.resize(count);
+					ok = true;
+				}
 			}
 			else
 			{
@@ -1031,7 +1039,10 @@ if (tile < int(tiles) && g.y < ts) {
 			}
 			wake.notify_all();
 		}
+	}
 
+	std::string Monitor::NoteSource(const pl_frame& source, uint64_t sourceSequence, double raw)
+	{
 		// What the source is (a change is a discontinuity) and whether it can be read.
 		const pl_tex luma = source.num_planes > 0 ? source.planes[0].texture : nullptr;
 		const std::string notRead = NotReadReason(source);
@@ -1072,6 +1083,60 @@ if (tile < int(tiles) && g.y < ts) {
 				chainEst->SetFormatInfo(signature);
 			}
 		}
+		return notRead;
+	}
+
+	void Monitor::Frame(pl_gpu g, pl_dispatch dispatch, const pl_frame& source, uint64_t sourceSequence, double seconds)
+	{
+		if (!g || !dispatch) return;
+		// One call, in the order the monitor always had: clock and release, GPU set-up, collect the finished
+		// copies, what the source is, then the tile copy. (The renderer uses FrameBegin / FrameSubmit instead.)
+		const bool bound = frameBound.load(std::memory_order_acquire);
+		// Frame-bound: the monitor's source clock (monotone) and the results this frame may see.
+		const double raw = seconds;   // the frame's own source seconds (the trackers' clock)
+		if (bound) seconds = BeginBoundFrame(sourceSequence, seconds);
+		PrepareGpu(g);
+		CollectFinished(seconds, bound);
+		const std::string notRead = NoteSource(source, sourceSequence, raw);
+		SubmitTiles(dispatch, source, sourceSequence, raw, seconds, bound, notRead);
+	}
+
+	void Monitor::FrameBegin(const pl_frame& source, uint64_t sourceSequence, double seconds)
+	{
+		// CPU only, no GPU call: the frame-bound clock and release (the decision of this frame may see
+		// the results released here), then what the source is. The GPU work follows in FrameSubmit.
+		const bool bound = frameBound.load(std::memory_order_acquire);
+		if (carry.valid)
+			NoteCopySkipped();   // the previous frame never reached FrameSubmit: counted, never silent
+		carry.raw = seconds;
+		carry.seconds = bound ? BeginBoundFrame(sourceSequence, seconds) : seconds;
+		carry.bound = bound;
+		carry.sequence = sourceSequence;
+		carry.valid = true;
+		NoteSource(source, sourceSequence, seconds);
+	}
+
+	bool Monitor::FrameSubmit(pl_gpu g, pl_dispatch dispatch, const pl_frame& source, uint64_t sourceSequence)
+	{
+		if (!carry.valid || carry.sequence != sourceSequence) return false;
+		carry.valid = false;
+		if (!g || !dispatch)
+		{
+			NoteCopySkipped();   // the frame had no GPU work: counted, never silent
+			return false;
+		}
+		PrepareGpu(g);
+		CollectFinished(carry.seconds, carry.bound);
+		const double submittedBefore = lastSubmit;
+		SubmitTiles(dispatch, source, sourceSequence, carry.raw, carry.seconds, carry.bound, NotReadReason(source));
+		return lastSubmit != submittedBefore;   // the tile pass and its copy were issued (FrameQuiet flushes only then)
+	}
+
+	void Monitor::SubmitTiles(pl_dispatch dispatch, const pl_frame& source, uint64_t sourceSequence, double raw, double seconds,
+		bool bound, const std::string& notRead)
+	{
+		const pl_tex luma = source.num_planes > 0 ? source.planes[0].texture : nullptr;
+		LedDrive::NativeTexReadback* const native = Native(nativeHolder);
 		if (!notRead.empty() || seconds - lastSubmit < intervalSeconds) return;
 
 		// Tiles inside the active picture on the frame's 16-pixel grid (the
@@ -1633,7 +1698,7 @@ if (tile < int(tiles) && g.y < ts) {
 		snapshot.frameRatio = frame.ratio;
 		snapshot.frameBlank = !frame.informative();
 		snapshot.frameBlack = frame.black;
-		snapshot.liveRatio = ratios.empty() ? 1.0 : Median(ratios);
+		snapshot.liveRatio = RobustStats::Median(ratios, RobustStats::MedianRule::Upper, 1.0);
 		// Latch precision (2026-10-17): the declared rate as the exact rendition behind it - an even
 		// size of the frame within SourceResolution::kSnapBins of this tile's sweep, the simplest ratio (SnapRatio):
 		// 128-px tiles at 1080 read a 540-line source as ~542, re-based 0.4 % off.
@@ -1841,6 +1906,11 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 		if (bound)
 		{
+			// Frame-bound: a result that reaches the held queue AFTER its release point (the frame it belongs to
+			// is already decided, D frames on) is applied late, so this run's decisions depended on the worker's
+			// timing: counted as a missed wait (no bounded wait runs in the renderer), never silent.
+			if (j.sequence != 0 && j.sequence <= releasedThrough.load(std::memory_order_acquire))
+				waitsMissed.fetch_add(1, std::memory_order_relaxed);
 			PushHeld(j, workerReset);
 			analysedThrough.store(j.sequence, std::memory_order_release);
 			FinishSequence(j.sequence);
@@ -1910,7 +1980,9 @@ if (tile < int(tiles) && g.y < ts) {
 		const double before = autoApplied;
 		const bool fixes = LatchFixes();
 		// SID r2 N1: a chain latch release by its no-cut CEILING not shown yet (the counter only moves while the safety rules are on).
-		latchCeilingCount = chainEst->LatchCeilingReleases();
+		// fx/dv-frame-quiet: frame-bound reads the releases stamped up to the frame the monitor may see (render sequence - D), not the live counter.
+		latchCeilingCount = bound ? chainEst->LatchCeilingReleasesThrough(renderSequence > frameLead.load(std::memory_order_acquire) ?
+			renderSequence - frameLead.load(std::memory_order_acquire) : 0) : chainEst->LatchCeilingReleases();
 		latchCeilingPending = latchCeilingCount != latchCeilingSeen;
 		latchCeilingGateClear = false;
 		if (latchCeilingPending && latchCeilingFloorFor != latchCeilingCount)
@@ -2049,7 +2121,8 @@ if (tile < int(tiles) && g.y < ts) {
 				std::lock_guard<std::mutex> lock(aheadMutex);
 				a = ahead;
 			}
-			const bool aheadDue = !bound && renderSequence != 0 && a.eventSequence != 0 && a.ready && renderSequence >= a.eventSequence &&
+			// Frame-bound too (refs/121 decision (i)): the look-ahead lands the engage on the next detected cut.
+			const bool aheadDue = renderSequence != 0 && a.eventSequence != 0 && a.ready && renderSequence >= a.eventSequence &&
 				std::fabs(wanted - autoPending) <= tolerance;
 			if (std::fabs(wanted - autoPending) > tolerance)
 			{
@@ -2092,6 +2165,9 @@ if (tile < int(tiles) && g.y < ts) {
 				{
 					autoApplied = wanted;
 					nextFadeSeconds = trigger == 2 ? CrossfadeSeconds() : 0.0;
+					// Frame-bound: the reactive trigger is the FALLBACK for an absent or stale look-ahead; counted and shown (Ctrl+I, Config status).
+					if (bound && !(renderSequence != 0 && aheadLastSequence > renderSequence))
+						engagedReactive.fetch_add(1, std::memory_order_relaxed);
 				}
 			}
 			else if (s.moments <= autoNotBeforeCuts && autoNotBeforeCuts != 0)
@@ -2343,7 +2419,7 @@ if (tile < int(tiles) && g.y < ts) {
 	{
 		// The look-ahead, while it runs, finds the cut on the frame itself: the tracker's (a tile copy
 		// later) is not used then.
-		const bool aheadLive = !frameBound.load(std::memory_order_acquire) && renderSequence != 0 && aheadLastSequence > renderSequence;
+		const bool aheadLive = renderSequence != 0 && aheadLastSequence > renderSequence;
 		const bool newFrame = s.frames != pendingFrames;
 		// A cut found across a lost tile copy happened somewhere in a longer span: switching on it could
 		// land mid-shot, so it waits for the next moment.
@@ -2471,9 +2547,11 @@ if (tile < int(tiles) && g.y < ts) {
 		// A fresh era: a reset carried from the previous era is superseded by this one's (autoReset
 		// below), and reproducibility is judged per era (losses of the previous era are not this run's).
 		pendingBoundReset.store(false, std::memory_order_release);
+		releasedThrough.store(0, std::memory_order_release);
 		jobsDropped.store(0, std::memory_order_relaxed);
 		heldDropped.store(0, std::memory_order_relaxed);
 		submitSkipped.store(0, std::memory_order_relaxed);
+		engagedReactive.store(0, std::memory_order_relaxed);
 		waitsMissed.store(0, std::memory_order_relaxed);
 		frameLead.store(lead, std::memory_order_release);
 		frameBound.store(on, std::memory_order_release);
@@ -2643,8 +2721,11 @@ if (tile < int(tiles) && g.y < ts) {
 		{
 			ResetVisible();
 			denseGridApplied.store(false, std::memory_order_release);
+			releasedThrough.store(0, std::memory_order_release);   // a new stretch: earlier release points mean nothing
 			reset = true;
 		}
+		if (through > releasedThrough.load(std::memory_order_relaxed))
+			releasedThrough.store(through, std::memory_order_release);
 		const uint64_t era = epoch.load(std::memory_order_acquire);
 		while (heldCount > 0)
 		{
@@ -2709,6 +2790,8 @@ if (tile < int(tiles) && g.y < ts) {
 		snprintf(bound, sizeof(bound), "; frame-bound D=%u: held %u, dropped %llu, stale %llu, jobs dropped %llu, copies skipped %llu, waits missed %llu, clock steps back %llu",
 			s.frameLead, s.heldNow, s.heldDropped, s.heldStale, s.jobsDropped, s.submitSkipped, s.waitsMissed, s.clockStepsBack);
 		std::string out = text + bound;
+		if (s.engagedReactive != 0)
+			out += "; engaged " + std::to_string(s.engagedReactive) + "x without the look-ahead (reactive fallback: the cut could not be read ahead)";
 		if (s.heldDropped != 0 || s.jobsDropped != 0 || s.submitSkipped != 0 || s.waitsMissed != 0)
 			out += " (analyses were lost to timing: this run is not reproducible)";
 		return out;

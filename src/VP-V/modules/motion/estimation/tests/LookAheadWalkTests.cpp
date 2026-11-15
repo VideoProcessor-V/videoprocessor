@@ -96,15 +96,29 @@ namespace LookAheadWalkTest
 			FakeValidity motionValidity;
 			std::atomic<size_t> queuedFutureFrames{ 0 };
 			struct { bool vectorDemand = false, timingContinuityFixes = false, motionHistoryFixes = false; } activeSettings;
-			std::atomic<int> motionAheadConfigured{ 4 }, queueAheadCapacity{ 0 }, motionAheadDepth{ 0 };
-			std::atomic<bool> motionAheadBackward{ false };
-			bool motionAheadEngaged = false;
-			unsigned long long motionAheadEngagedGeneration = 0;
+			std::atomic<int> queueAheadCapacity{ 0 };
 			VectorDemand::Decision vectorDemand;
-			std::shared_ptr<FakeProducer> motionProducer;   // the walk loads it with std::atomic_load (hardening)
-			bool motionAheadPrevKnown = false;
-			unsigned long long motionAheadPrevGeneration = 0;
-			DejudderPolicy::MotionAheadFrame motionAheadPrev;
+			// P11b: the walk reads these through impl.vectorEngine; the flat names below are references so the test bodies read unchanged.
+			struct
+			{
+				std::atomic<int> motionAheadConfigured{ 4 }, motionAheadDepth{ 0 };
+				std::atomic<bool> motionAheadBackward{ false };
+				bool motionAheadEngaged = false;
+				unsigned long long motionAheadEngagedGeneration = 0;
+				std::shared_ptr<FakeProducer> motionProducer;   // the walk loads it with std::atomic_load (hardening)
+				bool motionAheadPrevKnown = false;
+				unsigned long long motionAheadPrevGeneration = 0;
+				DejudderPolicy::MotionAheadFrame motionAheadPrev;
+			} vectorEngine;
+			std::atomic<int>& motionAheadConfigured = vectorEngine.motionAheadConfigured;
+			std::atomic<int>& motionAheadDepth = vectorEngine.motionAheadDepth;
+			std::atomic<bool>& motionAheadBackward = vectorEngine.motionAheadBackward;
+			bool& motionAheadEngaged = vectorEngine.motionAheadEngaged;
+			unsigned long long& motionAheadEngagedGeneration = vectorEngine.motionAheadEngagedGeneration;
+			std::shared_ptr<FakeProducer>& motionProducer = vectorEngine.motionProducer;
+			bool& motionAheadPrevKnown = vectorEngine.motionAheadPrevKnown;
+			unsigned long long& motionAheadPrevGeneration = vectorEngine.motionAheadPrevGeneration;
+			DejudderPolicy::MotionAheadFrame& motionAheadPrev = vectorEngine.motionAheadPrev;
 			struct { struct { FakeMonitor sourceMonitor; } sourceAnalysis; } vpv;   // P11a-f: the monitor now lives at vpv.sourceAnalysis
 			// The walks' PrepareFrameAnalysis always throws: reached with one queued frame.
 			template <class... A> static Prepared PrepareFrameAnalysis(A&&...) { throw std::runtime_error("injected prepare"); }

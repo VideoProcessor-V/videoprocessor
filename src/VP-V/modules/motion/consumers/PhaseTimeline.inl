@@ -34,7 +34,7 @@ bool LibplaceboVideoRenderer::Impl::RunVpPhaseInterpolation()
 double LibplaceboVideoRenderer::Impl::TimelineDisplayHz() const
 {
 	const double measured = presentationTelemetry.Snapshot().measuredDisplayHz;
-	return timelineDisplayRateHold.Update(measured, renderLoadDisplayRefreshHz.load(std::memory_order_acquire),
+	return dejudderPolicy.timelineDisplayRateHold.Update(measured, renderLoadDisplayRefreshHz.load(std::memory_order_acquire),
 		activeSettings.timingContinuityFixes);
 }
 

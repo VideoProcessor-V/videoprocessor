@@ -40,30 +40,55 @@ SCAN_ROOTS = ["src/VP-V", "src/VideoProcessor-Lib", "src/VideoProcessor-VPRender
 FMT = re.compile(r"DXGI_FORMAT_(R8_UNORM|R8G8_UNORM|R8G8B8A8_UNORM|B8G8R8A8_UNORM|R10G10B10A2_UNORM|R16_FLOAT|R16G16_FLOAT)\b"
                  r"|\b(R8_UNORM|TexFormat::R8|RG16F|RGBA16F|R16F)\b|\"(r8|rgba8|rgba16hf|r16f)\"")
 SHIFT = re.compile(r">>\s*(2|4|6)\b")
-SHIFT_CTX = re.compile(r"luma|chroma|plane|sample|code|word|y10|intensity|p010", re.I)
+# A named constant equal to an axis shift (2/4/6) counts exactly like the literal (rule 19: renaming the
+# literal to a constant of the same value is not a fix).
+SHIFT_CONST_DEF = re.compile(r"\b(?:constexpr|const)\s+(?:static\s+)?(?:inline\s+)?[\w:]+\s+(\w+)\s*=\s*(?:2|4|6)\s*[;,]")
+SHIFT_CTX = re.compile(r"luma|chroma|plane|sample|code|word|y10|intensity|p010", re.I)
 U8 = re.compile(r"uint8_t\s*\*|vector\s*<\s*(std::)?uint8_t")
 U8_CTX = re.compile(r"pixel|plane|luma|chroma", re.I)
 TAG = re.compile(r"PRECISION-OK\s+\S+:\s*\S")
 CLASSES = ("A", "O", "T", "R", "U")
 
 
-def classify_line(line):
+def shift_constants(text):
+    return set(SHIFT_CONST_DEF.findall(text))
+
+
+_NAMED_CACHE = {}
+
+
+def _named_shift(names):
+    if not names:
+        return None
+    key = frozenset(names)
+    if key not in _NAMED_CACHE:
+        _NAMED_CACHE[key] = _build_named_shift(key)
+    return _NAMED_CACHE[key]
+
+
+def _build_named_shift(names):
+    return re.compile(r">>\s*(?:[\w:]*::)?(?:" + "|".join(re.escape(n) for n in sorted(names)) + r")\b")
+
+
+def classify_line(line, names=None):
     ids = []
     if FMT.search(line):
         ids.append("fmt")
-    if SHIFT.search(line) and SHIFT_CTX.search(line):
+    named = _named_shift(names)
+    if (SHIFT.search(line) or (named and named.search(line))) and SHIFT_CTX.search(line):
         ids.append("shift")
     if U8.search(line) and U8_CTX.search(line):
         ids.append("u8")
     return ids
 
 
-def scan_text(rel, text, sites):
+def scan_text(rel, text, sites, names=None):
     raw = text.splitlines()
+    names = set(names or ()) | shift_constants(text)
     cls = sites.get(rel, {}).get("class", "U")
     out = []
     for no, line in enumerate(L.strip_comments(text).splitlines(), 1):
-        ids = classify_line(line)
+        ids = classify_line(line, names)
         if not ids:
             continue
         if TAG.search(raw[no - 1] if no <= len(raw) else "") or (no > 1 and TAG.search(raw[no - 2])):
@@ -74,9 +99,13 @@ def scan_text(rel, text, sites):
 
 def scan(root, sites):
     roots = [r for r in SCAN_ROOTS if os.path.isdir(os.path.join(root, r))]
+    files = [(rel, L.read(full)) for rel, full in L.iter_files(root, roots, exempt_prefixes=("src/VP-V/tests/",))]
+    names = set()
+    for _, text in files:
+        names |= shift_constants(L.strip_comments(text))
     hits = []
-    for rel, full in L.iter_files(root, roots, exempt_prefixes=("src/VP-V/tests/",)):
-        hits.extend(scan_text(rel, L.read(full), sites))
+    for rel, text in files:
+        hits.extend(scan_text(rel, text, sites, names))
     return hits
 
 

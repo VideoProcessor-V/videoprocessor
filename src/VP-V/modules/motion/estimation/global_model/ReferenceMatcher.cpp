@@ -4,6 +4,7 @@
 // CPU reference matcher (see ReferenceMatcher.h). Mirrors the GPU matcher's search order so that tests and
 // the cost measurement can compare today's search with the plan-guided one. Not on the runtime path.
 #include "ReferenceMatcher.h"
+#include <VP-V/core/RobustStats.h>
 
 #include <algorithm>
 #include <chrono>
@@ -151,13 +152,6 @@ namespace CameraModel
 				if (a.prevValid) s.Box(RoundInt(a.pvx), RoundInt(a.pvy), 3, 3);
 				s.HalfPel();
 				return s.best;
-			}
-
-			double Median(std::vector<float>& v)
-			{
-				std::sort(v.begin(), v.end());
-				const size_t n = v.size();
-				return (n & 1u) ? v[n / 2] : 0.5 * (static_cast<double>(v[n / 2 - 1]) + v[n / 2]);
 			}
 
 			size_t PlanIndex(const MeasurementPlan& p, int bx, int by, double s2m)
@@ -370,8 +364,8 @@ namespace CameraModel
 						if (prevValid) { cand.push_back(previous->vx[i]); cand.push_back(previous->vy[i]); }
 						if (haveGlobal) { cand.push_back(static_cast<float>(gx * s2m)); cand.push_back(static_cast<float>(gy * s2m)); }
 						if (guided && eligible) { cand.push_back(static_cast<float>(plan->predX[pi] * s2m)); cand.push_back(static_cast<float>(plan->predY[pi] * s2m)); }
-						const double medx = nbx.empty() ? fvx[i] : Median(nbx);
-						const double medy = nby.empty() ? fvy[i] : Median(nby);
+						const double medx = nbx.empty() ? fvx[i] : RobustStats::Median(nbx);   // core/RobustStats.h (ND06)
+						const double medy = nby.empty() ? fvy[i] : RobustStats::Median(nby);
 						const int ox = windowOrigin(bx * kBlock, from.w, fullW), oy = windowOrigin(by * kBlock, from.h, fullW);
 						double bestScore = 1e30, bestSad = 0, bvx = fvx[i], bvy = fvy[i];
 						auto consider = [&](double vx, double vy)

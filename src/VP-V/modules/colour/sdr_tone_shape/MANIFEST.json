@@ -7,16 +7,16 @@
   "code_location": "partly migrated",
   "live_files": [
     "src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h",
-    "src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h",
     "shaders/SDR tone shape.glsl",
-    "shaders/DV trims.glsl",
-    "src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h",
-    "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h",
-    "src/VP-V/modules/colour/sdr_tone_shape/DvHostStage.h"
+    "shaders/DV trims.glsl"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h",
-    "src/VideoProcessor-Lib/vprenderer/SdrToneShape.h"
+    "src/VideoProcessor-Lib/vprenderer/SdrToneShape.h",
+    "src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h",
+    "src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h",
+    "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h",
+    "src/VP-V/modules/colour/sdr_tone_shape/DvHostStage.h"
   ],
   "components": {
     "files": {

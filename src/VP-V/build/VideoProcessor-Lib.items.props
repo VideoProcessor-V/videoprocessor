@@ -53,6 +53,10 @@
     <ClInclude Include="..\VP-V\core\ResyncCause.h" />
     <ClInclude Include="..\VP-V\core\Indicator.h" />
     <ClInclude Include="..\VP-V\core\Ancestry.h" />
+    <ClInclude Include="..\VP-V\core\OnePole.h" />
+    <ClInclude Include="..\VP-V\core\RobustStats.h" />
+    <ClInclude Include="..\VP-V\core\Ramp.h" />
+    <ClInclude Include="..\VP-V\core\LumaWeights.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedRawTransfer.h" />
     <ClInclude Include="..\VP-V\modules\drive\projector_control\LedDriveArbiter.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedDriveHoldover.h" />
@@ -88,7 +92,7 @@
     <ClInclude Include="IntentInterpreterObserver.h" />
     <ClInclude Include="IntentInterpreterSupport.h" />
     <ClInclude Include="..\VP-V\modules\input\queue_timing\QueueLookahead.h" />
-    <ClInclude Include="..\VP-V\modules\colour\appearance\AmbientAdaptation.h" />
+    <ClInclude Include="..\VP-V\modules\colour\display_mapping\AmbientAdaptation.h" />
     <ClInclude Include="BlackIntent.h" />
     <ClInclude Include="DisplayIntent.h" />
     <ClInclude Include="DisplayProfile.h" />

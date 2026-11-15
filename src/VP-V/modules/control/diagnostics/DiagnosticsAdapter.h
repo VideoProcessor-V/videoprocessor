@@ -22,6 +22,7 @@
 // Header-only, C++14: the renderer DLL and the executable each compile it (DiagnosticHistory's
 // Global() is one recorder per module, as before).
 #include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
+#include <VP-V/modules/control/diagnostics/LibplaceboErrors.h>   // S-12BIT: pure builder, used by ReportRenderErrors
 #include <VP-V/modules/control/diagnostics/RendererDiagnosticCodes.h>
 #include <DebugLog.h>
 #include <GeneralRate.h>

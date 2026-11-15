@@ -90,6 +90,8 @@ enum : ProductId {
     kTdTrailSummary,      // 28 td.trail_summary: per-frame CPU summary for source identity / status
     // Wave S2 (SID lead request, doc 78 section 6): appended after the doc 72 list, never before it.
     kSourceGeometry,      // 29 source_geometry (P14g): HELD-STATE measured + applied source geometry (SourceGeometry unit v1)
+    // Id 30 is RESERVED for grain.band (lead 8 allocation 30, 11-14; lead 12 R1: ids fixed, no renumbering). It is NOT registered: a GpuCompute
+    // product is registered only with its owner fill (R13-8, 102b B3-ID30-EXCLUSIONS); the fill and the id land together (102b LB3-BAND-MEMO-GPU).
     kSkeletonProductEnd
 };
 

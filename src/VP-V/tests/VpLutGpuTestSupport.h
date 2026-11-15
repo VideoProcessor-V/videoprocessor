@@ -46,12 +46,12 @@
 #include <VideoState.h>
 #include <vprenderer/OutputEncodingRepair.h>
 #include <libplacebo/shaders/colorspace.h>
-#include <VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h>   // feat/dv-l8: L8 / ICtCp shader parity
+#include <VP-V/modules/colour/display_mapping/DvDolbyStyle.h>   // feat/dv-l8: L8 / ICtCp shader parity
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/ExtendedRange.h>
 #include <vprenderer/SdrToneShape.h>
-#include <vprenderer/DolbyVisionTrims.h>
+#include <VP-V/modules/colour/display_mapping/DolbyVisionTrims.h>
 #include <vprenderer/RenderedWarp.h>
 #include <vprenderer/AdaptiveDownscale.h>
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>

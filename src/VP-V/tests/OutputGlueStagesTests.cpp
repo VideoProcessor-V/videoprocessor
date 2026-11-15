@@ -464,9 +464,8 @@ namespace VideoProcessorTest
 			Assert::IsTrue(DitherSlot::ClearsLibplaceboDither(false, true, true));    // temporal_dither off, slot on
 			Assert::IsFalse(DitherSlot::ClearsLibplaceboDither(false, true, false));  // slot off: upstream dithers
 			Assert::IsFalse(DitherSlot::ClearsLibplaceboDither(false, false, true));
-			Assert::IsTrue(AdaptiveDownscaleStage::FboFloat32(-1, true));    // auto = on
-			Assert::IsFalse(AdaptiveDownscaleStage::FboFloat32(-1, false));  // slot off
-			Assert::IsFalse(AdaptiveDownscaleStage::FboFloat32(0, true));
+			Assert::IsTrue(PicturePrecision::FboFloat32(-1));   // auto = on, whatever the scaling.output slot does
+			Assert::IsFalse(PicturePrecision::FboFloat32(0));
 		}
 
 		TEST_METHOD(OriginalPathwayTurnsTheExtendedRangeSlotOff)

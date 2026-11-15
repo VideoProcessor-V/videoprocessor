@@ -11,6 +11,8 @@
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/MotionRecordPublish.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/input/source_analysis/P1AcquireSource.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/motion/estimation/VectorEngineFallbackSync.h>
 
 #include <algorithm>
@@ -114,6 +116,14 @@ namespace VpMotion
 			// render-time fallback keeps the matcher's preset (medium).
 			const NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Slow;
 			producer->SetSlot(p2Slot);   // SK-MV: the producer publishes P2 into the engine's slot (it owns no store)
+			// L-B4 (a): the producer reads its engine luma from the skeleton's P1 (Acquire CPU form from its thread), never recomputes it.
+			{
+				const void* memoHost = host_;
+				producer->SetP1Source(std::make_shared<VpFrameAnalysis::P1AcquireSource>([memoHost](uint64_t seq) {
+					const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(memoHost, seq);
+					return fm.Valid() ? fm.memo->Acquire(VpSkeleton::kP1HalfLuma, seq, VpSkeleton::AcquireForm::Cpu) : VpSkeleton::AcquireResult();
+				}));
+			}
 			if (!startFailureInjected && d3d && d3d->device && producer->Start(d3d->device, preset))
 			{
 				motionProducerStartError.clear();
@@ -848,6 +858,8 @@ namespace VpMotion
 			auto lease = std::make_shared<FlowLease>();
 			++flowReads_.conversions;   // W1-C3: once per pair id (a repeated FlowOf of the same pair reuses the lease)
 			lease->computes = &flowTrustComputes_;
+			lease->fbErrorRecomputes = &flowFbErrorRecomputes_;
+			lease->costWeightRecomputes = &flowCostWeightRecomputes_;
 			lease->flow = flow;
 			lease->from = from;
 			lease->to = to;
@@ -905,17 +917,19 @@ namespace VpMotion
 		return true;
 	}
 
-	// W1-C3: the pair's cell trust, computed once per pair and tolerance (the same OpticalFlowTrust functions as every consumer used
+	// W1-C3: the pair's cell trust, computed once per (direction, tolerance) for as long as this lease is the engine's current one (a
+	// FlowOf of another pair replaces the lease and drops the memo: the memo is per single lease, not per pair) (the same OpticalFlowTrust functions as every consumer used
 	// to call itself: the producer's CostWeights / FbError when it worked them out, else the same maths on the raw fields).
-	const float* VectorEngine::FlowLease::CellTrust(float toleranceEnginePx) const
+	const float* VectorEngine::FlowLease::Trust(float toleranceEnginePx, bool backward) const
 	{
 		std::lock_guard<std::mutex> lock(trustMutex);
 		for (const TrustEntry& e : trusts)
-			if (std::memcmp(&e.tolerance, &toleranceEnginePx, sizeof(float)) == 0)   // bit-exact: one entry per value, a NaN included (the list stays bounded)
+			if (e.backward == backward && std::memcmp(&e.tolerance, &toleranceEnginePx, sizeof(float)) == 0)   // bit-exact: one entry per value, a NaN included (the list stays bounded)
 				return e.ok ? e.trust.data() : nullptr;
 		trusts.emplace_back();
 		TrustEntry& entry = trusts.back();
 		entry.tolerance = toleranceEnginePx;
+		entry.backward = backward;
 		std::vector<float>& trust = entry.trust;
 		bool& trustOk = entry.ok;
 		if (computes)
@@ -928,17 +942,28 @@ namespace VpMotion
 		const int blockPx = MotionAhead::Flow::kBlockPx;
 		const int blocksX = (f.halfW + blockPx - 1) / blockPx, blocksY = (f.halfH + blockPx - 1) / blockPx;
 		std::vector<float> blockCostLocal, cellErrorLocal;
+		// The forward direction uses the producer's CostWeights / FbError when it worked them out; the backward direction (fields
+		// swapped: the backward costs, FbError(backward, forward)) has no producer extra and is worked out here, once.
+		const std::vector<int16_t>& vec = backward ? f.backward : f.forward;
+		const std::vector<int16_t>& other = backward ? f.forward : f.backward;
+		const std::vector<uint8_t>& cost = backward ? f.backwardCost : f.forwardCost;
+		if (cells == 0 || vec.size() < cells * 2 || other.size() < cells * 2 || cost.size() < cells)
+			return nullptr;
 		const std::vector<float>* blockCost = &f.costWeight;
-		if (!(f.blocksX == blocksX && f.blocksY == blocksY && f.costWeight.size() == static_cast<size_t>(blocksX) * static_cast<size_t>(blocksY)))
+		if (backward || !(f.blocksX == blocksX && f.blocksY == blocksY && f.costWeight.size() == static_cast<size_t>(blocksX) * static_cast<size_t>(blocksY)))
 		{
-			if (!OpticalFlowTrust::CostWeights(f.forwardCost, f.gridW, f.gridH, grid, blockPx, blocksX, blocksY, blockCostLocal))
+			if (costWeightRecomputes)
+				costWeightRecomputes->fetch_add(1, std::memory_order_relaxed);
+			if (!OpticalFlowTrust::CostWeights(cost, f.gridW, f.gridH, grid, blockPx, blocksX, blocksY, blockCostLocal))
 				return nullptr;
 			blockCost = &blockCostLocal;
 		}
 		const std::vector<float>* cellError = &f.fbError;
-		if (cells == 0 || f.fbError.size() != cells)
+		if (backward || f.fbError.size() != cells)
 		{
-			if (!OpticalFlowTrust::FbError(f.forward, f.backward, f.gridW, f.gridH, grid, cellErrorLocal))
+			if (fbErrorRecomputes)
+				fbErrorRecomputes->fetch_add(1, std::memory_order_relaxed);
+			if (!OpticalFlowTrust::FbError(vec, other, f.gridW, f.gridH, grid, cellErrorLocal))
 				return nullptr;
 			cellError = &cellErrorLocal;
 		}
@@ -951,6 +976,8 @@ namespace VpMotion
 		std::lock_guard<std::mutex> lock(flowMutex_);
 		FlowReadCounters r = flowReads_;
 		r.trustComputes = flowTrustComputes_.load(std::memory_order_relaxed);
+		r.fbErrorRecomputes = flowFbErrorRecomputes_.load(std::memory_order_relaxed);
+		r.costWeightRecomputes = flowCostWeightRecomputes_.load(std::memory_order_relaxed);
 		return r;
 	}
 

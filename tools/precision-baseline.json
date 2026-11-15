@@ -1,8 +1,8 @@
 {
  "classes": {
   "A": 27,
-  "O": 31,
-  "R": 46,
+  "O": 32,
+  "R": 48,
   "T": 2,
   "U": 62
  },
@@ -30,7 +30,7 @@
   "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h": 3,
   "src/VP-V/nets/NetPackage.h": 1,
   "src/VP-V/nets/PlNetRunner.cpp": 2,
-  "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 14,
+  "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 16,
   "src/VideoProcessor-Lib/DisplayMonitorInventory.h": 1,
   "src/VideoProcessor-Lib/DolbyVisionTunnelInput.h": 1,
   "src/VideoProcessor-Lib/P210FrameLayout.h": 2,
@@ -51,6 +51,7 @@
   "src/VideoProcessor-Lib/video_frame_formatter/CR210toRGB48VideoFrameFormatter.AVX2.cpp": 1,
   "src/VideoProcessor-Lib/video_frame_formatter/CRGBDolbyVisionTunnelFormatter.cpp": 1,
   "src/VideoProcessor-Lib/video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h": 1,
+  "src/VideoProcessor-Lib/video_frame_formatter/CV210toP010VideoFrameFormatter.Common.h": 1,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp": 3,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.h": 3,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 22,
@@ -240,6 +241,10 @@
    "class": "U",
    "row": "UNCLASSIFIED"
   },
+  "src/VideoProcessor-Lib/video_frame_formatter/CV210toP010VideoFrameFormatter.Common.h": {
+   "class": "O",
+   "row": "119#63"
+  },
   "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp": {
    "class": "U",
    "row": "UNCLASSIFIED"
@@ -258,5 +263,5 @@
   }
  },
  "tool": "N2 precision",
- "total": 168
+ "total": 171
 }

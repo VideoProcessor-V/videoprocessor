@@ -33,11 +33,11 @@
   },
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": {
    "limit": 141,
-   "reverts_to": 142,
+   "reverts_to": 141,
    "until": [
     "P11b"
    ],
-   "note": "coordinator re-ruling 2026-11-12 (via Lead 6, P4 opus gate MUST-2 + Phase 3 gate SHOULD-2): ONE temporary LVR ceiling of 145 until P11b, replacing the stacked P5c / R12 / Phase3 / P4 allowances; P11b brings LVR to <= 143 and removes this entry in the same commit. Count on r2/phase3-on-p4 = 145 (P4 e-i -3 transitional reads; Phase 3 R11 + R14 + the one R12 block; HA-P4f-S3 / HA-P4g-S3). p4-fg alone counts 146 and lands only stacked with Phase 3."
+   "note": "ONE temporary LVR ceiling until P11b: limit 141, reverts_to 141 (count 141). History: coordinator re-ruling 2026-11-12 (via Lead 6, P4 opus gate MUST-2 + Phase 3 gate SHOULD-2) set one ceiling of 145, replacing the stacked P5c / R12 / Phase3 / P4 allowances; ratcheted 145 -> 141 at the count (HF item 7, db3db4c8d) and reverts_to 142 -> 141 (ed11562c1); composite1b bb6451d22 keeps the minimum of each field (141 / 141). Shrink only; P11b removes this entry in the same commit."
   }
  }
 }

@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <VP-V/core/Ramp.h>   // ND07
 #include <vector>
 
 namespace VpUnit
@@ -86,7 +87,7 @@ inline void Compute(const In& in, const Params& p, Out& out)
 }
 
 // Dither need in 0..1: the lower the quality, the more a step is visible. Smooth, monotone.
-inline double DitherNeed(double quality) { return (std::min)(1.0, (std::max)(0.0, 1.0 - quality)); }
+inline double DitherNeed(double quality) { return RampMath::Clamp01NanToZero(1.0 - quality); }
 
 // Contrast recovery gates OFF on a clean high-bitrate source (get out of the way): the best tier and a high quality.
 inline bool ContrastRecoveryActive(int tier, double quality, const Params& p)

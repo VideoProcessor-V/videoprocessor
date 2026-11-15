@@ -17,6 +17,8 @@
 // so the matcher's own vector, or no motion, is preferred there. Weight 1
 // changes nothing.
 
+#include <VP-V/core/RobustStats.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -82,7 +84,7 @@ namespace OpticalFlowTrust
 			if (seen > half) break;
 		}
 		median = static_cast<float>(m);
-		spread = (std::max)(scale.floorCodes, 1.4826f * static_cast<float>(d));
+		spread = (std::max)(scale.floorCodes, static_cast<float>(RobustStats::kMadToSigma) * static_cast<float>(d));
 		return true;
 	}
 
