@@ -118,9 +118,10 @@ namespace QueueWindowTestsNs
 			p.Sample(1 * u, 2);   // a dip
 			p.Sample(2 * u, 6);
 			Assert::AreEqual<int>(6, p.Value(3 * u), L"a dip shorter than the hold keeps the peak");
-			for (uint64_t t = 3 * u; t <= 14 * u; t += u)
-				p.Sample(t, 3);   // a sustained fall
+			for (uint64_t t = 3 * u; t <= 11 * u; t += u)
+				p.Sample(t, 3);   // a sustained fall (time only moves forward: one writer, the render thread's Begin)
 			Assert::AreEqual<int>(6, p.Value(11 * u), L"still within the hold of the last 6");
+			p.Sample(12 * u, 3);   // the fall goes on past the hold of the 6 sampled at 2u
 			Assert::AreEqual<int>(3, p.Value(12 * u + u / 2), L"after the hold the window follows the fall");
 			p.Sample(13 * u, 9);
 			Assert::AreEqual<int>(9, p.Value(13 * u + 1), L"a rise is taken at once");
