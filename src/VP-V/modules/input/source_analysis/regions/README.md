@@ -105,7 +105,12 @@ Design goal: one computation of the debander guard's busy share (P11 term S5, va
 plane) and one per-pixel Sobel edge map (ProductId kEdgeMap, consumers AdaptiveDownscale and L-FOCUS, later P11 gmax), both owner-filled
 in source_analysis and read by consumers through Acquire. Philosophy: the arithmetic is MOVED from VpDebander / AdaptiveDownscale, not
 copied; a private pass is deleted in the same commit as its consumer's switch.
-Status: BusyEdge.h (CPU reference and tolerance oracle) and BusyEdgeGlsl.h (shader mirrors) exist with BusyEdgeTests (registered, not
-yet run). The GPU owner fills and the consumer switches wait for L-CORE's OwnerFillRequest::gpu context (r2/lcore-qwin); until then no
-consumer is switched and no private pass is removed.
+Status: BusyEdge.h (CPU reference and tolerance oracle) and BusyEdgeGlsl.h (shader mirrors, one tap form kSourceTapCodesPerUnit) exist
+with BusyEdgeTests. The kEdgeMap owner fill (EdgeMapFill.h, on L-CORE's OwnerFillRequest::gpu) is built and registered at start-up
+(HubBootstrap; reserve derived from the source luma size, rule 6) with EdgeMapFillTests (registration, reserve, CPU declines; the GPU
+parity test is owed before the first reader row, 102b KEDGEMAP-RULE3). It has NO reader yet, so it never runs; no consumer is switched and
+every private pass (debander guard, AdaptiveDownscale measure) is still present. Decisions: R14-66 (lead 14, 2026-11-14 20:54Z,
+lead14-state.md:102) registers kEdgeMap under rule 3, first reader L-FOCUS; R14-64 (lead 14, 2026-11-14 ~21:10Z, lead14-state.md:89)
+kept X5 private, superseded by the owner's ruling of 2026-11-14 ~17:00 EST (design-EDGEMAP-DOMAIN-AXIS rev 2, 102b X5-EDGEMAP-CJ3): X5
+acquires a kEdgeMap stage variant in CJ-3.
 Settings: none added (no new keys); thresholds are the debander's existing lap_min / ext_min.
