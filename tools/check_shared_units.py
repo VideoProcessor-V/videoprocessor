@@ -192,7 +192,11 @@ REGISTRY = [
                       r"\bMad(Sigma)?\s*\(", r"\bPercentile\s*\(", r"\bQuantile\s*\(",
                       # C6-2 C8 (review MUST-1/SHOULD-2): the sorted[size() / 2] Upper-median idiom, and any vpu_median_ name
                       # (a call is allowed below; a pasted `float vpu_median_...(` definition outside the owner stays a duplicate).
-                      r"\[\s*[\w.>()-]*\bsize\(\)\s*/\s*2u?\s*\]", r"\bvpu_median_\w*\s*\("),
+                      r"\[\s*[\w.>()-]*\bsize\(\)\s*/\s*2u?\s*\]", r"\bvpu_median_\w*\s*\(",
+                      # 102b U24-FLOORINDEX-QUANTILE-COPIES: the FloorIndex quantile idiom sorted[size_t(q * (size() - 1))]
+                      # (either operand order) = RobustStats::Quantile(v, q, RankRule::FloorIndex).
+                      r"\[[^\[\]]*\*[^\[\]]*\bsize\(\)\s*-\s*1\b[^\[\]]*\]",
+                      r"\[[^\[\]]*\bsize\(\)\s*-\s*1\s*\)*\s*\*[^\[\]]*\]"),
      "allow": _c(r"RobustStats::\w+", r"core/RobustStats(Shaders)?\.h", r"(?<!float )\bvpu_median_\w*\s*\(",
                  r"\bVP_MAD_TO_SIGMA\b")},
     {"id": "U25", "name": "ramp_clamp_smoothstep",

@@ -445,6 +445,22 @@ class NearDupUnitPatternsTest(unittest.TestCase):
             role = {h["line"]: h["role"] for h in res["hits"] if h["file"] == f}
             self.assertEqual(role, {1: "duplicate", 2: "duplicate", 3: "consumer", 4: "duplicate", 5: "consumer"})
 
+    def test_u24_floor_index_quantile_idiom_is_a_duplicate(self):
+        # 102b U24-FLOORINDEX-QUANTILE-COPIES: sorted[size_t(q * (size() - 1))] (the two copies moved in C9, verbatim, and
+        # the reversed operand order) is a private FloorIndex Quantile; the owner call is a consumer; a last-element or
+        # 2-D index without the q * (size() - 1) product is no hit.
+        with tempfile.TemporaryDirectory() as r:
+            f = "src/VP-V/modules/repair/c/Q.h"
+            _w(r, f, "const auto at = [&](double q) { return sorted[static_cast<size_t>(q * static_cast<double>(sorted.size() - 1))]; };\n"
+                     "const double thr = sorted[static_cast<size_t>(0.3 * static_cast<double>(sorted.size() - 1))];\n"
+                     "double p = v[static_cast<size_t>((v.size() - 1) * q)];\n"
+                     "const double t = RobustStats::Quantile(e, 0.3, RobustStats::RankRule::FloorIndex);\n"
+                     "double last = v[v.size() - 1];\n"
+                     "float f = px[static_cast<size_t>(y) * w + x];\n")
+            res = _unit(csu.scan(r, baseline={"units": {}}), "U24")
+            role = {h["line"]: h["role"] for h in res["hits"] if h["file"] == f}
+            self.assertEqual(role, {1: "duplicate", 2: "duplicate", 3: "duplicate", 4: "consumer"})
+
 
 class FocusAcquireAllowTest(unittest.TestCase):
     """L-FOCUS: Acquire(kP11RegionBlockStats) is a consumer read of the published product; a line that computes block
