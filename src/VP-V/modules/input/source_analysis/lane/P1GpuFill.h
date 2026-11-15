@@ -228,3 +228,13 @@ if (p.x < size.x && p.y < size.y) {
 		const pl_tex_t* l2, int from, int levels);
 }
 }
+
+namespace Vpv
+{
+namespace FrameAnalysis
+{
+	// Start-up only (core/hub/HubBootstrap.cpp, after the skeleton module; idempotent): registers the (kP1HalfLuma, Gpu) owner fill
+	// of the matcher pyramid variant (BBP-B commit B2; defined in P1GpuFill.cpp).
+	void RegisterP1GpuModule();
+}
+}
