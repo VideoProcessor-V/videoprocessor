@@ -303,7 +303,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(disp.Stats().releasesDone == 2 && disp.AllocatedBytes() == 0, L"everything released");
 		}
 
-		// Lane (tap bands, extend, six kernel steps, one Dispatch each) == live (DispatchLive), texel for texel.
+		// Lane (tap bands, extend, seven kernel steps, one Dispatch each) == live (DispatchLive), texel for texel.
 		BEGIN_TEST_METHOD_ATTRIBUTE(LaneEqualsLive)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()
