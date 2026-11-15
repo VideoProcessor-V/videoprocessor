@@ -60,6 +60,8 @@ inline StaticClass StaticClassOf(ProductId id)
         return StaticClass{ JobClass::Derived, false };
     // TD's own products: the jobs of the TD reserved slice (OD:391 (2)/(3); 115 #47 "regulator can never shed TD"). Admitted inside the
     // slice (AdmissionTable.h Admit), never optional fill, never in the arbiter's FillOff list: TD steps down only its own ladder (OD:612 (3)).
+    // This is the static class. With TD OFF, Admit re-classes a demanded one per mode (owner 2026-11-15): Derived in standard / AVR-safe
+    // (never shed), Fill when its only readers are optional fills (it stops with them) and Fill in games (not made); competitive makes none.
     case kTdBlocks: case kTdMemory: case kTdAnchorPass: case kTdAnchorRefs: case kTdDelta: case kTdMaps: case kTdTrailSummary:
         return StaticClass{ JobClass::Slice, true };
     // optional fill, admitted once at Configure (doc 91 C :79): P5, P6, P9, P10 (until proven, :119), P10c
