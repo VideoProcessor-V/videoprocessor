@@ -266,7 +266,7 @@ namespace DetailPulseTestsNs
 		}
 		~PulseGpu()
 		{
-			VpDetailRestore::DefaultSceneReader() = &VpDetailRestore::ReadSceneFromStore;
+			VpDetailRestore::DefaultSceneReader() = &VpDetailRestore::ReadSceneFromSkeleton;   // the production default (C5)
 			pl_dispatch_destroy(&dispatch);
 			pl_d3d11_destroy(&d3d);
 			pl_log_destroy(&log);

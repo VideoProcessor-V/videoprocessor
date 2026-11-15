@@ -10,6 +10,10 @@
 // mirrors) and the temporal detail CPU model.
 
 #include <VP-V/core/FrameAnalysisStore.h>
+#include <VP-V/core/hub/CurrentFrame.h>
+#include <VP-V/core/hub/ExtensionHub.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
+#include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailModel.h>
@@ -22,7 +26,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -139,6 +146,35 @@ namespace U7FadePartialResetTestsNs
 		}
 		return true;
 	}
+
+	// C5 (WAIVER-C5-SCENEOF-DPTR; owner 2026-11-14 17:38 "Ask the skeleton for it same as everything else"): a skeleton module in the
+	// hub whose IExternalDemand::SceneOf answers LIVE from g_plan, as the real SceneOf does with frame_analysis_store off (that live
+	// path itself is pinned on the real module: SkeletonModuleTests, "2. Store off"). `unknownAt` = a frame it cannot answer.
+	struct LiveSceneSkeleton : Vpv::Hub::ISkeletonModule, Vpv::Skeleton::IExternalDemand
+	{
+		const char* Name() const override { return "test skeleton (scene product, live)"; }
+		void* Query(const char* iid) override
+		{
+			return iid && std::strcmp(iid, Vpv::Skeleton::kExternalDemandQueryId) == 0 ? static_cast<Vpv::Skeleton::IExternalDemand*>(this) : nullptr;
+		}
+		void SetExternalDemand(const void*, const void*, const std::vector<VpSkeleton::ConsumerDecl>&, const std::vector<VpSkeleton::ProductId>&) override {}
+		void ClearExternalDemand(const void*, const void*) override {}
+		Vpv::Skeleton::SceneAnswer SceneOf(const void* host, uint64_t seq) const override
+		{
+			asks.push_back(std::make_pair(host, seq));
+			Vpv::Skeleton::SceneAnswer a;
+			FrameAnalysis::Scene s;
+			if (seq == unknownAt || !PlanReader(seq, s))
+				return a;
+			a.known = true;
+			a.cut = s.cut; a.fade = s.fade; a.cutLate = s.cutLate; a.cutHere = s.cutHere; a.confirmed = s.confirmed;
+			a.flash = s.flash; a.cutPossible = s.cutPossible; a.cutStrength = s.cutStrength; a.fadeKeep = s.fadeKeep;
+			a.from = Vpv::Skeleton::SceneAnswer::From::Live;
+			return a;
+		}
+		uint64_t unknownAt = 0;
+		mutable std::vector<std::pair<const void*, uint64_t>> asks;
+	};
 
 	// A textured plane (codes of a 10-bit signal), the same picture every frame with its own fine noise.
 	inline GrainModel::Image Textured(int w, int h, uint32_t k)
@@ -367,6 +403,106 @@ namespace U7FadePartialResetTestsNs
 			Assert::AreEqual(d[23].resets + 1, d[24].resets, L"a fade without its keep resets (shown)");
 			Assert::IsTrue(d[24].status.find("reset: fade (no keep)") == 0, Wide(d[24].status).c_str());
 			Assert::AreEqual(d[27].resets + 1, d[28].resets, L"a cut resets");
+		}
+
+		// C5 (WAIVER-C5-SCENEOF-DPTR; gate C5 prequal x5dup MUST 1, extended to DP/TR by lead 18): the PRODUCTION reader of detail
+		// pulse / texture restore asks the skeleton's get-or-compute reader (SceneOf) for the renderer this thread renders, never a
+		// store Peek. With frame_analysis_store OFF (the Host's store registered DISABLED: the Peek finds nothing) a cut still
+		// restarts in full and a fade still gets its partial reset. A frame the skeleton cannot answer, and no skeleton module, stay
+		// visible restarts with their cause.
+		TEST_METHOD(StoreOffACutStillRestartsThroughTheSkeleton)
+		{
+			struct Scope
+			{
+				Scope() { Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); Vpv::Hub::ResetThisThreadFrameForTesting(); }
+				~Scope()
+				{
+					Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+					Vpv::Hub::ResetThisThreadFrameForTesting();
+					VpDetailRestore::DefaultSceneReader() = &VpDetailRestore::ReadSceneFromSkeleton;
+				}
+			} scope;
+			int renderer = 0;
+			FrameAnalysis::Store offStore(FrameAnalysis::RingDepth(4, 4));
+			offStore.SetEnabled(false);   // what frame_analysis_store=false leaves
+			VpFrameAnalysis::SourceFrameTap::SetStore(&renderer, &offStore);
+			struct StoreScope { const void* h; ~StoreScope() { VpFrameAnalysis::SourceFrameTap::SetStore(h, nullptr); } } storeScope{ &renderer };
+			Assert::IsTrue(VpDetailRestore::DefaultSceneReader() == &VpDetailRestore::ReadSceneFromSkeleton,
+				L"production default: the skeleton's scene product, not the store Peek");
+
+			// No skeleton module yet: a visible restart with its cause.
+			RendererExtension::FrameContext c;
+			c.host = &renderer;
+			c.phase = RendererExtension::FramePhase::Entrance;
+			c.seq = 12;
+			Vpv::Hub::RecordCurrentFrame(c);
+			g_plan = ReaderPlan();
+			g_plan.fadeFrom = 5; g_plan.fadeTo = 10; g_plan.fadeKeep = 0.6f; g_plan.cutAt = 12;
+			const VpDetailRestore::SceneRestartAnswer noModule = VpDetailRestore::SceneRestartOf(12, nullptr);
+			Assert::IsTrue(noModule.restart && !noModule.fromRecord, L"no skeleton module: restart, counted as missing");
+			Assert::IsTrue(std::string(VpDetailRestore::SceneUnavailableWhy()).find("no skeleton module") != std::string::npos,
+				Wide(VpDetailRestore::SceneUnavailableWhy()).c_str());
+
+			LiveSceneSkeleton* sk = new LiveSceneSkeleton();
+			sk->unknownAt = 14;
+			Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(sk));
+			FrameAnalysis::Scene peeked;
+			Assert::IsFalse(VpDetailRestore::ReadSceneFromStore(12, peeked), L"store off: a Peek finds no scene group");
+
+			// The cut: a full restart, answered by the skeleton for THIS renderer and frame.
+			const VpDetailRestore::SceneRestartAnswer cut = VpDetailRestore::SceneRestartOf(12, nullptr);
+			Assert::IsTrue(cut.restart && cut.fromRecord, L"store off: the cut still restarts, from the skeleton's answer");
+			Assert::AreEqual(0.0f, cut.historyKeep);
+			Assert::AreEqual(size_t(1), sk->asks.size(), L"one SceneOf call per frame");
+			Assert::IsTrue(sk->asks[0].first == &renderer && sk->asks[0].second == 12u, L"asked for this thread's renderer and the frame");
+
+			// A fade: the partial reset, no restart.
+			const VpDetailRestore::SceneRestartAnswer fade = VpDetailRestore::SceneRestartOf(7, nullptr);
+			Assert::IsTrue(!fade.restart && fade.fadePartial && fade.fromRecord, L"store off: a fade is still a partial reset");
+			Assert::AreEqual(0.6f, fade.historyKeep);
+			const VpDetailRestore::SceneRestartAnswer still = VpDetailRestore::SceneRestartOf(11, nullptr);
+			Assert::IsTrue(!still.restart && !still.fadePartial && still.fromRecord, L"no cut, no fade: the history is kept");
+
+			// A frame the skeleton cannot answer: a visible restart with the skeleton's cause (a genuinely missing result).
+			const VpDetailRestore::SceneRestartAnswer unknown = VpDetailRestore::SceneRestartOf(14, nullptr);
+			Assert::IsTrue(unknown.restart && !unknown.fromRecord, L"not answered: restart, counted as missing");
+			Assert::IsTrue(std::string(VpDetailRestore::SceneUnavailableWhy()).find("could not classify") != std::string::npos,
+				Wide(VpDetailRestore::SceneUnavailableWhy()).c_str());
+
+			// The CPU models with the production reader: the cut restarts (gain 1), the fade frames are partial.
+			DetailPulseModel::Settings s;
+			s.sourceHz = 23.976;
+			s.colorDepth = 10;
+			s.sceneReader = &VpDetailRestore::ReadSceneFromSkeleton;
+			g_plan = ReaderPlan();
+			g_plan.fadeFrom = 8; g_plan.fadeTo = 21; g_plan.fadeKeep = 0.7f; g_plan.cutAt = 25;
+			sk->unknownAt = 0;
+			DetailPulseModel::Model dp;
+			TextureRestoreModel::Model tr;
+			for (int k = 0; k < 30; ++k)
+			{
+				const uint64_t seq = uint64_t(k) + 1;
+				const GrainModel::Image g = Textured(96, 64, uint32_t(k));
+				const DetailPulseModel::Frame f = dp.Process(g, seq, s);
+				TextureRestoreModel::Image im(96, 64);
+				for (size_t i = 0; i < im.v.size(); ++i) im.v[i] = g.v[i];
+				TextureRestore::Params p;
+				p.colorDepth = 10; p.sourceHz = 23.976; p.bitrateQuality = 1.0; p.sequence = seq;
+				p.sceneReader = &VpDetailRestore::ReadSceneFromSkeleton;
+				tr.Frame(im, p);
+				if (seq == 25)
+				{
+					Assert::IsTrue(f.restart, L"detail pulse: store off, the cut restarts");
+					Assert::AreEqual(1.0, f.g1);
+					Assert::AreEqual(1.0, f.g2);
+					Assert::IsTrue(tr.LastWasCut(), L"texture restore: store off, the cut restarts");
+				}
+				else if (seq >= 8 && seq < 21)
+				{
+					Assert::IsTrue(!f.restart && f.fadePartial, L"detail pulse: store off, a fade frame is partial");
+					Assert::IsTrue(!tr.LastWasCut() && tr.LastWasFadePartial(), L"texture restore: store off, a fade frame is partial");
+				}
+			}
 		}
 
 	private:
