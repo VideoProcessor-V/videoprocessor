@@ -4,6 +4,13 @@
 // VP-V GPU hook tests (moved out of Bill's LibplaceboLutParserTests.cpp; test names unchanged).
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/modules/input/source_analysis/regions/BusyEdge.h>
+#include <vprenderer/GrainPreserve.h>
+
+#include <cmath>
+#include <cstring>
+#include <random>
+#include <vector>
 
 namespace VideoProcessorTest
 {
@@ -457,6 +464,156 @@ namespace VideoProcessorTest
 				Assert::IsTrue(vetoKept > 0.7, wtext.c_str());
 				Assert::IsTrue(pass > 0.95 && pass < 1.05, wtext.c_str());
 				matchesModel(split, img, threshold, "noisy bands");
+			}
+			pl_dispatch_destroy(&dispatch);
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(VpDebanderGuardMatchesTheBusyShareOracle)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VpDebanderGuardMatchesTheBusyShareOracle)
+		{
+			// C7-6 U5 G1 parity: the debander's grain guard (the spatial-share veto) is the regions owner's busy-share kernel
+			// (RegionEvidence::BusyShareBodyGlsl) with bz_scale 1 and the thresholds in the plane's normalised units. Its texture
+			// must carry the CPU oracle's (BusyEdge::BusyShare) decisions on the same float taps, pixel for pixel: per cell the
+			// share is within a quarter of one pixel's weight (one flipped decision moves a share by 1 / the cell's pixels).
+			// Planes: a 1-component luma and a 2-component chroma (bz_ncomp 2), partial cells on both axes, integer codes on a
+			// ramp (the absolute value varies the float rounding) plus small noise. Threshold edges: at 12 bits with thresholds
+			// 12 and 24 the extremum level is exactly 1 and 2 codes, so a neighbour step of that many codes sits ON the comparison.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			struct Case { int depth; double threshold; };
+			const Case cases[3] = { { 12, 12.0 }, { 12, 24.0 }, { 10, 6.0 } };
+			for (const Case& cs : cases)
+			{
+				const int shift = 16 - cs.depth, maxCode = (1 << cs.depth) - 1;
+				const int lw = 72, lh = 40, cw = 36, ch = 20;   // 4.5 x 2.5 and 2.25 x 1.25 cells
+				std::mt19937 rng(7u + static_cast<unsigned>(cs.depth * 100 + cs.threshold));
+				std::uniform_int_distribution<int> noise(-1, 2);
+				auto code = [&](int x, int y, int k, int noisyBelowX) {
+					// Top: near-flat steps (extremum edges); bottom: a steep ramp (Laplacian edges at varied absolute codes). Noise of
+					// -1..2 codes of the signal left of noisyBelowX (neighbour steps of 1, 2, 3 codes: on and around the levels); the
+					// clean part right of it keeps both decisions in the picture.
+					const int base = y < 20 ? (maxCode / 3 + 3 * (x / 9) + 5 * k) : (maxCode / 8 + 37 * x + 11 * y + 101 * k);
+					return (std::min)(maxCode, (std::max)(0, base + (x < noisyBelowX ? noise(rng) : 0)));
+				};
+				std::vector<uint16_t> luma(static_cast<size_t>(lw) * lh), chroma(static_cast<size_t>(cw) * ch * 2);
+				for (int y = 0; y < lh; ++y)
+					for (int x = 0; x < lw; ++x) luma[static_cast<size_t>(y) * lw + x] = static_cast<uint16_t>(code(x, y, 0, 48) << shift);
+				for (int y = 0; y < ch; ++y)
+					for (int x = 0; x < cw; ++x)
+						for (int k = 0; k < 2; ++k)
+							chroma[(static_cast<size_t>(y) * cw + x) * 2 + k] = static_cast<uint16_t>(code(x, y * 2, k + 1, 24) << shift);
+				auto upload = [&](int w, int h, const char* fmt, const std::vector<uint16_t>& data) {
+					pl_tex_params p{};
+					p.w = w; p.h = h; p.format = pl_find_named_fmt(gpu, fmt); p.sampleable = true; p.initial_data = data.data();
+					Assert::IsNotNull(p.format, L"no 16-bit unorm upload format");
+					return pl_tex_create(gpu, &p);
+				};
+				pl_tex lt = upload(lw, lh, "r16", luma), ct = upload(cw, ch, "rg16", chroma);
+				Assert::IsTrue(lt && ct, L"upload");
+				pl_frame f{};
+				f.num_planes = 2;
+				f.planes[0].texture = lt; f.planes[0].components = 1; f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				f.planes[1].texture = ct; f.planes[1].components = 2;
+				f.planes[1].component_mapping[0] = PL_CHANNEL_CB; f.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				f.repr.sys = PL_COLOR_SYSTEM_BT_709; f.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				f.repr.bits.sample_depth = 16; f.repr.bits.color_depth = cs.depth; f.repr.bits.bit_shift = shift;
+				f.color = pl_color_space_bt709;
+				VpDebander::Params params;
+				params.thresholdCodes = cs.threshold;
+				params.colorDepth = cs.depth;
+				params.radiusScale = 1080.0 / lh;
+				params.grainGuard = true;
+				params.grainSplit = false;   // the spatial-share veto: the guard pass runs
+				VpDebander::Module deband;
+				pl_frame out{};
+				Assert::IsTrue(deband.Apply(gpu, dispatch, f, params, out), ExtendedRangeGpuProbe::ToWide(deband.LastError()).c_str());
+				pl_gpu_finish(gpu);
+				// The thresholds exactly as the debander forms them (one code in normalised units, VpDebander.cpp).
+				const double codeUnit = std::pow(2.0, shift) / 65535.0;
+				const double extCodes = GrainPreserve::GuardExtremumCodes(cs.threshold, cs.depth);
+				const float lapMin = static_cast<float>(GrainPreserve::GuardLaplacianCodes(cs.threshold, cs.depth) * codeUnit);
+				const float extMin = static_cast<float>(extCodes * codeUnit);
+				int flips = 0, edgeSteps = 0;
+				for (int planeIndex = 0; planeIndex < 2; ++planeIndex)
+				{
+					const int w = planeIndex == 0 ? lw : cw, h = planeIndex == 0 ? lh : ch, n = planeIndex == 0 ? 1 : 2;
+					const std::vector<uint16_t>& raw = planeIndex == 0 ? luma : chroma;
+					// The oracle's taps: the GPU's unorm16 sample, raw / 65535 rounded to float.
+					std::vector<float> comp[2];
+					for (int k = 0; k < n; ++k)
+					{
+						comp[k].resize(static_cast<size_t>(w) * h);
+						for (size_t i = 0; i < comp[k].size(); ++i) comp[k][i] = static_cast<float>(raw[i * n + k] / 65535.0);
+					}
+					RegionEvidence::BusyEdge::PlaneGroup g;
+					g.w = w; g.h = h; g.n = n; g.comp[0] = comp[0].data(); g.comp[1] = n > 1 ? comp[1].data() : nullptr;
+					const std::vector<float> want = RegionEvidence::BusyEdge::BusyShare(g, 16, lapMin, extMin);
+					// Horizontal neighbour steps exactly on an integer extremum level: the threshold edges this case exercises.
+					if (extCodes == std::floor(extCodes))
+						for (int k = 0; k < n; ++k)
+							for (int y = 0; y < h; ++y)
+								for (int x = 1; x < w; ++x)
+								{
+									const int a = raw[(static_cast<size_t>(y) * w + x) * n + k] >> shift;
+									const int b = raw[(static_cast<size_t>(y) * w + x - 1) * n + k] >> shift;
+									edgeSteps += std::abs(a - b) == static_cast<int>(extCodes) ? 1 : 0;
+								}
+					pl_tex guard = deband.GuardTextureForTest(0, planeIndex);
+					Assert::IsNotNull(guard, L"the guard texture exists (grainGuard on, grainSplit off)");
+					const int gw = (w + 15) / 16, gh = (h + 15) / 16;
+					Assert::AreEqual(gw, guard->params.w);
+					Assert::AreEqual(gh, guard->params.h);
+					const pl_fmt fmt = guard->params.format;
+					pl_tex_params rp{};
+					rp.w = gw; rp.h = gh; rp.format = fmt; rp.host_readable = true; rp.blit_dst = true;
+					pl_tex readable = pl_tex_create(gpu, &rp);
+					Assert::IsNotNull(readable, L"readback texture");
+					pl_tex_blit_params bp{}; bp.src = guard; bp.dst = readable;
+					pl_tex_blit(gpu, &bp);
+					const size_t texel = fmt->texel_size;
+					std::vector<uint8_t> bytes(static_cast<size_t>(gw) * gh * texel);
+					pl_tex_transfer_params d{}; d.tex = readable; d.ptr = bytes.data();
+					Assert::IsTrue(pl_tex_download(gpu, &d));
+					pl_tex_destroy(gpu, &readable);
+					auto share = [&](size_t i) -> float {
+						const uint8_t* q = bytes.data() + i * texel;
+						if (fmt->type == PL_FMT_FLOAT && fmt->component_depth[0] == 32) { float v; std::memcpy(&v, q, 4); return v; }
+						uint16_t h16; std::memcpy(&h16, q, 2);
+						if (fmt->type == PL_FMT_UNORM) return h16 / 65535.0f;
+						const int e = (h16 >> 10) & 31, m = h16 & 1023;   // IEEE half (a 16-bit float fallback format)
+						const float v = e == 0 ? std::ldexp(static_cast<float>(m), -24) : std::ldexp(static_cast<float>(m + 1024), e - 25);
+						return (h16 & 0x8000) ? -v : v;
+					};
+					double worst = 0.0;
+					bool anyBusy = false, anyClear = false;
+					for (int by = 0; by < gh; ++by)
+						for (int bx = 0; bx < gw; ++bx)
+						{
+							const size_t i = static_cast<size_t>(by) * gw + bx;
+							const int cellPx = ((std::min)(w, (bx + 1) * 16) - bx * 16) * ((std::min)(h, (by + 1) * 16) - by * 16);
+							const double delta = std::fabs(static_cast<double>(share(i)) - want[i]) * cellPx;   // in pixels
+							worst = (std::max)(worst, delta);
+							flips += static_cast<int>(std::lround(delta));
+							anyBusy = anyBusy || want[i] > 0.0f;
+							anyClear = anyClear || want[i] < 1.0f;
+						}
+					char text[220];
+					snprintf(text, sizeof(text), "%d-bit threshold %.0f plane %d (%dx%d, %d comp): worst %.3f px of a cell, flips %d, edge steps so far %d",
+						cs.depth, cs.threshold, planeIndex, w, h, n, worst, flips, edgeSteps);
+					Logger::WriteMessage(text);
+					const std::wstring wtext(text, text + strlen(text));
+					Assert::IsTrue(anyBusy && anyClear, (L"the picture exercises both decisions; " + wtext).c_str());
+					Assert::IsTrue(worst < 0.25, (L"guard = BusyShare oracle decision for decision (else register a FIX with this flip count); " + wtext).c_str());
+				}
+				if (cs.depth == 12)
+					Assert::IsTrue(edgeSteps > 0, L"the 12-bit cases put neighbour steps exactly on the extremum level");
+				deband.Release(gpu);
+				pl_tex_destroy(gpu, &lt);
+				pl_tex_destroy(gpu, &ct);
 			}
 			pl_dispatch_destroy(&dispatch);
 		}

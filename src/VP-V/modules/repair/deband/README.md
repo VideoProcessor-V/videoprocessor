@@ -79,7 +79,7 @@ libplacebo (`renderer.h`, `dispatch.h`, compute shaders), `src/VideoProcessor-Li
 ### Test it standalone
 
 - CPU: `GrainPreservationTests` methods `VpDebander*` (the reference model of the guard and the split, GrainReferenceModel.h), and `LibplaceboLutParserTests::VpDebanderStrengthSnapsOccupancyReadingToContentLevels` (`Strength` only).
-- GPU (D3D11, WARP unless `VP_TEST_GPU=hardware`; run only when GPU tests are allowed): `LibplaceboLutParserTests` methods `VpDebanderSmoothsBandsKeepsTextureAndHoldsAlongTheVectors`, `VpDebanderKeepsGrainWithoutVectors` and `VpDebanderGrainSplitDebandsNoisyBands`. Through the renderer (`GpuHardware`, skipped without hardware): `RendererCaptureHarnessTests::VpDebanderRunsThroughTheRenderer`.
+- GPU (D3D11, WARP unless `VP_TEST_GPU=hardware`; run only when GPU tests are allowed): `LibplaceboLutParserTests` methods `VpDebanderSmoothsBandsKeepsTextureAndHoldsAlongTheVectors`, `VpDebanderKeepsGrainWithoutVectors`, `VpDebanderGrainSplitDebandsNoisyBands` and `VpDebanderHookTests::VpDebanderGuardMatchesTheBusyShareOracle` (GpuWarp: the guard texture against the regions CPU oracle `BusyEdge::BusyShare`, decision for decision, threshold-edge steps included; the parity of C7-6 U5 G1). Through the renderer (`GpuHardware`, skipped without hardware): `RendererCaptureHarnessTests::VpDebanderRunsThroughTheRenderer`.
 - `FallbackCatalogTests::DebandSubstitutesOnlyForAFailedVpDebander` (CPU) tests the unwired plan.
 
 Run single-threaded:
