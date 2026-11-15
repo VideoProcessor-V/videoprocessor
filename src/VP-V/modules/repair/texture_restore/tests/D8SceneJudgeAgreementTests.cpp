@@ -7,7 +7,8 @@
 // the retired tile law. This harness measures, on real clips from VP_TEST_CLIP_MANIFEST and on a synthetic fade and a synthetic
 // flash, how often the SHARED restart decision agrees with the truth, and gates it:
 //   - per frame: decode (RealClipLibrary, 8-bit gray), P1 half luma + P4 source stats at the clip size (the lane's own functions),
-//     U7 verdict for seq >= 2 (prev, cur, false, false: exactly the skeleton's SceneFactsOf), published into a FrameAnalysis::Store
+//     U7 verdict for seq >= 2 (prev, cur, false, false, then the pair folded into the part's one CutFadeJudge::FadeRun, fade = pair
+//     law OR run: exactly the skeleton's SceneFactsOf since the multi-frame fade law), published into a FrameAnalysis::Store
 //     registered as the one SourceFrameTap store (the harness plays the skeleton's seal; the skeleton itself is not run);
 //   - truth per frame of the part (TruthRestarts), scored on the part's frames AFTER its first (the first frame has no prior
 //     frame, so no detector decision exists there; excluded for DP and TR alike, never an automatic agree): the manifest's cuts_s frames;
@@ -417,6 +418,7 @@ namespace D8SceneJudgeAgreementNs
 				if (f + 1 < end) expected[static_cast<size_t>(f + 1 - begin)] = 1;
 			}
 		VpUnit::CutFadeJudge::CutTracker tracker;   // the renderer's law, fed every P4 record of the part in order
+		VpUnit::CutFadeJudge::FadeRun fadeRun;      // WAIVER-U7-MULTIFRAME-FADE: the part's stream, one run, every pair folded in order (the skeleton's seal)
 
 		ModuleRow dp, tr;
 		DetailPulseModel::Model dpOld, dpShared;
@@ -469,15 +471,16 @@ namespace D8SceneJudgeAgreementNs
 				Assert::IsTrue(havePrev, L"D8: the pair's previous P4");
 				const auto e = VpLaneProducts::ClassifyEvents(prev, cur, false, false);
 				ev = e;
+				const bool fade = VpUnit::CutFadeJudge::FoldFadeRun(prev, cur, e, fadeRun) || e.fade;   // WAIVER-U7-MULTIFRAME-FADE
 				const VpUnit::CutFadeJudge::CutVerdict own = tracker.Provisional();
 				const bool delivered = confirmedPrev.known && confirmedPrev.seq + 1u == seq && confirmedPrev.cut;
 				FrameAnalysis::Scene scene;
-				scene.cut = delivered; scene.cutLate = delivered; scene.fade = e.fade; scene.origin = FrameAnalysis::SceneOrigin::Vp;
+				scene.cut = delivered; scene.cutLate = delivered; scene.fade = fade; scene.origin = FrameAnalysis::SceneOrigin::Vp;
 				scene.cutHere = own.cut; scene.confirmed = false; scene.flash = own.flash; scene.cutPossible = own.candidate;
 				scene.cutStrength = own.strength;
 				Assert::IsTrue(store.PublishScene(seq, scene), L"D8: the scene group is published");
 				facts.u7Cuts += delivered ? 1 : 0;
-				facts.u7Fades += e.fade ? 1 : 0;
+				facts.u7Fades += fade ? 1 : 0;
 				facts.u7Flashes += (confirmedPrev.known && confirmedPrev.flash) ? 1 : 0;
 			}
 			prev = cur;
