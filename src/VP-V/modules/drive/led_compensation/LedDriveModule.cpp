@@ -5,6 +5,10 @@
 
 #include <DebugLog.h>
 
+#include <VP-V/core/Products.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
+#include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -218,6 +222,36 @@ namespace LedDrive
 		}
 		else if (fallbacks.Release(kCutJudgeAheadFallbackId))
 			DebugLog::Log("Dynamic Drive: shared scene available for look-ahead frames again; cuts predicted");
+	}
+
+	void LedDriveModule::DeclareSceneDemand()
+	{
+		// FIX-LED-CUT-U7 C-4 (coordinator ruling 2026-11-15): the LED declares the P4 it needs for the scene verdict (the pair for frame n
+		// is P4 at lag 0 and lag 1) as an external demand on the ONE registered renderer, so the lane keeps those records for the frames
+		// the look-ahead asks about. The ahead DEPTH is not part of a ConsumerDecl: it comes from the skeleton's own plan (queue shape and
+		// owner fills), so the declaration names the products, not the walk depth. Cheap no-op once declared or while no skeleton/renderer.
+		if (demandHost.load(std::memory_order_acquire) != nullptr)
+			return;
+		const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
+		Vpv::Skeleton::IExternalDemand* demand = owners.size() == 1 ? Vpv::Skeleton::Demand() : nullptr;
+		if (demand == nullptr)
+			return;
+		VpSkeleton::ConsumerDecl d;
+		d.id = kSceneConsumerId;
+		d.name = "LED look-ahead cut";
+		VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 0);
+		VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 1);
+		demand->SetExternalDemand(owners[0], this, std::vector<VpSkeleton::ConsumerDecl>(1, d), std::vector<VpSkeleton::ProductId>());
+		demandHost.store(owners[0], std::memory_order_release);
+	}
+
+	void LedDriveModule::WithdrawSceneDemand()
+	{
+		const void* host = demandHost.exchange(nullptr, std::memory_order_acq_rel);
+		if (host == nullptr)
+			return;
+		if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
+			demand->ClearExternalDemand(host, this);
 	}
 
 	void LedDriveModule::SetSceneReaderForTesting(SceneCutFn reader)
@@ -696,6 +730,7 @@ namespace LedDrive
 		stopping = false;
 		restoreConfirmed = true;
 		thread = std::thread(&LedDriveModule::Run, this);
+		DeclareSceneDemand();
 	}
 
 	// Bug hunt 2 2026-10-17: the forced-shutdown restore (a detached thread)
@@ -721,6 +756,7 @@ namespace LedDrive
 		if (thread.joinable()) thread.join();
 		lock.lock();
 		started = false;
+		WithdrawSceneDemand();   // disabled / shut down: the demand is withdrawn with the module
 		const bool confirmed = restoreConfirmed;
 		stoppedConfirmed = confirmed;
 		++stopGeneration;
@@ -738,6 +774,7 @@ namespace LedDrive
 		// R3: a readback of the old source after a FULL resync (resync_event on only; 0 otherwise).
 		if (sequence != 0 && restartSequence != 0 && sequence < restartSequence) return;
 		lastMeasuredSequence = sequence;
+		DeclareSceneDemand();   // the renderer may register after Start(): declared with the first measurement at the latest
 		statsBuilder.SetSceneReader(SceneReader());   // applied before every Build (Reconfigure re-creates the builder)
 		const FrameStats stats = statsBuilder.Build(raw, NowMs(), sourceFps > 0.0 ? 1000.0 / sourceFps : 0.0, sequence);   // unmeasured: the 24p values
 		if (stats.blocks == 0) return;

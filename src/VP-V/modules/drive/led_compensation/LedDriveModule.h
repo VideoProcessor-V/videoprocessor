@@ -475,6 +475,12 @@ namespace LedDrive
 		void UpdateHoldFallbackLocked();
 		void UpdateCutJudgeFallbackLocked(bool known, const char* why);
 		void UpdateCutJudgeAheadFallback(bool known, const char* why);
+		// C-4: the P4 demand (lag 0 + lag 1) on the skeleton, declared with the module and withdrawn when it stops. One entry per
+		// (host, owner = this); demandHost = the renderer key it was declared on (null = not declared).
+		static constexpr uint16_t kSceneConsumerId = 0x0600;
+		std::atomic<const void*> demandHost{ nullptr };
+		void DeclareSceneDemand();
+		void WithdrawSceneDemand();
 		// Its own small lock (not `mutex`): the walk thread reads it per frame while the module's thread may hold `mutex` across a measure.
 		mutable std::mutex sceneReaderMutex;
 		SceneCutFn sceneReader_;
