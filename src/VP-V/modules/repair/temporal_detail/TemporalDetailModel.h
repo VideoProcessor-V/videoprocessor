@@ -34,6 +34,9 @@ namespace TemporalDetail
 		int bw = 0, bh = 0, blockPx = 0;
 		double scale = 1.0;
 		int resets = 0, refreshes = 0, retires = 0, liveSlots = 0, frames = 0;
+		int fadePartials = 0;          // U7 v3: fade frames that reduced the store (no reset); not in operator== (diagnostic)
+		double fadeKeep = 1.0;         // U7 v3: this frame's fade keep (1 = no fade)
+		std::vector<double> historyKeep;   // U7 v3, per block: the keep of the slot it transferred from (1 = none / no reduction)
 		// per block, raster
 		std::vector<double> weight, boost, target, ageSeconds, uncertainty, baseMatch, corr, corrGate, stronger,
 			highBand, focus, referee, evidence, rebounds, q, qref, hard;
@@ -189,6 +192,9 @@ namespace TemporalDetail
 			std::vector<double> cx, cy, u;  // composed displacement (px) and uncertainty (px) per current-frame block
 			double hc[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };   // composed homography current -> source (picture-centred)
 			bool camChain = true;           // every hop since the source had a usable camera model
+			// U7 v3 partial reset on fades: the product of the fade keeps (FrameIn::fadeKeep) of the frames since this slot was admitted;
+			// it scales every transfer from this slot (1 = the slot's picture still has its contrast; a fade to black: 0).
+			double keep = 1.0;
 		};
 
 		inline bool Invert3(const double* m, double* o)
@@ -378,6 +384,9 @@ namespace TemporalDetail
 			double planeLines = 1080.0;   // sets Scale independent of the image size (tests simulate 8K on small planes)
 			StampView stamps;
 			bool cut = false, fade = false;
+			// U7 v3 partial reset (owner 2026-11-15): the fade's history keep, FrameAnalysis::Scene::fadeKeep (0..1, amplitude). A fade is
+			// NO reset: every stored slot's keep is multiplied by it. < 0 = not given: a fade without it resets (visible: "reset: fade (no keep)").
+			double fadeKeep = -1.0;
 			const IMotionSource* motion = nullptr;
 			std::vector<FutureFrame> future;   // queued modes: seq + 1, seq + 2, ... (the referee and future slot)
 			std::vector<double> quality;       // optional per-block bitrate quality 0..1 on the active picture's block grid (empty = neutral 1)
@@ -826,7 +835,7 @@ namespace TemporalDetail
 		FrameIn c;
 		c.luma = Detail::Crop(in.luma, r);
 		c.seq = in.seq; c.contentHz = in.contentHz; c.planeLines = in.planeLines; c.stamps = in.stamps;
-		c.cut = in.cut; c.fade = in.fade; c.quality = in.quality; c.blockGates = in.blockGates;
+		c.cut = in.cut; c.fade = in.fade; c.fadeKeep = in.fadeKeep; c.quality = in.quality; c.blockGates = in.blockGates;
 		const Detail::OffsetMotionSource shifted(in.motion, r.left, r.top);
 		c.motion = in.motion ? &shifted : nullptr;
 		std::vector<Plane> futures;
@@ -866,7 +875,7 @@ namespace TemporalDetail
 		const int B = (std::max)(1, static_cast<int>(std::floor(kBlockPx * scale + 0.5)));
 		const double hz = in.contentHz > 0.0 ? in.contentHz : kReferenceHz;
 
-		// --- Resets: dimension/scale change, sequence break, stamps with the Reset policy, cut, fade ---
+		// --- Resets: dimension/scale change, sequence break, stamps with the Reset policy, cut; a fade without its keep ---
 		const char* reason = nullptr;
 		if (m_haveFrame)
 		{
@@ -878,9 +887,12 @@ namespace TemporalDetail
 			else if (in.stamps.rebaseV != m_stamps.rebaseV && PolicyOf(Counter::RebaseV) == ReaderPolicy::Reset) reason = "stamp rebaseV";
 		}
 		if (in.cut) reason = "cut";
-		else if (in.fade) reason = "fade";
+		else if (in.fade && !(in.fadeKeep >= 0.0)) reason = "fade (no keep)";   // a producer before U7 v3: the old full reset, shown
 		if (reason) Reset(reason);
-		std::string status = reason ? std::string("reset: ") + reason : std::string("ok");
+		// U7 v3 partial reset (owner 2026-11-15): a fade with its keep reduces every stored slot by it (below, before admission).
+		const bool fadePartial = !reason && in.fade;
+		const double fadeKeep = fadePartial ? Clamp(in.fadeKeep, 0.0, 1.0) : 1.0;
+		std::string status = reason ? std::string("reset: ") + reason : fadePartial ? std::string("fade: partial reset") : std::string("ok");
 		m_w = w; m_h = h; m_B = B; m_scale = scale;
 
 		const int bw = (w + B - 1) / B, bh = (h + B - 1) / B, nb = bw * bh;
@@ -1094,6 +1106,9 @@ namespace TemporalDetail
 				if (wk.refresh) ++refreshes;
 			}
 
+		// --- U7 v3 partial reset: this frame's fade keep scales every stored slot (the GPU's admission pass, tab row 1) ---
+		for (Source& s : m_slots) s.keep *= fadeKeep;
+
 		// --- Admission of the current frame as a slot (eviction: no live blocks, else the oldest that has faded) ---
 		bool admitted = false;
 		int curId = -1;
@@ -1164,6 +1179,8 @@ namespace TemporalDetail
 		d.status = status + gateNote;
 		d.bw = bw; d.bh = bh; d.blockPx = B; d.scale = scale;
 		d.resets = m_diag.resets; d.refreshes = m_diag.refreshes; d.retires = m_diag.retires; d.frames = m_diag.frames + 1;
+		d.fadePartials = m_diag.fadePartials + (fadePartial ? 1 : 0); d.fadeKeep = fadeKeep;
+		d.historyKeep.assign(static_cast<size_t>(nb), 1.0);
 		auto sized = [&](std::vector<double>& v) { v.assign(static_cast<size_t>(nb), 0.0); };
 		sized(d.weight); sized(d.boost); sized(d.target); sized(d.ageSeconds); sized(d.uncertainty); sized(d.baseMatch); sized(d.corr);
 		sized(d.corrGate); sized(d.stronger); sized(d.highBand); sized(d.focus); sized(d.referee); sized(d.evidence); sized(d.rebounds);
@@ -1273,6 +1290,12 @@ namespace TemporalDetail
 				}
 				c.cam = camBlock[static_cast<size_t>(i)] != 0 && !useFuture;
 				if (!c.a) c.w = 0.0;
+				// U7 v3 partial reset: a past slot transfers scaled by its keep (the future source is the fading picture's own successor: 1).
+				if (c.a && !useFuture)
+				{
+					c.w *= c.a->keep;
+					d.historyKeep[static_cast<size_t>(i)] = c.a->keep;
+				}
 			}
 			// The reference template (step 8): every valid stored slot's grain-free structure (or the future source alone),
 			// q-weighted (best linear estimate of a common structure under independent grain), scaled to the selected
