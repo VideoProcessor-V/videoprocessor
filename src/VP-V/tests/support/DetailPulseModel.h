@@ -38,6 +38,9 @@ namespace DetailPulseModel
 		// Null = the RETIRED tile cut / fade law (TileJudgeReference, kept as the test reference); set = the shared judge's verdict
 		// (VpDetailRestore::SceneRestartOf, no record = restart), as the module does since registered fix D8.
 		VpDetailRestore::SceneReaderFn sceneReader = nullptr;
+		// WAIVER-C5-SOFTRESET-ON: cut_soft_reset, as the module (DetailPulse::Params::softReset, same default); shared-judge reader
+		// only. A soft reset takes the fade keep's path (keep squared on the energies), counted in Frame::softPartial.
+		bool softReset = VpDetailRestore::kDefaultCutSoftReset;
 	};
 
 	// The RETIRED private cut / fade judge of detail_pulse_stabilise (WAIVER-B6-D8-MODELS): the module reads the shared judge now.
@@ -102,6 +105,8 @@ namespace DetailPulseModel
 		// 1 = no fade, 0 = restart). Shared-judge reader only.
 		bool fadePartial = false;
 		double historyKeep = 1.0;
+		// WAIVER-C5-SOFTRESET-ON: the frame was a soft reset (cut_soft_reset; no restart, historyKeep = SoftResetKeep).
+		bool softPartial = false;
 	};
 
 	// The two bands of a plane: D1 = Y - G(s1) Y, D2 = G(s1) Y - L (L bilinear from the half band).
@@ -322,11 +327,13 @@ namespace DetailPulseModel
 			{
 				if (nValid > 0)
 				{
-					const VpDetailRestore::SceneRestartAnswer a = VpDetailRestore::SceneRestartOf(sequence, s.sceneReader);   // the shared judge's verdict
+					const VpDetailRestore::SceneRestartAnswer a = VpDetailRestore::SceneRestartOf(sequence, s.sceneReader,
+						s.softReset);   // the shared judge's verdict (WAIVER-C5-SOFTRESET-ON: with the module's soft reset switch)
 					cut = a.restart;
 					f.fadePartial = a.fadePartial;
+					f.softPartial = a.softPartial;
 					f.historyKeep = a.historyKeep;
-					if (a.fadePartial)
+					if (a.fadePartial || a.softPartial)
 						keep2 = static_cast<double>(a.historyKeep) * a.historyKeep;
 				}
 			}

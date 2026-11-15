@@ -138,6 +138,7 @@ Placeholder tests:
 Isolation tests:
 - TextureRestoreGpuTiming
 - DetailPulse tests
+- SoftResetTests (`tests/SoftResetTests.cpp`, CPU; WAIVER-C5-SOFTRESET-ON, 2026-11-15): `cut_soft_reset` default on, off unchanged, on only at the bar on a confirmed candidate, never on cut-free clips, keep 0.5, cut restarts, the off / inactive status text
 
 Contract tests:
 - never runs with libplacebo smooth motion / deinterlacing
