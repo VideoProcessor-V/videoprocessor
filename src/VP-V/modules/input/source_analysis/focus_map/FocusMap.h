@@ -29,6 +29,7 @@
 // law only; the edge law's GPU mirror is owed with the GPU form (102b FOCUS-EDGEMAP-SWITCH follow-up; no GPU form is registered).
 #pragma once
 
+#include <VP-V/core/Ramp.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 
 #include <algorithm>
@@ -75,11 +76,9 @@ namespace FocusMap
 	// exponential with mean 24 s^2 and E|G|^4 / E|G|^2 = 48 s^2: the grain floor of the edge law's peak per unit of N.
 	constexpr double kSobelPeakNoiseGain = 48.0;
 
-	template<class T> inline T Ramp(T x, T lo, T hi)
-	{
-		const T t = (x - lo) / (hi - lo);
-		return t < T(0) ? T(0) : (t > T(1) ? T(1) : t);
-	}
+	// The ONE linear ramp (core/Ramp.h, U25; rule 20): the private copy that stood here is removed. Bit-identical for every ramp of this
+	// law (each has hi > lo: RampMath::Ramp is then Clamp01((x - lo) / (hi - lo)), the removed copy's arithmetic, NaN passing through).
+	using RampMath::Ramp;
 
 	// s = one P11 block (RegionEvidence::kStatsChannels floats / doubles). flags gets kValid / kNoSplit.
 	template<class T> inline void DefocusBlock(const Params& p, const T* s, T& defocus, T& confidence, uint32_t& flags)
