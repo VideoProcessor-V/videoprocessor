@@ -5,19 +5,25 @@
 // The restart decision of detail_pulse_stabilise and texture_restore (registered fix D8, WAIVER-B6-D8-MODELS): a cut starts the
 // references over; a fade (U7 v3, owner 2026-11-15) is a PARTIAL reset: the history is reduced by the frame's fade keep, never
 // restarted mid-fade. The judgement is the shared unit U7 (CutFadeJudge v3: the sequence law's delivered cut, the pair or multi-frame fade and its keep), read from
-// the SCENE group the skeleton published for the source frame (FrameAnalysis::Store::PeekScene via Acquire semantics: read only,
-// never classifies, never starts a producer). The modules' private tile-change judges (share of changed tiles, two-step mean ramp)
-// are gone.
+// the skeleton's SCENE PRODUCT for the source frame through its get-or-compute-and-publish reader (SkeletonModule::SceneOf via
+// Vpv::Skeleton::SceneGroupOf; owner 2026-11-14 17:38 "Ask the skeleton for it same as everything else", C5): the store's scene
+// group when it is there, else the skeleton classifies the frame now and publishes it. With frame_analysis_store off a cut therefore
+// still restarts and a fade still reduces. Nothing here classifies; the modules' private tile-change judges (share of changed tiles,
+// two-step mean ramp) are gone.
 //
-// No private fallback: a frame without a readable scene group (no store, store off, ambiguous owner, not sealed yet) is a RESTART
-// (references start over, gain 1: the safe answer, the picture is never stabilised on an unknown history) and is counted as missing
-// (visible in the module's SceneMissing()). Tests inject the reader through Params::sceneReader.
+// No private fallback: a frame the skeleton cannot answer (no skeleton module / Original pathway, no renderer frame on this thread,
+// no sealed pair of P4 records) is a RESTART (references start over, gain 1: the safe answer, the picture is never stabilised on an
+// unknown history) and is counted as missing (visible in the module's SceneMissing(), cause in SceneUnavailableWhy()). Tests inject
+// the reader through Params::sceneReader or DefaultSceneReader().
 //
 // Header-only, C++14.
 
 #include <VP-V/core/FrameAnalysisStore.h>
+#include <VP-V/core/hub/CurrentFrame.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 
+#include <atomic>
 #include <cstdint>
 
 namespace VpDetailRestore
@@ -25,23 +31,45 @@ namespace VpDetailRestore
 	// Reads the scene group of one source sequence. False = no readable record.
 	using SceneReaderFn = bool (*)(uint64_t sequence, FrameAnalysis::Scene& scene);
 
+	// The cause of the last unanswered read of the production reader (a string literal; shown by SceneUnavailableWhy()).
+	inline std::atomic<const char*>& LastSceneMissingWhy()
+	{
+		static std::atomic<const char*> why{ "scene product not asked yet" };
+		return why;
+	}
+
+	// PRODUCTION reader: the scene product of the renderer this thread renders (Hub::ThisThreadFrame), through the skeleton's
+	// get-or-compute reader. Render thread (the consumers run inside the render).
+	inline bool ReadSceneFromSkeleton(uint64_t sequence, FrameAnalysis::Scene& scene)
+	{
+		const char* why = nullptr;
+		if (Vpv::Skeleton::SceneGroupOf(Vpv::Hub::ThisThreadFrame().host, sequence, scene, &why))
+			return true;
+		LastSceneMissingWhy().store(why != nullptr ? why : "scene product not answered", std::memory_order_relaxed);
+		return false;
+	}
+
+	// A PEEK of the single store's published group (never classifies, never publishes). Not the production path: kept for the test
+	// harnesses that drive a bare store without a skeleton module (D8SceneJudgeAgreementTests and the module suites).
 	inline bool ReadSceneFromStore(uint64_t sequence, FrameAnalysis::Scene& scene)
 	{
 		FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::SingleStore();
 		return store && store->PeekScene(sequence, scene);
 	}
 
-	// The reader used when Params::sceneReader is null: the skeleton's store. Tests replace it (a test seam: the unit tests run
-	// without a skeleton store); production never sets it.
+	// The reader used when Params::sceneReader is null: the skeleton's scene product (ReadSceneFromSkeleton). Tests replace it (a
+	// test seam: the unit tests run without a skeleton module); production never sets it.
 	inline SceneReaderFn& DefaultSceneReader()
 	{
-		static SceneReaderFn reader = &ReadSceneFromStore;
+		static SceneReaderFn reader = &ReadSceneFromSkeleton;
 		return reader;
 	}
 
-	// Why a scene group could not be read (for the visible "scene judge unavailable" status line; never silent).
+	// Why a scene could not be read (for the visible "scene judge unavailable" status line; never silent).
 	inline const char* SceneUnavailableWhy()
 	{
+		if (DefaultSceneReader() == &ReadSceneFromSkeleton)
+			return LastSceneMissingWhy().load(std::memory_order_relaxed);
 		return VpFrameAnalysis::SourceFrameTap::SingleStore() ? "scene group not sealed for the frame" : "no frame analysis store (frame_analysis_store off)";
 	}
 

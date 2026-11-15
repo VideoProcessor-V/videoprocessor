@@ -158,6 +158,11 @@ namespace Vpv
 			virtual VpSkeleton::SkeletonMemo::Registration RegisterOwnerFill(VpSkeleton::ProductId, VpSkeleton::AcquireForm,
 				const std::string& /*unit*/, VpSkeleton::OwnerFill) { return VpSkeleton::SkeletonMemo::Registration::NotInCatalog; }
 			virtual bool UnregisterOwnerFill(VpSkeleton::ProductId, VpSkeleton::AcquireForm, const std::string& /*unit*/) { return false; }
+			// The SCENE PRODUCT's get-or-compute-and-publish reader (SkeletonModule::SceneOf; owner 2026-11-14 17:38 "Ask the skeleton
+			// for it same as everything else"): the store's scene group of frame `seq`, else classified now and published. The answer is
+			// the same with frame_analysis_store off. RENDER THREAD for the live path (it reads the lane's slots). Default: unknown (an
+			// implementer without a scene product; the caller shows its visible "unavailable").
+			virtual SceneAnswer SceneOf(const void* /*host*/, uint64_t /*seq*/) const { return SceneAnswer(); }
 		protected:
 			~IExternalDemand() {}
 		};

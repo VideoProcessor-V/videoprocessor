@@ -187,7 +187,8 @@ namespace Vpv
 			// `seq`); else classified from the two P4 records now (SceneFactsOf), written into the store when it holds the frame's record. The
 			// answer is identical with frame_analysis_store off (nothing to read, always live). RENDER THREAD for the live path (it reads the
 			// lane's slots); the store path is any thread. known = false when neither answers.
-			SceneAnswer SceneOf(const void* host, uint64_t seq) const;
+			// Also IExternalDemand::SceneOf, the entry module code outside the skeleton uses (Vpv::Skeleton::SceneOf, SkeletonAccess.h).
+			SceneAnswer SceneOf(const void* host, uint64_t seq) const override;
 			SceneCounters SceneCountersOf(const void* host) const;
 
 			// The queue the lane graph is sized for: the terms the record histories are derived from (render-ahead R, lane lead L,
