@@ -2,6 +2,7 @@
 #include "DetailPulse.h"
 
 #include <vprenderer/GrainPreserve.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 
 #include <libplacebo/dispatch.h>
 
@@ -138,8 +139,8 @@ void load_low(ivec2 qb, ivec2 hi, ivec2 hhi)
     ivec2 ob = qb - ivec2(1 + GP_R);
     for (int i = int(li); i < RB * RB; i += 256) {
         ivec2 b = clamp(ob + ivec2(i % RB, i / RB), ivec2(0), hhi) * 2;
-        sbox[i] = 0.25 * (code_at(clamp(b, PIC_LO(hi), PIC_HI(hi))) + code_at(clamp(b + ivec2(1, 0), PIC_LO(hi), PIC_HI(hi))) +
-                          code_at(clamp(b + ivec2(0, 1), PIC_LO(hi), PIC_HI(hi))) + code_at(clamp(b + ivec2(1, 1), PIC_LO(hi), PIC_HI(hi))));
+        sbox[i] = vpu_half_luma_mean4(code_at(clamp(b, PIC_LO(hi), PIC_HI(hi))), code_at(clamp(b + ivec2(1, 0), PIC_LO(hi), PIC_HI(hi))),
+                                      code_at(clamp(b + ivec2(0, 1), PIC_LO(hi), PIC_HI(hi))), code_at(clamp(b + ivec2(1, 1), PIC_LO(hi), PIC_HI(hi))));
     }
     barrier();
     for (int i = int(li); i < RB * HL; i += 256) {
@@ -506,7 +507,7 @@ ivec2 ob = q0 - ivec2(GP_R);
 // The 2x2 boxes at the clamped half-resolution positions (GrainModel::Low).
 for (int i = int(li); i < LR * LR; i += 256) {
     vec4 q = quad_codes(clamp(ob + ivec2(i % LR, i / LR), ivec2(0), hhi) * 2, isz);
-    sm[(i / LR) * LRP + i % LR] = 0.25 * (q.x + q.y + q.z + q.w);
+    sm[(i / LR) * LRP + i % LR] = vpu_half_luma_mean4(q.x, q.y, q.z, q.w);
 }
 barrier();
 // The horizontal Gaussian on every box row, at this block's columns: a thread per row and 8
@@ -1035,7 +1036,7 @@ for (int q = 0; q < 4; q++) {
 			c.tilesY = (c.geometry.h + kTilePx - 1) / kTilePx;
 			c.bandHeader = "#define R1 " + std::to_string(c.r1) + "\n" + "#define RING " + std::to_string(kRingSlots) + "\n" +
 				WeightsGlsl("fw", "FW_R", c.r1, FineWeight, c.geometry.scale) +
-				GrainPreserve::LowWeightsGlsl(WideSigma(c.geometry.scale)) + BAND_HEADER + LOW_HEADER;
+				GrainPreserve::LowWeightsGlsl(WideSigma(c.geometry.scale)) + BAND_HEADER + VpUnit::HalfLuma::GlslMean4() + LOW_HEADER;
 			const int sw = kTilePx + 2 * c.r1, hl = kTilePx / 2 + 2, rb = hl + 2 * c.gpR;
 			c.bandShmem = sizeof(float) * (sw * sw + sw * kTilePx + hl * hl + 1024 + rb * rb + rb * hl);
 			c.halfW = (c.geometry.w + 1) / 2;
@@ -1049,7 +1050,8 @@ for (int q = 0; q < 4; q++) {
 				QUAD_FUNCS + BAND_FUNCS_FAST;
 			c.lowHeader = "#define GP_R " + std::to_string(c.gpR) + "\n" + gather + LOW_HEADER_FAST +
 				BlockedConvGlsl("gp_across8", c.gpR, LowWeightAt, WideSigma(c.geometry.scale), 8, "1", true) +
-				BlockedConvGlsl("gp_down4", c.gpR, LowWeightAt, WideSigma(c.geometry.scale), 4, "LTP", false) + QUAD_FUNCS;
+				BlockedConvGlsl("gp_down4", c.gpR, LowWeightAt, WideSigma(c.geometry.scale), 4, "LTP", false) + QUAD_FUNCS +
+				VpUnit::HalfLuma::GlslMean4();
 			c.fastShmem = sizeof(float) * (sw * (sw + 1) + sw * (kTilePx + 1) + hl * hl + 9);
 			const int lr = kLowTile + 2 * c.gpR;
 			c.lowShmem = sizeof(float) * (lr * (lr + 1) + lr * (kLowTile + 1));
