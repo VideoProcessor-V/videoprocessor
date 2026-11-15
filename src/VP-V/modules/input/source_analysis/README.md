@@ -319,6 +319,12 @@ Chain tests:
 - ONE MSB-align law for lane taps (doc 91 D5; plan `lead18/coreplan-C10-15c-PC-regions.md` commit C2): `SourceFrameView::MsbAlign` /
   `Row16(y, x0, n, dst)` in `core/LaneInterfaces.h` is `raw << msbShift`; `lane/LaneGpuProducts.cpp` `UploadTapRows` and
   `lane/LaneCpuProducts.h` `HalfLumaRows` call it instead of shifting themselves. Same expression, identical output (code-only slice, no run).
+- CONSUMER DEMAND on the frame-analysis store (15c-c8): `VpFrameAnalysis::Host` runs its store while CONFIGURED (`frame_analysis_store`
+  and not Original, `Configure`) OR DEMANDED (`ApplyDemand`, reached through `SourceFrameTap::SetStoreDemand` / `SetStoreDemandApplier`,
+  its own mutex, never the registry mutex the worker delivers under). The skeleton raises it for a consumer that needs the lane's
+  results (the enabled LED drive); `SourceFrameTap::StoreRaisedByDemand` tells Ctrl+I that the demand alone keeps it on. The
+  configured value is never changed; the host never hands arrivals over in the Original pathway and the skeleton never demands there
+  (COORDINATOR 2026-11-15 13:53 EST, `D:/codex/vp-handover/refs/owner-decisions-2026-11-07.md:831`; OWNER 2026-11-15 06:58 EST, log:788).
 
 ## Known issues / open items
 

@@ -313,5 +313,92 @@ namespace VpFrameAnalysis
 			std::lock_guard<std::mutex> lock(r.mutex);
 			return r.stores.size() == 1 ? r.stores.begin()->second : nullptr;
 		}
+
+		// ---- 15c-c8: CONSUMER DEMAND on the store (coordinator ruling 2026-11-15; the TD fill rule's shape, core/AdmissionTable.h) ----
+		// The skeleton raises a renderer's store while a registered consumer needs the lane's results (SkeletonModule, a raising external
+		// demand): SetStoreDemand(owner, true, reason). The Host (VpFrameAnalysisHost.h) runs the store while configured
+		// (frame_analysis_store) OR demanded, and says whether the demand alone keeps it on (StoreRaisedByDemand). The configuration is
+		// never changed. The demand is recorded per owner, so a Host that registers later picks it up (Owner()).
+		// Threading: its own mutex (never the registry mutex: the Host's applier stops its worker, and the worker delivers under the
+		// registry mutex). The applier is called with this mutex held, so a Host that unregisters (its destructor) waits for a call in
+		// flight and is never called afterwards. Lock order: demand mutex -> the Host's mutex; the Host never calls in here under its own.
+		using StoreDemandApplier = std::function<void(bool demanded)>;
+
+		struct StoreDemandRegistry
+		{
+			struct Owner
+			{
+				bool demanded = false;
+				std::string reason;
+				StoreDemandApplier applier;
+				const std::atomic<bool>* raised = nullptr;   // the Host's "on only because of the demand" flag (null = no Host)
+			};
+			std::mutex mutex;
+			std::map<const void*, Owner> owners;
+		};
+
+		inline StoreDemandRegistry& DemandReg()
+		{
+			static StoreDemandRegistry registry;
+			return registry;
+		}
+
+		// The Host's registration (Owner(); null applier = unregister, from its destructor). A demand already recorded is applied at once.
+		inline void SetStoreDemandApplier(const void* owner, StoreDemandApplier applier, const std::atomic<bool>* raised)
+		{
+			if (!owner)
+				return;
+			StoreDemandRegistry& r = DemandReg();
+			std::lock_guard<std::mutex> lock(r.mutex);
+			StoreDemandRegistry::Owner& o = r.owners[owner];
+			o.applier = std::move(applier);
+			o.raised = o.applier ? raised : nullptr;
+			if (o.applier && o.demanded)
+				o.applier(true);
+			if (!o.applier && !o.demanded)
+				r.owners.erase(owner);
+		}
+
+		// The skeleton's demand for `owner`'s store (render thread). Change-only; `reason` names the consumer for the status.
+		inline void SetStoreDemand(const void* owner, bool demanded, const std::string& reason)
+		{
+			if (!owner)
+				return;
+			StoreDemandRegistry& r = DemandReg();
+			std::lock_guard<std::mutex> lock(r.mutex);
+			const auto it = r.owners.find(owner);
+			if (it == r.owners.end() && !demanded)
+				return;
+			StoreDemandRegistry::Owner& o = r.owners[owner];
+			o.reason = demanded ? reason : std::string();
+			if (o.demanded == demanded)
+				return;
+			o.demanded = demanded;
+			if (o.applier)
+				o.applier(demanded);
+			if (!o.applier && !o.demanded)
+				r.owners.erase(owner);
+		}
+
+		inline bool StoreDemanded(const void* owner, std::string* reason = nullptr)
+		{
+			StoreDemandRegistry& r = DemandReg();
+			std::lock_guard<std::mutex> lock(r.mutex);
+			const auto it = r.owners.find(owner);
+			if (it == r.owners.end() || !it->second.demanded)
+				return false;
+			if (reason)
+				*reason = it->second.reason;
+			return true;
+		}
+
+		// True while `owner`'s store runs ONLY because of the demand (configured off): what Ctrl+I says "(demand: ...)" about.
+		inline bool StoreRaisedByDemand(const void* owner)
+		{
+			StoreDemandRegistry& r = DemandReg();
+			std::lock_guard<std::mutex> lock(r.mutex);
+			const auto it = r.owners.find(owner);
+			return it != r.owners.end() && it->second.raised != nullptr && it->second.raised->load(std::memory_order_acquire);
+		}
 	}
 }

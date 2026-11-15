@@ -353,4 +353,74 @@ namespace SourceFrameTapTestsNs
 			AssertViewMatches(shared, pending.source);
 		}
 	};
+
+	// 15c-c8 (coordinator ruling 2026-11-15, the demand-driven principle): the Host's store runs while configured OR demanded by a
+	// registered consumer (SourceFrameTap::SetStoreDemand); the configured value is never changed and the demand is withdrawn with
+	// the consumer. CPU only.
+	TEST_CLASS(StoreConsumerDemandTests)
+	{
+	public:
+		TEST_METHOD(ADemandTurnsAnOffStoreOnAndItsWithdrawalTurnsItOff)
+		{
+			VpFrameAnalysis::Host host;
+			host.Owner(&host).Configure(false);
+			Assert::IsFalse(host.Enabled(), L"configured off, no consumer: off");
+			Assert::IsFalse(Tap::StoreDemanded(&host));
+			Tap::SetStoreDemand(&host, true, "LED drive");
+			Assert::IsTrue(host.Enabled(), L"a consumer's demand turns the store on");
+			Assert::IsTrue(host.Store().Enabled());
+			Assert::IsTrue(host.RaisedByDemand(), L"on only because of the demand");
+			Assert::IsTrue(Tap::StoreRaisedByDemand(&host));
+			std::string why;
+			Assert::IsTrue(Tap::StoreDemanded(&host, &why));
+			Assert::AreEqual(std::string("LED drive"), why, L"the consumer is named for the status");
+			host.Owner(&host).Configure(false);   // a settings apply with the configuration still off keeps the demand
+			Assert::IsTrue(host.Enabled());
+			Tap::SetStoreDemand(&host, false, std::string());
+			Assert::IsFalse(host.Enabled(), L"withdrawn: back to the configured off");
+			Assert::IsFalse(host.RaisedByDemand());
+			Assert::IsFalse(Tap::StoreRaisedByDemand(&host));
+		}
+
+		TEST_METHOD(AConfiguredStoreIsNotReportedAsRaisedAndStaysOnWhenTheDemandGoes)
+		{
+			VpFrameAnalysis::Host host;
+			host.Owner(&host).Configure(true);
+			Tap::SetStoreDemand(&host, true, "LED drive");
+			Assert::IsTrue(host.Enabled());
+			Assert::IsFalse(host.RaisedByDemand(), L"configured on: the demand raises nothing");
+			Tap::SetStoreDemand(&host, false, std::string());
+			Assert::IsTrue(host.Enabled(), L"the configuration keeps it on");
+			host.Owner(&host).Configure(false);
+			Assert::IsFalse(host.Enabled());
+			host.Worker().Stop();
+		}
+
+		TEST_METHOD(ADemandMadeBeforeTheHostRegisteredIsAppliedAtRegistrationAndAGoneHostIsNeverCalled)
+		{
+			int key = 0;
+			Tap::SetStoreDemand(&key, true, "LED drive");
+			{
+				VpFrameAnalysis::Host host;
+				host.Owner(&key).Configure(false);
+				Assert::IsTrue(host.Enabled(), L"the recorded demand reaches a Host that registers later");
+				Assert::IsTrue(Tap::StoreRaisedByDemand(&key));
+			}
+			Assert::IsFalse(Tap::StoreRaisedByDemand(&key), L"the Host unregistered with itself");
+			Tap::SetStoreDemand(&key, false, std::string());   // no Host: recorded only, nothing called
+			Tap::SetStoreDemand(&key, true, "LED drive");
+			Assert::IsTrue(Tap::StoreDemanded(&key));
+			Tap::SetStoreDemand(&key, false, std::string());
+			Assert::IsFalse(Tap::StoreDemanded(&key));
+		}
+
+		TEST_METHOD(NoDemandChangesNothing)
+		{
+			VpFrameAnalysis::Host host;
+			host.Owner(&host).Configure(false);
+			Tap::SetStoreDemand(&host, false, std::string());
+			Assert::IsFalse(host.Enabled(), L"no consumer: nothing turns on");
+			Assert::IsFalse(Tap::StoreDemanded(&host));
+		}
+	};
 }

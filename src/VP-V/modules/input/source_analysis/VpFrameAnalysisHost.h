@@ -31,6 +31,8 @@ namespace VpFrameAnalysis
 		Host() : m_store(FrameAnalysis::RingDepth(4, 4)), m_producer(m_store) { m_store.SetEnabled(false); }
 		~Host()
 		{
+			if (const void* owner = m_owner.load(std::memory_order_acquire))
+				SourceFrameTap::SetStoreDemandApplier(owner, SourceFrameTap::StoreDemandApplier(), nullptr);   // 15c-c8: waits for a call in flight
 			m_producer.Stop();
 			if (const void* owner = m_owner.load(std::memory_order_acquire))
 			{
@@ -49,8 +51,14 @@ namespace VpFrameAnalysis
 		{
 			const void* previous = m_owner.exchange(key, std::memory_order_acq_rel);
 			if (previous && previous != key)
+			{
 				SourceFrameTap::SetStore(previous, nullptr);
+				SourceFrameTap::SetStoreDemandApplier(previous, SourceFrameTap::StoreDemandApplier(), nullptr);
+			}
 			SourceFrameTap::SetStore(key, &m_store);
+			// 15c-c8: the consumer demand on this store (SourceFrameTap::SetStoreDemand by the skeleton) reaches ApplyDemand; a demand
+			// recorded before this Host registered is applied now. Re-registering at every settings apply is harmless (replaced).
+			SourceFrameTap::SetStoreDemandApplier(key, [this](bool demanded) { ApplyDemand(demanded); }, &m_raisedByDemand);
 			return *this;
 		}
 
@@ -72,28 +80,31 @@ namespace VpFrameAnalysis
 		// plane decoded (audit M1). recordReaders: a running slot reads the measured record groups;
 		// only then is the measurement pass run (none on this branch: consumers register in WP-13..16,
 		// each behind its own slot's Runs()). With neither, an arriving frame costs nothing.
+		//
+		// 15c-c8 (coordinator ruling 2026-11-15, the owner's demand-driven principle): the store RUNS while configured (`enabled`)
+		// OR demanded by a registered consumer (ApplyDemand, from SourceFrameTap::SetStoreDemand: the skeleton raises it for a
+		// consumer that needs the lane's results, e.g. an enabled LED drive). The configured value is never changed; the demand
+		// is withdrawn with the consumer and never made in the Original pathway (whose arrivals the host does not hand over).
 		void Configure(bool enabled, bool fullLumaReaders = false, bool recordReaders = false)
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			m_fullLumaReaders = fullLumaReaders;
 			m_recordReaders = recordReaders;
+			m_configured = enabled;
 			SharedFlag().store(enabled && fullLumaReaders, std::memory_order_release);
-			if (enabled == m_enabled) return;
-			m_enabled = enabled;
-			m_store.SetEnabled(enabled);
-			if (enabled)
-			{
-				if (m_pendingDepth && m_pendingDepth != m_store.Depth()) m_store.Resize(m_pendingDepth);
-				m_producer.Start();
-			}
-			else
-			{
-				m_producer.Stop();
-				ReleasePlanePool();
-			}
-			m_lastUnique = 0;
-			m_haveUnique = false;
+			ApplyLocked();
 		}
+
+		// The consumer demand (SourceFrameTap's applier, called with its demand mutex held; the skeleton's render thread).
+		void ApplyDemand(bool demanded)
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_demanded = demanded;
+			ApplyLocked();
+		}
+
+		// True while the store runs only because of a consumer demand (configured off).
+		bool RaisedByDemand() const { return m_raisedByDemand.load(std::memory_order_acquire); }
 
 		bool Enabled() const
 		{
@@ -238,6 +249,28 @@ namespace VpFrameAnalysis
 		Producer& Worker() { return m_producer; }
 
 	private:
+		// m_mutex held. The one place the store and its worker start or stop: effective = configured OR demanded.
+		void ApplyLocked()
+		{
+			const bool enabled = m_configured || m_demanded;
+			m_raisedByDemand.store(enabled && !m_configured, std::memory_order_release);
+			if (enabled == m_enabled) return;
+			m_enabled = enabled;
+			m_store.SetEnabled(enabled);
+			if (enabled)
+			{
+				if (m_pendingDepth && m_pendingDepth != m_store.Depth()) m_store.Resize(m_pendingDepth);
+				m_producer.Start();
+			}
+			else
+			{
+				m_producer.Stop();
+				ReleasePlanePool();
+			}
+			m_lastUnique = 0;
+			m_haveUnique = false;
+		}
+
 		static std::atomic<bool>& SharedFlag()
 		{
 			static std::atomic<bool> flag{ false };
@@ -253,7 +286,10 @@ namespace VpFrameAnalysis
 		FrameAnalysis::Store m_store;
 		Producer m_producer;
 		std::atomic<const void*> m_owner{ nullptr };
-		bool m_enabled = false;
+		bool m_enabled = false;      // the store runs: m_configured || m_demanded (ApplyLocked)
+		bool m_configured = false;   // frame_analysis_store && !Original (Configure)
+		bool m_demanded = false;     // 15c-c8: a registered consumer's demand (ApplyDemand)
+		std::atomic<bool> m_raisedByDemand{ false };
 		bool m_fullLumaReaders = false;
 		bool m_recordReaders = false;
 		size_t m_pendingDepth = 0;

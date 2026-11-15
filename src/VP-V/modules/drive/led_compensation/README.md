@@ -78,7 +78,7 @@ The Dynamic Drive control side: the core (`LedDriveModule`), the controllers tha
   - The shader does not load, libplacebo disables it, or slot `drive.led_compensation` is off while a module runs: compensate holds the LED at `led_ceiling` (a jump, not a ramp) and "Fallbacks engaged: LED drive (held at full: picture compensation unavailable (<reason>))" shows. Script mode is not held (its dimming is paired with CNTR; only `script_smoothing` is lost).
   - A configured gamma boost that cannot apply: "Fallbacks engaged: gamma boost (not applied: <reason>; the picture is plain output_gamma)" plus the log warning.
   - Dry run (no port, or the drive mutex held by another owner): "Fallbacks engaged: projector (not connected: <error>; LED drive off (dry run))"; no picture gain.
-  - FIX-LED-CUT-U7 (owner 2026-11-15 answer (2), plan `lead18/coreplan-C10-15c-PC-regions.md` C8): the cut of the measured frame and of each look-ahead frame is got-or-computed from the shared scene product (U7, `SceneRecordReader::AcquireCut`). Genuine failure only: "Fallbacks engaged: LED cut judge (no scene for the measured frame (<cause>): no cut judged)" (`kCutJudgeFallbackId`, `SubmitMeasurement`) and "LED look-ahead cut judge (no scene for a look-ahead frame (<cause>): no cut predicted)" (`kCutJudgeAheadFallbackId`, `SubmitPrediction`), each released when a scene is got again. The module declares its P4 demand (lag 0 + 1) on the skeleton while running (`DeclareSceneDemand` / `WithdrawSceneDemand`). Tests inject the reader per module (`SetSceneReaderForTesting`). Details in `drive/led_measure/README.md`.
+  - FIX-LED-CUT-U7 (owner 2026-11-15 answer (2), plan `lead18/coreplan-C10-15c-PC-regions.md` C8): the cut of the measured frame and of each look-ahead frame is got-or-computed from the shared scene product (U7, `SceneRecordReader::AcquireCut`). Genuine failure only: "Fallbacks engaged: LED cut judge (no scene for the measured frame (<cause>): no cut judged)" (`kCutJudgeFallbackId`, `SubmitMeasurement`) and "LED look-ahead cut judge (no scene for a look-ahead frame (<cause>): no cut predicted)" (`kCutJudgeAheadFallbackId`, `SubmitPrediction`), each released when a scene is got again. The module declares its P4 demand (lag 0 + 1) on the skeleton while running (`DeclareSceneDemand` / `WithdrawSceneDemand`). 15c-c8: the declaration RAISES (`SetRaisingExternalDemand`, reason "LED drive"): with `analysis_lane` / `frame_analysis_store` off in the configuration (the defaults, unchanged) the enabled drive's demand turns the lane and the store on while it runs, shown on Ctrl+I as "analysis lane on (demand: LED drive) ...; frame-analysis store on (demand: LED drive)"; Stop() withdraws it and both go back to the configured state (COORDINATOR 2026-11-15 13:53 EST, `refs/owner-decisions-2026-11-07.md:831`). Tests inject the reader per module (`SetSceneReaderForTesting`). Details in `drive/led_measure/README.md`.
 - Before that patch lands, the renderer's inline code still runs: none of the entries above is shown, and compensate keeps dimming without compensation (the module's default is "available").
 - Invalid `[led_drive]` / `[projector]` settings: log "Dynamic Drive: configuration rejected (...); module and gamma boost off". An invalid LED profile is ignored with a log warning.
 - Look-ahead starved (frames queued but no predictions): log "Dynamic Drive: WARNING - ... every cut and exit from black is reactive". Low Latency (no queue) is logged as reactive, not as a fault.
@@ -247,8 +247,18 @@ Contract tests:
 Chain tests:
 - LED + Stage 13 + LUT + black level (no dedicated test found)
 
+## Design goal, philosophy and decisions
+
+- Cuts come from the ONE shared scene product (U7), got-or-computed; never a private cut rule (FIX-LED-CUT-U7, owner 2026-11-15 answer (2)).
+- DEMAND-DRIVEN: an enabled drive's scene demand turns on the analysis lane and the frame-analysis store it needs, visibly, only while
+  the drive runs; the configuration defaults stay off (COORDINATOR 2026-11-15 13:53 EST, `D:/codex/vp-handover/refs/owner-decisions-2026-11-07.md:831`,
+  applying OWNER 2026-11-15 06:58 EST, log:788, the TD rule).
+
 ## Known issues / open items
 
+- A device reset that keeps the same renderer (GpuReleased, then GpuCreated, same store owner and generation) erases the skeleton's
+  entry while `DeclareSceneDemand` still sees itself declared (same host + generation): the demand, and with it the raise, is not made
+  again until the drive restarts (15c-c8 open item; pre-existing for the demand itself).
 - The hold and the entries need the WP-15 call-site patch (docs/design/wp15-led-callsites.md) applied by the integrator; until then the renderer's inline code runs without them.
 - GPU checks owed (coordinator): shader missing / disabled on the real chain (LED held, entry shown), byte identity with the LED off and with compensate running.
 - `LedDriveHoldover.*` is host lifetime (the filter's between-files hold); it stays here with the adapter that parks and adopts.

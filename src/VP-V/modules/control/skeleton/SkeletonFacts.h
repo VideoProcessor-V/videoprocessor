@@ -144,6 +144,18 @@ namespace Vpv
 			virtual void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
 				const std::vector<VpSkeleton::ProductId>& publishedOutside) = 0;
 			virtual void ClearExternalDemand(const void* host, const void* owner) = 0;
+			// 15c-c8 (coordinator ruling 2026-11-15, the owner's demand-driven principle; the same shape as the TD fill rule,
+			// core/AdmissionTable.h Admit "TD OFF: ... filled FOR that consumer"): the same entry, but the declaring component NEEDS the
+			// lane's results, so its demand RAISES the host's lane (analysis_lane off / shadow -> on) and the frame-analysis store that
+			// feeds it (frame_analysis_store off -> on) while the entry is registered; ClearExternalDemand withdraws the raise. `reason`
+			// names the consumer on Ctrl+I ("Analysis lane: on (demand: <reason>)"). Never in the Original pathway; the configuration
+			// is never changed. An empty consumer list raises nothing (no consumer, nothing on). Any thread.
+			// Default (an implementer without lanes): the plain declaration.
+			virtual void SetRaisingExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
+				const std::vector<VpSkeleton::ProductId>& publishedOutside, const std::string& /*reason*/)
+			{
+				SetExternalDemand(host, owner, consumers, publishedOutside);
+			}
 			// The CURRENT lease of the host's lane for `product` (AnalysisLane::Lease: the product's bytes ring added), for a component that
 			// publishes a product it declared publishedOutside (the camera's on-time P7). Any thread. EMPTY (no table) when the host has no
 			// lane (analysis_lane off, no source yet) or the graph does not hold the product: the caller uses its own path, visibly.
