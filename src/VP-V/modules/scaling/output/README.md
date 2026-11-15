@@ -41,7 +41,7 @@ Scale to the output active size inside libplacebo: hybrid SSIM downscale (adapti
 | `adaptive_w_base` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 1.0 | VP-V > Scaling > Advanced > Set by the Scaling tier | n/a (VP-only): unchanged by the Original pathway | Base weight of the SSIM branch in the adaptive downscale where nothing argues against it (design value 0.2; the Scaling tier Mid writes it) | Scaling Mid=0.2 |
 | `cnn_residual_stabilise` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | VP-V > Scaling > Advanced > Scaler steadiness (expert); also VP Renderer > Rendering > Fixes under test (upstream copy greyed while VP-V is on) | Original pathway sets `off` (ADR-0019) | The same hold for the CNN upscaler's added detail. status line: output scaling: libplacebo downscaler (SSimDownscaler not in the shader list) | same on all (not tiered) |
 | `downscale_light` | profile ([vprenderer.Default] and matching profiles) | enum | linear, gamma | linear | VP Renderer > Scaling page (downscale light) | Original pathway sets `linear` (ADR-0019) | Light domain of downscaling frames (Stage 8-1); gamma matches madVR's SSIM | same on all (not tiered) |
-| `fbo_float32` | profile ([vprenderer.Default] and matching profiles) | enum | auto, on, off | auto (on, everywhere) | VP-V > Colour > Main > Range and precision (named there); the control is on VP Renderer > Rendering > Processing (Bill's page) | Original pathway sets `off` (ADR-0019) | Every libplacebo intermediate texture in 32-bit float (exact highlights, more bandwidth; half-float rounds values above white). auto = on; the output pass is rgba32f regardless. status line: Tone map: libplacebo (combined LUT missing) | same on all (not tiered) |
+| `fbo_float32` | profile ([vprenderer.Default] and matching profiles) | enum | auto, on, off | auto (on, everywhere) | VP-V > Colour > Main > Range and precision (named there); the control is on VP Renderer > Rendering > Processing (Bill's page) | Original pathway sets `off` (ADR-0019); no longer tied to the scaling.output slot (S-12BIT) | Every libplacebo intermediate texture in 32-bit float (exact highlights, more bandwidth; half-float rounds values above white). auto = on; the output pass is rgba32f regardless. status line: Tone map: libplacebo (combined LUT missing) | same on all (not tiered) |
 | `residual_stabilise_grain_guard` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | VP-V > Proposed retirement > Proven fixes (all on by default) | Original pathway sets `off` (ADR-0019) | Limits the residual hold to the coding-artefact band: blocks the grain term marks as grain pass this frame's residual, the held change is clamped to the expected coding-noise RMS; off = the 2026-10-15 one-pole, byte for byte. proposed for retirement (group A) | same on all (not tiered) |
 | `ssim_bitrate_aware` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | VP-V > Scaling > Main > Grain-aware downscale; also VP Renderer > Rendering > Fixes under test (upstream copy greyed while VP-V is on) | Original pathway sets `off` (ADR-0019) | Lowers the SSIM weight (and the CNN's) at a low bitrate-quality reading, down to ssim_bitrate_floor: gentler sharpening on poor streams (SSIM would sharpen blocking). status line: output scaling: libplacebo downscaler (SSimDownscaler not in the shader list) | same on all (not tiered) |
 | `ssim_bitrate_floor` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 0.4 | VP Renderer > Rendering > Fixes under test (stays until P9 FULL, 102b) | n/a (VP-only): unchanged by the Original pathway | The lowest factor ssim_bitrate_aware lowers the SSIM weight to | same on all (not tiered) |
@@ -53,9 +53,14 @@ Scale to the output active size inside libplacebo: hybrid SSIM downscale (adapti
 - Planned keys: `hybrid_refine_d`
 - Tiers: Classic Lanczos; Low..Upper hybrid; Upper + D
 
+## Design goal, philosophy and decisions
+
+- Intermediate pictures are float32 for every profile: `fbo_float32` is decided by the setting alone (auto = on), never by whether this slot runs (`PicturePrecision.h`). A profile with the slot off used to fall silently to float16, up to one 12-bit code of error near white. (S-12BIT, refs/119 #29/#30/#48/#49/#51; owner decision 2026-11-12 15:07 EST = 20:07 UTC, via lead 8 brief 2026-11-14 05:18 EST = 10:18 UTC; written 2026-11-14 10:40 UTC)
+- float16 is never silent: the `picture precision` entry (Ctrl+I, Config live status, Ctrl+Alt+D, one-time notice) shows when the intermediates are float16 in a VP pathway, with the reason (Stable 7.360 lane, or the setting off by hand). Original pathway: Bill's own table, not labelled. (S-12BIT, refs/119 #29/#30/#48/#49/#51; owner decision 2026-11-12 15:07 EST = 20:07 UTC, via lead 8 brief 2026-11-14 05:18 EST = 10:18 UTC; written 2026-11-14 10:40 UTC)
+
 ## Fallbacks
 
-- "Fallbacks engaged" entry: output scaling: libplacebo downscaler (SSimDownscaler not in the shader list) | plain SSIM (adaptive downscale failed on the GPU)
+- "Fallbacks engaged" entry: `picture precision` (PicturePrecision::Precision) | output scaling: libplacebo downscaler (SSimDownscaler not in the shader list) | plain SSIM (adaptive downscale failed on the GPU)
 - Behaviour: SSimDownscaler missing while adaptive_downscale is on, or a GPU failure of the blend (FallbackCatalog::OutputScaling).
 
 ## Net fingerprint / upstream
@@ -112,10 +117,11 @@ Render thread only. No locks.
 
 ### Config keys actually read
 
-Per renderer profile (display-rule overrides): `adaptive_downscale`, `adaptive_w_base`, `adaptive_edge_lo`, `adaptive_edge_hi`, `adaptive_grain_lo`, `adaptive_grain_hi`, `adaptive_grain_floor`, `adaptive_grain_smooth_ms`, `adaptive_grain_shadow_bias`, `adaptive_chroma_ssim`, `adaptive_grain_map`, `adaptive_grain_map_smooth_ms`, `adaptive_faithful` (retired values migrated), `adaptive_upscale`, `adaptive_upscale_w_base`, `adaptive_upscale_superres_scale`, `downscale_light` and `upscale_light` (`linear` / `gamma`), `ssim_bitrate_aware`, `ssim_bitrate_floor`, `cnn_residual_stabilise`, `ssim_residual_stabilise`, `residual_stabilise_grain_guard`. `fbo_float32` (Beta builds: every libplacebo FBO in rgba32f; a scaling.output VP addition, off with the slot off and in the Original pathway). Read here but owned elsewhere: `low_bitrate_handling` (input.source_analysis). `hybrid_refine_d` is planned (not read).
+Per renderer profile (display-rule overrides): `adaptive_downscale`, `adaptive_w_base`, `adaptive_edge_lo`, `adaptive_edge_hi`, `adaptive_grain_lo`, `adaptive_grain_hi`, `adaptive_grain_floor`, `adaptive_grain_smooth_ms`, `adaptive_grain_shadow_bias`, `adaptive_chroma_ssim`, `adaptive_grain_map`, `adaptive_grain_map_smooth_ms`, `adaptive_faithful` (retired values migrated), `adaptive_upscale`, `adaptive_upscale_w_base`, `adaptive_upscale_superres_scale`, `downscale_light` and `upscale_light` (`linear` / `gamma`), `ssim_bitrate_aware`, `ssim_bitrate_floor`, `cnn_residual_stabilise`, `ssim_residual_stabilise`, `residual_stabilise_grain_guard`. `fbo_float32` (Beta builds: every libplacebo FBO in rgba32f; decided by the setting alone, also with the scaling.output slot off; off in the Original pathway; the Stable 7.360 lane has no such switch and is shown as `picture precision`, below 12-bit). Read here but owned elsewhere: `low_bitrate_handling` (input.source_analysis). `hybrid_refine_d` is planned (not read).
 
 ### Fallbacks a user sees
 
+- `picture precision` under "Fallbacks engaged": the libplacebo intermediates are float16 (Stable 7.360 lane, or `fbo_float32` off). Synced every frame from `CollectFrameHooks` (VP-V/segments/CoreSegments.inl; ReportRenderErrors stays a pure move), and released in the Original pathway. The Config process cannot know which libplacebo lane the renderer loaded, so the Stable-lane label is shown only through the live fallbacks line (`config.live.fallbacks`), never as a static Config note.
 - `output scaling` under "Fallbacks engaged" (`FallbackCatalog::OutputScaling`): adaptive downscale on but SSimDownscaler not in the shader list (libplacebo's downscaler), or the blend failed on the GPU on the last frame (plain SSIM). Engaged through `AdaptiveDownscaleStage::Stage::Fallback` (the fix after the WP-13 move; findings 2026-10-25).
 - The custom-shader status line also says "Adaptive downscale: needs SSimDownscaler" / "idle" / "measuring".
 - The grain map not used with an unknown NLS shader: per-frame grain (logged once). A designed path, not a downgrade.
@@ -182,3 +188,15 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Private GPU textures (skeleton rule)
 
 This module still creates its own GPU textures (see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): per-render temporaries move to the shared scratch arena (src/VP-V/core/ScratchArena.h) and kept state to skeleton product nodes.
+
+## FIX-12BIT-1 before/after (S-12BIT, refs/119 #29)
+
+`fbo_float32` is decided by the setting alone, no longer by the `scaling.output` slot. Measured values are filled in at TRAIN-1.
+
+| Case | Before | After | Expected | Measured |
+|---|---|---|---|---|
+| 10-bit picture, Beta lane, `fbo_float32` auto, slot on | f32 intermediates | f32 intermediates | 0 code difference | pending TRAIN-1 |
+| 10-bit picture, Beta lane, slot off (profile with `scaling.output` off) | f16 intermediates (up to about 1 code of 12-bit error near white) | f32 intermediates | 0 codes at 10-bit output; 12-bit path gains the precision | pending TRAIN-1 |
+| Slot-off bandwidth (FBO read/write) | f16 | f32, about 2x intermediate bandwidth for those profiles | GPU frame-time rise only for slot-off profiles, to be timed on the laptop RTX 3050 Ti | pending TRAIN-1 |
+| Stable 7.360 lane | f16 (no flag) | f16, now labelled "picture precision ... below 12-bit" | label shown, no pixel change | pending TRAIN-1 |
+| `SyncFallback` cost per frame | none | two compares plus a registry sync, no string work when unchanged | below measurement noise | pending TRAIN-1 |

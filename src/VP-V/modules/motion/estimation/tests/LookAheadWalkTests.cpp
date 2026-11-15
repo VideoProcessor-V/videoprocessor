@@ -96,15 +96,29 @@ namespace LookAheadWalkTest
 			FakeValidity motionValidity;
 			std::atomic<size_t> queuedFutureFrames{ 0 };
 			struct { bool vectorDemand = false, timingContinuityFixes = false, motionHistoryFixes = false; } activeSettings;
-			std::atomic<int> motionAheadConfigured{ 4 }, queueAheadCapacity{ 0 }, motionAheadDepth{ 0 };
-			std::atomic<bool> motionAheadBackward{ false };
-			bool motionAheadEngaged = false;
-			unsigned long long motionAheadEngagedGeneration = 0;
+			std::atomic<int> queueAheadCapacity{ 0 };
 			VectorDemand::Decision vectorDemand;
-			std::shared_ptr<FakeProducer> motionProducer;   // the walk loads it with std::atomic_load (hardening)
-			bool motionAheadPrevKnown = false;
-			unsigned long long motionAheadPrevGeneration = 0;
-			DejudderPolicy::MotionAheadFrame motionAheadPrev;
+			// P11b: the walk reads these through impl.vectorEngine; the flat names below are references so the test bodies read unchanged.
+			struct
+			{
+				std::atomic<int> motionAheadConfigured{ 4 }, motionAheadDepth{ 0 };
+				std::atomic<bool> motionAheadBackward{ false };
+				bool motionAheadEngaged = false;
+				unsigned long long motionAheadEngagedGeneration = 0;
+				std::shared_ptr<FakeProducer> motionProducer;   // the walk loads it with std::atomic_load (hardening)
+				bool motionAheadPrevKnown = false;
+				unsigned long long motionAheadPrevGeneration = 0;
+				DejudderPolicy::MotionAheadFrame motionAheadPrev;
+			} vectorEngine;
+			std::atomic<int>& motionAheadConfigured = vectorEngine.motionAheadConfigured;
+			std::atomic<int>& motionAheadDepth = vectorEngine.motionAheadDepth;
+			std::atomic<bool>& motionAheadBackward = vectorEngine.motionAheadBackward;
+			bool& motionAheadEngaged = vectorEngine.motionAheadEngaged;
+			unsigned long long& motionAheadEngagedGeneration = vectorEngine.motionAheadEngagedGeneration;
+			std::shared_ptr<FakeProducer>& motionProducer = vectorEngine.motionProducer;
+			bool& motionAheadPrevKnown = vectorEngine.motionAheadPrevKnown;
+			unsigned long long& motionAheadPrevGeneration = vectorEngine.motionAheadPrevGeneration;
+			DejudderPolicy::MotionAheadFrame& motionAheadPrev = vectorEngine.motionAheadPrev;
 			struct { struct { FakeMonitor sourceMonitor; } sourceAnalysis; } vpv;   // P11a-f: the monitor now lives at vpv.sourceAnalysis
 			// The walks' PrepareFrameAnalysis always throws: reached with one queued frame.
 			template <class... A> static Prepared PrepareFrameAnalysis(A&&...) { throw std::runtime_error("injected prepare"); }
@@ -185,7 +199,8 @@ namespace LookAheadWalkTest
 	};
 
 	// B1 (owner 2026-11-10, doc 91 C): the walk's lead is every frame queued ahead, in both queue modes and at every rate; the
-	// configured depth (DepthAt of motion_ahead_frames 4) is only its minimum; the P2 ring bounds it (kMaxLead).
+	// configured depth (DepthAt of motion_ahead_frames 4) is only its minimum; the ahead-compute ceiling bounds it (kMaxLead =
+	// kAheadCeiling, OD 11-14; before: the P2 ring's 13).
 	TEST_CLASS(MotionAheadLeadTests)
 	{
 		// A queue of the current frame plus `ahead` frames, the render loop's count stored as it does, then the copy.
@@ -222,8 +237,12 @@ namespace LookAheadWalkTest
 					impl.motionProducer = std::make_shared<FakeProducer>();
 					std::vector<FakeQueued> queue;
 					const size_t copied = Collect(impl, queued, depth, queue);
-					Assert::AreEqual(static_cast<int>(queued), impl.motionProducer->lead, L"lead == the queued frames ahead");
-					Assert::AreEqual(queued + 1, copied, L"the current frame plus every frame ahead");
+					// OD 11-14: every frame queued ahead up to the ceiling (60p By time: 12 queued, kMaxLead computed).
+					const size_t lead = (std::min)(queued, static_cast<size_t>(MotionAhead::kMaxLead));
+					Assert::AreEqual(static_cast<int>(lead), impl.motionProducer->lead, L"lead == the queued frames ahead, at most the ceiling");
+					Assert::AreEqual(lead + 1, copied, L"the current frame plus every frame ahead within the ceiling");
+					Assert::AreEqual(queued > static_cast<size_t>(MotionAhead::kMaxLead), MotionAhead::LeadCapped(depth, queued),
+						L"the cap is shown exactly when it binds");
 				}
 			}
 			const size_t expected[] = { 5, 6, 12 };
@@ -233,8 +252,9 @@ namespace LookAheadWalkTest
 
 		TEST_METHOD(OneTwentyHzLeadAndTheDecideBound)
 		{
-			// 120p: DepthAt(4, 120) = 8 (66.7 ms). 12 queued ahead: the lead is 12 (above the depth). 6 queued ahead: Decide bounds the
-			// depth to the 6 there (ShallowQueue) before the walk reads it, and the lead is those 6.
+			// 120p: DepthAt(4, 120) = 8 (66.7 ms). 12 queued ahead: the lead is the ceiling kMaxLead (OD 11-14; was 12), the depth and
+			// the queue both above it. 6 queued ahead: Decide bounds the depth to the 6 there (ShallowQueue) before the walk reads it, and
+			// the lead is those 6 (within the ceiling).
 			const int depth = MotionAhead::DepthAt(4, 120.0);
 			Assert::AreEqual(8, depth);
 			const MotionAhead::Decision deep = MotionAhead::Decide(depth, false, true, 12);
@@ -242,17 +262,18 @@ namespace LookAheadWalkTest
 			FakeImpl impl;
 			impl.motionProducer = std::make_shared<FakeProducer>();
 			std::vector<FakeQueued> queue;
-			Assert::AreEqual<size_t>(13, Collect(impl, 12, deep.depth, queue));
-			Assert::AreEqual(12, impl.motionProducer->lead);
+			Assert::IsTrue(MotionAhead::kMaxLead < 12 && MotionAhead::kMaxLead < deep.depth, L"the ceiling binds here");
+			Assert::AreEqual<size_t>(static_cast<size_t>(MotionAhead::kMaxLead) + 1, Collect(impl, 12, deep.depth, queue));
+			Assert::AreEqual(MotionAhead::kMaxLead, impl.motionProducer->lead, L"120p: the depth 8 and the 12 queued held to the ceiling");
 			const MotionAhead::Decision shallow = MotionAhead::Decide(depth, false, true, 6);
 			Assert::AreEqual(6, shallow.depth);
 			Assert::IsTrue(shallow.reason == MotionAhead::Reason::ShallowQueue);
 			Assert::AreEqual<size_t>(7, Collect(impl, 6, shallow.depth, queue));
 			Assert::AreEqual(6, impl.motionProducer->lead);
-			// The ring cap: depth 4 with 20 queued -> 13; 240p depth 16 -> 13 too (WAIVER-B1-01), 14 frames copied.
-			Assert::AreEqual<size_t>(14, Collect(impl, 20, 4, queue));
+			// The ceiling: depth 4 with 20 queued -> kMaxLead; 240p depth 16 -> kMaxLead too (WAIVER-B1-01, OD 11-14), kMaxLead + 1 copied.
+			Assert::AreEqual<size_t>(static_cast<size_t>(MotionAhead::kMaxLead) + 1, Collect(impl, 20, 4, queue));
 			Assert::AreEqual(MotionAhead::kMaxLead, impl.motionProducer->lead);
-			Assert::AreEqual<size_t>(14, Collect(impl, 20, MotionAhead::DepthAt(4, 240.0), queue));
+			Assert::AreEqual<size_t>(static_cast<size_t>(MotionAhead::kMaxLead) + 1, Collect(impl, 20, MotionAhead::DepthAt(4, 240.0), queue));
 			Assert::AreEqual(MotionAhead::kMaxLead, impl.motionProducer->lead);
 		}
 
@@ -271,21 +292,27 @@ namespace LookAheadWalkTest
 			Assert::AreEqual<size_t>(6, producer.PendingCapacity());
 		}
 
+		// OD 11-14 (BEHAVIOUR-CHANGE OD-11-14-AHEAD-CAP): the cap is the ahead-compute ceiling (core/AheadCeiling.h), was the ring's 13.
 		TEST_METHOD(LeadNeverBelowTheDepthAndCappedByTheRing)
 		{
-			Assert::AreEqual(13, MotionAhead::kMaxLead);
+			Assert::AreEqual(int(VpSkeleton::kAheadCeiling), MotionAhead::kMaxLead, L"the lead's cap is THE ahead-compute ceiling");
+			Assert::AreEqual(13, MotionAhead::kRingMaxLead, L"the P2 ring's structural bound is unchanged");
+			Assert::AreEqual(MotionAhead::kP2RingPairs - MotionAhead::kPairsKeptBehind, MotionAhead::kRingMaxLead);
+			Assert::IsTrue(MotionAhead::kMaxLead <= MotionAhead::kRingMaxLead, L"the ceiling fits the ring");
 			Assert::AreEqual(0, MotionAhead::LeadFor(0, 12), L"look-ahead off: no lead");
 			Assert::AreEqual(2, MotionAhead::LeadFor(2, 1), L"a shallow queue keeps the depth (Decide bounds it before)");
-			Assert::AreEqual(12, MotionAhead::LeadFor(4, 12));
-			Assert::AreEqual(13, MotionAhead::LeadFor(2, 40), L"the P2 ring cap");
+			const size_t within = static_cast<size_t>(MotionAhead::kMaxLead) - 1;
+			Assert::AreEqual(int(within), MotionAhead::LeadFor(2, within), L"within the ceiling: every queued frame ahead");
+			Assert::AreEqual(MotionAhead::kMaxLead, MotionAhead::LeadFor(4, 12), L"12 queued: held to the ceiling (was 12)");
+			Assert::AreEqual(MotionAhead::kMaxLead, MotionAhead::LeadFor(2, 40), L"the ceiling");
 			Assert::AreEqual(16, MotionAhead::DepthAt(4, 240.0));
-			Assert::AreEqual(13, MotionAhead::LeadFor(MotionAhead::DepthAt(4, 240.0), 20), L"240p: the ring cap holds even a larger depth");
-			Assert::AreEqual(13, MotionAhead::LeadFor(MotionAhead::DepthAt(4, 240.0), 2), L"240p, short queue: still at most kMaxLead");
+			Assert::AreEqual(MotionAhead::kMaxLead, MotionAhead::LeadFor(MotionAhead::DepthAt(4, 240.0), 20), L"240p: the ceiling holds even a larger depth");
+			Assert::AreEqual(MotionAhead::kMaxLead, MotionAhead::LeadFor(MotionAhead::DepthAt(4, 240.0), 2), L"240p, short queue: still at most kMaxLead");
 			FakeImpl impl;
 			impl.motionProducer = std::make_shared<FakeProducer>();
 			std::vector<FakeQueued> queue;
-			Assert::AreEqual<size_t>(14, Collect(impl, 30, 2, queue), L"current + kMaxLead");
-			Assert::AreEqual(13, impl.motionProducer->lead);
+			Assert::AreEqual<size_t>(static_cast<size_t>(MotionAhead::kMaxLead) + 1, Collect(impl, 30, 2, queue), L"current + kMaxLead");
+			Assert::AreEqual(MotionAhead::kMaxLead, impl.motionProducer->lead);
 			// Depth 0 (off, low latency): the lead is handed back as 0 and nothing is copied.
 			Assert::AreEqual<size_t>(0, Collect(impl, 30, 0, queue));
 			Assert::AreEqual(0, impl.motionProducer->lead);

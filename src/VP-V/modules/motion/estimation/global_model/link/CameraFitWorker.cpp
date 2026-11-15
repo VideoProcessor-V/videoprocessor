@@ -280,7 +280,7 @@ namespace CameraLink
 			if (m_env.aheadGlobal)
 				m_env.aheadGlobal(copy);
 			auto field = std::make_shared<FieldCopy>();
-			if (!AheadToSourceGrid(copy, job.aheadConsistency, job.outGridW, job.outGridH, *field))
+			if (!AheadToSourceGrid(copy, job.outGridW, job.outGridH, *field))
 			{
 				// Not fitted: a hole in the pair chain (the next fit must not seed from the previous pair), counted and shown (layout).
 				if (m_env.counters)

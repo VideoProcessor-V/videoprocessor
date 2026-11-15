@@ -10,11 +10,9 @@
 //  * Backward(seq) = pair (seq -> seq - 1) on frame seq's grid: the pair's backward vectors.
 //  Vectors are in SOURCE pixels of the frame the producer saw (the engine's grid cell is 4 pixels of the producer's input, which is the
 //  source scaled by sourceWidth / flow.halfW); the host scales them to the re-based plane as for any source (the module never rescales).
-//  Trust per cell is the de-judder's own engine-trust weighting (OpticalFlowTrust), not a raw cost scale: the cell's block cost weight
-//  (Flow::costWeight for the forward direction, the same CostWeights maths on the backward costs; cost judged against the pair's own median and
-//  spread) times the engine's forward/backward consistency weight (Flow::fbError, FallOff from the matcher's consistency limit to twice it;
-//  the backward direction swaps the two fields). Both are in [0, 1], 1 = as sure as the engine usually is; a pair without them is not guessed
-//  at (absent: "the pair has no vectors or costs"). Camera() stays false (the camera model reaches TD through its own adapter).
+//  Trust per cell is the ENGINE's memo (FlowView::CellTrust / CellTrustBackward, computed once per direction and tolerance while the pair is the engine's current FlowOf lease;
+//  this adapter holds no trust arithmetic, L-B6 WAIVER-B6-TD-TRUST). Both are in [0, 1]; a pair without a trust plane is not guessed at (absent:
+//  "the pair has no vectors or costs"). Camera() stays false (the camera model reaches TD through its own adapter).
 //
 // ABSENT is visible: a pair that is not in the slot, is stale (the vectors-valid state moved: MotionValidity::PairValid), or does not fit
 // the source size answers false (TD takes its causal substitute) and is counted by kind; a sustained run raises the "td motion" entry
@@ -29,12 +27,13 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/MotionValidity.h>
-#include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
+#include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/motion/estimation/VectorProducts.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <string>
+#include <functional>
 #include <vector>
 
 namespace TemporalDetail
@@ -49,12 +48,14 @@ namespace TemporalDetail
 		struct Stats
 		{
 			uint64_t hits = 0, absent = 0, stale = 0, unfit = 0;   // absent = not in the slot; stale = epoch moved; unfit = size unknown / mismatched
-			uint64_t fbErrorComputed = 0;   // W1-C3: FbError worked out here (the backward direction, or a pair without the producer's extras)
 		};
 
 		// view: the engine's P2 view. validity: its vectors-valid state (null = trust the slot). The source size is needed to put the
 		// engine's cells into source pixels (the producer may have worked at half again).
-		SharedMotionSource(VpMotion::P2View view, const MotionValidity::State* validity) : m_view(std::move(view)), m_validity(validity) {}
+		// flowOf: the engine's FlowOf (render thread), the source of the per-cell trust memo (null = no trust, every pair absent).
+		using FlowOfFn = std::function<bool(uint64_t seq, VpMotion::FlowView& out)>;
+		SharedMotionSource(VpMotion::P2View view, const MotionValidity::State* validity, FlowOfFn flowOf = nullptr)
+			: m_view(std::move(view)), m_validity(validity), m_flowOf(std::move(flowOf)) {}
 		void SetSourceSize(int width, int height) { m_srcW = width; m_srcH = height; }
 		// The measured look-ahead depth in frames (VectorEngineState::motionAheadConfigured, the number the "motion" entry uses): the visible
 		// entry's threshold follows it. 0 (the default) = the tracker's floor.
@@ -99,39 +100,17 @@ namespace TemporalDetail
 			const std::vector<int16_t>& vec = forward ? flow->forward : flow->backward;
 			const std::vector<uint8_t>& cost = forward ? flow->forwardCost : flow->backwardCost;
 			const size_t cells = static_cast<size_t>(flow->gridW) * flow->gridH;
-			if (vec.size() < cells * 2 || cost.size() < cells)
-				return Absent(m_stats.unfit, "the pair has no vectors or costs");
-			// The de-judder's trust weights for this direction (OpticalFlowTrust), per cell.
-			std::vector<float> cellErrorLocal, blockCost;
 			const std::vector<int16_t>& other = forward ? flow->backward : flow->forward;
-			if (other.size() < cells * 2)
+			if (vec.size() < cells * 2 || cost.size() < cells || other.size() < cells * 2)
 				return Absent(m_stats.unfit, "the pair has no vectors or costs");
-			// W1-C3: the forward direction's error is the producer's Flow::fbError (FbError(forward, backward), worked out once on its
-			// worker); the backward direction (fields swapped) has no producer extra and is computed here, as before.
-			const std::vector<float>* cellError = &cellErrorLocal;
-			if (forward && flow->fbError.size() == cells)
-				cellError = &flow->fbError;
-			else
-			{
-				++m_stats.fbErrorComputed;
-				if (!OpticalFlowTrust::FbError(vec, other, flow->gridW, flow->gridH, NvOpticalFlow::Engine::Grid, cellErrorLocal))
-					return Absent(m_stats.unfit, "the pair has no vectors or costs");
-			}
-			const int blocksX = (flow->halfW + MotionAhead::Flow::kBlockPx - 1) / MotionAhead::Flow::kBlockPx;
-			const int blocksY = (flow->halfH + MotionAhead::Flow::kBlockPx - 1) / MotionAhead::Flow::kBlockPx;
-			const size_t blocks = static_cast<size_t>(blocksX) * blocksY;
-			const std::vector<float>* costBlocks = nullptr;
-			if (forward && flow->blocksX == blocksX && flow->blocksY == blocksY && flow->costWeight.size() == blocks)
-				costBlocks = &flow->costWeight;   // the producer already worked it out
-			else if (OpticalFlowTrust::CostWeights(cost, flow->gridW, flow->gridH, NvOpticalFlow::Engine::Grid, MotionAhead::Flow::kBlockPx,
-					blocksX, blocksY, blockCost))
-				costBlocks = &blockCost;
-			if (!costBlocks)
-				return Absent(m_stats.unfit, "the pair has no vectors or costs");
-			// The engine's ONE per-cell trust (OpticalFlowTrust::CellTrust: the camera ahead fit calls the same function).
-			std::vector<float> cellTrust;
-			if (!OpticalFlowTrust::CellTrust(*costBlocks, blocksX, blocksY, *cellError, flow->gridW, flow->gridH, NvOpticalFlow::Engine::Grid,
-					MotionAhead::Flow::kBlockPx, m_consistencyPx, cellTrust))
+			// L-B6 (WAIVER-B6-TD-TRUST): the engine's ONE per-cell trust for this direction, READ from the engine memo (FlowView::CellTrust /
+			// CellTrustBackward: computed once per direction and tolerance for as long as the pair is the engine's current lease; another pair's FlowOf recomputes), never worked out here. No engine handle, or
+			// a memo without the plane: absent (never guessed). Copied here, so the pair outlives the engine's next FlowOf.
+			VpMotion::FlowView view;
+			if (!m_flowOf || !m_flowOf(seq, view))
+				return Absent(m_stats.unfit, "the engine has no trust for this pair");
+			const float* trustPlane = forward ? view.CellTrust(m_consistencyPx) : view.CellTrustBackward(m_consistencyPx);
+			if (!trustPlane || view.gridW != flow->gridW || view.gridH != flow->gridH)
 				return Absent(m_stats.unfit, "the pair has no vectors or costs");
 			const double scale = static_cast<double>(m_srcW) / flow->halfW;   // producer pixels -> source pixels
 			MotionPair pair;
@@ -146,7 +125,7 @@ namespace TemporalDetail
 			{
 				pair.vx[i] = static_cast<float>(vec[i * 2] / 32.0 * scale);       // S10.5 producer pixels -> source pixels
 				pair.vy[i] = static_cast<float>(vec[i * 2 + 1] / 32.0 * scale);
-				pair.trust[i] = cellTrust[i];
+				pair.trust[i] = trustPlane[i];
 			}
 			out = std::move(pair);
 			++m_stats.hits;
@@ -163,6 +142,7 @@ namespace TemporalDetail
 		}
 
 		VpMotion::P2View m_view;
+		FlowOfFn m_flowOf;
 		const MotionValidity::State* m_validity = nullptr;
 		int m_srcW = 0, m_srcH = 0;
 		float m_consistencyPx = DefaultConsistencyPixels();   // the live dejudder_consistency_px default; the wiring sets its matcher's value

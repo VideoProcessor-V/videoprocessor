@@ -49,6 +49,21 @@ class JudgeTests(unittest.TestCase):
         self.assertTrue(T.judge([F("src/a.cpp", add=["// ALLOW_SITES += 1"])], "m")[0])
         self.assertEqual(T.judge([F("src/a.cpp", add=["int x;"])], "m")[0], [])
 
+    def test_product_rows_folder_change_is_a_rule_19_change(self):
+        row = '        { kP10GrainSplit, "repair/grain_split", kExpectedGrainSplitUnit, "grain split pass" },'
+        moved = '        { kP10GrainSplit, "repair/elsewhere", kExpectedGrainSplitUnit, "grain split pass" },'
+        cat = "src/VP-V/core/ProductCatalog.h"
+        v, _, _ = T.judge([F(cat, add=[moved], rem=[row])], "m")
+        self.assertEqual(v[0][0], "register_owner")
+        v, _, _ = T.judge([F(cat, add=[moved])], "m")
+        self.assertEqual(v[0][0], "register_owner")
+        v, _, w = T.judge([F(cat, add=[moved], rem=[row])], "m" + chr(10) + chr(10) + "WAIVER-X: r")
+        self.assertEqual((v, w), ([], True))
+        v, _, _ = T.judge([F(cat, add=["inline int Other();"])], "m")
+        self.assertEqual(v, [])
+        v, _, _ = T.judge([F("src/VP-V/core/Other.h", add=[moved])], "m")
+        self.assertEqual(v, [])
+
     def test_waiver_needs_line_start(self):
         self.assertFalse(T.has_waiver("fix mentions WAIVER-X inline"))
         self.assertTrue(T.has_waiver("a\nWAIVER-X"))
@@ -76,6 +91,27 @@ class GitTests(unittest.TestCase):
             self.assertEqual([bool(x["violations"]) for x in res], [True, False])
             self.assertEqual(T.main(["--root", r, "--range", base + "..HEAD", "--strict"]), 1)
             self.assertEqual(T.main(["--root", r, "--range", "nonsense..HEAD", "--strict"]), 2)
+
+    def test_follow_up_waives_an_earlier_commit_without_history_rewrite(self):
+        with tempfile.TemporaryDirectory() as r:
+            self._g(r, "init", "-q")
+            os.makedirs(os.path.join(r, "tools"))
+            p = os.path.join(r, "tools", "check_a.py")
+            open(p, "w").write("x=1\n")
+            self._g(r, "add", "-A")
+            self._g(r, "commit", "-qm", "base")
+            base = subprocess.run(["git", "-C", r, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+            open(p, "w").write("x=2\n")
+            self._g(r, "commit", "-qam", "bad")
+            bad = subprocess.run(["git", "-C", r, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+            rng = base + "..HEAD"
+            self.assertEqual(T.main(["--root", r, "--range", rng, "--strict"]), 1)
+            self._g(r, "commit", "--allow-empty", "-qm", "late waiver\n\nWAIVER-T9: why\nWaives: " + bad[:9])
+            self.assertEqual(T.main(["--root", r, "--range", rng, "--strict"]), 0)
+            # a Waives: line without a WAIVER trailer, or naming another commit, waives nothing
+            self._g(r, "commit", "--allow-empty", "-qm", "noise\n\nWaives: " + bad[:9])
+            self.assertEqual(T.main(["--root", r, "--range", rng, "--strict"]), 0)
+            self.assertEqual(T.late_waivers(["x\nWaives: abcdef1"]), set())
 
     def test_selftest(self):
         self.assertEqual(T.main(["--selftest"]), 0)

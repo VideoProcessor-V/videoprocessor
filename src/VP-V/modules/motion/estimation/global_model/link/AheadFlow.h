@@ -18,9 +18,9 @@
 // half-size luma, so a cell is 8 source px at a half-size search and 16 at a quarter-size (lowRes 4K) search.
 //
 // FULL NATIVE RESOLUTION (owner): AheadToSourceGrid gives the fit the NATIVE cell grid, one sample per cell, full sub-pel, never an
-// aggregate; only the record's per-block OUTPUTS are put on the 16-px consumer grid (RegridToConsumerGrid). Cell trust = the engine's ONE trust definition, OpticalFlowTrust::CellTrust (the
-// cost weight of the cell's de-judder block x the forward/backward consistency weight from the matcher's consistency limit), the same
-// arithmetic as SK-MV MV5's TD source. Deterministic: fixed loop order, no threads, no hash or time input.
+// aggregate; only the record's per-block OUTPUTS are put on the 16-px consumer grid (RegridToConsumerGrid). Cell trust = the engine's ONE trust (job #1 L-B6,
+// WAIVER-B6-CELLTRUST): CopyAhead copies FlowView::CellTrust (the engine's per-pair memo, OpticalFlowTrust::CellTrust) on the render thread; this file
+// holds NO trust arithmetic. Deterministic: fixed loop order, no threads, no hash or time input.
 #pragma once
 
 #include "FieldCopy.h"
@@ -28,7 +28,6 @@
 #include <VP-V/modules/motion/estimation/global_model/CameraMotion.h>
 
 #include <VP-V/core/Indicator.h>
-#include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 
 #include <cmath>
@@ -39,10 +38,6 @@
 
 namespace CameraLink
 {
-	// The de-judder block the engine's cost weight is judged over, in engine px (MotionAhead::Flow::kBlockPx; pinned equal by
-	// CameraAheadFitTests). The trust maths takes it as a parameter; it is the producer's FlowExtras block, not a camera choice.
-	constexpr int kEngineTrustBlockPx = 8;
-
 	// Why an ahead pair was not taken (counted per reason in AheadCounters, shown in the status line).
 	enum class AheadRefusal : uint8_t
 	{
@@ -83,20 +78,21 @@ namespace CameraLink
 		// (MotionAhead::FlowGlobal); a fit prior like the render-time EngineGlobal. Not filled: no prior.
 		bool globalValid = false;
 		double globalX = 0, globalY = 0;
-		// W1-C3 (doc 93 D3/D5): the producer's extras as FlowOf served them (worked out once on the producer's worker), copied with the
-		// pair so the worker reads them instead of recomputing. Empty / false when the view carried none, or carried them for other
-		// arithmetic (cell size, units, trust block): then AheadGlobal / AheadCellTrust compute them as before (same functions).
+		// W1-C3 (doc 93 D3/D5): the producer's whole-frame vote as FlowOf served it (worked out once on the producer's worker), copied
+		// with the pair. False when the view carried none (then AheadGlobal votes from the copied fields).
 		bool haveProducerGlobal = false;     // producerGlobal = MotionAhead::FlowGlobal(forward, forwardCost, ..., general = true)
 		float producerGlobal[4] = {};
-		int extrasBlocksX = 0, extrasBlocksY = 0;
-		std::vector<float> costWeight;       // OpticalFlowTrust::CostWeights of forwardCost, extrasBlocksX x extrasBlocksY
-		std::vector<float> fbError;          // OpticalFlowTrust::FbError(forward, backward), gridW x gridH
+		// L-B6: the engine's per-cell trust of the pair (FlowView::CellTrust, the memo), gridW x gridH, copied on the render thread with
+		// the tolerance it was asked for (the matcher's consistency limit, engine px). The only trust the fit reads.
+		float trustToleranceEnginePx = 0.0f;
+		std::vector<float> trust;
 		size_t Cells() const { return static_cast<size_t>(gridW > 0 ? gridW : 0) * static_cast<size_t>(gridH > 0 ? gridH : 0); }
 		double CellSourcePx() const { return cellEnginePx * enginePxToSource; }
 	};
 
-	// Copies the view at once (the pointers die at the next FlowOf). Checks the layout; never guesses a missing part.
-	inline AheadRefusal CopyAhead(const VpMotion::FlowView& v, uint64_t seq, AheadCopy& out)
+	// Copies the view at once (the pointers die at the next FlowOf), the engine's cell trust at `trustToleranceEnginePx` included.
+	// Checks the layout; never guesses a missing part (no backward vectors / costs: no engine trust: Incomplete).
+	inline AheadRefusal CopyAhead(const VpMotion::FlowView& v, uint64_t seq, float trustToleranceEnginePx, AheadCopy& out)
 	{
 		out = AheadCopy();
 		if (v.to != seq || v.from + 1 != v.to || !v.rawForward)
@@ -106,6 +102,9 @@ namespace CameraLink
 			(v.engineW + v.cellEnginePx - 1) / v.cellEnginePx != v.gridW || (v.engineH + v.cellEnginePx - 1) / v.cellEnginePx != v.gridH)
 			return AheadRefusal::Layout;
 		if (!v.rawBackward || !v.forwardCost)
+			return AheadRefusal::Incomplete;
+		const float* engineTrust = v.CellTrust(trustToleranceEnginePx);   // the engine's memo (render thread; valid until the next FlowOf)
+		if (!engineTrust)
 			return AheadRefusal::Incomplete;
 		const size_t cells = static_cast<size_t>(v.gridW) * static_cast<size_t>(v.gridH);
 		out.seq = seq;
@@ -129,55 +128,9 @@ namespace CameraLink
 			for (int k = 0; k < 4; ++k)
 				out.producerGlobal[k] = v.global[0][k];
 		}
-		const bool sameTrustMaths = v.extrasCellPx == v.cellEnginePx && v.extrasUnitsPerEnginePx == 32.0 && v.rawUnitsPerEnginePx == 32.0 &&
-			v.extrasBlockPx == kEngineTrustBlockPx;
-		const int blocksX = (v.engineW + kEngineTrustBlockPx - 1) / kEngineTrustBlockPx;
-		const int blocksY = (v.engineH + kEngineTrustBlockPx - 1) / kEngineTrustBlockPx;
-		if (sameTrustMaths && v.costWeight && v.fbError && v.blocksX == blocksX && v.blocksY == blocksY)
-		{
-			out.extrasBlocksX = blocksX;
-			out.extrasBlocksY = blocksY;
-			out.costWeight.assign(v.costWeight, v.costWeight + static_cast<size_t>(blocksX) * static_cast<size_t>(blocksY));
-			out.fbError.assign(v.fbError, v.fbError + cells);
-		}
+		out.trustToleranceEnginePx = trustToleranceEnginePx;
+		out.trust.assign(engineTrust, engineTrust + cells);
 		return AheadRefusal::None;
-	}
-
-	// The engine's per-cell trust of the pair (forward direction): OpticalFlowTrust::CellTrust over the producer's own extras maths
-	// (CostWeights on the forward costs, FbError of the two directions), with the matcher's consistency limit in ENGINE px.
-	inline bool AheadCellTrust(const AheadCopy& a, float consistencyEnginePx, std::vector<float>& out)
-	{
-		out.clear();
-		const int blocksX = (a.engineW + kEngineTrustBlockPx - 1) / kEngineTrustBlockPx;
-		const int blocksY = (a.engineH + kEngineTrustBlockPx - 1) / kEngineTrustBlockPx;
-		// W1-C3: the producer's extras when the copy carries them (CopyAhead checked the arithmetic): the same CellTrust on the same inputs.
-		if (a.extrasBlocksX == blocksX && a.extrasBlocksY == blocksY && a.costWeight.size() == static_cast<size_t>(blocksX) * static_cast<size_t>(blocksY) &&
-			a.fbError.size() == a.Cells() && a.Cells() > 0)
-			return OpticalFlowTrust::CellTrust(a.costWeight, blocksX, blocksY, a.fbError, a.gridW, a.gridH, a.cellEnginePx, kEngineTrustBlockPx,
-				consistencyEnginePx, out);
-		std::vector<float> blockCost, cellError;
-		if (!OpticalFlowTrust::CostWeights(a.forwardCost, a.gridW, a.gridH, a.cellEnginePx, kEngineTrustBlockPx, blocksX, blocksY, blockCost))
-			return false;
-		// FbError reads S10.5; other units are rescaled to it first (exactly, when the units are 32).
-		const std::vector<int16_t>* fwd = &a.forward;
-		const std::vector<int16_t>* bwd = &a.backward;
-		std::vector<int16_t> f32, b32;
-		if (a.unitsPerEnginePx != 32.0)
-		{
-			const double k = 32.0 / a.unitsPerEnginePx;
-			f32.resize(a.forward.size());
-			b32.resize(a.backward.size());
-			for (size_t i = 0; i < a.forward.size(); ++i)
-				f32[i] = static_cast<int16_t>(std::lround(a.forward[i] * k));
-			for (size_t i = 0; i < a.backward.size(); ++i)
-				b32[i] = static_cast<int16_t>(std::lround(a.backward[i] * k));
-			fwd = &f32;
-			bwd = &b32;
-		}
-		if (!OpticalFlowTrust::FbError(*fwd, *bwd, a.gridW, a.gridH, a.cellEnginePx, cellError))
-			return false;
-		return OpticalFlowTrust::CellTrust(blockCost, blocksX, blocksY, cellError, a.gridW, a.gridH, a.cellEnginePx, kEngineTrustBlockPx,
-			consistencyEnginePx, out);
 	}
 
 	// What the conversion did (diagnostics / the harness).
@@ -190,12 +143,12 @@ namespace CameraLink
 
 	// FULL NATIVE RESOLUTION (owner, 2026-11-08): the ahead pair AS the fit's field, one sample per native cell (cellEnginePx engine px =
 	// CellSourcePx() source px: 8 at a half-size search of a 1080 source, 16 at a quarter-size 4K search), full sub-pel (raw units /
-	// unitsPerEnginePx x enginePxToSource), trust = the engine's cell trust (AheadCellTrust). NO aggregation: the fit runs on the native
+	// unitsPerEnginePx x enginePxToSource), trust = the engine's cell trust (copied by CopyAhead). NO aggregation: the fit runs on the native
 	// cell grid (the Fitter is grid-generic: blockSize = the cell's source px). sourceGridW x sourceGridH is the camera's 16-px consumer
 	// grid, used only to check that the pair covers the picture. Forward only (the fit reads no backward field). False when the pair does
 	// not cover the grid or its trust cannot be computed. Deterministic (fixed loop order). The record's per-block OUTPUTS are put on the
 	// consumer grid afterwards (RegridToConsumerGrid); the input is never reduced.
-	inline bool AheadToSourceGrid(const AheadCopy& a, float consistencyEnginePx, int sourceGridW, int sourceGridH, FieldCopy& out,
+	inline bool AheadToSourceGrid(const AheadCopy& a, int sourceGridW, int sourceGridH, FieldCopy& out,
 		AheadConvertInfo* info = nullptr)
 	{
 		const size_t cells = a.Cells();
@@ -208,9 +161,9 @@ namespace CameraLink
 		const double needW = (sourceGridW - 1) * static_cast<double>(FieldCopy::kSourceBlockPx), needH = (sourceGridH - 1) * static_cast<double>(FieldCopy::kSourceBlockPx);
 		if (spanW + cs < needW || spanH + cs < needH)
 			return false;
-		std::vector<float> trust;
-		if (!AheadCellTrust(a, consistencyEnginePx, trust))
-			return false;
+		if (a.trust.size() != cells)
+			return false;   // no engine trust copied: never guessed
+		const std::vector<float>& trust = a.trust;
 		const double toSource = a.enginePxToSource / a.unitsPerEnginePx;
 		out.seq = a.seq;
 		out.pairFrom = a.pairFrom;

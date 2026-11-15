@@ -9,6 +9,7 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/modules/motion/estimation/LaneAheadPolicy.h>
+#include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/consumers/DejudderAhead.h>
 
 #include <string>
@@ -64,16 +65,23 @@ namespace LaneAheadPolicyTest
 			Assert::IsTrue(Decide(in).reason == Reason::EngineOff);
 		}
 
-		// Doc 101 C6 / TD 99 s3.4: the maximum depth is derived (design lead = 2 + anchor slots), capped by the P2 ring (16 - 3 = 13).
+		// Doc 101 C6 / TD 99 s3.4: the maximum depth is derived (design lead = 2 + anchor slots), capped by the ahead-compute ceiling
+		// (OD 11-14, BEHAVIOUR-CHANGE OD-11-14-AHEAD-CAP; before: the P2 ring, 16 - 3 = 13, which stays the structural bound).
 		TEST_METHOD(DepthMaxIsDerivedAndCappedByTheP2Ring)
 		{
+			// Audit S8 drift guard: the mirrored ring constants and the cap are MotionAhead's.
+			static_assert(kP2RingPairs == MotionAhead::kP2RingPairs, "P2 ring pairs drift");
+			static_assert(kPairsKeptBehind == MotionAhead::kPairsKeptBehind, "pairs kept behind drift");
+			static_assert(kStructuralMaxLead == MotionAhead::kRingMaxLead, "ring max lead drift");
+			static_assert(kAheadCeilingLead == MotionAhead::kMaxLead, "the spare depth and the lead share the ceiling");
 			Assert::AreEqual(13, kStructuralMaxLead);
 			Assert::AreEqual(kP2RingPairs - kPairsKeptBehind, kStructuralMaxLead);
+			Assert::AreEqual(int(VpSkeleton::kAheadCeiling), kAheadCeilingLead, L"the cap is THE ahead-compute ceiling");
 			Assert::AreEqual(4, DesignLead(2));
 			Assert::AreEqual(4, DepthMax(), L"the default design point: 2 + 2 anchor slots");
 			Assert::AreEqual(6, DepthMax(4));
-			Assert::AreEqual(13, DepthMax(40), L"the P2 ring caps the design lead");
-			Assert::AreEqual(13, DepthMax(2, true), L"extended tier: up to the ring cap");
+			Assert::AreEqual(kAheadCeilingLead, DepthMax(40), L"the ceiling caps the design lead");
+			Assert::AreEqual(kAheadCeilingLead, DepthMax(2, true), L"extended tier: up to the ceiling (was the ring's 13)");
 			Assert::AreEqual(kDepthMin, DepthMax(-1));
 			Assert::AreEqual(6, RingCapacity(9, DepthMax(4)));
 			Input in = On();
@@ -82,9 +90,9 @@ namespace LaneAheadPolicyTest
 			in.anchorSlots = 4;
 			Assert::AreEqual(6, Decide(in).depth);
 			in.extendedTier = true;
-			Assert::AreEqual(9, Decide(in).depth);
+			Assert::AreEqual((std::min)(9, kAheadCeilingLead), Decide(in).depth, L"extended: the request, within the ceiling");
 			in.requestedDepth = 30;
-			Assert::AreEqual(13, Decide(in).depth);
+			Assert::AreEqual(kAheadCeilingLead, Decide(in).depth);
 			in.queuedAfterNext = 3;
 			Assert::AreEqual(3, Decide(in).depth, L"still never more than queued");
 		}

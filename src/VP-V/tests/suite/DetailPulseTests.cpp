@@ -223,6 +223,19 @@ namespace DetailPulseTestsNs
 		return h;
 	}
 
+	// The scene readers of the shared cut / fade judge (registered fix D8). The unit tests run without a skeleton store, so the
+	// default reader is replaced for the lifetime of a PulseGpu: no frame is a cut or a fade.
+	bool NoCutReader(uint64_t, FrameAnalysis::Scene& scene) { scene = FrameAnalysis::Scene(); return true; }
+	bool MissingReader(uint64_t, FrameAnalysis::Scene&) { return false; }
+	uint64_t g_cutAt = 0, g_fadeAt = 0;
+	bool CutOrFadeAtReader(uint64_t sequence, FrameAnalysis::Scene& scene)
+	{
+		scene = FrameAnalysis::Scene();
+		scene.cut = sequence == g_cutAt;
+		scene.fade = sequence == g_fadeAt;
+		return true;
+	}
+
 	// The GPU tests' device (WARP unless VP_TEST_GPU=hardware) and r16 luma helpers.
 	struct PulseGpu
 	{
@@ -249,9 +262,11 @@ namespace DetailPulseTestsNs
 			Assert::IsNotNull(d3d, L"Could not create the libplacebo test device");
 			gpu = d3d->gpu;
 			dispatch = pl_dispatch_create(log, gpu);
+			VpDetailRestore::DefaultSceneReader() = &NoCutReader;
 		}
 		~PulseGpu()
 		{
+			VpDetailRestore::DefaultSceneReader() = &VpDetailRestore::ReadSceneFromStore;
 			pl_dispatch_destroy(&dispatch);
 			pl_d3d11_destroy(&d3d);
 			pl_log_destroy(&log);
@@ -700,6 +715,88 @@ namespace DetailPulseTestsNs
 			}
 		}
 
+		TEST_METHOD(DetailPulseSharedJudgeVerdictRestartsTheModel)
+		{
+			// Registered fix D8: with a scene reader the model restarts on the shared judge's verdict (cut or fade), and on a missing
+			// record (no private fallback); the retired tile law stays the reference when the reader is null (the tests above).
+			const int w = 256, h = 192;
+			const Coded c = MakeCoded(w, h, 24, 23.976, 4.0, false, 404u);
+			Settings tile;
+			const std::vector<Frame> base = Run(c.frames, tile);
+			Settings shared;
+			shared.sceneReader = &CutOrFadeAtReader;
+			g_cutAt = 0; g_fadeAt = 0;
+			const std::vector<Frame> none = Run(c.frames, shared);
+			for (size_t k = 0; k < none.size(); ++k)
+			{
+				Assert::AreEqual(base[k].restart, none[k].restart, L"no verdict: the same restarts as the tile law on a clean GOP");
+				Assert::AreEqual(base[k].g1, none[k].g1);
+			}
+			g_cutAt = 7;   // frame index 6
+			const std::vector<Frame> cut = Run(c.frames, shared);
+			Assert::IsTrue(cut[6].restart, L"the shared judge's cut restarts the history");
+			Assert::AreEqual(1.0, cut[6].g1);
+			Assert::AreEqual(1.0, cut[6].g2);
+			g_cutAt = 0; g_fadeAt = 7;
+			const std::vector<Frame> fade = Run(c.frames, shared);
+			Assert::IsTrue(fade[6].restart, L"the shared judge's fade restarts the history");
+			Settings missing;
+			missing.sceneReader = &MissingReader;
+			const std::vector<Frame> none2 = Run(c.frames, missing);
+			for (size_t k = 1; k < none2.size(); ++k)
+				Assert::IsTrue(none2[k].restart, L"no scene record: restart, never a private judgement");
+		}
+
+		TEST_METHOD(DetailPulseGpuSceneVerdictRestartsAndMissingIsCounted)
+		{
+			// Registered fix D8 on the GPU: the module restarts (gain 1, output = input) on the reader's cut and on a missing
+			// record, and counts the missing ones; it never judges privately.
+			PulseGpu g;
+			const int w = 256, h = 192;
+			const Coded c = MakeCoded(w, h, 8, 23.976, 4.0, false, 404u);
+			std::vector<pl_tex> textures;
+			for (const Image& f : c.frames) textures.push_back(g.Upload(f));
+			const int cutIndex = 5;
+			g_cutAt = static_cast<uint64_t>(cutIndex) + 1; g_fadeAt = 0;
+			{
+				DetailPulse::Module module;
+				bool liftedBefore = false;
+				for (int k = 0; k < static_cast<int>(c.frames.size()); ++k)
+				{
+					DetailPulse::Params p;
+					p.sequence = static_cast<uint64_t>(k) + 1;
+					p.sceneReader = &CutOrFadeAtReader;
+					pl_frame out{};
+					Assert::IsTrue(module.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(textures[k]), p, out), W(module.LastError().c_str()).c_str());
+					const Image gpuOut = g.Readback(out.planes[0].texture);
+					const double change = MaxAbsDiff(gpuOut, c.frames[k]);
+					if (k == cutIndex)
+						Assert::IsTrue(change < 0.01, L"the shared judge's cut restarts: output is the input");
+					else if (k > 0 && k < cutIndex && change > 0.1)
+						liftedBefore = true;
+				}
+				Assert::AreEqual(0ull, module.SceneMissing(), L"every record was readable");
+				Assert::IsTrue(liftedBefore, L"before the cut the stabiliser still acts");
+				module.Release(g.gpu);
+			}
+			{
+				DetailPulse::Module module;
+				const int frames = static_cast<int>(c.frames.size());
+				for (int k = 0; k < frames; ++k)
+				{
+					DetailPulse::Params p;
+					p.sequence = static_cast<uint64_t>(k) + 1;
+					p.sceneReader = &MissingReader;
+					pl_frame out{};
+					Assert::IsTrue(module.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(textures[k]), p, out), W(module.LastError().c_str()).c_str());
+					Assert::IsTrue(MaxAbsDiff(g.Readback(out.planes[0].texture), c.frames[k]) < 0.01, L"no record: restart, output is the input");
+				}
+				Assert::AreEqual(static_cast<unsigned long long>(frames - 1), module.SceneMissing(), L"each consecutive frame without a record is counted");
+				module.Release(g.gpu);
+			}
+			for (pl_tex& t : textures) pl_tex_destroy(g.gpu, &t);
+		}
+
 		TEST_METHOD(DetailPulseGpuLetterboxMatchesModel)
 		{
 			// Bug hunt 33 F1 (GPU vs model; WARP unless VP_TEST_GPU=hardware): letterbox and
@@ -722,6 +819,7 @@ namespace DetailPulseTestsNs
 					DetailPulse::Module module;
 					Model model;
 					Settings s;
+					s.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module (SHOULD 5)
 					s.picture = { b[0] / static_cast<float>(w), b[1] / static_cast<float>(h),
 						(b[2] + 1) / static_cast<float>(w), (b[3] + 1) / static_cast<float>(h) };
 					double worst = 0.0, barWorst = 0.0;
@@ -821,12 +919,14 @@ namespace DetailPulseTestsNs
 				DetailPulse::Module module;
 				Model model;
 				Settings s;
+				s.sceneReader = &NoCutReader;   // D8: this test builds its own device, so the module is given the same reader (NoCutReader) explicitly via p.sceneReader; the model follows that verdict
 				double worst = 0.0;
 				for (int k = 0; k < static_cast<int>(c.frames.size()); ++k)
 				{
 					const uint64_t seq = static_cast<uint64_t>(k) + 1;
 					DetailPulse::Params p;
 					p.sequence = seq;
+					p.sceneReader = &NoCutReader;   // own device, no PulseGpu fixture default: the module must read the model's verdict
 					p.field = useField ? fieldTex : nullptr;
 					if (ahead && k + 1 < static_cast<int>(c.frames.size()) && k > 0)
 					{
@@ -924,6 +1024,7 @@ namespace DetailPulseTestsNs
 			DetailPulse::Module module;
 			Model model;
 			Settings s;
+			s.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module (SHOULD 5)
 			double worstRepeat = 0.0, worst = 0.0;
 			std::vector<pl_tex> textures;
 			for (int k = 0; k < static_cast<int>(c.frames.size()); ++k)
@@ -962,6 +1063,8 @@ namespace DetailPulseTestsNs
 			DetailPulse::Module module;
 			Model model;
 			Settings s, half;
+			s.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module (SHOULD 5)
+			half.sceneReader = &NoCutReader;
 			half.planeLines = (h + 1) / 2;
 			double worstMain = 0.0, worstForeign = 0.0;
 			std::vector<pl_tex> textures;
@@ -1009,6 +1112,7 @@ namespace DetailPulseTestsNs
 			DetailPulse::Module module;
 			Model model;
 			Settings s;
+			s.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module (SHOULD 5)
 			double worst = 0.0, worstSpread = 0.0;
 			std::vector<pl_tex> textures;
 			for (int f = 0; f < static_cast<int>(c.frames.size()); ++f)
@@ -1177,6 +1281,7 @@ namespace DetailPulseTestsNs
 					DetailPulse::Module fast, orig;
 					Model model;
 					Settings s;
+					s.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module (SHOULD 5)
 					for (int k = 0; k < static_cast<int>(c.frames.size()); ++k)
 					{
 						const uint64_t seq = static_cast<uint64_t>(k) + 1;
@@ -1451,6 +1556,7 @@ namespace DetailPulseTestsNs
 				{
 					Model model;
 					Settings s;
+					s.sceneReader = &NoCutReader;   // D8: the model follows the same shared verdict as the module (SHOULD 5)
 					std::vector<double> hout;
 					double meanLoss = 0.0, worstLoss = 0.0, iGain = 1.0, gmax = 1.0;
 					bool lowered = false;

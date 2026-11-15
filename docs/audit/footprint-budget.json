@@ -20,7 +20,7 @@
   "3rdparty/libplacebo-beta/include/libplacebo/renderer.h": 15,
   "3rdparty/libplacebo-beta/include/libplacebo/shaders/custom.h": 11,
   "3rdparty/libplacebo-beta/lib/libplacebo-388.def": 1,
-  "AGENTS.md": 33,
+  "AGENTS.md": 53,
   "CONFIGURATION.html": 23,
   "Directory.Build.targets": 36,
   "VideoProcessor.cfg": 95,

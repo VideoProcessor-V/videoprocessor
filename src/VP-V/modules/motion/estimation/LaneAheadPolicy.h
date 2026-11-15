@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <VP-V/core/AheadCeiling.h>
+
 // B3-Z Z2 scaffold (refs 93-prep-B3Z s2, s3, s6; TD design 99 s3.3, s3.4, s12 item 2): the matcher top-up in the
 // post-present spare slot (core/PostPresentSpare.h, class Core, order 1) as a pure decision, plus the pair-keyed
 // entry layout Z1 (ring + slots) and Z3 (engine ring + feed) build on. No host types, no GPU, no clock. C++14.
@@ -53,11 +55,15 @@ constexpr int kDepthMin = 2;      // the ring holds at least two pairs
 
 // The maximum depth is derived, never a fixed 4 (doc 101 C6; TD 99 s3.4: design lead = 2 + anchor slots; the
 // extended tier may want more). Structural cap = the P2 ring: 16 pairs minus the 3 kept behind = 13. These mirror
-// B1's MotionAhead.h kP2RingPairs / kPairsKeptBehind / kMaxLead (r2/b1 MotionAhead.h:131-134) and switch to
-// MotionAhead::kMaxLead when B3-Z rebases onto B1, with a static_assert drift guard on all three (audit S8).
+// MotionAhead.h kP2RingPairs / kPairsKeptBehind / kRingMaxLead (this header is included by core/PostPresentSpare.h, so it does
+// not include the motion header; LaneAheadPolicyTests static_asserts the three against it, audit S8).
+// BEHAVIOUR-CHANGE OD-11-14-AHEAD-CAP (lead10/design-queue-keyed-products.md s10): the depth is ALSO held to the ahead-compute
+// ceiling core/AheadCeiling.h kAheadCeiling 6 (the same cap as MotionAhead::kMaxLead). BEFORE: the extended tier and a large design
+// lead ran up to the ring's 13; AFTER: at most 6. A ceiling, never a target.
 constexpr int kP2RingPairs = 16;
 constexpr int kPairsKeptBehind = 3;
 constexpr int kStructuralMaxLead = kP2RingPairs - kPairsKeptBehind;
+constexpr int kAheadCeilingLead = int(VpSkeleton::kAheadCeiling) < kStructuralMaxLead ? int(VpSkeleton::kAheadCeiling) : kStructuralMaxLead;
 constexpr int kAnchorSlotsDefault = 2;
 
 inline int DesignLead(int anchorSlots = kAnchorSlotsDefault)
@@ -65,11 +71,11 @@ inline int DesignLead(int anchorSlots = kAnchorSlotsDefault)
     return 2 + (anchorSlots > 0 ? anchorSlots : 0);
 }
 
-// Standard tier: the design lead, capped by the P2 ring. Extended tier: the ring cap itself.
+// Standard tier: the design lead, capped by the ahead-compute ceiling (within the P2 ring). Extended tier: the cap itself.
 inline int DepthMax(int anchorSlots = kAnchorSlotsDefault, bool extendedTier = false)
 {
-    const int lead = extendedTier ? kStructuralMaxLead : DesignLead(anchorSlots);
-    const int capped = lead > kStructuralMaxLead ? kStructuralMaxLead : lead;
+    const int lead = extendedTier ? kAheadCeilingLead : DesignLead(anchorSlots);
+    const int capped = lead > kAheadCeilingLead ? kAheadCeilingLead : lead;
     return capped < kDepthMin ? kDepthMin : capped;
 }
 

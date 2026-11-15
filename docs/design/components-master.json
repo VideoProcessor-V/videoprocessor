@@ -212,6 +212,7 @@
         "src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.h",
         "src/VP-V/modules/input/source_analysis/SourceAnalysisState.h",
         "src/VP-V/modules/input/source_analysis/SourceHistoryLog.h",
+        "src/VP-V/modules/input/source_analysis/FrameQuiet.h",
         "src/VP-V/modules/input/source_analysis/SourceHistoryLog.cpp",
         "src/VP-V/modules/input/source_analysis/SourceAheadWalk.h",
         "src/VP-V/modules/input/source_analysis/SourceRingPin.h",
@@ -272,10 +273,15 @@
         "src/VP-V/modules/input/source_analysis/lane/tests/LaneGpuRegionKernelWarpTests.cpp",
         "src/VP-V/modules/input/source_analysis/lane/tests/LaneGpuLightKernelWarpTests.cpp",
         "src/VP-V/modules/input/source_analysis/tests/HalfLumaEngineViewTests.cpp",
+        "src/VP-V/modules/input/source_analysis/tests/P1AcquireSourceTests.cpp",
+        "src/VP-V/modules/input/source_analysis/P1AcquireSource.h",
+        "src/VP-V/modules/input/source_analysis/lane/P1GpuFill.h",
+        "src/VP-V/modules/input/source_analysis/tests/P1GpuFillTests.cpp",
         "src/VP-V/modules/input/source_analysis/lane/tests/EngineLumaGpuTwinTests.cpp",
         "src/VP-V/tests/AnalysisLaneGpuHookTests.cpp",
         "src/VP-V/modules/input/source_analysis/lane/LaneReadback.h",
         "src/VP-V/tests/suite/SourceResolutionFrameBoundTests.cpp",
+        "src/VP-V/tests/suite/SourceResolutionFrameQuietTests.cpp",
         "src/VP-V/tests/suite/SourceResolutionChainClearTests.cpp",
         "src/VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h",
         "src/VP-V/modules/input/source_analysis/lane/shared/README.md",
@@ -315,6 +321,7 @@
           "source_resolution_engage_max_wait_s",
           "source_resolution_evidence_seconds",
           "source_resolution_evidence_shots",
+          "source_resolution_frame_bound",
           "source_resolution_latch_fixes",
           "source_resolution_mixed_guard",
           "source_resolution_release_fade_s",
@@ -380,6 +387,7 @@
         "src/VP-V/modules/motion/estimation/global_model/PhotometricRefineGpu.cpp",
         "src/VP-V/modules/motion/estimation/global_model/PhotometricRefineGpuShaders.inl",
         "src/VP-V/modules/motion/estimation/global_model/CameraAccessor.h",
+        "src/VP-V/modules/motion/estimation/tests/CameraRecordPodTests.cpp",
         "src/VP-V/modules/motion/estimation/global_model/CameraAccessorGlsl.h",
         "src/VP-V/modules/motion/estimation/global_model/CameraModelGpu.h",
         "src/VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h",
@@ -685,6 +693,29 @@
       "fallback_when_missing": "VP debander failure renders without it; temporal frames keep libplacebo's deband."
     },
     {
+      "slot": "colour.dm_pre",
+      "order": 85,
+      "status": "placeholder",
+      "code_location": "placeholder (no component; the slot registers no pass and no hook)",
+      "live_files": [],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [],
+        "upstream_modules": [
+          "input.source_analysis"
+        ]
+      },
+      "fallback_when_missing": "Placeholder: registers no pass and no hook; nothing to fall back from."
+    },
+    {
       "slot": "repair.texture_restore",
       "order": 90,
       "status": "built",
@@ -694,6 +725,8 @@
         "src/VP-V/modules/repair/texture_restore/DetailPulse.h",
         "src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
         "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+        "src/VP-V/modules/repair/texture_restore/SceneRestart.h",
+        "src/VP-V/modules/repair/texture_restore/tests/D8SceneJudgeAgreementTests.cpp",
         "src/VP-V/segments/EntranceSegment.cpp",
         "src/VP-V/segments/EntranceSegment.h",
         "docs/VP-detail-restore.md"
@@ -1009,6 +1042,7 @@
         "shaders/SSimDownscaler.glsl",
         "shaders/SSimSuperRes.glsl",
         "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.h",
+        "src/VP-V/modules/scaling/output/PicturePrecision.h",
         "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp",
         "src/VP-V/modules/scaling/output/NlsMaskMapping.h"
       ],
@@ -1099,6 +1133,29 @@
       "fallback_when_missing": "Missing/invalid combined LUT -> libplacebo tone mapping."
     },
     {
+      "slot": "colour.dm_curve",
+      "order": 172,
+      "status": "placeholder",
+      "code_location": "placeholder (no component; the slot registers no pass and no hook)",
+      "live_files": [],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [],
+        "upstream_modules": [
+          "colour.tone_gamut"
+        ]
+      },
+      "fallback_when_missing": "Placeholder: registers no pass and no hook; nothing to fall back from."
+    },
+    {
       "slot": "colour.extended_range",
       "order": 175,
       "status": "built",
@@ -1136,12 +1193,8 @@
       "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h",
-        "src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h",
         "shaders/SDR tone shape.glsl",
-        "shaders/DV trims.glsl",
-        "src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h",
-        "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h",
-        "src/VP-V/modules/colour/sdr_tone_shape/DvHostStage.h"
+        "shaders/DV trims.glsl"
       ],
       "components": {
         "files": {
@@ -1172,13 +1225,35 @@
       "fallback_when_missing": "A shader failure skips the stage; the Dolby-style curve falls back to bt2390 (+ the luminance trims). SDR tone shape entry: call site in WP-4's silent-fallbacks patch."
     },
     {
+      "slot": "colour.dm_trims",
+      "order": 205,
+      "status": "placeholder",
+      "code_location": "placeholder (no component; the slot registers no pass and no hook)",
+      "live_files": [],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [],
+        "upstream_modules": [
+          "colour.sdr_tone_shape"
+        ]
+      },
+      "fallback_when_missing": "Placeholder: registers no pass and no hook; nothing to fall back from."
+    },
+    {
       "slot": "colour.appearance",
       "order": 210,
       "status": "placeholder",
       "code_location": "module (ambient adaptation config/logic, SdrAmbientLift; slot placeholder)",
       "live_files": [
         "src/VP-V/modules/colour/appearance/SdrAmbientLift.h",
-        "src/VP-V/modules/colour/appearance/AmbientAdaptation.h",
         "src/VP-V/modules/colour/appearance/AmbientConfig.h"
       ],
       "components": {
@@ -1573,9 +1648,11 @@
       "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/modules/control/diagnostics/DiagnosticOverrides.h",
+        "src/VP-V/modules/control/diagnostics/LibplaceboErrors.h",
         "src/VP-V/modules/control/diagnostics/DiagnosticOverridesModule.h",
         "src/VP-V/modules/control/diagnostics/StateReport.cpp",
         "src/VP-V/modules/control/diagnostics/CrashState.cpp",
+        "src/VP-V/modules/control/diagnostics/ExeLogRing.cpp",
         "src/VP-V/modules/control/diagnostics/CrashState.h",
         "src/VP-V/modules/control/diagnostics/StateReport.h",
         "src/VP-V/modules/control/diagnostics/StateReportSettings.h",
@@ -1668,6 +1745,7 @@
         "src/VP-V/modules/control/config/config_pages/VpvRenderingDefaults.h",
         "src/VP-V/modules/control/config/config_pages/VpvScalingRows.h",
         "src/VP-V/modules/control/config/config_pages/VpvSection.cpp",
+        "src/VP-V/modules/control/config/config_pages/VpvConfigProvidersStatic.cpp",
         "src/VP-V/modules/control/config/config_pages/VpvSection.h",
         "src/VP-V/modules/control/config/config_pages/VpvSetBy.h",
         "src/VP-V/modules/control/config/config_pages/VpvTierModel.h",

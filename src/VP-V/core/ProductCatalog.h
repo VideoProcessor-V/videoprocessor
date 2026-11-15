@@ -158,6 +158,7 @@ inline const std::vector<ProductRow>& ProductRows()
         // Wave S2: P14g source_geometry is HELD STATE like P14: the source-resolution side (single writer) publishes it on each evaluation, no lane
         // producer, no live fill; its readers take the latest sealed record (lag 1) and fall back visibly when it is absent or stale.
         { kSourceGeometry, "input/source_analysis/identity", kExpectedSourceGeometryUnit, "" },
+        { kEdgeMap, "input/source_analysis/regions", kExpectedRegionUnit, "edge map pass (per-frame memo); readers: focus map, busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3))" },
     };
     return rows;
 }
@@ -760,7 +761,14 @@ inline std::string RenderDoc()
     s += "### Products\n\n";
     s += "| id | token | unit (version) | backend | lane producer | live-fill owner | consumers | stamps | tier | residency | 1080p MB | 4K MB | 8K MB |\n";
     s += "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
-    for (const ProductDecl& d : reg.All()) {
+    for (size_t slot = 0; slot < reg.All().size(); ++slot) {
+        const ProductDecl& d = reg.All()[slot];
+        if (d.id == kNoProduct) {
+            // An absent slot of a reserved id: a named row with no owner until its product lands (no unit, reader or size).
+            s += "| " + std::to_string(slot) + " | " + ReservedProductName(ProductId(slot)) + " | reserved (no owner)"
+                 + " | - | - | - | - | - | - | - | - | - | - |\n";
+            continue;
+        }
         const ProductRow* row = RowOf(d.id);
         const std::vector<const ConsumerRow*> cs = ConsumersOf(d.id);
         const ConsumerRow* owner = LiveFillOwner(d.id);

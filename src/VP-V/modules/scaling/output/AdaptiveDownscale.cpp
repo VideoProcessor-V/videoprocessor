@@ -7,6 +7,7 @@
 #include <libplacebo/shaders/custom.h>
 #include <libplacebo/shaders/sampling.h>
 
+#include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <VP-V/modules/drive/led_measure/NativeReadback.h>
@@ -89,19 +90,14 @@ if (li == 0u)
 )GLSL";
 
 		// 8b: a luma doubler's output (exactly 2x the source crop) back to the
-		// source resolution, 2x2 box in the picture's own light domain.
+		// source resolution in the picture's own light domain. The mean is the shared
+		// unit U3 (VpUnit::HalfLuma::GlslRgbaAt, lane/shared/HalfLuma.h; moved unchanged:
+		// the same taps, clamp, order and scale as the former private loop).
 		const char* const HALVE_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
-if (q.x < size.x && q.y < size.y) {
-    ivec2 sz = textureSize(src, 0);
-    ivec2 p = ivec2(origin) + q * 2;
-    vec4 s = vec4(0.0);
-    for (int y = 0; y < 2; y++)
-        for (int x = 0; x < 2; x++)
-            s += texelFetch(src, clamp(p + ivec2(x, y), ivec2(0), sz - ivec2(1)), 0);
-    imageStore(dst, q, s * 0.25);
-}
+if (q.x < size.x && q.y < size.y)
+    imageStore(dst, q, vpu_half_luma_rgba_at(src, ivec2(origin), q));
 )GLSL";
 
 		// One workgroup: the frame's totals, the ramp, the smoothing and the
@@ -724,13 +720,21 @@ float rs_slope(float y)
 		};
 		if (NativeStatsReadback())
 		{
-			// Never waits: a slot is read only once its copy's query reports done, oldest first.
-			const std::vector<int> slots = statsSchedule.Collect(statsFrames, [this](int slot) { return statsNative->Ready(slot); });
+			// Never waits: a slot is read only once the fence reports its copy complete and the staging copy
+			// maps (DO_NOT_WAIT), oldest first.
+			// A slot whose copy reports an error is handed out too: released and counted as a failure
+			// (the "output scaling" fallback), never kept busy forever.
+			const std::vector<int> slots = statsSchedule.Collect(statsFrames, [this](int slot) {
+				return statsNative->Poll(slot) != LedDrive::ReadState::Pending; });
 			for (int slot : slots)
 			{
 				float values[4] = {};
 				if (!statsNative->Read(slot, values, sizeof(values), 1))
-					break;   // still drawing after all: the next frame takes it
+				{
+					++failures;   // shown by the "output scaling" fallback (the HRESULT is statsNative->LastError())
+					statsSchedule.Release(slot);
+					continue;
+				}
 				take(values);
 				statsSchedule.Release(slot);
 			}
@@ -806,7 +810,8 @@ float rs_slope(float y)
 			const float halveOrigin[2] = { static_cast<float>(hx0), static_cast<float>(hy0) };
 			const pl_shader_desc d[2] = { Sampled("src", p->tex, false), Storage("dst", lowres) };
 			const pl_shader_var v[1] = { { pl_var_vec2("origin"), halveOrigin, true } };
-			if (!Compute(p->dispatch, "VideoProcessor adaptive upscale: doubler to source resolution", nullptr,
+			static const std::string halveHeader = VpUnit::HalfLuma::GlslRgbaAt();
+			if (!Compute(p->dispatch, "VideoProcessor adaptive upscale: doubler to source resolution", halveHeader.c_str(),
 				HALVE_BODY, d, 2, v, 1, (lw + 15) / 16, (lh + 15) / 16))
 			{
 				++failures;
@@ -1004,7 +1009,7 @@ float rs_slope(float y)
 				return unchanged;
 			}
 			if (statsSlot >= 0)
-				statsNative->Queue(statsSlot);
+				statsNative->QueueDeferred(statsSlot);   // this pass runs inside libplacebo's frame: the native copy follows the frame (NativeReadback.h)
 			if (advance > 0.5f)
 			{
 				advancedSequence = sequence;

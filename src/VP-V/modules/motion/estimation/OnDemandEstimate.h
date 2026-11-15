@@ -15,6 +15,7 @@
 #pragma once
 
 #include <AnalysisLumaSource.h>
+#include <VP-V/core/SchedulerContract.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/estimation/VectorProducts.h>
 
@@ -273,34 +274,9 @@ namespace VpMotion
 		// The budget a request may wait (the deadline): the source period minus the MEASURED render time (an EWMA, 1/8 per
 		// sample, of RenderSample's values) minus a tenth of the period as a margin; never below 0. Never a fixed number of
 		// milliseconds: until the first sample it is half the period; an unknown rate gives 0 (no budget: not issued).
-		class RenderBudget
-		{
-		public:
-			void Note(double renderMs)
-			{
-				if (!(renderMs >= 0.0))
-					return;   // NaN or negative: ignored
-				ewmaMs_ = measured_ ? ewmaMs_ + (renderMs - ewmaMs_) / 8.0 : renderMs;
-				measured_ = true;
-			}
-			bool Measured() const { return measured_; }
-			double RenderMs() const { return ewmaMs_; }
-			double BudgetMs(double sourceHz) const
-			{
-				if (!(sourceHz > 0.0))
-					return 0.0;
-				const double period = 1000.0 / sourceHz;
-				if (!measured_)
-					return period * 0.5;
-				const double b = period - ewmaMs_ - period * 0.1;
-				return b > 0.0 ? b : 0.0;
-			}
-			void Reset() { ewmaMs_ = 0.0; measured_ = false; }
-
-		private:
-			double ewmaMs_ = 0.0;
-			bool measured_ = false;
-		};
+		// S0 (IC-2): the class itself moved to core/SchedulerContract.h (ONE copy, shared with the post-present spare slot);
+		// this alias keeps the engine and its tests compiling unchanged.
+		using RenderBudget = VpSkeleton::RenderBudget;
 
 		// optical_flow_on_demand (profile key; README Settings): auto | on | off, default auto.
 		//   auto (DEFAULT) = today's behaviour on EVERY profile: the on-demand path is OFF (no producer is started for it, no request

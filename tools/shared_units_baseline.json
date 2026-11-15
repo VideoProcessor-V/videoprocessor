@@ -47,6 +47,12 @@
      "pattern": "p\\.grainCal = kGrainCal",
      "kind": "shared_function_use",
      "reason": "CPU reference model calls the owner function GrainSplit::Compute for tests (switch to GrainSplit::DefaultParams with the GPU fix) (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+     "pattern": "^\\s*constexpr (int|double) \\w+ = kGrainLaw\\.\\w+;",
+     "kind": "false_positive",
+     "reason": "reads the U1 grain law by name (GrainSplit::DefaultParams), not a private copy (B2 unit move, ND04; verified at r2/job1-b2 f2a63dd3e)"
     }
    ]
   },
@@ -150,31 +156,49 @@
      "pattern": "exp\\(-0\\.5 \\* d[xy] \\* d[xy]\\)",
      "kind": "false_positive",
      "reason": "Gaussian surround weight over the P11 block grid (J_surround), not a band split of the picture"
+    },
+    {
+     "file": "src/VP-V/modules/repair/temporal_detail/TemporalDetail.h",
+     "pattern": "^#include <VP-V/modules/repair/grain_split/GrainSplit\\.h>$",
+     "kind": "false_positive",
+     "reason": "include of the U1 grain law header: TD reads blockPx, no band-split copy (B2 unit move, ND04; verified at r2/job1-b2 f2a63dd3e)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+     "pattern": "^#include <VP-V/modules/repair/grain_split/GrainSplit\\.h>$",
+     "kind": "false_positive",
+     "reason": "include of the U1 grain law header: TR reads tile/sub-blocks/calibration/kappa, no band-split copy (B2 unit move, ND04; verified at r2/job1-b2 f2a63dd3e)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+     "pattern": "^\\s*constexpr double kSigma1 = VpUnit::BandFromBase::kSigmaFine, kSigma2 = VpUnit::BandFromBase::kSigmaBase, kSigma3 = VpUnit::BandFromBase::kSigmaLow;",
+     "kind": "false_positive",
+     "reason": "reads the U2 unit sigma table; band splits is a trailing comment (B2 unit move, ND04; verified at r2/job1-b2 f2a63dd3e)"
     }
    ]
   },
   "U3": {
    "name": "half_luma_downsample",
    "blocking": true,
-   "baseline_duplicates": 19,
+   "baseline_duplicates": 3,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
-     "pattern": "DOWNSAMPLE_BODY|MotionWarp::Downsample|FADE_APPLY|Downsample\\(",
-     "kind": "residual",
-     "reason": "matcher half-resolution downsample: GLSL float 2x2 sum with the M4 fade gain applied in the same pass; byte identity needs a GPU run and the vector-suite identity proof (doc 62 order 9), not available in this wave"
+     "pattern": "^\\s*const char\\* const DOWNSAMPLE_BODY = R\"GLSL\\($|^\\s*bool MotionWarp::Downsample\\(pl_tex luma, pl_tex half,|^\\s*header\\.c_str\\(\\), DOWNSAMPLE_BODY,$|(^\\s*return |[!:(] ?)Downsample\\([ab]\\.luma, half[AB], l1[AB], l2[AB], [ab]\\.fullRange,",
+     "kind": "false_positive",
+     "reason": "names only: the DOWNSAMPLE_BODY raw-string opener (:33), the MotionWarp::Downsample definition (:2699), its Dispatch argument (:2711) and its four calls (:3836/:3911/:3912/:3935). The body's 2x2 box already calls the shared accessor `vpu_half_luma(src, p) * codes` (:48, since 5b43fc22a, gated ca7a194aa), header VpUnit::HalfLuma::Glsl() (:2709); no private box remains (U3 one copy, verified at r2/u3-one-copy)"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h",
-     "pattern": "Downsample\\(",
-     "kind": "residual",
-     "reason": "matcher half-resolution downsample: GLSL float 2x2 sum with the M4 fade gain applied in the same pass; byte identity needs a GPU run and the vector-suite identity proof (doc 62 order 9), not available in this wave"
+     "pattern": "^\\s*bool Downsample\\(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange,",
+     "kind": "false_positive",
+     "reason": "declaration of MotionWarp::Downsample (:659); its body calls the shared accessor vpu_half_luma (DejudderWarp.cpp:48, since 5b43fc22a); no private box (U3 one copy, verified at r2/u3-one-copy)"
     },
     {
      "file": "src/VP-V/modules/motion/consumers/FrameInterpolator.cpp",
-     "pattern": "low_half_|LOW_HALF|LOW_A|LOW_B",
-     "kind": "residual",
-     "reason": "interpolator low band: GLSL float 2x2 box feeding the Bill low-band Gaussian; byte identity needs a GPU run, not available in this wave"
+     "pattern": "^DEFINE_LOWBI\\(low_half_[ab], low_[ab]\\)$|^#define LOW_[AB]\\(P\\) low_half_[ab]\\(\\(P\\) \\* 0\\.5\\)$|^\\s*const char\\* const LOW_HALF_BODY = R\"GLSL\\($|Compute\\(dispatch, description, halfHeader, LOW_HALF_BODY, passHalf,",
+     "kind": "false_positive",
+     "reason": "names only: DEFINE_LOWBI(low_half_a/b) (:171/:172) instantiate a BILINEAR read (mix of 4 taps at fractional weights) of the half-resolution low band, and LOW_A/LOW_B (:174/:175) call it at p * 0.5 (a coordinate scale); the LOW_HALF_BODY raw-string opener (:329) and its Compute call in LowBand (:500). The 2x2 box itself calls the shared accessor vpu_half_luma_rgba_at(src, ivec2(0), q) (:333, header VpUnit::HalfLuma::GlslRgbaAt() :498) since r2/u3-one-copy b6584ab9b; no private box remains"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
@@ -201,12 +225,6 @@
      "reason": "exponential smoothing factor of a quality/bits statistic, not a 2x2 box"
     },
     {
-     "file": "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
-     "pattern": "0\\.25 \\* \\(",
-     "kind": "residual",
-     "reason": "GLSL, no byte-identity proof without GPU: DetailPulse load_low sbox 2x2 box (line 141) and the 2x2 mean at line 521"
-    },
-    {
      "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
      "pattern": "kP1HalfLuma|HalfLumaProducer|ComputeHalfLuma",
      "kind": "false_positive",
@@ -223,6 +241,24 @@
      "pattern": "avg = 0\\.25 \\* \\(texture",
      "kind": "false_positive",
      "reason": "4-tap ring average around the pixel (deband sampling), not a downsample (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
+     "pattern": "vec2 vpt = use_temporal",
+     "kind": "false_positive",
+     "reason": "previous-frame vector scale (x 0.25), not a 2x2 box (gate-C1-batch2 row 0a9e66738: verified FP)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
+     "pattern": "h[0-3] \\* \\(1\\.0 - 0\\.(75|25)\\) \\+ h[0-3] \\* 0\\.(75|25)",
+     "kind": "false_positive",
+     "reason": "linear interpolation weights 0.25/0.75 between smoothed rows, not a 2x2 box (gate-C1-batch2 row 0a9e66738: verified FP, pattern narrowed to the statement as the gate prescribed)"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
+     "pattern": "length\\(vec2\\(gx, gy\\)\\) \\* 0\\.25",
+     "kind": "false_positive",
+     "reason": "Sobel gradient normalisation, not a downsample (gate-C1-batch2 row 0a9e66738: verified FP)"
     }
    ]
   },
@@ -274,10 +310,22 @@
      "reason": "the lane hosts the P11 GPU kernel (co-owner of U4) (refs/126 s3, B0)"
     },
     {
-     "file": "src/VP-V/modules/repair/grain_split/",
-     "pattern": "block|e1|BlockMeans",
+     "file": "src/VP-V/modules/repair/grain_split/GrainSplit.h",
+     "pattern": "block means of d1|BlockMeans|region block stats \\(declared\\)",
      "kind": "false_positive",
-     "reason": "P10 own block energies e1/e2/e3: inside the U1 owner, part of the split law (refs/126 s3, B0)"
+     "reason": "P10 own block energies e1/e2/e3: inside the U1 owner, part of the split law (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/grain_split/GrainSplitGpu.cpp",
+     "pattern": "block means of d1",
+     "kind": "false_positive",
+     "reason": "P10 own block energies e1/e2/e3: inside the U1 owner, part of the split law (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/grain_split/GrainSplitGpu.h",
+     "pattern": "block mean of d3",
+     "kind": "false_positive",
+     "reason": "P10 own block energies e1/e2/e3: inside the U1 owner, part of the split law (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
     },
     {
      "file": "src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
@@ -394,7 +442,7 @@
   "U7": {
    "name": "cut_fade_flash_judge",
    "blocking": true,
-   "baseline_duplicates": 6,
+   "baseline_duplicates": 0,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/input/signal/HdrInference.cpp",
@@ -499,7 +547,7 @@
      "reason": "carries the frame's mean luma (8-bit codes) read back from the scalar pass as data; the cut rule is CutFadeJudge::MeanStepCut / MeanStepCutLine"
     }
    ],
-   "waiver": "WAIVER-JOB1-U7 (coordinator, job1): 0 -> 6 is a new detection of REAL X2 copies (kCutShare/kFadeStepShare), not a loosened rule; target 0 at B6, expires at B6"
+   "waiver": "WAIVER-JOB1-U7 EXPIRED at B6: the X2 copies are removed (L-B6), U7 measures 0 and the baseline is lowered 6 -> 0 (WAIVER-LB6-U7, gate C3)"
   },
   "U8": {
    "name": "active_picture_rect",
@@ -630,10 +678,22 @@
      "reason": "call of the shared siting law (refs/126 s3, B0)"
     },
     {
-     "file": "src/VP-V/modules/input/source_analysis/identity/chain/",
+     "file": "src/VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.cpp",
+     "pattern": "PolyphaseProposer",
+     "kind": "false_positive",
+     "reason": "source-identity polyphase EVIDENCE proposer (detection), not a chroma upsample (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h",
+     "pattern": "PolyphaseProposer\\.h",
+     "kind": "false_positive",
+     "reason": "source-identity polyphase EVIDENCE proposer (detection), not a chroma upsample (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/identity/chain/PolyphaseProposer.h",
      "pattern": "[Pp]olyphase",
      "kind": "false_positive",
-     "reason": "source-identity polyphase EVIDENCE proposer (detection), not a chroma upsample (refs/126 s3, B0)"
+     "reason": "source-identity polyphase EVIDENCE proposer (detection), not a chroma upsample (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
     },
     {
      "file": "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
@@ -709,13 +769,13 @@
    "name": "one_pole_alpha",
    "known_false_positive": [],
    "blocking": true,
-   "baseline_duplicates": 12
+   "baseline_duplicates": 9
   },
   "U24": {
    "name": "robust_stats",
    "known_false_positive": [],
    "blocking": true,
-   "baseline_duplicates": 73
+   "baseline_duplicates": 60
   },
   "U25": {
    "name": "ramp_clamp_smoothstep",
@@ -727,8 +787,8 @@
    "name": "luma_from_rgb_weights",
    "known_false_positive": [],
    "blocking": true,
-   "baseline_duplicates": 25
+   "baseline_duplicates": 21
   }
  },
- "note": "refs/126 B0 (2026-11-12): all registered units blocking at the measured true count; baselines only shrink. U10 baseline = the matcher D1 global search (X1, file-level owner scope), 0 at refs/126 B6. U7 6 = DetailPulse/TextureRestore private cut/fade shares (X2). U13 14 = SourceResolutionDetector private blockiness (real). U17 is undefined/reserved. U10 = 19 after the audit fix (Dispatch-label lines un-suppressed)."
+ "note": "refs/126 B0 (2026-11-12): all registered units blocking at the measured true count; baselines only shrink. U10 baseline = the matcher D1 global search (X1, file-level owner scope), 0 at refs/126 B6. U7 0 at L-B6 (the X2 DetailPulse/TextureRestore private cut/fade shares are removed; was 6). U13 14 = SourceResolutionDetector private blockiness (real). U17 is undefined/reserved. U10 = 19 after the audit fix (Dispatch-label lines un-suppressed)."
 }

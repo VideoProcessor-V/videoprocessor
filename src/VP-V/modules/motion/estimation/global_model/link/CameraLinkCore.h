@@ -88,7 +88,7 @@ namespace CameraLink
 	};
 
 	// AHEAD FIT: the render-thread source of the ahead pair of `seq` (IVectorEngine::FlowOf + CopyAhead, copied at once).
-	using AheadSource = std::function<AheadRefusal(uint64_t seq, AheadCopy& out)>;
+	using AheadSource = std::function<AheadRefusal(uint64_t seq, float trustToleranceEnginePx, AheadCopy& out)>;
 
 	// What the host provides per field copy that is ready: the pair facts (P4 rect and events, engine global, slip).
 	// Returns false when the pair cannot be described (counted as a readback drop).

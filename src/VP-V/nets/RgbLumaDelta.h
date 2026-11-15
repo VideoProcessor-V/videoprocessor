@@ -1,5 +1,7 @@
 #pragma once
 
+#include <VP-V/core/LumaWeights.h>
+
 #include <algorithm>
 
 // RGB capture: repair the luma, then add the luma delta to R, G and B (barrier B1, owner
@@ -93,8 +95,8 @@ namespace VpNets
 	// POST_KERNEL hook (and RGB front-end paths without a matcher luma). Same transfer domain as
 	// the RGB it reads (the caller's responsibility; D's light domain is barrier R8).
 	constexpr const char* kLumaFromRgbPass =
-		"//!PARAM vp_kr\n//!TYPE float\n//!MINIMUM 0.0\n//!MAXIMUM 1.0\n0.2126\n\n"
-		"//!PARAM vp_kb\n//!TYPE float\n//!MINIMUM 0.0\n//!MAXIMUM 1.0\n0.0722\n\n"
+		"//!PARAM vp_kr\n//!TYPE float\n//!MINIMUM 0.0\n//!MAXIMUM 1.0\n" VP_LUMA_BT709_KR_TEXT "\n\n"
+		"//!PARAM vp_kb\n//!TYPE float\n//!MINIMUM 0.0\n//!MAXIMUM 1.0\n" VP_LUMA_BT709_KB_TEXT "\n\n"
 		"//!PARAM vp_range_scale\n//!TYPE float\n//!MINIMUM 0.0\n//!MAXIMUM 2.0\n1.0\n\n"
 		"//!PARAM vp_range_offset\n//!TYPE float\n//!MINIMUM -1.0\n//!MAXIMUM 1.0\n0.0\n\n"
 		"//!DESC VP luma from RGB (the net's trained range)\n"

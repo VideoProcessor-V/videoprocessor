@@ -206,6 +206,15 @@ namespace TextureRestoreModel
 		bool restart = false;
 	};
 
+	// The RETIRED private cut / fade judge (registered fix D8, WAIVER-B6-D8-MODELS): kept here, no longer in the module, as the test
+	// reference the shared judge's verdicts are compared against. The module reads the shared judge (SceneRestart.h); this model
+	// follows it when Params::sceneReader is set and applies the retired tile law when it is null.
+	namespace TileJudgeReference
+	{
+		constexpr double kCutShare = 0.5;          // share of tiles changed: a cut (all references restart)
+		constexpr double kFadeStepShare = 0.5;     // frame mean ramp per frame (x the allowance) over two frames: a fade
+	}
+
 	class Model
 	{
 	public:
@@ -410,12 +419,21 @@ namespace TextureRestoreModel
 				const double mean = sum / (std::max)(count, 1.0);
 				if (!restartAll)
 				{
-					const double fs = kFadeStepShare * allow;
-					const double d0 = mean - m1, d1 = m1 - m2;
-					const bool fade = hist >= 2 && std::fabs(d0) > fs && std::fabs(d1) > fs && d0 * d1 > 0.0;
-					const bool cut = nchanged > kCutShare * count;
-					lastCut = cut || fade;
-					flag = cut || fade;
+					if (p.sceneReader)
+					{
+						// The shared judge's verdict (no record = restart, as the module).
+						lastCut = VpDetailRestore::SceneRestartOf(p.sequence, p.sceneReader).restart;
+						flag = lastCut;
+					}
+					else
+					{
+						const double fs = TileJudgeReference::kFadeStepShare * allow;
+						const double d0 = mean - m1, d1 = m1 - m2;
+						const bool fade = hist >= 2 && std::fabs(d0) > fs && std::fabs(d1) > fs && d0 * d1 > 0.0;
+						const bool cut = nchanged > TileJudgeReference::kCutShare * count;
+						lastCut = cut || fade;
+						flag = cut || fade;
+					}
 				}
 				if (restartAll) { m2 = mean; m1 = mean; hist = 1; }
 				else { m2 = m1; m1 = mean; hist = (std::min)(hist + 1, 2); }
