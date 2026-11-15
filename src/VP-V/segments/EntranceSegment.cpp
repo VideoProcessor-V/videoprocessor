@@ -427,6 +427,23 @@ namespace EntranceSegment
 		entranceStatefulLast = (std::max)(entranceStatefulLast, sequence);
 	}
 
+	// fix-A (2026-11-15, ER/EM "1 stateful history breaks"): the re-base warm-up gate (FX-RB) lets the
+	// re-base start mid source frame; the planner then forgets the debander's hold and the detail histories
+	// (plane-sized, EntrancePlanner.inl). The ring's A for the current frame was made at the old factor (its
+	// key no longer matches), so A is processed again at the new size AFTER B was processed as B's A at the
+	// old one. That run begins the new chain: the old chain was ended deliberately, nothing restarts by
+	// accident. Only a deliberate restart ends the chain here; every other earlier-frame run still counts.
+	void Segment::StatefulHistoriesRestarted(uint64_t sourceSequence)
+	{
+		if (entranceStatefulLast == 0)
+			return;   // no chain yet: nothing to end
+		++entranceStatefulRestarts;
+		if (entranceStatefulRestarts <= 3)
+			DebugLog::Log("Entrance once (B3): stateful histories restarted on purpose (re-base factor change at source %llu; chain ended at %llu)",
+				static_cast<unsigned long long>(sourceSequence), static_cast<unsigned long long>(entranceStatefulLast));
+		entranceStatefulLast = 0;
+	}
+
 	// Test only (VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY=N): every Nth picture between frames takes
 	// the late fallback, so the harness proves the stateful stages never restart (HIGH 1).
 	bool Segment::ForcedFallback()

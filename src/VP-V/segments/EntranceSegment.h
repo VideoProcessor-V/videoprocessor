@@ -189,6 +189,11 @@ namespace EntranceSegment
 		void OnceWorking();
 		bool ForcedFallback();   // test only: VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY
 		void OnceSwitchedOff();  // settings: B3 off (the note cleared; the textures go on the render thread)
+		// The host restarted every stateful stage's history ON PURPOSE (a re-base factor change: the debander's
+		// hold and the detail histories are plane-sized and were forgotten, EntrancePlanner.inl). The next stateful
+		// run starts a new chain at the new plane size; it is not "out of sequence" against the forgotten chain.
+		// Counted and logged once per restart (never silent).
+		void StatefulHistoriesRestarted(uint64_t sourceSequence);
 
 		// ---- lifetime ----
 		void NoteSourceFrame(uint64_t sequence);
@@ -241,6 +246,7 @@ namespace EntranceSegment
 		uint64_t entranceOnceBAsAFor = 0;      // A whose B was processed as B's A
 		unsigned long long entranceStatefulBreaks = 0;
 		uint64_t entranceStatefulLast = 0;
+		unsigned long long entranceStatefulRestarts = 0;   // deliberate restarts (StatefulHistoriesRestarted)
 		unsigned entranceOnceForcedEvery = 0, entranceOnceForcedCount = 0;
 		bool entranceOnceForcedRead = false;
 		std::string rebaseFormatNoteLogged;
