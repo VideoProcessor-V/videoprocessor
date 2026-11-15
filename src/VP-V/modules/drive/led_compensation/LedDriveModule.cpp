@@ -211,17 +211,17 @@ namespace LedDrive
 			DebugLog::Log("Dynamic Drive: shared scene available again; cuts judged");
 	}
 
-	void LedDriveModule::UpdateCutJudgeAheadFallback(bool known, const char* why)
+	void LedDriveModule::UpdateCutJudgeAheadFallbackLocked(bool known, const char* why)
 	{
 		// The look-ahead acquires the scene for the frame ahead (get-or-compute-and-publish); only a genuine failure lands here.
-		if (!known)
-		{
-			const std::string cause = (why != nullptr && why[0] != 0) ? why : "unknown";
-			if (fallbacks.Engage(kCutJudgeAheadFallbackId, "no scene for a look-ahead frame (" + cause + "): no cut predicted"))
-				DebugLog::Log("Dynamic Drive: no shared scene for a look-ahead frame (%s); no cut predicted until one is available", cause.c_str());
-		}
-		else if (fallbacks.Release(kCutJudgeAheadFallbackId))
-			DebugLog::Log("Dynamic Drive: shared scene available for look-ahead frames again; cuts predicted");
+		// Judged once per walk: the first failing frame of a walk engages (its cause kept); known frames never release mid-walk.
+		walkHadPredictions = true;
+		if (known || walkFailed)
+			return;
+		walkFailed = true;
+		const std::string cause = (why != nullptr && why[0] != 0) ? why : "unknown";
+		if (fallbacks.Engage(kCutJudgeAheadFallbackId, "no scene for a look-ahead frame (" + cause + "): no cut predicted"))
+			DebugLog::Log("Dynamic Drive: no shared scene for a look-ahead frame (%s); no cut predicted until one is available", cause.c_str());
 	}
 
 	void LedDriveModule::DeclareSceneDemand()
@@ -230,9 +230,13 @@ namespace LedDrive
 		// is P4 at lag 0 and lag 1) as an external demand on the ONE registered renderer, so the lane keeps those records for the frames
 		// the look-ahead asks about. The ahead DEPTH is not part of a ConsumerDecl: it comes from the skeleton's own plan (queue shape and
 		// owner fills), so the declaration names the products, not the walk depth. Cheap no-op once declared or while no skeleton/renderer.
-		if (demandHost.load(std::memory_order_acquire) != nullptr)
-			return;
+		// A renderer change (the skeleton erases the demand at GpuReleased / a dead renderer) shows as another host or another
+		// registration generation: the declaration is then made again on the current one. Never per frame without a change.
 		const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
+		const void* declared = demandHost.load(std::memory_order_acquire);
+		if (declared != nullptr && owners.size() == 1 && owners[0] == declared &&
+			VpFrameAnalysis::SourceFrameTap::Generation(declared) == demandGen.load(std::memory_order_acquire))
+			return;
 		Vpv::Skeleton::IExternalDemand* demand = owners.size() == 1 ? Vpv::Skeleton::Demand() : nullptr;
 		if (demand == nullptr)
 			return;
@@ -242,6 +246,7 @@ namespace LedDrive
 		VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 0);
 		VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 1);
 		demand->SetExternalDemand(owners[0], this, std::vector<VpSkeleton::ConsumerDecl>(1, d), std::vector<VpSkeleton::ProductId>());
+		demandGen.store(VpFrameAnalysis::SourceFrameTap::Generation(owners[0]), std::memory_order_release);
 		demandHost.store(owners[0], std::memory_order_release);
 	}
 
@@ -826,6 +831,11 @@ namespace LedDrive
 		std::lock_guard<std::mutex> guard(mutex);
 		lookaheadDepth = futureFrames;
 		lastWalkWallMs = NowMs();   // review 2026-10-17
+		// A new walk begins: the previous one is judged as a whole (release only after a complete walk with every scene known).
+		if (walkHadPredictions && !walkFailed && fallbacks.Release(kCutJudgeAheadFallbackId))
+			DebugLog::Log("Dynamic Drive: shared scene available for look-ahead frames again; cuts predicted");
+		walkHadPredictions = false;
+		walkFailed = false;
 	}
 
 	void LedDriveModule::SubmitPrediction(uint64_t sequence, const FrameStats& predicted)
@@ -836,7 +846,7 @@ namespace LedDrive
 		while (predictions.size() > MAX_PREDICTIONS)
 			predictions.erase(predictions.begin());
 		lastPredictionWallMs = NowMs();
-		UpdateCutJudgeAheadFallback(predicted.sceneKnown, predicted.sceneWhy);
+		UpdateCutJudgeAheadFallbackLocked(predicted.sceneKnown, predicted.sceneWhy);
 	}
 
 	void LedDriveModule::ResetLookahead()

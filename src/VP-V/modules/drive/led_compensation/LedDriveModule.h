@@ -474,11 +474,18 @@ namespace LedDrive
 		FallbackStatus::Registry fallbacks;
 		void UpdateHoldFallbackLocked();
 		void UpdateCutJudgeFallbackLocked(bool known, const char* why);
-		void UpdateCutJudgeAheadFallback(bool known, const char* why);
+		void UpdateCutJudgeAheadFallbackLocked(bool known, const char* why);
+		// The look-ahead entry is judged once per walk: a walk with any failing frame engages it (first cause kept); it is released
+		// only after a whole walk (with predictions) was known, at the next BeginWalk. Guarded by `mutex`.
+		bool walkHadPredictions = false;
+		bool walkFailed = false;
 		// C-4: the P4 demand (lag 0 + lag 1) on the skeleton, declared with the module and withdrawn when it stops. One entry per
 		// (host, owner = this); demandHost = the renderer key it was declared on (null = not declared).
 		static constexpr uint16_t kSceneConsumerId = 0x0600;
 		std::atomic<const void*> demandHost{ nullptr };
+		// The registration generation of demandHost at declaration: the skeleton erases the demand when that renderer goes away, so a
+		// changed host or generation means the declaration is gone and is made again (never per frame: a declaration re-graphs the lane).
+		std::atomic<uint64_t> demandGen{ 0 };
 		void DeclareSceneDemand();
 		void WithdrawSceneDemand();
 		// Its own small lock (not `mutex`): the walk thread reads it per frame while the module's thread may hold `mutex` across a measure.
