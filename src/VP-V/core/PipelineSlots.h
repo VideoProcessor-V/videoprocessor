@@ -46,10 +46,12 @@ namespace PipelineSlots
 	{
 		InputCapture, InputSignal, InputQueueTiming, InputSourceAnalysis, MotionEstimation,
 		ScalingRebase, RepairEncoding, RepairDeband, RepairTextureRestore, ScalingRoute4k,
-		ScalingRefine, ScalingChromaUpscale, ScalingShared, MotionVectorDelivery, MotionConsumers, ScalingGeometry,
+		ScalingRefine, ScalingChromaUpscale, MotionVectorDelivery, MotionConsumers, ScalingGeometry,
 		ScalingOutput, ColourToneGamut, ColourExtendedRange, ColourSdrToneShape, ColourAppearance,
 		DriveLedMeasure, DriveLedCompensation, DriveBlackLevel, OutputCalibrationLut, OutputDither,
 		OutputPresentation, DriveProjectorControl, ControlNetRuntime, ControlDiagnostics, ControlConfig,
+		// Appended (ids are append-only: StageAfter keys use uint8(slot id)); their pipeline position is `order`.
+		ScalingShared,
 		Count
 	};
 
@@ -82,7 +84,6 @@ namespace PipelineSlots
 		{ Id::ScalingRoute4k, "scaling.route_4k", Side::Input, 100, HookPoint::Prepass, Status::Placeholder, Origin::Vp },
 		{ Id::ScalingRefine, "scaling.refine", Side::Input, 110, HookPoint::Prepass, Status::Placeholder, Origin::Vp },
 		{ Id::ScalingChromaUpscale, "scaling.chroma_upscale", Side::Input, 120, HookPoint::Prepass, Status::Placeholder, Origin::Vp },
-		{ Id::ScalingShared, "scaling.shared", Side::Input, 125, HookPoint::Host, Status::Placeholder, Origin::Vp },
 		{ Id::MotionVectorDelivery, "motion.vector_delivery", Side::Processing, 130, HookPoint::Host, Status::Partial, Origin::Vp },
 		{ Id::MotionConsumers, "motion.consumers", Side::Processing, 140, HookPoint::Prepass, Status::Built, Origin::Vp },
 		{ Id::ScalingGeometry, "scaling.geometry", Side::Processing, 150, HookPoint::Libplacebo, Status::Built, Origin::Mixed },
@@ -101,6 +102,7 @@ namespace PipelineSlots
 		{ Id::ControlNetRuntime, "control.net_runtime", Side::Control, 910, HookPoint::Host, Status::Placeholder, Origin::Vp },
 		{ Id::ControlDiagnostics, "control.diagnostics", Side::Control, 920, HookPoint::Host, Status::Partial, Origin::Mixed },
 		{ Id::ControlConfig, "control.config", Side::Control, 930, HookPoint::Host, Status::Partial, Origin::Mixed },
+		{ Id::ScalingShared, "scaling.shared", Side::Input, 125, HookPoint::Host, Status::Placeholder, Origin::Vp },
 		} };
 		return kSlots;
 	}
@@ -130,6 +132,8 @@ namespace PipelineSlots
 		std::vector<Id> order;
 		for (const Info& info : Slots())
 			order.push_back(info.id);
-		return order;   // the table is in designed order (a test checks it)
+		// Ids are append-only, so the designed order is the `order` field, not the table position.
+		std::stable_sort(order.begin(), order.end(), [](Id a, Id b) { return Get(a).order < Get(b).order; });
+		return order;
 	}
 }
