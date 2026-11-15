@@ -18,6 +18,7 @@
 #include <VP-V/modules/motion/estimation/ProducerPlan.h>
 #include <VP-V/modules/motion/estimation/VectorProducts.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
+#include <VP-V/core/SlotSwitchSettings.h>
 
 #include <algorithm>
 #include <cmath>
@@ -360,8 +361,10 @@ namespace ProducerPlanTest
 		// SK-MV warm engine: the standing class by reason. The coordinator's trigger is "the de-judder setting is on AND the cadence is
 		// eligible": the reasons that act now or become Active at a transient keep the engine warm; the reasons where it can never act stay
 		// idle (an idle matcher kept loaded for hiccup repair runs no NVOF).
-		// W2-C1 MUST 2: the occlusion mask is reuse-only: alone it runs the estimate only while the vector engine serves it.
-		TEST_METHOD(TheOcclusionMaskAloneRunsTheEstimateOnlyWhileServed)
+		// Batch B (WAIVER-B1-ENGINE-01): was TheOcclusionMaskAloneRunsTheEstimateOnlyWhileServed. The refused leg (occlusionMaskServed)
+		// is gone with the starter gate: ON, the mask alone runs the estimate. The engine-OFF absence moves to the Q3 resolver
+		// (SlotSwitchSettings::ApplyEngineOff): with vector_demand off the mask is forced off, so the policy decides Off.
+		TEST_METHOD(TheOcclusionMaskAloneRunsTheEstimateWhileTheEngineIsOn)
 		{
 			DejudderPolicy::Input in;
 			in.strength = 0.0;
@@ -371,11 +374,31 @@ namespace ProducerPlanTest
 			in.displayHz = 60.0;
 			in.haveNext = true;
 			in.nextMatches = true;
-			Assert::IsTrue(DejudderPolicy::Decide(in) == DejudderPolicy::Reason::Active, L"served: the mask runs the estimate");
-			in.occlusionMaskServed = false;
-			Assert::IsTrue(DejudderPolicy::Decide(in) == DejudderPolicy::Reason::Off, L"refused (no starter): no matcher for the mask alone");
+			Assert::IsTrue(DejudderPolicy::Decide(in) == DejudderPolicy::Reason::Active, L"engine on: the mask alone runs the estimate");
+
+			struct Settings
+			{
+				enum class Mode { Off, Auto };
+				bool vectorDemand = true;
+				double dejudderStrength = 0.0, dejudderStrengthEven = 0.0;
+				Mode interpolation = Mode::Off;
+				bool interpolationFillGaps = false, occlusionMask = true;
+			};
+			Settings on;
+			const ::SlotSwitchSettings::EngineOffForced none = ::SlotSwitchSettings::ApplyEngineOff(on);
+			Assert::IsFalse(none.Any(), L"engine on: nothing forced");
+			Assert::IsTrue(on.occlusionMask, L"engine on: the mask is kept");
+			Settings off;
+			off.vectorDemand = false;
+			const ::SlotSwitchSettings::EngineOffForced forced = ::SlotSwitchSettings::ApplyEngineOff(off);
+			Assert::IsTrue(forced.dejudder && !forced.hiccup, L"engine off: the mask counts as the de-judder's extra");
+			Assert::IsFalse(off.occlusionMask, L"engine off: the mask is forced off");
+			in.occlusionMask = off.occlusionMask;
+			Assert::IsTrue(DejudderPolicy::Decide(in) == DejudderPolicy::Reason::Off, L"engine off: no estimate for the mask");
+			Assert::AreEqual(std::string("de-judder off: motion engine off"), ::SlotSwitchSettings::DescribeEngineOff(forced), L"visible");
+
 			in.strength = 0.5;
-			Assert::IsTrue(DejudderPolicy::Decide(in) == DejudderPolicy::Reason::Active, L"the de-judder itself is a starter: unaffected");
+			Assert::IsTrue(DejudderPolicy::Decide(in) == DejudderPolicy::Reason::Active, L"the de-judder itself: unaffected by the mask");
 		}
 
 		TEST_METHOD(OnlyReasonsThatCanBecomeActiveAreStanding)

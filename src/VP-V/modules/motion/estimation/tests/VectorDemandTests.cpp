@@ -30,17 +30,20 @@ namespace VectorDemandTest
 			in.enabled = true;
 			in.slotsRun = true;
 			in.queueAheadCapacity = 4;
-			in.starterEngaged = true;   // W2-C1: a starter runs the engine (the reuse-only rows below need one)
+			// Batch B: no starter input any more (the engine is one switch, `enabled`); pairsExpected defaults to true.
 			for (Consumer c : wants)
 				in.wants[static_cast<int>(c)] = true;
 			return in;
 		}
 		bool Same(const Decision& a, const Decision& b)
 		{
+			// Batch B: the no-pairs fields are compared too (a disabled decision carries none of them).
 			return a.mode == b.mode && a.reason == b.reason && a.served == b.served && a.unserved == b.unserved &&
 				a.estimate == b.estimate && a.producer == b.producer && a.lowLatencyAllowed == b.lowLatencyAllowed &&
-				a.smoothMotion == b.smoothMotion && a.synthesisOnly == b.synthesisOnly;
+				a.smoothMotion == b.smoothMotion && a.synthesisOnly == b.synthesisOnly && a.noPairs == b.noPairs &&
+				a.matcherFallback == b.matcherFallback && a.pairsDeliberatelyOff == b.pairsDeliberatelyOff;
 		}
+		unsigned Bit(Consumer c) { return 1u << static_cast<int>(c); }
 		const Consumer kNonSynthesis[] = { Consumer::SigmaDelta, Consumer::GrainMap, Consumer::DebandHold,
 			Consumer::DetailPulse, Consumer::EntranceSegment, Consumer::SourceMonitorPan, Consumer::MotionIntent,
 			Consumer::TextureRestore, Consumer::ResidualStabilise, Consumer::TemporalDetail };
@@ -57,9 +60,11 @@ namespace VectorDemandTest
 				Assert::IsTrue(d.mode == Mode::Forward, L"forward");
 				Assert::IsTrue(d.Serves(c), L"served");
 				Assert::AreEqual(0u, d.unserved);
-				// W2-C1: reuse-only: served from the starter's vectors, never an estimate or a producer of its own.
-				Assert::IsFalse(d.estimate, L"no estimate of its own");
-				Assert::IsFalse(d.producer, L"no producer of its own");
+				// Batch B: the ON engine runs the producer for any served want (no starter); with pairs expected the render-time matcher
+				// estimate does not run (it is the fallback without pairs; the camera fit is not in this list).
+				Assert::IsFalse(d.estimate, L"pairs expected: no render-time estimate");
+				Assert::IsTrue(d.producer, L"the ON engine runs the producer for any served want");
+				Assert::IsFalse(d.matcherFallback, L"pairs expected: no matcher fallback");
 				Assert::IsTrue(d.reason == Reason::Forward, L"reason");
 			}
 		}
@@ -69,11 +74,12 @@ namespace VectorDemandTest
 			const Decision stats = Decide(Make({ Consumer::SourceMonitorPan, Consumer::MotionIntent }));
 			Assert::IsTrue(stats.mode == Mode::Forward, L"forward");
 			Assert::IsFalse(stats.estimate, L"no render-time estimate");
-			Assert::IsFalse(stats.producer, L"W2-C1: statistics are reuse-only");
+			Assert::IsTrue(stats.producer, L"batch B: the producer runs for the served statistics consumers");
 			const Decision both = Decide(Make({ Consumer::SourceMonitorPan, Consumer::GrainMap }));
-			Assert::IsFalse(both.estimate || both.producer, L"W2-C1: a reuse-only field consumer brings no estimate");
+			Assert::IsFalse(both.estimate, L"pairs expected: a field consumer brings no render-time estimate");
+			Assert::IsTrue(both.producer, L"batch B: the producer runs");
 			const Decision camera = Decide(Make({ Consumer::SourceMonitorPan, Consumer::CameraFit }));
-			Assert::IsTrue(camera.estimate && camera.producer, L"the camera fit (a starter) brings the estimate and the producer");
+			Assert::IsTrue(camera.estimate && camera.producer, L"the camera fit (its own matcher field) brings the estimate and the producer");
 		}
 
 		TEST_METHOD(StatisticsConsumersAloneAtDepthZeroRunBackward)
@@ -86,7 +92,7 @@ namespace VectorDemandTest
 				const Decision d = Decide(in);
 				Assert::IsTrue(d.mode == Mode::Backward, L"backward");
 				Assert::IsTrue(d.Serves(c), L"served");
-				Assert::IsFalse(d.producer, L"W2-C1: reuse-only, the starter's producer serves it");
+				Assert::IsTrue(d.producer, L"batch B: the backward pair runs for the served statistics consumer");
 				Assert::IsFalse(d.estimate, L"no estimate");
 			}
 		}
@@ -250,7 +256,7 @@ namespace VectorDemandTest
 			Assert::IsFalse(d.Serves(Consumer::DebandHold) || d.Serves(Consumer::GrainMap) ||
 				d.Serves(Consumer::DetailPulse) || d.Serves(Consumer::SigmaDelta), L"others unserved");
 			Assert::AreEqual(4u, [&] { unsigned n = 0; for (unsigned b = d.unserved; b; b &= b - 1) ++n; return n; }());
-			Assert::IsFalse(d.producer, L"W2-C1: reuse-only");
+			Assert::IsTrue(d.producer, L"batch B: the backward pair runs for the served statistics consumers");
 			Assert::IsFalse(d.estimate, L"no estimate");
 			Assert::AreEqual(std::string("Vector engine: backward pairs (no frame ahead) for source monitor, intent; "
 				"output dither, grain map, deband hold, detail pulse without vectors (needs a frame ahead)"), StatusLine(d));
@@ -384,153 +390,290 @@ namespace VectorDemandTest
 				Assert::IsTrue(s.compare(0, 14, "Vector engine:") == 0, L"prefix");
 			}
 		}
-		// ---- W2-C1 (B9): starters and reuse-only consumers -----------------------------------------------------------
-		TEST_METHOD(StarterMaskIsDejudderInterpolatorHiccupAndCameraFit)
+		// ---- Batch B (lead18 plan-motion-engine-switch.md): the engine is ONE switch; no starter gate -----------------------
+		// Replaces StarterMaskIsDejudderInterpolatorHiccupAndCameraFit: the starter set is retired (IsStarter / StarterMask removed);
+		// ON serves every reuse-only want alone. The enum values stay append-only.
+		TEST_METHOD(OnEngineServesEveryReuseOnlyWant)
 		{
 			for (int i = 0; i < kConsumerCount; ++i)
 			{
 				const Consumer c = ConsumerAt(i);
-				const bool expected = c == Consumer::DejudderExtras || c == Consumer::Interpolator || c == Consumer::HiccupRepair ||
-					c == Consumer::CameraFit;
-				Assert::AreEqual(expected, IsStarter(c), L"starter set (owner 2026-11-10)");
+				const Decision d = Decide(Make({ c }));
+				Assert::AreEqual(Bit(c), d.wants, L"the want is recorded");
+				Assert::AreEqual(0u, d.unserved, L"never refused while ON");
+				if (DomainOf(c) == Domain::Synthesis)
+				{
+					Assert::AreEqual(0u, d.served, L"synthesis: its own policy, never in served");
+					Assert::IsTrue(d.synthesisOnly && d.reason == Reason::NoConsumer, L"synthesis only");
+					Assert::IsFalse(d.producer || d.estimate, L"synthesis decides for itself");
+					continue;
+				}
+				Assert::IsTrue(d.mode == Mode::Forward && d.reason == Reason::Forward, L"forward");
+				Assert::IsTrue(d.Serves(c), L"served alone (no starter needed)");
+				Assert::IsTrue(d.producer, L"the producer runs for it");
+				const std::string s = StatusLine(d);
+				Assert::IsTrue(s.find(Name(c)) != std::string::npos, L"named in the status");
+				Assert::IsTrue(s.find("starter") == std::string::npos, L"the starter wording is retired");
 			}
-			Assert::AreEqual(8, static_cast<int>(Reason::NoStarter), L"NoStarter appended, no index moved");
+			Assert::AreEqual(8, static_cast<int>(Reason::NoStarter), L"NoStarter kept (retired), no index moved");
+			Assert::AreEqual(9, static_cast<int>(Reason::NoPairs), L"NoPairs appended");
 		}
 
-		// W2-C1 (coordinator 2026-11-11): the status never says "idle (no starter)" while a motion engine exists; it names why the
-		// engine is loaded (kept idle for hiccup repair, or loaded but not running). Serving is unchanged: still refused, nothing starts.
-		TEST_METHOD(LoadedEngineWithoutAStarterIsNamedNotIdle)
+		// Replaces LoadedEngineWithoutAStarterIsNamedNotIdle (the loaded / no-starter wording is retired). Engine OFF by the setting:
+		// the decision is Disabled, and OffLine names every registered want (Q2: a status line, never a Fallbacks entry).
+		TEST_METHOD(EngineOffByTheSettingNamesEveryWantInItsLine)
 		{
-			const Consumer cases[] = { Consumer::SourceMonitorPan, Consumer::DetailPulse, Consumer::OcclusionMask };
-			for (Consumer c : cases)
+			Input in = Make({ Consumer::DejudderExtras, Consumer::GrainMap, Consumer::SourceMonitorPan });
+			in.enabled = false;
+			const Decision d = Decide(in);
+			Assert::IsTrue(d.mode == Mode::Off && d.reason == Reason::Disabled, L"disabled");
+			Assert::AreEqual(0u, d.served);
+			Assert::AreEqual(0u, d.unserved);
+			Assert::IsFalse(d.producer || d.estimate, L"no motion work with the engine off");
+			Assert::AreEqual(Bit(Consumer::DejudderExtras) | Bit(Consumer::GrainMap) | Bit(Consumer::SourceMonitorPan), d.wants);
+			Assert::AreEqual(std::string("motion engine off (setting): dejudder extras, grain map, source monitor use their non-motion path"),
+				OffLine(d));
+			Assert::AreEqual(std::string(), StatusLine(d), L"the vector engine's own line is empty; OffLine is the line");
+			Assert::IsFalse(FallbackCatalog::VectorEngine(d).engaged, L"Q2: not a Fallbacks entry");
+			EngineFacts f;
+			f.vectorDemand = false;
+			f.decision = d;
+			const MotionEngineStatus st = DeriveEngineStatus(f);
+			Assert::IsTrue(st.state == MotionEngineState::Off && st.reason == MotionEngineReason::VectorDemandOff);
+			Assert::AreEqual(0u, st.affected, L"nothing affected");
+			Assert::IsFalse(FallbackCatalog::MotionEngine(st).engaged, L"Q2: the motion engine entry is released");
+
+			Input none = Make({});
+			none.enabled = false;
+			Assert::AreEqual(std::string(), OffLine(Decide(none)), L"no want: no line");
+
+			for (Consumer c : { Consumer::SourceMonitorPan, Consumer::DetailPulse, Consumer::OcclusionMask })
 			{
-				Input in = Make({ c });
-				in.starterEngaged = false;
-				in.engineLoaded = true;
-				in.engineLoadedForHiccupRepair = true;
-				const Decision d = Decide(in);
-				Assert::IsTrue(d.reason == Reason::NoStarter, L"still a refused start");
-				Assert::AreEqual(0u, d.served, L"an idle engine serves nothing");
-				Assert::AreEqual(1u << static_cast<int>(c), d.refused, L"refused");
-				Assert::IsFalse(d.estimate || d.producer, L"nothing starts");
-				const std::string hiccup = StatusLine(d);
-				Assert::IsTrue(hiccup.find("idle (no starter)") == std::string::npos, L"not called idle while loaded");
-				Assert::IsTrue(hiccup.find("loaded idle for hiccup repair (no starter runs it)") != std::string::npos, L"names the hiccup keep");
-				Assert::IsTrue(hiccup.find("no starter runs the motion engine") != std::string::npos, L"still says why it is unserved");
-
-				in.engineLoadedForHiccupRepair = false;
-				const std::string held = StatusLine(Decide(in));
-				Assert::IsTrue(held.find("idle (no starter)") == std::string::npos, L"not called idle while held");
-				Assert::IsTrue(held.find("loaded, not running (no starter runs it)") != std::string::npos, L"names a held engine");
-
-				in.engineLoaded = false;
-				in.engineLoadedForHiccupRepair = true;   // without an engine the hiccup flag says nothing
-				const std::string none = StatusLine(Decide(in));
-				Assert::IsTrue(none.find("idle (no starter)") != std::string::npos, L"no engine: idle (no starter)");
-				Assert::IsTrue(none.find("loaded") == std::string::npos, L"no engine: never called loaded");
+				Input on = Make({ c });
+				const std::string s = StatusLine(Decide(on));
+				Assert::IsTrue(s.find("starter") == std::string::npos && s.find("loaded") == std::string::npos, L"ON: no starter / loaded wording");
+				on.enabled = false;
+				Assert::IsTrue(OffLine(Decide(on)).find(Name(c)) != std::string::npos, L"OFF: the consumer is named");
 			}
 		}
 
-		TEST_METHOD(ReuseOnlyConsumersWithoutAStarterAreRefusedVisibly)
+		// Replaces ReuseOnlyConsumersWithoutAStarterAreRefusedVisibly: ON serves them; the refusal (each consumer named, visible
+		// entry) moves to the hard absences that remain: interlaced and exclusive smooth motion.
+		TEST_METHOD(ReuseOnlyConsumersAreServedAndHardAbsencesNameEachOne)
 		{
 			for (Consumer c : kNonSynthesis)
 			{
 				Input in = Make({ c });
-				in.starterEngaged = false;
-				const Decision d = Decide(in);
-				Assert::IsTrue(d.mode == Mode::Off && d.reason == Reason::NoStarter, L"no starter: off");
-				Assert::AreEqual(0u, d.served);
-				Assert::AreEqual(1u << static_cast<int>(c), d.unserved, L"unserved");
-				Assert::AreEqual(1u << static_cast<int>(c), d.refused, L"a refused start");
-				Assert::IsFalse(d.estimate || d.producer, L"nothing starts");
-				const std::string s = StatusLine(d);
-				Assert::IsTrue(s.find("idle (no starter)") != std::string::npos, L"status says no starter");
-				Assert::IsTrue(s.find("no starter runs the motion engine") != std::string::npos, L"says why");
+				const Decision on = Decide(in);
+				Assert::IsTrue(on.mode == Mode::Forward && on.Serves(c) && on.unserved == 0u && on.producer, L"ON: served");
+				Assert::IsFalse(FallbackCatalog::VectorEngine(on).engaged, L"ON: nothing unserved");
+
+				Input il = in;
+				il.interlaced = true;
+				const Decision i = Decide(il);
+				Assert::IsTrue(i.mode == Mode::Off && i.reason == Reason::Interlaced, L"interlaced: off");
+				Assert::AreEqual(0u, i.served);
+				Assert::AreEqual(Bit(c), i.unserved, L"interlaced: unserved");
+				Assert::IsFalse(i.estimate || i.producer, L"interlaced: nothing starts");
+				const FallbackCatalog::Decision fi = FallbackCatalog::VectorEngine(i);
+				Assert::IsTrue(fi.engaged, L"interlaced: visible");
+				Assert::AreEqual(std::string(Name(c)) + " without vectors (interlaced)", fi.reason, L"interlaced: named with why");
+
+				Input sm = in;
+				sm.smoothMotion = true;
+				const Decision x = DecideWith(sm, false);
+				Assert::IsTrue(x.mode == Mode::Off && x.reason == Reason::SmoothMotionExclusive, L"exclusive smooth motion: off");
+				Assert::AreEqual(Bit(c), x.unserved, L"exclusive smooth motion: unserved");
+				Assert::IsFalse(x.estimate || x.producer, L"exclusive smooth motion: nothing starts");
+				const FallbackCatalog::Decision fx = FallbackCatalog::VectorEngine(x);
+				Assert::IsTrue(fx.engaged, L"exclusive smooth motion: visible");
+				Assert::AreEqual(std::string(Name(c)) + " without vectors (libplacebo smooth motion owns output)", fx.reason,
+					L"exclusive smooth motion: named with why");
 			}
 			Input low = Make({ Consumer::SourceMonitorPan, Consumer::GrainMap });
-			low.starterEngaged = false;
 			low.lowLatency = true;
 			low.queueAheadCapacity = 0;
 			const Decision d = Decide(low);
-			Assert::IsTrue(d.reason == Reason::NoStarter && !d.producer, L"competitive low latency: no backward producer for statistics alone");
+			Assert::IsTrue(d.mode == Mode::Backward && d.reason == Reason::BackwardDepth0, L"competitive low latency: backward");
+			Assert::AreEqual(Bit(Consumer::SourceMonitorPan), d.served, L"competitive: the statistics consumer is served");
+			Assert::AreEqual(Bit(Consumer::GrainMap), d.unserved, L"competitive: the field consumer falls back visibly");
+			Assert::IsTrue(d.producer, L"competitive: the backward producer runs for the statistics consumer");
 		}
 
-		// W2-C1 (C1-4 defect fix): the occlusion mask is reuse-only but synthesis-domain (never in served). Without a starter it is a
-		// refused start too - alone (the synthesis-only return) and beside other reuse-only wants - so DejudderPolicy's
-		// occlusionMaskServed reads false and its own matcher never runs. With a starter it is not refused.
-		TEST_METHOD(TheOcclusionMaskWithoutAStarterIsARefusedStart)
+		// Replaces TheOcclusionMaskWithoutAStarterIsARefusedStart: the mask is synthesis-domain (never in served) and is never refused
+		// while ON (DejudderPolicy's occlusionMaskServed is gone: the mask alone starts its own estimate under its own policy).
+		TEST_METHOD(TheOcclusionMaskIsNeverRefusedWhileOn)
 		{
-			const unsigned mask = 1u << static_cast<int>(Consumer::OcclusionMask);
-			Input alone = Make({ Consumer::OcclusionMask });
-			alone.starterEngaged = false;
-			const Decision a = Decide(alone);
-			Assert::IsTrue(a.mode == Mode::Off && a.reason == Reason::NoStarter, L"mask alone, no starter: off, NoStarter");
-			Assert::AreEqual(mask, a.refused, L"mask alone: a refused start");
-			Assert::AreEqual(mask, a.unserved, L"mask alone: unserved (named)");
+			const unsigned mask = Bit(Consumer::OcclusionMask);
+			const Decision a = Decide(Make({ Consumer::OcclusionMask }));
+			Assert::IsTrue(a.mode == Mode::Off && a.reason == Reason::NoConsumer && a.synthesisOnly, L"mask alone: its own policy decides");
+			Assert::AreEqual(mask, a.wants, L"mask alone: the want is recorded");
 			Assert::AreEqual(0u, a.served);
-			Assert::IsFalse(a.estimate || a.producer, L"nothing starts");
-			Input withReuse = Make({ Consumer::OcclusionMask, Consumer::GrainMap, Consumer::DetailPulse });
-			withReuse.starterEngaged = false;
-			const Decision b = Decide(withReuse);
-			Assert::IsTrue(b.reason == Reason::NoStarter, L"mask + reuse, no starter: NoStarter");
-			Assert::AreEqual(mask, b.refused & mask, L"mask + reuse: the mask is refused too");
-			Assert::AreEqual(mask, b.unserved & mask, L"mask + reuse: the mask is unserved");
-			Assert::IsTrue(UnservedText(b).find("occlusion mask") != std::string::npos, L"the mask is named");
-			Input engaged = Make({ Consumer::OcclusionMask });
-			Assert::AreEqual(0u, Decide(engaged).refused, L"mask alone with a starter: not refused");
-			Input engagedReuse = Make({ Consumer::OcclusionMask, Consumer::GrainMap });
-			Assert::AreEqual(0u, Decide(engagedReuse).refused, L"mask + reuse with a starter: not refused");
+			Assert::AreEqual(0u, a.unserved, L"mask alone: not unserved");
+			Assert::IsFalse(a.estimate || a.producer, L"synthesis: the engine starts nothing for it here");
+			const Decision b = Decide(Make({ Consumer::OcclusionMask, Consumer::GrainMap, Consumer::DetailPulse }));
+			Assert::AreEqual(Bit(Consumer::GrainMap) | Bit(Consumer::DetailPulse), b.served, L"mask + reuse: the reuse consumers are served");
+			Assert::AreEqual(0u, b.unserved, L"mask + reuse: nothing unserved");
+			Assert::AreEqual(std::string(), UnservedText(b));
+			Assert::IsTrue(b.producer && !b.synthesisOnly, L"mask + reuse: the producer runs");
 		}
 
-		TEST_METHOD(TheCameraFitStartsAloneAndEngagesTheReuseOnlyConsumers)
+		TEST_METHOD(TheCameraFitIsServedWithTheReuseOnlyConsumers)
 		{
-			Input in = Make({ Consumer::CameraFit, Consumer::DetailPulse, Consumer::SourceMonitorPan });
-			in.starterEngaged = false;
-			const Decision d = Decide(in);
+			const Decision d = Decide(Make({ Consumer::CameraFit, Consumer::DetailPulse, Consumer::SourceMonitorPan }));
 			Assert::IsTrue(d.mode == Mode::Forward && d.reason == Reason::Forward);
 			Assert::IsTrue(d.Serves(Consumer::CameraFit) && d.Serves(Consumer::DetailPulse) && d.Serves(Consumer::SourceMonitorPan));
-			Assert::AreEqual(0u, d.refused);
-			Assert::IsTrue(d.estimate && d.producer);
-			Assert::AreEqual(1u << static_cast<int>(Consumer::CameraFit), d.starters);
+			Assert::AreEqual(0u, d.unserved);
+			Assert::IsTrue(d.estimate && d.producer, L"the camera fit's own matcher field and the producer");
+			Assert::IsFalse(d.matcherFallback, L"pairs expected: the camera fit's estimate is its own field, not the fallback");
 		}
 
-		// W2-C1 MUST 3: with the de-judder running (the starter engaged), the reuse-only consumers are SERVED, not refused.
-		TEST_METHOD(WithTheDejudderRunningTheReuseOnlyConsumersAreServed)
+		// W2-C1 MUST 3, batch B form: the reuse-only consumers are SERVED whether or not the de-judder runs (no starter).
+		TEST_METHOD(WithOrWithoutTheDejudderTheReuseOnlyConsumersAreServed)
 		{
-			Input in = Make({ Consumer::DejudderExtras, Consumer::SigmaDelta, Consumer::DetailPulse, Consumer::DebandHold, Consumer::SourceMonitorPan });
-			in.starterEngaged = true;
-			const Decision d = Decide(in);
-			Assert::AreEqual(0u, d.refused, L"nothing refused while a starter runs");
-			Assert::IsTrue(d.reason != Reason::NoStarter);
-			for (Consumer c : { Consumer::SigmaDelta, Consumer::DetailPulse, Consumer::DebandHold, Consumer::SourceMonitorPan })
-				Assert::IsTrue(d.Serves(c), L"served");
-			in.starterEngaged = false;
-			const Decision off = Decide(in);
-			const unsigned reuse = (1u << static_cast<int>(Consumer::SigmaDelta)) | (1u << static_cast<int>(Consumer::DetailPulse)) |
-				(1u << static_cast<int>(Consumer::DebandHold)) | (1u << static_cast<int>(Consumer::SourceMonitorPan));
-			Assert::AreEqual(reuse, off.refused & reuse, L"the de-judder not running: the same consumers are refused");
+			const unsigned reuse = Bit(Consumer::SigmaDelta) | Bit(Consumer::DetailPulse) | Bit(Consumer::DebandHold) |
+				Bit(Consumer::SourceMonitorPan);
+			const Decision with = Decide(Make({ Consumer::DejudderExtras, Consumer::SigmaDelta, Consumer::DetailPulse, Consumer::DebandHold,
+				Consumer::SourceMonitorPan }));
+			Assert::AreEqual(reuse, with.served, L"with the de-judder: served");
+			Assert::AreEqual(0u, with.unserved);
+			const Decision without = Decide(Make({ Consumer::SigmaDelta, Consumer::DetailPulse, Consumer::DebandHold, Consumer::SourceMonitorPan }));
+			Assert::AreEqual(reuse, without.served, L"without the de-judder: the same consumers are served");
+			Assert::AreEqual(0u, without.unserved);
+			Assert::IsTrue(with.reason == Reason::Forward && without.reason == Reason::Forward);
+			Assert::IsTrue(with.producer && without.producer);
 		}
 
-		TEST_METHOD(SynthesisStartersAreRecordedButNeverServedHere)
+		TEST_METHOD(SynthesisWantsAreRecordedButNeverServedHere)
 		{
-			Input in = Make({ Consumer::DejudderExtras, Consumer::HiccupRepair, Consumer::GrainMap });
+			const Decision d = Decide(Make({ Consumer::DejudderExtras, Consumer::HiccupRepair, Consumer::GrainMap }));
+			Assert::AreEqual(Bit(Consumer::DejudderExtras) | Bit(Consumer::HiccupRepair) | Bit(Consumer::GrainMap), d.wants, L"every want recorded");
+			Assert::AreEqual(Bit(Consumer::GrainMap), d.served, L"synthesis never in served");
+			Assert::IsTrue(d.producer, L"batch B: the producer runs for the served grain map");
+			Assert::IsFalse(d.estimate, L"pairs expected: no render-time estimate (synthesis runs through its own policies)");
+		}
+
+		// Batch B Q1 + review M3: the hybrid scaler's want registers as ResidualStabilise (not the grain map): served exactly like the
+		// grain map (the same source-field domain), named as itself in Ctrl+I and in the OFF line.
+		TEST_METHOD(TheHybridScalerWantIsResidualStabiliseNotTheGrainMap)
+		{
+			Assert::IsTrue(DomainOf(Consumer::ResidualStabilise) == DomainOf(Consumer::GrainMap), L"served identically");
+			Assert::AreEqual(std::string("residual stabilise"), std::string(Name(Consumer::ResidualStabilise)));
+			const Decision d = Decide(Make({ Consumer::ResidualStabilise }));
+			Assert::AreEqual(Bit(Consumer::ResidualStabilise), d.served);
+			Assert::AreEqual(std::string("Vector engine: on (forward) for residual stabilise"), StatusLine(d), L"not called the grain map");
+			Input off = Make({ Consumer::ResidualStabilise });
+			off.enabled = false;
+			Assert::AreEqual(std::string("motion engine off (setting): residual stabilise use their non-motion path"), OffLine(Decide(off)));
+		}
+
+		// ---- Batch B: no optical-flow pairs expected (optical flow off, NVOF start failed, producer recovering) ---------------
+		TEST_METHOD(WithoutPairsTheFieldConsumersUseTheMatcherFallback)
+		{
+			Input in = Make({ Consumer::GrainMap, Consumer::DebandHold });
+			in.pairsExpected = false;
 			const Decision d = Decide(in);
-			Assert::AreEqual((1u << static_cast<int>(Consumer::DejudderExtras)) | (1u << static_cast<int>(Consumer::HiccupRepair)), d.starters);
-			Assert::IsTrue(d.Serves(Consumer::GrainMap) && !d.Serves(Consumer::DejudderExtras), L"synthesis never in served");
-			Assert::IsFalse(d.estimate || d.producer, L"synthesis starters run through their own policies");
+			Assert::IsTrue(d.mode == Mode::Forward && d.reason == Reason::Forward, L"forward");
+			Assert::AreEqual(Bit(Consumer::GrainMap) | Bit(Consumer::DebandHold), d.served, L"served by the matcher");
+			Assert::AreEqual(0u, d.unserved);
+			Assert::AreEqual(0u, d.noPairs);
+			Assert::IsTrue(d.estimate && d.matcherFallback, L"the render-time matcher estimate is the fallback");
+			Assert::AreEqual(std::string("Vector engine: on (forward; matcher fallback, no optical-flow pairs) for grain map, deband hold"),
+				StatusLine(d), L"the fallback is named");
+			Assert::IsFalse(FallbackCatalog::VectorEngine(d).engaged, L"served (by the fallback): no vector_engine entry");
+
+			in.pairsExpected = true;
+			const Decision p = Decide(in);
+			Assert::IsFalse(p.estimate || p.matcherFallback, L"pairs expected: the matcher costs nothing");
+			Assert::AreEqual(std::string("Vector engine: on (forward) for grain map, deband hold"), StatusLine(p));
+
+			Input dither = Make({ Consumer::SigmaDelta });
+			dither.pairsExpected = false;
+			const Decision o = Decide(dither);
+			Assert::IsTrue(o.Serves(Consumer::SigmaDelta) && o.estimate && o.matcherFallback, L"the output consumer uses the fallback too");
+
+			Input camera = Make({ Consumer::CameraFit });
+			camera.pairsExpected = false;
+			const Decision c = Decide(camera);
+			Assert::IsTrue(c.estimate, L"the camera fit's own field");
+			Assert::IsFalse(c.matcherFallback, L"the camera fit alone is not the fallback");
+		}
+
+		TEST_METHOD(WithoutPairsTheStatisticsConsumersAreNamedUnserved)
+		{
+			for (Consumer c : { Consumer::SourceMonitorPan, Consumer::MotionIntent })
+			{
+				Input in = Make({ c });
+				in.pairsExpected = false;
+				const Decision d = Decide(in);
+				Assert::IsTrue(d.mode == Mode::Off && d.reason == Reason::NoPairs, L"statistics alone: NoPairs");
+				Assert::AreEqual(0u, d.served);
+				Assert::AreEqual(Bit(c), d.unserved, L"unserved");
+				Assert::AreEqual(Bit(c), d.noPairs, L"for want of pairs");
+				Assert::IsFalse(d.estimate || d.producer || d.matcherFallback, L"the matcher has no statistics form");
+				const std::string why = std::string(Name(c)) + " without vectors (no optical-flow pairs (optical flow off or not running))";
+				Assert::AreEqual(why, UnservedText(d), L"named with why");
+				Assert::AreEqual("Vector engine: off; " + why, StatusLine(d));
+				const FallbackCatalog::Decision f = FallbackCatalog::VectorEngine(d);
+				Assert::IsTrue(f.engaged, L"not deliberate: a visible fallback");
+				Assert::AreEqual(why, f.reason);
+			}
+			Input mixed = Make({ Consumer::SourceMonitorPan, Consumer::GrainMap });
+			mixed.pairsExpected = false;
+			const Decision m = Decide(mixed);
+			Assert::IsTrue(m.mode == Mode::Forward && m.reason == Reason::Forward);
+			Assert::AreEqual(Bit(Consumer::GrainMap), m.served);
+			Assert::AreEqual(Bit(Consumer::SourceMonitorPan), m.unserved);
+			Assert::AreEqual(Bit(Consumer::SourceMonitorPan), m.noPairs);
+			Assert::IsTrue(m.estimate && m.matcherFallback && m.producer);
+			Assert::AreEqual(std::string("Vector engine: on (forward; matcher fallback, no optical-flow pairs) for grain map; "
+				"source monitor without vectors (no optical-flow pairs (optical flow off or not running))"), StatusLine(m));
+		}
+
+		// Review M4: no pairs because of a SETTING (optical flow off / motion_ahead_frames 0) is deliberate: the statistics consumers stay
+		// named in Ctrl+I (StatusLine / UnservedText) but are not a vector_engine Fallbacks entry. Any other unserved cause still is one.
+		TEST_METHOD(ADeliberateNoPairsIsNamedButIsNotAFallbacksEntry)
+		{
+			Input in = Make({ Consumer::SourceMonitorPan });
+			in.pairsExpected = false;
+			in.pairsDeliberatelyOff = true;
+			const Decision d = Decide(in);
+			Assert::IsTrue(d.pairsDeliberatelyOff, L"copied to the decision");
+			Assert::AreEqual(Bit(Consumer::SourceMonitorPan), d.noPairs);
+			Assert::IsTrue(UnservedText(d).find("source monitor without vectors (no optical-flow pairs") != std::string::npos, L"still named");
+			Assert::IsTrue(StatusLine(d).find("source monitor") != std::string::npos, L"still in the Ctrl+I line");
+			const FallbackCatalog::Decision f = FallbackCatalog::VectorEngine(d);
+			Assert::IsFalse(f.engaged, L"deliberate: not an entry");
+			Assert::AreEqual(std::string("vector_engine"), f.id);
+
+			Input fault = in;
+			fault.pairsDeliberatelyOff = false;
+			Assert::IsTrue(FallbackCatalog::VectorEngine(Decide(fault)).engaged, L"a producer fault stays an entry");
+
+			Input other = Make({ Consumer::SourceMonitorPan, Consumer::SigmaDelta, Consumer::GrainMap });
+			other.pairsExpected = false;
+			other.pairsDeliberatelyOff = true;
+			other.smoothMotion = true;
+			const FallbackCatalog::Decision o = FallbackCatalog::VectorEngine(Decide(other));
+			Assert::IsTrue(o.engaged, L"another unserved cause still engages");
+			Assert::IsTrue(o.reason.find("output dither without vectors (libplacebo smooth motion owns output)") != std::string::npos);
+
+			Decision handBuilt;
+			handBuilt.unserved = handBuilt.noPairs = Bit(Consumer::MotionIntent);
+			Assert::IsFalse(handBuilt.pairsDeliberatelyOff, L"a hand-built decision defaults to not deliberate");
+			Assert::IsTrue(FallbackCatalog::VectorEngine(handBuilt).engaged, L"so it stays an entry");
 		}
 
 		TEST_METHOD(EngineStatusMapsEachReason)
 		{
 			EngineFacts f;
 			f.decision = Decide(Make({ Consumer::DejudderExtras, Consumer::GrainMap }));
-			f.starterEngaged = true;
 			f.producerRunning = true;
 			f.frame = 7;
 			MotionEngineStatus st = DeriveEngineStatus(f);
 			Assert::IsTrue(st.state == MotionEngineState::On && st.reason == MotionEngineReason::None && st.reasons == 0u, L"on");
 			Assert::AreEqual(7ull, static_cast<unsigned long long>(st.frame));
-			Assert::AreEqual(1u << static_cast<int>(Consumer::DejudderExtras), st.starters);
+			Assert::AreEqual(0u, st.affected, L"on: nothing affected");
 
 			struct Row { void (*set)(EngineFacts&); MotionEngineState state; MotionEngineReason reason; };
 			const Row rows[] = {
@@ -538,7 +681,6 @@ namespace VectorDemandTest
 				{ [](EngineFacts& x) { x.nvofStartError = true; x.producerRunning = false; }, MotionEngineState::Degraded, MotionEngineReason::NvofUnavailable },
 				{ [](EngineFacts& x) { x.producerRecovering = true; }, MotionEngineState::Degraded, MotionEngineReason::ProducerRecovering },
 				{ [](EngineFacts& x) { x.resyncWindow = true; }, MotionEngineState::Degraded, MotionEngineReason::Resync },
-				{ [](EngineFacts& x) { x.starterEngaged = false; }, MotionEngineState::Off, MotionEngineReason::NoStarter },
 				{ [](EngineFacts& x) { x.vramRelease = true; }, MotionEngineState::Off, MotionEngineReason::VramRelease },
 				{ [](EngineFacts& x) { x.vectorDemand = false; }, MotionEngineState::Off, MotionEngineReason::VectorDemandOff },
 				{ [](EngineFacts& x) { x.lowLatency = true; x.lowLatencyNoVectors = true; }, MotionEngineState::Off, MotionEngineReason::LowLatency },
@@ -551,8 +693,17 @@ namespace VectorDemandTest
 				Assert::IsTrue(st.state == r.state, L"state");
 				Assert::IsTrue(st.reason == r.reason, L"leading reason");
 				Assert::IsTrue(st.Has(r.reason), L"reason bit");
+				Assert::IsFalse(st.Has(MotionEngineReason::NoStarter), L"batch B: NoStarter is never derived");
 				Assert::IsTrue(std::string(ReasonWords(r.reason)).size() > 0, L"words");
 			}
+			// Batch B: nothing wanted (the old NoStarter row's place): Off, no reason, nothing affected (information only, Q1).
+			EngineFacts idle = f;
+			idle.decision = Decide(Make({}));
+			st = DeriveEngineStatus(idle);
+			Assert::IsTrue(st.state == MotionEngineState::Off && st.reason == MotionEngineReason::None, L"nothing wanted: off, no reason");
+			Assert::AreEqual(0u, st.reasons);
+			Assert::AreEqual(0u, st.affected);
+			Assert::IsFalse(FallbackCatalog::MotionEngine(st).engaged, L"nothing wanted: released");
 			EngineFacts shallow = f;
 			Input ll = Make({ Consumer::DejudderExtras, Consumer::GrainMap });
 			ll.lowLatency = true;
