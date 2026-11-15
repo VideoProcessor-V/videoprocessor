@@ -406,7 +406,7 @@ namespace AdaptiveDownscale
 		// Stream robustness (owner 2026-10-14): a discontinuity - the map no
 		// longer follows the content and starts over (consumers see NoField).
 		// Audit x5dup M3: the kept previous P4 record is forgotten too (vector-validity rule: no history across a discontinuity).
-		void ForgetMap() { mapReady = false; mapSequence = 0; mapState = MapState::NoField; residualSequence = 0; residualPrevValid = false; motionReady = false; motionSequence = 0; cutRecords.Clear(); }
+		void ForgetMap() { mapReady = false; mapSequence = 0; mapState = MapState::NoField; residualSequence = 0; residualPrevValid = false; motionReady = false; motionSequence = 0; cutRecords.Clear(); cutResolved = false; }   // gate B-S2: the next frame asks the cut again
 		// The newest map (r = grain scale per block, g = trusted); tests.
 		pl_tex GrainMap() const { return mapReady ? map[mapIndex] : nullptr; }
 		bool hostReadableMap = false;   // tests: the map can be downloaded
