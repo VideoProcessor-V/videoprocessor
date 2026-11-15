@@ -236,5 +236,28 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0ull, rig.engine.P2CpuFormServed(), L"the (other) engine is not counted");
 			Assert::AreEqual(0ull, rig.engine.P2CpuFormDeclined());
 		}
+
+		// BBP-A-COUNTS-CTRLALTD: the form's declines reach the status segment (Config status / Ctrl+Alt+D), never log-only:
+		// served + declined + the last decline's words; nothing shown while every read was served; shown without a producer too.
+		TEST_METHOD(ProducerStatusSegmentNamesTheP2CpuFormDeclines)
+		{
+			using namespace VpSkeleton;
+			Rig rig;
+			SkeletonMemo m;
+			Assert::IsTrue(RegisterFill(m, rig.EngineOf()));
+			Assert::IsTrue(m.Acquire(kP2VectorPair, 11, AcquireForm::Cpu).status == AcquireStatus::FilledAtRead);
+			Assert::AreEqual(std::string(), rig.engine.ProducerStatusSegment(), L"served only: nothing shown");
+			Assert::IsTrue(m.Acquire(kP2VectorPair, 12, AcquireForm::Cpu).cause == AcquireCause::OwnerDeclined);
+			Assert::AreEqual(std::string("P2 CPU form served 1, declined 1 (last: p2 cpu form: no pair ahead for frame 12 (generation 1))"),
+				rig.engine.ProducerStatusSegment(), L"the decline is counted and named");
+			Assert::AreEqual(rig.engine.ProducerStatusSegment(), rig.engine.P2CpuFormStatusSegment(), L"no ring miss: the form's segment alone");
+
+			VpMotion::VectorEngine bare;   // no producer: the form's segment is not hidden behind the ring-miss early return
+			const VpMotion::IVectorEngine& asInterface = bare;
+			asInterface.NoteP2CpuFormRead(false, "p2 cpu form: no pair store");
+			Assert::AreEqual(std::string("P2 CPU form served 0, declined 1 (last: p2 cpu form: no pair store)"), bare.ProducerStatusSegment());
+			asInterface.NoteP2CpuFormRead(false);   // the one-argument form counts and keeps the last words
+			Assert::AreEqual(std::string("P2 CPU form served 0, declined 2 (last: p2 cpu form: no pair store)"), bare.ProducerStatusSegment());
+		}
 	};
 }
