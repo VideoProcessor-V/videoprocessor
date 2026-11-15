@@ -309,6 +309,14 @@ namespace SkeletonCoreContextTestsNs
 			VariantKey half;
 			half.precision = kPrecisionFloat16;
 			Assert::IsTrue(m.Acquire(kP10GrainSplit, 1, AcquireForm::Cpu, half).cause == AcquireCause::VariantUndeclared, L"pixel data never at fp16");
+			{
+				// N2 (waiver gate batch 12): a non-pixelData owner that declares the precision axis is declined at fp16 too.
+				std::atomic<int> calls2{ 0 };
+				m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, CpuFill(&calls2, 0x44, VariantKey::kAxisPrecision));
+				Assert::IsTrue(m.Acquire(kP11RegionBlockStats, 1, AcquireForm::Cpu, half).cause == AcquireCause::VariantUndeclared, L"fp16 refused for every owner, pixelData or not");
+				Assert::IsTrue(calls2.load() == 0, L"and the fill never ran");
+				Assert::IsTrue(Has(m.LastCause(kP11RegionBlockStats), "variant not served"), L"and the decline is visible: the cause text says so");
+			}
 			VariantKey p0;
 			p0.param0 = 3;
 			Assert::IsTrue(m.Acquire(kP10GrainSplit, 1, AcquireForm::Cpu, p0).cause == AcquireCause::VariantUndeclared, L"an undeclared axis is refused, visibly");
@@ -339,6 +347,62 @@ namespace SkeletonCoreContextTestsNs
 			Assert::IsTrue(VariantReserveBytes(p1, full, 1, TexFormat::R16F) == 960u * 540u * 4u, L"float32 = R32F");
 			p1.precision = kPrecisionUnorm16;
 			Assert::IsFalse(VariantTexShape(p1, full, 4, TexFormat::RGBA16F, &s), L"no 4-channel unorm16 in the ledger: refused");
+			// N2 (waiver gate batch 10): float16 is not 12-bit safe: no ledger format for it, for any channel count or product.
+			for (unsigned ch : { 1u, 2u, 4u }) {
+				TexFormat f16 = TexFormat::R32F;
+				Assert::IsFalse(TexFormatOf(kPrecisionFloat16, ch, TexFormat::R32F, &f16), L"float16 refused by the ledger");
+				Assert::IsTrue(f16 == TexFormat::R32F, L"and nothing written");
+			}
+			VariantKey half16;
+			half16.precision = kPrecisionFloat16;
+			Assert::IsFalse(VariantTexShape(half16, full, 1, TexFormat::R16, &s), L"a float16 variant has no shape: the owner declines it");
+		}
+	};
+
+	TEST_CLASS(SkeletonDeclaredDemandAccessorTests)
+	{
+	public:
+		TEST_METHOD(NoOwnersDeclareNothing)
+		{
+			SkeletonMemo m;
+			Assert::IsTrue(m.DeclaredFillHistory() == 0, L"no owner: no history");
+			Assert::IsTrue(m.ActiveAheadDemands().empty(), L"no owner: no ahead demand");
+		}
+
+		TEST_METHOD(DeclaredHistoryIsTheLargestDeclaredLag)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			OwnerFill a = CpuFill(&calls, 0x01);
+			a.historyFrames = 1;
+			OwnerFill b = CpuFill(&calls, 0x02);
+			b.keepFrames = 3;   // keepFrames is the same declaration under its B1 name: the larger counts
+			b.historyFrames = 2;
+			OwnerFill c = CpuFill(&calls, 0x03);   // declares nothing
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, a);
+			Assert::IsTrue(m.DeclaredFillHistory() == 1, L"one owner, history 1");
+			m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, b);
+			Assert::IsTrue(m.DeclaredFillHistory() == 3, L"max(keep 3, history 2) = 3 is the largest");
+			m.RegisterOwnerFill(kP1HalfLuma, AcquireForm::Cpu, kLaneUnit, c);
+			Assert::IsTrue(m.DeclaredFillHistory() == 3, L"an owner declaring nothing changes nothing");
+			Assert::IsTrue(calls.load() == 0, L"read-only: no fill ran");
+		}
+
+		TEST_METHOD(AheadDemandsListOnlyDeclaringOwners)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			OwnerFill a = CpuFill(&calls, 0x01);
+			a.aheadDepth = 4;
+			a.jobClass = JobClass::Core;
+			OwnerFill none = CpuFill(&calls, 0x02);   // aheadDepth 0: no demand
+			m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, none);
+			Assert::IsTrue(m.ActiveAheadDemands().empty(), L"aheadDepth 0 is not a demand");
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, a);
+			const std::vector<SkeletonMemo::AheadDemand> d = m.ActiveAheadDemands();
+			Assert::IsTrue(d.size() == 1, L"only the declaring owner is listed");
+			Assert::IsTrue(d[0].id == uint16_t(kP10GrainSplit) && d[0].form == 0 && d[0].depth == 4 && d[0].cls == JobClass::Core, L"its id, CPU form, depth and class");
+			Assert::IsTrue(calls.load() == 0, L"read-only: no fill ran");
 		}
 	};
 

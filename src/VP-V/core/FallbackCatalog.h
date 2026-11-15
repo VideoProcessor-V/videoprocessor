@@ -417,16 +417,18 @@ namespace FallbackCatalog
 	// back-off (MotionAhead::ProducerRecovery). Engaged while it is wanted and waiting to restart,
 	// for every vector consumer (the "motion" entry above covers only the de-judder's view).
 	// ---- motion.estimation: the look-ahead lead cap (refs/109 F1, AUDIT-R) ---------------------------
-	// The lead (frames computed ahead) is held at MotionAhead::kMaxLead (the 16-pair P2 ring minus the 3 kept behind the render)
-	// while more frames are queued ahead (60p with the standard 250 ms queue) or the depth is larger (240p). Engaged while that
-	// binds sustained; the frames beyond it get their pairs as they come within the lead (no matcher stand-in).
-	inline Decision MotionLookaheadCapped(bool capped, int cap)
+	// The lead (frames computed ahead) is held at MotionAhead::kMaxLead (the ahead-compute ceiling, core/AheadCeiling.h, OD 11-14;
+	// was the 16-pair P2 ring minus the 3 kept behind). R3 (lead 12): held there while MORE frames are queued (60p with the standard
+	// 250 ms queue) is the DESIGNED state, shown on the Ctrl+I line only, never this entry. Engaged only while the consumer gets LESS
+	// than it asks: its depth (`asked`, 120p's 8, 240p's 16) is above the ceiling, sustained. The frames beyond the lead get their pairs
+	// as they come within it (no matcher stand-in). `asked` 0 = not known (the words then leave the number out).
+	inline Decision MotionLookaheadCapped(bool capped, int cap, int asked = 0)
 	{
 		if (!capped)
 			return Released("motion_lookahead_capped");
 		return Engaged("motion_lookahead_capped", "optical flow runs " + std::to_string(cap) +
-			" frames ahead, fewer than are queued (the pair ring's limit); later frames get their pairs as they come within " +
-			std::to_string(cap));
+			" frames ahead, fewer than its look-ahead depth asks" + (asked > cap ? " (" + std::to_string(asked) + ")" : std::string()) +
+			" (the ahead-compute ceiling); later frames get their pairs as they come within " + std::to_string(cap));
 	}
 
 	inline Decision VectorProducer(bool wanted, bool recovering, unsigned stops, const std::string& error = std::string())
