@@ -121,7 +121,7 @@ inline Strength StrengthOf(const EventSignals& e) { return e.cut ? Strength::Ful
 //      |cur - fitted prev| over a +-2-cell neighbourhood (local motion tolerance), averaged over the interior cells
 //   G  mean |cur - prev| over the cells;  H  half L1 distance of the normalised histograms
 //   S  structure correlation: Pearson correlation of the log-grid gradients (log(g + 4), horizontal and vertical
-//      differences), the best over +-1-cell shifts (1 = same structure; a lighting change keeps it, a new shot does not)
+//      differences, each centred on its own mean, then pooled), the best over +-1-cell shifts (1 = same structure; a lighting change keeps it, a new shot does not)
 //   F  flatness of one frame: RMS of its log-grid gradients (F < 0.02: a flat / black frame without structure)
 // The decision for frame k (CutTracker) needs frame k+1 (the verdict is one frame late; without k+1 it is provisional):
 //   context  ctx = the largest L of frames k-3..k-1 (not part starts, cuts, flashes or lit frames) and of frame k+1
@@ -259,31 +259,43 @@ inline double Flatness(const Grid& a)
     return std::sqrt(s / double(kGridH * (kGridW - 1) + (kGridH - 1) * kGridW));
 }
 
-// The Pearson correlation of prev's gradient field shifted by (sy, sx) against cur's over the overlap.
+// The Pearson correlation of prev's gradient field shifted by (sy, sx) against cur's over the overlap. Each component (horizontal,
+// vertical) is centred on its OWN mean before the two are pooled: pooled under one mean, a picture ramping left to right and another
+// ramping top to bottom correlate (their mean gradients differ per component), and a new shot was read as the same structure.
 inline double ShiftedCorrelation(const Gradients& p, const Gradients& c, int sy, int sx)
 {
     // Pairs: p at (y + sy', x + sx') with c at (y, x), where for a shift s >= 0 p starts at s and c at 0 (and the reverse).
-    double sa = 0.0, sb = 0.0, saa = 0.0, sbb = 0.0, sab = 0.0, n = 0.0;
-    auto pairUp = [&](double va, double vb) {
-        sa += va;
-        sb += vb;
-        saa += va * va;
-        sbb += vb * vb;
-        sab += va * vb;
-        n += 1.0;
+    struct Sums {
+        double sa = 0.0, sb = 0.0, saa = 0.0, sbb = 0.0, sab = 0.0, n = 0.0;
+        void Add(double va, double vb)
+        {
+            sa += va;
+            sb += vb;
+            saa += va * va;
+            sbb += vb * vb;
+            sab += va * vb;
+            n += 1.0;
+        }
     };
+    Sums hs, vs;
     const int py0 = sy > 0 ? sy : 0, cy0 = sy < 0 ? -sy : 0;
     const int px0 = sx > 0 ? sx : 0, cx0 = sx < 0 ? -sx : 0;
     const int ay = sy < 0 ? -sy : sy, ax = sx < 0 ? -sx : sx;
     for (int y = 0; y < kGridH - ay; ++y)
         for (int x = 0; x < kGridW - 1 - ax; ++x)
-            pairUp(p.h[py0 + y][px0 + x], c.h[cy0 + y][cx0 + x]);
+            hs.Add(p.h[py0 + y][px0 + x], c.h[cy0 + y][cx0 + x]);
     for (int y = 0; y < kGridH - 1 - ay; ++y)
         for (int x = 0; x < kGridW - ax; ++x)
-            pairUp(p.v[py0 + y][px0 + x], c.v[cy0 + y][cx0 + x]);
-    if (n <= 0.0)
-        return 0.0;
-    const double va = saa - sa * sa / n, vb = sbb - sb * sb / n, cov = sab - sa * sb / n;
+            vs.Add(p.v[py0 + y][px0 + x], c.v[cy0 + y][cx0 + x]);
+    double va = 0.0, vb = 0.0, cov = 0.0;
+    const Sums* parts[2] = { &hs, &vs };
+    for (const Sums* s : parts) {
+        if (s->n <= 0.0)
+            continue;
+        va += s->saa - s->sa * s->sa / s->n;
+        vb += s->sbb - s->sb * s->sb / s->n;
+        cov += s->sab - s->sa * s->sb / s->n;
+    }
     const double d = std::sqrt((va > 0.0 ? va : 0.0) * (vb > 0.0 ? vb : 0.0));
     return d > 1e-12 ? cov / d : 0.0;
 }
