@@ -107,6 +107,8 @@
     "src/VP-V/modules/motion/estimation/VectorEngineExtension.h",
     "src/VP-V/modules/motion/estimation/VectorEngineExtension.cpp",
     "src/VP-V/modules/motion/estimation/tests/VectorEngineHookTests.cpp",
+    "src/VP-V/modules/motion/estimation/tests/MatcherPyramidReaderTests.cpp",
+    "src/VP-V/modules/motion/estimation/tests/MatcherPyramidGpuIdentityTests.cpp",
     "src/VP-V/modules/motion/estimation/global_model/link/CameraConsumerBinding.cpp",
     "src/VP-V/modules/motion/estimation/global_model/link/CameraConsumerBinding.h",
     "src/VP-V/modules/motion/estimation/global_model/link/CameraPhaseInterp.h",
