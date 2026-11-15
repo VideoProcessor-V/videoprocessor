@@ -297,9 +297,13 @@ namespace Tests
 			m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
 			const SidGate::Outcome o = SidGate::Script(m, geo, 10.0);
 			auto& est = m.ChainEstimatorRef();
+			est.SetSynchronous(true);                                        // no worker thread
+			est.SetMode(SourceIdentity::Chain::EstimatorMode::On);           // running, so NoteFrame stamps (the monitor's chain stays off: geometry source unchanged)
 			Assert::AreEqual<uint64_t>(0, est.LatchCeilingReleasesThrough(~0ull), L"no release yet");
+			est.NoteFrame(o.nextSeq - 1, 16.6, 0, 0, 3840, 2160);           // the newest frame the estimator has seen (seq 16), as NoteSource would
 			est.NoteLatchCeilingForTest();   // stamped with the newest frame the estimator has seen
 			const uint64_t seq = SidGate::Feed(m, geo, 16.7, 32, o.nextSeq, false);
+			est.NoteFrame(seq - 1, 32.2, 0, 0, 3840, 2160);                  // the last fed frame (seq 48)
 			est.NoteLatchCeilingForTest();   // stamped with a later frame
 			Assert::AreEqual<uint64_t>(2, est.LatchCeilingReleases());
 			Assert::AreEqual<uint64_t>(2, est.LatchCeilingReleasesThrough(seq), L"both visible once the monitor may see the later frame");
