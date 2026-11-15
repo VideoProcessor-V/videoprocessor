@@ -2409,11 +2409,16 @@ if (q.x < size.x && q.y < size.y) {
 			return pl_tex_recreate(gpu, tex, &params);
 		};
 		const bool readable = settings.hostReadable;
-		if (!make(&halfA, halfW, halfH, scalar, readable) || !make(&halfB, halfW, halfH, scalar, readable) ||
-			!make(&l1A, l1W, l1H, scalar, readable) || !make(&l1B, l1W, l1H, scalar, readable) ||
-			!make(&l2A, l2W, l2H, scalar, readable) || !make(&l2B, l2W, l2H, scalar, readable) ||
-			!make(&halfK, halfW, halfH, scalar, readable) || !make(&l1K, l1W, l1H, scalar, readable) ||
-			!make(&l2K, l2W, l2H, scalar, readable) ||
+		pyramidFmt = scalar;
+		// L-B4 LOW-3: while the shared product is bound, A's own pyramid and the K set are not kept (the product replaces them;
+		// B's own set stays for the fade exception): a slot freed then stays empty here and is made again by EnsureOwnPyramidScratch
+		// only when the matcher builds its own pyramid.
+		const auto ownLevel = [&](pl_tex* tex, int w, int h) { return (ownPyramidLazy && *tex == nullptr) || make(tex, w, h, scalar, readable); };
+		if (!ownLevel(&halfA, halfW, halfH) || !make(&halfB, halfW, halfH, scalar, readable) ||
+			!ownLevel(&l1A, l1W, l1H) || !make(&l1B, l1W, l1H, scalar, readable) ||
+			!ownLevel(&l2A, l2W, l2H) || !make(&l2B, l2W, l2H, scalar, readable) ||
+			!ownLevel(&halfK, halfW, halfH) || !ownLevel(&l1K, l1W, l1H) ||
+			!ownLevel(&l2K, l2W, l2H) ||
 			!make(&forward, blocksX, blocksY, vec4f, readable) || !make(&backward, blocksX, blocksY, vec4f, readable) ||
 			!make(&field, blocksX, blocksY, vec4f, readable) || !make(&frameTrust, 1, 1, vec4f, readable) ||
 			!make(&occlusion[0], blocksX, blocksY, vec4f, readable) || !make(&occlusion[1], blocksX, blocksY, vec4f, readable) ||
@@ -2711,7 +2716,7 @@ if (q.x < size.x && q.y < size.y) {
 	}
 
 	// The owner's pyramid law (P1Gpu::BuildPyramidInto) run through this matcher's own Dispatch into its own scratch textures:
-	// the non-fade Downsample, Pyramid, and the visible fallback product.matcher_pyramid (B3).
+	// the non-fade Downsample, Pyramid, and the visible fallback row product.motion_warp (B3).
 	bool MotionWarp::BuildOwnPyramid(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, int from, int levels)
 	{
 		const float codes = VpFrameAnalysis::P1Gpu::MatcherCodes(lumaInCodes, fullRange);
@@ -2731,10 +2736,12 @@ if (q.x < size.x && q.y < size.y) {
 		pl_tex* slot[6] = { &halfA, &l1A, &l2A, &halfB, &l1B, &l2B };
 		for (int i = 0; i < 6; ++i)
 		{
-			if (parkedOwn[i])
+			// A borrowed slot gets its own texture back, or nothing when that one was freed (LOW-3): never the product's texture.
+			if (borrowed[i])
 			{
 				*slot[i] = parkedOwn[i];
 				parkedOwn[i] = nullptr;
+				borrowed[i] = false;
 			}
 			pins[i].reset();
 		}
@@ -2745,10 +2752,11 @@ if (q.x < size.x && q.y < size.y) {
 	{
 		pl_tex* slot[3] = { &halfB, &l1B, &l2B };
 		for (int i = 0; i < 3; ++i)
-			if (parkedOwn[3 + i])
+			if (borrowed[3 + i])
 			{
 				*slot[i] = parkedOwn[3 + i];
 				parkedOwn[3 + i] = nullptr;
+				borrowed[3 + i] = false;
 			}
 	}
 
@@ -2768,10 +2776,12 @@ if (q.x < size.x && q.y < size.y) {
 
 	// B3: A's and B's levels (levelsA / levelsB) from the shared product, bound where the matcher reads them. True = all bound.
 	// False = nothing bound: the matcher builds its own (the product's source is absent: silent, as before; not served: the visible
-	// row product.matcher_pyramid via PyramidFallbackWhy()).
+	// row product.motion_warp via PyramidFallbackWhy()).
 	bool MotionWarp::BindProductPyramid(const Planes& a, const Planes& b, int levelsA, int levelsB)
 	{
 		pyramidBound = false;
+		if (inner)
+			inner->pyramidFallbackWhy.clear();   // MED-1: the inner's decline counts only for the estimate it ran in
 		if (!pyramidSource || a.sequence == 0 || b.sequence == 0 || a.sequence == b.sequence || !a.luma || !b.luma)
 		{
 			pyramidFallbackWhy.clear();
@@ -2792,7 +2802,12 @@ if (q.x < size.x && q.y < size.y) {
 			for (int lv = 0; lv <= levels && configured && why.empty(); ++lv)
 			{
 				const int i = side * 3 + lv;
-				const VpMotion::MatcherPyramid::Level r = pyramidSource(p.sequence, base + 2 * lv, src);
+				VpMotion::MatcherPyramid::Request q;
+				q.seq = p.sequence;
+				q.level = base + 2 * lv;
+				q.lumaTex = src;
+				q.fullRange = p.fullRange;   // MED-3: the range the matcher's own level 1 would be coded with
+				const VpMotion::MatcherPyramid::Level r = pyramidSource(q);
 				if (r.state == VpMotion::MatcherPyramid::Level::State::NotConfigured)
 				{
 					configured = false;
@@ -2804,8 +2819,8 @@ if (q.x < size.x && q.y < size.y) {
 					break;
 				}
 				const pl_tex t = static_cast<pl_tex>(r.tex);
-				const pl_tex own = parkedOwn[i] ? parkedOwn[i] : *slot[i];
-				const pl_fmt f = t->params.format, of = own ? own->params.format : nullptr;
+				// The matcher's own scratch format (EnsureTextures; its A slots may be freed while the product is bound, LOW-3).
+				const pl_fmt f = t->params.format, of = pyramidFmt;
 				if (t->params.w != sizes[lv][0] || t->params.h != sizes[lv][1])
 					why = "the shared level has another size than the matcher's";
 				else if (!t->params.sampleable || !f || !of || settings.hostReadable ||
@@ -2836,8 +2851,48 @@ if (q.x < size.x && q.y < size.y) {
 				parkedOwn[i] = *slot[i];
 				*slot[i] = got[i];
 				pins[i] = held[i];
+				borrowed[i] = true;
 			}
+		// LOW-3: the product replaces A's own levels and the K set (the last pair's plain B: A is now Acquire(a.seq)); they are freed
+		// while it is bound and made again only when the matcher builds its own (EnsureOwnPyramidScratch). B's own set is kept: the
+		// fade exception rebuilds the corrected B in it.
+		for (int i = 0; i < 3; ++i)
+			if (parkedOwn[i])
+				pl_tex_destroy(gpu, &parkedOwn[i]);
+		for (pl_tex* tex : { &halfK, &l1K, &l2K })
+			pl_tex_destroy(gpu, tex);
+		ownPyramidLazy = true;
 		pyramidBound = true;
+		return true;
+	}
+
+	bool MotionWarp::EnsureOwnPyramidScratch()
+	{
+		if (!ownPyramidLazy)
+			return true;
+		if (!pyramidFmt)
+		{
+			error = "no storable float format";
+			return false;
+		}
+		const auto make = [this](pl_tex* tex, int w, int h) -> bool
+		{
+			pl_tex_params params{};
+			params.w = w;
+			params.h = h;
+			params.format = pyramidFmt;
+			params.sampleable = true;
+			params.storable = true;
+			params.host_readable = settings.hostReadable && (pyramidFmt->caps & PL_FMT_CAP_HOST_READABLE);
+			return pl_tex_recreate(gpu, tex, &params);
+		};
+		if (!make(&halfA, halfW, halfH) || !make(&l1A, l1W, l1H) || !make(&l2A, l2W, l2H) ||
+			!make(&halfK, halfW, halfH) || !make(&l1K, l1W, l1H) || !make(&l2K, l2W, l2H))
+		{
+			error = "cannot create the motion textures";
+			return false;
+		}
+		ownPyramidLazy = false;
 		return true;
 	}
 
@@ -4021,6 +4076,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		keptSequence = 0;
 		if (!productBound)
 		{
+			if (!EnsureOwnPyramidScratch())   // LOW-3: A's own levels and the K set, freed while the product was bound
+				return false;
 			if (reuseA)
 			{
 				if (keptInK)

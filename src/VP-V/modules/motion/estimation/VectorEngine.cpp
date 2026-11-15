@@ -13,6 +13,8 @@
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/P1AcquireSource.h>
 #include <VP-V/modules/input/source_analysis/lane/P1GpuFill.h>
+#include <VP-V/modules/input/capture/SourcePlanes.h>
+#include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/motion/estimation/VectorEngineFallbackSync.h>
 
@@ -1262,31 +1264,76 @@ namespace VpMotion
 		return line;
 	}
 
-	MatcherPyramid::Source VectorEngine::MatcherPyramidSource() const
+	bool VectorEngine::OfferMatcherPlanes(uint64_t seq, const void* luma, const void* chroma, bool fullRange) const
+	{
+		if (seq == 0 || luma == nullptr || host_ == nullptr || Vpv::Hub::ExtensionHub::Instance().OriginalPathway(host_))
+			return false;
+		Vpv::Capture::SourcePlaneSet s;
+		s.seq = seq;
+		s.generation = kMatcherOfferGeneration;
+		s.planes = chroma != nullptr ? 2 : 1;
+		s.tex[0] = static_cast<pl_tex>(luma);
+		s.tex[1] = static_cast<pl_tex>(chroma);
+		s.components[0] = 1;
+		s.components[1] = chroma != nullptr ? 2 : 0;
+		s.repr.levels = fullRange ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;   // the range only: the matcher's planes carry no system
+		s.rgb = false;
+		s.fullRange = fullRange;
+		s.origin = "matcher upload";
+		if (!Vpv::Capture::SourcePlanes::Offer(host_, s))
+			return false;
+		// The P1 owner fill is registered from the largest source luma size: told here too, so the first estimate (before the first
+		// Entrance) finds the owner instead of a transient NoOwnerFill.
+		Vpv::FrameAnalysis::NoteP1GpuSourceLuma(host_, uint32_t(s.tex[0]->params.w), uint32_t(s.tex[0]->params.h));
+		return true;
+	}
+
+	MatcherPyramid::Source VectorEngine::MatcherPyramidSource(const char* namedException) const
 	{
 		const void* memoHost = host_;
-		return [memoHost](uint64_t seq, int level, const void* lumaTex) -> MatcherPyramid::Level
+		const std::string exception = namedException != nullptr ? std::string(namedException) : std::string();
+		return [memoHost, exception](const MatcherPyramid::Request& q) -> MatcherPyramid::Level
 		{
 			MatcherPyramid::Level out;   // NotConfigured
-			const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(memoHost, seq);
-			if (!fm.Valid() || lumaTex == nullptr || level < 1 || level > 6)
+			const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(memoHost, q.seq);
+			if (!fm.Valid() || q.lumaTex == nullptr || q.level < 1 || q.level > 6)
 				return out;
 			out.state = MatcherPyramid::Level::State::Unavailable;
-			// The named exception (U3): the product is made from the shared P13 luma plane; any other luma (native RGB structure
-			// luma, DV unpack output) keeps the matcher's own pyramid, shown with this cause.
-			const VpSkeleton::AcquireResult plane = fm.memo->Acquire(VpSkeleton::kP13SourceRing, seq, VpSkeleton::AcquireForm::Gpu);
-			if (!plane.Ok() || !plane.gpu.Valid())
+			// The named exceptions (plan (b), U3): the product is made from the shared P13 luma plane; a matcher luma that is not
+			// one (native RGB structure luma, DV unpack output) keeps the matcher's own pyramid, shown with this cause.
+			if (!exception.empty())
+			{
+				out.cause = "named exception: " + exception;
+				return out;
+			}
+			// MED-2: the offer table first (no memo entry): an Acquire of a seq not yet offered would cache its decline for the
+			// whole render frame and refuse every later P13 reader of that frame.
+			const std::shared_ptr<const Vpv::Capture::SourcePlaneSet> offered = Vpv::Capture::SourcePlanes::Find(memoHost, q.seq);
+			if (!offered)
 			{
 				out.cause = "no shared source luma for this frame";
 				return out;
 			}
-			if (plane.gpu.resource != lumaTex)
+			const VpSkeleton::AcquireResult plane = fm.memo->Acquire(VpSkeleton::kP13SourceRing, q.seq, VpSkeleton::AcquireForm::Gpu);
+			if (!plane.Ok() || !plane.gpu.Valid())
+			{
+				const std::string why = fm.memo->LastCause(VpSkeleton::kP13SourceRing);
+				out.cause = why.empty() ? std::string("no shared source luma for this frame") : why;
+				return out;
+			}
+			if (plane.gpu.resource != q.lumaTex)
 			{
 				out.cause = "named exception: the matcher's luma is not the shared source plane";
 				return out;
 			}
-			const VpSkeleton::AcquireResult r = fm.memo->Acquire(VpSkeleton::kP1HalfLuma, seq, VpSkeleton::AcquireForm::Gpu,
-				VpFrameAnalysis::P1Gpu::MatcherPyramidKey(static_cast<uint8_t>(level)));
+			const Vpv::Capture::SourcePlaneSet* facts = Vpv::Capture::SourcePlanes::FactsOf(plane);
+			if (facts == nullptr || facts->fullRange != q.fullRange)
+			{
+				out.cause = "range differs from the shared plane";   // MED-3: the product's level-1 codes would differ from the matcher's
+				return out;
+			}
+			const VpSkeleton::AcquireResult r = fm.memo->Acquire(VpSkeleton::kP1HalfLuma, q.seq, VpSkeleton::AcquireForm::Gpu,
+				VpFrameAnalysis::P1Gpu::MatcherPyramidKey(static_cast<uint8_t>(q.level)));
 			if (!r.Ok() || !r.gpu.Valid() || r.gpu.resource == nullptr)
 			{
 				const std::string why = fm.memo->LastCause(VpSkeleton::kP1HalfLuma);
@@ -1295,7 +1342,6 @@ namespace VpMotion
 			}
 			out.state = MatcherPyramid::Level::State::Product;
 			out.tex = r.gpu.resource;
-			out.pin = r.pin;
 			// The texture must outlive this call: the handle's keepAlive (the memo spot) is held with the pin.
 			out.pin = std::make_shared<std::pair<std::shared_ptr<const void>, std::shared_ptr<void>>>(r.pin, r.gpu.keepAlive);
 			return out;

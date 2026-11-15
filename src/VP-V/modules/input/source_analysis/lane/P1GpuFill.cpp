@@ -4,7 +4,7 @@
 // P1 GPU owner fill, matcher pyramid variant (BBP-B commit B2; plan lead18/coreplan-B-prereq-P2global-pyramid.md section (b)):
 //   - BuildPyramidInto: THE one code copy of the matcher's half / pyramid law (today's MotionWarp::Downsample non-fade branch +
 //     Pyramid), run through the caller's pass runner: the owner fill below, and the matcher's visible fallback
-//     (product.matcher_pyramid, B3) in its own scratch textures.
+//     (row product.motion_warp, B3) in its own scratch textures.
 //   - The OwnerFill of (kP1HalfLuma, Gpu): serves the variant { codeUnit 8, scale 1..6 } (P1GpuFill.h contract); every level
 //     Acquires the level it is made from, so a level is never built twice per frame.
 //   - P1GpuModule: registers that fill with the skeleton (reserve derived from the observed source luma size, like the edge map).
@@ -384,6 +384,13 @@ namespace Vpv
 			std::atomic<bool> registered_{ false };
 		};
 
+		// The registered module (owned by the hub, which keeps its modules for the process lifetime); null before registration.
+		static std::atomic<P1GpuModule*>& RegisteredP1GpuModule()
+		{
+			static std::atomic<P1GpuModule*> module{ nullptr };
+			return module;
+		}
+
 		// Start-up only (HubBootstrap), after the skeleton module; idempotent.
 		void RegisterP1GpuModule()
 		{
@@ -391,7 +398,21 @@ namespace Vpv
 			if (registered)
 				return;
 			registered = true;
-			Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Hub::ISkeletonModule>(new P1GpuModule()));
+			P1GpuModule* const module = new P1GpuModule();
+			Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Hub::ISkeletonModule>(module));
+			RegisteredP1GpuModule().store(module, std::memory_order_release);
+		}
+
+		void NoteP1GpuSourceLuma(const void* host, uint32_t width, uint32_t height)
+		{
+			P1GpuModule* const module = RegisteredP1GpuModule().load(std::memory_order_acquire);
+			if (module == nullptr || host == nullptr || width == 0 || height == 0
+				|| Hub::ExtensionHub::Instance().OriginalPathway(host))
+				return;
+			VpSkeleton::Dims luma;
+			luma.width = width;
+			luma.height = height;
+			module->Observe(host, luma);
 		}
 	}
 }

@@ -20,12 +20,22 @@ namespace VpMotion
 		{
 			// NotConfigured: no skeleton memo for this frame (the skeleton is off): the matcher builds its own, as before, and
 			// shows nothing (there is no product to fall back from). Unavailable: the product was asked and not served: the matcher
-			// builds its own and the row product.matcher_pyramid is engaged with `cause`. Product: `tex` (a pl_tex) is the level.
+			// builds its own and the row product.motion_warp (catalog row 13) is engaged with `cause`. Product: `tex` (a pl_tex) is the level.
 			enum class State : uint8_t { NotConfigured, Product, Unavailable } state = State::NotConfigured;
 			void* tex = nullptr;
 			std::shared_ptr<const void> pin;   // keeps the texture alive; held by the matcher until its next Estimate
 			std::string cause;
 		};
-		typedef std::function<Level(uint64_t seq, int level, const void* lumaTex)> Source;
+		// One level asked by the matcher. `lumaTex` is the luma the matcher itself would downsample (for the lowRes inner: the
+		// outer's source luma); `fullRange` is the range the matcher would code level 1 with (Planes.fullRange): a shared plane
+		// whose range differs is declined with a named cause (the product's codes would differ from the matcher's own).
+		struct Request
+		{
+			uint64_t seq = 0;
+			int level = 0;
+			const void* lumaTex = nullptr;
+			bool fullRange = false;
+		};
+		typedef std::function<Level(const Request&)> Source;
 	}
 }

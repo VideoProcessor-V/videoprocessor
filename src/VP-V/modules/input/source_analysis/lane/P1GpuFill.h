@@ -201,7 +201,7 @@ if (p.x < size.x && p.y < size.y) {
 	}
 
 	// One compute pass of the pyramid law, run by the CALLER's dispatch path: the owner fill through OwnerFillRequest::gpu, the
-	// matcher's visible fallback (product.matcher_pyramid) through its own Dispatch (its pass timing maps keep their names).
+	// matcher's visible fallback (row product.motion_warp) through its own Dispatch (its pass timing maps keep their names).
 	// `description` is the matcher's former pass name; `header` is VpUnit::HalfLuma::Glsl() for a 2x2 pass and empty for a 4x4
 	// pass; `codes` is set (hasCodes) only for a 2x2 pass; width / height = the dst texture's size; group = 16 (2x2) or 8 (4x4).
 	struct PyramidPass {
@@ -236,5 +236,9 @@ namespace FrameAnalysis
 	// Start-up only (core/hub/HubBootstrap.cpp, after the skeleton module; idempotent): registers the (kP1HalfLuma, Gpu) owner fill
 	// of the matcher pyramid variant (BBP-B commit B2; defined in P1GpuFill.cpp).
 	void RegisterP1GpuModule();
+	// Render thread: the source luma size of a frame whose planes a VP-V uploader offered as P13 views before the Entrance phase (the
+	// matcher's A / B / ahead uploads, VectorEngine::OfferMatcherPlanes). Same effect as the module's Entrance observation: the fill
+	// is registered from the largest size (re-registered only when it changes). No-op before RegisterP1GpuModule.
+	void NoteP1GpuSourceLuma(const void* host, uint32_t width, uint32_t height);
 }
 }

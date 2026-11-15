@@ -673,10 +673,15 @@ namespace Dejudder
 		void ReleaseBorrowedB();
 		bool RebuildBWithFade(const Planes& b, pl_tex fadeTex, int levels);
 		bool BuildOwnPyramid(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, int from, int levels);
+		// LOW-3: makes A's own levels and the K set again after the product was bound (they are freed while it is; no-op otherwise).
+		bool EnsureOwnPyramidScratch();
 		VpMotion::MatcherPyramid::Source pyramidSource;
 		std::string pyramidFallbackWhy;
 		bool pyramidBound = false;        // this Estimate read the product
 		bool keptOwned = false;           // the last pair's B planes are the matcher's own (reusable as the next A)
+		bool ownPyramidLazy = false;      // A's own levels / the K set freed while the product is bound (LOW-3)
+		pl_fmt pyramidFmt = nullptr;      // the own pyramid scratch format (EnsureTextures)
+		bool borrowed[6] = {};            // slot i holds the product's texture (ReleaseBorrowed gives parkedOwn[i] back, null if freed)
 		pl_tex parkedOwn[6] = {};
 		std::shared_ptr<const void> pins[6];
 		const void* productLuma[2] = { nullptr, nullptr };   // the lowRes inner: the outer's source luma (A, B) the product was made from
@@ -844,10 +849,18 @@ namespace Dejudder
 		// L-B4 (BBP-B B3): the shared luma pyramid read seam (null = the matcher builds its own, as before). The engine sets it;
 		// Estimate reads the levels it needs from the product, and on a product that is not served builds its own pyramid through
 		// the owner's law function (P1Gpu::BuildPyramidInto) and shows it: PyramidFallbackWhy() non-empty = engage the row
-		// product.matcher_pyramid ("matcher builds its own pyramid: <cause>"), empty = released.
+		// product.motion_warp (the catalog's matcher row 13 fallback), empty = released. MED-1: the lowRes inner's own decline in the
+		// same estimate is included ("lowRes inner: <cause>"), so a fallen-back inner is never hidden behind a bound outer.
 		void SetPyramidSource(VpMotion::MatcherPyramid::Source source) { pyramidSource = std::move(source); }
-		const std::string& PyramidFallbackWhy() const { return pyramidFallbackWhy; }
+		std::string PyramidFallbackWhy() const
+		{
+			if (!pyramidFallbackWhy.empty() || !inner)
+				return pyramidFallbackWhy;
+			const std::string innerWhy = inner->PyramidFallbackWhy();
+			return innerWhy.empty() ? innerWhy : "lowRes inner: " + innerWhy;
+		}
 		bool PyramidFromProduct() const { return pyramidBound; }
+		bool InnerPyramidFromProduct() const { return inner && inner->pyramidBound; }
 		// Plan 19 phase 2 (global camera model, global_model/CameraGuidanceGpu.h): the measurement plan's
 		// guidance for the NEXT Estimate (null or inactive = today's matcher exactly; nothing bound or
 		// dispatched). Cleared by each Estimate. A low-resolution inner receives it scaled.

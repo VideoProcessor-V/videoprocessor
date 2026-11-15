@@ -966,7 +966,6 @@ namespace FallbackCatalog
 			{ "product.chroma_cfl", "chroma upscale runs a lower tier without the grain guard (chroma split unavailable)" },
 			{ "product.entrance", "entrance stages run in the render with no work done ahead (entrance output unavailable)" },
 			{ "product.motion_warp", "motion warp builds its own half-resolution pyramids (shared half luma unavailable)" },
-			{ "product.matcher_pyramid", "matcher builds its own pyramid" },
 			{ "product.nvof_producer", "optical-flow producer builds its own 8-bit half luma (shared half luma unavailable)" },
 			{ "product.region_evidence", "regional repairs use their own local statistics (shared split / light level unavailable)" },
 			{ "product.contrast_recovery", "contrast recovery uses the classical bitrate quality for its need test (source identity unavailable)" },

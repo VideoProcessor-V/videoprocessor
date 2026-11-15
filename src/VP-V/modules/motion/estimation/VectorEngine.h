@@ -449,8 +449,17 @@ namespace VpMotion
 		std::string ProducerStatusSegment() const;
 		// L-B4 (BBP-B B3): the matcher's read seam for the shared luma pyramid (kP1HalfLuma, Gpu, MatcherPyramidKey(level)) of the
 		// renderer registered under this engine's host. NotConfigured without a skeleton memo for the frame (nothing to fall back
-		// from); Unavailable with the cause when the product is asked and not served (the matcher then shows product.matcher_pyramid).
-		MatcherPyramid::Source MatcherPyramidSource() const;
+		// from); Unavailable with the cause when the product is asked and not served (the matcher then shows the catalog row 13 id
+		// product.motion_warp). `namedException` (non-null: RGB structure luma, DV unpack output) = every level is Unavailable with
+		// "named exception: <it>" (plan (b): those lumas are not the shared source plane).
+		MatcherPyramid::Source MatcherPyramidSource(const char* namedException = nullptr) const;
+		// L-B4 (BBP-B HIGH-1): the matcher's A / B / ahead-C uploads ARE the unpacked planes of those queued frames on the render
+		// device: offered as P13 views (SourcePlanes::Offer, VP-V code, no host line) for this render frame BEFORE the estimate, so
+		// the P1 owner fill finds its source and the read seam its identity. Render thread. `luma` / `chroma` are pl_tex (chroma may
+		// be null). The generation is below every render frame's, so the Entrance offer of the same seq wins later Find calls; the
+		// memo keeps what the frame's first P13 Acquire saw. False = not offered (Original pathway, no host, table full).
+		bool OfferMatcherPlanes(uint64_t seq, const void* luma, const void* chroma, bool fullRange) const;
+		static constexpr int64_t kMatcherOfferGeneration = -1;
 
 	private:
 		void NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence, uint64_t epochAtChoice);

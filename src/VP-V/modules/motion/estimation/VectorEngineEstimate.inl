@@ -363,7 +363,17 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			++vectorEngine.motionGapUnseeded;
 	}
 	SyncFallback(vectorEstimate.SnapshotLeaseDecision(GetTickCount64()));   // SK-MV: a lost snapshot lease is shown while recent
-	dejudder->SetPyramidSource(vectorEngine.MatcherPyramidSource());   // L-B4 (BBP-B B3): the shared luma pyramid read seam
+	// L-B4 (BBP-B B3 + HIGH-1): the shared luma pyramid read seam. A's and B's planes (B's and C's ahead) are the unpacked planes of
+	// those queued frames: offered as P13 views before the estimate (VP-V code; no host line), so the P1 owner fill finds its source
+	// and the seam its identity. The named exceptions of plan (b) are not offered and are shown as such.
+	const char* const pyramidException = dejudderLayout.rgb ? "RGB source: the matcher's luma comes from the RGB unpack" :
+		dejudderLayout.dvTunnelRaw ? "Dolby Vision tunnel: the matcher's luma is the DV unpack output" : nullptr;
+	if (pyramidException == nullptr)
+	{
+		vectorEngine.OfferMatcherPlanes(aSequence, a.luma, a.chroma, a.fullRange);
+		vectorEngine.OfferMatcherPlanes(bSequence, b.luma, b.chroma, b.fullRange);
+	}
+	dejudder->SetPyramidSource(vectorEngine.MatcherPyramidSource(pyramidException));
 	dejudder->SetFieldSource(&vectorEstimate);   // SK-MV pass-through (TEMPORARY until P5c): Field/FrameTrust/SubField read the shared view
 	dejudderLiveFieldFrom = 0;   // the live outputs are being replaced
 	motionSegment.Retract(VpMotion::Direction::Forward);
@@ -508,8 +518,11 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		// SK-MV: the one-engine guard is visible (Ctrl+I / Fallbacks) while more than one Engine session is open on one GPU. Synced here,
 		// not in VectorEngineFallbackSync (VectorEngineTests pins that group's exact sync counts, WAIVER-T1-01).
 		// L-B4 (BBP-B B3): the matcher built its own luma pyramid because the shared one was not served (visible, never log-only).
-		SyncFallback(dejudder->PyramidFallbackWhy().empty() ? FallbackCatalog::Released("product.matcher_pyramid") :
-			FallbackCatalog::ProductFallback("product.matcher_pyramid", dejudder->PyramidFallbackWhy()));
+		// The id is the catalog's matcher row 13 fallback (ProductCatalog.h, product.motion_warp): one row for one downgrade (LOW-2).
+		// The lowRes inner's own decline is included (MED-1).
+		const std::string pyramidWhy = dejudder->PyramidFallbackWhy();
+		SyncFallback(pyramidWhy.empty() ? FallbackCatalog::Released("product.motion_warp") :
+			FallbackCatalog::ProductFallback("product.motion_warp", pyramidWhy));
 		SyncFallback(FallbackCatalog::NvofSessions(NvOpticalFlow::Sessions::MostOpenOnOneGpu(NvOpticalFlow::SessionKind::Engine),
 			NvOpticalFlow::Sessions::Violations()));
 	}
