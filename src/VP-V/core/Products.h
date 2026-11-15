@@ -95,7 +95,7 @@ enum : ProductId {
     // Id 30 (lead 8 allocation 30, 11-14; lead 12 R1: ids fixed, no renumbering) is NOT registered: a GpuCompute product is registered only
     // with its owner fill (R13-8, 102b B3-ID30-EXCLUSIONS); the fill and the id land together (102b LB3-BAND-MEMO-GPU).
     kBandMemo = 30,       // 30 band_memo (BandMemo; implementation not landed on this line: RESERVED)
-    kEdgeMap = 31,        // 31 edge_map (per-frame memo of the source-luma Sobel; readers: L-FOCUS focus map, L-B5 busy-edge; later deband guard, occlusion, TD; the AdaptiveDownscale ramp is NOT a reader, R14-64/X5)
+    kEdgeMap = 31,        // 31 edge_map (C3 fixed id table; per-frame memo of the source-luma Sobel; readers: L-FOCUS focus map, L-B5 busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3); frozen 17:19; 102b X5-EDGEMAP-CJ3, KEDGEMAP-RULE3 UPDATE :523); later deband guard, occlusion, TD); lead 8 allocation 31, 05:2x 11-14
     kFocusMap = 32,       // 32 focus_map (L-FOCUS; RESERVED until it lands)
     kRoomLight = 33,      // 33 room_light (DV block; RESERVED until it lands)
     kComposedVectors = 34,// 34 composed_vectors (RESERVED until it lands)

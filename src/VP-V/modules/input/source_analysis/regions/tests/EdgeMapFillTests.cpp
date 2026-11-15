@@ -255,14 +255,14 @@ namespace VideoProcessorTest
 			req.form = AcquireForm::Gpu;
 
 			// A reserve derived from a smaller source than the frame: the texture would pass it (visible decline, nothing made).
-			RefusingDevice small;
-			OwnerGpuContext under(&small, need - 1u);
+			RefusingDevice smallDev; // not "small": rpcndr.h defines small as char
+			OwnerGpuContext under(&smallDev, need - 1u);
 			req.gpu = &under;
 			OwnerFillOutput out;
 			Assert::IsFalse(f.fill(req, m, out), L"above the reserve: declined");
 			Assert::IsTrue(out.declineReason.find("edge_map: ") == 0 && out.declineReason.find("reserve") != std::string::npos,
 				L"worded with the reserve");
-			Assert::AreEqual(0, small.asked, L"the device is never asked");
+			Assert::AreEqual(0, smallDev.asked, L"the device is never asked");
 			Assert::AreEqual(uint64_t(1), under.Refused(), L"counted as refused");
 
 			// The derived reserve fits exactly: the device is asked for one R32F plane of the luma size.
