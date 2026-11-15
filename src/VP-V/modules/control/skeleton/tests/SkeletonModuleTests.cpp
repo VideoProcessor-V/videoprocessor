@@ -1867,7 +1867,9 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(f.fullBetween, L"no resync event between the frames");
 			// The same pair classification the shared unit gives for those two records (U7): SceneFactsOf derives the fade from it and keeps
 			// the v1 pair cut / flash / cutPossible as pair* (WAIVER-U7ACC-SKELETON-SCENE: cut / flash / cutPossible are now the v2 sequence
-			// law's verdict; on noise frames it calls no cut either).
+			// law's verdict: the same as the shared CutTracker gives over the readable P4 records up to frame 4, judged without frame 5.
+			// WAIVER-U7ACC-NOISE-VERDICT: this replaces the lane's own earlier "no cut on noise" line, which assumed context frames the
+			// lane's P4 ring does not keep; a provisional verdict without context is decided on L alone, by the documented law).
 			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
 			const VpSkeleton::AnalysisLane::ProductRead cur = lane->ReadOf(VpSkeleton::kP4SourceStats, 4);
 			const VpSkeleton::AnalysisLane::ProductRead prev = lane->ReadOf(VpSkeleton::kP4SourceStats, 3);
@@ -1878,8 +1880,27 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual(e.flash, f.pairFlash);
 			Assert::AreEqual(e.fade, f.fade);
 			Assert::AreEqual(e.cutPossible, f.pairCutPossible);
-			Assert::IsFalse(f.cut, L"noise frames: no sequence-law cut");
 			Assert::IsFalse(f.confirmed, L"frame 5 is not sealed: provisional");
+			VpUnit::CutFadeJudge::CutTracker tracker;
+			tracker.Reset();
+			VpLaneProducts::SourceStatsRecord r;
+			int pushed = 0;
+			for (int64_t s = 1; s <= 4; ++s)
+			{
+				const VpSkeleton::AnalysisLane::ProductRead read = lane->ReadOf(VpSkeleton::kP4SourceStats, uint64_t(s));
+				if (read.cpu != nullptr && VpLaneProducts::ReadSourceStats(read.cpu, read.cpuBytes, &r))
+				{
+					tracker.Push(uint64_t(s), r);
+					++pushed;
+				}
+			}
+			Assert::IsTrue(pushed >= 2, L"frames 3 and 4 are readable");
+			const VpUnit::CutFadeJudge::CutVerdict expected = tracker.Provisional();
+			Assert::IsTrue(expected.known && expected.seq == 4u);
+			Assert::AreEqual(expected.cut, f.cut, L"the shared sequence law's verdict, not a private one");
+			Assert::AreEqual(expected.flash, f.flash);
+			Assert::AreEqual(expected.candidate, f.cutPossible);
+			Assert::AreEqual(expected.gridLaw, f.gridLaw);
 			Assert::AreEqual(e.histDistance, f.histDistance);
 			Assert::IsTrue(f.histDistance > 0u, L"two different noise frames never have identical histograms");
 			Assert::AreEqual(c.mean, f.curMean);
