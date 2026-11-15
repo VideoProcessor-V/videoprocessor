@@ -247,6 +247,24 @@
      "pattern": "avg = 0\\.25 \\* \\(texture",
      "kind": "false_positive",
      "reason": "4-tap ring average around the pixel (deband sampling), not a downsample (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
+     "pattern": "vec2 vpt = use_temporal",
+     "kind": "false_positive",
+     "reason": "previous-frame vector scale (x 0.25), not a 2x2 box (gate-C1-batch2 row 0a9e66738: verified FP)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
+     "pattern": "h[0-3] \\* \\(1\\.0 - 0\\.(75|25)\\) \\+ h[0-3] \\* 0\\.(75|25)",
+     "kind": "false_positive",
+     "reason": "linear interpolation weights 0.25/0.75 between smoothed rows, not a 2x2 box (gate-C1-batch2 row 0a9e66738: verified FP, pattern narrowed to the statement as the gate prescribed)"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
+     "pattern": "length\\(vec2\\(gx, gy\\)\\) \\* 0\\.25",
+     "kind": "false_positive",
+     "reason": "Sobel gradient normalisation, not a downsample (gate-C1-batch2 row 0a9e66738: verified FP)"
     }
    ]
   },
