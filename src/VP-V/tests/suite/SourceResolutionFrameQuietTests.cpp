@@ -469,6 +469,37 @@ namespace VideoProcessorTest
 			quiet.EndFrame();
 		}
 
+		// C1 gate SHOULD-5: counted through Poll's flush rule (ReadyGate::PollFlushes, the exact condition Poll uses before
+		// immediate->Flush()): over 50 Original frames, each with one waiting monitor tile copy, VP flushes nothing (as integ
+		// 2e77256c7 and 4aac4f63c). Without the hold (unarmed, the state MUST-1 alone left) it would be one flush per copy.
+		// A VP frame (Arm) ends the hold; armed frames never flush in Poll.
+		TEST_METHOD(OriginalFramesIssueNoPollFlushAndAVpFrameEndsTheHold)
+		{
+			using LedDrive::ReadyGate;
+			LedDrive::DeferredCopies& deferral = LedDrive::DeferredCopies::ForThisThread();
+			FrameQuiet::Deferred quiet;
+			struct EndHold { FrameQuiet::Deferred& q; ~EndHold() { q.Arm(nullptr); q.EndFrame(); } } endHold{ quiet };   // never leak the hold into later tests on this thread
+			Assert::IsTrue(ReadyGate::PollFlushes(ReadyGate::Step::FenceWaiting, false, false, false),
+				L"unarmed and not held: one flush per waiting copy (tests, other hosts; the state MUST-1 alone left in Original)");
+			int originalFlushes = 0;
+			for (int frame = 0; frame < 50; ++frame)
+			{
+				quiet.OriginalFrame(nullptr);
+				if (ReadyGate::PollFlushes(ReadyGate::Step::FenceWaiting, false, deferral.Armed(), deferral.PollFlushHeld())) ++originalFlushes;
+			}
+			Assert::AreEqual(0, originalFlushes, L"no VP flush in Original");
+			quiet.Arm(nullptr);
+			Assert::IsFalse(deferral.PollFlushHeld(), L"a VP frame ends the hold");
+			Assert::IsFalse(ReadyGate::PollFlushes(ReadyGate::Step::FenceWaiting, false, deferral.Armed(), deferral.PollFlushHeld()),
+				L"armed: the host flushes after the submit, never Poll");
+			quiet.EndFrame();
+			Assert::IsTrue(ReadyGate::PollFlushes(ReadyGate::Step::FenceWaiting, false, deferral.Armed(), deferral.PollFlushHeld()),
+				L"after the VP End (unarmed, not held): Poll's one-shot flush is back, as at 4aac4f63c");
+			Assert::IsFalse(ReadyGate::PollFlushes(ReadyGate::Step::FenceWaiting, true, false, false), L"once per copy");
+			Assert::IsFalse(ReadyGate::PollFlushes(ReadyGate::Step::MapProbe, false, false, false), L"only a waiting copy");
+			Assert::IsFalse(ReadyGate::PollFlushes(ReadyGate::Step::NotIssued, false, false, false));
+		}
+
 		// C1 gate SHOULD-4: a frame whose post-frame end never ran is named as such, not as copies issued late.
 		TEST_METHOD(AMissedEndIsNamedApartFromLateCopies)
 		{
