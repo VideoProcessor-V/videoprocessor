@@ -7761,8 +7761,9 @@ namespace Tests
 		TEST_METHOD(VectorEngineSmoothMotionKeepsAnalysis)
 		{
 			const HarnessScope harnessScope;
-			// With libplacebo's smooth motion as the motion engine VP's engine has no starter: the source consumers and the output
-			// dither are named as without vectors (WAIVER-THSM-02; the control, with a starter, serves the sigma-delta).
+			// With libplacebo's smooth motion as the motion engine VP's engine is off by exclusivity (batch B: VectorDemand::DecideForHost,
+			// SmoothMotionExclusive): the source consumers and the output dither are named as without vectors (WAIVER-THSM-02; the
+			// control, without smooth motion, serves the sigma-delta).
 			if (!RequireHardwareOrSkip("VectorEngineSmoothMotionKeepsAnalysis")) return;
 			if (VectorTestSkip("VectorEngineSmoothMotionKeepsAnalysis")) return;
 			const FramePlan plan = RatePlan(HarnessMonitorHz() * 0.4);
@@ -7806,7 +7807,7 @@ namespace Tests
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("Motion engine: libplacebo smooth motion"), (L"smooth motion is the engine\n" + r.Tail()).c_str());
 			// WAIVER-THSM-02 (coordinator 2026-11-12 18:42; owner 2026-11-12 18:47): under owner decision D (2026-11-11) and the
-			// motion-engine exclusivity, libplacebo's smooth motion owns the output and no starter runs VP's engine, so the reuse-only
+			// motion-engine exclusivity, libplacebo's smooth motion owns the output and VP's engine is off by that exclusivity (batch B), so the reuse-only
 			// source consumers are NAMED as without vectors (a visible fallback), not served. The former assertion ("Vector engine: on
 			// (forward)" - a source consumer is served) is replaced by that naming; the control and the dither assertion stay.
 			bool sourceNamedWithout = false;

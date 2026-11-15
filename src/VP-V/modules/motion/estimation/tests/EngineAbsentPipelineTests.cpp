@@ -3,7 +3,7 @@
 //
 // W2-C1 (C1-4, B9 "one motion-engine state"): the engine-absent pipeline. Pure CPU, 600 frames per scenario, every want ON. Each
 // frame runs the renderer's per-frame order with the product code: VectorEngine::PlanProducer (null device) -> the VectorDemand
-// input (VectorDemandInput: the synthesis wants follow the settings) -> VectorEngine::UpdateVectorEngine (VectorDemand::Decide,
+// input (VectorDemandInput: the synthesis wants follow the settings) -> VectorEngine::UpdateVectorEngine (VectorDemand::DecideForHost,
 // the engine state, the fallback entries) -> RunDejudderDecision (DejudderDecisionRunnerHost.h) -> the pair check and estimate.
 // The matcher's own counter sites live in renderer files (EngineKeeper.inl warm-up, VectorEngineEstimate.inl create / estimate,
 // DejudderPolicyRunner.inl analysis estimate); they are modelled here at the decision level with the same conditions: a warm-up
