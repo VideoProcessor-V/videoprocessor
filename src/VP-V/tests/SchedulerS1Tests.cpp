@@ -613,6 +613,34 @@ namespace SchedulerS1Test
 			Assert::AreEqual(2ull, feed.Published());
 		}
 
+		// C4 s3a SHOULD 2 (lead17 opus-audit-s3a-inc): the feed hands back each pending entry's PHYSICAL slot (AheadRing::SlotAt), so after
+		// a consume the host publishes the texture the pair was estimated into, never the slot of its ring position.
+		TEST_METHOD(AheadFeedPendingGivesEachEntrysSlotAfterAConsume)
+		{
+			AheadRing ring(3);
+			ring.Push(EntryKey{ 2, 3, 1 });   // slot 0
+			ring.Push(EntryKey{ 3, 4, 1 });   // slot 1
+			ring.Push(EntryKey{ 4, 5, 1 });   // slot 2
+			Assert::IsTrue(ring.Consume(2, 3, 1));
+			Assert::IsTrue(ring.Push(EntryKey{ 5, 6, 1 }) == PushResult::Held);   // into the freed slot 0
+			AheadFeed feed;
+			uint64_t out[8] = {};
+			int slots[8] = { -9, -9, -9, -9, -9, -9, -9, -9 };
+			Assert::AreEqual(3, feed.Pending(ring, out, 8, slots));
+			Assert::AreEqual(uint64_t(4), out[0]);
+			Assert::AreEqual(1, slots[0], L"(3,4) sits in slot 1 though it is ring position 0");
+			Assert::AreEqual(uint64_t(5), out[1]);
+			Assert::AreEqual(2, slots[1]);
+			Assert::AreEqual(uint64_t(6), out[2]);
+			Assert::AreEqual(0, slots[2], L"(5,6) was estimated into the freed slot 0");
+			Assert::AreEqual(-9, slots[3], L"nothing written past the pending entries");
+			feed.MarkPublished(4);
+			Assert::AreEqual(2, feed.Pending(ring, out, 8, slots));
+			Assert::AreEqual(2, slots[0]);
+			Assert::AreEqual(0, slots[1]);
+			Assert::AreEqual(2, feed.Pending(ring, out, 8), L"slots stay optional");
+		}
+
 		// Q5: auto = on only once the S1 acceptance row is recorded; the status says which.
 		TEST_METHOD(AutoKeyFollowsTheAcceptanceRow)
 		{

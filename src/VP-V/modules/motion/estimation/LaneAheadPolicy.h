@@ -418,12 +418,17 @@ private:
 // Pure: the host publishes the slot for each `to` returned.
 class AheadFeed {
 public:
-    // The `to` frames of held entries not yet published, ascending (written to out[0..n), n returned; at most `max`).
-    int Pending(const AheadRing& ring, uint64_t* out, int max) const
+    // The `to` frames of held entries not yet published, ascending (written to out[0..n), n returned; at most `max`). `slots` (optional,
+    // room for `max`) gets each entry's PHYSICAL host slot, AheadRing::SlotAt(i): a ring position is not a slot once the front has been
+    // consumed (PREC2-S3A MUST 3; C4 s3a SHOULD 2), so the host publishes the texture the pair was estimated into.
+    int Pending(const AheadRing& ring, uint64_t* out, int max, int* slots = nullptr) const
     {
         int n = 0;
         for (int i = 0; i < ring.Held() && n < max; ++i)
-            if (ring.At(i).to > m_lastPublished) out[n++] = ring.At(i).to;
+            if (ring.At(i).to > m_lastPublished) {
+                if (slots != nullptr) slots[n] = ring.SlotAt(i);
+                out[n++] = ring.At(i).to;
+            }
         return n;
     }
     void MarkPublished(uint64_t to) { if (to > m_lastPublished) { m_lastPublished = to; ++m_published; } }
