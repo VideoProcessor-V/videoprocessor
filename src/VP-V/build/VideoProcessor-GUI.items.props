@@ -28,9 +28,8 @@
     <ClCompile Include="..\VP-V\modules\control\diagnostics\ExeLogRing.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <!-- S-3f b: static registration of the "global shortcuts" Fallbacks entry (DialogExtension seam). -->
-    <ClCompile Include="..\VP-V\gui\ShortcutObserverStatus.cpp">
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-    </ClCompile>
+    <!-- S-3f b: the default report key's background hook and its static DialogExtension registration.
+         It uses the GUI's precompiled header (pch.h: MFC, for AfxGetMainWnd). -->
+    <ClCompile Include="..\VP-V\gui\ShortcutObserverStatus.cpp" />
   </ItemGroup>
 </Project>
