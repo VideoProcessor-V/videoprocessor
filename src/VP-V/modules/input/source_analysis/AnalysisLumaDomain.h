@@ -38,6 +38,8 @@
 #include <ColorSpace.h>
 #include <VideoFrameEncoding.h>
 
+#include "AnalysisAxis10.h" // S-2a: the axis laws (Q6 fractions, Shift/Scale decode); this header is the unit's public face
+
 struct AnalysisLumaSample;
 struct AnalysisLumaSource;
 

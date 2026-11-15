@@ -33,7 +33,7 @@ Per plane the passes are, in this order:
 
 ### Data flow
 
-In: the `pl_frame` planes (any count, up to 3 components each). Out: a copy of the frame whose plane textures are the module's `out[slot][plane]`. The module owns them; they are overwritten by the next call on the same slot and freed by `Release`. The weight textures (`weight[2][plane]`, r16f) belong to slot 0. A repeat of the same `sequence` is recomputed against the same previous weights and never advances them.
+In: the `pl_frame` planes (any count, up to 3 components each). Out: a copy of the frame whose plane textures are the module's `out[slot][plane]`. The module owns them; they are overwritten by the next call on the same slot and freed by `Release`. The weight textures (`weight[2][plane]`, r32f) belong to slot 0. A repeat of the same `sequence` is recomputed against the same previous weights and never advances them.
 
 Call sites (`src/VP-V/segments/EntranceSegment.cpp`, `Segment::Deband`, run in the slot registry's entrance order after the re-base):
 

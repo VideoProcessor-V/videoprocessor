@@ -488,7 +488,7 @@ if (b.x < size.x && b.y < size.y) {
 				pl_tex_params wp{};
 				wp.w = w;
 				wp.h = h;
-				wp.format = StorableLike(gpu, pl_find_named_fmt(gpu, "r16f"));
+				wp.format = StorableLike(gpu, pl_find_named_fmt(gpu, "r32f"));
 				wp.sampleable = true;
 				wp.storable = true;
 				if (!wp.format || !pl_tex_recreate(gpu, &weight[next][plane], &wp))
@@ -540,7 +540,7 @@ if (b.x < size.x && b.y < size.y) {
 				pl_tex_params gp{};
 				gp.w = (w + 15) / 16;
 				gp.h = (h + 15) / 16;
-				gp.format = StorableLike(gpu, pl_find_named_fmt(gpu, "r16f"));
+				gp.format = StorableLike(gpu, pl_find_named_fmt(gpu, "r32f"));
 				gp.sampleable = true;
 				gp.storable = true;
 				if (!gp.format || !pl_tex_recreate(gpu, &guard[slot][plane], &gp))

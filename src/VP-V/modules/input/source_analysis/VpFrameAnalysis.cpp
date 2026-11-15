@@ -2,6 +2,7 @@
 #include "VpFrameAnalysis.h"
 #include "SourceFrameTap.h"
 #include <VP-V/modules/input/signal/DvTunnelTapLaw.h>
+#include <VP-V/modules/input/source_analysis/AnalysisAxis10.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
@@ -155,7 +156,7 @@ namespace VpFrameAnalysis
 		{
 			// The lanes' upper ten bits, mapped as Sample() maps them (PlaneLuma).
 			for (int i = 0; i < count; ++i)
-				m_buffer[static_cast<size_t>(i)] = m_source.PlaneLuma(static_cast<uint16_t>(plane[x0 + i] >> 6));
+				m_buffer[static_cast<size_t>(i)] = m_source.PlaneLuma(static_cast<uint16_t>(Vpv::AnalysisDomain::Floor10FromQ6(plane[x0 + i])));
 			return m_buffer.data();
 		}
 		if (m_source.SampleLumaRow(x0, y, count, m_buffer.data()))

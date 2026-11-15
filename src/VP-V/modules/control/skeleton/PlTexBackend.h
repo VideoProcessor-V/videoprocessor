@@ -25,12 +25,12 @@ struct PlTexBackend {
             return nullptr;
         const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE);
         switch (f) {
-        case TexFormat::R8: return pl_find_fmt(gpu, PL_FMT_UNORM, 1, 8, 8, caps);
+        case TexFormat::R8: return pl_find_fmt(gpu, PL_FMT_UNORM, 1, 8, 8, caps);  // PRECISION-OK 119#17a: format lookup: the requested R8 maps to an 8-bit unorm pl_fmt, 1:1, no substitution
         case TexFormat::R16: return pl_find_fmt(gpu, PL_FMT_UNORM, 1, 16, 16, caps);
         case TexFormat::RG16: return pl_find_fmt(gpu, PL_FMT_UNORM, 2, 16, 16, caps);
-        case TexFormat::R16F: return pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 16, 16, caps);
-        case TexFormat::RG16F: return pl_find_fmt(gpu, PL_FMT_FLOAT, 2, 16, 16, caps);
-        case TexFormat::RGBA16F: return pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16, caps);
+        case TexFormat::R16F: return pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 16, 16, caps);  // PRECISION-OK 119#17a: format lookup: R16F maps to a 16-bit float pl_fmt, 1:1; no narrowing of a wider request
+        case TexFormat::RG16F: return pl_find_fmt(gpu, PL_FMT_FLOAT, 2, 16, 16, caps);  // PRECISION-OK 119#17a: format lookup: RG16F maps to a 16-bit float pl_fmt, 1:1; no narrowing of a wider request
+        case TexFormat::RGBA16F: return pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16, caps);  // PRECISION-OK 119#17a: format lookup: RGBA16F maps to a 16-bit float pl_fmt, 1:1; no narrowing of a wider request
         case TexFormat::R32F: return pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, caps);
         case TexFormat::RG32F: return pl_find_fmt(gpu, PL_FMT_FLOAT, 2, 32, 32, caps);
         case TexFormat::RGBA32F: return pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, caps);
@@ -48,9 +48,9 @@ struct PlTexBackend {
         const int n = fmt->num_components;
         const int d = fmt->component_depth[0];
         if (fmt->type == PL_FMT_FLOAT) {
-            if (d == 16 && n == 1) *out = TexFormat::R16F;
-            else if (d == 16 && n == 2) *out = TexFormat::RG16F;
-            else if (d == 16 && n == 4) *out = TexFormat::RGBA16F;
+            if (d == 16 && n == 1) *out = TexFormat::R16F;  // PRECISION-OK 119#17a: reverse lookup of the exact depth, 1:1, no narrowing
+            else if (d == 16 && n == 2) *out = TexFormat::RG16F;  // PRECISION-OK 119#17a: reverse lookup of the exact depth, 1:1, no narrowing
+            else if (d == 16 && n == 4) *out = TexFormat::RGBA16F;  // PRECISION-OK 119#17a: reverse lookup of the exact depth, 1:1, no narrowing
             else if (d == 32 && n == 1) *out = TexFormat::R32F;
             else if (d == 32 && n == 2) *out = TexFormat::RG32F;
             else if (d == 32 && n == 4) *out = TexFormat::RGBA32F;
@@ -58,7 +58,7 @@ struct PlTexBackend {
             return true;
         }
         if (fmt->type == PL_FMT_UNORM) {
-            if (d == 8 && n == 1) *out = TexFormat::R8;
+            if (d == 8 && n == 1) *out = TexFormat::R8;  // PRECISION-OK 119#17a: reverse lookup of the exact depth, 1:1, no narrowing
             else if (d == 16 && n == 1) *out = TexFormat::R16;
             else if (d == 16 && n == 2) *out = TexFormat::RG16;
             else return false;
