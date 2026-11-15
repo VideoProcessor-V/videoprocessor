@@ -18141,7 +18141,7 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 
 
 		++m_timerSeconds;
-		DialogExtension::OnTimer();   // VPV-HOOK
+		DialogExtension::OnTimer({ m_interfaceMode == ApplicationInterface::Mode::Modern, m_hideUI, m_shortcutsForegroundOnly, m_shortcutsGlobalHotkeys, m_shortcutsGlobalActions.size(), GlobalShortcutObserver::IsRunning() });   // VPV-HOOK
 	}
 
 	CDialog::OnTimer(nIDEvent);

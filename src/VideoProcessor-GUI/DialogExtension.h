@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
@@ -26,6 +27,19 @@ namespace DialogExtension
 {
 	using StatsRow = std::pair<std::wstring, std::wstring>;
 
+	// The dialog's facts handed over with the one-second timer (the payload of the existing OnTimer
+	// seam line, refs/107: extend a seam's payload, never a new line). Plain values of the dialog's
+	// own members; an extension that needs none of them ignores them.
+	struct DialogFacts
+	{
+		bool modernInterface = false;            // m_interfaceMode == Modern
+		bool noUi = false;                       // m_hideUI
+		bool shortcutsForegroundOnly = false;    // [shortcuts] foreground_only
+		bool shortcutsGlobalHotkeys = false;     // [shortcuts] global_hotkeys
+		size_t shortcutsGlobalActions = 0;       // size of the [shortcuts] global_actions set in force
+		bool shortcutObserverRunning = false;    // the background keyboard hook is installed
+	};
+
 	class IDialogExtension
 	{
 	public:
@@ -33,6 +47,8 @@ namespace DialogExtension
 
 		// Once per second from the dialog's timer.
 		virtual void OnTimer() {}
+		// The same tick with the dialog's facts (called right after OnTimer()).
+		virtual void OnTimerFacts(const DialogFacts& facts) { (void)facts; }
 		// True when the request was handled; `reply` then holds the answer.
 		virtual bool OnRpcRequest(const std::string& verb, const std::string& payload, std::string& reply)
 		{ (void)verb; (void)payload; (void)reply; return false; }
@@ -60,10 +76,23 @@ namespace DialogExtension
 		catch (...) {}
 	}
 
+	inline void OnTimer(const DialogFacts& facts) noexcept
+	{
+		try
+		{
+			for (IDialogExtension* e : Detail::Registry())
+			{
+				try { e->OnTimer(); } catch (...) {}
+				try { e->OnTimerFacts(facts); } catch (...) {}
+			}
+		}
+		catch (...) {}
+	}
+
+	// Without facts (tests, callers that have none): every fact at its default.
 	inline void OnTimer() noexcept
 	{
-		try { for (IDialogExtension* e : Detail::Registry()) { try { e->OnTimer(); } catch (...) {} } }
-		catch (...) {}
+		OnTimer(DialogFacts{});
 	}
 
 	// First extension that returns true wins.

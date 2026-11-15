@@ -6,6 +6,7 @@ VP's parts of the executable's GUI, out of `VideoProcessorDlg.cpp` and `StatsOve
 | Header | One job |
 |---|---|
 | `VpStatusAdapter.h` | The one place the dialog gets VP's status lines (a thin client of the one status reader, `modules/control/diagnostics/StatusExtension`, W1-C14): one poll of the renderer's VP module (`vpv.modules.v1` Status through `VpvCalls::GetModuleStatus`, module `vp`), the Ctrl+I extension rows, the crash-state keys, the Ctrl+Alt+D bundle lines, the content/room/key-override lines, and the VP shortcut dispatcher. MFC side, header-only |
+| `ShortcutObserverStatus.h` / `.cpp` | The "global shortcuts" Fallbacks entry while the background keyboard hook that VP's global keys need is not running (rule 5). A `DialogExtension` fed by the payload of the existing `DialogExtension::OnTimer` seam line (the dialog's facts); VP-V pathways only (the Original pathway and Bill's config-only observer stay log-only, as Bill). `VpStatusAdapter.h` `Poll` adds the entry to the Fallbacks line, so the Config status, the one-time notice, Ctrl+I, the crash state and the Ctrl+Alt+D bundle show it. The `.cpp` registers it statically (GUI executable only, `build/VideoProcessor-GUI.items.props`). The pathway is read once: a switch applies at the next start |
 | `VpShortcuts.h` | VP's command ids (moved out of `Resource.h`, same values), their `[shortcuts]` keys and their place in the binding order (`Merge`). Pure |
 
 The wording and order live in `core/StatusText.h` (pure, CPU-tested). Tests:
