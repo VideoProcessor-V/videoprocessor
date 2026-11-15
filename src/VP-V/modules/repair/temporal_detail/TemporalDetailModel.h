@@ -13,6 +13,7 @@
 // Reset() at discontinuities; UpdateSettings() for a settings change (it knows which fields changed).
 #pragma once
 
+#include <VP-V/modules/motion/estimation/composed/WarpSampler.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailMotion.h>
@@ -71,21 +72,14 @@ namespace TemporalDetail
 	{
 		using GrainSplit::Gauss;
 
-		// The 4-tap Catmull-Rom of README step 5, separable.
+		// The 4-tap Catmull-Rom of README step 5, separable. The weights are the ONE shared law VpComposed::CubicWeights
+		// (motion/estimation/composed/WarpSampler.h; rule 20, owner 11-14 05:22); this model keeps only its own footprint rule:
+		// SampleTaps CLAMPS edge taps (README step 5), where VpComposed::SampleBicubic refuses a clamped tap.
 		struct Taps
 		{
 			int x0 = 0, y0 = 0;
 			double wx[4] = {}, wy[4] = {};
 		};
-
-		inline void CatmullRom(double t, double* wt)
-		{
-			const double t2 = t * t, t3 = t2 * t;
-			wt[0] = -0.5 * t3 + t2 - 0.5 * t;
-			wt[1] = 1.5 * t3 - 2.5 * t2 + 1.0;
-			wt[2] = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
-			wt[3] = 0.5 * t3 - 0.5 * t2;
-		}
 
 		inline Taps MakeTaps(double x, double y)
 		{
@@ -93,8 +87,8 @@ namespace TemporalDetail
 			const double fx = std::floor(x), fy = std::floor(y);
 			t.x0 = static_cast<int>(fx) - 1;
 			t.y0 = static_cast<int>(fy) - 1;
-			CatmullRom(x - fx, t.wx);
-			CatmullRom(y - fy, t.wy);
+			VpComposed::CubicWeights(x - fx, t.wx);
+			VpComposed::CubicWeights(y - fy, t.wy);
 			return t;
 		}
 

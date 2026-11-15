@@ -90,7 +90,8 @@ frame count follows the measured content rate (`Frames(seconds, hz)`); no GOP, c
    camera model use the composed homography instead (exact, no grid error). Each hop adds
    uncertainty `(1 - trust) * block + |Vf + Vb|` (forward/backward disagreement when forward vectors exist).
    The structure is sampled **once** from the unwarped slot with a 4-tap Catmull-Rom filter at `p + C(p)`; nothing
-   is ever re-warped.
+   is ever re-warped. The CPU model takes the Catmull-Rom weights from the shared `VpComposed::CubicWeights`
+   (`motion/estimation/composed/WarpSampler.h`, rule 20); its edge-clamped tap footprint stays its own.
 6. **Validation** (per block, all smooth gates multiply): age `<= max_age` with a linear fade over its last
    half; `u <= 0.5 px * s`; warped base matches (`mean |base - base_w| <=` coding-noise + grain allowance;
    this is the occlusion/ghosting veto); structure positively correlated (`corr(S, S_w) >= 0.3`) and the
