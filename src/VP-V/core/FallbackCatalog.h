@@ -1037,6 +1037,8 @@ namespace FallbackCatalog
 	// P10g C8 status text for Config status and Ctrl+I (NOT a registry entry: the registry announces every entry once, and this is the
 	// DEFAULT state while no producer repeat fact exists). Empty when the gate is off (its entry covers that), nothing was offered, or the
 	// producer facts decided every neighbour; otherwise "repeat facts unavailable: block test" with the number of repeats it dropped.
+	// The block test is primary (OD:744) and now also runs for Distinct neighbours, so NeighbourResult::blockTestRuns no longer means
+	// "facts unavailable": the S-3a-GS caller (102b C8-VISIBILITY-TO-S3A-GS) must pass the runs for neighbours WITHOUT a bit fact.
 	inline std::string GrainSepRepeatStatus(bool keyOff, int offered, int blockTestRuns, int droppedByBlockTest)
 	{
 		if (keyOff || offered <= 0 || blockTestRuns <= 0)
@@ -1044,12 +1046,14 @@ namespace FallbackCatalog
 		return "grain separation: repeat facts unavailable: block test (" + std::to_string(droppedByBlockTest) + " repeated neighbour frame(s) dropped)";
 	}
 
-	// C8-PROD Ctrl+Alt+D line: where the repeat facts came from and what each path dropped. source: bits = the producer capture bit decided
-	// every neighbour, mixed = some, block test = none (bit Missing / stale / store off / non-capture source).
+	// C8-PROD Ctrl+Alt+D line: which detector dropped the repeats and what each dropped. The block test is the PRIMARY detector (owner
+	// OD:744): it runs for every offered neighbour the capture bit does not name a Repeat (a Distinct bit never vetoes it); the bit only
+	// adds drops. source: block test = the block test judged every offered neighbour (no bit named a Repeat), block test + capture bit =
+	// the bit named some repeats and the block test judged the rest, capture bit = the bit named every offered neighbour a Repeat.
 	inline std::string GrainSepRepeatDiagLine(bool keyOff, int offered, int droppedByFacts, int droppedByBlockTest, int blockTestRuns)
 	{
 		if (keyOff) return "grain separation repeat gate: off";
-		const char* source = offered <= 0 ? "no neighbours" : blockTestRuns <= 0 ? "capture bit" : blockTestRuns >= offered ? "block test" : "capture bit + block test";
+		const char* source = offered <= 0 ? "no neighbours" : blockTestRuns <= 0 ? "capture bit" : droppedByFacts <= 0 ? "block test" : "block test + capture bit";
 		return std::string("grain separation repeat gate: source ") + source + ", droppedByFacts " + std::to_string(droppedByFacts) +
 			", droppedByBlockTest " + std::to_string(droppedByBlockTest) + ", blockTestRuns " + std::to_string(blockTestRuns);
 	}

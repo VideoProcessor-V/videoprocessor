@@ -146,7 +146,7 @@ namespace GrainLevel
 		bool repeatGate = true;
 		double repeatFrac = 0.005;                       // grain_sep_repeat_threshold: quiet block when mean (W_k - D_t)^2 <= this x N; range 0.001-0.020 (measured: true repeats 0.000, 0 false fires; 0.05 false-fired)
 		double repeatShare = 0.9;                        // a neighbour is a repeat when this share of its judged blocks is quiet
-		int dctShifts = 4;                               // tile grids averaged: 4 = half-shifts (0,0) (4,0) (0,4) (4,4); 2 = (0,0) (4,4). MEASUREMENT knob (B-S0), default unchanged, NOT a user setting
+		int dctShifts = 4;                               // tile grids averaged: 4 = half-shifts (0,0) (4,0) (0,4) (4,4); 2 = (0,0) (4,4). MEASUREMENT knob (B-S0), default unchanged; a measurement knob until S-3a wires the Config sub-field (OD:735: DCT shifts is a grain-separation sub-field)
 		int minNeighbours = 2;                           // fewer usable neighbours: the L1+L2 gains exactly
 		double psdFlatFactor = 1.5;                      // a tile is flat when mean d^2 <= factor N
 		int psdMinTiles = 4;                             // fewer flat tiles: white PSD shape (counted, visible)
@@ -599,8 +599,10 @@ namespace GrainLevel
 	}
 
 	// One neighbour: its band plane D_k, the field current -> that frame, its epoch id and its signed offset (negative = behind).
-	// C8 per-neighbour repeat fact. Repeat: the neighbour repeats the current frame (leaves the set, no block test). Distinct: it does not
-	// (kept, no block test). Unknown (the default config, no producer fact exists): the block test decides.
+	// C8 per-neighbour repeat fact, SUPPORTING the block test (owner OD:744: the block test is the primary detector, the capture bit is
+	// used when present). Repeat: the neighbour repeats the current frame (leaves the set without a block test; a bit only ever adds drops).
+	// Distinct: the bit saw a different picture, but that never vetoes the block test: it still runs and decides. Unknown (no producer
+	// fact): the block test decides. So the block test runs for every offered neighbour that is not a Repeat.
 	enum class RepeatFact { Unknown, Repeat, Distinct };
 
 	// C8-PROD (R14-59): the producer's capture bit of one frame: "this frame repeats the previous captured frame" (the always-on ingress
@@ -610,8 +612,9 @@ namespace GrainLevel
 
 	// bits[i] belongs to the frame at window position i (ascending time); cur is the current frame's position. Fills one RepeatFact per
 	// position: a neighbour repeats the current frame when EVERY bit between them (the later frame of each consecutive pair) is Same;
-	// any Different makes it Distinct (trusted, kept); otherwise (a Missing in the chain) Unknown, and the block test is the backup.
-	// bitsFromProducer receives how many neighbours were decided by a bit (Same or Different chain), for the Ctrl+Alt+D source line.
+	// any Different makes it Distinct (the block test still runs for it); otherwise (a Missing in the chain) Unknown (the block test runs).
+	// The bit supports the block test, it does not replace it: only a Repeat skips the test, and that only adds a drop.
+	// decidedByBits receives how many neighbours carry a bit fact (Same or Different chain), for the Ctrl+Alt+D source line.
 	inline std::vector<RepeatFact> ResolveRepeatFacts(const std::vector<CaptureBit>& bits, int cur, int* decidedByBits = nullptr)
 	{
 		const int n = static_cast<int>(bits.size());
@@ -640,7 +643,7 @@ namespace GrainLevel
 		BlockField field;
 		int epoch = 0;
 		int offset = 0;
-		RepeatFact fact = RepeatFact::Unknown;   // C8: producer fact about this neighbour vs the current frame (Unknown = run the block test)
+		RepeatFact fact = RepeatFact::Unknown;   // C8: producer fact about this neighbour vs the current frame (only Repeat skips the block test)
 	};
 
 	struct NeighbourResult
@@ -651,9 +654,9 @@ namespace GrainLevel
 		int droppedRepeat = 0;      // C8: repeated frames that left the set
 		int repeatJudged = 0;       // C8: neighbours the block test could judge (0 with neighbours offered = no signal; visible: FallbackCatalog::GrainSepRepeatGateOff)
 		int offered = 0;            // neighbours offered to the gate (in window, same epoch)
-		int droppedByFacts = 0;     // C8: repeats named by the neighbour's own fact (RepeatFact::Repeat), no block test run
-		int droppedByBlockTest = 0; // C8: repeats found by the per-neighbour block test (facts Unknown)
-		int blockTestRuns = 0;      // C8: neighbours the block test ran for (RepeatFact::Unknown with the gate on)
+		int droppedByFacts = 0;     // C8: repeats named by the neighbour's own fact (RepeatFact::Repeat), no block test run (adds drops only)
+		int droppedByBlockTest = 0; // C8: repeats found by the per-neighbour block test (the primary detector; facts Unknown or Distinct)
+		int blockTestRuns = 0;      // C8: neighbours the block test ran for (every offered neighbour that is not RepeatFact::Repeat, gate on)
 		bool psdWhite = false;      // no flat tiles: the white PSD shape was used (visible)
 		double meanKeff = 0.0;      // over the non-fallback pixels
 	};
@@ -825,7 +828,9 @@ namespace GrainLevel
 			++out.offered;
 			if (p.repeatGate && n.fact == RepeatFact::Repeat) { ++out.droppedRepeat; ++out.droppedByFacts; continue; }
 			Warped wk = WarpBicubic(*n.d, n.field, w, h);
-			if (p.repeatGate && n.fact == RepeatFact::Unknown)
+			// The block test is the PRIMARY detector (owner OD:744): it runs for every offered neighbour the bit does not already name a
+			// Repeat. A Distinct bit never vetoes it; a Repeat bit only adds a drop (above), never removes one.
+			if (p.repeatGate && n.fact != RepeatFact::Repeat)
 			{
 				++out.blockTestRuns;
 				bool judged = false;
