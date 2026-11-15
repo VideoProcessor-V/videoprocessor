@@ -1957,6 +1957,14 @@ namespace Vpv
 					}
 				group->setVisible(any);
 			}
+			// Batch B (c): Bill's motion_engine row is the choice of motion source (VP's vectors or libplacebo smooth motion), so its
+			// label says so; label text only, no Bill line changes (his "Motion handling" label stays in his file).
+			for (QWidget* root : { state->host.upstreamRoot, state->root })
+				for (QWidget* field : RowFields(root, QStringLiteral("motion_engine")))
+					if (field->parentWidget())
+						if (auto* form = qobject_cast<QFormLayout*>(field->parentWidget()->layout()))
+							if (auto* label = qobject_cast<QLabel*>(form->labelForField(field)))
+								label->setText(QStringLiteral("Motion source (VP or smooth motion)"));
 		}
 
 		// The Rendering page after the moves: Bill's sections stay as his themed cards; every other
