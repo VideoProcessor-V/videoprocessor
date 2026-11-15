@@ -170,14 +170,25 @@ namespace VideoProcessorTest
 			Assert::AreEqual(16.0, HistogramPercentile(histogram, 0, 99.5), 1e-9);
 		}
 
-		TEST_METHOD(CutsAreLargeBlockChangesAndFadesAreSteadyDeclines)
+		// FIX-LED-CUT-U7: the cut is the shared U7 scene judge's verdict for the frame's source sequence, whatever the block change
+		// (the private mean-difference > cut_threshold law is deleted); fades are still steady APL declines measured here.
+		TEST_METHOD(CutsAreTheSharedSceneVerdictAndFadesAreSteadyDeclines)
 		{
 			LedDriveConfig config;
 			StatsBuilder builder(config);
-			Assert::IsFalse(builder.Build(Uniform(100.0)).cut, L"No previous frame");
-			Assert::IsFalse(builder.Build(Uniform(110.0)).cut, L"10 codes is a scene change, not a cut");
-			Assert::IsTrue(builder.Build(Uniform(30.0)).cut, L"80 codes is a cut");
-			Assert::AreEqual(80.0, builder.LastDifference(), 1e-9);
+			SceneVerdicts verdicts;
+			verdicts.Cut(3).Cut(5);
+			builder.SetSceneReader(verdicts.Reader());
+			Assert::IsFalse(builder.Build(Uniform(100.0), 0.0, 0.0, 1).cut, L"No previous frame: the judge says no cut");
+			Assert::IsFalse(builder.Build(Uniform(110.0), 0.0, 0.0, 2).cut, L"The judge says no cut: no cut");
+			Assert::IsTrue(builder.Build(Uniform(30.0), 0.0, 0.0, 3).cut, L"The judge says cut: a cut");
+			Assert::AreEqual<uint64_t>(3, builder.SceneFromRecord(), L"Every frame's cut came from the shared judge");
+			// Independent of the block change: an 80-code change the judge calls no cut is no cut, a 10-code change it calls a
+			// cut is a cut (the old law would have said the opposite of both).
+			Assert::IsFalse(builder.Build(Uniform(110.0), 0.0, 0.0, 4).cut, L"80 codes, judge no cut: no cut");
+			Assert::IsTrue(builder.Build(Uniform(100.0), 0.0, 0.0, 5).cut, L"10 codes, judge cut: a cut");
+			Assert::AreEqual<uint64_t>(0, builder.SceneMissing(), L"No frame without a verdict");
+			Assert::IsTrue(builder.LastSceneFromRecord());
 
 			// The fade is in time (general): the same at 24p and 60p.
 			for (double fps : { 24.0, 60.0 })
@@ -291,6 +302,7 @@ namespace VideoProcessorTest
 			TestClock clock;
 			LedDriveModule module(port, FastScript(),
 				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			module.SetSceneReaderForTesting(NoSceneCuts());   // FIX-LED-CUT-U7: the U7 verdict per sequence (uniform frames: no cut)
 			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));

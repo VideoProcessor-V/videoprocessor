@@ -14,8 +14,11 @@
 #include <atomic>
 #include <deque>
 #include <functional>
+#include <initializer_list>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -294,5 +297,86 @@ namespace
 	{
 		clock.To(timeMs);
 		return module.BeginFrameAt(sequence, timeMs, sourceFps);
+	}
+
+	// FIX-LED-CUT-U7: the LED's cut is the shared U7 scene judge's verdict per source sequence (read through a SceneCutFn).
+	// The tests stand in for that judge here: every sequence is answered (known) unless marked unknown, and the marked
+	// sequences are cuts. It is injected per module (LedDriveModule::SetSceneReaderForTesting) or per builder
+	// (StatsBuilder::SetSceneReader), never through the process-global skeleton, so no LED test depends on what another
+	// test left registered. Copies share one state. Thread-safe: the walk and the module's thread read it while the test
+	// adds verdicts.
+	class SceneVerdicts
+	{
+	public:
+		SceneVerdicts& Cut(uint64_t sequence)
+		{
+			std::lock_guard<std::mutex> guard(state->mutex);
+			state->cuts.insert(sequence);
+			return *this;
+		}
+		SceneVerdicts& Unknown(uint64_t sequence, const char* why)
+		{
+			std::lock_guard<std::mutex> guard(state->mutex);
+			state->unknown[sequence] = why;
+			return *this;
+		}
+		SceneVerdicts& Known(uint64_t sequence)
+		{
+			std::lock_guard<std::mutex> guard(state->mutex);
+			state->unknown.erase(sequence);
+			return *this;
+		}
+		size_t Calls() const
+		{
+			std::lock_guard<std::mutex> guard(state->mutex);
+			return state->calls;
+		}
+		size_t CallsFor(uint64_t sequence) const
+		{
+			std::lock_guard<std::mutex> guard(state->mutex);
+			const auto it = state->callsPerSequence.find(sequence);
+			return it == state->callsPerSequence.end() ? 0 : it->second;
+		}
+		LedDrive::SceneCutFn Reader() const
+		{
+			const std::shared_ptr<State> shared = state;
+			return [shared](uint64_t sequence, bool& cut, const char** why) -> bool
+			{
+				std::lock_guard<std::mutex> guard(shared->mutex);
+				++shared->calls;
+				++shared->callsPerSequence[sequence];
+				cut = false;
+				const auto unknown = shared->unknown.find(sequence);
+				if (unknown != shared->unknown.end())
+				{
+					if (why != nullptr) *why = unknown->second;
+					return false;
+				}
+				cut = shared->cuts.count(sequence) != 0;
+				return true;
+			};
+		}
+
+	private:
+		struct State
+		{
+			std::mutex mutex;
+			std::set<uint64_t> cuts;
+			std::map<uint64_t, const char*> unknown;
+			size_t calls = 0;
+			std::map<uint64_t, size_t> callsPerSequence;
+		};
+		std::shared_ptr<State> state = std::make_shared<State>();
+	};
+
+	// The U7 verdict for a stream without cuts: every sequence known, none a cut.
+	inline LedDrive::SceneCutFn NoSceneCuts() { return SceneVerdicts().Reader(); }
+
+	// The U7 verdict with cuts at the given sequences only (every sequence known).
+	inline LedDrive::SceneCutFn SceneCutsAt(std::initializer_list<uint64_t> cuts)
+	{
+		SceneVerdicts verdicts;
+		for (uint64_t sequence : cuts) verdicts.Cut(sequence);
+		return verdicts.Reader();
 	}
 }

@@ -67,6 +67,15 @@ namespace
         return frames;
     }
 
+    // FIX-LED-CUT-U7: the shared U7 verdict for Scenes(), frame i at source sequence i + 1. The cuts are the first frames of
+    // the scenes that change the whole picture: the jump into the fading bright scene, the bright cut, the cut to the mid
+    // scene and the last bright cut. The highlight change, the fade's steps and the small steps into black are no cuts.
+    SceneCutFn ScenesVerdict()
+    {
+        return SceneCutsAt({ 240 + 120 + 1, 240 + 120 + 60 + 90 + 1, 240 + 120 + 60 + 90 + 120 + 1,
+            240 + 120 + 60 + 90 + 120 + 120 + 120 + 60 + 1 });
+    }
+
     bool SameOutput(const ControllerOutput& a, const ControllerOutput& b)
     {
         return a.lightCommand == b.lightCommand && a.lightTarget == b.lightTarget && a.light == b.light &&
@@ -86,11 +95,13 @@ namespace
     {
         const std::vector<RawMeasurement> frames = Scenes();
         StatsBuilder builder(config), aheadBuilder(config);
+        builder.SetSceneReader(ScenesVerdict());   // FIX-LED-CUT-U7: the scenes' cuts are the shared U7 verdict
         std::vector<FrameStats> stats;
         double t = 0.0;
+        uint64_t sequence = 0;
         for (const RawMeasurement& raw : frames)
         {
-            stats.push_back(builder.Build(raw, t));
+            stats.push_back(builder.Build(raw, t, 0.0, ++sequence));
             t += 1000.0 / 60.0;
         }
         for (size_t i = 0; i < stats.size(); ++i)
@@ -164,11 +175,13 @@ namespace VideoProcessorTest
             limited.Reset(255, 50);
             limited.SetIntentFloor(0);
             StatsBuilder builder(config);
+            builder.SetSceneReader(ScenesVerdict());   // FIX-LED-CUT-U7: the scenes' cuts are the shared U7 verdict
             double t = 0.0;
             int commands = 0;
+            uint64_t sequence = 0;
             for (const RawMeasurement& raw : Scenes())
             {
-                const FrameStats stats = builder.Build(raw, t);
+                const FrameStats stats = builder.Build(raw, t, 0.0, ++sequence);
                 t += 400.0;
                 const ControllerOutput a = plain.Tick(stats);
                 const ControllerOutput b = limited.Tick(stats);
@@ -231,11 +244,13 @@ namespace VideoProcessorTest
             controller.SetFloor(ScriptFloor::Covered);
             Assert::AreEqual(170, controller.LightTargetFor(5));
             StatsBuilder builder(config);
+            builder.SetSceneReader(ScenesVerdict());   // FIX-LED-CUT-U7: the scenes' cuts are the shared U7 verdict
             double t = 0.0;
             int lowest = 255;
+            uint64_t sequence = 0;
             for (const RawMeasurement& raw : Scenes())
             {
-                const ControllerOutput out = controller.Tick(builder.Build(raw, t));
+                const ControllerOutput out = controller.Tick(builder.Build(raw, t, 0.0, ++sequence));
                 t += 400.0;
                 Assert::IsTrue(out.lightTarget >= 170);
                 lowest = std::min(lowest, out.light);
@@ -351,13 +366,17 @@ namespace VideoProcessorTest
             Assert::AreEqual(size_t(1), entries.size());
             Assert::AreEqual(std::string(LedDriveModule::kHoldFallbackId), entries[0].id);
             Assert::IsTrue(entries[0].reason.find("shader did not load") != std::string::npos);
+            // FIX-LED-CUT-U7: the measurements carry their source sequences and the shared U7 verdict is injected (one dark
+            // scene, every frame answered), so no cut-judge entry is engaged and the hold entry is the only one.
+            module.SetSceneReaderForTesting(NoSceneCuts());
+            uint64_t sequence = 0;
             module.Start();
             Assert::IsTrue(WaitUntilTrue([&] { return module.DrivingProjector() && projector->light == 255; }),
                 L"compensate started");
             double time = 0.0;
             for (int frame = 0; frame < 240; ++frame)   // dark frames: compensate would dim to the floor
             {
-                module.SubmitMeasurement(IntentFrame(16.0));
+                module.SubmitMeasurement(IntentFrame(16.0), ++sequence);
                 time += 1000.0 / 60.0;
                 module.BeginFrameAt(0, time);
                 WaitUntilTrue([&] { return !module.ProjectorStatus().busy; }, 500);
@@ -370,7 +389,7 @@ namespace VideoProcessorTest
             Assert::AreEqual(0, module.IntentFloorLevel());
             for (int frame = 0; frame < 240; ++frame)
             {
-                module.SubmitMeasurement(IntentFrame(16.0));
+                module.SubmitMeasurement(IntentFrame(16.0), ++sequence);
                 time += 1000.0 / 60.0;
                 module.BeginFrameAt(0, time);
                 WaitUntilTrue([&] { return !module.ProjectorStatus().busy; }, 500);
@@ -407,13 +426,17 @@ namespace VideoProcessorTest
             Assert::AreEqual(size_t(1), entries.size());
             Assert::AreEqual(std::string(LedDriveModule::kHoldFallbackId), entries[0].id);
             Assert::IsTrue(entries[0].reason.find("held at full: measurement off (slot drive.led_measure is off)") != std::string::npos);
+            // FIX-LED-CUT-U7: the measurements carry their source sequences and the shared U7 verdict is injected (one dark
+            // scene, every frame answered), so no cut-judge entry is engaged and the hold entry is the only one.
+            module.SetSceneReaderForTesting(NoSceneCuts());
+            uint64_t sequence = 0;
             module.Start();
             Assert::IsTrue(WaitUntilTrue([&] { return module.DrivingProjector() && projector->light == 255; }),
                 L"compensate started");
             double time = 0.0;
             for (int frame = 0; frame < 240; ++frame)   // dark frames: compensate would dim to the floor
             {
-                module.SubmitMeasurement(IntentFrame(16.0));
+                module.SubmitMeasurement(IntentFrame(16.0), ++sequence);
                 time += 1000.0 / 60.0;
                 module.BeginFrameAt(0, time);
                 WaitUntilTrue([&] { return !module.ProjectorStatus().busy; }, 500);
@@ -426,7 +449,7 @@ namespace VideoProcessorTest
             Assert::AreEqual(0, module.IntentFloorLevel());
             for (int frame = 0; frame < 240; ++frame)
             {
-                module.SubmitMeasurement(IntentFrame(16.0));
+                module.SubmitMeasurement(IntentFrame(16.0), ++sequence);
                 time += 1000.0 / 60.0;
                 module.BeginFrameAt(0, time);
                 WaitUntilTrue([&] { return !module.ProjectorStatus().busy; }, 500);

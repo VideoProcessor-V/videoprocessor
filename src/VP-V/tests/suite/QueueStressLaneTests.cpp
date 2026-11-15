@@ -15,6 +15,7 @@
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 
 #include <chrono>
+#include <cmath>
 #include <map>
 #include <thread>
 #include <tuple>
@@ -187,7 +188,29 @@ namespace
 		port.protocol = "barco_ascii";
 		port.terminator = LedDrive::Terminator::Cr;
 		TestClock clock;
+		// FIX-LED-CUT-U7: the cut is the shared U7 verdict per source sequence, injected here as the scenario's ground truth:
+		// a source frame is a cut when it starts a scene whose picture level differs from the scene before it by more than
+		// 24 codes (the scenario's hard cuts; the dark, black and dim scenes are one family). The content time of every
+		// sequence is recorded before its statistics are built. Declared before the module so it outlives the reader.
+		const double framePeriod = 1000.0 / s.fps;
+		std::map<uint64_t, double> contentOf;
+		auto sceneVerdict = [&s, &contentOf, framePeriod](uint64_t sequence, bool& cut, const char** why) -> bool
+		{
+			cut = false;
+			const auto it = contentOf.find(sequence);
+			if (it == contentOf.end())
+			{
+				if (why != nullptr) *why = "test: sequence not queued";
+				return false;
+			}
+			if (it->second < framePeriod) return true;
+			const LedScene& now = SceneAt(s, (std::min)(it->second / 1000.0, s.seconds - 0.001));
+			const LedScene& before = SceneAt(s, (std::min)((it->second - framePeriod) / 1000.0, s.seconds - 0.001));
+			cut = &now != &before && std::abs(now.code - before.code) > 24.0;
+			return true;
+		};
 		LedDrive::LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); }, clock);
+		module.SetSceneReaderForTesting(sceneVerdict);
 		Bind(clock, module, projector);
 		module.Start();
 		if (s.drive != DynamicDrive::None && !clock.RunUntil([&] { return module.DrivingProjector(); }, 5000))
@@ -201,6 +224,7 @@ namespace
 		const std::vector<LedFrameEvent> frames = LedSchedule(s);
 		const double period = 1000.0 / s.fps;
 		LedDrive::StatsBuilder builder(module.Config());
+		builder.SetSceneReader(module.SceneReader());
 		uint64_t predictedUpTo = 0;
 		for (const LedFrameEvent& f : frames)
 		{
@@ -214,13 +238,16 @@ namespace
 				{
 					const double qs = (f.contentMs + static_cast<double>(q - f.sequence) * period) / 1000.0;
 					const LedScene& qsc = SceneAt(s, (std::min)(qs, s.seconds - 0.001));
-					module.SubmitPrediction(q, builder.Build(LedFrame(qsc.code, qsc.bright, qsc.highlight), t + (q - f.sequence) * period));
+					contentOf[q] = qs * 1000.0;
+					module.SubmitPrediction(q, builder.Build(LedFrame(qsc.code, qsc.bright, qsc.highlight), t + (q - f.sequence) * period,
+						0.0, q));
 				}
 				predictedUpTo = (std::max)(predictedUpTo, f.sequence + f.ahead);
 				module.SetLookaheadDepth(f.ahead);
 			}
 			else
 				module.SetLookaheadDepth(0);
+			contentOf[f.sequence] = f.contentMs;
 			module.SubmitMeasurement(LedFrame(sc.code, sc.bright, sc.highlight), f.sequence);
 			module.BeginFrameAt(f.sequence, t, s.fps);
 			if (!clock.Settle())

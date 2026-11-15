@@ -174,19 +174,22 @@ namespace VideoProcessorTest
 		{
 			LedDriveConfig config;
 			StatsBuilder builder(config);
+			// FIX-LED-CUT-U7: the shared U7 verdict per sequence (injected): the black frame and the bright frame after it are cuts.
+			builder.SetSceneReader(SceneCutsAt({ 3001, 3002 }));
+			uint64_t sequence = 0;
 			const RawMeasurement bright = Frame(100.0, 500, 235), black = Frame(16.0);
 			for (int i = 0; i < 3000; ++i)
-				builder.Build(bright, i * 1000.0 / FILM_FPS);
+				builder.Build(bright, i * 1000.0 / FILM_FPS, 0.0, ++sequence);
 			// Backwards (an old seq x period clock): one black frame, then highlights.
 			const double back = 3001 * 1000.0 / VIDEO_FPS;
-			builder.Build(black, back);
+			Assert::IsTrue(builder.Build(black, back, 0.0, ++sequence).cut);
 			FrameStats stats;
 			for (int i = 1; i <= 20; ++i)
-				stats = builder.Build(bright, back + i * 1000.0 / VIDEO_FPS);
+				stats = builder.Build(bright, back + i * 1000.0 / VIDEO_FPS, 0.0, ++sequence);
 			Assert::AreEqual(stats.highlight, stats.sustainedHighlight, 1e-9, L"recovered after time went back");
 			// A stalled clock never grows the window without limit.
 			for (int i = 0; i < 10000; ++i)
-				builder.Build(bright, 1.0e6);
+				builder.Build(bright, 1.0e6, 0.0, ++sequence);
 			Assert::IsTrue(builder.HighlightHistorySize() <= StatsBuilder::MAX_WINDOW_SAMPLES);
 		}
 
@@ -198,6 +201,7 @@ namespace VideoProcessorTest
 			for (const bool explicitReset : { true, false })
 			{
 				LedDriveModule module(ProjectorConfig(), Compensate());
+				module.SetSceneReaderForTesting(NoSceneCuts());   // FIX-LED-CUT-U7: the U7 verdict per sequence (no cut in either file)
 				const LumaFrame bright(120, 8), dark(30, 0);
 				double timeMs = 0.0;
 				for (uint64_t sequence = 1; sequence <= 300; ++sequence)
@@ -229,6 +233,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(SmallSequenceStepBackKeepsTheLookahead)
 		{
 			LedDriveModule module(ProjectorConfig(), Compensate());
+			module.SetSceneReaderForTesting(NoSceneCuts());   // FIX-LED-CUT-U7: the U7 verdict per sequence (one scene)
 			const LumaFrame bright(120, 8);
 			double timeMs = 0.0;
 			for (uint64_t sequence = 1; sequence <= 100; ++sequence)
@@ -312,6 +317,7 @@ namespace VideoProcessorTest
 			TestClock clock;
 			LedDriveModule module(Port(), script,
 				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			module.SetSceneReaderForTesting(NoSceneCuts());   // FIX-LED-CUT-U7: the U7 verdict per sequence (one scene)
 			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector(); }));
