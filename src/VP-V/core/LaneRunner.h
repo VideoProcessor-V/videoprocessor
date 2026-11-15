@@ -41,6 +41,7 @@ enum class StepOutcome : uint8_t {
 struct LaneProductCounters {
     std::atomic<uint64_t> published{ 0 };
     std::atomic<uint64_t> staleSkips{ 0 };
+    std::atomic<uint64_t> workerReused{ 0 };     // QKP slice C: of staleSkips, frames the render thread made first (RunAheadNow): the worker skipped, nothing recomputed
     std::atomic<uint64_t> latePublishes{ 0 };
     std::atomic<uint64_t> skippedDropped{ 0 };   // source frame unknown or dropped
     std::atomic<uint64_t> cancelled{ 0 };        // the seal (or the plan) took a running job
@@ -102,6 +103,8 @@ public:
     // `out` may be null (presence test only).
     void SetSources(std::function<bool(uint64_t, SourceFrameView*)> find) { find_ = std::move(find); }
     void SetReleaseCompleted(std::function<uint64_t(ProductId)> f) { releaseCompleted_ = std::move(f); }
+    // QKP slice C: told (worker thread) of each frame the render thread made first that this worker then skipped.
+    void SetWorkerReusedSink(std::function<void(ProductId)> f) { workerReusedSink_ = std::move(f); }
     void SetReadsSource(ProductId id, bool reads)
     {
         if (State* st = StateOf(id))
@@ -277,6 +280,11 @@ private:
         case ClaimResult::Stale:
             st.nextSeq = seq + 1u;
             st.counters.staleSkips.fetch_add(1, std::memory_order_relaxed);
+            if (st.set->RenderMade(seq)) {
+                st.counters.workerReused.fetch_add(1, std::memory_order_relaxed);
+                if (workerReusedSink_)
+                    workerReusedSink_(st.node->id);
+            }
             *out = StepOutcome::Late;
             return false;
         case ClaimResult::TooEarly:
@@ -436,6 +444,7 @@ private:
     std::function<size_t(ProductId)> bytes_;
     std::function<bool(uint64_t, SourceFrameView*)> find_;
     std::function<uint64_t(ProductId)> releaseCompleted_;
+    std::function<void(ProductId)> workerReusedSink_;
     std::atomic<uint64_t> arrived_{ 0 };
     std::atomic<uint64_t> skipBefore_{ 0 };
     std::atomic<uint64_t> lateSkipBefore_{ 0 };   // B3 X1: SetLateSkipBefore (lowered by each node's sealLag)

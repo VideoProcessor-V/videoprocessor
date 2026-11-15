@@ -616,6 +616,152 @@ public:
         return ids;
     }
     bool HasGpuDispatcher() const { return dispatcher_ != nullptr; }
+
+    // ---- QKP slice C (design s2.4 / s9.4): the lane CLAIM for a frame ahead of the render frame ----
+    // The render thread asks the lane to make product `id` of frame `seq` NOW, into the ring slot of that frame, instead of the memo
+    // making a second copy: the same Claim / Publish protocol the worker runs (a compare-exchange on the slot word, so the worker and
+    // this call can never both own a frame), the same RunCpuLive law with the inputs pinned. The frame is marked made-by-render
+    // (SlotSet::MarkRenderMade): the worker that finds the slot taken counts WorkerReused (LaneRunner), the seal counts it reused.
+    //   Ran      the frame is Published in its slot (or already was: a reuse): the caller reads it through ReadOf
+    //   Claimed  a worker is writing it right now: nothing is computed twice, the caller reports LanePending (visible, no wait)
+    //   NotNode  no graph / not a node of this graph: the memo's own owner fill path
+    //   Declined why names the reason (visible): beyond the lane's slots, an input not published, dropped, a GPU form outside a
+    //            GPU-legal phase, no compute registered, an ordered chain (worker only), the fill refused
+    // A GPU lane product is never dispatched here: its ahead form is recorded by the seal / RunDeferredLive at Entrance, and a call
+    // outside that phase is Declined "lane GPU ahead: not at a GPU-legal phase" (design s9.4 d). Render thread.
+    enum class AheadRun : uint8_t { Ran, Claimed, NotNode, Declined };
+    struct AheadRunResult {
+        AheadRun kind = AheadRun::NotNode;
+        const char* why = "";
+    };
+    AheadRunResult RunAheadNow(ProductId id, uint64_t seq)
+    {
+        AheadRunResult out;
+        LaneState* st = renderState_.get();
+        if (st == nullptr || ind_ == nullptr) {
+            out.why = "no lane graph";
+            return out;
+        }
+        const int idx = st->IndexOf(id);
+        if (idx < 0) {
+            out.why = "not a lane product";
+            return out;
+        }
+        const Node& n = st->graph.nodes[size_t(idx)];
+        out.kind = AheadRun::Declined;
+        if (n.backend != Backend::Cpu) {
+            out.why = "lane GPU ahead: not at a GPU-legal phase";
+            ++aheadGpuNotLegal_;
+            return out;
+        }
+        for (ProductId e : externalIds_)
+            if (e == id) {
+                out.why = "published outside the lane";
+                return out;
+            }
+        if (regulator_.StateOf(id) == ProductState::Dropped) {
+            out.why = "dropped by the regulator";
+            return out;
+        }
+        if (n.orderedChain) {
+            out.why = "ordered chain: the lane worker makes it";
+            return out;
+        }
+        if (cpuLive_.find(id) == cpuLive_.end() || !st->bufs[size_t(idx)]) {
+            out.why = "no lane compute registered";
+            return out;
+        }
+        if (seq < st->firstSeq) {
+            out.why = "before the lane's first frame";
+            return out;
+        }
+        SlotSet& set = st->table->At(size_t(idx));
+        // The inputs are pinned BEFORE the claim (a claim abandoned for a missing input would leave the frame Stale for the worker).
+        Header scratch;
+        LaneInputs pins;
+        // countWaits false: this is the render thread; the wait dedupe entries belong to the lane worker, which counts the wait once.
+        if (!st->table->LaneAncestors(id, seq, scratch, pins, /*countWaits*/ false)) {
+            out.why = "an input is not published yet";
+            return out;
+        }
+        LaneTicket t;
+        const ClaimResult cr = set.Claim(seq, Provenance::AheadLane, ~uint64_t(0), &t);
+        if (cr == ClaimResult::TooEarly || cr == ClaimResult::ReleasePending || cr == ClaimResult::OutOfRange) {
+            pins.Unpin();
+            out.why = "beyond the lane's slots";   // design s9.4 a: not LanePending (no worker will ever have it)
+            ++aheadBeyondSlots_;
+            return out;
+        }
+        if (cr == ClaimResult::Stale) {
+            pins.Unpin();
+            const SlotState ss = set.StateOf(seq);
+            if (ss == SlotState::Writing) {
+                out.kind = AheadRun::Claimed;   // a worker owns it right now
+                out.why = "a lane worker is making it";
+                ++aheadClaimedByWorker_;
+                return out;
+            }
+            if (HasContent(ss)) {
+                out.kind = AheadRun::Ran;   // already made (worker or an earlier call): reused
+                out.why = "already in its slot";
+                ++aheadAlreadyMade_;
+                return out;
+            }
+            out.why = "the frame left the lane's slots";
+            return out;
+        }
+        Header& hdr = set.LaneHeader(t);
+        if (!set.Writable(t)) {
+            pins.Unpin();
+            LaneTicket a = t;
+            set.Abandon(a);
+            out.why = "slot still pinned by a reader of the previous frame";
+            return out;
+        }
+        hdr.ancestors = scratch.ancestors;
+        hdr.ancestorCount = scratch.ancestorCount;
+        hdr.chainReduced = scratch.chainReduced;
+        hdr.reads = scratch.reads;
+        hdr.honoured = ind_->StampOf(seq);   // read AFTER the pins: a later event is seen by the seal (mismatch -> live)
+        hdr.costUs = 0;
+        uint8_t* dst = st->bufs[size_t(idx)]->Ring(size_t(t.slot));
+        const size_t bytes = st->bufs[size_t(idx)]->Bytes();
+        const uint64_t t0 = nowUs_ ? nowUs_() : 0u;
+        const bool ok = RunCpuLive(*st, n, seq, 0u, dst, bytes, InputResolver(), true);
+        const uint64_t t1 = nowUs_ ? nowUs_() : t0;
+        if (!ok) {
+            const bool held = st->ring->Find(seq, nullptr);
+            pins.Unpin();
+            LaneTicket a = t;
+            set.Abandon(a);
+            out.why = held ? "the fill refused" : "the frame's source is not held";
+            return out;
+        }
+        if (set.LaneContinue(t))
+            set.LaneHeader(t).costUs = t1 > t0 ? uint32_t(t1 - t0) : 0u;
+        set.MarkRenderMade(seq);   // before the Publish: a worker that sees the slot taken finds the mark
+        const PublishResult pr = set.Publish(t);
+        pins.Unpin();
+        if (pr != PublishResult::Published) {
+            set.ClearRenderMade(seq);   // not made by the render after all: no reuse may be counted for it (audit S3)
+            out.why = "the seal took the frame first";
+            return out;
+        }
+        ++aheadMadeByRender_;
+        out.kind = AheadRun::Ran;
+        out.why = "made now";
+        return out;
+    }
+    // The ledger of slice C (render thread; the worker's skips are LaneRunner counters workerReused).
+    uint64_t AheadMadeByRender() const { return aheadMadeByRender_; }
+    uint64_t AheadClaimedByWorker() const { return aheadClaimedByWorker_; }
+    uint64_t AheadAlreadyMade() const { return aheadAlreadyMade_; }
+    uint64_t AheadBeyondSlots() const { return aheadBeyondSlots_; }
+    uint64_t AheadGpuNotLegal() const { return aheadGpuNotLegal_; }
+    uint64_t AheadSealReused() const { return aheadSealReused_; }
+    // The seal compute in a DECLARED reduced form (an input missing at the seal): counted apart from sealComputed, which is the
+    // compute-once ledger of the full form (L-CORE s1 SHOULD): the two are different results of one frame.
+    uint64_t SealComputedReduced() const { return sealComputedReduced_; }
     // The product is a node of the current graph (render thread); `backend` receives its backend.
     bool IsNode(ProductId id, Backend* backend = nullptr) const
     {
@@ -660,6 +806,14 @@ public:
     uint64_t ExternalDeclined() const { return externalDeclined_; }
     // The render-device release fence's completed value for a product (lane polls it before reuse).
     void SetReleaseCompleted(std::function<uint64_t(ProductId)> f) { releaseCompleted_ = std::move(f); }
+    // QKP slice C (R14-73): the memo's ledgers. Set before the lane starts (SkeletonAcquireLane.h BindLaneToMemo). `reduced` is told on
+    // the render thread when a seal computed a DECLARED reduced form; `reused` on the worker when it skipped a frame the render thread
+    // made first (the sink must be thread-safe: the memo's Note* take its mutex).
+    void SetAheadSinks(std::function<void(ProductId)> reduced, std::function<void(ProductId)> reused)
+    {
+        sealReducedSink_ = std::move(reduced);
+        workerReusedSink_ = std::move(reused);
+    }
     // 70b G0: GPU live deferral. On, a GPU-compute product's live fill at the seal (OnRenderStart, BEFORE the
     // render lock: no GPU recording there) only reserves the live buffer and records a LivePending entry; the
     // render thread later calls RunDeferredLive(seq) at a GPU-legal phase (Entrance), which dispatches the
@@ -838,8 +992,12 @@ public:
         const std::vector<ProductFrameResult>& res = st->table->Resolve(seq, stamp, fill);
         lastAhead_ = lastInRender_ = lastDeclined_ = 0;
         for (const ProductFrameResult& r : res) {
-            if (r.seal.outcome == SealOutcome::Sealed && r.seal.reason == SealReason::Accepted)
+            if (r.seal.outcome == SealOutcome::Sealed && r.seal.reason == SealReason::Accepted) {
                 ++lastAhead_;
+                const int ri = st->IndexOf(r.id);
+                if (ri >= 0 && st->table->At(size_t(ri)).RenderMade(seq))
+                    ++aheadSealReused_;   // design s9.4 b: the seal of a frame RunAheadNow made accepts it, computes nothing
+            }
             if (r.liveFilled)
                 ++lastInRender_;
             if (r.final == SealOutcome::Unavailable && r.finalReason == SealReason::FillDeclined)
@@ -1527,6 +1685,10 @@ private:
         st->runner->SetReleaseCompleted([this](ProductId id) -> uint64_t {
             return releaseCompleted_ ? releaseCompleted_(id) : ~uint64_t(0);
         });
+        st->runner->SetWorkerReusedSink([this](ProductId id) {
+            if (workerReusedSink_)
+                workerReusedSink_(id);
+        });
         for (ILaneProducer* p : producers_)
             st->runner->Register(p);
         for (size_t i = 0; i < st->graph.nodes.size(); ++i) {
@@ -1634,7 +1796,7 @@ private:
     // inputs read from the slots (a lead reads the published result); an input bit set in `missing` stays null, an input the
     // slots do not hold is asked of `inputOf` when given (Acquire chain). Render thread.
     bool RunCpuLive(const LaneState& st, const Node& n, uint64_t seq, uint32_t missing, uint8_t* dst, size_t bytes,
-                    const InputResolver& inputOf) const
+                    const InputResolver& inputOf, bool holdSource = false) const
     {
         const auto it = cpuLive_.find(n.id);
         if (it == cpuLive_.end())
@@ -1656,7 +1818,10 @@ private:
                 in[k] = inputOf(n.inputs[k].product, aseq, st.bufs[size_t(j)]->Bytes());
         }
         SourceFrameView view;
-        const bool haveView = st.ring->TryGet(seq, &view);   // lock-free, no keepAlive copy: the render holds the frame
+        // holdSource (RunAheadNow, a frame AHEAD of the render frame the render does not hold): the copy under the ring's lock carries the
+        // keepAlive, so a drop of the frame mid-compute cannot free the planes (QKP audit MUST-1). Else the lock-free copy of the frame
+        // the render holds (no keepAlive).
+        const bool haveView = holdSource ? st.ring->Find(seq, &view) : st.ring->TryGet(seq, &view);
         return it->second(n, haveView ? &view : nullptr, in, dst, bytes);
     }
 
@@ -1685,6 +1850,11 @@ private:
                 ok = true;
             } else {
                 ok = RunCpuLive(st, n, seq, missing, dst, bytes, InputResolver());
+                if (ok && missing != 0) {
+                    ++sealComputedReduced_;
+                    if (sealReducedSink_)
+                        sealReducedSink_(n.id);
+                }
             }
         } else if (liveFill_) {
             ok = liveFill_(n, seq, live, hdr, missing);
@@ -1808,10 +1978,19 @@ private:
     DeferredReport deferredTotals_;
     std::map<ProductId, CpuLiveCompute> cpuLive_;
     PublishedLookup publishedLookup_;      // B1: the seal copies an Acquire-published default-variant CPU form (render thread)
+    uint64_t aheadMadeByRender_ = 0;
+    uint64_t aheadClaimedByWorker_ = 0;
+    uint64_t aheadAlreadyMade_ = 0;
+    uint64_t aheadBeyondSlots_ = 0;
+    uint64_t aheadGpuNotLegal_ = 0;
+    uint64_t aheadSealReused_ = 0;
+    uint64_t sealComputedReduced_ = 0;
     uint64_t sealReusedPublished_ = 0;     // seal live fills served from that publication (never computed twice)
     std::vector<ProductId> externalIds_;   // products published outside the lane (SetExternalProducts)
     uint64_t externalDeclined_ = 0;        // seal-time live fills of those products that were declined (nothing published in time)
     std::function<uint64_t(ProductId)> releaseCompleted_;
+    std::function<void(ProductId)> sealReducedSink_;
+    std::function<void(ProductId)> workerReusedSink_;
     std::vector<ProductFrameResult> empty_;
     std::string error_;
     double periodMs_ = 0.0;

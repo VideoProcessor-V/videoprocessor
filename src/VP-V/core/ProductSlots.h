@@ -275,6 +275,8 @@ public:
     {
         for (std::atomic<uint32_t>& pin : livePins_)
             pin.store(0, std::memory_order_relaxed);
+        for (std::atomic<uint64_t>& m : renderMade_)
+            m.store(0, std::memory_order_relaxed);
         for (uint16_t i = 0; i < ring_; ++i) {
             SlotWord w;
             w.seq = i;   // = biased(i - ring): frame i is the slot's first claimable frame
@@ -294,6 +296,21 @@ public:
     // The tier plan's grant: without a lane, a missing result is expected, not counted.
     void SetLaneGranted(bool granted) { laneGranted_.store(granted, std::memory_order_relaxed); }
     bool LaneGranted() const { return laneGranted_.load(std::memory_order_relaxed); }
+    // QKP slice C (design s2.4 / s9.4 b): a frame the RENDER thread made through AnalysisLane::RunAheadNow carries a per-(slot, seq) mark
+    // (any thread). The lane worker that later finds the slot taken counts it WorkerReused (not a plain stale skip), and the seal of that
+    // frame counts it reused. A mark is the frame's seq + 1 in a small table by seq: a collision only forgets an older mark (an undercount
+    // of a reuse, never a wrong frame).
+    static constexpr size_t kRenderMadeMarks = 16;
+    void MarkRenderMade(uint64_t seq) { renderMade_[size_t(seq % kRenderMadeMarks)].store(seq + 1u, std::memory_order_release); }
+    bool RenderMade(uint64_t seq) const { return renderMade_[size_t(seq % kRenderMadeMarks)].load(std::memory_order_acquire) == seq + 1u; }
+    // Withdraw the mark of frame `seq` when its Publish failed (RunAheadNow: "the seal took the frame first"): the frame was not made
+    // by the render, so neither the worker (workerReused) nor the seal (aheadSealReused) may count it reused. Only this frame's own
+    // mark is cleared (a newer frame's mark in the same entry is kept).
+    void ClearRenderMade(uint64_t seq)
+    {
+        uint64_t expected = seq + 1u;
+        renderMade_[size_t(seq % kRenderMadeMarks)].compare_exchange_strong(expected, 0u, std::memory_order_acq_rel, std::memory_order_acquire);
+    }
 
     // Any thread: the decoded word of the slot that frame `seq` maps to (diagnostics, tests).
     SlotWord WordFor(uint64_t seq) const { return Unpack(slots_[SlotOf(seq)].word.load(std::memory_order_acquire)); }
@@ -938,6 +955,7 @@ private:
     std::vector<std::atomic<uint32_t>> livePins_;   // lane readers pinning each live buffer (PinRef)
     SlotCounters counters_;
     std::atomic<bool> laneGranted_{ true };
+    std::array<std::atomic<uint64_t>, kRenderMadeMarks> renderMade_;
 };
 
 // A lane job's pinned inputs (one per declared input), released by Unpin.
@@ -1049,7 +1067,11 @@ public:
 
     // Lane: pin every declared input of product `id` at frame `seq` and record them as the
     // header's ancestors. False (nothing pinned) when an input has no content yet.
-    bool LaneAncestors(ProductId id, uint64_t seq, Header& hdr, LaneInputs& pins)
+    // `countWaits` false (AnalysisLane::RunAheadNow, the render thread): the waits are NOT counted and the
+    // per-frame dedupe entries (chainWaitSeen_, chainWaitUnsealedSeen_, storeWaitSeen_) are not touched, so
+    // only the product's lane thread ever writes them. Nothing is hidden: the lane worker still counts the
+    // wait once, and the ahead caller reports its own decline ("an input is not published yet").
+    bool LaneAncestors(ProductId id, uint64_t seq, Header& hdr, LaneInputs& pins, bool countWaits = true)
     {
         pins.count = 0;
         const Node* n = NodeOf(id);
@@ -1085,7 +1107,7 @@ public:
                     hdr.chainReduced = true;
                     continue;
                 }
-                if (chainSelf && set && haveSeq) {
+                if (countWaits && chainSelf && set && haveSeq) {
                     // Waiting on a Rejected predecessor: it waits for the live fill (which may decline or find no live
                     // buffer: then it never comes and this chain stalls until the frame is released). Or on a Published
                     // one whose seal has not run. Counted once per frame, not per poll: the entries are private to this
@@ -1103,7 +1125,7 @@ public:
                         }
                     }
                 }
-                if (!chainSelf && set && haveSeq) {
+                if (countWaits && !chainSelf && set && haveSeq) {
                     // A reader of a SINGLE-STORE or HELD-STATE product (P14 / P14g: livePool 0) whose frame is Rejected (the seal refused it or the writer made none): it has no live pool, so the
                     // frame never gets content and the reader's lane job does not run for that frame (this call returns false; the render makes
                     // the reader live in its declared reduced form, or it is unavailable). Counted once per reader frame AND per store input (not
@@ -1522,9 +1544,11 @@ private:
     std::vector<ProductId> pendingLead_;   // lead ancestors seen by the Check in flight (counted on Accepted)
     bool pendingChain_ = false;            // the Check in flight accepted a chain carry-forward
     std::vector<std::vector<uint64_t>> leadMark_;   // per node, per slot: frame + 1 accepted as a lead ancestor
-    std::vector<uint64_t> chainWaitSeen_;   // per node: frame + 1 last counted in chainWaitRejected (that product's lane thread only)
-    std::vector<uint64_t> storeWaitSeen_;   // per (READER node, input index): frame + 1 last counted in storeWaitRejected (that product's lane thread only)
-    std::vector<uint64_t> chainWaitUnsealedSeen_;   // per node: frame + 1 last counted in chainWaitUnsealed (that product's lane thread only)
+    // The three dedupe entries below are written only by the product's lane thread; the ahead path
+    // (AnalysisLane::RunAheadNow, render thread) never writes them (LaneAncestors countWaits false).
+    std::vector<uint64_t> chainWaitSeen_;   // per node: frame + 1 last counted in chainWaitRejected (written only by the lane thread)
+    std::vector<uint64_t> storeWaitSeen_;   // per (READER node, input index): frame + 1 last counted in storeWaitRejected (written only by the lane thread)
+    std::vector<uint64_t> chainWaitUnsealedSeen_;   // per node: frame + 1 last counted in chainWaitUnsealed (written only by the lane thread)
     std::vector<Node> nodes_;
     std::vector<SlotSet*> sets_;
     std::vector<SealedRecord> sealed_;

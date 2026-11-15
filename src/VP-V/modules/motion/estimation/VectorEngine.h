@@ -32,11 +32,15 @@
 #include <cstdint>
 #include <exception>
 #include <list>
+#include <map>
+#include <tuple>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
+
+namespace VpSkeleton { class QueueWindowBoard; }   // core/QueueWindow.h (QKP E: the lease window's bound)
 
 namespace VpMotion
 {
@@ -323,7 +327,10 @@ namespace VpMotion
 		// vectors-valid state (P5a MotionValidity) does not hold the pair, no producer / low latency, or the source size is not known yet
 		// (set by the statistics service). Never a stale pair. The view's pointers stay valid until the NEXT FlowOf call on this engine
 		// (the engine holds the shared pair and its converted planes as a lease; the pair is copied out of the slot before any Prune)
-		// or the engine's destruction; call and read on the render thread.
+		// or the engine's destruction; call and read on the render thread. QKP E: a view is valid until its pair leaves the lease window
+		// (a frame older than current - back, or the pair pruned from the P2 slot) or an invalidation (a vectors-valid / board epoch move);
+		// only a FlowOf call evicts, never another pair's FlowOf by itself. Without a board: until the next FlowOf of another pair.
+		// (The earlier text said "until the NEXT FlowOf call": that was the single lease.)
 		bool FlowOf(uint64_t seq, FlowView& out) const override;
 		// The source width the engine size derives from (the statistics service notes it each time it sizes the producer); until then
 		// FlowOf answers "size unknown" rather than guess a scale.
@@ -345,6 +352,23 @@ namespace VpMotion
 			unsigned long long costWeightRecomputes = 0;
 		};
 		FlowReadCounters FlowReads() const;
+		// QKP slice E: the lease window's ledger and the ONE line that names how it is bounded. DORMANT: no production caller yet (no host
+		// calls SetQueueWindowBoard and nothing puts this line on Ctrl+I / Config status; only VectorLeaseTests read it; 102b QKP-E-HOST-WIRING).
+		// "vector lease window not fed" (no board: the single lease), "vector lease window capped by the P2 ring: behind 3 / ahead 13"
+		// (the P2 retention binds below the board window), "" when the board's window is what bounds it. Render thread.
+		struct LeaseCounters
+		{
+			unsigned long long live = 0;                 // leases held now
+			unsigned long long evictedWindow = 0;        // frame older than current - back (never by a newer FlowOf)
+			unsigned long long droppedPruned = 0;        // the pair left the P2 slot
+			unsigned long long droppedEpoch = 0;         // a validity / board epoch moved (all leases)
+			unsigned long long droppedSingle = 0;        // no board: the single lease replaced by another pair
+			unsigned long long window = 0;               // the bound's back term in frames (0 = not fed)
+		};
+		LeaseCounters Leases() const;
+		std::string LeaseWindowLine() const;
+		// The host's window board (core/QueueWindow.h); null = not fed. Set and clear on the render thread; outlives the engine's use.
+		void SetQueueWindowBoard(const VpSkeleton::QueueWindowBoard* board) { queueBoard_.store(board, std::memory_order_release); }
 		// Contract: set AND clear on the render thread or under renderMutex (an estimate reads the pointer once and
 		// calls it without a lock); the hook object may be destroyed only after the clear has returned.
 		void SetPreEstimateHook(IPreEstimateHook* hook) override { preEstimateHook_.store(hook, std::memory_order_release); }
@@ -453,13 +477,19 @@ namespace VpMotion
 		FallbackCatalog::Decision ReleaseHookFailures();
 
 		const void* host_ = nullptr;
-		// FlowOf's lease: the shared pair and the converted planes the last returned view points into (render thread; the mutex only
+		// QKP slice E (design s9.3): FlowOf's leases are a MAP keyed (from, to, scale), bounded by the SAME derived queue window as the
+		// frame memo (core/QueueWindow.h; the board is the host's one snapshot, fed by SetQueueWindowBoard). A lease is dropped when its
+		// frame is older than current - back, when its pair is no longer in the P2 slot (a lease never extends P2 retention), or when
+		// the vectors-valid epoch / the board's invalidation epoch moved. Without a board the behaviour is today's single lease. In production
+		// there is no board yet (slice E is dormant: no host wiring, LeaseWindowLine not displayed; 102b QKP-E-HOST-WIRING), so it is not shown.
+		// FlowOf's lease (one per pair): the shared pair and the converted planes the last returned view points into (render thread; the mutex only
 		// makes a stray second reader safe, it does not extend a view's validity).
 		struct FlowLease : IFlowTrustMemo
 		{
 			MotionAhead::FlowPtr flow;
 			uint64_t from = 0, to = 0;
 			double scale = 0;
+			uint64_t validityEpoch = 0, boardEpoch = 0;   // QKP E: the epochs the lease was built in (a moved epoch drops it)
 			std::vector<float> x, y;
 			// W1-C3: the cell trust memo, one entry per tolerance asked for this pair (each computed once and counted). A std::list so a
 			// pointer handed out stays valid when another tolerance is added (a vector of entries would move them).
@@ -480,7 +510,10 @@ namespace VpMotion
 			const float* Trust(float toleranceEnginePx, bool backward) const;
 		};
 		mutable std::mutex flowMutex_;
-		mutable std::shared_ptr<FlowLease> flowLease_;
+		using LeaseKey = std::tuple<uint64_t, uint64_t, double>;   // (from, to, scale)
+		mutable std::map<LeaseKey, std::shared_ptr<FlowLease>> flowLeases_;
+		std::atomic<const VpSkeleton::QueueWindowBoard*> queueBoard_{ nullptr };
+		mutable LeaseCounters leaseCounters_;
 		mutable FlowReadCounters flowReads_;
 		mutable std::atomic<unsigned long long> flowFbErrorRecomputes_{ 0 };
 		mutable std::atomic<unsigned long long> flowCostWeightRecomputes_{ 0 };

@@ -413,3 +413,13 @@ Depth: 8 back + 4 ahead, low latency 10 + 0; ahead = max active reader need capp
 its registry decl and reader row land (lead ruling SHOULD S3), so the pinned product counts do not move. CPU reference; GPU form = register row ECV-GPU-FORM (trigger S-3c T3).
 Details: `composed/README.md`.
 Tests: `tests/ComposedVectorsTests.cpp`.
+
+## FlowOf lease window (QKP slice E, design-queue-keyed-products s9.3)
+
+`VectorEngine::FlowOf` keeps a map of leases keyed (from, to, scale), not one. The bound is the host's derived queue window
+(`SetQueueWindowBoard`; core/QueueWindow.h): a lease whose frame is older than current - back leaves, never because a newer pair was
+asked. A pair no longer in the P2 slot drops its lease (a lease never extends P2 retention); a vectors-valid or board epoch move drops
+all. A view is valid until its pair leaves the window or an invalidation. Named by `LeaseWindowLine()`: "vector lease window not fed" (no
+board: today's single lease) or "vector lease window capped by the P2 ring: behind 3 / ahead 13" (102b VE-P2-RETENTION, owner L-B4).
+DORMANT today: no host calls `SetQueueWindowBoard` and no status surface displays `LeaseWindowLine()` yet (only `tests/VectorLeaseTests.cpp`
+reads them), so production runs the single lease and the line is not shown; the host wiring is 102b QKP-E-HOST-WIRING.

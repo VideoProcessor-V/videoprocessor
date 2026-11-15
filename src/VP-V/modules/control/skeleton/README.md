@@ -306,6 +306,16 @@ Decisions (provenance: decision log = `D:/codex/vp-handover/refs/owner-decisions
   ~05:45, 102b P13-NO-LANE-GPU-ALLOC).
 - The seal keeps the shared RunCpuLive law ONLY IF it reuses an Acquire publication and its own compute is the publication, computed
   <= 1 per frame (COORDINATOR ruling on G0 S6, lead9/lead9-state.md 07:05 entry; 102b B1-SEAL-VIA-ACQUIRE).
+- QUEUE-KEYED products (QKP, owner 2026-11-14 08:33 EST; design `D:/codex/vp-handover/lead10/design-queue-keyed-products.md` s2, s3, s6): a spot
+  belongs to ITS frame, kept while the frame is inside the queue window; the window is DERIVED at every Begin, never configured (rule 6):
+  R render-ahead (QueueDepth), P presented lag (AfterPresent), H history, L lane lead (CollectAhead min-window), W look-ahead walk
+  (SettingsApplied); back = H + max(R, P), ahead = L + W. Slice B wires it in SkeletonModule: the feeds run whenever a memo exists
+  (lane or not), `DeriveMemoWindow` sets the memo window and publishes the `QueueWindowBoard` before the memo's seal, every OnQueue
+  kind but BacklogFlush bumps the memo epoch AT the call and a Drop discards its seqs, and the no-lane VRAM grant asks for one level
+  per ahead-ladder step (never 0 while a level fits) with the interim S-A / S-B ahead plan applied. H and the active ahead need are
+  fed from the memo's DeclaredFillHistory() / ActiveAheadDemands() (L-CORE); the lane graph's lag edges join H later (102b QKP-B-LANE-GRAPH-H).
+  Basis (R14-67): H and the ahead need count CPU and GPU fills including views; the VRAM need (GpuNeedLevels) counts GPU allocating fills only.
+  A term nobody feeds is named by Ctrl+Alt+D ("not fed: ...") and the Fallbacks line `skeleton_queue_window`, never a silent 0.
 Times are EST (UTC = EST + 5 h); transcript session cf1d27fa-e9e0-4e7a-b3a8-9416d0edfd34 (D:/codex/vp-handover/TRANSCRIPT-INDEX.md).
 
 ## Scheduler budget feed and the IC-2 contract (S0)

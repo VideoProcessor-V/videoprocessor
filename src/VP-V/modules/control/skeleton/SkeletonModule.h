@@ -39,6 +39,7 @@
 namespace VpMotion { class IVectorEngine; }   // modules/motion/estimation/VectorEngineInterface.h (the P5a engine)
 namespace VpSkeleton { class SpareHost; }   // core/PostPresentSpare.h (B3-Z Z2: the post-present spare slot)
 namespace VpSkeleton { class SkeletonMemo; }   // core/SkeletonAcquire.h (B1: GET-OR-COMPUTE-AND-PUBLISH)
+namespace VpSkeleton { class QueueWindowBoard; }   // core/QueueWindow.h (QKP B: the per-host window snapshot)
 
 namespace Vpv
 {
@@ -325,6 +326,11 @@ namespace Vpv
 			// L-CORE (102b P13-NO-LANE-GPU-ALLOC): the VRAM ledger grant and GPU presence of a memo no lane is bound to (render thread,
 			// at Begin). Re-planned when the need, the declared VRAM users or the binding changed, else every kNoLaneReplanFrames.
 			void PlanNoLaneGpu(const void* host);
+			// QKP B: the queue window of this Begin (derived before the memo seal, published to the board); the board is read by any thread.
+			void DeriveMemoWindow(const void* host, const std::shared_ptr<VpSkeleton::SkeletonMemo>& memo, uint64_t seq, const std::shared_ptr<HostState>& st);
+		public:
+			const VpSkeleton::QueueWindowBoard* WindowBoardOf(const void* host) const;
+		private:
 			bool cardOverride_ = false;
 			bool startWorkers_ = true;
 			struct ExternalEntry
