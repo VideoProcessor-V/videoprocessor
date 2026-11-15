@@ -49,8 +49,12 @@ class RepoSeeds(unittest.TestCase):
                             for h in self.hits))
 
     def test_rule_c_flags_td_grain_split_compute(self):
-        self.assertTrue(any(h["rule"] == "c" and h["file"].endswith("temporal_detail/TemporalDetailModel.h") and h["line"] == 141
-                            for h in self.hits))
+        # Anchored by the site's text, not its line number (C6-1 U25 C9: the site moved 141 -> 142 with an include).
+        site = [h for h in self.hits if h["rule"] == "c" and h["file"].endswith("temporal_detail/TemporalDetailModel.h")
+                and "GrainSplit::Compute(y, scale, B, SplitParams())" in h["text"]]
+        self.assertEqual(len(site), 1, site)
+        with open(os.path.join(REPO, site[0]["file"]), encoding="utf-8") as fh:
+            self.assertIn("GrainSplit::Compute(y, scale, B, SplitParams())", fh.read().splitlines()[site[0]["line"] - 1])
 
     def test_strict_passes_with_the_baseline(self):
         self.assertEqual(N1.main(["--strict", "--root", REPO]), 0)
