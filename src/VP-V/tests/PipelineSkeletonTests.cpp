@@ -100,7 +100,7 @@ namespace PipelineSkeletonTestsNs
 			}
 			// The slots that existed before the appended ones keep their table position.
 			int lastOld = 0;
-			for (size_t i = 0; i < static_cast<size_t>(Id::ScalingShared); ++i)
+			for (size_t i = 0; i < static_cast<size_t>(Id::ColourDmPre); ++i)
 			{
 				Assert::IsTrue(PipelineSlots::Slots()[i].order > lastOld, L"original slots out of order");
 				lastOld = PipelineSlots::Slots()[i].order;
