@@ -383,6 +383,7 @@ namespace Vpv
 			std::string waiting;
 			std::string shownWaiting;
 			bool shownBundle = false;
+			std::string shownVetoOff;   // the cut veto state the cached status text was built for ("" = on)
 			uint8_t shownQueueWired = 0xFF;   // the queue-delivery state the cached status text was built for
 			Vpv::Skeleton::SlotBudgetFeed budgetFeed;   // S0: feeds spare.SetBudget once per source frame + Presenter::spareSlotMs (SlotBudgetFeed.h)
 			VpSkeleton::SpareHost spare;       // B3-Z Z2: the post-present spare slot, driven by R12 AfterPresent (OnAfterPresent)
@@ -1510,11 +1511,14 @@ namespace Vpv
 				// Delivery (FrameAnalysis::Scene::cut): this frame's confirmed cut now, else the OLDEST confirmed cut since the last frame
 				// judged that did not go out with its own group (it was provisional then): exactly once per cut. Normally that is frame
 				// seq - 1 (one frame late); when frame c + 1 had no group (dropped, unsealed or no record) cut c is confirmed at the part end
-				// and goes out with the next frame that has one (counted: sceneLateGap). A provisional verdict never delivers a cut (on the
+				// and goes out with the next frame that has one (counted: sceneLateGap). Reach: a gap longer than the tracker's re-prime
+				// span (kScenePrimeFrames) restarts the tracker, and a cut inside it is not judged at all (counted as a re-prime, refs/102b).
+				// A provisional verdict never delivers a cut (on the
 				// footage it holds false cuts the successor removes: refs/102b U7-accuracy).
 				HostState::SceneVerdictSlot& own = st.sceneVerdicts[seq % HostState::kSceneVerdicts];
 				const bool ownSlot = own.used && own.seq == seq;
 				bool late = false;
+				uint64_t nextUndelivered = 0;
 				if (ownSlot && own.carriesLate)
 					late = true;   // a re-fill of the same picture: the late cut it carried stays with it
 				else
@@ -1526,11 +1530,17 @@ namespace Vpv
 						lowest = seq - (HostState::kSceneVerdicts - 1);
 					if (lowest == 0)
 						lowest = 1;
-					for (uint64_t d = lowest; d < seq && !late; ++d)
+					for (uint64_t d = lowest; d < seq; ++d)
 					{
 						HostState::SceneVerdictSlot& c = st.sceneVerdicts[d % HostState::kSceneVerdicts];
 						if (c.used && c.seq == d && c.v.known && c.v.confirmed && c.v.cut && !c.deliveredOwn && !c.deliveredLate)
 						{
+							if (late)
+							{
+								// A second undelivered cut in the window (one cut per group): the next fill starts its search here.
+								nextUndelivered = d;
+								break;
+							}
 							late = true;
 							c.deliveredLate = true;
 							if (ownSlot)
@@ -1541,7 +1551,12 @@ namespace Vpv
 						}
 					}
 				}
-				if (!st.sceneHasFilled || seq > st.sceneLastFilled || seq + HostState::kSceneVerdicts < st.sceneLastFilled)
+				if (nextUndelivered != 0)
+				{
+					st.sceneHasFilled = true;
+					st.sceneLastFilled = nextUndelivered;   // still owed: the next fill delivers it
+				}
+				else if (!st.sceneHasFilled || seq > st.sceneLastFilled || seq + HostState::kSceneVerdicts < st.sceneLastFilled)
 				{
 					st.sceneHasFilled = true;
 					st.sceneLastFilled = seq;   // a seek back (far below the newest) starts the search over
@@ -2363,10 +2378,13 @@ namespace Vpv
 			const uint8_t queueWired = CurrentQueue().wired;
 			const uint64_t queueKey = (uint64_t(st.queueFed.laneLead) << 40) | (uint64_t(st.queueUsed.laneLead) << 32) | (uint64_t(st.queueFed.renderAhead) << 24) |
 				(uint64_t(st.queueUsed.renderAhead) << 16) | (st.starveEvents & 0xFFFFu);
+			// U7-accuracy Q5: the cut veto's reach (a store toggle, a second renderer) refreshes the text at once.
+			const std::string vetoOff = SceneVetoOff(st.host);
 			const bool due = st.frames <= kEarlyRefreshFrames || st.frames % kRefreshEvery == 1 || st.waiting != st.shownWaiting ||
-				hasBundle != st.shownBundle || queueWired != st.shownQueueWired || queueKey != st.shownQueueKey;
+				hasBundle != st.shownBundle || queueWired != st.shownQueueWired || queueKey != st.shownQueueKey || vetoOff != st.shownVetoOff;
 			if (!due)
 				return;
+			st.shownVetoOff = vetoOff;
 			st.shownQueueKey = queueKey;
 			st.shownQueueWired = queueWired;
 			st.shownWaiting = st.waiting;
@@ -2401,7 +2419,7 @@ namespace Vpv
 				addDecision(FallbackCatalog::SkeletonRegulatorInput(hasBundle && !st.timing.measured, st.timing.noted, st.timing.lastNotedMs));
 addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleton::KnownUndeclaredVramUsers()) : std::string()));   // MV7 standing gap
 				addDecision(FallbackCatalog::SkeletonEngineFeed(st.feedNeeded && st.engine == nullptr));   // SK-W stage D: P2m / P3 cannot be published
-				addDecision(FallbackCatalog::SkeletonSceneVeto(SceneVetoOff(st.host)));   // U7-accuracy Q5: the cut veto's reach, never silent
+				addDecision(FallbackCatalog::SkeletonSceneVeto(vetoOff));   // U7-accuracy Q5: the cut veto's reach, never silent
 				// MV7 guard: a module that holds video memory is active but declared none of it: visible, never silent.
 				addDecision(FallbackCatalog::SkeletonVramUsers(VpSkeleton::UnpopulatedUserNames(VpSkeleton::VramUsers::Instance().Take().unpopulated)));
 			}
@@ -2555,7 +2573,6 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				}
 				{
 					// U7 v2 (Ctrl+I / Ctrl+Alt+D): the scene product's sequence judge and the vector cut veto, in plain words.
-					const std::string vetoOff = SceneVetoOff(st.host);
 					const std::string vetoState = vetoOff.empty() ? std::string("on") : "off (" + vetoOff + ")";
 					char sceneLine[768] = {};
 					std::snprintf(sceneLine, sizeof(sceneLine),
