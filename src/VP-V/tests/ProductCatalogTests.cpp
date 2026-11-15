@@ -188,8 +188,10 @@ namespace ProductCatalogTestsNs
 				{ kTdTrailSummary, "temporal detail" },
 			};
 			const Registry reg = SkeletonProducts();
-			Assert::AreEqual(size_t(kSkeletonProductEnd) - 4u, sizeof(expected) / sizeof(expected[0]),
-				L"every product but the matcher pair, the two held-state records (source identity, source geometry) and the causal quality pattern has an expectation");
+			Assert::AreEqual(size_t(kSkeletonProductEnd) - 5u, sizeof(expected) / sizeof(expected[0]),
+				L"every product but the matcher pair, the two held-state records (source identity, source geometry), the causal quality pattern and the edge map (no catalog reader row yet; L-B5 owner fill only) has an expectation");
+			// kEdgeMap is exempt above because no catalog reader row declares it yet (L-B5 owner fill only): pin that state.
+			Assert::IsNull(LiveFillOwner(kEdgeMap), L"kEdgeMap has no live-fill owner until a reader row is declared; then give it an expectation and drop the exemption");
 			// The causal quality pattern is a substitute (read as P15 by its declared id): nobody reads it by its own id.
 			Assert::IsNull(LiveFillOwner(kQualityPatternCausal));
 			for (const Expect& e : expected) {
