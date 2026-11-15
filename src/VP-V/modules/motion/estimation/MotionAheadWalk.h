@@ -84,12 +84,13 @@ namespace MotionAhead
 			return;
 		// B1 (owner 2026-11-10, doc 91 C): the frames taken are the LEAD, every frame queued ahead (the render loop's one count,
 		// queuedFutureFrames, stored by the same pass just before this call), never below the depth, at most MotionAhead::kMaxLead;
-		// 0 while the depth is 0. Backward pairs (depth 0) keep the current frame only. The producer's pending capacity follows the
-		// lead (SetLead, every pass, so a stopped look-ahead hands its capacity back to the depth's).
+		// 0 while the depth is 0, and then nothing is taken (batch B fold: the backward pairs that took the current frame at depth 0
+		// are retired). The producer's pending capacity follows the lead (SetLead, every pass, so a stopped look-ahead hands its
+		// capacity back to the depth's).
 		const int aheadDepth = impl->vectorEngine.motionAheadDepth.load(std::memory_order_acquire);
 		const int lead = MotionAhead::LeadFor(aheadDepth, queuedAhead);
 		aheadProducer->SetLead(lead);
-		if (aheadDepth > 0 || impl->vectorEngine.motionAheadBackward.load(std::memory_order_acquire))
+		if (aheadDepth > 0)
 		{
 			const size_t depth = static_cast<size_t>(lead);
 			const uint64_t last = aheadProducer->LastSubmitted();
@@ -127,7 +128,8 @@ namespace MotionAhead
 				static_cast<size_t>(VectorDemand::EngageAhead(impl.vectorEngine.motionAheadConfigured.load(std::memory_order_acquire),
 					impl.queueAheadCapacity.load(std::memory_order_acquire))) :
 				static_cast<size_t>((std::max)(1, impl.vectorEngine.motionAheadConfigured.load(std::memory_order_acquire)));
-			const bool backwardPairs = impl.vectorEngine.motionAheadBackward.load(std::memory_order_acquire);   // vector engine: engaged while it runs
+			// Batch B fold: the backward pairs (engaged while they ran, without the engage wait) are retired; only the engagement below
+			// hands the producer frames.
 			// A break always disengages and the next pass must see 4 queued ahead again (a re-engage
 			// in the same pass would skip the refill wait: the reset test, 2026-10-16).
 			if (impl.vectorEngine.motionAheadEngaged &&
@@ -137,7 +139,7 @@ namespace MotionAhead
 				DebugLog::Log("Motion ahead: waiting for %zu frames queued ahead (%s)", engageAhead,
 					queuedAhead == 0 ? "the queue holds none" : "the sequence broke: skip, seek or reset");
 			}
-			else if (!impl.vectorEngine.motionAheadEngaged && queuedAhead >= engageAhead && !backwardPairs)
+			else if (!impl.vectorEngine.motionAheadEngaged && queuedAhead >= engageAhead)
 			{
 				impl.vectorEngine.motionAheadEngaged = true;
 				impl.vectorEngine.motionAheadEngagedGeneration = generation;
@@ -145,7 +147,7 @@ namespace MotionAhead
 					MotionAhead::LeadFor(impl.vectorEngine.motionAheadDepth.load(std::memory_order_acquire), queuedAhead),
 					impl.vectorDemand.lowLatencyAllowed ? "; vector engine: shallow queue" : "");
 			}
-			const bool framesAhead = impl.vectorEngine.motionAheadEngaged || backwardPairs;
+			const bool framesAhead = impl.vectorEngine.motionAheadEngaged;
 			// A frame's time as the dequeue reads it (the film clock when pulldown is locked,
 			// else the capture timestamp; 0 = not known).
 			LARGE_INTEGER aheadQpcFrequency{};

@@ -23,7 +23,9 @@ ROW("off-warm-pending-fillgaps", { s.motionEngineWarmPending=true; s.sourceHz=23
 	"",
 	0ull, 0ull,
 	"" })
-ROW("off-vector-demand-line", { s.vectorDemand.mode=VectorDemand::Mode::Backward; s.sourceHz=50.0; s.measuredDisplayHz=60.0; },
+// Batch B fold (WAIVER-B1-ENGINE-06): Mode::Backward is retired; the row's running engine is Forward (the decision reads only
+// mode != Off on the settled-off branch, so every recorded column is unchanged).
+ROW("off-vector-demand-line", { s.vectorDemand.mode=VectorDemand::Mode::Forward; s.sourceHz=50.0; s.measuredDisplayHz=60.0; },
 	{ R::Off, false, 0.0f, 0, false, I::Off, 0, false, false, 1.0f, 0, false, O::SettledOff, false, false, false, false, 2, false,
 	"",
 	"",
@@ -615,7 +617,9 @@ ROW("analysis-forward-off-reason", { s.vectorDemand.mode=VectorDemand::Mode::For
 	"",
 	0ull, 0ull,
 	"" })
-ROW("analysis-backward-no", { s.vectorDemand.mode=VectorDemand::Mode::Backward; s.vectorDemand.estimate=true; s.sourceHz=50.0; s.measuredDisplayHz=60.0; s.haveNext=true; s.nextMatches=true; },
+// Batch B fold (WAIVER-B1-ENGINE-06): was "analysis-backward-no" (Mode::Backward, retired). The non-forward decision is now Off
+// with an estimate asked: the analysis estimate still needs mode == Forward, so every recorded column is unchanged.
+ROW("analysis-mode-off-no", { s.vectorDemand.mode=VectorDemand::Mode::Off; s.vectorDemand.estimate=true; s.sourceHz=50.0; s.measuredDisplayHz=60.0; s.haveNext=true; s.nextMatches=true; },
 	{ R::Off, false, 0.0f, 0, false, I::Off, 1.2, false, false, 1.0f, 1.2, false, O::ReleaseBranch, false, false, false, false, 2, false,
 	"",
 	"",

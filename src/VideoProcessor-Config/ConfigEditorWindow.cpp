@@ -9173,11 +9173,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "estimated ahead follows the same timing and Dolby Vision rules as the next frame, and Dolby Vision frames "
             "pair only under the same colour matrices; changing a motion setting or the motion source restarts the "
             "motion; a frame dropped to keep a queued repeat counts as a gap. Off: the earlier behaviour."));
-        auto* vectorDemand = addChoice(QStringLiteral("Vector engine on demand"), QStringLiteral("vector_demand"),
+        auto* vectorDemand = addChoice(QStringLiteral("Motion engine"), QStringLiteral("vector_demand"),
             { QStringLiteral("on"), QStringLiteral("off") });
         vectorDemand->setToolTip(QStringLiteral(
-            "Runs the vector engine only when a feature that needs motion vectors is active, at any frame rate. "
-            "Off keeps the old behaviour."));
+            "Runs the motion engine only when a feature that needs motion vectors is active, at any frame rate. "
+            "Off: no motion work; de-judder and hiccup smoothing are off, other features use their non-motion path."));
         // Hunt 2 group 5 (13-timing).
         auto* queueTiming = addChoice(QStringLiteral("Queue timing fixes"), QStringLiteral("queue_timing_fixes"),
             { QStringLiteral("on"), QStringLiteral("off") });

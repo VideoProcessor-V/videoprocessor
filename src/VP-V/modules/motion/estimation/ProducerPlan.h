@@ -78,7 +78,7 @@ namespace VpMotion
 			bool generalRateFixes = true;
 			double sourceHz = 0.0;
 			bool vectorLowLatencyAllowed = false;
-			bool vectorBackward = false;           // vectorDemand.mode == Backward
+			// Batch B fold: vectorBackward (vectorDemand.mode == Backward) is retired with the backward pairs.
 			bool vectorProducer = false;           // vectorDemand.producer
 			bool dejudderEstimating = false;       // the de-judder's reason is Active / NoNextFrame / NextFrameDiffers
 			// SK-MV warm engine (owner MUST KEEP): a STANDING demand, true whenever the de-judder is enabled (its matcher exists), whether
@@ -95,7 +95,6 @@ namespace VpMotion
 			MotionAhead::Decision ahead;
 			bool motionConsumer = false;
 			int storedDepth = 0;           // motionAheadDepth: 0 unless the producer runs
-			bool storedBackward = false;   // motionAheadBackward
 			int storedConfigured = 1;      // motionAheadConfigured, at least 1
 			bool disengage = false;        // no frames are collected: no stale engagement
 		};
@@ -106,10 +105,9 @@ namespace VpMotion
 			out.motionConsumer = in.dejudderEstimating || in.vectorProducer || in.dejudderStanding;
 			out.ahead = MotionAhead::Decide(
 				MotionAhead::DepthAt(in.motionAheadFrames, in.sourceHz, in.generalRateFixes),
-				in.lowLatency && (!in.vectorLowLatencyAllowed || in.vectorBackward),
-				in.producerRunning, in.queuedFutureFrames, in.opticalFlow, out.motionConsumer, in.vectorBackward);
+				in.lowLatency && !in.vectorLowLatencyAllowed,
+				in.producerRunning, in.queuedFutureFrames, in.opticalFlow, out.motionConsumer);
 			out.storedDepth = in.producerRunning ? out.ahead.depth : 0;
-			out.storedBackward = in.producerRunning && out.ahead.reason == MotionAhead::Reason::BackwardPairs;
 			out.storedConfigured = (std::max)(1, out.ahead.configured);
 			out.disengage = !in.producerRunning || out.ahead.depth == 0;
 			return out;

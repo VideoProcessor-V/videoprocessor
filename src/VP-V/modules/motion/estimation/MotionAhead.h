@@ -63,7 +63,8 @@ namespace MotionAhead
 		LowLatency,     // a low-latency profile
 		NoEngine,       // no optical-flow engine (not NVIDIA, failed self-check, not built yet)
 		NoConsumer,     // neither the de-judder nor the interpolator estimates for this source (idle)
-		BackwardPairs,  // low latency, no frame ahead: backward pairs on arrival (Vector engine on demand)
+		// Batch B fold: BackwardPairs (low latency, no frame ahead: backward pairs on arrival) is retired with the backward pairs
+		// (competitive low latency is motion-free, VectorDemand::DecideForHost); it was the last value, so no index moved.
 	};
 
 	struct Decision
@@ -80,7 +81,7 @@ namespace MotionAhead
 	// DejudderPolicy Active / NoNextFrame / NextFrameDiffers). Without one no frames are submitted
 	// (intent audit 2026-10-16: pairs were computed for 60p after film); the producer stays alive, idle.
 	inline Decision Decide(int configured, bool lowLatency, bool engineAvailable, size_t availableFutureFrames, bool opticalFlow = true,
-		bool consumer = true, bool backwardPairs = false)
+		bool consumer = true)
 	{
 		Decision d;
 		// `configured`: DepthAt(motion_ahead_frames, rate) - motion_ahead_frames itself at 60 Hz and below.
@@ -88,7 +89,6 @@ namespace MotionAhead
 		d.available = static_cast<int>((std::min)(availableFutureFrames, static_cast<size_t>(1000)));
 		if (!opticalFlow) d.reason = Reason::Disabled;
 		else if (d.configured == 0) d.reason = Reason::Off;
-		else if (lowLatency && backwardPairs && consumer && engineAvailable) d.reason = Reason::BackwardPairs;
 		else if (lowLatency) d.reason = Reason::LowLatency;
 		else if (!consumer) d.reason = Reason::NoConsumer;
 		else if (!engineAvailable) d.reason = Reason::NoEngine;
@@ -113,7 +113,6 @@ namespace MotionAhead
 		case Reason::LowLatency: return "off in low latency";
 		case Reason::NoEngine: return "no optical-flow engine (the matcher runs)";
 		case Reason::NoConsumer: return "idle (no motion estimate runs for this source)";
-		case Reason::BackwardPairs: return "backward pairs on arrival (no frame ahead)";
 		}
 		return "?";
 	}
@@ -140,8 +139,8 @@ namespace MotionAhead
 	// queued frame); the ring keeps its size. 6 = 100 ms at 60p, 250 ms at 24p.
 	constexpr int kMaxLead = int(VpSkeleton::kAheadCeiling);
 	static_assert(kMaxLead >= 1 && kMaxLead <= kRingMaxLead, "the ahead-compute ceiling fits the P2 ring (else raise the ring, never evict)");
-	// The lead for a frame: 0 while the look-ahead is not running (depth 0: off, low latency, no engine, nothing queued; backward pairs
-	// keep their own current-frame-only rule in the walk), else the queued frames ahead, never below the depth, and never above kMaxLead
+	// The lead for a frame: 0 while the look-ahead is not running (depth 0: off, low latency, no engine, nothing queued; the walk then
+	// hands the producer no frame), else the queued frames ahead, never below the depth, and never above kMaxLead
 	// (also when the depth is larger: 120p's time-based depth 8 and 240p's 16 are held to the ceiling). Where the queue held exactly the
 	// depth (60p with 4 queued ahead) the lead is the depth: the old behaviour.
 	inline int LeadFor(int depth, size_t queuedAhead)

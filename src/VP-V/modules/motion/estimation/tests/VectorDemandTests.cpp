@@ -49,10 +49,10 @@ namespace VectorDemandTest
 			Consumer::TextureRestore, Consumer::ResidualStabilise, Consumer::TemporalDetail };
 	}
 
-	// The pure-decision layer: Decide() = DecideWith(in, kAnalysisUnderSmoothMotion). Production (VectorEngine::UpdateVectorEngine,
-	// VectorEngine.cpp) calls VectorDemand::DecideForHost, NOT Decide(): under libplacebo smooth motion and in competitive low latency
-	// the host decides Off with the reason (batch B plan (b)/(d4); VectorDemandHostTests below pins that). The Decide() expectations
-	// here (analysis under smooth motion, backward pairs at depth 0) stay as they are until Decide() is folded into DecideForHost (102b).
+	// The decision the engine host acts on: VectorDemand::DecideForHost (VectorEngine::UpdateVectorEngine), the ONE decision since the
+	// batch B fold (gate-union-b1 (i); WAIVER-B1-ENGINE-06). Every test here pins that function: under libplacebo smooth motion and in
+	// competitive low latency it decides Off with the reason (plan (b)/(d4)); the expectations of the retired Decide() (analysis under
+	// smooth motion, backward pairs at depth 0) moved to those Off decisions, each consumer still named (VectorDemandHostTests too).
 	TEST_CLASS(VectorDemandTests)
 	{
 	public:
@@ -60,7 +60,7 @@ namespace VectorDemandTest
 		{
 			for (Consumer c : kNonSynthesis)
 			{
-				const Decision d = Decide(Make({ c }));
+				const Decision d = DecideForHost(Make({ c }));
 				Assert::IsTrue(d.mode == Mode::Forward, L"forward");
 				Assert::IsTrue(d.Serves(c), L"served");
 				Assert::AreEqual(0u, d.unserved);
@@ -75,35 +75,40 @@ namespace VectorDemandTest
 
 		TEST_METHOD(StatisticsOnlyForwardHasNoEstimateAndFieldConsumerAddsOne)
 		{
-			const Decision stats = Decide(Make({ Consumer::SourceMonitorPan, Consumer::MotionIntent }));
+			const Decision stats = DecideForHost(Make({ Consumer::SourceMonitorPan, Consumer::MotionIntent }));
 			Assert::IsTrue(stats.mode == Mode::Forward, L"forward");
 			Assert::IsFalse(stats.estimate, L"no render-time estimate");
 			Assert::IsTrue(stats.producer, L"batch B: the producer runs for the served statistics consumers");
-			const Decision both = Decide(Make({ Consumer::SourceMonitorPan, Consumer::GrainMap }));
+			const Decision both = DecideForHost(Make({ Consumer::SourceMonitorPan, Consumer::GrainMap }));
 			Assert::IsFalse(both.estimate, L"pairs expected: a field consumer brings no render-time estimate");
 			Assert::IsTrue(both.producer, L"batch B: the producer runs");
-			const Decision camera = Decide(Make({ Consumer::SourceMonitorPan, Consumer::CameraFit }));
+			const Decision camera = DecideForHost(Make({ Consumer::SourceMonitorPan, Consumer::CameraFit }));
 			Assert::IsTrue(camera.estimate && camera.producer, L"the camera fit (its own matcher field) brings the estimate and the producer");
 		}
 
-		TEST_METHOD(StatisticsConsumersAloneAtDepthZeroRunBackward)
+		// Batch B fold (WAIVER-B1-ENGINE-06; was StatisticsConsumersAloneAtDepthZeroRunBackward): competitive low latency (no frame
+		// ahead) is motion-free, so a statistics consumer alone is named unserved and nothing starts (the backward pairs are retired).
+		TEST_METHOD(StatisticsConsumersAloneAtDepthZeroAreMotionFree)
 		{
 			for (Consumer c : { Consumer::SourceMonitorPan, Consumer::MotionIntent })
 			{
 				Input in = Make({ c });
 				in.lowLatency = true;
 				in.queueAheadCapacity = 0;
-				const Decision d = Decide(in);
-				Assert::IsTrue(d.mode == Mode::Backward, L"backward");
-				Assert::IsTrue(d.Serves(c), L"served");
-				Assert::IsTrue(d.producer, L"batch B: the backward pair runs for the served statistics consumer");
+				const Decision d = DecideForHost(in);
+				Assert::IsTrue(d.mode == Mode::Off && d.reason == Reason::BackwardDepth0, L"competitive: off, motion-free");
+				Assert::IsFalse(d.Serves(c), L"not served");
+				Assert::AreEqual(Bit(c), d.unserved, L"named unserved");
+				Assert::IsFalse(d.producer, L"no producer (no backward pair)");
 				Assert::IsFalse(d.estimate, L"no estimate");
+				Assert::IsFalse(d.lowLatencyAllowed, L"no low-latency vectors path");
+				Assert::AreEqual(std::string(Name(c)) + " without vectors (competitive low latency (motion-free))", UnservedText(d));
 			}
 		}
 
 		TEST_METHOD(NoConsumerIsOff)
 		{
-			const Decision d = Decide(Make({}));
+			const Decision d = DecideForHost(Make({}));
 			Assert::IsTrue(d.mode == Mode::Off, L"off");
 			Assert::IsTrue(d.reason == Reason::NoConsumer, L"reason");
 			Assert::AreEqual(0u, d.served);
@@ -119,7 +124,7 @@ namespace VectorDemandTest
 			Assert::AreEqual(15, kConsumerCount);
 			Assert::IsTrue(DomainOf(Consumer::CameraFit) == Domain::SourceField);
 			Assert::AreEqual(std::string("camera fit"), std::string(Name(Consumer::CameraFit)));
-			const Decision d = Decide(Make({ Consumer::CameraFit }));
+			const Decision d = DecideForHost(Make({ Consumer::CameraFit }));
 			Assert::IsTrue(d.mode == Mode::Forward);
 			Assert::IsTrue(d.Serves(Consumer::CameraFit));
 			Assert::IsTrue(d.estimate && d.producer);
@@ -132,7 +137,7 @@ namespace VectorDemandTest
 
 		TEST_METHOD(SynthesisConsumersOnlyAreNeverServedHere)
 		{
-			const Decision d = Decide(Make({ Consumer::Interpolator, Consumer::DejudderExtras }));
+			const Decision d = DecideForHost(Make({ Consumer::Interpolator, Consumer::DejudderExtras }));
 			Assert::IsTrue(d.mode == Mode::Off, L"off");
 			Assert::AreEqual(0u, d.served);
 			Assert::AreEqual(0u, d.unserved);
@@ -147,16 +152,16 @@ namespace VectorDemandTest
 			in.enabled = false;
 			in.smoothMotion = true;
 			in.interlaced = true;
-			Assert::IsTrue(Same(Decide(in), Decision()), L"field for field default");
-			Assert::IsTrue(Decide(in).reason == Reason::Disabled, L"disabled");
-			Assert::AreEqual(std::string(), StatusLine(Decide(in)));
+			Assert::IsTrue(Same(DecideForHost(in), Decision()), L"field for field default");
+			Assert::IsTrue(DecideForHost(in).reason == Reason::Disabled, L"disabled");
+			Assert::AreEqual(std::string(), StatusLine(DecideForHost(in)));
 		}
 
 		TEST_METHOD(SlotsOffServesNothing)
 		{
 			Input in = Make({ Consumer::GrainMap, Consumer::SigmaDelta });
 			in.slotsRun = false;
-			const Decision d = Decide(in);
+			const Decision d = DecideForHost(in);
 			Assert::IsTrue(d.reason == Reason::SlotsOff, L"slots off");
 			Assert::IsTrue(d.mode == Mode::Off, L"off");
 			Assert::AreEqual(0u, d.served);
@@ -164,27 +169,34 @@ namespace VectorDemandTest
 			Assert::AreEqual(std::string("Vector engine: off (slot off)"), StatusLine(d));
 		}
 
-		TEST_METHOD(SmoothMotionKeepsSourceAnalysisAndDropsOutputDither)
+		// Batch B fold (WAIVER-B1-ENGINE-06; was SmoothMotionKeepsSourceAnalysisAndDropsOutputDither, the retired analysis-under-smooth-
+		// motion semantics): libplacebo smooth motion owns output exclusively, so the source consumers go without vectors like the dither,
+		// and the one vector_engine entry names every one of them with why.
+		TEST_METHOD(SmoothMotionOwnsOutputAndNamesTheSourceConsumersAndTheDither)
 		{
 			Input in = Make({ Consumer::GrainMap, Consumer::MotionIntent, Consumer::SigmaDelta });
 			in.smoothMotion = true;
-			const Decision d = Decide(in);
-			Assert::IsTrue(d.mode == Mode::Forward, L"forward");
-			Assert::IsTrue(d.Serves(Consumer::GrainMap) && d.Serves(Consumer::MotionIntent), L"source served");
+			const Decision d = DecideForHost(in);
+			Assert::IsTrue(d.mode == Mode::Off && d.reason == Reason::SmoothMotionExclusive, L"off, exclusive");
+			Assert::IsFalse(d.Serves(Consumer::GrainMap) || d.Serves(Consumer::MotionIntent), L"source not served");
 			Assert::IsFalse(d.Serves(Consumer::SigmaDelta), L"dither not served");
-			Assert::AreEqual(1u << static_cast<int>(Consumer::SigmaDelta), d.unserved);
+			Assert::AreEqual(Bit(Consumer::GrainMap) | Bit(Consumer::MotionIntent) | Bit(Consumer::SigmaDelta), d.unserved);
+			Assert::IsFalse(d.producer || d.estimate, L"nothing starts");
 			const FallbackCatalog::Decision f = FallbackCatalog::VectorEngine(d);
 			Assert::IsTrue(f.engaged, L"engaged");
 			Assert::AreEqual(std::string("vector_engine"), f.id);
 			Assert::IsTrue(f.reason.find("output dither") != std::string::npos, L"names output dither");
+			Assert::IsTrue(f.reason.find("grain map") != std::string::npos && f.reason.find("intent") != std::string::npos,
+				L"names the source consumers");
 			Assert::IsTrue(f.reason.find("libplacebo smooth motion owns output") != std::string::npos, L"says why");
+			Assert::AreEqual(std::string("output dither, grain map, intent without vectors (libplacebo smooth motion owns output)"), f.reason);
 		}
 
 		TEST_METHOD(ExclusiveModelLeavesEverythingUnserved)
 		{
 			Input in = Make({ Consumer::GrainMap, Consumer::SigmaDelta });
 			in.smoothMotion = true;
-			const Decision d = DecideWith(in, false);
+			const Decision d = DecideForHost(in);
 			Assert::IsTrue(d.reason == Reason::SmoothMotionExclusive, L"exclusive");
 			Assert::IsTrue(d.mode == Mode::Off, L"off");
 			Assert::AreEqual(0u, d.served);
@@ -196,7 +208,7 @@ namespace VectorDemandTest
 		{
 			Input in = Make({ Consumer::GrainMap, Consumer::MotionIntent });
 			in.interlaced = true;
-			const Decision d = Decide(in);
+			const Decision d = DecideForHost(in);
 			Assert::IsTrue(d.reason == Reason::Interlaced, L"interlaced");
 			Assert::IsTrue(d.mode == Mode::Off, L"off");
 			Assert::AreEqual(0u, d.served);
@@ -208,27 +220,30 @@ namespace VectorDemandTest
 
 		TEST_METHOD(LowLatencyUsesOnlyTheModesOwnQueuedFrames)
 		{
-			// Owner 2026-11-01: in low latency the vectors never ADD queue depth. Competitive (no frame
-			// queued ahead, capacity 0) runs backward pairs; games (its own queue holds frames ahead,
-			// capacity >= 1) uses those already-queued frames forward (ForwardShallow), never deeper than
-			// the queue holds (EngageAhead bounded by the capacity).
+			// Owner 2026-11-01: in low latency the vectors never ADD queue depth. Games (its own queue holds
+			// frames ahead, capacity >= 1) uses those already-queued frames forward (ForwardShallow), never
+			// deeper than the queue holds (EngageAhead bounded by the capacity). Batch B fold
+			// (WAIVER-B1-ENGINE-06): competitive (no frame queued ahead, capacity 0) is motion-free (was:
+			// backward pairs for the statistics consumers): every consumer falls back visibly, nothing starts.
 			for (int capacity = 0; capacity <= 8; ++capacity)
 			{
 				Input in = Make({ Consumer::GrainMap, Consumer::DebandHold, Consumer::SourceMonitorPan });
 				in.lowLatency = true;
 				in.queueAheadCapacity = capacity;
-				const Decision d = Decide(in);
-				Assert::IsTrue(d.lowLatencyAllowed, L"low latency allowed");
-				Assert::IsTrue(d.Serves(Consumer::SourceMonitorPan), L"statistics served");
+				const Decision d = DecideForHost(in);
 				if (capacity == 0)
 				{
-					Assert::IsTrue(d.mode == Mode::Backward && d.reason == Reason::BackwardDepth0, L"competitive: backward");
-					Assert::IsFalse(d.estimate, L"competitive: no forward estimate");
-					Assert::AreEqual((1u << static_cast<int>(Consumer::GrainMap)) | (1u << static_cast<int>(Consumer::DebandHold)), d.unserved,
-						L"competitive: the field consumers fall back visibly");
+					Assert::IsTrue(d.mode == Mode::Off && d.reason == Reason::BackwardDepth0, L"competitive: off, motion-free");
+					Assert::IsFalse(d.lowLatencyAllowed, L"competitive: no low-latency vectors path");
+					Assert::IsFalse(d.Serves(Consumer::SourceMonitorPan), L"competitive: the statistics consumer is not served");
+					Assert::IsFalse(d.estimate || d.producer, L"competitive: no estimate, no producer");
+					Assert::AreEqual(Bit(Consumer::GrainMap) | Bit(Consumer::DebandHold) | Bit(Consumer::SourceMonitorPan), d.unserved,
+						L"competitive: every consumer falls back visibly");
 				}
 				else
 				{
+					Assert::IsTrue(d.lowLatencyAllowed, L"low latency allowed");
+					Assert::IsTrue(d.Serves(Consumer::SourceMonitorPan), L"statistics served");
 					Assert::IsTrue(d.mode == Mode::Forward && d.reason == Reason::ForwardShallow, L"games: forward from the queued frames");
 					Assert::AreEqual(0u, d.unserved, L"games: every consumer served");
 				}
@@ -246,52 +261,58 @@ namespace VectorDemandTest
 			Assert::AreEqual(1, EngageAhead(0, 5));
 		}
 
-		TEST_METHOD(DepthZeroLowLatencyIsBackwardForStatisticsOnly)
+		// Batch B fold (WAIVER-B1-ENGINE-06; was DepthZeroLowLatencyIsBackwardForStatisticsOnly): at depth 0 in low latency every
+		// consumer, the statistics consumers too, goes visibly without vectors; nothing starts; the Ctrl+I line names each with why.
+		TEST_METHOD(DepthZeroLowLatencyIsMotionFreeForEveryConsumer)
 		{
 			Input in = Make({ Consumer::SourceMonitorPan, Consumer::MotionIntent, Consumer::DebandHold,
 				Consumer::GrainMap, Consumer::DetailPulse, Consumer::SigmaDelta });
 			in.lowLatency = true;
 			in.queueAheadCapacity = 0;
-			const Decision d = Decide(in);
-			Assert::IsTrue(d.mode == Mode::Backward, L"backward");
+			const Decision d = DecideForHost(in);
+			Assert::IsTrue(d.mode == Mode::Off, L"off (no backward pairs)");
 			Assert::IsTrue(d.reason == Reason::BackwardDepth0, L"depth 0");
-			Assert::IsTrue(d.lowLatencyAllowed, L"low latency allowed");
-			Assert::IsTrue(d.Serves(Consumer::SourceMonitorPan) && d.Serves(Consumer::MotionIntent), L"statistics served");
+			Assert::IsFalse(d.lowLatencyAllowed, L"no low-latency vectors path");
+			Assert::IsFalse(d.Serves(Consumer::SourceMonitorPan) || d.Serves(Consumer::MotionIntent), L"statistics unserved");
 			Assert::IsFalse(d.Serves(Consumer::DebandHold) || d.Serves(Consumer::GrainMap) ||
 				d.Serves(Consumer::DetailPulse) || d.Serves(Consumer::SigmaDelta), L"others unserved");
-			Assert::AreEqual(4u, [&] { unsigned n = 0; for (unsigned b = d.unserved; b; b &= b - 1) ++n; return n; }());
-			Assert::IsTrue(d.producer, L"batch B: the backward pair runs for the served statistics consumers");
+			Assert::AreEqual(6u, [&] { unsigned n = 0; for (unsigned b = d.unserved; b; b &= b - 1) ++n; return n; }());
+			Assert::IsFalse(d.producer, L"no producer");
 			Assert::IsFalse(d.estimate, L"no estimate");
-			Assert::AreEqual(std::string("Vector engine: backward pairs (no frame ahead) for source monitor, intent; "
-				"output dither, grain map, deband hold, detail pulse without vectors (needs a frame ahead)"), StatusLine(d));
+			Assert::AreEqual(std::string("Vector engine: off; output dither, grain map, deband hold, detail pulse, source monitor, intent "
+				"without vectors (competitive low latency (motion-free))"), StatusLine(d));
 		}
 
-		TEST_METHOD(MotionAheadBackwardPairsIsDepthZeroAndDefaultIsUnchanged)
+		// Batch B fold (WAIVER-B1-ENGINE-06; was MotionAheadBackwardPairsIsDepthZeroAndDefaultIsUnchanged): MotionAhead::Decide has no
+		// backward-pair flag any more. Low latency is depth 0 with reason LowLatency, outside it the queued frames are the depth, and no
+		// reason describes backward pairs.
+		TEST_METHOD(MotionAheadLowLatencyIsDepthZeroWithoutBackwardPairs)
 		{
-			const MotionAhead::Decision b = MotionAhead::Decide(4, true, true, 3, true, true, true);
-			Assert::IsTrue(b.reason == MotionAhead::Reason::BackwardPairs, L"backward pairs");
-			Assert::AreEqual(0, b.depth);
-			const MotionAhead::Decision old = MotionAhead::Decide(4, true, true, 3, true, true);
-			Assert::IsTrue(old.reason == MotionAhead::Reason::LowLatency, L"old low-latency result");
-			Assert::AreEqual(0, old.depth);
-			const MotionAhead::Decision normal = MotionAhead::Decide(4, false, true, 3, true, true, true);
-			Assert::IsTrue(normal.reason == MotionAhead::Reason::ShallowQueue, L"flag only matters in low latency");
+			const MotionAhead::Decision low = MotionAhead::Decide(4, true, true, 3, true, true);
+			Assert::IsTrue(low.reason == MotionAhead::Reason::LowLatency, L"low latency: off");
+			Assert::AreEqual(0, low.depth);
+			const MotionAhead::Decision normal = MotionAhead::Decide(4, false, true, 3, true, true);
+			Assert::IsTrue(normal.reason == MotionAhead::Reason::ShallowQueue, L"outside low latency: the queued frames");
 			Assert::AreEqual(3, normal.depth);
-			Assert::AreEqual(std::string("backward pairs on arrival (no frame ahead)"), std::string(MotionAhead::Describe(MotionAhead::Reason::BackwardPairs)));
+			for (int r = 0; r <= static_cast<int>(MotionAhead::Reason::NoConsumer); ++r)
+				Assert::IsTrue(std::string(MotionAhead::Describe(static_cast<MotionAhead::Reason>(r))).find("backward") == std::string::npos,
+					L"no reason describes backward pairs");
 		}
 
 		TEST_METHOD(FallbackCatalogWordingAndRelease)
 		{
-			const Decision served = Decide(Make({ Consumer::GrainMap }));
+			const Decision served = DecideForHost(Make({ Consumer::GrainMap }));
 			Assert::IsFalse(FallbackCatalog::VectorEngine(served).engaged, L"released when nothing unserved");
 			Assert::AreEqual(std::string("vector_engine"), FallbackCatalog::VectorEngine(served).id);
 
+			// Batch B fold (WAIVER-B1-ENGINE-06, review b1-fin L1): the competitive why was "needs a frame ahead" (the retired
+			// backward-pair cause).
 			Input in = Make({ Consumer::DebandHold });
 			in.lowLatency = true;
 			in.queueAheadCapacity = 0;
-			const FallbackCatalog::Decision f = FallbackCatalog::VectorEngine(Decide(in));
+			const FallbackCatalog::Decision f = FallbackCatalog::VectorEngine(DecideForHost(in));
 			Assert::IsTrue(f.engaged, L"engaged");
-			Assert::AreEqual(std::string("deband hold without vectors (needs a frame ahead)"), f.reason);
+			Assert::AreEqual(std::string("deband hold without vectors (competitive low latency (motion-free))"), f.reason);
 
 			const FallbackCatalog::Decision p = FallbackCatalog::VectorEngineProducer(true);
 			Assert::IsTrue(p.engaged, L"producer engaged");
@@ -348,13 +369,13 @@ namespace VectorDemandTest
 			t.Note(false);
 			Assert::IsFalse(t.sustained, L"released");
 
-			const Decision forward = Decide(Make({ Consumer::GrainMap }));
+			const Decision forward = DecideForHost(Make({ Consumer::GrainMap }));
 			Assert::IsTrue(forward.mode == Mode::Forward);
 			Assert::AreEqual(StatusLine(forward), StatusLine(forward, 0), L"not capped: the line is unchanged");
 			Assert::AreEqual(StatusLine(forward) + "; look-ahead computes " + std::to_string(MotionAhead::kMaxLead) +
 				" frames ahead (the ahead-compute ceiling; more are queued)", StatusLine(forward, MotionAhead::kMaxLead),
 				L"R3: at the ceiling the line is information, not a downgrade");
-			const Decision idle = Decide(Make({}));
+			const Decision idle = DecideForHost(Make({}));
 			Assert::AreEqual(StatusLine(idle), StatusLine(idle, MotionAhead::kMaxLead), L"no forward look-ahead: no cap text");
 
 			const FallbackCatalog::Decision on = FallbackCatalog::MotionLookaheadCapped(true, MotionAhead::kMaxLead);
@@ -375,22 +396,24 @@ namespace VectorDemandTest
 		TEST_METHOD(StatusLinesAreExact)
 		{
 			Assert::AreEqual(std::string("Vector engine: on (forward) for grain map, deband hold"),
-				StatusLine(Decide(Make({ Consumer::GrainMap, Consumer::DebandHold }))));
+				StatusLine(DecideForHost(Make({ Consumer::GrainMap, Consumer::DebandHold }))));
 
+			// Batch B fold (WAIVER-B1-ENGINE-06): competitive low latency is motion-free (was "backward pairs (no frame ahead) for source
+			// monitor, intent; deband hold without vectors (needs a frame ahead)"): every consumer named, with review b1-fin L1's why.
 			Input in = Make({ Consumer::SourceMonitorPan, Consumer::MotionIntent, Consumer::DebandHold });
 			in.lowLatency = true;
 			in.queueAheadCapacity = 0;
-			Assert::AreEqual(std::string("Vector engine: backward pairs (no frame ahead) for source monitor, intent; "
-				"deband hold without vectors (needs a frame ahead)"), StatusLine(Decide(in)));
+			Assert::AreEqual(std::string("Vector engine: off; deband hold, source monitor, intent without vectors (competitive low latency "
+				"(motion-free))"), StatusLine(DecideForHost(in)));
 
-			Assert::AreEqual(std::string("Vector engine: idle (no consumer)"), StatusLine(Decide(Make({}))));
+			Assert::AreEqual(std::string("Vector engine: idle (no consumer)"), StatusLine(DecideForHost(Make({}))));
 
 			for (Consumer c : kNonSynthesis)
 			{
 				Input w = Make({ c });
 				w.lowLatency = true;
 				w.queueAheadCapacity = 0;
-				const std::string s = StatusLine(Decide(w));
+				const std::string s = StatusLine(DecideForHost(w));
 				Assert::IsTrue(s.compare(0, 14, "Vector engine:") == 0, L"prefix");
 			}
 		}
@@ -402,7 +425,7 @@ namespace VectorDemandTest
 			for (int i = 0; i < kConsumerCount; ++i)
 			{
 				const Consumer c = ConsumerAt(i);
-				const Decision d = Decide(Make({ c }));
+				const Decision d = DecideForHost(Make({ c }));
 				Assert::AreEqual(Bit(c), d.wants, L"the want is recorded");
 				Assert::AreEqual(0u, d.unserved, L"never refused while ON");
 				if (DomainOf(c) == Domain::Synthesis)
@@ -429,7 +452,7 @@ namespace VectorDemandTest
 		{
 			Input in = Make({ Consumer::DejudderExtras, Consumer::GrainMap, Consumer::SourceMonitorPan });
 			in.enabled = false;
-			const Decision d = Decide(in);
+			const Decision d = DecideForHost(in);
 			Assert::IsTrue(d.mode == Mode::Off && d.reason == Reason::Disabled, L"disabled");
 			Assert::AreEqual(0u, d.served);
 			Assert::AreEqual(0u, d.unserved);
@@ -449,15 +472,15 @@ namespace VectorDemandTest
 
 			Input none = Make({});
 			none.enabled = false;
-			Assert::AreEqual(std::string(), OffLine(Decide(none)), L"no want: no line");
+			Assert::AreEqual(std::string(), OffLine(DecideForHost(none)), L"no want: no line");
 
 			for (Consumer c : { Consumer::SourceMonitorPan, Consumer::DetailPulse, Consumer::OcclusionMask })
 			{
 				Input on = Make({ c });
-				const std::string s = StatusLine(Decide(on));
+				const std::string s = StatusLine(DecideForHost(on));
 				Assert::IsTrue(s.find("starter") == std::string::npos && s.find("loaded") == std::string::npos, L"ON: no starter / loaded wording");
 				on.enabled = false;
-				Assert::IsTrue(OffLine(Decide(on)).find(Name(c)) != std::string::npos, L"OFF: the consumer is named");
+				Assert::IsTrue(OffLine(DecideForHost(on)).find(Name(c)) != std::string::npos, L"OFF: the consumer is named");
 			}
 		}
 
@@ -468,13 +491,13 @@ namespace VectorDemandTest
 			for (Consumer c : kNonSynthesis)
 			{
 				Input in = Make({ c });
-				const Decision on = Decide(in);
+				const Decision on = DecideForHost(in);
 				Assert::IsTrue(on.mode == Mode::Forward && on.Serves(c) && on.unserved == 0u && on.producer, L"ON: served");
 				Assert::IsFalse(FallbackCatalog::VectorEngine(on).engaged, L"ON: nothing unserved");
 
 				Input il = in;
 				il.interlaced = true;
-				const Decision i = Decide(il);
+				const Decision i = DecideForHost(il);
 				Assert::IsTrue(i.mode == Mode::Off && i.reason == Reason::Interlaced, L"interlaced: off");
 				Assert::AreEqual(0u, i.served);
 				Assert::AreEqual(Bit(c), i.unserved, L"interlaced: unserved");
@@ -485,7 +508,7 @@ namespace VectorDemandTest
 
 				Input sm = in;
 				sm.smoothMotion = true;
-				const Decision x = DecideWith(sm, false);
+				const Decision x = DecideForHost(sm);
 				Assert::IsTrue(x.mode == Mode::Off && x.reason == Reason::SmoothMotionExclusive, L"exclusive smooth motion: off");
 				Assert::AreEqual(Bit(c), x.unserved, L"exclusive smooth motion: unserved");
 				Assert::IsFalse(x.estimate || x.producer, L"exclusive smooth motion: nothing starts");
@@ -494,14 +517,20 @@ namespace VectorDemandTest
 				Assert::AreEqual(std::string(Name(c)) + " without vectors (libplacebo smooth motion owns output)", fx.reason,
 					L"exclusive smooth motion: named with why");
 			}
+			// Batch B fold (WAIVER-B1-ENGINE-06): competitive low latency is a hard absence for every consumer (was: the statistics
+			// consumer served by a backward producer): off, nothing served, each named with why.
 			Input low = Make({ Consumer::SourceMonitorPan, Consumer::GrainMap });
 			low.lowLatency = true;
 			low.queueAheadCapacity = 0;
-			const Decision d = Decide(low);
-			Assert::IsTrue(d.mode == Mode::Backward && d.reason == Reason::BackwardDepth0, L"competitive low latency: backward");
-			Assert::AreEqual(Bit(Consumer::SourceMonitorPan), d.served, L"competitive: the statistics consumer is served");
-			Assert::AreEqual(Bit(Consumer::GrainMap), d.unserved, L"competitive: the field consumer falls back visibly");
-			Assert::IsTrue(d.producer, L"competitive: the backward producer runs for the statistics consumer");
+			const Decision d = DecideForHost(low);
+			Assert::IsTrue(d.mode == Mode::Off && d.reason == Reason::BackwardDepth0, L"competitive low latency: off, motion-free");
+			Assert::AreEqual(0u, d.served, L"competitive: nothing served");
+			Assert::AreEqual(Bit(Consumer::SourceMonitorPan) | Bit(Consumer::GrainMap), d.unserved, L"competitive: both fall back visibly");
+			Assert::IsFalse(d.producer, L"competitive: no producer");
+			const FallbackCatalog::Decision fl = FallbackCatalog::VectorEngine(d);
+			Assert::IsTrue(fl.engaged, L"competitive: visible");
+			Assert::AreEqual(std::string("grain map, source monitor without vectors (competitive low latency (motion-free))"), fl.reason,
+				L"competitive: each named with why");
 		}
 
 		// Replaces TheOcclusionMaskWithoutAStarterIsARefusedStart: the mask is synthesis-domain (never in served) and is never refused
@@ -509,13 +538,13 @@ namespace VectorDemandTest
 		TEST_METHOD(TheOcclusionMaskIsNeverRefusedWhileOn)
 		{
 			const unsigned mask = Bit(Consumer::OcclusionMask);
-			const Decision a = Decide(Make({ Consumer::OcclusionMask }));
+			const Decision a = DecideForHost(Make({ Consumer::OcclusionMask }));
 			Assert::IsTrue(a.mode == Mode::Off && a.reason == Reason::NoConsumer && a.synthesisOnly, L"mask alone: its own policy decides");
 			Assert::AreEqual(mask, a.wants, L"mask alone: the want is recorded");
 			Assert::AreEqual(0u, a.served);
 			Assert::AreEqual(0u, a.unserved, L"mask alone: not unserved");
 			Assert::IsFalse(a.estimate || a.producer, L"synthesis: the engine starts nothing for it here");
-			const Decision b = Decide(Make({ Consumer::OcclusionMask, Consumer::GrainMap, Consumer::DetailPulse }));
+			const Decision b = DecideForHost(Make({ Consumer::OcclusionMask, Consumer::GrainMap, Consumer::DetailPulse }));
 			Assert::AreEqual(Bit(Consumer::GrainMap) | Bit(Consumer::DetailPulse), b.served, L"mask + reuse: the reuse consumers are served");
 			Assert::AreEqual(0u, b.unserved, L"mask + reuse: nothing unserved");
 			Assert::AreEqual(std::string(), UnservedText(b));
@@ -524,7 +553,7 @@ namespace VectorDemandTest
 
 		TEST_METHOD(TheCameraFitIsServedWithTheReuseOnlyConsumers)
 		{
-			const Decision d = Decide(Make({ Consumer::CameraFit, Consumer::DetailPulse, Consumer::SourceMonitorPan }));
+			const Decision d = DecideForHost(Make({ Consumer::CameraFit, Consumer::DetailPulse, Consumer::SourceMonitorPan }));
 			Assert::IsTrue(d.mode == Mode::Forward && d.reason == Reason::Forward);
 			Assert::IsTrue(d.Serves(Consumer::CameraFit) && d.Serves(Consumer::DetailPulse) && d.Serves(Consumer::SourceMonitorPan));
 			Assert::AreEqual(0u, d.unserved);
@@ -537,11 +566,11 @@ namespace VectorDemandTest
 		{
 			const unsigned reuse = Bit(Consumer::SigmaDelta) | Bit(Consumer::DetailPulse) | Bit(Consumer::DebandHold) |
 				Bit(Consumer::SourceMonitorPan);
-			const Decision with = Decide(Make({ Consumer::DejudderExtras, Consumer::SigmaDelta, Consumer::DetailPulse, Consumer::DebandHold,
+			const Decision with = DecideForHost(Make({ Consumer::DejudderExtras, Consumer::SigmaDelta, Consumer::DetailPulse, Consumer::DebandHold,
 				Consumer::SourceMonitorPan }));
 			Assert::AreEqual(reuse, with.served, L"with the de-judder: served");
 			Assert::AreEqual(0u, with.unserved);
-			const Decision without = Decide(Make({ Consumer::SigmaDelta, Consumer::DetailPulse, Consumer::DebandHold, Consumer::SourceMonitorPan }));
+			const Decision without = DecideForHost(Make({ Consumer::SigmaDelta, Consumer::DetailPulse, Consumer::DebandHold, Consumer::SourceMonitorPan }));
 			Assert::AreEqual(reuse, without.served, L"without the de-judder: the same consumers are served");
 			Assert::AreEqual(0u, without.unserved);
 			Assert::IsTrue(with.reason == Reason::Forward && without.reason == Reason::Forward);
@@ -550,7 +579,7 @@ namespace VectorDemandTest
 
 		TEST_METHOD(SynthesisWantsAreRecordedButNeverServedHere)
 		{
-			const Decision d = Decide(Make({ Consumer::DejudderExtras, Consumer::HiccupRepair, Consumer::GrainMap }));
+			const Decision d = DecideForHost(Make({ Consumer::DejudderExtras, Consumer::HiccupRepair, Consumer::GrainMap }));
 			Assert::AreEqual(Bit(Consumer::DejudderExtras) | Bit(Consumer::HiccupRepair) | Bit(Consumer::GrainMap), d.wants, L"every want recorded");
 			Assert::AreEqual(Bit(Consumer::GrainMap), d.served, L"synthesis never in served");
 			Assert::IsTrue(d.producer, L"batch B: the producer runs for the served grain map");
@@ -563,12 +592,12 @@ namespace VectorDemandTest
 		{
 			Assert::IsTrue(DomainOf(Consumer::ResidualStabilise) == DomainOf(Consumer::GrainMap), L"served identically");
 			Assert::AreEqual(std::string("residual stabilise"), std::string(Name(Consumer::ResidualStabilise)));
-			const Decision d = Decide(Make({ Consumer::ResidualStabilise }));
+			const Decision d = DecideForHost(Make({ Consumer::ResidualStabilise }));
 			Assert::AreEqual(Bit(Consumer::ResidualStabilise), d.served);
 			Assert::AreEqual(std::string("Vector engine: on (forward) for residual stabilise"), StatusLine(d), L"not called the grain map");
 			Input off = Make({ Consumer::ResidualStabilise });
 			off.enabled = false;
-			Assert::AreEqual(std::string("motion engine off (setting): residual stabilise use their non-motion path"), OffLine(Decide(off)));
+			Assert::AreEqual(std::string("motion engine off (setting): residual stabilise use their non-motion path"), OffLine(DecideForHost(off)));
 		}
 
 		// ---- Batch B: no optical-flow pairs expected (optical flow off, NVOF start failed, producer recovering) ---------------
@@ -576,7 +605,7 @@ namespace VectorDemandTest
 		{
 			Input in = Make({ Consumer::GrainMap, Consumer::DebandHold });
 			in.pairsExpected = false;
-			const Decision d = Decide(in);
+			const Decision d = DecideForHost(in);
 			Assert::IsTrue(d.mode == Mode::Forward && d.reason == Reason::Forward, L"forward");
 			Assert::AreEqual(Bit(Consumer::GrainMap) | Bit(Consumer::DebandHold), d.served, L"served by the matcher");
 			Assert::AreEqual(0u, d.unserved);
@@ -587,18 +616,18 @@ namespace VectorDemandTest
 			Assert::IsFalse(FallbackCatalog::VectorEngine(d).engaged, L"served (by the fallback): no vector_engine entry");
 
 			in.pairsExpected = true;
-			const Decision p = Decide(in);
+			const Decision p = DecideForHost(in);
 			Assert::IsFalse(p.estimate || p.matcherFallback, L"pairs expected: the matcher costs nothing");
 			Assert::AreEqual(std::string("Vector engine: on (forward) for grain map, deband hold"), StatusLine(p));
 
 			Input dither = Make({ Consumer::SigmaDelta });
 			dither.pairsExpected = false;
-			const Decision o = Decide(dither);
+			const Decision o = DecideForHost(dither);
 			Assert::IsTrue(o.Serves(Consumer::SigmaDelta) && o.estimate && o.matcherFallback, L"the output consumer uses the fallback too");
 
 			Input camera = Make({ Consumer::CameraFit });
 			camera.pairsExpected = false;
-			const Decision c = Decide(camera);
+			const Decision c = DecideForHost(camera);
 			Assert::IsTrue(c.estimate, L"the camera fit's own field");
 			Assert::IsFalse(c.matcherFallback, L"the camera fit alone is not the fallback");
 		}
@@ -609,7 +638,7 @@ namespace VectorDemandTest
 			{
 				Input in = Make({ c });
 				in.pairsExpected = false;
-				const Decision d = Decide(in);
+				const Decision d = DecideForHost(in);
 				Assert::IsTrue(d.mode == Mode::Off && d.reason == Reason::NoPairs, L"statistics alone: NoPairs");
 				Assert::AreEqual(0u, d.served);
 				Assert::AreEqual(Bit(c), d.unserved, L"unserved");
@@ -624,7 +653,7 @@ namespace VectorDemandTest
 			}
 			Input mixed = Make({ Consumer::SourceMonitorPan, Consumer::GrainMap });
 			mixed.pairsExpected = false;
-			const Decision m = Decide(mixed);
+			const Decision m = DecideForHost(mixed);
 			Assert::IsTrue(m.mode == Mode::Forward && m.reason == Reason::Forward);
 			Assert::AreEqual(Bit(Consumer::GrainMap), m.served);
 			Assert::AreEqual(Bit(Consumer::SourceMonitorPan), m.unserved);
@@ -641,7 +670,7 @@ namespace VectorDemandTest
 			Input in = Make({ Consumer::SourceMonitorPan });
 			in.pairsExpected = false;
 			in.pairsDeliberatelyOff = true;
-			const Decision d = Decide(in);
+			const Decision d = DecideForHost(in);
 			Assert::IsTrue(d.pairsDeliberatelyOff, L"copied to the decision");
 			Assert::AreEqual(Bit(Consumer::SourceMonitorPan), d.noPairs);
 			Assert::IsTrue(UnservedText(d).find("source monitor without vectors (no optical-flow pairs") != std::string::npos, L"still named");
@@ -652,15 +681,31 @@ namespace VectorDemandTest
 
 			Input fault = in;
 			fault.pairsDeliberatelyOff = false;
-			Assert::IsTrue(FallbackCatalog::VectorEngine(Decide(fault)).engaged, L"a producer fault stays an entry");
+			Assert::IsTrue(FallbackCatalog::VectorEngine(DecideForHost(fault)).engaged, L"a producer fault stays an entry");
 
 			Input other = Make({ Consumer::SourceMonitorPan, Consumer::SigmaDelta, Consumer::GrainMap });
 			other.pairsExpected = false;
 			other.pairsDeliberatelyOff = true;
 			other.smoothMotion = true;
-			const FallbackCatalog::Decision o = FallbackCatalog::VectorEngine(Decide(other));
+			const FallbackCatalog::Decision o = FallbackCatalog::VectorEngine(DecideForHost(other));
 			Assert::IsTrue(o.engaged, L"another unserved cause still engages");
-			Assert::IsTrue(o.reason.find("output dither without vectors (libplacebo smooth motion owns output)") != std::string::npos);
+			// Batch B fold (WAIVER-B1-ENGINE-06): smooth motion owns output exclusively, so it names every consumer (was: the output
+			// dither alone, "output dither without vectors (...)", the retired analysis-under-smooth-motion semantics).
+			Assert::AreEqual(std::string("output dither, grain map, source monitor without vectors (libplacebo smooth motion owns output)"),
+				o.reason);
+			// The deliberate no-pairs beside another cause in ONE decision (competitive low latency): the deliberate statistics consumer
+			// is left out of the entry's trigger, the competitive ones still engage it, and the text names both causes.
+			Input both = Make({ Consumer::SourceMonitorPan, Consumer::SigmaDelta, Consumer::GrainMap });
+			both.pairsExpected = false;
+			both.pairsDeliberatelyOff = true;
+			both.lowLatency = true;
+			both.queueAheadCapacity = 0;
+			const Decision bd = DecideForHost(both);
+			Assert::AreEqual(Bit(Consumer::SourceMonitorPan), bd.noPairs, L"the deliberate no-pairs");
+			const FallbackCatalog::Decision ob = FallbackCatalog::VectorEngine(bd);
+			Assert::IsTrue(ob.engaged, L"competitive beside a deliberate no-pairs: still an entry");
+			Assert::AreEqual(std::string("output dither, grain map without vectors (competitive low latency (motion-free)); source monitor "
+				"without vectors (no optical-flow pairs (optical flow off or not running))"), ob.reason);
 
 			Decision handBuilt;
 			handBuilt.unserved = handBuilt.noPairs = Bit(Consumer::MotionIntent);
@@ -671,7 +716,7 @@ namespace VectorDemandTest
 		TEST_METHOD(EngineStatusMapsEachReason)
 		{
 			EngineFacts f;
-			f.decision = Decide(Make({ Consumer::DejudderExtras, Consumer::GrainMap }));
+			f.decision = DecideForHost(Make({ Consumer::DejudderExtras, Consumer::GrainMap }));
 			f.producerRunning = true;
 			f.frame = 7;
 			MotionEngineStatus st = DeriveEngineStatus(f);
@@ -702,7 +747,7 @@ namespace VectorDemandTest
 			}
 			// Batch B: nothing wanted (the old NoStarter row's place): Off, no reason, nothing affected (information only, Q1).
 			EngineFacts idle = f;
-			idle.decision = Decide(Make({}));
+			idle.decision = DecideForHost(Make({}));
 			st = DeriveEngineStatus(idle);
 			Assert::IsTrue(st.state == MotionEngineState::Off && st.reason == MotionEngineReason::None, L"nothing wanted: off, no reason");
 			Assert::AreEqual(0u, st.reasons);
@@ -712,13 +757,13 @@ namespace VectorDemandTest
 			Input ll = Make({ Consumer::DejudderExtras, Consumer::GrainMap });
 			ll.lowLatency = true;
 			ll.queueAheadCapacity = 1;
-			shallow.decision = Decide(ll);
+			shallow.decision = DecideForHost(ll);
 			st = DeriveEngineStatus(shallow);
 			Assert::IsTrue(st.state == MotionEngineState::Degraded && st.reason == MotionEngineReason::LowLatency, L"ForwardShallow = degraded");
 			EngineFacts inter = f;
 			Input il = Make({ Consumer::GrainMap });
 			il.interlaced = true;
-			inter.decision = Decide(il);
+			inter.decision = DecideForHost(il);
 			st = DeriveEngineStatus(inter);
 			Assert::IsTrue(st.state == MotionEngineState::Off && st.reason == MotionEngineReason::Interlaced, L"interlaced = off");
 			Assert::IsTrue(MotionEngineStatus().state == MotionEngineState::Off && MotionEngineStatus().reason == MotionEngineReason::None,
@@ -740,7 +785,7 @@ namespace VectorDemandTest
 			// Off decides nothing, whatever wants vectors: the renderer then runs today's path.
 			Input in = Make({ Consumer::GrainMap, Consumer::SigmaDelta });
 			in.enabled = false;
-			const Decision d = Decide(in);
+			const Decision d = DecideForHost(in);
 			Assert::IsTrue(d.mode == Mode::Off && d.reason == Reason::Disabled && d.served == 0 && d.unserved == 0 &&
 				!d.estimate && !d.producer && !d.lowLatencyAllowed);
 		}
@@ -780,7 +825,8 @@ namespace VectorDemandTest
 		}
 	};
 
-	// WAIVER-B1-ENGINE-05 (review-b1-fin M1): the decision the engine HOST acts on, VectorDemand::DecideForHost (VectorEngine.cpp:310).
+	// WAIVER-B1-ENGINE-05 (review-b1-fin M1): the decision the engine HOST acts on, VectorDemand::DecideForHost (VectorEngine::
+	// UpdateVectorEngine); since the batch B fold (WAIVER-B1-ENGINE-06) it is the only decision.
 	// Plan (b) "Hard Off: SmoothMotion, LowLatency (competitive)" and (d4) "smooth motion / competitive = Off with the reason"; owner
 	// 2026-11-12 18:47 (smooth motion on: VP's engine stays off, the dither uses its own visible fallback search); doc 91 C / register
 	// 115 G6 "keep Competitive motion-free" (WAIVER-C1-08). The engine facts mirror the host: lowLatencyNoVectors = lowLatency &&
@@ -846,12 +892,14 @@ namespace VectorDemandTest
 			Assert::IsFalse(d.producer, L"no producer");
 			Assert::IsFalse(d.estimate, L"no estimate");
 			Assert::IsFalse(d.lowLatencyAllowed, L"lowLatencyAllowed false: the host sets lowLatencyNoVectors");
-			// The "why" word is left to the Decide() fold (review L1: it still reads the backward-pair cause); pinned here: the line is
-			// Off and names every consumer as without vectors.
+			// The line is Off and names every consumer as without vectors. Batch B fold (WAIVER-B1-ENGINE-06, review b1-fin L1): the
+			// "why" is pinned too, competitive low latency (motion-free).
 			const std::string s = StatusLine(d);
 			Assert::IsTrue(s.compare(0, 20, "Vector engine: off; ") == 0, (L"off line: " + std::wstring(s.begin(), s.end())).c_str());
 			Assert::IsTrue(s.find("deband hold, source monitor, intent without vectors (") != std::string::npos, L"each named without vectors");
 			Assert::IsTrue(s.find("backward") == std::string::npos, L"no backward-pair wording");
+			Assert::AreEqual(std::string("Vector engine: off; deband hold, source monitor, intent without vectors (competitive low latency "
+				"(motion-free))"), s, L"the competitive why");
 			const FallbackCatalog::Decision f = FallbackCatalog::VectorEngine(d);
 			Assert::IsTrue(f.engaged, L"a visible Fallbacks entry");
 			Assert::AreEqual(UnservedText(d), f.reason);
@@ -881,36 +929,67 @@ namespace VectorDemandTest
 				Assert::IsFalse(x.producer || x.estimate || x.lowLatencyAllowed, L"each alone: motion-free");
 				Assert::IsTrue(UnservedText(x).compare(0, std::string(Name(c)).size() + 18, std::string(Name(c)) + " without vectors (") == 0,
 					L"each alone: named without vectors");
+				Assert::AreEqual(std::string(Name(c)) + " without vectors (competitive low latency (motion-free))", UnservedText(x),
+					L"each alone: the competitive why");
 			}
 		}
 
-		TEST_METHOD(GamesAndOrdinaryInputsDecideAsDecide)
+		// Batch B fold (WAIVER-B1-ENGINE-06; was GamesAndOrdinaryInputsDecideAsDecide, "identical to Decide()"): the retired Decide()
+		// is gone, so the decisions it shared with the host are pinned field for field (Same) against the expected Decision, built
+		// from the rules: games (capacity >= 1, ForwardShallow) and every input without smooth motion and outside competitive keep
+		// exactly the decisions the host made before the fold; only those two cases are Off with the reason (the tests above).
+		TEST_METHOD(GamesAndOrdinaryInputsKeepTheirDecisions)
 		{
-			// Plan (b): games (capacity >= 1, ForwardShallow) and every input without smooth motion and outside competitive decide exactly
-			// as the pure layer: DecideForHost changes only those two cases.
 			for (int capacity = 1; capacity <= 8; ++capacity)
 			{
 				Input in = Make({ Consumer::GrainMap, Consumer::DebandHold, Consumer::SourceMonitorPan });
 				in.lowLatency = true;
 				in.queueAheadCapacity = capacity;
 				const Decision h = DecideForHost(in);
-				Assert::IsTrue(Same(h, Decide(in)), L"games: identical to Decide()");
+				Decision games;   // forward from the frames the games queue already holds; pairs expected: no render-time estimate
+				games.mode = Mode::Forward;
+				games.reason = Reason::ForwardShallow;
+				games.served = Bit(Consumer::GrainMap) | Bit(Consumer::DebandHold) | Bit(Consumer::SourceMonitorPan);
+				games.producer = true;
+				games.lowLatencyAllowed = true;
+				Assert::IsTrue(Same(h, games), L"games: the forward-shallow decision, field for field");
 				Assert::IsTrue(h.mode == Mode::Forward && h.reason == Reason::ForwardShallow && h.lowLatencyAllowed, L"games: forward shallow");
 				Assert::IsTrue(h.producer, L"games: the producer runs");
 			}
 			for (int i = 0; i < kConsumerCount; ++i)
 			{
-				Input in = Make({ ConsumerAt(i), Consumer::DetailPulse });
-				Assert::IsTrue(Same(DecideForHost(in), Decide(in)), L"ordinary: identical");
+				const Consumer c = ConsumerAt(i);
+				const unsigned wanted = (DomainOf(c) == Domain::Synthesis ? 0u : Bit(c)) | Bit(Consumer::DetailPulse);
+				const unsigned stats = DomainOf(c) == Domain::SourceStatistics ? Bit(c) : 0u;
+				Input in = Make({ c, Consumer::DetailPulse });
+				Decision ordinary;   // forward, every non-synthesis want served; the render-time matcher only for the camera fit's field
+				ordinary.mode = Mode::Forward;
+				ordinary.reason = Reason::Forward;
+				ordinary.served = wanted;
+				ordinary.producer = true;
+				ordinary.estimate = c == Consumer::CameraFit;
+				Assert::IsTrue(Same(DecideForHost(in), ordinary), L"ordinary: forward, every want served");
 				Input noPairs = in;
 				noPairs.pairsExpected = false;
-				Assert::IsTrue(Same(DecideForHost(noPairs), Decide(noPairs)), L"no pairs: identical");
+				Decision fallback;   // the matcher fallback serves the field consumers; a statistics consumer is named without pairs
+				fallback.mode = Mode::Forward;
+				fallback.reason = Reason::Forward;
+				fallback.served = wanted & ~stats;
+				fallback.unserved = stats;
+				fallback.noPairs = stats;
+				fallback.producer = true;
+				fallback.estimate = true;
+				fallback.matcherFallback = true;
+				Assert::IsTrue(Same(DecideForHost(noPairs), fallback), L"no pairs: the matcher fallback");
 				Input il = in;
 				il.interlaced = true;
-				Assert::IsTrue(Same(DecideForHost(il), Decide(il)), L"interlaced: identical");
+				Decision interlaced;   // off, every non-synthesis want unserved
+				interlaced.reason = Reason::Interlaced;
+				interlaced.unserved = wanted;
+				Assert::IsTrue(Same(DecideForHost(il), interlaced), L"interlaced: off, every want unserved");
 				Input off = in;
 				off.enabled = false;
-				Assert::IsTrue(Same(DecideForHost(off), Decide(off)), L"disabled: identical");
+				Assert::IsTrue(Same(DecideForHost(off), Decision()), L"disabled: the default decision");
 			}
 		}
 	};

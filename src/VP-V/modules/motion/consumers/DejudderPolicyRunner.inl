@@ -165,7 +165,7 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 		}
 	}
 	dejudderSourceHz = sourceHz;
-	// Vector engine on demand: what wants vectors this frame (previous-frame state), and backward pairs.
+	// Vector engine on demand: what wants vectors this frame (previous-frame state), and the forward statistics service.
 	// VPV-HOOK
 	{
 	auto vectorHost = VpMotion::MakeVectorEngineHost(*this);
@@ -195,7 +195,6 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 		serve.legacyConsumer = (dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
 			dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers)) || interpolating;
 		serve.lowResSearch = activeSettings.dejudderLowRes != "off";
-		serve.vectorDeliveryRuns = pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery);
 		serve.pictureHeight = dejudderPicture.available && dejudderPicture.rasterHeight == height &&
 			dejudderPicture.bottom > dejudderPicture.top ? dejudderPicture.bottom - dejudderPicture.top : height;
 		vectorEngine.ServeStatistics(sourceSequence, nextSourceSequence, width, height, serve, vectorHost);

@@ -165,7 +165,7 @@ namespace VpMotion
 
 		// Render thread, renderMutex held, once per rendered source frame: starts, keeps or stops the
 		// optical-flow producer and publishes the look-ahead depth the render loop submits to
-		// (motionAheadDepth / Backward / Configured), with the one "Motion ahead:" log line.
+		// (motionAheadDepth / Configured), with the one "Motion ahead:" log line.
 		void PlanProducer(const ProducerInputs& in);
 
 		// ---- P5a-4: the vector-demand decision and its statistics service ------------------------------------
@@ -195,20 +195,21 @@ namespace VpMotion
 		{
 			bool legacyConsumer = false;          // a de-judder / interpolator estimate takes this frame's pair
 			bool lowResSearch = true;             // dejudder_low_res != "off"
-			bool vectorDeliveryRuns = true;       // the motion.vector_delivery slot runs
 			int pictureHeight = 0;                // the trusted picture's height (the raster's when none)
+			// Batch B fold: vectorDeliveryRuns (the motion.vector_delivery slot gate of the backward pair's segment publish) is
+			// retired with the backward leg.
 		};
-		// Backward pairs (no frame ahead): once per new source frame the statistics consumers read the pair (n-1, n)
-		// if the producer has it, else the frame-old (n-2, n-1); statistics only, never a field. Forward without a
-		// render-time estimate: statistics consumers only. Render thread.
+		// Forward without a render-time estimate: once per new source frame the statistics consumers read the producer's
+		// pair (n, n+1); statistics only, never a field. Batch B fold: the backward leg (competitive low latency, pairs
+		// (n-1, n) / (n-2, n-1)) is retired: competitive is motion-free. Render thread.
 		void ServeStatistics(uint64_t sequence, uint64_t nextSequence, int width, int height, const ServeFacts& facts,
 			IVectorEngineHost& host);
 
 		// Whole-frame motion for the statistics consumers: a producer pair (hit) or none (miss). A miss run is visible
 		// (never log-only): hysteresis, so a single missed pair does not flap the entry.
 		void NoteGlobalPair(bool hit);
-		// Once per mode: the first vectors the engine delivered and where they came from.
-		void NoteVectorsDelivered(bool backward, const char* source);
+		// Once: the first vectors the engine delivered and where they came from (forward; the backward mode is retired).
+		void NoteVectorsDelivered(const char* source);
 		// Engine size the producer works at for a picture of this size, as the matcher would use it (halvings of the
 		// search input), and the halvings themselves for the pixel scaling.
 		static void SizeFor(bool lowResSearch, int width, int height, int& engineW, int& engineH, int& halvings);

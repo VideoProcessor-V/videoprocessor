@@ -102,8 +102,7 @@ namespace LookAheadWalkTest
 			struct
 			{
 				std::atomic<int> motionAheadConfigured{ 4 }, motionAheadDepth{ 0 };
-				std::atomic<bool> motionAheadBackward{ false };
-				bool motionAheadEngaged = false;
+				bool motionAheadEngaged = false;   // batch B fold: motionAheadBackward is retired with the backward pairs
 				unsigned long long motionAheadEngagedGeneration = 0;
 				std::shared_ptr<FakeProducer> motionProducer;   // the walk loads it with std::atomic_load (hardening)
 				bool motionAheadPrevKnown = false;
@@ -112,7 +111,6 @@ namespace LookAheadWalkTest
 			} vectorEngine;
 			std::atomic<int>& motionAheadConfigured = vectorEngine.motionAheadConfigured;
 			std::atomic<int>& motionAheadDepth = vectorEngine.motionAheadDepth;
-			std::atomic<bool>& motionAheadBackward = vectorEngine.motionAheadBackward;
 			bool& motionAheadEngaged = vectorEngine.motionAheadEngaged;
 			unsigned long long& motionAheadEngagedGeneration = vectorEngine.motionAheadEngagedGeneration;
 			std::shared_ptr<FakeProducer>& motionProducer = vectorEngine.motionProducer;
@@ -154,8 +152,8 @@ namespace LookAheadWalkTest
 
 	// P5a-rest item h: the look-ahead copy (render loop, queue lock), moved verbatim into CollectQueueAhead. The rule:
 	// the current frame and up to `depth` more non-repeat frames with a state are counted; those after the producer's
-	// last submitted sequence are copied and AddRef'd once; nothing without a producer or with neither a depth nor
-	// backward pairs.
+	// last submitted sequence are copied and AddRef'd once; nothing without a producer or without a depth (batch B
+	// fold: the backward pairs, which took the current frame at depth 0, are retired).
 	TEST_CLASS(LookAheadCopyTests)
 	{
 	public:
@@ -190,11 +188,14 @@ namespace LookAheadWalkTest
 			Assert::AreEqual(0, *queue[0].frame.addRefs);
 			out.clear();
 			impl.motionAheadDepth.store(0);
-			impl.motionAheadBackward.store(true);   // backward pairs: the current frame only
+			// Batch B fold (WAIVER-B1-ENGINE-06): was motionAheadBackward = true, "backward pairs: the current frame only" (1 copied,
+			// seq 1). The backward pairs are retired (competitive low latency is motion-free): at depth 0 no frame reaches the
+			// producer, the unsubmitted current frame included.
 			impl.motionProducer->last = 0;
 			MotionAhead::CollectQueueAhead(&impl, queue, out);
-			Assert::AreEqual<size_t>(1, out.size());
-			Assert::AreEqual<unsigned long long>(1, out[0].sourceSequence);
+			Assert::AreEqual<size_t>(0, out.size(), L"depth 0: nothing (the backward pairs that took the current frame are retired)");
+			Assert::AreEqual(1, *queue[2].frame.addRefs, L"depth 0: no further AddRef");
+			Assert::AreEqual(0, *queue[0].frame.addRefs, L"depth 0: the current frame is not taken");
 		}
 	};
 
@@ -343,7 +344,10 @@ namespace LookAheadWalkTest
 		TEST_METHOD(WalkSubmitsWhileTheProducerIsReplacedAndReset)
 		{
 			RaceImpl impl;
-			impl.motionAheadBackward.store(true);   // frames ahead without the engage wait
+			// Batch B fold (WAIVER-B1-ENGINE-06): was motionAheadBackward = true ("frames ahead without the engage wait"; retired with
+			// the backward pairs). Four frames queued ahead engage the walk on its first pass instead (engageAhead is 4 here: the
+			// configured 4 with vector_demand off in the fake), so every later pass hands the producer its frames as before.
+			impl.queuedFutureFrames.store(4);
 			std::vector<FakeQueued> frames;
 			for (int i = 0; i < 4; ++i)
 			{

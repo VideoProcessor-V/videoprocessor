@@ -372,7 +372,7 @@ namespace VectorEngineTest
 		TEST_METHOD(GlobalPairMissIsSustainedOnlyAfter24InARowAndNeedsAServedConsumer)
 		{
 			VectorEngine engine;
-			engine.vectorDemand = VectorDemand::Decide(OneConsumer(VectorDemand::Consumer::SourceMonitorPan));
+			engine.vectorDemand = VectorDemand::DecideForHost(OneConsumer(VectorDemand::Consumer::SourceMonitorPan));
 			for (int i = 0; i < 23; ++i)
 				engine.NoteGlobalPair(false);
 			Assert::IsFalse(engine.vectorGlobalMissSustained);
@@ -383,7 +383,7 @@ namespace VectorEngineTest
 			Assert::IsTrue(engine.vectorGlobalMissSustained, L"23 hits do not release it");
 			engine.NoteGlobalPair(true);
 			Assert::IsFalse(engine.vectorGlobalMissSustained);
-			engine.vectorDemand = VectorDemand::Decide(OneConsumer(VectorDemand::Consumer::GrainMap));
+			engine.vectorDemand = VectorDemand::DecideForHost(OneConsumer(VectorDemand::Consumer::GrainMap));
 			for (int i = 0; i < 30; ++i)
 				engine.NoteGlobalPair(false);
 			Assert::IsFalse(engine.vectorGlobalMissSustained, L"no statistics consumer served: counters stay clear");
@@ -412,13 +412,15 @@ namespace VectorEngineTest
 		{
 			VectorEngine engine;
 			FakeHost host;
-			engine.vectorDemand = VectorDemand::Decide(OneConsumer(VectorDemand::Consumer::SourceMonitorPan));
+			engine.vectorDemand = VectorDemand::DecideForHost(OneConsumer(VectorDemand::Consumer::SourceMonitorPan));
 			VectorEngine::ServeFacts serve;
 			engine.ServeStatistics(10, 11, 1920, 1080, serve, host);
 			Assert::AreEqual(0, host.monitorMotions);
 			Assert::AreEqual(0, host.intentVectors);
 			Assert::AreEqual<unsigned long long>(0, engine.motionAheadMisses, L"no producer: not even a miss is counted");
-			Assert::AreEqual<uint64_t>(0, engine.vectorBackwardSequence, L"the sequence is not consumed");
+			// Batch B fold (WAIVER-B1-ENGINE-06): the served-sequence member is vectorStatsSequence (was vectorBackwardSequence; the
+			// backward leg it was named after is retired, the forward statistics service used it too).
+			Assert::AreEqual<uint64_t>(0, engine.vectorStatsSequence, L"the sequence is not consumed");
 		}
 
 		TEST_METHOD(ShadowCheckCountsOnlyWhileTheDeliverySlotRuns)
@@ -709,17 +711,17 @@ namespace VectorEngineTest
 			VectorDemand::Input in = OneConsumer(C::SourceMonitorPan);
 			in.wants[static_cast<int>(C::MotionIntent)] = true;
 			in.wants[static_cast<int>(C::DejudderExtras)] = true;
-			const VectorDemand::Decision decided = VectorDemand::Decide(in);
+			const VectorDemand::Decision decided = VectorDemand::DecideForHost(in);
 			Assert::IsTrue(MotionRecord::EstimateGate(decided, C::SourceMonitorPan) && MotionRecord::EstimateGate(decided, C::MotionIntent),
 				L"defaults: both gates open, the estimate feed is unchanged");
 			VectorDemand::Input interlaced = in;
 			interlaced.interlaced = true;
-			const VectorDemand::Decision unserved = VectorDemand::Decide(interlaced);
+			const VectorDemand::Decision unserved = VectorDemand::DecideForHost(interlaced);
 			Assert::IsFalse(MotionRecord::EstimateGate(unserved, C::SourceMonitorPan) || MotionRecord::EstimateGate(unserved, C::MotionIntent),
 				L"interlaced: the demand serves neither, the estimate path feeds neither");
 			VectorDemand::Input disabled = in;
 			disabled.enabled = false;
-			const VectorDemand::Decision legacy = VectorDemand::Decide(disabled);
+			const VectorDemand::Decision legacy = VectorDemand::DecideForHost(disabled);
 			Assert::IsTrue(MotionRecord::EstimateGate(legacy, C::SourceMonitorPan) && MotionRecord::EstimateGate(legacy, C::MotionIntent),
 				L"vector_demand off: the legacy ungated feed");
 		}
