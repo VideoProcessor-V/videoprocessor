@@ -19,7 +19,7 @@
 //            the quiet sub-block energies and the low band's change energy against the
 //            previous frame's L2 (along the vector where trusted)     (reads the plane once)
 //  5. GRAIN  per tile: the neighbourhood minimum, calibrated          (tile grid)
-//  6. FRAME  one workgroup: cut (share of changed tiles) / fade (frame mean ramp)
+//  6. FRAME  one workgroup: writes the restart flag (the shared U7 judge's verdict, decided on the CPU)
 //  7. REF    per tile: smoothed statistics, carried references, gains (tile grid)
 //  8. APPLY  per pixel: G1 again in shared memory, the pixel split, the gains -> 16-bit output
 //                                                                     (reads once, writes once)
