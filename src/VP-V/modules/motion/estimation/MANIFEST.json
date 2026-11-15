@@ -18,6 +18,7 @@
     "src/VP-V/modules/motion/estimation/VectorStore.h",
     "src/VP-V/modules/motion/estimation/VectorProducts.h",
     "src/VP-V/modules/motion/estimation/P2PairRecord.h",
+    "src/VP-V/modules/motion/estimation/P2CpuForm.h",
     "src/VP-V/modules/motion/estimation/GapSeed.h",
     "src/VP-V/modules/motion/estimation/tests/GapSeedTests.cpp",
     "src/VP-V/modules/motion/estimation/MotionRecordPublish.h",
