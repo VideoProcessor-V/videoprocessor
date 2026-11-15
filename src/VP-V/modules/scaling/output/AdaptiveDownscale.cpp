@@ -572,6 +572,8 @@ float rs_slope(float y)
 		gpu = nullptr;
 		active = false;
 		advancedSequence = 0;
+		cutRecords.Clear();   // audit x5dup M3: a Release is a discontinuity (the next frame is a first frame)
+		cutResolved = false;
 		stats = Stats();
 	}
 
@@ -580,16 +582,25 @@ float rs_slope(float y)
 	// cause is kept and counted for the stage's status line and fallback entry.
 	bool Module::ResolveCut()
 	{
+		// Audit x5dup S3: the same (frame, previous) pair already asked (the frame did not advance after it): the same verdict, not
+		// asked or counted again (the visible state from that ask stands).
+		if (cutResolved && cutResolvedSequence == sequence && cutResolvedPrevious == advancedSequence)
+			return cutResolvedValue;
 		CutVerdict verdict;
 		if (cutSource)
 			verdict = cutSource(advancedSequence, sequence);
 		else
 			verdict.cause = "no cut source set";
+		cutResolved = true;
+		cutResolvedSequence = sequence;
+		cutResolvedPrevious = advancedSequence;
+		cutResolvedValue = false;
 		if (verdict.state == CutVerdict::State::Known)
 		{
 			cutAvailable = true;
 			cutCause.clear();
 			lastApl = verdict.apl;
+			cutResolvedValue = verdict.cut;
 			return verdict.cut;
 		}
 		cutAvailable = false;
@@ -997,6 +1008,7 @@ float rs_slope(float y)
 			if (advance > 0.5f)
 			{
 				advancedSequence = sequence;
+				cutRecords.Commit(sequence);   // audit x5dup M3: this frame's P4 record is the next frame's previous one
 				if (writeStats && !native)
 					readbackPending = true;
 			}

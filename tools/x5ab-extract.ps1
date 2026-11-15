@@ -1,3 +1,5 @@
+# Copyright(C) 2026 VP-V contributors
+# SPDX-License-Identifier: GPL-3.0-only
 <#
 Makes the raw clips and the list file for X5AbCaptureTests (FIX-X5-CUT-P4 before/after). ffmpeg only; no film pixels are committed.
   x5ab-extract.ps1 [-Out D:\testclips\x5ab] [-Frames 120]

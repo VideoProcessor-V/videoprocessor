@@ -117,8 +117,9 @@ namespace AdaptiveDownscaleStage
 				adaptiveNow.residualCodingNoiseCodes = static_cast<float>(GrainPreserve::CodingNoiseCodes(quality));
 		}
 		// FIX-X5-CUT-P4: the grain term's cut event is the shared one (P4 through U7); the module asks it once per new source frame.
+		// Audit x5dup M3: the previous frame's record is kept by the module (the memo releases it at the next seal).
 		if (!module.HasCutSource())
-			module.SetCutSource(AdaptiveDownscale::P4CutSource());
+			module.SetCutSource(AdaptiveDownscale::P4CutSource(&module.CutRecords()));
 		if (upscaleBlend)
 		{
 			module.SetFrame(adaptiveNow, frame.sourceSequence, FramePeriod(frame, host));
