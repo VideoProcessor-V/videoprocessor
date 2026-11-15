@@ -175,6 +175,46 @@ namespace SlotSwitchSettings
 		}
 	}
 
+	// Batch B (lead18 plan-motion-engine-switch.md Q3): the motion engine is ONE switch (vector_demand). OFF, its sub-selections
+	// de-judder and hiccup smoothing cannot run: this resolver forces them off in the same upstream form as the `consumers` block of
+	// Apply above (strength, even strength, interpolation, fill gaps, mask), and the de-judder's legacy no-engine estimate path is
+	// gone (nothing reaches it). Returns which sub-selection the user had on (so the Ctrl+I line names only what was forced).
+	struct EngineOffForced
+	{
+		bool dejudder = false;   // de-judder strength, even strength, interpolation or the occlusion mask was on
+		bool hiccup = false;     // interpolation_fill_gaps was on
+		bool Any() const { return dejudder || hiccup; }
+	};
+
+	template <class Settings>
+	EngineOffForced ApplyEngineOff(Settings& settings)
+	{
+		EngineOffForced forced;
+		if (settings.vectorDemand)
+			return forced;
+		using Mode = decltype(settings.interpolation);
+		forced.dejudder = settings.dejudderStrength > 0.0 || settings.dejudderStrengthEven > 0.0 ||
+			settings.interpolation != Mode::Off || settings.occlusionMask;
+		forced.hiccup = settings.interpolationFillGaps;
+		settings.dejudderStrength = 0.0;              // dejudder_strength
+		settings.dejudderStrengthEven = 0.0;          // dejudder_strength_even
+		settings.interpolation = Mode::Off;           // interpolation
+		settings.interpolationFillGaps = false;       // interpolation_fill_gaps
+		settings.occlusionMask = false;               // occlusion_mask (a de-judder extra: its estimate needs the engine)
+		return forced;
+	}
+
+	// The Ctrl+I / Config line for what ApplyEngineOff forced (empty when nothing was on): never silent.
+	inline std::string DescribeEngineOff(const EngineOffForced& forced)
+	{
+		std::string text;
+		if (forced.dejudder)
+			text += "de-judder off: motion engine off";
+		if (forced.hiccup)
+			text += std::string(text.empty() ? "" : "; ") + "hiccup smoothing off: motion engine off";
+		return text;
+	}
+
 	// One status line (Ctrl+I / log): which of these slots are off and what runs instead. Empty
 	// when none is off. A slot switched off is the user's choice, not a fallback; the knock-on is
 	// named so it is never silent.

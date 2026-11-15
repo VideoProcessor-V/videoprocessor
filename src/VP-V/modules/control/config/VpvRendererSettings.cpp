@@ -1006,6 +1006,8 @@ namespace VpvRendererSettings
 		}
 		// Motion + queue/timing slots switched off run in their upstream form (owner 2026-10-25).
 		SlotSwitchSettings::Apply(SlotSwitchSettings::FromText(settings.pipelineSlotsOff), settings);
+		// Batch B Q3: the motion engine is one switch; OFF forces de-judder and hiccup smoothing off, visibly (the line is the Ctrl+I text).
+		settings.engineOffForced = SlotSwitchSettings::DescribeEngineOff(SlotSwitchSettings::ApplyEngineOff(settings));
 		// Bill merge (owner decision 2): Bill's presentation vs VP-V's render-ahead, either/or on
 		// render_ahead (off on the Original pathway = Bill's presentation exactly).
 		const PresentationOwner::Decision presentation =
@@ -1246,6 +1248,7 @@ namespace VpvRendererSettings
 			<< settings.cadenceClassFixes << '|'
 			<< settings.motionHistoryFixes << '|'
 			<< settings.vectorDemand << '|'
+			<< settings.engineOffForced << '|'
 			<< settings.queueTimingFixes << '|'
 			<< settings.generalRateFixes << '|'
 			<< settings.efficiencyFixes << '|'
