@@ -36,8 +36,27 @@ class RepoSeeds(unittest.TestCase):
         cls.sites = {h["site"] for h in cls.hits}
 
     def test_every_d_and_x_site_detected(self):
-        for sid in ["D1", "D2", "D3", "D4", "D5", "D6", "X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8"]:
+        # X2 left this list at C6-1 U25 C10: the copy was REMOVED by D8 (d51e276c3, L-B6), see test_x2_removed_* below.
+        for sid in ["D1", "D2", "D3", "D4", "D5", "D6", "X1", "X3", "X4", "X5", "X6", "X7", "X8"]:
             self.assertIn(sid, self.sites, sid + " not detected at the tip")
+
+    def test_x2_removed_at_the_tip(self):
+        # D8 (d51e276c3) deleted kCutShare / kFadeStepShare / FadeCodes and the GLSL tile-share cut and two-step fade
+        # laws from DetailPulse and TextureRestore; both read the shared judge's verdict (SceneRestart.h, U7 via P4).
+        self.assertNotIn("X2", self.sites)
+        tr = os.path.join(REPO, M + "repair/texture_restore")
+        for name in ("DetailPulse.h", "DetailPulse.cpp", "TextureRestore.h", "TextureRestore.cpp"):
+            with open(os.path.join(tr, name), encoding="utf-8") as fh:
+                text = fh.read()
+            for law in ("kCutShare", "kFadeStepShare", "FadeCodes", "cut_share", "fade_codes"):
+                self.assertNotRegex(text, r"\b" + law + r"\b(?!::)", name + ": " + law)
+        with open(os.path.join(tr, "DetailPulse.h"), encoding="utf-8") as fh:
+            self.assertIn("SceneRestart.h", fh.read())
+
+    def test_x2_pattern_still_detects_a_private_judge(self):
+        for f in ("DetailPulse.h", "TextureRestore.cpp"):
+            root = make_tree({M + "repair/texture_restore/" + f: "constexpr double kCutShare = 0.5;\nfloat s = kFadeStepShare;\n"})
+            self.assertEqual(len([h for h in N1.scan(root) if h["site"] == "X2"]), 2, f)
 
     def test_x1_is_file_level_inside_the_owner_folder(self):
         x1 = [h for h in self.hits if h["site"] == "X1"]
