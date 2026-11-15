@@ -5,6 +5,7 @@
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
+#include <VP-V/modules/input/source_analysis/lane/P1GpuFill.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/estimation/GapSeed.h>
@@ -30,32 +31,32 @@ namespace Dejudder
 		// Half-resolution luma in 8-bit code units (2x2 average of Y): `codes`
 		// per unit, 255 for limited-range sources (the stored codes) and 219
 		// for full range (limited-equivalent codes; delta 5, D5-3).
-		const char* const DOWNSAMPLE_BODY = R"GLSL(
-ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-ivec2 size = imageSize(dst);
-if (p.x < size.x && p.y < size.y) {
-    float v;
-#ifdef FADE_PLAIN
+		// BBP-B B1: the non-fade text (head, core, tail) is the P1 owner's 2x2 level body
+		// (input/source_analysis/lane/P1GpuFill.h VpFrameAnalysis::P1Gpu::MatcherHalfHead / Core / Tail, moved byte-identical);
+		// only the fade pieces stay here: the fade-corrected B is the matcher's named exception (i), an edit-for-matching
+		// derivative (plan lead18/coreplan-B-prereq-P2global-pyramid.md section (b)). The spliced body below is byte-identical to
+		// the former single raw string.
+		const char* const FADE_PLAIN_PIECE = R"GLSL(#ifdef FADE_PLAIN
     // No fade active: B's uncorrected half-size value, stored by the plain
     // pass (the same value this pass would store).
     if (texelFetch(fade_state, ivec2(0), 0).z <= 0.5)
         v = texelFetch(plain, p, 0).r;
     else
 #endif
-    {
-        // The shared U3 accessor (HalfLuma.h): the same taps, edge clamp and (a + b + c + d) * 0.25 as the
-        // matcher's former private loop, then the code scale; the arithmetic order is unchanged.
-        v = vpu_half_luma(src, p) * codes;
-#ifdef FADE_APPLY
+)GLSL";
+		const char* const FADE_APPLY_PIECE = R"GLSL(#ifdef FADE_APPLY
         // M4: B after the fade's global gain and offset (when active).
         vec4 fs = texelFetch(fade_state, ivec2(0), 0);
         if (fs.z > 0.5)
             v = v * fs.x + fs.y;
 #endif
-    }
-    imageStore(dst, p, vec4(v, 0.0, 0.0, 1.0));
-}
 )GLSL";
+		const std::string& MatcherHalfPass()
+		{
+			static const std::string body = std::string(VpFrameAnalysis::P1Gpu::MatcherHalfHead()) + FADE_PLAIN_PIECE
+				+ VpFrameAnalysis::P1Gpu::MatcherHalfCore() + FADE_APPLY_PIECE + VpFrameAnalysis::P1Gpu::MatcherHalfTail();
+			return body;
+		}
 
 		// M4: the fade test on the 1/32 pyramids (one work group): A's and B's mean and spread; active when the mean moves smoothly
 		// (the same direction as the last pair's, in the per-frame step window) with both spreads above a code. The kernel and its law
@@ -110,11 +111,11 @@ if (b.x < blocks.x && b.y < blocks.y) {
 
 		// One pyramid step (half -> 1/8, 1/8 -> 1/32 source): the shared unit U3's 4x4 variant level body
 		// (VpUnit::HalfLuma::GlslBox4x4LevelBody, U3 one copy, owner 2026-11-15), byte-identical to the former private
-		// body (HalfLumaUnitTests pins it).
+		// body (HalfLumaUnitTests pins it). BBP-B B1: read through the P1 owner's pyramid level body (P1GpuFill.h, the same
+		// string), the one reference the owner fill and the matcher share.
 		const std::string& PyramidBody()
 		{
-			static const std::string body = VpUnit::HalfLuma::GlslBox4x4LevelBody();
-			return body;
+			return VpFrameAnalysis::P1Gpu::MatcherPyramidLevelBody();
 		}
 
 		// Block search from -> to on half-resolution luma. The vector v says
@@ -2694,7 +2695,7 @@ if (q.x < size.x && q.y < size.y) {
 	bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int levels,
 		pl_tex plain)
 	{
-		const float codes = lumaInCodes ? 1.0f : fullRange ? 219.0f : 255.0f;
+		const float codes = VpFrameAnalysis::P1Gpu::MatcherCodes(lumaInCodes, fullRange);
 		const pl_shader_var variables[1] = { { pl_var_float("codes"), &codes, true } };
 		const bool withPlain = fade && plain;
 		const pl_shader_desc first[4] = { Sampled("src", luma, false), Storage("dst", half), Sampled("fade_state", fade, false),
@@ -2703,7 +2704,7 @@ if (q.x < size.x && q.y < size.y) {
 		const std::string header = std::string(withPlain ? "#define FADE_APPLY 1\n#define FADE_PLAIN 1\n" : fade ? "#define FADE_APPLY 1\n" : "") +
 			VpUnit::HalfLuma::Glsl();
 		return Dispatch(fade ? "VideoProcessor de-judder: half-resolution luma after the fade (M4)" : "VideoProcessor de-judder: half-resolution luma",
-				header.c_str(), DOWNSAMPLE_BODY,
+				header.c_str(), MatcherHalfPass().c_str(),
 				first, withPlain ? 4 : fade ? 3 : 2, variables, 1, halfW, halfH, 16) &&
 			Pyramid(half, l1, l2, 0, levels);
 	}
