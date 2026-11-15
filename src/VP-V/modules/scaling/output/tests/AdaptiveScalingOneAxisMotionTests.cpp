@@ -10,7 +10,9 @@
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
-#include <VP-V/core/OnePole.h>
+#include <VP-V/core/hub/CurrentFrame.h>
+#include <VP-V/core/hub/ExtensionHub.h>
+#include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 
 #include <chrono>
 #include <cmath>
@@ -20,7 +22,9 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if __has_include(<VP-V/modules/scaling/output/AdaptiveDownscaleCut.h>)
@@ -663,12 +667,20 @@ namespace VideoProcessorTest
 			const AdaptiveDownscale::CutVerdict noPrev = AdaptiveDownscale::VerdictFromScene(10, 11, std::ref(read), 8, "missing");
 			Assert::IsTrue(noPrev.state == AdaptiveDownscale::CutVerdict::State::Known && !noPrev.cut,
 				L"previous group missing: the current group decides");
-			// The causes the production source gives (no store, store off, group not sealed).
-			Assert::IsTrue(AdaptiveDownscale::SceneMissingWhy(nullptr, 11).find("no frame analysis store") != std::string::npos);
-			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
-			Assert::IsTrue(AdaptiveDownscale::SceneMissingWhy(&store, 11).find("not sealed for source frame 11") != std::string::npos);
-			store.SetEnabled(false);
-			Assert::IsTrue(AdaptiveDownscale::SceneMissingWhy(&store, 11).find("store off") != std::string::npos);
+			// C5 (WAIVER-C5-SCENEOF-X5): the production cause is the skeleton's (its SceneOf did not answer the frame), carried with the
+			// frame. The store being off is no longer a cause: SceneOf answers live (AdaptiveScalingCutP4StoreOffACutStillSnapsThroughTheSkeleton).
+			const std::string why = AdaptiveDownscale::SceneProductMissingWhy("the skeleton could not classify the frame", 11);
+			Assert::IsTrue(why.find("source frame 11") != std::string::npos && why.find("could not classify") != std::string::npos,
+				L"the skeleton's cause, with the frame");
+			Assert::IsTrue(AdaptiveDownscale::SceneProductMissingWhy(nullptr, 11).find("no cause given") != std::string::npos);
+			// The current frame not answered: Unavailable with exactly that cause, no cut, and the skipped frames are not scanned.
+			GroupMap skipped;
+			skipped.groups[10] = Group(true, true);
+			const AdaptiveDownscale::CutVerdict notAnswered = AdaptiveDownscale::VerdictFromSceneProduct(9, 11,
+				[&why](uint64_t, FrameAnalysis::Scene&, std::string& w) { w = why; return false; }, std::ref(skipped), 8);
+			Assert::IsTrue(notAnswered.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !notAnswered.cut
+				&& notAnswered.cause == why, L"not answered: visible Unavailable, the skeleton's cause");
+			Assert::AreEqual(0, skipped.asked, L"no skipped-frame scan without the current frame's answer");
 			// Without a memo (no skeleton, the Original pathway) the production source answers Unavailable with its cause.
 			const AdaptiveDownscale::CutVerdict noMemo = AdaptiveDownscale::SceneCutSource()(10, 11);
 			Assert::IsTrue(noMemo.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !noMemo.cause.empty() && !noMemo.cut,
@@ -751,12 +763,27 @@ namespace VideoProcessorTest
 				Assert::IsTrue(store.PublishScene(s, g), L"group published");
 			}
 			auto reader = [&store](uint64_t seq, FrameAnalysis::Scene& scene) { return store.PeekScene(seq, scene); };
+			// C5 (WAIVER-C5-SCENEOF-X5): the current frame as the skeleton's SceneOf answers it: the store's group, else the live
+			// classification (`live`: what the skeleton classifies and publishes then); skipped frames stay a Peek of the store.
+			std::map<uint64_t, FrameAnalysis::Scene> live;
+			auto sceneOf = [&store, &live](uint64_t seq, FrameAnalysis::Scene& scene, std::string& why)
+			{
+				if (store.PeekScene(seq, scene))
+					return true;
+				const auto it = live.find(seq);
+				if (it != live.end())
+				{
+					scene = it->second;
+					return true;
+				}
+				why = AdaptiveDownscale::SceneProductMissingWhy("the skeleton could not classify the frame (no sealed pair of P4 records)", seq);
+				return false;
+			};
 			uint64_t advanced = 0;
 			std::vector<uint64_t> snaps;
 			auto frame = [&](uint64_t seq)
 			{
-				const AdaptiveDownscale::CutVerdict v = AdaptiveDownscale::VerdictFromScene(advanced, seq, reader, store.Depth(),
-					AdaptiveDownscale::SceneMissingWhy(&store, seq));
+				const AdaptiveDownscale::CutVerdict v = AdaptiveDownscale::VerdictFromSceneProduct(advanced, seq, sceneOf, reader, store.Depth());
 				if (v.state == AdaptiveDownscale::CutVerdict::State::Known)
 					advanced = seq;   // Module::Measuring: the frame advanced
 				if (v.cut)
@@ -778,12 +805,116 @@ namespace VideoProcessorTest
 			Assert::IsTrue(snaps[0] == 1 && snaps[1] == 4, L"snaps at frames 1 and 4");
 			const AdaptiveDownscale::CutVerdict f7 = frame(7);
 			Assert::IsTrue(f7.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !f7.cut
-				&& f7.cause.find("not sealed") != std::string::npos, L"frame 7 has no group: visible Unavailable");
+				&& f7.cause.find("not answered for source frame 7") != std::string::npos,
+				L"frame 7: neither a group nor a live answer: visible Unavailable");
+			// The store OFF (C5, reversed by design: it was a visible Unavailable while the current frame was a Peek): SceneOf answers
+			// live, so a delivered cut still snaps and a frame without one does not; a frame the skeleton cannot answer stays Unavailable.
 			store.SetEnabled(false);
+			live[8] = Group(true, true);
 			const AdaptiveDownscale::CutVerdict off = frame(8);
-			Assert::IsTrue(off.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !off.cut
-				&& off.cause.find("store off") != std::string::npos, L"the store off: visible Unavailable");
+			Assert::IsTrue(off.state == AdaptiveDownscale::CutVerdict::State::Known && off.cut && off.cutLate && off.cutGroup == 8,
+				L"the store off: the live answer's delivered cut snaps");
+			Assert::AreEqual(size_t(3), snaps.size(), L"store off: one more snap, the delivered cut");
+			Assert::IsTrue(snaps[2] == 8, L"at frame 8");
+			live[9] = Group(false);
+			const AdaptiveDownscale::CutVerdict offNoCut = frame(9);
+			Assert::IsTrue(offNoCut.state == AdaptiveDownscale::CutVerdict::State::Known && !offNoCut.cut, L"the store off: no cut, no snap");
+			const AdaptiveDownscale::CutVerdict offMissing = frame(10);
+			Assert::IsTrue(offMissing.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !offMissing.cut
+				&& offMissing.cause.find("could not classify") != std::string::npos, L"the store off, no live answer: visible Unavailable");
 		}
+
+		// C5 (WAIVER-C5-SCENEOF-X5; owner 2026-11-14 17:38 "Ask the skeleton for it same as everything else"): the PRODUCTION source
+		// (SceneCutSource) asks the skeleton's SceneOf for the current frame of the renderer this thread renders. The Host's store is
+		// registered DISABLED (frame_analysis_store=false); a skeleton module in the hub answers SceneOf LIVE, as the real module does
+		// with the store off (pinned on the real module: SkeletonModuleTests "2. Store off"). A cut still snaps.
+		struct LiveSceneSkeleton : Vpv::Hub::ISkeletonModule, Vpv::Skeleton::IExternalDemand
+		{
+			const char* Name() const override { return "test skeleton (scene product, live)"; }
+			void* Query(const char* iid) override
+			{
+				return iid && std::strcmp(iid, Vpv::Skeleton::kExternalDemandQueryId) == 0 ? static_cast<Vpv::Skeleton::IExternalDemand*>(this) : nullptr;
+			}
+			void SetExternalDemand(const void*, const void*, const std::vector<VpSkeleton::ConsumerDecl>&, const std::vector<VpSkeleton::ProductId>&) override {}
+			void ClearExternalDemand(const void*, const void*) override {}
+			Vpv::Skeleton::FrameMemo MemoFor(const void* host, uint64_t seq) override
+			{
+				Vpv::Skeleton::FrameMemo fm;
+				fm.memo = memo;
+				fm.host = host;
+				fm.seq = seq;
+				return fm;
+			}
+			Vpv::Skeleton::SceneAnswer SceneOf(const void* host, uint64_t seq) const override
+			{
+				asks.push_back(std::make_pair(host, seq));
+				Vpv::Skeleton::SceneAnswer a;
+				const auto it = groups.find(seq);
+				if (it == groups.end())
+					return a;
+				a.known = true;
+				a.cut = it->second.cut; a.cutLate = it->second.cutLate; a.cutHere = it->second.cutHere; a.confirmed = it->second.confirmed;
+				a.fade = it->second.fade; a.fadeKeep = it->second.fadeKeep;
+				a.from = Vpv::Skeleton::SceneAnswer::From::Live;
+				return a;
+			}
+			std::shared_ptr<VpSkeleton::SkeletonMemo> memo = std::make_shared<VpSkeleton::SkeletonMemo>();
+			std::map<uint64_t, FrameAnalysis::Scene> groups;
+			mutable std::vector<std::pair<const void*, uint64_t>> asks;
+		};
+
+		TEST_METHOD(AdaptiveScalingCutP4StoreOffACutStillSnapsThroughTheSkeleton)
+		{
+			struct Scope
+			{
+				Scope() { Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); Vpv::Hub::ResetThisThreadFrameForTesting(); }
+				~Scope() { Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); Vpv::Hub::ResetThisThreadFrameForTesting(); }
+			} scope;
+			int renderer = 0;
+			FrameAnalysis::Store offStore(FrameAnalysis::RingDepth(4, 4));
+			offStore.SetEnabled(false);   // what frame_analysis_store=false leaves
+			VpFrameAnalysis::SourceFrameTap::SetStore(&renderer, &offStore);
+			struct StoreScope { const void* h; ~StoreScope() { VpFrameAnalysis::SourceFrameTap::SetStore(h, nullptr); } } storeScope{ &renderer };
+			LiveSceneSkeleton* sk = new LiveSceneSkeleton();
+			sk->groups[4] = Group(true, true);   // the cut of frame 3, delivered with frame 4's answer
+			sk->groups[5] = Group(false);
+			FrameAnalysis::Scene fade = Group(false);
+			fade.fade = true;
+			fade.fadeKeep = 0.5f;
+			sk->groups[6] = fade;
+			Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(sk));
+			const AdaptiveDownscale::CutSource source = AdaptiveDownscale::SceneCutSource();
+			auto at = [&renderer, &source](uint64_t prev, uint64_t seq)
+			{
+				RendererExtension::FrameContext c;
+				c.host = &renderer;
+				c.phase = RendererExtension::FramePhase::Entrance;
+				c.seq = int64_t(seq);
+				Vpv::Hub::RecordCurrentFrame(c);
+				return source(prev, seq);
+			};
+			const AdaptiveDownscale::CutVerdict cut = at(3, 4);
+			Assert::IsTrue(cut.state == AdaptiveDownscale::CutVerdict::State::Known && cut.cut && cut.cutLate && cut.cutGroup == 4,
+				Wide("store off: the delivered cut still snaps (" + cut.cause + ")").c_str());
+			Assert::AreEqual(size_t(1), sk->asks.size(), L"one SceneOf call for the frame");
+			Assert::IsTrue(sk->asks[0].first == &renderer && sk->asks[0].second == 4u, L"asked for this thread's renderer and frame");
+			const AdaptiveDownscale::CutVerdict still = at(4, 5);
+			Assert::IsTrue(still.state == AdaptiveDownscale::CutVerdict::State::Known && !still.cut, L"store off: no cut, no snap");
+			const AdaptiveDownscale::CutVerdict onFade = at(5, 6);
+			Assert::IsTrue(onFade.state == AdaptiveDownscale::CutVerdict::State::Known && !onFade.cut && onFade.fade,
+				L"store off: a fade, no snap (owner 09:20)");
+			const AdaptiveDownscale::CutVerdict missing = at(6, 7);
+			Assert::IsTrue(missing.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !missing.cut
+				&& missing.cause.find("could not classify") != std::string::npos, Wide(missing.cause).c_str());
+			// A skipped frame is a Peek of the store, never a SceneOf call: with the store off it finds nothing (no cut, no fault).
+			sk->groups[9] = Group(false);
+			const size_t before = sk->asks.size();
+			const AdaptiveDownscale::CutVerdict skip = at(7, 9);
+			Assert::IsTrue(skip.state == AdaptiveDownscale::CutVerdict::State::Known && !skip.cut, L"the skipped frame 8: no cut");
+			Assert::AreEqual(before + 1, sk->asks.size(), L"only the current frame is asked through SceneOf");
+		}
+
+		static std::wstring Wide(const std::string& s) { return std::wstring(s.begin(), s.end()); }
 	};
 
 #include "X5AbCaptureTests.inl"
