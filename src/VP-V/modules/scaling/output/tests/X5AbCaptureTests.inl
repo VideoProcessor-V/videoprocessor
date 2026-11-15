@@ -28,6 +28,18 @@
 
 	namespace X5AbSupport
 	{
+		// _dupenv_s, as the other VP tests read the environment (std::getenv is C4996 under the test project's warnings-as-errors).
+		// Returns whether the variable is set; value receives its text.
+		inline bool Env(const char* name, std::string& value)
+		{
+			char* v = nullptr;
+			size_t n = 0;
+			const bool set = _dupenv_s(&v, &n, name) == 0 && v != nullptr;
+			value = set ? std::string(v) : std::string();
+			std::free(v);
+			return set;
+		}
+
 		struct CaseLine
 		{
 			std::string name, raw, transfer, light;
@@ -134,13 +146,12 @@
 	public:
 		TEST_METHOD(X5AbCaptureClips)
 		{
-			const char* listEnv = std::getenv("VP_X5AB_LIST");
-			if (listEnv == nullptr || *listEnv == 0)
+			std::string listEnv, outDir, side;
+			if (!X5AbSupport::Env("VP_X5AB_LIST", listEnv) || listEnv.empty())
 				return;   // not requested: nothing to capture
-			const char* outEnv = std::getenv("VP_X5AB_OUT");
-			const char* sideEnv = std::getenv("VP_X5AB_SIDE");
-			Assert::IsTrue(outEnv != nullptr && sideEnv != nullptr, L"VP_X5AB_OUT and VP_X5AB_SIDE are required with VP_X5AB_LIST");
-			const std::string outDir = outEnv, side = sideEnv;
+			const bool outSet = X5AbSupport::Env("VP_X5AB_OUT", outDir);
+			const bool sideSet = X5AbSupport::Env("VP_X5AB_SIDE", side);
+			Assert::IsTrue(outSet && sideSet, L"VP_X5AB_OUT and VP_X5AB_SIDE are required with VP_X5AB_LIST");
 			const auto cases = X5AbSupport::ParseList(listEnv);
 			Assert::IsFalse(cases.empty(), L"the list has no cases");
 
