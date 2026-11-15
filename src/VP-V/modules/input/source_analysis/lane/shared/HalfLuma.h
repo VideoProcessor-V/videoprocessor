@@ -100,5 +100,21 @@ namespace HalfLuma
 			"    float d = texelFetch(src, ivec2(p1.x, p1.y), 0)[comp];\n"
 			"    return (a + b + c + d) * 0.25;\n}\n");
 	}
+	// Additive (U3 one copy, owner 2026-11-15): the same taps, order and mean on all four channels, output sample q read
+	// at source offset `origin` (origin + q * 2), taps clamped to [0, size - 1]. Moved from the output downscaler's
+	// private doubler-halving pass (AdaptiveDownscale HALVE_BODY, which summed a, b, c, d in this order from 0 and scaled
+	// by 0.25). The existing entries above are unchanged, so kUnitVersion stays.
+	inline std::string GlslRgbaAt()
+	{
+		return std::string("vec4 vpu_half_luma_rgba_at(sampler2D src, ivec2 origin, ivec2 q)\n{\n"
+			"    ivec2 hi = textureSize(src, 0) - ivec2(1);\n"
+			"    ivec2 p0 = clamp(origin + q * 2, ivec2(0), hi);\n"
+			"    ivec2 p1 = clamp(origin + q * 2 + ivec2(1), ivec2(0), hi);\n"
+			"    vec4 a = texelFetch(src, ivec2(p0.x, p0.y), 0);\n"
+			"    vec4 b = texelFetch(src, ivec2(p1.x, p0.y), 0);\n"
+			"    vec4 c = texelFetch(src, ivec2(p0.x, p1.y), 0);\n"
+			"    vec4 d = texelFetch(src, ivec2(p1.x, p1.y), 0);\n"
+			"    return (a + b + c + d) * 0.25;\n}\n");
+	}
 }
 }
