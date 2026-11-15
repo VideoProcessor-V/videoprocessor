@@ -37,6 +37,15 @@
    "max_hits": 1
   },
   {
+   "key": "a|D5|src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
+   "rule": "a",
+   "site": "D5",
+   "refs": "122 s9 D5 / gate-15c-D5 (a)",
+   "reason": "optical-flow producer planar16 private CPU luma decode (words[x] >> 6, HalfLuma8 input); 102b MAP-RGB-LUMA-PROXY / CB slice B0",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
    "key": "a|D6|src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp",
    "rule": "a",
    "site": "D6",

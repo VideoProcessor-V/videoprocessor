@@ -66,7 +66,9 @@ SITES = [
     {"id": "D5", "product": "kP13SourceRing", "refs": "122 s9 D5",
      "what": "producer CPU luma decode (code >> 6) / GPU row upload shift",
      "re": r">>\s*6\b|<<\s*(view\.)?(msbShift|shift)\b",
-     "only": [_M + "input/source_analysis/VpFrameAnalysis.cpp", _M + "input/source_analysis/lane/LaneGpuProducts.cpp"]},
+     # gate-15c-D5 (a): + the producer's planar16 private CPU luma decode (MotionAheadProducer.cpp:64, 102b MAP-RGB-LUMA-PROXY).
+     "only": [_M + "input/source_analysis/VpFrameAnalysis.cpp", _M + "input/source_analysis/lane/LaneGpuProducts.cpp",
+              _M + "motion/estimation/MotionAheadProducer.cpp"]},
     {"id": "D6", "product": "kP13SourceRing", "refs": "122 s9 D6 / doc 91 D C9",
      "what": "C9 producer own RGB / full-range luma decode (named exception until EPE is compared)",
      "re": r"\bSamplerCodesAreFullRange\b|\bfullRangeYuv\b|\bCodesFullRange\b",
