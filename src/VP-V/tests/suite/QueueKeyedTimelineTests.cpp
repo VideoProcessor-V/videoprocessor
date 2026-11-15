@@ -69,7 +69,8 @@ namespace QueueKeyedTimelineTestsNs
 				uint64_t epoch = 0, presented = 0;
 				bool havePresented = false;
 				const uint64_t first = 100, last = 160, flushAt = 130;
-				int refills = 0;
+				int refills = 0;     // render-time fills from the flush on (the frames the flush took)
+				int coldFills = 0;   // render-time fills before the flush (the cold start: nothing was demanded ahead yet)
 				for (uint64_t t = first; t <= last; ++t) {
 					const uint64_t nowUs = uint64_t(double(t) * clockPeriodUs);   // the swept display's render clock
 					if (t == flushAt) {
@@ -112,7 +113,10 @@ namespace QueueKeyedTimelineTestsNs
 					Assert::IsTrue(r.Ok() && r.cpu[0] == uint8_t(t), L"render read");
 					if (!made.count(t)) {
 						made[t] = r.cpu;
-						++refills;   // only right after the flush (nothing was demanded ahead for those frames since)
+						if (t >= flushAt)
+							++refills;   // only right after the flush (nothing was demanded ahead for those frames since)
+						else
+							++coldFills;
 					}
 					Assert::IsTrue(r.cpu == made[t], L"the render reads the spot made ahead");
 					// The present of t - D (frames rendered after the flush only).
@@ -130,6 +134,7 @@ namespace QueueKeyedTimelineTestsNs
 				Assert::IsTrue(c.unavailable[size_t(AcquireCause::FrameReleased)] == 0, L"0 FrameReleased at present time");
 				Assert::IsTrue(c.unavailable[size_t(AcquireCause::NotQueued)] == 0, L"every demand inside the window");
 				Assert::IsTrue(refills <= int(kAheadCeiling) + 1, L"a refill only for the frames the flush took");
+				Assert::IsTrue(coldFills <= int(kAheadCeiling) + 1, L"a cold-start fill only for the frames before the first ahead demand");
 				Assert::IsTrue(m.Invalidations(SkeletonMemo::InvalidateCause::Flush) == 1 && m.Epoch() == 1, L"one flush, one epoch");
 				const int framesTouched = int((last + kAheadCeiling) - first + 1u);
 				Assert::IsTrue(calls.load() - int(c.invalidatedRecompute) <= framesTouched, L"computed once per frame (recompute counted apart)");
