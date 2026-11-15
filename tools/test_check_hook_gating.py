@@ -836,5 +836,57 @@ class HookLinesTest(unittest.TestCase):
             self.assertIn("hook LINES: 0 (baseline 1, trend -1)", out)
 
 
+class SinceKeepsUnverifiedMarkersTest(unittest.TestCase):
+    """HOOKGATE-CHECKER-HOLES (1): a VPV-GATED body in src/VP-V that loses its Original early return after the merge
+    base changes no Bill line, yet under --since the marker and its call site must still fail the gate."""
+
+    GIT_ENV = CheckHookGatingTest.GIT_ENV
+    GATED = "src/VP-V/modules/motion/estimation/Lease.h"
+    WITH_RETURN = ("struct State\n{\n\tbool EndLease(bool originalPathway)   // VPV-GATED\n\t{\n"
+                   "\t\tif (originalPathway) return false;\n\t\tReset();\n\t\treturn true;\n\t}\n};\n")
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = self.td.name
+        _w(self.root, BILL, _bill("\t\tdoBill();\n"))
+        self._git("init", "-q")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "bill")     # Bill's baseline: no src/VP-V/ in its tree
+        self.bill = self._git("rev-parse", "HEAD")
+        _w(self.root, chg.SLOTS_HEADER, SLOTS)
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", self.root] + list(args), check=True, env=self.GIT_ENV,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode("utf-8", "replace").strip()
+
+    def _commit(self, gated_text):
+        _w(self.root, self.GATED, gated_text)
+        _w(self.root, BILL, _bill("\t\tdoBill();\n\t\tvectorEstimate.EndLease(pipelineSlots.OriginalPathway());   // VPV-HOOK\n"))
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "vp")
+        return self._git("rev-parse", "HEAD")
+
+    def _cli(self, since):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = chg.main(["--root", self.root, "--base-ref", self.bill, "--files", BILL, "--rev", "HEAD", "--since", since])
+        return rc, buf.getvalue()
+
+    def test_red_a_marker_that_loses_its_early_return_after_the_merge_base_fails_under_since(self):
+        first = self._commit(self.WITH_RETURN)
+        rc, out = self._cli(first)
+        self.assertIn("0 unguarded, 0 unverified markers", out)
+        self._commit(self.WITH_RETURN.replace("\t\tif (originalPathway) return false;\n", ""))
+        rc, out = self._cli(first)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("UNVERIFIED VPV-GATED marker", out)
+        self.assertIn("EndLease", out)
+        self.assertIn("1 unguarded, 1 unverified markers", out)
+        self.assertIn(BILL + ":", out)
+
+
 if __name__ == "__main__":
     unittest.main()
