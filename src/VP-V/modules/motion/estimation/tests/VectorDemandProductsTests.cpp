@@ -9,8 +9,9 @@
 // Skeleton S0: vector demand as registry consumer declarations
 // (src/VP-V/modules/motion/estimation/VectorDemandProducts.h). Exhaustive over every VectorDemand
 // input: the graph holds the vector pair exactly when the decision runs the producer and the
-// analysis field exactly when it asks for an estimate, so VectorDemand's behaviour is unchanged.
-// CPU only.
+// analysis field exactly when a served consumer reads it (batch B, WAIVER-B1-ENGINE-07: the
+// render-time estimate never runs without it, and is that field without optical-flow pairs), so
+// VectorDemand's behaviour is unchanged. CPU only.
 
 #include <VP-V/core/ProductGraph.h>
 #include <VP-V/modules/motion/estimation/VectorDemandProducts.h>
@@ -42,6 +43,10 @@ namespace VectorDemandProductsTestsNs
 			noEngine.ofaPresent = false;
 			std::vector<ConsumerDecl> cs;
 			size_t checked = 0;
+			unsigned readsField = 0;   // the consumers that read the analysis field (P3): source field and output (DeclarationOf)
+			for (int i = 0; i < kConsumerCount; ++i)
+				if (DomainOf(ConsumerAt(i)) == Domain::SourceField || DomainOf(ConsumerAt(i)) == Domain::Output)
+					readsField |= 1u << i;
 			// Batch B fold (WAIVER-B1-ENGINE-06): the third dimension was the retired analysis-under-smooth-motion flag
 			// (DecideWith(in, under)); it now sweeps Input::pairsExpected, so every input of the one decision is covered and the
 			// count is unchanged.
@@ -71,7 +76,16 @@ namespace VectorDemandProductsTestsNs
 							const Graph g = BuildGraph(reg, cs, gs);
 							Assert::IsTrue(g.valid);
 							Assert::AreEqual(d.producer, g.Has(VpSkeleton::kP2VectorPair));
-							Assert::AreEqual(d.estimate, g.Has(VpSkeleton::kP3AnalysisField));
+							// WAIVER-B1-ENGINE-07 (pre-existing since batch B, red at f45f0f509): was AreEqual(d.estimate, Has(P3)). Batch B
+							// serves the source-field / output consumers from the producer's pairs while pairs are expected (no render-time
+							// matcher estimate: VectorDemandTests EachNonSynthesisConsumerAloneIsServedForward), yet each of them reads the
+							// analysis field (DeclarationOf), so that equivalence held only without pairs. The graph holds P3 exactly when a
+							// served consumer reads it; the estimate never runs without it; without pairs the two are the same, as before.
+							const bool fieldRead = (d.served & readsField) != 0;
+							Assert::AreEqual(fieldRead, g.Has(VpSkeleton::kP3AnalysisField));
+							Assert::IsTrue(!d.estimate || fieldRead, L"the render-time estimate makes a field a served consumer reads");
+							if (!in.pairsExpected)
+								Assert::AreEqual(d.estimate, g.Has(VpSkeleton::kP3AnalysisField), L"no pairs: the matcher fallback makes every field");
 							Assert::IsFalse(g.Has(VpSkeleton::kP4SourceStats));
 							if (d.producer) {
 								const Graph m = BuildGraph(reg, cs, noEngine);
