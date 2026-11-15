@@ -67,11 +67,14 @@ namespace VideoProcessorTest
 			State state;
 			const auto urgent = MotionAhead::ProducerJobs::NextJob(Q(1, 1), state, 2, 5.0, 4.0);   // slack 5 ms < 2 x 4 ms
 			Assert::IsTrue(urgent.cls == Class::CorePair && urgent.urgent && !urgent.fairness);
-			const auto relaxed = MotionAhead::ProducerJobs::NextJob(Q(1, 1), state, 2, 8.0, 4.0);  // slack 8 ms is not < 8 ms
+			State fresh_relaxed;   // a fresh chooser state per sub-check (no streak carried over)
+			const auto relaxed = MotionAhead::ProducerJobs::NextJob(Q(1, 1), fresh_relaxed, 2, 8.0, 4.0);  // slack 8 ms is not < 8 ms
 			Assert::IsTrue(relaxed.cls == Class::OnDemand);
-			const auto unknown = MotionAhead::ProducerJobs::NextJob(Q(1, 1), state, 2, -1.0, 4.0);
+			State fresh_unknown;   // a fresh chooser state per sub-check (no streak carried over)
+			const auto unknown = MotionAhead::ProducerJobs::NextJob(Q(1, 1), fresh_unknown, 2, -1.0, 4.0);
 			Assert::IsTrue(unknown.cls == Class::OnDemand, L"unknown slack is never urgent");
-			const auto noService = MotionAhead::ProducerJobs::NextJob(Q(1, 1), state, 2, 1.0, 0.0);
+			State fresh_noService;   // a fresh chooser state per sub-check (no streak carried over)
+			const auto noService = MotionAhead::ProducerJobs::NextJob(Q(1, 1), fresh_noService, 2, 1.0, 0.0);
 			Assert::IsTrue(noService.cls == Class::OnDemand, L"no measured service time: never urgent");
 		}
 
