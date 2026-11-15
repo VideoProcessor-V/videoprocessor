@@ -175,6 +175,10 @@ namespace VideoProcessorTest
 			Assert::AreEqual(uint64_t(0), module.RegisteredReserveBytes(), L"nothing of ours registered");
 		}
 
+		// Category Cpu: the name says GPU, the body is hardware-free (a refusing fake device, no pl_gpu).
+		BEGIN_TEST_METHOD_ATTRIBUTE(FillDeclinesWithoutAGpuContext)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(FillDeclinesWithoutAGpuContext)
 		{
 			using namespace VpSkeleton;

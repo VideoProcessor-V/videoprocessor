@@ -823,6 +823,10 @@ namespace SkeletonAcquireTestsNs
 		// R2 (lead 12): THE sanctioned GPU context. A non-view GPU fill gets it (and only it: no pl_gpu of its own), CPU and view fills
 		// get none; its textures are accounted against the fill's reserve (refused above it, counted, worded with the decline); it is
 		// worded; without a device it allocates nothing and says so.
+		// Category Cpu: the name says GPU, the body is hardware-free (a fake IOwnerGpuDevice; no device).
+		BEGIN_TEST_METHOD_ATTRIBUTE(OwnerGpuContextIsSanctionedAndAccounted)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(OwnerGpuContextIsSanctionedAndAccounted)
 		{
 			struct FakeDevice : IOwnerGpuDevice
@@ -935,6 +939,10 @@ namespace SkeletonAcquireTestsNs
 		}
 
 		// R2: the context on its own: closed = nothing; an empty shape is refused; the grant is cumulative.
+		// Category Cpu: the name says GPU, the body is hardware-free (a counting fake IOwnerGpuDevice; no device).
+		BEGIN_TEST_METHOD_ATTRIBUTE(OwnerGpuContextClosesAndAccumulates)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(OwnerGpuContextClosesAndAccumulates)
 		{
 			struct CountingDevice : IOwnerGpuDevice

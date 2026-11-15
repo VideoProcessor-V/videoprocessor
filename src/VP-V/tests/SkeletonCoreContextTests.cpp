@@ -527,6 +527,10 @@ namespace SkeletonCoreContextTestsNs
 			Assert::IsTrue(m.Acquire(kP10GrainSplit, 13, AcquireForm::Cpu).cause == AcquireCause::OwnerDeclined, L"an empty reason is still a visible decline");
 		}
 
+		// Category Cpu: the name says GPU (the Gpu acquire form), the body is hardware-free (a fake lane; no device).
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuFormAndNonDefaultVariantNeverAskTheLane)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GpuFormAndNonDefaultVariantNeverAskTheLane)
 		{
 			SkeletonMemo m;
@@ -617,6 +621,10 @@ namespace SkeletonCoreContextTestsNs
 			Assert::IsTrue(b.cpu[0] == uint8_t(0xA5 ^ 0xFF), L"pinned past the release");
 		}
 
+		// Category Cpu: the name says GPU (the Gpu acquire form), the body is hardware-free (a fake texture handle; no device).
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuAndRenderBoundFillsAreRefusedOffTheRenderThread)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GpuAndRenderBoundFillsAreRefusedOffTheRenderThread)
 		{
 			SkeletonMemo m;

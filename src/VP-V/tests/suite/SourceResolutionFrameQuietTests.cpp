@@ -376,6 +376,11 @@ namespace VideoProcessorTest
 		// so Begin runs the monitor inline and leaves nothing pending. C1 gate SHOULD-1: the REAL Original pattern is
 		// OriginalFrame() with no End (the AfterPresent seam is skipped in Original): no flush, no decision, no missed End.
 		// The Arm + End pairs this test used to call "Original" are a VP-pathway frame with no VP native work; kept, so named.
+		// Category Cpu: the name says GPU (pl_gpu_flush), the body is a source-text check plus FrameQuiet counters with null
+		// GPUs (no device).
+		BEGIN_TEST_METHOD_ATTRIBUTE(OriginalMakesNoPlGpuFlushCallsAtTheHostLevel)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(OriginalMakesNoPlGpuFlushCallsAtTheHostLevel)
 		{
 			const std::string renderer = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");

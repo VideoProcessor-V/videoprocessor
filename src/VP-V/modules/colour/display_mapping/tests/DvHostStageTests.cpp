@@ -242,6 +242,56 @@ namespace Tests
 			Assert::IsFalse(reg.Has("DV tone mapping"));
 		}
 
+		// C4 chkfix (N3 fallback coverage, ADR-0001 no silent fallbacks): the Dolby-style curve running without the L1
+		// scene values (mid-range fallback) is listed under its own entry while it lasts, not only logged; released when
+		// the values arrive, when the curve does not run (a LUT fallback, libplacebo mode) and with the slot off.
+		TEST_METHOD(DolbyStyleWithoutSceneValuesIsListedNotOnlyLogged)
+		{
+			using namespace DvHost;
+			Registry reg;
+			DvHostStage stage(NoShaders(), reg.Engage(), reg.Release());
+			Run run;
+			run.mode = "dolby_style";
+			run.trims = false;
+			pl_color_map_params params = pl_color_map_default_params;
+			std::vector<const pl_hook*> hooks;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			pl_frame image = Picture(true);
+			image.color.hdr.max_pq_y = 0.0f;
+			image.color.hdr.avg_pq_y = 0.0f;
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsTrue(params.tone_mapping_function == &DvDolbyStyle::Function(), L"the Dolby-style curve runs");
+			Assert::IsTrue(reg.Has("DV tone mapping scene values"), L"no L1 values: listed");
+			Assert::AreEqual(std::string("L1 missing: the Dolby-style curve uses mid-range scene values"), reg.engaged["DV tone mapping scene values"]);
+			Assert::IsTrue(stage.ToneStatus().find("L1 missing -> mid-range fallback") != std::string::npos, L"and in the status");
+			// One value zero is still missing.
+			image.color.hdr.max_pq_y = 3000.0f / 4095.0f;
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsTrue(reg.Has("DV tone mapping scene values"), L"avg_pq_y 0: still listed");
+			// Both values: released.
+			image.color.hdr.avg_pq_y = 1500.0f / 4095.0f;
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsFalse(reg.Has("DV tone mapping scene values"), L"L1 values present: released");
+			// Missing again, then a LUT stops the curve: released (the LUT fallback is listed instead).
+			image.color.hdr.max_pq_y = image.color.hdr.avg_pq_y = 0.0f;
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsTrue(reg.Has("DV tone mapping scene values"));
+			pl_frame lutTarget = Target(PL_COLOR_TRC_PQ, 100.0f);
+			static const int dummy = 0;
+			lutTarget.lut = reinterpret_cast<const pl_custom_lut*>(&dummy);
+			run.Frame(stage, image, lutTarget, &dm, params, hooks);
+			Assert::IsFalse(reg.Has("DV tone mapping scene values"), L"the curve does not run: not listed");
+			Assert::IsTrue(reg.Has("DV tone mapping"));
+			// libplacebo mode and the slot off: never listed.
+			run.mode = "libplacebo";
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsFalse(reg.Has("DV tone mapping scene values"), L"libplacebo mode: not listed");
+			run.mode = "dolby_style";
+			run.colourRuns = false;
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsTrue(reg.engaged.empty(), L"slot off: nothing listed");
+		}
+
 		TEST_METHOD(TrimsListTheirFallbacksAndAMissingShaderStopsTheDolbyStyleCurve)
 		{
 			using namespace DvHost;
