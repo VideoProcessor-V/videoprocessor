@@ -3563,6 +3563,44 @@ namespace Tests
 			const std::vector<std::string> saved = g_harnessShaderProfiles;
 			g_harnessShaderProfiles = { "standard.sigma_delta" };
 			const ScratchCaptureFolder shots(L"vp-c8-own");
+			// Lead 19 fix-D: the comparison is void unless both folders really load their sigma-delta. The renderer reads
+			// <VP_TEST_SHADER_DIR>\shaders\<glsl_file> (MadVRShaderLoader::ResolveShaderFilename), so VP_C8_ORIG_SHADER_DIR must
+			// name a folder HOLDING shaders\Temporal sigma-delta.glsl, the b5ae6eda5 file (LF text 46000 bytes, FNV-1a 64
+			// d631910eb881f914, the OutputDomainSearchTests pin). A copy beside shaders\ is never read: the original run then
+			// renders with no sigma-delta ("Custom hooks: ... not loaded: cannot open shader file") and differs from the split.
+			{
+				std::ifstream originalFile(original + "\\shaders\\Temporal sigma-delta.glsl", std::ios::binary);
+				Assert::IsTrue(originalFile.is_open(), WideOf("VP_C8_ORIG_SHADER_DIR=" + original +
+					" holds no shaders\\Temporal sigma-delta.glsl (the renderer reads <dir>\\shaders\\<file>)").c_str());
+				const std::string originalText((std::istreambuf_iterator<char>(originalFile)), std::istreambuf_iterator<char>());
+				std::string originalLf;
+				for (size_t i = 0; i < originalText.size(); ++i)
+					if (!(originalText[i] == '\r' && i + 1 < originalText.size() && originalText[i + 1] == '\n'))
+						originalLf += originalText[i];
+				uint64_t originalFnv = 0xcbf29ce484222325ull;
+				for (const unsigned char ch : originalLf)
+				{
+					originalFnv ^= ch;
+					originalFnv *= 0x100000001b3ull;
+				}
+				Assert::IsTrue(originalLf.size() == 46000 && originalFnv == 0xd631910eb881f914ull,
+					WideOf("VP_C8_ORIG_SHADER_DIR=" + original + ": shaders\\Temporal sigma-delta.glsl is not the b5ae6eda5 file").c_str());
+				const std::string splitFolder = here.substr(0, here.size() - 1);
+				for (const std::string& folder : { splitFolder, original })
+				{
+					SetEnvironmentVariableA("VP_TEST_SHADER_DIR", folder.c_str());
+					const RunResult probe = Run(VideoFrameEncoding::V210, "standard", 3.0, false, C8SigmaRule("own"));
+					bool loaded = false, refused = false;
+					for (const std::string& line : probe.log)
+					{
+						if (line.find("Custom hooks:") == std::string::npos || line.find("Temporal sigma-delta.glsl") == std::string::npos)
+							continue;
+						if (line.find("Custom hooks: loaded") != std::string::npos) loaded = true;
+						if (line.find("not loaded") != std::string::npos || line.find("disabled by libplacebo") != std::string::npos) refused = true;
+					}
+					Assert::IsTrue(loaded && !refused, (WideOf(folder + ": the sigma-delta did not load from this folder\n") + probe.Tail()).c_str());
+				}
+			}
 			struct Case { const char* name; VideoFrameEncoding encoding; const char* path; bool film; bool moving; };
 			const Case cases[] = { { "v210 gpu 23.976 still", VideoFrameEncoding::V210, "gpu", true, false },
 				{ "v210 standard 59.94 still", VideoFrameEncoding::V210, "standard", false, false },
