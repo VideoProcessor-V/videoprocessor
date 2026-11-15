@@ -35,6 +35,12 @@ VP owns two file pairs in this folder (moved by `git mv` in M2 step 10): `Source
   - Frame-bound mode (resync Q3, default off; the behaviour with it off is unchanged): `SetFrameBound(on, leadFramesD)`, `FrameBound()`, `FrameLead()`, `ReadyFor(s)`, `AnalysedThrough()`, `NoteWaitMissed()`, and the counters `HeldDropped()`, `WaitsMissed()`, `ClockStepsBack()`, `HeldCount()`. See "Frame-bound mode" below.
   - Tests: `AnalyseTilesForTest` (synchronous, no GPU), `InjectResultForTest` and `NoteSubmittedForTest` (frame-bound tests), `FadeWeight`, `FadeMixTimestamps`, `FadeMixValue`.
   - Free function `Describe(snapshot, autoRatio, autoSelected)`: the status text.
+- `AnalysisLumaDomain.h` (the decode owner's VP-V face, 15c C6): `Vpv::AnalysisDomain::NeedsLumaPlane(source)` (the format's luma
+  is not a readable 10-bit plane: every RGB / 4:2:2 / packed format, and P010 / P210 / decoded DV at full range),
+  `DecodeSharedLuma(source)` (fill + publish the shared plane once) and `StudioLumaMap(source)` (sampler code -> studio code via
+  `CodesFullRange()`). `VpFrameAnalysis` re-exports `DecodeSharedLuma` / `StudioLumaMap` (using-declarations) and only pools the
+  planes (`AttachSharedLuma`, `ReleasePlanePool`); `NeedsDecode` and `SamplerCodesAreFullRange` are deleted (call
+  `NeedsLumaPlane` / `source.CodesFullRange()`).
 - `VpFrameAnalysis.h` (C9 commit A, doc 105 phase 4a; the frame's luma view and the P1 engine reader):
   - `SourceViewOf(source, view)`: the frame's decoded luma as the lane reads it (10-bit sampler codes, msbShift 6, stride = width; `keepAlive` holds the plane): the shared plane, or a pooled plane decoded here for P010 / P210 / decoded DV. False when no plane is ready. The source frame tap delivers exactly this view.
   - `LiveEngine8(source, out, hw, hh)`: the P1 engine half through the shared decode (the live fill): `DecodeSharedLuma`, `SourceViewOf`, `HalfLumaRows`, `Engine8Half`. False without a 10-bit view (`Engine8Half` is exact for msbShift 6 only).

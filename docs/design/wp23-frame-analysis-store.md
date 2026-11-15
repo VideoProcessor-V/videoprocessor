@@ -62,7 +62,8 @@ and adapts his thresholds. One model per side, one conversion:
 1. **Bill's analysers use Bill's model.** The shared plane is `Sample()`'s output, so it follows
    whatever the merged `AnalysisLumaSource` emits; his decisions stay his.
 2. **VP analysis uses 10-bit studio codes** (black 64, white 940, BTB/WTW kept). The conversion is
-   ONE function, `VpFrameAnalysis::SamplerCodesAreFullRange` + `StudioLumaMap`. Today it is the
+   ONE function in the decode owner, `AnalysisLumaSource::CodesFullRange` + `Vpv::AnalysisDomain::StudioLumaMap`
+   (`AnalysisLumaDomain.h`; moved from VpFrameAnalysis by 15c C6, 2026-11-15). Today it is the
    identity (our sampler already emits studio codes — `RangeModelIsOneStudioMapping` test).
 3. **At the WP-21 merge (recommended):** take Bill's sampler text (his file returns to upstream, the
    patch set shrinks), change that one VP function to `source.range == AnalysisLumaRange::Full`,

@@ -59,5 +59,6 @@ when Bill takes it.
 His v1.4.02 `AnalysisLumaSource` emits delivered codes with an `AnalysisLumaRange` tag; ours maps
 full range to studio codes inside `Sample()`. The shared plane holds whatever `Sample()` emits, so
 it follows whichever model the merged file uses without change. VP's own range conversion is in
-one VP function (`VpFrameAnalysis::SamplerCodesAreFullRange`); see
+one place, the decode owner (`AnalysisLumaSource::CodesFullRange` + `Vpv::AnalysisDomain::StudioLumaMap`
+in `AnalysisLumaDomain.h`; 15c C6, 2026-11-15); see
 `wp23-frame-analysis-store.md` "Range model".
