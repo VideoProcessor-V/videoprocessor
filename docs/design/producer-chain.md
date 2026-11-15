@@ -4,15 +4,15 @@
 
 Machine-checked (refs/129 L-PROD). R = read shape found (a regex hit on the owner fill, NOT proven Acquire); X = it recomputes it privately or reads it outside Acquire; N = declared but never read; NP = the product has no production producer. Fix owners are the lanes of refs/129. Counts count declared (product, input) pairs.
 
-Counts: R 8, X 8, N 12, NP 33.
+Counts: R 9, X 8, N 12, NP 33.
 
 | Product | Lane | Producer files | Input (lag/lead) | St | Evidence / note |
 |---|---|---|---|---|---|
 | **P0** p0_rebase_decision | - | - | (no inputs) | - | |
 | **P1** p1_half_luma | L-B4 | LaneCpuProducts.h | (no inputs) | - | |
-| **P2** p2_vector_pair (variants, no-OFA P2m) | L-B4 | MotionAheadProducer.cpp | P1 lag0,1 | X | recompute: MotionAheadProducer.cpp:28; MotionAheadProducer.cpp:492; MotionAheadProducer.cpp:556 / flag NotYetConsumed: C9 |
-| **P2m** p2m_matcher_pair | L-B4 | DejudderWarp.cpp | P1 lag0,1 | X | recompute: DejudderWarp.cpp:2701; DejudderWarp.cpp:2712; DejudderWarp.cpp:2715 / flag NotYetConsumed: C9 |
-| **P3** p3_analysis_field | L-B4 | DejudderWarp.cpp | P1 lag0,1 | X | recompute: DejudderWarp.cpp:2701; DejudderWarp.cpp:2712; DejudderWarp.cpp:2715 / flag NotYetConsumed: C9 |
+| **P2** p2_vector_pair (variants, no-OFA P2m) | L-B4 | MotionAheadProducer.cpp | P1 lag0,1 | X | recompute: MotionAheadProducer.cpp:29; MotionAheadProducer.cpp:493; MotionAheadProducer.cpp:557 / flag NotYetConsumed: C9 |
+| **P2m** p2m_matcher_pair | L-B4 | DejudderWarp.cpp | P1 lag0,1 | X | recompute: DejudderWarp.cpp:2699; DejudderWarp.cpp:2713; DejudderWarp.cpp:2716 / flag NotYetConsumed: C9 |
+| **P3** p3_analysis_field | L-B4 | DejudderWarp.cpp | P1 lag0,1 | X | recompute: DejudderWarp.cpp:2699; DejudderWarp.cpp:2713; DejudderWarp.cpp:2716 / flag NotYetConsumed: C9 |
 |  |  |  | P2 | N |  |
 | **P4** p4_source_stats | L-B4 | LaneCpuProducts.h | P1 | R | LaneCpuProducts.h:292; LaneCpuProducts.h:304 |
 | **P5** p5_monitor_tiles | - | SourceResolutionMonitor.h | (no inputs) | - | |
@@ -22,8 +22,8 @@ Counts: R 8, X 8, N 12, NP 33.
 |  |  |  | P2 (undeclared) | X | outside-acquire: CameraExtension.cpp:239; CameraExtension.cpp:480; CameraExtension.cpp:629 / undeclared external view: P2 via FlowOf (decision G-A3, ProductFlags ExternalView) |
 | **P8** p8_camera_labels | L-B6 | CameraLabelFill.cpp | P7 | X | partial: CameraLabelFill.cpp:50; CameraLabelFill.cpp:82; CameraLabelFill.cpp:116 |
 |  |  |  | P3 | X | outside-acquire: CameraLabelFill.cpp:83; CameraLabelFill.cpp:125 |
-| **P9** p9_camera_smoothed (variants, short-queue P7) | L-B4 | CameraLinkCore.cpp | P7 lead2 | X | outside-acquire: CameraLinkCore.cpp:358; CameraLinkCore.cpp:457; CameraLinkCore.cpp:755 |
-| **P10** grain.split | L-B2 | SkeletonGpuDispatcher.cpp<br>LaneGpuProducts.cpp | P4 | R | SkeletonGpuDispatcher.cpp:496; SkeletonGpuDispatcher.cpp:571 / shared dispatcher read; its picture feeds the ownsTap (P10) tap build |
+| **P9** p9_camera_smoothed (variants, short-queue P7) | L-B4 | CameraLinkCore.cpp | P7 lead2 | X | outside-acquire: CameraLinkCore.cpp:357; CameraLinkCore.cpp:456; CameraLinkCore.cpp:764 |
+| **P10** grain.split | L-B2 | SkeletonGpuDispatcher.cpp<br>LaneGpuProducts.cpp | P4 | R | SkeletonGpuDispatcher.cpp:497; SkeletonGpuDispatcher.cpp:572 / shared dispatcher read; its picture feeds the ownsTap (P10) tap build |
 |  |  |  | P13 | N | INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)); flag ViewIsActual: C9b |
 | **P10c** grain.split.chroma | L-B2 | - | P4 | NP | no production producer |
 |  |  |  | P13 | NP | no production producer |
@@ -47,12 +47,13 @@ Counts: R 8, X 8, N 12, NP 33.
 |  |  |  | td.memory lag1 | NP | no production producer |
 | **P14** p14_source_identity | - | SourceIdPipeline.h | P5 | R | SourceIdPipeline.h:126; SourceIdPipeline.h:214 / type-token match only: FrameInput.classical is a monitor snapshot copied by the call site, not an Acquire |
 | **P14g** source_geometry | - | SourceGeometryProduct.h | P5 | N | flag ViewIsActual: C9b |
+| **edge_map** edge_map | - | EdgeMapFill.h | P13 | R | EdgeMapFill.h:65 |
 | **P7g** p7g_camera_guide | L-B6 | GuideLaneJob.cpp | P7 | N |  |
 |  |  |  | P4 | N |  |
 | **P16** coding_evidence | L-B5 | CodingEvidence.cpp<br>SkeletonModule.cpp | P10 | N |  |
 |  |  |  | P11 | N |  |
 |  |  |  | P13 | N |  |
-|  |  |  | P16 lag1 | R | CodingEvidence.cpp:556 |
+|  |  |  | P16 lag1 | R | CodingEvidence.cpp:592 |
 | **P15** quality_pattern (variants, short-queue P15c) | L-B5 | - | P16 lead1,lead2 | NP | no production producer |
 |  |  |  | P15 lag1 | NP | no production producer |
 |  |  |  | P5 | NP | no production producer; flag ViewIsActual: C9b |
@@ -109,5 +110,5 @@ Declared in Products.h but the producer does not read them yet. They still order
 
 Ordering edges are lag 0, lead 0, non-self (Registry::Validate's Kahn); lag > 0, lead and own-previous-frame edges are temporal. Acyclic: **yes**.
 
-Order: P0(L0) , P13(L0) , P1(L0) , P2(L1) , P2m(L1) , P3(L2) , P4(L1) , P10(L2) , P10c(L2) , P11(L3) , P16(L4) , P12(L4) , P5(L0) , P6(L3) , P7(L2) , P7g(L3) , P8(L3) , P9(L3) , P15(L5) , P15c(L5) , P3r(L4) , P14g(L1) , P14(L1) , td.anchor_pass(L4) , td.anchor_refs(L6) , td.blocks(L4) , td.delta(L5) , td.maps(L5) , td.memory(L5) , td.trail_summary(L5)
+Order: P0(L0) , P13(L0) , edge_map(L1) , P1(L0) , P2(L1) , P2m(L1) , P3(L2) , P4(L1) , P10(L2) , P10c(L2) , P11(L3) , P16(L4) , P12(L4) , P5(L0) , P6(L3) , P7(L2) , P7g(L3) , P8(L3) , P9(L3) , P15(L5) , P15c(L5) , P3r(L4) , P14g(L1) , P14(L1) , td.anchor_pass(L4) , td.anchor_refs(L6) , td.blocks(L4) , td.delta(L5) , td.maps(L5) , td.memory(L5) , td.trail_summary(L5)
 

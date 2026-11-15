@@ -1,7 +1,7 @@
 {
  "schema": 1,
  "counts": {
-  "R": 8,
+  "R": 9,
   "X": 8,
   "N": 12,
   "NP": 33
@@ -73,18 +73,18 @@
      "evidence": [
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       28,
+       29,
        "bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH)"
       ],
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       492,
-       "if (!LumaAtTarget(job.luma, lumaBuffer, halfW, halfH))"
+       493,
+       "if (!LumaAtTarget(job.sequence, job.luma, lumaBuffer, halfW, halfH))"
       ],
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       556,
-       "bool Producer::LumaAtTarget(const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& halfW, int& hal"
+       557,
+       "bool Producer::LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, i"
       ]
      ],
      "kind": "recompute",
@@ -123,17 +123,17 @@
      "evidence": [
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2701,
+       2699,
        "bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int l"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2712,
+       2713,
        "Pyramid(half, l1, l2, 0, levels);"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2715,
+       2716,
        "bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)"
       ]
      ],
@@ -173,17 +173,17 @@
      "evidence": [
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2701,
+       2699,
        "bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int l"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2712,
+       2713,
        "Pyramid(half, l1, l2, 0, levels);"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2715,
+       2716,
        "bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)"
       ]
      ],
@@ -496,17 +496,17 @@
      "evidence": [
       [
        "motion/estimation/global_model/link/CameraLinkCore.cpp",
-       358,
+       357,
        "const bool have = m_pool->Get(seq, e, true);"
       ],
       [
        "motion/estimation/global_model/link/CameraLinkCore.cpp",
-       457,
+       456,
        "if (m_pool->Get(f.seq, e))"
       ],
       [
        "motion/estimation/global_model/link/CameraLinkCore.cpp",
-       755,
+       764,
        "if (!m_pool->Get(seq, e))"
       ]
      ],
@@ -546,12 +546,12 @@
      "evidence": [
       [
        "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
-       496,
+       497,
        "const VpLaneProducts::GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
       ],
       [
        "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
-       571,
+       572,
        "const VpLaneProducts::GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
       ]
      ],
@@ -1074,6 +1074,45 @@
    ]
   },
   {
+   "id": "kEdgeMap",
+   "label": "edge_map",
+   "token": "edge_map",
+   "name": "edge map (source luma Sobel)",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "-",
+   "producer_files": [
+    "input/source_analysis/regions/EdgeMapFill.h"
+   ],
+   "producer_text": "edge map pass (per-frame memo); readers: focus map, busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3))",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP13SourceRing",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "input/source_analysis/regions/EdgeMapFill.h",
+       65,
+       "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    }
+   ]
+  },
+  {
    "id": "kP7gCameraGuide",
    "label": "P7g",
    "token": "p7g_camera_guide",
@@ -1188,7 +1227,7 @@
      "evidence": [
       [
        "input/source_analysis/regions/CodingEvidence.cpp",
-       556,
+       592,
        "const VpSkeleton::AcquireResult r = memo->Acquire(VpSkeleton::kCodingEvidence, seq, VpSkeleton::AcquireForm::C"
       ]
      ],
@@ -1666,6 +1705,10 @@
    ],
    [
     "kP13SourceRing",
+    "kEdgeMap"
+   ],
+   [
+    "kP13SourceRing",
     "kP10GrainSplit"
    ],
    [
@@ -1912,6 +1955,7 @@
   "topological_order": [
    "kP0RebaseDecision",
    "kP13SourceRing",
+   "kEdgeMap",
    "kP1HalfLuma",
    "kP2VectorPair",
    "kP2mMatcherPair",
@@ -1944,6 +1988,7 @@
   "levels": {
    "kP0RebaseDecision": 0,
    "kP13SourceRing": 0,
+   "kEdgeMap": 1,
    "kP1HalfLuma": 0,
    "kP2VectorPair": 1,
    "kP2mMatcherPair": 1,
