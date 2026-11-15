@@ -199,8 +199,15 @@ namespace PrivateTextureScanTestsNs
 					L" (core/SkeletonAcquire.h OwnerGpuContext), never a captured pl_gpu";
 				Assert::IsTrue(text.find("pl_gpu") == std::string::npos, message.c_str());
 				// Audit S4: nor a dispatch of its own (the context's Dispatch() is the one). A guard, not a proof: a stronger pattern
-				// is an S-CHK checker change through the lead.
-				Assert::IsTrue(text.find("pl_dispatch") == std::string::npos, message.c_str());
+				// is an S-CHK checker change through the lead. C3 (lead 17 R17-22): a fill may RUN on the context's dispatch
+				// (pl_dispatch_begin / compute), so the guard forbids creating or destroying one, and a fill that uses pl_dispatch_*
+				// must obtain it from req.gpu->Dispatch().
+				const std::wstring dispatchMessage = Widen(rel) + L": an owner fill owns a pl_dispatch, or uses one not taken from"
+					L" req.gpu->Dispatch() (core/SkeletonAcquire.h OwnerGpuContext)";
+				Assert::IsTrue(text.find("pl_dispatch_create") == std::string::npos, dispatchMessage.c_str());
+				Assert::IsTrue(text.find("pl_dispatch_destroy") == std::string::npos, dispatchMessage.c_str());
+				if (text.find("pl_dispatch") != std::string::npos)
+					Assert::IsTrue(text.find("req.gpu->Dispatch()") != std::string::npos, dispatchMessage.c_str());
 			}
 			Assert::IsTrue(fillFiles >= 2, L"the scan found the memo and at least one fill");
 		}
