@@ -549,12 +549,15 @@ public:
         history_ = w.history;
         // presented_ only moves forward (NotePresented feeds the exact value, the window an older peak-based one: audit SHOULD 8),
         // except when the window's numbering went back (a restart after a discontinuity). A window without present facts leaves
-        // what NotePresented delivered.
+        // what NotePresented delivered; when only earlier WINDOWS delivered them, the facts lapse with the window (design s4
+        // MEMO-T4: present facts not fed -> the render-seq edge, and the status line says so).
         if (w.presentKnown) {
             const bool restarted = haveSealed_ && w.current < lastSeal_;
             if (!presentKnown_ || restarted || w.presented > presented_)
                 presented_ = w.presented;
             presentKnown_ = true;
+        } else if (!presentNoted_) {
+            presentKnown_ = false;
         }
         windowSet_ = true;
         window_ = w;
@@ -571,6 +574,7 @@ public:
         if (!presentKnown_ || seq > presented_)
             presented_ = seq;
         presentKnown_ = true;
+        presentNoted_ = true;
     }
     // A DROPPED frame (never rendered): its spots are released, every other frame is untouched (design s2.5).
     void Discard(uint64_t seq)
@@ -1448,6 +1452,7 @@ private:
     uint16_t ahead_ = 0;
     uint16_t history_ = 0;
     bool presentKnown_ = false;
+    bool presentNoted_ = false;   // NotePresented (the AfterPresent feed) delivered present facts: they persist across windows
     uint64_t presented_ = 0;
     QueueWindow window_;
     uint64_t epoch_ = 0;
