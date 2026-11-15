@@ -162,7 +162,6 @@ namespace Vpv
 			// lane (analysis_lane off, no source yet) or the graph does not hold the product: the caller uses its own path, visibly.
 			// Generations are per lane (a new source size builds a new lane and restarts them): take a fresh lease per use, never install
 			// one across a rebuild with LaneLeaseNewer. Default: empty (an implementer without lanes).
-			virtual SceneAnswer SceneOf(const void* /*host*/, uint64_t /*seq*/) const { return SceneAnswer(); }
 			virtual VpSkeleton::LaneLease LeaseFor(const void* /*host*/, VpSkeleton::ProductId /*product*/) { return VpSkeleton::LaneLease(); }
 			// L-CORE deliverables 1-2: the renderer's memo for frame `seq` (any thread). It exists with or without the analysis lane;
 			// never in the Original pathway. nextSeq / haveNext are filled from the hub's current frame when `seq` is the frame the
