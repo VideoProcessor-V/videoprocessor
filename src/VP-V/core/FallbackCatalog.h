@@ -688,7 +688,10 @@ namespace FallbackCatalog
 	// Engaged while a wanted consumer goes without vectors; the reason names each and why.
 	inline Decision VectorEngine(const VectorDemand::Decision& demand)
 	{
-		if (demand.unserved == 0)
+		// Statistics consumers unserved only because the pairs are deliberately off (optical flow off / motion_ahead_frames 0) are a
+		// setting, like OpticalFlowOff: named in Ctrl+I (UnservedText / StatusLine), not a Fallbacks entry. A producer fault stays one.
+		const unsigned u = demand.unserved & ~(demand.pairsDeliberatelyOff ? demand.noPairs : 0u);
+		if (u == 0)
 			return Released("vector_engine");
 		return Engaged("vector_engine", VectorDemand::UnservedText(demand));
 	}

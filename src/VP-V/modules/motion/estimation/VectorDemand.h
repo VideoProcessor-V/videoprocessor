@@ -106,6 +106,9 @@ namespace VectorDemand
 		// motion_ahead_frames > 0). False: the matcher fallback serves the source-field consumers; the statistics consumers have no
 		// matcher form and go visibly without vectors (Reason::NoPairs).
 		bool pairsExpected = true;
+		// No pairs because of a SETTING (optical_flow off, or motion_ahead_frames 0): deliberate, like OpticalFlowOff. The unserved
+		// statistics consumers are still named in Ctrl+I (StatusLine / UnservedText) but are not a Fallbacks entry (plan (b), M4).
+		bool pairsDeliberatelyOff = false;
 	};
 
 	struct Decision
@@ -128,17 +131,20 @@ namespace VectorDemand
 		unsigned noPairs = 0;
 		// The matcher serves the source-field consumers because no pairs are expected (the fallback of the ON engine).
 		bool matcherFallback = false;
+		// Copied from Input: the no-pairs cause is a setting, so FallbackCatalog::VectorEngine leaves `noPairs` consumers out.
+		bool pairsDeliberatelyOff = false;
 		bool Serves(Consumer c) const { return (served & (1u << static_cast<int>(c))) != 0; }
 	};
 
 	inline Consumer ConsumerAt(int i) { return static_cast<Consumer>(i); }
 
-	// The consumers whose vectors can come from the matcher alone (a GPU field made at render time, no pairs): the camera fit.
+	// The consumer whose render-time matcher estimate runs even with pairs expected (its own P3 field): the camera fit.
 	inline unsigned MatcherFieldMask() { return 1u << static_cast<int>(Consumer::CameraFit); }
 
 	inline Decision DecideWith(const Input& in, bool analysisUnderSmoothMotion)
 	{
 		Decision d;
+		d.pairsDeliberatelyOff = in.pairsDeliberatelyOff;
 		unsigned wanted = 0;   // non-synthesis wants
 		for (int i = 0; i < kConsumerCount; ++i)
 		{
