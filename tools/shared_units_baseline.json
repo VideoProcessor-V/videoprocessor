@@ -180,19 +180,19 @@
   "U3": {
    "name": "half_luma_downsample",
    "blocking": true,
-   "baseline_duplicates": 17,
+   "baseline_duplicates": 9,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
-     "pattern": "DOWNSAMPLE_BODY|MotionWarp::Downsample|FADE_APPLY|Downsample\\(",
-     "kind": "residual",
-     "reason": "matcher half-resolution downsample: GLSL float 2x2 sum with the M4 fade gain applied in the same pass; byte identity needs a GPU run and the vector-suite identity proof (doc 62 order 9), not available in this wave"
+     "pattern": "^\\s*const char\\* const DOWNSAMPLE_BODY = R\"GLSL\\($|^\\s*bool MotionWarp::Downsample\\(pl_tex luma, pl_tex half,|^\\s*header\\.c_str\\(\\), DOWNSAMPLE_BODY,$|(^\\s*return |[!:(] ?)Downsample\\([ab]\\.luma, half[AB], l1[AB], l2[AB], [ab]\\.fullRange,",
+     "kind": "false_positive",
+     "reason": "names only: the DOWNSAMPLE_BODY raw-string opener (:33), the MotionWarp::Downsample definition (:2699), its Dispatch argument (:2711) and its four calls (:3836/:3911/:3912/:3935). The body's 2x2 box already calls the shared accessor `vpu_half_luma(src, p) * codes` (:48, since 5b43fc22a, gated ca7a194aa), header VpUnit::HalfLuma::Glsl() (:2709); no private box remains (U3 one copy, verified at r2/u3-one-copy)"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h",
-     "pattern": "Downsample\\(",
-     "kind": "residual",
-     "reason": "matcher half-resolution downsample: GLSL float 2x2 sum with the M4 fade gain applied in the same pass; byte identity needs a GPU run and the vector-suite identity proof (doc 62 order 9), not available in this wave"
+     "pattern": "^\\s*bool Downsample\\(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange,",
+     "kind": "false_positive",
+     "reason": "declaration of MotionWarp::Downsample (:659); its body calls the shared accessor vpu_half_luma (DejudderWarp.cpp:48, since 5b43fc22a); no private box (U3 one copy, verified at r2/u3-one-copy)"
     },
     {
      "file": "src/VP-V/modules/motion/consumers/FrameInterpolator.cpp",
