@@ -184,9 +184,11 @@ namespace QueueKeyedMemoTestsNs
 			const AcquireResult pin = m.Acquire(kP10GrainSplit, 10, AcquireForm::Cpu);
 			for (uint64_t s = 11; s <= 15; ++s) {   // presented = s - 4: frame 10 is still queued while presented - H <= 10
 				Render(m, s, t);
+				m.Acquire(kP10GrainSplit, s, AcquireForm::Cpu);   // the render of s (MEMO-T1's render step): one fill per frame
 				Assert::IsTrue(m.Acquire(kP10GrainSplit, 10, AcquireForm::Cpu).status == AcquireStatus::Reused, L"still in the queue: kept");
 			}
 			Render(m, 16, t);   // presented 12, edge 12 - 1 = 11 > 10: frame 10 left the queue
+			m.Acquire(kP10GrainSplit, 16, AcquireForm::Cpu);   // the render of 16
 			Assert::IsTrue(m.Acquire(kP10GrainSplit, 10, AcquireForm::Cpu).cause == AcquireCause::FrameReleased, L"released after leaving");
 			Assert::IsTrue(OfFrame(pin, 10), L"the pin outlives the release");
 			Assert::AreEqual(7, calls.load(), L"never recomputed");
