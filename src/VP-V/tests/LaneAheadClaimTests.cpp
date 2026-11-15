@@ -11,6 +11,7 @@
 //   LANE-T2  WorkerRunningGivesLanePending     a frame a worker is writing is Claimed (no wait, no second compute); the claim race has one winner
 //   LANE-T3  MissingInputSealCountedReduced    the seal compute in a declared reduced form is its own ledger line
 //   plus:    beyond the lane's slots / not a node / an input not made are visible Declined / NotNode, never LanePending
+//   MUST-3   AheadDeclineOnRejectedStoreLeavesTheWaitCountToTheWorker  the ahead path never writes the lane thread's wait dedupe entries
 // The GPU-fake form of LANE-T1 and the GPU "not at a GPU-legal phase" refusal (design s9.4 d) are NOT covered here (no GPU lane rig in
 // this file): RunAheadNow declines every GPU product with that text; the Entrance-phase dispatch is a deferred row (102b).
 // CPU only, single thread except the one claim race, bounded.
@@ -111,6 +112,16 @@ namespace LaneAheadClaimTestsNs
 					dst[0] = in[1] != nullptr ? uint8_t(0x55) : uint8_t(0xAA);
 					return true;
 				});
+		}
+		// P1 declared a SINGLE STORE (history 0, ungoverned, no live pool); P4 stays its lag-0 reader (a single store is read at lag 0
+		// or 1). Used by the MUST-3 test: a Rejected store frame never gets content, so its reader's wait is counted (storeWaitRejected).
+		void MakeHalfLumaASingleStore()
+		{
+			std::vector<ProductDecl> d = FirstProducts().All();
+			d[kP1HalfLuma].history = 0;
+			d[kP1HalfLuma].historyFloor = kHistoryFixed;
+			d[kP1HalfLuma].singletonStore = true;
+			reg = Registry(d);
 		}
 		bool Configure()
 		{
@@ -268,6 +279,43 @@ namespace LaneAheadClaimTestsNs
 			Assert::IsTrue(r.lane.RunAheadNow(kP10GrainSplit, 1).kind == AnalysisLane::AheadRun::NotNode, L"not a node of this graph");
 			const AnalysisLane::AheadRunResult noInput = r.lane.RunAheadNow(kP4SourceStats, 2);
 			Assert::IsTrue(noInput.kind == AnalysisLane::AheadRun::Declined && Has(noInput.why, "input"), L"P4 with its P1 not made: input named");
+		}
+
+		// MUST-3 (opus audit qkp-bce): the ahead path (render thread) never writes the lane thread's wait dedupe entries. A reader of a
+		// single-store product whose frame is Rejected: RunAheadNow declines (named) and counts nothing; the lane worker's own
+		// LaneAncestors call (the default countWaits) then counts the wait exactly once, however often it polls.
+		TEST_METHOD(AheadDeclineOnRejectedStoreLeavesTheWaitCountToTheWorker)
+		{
+			LaneRig r;
+			r.MakeHalfLumaASingleStore();
+			Assert::IsTrue(r.Configure(), L"built");
+			for (uint64_t s = 0; s < 3; ++s)
+				r.lane.OnSourceFrame(r.View(s));
+			r.lane.OnRenderStart(0, 4000);   // the render state exists
+			const std::shared_ptr<LaneState> st = r.lane.State();
+			Assert::IsTrue(st != nullptr, L"state");
+			Assert::IsTrue(st->IndexOf(kP1HalfLuma) >= 0 && st->IndexOf(kP4SourceStats) >= 0, L"both are lane nodes");
+			SlotSet& store = st->table->At(size_t(st->IndexOf(kP1HalfLuma)));
+			// P1(1) is published, then its seal REFUSES it: a single store has no live fill, so the frame never gets content.
+			LaneTicket t;
+			Assert::IsTrue(store.Claim(1, Provenance::AheadLane, ~uint64_t(0), &t) == ClaimResult::Claimed, L"store frame 1 claimed");
+			Assert::IsTrue(store.Writable(t), L"writable");
+			Assert::IsTrue(store.Publish(t) == PublishResult::Published, L"store frame 1 published");
+			Assert::IsTrue(store.Seal(1, [](const Header&) { return SealReason::StampMismatch; }).outcome == SealOutcome::NeedsLive, L"the seal refuses it");
+			Assert::IsTrue(store.RejectedAwaitingLive(1), L"Rejected, awaiting a live fill that never comes");
+			const uint64_t before = store.Counters().storeWaitRejected.load();
+			for (int poll = 0; poll < 3; ++poll) {
+				const AnalysisLane::AheadRunResult res = r.lane.RunAheadNow(kP4SourceStats, 1);
+				Assert::IsTrue(res.kind == AnalysisLane::AheadRun::Declined && Has(res.why, "input"), L"the ahead call declines, named");
+			}
+			Assert::AreEqual(before, store.Counters().storeWaitRejected.load(), L"the ahead path counts nothing (it never writes the dedupe entries)");
+			Assert::IsTrue(r.lane.AheadMadeByRender() == 0u, L"nothing made");
+			Header scratch;
+			LaneInputs pins;
+			for (int poll = 0; poll < 5; ++poll)
+				Assert::IsFalse(st->table->LaneAncestors(kP4SourceStats, 1, scratch, pins), L"the lane worker's call (default countWaits) waits");
+			Assert::AreEqual(size_t(0), pins.count, L"nothing stays pinned");
+			Assert::AreEqual(before + 1u, store.Counters().storeWaitRejected.load(), L"the worker counts the reader frame once, not per poll");
 		}
 	};
 }
