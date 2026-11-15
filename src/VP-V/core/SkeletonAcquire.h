@@ -659,11 +659,7 @@ public:
             n.budgetFed = true;
         }
         uint16_t back = n.window.back > keepFrames_ ? n.window.back : uint16_t(keepFrames_);
-        std::map<uint32_t, const OwnerFill*> all;
-        for (const auto& kv : owners_)
-            all[kv.first] = &kv.second;
-        for (const auto& kv : laneOwners_)
-            all[kv.first] = &kv.second;   // the bound lane's fill shadows a module registration
+        const std::map<uint32_t, const OwnerFill*> all = MergedOwnersLocked();
         for (const auto& kv : all) {
             const OwnerFill& f = *kv.second;
             const bool gpu = (kv.first & 1u) != 0u;
@@ -700,17 +696,9 @@ public:
     {
         std::lock_guard<std::mutex> g(mutex_);
         uint16_t h = 0;
-        for (const auto& kv : owners_) {
-            const OwnerFill* f = &kv.second;
-            const auto l = laneOwners_.find(kv.first);
-            if (l != laneOwners_.end())
-                f = &l->second;
-            if (f->DeclaredHistory() > h)
-                h = f->DeclaredHistory();
-        }
-        for (const auto& kv : laneOwners_)
-            if (kv.second.DeclaredHistory() > h)
-                h = kv.second.DeclaredHistory();
+        for (const auto& kv : MergedOwnersLocked())
+            if (kv.second->DeclaredHistory() > h)
+                h = kv.second->DeclaredHistory();
         return h;
     }
     // One declared ahead demand: a registered fill whose consumers declared an ahead depth (OwnerFill::aheadDepth > 0).
@@ -725,13 +713,8 @@ public:
     std::vector<AheadDemand> ActiveAheadDemands() const
     {
         std::lock_guard<std::mutex> g(mutex_);
-        std::map<uint32_t, const OwnerFill*> all;
-        for (const auto& kv : owners_)
-            all[kv.first] = &kv.second;
-        for (const auto& kv : laneOwners_)
-            all[kv.first] = &kv.second;
         std::vector<AheadDemand> out;
-        for (const auto& kv : all) {
+        for (const auto& kv : MergedOwnersLocked()) {
             if (kv.second->aheadDepth == 0)
                 continue;
             AheadDemand d;
@@ -1331,6 +1314,18 @@ private:
             return &l->second;
         const auto m = owners_.find(k);
         return m != owners_.end() ? &m->second : nullptr;
+    }
+    // Every registered owner fill, ordered by owner key; the bound lane's fill shadows a module registration with the same key
+    // (the same precedence as OwnerLocked). The one merge used by AheadNeedLocked, DeclaredFillHistory and ActiveAheadDemands.
+    // Caller holds mutex_.
+    std::map<uint32_t, const OwnerFill*> MergedOwnersLocked() const
+    {
+        std::map<uint32_t, const OwnerFill*> all;
+        for (const auto& kv : owners_)
+            all[kv.first] = &kv.second;
+        for (const auto& kv : laneOwners_)
+            all[kv.first] = &kv.second;   // the bound lane's fill shadows a module registration
+        return all;
     }
     bool OnRenderThreadLocked() const
     {
