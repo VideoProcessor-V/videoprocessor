@@ -224,6 +224,8 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		detailPulse.Forget();      // the planes change size: both histories restart
 		textureRestore.Forget();
 		detailPulseAheadSequence = 0;
+		// fix-A (ER/EM history break): the stateful chain B3 tracks ends here on purpose (logged by the segment).
+		entrance.StatefulHistoriesRestarted(sourceSequence);
 		// Report-a-problem: a = native height, b = source sequence, x/y = factor X/Y.
 		DiagnosticHistory::Global().RecordDecision("srcres-factor", activeSettings.sourceResolution.c_str(),
 			nativeHeight, static_cast<int64_t>(sourceSequence), rebaseFactorX, rebaseFactor);

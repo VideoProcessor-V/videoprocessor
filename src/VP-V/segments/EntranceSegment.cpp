@@ -218,10 +218,10 @@ namespace EntranceSegment
 		}
 		if (run.path == Path::Main && !StatelessNow())
 		{
-			const unsigned long long before = entranceStatefulBreaks;
-			const uint64_t last = entranceStatefulLast;
+			const unsigned long long before = entranceStateful.breaks;
+			const uint64_t last = entranceStateful.Newest();   // the last run, or the floor right after a restart
 			NoteStatefulRun(run.sequence);
-			if (entranceStatefulBreaks != before && entranceStatefulBreaks <= 3)
+			if (entranceStateful.breaks != before && entranceStateful.breaks <= 3)
 				DebugLog::Log("Entrance once (B3): stateful run out of sequence (source %llu after %llu; phase picture %d, A alongside %d, repeat %d)",
 					static_cast<unsigned long long>(run.sequence), static_cast<unsigned long long>(last), run.phasePicture ? 1 : 0,
 					run.aNeeded ? 1 : 0, run.cadenceRepeat ? 1 : 0);
@@ -310,7 +310,8 @@ namespace EntranceSegment
 		// The "Entrance cost" / "Entrance stages" lines and their cadence live in the diagnostics adapter.
 		VpDiagnostics::EntranceCounters c = {
 			entranceStageRuns, entranceSourceFrames, entranceRuns, entranceReuses, entranceOnceA, entranceOnceB,
-			entranceOnceReused, entranceOncePictures, entranceOnceFallbacks, entranceStatefulBreaks, Once(), entranceOnceFallbackFrames };
+			entranceOnceReused, entranceOncePictures, entranceOnceFallbacks, entranceStateful.breaks, Once(), entranceOnceFallbackFrames,
+			entranceStateful.restarts };
 		VpDiagnostics::LogEntranceCounters(c, entranceCostLoggedAt);
 	}
 
@@ -418,13 +419,28 @@ namespace EntranceSegment
 
 	// A stateful main run for an EARLIER source frame than one already run (A after B was processed
 	// as B's A: the hold chain and the history would restart). A forward skip is a capture gap.
+	// The rule is StatefulChain::Note (EntranceSegment.h; pinned on the CPU by EntranceSegmentTests).
 	void Segment::NoteStatefulRun(uint64_t sequence)
 	{
-		if (sequence == 0)
-			return;
-		if (entranceStatefulLast != 0 && sequence < entranceStatefulLast)
-			++entranceStatefulBreaks;
-		entranceStatefulLast = (std::max)(entranceStatefulLast, sequence);
+		(void)entranceStateful.Note(sequence);
+	}
+
+	// fix-A (2026-11-15, ER/EM "1 stateful history breaks"): the re-base warm-up gate (FX-RB) lets the
+	// re-base start mid source frame; the planner then forgets the debander's hold and the detail histories
+	// (plane-sized, EntrancePlanner.inl). The ring's A for the current frame was made at the old factor (its
+	// key no longer matches), so A is processed again at the new size AFTER B was processed as B's A at the
+	// old one. That run begins the new chain: the old chain was ended deliberately, nothing restarts by
+	// accident. Only a deliberate restart ends the chain here; every other earlier-frame run still counts.
+	// Gate SHOULD 1 (gate-C5-set1 SET 2 A1): the restart leaves a floor at A (`sourceSequence`, the frame being
+	// drawn), so the first run after it is still checked: A's own re-run passes, an older frame is a break.
+	void Segment::StatefulHistoriesRestarted(uint64_t sourceSequence)
+	{
+		const uint64_t ended = entranceStateful.Newest();
+		if (!entranceStateful.Restart(sourceSequence))
+			return;   // no chain yet: nothing to end
+		if (entranceStateful.restarts <= 3)
+			DebugLog::Log("Entrance once (B3): stateful histories restarted on purpose (re-base factor change at source %llu; chain ended at %llu)",
+				static_cast<unsigned long long>(sourceSequence), static_cast<unsigned long long>(ended));
 	}
 
 	// Test only (VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY=N): every Nth picture between frames takes

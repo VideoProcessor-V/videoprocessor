@@ -11,6 +11,7 @@
 #include <libplacebo/dispatch.h>
 #include <libplacebo/renderer.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -41,6 +42,46 @@
 // EntranceOnceExtra). They reach the segment through Host and ProcessedA/ProcessedB.
 namespace EntranceSegment
 {
+	// B3's stateful-history chain (audit HIGH 1), pure so it is pinned on the CPU (EntranceSegmentTests).
+	// Note: a stateful main run for an EARLIER source frame than one already run is a break (A after B was
+	// processed as B's A: the hold chain and the history would restart). A forward skip is a capture gap.
+	// Restart (fix-A): the host ended every stateful history ON PURPOSE at A = `sequence` (a re-base factor
+	// change). The chain starts over, but with a FLOOR: the first run after it may be that frame's own A
+	// again (the re-run at the new plane size) or later; a run for an OLDER frame is still a break.
+	struct StatefulChain
+	{
+		uint64_t last = 0;    // the newest source frame a stateful main run advanced the history on
+		uint64_t floor = 0;   // after a restart, before the next run: the restart frame (no older run allowed)
+		unsigned long long breaks = 0, restarts = 0;
+
+		// Returns true when the run is a break.
+		bool Note(uint64_t sequence)
+		{
+			if (sequence == 0)
+				return false;
+			const uint64_t bound = last != 0 ? last : floor;
+			const bool broken = bound != 0 && sequence < bound;
+			if (broken)
+				++breaks;
+			last = (std::max)(bound, sequence);
+			floor = 0;
+			return broken;
+		}
+		// Returns true when a chain was ended (counted); false with no chain (nothing advanced yet).
+		bool Restart(uint64_t sequence)
+		{
+			if (last == 0 && floor == 0)
+				return false;
+			const uint64_t ended = last != 0 ? last : floor;
+			++restarts;
+			last = 0;
+			floor = sequence != 0 ? sequence : ended;
+			return true;
+		}
+		// The newest frame of the chain (for the log): the last run, else the pending floor.
+		uint64_t Newest() const { return last != 0 ? last : floor; }
+	};
+
 	// Which call site a picture comes from (each keeps its own module slots and rules).
 	enum class Path { Main, Extra, CrossfadeFrom };
 
@@ -189,6 +230,11 @@ namespace EntranceSegment
 		void OnceWorking();
 		bool ForcedFallback();   // test only: VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY
 		void OnceSwitchedOff();  // settings: B3 off (the note cleared; the textures go on the render thread)
+		// The host restarted every stateful stage's history ON PURPOSE (a re-base factor change: the debander's
+		// hold and the detail histories are plane-sized and were forgotten, EntrancePlanner.inl). The next stateful
+		// run starts a new chain at the new plane size; it is not "out of sequence" against the forgotten chain.
+		// Counted and logged once per restart (never silent).
+		void StatefulHistoriesRestarted(uint64_t sourceSequence);
 
 		// ---- lifetime ----
 		void NoteSourceFrame(uint64_t sequence);
@@ -239,8 +285,7 @@ namespace EntranceSegment
 		uint64_t entranceOnceCurrentA = 0;     // the source frame whose pictures are being made
 		uint64_t entranceOnceFallbackFor = 0;  // the source frame that fell back (sticky until the next clean one)
 		uint64_t entranceOnceBAsAFor = 0;      // A whose B was processed as B's A
-		unsigned long long entranceStatefulBreaks = 0;
-		uint64_t entranceStatefulLast = 0;
+		StatefulChain entranceStateful;   // breaks, deliberate restarts (StatefulHistoriesRestarted) and the floor
 		unsigned entranceOnceForcedEvery = 0, entranceOnceForcedCount = 0;
 		bool entranceOnceForcedRead = false;
 		std::string rebaseFormatNoteLogged;

@@ -342,6 +342,56 @@ namespace EntranceSegmentTestsNs
 			}
 		}
 
+		TEST_METHOD(StatefulChainCountsBreaksAndADeliberateRestartKeepsAFloor)
+		{
+			// B3 HIGH 1 + fix-A (gate-C5-set1 SET 2 A1 SHOULD 1/2): a stateful main run for an earlier source frame
+			// is a break; a forward skip is not. A deliberate restart (the planner forgot the histories at A) lets
+			// A's own re-run start the new chain, but a run for a frame OLDER than A right after it is still a break.
+			EntranceSegment::StatefulChain chain;
+			Assert::IsFalse(chain.Restart(4), L"no chain yet: nothing to end, nothing counted");
+			Assert::AreEqual(0ull, chain.restarts);
+			Assert::IsFalse(chain.Note(0), L"sequence 0 (unknown) is never judged");
+			Assert::IsFalse(chain.Note(3));
+			Assert::IsFalse(chain.Note(4));
+			Assert::IsFalse(chain.Note(5), L"B processed as B's A");
+			Assert::IsFalse(chain.Note(7), L"a forward skip is a capture gap, not a break");
+			Assert::IsTrue(chain.Note(6), L"an earlier frame after a later one is a break");
+			Assert::AreEqual(1ull, chain.breaks);
+			Assert::AreEqual(7ull, static_cast<unsigned long long>(chain.Newest()), L"the chain keeps its newest frame");
+
+			// The ER/EM signature: A=8 drawn after B=9 was processed as B's A, the re-base factor changed at A.
+			EntranceSegment::StatefulChain er;
+			er.Note(8);
+			er.Note(9);
+			Assert::IsTrue(er.Restart(8), L"the deliberate restart ends the chain");
+			Assert::AreEqual(1ull, er.restarts);
+			Assert::AreEqual(8ull, static_cast<unsigned long long>(er.Newest()), L"the floor is A");
+			Assert::IsFalse(er.Note(8), L"A's own re-run at the new plane size starts the new chain");
+			Assert::IsFalse(er.Note(9), L"then B as B's A");
+			Assert::IsTrue(er.Note(8), L"A again after B: still a break");
+			Assert::AreEqual(1ull, er.breaks);
+
+			// The floor: the first run after a restart is checked too.
+			EntranceSegment::StatefulChain older;
+			older.Note(4);
+			older.Note(5);
+			Assert::IsTrue(older.Restart(4));
+			Assert::IsTrue(older.Note(2), L"a frame older than the restart frame right after it is a break");
+			Assert::AreEqual(1ull, older.breaks);
+			Assert::IsTrue(older.Note(3), L"the floor stays the bound after the break (never lowered)");
+			Assert::AreEqual(2ull, older.breaks);
+			Assert::IsFalse(older.Note(4));
+
+			// Two restarts before a run: the second moves the floor to its own A; only real chains count.
+			EntranceSegment::StatefulChain twice;
+			twice.Note(10);
+			Assert::IsTrue(twice.Restart(10));
+			Assert::IsTrue(twice.Restart(11));
+			Assert::AreEqual(2ull, twice.restarts);
+			Assert::IsTrue(twice.Note(10), L"older than the newest restart frame");
+			Assert::IsFalse(twice.Note(11));
+		}
+
 		TEST_METHOD(PlaceholderStagePassesThePictureThroughUnchanged)
 		{
 			// The held repair (A) slot and the other placeholders: pass-through, no pass, no texture.
