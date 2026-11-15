@@ -175,7 +175,7 @@ namespace GrainSplit
 				const VpSkeleton::VariantKey& v = req.variant;
 				if (!m_gpu || !m_dispatch || !m_planes) { m_error = "grain split variant: no device"; return false; }
 				if (v.width == 0 || v.height == 0 || v.plane != 0) { m_error = "grain split variant: a luma size is required"; return false; }
-			if (!ScaleAxisServed(v.scale)) { m_error = "grain split variant: Scale not a whole number of eighths (not served)"; return false; }
+				if (!ScaleAxisServed(v.scale)) { m_error = "grain split variant: Scale not a whole number of eighths (not served)"; return false; }
 				const SourcePlaneView src = m_planes->Acquire(req.seq, 0);
 				if (!src.Valid()) { m_error = "grain split variant: no source plane for the frame"; return false; }
 				if (static_cast<uint32_t>(src.tex->params.w) != v.width || static_cast<uint32_t>(src.tex->params.h) != v.height)
