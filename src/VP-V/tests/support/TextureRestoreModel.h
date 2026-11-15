@@ -454,7 +454,7 @@ namespace TextureRestoreModel
 			// REF: smoothed current statistics, references, gains.
 			const double eight = EightBitStep(p.colorDepth);
 			const double fg = std::pow(kGrainFloorCodes8 * eight, 2.0), ft = std::pow(kTextureFloorCodes8 * eight, 2.0);
-			const double dec = Decay(p.sourceHz) * keep2;   // U7 v3: x the fade keep^2 (1 off a fade), as the module
+			const double dec = Decay(p.sourceHz);
 			const double sf = std::pow(CodingNoiseCodes8(p.bitrateQuality) * eight, 2.0);   // texture evidence: above grain and coding noise
 			TileGrid newRef(tw, th), newGains(tw, th);
 			debug.assign(static_cast<size_t>(tw) * th, TileDebug());
@@ -486,6 +486,7 @@ namespace TextureRestoreModel
 						{
 							old = field ? ref.bilinear(u, v) : ref.at(tx, ty);
 							old.x *= dec; old.y *= dec; old.z *= dec; old.w *= dec;
+							old.x *= keep2; old.y *= keep2; old.z *= keep2;   // U7 v3: the fade keep^2 on the energies only (not F), as the module
 							if (changed(tx, ty)) restart = true;
 							if (F < kPullLo * old.w) restart = true;
 							if (T2 + ft < kMidLossLo * (old.z + ft)) restart = true;

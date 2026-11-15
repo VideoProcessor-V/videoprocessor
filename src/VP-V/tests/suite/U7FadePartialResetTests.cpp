@@ -363,6 +363,7 @@ namespace U7FadePartialResetTestsNs
 			char text[160];
 			snprintf(text, sizeof(text), "TD partial reset: %d block-frames transferred from the same slot through the fade", observed);
 			Logger::WriteMessage(text);
+			Assert::IsTrue(observed > 0, Wide(std::string(text) + " (the per-slot product check must see a transfer)").c_str());   // WAIVER-U7FADE-PARTIAL-2 (audit C2)
 			Assert::AreEqual(d[23].resets + 1, d[24].resets, L"a fade without its keep resets (shown)");
 			Assert::IsTrue(d[24].status.find("reset: fade (no keep)") == 0, Wide(d[24].status).c_str());
 			Assert::AreEqual(d[27].resets + 1, d[28].resets, L"a cut resets");

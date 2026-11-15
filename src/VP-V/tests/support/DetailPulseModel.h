@@ -348,14 +348,17 @@ namespace DetailPulseModel
 			{
 				const double decay = DetailPulse::DecayPerFrame(s.sourceHz);
 				double dec = 1.0;
+				double kp = keep2;   // U7 v3: the keep^2 of the frame after the reference (this frame first), as the shader's ring row 1
 				for (int j = 1; j <= nUse; ++j)
 				{
-					const std::array<double, 4>& e = ring[(slot + kRing - j) % kRing];
-					dec *= decay * keep2;
+					const int idx = (slot + kRing - j) % kRing;
+					const std::array<double, 4>& e = ring[idx];
+					dec *= decay * kp;
 					if (e[3] < 0.5) break;
 					r1 = (std::max)(r1, e[0] * dec);
 					r2 = (std::max)(r2, e[1] * dec);
 					if (e[3] > 1.5) break;
+					kp = ringKeep2[idx];
 				}
 				if (aheadValid)
 				{
@@ -375,6 +378,7 @@ namespace DetailPulseModel
 				f.g2 = DetailPulse::Gain(r2, fs.e2, s.cap);
 			}
 			ring[slot] = { fs.e1, fs.e2, fs.meanLuma, restart ? 2.0 : 1.0 };
+			ringKeep2[slot] = restart ? 1.0 : keep2;
 			f.restart = restart;
 			f.aheadUsed = aheadValid;
 			f.e1 = fs.e1;
@@ -446,6 +450,7 @@ namespace DetailPulseModel
 	private:
 		static constexpr int kRing = DetailPulse::kRingSlots;
 		std::vector<std::array<double, 4>> ring = std::vector<std::array<double, 4>>(kRing + 2, std::array<double, 4>{ { 0.0, 0.0, 0.0, 0.0 } });
+		std::vector<double> ringKeep2 = std::vector<double>(kRing + 2, 0.0);   // U7 v3: each ring slot's fade keep^2 (the shader's row 1)
 		Tiles prevTiles;
 		Frame last;
 		int cur = 0, behind = 0;

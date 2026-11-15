@@ -27,7 +27,10 @@
 // Gate per row: truth agreement >= 99.5 % (kAgreementGatePct, the owner's value) for each module and SceneMissing == 0 for each
 // GPU module; WAIVER-U7FADE-PARTIAL adds: ZERO full restarts on fade frames (each module), every applied fade keep within [0, 1]
 // (the history reduction over a fade is monotone), and on the synthetic fade (to black over 48 frames) the product of the applied
-// keeps over its fade-out <= kFadeOutKeepMax (pre-fade detail not carried). Rows whose law misses slow fades or calls a flash a cut are red until the U7 fixes land (102b); not loosened here.
+// keeps over its fade-out <= kFadeOutKeepMax (pre-fade detail not carried). WAIVER-U7FADE-PARTIAL-2 (audit MUST 1): the fade frames
+// stay inside the 99.5 % gate: PartialTruthAgreementPct counts a fade frame with neither a restart nor a partial reset (a missed
+// fade) and a partial reset outside the labelled fades (a false fade) as disagreements, and is gated >= kAgreementGatePct per
+// module on every row. TR's per-tile low-band restart share on fade frames is measured (information, owner table). Rows whose law misses slow fades or calls a flash a cut are red until the U7 fixes land (102b); not loosened here.
 // Rows go to the CSV at VP_TEST_D8_OUT (header written when the file is new) and to the test log.
 // Skips VISIBLY (SKIP-NO-GPU / SKIP-NO-FOOTAGE marker, a failure under VP_TEST_REQUIRE_GPU / _FOOTAGE / _ALL) when the GPU is not
 // the hardware adapter (VP_TEST_GPU=hardware), the device cannot be created, or the manifest / clip / ffmpeg is missing.
@@ -141,6 +144,8 @@ namespace D8SceneJudgeAgreementNs
 		double msOld = 0.0, msShared = 0.0, msGpu = 0.0;
 		// WAIVER-U7FADE-PARTIAL: the partial reset on fade frames (scored frames only).
 		int fadeFrames = 0, fadePartial = 0, fadeRestarts = 0, partialOutsideFade = 0, keepOutOfRange = 0;
+		int fadeMissed = 0;               // WAIVER-U7FADE-PARTIAL-2: a fade frame with neither a restart nor a partial reset
+		double tileRestartShareSum = 0.0, tileRestartShareMax = 0.0;   // TR only: its per-tile restart share on fade frames (information)
 		double fadeKeepProduct = 1.0;     // product of the applied keeps over the current fade event
 		double fadeKeepEndMin = 1.0;      // the smallest product reached by a fade event (1 = no reduction)
 		double fadeOutKeep = 1.0;         // synthetic fade: the product over the fade-out frames [kFadeOutBegin, kFadeOutEnd)
@@ -155,6 +160,7 @@ namespace D8SceneJudgeAgreementNs
 			}
 			++fadeFrames;
 			if (restart) ++fadeRestarts;
+			if (!restart && !partial) ++fadeMissed;
 			if (partial)
 			{
 				++fadePartial;
@@ -164,6 +170,13 @@ namespace D8SceneJudgeAgreementNs
 			fadeKeepEndMin = (std::min)(fadeKeepEndMin, fadeKeepProduct);
 		}
 		double AgreementPct() const { return frames > 0 ? 100.0 * agree / frames : 0.0; }   // retired law: information only
+		// WAIVER-U7FADE-PARTIAL-2: the truth agreement with the fade frames inside it: a missed fade (no restart, no partial) and a
+		// partial reset outside the labelled fades are disagreements (a fade frame that restarted is already one, in truthAgree).
+		double PartialTruthAgreementPct() const
+		{
+			return truthFrames > 0 ? 100.0 * (truthAgree - fadeMissed - partialOutsideFade) / truthFrames : 0.0;
+		}
+		double TileRestartShareMean() const { return fadeFrames > 0 ? tileRestartShareSum / fadeFrames : 0.0; }
 		// Over the scored frames only (the part's frames after its first: see TruthRestarts).
 		double TruthAgreementPct() const { return truthFrames > 0 ? 100.0 * truthAgree / truthFrames : 0.0; }
 		void CountTruth(bool shared, bool truth)
@@ -247,12 +260,13 @@ namespace D8SceneJudgeAgreementNs
 	{
 		char line[1024];
 		snprintf(line, sizeof(line),
-			"%s,%s,%s,%d,%d,%d,%.3f,%d,%.4f,%.4f,%llu,n/a,%dx%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.3f,%d,%d,%s,%s,%d,%d,%d,%d,%.4f,%.4f",
+			"%s,%s,%s,%d,%d,%d,%.3f,%d,%.4f,%.4f,%llu,n/a,%dx%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%.2f,%.3f,%d,%d,%s,%s,%d,%d,%d,%d,%.4f,%.4f,%d,%.3f,%.4f,%.4f",
 			f.row.c_str(), f.part.c_str(), module, r.frames, r.oldRestarts, r.sharedRestarts, r.AgreementPct(), r.differ,
 			r.diffMax, r.DiffMean(), r.sceneMissing, f.planeW, f.planeH, f.u7Cuts, f.u7Fades, f.u7Flashes, f.truthRestarts,
 			r.frames ? r.msOld / r.frames : 0.0, r.frames ? r.msShared / r.frames : 0.0, r.frames ? r.msGpu / r.frames : 0.0,
 			r.frames ? f.decodeMs / r.frames : 0.0, r.TruthAgreementPct(), r.truthMiss, r.truthExtra, f.truthLabels.c_str(),
-			f.device.c_str(), r.fadeFrames, r.fadePartial, r.fadeRestarts, r.partialOutsideFade, r.fadeKeepEndMin, r.fadeOutKeep);   // WAIVER-U7FADE-PARTIAL
+			f.device.c_str(), r.fadeFrames, r.fadePartial, r.fadeRestarts, r.partialOutsideFade, r.fadeKeepEndMin, r.fadeOutKeep,   // WAIVER-U7FADE-PARTIAL
+			r.fadeMissed, r.PartialTruthAgreementPct(), r.TileRestartShareMean(), r.tileRestartShareMax);   // WAIVER-U7FADE-PARTIAL-2
 		Logger::WriteMessage((std::string("D8ROW ") + line + "\n").c_str());
 		std::string path = RealClip::Env("VP_TEST_D8_OUT");
 		if (path.empty())
@@ -274,7 +288,8 @@ namespace D8SceneJudgeAgreementNs
 				"picture_diff_max_code10,picture_diff_mean_code10,scene_missing,cell_trust_ms_per_frame,plane,u7_cuts,u7_fades,"
 				"u7_flashes,truth_restarts,model_old_ms_per_frame,model_shared_ms_per_frame,gpu_ms_per_frame,decode_p4_ms_per_frame,"
 				"truth_agree_pct,truth_miss,truth_extra,truth_labels,device,fade_frames,fade_partial_frames,fade_restarts,partial_outside_fade,"
-				"fade_keep_end_min,fade_out_keep\r\n",
+"fade_keep_end_min,fade_out_keep,fade_missed,partial_truth_agree_pct,tr_tile_restart_share_on_fades_mean,"
+				"tr_tile_restart_share_on_fades_max\r\n",
 				file);
 		std::fputs(line, file);
 		std::fputs("\r\n", file);
@@ -592,6 +607,12 @@ namespace D8SceneJudgeAgreementNs
 				dumpTrShared = rs; dumpTrOld = ro;
 				if (k > begin) tr.CountTruth(rs, expected[static_cast<size_t>(k - begin)] != 0);   // WAIVER-U7ACC-D8-DELIVERY
 				if (k > begin) tr.CountFade(fadeFrame, rs, trShared.LastWasFadePartial(), trShared.LastHistoryKeep(), inFadeOut);   // WAIVER-U7FADE-PARTIAL
+				if (k > begin && fadeFrame && !rs)   // WAIVER-U7FADE-PARTIAL-2: TR's own per-tile restarts inside the fade (information)
+				{
+					const double share = trShared.RestartShare();
+					tr.tileRestartShareSum += share;
+					tr.tileRestartShareMax = (std::max)(tr.tileRestartShareMax, share);
+				}
 				dumpTrKeep = trShared.LastHistoryKeep();
 				if (ro == rs) ++tr.agree;
 				else { ++tr.differ; AddDiff(tr, oo, os); }
@@ -668,15 +689,19 @@ namespace D8SceneJudgeAgreementNs
 		Assert::IsTrue(dp.TruthAgreementPct() >= kAgreementGatePct, Wide(text).c_str());
 		Assert::IsTrue(tr.TruthAgreementPct() >= kAgreementGatePct, Wide(text).c_str());
 		// WAIVER-U7FADE-PARTIAL: the partial reset on fades (owner 2026-11-15). Added gates; none of the above is changed.
-		char partial[768];
-		snprintf(partial, sizeof(partial), "D8PARTIAL %s part %s: fade frames %d (%s) | DP partial %d, restarts on fades %d, outside fades %d, "
-			"keep product min %.4f, fade-out product %.4f | TR partial %d, restarts on fades %d, outside fades %d, keep product min %.4f, "
-			"fade-out product %.4f | GPU partials DP %llu TR %llu, no-keep restarts DP %llu TR %llu (gate: 0 restarts on fades, keeps in "
-			"[0, 1], synthetic fade-out product <= %.2f, 0 no-keep restarts)", rowName, facts.part.c_str(), facts.truthFades,
-			facts.truthLabels.c_str(), dp.fadePartial, dp.fadeRestarts, dp.partialOutsideFade, dp.fadeKeepEndMin, dp.fadeOutKeep,
-			tr.fadePartial, tr.fadeRestarts, tr.partialOutsideFade, tr.fadeKeepEndMin, tr.fadeOutKeep, dpGpuPartials, trGpuPartials,
-			dpGpuFadeRestarts, trGpuFadeRestarts, kFadeOutKeepMax);
+		char partial[1024];
+		snprintf(partial, sizeof(partial), "D8PARTIAL %s part %s: fade frames %d (%s) | DP partial %d, missed %d, restarts on fades %d, outside fades %d, "
+			"keep product min %.4f, fade-out product %.4f, partial truth agreement %.3f %% | TR partial %d, missed %d, restarts on fades %d, "
+			"outside fades %d, keep product min %.4f, fade-out product %.4f, partial truth agreement %.3f %%, tile-restart share on fades "
+			"mean %.4f max %.4f | GPU partials DP %llu TR %llu, no-keep restarts DP %llu TR %llu (gate: partial truth agreement >= %.1f %%, "
+			"0 restarts on fades, keeps in [0, 1], synthetic fade-out product <= %.2f, 0 no-keep restarts)", rowName, facts.part.c_str(),
+			facts.truthFades, facts.truthLabels.c_str(), dp.fadePartial, dp.fadeMissed, dp.fadeRestarts, dp.partialOutsideFade,
+			dp.fadeKeepEndMin, dp.fadeOutKeep, dp.PartialTruthAgreementPct(), tr.fadePartial, tr.fadeMissed, tr.fadeRestarts,
+			tr.partialOutsideFade, tr.fadeKeepEndMin, tr.fadeOutKeep, tr.PartialTruthAgreementPct(), tr.TileRestartShareMean(),
+			tr.tileRestartShareMax, dpGpuPartials, trGpuPartials, dpGpuFadeRestarts, trGpuFadeRestarts, kAgreementGatePct, kFadeOutKeepMax);
 		Logger::WriteMessage((std::string(partial) + "\n").c_str());
+		Assert::IsTrue(dp.PartialTruthAgreementPct() >= kAgreementGatePct, Wide(partial).c_str());   // WAIVER-U7FADE-PARTIAL-2
+		Assert::IsTrue(tr.PartialTruthAgreementPct() >= kAgreementGatePct, Wide(partial).c_str());   // WAIVER-U7FADE-PARTIAL-2
 		Assert::AreEqual(0, dp.fadeRestarts, Wide(partial).c_str());
 		Assert::AreEqual(0, tr.fadeRestarts, Wide(partial).c_str());
 		Assert::AreEqual(0, dp.keepOutOfRange, Wide(partial).c_str());
