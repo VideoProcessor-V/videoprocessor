@@ -435,7 +435,8 @@ namespace DetailRestoreConfigTestsNs
 			// before the entrance hook, so the monitor read still precedes entrance.Run.
 			const std::string planner = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntrancePlanner.inl");
 			Assert::IsFalse(planner.empty(), L"the entrance planner source");
-			const size_t monitorRead = planner.find("sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage,");
+			// fx/dv-frame-quiet: the monitor read is fed through frameQuiet.Begin (FrameQuiet.h calls monitor.Frame / FrameBegin).
+			const size_t monitorRead = planner.find("frameQuiet.Begin(vpv.sourceAnalysis.sourceMonitor, rebaseDispatch, renderImage,");
 			const size_t planSite = text.find("PlanEntrance(renderImage, target, image, sourceSequence,");
 			const size_t monitor = monitorRead != std::string::npos && planSite != std::string::npos ? planSite : std::string::npos;
 			const size_t renderOwned = planSite == std::string::npos ? std::string::npos : text.find("NlsHookRecovery::RenderOwned(", planSite);
