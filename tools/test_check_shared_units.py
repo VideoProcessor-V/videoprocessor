@@ -408,6 +408,23 @@ class NearDupUnitPatternsTest(unittest.TestCase):
             self.assertTrue(any(r.search(line) for r in reg[uid]["signatures"]), uid)
 
 
+class RampAllowTest(unittest.TestCase):
+    """C6-1 U25: RampMath:: calls are consumers; a bare or other-namespace Smoothstep/Clamp01 stays a duplicate."""
+    def test_rampmath_calls_are_consumers_bare_calls_duplicates(self):
+        with tempfile.TemporaryDirectory() as r:
+            f = "src/VP-V/modules/repair/ramp_use/Use.cpp"
+            _w(r, f, "double a = RampMath::Smoothstep(a, b, x);\n"
+                     "double b = Smoothstep(a, b, x);\n"
+                     "double c = RampMath::Smoothstep(a, b, x, RampMath::SmoothRule::Unguarded) * RampMath::Clamp01NanToZero(v);\n"
+                     "double d = GrainSplit::Clamp01(v);\n"
+                     "double e = RampMath::Ramp(v, lo, hi) + RampMath::Clamp01(w);\n")
+            role = {h["line"]: h["role"] for h in _unit(csu.scan(r, baseline={"units": {}}), "U25")["hits"]}
+            self.assertEqual(role.get(2), "duplicate")
+            self.assertEqual(role.get(4), "duplicate")
+            for line in (1, 3, 5):
+                self.assertNotEqual(role.get(line), "duplicate", line)
+
+
 class FocusAcquireAllowTest(unittest.TestCase):
     """L-FOCUS: Acquire(kP11RegionBlockStats) is a consumer read of the published product; a line that computes block
     statistics and only mentions the id stays counted."""
