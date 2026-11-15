@@ -117,6 +117,38 @@ class CheckHookGatingTest(unittest.TestCase):
         self.assertIn("UNVERIFIED VPV-GATED marker", out)
         self.assertIn("1 unguarded, 1 unverified markers", out)
 
+    def _gated_body(self, body):
+        _w(self.root, "src/VP-V/modules/motion/estimation/Lease.h",
+           "struct State\n{\n\tbool EndLease(Ctx& c)   // VPV-GATED\n\t{\n" + body + "\t}\n};\n")
+        _w(self.root, BILL, _bill("\t\tvectorEstimate.EndLease(ctx);   // VPV-HOOK\n"))
+        return _run(self.root)
+
+    def test_red_hg2_an_early_return_after_effects_is_unverified(self):
+        for name, body in (
+                ("calls first", "\t\tDoWork();\n\t\tResetAll();\n\t\tif (originalPathway) return false;\n\t\treturn true;\n"),
+                ("conditional effect first", "\t\tif (x) DoWork();\n\t\tif (originalPathway) return false;\n\t\treturn true;\n"),
+                ("block first", "\t\tif (x)\n\t\t{\n\t\t\tn = 1;\n\t\t}\n\t\tif (originalPathway) return false;\n\t\treturn true;\n"),
+                ("assignment first", "\t\tcount = 0;\n\t\tif (originalPathway) return false;\n\t\treturn true;\n"),
+                ("non-pathway call in a declaration", "\t\tconst bool originalPathway = DoWork(c.host);\n\t\tif (originalPathway) return false;\n\t\treturn true;\n"),
+                ("pathway query plus an effect", "\t\tconst bool originalPathway = OriginalPathwayOf(c.host); DoWork();\n\t\tif (originalPathway) return false;\n\t\treturn true;\n")):
+            with self.subTest(name):
+                rc, out = self._gated_body(body)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("UNVERIFIED VPV-GATED marker", out)
+                self.assertIn("1 unguarded, 1 unverified markers", out)
+
+    def test_hg2_guard_first_after_inert_declarations_is_verified(self):
+        for name, body in (
+                ("guard first", "\t\tif (originalPathway) return false;\n\t\tDoWork();\n\t\treturn true;\n"),
+                ("after declarations without calls", "\t\tint n = 0;\n\t\tbool ok;\n\t\tif (originalPathway) return false;\n\t\tDoWork();\n\t\treturn true;\n"),
+                ("braced return", "\t\tif (originalPathway)\n\t\t{\n\t\t\treturn false;\n\t\t}\n\t\tDoWork();\n\t\treturn true;\n"),
+                ("predicate from the pathway query", "\t\tconst bool originalPathway = OriginalPathwayOf(c.host);\n\t\tif (originalPathway) return false;\n\t\tDoWork();\n\t\treturn true;\n"),
+                ("predicate from the hub query", "\t\tconst bool originalPathway = Vpv::Hub::ExtensionHub::Instance().OriginalPathway(c.host);\n\t\tif (originalPathway) return false;\n\t\treturn true;\n")):
+            with self.subTest(name):
+                rc, out = self._gated_body(body)
+                self.assertEqual(rc, 0, out)
+                self.assertIn("VPV-GATED EndLease (src/VP-V/modules/motion/estimation/Lease.h:3) verified", out)
+
     def test_declarations_includes_and_context_fills_are_inert(self):
         body = ("\t\tRendererExtension::IngressContext ic; ic.host = this; ic.seq = static_cast<int64_t>(seq);   // VPV-HOOK\n"
                 "\t\tif (RendererExtension::DecideIngress(ic) && ic.drop) return;   // VPV-HOOK\n"
@@ -834,6 +866,58 @@ class HookLinesTest(unittest.TestCase):
             _w(root, BILL, _bill(""))
             rc, out = _run(root)
             self.assertIn("hook LINES: 0 (baseline 1, trend -1)", out)
+
+
+class SinceKeepsUnverifiedMarkersTest(unittest.TestCase):
+    """HOOKGATE-CHECKER-HOLES (1): a VPV-GATED body in src/VP-V that loses its Original early return after the merge
+    base changes no Bill line, yet under --since the marker and its call site must still fail the gate."""
+
+    GIT_ENV = CheckHookGatingTest.GIT_ENV
+    GATED = "src/VP-V/modules/motion/estimation/Lease.h"
+    WITH_RETURN = ("struct State\n{\n\tbool EndLease(bool originalPathway)   // VPV-GATED\n\t{\n"
+                   "\t\tif (originalPathway) return false;\n\t\tReset();\n\t\treturn true;\n\t}\n};\n")
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = self.td.name
+        _w(self.root, BILL, _bill("\t\tdoBill();\n"))
+        self._git("init", "-q")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "bill")     # Bill's baseline: no src/VP-V/ in its tree
+        self.bill = self._git("rev-parse", "HEAD")
+        _w(self.root, chg.SLOTS_HEADER, SLOTS)
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", self.root] + list(args), check=True, env=self.GIT_ENV,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode("utf-8", "replace").strip()
+
+    def _commit(self, gated_text):
+        _w(self.root, self.GATED, gated_text)
+        _w(self.root, BILL, _bill("\t\tdoBill();\n\t\tvectorEstimate.EndLease(pipelineSlots.OriginalPathway());   // VPV-HOOK\n"))
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "vp")
+        return self._git("rev-parse", "HEAD")
+
+    def _cli(self, since):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = chg.main(["--root", self.root, "--base-ref", self.bill, "--files", BILL, "--rev", "HEAD", "--since", since])
+        return rc, buf.getvalue()
+
+    def test_red_a_marker_that_loses_its_early_return_after_the_merge_base_fails_under_since(self):
+        first = self._commit(self.WITH_RETURN)
+        rc, out = self._cli(first)
+        self.assertIn("0 unguarded, 0 unverified markers", out)
+        self._commit(self.WITH_RETURN.replace("\t\tif (originalPathway) return false;\n", ""))
+        rc, out = self._cli(first)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("UNVERIFIED VPV-GATED marker", out)
+        self.assertIn("EndLease", out)
+        self.assertIn("1 unguarded, 1 unverified markers", out)
+        self.assertIn(BILL + ":", out)
 
 
 if __name__ == "__main__":

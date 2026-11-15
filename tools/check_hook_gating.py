@@ -6,7 +6,8 @@ Usage: python -I tools/check_hook_gating.py [--base-ref a591ad3b5] [--root PATH]
                                             [--files F...] [--json] [--fail-untagged] [--no-git]
 
 --base-ref is BILL's tip (the file-ownership baseline; a ref whose tree contains src/VP-V/ is refused). To see only
-what a branch ADDED, use --since <merge-base> (hits, untagged lines and new sites on added lines only).
+what a branch ADDED, use --since <merge-base> (hits, untagged lines and new sites on added lines only; unverified
+VPV-GATED markers and their gated-marker-unverified call sites are always reported, wherever they are).
 
 Bill-owned files = the files present at --base-ref (Bill's tip, the vp_footprint.py convention: every file
 outside src/VP-V/) that are production code (vp_footprint.bucket_of == "production"; tests and project files
@@ -24,8 +25,10 @@ Every hook STATEMENT inside a function body of a Bill-owned production file must
             of a positive check; or the enclosing function returns early on the positive predicate
             (`if (<orig>) return ...;` before the statement, at the function's top level).
   gated     it calls a function whose definition carries `// VPV-GATED` on its signature line (or the line
-            above) and whose body the checker verified: the first statements contain
-            `if (<positive predicate, || - joined>) return ...;` with the predicate from the list above.
+            above) and whose body the checker verified: `if (<positive predicate, || - joined>) return ...;`
+            (predicate from the list above) at the body's top level, preceded only by inert statements
+            (declarations without calls, and `const bool originalPathway = <...>OriginalPathway[Of](<x>.host);`,
+            the guard's own predicate); any earlier block, call or assignment leaves the marker unverified.
             A marker without that early return is a hit ("gated-marker-unverified").
   allowed   its callee is in ALLOW_CALLEES or the site is in ALLOW_SITES (reason required; reported).
   inert     a declaration without a call, a guard line itself, a brace / comment / preprocessor line.
@@ -562,6 +565,39 @@ def early_return_before(func, stmt_start, parse_only=False):
     return False
 
 
+def _positive_early_return(ch):
+    c = _cond_of(ch.text)
+    if not c:
+        return False
+    body = " ".join(x.text for x in ch.children) if ch.kind == "open" else c[1]
+    return positive_guard(c[0]) and bool(re.match(r"^\s*(?:\{\s*)?return\b", body))
+
+
+# The one call allowed before a VPV-GATED guard: the declaration of the guard's own predicate from the pathway query
+# (house form `const bool originalPathway = OriginalPathwayOf(ic.host);` or
+# `... = Vpv::Hub::ExtensionHub::Instance().OriginalPathway(f.host);`). Nothing else may share the statement.
+PATHWAY_QUERY_DECL_RE = re.compile(
+    r"^(?:const\s+)?bool\s+(?:originalPathway|pipelineOriginalPathway)\s*=\s*"
+    r"(?:[A-Za-z_][\w:]*(?:\(\s*\))?(?:\.|->))*(?:[\w:]+::)?OriginalPathway(?:Of)?\(\s*[A-Za-z_][\w]*(?:(?:\.|->)\w+)*\s*\)\s*;?\s*$")
+
+
+def gated_guard_first(func):
+    """A VPV-GATED body is verified only when its positive early return comes before every effect: the top-level
+    children before it are inert (declarations without calls, comments). Any block (if / for / lambda body) or a
+    statement with a call or an assignment ends the prefix (HOOKGATE-CHECKER-HOLES (2))."""
+    for ch in func.children:
+        if _positive_early_return(ch):
+            return True
+        if ch.kind == "open":
+            return False
+        if PATHWAY_QUERY_DECL_RE.match(ch.text.strip()):
+            continue   # `const bool originalPathway = <...>OriginalPathway[Of](<x>.host);`: the guard's own predicate
+        pieces = [p.strip() for p in ch.text.split(";") if p.strip()]
+        if not all(_inert_piece(p, set()) for p in pieces):
+            return False
+    return False
+
+
 def allowed_callee(text):
     for k, e in enumerate(ALLOW_CALLEES):
         if re.search(r"\b(?:" + e["callee"] + r")\s*\(", text):
@@ -668,7 +704,7 @@ def gated_markers(tree, files):
                         if not m:
                             continue
                         name = m.group(1).split("::")[-1]
-                        verified = early_return_before(ch, 10 ** 9, parse_only=True)
+                        verified = gated_guard_first(ch)
                         out[name] = (rel, ch.start, verified)
     return out
 
@@ -1398,8 +1434,10 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
             return s["line"] in since_added.get(s["file"], set())
         def _new_site(s):
             return any(n in since_added.get(s["file"], set()) for n in range(s["start"], s["end"] + 1))
-        hits = [h for h in hits if _new(h)]
-        unverified = [u for u in unverified if u["file"] in since_added and _new(u)]
+        # A VPV-GATED marker lives in src/VP-V (outside since_added) and its body can lose the early return
+        # without any Bill line changing: unverified markers are a whole-tree invariant (0 at a green base), so
+        # they and their call sites are kept under --since (HOOKGATE-CHECKER-HOLES (1)).
+        hits = [h for h in hits if _new(h) or h["class"] == "gated-marker-unverified"]
         untagged = [u for u in untagged if _new(u)]
         untagged_vpv = untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_used)
         stale = [x for x in stale if x not in allow_used]

@@ -240,8 +240,8 @@ ceiling via `Tuning::forceWeight`, per-block master oracle, a local-evidence str
 scored on held-out clips).
 
 ```
-D:\hfrenv\Scripts\python.exe -I tools/eval/run_prototypes.py --family temporal_detail --suite tools/eval/suites/td_real.json ^
-    --baseline td_off --candidates td_b008 --out D:\codexideoprocessor\eval-scratch	est-td-realun-td_b008 --lpips
+D:\hfr\venv\Scripts\python.exe -I tools/eval/run_prototypes.py --family temporal_detail --suite tools/eval/suites/td_real.json ^
+    --baseline td_off --candidates td_b008 --out D:\codex\videoprocessor\eval-scratch\test-td-real\run-td_b008 --lpips
 ```
 
 ### TemporalDetail with real vectors (`td_vectors/`, test/td-real-vectors)

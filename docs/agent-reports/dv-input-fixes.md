@@ -100,7 +100,7 @@ Two existing formatter tests embedded valid metadata into an all-zero picture (t
 truncated-frame signature); they now restore a tunnel near-black picture first.
 
 Results on the final build (x64 Release, full solution rc=0):
-- CPU (vstest, single-threaded, TRX `dv-fixes-logs	rxinal3.trx`, after the follow-ups):
+- CPU (vstest, single-threaded, TRX `dv-fixes-logs\trx\final3.trx`, after the follow-ups):
   every DolbyVision*, Dv*, HdrInference*, Lldv*, Shortcut*, ConfigEditorCore, ConfigFile,
   MainConfigSchema, RawCapture class: **492 / 492 passed**.
 - Config tests after the follow-ups (shortcut / DV / LLDV / control coverage): 24 / 24 passed.
