@@ -68,7 +68,7 @@ namespace Vpv
 		{
 			enum class From : uint8_t { None, Store, Live };
 			bool known = false;               // cut / fade are answered (false: the frame has no sealed pair of P4 records yet)
-			bool cut = false, fade = false;   // cut = the DELIVERED restart signal (FrameAnalysis::Scene::cut: once per cut, one frame late at most)
+			bool cut = false, fade = false;   // cut = the DELIVERED restart signal (FrameAnalysis::Scene::cut: once per cut, normally one frame late)
 			bool cutLate = false, cutHere = false;                        // U7 v2: FrameAnalysis::Scene
 			bool flash = false, cutPossible = false, confirmed = false;   // U7 v2 (SceneFacts above)
 			float cutStrength = 0.0f;
@@ -88,6 +88,8 @@ namespace Vpv
 			// U7 v2: verdicts judged with frame seq + 1, verdicts given without it (provisional), tracker restarts (a seek, a gap, a
 			// renumbered frame) and earlier Vp groups rewritten when their confirmation arrived.
 			uint64_t confirmed = 0, provisional = 0, reprimes = 0, republished = 0;
+			// Cuts delivered late (with a later frame's group) and, of them, more than one frame late (frame c + 1 had no group).
+			uint64_t late = 0, lateGap = 0;
 		};
 
 		// What the engine feed did (render thread): shown on the status lines, read by tests.

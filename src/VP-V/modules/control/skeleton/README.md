@@ -340,6 +340,7 @@ Every downgrade is visible (Ctrl+I line, Ctrl+Alt+D, Config status); none is log
 | `skeleton_vram_known` | `VRAM not yet declared to the governor (known gaps): temporal detail, ...` | standing while the lane runs: users that hold video memory and declare none |
 | `skeleton_vram_users` | `VRAM not declared to the governor: <modules> (its memory is not in the budget)` | a module that holds video memory called `VramUsers::MarkActive` but declared none of it (MV7 guard) |
 | `skeleton_engine_feed` | `no vector engine for this renderer: the pair and field slots (P2m, P3) are not published; their readers fall back` | external consumers are declared (P2m / P3 are in the graph) but the renderer has no vector engine |
+| `skeleton_scene_veto` | `vector cut veto off: <why>; vector pairs across a scene cut are not refused by the scene` | U7-accuracy Q5: the scene seam cannot reach this renderer's confirmed cuts (store off, more than one renderer, or the seam not bound); the "Skeleton scene:" status line shows the veto state, the delivery counters (late, more than one frame late) and the refusals of all renderers |
 | `skeleton_history` | `quality pattern history capped at N frames (...)` | the rate or the queue asks for deeper record histories than the 255-slot rings allow |
 | `skeleton_gpu_shadow` | `shadow: GPU products skipped (no GPU dispatcher, no GPU work)` | `analysis_lane = shadow` |
 | `skeleton_gpu_device` | `GPU products: no render device (...)` | `analysis_lane = on` without a usable `pl_gpu` |

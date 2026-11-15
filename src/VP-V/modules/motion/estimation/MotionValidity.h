@@ -403,6 +403,13 @@ namespace MotionValidity
 			static std::atomic<ConfirmedCutFn> reader{ nullptr };
 			return reader;
 		}
+		// Every state's confirmed-cut refusals, process-wide: the scene producer shows it on its status lines (the states live in the
+		// engines, which the producer cannot see; audit U7ACC MUST 4, never log-only).
+		static std::atomic<uint64_t>& ConfirmedCutRefusalsAll()
+		{
+			static std::atomic<uint64_t> all{ 0 };
+			return all;
+		}
 		bool PairValidAt(uint64_t a, uint64_t b) const
 		{
 			if (!(Adjacent(a, b) && SpanStatus(a, b) != SpanState::Invalid))   // C2a-F 1: Unknown (unbound) refuses nothing
@@ -411,6 +418,7 @@ namespace MotionValidity
 			if (reader != nullptr && reader(b))
 			{
 				confirmedCutRefusals.fetch_add(1, std::memory_order_relaxed);
+				ConfirmedCutRefusalsAll().fetch_add(1, std::memory_order_relaxed);
 				return false;
 			}
 			return true;

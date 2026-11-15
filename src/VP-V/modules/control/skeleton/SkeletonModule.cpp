@@ -428,6 +428,8 @@ namespace Vpv
 				uint64_t print = 0;
 				VpUnit::CutFadeJudge::CutVerdict v;   // known = false until judged
 				bool deliveredOwn = false;            // this frame's own cut went out with its group (confirmed at its publish)
+				bool deliveredLate = false;           // this frame's own cut went out late, with a later frame's group
+				bool carriesLate = false;             // this frame's group carries an earlier frame's late cut (a re-fill keeps it)
 			};
 			static constexpr size_t kSceneVerdicts = 16;
 			std::unique_ptr<VpUnit::CutFadeJudge::CutTracker> sceneTracker;
@@ -435,6 +437,11 @@ namespace Vpv
 			uint64_t sceneTrackerNewest = 0, sceneTrackerNewestPrint = 0;
 			SceneVerdictSlot sceneVerdicts[kSceneVerdicts];
 			std::atomic<uint64_t> sceneConfirmed{ 0 }, sceneProvisional{ 0 }, sceneReprimes{ 0 }, sceneRepublished{ 0 };
+			// Delivery (audit U7ACC MUST 3): cuts delivered late (with a later frame's group), of them more than one frame late (frame
+			// c + 1 had no group: dropped, unsealed or no record), and the newest frame a fill judged (the late search starts there).
+			std::atomic<uint64_t> sceneLate{ 0 }, sceneLateGap{ 0 };
+			bool sceneHasFilled = false;
+			uint64_t sceneLastFilled = 0;
 			uint64_t feedEra = 0;
 			bool feedHadEra = false;
 			uint64_t feedLastEngineSeq = 0;      // the last field seq handled (published, slipped or given up)
@@ -508,7 +515,10 @@ namespace Vpv
 					}
 				}
 				SceneSlot& n = st.sceneVerdicts[s % HostState::kSceneVerdicts];
-				n.deliveredOwn = n.used && n.seq == s && n.print == print && n.deliveredOwn;   // the same picture again keeps its delivery
+				const bool samePicture = n.used && n.seq == s && n.print == print;
+				n.deliveredOwn = samePicture && n.deliveredOwn;   // the same picture again keeps its delivery
+				n.deliveredLate = samePicture && n.deliveredLate;
+				n.carriesLate = samePicture && n.carriesLate;
 				n.used = true;
 				n.seq = s;
 				n.print = print;
@@ -721,6 +731,22 @@ namespace Vpv
 				FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::SingleStore();
 				FrameAnalysis::Scene s;
 				return store != nullptr && store->PeekScene(seq, s) && s.confirmed && s.cutHere;
+			}
+			// Why the cut veto cannot work for renderer `host` ("" = it works): its store is off, or the seam's single store is not its
+			// store (more than one renderer: the seam carries no renderer key, so it refuses nothing). No store registered at all happens
+			// only without the Host (tests): nothing is published, nothing to show. Shown as skeleton_scene_veto and on "Skeleton scene:".
+			std::string SceneVetoOff(const void* host)
+			{
+				FrameAnalysis::Store* own = VpFrameAnalysis::SourceFrameTap::StoreFor(host);
+				if (own == nullptr)
+					return std::string();
+				if (!own->Enabled())
+					return "frame-analysis store off (frame_analysis_store=false)";
+				if (VpFrameAnalysis::SourceFrameTap::SingleStore() != own)
+					return "more than one renderer (the scene seam carries no renderer key)";
+				if (MotionValidity::State::ConfirmedCutReader().load(std::memory_order_acquire) != &ConfirmedCutAt)
+					return "scene seam not bound to the skeleton";
+				return std::string();
 			}
 			// Live skeleton modules: the seam is cleared when the last one goes (it is ours only while one lives).
 			std::atomic<int>& SceneSeamUsers()
@@ -1481,14 +1507,48 @@ namespace Vpv
 				if (!b || !SceneFactsFor(st, *b, seq, f, &done) || !f.valid)
 					return false;
 				std::lock_guard<std::mutex> lock(st.sceneMutex);
-				// Delivery (FrameAnalysis::Scene::cut): this frame's confirmed cut now, else frame seq - 1's confirmed cut that did not go
-				// out with its own group (it was provisional then): exactly once per cut, one frame late at most. A provisional verdict
-				// never delivers a cut (on the footage it holds false cuts the successor removes: refs/102b U7-accuracy).
-				const HostState::SceneVerdictSlot& before = st.sceneVerdicts[(seq - 1) % HostState::kSceneVerdicts];
-				const bool late = before.used && before.seq == seq - 1 && before.v.known && before.v.confirmed && before.v.cut && !before.deliveredOwn;
+				// Delivery (FrameAnalysis::Scene::cut): this frame's confirmed cut now, else the OLDEST confirmed cut since the last frame
+				// judged that did not go out with its own group (it was provisional then): exactly once per cut. Normally that is frame
+				// seq - 1 (one frame late); when frame c + 1 had no group (dropped, unsealed or no record) cut c is confirmed at the part end
+				// and goes out with the next frame that has one (counted: sceneLateGap). A provisional verdict never delivers a cut (on the
+				// footage it holds false cuts the successor removes: refs/102b U7-accuracy).
 				HostState::SceneVerdictSlot& own = st.sceneVerdicts[seq % HostState::kSceneVerdicts];
-				const bool now = f.confirmed && f.cut;
-				if (now && own.used && own.seq == seq)
+				const bool ownSlot = own.used && own.seq == seq;
+				bool late = false;
+				if (ownSlot && own.carriesLate)
+					late = true;   // a re-fill of the same picture: the late cut it carried stays with it
+				else
+				{
+					uint64_t lowest = seq - 1;
+					if (st.sceneHasFilled && st.sceneLastFilled < seq)
+						lowest = st.sceneLastFilled;
+					if (seq - lowest > HostState::kSceneVerdicts - 1)
+						lowest = seq - (HostState::kSceneVerdicts - 1);
+					if (lowest == 0)
+						lowest = 1;
+					for (uint64_t d = lowest; d < seq && !late; ++d)
+					{
+						HostState::SceneVerdictSlot& c = st.sceneVerdicts[d % HostState::kSceneVerdicts];
+						if (c.used && c.seq == d && c.v.known && c.v.confirmed && c.v.cut && !c.deliveredOwn && !c.deliveredLate)
+						{
+							late = true;
+							c.deliveredLate = true;
+							if (ownSlot)
+								own.carriesLate = true;
+							st.sceneLate.fetch_add(1, std::memory_order_relaxed);
+							if (d + 1 < seq)
+								st.sceneLateGap.fetch_add(1, std::memory_order_relaxed);
+						}
+					}
+				}
+				if (!st.sceneHasFilled || seq > st.sceneLastFilled || seq + HostState::kSceneVerdicts < st.sceneLastFilled)
+				{
+					st.sceneHasFilled = true;
+					st.sceneLastFilled = seq;   // a seek back (far below the newest) starts the search over
+				}
+				// Already delivered late with a later frame (that frame was filled first): not delivered again here.
+				const bool now = f.confirmed && f.cut && !(ownSlot && own.deliveredLate);
+				if (now && ownSlot)
 					own.deliveredOwn = true;
 				scene.cut = now || late;
 				scene.cutLate = late;
@@ -1531,7 +1591,7 @@ namespace Vpv
 				{
 					if (store->PublishScene(seq, scene))
 						st.scenePublished.fetch_add(1, std::memory_order_relaxed);
-					// The confirmation of earlier frames (one frame late at most): only a PROVISIONAL group this module wrote is rewritten
+					// The confirmation of earlier frames (normally seq - 1; `done` has any others): only a PROVISIONAL group this module wrote is rewritten
 					// (another producer's group, or one already confirmed, is left alone); its fade is kept.
 					if (seq > 1)
 						done.push_back(seq - 1);
@@ -1615,6 +1675,8 @@ namespace Vpv
 				c.provisional = st->sceneProvisional.load(std::memory_order_relaxed);
 				c.reprimes = st->sceneReprimes.load(std::memory_order_relaxed);
 				c.republished = st->sceneRepublished.load(std::memory_order_relaxed);
+				c.late = st->sceneLate.load(std::memory_order_relaxed);
+				c.lateGap = st->sceneLateGap.load(std::memory_order_relaxed);
 			}
 			return c;
 		}
@@ -2339,6 +2401,7 @@ namespace Vpv
 				addDecision(FallbackCatalog::SkeletonRegulatorInput(hasBundle && !st.timing.measured, st.timing.noted, st.timing.lastNotedMs));
 addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleton::KnownUndeclaredVramUsers()) : std::string()));   // MV7 standing gap
 				addDecision(FallbackCatalog::SkeletonEngineFeed(st.feedNeeded && st.engine == nullptr));   // SK-W stage D: P2m / P3 cannot be published
+				addDecision(FallbackCatalog::SkeletonSceneVeto(SceneVetoOff(st.host)));   // U7-accuracy Q5: the cut veto's reach, never silent
 				// MV7 guard: a module that holds video memory is active but declared none of it: visible, never silent.
 				addDecision(FallbackCatalog::SkeletonVramUsers(VpSkeleton::UnpopulatedUserNames(VpSkeleton::VramUsers::Instance().Take().unpopulated)));
 			}
@@ -2489,6 +2552,23 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					const std::string claimNote = ClaimFailedNote(st.feed.claimFailed, st.queueUsed.laneLead == 0);
 					if (!claimNote.empty())
 						full.push_back(claimNote);
+				}
+				{
+					// U7 v2 (Ctrl+I / Ctrl+Alt+D): the scene product's sequence judge and the vector cut veto, in plain words.
+					const std::string vetoOff = SceneVetoOff(st.host);
+					const std::string vetoState = vetoOff.empty() ? std::string("on") : "off (" + vetoOff + ")";
+					char sceneLine[768] = {};
+					std::snprintf(sceneLine, sizeof(sceneLine),
+						"Skeleton scene: %llu verdict(s) confirmed with the next frame, %llu provisional, %llu tracker restart(s), %llu group(s) confirmed later; %llu cut(s) delivered late (%llu more than one frame late); vector cut veto %s, %llu vector pair(s) refused at confirmed cuts (all renderers)",
+						static_cast<unsigned long long>(st.sceneConfirmed.load(std::memory_order_relaxed)),
+						static_cast<unsigned long long>(st.sceneProvisional.load(std::memory_order_relaxed)),
+						static_cast<unsigned long long>(st.sceneReprimes.load(std::memory_order_relaxed)),
+						static_cast<unsigned long long>(st.sceneRepublished.load(std::memory_order_relaxed)),
+						static_cast<unsigned long long>(st.sceneLate.load(std::memory_order_relaxed)),
+						static_cast<unsigned long long>(st.sceneLateGap.load(std::memory_order_relaxed)),
+						vetoState.c_str(),
+						static_cast<unsigned long long>(MotionValidity::State::ConfirmedCutRefusalsAll().load(std::memory_order_relaxed)));
+					full.push_back(sceneLine);
 				}
 				for (const std::string& l : PassTimers::Inbox::Motion().Lines())
 					full.push_back("Skeleton cost row " + l);

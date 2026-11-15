@@ -51,9 +51,11 @@ namespace VpDetailRestore
 		float strength = 1.0f;   // how far to start over, 0..1: 1 on a restart; with softReset, the U7 v2 cut strength of a non-cut
 	};
 
-	// U7 v2 (U7-accuracy): `cut` is the scene group's DELIVERED cut (once per confirmed cut, one frame late at most; FrameAnalysis::Scene).
-	// Consumers keep the HARD reset on it (owner ruling Q4). softReset (default OFF, behind each consumer's switch) also reports the cut
-	// strength of a frame that is not a cut, for a partial start-over; the restart decision itself is unchanged by it.
+	// U7 v2 (U7-accuracy): `cut` is the scene group's DELIVERED cut (once per confirmed cut; normally one frame late, later only when the
+	// frame after the cut had no scene group; FrameAnalysis::Scene). Consumers keep the HARD reset on it (owner ruling Q4). softReset
+	// (default OFF) also reports the cut strength of a frame that is not a cut, for a partial start-over; the restart decision itself is
+	// unchanged by it. No consumer has a switch for it yet: DetailPulse and TextureRestore call with the default (OFF); the per-consumer
+	// switches are deferred (refs/102b, U7-accuracy row "soft reset switch").
 	inline SceneRestartAnswer SceneRestartOf(uint64_t sequence, SceneReaderFn reader, bool softReset = false)
 	{
 		SceneRestartAnswer a;
