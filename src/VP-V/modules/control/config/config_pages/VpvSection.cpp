@@ -704,7 +704,11 @@ namespace Vpv
 				break;
 			case LockKind::Feature:
 				locked = EffectiveOff(state, spec);
-				why = lock->onMain ? TurnsOnLine(spec) : QStringLiteral("Used only when %1 is on (Main).").arg(Q(spec.master));
+				// A Main card that locks only some of its keys stays visible with those keys greyed in place.
+				if (lock->onMain && !spec.lockKeys.empty())
+					why = QStringLiteral("Used only when %1 is on.").arg(Q(spec.master));
+				else
+					why = lock->onMain ? TurnsOnLine(spec) : QStringLiteral("Used only when %1 is on (Main).").arg(Q(spec.master));
 				if (locked) lock->unusedBecause = QStringLiteral("%1 is off").arg(Q(spec.master));
 				break;
 			}

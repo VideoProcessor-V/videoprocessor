@@ -124,14 +124,14 @@ namespace Vpv
                 u.slotIds.push_back("motion.vector_delivery");
                 u.slotIds.push_back("motion.consumers");
                 {
-                    Preset p; p.tier = "Classic"; p.description = "VP's basic motion search only: whole-pixel matching, no NVIDIA engine, nothing computed ahead. Your de-judder amount still applies (choose As shot for no motion processing)."; p.cost = "low";
+                    Preset p; p.tier = "Classic"; p.description = "VP's basic motion search only: whole-pixel matching, no NVIDIA engine, nothing computed ahead. Your de-judder amount still applies (choose As shot for no motion processing). With the Motion engine ON this is the degraded mode: VP's matcher does the work."; p.cost = "low";
                     p.set.push_back({ "optical_flow", "off" });
                     p.set.push_back({ "motion_ahead_frames", "0" });
                     p.set.push_back({ "dejudder_est_qpel", "off" });
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Low"; p.description = "VP's own motion search at quarter-pixel precision (no NVIDIA engine, nothing computed ahead)."; p.cost = "low";
+                    Preset p; p.tier = "Low"; p.description = "VP's own motion search at quarter-pixel precision (no NVIDIA engine, nothing computed ahead). With the Motion engine ON this is the degraded mode: VP's matcher does the work."; p.cost = "low";
                     p.set.push_back({ "optical_flow", "off" });
                     p.set.push_back({ "motion_ahead_frames", "0" });
                     p.set.push_back({ "dejudder_est_split", "off" });
@@ -159,7 +159,7 @@ namespace Vpv
                 u.toggles.push_back({ "interpolation_fill_gaps", "Fill dropped frames (hiccup repair)", { "on", "off" }, "motion.consumers" });
                 u.toggles.push_back({ "interpolation", "Frame interpolation (50/60p)", { "off", "auto", "always" }, "motion.consumers" });
                 u.toggles.push_back({ "dejudder_estimate_ahead", "Estimate motion ahead", { "on", "off" }, "motion.estimation" });
-                u.toggles.push_back({ "vector_demand", "Vector engine on demand", { "on", "off" }, "motion.estimation" });
+                u.toggles.push_back({ "vector_demand", "Motion engine", { "on", "off" }, "motion.estimation" });
                 u.toggles.push_back({ "dither_vectors", "Dither reuses the de-judder's motion", { "auto", "own" }, "motion.consumers" });
                 u.toggles.push_back({ "render_ahead", "De-judder: render ahead (under test)", { "off", "on" }, "output.presentation" });
                 u.toggles.push_back({ "interpolation_fallback", "Where motion is not trusted: hold or blend", { "hold", "blend" }, "motion.consumers" });

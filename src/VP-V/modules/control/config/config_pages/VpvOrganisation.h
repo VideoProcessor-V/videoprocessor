@@ -88,14 +88,20 @@ namespace Vpv
 				{ K::Row, "intent_black" }, { K::Row, "intent_display" }, { K::Row, "dv_compare_capture_folder" } } },
 
 			// ---- Motion ----
+			{ "motion", "engine", "Motion engine",
+				"One switch for all motion work (de-judder, hiccup repair, motion-aware scaling and dither). On: motion is "
+				"measured when something needs it. Off: those features use their non-motion path.", false, false, {
+				{ K::Toggle, "vector_demand" }, { K::Toggle, "dejudder_estimate_ahead" } } },
 			{ "motion", "taste", "De-judder amount (your taste)",
 				"How much film judder is smoothed: your taste. The tier above chooses how motion is measured; it never "
 				"changes the amount (As shot = no motion processing).", false, false, {
-				{ K::Row, "motion_preset_box" } } },
-			{ "motion", "engine", "Motion engine and hiccup repair",
-				"How dropped or repeated frames are repaired, and how motion is estimated.", false, false, {
-				{ K::Toggle, "interpolation_fill_gaps" }, { K::Toggle, "interpolation" }, { K::Toggle, "interpolation_fallback" },
-				{ K::Toggle, "dejudder_estimate_ahead" }, { K::Toggle, "vector_demand" } } },
+				{ K::Row, "motion_preset_box" } },
+				{ L::Feature, "the motion engine", "vector_demand", nullptr, "off", "on", { "motion_preset_box" } } },
+			{ "motion", "hiccup", "Hiccup repair",
+				"How dropped or repeated frames are repaired.", false, false, {
+				{ K::Toggle, "interpolation_fill_gaps" }, { K::Toggle, "interpolation" }, { K::Toggle, "interpolation_fallback" } },
+				{ L::Feature, "the motion engine", "vector_demand", nullptr, "off", "on",
+					{ "interpolation_fill_gaps", "interpolation", "interpolation_fallback" } } },
 			{ "motion", "render_ahead", "Render ahead (under test)", "Draws de-judder frames early to absorb timing hiccups.", false, false, {
 				{ K::Toggle, "render_ahead" } } },
 			{ "motion", "easing", "Per-shot easing", "Lowers the de-judder on shots that need less (never raises it).", false, false, {

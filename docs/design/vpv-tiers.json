@@ -184,7 +184,7 @@
       ],
       "presets": {
         "Classic": {
-          "description": "VP's basic motion search only: whole-pixel matching, no NVIDIA engine, nothing computed ahead. Your de-judder amount still applies (choose As shot for no motion processing).",
+          "description": "VP's basic motion search only: whole-pixel matching, no NVIDIA engine, nothing computed ahead. Your de-judder amount still applies (choose As shot for no motion processing). With the Motion engine ON this is the degraded mode: VP's matcher does the work.",
           "cost": "low",
           "set": {
             "optical_flow": "off",
@@ -193,7 +193,7 @@
           }
         },
         "Low": {
-          "description": "VP's own motion search at quarter-pixel precision (no NVIDIA engine, nothing computed ahead).",
+          "description": "VP's own motion search at quarter-pixel precision (no NVIDIA engine, nothing computed ahead). With the Motion engine ON this is the degraded mode: VP's matcher does the work.",
           "cost": "low",
           "set": {
             "optical_flow": "off",
@@ -258,7 +258,7 @@
         },
         {
           "key": "vector_demand",
-          "label": "Vector engine on demand",
+          "label": "Motion engine",
           "values": [
             "on",
             "off"
