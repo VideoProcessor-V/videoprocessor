@@ -40,7 +40,6 @@ namespace ProducerPlanTest
 			bool stopWasCalled = false;
 			bool stoppedLogged = false;   // "the producer stopped": the death note
 			int depthStored = -1, configuredStored = -1;
-			bool backwardStored = false;
 			MotionAhead::Decision ahead;
 		};
 
@@ -86,14 +85,16 @@ namespace ProducerPlanTest
 			}
 			s.engineReady = s.exists && s.running && producerEngineReady;
 			const bool motionConsumer = dejudderEstimating || d.vectorProducer;
+			// Batch B fold (WAIVER-B1-ENGINE-06): the old block's vectorBackward input (vectorDemand.mode == Backward) is retired with
+			// the backward pairs. This is the old block at vectorBackward = false, the only value it can take since the fold:
+			// `lowLatency && (!allowed || false)` and MotionAhead::Decide's backwardPairs flag false (its default, now removed, so
+			// Reason::BackwardPairs and the stored backward flag were false for every input).
 			s.ahead = MotionAhead::Decide(
 				MotionAhead::DepthAt(d.motionAheadFrames, d.sourceHz, d.generalRateFixes),
-				d.lowLatency && (!d.vectorLowLatencyAllowed || d.vectorBackward),
+				d.lowLatency && !d.vectorLowLatencyAllowed,
 				s.exists && s.running,
-				d.queuedFutureFrames, d.opticalFlow, motionConsumer,
-				d.vectorBackward);
+				d.queuedFutureFrames, d.opticalFlow, motionConsumer);
 			s.depthStored = s.exists && s.running ? s.ahead.depth : 0;
-			s.backwardStored = s.exists && s.running && s.ahead.reason == MotionAhead::Reason::BackwardPairs;
 			s.configuredStored = (std::max)(1, s.ahead.configured);
 			if (!(s.exists && s.running) || s.ahead.depth == 0)
 				s.engaged = false;
@@ -138,7 +139,6 @@ namespace ProducerPlanTest
 			const DepthOutput dout = Depth(d);
 			s.ahead = dout.ahead;
 			s.depthStored = dout.storedDepth;
-			s.backwardStored = dout.storedBackward;
 			s.configuredStored = dout.storedConfigured;
 			if (dout.disengage)
 				s.engaged = false;
@@ -150,7 +150,7 @@ namespace ProducerPlanTest
 			return a.exists == b.exists && a.running == b.running && a.failedLogged == b.failedLogged && a.engaged == b.engaged &&
 				a.engineReady == b.engineReady && a.startWasTried == b.startWasTried && a.stopWasCalled == b.stopWasCalled &&
 				a.stoppedLogged == b.stoppedLogged && a.depthStored == b.depthStored && a.configuredStored == b.configuredStored &&
-				a.backwardStored == b.backwardStored && a.ahead.configured == b.ahead.configured &&
+				a.ahead.configured == b.ahead.configured &&
 				a.ahead.available == b.ahead.available && a.ahead.depth == b.ahead.depth && a.ahead.reason == b.ahead.reason;
 		}
 
@@ -167,7 +167,9 @@ namespace ProducerPlanTest
 		TEST_METHOD(LifecycleAndDepthEqualTheOldInlineLogicOnTheWholeInputSpace)
 		{
 			size_t rows = 0;
-			for (unsigned bits = 0; bits < (1u << 11); ++bits)
+			// Batch B fold (WAIVER-B1-ENGINE-06): bit 1024 was vectorBackward, retired with the backward pairs (the copy above is the
+			// old block at vectorBackward = false); every remaining input is still enumerated.
+			for (unsigned bits = 0; bits < (1u << 10); ++bits)
 			{
 				for (int frames : kFrames)
 				{
@@ -182,7 +184,6 @@ namespace ProducerPlanTest
 					l.startFailedLatched = (bits & 128u) != 0;
 					l.gpuAvailable = (bits & 256u) != 0;
 					const bool startSucceeds = (bits & 512u) != 0;
-					const bool vectorBackward = (bits & 1024u) != 0;
 					l.motionAheadFrames = frames;
 					OldState s0;
 					s0.exists = l.producerExists;
@@ -203,7 +204,6 @@ namespace ProducerPlanTest
 										d.generalRateFixes = general;
 										d.sourceHz = hz;
 										d.vectorLowLatencyAllowed = l.vectorLowLatencyAllowed;
-										d.vectorBackward = vectorBackward;
 										d.vectorProducer = l.vectorProducer;
 										d.queuedFutureFrames = queued;
 										const OldState a = OldLogic(l, d, s0, startSucceeds, estimating, producerReady);

@@ -2132,8 +2132,7 @@ namespace SkeletonModuleTestsNs
 			std::atomic<size_t> queuedFutureFrames{ 0 };
 			struct   // P11b: the walk reads these through impl.vectorEngine; the flat names below are references so the test bodies read unchanged
 			{
-				std::atomic<int> motionAheadDepth{ 0 };
-				std::atomic<bool> motionAheadBackward{ false };
+				std::atomic<int> motionAheadDepth{ 0 };   // batch B fold: motionAheadBackward is retired (the walk no longer reads it)
 				std::shared_ptr<FeedProducer> motionProducer = std::make_shared<FeedProducer>();
 			} vectorEngine;
 			std::atomic<int>& motionAheadDepth = vectorEngine.motionAheadDepth;
