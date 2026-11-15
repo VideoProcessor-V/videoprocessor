@@ -93,6 +93,22 @@ class Synthetic(unittest.TestCase):
         hs = [h for h in N1.scan(root) if h["site"] == "D2"]
         self.assertEqual([h["file"] for h in hs], [M + "repair/x/Use.h"])
 
+    def test_d4_second_field_read_in_the_label_fill_hits(self):
+        # gate-15a-D4 fixtures: a field read other than the fit entry's own field in the label fill / producer files hits;
+        # the one pool read FitEntryOf does not; FlowOf outside the four files (CameraExtension.cpp) is not D4.
+        fill = M + "motion/estimation/global_model/link/CameraLabelFill.cpp"
+        prod = M + "motion/estimation/global_model/link/CameraLabelProducer.h"
+        for text in ("auto f = m_link.FieldOf(seq);",
+                     "VerifiedField v = vectorEngine.FieldOf(seq, f);",
+                     "const auto* fld = dejudder->Field();"):
+            root = make_tree({fill: text})
+            self.assertEqual([h["file"] for h in N1.scan(root) if h["site"] == "D4"], [fill], text)
+        root = make_tree({prod: "auto p = engine.Acquire(VpSkeleton::kP3AnalysisField, form);"})
+        self.assertEqual([h["file"] for h in N1.scan(root) if h["site"] == "D4"], [prod])
+        root = make_tree({fill: "const bool ok = m_link.FitEntryOf(seq, rec, field);",
+                          M + "motion/estimation/global_model/link/CameraExtension.cpp": "auto fl = engine.FlowOf(a, b);"})
+        self.assertFalse([h for h in N1.scan(root) if h["site"].startswith("D4")])
+
     def test_comments_do_not_hit(self):
         root = make_tree({M + "repair/temporal_detail/TemporalDetailModel.h": "// m_prevGin\n/* double guard */\nint ok;"})
         self.assertFalse([h for h in N1.scan(root) if h["site"] == "D1"])

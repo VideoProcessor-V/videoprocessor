@@ -54,10 +54,14 @@ SITES = [
      "re": r"full search within",
      "only": ["shaders/Temporal sigma-delta.glsl"]},
     {"id": "D4", "product": "kP8CameraLabels", "refs": "122 s9 D4",
-     "what": "camera labels read as a FieldCopy through the link instead of P3",
-     "re": r"\bm_link\.FieldOf\s*\(",
-     "wide": r"\bm_link\.FieldOf\s*\(",
-     "only": [_M + "motion/estimation/global_model/link/CameraLabelFill.cpp"]},
+     "what": "camera labels read a field other than the P7 pool entry's fit field (CameraLink::FitEntryOf)",
+     # gate-15a-D4 RETARGET (unseeded): any second field read in the label fill / producer files. NO wide: FlowOf / SeedFieldOf
+     # are legitimate in CameraExtension.cpp.
+     "re": r"\bm_link\.FieldOf\s*\(|\bVerifiedField\b|\bLiveFrom\s*\(|\bSeedFieldOf\s*\(|\bFlowOf\s*\(|(\.|->)\s*Field\s*\(\s*\)"
+           r"|\bP3FieldSet\b|\bAcquire\s*\(\s*(VpSkeleton::)?kP3AnalysisField",
+     "only": [_M + "motion/estimation/global_model/link/CameraLabelFill.cpp", _M + "motion/estimation/global_model/link/CameraLabelFill.h",
+              _M + "motion/estimation/global_model/link/CameraLabelProducer.cpp",
+              _M + "motion/estimation/global_model/link/CameraLabelProducer.h"]},
     {"id": "D5", "product": "kP13SourceRing", "refs": "122 s9 D5",
      "what": "producer CPU luma decode (code >> 6) / GPU row upload shift",
      "re": r">>\s*6\b|<<\s*(view\.)?(msbShift|shift)\b",

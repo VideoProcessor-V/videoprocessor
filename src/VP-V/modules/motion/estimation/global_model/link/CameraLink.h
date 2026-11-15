@@ -75,7 +75,11 @@ namespace CameraLink
 		}
 		// The on-time seal's verdict on frame `seq` (Pending until OnTimeSeal(seq) ran; render thread). Default (fakes): Pending.
 		virtual SealVerdict OnTimeSealVerdict(uint64_t seq) const { (void)seq; return SealVerdict::Pending; }
-		virtual std::shared_ptr<const FieldCopy> FieldOf(uint64_t seq) const = 0;
+		// The P7 pool entry of `seq` as ONE read: the record and the fit field (the optical-flow seed copy the fit used, F2) come from the
+		// same entry, so a label pass never pairs a record with another entry's field. False (outputs cleared) when the entry is absent.
+		// Replaces FieldOf (C10 15a K2: the P8 field is the P7 record's fit field, never a separate read of the live field).
+		virtual bool FitEntryOf(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion>& rec,
+			std::shared_ptr<const FieldCopy>& field) const = 0;
 		// P8 for consumer `c` at frame `seq` (K2: first consumer fills, later ones reuse).
 		virtual bool LabelsFor(uint64_t seq, CameraConsumer c, CameraLabelsView& out) = 0;
 		// The guidance frame for the pair about to be searched (K4); null = refused or all switches off.

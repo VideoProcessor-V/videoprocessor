@@ -798,7 +798,9 @@ inline void AppendCameraProducts(std::vector<ProductDecl>& decls)
     ProductDecl p8 = Make(kP8CameraLabels, "p8_camera_labels", "camera labels", Backend::GpuCompute, 0, Tier::T0,
                           content, 0);
     AddInput(p8, kP7CameraFit, 0);
-    AddInput(p8, kP3AnalysisField, 0);
+    // C10 15a K2: P3 is NOT an input of P8. P8 is computed from the P7 record and that record's own fit field (the P2 optical-flow seed
+    // copy the fit used, one pool entry, CameraLink::FitEntryOf). F2: the fit reads only the optical-flow seed and the labels are
+    // residuals against that fit, so a P3 (matcher) field would mix two motion sources. The P2 read is catalogued as an ExternalView flag.
     AddTerm(p8, 4, 16);
     p8.size.fixedBytes = 256;
     p8.refRenderMs = 0.1f;

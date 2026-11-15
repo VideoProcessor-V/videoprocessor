@@ -118,15 +118,6 @@
    "max_hits": 15
   },
   {
-   "key": "a|D4|src/VP-V/modules/motion/estimation/global_model/link/CameraLabelFill.cpp",
-   "rule": "a",
-   "site": "D4",
-   "refs": "122 s9 D4",
-   "reason": "camera labels read as a FieldCopy through the link instead of P3",
-   "seed": true,
-   "max_hits": 2
-  },
-  {
    "key": "a|D5|src/VP-V/modules/input/source_analysis/lane/LaneGpuProducts.cpp",
    "rule": "a",
    "site": "D5",

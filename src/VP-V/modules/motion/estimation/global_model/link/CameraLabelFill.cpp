@@ -79,8 +79,9 @@ namespace CameraLink
 			return;
 		}
 		hdr.honoured = lease.indicator ? lease.indicator->StampOf(seq) : VpIndicator::Stamp();
-		const std::shared_ptr<const CameraModel::CameraMotion> rec = m_link.CausalRecord(seq);
-		const std::shared_ptr<const FieldCopy> field = m_link.FieldOf(seq);
+		std::shared_ptr<const CameraModel::CameraMotion> rec;
+		std::shared_ptr<const FieldCopy> field;
+		m_link.FitEntryOf(seq, rec, field);   // ONE pool read: the record and its fit field are the same entry
 		LabelTarget target;
 		target.live = false;
 		target.index = ticket.slot;
@@ -113,7 +114,10 @@ namespace CameraLink
 		Rebind();
 		VpSkeleton::SlotSet* p7 = m_lease.table ? m_lease.table->Find(VpSkeleton::kP7CameraFit) : nullptr;
 		const bool p7Sealed = p7 && p7->Read(seq).kind == VpSkeleton::ReadInfo::Ring;
-		const std::shared_ptr<const CameraModel::CameraMotion> rec = p7Sealed ? m_link.CausalRecord(seq) : nullptr;
+		std::shared_ptr<const CameraModel::CameraMotion> rec;
+		std::shared_ptr<const FieldCopy> field;
+		if (p7Sealed)
+			m_link.FitEntryOf(seq, rec, field);   // ONE pool read: the record and its fit field are the same entry
 		if (!rec)
 		{
 			m_counters.declined.fetch_add(1, std::memory_order_relaxed);
@@ -122,7 +126,7 @@ namespace CameraLink
 		LabelTarget target;
 		target.live = true;
 		target.index = liveIndex;
-		if (!m_device.Produce(*rec, m_link.FieldOf(seq).get(), target))
+		if (!m_device.Produce(*rec, field.get(), target))
 		{
 			m_counters.declined.fetch_add(1, std::memory_order_relaxed);
 			return false;

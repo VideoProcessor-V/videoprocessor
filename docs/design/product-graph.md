@@ -174,6 +174,7 @@ A declaration is what a product or consumer is wired to read, not proof the code
 | product quality_pattern | p5_monitor_tiles | actual input is a view | C9b | actual input = the FrameQuality view of the P5 monitor tiles (modules/input/source_analysis/identity/FrameQuality.h); P5 stays the declared monitor snapshot |
 | product quality_pattern.causal | p5_monitor_tiles | actual input is a view | C9b | actual input = the FrameQuality view of the P5 monitor tiles (modules/input/source_analysis/identity/FrameQuality.h); P5 stays the declared monitor snapshot |
 | product p7_camera_fit | p2_vector_pair | external view (not declared) | C3 | external view: P2 via FlowOf (modules/motion/estimation/global_model/link/CameraExtension.cpp ahead fit); pair id recorded, not a declared input |
+| product p8_camera_labels | p2_vector_pair | external view (not declared) | C3 | the P7 record's fit field (pool entry via CameraLink::FitEntryOf): the P2 pair via FlowOf (ahead fit) or the optical-flow seed via SeedFieldOf (bridge); never P3 |
 | consumer detail pulse | grain.split | declared, not read | C10 | private bands (DetailPulse.h) |
 | consumer detail pulse | region_block_stats | declared, not read | C10 | private 32-px tiles |
 | consumer detail pulse | p4_source_stats | declared, not read | D10 | private cut / fade logic |

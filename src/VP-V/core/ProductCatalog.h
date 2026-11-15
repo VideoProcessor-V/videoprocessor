@@ -581,6 +581,8 @@ inline const std::vector<ProductFlag>& ProductFlags()
           "actual input = the FrameQuality view of the P5 monitor tiles (modules/input/source_analysis/identity/FrameQuality.h); P5 stays the declared monitor snapshot" },
         // D3: P7 reads P2 through IVectorEngine::FlowOf (pair id recorded) and declares only P4 (by design).
         { kP7CameraFit, kP2VectorPair, FlagKind::ExternalView, "C3", "external view: P2 via FlowOf (modules/motion/estimation/global_model/link/CameraExtension.cpp ahead fit); pair id recorded, not a declared input" },
+        // C10 15a K2: P8 is computed from the P7 record and that record's fit field (not from P3; F2).
+        { kP8CameraLabels, kP2VectorPair, FlagKind::ExternalView, "C3", "the P7 record's fit field (pool entry via CameraLink::FitEntryOf): the P2 pair via FlowOf (ahead fit) or the optical-flow seed via SeedFieldOf (bridge); never P3" },
     };
     return flags;
 }

@@ -1203,8 +1203,11 @@ namespace SkeletonModuleTestsNs
 			const VpSkeleton::Graph& g = laneState->graph;
 			Assert::IsTrue(g.valid);
 			Assert::IsTrue(g.Has(VpSkeleton::kP7CameraFit) && g.Has(VpSkeleton::kP8CameraLabels));
-			Assert::IsTrue(g.Has(VpSkeleton::kP3AnalysisField) && g.Has(VpSkeleton::kP2mMatcherPair) && g.Has(VpSkeleton::kP4SourceStats),
-				L"the inputs of P7 / P8 are in the graph (P2 resolves to the matcher pair without an engine session)");
+			Assert::IsTrue(g.Has(VpSkeleton::kP4SourceStats) && g.Has(VpSkeleton::kP1HalfLuma),
+				L"the inputs of P7 / P8 are in the graph (P8 -> P7 -> P4 -> P1)");
+			// C10 15a K2 (F2): P8 declares P7 only, so neither P3 nor a motion pair is pulled into a camera-only graph.
+			Assert::IsFalse(g.Has(VpSkeleton::kP3AnalysisField), L"P8 declares P7 only (C10 15a K2, F2)");
+			Assert::IsFalse(g.Has(VpSkeleton::kP2mMatcherPair) || g.Has(VpSkeleton::kP2VectorPair), L"no motion pair without a P3 reader");
 			Assert::IsTrue(eng.fitWanted, L"the camera fit asked the engine to run");
 			const std::string text = rig.Command();
 			Assert::IsTrue(text.find("Skeleton engine feed:") != std::string::npos);
@@ -1353,7 +1356,11 @@ namespace SkeletonModuleTestsNs
 			rig.ResyncApply("on");
 			rig.Life(RE::Lifecycle::GpuCreated);
 			int owner = 0;
-			rig.sk.SetExternalDemand(rig.Host(), &owner, CameraConsumers(), { VpSkeleton::kP7CameraFit, VpSkeleton::kP8CameraLabels });
+			// C10 15a K2: P8 no longer declares P3, so the camera demand alone holds no P2m / P3 slot to publish. Add a P3 reader (GrainMap:
+			// P8 + P3) so the graph holds the field slots this test is about; the assertions below are unchanged.
+			std::vector<VpSkeleton::ConsumerDecl> feedConsumers = CameraConsumers();
+			feedConsumers.push_back(CameraLink::DeclarationOf(CameraLink::CameraConsumer::GrainMap));
+			rig.sk.SetExternalDemand(rig.Host(), &owner, feedConsumers, { VpSkeleton::kP7CameraFit, VpSkeleton::kP8CameraLabels });
 			for (int64_t s = 1; s <= 3; ++s)
 				rig.Frame(s);
 			// The engine made the field of the pair (4, 5) while frame 4 renders: the stamp it was computed under is the Indicator's stamp of 5
