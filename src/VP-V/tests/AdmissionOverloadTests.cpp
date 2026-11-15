@@ -374,6 +374,54 @@ namespace AdmissionOverloadTest
 			Assert::AreEqual(std::string("++"), std::string(CostMark(1.5, true)));
 			Assert::AreEqual(std::string("+++"), std::string(CostMark(2.5, true)));
 		}
+
+		// C4 s3a (owner OD:391, 2026-11-11 07:45: the regulator switches off optional extras only, "never core, never TD"; 115 #47 / #59):
+		// the TD products are the TD slice's OWN jobs - admitted with the slice (even unmeasured, even when the slice is short), costed inside
+		// it (fill and slice unchanged by their presence), never "not measured" fill and never in the FillOff list (OptionalFillIds).
+		TEST_METHOD(TdProductsAreTheSlicesJobsNeverOptionalFill)
+		{
+			const ProductId td[] = { kTdBlocks, kTdMemory, kTdAnchorPass, kTdAnchorRefs, kTdDelta, kTdMaps, kTdTrailSummary };
+			const AdmissionFacts base = Facts(60.0, 6.0, 1.0);
+			const Result r0 = Admit(base);
+			AdmissionFacts f = base;
+			for (ProductId id : td) Put(f, id, 0.5, false);   // unmeasured: an optional fill would be left out as "not measured"
+			Result r = Admit(f);
+			for (ProductId id : td)
+			{
+				Assert::IsTrue(r.cls[id] == JobClass::Slice, L"a TD product is Slice class");
+				Assert::IsTrue(r.admitted[id], L"admitted with the TD slice");
+				Assert::IsFalse(r.notMeasured[id], L"never 'not measured' optional fill");
+			}
+			Assert::AreEqual(r0.sliceMs, r.sliceMs, 1e-12, L"costed inside the slice, never on top of it");
+			Assert::AreEqual(r0.fillMs, r.fillMs, 1e-12, L"never admitted from the fill leftovers");
+			Assert::AreEqual(r0.coreMs, r.coreMs, 1e-12);
+			Assert::AreEqual(FillOn(base, r0), FillOn(f, r));
+			Assert::IsTrue(r.line.find("not measured") == std::string::npos);
+			Assert::IsTrue(r.line.find("TD jobs 7 in the TD slice") != std::string::npos);
+
+			// the FillOff list is the admitted optional fills only (P5, P9, P10 of the fixture, in id order): no TD, no core
+			const std::vector<ProductId> fills = OptionalFillIds(r);
+			Assert::IsTrue(fills == std::vector<ProductId>{ kP5MonitorTiles, kP9CameraSmoothed, kP10GrainSplit });
+			for (ProductId id : td)
+				Assert::IsTrue(std::find(fills.begin(), fills.end(), id) == fills.end(), L"a TD product is never in FillOff's list");
+
+			// core over the budget: the slice is 0 (TD's reduced tier, shown) and the TD products stay admitted; FillOff's list is empty
+			AdmissionFacts over = Facts(60.0, 14.0, 4.0);
+			for (ProductId id : td) Put(over, id, 0.5, true);
+			r = Admit(over);
+			Assert::IsTrue(r.coreOver);
+			Assert::AreEqual(0.0, r.sliceMs);
+			Assert::IsTrue(r.tdReduced);
+			for (ProductId id : td) Assert::IsTrue(r.admitted[id], L"a short slice is TD's own ladder, never a TD product switched off");
+			Assert::IsTrue(OptionalFillIds(r).empty());
+
+			// games: optional fill off; the TD products stay TD's (its backward-only tier), never moved to fill
+			f.mode = LatencyMode::Games;
+			r = Admit(f);
+			Assert::AreEqual(0, FillOn(f, r));
+			for (ProductId id : td) Assert::IsTrue(r.admitted[id] && r.cls[id] == JobClass::Slice);
+			Assert::IsTrue(OptionalFillIds(r).empty());
+		}
 	};
 
 	TEST_CLASS(OverloadOrderTests)

@@ -18,7 +18,7 @@
 //  - Gap eligibility (S2-T1): in core_first the gap carries only backfill (Fill); Core / Derived / Slice / Unpack never go to RunGap.
 //  - StaticClassOf: the class of a lane product until S3's admission table decides it at Configure from measured costs (doc 91 C :79 fixed
 //    core set; P10 optional fill until its 4K cost <= 2 ms is proven, coordinator 2026-11-14 08:22 via lead 10 Q4 / doc 91 C :119; P12 is
-//    Derived-live: an Acquire live fill, not a job).
+//    Derived-live: an Acquire live fill, not a job; the TD products are the TD slice's own jobs, OD:391). Every id is classed explicitly.
 // Pure C++14 apart from the runner type (a template parameter, so tests drive a fake).
 
 #include <VP-V/core/LaneGapChunk.h>
@@ -34,15 +34,21 @@
 namespace VpSkeleton {
 
 // The class of a product before S3 (static; doc 91 C :79 / :119, Q4). `jobbed` false = no job at all (Derived-live through Acquire).
+// `classed` false = the id is not in the table below (never the case for an id below kSkeletonProductEnd: SchedulerS2Tests checks each id).
 struct StaticClass {
     JobClass cls;
     bool jobbed;
+    bool classed = true;
 };
+
+// Every id of the fixed table is classed EXPLICITLY: there is no default class (C4 s3a; owner OD:391, 2026-11-11 07:45: the regulator
+// switches off optional extras only, "never core, never TD"; 115 #47 / #59). A new id fails this assert and the per-id test until classed.
+static_assert(kSkeletonProductEnd == 35, "a new product id: class it explicitly in StaticClassOf (no default class)");
 
 inline StaticClass StaticClassOf(ProductId id)
 {
     switch (id) {
-    // fixed core set, never shed for time (doc 91 C :79): P1 + P2 (P2m), P7 / P8, P3, P15 / P16, P4 + P11
+    // fixed core set, never shed for time (doc 91 C :79; OD:391 (1)): P1 + P2 (P2m), P7 / P8, P3, P15 / P16, P4 + P11
     case kP1HalfLuma: case kP2VectorPair: case kP2mMatcherPair: case kP3AnalysisField: case kP4SourceStats:
     case kP7CameraFit: case kP8CameraLabels: case kP11RegionBlockStats: case kQualityPattern: case kCodingEvidence:
         return StaticClass{ JobClass::Core, true };
@@ -52,12 +58,23 @@ inline StaticClass StaticClassOf(ProductId id)
     // derived-live: filled at first read through Acquire, never a job
     case kP12LightLevel:
         return StaticClass{ JobClass::Derived, false };
+    // TD's own products: the jobs of the TD reserved slice (OD:391 (2)/(3); 115 #47 "regulator can never shed TD"). Admitted inside the
+    // slice (AdmissionTable.h Admit), never optional fill, never in the arbiter's FillOff list: TD steps down only its own ladder (OD:612 (3)).
+    case kTdBlocks: case kTdMemory: case kTdAnchorPass: case kTdAnchorRefs: case kTdDelta: case kTdMaps: case kTdTrailSummary:
+        return StaticClass{ JobClass::Slice, true };
     // optional fill, admitted once at Configure (doc 91 C :79): P5, P6, P9, P10 (until proven, :119), P10c
     case kP5MonitorTiles: case kP6EntranceAhead: case kP9CameraSmoothed: case kP10GrainSplit: case kP10cGrainSplitChroma:
         return StaticClass{ JobClass::Fill, true };
-    default:
+    // optional fill ("everything else optional fill", OD:391 (1)): P0 re-base decision, P7g camera guide, P13 source ring, P14 / P14g
+    // held-state records, P15c causal quality pattern
+    case kP0RebaseDecision: case kP7gCameraGuide: case kP13SourceRing: case kSourceIdentity: case kSourceGeometry: case kQualityPatternCausal:
+        return StaticClass{ JobClass::Fill, true };
+    // the C3 fixed-table ids 30..34 (R14-95): optional fill under OD:391 (1) until each lands with its owner fill; the landing lane
+    // re-classes its id here if the owner rules it core
+    case kBandMemo: case kEdgeMap: case kFocusMap: case kRoomLight: case kComposedVectors:
         return StaticClass{ JobClass::Fill, true };
     }
+    return StaticClass{ JobClass::Fill, false, false };   // not an id of the table: no job (never admitted) and visibly unclassed
 }
 
 // S2-T1: what the gap may carry. core_first = backfill only; shared_gap (R10) = every registration.

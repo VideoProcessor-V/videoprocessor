@@ -13,6 +13,8 @@
 //  - Optional fill (P5, P6, P9, P10c, P12-as-job, long pair) admitted ONCE at Configure from the ledger (doc 91 C :79); an UNMEASURED optional
 //    product is not admitted and says "not measured" (S3-T4; rule 5).
 //  - P10 (grain split) is optional fill until <= 2 ms at 4K is proven, then core (doc 91 C :119 D7; coordinator 2026-11-14 08:22 via lead 10, Q4).
+//  - TD's products (td.*, Slice class) are the TD slice's own jobs, admitted with the slice and costed inside it; never optional fill, never in
+//    the FillOff list (owner OD:391 2026-11-11 07:45 "never core, never TD"; 115 #47 / #59). Every id has an explicit class (StaticClassOf).
 //  - TD reserved slice: derived at Configure from the MEASURED remainder (budget - core), never a fixed number (coordinator 2026-11-14 08:22
 //    via lead 10, Q3); below TD's minimum TD shows its reduced tier (the line says so). The 3090 "4K ~8 ms + P10" is a design figure, never
 //    a constant here; 3090 numbers are estimates until a VP run there (feedback-no-waiting-on-3090) and are shown as "estimated".
@@ -348,6 +350,15 @@ inline Result Admit(const AdmissionFacts& f)
         r.tdReduced = r.sliceMs < f.tdMinMs;
         left -= r.sliceMs;
     }
+    // The TD products (Slice class, LaneSpareWork.h StaticClassOf) are the slice's OWN jobs (OD:391 (2)/(3); 115 #47 / #59): admitted with
+    // TD, costed inside sliceMs (never on top of it, never from fill leftovers), never "not measured" fill and never in the FillOff list
+    // (OptionalFillIds). A short slice is TD's own reduced tier (tdReduced, shown), never a TD product switched off.
+    uint32_t sliceJobs = 0;
+    for (size_t i = 0; i < kProductCount; ++i) {
+        if (!f.present[i] || r.cls[i] != JobClass::Slice || !r.jobbed[i]) continue;
+        r.admitted[i] = true;
+        ++sliceJobs;
+    }
 
     // 3. Fill in what is left, in product order, measured only. Games: none (backward products only).
     uint32_t fillOn = 0, fillOff = 0, fillUnmeasured = 0;
@@ -368,9 +379,20 @@ inline Result Admit(const AdmissionFacts& f)
         unsigned(fillOn), unsigned(fillOff), fillUnmeasured > 0 ? ", not measured " : "",
         fillUnmeasured > 0 ? std::to_string(fillUnmeasured).c_str() : "");
     r.line = buf;
+    if (sliceJobs > 0) r.line += "; TD jobs " + std::to_string(sliceJobs) + " in the TD slice";
     if (!rb.Measured() || !(hz > 0.0)) r.line += "; no budget (render or source rate not measured)";
     PlanAhead(f, r);
     return r;
+}
+
+// The optional fills the admission turned on: what the wiring hands OverloadArbiter::SetOptionalFills (core/OverloadOrder.h), so FillOff
+// switches off optional extras only (OD:391 (2): never core, never TD). Fill class only: a Core, Derived or Slice (TD) product is never listed.
+inline std::vector<ProductId> OptionalFillIds(const Result& r)
+{
+    std::vector<ProductId> ids;
+    for (size_t i = 0; i < kProductCount; ++i)
+        if (r.admitted[i] && r.jobbed[i] && r.cls[i] == JobClass::Fill) ids.push_back(ProductId(i));
+    return ids;
 }
 
 }   // namespace Admission

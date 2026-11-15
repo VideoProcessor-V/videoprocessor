@@ -225,6 +225,53 @@ namespace SchedulerS2Test
 			Assert::IsTrue(Admission::ClassOf(kP10cGrainSplitChroma, f).cls == JobClass::Fill, L"only P10 is promoted");
 		}
 
+		// C4 s3a (owner OD:391, 2026-11-11 07:45; 115 #47 / #59): every ProductId below kSkeletonProductEnd has an EXPLICIT class (no default
+		// class in StaticClassOf), checked against this test's own expected table, which itself fails on any id it does not list. The TD
+		// products are Slice (the TD slice's jobs), never optional fill.
+		TEST_METHOD(EveryProductIdHasAnExplicitClassTdIsSlice)
+		{
+			for (ProductId id = 0; id < kSkeletonProductEnd; ++id)
+			{
+				const std::wstring at = L"id " + std::to_wstring(id);
+				JobClass want = JobClass::Unpack;
+				bool jobbed = true;
+				switch (id)
+				{
+				case kP1HalfLuma: case kP2VectorPair: case kP2mMatcherPair: case kP3AnalysisField: case kP4SourceStats:
+				case kP7CameraFit: case kP8CameraLabels: case kP11RegionBlockStats: case kQualityPattern: case kCodingEvidence:
+					want = JobClass::Core;
+					break;
+				case kRefinedField:
+					want = JobClass::Derived;
+					break;
+				case kP12LightLevel:
+					want = JobClass::Derived;
+					jobbed = false;
+					break;
+				case kTdBlocks: case kTdMemory: case kTdAnchorPass: case kTdAnchorRefs: case kTdDelta: case kTdMaps: case kTdTrailSummary:
+					want = JobClass::Slice;
+					break;
+				case kP0RebaseDecision: case kP5MonitorTiles: case kP6EntranceAhead: case kP7gCameraGuide: case kP9CameraSmoothed:
+				case kP10GrainSplit: case kP10cGrainSplitChroma: case kP13SourceRing: case kSourceIdentity: case kSourceGeometry:
+				case kQualityPatternCausal: case kBandMemo: case kEdgeMap: case kFocusMap: case kRoomLight: case kComposedVectors:
+					want = JobClass::Fill;
+					break;
+				default:
+					Assert::Fail((at + L": no expected class - class the new id explicitly in StaticClassOf and here").c_str());
+				}
+				const StaticClass s = StaticClassOf(id);
+				Assert::IsTrue(s.classed, (at + L": classed explicitly, never by a default").c_str());
+				Assert::IsTrue(s.cls == want, (at + L": class").c_str());
+				Assert::AreEqual(jobbed, s.jobbed, (at + L": jobbed").c_str());
+				if (want == JobClass::Slice)
+					Assert::IsFalse(GapEligible(DeclOf(id, s.cls, 0), ScheduleMode::CoreFirst), (at + L": a TD job is never core_first gap fill").c_str());
+			}
+			// an id outside the table is visibly unclassed and never a job (never admitted)
+			Assert::IsFalse(StaticClassOf(kSkeletonProductEnd).classed);
+			Assert::IsFalse(StaticClassOf(kSkeletonProductEnd).jobbed);
+			Assert::IsFalse(StaticClassOf(kNoProduct).classed);
+		}
+
 		// S2-T5: the Original pathway registers no lane job either.
 		TEST_METHOD(OriginalRegistersNoLaneJob)
 		{
