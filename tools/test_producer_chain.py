@@ -219,6 +219,15 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(edge(doc, "kPc", "kPa")["interim"], "tap plane")
         self.assertIn("INTERIM (tap plane)", edge(doc, "kPc", "kPa")["note"])
 
+    def test_edge_read_override_is_scoped_not_a_dodge(self):
+        # jprod-a audit SHOULD 1: an edge override narrows the read shape; the same edge still reads R when the narrowed
+        # shape is present (the override never hides a real read).
+        mp = dict(MAP)
+        mp["edges"] = {"kPc<-kPc": {"read": ["\\bAcquire\\(\\s*kPc\\s*,\\s*req\\.seq\\s*-\\s*1\\b"]}}
+        self.assertEqual(edge(self.doc("", "void g(){ Acquire(kPc, seq); }"), "kPc", "kPc")["status"], "R")
+        self.assertEqual(edge(self.doc("", "void g(){ Acquire(kPc, seq); }", mp), "kPc", "kPc")["status"], "N")
+        self.assertEqual(edge(self.doc("", "void g(){ m.Acquire(kPc, req.seq - 1); }", mp), "kPc", "kPc")["status"], "R")
+
 
 class RepoTests(unittest.TestCase):
     """Invariants of the real tree that lane fixes must not break (the X / N rows are NOT pinned)."""
@@ -261,11 +270,23 @@ class RepoTests(unittest.TestCase):
 
     def test_p16_is_a_real_producer(self):
         # L-P16 (r2/job1-p16): kCodingEvidence owner fill is registered, so its edges are verdicts, never NP.
+        self.assertEqual(sum(1 for t in self.doc["products"] if t["id"] == "kCodingEvidence"), 1,
+                         "exactly one kCodingEvidence row (the loop below must not pass vacuously)")
         for t in self.doc["products"]:
             if t["id"] == "kCodingEvidence":
                 self.assertFalse(t["no_producer"])
                 self.assertTrue(any(f.endswith("CodingEvidence.cpp") for f in t["producer_files"]))
                 self.assertTrue(all(e["status"] != "NP" for e in t["edges"]))
+
+    def test_p16_self_edge_is_not_R_while_the_fill_ignores_its_memo(self):
+        # jprod-a audit SHOULD 1: the declared P16 lag-1 self edge is read only if the owner fill asks its memo for the
+        # previous frame. MakeOwnerFill's fill takes the SkeletonMemo unnamed (ignored); Hub::AcquireTiles is the consumer.
+        path = os.path.join(REPO, "src", "VP-V", "modules", "input", "source_analysis", "regions", "CodingEvidence.cpp")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertRegex(text, r"OwnerFillRequest&\s*req\s*,\s*VpSkeleton::SkeletonMemo&\s*,",
+                         "the fill now names its memo: re-check the P16 lag-1 verdict and update this pin")
+        self.assertEqual(edge(self.doc, "kCodingEvidence", "kCodingEvidence")["status"], "N")
 
     def test_every_no_producer_product_has_an_owner_or_trigger(self):
         self.assertEqual(self.doc["unowned_no_producer"], [])
