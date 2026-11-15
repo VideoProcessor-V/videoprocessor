@@ -181,7 +181,7 @@ namespace VpFrameAnalysis
 			identity.height = source.height;
 			identity.encoding = static_cast<uint32_t>(source.encoding);
 			identity.colorspace = static_cast<uint32_t>(source.colorspace);
-			identity.range = SamplerCodesAreFullRange(source) || source.fullRangeYuv ?
+			identity.range = source.CodesFullRange() || source.fullRangeYuv ?
 				FrameAnalysis::SourceRange::Full : FrameAnalysis::SourceRange::Limited;
 			identity.picture = picture.Empty() ? FrameAnalysis::Rect{ 0, 0, source.width, source.height } : picture;
 			identity.sourceGeneration = source.generation;

@@ -45,21 +45,21 @@ namespace VpFrameAnalysis
 	// ---- Range model (WP-23 decision; docs/design/wp23-frame-analysis-store.md) ----
 	// VP's analysis domain is 10-bit studio codes. With AnalysisLumaSource::limitedDomain (VP-V
 	// pathway, source_coding_fixes) the sampler already emits them; Bill's v1.4.02 sampler
-	// (Original pathway) emits the delivered codes with an AnalysisLumaRange tag. This ONE
-	// function answers from the source (AnalysisLumaSource::CodesFullRange, merge 2026-10-31).
-	bool SamplerCodesAreFullRange(const AnalysisLumaSource& source);
-	// Sampler luma code (0..1023) -> studio code, the single conversion for every VP consumer.
-	std::array<uint16_t, 1024> StudioLumaMap(const AnalysisLumaSource& source);
+	// (Original pathway) emits the delivered codes with an AnalysisLumaRange tag. The ONE range
+	// function is the decode owner's AnalysisLumaSource::CodesFullRange (merge 2026-10-31; 15c C6
+	// deleted this producer's wrapper of it). Sampler luma code (0..1023) -> studio code, the single
+	// conversion for every VP consumer: the decode owner's StudioLumaMap (AnalysisLumaDomain.h).
+	using Vpv::AnalysisDomain::StudioLumaMap;
 
-	// ---- The single luma decode ----
-	// True when the format's luma must be decoded (not already a readable 10-bit plane).
-	bool NeedsDecode(const AnalysisLumaSource& source);
-	// Gives the source an empty shared plane when it needs a decode (before the source is copied
-	// out to readers, so every copy shares it). No-op otherwise or when it has one.
+	// ---- The single luma decode (the decode owner's, 15c C6; owner answer 3, 2026-11-15) ----
+	// Gives the source an empty pooled shared plane when the owner says it needs one
+	// (Vpv::AnalysisDomain::NeedsLumaPlane), before the source is copied out to readers, so every copy
+	// shares it. No-op otherwise or when it has one.
 	void AttachSharedLuma(AnalysisLumaSource& source);
-	// Fills and publishes the shared plane once (the first caller that claims it). False when there
-	// is nothing to do (no plane, already claimed, a format that cannot be read).
-	bool DecodeSharedLuma(const AnalysisLumaSource& source);
+	// Fills and publishes the shared plane once (the first caller that claims it): the decode owner's
+	// Vpv::AnalysisDomain::DecodeSharedLuma. False when there is nothing to do (no plane, already
+	// claimed, a format that cannot be read).
+	using Vpv::AnalysisDomain::DecodeSharedLuma;
 	// Planes are recycled from a small pool once nothing holds them; the store's switch-off empties it.
 	void ReleasePlanePool();
 	size_t PlanePoolSize();

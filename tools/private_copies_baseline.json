@@ -118,33 +118,6 @@
    "max_hits": 15
   },
   {
-   "key": "a|D6|src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp",
-   "rule": "a",
-   "site": "D6",
-   "refs": "122 s9 D6 / doc 91 D C9",
-   "reason": "C9 producer own RGB / full-range luma decode (named exception until EPE is compared)",
-   "seed": true,
-   "max_hits": 5
-  },
-  {
-   "key": "a|D6~moved|src/VP-V/modules/input/source_analysis/VpFrameAnalysis.h",
-   "rule": "a",
-   "site": "D6~moved",
-   "refs": "audit B0 (moved-copy detection)",
-   "reason": "the seeded signature also occurs in a sibling file of the same module/producer (declaration or a second module with the same private pattern); counted so it cannot grow",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
-   "key": "a|D6~moved|src/VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h",
-   "rule": "a",
-   "site": "D6~moved",
-   "refs": "audit B0 (moved-copy detection)",
-   "reason": "the seeded signature also occurs in a sibling file of the same module/producer (declaration or a second module with the same private pattern); counted so it cannot grow",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
    "key": "a|X1|src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
    "rule": "a",
    "site": "X1",

@@ -15,19 +15,6 @@ namespace VpFrameAnalysis
 {
 	namespace
 	{
-		bool PlaneFormat(const AnalysisLumaSource& source)
-		{
-			return source.format == AnalysisLumaFormat::P010 || source.format == AnalysisLumaFormat::P210 ||
-				source.format == AnalysisLumaFormat::DecodedDolbyVision422;
-		}
-
-		// Symmetric round-half-away-from-zero, as AnalysisLumaSource's FullLumaToLimited.
-		int RoundDivide(int64_t numerator, int64_t denominator)
-		{
-			return static_cast<int>(numerator >= 0 ? (numerator + denominator / 2) / denominator :
-				-((-numerator + denominator / 2) / denominator));
-		}
-
 		uint16_t Percentile(const std::array<uint32_t, FrameAnalysis::kHistogramBins>& histogram, uint64_t samples,
 			double q)
 		{
@@ -41,28 +28,8 @@ namespace VpFrameAnalysis
 		}
 	}
 
-	bool SamplerCodesAreFullRange(const AnalysisLumaSource& source)
-	{
-		// WP-21 (merge 2026-10-31): the source says which domain its codes are in. VP-V
-		// pathway (limitedDomain, DIV-AN-01): the sampler already mapped full-range levels to
-		// studio codes; Original pathway (Bill's model): delivered full-range codes.
-		return source.CodesFullRange();
-	}
-
-	std::array<uint16_t, 1024> StudioLumaMap(const AnalysisLumaSource& source)
-	{
-		std::array<uint16_t, 1024> map{};
-		const bool full = SamplerCodesAreFullRange(source);
-		for (int code = 0; code < 1024; ++code)
-			map[code] = static_cast<uint16_t>(full ?
-				(std::max)(0, (std::min)(1023, 64 + RoundDivide(static_cast<int64_t>(code) * 876, 1023))) : code);
-		return map;
-	}
-
-	bool NeedsDecode(const AnalysisLumaSource& source)
-	{
-		return source.IsValid() && !(PlaneFormat(source) && !source.fullRangeYuv);
-	}
+	// 15c C6: the range question (CodesFullRange), the studio map, the need for a plane and the plane's decode are the
+	// decode owner's (AnalysisLumaDomain.h, Vpv::AnalysisDomain); this producer only pools the planes and reads them.
 
 	namespace
 	{
@@ -110,40 +77,8 @@ namespace VpFrameAnalysis
 
 	void AttachSharedLuma(AnalysisLumaSource& source)
 	{
-		if (!source.sharedLuma && NeedsDecode(source))
+		if (!source.sharedLuma && Vpv::AnalysisDomain::NeedsLumaPlane(source))
 			source.sharedLuma = AcquirePlane();
-	}
-
-	bool DecodeSharedLuma(const AnalysisLumaSource& source)
-	{
-		AnalysisLumaPlane* plane = source.sharedLuma.get();
-		if (!plane || !source.IsValid() || plane->Ready() || !plane->TryClaim())
-			return false;
-		const int width = source.width, height = source.height;
-		plane->Bind(source);
-		// resize, not assign: a recycled plane of the same size keeps its storage and is not
-		// zero-filled (every element is written below).
-		plane->codes.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
-		for (int y = 0; y < height; ++y)
-		{
-			uint16_t* row = plane->codes.data() + static_cast<size_t>(y) * static_cast<size_t>(width);
-			if (source.SampleLumaRow(0, y, width, row))
-				continue;
-			for (int x = 0; x < width; ++x)
-			{
-				AnalysisLumaSample sample;
-				if (!source.Sample(x, y, sample))
-				{
-					// Unreadable: never published; every reader keeps decoding for itself.
-					plane->codes.clear();
-					plane->codes.shrink_to_fit();
-					return false;
-				}
-				row[x] = sample.luma;
-			}
-		}
-		plane->Publish();
-		return true;
 	}
 
 	const uint16_t* LumaRowReader::Row(int y, int x0, int count)
@@ -297,6 +232,8 @@ namespace VpFrameAnalysis
 	{
 		// Mirrors MotionAheadProducer.cpp HalfLuma8's planar16 / rgbOwnDecode / full-range 4:2:2 split (the producer's own
 		// codes): planar P010 / P210 at limited range equal the shared decode's codes; at full range they are raw words.
+		// 15c C6: for these YCbCr formats the producer's raw words differ exactly when the decode owner maps the codes
+		// (MapsToLimitedDomain, which for a non-RGB format is the fullRangeYuv flag): asked of the owner, not re-derived.
 		const VideoFrameEncoding e = source.encoding;
 		if (source.format == AnalysisLumaFormat::NativeRgb)
 			return e == VideoFrameEncoding::R12B || e == VideoFrameEncoding::R12L || e == VideoFrameEncoding::R210 ||
@@ -304,7 +241,7 @@ namespace VpFrameAnalysis
 				e == VideoFrameEncoding::ARGB_8BIT;
 		if (source.format == AnalysisLumaFormat::P010 || source.format == AnalysisLumaFormat::P210 ||
 			source.format == AnalysisLumaFormat::NativeYuv422)
-			return source.fullRangeYuv;
+			return source.MapsToLimitedDomain();
 		return false;
 	}
 

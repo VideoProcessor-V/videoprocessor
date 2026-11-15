@@ -218,6 +218,14 @@ P13 for the planes ON THE RENDER DEVICE in the current render frame. Contract: `
 - S-2a: `GpuRgbUnpack::SetWideLuma(true)` writes the R12 matcher luma as Q6 fractions on the 10-bit axis (`AnalysisAxis10.h`);
   default off keeps the CPU formatter's ten-bit law bit for bit. 12-bit arrives only through the DV tunnel (OWNER 2026-11-14 08:30 EST,
   `D:/codex/vp-handover/refs/owner-decisions-2026-11-07.md:691`); enabling it from the renderer needs a Bill-file call site (rule 33, open).
+- 15c C6 (OWNER ANSWER 2026-11-15 (3), lead18/coreplan-C10-15c-PC-regions.md: "the central one should be able to be changed to
+  accommodate for this"): the decode owner (102b CP-A1-D6-C9-PRODUCER-DECODE: `GpuRgbUnpack` + `AnalysisLumaSource`) was extended,
+  so the frame-analysis producer keeps no RGB / full-range decode of its own. The extension is on the CPU half, where the analysers'
+  values come from: `AnalysisLumaSource`'s VP-V face `input/source_analysis/AnalysisLumaDomain.h` now owns the shared luma plane
+  (`DecodeSharedLuma`, `NeedsLumaPlane`) and the studio map (`StudioLumaMap`), bit-identical to the producer's former copy
+  (`source_analysis/tests/DecodeOwnerIdentityTests.cpp`). `GpuRgbUnpack` is unchanged: its luma is the CPU formatter's law (the
+  matcher's values), not `Sample()`'s, so it is not what the producer decoded, and a GPU twin of `Sample()` could not be proven
+  identical on the CPU.
 
 ## Known issues / open items
 

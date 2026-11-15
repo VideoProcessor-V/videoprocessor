@@ -35,6 +35,12 @@ VP owns two file pairs in this folder (moved by `git mv` in M2 step 10): `Source
   - Frame-bound mode (resync Q3, default off; the behaviour with it off is unchanged): `SetFrameBound(on, leadFramesD)`, `FrameBound()`, `FrameLead()`, `ReadyFor(s)`, `AnalysedThrough()`, `NoteWaitMissed()`, and the counters `HeldDropped()`, `WaitsMissed()`, `ClockStepsBack()`, `HeldCount()`. See "Frame-bound mode" below.
   - Tests: `AnalyseTilesForTest` (synchronous, no GPU), `InjectResultForTest` and `NoteSubmittedForTest` (frame-bound tests), `FadeWeight`, `FadeMixTimestamps`, `FadeMixValue`.
   - Free function `Describe(snapshot, autoRatio, autoSelected)`: the status text.
+- `AnalysisLumaDomain.h` (the decode owner's VP-V face, 15c C6): `Vpv::AnalysisDomain::NeedsLumaPlane(source)` (the format's luma
+  is not a readable 10-bit plane: every RGB / 4:2:2 / packed format, and P010 / P210 / decoded DV at full range),
+  `DecodeSharedLuma(source)` (fill + publish the shared plane once) and `StudioLumaMap(source)` (sampler code -> studio code via
+  `CodesFullRange()`). `VpFrameAnalysis` re-exports `DecodeSharedLuma` / `StudioLumaMap` (using-declarations) and only pools the
+  planes (`AttachSharedLuma`, `ReleasePlanePool`); `NeedsDecode` and `SamplerCodesAreFullRange` are deleted (call
+  `NeedsLumaPlane` / `source.CodesFullRange()`).
 - `VpFrameAnalysis.h` (C9 commit A, doc 105 phase 4a; the frame's luma view and the P1 engine reader):
   - `SourceViewOf(source, view)`: the frame's decoded luma as the lane reads it (10-bit sampler codes, msbShift 6, stride = width; `keepAlive` holds the plane): the shared plane, or a pooled plane decoded here for P010 / P210 / decoded DV. False when no plane is ready. The source frame tap delivers exactly this view.
   - `LiveEngine8(source, out, hw, hh)`: the P1 engine half through the shared decode (the live fill): `DecodeSharedLuma`, `SourceViewOf`, `HalfLumaRows`, `Engine8Half`. False without a 10-bit view (`Engine8Half` is exact for msbShift 6 only).
@@ -325,6 +331,18 @@ Chain tests:
   results (the enabled LED drive); `SourceFrameTap::StoreRaisedByDemand` tells Ctrl+I that the demand alone keeps it on. The
   configured value is never changed; the host never hands arrivals over in the Original pathway and the skeleton never demands there
   (COORDINATOR 2026-11-15 13:53 EST, `D:/codex/vp-handover/refs/owner-decisions-2026-11-07.md:831`; OWNER 2026-11-15 06:58 EST, log:788).
+- ONE decoder for RGB and full-range 4:2:x too (15c C6, checker site D6). OWNER ANSWER 2026-11-15 (3), lead18/coreplan-C10-15c-PC-regions.md
+  commit C6: "the central one should be able to be changed to accommodate for this". So the central decoder was extended instead of
+  keeping the producer's copy as a named exception: the decode owner (Bill's `AnalysisLumaSource` sampler + its VP-V face
+  `AnalysisLumaDomain.h`) now carries `Vpv::AnalysisDomain::NeedsLumaPlane`, `DecodeSharedLuma` (the frame's shared plane of
+  Sample().luma, 10-bit codes) and `StudioLumaMap` (the one sampler-code -> studio-code map, `FullLumaToLimited(code, 1)` when
+  `CodesFullRange()`). The range question has ONE function, the owner's `CodesFullRange()` (the producer's wrapper
+  `SamplerCodesAreFullRange` is deleted). No lossy switch, no EPE trade-off: the result is IDENTICAL, pinned by
+  `tests/DecodeOwnerIdentityTests.cpp` (the producer's former private decode frozen as the oracle, byte-equal planes, equal maps and
+  equal Measured records on R210 / R12B / R12L / BGRA / full-range P010, decoded DV, v210 and every other synthetic kind; both
+  pathways, BT.709 and BT.2020). Bit depths are unchanged: the plane holds the sampler's 10-bit codes (msbShift 6) as before; R12
+  sources reach the plane through Sample()'s 10-bit law exactly as before; the 12-bit packed-DV view (`SourceViewOf12`, msbShift 4)
+  is untouched; nothing is narrowed. Cost: none added (the same loop, moved; header-inline).
 
 ## Known issues / open items
 
