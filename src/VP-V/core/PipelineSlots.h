@@ -52,6 +52,7 @@ namespace PipelineSlots
 		OutputPresentation, DriveProjectorControl, ControlNetRuntime, ControlDiagnostics, ControlConfig,
 		// Appended (ids are append-only: StageAfter keys use uint8(slot id)); their pipeline position is `order`.
 		ColourDmPre, ColourDmCurve, ColourDmTrims,
+		ScalingShared,
 		Count
 	};
 
@@ -105,6 +106,7 @@ namespace PipelineSlots
 		{ Id::ColourDmPre, "colour.dm_pre", Side::Input, 85, HookPoint::Host, Status::Placeholder, Origin::Vp },
 		{ Id::ColourDmCurve, "colour.dm_curve", Side::Processing, 172, HookPoint::Libplacebo, Status::Placeholder, Origin::Vp },
 		{ Id::ColourDmTrims, "colour.dm_trims", Side::Output, 205, HookPoint::PreOutput, Status::Placeholder, Origin::Vp },
+		{ Id::ScalingShared, "scaling.shared", Side::Input, 125, HookPoint::Host, Status::Placeholder, Origin::Vp },
 		} };
 		return kSlots;
 	}

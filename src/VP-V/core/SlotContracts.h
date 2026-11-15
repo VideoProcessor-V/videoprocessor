@@ -88,6 +88,7 @@ namespace PipelineSlots
 			switch (id)
 			{
 			case Id::InputCapture: case Id::InputSignal: case Id::InputQueueTiming: case Id::InputSourceAnalysis:
+			case Id::ScalingShared:   // function-only scaler unit, no caller yet: changes no picture
 			case Id::MotionVectorDelivery: case Id::OutputPresentation: case Id::DriveProjectorControl:
 			case Id::ControlNetRuntime: case Id::ControlDiagnostics: case Id::ControlConfig:
 				break;

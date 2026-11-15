@@ -37,6 +37,9 @@ namespace PrivateTextureScanTestsNs
 		{ "src/VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.cpp", "src/VP-V/modules/scaling/chroma_upscale/README.md" },
 		// BasicChromaGpu::Module::m_out: the stage's OUTPUT texture, handed to the caller and kept across frames (not a per-call temporary).
 		{ "src/VP-V/modules/scaling/chroma_upscale/basic/BasicChromaGpu.cpp", "src/VP-V/modules/scaling/chroma_upscale/README.md" },
+		// ScalerPass::Module: the per-slot OUTPUT textures (handed to the caller, kept across frames) and the per-slot two-pass temporary.
+		// EXPIRES when the first B1 caller of ScalerPass lands (102b row SCALERPASS-ARENA: caller-supplied out/temp textures from the arena or product store).
+		{ "src/VP-V/modules/scaling/shared/ScalerPass.cpp", "src/VP-V/modules/scaling/shared/README.md" },
 	};
 
 	static const char* const kScanDirs[] = {

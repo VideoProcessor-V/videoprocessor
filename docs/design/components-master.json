@@ -853,6 +853,39 @@
       "fallback_when_missing": "Off = libplacebo's chroma upscaler (today's behaviour)."
     },
     {
+      "slot": "scaling.shared",
+      "order": 125,
+      "status": "placeholder",
+      "code_location": "migrated",
+      "live_files": [
+        "src/VP-V/modules/scaling/shared/KernelTable.h",
+        "src/VP-V/modules/scaling/shared/ScalerGeometry.h",
+        "src/VP-V/modules/scaling/shared/ScalerReference.h",
+        "src/VP-V/modules/scaling/shared/ScalerPass.h",
+        "src/VP-V/modules/scaling/shared/ScalerPass.cpp",
+        "src/VP-V/modules/scaling/shared/README.md",
+        "src/VP-V/modules/scaling/shared/tests/ScalerPassTests.cpp",
+        "src/VP-V/modules/scaling/shared/tests/ScalerPassAdaptiveIdentityTests.cpp",
+        "src/VP-V/modules/scaling/shared/tests/README.md"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [],
+        "upstream_modules": [
+          "scaling.chroma_upscale"
+        ]
+      },
+      "fallback_when_missing": "Function-only unit with no caller yet; a failed pass returns false with LastError and the caller keeps its own path."
+    },
+    {
       "slot": "motion.vector_delivery",
       "order": 130,
       "status": "partial",

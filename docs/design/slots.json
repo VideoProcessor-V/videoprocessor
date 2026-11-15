@@ -914,6 +914,57 @@
       "movable": true
     },
     {
+      "id": "scaling.shared",
+      "name": "Shared scaler unit (ScalerPass)",
+      "unit": "scaling",
+      "side": "input",
+      "order": 125,
+      "status": "placeholder",
+      "hook_point": "host",
+      "purpose": "One shared separable scaler unit (ScalerPass + kernel table) that the scaling slots will call instead of each carrying its own copy (rule 20). Function-only today: nothing in the pipeline calls it yet, so it changes no picture.",
+      "contract": {
+        "input": "a texture and a destination size (any plane layout the caller names)",
+        "output": "a scaled texture, valid until the next Apply of that scaler slot",
+        "geometry": "per-axis ratios; ortho or polar kernels; siting per plane",
+        "delay_share": "0 frames",
+        "lookahead": "none"
+      },
+      "settings_keys": [],
+      "planned_keys": [],
+      "tiers": "not tiered: a library unit, no user setting",
+      "fallback": {
+        "entry": "Scaler pass: caller's own path (<reason>)",
+        "behaviour": "A failed pass returns false with LastError and the caller keeps its own path."
+      },
+      "upstream": [
+        "scaling.chroma_upscale"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": [
+          "byte-identical with no caller"
+        ],
+        "isolation": [
+          "ScalerPass model tests; GPU vs CPU model; migration identity vs AdaptiveDownscale faithful-ortho"
+        ],
+        "contract": [],
+        "chain": []
+      },
+      "open_items": [
+        "linear-light scaling refused until B1",
+        "antiring/polar reference gap",
+        "UPSC1-KERNEL-DUPLICATE (102b)"
+      ],
+      "decisions": [],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {}
+      },
+      "zone": "host",
+      "movable": false
+    },
+    {
       "id": "motion.vector_delivery",
       "name": "Vector delivery",
       "unit": "motion",

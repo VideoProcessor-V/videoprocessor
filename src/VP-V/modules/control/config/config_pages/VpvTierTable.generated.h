@@ -76,6 +76,7 @@ namespace Vpv
             t.slotList.push_back({ "scaling.route_4k", "4K route (entrance stage 2b)", "scaling", "placeholder", 100, "4K route: off (<reason>)" });
             t.slotList.push_back({ "scaling.refine", "Refine net", "scaling", "placeholder", 110, "Refine: bypassed (fingerprint mismatch / group underperforms / low latency)" });
             t.slotList.push_back({ "scaling.chroma_upscale", "Chroma upscale (placeholder)", "scaling", "placeholder", 120, "Chroma upscale: libplacebo (<reason>)" });
+            t.slotList.push_back({ "scaling.shared", "Shared scaler unit (ScalerPass)", "scaling", "placeholder", 125, "Scaler pass: caller's own path (<reason>)" });
             t.slotList.push_back({ "motion.vector_delivery", "Vector delivery", "motion", "partial", 130, "motion: matcher (optical flow unavailable)" });
             t.slotList.push_back({ "motion.consumers", "Motion consumers", "motion", "built", 140, "motion consumers: <warp failed | rendered warp failed | interpolation failed>: the source frame is shown instead" });
             t.slotList.push_back({ "scaling.geometry", "Geometry", "scaling", "built", 150, "Geometry: NLS safe fit (hook failure)" });
@@ -218,6 +219,7 @@ namespace Vpv
                 u.slotIds.push_back("scaling.route_4k");
                 u.slotIds.push_back("scaling.refine");
                 u.slotIds.push_back("scaling.chroma_upscale");
+                u.slotIds.push_back("scaling.shared");
                 u.slotIds.push_back("scaling.geometry");
                 u.slotIds.push_back("scaling.output");
                 {

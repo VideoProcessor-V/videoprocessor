@@ -109,6 +109,27 @@
    "note": "WARP unless VP_TEST_GPU=hardware; the *Timing methods carry Category GpuHardware."
   },
   {
+   "kind": "method",
+   "value": "ScalerPassGpuTests::ScalerGpuTiming",
+   "category": "GpuHardware",
+   "file": "src/VP-V/modules/scaling/shared/tests/ScalerPassTests.cpp",
+   "note": "Timing; runs only with VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "class",
+   "value": "ScalerPassGpuTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/scaling/shared/tests/ScalerPassTests.cpp",
+   "note": "WARP unless VP_TEST_GPU=hardware; ScalerGpuTiming carries Category GpuHardware."
+  },
+  {
+   "kind": "class",
+   "value": "ScalerPassAdaptiveIdentityTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/scaling/shared/tests/ScalerPassAdaptiveIdentityTests.cpp",
+   "note": "WARP unless VP_TEST_GPU=hardware; drives the real AdaptiveDownscale module."
+  },
+  {
    "kind": "class",
    "value": "BasicChromaGpuTests",
    "category": "GpuWarp",
