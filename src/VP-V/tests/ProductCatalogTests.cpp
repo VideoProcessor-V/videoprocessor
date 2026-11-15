@@ -778,12 +778,19 @@ namespace ProductCatalogTestsNs
 			Assert::AreEqual(std::string("C9b"), std::string(ConsumerFlagOf(idCfl, kP13SourceRing)->item), L"CfL P13: register item C9b");
 			Assert::IsTrue(std::string(ConsumerFlagOf(idCfl, kP13SourceRing)->note).find("ChromaCflGpu.cpp CflModule::Apply") != std::string::npos,
 				L"CfL P13: the note names the file the N1 view rule checks");
+			// WAIVER-15C-ROWS (gate-15c-X8-row2-P3-r2): the debander's declared P3 read is the live matcher field through its Params (view, C9b).
+			const uint16_t idDeband = uint16_t(kCatalogConsumerIdBase + 2);
+			Assert::IsTrue(ConsumerFlagOf(idDeband, kP3AnalysisField) && ConsumerFlagOf(idDeband, kP3AnalysisField)->kind == FlagKind::ViewIsActual, L"deband P3: view");
+			Assert::AreEqual(std::string("C9b"), std::string(ConsumerFlagOf(idDeband, kP3AnalysisField)->item), L"deband P3: register item C9b");
+			Assert::IsTrue(std::string(ConsumerFlagOf(idDeband, kP3AnalysisField)->note).find("repair/deband/VpDebander.cpp") != std::string::npos,
+				L"deband P3: the note names the file the N1 view rule checks");
 			// The exact P3 set: 4 synthesis consumers + DP, TR, adaptive downscale read the live matcher field at render (external view);
 			// the camera fit reads P3 through SeedFieldOf (view); identification reads P5 through the tap (view). 10 + 7 + 2 = 19.
 			// WAIVER-15C-ROWS: + TR P4 (view, scene group) + CfL P13 (view, source pl_frame): NotRead 9 + external 7 + views 4 = 20.
+			// WAIVER-15C-ROWS (row 2 P3 r2): + deband P3 (view, live matcher field): NotRead 9 + external 7 + views 5 = 21.
 			Assert::AreEqual(size_t(7), cExt, L"synthesis x4 + DP + TR + adaptive downscale: P3 read at render");
-			Assert::AreEqual(size_t(4), cViews, L"camera fit: P3 via SeedFieldOf; identification: P5 via the tap; TR: P4 via the scene group; CfL: P13 via the source pl_frame");   // WAIVER-B3Z-02 (coordinator approved 2026-11-12); WAIVER-15C-ROWS
-			Assert::AreEqual(size_t(20), ConsumerFlags().size());   // WAIVER-B3Z-02 (coordinator approved 2026-11-12); WAIVER-15C-ROWS
+			Assert::AreEqual(size_t(5), cViews, L"camera fit: P3 via SeedFieldOf; identification: P5 via the tap; TR: P4 via the scene group; CfL: P13 via the source pl_frame; deband: P3 via Params.field");   // WAIVER-B3Z-02 (coordinator approved 2026-11-12); WAIVER-15C-ROWS
+			Assert::AreEqual(size_t(21), ConsumerFlags().size());   // WAIVER-B3Z-02 (coordinator approved 2026-11-12); WAIVER-15C-ROWS
 			for (const ConsumerFlag& f : ConsumerFlags())
 				if (f.kind != FlagKind::NotRead && !(f.consumerId == idIdentity && f.input == kP5MonitorTiles)
 					&& !(f.consumerId == idTr && f.input == kP4SourceStats) && !(f.consumerId == idCfl && f.input == kP13SourceRing))
