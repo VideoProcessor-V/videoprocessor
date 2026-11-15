@@ -7473,6 +7473,73 @@ namespace Tests
 			Assert::AreEqual(expectedPositive, positiveLegs, L"every non-repeat-served film-like rate reached the positive starter leg");
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(ThirtyPDejudderStarterPresentsFrames)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ThirtyPDejudderStarterPresentsFrames)
+		{
+			const HarnessScope harnessScope;
+			// D-30P-DEJUDDER-STALL (102b; HF 2026-11-14 07:31): a 30p source with the de-judder starter (dejudder_strength) on a
+			// display (the ratio is logged; an integer multiple is the suspect case) must still present frames. The rate is the source's own and the
+			// display is the machine's (never a fixed 60 Hz: HarnessMonitorHz). New test only; the existing legs are unchanged.
+			// Overlap: VectorEngineDeliversAtEveryRate leg B (30p) makes the same Run and asserts presented; this is the focused
+			// regression + diagnostic leg for D-30P (adds the render_failed assert, the filtered lines and the full log).
+			if (!RequireHardwareOrSkip("ThirtyPDejudderStarterPresentsFrames")) return;
+			if (VectorTestSkip("ThirtyPDejudderStarterPresentsFrames")) return;
+			// D-30P-COLD-START-STALL (102b): VP_TEST_D30P_COLD_CACHE=1 runs this test on a fresh, empty shader cache (removed
+			// before and after), so each rerun is a real cold start. Unset: the shared warm cache, as every other test.
+			struct ColdFolder
+			{
+				std::string path;
+				explicit ColdFolder(const std::string& p) : path(p) { if (!path.empty()) RemoveFolderTree(path); }
+				~ColdFolder() { if (!path.empty()) RemoveFolderTree(path); }
+			};
+			const bool coldCache = HarnessEnvText("VP_TEST_D30P_COLD_CACHE") == "1";
+			const std::string runTag = std::to_string(GetCurrentProcessId()) + "-" +
+				std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+			const std::string coldName = coldCache ? "vp-harness-shader-cache-d30p-cold-" + runTag : std::string();
+			const ColdFolder cold(coldCache ? Here() + coldName : std::string());
+			if (coldCache) g_harnessShaderCacheName = coldName;
+			Logger::WriteMessage(coldCache ? ("30p starter: cold shader cache " + coldName + "\n").c_str() : "30p starter: warm shader cache\n");
+			FramePlan plan;
+			plan.rateNumerator = 30000;
+			plan.rateDenominator = 1001;
+			plan.step = [](int n) { FrameStep f; f.content = n; return f; };
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false, "deband_vp: on\ndejudder_strength: 0.25\n", false, &plan);
+			// The whole run's presentation-relevant lines (the 25-line Tail is too short to show why nothing presented).
+			std::string why;
+			int kept = 0;
+			for (const std::string& line : r.log)
+			{
+				if (kept >= 400) break;
+				if (line.find("render_failed") != std::string::npos || line.find("Present failed") != std::string::npos ||
+					line.find("Render-ahead") != std::string::npos || line.find("De-judder") != std::string::npos ||
+					line.find("Motion ahead") != std::string::npos || line.find("consecutive") != std::string::npos ||
+					line.find("paused") != std::string::npos || line.find("stale") != std::string::npos || line.find("Alpha dropped") != std::string::npos)
+				{
+					why += line.substr(0, 300) + "\n";
+					++kept;
+				}
+			}
+			{   // the whole run log, start to end, beside the TRX (the assert message carries only the filtered lines)
+				char* temp = nullptr; size_t n = 0;
+				if (_dupenv_s(&temp, &n, "TEMP") == 0 && temp)
+				{
+					// One file per run (PID + time), so reruns keep every log; the path is reported only when the write succeeded.
+					const std::string path = std::string(temp) + "\\d30p-starter-full-" + runTag + ".log";
+					free(temp);
+					std::ofstream out(path, std::ios::trunc);
+					for (const std::string& line : r.log) out << line << "\n";
+					out.flush();
+					Logger::WriteMessage(out.good() ? ("30p starter: full log " + path + "\n").c_str() : ("30p starter: full log NOT written (" + path + ")\n").c_str());
+				}
+			}
+			const double ratio = HarnessMonitorHz() / (30000.0 / 1001.0);
+			Logger::WriteMessage(("30p starter: display/source ratio " + std::to_string(ratio) + "\n" + why).c_str());
+			Assert::IsTrue(r.presented, (L"30p + de-judder starter: frames presented\n" + HarnessWide(why.c_str()) + r.Tail()).c_str());
+			Assert::IsFalse(r.Logged("Alpha dropped frame: reason=render_failed"), (L"30p + de-judder starter: no render_failed drops\n" + r.Tail()).c_str());
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineGamesDepthOneEngagesAtOneAhead)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
