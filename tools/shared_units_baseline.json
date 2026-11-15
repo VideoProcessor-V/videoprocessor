@@ -749,9 +749,16 @@
   },
   "U23": {
    "name": "one_pole_alpha",
-   "known_false_positive": [],
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
+     "pattern": "1\\.0 - std::exp\\(-0\\.5 \\* sigma",
+     "kind": "false_positive",
+     "reason": "H2 = 1 - exp(-0.5 sigma^2 w^2) is a Gaussian high-pass transfer function, not a time-constant smoother (C6-3 K4)"
+    }
+   ],
    "blocking": true,
-   "baseline_duplicates": 9
+   "baseline_duplicates": 0
   },
   "U24": {
    "name": "robust_stats",
@@ -767,9 +774,34 @@
   },
   "U26": {
    "name": "luma_from_rgb_weights",
-   "known_false_positive": [],
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
+     "pattern": "\\bad_luma\\b",
+     "kind": "false_positive",
+     "reason": "ad_luma is the GLSL consumer dot(c, AD_KW); AD_KW comes from LumaCoeff::ForSystem via DetailPulse::LumaWeights (transfer handling, no weights copy) (C6-3 K4)"
+    },
+    {
+     "file": "src/VP-V/nets/PlNetRunner.cpp",
+     "pattern": "\\{ \\\"vp_kr\\\", opt\\.kr \\}",
+     "kind": "false_positive",
+     "reason": "vp_kr is the mpv parameter name; its value comes from LumaCoeff via opt (C6-3 K4)"
+    },
+    {
+     "file": "src/VP-V/nets/RgbLumaDelta.h",
+     "pattern": "//!PARAM vp_kr",
+     "kind": "false_positive",
+     "reason": "//!PARAM vp_kr declares the mpv parameter name; its default is VP_LUMA_BT709_KR_TEXT from LumaWeights (C6-3 K4)"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
+     "pattern": "\\bLumaOf\\b",
+     "kind": "false_positive",
+     "reason": "integer (R+2G+B+2)>>2 motion-structure proxy on RGB ingest: no matrix, not a Y' weight copy; ruling C6-3 + 102b MAP-RGB-LUMA-PROXY (C6-3 K4)"
+    }
+   ],
    "blocking": true,
-   "baseline_duplicates": 21
+   "baseline_duplicates": 0
   }
  },
  "note": "refs/126 B0 (2026-11-12): all registered units blocking at the measured true count; baselines only shrink. U10 baseline = the matcher D1 global search (X1, file-level owner scope), 0 at refs/126 B6. U7 0 at L-B6 (the X2 DetailPulse/TextureRestore private cut/fade shares are removed; was 6). U13 0 (P16 coding evidence moved to regions, df03734f7). U17 is undefined/reserved. U10 = 19 after the audit fix (Dispatch-label lines un-suppressed)."
