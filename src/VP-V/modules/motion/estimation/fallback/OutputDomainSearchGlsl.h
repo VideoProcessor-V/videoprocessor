@@ -28,6 +28,7 @@
 // owner-visible change (rule 28: never edit the golden to pass).
 #pragma once
 
+#include <VP-V/core/LumaWeights.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 
 #include <string>
@@ -68,7 +69,7 @@ void hook()
         ((levels_full < 0.5 && swapchain_bits > 9.0) ? 255.75 : 255.0);
 )VPGLSL" + VpUnit::HalfLuma::GlslBox4x4TileLoad("full",
 			"        vec3 c = (HOOKED_mul * texelFetch(HOOKED_raw, p, 0)).rgb * scale;\n",
-			"dot(c, vec3(0.2126, 0.7152, 0.0722))") + R"VPGLSL(    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+			"dot(c, " VP_LUMA_BT709_VEC3_TEXT ")") + R"VPGLSL(    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(out_image);
     if (pos.x < size.x && pos.y < size.y) {
 )VPGLSL" + VpUnit::HalfLuma::GlslBox4x4TileSum("        ") +
@@ -160,7 +161,7 @@ float luma_cur(ivec2 p)
 {
     p = clamp(p, ivec2(0), full_size - ivec2(1));
     vec3 c = (HOOKED_mul * texelFetch(HOOKED_raw, p, 0)).rgb * full_scale;
-    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+    return dot(c, )VPGLSL" VP_LUMA_BT709_VEC3_TEXT R"VPGLSL();
 }
 
 // Efficiency (owner 2026-10-15): the state is ping-ponged instead of copied
@@ -178,7 +179,7 @@ float luma_prev(ivec2 p)
     // stored value to 8-bit units (exact power-of-two scale); the 8-bit and
     // limited-on-10-bit-swapchain modes already match (scale 1.0, unchanged).
     float to8 = color_bits > 9.0 ? 0.25 : 1.0;
-    return dot((last_in_a_ ? imageLoad(PREV, p) : imageLoad(PREV_NEXT, p)).rgb, vec3(0.2126, 0.7152, 0.0722)) * to8;
+    return dot((last_in_a_ ? imageLoad(PREV, p) : imageLoad(PREV_NEXT, p)).rgb, )VPGLSL" VP_LUMA_BT709_VEC3_TEXT R"VPGLSL() * to8;
 }
 
 // Full-resolution match of the 16x16 block displaced by v (full pixels).

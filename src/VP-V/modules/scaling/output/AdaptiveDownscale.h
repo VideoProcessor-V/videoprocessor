@@ -3,6 +3,7 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders.h>
 
+#include <VP-V/core/LumaWeights.h>
 #include <VP-V/modules/scaling/output/NlsMaskMapping.h>
 #include <VP-V/modules/drive/led_measure/ReadbackRing.h>
 
@@ -216,7 +217,7 @@ namespace AdaptiveDownscale
 	//    (mode 0, as before).
 	struct MeasureDomain
 	{
-		float w[3] = { 0.2126f, 0.7152f, 0.0722f };
+		float w[3] = { static_cast<float>(LumaCoeff::kBt709Kr), static_cast<float>(LumaCoeff::kBt709Kg), static_cast<float>(LumaCoeff::kBt709Kb) };
 		bool bt709 = true;            // the weights are BT.709's (the literal shader text)
 		float mode = 0.0f;            // 0 codes as they are, 1 linear -> 2.2, 2 HDR decode -> 2.2
 		GuardTransferParams transfer; // mode 2: the hooked picture's transfer

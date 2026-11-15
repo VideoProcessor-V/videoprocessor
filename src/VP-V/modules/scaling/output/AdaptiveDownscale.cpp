@@ -7,6 +7,7 @@
 #include <libplacebo/shaders/custom.h>
 #include <libplacebo/shaders/sampling.h>
 
+#include <VP-V/core/LumaWeights.h>
 #include <VP-V/core/OnePole.h>
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
@@ -641,7 +642,7 @@ float rs_slope(float y)
 		double k[3];
 		DetailPulse::LumaWeights(system, primaries, k);
 		for (int i = 0; i < 3; ++i) d.w[i] = static_cast<float>(k[i]);
-		d.bt709 = k[0] == 0.2126 && k[2] == 0.0722;
+		d.bt709 = k[0] == LumaCoeff::kBt709Kr && k[2] == LumaCoeff::kBt709Kb;
 		if (hooked.transfer == PL_COLOR_TRC_LINEAR)
 			d.mode = 1.0f;
 		else if (hooked.transfer == PL_COLOR_TRC_PQ || hooked.transfer == PL_COLOR_TRC_HLG)
@@ -655,7 +656,7 @@ float rs_slope(float y)
 	std::string LumaWeightsGlsl(const MeasureDomain& d)
 	{
 		if (d.bt709)
-			return "vec3(0.2126, 0.7152, 0.0722)";
+			return VP_LUMA_BT709_VEC3_TEXT;
 		char text[96];
 		snprintf(text, sizeof(text), "vec3(%.9g, %.9g, %.9g)", d.w[0], d.w[1], d.w[2]);
 		return text;

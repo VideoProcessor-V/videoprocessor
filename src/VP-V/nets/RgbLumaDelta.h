@@ -61,12 +61,6 @@ namespace VpNets
 		}
 	}
 
-	// Y' from R'G'B' with the matrix coefficients (BT.709: kr 0.2126, kb 0.0722).
-	inline float LumaOf(float r, float g, float b, float kr, float kb)
-	{
-		return kr * r + (1.0f - kr - kb) * g + kb * b;
-	}
-
 	// The GPU form, in the exporter's mpv pass format: hook the RGB plane, bind the luma before
 	// and after the net. Same-size planes; texel-exact reads (no filtering).
 	constexpr const char* kRgbLumaDeltaPass =
@@ -107,7 +101,7 @@ namespace VpNets
 		"vec4 hook() {\n"
 		"    ivec2 p = ivec2(HOOKED_pos * HOOKED_size);\n"
 		"    vec4 c = texelFetch(HOOKED_raw, p, 0) * HOOKED_mul;\n"
-		"    float y = vp_kr * c.x + (1.0 - vp_kr - vp_kb) * c.y + vp_kb * c.z;\n"
+		"    float y = " VP_LUMA_DOT_PARAM_GLSL_TEXT ";\n"
 		"    return vec4(y * vp_range_scale + vp_range_offset, 0.0, 0.0, 1.0);\n"
 		"}\n";
 }

@@ -41,6 +41,7 @@
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <microsoft_directshow/MadVRShaderLoader.h>
+#include <VP-V/core/LumaWeights.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h>
@@ -275,7 +276,7 @@ public:
 					m_trimsHook.Ensure(hookTemplates);
 					// Review C4: the luminance coefficients of the output's own primaries.
 					const pl_raw_primaries* prim = pl_raw_primaries_get(display.primaries);
-					double kr = 0.2126, kg = 0.7152, kb = 0.0722;
+					double kr = LumaCoeff::kBt709Kr, kg = LumaCoeff::kBt709Kg, kb = LumaCoeff::kBt709Kb;
 					if (prim)
 					{
 						const double red[2] = { prim->red.x, prim->red.y }, green[2] = { prim->green.x, prim->green.y };
