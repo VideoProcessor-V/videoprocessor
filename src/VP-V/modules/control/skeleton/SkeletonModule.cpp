@@ -408,6 +408,10 @@ namespace Vpv
 			bool wantsCameraFit = false;         // an external consumer reads a camera product
 			bool feedNeeded = false;             // the graph holds P2m / P3 for an external consumer: the engine feed runs
 			bool fitWantedPushed = false;        // IVectorEngine::SetCameraFitWanted(true) was sent
+			// 15c-c8 (render thread, Reconcile): the raising consumers that turned this lane on (empty = the lane runs as configured) and
+			// the configured mode beside it. A raised lane is On with no GPU dispatcher, and its report reads only P1 / P4.
+			std::string laneRaise;
+			VpSkeleton::LaneSettings::Mode configuredLaneMode = VpSkeleton::LaneSettings::Mode::Off;
 			VpMotion::IVectorEngine* engine = nullptr;   // this renderer's engine; dropped at Teardown (valid until the renderer goes)
 			FeedCounters feed;
 			// The scene product's counters (W1-C7): written by the render thread (seal) and by any SceneOf caller, so atomic and relaxed.
@@ -526,7 +530,8 @@ namespace Vpv
 			// storage choice rebuilds it (kernels carry the storage) and drops the lane bundle that points at the old one.
 			void UpdateDispatcher(HostState& st)
 			{
-				const bool want = st.settings.lane.mode == LaneSettings::Mode::On && st.gpu != nullptr;
+				// 15c-c8: a lane raised by consumer demand makes no GPU products (no consumer of them): no dispatcher.
+				const bool want = st.settings.lane.mode == LaneSettings::Mode::On && st.gpu != nullptr && st.laneRaise.empty();
 				const GrainSplit::Storage storage = RequestedStorage(st.settings);
 				if (!want)
 				{
@@ -906,6 +911,7 @@ namespace Vpv
 				break;
 			case RE::Lifecycle::SettingsApplied:
 				PublishLookAheadWalk(f.value);   // the host passes the motion look-ahead depth (frames) here: the one queue term it delivers
+				NotePathway(f.host, f.code != 0 ? 1 : 0);   // 15c-c8: kept for the demand-driven reconciles (never a raise in Original)
 				Reconcile(f.host, f.code != 0 ? 1 : 0);   // code != 0: the Original pathway
 				break;
 			case RE::Lifecycle::QueueDepth:
@@ -941,6 +947,9 @@ namespace Vpv
 				}
 				memoHosts_.Remove(f.host, true);  // L-CORE: the renderer's memo (a reader's pin keeps its spots until released)
 				EraseExternal(f.host);   // a renderer recreated at this address never inherits the old one's external demand
+				// 15c-c8: with the demand goes its raise of the store; version 0 = the next Begin looks again (a later declaration raises anew).
+				VpFrameAnalysis::SourceFrameTap::SetStoreDemand(f.host, false, std::string());
+				NoteRaiseApplied(f.host, 0, std::string());
 				break;
 			}
 			default:
@@ -965,6 +974,24 @@ namespace Vpv
 				hosts_.Remove(host, false);
 				EraseExternal(host);          // nor is its external demand (declared for the dead renderer)
 				st.reset();
+			}
+			// 15c-c8 (coordinator ruling 2026-11-15; the TD fill rule's shape, core/AdmissionTable.h Admit: a product TD OFF still filled FOR the
+			// active consumer that depends on it): a registered consumer that needs the lane's results RAISES the effective lane mode to On (the
+			// least that serves it: Shadow's results are not used) and the frame-analysis store that feeds the lane, while it is registered.
+			// The configured value stays as read (shown beside the raise); never in the Original pathway (the renderer's word, also the one it
+			// last reported, so a GpuCreated reconcile with no word cannot raise there). The version is read first: a declaration made while
+			// this runs moves it again and the next Begin reconciles once more.
+			const uint64_t raiseVer = raiseVersion_.load(std::memory_order_acquire);
+			const bool raiseBlocked = s.originalPathway || RecordedPathway(host) == 1;
+			const std::string raise = raiseBlocked ? std::string() : RaiseReasonOf(host);
+			VpFrameAnalysis::SourceFrameTap::SetStoreDemand(host, !raise.empty(), raise);
+			NoteRaiseApplied(host, raiseVer, raise);
+			std::string laneRaise;
+			const LaneSettings::Mode configuredMode = s.lane.mode;
+			if (!raise.empty() && s.lane.mode != LaneSettings::Mode::On)
+			{
+				s.lane.mode = LaneSettings::Mode::On;
+				laneRaise = raise;
 			}
 			if (!s.LaneWanted())
 			{
@@ -1003,6 +1030,8 @@ namespace Vpv
 				}
 			}
 			st->settings = s;
+			st->laneRaise = laneRaise;               // 15c-c8: before UpdateDispatcher (a raised lane has no GPU dispatcher)
+			st->configuredLaneMode = configuredMode;
 			st->gpu = static_cast<pl_gpu>(gpuSlots_.Aux(host));   // const pl_gpu_t*
 			UpdateDispatcher(*st);
 			st->settingsGen.fetch_add(1, std::memory_order_relaxed);
@@ -1069,6 +1098,7 @@ namespace Vpv
 			st->fitWantedPushed = false;
 			st->feedNeeded = false;
 			st->wantsCameraFit = false;
+			st->laneRaise.clear();   // 15c-c8 (the store demand is Reconcile's / GpuReleased's: a torn-down lane may still be raised again)
 			st->feedPendingSeq = 0;
 			StopBundle(*st);
 			ReleaseDispatcher(*st, gpuAlive);   // 70b G5: the GPU textures go with the lane (GpuReleased / switched off)
@@ -1097,32 +1127,138 @@ namespace Vpv
 		void SkeletonModule::SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
 			const std::vector<VpSkeleton::ProductId>& publishedOutside)
 		{
+			SetRaisingExternalDemand(host, owner, consumers, publishedOutside, std::string());   // a plain declaration raises nothing
+		}
+
+		// 15c-c8: the one entry writer. A raising entry (non-empty reason with a consumer) also moves raiseVersion_, so the host's next Begin
+		// reconciles its effective lane / store (render thread); a plain entry replacing a raising one withdraws the raise the same way.
+		void SkeletonModule::SetRaisingExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
+			const std::vector<VpSkeleton::ProductId>& publishedOutside, const std::string& reason)
+		{
 			std::lock_guard<std::mutex> lock(externalMutex_);
+			ExternalEntry* entry = nullptr;
 			for (ExternalEntry& e : external_)
 				if (e.host == host && e.owner == owner)
+					entry = &e;
+			if (entry == nullptr)
+			{
+				ExternalEntry e;
+				e.host = host;
+				e.owner = owner;
+				external_.push_back(std::move(e));
+				entry = &external_.back();
+			}
+			const bool wasRaising = RaisingLocked(*entry);
+			const std::string wasReason = entry->raise;
+			entry->consumers = consumers;
+			entry->products = publishedOutside;
+			entry->raise = reason;
+			externalVersion_.fetch_add(1, std::memory_order_release);
+			if (wasRaising != RaisingLocked(*entry) || (wasRaising && wasReason != reason))
+				raiseVersion_.fetch_add(1, std::memory_order_release);
+		}
+
+		std::string SkeletonModule::RaiseReasonLocked(const void* host) const
+		{
+			std::string why;
+			for (const ExternalEntry& e : external_)
+				if (e.host == host && RaisingLocked(e) && why.find(e.raise) == std::string::npos)
+					why += (why.empty() ? "" : ", ") + e.raise;
+			return why;
+		}
+
+		std::string SkeletonModule::RaiseReasonOf(const void* host) const
+		{
+			std::lock_guard<std::mutex> lock(externalMutex_);
+			return RaiseReasonLocked(host);
+		}
+
+		void SkeletonModule::NoteRaiseApplied(const void* host, uint64_t version, const std::string& applied)
+		{
+			std::lock_guard<std::mutex> lock(externalMutex_);
+			for (RaiseSeen& r : raiseSeen_)
+				if (r.host == host)
 				{
-					e.consumers = consumers;
-					e.products = publishedOutside;
-					externalVersion_.fetch_add(1, std::memory_order_release);
+					r.version = version;
+					r.applied = applied;
 					return;
 				}
-			ExternalEntry e;
-			e.host = host;
-			e.owner = owner;
-			e.consumers = consumers;
-			e.products = publishedOutside;
-			external_.push_back(std::move(e));
-			externalVersion_.fetch_add(1, std::memory_order_release);
+			RaiseSeen r;
+			r.host = host;
+			r.version = version;
+			r.applied = applied;
+			raiseSeen_.push_back(r);
+		}
+
+		void SkeletonModule::NotePathway(const void* host, int originalFlag)
+		{
+			std::lock_guard<std::mutex> lock(externalMutex_);
+			for (RaiseSeen& r : raiseSeen_)
+				if (r.host == host)
+				{
+					r.originalFlag = originalFlag;
+					return;
+				}
+			RaiseSeen r;
+			r.host = host;
+			r.originalFlag = originalFlag;
+			raiseSeen_.push_back(r);   // version 0: the next Begin reconciles (Reconcile follows this call anyway)
+		}
+
+		int SkeletonModule::RecordedPathway(const void* host) const
+		{
+			std::lock_guard<std::mutex> lock(externalMutex_);
+			for (const RaiseSeen& r : raiseSeen_)
+				if (r.host == host)
+					return r.originalFlag;
+			return -1;
+		}
+
+		// Render thread (Begin): a raising declaration made or withdrawn since this host's last Reconcile is applied now. While nothing moved:
+		// one atomic load and one short locked scan. A move that leaves this host's raise as it was (another host's demand) only records the
+		// version; a real change reconciles with the pathway the renderer last reported (never a raise in the Original pathway).
+		void SkeletonModule::ReconcileIfRaiseMoved(const void* host)
+		{
+			const uint64_t version = raiseVersion_.load(std::memory_order_acquire);
+			if (version == 1)
+				return;   // no raising declaration was ever made: one atomic load, no lock (the default configuration's cost)
+			int flag = -1;
+			{
+				std::lock_guard<std::mutex> lock(externalMutex_);
+				RaiseSeen* seen = nullptr;
+				for (RaiseSeen& r : raiseSeen_)
+					if (r.host == host)
+						seen = &r;
+				if (seen != nullptr && seen->version == version)
+					return;
+				const std::string now = RaiseReasonLocked(host);
+				if (seen == nullptr)
+				{
+					RaiseSeen r;
+					r.host = host;
+					raiseSeen_.push_back(r);
+					seen = &raiseSeen_.back();
+				}
+				if (now == seen->applied)
+				{
+					seen->version = version;   // nothing to change for this host: the configured state (or the raise in force) stays
+					return;
+				}
+				flag = seen->originalFlag;
+			}
+			Reconcile(host, flag);
 		}
 
 		size_t SkeletonModule::EraseExternal(const void* host)
 		{
 			std::lock_guard<std::mutex> lock(externalMutex_);
 			size_t erased = 0;
+			bool raising = false;
 			for (size_t i = 0; i < external_.size();)
 			{
 				if (external_[i].host == host)
 				{
+					raising = raising || RaisingLocked(external_[i]);
 					external_.erase(external_.begin() + static_cast<std::ptrdiff_t>(i));
 					++erased;
 				}
@@ -1131,6 +1267,8 @@ namespace Vpv
 			}
 			if (erased != 0)
 				externalVersion_.fetch_add(1, std::memory_order_release);
+			if (raising)
+				raiseVersion_.fetch_add(1, std::memory_order_release);
 			return erased;
 		}
 
@@ -1149,8 +1287,11 @@ namespace Vpv
 			for (size_t i = 0; i < external_.size(); ++i)
 				if (external_[i].host == host && external_[i].owner == owner)
 				{
+					const bool raising = RaisingLocked(external_[i]);
 					external_.erase(external_.begin() + static_cast<std::ptrdiff_t>(i));
 					externalVersion_.fetch_add(1, std::memory_order_release);
+					if (raising)
+						raiseVersion_.fetch_add(1, std::memory_order_release);   // withdrawn: the host's next Begin lowers the lane / store again
 					return;
 				}
 		}
@@ -1590,6 +1731,8 @@ namespace Vpv
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(c.host))
 					if (mh->gpuDevice)
 						mh->gpuDevice->FlushReleases();   // R2: GPU-legal: the owner textures released at the seal are destroyed
+			if (c.phase == RE::FramePhase::Begin)
+				ReconcileIfRaiseMoved(c.host);   // 15c-c8: a consumer's raising demand made / withdrawn on another thread is applied here
 			const std::shared_ptr<HostState> st = hosts_.Find(c.host);
 			// L-CORE s3: the renderer's memo is sealed at every Begin with or without the lane. With a bound lane Begin() seals it after
 			// the lane's seal (the seal reuses a publication); otherwise (no lane, lane waiting, lane off) it is sealed here.
@@ -1836,8 +1979,11 @@ namespace Vpv
 				report.name = "skeleton.report";
 				const VpSkeleton::ProductId consumed[] = { VpSkeleton::kP1HalfLuma, VpSkeleton::kP4SourceStats, VpSkeleton::kP10GrainSplit,
 					VpSkeleton::kP11RegionBlockStats, VpSkeleton::kP12LightLevel };
-				for (VpSkeleton::ProductId p : consumed)
-					VpSkeleton::AddConsume(report, p);
+				// 15c-c8: a lane raised by consumer demand reports only the CPU products P1 / P4 (the GPU products have no consumer there and
+				// no dispatcher: nothing turns on without a consumer, coordinator ruling 2026-11-15).
+				const size_t reported = st.laneRaise.empty() ? sizeof(consumed) / sizeof(consumed[0]) : 2u;
+				for (size_t i = 0; i < reported; ++i)
+					VpSkeleton::AddConsume(report, consumed[i]);
 				std::vector<ConsumerDecl> consumers{ report };
 				// SK-W stage D: the consumers other components declared (the camera link): their products and ancestors join the graph.
 				std::vector<VpSkeleton::ProductId> outside;
@@ -2097,7 +2243,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 			const SkeletonGpuDispatcher* gd = st.dispatcher.get();
 			const bool shadow = st.settings.lane.mode == LaneSettings::Mode::Shadow;
 			addDecision(FallbackCatalog::SkeletonGpuShadow(shadow));
-			addDecision(FallbackCatalog::SkeletonGpuDevice(!shadow && gd == nullptr));
+			addDecision(FallbackCatalog::SkeletonGpuDevice(!shadow && gd == nullptr && st.laneRaise.empty()));   // 15c-c8: raised = no GPU products by design
 			if (st.sealLateHook)
 				fb.push_back("skeleton_lane: switched on after the first frame; the lane binds the shared seal at the next source era");
 			if (!st.cardNote.empty())
@@ -2116,7 +2262,12 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				fb.push_back("skeleton_fault: " + std::to_string(faults) + " skeleton callback exception(s) contained; analysis may be incomplete");
 
 			std::string line;
-			const char* mode = st.settings.lane.mode == LaneSettings::Mode::Shadow ? "shadow" : "on";
+			// 15c-c8: a raised lane says by whom on Ctrl+I ("analysis lane on (demand: LED drive) ..."), and the store raised with it too.
+			const std::string mode = !st.laneRaise.empty() ? "on (demand: " + st.laneRaise + ")" :
+				st.settings.lane.mode == LaneSettings::Mode::Shadow ? std::string("shadow") : std::string("on");
+			std::string storeDemand;
+			const bool storeRaised = VpFrameAnalysis::SourceFrameTap::StoreRaisedByDemand(st.host) &&
+				VpFrameAnalysis::SourceFrameTap::StoreDemanded(st.host, &storeDemand);
 			if (b)
 			{
 				const AnalysisLane& lane = b->lane;
@@ -2157,6 +2308,9 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				if (const std::shared_ptr<VpSkeleton::LaneState> laneState = lane.State())
 					addDecision(SkeletonModule::HistoryCapDecision(laneState->graph, b->configuredPeriodMs));
 				full = lane.StatusLines();
+				if (!st.laneRaise.empty() && !full.empty() && full[0] == "Analysis lane: on")
+					full[0] += " (demand: " + st.laneRaise + "; analysis_lane = " +
+						(st.configuredLaneMode == LaneSettings::Mode::Shadow ? "shadow" : "off") + " in the configuration, unchanged)";
 				for (const std::string& memoLine : b->memo->StatusLines())
 					full.push_back(memoLine);   // B1: reused / filled at read / unavailable (cause) per product asked
 				// MV7 ledger (Ctrl+Alt+D): the VRAM users outside the product catalog, as the governor granted them (one line each; products are
@@ -2196,6 +2350,12 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 			}
 			else
 				line = std::string("analysis lane ") + mode + ": " + (st.waiting.empty() ? std::string("starting") : st.waiting);
+			if (storeRaised)
+			{
+				// 15c-c8: the store runs only for the demand (frame_analysis_store off in the configuration, unchanged).
+				line += "; frame-analysis store on (demand: " + storeDemand + ")";
+				full.push_back("Frame-analysis store: on (demand: " + storeDemand + "; frame_analysis_store = off in the configuration, unchanged)");
+			}
 			full.push_back(st.budgetFeed.StatusLine());   // S0: the spare slot budget, never silent (rule 5)
 			{
 				// Ctrl+I / Ctrl+Alt+D: the queue the lane is built for and the regulator's input, in plain words.

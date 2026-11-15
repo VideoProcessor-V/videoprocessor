@@ -147,6 +147,15 @@ namespace Vpv
 			void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
 				const std::vector<VpSkeleton::ProductId>& publishedOutside) override;
 			void ClearExternalDemand(const void* host, const void* owner) override;
+			// 15c-c8: a RAISING declaration (IExternalDemand::SetRaisingExternalDemand). The entry is the same one (replaced / cleared
+			// like any other); while it holds a consumer, the host's effective lane mode is the configured one raised to On (the
+			// minimum a consumer that uses the results needs: Shadow's results are not used) with no GPU dispatcher and no GPU
+			// products for the report (no consumer of them), and the frame-analysis store is raised (SourceFrameTap::SetStoreDemand).
+			// Applied on the render thread at the host's next Begin (Reconcile), never across threads; withdrawn the same way.
+			void SetRaisingExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
+				const std::vector<VpSkeleton::ProductId>& publishedOutside, const std::string& reason) override;
+			// The names of the raising consumers of `host` ("LED drive"; several joined by ", "), empty when none (tests / status).
+			std::string RaiseReasonOf(const void* host) const;
 			// The host lane's current lease of `product` (IExternalDemand::LeaseFor); empty without a lane or the product. Any thread.
 			VpSkeleton::LaneLease LeaseFor(const void* host, VpSkeleton::ProductId product) override;
 			// External-demand entries held for `host` (tests / diagnostics). Every entry of a host is erased at its GpuReleased / Shutdown and when
@@ -335,10 +344,29 @@ namespace Vpv
 				const void* owner = nullptr;
 				std::vector<VpSkeleton::ConsumerDecl> consumers;
 				std::vector<VpSkeleton::ProductId> products;
+				std::string raise;   // 15c-c8: non-empty = a raising declaration (the consumer's name for Ctrl+I)
 			};
 			mutable std::mutex externalMutex_;
 			std::vector<ExternalEntry> external_;
 			std::atomic<uint64_t> externalVersion_{ 0 };
+			// 15c-c8: bumped whenever the set of raising entries (or a reason) changes; a host's Begin compares it with the version its
+			// last Reconcile applied (raiseSeen_) and reconciles on the render thread. The pathway each host last reported at
+			// SettingsApplied is kept beside it: a demand-driven Reconcile never raises in the Original pathway (the renderer's word).
+			struct RaiseSeen
+			{
+				const void* host = nullptr;
+				uint64_t version = 0;
+				int originalFlag = -1;   // -1 = no SettingsApplied seen yet
+				std::string applied;     // the raise reason the last Reconcile applied (empty = none)
+			};
+			std::atomic<uint64_t> raiseVersion_{ 1 };
+			std::vector<RaiseSeen> raiseSeen_;   // under externalMutex_
+			std::string RaiseReasonLocked(const void* host) const;
+			bool RaisingLocked(const ExternalEntry& e) const { return !e.raise.empty() && !e.consumers.empty(); }
+			void NoteRaiseApplied(const void* host, uint64_t version, const std::string& applied);
+			void NotePathway(const void* host, int originalFlag);
+			int RecordedPathway(const void* host) const;
+			void ReconcileIfRaiseMoved(const void* host);
 			EngineProvider engineProvider_;
 			std::atomic<VpSkeleton::ILaneProducer*> qualityP15_{ nullptr };    // see SetQualityPatternProducers (null = none, the lane is unchanged)
 			std::atomic<VpSkeleton::ILaneProducer*> qualityP15c_{ nullptr };

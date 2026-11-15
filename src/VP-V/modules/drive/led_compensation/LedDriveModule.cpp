@@ -245,7 +245,11 @@ namespace LedDrive
 		d.name = "LED look-ahead cut";
 		VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 0);
 		VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 1);
-		demand->SetExternalDemand(owners[0], this, std::vector<VpSkeleton::ConsumerDecl>(1, d), std::vector<VpSkeleton::ProductId>());
+		// 15c-c8 (coordinator ruling 2026-11-15, the owner's demand-driven principle): an ENABLED drive (this module runs only then) needs the
+		// lane's results, so its demand RAISES the lane and the frame-analysis store while declared (Ctrl+I "(demand: LED drive)"); Stop()
+		// withdraws it. The configuration (analysis_lane, frame_analysis_store) is not changed.
+		demand->SetRaisingExternalDemand(owners[0], this, std::vector<VpSkeleton::ConsumerDecl>(1, d), std::vector<VpSkeleton::ProductId>(),
+			std::string("LED drive"));
 		demandGen.store(VpFrameAnalysis::SourceFrameTap::Generation(owners[0]), std::memory_order_release);
 		demandHost.store(owners[0], std::memory_order_release);
 	}
