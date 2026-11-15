@@ -333,7 +333,7 @@ mean Huber cost before / after on the same pixels and sigma, correction in sourc
   plus photometric gain/offset (`RefineOptions::fadeTerms`). Pixels: the `targetPixels` (50k) strongest-gradient inlier pixels,
   chosen by a gradient-bin threshold with ties in raster order (deterministic). Huber weights (1.345 robust sigma,
   sigma = 1.4826 median |r|, floor 0.5 code), Keys bicubic sampling of frame N without clamping (a tap outside the plane
-  drops the pixel), at most `maxIterations` (4) steps, stop when no corner moves more than 0.001 engine px.
+  drops the pixel; the CPU reference samples through the shared `VpComposed::SampleBicubic`, `composed/WarpSampler.h`, rule 20), at most `maxIterations` (4) steps, stop when no corner moves more than 0.001 engine px.
   `RefineResult::lastStepPx` reports the last step (source px); the tests require it below the bias target (0.02 source
   px at 1080, 0.04 at 4K), so a run that ends on the iteration cap has stopped moving at the accuracy that matters.
   Most test runs end on the cap (4): the last step is 0.0003-0.004 source px, just above the 0.001 engine-px stop rule,
