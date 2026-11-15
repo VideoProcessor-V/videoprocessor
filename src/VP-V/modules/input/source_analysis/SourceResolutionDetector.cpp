@@ -1364,6 +1364,7 @@ namespace SourceResolution
 			if (streakLong && haveLastNative && shot == lastNativeShot && !renditionMode &&
 				declared >= 1.0)
 			{
+				assert(!streakDetail.empty());   // renditionFrames <= 0 would reach here empty (plan (d): assert, no fallback)
 				const double streakMedian = RobustStats::Median(streakDetail, RobustStats::MedianRule::Upper);
 				const double before = DetailAbove(lastNative, streakRatio);
 				if (!std::isinf(before) && before - streakMedian >= settings.renditionDetailDrop)
