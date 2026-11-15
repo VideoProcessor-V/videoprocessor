@@ -1884,20 +1884,24 @@ namespace SkeletonModuleTestsNs
 			VpUnit::CutFadeJudge::CutTracker tracker;
 			tracker.Reset();
 			VpLaneProducts::SourceStatsRecord r;
-			int pushed = 0;
+			bool read3 = false, read4 = false;
 			for (int64_t s = 1; s <= 4; ++s)
 			{
 				const VpSkeleton::AnalysisLane::ProductRead read = lane->ReadOf(VpSkeleton::kP4SourceStats, uint64_t(s));
 				if (read.cpu != nullptr && VpLaneProducts::ReadSourceStats(read.cpu, read.cpuBytes, &r))
 				{
 					tracker.Push(uint64_t(s), r);
-					++pushed;
+					read3 = read3 || s == 3;
+					read4 = read4 || s == 4;
 				}
 			}
-			Assert::IsTrue(pushed >= 2, L"frames 3 and 4 are readable");
+			Assert::IsTrue(read3 && read4, L"frames 3 and 4 are readable");
 			const VpUnit::CutFadeJudge::CutVerdict expected = tracker.Provisional();
 			Assert::IsTrue(expected.known && expected.seq == 4u);
 			Assert::AreEqual(expected.cut, f.cut, L"the shared sequence law's verdict, not a private one");
+			// Pinned: without context frames (the ring keeps no frame before 3, the part's start) the provisional verdict is decided on
+			// L alone (noise L is about 21 >= 6), so it is a cut; a later law change shows up here. Scene never delivers it (provisional).
+			Assert::IsTrue(expected.cut, L"no context: the provisional verdict is decided on L alone");
 			Assert::AreEqual(expected.flash, f.flash);
 			Assert::AreEqual(expected.candidate, f.cutPossible);
 			Assert::AreEqual(expected.gridLaw, f.gridLaw);

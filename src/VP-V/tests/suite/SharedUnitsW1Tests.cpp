@@ -399,6 +399,29 @@ namespace SharedUnitsW1TestsNs2
 			Assert::IsTrue(e.flash && !e.cut && e.cutPossible);
 		}
 
+		// WAIVER-U7ACC-STRUCTURE (U7-accuracy, opus test-diff review SHOULD 2, a new test): the structure correlation centres each
+		// gradient component on its own mean. Pooled under one mean, a left-to-right ramp and a top-to-bottom ramp correlated (0.74)
+		// and a real cut between them was read as a lighting change.
+		TEST_METHOD(StructureCorrelationSeparatesOrthogonalRampsAndKeepsAGainChange)
+		{
+			using namespace VpUnit::CutFadeJudge;
+			Grid across, down, textured, dimmed;
+			uint32_t x = 12345u;
+			for (int gy = 0; gy < kGridH; ++gy)
+				for (int gx = 0; gx < kGridW; ++gx)
+				{
+					across.g[gy][gx] = 40.0 + 5.0 * gx;
+					down.g[gy][gx] = 200.0 - 8.0 * gy;
+					x = x * 1664525u + 1013904223u;
+					textured.g[gy][gx] = 20.0 + double((x >> 16) % 200u);
+					dimmed.g[gy][gx] = 0.6 * textured.g[gy][gx];
+				}
+			across.valid = down.valid = textured.valid = dimmed.valid = true;
+			Assert::IsTrue(StructureCorrelation(across, down) < kSameStructure, L"orthogonal ramps: a new structure");
+			Assert::IsTrue(StructureCorrelation(textured, dimmed) >= kSameStructure, L"a gain change keeps the structure");
+			Assert::IsTrue(StructureCorrelation(textured, textured) > 0.999, L"the same grid");
+		}
+
 		TEST_METHOD(GridHistRuleAndMeanAbsDifference)
 		{
 			using namespace VpUnit::CutFadeJudge;
