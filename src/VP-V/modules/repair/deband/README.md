@@ -26,7 +26,7 @@ Remove banding at source resolution, after repair (cheaper and correct for sourc
 Per plane the passes are, in this order:
 
 1. Grain split (`grainGuard` and `grainSplit`, the default): a half-resolution low band (2x2 box, then a separable Gaussian, `GrainPreserve::kSplitSigma`) and a structure tensor per block of it. Only the low band is debanded. The residual (grain, noise) passes unchanged, and the band's sharp step part is put back where it is coherent along the contour.
-2. Spatial veto (`grainGuard` on, `grainSplit` off, `deband_vp_grain_guard: veto`): per 16x16 block, the share of busy pixels (Laplacian or local extremum, `GrainPreserve::Guard*Codes`) vetoes the blur.
+2. Spatial veto (`grainGuard` on, `grainSplit` off, `deband_vp_grain_guard: veto`): per 16x16 block, the share of busy pixels (Laplacian or local extremum, `GrainPreserve::Guard*Codes`) vetoes the blur. The share is computed by the owner's kernel text (`RegionEvidence::BusyShareHeaderGlsl` / `BusyShareBodyGlsl`, input.source_analysis/regions, CPU oracle `BusyEdge::BusyShare`); the module keeps no private copy. It runs on the debander's own input planes (not necessarily the source planes), so it reuses the owner text rather than acquiring the S5 product; taps stay in the plane's normalised units (`bz_scale` 1) and the thresholds are passed in those units, which keeps the decisions bit-identical to the former private guard.
 3. Deband: four samples on a ring whose angle and distance come from a hash of the pixel position, so a still picture never shimmers. The ring mean replaces the pixel with weight 1 below 0.6 x threshold and 0 at the threshold. No grain is added.
    - Hold (slot 0 only): with a field, on trusted blocks, inside this frame's blur band, the weight is mixed with the previous frame's weight read back along the vector.
    - Vector grain veto (only without the split): blocks with `grainError` above `grainCodes` are never blurred.
@@ -127,6 +127,10 @@ Contract tests:
 
 Chain tests:
 - deband + re-base + 4K route
+
+## Design goal, philosophy and decisions
+
+One copy of every shared computation: the grain guard's busy share is the regions owner's (C7-6 U5 G1); the module supplies only its thresholds (Bill's GrainPreserve constants, read only) and its planes.
 
 ## Known issues / open items
 
