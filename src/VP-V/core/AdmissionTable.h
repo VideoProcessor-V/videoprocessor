@@ -18,7 +18,8 @@
 //    fill, never in the FillOff list, never shed (owner OD:391 2026-11-11 07:45 "never core, never TD"; 115 #47 / #59). TD OFF: no fill,
 //    unless another active consumer depends on one; then it is filled FOR that consumer and is NOT shed either (owner decision 2026-11-15
 //    06:58): Derived class, run right after its inputs with the chain that reads it, never optional fill, never in the FillOff list, in
-//    every mode that does slot work (games too). Every id has an explicit class (StaticClassOf).
+//    standard and AVR-safe. Games (queue 1, owner answer 2026-11-15 via lead 18): such a demanded TD product is OPTIONAL (Fill class), so
+//    games, which runs no optional fill, does not make it, and the line says so. Every id has an explicit class (StaticClassOf).
 //  - TD reserved slice: derived at Configure from the MEASURED remainder (budget - core), never a fixed number (coordinator 2026-11-14 08:22
 //    via lead 10, Q3); below TD's minimum TD shows its reduced tier (the line says so). The 3090 "4K ~8 ms + P10" is a design figure, never
 //    a constant here; 3090 numbers are estimates until a VP run there (feedback-no-waiting-on-3090) and are shown as "estimated".
@@ -114,6 +115,7 @@ struct Result {
     bool notMeasured[kProductCount] = {};  // optional product left out because unmeasured (visible)
     bool filledForConsumer[kProductCount] = {};   // TD OFF: a TD product another active consumer depends on, filled for it, never shed
     double filledForConsumerMs = 0.0;      // their measured cost (inside coreMs: they run with the chain that reads them)
+    uint32_t tdOptionalInGames = 0;        // TD OFF in games: demanded TD products that are optional fill there (games runs none: not made)
     double budgetMs = 0.0;                 // the slot budget (RenderBudget law)
     double coreMs = 0.0;                   // measured core cost (unmeasured core counted 0, named in the line)
     double sliceMs = 0.0;                  // the TD slice declared to the slot
@@ -345,12 +347,20 @@ inline Result Admit(const AdmissionFacts& f)
     //  - TD OFF: there is no TD slice. A TD product still present is one ANOTHER active consumer depends on: it is filled FOR that consumer
     //    and NEVER shed. It takes the Derived class (a job right after its inputs, run with the chain that reads it; SpareClass::Core in the
     //    slot), so it is admitted with the core chain, costed in coreMs (an over-budget sum steps the arbiter, which never names it), never
-    //    optional fill, never "not measured" fill, never in OptionalFillIds / FillOff, and filled in games as in standard. Unmeasured, it is
-    //    still filled and named as "some core not measured" (rule 5).
+    //    optional fill, never "not measured" fill, never in OptionalFillIds / FillOff. Unmeasured, it is still filled and named as "some core
+    //    not measured" (rule 5).
+    //  - TD OFF in GAMES (queue 1; owner answer 2026-11-15 via lead 18, S3A-GAMES; partly reverses 6aa02f66d for games only): a TD product
+    //    another consumer demands is OPTIONAL (Fill class), not Derived. Games runs no optional fill, so it is not made; the line counts it
+    //    (tdOptionalInGames). Standard / AVR-safe stay Derived and are never shed.
     const bool tdOn = TdOn(f);
     uint32_t tdForOthers = 0;
     for (size_t i = 0; i < kProductCount; ++i) {
         if (tdOn || !f.present[i] || r.cls[i] != JobClass::Slice || !r.jobbed[i]) continue;
+        if (f.mode == LatencyMode::Games) {
+            r.cls[i] = JobClass::Fill;
+            ++r.tdOptionalInGames;
+            continue;
+        }
         r.cls[i] = JobClass::Derived;
         r.filledForConsumer[i] = true;
         ++tdForOthers;
@@ -419,6 +429,9 @@ inline Result Admit(const AdmissionFacts& f)
             unsigned(tdForOthers), r.filledForConsumerMs);
         r.line += td;
     }
+    if (r.tdOptionalInGames > 0)
+        r.line += "; TD off (games): TD products " + std::to_string(r.tdOptionalInGames) +
+            " demanded by another consumer are optional fill, not made (games runs no optional fill)";
     if (!rb.Measured() || !(hz > 0.0)) r.line += "; no budget (render or source rate not measured)";
     PlanAhead(f, r);
     return r;
@@ -427,7 +440,8 @@ inline Result Admit(const AdmissionFacts& f)
 // The optional fills the admission turned on: what the wiring hands OverloadArbiter::SetOptionalFills (core/OverloadOrder.h), so FillOff
 // switches off optional extras only (OD:391 (2): never core, never TD). Fill class only: a Core, Derived or Slice (TD) product is never listed,
 // so no TD product is ever listed: with TD ON it is a Slice job, with TD OFF one filled for another consumer is Derived (owner decision
-// 2026-11-15 06:58: filled for that consumer and NOT shed).
+// 2026-11-15 06:58: filled for that consumer and NOT shed). In games a demanded TD product is Fill class but never admitted (games runs no
+// optional fill), so it is never listed there either.
 inline std::vector<ProductId> OptionalFillIds(const Result& r)
 {
     std::vector<ProductId> ids;
