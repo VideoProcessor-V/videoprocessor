@@ -458,5 +458,88 @@ namespace ComposedVectorsTest
 			Assert::IsTrue(p.GetStats().budgetRefused > 0);
 			Assert::IsTrue(p.CurrentStatus().engaged);
 		}
+		// Owner 11-14 16:43 item 4 (S-T1 Q1): the shared neighbour-warp (image) sampler is BICUBIC. Catmull-Rom reproduces a quadratic exactly; bilinear
+		// would read the chord (30.5 at x = 5.5 of x^2).
+		TEST_METHOD(WarpSamplerIsBicubicNotBilinear)
+		{
+			struct Img
+			{
+				int w = 16, h = 8;
+				double at(int x, int y) const { return static_cast<double>(x) * x + 0.0 * y; }
+			} img;
+			double v = 0.0;
+			Assert::IsTrue(SampleBicubic(img, 5.5, 3.0, v));
+			Assert::AreEqual(30.25, v, 1e-9);
+			Assert::IsTrue(std::fabs(v - 30.5) > 0.2);
+			Assert::IsTrue(SampleBicubic(img, 7.0, 3.0, v));
+			Assert::AreEqual(49.0, v, 1e-12);   // on a sample: the sample itself
+		}
+		TEST_METHOD(WarpSamplerRampExactAndFootprintNeverClamped)
+		{
+			struct Ramp
+			{
+				int w = 16, h = 8;
+				double at(int x, int y) const { return 2.0 * x + 3.0 * y; }
+			} img;
+			double v = 0.0;
+			Assert::IsTrue(SampleBicubic(img, 6.25, 3.75, v));
+			Assert::AreEqual(2.0 * 6.25 + 3.0 * 3.75, v, 1e-9);
+			Assert::IsTrue(SampleBicubic(img, 13.5, 5.5, v));    // taps 12..15 x 4..7: inside
+			v = -1.0;
+			Assert::IsFalse(SampleBicubic(img, 0.5, 3.0, v));    // tap x = -1
+			Assert::IsFalse(SampleBicubic(img, 14.0, 3.0, v));   // tap x = 16
+			Assert::IsFalse(SampleBicubic(img, 6.0, 6.0, v));    // tap y = 8
+			Assert::AreEqual(-1.0, v, 0.0);                       // out untouched on refusal
+		}
+		TEST_METHOD(SampleLandedWarpsTheImageBicubicallyAtTheLanding)
+		{
+			struct Ramp
+			{
+				int w = kW, h = kH;
+				double at(int x, int y) const { return 2.0 * x + y; }
+			} img;
+			Plane q;
+			q.step = kBlockStep; q.srcW = kW; q.srcH = kH; q.w = kW / kBlockStep; q.h = kH / kBlockStep;
+			const size_t n = static_cast<size_t>(q.w) * q.h;
+			q.dx.assign(n, 3.25f); q.dy.assign(n, -1.5f); q.trust.assign(n, 1.0f); q.unc.assign(n, 0.0f);
+			double v = 0.0;
+			Assert::IsTrue(q.SampleLanded(img, 40.0, 20.0, v));           // lands at (43.25, 18.5)
+			Assert::AreEqual(2.0 * 43.25 + 18.5, v, 1e-6);
+			Assert::IsFalse(q.SampleLanded(img, kW - 2.0, 20.0, v));       // landing outside the frame
+			Assert::IsFalse(q.SampleLanded(img, kW - 3.5, 20.0, v));       // landing inside, footprint clipped
+			q.trust.assign(n, 0.0f);
+			Assert::IsFalse(q.SampleLanded(img, 40.0, 20.0, v));           // dead chain
+		}
+		// The status line names the reason of the direction it reports (back first), not whichever direction failed last (audit SHOULD 6).
+		TEST_METHOD(StatusReasonBelongsToTheReportedDirection)
+		{
+			class TwoGaps : public FakeSource
+			{
+			public:
+				bool Adjacent(uint64_t from, uint64_t to, PairField& out, std::string* why) const override
+				{
+					if (from == 99 && to == 98) {
+						if (why) *why = "back gap";
+						return false;
+					}
+					if (from == 101 && to == 102) {
+						if (why) *why = "ahead gap";
+						return false;
+					}
+					return FakeSource::Adjacent(from, to, out, why);
+				}
+			} src;
+			Product p(&src);
+			ActivateBoth(p);
+			const Reached r = p.Prepare(100);
+			Assert::AreEqual(1, (int)r.back);
+			Assert::AreEqual(1, (int)r.ahead);
+			Assert::IsTrue(r.backWhyText == "back gap");
+			Assert::IsTrue(r.aheadWhyText == "ahead gap");
+			const Product::Status st = p.CurrentStatus();
+			Assert::IsTrue(st.engaged);
+			Assert::IsTrue(st.text.find("back gap") != std::string::npos);
+			Assert::IsTrue(st.text.find("ahead gap") == std::string::npos);
+		}
 	};
 }

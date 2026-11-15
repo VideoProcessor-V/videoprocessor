@@ -36,11 +36,21 @@
 // CALLERS NOT BUILT HERE: the IPairSource adapter over the P2 slot / CellTrust memo / MotionValidity (the grain-level and TD lanes) and the Invalidate()
 // call at every epoch cause (MotionValidity epoch change) are wired by those lanes; this product exposes the seams.
 //
+// TWO SAMPLERS, ONE EACH (owner 11-14 16:43 item 4, "shared neighbour-warp sampler (ECV) = bicubic", citing S-T1 Q1 "adopt a bicubic warp"):
+//   - the VECTOR-FIELD sampler: BilinearTap (one helper for Plane::At and the producer's SampleField) interpolates the displacement / trust /
+//     uncertainty raster; Plane::Warp gives the landing. The owner decision does not concern this interpolation (S-T1 compared IMAGE warps).
+//   - the IMAGE warp sampler: SampleBicubic (WarpSampler.h, Catmull-Rom, no clamped taps) resamples a neighbour image plane at that landing;
+//     Plane::SampleLanded = Warp + SampleBicubic. This is the neighbour-warp sampler of the owner decision: every reader (P10g grain level,
+//     TemporalDetail) calls it; nobody keeps a private warp or a private bicubic (rule 1).
+// A landing that is not valid (trust 0, or outside the frame) still carries the dx / dy the chain held (Plane::At, Warped.x / .y): a reader that
+// reads dx / dy directly must check trust (or Warped.valid) first; Product::Value reports such a point as trust 0.
+//
 // GPU. This is the CPU form and the product contract; a GPU form of the block field (one dispatch per offset, same fields, same step) is a later
 // step (102b ECV-GPU-FORM closed by decision R14-16: block field + shared plane sampler). Header-only, C++14, no Windows headers. Render / lane thread, one caller at a time
 // (the lane serialises; the class holds no lock).
 
 #include "ComposedVectorPlan.h"
+#include "WarpSampler.h"
 
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 
@@ -102,6 +112,34 @@ struct Sampled
     float dx = 0.0f, dy = 0.0f, trust = 0.0f, unc = 0.0f;
 };
 
+// The ONE bilinear tap of the vector rasters (rule 1: Plane::At and the producer's SampleField both use it). Pixel-centre source position (x, y) on a
+// gridW x gridH raster of cellPx source px per cell, clamped to the grid. The caller checks the grid is non-empty.
+struct BilinearTap
+{
+    size_t i00 = 0, i10 = 0, i01 = 0, i11 = 0;
+    float fx = 0.0f, fy = 0.0f;
+
+    BilinearTap(double x, double y, double cellPx, int gridW, int gridH)
+    {
+        const double gx = (std::min)((std::max)(x / cellPx - 0.5, 0.0), double(gridW - 1));
+        const double gy = (std::min)((std::max)(y / cellPx - 0.5, 0.0), double(gridH - 1));
+        const int x0 = static_cast<int>(gx), y0 = static_cast<int>(gy);
+        const int x1 = (std::min)(x0 + 1, gridW - 1), y1 = (std::min)(y0 + 1, gridH - 1);
+        fx = static_cast<float>(gx - x0);
+        fy = static_cast<float>(gy - y0);
+        i00 = static_cast<size_t>(y0) * gridW + x0;
+        i10 = static_cast<size_t>(y0) * gridW + x1;
+        i01 = static_cast<size_t>(y1) * gridW + x0;
+        i11 = static_cast<size_t>(y1) * gridW + x1;
+    }
+    float Mix(const std::vector<float>& v) const
+    {
+        const float a = v[i00] + (v[i10] - v[i00]) * fx;
+        const float b = v[i01] + (v[i11] - v[i01]) * fx;
+        return a + (b - a) * fy;
+    }
+};
+
 // The composed field of one (frame, direction, offset): ow x oh output cells, cell (i, j) centred on source position ((i + 0.5) step, (j + 0.5) step).
 struct Plane
 {
@@ -128,22 +166,11 @@ struct Plane
             return s;
         if (!(x >= 0.0 && y >= 0.0 && x <= srcW && y <= srcH))
             return s;
-        const double gx = (std::min)((std::max)(x / step - 0.5, 0.0), double(w - 1));
-        const double gy = (std::min)((std::max)(y / step - 0.5, 0.0), double(h - 1));
-        const int x0 = static_cast<int>(gx), y0 = static_cast<int>(gy);
-        const int x1 = (std::min)(x0 + 1, w - 1), y1 = (std::min)(y0 + 1, h - 1);
-        const float fx = static_cast<float>(gx - x0), fy = static_cast<float>(gy - y0);
-        const size_t i00 = static_cast<size_t>(y0) * w + x0, i10 = static_cast<size_t>(y0) * w + x1;
-        const size_t i01 = static_cast<size_t>(y1) * w + x0, i11 = static_cast<size_t>(y1) * w + x1;
-        const auto mix = [&](const std::vector<float>& v) {
-            const float a = v[i00] + (v[i10] - v[i00]) * fx;
-            const float b = v[i01] + (v[i11] - v[i01]) * fx;
-            return a + (b - a) * fy;
-        };
-        s.dx = mix(dx);
-        s.dy = mix(dy);
-        s.trust = mix(trust);
-        s.unc = mix(unc);
+        const BilinearTap tap(x, y, static_cast<double>(step), w, h);
+        s.dx = tap.Mix(dx);
+        s.dy = tap.Mix(dy);
+        s.trust = tap.Mix(trust);
+        s.unc = tap.Mix(unc);
         return s;
     }
 
@@ -166,6 +193,13 @@ struct Plane
         r.y = y + s.dy;
         r.valid = s.trust > 0.0f && r.x >= 0.0 && r.y >= 0.0 && r.x <= srcW && r.y <= srcH;
         return r;
+    }
+    // Image-plane sample at the landing of source position (x, y): Warp, then the shared bicubic. False for an invalid landing or a clipped footprint.
+    template <class P>
+    bool SampleLanded(const P& img, double x, double y, double& out) const
+    {
+        const Warped l = Warp(x, y);
+        return l.valid && SampleBicubic(img, l.x, l.y, out);
     }
 };
 
@@ -198,6 +232,7 @@ struct Reached
     uint16_t degradedBack = 0, degradedAhead = 0;   // of those, planes built without a reverse pair (pair trust only; visible in Status)
     Got backWhy = Got::Ok, aheadWhy = Got::Ok;
     std::string lastWhy;            // the adapter's plain reason for the last absent pair
+    std::string backWhyText, aheadWhyText;   // the same reason per direction (the status line names the reason of the direction it reports)
 };
 
 struct Stats
@@ -289,9 +324,12 @@ public:
             const uint16_t want = d == Dir::Back ? plan.back : plan.ahead;
             uint16_t got = 0, degraded = 0;
             Got why = Got::Ok;
+            std::string& dirWhy = d == Dir::Back ? r.backWhyText : r.aheadWhyText;
             for (uint16_t k = 1; k <= want; ++k) {
                 PlanePtr p;
-                why = Acquire(t, d, k, p, &r.lastWhy);
+                why = Acquire(t, d, k, p, &dirWhy);
+                if (!dirWhy.empty())
+                    r.lastWhy = dirWhy;
                 if (why != Got::Ok)
                     break;
                 got = k;
@@ -372,9 +410,11 @@ public:
             s.text = "composed vectors: " + std::to_string(noRev) + " planes without a reverse pair (pair trust only)";
             return s;
         }
+        // The reason of the direction the line reports (back first, as the Got name below), not whichever direction failed last.
+        const std::string& reportedWhy = backShort ? m_last.backWhyText : m_last.aheadWhyText;
         s.text = "composed vectors reach " + std::to_string(m_last.back) + " of " + std::to_string(plan.back) + " frames back and " +
                  std::to_string(m_last.ahead) + " of " + std::to_string(plan.ahead) + " ahead (" +
-                 (m_last.lastWhy.empty() ? std::string(GotName(backShort ? m_last.backWhy : m_last.aheadWhy)) : m_last.lastWhy) + ")";
+                 (reportedWhy.empty() ? std::string(GotName(backShort ? m_last.backWhy : m_last.aheadWhy)) : reportedWhy) + ")";
         return s;
     }
 
@@ -503,21 +543,10 @@ private:
     static Sampled SampleField(const PairField& f, double x, double y)
     {
         Sampled s;
-        const double gx = (std::min)((std::max)(x / f.cellPx - 0.5, 0.0), double(f.gridW - 1));
-        const double gy = (std::min)((std::max)(y / f.cellPx - 0.5, 0.0), double(f.gridH - 1));
-        const int x0 = static_cast<int>(gx), y0 = static_cast<int>(gy);
-        const int x1 = (std::min)(x0 + 1, f.gridW - 1), y1 = (std::min)(y0 + 1, f.gridH - 1);
-        const float fx = static_cast<float>(gx - x0), fy = static_cast<float>(gy - y0);
-        const size_t i00 = static_cast<size_t>(y0) * f.gridW + x0, i10 = static_cast<size_t>(y0) * f.gridW + x1;
-        const size_t i01 = static_cast<size_t>(y1) * f.gridW + x0, i11 = static_cast<size_t>(y1) * f.gridW + x1;
-        const auto mix = [&](const std::vector<float>& v) {
-            const float a = v[i00] + (v[i10] - v[i00]) * fx;
-            const float b = v[i01] + (v[i11] - v[i01]) * fx;
-            return a + (b - a) * fy;
-        };
-        s.dx = mix(f.vx);
-        s.dy = mix(f.vy);
-        s.trust = mix(f.trust);
+        const BilinearTap tap(x, y, f.cellPx, f.gridW, f.gridH);
+        s.dx = tap.Mix(f.vx);
+        s.dy = tap.Mix(f.vy);
+        s.trust = tap.Mix(f.trust);
         return s;
     }
 
