@@ -349,7 +349,7 @@ namespace VpvRenderer
 		bool vectorDemand = true;
 		// Batch B (plan-motion-engine-switch.md Q3): derived by PostLoad, never read from the file. With vector_demand off the de-judder and
 		// the hiccup smoothing the user had on are forced off; this is the Ctrl+I / Config line saying so ("de-judder off: motion engine
-		// off"), empty when nothing was forced (and on the Original pathway / with the motion slots off, which already switch them off).
+		// off"), empty when nothing was forced (and on the Original pathway, which already switches them off; also empty when they were already off in the file).
 		std::string engineOffForced;
 		// Hunt 2 group 5 (13-timing, 05-renderahead M5): the backlog flush measures
 		// staleness beyond the queue target, the timeline steering is in seconds, the cadence
