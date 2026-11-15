@@ -1575,13 +1575,22 @@ namespace Tests
 			// r6 fix 7 (vp-no-silent-fallbacks): the capture GPU unpack's automatic CPU fallback is
 			// listed under "Fallbacks engaged"; a clean run says "none".
 			if (!RequireHardwareOrSkip("FallbacksEngagedIsPopulatedByTheCaptureUnpackFallback")) return;
+			// WAIVER-C5-FBCLEAN (lead 18): "none" is only true where every OTHER entry is legitimately released, so both legs run:
+			//  - the Beta lane (fbo_float32 at its default auto = float32 intermediates): "picture precision" is released there
+			//    (PicturePrecision::Classify); the Stable 7.360 lane has no float32 switch and lists it by design (S-12BIT);
+			//  - vector_demand off: the W2-C1 (B9) NoStarter entries "vector_engine" and "motion engine" (a 59.94p video source
+			//    starts no de-judder) are released as a group (VectorEngine::UpdateVectorEngine, VectorEngineFallbackSync::Release).
+			// The same configuration on the forced-fallback leg, so the capture GPU unpack is the first (only) entry listed.
+			const std::string released = "vector_demand: off\n";   // B1 deletes this line
+			_putenv_s("VP_TEST_HARNESS_BETA", "1");
 			{
-				const RunResult clean = Run(VideoFrameEncoding::V210, "gpu", 2.0);
+				const RunResult clean = Run(VideoFrameEncoding::V210, "gpu", 2.0, false, released);
 				Assert::AreEqual(std::string("Fallbacks engaged: none"), clean.fallbacksStatus, (L"clean\n" + clean.Tail()).c_str());
 			}
 			_putenv_s("VP_TEST_CAPTURE_UNPACK_FAIL", "1");
-			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 2.0);
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 2.0, false, released);
 			_putenv_s("VP_TEST_CAPTURE_UNPACK_FAIL", "");
+			_putenv_s("VP_TEST_HARNESS_BETA", "");
 			Logger::WriteMessage(("fallbacks: " + r.fallbacksStatus + "\n").c_str());
 			Assert::IsTrue(r.fallbacksStatus.find("Fallbacks engaged: capture GPU unpack (CPU formatters") == 0,
 				(L"the fallback listed\n" + r.Tail()).c_str());
