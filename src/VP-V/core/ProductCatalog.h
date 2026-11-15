@@ -311,8 +311,10 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         r.push_back(MakeRow(1, "texture restore", "VP-V/modules/repair/texture_restore", PathwayUnit::Repair, 30,
                             { kP10GrainSplit, kP11RegionBlockStats, kP4SourceStats }, own, "product.texture_restore", false,
                             { kSourceIdentity }));
+        // No P12 read today (the debander computes no light level); it is re-declared when the WP4b/5b luminance-adaptive threshold
+        // reads P12 through the accessor (102b DEBAND-P12-WP4B, doc 115 item 24).
         r.push_back(MakeRow(2, "debander (with hold)", "VP-V/modules/repair/deband", PathwayUnit::Repair, 40,
-                            { kP10GrainSplit, kP11RegionBlockStats, kP12LightLevel, kP3AnalysisField }, own,
+                            { kP10GrainSplit, kP11RegionBlockStats, kP3AnalysisField }, own,
                             "product.debander", true, { kSourceIdentity }));
         // Contrast recovery gates itself off on a clean high-bitrate source (get out of the way): it reads only the held record.
         r.push_back(MakeRow(18, "contrast recovery need", "VP-V/modules/repair", PathwayUnit::Repair, 55,
