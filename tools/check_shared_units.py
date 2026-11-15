@@ -196,7 +196,11 @@ REGISTRY = [
                       # 102b U24-FLOORINDEX-QUANTILE-COPIES: the FloorIndex quantile idiom sorted[size_t(q * (size() - 1))]
                       # (either operand order) = RobustStats::Quantile(v, q, RankRule::FloorIndex).
                       r"\[[^\[\]]*\*[^\[\]]*\bsize\(\)\s*-\s*1\b[^\[\]]*\]",
-                      r"\[[^\[\]]*\bsize\(\)\s*-\s*1\s*\)*\s*\*[^\[\]]*\]"),
+                      r"\[[^\[\]]*\bsize\(\)\s*-\s*1\s*\)*\s*\*[^\[\]]*\]",
+                      # C6-2 C11 (gate SHOULD-1): the same quantile with a local count, sorted[size_t(q * (n - 1))], either operand
+                      # order. An index holding a '+' is excluded: the 2-D image form a[(y - 1) * w + x] is no hit.
+                      r"\[[^\[\]+]*\*[^\[\]+]*\(\s*[A-Za-z_][\w.>-]*\s*-\s*1\s*\)[^\[\]+]*\]",
+                      r"\[[^\[\]+]*\(\s*[A-Za-z_][\w.>-]*\s*-\s*1\s*\)\s*\)*\s*\*[^\[\]+]*\]"),
      "allow": _c(r"RobustStats::\w+", r"core/RobustStats(Shaders)?\.h", r"(?<!float )\bvpu_median_\w*\s*\(",
                  r"\bVP_MAD_TO_SIGMA\b")},
     {"id": "U25", "name": "ramp_clamp_smoothstep",

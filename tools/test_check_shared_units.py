@@ -461,6 +461,23 @@ class NearDupUnitPatternsTest(unittest.TestCase):
             role = {h["line"]: h["role"] for h in res["hits"] if h["file"] == f}
             self.assertEqual(role, {1: "duplicate", 2: "duplicate", 3: "duplicate", 4: "consumer"})
 
+    def test_u24_floor_index_quantile_with_a_local_count_is_a_duplicate(self):
+        # C6-2 C11 (gate SHOULD-1): sorted[size_t(q * (n - 1))] with a local count, both operand orders and the
+        # static_cast<double>(n - 1) form, is a private FloorIndex Quantile; 2-D indexes (a '+' in the index), a plain
+        # last element and the owner call are not duplicates.
+        with tempfile.TemporaryDirectory() as r:
+            f = "src/VP-V/modules/repair/c/Qn.h"
+            _w(r, f, "const double p = s[static_cast<size_t>(0.9 * static_cast<double>(n - 1))];\n"
+                     "auto v = t[size_t(q * (count - 1))];\n"
+                     "auto w = t[size_t((m_n - 1) * q)];\n"
+                     "subY = SubPel(costs[(by - 1) * n + bx], best, costs[(by + 1) * n + bx]);\n"
+                     "const int64_t d = int64_t(half[size_t(y - 1) * hw_ + x]) - 2 * int64_t(s);\n"
+                     "double last = v[n - 1];\n"
+                     "const double t = RobustStats::Quantile(e, 0.9, RobustStats::RankRule::FloorIndex);\n")
+            res = _unit(csu.scan(r, baseline={"units": {}}), "U24")
+            role = {h["line"]: h["role"] for h in res["hits"] if h["file"] == f}
+            self.assertEqual(role, {1: "duplicate", 2: "duplicate", 3: "duplicate", 7: "consumer"})
+
 
 class FocusAcquireAllowTest(unittest.TestCase):
     """L-FOCUS: Acquire(kP11RegionBlockStats) is a consumer read of the published product; a line that computes block
