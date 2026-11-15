@@ -1071,7 +1071,7 @@ inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
 // map (kEdgeMap 31; owner 11-14 05:25 "focus map built ON the edge map"; registered fix FOCUS-EDGEMAP-SWITCH, unit v2): the per-block
 // peak Sobel energy over the P11 band energy. While the edge map has no CPU form the fill uses the P11 band-energy law (the interim, v1)
 // and says so on every block (FocusMap::kSharpnessInterim) and on the Fallbacks list. Declared inputs: kEdgeMap (lag 0 and lag 1), P11 v2
-// (stats + E1/E2/E3/N; lag 0 and lag 1), P10, P2 and P7. It owns no statistic: every input is read through Acquire by its OWNER'S fill; the owner fill here obtains each prerequisite the
+// (stats + E1/E2/E3/N; lag 0 and lag 1), P2 and P7. It owns no statistic: every input is read through Acquire by its OWNER'S fill; the owner fill here obtains each prerequisite the
 // same way (nested Acquire publishes it). HARD TD RULE (owner 22:16): never import detail sharper than the current frame's focus state into
 // a region whose focus changed; the TD consumer row is DECLARED only (no wiring). Pads nothing before it (31 is edge_map) and the reserved
 // tail (33..34) after it: it closes the fixed id table.
@@ -1091,7 +1091,8 @@ inline void AppendFocusMapProduct(std::vector<ProductDecl>& decls)
     AddInput(p, kP11RegionBlockStats, 0);
     AddInput(p, kP11RegionBlockStats, 1);    // the previous frame's block statistics: the focus-change reference (read, never copied);
                                              // needs the P11 owner fill's keepFrames >= 1 (102b FOCUS-P11-LAG1-RETENTION), else kNoPreviousRetained
-    AddInput(p, kP10GrainSplit, 0);
+    // No P10 edge: the fill never reads the grain split itself (audit SHOULD 4); its N and band energies reach the focus map inside P11
+    // (which reads P10), and N = -1 there is kNoSplit. A declared read the code never makes would be a false declaration (X8).
     AddInput(p, kP2VectorPair, 0);
     AddInput(p, kP7CameraFit, 0);
     AddTerm(p, 4, kFocusMapBytesPerBlock);   // the 16 px cell: exact at 1080p, an upper bound at 4K/8K (32/64 px blocks)

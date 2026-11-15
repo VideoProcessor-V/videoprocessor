@@ -14,7 +14,7 @@
 //   P11 (seq - 1)  the previous frame's statistics: the focus-change reference       -> absent = kNoPrevious; RELEASED (the P11 owner
 //                  kept no spot for frame seq - 1: its owner fill must declare keepFrames >= 1, 102b FOCUS-P11-LAG1-RETENTION) =
 //                  kNoPrevious + kNoPreviousRetained on every block, counted (Stats::noPreviousRetained) and on the Fallbacks list
-//   P10 (seq)      the grain split: a DECLARED edge, not Acquired (audit SHOULD 4): P11 carries N = -1 when there was no split
+//   P10            not read and not declared (audit SHOULD 4): P11 carries the split's N and bands, and N = -1 when there was no split
 //                  (RegionEvidence.h), which is kNoSplit on that block, so the full P10 CPU form is never forced only to set a flag
 //   P2  (seq)      the backward vector grid (kP2BytesPerCell per cell; the cell edge is derived from the payload size) -> absent = P7 below
 //   P7  (seq)      the camera translation (FocusMap::kP7Bytes)                          -> absent = zero motion + kNoMotion (visible)

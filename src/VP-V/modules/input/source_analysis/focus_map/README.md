@@ -10,7 +10,7 @@ The per-region defocus level and the focus-change flag: one skeleton product (`k
 |---|---|---|---|
 | lag 0 and lag 1 | kEdgeMap (31, regions unit) | the SHARPNESS input (edge law, unit v2): per-block sums of the Sobel energy; lag 1 = the change reference under the same law | not served on the CPU (C3: GPU-only owner fill) or another size: the interim law for both frames, `kSharpnessInterim` on every block, Fallbacks line "sharpness: P11 interim, edge map pending"; lag 1 absent under the edge law: `kNoPrevious` (released: + `kNoPreviousRetained`) |
 | lag 0 and lag 1 | P11 region block statistics | band energies E1 / E2 / E3, grain level N, coverage; lag 1 = the focus-change reference | no P11: the fill declines (visible); no lag 1: `kNoPrevious`; lag 1 RELEASED (retention missing): `kNoPrevious` + `kNoPreviousRetained`, counted, `product.focus_map` Fallbacks line |
-| lag 0 | P10 grain split | a declared edge only, not Acquired: P11 carries N = -1 without a split | `kNoSplit` on that block (fine = E1) |
+| (none) | P10 grain split | not an edge (audit SHOULD 4; a declared read the code never makes is a false declaration, check_private_copies X8): its N and bands reach the map inside P11, and N = -1 there means no split | `kNoSplit` on that block (fine = E1) |
 | lag 0 | P2 vector pair | backward vector per cell (the cell edge is derived from the payload size), mean per block | P7 below |
 | lag 0 | P7 camera fit | translation stand-in | zero motion + `kNoMotion` (visible), never absent |
 
@@ -34,7 +34,7 @@ confidences >= 0.3; `kSharper` when `delta < 0`. Packed 8 B per P11 block: u16 d
 | | before (r2/job1-focus e4b184625, unit v1) | after (this lane, unit v2) |
 |---|---|---|
 | sharpness input | P11 band energies E1 / E2 / E3 (fine-band share of the band energy) | kEdgeMap through `Acquire(kEdgeMap, seq, Cpu)` (and seq - 1): the peak Sobel energy over the P11 band energy |
-| declared edges | P11 (0, 1), P10, P2, P7 | + kEdgeMap (0, 1); catalog row 28 reads kEdgeMap (the focus map is its first reader) |
+| declared edges | P11 (0, 1), P10, P2, P7 | kEdgeMap (0, 1), P11 (0, 1), P2, P7 (P10 dropped: never read, SHOULD 4 / X8); catalog row 28 reads kEdgeMap (the focus map is its first reader) |
 | edge map not served on the CPU (every frame on C3) | n/a | the v1 law, bit for bit, plus `kSharpnessInterim` on every block and the Fallbacks line |
 | confidence, change flag, motion, packing | as v1 | unchanged |
 Equivalence / intended difference, proven by the queued FocusMapTests: (1) with no kEdgeMap CPU fill, every block equals the v1 result
