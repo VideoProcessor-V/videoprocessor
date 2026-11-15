@@ -67,11 +67,11 @@ namespace FrameAnalysisProducerTestsNs
 				if (PlaneKind(kind))
 				{
 					// Already a readable plane: no copy, no decode.
-					Assert::IsFalse(VpFrameAnalysis::NeedsDecode(frame.source), KindName(kind));
+					Assert::IsFalse(Vpv::AnalysisDomain::NeedsLumaPlane(frame.source), KindName(kind));
 					Assert::IsTrue(frame.source.sharedLuma == nullptr, KindName(kind));
 					continue;
 				}
-				Assert::IsTrue(VpFrameAnalysis::NeedsDecode(frame.source), KindName(kind));
+				Assert::IsTrue(Vpv::AnalysisDomain::NeedsLumaPlane(frame.source), KindName(kind));
 				const AnalysisLumaSource copy = frame.source;   // copies share the plane
 				Assert::IsTrue(copy.SharedLumaRow(0) == nullptr, L"not published yet");
 				Assert::IsTrue(VpFrameAnalysis::DecodeSharedLuma(frame.source), KindName(kind));
@@ -235,7 +235,7 @@ namespace FrameAnalysisProducerTestsNs
 			// conversion; the forecast's double-conversion clash cannot happen).
 			const Frame frame = Make(Kind::Bgra, 0);
 			Assert::IsTrue(kAnalysisLumaSampleLimitedDomain);
-			Assert::IsFalse(VpFrameAnalysis::SamplerCodesAreFullRange(frame.source));
+			Assert::IsFalse(frame.source.CodesFullRange());
 			const auto map = VpFrameAnalysis::StudioLumaMap(frame.source);
 			for (int code = 0; code < 1024; ++code)
 				Assert::AreEqual(static_cast<uint16_t>(code), map[code]);
@@ -249,8 +249,8 @@ namespace FrameAnalysisProducerTestsNs
 			const Frame vp = Make(Kind::Bgra, 0);
 			Frame original = Make(Kind::Bgra, 0);
 			original.source.limitedDomain = false;
-			Assert::IsFalse(VpFrameAnalysis::SamplerCodesAreFullRange(vp.source));
-			Assert::IsTrue(VpFrameAnalysis::SamplerCodesAreFullRange(original.source));
+			Assert::IsFalse(vp.source.CodesFullRange());
+			Assert::IsTrue(original.source.CodesFullRange());
 			const auto map = VpFrameAnalysis::StudioLumaMap(original.source);
 			Assert::AreEqual(64, static_cast<int>(map[0]));
 			Assert::AreEqual(940, static_cast<int>(map[1023]));
