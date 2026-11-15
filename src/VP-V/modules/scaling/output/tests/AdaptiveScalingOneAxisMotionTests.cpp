@@ -620,6 +620,69 @@ namespace VideoProcessorTest
 			Assert::IsTrue(noMemo.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !noMemo.cause.empty(),
 				L"no memo on this thread: visible Unavailable");
 		}
+
+		// Audit x5dup M3: a REAL skeleton memo at the per-frame lifetime (keepFrames 0) releases the previous frame at the next seal and
+		// refuses it (FrameReleased, never recomputed). The module's kept record (CutRecordCache, committed on each advance as
+		// Module::Measuring does) still judges the pair, so a cut after the seal is detected; a cleared cache (a discontinuity) is the
+		// visible Unavailable with its cause.
+		TEST_METHOD(AdaptiveScalingCutP4DetectsACutAcrossAMemoSeal)
+		{
+			using namespace VpSkeleton;
+			SkeletonMemo memo;
+			memo.SetKeepFrames(0);
+			int fills = 0;
+			OwnerFill fill;
+			fill.fill = [&fills](const OwnerFillRequest& rq, SkeletonMemo&, OwnerFillOutput& out)
+			{
+				++fills;
+				// Frames 1-2: one scene (bin 3); frame 3 on: another (bin 40), a cut at frame 3.
+				const VpLaneProducts::SourceStatsRecord rec = FlatRecord(257 * 100, 1000, 60000, rq.seq >= 3 ? 40u : 3u);
+				out.bytes.assign(VpLaneProducts::kStatsBytes, 0);
+				VpLaneProducts::WriteStatsRecord(rec, out.bytes.data(), out.bytes.size());
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(kP4SourceStats, AcquireForm::Cpu, SkeletonMemo::OwnerUnitOf(kP4SourceStats), fill)
+				== SkeletonMemo::Registration::Registered, L"P4 owner fill registered under its catalog unit");
+
+			AdaptiveDownscale::CutRecordCache cache;
+			uint64_t advanced = 0;
+			auto frame = [&](uint64_t seq)
+			{
+				memo.OnSeal(seq);   // the skeleton seals each frame before it renders
+				const AdaptiveDownscale::CutVerdict v = AdaptiveDownscale::VerdictFromMemo(memo, advanced, seq, &cache);
+				advanced = seq;
+				cache.Commit(seq);   // Module::Measuring: the frame advanced
+				return v;
+			};
+
+			const AdaptiveDownscale::CutVerdict f1 = frame(1);
+			Assert::IsTrue(f1.state == AdaptiveDownscale::CutVerdict::State::Known && f1.cut, L"frame 1: the first frame is a cut");
+			const AdaptiveDownscale::CutVerdict f2 = frame(2);
+			Assert::IsTrue(memo.Released(1), L"the seal of frame 2 released frame 1 (the test crosses a release)");
+			Assert::IsTrue(memo.Acquire(kP4SourceStats, 1, AcquireForm::Cpu).cause == AcquireCause::FrameReleased,
+				L"the memo refuses the released frame");
+			Assert::IsTrue(f2.state == AdaptiveDownscale::CutVerdict::State::Known && !f2.cut,
+				L"frame 2: judged against the kept record of frame 1 (same scene, no cut)");
+			// Without the kept record the same pair is Unavailable: the defect this cache fixes.
+			const AdaptiveDownscale::CutVerdict uncached = AdaptiveDownscale::VerdictFromMemo(memo, 1, 2, nullptr);
+			Assert::IsTrue(uncached.state == AdaptiveDownscale::CutVerdict::State::Unavailable
+				&& uncached.cause.find("frame released") != std::string::npos, L"re-asking the memo for frame 1: frame released");
+			const AdaptiveDownscale::CutVerdict f3 = frame(3);
+			Assert::IsTrue(memo.Released(2), L"frame 2 released at the seal of frame 3");
+			Assert::IsTrue(f3.state == AdaptiveDownscale::CutVerdict::State::Known && f3.cut,
+				L"frame 3: the cut is detected after the seal released frame 2");
+			Assert::AreEqual(3, fills, L"each frame's P4 computed once (the previous one never re-asked)");
+
+			// A discontinuity clears the kept record: the next frame's previous record is asked from the memo, which has released it:
+			// the visible Unavailable (no cut verdict, cause shown), never a private recompute or a made-up cut.
+			cache.Clear();
+			const AdaptiveDownscale::CutVerdict f4 = frame(4);
+			Assert::IsTrue(f4.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !f4.cut, L"after a discontinuity: unavailable");
+			Assert::IsTrue(f4.cause.find("frame released") != std::string::npos && f4.cause.find("not kept") != std::string::npos,
+				L"the cause says why");
+			const AdaptiveDownscale::CutVerdict f5 = frame(5);
+			Assert::IsTrue(f5.state == AdaptiveDownscale::CutVerdict::State::Known && !f5.cut, L"frame 5: the kept record of frame 4 again");
+		}
 	};
 
 #include "X5AbCaptureTests.inl"
