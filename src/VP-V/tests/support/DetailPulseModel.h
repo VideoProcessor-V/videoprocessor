@@ -98,6 +98,10 @@ namespace DetailPulseModel
 		double meanLuma = 0.0;
 		double cutShare = 0.0;
 		Image tileWeight;             // per tile veto weight (1 = full gain)
+		// U7 v3 partial reset (the module's): the frame was a fade with its keep (no restart), and the keep applied (amplitude;
+		// 1 = no fade, 0 = restart). Shared-judge reader only.
+		bool fadePartial = false;
+		double historyKeep = 1.0;
 	};
 
 	// The two bands of a plane: D1 = Y - G(s1) Y, D2 = G(s1) Y - L (L bilinear from the half band).
@@ -313,8 +317,19 @@ namespace DetailPulseModel
 			const double cutCodes = DetailPulse::CutCodes(s.bitrateQuality, s.colorDepth);
 			bool cut = false;
 			bool fade = false;
+			double keep2 = 1.0;   // U7 v3: the fade keep squared (the energies), 1 off a fade
 			if (s.sceneReader)
-				cut = nValid > 0 && VpDetailRestore::SceneRestartOf(sequence, s.sceneReader).restart;   // the shared judge's verdict
+			{
+				if (nValid > 0)
+				{
+					const VpDetailRestore::SceneRestartAnswer a = VpDetailRestore::SceneRestartOf(sequence, s.sceneReader);   // the shared judge's verdict
+					cut = a.restart;
+					f.fadePartial = a.fadePartial;
+					f.historyKeep = a.historyKeep;
+					if (a.fadePartial)
+						keep2 = static_cast<double>(a.historyKeep) * a.historyKeep;
+				}
+			}
 			else
 			{
 				cut = nValid > 0 && fs.cutShare > TileJudgeReference::kCutShare;
@@ -336,7 +351,7 @@ namespace DetailPulseModel
 				for (int j = 1; j <= nUse; ++j)
 				{
 					const std::array<double, 4>& e = ring[(slot + kRing - j) % kRing];
-					dec *= decay;
+					dec *= decay * keep2;
 					if (e[3] < 0.5) break;
 					r1 = (std::max)(r1, e[0] * dec);
 					r2 = (std::max)(r2, e[1] * dec);
@@ -348,8 +363,8 @@ namespace DetailPulseModel
 					const double ra = (a[0] + a[1]) / (std::max)(fs.e1 + fs.e2, 1e-20);
 					if (std::fabs(a[2] - fs.meanLuma) <= cutCodes && ra <= DetailPulse::kAheadMaxRatio && ra * DetailPulse::kAheadMaxRatio >= 1.0)
 					{
-						r1 = (std::max)(r1, a[0] * decay);
-						r2 = (std::max)(r2, a[1] * decay);
+						r1 = (std::max)(r1, a[0] * decay * keep2);
+						r2 = (std::max)(r2, a[1] * decay * keep2);
 					}
 				}
 			}

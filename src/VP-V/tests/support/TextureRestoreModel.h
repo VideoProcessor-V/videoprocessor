@@ -220,6 +220,9 @@ namespace TextureRestoreModel
 	public:
 		void Forget() { forget = true; }
 		bool LastWasCut() const { return lastCut; }
+		// U7 v3 partial reset (the module's): the last frame was a fade with its keep (no restart) and the keep applied (amplitude).
+		bool LastWasFadePartial() const { return lastFadePartial; }
+		double LastHistoryKeep() const { return lastHistoryKeep; }
 		bool LastWasRepeat() const { return lastRepeat; }
 		int TileW() const { return tw; }
 		int TileH() const { return th; }
@@ -239,6 +242,8 @@ namespace TextureRestoreModel
 			using namespace TextureRestore;
 			lastCut = false;
 			lastRepeat = false;
+			lastFadePartial = false;
+			lastHistoryKeep = 1.0;
 			const double cap = EffectiveCap(p.cap);
 			if (!(cap > 1.0))
 			{
@@ -275,7 +280,8 @@ namespace TextureRestoreModel
 		}
 
 	private:
-		bool have = false, forget = false, lastCut = false, lastRepeat = false;
+		bool have = false, forget = false, lastCut = false, lastRepeat = false, lastFadePartial = false;
+		double lastHistoryKeep = 1.0;
 		uint64_t sequence = 0;
 		int tw = 0, th = 0, tilePx = 16, width = 0, height = 0;
 		TileGrid ref, gains;   // ref: (N1r, T1r, T2r, Fr); gains: (gG, gT1, gT2, N1)
@@ -407,6 +413,7 @@ namespace TextureRestoreModel
 			};
 			// FRAME: cut / fade.
 			bool flag = restartAll;
+			double keep2 = 1.0;   // U7 v3 partial reset: the fade keep squared (1 off a fade)
 			{
 				double nchanged = 0.0, count = 0.0, sum = 0.0;
 				for (int ty = 0; ty < th; ++ty)
@@ -421,9 +428,15 @@ namespace TextureRestoreModel
 				{
 					if (p.sceneReader)
 					{
-						// The shared judge's verdict (no record = restart, as the module).
-						lastCut = VpDetailRestore::SceneRestartOf(p.sequence, p.sceneReader).restart;
+						// The shared judge's verdict (no record = restart, as the module). U7 v3: a fade with its keep is a partial
+						// reset (the references take one more decay step, keep^2), not a restart.
+						const VpDetailRestore::SceneRestartAnswer sa = VpDetailRestore::SceneRestartOf(p.sequence, p.sceneReader);
+						lastCut = sa.restart;
 						flag = lastCut;
+						lastFadePartial = sa.fadePartial;
+						lastHistoryKeep = sa.historyKeep;
+						if (sa.fadePartial)
+							keep2 = static_cast<double>(sa.historyKeep) * sa.historyKeep;
 					}
 					else
 					{
@@ -441,7 +454,7 @@ namespace TextureRestoreModel
 			// REF: smoothed current statistics, references, gains.
 			const double eight = EightBitStep(p.colorDepth);
 			const double fg = std::pow(kGrainFloorCodes8 * eight, 2.0), ft = std::pow(kTextureFloorCodes8 * eight, 2.0);
-			const double dec = Decay(p.sourceHz);
+			const double dec = Decay(p.sourceHz) * keep2;   // U7 v3: x the fade keep^2 (1 off a fade), as the module
 			const double sf = std::pow(CodingNoiseCodes8(p.bitrateQuality) * eight, 2.0);   // texture evidence: above grain and coding noise
 			TileGrid newRef(tw, th), newGains(tw, th);
 			debug.assign(static_cast<size_t>(tw) * th, TileDebug());
