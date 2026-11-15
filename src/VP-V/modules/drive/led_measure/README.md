@@ -46,11 +46,11 @@ Measure the picture's light for the LED drive: the rendered picture at PRE_OUTPU
 ### Config keys actually read
 
 - `[led_drive.default]` (alias `[dynamic_drive.default]`):
-  - Read in StatsBuilder: `highlight_percentile` (99.5), `highlight_persist_ms` (250), `apl_persist_ms` (100), `fade_ms` (250) / `fade_min_slope` (12; the older `fade_frames` / `fade_min_step` are converted), `script_highlight_code` (215, highlight area). `cut_threshold` (24) is NO LONGER read here (FIX-LED-CUT-U7; the key is a user key and stays, see "Design goal, philosophy and decisions"): it is still read by `drive.led_compensation` (`LedController.cpp` look-ahead cut test), which is outside this slice.
+  - Read in StatsBuilder: `highlight_percentile` (99.5), `highlight_persist_ms` (250), `apl_persist_ms` (100), `fade_ms` (250) / `fade_min_slope` (12; the older `fade_frames` / `fade_min_step` are converted), `script_highlight_code` (215, highlight area). `cut_threshold` (24) is NO LONGER read here (FIX-LED-CUT-U7): the key moved to `drive.led_compensation`'s manifest (it is read only by the controller's early-ramp APL step test, `LedController.cpp`).
   - Passed in through `DynamicDriveFrame` (from the module's config): `apl_weights`, `led_peak_full_coverage` (on), `led_picture_only` (on), `led_highlight_grain_suppress` (on; needs the Stage 8 grain map), `gamma_boost` (the stats describe the boosted picture).
   - Read by the module (look-ahead depth and use): `lookahead` (on), `script_lookahead` (on), `led_lookahead_ms` (0 = whole queue).
 - Renderer profile `source_range` (how the raw path reads the captured range).
-- slots.json / MANIFEST now list exactly these keys (WP-15): `apl_persist_ms`, `apl_weights`, `cut_threshold`, `fade_min_slope`, `fade_ms`, `highlight_percentile`, `highlight_persist_ms`, `led_highlight_grain_suppress`, `led_lookahead_ms`, `led_peak_full_coverage`, `led_picture_only`, `lookahead`, `script_highlight_code`, `script_lookahead`. The old `led_compensation` (a shader rule name) and `led_protect` (a value of `intent_black`, read by the module's intent limits) are gone. `gamma_boost` is listed by `drive.led_compensation`.
+- slots.json / MANIFEST now list exactly these keys (WP-15): `apl_persist_ms`, `apl_weights`, `fade_min_slope`, `fade_ms`, `highlight_percentile`, `highlight_persist_ms`, `led_highlight_grain_suppress`, `led_lookahead_ms`, `led_peak_full_coverage`, `led_picture_only`, `lookahead`, `script_highlight_code`, `script_lookahead` (`cut_threshold` moved to `drive.led_compensation`, FIX-LED-CUT-U7). The old `led_compensation` (a shader rule name) and `led_protect` (a value of `intent_black`, read by the module's intent limits) are gone. `gamma_boost` is listed by `drive.led_compensation`.
 
 ### What the user sees when it falls back
 
@@ -103,14 +103,18 @@ When off: LED disabled costs nothing (no hook, no observer, no walk depth; a few
 
 - "Fallbacks engaged" entry: LED measurement (<reason>; the LED follows the last statistics). Engaged by `DynamicDriveFrame` (pass disabled, readbacks late / frames not measured) once the WP-15 call-site patch is applied.
 - Behaviour: The controllers keep acting on the last statistics (not the between-files `LedDriveHoldover`).
-- "Fallbacks engaged" entry: `LED cut judge` (no scene record for the frame: no cut judged), engaged by `LedDriveModule::SubmitMeasurement` while the measured frame's scene group is not readable (frame_analysis_store off, not sealed yet, slot gone, or sequence 0), released when a record reads again; one event line each way (FIX-LED-CUT-U7). Behaviour while engaged: no cut that frame (never a private re-judgement).
+- "Fallbacks engaged" entries (FIX-LED-CUT-U7), both for GENUINE failure of the get-or-compute scene read only (no skeleton module, renderer ambiguous or unknown, no analysis lane, P4 record unreadable, no previous frame, or sequence 0; the cause is in the entry text):
+  - `LED cut judge (no scene for the measured frame (<cause>): no cut judged)`, engaged by `LedDriveModule::SubmitMeasurement`;
+  - `LED look-ahead cut judge (no scene for a look-ahead frame (<cause>): no cut predicted)`, engaged by `LedDriveModule::SubmitPrediction` for a walked (ahead) frame.
+  Each is released when a scene is got again; one event line each way. Behaviour while engaged: no cut for that frame (never a private re-judgement).
 
 ## Design goal, philosophy and decisions
 
 - One cut judge for the whole product (doc 91 D, "no feature keeps private motion/scene code"; plan `lead18/coreplan-C10-15c-PC-regions.md` commit C8): the LED cut moved to the shared U7 judge (`CutFadeJudge::ClassifyEvents` over the P4 records, published as the scene group by the skeleton, read here with `SceneRecordReader::CutOf` / `PeekScene`, as texture_restore and detail_pulse read it). OWNER ANSWER 2026-11-15 (2): "move NOW, no A/B" (`D:/codex/vp-handover/lead18/coreplan-C10-15c-PC-regions.md` line 45).
 - Registered change FIX-LED-CUT-U7: the old private rule (mean block-luma difference above `cut_threshold`) is gone from the measurement. Expected effect to record on the LED correlation harness (recorded, not gating; the run is later): cuts that the old rule found by a large mean difference but U7 does not (and the reverse) show in the before/after cut list; fades and sustained APL follow the cut flag, so they move with it.
-- `cut_threshold` is a USER key: kept in the schema, example config and Config page, no longer read by the measurement; still read by the controller's look-ahead cut test (`led_compensation`). Retiring or re-pointing it is a separate decision (reported, not taken here).
-- No silent fallback (doc 91 D): record absent or stale = no cut for the frame plus the visible `LED cut judge` entry above. Look-ahead frames are walked before the render thread seals them, so their predicted cuts are mostly "no record" until the skeleton publishes earlier; that is the same step down, counted in the look-ahead builder's `SceneMissing()` (not yet shown in the status line; see the lane report).
+- `cut_threshold` is a USER key: kept in the schema, example config and Config page, and now documented under `drive.led_compensation` (manifest, slots.json, README). It no longer judges cuts: it is the "early-ramp APL step" the controller reads (`LedController.cpp`, with the look-ahead's `cutAhead`). The Config label still says "Cut threshold (APL change)"; renaming or retiring it is a separate decision (reported, not taken here).
+- Get-or-compute (OD 2026-11-15, coordinator ruling): the measured frame AND the look-ahead frame ACQUIRE the scene (`SceneRecordReader::AcquireCut` -> `IExternalDemand::SceneOf` -> `SkeletonModule::SceneOf`): the store's group when present, else the two P4 records are acquired through the renderer's memo (made now for a frame ahead of the seal) and the verdict is published for the later seal, so it is computed once. A frame ahead is therefore normally answered; "no scene" is a genuine failure and shows the visible entries above. The LED declares its P4 demand (lag 0 + lag 1) on the skeleton while it runs (`LedDriveModule::DeclareSceneDemand`, consumer "LED look-ahead cut") and withdraws it on stop; the ahead DEPTH is the skeleton's own plan (a ConsumerDecl has no depth field).
+- The scene reader is injectable per module for tests (`LedDriveModule::SetSceneReaderForTesting`, `IPredictionSink::SceneReader`, `StatsBuilder::SetSceneReader(SceneCutFn)` with a `why` out-parameter); the default is the skeleton reader above.
 
 ## Net fingerprint / upstream
 
@@ -173,7 +177,7 @@ While the frame-quiet deferral is armed (`FrameQuiet::Deferred::Arm`, per render
 
 ## Settings
 
-- Keys: `apl_persist_ms`, `apl_weights`, `cut_threshold`, `fade_min_slope`, `fade_ms`, `highlight_percentile`, `highlight_persist_ms`, `led_highlight_grain_suppress`, `led_lookahead_ms`, `led_peak_full_coverage`, `led_picture_only`, `lookahead`, `script_highlight_code`, `script_lookahead`.
+- Keys: `apl_persist_ms`, `apl_weights`, `fade_min_slope`, `fade_ms`, `highlight_percentile`, `highlight_persist_ms`, `led_highlight_grain_suppress`, `led_lookahead_ms`, `led_peak_full_coverage`, `led_picture_only`, `lookahead`, `script_highlight_code`, `script_lookahead`.
 - Tiers: not tiered.
 - VP-V page, Dynamic Drive tab: not tiered (Not a quality/cost choice: Dynamic Drive is set up on its own page (projector, script/compensate).).
 - Plain-language guide: [docs/settings/VP-settings-reference.md#7-dynamic-drive](../../../../../docs/settings/VP-settings-reference.md#7-dynamic-drive).

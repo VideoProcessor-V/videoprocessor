@@ -46,6 +46,7 @@
     "tools": [],
     "config_keys": [
       "adaptive_gamma",
+      "cut_threshold",
       "gamma_boost",
       "intent_black",
       "led_drive",
