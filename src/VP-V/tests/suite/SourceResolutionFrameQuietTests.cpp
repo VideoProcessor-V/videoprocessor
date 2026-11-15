@@ -353,8 +353,7 @@ namespace VideoProcessorTest
 				const uint64_t cut = cuts[seed - 1];
 				const BoundRun a = RunBoundEngage(cut, seed);
 				const BoundRun b = RunBoundEngage(cut, seed + 100);   // the worker's timing differs, the decisions do not
-				Logger::WriteMessage(("seed " + std::to_string(seed) + ": cut " + std::to_string(cut) + " engaged at " + std::to_string(a.engagedAt) + " (" + a.why + ")\
-").c_str());
+				Logger::WriteMessage(("seed " + std::to_string(seed) + ": cut " + std::to_string(cut) + " engaged at " + std::to_string(a.engagedAt) + " (" + a.why + ")\n").c_str());
 				Assert::AreEqual<unsigned long long>(cut, a.engagedAt, L"engaged on the cut frame itself");
 				Assert::IsTrue(a.why.find("look-ahead verified") != std::string::npos, L"through the look-ahead, not the reactive trigger");
 				Assert::AreEqual<unsigned long long>(0, a.reactive, L"no reactive fallback was used");
