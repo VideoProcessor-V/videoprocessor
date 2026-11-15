@@ -608,7 +608,6 @@ public:
     using InputResolver = std::function<const uint8_t*(ProductId, uint64_t, size_t)>;
     void SetPublishedLookup(PublishedLookup f) { publishedLookup_ = std::move(f); }
     uint64_t SealReusedPublished() const { return sealReusedPublished_; }
-    uint64_t SealComputedReduced() const { return sealComputedReduced_; }   // seal live computes of a missing-input form
     std::vector<ProductId> CpuLiveProducts() const
     {
         std::vector<ProductId> ids;
@@ -1851,7 +1850,6 @@ private:
                 ++sealReusedPublished_;
                 ok = true;
             } else {
-                if (missing != 0) ++sealComputedReduced_;   // L-CORE gate S2: the missing-input form is a compute, counted
                 VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(n.id))).c_str(), seq, ::ComputeOnce::Variant(0));   // compute-once: the seal live compute
                 ok = RunCpuLive(st, n, seq, missing, dst, bytes, InputResolver());
                 if (ok && missing != 0) {
@@ -1990,7 +1988,6 @@ private:
     uint64_t aheadSealReused_ = 0;
     uint64_t sealComputedReduced_ = 0;
     uint64_t sealReusedPublished_ = 0;     // seal live fills served from that publication (never computed twice)
-    uint64_t sealComputedReduced_ = 0;     // seal live fills computed with an input missing (a compute, never a reuse)
     std::vector<ProductId> externalIds_;   // products published outside the lane (SetExternalProducts)
     uint64_t externalDeclined_ = 0;        // seal-time live fills of those products that were declined (nothing published in time)
     std::function<uint64_t(ProductId)> releaseCompleted_;
