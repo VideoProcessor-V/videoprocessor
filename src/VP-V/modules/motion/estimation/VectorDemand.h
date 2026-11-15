@@ -13,11 +13,9 @@
 // Synthesis consumers (de-judder extras, interpolator, hiccup repair, occlusion mask) have their
 // own policies; they only count as "wants" here and are never in served / unserved.
 //
-// DELIBERATE exception: while libplacebo smooth motion runs, the source-domain analysis consumers
-// (SourceField, SourceStatistics) keep the VP vectors; the output-domain consumer (sigma-delta)
-// falls back visibly. Analysis only: no VP interpolation / de-judder synthesis runs alongside
-// smooth motion. Revert with kAnalysisUnderSmoothMotion = false (smooth motion then owns output
-// exclusively and every non-synthesis consumer falls back visibly).
+// Libplacebo smooth motion (owner 2026-11-12 18:47): the host acts on DecideForHost, where smooth motion owns output exclusively
+// (every non-synthesis consumer goes visibly without vectors, no producer). Decide() keeps the older analysis-under-smooth-motion
+// semantics (kAnalysisUnderSmoothMotion) for the pure decision tests only. Competitive low latency is motion-free in the host too.
 namespace VectorDemand
 {
 	constexpr bool kAnalysisUnderSmoothMotion = true;
@@ -249,6 +247,26 @@ namespace VectorDemand
 	}
 
 	inline Decision Decide(const Input& in) { return DecideWith(in, kAnalysisUnderSmoothMotion); }
+
+	// The decision the engine HOST acts on (batch B plan (b)/(d4); owner 2026-11-12 18:47). Libplacebo smooth motion owns output
+	// exclusively (DecideWith(.., false): every non-synthesis consumer unserved, no producer), and competitive low latency (no frame
+	// ahead, queue capacity 0) is motion-free: the backward pair is not run, the consumers go visibly without vectors, mode Off and
+	// lowLatencyAllowed false so DeriveEngineStatus reports hard Off / LowLatency. Decide() above keeps the older analysis-under-smooth-
+	// motion and backward-pair semantics for the pure tests; the host never calls it.
+	inline Decision DecideForHost(const Input& in)
+	{
+		Decision d = DecideWith(in, false);
+		if (d.mode == Mode::Backward)
+		{
+			d.unserved |= d.served;
+			d.served = 0;
+			d.mode = Mode::Off;
+			d.producer = false;
+			d.estimate = false;
+			d.lowLatencyAllowed = false;
+		}
+		return d;
+	}
 
 	// The look-ahead depth the engine engages at: the configured depth bounded by the queue's
 	// capacity, at least one frame.

@@ -307,7 +307,7 @@ namespace VpMotion
 		{
 			decided.wants[cameraFit] = !motionCameraGated;   // the camera fit asked for the field: one more consumer of the same decision
 		}
-		vectorDemand = VectorDemand::Decide(decided);
+		vectorDemand = VectorDemand::DecideForHost(decided);   // smooth motion and competitive low latency: Off with the reason (plan (b)/(d4))
 		// W2-C1: the engine state is derived from this decision (batch B: no starter gate, no refused starts).
 		motionEngineFacts.vectorDemand = facts.vectorDemandSetting;
 		motionEngineFacts.decision = vectorDemand;
