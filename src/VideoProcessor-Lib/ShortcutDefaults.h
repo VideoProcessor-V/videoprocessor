@@ -36,10 +36,15 @@
 // report-a-problem key (state_report, Ctrl+Alt+D) is the one default global
 // action, so a problem can be reported from whatever application has focus.
 // The default applies only while [shortcuts] global_actions is ABSENT; an
-// explicit (even empty) value is the user's and replaces it.
+// explicit (even empty) value is the user's and replaces it. VP-V code applies
+// the default (owner 2026-11-15: Bill's file keeps its text): the report key's
+// own background hook, src/VP-V/gui/ShortcutObserverStatus.h; the dialog reads
+// only an explicit value.
 // For MPC file playback, keep VP's keys off
 // MPC's own (Alt+Enter, Ctrl+1..4 and Ctrl+I are MPC keys too) or leave
 // them non-global.
+#include <ConfigFile.h>
+
 #include <array>
 #include <cstddef>
 #include <cstring>
@@ -91,9 +96,9 @@ constexpr ShortcutDefault kShortcutDefaults[] = {
 // [shortcuts] global_actions when the key is absent (comma-separated action names).
 constexpr const char* kDefaultGlobalActions = "state_report";
 
-// The list the host acts on: the file's value when the key is present (even empty),
-// else the default. defaultApplies is the ONE place a pathway gate goes (whether
-// the default hook installs in the Original pathway is pending lead 14).
+// The list in force: the file's value when the key is present (even empty),
+// else the default. defaultApplies is the ONE place a pathway gate goes (R14-34:
+// no default in the Original pathway, GlobalActionsForConfig).
 inline std::string EffectiveGlobalActions(bool keyPresent, const std::string& value,
 	bool defaultApplies = true)
 {
@@ -102,25 +107,70 @@ inline std::string EffectiveGlobalActions(bool keyPresent, const std::string& va
 	return defaultApplies ? std::string(kDefaultGlobalActions) : std::string();
 }
 
-// The list for a configuration. tryGet(section, key, out) is the config read (true = key present).
-// Pathway gate (lead 14 R14-34, principle 8): the Original pathway ([vpv] then [vprenderer]
-// pipeline_original_pathway = on) is Bill's behaviour, so the default global action does not
-// apply there and no low-level keyboard hook is installed by default; an explicit
-// global_actions value is still the user's and is honoured in every pathway.
+// The Original pathway ([vpv] then [vprenderer] pipeline_original_pathway = on), read as the
+// renderer and HdrInferenceChoice read it (ConfigFile::NormalizeName == "on"), so the default hook
+// and the pathway in force never disagree (lead 18 c5-audit-s3f SHOULD-C).
 template <class TryGet>
-std::string GlobalActionsForConfig(TryGet&& tryGet)
+bool OriginalPathwayForConfig(TryGet&& tryGet)
 {
 	std::string pathway;
 	const bool known = tryGet("vpv", "pipeline_original_pathway", pathway) ||
 		tryGet("vprenderer", "pipeline_original_pathway", pathway);
-	std::string lower;
-	for (char c : pathway)
-		if (c != ' ' && c != '\t')
-			lower += static_cast<char>((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c);
-	const bool original = known && lower == "on";
+	return known && ConfigFile::NormalizeName(pathway) == "on";
+}
+
+// The list for a configuration. tryGet(section, key, out) is the config read (true = key present).
+// Pathway gate (lead 14 R14-34, principle 8): the Original pathway is Bill's behaviour, so the
+// default global action does not apply there and no low-level keyboard hook is installed by
+// default; an explicit global_actions value is still the user's and is honoured in every pathway.
+template <class TryGet>
+std::string GlobalActionsForConfig(TryGet&& tryGet)
+{
+	const bool original = OriginalPathwayForConfig(tryGet);
 	std::string value;
 	const bool present = tryGet("shortcuts", "global_actions", value);
 	return EffectiveGlobalActions(present, value, !original);
+}
+
+// The [shortcuts] facts the default global action depends on, for VP-V's report-key hook
+// (src/VP-V/gui/ShortcutObserverStatus.h; owner 2026-11-15: the default lives in VP-V code, the
+// dialog reads only an explicit global_actions value).
+// - defaultActions: the default list while global_actions is ABSENT (EffectiveGlobalActions: none
+//   in the Original pathway); empty while the key is present, because the list is then the user's
+//   and the dialog's own observer serves it.
+// - globalHotkeys / foregroundOnly: [shortcuts] global_hotkeys / foreground_only through
+//   ConfigFile::TryGetBool, an unreadable value off, as the dialog's readers keep it. global_hotkeys
+//   on: the dialog's observer already makes every binding global; foreground_only on: keys act only
+//   while VP has focus (ConfigurationLiveApply::ShouldEnableBackgroundShortcuts).
+struct DefaultGlobalActionFacts
+{
+	std::string defaultActions;
+	bool globalHotkeys = false;
+	bool foregroundOnly = false;
+};
+
+// originalPathway: the pathway in force. VP-V reads it once, at its first read of the file, since a
+// [vpv] change takes effect at the next start (ConfigurationApplyPolicy: SaveOnly), so the default
+// follows the pathway the process runs; the [shortcuts] keys apply live, as the dialog applies them.
+inline DefaultGlobalActionFacts DefaultGlobalActionFactsFor(const ConfigFile& config, bool originalPathway)
+{
+	DefaultGlobalActionFacts facts;
+	std::string listed;
+	if (!config.TryGetString("shortcuts", "global_actions", listed))
+		facts.defaultActions = EffectiveGlobalActions(false, std::string(), !originalPathway);
+	bool on = false;
+	facts.globalHotkeys = config.TryGetBool("shortcuts", "global_hotkeys", on) && on;
+	on = false;
+	facts.foregroundOnly = config.TryGetBool("shortcuts", "foreground_only", on) && on;
+	return facts;
+}
+
+// The same with the file's own pathway.
+inline DefaultGlobalActionFacts DefaultGlobalActionFactsFor(const ConfigFile& config)
+{
+	return DefaultGlobalActionFactsFor(config, OriginalPathwayForConfig(
+		[&config](const char* section, const char* key, std::string& out)
+		{ return config.TryGetString(section, key, out); }));
 }
 
 // What a live configuration publication does to the global-action set (R14-45 MUST-3). With
@@ -129,6 +179,10 @@ std::string GlobalActionsForConfig(TryGet&& tryGet)
 // pipeline_original_pathway removes the default global hook at once (Original == Bill) and the
 // switch back re-installs it. Returns true when the host must restart the background observer;
 // `next` is then the set to adopt. Only the actions set is touched, never the accelerators.
+// No production caller: the dialog's publication path keeps Bill's text (owner 2026-11-15), the
+// default lives in VP-V's own report-key hook (src/VP-V/gui/ShortcutObserverStatus.h), and a
+// pathway switch still applies at the next start there (the [vpv] key itself is next-start). Kept,
+// with its Lib tests, for a later host seam that restarts the dialog's observer.
 inline bool GlobalActionsOnPublish(bool replaceAccelerators, const std::set<std::string>& current,
 	const std::set<std::string>& staged, std::set<std::string>& next)
 {
