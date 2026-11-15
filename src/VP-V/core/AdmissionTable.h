@@ -19,7 +19,10 @@
 //    unless another active consumer depends on one; then it is filled FOR that consumer and is NOT shed either (owner decision 2026-11-15
 //    06:58): Derived class, run right after its inputs with the chain that reads it, never optional fill, never in the FillOff list, in
 //    standard and AVR-safe. Games (queue 1, owner answer 2026-11-15 via lead 18): such a demanded TD product is OPTIONAL (Fill class), so
-//    games, which runs no optional fill, does not make it, and the line says so. Every id has an explicit class (StaticClassOf).
+//    games, which runs no optional fill, does not make it, and the line says so. A demanded TD product whose ONLY readers are optional
+//    fills (no active consumer reads it directly; readers fed by DemandFromGraph with the consumers) follows them (S3A-STALE, owner answer
+//    2026-11-15 via lead 18): Fill class, admitted with a reader, listed for FillOff, so it stops at the same step as its readers. Every id
+//    has an explicit class (StaticClassOf).
 //  - TD reserved slice: derived at Configure from the MEASURED remainder (budget - core), never a fixed number (coordinator 2026-11-14 08:22
 //    via lead 10, Q3); below TD's minimum TD shows its reduced tier (the line says so). The 3090 "4K ~8 ms + P10" is a design figure, never
 //    a constant here; 3090 numbers are estimates until a VP run there (feedback-no-waiting-on-3090) and are shown as "estimated".
@@ -84,6 +87,11 @@ struct AdmissionFacts {
     double costMs[kProductCount] = {};     // the ledger's measured per-frame cost of each product at the current geometry
     bool measured[kProductCount] = {};     // costMs[i] is a measurement
     bool present[kProductCount] = {};      // the product is in the run-time graph (a node; DemandFromGraph): nothing else is admitted
+    // Who reads each product (DemandFromGraph with the consumer declarations; S3A-STALE). Not fed = every demanded product counts as read
+    // by an active consumer directly (never stopped with an optional reader).
+    bool readersFed = false;
+    bool consumerReads[kProductCount] = {};    // an ACTIVE consumer reads it directly (a feature: FillOff never switches it off)
+    uint64_t readBy[kProductCount] = {};       // bit j: the graph node of product j reads it (any lag or lead)
     LatencyMode mode = LatencyMode::Standard;
     double tdMinMs = 0.0;                  // TD's own minimum tier (its ladder; 0 = TD not running)
     double tdWantMs = 0.0;                 // TD's wanted share (its full tier)
@@ -116,6 +124,10 @@ struct Result {
     bool filledForConsumer[kProductCount] = {};   // TD OFF: a TD product another active consumer depends on, filled for it, never shed
     double filledForConsumerMs = 0.0;      // their measured cost (inside coreMs: they run with the chain that reads them)
     uint32_t tdOptionalInGames = 0;        // TD OFF in games: demanded TD products that are optional fill there (games runs none: not made)
+    bool followsReaders[kProductCount] = {};   // TD OFF: a TD product read ONLY by optional fills (S3A-STALE): Fill class, admitted with a
+                                               // reader, so it is in OptionalFillIds and FillOff stops it at the same step as its readers
+    uint32_t tdFollowing = 0;              // how many TD products follow their optional readers
+    uint32_t tdFollowingOn = 0;            // of those, admitted (with a reader)
     double budgetMs = 0.0;                 // the slot budget (RenderBudget law)
     double coreMs = 0.0;                   // measured core cost (unmeasured core counted 0, named in the line)
     double sliceMs = 0.0;                  // the TD slice declared to the slot
@@ -311,6 +323,32 @@ inline void DemandFromGraph(const Graph& g, AdmissionFacts& f)
     for (size_t i = 0; i < kProductCount; ++i) f.present[i] = g.valid && g.Has(ProductId(i));
 }
 
+static_assert(kProductCount <= 64, "AdmissionFacts::readBy is a 64-bit mask of product ids");
+
+// The same demand plus WHO reads each product (S3A-STALE, owner answer 2026-11-15 via lead 18): the graph's edges (each node's inputs, any
+// lag or lead; substituted ids) give the product readers, the ACTIVE consumers' declarations the direct reads (a consumer that asked for a
+// declared id reads the node made for it). An invalid graph demands nothing and no reader is fed.
+inline void DemandFromGraph(const Graph& g, const std::vector<ConsumerDecl>& consumers, AdmissionFacts& f)
+{
+    DemandFromGraph(g, f);
+    f.readersFed = g.valid;
+    for (size_t i = 0; i < kProductCount; ++i) { f.consumerReads[i] = false; f.readBy[i] = 0; }
+    if (!g.valid) return;
+    for (const Node& n : g.nodes) {
+        if (size_t(n.id) >= kProductCount) continue;
+        for (size_t k = 0; k < n.inputCount && k < n.inputs.size(); ++k) {
+            const size_t in = n.inputs[k].product;
+            if (in < kProductCount) f.readBy[in] |= uint64_t(1) << n.id;
+        }
+    }
+    for (const ConsumerDecl& c : consumers)
+        for (size_t k = 0; k < c.count && k < c.consumes.size(); ++k) {
+            const ProductId asked = c.consumes[k].product;
+            for (const Node& n : g.nodes)
+                if ((n.id == asked || n.declared == asked) && size_t(n.id) < kProductCount) f.consumerReads[n.id] = true;
+        }
+}
+
 // The settings cost mark from measured ms at the 4K30 laptop reference (control-config rule 4: < 0.5 "+", 0.5-2 "++", > 2 "+++"; none untimed).
 inline const char* CostMark(double ms, bool measured)
 {
@@ -352,13 +390,46 @@ inline Result Admit(const AdmissionFacts& f)
     //  - TD OFF in GAMES (queue 1; owner answer 2026-11-15 via lead 18, S3A-GAMES; partly reverses 6aa02f66d for games only): a TD product
     //    another consumer demands is OPTIONAL (Fill class), not Derived. Games runs no optional fill, so it is not made; the line counts it
     //    (tdOptionalInGames). Standard / AVR-safe stay Derived and are never shed.
+    //  - TD OFF, read ONLY by optional fills (S3A-STALE, owner answer 2026-11-15 via lead 18: when FillOff switches off the only reader of a
+    //    TD product, that TD product stops at the same step): with the readers fed (DemandFromGraph with the consumers), a demanded TD
+    //    product that no active consumer reads directly and whose every graph reader is an optional fill (or another such TD product) FOLLOWS
+    //    its readers: Fill class, admitted only together with a reader in step 3 (its cost charged with that reader's), so it is in
+    //    OptionalFillIds and FillOff stops (and names) it at the same step as its readers. No reader admitted = not made. Readers not fed =
+    //    never a follower (the Derived rule above).
     const bool tdOn = TdOn(f);
+    bool tdCandidate[kProductCount] = {};
+    for (size_t i = 0; i < kProductCount; ++i)
+        tdCandidate[i] = !tdOn && f.present[i] && r.cls[i] == JobClass::Slice && r.jobbed[i];
+    if (f.mode != LatencyMode::Games && f.readersFed) {
+        for (size_t i = 0; i < kProductCount; ++i)
+            r.followsReaders[i] = tdCandidate[i] && !f.consumerReads[i] && f.readBy[i] != 0;
+        // Greatest fixed point: drop a candidate any of whose present readers is neither an optional fill nor a follower.
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (size_t i = 0; i < kProductCount; ++i) {
+                if (!r.followsReaders[i]) continue;
+                for (size_t j = 0; j < kProductCount; ++j) {
+                    if (j == i || !(f.readBy[i] & (uint64_t(1) << j)) || !f.present[j]) continue;
+                    const bool optionalReader = !tdCandidate[j] && r.cls[j] == JobClass::Fill && r.jobbed[j];
+                    if (optionalReader || r.followsReaders[j]) continue;
+                    r.followsReaders[i] = false;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
     uint32_t tdForOthers = 0;
     for (size_t i = 0; i < kProductCount; ++i) {
-        if (tdOn || !f.present[i] || r.cls[i] != JobClass::Slice || !r.jobbed[i]) continue;
+        if (!tdCandidate[i]) continue;
         if (f.mode == LatencyMode::Games) {
             r.cls[i] = JobClass::Fill;
             ++r.tdOptionalInGames;
+            continue;
+        }
+        if (r.followsReaders[i]) {
+            r.cls[i] = JobClass::Fill;
+            ++r.tdFollowing;
             continue;
         }
         r.cls[i] = JobClass::Derived;
@@ -404,15 +475,45 @@ inline Result Admit(const AdmissionFacts& f)
     }
 
     // 3. Fill in what is left, in product order, measured only. Games: none (backward products only).
+    //    A TD product that follows its optional readers (S3A-STALE) is never admitted on its own: it comes in with the first reader admitted,
+    //    which must fit with the cost of every follower it needs that is not in yet (its follower inputs, transitively); an unmeasured one
+    //    keeps that reader out as "not measured" (both shown).
     uint32_t fillOn = 0, fillOff = 0, fillUnmeasured = 0;
     for (size_t i = 0; i < kProductCount; ++i) {
-        if (!f.present[i] || r.cls[i] != JobClass::Fill || !r.jobbed[i]) continue;
+        if (!f.present[i] || r.cls[i] != JobClass::Fill || !r.jobbed[i] || r.followsReaders[i]) continue;
         if (f.mode == LatencyMode::Games) { ++fillOff; continue; }
         if (!f.measured[i]) { r.notMeasured[i] = true; ++fillUnmeasured; continue; }
-        const double c = f.costMs[i] > 0.0 ? f.costMs[i] : 0.0;
-        if (c <= left) { r.admitted[i] = true; left -= c; r.fillMs += c; ++fillOn; }
+        uint64_t needs = 0;   // the followers this fill reads, directly or through another follower, not admitted yet
+        for (bool grew = true; grew;) {
+            grew = false;
+            for (size_t k = 0; k < kProductCount; ++k) {
+                const uint64_t bit = uint64_t(1) << k;
+                if (!r.followsReaders[k] || r.admitted[k] || (needs & bit)) continue;
+                if ((f.readBy[k] & ((uint64_t(1) << i) | needs)) == 0) continue;
+                needs |= bit;
+                grew = true;
+            }
+        }
+        double c = f.costMs[i] > 0.0 ? f.costMs[i] : 0.0;
+        bool needsUnmeasured = false;
+        for (size_t k = 0; k < kProductCount; ++k) {
+            if (!(needs & (uint64_t(1) << k))) continue;
+            if (!f.measured[k]) { needsUnmeasured = true; r.notMeasured[k] = true; }
+            else if (f.costMs[k] > 0.0) c += f.costMs[k];
+        }
+        if (needsUnmeasured) { r.notMeasured[i] = true; ++fillUnmeasured; continue; }
+        if (c <= left) {
+            r.admitted[i] = true;
+            left -= c;
+            r.fillMs += c;
+            ++fillOn;
+            for (size_t k = 0; k < kProductCount; ++k)
+                if (needs & (uint64_t(1) << k)) { r.admitted[k] = true; ++fillOn; ++r.tdFollowingOn; }
+        }
         else ++fillOff;
     }
+    for (size_t i = 0; i < kProductCount; ++i)
+        if (r.followsReaders[i] && !r.admitted[i]) ++fillOff;   // no reader admitted: not made (counted off)
 
     std::snprintf(buf, sizeof(buf),
         "admission (%s%s): budget %.2f ms, core %.2f ms%s%s, TD slice %.2f ms%s, fill %u on / %u off%s%s",
@@ -429,6 +530,9 @@ inline Result Admit(const AdmissionFacts& f)
             unsigned(tdForOthers), r.filledForConsumerMs);
         r.line += td;
     }
+    if (r.tdFollowing > 0)
+        r.line += "; TD off: TD products " + std::to_string(r.tdFollowing) + " read only by optional fills, " +
+            std::to_string(r.tdFollowingOn) + " on with them (they stop when their readers stop)";
     if (r.tdOptionalInGames > 0)
         r.line += "; TD off (games): TD products " + std::to_string(r.tdOptionalInGames) +
             " demanded by another consumer are optional fill, not made (games runs no optional fill)";
@@ -439,9 +543,11 @@ inline Result Admit(const AdmissionFacts& f)
 
 // The optional fills the admission turned on: what the wiring hands OverloadArbiter::SetOptionalFills (core/OverloadOrder.h), so FillOff
 // switches off optional extras only (OD:391 (2): never core, never TD). Fill class only: a Core, Derived or Slice (TD) product is never listed,
-// so no TD product is ever listed: with TD ON it is a Slice job, with TD OFF one filled for another consumer is Derived (owner decision
+// so no TD product a feature needs is listed: with TD ON it is a Slice job, with TD OFF one filled for another consumer is Derived (owner decision
 // 2026-11-15 06:58: filled for that consumer and NOT shed). In games a demanded TD product is Fill class but never admitted (games runs no
-// optional fill), so it is never listed there either.
+// optional fill), so it is never listed there either. The one exception (S3A-STALE, owner answer 2026-11-15 via lead 18): a TD product
+// read ONLY by optional fills follows them (Fill class, Result::followsReaders) and IS listed while admitted, so FillOff stops it at the
+// same step as its readers and names it.
 inline std::vector<ProductId> OptionalFillIds(const Result& r)
 {
     std::vector<ProductId> ids;
