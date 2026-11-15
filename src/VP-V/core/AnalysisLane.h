@@ -727,6 +727,8 @@ public:
         uint8_t* dst = st->bufs[size_t(idx)]->Ring(size_t(t.slot));
         const size_t bytes = st->bufs[size_t(idx)]->Bytes();
         const uint64_t t0 = nowUs_ ? nowUs_() : 0u;
+        const ::ComputeOnce::FrameScope frameScope(static_cast<int64_t>(seq), "lane", static_cast<int64_t>(id));   // compute-once: the ahead job's frame
+        VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(id))).c_str(), seq, ::ComputeOnce::Variant(0));   // compute-once: the ahead live compute
         const bool ok = RunCpuLive(*st, n, seq, 0u, dst, bytes, InputResolver(), true);
         const uint64_t t1 = nowUs_ ? nowUs_() : t0;
         if (!ok) {
