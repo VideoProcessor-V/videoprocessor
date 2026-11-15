@@ -180,13 +180,13 @@
   "U3": {
    "name": "half_luma_downsample",
    "blocking": true,
-   "baseline_duplicates": 3,
+   "baseline_duplicates": 0,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
      "pattern": "^\\s*const char\\* const DOWNSAMPLE_BODY = R\"GLSL\\($|^\\s*bool MotionWarp::Downsample\\(pl_tex luma, pl_tex half,|^\\s*header\\.c_str\\(\\), DOWNSAMPLE_BODY,$|(^\\s*return |[!:(] ?)Downsample\\([ab]\\.luma, half[AB], l1[AB], l2[AB], [ab]\\.fullRange,",
      "kind": "false_positive",
-     "reason": "names only: the DOWNSAMPLE_BODY raw-string opener (:33), the MotionWarp::Downsample definition (:2699), its Dispatch argument (:2711) and its four calls (:3836/:3911/:3912/:3935). The body's 2x2 box already calls the shared accessor `vpu_half_luma(src, p) * codes` (:48, since 5b43fc22a, gated ca7a194aa), header VpUnit::HalfLuma::Glsl() (:2709); no private box remains (U3 one copy, verified at r2/u3-one-copy)"
+     "reason": "names only: the DOWNSAMPLE_BODY raw-string opener (:33), the MotionWarp::Downsample definition (:2694), its Dispatch argument (:2706) and its four calls (:3831/:3906/:3907/:3930). The body's 2x2 box already calls the shared accessor `vpu_half_luma(src, p) * codes` (:48, since 5b43fc22a, gated ca7a194aa), header VpUnit::HalfLuma::Glsl() (:2704); no private box remains (U3 one copy, verified at r2/u3-one-copy). The 4x4 pyramid step is the unit's VpUnit::HalfLuma::GlslBox4x4LevelBody() (PyramidBody, r2/c3-u3-one; line numbers at r2/c3-u3-one)"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h",
