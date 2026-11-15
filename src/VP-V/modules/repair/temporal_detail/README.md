@@ -206,16 +206,15 @@ Declared products and their sizes: see "Declared products" above. What the GPU m
 
 | Item | Id / owner | Fill rule | Consumer fallback when absent |
 |---|---|---|---|
-| grain split | P10 `grain.split` (unit version `GrainSplit::kUnitVersion`), read through `gs_fetch` / `gs_blocks` | lane precompute or first-consumer live fill (the host's node) | the module's own Full split, visible ("grain split (temporal detail)"); its output textures are freed once the shared product has fitted for `kSplitReleaseSeconds` (1 s of content at the measured rate; with an unknown rate the reference rate 23.976 Hz applies, i.e. 24 frames), in both the arena and the private mode, and re-created, visibly, if it drops out again |
-| scratch temporaries | arena scope `kArenaScope` (0x0401), owner `temporal_detail`, tier T1: 3 x rg32f at the active picture's size (two cleaner accumulators, the transferred delta; 1 without the cleaner) | requested by `Module::ArenaRequests(gpu, w, h, planeLines, templateClean, ownSplit)`; acquired per Apply after the own split's scope has closed | no arena (`Params::arena` null): private textures, byte-identical pixels (the own split's output is freed after the 1 s hold in both modes); arena short: the frame fails visibly (see below) |
-| own split intermediates | `grain_split` T0 requests of `Splitter::ArenaRequests` (merged into the list when `ownSplit`) | the Splitter's own scope | as above |
+| grain split | P10 `grain.split` (unit version `GrainSplit::kUnitVersion`), read through `gs_fetch` / `gs_blocks` | lane precompute or first-consumer live fill (the host's node); with none that fits, the owner's memo variant: `Params::memo->Acquire(kP10GrainSplit, seq, Gpu, VariantFor(w, h, scale, colorDepth))`, filled once per frame and variant by repair.grain_split (`GrainSplitVariantOwner.h`), reused by every later reader of the frame | visible ("grain split (temporal detail)", status "grain split: memo variant, filled at read / reused"); the module never computes a split itself. Refusals fail the frame visibly: no memo ("no skeleton memo"), an active-picture crop or a scale that is not a whole number of eighths (`LastAcquireCause()` VariantUndeclared, never sent to the memo), or any memo refusal (its cause token) |
+| scratch temporaries | arena scope `kArenaScope` (0x0401), owner `temporal_detail`, tier T1: 3 x rg32f at the active picture's size (two cleaner accumulators, the transferred delta; 1 without the cleaner) | requested by `Module::ArenaRequests(gpu, w, h, planeLines, templateClean)`; acquired per Apply | no arena (`Params::arena` null): private textures, byte-identical pixels; arena short: the frame fails visibly (see below) |
 | previous-frame grain `prevg` | module texture (rg32f, persistent) | written by the recompose pass of every frame | the guard's lag-1 sums are skipped for a frame without it (`TD_LAG` off) |
 
-Sizes at 4K (estimates, decimal MB): the arena temporaries are 3 x 66 = 199 MB plus the own split's bands 133 MB; they are the
-arena's (`TextureBytes(..., tempsInArena = true)` is 332 MB smaller than the private form). The arena keeps one pool per texture
-shape sized by its busiest scope, so a temporary only saves memory where another stage uses the same shape in another scope (the
-own split's bands share the grain split producer's; the rg32f picture-size pool has no other user today). The freed own split
-output (16 B per pixel, 133 MB at 4K) is a saving whenever the shared product fits. The 332 MB figure is only real once the host counts the arena plan once in the governor's ledger and drops this module's private share (SA10 / P13 own that accounting); until then the rg32f picture-size pool has no other user and only moves the bytes.
+Sizes at 4K (estimates, decimal MB): the arena temporaries are 3 x 66 = 199 MB; they are the arena's (`TextureBytes(...,
+tempsInArena = true)` is 24 B per pixel, 199 MB, smaller than the private form). The arena keeps one pool per texture shape sized
+by its busiest scope, so a temporary only saves memory where another stage uses the same shape in another scope (the rg32f
+picture-size pool has no other user today). The grain split is not this module's memory at all: the shared product is the lane's,
+the memo variant is the owner's (budgeted against the memo's VRAM ledger grant, freed when the frame seals). The 199 MB figure is only real once the host counts the arena plan once in the governor's ledger and drops this module's private share (SA10 / P13 own that accounting); until then the rg32f picture-size pool has no other user and only moves the bytes.
 
 `prevg` stays a module texture. It is not derivable from the shared product: its input half is `Y(N-1) - (base + s1 + s2)(N-1)`
 and needs the previous frame's source luma, and its output half includes this module's own delta of that frame. Moving it to a
@@ -226,7 +225,8 @@ move of the same arithmetic; it is left as an open item of SA6.
 
 | Visible downgrade | Where it shows |
 |---|---|
-| own grain split instead of the shared product (Missing, Stale, WrongSize, Shed) | `Status()` "own grain split", catalog entry "grain split (temporal detail)", Ctrl+I line |
+| the owner's memo variant instead of the shared product (Missing, Stale, WrongSize, Shed) | `Status()` "grain split: memo variant, filled at read" / "... reused" (plus "(the shared product does not fit)" for a misfit), catalog entry "grain split (temporal detail)", Ctrl+I line |
+| no grain split at all (no memo, crop / scale variant not served, memo refusal) | `Apply` returns false: `LastError()` "temporal detail: grain split unavailable: ...", `LastAcquireCause()` / `LastAcquireStatus()`, the failure counted; the host renders the frame as it was |
 | scratch memory short (arena empty, T1 shed by the governor, nested scope, other thread) | `Apply` returns false for the frame: `LastError()` "temporal detail: scratch memory short (...)", `ScratchShort()`, the arena's catalog entry "scratch_arena" naming `temporal_detail` or `grain_split`, the failure counted in `Failures()`; the host renders the frame as it was; the next frame restarts the store (the skipped frame breaks the sequence) and recovers by itself once a larger plan is reserved |
 | fewer reference slots (memory tier) | `Status()` "store N of 5 slots (memory tier)" |
 | look-ahead / camera model not on the GPU path | `Status()` "not on GPU: ..." |
@@ -234,8 +234,8 @@ move of the same arithmetic; it is left as an open item of SA6.
 ## Tests
 
 Classes `TemporalDetailGpuTests` (GPU passes on WARP in the CPU tier unless `VP_TEST_GPU=hardware`) and `TemporalDetailModelTests`
-(CPU model). SA6: `TemporalDetailGpuArenaIsByteIdentical` (arena output equals private output: own split, shared product, product
-from frame 3), `TemporalDetailGpuArenaShortageIsVisibleAndRecovers` (empty plan and tier shed), `TemporalDetailGpuReleasesTheOwnSplitOnceTheSharedProductFits`, `TemporalDetailGpuTextureBytesCountsTheArenaTemporaries` (CPU). Command:
+(CPU model). SA6: `TemporalDetailGpuArenaIsByteIdentical` (arena output equals private output: memo variant, shared product, product
+from frame 3), `TemporalDetailGpuArenaShortageIsVisibleAndRecovers` (empty plan and tier shed), `TemporalDetailGpuTextureBytesCountsTheArenaTemporaries` (CPU). WAIVER-B2-TD-OWNSPLIT: `TemporalDetailGpuAcquiresTheVariantOncePerFrame` (Acquired once per frame, Reused by the second reader, owner computes once), `TemporalDetailGpuRefusesVisiblyWithoutAVariant` (no memo; crop -> VariantUndeclared, memo never asked), `TemporalDetailGpuOutputIdentityPins` (output hashes recorded before the own split was deleted, incl. an active-picture crop; must not move). Test helpers run a `MemoRig` (source-plane stand-in + variant owner + memo). Command:
 `vstest.console.exe x64\Release\VideoProcessor-Test.dll /TestCaseFilter:"Name~TemporalDetailGpu" /Logger:trx` (read the TRX counters).
 
 ## Determinism, generality, known limits
@@ -289,7 +289,7 @@ sequence) returns the last output (repeat/foreign/phase pictures come at integra
 **Grain map: one producer, many readers (owner rule 2026-10-31).** `Gpu::Params::grain` (RegionEvidence::GrainView, the one
 read API of the single `grain.split` node owned by input.source_analysis/regions; its luma GPU form), computed once, early, on the decoded source's active picture by the host; the module
 then computes no split (bit-identical output, `TemporalDetailGpuReadsTheSharedGrainSplit`). Without it, or when it does not
-fit (size / block / scale), the module computes its own and the status says "own grain split". The module's output is
+fit (size / block / scale), the module Acquires the owner's memo variant and the status says "grain split: memo variant". The module's output is
 `Y + delta` = the shared clean picture's repair plus the ORIGINAL grain; a later repair must read the same published
 product, never a split of this output. Open point for the coordinator: the product is computed on the plane the readers
 work on (today the re-based plane); if the re-base changes geometry, the published split must follow it (re-based once).
@@ -342,14 +342,30 @@ shared product may be Full or Compact and the module never touches the `split` /
 the same math as before (Off / Full output byte-identical).
 
 Fallback rule: the shared product is used when `Fits` holds for this plane (size, block, scale, code unit, component, and the
-second texture of a Compact frame); otherwise (absent, invalid view, wrong size or any misfit) the module computes its OWN
-Full split and says so, visibly, every frame, and returns to the shared product the first frame it fits again (nothing is latched).
-Status keeps "own grain split" / "own grain split (the shared product does not fit)". `LastGrainStatus()` is Ring (shared
+second texture of a Compact frame); otherwise (absent, invalid view, wrong size or any misfit) the module reads the owner's memo
+variant (Full, the same law: bit-identical) and says so, visibly, every frame, and returns to the shared product the first frame it fits again (nothing is latched).
+Status says "grain split: memo variant, <status>" / "... (the shared product does not fit)". `LastGrainStatus()` is Ring (shared
 product read), Missing (no product) or WrongSize (misfit); Shed is the node's. `GrainFallbackDecision()` is
-GrainSplit::ReaderFallback("temporal detail", status): the catalog entry "grain split (temporal detail)", engaged while the own
-split runs. Off / auto idle read no grain: Ring. Tests: TemporalDetailGpuGrainProduct*, ...FittingFullProduct*,
+GrainSplit::ReaderFallback("temporal detail", status): the catalog entry "grain split (temporal detail)", engaged while the memo
+variant is read. Off / auto idle read no grain: Ring. Tests: TemporalDetailGpuGrainProduct*, ...FittingFullProduct*,
 ...CompactProduct*, ...GrainFallbackRecoversAutomatically (WARP).
 
 ## Private GPU textures (skeleton rule)
 
-This module still creates its own GPU textures through the `Ensure` wrapper (its persistent state, `prevg`, the output, the block grids and, when no shared product fits, its own grain split; see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): kept state moves to skeleton product nodes and per-render temporaries to the shared scratch arena (src/VP-V/core/ScratchArena.h). SA6 (reduced) moved the per-render temporaries (cleaner accumulators, delta, own split intermediates) to the arena behind `Params::arena`; the reference store (`td.refstore`), `prevg` and the output remain, see "Products" above. Its grain reads already go through the one accessor (`gs_fetch` / `gs_blocks`); a shared product that is Missing, Stale (another frame or unit version, `Params::grainSeq`), WrongSize or Shed (`Params::grainShed`) makes it use its own split, visibly (FallbackCatalog "grain split (...)"), and it recovers on the first fitting frame.
+This module still creates its own GPU textures through the `Ensure` wrapper (its persistent state, `prevg`, the output, the block grids; it holds no grain split of its own (WAIVER-B2-TD-OWNSPLIT); see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): kept state moves to skeleton product nodes and per-render temporaries to the shared scratch arena (src/VP-V/core/ScratchArena.h). SA6 (reduced) moved the per-render temporaries (cleaner accumulators, delta) to the arena behind `Params::arena`; the reference store (`td.refstore`), `prevg` and the output remain, see "Products" above. Its grain reads already go through the one accessor (`gs_fetch` / `gs_blocks`); a shared product that is Missing, Stale (another frame or unit version, `Params::grainSeq`), WrongSize or Shed (`Params::grainShed`) makes it read the owner's memo variant, visibly (FallbackCatalog "grain split (...)"), and it recovers on the first fitting frame.
+
+## Design goal, philosophy and decisions
+
+- Goal: carry the faithful detail of earlier frames into the present one while the CURRENT frame's grain is added back exactly
+  (grain is never averaged or interpolated away). The module only repairs the clean picture; the grain split it reads is the
+  one law of repair.grain_split.
+- One producer, many readers (owner rule 2026-10-31; shared units to zero, job #1): the grain split is the lane's shared
+  product or, when none fits, the owner's memo variant (Acquire). The module never computes a split of its own, keeps no copy
+  of the split's constants (ND04: `GrainSplit::DefaultParams()`) and no hold/release logic for one. Decision WAIVER-B2-TD-OWNSPLIT
+  (lead 8): the own split and its assertions were removed; equivalence is proved by Acquired-once / Reused tests and by output
+  identity pins recorded before the change.
+- No silent fallbacks: every case without a split (no memo, a crop or scale the owner does not serve, a memo refusal) fails
+  the frame visibly with its cause; the host shows the frame unrepaired. A crop is served only by a producer that splits the
+  cropped plane (the source-plane stand-in serves whole planes); crop variants are an open item of the P13 source ring.
+- Today's memo wiring is VP-V side only: the source-plane stand-in behind the P13 signature (deleted at the rebase onto
+  r2/job1-core); the renderer has no call site of this module yet, so production registration is a later integration step.

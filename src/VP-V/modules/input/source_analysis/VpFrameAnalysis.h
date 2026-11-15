@@ -133,12 +133,7 @@ namespace VpFrameAnalysis
 	{
 		FrameAnalysis::LumaStats luma;
 		FrameAnalysis::RangeOccupancy range;
-		FrameAnalysis::GrainEstimate grain;
 	};
-
-	// Grain / noise: 8x8 blocks over the picture; RMS of the flattest decile (blocks near black or
-	// clipped excluded: crushed noise is not grain); confidence = share of equally flat blocks.
-	constexpr int kGrainBlock = 8;
 
 	class Reducer
 	{
@@ -150,17 +145,11 @@ namespace VpFrameAnalysis
 		Measured Finish();
 
 	private:
-		void FlushBand();
 		FrameAnalysis::Rect m_picture;
 		std::array<uint16_t, 1024> m_studio;
 		std::array<uint32_t, FrameAnalysis::kHistogramBins> m_histogram{};
 		uint64_t m_samples = 0;
 		uint64_t m_sum = 0;
-		std::vector<uint64_t> m_blockSum, m_blockSumSq;
-		std::vector<uint8_t> m_blockExcluded;
-		int m_bandRows = 0;
-		std::vector<float> m_blockVariance;
-		uint32_t m_blocks = 0;
 	};
 
 	// The whole picture in one call (tests, CPU fallback). False when the source cannot be read.

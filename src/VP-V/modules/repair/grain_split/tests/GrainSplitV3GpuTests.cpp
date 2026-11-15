@@ -6,7 +6,10 @@
 // GrainSplit::Compute (the v3 law in doubles): odd and even plane sizes, block edges 8 / 16 / 32 with the lane law's scale B / 16.
 //   V3GpuMatchesCpuReference  max |s1|, |s2|, |base| <= 0.05 code, f <= 1/255, N and e3 / e1 / e2 relative <= 1e-3.
 //   V3GpuIsDeterministic      two runs: bit-identical product and blocks.
-//   V3StepLoopEqualsCompute   Step(0..5) is bit-identical to Compute.
+//   V3StepLoopEqualsCompute   Step(0..6) is bit-identical to Compute.
+//   V5ChunkedStatsEqualsUnit4 unit 5 (STATS per 16x16 chunk + REDUCE, refs/127 A1) against the unit-4 output: the FNV-1a 64 of the
+//                             product and blocks at every live block edge (8 / 16 / 32 / 64) pinned to the values the unit-4
+//                             kernel wrote on the WARP device (WAIVER-P10V5-01 condition a); a hardware device logs only.
 //   V3P11RegionFlagsAgree     consumer level: the P11 region classification from the v3 split against the v2 split (CPU).
 // Every measured worst value is written to the test log. No assertion is loosened to fit a result (rule 28): a miss is reported
 // with its numbers.
@@ -82,6 +85,7 @@ namespace GrainSplitV3GpuTestsNs
 		pl_log log = nullptr;
 		pl_d3d11 d3d11 = nullptr;
 		pl_dispatch dispatch = nullptr;
+		std::string name;
 		~GpuDevice()
 		{
 			if (dispatch) pl_dispatch_destroy(&dispatch);
@@ -94,7 +98,6 @@ namespace GrainSplitV3GpuTestsNs
 			lp.log_level = PL_LOG_ERR;
 			lp.log_cb = [](void*, enum pl_log_level, const char* msg) { Logger::WriteMessage((std::string("libplacebo: ") + msg).c_str()); };
 			log = pl_log_create(PL_API_VER, &lp);
-			std::string name;
 			const pl_d3d11_params params = ExtendedRangeGpuProbe::TestDeviceParams(&name);
 			Logger::WriteMessage(("grain split v3 GPU tests on: " + name).c_str());
 			d3d11 = pl_d3d11_create(log, &params);
@@ -416,14 +419,14 @@ public:
 		}
 	}
 
-	// (c) Step(0..5) with the same arguments records exactly Compute's dispatches: bit-identical output.
+	// (c) Step(0..6) with the same arguments records exactly Compute's dispatches: bit-identical output.
 	TEST_METHOD(V3StepLoopEqualsCompute)
 	{
 		using namespace GrainSplitV3GpuTestsNs;
 		GpuDevice dev;
 		Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 		pl_gpu gpu = dev.Gpu();
-		Assert::AreEqual(static_cast<uint32_t>(6), GrainSplit::Gpu::Splitter::StepCount(), L"six steps");
+		Assert::AreEqual(static_cast<uint32_t>(7), GrainSplit::Gpu::Splitter::StepCount(), L"seven steps (unit 5, WAIVER-P10V5-01: was 6)");
 		const int cases[3][3] = { { 320, 180, 16 }, { 257, 143, 8 }, { 257, 143, 32 } };
 		for (const auto& cs : cases)
 		{
@@ -441,10 +444,57 @@ public:
 				Assert::IsTrue(!whole.a.empty() && !whole.blocks.empty(), L"downloaded");
 				const bool same = SameBits(whole.a, steps.a) && SameBits(whole.b, steps.b) && SameBits(whole.blocks, steps.blocks);
 				LogF("v3 step loop %.0fx%.0f B %.0f: %.0f (0 = bit-identical to Compute)", w, h, B, same ? 0.0 : 1.0);
-				Assert::IsTrue(same, L"Step(0..5) is bit-identical to Compute");
+				Assert::IsTrue(same, L"Step(0..6) is bit-identical to Compute");
 			}
 			pl_tex_destroy(gpu, &tex);
 		}
+	}
+
+	// (e) unit 5 against unit 4 (WAIVER-P10V5-01 condition a): the chunked STATS + REDUCE leave every live block edge
+	// bit-identical. The pins are the FNV-1a 64 of (product, blocks) the unit-4 kernel (one workgroup per block) wrote for
+	// these planes on the WARP device, recorded at r2/job1-base f61d18823 with this test before the restructure.
+	TEST_METHOD(V5ChunkedStatsEqualsUnit4)
+	{
+		using namespace GrainSplitV3GpuTestsNs;
+		GpuDevice dev;
+		Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+		pl_gpu gpu = dev.Gpu();
+		const bool warp = dev.name.find("WARP") != std::string::npos || dev.name.find("Basic Render") != std::string::npos;
+		struct Case { int w, h, B; uint64_t full, compact; };
+		const Case cases[] = {
+			{ 1280, 720, 8, 0x308ec19d2183c7b1ull, 0xefe7a232b85c1a98ull },
+			{ 1920, 1080, 16, 0xcfa64dbed42d3583ull, 0x485bcd46682e3108ull },
+			{ 3840, 2160, 32, 0x23ca19cdabd353b1ull, 0x30b5d6e1685ac00cull },
+			{ 1031, 587, 64, 0xdceedb61daa8de8dull, 0x18b58ec0492b7f28ull },
+			{ 257, 143, 32, 0xbb99a79cc34ce9d6ull, 0x13a4b5dae2aa48b5ull },
+		};
+		auto fnv = [](uint64_t h, const std::vector<float>& v) {
+			const unsigned char* b = reinterpret_cast<const unsigned char*>(v.data());
+			for (size_t i = 0; i < v.size() * sizeof(float); ++i) { h ^= b[i]; h *= 1099511628211ull; }
+			return h;
+		};
+		bool all = true;
+		for (const Case& cs : cases)
+		{
+			const Plane y = MakePlane(cs.w, cs.h, 401u + static_cast<uint32_t>(cs.B));
+			pl_tex tex = UploadLuma(gpu, y);
+			Assert::IsNotNull(tex, L"upload");
+			for (int st = 0; st < 2; ++st)
+			{
+				const Storage storage = st == 0 ? Storage::Full : Storage::Compact;
+				const Product p = Run(dev, tex, cs.B, cs.B / 16.0, storage, false);
+				Assert::IsTrue(p.ok, Wide(p.error).c_str());
+				const uint64_t h = fnv(fnv(fnv(14695981039346656037ull, p.a), p.b), p.blocks);
+				const uint64_t pin = st == 0 ? cs.full : cs.compact;
+				char line[256];
+				std::snprintf(line, sizeof line, "v5 vs unit 4 %dx%d B %d %s: hash 0x%016llx pin 0x%016llx (%s)", cs.w, cs.h, cs.B,
+					st == 0 ? "full" : "compact", static_cast<unsigned long long>(h), static_cast<unsigned long long>(pin), warp ? "WARP" : "hardware, logged only");
+				Logger::WriteMessage(line);
+				if (warp && h != pin) all = false;
+			}
+			pl_tex_destroy(gpu, &tex);
+		}
+		Assert::IsTrue(all, L"unit 5 output is bit-identical to the unit-4 output at every live block edge");
 	}
 
 	// (d) consumer-level equivalence: the P11 region classification from the v3 split against the v2 split.

@@ -45,15 +45,17 @@ Computed once per frame; readers never recompute it.
 
 **Cost (v3, estimate until the idle timing proof C6; the v2 measurement was 36.85 ms at 4K and 3.04 ms at 1080p on the laptop, refs/116 s1).** Six passes: HALF (2 x 2 box + half-resolution horizontal Gaussian), DOWN (the half-resolution vertical Gaussians for base and low), STATS (one workgroup per block, shared-memory reduction: N, e3, e1, e2), LEVEL (the NLF cap table, refs/116b), NMIN (5 x 5 block minimum) and APPLY (G1 in shared memory, D, 3 x 3 energy, f, split write, Full or Compact). No full-size intermediate exists; the plan target is 1.3-2.0 ms on the laptop GPU at 4K (refs/116 s3).
 
+**Unit 5 (refs/127 A1, WAIVER-P10V5-01, lead 8 2026-11-14).** STATS no longer runs one workgroup per block (at 4K B = 32 that was a 1024-pixel tile per workgroup, few workgroups, poor occupancy): it runs one workgroup per CH x CH chunk (CH = min(B, 16)), every chunk in parallel, and writes per-(sub-block, chunk) partial sums (D^2, d1^2, d2^2, d3^2) to the private rgba32f texture `part`; a new pass REDUCE (one thread per block) adds each sub-block's chunk partials in the unit-4 order and finishes the block exactly as unit 4 did. No atomics, fixed summation order, so the output is bit-identical to unit 4 at every live block edge (B 8/16/32/64, Full and Compact; pinned on WARP by `GrainSplitV3GpuTests::V5ChunkedStatsEqualsUnit4`, hashes recorded with the unit-4 kernel at r2/job1-base f61d18823). Scope of that identity: it holds where every sub-block lies inside one chunk (span 1), which is every edge `RegionEvidence::BlockSizeFor` gives (powers of two). The variant owner's `BlockFor(scale)` can give other edges (B 18, 20, 24, ... at eighth scales); there a sub-block can span two chunks and REDUCE adds the chunk partials, a different float order from unit 4's running sum. That is not a defect (no unit-4 output exists for those variants), but it is not an identity claim either. The law is unchanged; the version is bumped because a pass and the step count changed (7 steps, `kP10SplitterSteps` = 7).
+
 ## Files
 
 - `GrainSplit.h`: header-only CPU reference model (`Plane`, `Gauss`, `Params` with texture_restore's values, `Compute`,
   `kProduct`). Deterministic (raster loops, double sums, no threads), C++14-compatible, no Windows headers.
-- `GrainSplitGpu.h/.cpp`: the same split as six libplacebo compute passes on any plane component (unit 4: half, down, stats, level, nmin, apply) -> `split` (s1, s2, f, base; rgba32f) and `blocks` (N, e3). v3: the passes are HALF, DOWN, STATS, NMIN, APPLY (see Law v3). Matches the v3 model
-  on WARP (`GrainSplitGpuMatchesModel`, `tests/GrainSplitV3Tests.cpp`). Intermediates: two half-size rg32f planes (tmp, low) plus the block grid (quiet); the Full product is its own rgba32f texture.
-- `Splitter::Step(..., step)` / `Splitter::StepCount()` (70b G2, `GrainSplitGpu.h`): the same six passes as separate, resumable steps (0..5);
+- `GrainSplitGpu.h/.cpp`: the same split as seven libplacebo compute passes on any plane component (unit 5: half, down, stats per chunk, reduce, level, nmin, apply; unit 4 had six) -> `split` (s1, s2, f, base; rgba32f) and `blocks` (N, e3). v3: the passes are HALF, DOWN, STATS, NMIN, APPLY (see Law v3). Matches the v3 model
+  on WARP (`GrainSplitGpuMatchesModel`, `tests/GrainSplitV3Tests.cpp`). Intermediates: two half-size rg32f planes (tmp, low), the rgba32f per-(sub-block, chunk) partial sums (part, unit 5) plus the block grid (quiet); the Full product is its own rgba32f texture.
+- `Splitter::Step(..., step)` / `Splitter::StepCount()` (70b G2, `GrainSplitGpu.h`): the same seven passes as separate, resumable steps (0..6);
   `Compute()` is the loop over `Step` (same dispatches, same order, byte-identical). The skeleton's lane form runs one step per gap chunk
-  (`LaneGpuGrainKernel.h`, `kP10SplitterSteps` = 6) and its live form all six at once.
+  (`LaneGpuGrainKernel.h`, `kP10SplitterSteps` = 7) and its live form all seven at once.
 - `GpuPassUtil.h`: the compute-pass helpers its readers share.
 - Tests: see `tests/README.md`.
 
@@ -77,10 +79,10 @@ integrator's node/settings, not here.
 N and e3 stay fp32 (they exceed the fp16 range); f and the base (the plane value, 0..1) are unorm16; s1, s2 are half floats in
 codes (11 significant bits). `Fits` needs `splitB` for a Compact frame only. `Compact(const Frame*)` tells the layout.
 
-**Intermediates (v3).** tmp, low (both half-size rg32f) and quiet (the rgba32f block grid) are temporaries, the same in both layouts. With `Options.arena` set they come from the shared scratch arena
-(scope `kArenaScope` = 0x0201, owner `grain_split`, tier T0, acquired in the fixed order tmp, low, quiet, scope closed by an
+**Intermediates (v3; unit 5 adds part).** tmp, low (both half-size rg32f), part (the rgba32f per-(sub-block, chunk) partial sums, `PartialSize` = bw x sub x span by bh x sub x span) and quiet (the rgba32f block grid) are temporaries, the same in both layouts. With `Options.arena` set they come from the shared scratch arena
+(scope `kArenaScope` = 0x0201, owner `grain_split`, tier T0, acquired in the fixed order tmp, low, part, quiet, scope closed by an
 RAII guard). The Full product is its own rgba32f texture (or `Targets.split`), not an arena temporary.
-`Splitter::ArenaRequests(gpu, w, h, B, storage)` lists the requests (both layouts: half rg32f x2 + block rgba32f x1 = 3 acquires).
+`Splitter::ArenaRequests(gpu, w, h, B, storage)` lists the requests (both layouts: half rg32f x2 + part rgba32f x1 + block rgba32f x1 = 4 acquires); `Gpu::WorkingBytes(w, h, B, sub)` is their byte total, built from the same shapes (the lane kernel's `PrivateBytes` reads it).
 A null handle makes `Compute` return false with `LastError()` starting `scratch memory short (grain split)` and
 `ScratchShort()` true (reset on every Compute); no private temporaries are made then and the arena's `scratch_arena` fallback is
 engaged (visible), recovering on the first frame after a larger plan is reserved. `Options.targets` (split, splitB, blocks) lets a
@@ -106,7 +108,7 @@ Derived bounds: s1, s2 <= 2^-11 relative (0.03 codes at 64, asserted <= 0.05); b
 | 3840 x 2160 | 32 | 120 x 68 | 132,840,960 B (126.7 MiB) | 66,485,760 B (63.4 MiB) | 50 % |
 | 7680 x 4320 | 64 | 120 x 68 | 530,972,160 B (506.4 MiB) | 265,551,360 B (253.3 MiB) | 50 % |
 
-Scratch (arena, shared across scopes, not per slot), v3, the same for both layouts: two half-size rg32f planes = 2 x (w/2 x h/2) x 8 B = 4 B/px, plus 16 B/block (quiet): 8,424,960 B at 1080p, 33,308,160 B at 4K, 132,840,960 B at 8K (the lane form holds two splitters). `GrainNode.h` `StorageLedgerLines` still counts the v2 scratch (Full 16 B/px, Compact 32 B/px): known stale, not edited in this package.
+Scratch (arena, shared across scopes, not per slot), unit 5, the same for both layouts (`Gpu::WorkingBytes`): two half-size rg32f planes = 2 x (w/2 x h/2) x 8 B = 4 B/px, plus part (480 x 272 rgba32f at the three sizes below: 120 x 68 blocks x sub 4 x span 1, = 2,088,960 B), plus 16 B/block (quiet): 8,294,400 + 2,088,960 + 130,560 = 10,513,920 B at 1080p, 33,177,600 + 2,088,960 + 130,560 = 35,397,120 B at 4K, 132,710,400 + 2,088,960 + 130,560 = 134,929,920 B at 8K (the lane form holds two splitters). The 8 x 1 rgba32f level table (128 B) is private and not counted. `GrainNode.h` `StorageLedgerLines` still counts the v2 scratch (Full 16 B/px, Compact 32 B/px): known stale, not edited in this package.
 
 ## Host call sites (for the wiring package; renderer-side, not in SA1/SA2)
 
@@ -122,7 +124,7 @@ SA1/SA2 add no renderer code. The wiring package that creates the P10 / P10c nod
 
 ## One dependency unit, version and stale detection (SA2 audit)
 
-The grain split is ONE unit: the CPU reference (`GrainSplit::Compute`, GrainSplit.h), its GLSL (GrainSplitGpu.cpp) and the storage layouts, versioned by `GrainSplit::kUnitVersion` (= 4; bump on ANY change of the law, a pass or a layout, and update the pin in GrainUnitGpuTests). A produced `Gpu::Frame` carries `seq` (the source frame, `Options::seq`), `version` and `storage`; the GLSL embeds the version as `#define GS_UNIT_VERSION` (also in the `ViewGlsl` prelude). `Splitter::Compute` resets `Out()` first (a failed Compute never leaves the previous frame looking valid). Readers call `Gpu::CheckFit(frame, w, h, B, scale, codeUnit, component, expectedSeq)`: another frame or another unit version is `Stale`, another geometry/unit/component `WrongSize`, nothing `Missing`; each falls back visibly to the module's own split (FallbackCatalog "grain split (<consumer>)") and recovers on the first fitting frame. A governor-dropped product is `Shed` (`Params::grainShed`).
+The grain split is ONE unit: the CPU reference (`GrainSplit::Compute`, GrainSplit.h), its GLSL (GrainSplitGpu.cpp) and the storage layouts, versioned by `GrainSplit::kUnitVersion` (= 5; bump on ANY change of the law, a pass or a layout, and update the pin in GrainUnitGpuTests). A produced `Gpu::Frame` carries `seq` (the source frame, `Options::seq`), `version` and `storage`; the GLSL embeds the version as `#define GS_UNIT_VERSION` (also in the `ViewGlsl` prelude). `Splitter::Compute` resets `Out()` first (a failed Compute never leaves the previous frame looking valid). Readers call `Gpu::CheckFit(frame, w, h, B, scale, codeUnit, component, expectedSeq)`: another frame or another unit version is `Stale`, another geometry/unit/component `WrongSize`, nothing `Missing`; each falls back visibly (FallbackCatalog "grain split (<consumer>)") and recovers on the first fitting frame: a reader that keeps its own split runs it; temporal detail has no own split since L-B2 and reads the variant owner's memo variant (`GrainSplitVariantOwner.h`) or refuses the frame visibly. A governor-dropped product is `Shed` (`Params::grainShed`).
 
 The lane producer and the live-fill path are the same implementation: `GrainNodeGpu.h` `SplitterFill::Fill` calls `Splitter::Compute` into the slot textures of the node's `ProductTextures` (`GrainLayout`, `TargetsFor`, `FrameOf`); `GrainNode::LanePrecompute` and the first consumer's `Acquire` both go through it (test GrainUnitGpuTests::GrainUnitLaneAndLiveFillShareOneCompute: both results equal the plain Splitter result).
 
@@ -130,7 +132,7 @@ One code path, one instance per thread (audit 2): the lane thread and the render
 
 The declaration follows the GRANTED storage too: `NodeLayout::decl` is `GrainDecl(choice.storage)` (the one core P10 declaration, `AppendGrainSplitProducts`), and the host plans the governor with `GrainRegistryFor(luma grant, chroma grant)` (the chroma planes are granted separately). Declaring the requested storage would make a downgraded Compact (a Full layout at 16 B/px against an 8 B/px declaration) fail every allocation. `ProductTexLayout::MatchesDecl` matches per shift (Compact's A rg16f + B rg16 together carry the declared 8 B/px) and bounds an absolute grid in each axis (GrainNodeTests::DeclarationFollowsTheGrantedStorage, GpuAllocatorTests::ProductTexturesAllocateCompactAtBlock16And32).
 
-Full-mode identity is pinned, not assumed: `Gpu::FullShaderFingerprint()` (FNV-1a 64 over the HALF, DOWN, STATS, LEVEL, NMIN and APPLY header and body texts, carriage returns skipped) is pinned to 0x7fe213d86466cc12 for unit 4 (0x8949becef0aab5c9 for unit 3; WAIVER-P10V4-01) (v2 pin 0x41cef8707edf809d, WAIVER-P10V3-01), and the temporal-detail shader text with `gs_fetch/gs_blocks` mapped back to `texelFetch(split/gblocks, ...)` equals its pre-SA2 text byte for byte (size + hash, GrainNodeTests). The chroma upscaler's shaders changed structurally (three per-plane accessors), so its Full-mode identity is asserted on output (bit-identical to its own split), not on text.
+Full-mode identity is pinned, not assumed: `Gpu::FullShaderFingerprint()` (FNV-1a 64 over the HALF, DOWN, STATS, REDUCE, LEVEL, NMIN and APPLY header and body texts, carriage returns skipped) is pinned to 0xf33e0215cda77a66 for unit 5 (0x7fe213d86466cc12 for unit 4, WAIVER-P10V5-01; 0x8949becef0aab5c9 for unit 3; WAIVER-P10V4-01) (v2 pin 0x41cef8707edf809d, WAIVER-P10V3-01), and the temporal-detail shader text with `gs_fetch/gs_blocks` mapped back to `texelFetch(split/gblocks, ...)` equals its pre-SA2 text byte for byte (size + hash, GrainNodeTests). The chroma upscaler's shaders changed structurally (three per-plane accessors), so its Full-mode identity is asserted on output (bit-identical to its own split), not on text.
 
 ### Compact storage rules
 

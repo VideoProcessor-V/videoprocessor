@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // 70b G2: the P10 grain-split kernel (GrainSplitKernel) on the libplacebo WARP device (TargetLutGpuFixture; WARP unless
-// VP_TEST_GPU=hardware): the six kernel steps equal Splitter::Compute byte for byte (Full and Compact), the lane form
+// VP_TEST_GPU=hardware): the seven kernel steps equal Splitter::Compute byte for byte (Full and Compact), the lane form
 // through the SkeletonGpuDispatcher equals the live form, the produced Frame passes / fails CheckFit as it must, and the
 // Full pass text is pinned by its FNV-1a fingerprint.
 #include "pch.h"
@@ -125,7 +125,7 @@ namespace VideoProcessorTest
 	TEST_CLASS(LaneGpuGrainKernelWarpTests)
 	{
 	public:
-		// The kernel's six steps record Splitter::Compute's dispatches: every output term is byte-identical, in the Full
+		// The kernel's seven steps record Splitter::Compute's dispatches: every output term is byte-identical, in the Full
 		// layout and in the Compact one.
 		BEGIN_TEST_METHOD_ATTRIBUTE(KernelStepLoopEqualsSplitterCompute)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
@@ -146,7 +146,7 @@ namespace VideoProcessorTest
 			for (Storage storage : { Storage::Full, Storage::Compact })
 			{
 				VpLaneProducts::GrainSplitKernel kernel(storage);
-				Assert::IsTrue(kernel.Steps(dims) == 6 && kernel.NeedsTap() && kernel.Product() == kP10GrainSplit, L"kernel shape");
+				Assert::IsTrue(kernel.Steps(dims) == 7 && kernel.NeedsTap() && kernel.Product() == kP10GrainSplit, L"kernel shape");
 				Assert::IsTrue(kernel.Granted() == storage, L"R16 unorm at codeUnit 64/65535 grants either storage");
 				const ProductTexLayout layout = kernel.Layout(dims);
 				std::vector<pl_tex> viaKernel = MakeOutputs(gpu, layout, dims);
@@ -202,7 +202,7 @@ namespace VideoProcessorTest
 			pl_dispatch_destroy(&dispatch);
 		}
 
-		// The lane form (tap bands, extend, six kernel steps, one Dispatch each) equals the live form (DispatchLive), every
+		// The lane form (tap bands, extend, seven kernel steps, one Dispatch each) equals the live form (DispatchLive), every
 		// term byte for byte; the Frame the kernel produced fits its plane and is refused when it does not.
 		BEGIN_TEST_METHOD_ATTRIBUTE(LaneFormEqualsLiveFormAndFrameFits)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
@@ -228,7 +228,7 @@ namespace VideoProcessorTest
 			job.ringSlot = 0;
 			job.source = &view;
 			const uint32_t steps = VpLaneProducts::StepsFor(kP10GrainSplit, d);
-			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 6u, L"bands + extend + 6");
+			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 7u, L"bands + extend + 7 (WAIVER-P10V5-01: unit 5 REDUCE)");
 			for (uint32_t i = 0; i < steps; ++i)
 				Assert::IsTrue(disp.Dispatch(job, i, steps), L"lane chunk");
 			disp.SetLiveSourceForTesting([&codes, d](uint64_t seq, SourceFrameView* out) {
@@ -274,8 +274,8 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(PassTextFingerprintIsPinned)
 		{
-			// WAIVER-P10V3-01: 0x41cef8707edf809d (v2) -> 0x8949becef0aab5c9 (v3). WAIVER-P10V4-01 (refs/116b): -> 0x7fe213d86466cc12 (unit 4: LEVEL pass, NLF cap, depth scale).
-			constexpr uint64_t kPinned = 0x7fe213d86466cc12ull;
+			// WAIVER-P10V3-01: 0x41cef8707edf809d (v2) -> 0x8949becef0aab5c9 (v3). WAIVER-P10V4-01 (refs/116b): -> 0x7fe213d86466cc12 (unit 4: LEVEL pass, NLF cap, depth scale). WAIVER-P10V5-01 (refs/127 A1): -> 0xf33e0215cda77a66 (unit 5: STATS per 16x16 chunk + REDUCE).
+			constexpr uint64_t kPinned = 0xf33e0215cda77a66ull;
 			Assert::IsTrue(GrainSplit::Gpu::FullShaderFingerprint() == kPinned, L"Full pass GLSL fingerprint");
 		}
 	};
@@ -297,13 +297,22 @@ namespace VideoProcessorTest
 			// blocks*16. New (both layouts): 2 half-size rg32f planes (8 B per half px) + the rgba32f block grid (16 B per block).
 			// At 3840x2160: halfPx = 1920*1080 = 2,073,600; B = 32 -> 120*68 = 8,160 blocks;
 			// 2*2,073,600*8 + 8,160*16 = 33,177,600 + 130,560 = 33,308,160 B (old Full 132,710,400 + 130,560).
+			// WAIVER-P10V5-01 (unit 5 adds the private rgba32f `part` texture of the chunked STATS pass; corrected value, not a
+			// loosened one): part = (bw*sub*span) x (bh*sub*span) texels at 16 B, sub = Params().subBlocks = 4, chunk CH =
+			// min(B, 16) = 16, a sub-block is B / sub = 8 px wide and never crosses a chunk, so span = 1:
+			// (120*4*1) x (68*4*1) = 480 x 272 = 130,560 texels * 16 = 2,088,960 B.
+			// one = 33,177,600 + 2,088,960 + 130,560 = 35,397,120 B (lane form 70,794,240 B).
 			const uint64_t halfPx = ((uint64_t(d.width) + 1u) / 2u) * ((uint64_t(d.height) + 1u) / 2u);
-			const uint64_t one = 2u * halfPx * 8u + blocks * 16u;
+			const uint64_t bw = (d.width + B - 1) / B, bh = (d.height + B - 1) / B;
+			const uint64_t sub = 4u, span = 1u;
+			const uint64_t one = 2u * halfPx * 8u + (bw * sub * span) * (bh * sub * span) * 16u + blocks * 16u;
 			(void)px;
-			Assert::IsTrue(full.PrivateBytes(d, false) == one, L"Full live set: two half-size rg32f planes + block grid");
+			Assert::IsTrue(B == 32u && GrainSplit::Params().subBlocks == int(sub), L"4K: B 32, sub 4 (span 1)");
+			Assert::IsTrue(one == 35397120u, L"4K working set: 33,177,600 + 2,088,960 + 130,560 B");
+			Assert::IsTrue(full.PrivateBytes(d, false) == one, L"Full live set: two half-size rg32f planes + part + block grid");
 			Assert::IsTrue(full.PrivateBytes(d, true) == 2u * full.PrivateBytes(d, false), L"lane form = a second Splitter");
 			if (compact.Granted() == GrainSplit::Storage::Compact)
-				Assert::IsTrue(compact.PrivateBytes(d, false) == one, L"Compact live set: the same two half-size planes + grid");
+				Assert::IsTrue(compact.PrivateBytes(d, false) == one, L"Compact live set: the same half-size planes + part + grid");
 		}
 	};
 }

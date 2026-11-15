@@ -431,8 +431,9 @@ namespace ProductCatalogTestsNs
 			// WAIVER-P10V3-01 (rule 28): an INTENDED unit-version bump 2 -> 3 with the v3 law (refs/116; ProductCatalog.h
 			// kExpectedGrainSplitUnit = 3 in the same package), not a weakening: the assertion still pins one exact value.
 			// WAIVER-P10V4-01 (coordinator brief 2026-11-12): unit-version bump 3 -> 4 with the NLF cap (refs/116b), still one exact value.
-			Assert::AreEqual(4u, RowOf(kP10GrainSplit)->unitVersion);
-			Assert::AreEqual(4u, RowOf(kP10cGrainSplitChroma)->unitVersion);
+			// WAIVER-P10V5-01 (refs/127 A1): unit-version bump 4 -> 5 (STATS per chunk + REDUCE), still one exact value.
+			Assert::AreEqual(5u, RowOf(kP10GrainSplit)->unitVersion);
+			Assert::AreEqual(5u, RowOf(kP10cGrainSplitChroma)->unitVersion);
 
 			FallbackCatalog::Decision bad;
 			Assert::IsFalse(VerifyUnit(kP7CameraFit, CameraLink::kCameraUnitVersion + 1, &bad));
@@ -819,7 +820,15 @@ namespace ProductCatalogTestsNs
 			// external view) stay human-pinned: they are counted and cross-checked against the registry above, but no scan proves them.
 			namespace fs = std::filesystem;
 			const std::string dir = SettingsTestSupport::RepoRoot() + "src\\VP-V\\modules\\repair\\texture_restore\\";
-			const std::regex reads("\\bk(P10|P11|P4)\\w*|\\bGrainSplit::|RegionEvidence|SourceStats\\.h|LaneGpuProducts|LaneCpuProducts|LaneProducts|Products\\.h|FrameAnalysisStore|\\bProductId\\b");
+			// WAIVER-B2-NOTREAD-LAW: the U1 law constants (GrainSplit::DefaultParams / GrainSplit::Params, ND04) are not a product read;
+			// exactly those two names are exempt, every other GrainSplit:: reference still counts.
+			const std::regex reads("\\bk(P10|P11|P4)\\w*|\\bGrainSplit::(?!DefaultParams\\b|Params\\b)|RegionEvidence|SourceStats\\.h|LaneGpuProducts|LaneCpuProducts|LaneProducts|Products\\.h|FrameAnalysisStore|\\bProductId\\b");
+			// The teeth: a real P10 product / accessor read in a declared-NotRead file still trips the scan; the law constants alone do not.
+			Assert::IsTrue(std::regex_search(std::string("GrainSplit::Gpu::Splitter s; s.Compute(gpu);"), reads), L"a GrainSplit producer reference trips the scan");
+			Assert::IsTrue(std::regex_search(std::string("auto d = GrainSplit::ReaderFallback(\"x\", st);"), reads), L"a GrainSplit product accessor trips the scan");
+			Assert::IsTrue(std::regex_search(std::string("const auto& t = store.Get(kP10GrainSplit);"), reads), L"a P10 product alias trips the scan");
+			Assert::IsTrue(std::regex_search(std::string("GrainSplit::DefaultParams(); GrainSplit::ParamsView v;"), reads), L"only the exact law names are exempt");
+			Assert::IsFalse(std::regex_search(std::string("constexpr GrainSplit::Params kGrainLaw = GrainSplit::DefaultParams();"), reads), L"the U1 law constants are not a product read");
 			for (const char* name : { "DetailPulse.h", "DetailPulse.cpp", "TextureRestore.h", "TextureRestore.cpp" }) {
 				const std::string path = dir + name;
 				Assert::IsTrue(fs::exists(path), L"the DetailPulse / TextureRestore sources exist where the flag says");

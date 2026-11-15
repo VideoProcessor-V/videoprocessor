@@ -3,8 +3,8 @@
 #pragma once
 
 // 70b G2: the GPU kernel of lane product P10 (grain split) for the skeleton's render-thread dispatcher
-// (SkeletonGpuDispatcher). The dispatcher puts the tap bands and the extend pass in front (StepsFor); this kernel's six
-// steps are GrainSplit::Gpu::Splitter::Step(0..5) (v3: half, low down, stats, level, neighbourhood minimum, Wiener share) on the
+// (SkeletonGpuDispatcher). The dispatcher puts the tap bands and the extend pass in front (StepsFor); this kernel's seven
+// steps are GrainSplit::Gpu::Splitter::Step(0..6) (unit 5: half, low down, stats per chunk, reduce, level, neighbourhood minimum, Wiener share) on the
 // EXTENDED tap plane: component 0, codeUnit 64 / 65535 (a texel is code * 64 / 65535), B = RegionEvidence::BlockSizeFor(h),
 // scale B / 16 (the law of RegionEvidence.h). The same steps run for the lane form (one per chunk) and the live form (all
 // at once), so lane == live by construction. Two Splitters (lane, live): their private intermediates survive across the
@@ -30,14 +30,15 @@ namespace VpLaneProducts
 		bool Step(KernelContext& c, uint32_t step) override;
 		void Release(pl_gpu gpu) override;
 		std::string LastError() const override { return m_error; }
-		// Working set of one Splitter (the arena-free layout of GrainSplitGpu v3): two half-size rg32f planes plus the block
-		// grid, the same for both layouts; two Splitters (lane + live).
+		// Working set of one Splitter (the arena-free layout, unit 5): GrainSplit::Gpu::WorkingBytes = two half-size rg32f
+		// planes, the rgba32f `part` partial sums and the block grid, the same for both layouts; the lane form counts two
+		// Splitters (lane + live).
 		uint64_t PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const override;
 		std::vector<FallbackCatalog::Decision> Fallbacks() const override;
 
 		// The storage the layout really uses (a refused Compact is Full, shown through Fallbacks()).
 		GrainSplit::Storage Granted() const { return Choice().storage; }
-		// The last Frame the lane / live form produced (valid after its step 4; reset when a run fails).
+		// The last Frame the lane / live form produced (valid after its last step, 6 under unit 5; reset when a run fails).
 		const GrainSplit::Gpu::Frame& LastFrame(bool live) const { return live ? m_live.Out() : m_lane.Out(); }
 
 		// The plane the kernel reads: R16 unorm, codeUnit 64 / 65535 (the tap law).

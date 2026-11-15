@@ -6,14 +6,15 @@
 //   classes (4a) -> FINISH + BASECOPY + COPYBLK (4: the new slot) -> WEIGHT (7, pass 2) -> PROJ (8: projections) ->
 //   TRANSFER (8) -> GUARD_SUMS / GUARD_EMA / GUARD_POOL (10) -> STATS -> APPLY (9, 10a).
 // The block state ping-pongs between two textures; four state passes per frame leave it in set 0.
-// SA6: with Params::arena the cleaner accumulators and the delta are arena temporaries (one scope per Apply, opened after the
-// module's own grain split, whose scope is its own); the own split's output is freed once the shared product fits again.
+// SA6: with Params::arena the cleaner accumulators and the delta are arena temporaries (one scope per Apply). The grain split
+// is the lane's shared product or the memo's variant (GrainSplitVariantOwner.h); the module never computes one itself.
 #include <pch.h>
 
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailGpu.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailModel.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailShaders.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
+#include <VP-V/modules/repair/grain_split/GrainSplitVariantOwner.h>
 
 #include <algorithm>
 #include <initializer_list>
@@ -94,7 +95,6 @@ namespace TemporalDetail
 
 		struct Module::Impl
 		{
-			GrainSplit::Gpu::Splitter split;
 			pl_tex meas = nullptr, slotBlk = nullptr, evA = nullptr, evB = nullptr, work = nullptr, coef = nullptr, cw = nullptr,
 				cf = nullptr, ct = nullptr, delta = nullptr, gsum = nullptr, kback = nullptr, gflag = nullptr, patches = nullptr,
 				prevg = nullptr, out = nullptr, crop = nullptr;
@@ -108,7 +108,6 @@ namespace TemporalDetail
 			ActiveRect rect;
 			bool baseUnorm = true;
 			int slots = 0;
-			int sharedStreak = 0;   // consecutive frames that read the shared grain product (frees the own split's output)
 		};
 
 		Module::~Module() { delete m_impl; }
@@ -123,7 +122,6 @@ namespace TemporalDetail
 			if (m_impl && gpu)
 			{
 				Impl& m = *m_impl;
-				m.split.Release(gpu);
 				for (pl_tex* t : { &m.meas, &m.slotBlk, &m.evA, &m.evB, &m.work, &m.coef, &m.cw, &m.cf, &m.ct, &m.delta, &m.gsum,
 					&m.kback, &m.gflag, &m.patches, &m.prevg, &m.out, &m.crop })
 					if (*t) pl_tex_destroy(gpu, t);
@@ -151,13 +149,14 @@ namespace TemporalDetail
 			b += 8 * px + 8 * px + 2 * px + 2 * px;       // delta, prevg (rg32f), output and active-picture crop (16-bit; bars excluded)
 			b += nb * 16 * (2 + 1 + 2 * K + 2 * K + 16 + 1 + 3 + 2 + 1) + nb * 4 * (K + 1);   // block grids
 			b += static_cast<uint64_t>(g.npx) * static_cast<uint64_t>(g.npy) * 8;          // patch statistics
-			// SA6: the own split's bands (16 B/px), the cleaner accumulators (2 x 8) and the delta (8) are the arena's, counted in its plan.
-			if (tempsInArena) b -= (16 + 2 * 8 + 8) * px;
+			// SA6: the cleaner accumulators (2 x 8) and the delta (8) are the arena's, counted in its plan.
+			if (tempsInArena) b -= (2 * 8 + 8) * px;
 			return b;
 		}
 
-		std::vector<VpSkeleton::ArenaRequest> Module::ArenaRequests(pl_gpu gpu, int w, int h, double planeLines, bool templateClean, bool ownSplit)
+		std::vector<VpSkeleton::ArenaRequest> Module::ArenaRequests(pl_gpu gpu, int w, int h, double planeLines, bool templateClean)
 		{
+			(void)planeLines;   // the arena requests do not depend on Scale (the grain split variant is the memo owner's)
 			std::vector<VpSkeleton::ArenaRequest> r;
 			VpSkeleton::TexFormat t2{};
 			if (!gpu || w < 1 || h < 1 || !VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 2), &t2)) return r;
@@ -170,18 +169,7 @@ namespace TemporalDetail
 			q.shape.fmt = t2;
 			q.count = templateClean ? 3 : 1;   // accumulators 0 and 1 (cleaner), then the delta
 			r.push_back(q);
-			if (ownSplit)
-			{
-				const Geometry g = MakeGeometry(w, h, planeLines);
-				for (const VpSkeleton::ArenaRequest& s : GrainSplit::Gpu::Splitter::ArenaRequests(gpu, w, h, g.B, GrainSplit::Storage::Full))
-					r.push_back(s);
-			}
 			return r;
-		}
-
-		bool Module::OwnSplitHeld() const
-		{
-			return m_impl && m_impl->split.Out().split != nullptr;
 		}
 
 		int Module::SlotsForBudget(uint64_t budgetBytes, int w, int h, double planeLines)
@@ -233,7 +221,8 @@ namespace TemporalDetail
 				// Off: the input itself, no pass; the store is untouched (the model's Off).
 				m_status = "off";
 				m_grainStatus = GrainSplit::GrainStatus::Ring;   // not reading the grain: no fallback to show
-				if (m_impl) { m_impl->lastSet = set; m_impl->haveSet = true; m_impl->sharedStreak = 0; }   // switching on again is a mode change: reset
+				m_acquireCause = VpSkeleton::AcquireCause::None;
+				if (m_impl) { m_impl->lastSet = set; m_impl->haveSet = true; }   // switching on again is a mode change: reset
 				result = source;
 				return true;
 			}
@@ -242,7 +231,8 @@ namespace TemporalDetail
 				// auto, idle: the input itself, no pass; the store restarts when it engages again.
 				m_status = "auto: idle";
 				m_grainStatus = GrainSplit::GrainStatus::Ring;
-				if (m_impl) { m_impl->haveFrame = false; m_impl->sharedStreak = 0; }
+				m_acquireCause = VpSkeleton::AcquireCause::None;
+				if (m_impl) m_impl->haveFrame = false;
 				result = source;
 				return true;
 			}
@@ -287,7 +277,6 @@ namespace TemporalDetail
 			// A repeat: the last output again, no state advanced.
 			if (m.haveFrame && params.seq == m.prevSeq && w == m.geo.w && h == m.geo.h && r == m.rect && m.out && m.out->params.w == W && m.out->params.h == H)
 			{
-				m.sharedStreak = 0;   // a repeat reads no grain product: the hold restarts
 				pl_frame frame = source;
 				frame.planes[0].texture = m.out;
 				result = frame;
@@ -320,7 +309,6 @@ namespace TemporalDetail
 				++m_failures;
 				m.haveFrame = false;   // the next frame restarts
 				m.havePrevG = false;
-				m.sharedStreak = 0;
 				return false;
 			};
 
@@ -331,7 +319,7 @@ namespace TemporalDetail
 			m.baseUnorm = baseFmt != nullptr;
 			if (!baseFmt) baseFmt = f1;
 			const int kbw = K * g.bw;
-			const bool useArena = params.arena != nullptr;   // SA6: the accumulators, the delta and the own split's intermediates
+			const bool useArena = params.arena != nullptr;   // SA6: the accumulators and the delta
 			bool ok = f4 && f2 && f1 && h4 &&
 				Ensure(gpu, m.out, W, H, StorableLike(gpu, luma->params.format), true) &&
 				Ensure(gpu, m.meas, g.bw, g.bh, f4) && Ensure(gpu, m.slotBlk, kbw, g.bh, f4) &&
@@ -377,10 +365,6 @@ namespace TemporalDetail
 
 			// --- Grain split (the shared product) ---
 			const double cu = CodeUnit(luma, source.repr.bits, params.colorDepth);
-			GrainSplit::Params sp;
-			sp.sigmaFine = kSigmaFine; sp.sigmaBase = kSigmaBase; sp.sigmaLow = kSigmaLow;
-			sp.subBlocks = kSubBlocks; sp.quietSubBlocks = kQuietSubBlocks; sp.neighbourhood = kGrainNeighbourhood;
-			sp.grainCal = kGrainCal; sp.kappa = kWienerKappa; sp.energyFloor = kEnergyFloor;
 			const std::string rectDefs = DefineInt("TD_OX", r.left) + DefineInt("TD_OY", r.top) + DefineInt("TD_FW", W) + DefineInt("TD_FH", H);
 			if (!whole)
 			{
@@ -389,7 +373,8 @@ namespace TemporalDetail
 					cd, 2, nullptr, 0, (w + 15) / 16, (h + 15) / 16, 0))
 					return fail("active picture pass failed");
 			}
-			// The shared product when it fits (one producer, many readers), else this module's own split (visible).
+			// The shared product when it fits (one producer, many readers), else the memo's variant (get-or-compute-and-publish by
+			// the owner repair/grain_split, once per frame and variant). The module never computes a split of its own.
 			const GrainSplit::Gpu::Frame* const sharedSplit = params.grain.Gpu(RegionEvidence::GrainPlane::Luma);
 			const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(sharedSplit, w, h, g.B, g.scale, cu, 0, params.grainSeq);
 			const bool shared = fit == GrainSplit::Gpu::FitResult::Fits && !params.grainShed;
@@ -397,36 +382,40 @@ namespace TemporalDetail
 			m_grainStatus = params.grainShed ? GrainSplit::GrainStatus::Shed : shared ? GrainSplit::GrainStatus::Ring :
 				(fit == GrainSplit::Gpu::FitResult::Stale ? GrainSplit::GrainStatus::Stale :
 				(fit == GrainSplit::Gpu::FitResult::WrongSize ? GrainSplit::GrainStatus::WrongSize : GrainSplit::GrainStatus::Missing));
-			if (shared)
+			m_acquireCause = VpSkeleton::AcquireCause::None;
+			m_acquireStatus = VpSkeleton::AcquireStatus::Unavailable;
+			VpSkeleton::AcquireResult variant;   // holds the memo spot (its pin) for the rest of this Apply
+			const GrainSplit::Gpu::Frame* split = shared ? sharedSplit : nullptr;
+			if (!shared)
 			{
-				// The shared product is read: once it has fitted for a while the own split's output textures are not needed (a product
-				// that drops out again costs one re-creation, visible as the own-split fallback it is).
-				m.sharedStreak = (std::min)(m.sharedStreak + 1, 1 << 30);
-				// hz = the measured content rate; unknown (<= 0) it is kReferenceHz (23.976), so the hold is then 24 frames, not 1 s of real time.
-				// Released in both modes (arena or not): only the pixels are byte-identical between them.
-				if (m.sharedStreak >= Frames(kSplitReleaseSeconds, hz)) m.split.Release(gpu);
-			}
-			else
-			{
-				m.sharedStreak = 0;
-				// With an arena the split's intermediates come from it (its own scope, closed before ours opens); without, the call is
-				// the one without options, byte for byte.
-				GrainSplit::Gpu::Options splitOptions;
-				splitOptions.arena = params.arena;
-				const bool splitOk = params.arena ? m.split.Compute(gpu, dispatch, work, 0, cu, g.scale, g.B, sp, splitOptions)
-					: m.split.Compute(gpu, dispatch, work, 0, cu, g.scale, g.B, sp);
-				if (!splitOk)
+				if (!params.memo) return fail("grain split unavailable: no skeleton memo");
+				if (!whole)
 				{
-					m_scratchShort = m.split.ScratchShort();
-					return fail(m.split.LastError().c_str());
+					// The variant key has no crop axis on this base: the reader refuses (never a split of the uncropped plane).
+					m_acquireCause = VpSkeleton::AcquireCause::VariantUndeclared;
+					return fail("grain split unavailable: variant not served by the owner (active-picture crop; no fitting shared product)");
 				}
+				if (!GrainSplit::Gpu::ScaleRepresentable(g.scale))
+				{
+					m_acquireCause = VpSkeleton::AcquireCause::VariantUndeclared;
+					return fail("grain split unavailable: variant not served by the owner (Scale not a whole number of eighths)");
+				}
+				variant = params.memo->Acquire(VpSkeleton::kP10GrainSplit, params.seq, VpSkeleton::AcquireForm::Gpu,
+					GrainSplit::Gpu::VariantFor(w, h, g.scale, params.colorDepth));
+				m_acquireCause = variant.cause;
+				m_acquireStatus = variant.status;
+				if (!variant.Ok()) return fail((std::string("grain split unavailable: ") + VpSkeleton::Token(variant.cause)).c_str());
+				split = GrainSplit::Gpu::FrameOf(variant);
+				// The owner's variant must fit this reader exactly, as the shared product would (else a visible refusal).
+				if (GrainSplit::Gpu::CheckFit(split, w, h, g.B, g.scale, cu, 0, params.seq) != GrainSplit::Gpu::FitResult::Fits)
+					return fail("grain split unavailable: the memo variant does not fit this plane");
 			}
-			const GrainSplit::Gpu::Frame& gs = shared ? *sharedSplit : m.split.Out();
+			const GrainSplit::Gpu::Frame& gs = *split;
 			// THE ONE READ ACCESSOR: every grain read goes through gs_fetch / gs_blocks (the prelude + BindView of the frame's layout).
 			const std::string view = GrainSplit::Gpu::ViewGlsl(gs.storage, gs.codeUnit);
 
 			// --- The per-frame temporaries: the arena's (SA6) or this module's own ---
-			// One scope for the rest of the Apply, opened only now: the own split's scope above is closed, so they never nest.
+			// One scope for the rest of the Apply (the grain split variant is the memo owner's: no nested scope here).
 			ArenaScopeGuard arenaScope(params.arena, kArenaScope);
 			pl_tex deltaTex = m.delta, accTex[2] = { m.acc[0], m.acc[1] };
 			if (useArena)
@@ -563,7 +552,7 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 			// 4a: CLEAN (four parity classes; admission frames only do work)
 			if (params.templateClean)
 			{
-				const Detail::CleanBasis cb = Detail::MakeCleanBasis(g.P, kSigmaBase * g.scale);
+				const Detail::CleanBasis cb = Detail::MakeCleanBasis(g.P, GrainSplit::DefaultParams().sigmaBase * g.scale);
 				const std::string chdr = DefineInt("TD_P", g.P) + DefineInt("TD_HALF", g.half) + DefineInt("TD_NPX", g.npx) + DefineInt("TD_NPY", g.npy) +
 					ConstArray("TD_C", g.P * g.P, [&](int i) { return cb.C[static_cast<size_t>(i)]; }) +
 					ConstArray("TD_WIN", g.P, [&](int i) { return cb.win[static_cast<size_t>(i)]; }) +
@@ -654,7 +643,9 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 			m.stamps = params.stamps;
 			m_status = reason ? std::string("reset: ") + reason : (motionLost ? std::string("motion lost") : std::string("ok"));
 			if (params.blockGates) m_status += bgTex ? "; block gates" : "; block gates rejected (size/format)";
-			if (!shared) m_status += params.grain.Gpu(RegionEvidence::GrainPlane::Luma) ? "; own grain split (the shared product does not fit)" : "; own grain split";
+			if (!shared)
+				m_status += std::string("; grain split: memo variant, ") + VpSkeleton::Token(m_acquireStatus) +
+					(params.grain.Gpu(RegionEvidence::GrainPlane::Luma) ? " (the shared product does not fit)" : "");
 			if (K < kSlots) m_status += "; store " + std::to_string(K) + " of " + std::to_string(kSlots) + " slots (memory tier)";
 			if (params.lookAheadAvailable || params.cameraAvailable)
 				m_status += std::string("; not on GPU:") + (params.lookAheadAvailable ? " look-ahead" : "") +

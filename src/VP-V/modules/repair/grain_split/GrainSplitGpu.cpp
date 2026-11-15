@@ -100,10 +100,12 @@ vec2 low_s(ivec2 p, ivec2 lo)
 }
 )GLSL";
 
-			// 3. STATS: one workgroup per block, in chunks of CH x CH px (CH = min(B, 16)): the chunk and its R1 apron in
-			// shared memory, G1 separably, the bands per pixel; per sub-block (one thread each, fixed order) the sums of
-			// (D^2, d1^2, d2^2, d3^2) and the pixel count. Then one thread: the quietest sub-block energies (sorted) x CAL and
-			// the block means -> quiet = (quiet, e3, e1, e2). Deterministic: no atomics.
+			// 3a. STATS (refs/127 A1, unit 5): one workgroup per CH x CH chunk (CH = min(B, 16); GS_NC = ceil(B / CH) chunks per
+			// block edge, grid bw * GS_NC x bh * GS_NC, every chunk in parallel): the chunk and its R1 apron in shared memory, G1
+			// separably, the bands per pixel; per sub-block that meets the chunk (one thread each, the pixel order of unit 4) the
+			// sum of (D^2, d1^2, d2^2, d3^2) over its in-plane pixels -> part_out at ((bx * SUB + si) * GS_S + ox, (by * SUB + sj)
+			// * GS_S + oy), (ox, oy) = the chunk's place in the sub-block's chunk span (GS_S = the longest span, 1 when CH is a
+			// multiple of B / SUB). Deterministic: no atomics.
 			const char* const STATS_HEADER = R"GLSL(
 #define AP (CH + 2 * R1)
 #define LA (CH / 2 + 3)
@@ -112,73 +114,86 @@ shared float s_y[AP * AP];
 shared float s_hh[AP * CH];
 shared vec2 s_l[LA * LA];
 shared vec4 s_px[CH * CH];
-shared vec4 s_sum[NSUB];
-shared float s_cnt[NSUB];
 )GLSL";
 			const char* const STATS_BODY = R"GLSL(
 uint li = gl_LocalInvocationIndex;
 ivec2 lid = ivec2(gl_LocalInvocationID.xy);
-ivec2 blk = ivec2(gl_WorkGroupID.xy);
-ivec2 borg = blk * GS_B;
-if (li < uint(NSUB)) { s_sum[li] = vec4(0.0); s_cnt[li] = 0.0; }
-for (int cy = 0; cy < GS_B; cy += CH) {
-    for (int cx = 0; cx < GS_B; cx += CH) {
-        ivec2 org = borg + ivec2(cx, cy);
-        ivec2 lo = org / 2 - ivec2(1);
-        barrier();
-        for (uint i = li; i < uint(AP * AP); i += 256u) {
-            int r = int(i / uint(AP)), c = int(i % uint(AP));
-            s_y[i] = gs_y(clamp(org.x - R1 + c, 0, GS_W - 1), clamp(org.y - R1 + r, 0, GS_H - 1));
-        }
-        for (uint i = li; i < uint(LA * LA); i += 256u) {
-            int r = int(i / uint(LA)), c = int(i % uint(LA));
-            s_l[i] = texelFetch(low, clamp(lo + ivec2(c, r), ivec2(0), ivec2(GS_HW - 1, GS_HH - 1)), 0).xy;
-        }
-        barrier();
-        for (uint i = li; i < uint(AP * CH); i += 256u) {
-            int r = int(i / uint(CH)), c = int(i % uint(CH));
-            float acc = 0.0;
-            for (int k = -R1; k <= R1; k++) acc += w1(k) * s_y[r * AP + c + R1 + k];
-            s_hh[i] = acc;
-        }
-        barrier();
-        if (lid.x < CH && lid.y < CH) {
-            ivec2 p = org + lid;
-            float g1 = 0.0;
-            for (int k = -R1; k <= R1; k++) g1 += w1(k) * s_hh[(lid.y + R1 + k) * CH + lid.x];
-            float y = s_y[(lid.y + R1) * AP + lid.x + R1];
-            vec2 l = low_s(p, lo);
-            float d1 = y - g1, d2 = g1 - l.x, d3 = l.x - l.y, dd = d1 + d2;
-            bool inside = p.x < GS_W && p.y < GS_H;
-            s_px[lid.y * CH + lid.x] = inside ? vec4(dd * dd, d1 * d1, d2 * d2, d3 * d3) : vec4(-1.0);
-        }
-        barrier();
-        if (li < uint(NSUB)) {
-            int si = int(li) % GS_SUB, sj = int(li) / GS_SUB;
-            int x0 = max((si * GS_B) / GS_SUB, cx), x1 = min(((si + 1) * GS_B) / GS_SUB, cx + CH);
-            int y0 = max((sj * GS_B) / GS_SUB, cy), y1 = min(((sj + 1) * GS_B) / GS_SUB, cy + CH);
-            vec4 acc = s_sum[li];
-            float n = s_cnt[li];
-            for (int yy = y0; yy < y1; yy++)
-                for (int xx = x0; xx < x1; xx++) {
-                    vec4 v = s_px[(yy - cy) * CH + (xx - cx)];
-                    if (v.x >= 0.0) { acc += v; n += 1.0; }
-                }
-            s_sum[li] = acc;
-            s_cnt[li] = n;
-        }
-    }
+ivec2 blk = ivec2(gl_WorkGroupID.xy) / GS_NC;
+ivec2 kc = ivec2(gl_WorkGroupID.xy) - blk * GS_NC;
+int cx = kc.x * CH, cy = kc.y * CH;
+ivec2 org = blk * GS_B + ivec2(cx, cy);
+ivec2 lo = org / 2 - ivec2(1);
+for (uint i = li; i < uint(AP * AP); i += 256u) {
+    int r = int(i / uint(AP)), c = int(i % uint(AP));
+    s_y[i] = gs_y(clamp(org.x - R1 + c, 0, GS_W - 1), clamp(org.y - R1 + r, 0, GS_H - 1));
+}
+for (uint i = li; i < uint(LA * LA); i += 256u) {
+    int r = int(i / uint(LA)), c = int(i % uint(LA));
+    s_l[i] = texelFetch(low, clamp(lo + ivec2(c, r), ivec2(0), ivec2(GS_HW - 1, GS_HH - 1)), 0).xy;
 }
 barrier();
-if (li == 0u) {
+for (uint i = li; i < uint(AP * CH); i += 256u) {
+    int r = int(i / uint(CH)), c = int(i % uint(CH));
+    float acc = 0.0;
+    for (int k = -R1; k <= R1; k++) acc += w1(k) * s_y[r * AP + c + R1 + k];
+    s_hh[i] = acc;
+}
+barrier();
+if (lid.x < CH && lid.y < CH) {
+    ivec2 p = org + lid;
+    float g1 = 0.0;
+    for (int k = -R1; k <= R1; k++) g1 += w1(k) * s_hh[(lid.y + R1 + k) * CH + lid.x];
+    float y = s_y[(lid.y + R1) * AP + lid.x + R1];
+    vec2 l = low_s(p, lo);
+    float d1 = y - g1, d2 = g1 - l.x, d3 = l.x - l.y, dd = d1 + d2;
+    bool inside = p.x < GS_W && p.y < GS_H;
+    s_px[lid.y * CH + lid.x] = inside ? vec4(dd * dd, d1 * d1, d2 * d2, d3 * d3) : vec4(-1.0);
+}
+barrier();
+if (li < uint(NSUB)) {
+    int si = int(li) % GS_SUB, sj = int(li) / GS_SUB;
+    int sx0 = (si * GS_B) / GS_SUB, sy0 = (sj * GS_B) / GS_SUB;
+    int x0 = max(sx0, cx), x1 = min(((si + 1) * GS_B) / GS_SUB, cx + CH);
+    int y0 = max(sy0, cy), y1 = min(((sj + 1) * GS_B) / GS_SUB, cy + CH);
+    if (x0 < x1 && y0 < y1) {
+        vec4 acc = vec4(0.0);
+        for (int yy = y0; yy < y1; yy++)
+            for (int xx = x0; xx < x1; xx++) {
+                vec4 v = s_px[(yy - cy) * CH + (xx - cx)];
+                if (v.x >= 0.0) acc += v;
+            }
+        ivec2 o = kc - ivec2(sx0 / CH, sy0 / CH);
+        imageStore(part_out, ivec2((blk.x * GS_SUB + si) * GS_S + o.x, (blk.y * GS_SUB + sj) * GS_S + o.y), acc);
+    }
+}
+)GLSL";
+
+			// 3b. REDUCE (unit 5): one thread per block. Per sub-block (fixed order) the chunk partials of its span (chunk order
+			// of unit 4) and its in-plane pixel count (analytic: the sub-block rectangle clipped to the plane); then the
+			// quietest sub-block energies (sorted) x CAL and the block means -> quiet = (quiet, e3, e1, e2).
+			const char* const REDUCE_BODY = R"GLSL(
+ivec2 blk = ivec2(gl_GlobalInvocationID.xy);
+if (blk.x < GS_BW && blk.y < GS_BH) {
     float e[NSUB];
     int n = 0;
     vec4 tot = vec4(0.0);
     float cnt = 0.0;
+    ivec2 borg = blk * GS_B;
     for (int i = 0; i < NSUB; i++) {
-        if (s_cnt[i] > 0.0) { e[n] = s_sum[i].x / s_cnt[i]; n++; }
-        tot += s_sum[i];
-        cnt += s_cnt[i];
+        int si = i % GS_SUB, sj = i / GS_SUB;
+        int x0 = (si * GS_B) / GS_SUB, x1 = ((si + 1) * GS_B) / GS_SUB;
+        int y0 = (sj * GS_B) / GS_SUB, y1 = ((sj + 1) * GS_B) / GS_SUB;
+        vec4 s = vec4(0.0);
+        float c = 0.0;
+        if (x0 < x1 && y0 < y1) {
+            for (int ky = y0 / CH; ky <= (y1 - 1) / CH; ky++)
+                for (int kx = x0 / CH; kx <= (x1 - 1) / CH; kx++)
+                    s += texelFetch(part, ivec2((blk.x * GS_SUB + si) * GS_S + kx - x0 / CH, (blk.y * GS_SUB + sj) * GS_S + ky - y0 / CH), 0);
+            c = float(max(0, min(borg.x + x1, GS_W) - (borg.x + x0)) * max(0, min(borg.y + y1, GS_H) - (borg.y + y0)));
+        }
+        if (c > 0.0) { e[n] = s.x / c; n++; }
+        tot += s;
+        cnt += c;
     }
     for (int i = 1; i < n; i++) {
         float v = e[i];
@@ -376,19 +391,63 @@ if (p.x < GS_W && p.y < GS_H) {
 
 			int HalfOf(int v) { return (v + 1) / 2; }
 			int ChunkOf(int B) { return (std::min)(B, 16); }
+			int ChunksPerBlock(int B) { const int ch = ChunkOf(B); return (B + ch - 1) / ch; }
+			// The longest chunk span of a sub-block (in chunks, per axis): sub-block i covers [i B / sub, (i + 1) B / sub).
+			int SpanOf(int B, int sub)
+			{
+				const int ch = ChunkOf(B);
+				int s = 1;
+				for (int i = 0; i < sub; ++i)
+				{
+					const int x0 = (i * B) / sub, x1 = ((i + 1) * B) / sub;
+					if (x0 < x1) s = (std::max)(s, (x1 - 1) / ch - x0 / ch + 1);
+				}
+				return s;
+			}
+			// The partial-sum texture of the grain level pass: (bw * sub * span) x (bh * sub * span).
+			void PartialSize(int bw, int bh, int B, int sub, int* pw, int* ph)
+			{
+				const int span = SpanOf(B, sub);
+				*pw = bw * sub * span;
+				*ph = bh * sub * span;
+			}
+			// The shapes of the four working intermediates (tmp + low half-size, part, quiet block grid): the one source of
+			// ArenaRequests and WorkingBytes.
+			struct WorkingShapes
+			{
+				int hw = 0, hh = 0, pw = 0, ph = 0, bw = 0, bh = 0;
+			};
+			WorkingShapes WorkingOf(int w, int h, int B, int sub)
+			{
+				WorkingShapes s;
+				s.hw = HalfOf(w);
+				s.hh = HalfOf(h);
+				s.bw = (w + B - 1) / B;
+				s.bh = (h + B - 1) / B;
+				PartialSize(s.bw, s.bh, B, sub, &s.pw, &s.ph);
+				return s;
+			}
 		}
 
-		int GaussRadius(double sigma) { return VpUnit::BandFromBase::Radius(sigma, 3.0, true, 0.0); }
-
-		double GaussWeight(int k, double sigma)
+		uint64_t WorkingBytes(int w, int h, int B, int sub)
 		{
-			return VpUnit::BandFromBase::Weight(k, sigma, GaussRadius(sigma));
+			if (w < 1 || h < 1 || B < 1 || sub < 1)
+				return 0;
+			const WorkingShapes s = WorkingOf(w, h, B, sub);
+			return 2u * uint64_t(s.hw) * uint64_t(s.hh) * 8u   // tmp + low, rg32f
+				+ uint64_t(s.pw) * uint64_t(s.ph) * 16u        // part, rgba32f
+				+ uint64_t(s.bw) * uint64_t(s.bh) * 16u;       // quiet, rgba32f
 		}
+
+		// ND03: the law's one band Gaussian (the U2 unit's VpUnit::BandFromBase::BandRadius / BandWeight).
+		int GaussRadius(double sigma) { return VpUnit::BandFromBase::BandRadius(sigma); }
+
+		double GaussWeight(int k, double sigma) { return VpUnit::BandFromBase::BandWeight(k, sigma); }
 
 		void Splitter::Release(pl_gpu gpu)
 		{
 			if (gpu)
-				for (pl_tex* t : { &m_tmp, &m_low, &m_quiet, &m_level, &m_blocks, &m_outFull, &m_outA, &m_outB })
+				for (pl_tex* t : { &m_tmp, &m_low, &m_part, &m_quiet, &m_level, &m_blocks, &m_outFull, &m_outA, &m_outB })
 					if (*t) pl_tex_destroy(gpu, t);
 			m_out = Frame();
 		}
@@ -427,7 +486,7 @@ if (p.x < GS_W && p.y < GS_H) {
 		uint64_t FullShaderFingerprint()
 		{
 			uint64_t h = 14695981039346656037ull;
-			for (const char* body : { HALF_HEADER, HALF_BODY, DOWN_HEADER, DOWN_BODY, LOW_S_GLSL, STATS_HEADER, STATS_BODY, LEVEL_HEADER, LEVEL_BODY, NMIN_BODY, APPLY_HEADER, APPLY_BODY })
+			for (const char* body : { HALF_HEADER, HALF_BODY, DOWN_HEADER, DOWN_BODY, LOW_S_GLSL, STATS_HEADER, STATS_BODY, REDUCE_BODY, LEVEL_HEADER, LEVEL_BODY, NMIN_BODY, APPLY_HEADER, APPLY_BODY })
 				for (const char* c = body; *c; ++c)
 					if (*c != '\r')
 					{
@@ -457,15 +516,18 @@ if (p.x < GS_W && p.y < GS_H) {
 			if (!gpu || w < 1 || h < 1 || B < 1 || !VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 2), &t2) ||
 				!VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 4), &t4))
 				return r;
-			const int bw = (w + B - 1) / B, bh = (h + B - 1) / B;
+			const WorkingShapes s = WorkingOf(w, h, B, Params().subBlocks);   // the same shapes as WorkingBytes
 			VpSkeleton::ArenaRequest a;
 			a.scope = kArenaScope;
 			a.owner = kArenaOwner;
 			a.tier = VpSkeleton::Tier::T0;
-			a.shape.w = static_cast<uint32_t>(HalfOf(w)); a.shape.h = static_cast<uint32_t>(HalfOf(h)); a.shape.fmt = t2;
+			a.shape.w = static_cast<uint32_t>(s.hw); a.shape.h = static_cast<uint32_t>(s.hh); a.shape.fmt = t2;
 			a.count = 2;   // tmp (across) + low (Gb, G6) at half resolution
 			r.push_back(a);
-			a.shape.w = static_cast<uint32_t>(bw); a.shape.h = static_cast<uint32_t>(bh); a.shape.fmt = t4;
+			a.shape.w = static_cast<uint32_t>(s.pw); a.shape.h = static_cast<uint32_t>(s.ph); a.shape.fmt = t4;
+			a.count = 1;   // part = the grain level pass's per-(sub-block, chunk) partial sums
+			r.push_back(a);
+			a.shape.w = static_cast<uint32_t>(s.bw); a.shape.h = static_cast<uint32_t>(s.bh); a.shape.fmt = t4;
 			a.count = 1;   // quiet = (quiet, e3, e1, e2) per block
 			r.push_back(a);
 			return r;
@@ -479,7 +541,7 @@ if (p.x < GS_W && p.y < GS_H) {
 		bool Splitter::Compute(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B, const Params& params,
 			const Options& options)
 		{
-			// One arena scope across the six steps (they share the arena's temporaries), closed on every exit.
+			// One arena scope across the seven steps (they share the arena's temporaries), closed on every exit.
 			ScopeGuard scope(options.arena);
 			for (uint32_t i = 0; i < StepCount(); ++i)
 				if (!Step(gpu, dispatch, plane, component, codeUnit, scale, B, params, options, i))
@@ -576,16 +638,26 @@ if (p.x < GS_W && p.y < GS_H) {
 			}
 			case 2:
 			{
-				const int ch = ChunkOf(B), ap = ch + 2 * txt.r1, la = ch / 2 + 3, nsub = params.subBlocks * params.subBlocks;
-				const std::string hdr = txt.geo + txt.w1 + txt.yread + DefineInt("CH", ch) + DefineInt("GS_SUB", params.subBlocks) +
-					DefineInt("GS_QUIET", params.quietSubBlocks) + Define("GS_CAL", params.grainCal) + STATS_HEADER + LOW_S_GLSL;
-				const size_t shmem = sizeof(float) * (size_t(ap) * ap + size_t(ap) * ch + 2u * size_t(la) * la + 4u * size_t(ch) * ch + 5u * size_t(nsub));
-				const pl_shader_desc d[3] = { Sampled("src", plane), Sampled("low", r.low), VpvGpu::Storage("quiet_out", r.quiet) };
-				if (!Pass(dispatch, "VideoProcessor grain split: grain level", hdr, STATS_BODY, d, 3, nullptr, 0, bw, bh, shmem, 16, 16, options.timer))
+				const int ch = ChunkOf(B), nc = ChunksPerBlock(B), ap = ch + 2 * txt.r1, la = ch / 2 + 3;
+				const std::string hdr = txt.geo + txt.w1 + txt.yread + DefineInt("CH", ch) + DefineInt("GS_NC", nc) + DefineInt("GS_SUB", params.subBlocks) +
+					DefineInt("GS_S", SpanOf(B, params.subBlocks)) + STATS_HEADER + LOW_S_GLSL;
+				const size_t shmem = sizeof(float) * (size_t(ap) * ap + size_t(ap) * ch + 2u * size_t(la) * la + 4u * size_t(ch) * ch);
+				const pl_shader_desc d[3] = { Sampled("src", plane), Sampled("low", r.low), VpvGpu::Storage("part_out", r.part) };
+				if (!Pass(dispatch, "VideoProcessor grain split: grain level", hdr, STATS_BODY, d, 3, nullptr, 0, bw * nc, bh * nc, shmem, 16, 16, options.timer))
 					return fail("grain split: grain level pass failed");
 				break;
 			}
 			case 3:
+			{
+				const std::string hdr = txt.geo + DefineInt("CH", ChunkOf(B)) + DefineInt("GS_SUB", params.subBlocks) + DefineInt("GS_S", SpanOf(B, params.subBlocks)) +
+					DefineInt("NSUB", params.subBlocks * params.subBlocks) + DefineInt("GS_QUIET", params.quietSubBlocks) + Define("GS_CAL", params.grainCal);
+				const pl_shader_desc d[2] = { Sampled("part", r.part), VpvGpu::Storage("quiet_out", r.quiet) };
+				if (!Pass(dispatch, "VideoProcessor grain split: grain level reduce", hdr, REDUCE_BODY, d, 2, nullptr, 0, (bw + 15) / 16, (bh + 15) / 16, 0, 16, 16,
+					options.timer))
+					return fail("grain split: grain level reduce pass failed");
+				break;
+			}
+			case 4:
 			{
 				const pl_shader_desc d[3] = { Sampled("quiet", r.quiet), Sampled("low", r.low), VpvGpu::Storage("level_out", r.level) };
 				const size_t shmem = sizeof(uint32_t) * (size_t(params.levelBins) * 160u + size_t(params.levelBins));
@@ -594,7 +666,7 @@ if (p.x < GS_W && p.y < GS_H) {
 					return fail("grain split: noise level pass failed");
 				break;
 			}
-			case 4:
+			case 5:
 			{
 				const pl_shader_desc d[4] = { Sampled("quiet", r.quiet), Sampled("low", r.low), Sampled("level", r.level), VpvGpu::Storage("blocks_out", r.blocks) };
 				if (!Pass(dispatch, "VideoProcessor grain split: neighbourhood minimum", txt.geo + DefineInt("GS_NG", params.neighbourhood) + LEVEL_HEADER, NMIN_BODY, d, 4,
@@ -666,10 +738,10 @@ if (p.x < GS_W && p.y < GS_H) {
 			{
 				const double s1 = params.sigmaFine * scale;
 				const int r1 = GaussRadius(s1), rl = (std::max)(GrainSplit::V3HalfRadius(params.sigmaBase * scale), GrainSplit::V3HalfRadius(params.sigmaLow * scale));
-				const int ch = ChunkOf(B), ap = ch + 2 * r1, la = ch / 2 + 3, nsub = params.subBlocks * params.subBlocks;
+				const int ch = ChunkOf(B), ap = ch + 2 * r1, la = ch / 2 + 3;
 				const int aw = kApplyTile + 2, aa = aw + 2 * r1, lapp = kApplyTile / 2 + 2;
 				const size_t need[5] = { sizeof(float) * size_t(kHalfTh) * size_t(kHalfTw + 2 * rl), 2 * sizeof(float) * size_t(kDownTc) * size_t(kDownTr + 2 * rl),
-					sizeof(float) * (size_t(ap) * ap + size_t(ap) * ch + 2u * size_t(la) * la + 4u * size_t(ch) * ch + 5u * size_t(nsub)),
+					sizeof(float) * (size_t(ap) * ap + size_t(ap) * ch + 2u * size_t(la) * la + 4u * size_t(ch) * ch),
 					sizeof(float) * (size_t(aa) * aa + size_t(aa) * kApplyTile + 2u * size_t(lapp) * lapp + size_t(aw) * aw),
 					sizeof(uint32_t) * (size_t(params.levelBins) * 160u + size_t(params.levelBins)) };
 				const size_t most = (std::max)((std::max)(need[0], need[1]), (std::max)((std::max)(need[2], need[3]), need[4]));
@@ -717,11 +789,13 @@ if (p.x < GS_W && p.y < GS_H) {
 			}
 
 			// Intermediates (half-resolution tmp + low, block-grid quiet): from the arena (scope closed on every exit), else private.
-			pl_tex tmp = nullptr, low = nullptr, quiet = nullptr, levelTex = nullptr;
+			pl_tex tmp = nullptr, low = nullptr, part = nullptr, quiet = nullptr, levelTex = nullptr;
+			int pw = 0, ph = 0;
+			PartialSize(bw, bh, B, params.subBlocks, &pw, &ph);
 			if (options.arena)
 			{
 				// The private temporaries of the non-arena path are not used any more: free them.
-				for (pl_tex* t : { &m_tmp, &m_low, &m_quiet })
+				for (pl_tex* t : { &m_tmp, &m_low, &m_part, &m_quiet })
 					if (*t) pl_tex_destroy(gpu, t);
 				VpSkeleton::TexFormat t2 = VpSkeleton::TexFormat::RG32F, t4 = VpSkeleton::TexFormat::RGBA32F;
 				if (!VpSkeleton::PlTexBackend::FormatOf(f2, &t2) || !VpSkeleton::PlTexBackend::FormatOf(f4, &t4))
@@ -729,29 +803,32 @@ if (p.x < GS_W && p.y < GS_H) {
 					m_error = "grain split: rg32f / rgba32f is not an arena format";
 					return false;
 				}
-				VpSkeleton::TexShape half, qshape;
+				VpSkeleton::TexShape half, pshape, qshape;
+				pshape.w = static_cast<uint32_t>(pw); pshape.h = static_cast<uint32_t>(ph); pshape.fmt = t4;
 				half.w = static_cast<uint32_t>(hw); half.h = static_cast<uint32_t>(hh); half.fmt = t2;
 				qshape.w = static_cast<uint32_t>(bw); qshape.h = static_cast<uint32_t>(bh); qshape.fmt = t4;
 				tmp = options.arena->Acquire(kArenaOwner, half);
 				low = options.arena->Acquire(kArenaOwner, half);
+				part = options.arena->Acquire(kArenaOwner, pshape);
 				quiet = options.arena->Acquire(kArenaOwner, qshape);
-				if (!tmp || !low || !quiet)
+				if (!tmp || !low || !part || !quiet)
 				{
 					m_scratchShort = true;
-					m_error = std::string("scratch memory short (grain split): ") + (!tmp ? "tmp " : "") + (!low ? "low " : "") +
+					m_error = std::string("scratch memory short (grain split): ") + (!tmp ? "tmp " : "") + (!low ? "low " : "") + (!part ? "part " : "") +
 						(!quiet ? "quiet " : "") + "unavailable";
 					return false;
 				}
 			}
 			else
 			{
-				if (!Ensure(gpu, m_tmp, hw, hh, f2) || !Ensure(gpu, m_low, hw, hh, f2) || !Ensure(gpu, m_quiet, bw, bh, f4))
+				if (!Ensure(gpu, m_tmp, hw, hh, f2) || !Ensure(gpu, m_low, hw, hh, f2) || !Ensure(gpu, m_part, pw, ph, f4) || !Ensure(gpu, m_quiet, bw, bh, f4))
 				{
 					m_error = "grain split: no rg32f / rgba32f storage texture";
 					return false;
 				}
 				tmp = m_tmp;
 				low = m_low;
+				part = m_part;
 				quiet = m_quiet;
 			}
 			if (!Ensure(gpu, m_level, params.levelBins, 1, f4))
@@ -798,7 +875,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			m_run.compact = compact;
 			m_run.storage = choice.storage;
 			m_run.w = w; m_run.h = h; m_run.bw = bw; m_run.bh = bh;
-			m_run.tmp = tmp; m_run.low = low; m_run.quiet = quiet; m_run.level = levelTex; m_run.blocks = blocksTex;
+			m_run.tmp = tmp; m_run.low = low; m_run.part = part; m_run.quiet = quiet; m_run.level = levelTex; m_run.blocks = blocksTex;
 			m_run.outFull = outFull; m_run.outA = outA; m_run.outB = outB;
 			return true;
 		}

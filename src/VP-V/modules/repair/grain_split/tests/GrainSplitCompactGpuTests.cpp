@@ -312,11 +312,12 @@ public:
 			const uint64_t before = arena.Acquired();
 			const Product viaArena = Run(dev, tex, B, Storage::Full, &arena);
 			Assert::IsTrue(viaArena.ok, Wide(viaArena.error).c_str());
-			LogF("Full via arena %.0fx%.0f: %.0f acquires (tmp, low, quiet), arena %.1f MB", w, h, static_cast<double>(arena.Acquired() - before),
+			LogF("Full via arena %.0fx%.0f: %.0f acquires (tmp, low, part, quiet), arena %.1f MB", w, h, static_cast<double>(arena.Acquired() - before),
 				static_cast<double>(arena.ReservedBytes()) / (1024.0 * 1024.0));
 			// WAIVER-P10V3-01 (approved v3 law, refs/116): old 2 (bands, quiet; rows was the product) -> new 3 (tmp, low, quiet; the
 			// Full product is its own rgba32f texture): 2 half-size rg32f planes + 1 block grid = 3 acquires.
-			Assert::AreEqual(static_cast<uint64_t>(3), arena.Acquired() - before, L"Full takes tmp, low and quiet from the arena (the product is its own texture)");
+			// WAIVER-P10V5-01 (unit 5): 3 -> 4 (tmp, low, part, quiet): the grain level pass's per-(sub-block, chunk) partial sums are one more arena texture.
+			Assert::AreEqual(static_cast<uint64_t>(4), arena.Acquired() - before, L"Full takes tmp, low, part and quiet from the arena (the product is its own texture)");
 			Assert::IsTrue(SameBits(today.a, viaArena.a) && SameBits(today.blocks, viaArena.blocks), L"arena intermediates: split and blocks exactly equal");
 			Assert::IsFalse(arena.FrameDecision().engaged, L"no shortage");
 			pl_tex_destroy(gpu, &tex);
@@ -346,7 +347,8 @@ public:
 		const Product r3 = Run(dev, tex, B, Storage::Compact, &arena);
 		Assert::IsTrue(r3.ok, Wide(r3.error).c_str());
 		// v3 (WAIVER-P10V3-01, wording only): the count stays 3 (old rows, bands, quiet; new tmp, low, quiet).
-		Assert::AreEqual(static_cast<uint64_t>(3), arena.Acquired() - before, L"Compact takes tmp, low and quiet from the arena");
+		// WAIVER-P10V5-01 (unit 5): 3 -> 4 (tmp, low, part, quiet).
+		Assert::AreEqual(static_cast<uint64_t>(4), arena.Acquired() - before, L"Compact takes tmp, low, part and quiet from the arena");
 		Assert::IsTrue(SameBits(r1.a, r3.a) && SameBits(r1.b, r3.b) && SameBits(r1.blocks, r3.blocks), L"arena result equals the private result");
 		Logger::WriteMessage("Compact: two private runs and one arena run are bit-identical (A, B, blocks)");
 		pl_tex_destroy(gpu, &tex);
