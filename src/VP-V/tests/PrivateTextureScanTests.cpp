@@ -509,5 +509,75 @@ namespace PrivateTextureScanTestsNs
 			}
 			Assert::IsTrue(fillFiles >= 2, L"the scan found the memo and at least one fill");
 		}
+
+		// C-T4 (gate C3-testdiff item 4): the per-use dispatch scanner on injected text, as ScannerFlagsAnInjectedFile does for the
+		// texture scanner. Every red case still names req.gpu->Dispatch() and no pl_dispatch_create / _destroy, so the old
+		// file-level check passed it: a member dispatch, a foreign cast, a comment- or string-only req.gpu->Dispatch(), a
+		// parameter, the struct itself, a non-const or re-declared local, an alias, code that follows a literal, and the local's
+		// name used out of its scope. Green: the house form (EdgeMapFill.h), the cast handed straight to a call, a const auto
+		// local, no dispatch at all, and foreign forms that sit only in comments or literals.
+		TEST_METHOD(DispatchProvenanceScannerFlagsAnInjectedFile)
+		{
+			struct Case { const wchar_t* name; std::string text; };
+			const std::string house =
+				"if (req.gpu == nullptr || req.gpu->Gpu() == nullptr || req.gpu->Dispatch() == nullptr) return false;\n"
+				"const pl_dispatch dispatch = static_cast<pl_dispatch>(req.gpu->Dispatch());\n"
+				"pl_shader sh = pl_dispatch_begin(dispatch);\n"
+				"if (!pl_shader_custom(sh, &custom)) { pl_dispatch_abort(dispatch, &sh); return false; }\n"
+				"pl_dispatch_compute_params compute{};\n"
+				"compute.shader = &sh;\n"
+				"compute.dispatch_size[0] = 1;\n"
+				"return pl_dispatch_compute(dispatch, &compute);\n";
+			const Case green[] = {
+				{ L"the house form (EdgeMapFill.h)", house },
+				{ L"the cast handed straight to the call", "pl_shader sh = pl_dispatch_begin(static_cast<pl_dispatch>(req.gpu->Dispatch()));\n" },
+				{ L"a const auto local of the cast", "const auto dp = static_cast<pl_dispatch>(req.gpu->Dispatch());\npl_shader sh = pl_dispatch_begin(dp);\n" },
+				{ L"no dispatch at all", "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireForm::Gpu);\n" },
+				{ L"comments and literals never count", house + "// a pl_dispatch m_dp member, pl_dispatch_begin(m_dp), would be refused\n"
+					"/* static_cast<pl_dispatch>(SomeOtherDispatch()) */\nconst char* why = \"pl_dispatch_begin(m_dp)\";\n" },
+				{ L"an include of the dispatch header", "#include <libplacebo/dispatch.h>\n" + house },
+				{ L"a raw string naming a foreign dispatch", house + "const char* glsl = R\"GLSL(pl_dispatch_begin(m_dp); // \" x)GLSL\";\n" },
+			};
+			const Case red[] = {
+				{ L"a member dispatch", house + "struct Kept { pl_dispatch m_dp = nullptr; };\n" },
+				{ L"a member dispatch used by a call", house + "pl_dispatch_reset_frame(kept.m_dp);\n" },
+				{ L"a foreign cast", "if (req.gpu == nullptr || req.gpu->Dispatch() == nullptr) return false;\n"
+					"const pl_dispatch dispatch = static_cast<pl_dispatch>(SomeOtherDispatch());\npl_shader sh = pl_dispatch_begin(dispatch);\n" },
+				{ L"a foreign cast handed to the call", house + "pl_dispatch_reset_frame(static_cast<pl_dispatch>(host->OtherDispatch()));\n" },
+				{ L"a C-style cast of a foreign dispatch", house + "pl_dispatch_reset_frame((pl_dispatch)host->dispatch);\n" },
+				{ L"a comment-only req.gpu->Dispatch()", "// the dispatch is static_cast<pl_dispatch>(req.gpu->Dispatch())\n"
+					"auto dp = host->dispatch;\npl_shader sh = pl_dispatch_begin(dp);\n" },
+				{ L"a string-only req.gpu->Dispatch()", "const char* note = \"req.gpu->Dispatch()\";\nauto dp = host->dispatch;\npl_shader sh = pl_dispatch_begin(dp);\n" },
+				{ L"a parameter", house + "static bool Finish(pl_dispatch dp) { return pl_dispatch_finish(dp, nullptr); }\n" },
+				{ L"the dispatch struct itself", house + "struct pl_dispatch_t* kept = nullptr;\n" },
+				{ L"a non-const local", "pl_dispatch dispatch = static_cast<pl_dispatch>(req.gpu->Dispatch());\n"
+					"dispatch = host->dispatch;\npl_shader sh = pl_dispatch_begin(dispatch);\n" },
+				{ L"the local's name declared again", house + "{ auto dispatch = host->dispatch; pl_dispatch_reset_frame(dispatch); }\n" },
+				{ L"the local captured", house + "auto later = [dispatch]() { return dispatch; };\n" },
+				{ L"an alias of the type", house + "#define VP_DP pl_dispatch\n" },
+				{ L"a dispatch function outside a call", house + "auto begin = &pl_dispatch_begin;\n" },
+				{ L"a call on another local", house + "pl_dispatch_reset_frame(other);\n" },
+				{ L"code after a raw string", house + "const char* glsl = R\"GLSL(x = \"y\"; // z)GLSL\"; struct K { pl_dispatch m; };\n" },
+				{ L"code after a char literal and a digit separator", house + "const char q = '\"'; const int n = 1'000; struct K { pl_dispatch m; };\n" },
+				{ L"code after an escaped quote", house + "const char* s = \"a \\\" b\"; struct K { pl_dispatch m; };\n" },
+				{ L"a literal argument is not the context call", "if (req.gpu->Dispatch() == nullptr) return false;\n"
+					"pl_shader sh = pl_dispatch_begin(static_cast<pl_dispatch>(req.gpu->Dispatch(\"x\")));\n" },
+				{ L"the local's name used before its declaration", "pl_dispatch_reset_frame(dispatch);\n" + house },
+				{ L"the local's name used outside its block", "{\n" + house + "}\nstruct M { void Run() { pl_dispatch_reset_frame(dispatch); } };\n" },
+			};
+			for (const Case& c : green)
+			{
+				const std::string fault = OwnerFillDispatchFault(c.text);
+				Assert::IsTrue(fault.empty(), (std::wstring(c.name) + L": " + Widen(fault)).c_str());
+			}
+			for (const Case& c : red)
+			{
+				Assert::IsTrue(c.text.find("req.gpu->Dispatch()") != std::string::npos && c.text.find("pl_dispatch_create") == std::string::npos
+					&& c.text.find("pl_dispatch_destroy") == std::string::npos, (std::wstring(c.name) + L": the old file-level check must pass this case").c_str());
+				Assert::IsFalse(OwnerFillDispatchFault(c.text).empty(), (std::wstring(c.name) + L": not flagged").c_str());
+			}
+			// the fault names its line (the house form is 8 lines)
+			Assert::AreEqual(std::string("line 9: "), OwnerFillDispatchFault(red[0].text).substr(0, 8));
+		}
 	};
 }
