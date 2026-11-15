@@ -19,7 +19,8 @@
 //               Interpolated  linear interpolation between the neighbouring ranks (type 7)
 // The two median rules give different values on even n by design of their callers (a registered
 // difference, not merged away: merging them would change picture-independent decisions and needs its own
-// FIX with a before/after table). Every function copies its input (the caller's vector is untouched);
+// FIX with a before/after table). Every function copies its input (the caller's vector is untouched), except
+// MedianInPlace, which reorders its argument;
 // an empty input returns `ifEmpty` (default 0); `NthSmallest` of an empty input returns T(). Callers whose
 // input can never be empty (the private copies were undefined there) assert(!empty) at the call, with no
 // fallback (C6-2 U24 plan (d)).
@@ -44,7 +45,10 @@ namespace RobustStats
 		return v[k];
 	}
 
-	template <class T> inline double Median(std::vector<T> v, MedianRule rule = MedianRule::MeanOfMiddle, double ifEmpty = 0.0)
+	// The median of v IN PLACE: v is reordered (Upper: nth_element, MeanOfMiddle: sorted), nothing is allocated. For a
+	// caller's persistent scratch buffer that is refilled every pass (PhotometricRefine |r|), where a copy or a move
+	// would cost an allocation per pass. Same values as Median().
+	template <class T> inline double MedianInPlace(std::vector<T>& v, MedianRule rule = MedianRule::MeanOfMiddle, double ifEmpty = 0.0)
 	{
 		if (v.empty()) return ifEmpty;
 		const size_t n = v.size();
@@ -55,6 +59,11 @@ namespace RobustStats
 		}
 		std::sort(v.begin(), v.end());
 		return (n % 2 == 1) ? static_cast<double>(v[n / 2]) : 0.5 * (static_cast<double>(v[n / 2 - 1]) + static_cast<double>(v[n / 2]));
+	}
+
+	template <class T> inline double Median(std::vector<T> v, MedianRule rule = MedianRule::MeanOfMiddle, double ifEmpty = 0.0)
+	{
+		return MedianInPlace(v, rule, ifEmpty);
 	}
 
 	// The median of n doubles (n <= 0: ifEmpty).

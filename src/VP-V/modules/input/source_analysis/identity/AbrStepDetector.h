@@ -13,7 +13,7 @@
 // Method (deterministic, no clock, no randomness): samples go into a bounded buffer in SOURCE time.
 // At every Push the valid samples of the last (pre + post) window are split at "now - post":
 //   post = (now - postWindowUs, now], pre = (now - postWindowUs - preWindowUs, now - postWindowUs].
-// A step needs |median(post) - median(pre)| >= minStep with BOTH windows stable (median absolute
+// A step needs |median of the post window - median of the pre window| >= minStep with BOTH windows stable (median absolute
 // deviation <= stableMad), at least minSamples valid samples in each, and the post window's valid
 // samples spanning >= confirmUs (the new level has persisted). The boundary is the first sample of
 // the newest run that sits on the post side of the midpoint, and it must reach back over the whole

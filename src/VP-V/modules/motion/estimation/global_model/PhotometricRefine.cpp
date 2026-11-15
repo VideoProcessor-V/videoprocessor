@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <utility>
 
 #include <VP-V/core/RobustStats.h>
 
@@ -303,7 +302,7 @@ namespace CameraModel
 					degenerate = true;
 					break;
 				}
-				sigma = std::max(o.minScaleCodes, RobustStats::MadSigma(RobustStats::Median(std::move(ABS), RobustStats::MedianRule::Upper)));
+				sigma = std::max(o.minScaleCodes, RobustStats::MadSigma(RobustStats::MedianInPlace(ABS, RobustStats::MedianRule::Upper)));
 				if (done)
 					break;
 

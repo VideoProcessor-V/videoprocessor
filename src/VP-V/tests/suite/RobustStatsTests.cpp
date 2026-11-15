@@ -6,7 +6,10 @@
 #include <VP-V/core/RobustStats.h>
 #include <VP-V/core/RobustStatsShaders.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -83,6 +86,45 @@ float median_(float a[9], int n)
 			Assert::AreEqual(3.f, NthSmallest(f, 99));
 			const std::vector<unsigned char> u8 = { 7, 200, 3, 50, 9 };
 			Assert::AreEqual(9, static_cast<int>(NthSmallest(u8, u8.size() / 2)));
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(MedianInPlaceSameValueNoAllocation)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(MedianInPlaceSameValueNoAllocation)
+		{
+			// The PhotometricRefine |r| scratch form: same value as the old in-place nth_element (sorted[n / 2]) and as
+			// Median(), the buffer keeps its storage (no allocation per pass) and still holds the same values.
+			for (size_t n : { size_t(1), size_t(2), size_t(7), size_t(64), size_t(301) })
+			{
+				std::vector<double> buf;
+				buf.reserve(512);
+				uint32_t s = static_cast<uint32_t>(n) * 2654435761u + 7u;
+				for (size_t i = 0; i < n; ++i)
+				{
+					s = s * 1664525u + 1013904223u;
+					buf.push_back(std::fabs(static_cast<double>(s >> 8) / 16777216.0 * 20.0 - 10.0));
+				}
+				std::vector<double> old = buf;
+				const size_t mid = old.size() / 2;
+				std::nth_element(old.begin(), old.begin() + static_cast<std::ptrdiff_t>(mid), old.end());
+				const double expect = 1.4826 * old[mid];
+				const double byValue = Median(buf, MedianRule::Upper);
+				std::vector<double> sortedBefore = buf;
+				std::sort(sortedBefore.begin(), sortedBefore.end());
+				const double* data = buf.data();
+				const size_t cap = buf.capacity();
+				const double inPlace = MedianInPlace(buf, MedianRule::Upper);
+				Assert::IsTrue(SameBits(expect, MadSigma(inPlace)));
+				Assert::IsTrue(SameBits(byValue, inPlace));
+				Assert::IsTrue(data == buf.data() && cap == buf.capacity() && buf.size() == n);
+				std::sort(buf.begin(), buf.end());
+				Assert::IsTrue(buf == sortedBefore);
+			}
+			std::vector<double> empty;
+			Assert::AreEqual(2.0, MedianInPlace(empty, MedianRule::Upper, 2.0));
+			std::vector<double> even = { 8.0, 2.0, 6.0, 4.0 };
+			Assert::AreEqual(5.0, MedianInPlace(even));
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(MadKnownValues)
