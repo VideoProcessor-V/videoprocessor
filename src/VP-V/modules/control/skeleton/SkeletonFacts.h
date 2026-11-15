@@ -92,6 +92,10 @@ namespace Vpv
 			// Cuts delivered late (with a later frame's group) and, of them, more than one frame late (frame c + 1 had no group).
 			uint64_t late = 0, lateGap = 0;
 			uint64_t noGrid = 0;          // no-grid fallback verdicts (the v1 pair law), per tracker push (a re-prime pushes again)
+			// U7's multi-frame fade run (unit version 3) on a ring miss: rebuilt exactly from older P4 records (joined a ring entry or the
+			// stream start), or with REDUCED evidence (the run starts only a few pairs back; a slow fade may be found later). Rule 5.
+			uint64_t fadeRunRebuilt = 0;
+			uint64_t fadeRunReduced = 0;
 		};
 
 		// What the engine feed did (render thread): shown on the status lines, read by tests.

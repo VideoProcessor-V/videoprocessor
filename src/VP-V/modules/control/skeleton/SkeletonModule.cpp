@@ -69,7 +69,9 @@ namespace Vpv
 			using VpSkeleton::kLeadWindowSeconds;     // source time the lane-lead feed keeps its lowest value over (core/QueueFrames.h)
 			using VpSkeleton::kLeadPeakHoldSeconds;   // the lane lead's best value is held this long, then decays to the lead in use
 			constexpr size_t kFactsRing = 64;           // engine-field facts kept (frames)
-			constexpr size_t kSceneRunRing = 8;         // U7 fade runs kept (frames; storage only, the law has no frame count)
+			constexpr size_t kSceneRunRing = 8;         // U7 fade runs kept (frames) and the rebuild depth on a ring miss; the law itself has no
+			                                            // frame count, but a REDUCED rebuild (no ring entry joined) starts its run at most 7 pairs back
+			                                            // (counted: sceneRunReduced, the "Skeleton scene" status line)
 			constexpr unsigned kFeedRetries = 8;        // publish attempts per field before it is given up (Begin + AfterRender per frame)
 
 			uint64_t SteadyUs()
@@ -456,6 +458,7 @@ namespace Vpv
 			};
 			std::mutex sceneRunMutex;
 			SceneRunEntry sceneRuns[kSceneRunRing];
+			std::atomic<uint64_t> sceneRunRebuilt{ 0 }, sceneRunReduced{ 0 };   // ring misses rebuilt exactly / with reduced evidence (SceneRunBefore)
 			uint64_t feedEra = 0;
 			bool feedHadEra = false;
 			uint64_t feedLastEngineSeq = 0;      // the last field seq handled (published, slipped or given up)
@@ -1470,6 +1473,10 @@ namespace Vpv
 			// still holds (at most kSceneRunRing - 1 pairs back, inside the P4 read lag kScenePrimeFrames, starting from a ring entry that
 			// ends at the oldest of them, or from an empty run); nothing older readable: an empty run, i.e. the pair law alone for this pair.
 			// Caller holds st.sceneRunMutex.
+			// The rebuild is NOT always equivalent to the ring path: unless it joins a ring entry or reaches the first frame (P4(1)), its run
+			// starts at most kSceneRunRing - 1 pairs back, so less gain has built up and a slow fade can be found later. That reduced-evidence
+			// path is counted (sceneRunReduced, SceneCounters::fadeRunReduced, the "Skeleton scene" status line, rule 5); an exact rebuild
+			// is counted as sceneRunRebuilt.
 			VpUnit::CutFadeJudge::FadeRun SceneRunBefore(HostState& st, Bundle& b, uint64_t seq, const VpLaneProducts::SourceStatsRecord& prev)
 			{
 				using VpUnit::CutFadeJudge::FadeRun;
@@ -1487,6 +1494,7 @@ namespace Vpv
 				std::vector<VpLaneProducts::SourceStatsRecord> recs(1, prev);
 				uint64_t oldest = seq - 1;
 				FadeRun start;
+				bool joined = false;
 				while (recs.size() < kSceneRunRing && oldest > 1)
 				{
 					VpLaneProducts::SourceStatsRecord older;
@@ -1495,8 +1503,19 @@ namespace Vpv
 					recs.push_back(older);
 					--oldest;
 					if (entryEndingAt(oldest, recs.back(), start))
+					{
+						joined = true;
 						break;
+					}
 				}
+				// Exact when the walk joined a ring entry or reached the stream's first frame (nothing earlier to know); else reduced evidence.
+				if (joined || oldest <= 1)
+				{
+					if (seq > 2)
+						st.sceneRunRebuilt.fetch_add(1, std::memory_order_relaxed);
+				}
+				else
+					st.sceneRunReduced.fetch_add(1, std::memory_order_relaxed);
 				run = start;
 				for (size_t i = recs.size() - 1; i > 0; --i)
 				{
@@ -1789,6 +1808,8 @@ namespace Vpv
 				c.storeReads = st->sceneStoreReads.load(std::memory_order_relaxed);
 				c.liveFills = st->sceneLiveFills.load(std::memory_order_relaxed);
 				c.cacheHits = st->sceneCacheHits.load(std::memory_order_relaxed);
+				c.fadeRunRebuilt = st->sceneRunRebuilt.load(std::memory_order_relaxed);
+				c.fadeRunReduced = st->sceneRunReduced.load(std::memory_order_relaxed);
 				c.unknown = st->sceneUnknown.load(std::memory_order_relaxed);
 				c.confirmed = st->sceneConfirmed.load(std::memory_order_relaxed);
 				c.provisional = st->sceneProvisional.load(std::memory_order_relaxed);
@@ -2707,6 +2728,14 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				if (PassTimers::Inbox::Motion().Posted() != 0 || PassTimers::Inbox::Motion().Dropped() != 0)
 					full.push_back("Skeleton cost rows: " + std::to_string(PassTimers::Inbox::Motion().Posted()) + " posted, " +
 						std::to_string(PassTimers::Inbox::Motion().Dropped()) + " dropped (the queue is bounded; with nobody draining it the oldest is dropped)");   // MV7: the producers' posted timings (also drained into the pass-timer readout by the host)
+			}
+			{
+				const uint64_t rebuilt = st.sceneRunRebuilt.load(std::memory_order_relaxed);
+				const uint64_t reduced = st.sceneRunReduced.load(std::memory_order_relaxed);
+				if (rebuilt != 0 || reduced != 0)
+					full.push_back("Skeleton scene: U7 fade run missing for " + std::to_string(rebuilt + reduced) + " frame(s): " +
+						std::to_string(rebuilt) + " rebuilt exactly from older P4 records, " + std::to_string(reduced) +
+						" with REDUCED evidence (the older records had left the lane ring; a slow fade there is found later)");
 			}
 			full.push_back("Skeleton: " + std::to_string(st.frames) + " frames, " + std::to_string(st.srcFrames.load(std::memory_order_relaxed)) +
 				" source frames tapped, " + std::to_string(st.dropsApplied) + " drops applied, " + std::to_string(st.gapsRun) +
