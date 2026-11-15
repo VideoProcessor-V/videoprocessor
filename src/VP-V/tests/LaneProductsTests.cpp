@@ -879,5 +879,54 @@ namespace HalfLumaUnitTestsNs
 			Assert::IsTrue(GlslMean4() == std::string("float vpu_half_luma_mean4(float a, float b, float c, float d)\n{\n"
 				"    return (a + b + c + d) * 0.25;\n}\n"), L"the mean-only entry: same order and mean");
 		}
+
+		// U3 one copy (owner 2026-11-15, 102b U3-BOX4-VARIANT): the 4x4 variant takes over the three private 4x4 copies
+		// (output-domain search LUMAQ tile + LUMAC, matcher PYRAMID_BODY). Each emitted text must be byte-identical to the
+		// body it replaced (frozen here from e95832a0c), so the compiled shaders are unchanged. The sigma-delta passes are
+		// also pinned whole by OutputDomainSearchTests' b5ae6eda5 golden.
+		TEST_METHOD(Box4x4VariantIsByteIdenticalToTheFormerPrivateCopies)
+		{
+			using namespace VpUnit::HalfLuma;
+			// DejudderWarp.cpp PYRAMID_BODY at e95832a0c.
+			const std::string oldPyramid = std::string("\n"
+				"ivec2 p = ivec2(gl_GlobalInvocationID.xy);\n"
+				"ivec2 size = imageSize(dst);\n"
+				"if (p.x < size.x && p.y < size.y) {\n"
+				"    ivec2 src_size = textureSize(src, 0);\n"
+				"    float sum = 0.0;\n"
+				"    for (int y = 0; y < 4; y++)\n"
+				"        for (int x = 0; x < 4; x++)\n"
+				"            sum += texelFetch(src, min(p * 4 + ivec2(x, y), src_size - ivec2(1)), 0).r;\n"
+				"    imageStore(dst, p, vec4(sum / 16.0, 0.0, 0.0, 1.0));\n"
+				"}\n");
+			Assert::IsTrue(GlslBox4x4LevelBody() == oldPyramid, L"the matcher's pyramid step text unchanged by the move");
+			// OutputDomainSearchGlsl.h LUMAC loop at e95832a0c.
+			const std::string oldCoarse = std::string("    float sum = 0.0;\n"
+				"    for (int y = 0; y < 4; y++)\n"
+				"        for (int x = 0; x < 4; x++)\n"
+				"            sum += (LUMAQ_mul * texelFetch(LUMAQ_raw, min(pos * 4 + ivec2(x, y), lq - ivec2(1)), 0)).r;\n");
+			Assert::IsTrue(GlslBox4x4Sum("    ", "(LUMAQ_mul * " + GlslBox4x4Fetch("LUMAQ_raw", "pos", "lq") + ").r") == oldCoarse,
+				L"the LUMAC loop text unchanged by the move");
+			// OutputDomainSearchGlsl.h LUMAQ tile at e95832a0c.
+			Assert::IsTrue(GlslBox4x4TileDecl() == std::string("shared float lq_tile_[4096];\n"), L"the LUMAQ tile declaration");
+			const std::string oldLoad = std::string("    ivec2 base = ivec2(gl_WorkGroupID.xy) * 64;\n"
+				"    for (int k = 0; k < 16; k++) {\n"
+				"        int idx = int(gl_LocalInvocationIndex) + k * 256;\n"
+				"        ivec2 p = min(base + ivec2(idx % 64, idx / 64), full - ivec2(1));\n"
+				"        vec3 c = (HOOKED_mul * texelFetch(HOOKED_raw, p, 0)).rgb * scale;\n"
+				"        lq_tile_[idx] = dot(c, vec3(0.2126, 0.7152, 0.0722));\n"
+				"    }\n"
+				"    memoryBarrierShared();\n"
+				"    barrier();\n");
+			Assert::IsTrue(GlslBox4x4TileLoad("full", "        vec3 c = (HOOKED_mul * texelFetch(HOOKED_raw, p, 0)).rgb * scale;\n",
+				"dot(c, vec3(0.2126, 0.7152, 0.0722))") == oldLoad, L"the LUMAQ tile sweep text unchanged by the move");
+			const std::string oldTileSum = std::string("        ivec2 local = ivec2(gl_LocalInvocationID.xy) * 4;\n"
+				"        float sum = 0.0;\n"
+				"        for (int y = 0; y < 4; y++)\n"
+				"            for (int x = 0; x < 4; x++)\n"
+				"                sum += lq_tile_[(local.y + y) * 64 + local.x + x];\n");
+			Assert::IsTrue(GlslBox4x4TileSum("        ") == oldTileSum, L"the LUMAQ tile sum text unchanged by the move");
+			Assert::AreEqual(std::string("sum / 16.0"), std::string(kGlslBox4x4Mean), L"the finish: sum / 16.0");
+		}
 	};
 }

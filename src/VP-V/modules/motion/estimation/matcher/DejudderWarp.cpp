@@ -108,19 +108,14 @@ if (b.x < blocks.x && b.y < blocks.y) {
 }
 )GLSL";
 
-		// One pyramid step: a 4x4 average (half -> 1/8, 1/8 -> 1/32 source).
-		const char* const PYRAMID_BODY = R"GLSL(
-ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-ivec2 size = imageSize(dst);
-if (p.x < size.x && p.y < size.y) {
-    ivec2 src_size = textureSize(src, 0);
-    float sum = 0.0;
-    for (int y = 0; y < 4; y++)
-        for (int x = 0; x < 4; x++)
-            sum += texelFetch(src, min(p * 4 + ivec2(x, y), src_size - ivec2(1)), 0).r;
-    imageStore(dst, p, vec4(sum / 16.0, 0.0, 0.0, 1.0));
-}
-)GLSL";
+		// One pyramid step (half -> 1/8, 1/8 -> 1/32 source): the shared unit U3's 4x4 variant level body
+		// (VpUnit::HalfLuma::GlslBox4x4LevelBody, U3 one copy, owner 2026-11-15), byte-identical to the former private
+		// body (HalfLumaUnitTests pins it).
+		const std::string& PyramidBody()
+		{
+			static const std::string body = VpUnit::HalfLuma::GlslBox4x4LevelBody();
+			return body;
+		}
 
 		// Block search from -> to on half-resolution luma. The vector v says
 		// where the block's content is in `to`: from(p) ~ to(p + v).
@@ -2717,9 +2712,9 @@ if (q.x < size.x && q.y < size.y) {
 	{
 		const pl_shader_desc second[2] = { Sampled("src", half, false), Storage("dst", l1) };
 		const pl_shader_desc third[2] = { Sampled("src", l1, false), Storage("dst", l2) };
-		return (from >= 1 || levels < 1 || Dispatch("VideoProcessor de-judder: luma pyramid 1/8", nullptr, PYRAMID_BODY,
+		return (from >= 1 || levels < 1 || Dispatch("VideoProcessor de-judder: luma pyramid 1/8", nullptr, PyramidBody().c_str(),
 				second, 2, nullptr, 0, l1W, l1H, 8)) &&
-			(from >= 2 || levels < 2 || Dispatch("VideoProcessor de-judder: luma pyramid 1/32", nullptr, PYRAMID_BODY,
+			(from >= 2 || levels < 2 || Dispatch("VideoProcessor de-judder: luma pyramid 1/32", nullptr, PyramidBody().c_str(),
 				third, 2, nullptr, 0, l2W, l2H, 8));
 	}
 
