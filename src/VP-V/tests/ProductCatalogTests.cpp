@@ -17,6 +17,7 @@
 #include <VP-V/modules/input/source_analysis/identity/SourceGeometryProduct.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdProduct.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
+#include <VP-V/modules/input/source_analysis/focus_map/FocusMap.h>
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
@@ -186,12 +187,17 @@ namespace ProductCatalogTestsNs
 				{ kTdDelta, "temporal detail" },
 				{ kTdMaps, "temporal detail" },
 				{ kTdTrailSummary, "temporal detail" },
+				// L-FOCUS (C3 fixed id 32): the focus map's first reader is the declared temporal-detail read path (row 29, repair 24, family
+				// "temporal detail"); the edge map's first reader is the focus map screen pass (row 28, repair 23; FOCUS-EDGEMAP-SWITCH).
+				{ kEdgeMap, "focus map (screen pass)" },
+				{ kFocusMap, "temporal detail" },
 			};
 			const Registry reg = SkeletonProducts();
-			Assert::AreEqual(size_t(kSkeletonProductEnd) - kReservedProductCount - 5u, sizeof(expected) / sizeof(expected[0]),
-				L"every product but the matcher pair, the two held-state records (source identity, source geometry), the causal quality pattern and the edge map (no catalog reader row yet; L-B5 owner fill only) has an expectation");
-			// kEdgeMap is exempt above because no catalog reader row declares it yet (L-B5 owner fill only): pin that state.
-			Assert::IsNull(LiveFillOwner(kEdgeMap), L"kEdgeMap has no live-fill owner until a reader row is declared; then give it an expectation and drop the exemption");
+			// WAIVER-JOB1FOCUS-C3: End 35 - 3 reserved (30, 33, 34; focus_map 32 declared) - 4 exempt = 28 rows (C3's 26 + edge map + focus map).
+			Assert::AreEqual(size_t(kSkeletonProductEnd) - kReservedProductCount - 4u, sizeof(expected) / sizeof(expected[0]),
+				L"every product but the matcher pair, the two held-state records (source identity, source geometry) and the causal quality pattern has an expectation");
+			// kEdgeMap's exemption is dropped as its C3 pin said ("then give it an expectation"): the focus map declares the reader row.
+			Assert::IsNotNull(LiveFillOwner(kEdgeMap), L"kEdgeMap has a live-fill owner: the focus map screen pass reads it");
 			// The causal quality pattern is a substitute (read as P15 by its declared id): nobody reads it by its own id.
 			Assert::IsNull(LiveFillOwner(kQualityPatternCausal));
 			for (const Expect& e : expected) {
@@ -220,7 +226,8 @@ namespace ProductCatalogTestsNs
 			for (const ProductDecl& d : reg.All())
 				if (ConsumersOf(d.id).empty() && d.backend != Backend::RenderOnly)
 					++unread;
-			Assert::AreEqual(size_t(3) + kReservedProductCount, unread, L"the matcher pair, the causal quality pattern (substitutes read by the declared id), the edge map (no reader row yet) and the reserved absent slots of the fixed id table");
+			// WAIVER-JOB1FOCUS-C3: 2 + 3 reserved = 5 (C3: 3 + 4 = 7; the edge map and the focus map now have reader rows, focus_map left the reserved set).
+			Assert::AreEqual(size_t(2) + kReservedProductCount, unread, L"the matcher pair, the causal quality pattern (substitutes read by the declared id) and the reserved absent slots of the fixed id table");
 
 			// Over the ACTIVE consumers: with the temporal-detail camera row off, P7's owner is the next lag-0 reader.
 			std::vector<uint16_t> active;
@@ -401,6 +408,7 @@ namespace ProductCatalogTestsNs
 				{ kTdAdmission, TdProducts::kUnitVersion },
 				{ kSourceIdentity, SourceIdentity::kUnitVersion },
 				{ kSourceGeometry, SourceGeometry::kUnitVersion },
+				{ kFocusMap, FocusMap::kUnitVersion },   // L-FOCUS (fixed id 32): v2 = the edge law (FOCUS-EDGEMAP-SWITCH)
 				{ kP10GrainSplit, GrainSplit::kUnitVersion }, { kP10cGrainSplitChroma, GrainSplit::kUnitVersion },
 			};
 			for (const Pair& p : pairs) {

@@ -212,7 +212,9 @@ namespace VideoProcessorTest
 				Assert::IsTrue(a.status == AcquireStatus::FilledAtRead && a.cpuBytes == g.Blocks() * kBytesPerBlock, L"the map is built and published");
 				const AcquireResult b = m.Acquire(kFocusMap, 5, AcquireForm::Cpu);
 				Assert::IsTrue(b.status == AcquireStatus::Reused && a.cpu == b.cpu, L"the second reader reuses the one map");
-				Check(p11Calls == 2 && p10Calls == 1 && p2Calls == 1 && p7Calls == 1,
+				// WAIVER-JOB1FOCUS-C3 (audit SHOULD 4): P10 is a declared edge only, never Acquired (P11's N = -1 carries "no split"), so its
+				// full CPU form is not forced: p10 0 (was 1). Every Acquired input is still built exactly once.
+				Check(p11Calls == 2 && p10Calls == 0 && p2Calls == 1 && p7Calls == 1,
 					"every input built once: p11 " + std::to_string(p11Calls.load()) + " (frame + previous), p10 " + std::to_string(p10Calls.load()) + ", p2 "
 					+ std::to_string(p2Calls.load()) + ", p7 " + std::to_string(p7Calls.load()));
 				Assert::IsTrue(m.CountersOf(kFocusMap).ownerFillCalls == 1 && m.CountersOf(kFocusMap).filledAtRead == 1 && m.CountersOf(kFocusMap).reusedMemo == 1);
@@ -229,7 +231,7 @@ namespace VideoProcessorTest
 				// The next frame reuses frame 5's P11 (its previous frame): one more P11 build, none for 5.
 				const AcquireResult c = m.Acquire(kFocusMap, 6, AcquireForm::Cpu);
 				Assert::IsTrue(c.Ok());
-				Check(p11Calls == 3 && p10Calls == 2 && p2Calls == 2 && p7Calls == 2, "the next frame builds only its own inputs: p11 " + std::to_string(p11Calls.load()));
+				Check(p11Calls == 3 && p10Calls == 0 && p2Calls == 2 && p7Calls == 2, "the next frame builds only its own inputs: p11 " + std::to_string(p11Calls.load()));   // WAIVER-JOB1FOCUS-C3: p10 0 (was 2), SHOULD 4
 				int sharper = 0;
 				for (size_t i = 0; i < g.Blocks(); ++i) sharper += (Unpack(c.cpu + i * kBytesPerBlock).flags & kSharper) ? 1 : 0;
 				Check(sharper == 8 * 12, "the focus returning is flagged sharper");

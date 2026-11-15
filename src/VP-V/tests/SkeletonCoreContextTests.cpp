@@ -1101,8 +1101,8 @@ namespace SkeletonCoreContextTestsNs
 			}
 		}
 	};
-	// R14-97 M3: the reserved ids of the fixed product-id table (30 band_memo, 32 focus_map, 33 room_light, 34 composed_vectors) are ABSENT
-	// slots: no declaration, no reads, fail closed everywhere a name could reach them.
+	// R14-97 M3: the reserved ids of the fixed product-id table (30 band_memo, 33 room_light, 34 composed_vectors; 32 focus_map has landed,
+	// L-FOCUS) are ABSENT slots: no declaration, no reads, fail closed everywhere a name could reach them.
 	TEST_CLASS(ReservedProductIdTests)
 	{
 	public:
@@ -1112,7 +1112,8 @@ namespace SkeletonCoreContextTestsNs
 			const char* why = "";
 			Assert::IsTrue(reg.Validate(&why), L"valid with absent slots");
 			Assert::IsTrue(reg.Size() == size_t(kSkeletonProductEnd), L"Size() is the id span");
-			Assert::IsTrue(reg.ReservedAbsent() == 4u && kReservedProductCount == 4u, L"four reserved slots");
+			// WAIVER-JOB1FOCUS-C3: four -> three reserved slots (focus_map 32 is declared by L-FOCUS); the name keeps C3's wording.
+			Assert::IsTrue(reg.ReservedAbsent() == 3u && kReservedProductCount == 3u, L"three reserved slots");
 			for (ProductId id : kReservedProductIds)
 			{
 				Assert::IsTrue(IsReservedProduct(id) && !reg.Has(id), L"absent: Has() is false");
@@ -1120,6 +1121,7 @@ namespace SkeletonCoreContextTestsNs
 				Assert::IsTrue(ReservedProductName(id)[0] != '\0', L"named");
 			}
 			Assert::IsTrue(reg.Has(kEdgeMap) && kEdgeMap == 31, L"edge_map keeps the fixed id 31");
+			Assert::IsTrue(reg.Has(kFocusMap) && kFocusMap == 32 && !IsReservedProduct(kFocusMap), L"focus_map is declared at the fixed id 32");
 		}
 
 		TEST_METHOD(ARealDeclarationAtAReservedIdIsRejected)
@@ -1134,7 +1136,7 @@ namespace SkeletonCoreContextTestsNs
 		TEST_METHOD(AnInputNamingAReservedIdIsRejected)
 		{
 			std::vector<ProductDecl> d = SkeletonProducts().All();
-			detail::AddInput(d[kP4SourceStats], kFocusMap, 0);
+			detail::AddInput(d[kP4SourceStats], kComposedVectors, 0);   // WAIVER-JOB1FOCUS-C3: kFocusMap is no longer reserved; 34 still is
 			const char* why = "";
 			Assert::IsFalse(Registry(d).Validate(&why), L"an input naming an absent slot fails closed");
 			Assert::IsTrue(std::string(why).find("unknown input") != std::string::npos, L"unknown input product");
