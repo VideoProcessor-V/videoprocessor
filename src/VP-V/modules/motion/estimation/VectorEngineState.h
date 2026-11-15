@@ -50,13 +50,14 @@ namespace VpMotion
 		// default-constructed Decision. Render thread.
 		VectorDemand::Decision vectorDemand;
 		std::atomic<int> queueAheadCapacity{ 0 };         // frames the queue holds after the current one (queue pass)
-		std::atomic<bool> motionAheadBackward{ false };   // backward pairs: the producer is fed the current frame
+		// Batch B fold: motionAheadBackward (the producer fed the current frame for backward pairs) and the backward pair counter are
+		// retired with the backward pairs (competitive low latency is motion-free).
 		std::string vectorEngineLogged;
-		int vectorDeliveredLogged = -1;
+		int vectorDeliveredLogged = -1;                   // NoteVectorsDelivered: -1 not yet, 0 logged
 		int vectorDitherKeyLogged = -1;
-		unsigned long long vectorPairs = 0, vectorBackwardPairs = 0;
+		unsigned long long vectorPairs = 0;
 		ULONGLONG vectorStatsTick = 0;
-		uint64_t vectorBackwardSequence = 0;
+		uint64_t vectorStatsSequence = 0;                 // the last source frame ServeStatistics served the statistics consumers for
 		bool vectorGlobalMissSustained = false;
 		unsigned vectorGlobalMisses = 0;
 		unsigned vectorGlobalHits = 0;

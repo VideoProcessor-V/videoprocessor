@@ -89,7 +89,7 @@ namespace VpMotion
 		// Owner 2026-10-16: the producer stays alive once wanted (starting it again would cost a device on
 		// every queue refill); with no frames queued ahead it gets no frames, so it computes nothing it
 		// could not use - the startup fill and an emptied queue alike.
-		// Vector engine on demand: also while a consumer of vectors is served (forward, or backward pairs).
+		// Vector engine on demand: also while a consumer of vectors is served (forward; the backward pairs are retired).
 		life.vectorProducer = vectorDemand.producer;
 		life.vectorLowLatencyAllowed = vectorDemand.lowLatencyAllowed;
 		motionLowLatencyNoVectors = life.lowLatency && !vectorDemand.lowLatencyAllowed;
@@ -240,7 +240,6 @@ namespace VpMotion
 		depth.generalRateFixes = in.generalRateFixes;
 		depth.sourceHz = in.sourceHz;
 		depth.vectorLowLatencyAllowed = vectorDemand.lowLatencyAllowed;
-		depth.vectorBackward = vectorDemand.mode == VectorDemand::Mode::Backward;
 		depth.vectorProducer = vectorDemand.producer;
 		depth.dejudderEstimating = in.dejudderEstimating;
 		// SK-MV: the standing demand while the de-judder is enabled AND eligible (DejudderPolicy::CanEngage). The estimating reasons
@@ -253,7 +252,6 @@ namespace VpMotion
 		const ProducerPlan::DepthOutput plan = ProducerPlan::Depth(depth);
 		const MotionAhead::Decision& ahead = plan.ahead;
 		motionAheadDepth.store(plan.storedDepth, std::memory_order_release);
-		motionAheadBackward.store(plan.storedBackward, std::memory_order_release);
 		motionAheadConfigured.store(plan.storedConfigured, std::memory_order_release);
 		if (motionProducer)   // fixed-constant batch B3/B4 2026-10-18
 		{
@@ -298,7 +296,7 @@ namespace VpMotion
 			(motionProducerStartRetry.Recovering() && now < motionProducerStartRetry.RetryAtMs()));
 		// Batch B (plan-motion-engine-switch.md (b)): optical-flow pairs are EXPECTED when the optical-flow producer is configured and
 		// has not failed to start (previous-frame facts: the planner's motion_ahead_frames, -1 = not planned yet = expected). With none
-		// expected the field consumers use the matcher fallback and the statistics consumers are named unserved (VectorDemand::Decide).
+		// expected the field consumers use the matcher fallback and the statistics consumers are named unserved (VectorDemand::DecideForHost).
 		VectorDemand::Input decided = input;
 		decided.pairsExpected = facts.opticalFlow && !motionProducerStartFailed && !motionEngineFacts.producerRecovering &&
 			motionAheadSetting != 0;
@@ -307,7 +305,7 @@ namespace VpMotion
 		{
 			decided.wants[cameraFit] = !motionCameraGated;   // the camera fit asked for the field: one more consumer of the same decision
 		}
-		vectorDemand = VectorDemand::DecideForHost(decided);   // smooth motion and competitive low latency: Off with the reason (plan (b)/(d4))
+		vectorDemand = VectorDemand::DecideForHost(decided);   // the one decision; smooth motion and competitive low latency: Off with the reason (plan (b)/(d4))
 		// W2-C1: the engine state is derived from this decision (batch B: no starter gate, no refused starts).
 		motionEngineFacts.vectorDemand = facts.vectorDemandSetting;
 		motionEngineFacts.decision = vectorDemand;
@@ -378,8 +376,8 @@ namespace VpMotion
 		if (vectorDemand.mode != VectorDemand::Mode::Off && (vectorStatsTick == 0 || now - vectorStatsTick >= 5000))
 		{
 			vectorStatsTick = now;
-			DebugLog::Log("Vector engine: %llu pairs (ahead hits %llu, misses %llu, backward %llu)", vectorPairs,
-				static_cast<unsigned long long>(motionAheadHits), static_cast<unsigned long long>(motionAheadMisses), vectorBackwardPairs);
+			DebugLog::Log("Vector engine: %llu pairs (ahead hits %llu, misses %llu)", vectorPairs,
+				static_cast<unsigned long long>(motionAheadHits), static_cast<unsigned long long>(motionAheadMisses));
 			const FlowReadCounters fr = FlowReads();   // a CPU flow reader exists (FlowOf): its absences are visible, by reason
 			if (fr.requests)
 				DebugLog::Log("Vector engine: flow reads %llu, served %llu, absent %llu (no producer %llu, no pair %llu, invalidated %llu, size unknown %llu)",
@@ -400,13 +398,12 @@ namespace VpMotion
 		else { ++vectorGlobalMisses; vectorGlobalHits = 0; if (vectorGlobalMisses >= kRun) vectorGlobalMissSustained = true; }
 	}
 
-	void VectorEngine::NoteVectorsDelivered(bool backward, const char* source)
+	void VectorEngine::NoteVectorsDelivered(const char* source)
 	{
-		const int mode = backward ? 1 : 0;
-		if (vectorDeliveredLogged == mode)
+		if (vectorDeliveredLogged == 0)
 			return;
-		vectorDeliveredLogged = mode;
-		DebugLog::Log("Vector engine: vectors delivered (%s, source %s)", backward ? "backward" : "forward", source);
+		vectorDeliveredLogged = 0;
+		DebugLog::Log("Vector engine: vectors delivered (forward, source %s)", source);
 	}
 
 	void VectorEngine::SizeFor(bool lowResSearch, int width, int height, int& engineW, int& engineH, int& halvings)
@@ -420,51 +417,38 @@ namespace VpMotion
 	void VectorEngine::ServeStatistics(uint64_t sequence, uint64_t nextSequence, int width, int height, const ServeFacts& facts,
 		IVectorEngineHost& host)
 	{
-		const bool backward = vectorDemand.mode == VectorDemand::Mode::Backward;
+		// Batch B fold: the forward statistics service only (the backward leg of competitive low latency is retired: competitive is
+		// motion-free, VectorDemand::DecideForHost never decides a backward mode).
 		const bool forwardStats = vectorDemand.mode == VectorDemand::Mode::Forward && !vectorDemand.estimate && !facts.legacyConsumer &&
 			(vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan) || vectorDemand.Serves(VectorDemand::Consumer::MotionIntent));
-		if ((!backward && !forwardStats) || !motionProducer || !motionProducer->Running() ||
-			sequence == 0 || sequence == vectorBackwardSequence)
+		if (!forwardStats || !motionProducer || !motionProducer->Running() ||
+			sequence == 0 || sequence == vectorStatsSequence)
 			return;
-		vectorBackwardSequence = sequence;
+		vectorStatsSequence = sequence;
 		int engineW = 0, engineH = 0, halvings = 0;
 		SizeFor(facts.lowResSearch, width, height, engineW, engineH, halvings);
 		NoteFlowSourceWidth(width);
 		motionProducer->SetTargetSize(engineW, engineH);
 		MotionAhead::FlowPtr flow;
-		uint64_t from = 0, to = 0;
-		if (forwardStats)
-		{
-			from = sequence;
-			to = nextSequence;
-			if (nextSequence == sequence + 1 &&
-				motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))   // W1-C2a A1 / S2
-				flow = FindCurrent(from, to);   // C2a-F 2: never a pair of another stream generation
-			NoteGlobalPair(flow != nullptr);
-		}
-		else
-			for (int age = 0; age < 2 && !flow && sequence > static_cast<uint64_t>(age + 1); ++age)
-			{
-				from = sequence - 1 - age;
-				to = sequence - age;
-				if (motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))   // W1-C2a A1 / S2
-					flow = FindCurrent(from, to);   // C2a-F 2
-			}
+		const uint64_t from = sequence, to = nextSequence;
+		if (nextSequence == sequence + 1 &&
+			motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))   // W1-C2a A1 / S2
+			flow = FindCurrent(from, to);   // C2a-F 2: never a pair of another stream generation
+		NoteGlobalPair(flow != nullptr);
 		// SK-MV row 24: the frame-analysis record carries the shared engine's global, or "absent" (never a stale value). The store is
 		// null while frame_analysis_store is off / the Original pathway runs.
 		FrameAnalysis::Store* const recordStore = host_ ? VpFrameAnalysis::SourceFrameTap::StoreFor(host_) : nullptr;
 		if (!flow)
 		{
 			++motionAheadMisses;
-			if (recordStore && (!forwardStats || nextSequence > sequence))
-				MotionRecord::Publish(recordStore, forwardStats ? nextSequence : sequence, MotionRecord::Absent());
-			P2().Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
+			if (recordStore && nextSequence > sequence)
+				MotionRecord::Publish(recordStore, nextSequence, MotionRecord::Absent());
+			P2().Prune(sequence);
 			return;
 		}
 		++motionAheadHits;
-		if (backward) ++vectorBackwardPairs;
 		++vectorPairs;
-		NoteVectorsDelivered(backward, backward ? "engine" : "engine ahead");
+		NoteVectorsDelivered("engine ahead");
 		// W1-C4: the pair's ONE sample, read by the record and by the one feed (MotionRecordPublish.h).
 		const MotionRecord::PairSample sample = MotionRecord::SampleOf(from, to, flow->global[0], halvings, facts.pictureHeight);
 		if (recordStore)
@@ -472,10 +456,7 @@ namespace VpMotion
 				motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()), sample));   // W1-C2a A1 / S2
 		MotionRecord::Feed(sample, vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan),
 			vectorDemand.Serves(VectorDemand::Consumer::MotionIntent), host);
-		if (backward && facts.vectorDeliveryRuns)
-			motionSegment.Publish(VpMotion::Direction::Backward, from, to, MotionShadowField{ from, to },
-				VpMotion::Source::EngineAhead, motionValidity.Epoch(), 0, false);
-		P2().Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
+		P2().Prune(sequence);
 	}
 
 	void VectorEngine::MotionShadowCheck(bool deliveryRuns, uint64_t sequence, uint64_t nextSequence, bool hostLive)

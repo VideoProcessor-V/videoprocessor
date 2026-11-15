@@ -13,12 +13,13 @@
 // Synthesis consumers (de-judder extras, interpolator, hiccup repair, occlusion mask) have their
 // own policies; they only count as "wants" here and are never in served / unserved.
 //
-// Libplacebo smooth motion (owner 2026-11-12 18:47): the host acts on DecideForHost, where smooth motion owns output exclusively
-// (every non-synthesis consumer goes visibly without vectors, no producer). Decide() keeps the older analysis-under-smooth-motion
-// semantics (kAnalysisUnderSmoothMotion) for the pure decision tests only. Competitive low latency is motion-free in the host too.
+// ONE decision, DecideForHost: the engine host acts on it (VectorEngine::UpdateVectorEngine) and the pure tests pin the same
+// function. Libplacebo smooth motion owns output exclusively (owner 2026-11-12 18:47: every non-synthesis consumer goes visibly
+// without vectors, no producer) and competitive low latency is motion-free. Batch B fold (gate-union-b1 (i), owner 2026-11-15): the
+// older Decide() semantics are retired with it (kAnalysisUnderSmoothMotion: source analysis kept under smooth motion; Mode::Backward:
+// backward pairs at queue depth 0).
 namespace VectorDemand
 {
-	constexpr bool kAnalysisUnderSmoothMotion = true;
 	constexpr unsigned kUnitVersion = 1;   // P2/P3 (vector pair, analysis field) unit version (core/ProductCatalog.h)
 
 	enum class Consumer : int
@@ -82,10 +83,12 @@ namespace VectorDemand
 		return "?";
 	}
 
-	enum class Mode { Off, Forward, Backward };
+	// Batch B fold: Backward (the backward pairs of competitive low latency) is retired with them; Off and Forward keep their values.
+	enum class Mode { Off, Forward };
 	// W2-C1 (B9): NoStarter appended (no index moved). Batch B (motion engine switch): the starter gate is retired, so NoStarter is
 	// retired, never derived; the value stays (append-only enum, tests and logs name it). NoPairs appended: statistics consumers
-	// without optical-flow pairs (the matcher cannot make their whole-frame global).
+	// without optical-flow pairs (the matcher cannot make their whole-frame global). BackwardDepth0 (the name is historical; no index
+	// moves): competitive low latency, no frame ahead: motion-free since the fold (mode Off, every consumer unserved).
 	enum class Reason { Disabled, SlotsOff, NoConsumer, Interlaced, SmoothMotionExclusive, Forward, ForwardShallow, BackwardDepth0, NoStarter, NoPairs };
 
 	// The motion engine is ONE ON/OFF switch (vector_demand, default ON; lead18 plan-motion-engine-switch.md). ON: every consumer that
@@ -139,7 +142,13 @@ namespace VectorDemand
 	// The consumer whose render-time matcher estimate runs even with pairs expected (its own P3 field): the camera fit.
 	inline unsigned MatcherFieldMask() { return 1u << static_cast<int>(Consumer::CameraFit); }
 
-	inline Decision DecideWith(const Input& in, bool analysisUnderSmoothMotion)
+	// THE decision (batch B fold, gate-union-b1 (i)): the engine host acts on it and the pure tests pin it (VectorDemandTests).
+	// Libplacebo smooth motion owns output exclusively (plan (b)/(d4); owner 2026-11-12 18:47: VP's engine stays off and the dither
+	// uses its own visible fallback search): every non-synthesis consumer unserved, no producer. Competitive low latency (no frame
+	// ahead, queue capacity 0) is motion-free (doc 91 C / register 115 G6, WAIVER-C1-08): every consumer unserved with its reason,
+	// mode Off and lowLatencyAllowed false, so DeriveEngineStatus reports hard Off / LowLatency. Every decision equals the host's
+	// before the fold (exclusive smooth motion; the competitive backward decision turned Off), field for field.
+	inline Decision DecideForHost(const Input& in)
 	{
 		Decision d;
 		d.pairsDeliberatelyOff = in.pairsDeliberatelyOff;
@@ -174,25 +183,14 @@ namespace VectorDemand
 			d.reason = Reason::Interlaced;
 			return d;
 		}
-		unsigned served = wanted;
+		// Libplacebo smooth motion owns output exclusively: every non-synthesis consumer goes visibly without vectors, nothing starts.
 		if (in.smoothMotion)
 		{
-			if (!analysisUnderSmoothMotion)
-			{
-				d.unserved = wanted;
-				d.reason = Reason::SmoothMotionExclusive;
-				return d;
-			}
-			for (int i = 0; i < kConsumerCount; ++i)
-				if ((wanted & (1u << i)) != 0 && DomainOf(ConsumerAt(i)) == Domain::Output)
-					served &= ~(1u << i);
-			d.unserved = wanted & ~served;
-			if (served == 0)
-			{
-				d.reason = Reason::SmoothMotionExclusive;
-				return d;
-			}
+			d.unserved = wanted;
+			d.reason = Reason::SmoothMotionExclusive;
+			return d;
 		}
+		unsigned served = wanted;
 		// No optical-flow pairs expected (optical flow off, producer start failed or recovering): the statistics consumers read the
 		// global of a producer pair, which the matcher cannot make. They go visibly without vectors; the others fall back to the matcher.
 		unsigned statsServed = 0;
@@ -210,19 +208,14 @@ namespace VectorDemand
 				return d;
 			}
 		}
-		// Low latency (owner 2026-11-01): vectors never ADD queue depth. A mode that queues no frame ahead
-		// (competitive, capacity 0) runs backward pairs; a mode whose own queue holds frames ahead (games,
-		// capacity >= 1) uses those already-queued frames (ForwardShallow, EngageAhead bounded by the capacity).
+		// Low latency (owner 2026-11-01): vectors never ADD queue depth. A mode that queues no frame ahead (competitive, capacity 0)
+		// is motion-free: every consumer still served here goes visibly without vectors (mode Off, served 0, no producer, no estimate,
+		// lowLatencyAllowed false). A mode whose own queue holds frames ahead (games, capacity >= 1) uses those already-queued frames
+		// (ForwardShallow, EngageAhead bounded by the capacity).
 		if (in.lowLatency && in.queueAheadCapacity == 0)
 		{
-			const unsigned stats = served & statsServed;
-			d.unserved |= served & ~stats;
-			d.served = stats;
-			d.mode = Mode::Backward;
+			d.unserved |= served;
 			d.reason = Reason::BackwardDepth0;
-			d.producer = stats != 0;   // the backward pair serves the statistics consumers: it runs while any is served
-			d.estimate = false;
-			d.lowLatencyAllowed = true;
 			return d;
 		}
 		d.served = served;
@@ -246,28 +239,6 @@ namespace VectorDemand
 		return d;
 	}
 
-	inline Decision Decide(const Input& in) { return DecideWith(in, kAnalysisUnderSmoothMotion); }
-
-	// The decision the engine HOST acts on (batch B plan (b)/(d4); owner 2026-11-12 18:47). Libplacebo smooth motion owns output
-	// exclusively (DecideWith(.., false): every non-synthesis consumer unserved, no producer), and competitive low latency (no frame
-	// ahead, queue capacity 0) is motion-free: the backward pair is not run, the consumers go visibly without vectors, mode Off and
-	// lowLatencyAllowed false so DeriveEngineStatus reports hard Off / LowLatency. Decide() above keeps the older analysis-under-smooth-
-	// motion and backward-pair semantics for the pure tests; the host never calls it.
-	inline Decision DecideForHost(const Input& in)
-	{
-		Decision d = DecideWith(in, false);
-		if (d.mode == Mode::Backward)
-		{
-			d.unserved |= d.served;
-			d.served = 0;
-			d.mode = Mode::Off;
-			d.producer = false;
-			d.estimate = false;
-			d.lowLatencyAllowed = false;
-		}
-		return d;
-	}
-
 	// The look-ahead depth the engine engages at: the configured depth bounded by the queue's
 	// capacity, at least one frame.
 	inline int EngageAhead(int configured, int queueAheadCapacity)
@@ -278,16 +249,18 @@ namespace VectorDemand
 		return bounded > 1 ? bounded : 1;
 	}
 
-	// Why a consumer the engine cannot serve goes without vectors.
+	// Why a consumer the engine cannot serve goes without vectors. DecideForHost leaves one unserved for exactly these causes:
+	// interlaced, no optical-flow pairs, smooth motion (exclusive), competitive low latency (Reason::BackwardDepth0).
 	inline const char* UnservedWhy(const Decision& d, Consumer c)
 	{
 		if (d.reason == Reason::Interlaced)
 			return "interlaced";
 		if ((d.noPairs & (1u << static_cast<int>(c))) != 0)
 			return "no optical-flow pairs (optical flow off or not running)";
-		if (d.smoothMotion && (d.reason == Reason::SmoothMotionExclusive || DomainOf(c) == Domain::Output))
+		if (d.reason == Reason::SmoothMotionExclusive)
 			return "libplacebo smooth motion owns output";
-		return "needs a frame ahead";
+		// Competitive low latency is motion-free (review b1-fin L1; was "needs a frame ahead", the retired backward-pair cause).
+		return "competitive low latency (motion-free)";
 	}
 
 	inline std::string NamesOf(unsigned bits)
@@ -355,8 +328,6 @@ namespace VectorDemand
 		std::string s = "Vector engine: ";
 		if (d.mode == Mode::Forward)
 			s += d.matcherFallback ? "on (forward; matcher fallback, no optical-flow pairs)" : "on (forward)";
-		else if (d.mode == Mode::Backward)
-			s += "backward pairs (no frame ahead)";
 		else
 			s += "off";
 		if (d.served != 0)
@@ -376,8 +347,8 @@ namespace VectorDemand
 		return s;
 	}
 	// The whole-frame motion statistics every source-statistics consumer reads (source monitor fast-pan,
-	// motion intent), from one engine pair's global vector. One formula for the forward producer hit,
-	// a render-time sample and the backward pair. `sourcePixels` = the global vector in source pixels
+	// motion intent), from one engine pair's global vector. One formula for the forward producer hit
+	// and a render-time sample. `sourcePixels` = the global vector in source pixels
 	// per frame (DejudderPolicy::EngineGlobalSourcePixels); z / w = the ambiguity and validity of
 	// the engine's global (usable below 0.9, valid above 0.5).
 	struct GlobalSample

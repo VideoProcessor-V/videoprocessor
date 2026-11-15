@@ -512,7 +512,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	if (vectorDemand.estimate)
 	{
 		++vectorEngine.vectorPairs;
-		vectorEngine.NoteVectorsDelivered(false, onDemandPair ? "engine on demand" : dejudder->ExternalFlowUsed() ? "engine ahead" : dejudder->OpticalFlowUsed() ? "engine" : "matcher");   // VPV-HOOK
+		vectorEngine.NoteVectorsDelivered(onDemandPair ? "engine on demand" : dejudder->ExternalFlowUsed() ? "engine ahead" : dejudder->OpticalFlowUsed() ? "engine" : "matcher");   // VPV-HOOK
 	}
 	static GeneralRate::LogInterval motionAheadStatsLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
 	if (vectorEngine.motionProducer && dejudderEstimates + 1 >= 24 && motionAheadStatsLog.DueOr((dejudderEstimates + 1) == 24))   // as the other periodic logs (audit 2026-10-16)
