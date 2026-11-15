@@ -376,7 +376,7 @@
   "U7": {
    "name": "cut_fade_flash_judge",
    "blocking": true,
-   "baseline_duplicates": 6,
+   "baseline_duplicates": 0,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/input/signal/HdrInference.cpp",
@@ -481,7 +481,7 @@
      "reason": "carries the frame's mean luma (8-bit codes) read back from the scalar pass as data; the cut rule is CutFadeJudge::MeanStepCut / MeanStepCutLine"
     }
    ],
-   "waiver": "WAIVER-JOB1-U7 (coordinator, job1): 0 -> 6 is a new detection of REAL X2 copies (kCutShare/kFadeStepShare), not a loosened rule; target 0 at B6, expires at B6"
+   "waiver": "WAIVER-JOB1-U7 EXPIRED at B6: the X2 copies are removed (L-B6), U7 measures 0 and the baseline is lowered 6 -> 0 (WAIVER-LB6-U7, gate C3)"
   },
   "U8": {
    "name": "active_picture_rect",
@@ -712,5 +712,5 @@
    "baseline_duplicates": 25
   }
  },
- "note": "refs/126 B0 (2026-11-12): all registered units blocking at the measured true count; baselines only shrink. U10 baseline = the matcher D1 global search (X1, file-level owner scope), 0 at refs/126 B6. U7 6 = DetailPulse/TextureRestore private cut/fade shares (X2). U13 14 = SourceResolutionDetector private blockiness (real). U17 is undefined/reserved. U10 = 19 after the audit fix (Dispatch-label lines un-suppressed)."
+ "note": "refs/126 B0 (2026-11-12): all registered units blocking at the measured true count; baselines only shrink. U10 baseline = the matcher D1 global search (X1, file-level owner scope), 0 at refs/126 B6. U7 0 at L-B6 (the X2 DetailPulse/TextureRestore private cut/fade shares are removed; was 6). U13 14 = SourceResolutionDetector private blockiness (real). U17 is undefined/reserved. U10 = 19 after the audit fix (Dispatch-label lines un-suppressed)."
 }
