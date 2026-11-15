@@ -36,12 +36,25 @@ namespace Vpv
 	{
 		struct CadenceFacts
 		{
-			bool valid = false;            // the detector ran for this frame (detection on, a captured frame)
+			bool valid = false;            // a cadence group is published for this frame: the detector ran (detection on) or a capture signature was taken (C8-PROD)
 			bool locked = false;
 			bool phaseUncertain = false;
 			double filmHz = 0.0;
 			int cycle = 0, unique = 0;
 			uint64_t filmIndex = 0;
+			// C8-PROD (R14-59): the always-on capture signature compare (one hash per captured frame, shared with pulldown when on).
+			// captureValid: a signature was taken for this frame. `valid` above stays "the pulldown detector decided this frame".
+			bool captureValid = false;
+			bool captureRepeat = false;
+		};
+
+		// The previous captured frame's signature; Step() is the one compare. Pulldown keeps its own copy (its toggle edge and
+		// resync reset are unchanged); this one runs for every captured frame.
+		struct CaptureSignature
+		{
+			uint64_t last = 0;
+			bool Step(uint64_t signature) { const bool repeat = signature != 0 && signature == last; last = signature; return repeat; }
+			void Reset() { last = 0; }
 		};
 
 		inline CadenceFacts FactsOf(const Pulldown::Decision& decision)
@@ -57,6 +70,15 @@ namespace Vpv
 			return facts;
 		}
 
+		// The detector's facts with the frame's capture bit carried over (the bit is decided before the detector runs).
+		inline CadenceFacts FactsOf(const Pulldown::Decision& decision, const CadenceFacts& capture)
+		{
+			CadenceFacts facts = FactsOf(decision);
+			facts.captureValid = capture.captureValid;
+			facts.captureRepeat = capture.captureRepeat;
+			return facts;
+		}
+
 		// Take-once: hands the slot's facts to the caller and clears the slot, so a frame never publishes the previous
 		// frame's facts (EnqueueFrame calls this once per captured frame).
 		inline CadenceFacts Take(CadenceFacts& slot)
@@ -69,6 +91,8 @@ namespace Vpv
 		inline FrameAnalysis::Cadence ToRecord(const CadenceFacts& facts)
 		{
 			FrameAnalysis::Cadence cadence;
+			cadence.captureValid = facts.captureValid;
+			cadence.captureRepeat = facts.captureValid && facts.captureRepeat;
 			cadence.filmHz = facts.locked ? facts.filmHz : 0.0;
 			if (facts.locked && !facts.phaseUncertain && facts.unique > 0)
 				cadence.phase = static_cast<int>(facts.filmIndex % static_cast<uint64_t>(facts.unique));

@@ -154,15 +154,25 @@ bool LibplaceboVideoRenderer::IngressPulldown(RendererExtension::IngressContext&
 	filmHz = 0.0;
 	filmUpdate = false;
 	m_pulldownFrameFacts = Vpv::Ingress::CadenceFacts{};   // C7b: invalid unless the detector decides this frame
+	// C8-PROD (R14-59): the 64-row signature is taken ONCE per captured frame, pulldown on or off; the pulldown branch below reuses it
+	// (its own m_pulldownSignature and toggle edge are unchanged), and the capture bit rides the same cadence facts.
+	uint64_t frameSignature = 0;
+	if (frameState->displayMode)
+	{
+		frameSignature = Pulldown::Signature(videoFrame.GetData(),
+			static_cast<size_t>(frameState->BytesPerRow()),
+			static_cast<size_t>(frameState->displayMode->FrameHeight()));
+		m_pulldownFrameFacts.captureValid = true;
+		m_pulldownFrameFacts.valid = true;   // the cadence group is published for every captured frame; pulldown fields stay default (unlocked) unless the detector decides below
+		m_pulldownFrameFacts.captureRepeat = m_captureSignature.Step(frameSignature);
+	}
 	if (m_pulldownDetection.load(std::memory_order_relaxed) && frameState->displayMode)
 	{
 		const Vpv::Resync::PulldownStep pulldownResync = Vpv::Resync::PulldownResyncStep(m_impl.get(), m_pulldownResetRequested.exchange(false, std::memory_order_acq_rel)); // VPV-HOOK: resync cursor (on: FULL resets, timing re-latches)
 		m_pulldown.SetTimingRelatch(pulldownResync.driving); // VPV-HOOK
 		if (pulldownResync.reset) // VPV-HOOK
 			ResetPulldown();   // W1-A4: also clears the acquiring flag (Next below sets it again from the fresh history)
-		const uint64_t signature = Pulldown::Signature(videoFrame.GetData(),
-			static_cast<size_t>(frameState->BytesPerRow()),
-			static_cast<size_t>(frameState->displayMode->FrameHeight()));
+		const uint64_t signature = frameSignature;
 		const bool repeat = signature != 0 && signature == m_pulldownSignature;
 		m_pulldownSignature = signature;
 		const double measuredRateHz = m_measuredFrameRate.load(std::memory_order_relaxed);
@@ -242,7 +252,7 @@ bool LibplaceboVideoRenderer::IngressPulldown(RendererExtension::IngressContext&
 			DebugLog::Log("Pulldown: %s (was %s)", lockText.c_str(), before.c_str());
 		}
 		const int cadence = decision.locked ? (decision.cycle << 16) | decision.unique : 0;
-		m_pulldownFrameFacts = Vpv::Ingress::FactsOf(decision);   // C7b: the cadence group of this frame's store record (CadenceFeed.h)
+		m_pulldownFrameFacts = Vpv::Ingress::FactsOf(decision, m_pulldownFrameFacts);   // C7b: the cadence group of this frame's store record (CadenceFeed.h)
 		m_pulldownAcquiring.store(!decision.locked && m_pulldown.Acquiring(), std::memory_order_relaxed);   // SK-MV warm engine
 		// Hunt 2 (06-interp M3): the queue target follows the lock (PrefillTargetLocked): wake
 		// the waiters when it changes.

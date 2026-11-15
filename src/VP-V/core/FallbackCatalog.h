@@ -1029,6 +1029,42 @@ namespace FallbackCatalog
 			"and the render upload");
 	}
 
+	// P10g C8 repeated-frame gate (grain separation, S-3a-GS names): Engaged when grain_sep_repeat_gate = off, or when the gate had
+	// neighbours to judge but no signal (none of them could be judged). Then paused / duplicated frames are NOT removed from B's set
+	// and their own grain can be averaged into the clean picture. Released otherwise. `offered` = neighbours offered to the gate.
+	inline Decision GrainSepRepeatGateOff(bool keyOff, int offered, int judged)
+	{
+		if (keyOff)
+			return Engaged("grain_sep.repeat_gate_off", "grain separation: repeated-frame gate is off (grain_sep_repeat_gate = off); paused or duplicated frames are not removed from the neighbour window");
+		if (offered > 0 && judged <= 0)
+			return Engaged("grain_sep.repeat_gate_off", "grain separation: repeated-frame gate has no signal (no neighbour could be judged); paused or duplicated frames are not removed from the neighbour window");
+		return Released("grain_sep.repeat_gate_off");
+	}
+
+	// P10g C8 status text for Config status and Ctrl+I (NOT a registry entry: the registry announces every entry once, and this is the
+	// DEFAULT state while no producer repeat fact exists). Empty when the gate is off (its entry covers that), nothing was offered, or the
+	// producer facts decided every neighbour; otherwise "repeat facts unavailable: block test" with the number of repeats it dropped.
+	// The block test is primary (OD:744) and now also runs for Distinct neighbours, so NeighbourResult::blockTestRuns no longer means
+	// "facts unavailable": the S-3a-GS caller (102b C8-VISIBILITY-TO-S3A-GS) must pass the runs for neighbours WITHOUT a bit fact.
+	inline std::string GrainSepRepeatStatus(bool keyOff, int offered, int blockTestRuns, int droppedByBlockTest)
+	{
+		if (keyOff || offered <= 0 || blockTestRuns <= 0)
+			return std::string();
+		return "grain separation: repeat facts unavailable: block test (" + std::to_string(droppedByBlockTest) + " repeated neighbour frame(s) dropped)";
+	}
+
+	// C8-PROD Ctrl+Alt+D line: which detector dropped the repeats and what each dropped. The block test is the PRIMARY detector (owner
+	// OD:744): it runs for every offered neighbour the capture bit does not name a Repeat (a Distinct bit never vetoes it); the bit only
+	// adds drops. source: block test = the block test judged every offered neighbour (no bit named a Repeat), block test + capture bit =
+	// the bit named some repeats and the block test judged the rest, capture bit = the bit named every offered neighbour a Repeat.
+	inline std::string GrainSepRepeatDiagLine(bool keyOff, int offered, int droppedByFacts, int droppedByBlockTest, int blockTestRuns)
+	{
+		if (keyOff) return "grain separation repeat gate: off";
+		const char* source = offered <= 0 ? "no neighbours" : blockTestRuns <= 0 ? "capture bit" : droppedByFacts <= 0 ? "block test" : "block test + capture bit";
+		return std::string("grain separation repeat gate: source ") + source + ", droppedByFacts " + std::to_string(droppedByFacts) +
+			", droppedByBlockTest " + std::to_string(droppedByBlockTest) + ", blockTestRuns " + std::to_string(blockTestRuns);
+	}
+
 	inline Decision ProductFallback(const char* id, const std::string& why)
 	{
 		const ProductEntry* e = FindProductEntry(id);

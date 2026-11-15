@@ -27,6 +27,7 @@ namespace FallbackPlainText
 			{ "re-base warm-up", "A resolution change is waiting for its shaders; the picture stays as it was" },
 			{ "detail pulse", "The detail stabiliser was skipped for this frame" },
 			{ "texture restore", "The texture restore was skipped for this frame" },
+			{ "grain_sep.repeat_gate_off", "Paused or repeated frames are not left out of the grain separation, so their grain can be averaged away" },
 			{ "deband", "The standard debander is being used instead of VP's" },
 			{ "motion", "The motion engine is not running, so motion-based steps are off" },
 			{ "motion consumers", "Motion-based steps are showing the source frame instead" },

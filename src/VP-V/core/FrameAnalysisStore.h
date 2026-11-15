@@ -148,6 +148,10 @@ namespace FrameAnalysis
 		uint64_t repeatOf = 0;
 		int phase = -1;                 // cadence phase (-1 = unknown)
 		double filmHz = 0.0;            // film clock when pulldown is locked (0 = the signal's rate)
+		// C8-PROD (R14-59): the ingress 64-row signature equalled the previous captured frame's, computed ALWAYS (pulldown on or off).
+		// captureValid false = no signature was taken for this frame (non-capture source, no display mode): consumers treat it as Missing.
+		bool captureValid = false;
+		bool captureRepeat = false;
 	};
 
 	enum class SceneOrigin : uint8_t { None, Vp, BillCopied };

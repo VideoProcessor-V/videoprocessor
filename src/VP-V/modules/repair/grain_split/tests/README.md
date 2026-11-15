@@ -19,3 +19,11 @@ classification from the v3 split against the v2 split agrees on >= 99.5 % of blo
 TD will read the split later; re-check at the TD build).
 `tests/GrainSplitV3CostBench.cpp` (category GpuHardware, logs only): per-pass pl_timer mean / p95 and total mean / p95 / max of the lane
 kernel at 1080p and 2160p (Compact and Full, 20 warm-up + 120 timed frames) plus the dispatcher's live-form wall time.
+
+`tests/GrainLevelLawTests.cpp` and `tests/GrainLevelDetailLossTests.cpp` (CPU only, GrainLevel CPU law v5, brief-S-3c T2): seconds-based half-life at six rates, bit-identical unit-4 fallback per reset/fallback cause with visible reason, histogram reset, skip-copy guard, temporal invariants (N_b <= N, f up, clean + grain = Y), mirror gate (default OFF, only lowers, OFF equals a gate that cannot fire), bicubic cross form phase bias at 0.3 / 1.7 px, DCT orthonormality, the B neighbour Wiener with 4 planted-grain neighbours, AR(1) 0.3 reporting, window sizes, cost rows, frozen-gain detail loss. Numeric thresholds are logged first-run values awaiting the first build.
+
+`tests/GrainLevelShiftBench.cpp` (B-S0 measurement, synthetic frames, numbers logged only): 2 versus 4 DCT half-shift grids of the neighbour Wiener (error, structure kept, time) over K = 2/4/8/12 neighbours and three grain levels, and 8x8 versus 16x16 block-field warp error on affine motions. `Params::dctShifts` (default 4, bit-identical) is a measurement knob, not a user setting.
+
+`tests/GrainLevelRepeatGateTests.cpp` (P10g C8 repeated-frame gate, new tests only): a repeat leaves the B set, independent grain never fires (0 false fires at three grain levels), a frozen picture takes the L1+L2 gains exactly, `grain_sep_repeat_gate` / `grain_sep_repeat_threshold` parse with visible problem texts, the `grain_sep.repeat_gate_off` fallback entry.
+
+`tests/GrainLevelRepeatFactsTests.cpp` (C8 with the per-neighbour RepeatFact tri-state, new file): the block test is primary (a Repeat fact only adds a drop, a Distinct fact never vetoes the test), frozen-12 and dup2 rows on both paths (facts=Repeat, facts=Unknown), still and aerial-crop rows with 0 false fires on both paths, threshold clamp (0.05 rejected / clamped), gate off drops nothing and engages `grain_sep.repeat_gate_off`, the "repeat facts unavailable: block test" status text (no registry entry, so no one-time notice).

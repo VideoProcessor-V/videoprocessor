@@ -115,6 +115,7 @@ namespace Vpv
 	Pulldown::Detector m_pulldown;
 	Pulldown::FilmClock m_pulldownClock;
 	uint64_t m_pulldownSignature = 0;
+	CaptureSignature m_captureSignature;   // C8-PROD: the always-on capture compare (pulldown on or off), capture thread
 	int64_t m_pulldownFilmQpc = 0;   // the last film frame's even time (QPC)
 	// M2 P10-5: OnVideoFrame's locals shared by its three ingress blocks (IngressPolicy.inl), per frame on the capture
 	// thread (callbacks are serial). Written by blocks 1-2, read by the R15 call site and block 3.
@@ -137,6 +138,7 @@ namespace Vpv
 		m_pulldown.Reset();
 		m_pulldownClock.Reset();
 		m_pulldownSignature = 0;
+		m_captureSignature.Reset();
 		m_pulldownFilmQpc = 0;
 		m_pulldownAcquiring.store(false, std::memory_order_relaxed);
 	}

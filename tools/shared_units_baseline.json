@@ -745,6 +745,12 @@
    "name": "trail_compose",
    "known_false_positive": [
     {
+     "file": "src/VP-V/modules/repair/grain_split/GrainLevel.h",
+     "pattern": "#include <VP-V/modules/motion/estimation/composed/ComposedVectors\\.h>",
+     "kind": "false_positive",
+     "reason": "consumer include of the ECV owner header (WarpFromComposed reads VpComposed::Plane::SampleLanded); no vector composition in grain_split"
+    },
+    {
      "file": "src/VP-V/core/FallbackPlainText.h",
      "pattern": "^\\s*\\{ \"composed vectors\", \"Motion followed across several frames reaches fewer frames than asked; the steps that use it work from fewer frames\" \\},$",
      "kind": "false_positive",
