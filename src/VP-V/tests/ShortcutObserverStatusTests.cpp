@@ -10,10 +10,12 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <ConfigFile.h>
 #include <VP-V/core/FallbackStatus.h>
 #include <VP-V/gui/ShortcutObserverStatus.h>
 #include <VP-V/gui/VpStatusAdapter.h>
 
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -80,6 +82,23 @@ namespace ShortcutObserverStatusTest
 		std::string Heading(const VpvGui::Snapshot& snapshot)
 		{
 			return VpvGui::FallbacksHeading(snapshot);
+		}
+
+		// A configuration file with `text`, read fresh (not from the cache) the way the dialog reads one.
+		ConfigFile LoadText(const std::string& text)
+		{
+			char base[MAX_PATH] = {};
+			GetTempPathA(MAX_PATH, base);
+			const std::string folder = std::string(base) + "vp-shortcut-observer-status";
+			CreateDirectoryA(folder.c_str(), nullptr);
+			const std::string path = folder + "\\settings.cfg";
+			{
+				std::ofstream file(path, std::ios::binary | std::ios::trunc);
+				file << text;
+			}
+			ConfigFile config;
+			Assert::IsTrue(config.Load(path, ConfigFile::ReadPolicy::Fresh));
+			return config;
 		}
 	}
 
@@ -186,6 +205,134 @@ namespace ShortcutObserverStatusTest
 			DialogExtension::OnTimer();
 			Assert::AreEqual(1, r.reads);   // OnTimer() reached the extension (lead 18 SHOULD-B)
 			Assert::IsTrue(r.note.empty());
+		}
+
+		// The facts from a real configuration file, through the shared readers.
+		TEST_METHOD(FactsFromAConfigurationFile)
+		{
+			using ShortcutObserverStatus::FromConfig;
+			// global_actions absent in a VP-V pathway: the default applies, on Ctrl+Alt+D.
+			ShortcutObserverStatus::Facts facts = FromConfig(LoadText("[shortcuts]\nshow_profiles: Ctrl+P\n"));
+			Assert::IsTrue(facts.defaultApplies);
+			Assert::IsFalse(facts.globalHotkeys);
+			Assert::IsFalse(facts.foregroundOnly);
+			Assert::IsTrue(facts.keyBound);
+			Assert::AreEqual(static_cast<int>(FCONTROL | FALT), static_cast<int>(facts.modifiers));
+			Assert::AreEqual(static_cast<int>('D'), static_cast<int>(facts.key));
+			Assert::IsTrue(ShortcutObserverStatus::Decide(facts).wanted);
+			// An explicit value, even empty, is the user's (the dialog's own observer serves it).
+			Assert::IsFalse(FromConfig(LoadText("[shortcuts]\nglobal_actions:\n")).defaultApplies);
+			Assert::IsFalse(FromConfig(LoadText("[shortcuts]\nglobal_actions: config_editor\n")).defaultApplies);
+			Assert::IsFalse(FromConfig(LoadText("[shortcuts]\nglobal_actions: state_report\n")).defaultApplies,
+				L"listed explicitly: the dialog's observer serves it");
+			// The Original pathway: no default, the value read as the renderer reads it (NormalizeName).
+			Assert::IsFalse(FromConfig(LoadText("[vpv]\npipeline_original_pathway: on\n")).defaultApplies);
+			Assert::IsFalse(FromConfig(LoadText("[vpv]\npipeline_original_pathway: -on\n")).defaultApplies,
+				L"SHOULD-C: NormalizeName reads -on as on");
+			Assert::IsTrue(FromConfig(LoadText("[vpv]\npipeline_original_pathway: off\n")).defaultApplies);
+			// The switches the default depends on; an unreadable value is off, as the dialog reads it.
+			Assert::IsTrue(FromConfig(LoadText("[shortcuts]\nglobal_hotkeys: true\n")).globalHotkeys);
+			Assert::IsFalse(FromConfig(LoadText("[shortcuts]\nglobal_hotkeys: maybe\n")).globalHotkeys);
+			Assert::IsTrue(FromConfig(LoadText("[shortcuts]\nforeground_only: yes\n")).foregroundOnly);
+			// The report key's chord.
+			Assert::IsFalse(FromConfig(LoadText("[shortcuts]\nstate_report:\n")).keyBound, L"empty: no report key");
+			facts = FromConfig(LoadText("[shortcuts]\nstate_report: Ctrl+Shift+F9\n"));
+			Assert::IsTrue(facts.keyBound);
+			Assert::AreEqual(static_cast<int>(FCONTROL | FSHIFT), static_cast<int>(facts.modifiers));
+			Assert::AreEqual(static_cast<int>(VK_F9), static_cast<int>(facts.key));
+			facts = FromConfig(LoadText("[shortcuts]\nstate_report: Hyper+Q\n"));
+			Assert::IsTrue(facts.keyBound, L"does not parse: the dialog binds the compiled default");
+			Assert::AreEqual(static_cast<int>(FCONTROL | FALT), static_cast<int>(facts.modifiers));
+			Assert::AreEqual(static_cast<int>('D'), static_cast<int>(facts.key));
+		}
+
+		TEST_METHOD(PlanFollowsTheFacts)
+		{
+			const ShortcutObserverStatus::Plan plan = ShortcutObserverStatus::Decide(DefaultWanted());
+			Assert::IsTrue(plan.wanted);
+			Assert::AreEqual(static_cast<int>(FCONTROL | FALT), static_cast<int>(plan.modifiers));
+			Assert::AreEqual(static_cast<int>('D'), static_cast<int>(plan.key));
+			ShortcutObserverStatus::Facts unbound = DefaultWanted();
+			unbound.keyBound = false;   // [shortcuts] state_report empty: no report key at all
+			Assert::IsFalse(ShortcutObserverStatus::Decide(unbound).wanted);
+			Assert::IsTrue(ShortcutObserverStatus::Decide(unbound) == ShortcutObserverStatus::Plan());
+			ShortcutObserverStatus::Facts otherChord = DefaultWanted();
+			otherChord.key = VK_F9;
+			Assert::IsTrue(ShortcutObserverStatus::Decide(otherChord) != plan);
+		}
+
+		// The hook's key rules are ConfigurationLiveApply's: AltGr is not Ctrl+Alt, VP or Config in front
+		// keeps the key, and the key is never taken (dispatch and pass).
+		TEST_METHOD(TheHookKeyRulesAreTheSharedOnes)
+		{
+			const ShortcutObserverStatus::Plan plan = ShortcutObserverStatus::Decide(DefaultWanted());   // Ctrl+Alt+D
+			// virtual key, control, leftAlt, rightAlt, shift
+			Assert::IsTrue(ShortcutObserverStatus::Matches(plan, 'D', true, true, false, false));
+			Assert::IsTrue(ShortcutObserverStatus::Matches(plan, 'D', true, true, true, false), L"both Alt keys held");
+			Assert::IsFalse(ShortcutObserverStatus::Matches(plan, 'D', true, false, true, false), L"AltGr+D types a character");
+			Assert::IsFalse(ShortcutObserverStatus::Matches(plan, 'D', true, true, false, true), L"Ctrl+Alt+Shift+D is another chord");
+			Assert::IsFalse(ShortcutObserverStatus::Matches(plan, 'E', true, true, false, false));
+			Assert::IsFalse(ShortcutObserverStatus::Matches(ShortcutObserverStatus::Plan(), 'D', true, true, false, false),
+				L"nothing wanted: nothing matches");
+			// vpForeground, configurationForeground
+			Assert::IsTrue(ShortcutObserverStatus::Dispatches(false, false), L"another application in front: report");
+			Assert::IsFalse(ShortcutObserverStatus::Dispatches(true, false), L"VP in front: its own keys handle it");
+			Assert::IsFalse(ShortcutObserverStatus::Dispatches(false, true), L"Config in front: the key is Config's");
+		}
+
+		TEST_METHOD(APlanChangeRestartsTheHook)
+		{
+			Registered r(DefaultWanted());
+			r.observer.startWorks = true;
+			DialogExtension::OnTimer();
+			Assert::AreEqual(1, r.observer.starts);
+			DialogExtension::OnTimer();
+			Assert::AreEqual(1, r.observer.starts, L"same plan: the hook keeps running");
+			// An explicit global_actions value arrives (Config Apply): the list is the dialog's now.
+			r.facts.defaultApplies = false;
+			DialogExtension::OnTimer();
+			Assert::IsFalse(r.observer.running, L"the explicit value wins within a tick");
+			Assert::AreEqual(1, r.observer.starts);
+			Assert::IsTrue(r.note.empty());
+			// The key is removed again: the default is back.
+			r.facts.defaultApplies = true;
+			DialogExtension::OnTimer();
+			Assert::IsTrue(r.observer.running);
+			Assert::AreEqual(2, r.observer.starts);
+			// A new chord for the report key: the hook restarts on it.
+			r.facts.modifiers = static_cast<unsigned char>(FCONTROL | FSHIFT);
+			r.facts.key = VK_F9;
+			DialogExtension::OnTimer();
+			Assert::AreEqual(3, r.observer.starts);
+			Assert::AreEqual(static_cast<int>(FCONTROL | FSHIFT), static_cast<int>(r.observer.started.modifiers));
+			Assert::AreEqual(static_cast<int>(VK_F9), static_cast<int>(r.observer.started.key));
+			Assert::IsTrue(r.extension.PlanInForce() == r.observer.started);
+			// A switch to the Original pathway (no default there): stopped at once.
+			r.facts.defaultApplies = false;
+			DialogExtension::OnTimer();
+			Assert::IsFalse(r.observer.running);
+			Assert::IsFalse(r.extension.PlanInForce().wanted);
+			Assert::IsTrue(r.note.empty());
+		}
+
+		TEST_METHOD(AnUnreadableConfigurationKeepsThePlanInForce)
+		{
+			Registered r(DefaultWanted());
+			r.readable = false;   // not readable yet: nothing is wanted, nothing starts
+			DialogExtension::OnTimer();
+			Assert::AreEqual(0, r.observer.starts);
+			Assert::IsTrue(r.note.empty());
+			r.readable = true;
+			r.observer.startWorks = true;
+			DialogExtension::OnTimer();
+			Assert::AreEqual(1, r.observer.starts);
+			// The file cannot be read for a moment (being replaced): the hook keeps the plan in force.
+			r.readable = false;
+			r.facts.defaultApplies = false;
+			DialogExtension::OnTimer();
+			Assert::IsTrue(r.observer.running);
+			Assert::AreEqual(1, r.observer.starts);
+			Assert::IsTrue(r.extension.PlanInForce().wanted);
 		}
 	};
 }
