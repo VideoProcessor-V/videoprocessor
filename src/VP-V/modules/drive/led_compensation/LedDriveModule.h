@@ -97,6 +97,10 @@ namespace LedDrive
 		void SetSourceRange(int range) { sourceRange.store(range, std::memory_order_relaxed); }
 		int SourceRange() const override { return sourceRange.load(std::memory_order_relaxed); }
 		void SubmitPrediction(uint64_t sequence, const FrameStats& predicted) override;
+		// FIX-LED-CUT-U7: the scene-cut reader of this module's measured and look-ahead builders (empty = the default get-or-compute reader
+		// of the skeleton's scene product). Tests inject one here (per module, never a global). Any thread.
+		void SetSceneReaderForTesting(SceneCutFn reader);
+		SceneCutFn SceneReader() const override;
 		// Hunt 3 (LED2): a new stream starts on this module (a hold-over drive
 		// adopted by the next file, whose source sequence restarts): the
 		// predictions by sequence are dropped and the look-ahead observer
@@ -262,6 +266,8 @@ namespace LedDrive
 		static constexpr const char* kDryRunFallbackId = "projector";
 		// FIX-LED-CUT-U7: engaged while the measured frame has no readable shared scene record (no cut is judged then).
 		static constexpr const char* kCutJudgeFallbackId = "LED cut judge";
+		// The same for the look-ahead walk: engaged while a walked (ahead) frame's scene could not be got-or-computed (genuine failure only).
+		static constexpr const char* kCutJudgeAheadFallbackId = "LED look-ahead cut judge";
 
 	private:
 		std::atomic<double> displayGamma{ 2.2 };
@@ -467,7 +473,11 @@ namespace LedDrive
 		bool holdingFull = false;
 		FallbackStatus::Registry fallbacks;
 		void UpdateHoldFallbackLocked();
-		void UpdateCutJudgeFallbackLocked(bool recordRead);
+		void UpdateCutJudgeFallbackLocked(bool known, const char* why);
+		void UpdateCutJudgeAheadFallback(bool known, const char* why);
+		// Its own small lock (not `mutex`): the walk thread reads it per frame while the module's thread may hold `mutex` across a measure.
+		mutable std::mutex sceneReaderMutex;
+		SceneCutFn sceneReader_;
 		void StartHoldJumpLocked(bool wasHolding);
 	};
 }

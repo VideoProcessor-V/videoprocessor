@@ -19,6 +19,7 @@
 // Header-only, C++14.
 
 #include <VP-V/core/FrameAnalysisStore.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 
 #include <cstdint>
@@ -38,6 +39,37 @@ namespace VpSkeleton
 				return false;
 			cut = scene.cut;
 			return true;
+		}
+
+		// GET-OR-COMPUTE reader (the LED's, measured frame AND look-ahead): the skeleton's scene product (SceneOf) for frame `seq`. It reads the
+		// store's group when present, else the two P4 records are acquired through the renderer's memo (made now for a frame ahead of the seal)
+		// and the verdict is published for the later seal (computed once). The renderer key is the ONE registered owner (the Host registers its
+		// store even with frame_analysis_store=off, so the key exists); more than one renderer is ambiguous and never guessed.
+		// False = genuine failure; `*why` (when given) names it, static text. cut is false then.
+		inline bool AcquireCut(uint64_t seq, bool& cut, const char** why)
+		{
+			cut = false;
+			const char* reason = "";
+			bool found = false;
+			const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
+			if (owners.size() != 1)
+				reason = owners.empty() ? "no store owner" : "renderer ambiguous";
+			else if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
+			{
+				const Vpv::Skeleton::SceneAnswer a = demand->SceneOf(owners[0], seq);
+				if (a.known)
+				{
+					cut = a.cut;
+					found = true;
+				}
+				else
+					reason = (a.why != nullptr && a.why[0] != 0) ? a.why : "scene unknown";
+			}
+			else
+				reason = "no skeleton module";
+			if (why != nullptr)
+				*why = reason;
+			return found;
 		}
 	}
 }

@@ -492,32 +492,27 @@ namespace LedDrive
 		stats.sustainedHighlight = WindowMinimum(highlightHistory, timeMs, stats.highlight,
 			config.highlightPersistMs);
 
-		std::vector<double> cells(GRID_W * GRID_H, -1.0);
-		for (int i = 0; i < GRID_W * GRID_H; ++i)
-			if (raw.cellCount[i] > 0)
-				cells[i] = static_cast<double>(raw.cellSum[i]) / SUM_SCALE / raw.cellCount[i];
-		double difference = 0.0;
-		int compared = 0;
-		if (previousCells.size() == cells.size())
-			for (size_t i = 0; i < cells.size(); ++i)
-				if (cells[i] >= 0.0 && previousCells[i] >= 0.0)
-				{
-					difference += std::abs(cells[i] - previousCells[i]);
-					++compared;
-				}
-		lastDifference = compared > 0 ? difference / compared : 0.0;
 		// FIX-LED-CUT-U7 (owner answer 2026-11-15 (2)): the cut is the shared scene judge's verdict (U7, CutFadeJudge over the P4
-		// records, read from the skeleton's scene record for this source sequence), not a private mean-difference threshold. No
-		// readable record (sequence 0, store off, not sealed yet, slot gone) = NO cut this frame, counted and surfaced by the caller.
+		// records) for this source sequence, GOT-OR-COMPUTED through the skeleton (also for a queued frame ahead of the seal), not a
+		// private mean-difference threshold (that metric and its cell memory are deleted). Genuine failure (sequence 0, no lane, the
+		// frame beyond the planned depth ...) = NO cut this frame, counted, with the cause in stats.sceneWhy for the caller's visible entry.
 		{
 			bool recordCut = false;
-			const SceneCutFn read = sceneReader ? sceneReader : &VpSkeleton::SceneRecordReader::CutOf;
-			const bool found = sequence != 0 && read(sequence, recordCut);
+			const char* why = "no frame sequence";
+			bool found = false;
+			if (sequence != 0)
+			{
+				why = "";
+				found = sceneReader ? sceneReader(sequence, recordCut, &why)
+					: VpSkeleton::SceneRecordReader::AcquireCut(sequence, recordCut, &why);
+			}
 			lastSceneFromRecord = found;
+			lastSceneWhy = found ? "" : (why != nullptr ? why : "");
 			if (found) ++sceneFromRecord; else ++sceneMissing;
 			stats.cut = found && recordCut;
+			stats.sceneKnown = found;
+			stats.sceneWhy = lastSceneWhy;
 		}
-		previousCells = cells;
 
 		// Sustained APL: minimum over apl_persist_ms, restarted at a cut so
 		// the new scene's APL counts at once (a dark-to-bright cut must not

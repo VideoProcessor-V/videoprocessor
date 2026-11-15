@@ -193,17 +193,43 @@ namespace LedDrive
 			DebugLog::Log("Dynamic Drive: picture compensation and measurement available again; the LED hold at full drive ends");
 	}
 
-	void LedDriveModule::UpdateCutJudgeFallbackLocked(bool recordRead)
+	void LedDriveModule::UpdateCutJudgeFallbackLocked(bool known, const char* why)
 	{
-		// FIX-LED-CUT-U7: the cut comes only from the shared scene record. A frame without a readable record judges no cut: a visible
-		// step down (Ctrl+I / Config "Fallbacks engaged", one event), released as soon as a record is read again.
-		if (!recordRead)
+		// FIX-LED-CUT-U7: the cut comes only from the shared scene product (get-or-compute). A frame whose scene could not be got judges no
+		// cut: a visible step down (Ctrl+I / Config "Fallbacks engaged", one event), released as soon as a scene is got again.
+		if (!known)
 		{
-			if (fallbacks.Engage(kCutJudgeFallbackId, "no scene record for the frame: no cut judged"))
-				DebugLog::Log("Dynamic Drive: no shared scene record for the measured frame; no cut judged until one is readable");
+			const std::string cause = (why != nullptr && why[0] != 0) ? why : "unknown";
+			if (fallbacks.Engage(kCutJudgeFallbackId, "no scene for the measured frame (" + cause + "): no cut judged"))
+				DebugLog::Log("Dynamic Drive: no shared scene for the measured frame (%s); no cut judged until one is available", cause.c_str());
 		}
 		else if (fallbacks.Release(kCutJudgeFallbackId))
-			DebugLog::Log("Dynamic Drive: shared scene record readable again; cuts judged");
+			DebugLog::Log("Dynamic Drive: shared scene available again; cuts judged");
+	}
+
+	void LedDriveModule::UpdateCutJudgeAheadFallback(bool known, const char* why)
+	{
+		// The look-ahead acquires the scene for the frame ahead (get-or-compute-and-publish); only a genuine failure lands here.
+		if (!known)
+		{
+			const std::string cause = (why != nullptr && why[0] != 0) ? why : "unknown";
+			if (fallbacks.Engage(kCutJudgeAheadFallbackId, "no scene for a look-ahead frame (" + cause + "): no cut predicted"))
+				DebugLog::Log("Dynamic Drive: no shared scene for a look-ahead frame (%s); no cut predicted until one is available", cause.c_str());
+		}
+		else if (fallbacks.Release(kCutJudgeAheadFallbackId))
+			DebugLog::Log("Dynamic Drive: shared scene available for look-ahead frames again; cuts predicted");
+	}
+
+	void LedDriveModule::SetSceneReaderForTesting(SceneCutFn reader)
+	{
+		std::lock_guard<std::mutex> guard(sceneReaderMutex);
+		sceneReader_ = std::move(reader);
+	}
+
+	SceneCutFn LedDriveModule::SceneReader() const
+	{
+		std::lock_guard<std::mutex> guard(sceneReaderMutex);
+		return sceneReader_;
 	}
 
 	void LedDriveModule::SetCompensationAvailable(bool available, const std::string& reason)
@@ -712,9 +738,10 @@ namespace LedDrive
 		// R3: a readback of the old source after a FULL resync (resync_event on only; 0 otherwise).
 		if (sequence != 0 && restartSequence != 0 && sequence < restartSequence) return;
 		lastMeasuredSequence = sequence;
+		statsBuilder.SetSceneReader(SceneReader());   // applied before every Build (Reconfigure re-creates the builder)
 		const FrameStats stats = statsBuilder.Build(raw, NowMs(), sourceFps > 0.0 ? 1000.0 / sourceFps : 0.0, sequence);   // unmeasured: the 24p values
 		if (stats.blocks == 0) return;
-		UpdateCutJudgeFallbackLocked(statsBuilder.LastSceneFromRecord());
+		UpdateCutJudgeFallbackLocked(stats.sceneKnown, stats.sceneWhy);
 		latest = stats;
 		haveStats = true;
 		// A cut or fade between two controller steps must still reach it.
@@ -772,6 +799,7 @@ namespace LedDrive
 		while (predictions.size() > MAX_PREDICTIONS)
 			predictions.erase(predictions.begin());
 		lastPredictionWallMs = NowMs();
+		UpdateCutJudgeAheadFallback(predicted.sceneKnown, predicted.sceneWhy);
 	}
 
 	void LedDriveModule::ResetLookahead()
