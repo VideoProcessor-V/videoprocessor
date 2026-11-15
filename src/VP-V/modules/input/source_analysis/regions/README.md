@@ -102,7 +102,7 @@ today, so no switch is byte-identical yet).
 ## BusyEdge (L-B5, in progress): S5 busy share and edge map
 
 Design goal: one computation of the debander guard's busy share (P11 term S5, variant axes: canonical lap_min / ext_min thresholds and
-plane) and one per-pixel Sobel edge map (ProductId kEdgeMap, consumers L-FOCUS and the L-B5 busy-edge, later P11 gmax; AdaptiveDownscale keeps its own ramp, R14-64), both owner-filled
+plane) and one per-pixel Sobel edge map (ProductId kEdgeMap, consumers AdaptiveDownscale and L-FOCUS, later P11 gmax), both owner-filled
 in source_analysis and read by consumers through Acquire. Philosophy: the arithmetic is MOVED from VpDebander / AdaptiveDownscale, not
 copied; a private pass is deleted in the same commit as its consumer's switch.
 Status: BusyEdge.h (CPU reference and tolerance oracle) and BusyEdgeGlsl.h (shader mirrors, one tap form kSourceTapCodesPerUnit) exist
