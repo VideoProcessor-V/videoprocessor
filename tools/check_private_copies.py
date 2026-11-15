@@ -158,6 +158,29 @@ ACCESSOR = {
 }
 _ENUM_RE = re.compile(r"\b(k[A-Z]\w+)\b")
 
+# Rule b owner edges (gate-15a-X8-row14-P2): a row that is the PRODUCER of a product it declares (the live-fill ownership edge)
+# reads nothing through an accessor; it writes. An edge excuses ONLY that exact (row id, product) pair, never the row's other
+# products, and holds only if the file is a member of the row folder, lies under the product's ProductRows owner folder and the
+# writer regex matches its comment-stripped code (the computed result is published); otherwise the X8 hit is emitted.
+OWNER_EDGES = {
+    (14, "kP2VectorPair"): {"file": _M + "motion/estimation/MotionAheadProducer.cpp",
+                            "writer": r"\bslot->Publish\s*\([^;]*,\s*flow\s*\)\s*;"},
+}
+
+
+def product_owner_folders(root):
+    """{product: 'src/VP-V/modules/<folder>/'} from ProductRows() of ProductCatalog.h (rows marked 'reserved' are skipped)."""
+    out = {}
+    p = os.path.join(root, "src/VP-V/core/ProductCatalog.h")
+    if os.path.isfile(p):
+        for m in _PRODUCT_ROW.finditer(strip_comments(read(p))):
+            if m.group(3).strip().lower().startswith("reserved"):
+                continue
+            folder = m.group(2).split()[0].strip("/")
+            if folder and not folder.startswith(".."):
+                out.setdefault(m.group(1), _M + folder + "/")
+    return out
+
 
 def strip_comments(text):
     out, i, n, blk = [], 0, len(text), False
@@ -271,6 +294,15 @@ def scan(root):
             ln = next(i for i, l in enumerate(code(rel).split(chr(10)), 1) if REGISTER_SYM.search(l))
             hits.append({"rule": "d", "site": "REG", "file": rel, "line": ln,
                          "text": "live-fill registration outside the owning folders", "product": "-"})
+    owners = product_owner_folders(root)
+
+    def owner_edge_holds(rid, pr, members):
+        e = OWNER_EDGES.get((rid, pr))
+        if not e:
+            return False
+        own = owners.get(pr)
+        return bool(e["file"] in members and own and e["file"].startswith(own) and re.search(e["writer"], code(e["file"])))
+
     for rid, name, folder, prods in consumer_rows(root):
         fdir = "src/" + folder
         members = [r for r in files if r.startswith(fdir + "/")] or [r for r in files if r.startswith(fdir)]
@@ -281,7 +313,7 @@ def scan(root):
         blob = "\n".join(code(r) for r in members)
         for pr in prods:
             acc = ACCESSOR.get(pr)
-            if acc and not re.search(acc, blob):
+            if acc and not re.search(acc, blob) and not owner_edge_holds(rid, pr, members):
                 hits.append({"rule": "b", "site": "X8", "file": fdir, "line": 0, "product": pr,
                              "text": "row %d '%s' declares %s but no file reads it" % (rid, name, pr)})
     return hits

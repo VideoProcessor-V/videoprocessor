@@ -166,6 +166,34 @@ class Synthetic(unittest.TestCase):
         hs = sorted(h["file"] for h in N1.scan(root) if h["site"] == "D3s")
         self.assertEqual(hs, sorted(["shaders/Fixture.glsl", M + "output/dither/Copy.h"]))
 
+    def test_x8_owner_edge_excuses_only_its_row_and_product(self):
+        # gate-15a-X8-row14-P2 fixtures: the producer row's P2 edge holds only with the computed-flow publish in the named file,
+        # under the product's owner folder; it never excuses the row's other products or another row.
+        prod = M + "motion/estimation/MotionAheadProducer.cpp"
+        pub = "void R(){ slot->Publish(previousSequence, job.sequence, job.generation, flow); }"
+
+        def cat(row_id=14, folder="VP-V/modules/motion/estimation/MotionAheadProducer", owner="motion/estimation"):
+            return ('inline const std::vector<ProductRow>& ProductRows(){ static const std::vector<ProductRow> rows = {'
+                    ' { kP2VectorPair, "' + owner + '", kExpectedVectorUnit, "NVOF producer (MotionAheadProducer)" } }; }\n'
+                    'r.push_back(MakeRow(' + str(row_id) + ', "optical-flow producer", "' + folder + '", PathwayUnit::Input, 5, '
+                    '{ kP1HalfLuma, kP2VectorPair }, own, "product.nvof_producer"));')
+
+        def x8(files):
+            return sorted(h["product"] for h in N1.scan(make_tree(files)) if h["site"] == "X8")
+        self.assertEqual(x8({"src/VP-V/core/ProductCatalog.h": cat(), prod: pub}), ["kP1HalfLuma"])   # P1 still governed
+        self.assertEqual(x8({"src/VP-V/core/ProductCatalog.h": cat(),
+                             prod: "void R(){ slot->Publish(a, b, c, std::make_shared<Flow>()); }"}),
+                         ["kP1HalfLuma", "kP2VectorPair"])                                              # empty publish only
+        self.assertEqual(x8({"src/VP-V/core/ProductCatalog.h": cat(), prod: "// " + pub}),
+                         ["kP1HalfLuma", "kP2VectorPair"])                                              # writer in a comment
+        self.assertEqual(x8({"src/VP-V/core/ProductCatalog.h": cat(),
+                             M + "motion/estimation/MotionAheadProducerNew.cpp": pub}),
+                         ["kP1HalfLuma", "kP2VectorPair"])                                              # file renamed
+        self.assertEqual(x8({"src/VP-V/core/ProductCatalog.h": cat(row_id=13), prod: pub}),
+                         ["kP1HalfLuma", "kP2VectorPair"])                                              # another row id
+        self.assertEqual(x8({"src/VP-V/core/ProductCatalog.h": cat(owner="input/capture"), prod: pub}),
+                         ["kP1HalfLuma", "kP2VectorPair"])                                              # not under the owner folder
+
     def test_bad_root_is_exit_2(self):
         self.assertEqual(N1.main(["--root", tempfile.mkdtemp()]), 2)
 
