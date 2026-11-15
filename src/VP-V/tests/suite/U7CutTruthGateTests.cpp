@@ -267,7 +267,13 @@ namespace U7CutTruthGateTest
 			for (const Row& row : rows)
 			{
 				const ClipRun run = RunClip(test, row.id, row.synthetic);
-				if (!run.ran) return;   // skipped visibly (SKIP-NO-FOOTAGE)
+				if (!run.ran)
+				{
+					// Skipped visibly (SKIP-NO-FOOTAGE); cuts already seen on earlier rows still fail the gate.
+					Assert::AreEqual(0, all.falseCuts, Wide("U7GATE " + Line("cut-free set (partial)", all) + " (gate: zero cuts; red rows:" +
+						red + ")").c_str());
+					return;
+				}
 				Score own;
 				own.Add(run, Truth());
 				all.Add(run, Truth());

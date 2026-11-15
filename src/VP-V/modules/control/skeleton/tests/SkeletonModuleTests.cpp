@@ -1635,6 +1635,39 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(seam(kCutFrame - 1), L"no group: nothing refused");
 			stored.After(int64_t(kCutFrame + 1));
 
+			// 1b. Store on, the records open AFTER the seals (WAIVER-U7ACC-SKELETON-SCENE: the v1 case 2, restored with the v2 expectations):
+			// the seals write nothing, the reader classifies live, gets the same confirmed cut, delivered at the cut frame itself (its
+			// successor was sealed when asked), writes it into the record and is served from the store after that; the next frame does not
+			// deliver it again.
+			Rig late(Lane("on"));
+			ShapeTwoStillShots(late);
+			FrameAnalysis::Store lateStore(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(late.Host(), &lateStore);
+			SceneStoreGuard g2(late.Host());
+			RunToTheSealOfTheCut(late, nullptr);
+			FrameAnalysis::Scene none;
+			Assert::IsFalse(lateStore.PeekScene(kCutFrame, none), L"no record at the seal: nothing written");
+			late.After(int64_t(kCutFrame));
+			late.Frame(int64_t(kCutFrame + 1));
+			lateStore.Begin(SceneTestId(kCutFrame), FrameAnalysis::kScene);
+			lateStore.Begin(SceneTestId(kCutFrame + 1), FrameAnalysis::kScene);
+			const Vpv::Skeleton::SceneAnswer fromLive = late.sk.SceneOf(late.Host(), kCutFrame);
+			Assert::IsTrue(fromLive.known);
+			Assert::IsTrue(fromLive.from == Vpv::Skeleton::SceneAnswer::From::Live);
+			Assert::IsTrue(fromLive.cutHere && fromLive.confirmed, L"the same confirmed verdict as the seal path");
+			Assert::IsTrue(fromLive.cut && !fromLive.cutLate, L"delivered at the cut frame: its successor was sealed when asked");
+			Assert::AreEqual(fromStore.fade, fromLive.fade);
+			FrameAnalysis::Scene written;
+			Assert::IsTrue(lateStore.PeekScene(kCutFrame, written), L"the live fill wrote the record that opened late");
+			Assert::IsTrue(written.cut && written.cutHere && written.confirmed);
+			Assert::IsTrue(late.sk.SceneOf(late.Host(), kCutFrame).from == Vpv::Skeleton::SceneAnswer::From::Store);
+			const Vpv::Skeleton::SceneAnswer lateNext = late.sk.SceneOf(late.Host(), kCutFrame + 1);
+			Assert::IsTrue(lateNext.known);
+			Assert::IsFalse(lateNext.cut, L"delivered once");
+			Assert::AreEqual(uint64_t(0), late.sk.SceneCountersOf(late.Host()).late, L"nothing went out late");
+			late.After(int64_t(kCutFrame + 1));
+			Tap::SetStore(late.Host(), nullptr);
+
 			// 2. Store off, the reader asks after the successor was sealed: the verdict is confirmed when asked, so the cut is delivered at
 			// the cut frame itself and not again on the next frame (exactly once).
 			Rig off(Lane("on"));
@@ -1670,6 +1703,98 @@ namespace SkeletonModuleTestsNs
 			// No other frame of the two shots is a cut (still shots: every other pair is identical).
 			for (uint64_t s = 2; s < kCutFrame; ++s)
 				Assert::IsFalse(off.sk.SceneOf(off.Host(), s).cutHere, L"no cut inside a still shot");
+		}
+
+		// WAIVER-U7ACC-DELIVERY-GAP (audit U7ACC MUST 3, a new test): the frame after the cut has no scene group (its record never opened:
+		// unsealed / dropped from the store). The cut is confirmed at the next seal that has a group and is delivered there, exactly once,
+		// counted as more than one frame late. Before the fix only frame seq - 1 was looked at and this cut was lost.
+		TEST_METHOD(ACutWhoseNextFrameHasNoSceneGroupIsDeliveredOnceWithTheNextGroup)
+		{
+			Rig rig(Lane("on"));
+			ShapeTwoStillShots(rig);
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s < int64_t(kCutFrame); ++s)
+				rig.Frame(s);
+			store.Begin(SceneTestId(kCutFrame), FrameAnalysis::kScene);
+			rig.Ingress(int64_t(kCutFrame));
+			rig.Deliver(kCutFrame + 1);
+			rig.Begin(int64_t(kCutFrame));
+			FrameAnalysis::Scene atSeal;
+			Assert::IsTrue(store.PeekScene(kCutFrame, atSeal));
+			Assert::IsFalse(atSeal.confirmed || atSeal.cut, L"provisional at its seal: nothing delivered");
+			rig.After(int64_t(kCutFrame));
+			rig.Frame(int64_t(kCutFrame + 1));   // no record: no group for the frame after the cut
+			FrameAnalysis::Scene none;
+			Assert::IsFalse(store.PeekScene(kCutFrame + 1, none));
+			store.Begin(SceneTestId(kCutFrame + 2), FrameAnalysis::kScene);
+			rig.Frame(int64_t(kCutFrame + 2));
+			FrameAnalysis::Scene cutGroup, carrier;
+			Assert::IsTrue(store.PeekScene(kCutFrame, cutGroup));
+			Assert::IsTrue(cutGroup.confirmed && cutGroup.cutHere, L"the cut frame's group was confirmed later");
+			Assert::IsFalse(cutGroup.cut, L"the delivered cut is not rewritten");
+			Assert::IsTrue(store.PeekScene(kCutFrame + 2, carrier));
+			Assert::IsTrue(carrier.cut && carrier.cutLate, L"delivered with the next frame that has a group");
+			Assert::IsFalse(carrier.cutHere);
+			const Vpv::Skeleton::SceneCounters c = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(uint64_t(1), c.late);
+			Assert::AreEqual(uint64_t(1), c.lateGap, L"counted: more than one frame late");
+			// A reader of the frame in between gets no second delivery; the carrier keeps it on a re-ask.
+			const Vpv::Skeleton::SceneAnswer between = rig.sk.SceneOf(rig.Host(), kCutFrame + 1);
+			Assert::IsTrue(between.known);
+			Assert::IsFalse(between.cut, L"exactly once");
+			Assert::IsTrue(rig.sk.SceneOf(rig.Host(), kCutFrame + 2).cut);
+			for (int64_t s = int64_t(kCutFrame + 3); s <= int64_t(kCutFrame + 6); ++s)
+			{
+				store.Begin(SceneTestId(uint64_t(s)), FrameAnalysis::kScene);
+				rig.Frame(s);
+				FrameAnalysis::Scene later;
+				Assert::IsTrue(store.PeekScene(uint64_t(s), later));
+				Assert::IsFalse(later.cut, L"no further delivery");
+			}
+			Assert::AreEqual(uint64_t(1), rig.sk.SceneCountersOf(rig.Host()).late, L"one cut, one delivery");
+		}
+
+		// Audit U7ACC MUST 4 (WAIVER-U7ACC-VECTOR-VETO, a new test): the vector cut veto's reach is shown, never silent. One enabled store:
+		// the veto is on ("Skeleton scene:" line); a registered but disabled store: skeleton_scene_veto is engaged with the reason.
+		TEST_METHOD(TheVectorCutVetoStateIsShown)
+		{
+			{
+				Rig rig(Lane("on"));
+				FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+				Tap::SetStore(rig.Host(), &store);
+				SceneStoreGuard guard(rig.Host());
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				for (int64_t s = 1; s <= 4; ++s)
+					rig.Frame(s);
+				Assert::IsTrue(Tap::SingleStore() == &store);
+				Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_scene_veto"), L"one enabled store: the veto works");
+				RE::Context c; c.host = rig.Host();
+				std::string reply;
+				Assert::IsTrue(rig.sk.OnCommand(c, "skeleton", "status", reply));
+				Assert::IsTrue(reply.find("Skeleton scene: ") != std::string::npos, L"the scene line is on the status");
+				Assert::IsTrue(reply.find("vector cut veto on") != std::string::npos);
+			}
+			{
+				Rig rig(Lane("on"));
+				FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+				store.SetEnabled(false);
+				Tap::SetStore(rig.Host(), &store);
+				SceneStoreGuard guard(rig.Host());
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				for (int64_t s = 1; s <= 4; ++s)
+					rig.Frame(s);
+				Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_scene_veto"), L"store off: the veto is off, visibly");
+				RE::Context c; c.host = rig.Host();
+				std::string reply;
+				Assert::IsTrue(rig.sk.OnCommand(c, "skeleton", "status", reply));
+				Assert::IsTrue(reply.find("vector cut veto off (frame-analysis store off") != std::string::npos);
+			}
 		}
 
 		TEST_METHOD(ARegisteredButDisabledStoreCostsNothingAtTheSeal)
