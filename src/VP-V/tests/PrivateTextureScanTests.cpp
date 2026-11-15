@@ -181,6 +181,10 @@ namespace PrivateTextureScanTestsNs
 		// OwnerFillRequest) takes the device only through OwnerFillRequest::gpu (the sanctioned OwnerGpuContext): it never names
 		// pl_gpu. The memo itself (core/SkeletonAcquire.h, whose comments name the type) is the one exception. The whole VP-V tree
 		// is scanned (tests excluded).
+		// Category Cpu: the name says GPU, the body is a source-text scan (no device).
+		BEGIN_TEST_METHOD_ATTRIBUTE(OwnerFillsTakeNoPrivateGpu)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(OwnerFillsTakeNoPrivateGpu)
 		{
 			std::vector<std::string> files;
