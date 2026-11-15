@@ -96,7 +96,7 @@ enum : ProductId {
     // with its owner fill (R13-8, 102b B3-ID30-EXCLUSIONS); the fill and the id land together (102b LB3-BAND-MEMO-GPU).
     kBandMemo = 30,       // 30 band_memo (BandMemo; implementation not landed on this line: RESERVED)
     kEdgeMap = 31,        // 31 edge_map (C3 fixed id table; per-frame memo of the source-luma Sobel; readers: L-FOCUS focus map, L-B5 busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3); frozen 17:19; 102b X5-EDGEMAP-CJ3, KEDGEMAP-RULE3 UPDATE :523); later deband guard, occlusion, TD); lead 8 allocation 31, 05:2x 11-14
-    kFocusMap = 32,       // 32 focus_map (L-FOCUS; RESERVED until it lands)
+    kFocusMap = 32,       // 32 focus_map (P17, job #1 L-FOCUS, owner 11-12 22:16 / 22:18): per P11 block defocus level, focus change, confidence, flags; built ON kEdgeMap (owner 11-14 05:25); owner input/source_analysis/focus_map
     kRoomLight = 33,      // 33 room_light (DV block; RESERVED until it lands)
     kComposedVectors = 34,// 34 composed_vectors (RESERVED until it lands)
     kSkeletonProductEnd = 35
@@ -108,7 +108,7 @@ static_assert(kSourceGeometry == 29 && kBandMemo == kSourceGeometry + 1 && kSkel
 // token, no inputs, no reader row, no catalog row), so ids stay indexes and Size() == kSkeletonProductEnd. Registry::Validate accepts an
 // absent slot ONLY at a listed id and rejects a real declaration at a listed id; Has() is false for an absent slot, so any input naming one
 // fails closed ("unknown input product"). The lane that lands a product declares it under its fixed number and deletes the number here.
-constexpr ProductId kReservedProductIds[] = { kBandMemo, kFocusMap, kRoomLight, kComposedVectors };
+constexpr ProductId kReservedProductIds[] = { kBandMemo, kRoomLight, kComposedVectors };
 constexpr size_t kReservedProductCount = sizeof(kReservedProductIds) / sizeof(kReservedProductIds[0]);
 constexpr bool IsReservedProduct(ProductId id)
 {
@@ -120,7 +120,7 @@ constexpr bool IsReservedProduct(ProductId id)
 // The planned token of a reserved id (shown in the product-graph doc and the Ctrl+Alt+D status line; "" for any other id).
 constexpr const char* ReservedProductName(ProductId id)
 {
-    return id == kBandMemo ? "band_memo" : id == kFocusMap ? "focus_map" : id == kRoomLight ? "room_light"
+    return id == kBandMemo ? "band_memo" : id == kRoomLight ? "room_light"
          : id == kComposedVectors ? "composed_vectors" : "";
 }
 
@@ -1047,8 +1047,9 @@ inline void PadReservedUntil(std::vector<ProductDecl>& decls, ProductId upTo)
     }
 }
 
-// Pads the reserved ids before (30) and after (32..34) edge_map, so EVERY caller that completes the skeleton set (SkeletonProducts, RegionEvidence)
-// gets the same id-indexed registry of Size() == kSkeletonProductEnd.
+// Pads the reserved id before (30) edge_map. The ids after it are the focus map's (32) and the reserved tail (33..34): AppendFocusMapProduct
+// closes the table, so EVERY caller that completes the skeleton set (SkeletonProducts, RegionEvidence) calls both and gets the same
+// id-indexed registry of Size() == kSkeletonProductEnd.
 inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
 {
     using detail::AddInput;
@@ -1062,6 +1063,38 @@ inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
     AddTerm(p, 0, 4);   // one R32F sample per source pixel (shift 0 = the full plane)
     p.refRenderMs = 0.05f;
     PadReservedUntil(decls, kEdgeMap);
+    decls.push_back(p);
+}
+
+// P17 focus_map (fixed id 32; owner 2026-11-12 22:16 / 22:18): a screen pass, cheap, before TD. Per P11 block: defocus level, focus-change
+// flag (defocus delta along the P2 motion, P7 camera translation where P2 is absent) and confidence. The sharpness input is the P11 band
+// energy ratio (interim; 102b FOCUS-EDGEMAP-SWITCH). Declared inputs: P11 v2 (stats + E1/E2/E3/N; lag 0 and lag 1), P10, P2 and P7.
+// It owns no statistic: every input is read through Acquire by its OWNER'S fill; the owner fill here obtains each prerequisite the
+// same way (nested Acquire publishes it). HARD TD RULE (owner 22:16): never import detail sharper than the current frame's focus state into
+// a region whose focus changed; the TD consumer row is DECLARED only (no wiring). Pads nothing before it (31 is edge_map) and the reserved
+// tail (33..34) after it: it closes the fixed id table.
+constexpr uint32_t kFocusMapBytesPerBlock = 8;   // u16 defocus, s16 delta, u16 confidence, u16 flags
+inline void AppendFocusMapProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    ProductDecl p = Make(kFocusMap, "focus_map", "focus map (defocus / focus change)", Backend::GpuCompute, 1, Tier::T1,
+                         Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis) | Bit(kSettingsMotion));
+    p.sourceFrame = true;
+    AddInput(p, kP11RegionBlockStats, 0);
+    AddInput(p, kP11RegionBlockStats, 1);    // the previous frame's block statistics: the focus-change reference (read, never copied);
+                                             // needs the P11 owner fill's keepFrames >= 1 (102b FOCUS-P11-LAG1-RETENTION), else kNoPreviousRetained
+    AddInput(p, kP10GrainSplit, 0);
+    AddInput(p, kP2VectorPair, 0);
+    AddInput(p, kP7CameraFit, 0);
+    AddTerm(p, 4, kFocusMapBytesPerBlock);   // the 16 px cell: exact at 1080p, an upper bound at 4K/8K (32/64 px blocks)
+    // No history of its own: the previous frame's defocus is a pure function of P11(seq - 1) (lag-1 edge above), so the map of a frame
+    // never depends on which frame was asked first (determinism), and no copy of the previous map exists.
+    p.missingInputForm = true;               // without P2 / P7 the change flag reads 0 motion and says so (flags), never absent
+    p.refRenderMs = 0.05f;                   // estimate only (a per-block screen pass); the measured bench replaces it
+    PadReservedUntil(decls, kFocusMap);
     decls.push_back(p);
     PadReservedUntil(decls, kSkeletonProductEnd);
 }
@@ -1338,7 +1371,8 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double s
     AppendCameraGuideProduct(d);
     AppendTemporalDetailEngineProducts(d, sourcePeriodMs, queueFrames);
     AppendSourceGeometryProduct(d);   // wave S2: P14g, appended after the doc 72 list
-    AppendEdgeMapProduct(d);          // L-B5 / rule 3: fixed id 31, after source_geometry; pads reserved ids 30 and 32..34 (Size() == kSkeletonProductEnd)
+    AppendEdgeMapProduct(d);          // L-B5 / rule 3: fixed id 31, after source_geometry; pads reserved id 30
+    AppendFocusMapProduct(d);         // job #1 L-FOCUS: fixed id 32; pads the reserved tail 33..34 (Size() == kSkeletonProductEnd)
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }
