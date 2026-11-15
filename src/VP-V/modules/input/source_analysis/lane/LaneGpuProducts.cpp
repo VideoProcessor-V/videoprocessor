@@ -21,14 +21,8 @@ namespace VpLaneProducts
 		const size_t rows = size_t(y1 - y0);
 		const size_t w = view.width;
 		scratch.resize(rows * w);
-		const unsigned shift = view.msbShift;
 		for (size_t r = 0; r < rows; ++r)
-		{
-			const uint16_t* src = view.luma + (size_t(y0) + r) * view.strideSamples;
-			uint16_t* dst = scratch.data() + r * w;
-			for (size_t x = 0; x < w; ++x)
-				dst[x] = uint16_t(uint32_t(src[x]) << shift);
-		}
+			view.Row16(uint32_t(size_t(y0) + r), 0, uint32_t(w), scratch.data() + r * w);
 		pl_tex_transfer_params t{};
 		t.tex = tap;
 		t.rc.x0 = 0;
