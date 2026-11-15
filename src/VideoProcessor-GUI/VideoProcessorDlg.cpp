@@ -253,14 +253,16 @@ bool ReadShortcutsGlobalHotkeys(const ConfigFile& config, bool& enabled,
 }
 
 // Bug hunt 3 (SH6): [shortcuts] global_actions - the [shortcuts] action keys
-// that act while another application has focus. Empty (none) by default.
+// that act while another application has focus. Default (key absent):
+// ShortcutDefaults.h EffectiveGlobalActions (state_report); an explicit empty
+// value means none.
 bool ReadShortcutsGlobalActions(const ConfigFile& config, std::set<std::string>& actions,
 	std::string& error)
 {
 	actions.clear();
-	std::string raw;
-	if (!config.TryGetString("shortcuts", "global_actions", raw))
-		return true;
+	const std::string raw = GlobalActionsForConfig(
+		[&config](const char* section, const char* key, std::string& out)
+		{ return config.TryGetString(section, key, out); });
 	std::string unknown;
 	if (!MainConfigSchema::ShortcutGlobalActionsValid(raw, unknown))
 	{
@@ -18139,7 +18141,7 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 
 
 		++m_timerSeconds;
-		DialogExtension::OnTimer();   // VPV-HOOK
+		DialogExtension::OnTimer({ m_interfaceMode == ApplicationInterface::Mode::Modern, m_hideUI, m_shortcutsForegroundOnly, m_shortcutsGlobalHotkeys, m_shortcutsGlobalActions.size(), GlobalShortcutObserver::IsRunning() });   // VPV-HOOK
 	}
 
 	CDialog::OnTimer(nIDEvent);

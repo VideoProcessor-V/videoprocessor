@@ -21,6 +21,7 @@
 #include <VP-V/abi/VpvHostCalls.h>
 #include <VP-V/core/StatusText.h>
 #include <VP-V/gui/VpShortcuts.h>
+#include <VP-V/gui/ShortcutObserverStatus.h>
 
 #include <atlstr.h>
 #include <functional>
@@ -40,11 +41,24 @@ namespace VpvGui
 	// GetLedDriveStatus / GetSourceResolutionStatus calls returned (StatusExtension::Snapshot).
 	using Snapshot = StatusExtension::Snapshot;
 
+	// S-3f b: a host-owned Fallbacks entry (`note`, "" = none; ShortcutObserverStatus.h) added to a
+	// poll's Fallbacks line, so every reader of the snapshot (Config status + one-time notice, Ctrl+I,
+	// crash state, Ctrl+Alt+D bundle) shows it. Without a note the snapshot is unchanged.
+	inline Snapshot WithHostFallbacks(Snapshot snapshot, const std::string& note)
+	{
+		if (note.empty())
+			return snapshot;
+		const std::string heading = snapshot.vp.fallbacks.known ? Narrow(snapshot.vp.fallbacks.text) : std::string();
+		snapshot.vp.fallbacks.Set(true, Wide(CString(ShortcutObserverStatus::WithEntry(heading, note).c_str())));
+		return snapshot;
+	}
+
 	inline Snapshot Poll(IVideoRenderer* renderer)
 	{
 		CString text;
 		const bool answered = renderer && VpvCalls::GetModuleStatus(renderer, VpStatusText::kRendererModule, text);
-		return StatusExtension::Read(renderer != nullptr, answered, answered ? Wide(text) : std::wstring());
+		return WithHostFallbacks(StatusExtension::Read(renderer != nullptr, answered, answered ? Wide(text) : std::wstring()),
+			ShortcutObserverStatus::CurrentNote());
 	}
 
 	// The "Fallbacks engaged" heading for the one-time notices and the Config status ("" = none).

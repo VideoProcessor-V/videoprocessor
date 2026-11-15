@@ -17,6 +17,7 @@
 #include <SessionEndShutdown.h>
 #include <ShortcutChord.h>
 #include <ShortcutDefaults.h>
+#include <VP-V/core/FallbackStatus.h>
 #include <VP-V/modules/drive/projector_control/ConnectionTest.h>
 #include <VP-V/modules/drive/projector_control/LedShutdownRestore.h>
 #include <VP-V/modules/drive/projector_control/ProjectorDriver.h>
@@ -26,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -355,6 +357,118 @@ namespace VideoProcessorTest
 			Assert::IsTrue(MainConfigSchema::ShortcutGlobalActionsValid("config_editor, toggle_noui", unknown));
 			Assert::IsFalse(MainConfigSchema::ShortcutGlobalActionsValid("config_editor, everything", unknown));
 			Assert::AreEqual(std::string("everything"), unknown);
+		}
+
+		// S-3f b (owner Q4): the report key is the one default global action; the default is a valid list,
+		// names only state_report, and that action keeps Ctrl+Alt+D.
+		TEST_METHOD(TheReportKeyIsTheOneDefaultGlobalAction)
+		{
+			std::string unknown;
+			Assert::AreEqual(std::string("state_report"), std::string(kDefaultGlobalActions));
+			Assert::IsTrue(MainConfigSchema::ShortcutGlobalActionsValid(kDefaultGlobalActions, unknown));
+			const ShortcutDefault* report = FindShortcutDefault("state_report");
+			Assert::IsTrue(report != nullptr);
+			Assert::AreEqual(std::string("Ctrl+Alt+D"), std::string(report->chord));
+		}
+
+		// S-3f b follow-up: the absent-key default lives in one Lib function. Absent -> default,
+		// present (even empty) -> the file's value, and the pathway gate is the one bool.
+		TEST_METHOD(GlobalActionsDefaultAppliesOnlyWhileTheKeyIsAbsent)
+		{
+			Assert::AreEqual(std::string("state_report"), EffectiveGlobalActions(false, ""));
+			Assert::AreEqual(std::string(""), EffectiveGlobalActions(true, ""));
+			Assert::AreEqual(std::string("config_editor"), EffectiveGlobalActions(true, "config_editor"));
+			Assert::AreEqual(std::string("state_report"), EffectiveGlobalActions(false, "ignored"));
+			Assert::AreEqual(std::string(""), EffectiveGlobalActions(false, "", false));
+			Assert::AreEqual(std::string("toggle_noui"), EffectiveGlobalActions(true, "toggle_noui", false));
+		}
+
+		// R14-34 (principle 8): the Original pathway installs no default global hook; VP-V pathways do;
+		// an explicit value wins everywhere.
+		TEST_METHOD(OriginalPathwayInstallsNoDefaultGlobalHook)
+		{
+			auto make = [](std::map<std::string, std::string> values)
+			{
+				return [values](const char* section, const char* key, std::string& out)
+				{
+					const auto it = values.find(std::string(section) + "." + key);
+					if (it == values.end()) return false;
+					out = it->second;
+					return true;
+				};
+			};
+			Assert::AreEqual(std::string("state_report"), GlobalActionsForConfig(make({})));
+			Assert::AreEqual(std::string("state_report"),
+				GlobalActionsForConfig(make({ { "vpv.pipeline_original_pathway", "off" } })));
+			Assert::AreEqual(std::string(""),
+				GlobalActionsForConfig(make({ { "vpv.pipeline_original_pathway", "on" } })));
+			Assert::AreEqual(std::string(""),
+				GlobalActionsForConfig(make({ { "vprenderer.pipeline_original_pathway", " On " } })));
+			Assert::AreEqual(std::string("toggle_noui"),
+				GlobalActionsForConfig(make({ { "vpv.pipeline_original_pathway", "on" }, { "shortcuts.global_actions", "toggle_noui" } })));
+			Assert::AreEqual(std::string(""),
+				GlobalActionsForConfig(make({ { "shortcuts.global_actions", "" } })));
+		}
+
+		// R14-45 MUST-3: the live-switch path. A publication that retains the shortcuts (ApplyProfiles:
+		// replaceAccelerators = false) still takes the staged global-action set, so switching
+		// pipeline_original_pathway on drops the default hook and switching off restores it; a publication
+		// that replaces the accelerators leaves the set to that replacement. [vpv] SaveOnly changes follow
+		// at the next start.
+		TEST_METHOD(ALiveSwitchOfThePathwayRemovesAndRestoresTheDefaultGlobalHook)
+		{
+			auto make = [](std::map<std::string, std::string> values)
+			{
+				return [values](const char* section, const char* key, std::string& out)
+				{
+					const auto it = values.find(std::string(section) + "." + key);
+					if (it == values.end()) return false;
+					out = it->second;
+					return true;
+				};
+			};
+			auto parse = [](const std::string& list)
+			{
+				std::set<std::string> actions;
+				std::istringstream stream(list);
+				std::string item;
+				while (std::getline(stream, item, ','))
+					if (!item.empty()) actions.insert(item);
+				return actions;
+			};
+			std::set<std::string> live = parse(GlobalActionsForConfig(make({})));     // VP-V pathway at start
+			Assert::AreEqual(size_t(1), live.size());
+			std::set<std::string> next;
+			// switch to the Original pathway, shortcuts retained (ApplyProfiles)
+			const std::set<std::string> toOriginal = parse(GlobalActionsForConfig(make({ { "vpv.pipeline_original_pathway", "on" } })));
+			Assert::IsTrue(GlobalActionsOnPublish(false, live, toOriginal, next), L"the observer is restarted");
+			Assert::IsTrue(next.empty(), L"Original: no global action, so no hook is installed");
+			live = next;
+			// nothing changed on a second publication: no restart
+			Assert::IsFalse(GlobalActionsOnPublish(false, live, toOriginal, next));
+			// back to a VP-V pathway
+			const std::set<std::string> toVp = parse(GlobalActionsForConfig(make({ { "vpv.pipeline_original_pathway", "off" } })));
+			Assert::IsTrue(GlobalActionsOnPublish(false, live, toVp, next));
+			Assert::IsTrue(next.count("state_report") == 1, L"VP-V: the report key is global again");
+			// accelerators replaced: ReplaceStagedAccelerators owns the set, nothing extra here
+			Assert::IsFalse(GlobalActionsOnPublish(true, live, toVp, next));
+			Assert::IsTrue(next == live);
+		}
+
+		// S-3f b follow-up (no silent fallbacks): a failed background-hook start is one more entry
+		// in the Fallbacks heading, announced once.
+		TEST_METHOD(AFailedKeyHookIsAVisibleFallbackEntry)
+		{
+			const FallbackStatus::Entry e{ "global shortcuts", "hook could not start" };
+			Assert::AreEqual(std::string("Fallbacks engaged: global shortcuts (hook could not start)"),
+				FallbackStatus::AppendEntry("Fallbacks engaged: none", e));
+			Assert::AreEqual(std::string("Fallbacks engaged: global shortcuts (hook could not start)"),
+				FallbackStatus::AppendEntry("", e));
+			Assert::AreEqual(std::string("Fallbacks engaged: render-ahead (off); global shortcuts (hook could not start)"),
+				FallbackStatus::AppendEntry("Fallbacks engaged: render-ahead (off)", e));
+			FallbackStatus::Notices notices;
+			Assert::AreEqual(size_t(1), notices.Take(FallbackStatus::AppendEntry("", e)).size());
+			Assert::AreEqual(size_t(0), notices.Take(FallbackStatus::AppendEntry("", e)).size());
 		}
 
 		// SH9: a remote-editing Config's title still identifies VP's editor.

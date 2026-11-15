@@ -28,15 +28,23 @@
 // dialog manager cannot turn it into a close; the background observer never
 // sees it unless the user marks it global.
 //
-// Bug hunt 3 (SH6): no default is global. While another application (MPC-HC,
-// a browser) has focus VP acts on - and swallows - no key, unless the user
-// lists the action in [shortcuts] global_actions (or turns global_hotkeys on,
-// which marks every binding global). For MPC file playback, keep VP's keys off
+// Bug hunt 3 (SH6): no shortcut is global except the one named in
+// kDefaultGlobalActions. While another application (MPC-HC, a browser) has
+// focus VP acts on - and swallows - no other key, unless the user lists the
+// action in [shortcuts] global_actions (or turns global_hotkeys on, which
+// marks every binding global). S-3f b (owner decision 2026-11-11 Q4): the
+// report-a-problem key (state_report, Ctrl+Alt+D) is the one default global
+// action, so a problem can be reported from whatever application has focus.
+// The default applies only while [shortcuts] global_actions is ABSENT; an
+// explicit (even empty) value is the user's and replaces it.
+// For MPC file playback, keep VP's keys off
 // MPC's own (Alt+Enter, Ctrl+1..4 and Ctrl+I are MPC keys too) or leave
 // them non-global.
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <set>
+#include <string>
 
 struct ShortcutDefault
 {
@@ -79,6 +87,57 @@ constexpr ShortcutDefault kShortcutDefaults[] = {
 	// first (the separate renderer file is the legacy fallback).
 	{ "display_rules_auto",      "Ctrl+Shift+F4", true },       // was F4 (SH7)
 };
+
+// [shortcuts] global_actions when the key is absent (comma-separated action names).
+constexpr const char* kDefaultGlobalActions = "state_report";
+
+// The list the host acts on: the file's value when the key is present (even empty),
+// else the default. defaultApplies is the ONE place a pathway gate goes (whether
+// the default hook installs in the Original pathway is pending lead 14).
+inline std::string EffectiveGlobalActions(bool keyPresent, const std::string& value,
+	bool defaultApplies = true)
+{
+	if (keyPresent)
+		return value;
+	return defaultApplies ? std::string(kDefaultGlobalActions) : std::string();
+}
+
+// The list for a configuration. tryGet(section, key, out) is the config read (true = key present).
+// Pathway gate (lead 14 R14-34, principle 8): the Original pathway ([vpv] then [vprenderer]
+// pipeline_original_pathway = on) is Bill's behaviour, so the default global action does not
+// apply there and no low-level keyboard hook is installed by default; an explicit
+// global_actions value is still the user's and is honoured in every pathway.
+template <class TryGet>
+std::string GlobalActionsForConfig(TryGet&& tryGet)
+{
+	std::string pathway;
+	const bool known = tryGet("vpv", "pipeline_original_pathway", pathway) ||
+		tryGet("vprenderer", "pipeline_original_pathway", pathway);
+	std::string lower;
+	for (char c : pathway)
+		if (c != ' ' && c != '\t')
+			lower += static_cast<char>((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c);
+	const bool original = known && lower == "on";
+	std::string value;
+	const bool present = tryGet("shortcuts", "global_actions", value);
+	return EffectiveGlobalActions(present, value, !original);
+}
+
+// What a live configuration publication does to the global-action set (R14-45 MUST-3). With
+// replaceAccelerators the accelerator replacement installs the staged set itself (returns false).
+// Without it (ApplyProfiles / ResetQueues, shortcuts retained) the staged set still applies, so a live switch of
+// pipeline_original_pathway removes the default global hook at once (Original == Bill) and the
+// switch back re-installs it. Returns true when the host must restart the background observer;
+// `next` is then the set to adopt. Only the actions set is touched, never the accelerators.
+inline bool GlobalActionsOnPublish(bool replaceAccelerators, const std::set<std::string>& current,
+	const std::set<std::string>& staged, std::set<std::string>& next)
+{
+	next = current;
+	if (replaceAccelerators || staged == current)
+		return false;
+	next = staged;
+	return true;
+}
 
 // Chords other branches already use for compiled defaults that are not on
 // this branch yet. A new default must not take them; when the feature is

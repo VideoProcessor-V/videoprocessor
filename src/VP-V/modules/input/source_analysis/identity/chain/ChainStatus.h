@@ -110,11 +110,12 @@ namespace SourceIdentity
 			// SID r2 (M4): the latch reasons of the published (applied) geometry. Only the r2 bits: they are zero while the rules are off.
 			constexpr uint32_t kLatchReasonBits = kReasonNonConventional | kReasonLatchBar | kReasonLatchRelease | kReasonMenuHold | kReasonAbrStep;
 
-			// SID r2 (M4): "; upscale latch 1920x1080" / "; no upscale latch" while the rules are on, "" while off.
+			// SID r2 (M4): "; upscale latch 1920x1080" / "; no upscale latch" while the rules are on; "; SID safety rules: off" while off
+			// (S-3f a: the default state is visible, never silent; the detail text still says nothing of the latch while off).
 			inline std::string LatchClause(const ChainStatusInput& in)
 			{
 				if (!in.safetyRules)
-					return std::string();
+					return "; SID safety rules: off";
 				if (in.latchNx > 0 && in.latchNy > 0)
 					return "; upscale latch " + std::to_string(in.latchNx) + "x" + std::to_string(in.latchNy) +
 						(in.latchDeferred ? " (release deferred to the next cut)" : "");
