@@ -512,6 +512,88 @@ namespace SchedulerS1Test
 			Assert::IsTrue(ring.Push(EntryKey{ 41, 42, 7 }) == PushResult::Full);
 		}
 
+		// PREC2-S3A MUST 3: an entry keeps the host slot it was estimated into across consumes (the textures never move); MUST 4: the ring's
+		// capacity is the owner's ahead ceiling, never the P2 ring's 13.
+		TEST_METHOD(AheadRingSlotFollowsTheEntryAcrossConsume)
+		{
+			AheadRing ring(2);
+			const EntryKey a{ 2, 3, 7 }, b{ 3, 4, 7 }, c{ 4, 5, 7 };
+			Assert::AreEqual(0, ring.FreeSlot());
+			Assert::IsTrue(ring.Push(a) == PushResult::Held);
+			Assert::IsTrue(ring.Push(b) == PushResult::Held);
+			Assert::AreEqual(-1, ring.FreeSlot(), L"both slots held");
+			int slot = -2;
+			Assert::IsTrue(ring.Consume(2, 3, 7, &slot));
+			Assert::AreEqual(0, slot, L"A was estimated into slot 0");
+			Assert::AreEqual(1, ring.SlotAt(0), L"B keeps slot 1 after A is consumed");
+			Assert::AreEqual(0, ring.FreeSlot(), L"the next pair goes to A's freed slot, never over B");
+			Assert::IsTrue(ring.Push(c, 1) == PushResult::BadSlot, L"a held pair's slot is refused");
+			Assert::IsTrue(ring.Push(c) == PushResult::Held);
+			Assert::AreEqual(0, ring.SlotAt(1));
+			Assert::IsTrue(ring.Consume(3, 4, 7, &slot));
+			Assert::AreEqual(1, slot, L"B is read from the slot it was estimated into");
+			Assert::IsTrue(ring.Consume(4, 5, 7, &slot));
+			Assert::AreEqual(0, slot, L"C is read from the slot it was estimated into");
+
+			// a smaller capacity keeps only a chained prefix whose slots still exist (each dropped entry counted)
+			AheadRing r4(4);
+			r4.Push(EntryKey{ 10, 11, 7 });
+			r4.Push(EntryKey{ 11, 12, 7 });
+			r4.Push(EntryKey{ 12, 13, 7 });
+			Assert::IsTrue(r4.Consume(10, 11, 7));
+			r4.SetCapacity(2);
+			Assert::AreEqual(1, r4.Held(), L"(12,13) sat in slot 2, beyond the new capacity");
+			Assert::AreEqual(1, r4.SlotAt(0));
+			Assert::AreEqual(1ull, r4.Discarded(DiscardCause::Drop));
+
+			Assert::IsTrue(AheadRing::kCapacityMax == kAheadCeilingLead, L"capacity max = the owner's ahead cap");
+			AheadRing big(kStructuralMaxLead);
+			Assert::AreEqual(kAheadCeilingLead, big.Capacity(), L"held to the owner's ahead cap");
+		}
+
+		// PREC2-S3A MUST 3 through the adapter: push, consume, push at capacity 2 leaves each held pair reading the slot it was estimated into.
+		TEST_METHOD(LaneAheadSpareWorkEstimatesIntoAFreeSlot)
+		{
+			struct SlotEngine : FakeEngine
+			{
+				std::map<uint64_t, int> slotByTo;
+				double Estimate(const EntryKey& pair, int slot, const AcquireResult& fromPlanes, const AcquireResult& toPlanes) override
+				{
+					slotByTo[pair.to] = slot;
+					return FakeEngine::Estimate(pair, slot, fromPlanes, toPlanes);
+				}
+			};
+			SlotEngine eng;
+			FakeAcquire acq;
+			AheadRing p3Ring(2);
+			LaneAheadSpareWork p3(&eng, acq.Fn(), 2, p3Ring);
+			SpareHost host;
+			host.Slot().Register(&p3);
+			eng.render = 1;
+			eng.lastQueued = 4;
+			Present(host, 1, false, 20.0);   // (2,3) -> slot 0, (3,4) -> slot 1
+			Assert::AreEqual(0, eng.slotByTo[3]);
+			Assert::AreEqual(1, eng.slotByTo[4]);
+			int slot = -2;
+			eng.render = 2;
+			Assert::IsTrue(p3.ConsumeAtRender(2, 3, eng.epoch, &slot));
+			Assert::AreEqual(0, slot);
+			eng.lastQueued = 5;
+			Present(host, 2, false, 20.0);   // (4,5) -> the freed slot 0, never (3,4)'s slot 1
+			Assert::AreEqual(0, eng.slotByTo[5]);
+			eng.render = 3;
+			Assert::IsTrue(p3.ConsumeAtRender(3, 4, eng.epoch, &slot));
+			Assert::AreEqual(eng.slotByTo[4], slot, L"(3,4) is read from the slot it was estimated into");
+			eng.render = 4;
+			Assert::IsTrue(p3.ConsumeAtRender(4, 5, eng.epoch, &slot));
+			Assert::AreEqual(eng.slotByTo[5], slot);
+
+			// SHOULD 4: a lost lease is on the status line, not only in a counter
+			p3Ring.Push(EntryKey{ 5, 6, eng.epoch });
+			p3Ring.Discard(DiscardCause::LeaseLost);
+			Assert::IsTrue(p3.StatusLine().find("lease lost 1") != std::string::npos);
+		}
+
 		// Z3: the feed publishes every held entry once, ascending.
 		TEST_METHOD(AheadFeedPublishesEachEntryOnceAscending)
 		{
