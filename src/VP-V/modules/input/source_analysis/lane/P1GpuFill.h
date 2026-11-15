@@ -156,7 +156,7 @@ namespace P1Gpu
 
 	// The variant's storage: the owner's own default format for every pyramid level (VariantTexShape `fallback`; the precision
 	// axis stays 0, so core/VariantShape.h still refuses every Float16 PRECISION request). OD:670 (d); N2 row requested (BBP-B).
-	inline VpSkeleton::TexFormat MatcherStorageFormat() { return VpSkeleton::TexFormat::R16F; }
+	inline VpSkeleton::TexFormat MatcherStorageFormat() { return VpSkeleton::TexFormat::R16F; }  // PRECISION-OK 119#64: matcher pyramid analysis variant (codeUnit 8, scale 1..6), never pixels; OD:670 (d)
 
 	// The 2x2 level body, MOVED from DejudderWarp.cpp DOWNSAMPLE_BODY (its non-fade branch, byte-identical): head + core + tail.
 	// The matcher splices its fade exception between the pieces (FADE_PLAIN after the head, FADE_APPLY after the core), so its
