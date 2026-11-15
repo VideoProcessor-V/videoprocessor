@@ -371,17 +371,22 @@ namespace VideoProcessorTest
 			Assert::IsTrue(r.describe.find("reactive fallback") != std::string::npos, L"shown in the Ctrl+I / Config status line, never log-only");
 		}
 
-		// Original: PlanEntrance is skipped (the pathway gate at the call site), the End handler runs for a frame nothing
-		// armed, and a frame with no VP native work flushes nothing: pl_gpu_flush is never called.
+		// Original (owner REVERT 2026-11-12, bda439bd9): PlanEntrance runs in Original on purpose (it feeds the source-resolution
+		// monitor as before P4, 77fe0397e) and its body returns before any VP-V stage. source_resolution_frame_bound is off there,
+		// so Begin runs the monitor inline and leaves nothing pending; with no deferred LED copies an End then flushes nothing:
+		// pl_gpu_flush is never called, armed or not.
 		TEST_METHOD(OriginalMakesNoPlGpuFlushCallsAtTheHostLevel)
 		{
 			const std::string renderer = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
-			Assert::IsTrue(renderer.find("if (!pipelineSlots.OriginalPathway()) { PlanEntrance(renderImage, target, image, sourceSequence,") != std::string::npos,
-				L"the only caller of the planner (the only Arm) is behind the Original gate");
+			Assert::IsTrue(renderer.find("\t\tPlanEntrance(renderImage, target, image, sourceSequence,") != std::string::npos &&
+				renderer.find("if (!pipelineSlots.OriginalPathway()) { PlanEntrance(") == std::string::npos,
+				L"the planner call is unguarded: the Original pathway still feeds the source-resolution monitor (owner REVERT 2026-11-12)");
 			FrameQuiet::Deferred& frameQuiet = FrameQuiet::Deferred::ForThisThread();
 			const unsigned long long before = frameQuiet.Flushes();
 			for (int i = 0; i < 50; ++i) FrameQuiet::Deferred::EndThisFrame();   // the seam handler on frames nothing armed
 			Assert::AreEqual(before, frameQuiet.Flushes(), L"no flush on an unarmed frame");
+			for (int i = 0; i < 50; ++i) { frameQuiet.Arm(nullptr); FrameQuiet::Deferred::EndThisFrame(); }   // Original: armed, nothing pending, no copies
+			Assert::AreEqual(before, frameQuiet.Flushes(), L"no flush on an armed frame with no VP native work (Original)");
 			Assert::AreEqual<unsigned long long>(0, frameQuiet.MissedEnds());
 		}
 
