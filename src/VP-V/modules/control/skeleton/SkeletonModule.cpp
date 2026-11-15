@@ -630,6 +630,9 @@ namespace Vpv
 			std::atomic<uint64_t> lastPresentedSeq{ 0 };                   // AfterPresent: the last presented source seq (0 = none)
 			VpSkeleton::WindowPeak presentLag{ static_cast<uint64_t>(VpSkeleton::kLeadWindowSeconds * 1e6) };   // render thread: P
 			VpSkeleton::QueueWindowBoard board;                            // written once per Begin, any thread reads
+			// OnQueue Drop (any thread): dropped frames past kMaxDropsPerEvent in one event are not discarded from the memo; counted and
+			// shown on the Fallbacks status (audit S4, the memo-only twin of HostState::dropsLost), never silent.
+			std::atomic<uint64_t> dropsLost{ 0 };
 		};
 
 		namespace
@@ -1568,6 +1571,8 @@ namespace Vpv
 					{
 						const uint64_t survivor = static_cast<uint64_t>(f.seq);
 						const uint64_t n = (std::min<uint64_t>)(f.frames, survivor);
+						if (n > kMaxDropsPerEvent)
+							mhq->dropsLost.fetch_add(n - kMaxDropsPerEvent, std::memory_order_relaxed);
 						for (uint64_t i = 0; i < n && i < kMaxDropsPerEvent; ++i)
 							mhq->memo->Discard(survivor - n + i);
 					}
@@ -2393,6 +2398,15 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					const VpSkeleton::QueueWindow w = mw->Window();
 					if (w.wired != 0 && w.wired != VpSkeleton::QueueWindowTerms::kAll)
 						lines.push_back("skeleton_queue_window: not fed: " + VpSkeleton::NotFed(w.wired) + " (those terms read 0 until delivered)");
+				}
+			// Audit S4: queue drops past the per-event cap that the memo did not discard (lane or not), shown, never silent.
+			if (kind == RE::StatusKind::Fallbacks)
+				if (const std::shared_ptr<MemoHost> mhd = memoHosts_.Find(ctx.host))
+				{
+					const uint64_t memoLost = mhd->dropsLost.load(std::memory_order_relaxed);
+					if (memoLost != 0)
+						lines.push_back("skeleton_memo: " + std::to_string(memoLost) + " dropped frame(s) past the per-event cap (" +
+							std::to_string(kMaxDropsPerEvent) + ") were not discarded from the memo");
 				}
 			if (!st)
 				return;
