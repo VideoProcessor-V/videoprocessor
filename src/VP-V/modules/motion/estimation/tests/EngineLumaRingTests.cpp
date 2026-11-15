@@ -8,6 +8,7 @@
 #include <VP-V/modules/motion/estimation/EngineLumaRing.h>
 
 #include <set>
+#include <string>
 #include "CppUnitTest.h"
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -120,6 +121,38 @@ namespace VideoProcessorTest
 				{
 					Assert::IsTrue(ring.Find(1, s) != Ring::kNoSlot && ring.Find(1, s - 1) != Ring::kNoSlot && ring.Find(1, s - 2) != Ring::kNoSlot);
 				}
+			}
+		}
+
+		// S2PH1-S3B C4 (register 115 #13 / #35): the walk pair's first frame. Chained and held = its slot; chained but evicted =
+		// Lost() (the producer counts and names it); not chained (no previous, a gap, another generation) = never a miss.
+		TEST_METHOD(APairStartTheRingLostIsALostMissNotASilentSkip)
+		{
+			Ring ring(3, 0);
+			const int held = ring.Acquire(1, 9);
+			const MotionAhead::PairStart hit = MotionAhead::FindPairStart(ring, true, 1, 9, 1, 10);
+			Assert::IsTrue(hit.chained && !hit.Lost());
+			Assert::AreEqual(held, hit.slot, L"the slot of frame 9 by key");
+			for (uint64_t s = 20; s <= 22; ++s) ring.Acquire(1, s);   // three newer frames evict frame 9
+			Assert::AreEqual(static_cast<int>(Ring::kNoSlot), ring.Find(1, 9), L"setup: frame 9 was evicted");
+			const MotionAhead::PairStart lost = MotionAhead::FindPairStart(ring, true, 1, 9, 1, 10);
+			Assert::IsTrue(lost.chained, L"the chain still says (9, 10) is a pair");
+			Assert::AreEqual(static_cast<int>(Ring::kNoSlot), lost.slot);
+			Assert::IsTrue(lost.Lost(), L"a ring miss, for the producer's NoteRingMiss");
+			Assert::AreEqual(std::string("the engine-luma ring lost the pair's first frame"), std::string(MotionAhead::PairStartLostText()));
+		}
+
+		TEST_METHOD(AnUnchainedFrameIsNeverARingMiss)
+		{
+			Ring ring(3, 0);   // empty: every Find misses
+			const MotionAhead::PairStart noPrevious = MotionAhead::FindPairStart(ring, false, 1, 9, 1, 10);
+			const MotionAhead::PairStart gap = MotionAhead::FindPairStart(ring, true, 1, 8, 1, 10);
+			const MotionAhead::PairStart otherGeneration = MotionAhead::FindPairStart(ring, true, 1, 9, 2, 10);
+			for (const MotionAhead::PairStart& p : { noPrevious, gap, otherGeneration })
+			{
+				Assert::IsFalse(p.chained);
+				Assert::IsFalse(p.Lost(), L"no pair is due: not a miss");
+				Assert::AreEqual(static_cast<int>(Ring::kNoSlot), p.slot);
 			}
 		}
 	};
