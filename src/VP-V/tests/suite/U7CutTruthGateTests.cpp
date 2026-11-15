@@ -126,12 +126,14 @@ namespace U7CutTruthGateTest
 		int frame = 0;
 		bool cut = false, candidate = false, gridLaw = false;
 		double L = 0.0, bar = 0.0, H = 0.0, G = 0.0;
-		// How close the frame came to firing: the spike tier needs L >= kSpikeL and L >= bar, the hard tier H > kHardH and
-		// G >= kHardG; 1 = at the bar of the nearer tier.
+		// How close the frame came to the candidate rule: the spike tier needs L >= kSpikeL and L >= bar, the low tier L >= kLowTierL
+		// and L >= bar (with S < kLowTierS and no flat frame, not checked here: an upper bound), the hard tier H > kHardH and G >= kHardG;
+		// 1 = at the bar of the nearest tier. It does not see the veto stage (flash / lighting): `vetoed` counts those candidates.
 		double Fire() const
 		{
 			using namespace VpUnit::CutFadeJudge;
-			const double spikeL = L / kSpikeL, spikeBar = bar > 0.0 ? L / bar : 0.0;
+			const double spikeBar = bar > 0.0 ? L / bar : 0.0;
+			const double spikeL = L / kLowTierL;
 			const double spike = spikeL < spikeBar ? spikeL : spikeBar;
 			const double hardH = H / kHardH, hardG = G / kHardG;
 			const double hard = hardH < hardG ? hardH : hardG;

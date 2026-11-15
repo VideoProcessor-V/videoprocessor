@@ -1899,8 +1899,9 @@ namespace SkeletonModuleTestsNs
 			const VpUnit::CutFadeJudge::CutVerdict expected = tracker.Provisional();
 			Assert::IsTrue(expected.known && expected.seq == 4u);
 			Assert::AreEqual(expected.cut, f.cut, L"the shared sequence law's verdict, not a private one");
-			// Pinned: with its context frames (L of the pairs 1->2 and 2->3 about 21-24) frame 4 (L about 21) is no spike; a later law or
-			// window change shows up here.
+			// Pinned: with its context frames (L of the pairs 1->2 and 2->3 about 21-24) frame 4 (L about 21.3, spike bar 43.7) is no spike.
+			// The BINDING margin is the hard tier: H 0.457 against kHardH 0.5 (G about 37 >= kHardG), so a lower kHardH or a coarser
+			// histogram makes this a cut. A later law or window change shows up here.
 			Assert::IsFalse(expected.cut, L"noise frames with their context: no sequence-law cut");
 			Assert::AreEqual(expected.flash, f.flash);
 			Assert::AreEqual(expected.candidate, f.cutPossible);
