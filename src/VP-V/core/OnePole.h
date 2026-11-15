@@ -11,6 +11,7 @@
 // Nine private copies of this law existed (dither need, ambient adaptation, light-level blocks, queue
 // rules, LED settle, ...). They differ only in AXES, which are parameters here, not copies:
 //   - unit of dt and tau: seconds or milliseconds (AlphaFor / AlphaForMs; dt and tau must share the unit);
+//   - precision: double, or float overloads evaluated in float (the float callers' old expressions, bit for bit);
 //   - dt source: a MEASURED interval (AlphaFor) or one frame at a rate (AlphaPerFrame / PerFrameAt);
 //   - a dt of 0 or less: "unknown, no smoothing" (alpha 1, the dither-need rule) or "as given" (the
 //     caller already clamped dt to >= 0; dt 0 holds, alpha 0). DtRule selects it.
@@ -36,6 +37,22 @@ namespace OnePole
 
 	// The same law with dt and tau in milliseconds (the ratio is unit free; the name records the unit).
 	inline double AlphaForMs(double dtMs, double tauMs, DtRule rule = DtRule::UnknownIsNoSmoothing)
+	{
+		return AlphaFor(dtMs, tauMs, rule);
+	}
+
+	// float overloads of the same law, evaluated in float (std::exp(float)), for the float callers (AdaptiveDownscale's
+	// grain smoothing). Overload safety: every pre-existing call passes doubles (exact
+	// match on the double form); a mixed float/double call is ambiguous and fails to compile, so no call can switch
+	// precision silently. Only all-float (or float with an int literal) arguments pick these.
+	inline float AlphaFor(float dt, float tau, DtRule rule = DtRule::UnknownIsNoSmoothing)
+	{
+		if (!(tau > 0.0f)) return 1.0f;
+		if (rule == DtRule::UnknownIsNoSmoothing && !(dt > 0.0f)) return 1.0f;
+		return 1.0f - std::exp(-dt / tau);
+	}
+
+	inline float AlphaForMs(float dtMs, float tauMs, DtRule rule = DtRule::UnknownIsNoSmoothing)
 	{
 		return AlphaFor(dtMs, tauMs, rule);
 	}

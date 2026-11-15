@@ -13,12 +13,18 @@
 //   kBt709*     the BT.709 constants; the *Text macros are the same numbers as string literals so a GLSL / mpv
 //               pass built from adjacent literals takes them from here (a test checks text == constant).
 //
-// Kept apart (display / grading primaries, not a YCbCr tag): DvHostStage.h:269, DolbyVisionTrims.h:204, calibration
-// patterns. AdaptiveDownscale's GLSL form is owned by L-B5 and calls ForSystem through DetailPulse::LumaWeights.
+//   LumaOf      Y' = kr R' + (1 - kr - kb) G' + kb B' in float (moved verbatim from VpNets RgbLumaDelta); its GLSL twin
+//               is VP_LUMA_DOT_PARAM_GLSL_TEXT over the mpv parameters vp_kr / vp_kb (a test checks the text).
+//
+// Kept apart (display / grading primaries, not a YCbCr tag): DvHostStage's primaries-derived luminance (its
+// BT.709 fallback reads the kBt709* constants here; the primaries path stays its own), DolbyVisionTrims.h:204,
+// calibration patterns. AdaptiveDownscale's GLSL form is owned by L-B5 and calls ForSystem through DetailPulse::LumaWeights.
 #define VP_LUMA_BT709_KR_TEXT "0.2126"
 #define VP_LUMA_BT709_KG_TEXT "0.7152"
 #define VP_LUMA_BT709_KB_TEXT "0.0722"
 #define VP_LUMA_BT709_VEC3_TEXT "vec3(" VP_LUMA_BT709_KR_TEXT ", " VP_LUMA_BT709_KG_TEXT ", " VP_LUMA_BT709_KB_TEXT ")"
+// GLSL twin of LumaCoeff::LumaOf over a vec4 c and the mpv parameters vp_kr / vp_kb.
+#define VP_LUMA_DOT_PARAM_GLSL_TEXT "vp_kr * c.x + (1.0 - vp_kr - vp_kb) * c.y + vp_kb * c.z"
 
 namespace LumaCoeff
 {
@@ -43,5 +49,11 @@ namespace LumaCoeff
 		out[0] = kr;
 		out[1] = 1.0 - kr - kb;
 		out[2] = kb;
+	}
+
+	// Y' from R'G'B' with the matrix coefficients (BT.709: kr 0.2126, kb 0.0722).
+	inline float LumaOf(float r, float g, float b, float kr, float kb)
+	{
+		return kr * r + (1.0f - kr - kb) * g + kb * b;
 	}
 }

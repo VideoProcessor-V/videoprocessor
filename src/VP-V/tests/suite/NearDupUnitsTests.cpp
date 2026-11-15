@@ -15,7 +15,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -32,6 +35,43 @@ namespace NearDupUnitsTest
 	bool SameBits(float a, float b)
 	{
 		return std::memcmp(&a, &b, sizeof(float)) == 0;
+	}
+
+	bool SameBitsOrBothNaN(float a, float b)
+	{
+		return (std::isnan(a) && std::isnan(b)) || SameBits(a, b);
+	}
+
+	// Overload-set guard (C6-3 K1): the float AlphaFor overloads must not capture a double or mixed call.
+	template <class A, class B, class = void> struct CanCallAlphaFor : std::false_type {};
+	template <class A, class B>
+	struct CanCallAlphaFor<A, B, decltype(void(OnePole::AlphaFor(std::declval<A>(), std::declval<B>())))> : std::true_type {};
+	static_assert(std::is_same<decltype(OnePole::AlphaFor(0.1, 0.2)), double>::value, "double calls keep the double form");
+	static_assert(std::is_same<decltype(OnePole::AlphaForMs(1.0, 2.0)), double>::value, "double calls keep the double form");
+	static_assert(std::is_same<decltype(OnePole::AlphaFor(0.1f, 0.2f)), float>::value, "float calls take the float form");
+	static_assert(std::is_same<decltype(OnePole::AlphaForMs(1.0f, 2.0f)), float>::value, "float calls take the float form");
+	static_assert(!CanCallAlphaFor<float, double>::value && !CanCallAlphaFor<double, float>::value,
+		"a mixed float/double call is ambiguous (compile error), never a silent precision switch");
+
+	// The BT.709 float weights the float sites spell as static_cast<float>(LumaCoeff::kBt709K*) equal the old float literals.
+	static_assert(static_cast<float>(LumaCoeff::kBt709Kr) == 0.2126f, "Kr float");
+	static_assert(static_cast<float>(LumaCoeff::kBt709Kg) == 0.7152f, "Kg float");
+	static_assert(static_cast<float>(LumaCoeff::kBt709Kb) == 0.0722f, "Kb float");
+
+	// Old float one-pole forms (AdaptiveDownscale MotionAlpha / grain smoothing; dither-need rule in float).
+	float OldAdAlpha(float frameSeconds, float smoothMs)
+	{
+		return smoothMs > 0.0f ? 1.0f - std::exp(-frameSeconds * 1000.0f / smoothMs) : 1.0f;
+	}
+
+	float OldFloatUnknownIsNoSmoothing(float dt, float tau)
+	{
+		return (tau > 0.0f && dt > 0.0f) ? 1.0f - std::exp(-dt / tau) : 1.0f;
+	}
+
+	float OldLumaOf(float r, float g, float b, float kr, float kb)   // VpNets::LumaOf (RgbLumaDelta.h) as it was
+	{
+		return kr * r + (1.0f - kr - kb) * g + kb * b;
 	}
 
 	// ---- legacy copies (reference) ----
@@ -130,6 +170,41 @@ namespace NearDupUnitsTest
 			for (double tau : { 0.1, 0.25, 1.0 })
 				for (double rate : { 24.0, 30.0, 50.0, 60.0, 120.0 })
 					Assert::IsTrue(SameBits(1.0 - std::exp(-1.0 / (tau * rate)), OnePole::AlphaPerFrame(tau, rate)));
+		}
+
+		TEST_METHOD(OnePoleFloatMatchesTheOldFloatForms)
+		{
+			const float nan = std::numeric_limits<float>::quiet_NaN();
+			const float edgeDt[] = { 0.0f, -0.0f, -1.0f, -0.0417f, nan, 1.0f / 24.0f, 1.0f / 60.0f, 1e-30f, 1e30f };
+			const float edgeTau[] = { 0.0f, -0.0f, -5.0f, nan, 1e-30f, 0.25f, 16.0f, 250.0f, 1e30f };
+			std::vector<float> dts(std::begin(edgeDt), std::end(edgeDt)), taus(std::begin(edgeTau), std::end(edgeTau));
+			uint32_t st = 0x9e3779b9u;
+			for (int i = 0; i < 100; ++i)
+			{
+				st = st * 1664525u + 1013904223u;
+				dts.push_back(static_cast<float>(st >> 8) / 16777216.0f * 0.2f - 0.02f);     // seconds, some negative
+				st = st * 1664525u + 1013904223u;
+				taus.push_back(static_cast<float>(st >> 8) / 16777216.0f * 500.0f - 10.0f);  // ms, some <= 0
+			}
+			size_t n = 0;
+			for (float dt : dts)
+				for (float tau : taus)
+				{
+					++n;
+					// AdaptiveDownscale: smoothMs <= 0 / NaN -> 1, dt as given (frameSeconds * 1000).
+					Assert::IsTrue(SameBitsOrBothNaN(OldAdAlpha(dt, tau),
+						OnePole::AlphaForMs(dt * 1000.0f, tau, OnePole::DtRule::AsGiven)));
+					// The dither-need rule in float (dt <= 0 / NaN -> 1).
+					Assert::IsTrue(SameBitsOrBothNaN(OldFloatUnknownIsNoSmoothing(dt, tau), OnePole::AlphaFor(dt, tau)));
+					Assert::IsTrue(SameBitsOrBothNaN(OldFloatUnknownIsNoSmoothing(dt, tau), OnePole::AlphaForMs(dt, tau)));
+				}
+			Assert::IsTrue(n >= 10000);
+			// The edges by name: tau 0 / NaN -> 1; unknown dt -> 1; dt 0 as given holds (alpha 0).
+			Assert::IsTrue(SameBits(1.0f, OnePole::AlphaFor(0.1f, 0.0f, OnePole::DtRule::AsGiven)));
+			Assert::IsTrue(SameBits(1.0f, OnePole::AlphaFor(0.1f, nan, OnePole::DtRule::AsGiven)));
+			Assert::IsTrue(SameBits(1.0f, OnePole::AlphaFor(nan, 0.25f)));
+			Assert::IsTrue(SameBits(1.0f, OnePole::AlphaFor(-1.0f, 0.25f)));
+			Assert::IsTrue(SameBits(0.0f, OnePole::AlphaFor(0.0f, 0.25f, OnePole::DtRule::AsGiven)));
 		}
 
 		TEST_METHOD(RobustStatsMatchTheOldCopies)
@@ -307,6 +382,27 @@ namespace NearDupUnitsTest
 			Assert::AreEqual(expected, std::string(VpNets::kLumaFromRgbPass));
 			// The splice used by the source-resolution shader: the text of the old literal.
 			Assert::AreEqual(std::string("vec3(0.2126, 0.7152, 0.0722)"), std::string(VP_LUMA_BT709_VEC3_TEXT));
+		}
+
+		TEST_METHOD(LumaOfAndItsGlslTwinAreTheOldCopies)
+		{
+			const float ks[][2] = { { 0.2126f, 0.0722f }, { 0.299f, 0.114f }, { 0.2627f, 0.0593f }, { 0.212f, 0.087f } };
+			uint32_t st = 12345u;
+			for (const auto& k : ks)
+				for (int i = 0; i < 2500; ++i)
+				{
+					float c[3];
+					for (float& v : c)
+					{
+						st = st * 1664525u + 1013904223u;
+						v = static_cast<float>(st >> 8) / 16777216.0f * 1.2f - 0.1f;
+					}
+					Assert::IsTrue(SameBits(OldLumaOf(c[0], c[1], c[2], k[0], k[1]), LumaCoeff::LumaOf(c[0], c[1], c[2], k[0], k[1])));
+				}
+			// The GLSL twin is the old kLumaFromRgbPass expression, byte for byte.
+			Assert::AreEqual(std::string("vp_kr * c.x + (1.0 - vp_kr - vp_kb) * c.y + vp_kb * c.z"), std::string(VP_LUMA_DOT_PARAM_GLSL_TEXT));
+			Assert::IsTrue(std::string(VpNets::kLumaFromRgbPass).find(std::string("    float y = ") + VP_LUMA_DOT_PARAM_GLSL_TEXT + ";\n")
+				!= std::string::npos);
 		}
 
 		TEST_METHOD(ReplicateBlurMatchesTheDoubleReference)

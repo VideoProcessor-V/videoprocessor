@@ -197,7 +197,9 @@ REGISTRY = [
     {"id": "U26", "name": "luma_from_rgb_weights",
      "owning_unit": ["src/VP-V/core/LumaWeights"],
      "signatures": _c(r"0\.2126", r"0\.7152", r"0\.0722", r"\bLumaOf\b", r"\bad_luma\b", r"\bvp_kr\b"),
-     "allow": []},
+     # C6-3 K1: the owner's API (LumaCoeff::LumaOf / kBt709* / ForSystem) and its GLSL text macros are consumers. U23 needs no
+     # allow: OnePole::AlphaFor* calls carry no "1 - exp(-" signature, so they are not hits at all.
+     "allow": _c(r"\bLumaCoeff::\w+", r"\bVP_LUMA_\w+_TEXT\b")},
 ]
 
 DECLARATION_PATHS = _c(
