@@ -116,8 +116,8 @@ namespace AdaptiveDownscaleStage
 			if (host.bitrate(quality))
 				adaptiveNow.residualCodingNoiseCodes = static_cast<float>(GrainPreserve::CodingNoiseCodes(quality));
 		}
-		// FIX-X5-CUT-P4 / C5: the grain term's cut event is the shared one, the skeleton scene product's delivered cut (read from the
-		// renderer's frame-analysis store; never re-classified here); the module asks it once per new source frame.
+		// FIX-X5-CUT-P4 / C5: the grain term's cut event is the shared one, the skeleton scene product's delivered cut (asked through
+		// the skeleton's SceneOf, also with frame_analysis_store off; never re-classified here); the module asks it once per new source frame.
 		if (!module.HasCutSource())
 			module.SetCutSource(AdaptiveDownscale::SceneCutSource());
 		if (upscaleBlend)

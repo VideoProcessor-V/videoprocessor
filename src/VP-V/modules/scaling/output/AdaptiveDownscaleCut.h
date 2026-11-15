@@ -5,9 +5,13 @@
 // FIX-X5-CUT-P4 (102b row X5-CUT-P4; design-EDGEMAP-DOMAIN-AXIS s4b), moved onto the skeleton SCENE PRODUCT in C5 (audit x5dup MUST 1):
 // the adaptive downscale's grain term snaps to its target on a CUT. The cut is the shared one, judged ONCE per frame by the skeleton
 // (U7 v2/v3: VpUnit::CutFadeJudge::CutTracker over the P4 record sequence, SkeletonModule::FillScene) and published at the frame's seal
-// as the frame-analysis store's scene group (FrameAnalysis::Scene). This file only READS that group (Store::PeekScene of the renderer's
-// own store, the same read DetailPulse / TextureRestore and the content-intent observers do): no classification here, no ClassifyEvents
-// call, no private copy of a P4 record, no second computation of the scene product (producer chains, OD 2026-11-15 10:02).
+// as the frame-analysis store's scene group (FrameAnalysis::Scene). This file only ASKS for that product: the CURRENT frame's scene
+// through the skeleton's get-or-compute-and-publish reader SkeletonModule::SceneOf (Vpv::Skeleton::SceneGroupOf; owner 2026-11-14 17:38
+// "Ask the skeleton for it same as everything else", gate C5 prequal x5dup MUST 1; DetailPulse / TextureRestore read it the same way),
+// which serves the store's group or classifies the frame now and publishes it, so a cut still snaps with frame_analysis_store off.
+// Only the scan of SKIPPED frames below is a Peek of the renderer's own store (groups already published; a frame without one is no
+// cut). No classification here, no ClassifyEvents call, no private copy of a P4 record, no second computation of the scene product
+// (producer chains, OD 2026-11-15 10:02).
 //
 // Snap rule (owner 2026-11-15 08:35: high firing bar, precision first; false cuts equally unacceptable):
 // - snap on the DELIVERED confirmed cut only (FrameAnalysis::Scene::cut: once per confirmed cut, normally with the group of the frame
@@ -20,15 +24,15 @@
 // - NO snap on a fade (owner 2026-11-15 09:20: fades are a partial reset, never a restart). Choice recorded for C5: the grain term keeps
 //   its one-pole smoothing through a fade; it does NOT apply Scene::fadeKeep (an owner option, refs\102b row X5-FADE-KEEP proposed). The
 //   fade flag is carried for diagnostics only.
-// - a missing scene group of the CURRENT frame (no memo / Original pathway, no store for the renderer, the store off, the group not
-//   sealed) is the visible Unavailable: no cut verdict, no snap, cause shown (status line, "output scaling" fallback entry, counter).
-//   There is no private re-classification and no backup path.
+// - a CURRENT frame the skeleton cannot answer (no memo / Original pathway, no skeleton module, the analysis lane off or no sealed
+//   pair of P4 records) is the visible Unavailable: no cut verdict, no snap, cause shown (status line, "output scaling" fallback entry,
+//   counter). The store being off is NOT such a case (SceneOf answers live). There is no private re-classification and no backup path.
 //
 // The frame's APL (the scalar's diagnostic mean luma) is read from the current frame's P4 record through the renderer's skeleton memo
 // (the standard Acquire: get-or-compute-and-publish). It is not part of the cut; a failed read leaves the APL unread (aplCause, shown).
 //
-// Header-only, C++14. The pure decision (VerdictFromScene) has no hub, memo, store or GPU dependency; SceneCutSource() binds it to the
-// renderer's store and memo of the current frame (render thread).
+// Header-only, C++14. The pure decision (VerdictFromSceneProduct / VerdictFromScene) has no hub, memo, store or GPU dependency;
+// SceneCutSource() binds it to the skeleton's SceneOf, the renderer's store (skipped frames) and memo of the current frame (render thread).
 
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/SkeletonAcquire.h>
@@ -60,11 +64,13 @@ namespace AdaptiveDownscale
 	// (previous advanced source sequence, this source sequence): 0 = none before. Render thread.
 	using CutSource = std::function<CutVerdict(uint64_t, uint64_t)>;
 
-	// `readScene(seq, scene)` reads the published scene group of source frame `seq` (false: none). `reach` = how many frames back the
-	// store can still hold (its ring depth; 0 = read only the current frame). `missingWhy` = the cause when the current group is missing.
-	template <class ReadScene>
-	inline CutVerdict VerdictFromScene(uint64_t prevSequence, uint64_t sequence, ReadScene&& readScene, size_t reach,
-		const std::string& missingWhy)
+	// `readCurrent(seq, scene, why)` answers the scene of the CURRENT source frame (production: the skeleton's SceneOf; false: not
+	// answered, `why` = the visible cause). `readSkipped(seq, scene)` reads an already published group of a frame the module did not
+	// advance through (production: a Peek of the renderer's store; false: none, which is no cut and no fault). `reach` = how many frames
+	// back the store can still hold (its ring depth; 0 = read only the current frame).
+	template <class ReadCurrent, class ReadSkipped>
+	inline CutVerdict VerdictFromSceneProduct(uint64_t prevSequence, uint64_t sequence, ReadCurrent&& readCurrent, ReadSkipped&& readSkipped,
+		size_t reach)
 	{
 		CutVerdict v;
 		if (prevSequence == 0)
@@ -75,9 +81,10 @@ namespace AdaptiveDownscale
 			return v;
 		}
 		FrameAnalysis::Scene own;
-		if (!readScene(sequence, own))
+		std::string why;
+		if (!readCurrent(sequence, own, why))
 		{
-			v.cause = missingWhy.empty() ? std::string("scene group not readable") : missingWhy;
+			v.cause = why.empty() ? std::string("scene group not readable") : why;
 			return v;
 		}
 		v.state = CutVerdict::State::Known;
@@ -98,7 +105,7 @@ namespace AdaptiveDownscale
 			for (uint64_t d = from; d < sequence; ++d)
 			{
 				FrameAnalysis::Scene skipped;
-				if (readScene(d, skipped) && skipped.cut)
+				if (readSkipped(d, skipped) && skipped.cut)
 				{
 					v.cut = true;
 					v.cutLate = true;
@@ -110,14 +117,27 @@ namespace AdaptiveDownscale
 		return v;
 	}
 
-	// Why the current frame's scene group could not be read, for the renderer's store (null: none registered).
-	inline std::string SceneMissingWhy(const FrameAnalysis::Store* store, uint64_t sequence)
+	// One reader for both (the current frame and the skipped ones), `missingWhy` = the cause when the current frame is not read.
+	template <class ReadScene>
+	inline CutVerdict VerdictFromScene(uint64_t prevSequence, uint64_t sequence, ReadScene&& readScene, size_t reach,
+		const std::string& missingWhy)
 	{
-		if (store == nullptr)
-			return "no frame analysis store for this renderer (no scene product to read)";
-		if (!store->Enabled())
-			return "frame analysis store off (frame_analysis_store=off): no scene product to read";
-		return "scene group not sealed for source frame " + std::to_string(sequence);
+		return VerdictFromSceneProduct(prevSequence, sequence,
+			[&readScene, &missingWhy](uint64_t seq, FrameAnalysis::Scene& scene, std::string& why)
+			{
+				if (readScene(seq, scene))
+					return true;
+				why = missingWhy;
+				return false;
+			},
+			readScene, reach);
+	}
+
+	// Why the skeleton did not answer the current frame's scene (`skeletonWhy`: Vpv::Skeleton::SceneGroupOf's cause).
+	inline std::string SceneProductMissingWhy(const char* skeletonWhy, uint64_t sequence)
+	{
+		return "scene product not answered for source frame " + std::to_string(sequence) + ": " +
+			(skeletonWhy != nullptr ? skeletonWhy : "no cause given");
 	}
 
 	// The frame's APL from its P4 record through the memo (Acquire, CPU form: the standard get-or-compute-and-publish).
@@ -138,8 +158,9 @@ namespace AdaptiveDownscale
 		v.apl = static_cast<float>(cur.mean) / 257.0f;
 	}
 
-	// The production source: the renderer of the frame this thread renders (Hub::ThisThreadFrame through the skeleton's memo lookup),
-	// its frame-analysis store's scene groups, and its memo for the APL.
+	// The production source: the renderer of the frame this thread renders (Hub::ThisThreadFrame through the skeleton's memo lookup);
+	// the current frame's scene from the skeleton's SceneOf (get-or-compute-and-publish), skipped frames from its store (Peek), and
+	// its memo for the APL.
 	inline CutSource SceneCutSource()
 	{
 		return [](uint64_t prevSequence, uint64_t sequence)
@@ -152,10 +173,19 @@ namespace AdaptiveDownscale
 				v.cause = "no skeleton memo for this renderer: Original pathway or analysis lane off (expected there, not a fault)";
 				return v;
 			}
-			const FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(fm.host);
-			CutVerdict v = VerdictFromScene(prevSequence, sequence,
+			const void* host = fm.host;
+			const FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(host);
+			CutVerdict v = VerdictFromSceneProduct(prevSequence, sequence,
+				[host](uint64_t seq, FrameAnalysis::Scene& scene, std::string& why)
+				{
+					const char* skeletonWhy = nullptr;
+					if (Vpv::Skeleton::SceneGroupOf(host, seq, scene, &skeletonWhy))
+						return true;
+					why = SceneProductMissingWhy(skeletonWhy, seq);
+					return false;
+				},
 				[store](uint64_t seq, FrameAnalysis::Scene& scene) { return store != nullptr && store->PeekScene(seq, scene); },
-				store != nullptr ? store->Depth() : 0, SceneMissingWhy(store, sequence));
+				store != nullptr ? store->Depth() : 0);
 			ReadAplFromMemo(*fm.memo, sequence, v);
 			return v;
 		};
