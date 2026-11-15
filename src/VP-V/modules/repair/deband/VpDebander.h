@@ -112,6 +112,8 @@ namespace VpDebander
 		}
 		uint64_t HoldSequence() const { return weightSequence; }
 		void SetHoldSequenceForTest(uint64_t sequence) { weightSequence = sequence; }
+		// The grain guard's busy-share texture of a slot's plane (grainGuard on, grainSplit off; null otherwise): the guard parity test.
+		pl_tex GuardTextureForTest(int slot, int plane) const { return (slot >= 0 && slot < kSlots && plane >= 0 && plane < PL_MAX_PLANES) ? guard[slot][plane] : nullptr; }
 		const std::string& LastError() const { return error; }
 		// R1-W1-RES (doc 72 item 2): the debander is the FALLBACK LAYER under temporal detail (order TD -> deband -> CR). Its read path
 		// of td.maps (validity, stability) and coding_evidence: reset 1 = not requested, the debander decides exactly as today

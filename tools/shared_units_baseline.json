@@ -350,8 +350,14 @@
   "U5": {
    "name": "laplacian_ringing",
    "blocking": true,
-   "baseline_duplicates": 1,
+   "baseline_duplicates": 0,
    "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/repair/deband/VpDebander.cpp",
+     "pattern": "lapMin = static_cast<float>\\(GrainPreserve::GuardLaplacianCodes",
+     "kind": "false_positive",
+     "reason": "threshold from Bill's GrainPreserve constant passed to the owner kernel (bz_lap of RegionEvidence::BusyShareBodyGlsl; C7-6 U5 G1)"
+    },
     {
      "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
      "pattern": "grainLo = 2\\.0f",

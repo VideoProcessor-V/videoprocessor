@@ -2,6 +2,7 @@
 #include "VpDebander.h"
 
 #include <vprenderer/GrainPreserve.h>
+#include <VP-V/modules/input/source_analysis/regions/BusyEdgeGlsl.h>
 
 #include <libplacebo/dispatch.h>
 
@@ -99,8 +100,8 @@ if (p.x < sz.x && p.y < sz.y) {
 #endif
 #ifdef SPATIAL_GUARD
     // deband_vp_grain_guard (owner 2026-10-17): this frame's own grain estimate, no
-    // vectors needed - the share of busy pixels per 16x16 block (GUARD_BODY: Laplacian
-    // above lap_min or a local extremum; a band is flat but for its edges, grain is busy
+    // vectors needed - the share of busy pixels per 16x16 block (the regions busy share:
+    // Laplacian above bz_lap or a local extremum; a band is flat but for its edges, grain is busy
     // everywhere), bilinear between block centres; blur vetoed from veto_lo to veto_hi.
     {
         float share = texture(grain_spatial, pos / 16.0 / vec2(textureSize(grain_spatial, 0))).r;
@@ -118,59 +119,15 @@ if (p.x < sz.x && p.y < sz.y) {
 }
 )GLSL";
 
-		// The spatial grain estimate per 16x16 block (one workgroup): the share of the
-		// block's busy pixels (GrainPreserve::GuardLaplacianCodes / GuardExtremumCodes):
-		// Laplacian |4c - n - s - e - w| (largest channel) above lap_min, or a strict
-		// local extremum along x, y or a diagonal by more than ext_min on both sides (a
-		// quantised smooth gradient is monotone along every line: never). The block and
-		// its one-pixel border are read once into shared memory (1.27 fetches a pixel).
-		const char* const GUARD_HEADER = R"GLSL(
-shared vec2 gg_sum[256];
-shared vec4 gg_tile[324];
-)GLSL";
-		const char* const GUARD_BODY = R"GLSL(
-ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-uint li = gl_LocalInvocationIndex;
-ivec2 sz = textureSize(src, 0);
-ivec2 hi = sz - ivec2(1);
-ivec2 origin = ivec2(gl_WorkGroupID.xy) * 16 - ivec2(1);
-for (uint i = li; i < 324u; i += 256u)
-    gg_tile[i] = texelFetch(src, clamp(origin + ivec2(int(i % 18u), int(i / 18u)), ivec2(0), hi), 0);
-barrier();
-vec2 v = vec2(0.0);
-if (p.x < sz.x && p.y < sz.y) {
-    int t = (int(gl_LocalInvocationID.y) + 1) * 18 + int(gl_LocalInvocationID.x) + 1;
-    vec4 c = gg_tile[t];
-    vec4 dw = c - gg_tile[t - 1], de = c - gg_tile[t + 1];
-    vec4 dn = c - gg_tile[t - 18], ds = c - gg_tile[t + 18];
-    vec4 d1 = c - gg_tile[t - 19], d2 = c - gg_tile[t + 19];
-    vec4 d3 = c - gg_tile[t - 17], d4 = c - gg_tile[t + 17];
-    vec4 l = abs(dw + de + dn + ds);
-    // Extremum along a line: both differences above ext_min, or both below -ext_min.
-    vec4 x = max(max(max(min(dw, de), -max(dw, de)), max(min(dn, ds), -max(dn, ds))),
-                 max(max(min(d1, d2), -max(d1, d2)), max(min(d3, d4), -max(d3, d4))));
-    float m = l.x;
-    float e = x.x;
-#if NCOMP > 1
-    m = max(m, l.y);
-    e = max(e, x.y);
-#endif
-#if NCOMP > 2
-    m = max(m, l.z);
-    e = max(e, x.z);
-#endif
-    v = vec2((m > lap_min || e > ext_min) ? 1.0 : 0.0, 1.0);
-}
-gg_sum[li] = v;
-barrier();
-for (uint s = 128u; s > 0u; s >>= 1u) {
-    if (li < s)
-        gg_sum[li] += gg_sum[li + s];
-    barrier();
-}
-if (li == 0u)
-    imageStore(guard_out, ivec2(gl_WorkGroupID.xy), vec4(gg_sum[0].x / max(gg_sum[0].y, 1.0), 0.0, 0.0, 1.0));
-)GLSL";
+		// The spatial grain estimate per 16x16 block (one workgroup) is the owner's busy share
+		// (input.source_analysis/regions, RegionEvidence::BusyShareHeaderGlsl / BusyShareBodyGlsl,
+		// CPU oracle BusyEdge::BusyShare): the share of the block's busy pixels, Laplacian
+		// |4c - n - s - e - w| (largest channel) above bz_lap, or a strict local extremum along x,
+		// y or a diagonal by more than bz_ext on both sides (GrainPreserve::GuardLaplacianCodes /
+		// GuardExtremumCodes; a quantised smooth gradient is monotone along every line: never).
+		// The guard reads the debander's own input planes (any depth, float or a shifted
+		// container), so the taps stay in the plane's normalised units (bz_scale 1) and the
+		// thresholds are passed in those units: the comparisons are the ones the private copy made.
 
 		// deband_vp_grain_guard split: the low band at half resolution (GrainPreserve, as
 		// the interpolator's): a 2x2 box average, then the separable Gaussian (gp_w).
@@ -543,27 +500,34 @@ if (b.x < size.x && b.y < size.y) {
 				gp.format = StorableLike(gpu, pl_find_named_fmt(gpu, "r32f"));
 				gp.sampleable = true;
 				gp.storable = true;
+				gp.blit_src = gp.format && (gp.format->caps & PL_FMT_CAP_BLITTABLE) != 0;   // read back by the guard parity test where blittable
 				if (!gp.format || !pl_tex_recreate(gpu, &guard[slot][plane], &gp))
 				{
 					error = "no grain guard texture";
 					++failures;
 					return false;
 				}
-				const pl_shader_desc gd[2] = { Sampled("src", in, false), Storage("guard_out", guard[slot][plane]) };
-				const pl_shader_var gv[2] = { { pl_var_float("lap_min"), &lapMin, true }, { pl_var_float("ext_min"), &extMin, true } };
-				const std::string guardHeader = "#define NCOMP " + std::to_string(ncomp) + "\n" + GUARD_HEADER;
+				const pl_shader_desc gd[2] = { Sampled("bz_src", in, false), Storage("bz_out", guard[slot][plane]) };
+				// The owner kernel: one 16 x 16 workgroup per 16 px cell, the plane's components (bz_ncomp),
+				// taps in the plane's normalised units (scale 1), thresholds in the same units.
+				const int busyBlock = 16;
+				const float busyScale = 1.0f;
+				const pl_shader_var gv[5] = { { pl_var_int("bz_block"), &busyBlock, true }, { pl_var_int("bz_ncomp"), &ncomp, true },
+					{ pl_var_float("bz_scale"), &busyScale, true }, { pl_var_float("bz_lap"), &lapMin, true }, { pl_var_float("bz_ext"), &extMin, true } };
+				const std::string guardHeader = RegionEvidence::BusyShareHeaderGlsl();
+				const std::string guardBody = RegionEvidence::BusyShareBodyGlsl();
 				pl_custom_shader gc{};
-				gc.description = "VideoProcessor deband: grain guard";
+				gc.description = "VideoProcessor deband: grain guard (regions busy share)";
 				gc.header = guardHeader.c_str();
-				gc.body = GUARD_BODY;
+				gc.body = guardBody.c_str();
 				gc.input = PL_SHADER_SIG_NONE;
 				gc.output = PL_SHADER_SIG_NONE;
 				gc.descriptors = gd;
 				gc.num_descriptors = 2;
 				gc.variables = gv;
-				gc.num_variables = 2;
+				gc.num_variables = 5;
 				gc.compute = true;
-				gc.compute_shmem = sizeof(float) * (256 * 2 + 324 * 4);   // gg_sum + gg_tile
+				gc.compute_shmem = sizeof(float) * 256 * 2;   // bz_sum
 				gc.compute_group_size[0] = 16;
 				gc.compute_group_size[1] = 16;
 				pl_shader gsh = pl_dispatch_begin(dispatch);
