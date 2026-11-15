@@ -7,14 +7,23 @@ The one 2x2 box law of the half / quarter luma pyramid behind product P1 (doc 62
 - Taps: `Tap0(x, n) = min(2x, n-1)`, `Tap1(x, n) = min(2x+1, n-1)` (odd edges replicate), summed `Box4(a, b, c, d)` in that fixed order.
 - Finishing: `FinishP1(sum) = (sum + 2) >> 2` (half and quarter, 16-bit-scaled samples) and `FinishEngine8(sum) = min(255, sum >> 4)`
   (10-bit codes to the 8-bit mean code / 4, the optical-flow engine view).
-- `Glsl()`: the accessors `vpu_half_luma` / `vpu_quarter_luma` (contract text, not wired into a pass yet).
+- GLSL entries (the same taps, tap order a, b, c, d and `(a + b + c + d) * 0.25` mean):
+  - `Glsl()`: `vpu_half_luma` / `vpu_quarter_luma` (R channel). Consumers: the matcher's DOWNSAMPLE_BODY
+    (`DejudderWarp.cpp`, since 5b43fc22a) and the P1 GPU fill (`P1GpuFill.h`).
+  - `GlslComponent()`: `vpu_half_luma_comp(src, q, comp)` (any one channel). Consumer: grain split v3 HALF pass
+    (`GrainSplitGpu.cpp`).
+  - `GlslRgbaAt()`: `vpu_half_luma_rgba_at(src, origin, q)` (all four channels, source offset `origin`, taps clamped to
+    [0, size - 1]). Consumer: the output downscaler's doubler-halving HALVE_BODY (`AdaptiveDownscale.cpp`, 7db0b0631).
 
 Consumers migrated (identity, proven in their test files): the lane producer (`LaneCpuProducts.h` HalfLumaRows / QuarterFromHalf,
 `LaneProductsTests.cpp`) and the NVOF producer's 8-bit box (`MotionAheadProducer.cpp` HalfLuma8, `VectorStoreTests.cpp`).
-Not migrated (GPU float shaders, no byte-identity proof without a GPU run): the matcher's DOWNSAMPLE_BODY (`DejudderWarp.cpp`)
-and the interpolator's LOW_HALF_BODY (`FrameInterpolator.cpp`); recorded as residuals in `tools/shared_units_baseline.json`.
+GPU consumers above were moved with the arithmetic unchanged (same taps and order). Not migrated (GPU float shader, no
+byte-identity proof without a GPU run): the interpolator's LOW_HALF_BODY (`FrameInterpolator.cpp`); recorded as a residual
+in `tools/shared_units_baseline.json`.
 
-Determinism: integer arithmetic, fixed tap order. Any change of the grid, tap order, rounding or GLSL entry names bumps `kUnitVersion`.
+Determinism: integer arithmetic, fixed tap order. Any change of the grid, tap order, rounding or an existing GLSL entry's name
+bumps `kUnitVersion`. Adding a new entry with the same law (as `GlslComponent` and `GlslRgbaAt` were) is additive and does
+not bump it.
 
 # EngineLumaGpu (the GPU twin of the optical-flow engine luma, `VpUnit::EngineLumaGpu`)
 
