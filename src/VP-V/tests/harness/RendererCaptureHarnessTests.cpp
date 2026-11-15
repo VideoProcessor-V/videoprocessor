@@ -2849,7 +2849,30 @@ namespace Tests
 			Assert::IsTrue(on.Logged("Detail pulse stabilise: on") && on.Logged("Texture restore: statistical"), (L"on: the stages are set up\n" + on.Tail()).c_str());
 			Assert::IsFalse(on.Logged("Detail pulse stabilise failed") || on.Logged("Texture restore failed"), (L"on: no failure\n" + on.Tail()).c_str());
 			Assert::IsTrue(off.sourceStatus.find("Source resolution:") == 0, L"the monitor read the source (off)");
-			Assert::AreEqual(off.sourceStatus, on.sourceStatus, L"the source-resolution monitor's reading is identical with the stages on");
+			// WAIVER-DRSM-01 (fix-B, lead 19): the READING is compared (effective size, bitrate quality, bits, the auto state, the
+			// notes, the frame-bound mode and its D), exactly as before. Since FX-DV (bd3508448, 2026-11-14, after this test) the
+			// status line also carries the frame-bound lane's timing-loss counters ("held, dropped, stale, jobs dropped, copies
+			// skipped, waits missed, clock steps back" and "analyses were lost to timing"), which count how late the worker's
+			// results arrived (source_analysis/README.md "Frame-bound mode": GPU and thread timing, shown, never hidden); they are
+			// not the monitor's reading, and the stages' extra GPU work legitimately moves them (C4 rch06 and rchB04: waits missed
+			// 1 off, 2 on, identical readings and identical input digests). Only that counter span is left out of the comparison;
+			// both full lines stay in the log above.
+			auto readingOf = [](std::string s) {
+				const std::string head = "; frame-bound D=", tail = "clock steps back ";
+				const size_t at = s.find(head);
+				if (at == std::string::npos) return s;
+				const size_t colon = s.find(':', at + head.size());
+				const size_t clock = s.find(tail, at);
+				if (colon == std::string::npos || clock == std::string::npos) return s;
+				size_t end = clock + tail.size();
+				while (end < s.size() && std::isdigit(static_cast<unsigned char>(s[end]))) ++end;
+				s.erase(colon, end - colon);   // keeps "; frame-bound D=<n>"
+				const std::string lost = " (analyses were lost to timing: this run is not reproducible)";
+				const size_t l = s.find(lost);
+				if (l != std::string::npos) s.erase(l, lost.size());
+				return s;
+			};
+			Assert::AreEqual(readingOf(off.sourceStatus), readingOf(on.sourceStatus), L"the source-resolution monitor's reading is identical with the stages on");
 			g_harnessWidth = savedW;
 			g_harnessHeight = savedH;
 		}
@@ -3006,12 +3029,40 @@ namespace Tests
 				{ "1920x1080", "Resync (on): re-base H+V stamp", L"both" },
 				{ "1440x1080", "Resync (on): re-base H+V stamp", L"anamorphic" },
 			};
+			// WAIVER-RSAX-01 (fix-B, lead 19): the re-base warm-up (FX-RB, scaling/rebase/RebaseWarmup.h) holds a re-base to a NEW
+			// plane size on the native path until its shaders are compiled, visibly ("Re-base pending shader warm-up"). The capture
+			// is at a fixed 2.5 s, so a cold variant made the first (off) run capture the HELD native frame (its hash = the native
+			// still's) and the second (on) run, on the cache the first filled, the re-based one: two different pictures compared.
+			// As SourceResolutionRebasesThroughTheRenderer's FX-RBT pre-warm: each axis variant runs once first, untimed and
+			// unasserted, until 3 s after its re-base starts (the harness shader cache is then warm); and every compared capture
+			// must now follow the re-base's start in its run's log, so a capture of a held (native) frame fails instead of
+			// passing or failing by timing. The off == on comparison is unchanged.
+			FramePlan warmPlan = plan;
+			warmPlan.captureAtSeconds = -1.0;   // the pre-warm takes no capture
+			auto rebasedBeforeCapture = [](const RunResult& r, const std::string& rebased) {
+				size_t rebaseAt = std::string::npos, captureAt = std::string::npos;
+				for (size_t i = 0; i < r.log.size(); ++i)
+				{
+					if (rebaseAt == std::string::npos && r.log[i].find(rebased) != std::string::npos) rebaseAt = i;
+					if (captureAt == std::string::npos && r.log[i].find("Rendered-output capture complete") != std::string::npos) captureAt = i;
+				}
+				return rebaseAt != std::string::npos && captureAt != std::string::npos && rebaseAt < captureAt;
+			};
 			for (const Axis& a : axes)
 			{
 				const std::string key = std::string("source_resolution: ") + a.setting + "\n";
+				const std::string rebased = std::string("Re-base: 3840x2160 -> ") + a.setting + " ";
+				const RunResult warm = Run(VideoFrameEncoding::V210, "gpu", 30.0, false,
+					"[vpv]\nresync_event: off\n[vprenderer.Default]\ndithering: off\ndeband: off\n" + key, false, &warmPlan, rebased, 3.0);
+				Logger::WriteMessage((std::wstring(L"pre-warm ") + a.name + L": re-base seen after " +
+					(warm.stopSeenSeconds >= 0.0 ? std::to_wstring(warm.stopSeenSeconds) + L" s" : std::wstring(L"never (30 s)")) + L"\n").c_str());
 				const std::string baseHash = hashOf("[vpv]\nresync_event: off\n", a.name, key);
+				Assert::IsTrue(rebasedBeforeCapture(last, rebased),
+					(std::wstring(a.name) + L": off: the capture follows the re-base's start (not a held native frame)\n" + last.Tail()).c_str());
 				Assert::AreEqual(baseHash, hashOf("[vpv]\nresync_event: on\n", a.name, key),
 					(std::wstring(a.name) + L": a fixed re-base is identical with on").c_str());
+				Assert::IsTrue(rebasedBeforeCapture(last, rebased),
+					(std::wstring(a.name) + L": on: the capture follows the re-base's start (not a held native frame)\n" + last.Tail()).c_str());
 				Assert::IsTrue(last.Logged(a.logged), (std::wstring(a.name) + L": the moved axes are stamped\n" + last.Tail()).c_str());
 			}
 			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
