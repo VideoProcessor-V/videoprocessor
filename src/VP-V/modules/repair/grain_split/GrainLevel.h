@@ -181,7 +181,7 @@ namespace GrainLevel
 		size_t At(int x, int y) const { return static_cast<size_t>(y / B) * bw + static_cast<size_t>(x / B); }
 	};
 
-	// Rule 1: the bicubic sampler is the ONE shared one (VpComposed::SampleBicubic, composed/ComposedVectors.h); no private copy here.
+	// Rule 1: the bicubic sampler is the ONE shared one (VpComposed::SampleBicubic, composed/WarpSampler.h); no private copy here.
 	inline bool SampleBicubic(const Plane& p, double sx, double sy, double& out) { return VpComposed::SampleBicubic(p, sx, sy, out); }
 
 	// The reference plane warped to the current frame by a block field. valid[i] = 1 where the block is trusted and the bicubic
