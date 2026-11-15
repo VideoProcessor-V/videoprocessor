@@ -20,7 +20,13 @@
 // The two median rules give different values on even n by design of their callers (a registered
 // difference, not merged away: merging them would change picture-independent decisions and needs its own
 // FIX with a before/after table). Every function copies its input (the caller's vector is untouched);
-// an empty input returns `ifEmpty` (default 0).
+// an empty input returns `ifEmpty` (default 0); `NthSmallest` of an empty input returns T(). Callers whose
+// input can never be empty (the private copies were undefined there) assert(!empty) at the call, with no
+// fallback (C6-2 U24 plan (d)).
+// NaN policy: NONE here. The helpers neither filter nor detect NaN / inf: with a NaN in the input the
+// ordering is unspecified and so is the result. Callers filter non-finite values before the call, exactly
+// as they did before the consolidation (a NaN must never reach pixels; masking it here would be a silent
+// fallback). The GPU twins of the Upper median and of kMadToSigma are text in RobustStatsShaders.h.
 namespace RobustStats
 {
 	// A MAD is scaled by this to estimate a standard deviation of a normal distribution.
@@ -72,6 +78,34 @@ namespace RobustStats
 	{
 		if (v.empty()) return ifEmpty;
 		return MadAbout(v, Median(v, rule, ifEmpty), rule, ifEmpty);
+	}
+
+	// The MAD of n doubles about a given centre (n <= 0: ifEmpty): median of |v[i] - centre| under the rule.
+	inline double MadAboutOf(const double* v, int n, double centre, MedianRule rule = MedianRule::MeanOfMiddle, double ifEmpty = 0.0)
+	{
+		if (n <= 0) return ifEmpty;
+		std::vector<double> d(static_cast<size_t>(n));
+		for (int i = 0; i < n; ++i) d[static_cast<size_t>(i)] = std::fabs(v[i] - centre);
+		return Median(std::move(d), rule, ifEmpty);
+	}
+
+	// Mean after dropping floor(trim * n) values from each end of the sorted sample (ascending summation order).
+	// Moved verbatim from identity/chain/ChainCommon.h (C6-2 U24); n <= 0 -> 0; n - 2k <= 0 -> no trimming.
+	inline double TrimmedMeanOf(const double* v, int n, double trim)
+	{
+		if (n <= 0)
+			return 0.0;
+		std::vector<double> t(v, v + n);
+		std::sort(t.begin(), t.end());
+		int k = static_cast<int>(std::floor(trim * static_cast<double>(n)));
+		if (k < 0)
+			k = 0;
+		if (n - 2 * k <= 0)
+			k = 0;
+		double s = 0.0;
+		for (int i = k; i < n - k; ++i)
+			s += t[static_cast<size_t>(i)];
+		return s / static_cast<double>(n - 2 * k);
 	}
 
 	// A MAD as a standard deviation estimate.

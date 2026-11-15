@@ -55,6 +55,7 @@
     <ClInclude Include="..\VP-V\core\Ancestry.h" />
     <ClInclude Include="..\VP-V\core\OnePole.h" />
     <ClInclude Include="..\VP-V\core\RobustStats.h" />
+    <ClInclude Include="..\VP-V\core\RobustStatsShaders.h" />
     <ClInclude Include="..\VP-V\core\Ramp.h" />
     <ClInclude Include="..\VP-V\core\LumaWeights.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedRawTransfer.h" />

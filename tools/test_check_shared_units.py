@@ -407,6 +407,27 @@ class NearDupUnitPatternsTest(unittest.TestCase):
         for uid, line in self.CASES.items():
             self.assertTrue(any(r.search(line) for r in reg[uid]["signatures"]), uid)
 
+    def test_u24_owner_calls_are_consumers_private_order_statistics_duplicates(self):
+        # C6-2 U24: a RobustStats:: call is a consumer; a bare nth_element, a private Median or an inline 1.4826 stays a
+        # duplicate, also on a line that also calls the owner. The shader twins' names (vpu_median_upper, VP_MAD_TO_SIGMA)
+        # and the include are no hit at all; the shaders header is part of the owner.
+        with tempfile.TemporaryDirectory() as r:
+            f = "src/VP-V/modules/repair/c/Rs.cpp"
+            _w(r, f, "double m = RobustStats::Median(v, RobustStats::MedianRule::Upper);\n"
+                     "std::nth_element(v.begin(), v.begin() + n / 2, v.end());\n"
+                     "double s = RobustStats::MadSigma(RobustStats::MadAboutOf(p, n, m));\n"
+                     "double t = 1.4826 * Median(w);\n"
+                     "double u = RobustStats::Median(v) + Median(w);\n"
+                     "#include <VP-V/core/RobustStatsShaders.h>\n"
+                     "vec2 med = vec2(vpu_median_upper(xs, nn), vpu_median_upper(ys, nn));\n"
+                     "PutD(S_SIGMA, max(gMinScale, VP_MAD_TO_SIGMA * med));\n")
+            _w(r, "src/VP-V/core/RobustStatsShaders.h", "static const double VP_MAD_TO_SIGMA = 1.4826L;\n")
+            res = _unit(csu.scan(r, baseline={"units": {}}), "U24")
+            role = {h["line"]: h["role"] for h in res["hits"] if h["file"] == f}
+            self.assertEqual(role, {1: "consumer", 2: "duplicate", 3: "consumer", 4: "duplicate", 5: "duplicate"})
+            self.assertFalse([h for h in res["hits"] if h["file"].endswith("RobustStatsShaders.h")])
+            self.assertEqual(res["inside_owner"], 1)
+
 
 class FocusAcquireAllowTest(unittest.TestCase):
     """L-FOCUS: Acquire(kP11RegionBlockStats) is a consumer read of the published product; a line that computes block

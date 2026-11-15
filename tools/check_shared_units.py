@@ -186,10 +186,11 @@ REGISTRY = [
      "signatures": _c(r"1(\.0f?)?\s*-\s*(std::)?exp\s*\(\s*-"),
      "allow": []},
     {"id": "U24", "name": "robust_stats",
-     "owning_unit": ["src/VP-V/core/RobustStats"],
+     # C6-2 U24: RobustStatsShaders.h holds the GPU twins (GLSL vpu_median_upper, HLSL VP_MAD_TO_SIGMA) of the same owner.
+     "owning_unit": ["src/VP-V/core/RobustStats", "src/VP-V/core/RobustStatsShaders"],
      "signatures": _c(r"\bMedian\w*\s*\(", r"\bMedianOf\b", r"1\.4826", r"\bnth_element\b",
                       r"\bMad(Sigma)?\s*\(", r"\bPercentile\s*\(", r"\bQuantile\s*\("),
-     "allow": []},
+     "allow": _c(r"RobustStats::\w+", r"core/RobustStats(Shaders)?\.h", r"\bvpu_median_\w*", r"\bVP_MAD_TO_SIGMA\b")},
     {"id": "U25", "name": "ramp_clamp_smoothstep",
      "owning_unit": ["src/VP-V/core/Ramp"],
      "signatures": _c(r"\bClamp01\s*\(", r"\bSmoothstep\s*\(", r"\bRamp\s*\("),
