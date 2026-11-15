@@ -49,6 +49,7 @@
     "src/VP-V/modules/control/config/config_pages/VpvRenderingDefaults.h",
     "src/VP-V/modules/control/config/config_pages/VpvScalingRows.h",
     "src/VP-V/modules/control/config/config_pages/VpvSection.cpp",
+    "src/VP-V/modules/control/config/config_pages/VpvConfigProvidersStatic.cpp",
     "src/VP-V/modules/control/config/config_pages/VpvSection.h",
     "src/VP-V/modules/control/config/config_pages/VpvSetBy.h",
     "src/VP-V/modules/control/config/config_pages/VpvTierModel.h",

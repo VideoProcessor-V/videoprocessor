@@ -184,9 +184,13 @@ namespace QueueKeyedMemoTestsNs
 			const AcquireResult pin = m.Acquire(kP10GrainSplit, 10, AcquireForm::Cpu);
 			for (uint64_t s = 11; s <= 15; ++s) {   // presented = s - 4: frame 10 is still queued while presented - H <= 10
 				Render(m, s, t);
+				const AcquireResult r = m.Acquire(kP10GrainSplit, s, AcquireForm::Cpu);   // the render of s (MEMO-T1's render step)
+				Assert::IsTrue(r.Ok() && r.status == AcquireStatus::FilledAtRead && OfFrame(r, s), L"the render of s: one fill per frame");
 				Assert::IsTrue(m.Acquire(kP10GrainSplit, 10, AcquireForm::Cpu).status == AcquireStatus::Reused, L"still in the queue: kept");
 			}
 			Render(m, 16, t);   // presented 12, edge 12 - 1 = 11 > 10: frame 10 left the queue
+			const AcquireResult r16 = m.Acquire(kP10GrainSplit, 16, AcquireForm::Cpu);   // the render of 16
+			Assert::IsTrue(r16.Ok() && r16.status == AcquireStatus::FilledAtRead && OfFrame(r16, 16), L"the render of 16: one fill");
 			Assert::IsTrue(m.Acquire(kP10GrainSplit, 10, AcquireForm::Cpu).cause == AcquireCause::FrameReleased, L"released after leaving");
 			Assert::IsTrue(OfFrame(pin, 10), L"the pin outlives the release");
 			Assert::AreEqual(7, calls.load(), L"never recomputed");
@@ -208,8 +212,8 @@ namespace QueueKeyedMemoTestsNs
 			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, FrameFill(&calls));
 			Render(m, 10, Terms(0, 0, 0, 1, 2));   // ahead = L + W = 1 + 2 = 3
 			Assert::IsTrue(m.Acquire(kP10GrainSplit, 13, AcquireForm::Cpu).Ok(), L"current + ahead admitted");
-			const AcquireResult far = m.Acquire(kP10GrainSplit, 14, AcquireForm::Cpu);
-			Assert::IsTrue(far.cause == AcquireCause::NotQueued && calls.load() == 1, L"refused, the fill not called");
+			const AcquireResult farRes = m.Acquire(kP10GrainSplit, 14, AcquireForm::Cpu);
+			Assert::IsTrue(farRes.cause == AcquireCause::NotQueued && calls.load() == 1, L"refused, the fill not called");
 			bool engaged = false;
 			for (const FallbackCatalog::Decision& d : m.Decisions())
 				engaged = engaged || (d.engaged && Has(d.reason, "not in the queue"));

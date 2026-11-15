@@ -59,7 +59,7 @@ size_t LibplaceboVideoRenderer::LockedFilmQueueTarget(size_t desired) const
 	size_t minimum = Pulldown::kLockedQueuePairFrames;   // gate r3: A, B ready and the arrival (was 2)
 	if (m_impl)
 	{
-		const int motionDepth = m_impl->motionAheadDepth.load(std::memory_order_acquire);
+		const int motionDepth = m_impl->vectorEngine.motionAheadDepth.load(std::memory_order_acquire);
 		if (motionDepth > 0)
 			minimum = (std::max)(minimum, MotionAhead::QueueFramesFor(motionDepth));
 	}

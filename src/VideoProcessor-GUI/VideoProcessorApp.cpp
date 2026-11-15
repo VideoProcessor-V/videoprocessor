@@ -1435,12 +1435,6 @@ BOOL CVideoProcessorApp::InitInstance()
 		return FALSE;
 	}
 
-	// VPV-HOOK
-	// C15: the one recent-lines ring (control\diagnostics\CrashState) listens to
-	// DebugLog from the first line, as DebugLog's own ring did.
-	CrashState::InstallLogRing();
-	// VPV-HOOK-END
-
 	// Resolve startup-only logging configuration before rotation and before
 	// any producer thread can enqueue a diagnostic.
 	if (cpuCheckRequested || avx2ProbeRequested || LoadDebugLoggingEnabled())

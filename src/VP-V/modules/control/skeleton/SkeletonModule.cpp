@@ -15,12 +15,14 @@
 #include <VP-V/core/SkeletonAcquireLane.h>
 #include <VP-V/core/hub/CurrentFrame.h>
 #include <VP-V/core/MemoGpuGrant.h>
+#include <VP-V/modules/control/skeleton/SlotBudgetFeedHost.h>
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
+#include <VP-V/modules/input/source_analysis/FrameQuiet.h>
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuGrainKernel.h>
@@ -381,6 +383,7 @@ namespace Vpv
 			std::string shownWaiting;
 			bool shownBundle = false;
 			uint8_t shownQueueWired = 0xFF;   // the queue-delivery state the cached status text was built for
+			Vpv::Skeleton::SlotBudgetFeed budgetFeed;   // S0: feeds spare.SetBudget once per source frame + Presenter::spareSlotMs (SlotBudgetFeed.h)
 			VpSkeleton::SpareHost spare;       // B3-Z Z2: the post-present spare slot, driven by R12 AfterPresent (OnAfterPresent)
 			uint64_t shownQueueKey = ~uint64_t(0);   // the queue-in-use / starve state the cached status text was built for
 
@@ -917,7 +920,10 @@ namespace Vpv
 					hosts_.Remove(f.host, true);
 				gpuSlots_.Remove(f.host, true);   // the pl_gpu is going away: the dispatcher was released by Teardown above
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
+				{
+					std::lock_guard<std::mutex> lock(ownerFillsMutex_);   // as at GpuCreated (C2 gate SHOULD 2): one lock context for the memo's device
 					DetachMemoGpu(*mh, true);     // R2: the memo's GPU spots and the owner textures go while the device lives
+				}
 				memoHosts_.Remove(f.host, true);  // L-CORE: the renderer's memo (a reader's pin keeps its spots until released)
 				EraseExternal(f.host);   // a renderer recreated at this address never inherits the old one's external demand
 				break;
@@ -1543,6 +1549,7 @@ namespace Vpv
 				}
 				return false;
 			}
+			if (c.phase == RE::FramePhase::Entrance) { if (const std::shared_ptr<HostState> e = hosts_.Find(c.host)) e->budgetFeed.NoteCaptureRate(c.captureRateHz); return false; }   // S0: measured rate for the slot budget
 			if (c.phase != RE::FramePhase::Begin && c.phase != RE::FramePhase::AfterRender)
 				return false;
 			if (c.phase == RE::FramePhase::AfterRender)
@@ -1603,13 +1610,15 @@ namespace Vpv
 		// to the outcome) without an active lane for this host or with no sequence. Render thread.
 		void SkeletonModule::OnAfterPresent(RE::FrameContext& c, RE::PresentContext& p)
 		{
+			// fx/dv-frame-quiet (refs/121): the frame's native GPU work VP deferred (the monitor's tile pass + copy, the hooks' copies)
+			// is issued here, after the submit and outside libplacebo's frame, for every host and before any early return below.
+			FrameQuiet::Deferred::EndThisFrame();
 			const std::shared_ptr<HostState> st = hosts_.Find(c.host);
 			if (!st || !st->active.load(std::memory_order_acquire) || c.seq <= 0)
 				return;
 			const VpSkeleton::SpareTrigger trigger = p.kind == RE::AfterPresentKind::AfterLastExtra ? VpSkeleton::SpareTrigger::AfterLastExtra :
 				p.kind == RE::AfterPresentKind::NoExtras ? VpSkeleton::SpareTrigger::PostPresentNoExtras : VpSkeleton::SpareTrigger::BeforeDequeueWait;
-			st->spare.NotePresented(static_cast<uint64_t>(c.seq), p.cadenceRepeat);
-			st->spare.Fire(trigger);
+			st->budgetFeed.OnAfterPresent(st->spare, Vpv::Skeleton::FactsOf(c, p, trigger, st->timing.lastRenderOnlyMs, st->periodMs), p.presenter);   // S0
 		}
 
 		// The input-queue term of the lane lead. CALL CONTRACT: any thread, any rate (the host calls it once per frame; calls in bursts or several
@@ -2153,6 +2162,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 			}
 			else
 				line = std::string("analysis lane ") + mode + ": " + (st.waiting.empty() ? std::string("starting") : st.waiting);
+			full.push_back(st.budgetFeed.StatusLine());   // S0: the spare slot budget, never silent (rule 5)
 			{
 				// Ctrl+I / Ctrl+Alt+D: the queue the lane is built for and the regulator's input, in plain words.
 				const QueueShape& fq = st.queueFed;

@@ -10,4 +10,8 @@
 - `RegionEvidenceWarpTests.cpp` (Category GpuWarp: WARP in the CPU tier; on hardware with `VP_TEST_GPU=hardware`): the
   stats pass against `StatsBlock<float>` for SDR/PQ/HLG plus run-to-run bit identity; the fused accessor against
   `DeriveBlock<float>` including the out-of-grid neutral sample.
+- `EdgeMapFillTests.cpp` (CPU): the kEdgeMap owner fill: reserve derived from the declared size at the source luma size,
+  registration under the catalog owner, the module's re-registration on the largest live size (forget, no per-frame retry),
+  and the worded declines (no GPU context, no source luma view, above the reserve, texture refused). GPU parity vs
+  `BusyEdge::SobelMagnitude` is owed before the first reader row (102b KEDGEMAP-RULE3).
 - `RegionEvidenceSynthetic.h`: deterministic synthetic frames.

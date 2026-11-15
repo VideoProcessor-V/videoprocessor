@@ -835,5 +835,49 @@ namespace HalfLumaUnitTestsNs
 			Assert::IsTrue(g.find("vpu_quarter_luma(sampler2D halfSrc, ivec2 q)") != std::string::npos);
 			Assert::IsTrue(g.find("VPU_HALF_LUMA_VERSION 1") != std::string::npos);
 		}
+
+		// U3 one copy (gate-u3fix SHOULD): the three GLSL entries are folded into one generator (Detail::GlslBox). The text
+		// each emits must stay byte-identical to the hand-written bodies it replaced (frozen here from HalfLuma.h at
+		// 3467448f4), so every shader that splices them compiles the same source. The new mean-only entry carries the same
+		// mean expression.
+		TEST_METHOD(FoldedGlslEntriesAreByteIdenticalToTheFormerBodies)
+		{
+			using namespace VpUnit::HalfLuma;
+			const std::string oldGlsl = std::string("#define VPU_HALF_LUMA_VERSION 1\n"
+				"float vpu_half_luma(sampler2D src, ivec2 q)\n{\n"
+				"    ivec2 hi = textureSize(src, 0) - ivec2(1);\n"
+				"    ivec2 p0 = min(q * 2, hi);\n"
+				"    ivec2 p1 = min(q * 2 + ivec2(1), hi);\n"
+				"    float a = texelFetch(src, ivec2(p0.x, p0.y), 0).r;\n"
+				"    float b = texelFetch(src, ivec2(p1.x, p0.y), 0).r;\n"
+				"    float c = texelFetch(src, ivec2(p0.x, p1.y), 0).r;\n"
+				"    float d = texelFetch(src, ivec2(p1.x, p1.y), 0).r;\n"
+				"    return (a + b + c + d) * 0.25;\n}\n"
+				"float vpu_quarter_luma(sampler2D halfSrc, ivec2 q)\n{\n"
+				"    return vpu_half_luma(halfSrc, q);\n}\n");
+			const std::string oldComponent = std::string("float vpu_half_luma_comp(sampler2D src, ivec2 q, int comp)\n{\n"
+				"    ivec2 hi = textureSize(src, 0) - ivec2(1);\n"
+				"    ivec2 p0 = min(q * 2, hi);\n"
+				"    ivec2 p1 = min(q * 2 + ivec2(1), hi);\n"
+				"    float a = texelFetch(src, ivec2(p0.x, p0.y), 0)[comp];\n"
+				"    float b = texelFetch(src, ivec2(p1.x, p0.y), 0)[comp];\n"
+				"    float c = texelFetch(src, ivec2(p0.x, p1.y), 0)[comp];\n"
+				"    float d = texelFetch(src, ivec2(p1.x, p1.y), 0)[comp];\n"
+				"    return (a + b + c + d) * 0.25;\n}\n");
+			const std::string oldRgbaAt = std::string("vec4 vpu_half_luma_rgba_at(sampler2D src, ivec2 origin, ivec2 q)\n{\n"
+				"    ivec2 hi = textureSize(src, 0) - ivec2(1);\n"
+				"    ivec2 p0 = clamp(origin + q * 2, ivec2(0), hi);\n"
+				"    ivec2 p1 = clamp(origin + q * 2 + ivec2(1), ivec2(0), hi);\n"
+				"    vec4 a = texelFetch(src, ivec2(p0.x, p0.y), 0);\n"
+				"    vec4 b = texelFetch(src, ivec2(p1.x, p0.y), 0);\n"
+				"    vec4 c = texelFetch(src, ivec2(p0.x, p1.y), 0);\n"
+				"    vec4 d = texelFetch(src, ivec2(p1.x, p1.y), 0);\n"
+				"    return (a + b + c + d) * 0.25;\n}\n");
+			Assert::IsTrue(Glsl() == oldGlsl, L"Glsl() text unchanged by the fold");
+			Assert::IsTrue(GlslComponent() == oldComponent, L"GlslComponent() text unchanged by the fold");
+			Assert::IsTrue(GlslRgbaAt() == oldRgbaAt, L"GlslRgbaAt() text unchanged by the fold");
+			Assert::IsTrue(GlslMean4() == std::string("float vpu_half_luma_mean4(float a, float b, float c, float d)\n{\n"
+				"    return (a + b + c + d) * 0.25;\n}\n"), L"the mean-only entry: same order and mean");
+		}
 	};
 }

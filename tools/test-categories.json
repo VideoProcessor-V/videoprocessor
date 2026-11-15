@@ -266,7 +266,7 @@
    "kind": "class",
    "value": "AmbientSdrGpuTests",
    "category": "GpuWarp",
-   "file": "src/VP-V/tests/suite/AmbientAdaptationTests.cpp",
+   "file": "src/VP-V/modules/colour/display_mapping/tests/AmbientAdaptationTests.cpp",
    "note": "WARP unless VP_TEST_GPU=hardware."
   },
   {
@@ -287,7 +287,7 @@
    "kind": "method",
    "value": "AmbientSdrLiftTests::AmbientSdrLiftReachesTheCodes",
    "category": "Cpu",
-   "file": "src/VP-V/tests/suite/AmbientAdaptationTests.cpp",
+   "file": "src/VP-V/modules/colour/display_mapping/tests/AmbientAdaptationTests.cpp",
    "note": "Name mentions the GPU; the body is CPU only (reviewed)."
   },
   {
@@ -315,7 +315,7 @@
    "kind": "method",
    "value": "DvHostStageTests::GpuUnpackSessionLogsOnceAndSwitchesTheSessionToTheCpuOnce",
    "category": "Cpu",
-   "file": "src/VP-V/modules/colour/sdr_tone_shape/tests/DvHostStageTests.cpp",
+   "file": "src/VP-V/modules/colour/display_mapping/tests/DvHostStageTests.cpp",
    "note": "Name mentions the GPU; the body is CPU only (reviewed)."
   },
   {
@@ -513,6 +513,216 @@
    "category": "UpstreamStale",
    "file": "src/VideoProcessor-Test/RememberedEdgeReturnTests.cpp",
    "note": "UpstreamStale: Bill's test, unmodified; fails on Bill's tip a591ad3b exactly as here; passes at 2abdf66e^, fails from Bill's 2abdf66e (2026-10-30, RecoverFlatBarLowContrastPicture, his Eternals fix). Not a VP-V divergence (P010/P210/V210, Unknown range: DIV-AN-01 does not apply). Bill COST REGRESSION, not stale: raw evidence is still PROVISIONAL (no new crop) but the failed recovery attempt's samples are charged to the evidence (raw luma 11,808 -> 50,977, chroma 1,088 -> 40,257), so result.samples 96,352 -> 174,690 exceeds the test's 150,000 budget. Report to Bill as a cost regression; remove when fixed upstream."
+  },
+  {
+   "kind": "method",
+   "value": "GrainSplitV3GpuTests::V3GpuMatchesCpuReference",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/repair/grain_split/tests/GrainSplitV3GpuTests.cpp",
+   "note": "libplacebo test device from ExtendedRangeGpuProbe::TestDeviceParams: WARP unless VP_TEST_GPU=hardware; stays in the CPU run."
+  },
+  {
+   "kind": "method",
+   "value": "GrainSplitV3GpuTests::V3GpuIsDeterministic",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/repair/grain_split/tests/GrainSplitV3GpuTests.cpp",
+   "note": "libplacebo test device from ExtendedRangeGpuProbe::TestDeviceParams: WARP unless VP_TEST_GPU=hardware; stays in the CPU run."
+  },
+  {
+   "kind": "method",
+   "value": "AnalysisLaneTests::GpuChunkPredictionKeepsSmallGapsEmpty",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/AnalysisLaneTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: runs against FakeDispatcher, no device is created."
+  },
+  {
+   "kind": "method",
+   "value": "LaneProductsTests::ChunkPlanAndGpuComputeJob",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/LaneProductsTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: runs against FakeDispatcher, no device is created."
+  },
+  {
+   "kind": "method",
+   "value": "LaneProductsTests::GpuJobPredictsChunkCost",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/LaneProductsTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: runs against FakeDispatcher, no device is created."
+  },
+  {
+   "kind": "method",
+   "value": "LaneProductsTests::GpuJobCancelEndsTheJob",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/LaneProductsTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: runs against FakeDispatcher, no device is created."
+  },
+  {
+   "kind": "method",
+   "value": "DisplayRasterInfoTests::GpuScalingAndDrawingTagsRepresentDistinctStages",
+   "category": "Cpu",
+   "file": "src/VideoProcessor-Test/DisplayRasterInfoTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: the name says Gpu but the body creates no device (string tags only)."
+  },
+  {
+   "kind": "method",
+   "value": "DisplayRasterInfoTests::WindowedDrawingSizeIsShownWithoutGpuScalingTag",
+   "category": "Cpu",
+   "file": "src/VideoProcessor-Test/DisplayRasterInfoTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: the name says Gpu but the body creates no device (string tags only)."
+  },
+  {
+   "kind": "method",
+   "value": "DisplayRefreshRatePolicyTests::FullModeVerificationRejectsGpuScaledWireAndWrongDesktop",
+   "category": "Cpu",
+   "file": "src/VideoProcessor-Test/DisplayRefreshRatePolicyTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: the name says Gpu but the body creates no device (policy values only)."
+  },
+  {
+   "kind": "method",
+   "value": "RendererDependencyTests::GpuTestsLoadTheSelectedRendererDependency",
+   "category": "Cpu",
+   "file": "src/VideoProcessor-Test/RendererDependencyTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: the name says Gpu but the body creates no device (checks the loaded libplacebo DLL version only)."
+  },
+  {
+   "kind": "method",
+   "value": "RendererLivenessTests::GpuFailureCannotBeExcusedByOcclusionHiddenOrEmptyTarget",
+   "category": "Cpu",
+   "file": "src/VideoProcessor-Test/RendererLivenessTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: the name says Gpu but the body creates no device (liveness predicate only)."
+  },
+  {
+   "kind": "method",
+   "value": "StatsOverlayLayoutTests::ProductionHdrAndGpuValuesFitOrWrapWithoutLosingDiagnosticNumbers",
+   "category": "Cpu",
+   "file": "src/VideoProcessor-Test/StatsOverlayLayoutTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: the name says Gpu but the body creates no device (text layout only)."
+  },
+  {
+   "kind": "method",
+   "value": "TemporalPresentationLedgerTests::FailedLateGpuRevisionCannotReacquireOldSourceMapping",
+   "category": "Cpu",
+   "file": "src/VideoProcessor-Test/TemporalPresentationLedgerTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: the name says Gpu but the body creates no device (ledger bookkeeping only)."
+  },
+  {
+   "kind": "method",
+   "value": "NvofOneEngineGuardTests::SessionTableCountsPerGpuAndFlagsASecondEngine",
+   "category": "Cpu",
+   "file": "src/VideoProcessor-Test/NvofOneEngineGuardTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: the name says Gpu but the body creates no device (session table with synthetic ids)."
+  },
+  {
+   "kind": "method",
+   "value": "DitherNeedTests::StateTrackerDecidesResetOffAndMissingWithoutPlanes",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/output/dither/tests/SigmaDeltaHookTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: the name says Gpu but the body creates no device (pure state tracker)."
+  },
+  {
+   "kind": "method",
+   "value": "EngineLumaGpuTwinTests::GpuTwinFormatRuleAndFallbackCounters",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/input/source_analysis/lane/tests/EngineLumaGpuTwinTests.cpp",
+   "note": "Reviewed false positive of the name heuristic: the name says Gpu but the body creates no device (format rule and counters only)."
+  },
+  {
+   "kind": "method",
+   "value": "MotionRendererTests::SmoothSubtitlePacketHoldCannotCrossGpuOwners",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/MotionRendererTests.cpp",
+   "note": "GpuFixture creates a libplacebo D3D11 device with allow_software=true (software adapter allowed); the scanner does not follow the helper. Stays in the CPU run."
+  },
+  {
+   "kind": "method",
+   "value": "MotionRendererTests::SourceGapRendererProgramsCannotCrossGpuOwners",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/MotionRendererTests.cpp",
+   "note": "GpuFixture creates a libplacebo D3D11 device with allow_software=true (software adapter allowed); the scanner does not follow the helper. Stays in the CPU run."
+  },
+  {
+   "kind": "method",
+   "value": "MotionRendererTests::ClassicZeroOutputPacketReplaysItsOwnCropAtLaterGpuOutput",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/MotionRendererTests.cpp",
+   "note": "GpuFixture creates a libplacebo D3D11 device with allow_software=true (software adapter allowed); the scanner does not follow the helper. Stays in the CPU run."
+  },
+  {
+   "kind": "method",
+   "value": "MotionRendererTests::ZeroOutputPacketReplaysItsOwnCropAtLaterGpuOutput",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/MotionRendererTests.cpp",
+   "note": "GpuFixture creates a libplacebo D3D11 device with allow_software=true (software adapter allowed); the scanner does not follow the helper. Stays in the CPU run."
+  },
+  {
+   "kind": "method",
+   "value": "ReconstructionMotionTests::UhdLateCurrentCueReplacesNoCuePacketBeforeSealingSourceReuse",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/ReconstructionMotionTests.cpp",
+   "note": "ReconstructionMotionGpu creates a libplacebo D3D11 device with allow_software=true; stays in the CPU run."
+  },
+  {
+   "kind": "method",
+   "value": "SubtitleCutPasteTests::GlyphLocalRejectsAcceptedOldGlyphsOutsideCurrentSupport",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/SubtitleCutPasteTests.cpp",
+   "note": "SubtitleShaderGpuFixture creates a libplacebo D3D11 device with allow_software=true; stays in the CPU run."
+  },
+  {
+   "kind": "method",
+   "value": "SubtitleCutPasteShaderTests::FreshBarOnlyBackingLipAndOriginalWidthUseActualGpuCleanupAndLayer",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/SubtitleCutPasteTests.cpp",
+   "note": "SubtitleShaderGpuFixture creates a libplacebo D3D11 device with allow_software=true; stays in the CPU run."
+  },
+  {
+   "kind": "method",
+   "value": "SubtitleCutPasteShaderTests::PreparedBarErasureMatchesExactBlackAndReconstructionGpuFootprint",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/SubtitleCutPasteTests.cpp",
+   "note": "SubtitleShaderGpuFixture creates a libplacebo D3D11 device with allow_software=true; stays in the CPU run."
+  },
+  {
+   "kind": "method",
+   "value": "SubtitleCutPasteShaderTests::ViewportClippedBackingHasOpaqueGpuEdgesAtBothBars",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/SubtitleCutPasteTests.cpp",
+   "note": "SubtitleShaderGpuFixture creates a libplacebo D3D11 device with allow_software=true; stays in the CPU run."
+  },
+  {
+   "kind": "method",
+   "value": "SubtitleCutPasteShaderTests::MeasuredBackingIsCoveredByActualBlackAndReconstructionGpuLayers",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/SubtitleCutPasteTests.cpp",
+   "note": "SubtitleShaderGpuFixture creates a libplacebo D3D11 device with allow_software=true; stays in the CPU run."
+  },
+  {
+   "kind": "method",
+   "value": "EarlyUploadSecondReaderTests::SlotWaitsForBothReadersAndADeadReaderIsReleasedOnDetach",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/input/capture/tests/EarlyUploadSecondReaderTests.cpp",
+   "note": "TargetLutGpuFixture: WARP unless VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "method",
+   "value": "EngineLumaGpuTwinTests::GpuTwinEqualsTheCpuEngineLumaForEveryTwinFormat",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/input/source_analysis/lane/tests/EngineLumaGpuTwinTests.cpp",
+   "note": "TargetLutGpuFixture: WARP unless VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "method",
+   "value": "EngineLumaGpuTwinTests::GpuTwinRefusesWhatItCannotRead",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/input/source_analysis/lane/tests/EngineLumaGpuTwinTests.cpp",
+   "note": "TargetLutGpuFixture: WARP unless VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "method",
+   "value": "EngineLumaGpuTwinTests::GpuTwinReadsTheOneEarlyUploadOnTheReaderDevice",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/input/source_analysis/lane/tests/EngineLumaGpuTwinTests.cpp",
+   "note": "TargetLutGpuFixture: WARP unless VP_TEST_GPU=hardware."
   }
  ]
 }

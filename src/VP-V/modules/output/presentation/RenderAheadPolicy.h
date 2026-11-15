@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "OpenLoopDisplayRate.h"
+#include <VP-V/core/RobustStats.h>
 
 // Render-ahead (docs/VP-render-ahead-design.md, owner's top priority 2026-10-17):
 // the de-judder's processing cost follows the source frame, as in madVR, not the
@@ -803,9 +804,8 @@ namespace RenderAhead
 			values.reserve(samples.size());
 			for (const auto& s : samples)
 				values.push_back(s.second);
-			const size_t k = std::min(values.size() - 1, static_cast<size_t>(std::ceil(0.95 * values.size())) - 1);
-			std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(k), values.end());
-			return values[k];
+			// core/RobustStats.h (ND06): the nearest-rank percentile, sorted[ceil(0.95 n) - 1].
+			return RobustStats::Quantile(std::move(values), 0.95, RobustStats::RankRule::NearestRank);
 		}
 
 	private:

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <VP-V/core/RobustStats.h>
 #include <DisplayRefreshRatePolicy.h>
 
 #include <algorithm>
@@ -151,9 +152,7 @@ namespace OpenLoopDisplayRate
 		{
 			if (intervals.size() < kMinIntervals)
 				return 0.0;
-			std::vector<double> sorted(intervals);
-			std::nth_element(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(sorted.size() / 2), sorted.end());
-			const double median = sorted[sorted.size() / 2];
+			const double median = RobustStats::Median(intervals, RobustStats::MedianRule::Upper);   // core/RobustStats.h (ND06)
 			const double hz = median > 0.0 ? 1.0 / median : 0.0;
 			return DisplayRefreshBounds::Accepts(hz) ? hz : 0.0;
 		}

@@ -8,11 +8,11 @@
 -->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="..\VP-V\tests\suite\DolbyVisionTrimsTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DolbyVisionTrimsTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\FileSideDataTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SceneDescriptorTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\ContentIntentTests.cpp" />
-    <ClCompile Include="..\VP-V\tests\suite\AmbientAdaptationTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\AmbientAdaptationTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\BlackIntentTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\DisplayIntentTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedIntentLimitsTests.cpp" />
@@ -41,6 +41,12 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\LedMeasureHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\NativeReadbackWarpTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\NativeReadbackFenceTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\capture\tests\CaptureUnpackHookTests.cpp">
@@ -223,6 +229,9 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraAccessorTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraRecordPodTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraMeasurementTests.cpp">
@@ -432,6 +441,8 @@
     <ClCompile Include="..\VP-V\tests\suite\Integration20261017Tests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\Hunt2MotionTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\PostMergeAudit20261017Tests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\NearDupUnitsTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\NearDupRemainderTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\CaptureLayerAuditTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\DisplayRuleExpressionAuditTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\GuiAuditTests.cpp" />
@@ -444,6 +455,7 @@
     <ClCompile Include="..\VP-V\tests\suite\OriginalPathwaySiteGateTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\GrainPreservationTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\DetailPulseTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\repair\texture_restore\tests\D8SceneJudgeAgreementTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\CrossfadeMixTests.cpp" />
     <ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -476,9 +488,9 @@
     </ClCompile>
     <ClCompile Include="..\VP-V\tests\suite\HookSegmentTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\TextureRestoreTests.cpp" />
-    <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvTrimSelectionTests.cpp" />
-    <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvDolbyStyleTests.cpp" />
-    <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvHostStageTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvTrimSelectionTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvDolbyStyleTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvHostStageTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvSignalL8HoldTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncEventTests.cpp" />
@@ -686,6 +698,13 @@
     <ClCompile Include="..\VP-V\modules\input\source_analysis\regions\tests\RegionEvidenceTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\regions\tests\BusyEdgeTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\regions\tests\EdgeMapFillTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\regions\tests\RegionEvidenceWarpTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
@@ -726,6 +745,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\tests\PostPresentSpareTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\SchedulerContractTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\tests\AnalysisLaneTests.cpp">
@@ -778,6 +800,9 @@
     <ClCompile Include="..\VP-V\modules\input\source_analysis\lane\tests\LaneGpuLightKernelWarpTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\lane\tests\HalfLumaPassesIdentityGpuTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\tests\LaneProductsTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -787,6 +812,9 @@
     <ClCompile Include="..\VP-V\modules\control\diagnostics\tests\VpEventLineTests.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\tests\FrameStampTests.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\tests\StatusExtensionTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\PicturePrecisionTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\tests\FallbackPlainTextTests.cpp">
@@ -850,6 +878,12 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\HalfLumaEngineViewTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\P1AcquireSourceTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\P1GpuFillTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\AnalysisLumaDomainTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -895,6 +929,9 @@
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\MotionValidityResyncTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SourceResolutionFrameBoundTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\SourceResolutionFrameQuietTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncShadowQ0Tests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\tests\PulldownResyncTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\tests\QueueTargetNeverExceedsDesiredTests.cpp" />

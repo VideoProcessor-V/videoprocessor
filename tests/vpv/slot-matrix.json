@@ -225,6 +225,35 @@
   "missing": []
  },
  {
+  "id": "colour.dm_pre",
+  "order": 85,
+  "status": "placeholder",
+  "hook_point": "HOST",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [
+    "byte-identical with the slot off",
+    "zero hooks when off"
+   ],
+   "isolation": [],
+   "contract": [
+    "slot off: no pass and no hook, pipeline byte-identical"
+   ],
+   "chain": []
+  },
+  "fallback_entry": "DV display mapping (pre): off (<reason>)",
+  "missing": [
+   "isolation",
+   "chain"
+  ]
+ },
+ {
   "id": "repair.texture_restore",
   "order": 90,
   "status": "built",
@@ -484,6 +513,35 @@
   "missing": []
  },
  {
+  "id": "colour.dm_curve",
+  "order": 172,
+  "status": "placeholder",
+  "hook_point": "LIBPLACEBO",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [
+    "byte-identical with the slot off",
+    "zero hooks when off"
+   ],
+   "isolation": [],
+   "contract": [
+    "slot off: no pass and no hook, pipeline byte-identical"
+   ],
+   "chain": []
+  },
+  "fallback_entry": "DV display mapping (curve): off (<reason>)",
+  "missing": [
+   "isolation",
+   "chain"
+  ]
+ },
+ {
   "id": "colour.extended_range",
   "order": 175,
   "status": "built",
@@ -533,6 +591,35 @@
   },
   "fallback_entry": "DV tone mapping: <why>: bt2390[ + trims] | Dolby Vision trims: <state> | SDR tone shape: not applied (<why>)",
   "missing": [
+   "chain"
+  ]
+ },
+ {
+  "id": "colour.dm_trims",
+  "order": 205,
+  "status": "placeholder",
+  "hook_point": "PRE_OUTPUT",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [
+    "byte-identical with the slot off",
+    "zero hooks when off"
+   ],
+   "isolation": [],
+   "contract": [
+    "slot off: no pass and no hook, pipeline byte-identical"
+   ],
+   "chain": []
+  },
+  "fallback_entry": "DV display mapping (trims): off (<reason>)",
+  "missing": [
+   "isolation",
    "chain"
   ]
  },

@@ -315,6 +315,7 @@ namespace SkeletonCoreContextTestsNs
 				m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, CpuFill(&calls2, 0x44, VariantKey::kAxisPrecision));
 				Assert::IsTrue(m.Acquire(kP11RegionBlockStats, 1, AcquireForm::Cpu, half).cause == AcquireCause::VariantUndeclared, L"fp16 refused for every owner, pixelData or not");
 				Assert::IsTrue(calls2.load() == 0, L"and the fill never ran");
+				Assert::IsTrue(Has(m.LastCause(kP11RegionBlockStats), "variant not served"), L"and the decline is visible: the cause text says so");
 			}
 			VariantKey p0;
 			p0.param0 = 3;
@@ -355,6 +356,225 @@ namespace SkeletonCoreContextTestsNs
 			VariantKey half16;
 			half16.precision = kPrecisionFloat16;
 			Assert::IsFalse(VariantTexShape(half16, full, 1, TexFormat::R16, &s), L"a float16 variant has no shape: the owner declines it");
+		}
+	};
+
+	TEST_CLASS(SkeletonDeclaredDemandAccessorTests)
+	{
+	public:
+		TEST_METHOD(NoOwnersDeclareNothing)
+		{
+			SkeletonMemo m;
+			Assert::IsTrue(m.DeclaredFillHistory() == 0, L"no owner: no history");
+			Assert::IsTrue(m.ActiveAheadDemands().empty(), L"no owner: no ahead demand");
+		}
+
+		TEST_METHOD(DeclaredHistoryIsTheLargestDeclaredLag)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			OwnerFill a = CpuFill(&calls, 0x01);
+			a.historyFrames = 1;
+			OwnerFill b = CpuFill(&calls, 0x02);
+			b.keepFrames = 3;   // keepFrames is the same declaration under its B1 name: the larger counts
+			b.historyFrames = 2;
+			OwnerFill c = CpuFill(&calls, 0x03);   // declares nothing
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, a);
+			Assert::IsTrue(m.DeclaredFillHistory() == 1, L"one owner, history 1");
+			m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, b);
+			Assert::IsTrue(m.DeclaredFillHistory() == 3, L"max(keep 3, history 2) = 3 is the largest");
+			m.RegisterOwnerFill(kP1HalfLuma, AcquireForm::Cpu, kLaneUnit, c);
+			Assert::IsTrue(m.DeclaredFillHistory() == 3, L"an owner declaring nothing changes nothing");
+			Assert::IsTrue(calls.load() == 0, L"read-only: no fill ran");
+		}
+
+		TEST_METHOD(AheadDemandsListOnlyDeclaringOwners)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			OwnerFill a = CpuFill(&calls, 0x01);
+			a.aheadDepth = 4;
+			a.jobClass = JobClass::Core;
+			OwnerFill none = CpuFill(&calls, 0x02);   // aheadDepth 0: no demand
+			m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, none);
+			Assert::IsTrue(m.ActiveAheadDemands().empty(), L"aheadDepth 0 is not a demand");
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, a);
+			const std::vector<SkeletonMemo::AheadDemand> d = m.ActiveAheadDemands();
+			Assert::IsTrue(d.size() == 1, L"only the declaring owner is listed");
+			Assert::IsTrue(d[0].id == uint16_t(kP10GrainSplit) && d[0].form == 0 && d[0].depth == 4 && d[0].cls == JobClass::Core, L"its id, CPU form, depth and class");
+			Assert::IsTrue(calls.load() == 0, L"read-only: no fill ran");
+		}
+	};
+
+	TEST_CLASS(SkeletonLaneAheadSeamTests)
+	{
+	public:
+		// A fake lane: absent until its aheadNow ran, then Present with 8 bytes.
+		struct FakeLane {
+			std::atomic<int> asked{ 0 };
+			std::atomic<bool> made{ false };
+			LaneSlotSource::AheadNow kind = LaneSlotSource::AheadNow::Ran;
+			const char* why = "";
+			std::vector<uint8_t> bytes = std::vector<uint8_t>(8, 0x5A);
+			LaneSlotSource Source()
+			{
+				LaneSlotSource src;
+				src.read = [this](ProductId, uint64_t, AcquireForm, LaneSlotSource::Read* rd) {
+					if (!made.load())
+						return LaneSlotSource::State::Absent;
+					rd->cpu = bytes.data();
+					rd->cpuBytes = bytes.size();
+					return LaneSlotSource::State::Present;
+				};
+				src.aheadNow = [this](ProductId, uint64_t) {
+					asked.fetch_add(1);
+					LaneSlotSource::AheadNowResult r;
+					r.kind = kind;
+					r.why = why;
+					if (kind == LaneSlotSource::AheadNow::Ran)
+						made = true;
+					return r;
+				};
+				return src;
+			}
+		};
+
+		TEST_METHOD(RanServesTheLaneSlotAndCountsOneMadeFrame)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11));
+			FakeLane lane;
+			m.SetLaneSource(lane.Source());
+			m.OnSeal(10);
+			const AcquireResult a = m.Acquire(kP10GrainSplit, 12, AcquireForm::Cpu);
+			Assert::IsTrue(a.status == AcquireStatus::Reused && a.source == AcquireSource::LaneSlot && a.cpu != nullptr && a.cpu[0] == 0x5A, L"the lane's slot is served");
+			Assert::IsTrue(lane.asked.load() == 1 && calls.load() == 0, L"the lane was asked once, the owner fill never ran (computed once)");
+			const AcquireCounters c = m.CountersOf(kP10GrainSplit);
+			Assert::IsTrue(c.laneAheadMade == 1 && c.Computed() == 1, L"one made frame in the compute-once ledger");
+		}
+
+		TEST_METHOD(ClaimedIsLanePendingDeclinedIsVisibleNotNodeFallsBack)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11));
+			FakeLane lane;
+			m.SetLaneSource(lane.Source());
+			m.OnSeal(10);
+			lane.kind = LaneSlotSource::AheadNow::Claimed;
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 12, AcquireForm::Cpu).cause == AcquireCause::LanePending, L"claimed by a worker: pending, no wait");
+			lane.kind = LaneSlotSource::AheadNow::Declined;
+			lane.why = "lane GPU ahead: not at a GPU-legal phase";
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 13, AcquireForm::Cpu).cause == AcquireCause::OwnerDeclined, L"declined");
+			Assert::IsTrue(Has(m.LastCause(kP10GrainSplit), "GPU-legal phase"), L"the lane's reason is in the cause text");
+			lane.kind = LaneSlotSource::AheadNow::NotNode;
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 14, AcquireForm::Cpu).status == AcquireStatus::FilledAtRead && calls.load() == 1, L"not a lane product: the owner fill");
+			Assert::IsTrue(m.CountersOf(kP10GrainSplit).laneAheadMade == 0, L"none of these made a lane frame");
+		}
+
+		TEST_METHOD(TheRenderFrameAndEarlierNeverAskTheLane)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11));
+			FakeLane lane;
+			m.SetLaneSource(lane.Source());
+			m.OnSeal(10);
+			m.Acquire(kP10GrainSplit, 10, AcquireForm::Cpu);
+			Assert::IsTrue(lane.asked.load() == 0, L"seq == sealed frame is not ahead: the normal path");
+		}
+
+		TEST_METHOD(SealReducedAndWorkerReusedAreCountedPerProductInLaneFrames)
+		{
+			SkeletonMemo m;
+			m.NoteSealComputedReduced(kP10GrainSplit);
+			m.NoteSealComputedReduced(kP10GrainSplit);
+			m.NoteWorkerReused(kP10GrainSplit);
+			m.NoteWorkerReused(kP11RegionBlockStats);
+			const AcquireCounters c = m.CountersOf(kP10GrainSplit);
+			Assert::IsTrue(c.sealComputedReduced == 2 && c.workerReused == 1 && c.Computed() == 0, L"counted, and not frames computed");
+			Assert::IsTrue(m.CountersOf(kP11RegionBlockStats).workerReused == 1 && m.CountersOf(kP11RegionBlockStats).sealComputedReduced == 0, L"per product");
+			Assert::IsTrue(AnyLineHas(m.StatusLines(), "seal computed reduced 2") && AnyLineHas(m.StatusLines(), "worker reused 1"), L"shown on the status line");
+		}
+
+		TEST_METHOD(EarlierFramesDoNotAskTheLaneEither)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11));
+			FakeLane lane;
+			m.SetLaneSource(lane.Source());
+			m.OnSeal(10);
+			m.Acquire(kP10GrainSplit, 9, AcquireForm::Cpu);
+			Assert::IsTrue(lane.asked.load() == 0, L"a frame before the sealed one is not ahead");
+		}
+
+		TEST_METHOD(RanWithAnUnreadableSlotIsLanePendingAndAnEmptyReasonIsStillDeclined)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11));
+			FakeLane lane;
+			LaneSlotSource src = lane.Source();
+			src.read = [](ProductId, uint64_t, AcquireForm, LaneSlotSource::Read*) { return LaneSlotSource::State::Absent; };   // never readable
+			m.SetLaneSource(src);
+			m.OnSeal(10);
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 12, AcquireForm::Cpu).cause == AcquireCause::LanePending, L"told Ran, slot not readable: visible");
+			Assert::IsTrue(m.CountersOf(kP10GrainSplit).laneAheadMade == 0, L"and not counted as made");
+			lane.kind = LaneSlotSource::AheadNow::Declined;
+			lane.why = "";
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 13, AcquireForm::Cpu).cause == AcquireCause::OwnerDeclined, L"an empty reason is still a visible decline");
+		}
+
+		TEST_METHOD(GpuFormAndNonDefaultVariantNeverAskTheLane)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11, VariantKey::kAxisStage));
+			FakeLane lane;
+			m.SetLaneSource(lane.Source());
+			m.OnSeal(10);
+			VariantKey staged;
+			staged.stage = 4;
+			m.Acquire(kP10GrainSplit, 12, AcquireForm::Cpu, staged);
+			m.Acquire(kP10GrainSplit, 12, AcquireForm::Gpu);
+			Assert::IsTrue(lane.asked.load() == 0, L"only the default CPU form asks the lane");
+		}
+
+		TEST_METHOD(NotNodeAsksOnceAndANestedFillDuringTheAskIsNotFilledTwice)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11));
+			std::atomic<int> asked{ 0 };
+			bool inside = false;
+			LaneSlotSource src;
+			src.read = [](ProductId, uint64_t, AcquireForm, LaneSlotSource::Read*) { return LaneSlotSource::State::Absent; };
+			src.aheadNow = [&](ProductId, uint64_t seq) {
+				asked.fetch_add(1);
+				if (!inside) {
+					inside = true;
+					// While the memo lock is released for the ask, another reader fills the same key (the race MUST-2 named).
+					m.Acquire(kP10GrainSplit, seq, AcquireForm::Cpu);
+				}
+				LaneSlotSource::AheadNowResult r;
+				r.kind = LaneSlotSource::AheadNow::NotNode;
+				return r;
+			};
+			m.SetLaneSource(src);
+			m.OnSeal(10);
+			const AcquireResult a = m.Acquire(kP10GrainSplit, 12, AcquireForm::Cpu);
+			Assert::IsTrue(a.Ok() && calls.load() == 1, L"the owner fill ran exactly once (computed once)");
+			Assert::IsTrue(asked.load() == 2, L"the outer ask plus the nested reader's ask, no re-ask after the re-entry");
+		}
+
+		static bool AnyLineHas(const std::vector<std::string>& lines, const char* part)
+		{
+			for (const auto& l : lines)
+				if (Has(l, part))
+					return true;
+			return false;
 		}
 	};
 
@@ -879,6 +1099,76 @@ namespace SkeletonCoreContextTestsNs
 				rel.kind = RE::Lifecycle::GpuReleased;
 				sk.OnLifecycle(rel);
 			}
+		}
+	};
+	// R14-97 M3: the reserved ids of the fixed product-id table (30 band_memo, 32 focus_map, 33 room_light, 34 composed_vectors) are ABSENT
+	// slots: no declaration, no reads, fail closed everywhere a name could reach them.
+	TEST_CLASS(ReservedProductIdTests)
+	{
+	public:
+		TEST_METHOD(TheSkeletonRegistryIsValidWithFourAbsentSlots)
+		{
+			const Registry reg = SkeletonProducts();
+			const char* why = "";
+			Assert::IsTrue(reg.Validate(&why), L"valid with absent slots");
+			Assert::IsTrue(reg.Size() == size_t(kSkeletonProductEnd), L"Size() is the id span");
+			Assert::IsTrue(reg.ReservedAbsent() == 4u && kReservedProductCount == 4u, L"four reserved slots");
+			for (ProductId id : kReservedProductIds)
+			{
+				Assert::IsTrue(IsReservedProduct(id) && !reg.Has(id), L"absent: Has() is false");
+				Assert::IsTrue(reg.All()[id].id == kNoProduct && reg.All()[id].inputCount == 0, L"no declaration, no reads");
+				Assert::IsTrue(ReservedProductName(id)[0] != '\0', L"named");
+			}
+			Assert::IsTrue(reg.Has(kEdgeMap) && kEdgeMap == 31, L"edge_map keeps the fixed id 31");
+		}
+
+		TEST_METHOD(ARealDeclarationAtAReservedIdIsRejected)
+		{
+			std::vector<ProductDecl> d = SkeletonProducts().All();
+			d[kBandMemo] = detail::Make(kBandMemo, "band_memo", "band memo", Backend::Cpu, 1, Tier::T1, 0, 0);
+			const char* why = "";
+			Assert::IsFalse(Registry(d).Validate(&why), L"a declaration at a reserved id is refused");
+			Assert::IsTrue(std::string(why).find("reserved") != std::string::npos, L"with the reason");
+		}
+
+		TEST_METHOD(AnInputNamingAReservedIdIsRejected)
+		{
+			std::vector<ProductDecl> d = SkeletonProducts().All();
+			detail::AddInput(d[kP4SourceStats], kFocusMap, 0);
+			const char* why = "";
+			Assert::IsFalse(Registry(d).Validate(&why), L"an input naming an absent slot fails closed");
+			Assert::IsTrue(std::string(why).find("unknown input") != std::string::npos, L"unknown input product");
+		}
+
+		TEST_METHOD(AConsumerNamingAReservedIdMakesTheGraphInvalid)
+		{
+			ConsumerDecl c;
+			c.id = 1;
+			c.name = "reserved reader";
+			AddConsume(c, kRoomLight);
+			GraphSettings gs;
+			const Graph g = BuildGraph(SkeletonProducts(), std::vector<ConsumerDecl>(1, c), gs);
+			Assert::IsFalse(g.valid, L"a consumer of an unlanded product is refused, visibly");
+			Assert::IsTrue(g.error != nullptr && g.error[0] != '\0', L"with a plain reason");
+		}
+
+		TEST_METHOD(AcquireOfAReservedIdDeclinesVisibly)
+		{
+			SkeletonMemo m;
+			for (ProductId id : kReservedProductIds)
+			{
+				const AcquireResult r = m.Acquire(id, 5, AcquireForm::Cpu);
+				Assert::IsTrue(r.status == AcquireStatus::Unavailable && r.cause == AcquireCause::NoOwnerFill, L"declined, no owner");
+				const std::string why = m.LastCause(id);
+				Assert::IsTrue(why.find("reserved") != std::string::npos && why.find(ReservedProductName(id)) != std::string::npos,
+					L"the cause says reserved and names the product");
+			}
+			const std::vector<std::string> lines = m.StatusLines();
+			bool listed = false;
+			for (const std::string& l : lines)
+				listed = listed || (l.find("reserved product ids") != std::string::npos && l.find("band_memo") != std::string::npos
+					&& l.find("composed_vectors") != std::string::npos);
+			Assert::IsTrue(listed, L"the Ctrl+Alt+D status lists the reserved ids and names");
 		}
 	};
 }
