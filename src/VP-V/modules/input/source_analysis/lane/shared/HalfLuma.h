@@ -132,5 +132,79 @@ namespace HalfLuma
 		return std::string("float vpu_half_luma_mean4(float a, float b, float c, float d)\n{\n"
 			"    return ") + Detail::kGlslMean + ";\n}\n";
 	}
+
+	// ---- The 4x4 variant (U3 one copy, owner 2026-11-15; 102b U3-BOX4-VARIANT) ------------------------------------
+	// A variant axis of this unit (box size 4 instead of 2; no new product id): the 4x4 box mean that the coarse levels of
+	// two searches kept as private copies (the output-domain search's LUMAQ and LUMAC passes, OutputDomainSearchGlsl.h,
+	// and the matcher's pyramid step, DejudderWarp.cpp PYRAMID_BODY). Moved unchanged, the exact law of those copies:
+	//   taps    output sample q reads source 4q + (x, y), x and y in 0..3, each clamped by min to the last sample
+	//   sum     sequential from 0.0, y outer, x inner (16 terms, that order)
+	//   finish  sum / 16.0 (kGlslBox4x4Mean)
+	// It is NOT the two-level mean (vpu_half_luma of vpu_half_luma): that law differs at the edge when size % 4 == 2 and
+	// changes pictures (an owner decision, not proposed). GLSL cannot pass a tap read as an argument, so the variant is
+	// emitted as text that the consumers splice; every text is byte-identical to the body it replaced (HalfLumaUnitTests
+	// pins it, and OutputDomainSearchTests' golden pins the expanded sigma-delta text), so the compiled shaders are the
+	// same. Additive: the 2x2 entries above are unchanged and kUnitVersion stays.
+	constexpr const char* kGlslBox4x4Mean = "sum / 16.0";
+
+	// `float sum = 0.0;` and the y / x loop adding `tap` (an expression in the loop variables x and y), each line prefixed
+	// by `indent`. The consumer stores kGlslBox4x4Mean.
+	inline std::string GlslBox4x4Sum(const std::string& indent, const std::string& tap)
+	{
+		return indent + "float sum = 0.0;\n" +
+			indent + "for (int y = 0; y < 4; y++)\n" +
+			indent + "    for (int x = 0; x < 4; x++)\n" +
+			indent + "        sum += " + tap + ";\n";
+	}
+
+	// The min-edge tap of a sampled texture: texelFetch(tex, min(q * 4 + ivec2(x, y), size - ivec2(1)), 0).
+	inline std::string GlslBox4x4Fetch(const std::string& tex, const std::string& q, const std::string& size)
+	{
+		return "texelFetch(" + tex + ", min(" + q + " * 4 + ivec2(x, y), " + size + " - ivec2(1)), 0)";
+	}
+
+	// The R-channel level pass body (compute dispatch, sampled `src`, storage image `dst`, one invocation per output
+	// sample): the matcher's pyramid step (half -> 1/8, 1/8 -> 1/32 source). Moved from DejudderWarp.cpp PYRAMID_BODY.
+	inline std::string GlslBox4x4LevelBody()
+	{
+		return std::string("\n"
+			"ivec2 p = ivec2(gl_GlobalInvocationID.xy);\n"
+			"ivec2 size = imageSize(dst);\n"
+			"if (p.x < size.x && p.y < size.y) {\n"
+			"    ivec2 src_size = textureSize(src, 0);\n") +
+			GlslBox4x4Sum("    ", GlslBox4x4Fetch("src", "p", "src_size") + ".r") +
+			"    imageStore(dst, p, vec4(" + kGlslBox4x4Mean + ", 0.0, 0.0, 1.0));\n"
+			"}\n";
+	}
+
+	// The shared-memory tile form of the same law (a 16 x 16 work group, //!COMPUTE 16 16): the group's 64 x 64 source
+	// samples are read once in a coalesced sweep into the tile, then each invocation sums its 4x4 from the tile - the
+	// same per-sample values in the same order as 16 direct reads, so bit-identical to them. Moved from the output-domain
+	// search's LUMAQ pass (efficiency, owner 2026-10-15). Three pieces, spliced in this order:
+	//   GlslBox4x4TileDecl()  the tile, at file scope
+	//   GlslBox4x4TileLoad()  inside the entry point: the sweep; `fullSize` names the source size (an ivec2 in scope),
+	//                         `valueLines` (indented 8, may be empty) compute the sample at p, `value` is the stored float
+	//   GlslBox4x4TileSum()   inside the in-range branch: the 4x4 sum of this invocation (then store kGlslBox4x4Mean)
+	inline std::string GlslBox4x4TileDecl()
+	{
+		return "shared float lq_tile_[4096];\n";
+	}
+	inline std::string GlslBox4x4TileLoad(const std::string& fullSize, const std::string& valueLines, const std::string& value)
+	{
+		return std::string("    ivec2 base = ivec2(gl_WorkGroupID.xy) * 64;\n"
+			"    for (int k = 0; k < 16; k++) {\n"
+			"        int idx = int(gl_LocalInvocationIndex) + k * 256;\n"
+			"        ivec2 p = min(base + ivec2(idx % 64, idx / 64), ") + fullSize + " - ivec2(1));\n" +
+			valueLines +
+			"        lq_tile_[idx] = " + value + ";\n"
+			"    }\n"
+			"    memoryBarrierShared();\n"
+			"    barrier();\n";
+	}
+	inline std::string GlslBox4x4TileSum(const std::string& indent)
+	{
+		return indent + "ivec2 local = ivec2(gl_LocalInvocationID.xy) * 4;\n" +
+			GlslBox4x4Sum(indent, "lq_tile_[(local.y + y) * 64 + local.x + x]");
+	}
 }
 }

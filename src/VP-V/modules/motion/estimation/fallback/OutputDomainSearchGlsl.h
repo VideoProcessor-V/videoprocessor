@@ -28,6 +28,8 @@
 // owner-visible change (rule 28: never edit the golden to pass).
 #pragma once
 
+#include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
+
 #include <string>
 
 namespace VpMotion
@@ -38,9 +40,11 @@ namespace OutputDomainSearch
 	constexpr const char* kIncludeId = "motion.output_domain_search";
 
 	// Pass 1: LUMAQ, quarter-resolution luma of this refresh (code units). LF line ends, no trailing newline.
-	inline const char* LumaQuarterPassGlsl()
+	// The 4x4 mean is the shared unit U3's 4x4 variant in its tile form (VpUnit::HalfLuma::GlslBox4x4Tile*, U3 one copy,
+	// owner 2026-11-15); the spliced text is byte-identical to the former private tile (OutputDomainSearchTests' golden).
+	inline std::string LumaQuarterPassGlsl()
 	{
-		return R"VPGLSL(//!HOOK OUTPUT
+		return std::string(R"VPGLSL(//!HOOK OUTPUT
 //!BIND HOOKED
 //!SAVE LUMAQ
 //!WIDTH HOOKED.w 1.5 + 4 /
@@ -54,8 +58,7 @@ namespace OutputDomainSearch
 // read once in a coalesced sweep into shared memory, then each texel sums its
 // 4x4 from there - the same per-pixel values in the same order, so the
 // result is bit-identical to the direct 16 reads per texel it replaces.
-shared float lq_tile_[4096];
-
+)VPGLSL") + VpUnit::HalfLuma::GlslBox4x4TileDecl() + R"VPGLSL(
 void hook()
 {
     ivec2 full = textureSize(HOOKED_raw, 0);
@@ -63,33 +66,23 @@ void hook()
     // 8-bit units: a true 10-bit output (color_bits 10) arrives as /1023.
     float scale = color_bits > 9.0 ? 1023.0 / 4.0 :
         ((levels_full < 0.5 && swapchain_bits > 9.0) ? 255.75 : 255.0);
-    ivec2 base = ivec2(gl_WorkGroupID.xy) * 64;
-    for (int k = 0; k < 16; k++) {
-        int idx = int(gl_LocalInvocationIndex) + k * 256;
-        ivec2 p = min(base + ivec2(idx % 64, idx / 64), full - ivec2(1));
-        vec3 c = (HOOKED_mul * texelFetch(HOOKED_raw, p, 0)).rgb * scale;
-        lq_tile_[idx] = dot(c, vec3(0.2126, 0.7152, 0.0722));
-    }
-    memoryBarrierShared();
-    barrier();
-    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+)VPGLSL" + VpUnit::HalfLuma::GlslBox4x4TileLoad("full",
+			"        vec3 c = (HOOKED_mul * texelFetch(HOOKED_raw, p, 0)).rgb * scale;\n",
+			"dot(c, vec3(0.2126, 0.7152, 0.0722))") + R"VPGLSL(    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(out_image);
     if (pos.x < size.x && pos.y < size.y) {
-        ivec2 local = ivec2(gl_LocalInvocationID.xy) * 4;
-        float sum = 0.0;
-        for (int y = 0; y < 4; y++)
-            for (int x = 0; x < 4; x++)
-                sum += lq_tile_[(local.y + y) * 64 + local.x + x];
-        imageStore(out_image, pos, vec4(sum / 16.0, 0.0, 0.0, 1.0));
-    }
-}
-)VPGLSL";
+)VPGLSL" + VpUnit::HalfLuma::GlslBox4x4TileSum("        ") +
+			"        imageStore(out_image, pos, vec4(" + VpUnit::HalfLuma::kGlslBox4x4Mean + ", 0.0, 0.0, 1.0));\n"
+			"    }\n"
+			"}\n";
 	}
 
 	// Pass 2: LUMAC, coarse (1/16) luma, the top of the hierarchy.
-	inline const char* LumaCoarsePassGlsl()
+	// The 4x4 mean is the shared unit U3's 4x4 variant (VpUnit::HalfLuma::GlslBox4x4Sum / GlslBox4x4Fetch, U3 one copy,
+	// owner 2026-11-15); the spliced text is byte-identical to the former private loop (OutputDomainSearchTests' golden).
+	inline std::string LumaCoarsePassGlsl()
 	{
-		return R"VPGLSL(//!HOOK OUTPUT
+		return std::string(R"VPGLSL(//!HOOK OUTPUT
 //!BIND HOOKED
 //!BIND LUMAQ
 //!SAVE LUMAC
@@ -107,13 +100,10 @@ void hook()
     if (pos.x >= size.x || pos.y >= size.y)
         return;
     ivec2 lq = textureSize(LUMAQ_raw, 0);
-    float sum = 0.0;
-    for (int y = 0; y < 4; y++)
-        for (int x = 0; x < 4; x++)
-            sum += (LUMAQ_mul * texelFetch(LUMAQ_raw, min(pos * 4 + ivec2(x, y), lq - ivec2(1)), 0)).r;
-    imageStore(out_image, pos, vec4(sum / 16.0, 0.0, 0.0, 1.0));
-}
-)VPGLSL";
+)VPGLSL") + VpUnit::HalfLuma::GlslBox4x4Sum("    ",
+			"(LUMAQ_mul * " + VpUnit::HalfLuma::GlslBox4x4Fetch("LUMAQ_raw", "pos", "lq") + ").r") +
+			"    imageStore(out_image, pos, vec4(" + VpUnit::HalfLuma::kGlslBox4x4Mean + ", 0.0, 0.0, 1.0));\n"
+			"}\n";
 	}
 
 	// Pass 3: MV, per 16x16 block: vector (quarter pixels), confidence, match error; VPVEC copied when vector_source = 1.

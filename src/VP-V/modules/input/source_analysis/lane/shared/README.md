@@ -21,12 +21,22 @@ The one 2x2 box law of the half / quarter luma pyramid behind product P1 (doc 62
   - `GlslMean4()`: `vpu_half_luma_mean4(a, b, c, d)` (the mean alone, for consumers whose four taps are not plain
     texture fetches; the taps stay the consumer's). Consumer: texture restore's DetailPulse low band (`load_low` sbox and
     `LOW_BODY_FAST`, `DetailPulse.cpp`).
+- The 4x4 variant (U3 one copy, owner 2026-11-15; 102b U3-BOX4-VARIANT): a box-size axis of this unit, no new product id.
+  Law moved unchanged from the three private 4x4 copies: taps `4q + (x, y)` clamped by `min` to the last sample, a
+  sequential 16-term sum (y outer, x inner) from 0.0, finish `sum / 16.0` (`kGlslBox4x4Mean`). It is not the two-level
+  2x2-of-2x2 mean (that differs at the edge when size % 4 == 2; an owner decision). Emitted as text spliced by the
+  consumers, byte-identical to the bodies it replaced (`HalfLumaUnitTests::Box4x4VariantIsByteIdenticalToTheFormerPrivateCopies`,
+  and `OutputDomainSearchTests`' b5ae6eda5 golden for the sigma-delta text):
+  - `GlslBox4x4Sum(indent, tap)` + `GlslBox4x4Fetch(tex, q, size)`: consumer the output-domain search's LUMAC pass.
+  - `GlslBox4x4LevelBody()`: consumer the matcher's pyramid step (`DejudderWarp.cpp` PyramidBody, half -> 1/8 -> 1/32).
+  - `GlslBox4x4TileDecl()` / `GlslBox4x4TileLoad(...)` / `GlslBox4x4TileSum(indent)`: the shared-memory tile form (16 x 16
+    work group, 64 x 64 tile `lq_tile_`); consumer the output-domain search's LUMAQ pass.
 
 Consumers migrated (identity, proven in their test files): the lane producer (`LaneCpuProducts.h` HalfLumaRows / QuarterFromHalf,
 `LaneProductsTests.cpp`) and the NVOF producer's 8-bit box (`MotionAheadProducer.cpp` HalfLuma8, `VectorStoreTests.cpp`).
-GPU consumers above were moved with the arithmetic unchanged (same taps, order and IEEE operations, so bit-identical). Not
-migrated: the output-domain search's 4x4 output-luma box (`OutputDomainSearchGlsl.h`, an mpv user shader pinned byte-identical
-to `shaders/Temporal sigma-delta.glsl`; see `tools/shared_units_baseline.json`).
+GPU consumers above were moved with the arithmetic unchanged (same taps, order and IEEE operations, so bit-identical). The
+output-domain search's 4x4 output-luma boxes (`OutputDomainSearchGlsl.h` LUMAQ / LUMAC, an mpv user shader pinned
+byte-identical to `shaders/Temporal sigma-delta.glsl`) now splice the 4x4 variant; no private copy remains (U3 baseline 0).
 
 Determinism: integer arithmetic, fixed tap order. Any change of the grid, tap order, rounding or an existing GLSL entry's name
 bumps `kUnitVersion`. Adding a new entry with the same law (as `GlslComponent` and `GlslRgbaAt` were) is additive and does
