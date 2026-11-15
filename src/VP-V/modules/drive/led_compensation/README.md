@@ -98,6 +98,7 @@ The Dynamic Drive control side: the core (`LedDriveModule`), the controllers tha
 - `LedDriveCompensateTests`, `LedDriveDelta1Tests` (compensate controller, CNTR pairing never above the need, cut recovery, flux table, config reading).
 - `LedDriveHunt2Tests`, `LedDriveHunt3Tests` (resends, render-ahead landing, stream restarts, mode switches with the thread running).
 - `LedIntentLimitsTests`.
+- `LedCutJudgeTests` (CPU, FIX-LED-CUT-U7): no verdict = no cut with the cause; the "LED cut judge" / "LED look-ahead cut judge" entries (genuine failure only, the look-ahead one judged once per walk); the walk asks each queued frame's verdict once; an ahead cut lands the LED on the cut frame and opens the cut-lead window; the P4 demand declared once per renderer, again after a renderer change, withdrawn on stop. The LED tests inject the U7 verdict per sequence (`SceneVerdicts`, `tests/support/LedDriveTestSupport.h`), never through the process-global skeleton.
 - `LedDriveHoldoverTests`.
 - `LedDriveControllerTests` (`ScriptController` against beta_22, tick for tick), `LedScriptCorrelationTests` (a no-op unless `VP_TEST_LED_CORRELATION=1` and `VP_TEST_REAL_FOOTAGE` are set).
 - `DynamicDriveAdapterTests` (CPU): the host's settings / suspend / hold-over paths, the compensation-unavailable hold (compensate held, script not), the gamma-boost and dry-run entries, picture-only masks.
