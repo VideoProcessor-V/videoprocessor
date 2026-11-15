@@ -55,6 +55,13 @@ namespace VpMotion
 			e.motionEngineStatus = VectorDemand::DeriveEngineStatus(f);
 			if (e.motionCameraGated)
 				e.motionEngineStatus.affected |= 1u << static_cast<int>(VectorDemand::Consumer::CameraFit);
+			if (e.motionCameraGated && e.motionEngineStatus.reasons == 0)
+			{
+				// A gated camera fit alone must not leave a blank reason (an empty "motion engine off: ;" entry): name the gate's cause.
+				const auto r = e.motionOpticalFlow ? VectorDemand::MotionEngineReason::NvofUnavailable : VectorDemand::MotionEngineReason::OpticalFlowOff;
+				e.motionEngineStatus.reasons = 1u << static_cast<int>(r);
+				e.motionEngineStatus.reason = r;
+			}
 		}
 	}
 
@@ -293,8 +300,8 @@ namespace VpMotion
 		// has not failed to start (previous-frame facts: the planner's motion_ahead_frames, -1 = not planned yet = expected). With none
 		// expected the field consumers use the matcher fallback and the statistics consumers are named unserved (VectorDemand::Decide).
 		VectorDemand::Input decided = input;
-		decided.pairsExpected = facts.opticalFlow && !motionProducerStartFailed && motionAheadSetting != 0;
-		if ((cameraWanted && !input.wants[cameraFit]) || (motionCameraGated && input.wants[cameraFit]))
+		decided.pairsExpected = facts.opticalFlow && !motionProducerStartFailed && !motionEngineFacts.producerRecovering &&
+			motionAheadSetting != 0;		if ((cameraWanted && !input.wants[cameraFit]) || (motionCameraGated && input.wants[cameraFit]))
 		{
 			decided.wants[cameraFit] = !motionCameraGated;   // the camera fit asked for the field: one more consumer of the same decision
 		}
