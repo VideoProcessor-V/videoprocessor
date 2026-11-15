@@ -3550,8 +3550,9 @@ namespace Tests
 			const HarnessScope harnessScope;
 			// W2-C8 step 1, GPU form: dither_vectors own (the moved output-domain search) renders the same codes from the split
 			// shader (this build's shaders folder: `// VP_INCLUDE motion.output_domain_search`) and from the b5ae6eda5 file (a
-			// folder VP_C8_ORIG_SHADER_DIR holding the unsplit file). A run twice on the split file first: with the sigma-delta
-			// on the capture is temporal, so equality is asserted only where the same build is deterministic (REPORT otherwise).
+			// folder VP_C8_ORIG_SHADER_DIR holding shaders\ with the unsplit file). With the sigma-delta on the capture is
+			// temporal, so the two folders are compared at the same captured source frame (see the loop: FAIL, never REPORT,
+			// when no shared frame is reached or one folder is not repeatable at a fixed frame).
 			if (!RequireHardwareOrSkip("C8OwnSearchSplitShaderMatchesTheOriginalFile")) return;
 			const std::string original = HarnessEnvText("VP_C8_ORIG_SHADER_DIR");
 			if (original.empty())
@@ -3613,19 +3614,73 @@ namespace Tests
 				plan.retryRefusedCapture = true;
 				const bool moving = c.moving;
 				plan.step = [moving](int n) { FrameStep f; f.content = moving ? n : 0; return f; };
-				auto hashWith = [&](const std::string& dir) {
+				// Lead 19 fix-D (rule 28: no pass without repeatability). The sigma-delta's noise and carried error follow the
+				// refresh count (`frame / 5`, Temporal sigma-delta.glsl:602-612) and captureAtSeconds is wall-clock, so a capture's
+				// hash is a function of the source frame it lands on (tipC8e c8e.log: standard still split 114 / 114 = 838956e1,
+				// original 115 = 2775cdc6; gpu moving 45 / 45 / 45, all equal). Captures are therefore compared at the SAME
+				// captured source frame: up to kTries runs per folder, alternating, until both folders share a frame, and there
+				// every hash of both must be one. Two hashes from one folder at one frame = not repeatable even at a fixed phase:
+				// FAIL. No shared frame after kTries runs each: FAIL (the phase could not be pinned), never REPORT-only.
+				struct Sample { int source; std::string hash; };
+				auto sampleWith = [&](const std::string& dir) {
 					SetEnvironmentVariableA("VP_TEST_SHADER_DIR", dir.c_str());
-					return CaptureHash(Run(c.encoding, c.path, 4.0, c.film, C8SigmaRule("own"), false, &plan));
+					const RunResult r = Run(c.encoding, c.path, 4.0, c.film, C8SigmaRule("own"), false, &plan);
+					Sample s{ -1, CaptureHash(r) };
+					static const std::string kDone = "Rendered-output capture complete: source=";
+					for (const std::string& line : r.log)
+					{
+						const size_t at = line.find(kDone);
+						if (at != std::string::npos)
+							s.source = std::atoi(line.c_str() + at + kDone.size());
+					}
+					return s;
 				};
 				const std::string split = here.substr(0, here.size() - 1);
-				const std::string a = hashWith(split), a2 = hashWith(split), b = hashWith(original);
-				const bool deterministic = !a.empty() && a == a2;
-				report += std::string("== ") + c.name + ": split " + a + ", split again " + a2 + ", original " + b +
-					(deterministic ? " (deterministic)" : " (NOT deterministic: REPORT only)") + "\n";
-				if (a.empty() || b.empty())
-					failures += std::string(c.name) + ": a capture is missing; ";
-				else if (deterministic && a != b)
-					failures += std::string(c.name) + ": the split shader's output differs from the original file's; ";
+				constexpr int kTries = 4;
+				std::vector<Sample> splitRuns, originalRuns;
+				int common = -1;
+				for (int t = 0; t < kTries && common < 0; ++t)
+				{
+					splitRuns.push_back(sampleWith(split));
+					originalRuns.push_back(sampleWith(original));
+					for (const Sample& s : splitRuns)
+						for (const Sample& o : originalRuns)
+							if (common < 0 && s.source >= 0 && s.source == o.source && !s.hash.empty() && !o.hash.empty())
+								common = s.source;
+				}
+				std::string line = std::string("== ") + c.name + ":";
+				bool missing = false, unrepeatable = false;
+				std::string commonHash, mismatch;
+				auto scan = [&](const std::vector<Sample>& runs, const char* role) {
+					for (size_t i = 0; i < runs.size(); ++i)
+					{
+						line += std::string(" ") + role + "@" + std::to_string(runs[i].source) + " " + runs[i].hash + ";";
+						if (runs[i].hash.empty() || runs[i].source < 0)
+							missing = true;
+						for (size_t j = 0; j < i; ++j)
+							if (runs[j].source == runs[i].source && runs[j].hash != runs[i].hash)
+								unrepeatable = true;
+						if (common >= 0 && runs[i].source == common)
+						{
+							if (commonHash.empty())
+								commonHash = runs[i].hash;
+							else if (runs[i].hash != commonHash)
+								mismatch = std::string(role) + "@" + std::to_string(common);
+						}
+					}
+				};
+				scan(splitRuns, "split");
+				scan(originalRuns, "original");
+				report += line + (common >= 0 ? " compared at source " + std::to_string(common) : std::string(" no shared frame")) + "\n";
+				if (missing)
+					failures += std::string(c.name) + ": a capture (or its source frame) is missing; ";
+				if (unrepeatable)
+					failures += std::string(c.name) + ": one folder gave two hashes at the same captured frame (not repeatable at a fixed phase); ";
+				if (common < 0)
+					failures += std::string(c.name) + ": no captured frame shared by split and original in " + std::to_string(kTries) +
+						" runs each (phase not pinned: no comparison is not a pass); ";
+				else if (!mismatch.empty())
+					failures += std::string(c.name) + ": the split shader's output differs from the original file's at the same frame (" + mismatch + "); ";
 			}
 			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
 			g_harnessShaderProfiles = saved;
