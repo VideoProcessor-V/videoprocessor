@@ -114,7 +114,6 @@ namespace LightLevel
 			bool identity = true;
 
 			static double Mix(double a, double b, double t) { return RampMath::Mix(a, b, t); }   // core/Ramp.h (ND07)
-			static double Smoothstep(double e0, double e1, double x) { return RampMath::Smoothstep(e0, e1, x, RampMath::SmoothRule::StepWhenEqual); }
 
 			Spline(double srcPeak, double dstPeak, double srcMin, double dstMin,
 				const std::array<double, ToneMappingTuning::Count>& c)
@@ -127,7 +126,7 @@ namespace LightLevel
 				srcKnee = std::min(std::max(srcKnee, Mix(inMin, inMax, mn)), Mix(inMin, inMax, mx));
 				const double target = inMax > inMin ? (srcKnee - inMin) / (inMax - inMin) : 0.0;
 				const double adapted = Mix(outMin, outMax, target);
-				const double tuning = 1.0 - Smoothstep(mx, df, target) * Smoothstep(mn, df, target);
+				const double tuning = 1.0 - RampMath::Smoothstep(mx, df, target, RampMath::SmoothRule::StepWhenEqual) * RampMath::Smoothstep(mn, df, target, RampMath::SmoothRule::StepWhenEqual);
 				const double adaptation = Mix(c[T::KneeAdaptation], 1.0, tuning);
 				double dstKnee = Mix(srcKnee, adapted, adaptation);
 				dstKnee = std::min(std::max(dstKnee, Mix(outMin, outMax, mn)), Mix(outMin, outMax, mx));

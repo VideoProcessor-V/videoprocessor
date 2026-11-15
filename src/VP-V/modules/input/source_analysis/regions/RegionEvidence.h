@@ -154,10 +154,6 @@ namespace RegionEvidence
 		static constexpr double invM1 = 6.277394636015326, invM2 = 0.012683313515655966, m2 = 78.84375;
 	};
 
-	// core/Ramp.h (ND07).
-	template <class T> inline T Clamp01(T v) { return RampMath::Clamp01(v); }
-	template <class T> inline T Ramp(T v, T lo, T hi) { return ::RampMath::Ramp(v, lo, hi); }
-
 	// Display luminance (nits) of a 10-bit studio luma code. SDR: white * v^2.4 (BTB -> 0, WTW above white kept);
 	// PQ: ST 2084 EOTF of v clamped 0..1; HLG: BT.2100 inverse OETF and a 1000-nit luma OOTF (gamma 1.2).
 	template <class T>
@@ -166,14 +162,14 @@ namespace RegionEvidence
 		const T v = (code - T(64)) / T(876);
 		if (transfer == static_cast<int>(Transfer::Pq))
 		{
-			const T e = Clamp01(v);
+			const T e = RampMath::Clamp01(v);
 			const T p = std::pow(e, T(Pq::invM2));
 			const T num = (std::max)(p - T(Pq::c1), T(0));
 			return T(10000) * std::pow(num / (T(Pq::c2) - T(Pq::c3) * p), T(Pq::invM1));
 		}
 		if (transfer == static_cast<int>(Transfer::Hlg))
 		{
-			const T e = Clamp01(v);
+			const T e = RampMath::Clamp01(v);
 			const T s = e <= T(0.5) ? e * e / T(3) : (std::exp((e - T(0.55991073)) / T(0.17883277)) + T(0.28466892)) / T(12);
 			return T(1000) * std::pow(s, T(1.2));
 		}
@@ -185,7 +181,7 @@ namespace RegionEvidence
 	template <class T>
 	inline T PqOf(T nits)
 	{
-		const T y = Clamp01(nits / T(10000));
+		const T y = RampMath::Clamp01(nits / T(10000));
 		const T p = std::pow(y, T(Pq::m1));
 		return std::pow((T(Pq::c1) + T(Pq::c2) * p) / (T(1) + T(Pq::c3) * p), T(Pq::m2));
 	}
@@ -248,7 +244,7 @@ namespace RegionEvidence
 		const T peak = T(p.displayPeakNits);
 		T Lt = T(0), slopeT = T(1);
 		ToneMap<T>(L, peak, T(p.kneeShare) * peak, Lt, slopeT);
-		return Clamp01(slopeT * dL / (T(p.weber) * (Lt + T(p.darkNits))));
+		return RampMath::Clamp01(slopeT * dL / (T(p.weber) * (Lt + T(p.darkNits))));
 	}
 
 	struct StatsConstants
@@ -396,7 +392,7 @@ namespace RegionEvidence
 		out[kMeanNits] = sumNits * inv; out[kMeanPq] = sumPq * inv;
 		out[kCoverage] = T(n) / T(sp.frameArea);
 		out[kOffShare] = T(offCount) * inv;
-		out[kVisibilityStat] = k.lutTexels ? Clamp01<T>(LightLevel::FetchPacked<T>(k.lutTexels, out[kMeanY]).V)
+		out[kVisibilityStat] = k.lutTexels ? RampMath::Clamp01<T>(LightLevel::FetchPacked<T>(k.lutTexels, out[kMeanY]).V)
 			: Visibility<T>(out[kMeanY], k.transfer, T(k.sdrWhite), k.vis);
 	}
 
@@ -454,7 +450,7 @@ namespace RegionEvidence
 				float conf = 0.0f, code = 0.0f;
 				if (camValid)
 				{
-					conf = static_cast<float>(Clamp01(cam->confidence));
+					conf = static_cast<float>(RampMath::Clamp01(cam->confidence));
 					if (labels)
 					{
 						const int lx = static_cast<int>(std::floor(cx / cb->blockSize)), ly = static_cast<int>(std::floor(cy / cb->blockSize));
@@ -526,13 +522,13 @@ namespace RegionEvidence
 		m[kEdge] = edge;
 		m[kEdgeContrast] = range / (range + T(p.grainSpan) * sigma + T(1));
 		const T floorLap = T(p.lapGrain) * N;
-		const T gate = Ramp(edge, T(p.edgeGateLo) * sigma + T(p.edgeGateOffLo), T(p.edgeGateHi) * sigma + T(p.edgeGateOffHi));
+		const T gate = RampMath::Ramp(edge, T(p.edgeGateLo) * sigma + T(p.edgeGateOffLo), T(p.edgeGateHi) * sigma + T(p.edgeGateOffHi));
 		const T excess = (std::max)(s[kOffLap] - floorLap, T(0));
 		m[kRinging] = haveSplit ? gate * excess / (s[kOffLap] + floorLap + (std::max)(T(p.ringFloor), T(1e-6))) : T(0);
 		const T texture = haveSplit ? (std::max)(s[kE1] + s[kE2] - N, T(0)) : T(0);
 		m[kTexture] = texture;
 		const T slope = std::sqrt(s[kSlopeX] * s[kSlopeX] + s[kSlopeY] * s[kSlopeY]);
-		m[kBanding] = (haveSplit && !overlay) ? (T(1) - Ramp(texture, T(p.flatLo), T(p.flatHi))) * (T(1) - Ramp(slope, T(p.slopeLo), T(p.slopeHi))) : T(0);
+		m[kBanding] = (haveSplit && !overlay) ? (T(1) - RampMath::Ramp(texture, T(p.flatLo), T(p.flatHi))) * (T(1) - RampMath::Ramp(slope, T(p.slopeLo), T(p.slopeHi))) : T(0);
 		m[kBrightness] = s[kMeanY];
 		m[kVisibility] = s[kVisibilityStat];
 		const int code = static_cast<int>(s[kAuxCameraCode] + T(0.5));

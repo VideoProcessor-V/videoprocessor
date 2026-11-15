@@ -74,8 +74,6 @@ namespace SourceIdentity
 		}
 	}
 
-	inline double Clamp01(double x) { return ::RampMath::Clamp01NanToZero(x); }   // core/Ramp.h (ND07)
-
 	struct Vote
 	{
 		VoterId voter = VoterId::ClassicalResolution;
@@ -93,7 +91,7 @@ namespace SourceIdentity
 	inline void SetField(Vote& v, Field f, double confidence)
 	{
 		v.fieldMask |= FieldBit(f);
-		v.confidence[static_cast<int>(f)] = Clamp01(confidence);
+		v.confidence[static_cast<int>(f)] = ::RampMath::Clamp01NanToZero(confidence);
 	}
 
 	// Adapter settings (the known trust profile of the voters is data, not code branches).
@@ -160,9 +158,9 @@ namespace SourceIdentity
 		v.evidenceTimeUs = r.timeUs;
 		if (!r.reading || r.kernel < 0 || r.kernelVotes <= 0)
 			return v;
-		const double agree = Clamp01(static_cast<double>(r.kernelAgree) / static_cast<double>(r.kernelVotes));
+		const double agree = ::RampMath::Clamp01NanToZero(static_cast<double>(r.kernelAgree) / static_cast<double>(r.kernelVotes));
 		const int minVotes = s.kernelMinVotes > 1 ? s.kernelMinVotes : 1;
-		const double ramp = Clamp01(static_cast<double>(r.kernelVotes) / static_cast<double>(minVotes));
+		const double ramp = ::RampMath::Clamp01NanToZero(static_cast<double>(r.kernelVotes) / static_cast<double>(minVotes));
 		v.h.kernel = r.kernel;
 		SetField(v, Field::Kernel, agree * ramp);
 		return v;
