@@ -149,6 +149,53 @@ class CheckHookGatingTest(unittest.TestCase):
                 self.assertEqual(rc, 0, out)
                 self.assertIn("VPV-GATED EndLease (src/VP-V/modules/motion/estimation/Lease.h:3) verified", out)
 
+    def test_red_hg2_receiver_chains_in_the_predicate_declaration_are_unverified(self):
+        # HG2-RECEIVER-CHAIN (gate C-T3): before the guard only the two house forms of the predicate declaration are
+        # admitted (the plain OriginalPathwayOf and the hub instance, verified above); any other receiver, call or
+        # qualifier could hide an effect inside the declaration. The previous pattern verified every one of these.
+        for name, query in (
+                ("a zero-argument call as the receiver", "ResetAll().OriginalPathway(c.host)"),
+                ("a two-link receiver chain", "Flush()->Drain().OriginalPathway(c.host)"),
+                ("another call on the hub class", "Vpv::Hub::ExtensionHub::Reset().OriginalPathway(c.host)"),
+                ("an extra link after the hub instance", "Vpv::Hub::ExtensionHub::Instance().Flush().OriginalPathway(c.host)"),
+                ("a foreign singleton", "Other::Instance().OriginalPathway(c.host)"),
+                ("a call before the free form", "Make().OriginalPathwayOf(c.host)"),
+                ("a member receiver", "hub->OriginalPathway(c.host)"),
+                ("a qualified free form", "Other::OriginalPathwayOf(c.host)")):
+            with self.subTest(name):
+                rc, out = self._gated_body("\t\tconst bool originalPathway = %s;\n\t\tif (originalPathway) return false;\n"
+                                           "\t\treturn true;\n" % query)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("UNVERIFIED VPV-GATED marker", out)
+                self.assertIn("1 unguarded, 1 unverified markers", out)
+
+    def test_red_hg_same_named_markers_in_two_files_are_each_verified(self):
+        # HG-GATED-NAME-COLLISION: the markers were keyed by the short name, so of two same-named VPV-GATED definitions in
+        # two files the one read last hid the other (in the tree: OnQueue in DejudderExtension.cpp and in
+        # VectorEngineExtension.cpp). Each definition is now verified and listed, and a call of the name is gated only when
+        # every definition is. Both file orders run, so in one of them the hidden definition is the unverified one.
+        bad = "struct A\n{\n\tbool EndLease(Ctx& c)   // VPV-GATED\n\t{\n\t\tDoWork();\n\t\tif (originalPathway) return false;\n\t\treturn true;\n\t}\n};\n"
+        good = "struct B\n{\n\tbool EndLease(Ctx& c)   // VPV-GATED\n\t{\n\t\tif (originalPathway) return false;\n\t\tDoWork();\n\t\treturn true;\n\t}\n};\n"
+        files = ("src/VP-V/modules/a/LeaseA.h", "src/VP-V/modules/b/LeaseB.h")
+        _w(self.root, BILL, _bill("\t\tvectorEstimate.EndLease(ctx);   // VPV-HOOK\n"))
+        for name, texts in (("the unverified definition in the first file", (bad, good)),
+                            ("the unverified definition in the second file", (good, bad)),
+                            ("both definitions verified", (good, good))):
+            with self.subTest(name):
+                for rel, text in zip(files, texts):
+                    _w(self.root, rel, text)
+                rc, out = _run(self.root)
+                for rel, text in zip(files, texts):
+                    self.assertIn("VPV-GATED EndLease (%s:3) %s" % (rel, "verified" if text is good else "NOT VERIFIED"), out)
+                if bad in texts:
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn("UNVERIFIED VPV-GATED marker (no `if (<original>) return` found) %s:3 EndLease"
+                                  % files[texts.index(bad)], out)
+                    self.assertIn("1 unguarded, 1 unverified markers", out)
+                else:
+                    self.assertEqual(rc, 0, out)
+                    self.assertIn("0 unguarded, 0 unverified markers", out)
+
     def test_declarations_includes_and_context_fills_are_inert(self):
         body = ("\t\tRendererExtension::IngressContext ic; ic.host = this; ic.seq = static_cast<int64_t>(seq);   // VPV-HOOK\n"
                 "\t\tif (RendererExtension::DecideIngress(ic) && ic.drop) return;   // VPV-HOOK\n"
