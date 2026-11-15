@@ -210,24 +210,33 @@ class CheckSharedUnitsTest(unittest.TestCase):
         path = os.path.join(ROOT, "src", "VP-V", "modules", "control", "skeleton", "SkeletonModule.cpp")
         with open(path, encoding="utf-8") as f:
             text = f.read()
-        start = text.find("bool SkeletonModule::SceneFactsOf(")
-        self.assertGreaterEqual(start, 0, "SceneFactsOf not found")
-        open_at = text.find("{", start)
-        depth, i = 0, open_at
-        while i < len(text):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            i += 1
-        body = text[open_at:i]
-        code = "\n".join(l for l in body.splitlines() if not l.strip().startswith("//"))
-        for forbidden in ("TemporalValid", "Indicator", "Resync::", "StampOf", "seal.Current", "MotionValidity", "kFull", "kContinuity"):
-            self.assertNotIn(forbidden, code, "SceneFactsOf reads a validity source: " + forbidden)
+        # U7-accuracy (WAIVER-U7ACC-SCENE-FACTS): SceneFactsOf delegates to SceneFactsFor (the body, shared with the seal's FillScene), whose
+        # sequence verdict comes from SceneVerdictLocked; all three bodies are held to the same rule.
+        def body_of(signature):
+            start = text.find(signature)
+            self.assertGreaterEqual(start, 0, signature + " not found")
+            open_at = text.find("{", start)
+            depth, i = 0, open_at
+            while i < len(text):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+            body = text[open_at:i]
+            return "\n".join(l for l in body.splitlines() if not l.strip().startswith("//"))
+        bodies = {name: body_of(sig) for name, sig in (
+            ("SceneFactsOf", "bool SkeletonModule::SceneFactsOf("),
+            ("SceneFactsFor", "bool SceneFactsFor(HostState& st"),
+            ("SceneVerdictLocked", "SceneVerdictLocked(HostState& st"))}
+        for name, code in bodies.items():
+            for forbidden in ("TemporalValid", "Indicator", "Resync::", "StampOf", "seal.Current", "MotionValidity", "kFull", "kContinuity"):
+                self.assertNotIn(forbidden, code, name + " reads a validity source: " + forbidden)
+        self.assertIn("SceneFactsFor(", bodies["SceneFactsOf"])
         # The events are classified with NO full / continuity input: the literal call, so a validity argument cannot be slipped in.
-        self.assertIn("ClassifyEvents(a, c, false, false)", code)
+        self.assertIn("ClassifyEvents(a, c, false, false)", bodies["SceneFactsFor"])
 
     # ---- strict + baseline --------------------------------------------------------------------
     def _baseline(self, blocking, n):

@@ -26,6 +26,7 @@
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/motion/estimation/MotionAheadWalk.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
@@ -1447,13 +1448,18 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(rec.scene.origin == FrameAnalysis::SceneOrigin::Vp);
 			Vpv::Skeleton::SceneFacts f;
 			Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), 4, f));
-			Assert::AreEqual(f.cut, rec.scene.cut, L"the stored value is the classification");
+			// U7-accuracy (WAIVER-U7ACC-SKELETON-SCENE): the frame's own verdict is cutHere; `cut` is the delivered signal.
+			Assert::AreEqual(f.cut, rec.scene.cutHere, L"the stored verdict is the classification");
+			Assert::AreEqual(f.confirmed, rec.scene.confirmed);
+			Assert::IsFalse(rec.scene.confirmed, L"frame 5 was not sealed at the seal of 4: provisional");
+			Assert::IsFalse(rec.scene.cut, L"a provisional verdict delivers no cut (and noise frames never cut)");
 			Assert::AreEqual(f.fade, rec.scene.fade);
 			// The reader: from the store, nothing recomputed (no second write, no live fill).
 			const Vpv::Skeleton::SceneAnswer a = rig.sk.SceneOf(rig.Host(), 4);
 			Assert::IsTrue(a.known);
 			Assert::IsTrue(a.from == Vpv::Skeleton::SceneAnswer::From::Store);
-			Assert::AreEqual(f.cut, a.cut);
+			Assert::AreEqual(f.cut, a.cutHere);
+			Assert::AreEqual(rec.scene.cut, a.cut);
 			Assert::AreEqual(f.fade, a.fade);
 			const Vpv::Skeleton::SceneCounters done = rig.sk.SceneCountersOf(rig.Host());
 			Assert::AreEqual(afterSeal.published, done.published);
@@ -1507,7 +1513,8 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(live.from == Vpv::Skeleton::SceneAnswer::From::Live);
 			Vpv::Skeleton::SceneFacts f;
 			Assert::IsTrue(off.sk.SceneFactsOf(off.Host(), 4, f));
-			Assert::AreEqual(f.cut, live.cut);
+			Assert::AreEqual(f.cut, live.cutHere);   // WAIVER-U7ACC-SKELETON-SCENE: the frame's verdict; live.cut is the delivered signal
+			Assert::AreEqual(f.confirmed && f.cut, live.cut && !live.cutLate);
 			Assert::AreEqual(f.fade, live.fade);
 			const Vpv::Skeleton::SceneCounters c = off.sk.SceneCountersOf(off.Host());
 			Assert::AreEqual(uint64_t(0), c.published, L"no store: nothing written, no work at the seal");
@@ -1543,18 +1550,39 @@ namespace SkeletonModuleTestsNs
 			on.After(4);
 		}
 
-		// Frame 3 is FLAT and dark, frame 4 is bright texture: a picture change with a spread jump (a cut, not a flash). The random-noise
-		// frames the rig starts with never cut (every pair is alike), so the cut equivalence needs frames made on purpose. Call before any frame
-		// is delivered.
-		static void ShapeACutAtFrame4(Rig& rig)
+		// U7-accuracy (WAIVER-U7ACC-SKELETON-SCENE): the v2 sequence law needs the frames around a cut, and the delivered cut comes one frame
+		// late when the frame's successor was not sealed at its seal (FrameAnalysis::Scene::cut). Two still shots: frames 1 .. 11 a left-to-right
+		// ramp, frames 12 .. 63 a top-to-bottom ramp the other way (every pair inside a shot is identical, the pair across 11 -> 12 differs in
+		// every cell and in the histogram). Call before any frame is delivered.
+		static constexpr uint64_t kCutFrame = 12;
+		static void ShapeTwoStillShots(Rig& rig)
 		{
-			uint32_t x = 4242u;
-			for (uint32_t i = 0; i < kW * kH; ++i)
+			for (size_t s = 0; s < rig.count; ++s)
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const bool second = s >= kCutFrame;
+						const uint32_t v = second ? 900u - (y * 700u) / kH + ((x * 3u + y) & 7u) : 150u + (x * 700u) / kW + ((x + y) & 7u);
+						rig.store[s * kW * kH + size_t(y) * kW + x] = uint16_t(v);
+					}
+		}
+
+		// Frames 1 .. kCutFrame - 1 rendered, then the seal of kCutFrame (its successor delivered, not sealed): the cut frame's verdict is
+		// provisional here. `opened` (may be null) gets the records of kCutFrame and kCutFrame + 1 opened before their seals.
+		static void RunToTheSealOfTheCut(Rig& rig, FrameAnalysis::Store* opened)
+		{
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s < int64_t(kCutFrame); ++s)
+				rig.Frame(s);
+			if (opened)
 			{
-				rig.store[size_t(3 % rig.count) * kW * kH + i] = 100;
-				x = x * 1664525u + 1013904223u;
-				rig.store[size_t(4 % rig.count) * kW * kH + i] = uint16_t(600u + ((x >> 12) % 400u));
+				opened->Begin(SceneTestId(kCutFrame), FrameAnalysis::kScene);
+				opened->Begin(SceneTestId(kCutFrame + 1), FrameAnalysis::kScene);
 			}
+			rig.Ingress(int64_t(kCutFrame));
+			rig.Deliver(kCutFrame + 1);
+			rig.Begin(int64_t(kCutFrame));
 		}
 
 		static void RunToTheSealOfFrame4(Rig& rig)
@@ -1569,66 +1597,79 @@ namespace SkeletonModuleTestsNs
 
 		TEST_METHOD(ARealCutGivesTheSameAnswerFromTheStoreTheLiveFillAndWithTheStoreOff)
 		{
-			// 1. Store on, the record open at the seal: published, then served from the store.
+			// U7-accuracy (WAIVER-U7ACC-SKELETON-SCENE). 1. Store on, the records open at their seals. At the seal of the cut frame its
+			// successor is not sealed: the verdict is provisional and delivers nothing. At the next seal the cut is CONFIRMED: the cut
+			// frame's group is rewritten (cutHere, confirmed) and the cut is delivered once, one frame late (cut + cutLate on the next frame).
 			Rig stored(Lane("on"));
-			ShapeACutAtFrame4(stored);
+			ShapeTwoStillShots(stored);
 			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
 			Tap::SetStore(stored.Host(), &store);
 			SceneStoreGuard g1(stored.Host());
-			RunToTheSealOfFrame4(stored);
-			store.Begin(SceneTestId(4), FrameAnalysis::kScene);
-			stored.Begin(4);
-			const Vpv::Skeleton::SceneAnswer fromStore = stored.sk.SceneOf(stored.Host(), 4);
+			RunToTheSealOfTheCut(stored, &store);
+			FrameAnalysis::Scene atSeal;
+			Assert::IsTrue(store.PeekScene(kCutFrame, atSeal));
+			Assert::IsFalse(atSeal.confirmed, L"the successor was not sealed: provisional");
+			Assert::IsFalse(atSeal.cut, L"a provisional verdict never delivers a cut");
+			stored.After(int64_t(kCutFrame));
+			stored.Frame(int64_t(kCutFrame + 1));
+			FrameAnalysis::Scene cutGroup, nextGroup;
+			Assert::IsTrue(store.PeekScene(kCutFrame, cutGroup));
+			Assert::IsTrue(store.PeekScene(kCutFrame + 1, nextGroup));
+			Assert::IsTrue(cutGroup.confirmed, L"rewritten when frame 13 confirmed it");
+			Assert::IsTrue(cutGroup.cutHere, L"two still shots: the frame starting the second is a cut");
+			Assert::IsFalse(cutGroup.cut, L"the delivered cut is not rewritten (exactly once)");
+			Assert::IsTrue(nextGroup.cut && nextGroup.cutLate, L"delivered one frame late");
+			Assert::IsFalse(nextGroup.cutHere, L"inside the second shot");
+			Assert::IsTrue(stored.sk.SceneCountersOf(stored.Host()).republished >= 1u);
+			const Vpv::Skeleton::SceneAnswer fromStore = stored.sk.SceneOf(stored.Host(), kCutFrame);
 			Assert::IsTrue(fromStore.known);
 			Assert::IsTrue(fromStore.from == Vpv::Skeleton::SceneAnswer::From::Store);
-			Assert::IsTrue(fromStore.cut, L"flat then bright texture is a cut");
-			FrameAnalysis::Scene inStore;
-			Assert::IsTrue(store.PeekScene(4, inStore));
-			Assert::IsTrue(inStore.cut, L"what the seal wrote is a cut too");
-			stored.After(4);
+			Assert::IsTrue(fromStore.cutHere && fromStore.confirmed);
+			Assert::IsTrue(stored.sk.SceneOf(stored.Host(), kCutFrame + 1).cut);
+			// Q5: the vector-validity seam answers the confirmed cut (the store is the only one registered here).
+			const MotionValidity::State::ConfirmedCutFn seam = MotionValidity::State::ConfirmedCutReader().load();
+			Assert::IsTrue(seam != nullptr, L"the skeleton sets the scene seam of the P5a facade");
+			Assert::IsTrue(Tap::SingleStore() == &store);
+			Assert::IsTrue(seam(kCutFrame), L"a confirmed cut refuses the pair into it");
+			Assert::IsFalse(seam(kCutFrame + 1));
+			Assert::IsFalse(seam(kCutFrame - 1), L"no group: nothing refused");
+			stored.After(int64_t(kCutFrame + 1));
 
-			// 2. Store on, the record opens AFTER the seal: the reader classifies live (same answer).
-			Rig late(Lane("on"));
-			ShapeACutAtFrame4(late);
-			FrameAnalysis::Store lateStore(FrameAnalysis::RingDepth(4, 4));
-			Tap::SetStore(late.Host(), &lateStore);
-			SceneStoreGuard g2(late.Host());
-			RunToTheSealOfFrame4(late);
-			late.Begin(4);
-			lateStore.Begin(SceneTestId(4), FrameAnalysis::kScene);
-			const Vpv::Skeleton::SceneAnswer fromLive = late.sk.SceneOf(late.Host(), 4);
-			Assert::IsTrue(fromLive.known);
-			Assert::IsTrue(fromLive.from == Vpv::Skeleton::SceneAnswer::From::Live);
-			Assert::IsTrue(fromLive.cut);
-			late.After(4);
-
-			// 3. No store at all.
+			// 2. Store off, the reader asks after the successor was sealed: the verdict is confirmed when asked, so the cut is delivered at
+			// the cut frame itself and not again on the next frame (exactly once).
 			Rig off(Lane("on"));
-			ShapeACutAtFrame4(off);
-			RunToTheSealOfFrame4(off);
-			off.Begin(4);
-			const Vpv::Skeleton::SceneAnswer storeOff = off.sk.SceneOf(off.Host(), 4);
+			ShapeTwoStillShots(off);
+			RunToTheSealOfTheCut(off, nullptr);
+			off.After(int64_t(kCutFrame));
+			off.Frame(int64_t(kCutFrame + 1));
+			const Vpv::Skeleton::SceneAnswer storeOff = off.sk.SceneOf(off.Host(), kCutFrame);
 			Assert::IsTrue(storeOff.known);
 			Assert::IsTrue(storeOff.from == Vpv::Skeleton::SceneAnswer::From::Live);
-			Assert::IsTrue(storeOff.cut);
-			Assert::AreEqual(fromStore.fade, fromLive.fade);
-			Assert::AreEqual(fromLive.fade, storeOff.fade);
+			Assert::IsTrue(storeOff.cutHere && storeOff.confirmed);
+			Assert::IsTrue(storeOff.cut && !storeOff.cutLate);
+			const Vpv::Skeleton::SceneAnswer offNext = off.sk.SceneOf(off.Host(), kCutFrame + 1);
+			Assert::IsTrue(offNext.known);
+			Assert::IsFalse(offNext.cut, L"delivered once");
+			Assert::AreEqual(fromStore.fade, storeOff.fade);
 
-			// 4. A store that is registered but DISABLED (what frame_analysis_store=false leaves): the same answer again.
+			// 3. A store that is registered but DISABLED (what frame_analysis_store=false leaves): the same as the store off.
 			Rig disabled(Lane("on"));
-			ShapeACutAtFrame4(disabled);
+			ShapeTwoStillShots(disabled);
 			FrameAnalysis::Store offStore(FrameAnalysis::RingDepth(4, 4));
 			offStore.SetEnabled(false);
 			Tap::SetStore(disabled.Host(), &offStore);
-			SceneStoreGuard g4(disabled.Host());
-			RunToTheSealOfFrame4(disabled);
-			disabled.Begin(4);
-			const Vpv::Skeleton::SceneAnswer fromDisabled = disabled.sk.SceneOf(disabled.Host(), 4);
+			SceneStoreGuard g3(disabled.Host());
+			RunToTheSealOfTheCut(disabled, nullptr);
+			disabled.After(int64_t(kCutFrame));
+			disabled.Frame(int64_t(kCutFrame + 1));
+			const Vpv::Skeleton::SceneAnswer fromDisabled = disabled.sk.SceneOf(disabled.Host(), kCutFrame);
 			Assert::IsTrue(fromDisabled.known);
-			Assert::IsTrue(fromDisabled.cut);
-			Assert::AreEqual(fromLive.fade, fromDisabled.fade);
-			disabled.After(4);
+			Assert::IsTrue(fromDisabled.cutHere && fromDisabled.confirmed && fromDisabled.cut);
+			Assert::AreEqual(storeOff.fade, fromDisabled.fade);
 
+			// No other frame of the two shots is a cut (still shots: every other pair is identical).
+			for (uint64_t s = 2; s < kCutFrame; ++s)
+				Assert::IsFalse(off.sk.SceneOf(off.Host(), s).cutHere, L"no cut inside a still shot");
 		}
 
 		TEST_METHOD(ARegisteredButDisabledStoreCostsNothingAtTheSeal)
@@ -1699,17 +1740,21 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), 4, f));
 			Assert::IsTrue(f.valid);
 			Assert::IsFalse(f.fullBetween, L"no resync event between the frames");
-			// The same classification the shared unit gives for those two records (U7): SceneFactsOf derives it.
+			// The same pair classification the shared unit gives for those two records (U7): SceneFactsOf derives the fade from it and keeps
+			// the v1 pair cut / flash / cutPossible as pair* (WAIVER-U7ACC-SKELETON-SCENE: cut / flash / cutPossible are now the v2 sequence
+			// law's verdict; on noise frames it calls no cut either).
 			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
 			const VpSkeleton::AnalysisLane::ProductRead cur = lane->ReadOf(VpSkeleton::kP4SourceStats, 4);
 			const VpSkeleton::AnalysisLane::ProductRead prev = lane->ReadOf(VpSkeleton::kP4SourceStats, 3);
 			VpLaneProducts::SourceStatsRecord a, c;
 			Assert::IsTrue(VpLaneProducts::ReadSourceStats(prev.cpu, prev.cpuBytes, &a) && VpLaneProducts::ReadSourceStats(cur.cpu, cur.cpuBytes, &c));
 			const VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, false, false);
-			Assert::AreEqual(e.cut, f.cut);
-			Assert::AreEqual(e.flash, f.flash);
+			Assert::AreEqual(e.cut, f.pairCut);
+			Assert::AreEqual(e.flash, f.pairFlash);
 			Assert::AreEqual(e.fade, f.fade);
-			Assert::AreEqual(e.cutPossible, f.cutPossible);
+			Assert::AreEqual(e.cutPossible, f.pairCutPossible);
+			Assert::IsFalse(f.cut, L"noise frames: no sequence-law cut");
+			Assert::IsFalse(f.confirmed, L"frame 5 is not sealed: provisional");
 			Assert::AreEqual(e.histDistance, f.histDistance);
 			Assert::IsTrue(f.histDistance > 0u, L"two different noise frames never have identical histograms");
 			Assert::AreEqual(c.mean, f.curMean);

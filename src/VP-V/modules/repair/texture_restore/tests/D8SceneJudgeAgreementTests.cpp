@@ -403,6 +403,21 @@ namespace D8SceneJudgeAgreementNs
 				if (f > begin && f < end) truthCut[static_cast<size_t>(f - begin)] = 1;
 			}
 
+		// WAIVER-U7ACC-D8-DELIVERY: the U7 v2 sequence law delivers a confirmed cut at seq + 1 (owner ruling Q3, one frame late is
+		// allowed), as the skeleton's seal does: frame seq + 1 is not sealed when frame seq is. The scored truth therefore expects a
+		// manifest cut at f + 1 (a cut on the part's last frame is delivered after the part and is expected nowhere in it). Fade
+		// truth is unchanged: the fade stays the v1 pair law at the frame itself.
+		std::vector<char> expected = truth;
+		if (synthetic == Synthetic::None && hz > 0.0)
+			for (double c : clip->cuts)
+			{
+				const int f = static_cast<int>(std::floor(c * hz + 0.5));
+				if (f <= begin || f >= end) continue;
+				expected[static_cast<size_t>(f - begin)] = 0;
+				if (f + 1 < end) expected[static_cast<size_t>(f + 1 - begin)] = 1;
+			}
+		VpUnit::CutFadeJudge::CutTracker tracker;   // the renderer's law, fed every P4 record of the part in order
+
 		ModuleRow dp, tr;
 		DetailPulseModel::Model dpOld, dpShared;
 		DetailPulseModel::Settings sOld, sShared;
@@ -447,17 +462,23 @@ namespace D8SceneJudgeAgreementNs
 			Assert::IsTrue(store.Begin(id, FrameAnalysis::kScene) != 0, L"D8: the store is on and begins the record");
 			VpLaneProducts::EventSignals ev;   // the frame dump's copy of the U7 verdict (seq 1: none)
 			const VpLaneProducts::SourceStatsRecord dumpPrev = prev;
+			// WAIVER-U7ACC-D8-DELIVERY: the confirmed verdict of seq - 1 arrives with this frame's record.
+			const VpUnit::CutFadeJudge::CutVerdict confirmedPrev = tracker.Push(seq, cur);
 			if (seq >= 2)
 			{
 				Assert::IsTrue(havePrev, L"D8: the pair's previous P4");
 				const auto e = VpLaneProducts::ClassifyEvents(prev, cur, false, false);
 				ev = e;
+				const VpUnit::CutFadeJudge::CutVerdict own = tracker.Provisional();
+				const bool delivered = confirmedPrev.known && confirmedPrev.seq + 1u == seq && confirmedPrev.cut;
 				FrameAnalysis::Scene scene;
-				scene.cut = e.cut; scene.fade = e.fade; scene.origin = FrameAnalysis::SceneOrigin::Vp;
+				scene.cut = delivered; scene.cutLate = delivered; scene.fade = e.fade; scene.origin = FrameAnalysis::SceneOrigin::Vp;
+				scene.cutHere = own.cut; scene.confirmed = false; scene.flash = own.flash; scene.cutPossible = own.candidate;
+				scene.cutStrength = own.strength;
 				Assert::IsTrue(store.PublishScene(seq, scene), L"D8: the scene group is published");
-				facts.u7Cuts += e.cut ? 1 : 0;
+				facts.u7Cuts += delivered ? 1 : 0;
 				facts.u7Fades += e.fade ? 1 : 0;
-				facts.u7Flashes += e.flash ? 1 : 0;
+				facts.u7Flashes += (confirmedPrev.known && confirmedPrev.flash) ? 1 : 0;
 			}
 			prev = cur;
 			havePrev = true;
@@ -490,7 +511,7 @@ namespace D8SceneJudgeAgreementNs
 				dp.oldRestarts += fo.restart ? 1 : 0;
 				dp.sharedRestarts += fs.restart ? 1 : 0;
 				dumpDpShared = fs.restart; dumpDpOld = fo.restart;
-				if (k > begin) dp.CountTruth(fs.restart, truth[static_cast<size_t>(k - begin)] != 0);
+				if (k > begin) dp.CountTruth(fs.restart, expected[static_cast<size_t>(k - begin)] != 0);   // WAIVER-U7ACC-D8-DELIVERY
 				if (fo.restart == fs.restart) ++dp.agree;
 				else { ++dp.differ; AddDiff(dp, fo.out, fs.out); }
 			}
@@ -512,7 +533,7 @@ namespace D8SceneJudgeAgreementNs
 				tr.oldRestarts += ro ? 1 : 0;
 				tr.sharedRestarts += rs ? 1 : 0;
 				dumpTrShared = rs; dumpTrOld = ro;
-				if (k > begin) tr.CountTruth(rs, truth[static_cast<size_t>(k - begin)] != 0);
+				if (k > begin) tr.CountTruth(rs, expected[static_cast<size_t>(k - begin)] != 0);   // WAIVER-U7ACC-D8-DELIVERY
 				if (ro == rs) ++tr.agree;
 				else { ++tr.differ; AddDiff(tr, oo, os); }
 			}
