@@ -56,7 +56,9 @@ namespace CutFadeJudge
 {
 // Bump on ANY change of a threshold, a rule above or the meaning of an output.
 // 2 (U7-accuracy, 2026-11-15): the record-sequence cut law T2 (CutTracker) over the P4 v2 cell grid; the pair law is kept.
-constexpr uint32_t kUnitVersion = 2;
+// 3 (C5, 2026-11-15; 102b U7-MULTIFRAME-FADE-LAW + U7-FADE-NO-HARDRESTART): the multi-frame fade law (FadeRun / FoldFadeRun) and the
+//   partial reset on fades (FadeRun::keep, PairFadeKeep, FrameFadeKeep; a fade is no restart). The cut law of 2 is unchanged.
+constexpr uint32_t kUnitVersion = 3;
 
 constexpr double kCutHistFrac = 0.50;          // normalised L1 distance / 2 above this: a different picture
 constexpr double kCutPossibleHistFrac = 0.25;  // above this (or a continuity slip): a cut is possible

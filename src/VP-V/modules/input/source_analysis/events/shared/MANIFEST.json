@@ -8,7 +8,7 @@
   "shared_unit": {
     "name": "CutFadeJudge",
     "id": "U7",
-    "version": 1,
+    "version": 3,
     "product": "P4 event (cut / fade / flash)"
   },
   "live_files": [

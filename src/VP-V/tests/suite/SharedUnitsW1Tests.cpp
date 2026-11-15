@@ -235,7 +235,7 @@ namespace SharedUnitsW1TestsNs2
 		TEST_METHOD(UnitVersionsAreStampedAndMatchTheCatalog)
 		{
 			Assert::AreEqual(VpSkeleton::Catalog::kExpectedStatsUnit, VpUnit::SourceStats::kUnitVersion);
-			Assert::AreEqual(2u, VpUnit::CutFadeJudge::kUnitVersion);   // WAIVER-U7ACC-STATS-V2: 2 = the T2 sequence law
+			Assert::AreEqual(3u, VpUnit::CutFadeJudge::kUnitVersion);   // WAIVER-U7ACC-STATS-V2: 2 = the T2 sequence law; WAIVER-U7FADE-V3: 3 = the fade law + partial reset
 			Assert::AreEqual(1u, VpUnit::PictureRect::kUnitVersion);
 			Assert::AreEqual(1u, VpUnit::SourceQuality::kUnitVersion);
 			Assert::AreEqual(VpUnit::SourceStats::kUnitVersion, VpUnit::SourceStats::kRecordVersion);
@@ -524,7 +524,8 @@ namespace SharedUnitsW1TestsNs2
 			Assert::AreEqual(0x10da1f9152c0e32cull, Fnv1a(VpUnit::CutFadeJudge::TrustCutPlainLine()));
 			Assert::AreEqual(0x6b5eb81113219c2cull, Fnv1a(VpUnit::CutFadeJudge::MeanStepCutLine()));
 			// WAIVER-U7ACC-STATS-V2: the kernel pieces above are unchanged; version 2 is the T2 sequence law, not these texts.
-			Assert::AreEqual(2u, VpUnit::CutFadeJudge::kUnitVersion, L"kernel text byte-identical; 2 = the T2 sequence law");
+			// WAIVER-U7FADE-V3: version 3 is the CPU fade law and its keep; the kernel pieces above are still unchanged.
+			Assert::AreEqual(3u, VpUnit::CutFadeJudge::kUnitVersion, L"kernel text byte-identical; 2 = the T2 sequence law, 3 = the CPU fade law + partial reset");
 		}
 
 		TEST_METHOD(FadeFitIsIdenticalToTheFrozenCopy)

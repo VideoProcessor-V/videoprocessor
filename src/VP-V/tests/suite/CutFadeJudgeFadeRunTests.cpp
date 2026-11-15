@@ -3,7 +3,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-// U7 unit version 2 (102b U7-MULTIFRAME-FADE-LAW): the multi-frame fade law (CutFadeJudge::FadeRun / FoldFadeRun). Real P4 records
+// U7 unit version 3 (102b U7-MULTIFRAME-FADE-LAW; version 2 is U7-ACCURACY's cut law): the multi-frame fade law (CutFadeJudge::FadeRun / FoldFadeRun). Real P4 records
 // (SourceStats::ComputeRecord) of a synthetic half plane: a horizontal ramp with a deterministic per-frame noise, scaled about black
 // (4096, 8-bit 16) by the fade gain. The pair law (ClassifyEvents) is unchanged and checked alongside. CPU only.
 
@@ -115,7 +115,7 @@ namespace CutFadeJudgeFadeRunTestsNs
 	public:
 		TEST_METHOD(UnitVersionIsTwo)
 		{
-			Assert::AreEqual(2u, VpUnit::CutFadeJudge::kUnitVersion, L"the multi-frame fade law is a registered law change");
+			Assert::AreEqual(3u, VpUnit::CutFadeJudge::kUnitVersion, L"the multi-frame fade law is a registered law change (3, after U7-ACCURACY's 2)");
 		}
 
 		// A 300-frame fade (0.25 % of gain per frame): the pair law finds none of it; the run finds it once the gain moved 2 %.
