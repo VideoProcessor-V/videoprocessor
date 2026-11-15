@@ -23,7 +23,7 @@ Measure the picture's light for the LED drive: the rendered picture at PRE_OUTPU
   - After rendering: `Collect` returns finished measurements and their sequences; `LateNote()` describes readbacks running late or frames not measured (the readback ring, ReadbackRing.h), `Dropped()` counts skipped readbacks.
   - `Release` before the GPU goes away. It never modifies the picture.
 - `RawMeasurement` (LedMeasurement.h): the exact GPU buffer layout (256-bin histogram, 32 x 18 cell sums, total, blocks, peak).
-- `StatsBuilder::Build(raw, timeMs)` (LedMeasurement.cpp): raw counts to `FrameStats`. Highlight percentile from the histogram; sustained highlight/APL as window minima (`highlight_persist_ms`, `apl_persist_ms`); cut = mean cell difference above `cut_threshold`; fade = APL falling for `fade_ms` at `fade_min_slope` or more.
+- `StatsBuilder::Build(raw, timeMs, sourcePeriodMs, sequence)` (LedMeasurement.cpp): raw counts to `FrameStats`. Highlight percentile from the histogram; sustained highlight/APL as window minima (`highlight_persist_ms`, `apl_persist_ms`); cut = the shared U7 judge's verdict read from the skeleton's scene record for `sequence` (`VpSkeleton::SceneRecordReader::CutOf`, FIX-LED-CUT-U7; no readable record = no cut, counted in `SceneMissing()`); fade = APL falling for `fade_ms` at `fade_min_slope` or more. `LastDifference()` (mean cell difference) is still measured but no longer decides the cut.
 - `FrameStats` (FrameStats.h, split out of LedController.h in the WP-15 re-cut): the per-frame statistics this module produces and the controllers in `drive.led_compensation` consume.
 - `ActivePictureRect`, `SourceRectInCrop`, `AreaPeakGrid`, `AreaAveragedMaximum` (the reference), `AreaPeakAccumulator` (the fast separable form), `HistogramPercentile`.
 - `LookaheadObserver` (LedLookahead.h) implements `QueuedFrameStatistics::IObserver`: `BeginWalk`, `WantsFrame`, `ObserveFrame`. Each queued frame is measured once, in source order, with `MeasureRawFrame` (3x3 blocks on a grid of at most 96 x 54, plus `FullCoveragePeak`), then built into stats and handed to its `IPredictionSink` (`SubmitPrediction`). `IPredictionSink` (LedLookahead.h) is what the look-ahead needs from the drive (config, raw transfer, depth, epoch, range, period); `LedDriveModule` implements it, so this module no longer includes LedDriveModule.h. `SetPictureGeometry` passes the screen size and current subtitle masks.
@@ -46,7 +46,7 @@ Measure the picture's light for the LED drive: the rendered picture at PRE_OUTPU
 ### Config keys actually read
 
 - `[led_drive.default]` (alias `[dynamic_drive.default]`):
-  - Read in StatsBuilder: `highlight_percentile` (99.5), `highlight_persist_ms` (250), `apl_persist_ms` (100), `cut_threshold` (24), `fade_ms` (250) / `fade_min_slope` (12; the older `fade_frames` / `fade_min_step` are converted), `script_highlight_code` (215, highlight area).
+  - Read in StatsBuilder: `highlight_percentile` (99.5), `highlight_persist_ms` (250), `apl_persist_ms` (100), `fade_ms` (250) / `fade_min_slope` (12; the older `fade_frames` / `fade_min_step` are converted), `script_highlight_code` (215, highlight area). `cut_threshold` (24) is NO LONGER read here (FIX-LED-CUT-U7; the key is a user key and stays, see "Design goal, philosophy and decisions"): it is still read by `drive.led_compensation` (`LedController.cpp` look-ahead cut test), which is outside this slice.
   - Passed in through `DynamicDriveFrame` (from the module's config): `apl_weights`, `led_peak_full_coverage` (on), `led_picture_only` (on), `led_highlight_grain_suppress` (on; needs the Stage 8 grain map), `gamma_boost` (the stats describe the boosted picture).
   - Read by the module (look-ahead depth and use): `lookahead` (on), `script_lookahead` (on), `led_lookahead_ms` (0 = whole queue).
 - Renderer profile `source_range` (how the raw path reads the captured range).
@@ -103,6 +103,14 @@ When off: LED disabled costs nothing (no hook, no observer, no walk depth; a few
 
 - "Fallbacks engaged" entry: LED measurement (<reason>; the LED follows the last statistics). Engaged by `DynamicDriveFrame` (pass disabled, readbacks late / frames not measured) once the WP-15 call-site patch is applied.
 - Behaviour: The controllers keep acting on the last statistics (not the between-files `LedDriveHoldover`).
+- "Fallbacks engaged" entry: `LED cut judge` (no scene record for the frame: no cut judged), engaged by `LedDriveModule::SubmitMeasurement` while the measured frame's scene group is not readable (frame_analysis_store off, not sealed yet, slot gone, or sequence 0), released when a record reads again; one event line each way (FIX-LED-CUT-U7). Behaviour while engaged: no cut that frame (never a private re-judgement).
+
+## Design goal, philosophy and decisions
+
+- One cut judge for the whole product (doc 91 D, "no feature keeps private motion/scene code"; plan `lead18/coreplan-C10-15c-PC-regions.md` commit C8): the LED cut moved to the shared U7 judge (`CutFadeJudge::ClassifyEvents` over the P4 records, published as the scene group by the skeleton, read here with `SceneRecordReader::CutOf` / `PeekScene`, as texture_restore and detail_pulse read it). OWNER ANSWER 2026-11-15 (2): "move NOW, no A/B" (`D:/codex/vp-handover/lead18/coreplan-C10-15c-PC-regions.md` line 45).
+- Registered change FIX-LED-CUT-U7: the old private rule (mean block-luma difference above `cut_threshold`) is gone from the measurement. Expected effect to record on the LED correlation harness (recorded, not gating; the run is later): cuts that the old rule found by a large mean difference but U7 does not (and the reverse) show in the before/after cut list; fades and sustained APL follow the cut flag, so they move with it.
+- `cut_threshold` is a USER key: kept in the schema, example config and Config page, no longer read by the measurement; still read by the controller's look-ahead cut test (`led_compensation`). Retiring or re-pointing it is a separate decision (reported, not taken here).
+- No silent fallback (doc 91 D): record absent or stale = no cut for the frame plus the visible `LED cut judge` entry above. Look-ahead frames are walked before the render thread seals them, so their predicted cuts are mostly "no record" until the skeleton publishes earlier; that is the same step down, counted in the look-ahead builder's `SceneMissing()` (not yet shown in the status line; see the lane report).
 
 ## Net fingerprint / upstream
 

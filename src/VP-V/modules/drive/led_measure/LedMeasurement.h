@@ -215,12 +215,25 @@ namespace LedDrive
 	{
 	public:
 		explicit StatsBuilder(const LedDriveConfig& config);
+		// Reads the shared SCENE record's cut for a source sequence (FIX-LED-CUT-U7): false = no readable record. The default is
+		// VpSkeleton::SceneRecordReader::CutOf (the skeleton's U7 verdict, CutFadeJudge over the P4 records); tests inject their own.
+		using SceneCutFn = bool (*)(uint64_t sequence, bool& cut);
+		void SetSceneReader(SceneCutFn reader) { sceneReader = reader; }
 		// timeMs: the frame's time, for highlight persistence. sourcePeriodMs: the measured source
 		// frame period (<= 0 = unmeasured), for fade keys written in frames (bug hunt 31).
-		FrameStats Build(const RawMeasurement& raw, double timeMs = 0.0, double sourcePeriodMs = 0.0);
+		// sequence: the frame's source sequence, the key of the shared scene record the CUT is read from (FIX-LED-CUT-U7: the private
+		// mean-difference > cut_threshold judge is gone). 0 or no readable record = no cut for this frame, counted (SceneMissing) and
+		// surfaced by the caller; never a private re-judgement.
+		FrameStats Build(const RawMeasurement& raw, double timeMs = 0.0, double sourcePeriodMs = 0.0, uint64_t sequence = 0);
 		// Mean absolute difference of block luma against the previous frame,
-		// in codes (the cut metric); 0 before there is a previous frame.
+		// in codes (a measurement only: it no longer decides the cut); 0 before there is a previous frame.
 		double LastDifference() const { return lastDifference; }
+		// Frames whose cut came from the shared scene record / frames with no readable record (no cut judged), and whether the
+		// LAST Build read a record.
+		uint64_t SceneFromRecord() const { return sceneFromRecord; }
+		uint64_t SceneMissing() const { return sceneMissing; }
+		bool LastSceneFromRecord() const { return lastSceneFromRecord; }
+
 		// Hunt 3 (LED1, tests): the highlight persistence window's samples.
 		size_t HighlightHistorySize() const { return highlightHistory.size(); }
 		// Hunt 3 (LED1): the most samples a persistence window keeps (a time
@@ -237,5 +250,9 @@ namespace LedDrive
 		std::deque<Sample> highlightHistory;
 		std::deque<Sample> sustainHistory;
 		double lastDifference = 0.0;
+		SceneCutFn sceneReader = nullptr;   // null = the skeleton's SceneRecordReader::CutOf
+		uint64_t sceneFromRecord = 0;
+		uint64_t sceneMissing = 0;
+		bool lastSceneFromRecord = false;
 	};
 }

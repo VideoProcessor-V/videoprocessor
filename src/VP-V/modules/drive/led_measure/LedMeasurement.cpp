@@ -1,5 +1,6 @@
 #include <pch.h>
 #include "LedMeasurement.h"
+#include <VP-V/modules/control/skeleton/SceneRecordReader.h>   // FIX-LED-CUT-U7: the shared U7 verdict (read only)
 
 #include <algorithm>
 #include <cmath>
@@ -468,7 +469,7 @@ namespace LedDrive
 		}
 	}
 
-	FrameStats StatsBuilder::Build(const RawMeasurement& raw, double timeMs, double sourcePeriodMs)
+	FrameStats StatsBuilder::Build(const RawMeasurement& raw, double timeMs, double sourcePeriodMs, uint64_t sequence)
 	{
 		FrameStats stats;
 		if (raw.blocks == 0) return stats;
@@ -505,7 +506,17 @@ namespace LedDrive
 					++compared;
 				}
 		lastDifference = compared > 0 ? difference / compared : 0.0;
-		stats.cut = compared > 0 && lastDifference > config.cutThreshold;
+		// FIX-LED-CUT-U7 (owner answer 2026-11-15 (2)): the cut is the shared scene judge's verdict (U7, CutFadeJudge over the P4
+		// records, read from the skeleton's scene record for this source sequence), not a private mean-difference threshold. No
+		// readable record (sequence 0, store off, not sealed yet, slot gone) = NO cut this frame, counted and surfaced by the caller.
+		{
+			bool recordCut = false;
+			const SceneCutFn read = sceneReader ? sceneReader : &VpSkeleton::SceneRecordReader::CutOf;
+			const bool found = sequence != 0 && read(sequence, recordCut);
+			lastSceneFromRecord = found;
+			if (found) ++sceneFromRecord; else ++sceneMissing;
+			stats.cut = found && recordCut;
+		}
 		previousCells = cells;
 
 		// Sustained APL: minimum over apl_persist_ms, restarted at a cut so

@@ -260,6 +260,8 @@ namespace LedDrive
 		std::vector<FallbackStatus::Entry> FallbackEntries() const;
 		static constexpr const char* kHoldFallbackId = "LED drive";
 		static constexpr const char* kDryRunFallbackId = "projector";
+		// FIX-LED-CUT-U7: engaged while the measured frame has no readable shared scene record (no cut is judged then).
+		static constexpr const char* kCutJudgeFallbackId = "LED cut judge";
 
 	private:
 		std::atomic<double> displayGamma{ 2.2 };
@@ -465,6 +467,7 @@ namespace LedDrive
 		bool holdingFull = false;
 		FallbackStatus::Registry fallbacks;
 		void UpdateHoldFallbackLocked();
+		void UpdateCutJudgeFallbackLocked(bool recordRead);
 		void StartHoldJumpLocked(bool wasHolding);
 	};
 }

@@ -193,6 +193,19 @@ namespace LedDrive
 			DebugLog::Log("Dynamic Drive: picture compensation and measurement available again; the LED hold at full drive ends");
 	}
 
+	void LedDriveModule::UpdateCutJudgeFallbackLocked(bool recordRead)
+	{
+		// FIX-LED-CUT-U7: the cut comes only from the shared scene record. A frame without a readable record judges no cut: a visible
+		// step down (Ctrl+I / Config "Fallbacks engaged", one event), released as soon as a record is read again.
+		if (!recordRead)
+		{
+			if (fallbacks.Engage(kCutJudgeFallbackId, "no scene record for the frame: no cut judged"))
+				DebugLog::Log("Dynamic Drive: no shared scene record for the measured frame; no cut judged until one is readable");
+		}
+		else if (fallbacks.Release(kCutJudgeFallbackId))
+			DebugLog::Log("Dynamic Drive: shared scene record readable again; cuts judged");
+	}
+
 	void LedDriveModule::SetCompensationAvailable(bool available, const std::string& reason)
 	{
 		std::lock_guard<std::mutex> guard(mutex);
@@ -699,8 +712,9 @@ namespace LedDrive
 		// R3: a readback of the old source after a FULL resync (resync_event on only; 0 otherwise).
 		if (sequence != 0 && restartSequence != 0 && sequence < restartSequence) return;
 		lastMeasuredSequence = sequence;
-		const FrameStats stats = statsBuilder.Build(raw, NowMs(), sourceFps > 0.0 ? 1000.0 / sourceFps : 0.0);   // unmeasured: the 24p values
+		const FrameStats stats = statsBuilder.Build(raw, NowMs(), sourceFps > 0.0 ? 1000.0 / sourceFps : 0.0, sequence);   // unmeasured: the 24p values
 		if (stats.blocks == 0) return;
+		UpdateCutJudgeFallbackLocked(statsBuilder.LastSceneFromRecord());
 		latest = stats;
 		haveStats = true;
 		// A cut or fade between two controller steps must still reach it.
