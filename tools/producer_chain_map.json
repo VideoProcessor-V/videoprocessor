@@ -11,7 +11,8 @@
     "kP10GrainSplit": "L-B2", "kP10cGrainSplitChroma": "L-B2", "kTdBlocks": "L-B2", "kTdMemory": "L-B2",
     "kTdAnchorPass": "L-B2", "kTdAnchorRefs": "L-B2", "kTdDelta": "L-B2", "kTdMaps": "L-B2", "kTdTrailSummary": "L-B2",
     "kP11RegionBlockStats": "L-B5", "kP12LightLevel": "L-B5",
-    "kCodingEvidence": "L-B5", "kQualityPattern": "L-B5", "kQualityPatternCausal": "L-B5"
+    "kCodingEvidence": "L-B5", "kQualityPattern": "L-B5", "kQualityPatternCausal": "L-B5",
+    "kEdgeMap": "L-B5"
   },
   "default_read": ["\\bInput\\(\\s*(VpSkeleton::)?{k}\\b", "\\bAcquire\\(\\s*(VpSkeleton::)?{k}\\b", "\\bReadOf\\(\\s*(VpSkeleton::)?{k}\\b", "\\bFind\\(\\s*(VpSkeleton::)?{k}\\b"],
   "products": {
@@ -35,6 +36,7 @@
   },
   "edges": {
     "kP4SourceStats<-kP1HalfLuma": {"read": ["\\binputData\\[0\\]"]},
+    "kCodingEvidence<-kCodingEvidence": {"read": ["\\bAcquire\\(\\s*(VpSkeleton::)?kCodingEvidence\\s*,\\s*req\\.seq\\s*-\\s*1\\b"], "note": "read shape scoped to the owner fill asking for its own previous frame (req.seq - 1, through its SkeletonMemo parameter); Hub::AcquireTiles is the consumer-side Acquire the monitor uses, not the fill's lag-1 read; MakeOwnerFill ignores its memo today, so the declared lag-1 edge is N"},
     "kP12LightLevel<-kP12LightLevel": {"files": ["control/skeleton/SkeletonModule.cpp"], "read": ["\\bReadOf\\(\\s*VpSkeleton::kP12LightLevel"]},
     "kSourceIdentity<-kP5MonitorTiles": {"read": ["\\bClassicalReading\\b"], "note": "type-token match only: FrameInput.classical is a monitor snapshot copied by the call site, not an Acquire"},
     "kSourceGeometry<-kP5MonitorTiles": {"read": ["\\bSnapshot\\b"]},
@@ -42,8 +44,8 @@
     "kP7CameraFit<-kP4SourceStats": {"read": ["\\bFrameAnalysis::Store\\b"]},
     "kP10GrainSplit<-kP4SourceStats": {"note": "shared dispatcher read; its picture feeds the ownsTap (P10) tap build"},
     "kP11RegionBlockStats<-kP4SourceStats": {"files": ["input/source_analysis/lane/LaneGpuRegionKernel.cpp"], "read": ["\\bc\\.picture\\b"], "note": "P4 reaches the kernel as c.picture, set by the shared dispatcher (generic read, not per product)"},
-    "kP10GrainSplit<-kP13SourceRing": {"interim": "interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)"},
-    "kP11RegionBlockStats<-kP13SourceRing": {"interim": "interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)"},
+    "kP10GrainSplit<-kP13SourceRing": {"interim": "interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)"},
+    "kP11RegionBlockStats<-kP13SourceRing": {"interim": "interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)"},
     "kTdBlocks<-kP10GrainSplit": {"read": ["\\bparams\\.grain\\.Gpu\\("]}
   },
   "bypass": [

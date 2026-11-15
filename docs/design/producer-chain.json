@@ -1,9 +1,9 @@
 {
  "schema": 1,
  "counts": {
-  "R": 9,
+  "R": 8,
   "X": 8,
-  "N": 12,
+  "N": 13,
   "NP": 33
  },
  "products": [
@@ -569,8 +569,8 @@
      "status": "N",
      "evidence": [],
      "kind": "",
-     "note": "INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)); flag ViewIsActual: C9b",
-     "interim": "interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)"
+     "note": "INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)); flag ViewIsActual: C9b",
+     "interim": "interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)"
     }
    ]
   },
@@ -686,8 +686,8 @@
      "status": "N",
      "evidence": [],
      "kind": "",
-     "note": "INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged))",
-     "interim": "interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)"
+     "note": "INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged))",
+     "interim": "interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)"
     }
    ]
   },
@@ -1082,7 +1082,7 @@
    "variants": "Identical",
    "noOfaSubstitute": null,
    "shortQueueSubstitute": null,
-   "lane": "-",
+   "lane": "L-B5",
    "producer_files": [
     "input/source_analysis/regions/EdgeMapFill.h"
    ],
@@ -1223,16 +1223,10 @@
      ],
      "leads": [],
      "declared": true,
-     "status": "R",
-     "evidence": [
-      [
-       "input/source_analysis/regions/CodingEvidence.cpp",
-       592,
-       "const VpSkeleton::AcquireResult r = memo->Acquire(VpSkeleton::kCodingEvidence, seq, VpSkeleton::AcquireForm::C"
-      ]
-     ],
+     "status": "N",
+     "evidence": [],
      "kind": "",
-     "note": "",
+     "note": "read shape scoped to the owner fill asking for its own previous frame (req.seq - 1, through its SkeletonMemo parameter); Hub::AcquireTiles is the consumer-side Acquire the monitor uses, not the fill's lag-1 read; MakeOwnerFill ignores its memo today, so the declared lag-1 edge is N",
      "interim": ""
     }
    ]

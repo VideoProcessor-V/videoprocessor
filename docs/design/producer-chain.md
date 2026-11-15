@@ -4,7 +4,7 @@
 
 Machine-checked (refs/129 L-PROD). R = read shape found (a regex hit on the owner fill, NOT proven Acquire); X = it recomputes it privately or reads it outside Acquire; N = declared but never read; NP = the product has no production producer. Fix owners are the lanes of refs/129. Counts count declared (product, input) pairs.
 
-Counts: R 9, X 8, N 12, NP 33.
+Counts: R 8, X 8, N 13, NP 33.
 
 | Product | Lane | Producer files | Input (lag/lead) | St | Evidence / note |
 |---|---|---|---|---|---|
@@ -24,12 +24,12 @@ Counts: R 9, X 8, N 12, NP 33.
 |  |  |  | P3 | X | outside-acquire: CameraLabelFill.cpp:83; CameraLabelFill.cpp:125 |
 | **P9** p9_camera_smoothed (variants, short-queue P7) | L-B4 | CameraLinkCore.cpp | P7 lead2 | X | outside-acquire: CameraLinkCore.cpp:357; CameraLinkCore.cpp:456; CameraLinkCore.cpp:764 |
 | **P10** grain.split | L-B2 | SkeletonGpuDispatcher.cpp<br>LaneGpuProducts.cpp | P4 | R | SkeletonGpuDispatcher.cpp:497; SkeletonGpuDispatcher.cpp:572 / shared dispatcher read; its picture feeds the ownsTap (P10) tap build |
-|  |  |  | P13 | N | INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)); flag ViewIsActual: C9b |
+|  |  |  | P13 | N | INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)); flag ViewIsActual: C9b |
 | **P10c** grain.split.chroma | L-B2 | - | P4 | NP | no production producer |
 |  |  |  | P13 | NP | no production producer |
 | **P11** region_block_stats | L-B5 | SkeletonGpuDispatcher.cpp<br>LaneGpuRegionKernel.cpp<br>LaneGpuJobs.h | P10 | R | LaneGpuRegionKernel.cpp:120 |
 |  |  |  | P4 | R | LaneGpuRegionKernel.cpp:141 / P4 reaches the kernel as c.picture, set by the shared dispatcher (generic read, not per product) |
-|  |  |  | P13 | N | INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)) |
+|  |  |  | P13 | N | INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)) |
 | **P12** p12_light_level | L-B5 | LaneGpuLightKernel.cpp | P11 | R | LaneGpuLightKernel.cpp:174 |
 |  |  |  | P4 | R | LaneGpuLightKernel.cpp:192 |
 | **P13** p13_source_ring | - | SourcePlanes.h | (no inputs) | - | |
@@ -47,13 +47,13 @@ Counts: R 9, X 8, N 12, NP 33.
 |  |  |  | td.memory lag1 | NP | no production producer |
 | **P14** p14_source_identity | - | SourceIdPipeline.h | P5 | R | SourceIdPipeline.h:126; SourceIdPipeline.h:214 / type-token match only: FrameInput.classical is a monitor snapshot copied by the call site, not an Acquire |
 | **P14g** source_geometry | - | SourceGeometryProduct.h | P5 | N | flag ViewIsActual: C9b |
-| **edge_map** edge_map | - | EdgeMapFill.h | P13 | R | EdgeMapFill.h:65 |
+| **edge_map** edge_map | L-B5 | EdgeMapFill.h | P13 | R | EdgeMapFill.h:65 |
 | **P7g** p7g_camera_guide | L-B6 | GuideLaneJob.cpp | P7 | N |  |
 |  |  |  | P4 | N |  |
 | **P16** coding_evidence | L-B5 | CodingEvidence.cpp<br>SkeletonModule.cpp | P10 | N |  |
 |  |  |  | P11 | N |  |
 |  |  |  | P13 | N |  |
-|  |  |  | P16 lag1 | R | CodingEvidence.cpp:592 |
+|  |  |  | P16 lag1 | N | read shape scoped to the owner fill asking for its own previous frame (req.seq - 1, through its SkeletonMemo parameter); Hub::AcquireTiles is the consumer-side Acquire the monitor uses, not the fill's lag-1 read; MakeOwnerFill ignores its memo today, so the declared lag-1 edge is N |
 | **P15** quality_pattern (variants, short-queue P15c) | L-B5 | - | P16 lead1,lead2 | NP | no production producer |
 |  |  |  | P15 lag1 | NP | no production producer |
 |  |  |  | P5 | NP | no production producer; flag ViewIsActual: C9b |
@@ -99,8 +99,8 @@ Each carries an owner lane or a 102b trigger (A1c: NP is allowed with a trigger,
 
 Declared in Products.h but the producer does not read them yet. They still order in Registry::Validate; the tag records why and who removes the interim.
 
-- P10 <- P13: interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)
-- P11 <- P13: interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); tagged so the scheduler treats it as non-binding until the source ring is wired; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)
+- P10 <- P13: interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)
+- P11 <- P13: interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)
 
 ## Test-only references (no production caller)
 
