@@ -65,10 +65,13 @@ namespace VideoProcessorTest
 				auto it = records.find(s);
 				return it == records.end() ? nullptr : it->second;
 			}
-			std::shared_ptr<const CameraLink::FieldCopy> FieldOf(uint64_t s) const override
+			bool FitEntryOf(uint64_t s, std::shared_ptr<const CameraModel::CameraMotion>& outRec,
+				std::shared_ptr<const CameraLink::FieldCopy>& outField) const override
 			{
+				outRec = CausalRecord(s);
 				auto it = fields.find(s);
-				return it == fields.end() ? nullptr : it->second;
+				outField = it == fields.end() ? nullptr : it->second;
+				return outRec != nullptr || outField != nullptr;
 			}
 			bool LabelsFor(uint64_t, CameraLink::CameraConsumer, CameraLink::CameraLabelsView&) override { return false; }
 			std::shared_ptr<const CameraModel::GuidanceFrame> GuideFor(uint64_t) override { return nullptr; }
