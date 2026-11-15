@@ -38,7 +38,8 @@ class RepoSeeds(unittest.TestCase):
     def test_every_d_and_x_site_detected(self):
         # X2 left this list at C6-1 U25 C10: the copy was REMOVED by D8 (d51e276c3, L-B6), see test_x2_removed_* below.
         # D4 detects 0 at the tip after its retarget (gate-15a-D4: K2 FitEntryOf); proven by Synthetic.test_d4_* instead.
-        for sid in ["D1", "D2", "D3", "D5", "D6", "X1", "X3", "X4", "X5", "X6", "X7", "X8"]:
+        # D6 detects 0 at the tip after 15c C6 (the decode moved to the one decode owner); proven by Synthetic.test_d6_* instead.
+        for sid in ["D1", "D2", "D3", "D5", "X1", "X3", "X4", "X5", "X6", "X7", "X8"]:
             self.assertIn(sid, self.sites, sid + " not detected at the tip")
 
     def test_x2_removed_at_the_tip(self):
@@ -109,6 +110,19 @@ class Synthetic(unittest.TestCase):
         root = make_tree({fill: "const bool ok = m_link.FitEntryOf(seq, rec, field);",
                           M + "motion/estimation/global_model/link/CameraExtension.cpp": "auto fl = engine.FlowOf(a, b);"})
         self.assertFalse([h for h in N1.scan(root) if h["site"].startswith("D4")])
+
+    def test_d6_planted_private_decode_hits(self):
+        # D6 planted fixtures (15c C6): a private RGB / full-range decode returning to the producer hits D6; the old wrapper name
+        # anywhere else hits D6~moved; asking the owner's query API (MapsToLimitedDomain) does not.
+        vfa = M + "input/source_analysis/VpFrameAnalysis.cpp"
+        host = M + "input/source_analysis/VpFrameAnalysisHost.h"
+        root = make_tree({vfa: "static bool SamplerCodesAreFullRange(const S& s){ return s.CodesFullRange(); }\n"
+                               "const bool full = source.fullRangeYuv;",
+                          host: "const bool f = VpFrameAnalysis::SamplerCodesAreFullRange(s);"})
+        hs = sorted((h["site"], h["file"]) for h in N1.scan(root) if h["site"].startswith("D6"))
+        self.assertEqual(hs, [("D6", vfa), ("D6", vfa), ("D6~moved", host)])
+        root = make_tree({vfa: "if (fmt == P010 && source.MapsToLimitedDomain()) {}", host: "const bool f = s.CodesFullRange();"})
+        self.assertFalse([h for h in N1.scan(root) if h["site"].startswith("D6")])
 
     def test_comments_do_not_hit(self):
         root = make_tree({M + "repair/temporal_detail/TemporalDetailModel.h": "// m_prevGin\n/* double guard */\nint ok;"})
