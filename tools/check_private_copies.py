@@ -92,9 +92,12 @@ SITES = [
      "wide": r"\bSPLIT_TENSOR_BODY\b",
      "only": [_M + "repair/deband/VpDebander.cpp"]},
     {"id": "X5", "product": "kP11RegionBlockStats", "refs": "126 s4 X5",
-     "what": "adaptive downscale own Sobel / Laplacian maps",
-     "re": r"\bsobel\w*|\blaplac\w*|\bgrain(Lo|Hi)\b|\bedge(Lo|Hi)\b", "ic": True,
-     "only": [_M + "scaling/output/AdaptiveDownscale.h"]},
+     "what": "adaptive downscale own Sobel / Laplacian maps (MEASURE_BODY region statistics)",
+     # gate-15c-X5: the real copy is the .cpp MEASURE_BODY (body signatures, not the symbol alone); the .h settings lines were FP.
+     # wide = the body signatures only (DetailPulse.cpp has its own MEASURE_BODY / FAST_MEASURE_BODY symbol).
+     "re": r"\bMEASURE_BODY\b|\blength\(vec2\(gx,\s*gy\)\)|abs\(4\.0 \* e - b - d - f - h\)",
+     "wide": r"\blength\(vec2\(gx,\s*gy\)\)|abs\(4\.0 \* e - b - d - f - h\)",
+     "only": [_M + "scaling/output/AdaptiveDownscale.cpp"]},
     {"id": "X6", "product": "kP11RegionBlockStats", "refs": "126 s4 X6",
      "what": "source-resolution detector own flat-block test",
      "re": r"\bhi\s*-\s*lo\s*<=\s*flat\b|\bflat\s*=",

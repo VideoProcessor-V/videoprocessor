@@ -100,11 +100,11 @@
    "max_hits": 2
   },
   {
-   "key": "a|X5|src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
+   "key": "a|X5|src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
    "rule": "a",
    "site": "X5",
    "refs": "126 s4 X5",
-   "reason": "adaptive downscale own Sobel / Laplacian maps",
+   "reason": "MEASURE_BODY Sobel + Laplacian region stats: slice 18 (P31 gradient, P10/P11 grain)",
    "seed": true,
    "max_hits": 4
   },
