@@ -38,7 +38,7 @@ namespace VpLaneProducts
 
 		// The storage the layout really uses (a refused Compact is Full, shown through Fallbacks()).
 		GrainSplit::Storage Granted() const { return Choice().storage; }
-		// The last Frame the lane / live form produced (valid after its step 4; reset when a run fails).
+		// The last Frame the lane / live form produced (valid after its last step, 6 under unit 5; reset when a run fails).
 		const GrainSplit::Gpu::Frame& LastFrame(bool live) const { return live ? m_live.Out() : m_lane.Out(); }
 
 		// The plane the kernel reads: R16 unorm, codeUnit 64 / 65535 (the tap law).
