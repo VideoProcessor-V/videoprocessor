@@ -45,7 +45,8 @@ namespace Vpv
 				return 0;
 			std::vector<VpSkeleton::ProductDecl> decls;
 			VpSkeleton::AppendEdgeMapProduct(decls);
-			return decls.empty() ? uint64_t(0) : VpSkeleton::BytesOf(decls.back().size, luma);
+			// C3 composition: the fixed id table pads the reserved ids AFTER edge_map (32..34), so the declaration is found by its id, not taken as the last entry.
+			return decls.size() > size_t(VpSkeleton::kEdgeMap) ? VpSkeleton::BytesOf(decls[VpSkeleton::kEdgeMap].size, luma) : uint64_t(0);
 		}
 
 		inline VpSkeleton::OwnerFill MakeEdgeMapOwnerFill(uint64_t reserveBytes)
