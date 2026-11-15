@@ -74,6 +74,11 @@ namespace SourceResolutionMonitor
 		// the why is the Acquire token. Shown in Describe (never silent).
 		bool codingUnavailable = false;
 		std::string codingWhy;
+		// P16's visible fallback: no renderer store existed for the latest frame, so its coding evidence was measured by the owning unit
+		// directly (CodingEvidence::Hub::MeasureWithoutMemo), not acquired from a memo; the count is this monitor's such frames. Shown in
+		// Describe (never silent).
+		bool codingWithoutMemo = false;
+		unsigned long long codingWithoutMemoFrames = 0;
 		// The look-ahead worker has judged frames: it reads the ratio only, its coding readings are NEUTRAL there (no P16 acquire; the
 		// cut/latch distribution is not its input). Shown in Describe so the look-ahead's coding-blindness is never silent.
 		bool aheadCodingNeutral = false;
@@ -706,6 +711,8 @@ namespace SourceResolutionMonitor
 		std::atomic<bool> aheadRan{ false };   // the look-ahead worker analysed a frame (coding neutral there)
 		bool codingUnavailableNow = false;   // worker only: the latest frame's P16 acquire failed
 		std::string codingWhyNow;
+		bool codingWithoutMemoNow = false;   // worker only: the latest frame took P16's no-store fallback (visible)
+		unsigned long long codingWithoutMemoFrames = 0;   // worker only: frames that took it (shown)
 		Snapshot snapshot;
 		SourceHistory::Log historyLog;
 		uint64_t historyRotateBytes = 0;

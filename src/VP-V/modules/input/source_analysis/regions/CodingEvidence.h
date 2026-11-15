@@ -9,17 +9,21 @@
 // Product form: CPU, the default variant, per monitor frame seq. Bytes = Header + one record per tile (Serialise / Deserialise).
 // The owner fill (MakeOwnerFill) measures the tile pack the monitor staged for that seq (Hub::Stage); consumers get it through
 // SkeletonMemo::Acquire (Hub::AcquireTiles): no private measurement. Not acquired (no skeleton memo / declined) = coding evidence
-// UNAVAILABLE, shown in the consumer's fallbacks, never measured privately.
+// UNAVAILABLE, shown in the consumer's fallbacks. The one fallback (rules 1/5, rule 25 addendum): when NO renderer store exists at all
+// (a standalone monitor: tests, tools; or a renderer torn down while jobs are still queued) the consumer calls this unit's
+// Hub::MeasureWithoutMemo - the same MeasurePack the owner fill runs, counted here and shown by the consumer. Never measured privately.
 //
 // C++14, no Windows or libplacebo headers.
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -83,14 +87,27 @@ namespace CodingEvidence
 		std::vector<float> luma;
 	};
 
+	// The one per-pack measure (MeasureTile per tile, tile order): what the owner fill serialises and what the no-store fallback
+	// returns. False (nothing measured) when the pack is malformed; zero tiles = true with no records (the fill declines that case).
+	bool MeasurePack(const TilePack& pack, std::vector<TileMeasure>& tiles);
+
 	// Process-wide seam (module-level; no Bill file): the skeleton module gives the memo provider, the monitor stages its pack and
 	// Acquires. A later MemoFor of the core replaces the provider only.
+	// Lifetime: Instance() is never destroyed (a leaked heap object), so a module destructor running during static destruction
+	// still finds it. The provider is called under a shared lock that SetMemoProvider / ClearMemoProvider take exclusively: once a
+	// clear returns, no call into the old provider (and the module its lambda captured) is running or can start.
 	class Hub
 	{
 	public:
 		using MemoProvider = std::function<std::shared_ptr<VpSkeleton::SkeletonMemo>(const void* host)>;
 		static Hub& Instance();
-		void SetMemoProvider(MemoProvider provider);
+		// Installs `provider` (nullptr = none) and returns its token (0 for nullptr). Waits for in-flight provider calls.
+		uint64_t SetMemoProvider(MemoProvider provider);
+		// Clears the provider only if `token` is still the installed one (a newer module's provider is kept). Waits as above.
+		void ClearMemoProvider(uint64_t token);
+		// The visible no-store fallback (no renderer store exists): MeasurePack, counted (MeasuredWithoutMemo). The CALLER shows it.
+		bool MeasureWithoutMemo(const TilePack& pack, std::vector<TileMeasure>& tiles);
+		unsigned long long MeasuredWithoutMemo() const { return withoutMemo_.load(std::memory_order_relaxed); }
 		// Stage the pack for `seq`; the fill takes it. Bounded (the oldest are dropped).
 		void Stage(uint64_t seq, std::shared_ptr<const TilePack> pack);
 		std::shared_ptr<const TilePack> Staged(uint64_t seq) const;
@@ -98,8 +115,11 @@ namespace CodingEvidence
 		// Stage + Acquire + Deserialise + Unstage. False (with `why` = the Acquire token or "no skeleton memo") = unavailable.
 		bool AcquireTiles(const void* host, uint64_t seq, std::shared_ptr<const TilePack> pack, std::vector<TileMeasure>& tiles, std::string& why);
 	private:
-		mutable std::mutex mutex_;
+		mutable std::mutex mutex_;   // staged_
+		std::shared_timed_mutex providerMutex_;   // provider_ + providerToken_; shared while the provider is called
 		MemoProvider provider_;
+		uint64_t providerToken_ = 0, nextToken_ = 0;
+		std::atomic<unsigned long long> withoutMemo_{ 0 };
 		std::map<uint64_t, std::shared_ptr<const TilePack>> staged_;
 	};
 

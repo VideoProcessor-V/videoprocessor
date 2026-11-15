@@ -1364,20 +1364,30 @@ if (tile < int(tiles) && g.y < ts) {
 			codingPack->luma.insert(codingPack->luma.end(), luma.begin(), luma.end());
 		}
 		{
-			// P16 through the skeleton's Acquire (the one path; no private measurement): the sole store owner is the renderer's identity
+			// P16 through the skeleton's Acquire (the one path; no private measurement; the only exception is the visible, owner-called
+			// no-store fallback below): the sole store owner is the renderer's identity
 			// (as SetChainTap's discovery). Not acquired = the coding readings stay neutral and Describe says why.
 			const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
 			const uint64_t memoSeq = j.sequence != 0 ? j.sequence : ++codingSeq;
 			std::vector<VpUnit::CodingEvidence::TileMeasure> measured;
 			std::string why;
-			// No renderer exists (a standalone monitor: the latch tests, tools): no memo to acquire from, so the pure per-tile measure runs
-			// here exactly as the pre-P16 detector did. With a renderer present a failed acquire stays unavailable and visible.
-			const bool standalone = owners.empty();
-			if (standalone)
-				for (int t = 0; t < j.tiles; ++t)
-					measured.push_back(VpUnit::CodingEvidence::MeasureTile(codingPack->luma.data() + static_cast<size_t>(t) * pixels, T, T, j.codeMaximum));
-			const bool got = standalone || (owners.size() == 1 && VpUnit::CodingEvidence::Hub::Instance().AcquireTiles(owners[0], memoSeq, codingPack, measured, why));
-			if (!got && owners.size() > 1) why = "several renderers";
+			// The shared input is ABSENT (no renderer store at all: a standalone monitor - the latch tests, tools - or a renderer torn
+			// down / re-created while jobs are still queued): the VISIBLE fallback calls the owning unit (rules 1/5, rule 25 addendum),
+			// the same MeasurePack its owner fill runs, counted there and here and shown in Describe. Not a private measurement.
+			// With a renderer present a failed acquire stays unavailable and visible.
+			const bool noStore = owners.empty();
+			bool got = false;
+			if (noStore)
+			{
+				got = VpUnit::CodingEvidence::Hub::Instance().MeasureWithoutMemo(*codingPack, measured);
+				if (!got) why = "tile pack unreadable";
+			}
+			else if (owners.size() == 1)
+				got = VpUnit::CodingEvidence::Hub::Instance().AcquireTiles(owners[0], memoSeq, codingPack, measured, why);
+			else
+				why = "several renderers";
+			codingWithoutMemoNow = noStore && got;
+			if (codingWithoutMemoNow) ++codingWithoutMemoFrames;
 			codingUnavailableNow = !got || measured.size() != spectra.size();
 			codingWhyNow = codingUnavailableNow ? (why.empty() ? "tile count" : why) : std::string();
 			if (!codingUnavailableNow)
@@ -1706,6 +1716,8 @@ if (tile < int(tiles) && g.y < ts) {
 		VpUnit::SourceQuality::Store(snapshot, qualitySmoothed, bitsSmoothed);   // U12
 		snapshot.codingUnavailable = codingUnavailableNow;
 		snapshot.codingWhy = codingWhyNow;
+		snapshot.codingWithoutMemo = codingWithoutMemoNow;
+		snapshot.codingWithoutMemoFrames = codingWithoutMemoFrames;
 		snapshot.aheadCodingNeutral = aheadRan.load(std::memory_order_acquire);
 		snapshot.coherenceV = frame.vertical.coherence;
 		snapshot.coherenceH = frame.horizontal.coherence;
@@ -2731,6 +2743,8 @@ if (tile < int(tiles) && g.y < ts) {
 			liveText.c_str(), declaredText.c_str(), s.confidence, s.bitrateQuality, bits, autoText);
 		std::string text = line;
 		if (s.codingUnavailable) text += "; coding evidence unavailable (" + s.codingWhy + "); source latch: distribution unavailable";   // P16 not acquired: shown, never silent
+		if (s.codingWithoutMemo || s.codingWithoutMemoFrames > 0)   // P16's no-store fallback: shown, never silent
+			text += "; coding evidence measured by its owner without a memo (no renderer store; " + std::to_string(s.codingWithoutMemoFrames) + " frame(s))";
 		if (s.aheadCodingNeutral) text += "; look-ahead reads the ratio only (coding evidence not measured there)";
 		return text;
 	}

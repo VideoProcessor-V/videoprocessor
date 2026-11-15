@@ -108,7 +108,16 @@ duplicates. The code was MOVED here, not copied; the detector keeps no coding la
 **Philosophy.** Modules adapt to the shared product (owner rule, D8). The detector reads `kCodingEvidence` through
 `SkeletonMemo::Acquire` only. Without a memo (the Original pathway, no skeleton module) coding evidence is UNAVAILABLE and the
 detector's readings stay neutral (bitrateQuality 1.0, effectiveBits 0, bandShare 0, blockiness 1.0); the monitor's Describe line
-says "coding evidence unavailable (<reason>)". It is never measured privately (no silent fallback).
+says "coding evidence unavailable (<reason>)". It is never measured privately (no silent fallback). The one fallback (rules 1/5,
+rule 25 addendum): when NO renderer store exists at all (a standalone monitor in tests/tools, or a renderer torn down or re-created
+while jobs are still queued) the monitor calls this unit's `Hub::MeasureWithoutMemo`, the same `MeasurePack` the owner fill runs,
+counted (`Hub::MeasuredWithoutMemo`, `Snapshot::codingWithoutMemoFrames`) and shown in Describe: "coding evidence measured by its
+owner without a memo (no renderer store; N frame(s))". Its result equals the pre-P16 per-tile measure (CodingEvidenceTests).
+
+**Lifetime.** `Hub::Instance()` is a leaked heap object (never destroyed, so a module destructor in static destruction still
+finds it). The memo provider is called under a shared lock; `SetMemoProvider` returns a token and `ClearMemoProvider(token)`
+takes the lock exclusively, so once `~SkeletonModule` has cleared, no call into it is running, and it clears only its own
+installation (a newer module's provider is kept).
 
 **Decisions.**
 - Form: CPU, per monitor frame seq, the default variant; bytes = Header + one record per tile (`Serialise` / `Deserialise`, magic PCE1).

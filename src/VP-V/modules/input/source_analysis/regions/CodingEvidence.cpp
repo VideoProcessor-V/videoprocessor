@@ -506,16 +506,51 @@ namespace CodingEvidence
 	}
 
 	// ---- the hub and the owner fill ----
-	Hub& Hub::Instance()
+	bool MeasurePack(const TilePack& pack, std::vector<TileMeasure>& tiles)
 	{
-		static Hub hub;
-		return hub;
+		tiles.clear();
+		if (pack.tiles == 0)
+			return true;   // nothing to measure (an empty frame): an empty, valid reading
+		if (pack.tiles < 0 || pack.tileSize <= 0 || pack.luma.size() < size_t(pack.tiles) * size_t(pack.tileSize) * size_t(pack.tileSize))
+			return false;
+		tiles.resize(static_cast<size_t>(pack.tiles));
+		const size_t pixels = size_t(pack.tileSize) * size_t(pack.tileSize);
+		for (int t = 0; t < pack.tiles; ++t)
+			tiles[static_cast<size_t>(t)] = MeasureTile(pack.luma.data() + size_t(t) * pixels, pack.tileSize, pack.tileSize, pack.codeMaximum);
+		return true;
 	}
 
-	void Hub::SetMemoProvider(MemoProvider provider)
+	Hub& Hub::Instance()
 	{
-		std::lock_guard<std::mutex> g(mutex_);
+		// Leaked on purpose: never destroyed, so ~SkeletonModule during static destruction (ExtensionHub's function-static outlives a
+		// function-static first touched inside a module constructor) never reaches a destroyed hub (audit-P16 SHOULD 1).
+		static Hub* const hub = new Hub();
+		return *hub;
+	}
+
+	uint64_t Hub::SetMemoProvider(MemoProvider provider)
+	{
+		std::unique_lock<std::shared_timed_mutex> g(providerMutex_);   // waits for in-flight provider calls
 		provider_ = std::move(provider);
+		providerToken_ = provider_ ? ++nextToken_ : 0;
+		return providerToken_;
+	}
+
+	void Hub::ClearMemoProvider(uint64_t token)
+	{
+		std::unique_lock<std::shared_timed_mutex> g(providerMutex_);   // waits for in-flight provider calls
+		if (token == 0 || token != providerToken_)
+			return;   // another (newer) installation: kept
+		provider_ = nullptr;
+		providerToken_ = 0;
+	}
+
+	bool Hub::MeasureWithoutMemo(const TilePack& pack, std::vector<TileMeasure>& tiles)
+	{
+		if (!MeasurePack(pack, tiles))
+			return false;
+		withoutMemo_.fetch_add(1, std::memory_order_relaxed);
+		return true;
 	}
 
 	void Hub::Stage(uint64_t seq, std::shared_ptr<const TilePack> pack)
@@ -541,12 +576,13 @@ namespace CodingEvidence
 	bool Hub::AcquireTiles(const void* host, uint64_t seq, std::shared_ptr<const TilePack> pack, std::vector<TileMeasure>& tiles, std::string& why)
 	{
 		tiles.clear();
-		MemoProvider provider;
+		std::shared_ptr<VpSkeleton::SkeletonMemo> memo;
 		{
-			std::lock_guard<std::mutex> g(mutex_);
-			provider = provider_;
+			// Called under the shared lock: the module that installed the provider cannot finish its ClearMemoProvider (in its
+			// destructor) while this call runs, so the lambda's `this` is alive for the whole call (audit-P16 SHOULD 1).
+			std::shared_lock<std::shared_timed_mutex> g(providerMutex_);
+			if (provider_) memo = provider_(host);
 		}
-		const std::shared_ptr<VpSkeleton::SkeletonMemo> memo = provider ? provider(host) : nullptr;
 		if (!memo)
 		{
 			why = "no skeleton memo";
@@ -575,13 +611,9 @@ namespace CodingEvidence
 		Hub* h = &hub;
 		f.fill = [h](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
 			const std::shared_ptr<const TilePack> pack = h->Staged(req.seq);
-			if (!pack || pack->tiles <= 0 || pack->tileSize <= 0
-				|| pack->luma.size() < size_t(pack->tiles) * size_t(pack->tileSize) * size_t(pack->tileSize))
+			std::vector<TileMeasure> tiles;
+			if (!pack || pack->tiles <= 0 || !MeasurePack(*pack, tiles))
 				return false;   // nothing staged for this frame: declined (visible)
-			std::vector<TileMeasure> tiles(static_cast<size_t>(pack->tiles));
-			const size_t pixels = size_t(pack->tileSize) * size_t(pack->tileSize);
-			for (int t = 0; t < pack->tiles; ++t)
-				tiles[static_cast<size_t>(t)] = MeasureTile(pack->luma.data() + size_t(t) * pixels, pack->tileSize, pack->tileSize, pack->codeMaximum);
 			out.bytes = Serialise(tiles, pack->tileSize, pack->codeMaximum);
 			return true;
 		};

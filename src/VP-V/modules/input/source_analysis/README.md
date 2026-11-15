@@ -300,7 +300,9 @@ Chain tests:
 The coding measure (block grid, banding, effective bits) lives in `regions/CodingEvidence.*` (product P16 `kCodingEvidence`, see
 [regions/README.md](regions/README.md)). The detector's `Spectrum::coding` and `FrameReading::coding` carry it; the monitor acquires it
 per frame through the skeleton memo. Without a memo the coding readings are neutral and `Describe` shows "coding evidence unavailable".
-With no renderer at all (a standalone monitor) the monitor measures per tile via `CodingEvidence::MeasureTile`; with a renderer present, a failed Acquire leaves the evidence unavailable and visible.
+With no renderer store at all (a standalone monitor, or a renderer torn down while jobs are queued) the monitor takes the visible
+fallback `CodingEvidence::Hub::MeasureWithoutMemo` (the owner's own measure, counted, and shown in `Describe` as "coding evidence
+measured by its owner without a memo"); with a renderer present, a failed Acquire leaves the evidence unavailable and visible.
 
 ## Where the code lives (live file list)
 

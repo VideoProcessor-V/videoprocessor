@@ -314,6 +314,7 @@ namespace Vpv
 
 			Skeleton::ConfigLoader loader_;
 			std::function<uint64_t()> nowUs_;
+			uint64_t codingProviderToken_ = 0;   // P16: this module's CodingEvidence::Hub provider installation (cleared only if still ours)
 			Hub::HostSlots<HostState> hosts_;
 			Hub::HostSlots<GpuSlotTag> gpuSlots_;   // aux = the renderer's pl_gpu (GpuCreated), cleared at GpuReleased
 			Hub::HostSlots<MemoHost> memoHosts_;    // L-CORE: the renderers' memos (any thread; dropped at GpuReleased / Shutdown)
