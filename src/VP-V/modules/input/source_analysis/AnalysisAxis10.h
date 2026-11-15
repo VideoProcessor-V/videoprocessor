@@ -88,6 +88,7 @@ namespace Vpv { namespace AnalysisDomain
 
 	// 12-bit lane word (the 12 bits in the high of 16, as DolbyVisionTunnelUnpackReference::Intensity returns I) -> the
 	// plain 12-bit code, and back.
+	// PRECISION-OK 119#23: inverse of the 12-bit code<<4 lane packing; the 12-bit code comes back whole, nothing narrows
 	inline uint32_t Code12FromLane16(uint32_t lane16) { return lane16 >> 4; }
 	inline uint32_t Lane16FromCode12(uint32_t code12) { return code12 << 4; }
 
