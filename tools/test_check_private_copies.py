@@ -205,6 +205,32 @@ class Synthetic(unittest.TestCase):
         self.assertFalse(x8("void SetExternalFlow(std::shared_ptr<const MotionAhead::Flow> flow);"))
         self.assertTrue(x8("std::shared_ptr<MotionAhead::Flow> own = std::make_shared<MotionAhead::Flow>();"))
 
+    @staticmethod
+    def _view_tree(row_id, prod, flag_kind, folder, files, note="n"):
+        cat = ('r.push_back(MakeRow(' + str(row_id) + ', "row", "VP-V/modules/' + folder + '", PathwayUnit::Repair, 30, '
+               '{ ' + prod + ' }, own, "product.x"));\n')
+        if flag_kind:
+            cat += ('inline const std::vector<ConsumerFlag>& ConsumerFlags(){ static const std::vector<ConsumerFlag> flags = {\n'
+                    '  { uint16_t(kCatalogConsumerIdBase + ' + str(row_id) + '), ' + prod + ', FlagKind::' + flag_kind
+                    + ', "D8", "' + note + '" },\n }; return flags; }\n')
+        tree = {"src/VP-V/core/ProductCatalog.h": cat}
+        tree.update({M + folder + "/" + k: v for k, v in files.items()})
+        return [h for h in N1.scan(make_tree(tree)) if h["site"] == "X8"]
+
+    def test_c7_p4_view_accessor_needs_a_view_flag(self):
+        # gate-15c-X8-rows0-1-P4 fixtures: the call-site form is accepted only with a ViewIsActual / ExternalView flag of that
+        # (row, product); NotRead, no flag or a flag of another row never excuse; the judge's own definition is not a call site.
+        call = {"T.cpp": "auto s = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader);"}
+        self.assertFalse(self._view_tree(1, "kP4SourceStats", "ViewIsActual", "repair/texture_restore", call))
+        self.assertFalse(self._view_tree(1, "kP4SourceStats", "ExternalView", "repair/texture_restore", call))
+        self.assertTrue(self._view_tree(1, "kP4SourceStats", "NotRead", "repair/texture_restore", call))
+        self.assertTrue(self._view_tree(1, "kP4SourceStats", None, "repair/texture_restore", call))
+        self.assertTrue(self._view_tree(1, "kP4SourceStats", "ViewIsActual", "repair/texture_restore",
+                                        {"SceneRestart.h": "inline SceneRestartAnswer SceneRestartOf(uint64_t sequence, F r);"
+                                                           " bool p = store->PeekScene(sequence, scene);"}))
+        self.assertTrue(self._view_tree(1, "kP4SourceStats", "ViewIsActual", "repair/texture_restore",
+                                        {"T.cpp": "// SceneRestartOf(params.sequence, r);"}))   # a comment is not a call
+
     def test_bad_root_is_exit_2(self):
         self.assertEqual(N1.main(["--root", tempfile.mkdtemp()]), 2)
 

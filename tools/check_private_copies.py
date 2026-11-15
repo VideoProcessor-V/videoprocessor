@@ -173,6 +173,29 @@ OWNER_EDGES = {
 }
 
 
+# Rule b view reads (C7; gate-15c-X8-rows0-1-P4 and the rows 2 / 11 gates): a call-site form that is too broad for ACCESSOR is
+# accepted ONLY for a (row, product) whose ConsumerFlags entry in ProductCatalog.h is ViewIsActual / ExternalView (NotRead /
+# NotYetConsumed never excuse), matched in that row's folder; with note_file, only in a member file whose path ends with a file
+# path the flag note names.
+VIEW_ACCESSOR = {
+    "kP4SourceStats": {"re": r"\bSceneRestartOf\s*\(\s*params\.sequence\b"},
+}
+VIEW_KINDS = ("ViewIsActual", "ExternalView")
+_FLAG_RE = re.compile(r'\{\s*uint16_t\(\s*kCatalogConsumerIdBase\s*\+\s*(\d+)\s*\)\s*,\s*(k\w+)\s*,\s*FlagKind::(\w+)\s*,'
+                      r'\s*"([^"]*)"\s*,\s*"([^"]*)"')
+_NOTE_FILE = re.compile(r"[\w./-]+\.(?:h|hpp|cpp|inl)\b")
+
+
+def consumer_flags(root):
+    """{(row id, product): (kind, note)} from the kCatalogConsumerIdBase + N entries of ConsumerFlags() in ProductCatalog.h."""
+    out = {}
+    p = os.path.join(root, "src/VP-V/core/ProductCatalog.h")
+    if os.path.isfile(p):
+        for m in _FLAG_RE.finditer(strip_comments(read(p))):
+            out[(int(m.group(1)), m.group(2))] = (m.group(3), m.group(5))
+    return out
+
+
 def product_owner_folders(root):
     """{product: 'src/VP-V/modules/<folder>/'} from ProductRows() of ProductCatalog.h (rows marked 'reserved' are skipped)."""
     out = {}
@@ -308,6 +331,18 @@ def scan(root):
         own = owners.get(pr)
         return bool(e["file"] in members and own and e["file"].startswith(own) and re.search(e["writer"], code(e["file"])))
 
+    flags = consumer_flags(root)
+
+    def view_read_holds(rid, pr, members):
+        va, fl = VIEW_ACCESSOR.get(pr), flags.get((rid, pr))
+        if not va or not fl or fl[0] not in VIEW_KINDS:
+            return False
+        cand = members
+        if va.get("note_file"):
+            named = _NOTE_FILE.findall(fl[1])
+            cand = [r for r in members if any(r.endswith("/" + n) for n in named)]
+        return any(re.search(va["re"], code(r)) for r in cand)
+
     for rid, name, folder, prods in consumer_rows(root):
         fdir = "src/" + folder
         members = [r for r in files if r.startswith(fdir + "/")] or [r for r in files if r.startswith(fdir)]
@@ -318,7 +353,8 @@ def scan(root):
         blob = "\n".join(code(r) for r in members)
         for pr in prods:
             acc = ACCESSOR.get(pr)
-            if acc and not re.search(acc, blob) and not owner_edge_holds(rid, pr, members):
+            if acc and not re.search(acc, blob) and not owner_edge_holds(rid, pr, members) \
+                    and not view_read_holds(rid, pr, members):
                 hits.append({"rule": "b", "site": "X8", "file": fdir, "line": 0, "product": pr,
                              "text": "row %d '%s' declares %s but no file reads it" % (rid, name, pr)})
     return hits

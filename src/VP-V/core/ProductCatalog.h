@@ -596,7 +596,8 @@ inline const std::vector<ConsumerFlag>& ConsumerFlags()
         { uint16_t(kCatalogConsumerIdBase + 0), kP4SourceStats, FlagKind::NotRead, "D10", "private cut / fade logic" },
         { uint16_t(kCatalogConsumerIdBase + 1), kP10GrainSplit, FlagKind::NotRead, "C10", "private bands (TextureRestore.h)" },
         { uint16_t(kCatalogConsumerIdBase + 1), kP11RegionBlockStats, FlagKind::NotRead, "C10", "private 16-px tiles" },
-        { uint16_t(kCatalogConsumerIdBase + 1), kP4SourceStats, FlagKind::NotRead, "D10", "private cut / fade logic" },
+        { uint16_t(kCatalogConsumerIdBase + 1), kP4SourceStats, FlagKind::ViewIsActual, "D8",
+          "P4 via the scene group (repair/texture_restore/SceneRestart.h SceneRestartOf; U7 over two P4 records, SkeletonModule.cpp ClassifyEvents)" },
         // AUDIT-R2 F1 (B3-Z Z2): the optical-flow producer, the matcher and source identification print their declared reads as actual
         // otherwise. The producer and the matcher keep private half-luma copies (the P2 / P2m -> P1 product flags above); the matcher's M3
         // histogram is the shared unit U6 computed privately in its trust pass, not the P4 product; identification's chain reads the
