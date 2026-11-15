@@ -321,7 +321,7 @@ namespace SoftResetTestsNs
 						Assert::AreEqual(std::string("on"), std::string(t.values[0]));
 						Assert::AreEqual(std::string("off"), std::string(t.values[1]));
 					}
-			Assert::IsTrue(toggle, L"the VP-V Motion toggle exists");
+			Assert::IsTrue(toggle, L"the VP-V Repair toggle exists");
 		}
 
 		// RendererSettings::cutSoftReset through the renderer's own loader: absent = on; "off" is read.
