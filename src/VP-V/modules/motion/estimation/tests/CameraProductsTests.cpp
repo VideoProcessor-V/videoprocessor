@@ -154,8 +154,10 @@ namespace CameraProductsTestsNs
 			Assert::IsTrue(p8.residency == Residency::Vram);
 			Assert::AreEqual(0, int(p8.history));
 			Assert::IsTrue(p8.tier == Tier::T0 && p8.variants == Variants::Identical);
+			// C10 15a K2 (F2): P8 is computed from the P7 record and that record's own fit field; P3 is not an input.
+			Assert::AreEqual(1, int(p8.inputCount));
 			Assert::AreEqual(int(kP7CameraFit), int(p8.inputs[0].product));
-			Assert::AreEqual(int(kP3AnalysisField), int(p8.inputs[1].product));
+			Assert::IsTrue(p8.inputs[0].lag == 0 && p8.inputs[0].lead == 0);
 			Assert::AreEqual(content, p8.reads);
 			Assert::AreEqual(1, int(p8.size.termCount));
 			Assert::AreEqual(4, int(p8.size.terms[0].shift));
@@ -331,22 +333,36 @@ namespace CameraProductsTestsNs
 			const std::vector<ConsumerDecl> cs = Camera({ CameraLink::CameraConsumer::Diagnostics });
 			const Graph g = BuildGraph(reg, cs, Settings(1, true));
 			Assert::IsTrue(g.valid);
-			const ProductId expected[] = { ProductId(kP1HalfLuma), ProductId(kP2VectorPair), ProductId(kP3AnalysisField),
-				ProductId(kP4SourceStats), ProductId(kP7CameraFit), ProductId(kP8CameraLabels) };
+			// C10 15a K2 (F2): P8 declares only P7 and P7 only P4 (G-A3), so P2 (reached only through P3) and P3 leave the closure.
+			const ProductId expected[] = { ProductId(kP1HalfLuma), ProductId(kP4SourceStats), ProductId(kP7CameraFit),
+				ProductId(kP8CameraLabels) };
 			for (ProductId p : expected)
 				Assert::AreEqual(1, CountOf(g, p));
-			Assert::AreEqual(size_t(6), g.nodes.size());
+			Assert::AreEqual(size_t(4), g.nodes.size());
 			Assert::IsFalse(g.Has(kP9CameraSmoothed));
+			Assert::IsFalse(g.Has(kP3AnalysisField), L"P8 declares P7 only (C10 15a K2, F2)");
+			Assert::IsFalse(g.Has(kP2VectorPair) || g.Has(kP2mMatcherPair), L"no motion pair enters a Diagnostics-only graph");
 			// P7 before P8 (lag-0 edge), and both after their inputs.
 			Assert::IsTrue(g.IndexOf(kP7CameraFit) < g.IndexOf(kP8CameraLabels));
 			Assert::IsTrue(g.IndexOf(kP4SourceStats) < g.IndexOf(kP7CameraFit));   // G-A3: P4 is P7's only lane input
-			Assert::IsTrue(g.IndexOf(kP3AnalysisField) < g.IndexOf(kP8CameraLabels));
+			Assert::IsTrue(g.IndexOf(kP1HalfLuma) < g.IndexOf(kP4SourceStats));
 
 			const Graph noEngine = BuildGraph(reg, cs, Settings(1, false));
 			Assert::IsTrue(noEngine.valid);
-			Assert::IsTrue(noEngine.Has(kP2mMatcherPair));
-			Assert::IsFalse(noEngine.Has(kP2VectorPair));
-			Assert::AreEqual(1, CountOf(noEngine, kP2mMatcherPair));
+			Assert::IsFalse(noEngine.Has(kP2mMatcherPair) || noEngine.Has(kP2VectorPair) || noEngine.Has(kP3AnalysisField));
+			Assert::AreEqual(size_t(4), noEngine.nodes.size());
+
+			// The P2 -> P2m resolution without an engine, kept on a consumer that still reads P3 (GrainMap: P8 + P3).
+			const std::vector<ConsumerDecl> grain = Camera({ CameraLink::CameraConsumer::GrainMap });
+			const Graph grainOn = BuildGraph(reg, grain, Settings(1, true));
+			Assert::IsTrue(grainOn.valid);
+			Assert::AreEqual(1, CountOf(grainOn, kP2VectorPair));
+			Assert::AreEqual(1, CountOf(grainOn, kP3AnalysisField));
+			const Graph grainNoEngine = BuildGraph(reg, grain, Settings(1, false));
+			Assert::IsTrue(grainNoEngine.valid);
+			Assert::IsTrue(grainNoEngine.Has(kP2mMatcherPair));
+			Assert::IsFalse(grainNoEngine.Has(kP2VectorPair));
+			Assert::AreEqual(1, CountOf(grainNoEngine, kP2mMatcherPair));
 		}
 
 		TEST_METHOD(TemporalDetailLeadFollowsTheLaneLeadMinusOne)

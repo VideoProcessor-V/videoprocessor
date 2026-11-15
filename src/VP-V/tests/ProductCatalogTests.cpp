@@ -684,7 +684,15 @@ namespace ProductCatalogTestsNs
 					flagged = flagged || (f.product == p && f.input == kP5MonitorTiles && f.kind == FlagKind::ViewIsActual && std::string(f.note).find("identity/FrameQuality.h") != std::string::npos);
 				Assert::IsTrue(flagged, L"P15 / P15c carry the ViewIsActual flag that names identity/FrameQuality.h");
 			}
-			Assert::AreEqual(size_t(1), ext, L"P7 reads P2 via FlowOf");
+			Assert::AreEqual(size_t(2), ext, L"P7 reads P2 via FlowOf; P8 reads the P7 record's fit field (P2)");
+			{
+				// C10 15a K2 (F2): the P8 external view is the P7 pool entry's fit field (FitEntryOf), never P3.
+				bool p8Flagged = false;
+				for (const ProductFlag& f : ProductFlags())
+					p8Flagged = p8Flagged || (f.product == kP8CameraLabels && f.input == kP2VectorPair && f.kind == FlagKind::ExternalView
+						&& std::string(f.note).find("FitEntryOf") != std::string::npos);
+				Assert::IsTrue(p8Flagged, L"P8 carries the ExternalView flag on P2 that names CameraLink::FitEntryOf");
+			}
 			Assert::AreEqual(size_t(1), reserved, L"P10c has no producer");
 
 			// 2. The P2 / P2m / P3 declarations of P1 are KEPT (graph order unchanged), flagged rather than deleted.
