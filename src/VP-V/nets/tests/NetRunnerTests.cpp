@@ -723,14 +723,14 @@ namespace NetRunnerTestsNs
 				rgba[i * 4 + 1] = 0.6f - 0.02f * i;
 				rgba[i * 4 + 2] = 0.3f;
 				rgba[i * 4 + 3] = 1.0f;
-				before[i] = LumaOf(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], 0.2126f, 0.0722f);
+				before[i] = LumaCoeff::LumaOf(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], 0.2126f, 0.0722f);
 				after[i] = before[i] + 0.004f * ((i % 3) - 1);   // the repaired luma
 			}
 			const std::vector<float> original = rgba;
 			AddLumaDeltaToRgb(before.data(), after.data(), w, rgba.data(), w * 4, 4, w, h);
 			for (int i = 0; i < w * h; ++i)
 			{
-				const float y2 = LumaOf(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], 0.2126f, 0.0722f);
+				const float y2 = LumaCoeff::LumaOf(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], 0.2126f, 0.0722f);
 				Assert::AreEqual(after[i], y2, 1e-6f, L"the RGB luma becomes the repaired luma");
 				Assert::AreEqual(original[i * 4 + 2] - before[i], rgba[i * 4 + 2] - y2, 1e-6f, L"B - Y unchanged");
 				Assert::AreEqual(original[i * 4 + 0] - before[i], rgba[i * 4 + 0] - y2, 1e-6f, L"R - Y unchanged");
