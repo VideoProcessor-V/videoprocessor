@@ -153,6 +153,19 @@ class Synthetic(unittest.TestCase):
                   open(os.path.join(root, N1.BASELINE), "w"))
         self.assertEqual(N1.main(["--update-baseline", "--root", root]), 1)
 
+    def test_d3s_search_pass_outside_the_owner_file(self):
+        # gate-15a-D3s fixtures: a SAVE MV / LUMAQ / LUMAC pass in a shader or in a non-owner header raw string hits;
+        # the old comment wording and the owner file do not.
+        owner = M + "motion/estimation/fallback/OutputDomainSearchGlsl.h"
+        root = make_tree({
+            "shaders/Fixture.glsl": "//!HOOK OUTPUT\n//!SAVE MV\nvoid hook(){}\n",
+            M + "output/dither/Copy.h": 'const char* k = R"(\n//!SAVE LUMAQ\n//!DESC copy\n)";\n',
+            "shaders/Comment.glsl": "/* full search within the block */\n//!SAVE SIGMA_DELTA_STATE\n",
+            owner: 'const char* p = R"(\n//!SAVE LUMAQ\n)";\nconst char* q = R"(\n//!SAVE LUMAC\n//!SAVE MV\n)";\n',
+        })
+        hs = sorted(h["file"] for h in N1.scan(root) if h["site"] == "D3s")
+        self.assertEqual(hs, sorted(["shaders/Fixture.glsl", M + "output/dither/Copy.h"]))
+
     def test_bad_root_is_exit_2(self):
         self.assertEqual(N1.main(["--root", tempfile.mkdtemp()]), 2)
 

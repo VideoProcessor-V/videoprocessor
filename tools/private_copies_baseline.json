@@ -10,15 +10,6 @@
    "max_hits": 7
   },
   {
-   "key": "a|D3s|shaders/Temporal sigma-delta.glsl",
-   "rule": "a",
-   "site": "D3s",
-   "refs": "122 s9 D3",
-   "reason": "sigma-delta shader own block search pass",
-   "seed": true,
-   "max_hits": 2
-  },
-  {
    "key": "a|D4|src/VP-V/modules/motion/estimation/global_model/link/CameraLabelFill.cpp",
    "rule": "a",
    "site": "D4",

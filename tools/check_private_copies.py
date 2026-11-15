@@ -54,9 +54,10 @@ SITES = [
      "re": r"\bOutputDomainSearch::(Glsl|LumaQuarterPassGlsl|LumaCoarsePassGlsl|BlockSearchPassGlsl)\s*\(",
      "owner": [_M + "motion/estimation/fallback/OutputDomainSearchGlsl.h", _M + "output/dither/VpShaderInclude.h"]},
     {"id": "D3s", "product": "kP2VectorPair", "refs": "122 s9 D3",
-     "what": "sigma-delta shader own block search pass", "raw": True,
-     "re": r"full search within",
-     "only": ["shaders/Temporal sigma-delta.glsl"]},
+     "what": "an own output-domain search pass (SAVE MV / LUMAQ / LUMAC) outside the motion module", "raw": True,
+     # gate-15a-D3s: every scanned file (shaders AND src/VP-V headers: the passes live as C++ raw strings), owner by file.
+     "re": r"^\s*//!SAVE\s+(MV|LUMAQ|LUMAC)\b",
+     "owner": [_M + "motion/estimation/fallback/OutputDomainSearchGlsl.h"]},
     {"id": "D4", "product": "kP8CameraLabels", "refs": "122 s9 D4",
      "what": "camera labels read as a FieldCopy through the link instead of P3",
      "re": r"\bm_link\.FieldOf\s*\(",
