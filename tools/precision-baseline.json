@@ -2,14 +2,12 @@
  "classes": {
   "A": 27,
   "O": 32,
-  "R": 48,
-  "T": 2,
+  "R": 29,
+  "T": 0,
   "U": 62
  },
  "files": {
-  "src/VP-V/core/GpuAllocator.h": 11,
   "src/VP-V/core/LaneInterfaces.h": 1,
-  "src/VP-V/modules/control/skeleton/PlTexBackend.h": 8,
   "src/VP-V/modules/control/skeleton/SkeletonModule.cpp": 2,
   "src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp": 1,
   "src/VP-V/modules/input/capture/EarlyUpload.cpp": 1,
@@ -24,7 +22,6 @@
   "src/VP-V/modules/motion/estimation/longpair/LongPairService.cpp": 2,
   "src/VP-V/modules/motion/estimation/longpair/LongPairService.h": 3,
   "src/VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h": 4,
-  "src/VP-V/modules/repair/deband/VpDebander.cpp": 2,
   "src/VP-V/modules/repair/grain_split/GrainNode.h": 1,
   "src/VP-V/modules/repair/grain_split/GrainSplitGpu.cpp": 1,
   "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h": 3,
@@ -65,17 +62,9 @@
   "note": "refs/119 sweep at 6772f5fcb; U = hit file not yet keyed to a refs/119 row (to classify)"
  },
  "sites": {
-  "src/VP-V/core/GpuAllocator.h": {
-   "class": "R",
-   "row": "119#17"
-  },
   "src/VP-V/core/LaneInterfaces.h": {
    "class": "U",
    "row": "UNCLASSIFIED"
-  },
-  "src/VP-V/modules/control/skeleton/PlTexBackend.h": {
-   "class": "R",
-   "row": "119#17"
   },
   "src/VP-V/modules/control/skeleton/SkeletonModule.cpp": {
    "class": "U",
@@ -132,10 +121,6 @@
   "src/VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h": {
    "class": "A",
    "row": "119#36"
-  },
-  "src/VP-V/modules/repair/deband/VpDebander.cpp": {
-   "class": "T",
-   "row": "119#14"
   },
   "src/VP-V/modules/repair/grain_split/GrainNode.h": {
    "class": "R",
@@ -263,5 +248,5 @@
   }
  },
  "tool": "N2 precision",
- "total": 171
+ "total": 150
 }
