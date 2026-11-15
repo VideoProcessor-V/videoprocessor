@@ -24,7 +24,7 @@
 #include <cstring>
 #include <vector>
 
-#include "../../../../../core/RobustStats.h"   // C6-2 U24: the grain median (Upper rule)
+#include "../../../../../core/RobustStats.h"   // C6-2 U24: grain = the Upper rule of the owner
 #include "../../AnalysisAxis10.h" // S-2a: bin = HistBinFromQ6, centre = BinCenterQ6 (one decode law, rule 20)
 
 namespace VpUnit
