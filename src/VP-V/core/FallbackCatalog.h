@@ -1022,14 +1022,26 @@ namespace FallbackCatalog
 			"and the render upload");
 	}
 
-	// P10g C8 repeated-frame gate: neighbour frames that repeat the current frame (paused / duplicated picture) left the B window so their
-	// copy of the grain is not averaged into the clean picture. Engaged only while it dropped a frame; Released when the setting is off.
-	inline Decision GrainRepeatGate(bool settingOn, int droppedRepeats, int neighboursLeft, int minNeighbours)
+	// P10g C8 repeated-frame gate (grain separation, S-3a-GS names): Engaged when grain_sep_repeat_gate = off, or when the gate had
+	// neighbours to judge but no signal (none of them could be judged). Then paused / duplicated frames are NOT removed from B's set
+	// and their own grain can be averaged into the clean picture. Released otherwise. `offered` = neighbours offered to the gate.
+	inline Decision GrainSepRepeatGateOff(bool keyOff, int offered, int judged)
 	{
-		if (!settingOn || droppedRepeats <= 0)
-			return Released("grain_repeat_gate");
-		return Engaged("grain_repeat_gate", "grain: " + std::to_string(droppedRepeats) + " repeated neighbour frame(s) left the window ("
-			+ std::to_string(neighboursLeft) + " left); " + (neighboursLeft < minNeighbours ? "fewer than the minimum, the L1+L2 gains run" : "the rest still average"));
+		if (keyOff)
+			return Engaged("grain_sep.repeat_gate_off", "grain separation: repeated-frame gate is off (grain_sep_repeat_gate = off); paused or duplicated frames are not removed from the neighbour window");
+		if (offered > 0 && judged <= 0)
+			return Engaged("grain_sep.repeat_gate_off", "grain separation: repeated-frame gate has no signal (no neighbour could be judged); paused or duplicated frames are not removed from the neighbour window");
+		return Released("grain_sep.repeat_gate_off");
+	}
+
+	// P10g C8 status text for Config status and Ctrl+I (NOT a registry entry: the registry announces every entry once, and this is the
+	// DEFAULT state while no producer repeat fact exists). Empty when the gate is off (its entry covers that), nothing was offered, or the
+	// producer facts decided every neighbour; otherwise "repeat facts unavailable: block test" with the number of repeats it dropped.
+	inline std::string GrainSepRepeatStatus(bool keyOff, int offered, int blockTestRuns, int droppedByBlockTest)
+	{
+		if (keyOff || offered <= 0 || blockTestRuns <= 0)
+			return std::string();
+		return "grain separation: repeat facts unavailable: block test (" + std::to_string(droppedByBlockTest) + " repeated neighbour frame(s) dropped)";
 	}
 
 	inline Decision ProductFallback(const char* id, const std::string& why)
