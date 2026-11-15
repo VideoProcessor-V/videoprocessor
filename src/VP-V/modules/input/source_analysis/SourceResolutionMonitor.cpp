@@ -8,6 +8,7 @@
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
 #include <VP-V/modules/scaling/geometry/SourceGeometrySet.h>
 #include <VP-V/modules/input/source_analysis/identity/shared/SourceQuality.h>
+#include <VP-V/core/ComputeOnce.h>
 
 #include <DebugLog.h>
 #include <GeneralRateLog.h>
@@ -1784,6 +1785,7 @@ if (tile < int(tiles) && g.y < ts) {
 		snapshot.codingWithoutMemo = codingWithoutMemoNow;
 		snapshot.codingWithoutMemoFrames = codingWithoutMemoFrames;
 		snapshot.aheadCodingNeutral = aheadRan.load(std::memory_order_acquire);
+		VPV_COMPUTE_ONCE_AT("U12", static_cast<int64_t>(j.sequence != 0 ? j.sequence : snapshot.frames), ::ComputeOnce::Variant(j.nativeWidth, j.nativeHeight));   // compute-once detector 2
 		snapshot.coherenceV = frame.vertical.coherence;
 		snapshot.coherenceH = frame.horizontal.coherence;
 		snapshot.cuts = tracker.Cuts();

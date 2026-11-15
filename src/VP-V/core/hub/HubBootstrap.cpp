@@ -21,6 +21,7 @@
 #include <VP-V/modules/output/presentation/PresenterExtension.h>
 // Last: DiagnosticOverrides.h includes <windows.h> without NOMINMAX; the headers above use (std::min/max) forms that its macros break.
 #include <VP-V/modules/control/diagnostics/DiagnosticOverridesModule.h>
+#include <VP-V/modules/control/diagnostics/ComputeOnceModule.h>
 
 namespace
 {
@@ -54,6 +55,7 @@ namespace
 		// entrance and core segments (doc 59 2.2 list order); its views, PlanOutputs and the QueueFlush steering reset.
 		VpMotion::RegisterDejudderExtension();
 		Vpv::Diagnostics::RegisterDiagnosticOverridesModule();   // status only: the diagnostic override line
+		Vpv::Diagnostics::RegisterComputeOnceModule();           // compute-once detectors 2 + 3 (status / report / log; off by default)
 		Vpv::Hub::RegisterHub();
 		return 1;
 	}

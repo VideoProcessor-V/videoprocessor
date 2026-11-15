@@ -10,6 +10,7 @@
 
 #include <d3dcompiler.h>
 
+#include <VP-V/core/GpuAttribution.h>
 #include <cstring>
 
 #pragma comment(lib, "d3d11.lib")
@@ -227,6 +228,7 @@ namespace EngineLumaGpu
 		context->CSSetShaderResources(0, 1, srvs);
 		context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
 		context->Dispatch((outW + 7u) / 8u, (outH + 7u) / 8u, 1u);
+		GpuAttribution::NoteExternal("engine luma", "source_analysis_luma");   // compute-once detector 3: raw D3D11 pass
 		ID3D11ShaderResourceView* noSrv[1] = { nullptr };
 		ID3D11UnorderedAccessView* noUav[1] = { nullptr };
 		ID3D11Buffer* noBuffer[1] = { nullptr };

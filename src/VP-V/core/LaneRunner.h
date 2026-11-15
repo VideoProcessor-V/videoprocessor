@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include <VP-V/core/ComputeOnce.h>
 #include "LaneInterfaces.h"
 #include "OrderedChain.h"
 
@@ -361,12 +362,14 @@ private:
                 if (st.pins.sets[k] != nullptr)   // null: an absent chain-self input (carry-forward)
                     job.inputData[k] = input_(st.pins.sets[k]->Product(), st.pins.seqs[k], st.pins.liveIndex[k]);
 
+        const ComputeOnce::FrameScope frameScope(static_cast<int64_t>(job.seq), "lane", static_cast<int64_t>(st.node->id));
         if (!st.producer->Begin(job)) {
             st.counters.beginFailures.fetch_add(1, std::memory_order_relaxed);
             st.phase = Phase::Abandoning;   // nothing submitted: the default fence values apply
             return true;
         }
         st.began = true;
+        VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(st.node->id))).c_str(), job.seq, ::ComputeOnce::Variant(0));   // compute-once: the lane worker compute (one per product, frame)
         if (hdr.chainReduced)   // counted once the job really started (not on a failed Begin)
             st.counters.chainCarryForward.fetch_add(1, std::memory_order_relaxed);
         st.phase = Phase::Running;
@@ -382,6 +385,7 @@ private:
             return AbandonJob(st);
         }
         const uint64_t t0 = Now();
+        const ComputeOnce::FrameScope frameScope(static_cast<int64_t>(st.job.seq), "lane", static_cast<int64_t>(st.node->id));
         const ChunkResult r = st.producer->RunChunk(st.job, budgetUs);
         const uint64_t t1 = Now();
         const uint64_t dt = t1 > t0 ? t1 - t0 : uint64_t(0);

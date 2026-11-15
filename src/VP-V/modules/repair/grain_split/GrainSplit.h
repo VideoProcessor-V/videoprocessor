@@ -35,6 +35,7 @@
 #include <VP-V/core/Ramp.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
+#include <VP-V/core/ComputeOnce.h>
 
 namespace GrainSplit
 {
@@ -149,6 +150,7 @@ namespace GrainSplit
 	// accessor's tap order), in codes: the CPU twin of the GPU pass's vpu_half_luma.
 	inline Plane V3Half(const Plane& y)
 	{
+		VPV_COMPUTE_ONCE_PRIVATE("U3", "grain_split_cpu");
 		Plane o(static_cast<int>(VpUnit::HalfLuma::HalfDim(static_cast<uint32_t>(y.w))), static_cast<int>(VpUnit::HalfLuma::HalfDim(static_cast<uint32_t>(y.h))));
 		for (int j = 0; j < o.h; ++j)
 			for (int i = 0; i < o.w; ++i)
@@ -362,6 +364,7 @@ namespace GrainSplit
 	inline Split Compute(const Plane& y, double scale, int B, const Params& p = Params())
 	{
 		Split a;
+		VPV_COMPUTE_ONCE("U1", ::ComputeOnce::Variant(y.w, y.h, B, 1));
 		a.w = y.w; a.h = y.h; a.B = B;
 		a.bw = (y.w + B - 1) / B; a.bh = (y.h + B - 1) / B;
 		const Plane g1 = Gauss(y, p.sigmaFine * scale);

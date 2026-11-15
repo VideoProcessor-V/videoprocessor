@@ -5,6 +5,7 @@
 
 #include <dxgi.h>
 
+#include <VP-V/core/GpuAttribution.h>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -265,6 +266,7 @@ namespace NvOpticalFlow
 			QueryPerformanceCounter(&t0);
 		}
 		const NV_OF_STATUS status = List(functions)->nvOFExecute(static_cast<NvOFHandle>(handle), &input, &output);
+		GpuAttribution::NoteExternal("nvof execute", "motion_engine_nvof");   // compute-once detector 3: NVOF pass
 		if (status != NV_OF_SUCCESS)
 		{
 			char text[256] = {};

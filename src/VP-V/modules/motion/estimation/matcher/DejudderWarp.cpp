@@ -11,6 +11,7 @@
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
 #include <VP-V/core/RobustStatsShaders.h>
+#include <VP-V/core/GpuAttributionPl.h>
 
 #include <chrono>
 
@@ -2313,6 +2314,7 @@ if (q.x < size.x && q.y < size.y) {
 		: log(logIn), gpu(gpuIn), settings(settingsIn), base(settingsIn)
 	{
 		dispatch = pl_dispatch_create(log, gpu);
+		GpuAttribution::Watch(dispatch, "dejudder");
 	}
 
 	Settings MotionWarp::Scaled(const Settings& given, int inputHeight)
@@ -3760,6 +3762,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const pl_shader_var v[4] = { { pl_var_vec4("given"), given, true }, { pl_var_vec2("frame_size"), frameSize, true },
 			{ pl_var_float("black"), &black, true }, { pl_var_float("bar_codes"), &barCodes, true } };
 		const pl_shader_desc d[2] = { Sampled("l1", l1A, false), Storage("dst", picture) };
+		VPV_COMPUTE_ONCE("U8", ::ComputeOnce::Variant(width, height, pictureFullRange ? 1 : 0));   // compute-once detector 2: the one PICTURE pass
 		return Dispatch("VideoProcessor de-judder: picture area (black bars)", VpUnit::PictureRect::KernelHeader(), VpUnit::PictureRect::KernelBody(), d, 2, v, 4, 16, 16, 16);
 	}
 

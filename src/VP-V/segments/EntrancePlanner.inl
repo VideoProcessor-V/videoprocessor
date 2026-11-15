@@ -62,6 +62,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 			vpv.sourceAnalysis.sourceMonitorHistorySet = true;
 		}
 		if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+		GpuAttribution::Watch(rebaseDispatch, "rebase");
 		const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 		// R3 (resync_event on): the worker's copies carry the frame's stream key (copies from
 		// before a FULL are dropped), and a FULL resets the evidence on the frame that carries it.

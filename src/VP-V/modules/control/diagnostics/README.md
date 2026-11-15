@@ -94,6 +94,33 @@ Ids engaged in code today (LibplaceboVideoRenderer.cpp): `capture GPU unpack`, `
 
 `SlotTiming.h` (core, header-only) is the per-slot GPU-time accumulator and 3090 projection; it is used only by PipelineSkeletonTests so far.
 
+### Compute-once detectors (`ComputeOnceReport.h`, `ComputeOnceModule.h`; core `ComputeOnce.h`, `GpuAttribution.h`, `GpuAttributionPl.h`)
+
+refs/129 addendum 2026-11-13, interface D:/codex/vp-handover/lead7/iface-L-DET.md. Detector 2: `VPV_COMPUTE_ONCE*` at each shared-unit entry point counts calls per (unit, variant, source frame) with the caller (return address, symbolised on report) and its frame scope (hub phase or lane job); the skeleton Acquire owner fills are folded in as `acquire:<product>`; private copies are HIDDEN-COPY rows. Detector 3: every GPU pass (VP dispatches via `GpuAttribution::Watch`, libplacebo render passes via the PassTimerHook info callback) is charged to an owner by step-name rules; unmatched steps are listed UNATTRIBUTED with their GPU time. Hub module `compute_once`: one Fallbacks status line while on and dirty (Ctrl+I, Config status, Ctrl+Alt+D), command `compute_once report`, and the full report in the log at GPU release / shutdown and every 30 s (the Ctrl+Alt+D log excerpt and the acceptance harness read it). On only with env `VP_DEBUG_COMPUTE_ONCE=1` (no config key); off costs one relaxed load and a branch per entry point (ComputeOnceTests::CostWhenOff logs the measured ns). Tests: `tests/ComputeOnceTests.cpp`; real-clip acceptance `ComputeOnceRealClipAcceptance` (RendererCaptureHarnessTests).
+
+Design goal and decisions (compute-once): prove every shared unit is computed at most once per frame and variant, and that no GPU pass is unowned, because "Overhead costs end-image quality" (owner, refs/owner-decisions 2026-11-13 13:36-13:38; principles/skeleton-products.md rule 5; doc 124 A1b). Decisions: diagnostic-only (env switch, no settings key, no pixel or decision change); unit tokens are the bare tools/check_shared_units.py ids so the static checker and the counters name the same units; entry-point lines live in module files only, never in Bill files (hook-line delta 0, 00-UNIVERSAL rule 4).
+
+Coverage (audit L-DET MUST 4 / 5). GPU work outside libplacebo has no pl_dispatch callback: the raw D3D11 and NVOF submits (EngineLumaGpu, PhotometricRefineGpu, NvOpticalFlow, NvOpticalFlowHinted) call `GpuAttribution::NoteExternal(step, owner)` after each submit, so they are counted and owned but untimed (their owner rows read ms 0.000). Counters sit at U1, U2, U3, U4, U5 (the debander grain-guard pass, a GPU PrivateCopy rule), U6, U7, U8, U9, U10, U11, U12 and U20. The units without one (U13, U14, U15, U16, U18, U19, U21, U22) are printed by the report as `Compute-once not-instrumented <unit> <name>: <why> (trigger: ...)` and counted in the summary (`not-instrumented <n>`); each has a refs/102b row. A unit leaves `ComputeOnceReport::NotInstrumented()` in the commit that gives it a counter. A new private GPU pass needs its PrivateCopy rule in `GpuAttribution::SeedRules()` in the same commit (`AddRule` is not called in production).
+
+Acceptance asserts (ComputeOnceRealClipAcceptance): duplicates 0, gaps 0 (a seq<0 note fails), hidden copies 0 on CPU and GPU, gpu-unattributed 0, and non-vacuity: the default-on units of the clip each have a counted row and gpu-passes > 0. With `VP_COMPUTE_ONCE_BASELINE=1` it is the BEFORE run instead: it records the hidden-copy counts and asserts they are non-zero (the known private copies, so the AFTER zero is not vacuous).
+
+`VP_COMPUTE_ONCE_EXPECT` (test env, optional, comma-separated unit ids such as `U3,U4`) replaces the expected-unit set of the non-vacuity check; unset, the default set `U3,U4,U6,U7,U8,U9,U10` is used. The test always logs the set it used (`== compute-once expected units: ...`). Acceptance and gate runs leave it unset; a narrowed set needs its own waiver (WAIVER-LDET-1 condition).
+
+Caller symbols: `ComputeOnceReport.h` loads `dbghelp.dll` on demand (LoadLibrary/GetProcAddress, as CrashState's minidump writer does), so the renderer has no load-time dbghelp import. If it cannot be loaded or lacks a `Sym*` entry point, callers print as `<module>+0x<offset>` and the report carries `Compute-once symbols unavailable (...)` and the Fallbacks line says so.
+
+CPU sampling (`CpuSampleProfiler.h`, test-only) is ADVISORY: it suspends threads briefly and scans stack words for return addresses, so a hot function can be missed or mis-owned; it never gates.
+
+Run the real-clip acceptance (after an x64 Release build, on GPU-QUIET, from a PowerShell prompt at the repository root):
+
+    $env:VP_TEST_GPU = 'hardware'; $env:VP_TEST_REQUIRE_GPU = '1'; $env:VP_TEST_ADAPTER = 'NVIDIA'
+    $env:VP_TEST_CPU_SAMPLE = '1'        # optional: the CPU sampler
+    $env:VP_COMPUTE_ONCE_BASELINE = '1'  # optional: the BEFORE run
+    & 'C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe' x64\Release\VideoProcessor-Test.dll /Tests:ComputeOnceRealClipAcceptance /Logger:trx /ResultsDirectory:$env:TEMP\vp-compute-once-trx
+    Select-String -Path $env:TEMP\vp-compute-once-trx\*.trx -Pattern 'Compute-once' | ForEach-Object { $_.Line.Trim() }
+    Remove-Item Env:VP_TEST_CPU_SAMPLE, Env:VP_COMPUTE_ONCE_BASELINE -ErrorAction SilentlyContinue
+
+`tools/compute_once/run_cpu_sample.ps1` wraps the same steps (GPU-QUIET taken and released, the lines extracted to a summary file).
+
 ### Config keys actually read
 
 - `[shortcuts] state_report`: default Ctrl+Alt+D; empty = no shortcut; an invalid chord binds none and reports an error.
@@ -223,6 +250,11 @@ Forwarding headers (WP-17; removed in M2 step 0 with their includers): `src/Vide
 - `src/VP-V/modules/control/diagnostics/DiagnosticsReportRun.h`
 - `src/VP-V/modules/control/diagnostics/StatusExtension.h`
 - `src/VP-V/modules/control/diagnostics/StatusExtension.cpp`
+- `src/VP-V/modules/control/diagnostics/ComputeOnceReport.h`
+- `src/VP-V/modules/control/diagnostics/ComputeOnceModule.h`
+- `src/VP-V/core/ComputeOnce.h`
+- `src/VP-V/core/GpuAttribution.h`
+- `src/VP-V/core/GpuAttributionPl.h`
 - `src/VP-V/core/SlotTiming.h`
 - `src/VP-V/core/FallbackStatus.h`
 - `src/VideoProcessor-GUI/StatsOverlayWindow.cpp`

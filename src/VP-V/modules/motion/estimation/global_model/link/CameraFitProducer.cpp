@@ -1,6 +1,7 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 #include "CameraFitProducer.h"
+#include <VP-V/core/ComputeOnce.h>
 
 #include <chrono>
 #include <cstring>
@@ -96,6 +97,7 @@ namespace CameraLink
 		}
 		if (m_counters && res.timingUnknown)
 			m_counters->timingUnknown.fetch_add(1, std::memory_order_relaxed);
+		VPV_COMPUTE_ONCE_AT("U11", job.seq, 0);
 		auto rec = std::make_shared<CameraModel::CameraMotion>(m_fitter.Fit(in));
 		if (m_counters)
 			m_counters->fitted.fetch_add(1, std::memory_order_relaxed);

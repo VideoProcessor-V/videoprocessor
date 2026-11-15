@@ -43,6 +43,7 @@
 // Header-only, C++14, no Windows or GPU headers.
 #pragma once
 
+#include <VP-V/core/ComputeOnce.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
 #include <algorithm>
@@ -86,6 +87,7 @@ inline uint32_t HistDistance(const SourceStats::Record& a, const SourceStats::Re
 inline EventSignals ClassifyEvents(const SourceStats::Record& prev, const SourceStats::Record& cur, bool fullBetween,
                                    bool continuityBetween)
 {
+    VPV_COMPUTE_ONCE("U7", ::ComputeOnce::Variant(fullBetween ? 1 : 0, continuityBetween ? 1 : 0));
     EventSignals e;
     e.histDistance = HistDistance(prev, cur);
     const double frac = double(e.histDistance) / 65535.0;

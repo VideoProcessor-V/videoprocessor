@@ -6,6 +6,7 @@
 #include "CameraModelGpu.h"
 
 #include <VP-V/core/VramUsers.h>
+#include <VP-V/core/GpuAttributionPl.h>
 
 #include <algorithm>
 #include <cmath>
@@ -321,6 +322,7 @@ if (blk.x < cm_grid.x && blk.y < cm_grid.y) {
 	LabelPass::LabelPass(pl_log log, pl_gpu gpu, bool hostReadable) : m_log(log), m_gpu(gpu), m_readable(hostReadable)
 	{
 		m_dispatch = pl_dispatch_create(log, gpu);
+		GpuAttribution::Watch(m_dispatch, "camera_model");
 	}
 
 	LabelPass::~LabelPass()

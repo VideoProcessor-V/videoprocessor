@@ -3,6 +3,7 @@
 
 #include <VP-V/modules/motion/estimation/matcher/DejudderWarp.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
+#include <VP-V/core/GpuAttributionPl.h>
 
 #include <libplacebo/shaders/custom.h>
 
@@ -383,6 +384,7 @@ if (b.x < size.x && b.y < size.y) {
 		: gpu(gpuIn), hostReadable(hostReadableIn)
 	{
 		dispatch = pl_dispatch_create(log, gpu);
+		GpuAttribution::Watch(dispatch, "rendered_warp");
 	}
 
 	Warp::~Warp()
@@ -532,6 +534,7 @@ if (b.x < size.x && b.y < size.y) {
 		: gpu(gpuIn), hostReadable(hostReadableIn)
 	{
 		dispatch = pl_dispatch_create(log, gpu);
+		GpuAttribution::Watch(dispatch, "rendered_warp_field");
 	}
 
 	VectorField::~VectorField()

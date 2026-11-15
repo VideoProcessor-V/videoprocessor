@@ -4,6 +4,7 @@
 #include <VP-V/core/EntranceEpoch.h>
 #include <VP-V/modules/control/diagnostics/DiagnosticOverrides.h>
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/GpuAttributionPl.h>
 
 #include <VP-V/modules/control/diagnostics/DiagnosticsAdapter.h>
 #include <DebugLog.h>
@@ -238,6 +239,7 @@ namespace EntranceSegment
 		for (Id id : slots().ActiveEntrance())
 		{
 			const int span = host.BeginStageSpan(PipelineSlots::Get(id).name);   // efficiency timers T2 (WP-5)
+			if (::ComputeOnce::Enabled()) GpuAttribution::Watch(host.Dispatch(), "rebase");   // compute-once detector 3: the entrance dispatch (idempotent)
 			switch (StageFor(id))
 			{
 			case Stage::Rebase: Rebase(run, frame); break;

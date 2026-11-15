@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include <VP-V/core/ComputeOnce.h>
 #include <VP-V/core/LaneInterfaces.h>
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
@@ -96,6 +97,7 @@ inline bool ComputeHalfLuma(const SourceFrameView& v, uint8_t* out, size_t outBy
     const Dims d{ v.width, v.height };
     if (outBytes < HalfLumaBytes(d))
         return false;
+    VPV_COMPUTE_ONCE("U3", ::ComputeOnce::Variant(v.width, v.height));   // counted only when the product is computed
     const uint32_t hw = HalfDim(v.width);
     const uint32_t hh = HalfDim(v.height);
     uint16_t* half = reinterpret_cast<uint16_t*>(out);
@@ -187,6 +189,7 @@ public:
     {
         if (job.source == nullptr || !job.source->Valid() || job.out == nullptr)
             return false;
+        VPV_COMPUTE_ONCE_AT("U3", job.seq, ::ComputeOnce::Variant(job.source->width, job.source->height));
         dims_ = Dims{ job.source->width, job.source->height };
         if (job.outBytes < HalfLumaBytes(dims_))
             return false;
@@ -273,6 +276,7 @@ inline bool ComputeSourceStats(const uint8_t* halfLumaProduct, Dims dims, uint8_
 {
     if (halfLumaProduct == nullptr || dims.width == 0 || dims.height == 0)
         return false;
+    VPV_COMPUTE_ONCE("U6", ::ComputeOnce::Variant(dims.width, dims.height));
     return VpUnit::SourceStats::ComputeRecord(reinterpret_cast<const uint16_t*>(halfLumaProduct), HalfDim(dims.width),
                                               HalfDim(dims.height), out, outBytes);
 }
@@ -291,6 +295,7 @@ public:
         if (job.out == nullptr || job.outBytes < sizeof(SourceStatsRecord) || dims_.width == 0 || dims_.height == 0
             || job.inputData[0] == nullptr)
             return false;
+        VPV_COMPUTE_ONCE_AT("U6", job.seq, ::ComputeOnce::Variant(dims_.width, dims_.height));
         hw_ = HalfDim(dims_.width);
         hh_ = HalfDim(dims_.height);
         acc_.Reset(hw_, hh_);

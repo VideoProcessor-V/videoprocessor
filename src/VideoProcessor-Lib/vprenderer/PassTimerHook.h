@@ -2,6 +2,7 @@
 
 #include <VP-V/core/PassTimerInbox.h>   // the motion jobs' posted timings (the one host call in LibplaceboVideoRenderer drains it)
 #include <VP-V/core/PassTimers.h>
+#include <VP-V/core/GpuAttributionPl.h>   // compute-once detector 3: pass owners (only while VP_DEBUG_COMPUTE_ONCE is on)
 
 #include <libplacebo/renderer.h>
 
@@ -34,6 +35,12 @@ namespace PassTimerHook
 		bool BeginFrame()
 		{
 			sampling = sampler.Take(frames++);
+			// Compute-once pass attribution times every refresh while it is on (one flag load when off).
+			if (ComputeOnce::Enabled())
+			{
+				sampling = true;
+				GpuAttribution::Global().NoteFrame();
+			}
 			if (sampling)
 				++timedFrames;
 			return sampling;
@@ -60,6 +67,7 @@ namespace PassTimerHook
 				return;
 			if (info && info->pass && info->pass->shader)
 				self->acc.AddGpuPassNs(info->pass->shader->description, info->pass->last);
+			GpuAttribution::NoteRenderPass(info);
 			if (self->chainCallback)
 				self->chainCallback(self->chainPriv, info);
 		}

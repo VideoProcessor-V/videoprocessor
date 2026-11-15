@@ -10,6 +10,7 @@
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
+#include <VP-V/core/ComputeOnce.h>
 
 #include <algorithm>
 #include <cmath>
@@ -734,6 +735,7 @@ if (p.x < GS_W && p.y < GS_H) {
 				m_error = "grain split: invalid law";
 				return false;
 			}
+			VPV_COMPUTE_ONCE_AT("U1", options.seq ? static_cast<int64_t>(options.seq) : ::ComputeOnce::CurrentSeq(), ::ComputeOnce::Variant(plane->params.w, plane->params.h, component, B));
 			// The passes' shared memory against the device limit (a visible refusal, never a silent fallback).
 			{
 				const double s1 = params.sigmaFine * scale;

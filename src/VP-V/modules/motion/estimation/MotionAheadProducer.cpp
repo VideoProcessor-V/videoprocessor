@@ -7,6 +7,7 @@
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
+#include <VP-V/core/ComputeOnce.h>
 
 #include <dxgi.h>
 
@@ -512,6 +513,7 @@ namespace MotionAhead
 		int halfW = 0, halfH = 0;
 		if (!LumaAtTarget(job.sequence, job.luma, lumaBuffer, halfW, halfH))
 			return true;   // not a readable frame, or a size this producer does not make: nothing published (the consumer takes the matcher path, shown as a fallback)
+		VPV_COMPUTE_ONCE_PRIVATE_AT("U3", job.sequence, "motion_ahead");   // counted only when the private luma was computed
 		const double lumaMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 		if (!EnsureSize(halfW, halfH)) return false;
 		ReleaseStaleRequestTextures(halfW, halfH);   // W2-C5b
@@ -618,6 +620,7 @@ namespace MotionAhead
 		std::shared_ptr<Flow>& flowOut, double& extrasMs)
 	{
 		ran = false;
+		VPV_COMPUTE_ONCE_AT("nvof.pair", timedSequence, 0);
 		flowOut.reset();
 		extrasMs = 0.0;
 		// MV7: 1 pair in N is timed (the GPU idle first, then the engine's completion, on this worker's own device) and posted to the
@@ -663,6 +666,7 @@ namespace MotionAhead
 		// Planner Q1: the whole frame's motion, here on the worker (no render cost).
 		const auto extrasStart = std::chrono::steady_clock::now();
 		const bool general = generalRates.load(std::memory_order_acquire);   // fixed-constant batch B4 2026-10-18
+		VPV_COMPUTE_ONCE_AT("U10", timedSequence, 0);
 		FlowGlobals(*flow, general);   // both directions, flagged for the FlowOf view (W1-C3)
 		// The cost and the engine's own forward/backward consistency as trust inputs.
 		FlowExtras(*flow);
@@ -829,6 +833,7 @@ namespace MotionAhead
 				answer(Status::Failed);   // not a readable frame / a size not made: nothing to run, not an engine failure
 				return true;
 			}
+			VPV_COMPUTE_ONCE_PRIVATE_AT("U3", rq.to, "motion_ahead_request");   // counted only when the private luma was computed
 			engineRan = true;   // EnsureSize may open the engine: from here on a failure is the engine's
 			if (!EnsureSize(w, h))
 			{

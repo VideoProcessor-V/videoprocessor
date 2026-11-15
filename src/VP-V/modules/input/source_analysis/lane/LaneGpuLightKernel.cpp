@@ -9,6 +9,7 @@
 #include <VP-V/modules/input/source_analysis/light_level/LightLevelBlocks.h>
 #include <VP-V/modules/input/source_analysis/light_level/LightLevelBlocksGlsl.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
+#include <VP-V/core/ComputeOnce.h>
 
 #include <algorithm>
 #include <memory>
@@ -151,6 +152,7 @@ namespace VpLaneProducts
 		namespace LB = LightLevel::Blocks;
 		if (step != 0)
 			return Fail(c, "P12 has one pass");
+		VPV_COMPUTE_ONCE_AT("U9", c.seq, ::ComputeOnce::Variant(c.dims.width, c.dims.height));
 		if (m_header.empty())
 		{
 			m_header = HeaderGlsl();

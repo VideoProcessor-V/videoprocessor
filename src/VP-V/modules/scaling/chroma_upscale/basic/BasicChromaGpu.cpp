@@ -6,6 +6,7 @@
 
 #include <VP-V/modules/scaling/chroma_upscale/basic/BasicChromaGpu.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
+#include <VP-V/core/ComputeOnce.h>
 
 #include <algorithm>
 #include <string>
@@ -98,6 +99,7 @@ if (p.x < BC_W && p.y < BC_H) {
 		bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, pl_tex src, const Geometry& g, pl_tex& out)
 		{
 			m_error.clear();
+			VPV_COMPUTE_ONCE("U20", ::ComputeOnce::Variant(src ? src->params.w : 0, src ? src->params.h : 0));
 			auto fail = [&](const std::string& why) { m_error = why; return false; };
 			const std::string why = Check(g);
 			if (!why.empty()) return fail(why);
