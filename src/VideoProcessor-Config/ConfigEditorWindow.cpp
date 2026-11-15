@@ -9173,7 +9173,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "estimated ahead follows the same timing and Dolby Vision rules as the next frame, and Dolby Vision frames "
             "pair only under the same colour matrices; changing a motion setting or the motion source restarts the "
             "motion; a frame dropped to keep a queued repeat counts as a gap. Off: the earlier behaviour."));
-        auto* vectorDemand = addChoice(QStringLiteral("Motion engine"), QStringLiteral("vector_demand"),
+        auto* vectorDemand = addChoice(QStringLiteral("Vector engine on demand"), QStringLiteral("vector_demand"),
             { QStringLiteral("on"), QStringLiteral("off") });
         vectorDemand->setToolTip(QStringLiteral(
             "Runs the motion engine only when a feature that needs motion vectors is active, at any frame rate. "
