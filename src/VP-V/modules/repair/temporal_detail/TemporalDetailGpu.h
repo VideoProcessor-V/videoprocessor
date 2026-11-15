@@ -72,6 +72,9 @@ namespace TemporalDetail
 			int colorDepth = 10;           // codes of the signal (the model's units)
 			StampView stamps;
 			bool cut = false, fade = false;
+			// U7 v3 partial reset (owner 2026-11-15): the fade's history keep (FrameAnalysis::Scene::fadeKeep, 0..1). A fade is NO reset:
+			// every stored slot's keep is multiplied by it (the tab texture's row 1). < 0 = not given: that fade resets ("reset: fade (no keep)").
+			float fadeKeep = -1.0f;
 			ActiveRect active;             // the active picture in this plane (empty = whole plane); bars are copied unchanged
 			MotionTex backward;            // pair (seq -> seq - 1) on frame seq's grid; absent = motion lost
 			MotionTex forward;             // pair (seq - 1 -> seq), optional (uncertainty only)

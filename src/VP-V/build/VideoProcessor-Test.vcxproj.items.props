@@ -412,6 +412,8 @@
     <ClCompile Include="..\VP-V\tests\suite\SharedUnitsW1Tests.cpp" />
     <ClCompile Include="..\VP-V\tests\QueueWindowTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\QueueKeyedTimelineTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\CutFadeJudgeFadeRunTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\U7FadePartialResetTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SourceResolutionDetectorTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\MixedScreenSourceResolutionTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SourceResolutionLatchTests.cpp" />
@@ -453,6 +455,7 @@
     <ClCompile Include="..\VP-V\tests\suite\GrainPreservationTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\DetailPulseTests.cpp" />
     <ClCompile Include="..\VP-V\modules\repair\texture_restore\tests\D8SceneJudgeAgreementTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\U7CutTruthGateTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\CrossfadeMixTests.cpp" />
     <ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

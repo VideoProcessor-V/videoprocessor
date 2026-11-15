@@ -318,7 +318,10 @@ if (li == 0u) {
 #ifdef AHEAD
     imageStore(ring, ivec2(RING + 1, 0), vec4(e1, e2, my, 1.0));
 #else
-    // The cut / fade verdict is the shared judge's (scene_restart, from the P4 scene group); no private judge here.
+    // The cut verdict is the shared judge's (scene_restart, from the P4 scene group); no private judge here. A fade is no
+    // restart (U7 v3 partial reset): fade_keep2 (the frame's fade keep squared: e holds energies) reduces every reference per
+    // frame of its age, i.e. the frame's own fade step carried over the short window (exact for a steady fade), and the
+    // look-ahead reference by one step; 1 = none.
     bool restart = n_valid == 0 || scene_restart > 0;
     vec2 e = vec2(e1, e2);
     vec2 r = e;
@@ -326,7 +329,7 @@ if (li == 0u) {
         float dec = 1.0;
         for (int j = 1; j <= n_use; j++) {
             vec4 s = imageLoad(ring, ivec2((cur + RING - j) % RING, 0));
-            dec *= decay;
+            dec *= decay * fade_keep2;
             if (s.w < 0.5)
                 break;
             r = max(r, s.xy * dec);
@@ -337,7 +340,7 @@ if (li == 0u) {
             vec4 a = imageLoad(ring, ivec2(RING + 1, 0));
             float ra = (a.x + a.y) / max(e1 + e2, 1e-20);
             if (abs(a.z - my) <= cut_codes && ra <= ahead_ratio && ra * ahead_ratio >= 1.0)
-                r = max(r, a.xy * decay);
+                r = max(r, a.xy * decay * fade_keep2);   // a steady fade's step, one frame the other way (fade in: the brighter successor)
         }
     }
     vec2 g = vec2(1.0);
@@ -1182,7 +1185,8 @@ for (int q = 0; q < 4; q++) {
 		// lowTex (read back by the measure pass and by the apply pass after it).
 		bool MeasureAndReduce(pl_dispatch dispatch, pl_tex luma, const Params& params, const Constants& c,
 			pl_tex statsOut, pl_tex weightOut, pl_tex prevStats, pl_tex ring,
-			bool ahead, int cur, int nValid, int nUse, int sceneRestart, bool aheadValid, std::string& error, pl_tex lowTex = nullptr)
+			bool ahead, int cur, int nValid, int nUse, int sceneRestart, bool aheadValid, std::string& error, pl_tex lowTex = nullptr,
+			float historyKeep2 = 1.0f)
 		{
 			const bool fast = params.fast && lowTex;
 			if (fast && !LowPass(dispatch, luma, c, lowTex, !ahead, error))
@@ -1237,7 +1241,8 @@ for (int q = 0; q < 4; q++) {
 				const int aheadOn = aheadValid ? 1 : 0;
 				const pl_shader_desc d[3] = { Sampled("stats_in", statsOut), Sampled("weight_in", weightOut),
 					Storage("ring", ring, PL_DESC_ACCESS_READWRITE) };
-				const pl_shader_var v[12] = {
+				const float fadeKeep2 = historyKeep2;
+				const pl_shader_var v[13] = {
 					{ pl_var_float("floor_energy"), &floorEnergy, true },
 					{ pl_var_float("winsorise"), &winsorise, true },
 					{ pl_var_float("cut_codes"), &cutCodes, true },
@@ -1249,12 +1254,13 @@ for (int q = 0; q < 4; q++) {
 					{ pl_var_int("n_valid"), &nValid, true },
 					{ pl_var_int("scene_restart"), &sceneRestart, true },
 					{ pl_var_int("n_use"), &nUse, true },
-					{ pl_var_int("ahead_valid"), &aheadOn, true } };
+					{ pl_var_int("ahead_valid"), &aheadOn, true },
+					{ pl_var_float("fade_keep2"), &fadeKeep2, true } };
 				std::string header = "#define RING " + std::to_string(kRingSlots) + "\n" + REDUCE_HEADER;
 				if (ahead) header = "#define AHEAD 1\n" + header;
 				if (useField) header = "#define FIELD 1\n" + header;
 				if (!Compute(dispatch, ahead ? "VideoProcessor detail pulse: reduce (look-ahead)" : "VideoProcessor detail pulse: reduce",
-					header, REDUCE_BODY, d, 3, v, 12, sizeof(float) * 1024, 1, 1, ahead ? -1 : 1))
+					header, REDUCE_BODY, d, 3, v, 13, sizeof(float) * 1024, 1, 1, ahead ? -1 : 1))
 				{
 					error = "the reduce pass failed";
 					return false;
@@ -1400,19 +1406,30 @@ for (int q = 0; q < 4; q++) {
 			const bool aheadValid = m.aheadSequence != 0 && params.sequence != 0 && m.aheadSequence == params.sequence + 1 &&
 				m.aheadGeometry == c.geometry;
 			// The cut / fade verdict: the shared judge's, read from the scene group (U7 over P4; registered fix D8). A frame
-			// with no readable group restarts (no private fallback) and is counted.
+			// with no readable group restarts (no private fallback) and is counted. U7 v3: a fade is a partial reset (the history
+			// reduced by its keep, squared for the energies the ring holds); a fade group without a keep restarts, shown.
 			int sceneRestart = 0;
+			float historyKeep2 = 1.0f;
 			if (nValid > 0)
 			{
 				const VpDetailRestore::SceneRestartAnswer scene = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader);
 				sceneRestart = scene.restart ? 1 : 0;
-				sceneUnavailable = !scene.fromRecord;
+				sceneUnavailable = !scene.fromRecord || scene.fadeWithoutKeep;
+				sceneWhy = scene.fadeWithoutKeep ? VpDetailRestore::SceneFadeWithoutKeepWhy() : nullptr;
 				if (!scene.fromRecord)
 					++sceneMissing;
+				if (scene.fadeWithoutKeep)
+					++sceneFadeRestarts;
+				if (scene.fadePartial)
+				{
+					historyKeep2 = scene.historyKeep * scene.historyKeep;
+					++scenePartials;
+				}
+				lastHistoryKeep = scene.historyKeep;
 			}
 			if (!MeasureAndReduce(dispatch, luma, params, c, m.stats[next], m.weight,
 				consecutive && m.stats[m.statsIndex] ? m.stats[m.statsIndex] : nullptr, m.ring,
-				false, slot, nValid, nUse, sceneRestart, aheadValid, error, params.fast ? m.low : nullptr))
+				false, slot, nValid, nUse, sceneRestart, aheadValid, error, params.fast ? m.low : nullptr, historyKeep2))
 			{
 				++failures;
 				m.decided = false;
