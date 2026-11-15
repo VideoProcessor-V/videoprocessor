@@ -76,6 +76,14 @@ namespace LedDrive
 			if (haveFence && completedValue < signalValue) return Step::FenceWaiting;
 			return Step::MapProbe;
 		}
+		// Whether Poll flushes the immediate context once for a waiting copy (its signal still sits in the batch). Never while
+		// the host has armed the deferral (it flushes after the frame's submit), never while pollFlushHeld is set (C1 gate
+		// SHOULD-5: the Original pathway, which flushes nothing of VP's own, as integ 2e77256c7: its event query was read with
+		// D3D11_ASYNC_GETDATA_DONOTFLUSH), and once per copy otherwise (tests, other hosts).
+		static bool PollFlushes(Step step, bool alreadyFlushed, bool armed, bool pollFlushHeld)
+		{
+			return step == Step::FenceWaiting && !alreadyFlushed && !armed && !pollFlushHeld;
+		}
 	};
 
 	// Live readbacks that have no fence (their readiness is the Map probe alone). Process-wide per
@@ -119,7 +127,12 @@ namespace LedDrive
 			return instance;
 		}
 
-		void Arm() { armed = true; ++epoch; }
+		void Arm() { armed = true; pollFlushHeld = false; ++epoch; }
+		// C1 gate SHOULD-5: the Original pathway (FrameQuiet::Deferred::OriginalFrame, every Original render) holds Poll's one-shot
+		// flush, so VP issues no immediate-context flush there (integ 2e77256c7 issued none). The next Arm (a VP-pathway frame)
+		// ends the hold; it is never set outside Original, so VP pathways, tests and other hosts are unchanged.
+		void HoldPollFlush() { pollFlushHeld = true; }
+		bool PollFlushHeld() const { return pollFlushHeld; }
 		bool Armed() const { return armed; }
 
 		// False when not armed (the caller issues the copy now). A slot already recorded is not recorded twice.
@@ -170,7 +183,7 @@ namespace LedDrive
 			uint64_t epoch = 0;
 		};
 		std::vector<Entry> entries;
-		bool armed = false;
+		bool armed = false, pollFlushHeld = false;
 		uint64_t epoch = 0;
 		unsigned long long lateIssued = 0;
 	};
@@ -285,8 +298,10 @@ namespace LedDrive
 			{
 				// An issued copy and its signal sit in the immediate context's batch until a flush submits them. The
 				// renderer flushes right after it issues them (FrameQuiet End), and Poll then runs inside its frame
-				// (armed): no flush here. A host that does not flush (tests, other hosts) gets one flush per copy.
-				if (step == ReadyGate::Step::FenceWaiting && !s.flushed && !DeferredCopies::ForThisThread().Armed())
+				// (armed): no flush here. The Original pathway holds it (SHOULD-5). A host that does not flush (tests, other
+				// hosts) gets one flush per copy.
+				const DeferredCopies& deferral = DeferredCopies::ForThisThread();
+				if (ReadyGate::PollFlushes(step, s.flushed, deferral.Armed(), deferral.PollFlushHeld()))
 				{
 					immediate->Flush();
 					s.flushed = true;

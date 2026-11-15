@@ -117,6 +117,8 @@ namespace FrameQuiet
 		{
 			if (armed)
 				EndFrame();
+			// SHOULD-5: no VP flush in Original (the monitor's Poll would otherwise flush once per tile copy before the render).
+			LedDrive::DeferredCopies::ForThisThread().HoldPollFlush();
 			decision = FallbackCatalog::Decision();
 			armedGpu = gpu;
 		}
