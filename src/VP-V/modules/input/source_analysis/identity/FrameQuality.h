@@ -104,9 +104,7 @@ namespace SourceIdentity
 				}
 			if (okEnergy.size() < 64)
 				return out;
-			std::vector<double> sorted = okEnergy;
-			std::sort(sorted.begin(), sorted.end());
-			const double thr = sorted[static_cast<size_t>(0.3 * static_cast<double>(sorted.size() - 1))];
+			const double thr = RobustStats::Quantile(okEnergy, 0.3, RobustStats::RankRule::FloorIndex);   // size >= 64 here
 			std::vector<double> residual;
 			for (size_t i = 0; i < n; ++i)
 				if (ok[i] && e[i] <= thr)
