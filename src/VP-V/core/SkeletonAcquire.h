@@ -36,7 +36,8 @@
 //
 // Lifetime: memo spots live for their frame. OnSeal(seq) releases every memo of frames older than seq - keepFrames
 // (keepFrames 0 = discarded when the next frame seals: the owner's per-frame memo, owner-decisions 2026-11-12 17:31).
-// A request for a released frame is refused (FrameReleased), never silently recomputed. A result carries a PIN: the bytes /
+// A request for a released frame is refused (FrameReleased), never silently recomputed; "released" is per owner (an
+// OwnerFill::keepFrames window longer than the memo's: a frame inside it that nobody filled yet fills once at read). A result carries a PIN: the bytes /
 // handle stay valid while the reader holds it, even past OnSeal. A GPU spot whose recorded read fence (NoteGpuRead) is not
 // complete yet (SetFenceCompleted) is retired only when it completes: its keep-alive is not dropped under a GPU read.
 // GPU bytes are budgeted against the VRAM ledger grant (SetGpuBudget; reserved BEFORE the fill); CPU bytes are counted.
@@ -642,7 +643,7 @@ public:
 
         // G2 (b): the memo spot (a kept spot of a released frame included); a fill in flight is waited for (computed once).
         const auto it = memo_.find(key);
-        if (it == memo_.end() && haveReleased_ && seq <= releasedThrough_)
+        if (it == memo_.end() && ReleasedForOwnerLocked(seq, ow))
             return Fail(c, id, seq, AcquireCause::FrameReleased);   // a released frame is never recomputed (lane slots above stay readable)
         if (it != memo_.end()) {
             const std::shared_ptr<Entry> e = it->second;
@@ -1083,6 +1084,20 @@ private:
                 ++it;
             }
         }
+    }
+
+    // P16-LATCH-EVIDENCE: is frame `seq` released FOR THIS OWNER? OnSeal keeps an owner's spots for max(OwnerFill::keepFrames,
+    // SetKeepFrames) frames, so a frame inside that window that no reader has filled yet is not released for the owner either:
+    // it fills once at read (a lagging reader inside the window, e.g. the source-resolution monitor's worker), and a frame past
+    // the window is refused (FrameReleased), never recomputed. An owner keeping no more than the memo uses the memo's line.
+    bool ReleasedForOwnerLocked(uint64_t seq, const OwnerFill* ow) const
+    {
+        if (!haveReleased_)
+            return false;
+        const uint32_t keep = ow != nullptr ? uint32_t(ow->keepFrames) : 0u;
+        if (keep <= keepFrames_)
+            return seq <= releasedThrough_;
+        return lastSeal_ >= 1u + uint64_t(keep) && seq <= lastSeal_ - 1u - uint64_t(keep);
     }
 
     mutable std::mutex mutex_;
