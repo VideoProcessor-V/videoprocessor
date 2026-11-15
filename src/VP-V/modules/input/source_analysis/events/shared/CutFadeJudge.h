@@ -19,6 +19,10 @@
 //                accumulated gain, so a fade of any length at any rate is found once it has scaled the picture by 2 %. The
 //                caller keeps one FadeRun per stream and folds every pair in order; the pair law's fade still counts on its own
 //                                                                                       (FoldFadeRun)
+//   fade keep    (v3, owner 2026-11-15: partial reset on fades) a fade is not a restart: each fade frame's history keep is the
+//                share of contrast that frame kept (the run's min(gain, 1 / gain) step, the pair's spread ratio; the smaller of
+//                the laws that fired), so over a fade the history shrinks monotonically to the contrast the pre-fade picture
+//                still explains; 1 on a frame that is no fade               (FoldFadeRun frameKeep, PairFadeKeep, FrameFadeKeep)
 //   veto grid    cut = (grid difference >= G and histogram distance >= H) or histogram distance >= H_alone;
 //                entering or leaving black is a cut                                    (GridHistCut)
 //   fade fit     the matcher's M4 law on two frames' mean / spread: gain = clamp(sa / sb, 0.5, 2), offset = ma - gain * mb,
@@ -657,6 +661,9 @@ struct FadeRun {
     uint32_t refSpread = 0;     // the largest p99 - p01 inside the run (the mean-jump limit's reference)
     uint32_t endPixels = 0;     // the record the run ends at
     uint32_t endMean = 0, endP01 = 0, endP50 = 0, endP99 = 0;
+    // The partial reset (v3): the share of the run's first picture's contrast the picture at the run's end still has, as the run's
+    // fades measured it (min(gain, 1 / gain) about the fitted black, never rising inside the run). 1 = nothing reduced yet.
+    double keep = 1.0;
 };
 
 inline bool FadeRunEndsAt(const FadeRun& run, const SourceStats::Record& r)
@@ -675,8 +682,13 @@ inline void FadeRunEndAt(FadeRun& run, const SourceStats::Record& r)
 
 // Fold the pair (prev, cur), whose pair verdict is `e` (ClassifyEvents on the same two records), into `run` (the run ending at
 // prev; any other run is dropped first). Returns the multi-frame fade verdict of the pair; the frame's fade is this OR e.fade.
-inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur, const EventSignals& e, FadeRun& run)
+// `frameKeep` (v3, may be null) gets the run's partial-reset factor of this frame: 1 unless the pair is a run fade, else
+// keep_after / keep_before of the run (see FadeRun::keep), in (0, 1]; 0 when the run has scaled the picture to its black.
+inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur, const EventSignals& e, FadeRun& run,
+                        double* frameKeep = nullptr)
 {
+    if (frameKeep)
+        *frameKeep = 1.0;
     if (!FadeRunEndsAt(run, prev))
         run = FadeRun();
     if (e.cut || e.flash) {
@@ -723,7 +735,47 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
         m0 <= black)
         return false;
     const double gain = (p1 - black) / (p0 - black);
-    return std::fabs(1.0 - gain) > kFadeRunMinGain && (gain - 1.0) * double(run.direction) > 0.0 && (m1 - m0) * double(run.direction) > 0.0;
+    const bool fade = std::fabs(1.0 - gain) > kFadeRunMinGain && (gain - 1.0) * double(run.direction) > 0.0 && (m1 - m0) * double(run.direction) > 0.0;
+    if (fade) {
+        // The partial reset (v3): the contrast the run's first picture still explains, min(gain, 1 / gain) (a fade out: the gain;
+        // a fade in: its inverse). Never rising inside a run, so the history's reduction over the run is monotone.
+        const double k = gain <= 0.0 ? 0.0 : (std::min)(gain, 1.0 / gain);
+        if (k < run.keep) {
+            if (frameKeep)
+                *frameKeep = run.keep > 0.0 ? k / run.keep : 0.0;
+            run.keep = k;
+        }
+    }
+    return fade;
+}
+
+// ---- the partial reset on fades (unit version 3; owner 2026-11-15 09:20, 102b U7-FADE-NO-HARDRESTART) ---------------------------
+// A fade is NOT a restart: no consumer starts over mid-fade. Each fade frame reduces the history by the share of the picture's
+// contrast that changed on that frame, so the pre-fade picture's detail is not carried into what the fade leads to, and the
+// product of the factors over a fade is the contrast the pre-fade picture still explains (a fade to black: 0). A full restart
+// stays for cuts (the sequence law's delivered cut) only.
+//   keep(frame) = min(run factor (FoldFadeRun's frameKeep), pair factor (PairFadeKeep)) over the laws that called the frame a fade;
+//                 1 when it is no fade. Amplitude domain; a consumer holding energies (squared codes) applies keep^2.
+// No frame count, rate or window enters: the factor is the measured contrast change of the frame itself.
+
+// The pair law's factor for a pair it calls a fade: the smaller spread over the larger (p99 - p01, the pair law's own measure).
+inline double PairFadeKeep(const SourceStats::Record& prev, const SourceStats::Record& cur)
+{
+    const uint32_t sp = prev.p99 > prev.p01 ? prev.p99 - prev.p01 : 0u;
+    const uint32_t sc = cur.p99 > cur.p01 ? cur.p99 - cur.p01 : 0u;
+    const uint32_t lo = (std::min)(sp, sc), hi = (std::max)(sp, sc);
+    return hi == 0u ? 1.0 : double(lo) / double(hi);
+}
+
+// The frame's history keep (see above): pairFade / runFade = the two laws' verdicts, runKeep = FoldFadeRun's frameKeep.
+inline double FrameFadeKeep(const SourceStats::Record& prev, const SourceStats::Record& cur, bool pairFade, bool runFade, double runKeep)
+{
+    double k = 1.0;
+    if (runFade)
+        k = (std::min)(k, runKeep);
+    if (pairFade)
+        k = (std::min)(k, PairFadeKeep(prev, cur));
+    return k < 0.0 ? 0.0 : k;
 }
 
 // ---- the matcher's trust cut (M3) and AdaptiveDownscale's mean-step cut -------------------------------------------------------

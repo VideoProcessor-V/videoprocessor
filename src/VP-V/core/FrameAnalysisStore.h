@@ -176,6 +176,11 @@ namespace FrameAnalysis
 		bool flash = false;
 		bool cutPossible = false;
 		float cutStrength = 0.0f;
+		// U7 v3 (partial reset on fades, owner 2026-11-15; VpUnit::CutFadeJudge::FrameFadeKeep): the share of the history a consumer
+		// keeps on this frame, amplitude domain, 0..1 (1 = no reduction; energy holders apply its square). A fade is no restart: it
+		// reduces the history by this factor. < 0 = not given (a producer without the v3 law): a fade without it falls back to a
+		// full restart, visibly (texture_restore/SceneRestart.h).
+		float fadeKeep = -1.0f;
 	};
 
 	struct Labels

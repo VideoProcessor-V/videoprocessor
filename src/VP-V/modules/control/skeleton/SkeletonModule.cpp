@@ -423,6 +423,8 @@ namespace Vpv
 			bool sceneCacheCut = false, sceneCacheFade = false;
 			bool sceneCacheFlash = false, sceneCacheCutPossible = false, sceneCacheConfirmed = false, sceneCacheLate = false, sceneCacheHere = false;
 			float sceneCacheStrength = 0.0f;
+			float sceneCacheFadeKeep = -1.0f;   // U7 v3: the frame's history keep (FrameAnalysis::Scene::fadeKeep)
+			std::atomic<uint64_t> sceneFadePartial{ 0 };   // U7 v3: fades classified with a history keep below 1 (partial reset, no restart)
 			// U7 v2 (CutFadeJudge sequence law, U7-accuracy): the tracker over this renderer's P4 records in frame order, the newest frame it
 			// holds (with a fingerprint of that record, so a frame number reused after a seek re-primes it) and the recent verdicts by frame
 			// (with their record fingerprints). All under sceneMutex. A verdict is provisional until frame seq + 1 was judged with it.
@@ -1541,13 +1543,18 @@ namespace Vpv
 				// (no VpIndicator::TemporalValid, no Indicator at all): whether a vector pair is usable across a resync is answered only by the P5a
 				// MotionValidity facade (coordinator ruling 2026-11-08; tools/test_check_shared_units.py test_scene_facts_reads_no_validity_source).
 				VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, false, false);
+				double fadeKeep = 1.0;
 				{
 					// U7 v3: the multi-frame fade law folds this pair into the run that ends at P4(seq - 1); the run that ends here is kept for
 					// seq + 1. The run is ended by the pair law's cut / flash (the law as designed: one record pair at a time, independent of
 					// the sequence verdict's one-frame delivery); a sequence-law cut still restarts every consumer whatever the fade says.
+					// The frame's history keep (the partial reset, owner 2026-11-15) comes from the same fold: CutFadeJudge::FrameFadeKeep.
 					std::lock_guard<std::mutex> runLock(st.sceneRunMutex);
 					VpUnit::CutFadeJudge::FadeRun run = SceneRunBefore(st, bundle, seq, a);
-					e.fade = VpUnit::CutFadeJudge::FoldFadeRun(a, c, e, run) || e.fade;
+					double runKeep = 1.0;
+					const bool runFade = VpUnit::CutFadeJudge::FoldFadeRun(a, c, e, run, &runKeep);
+					fadeKeep = VpUnit::CutFadeJudge::FrameFadeKeep(a, c, e.fade, runFade, runKeep);
+					e.fade = runFade || e.fade;
 					HostState::SceneRunEntry& kept = st.sceneRuns[static_cast<size_t>(seq % kSceneRunRing)];
 					kept.seq = seq;
 					kept.run = run;
@@ -1571,6 +1578,7 @@ namespace Vpv
 				out.pairCutPossible = e.cutPossible;
 				out.pairFlash = e.flash;
 				out.fade = e.fade;
+				out.fadeKeep = static_cast<float>(fadeKeep);
 				out.histDistance = e.histDistance;
 				out.prevMean = a.mean;
 				out.curMean = c.mean;
@@ -1615,6 +1623,7 @@ namespace Vpv
 					scene.cutPossible = st.sceneCacheCutPossible;
 					scene.confirmed = st.sceneCacheConfirmed;
 					scene.cutStrength = st.sceneCacheStrength;
+					scene.fadeKeep = st.sceneCacheFadeKeep;
 					cached = true;
 				}
 			}
@@ -1692,6 +1701,9 @@ namespace Vpv
 				scene.cutPossible = f.cutPossible;
 				scene.confirmed = f.confirmed;
 				scene.cutStrength = f.cutStrength;
+				scene.fadeKeep = f.fadeKeep;   // U7 v3: 1 on a frame that is no fade
+				if (f.fade && f.fadeKeep < 1.0f)
+					st.sceneFadePartial.fetch_add(1, std::memory_order_relaxed);
 				st.sceneCacheSeq = seq;
 				st.sceneCacheValid = true;
 				st.sceneCacheCut = scene.cut;
@@ -1702,6 +1714,7 @@ namespace Vpv
 				st.sceneCacheCutPossible = scene.cutPossible;
 				st.sceneCacheConfirmed = scene.confirmed;
 				st.sceneCacheStrength = scene.cutStrength;
+				st.sceneCacheFadeKeep = scene.fadeKeep;
 			}
 			if (answer)
 			{
@@ -1714,6 +1727,7 @@ namespace Vpv
 				answer->cutPossible = scene.cutPossible;
 				answer->confirmed = scene.confirmed;
 				answer->cutStrength = scene.cutStrength;
+				answer->fadeKeep = scene.fadeKeep;
 			}
 			if (cached)
 				st.sceneCacheHits.fetch_add(1, std::memory_order_relaxed);
@@ -1780,6 +1794,7 @@ namespace Vpv
 					a.cutPossible = scene.cutPossible;
 					a.confirmed = scene.confirmed;
 					a.cutStrength = scene.cutStrength;
+					a.fadeKeep = scene.fadeKeep;
 					a.from = SceneAnswer::From::Store;
 					st->sceneStoreReads.fetch_add(1, std::memory_order_relaxed);
 					return a;
@@ -1810,6 +1825,7 @@ namespace Vpv
 				c.cacheHits = st->sceneCacheHits.load(std::memory_order_relaxed);
 				c.fadeRunRebuilt = st->sceneRunRebuilt.load(std::memory_order_relaxed);
 				c.fadeRunReduced = st->sceneRunReduced.load(std::memory_order_relaxed);
+				c.fadePartial = st->sceneFadePartial.load(std::memory_order_relaxed);
 				c.unknown = st->sceneUnknown.load(std::memory_order_relaxed);
 				c.confirmed = st->sceneConfirmed.load(std::memory_order_relaxed);
 				c.provisional = st->sceneProvisional.load(std::memory_order_relaxed);

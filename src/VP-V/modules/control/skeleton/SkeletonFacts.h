@@ -51,6 +51,8 @@ namespace Vpv
 			bool confirmed = false;           // the verdict saw frame seq + 1 (false = provisional, rewritten at the next frame's seal)
 			bool gridLaw = false;             // the 32 x 18 grid judged it (false: no grid, the v1 pair law)
 			float cutStrength = 0.0f;         // 0..1, 1 = cut
+			// U7 v3 partial reset (owner 2026-11-15): the frame's history keep, 0..1 (CutFadeJudge::FrameFadeKeep; 1 = no fade)
+			float fadeKeep = 1.0f;
 			bool pairCut = false, pairCutPossible = false, pairFlash = false;   // the v1 pair law on the two records (diagnostic only)
 			uint32_t histDistance = 0;        // 0..65535
 			bool fullBetween = false;         // RESERVED, always false: scene events come from P4 alone; resync / validity is the P5a MotionValidity facade's
@@ -73,6 +75,7 @@ namespace Vpv
 			bool cutLate = false, cutHere = false;                        // U7 v2: FrameAnalysis::Scene
 			bool flash = false, cutPossible = false, confirmed = false;   // U7 v2 (SceneFacts above)
 			float cutStrength = 0.0f;
+			float fadeKeep = -1.0f;           // U7 v3: FrameAnalysis::Scene::fadeKeep (< 0 = not given)
 			From from = From::None;
 		};
 
@@ -96,6 +99,8 @@ namespace Vpv
 			// stream start), or with REDUCED evidence (the run starts only a few pairs back; a slow fade may be found later). Rule 5.
 			uint64_t fadeRunRebuilt = 0;
 			uint64_t fadeRunReduced = 0;
+			// U7 v3 partial reset: frames classified as a fade with a history keep below 1 (no restart: the history is reduced).
+			uint64_t fadePartial = 0;
 		};
 
 		// What the engine feed did (render thread): shown on the status lines, read by tests.
