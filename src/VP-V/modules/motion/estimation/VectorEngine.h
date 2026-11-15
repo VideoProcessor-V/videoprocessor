@@ -190,6 +190,21 @@ namespace VpMotion
 		{
 			(served ? p2CpuFormServed_ : p2CpuFormDeclined_).fetch_add(1, std::memory_order_relaxed);
 		}
+		// The fill's call: a decline also keeps its words for the status segment's "(last: ...)" (BBP-A-COUNTS-CTRLALTD).
+		void NoteP2CpuFormRead(bool served, const std::string& why) const override
+		{
+			if (!served)
+			{
+				std::lock_guard<std::mutex> lock(p2CpuFormWhyMutex_);
+				p2CpuFormLastWhy_ = why;
+			}
+			NoteP2CpuFormRead(served);
+		}
+		std::string P2CpuFormLastDecline() const
+		{
+			std::lock_guard<std::mutex> lock(p2CpuFormWhyMutex_);
+			return p2CpuFormLastWhy_;
+		}
 		unsigned long long P2CpuFormServed() const { return p2CpuFormServed_.load(std::memory_order_relaxed); }
 		unsigned long long P2CpuFormDeclined() const { return p2CpuFormDeclined_.load(std::memory_order_relaxed); }
 		// The VRAM governor's release of the motion engine (the de-judder's keeper feeds it; render thread).
@@ -454,8 +469,10 @@ namespace VpMotion
 		// empty while nothing was issued or skipped (off / auto: nothing shown, nothing changed).
 		std::string OnDemandStatusSegment() const;
 		// The Ctrl+I segment of the look-ahead producer's ring misses (register 115 #13 / #35: never log-only):
-		// "engine-luma ring misses N (last: <words>)"; empty with no producer or no miss.
+		// "engine-luma ring misses N (last: <words>)"; empty with no producer or no miss. Then (BBP-A-COUNTS-CTRLALTD, with or
+		// without a producer) "; " + P2CpuFormStatusSegment(): "P2 CPU form served N, declined N (last: <why>)", empty with no decline.
 		std::string ProducerStatusSegment() const;
+		std::string P2CpuFormStatusSegment() const;
 
 	private:
 		void NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence, uint64_t epochAtChoice);
@@ -496,6 +513,9 @@ namespace VpMotion
 		mutable std::atomic<unsigned long long> flowCostWeightRecomputes_{ 0 };
 		mutable std::atomic<unsigned long long> flowTrustComputes_{ 0 };   // W1-C3: FlowLease::CellTrust computations (FlowReads().trustComputes)
 		mutable std::atomic<unsigned long long> p2CpuFormServed_{ 0 }, p2CpuFormDeclined_{ 0 };   // B-prereq (a): the P2 CPU form's reads
+		mutable std::mutex p2CpuFormWhyMutex_;
+		mutable std::string p2CpuFormLastWhy_;       // the last decline's reason (under p2CpuFormWhyMutex_)
+		unsigned long long p2CpuFormRecorded_ = 0;   // served + declined at the last DiagnosticHistory record (render thread)
 		std::atomic<int> flowSourceWidth_{ 0 };   // the source width the engine size was last made for (ServeStatistics)
 		InvalidateSink invalidateSink_ = nullptr;
 		const IMatcherView* matcher_ = nullptr;

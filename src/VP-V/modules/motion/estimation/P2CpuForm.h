@@ -57,19 +57,19 @@ namespace VpMotion
 			std::string why;
 			if (!engine->P2RecordEndingAt(req.seq, rec, why))
 			{
-				engine->NoteP2CpuFormRead(false);
+				engine->NoteP2CpuFormRead(false, why);
 				out.declineReason = why;
 				return false;
 			}
 			out.bytes.resize(kP2PairRecordBytes);
 			if (EncodeP2PairRecord(rec, out.bytes.data(), out.bytes.size()) != kP2PairRecordBytes)
 			{
-				engine->NoteP2CpuFormRead(false);
 				out.bytes.clear();
 				out.declineReason = "p2 cpu form: record not encoded";
+				engine->NoteP2CpuFormRead(false, out.declineReason);
 				return false;
 			}
-			engine->NoteP2CpuFormRead(true);
+			engine->NoteP2CpuFormRead(true, std::string());
 			return true;
 		};
 		return f;
