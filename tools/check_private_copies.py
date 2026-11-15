@@ -42,8 +42,10 @@ SITES = [
      "wide": r"\bm_prevGin\b",
      "only": [_M + "repair/temporal_detail/TemporalDetailModel.h"]},
     {"id": "D2", "product": "kP2VectorPair", "refs": "122 s9 D2",
-     "what": "per-consumer CellTrust (optical-flow trust recomputed outside the engine)",
-     "re": r"\bOpticalFlowTrust::CellTrust\b|\bCellTrust\s*\(",
+     "what": "OpticalFlowTrust::CellTrust computed outside the engine (memo reads via FlowView::CellTrust are the shared product); "
+             "overlaps rule c C-trust (folder scope), both kept",
+     # gate-15a-D2: the qualified call plus the alias forms (an unqualified CellTrust( after `using namespace` / an alias).
+     "re": r"\bOpticalFlowTrust::CellTrust\s*\(|\busing\s+namespace\s+OpticalFlowTrust\b|\bnamespace\s+\w+\s*=\s*OpticalFlowTrust\b",
      "owner": [_M + "motion/estimation/VectorEngine.cpp", _M + "motion/estimation/OpticalFlowTrust.h",
                _M + "motion/estimation/VectorEngineInterface.h"]},
     {"id": "D3", "product": "kP2VectorPair", "refs": "122 s9 D3",

@@ -10,33 +10,6 @@
    "max_hits": 7
   },
   {
-   "key": "a|D2|src/VP-V/modules/motion/estimation/VectorEngine.h",
-   "rule": "a",
-   "site": "D2",
-   "refs": "122 s9 D2",
-   "reason": "per-consumer CellTrust (optical-flow trust recomputed outside the engine)",
-   "seed": true,
-   "max_hits": 1
-  },
-  {
-   "key": "a|D2|src/VP-V/modules/motion/estimation/global_model/link/AheadFlow.h",
-   "rule": "a",
-   "site": "D2",
-   "refs": "122 s9 D2",
-   "reason": "per-consumer CellTrust (optical-flow trust recomputed outside the engine)",
-   "seed": true,
-   "max_hits": 2
-  },
-  {
-   "key": "a|D2|src/VP-V/modules/repair/temporal_detail/SharedMotionSource.h",
-   "rule": "a",
-   "site": "D2",
-   "refs": "122 s9 D2",
-   "reason": "per-consumer CellTrust (optical-flow trust recomputed outside the engine)",
-   "seed": true,
-   "max_hits": 1
-  },
-  {
    "key": "a|D3s|shaders/Temporal sigma-delta.glsl",
    "rule": "a",
    "site": "D3s",
