@@ -65,6 +65,12 @@ model. Each decision cites the owner lines of refs/123 N0.
 - General, not fixed: ratios are derived from the geometry of each call; no resolution or factor appears in the unit.
 - One scaler unit (rule 20): no private motion, grain or edge code here; nothing in this folder reads vectors. Kernel-table entries are
   taken from `KernelInverse`, so the re-base's identification and the upscaler share one list.
+- Hermite takes the exact one-tap-per-texel ortho path. libplacebo samples an all-positive kernel (radius == radius_zero) with
+  half-as-many hardware-bilinear fetches whose sub-texel fraction is only about 8-bit (about 1.13 codes at 10-bit in
+  `ScalerGpuParityAtTheBriefsRatios`). `hermite` therefore uses the same weights with a -1e-12 tail on (1, 1.5): far below the LUT
+  resolution, but it makes radius > radius_zero. Cost: about 4x the texture reads of the 2-fetch path. `Apply` checks this once on an
+  equivalent generated filter and REFUSES visibly (`LastError`, "did not take the exact-tap ortho path") if the exact path would not run.
+  This tail trick is temporary: it expires when the explicit fork flag lands (102b UPSC1-EXACT-TAPS-FLAG).
 
 ## Migration identity (proved by tests, B0 does not switch any user)
 
@@ -82,6 +88,11 @@ model. Each decision cites the owner lines of refs/123 N0.
 Nothing was built or run when this slice was written (code-only; the build + TRX are queued by the dispatcher after audit): the tests are unrun, the anti-ring and polar unequal-axis semantics of
 libplacebo are not modelled by the reference (parity tests use antiring 0 and equal-axis polar checks), and the bench (1080 to 2160 luma)
 has no number yet.
+
+- Hermite exact-tap fix (6ea4251e1/c502b30ba): not yet shown on a TRX. `ScalerGpuParityAtTheBriefsRatios` must pass on the fixed tip.
+- Bilinear (radius 1 == radius_zero) still takes libplacebo's hardware-bilinear path, with the same ~8-bit sub-texel fraction. It
+  passes parity at the one tested 2.22x case only. Either confirm it at every factor in the parity TRX, or tie it to 102b
+  UPSC1-EXACT-TAPS-FLAG. The tolerance stays 1 code.
 
 ## How to build / test
 
