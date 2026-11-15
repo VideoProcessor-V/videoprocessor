@@ -25,6 +25,9 @@
 // Skips VISIBLY (SKIP-NO-GPU / SKIP-NO-FOOTAGE marker, a failure under VP_TEST_REQUIRE_GPU / _FOOTAGE / _ALL) when the GPU is not
 // the hardware adapter (VP_TEST_GPU=hardware), the device cannot be created, or the manifest / clip / ffmpeg is missing.
 // Knobs: VP_TEST_D8_SCALE (integer box factor for the models and the GPU, default 2), VP_TEST_D8_MAX_FRAMES (cap per row).
+// Diagnostic output (WAIVER-D8-FRAME-DUMP, additive, output only; no gate reads it): VP_D8_FRAME_DUMP=<dir> writes one CSV per
+// row part, <dir>\d8-frames-<row>-part<N>of<M>.csv, one line per frame of the part (truth label, U7 verdict and its scores, the
+// DP / TR restart decisions). Unset: nothing is written.
 // Not covered: the skeleton's real seal timing, look-ahead (MeasureAhead), vector fields (cell-trust column is n/a).
 // GpuHardware: long real-clip rows, split into parts so that each test method stays within one GPU chunk.
 
@@ -237,6 +240,45 @@ namespace D8SceneJudgeAgreementNs
 		std::fclose(file);
 	}
 
+	// WAIVER-D8-FRAME-DUMP: the per-frame diagnostic CSV (see the file comment). Output only; never read by an assertion.
+	struct FrameDump
+	{
+		bool on = false;
+		std::string path;
+		std::vector<std::string> lines;
+		void Open(const char* rowName, int part, int parts)
+		{
+			const std::string dir = RealClip::Env("VP_D8_FRAME_DUMP");
+			if (dir.empty()) return;
+			CreateDirectoryA(dir.c_str(), nullptr);
+			path = dir;
+			if (path.back() != '\\' && path.back() != '/') path += "\\";
+			path += std::string("d8-frames-") + rowName + "-part" + std::to_string(part + 1) + "of" + std::to_string(parts) + ".csv";
+			on = true;
+		}
+		void Add(const std::string& line) { if (on) lines.push_back(line); }
+		void Write() const
+		{
+			if (!on) return;
+			FILE* file = nullptr;
+			if (fopen_s(&file, path.c_str(), "wb") != 0 || !file)
+			{
+				Logger::WriteMessage(("D8 frame dump: cannot open " + path + " (diagnostic only)\n").c_str());
+				return;
+			}
+			std::fputs("clip,part,frame,seq,time_s,scored,truth_restart,truth_label,u7_cut,u7_fade,u7_flash,u7_cut_possible,"
+				"u7_hist_distance,u7_hist_frac,mean_prev,mean_cur,spread_prev,spread_cur,dp_restart,tr_restart,dp_old_restart,"
+				"tr_old_restart\r\n", file);
+			for (const std::string& l : lines)
+			{
+				std::fputs(l.c_str(), file);
+				std::fputs("\r\n", file);
+			}
+			std::fclose(file);
+			Logger::WriteMessage(("D8 frame dump: " + std::to_string(lines.size()) + " frames to " + path + "\n").c_str());
+		}
+	};
+
 	struct StoreGuard
 	{
 		const void* owner;
@@ -351,6 +393,15 @@ namespace D8SceneJudgeAgreementNs
 		facts.planeW = pw; facts.planeH = ph;
 		const std::vector<char> truth = TruthRestarts(*clip, synthetic, begin, end, hz, facts.truthLabels);
 		for (char t : truth) facts.truthRestarts += t ? 1 : 0;
+		FrameDump dump;   // WAIVER-D8-FRAME-DUMP: diagnostic only
+		dump.Open(rowName, part, parts);
+		std::vector<char> truthCut(truth.size(), 0);   // which truth restarts are manifest cuts (the rest are fade frames)
+		if (dump.on && synthetic == Synthetic::None && hz > 0.0)
+			for (double c : clip->cuts)
+			{
+				const int f = static_cast<int>(std::floor(c * hz + 0.5));
+				if (f > begin && f < end) truthCut[static_cast<size_t>(f - begin)] = 1;
+			}
 
 		ModuleRow dp, tr;
 		DetailPulseModel::Model dpOld, dpShared;
@@ -394,10 +445,13 @@ namespace D8SceneJudgeAgreementNs
 			FrameAnalysis::Identity id;
 			id.seq = seq; id.width = W; id.height = H;
 			Assert::IsTrue(store.Begin(id, FrameAnalysis::kScene) != 0, L"D8: the store is on and begins the record");
+			VpLaneProducts::EventSignals ev;   // the frame dump's copy of the U7 verdict (seq 1: none)
+			const VpLaneProducts::SourceStatsRecord dumpPrev = prev;
 			if (seq >= 2)
 			{
 				Assert::IsTrue(havePrev, L"D8: the pair's previous P4");
 				const auto e = VpLaneProducts::ClassifyEvents(prev, cur, false, false);
+				ev = e;
 				FrameAnalysis::Scene scene;
 				scene.cut = e.cut; scene.fade = e.fade; scene.origin = FrameAnalysis::SceneOrigin::Vp;
 				Assert::IsTrue(store.PublishScene(seq, scene), L"D8: the scene group is published");
@@ -423,6 +477,7 @@ namespace D8SceneJudgeAgreementNs
 			TextureRestoreModel::Image trImage(pw, ph);
 			for (size_t i = 0; i < plane.size(); ++i) dpImage.v[i] = trImage.v[i] = plane[i];
 
+			bool dumpDpShared = false, dumpDpOld = false, dumpTrShared = false, dumpTrOld = false;
 			// DP: retired tile law vs the shared verdict.
 			{
 				const auto a = std::chrono::steady_clock::now();
@@ -434,6 +489,7 @@ namespace D8SceneJudgeAgreementNs
 				++dp.frames;
 				dp.oldRestarts += fo.restart ? 1 : 0;
 				dp.sharedRestarts += fs.restart ? 1 : 0;
+				dumpDpShared = fs.restart; dumpDpOld = fo.restart;
 				if (k > begin) dp.CountTruth(fs.restart, truth[static_cast<size_t>(k - begin)] != 0);
 				if (fo.restart == fs.restart) ++dp.agree;
 				else { ++dp.differ; AddDiff(dp, fo.out, fs.out); }
@@ -455,9 +511,27 @@ namespace D8SceneJudgeAgreementNs
 				++tr.frames;
 				tr.oldRestarts += ro ? 1 : 0;
 				tr.sharedRestarts += rs ? 1 : 0;
+				dumpTrShared = rs; dumpTrOld = ro;
 				if (k > begin) tr.CountTruth(rs, truth[static_cast<size_t>(k - begin)] != 0);
 				if (ro == rs) ++tr.agree;
 				else { ++tr.differ; AddDiff(tr, oo, os); }
+			}
+			if (dump.on)   // WAIVER-D8-FRAME-DUMP: one diagnostic line per frame of the part
+			{
+				const size_t idx = static_cast<size_t>(k - begin);
+				const bool truthRestart = truth[idx] != 0;
+				const char* label = !truthRestart ? "none" : truthCut[idx] ? "cut" : "fade";
+				const uint32_t spreadPrev = dumpPrev.p99 > dumpPrev.p01 ? dumpPrev.p99 - dumpPrev.p01 : 0u;
+				const uint32_t spreadCur = cur.p99 > cur.p01 ? cur.p99 - cur.p01 : 0u;
+				const bool pair = seq >= 2;
+				char line[512];
+				snprintf(line, sizeof(line), "%s,%d/%d,%d,%llu,%.4f,%d,%d,%s,%d,%d,%d,%d,%u,%.4f,%lld,%lld,%u,%u,%d,%d,%d,%d",
+					rowName, part + 1, parts, k, static_cast<unsigned long long>(seq), hz > 0.0 ? k / hz : 0.0, k > begin ? 1 : 0,
+					truthRestart ? 1 : 0, label, ev.cut ? 1 : 0, ev.fade ? 1 : 0, ev.flash ? 1 : 0, ev.cutPossible ? 1 : 0,
+					pair ? ev.histDistance : 0u, pair ? ev.histDistance / 65535.0 : 0.0,
+					pair ? static_cast<long long>(dumpPrev.mean) : -1ll, static_cast<long long>(cur.mean),
+					pair ? spreadPrev : 0u, spreadCur, dumpDpShared ? 1 : 0, dumpTrShared ? 1 : 0, dumpDpOld ? 1 : 0, dumpTrOld ? 1 : 0);
+				dump.Add(line);
 			}
 			// GPU modules: the store's verdict through the default reader (frame_analysis_store on).
 			{
@@ -496,6 +570,7 @@ namespace D8SceneJudgeAgreementNs
 
 		WriteRow(facts, "DP", dp);
 		WriteRow(facts, "TR", tr);
+		dump.Write();   // WAIVER-D8-FRAME-DUMP: diagnostic only, before the gate asserts so a red part still dumps
 		Assert::AreEqual(end - begin, dp.frames, L"D8: every frame of the part was processed");
 		char text[768];
 		snprintf(text, sizeof(text), "D8 %s part %s, truth %d restarts (%s): DP truth agreement %.3f %% (miss %d, extra %d), "
