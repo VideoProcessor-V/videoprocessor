@@ -316,6 +316,9 @@ Chain tests:
 - Doc 91 A (verbatim): "Fewer, consolidated modules (fewer places for bugs, easier audits)"; "compute once / skip if present; no duplicate work".
 - Cost (estimate, nothing built or run in this slice): the decode is one shift per sample, no allocation; at 4K (8.3 M luma samples)
   and 1080p (2.1 M) it replaces the existing `>> 6` / `<< 6` instructions one for one, so the added cost is zero; the GPU wide-luma branch is off by default.
+- ONE MSB-align law for lane taps (doc 91 D5; plan `lead18/coreplan-C10-15c-PC-regions.md` commit C2): `SourceFrameView::MsbAlign` /
+  `Row16(y, x0, n, dst)` in `core/LaneInterfaces.h` is `raw << msbShift`; `lane/LaneGpuProducts.cpp` `UploadTapRows` and
+  `lane/LaneCpuProducts.h` `HalfLumaRows` call it instead of shifting themselves. Same expression, identical output (code-only slice, no run).
 
 ## Known issues / open items
 

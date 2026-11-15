@@ -29,6 +29,11 @@ namespace LedDrive
 		// block): the highlight test of mode: script.
 		double maximum = 16.0;
 		bool cut = false;
+		// FIX-LED-CUT-U7: whether the shared scene judge answered for this frame (cut is its verdict). false = no cut was judged
+		// (genuine failure of the get-or-compute read); sceneWhy names the cause (static text). Default true: stats that were not
+		// built from a frame never raise the fallback.
+		bool sceneKnown = true;
+		const char* sceneWhy = "";
 		bool fade = false;
 		// Block-mean histogram in code units and the number of blocks measured.
 		std::array<uint32_t, 256> histogram{};

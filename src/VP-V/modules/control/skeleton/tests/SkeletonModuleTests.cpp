@@ -1804,6 +1804,118 @@ namespace SkeletonModuleTestsNs
 			}
 		}
 
+		// Frame n - 1 FLAT and dark, frame n bright texture (a cut at n, as ShapeACutAtFrame4). Call before any frame is delivered.
+		static void ShapeACutAtFrame(Rig& rig, uint64_t n)
+		{
+			uint32_t x = 4242u;
+			for (uint32_t i = 0; i < kW * kH; ++i)
+			{
+				rig.store[size_t((n - 1) % rig.count) * kW * kH + i] = 100;
+				x = x * 1664525u + 1013904223u;
+				rig.store[size_t(n % rig.count) * kW * kH + i] = uint16_t(600u + ((x >> 12) % 400u));
+			}
+		}
+
+		static std::wstring WhyOf(const Vpv::Skeleton::SceneAnswer& a)
+		{
+			const std::string why = a.why != nullptr ? a.why : "";
+			return L"why: " + std::wstring(why.begin(), why.end());
+		}
+
+		// Sealed 1..3; frames 5 and 6 arrived (queued) but are NOT sealed: frame 6 is two frames ahead of the next seal (4).
+		static void QueueTwoAheadOfTheSeal(Rig& rig)
+		{
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			rig.Ingress(4);
+			rig.Deliver(5);
+			rig.Ingress(5);
+			rig.Deliver(6);
+		}
+
+		static void SealThrough6(Rig& rig)
+		{
+			rig.Begin(4);
+			rig.After(4);
+			rig.Begin(5);
+			rig.After(5);
+			rig.Ingress(6);
+			rig.Deliver(7);
+		}
+
+		// FIX-LED-CUT-U7 / C-1 (get-or-compute-and-publish, OD 11-12 17:26 / 11-13 13:34): the scene of a frame AHEAD of the seal is
+		// answered NOW (its two P4 records acquired through the renderer's memo), written into the frame's record, and the later seal
+		// finds it there (computed once: alreadyPresent + 1, published + 0) with the verdict the seal-time classification gives.
+		TEST_METHOD(AnAheadFramesSceneIsGotNowAndTheSealFindsItComputedOnce)
+		{
+			Rig rig(Lane("on"));
+			ShapeACutAtFrame(rig, 6);
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			QueueTwoAheadOfTheSeal(rig);
+			store.Begin(SceneTestId(6), FrameAnalysis::kScene);   // the record the source tap opens at ARRIVAL
+			const Vpv::Skeleton::SceneCounters before = rig.sk.SceneCountersOf(rig.Host());
+			const Vpv::Skeleton::SceneAnswer ahead = rig.sk.SceneOf(rig.Host(), 6);
+			Assert::IsTrue(ahead.known, (L"an ahead frame is answered, not 'no record yet'; " + WhyOf(ahead)).c_str());
+			Assert::IsTrue(ahead.from == Vpv::Skeleton::SceneAnswer::From::Live);
+			Assert::IsTrue(ahead.cut, L"flat then bright texture is a cut, judged two frames ahead of the seal");
+			FrameAnalysis::Scene written;
+			Assert::IsTrue(store.PeekScene(6, written), L"published into the ahead frame's record");
+			Assert::AreEqual(ahead.cut, written.cut);
+			Assert::IsTrue(written.origin == FrameAnalysis::SceneOrigin::Vp);
+			const Vpv::Skeleton::SceneCounters got = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(before.liveFills + 1, got.liveFills, L"classified once, now");
+			Assert::AreEqual(before.published, got.published, L"not a seal write");
+			// A second reader before the seal: from the store, nothing recomputed.
+			const Vpv::Skeleton::SceneAnswer again = rig.sk.SceneOf(rig.Host(), 6);
+			Assert::IsTrue(again.known && again.from == Vpv::Skeleton::SceneAnswer::From::Store);
+			Assert::AreEqual(got.liveFills, rig.sk.SceneCountersOf(rig.Host()).liveFills);
+
+			SealThrough6(rig);
+			const Vpv::Skeleton::SceneCounters atSealBefore = rig.sk.SceneCountersOf(rig.Host());
+			rig.Begin(6);
+			const Vpv::Skeleton::SceneCounters atSeal = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(atSealBefore.alreadyPresent + 1, atSeal.alreadyPresent, L"the seal found the ahead verdict");
+			Assert::AreEqual(atSealBefore.published, atSeal.published, L"computed once: no second write at the seal");
+			Vpv::Skeleton::SceneFacts f;
+			Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), 6, f));
+			Assert::AreEqual(f.cut, ahead.cut, L"the ahead verdict is the seal-time classification of the same pair");
+			Assert::AreEqual(f.fade, ahead.fade);
+			rig.After(6);
+		}
+
+		// The same with the store off: the ahead frame is answered (live), nothing is published; the answer after the seal is the
+		// same. A caller OFF the render thread gets the lane's published copy or a NAMED miss (never a silent one).
+		TEST_METHOD(AnAheadFramesSceneIsAnsweredWithTheStoreOffAndOffTheRenderThreadNeverSilently)
+		{
+			Rig rig(Lane("on"));
+			ShapeACutAtFrame(rig, 6);
+			QueueTwoAheadOfTheSeal(rig);
+			const Vpv::Skeleton::SceneAnswer ahead = rig.sk.SceneOf(rig.Host(), 6);
+			Assert::IsTrue(ahead.known, (L"answered with the store off; " + WhyOf(ahead)).c_str());
+			Assert::IsTrue(ahead.from == Vpv::Skeleton::SceneAnswer::From::Live);
+			Assert::IsTrue(ahead.cut);
+			Assert::AreEqual(uint64_t(0), rig.sk.SceneCountersOf(rig.Host()).published, L"no store: nothing written");
+
+			Vpv::Skeleton::SceneAnswer offThread;
+			std::thread other([&] { offThread = rig.sk.SceneOf(rig.Host(), 5); });
+			other.join();
+			Assert::IsTrue(offThread.known || (offThread.why != nullptr && offThread.why[0] != 0),
+				L"off the render thread: the published copy, or a miss that names its cause");
+
+			SealThrough6(rig);
+			rig.Begin(6);
+			const Vpv::Skeleton::SceneAnswer sealed = rig.sk.SceneOf(rig.Host(), 6);
+			Assert::IsTrue(sealed.known);
+			Assert::AreEqual(ahead.cut, sealed.cut, L"the same verdict ahead and after the seal");
+			Assert::AreEqual(ahead.fade, sealed.fade);
+			Assert::AreEqual(uint64_t(0), rig.sk.SceneCountersOf(rig.Host()).published);
+			rig.After(6);
+		}
+
 		TEST_METHOD(ARegisteredButDisabledStoreCostsNothingAtTheSeal)
 		{
 			Rig rig(Lane("on"));

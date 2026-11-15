@@ -78,6 +78,16 @@ namespace
 		return stats;
 	}
 
+	// FIX-LED-CUT-U7: the same with each frame's source sequence (++sequence), so the builder reads the shared U7 verdict
+	// (the reader the test injected into the builder) for it.
+	FrameStats Play(StatsBuilder& builder, double& now, double ms, const RawMeasurement& raw, uint64_t& sequence)
+	{
+		FrameStats stats;
+		for (double end = now + ms; now < end; now += 1000.0 / 60.0)
+			stats = builder.Build(raw, now, 0.0, ++sequence);
+		return stats;
+	}
+
 	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 10000)
 	{
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
@@ -169,11 +179,14 @@ namespace
 		const uint64_t last = cut + static_cast<uint64_t>(std::lround(8.0 * options.fps));
 		const size_t depth = static_cast<size_t>(std::ceil(0.5 * options.fps));
 		auto rawFor = [&](uint64_t s) { return s < cut ? Frame(18.0, 100, 200) : Frame(120.0, 100, 235); };
+		// FIX-LED-CUT-U7: the shared U7 verdict per sequence (injected), one for the measured frames and the look-ahead: `cut`.
+		module.SetSceneReaderForTesting(SceneCutsAt({ cut }));
 		if (options.lookahead)
 		{
 			StatsBuilder builder(module.Config());
+			builder.SetSceneReader(module.SceneReader());
 			for (uint64_t s = 1; s <= last + depth; ++s)
-				module.SubmitPrediction(s, builder.Build(rawFor(s), time0 + s * period));
+				module.SubmitPrediction(s, builder.Build(rawFor(s), time0 + s * period, 0.0, s));
 		}
 		// The new scene (1% of the picture at white): the fade-up's gain ceiling, and
 		// the software headroom left by the large-area share; with the LED at or above
@@ -299,11 +312,14 @@ namespace
 		// Deep enough to cover measure + latency + settle and the next tick.
 		const size_t depth = static_cast<size_t>(std::ceil(1.2 * fps));
 		auto rawFor = [&](uint64_t s) { return s < cut ? Frame(18.0, 100, 200) : Frame(120.0, 100, 235); };
+		// FIX-LED-CUT-U7: the shared U7 verdict per sequence (injected), one for the measured frames and the look-ahead: `cut`.
+		module.SetSceneReaderForTesting(SceneCutsAt({ cut }));
 		if (lookahead)
 		{
 			StatsBuilder builder(module.Config());
+			builder.SetSceneReader(module.SceneReader());
 			for (uint64_t s = 1; s <= last + depth; ++s)
-				module.SubmitPrediction(s, builder.Build(rawFor(s), time0 + s * period));
+				module.SubmitPrediction(s, builder.Build(rawFor(s), time0 + s * period, 0.0, s));
 		}
 		run.cutMs = time0 + cut * period;
 		size_t writesBefore = 0;
@@ -504,12 +520,16 @@ namespace VideoProcessorTest
 			ProjectorConfig port;
 			auto projector = std::make_shared<FakeProjector>();
 			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+			// FIX-LED-CUT-U7: the shared U7 verdict per sequence (injected); the measurements carry their source sequences.
+			SceneVerdicts verdicts;
+			module.SetSceneReaderForTesting(verdicts.Reader());
+			uint64_t sequence = 0;
 			double time = 0.0;
 			auto frames = [&](const RawMeasurement& raw, int count)
 			{
 				for (int i = 0; i < count; ++i)
 				{
-					module.SubmitMeasurement(raw);
+					module.SubmitMeasurement(raw, ++sequence);
 					time += 1000.0 / 60.0;
 					module.BeginFrameAt(0, time);
 				}
@@ -524,6 +544,7 @@ namespace VideoProcessorTest
 			// Back to dark, then a cut to a bright scene: the cut sets it at once.
 			frames(Frame(30.0), 120);
 			const double before = module.Veil();
+			verdicts.Cut(sequence + 1);   // the judge's verdict: the bright scene's first frame is a cut
 			const double atCut = frames(Frame(200.0, 2000, 235), 1);
 			Assert::IsTrue(before < 0.05 && atCut > 0.9, (L"a cut resets: " + std::to_wstring(before) + L" -> " +
 				std::to_wstring(atCut)).c_str());
@@ -543,13 +564,15 @@ namespace VideoProcessorTest
 			port.protocol = "barco_ascii";
 			Assert::AreEqual(std::string("none"), EffectiveProtocol(port, config));
 			LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+			// FIX-LED-CUT-U7: the shared U7 verdict per sequence (injected): the 30 -> 120 scene change (frame 80) is a cut.
+			module.SetSceneReaderForTesting(SceneCutsAt({ 81 }));
 			module.Start();
 			double time = 0.0;
 			double veil = 0.0;
 			for (int frame = 0; frame < 120; ++frame)
 			{
 				const RawMeasurement raw = frame < 40 ? Frame(18.0) : frame < 80 ? Frame(30.0, 2000, 235) : Frame(200.0 - frame, 3000, 250);
-				module.SubmitMeasurement(raw);
+				module.SubmitMeasurement(raw, static_cast<uint64_t>(frame + 1));
 				time += 1000.0 / 60.0;
 				const CompensationGain gain = module.BeginFrameAt(0, time);
 				Assert::IsFalse(gain.active, L"picture_only never applies a gain");
@@ -639,11 +662,15 @@ namespace VideoProcessorTest
 			const size_t writes = projector->Writes().size();
 			{
 				LedDriveModule module(port, picture, [projector] { return std::make_unique<FakePort>(projector); });
+				// FIX-LED-CUT-U7: the shared U7 verdict per sequence (injected): every alternation is a cut.
+				SceneVerdicts verdicts;
+				for (uint64_t s = 2; s <= 60; ++s) verdicts.Cut(s);
+				module.SetSceneReaderForTesting(verdicts.Reader());
 				module.Start();
 				double time = 0.0;
 				for (int frame = 0; frame < 60; ++frame)
 				{
-					module.SubmitMeasurement(Frame(frame % 2 ? 18.0 : 200.0, 2000, 240));
+					module.SubmitMeasurement(Frame(frame % 2 ? 18.0 : 200.0, 2000, 240), static_cast<uint64_t>(frame + 1));
 					time += 1000.0 / 60.0;
 					Assert::IsFalse(module.BeginFrameAt(0, time).active);
 				}
@@ -1328,6 +1355,10 @@ namespace VideoProcessorTest
 				config.blackPreliftMax = cap;
 				config.ledFloorBlack = 60;
 				StatsBuilder black(config), bright(config);
+				// FIX-LED-CUT-U7: the shared U7 verdict per sequence (injected) for the picture on screen; the bright frame is a cut.
+				SceneVerdicts verdicts;
+				black.SetSceneReader(verdicts.Reader());
+				uint64_t sequence = 0;
 				CompensateController controller(config);
 				controller.Reset(60);
 				double now = 0.0, ahead = 0.0;
@@ -1335,7 +1366,7 @@ namespace VideoProcessorTest
 				look.stats = Play(bright, ahead, 100.0, Frame(120.0));
 				look.cutAhead = true;
 				look.framesAhead = 4;
-				ControllerOutput out = controller.Tick(Play(black, now, 1000.0 / 60.0, Frame(16.0)), 1000.0 / 60.0,
+				ControllerOutput out = controller.Tick(Play(black, now, 1000.0 / 60.0, Frame(16.0), sequence), 1000.0 / 60.0,
 					&look, true, true);
 				if (cap == 120)
 				{
@@ -1343,7 +1374,7 @@ namespace VideoProcessorTest
 					Assert::AreEqual(120, out.lightCommand, L"one command to black_prelift_max");
 					Assert::IsTrue(out.jump);
 					for (int tick = 0; tick < 10; ++tick)
-						out = controller.Tick(Play(black, now, 1000.0 / 60.0, Frame(16.0)), 1000.0 / 60.0, &look, true, true);
+						out = controller.Tick(Play(black, now, 1000.0 / 60.0, Frame(16.0), sequence), 1000.0 / 60.0, &look, true, true);
 					Assert::AreEqual(120, controller.Light(), L"no further while the picture is still black");
 				}
 				else
@@ -1352,7 +1383,8 @@ namespace VideoProcessorTest
 					Assert::IsTrue(out.lightCommand < 120 && !out.jump, L"255: the early ramp at the scene rate");
 				}
 				// The cut reaches the frame the LED lands on: the full jump.
-				FrameStats cut = Play(black, now, 1000.0 / 60.0, Frame(120.0));
+				verdicts.Cut(sequence + 1);
+				FrameStats cut = Play(black, now, 1000.0 / 60.0, Frame(120.0), sequence);
 				Assert::IsTrue(cut.cut);
 				out = controller.Tick(cut, 1000.0 / 60.0, &look, true, true);
 				Assert::AreEqual(255, controller.Light(), L"the cut jumps to the scene's level");
@@ -1608,6 +1640,11 @@ namespace VideoProcessorTest
 				LedDriveConfig config = Compensate();
 				config.cutLeadWindow = lead;
 				StatsBuilder scene(config), bright(config);
+				// FIX-LED-CUT-U7: the shared U7 verdict per sequence (injected) for the scene on screen: no cut in the dim scene,
+				// the bright frame is a cut.
+				SceneVerdicts verdicts;
+				scene.SetSceneReader(verdicts.Reader());
+				uint64_t sequence = 0;
 				double now = 0.0, ahead = 0.0;
 				Lookahead look;
 				look.stats = Play(bright, ahead, 100.0, Frame(120.0));
@@ -1615,7 +1652,8 @@ namespace VideoProcessorTest
 				look.framesAhead = 8;
 				CompensateController controller(config);
 				controller.Reset(130);   // the APL-30 scene's level
-				const FrameStats dim = Play(scene, now, 1000.0, Frame(30.0));
+				const FrameStats dim = Play(scene, now, 1000.0, Frame(30.0), sequence);
+				Assert::IsTrue(dim.sceneKnown, L"the judge answered for the dim frame");
 				Assert::IsFalse(dim.cut);
 				ControllerOutput out = controller.Tick(dim, 16.7, &look, true, true);
 				if (lead)
@@ -1624,7 +1662,7 @@ namespace VideoProcessorTest
 					Assert::IsTrue(out.jump && out.cutLeadHold);
 					for (int tick = 0; tick < 5; ++tick)
 					{
-						out = controller.Tick(Play(scene, now, 1000.0 / 60.0, Frame(30.0)), 16.7, &look, true, true);
+						out = controller.Tick(Play(scene, now, 1000.0 / 60.0, Frame(30.0), sequence), 16.7, &look, true, true);
 						Assert::AreEqual(-1, out.lightCommand, L"nothing more until the cut");
 						Assert::IsTrue(out.cutLeadHold, L"in-scene sends wait (port reserve)");
 					}
@@ -1635,7 +1673,8 @@ namespace VideoProcessorTest
 						L"off: the early ramp at the scene rate");
 					Assert::IsFalse(out.cutLeadHold);
 				}
-				const FrameStats cut = Play(scene, now, 1000.0 / 60.0, Frame(120.0));
+				verdicts.Cut(sequence + 1);
+				const FrameStats cut = Play(scene, now, 1000.0 / 60.0, Frame(120.0), sequence);
 				Assert::IsTrue(cut.cut);
 				out = controller.Tick(cut, 16.7, &look, true, true);
 				Assert::AreEqual(255, controller.Light(), L"at the scene's level on the cut");

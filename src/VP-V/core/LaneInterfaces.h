@@ -41,6 +41,15 @@ struct SourceFrameView {
     uint32_t strideSamples = 0;   // samples per row (>= width)
     uint8_t msbShift = 0;
     bool Valid() const { return luma != nullptr && width > 0 && height > 0 && strideSamples >= width; }
+    // The ONE MSB-align law (doc 91 D5): one raw luma sample scaled to the full 16-bit range, (raw << msbShift).
+    uint16_t MsbAlign(uint16_t raw) const { return uint16_t(uint32_t(raw) << msbShift); }
+    // Row y, samples [x0, x0 + n), MSB-aligned into dst (n samples). The caller guarantees Valid() and the range.
+    void Row16(uint32_t y, uint32_t x0, uint32_t n, uint16_t* dst) const
+    {
+        const uint16_t* src = luma + size_t(y) * strideSamples + x0;
+        for (uint32_t i = 0; i < n; ++i)
+            dst[i] = MsbAlign(src[i]);
+    }
 };
 
 enum class ChunkResult : uint8_t { More, Done, Failed };

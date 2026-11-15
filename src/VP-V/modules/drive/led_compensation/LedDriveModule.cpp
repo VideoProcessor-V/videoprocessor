@@ -5,6 +5,10 @@
 
 #include <DebugLog.h>
 
+#include <VP-V/core/Products.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
+#include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -191,6 +195,80 @@ namespace LedDrive
 		}
 		else if (fallbacks.Release(kHoldFallbackId))
 			DebugLog::Log("Dynamic Drive: picture compensation and measurement available again; the LED hold at full drive ends");
+	}
+
+	void LedDriveModule::UpdateCutJudgeFallbackLocked(bool known, const char* why)
+	{
+		// FIX-LED-CUT-U7: the cut comes only from the shared scene product (get-or-compute). A frame whose scene could not be got judges no
+		// cut: a visible step down (Ctrl+I / Config "Fallbacks engaged", one event), released as soon as a scene is got again.
+		if (!known)
+		{
+			const std::string cause = (why != nullptr && why[0] != 0) ? why : "unknown";
+			if (fallbacks.Engage(kCutJudgeFallbackId, "no scene for the measured frame (" + cause + "): no cut judged"))
+				DebugLog::Log("Dynamic Drive: no shared scene for the measured frame (%s); no cut judged until one is available", cause.c_str());
+		}
+		else if (fallbacks.Release(kCutJudgeFallbackId))
+			DebugLog::Log("Dynamic Drive: shared scene available again; cuts judged");
+	}
+
+	void LedDriveModule::UpdateCutJudgeAheadFallbackLocked(bool known, const char* why)
+	{
+		// The look-ahead acquires the scene for the frame ahead (get-or-compute-and-publish); only a genuine failure lands here.
+		// Judged once per walk: the first failing frame of a walk engages (its cause kept); known frames never release mid-walk.
+		walkHadPredictions = true;
+		if (known || walkFailed)
+			return;
+		walkFailed = true;
+		const std::string cause = (why != nullptr && why[0] != 0) ? why : "unknown";
+		if (fallbacks.Engage(kCutJudgeAheadFallbackId, "no scene for a look-ahead frame (" + cause + "): no cut predicted"))
+			DebugLog::Log("Dynamic Drive: no shared scene for a look-ahead frame (%s); no cut predicted until one is available", cause.c_str());
+	}
+
+	void LedDriveModule::DeclareSceneDemand()
+	{
+		// FIX-LED-CUT-U7 C-4 (coordinator ruling 2026-11-15): the LED declares the P4 it needs for the scene verdict (the pair for frame n
+		// is P4 at lag 0 and lag 1) as an external demand on the ONE registered renderer, so the lane keeps those records for the frames
+		// the look-ahead asks about. The ahead DEPTH is not part of a ConsumerDecl: it comes from the skeleton's own plan (queue shape and
+		// owner fills), so the declaration names the products, not the walk depth. Cheap no-op once declared or while no skeleton/renderer.
+		// A renderer change (the skeleton erases the demand at GpuReleased / a dead renderer) shows as another host or another
+		// registration generation: the declaration is then made again on the current one. Never per frame without a change.
+		const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
+		const void* declared = demandHost.load(std::memory_order_acquire);
+		if (declared != nullptr && owners.size() == 1 && owners[0] == declared &&
+			VpFrameAnalysis::SourceFrameTap::Generation(declared) == demandGen.load(std::memory_order_acquire))
+			return;
+		Vpv::Skeleton::IExternalDemand* demand = owners.size() == 1 ? Vpv::Skeleton::Demand() : nullptr;
+		if (demand == nullptr)
+			return;
+		VpSkeleton::ConsumerDecl d;
+		d.id = kSceneConsumerId;
+		d.name = "LED look-ahead cut";
+		VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 0);
+		VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 1);
+		demand->SetExternalDemand(owners[0], this, std::vector<VpSkeleton::ConsumerDecl>(1, d), std::vector<VpSkeleton::ProductId>());
+		demandGen.store(VpFrameAnalysis::SourceFrameTap::Generation(owners[0]), std::memory_order_release);
+		demandHost.store(owners[0], std::memory_order_release);
+	}
+
+	void LedDriveModule::WithdrawSceneDemand()
+	{
+		const void* host = demandHost.exchange(nullptr, std::memory_order_acq_rel);
+		if (host == nullptr)
+			return;
+		if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
+			demand->ClearExternalDemand(host, this);
+	}
+
+	void LedDriveModule::SetSceneReaderForTesting(SceneCutFn reader)
+	{
+		std::lock_guard<std::mutex> guard(sceneReaderMutex);
+		sceneReader_ = std::move(reader);
+	}
+
+	SceneCutFn LedDriveModule::SceneReader() const
+	{
+		std::lock_guard<std::mutex> guard(sceneReaderMutex);
+		return sceneReader_;
 	}
 
 	void LedDriveModule::SetCompensationAvailable(bool available, const std::string& reason)
@@ -657,6 +735,7 @@ namespace LedDrive
 		stopping = false;
 		restoreConfirmed = true;
 		thread = std::thread(&LedDriveModule::Run, this);
+		DeclareSceneDemand();
 	}
 
 	// Bug hunt 2 2026-10-17: the forced-shutdown restore (a detached thread)
@@ -682,6 +761,7 @@ namespace LedDrive
 		if (thread.joinable()) thread.join();
 		lock.lock();
 		started = false;
+		WithdrawSceneDemand();   // disabled / shut down: the demand is withdrawn with the module
 		const bool confirmed = restoreConfirmed;
 		stoppedConfirmed = confirmed;
 		++stopGeneration;
@@ -699,8 +779,11 @@ namespace LedDrive
 		// R3: a readback of the old source after a FULL resync (resync_event on only; 0 otherwise).
 		if (sequence != 0 && restartSequence != 0 && sequence < restartSequence) return;
 		lastMeasuredSequence = sequence;
-		const FrameStats stats = statsBuilder.Build(raw, NowMs(), sourceFps > 0.0 ? 1000.0 / sourceFps : 0.0);   // unmeasured: the 24p values
+		DeclareSceneDemand();   // the renderer may register after Start(): declared with the first measurement at the latest
+		statsBuilder.SetSceneReader(SceneReader());   // applied before every Build (Reconfigure re-creates the builder)
+		const FrameStats stats = statsBuilder.Build(raw, NowMs(), sourceFps > 0.0 ? 1000.0 / sourceFps : 0.0, sequence);   // unmeasured: the 24p values
 		if (stats.blocks == 0) return;
+		UpdateCutJudgeFallbackLocked(stats.sceneKnown, stats.sceneWhy);
 		latest = stats;
 		haveStats = true;
 		// A cut or fade between two controller steps must still reach it.
@@ -748,6 +831,11 @@ namespace LedDrive
 		std::lock_guard<std::mutex> guard(mutex);
 		lookaheadDepth = futureFrames;
 		lastWalkWallMs = NowMs();   // review 2026-10-17
+		// A new walk begins: the previous one is judged as a whole (release only after a complete walk with every scene known).
+		if (walkHadPredictions && !walkFailed && fallbacks.Release(kCutJudgeAheadFallbackId))
+			DebugLog::Log("Dynamic Drive: shared scene available for look-ahead frames again; cuts predicted");
+		walkHadPredictions = false;
+		walkFailed = false;
 	}
 
 	void LedDriveModule::SubmitPrediction(uint64_t sequence, const FrameStats& predicted)
@@ -758,6 +846,7 @@ namespace LedDrive
 		while (predictions.size() > MAX_PREDICTIONS)
 			predictions.erase(predictions.begin());
 		lastPredictionWallMs = NowMs();
+		UpdateCutJudgeAheadFallbackLocked(predicted.sceneKnown, predicted.sceneWhy);
 	}
 
 	void LedDriveModule::ResetLookahead()

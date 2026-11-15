@@ -200,12 +200,17 @@ namespace VideoProcessorTest
 			TestClock clock;
 			LedDriveModule module(port, config,
 				[projector] { return std::make_unique<FakePort>(projector); }, clock);
+			// FIX-LED-CUT-U7: the shared U7 verdict per sequence (injected): the measurements carry their sequences and the
+			// 18 -> 50 scene change is a cut.
+			SceneVerdicts verdicts;
+			module.SetSceneReaderForTesting(verdicts.Reader());
+			uint64_t sequence = 0;
 			Bind(clock, module, projector);
 			module.Start();
 			Assert::IsTrue(WaitFor([&] { return module.DrivingProjector() && projector->light == 255; }));
 			for (int frame = 1; frame <= 600 && projector->contrast == 50; ++frame)
 			{
-				module.SubmitMeasurement(Frame(18.0, 100, 230));
+				module.SubmitMeasurement(Frame(18.0, 100, 230), ++sequence);
 				clock.To(frame * FRAME_MS);
 				module.BeginFrameAt(0, frame * FRAME_MS);
 				clock.Settle();
@@ -213,7 +218,8 @@ namespace VideoProcessorTest
 			Assert::IsTrue(WaitFor([&] { return projector->contrast > 50; }), L"the CNTR assist raised CNTR");
 			const int assisted = projector->contrast;
 			// The script will target 50 (APL 45-60 with a highlight).
-			module.SubmitMeasurement(Frame(50.0, 100, 235));
+			verdicts.Cut(sequence + 1);
+			module.SubmitMeasurement(Frame(50.0, 100, 235), ++sequence);
 			SetWriteFails(*projector, true);
 			LedDriveConfig script = Script();
 			Assert::IsTrue(module.Reconfigure(port, script));

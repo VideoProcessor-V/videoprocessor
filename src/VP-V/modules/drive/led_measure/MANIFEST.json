@@ -31,7 +31,6 @@
     "config_keys": [
       "apl_persist_ms",
       "apl_weights",
-      "cut_threshold",
       "fade_min_slope",
       "fade_ms",
       "highlight_percentile",

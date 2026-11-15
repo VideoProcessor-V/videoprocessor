@@ -614,6 +614,7 @@
     <ClCompile Include="..\VP-V\tests\suite\LedDriveDelta1Tests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedDriveHunt2Tests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedDriveHunt3Tests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LedCutJudgeTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\QueueTimingFixesTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\EfficiencyTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\RealFootageSuiteTests.cpp" />

@@ -929,4 +929,86 @@ namespace HalfLumaUnitTestsNs
 			Assert::AreEqual(std::string("sum / 16.0"), std::string(kGlslBox4x4Mean), L"the finish: sum / 16.0");
 		}
 	};
+
+	// C2 (doc 91 D5, the ONE MSB-align law): SourceFrameView::MsbAlign / Row16 (core/LaneInterfaces.h) are bit-identical to the
+	// two private expressions they replaced: UploadTapRows' uint16_t(uint32_t(src[x]) << shift) and HalfLumaRows'
+	// uint16_t(r0[x0] << v.msbShift) (int promotion, then truncation). Every shift the lane meets, full 16-bit raw values (the
+	// truncation), a stride wider than the row, x0 > 0 and n < width; HalfLumaRows against a reference written with the old form.
+	TEST_CLASS(MsbAlignLawTests)
+	{
+	public:
+		TEST_METHOD(MsbAlignAndRow16EqualTheExpressionsTheyReplaced)
+		{
+			const uint32_t width = 13, height = 5, stride = 19;
+			std::vector<uint16_t> luma(size_t(stride) * height);
+			uint32_t x = 12345u;
+			for (size_t i = 0; i < luma.size(); ++i)
+			{
+				x = x * 1664525u + 1013904223u;
+				luma[i] = uint16_t(x >> 16);
+			}
+			luma[0] = 0u;
+			luma[1] = 0xFFFFu;
+			luma[2] = 0x8000u;
+			luma[3] = 0x03FFu;
+			luma[size_t(stride) + 4u] = 0xFFC0u;
+			for (const uint8_t shift : { uint8_t(0), uint8_t(2), uint8_t(4), uint8_t(6), uint8_t(8) })
+			{
+				SourceFrameView v;
+				v.seq = 1;
+				v.luma = luma.data();
+				v.width = width;
+				v.height = height;
+				v.strideSamples = stride;
+				v.msbShift = shift;
+				Assert::IsTrue(v.Valid());
+				const std::wstring at = L" (shift " + std::to_wstring(shift) + L")";
+
+				// One sample: every raw value.
+				uint32_t upload = 0, half = 0;
+				for (uint32_t raw = 0; raw <= 0xFFFFu; ++raw)
+				{
+					const uint16_t r = uint16_t(raw);
+					upload += v.MsbAlign(r) == uint16_t(uint32_t(r) << shift) ? 0u : 1u;
+					half += v.MsbAlign(r) == uint16_t(r << v.msbShift) ? 0u : 1u;
+				}
+				Assert::AreEqual(0u, upload, (L"MsbAlign == UploadTapRows' old expression" + at).c_str());
+				Assert::AreEqual(0u, half, (L"MsbAlign == HalfLumaRows' old expression" + at).c_str());
+
+				// A row span: [x0, x0 + n) of row y, nothing written past n.
+				const uint32_t spans[][2] = { { 0u, width }, { 3u, 7u }, { 5u, width - 5u }, { width - 1u, 1u } };
+				for (uint32_t y = 0; y < height; ++y)
+					for (const auto& span : spans)
+					{
+						const uint32_t x0 = span[0], n = span[1];
+						std::vector<uint16_t> dst(size_t(n) + 1u, 0xBEEFu);
+						v.Row16(y, x0, n, dst.data());
+						const uint16_t* src = luma.data() + size_t(y) * stride + x0;
+						for (uint32_t i = 0; i < n; ++i)
+							Assert::IsTrue(dst[i] == uint16_t(uint32_t(src[i]) << shift), (L"Row16 sample" + at).c_str());
+						Assert::IsTrue(dst[n] == 0xBEEFu, (L"Row16 writes n samples only" + at).c_str());
+					}
+
+				// HalfLumaRows (the P1 half plane) against the old form, every row band.
+				const uint32_t hw = HalfDim(width), hh = HalfDim(height);
+				std::vector<uint16_t> reference(size_t(hw) * hh);
+				for (uint32_t yy = 0; yy < hh; ++yy)
+				{
+					const uint16_t* r0 = luma.data() + size_t(VpUnit::HalfLuma::Tap0(yy, height)) * stride;
+					const uint16_t* r1 = luma.data() + size_t(VpUnit::HalfLuma::Tap1(yy, height)) * stride;
+					for (uint32_t xx = 0; xx < hw; ++xx)
+					{
+						const uint32_t x0 = VpUnit::HalfLuma::Tap0(xx, width), x1 = VpUnit::HalfLuma::Tap1(xx, width);
+						const uint32_t a = uint32_t(uint16_t(r0[x0] << shift)), b = uint32_t(uint16_t(r0[x1] << shift));
+						const uint32_t c = uint32_t(uint16_t(r1[x0] << shift)), d = uint32_t(uint16_t(r1[x1] << shift));
+						reference[size_t(yy) * hw + xx] = VpUnit::HalfLuma::FinishP1(VpUnit::HalfLuma::Box4(a, b, c, d));
+					}
+				}
+				std::vector<uint16_t> out(reference.size(), 0xCDCDu);
+				HalfLumaRows(v, out.data(), 0, 1);
+				HalfLumaRows(v, out.data(), 1, hh);
+				Assert::IsTrue(out == reference, (L"HalfLumaRows == the old expression's half plane" + at).c_str());
+			}
+		}
+	};
 }

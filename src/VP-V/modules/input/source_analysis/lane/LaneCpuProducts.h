@@ -58,10 +58,10 @@ inline void HalfLumaRows(const SourceFrameView& v, uint16_t* half, uint32_t rowB
         for (uint32_t x = 0; x < hw; ++x) {
             const uint32_t x0 = VpUnit::HalfLuma::Tap0(x, v.width);
             const uint32_t x1 = VpUnit::HalfLuma::Tap1(x, v.width);
-            const uint32_t a = uint32_t(uint16_t(r0[x0] << v.msbShift));
-            const uint32_t b = uint32_t(uint16_t(r0[x1] << v.msbShift));
-            const uint32_t c = uint32_t(uint16_t(r1[x0] << v.msbShift));
-            const uint32_t d = uint32_t(uint16_t(r1[x1] << v.msbShift));
+            const uint32_t a = uint32_t(v.MsbAlign(r0[x0]));
+            const uint32_t b = uint32_t(v.MsbAlign(r0[x1]));
+            const uint32_t c = uint32_t(v.MsbAlign(r1[x0]));
+            const uint32_t d = uint32_t(v.MsbAlign(r1[x1]));
             dst[x] = VpUnit::HalfLuma::FinishP1(VpUnit::HalfLuma::Box4(a, b, c, d));
         }
     }

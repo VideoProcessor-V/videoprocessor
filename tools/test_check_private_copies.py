@@ -165,6 +165,13 @@ class Synthetic(unittest.TestCase):
                           M + "control/skeleton/S.cpp": "lane.RegisterOwnerFill(k, f);"})
         self.assertEqual([h["file"] for h in N1.scan(root) if h["rule"] == "d"], [M + "repair/deband/D.cpp"])
 
+    def test_d5_private_msb_shift_outside_the_owner_law_is_moved(self):
+        # gate-15c-D5 (b): a planted private MSB-align shift in a module file is D5~moved; the owner law is not.
+        root = make_tree({M + "scaling/chroma_upscale/Copy.cpp": "dst[x] = uint16_t(src[x] << view.msbShift);",
+                          "src/VP-V/core/LaneInterfaces.h": "uint16_t MsbAlign(uint16_t raw) const { return uint16_t(uint32_t(raw) << msbShift); }"})
+        hs = [(h["site"], h["file"]) for h in N1.scan(root) if h["site"].startswith("D5")]
+        self.assertEqual(hs, [("D5~moved", M + "scaling/chroma_upscale/Copy.cpp")])
+
     def test_moved_copy_is_found_in_a_new_file(self):
         root = make_tree({M + "repair/temporal_detail/TemporalDetailModel.h": "int ok;",
                           M + "repair/temporal_detail/Other.h": "double v = m_prevGin;"})

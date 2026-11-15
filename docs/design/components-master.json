@@ -1360,7 +1360,6 @@
         "config_keys": [
           "apl_persist_ms",
           "apl_weights",
-          "cut_threshold",
           "fade_min_slope",
           "fade_ms",
           "highlight_percentile",
@@ -1422,6 +1421,7 @@
         "tools": [],
         "config_keys": [
           "adaptive_gamma",
+          "cut_threshold",
           "gamma_boost",
           "intent_black",
           "led_drive",

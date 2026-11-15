@@ -97,6 +97,10 @@ namespace LedDrive
 		void SetSourceRange(int range) { sourceRange.store(range, std::memory_order_relaxed); }
 		int SourceRange() const override { return sourceRange.load(std::memory_order_relaxed); }
 		void SubmitPrediction(uint64_t sequence, const FrameStats& predicted) override;
+		// FIX-LED-CUT-U7: the scene-cut reader of this module's measured and look-ahead builders (empty = the default get-or-compute reader
+		// of the skeleton's scene product). Tests inject one here (per module, never a global). Any thread.
+		void SetSceneReaderForTesting(SceneCutFn reader);
+		SceneCutFn SceneReader() const override;
 		// Hunt 3 (LED2): a new stream starts on this module (a hold-over drive
 		// adopted by the next file, whose source sequence restarts): the
 		// predictions by sequence are dropped and the look-ahead observer
@@ -260,6 +264,10 @@ namespace LedDrive
 		std::vector<FallbackStatus::Entry> FallbackEntries() const;
 		static constexpr const char* kHoldFallbackId = "LED drive";
 		static constexpr const char* kDryRunFallbackId = "projector";
+		// FIX-LED-CUT-U7: engaged while the measured frame has no readable shared scene record (no cut is judged then).
+		static constexpr const char* kCutJudgeFallbackId = "LED cut judge";
+		// The same for the look-ahead walk: engaged while a walked (ahead) frame's scene could not be got-or-computed (genuine failure only).
+		static constexpr const char* kCutJudgeAheadFallbackId = "LED look-ahead cut judge";
 
 	private:
 		std::atomic<double> displayGamma{ 2.2 };
@@ -465,6 +473,24 @@ namespace LedDrive
 		bool holdingFull = false;
 		FallbackStatus::Registry fallbacks;
 		void UpdateHoldFallbackLocked();
+		void UpdateCutJudgeFallbackLocked(bool known, const char* why);
+		void UpdateCutJudgeAheadFallbackLocked(bool known, const char* why);
+		// The look-ahead entry is judged once per walk: a walk with any failing frame engages it (first cause kept); it is released
+		// only after a whole walk (with predictions) was known, at the next BeginWalk. Guarded by `mutex`.
+		bool walkHadPredictions = false;
+		bool walkFailed = false;
+		// C-4: the P4 demand (lag 0 + lag 1) on the skeleton, declared with the module and withdrawn when it stops. One entry per
+		// (host, owner = this); demandHost = the renderer key it was declared on (null = not declared).
+		static constexpr uint16_t kSceneConsumerId = 0x0600;
+		std::atomic<const void*> demandHost{ nullptr };
+		// The registration generation of demandHost at declaration: the skeleton erases the demand when that renderer goes away, so a
+		// changed host or generation means the declaration is gone and is made again (never per frame: a declaration re-graphs the lane).
+		std::atomic<uint64_t> demandGen{ 0 };
+		void DeclareSceneDemand();
+		void WithdrawSceneDemand();
+		// Its own small lock (not `mutex`): the walk thread reads it per frame while the module's thread may hold `mutex` across a measure.
+		mutable std::mutex sceneReaderMutex;
+		SceneCutFn sceneReader_;
 		void StartHoldJumpLocked(bool wasHolding);
 	};
 }

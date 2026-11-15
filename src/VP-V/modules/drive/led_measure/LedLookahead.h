@@ -46,6 +46,9 @@ namespace LedDrive
 		virtual int SourceRange() const = 0;
 		virtual double SourceFramePeriodMs() const = 0;
 		virtual void SubmitPrediction(uint64_t sequence, const FrameStats& predicted) = 0;
+		// FIX-LED-CUT-U7: the scene-cut reader the walk's StatsBuilder uses (empty = the builder's default get-or-compute reader). Tests
+		// inject one per module; the walk applies it before every Build.
+		virtual SceneCutFn SceneReader() const { return SceneCutFn(); }
 	};
 
 	// Whether the luma reader returns full-range codes for this source (8-bit

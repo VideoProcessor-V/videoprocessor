@@ -257,7 +257,7 @@ namespace Vpv
 					"led_ceiling" } },
 			{ "highlights", "Highlights", "What counts as a highlight that the LED must keep bright, and for how long.", nullptr,
 				{ "highlight_percentile", "highlight_persist_ms", "highlight_area_small", "highlight_area_large", "highlight_release_ms" } },
-			{ "cuts", "Cuts and fades", "How a scene cut or a fade is recognised and how the LED follows it.", nullptr, { "cut_jump", "cut_threshold", "fade_ms", "fade_min_slope" } },
+			{ "cuts", "Cuts and fades", "How the LED follows a scene cut or a fade (cuts come from the shared scene judge; cut_threshold is the brightness step that starts an early ramp).", nullptr, { "cut_jump", "cut_threshold", "fade_ms", "fade_min_slope" } },
 			{ "script", "Script mode only (VP's copy of your script)", "Timing of VP's copy of your dimming script.", "internal_script", { "tick_ms", "script_highlight_code" } },
 			{ "compensate", "Compensate mode only", "How VP's own controller holds the LED steady and treats bright cuts.", "compensate",
 				{ "deadband", "knee", "apl_persist_ms", "early_ramp", "bright_cut_dump", "ftb_black_ms" } },

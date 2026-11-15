@@ -65,6 +65,10 @@ SITES = [
     {"id": "D5", "product": "kP13SourceRing", "refs": "122 s9 D5",
      "what": "producer CPU luma decode (code >> 6) / GPU row upload shift",
      "re": r">>\s*6\b|<<\s*(view\.)?(msbShift|shift)\b",
+     # gate-15c-D5 (b), lead 2 ruling: a private MSB-align shift anywhere outside the one owner law (LaneInterfaces.h MsbAlign)
+     # is D5~moved. Not `>>\s*6\b` (UTF-8 in nets/NetJson.h, the EngineLumaGpu.hlsl owner unit).
+     "wide": r"<<\s*(\w+(\.|->))?msbShift\b",
+     "owner": ["src/VP-V/core/LaneInterfaces.h"],
      "only": [_M + "input/source_analysis/VpFrameAnalysis.cpp", _M + "input/source_analysis/lane/LaneGpuProducts.cpp"]},
     {"id": "D6", "product": "kP13SourceRing", "refs": "122 s9 D6 / doc 91 D C9",
      "what": "C9 producer own RGB / full-range luma decode (named exception until EPE is compared)",

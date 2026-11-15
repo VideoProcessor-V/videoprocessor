@@ -1589,13 +1589,25 @@ namespace Vpv
 			{
 				out = SceneFacts();
 				if (seq < 2)
+				{
+					out.why = "no previous frame";
 					return false;
-				const AnalysisLane::ProductRead cur = bundle.lane.ReadOf(VpSkeleton::kP4SourceStats, seq);
-				const AnalysisLane::ProductRead prev = bundle.lane.ReadOf(VpSkeleton::kP4SourceStats, seq - 1);
+				}
+				// GET-OR-COMPUTE-AND-PUBLISH (OD 11-12 17:26 / 11-13 13:34): P4 of both frames is ASKED for through the renderer's memo, not peeked.
+				// A sealed / live slot is served through the lane binder exactly as ReadOf did; a frame AHEAD of the seal makes P4 in the lane's own
+				// slot now (or reuses the published one, never twice); off the render thread the lane's published bytes are copied. Both results
+				// stay alive (their pins) until both records are decoded.
+				const VpSkeleton::AcquireResult cur = bundle.memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
+				const VpSkeleton::AcquireResult prev = bundle.memo->Acquire(VpSkeleton::kP4SourceStats, seq - 1, VpSkeleton::AcquireForm::Cpu);
 				VpLaneProducts::SourceStatsRecord a, c;
-				if (cur.cpu == nullptr || prev.cpu == nullptr || !VpLaneProducts::ReadSourceStats(prev.cpu, prev.cpuBytes, &a) ||
+				if (!cur.Ok() || !prev.Ok() || cur.cpu == nullptr || prev.cpu == nullptr || cur.cpuBytes != VpLaneProducts::kStatsBytes ||
+					prev.cpuBytes != VpLaneProducts::kStatsBytes || !VpLaneProducts::ReadSourceStats(prev.cpu, prev.cpuBytes, &a) ||
 					!VpLaneProducts::ReadSourceStats(cur.cpu, cur.cpuBytes, &c))
+				{
+					const VpSkeleton::AcquireResult& bad = !cur.Ok() ? cur : prev;
+					out.why = !bad.Ok() ? VpSkeleton::Token(bad.cause) : "P4 record unreadable";
 					return false;
+				}
 				// Scene EVENTS (cut / fade / flash) are scene facts: classified from the P4 records alone. This function reads NO validity source
 				// (no VpIndicator::TemporalValid, no Indicator at all): whether a vector pair is usable across a resync is answered only by the P5a
 				// MotionValidity facade (coordinator ruling 2026-11-08; tools/test_check_shared_units.py test_scene_facts_reads_no_validity_source).
@@ -1623,7 +1635,10 @@ namespace Vpv
 					v = SceneVerdictLocked(st, bundle, seq, done);
 				}
 				if (!v.known)
+				{
+					out.why = "P4 record unreadable";   // the sequence judge could not read the frame's record (15c-code: why names every miss)
 					return false;
+				}
 				out.valid = true;
 				out.cut = v.cut;
 				out.cutPossible = v.candidate;
@@ -1656,8 +1671,11 @@ namespace Vpv
 			const std::shared_ptr<HostState> st = hosts_.Find(host);
 			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
 			if (!b)
+			{
+				out.why = "no analysis lane";
 				return false;
-			return SceneFactsFor(*st, *b, seq, out, nullptr);
+			}
+			return SceneFactsFor(*st, *b, seq, out, nullptr);   // 15c-code's memo Acquire of the P4 pair lives in SceneFactsFor (U7 v2 body)
 		}
 
 		// The scene product's one fill: judge the frame (SceneFactsFor), decide the delivered cut, write the store's scene group when the store
@@ -1690,8 +1708,14 @@ namespace Vpv
 			{
 				const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
 				SceneFacts f;
+				if (!b)
+					f.why = "no analysis lane";
 				if (!b || !SceneFactsFor(st, *b, seq, f, &done) || !f.valid)
+				{
+					if (answer)
+						answer->why = f.why;
 					return false;
+				}
 				std::lock_guard<std::mutex> lock(st.sceneMutex);
 				// Delivery (FrameAnalysis::Scene::cut): this frame's confirmed cut now, else the OLDEST confirmed cut since the last frame
 				// judged that did not go out with its own group (it was provisional then): exactly once per cut. Normally that is frame
@@ -1836,7 +1860,10 @@ namespace Vpv
 			SceneAnswer a;
 			const std::shared_ptr<HostState> st = hosts_.Find(host);
 			if (!st)
+			{
+				a.why = "unknown renderer";
 				return a;
+			}
 			if (FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(host))
 			{
 				FrameAnalysis::Scene scene;
