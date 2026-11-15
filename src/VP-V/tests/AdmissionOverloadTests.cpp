@@ -10,6 +10,8 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/core/AdmissionTable.h>
+#include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/FallbackPlainText.h>
 #include <VP-V/core/OverloadOrder.h>
 #include <VP-V/core/PostPresentSpare.h>
 
@@ -702,44 +704,222 @@ namespace AdmissionOverloadTest
 			Assert::IsTrue(ru.line.find("TD off: TD products 1 filled for another consumer") != std::string::npos);
 		}
 
-		// Owner decision 2026-11-15 06:58 (C4 s3a), (b) + (c) in games: games has no optional fill, yet a TD product another active consumer
-		// depends on is filled for it (before the fix it was Fill class and so not filled at all in games); with no consumer, none is filled.
-		// Competitive (no slot work at all) is unchanged: nothing is admitted.
-		TEST_METHOD(TdOffGamesFillsOnlyWhatAnotherConsumerDependsOn)
+		// Owner answer 2026-11-15 via lead 18 (S3A-GAMES), (b) + (c) in games: with TD off, a TD product another active consumer demands is
+		// OPTIONAL (Fill class), not Derived, so games (no optional fill) does not make it; the consumer's downgrade is shown on the Fallbacks
+		// entry; with no consumer, none is present or filled. Competitive (no slot work at all) admits nothing and shows the same downgrade.
+		TEST_METHOD(TdOffGamesDemandedTdProductIsOptionalNotFilled)
 		{
 			const ProductId td[] = { kTdBlocks, kTdMemory, kTdAnchorPass, kTdAnchorRefs, kTdDelta, kTdMaps, kTdTrailSummary };
 			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
 			f.tdMinMs = 0.0;
 			f.tdWantMs = 0.0;
 			f.mode = LatencyMode::Games;
-			for (ProductId id : td) { f.costMs[id] = 0.1; f.measured[id] = true; }   // measured, so only demand decides
+			for (ProductId id : td) { f.costMs[id] = 0.1; f.measured[id] = true; }   // measured, so only demand and mode decide
 			f.present[kTdMaps] = true;                                                // another active consumer's read
 			const Result r = Admit(f);
 			Assert::AreEqual(0, FillOn(f, r), L"games: no optional fill");
 			for (ProductId id : td)
 			{
-				const bool demanded = id == kTdMaps;
-				Assert::AreEqual(demanded, r.admitted[id], demanded ? L"games, TD off, demanded: filled for its consumer" : L"no consumer: no fill");
-				Assert::AreEqual(demanded, r.filledForConsumer[id]);
+				Assert::IsFalse(r.admitted[id], id == kTdMaps ? L"games, TD off, demanded: optional fill, games runs none" : L"no consumer: no fill");
+				Assert::IsFalse(r.filledForConsumer[id], L"games: never Derived for the consumer");
 			}
-			Assert::IsTrue(r.cls[kTdMaps] == JobClass::Derived);
+			Assert::IsTrue(r.cls[kTdMaps] == JobClass::Fill, L"games: a demanded TD product is optional (Fill), not Derived");
+			Assert::AreEqual(1u, r.tdOptionalInGames);
 			Assert::IsTrue(OptionalFillIds(r).empty(), L"nothing for FillOff to shed");
 			Assert::AreEqual(0.0, r.sliceMs);
-			Assert::IsTrue(r.line.find("TD off: TD products 1 filled for another consumer (0.10 ms in core, never shed)") != std::string::npos);
+			Assert::AreEqual(0.0, r.filledForConsumerMs, 1e-9);
+			Assert::IsTrue(r.line.find("fill 0 on / 4 off") != std::string::npos, L"P5, P9, P10 and td.maps: all optional, all off in games");
+			Assert::IsTrue(r.line.find("TD off (games): TD products 1 demanded by another consumer are optional fill, not made (games runs no optional fill)") != std::string::npos);
+			Assert::IsTrue(r.line.find("filled for another consumer") == std::string::npos);
+			Assert::AreEqual(std::string("games (queue 1): TD products 1 demanded by another consumer not made (optional fill; games runs none); the consumer runs without them"),
+				r.consumerDowngrade);
+			const FallbackCatalog::Decision d = FallbackCatalog::SkeletonAdmission(r.consumerDowngrade);
+			Assert::IsTrue(d.engaged, L"the consumer's downgrade is shown, never silent");
+			Assert::AreEqual(std::string("skeleton_admission"), d.id);
+			Assert::AreEqual(r.consumerDowngrade, d.reason);
 
-			// (c) games, TD off, no consumer reads a TD product: none is present, none is filled
+			// (c) games, TD off, no consumer reads a TD product: none is present, none is filled, nothing to show
 			AdmissionFacts none = f;
 			none.present[kTdMaps] = false;
 			const Result rn = Admit(none);
 			for (ProductId id : td) Assert::IsFalse(rn.admitted[id] || rn.filledForConsumer[id]);
-			Assert::AreEqual(r.coreMs - 0.1, rn.coreMs, 1e-9);
+			Assert::AreEqual(r.coreMs, rn.coreMs, 1e-9, L"td.maps was never in core in games");
 			Assert::IsTrue(rn.line.find("TD off") == std::string::npos);
+			Assert::IsTrue(rn.consumerDowngrade.empty());
+			Assert::IsFalse(FallbackCatalog::SkeletonAdmission(rn.consumerDowngrade).engaged);
 
-			// competitive: no slot work at all, unchanged by the fix
+			// competitive: no slot work at all; the consumer's downgrade is shown
 			AdmissionFacts comp = f;
 			comp.mode = LatencyMode::Competitive;
 			const Result rc = Admit(comp);
 			for (size_t i = 0; i < kProductCount; ++i) Assert::IsFalse(rc.admitted[i]);
+			Assert::AreEqual(std::string("competitive (latency 0): TD products 1 demanded by another consumer not made (no slot work); the consumer runs without them"),
+				rc.consumerDowngrade);
+			Assert::IsTrue(FallbackCatalog::SkeletonAdmission(rc.consumerDowngrade).engaged);
+		}
+
+		// Owner answer 2026-11-15 via lead 18 (S3A-COMP): competitive makes NO TD products, and the consumer's downgrade is SHOWN through the
+		// existing Fallbacks path (FallbackCatalog -> FallbackStatus registry -> "Fallbacks engaged" on Ctrl+I / Config status, plus the one-time
+		// notice sentence). TD on: TD itself is the consumer; TD off: another consumer; no TD product demanded: nothing to show.
+		TEST_METHOD(CompetitiveTdProductsNotMadeAndShown)
+		{
+			const ProductId td[] = { kTdBlocks, kTdMemory, kTdAnchorPass, kTdAnchorRefs, kTdDelta, kTdMaps, kTdTrailSummary };
+			AdmissionFacts on = Facts(60.0, 6.0, 1.0);
+			on.mode = LatencyMode::Competitive;
+			for (ProductId id : td) Put(on, id, 0.5, true);
+			Assert::IsTrue(TdOn(on));
+			const Result r = Admit(on);
+			for (size_t i = 0; i < kProductCount; ++i) Assert::IsFalse(r.admitted[i], L"competitive: no slot work");
+			Assert::AreEqual(7u, r.tdNotMadeCompetitive);
+			const std::string note = "competitive (latency 0): TD products 7 demanded by TD not made (no slot work); the consumer runs without them";
+			Assert::AreEqual(note, r.consumerDowngrade);
+			Assert::AreEqual(std::string("admission (competitive): no slot work (latency 0); ") + note, r.line);
+			FallbackStatus::Registry reg;
+			Assert::IsTrue(FallbackCatalog::Sync(reg, FallbackCatalog::SkeletonAdmission(r.consumerDowngrade)));
+			Assert::AreEqual(std::string("Fallbacks engaged: skeleton_admission (") + note + ")", reg.Heading());
+			Assert::IsFalse(std::string(FallbackPlainText::Sentence("skeleton_admission")).empty(), L"the one-time notice has its sentence");
+
+			// TD off, another consumer demands td.delta only
+			AdmissionFacts off = Facts(60.0, 6.0, 1.0);
+			off.mode = LatencyMode::Competitive;
+			off.tdMinMs = 0.0;
+			off.tdWantMs = 0.0;
+			Put(off, kTdDelta, 0.5, true);
+			const Result ro = Admit(off);
+			Assert::IsFalse(ro.admitted[kTdDelta]);
+			Assert::AreEqual(std::string("competitive (latency 0): TD products 1 demanded by another consumer not made (no slot work); the consumer runs without them"),
+				ro.consumerDowngrade);
+
+			// no TD product demanded: no downgrade, the entry is released, the line is the plain competitive line
+			AdmissionFacts plain = Facts(60.0, 6.0, 1.0);
+			plain.mode = LatencyMode::Competitive;
+			const Result rp = Admit(plain);
+			Assert::IsTrue(rp.consumerDowngrade.empty());
+			Assert::AreEqual(std::string("admission (competitive): no slot work (latency 0)"), rp.line);
+			Assert::IsTrue(FallbackCatalog::Sync(reg, FallbackCatalog::SkeletonAdmission(rp.consumerDowngrade)));
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), reg.Heading());
+		}
+
+		// Owner answer 2026-11-15 via lead 18 (S3A-STALE), wiring: the graph and the consumer declarations reach the admission through
+		// DemandFromGraph(graph, consumers, facts); a TD product read ONLY by an optional fill (td.maps read by P5, td.blocks read by td.maps;
+		// the active consumer reads P5) follows that fill: admitted with it, listed for FillOff, and the arbiter's FillOff stops and names it at
+		// the SAME step as its reader. A direct consumer read keeps the old rule (Derived, never listed). A reader left out at Configure
+		// leaves its followers out too; an unmeasured follower keeps its reader out as "not measured".
+		TEST_METHOD(TdOffTdProductStopsWithItsOnlyOptionalReaderAtFillOff)
+		{
+			const Registry reg = SkeletonProducts();
+			const ProductId followers[] = { kTdMaps, kTdBlocks };
+			const ProductId stopTogether[] = { kP5MonitorTiles, kTdMaps, kTdBlocks };
+			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
+			f.tdMinMs = 0.0;   // TD off
+			f.tdWantMs = 0.0;
+			Put(f, kTdMaps, 0.2, true);
+			Put(f, kTdBlocks, 0.1, true);
+			Graph g;   // the active consumers' graph: P5 reads td.maps, td.maps reads td.blocks
+			g.valid = true;
+			for (size_t i = 0; i < kProductCount; ++i)
+			{
+				if (!f.present[i]) continue;
+				Node n;
+				n.id = ProductId(i);
+				n.declared = ProductId(i);
+				if (n.id == kP5MonitorTiles) { n.inputCount = 1; n.inputs[0].product = kTdMaps; }
+				if (n.id == kTdMaps) { n.inputCount = 1; n.inputs[0].product = kTdBlocks; }
+				g.nodes.push_back(n);
+			}
+			ConsumerDecl monitor;
+			monitor.id = 1;
+			monitor.name = "monitor";
+			AddConsume(monitor, kP5MonitorTiles);
+			const std::vector<ConsumerDecl> consumers{ monitor };
+			DemandFromGraph(g, consumers, f);
+			Assert::IsTrue(f.readersFed);
+			Assert::IsTrue(f.readBy[kTdMaps] == (uint64_t(1) << kP5MonitorTiles), L"td.maps: read by P5 only");
+			Assert::IsTrue(f.readBy[kTdBlocks] == (uint64_t(1) << kTdMaps), L"td.blocks: read by td.maps only");
+			Assert::IsTrue(f.consumerReads[kP5MonitorTiles]);
+			Assert::IsFalse(f.consumerReads[kTdMaps] || f.consumerReads[kTdBlocks]);
+
+			// budget 16.667 - 6 - 1.667 = 9.0; core 1.65; left 7.35; P5 with its followers 0.4 + 0.2 + 0.1 = 0.7 fits; P9 0.05, P10 1.5:
+			// fill 0.7 + 0.05 + 1.5 = 2.25 ms, five fills on (P5, P9, P10, td.maps, td.blocks)
+			const Result r = Admit(f);
+			for (ProductId id : followers)
+			{
+				Assert::IsTrue(r.followsReaders[id]);
+				Assert::IsTrue(r.cls[id] == JobClass::Fill, L"read only by an optional fill: optional with it");
+				Assert::IsTrue(r.admitted[id], L"on with its reader");
+				Assert::IsFalse(r.filledForConsumer[id]);
+			}
+			Assert::IsTrue(r.admitted[kP5MonitorTiles]);
+			Assert::AreEqual(1.65, r.coreMs, 1e-9, L"the followers are not in core");
+			Assert::AreEqual(2.25, r.fillMs, 1e-9);
+			Assert::AreEqual(5, FillOn(f, r));
+			Assert::AreEqual(2u, r.tdFollowing);
+			Assert::AreEqual(2u, r.tdFollowingOn);
+			Assert::IsTrue(r.line.find("TD off: TD products 2 read only by optional fills, 2 on with them (they stop when their readers stop)") != std::string::npos);
+			const std::vector<ProductId> fills = OptionalFillIds(r);
+			for (ProductId id : stopTogether)
+				Assert::IsTrue(std::find(fills.begin(), fills.end(), id) != fills.end(), L"in the list FillOff switches off");
+
+			// the arbiter, fed the admission's own list: before FillOff nothing is named; at the step FillOff engages, the reader and both
+			// followers are named together (FillAllowed is false for all of them at once)
+			std::vector<const char*> names;
+			for (ProductId id : fills) names.push_back(reg.Get(id).token);
+			OverloadArbiter a;
+			a.SetOptionalFills(names.data(), names.size());
+			const double period = f.periodMs;
+			const SlotBudget over = Load(period, 0.7 * period, 0.4 * period);
+			for (double t = 0.0; a.State().step == OverloadStep::None && t <= 5000.0; t += period)
+			{
+				Assert::IsTrue(a.FillLine().empty());
+				a.Step(t, over, false, 2);
+			}
+			Assert::IsTrue(a.State().step == OverloadStep::FillOff);
+			Assert::IsFalse(FillAllowed(a.State()));
+			const std::string line = std::string(a.State().line) + " " + a.FillLine();
+			for (ProductId id : stopTogether)
+				Assert::IsTrue(line.find(reg.Get(id).token) != std::string::npos, L"FillOff stops the reader and its TD products at the same step");
+
+			// a direct consumer read of td.maps: the old rule (Derived, filled for the consumer, never listed); td.blocks then has a
+			// non-optional reader (td.maps) and is Derived too
+			ConsumerDecl dither;
+			dither.id = 2;
+			dither.name = "dither";
+			AddConsume(dither, kTdMaps);
+			const std::vector<ConsumerDecl> both{ monitor, dither };
+			AdmissionFacts d = f;
+			DemandFromGraph(g, both, d);
+			Assert::IsTrue(d.consumerReads[kTdMaps]);
+			const Result rd = Admit(d);
+			const std::vector<ProductId> dFills = OptionalFillIds(rd);
+			for (ProductId id : followers)
+			{
+				Assert::IsFalse(rd.followsReaders[id]);
+				Assert::IsTrue(rd.cls[id] == JobClass::Derived && rd.admitted[id] && rd.filledForConsumer[id]);
+				Assert::IsTrue(std::find(dFills.begin(), dFills.end(), id) == dFills.end(), L"a feature reads it: never in FillOff's list");
+			}
+
+			// the reader does not fit at Configure (8.0 + 0.3 > 7.35): it and its followers are left out together
+			AdmissionFacts big = f;
+			big.costMs[kP5MonitorTiles] = 8.0;
+			const Result rb = Admit(big);
+			Assert::IsFalse(rb.admitted[kP5MonitorTiles] || rb.admitted[kTdMaps] || rb.admitted[kTdBlocks]);
+			Assert::AreEqual(0u, rb.tdFollowingOn);
+			Assert::IsTrue(rb.line.find("TD off: TD products 2 read only by optional fills, 0 on with them") != std::string::npos);
+
+			// an unmeasured follower keeps its reader out; both are shown as not measured
+			AdmissionFacts u = f;
+			u.measured[kTdMaps] = false;
+			const Result ru = Admit(u);
+			Assert::IsFalse(ru.admitted[kP5MonitorTiles] || ru.admitted[kTdMaps] || ru.admitted[kTdBlocks]);
+			Assert::IsTrue(ru.notMeasured[kP5MonitorTiles] && ru.notMeasured[kTdMaps]);
+			Assert::IsTrue(ru.line.find("not measured 1") != std::string::npos);
+
+			// readers not fed: never a follower, the 6aa02f66d rule holds (Derived, filled for the consumer)
+			AdmissionFacts nf = f;
+			nf.readersFed = false;
+			const Result rnf = Admit(nf);
+			for (ProductId id : followers)
+				Assert::IsTrue(!rnf.followsReaders[id] && rnf.cls[id] == JobClass::Derived && rnf.filledForConsumer[id]);
 		}
 	};
 
