@@ -185,6 +185,7 @@ A declaration is what a product or consumer is wired to read, not proof the code
 | consumer matcher / motion warp | p4_source_stats | declared, not read | D8 | M3 histogram computed privately (matcher/DejudderWarp.cpp FrameTrustHeader / FrameTrustBody, SourceStats::CoarseHist*) |
 | consumer source identification | p5_monitor_tiles | actual input is a view | C9b | pixel evidence = the SourceFrameTap view (modules/input/source_analysis/identity/chain/ChainEstimator.cpp UpdateTap) |
 | consumer source identification | p4_source_stats | declared, not read | D6-D8 | no P4 read in the identity tree |
+| consumer chroma from luma | p13_source_ring | actual input is a view | C9b | render-time source pl_frame (scaling/chroma_upscale/ChromaCflGpu.cpp CflModule::Apply) |
 | consumer dejudder extras | p3_analysis_field | external view (not declared) | C9b | read at render: live matcher field (LibplaceboVideoRenderer.cpp warpField, de-judder extras loop) |
 | consumer interpolator | p3_analysis_field | external view (not declared) | C9b | read at render: live matcher field (Interpolator::Motion.field = warpField) |
 | consumer hiccup repair | p3_analysis_field | external view (not declared) | C9b | read at render: live matcher field (gap pairs through the interpolator) |

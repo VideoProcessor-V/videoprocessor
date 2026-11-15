@@ -179,6 +179,8 @@ OWNER_EDGES = {
 # path the flag note names.
 VIEW_ACCESSOR = {
     "kP4SourceStats": {"re": r"\bSceneRestartOf\s*\(\s*params\.sequence\b"},
+    # gate-15c-X8-row11-P13: narrowed to the Apply signature taking the source pl_frame, and only in the file the flag note names.
+    "kP13SourceRing": {"re": r"\bApply\s*\([^)]*const pl_frame&\s*source\b", "note_file": True},
 }
 VIEW_KINDS = ("ViewIsActual", "ExternalView")
 _FLAG_RE = re.compile(r'\{\s*uint16_t\(\s*kCatalogConsumerIdBase\s*\+\s*(\d+)\s*\)\s*,\s*(k\w+)\s*,\s*FlagKind::(\w+)\s*,'

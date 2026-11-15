@@ -231,6 +231,18 @@ class Synthetic(unittest.TestCase):
         self.assertTrue(self._view_tree(1, "kP4SourceStats", "ViewIsActual", "repair/texture_restore",
                                         {"T.cpp": "// SceneRestartOf(params.sequence, r);"}))   # a comment is not a call
 
+    def test_c7_p13_view_accessor_only_in_the_note_file(self):
+        # gate-15c-X8-row11-P13 fixtures: the broad pl_frame form is accepted only with the ViewIsActual flag AND in the file the
+        # flag note names; the same signature in another member file, a NotRead flag or no flag leave the X8 hit.
+        sig = "bool CflModule::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& p, pl_frame& r);"
+        note = "render-time source pl_frame (scaling/chroma_upscale/ChromaCflGpu.cpp CflModule::Apply)"
+        f = "scaling/chroma_upscale"
+        self.assertFalse(self._view_tree(11, "kP13SourceRing", "ViewIsActual", f, {"ChromaCflGpu.cpp": sig}, note))
+        self.assertTrue(self._view_tree(11, "kP13SourceRing", "ViewIsActual", f, {"basic/BasicChromaGpu.cpp": sig}, note))
+        self.assertTrue(self._view_tree(11, "kP13SourceRing", "NotRead", f, {"ChromaCflGpu.cpp": sig}, note))
+        self.assertTrue(self._view_tree(11, "kP13SourceRing", None, f, {"ChromaCflGpu.cpp": sig}, note))
+        self.assertTrue(self._view_tree(11, "kP13SourceRing", "ViewIsActual", f, {"ChromaCflGpu.cpp": sig}, "no file named"))
+
     def test_bad_root_is_exit_2(self):
         self.assertEqual(N1.main(["--root", tempfile.mkdtemp()]), 2)
 
