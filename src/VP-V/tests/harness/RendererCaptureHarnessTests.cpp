@@ -1579,10 +1579,11 @@ namespace Tests
 			// WAIVER-C5-FBCLEAN (lead 18): "none" is only true where every OTHER entry is legitimately released, so both legs run:
 			//  - the Beta lane (fbo_float32 at its default auto = float32 intermediates): "picture precision" is released there
 			//    (PicturePrecision::Classify); the Stable 7.360 lane has no float32 switch and lists it by design (S-12BIT);
-			//  - vector_demand off: the W2-C1 (B9) NoStarter entries "vector_engine" and "motion engine" (a 59.94p video source
-			//    starts no de-judder) are released as a group (VectorEngine::UpdateVectorEngine, VectorEngineFallbackSync::Release).
+			//  - B1 (plan d7, gate-union-b1 condition 3): the `vector_demand: off` override is deleted. With the engine ON at its
+			//    defaults the W2-C1 (B9) NoStarter entries "vector_engine" and "motion engine" (a 59.94p video source starts no
+			//    de-judder) are released by B1's engine switch (DecideForHost), so the clean leg must still read "none".
 			// The same configuration on the forced-fallback leg, so the capture GPU unpack is the first (only) entry listed.
-			const std::string released = "vector_demand: off\n";   // B1 deletes this line
+			const std::string released;   // no override: the engine ON at its defaults
 			_putenv_s("VP_TEST_HARNESS_BETA", "1");
 			{
 				const RunResult clean = Run(VideoFrameEncoding::V210, "gpu", 2.0, false, released);
