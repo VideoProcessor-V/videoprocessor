@@ -828,20 +828,31 @@ if (p.x < sz.x && p.y < sz.y) {
 			const double allowCodes = MeanAllowanceCodes(params.bitrateQuality, params.colorDepth);
 			const float allow2 = static_cast<float>(allowCodes * allowCodes * cu * cu);
 			// The cut / fade verdict: the shared judge's, from the scene group (U7 over P4; registered fix D8). A frame with no
-			// readable group restarts (no private fallback) and is counted.
+			// readable group restarts (no private fallback) and is counted. U7 v3: a fade is a partial reset: the references (energies)
+			// are reduced by the frame's fade keep squared, as one more decay step (`dec` below); a fade group without a keep restarts, shown.
 			bool sceneRestart = false;
+			double historyKeep2 = 1.0;
 			if (!restartAll)
 			{
 				const VpDetailRestore::SceneRestartAnswer scene = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader);
 				sceneRestart = scene.restart;
-				sceneUnavailable = !scene.fromRecord;
+				sceneUnavailable = !scene.fromRecord || scene.fadeWithoutKeep;
+				sceneWhy = scene.fadeWithoutKeep ? VpDetailRestore::SceneFadeWithoutKeepWhy() : nullptr;
 				if (!scene.fromRecord)
 					++sceneMissing;
+				if (scene.fadeWithoutKeep)
+					++sceneFadeRestarts;
+				if (scene.fadePartial)
+				{
+					historyKeep2 = static_cast<double>(scene.historyKeep) * scene.historyKeep;
+					++scenePartials;
+				}
+				lastHistoryKeep = scene.historyKeep;
 			}
 			const float restartF = restartAll || sceneRestart ? 1.0f : 0.0f;
 			const float fg = static_cast<float>(std::pow(kGrainFloorCodes8 * eight * cu, 2.0));
 			const float ft = static_cast<float>(std::pow(kTextureFloorCodes8 * eight * cu, 2.0));
-			const float dec = static_cast<float>(Decay(params.sourceHz));
+			const float dec = static_cast<float>(Decay(params.sourceHz) * historyKeep2);   // U7 v3: x the fade keep^2 (1 off a fade)
 			const float sigFloor = static_cast<float>(std::pow(CodingNoiseCodes8(params.bitrateQuality) * eight * cu, 2.0));
 			const float capF = static_cast<float>(cap);
 			const float planeSize[2] = { static_cast<float>(w), static_cast<float>(h) };
