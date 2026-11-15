@@ -427,14 +427,14 @@ namespace ComposedVectorsTest
 		{
 			FakeSource src;
 			Product::Config c;
-			c.budgetBytes = 300000;   // a 128 x 64 plane is 131072 bytes: two fit
+			c.budgetBytes = 5000;   // block form (owner R14-16): a 128 x 64 plane is 16 x 8 cells x 16 B = 2048 bytes: two fit, a third (6144) does not
 			Product p(&src, c);
 			ActivateBoth(p);
 			const Reached r = p.Prepare(100);
 			Assert::AreEqual(2, (int)r.back);
 			Assert::IsTrue(r.backWhy == Got::Budget);
 			Assert::AreEqual((size_t)2, p.PlaneCount());
-			Assert::IsTrue(p.GetStats().bytes <= 300000);
+			Assert::IsTrue(p.GetStats().bytes <= 5000);
 			Assert::IsTrue(p.CurrentStatus().engaged);
 		}
 		TEST_METHOD(FallbackDecisionRoundTrips)
