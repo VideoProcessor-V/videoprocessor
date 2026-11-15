@@ -1868,8 +1868,8 @@ namespace SkeletonModuleTestsNs
 			// The same pair classification the shared unit gives for those two records (U7): SceneFactsOf derives the fade from it and keeps
 			// the v1 pair cut / flash / cutPossible as pair* (WAIVER-U7ACC-SKELETON-SCENE: cut / flash / cutPossible are now the v2 sequence
 			// law's verdict: the same as the shared CutTracker gives over the readable P4 records up to frame 4, judged without frame 5.
-			// WAIVER-U7ACC-NOISE-VERDICT: this replaces the lane's own earlier "no cut on noise" line, which assumed context frames the
-			// lane's P4 ring does not keep; a provisional verdict without context is decided on L alone, by the documented law).
+			// WAIVER-U7ACC-NOISE-VERDICT: the earlier "no cut on noise" line failed because P4 kept one previous record only, so the judge
+			// had no context; the skeleton now declares its P4 read at the scene judge's lag, and the line holds again, pinned below).
 			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
 			const VpSkeleton::AnalysisLane::ProductRead cur = lane->ReadOf(VpSkeleton::kP4SourceStats, 4);
 			const VpSkeleton::AnalysisLane::ProductRead prev = lane->ReadOf(VpSkeleton::kP4SourceStats, 3);
@@ -1884,24 +1884,24 @@ namespace SkeletonModuleTestsNs
 			VpUnit::CutFadeJudge::CutTracker tracker;
 			tracker.Reset();
 			VpLaneProducts::SourceStatsRecord r;
-			bool read3 = false, read4 = false;
+			int readable = 0;
 			for (int64_t s = 1; s <= 4; ++s)
 			{
 				const VpSkeleton::AnalysisLane::ProductRead read = lane->ReadOf(VpSkeleton::kP4SourceStats, uint64_t(s));
 				if (read.cpu != nullptr && VpLaneProducts::ReadSourceStats(read.cpu, read.cpuBytes, &r))
 				{
 					tracker.Push(uint64_t(s), r);
-					read3 = read3 || s == 3;
-					read4 = read4 || s == 4;
+					++readable;
 				}
 			}
-			Assert::IsTrue(read3 && read4, L"frames 3 and 4 are readable");
+			// The skeleton declares its P4 read at lag kScenePrimeFrames (the scene judge's window), so frames 1 .. 4 are all kept.
+			Assert::AreEqual(4, readable, L"P4 records 1 .. 4 are readable at the seal of 4 (the scene judge's lag)");
 			const VpUnit::CutFadeJudge::CutVerdict expected = tracker.Provisional();
 			Assert::IsTrue(expected.known && expected.seq == 4u);
 			Assert::AreEqual(expected.cut, f.cut, L"the shared sequence law's verdict, not a private one");
-			// Pinned: without context frames (the ring keeps no frame before 3, the part's start) the provisional verdict is decided on
-			// L alone (noise L is about 21 >= 6), so it is a cut; a later law change shows up here. Scene never delivers it (provisional).
-			Assert::IsTrue(expected.cut, L"no context: the provisional verdict is decided on L alone");
+			// Pinned: with its context frames (L of the pairs 1->2 and 2->3 about 21-24) frame 4 (L about 21) is no spike; a later law or
+			// window change shows up here.
+			Assert::IsFalse(expected.cut, L"noise frames with their context: no sequence-law cut");
 			Assert::AreEqual(expected.flash, f.flash);
 			Assert::AreEqual(expected.candidate, f.cutPossible);
 			Assert::AreEqual(expected.gridLaw, f.gridLaw);
