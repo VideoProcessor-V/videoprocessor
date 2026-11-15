@@ -6,7 +6,10 @@
 // luma, GPU, per-frame memo. Gets its device, dispatch and output texture ONLY from OwnerFillRequest::gpu (L-CORE), the source luma
 // from the P13 ring view through the memo (get-or-compute-and-publish, no private upload). Header-only, C++14.
 // Variant axes: none (default variant only; width / height = the source luma size). Output R32F in codes at the 10-bit scale
-// (sampled value x 1023): float32 keeps a 12-bit source exact (rule 7), unlike the frozen r16f whose 11-bit mantissa does not.
+// (sampled value x RegionEvidence::kSourceTapCodesPerUnit, the source planes' one tap form, shared with the busy share): float32
+// keeps a 12-bit source exact (rule 7), unlike the frozen r16f whose 11-bit mantissa does not.
+// Reserve: DERIVED, never a fixed resolution (rule 6): kEdgeMap's declared size rule at the largest source luma size the Entrance
+// image (the P13 view) shows on a live host; the module re-registers the fill when that size changes (EdgeMapModule::Observe).
 // Declines (visible, with the cause): no GPU context, no luma view, texture refused / over the reserve, shader or dispatch failed.
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/core/Products.h>
@@ -19,8 +22,12 @@
 #include <libplacebo/shaders/custom.h>
 
 #include <atomic>
+#include <cstddef>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace Vpv
 {
@@ -29,14 +36,23 @@ namespace Vpv
 		namespace RE = RendererExtension;
 		static constexpr const char* kEdgeMapUnit = "input/source_analysis/regions";   // the catalog's kEdgeMap owner
 
-		// Reserve per fill: one R32F plane at 8K (7680 x 4320) = 132 MB; the ledger grant is checked BEFORE the fill and a larger frame declines.
-		static constexpr uint64_t kEdgeMapReserveBytes = uint64_t(7680) * 4320u * 4u;
+		// Reserve per fill, DERIVED from the source (rule 6): kEdgeMap's DECLARED size rule (AppendEdgeMapProduct: one R32F sample per
+		// source pixel) at the source luma size `luma`, so the ledger, the ahead cost and the fill agree on one figure (33 MB at a 4K
+		// source, 8.3 MB at 1080p). 0 = no size known yet. The grant is checked BEFORE the fill; a larger frame declines visibly.
+		inline uint64_t EdgeMapReserveBytes(VpSkeleton::Dims luma)
+		{
+			if (luma.width == 0 || luma.height == 0)
+				return 0;
+			std::vector<VpSkeleton::ProductDecl> decls;
+			VpSkeleton::AppendEdgeMapProduct(decls);
+			return decls.empty() ? uint64_t(0) : VpSkeleton::BytesOf(decls.back().size, luma);
+		}
 
-		inline VpSkeleton::OwnerFill MakeEdgeMapOwnerFill()
+		inline VpSkeleton::OwnerFill MakeEdgeMapOwnerFill(uint64_t reserveBytes)
 		{
 			VpSkeleton::OwnerFill f;
 			f.variantAxes = 0;
-			f.reserveBytes = kEdgeMapReserveBytes;
+			f.reserveBytes = reserveBytes;
 			f.frameScoped = true;
 			f.fill = [](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo& memo, VpSkeleton::OwnerFillOutput& out) {
 				if (req.gpu == nullptr || req.gpu->Gpu() == nullptr || req.gpu->Dispatch() == nullptr)
@@ -73,7 +89,7 @@ namespace Vpv
 				desc[1].desc.type = PL_DESC_STORAGE_IMG;
 				desc[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
 				desc[1].binding.object = dst;
-				const float scale = 1023.0f;   // normalised sample -> 10-bit codes
+				const float scale = RegionEvidence::kSourceTapCodesPerUnit;   // normalised sample -> 10-bit codes (the one tap form)
 				const pl_shader_var vars[1] = { { pl_var_float("em_scale"), &scale, true } };
 				const std::string header = RegionEvidence::EdgeMapHeaderGlsl();
 				const std::string body = RegionEvidence::EdgeMapBodyGlsl();
@@ -112,33 +128,117 @@ namespace Vpv
 			return f;
 		}
 
-		// Registers the kEdgeMap fill with the skeleton found by the hub (tests pass their own demand); idempotent.
+		// Registers the kEdgeMap fill with the skeleton found by the hub (tests pass their own demand). The reserve is derived
+		// (EdgeMapReserveBytes) from the LARGEST source luma size over the live hosts, observed at Entrance (the image the P13 view
+		// serves, before this frame's readers run); the fill is registered on the first size and re-registered (unregister, then
+		// register) only when that largest size changes, so one figure serves every host's memo (module-wide registration). A host
+		// is forgotten at GpuReleased / Shutdown. Nothing is registered before a size is known (an Acquire then is a visible
+		// NoOwnerFill). Cost per frame: one short lock and a lookup in at most sixteen entries.
 		class EdgeMapModule : public Hub::ISkeletonModule
 		{
 		public:
 			const char* Name() const override { return "input.source_analysis.edge_map"; }
+			void OnLifecycle(RE::LifecycleFacts& f) override
+			{
+				if (f.host && (f.kind == RE::Lifecycle::GpuReleased || f.kind == RE::Lifecycle::Shutdown))
+					Forget(f.host);
+			}
 			bool OnFrame(RE::FrameContext& c) override
 			{
-				if (c.phase == RE::FramePhase::Begin)
-					EnsureRegistered();
+				if (c.phase != RE::FramePhase::Entrance || c.image == nullptr || c.image->num_planes < 1
+					|| c.image->planes[0].texture == nullptr || Hub::ExtensionHub::Instance().OriginalPathway(c.host))
+					return false;
+				VpSkeleton::Dims luma;
+				luma.width = uint32_t(c.image->planes[0].texture->params.w);
+				luma.height = uint32_t(c.image->planes[0].texture->params.h);
+				Observe(c.host, luma);
 				return false;
 			}
-			bool EnsureRegistered(Skeleton::IExternalDemand* demand = nullptr)
+			// Records `host`'s source luma size and (re-)registers the fill when the derived reserve changes. True = a fill with the
+			// current reserve is registered.
+			bool Observe(const void* host, VpSkeleton::Dims luma, Skeleton::IExternalDemand* demand = nullptr)
 			{
-				if (registered_.load(std::memory_order_acquire))
-					return true;
+				std::lock_guard<std::mutex> g(mutex_);
+				bool found = false;
+				for (auto& h : hosts_)
+				{
+					if (h.host == host)
+					{
+						if (h.luma.width != luma.width || h.luma.height != luma.height)
+						{
+							h.luma = luma;
+							h.bytes = EdgeMapReserveBytes(luma);   // only when the size changes (no per-frame work beyond the lookup)
+						}
+						found = true;
+						break;
+					}
+				}
+				if (!found && host != nullptr && hosts_.size() < kMaxHosts)
+				{
+					HostSize h;
+					h.host = host;
+					h.luma = luma;
+					h.bytes = EdgeMapReserveBytes(luma);
+					hosts_.push_back(h);
+				}
+				return UpdateLocked(demand);
+			}
+			// Forgets `host`; a smaller largest size re-registers the fill with the smaller reserve (none left: registration kept).
+			void Forget(const void* host, Skeleton::IExternalDemand* demand = nullptr)
+			{
+				std::lock_guard<std::mutex> g(mutex_);
+				for (size_t i = 0; i < hosts_.size(); ++i)
+				{
+					if (hosts_[i].host == host)
+					{
+						hosts_.erase(hosts_.begin() + std::ptrdiff_t(i));
+						break;
+					}
+				}
+				UpdateLocked(demand);
+			}
+			bool Registered() const { return registered_.load(std::memory_order_acquire); }
+			// The reserve of the registered fill (0 = none registered).
+			uint64_t RegisteredReserveBytes() const
+			{
+				std::lock_guard<std::mutex> g(mutex_);
+				return registered_.load(std::memory_order_acquire) ? reserve_ : uint64_t(0);
+			}
+		private:
+			static constexpr size_t kMaxHosts = 16;   // the skeleton's renderer table (HostSlots)
+			struct HostSize
+			{
+				const void* host = nullptr;
+				VpSkeleton::Dims luma;
+				uint64_t bytes = 0;   // EdgeMapReserveBytes(luma)
+			};
+			bool UpdateLocked(Skeleton::IExternalDemand* demand)
+			{
+				uint64_t want = 0;
+				for (const HostSize& h : hosts_)
+					if (h.bytes > want)
+						want = h.bytes;
+				const bool ok = registered_.load(std::memory_order_acquire);
+				if (want == 0 || (ok && want == reserve_) || want == tried_)
+					return ok;
 				if (demand == nullptr)
 					demand = static_cast<Skeleton::IExternalDemand*>(Hub::ExtensionHub::Instance().Query(Skeleton::kExternalDemandQueryId));
 				if (demand == nullptr)
-					return false;
+					return ok;   // no skeleton yet: retried at the next Entrance
+				tried_ = want;   // a refused registration is retried at the next size change, not every frame
+				if (ok)
+					demand->UnregisterOwnerFill(VpSkeleton::kEdgeMap, VpSkeleton::AcquireForm::Gpu, kEdgeMapUnit);
 				const VpSkeleton::SkeletonMemo::Registration r =
-					demand->RegisterOwnerFill(VpSkeleton::kEdgeMap, VpSkeleton::AcquireForm::Gpu, kEdgeMapUnit, MakeEdgeMapOwnerFill());
-				const bool ok = r == VpSkeleton::SkeletonMemo::Registration::Registered
-					|| r == VpSkeleton::SkeletonMemo::Registration::AlreadyRegistered;
-				registered_.store(ok, std::memory_order_release);
-				return ok;
+					demand->RegisterOwnerFill(VpSkeleton::kEdgeMap, VpSkeleton::AcquireForm::Gpu, kEdgeMapUnit, MakeEdgeMapOwnerFill(want));
+				const bool now = r == VpSkeleton::SkeletonMemo::Registration::Registered;
+				reserve_ = now ? want : uint64_t(0);
+				registered_.store(now, std::memory_order_release);
+				return now;
 			}
-		private:
+			mutable std::mutex mutex_;
+			std::vector<HostSize> hosts_;
+			uint64_t reserve_ = 0;   // the registered fill's reserve
+			uint64_t tried_ = 0;     // the last reserve a registration was attempted with
 			std::atomic<bool> registered_{ false };
 		};
 
