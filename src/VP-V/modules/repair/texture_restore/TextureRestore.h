@@ -81,11 +81,6 @@ namespace TextureRestore
 	constexpr double kEnergyEps = 1e-6;        // codes^2
 
 	inline double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
-	inline double Smoothstep(double e0, double e1, double x)
-	{
-		const double t = Clamp((x - e0) / (e1 - e0), 0.0, 1.0);
-		return t * t * (3.0 - 2.0 * t);
-	}
 	// Grain-sized distances grow with the plane's height above 2160 lines (GrainPreserve::GrainScale).
 	inline double Scale(double planeLines) { return planeLines > 2160.0 ? planeLines / 2160.0 : 1.0; }
 	// The tile in plane px: a multiple of kSubBlocks.

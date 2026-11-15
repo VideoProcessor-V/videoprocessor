@@ -13,6 +13,7 @@
 // Reset() at discontinuities; UpdateSettings() for a settings change (it knows which fields changed).
 #pragma once
 
+#include <VP-V/core/Ramp.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailMotion.h>
@@ -719,14 +720,14 @@ namespace TemporalDetail
 		e.e1c = c1 / n; e.e1w = w1 / n;
 		const double e2c = c2 / n, e2w = w2 / n;
 		e.corr = dot / std::sqrt(cs * ws + 1e-12);
-		e.corrGate = Smoothstep(0.5 * kCorrMin, kCorrMin, e.corr);
+		e.corrGate = RampMath::Smoothstep<double>(0.5 * kCorrMin, kCorrMin, e.corr, RampMath::SmoothRule::Unguarded);
 		const GateTuning& gt = m_tune.gates;
 		const double margin = gt.strongerMargin * Bg(bi, 0);
-		e.strongerGate = Smoothstep(1.0 + margin, 1.0 + 3.0 * margin, (e.e1w + fl) / (e.e1c + fl)) *
-			Smoothstep(gt.significanceLo, gt.significanceHi, e.e1w / (A.N[bi] + fl));
+		e.strongerGate = RampMath::Smoothstep<double>(1.0 + margin, 1.0 + 3.0 * margin, (e.e1w + fl) / (e.e1c + fl), RampMath::SmoothRule::Unguarded) *
+			RampMath::Smoothstep<double>(gt.significanceLo, gt.significanceHi, e.e1w / (A.N[bi] + fl), RampMath::SmoothRule::Unguarded);
 		// A reference clearly weaker than the current block would soften it: that veto is instant.
-		e.harmGate = Smoothstep(1.0 - 3.0 * margin, 1.0 - margin, (e.e1w + fl) / (e.e1c + fl));
-		e.hbGate = Smoothstep(kRho2Lo, kRho2Hi, (e2c + fl) / (e2w + fl));
+		e.harmGate = RampMath::Smoothstep<double>(1.0 - 3.0 * margin, 1.0 - margin, (e.e1w + fl) / (e.e1c + fl), RampMath::SmoothRule::Unguarded);
+		e.hbGate = RampMath::Smoothstep<double>(kRho2Lo, kRho2Hi, (e2c + fl) / (e2w + fl), RampMath::SmoothRule::Unguarded);
 		// Focus: the source block's F at the composed block centre.
 		{
 			const double cx = (bx + 0.5) * B - 0.5, cy = (by + 0.5) * B - 0.5;
@@ -734,14 +735,14 @@ namespace TemporalDetail
 			Position(src, cam, static_cast<int>(cx), static_cast<int>(cy), sx, sy);
 			const int sbx = (std::max)(0, (std::min)(bw - 1, static_cast<int>(std::floor((sx + 0.5) / B)))), sby = (std::max)(0, (std::min)(bh - 1, static_cast<int>(std::floor((sy + 0.5) / B))));
 			const double Fw = src.F[static_cast<size_t>(sby) * bw + sbx];
-			e.focusGate = Smoothstep(kPullLo, kPullHi, A.F[bi] / (Fw + 1e-6));
+			e.focusGate = RampMath::Smoothstep<double>(kPullLo, kPullHi, A.F[bi] / (Fw + 1e-6), RampMath::SmoothRule::Unguarded);
 			e.u = Detail::GridAt(src.u, bw, bh, B, cx, cy);
 		}
 		const double uMax = gt.uncertaintyPx * m_scale * Bg(bi, 2);
-		e.uncGate = 1.0 - Smoothstep(0.3 * uMax, uMax, e.u);
+		e.uncGate = 1.0 - RampMath::Smoothstep<double>(0.3 * uMax, uMax, e.u, RampMath::SmoothRule::Unguarded);
 		e.baseDiff = bd / n;
 		const double allow = (gt.baseNoiseCodes + gt.baseGrainSigmas * std::sqrt((std::max)(0.0, A.N[bi])) / 4.0) * Bg(bi, 1);
-		e.baseGate = 1.0 - Smoothstep(allow, 2.0 * allow, e.baseDiff);
+		e.baseGate = 1.0 - RampMath::Smoothstep<double>(allow, 2.0 * allow, e.baseDiff, RampMath::SmoothRule::Unguarded);
 		const double hzv = hz > 0.0 ? hz : kReferenceHz;
 		const double ageFrames = src.future ? static_cast<double>(src.seq) - static_cast<double>(m_prevSeq + 1) : static_cast<double>(m_prevSeq + 1) - static_cast<double>(src.seq);
 		e.ageSeconds = ageFrames / hzv;
@@ -1040,7 +1041,7 @@ namespace TemporalDetail
 					if (st.xf >= 1.0) st.prevSlot = -1;
 				}
 				const double hint = (i < in.quality.size()) ? Clamp(in.quality[i], 0.0, 1.0) : 1.0;
-				wk.evidence = (std::max)(Smoothstep(kEvidenceLo, kEvidenceHi, st.rebounds), 1.0 - hint);
+				wk.evidence = (std::max)(RampMath::Smoothstep<double>(kEvidenceLo, kEvidenceHi, st.rebounds, RampMath::SmoothRule::Unguarded), 1.0 - hint);
 				if (m_tune.gatesOff & Tuning::kGateEvidence) wk.evidence = 1.0;
 				const bool cam = camBlock[i] != 0;
 				Source* ps = st.slot >= 0 ? FindSlot(st.slot) : nullptr;
@@ -1069,7 +1070,7 @@ namespace TemporalDetail
 						if (wk.pastId >= 0)
 						{
 							const double ratio = bestQ / (wk.pe.e1w + kEnergyFloor);
-							wk.referee = (m_tune.gatesOff & Tuning::kGateEvidence) ? 1.0 : Smoothstep(0.8 * kSoftFuture, 1.2 * kSoftFuture, ratio);
+							wk.referee = (m_tune.gatesOff & Tuning::kGateEvidence) ? 1.0 : RampMath::Smoothstep<double>(0.8 * kSoftFuture, 1.2 * kSoftFuture, ratio, RampMath::SmoothRule::Unguarded);
 						}
 					}
 				}
@@ -1246,10 +1247,10 @@ namespace TemporalDetail
 				const double raw = std::sqrt((std::max)(st.qPeak, q) / q) - 1.0;
 				const double boostMax = m_set.boost ? m_set.boostMax : 0.0;   // the boost switch (off by default)
 				double bn = boostMax > 0.0 ? Clamp(raw / boostMax, 0.0, 1.0) : 0.0;
-				const double hbP = Smoothstep(kRho2Lo, kRho2Hi, (A.e2[u] + kEnergyFloor) / (st.e2Peak + kEnergyFloor));
-				const double fP = Smoothstep(kPullLo, kPullHi, A.F[u] / (st.fPeak + 1e-6));
-				const double noRef = 1.0 - Smoothstep(0.0, 0.5, weight);
-				const double refB = wk.futQ >= 0.0 ? Smoothstep(0.8 * kSoftFuture, 1.2 * kSoftFuture, wk.futQ / (st.qPeak + kEnergyFloor)) : 1.0;
+				const double hbP = RampMath::Smoothstep<double>(kRho2Lo, kRho2Hi, (A.e2[u] + kEnergyFloor) / (st.e2Peak + kEnergyFloor), RampMath::SmoothRule::Unguarded);
+				const double fP = RampMath::Smoothstep<double>(kPullLo, kPullHi, A.F[u] / (st.fPeak + 1e-6), RampMath::SmoothRule::Unguarded);
+				const double noRef = 1.0 - RampMath::Smoothstep<double>(0.0, 0.5, weight, RampMath::SmoothRule::Unguarded);
+				const double refB = wk.futQ >= 0.0 ? RampMath::Smoothstep<double>(0.8 * kSoftFuture, 1.2 * kSoftFuture, wk.futQ / (st.qPeak + kEnergyFloor), RampMath::SmoothRule::Unguarded) : 1.0;
 				bn *= hbP * fP * wk.evidence * noRef * refB * m_set.strength * Bg(u, 3);
 				bn = (st.retired ? 0.0 : bn);
 				if (!st.bOn && bn >= kEnterWeight) st.bOn = true;
@@ -1327,7 +1328,7 @@ namespace TemporalDetail
 					lambda = txt > 1e-9 ? Clamp(sxt / txt, 0.0, 1.0) : 1.0;
 					if (!(txt > 1e-9)) return 0.0;
 					const double rho = sxt / std::sqrt(txt * sxs + 1e-12);
-					return (1.0 - lambda) * (cohOff ? 1.0 : Smoothstep(kCoherenceLo, kCoherenceHi, rho));
+					return (1.0 - lambda) * (cohOff ? 1.0 : RampMath::Smoothstep<double>(kCoherenceLo, kCoherenceHi, rho, RampMath::SmoothRule::Unguarded));
 				};
 				c.tau1 = share(st1, tt1, ss1, c.lam1);
 				c.tau2 = share(st2, tt2, ss2, c.lam2);
