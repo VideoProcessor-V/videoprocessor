@@ -93,9 +93,9 @@ namespace FrameQuiet
 			return instance;
 		}
 
-		// Every render, before pl_render_image (PlanEntrance; it runs in the Original pathway too, owner REVERT 2026-11-12, where nothing is pending and no copies are recorded, so End() flushes nothing): native copies a hook
-		// records are issued by End(). An End() that never came (the seam was not reached) is made up now, outside
-		// the new frame's libplacebo work, and counted (MissedEnds, visible through the decision).
+		// Every VP-pathway render, before pl_render_image (PlanEntrance; the Original pathway calls OriginalFrame() instead): native
+		// copies a hook records are issued by End(). An End() that never came (the seam was not reached) is made up now, outside
+		// the new frame's libplacebo work, and counted (MissedEnds, named apart from late copies in the decision).
 		void Arm(pl_gpu gpu)
 		{
 			if (armed)
@@ -106,6 +106,19 @@ namespace FrameQuiet
 			armed = true;
 			armedGpu = gpu;
 			LedDrive::DeferredCopies::ForThisThread().Arm();
+		}
+
+		// Every Original-pathway render (PlanEntrance; owner REVERT 2026-11-12 keeps the monitor feed there). C1 gate MUST-1: the
+		// AfterPresent seam is skipped in Original, so no frame-quiet window opens: nothing is armed (a hook's copy, none in
+		// Original, would be issued at once, as before C1), no End is owed and none is counted, and no decision is produced.
+		// The gpu is only what Begin hands the inline monitor (frame_bound is off in Original). A VP frame still armed at a
+		// live switch is ended here once (its copies issued, its decision dropped: Original shows no native readback entry).
+		void OriginalFrame(pl_gpu gpu)
+		{
+			if (armed)
+				EndFrame();
+			decision = FallbackCatalog::Decision();
+			armedGpu = gpu;
 		}
 
 		// Every NEW source frame, before the render. `image` is the native, unwarped, not re-based frame.
@@ -179,8 +192,9 @@ namespace FrameQuiet
 			lateSeen = lateTotal;
 			refusedSeen = refusedTotal;
 			const bool recent = lastEventEnd != 0 && endCount - lastEventEnd < kRecentFrames;
+			// C1 gate SHOULD-4: a missed End (the seam was skipped) is named on its own, not as copies issued late.
 			decision = FallbackCatalog::NativeReadback(LedDrive::FenceUnavailableReadbacks().load(std::memory_order_relaxed),
-				recent ? lateTotal : 0, recent ? refusedTotal : 0);
+				recent ? deferred.LateIssued() : 0, recent ? refusedTotal : 0, recent ? missedEnds : 0);
 		}
 
 	private:

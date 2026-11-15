@@ -435,6 +435,51 @@ namespace VideoProcessorTest
 			Assert::AreEqual(-1.0, quiet.Seconds(), L"wall-clock monitor mode, as before C1");
 		}
 
+		// C1 gate MUST-1, the entry the Original branch calls: 50 Original frames (OriginalFrame + Begin, never an End) count no
+		// missed End and produce no decision; a VP frame still armed at a live switch is ended once and not counted; the next VP
+		// frame arms afresh (no missed End owed from Original).
+		TEST_METHOD(OriginalFrameOpensNoWindowAndALiveSwitchEndsTheLastVpFrameOnce)
+		{
+			FrameQuiet::Deferred quiet;
+			Monitor m;
+			const pl_frame f = NoPlanes();
+			for (uint64_t s = 1; s <= 50; ++s)
+			{
+				quiet.OriginalFrame(nullptr);
+				quiet.Begin(m, nullptr, f, s, 24.0, false, static_cast<double>(s) / 24.0);
+				Assert::IsTrue(quiet.TakeDecision().id.empty(), L"no decision in Original");
+			}
+			Assert::AreEqual<unsigned long long>(0, quiet.MissedEnds());
+			Assert::AreEqual<unsigned long long>(0, quiet.Flushes());
+			quiet.Arm(nullptr);   // a VP frame, then the switch to Original before its seam ran
+			quiet.OriginalFrame(nullptr);
+			Assert::AreEqual<unsigned long long>(0, quiet.MissedEnds(), L"the switch is not a missed End");
+			Assert::IsFalse(LedDrive::DeferredCopies::ForThisThread().Armed(), L"the last VP frame was ended (its copies issued)");
+			Assert::IsTrue(quiet.TakeDecision().id.empty(), L"its decision is dropped: Original shows no native readback entry");
+			quiet.Arm(nullptr);   // back to VP
+			Assert::AreEqual<unsigned long long>(0, quiet.MissedEnds(), L"no End is owed from an Original frame");
+			quiet.EndFrame();
+		}
+
+		// C1 gate SHOULD-4: a frame whose post-frame end never ran is named as such, not as copies issued late.
+		TEST_METHOD(AMissedEndIsNamedApartFromLateCopies)
+		{
+			const FallbackCatalog::Decision missed = FallbackCatalog::NativeReadback(0, 0, 0, 2);
+			Assert::IsTrue(missed.engaged);
+			Assert::IsTrue(missed.reason.find("2 frame(s) skipped the post-frame end") != std::string::npos, L"named");
+			Assert::IsTrue(missed.reason.find("readback copy") == std::string::npos, L"no copy is claimed");
+			const FallbackCatalog::Decision both = FallbackCatalog::NativeReadback(0, 1, 0, 1);
+			Assert::IsTrue(both.reason.find("1 readback copy") != std::string::npos && both.reason.find(" and 1 frame(s) skipped") != std::string::npos);
+			Assert::IsTrue(both.reason.find("; ") == std::string::npos, L"the catalog splits on a top-level semicolon");
+			FrameQuiet::Deferred quiet;
+			quiet.Arm(nullptr);
+			quiet.Arm(nullptr);   // the seam was skipped once (a VP pathway)
+			quiet.EndFrame();
+			const FallbackCatalog::Decision d = quiet.TakeDecision();
+			Assert::IsTrue(d.engaged, L"still visible in VP pathways");
+			Assert::IsTrue(d.reason.find("1 frame(s) skipped the post-frame end") != std::string::npos, L"worded as a missed End");
+		}
+
 		// Negative look-ahead: the shot after the cut is native (ratio 1.0), so the cut does NOT engage; it is cancelled and counted.
 		TEST_METHOD(ALookAheadThatSeesANativeNextShotCancelsTheEngageAtTheCut)
 		{

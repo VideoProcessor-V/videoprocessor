@@ -21,11 +21,21 @@
 void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame& target, const pl_frame& image, uint64_t sourceSequence,
 	double captureRateHz, double nominalSourceRateHz, const VideoState& state)
 {
-	// fx/dv-frame-quiet (refs/121): VP issues no native D3D11 work inside libplacebo's frame. Arm here; the R12 AfterPresent
+	// fx/dv-frame-quiet (refs/121): VP issues no native D3D11 work inside libplacebo's frame. Arm here (VP pathways only); the R12 AfterPresent
 	// seam ends the frame (the monitor's tile pass + copy, the hooks' deferred copies, one flush only if that work ran).
 	FrameQuiet::Deferred& frameQuiet = FrameQuiet::Deferred::ForThisThread();
-	frameQuiet.Arm(d3d11 ? d3d11->gpu : nullptr);
+	if (pipelineSlots.OriginalPathway())
 	{
+		// C1 gate MUST-1 (Bill's behaviour restored): the AfterPresent seam is skipped in Original, so a frame armed here would
+		// never be ended (a missed End and a "native readback" engage per frame). Nothing defers in Original (frame_bound off,
+		// OriginalPathway.h; LED and adaptive statistics off): no frame-quiet window opens, the monitor runs inline with this
+		// gpu as before C1, and the entry Bill does not have is released (silent when it is not engaged).
+		frameQuiet.OriginalFrame(d3d11 ? d3d11->gpu : nullptr);
+		SyncFallback(FallbackCatalog::NativeReadback(0, 0));
+	}
+	else
+	{
+		frameQuiet.Arm(d3d11 ? d3d11->gpu : nullptr);
 		const FallbackCatalog::Decision quietDecision = frameQuiet.TakeDecision();
 		if (!quietDecision.id.empty()) SyncFallback(quietDecision);   // visible: native readback without fences / late copies
 	}
