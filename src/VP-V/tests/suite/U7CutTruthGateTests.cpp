@@ -7,9 +7,9 @@
 // size (the lane's own functions), CutTracker::Push per frame in order, one continuous part per clip. Only CONFIRMED verdicts count
 // (the delivered cut, owner ruling Q3: one frame late is allowed); the last frame of a clip has no successor and is not judged.
 //
-// Truth (owner ruling Q1: the COMBINED truth): the hand-checked frame labels of tos_24p_3min, cosmos_23976p_3min and
-// meridian_2997p_3min (vp-handover lead17, folder u7acc-truth; tos from the lane's frame review, where the manifest cuts_s list is wrong: 1315 missing,
-// 1778 and 1946 not cuts). A truth EVENT is a group of frames; it is found when any frame of the group is called a cut. A false cut
+// Truth (owner ruling Q1: the COMBINED truth): frame labels of tos_24p_3min, cosmos_23976p_3min and meridian_2997p_3min made by
+// an opus agent's frame review, not by a person (vp-handover lead17, folder u7acc-truth; candidate frames partly from the prototype law;
+// for tos the manifest cuts_s list is wrong: 1315 missing, 1778 and 1946 not cuts). A truth EVENT is a group of frames; it is found when any frame of the group is called a cut. A false cut
 // is a cut on a frame outside every event and outside the dont-care frames (fades, dissolves, ambiguous frames).
 // Gate on the combined set: recall >= 99.5 % and precision >= 99.5 %. Zero cuts on the cut-free clips: pan_480pxs_23976p,
 // pan_1440pxs_5994p, pan_480pxs_fade_23976p, rate_24, and the synthetic flash and fade (rate_24 picture, the D8 harness's rows).
@@ -119,12 +119,35 @@ namespace U7CutTruthGateTest
 		return t;
 	}
 
+	// WAIVER-U7ACC-GATE-LOG (lead 18 orders A4 + C, logging only: no assertion changes). The per-frame evidence of the confirmed
+	// verdicts (for the firing margins) and the v1 pair law (ClassifyEvents) over the same consecutive records (the before/after).
+	struct FrameEvidence
+	{
+		int frame = 0;
+		bool cut = false, candidate = false, gridLaw = false;
+		double L = 0.0, bar = 0.0, H = 0.0, G = 0.0;
+		// How close the frame came to firing: the spike tier needs L >= kSpikeL and L >= bar, the hard tier H > kHardH and
+		// G >= kHardG; 1 = at the bar of the nearer tier.
+		double Fire() const
+		{
+			using namespace VpUnit::CutFadeJudge;
+			const double spikeL = L / kSpikeL, spikeBar = bar > 0.0 ? L / bar : 0.0;
+			const double spike = spikeL < spikeBar ? spikeL : spikeBar;
+			const double hardH = H / kHardH, hardG = G / kHardG;
+			const double hard = hardH < hardG ? hardH : hardG;
+			return spike > hard ? spike : hard;
+		}
+	};
+
 	struct ClipRun
 	{
 		bool ran = false;
 		int frames = 0;
 		double seconds = 0.0;
 		std::vector<int> cuts, flashes;   // confirmed verdicts, 0-based frame
+		std::vector<FrameEvidence> evidence;   // every confirmed grid-law verdict
+		std::vector<int> v1Cuts, v1Flashes, fades;   // the v1 pair law on (k-1, k); fades = the pair fade (unchanged in v2)
+		int noGrid = 0;   // confirmed verdicts given by the no-grid fallback (gridLaw false, not a part start)
 	};
 
 	// Runs the clip (or its synthetic row) through P1 -> P4 -> CutTracker. ran = false: skipped visibly.
@@ -153,7 +176,8 @@ namespace U7CutTruthGateTest
 		const VpLaneProducts::Dims dims{ static_cast<uint32_t>(W), static_cast<uint32_t>(H) };
 		std::vector<uint8_t> luma, half(VpLaneProducts::HalfLumaBytes(dims)), stats(VpLaneProducts::kStatsBytes);
 		std::vector<uint16_t> view(static_cast<size_t>(W) * H);
-		VpLaneProducts::SourceStatsRecord cur;
+		VpLaneProducts::SourceStatsRecord cur, prev;
+		bool havePrev = false;
 		VpUnit::CutFadeJudge::CutTracker tracker;
 		tracker.Reset();
 		for (int k = 0; k < total; ++k)
@@ -167,12 +191,30 @@ namespace U7CutTruthGateTest
 			Assert::IsTrue(VpLaneProducts::ComputeHalfLuma(v, half.data(), half.size()), L"U7 gate: P1");
 			Assert::IsTrue(VpLaneProducts::ComputeSourceStats(half.data(), dims, stats.data(), stats.size()), L"U7 gate: P4");
 			Assert::IsTrue(VpLaneProducts::ReadSourceStats(stats.data(), stats.size(), &cur), L"U7 gate: P4 read back");
+			if (havePrev)
+			{
+				const VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(prev, cur, false, false);   // WAIVER-U7ACC-GATE-LOG
+				if (e.cut) run.v1Cuts.push_back(k);
+				if (e.flash) run.v1Flashes.push_back(k);
+				if (e.fade) run.fades.push_back(k);
+			}
+			prev = cur;
+			havePrev = true;
 			const VpUnit::CutFadeJudge::CutVerdict verdict = tracker.Push(v.seq, cur);
 			if (!verdict.known) continue;
 			Assert::IsTrue(verdict.confirmed && verdict.seq + 1u == v.seq, L"U7 gate: Push returns the confirmed verdict of the previous frame");
 			const int frame = static_cast<int>(verdict.seq) - 1;
 			if (verdict.cut) run.cuts.push_back(frame);
 			if (verdict.flash) run.flashes.push_back(frame);
+			if (verdict.gridLaw)
+			{
+				FrameEvidence ev;   // WAIVER-U7ACC-GATE-LOG
+				ev.frame = frame; ev.cut = verdict.cut; ev.candidate = verdict.candidate; ev.gridLaw = true;
+				ev.L = verdict.score.L; ev.bar = verdict.bar; ev.H = verdict.score.H; ev.G = verdict.score.G;
+				run.evidence.push_back(ev);
+			}
+			else if (!verdict.partStart)
+				++run.noGrid;
 		}
 		decoder.Close();
 		run.ran = true;
@@ -226,6 +268,50 @@ namespace U7CutTruthGateTest
 		return std::string(text) + (s.missed.empty() ? "" : "; missed:" + s.missed) + (s.falses.empty() ? "" : "; false:" + s.falses);
 	}
 
+	// WAIVER-U7ACC-GATE-LOG: the owner's before/after (v1 pair law vs the v2 sequence law), the firing margins (lead 18 order A4) and the
+	// per-consumer reset counts (order C), one line per row. Logging only. Resets: DetailPulse / TextureRestore / temporal detail restart
+	// on cut or fade (SceneRestart.h, TemporalDetailModel.h); the camera model and the classifier on the delivered cut; one vector pair
+	// is refused per confirmed cut (MotionValidity, v2 only).
+	inline std::string Diagnostics(const char* name, const ClipRun& run, const Truth& truth)
+	{
+		ClipRun v1 = run;
+		v1.cuts = run.v1Cuts;
+		Score s1, s2;
+		s1.Add(v1, truth);
+		s2.Add(run, truth);
+		std::set<int> eventFrames;
+		for (const std::vector<int>& e : truth.events)
+			for (int f : e)
+				eventFrames.insert(f);
+		double highestNonCut = 0.0, weakestCut = 1e9;
+		int highestFrame = -1, weakestFrame = -1, vetoed = 0;
+		for (const FrameEvidence& ev : run.evidence)
+		{
+			const bool inTruth = eventFrames.count(ev.frame) != 0, dontCare = truth.dontCare.count(ev.frame) != 0;
+			if (ev.cut)
+			{
+				if (inTruth && ev.Fire() < weakestCut) { weakestCut = ev.Fire(); weakestFrame = ev.frame; }
+				continue;
+			}
+			if (inTruth || dontCare)
+				continue;
+			if (ev.candidate) ++vetoed;
+			if (ev.Fire() > highestNonCut) { highestNonCut = ev.Fire(); highestFrame = ev.frame; }
+		}
+		std::set<int> v2Restart(run.cuts.begin(), run.cuts.end()), v1Restart(run.v1Cuts.begin(), run.v1Cuts.end());
+		for (int f : run.fades) { v2Restart.insert(f); v1Restart.insert(f); }
+		const double hours = run.seconds / 3600.0;
+		char text[1024];
+		snprintf(text, sizeof(text), "U7DIAG %s: v1 found %d/%d false %d (%.1f / h) flashes %d | v2 found %d/%d false %d (%.1f / h) flashes %d | "
+			"fades %d | margin: highest non-cut fire %.3f at %d (%d vetoed candidates), weakest real cut fire %.3f at %d | "
+			"resets v1 -> v2: DP/TR/TD %d -> %d, camera/classifier %d -> %d, refused vector pairs 0 -> %d | no-grid verdicts %d",
+			name, s1.found, s1.events, s1.falseCuts, hours > 0.0 ? s1.falseCuts / hours : 0.0, int(run.v1Flashes.size()),
+			s2.found, s2.events, s2.falseCuts, hours > 0.0 ? s2.falseCuts / hours : 0.0, int(run.flashes.size()), int(run.fades.size()),
+			highestNonCut, highestFrame, vetoed, weakestFrame >= 0 ? weakestCut : 0.0, weakestFrame,
+			int(v1Restart.size()), int(v2Restart.size()), int(run.v1Cuts.size()), int(run.cuts.size()), int(run.cuts.size()), run.noGrid);
+		return std::string(text);
+	}
+
 	TEST_CLASS(U7CutTruthGateTests)
 	{
 	public:
@@ -245,6 +331,7 @@ namespace U7CutTruthGateTest
 				own.Add(run, row.truth);
 				combined.Add(run, row.truth);
 				Logger::WriteMessage(("U7GATE " + Line(row.id, own) + "\n").c_str());
+				Logger::WriteMessage((Diagnostics(row.id, run, row.truth) + "\n").c_str());   // WAIVER-U7ACC-GATE-LOG
 			}
 			const std::string text = "U7GATE " + Line("combined truth", combined);
 			Logger::WriteMessage((text + "\n").c_str());
@@ -278,6 +365,7 @@ namespace U7CutTruthGateTest
 				own.Add(run, Truth());
 				all.Add(run, Truth());
 				Logger::WriteMessage(("U7GATE " + Line(row.name, own) + ", flashes " + std::to_string(run.flashes.size()) + "\n").c_str());
+				Logger::WriteMessage((Diagnostics(row.name, run, Truth()) + "\n").c_str());   // WAIVER-U7ACC-GATE-LOG
 				if (own.falseCuts != 0) red += std::string(" ") + row.name;
 			}
 			const std::string text = "U7GATE " + Line("cut-free set", all);
