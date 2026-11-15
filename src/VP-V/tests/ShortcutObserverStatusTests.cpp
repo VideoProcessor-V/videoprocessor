@@ -1,10 +1,12 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// S-3f b (lead 17 MUST-1): the "global shortcuts" Fallbacks entry reached through the existing
-// DialogExtension::OnTimer seam (src/VP-V/gui/ShortcutObserverStatus.h) and added to the poll's
+// S-3f b (lead 17 MUST-1; owner 2026-11-15: the default lives in VP-V code): the report key's default
+// global action (src/VP-V/gui/ShortcutObserverStatus.h), driven by the existing one-call
+// DialogExtension::OnTimer() tick, and its "global shortcuts" Fallbacks entry added to the poll's
 // Fallbacks line by VpvGui::WithHostFallbacks (VpStatusAdapter.h).
 //   wanted + failed -> one entry, one notice; Original pathway -> no entry; running -> no entry.
+// The hook itself is a fake here (the real low-level keyboard hook is GUI-only).
 #include "pch.h"
 #include "CppUnitTest.h"
 
@@ -21,28 +23,53 @@ namespace ShortcutObserverStatusTest
 {
 	namespace
 	{
-		// VP's global keys wanted: modern interface, UI shown, foreground_only off, one global action.
-		DialogExtension::DialogFacts GlobalKeysWanted(bool observerRunning)
+		// The VP-V default in force: global_actions absent in a VP-V pathway, global_hotkeys and
+		// foreground_only off, the report key on Ctrl+Alt+D.
+		ShortcutObserverStatus::Facts DefaultWanted()
 		{
-			DialogExtension::DialogFacts facts;
-			facts.modernInterface = true;
-			facts.noUi = false;
-			facts.shortcutsForegroundOnly = false;
-			facts.shortcutsGlobalHotkeys = false;
-			facts.shortcutsGlobalActions = 1;   // state_report, the VP-V default
-			facts.shortcutObserverRunning = observerRunning;
+			ShortcutObserverStatus::Facts facts;
+			facts.defaultApplies = true;
+			facts.keyBound = true;
+			facts.modifiers = static_cast<unsigned char>(FCONTROL | FALT);
+			facts.key = 'D';
 			return facts;
 		}
 
-		// One registered extension for the test; the registry is cleared before and after.
+		// The hook as the extension sees it: Start succeeds when `startWorks`; Running follows it.
+		class FakeObserver : public ShortcutObserverStatus::IObserver
+		{
+		public:
+			bool startWorks = false;
+			bool running = false;
+			int starts = 0;
+			ShortcutObserverStatus::Plan started;
+
+			bool Start(const ShortcutObserverStatus::Plan& plan) override
+			{
+				++starts;
+				started = plan;
+				running = startWorks;
+				return running;
+			}
+			void Stop() override { running = false; }
+			bool Running() const override { return running; }
+		};
+
+		// One registered extension for the test; the registry is cleared before and after. `facts` is
+		// what the configuration says at the next tick; `readable` false = it cannot be read then.
 		struct Registered
 		{
 			std::string note;
-			int pathwayReads = 0;
+			int reads = 0;
+			bool readable = true;
+			ShortcutObserverStatus::Facts facts;
+			FakeObserver observer;
 			ShortcutObserverStatus::Extension extension;
 
-			explicit Registered(bool originalPathway)
-				: extension([this, originalPathway] { ++pathwayReads; return originalPathway; }, note)
+			explicit Registered(const ShortcutObserverStatus::Facts& initial)
+				: facts(initial),
+				  extension([this](ShortcutObserverStatus::Facts& out) { ++reads; out = facts; return readable; },
+					  observer, note)
 			{
 				DialogExtension::ResetForTesting();
 				DialogExtension::Register(&extension);
@@ -61,12 +88,12 @@ namespace ShortcutObserverStatusTest
 	public:
 		TEST_METHOD(WantedAndFailedGivesOneEntryAndOneNotice)
 		{
-			Registered r(false);
+			Registered r(DefaultWanted());   // the fake hook does not start
 			FallbackStatus::Notices notices;
 			int noticesShown = 0;
 			for (int tick = 0; tick < 3; ++tick)
 			{
-				DialogExtension::OnTimer(GlobalKeysWanted(false));
+				DialogExtension::OnTimer();
 				Assert::AreEqual(std::string(ShortcutObserverStatus::kNote), r.note);
 				const std::string heading = Heading(VpvGui::WithHostFallbacks(VpvGui::Snapshot(), r.note));
 				const std::vector<std::string> ids = FallbackStatus::Ids(heading);
@@ -76,13 +103,14 @@ namespace ShortcutObserverStatusTest
 				noticesShown += static_cast<int>(notices.Take(heading).size());
 			}
 			Assert::AreEqual(1, noticesShown);
-			Assert::AreEqual(1, r.pathwayReads);   // read once: a pathway switch applies at the next start
+			Assert::AreEqual(3, r.reads);             // read every tick: the file is followed, a switch applies at once
+			Assert::AreEqual(1, r.observer.starts);   // started once: the plan did not change
 		}
 
 		TEST_METHOD(EntryIsAddedAfterTheRendererFallbacks)
 		{
-			Registered r(false);
-			DialogExtension::OnTimer(GlobalKeysWanted(false));
+			Registered r(DefaultWanted());
+			DialogExtension::OnTimer();
 			VpvGui::Snapshot snapshot;
 			snapshot.rendererPresent = true;
 			snapshot.vp.fallbacks.Set(true, L"Fallbacks engaged: render-ahead (off: no statistics)");
@@ -95,10 +123,13 @@ namespace ShortcutObserverStatusTest
 
 		TEST_METHOD(OriginalPathwayGivesNoEntry)
 		{
-			Registered r(true);
+			ShortcutObserverStatus::Facts original = DefaultWanted();
+			original.defaultApplies = false;   // GlobalActionsForConfig: no default in the Original pathway
+			Registered r(original);
 			FallbackStatus::Notices notices;
-			DialogExtension::OnTimer(GlobalKeysWanted(false));
+			DialogExtension::OnTimer();
 			Assert::IsTrue(r.note.empty());
+			Assert::AreEqual(0, r.observer.starts);   // no default global hook in the Original pathway
 			VpvGui::Snapshot snapshot;
 			const VpvGui::Snapshot shown = VpvGui::WithHostFallbacks(snapshot, r.note);
 			Assert::IsFalse(shown.vp.fallbacks.known);
@@ -108,8 +139,10 @@ namespace ShortcutObserverStatusTest
 
 		TEST_METHOD(RunningObserverGivesNoEntry)
 		{
-			Registered r(false);
-			DialogExtension::OnTimer(GlobalKeysWanted(true));
+			Registered r(DefaultWanted());
+			r.observer.startWorks = true;
+			DialogExtension::OnTimer();
+			Assert::IsTrue(r.observer.running);
 			Assert::IsTrue(r.note.empty());
 			VpvGui::Snapshot snapshot;
 			snapshot.rendererPresent = true;
@@ -119,34 +152,40 @@ namespace ShortcutObserverStatusTest
 
 		TEST_METHOD(EntryClearsWhenTheObserverRuns)
 		{
-			Registered r(false);
-			DialogExtension::OnTimer(GlobalKeysWanted(false));
+			Registered r(DefaultWanted());
+			DialogExtension::OnTimer();
 			Assert::IsFalse(r.note.empty());
-			DialogExtension::OnTimer(GlobalKeysWanted(true));
+			r.observer.running = true;   // the hook runs after all
+			DialogExtension::OnTimer();
 			Assert::IsTrue(r.note.empty());
 		}
 
 		TEST_METHOD(BillsConfigOnlyObserverAndNoGlobalKeysGiveNoEntry)
 		{
-			// [shortcuts] foreground_only: Bill's config-only observer, log-only as Bill.
-			DialogExtension::DialogFacts configOnly = GlobalKeysWanted(false);
-			configOnly.shortcutsForegroundOnly = true;
-			Assert::IsTrue(ShortcutObserverStatus::Note(configOnly, false).empty());
-			// No global action and global_hotkeys off: nothing is wanted.
-			DialogExtension::DialogFacts none = GlobalKeysWanted(false);
-			none.shortcutsGlobalActions = 0;
-			Assert::IsTrue(ShortcutObserverStatus::Note(none, false).empty());
-			// global_hotkeys on alone wants the hook.
-			none.shortcutsGlobalHotkeys = true;
-			Assert::AreEqual(std::string(ShortcutObserverStatus::kNote), ShortcutObserverStatus::Note(none, false));
+			// [shortcuts] foreground_only: keys act only while VP has focus (Bill's config-only observer).
+			ShortcutObserverStatus::Facts configOnly = DefaultWanted();
+			configOnly.foregroundOnly = true;
+			Assert::IsFalse(ShortcutObserverStatus::Decide(configOnly).wanted);
+			Assert::IsTrue(ShortcutObserverStatus::Note(ShortcutObserverStatus::Decide(configOnly).wanted, false).empty());
+			// An explicit global_actions value (here none): the list is the user's and the dialog's.
+			ShortcutObserverStatus::Facts none = DefaultWanted();
+			none.defaultApplies = false;
+			Assert::IsTrue(ShortcutObserverStatus::Note(ShortcutObserverStatus::Decide(none).wanted, false).empty());
+			// global_hotkeys on: the dialog's own observer makes every binding global, so the VP-V hook stands
+			// down (that observer's state needs a seam payload: log-only, as at integ ab32bc33b).
+			ShortcutObserverStatus::Facts hotkeys = DefaultWanted();
+			hotkeys.globalHotkeys = true;
+			Assert::IsFalse(ShortcutObserverStatus::Decide(hotkeys).wanted);
+			Assert::IsTrue(ShortcutObserverStatus::Note(ShortcutObserverStatus::Decide(hotkeys).wanted, false).empty());
 		}
 
 		TEST_METHOD(OnTimerWithoutFactsStillReachesOnTimer)
 		{
-			// The facts-less OnTimer() keeps working for extensions that need no facts.
-			Registered r(false);
+			// The seam's one-call OnTimer() is the extension's only input: it reads its facts itself.
+			Registered r((ShortcutObserverStatus::Facts()));   // nothing wanted
 			DialogExtension::OnTimer();
-			Assert::IsTrue(r.note.empty());   // default facts: nothing wanted
+			Assert::AreEqual(1, r.reads);   // OnTimer() reached the extension (lead 18 SHOULD-B)
+			Assert::IsTrue(r.note.empty());
 		}
 	};
 }
