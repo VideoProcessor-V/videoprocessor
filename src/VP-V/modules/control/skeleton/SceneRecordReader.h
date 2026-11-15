@@ -3,8 +3,9 @@
 #pragma once
 
 // The content-intent observers' reader of the SCENE record (W1-C7, doc 93 row "row 2"): frame `seq`'s cut as published by the skeleton
-// at the frame's seal (SkeletonModule::FillScene -> FrameAnalysis::Store::PublishScene; the verdict is VpUnit::CutFadeJudge::ClassifyEvents
-// over the two P4 records). Compute-once: this only READS the store (PeekScene), it never classifies and never starts any producer.
+// at the frame's seal (SkeletonModule::FillScene -> FrameAnalysis::Store::PublishScene; the verdict is U7 v2, VpUnit::CutFadeJudge::CutTracker
+// over the P4 record sequence, U7-accuracy). `cut` is the DELIVERED cut: once per confirmed cut, at the cut frame or one frame late
+// (Scene::cutLate). Compute-once: this only READS the store (PeekScene), it never classifies and never starts any producer.
 //
 // Not found (false) when: no store is registered, more than one renderer is registered (the observers' walk carries no renderer key; the
 // key is never guessed), the store is off (frame_analysis_store=false), or the frame has no scene group yet (look-ahead frames are walked
