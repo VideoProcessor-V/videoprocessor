@@ -37,7 +37,8 @@ class RepoSeeds(unittest.TestCase):
 
     def test_every_d_and_x_site_detected(self):
         # X2 left this list at C6-1 U25 C10: the copy was REMOVED by D8 (d51e276c3, L-B6), see test_x2_removed_* below.
-        for sid in ["D1", "D2", "D3", "D4", "D5", "D6", "X1", "X3", "X4", "X5", "X6", "X7", "X8"]:
+        # D4 detects 0 at the tip after its retarget (gate-15a-D4: K2 FitEntryOf); proven by Synthetic.test_d4_* instead.
+        for sid in ["D1", "D2", "D3", "D5", "D6", "X1", "X3", "X4", "X5", "X6", "X7", "X8"]:
             self.assertIn(sid, self.sites, sid + " not detected at the tip")
 
     def test_x2_removed_at_the_tip(self):
