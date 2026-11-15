@@ -25,6 +25,9 @@
 #include <VP-V/modules/control/config/config_pages/VpvTierTable.generated.h>
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
+#include <VP-V/modules/repair/temporal_detail/SharedSceneSource.h>
+#include <VP-V/modules/repair/temporal_detail/TemporalDetailModel.h>
+#include <VP-V/modules/repair/temporal_detail/TemporalDetailMotion.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <VP-V/modules/repair/texture_restore/SceneRestart.h>
 #include <VP-V/modules/repair/texture_restore/TextureRestore.h>
@@ -233,6 +236,60 @@ namespace SoftResetTestsNs
 			for (int x = 0; x < w; ++x)
 				im.at(x, y) = 400.0 + 60.0 * std::sin(0.37 * x) * std::cos(0.23 * y) + 0.02 * Noise(uint32_t(x), uint32_t(y), k);
 		return im;
+	}
+
+	// --- temporal detail (WAIVER-C5-SOFTRESET-TD; review D:\codex\vp-handover\batchB\review-softreset-r1.md L1) ---
+	// One run of the temporal detail CPU model over the textured plane: an I-like frame every third, the frames between at 0.7 of its
+	// contrast (the model transfers from the I-like slot there), exact zero vectors, sequence k + 1, Steady, 23.976 Hz, 1080 lines (the
+	// shape of U7FadePartialResetTests' TD case); each frame's scene answer is sceneOf(seq).
+	struct TdRun
+	{
+		std::vector<std::vector<double>> pictures;
+		std::vector<TemporalDetail::Diagnostics> diag;
+		unsigned long long softResets = 0, waiting = 0, missing = 0;   // the SharedSceneSource's counters (plan runs only)
+	};
+
+	template <typename SceneOf>
+	TdRun RunTemporalDetail(int frames, SceneOf sceneOf)
+	{
+		const int w = 128, h = 96;
+		TemporalDetail::FieldMotionSource motion;
+		for (int k = 0; k < frames; ++k)
+		{
+			motion.SetBackward(uint64_t(k) + 1, TemporalDetail::MotionPair::Uniform(w, h, 16.0, 0.0, 0.0));
+			motion.SetForward(uint64_t(k) + 1, TemporalDetail::MotionPair::Uniform(w, h, 16.0, 0.0, 0.0));
+		}
+		TemporalDetail::Settings set;
+		set.mode = TemporalDetail::Mode::Steady;
+		TemporalDetail::Model model(set);
+		TdRun r;
+		for (int k = 0; k < frames; ++k)
+		{
+			TemporalDetail::Model::FrameIn in;
+			in.luma = TemporalDetail::Plane(w, h);
+			const GrainModel::Image g = Textured(w, h, uint32_t(k));
+			for (size_t i = 0; i < in.luma.v.size(); ++i)
+				in.luma.v[i] = (k % 3 ? 0.7 : 1.0) * (g.v[i] - 400.0) + 400.0;
+			in.seq = uint64_t(k) + 1;
+			in.contentHz = 23.976;
+			in.planeLines = 1080.0;
+			in.motion = &motion;
+			in.sceneRestart = sceneOf(in.seq);
+			r.pictures.push_back(model.Process(in).v);
+			r.diag.push_back(model.Diag());
+		}
+		return r;
+	}
+
+	// The same run on the production consumers' answer: a SharedSceneSource on PlanReader with cut_soft_reset = softReset.
+	TdRun RunTemporalDetailOnPlan(int frames, bool softReset)
+	{
+		TemporalDetail::SharedSceneSource source(&PlanReader, softReset);
+		TdRun r = RunTemporalDetail(frames, [&source](uint64_t seq) { return source.Read(seq); });
+		r.softResets = source.SoftResets();
+		r.waiting = source.SoftWaiting();
+		r.missing = source.Missing();
+		return r;
 	}
 
 	TEST_CLASS(SoftResetTests)
@@ -520,6 +577,244 @@ namespace SoftResetTestsNs
 			Assert::IsFalse(TextureRestore::Module().SceneSoftResetInactive());
 			Assert::AreEqual(0ull, DetailPulse::Module().SceneSoftResets());
 			Assert::AreEqual(0ull, TextureRestore::Module().SceneSoftResets());
+		}
+
+		// WAIVER-C5-SOFTRESET-TD (review D:\codex\vp-handover\batchB\review-softreset-r1.md L1, "plan item 2 '(and TD model)' is not
+		// wired"; owner 2026-11-15: no 102b row, fixed in the union): temporal detail reads the SAME soft-reset product as detail pulse
+		// and texture restore. TemporalDetail::SharedSceneSource copies the consumers' VpDetailRestore::SceneRestartAnswer field for
+		// field (the rule, its bar and its depth stay U7's); the TD CPU model applies it: off = no soft reset and the pictures of a stream
+		// without the candidate; on = one soft reset at the candidate (no reset; every slot stored before it at half its keep, once);
+		// never below the bar or provisionally (the inactive note shown); a fade stays the fade's partial reset; a cut and a frame
+		// without a scene group reset, with their causes; a soft reset gives exactly the pictures of a fade at the same keep.
+
+		// The adapter: SceneRestartOf's answer, field for field, for every case the rule tells apart; the consumers' status note; their
+		// M3 watch.
+		TEST_METHOD(TemporalDetailSceneSourceCopiesTheConsumersAnswer)
+		{
+			auto same = [](const VpDetailRestore::SceneRestartAnswer& a, const TemporalDetail::SceneRestartInput& s, const std::string& what) {
+				const std::wstring m = Wide(what);
+				Assert::IsTrue(s.given, m.c_str());
+				Assert::AreEqual(a.restart, s.restart, m.c_str());
+				Assert::AreEqual(a.fromRecord, s.fromRecord, m.c_str());
+				Assert::AreEqual(a.fadeWithoutKeep, s.fadeWithoutKeep, m.c_str());
+				Assert::AreEqual(a.fadePartial, s.fadePartial, m.c_str());
+				Assert::AreEqual(a.softPartial, s.softPartial, m.c_str());
+				Assert::AreEqual(double(a.historyKeep), s.historyKeep, m.c_str());
+				Assert::AreEqual(a.softPartial ? double(a.strength) : 0.0, s.strength, m.c_str());
+			};
+			const char* names[] = { "a confirmed candidate at the bar", "0.99: below the bar", "a provisional candidate", "the delivered cut",
+				"the frame's own cut verdict", "a flash", "a candidate inside a fade", "no scene group", "a plain frame" };
+			for (int k = 0; k < 9; ++k)
+			{
+				g_plan = Plan();
+				g_plan.softAt = 7;
+				switch (k)
+				{
+				case 1: g_plan.softStrength = 0.99f; break;
+				case 2: g_plan.softConfirmed = false; break;
+				case 3: g_plan.softAt = 0; g_plan.cutAt = 7; break;
+				case 4: g_plan.softAt = 0; g_plan.cutHereAt = 7; break;
+				case 5: g_plan.softAt = 0; g_plan.flashAt = 7; break;
+				case 6: g_plan.fadeFrom = 5; g_plan.fadeTo = 10; break;
+				case 7: g_plan.missingAt = 7; break;
+				case 8: g_plan.softAt = 0; break;
+				default: break;
+				}
+				for (int on = 0; on < 2; ++on)
+				{
+					const std::string what = std::string(names[k]) + (on ? " (on)" : " (off)");
+					const VpDetailRestore::SceneRestartAnswer a = VpDetailRestore::SceneRestartOf(7, &PlanReader, on != 0);
+					TemporalDetail::SharedSceneSource source(&PlanReader, on != 0);
+					const TemporalDetail::SceneRestartInput s = source.Read(7);
+					same(a, s, what);
+					same(a, TemporalDetail::SharedSceneSource::From(a), what + ", From");
+					Assert::AreEqual(std::string(VpDetailRestore::SoftResetStatusText(on != 0, false)), std::string(s.statusNote), Wide(what).c_str());
+					Assert::AreEqual(a.softPartial ? 1ull : 0ull, source.SoftResets(), Wide(what).c_str());
+					Assert::AreEqual(a.fromRecord ? 0ull : 1ull, source.Missing(), Wide(what).c_str());
+				}
+			}
+			// As the TD input: only the confirmed candidate at the bar is a soft reset, keep 0.5 at strength 1, and only when on.
+			g_plan = Plan();
+			g_plan.softAt = 7;
+			const TemporalDetail::SceneRestartInput on = TemporalDetail::SharedSceneSource(&PlanReader, true).Read(7);
+			const TemporalDetail::SceneRestartInput off = TemporalDetail::SharedSceneSource(&PlanReader, false).Read(7);
+			Assert::IsTrue(on.softPartial && !on.restart && !on.fadePartial && on.historyKeep == 0.5 && on.strength == 1.0, L"on: the soft reset");
+			Assert::IsTrue(!off.softPartial && !off.restart && off.historyKeep == 1.0 && off.strength == 0.0, L"off: nothing");
+			Assert::AreEqual(std::string(""), std::string(on.statusNote), L"on and able to act: no note");
+			Assert::AreEqual(std::string(", soft reset: off"), std::string(off.statusNote));
+			// The consumers' M3 watch: kSoftResetInactiveGroups provisional groups make the note "inactive"; Forget starts it over.
+			g_plan.allProvisional = true;
+			TemporalDetail::SharedSceneSource watch(&PlanReader, true);
+			TemporalDetail::SceneRestartInput last;
+			for (int k = 1; k <= VpDetailRestore::kSoftResetInactiveGroups; ++k)
+				last = watch.Read(uint64_t(k));
+			Assert::IsTrue(watch.SoftResetInactive(), L"only provisional verdicts: inactive");
+			Assert::AreEqual(std::string(", soft reset: on (inactive: provisional verdicts only)"), std::string(last.statusNote));
+			Assert::AreEqual(1ull, watch.SoftWaiting(), L"the provisional candidate is counted as waiting");
+			Assert::AreEqual(0ull, watch.SoftResets(), L"and never fires");
+			watch.Forget();
+			Assert::IsFalse(watch.SoftResetInactive(), L"Forget: the provisional run starts over");
+		}
+
+		// The TD model on the consumers' answer: off = no soft reset and exactly the pictures of the stream without the candidate; on =
+		// one soft reset at the candidate (no reset, shown, counted once); every slot stored before the candidate transfers at half its
+		// keep from then on, a slot stored at or after it at its full keep; a cut still resets.
+		TEST_METHOD(TemporalDetailModelOffIsUnchangedOnSoftResetsOnceAndCutResets)
+		{
+			const int frames = 24;
+			const uint64_t softAt = 12;   // frame index 11: a B-like frame after a B-like one; both transfer from the I-like slot of index 9
+			const uint64_t cutAt = 20;
+			g_plan = Plan();
+			g_plan.cutAt = cutAt;
+			const TdRun none = RunTemporalDetailOnPlan(frames, true);
+			g_plan.softAt = softAt;
+			const TdRun off = RunTemporalDetailOnPlan(frames, false);
+			const TdRun on = RunTemporalDetailOnPlan(frames, true);
+			Assert::AreEqual(0ull, none.softResets);
+			Assert::AreEqual(0ull, off.softResets, L"off: no soft reset");
+			Assert::AreEqual(1ull, on.softResets, L"on: exactly one soft reset");
+			const size_t c = size_t(softAt) - 1;
+			for (size_t u = 0; u < size_t(frames); ++u)
+			{
+				const std::wstring at = Wide(", frame " + std::to_string(u) + ": " + on.diag[u].status + " / " + off.diag[u].status);
+				Assert::AreEqual(0, off.diag[u].softPartials, (L"off: never a soft reset" + at).c_str());
+				Assert::IsTrue(none.pictures[u] == off.pictures[u], (L"off: the pictures of the stream without the candidate" + at).c_str());
+				Assert::AreEqual(none.diag[u].resets, off.diag[u].resets, (L"off: the same resets" + at).c_str());
+				Assert::IsTrue(off.diag[u].status.find(", soft reset: off") != std::string::npos, (L"off: shown" + at).c_str());
+				Assert::IsTrue(none.diag[u].status.find("soft reset") == std::string::npos, (L"on and able to act: no note" + at).c_str());
+				Assert::AreEqual(none.diag[u].resets, on.diag[u].resets, (L"a soft reset is no reset" + at).c_str());
+				Assert::AreEqual(u < c ? 0 : 1, on.diag[u].softPartials, (L"on: one soft reset, counted once" + at).c_str());
+				if (u < c)
+					Assert::IsTrue(none.pictures[u] == on.pictures[u], (L"on: nothing changes before the candidate" + at).c_str());
+			}
+			Assert::IsTrue(on.diag[c].status.find("soft reset: partial") == 0, Wide(on.diag[c].status).c_str());
+			Assert::AreEqual(0.5, on.diag[c].softKeep, L"keep 0.5 at strength 1");
+			Assert::AreEqual(1.0, on.diag[c].softStrength);
+			Assert::AreEqual(1.0, on.diag[c].fadeKeep, L"not a fade");
+			Assert::AreEqual(0, on.diag[c].fadePartials, L"not counted as a fade");
+			Assert::AreEqual(1.0, on.diag[c + 1].softKeep, L"one frame's reduction, not a ramp");
+			Assert::AreEqual(0.0, on.diag[c + 1].softStrength);
+			// Every block that transfers from a past slot: half its keep from the candidate on when that slot was stored before it (the
+			// store's product), its full keep otherwise; nothing is ever reduced in the run without the candidate.
+			int observed = 0;
+			for (size_t u = 0; u < size_t(frames); ++u)
+				for (size_t b = 0; b < on.diag[u].refSeq.size(); ++b)
+				{
+					const long long ref = on.diag[u].refSeq[b];
+					if (ref >= 0)
+					{
+						const bool reduced = u >= c && ref < static_cast<long long>(softAt);
+						Assert::AreEqual(reduced ? 0.5 : 1.0, on.diag[u].historyKeep[b],
+							Wide("the slot's keep, frame " + std::to_string(u) + ", block " + std::to_string(b)).c_str());
+						observed += reduced ? 1 : 0;
+					}
+					if (none.diag[u].refSeq[b] >= 0)
+						Assert::AreEqual(1.0, none.diag[u].historyKeep[b], L"without the candidate nothing is reduced");
+				}
+			char text[200];
+			snprintf(text, sizeof(text), "TD soft reset: %d block-frames transferred at half keep from slots stored before the candidate", observed);
+			Logger::WriteMessage(text);
+			Assert::IsTrue(observed > 0, Wide(std::string(text) + " (the per-slot check must see a transfer)").c_str());
+			// A cut still resets in full.
+			const size_t k = size_t(cutAt) - 1;
+			Assert::AreEqual(on.diag[k - 1].resets + 1, on.diag[k].resets, L"a cut still resets");
+			Assert::IsTrue(on.diag[k].status.find("reset: cut") == 0, Wide(on.diag[k].status).c_str());
+		}
+
+		// Never below the bar, never provisionally: the pictures and resets of the stream without the candidate, no soft reset. The inert
+		// switch is shown from the kSoftResetInactiveGroups-th provisional group on (M3) and the eligible provisional frame is counted.
+		TEST_METHOD(TemporalDetailModelNoSoftResetBelowTheBarOrProvisionally)
+		{
+			const int frames = 24;
+			g_plan = Plan();
+			g_plan.cutAt = 20;
+			const TdRun none = RunTemporalDetailOnPlan(frames, true);
+			g_plan.softAt = 12;
+			g_plan.softStrength = 0.99f;
+			const TdRun low = RunTemporalDetailOnPlan(frames, true);
+			g_plan.softStrength = 1.0f;
+			g_plan.allProvisional = true;
+			const TdRun provisional = RunTemporalDetailOnPlan(frames, true);
+			Assert::AreEqual(0ull, low.softResets, L"0.99: below the bar nothing happens");
+			Assert::AreEqual(0ull, low.waiting);
+			Assert::AreEqual(0ull, provisional.softResets, L"a provisional verdict never fires");
+			Assert::AreEqual(1ull, provisional.waiting, L"the eligible provisional frame is counted as waiting (M3)");
+			const std::string inactive = ", soft reset: on (inactive: provisional verdicts only)";
+			for (size_t u = 0; u < size_t(frames); ++u)
+			{
+				const std::wstring at = Wide(", frame " + std::to_string(u) + ": " + provisional.diag[u].status);
+				Assert::IsTrue(none.pictures[u] == low.pictures[u], (L"0.99: the pictures without the candidate" + at).c_str());
+				Assert::IsTrue(none.pictures[u] == provisional.pictures[u], (L"provisional: the pictures without the candidate" + at).c_str());
+				Assert::AreEqual(0, low.diag[u].softPartials, at.c_str());
+				Assert::AreEqual(0, provisional.diag[u].softPartials, at.c_str());
+				Assert::AreEqual(none.diag[u].resets, low.diag[u].resets, at.c_str());
+				Assert::AreEqual(none.diag[u].resets, provisional.diag[u].resets, at.c_str());
+				const bool shown = provisional.diag[u].status.find(inactive) != std::string::npos;
+				Assert::AreEqual(int(u) + 1 >= VpDetailRestore::kSoftResetInactiveGroups, shown, (L"the inert switch is shown" + at).c_str());
+				Assert::IsTrue(low.diag[u].status.find("soft reset") == std::string::npos, (L"0.99 with the switch on and able to act: no note" + at).c_str());
+			}
+		}
+
+		// One path: a soft reset gives exactly the pictures of a fade answer at the same keep (the store's keep multiply), shown and
+		// counted apart. Through the consumers' answer a candidate inside a fade stays the fade's partial reset (the fade's keep, no soft
+		// reset), and a frame without a readable scene group resets with its cause, as the consumers restart there.
+		TEST_METHOD(TemporalDetailModelSoftResetIsTheFadeKeepPath)
+		{
+			const int frames = 16;
+			const uint64_t at = 12;
+			auto answers = [at](bool soft) {
+				return [soft, at](uint64_t seq) {
+					TemporalDetail::SceneRestartInput s;
+					s.given = true;
+					if (seq == at)
+					{
+						s.softPartial = soft;
+						s.fadePartial = !soft;
+						s.historyKeep = 0.5;
+						s.strength = soft ? 1.0 : 0.0;
+					}
+					return s;
+				};
+			};
+			const TdRun soft = RunTemporalDetail(frames, answers(true));
+			const TdRun fade = RunTemporalDetail(frames, answers(false));
+			const size_t c = size_t(at) - 1;
+			for (size_t u = 0; u < size_t(frames); ++u)
+			{
+				Assert::IsTrue(soft.pictures[u] == fade.pictures[u], L"a soft reset is the fade keep's path: the same pictures at the same keep");
+				Assert::AreEqual(fade.diag[u].resets, soft.diag[u].resets);
+				Assert::IsTrue(fade.diag[u].historyKeep == soft.diag[u].historyKeep, L"the same slot keeps");
+			}
+			Assert::IsTrue(soft.diag[c].status.find("soft reset: partial") == 0, Wide(soft.diag[c].status).c_str());
+			Assert::IsTrue(fade.diag[c].status.find("fade: partial reset") == 0, Wide(fade.diag[c].status).c_str());
+			Assert::AreEqual(1, soft.diag[c].softPartials);
+			Assert::AreEqual(0, soft.diag[c].fadePartials);
+			Assert::AreEqual(1, fade.diag[c].fadePartials);
+			Assert::AreEqual(0, fade.diag[c].softPartials);
+			Assert::AreEqual(0.5, soft.diag[c].softKeep);
+			Assert::AreEqual(0.5, fade.diag[c].fadeKeep);
+			Assert::AreEqual(soft.diag[c - 1].resets, soft.diag[c].resets, L"no reset");
+
+			// Through the consumers' answer: a candidate inside a fade stays the fade's partial reset, with the fade's keep.
+			g_plan = Plan();
+			g_plan.fadeFrom = 10;
+			g_plan.fadeTo = 15;
+			g_plan.fadeKeep = 0.8f;
+			g_plan.softAt = at;
+			const TdRun inFade = RunTemporalDetailOnPlan(frames, true);
+			Assert::AreEqual(0ull, inFade.softResets, L"a fade frame is no soft reset");
+			Assert::AreEqual(0, inFade.diag[c].softPartials);
+			Assert::IsTrue(inFade.diag[c].status.find("fade: partial reset") == 0, Wide(inFade.diag[c].status).c_str());
+			Assert::AreEqual(0.8, inFade.diag[c].fadeKeep, 1e-6, L"with the fade's keep, not the soft keep");
+			Assert::AreEqual(5, inFade.diag[size_t(frames) - 1].fadePartials, L"every fade frame is the fade's partial reset");
+
+			// A frame without a readable scene group: a reset with its cause (the consumers restart there too), counted.
+			g_plan = Plan();
+			g_plan.missingAt = 9;
+			const TdRun missing = RunTemporalDetailOnPlan(frames, true);
+			Assert::AreEqual(1ull, missing.missing);
+			Assert::AreEqual(missing.diag[7].resets + 1, missing.diag[8].resets, L"no scene group: a reset");
+			Assert::IsTrue(missing.diag[8].status.find("reset: scene (no record)") == 0, Wide(missing.diag[8].status).c_str());
 		}
 	};
 }
