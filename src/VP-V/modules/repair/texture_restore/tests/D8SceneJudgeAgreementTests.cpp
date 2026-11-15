@@ -9,7 +9,8 @@
 //   - per frame: decode (RealClipLibrary, 8-bit gray), P1 half luma + P4 source stats at the clip size (the lane's own functions),
 //     U7 verdict for seq >= 2 (prev, cur, false, false: exactly the skeleton's SceneFactsOf), published into a FrameAnalysis::Store
 //     registered as the one SourceFrameTap store (the harness plays the skeleton's seal; the skeleton itself is not run);
-//   - truth per frame of the part (TruthRestarts): the part's first frame (a restart by construction); the manifest's cuts_s frames;
+//   - truth per frame of the part (TruthRestarts), scored on the part's frames AFTER its first (the first frame has no prior
+//     frame, so no detector decision exists there; excluded for DP and TR alike, never an automatic agree): the manifest's cuts_s frames;
 //     the manifest's fade_in / fade_out events (t0..t1 s): every frame whose pair with the previous frame spans part of the ramp,
 //     i.e. t(k) > t0 and t(k-1) < t1 (the generator's ffmpeg fade filter); synthetic fade: FadeGain(k) != FadeGain(k-1);
 //     synthetic flash: no restart (a flash is not a restart). Labels are never invented: a real clip needs cuts_s or cut_free.
@@ -118,15 +119,17 @@ namespace D8SceneJudgeAgreementNs
 	struct ModuleRow
 	{
 		int frames = 0, oldRestarts = 0, sharedRestarts = 0, agree = 0, differ = 0;
-		int truthAgree = 0, truthMiss = 0, truthExtra = 0;   // the shared decision against the truth (the gate)
+		int truthFrames = 0, truthAgree = 0, truthMiss = 0, truthExtra = 0;   // the shared decision against the truth (the gate)
 		double diffMax = 0.0, diffSum = 0.0;
 		double diffPixels = 0.0;
 		unsigned long long sceneMissing = 0;
 		double msOld = 0.0, msShared = 0.0, msGpu = 0.0;
 		double AgreementPct() const { return frames > 0 ? 100.0 * agree / frames : 0.0; }   // retired law: information only
-		double TruthAgreementPct() const { return frames > 0 ? 100.0 * truthAgree / frames : 0.0; }
+		// Over the scored frames only (the part's frames after its first: see TruthRestarts).
+		double TruthAgreementPct() const { return truthFrames > 0 ? 100.0 * truthAgree / truthFrames : 0.0; }
 		void CountTruth(bool shared, bool truth)
 		{
+			++truthFrames;
 			if (shared == truth) ++truthAgree;
 			else if (truth) ++truthMiss;
 			else ++truthExtra;
@@ -154,13 +157,13 @@ namespace D8SceneJudgeAgreementNs
 		double decodeMs = 0.0;
 	};
 
-	// Truth restart per frame of the part [begin, end) (index k - begin): see the file comment.
+	// Truth restart per frame of the part [begin, end) (index k - begin): see the file comment. Index 0 (the part's first frame)
+	// stays 0 and is NOT scored: it has no prior frame, so no detector decision exists there.
 	inline std::vector<char> TruthRestarts(const RealClip::Clip& clip, Synthetic synthetic, int begin, int end, double hz,
 		std::string& labels)
 	{
 		Assert::IsTrue(end > begin, L"D8 truth: the part has frames");
 		std::vector<char> truth(static_cast<size_t>(end - begin), 0);
-		truth[0] = 1;   // the part's first frame: a restart by construction
 		if (synthetic == Synthetic::Fade)
 		{
 			labels = "synthetic fade gain";
@@ -431,7 +434,7 @@ namespace D8SceneJudgeAgreementNs
 				++dp.frames;
 				dp.oldRestarts += fo.restart ? 1 : 0;
 				dp.sharedRestarts += fs.restart ? 1 : 0;
-				dp.CountTruth(fs.restart, truth[static_cast<size_t>(k - begin)] != 0);
+				if (k > begin) dp.CountTruth(fs.restart, truth[static_cast<size_t>(k - begin)] != 0);
 				if (fo.restart == fs.restart) ++dp.agree;
 				else { ++dp.differ; AddDiff(dp, fo.out, fs.out); }
 			}
@@ -452,7 +455,7 @@ namespace D8SceneJudgeAgreementNs
 				++tr.frames;
 				tr.oldRestarts += ro ? 1 : 0;
 				tr.sharedRestarts += rs ? 1 : 0;
-				tr.CountTruth(rs, truth[static_cast<size_t>(k - begin)] != 0);
+				if (k > begin) tr.CountTruth(rs, truth[static_cast<size_t>(k - begin)] != 0);
 				if (ro == rs) ++tr.agree;
 				else { ++tr.differ; AddDiff(tr, oo, os); }
 			}
