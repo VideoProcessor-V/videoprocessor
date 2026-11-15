@@ -224,8 +224,8 @@ namespace Vpv
 				globalActions->setToolTip(QStringLiteral(
 					"Comma-separated [shortcuts] actions that act while another application has focus, such as "
 					"config_editor or toggle_noui. Default: state_report (Ctrl+Alt+D, report a problem) in the VP-V pathways, none in the "
-					"Original pathway; empty: none. A switch of the Original pathway changes this default within a second. For MPC-HC "
-					"file playback leave "
+					"Original pathway; empty: none. A switch of the Original pathway changes this default at the next start of VP, not "
+					"at once. For MPC-HC file playback leave "
 					"out actions whose keys MPC uses itself (Alt+Enter, Ctrl+1..4, Ctrl+I)."));
 				QObject::connect(globalActions, &QLineEdit::textChanged, globalActions, [k, globalActions](const QString& text)
 				{

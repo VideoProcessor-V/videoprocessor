@@ -9,11 +9,12 @@
 // (StartGlobalShortcutObserver) serves an explicit list and global_hotkeys, as before. No dialog
 // payload: the existing DialogExtension::OnTimer() seam gives the one-second tick and nothing else.
 //
-// - Facts (FromConfig): what the VP side reads itself, from the configuration file the dialog reads,
-//   with the shared readers: DefaultGlobalActionFactsFor (ShortcutDefaults.h: the absent-key default
-//   and its pathway gate through GlobalActionsForConfig, and global_hotkeys / foreground_only through
+// - Facts (FromConfig, FileFactsReader): what the VP side reads itself, from the configuration file
+//   the dialog reads, with the shared readers: DefaultGlobalActionFactsFor (ShortcutDefaults.h: the
+//   absent-key default and its pathway gate, and global_hotkeys / foreground_only through
 //   ConfigFile::TryGetBool, an unreadable value off as the dialog's readers keep it) and
-//   StateReportSettings for the report key's chord.
+//   StateReportSettings for the report key's chord. The pathway in force is read once (a [vpv]
+//   change takes effect at the next start); the [shortcuts] keys follow the file.
 // - Decide: the default key is wanted while the default applies, global_hotkeys is off (the dialog's
 //   observer then makes every binding global itself), foreground_only is off (the user's choice that
 //   keys act only while VP has focus) and the report key has a chord.
@@ -23,8 +24,8 @@
 //   with VP or VP's Config in front the key is theirs. It posts the report command
 //   (ID_COMMAND_STATE_REPORT) to the dialog and never takes the key.
 // - Extension: every tick (UI thread) reads the facts, restarts the hook when the plan changes (an
-//   explicit value, a pathway switch or a new chord applies within a second) and sets the
-//   "global shortcuts" Fallbacks entry while the hook is wanted but not running (rule 5). VpvGui::Poll
+//   explicit global_actions value, global_hotkeys, foreground_only or a new chord applies within a
+//   second; a pathway switch at the next start) and sets the "global shortcuts" Fallbacks entry while the hook is wanted but not running (rule 5). VpvGui::Poll
 //   (VpStatusAdapter.h) adds it to the snapshot's Fallbacks line: the Config status and the one-time
 //   notice always; Ctrl+I, the crash state and the Ctrl+Alt+D bundle while a renderer runs.
 //
@@ -76,10 +77,19 @@ namespace ShortcutObserverStatus
 		return false;
 	}
 
-	inline Facts FromConfig(const ConfigFile& config)
+	// The file's pathway (ShortcutDefaults.h OriginalPathwayForConfig: [vpv] then [vprenderer]
+	// pipeline_original_pathway, NormalizeName == "on").
+	inline bool OriginalPathwayOf(const ConfigFile& config)
+	{
+		return OriginalPathwayForConfig([&config](const char* section, const char* key, std::string& out)
+			{ return config.TryGetString(section, key, out); });
+	}
+
+	// originalPathway: the pathway in force (FileFactsReader reads it once; see there).
+	inline Facts FromConfig(const ConfigFile& config, bool originalPathway)
 	{
 		Facts facts;
-		const DefaultGlobalActionFacts shortcuts = DefaultGlobalActionFactsFor(config);
+		const DefaultGlobalActionFacts shortcuts = DefaultGlobalActionFactsFor(config, originalPathway);
 		facts.defaultApplies = ListNames(shortcuts.defaultActions, StateReportSettings::kShortcutKey);
 		facts.globalHotkeys = shortcuts.globalHotkeys;
 		facts.foregroundOnly = shortcuts.foregroundOnly;
@@ -99,6 +109,44 @@ namespace ShortcutObserverStatus
 		}
 		return facts;
 	}
+
+	// The same with the file's own pathway.
+	inline Facts FromConfig(const ConfigFile& config)
+	{
+		return FromConfig(config, OriginalPathwayOf(config));
+	}
+
+	// The executable's reader: the configuration file the dialog reads, every tick (`load` fills it;
+	// false = not readable now). The pathway in force is read once, from the first readable file: a
+	// [vpv] change takes effect at the next start (ConfigurationApplyPolicy: SaveOnly), so the default
+	// follows the pathway the process runs (R14-34: never a default hook while the Original pathway
+	// runs). The [shortcuts] keys follow the file, as the dialog applies them live.
+	class FileFactsReader
+	{
+	public:
+		using Loader = std::function<bool(ConfigFile&)>;
+
+		explicit FileFactsReader(Loader load) : m_load(std::move(load)) {}
+
+		bool operator()(Facts& facts)
+		{
+			ConfigFile config;
+			if (!m_load || !m_load(config))
+				return false;
+			if (!m_pathwayKnown)
+			{
+				m_originalPathway = OriginalPathwayOf(config);
+				m_pathwayKnown = true;
+			}
+			facts = FromConfig(config, m_originalPathway);
+			return true;
+		}
+
+	private:
+		Loader m_load;
+		bool m_pathwayKnown = false;
+		bool m_originalPathway = false;
+	};
 
 	// What the hook does: observe the report key's chord, or nothing.
 	struct Plan

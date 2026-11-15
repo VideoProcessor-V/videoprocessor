@@ -173,20 +173,18 @@ namespace
 		DWORD m_threadId = 0;
 	};
 
-	// Every tick: the configuration file the dialog reads (ConfigFile returns an unchanged file from its cache).
-	bool ReadFacts(ShortcutObserverStatus::Facts& facts)
+	// Every tick: the configuration file the dialog reads (ConfigFile returns an unchanged file from its
+	// cache). False = not readable now (none yet, or being replaced): the plan in force stays.
+	bool LoadConfiguration(ConfigFile& config)
 	{
-		ConfigFile config;
-		if (!config.Load())
-			return false;   // not readable now (none yet, or being replaced): the plan in force stays
-		facts = ShortcutObserverStatus::FromConfig(config);
-		return true;
+		return config.Load();
 	}
 
 	struct ShortcutObserverStatusRegistration
 	{
 		ReportKeyHook hook;
-		ShortcutObserverStatus::Extension extension{ ReadFacts, hook, ShortcutObserverStatus::CurrentNote() };
+		ShortcutObserverStatus::Extension extension{
+			ShortcutObserverStatus::FileFactsReader(LoadConfiguration), hook, ShortcutObserverStatus::CurrentNote() };
 		ShortcutObserverStatusRegistration() { DialogExtension::Register(&extension); }
 	};
 	ShortcutObserverStatusRegistration g_shortcutObserverStatusRegistration;
