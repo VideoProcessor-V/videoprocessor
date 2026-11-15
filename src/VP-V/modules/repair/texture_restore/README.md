@@ -108,6 +108,8 @@ Run single-threaded (CPU only):
 | `texture_restore_cap` | profile ([vprenderer.Default] and matching profiles) | float | 1.0 - 2.0 | 1.5 | VP-V > Repair > Advanced > Texture restore and detail pulse: limits | n/a (VP-only): unchanged by the Original pathway | The most texture is raised (safety limit) | same on all (not tiered) |
 
 
+Dependency: `detail_pulse_stabilise` and `texture_restore` keep their history only with `frame_analysis_store` on (default off). With the store off every frame restarts (gain 1), visibly through the "<module> scene judge" fallback (see "Scene judge" below).
+
 - Existing keys: `texture_restore`, `texture_restore_cap`, `detail_pulse_stabilise`, `detail_pulse_cap`, `detail_pulse_fast`
 - Planned keys: (none)
 - Tiers: Upper only (after the efficiency pass)
@@ -116,6 +118,7 @@ Run single-threaded (CPU only):
 
 - "Fallbacks engaged" entry: none produced. `Texture restore: inactive (<reason>)` (and `Detail pulse stabilise: inactive (<reason>)`) appear in the status line only, not under "Fallbacks engaged".
 - Behaviour: Failure renders without it (counted in the status line on the main path; silent on the extra and crossfade paths).
+- Exception, the scene judge: a frame with no readable scene group (e.g. `frame_analysis_store` off) engages the FallbackCatalog entry "<module> scene judge" (SceneJudgeUnavailable; Ctrl+I / Config status) and is counted by `SceneMissing()`.
 
 ## Net fingerprint / upstream
 
@@ -207,4 +210,4 @@ This module still creates its own GPU textures (see the static test src/VP-V/tes
 
 ## Scene judge (detail pulse and texture restore)
 
-- Decision (L-B6, WAIVER-B6-D8-MODELS; source: lead 9 ruling on D8 and audit-L-B6 SHOULD 8; 2026-11-14T13:25Z): both modules read the shared cut/fade verdict (U7, the frame analysis scene group via `SceneReader`); their private tile-change laws are deleted and kept only as the test reference `TileJudgeReference`. The scene group is read with Peek, so with `frame_analysis_store` off, or a frame whose group is not sealed, there is no verdict: the references restart every frame (visibly: the "<module> scene judge" fallback, Ctrl+I). Detail pulse and texture restore therefore need `frame_analysis_store` on to keep their history. The shared vector veto (P7) is not yet inside U7; the D8 switch stays parked behind it.
+- Decision (L-B6, WAIVER-B6-D8-MODELS; source: lead 9 ruling on D8 and audit-L-B6 SHOULD 8; 2026-11-14T13:25Z): both modules read the shared cut/fade verdict (U7, the frame analysis scene group via `SceneReader`); their private tile-change laws are deleted and kept only as the test reference `TileJudgeReference`. The scene group is read with Peek, so with `frame_analysis_store` off, or a frame whose group is not sealed, there is no verdict: the references restart every frame (visibly: the "<module> scene judge" fallback, Ctrl+I). Detail pulse and texture restore therefore need `frame_analysis_store` on to keep their history. D8 is live: the shared-judge read is unconditional (DetailPulse passes `scene_restart` to its shader, TextureRestore calls `SceneRestartOf`) and there is no parking switch. The retired tile law's vector veto (the field's untrusted share) has no equivalent yet: a reader-selectable vector veto inside U7, fed from P7 / the engine memo trust, is a later addition (refs/102b row B6-D8-VECTOR-VETO; trigger: L-B4's P7 integration lands). Until then DP/TR may restart on a pan with a large histogram change where the tile law did not; the FIX-B6-D8 pan rows measure it.
