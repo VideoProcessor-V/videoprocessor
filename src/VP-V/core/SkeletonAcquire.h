@@ -65,7 +65,8 @@ inline const char* Token(AcquireForm f) { return f == AcquireForm::Cpu ? "cpu" :
 //   kPrecisionUnorm16  R16 unorm at FULL 16-bit scale (msb-aligned code: 10-bit << 6, 12-bit << 4); exact for sources <= 14
 //                      bits including a 2x2 mean (2 extra fraction bits);
 //   kPrecisionFloat32  R32F in the plane's normalised units (0..1 as sampled);
-//   kPrecisionFloat16  R16F: an 11-bit mantissa, NOT 12-bit safe; never for pixel values (OwnerFill::pixelData refuses it).
+//   kPrecisionFloat16  R16F: an 11-bit mantissa, NOT 12-bit safe; never for pixel values (OwnerFill::pixelData refuses it) and
+//                      no ledger format for any product (VariantShape.h TexFormatOf refuses it; N2).
 enum : uint8_t { kPrecisionDefault = 0, kPrecisionUnorm16 = 1, kPrecisionFloat32 = 2, kPrecisionFloat16 = 3 };
 
 inline const char* PrecisionName(uint8_t p)

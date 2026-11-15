@@ -233,6 +233,23 @@ namespace FallbackCatalogTest
 			Assert::IsFalse(EarlyUpload(true, true, "").engaged);
 		}
 
+		TEST_METHOD(NativeReadbackNamesAMissingFenceAndALateFlush)
+		{
+			Assert::AreEqual(std::string("native readback"), NativeReadback(0, 0).id);
+			Assert::IsFalse(NativeReadback(0, 0).engaged, L"fences everywhere and the flush ran: nothing to show");
+			const Decision noFence = NativeReadback(2, 0);
+			Assert::IsTrue(noFence.engaged);
+			Assert::IsTrue(Has(noFence, "no D3D11 fence") && Has(noFence, "2 readback(s)"));
+			Assert::IsFalse(Has(noFence, "late"), L"only the missing fence is named");
+			const Decision late = NativeReadback(0, 3);
+			Assert::IsTrue(late.engaged);
+			Assert::IsTrue(Has(late, "3 readback copy") && Has(late, "a frame late"));
+			Assert::IsFalse(Has(late, "no D3D11 fence"));
+			const Decision both = NativeReadback(1, 1);
+			Assert::IsTrue(Has(both, "no D3D11 fence") && Has(both, " and 1 readback copy"));
+			Assert::IsTrue(both.reason.find("; ") == std::string::npos, L"the catalog splits on a top-level semicolon");
+		}
+
 		TEST_METHOD(ExtraRebaseAndDetailFailuresAreVisible)
 		{
 			const Decision extra = RebaseExtraNative("no format");
@@ -257,6 +274,20 @@ namespace FallbackCatalogTest
 			Assert::AreEqual(std::string("texture restore"), restore.id);
 			Assert::IsFalse(TextureRestoreFailed(false, "x").engaged);
 			Assert::AreEqual(std::string("texture restore"), TextureRestoreFailed(false, "x").id);
+		}
+
+		TEST_METHOD(SceneJudgeUnavailableIsVisibleAndReleases)
+		{
+			const Decision d = SceneJudgeUnavailable("detail pulse", true, "no frame analysis store");
+			Assert::IsTrue(d.engaged);
+			Assert::AreEqual(std::string("detail pulse scene judge"), d.id);
+			Assert::IsTrue(Has(d, "scene judge unavailable (no frame analysis store)"));
+			FallbackStatus::Registry registry;
+			Assert::IsTrue(Sync(registry, d));
+			Assert::IsTrue(registry.Engaged("detail pulse scene judge"));
+			Assert::IsTrue(Sync(registry, SceneJudgeUnavailable("detail pulse", false, "")));
+			Assert::IsFalse(registry.Engaged("detail pulse scene judge"));
+			Assert::AreEqual(std::string("texture restore scene judge"), SceneJudgeUnavailable("texture restore", false, "").id);
 		}
 
 		TEST_METHOD(CustomHooksNotLoadedListsTheFailedHooks)

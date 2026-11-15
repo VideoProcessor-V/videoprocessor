@@ -94,11 +94,14 @@ namespace Vpv
 			// Video memory the dispatcher holds OUTSIDE the product textures (the governor does not see it): the tap ring
 			// (tap + extended plane, R16, per in-flight frame) and the kernels' working textures. Analytic (no allocation).
 			uint64_t PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const;
-			// G5: the last measured device time of a product's pass(es) in ms (pl_timer), 0 = not measured yet. The lane job's
-			// predictedMs reads it (a conservative derived default is used until then).
+			// G5 + FIX-S0-COST (S0, registered fix lead8/FIX-S0-COST.md): the measured device time of a product per FRAME in ms
+			// (pl_timer; the mean over the timed frames of the SUM of all passes), 0 = not measured yet. The lane job's predictedMs and
+			// the gap planner read it (a conservative derived default is used until then). It used to be the LAST single pass, which
+			// under-reported the five-pass P10 by about 5x.
 			double MeasuredMs(VpSkeleton::ProductId id) const;
+			// The last single timed pass of the product in ms (diagnostics and the cost bench only; not a planning input).
+			double LastPassMs(VpSkeleton::ProductId id) const;
 			// Cost of ALL timed passes of a product's frames (mean ms per frame, worst pass, worst frame); zero struct when unknown.
-			// MeasuredMs() above is the last single pass only, so for the five-pass P10 it under-reports by about 5x.
 			GpuProductCost CostOf(VpSkeleton::ProductId id) const;
 			const Counters& Stats() const { return m_counters; }
 			size_t PendingReleases() const { return m_graveyard.size(); }

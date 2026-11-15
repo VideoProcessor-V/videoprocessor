@@ -4,7 +4,7 @@
 // guards (strength 0 / off bit-identical, monotonic, cap, never below the display black).
 #include "pch.h"
 #include "CppUnitTest.h"
-#include <VP-V/modules/colour/appearance/AmbientAdaptation.h>
+#include <VP-V/modules/colour/display_mapping/AmbientAdaptation.h>
 #include <IntentInterpreterSupport.h>
 #include <vprenderer/LibplaceboRenderParameters.h>
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>

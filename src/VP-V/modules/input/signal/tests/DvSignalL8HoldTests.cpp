@@ -13,7 +13,7 @@
 #include <VP-V/modules/input/signal/DvMetadataHold.h>
 #include <VP-V/modules/input/signal/DvCompareCapture.h>
 #include <VP-V/modules/input/signal/DvTunnelPolicy.h>
-#include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
+#include <VP-V/modules/colour/display_mapping/DvTrimSelection.h>
 #include <dv_loopback/DvLoopbackHarness.h>
 
 #include <algorithm>

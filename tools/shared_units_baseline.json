@@ -47,6 +47,12 @@
      "pattern": "p\\.grainCal = kGrainCal",
      "kind": "shared_function_use",
      "reason": "CPU reference model calls the owner function GrainSplit::Compute for tests (switch to GrainSplit::DefaultParams with the GPU fix) (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+     "pattern": "^\\s*constexpr (int|double) \\w+ = kGrainLaw\\.\\w+;",
+     "kind": "false_positive",
+     "reason": "reads the U1 grain law by name (GrainSplit::DefaultParams), not a private copy (B2 unit move, ND04; verified at r2/job1-b2 f2a63dd3e)"
     }
    ]
   },
@@ -150,6 +156,24 @@
      "pattern": "exp\\(-0\\.5 \\* d[xy] \\* d[xy]\\)",
      "kind": "false_positive",
      "reason": "Gaussian surround weight over the P11 block grid (J_surround), not a band split of the picture"
+    },
+    {
+     "file": "src/VP-V/modules/repair/temporal_detail/TemporalDetail.h",
+     "pattern": "^#include <VP-V/modules/repair/grain_split/GrainSplit\\.h>$",
+     "kind": "false_positive",
+     "reason": "include of the U1 grain law header: TD reads blockPx, no band-split copy (B2 unit move, ND04; verified at r2/job1-b2 f2a63dd3e)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+     "pattern": "^#include <VP-V/modules/repair/grain_split/GrainSplit\\.h>$",
+     "kind": "false_positive",
+     "reason": "include of the U1 grain law header: TR reads tile/sub-blocks/calibration/kappa, no band-split copy (B2 unit move, ND04; verified at r2/job1-b2 f2a63dd3e)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+     "pattern": "^\\s*constexpr double kSigma1 = VpUnit::BandFromBase::kSigmaFine, kSigma2 = VpUnit::BandFromBase::kSigmaBase, kSigma3 = VpUnit::BandFromBase::kSigmaLow;",
+     "kind": "false_positive",
+     "reason": "reads the U2 unit sigma table; band splits is a trailing comment (B2 unit move, ND04; verified at r2/job1-b2 f2a63dd3e)"
     }
    ]
   },
@@ -223,6 +247,24 @@
      "pattern": "avg = 0\\.25 \\* \\(texture",
      "kind": "false_positive",
      "reason": "4-tap ring average around the pixel (deband sampling), not a downsample (refs/126 s3, B0)"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
+     "pattern": "vec2 vpt = use_temporal",
+     "kind": "false_positive",
+     "reason": "previous-frame vector scale (x 0.25), not a 2x2 box (gate-C1-batch2 row 0a9e66738: verified FP)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
+     "pattern": "h[0-3] \\* \\(1\\.0 - 0\\.(75|25)\\) \\+ h[0-3] \\* 0\\.(75|25)",
+     "kind": "false_positive",
+     "reason": "linear interpolation weights 0.25/0.75 between smoothed rows, not a 2x2 box (gate-C1-batch2 row 0a9e66738: verified FP, pattern narrowed to the statement as the gate prescribed)"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
+     "pattern": "length\\(vec2\\(gx, gy\\)\\) \\* 0\\.25",
+     "kind": "false_positive",
+     "reason": "Sobel gradient normalisation, not a downsample (gate-C1-batch2 row 0a9e66738: verified FP)"
     }
    ]
   },
@@ -274,10 +316,22 @@
      "reason": "the lane hosts the P11 GPU kernel (co-owner of U4) (refs/126 s3, B0)"
     },
     {
-     "file": "src/VP-V/modules/repair/grain_split/",
-     "pattern": "block|e1|BlockMeans",
+     "file": "src/VP-V/modules/repair/grain_split/GrainSplit.h",
+     "pattern": "block means of d1|BlockMeans|region block stats \\(declared\\)",
      "kind": "false_positive",
-     "reason": "P10 own block energies e1/e2/e3: inside the U1 owner, part of the split law (refs/126 s3, B0)"
+     "reason": "P10 own block energies e1/e2/e3: inside the U1 owner, part of the split law (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/grain_split/GrainSplitGpu.cpp",
+     "pattern": "block means of d1",
+     "kind": "false_positive",
+     "reason": "P10 own block energies e1/e2/e3: inside the U1 owner, part of the split law (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/grain_split/GrainSplitGpu.h",
+     "pattern": "block mean of d3",
+     "kind": "false_positive",
+     "reason": "P10 own block energies e1/e2/e3: inside the U1 owner, part of the split law (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
     },
     {
      "file": "src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
@@ -376,7 +430,7 @@
   "U7": {
    "name": "cut_fade_flash_judge",
    "blocking": true,
-   "baseline_duplicates": 6,
+   "baseline_duplicates": 0,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/input/signal/HdrInference.cpp",
@@ -481,7 +535,7 @@
      "reason": "carries the frame's mean luma (8-bit codes) read back from the scalar pass as data; the cut rule is CutFadeJudge::MeanStepCut / MeanStepCutLine"
     }
    ],
-   "waiver": "WAIVER-JOB1-U7 (coordinator, job1): 0 -> 6 is a new detection of REAL X2 copies (kCutShare/kFadeStepShare), not a loosened rule; target 0 at B6, expires at B6"
+   "waiver": "WAIVER-JOB1-U7 EXPIRED at B6: the X2 copies are removed (L-B6), U7 measures 0 and the baseline is lowered 6 -> 0 (WAIVER-LB6-U7, gate C3)"
   },
   "U8": {
    "name": "active_picture_rect",
@@ -612,10 +666,22 @@
      "reason": "call of the shared siting law (refs/126 s3, B0)"
     },
     {
-     "file": "src/VP-V/modules/input/source_analysis/identity/chain/",
+     "file": "src/VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.cpp",
+     "pattern": "PolyphaseProposer",
+     "kind": "false_positive",
+     "reason": "source-identity polyphase EVIDENCE proposer (detection), not a chroma upsample (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h",
+     "pattern": "PolyphaseProposer\\.h",
+     "kind": "false_positive",
+     "reason": "source-identity polyphase EVIDENCE proposer (detection), not a chroma upsample (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/identity/chain/PolyphaseProposer.h",
      "pattern": "[Pp]olyphase",
      "kind": "false_positive",
-     "reason": "source-identity polyphase EVIDENCE proposer (detection), not a chroma upsample (refs/126 s3, B0)"
+     "reason": "source-identity polyphase EVIDENCE proposer (detection), not a chroma upsample (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
     },
     {
      "file": "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
@@ -691,13 +757,13 @@
    "name": "one_pole_alpha",
    "known_false_positive": [],
    "blocking": true,
-   "baseline_duplicates": 12
+   "baseline_duplicates": 9
   },
   "U24": {
    "name": "robust_stats",
    "known_false_positive": [],
    "blocking": true,
-   "baseline_duplicates": 73
+   "baseline_duplicates": 60
   },
   "U25": {
    "name": "ramp_clamp_smoothstep",
@@ -709,8 +775,8 @@
    "name": "luma_from_rgb_weights",
    "known_false_positive": [],
    "blocking": true,
-   "baseline_duplicates": 25
+   "baseline_duplicates": 21
   }
  },
- "note": "refs/126 B0 (2026-11-12): all registered units blocking at the measured true count; baselines only shrink. U10 baseline = the matcher D1 global search (X1, file-level owner scope), 0 at refs/126 B6. U7 6 = DetailPulse/TextureRestore private cut/fade shares (X2). U13 14 = SourceResolutionDetector private blockiness (real). U17 is undefined/reserved. U10 = 19 after the audit fix (Dispatch-label lines un-suppressed)."
+ "note": "refs/126 B0 (2026-11-12): all registered units blocking at the measured true count; baselines only shrink. U10 baseline = the matcher D1 global search (X1, file-level owner scope), 0 at refs/126 B6. U7 0 at L-B6 (the X2 DetailPulse/TextureRestore private cut/fade shares are removed; was 6). U13 14 = SourceResolutionDetector private blockiness (real). U17 is undefined/reserved. U10 = 19 after the audit fix (Dispatch-label lines un-suppressed)."
 }

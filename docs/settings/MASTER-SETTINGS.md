@@ -11,10 +11,10 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 
 | Count | Value |
 |---|---|
-| Modules | 43 |
-| Documented rows | 393 |
-| VP-V keys in code (outside Bill's schema lists) | 388 |
-| of which documented | 388 |
+| Modules | 47 |
+| Documented rows | 394 |
+| VP-V keys in code (outside Bill's schema lists) | 389 |
+| of which documented | 389 |
 | of which undocumented (appendix A) | 0 |
 | Documented keys with no code entry (appendix B) | 0 |
 
@@ -25,7 +25,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Input | `input.capture` | built | [README](../../src/VP-V/modules/input/capture/README.md) | 7 | 3 | 3/3 |
 | Input | `input.signal` | built | [README](../../src/VP-V/modules/input/signal/README.md) | 8 | 8 | 7/8 |
 | Input | `input.queue_timing` | built | [README](../../src/VP-V/modules/input/queue_timing/README.md) | 10 | 15 | 9/15 |
-| Input | `input.source_analysis` | partial | [README](../../src/VP-V/modules/input/source_analysis/README.md) | 17 | 20 | 14/20 |
+| Input | `input.source_analysis` | partial | [README](../../src/VP-V/modules/input/source_analysis/README.md) | 18 | 21 | 15/21 |
 | Input | `input.light_level` | draft | [README](../../src/VP-V/modules/input/source_analysis/light_level/README.md) | 4 | 33 | 4/33 |
 | Input | `input.source_analysis.identity.chain` | draft | [README](../../src/VP-V/modules/input/source_analysis/identity/chain/README.md) | 1 | 0 | 0/0 |
 | Input | `input.source_analysis.lane.shared.half_luma` | draft | [README](../../src/VP-V/modules/input/source_analysis/lane/shared/README.md) | 1 | 0 | 0/0 |
@@ -50,9 +50,13 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Scaling | `scaling.chroma_upscale.basic` | draft | [README](../../src/VP-V/modules/scaling/chroma_upscale/basic/README.md) | 1 | 0 | 0/0 |
 | Scaling | `scaling.geometry` | built | [README](../../src/VP-V/modules/scaling/geometry/README.md) | 5 | 8 | 1/8 |
 | Scaling | `scaling.output` | partial | [README](../../src/VP-V/modules/scaling/output/README.md) | 29 | 30 | 29/30 |
+| Colour | `colour.dm_pre` | placeholder | [README](../../src/VP-V/modules/colour/dm_pre/README.md) | 0 | 0 | 0/0 |
 | Colour | `colour.tone_gamut` | built | [README](../../src/VP-V/modules/colour/tone_gamut/README.md) | 1 | 5 | 0/5 |
+| Colour | `colour.dm_curve` | placeholder | [README](../../src/VP-V/modules/colour/dm_curve/README.md) | 0 | 0 | 0/0 |
 | Colour | `colour.extended_range` | built | [README](../../src/VP-V/modules/colour/extended_range/README.md) | 2 | 2 | 2/2 |
+| Colour | `colour.display_mapping` | draft | [README](../../src/VP-V/modules/colour/display_mapping/README.md) | 0 | 0 | 0/0 |
 | Colour | `colour.sdr_tone_shape` | built | [README](../../src/VP-V/modules/colour/sdr_tone_shape/README.md) | 7 | 7 | 7/7 |
+| Colour | `colour.dm_trims` | placeholder | [README](../../src/VP-V/modules/colour/dm_trims/README.md) | 0 | 0 | 0/0 |
 | Colour | `colour.appearance` | placeholder | [README](../../src/VP-V/modules/colour/appearance/README.md) | 13 | 6 | 0/6 |
 | Dynamic drive | `drive.led_measure` | built | [README](../../src/VP-V/modules/drive/led_measure/README.md) | 0 | 14 | 0/14 |
 | Dynamic drive | `drive.led_compensation` | built | [README](../../src/VP-V/modules/drive/led_compensation/README.md) | 90 | 5 | 1/5 |
@@ -111,6 +115,7 @@ Modules: `input.capture`, `input.signal`, `input.queue_timing`, `input.source_an
 | `source_resolution_engage_max_wait_s` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 600.0 | 20 | 20 | VP-V > Scaling > Advanced > Re-base timing | n/a (VP-only): unchanged by the Original pathway | The longest wait (s) for a switching moment (a cut, real black, fast pan or low-detail moment) before auto crossfades into the re-base | same on all (not tiered) |
 | `source_resolution_evidence_seconds` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | float | 2.0 - 120.0 | 10 | 10 | VP-V > Scaling > Advanced > Re-base evidence | n/a (VP-only): unchanged by the Original pathway | Seconds of agreeing evidence auto needs before it declares a lower source (Picture slider; Standard 10) | same on all (not tiered) |
 | `source_resolution_evidence_shots` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | int | 1 - 10 | 3 | 3 | VP-V > Scaling > Advanced > Re-base evidence | n/a (VP-only): unchanged by the Original pathway | Separate shots of agreeing evidence auto needs before it declares a lower source (Picture slider; Standard 3) | same on all (not tiered) |
+| `source_resolution_frame_bound` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on |  | VP-V > Input > Advanced > Capture plumbing (expert) | Original pathway sets `off` (it never runs the monitor) | The monitor decides on a fixed frame count (D = 8, source time) and its GPU work runs after the submit (FrameQuiet.h), so the picture does not depend on readback timing; the re-base switch still lands on the next detected cut. Off: the earlier timing-dependent mode. fx/dv-frame-quiet, refs/121 | same on all (not tiered) |
 | `source_resolution_latch_fixes` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Proposed retirement > Proven fixes (all on by default) | Original pathway sets `off` (ADR-0019) | Latch fixes for source_resolution auto: re-engage on the standard after native evidence, level-aware native readings, per-tile floor test, shape cuts, the switch at a cut / real black / fast pan / low-detail moment or a crossfade, a short release fade; off = the earlier behaviour and no fades. proposed for retirement (group A) | same on all (not tiered) |
 | `source_resolution_mixed_guard` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Scaling > Main > Re-base (your picture slider); also VP Renderer > Rendering > Fixes under test (upstream copy greyed while VP-V is on) | n/a (VP-only): unchanged by the Original pathway | A mixed screen (a native UI with a lower-resolution video in it, a 4K overlay, picture-in-picture) is read as native: no whole-frame re-base. status line: re-base precision: <the re-base's float-intermediate note> | same on all (not tiered) |
 | `source_resolution_release_fade_s` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 0.25 | 0.25 | 0.25 | VP-V > Scaling > Advanced > Re-base timing | n/a (VP-only): unchanged by the Original pathway | Length (s) of the fade back to native when evidence of native resolution returns (at most 0.25 s) | same on all (not tiered) |
@@ -272,7 +277,7 @@ Modules: `scaling.rebase`, `scaling.route_4k`, `scaling.refine`, `scaling.chroma
 | `cnn_residual_stabilise` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Scaling > Advanced > Scaler steadiness (expert); also VP Renderer > Rendering > Fixes under test (upstream copy greyed while VP-V is on) | Original pathway sets `off` (ADR-0019) | The same hold for the CNN upscaler's added detail. status line: output scaling: libplacebo downscaler (SSimDownscaler not in the shader list) | same on all (not tiered) |
 | `downscale_light` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | enum | linear, gamma | linear |  | VP Renderer > Scaling page (downscale light) | Original pathway sets `linear` (ADR-0019) | Light domain of downscaling frames (Stage 8-1); gamma matches madVR's SSIM | same on all (not tiered) |
 | `entrance_gpu_drain` | `scaling.rebase` | [vpv] (global; also read from the profile) | enum | off, flush, finish | off | off | VP-V > Pipeline (expert) (stored in [vpv]) | Original pathway sets `off` (ADR-0019) | Expert workaround: after the entrance stages ran on a draw, flush submits the GPU queue and finish waits for it before libplacebo renders, so pictures between frames match plain draws byte for byte (without it libplacebo's scaling passes vary by +-1 of 16 bits on scattered textured pixels). Root cause open | same on all (not tiered) |
-| `fbo_float32` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | enum | auto, on, off | auto (on, everywhere) | -1 | VP-V > Colour > Main > Range and precision (named there); the control is on VP Renderer > Rendering > Processing (Bill's page) | Original pathway sets `off` (ADR-0019) | Every libplacebo intermediate texture in 32-bit float (exact highlights, more bandwidth; half-float rounds values above white). auto = on; the output pass is rgba32f regardless. status line: Tone map: libplacebo (combined LUT missing) | same on all (not tiered) |
+| `fbo_float32` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | enum | auto, on, off | auto (on, everywhere) | -1 | VP-V > Colour > Main > Range and precision (named there); the control is on VP Renderer > Rendering > Processing (Bill's page) | Original pathway sets `off` (ADR-0019); no longer tied to the scaling.output slot (S-12BIT) | Every libplacebo intermediate texture in 32-bit float (exact highlights, more bandwidth; half-float rounds values above white). auto = on; the output pass is rgba32f regardless. status line: Tone map: libplacebo (combined LUT missing) | same on all (not tiered) |
 | `nls_sampling` | `scaling.geometry` | profile ([vprenderer.Default] and matching profiles) | enum | catmull, bilinear | catmull | catmull | VP-V > Proposed retirement > Experiments that lost, and superseded switches | Original pathway sets `bilinear` (ADR-0019) | How the NLS / NLS+ stretch samples the source: catmull = separable Catmull-Rom widened by the map's local minification (a low-pass at the centre); bilinear = the hooked texture's bilinear sampler (the earlier output). proposed for retirement (group B) | same on all (not tiered) |
 | `rebase_kernel_match` | `scaling.rebase` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | off | VP-V > Scaling > Main > Re-base (your picture slider); also VP Renderer > Rendering > Fixes under test (upstream copy greyed while VP-V is on) | Original pathway sets `off` (ADR-0019) | Kernel-matched re-base: identifies the player's upscale filter and undoes it exactly for an exact 2:1 luma re-base; off = the generic faithful re-base runs when no kernel is identified (opt-in since SID r2). status line: re-base precision: <the re-base's float-intermediate note> | same on all (not tiered) |
 | `residual_stabilise_grain_guard` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Proposed retirement > Proven fixes (all on by default) | Original pathway sets `off` (ADR-0019) | Limits the residual hold to the coding-artefact band: blocks the grain term marks as grain pass this frame's residual, the held change is clamped to the expected coding-noise RMS; off = the 2026-10-15 one-pole, byte for byte. proposed for retirement (group A) | same on all (not tiered) |
@@ -283,7 +288,7 @@ Modules: `scaling.rebase`, `scaling.route_4k`, `scaling.refine`, `scaling.chroma
 
 ## Colour
 
-Modules: `colour.tone_gamut`, `colour.extended_range`, `colour.sdr_tone_shape`, `colour.appearance`.
+Modules: `colour.dm_pre`, `colour.tone_gamut`, `colour.dm_curve`, `colour.extended_range`, `colour.display_mapping`, `colour.sdr_tone_shape`, `colour.dm_trims`, `colour.appearance`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
