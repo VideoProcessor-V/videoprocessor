@@ -39,7 +39,8 @@ inline Dims VariantDims(const VariantKey& k, Dims full)
 }
 
 // The ledger format of `precision` for `channels` (1, 2 or 4; 3 is stored as 4). `fallback` is the owner's default format
-// (precision 0). False = no such format in the ledger (e.g. a 4-channel unorm16): the owner declines that variant visibly.
+// (precision 0). False = no such format in the ledger (e.g. a 4-channel unorm16, or float16: no sub-12-bit format): the owner
+// declines that variant visibly.
 inline bool TexFormatOf(uint8_t precision, unsigned channels, TexFormat fallback, TexFormat* out)
 {
     const unsigned c = channels == 3 ? 4u : channels;
@@ -55,8 +56,10 @@ inline bool TexFormatOf(uint8_t precision, unsigned channels, TexFormat fallback
         f = c == 1 ? TexFormat::R32F : c == 2 ? TexFormat::RG32F : TexFormat::RGBA32F;
         break;
     case kPrecisionFloat16:
-        f = c == 1 ? TexFormat::R16F : c == 2 ? TexFormat::RG16F : TexFormat::RGBA16F;
-        break;
+        // N2 (waiver gate batch 10, 12-BIT END TO END): fp16 has an 11-bit mantissa, not 12-bit safe (PrecisionTwelveBitSafe). The
+        // ledger keeps no sub-12-bit variant format: a float16 request is refused here (the owner declines it visibly), for every
+        // product, not only pixel data. A product that needs half the bytes asks unorm16 (exact) instead.
+        return false;
     default: return false;
     }
     if (out != nullptr)
