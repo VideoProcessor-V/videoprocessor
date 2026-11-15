@@ -85,10 +85,12 @@ namespace VideoProcessorTest
 			Assert::IsTrue(MotionAhead::ProducerJobs::NextJob(Q(1, 0, 1), state, 2).cls == Class::CorePair);
 			Assert::IsTrue(MotionAhead::ProducerJobs::NextJob(Q(0, 1, 1), state, 2).cls == Class::OnDemand, L"a request first");
 			Assert::IsTrue(MotionAhead::ProducerJobs::NextJob(Q(0, 0, 1), state, 2).cls == Class::LongPair);
-			// A long job behind a request, past the streak bound, gets its turn like a core job (never starved).
+			// O1 (refs\105 s3.3): a long pair never runs while a request waits, even past the streak bound; only a core pair may
+			// break a request streak.
 			MotionAhead::ProducerJobs::NextJob(Q(0, 3, 1), state, 2);
 			MotionAhead::ProducerJobs::NextJob(Q(0, 2, 1), state, 2);
-			Assert::IsTrue(MotionAhead::ProducerJobs::NextJob(Q(0, 1, 1), state, 2).cls == Class::LongPair);
+			Assert::IsTrue(MotionAhead::ProducerJobs::NextJob(Q(0, 1, 1), state, 2).cls == Class::OnDemand,
+				L"O1: a long pair never overtakes a waiting request");
 		}
 	};
 }
