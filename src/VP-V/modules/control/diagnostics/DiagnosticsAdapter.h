@@ -454,6 +454,7 @@ namespace VpDiagnostics
 		unsigned long long statefulBreaks; // stateful history breaks (once mode)
 		bool once;                         // entrance once (B3) active
 		unsigned long long onceFallbackFrames = 0; // source frames that fell back (once per frame)
+		unsigned long long statefulRestarts = 0;   // fix-A: deliberate history restarts (re-base factor changes)
 	};
 
 	// "Entrance cost" / "Entrance stages" lines: the first run, every ~2400 legacy frames of
@@ -472,7 +473,12 @@ namespace VpDiagnostics
 				"A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu, history breaks %llu, fallback frames %llu",
 				c.runs, c.reuses, c.onceA, c.onceB, c.onceReused, c.oncePictures, c.onceFallbacks, c.statefulBreaks,
 				c.onceFallbackFrames);
-		else
+		// fix-A (gate SHOULD 3): the deliberate restarts are shown beside the breaks, never only in the one-time
+		// log; their own line, so the "Entrance stages" line above stays byte-identical (DiagnosticsAdapterTests).
+		if (c.once && c.statefulRestarts > 0)
+			DebugLog::Log("Entrance once (B3): history restarts on purpose %llu (re-base factor changes; the chain starts over at A, an older frame still counts as a break)",
+				c.statefulRestarts);
+		if (!c.once)
 			DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame)", c.runs, c.reuses);
 	}
 
