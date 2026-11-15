@@ -130,6 +130,7 @@ namespace
 				Join();   // the thread has ended afterwards, so it no longer uses `ready`
 			if (ready)
 				::CloseHandle(ready);
+			// VPV-FALLBACK global shortcuts: an unavailable hook is the Extension's "global shortcuts" Fallbacks entry (ShortcutObserverStatus::Note)
 			DebugLog::Log("Default report key: background hook %s (modifiers=0x%02x key=0x%02x; "
 				"[shortcuts] global_actions absent, VP-V pathway)", running ? "started" : "unavailable",
 				static_cast<unsigned>(plan.modifiers), static_cast<unsigned>(plan.key));
