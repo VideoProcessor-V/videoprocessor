@@ -212,9 +212,18 @@ public:
 		if (!dvToneFallback.empty()) m_engage("DV tone mapping", dvToneFallback + ": " + DvDolbyStyle::FallbackName(f.trims)); else m_release("DV tone mapping");
 		// Audit 7: libplacebo's input_avg / input_max for the curve come from L1 via hdr.avg_pq_y / max_pq_y.
 		const bool dvToneL1Missing = m_toneDolbyRunning && !(renderImage.color.hdr.max_pq_y > 0.0f && renderImage.color.hdr.avg_pq_y > 0.0f);
+		// No silent fallbacks (ADR-0001; N3 fallback coverage, C4 chkfix): the curve running on mid-range scene values is
+		// listed under "Fallbacks engaged" while it lasts, not only logged. It is its own entry: it also covers L1 values of
+		// zero, which the host's "Dolby Vision scene metadata" entry (no L1 at all) does not. Never on the Original pathway
+		// or with the slot off (m_toneDolbyRunning needs colourStageRuns).
+		if (dvToneL1Missing)
+			m_engage("DV tone mapping scene values", "L1 missing: the Dolby-style curve uses mid-range scene values");
+		else
+			m_release("DV tone mapping scene values");
 		if (m_toneDolbyRunning && static_cast<int>(dvToneL1Missing) != m_toneL1Logged)
 		{
 			m_toneL1Logged = dvToneL1Missing ? 1 : 0;
+			// VPV-FALLBACK DV tone mapping scene values (engaged above)
 			DebugLog::Log("DV tone mapping (Dolby-style): libplacebo %s the scene values (hdr.max_pq_y=%.4f avg_pq_y=%.4f)%s", dvToneL1Missing ? "does NOT receive" : "receives",
 				renderImage.color.hdr.max_pq_y, renderImage.color.hdr.avg_pq_y, dvToneL1Missing ? "; L1 missing -> mid-range fallback" : "");
 		}
