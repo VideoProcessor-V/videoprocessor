@@ -56,6 +56,36 @@ namespace VideoProcessorTest
 					v[size_t(y) * kN + x] = lv[y / 8][x / 8];
 			return v;
 		}
+		// The frame reduction's fixtures, at the monitor's smallest real tile (SourceResolution::TileSize: 128 at 1080). Its robust
+		// grid search needs at least eight repeats of the 8 px period (a 64 px tile has 63 steps: the search never runs there), and
+		// it counts blocking only from tiles with variation inside the blocks (gradient > 0.05, kept from the detector): a coded
+		// picture is block levels PLUS the texture the coder kept, never pure flat blocks.
+		constexpr int kFrameTile = 128;
+		std::vector<float> CleanAt(unsigned seed, int n)
+		{
+			std::mt19937 rng(seed);
+			std::normal_distribution<float> noise(0.0f, 0.004f);
+			std::vector<float> v(size_t(n) * n);
+			for (int y = 0; y < n; ++y)
+				for (int x = 0; x < n; ++x)
+					v[size_t(y) * n + x] = 0.3f + 0.3f * float(x + y) / float(2 * n) + noise(rng);
+			return v;
+		}
+		std::vector<float> CodedAt(unsigned seed, int n)
+		{
+			std::mt19937 rng(seed);
+			std::uniform_real_distribution<float> level(0.2f, 0.6f);
+			std::normal_distribution<float> noise(0.0f, 0.004f);
+			const int blocks = n / 8;
+			std::vector<float> lv(size_t(blocks) * blocks);
+			for (float& c : lv)
+				c = level(rng);
+			std::vector<float> v(size_t(n) * n);
+			for (int y = 0; y < n; ++y)
+				for (int x = 0; x < n; ++x)
+					v[size_t(y) * n + x] = lv[size_t(y / 8) * blocks + x / 8] + noise(rng);
+			return v;
+		}
 		std::shared_ptr<CE::TilePack> PackOf(const std::vector<std::vector<float>>& tiles)
 		{
 			std::shared_ptr<CE::TilePack> p = std::make_shared<CE::TilePack>();
@@ -87,8 +117,10 @@ namespace VideoProcessorTest
 			const CE::TileMeasure blocked = CE::MeasureTile(Blocked(2).data(), kN, kN, 1023);
 			Assert::IsTrue(blocked.blockiness > clean.blockiness, L"the 8 px grid shows in the measure");
 			const std::vector<char> eligible(1, 1);
-			const CE::FrameCoding c = CE::ReduceFrame({ &clean }, eligible, true);
-			const CE::FrameCoding b = CE::ReduceFrame({ &blocked }, eligible, true);
+			const CE::TileMeasure cleanFrame = CE::MeasureTile(CleanAt(1, kFrameTile).data(), kFrameTile, kFrameTile, 1023);
+			const CE::TileMeasure codedFrame = CE::MeasureTile(CodedAt(2, kFrameTile).data(), kFrameTile, kFrameTile, 1023);
+			const CE::FrameCoding c = CE::ReduceFrame({ &cleanFrame }, eligible, true);
+			const CE::FrameCoding b = CE::ReduceFrame({ &codedFrame }, eligible, true);
 			Assert::IsTrue(c.bitrateQuality > b.bitrateQuality, L"a blocked frame reads below a clean one");
 			const CE::FrameCoding none = CE::ReduceFrame({}, {}, true);
 			Assert::AreEqual(1.0, none.bitrateQuality, 1e-12, L"no tiles: neutral");
