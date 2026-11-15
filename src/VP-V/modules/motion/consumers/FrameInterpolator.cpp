@@ -1,6 +1,7 @@
 #include <pch.h>
 #include "FrameInterpolator.h"
 #include <VP-V/core/VramUsers.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 
 #include <vprenderer/GrainPreserve.h>
 
@@ -322,18 +323,14 @@ if (inside) {
 }
 )GLSL";
 
-		// The low band at half resolution (GrainPreserve): a 2x2 box average, then the
-		// Gaussian one axis per pass.
+		// The low band at half resolution (GrainPreserve): the shared unit U3's 2x2 mean
+		// (vpu_half_luma_rgba_at, origin 0: the same clamped taps, order and * 0.25 as the
+		// former private body), then the Gaussian one axis per pass.
 		const char* const LOW_HALF_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
-if (q.x < size.x && q.y < size.y) {
-    ivec2 hi = textureSize(src, 0) - ivec2(1);
-    ivec2 p = q * 2;
-    vec4 acc = texelFetch(src, clamp(p, ivec2(0), hi), 0) + texelFetch(src, clamp(p + ivec2(1, 0), ivec2(0), hi), 0) +
-               texelFetch(src, clamp(p + ivec2(0, 1), ivec2(0), hi), 0) + texelFetch(src, clamp(p + ivec2(1, 1), ivec2(0), hi), 0);
-    imageStore(dst, q, 0.25 * acc);
-}
+if (q.x < size.x && q.y < size.y)
+    imageStore(dst, q, vpu_half_luma_rgba_at(src, ivec2(0), q));
 )GLSL";
 
 		const char* const LOW_H_BODY = R"GLSL(
@@ -498,8 +495,9 @@ if (q.x < size.x && q.y < size.y) {
 		const int w = half->params.w, h = half->params.h;
 		const int gx = (w + 15) / 16, gy = (h + 15) / 16;
 		const std::string header = LowWeightsGlsl(src->params.h);
+		static const std::string halfHeader = VpUnit::HalfLuma::GlslRgbaAt();
 		const std::vector<pl_shader_desc> passHalf = { Sampled("src", src, false), Storage("dst", half) };
-		if (!Compute(dispatch, description, std::string(), LOW_HALF_BODY, passHalf, nullptr, 0, gx, gy))
+		if (!Compute(dispatch, description, halfHeader, LOW_HALF_BODY, passHalf, nullptr, 0, gx, gy))
 		{
 			error = std::string("grain low band (half) failed: ") + description;
 			return false;
