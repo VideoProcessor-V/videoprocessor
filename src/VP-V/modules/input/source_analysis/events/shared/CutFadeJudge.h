@@ -339,6 +339,7 @@ struct CutVerdict {
     bool partStart = false;   // first frame after a discontinuity / reset: never a cut
     bool gridLaw = false;     // T2 judged it (false: the ClassifyEvents fallback, no grid)
     float strength = 0.0f;    // 0..1 (1 = cut)
+    float bar = 0.0f;         // the spike bar the frame was judged against (1.8 ctx + 1; 0: not judged by the grid law), for margins
     PairScore score;
 };
 
@@ -495,6 +496,7 @@ private:
             }
         }
         const double bar = kSpikeRatio * ctx + kSpikeEps;
+        v.bar = float(bar);
         bool spike = L >= kSpikeL && L >= bar;
         if (!spike && L >= kLowTierL && L >= bar && !k->flat && !prev->flat && k->score.S < kLowTierS)
             spike = true;

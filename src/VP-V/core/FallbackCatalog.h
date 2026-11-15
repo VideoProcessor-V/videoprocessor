@@ -914,6 +914,14 @@ namespace FallbackCatalog
 		return why.empty() ? Released("skeleton_scene_veto")
 		                   : Engaged("skeleton_scene_veto", "vector cut veto off: " + why + "; vector pairs across a scene cut are not refused by the scene");
 	}
+	// U7 v2: frames whose P4 record has no 32 x 18 cell grid (a plane under 32 x 18) are judged by the v1 pair law (ClassifyEvents) instead
+	// of the sequence law. Engaged once any verdict took that fallback (counted on "Skeleton scene:").
+	inline Decision SkeletonSceneNoGrid(uint64_t verdicts)
+	{
+		return verdicts == 0 ? Released("skeleton_scene_no_grid")
+		                     : Engaged("skeleton_scene_no_grid", "scene cut law: " + std::to_string(verdicts) +
+		                           " verdict(s) without the 32 x 18 cell grid (picture plane too small) used the v1 pair law");
+	}
 	// MV7 standing gap: these users hold video memory and do not declare it to the governor (core/VramUsers.h KnownUndeclaredVramUsers), so the
 	// budget does not see their memory. Engaged while the lane runs, until each module declares.
 	inline Decision SkeletonVramKnown(const std::string& names)

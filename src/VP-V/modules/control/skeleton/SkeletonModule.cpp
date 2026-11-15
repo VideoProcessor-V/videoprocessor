@@ -384,6 +384,7 @@ namespace Vpv
 			std::string shownWaiting;
 			bool shownBundle = false;
 			std::string shownVetoOff;   // the cut veto state the cached status text was built for ("" = on)
+			bool shownNoGrid = false;   // the no-grid fallback state the cached status text was built for
 			uint8_t shownQueueWired = 0xFF;   // the queue-delivery state the cached status text was built for
 			Vpv::Skeleton::SlotBudgetFeed budgetFeed;   // S0: feeds spare.SetBudget once per source frame + Presenter::spareSlotMs (SlotBudgetFeed.h)
 			VpSkeleton::SpareHost spare;       // B3-Z Z2: the post-present spare slot, driven by R12 AfterPresent (OnAfterPresent)
@@ -441,6 +442,7 @@ namespace Vpv
 			// Delivery (audit U7ACC MUST 3): cuts delivered late (with a later frame's group), of them more than one frame late (frame
 			// c + 1 had no group: dropped, unsealed or no record), and the newest frame a fill judged (the late search starts there).
 			std::atomic<uint64_t> sceneLate{ 0 }, sceneLateGap{ 0 };
+			std::atomic<uint64_t> sceneNoGrid{ 0 };   // confirmed verdicts given by the no-grid fallback (the v1 pair law: plane under 32 x 18)
 			bool sceneHasFilled = false;
 			uint64_t sceneLastFilled = 0;
 			uint64_t feedEra = 0;
@@ -505,6 +507,8 @@ namespace Vpv
 			void PushScene(HostState& st, uint64_t s, const VpLaneProducts::SourceStatsRecord& r, uint64_t print, std::vector<uint64_t>* done)
 			{
 				const VpUnit::CutFadeJudge::CutVerdict v = st.sceneTracker->Push(s, r);
+				if (v.known && !v.gridLaw && !v.partStart)
+					st.sceneNoGrid.fetch_add(1, std::memory_order_relaxed);   // shown: "Skeleton scene:" and skeleton_scene_no_grid
 				if (v.known)
 				{
 					SceneSlot& d = st.sceneVerdicts[v.seq % HostState::kSceneVerdicts];
@@ -727,11 +731,39 @@ namespace Vpv
 			// U7-accuracy (owner ruling Q5): vector validity is invalidated at CONFIRMED cuts. The P5a facade asks this through its scene
 			// seam (MotionValidity::State::ConfirmedCutReader); the answer is the scene group the skeleton published: confirmed && cutHere (the
 			// frame's own verdict, judged with frame seq + 1). A provisional verdict refuses nothing.
+			// Vector pairs the veto let through because their frame had no confirmed verdict yet (process-wide, as the seam), and of them
+			// the pairs into a frame later CONFIRMED as a cut (vectors across a real cut were used before the verdict: one frame of the
+			// one-frame-late law). A small ring of the recent unjudged frames links the two; shown on "Skeleton scene:".
+			constexpr size_t kUnjudgedRing = 32;
+			std::atomic<uint64_t>& ScenePairsUnjudged() { static std::atomic<uint64_t> n{ 0 }; return n; }
+			std::atomic<uint64_t>& ScenePairsAcrossLateCut() { static std::atomic<uint64_t> n{ 0 }; return n; }
+			std::atomic<uint64_t>* UnjudgedRing()
+			{
+				static std::atomic<uint64_t> ring[kUnjudgedRing];   // static storage: zero-initialised (0 = no frame)
+				return ring;
+			}
+			// A frame's verdict was just CONFIRMED as a cut (any thread): counts the pairs into it the veto passed before.
+			void NoteConfirmedCut(uint64_t seq)
+			{
+				if (seq == 0)
+					return;
+				uint64_t expected = seq;
+				if (UnjudgedRing()[seq % kUnjudgedRing].compare_exchange_strong(expected, 0, std::memory_order_acq_rel))
+					ScenePairsAcrossLateCut().fetch_add(1, std::memory_order_relaxed);
+			}
 			bool ConfirmedCutAt(uint64_t seq)
 			{
 				FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::SingleStore();
+				if (store == nullptr)
+					return false;
 				FrameAnalysis::Scene s;
-				return store != nullptr && store->PeekScene(seq, s) && s.confirmed && s.cutHere;
+				const bool judged = store->PeekScene(seq, s) && s.confirmed;
+				if (!judged && store->Enabled())
+				{
+					ScenePairsUnjudged().fetch_add(1, std::memory_order_relaxed);
+					UnjudgedRing()[seq % kUnjudgedRing].store(seq, std::memory_order_release);
+				}
+				return judged && s.cutHere;
 			}
 			// Why the cut veto cannot work for renderer `host` ("" = it works): its store is off, or the seam's single store is not its
 			// store (more than one renderer: the seam carries no renderer key, so it refuses nothing). No store registered at all happens
@@ -1609,6 +1641,8 @@ namespace Vpv
 				{
 					if (store->PublishScene(seq, scene))
 						st.scenePublished.fetch_add(1, std::memory_order_relaxed);
+					if (scene.confirmed && scene.cutHere)
+						NoteConfirmedCut(seq);   // pairs into it the veto passed before this group was confirmed
 					// The confirmation of earlier frames (normally seq - 1; `done` has any others): only a PROVISIONAL group this module wrote is rewritten
 					// (another producer's group, or one already confirmed, is left alone); its fade is kept.
 					if (seq > 1)
@@ -1635,6 +1669,8 @@ namespace Vpv
 						old.confirmed = true;
 						if (store->PublishScene(d, old))
 							st.sceneRepublished.fetch_add(1, std::memory_order_relaxed);
+						if (v.cut)
+							NoteConfirmedCut(d);
 					}
 				}
 			return true;
@@ -1695,6 +1731,7 @@ namespace Vpv
 				c.republished = st->sceneRepublished.load(std::memory_order_relaxed);
 				c.late = st->sceneLate.load(std::memory_order_relaxed);
 				c.lateGap = st->sceneLateGap.load(std::memory_order_relaxed);
+				c.noGrid = st->sceneNoGrid.load(std::memory_order_relaxed);
 			}
 			return c;
 		}
@@ -2386,11 +2423,14 @@ namespace Vpv
 				(uint64_t(st.queueUsed.renderAhead) << 16) | (st.starveEvents & 0xFFFFu);
 			// U7-accuracy Q5: the cut veto's reach (a store toggle, a second renderer) refreshes the text at once.
 			const std::string vetoOff = SceneVetoOff(st.host);
+			const bool noGrid = st.sceneNoGrid.load(std::memory_order_relaxed) != 0;   // the no-grid decision engages at once too
 			const bool due = st.frames <= kEarlyRefreshFrames || st.frames % kRefreshEvery == 1 || st.waiting != st.shownWaiting ||
-				hasBundle != st.shownBundle || queueWired != st.shownQueueWired || queueKey != st.shownQueueKey || vetoOff != st.shownVetoOff;
+				hasBundle != st.shownBundle || queueWired != st.shownQueueWired || queueKey != st.shownQueueKey || vetoOff != st.shownVetoOff ||
+				noGrid != st.shownNoGrid;
 			if (!due)
 				return;
 			st.shownVetoOff = vetoOff;
+			st.shownNoGrid = noGrid;
 			st.shownQueueKey = queueKey;
 			st.shownQueueWired = queueWired;
 			st.shownWaiting = st.waiting;
@@ -2426,6 +2466,7 @@ namespace Vpv
 addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleton::KnownUndeclaredVramUsers()) : std::string()));   // MV7 standing gap
 				addDecision(FallbackCatalog::SkeletonEngineFeed(st.feedNeeded && st.engine == nullptr));   // SK-W stage D: P2m / P3 cannot be published
 				addDecision(FallbackCatalog::SkeletonSceneVeto(vetoOff));   // U7-accuracy Q5: the cut veto's reach, never silent
+				addDecision(FallbackCatalog::SkeletonSceneNoGrid(st.sceneNoGrid.load(std::memory_order_relaxed)));   // U7 v2 no-grid fallback
 				// MV7 guard: a module that holds video memory is active but declared none of it: visible, never silent.
 				addDecision(FallbackCatalog::SkeletonVramUsers(VpSkeleton::UnpopulatedUserNames(VpSkeleton::VramUsers::Instance().Take().unpopulated)));
 			}
@@ -2580,17 +2621,20 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				{
 					// U7 v2 (Ctrl+I / Ctrl+Alt+D): the scene product's sequence judge and the vector cut veto, in plain words.
 					const std::string vetoState = vetoOff.empty() ? std::string("on") : "off (" + vetoOff + ")";
-					char sceneLine[768] = {};
+					char sceneLine[1024] = {};
 					std::snprintf(sceneLine, sizeof(sceneLine),
-						"Skeleton scene: %llu verdict(s) confirmed with the next frame, %llu provisional, %llu tracker restart(s), %llu group(s) confirmed later; %llu cut(s) delivered late (%llu more than one frame late); vector cut veto %s, %llu vector pair(s) refused at confirmed cuts (all renderers)",
+						"Skeleton scene: %llu verdict(s) confirmed with the next frame, %llu provisional, %llu tracker restart(s), %llu group(s) confirmed later; %llu cut(s) delivered late (%llu more than one frame late); %llu no-grid fallback verdict(s) (v1 pair law); vector cut veto %s, %llu vector pair(s) refused at confirmed cuts, %llu asked before their frame's verdict (%llu of them into a cut confirmed later) (all renderers)",
 						static_cast<unsigned long long>(st.sceneConfirmed.load(std::memory_order_relaxed)),
 						static_cast<unsigned long long>(st.sceneProvisional.load(std::memory_order_relaxed)),
 						static_cast<unsigned long long>(st.sceneReprimes.load(std::memory_order_relaxed)),
 						static_cast<unsigned long long>(st.sceneRepublished.load(std::memory_order_relaxed)),
 						static_cast<unsigned long long>(st.sceneLate.load(std::memory_order_relaxed)),
 						static_cast<unsigned long long>(st.sceneLateGap.load(std::memory_order_relaxed)),
+						static_cast<unsigned long long>(st.sceneNoGrid.load(std::memory_order_relaxed)),
 						vetoState.c_str(),
-						static_cast<unsigned long long>(MotionValidity::State::ConfirmedCutRefusalsAll().load(std::memory_order_relaxed)));
+						static_cast<unsigned long long>(MotionValidity::State::ConfirmedCutRefusalsAll().load(std::memory_order_relaxed)),
+						static_cast<unsigned long long>(ScenePairsUnjudged().load(std::memory_order_relaxed)),
+						static_cast<unsigned long long>(ScenePairsAcrossLateCut().load(std::memory_order_relaxed)));
 					full.push_back(sceneLine);
 				}
 				for (const std::string& l : PassTimers::Inbox::Motion().Lines())

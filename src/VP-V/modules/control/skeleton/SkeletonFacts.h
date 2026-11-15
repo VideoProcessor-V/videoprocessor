@@ -90,6 +90,7 @@ namespace Vpv
 			uint64_t confirmed = 0, provisional = 0, reprimes = 0, republished = 0;
 			// Cuts delivered late (with a later frame's group) and, of them, more than one frame late (frame c + 1 had no group).
 			uint64_t late = 0, lateGap = 0;
+			uint64_t noGrid = 0;          // confirmed verdicts given by the no-grid fallback (the v1 pair law)
 		};
 
 		// What the engine feed did (render thread): shown on the status lines, read by tests.
