@@ -12,11 +12,23 @@
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
 #include <VP-V/core/OnePole.h>
 
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
+
+#if __has_include(<VP-V/modules/scaling/output/AdaptiveDownscaleCut.h>)
+#define X5AB_TIP_CUT 1
+#include <VP-V/modules/scaling/output/AdaptiveDownscaleCut.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
+#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>   // the X5 A/B harness models the scene product with U7's CutTracker
+#endif
 
 namespace VideoProcessorTest
 {
@@ -543,4 +555,236 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 	};
+
+	// FIX-X5-CUT-P4 / C5 (CPU; audit x5dup MUST 1, WAIVER-X5DUP-SCENE-READ): the grain term's cut event is the skeleton's published
+	// scene product (FrameAnalysis::Scene, U7 v2/v3), read, never classified here. Snap on the DELIVERED cut only (Scene::cut, normally
+	// one frame late), never on a provisional verdict, never on a fade; a missing group of the current frame is an Unavailable verdict
+	// with its cause (never a made-up cut, never a private re-classification).
+	TEST_CLASS(AdaptiveScalingCutP4Tests)
+	{
+	public:
+		static VpLaneProducts::SourceStatsRecord FlatRecord(uint32_t mean, uint32_t spreadLow, uint32_t spreadHigh, uint32_t bin)
+		{
+			VpLaneProducts::SourceStatsRecord r;
+			r.pixelCount = 1000;
+			r.mean = mean;
+			r.p01 = spreadLow;
+			r.p99 = spreadHigh;
+			r.hist[bin] = 1000;
+			return r;
+		}
+
+		// A scene reader over a map of groups (the published product of each frame), counting the frames asked.
+		struct GroupMap
+		{
+			std::map<uint64_t, FrameAnalysis::Scene> groups;
+			int asked = 0;
+			bool operator()(uint64_t seq, FrameAnalysis::Scene& scene)
+			{
+				++asked;
+				const auto it = groups.find(seq);
+				if (it == groups.end())
+					return false;
+				scene = it->second;
+				return true;
+			}
+		};
+
+		static FrameAnalysis::Scene Group(bool cut, bool cutLate = false)
+		{
+			FrameAnalysis::Scene s;
+			s.origin = FrameAnalysis::SceneOrigin::Vp;
+			s.cut = cut;
+			s.cutLate = cutLate;
+			s.confirmed = true;
+			s.fadeKeep = 1.0f;
+			return s;
+		}
+
+		TEST_METHOD(AdaptiveScalingCutP4FirstFrameIsACutWithoutPreviousRecord)
+		{
+			GroupMap read;
+			const AdaptiveDownscale::CutVerdict v = AdaptiveDownscale::VerdictFromScene(0, 5, std::ref(read), 8, "missing");
+			Assert::IsTrue(v.state == AdaptiveDownscale::CutVerdict::State::Known && v.cut && v.first, L"first frame: a cut by definition");
+			Assert::AreEqual(0, read.asked, L"no scene group is needed for the definitional first-frame cut");
+		}
+
+		TEST_METHOD(AdaptiveScalingCutP4SnapsOnTheDeliveredCutOnly)
+		{
+			GroupMap read;
+			read.groups[11] = Group(false);
+			const AdaptiveDownscale::CutVerdict same = AdaptiveDownscale::VerdictFromScene(10, 11, std::ref(read), 8, "missing");
+			Assert::IsTrue(same.state == AdaptiveDownscale::CutVerdict::State::Known && !same.cut, L"no delivered cut: no snap");
+			read.groups[11] = Group(true, true);
+			const AdaptiveDownscale::CutVerdict cut = AdaptiveDownscale::VerdictFromScene(10, 11, std::ref(read), 8, "missing");
+			Assert::IsTrue(cut.state == AdaptiveDownscale::CutVerdict::State::Known && cut.cut && cut.cutLate && cut.cutGroup == 11,
+				L"the delivered cut (late, with the frame after the cut): a snap");
+			// Precision first (owner 08:35): the frame's own verdict, provisional or confirmed after its seal, never snaps by itself.
+			FrameAnalysis::Scene provisional = Group(false);
+			provisional.cutHere = true;
+			provisional.confirmed = false;
+			read.groups[11] = provisional;
+			const AdaptiveDownscale::CutVerdict prov = AdaptiveDownscale::VerdictFromScene(10, 11, std::ref(read), 8, "missing");
+			Assert::IsTrue(prov.state == AdaptiveDownscale::CutVerdict::State::Known && !prov.cut, L"a provisional cutHere: no snap");
+			FrameAnalysis::Scene here = Group(false);
+			here.cutHere = true;
+			read.groups[11] = here;
+			const AdaptiveDownscale::CutVerdict own = AdaptiveDownscale::VerdictFromScene(10, 11, std::ref(read), 8, "missing");
+			Assert::IsTrue(own.state == AdaptiveDownscale::CutVerdict::State::Known && !own.cut,
+				L"a confirmed cutHere without its delivery: no snap (it is delivered once, with the next group)");
+		}
+
+		TEST_METHOD(AdaptiveScalingCutP4NoSnapOnAFade)
+		{
+			GroupMap read;
+			FrameAnalysis::Scene fade = Group(false);
+			fade.fade = true;
+			fade.fadeKeep = 0.4f;
+			read.groups[11] = fade;
+			const AdaptiveDownscale::CutVerdict v = AdaptiveDownscale::VerdictFromScene(10, 11, std::ref(read), 8, "missing");
+			Assert::IsTrue(v.state == AdaptiveDownscale::CutVerdict::State::Known && !v.cut && v.fade,
+				L"a fade with its keep: no snap (owner 09:20: partial reset, never a restart)");
+			fade.fadeKeep = -1.0f;
+			read.groups[11] = fade;
+			const AdaptiveDownscale::CutVerdict noKeep = AdaptiveDownscale::VerdictFromScene(10, 11, std::ref(read), 8, "missing");
+			Assert::IsTrue(noKeep.state == AdaptiveDownscale::CutVerdict::State::Known && !noKeep.cut && noKeep.fade,
+				L"a fade without its keep: still no snap (x5dup gives no snap on any fade)");
+		}
+
+		TEST_METHOD(AdaptiveScalingCutP4UnavailableRecordIsVisibleNotACut)
+		{
+			GroupMap read;
+			const AdaptiveDownscale::CutVerdict none = AdaptiveDownscale::VerdictFromScene(10, 11, std::ref(read), 8,
+				"scene group not sealed for source frame 11");
+			Assert::IsTrue(none.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !none.cut, L"unavailable, no cut");
+			Assert::IsTrue(none.cause.find("not sealed") != std::string::npos, L"the cause is carried");
+			// The previous frame's group is not needed: the current frame's group alone decides (a missing older group is no fault).
+			read.groups[11] = Group(false);
+			const AdaptiveDownscale::CutVerdict noPrev = AdaptiveDownscale::VerdictFromScene(10, 11, std::ref(read), 8, "missing");
+			Assert::IsTrue(noPrev.state == AdaptiveDownscale::CutVerdict::State::Known && !noPrev.cut,
+				L"previous group missing: the current group decides");
+			// The causes the production source gives (no store, store off, group not sealed).
+			Assert::IsTrue(AdaptiveDownscale::SceneMissingWhy(nullptr, 11).find("no frame analysis store") != std::string::npos);
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Assert::IsTrue(AdaptiveDownscale::SceneMissingWhy(&store, 11).find("not sealed for source frame 11") != std::string::npos);
+			store.SetEnabled(false);
+			Assert::IsTrue(AdaptiveDownscale::SceneMissingWhy(&store, 11).find("store off") != std::string::npos);
+			// Without a memo (no skeleton, the Original pathway) the production source answers Unavailable with its cause.
+			const AdaptiveDownscale::CutVerdict noMemo = AdaptiveDownscale::SceneCutSource()(10, 11);
+			Assert::IsTrue(noMemo.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !noMemo.cause.empty() && !noMemo.cut,
+				L"no memo on this thread: visible Unavailable");
+		}
+
+		// Frames the module did not advance through: a cut delivered with their group is not lost (within the store's ring); a group
+		// that is not there is not a fault; reach 0 (or a discontinuity: the module then asks with previous = sequence - 1) reads none.
+		TEST_METHOD(AdaptiveScalingCutP4ReadsSkippedFramesInTheRing)
+		{
+			GroupMap read;
+			read.groups[11] = Group(false);
+			read.groups[12] = Group(true, true);
+			read.groups[13] = Group(false);
+			const AdaptiveDownscale::CutVerdict v = AdaptiveDownscale::VerdictFromScene(10, 13, std::ref(read), 8, "missing");
+			Assert::IsTrue(v.state == AdaptiveDownscale::CutVerdict::State::Known && v.cut && v.cutLate && v.cutGroup == 12,
+				L"the cut delivered with skipped frame 12: a snap");
+			const AdaptiveDownscale::CutVerdict near1 = AdaptiveDownscale::VerdictFromScene(10, 13, std::ref(read), 1, "missing");
+			Assert::IsTrue(near1.cut && near1.cutGroup == 12, L"reach 1: frame 12 is still in reach");
+			const AdaptiveDownscale::CutVerdict none = AdaptiveDownscale::VerdictFromScene(10, 13, std::ref(read), 0, "missing");
+			Assert::IsTrue(none.state == AdaptiveDownscale::CutVerdict::State::Known && !none.cut, L"reach 0: only the frame's own group");
+			const AdaptiveDownscale::CutVerdict afterForget = AdaptiveDownscale::VerdictFromScene(12, 13, std::ref(read), 8, "missing");
+			Assert::IsTrue(afterForget.state == AdaptiveDownscale::CutVerdict::State::Known && !afterForget.cut,
+				L"previous = sequence - 1 (after ForgetMap): skipped groups are not scanned");
+			read.groups.erase(12);
+			const AdaptiveDownscale::CutVerdict gap = AdaptiveDownscale::VerdictFromScene(10, 13, std::ref(read), 8, "missing");
+			Assert::IsTrue(gap.state == AdaptiveDownscale::CutVerdict::State::Known && !gap.cut,
+				L"a skipped frame without a group (never sealed): no cut, not a fault");
+		}
+
+		// The APL (diagnostic mean luma) is the CURRENT frame's P4 record through the memo (Acquire: get-or-compute-and-publish), and a
+		// released frame is refused by the memo (FrameReleased, never recomputed): shown as the APL cause, not a cut fault.
+		TEST_METHOD(AdaptiveScalingCutP4AplFromTheCurrentP4RecordThroughTheMemo)
+		{
+			using namespace VpSkeleton;
+			SkeletonMemo memo;
+			memo.SetKeepFrames(0);
+			int fills = 0;
+			OwnerFill fill;
+			fill.fill = [&fills](const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput& out)
+			{
+				++fills;
+				const VpLaneProducts::SourceStatsRecord rec = FlatRecord(257 * 100, 1000, 60000, 3);
+				out.bytes.assign(VpLaneProducts::kStatsBytes, 0);
+				VpLaneProducts::WriteStatsRecord(rec, out.bytes.data(), out.bytes.size());
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(kP4SourceStats, AcquireForm::Cpu, SkeletonMemo::OwnerUnitOf(kP4SourceStats), fill)
+				== SkeletonMemo::Registration::Registered, L"P4 owner fill registered under its catalog unit");
+			memo.OnSeal(1);
+			AdaptiveDownscale::CutVerdict v;
+			AdaptiveDownscale::ReadAplFromMemo(memo, 1, v);
+			Assert::IsTrue(std::fabs(v.apl - 100.0f) < 0.01f && v.aplCause.empty(), L"APL = the P4 mean in 8-bit codes");
+			Assert::AreEqual(1, fills, L"the current frame's P4 computed once");
+			memo.OnSeal(2);
+			Assert::IsTrue(memo.Released(1), L"the seal of frame 2 released frame 1");
+			AdaptiveDownscale::CutVerdict old;
+			AdaptiveDownscale::ReadAplFromMemo(memo, 1, old);
+			Assert::IsTrue(old.apl < 0.0f && old.aplCause.find("frame released") != std::string::npos,
+				L"a released frame: APL not read, cause shown");
+			Assert::IsTrue(old.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !old.cut, L"the APL read never makes a cut");
+			Assert::AreEqual(1, fills, L"the released frame is never recomputed");
+		}
+
+		// A REAL frame-analysis store, groups written as the skeleton's seal writes them for contiguous frames (SkeletonModule::FillScene):
+		// a cut at frame 3 is confirmed by frame 4 and DELIVERED with frame 4's group (cutLate); frame 3's own group says cutHere once
+		// confirmed. The module's advance loop (previous = the last advanced frame) snaps exactly on the first frame and on frame 4:
+		// delivery offset +1 (the scorer's after-side offset). A frame whose group was not sealed, and a store switched off, are the
+		// visible Unavailable with their causes, never a made-up cut.
+		TEST_METHOD(AdaptiveScalingCutP4DetectsACutAcrossAMemoSeal)
+		{
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			for (uint64_t s = 1; s <= 6; ++s)
+			{
+				FrameAnalysis::Identity id;
+				id.seq = s;
+				Assert::IsTrue(store.Begin(id, FrameAnalysis::kScene) != 0, L"record opened");
+				FrameAnalysis::Scene g = Group(s == 4, s == 4);   // frame 4's group delivers the cut of frame 3
+				g.cutHere = s == 3;                               // frame 3's own verdict, confirmed when frame 4 arrived
+				Assert::IsTrue(store.PublishScene(s, g), L"group published");
+			}
+			auto reader = [&store](uint64_t seq, FrameAnalysis::Scene& scene) { return store.PeekScene(seq, scene); };
+			uint64_t advanced = 0;
+			std::vector<uint64_t> snaps;
+			auto frame = [&](uint64_t seq)
+			{
+				const AdaptiveDownscale::CutVerdict v = AdaptiveDownscale::VerdictFromScene(advanced, seq, reader, store.Depth(),
+					AdaptiveDownscale::SceneMissingWhy(&store, seq));
+				if (v.state == AdaptiveDownscale::CutVerdict::State::Known)
+					advanced = seq;   // Module::Measuring: the frame advanced
+				if (v.cut)
+					snaps.push_back(seq);
+				return v;
+			};
+			const AdaptiveDownscale::CutVerdict f1 = frame(1);
+			Assert::IsTrue(f1.state == AdaptiveDownscale::CutVerdict::State::Known && f1.cut && f1.first, L"frame 1: the first frame is a cut");
+			Assert::IsFalse(frame(2).cut, L"frame 2: same scene, no snap");
+			const AdaptiveDownscale::CutVerdict f3 = frame(3);
+			Assert::IsTrue(f3.state == AdaptiveDownscale::CutVerdict::State::Known && !f3.cut,
+				L"frame 3 (the cut's first frame): its own cutHere does not snap; the cut is delivered with frame 4");
+			const AdaptiveDownscale::CutVerdict f4 = frame(4);
+			Assert::IsTrue(f4.state == AdaptiveDownscale::CutVerdict::State::Known && f4.cut && f4.cutLate && f4.cutGroup == 4,
+				L"frame 4: the delivered cut of frame 3 snaps (offset +1)");
+			Assert::IsFalse(frame(5).cut, L"frame 5: no snap");
+			Assert::IsFalse(frame(6).cut, L"frame 6: no snap");
+			Assert::AreEqual(size_t(2), snaps.size(), L"exactly two snaps: the first frame and the one delivered cut");
+			Assert::IsTrue(snaps[0] == 1 && snaps[1] == 4, L"snaps at frames 1 and 4");
+			const AdaptiveDownscale::CutVerdict f7 = frame(7);
+			Assert::IsTrue(f7.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !f7.cut
+				&& f7.cause.find("not sealed") != std::string::npos, L"frame 7 has no group: visible Unavailable");
+			store.SetEnabled(false);
+			const AdaptiveDownscale::CutVerdict off = frame(8);
+			Assert::IsTrue(off.state == AdaptiveDownscale::CutVerdict::State::Unavailable && !off.cut
+				&& off.cause.find("store off") != std::string::npos, L"the store off: visible Unavailable");
+		}
+	};
+
+#include "X5AbCaptureTests.inl"
 }

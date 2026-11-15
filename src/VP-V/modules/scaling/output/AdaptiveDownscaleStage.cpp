@@ -116,6 +116,10 @@ namespace AdaptiveDownscaleStage
 			if (host.bitrate(quality))
 				adaptiveNow.residualCodingNoiseCodes = static_cast<float>(GrainPreserve::CodingNoiseCodes(quality));
 		}
+		// FIX-X5-CUT-P4 / C5: the grain term's cut event is the shared one, the skeleton scene product's delivered cut (read from the
+		// renderer's frame-analysis store; never re-classified here); the module asks it once per new source frame.
+		if (!module.HasCutSource())
+			module.SetCutSource(AdaptiveDownscale::SceneCutSource());
 		if (upscaleBlend)
 		{
 			module.SetFrame(adaptiveNow, frame.sourceSequence, FramePeriod(frame, host));
@@ -278,6 +282,12 @@ namespace AdaptiveDownscaleStage
 				m == AdaptiveDownscale::MotionState::NoVectors ? "Motion-adapted blend: no vectors on this frame (plain blend)" :
 				"Motion-adapted blend: idle (the blend did not run on the last frame)");
 		}
+		// FIX-X5-CUT-P4 / C5: never a silent downgrade. No scene group for this frame: no cut verdict this frame.
+		if (!module.CutAvailable())
+			lines.push_back("Adaptive downscale: no cut verdict this frame (" + module.CutCause() + ")");
+		// The APL (diagnostic mean luma) was not read from the P4 record: shown, not a cut fault.
+		if (!module.AplCause().empty())
+			lines.push_back("Adaptive downscale: APL not read (" + module.AplCause() + ")");
 		const std::string td = TdProducts::StatusLine(TdProducts::Consumer::AdaptiveScaler, tdRead);
 		if (!td.empty())
 			lines.push_back(td);
