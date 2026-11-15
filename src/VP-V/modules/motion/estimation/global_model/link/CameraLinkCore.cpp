@@ -850,10 +850,17 @@ namespace CameraLink
 		return m_pool && m_pool->Get(seq, e) ? e.record : nullptr;
 	}
 
-	std::shared_ptr<const FieldCopy> CameraLinkCore::FieldOf(uint64_t seq) const
+	bool CameraLinkCore::FitEntryOf(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion>& rec,
+		std::shared_ptr<const FieldCopy>& field) const
 	{
+		rec.reset();
+		field.reset();
 		PoolEntry e;
-		return m_pool && m_pool->Get(seq, e) ? e.field : nullptr;
+		if (!m_pool || !m_pool->Get(seq, e))
+			return false;
+		rec = e.record;
+		field = e.field;
+		return true;
 	}
 
 	bool CameraLinkCore::LabelsFor(uint64_t seq, CameraConsumer c, CameraLabelsView& out)

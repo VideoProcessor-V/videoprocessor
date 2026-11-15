@@ -191,7 +191,8 @@ namespace CameraLink
 		std::shared_ptr<const CameraModel::CameraMotion> CausalRecord(uint64_t seq) const override;
 		std::shared_ptr<const CameraModel::CameraMotion> OnTimeRecord(uint64_t seq, OnTimeCheck check, OnTimeMiss& why) const override;
 		SealVerdict OnTimeSealVerdict(uint64_t seq) const override;
-		std::shared_ptr<const FieldCopy> FieldOf(uint64_t seq) const override;
+		bool FitEntryOf(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion>& rec,
+			std::shared_ptr<const FieldCopy>& field) const override;
 		bool LabelsFor(uint64_t seq, CameraConsumer c, CameraLabelsView& out) override;
 		std::shared_ptr<const CameraModel::GuidanceFrame> GuideFor(uint64_t seq) override;
 
