@@ -181,6 +181,11 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	vectorInput.wants[static_cast<int>(VectorDemand::Consumer::SigmaDelta)] =
 		VpMotion::DitherVectors::SigmaDeltaWantsVectors(vectorInput.wants[static_cast<int>(VectorDemand::Consumer::SigmaDelta)],
 			CustomHookChain::QuantizerOn(customHooks, "motion_compensation"));
+	// Batch B Q1: every hybrid scaler is a vector user (owner 2026-11-15): the adaptive downscale / upscale form that registered reads
+	// the motion (residual hold, grain map, motion-adapted blend) whether or not the grain-map estimate is asked for, so it registers its
+	// want here (VP-V module code; the renderer's VectorDemandInput is Bill's and stays as it is). Shown under the grain map's name.
+	vectorInput.wants[static_cast<int>(VectorDemand::Consumer::GrainMap)] =
+		vectorInput.wants[static_cast<int>(VectorDemand::Consumer::GrainMap)] || adaptiveStage.UsesVectors();
 	// The governor's release is a state of this frame: a held matcher is not released (the keeper's latch alone would stay set).
 	vectorEngine.NoteVramRelease(vectorEstimate.motionEngineIdle.Pressured() && !dejudder);
 	vectorEngine.UpdateVectorEngine(vectorInput, vectorFacts, vectorHost);

@@ -111,6 +111,10 @@ namespace AdaptiveDownscaleStage
 		void ApplyLight(pl_render_params& params, const Light& light);
 
 		bool UpscaleThisFrame() const { return upscaleThisFrame; }
+		// Batch B Q1 (plan-motion-engine-switch.md): a hybrid scaler (the adaptive downscale or the upscale form) registered on this frame
+		// and motion can run: it is a vector user, so it registers a vector want (the host adds it to the GrainMap want, DejudderPolicyRunner.inl).
+		// Separate from grainMapWanted, which also asks the estimate for the grain error map (only with the grain map or motion-adaptive on).
+		bool UsesVectors() const { return vectorUser; }
 		// Stage 8b on a one-axis upscale this frame (faithful only; the prescaler dropped).
 		bool OneAxisThisFrame() const { return oneAxisThisFrame; }
 		// Prescaler hooks dropped from this frame's list (one-axis upscale).
@@ -161,6 +165,7 @@ namespace AdaptiveDownscaleStage
 		int lightLogged = -1;            // Stage 8-1: the last logged light domain
 		bool requested = false;          // the blend asked for on this frame (downscale on, or the upscale form)
 		bool ssimMissing = false;        // downscale on without SSimDownscaler in the chain
+		bool vectorUser = false;         // a hybrid form registered on this frame and motion can run (UsesVectors)
 		unsigned long long failuresSeen = 0;
 		unsigned long long lastFailureTick = 0;   // GetTickCount64() of the last frame with new failures
 		bool failureHeld = false;          // a failure within kFailureHoldMs
