@@ -345,8 +345,7 @@ private:
     QStringList monitors_;
     QStackedWidget* pages_ = nullptr;
     Vpv::ConfigPageDirectory vpvPages_;   // VPV-HOOK
-    Vpv::FunctionFormApi formApi_;   // VPV-HOOK
-    friend struct Vpv::ConfigEditorAccess;   // VPV-HOOK (S4A A4: the editor's VP-V seams; ConfigEditorAccess.inl)
+    Vpv::FunctionFormApi formApi_; friend struct Vpv::ConfigEditorAccess;   // VPV-HOOK
     QWidget* navigation_ = nullptr;
     QLabel* status_ = nullptr;
 	QLabel* effectSummary_ = nullptr;
