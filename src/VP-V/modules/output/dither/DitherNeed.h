@@ -74,8 +74,6 @@ namespace DitherNeed
 		double tauSeconds = 0.25;  // smoothing time constant
 	};
 
-	template <class T> inline T Smoothstep(T e0, T e1, T x) { return RampMath::Smoothstep(e0, e1, x); }   // core/Ramp.h (ND07)
-
 	// One link code step in the 10-bit code scale: 2^(10 - colorBits) (8 -> 4, 10 -> 1).
 	inline double QOut(int colorBits)
 	{
@@ -93,7 +91,7 @@ namespace DitherNeed
 	template <class T> inline T GateVis(const Params& p, T V, T Sout, T qOut)
 	{
 		const T aS = Sout < T(0) ? -Sout : Sout;
-		return aS > T(1e-6) ? Smoothstep<T>(T(p.visLo), T(p.visHi), V * qOut / aS) : T(0);
+		return aS > T(1e-6) ? RampMath::Smoothstep<T>(T(p.visLo), T(p.visHi), V * qOut / aS, RampMath::SmoothRule::StepWhenNotAscending) : T(0);
 	}
 
 	// The law for one block (see the header comment). N, V, Sout, banding are the already-read scalars.

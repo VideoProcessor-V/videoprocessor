@@ -424,6 +424,23 @@ class RampAllowTest(unittest.TestCase):
             for line in (1, 3, 5):
                 self.assertNotEqual(role.get(line), "duplicate", line)
 
+    def test_explicit_template_calls_are_counted_and_rampmath_ones_are_consumers(self):
+        # C6-1 U25 C8: Smoothstep<T>( / Clamp01<double>( / Ramp<float>( are the same calls as the bare forms.
+        with tempfile.TemporaryDirectory() as r:
+            f = "src/VP-V/modules/repair/ramp_use/Tpl.h"
+            _w(r, f, "return Smoothstep<T>(T(lo), T(hi), x);\n"
+                     "double a = Clamp01 <double>(v);\n"
+                     "float b = Ramp<float>(v, lo, hi);\n"
+                     "return RampMath::Smoothstep<T>(T(lo), T(hi), x, RampMath::SmoothRule::StepWhenNotAscending);\n"
+                     "double c = RampMath::Clamp01<double>(v) + RampMath::Ramp<double>(v, lo, hi);\n"
+                     "std::vector<double> v; auto m = std::max<double>(a, b);\n")
+            role = {h["line"]: h["role"] for h in _unit(csu.scan(r, baseline={"units": {}}), "U25")["hits"]}
+            for line in (1, 2, 3):
+                self.assertEqual(role.get(line), "duplicate", line)
+            self.assertEqual(role.get(4), "consumer")
+            self.assertEqual(role.get(5), "consumer")
+            self.assertNotIn(6, role)
+
 
 class FocusAcquireAllowTest(unittest.TestCase):
     """L-FOCUS: Acquire(kP11RegionBlockStats) is a consumer read of the published product; a line that computes block
