@@ -54,12 +54,23 @@ namespace GrainSplit
 			const double e = scale * 8.0;
 			return scale >= 1.0 && e <= 255.0 && e == std::floor(e);
 		}
-		inline uint8_t ScaleAxis(double scale) { return scale == 1.0 || !ScaleRepresentable(scale) ? uint8_t(0) : static_cast<uint8_t>(scale * 8.0); }
+		// The axis value of a non-representable scale: 1 (an eighth, below every served axis: 1.0 is keyed 0, the next served
+		// value is 9). VariantFor gives it, so the refusal is in the key itself, not in each caller's ScaleRepresentable check:
+		// the owner's Fill refuses it visibly and never computes the default-scale law in its place.
+		constexpr uint8_t kScaleAxisUnrepresentable = 1;
+		inline uint8_t ScaleAxis(double scale)
+		{
+			if (scale == 1.0) return uint8_t(0);
+			return ScaleRepresentable(scale) ? static_cast<uint8_t>(scale * 8.0) : kScaleAxisUnrepresentable;
+		}
+		// True for an axis value the owner serves (0 = 1.0, or 9..255 eighths).
+		inline bool ScaleAxisServed(uint8_t axis) { return axis == 0 || axis > 8; }
 		inline double ScaleOfAxis(uint8_t axis) { return axis == 0 ? 1.0 : axis / 8.0; }
 		// The block edge of the law at a scale (Params::blockPx at <= 2160 lines, x Scale): the same law the readers use.
 		inline int BlockFor(double scale) { const int b = static_cast<int>(std::floor(DefaultParams().blockPx * scale + 0.5)); return b < 1 ? 1 : b; }
 
-		// The variant key of a luma split of w x h at `scale` for a signal of `colorDepth` bits.
+		// The variant key of a luma split of w x h at `scale` for a signal of `colorDepth` bits. A scale that is not a whole
+		// number of eighths >= 1 gets kScaleAxisUnrepresentable, which the owner refuses (a structural guard, rule 5).
 		inline VpSkeleton::VariantKey VariantFor(int w, int h, double scale, int colorDepth)
 		{
 			VpSkeleton::VariantKey k;
@@ -137,6 +148,8 @@ namespace GrainSplit
 
 			// Fills run so far (one per (frame, variant): the compute-once counter of this owner).
 			uint64_t Computes() const { std::lock_guard<std::mutex> g(m_mutex); return m_computes; }
+			// m_error is written by Fill outside m_mutex and returned by reference: both run on the render thread that owns
+			// this object and its device (the memo calls Fill there), so no lock is needed; do not read it from another thread.
 			const std::string& LastError() const { return m_error; }
 			size_t PoolSize() const { std::lock_guard<std::mutex> g(m_mutex); return m_pool.size(); }
 			// Frees the pooled Splitters no memo spot holds any more (all of them once the memo is cleared).
@@ -162,6 +175,7 @@ namespace GrainSplit
 				const VpSkeleton::VariantKey& v = req.variant;
 				if (!m_gpu || !m_dispatch || !m_planes) { m_error = "grain split variant: no device"; return false; }
 				if (v.width == 0 || v.height == 0 || v.plane != 0) { m_error = "grain split variant: a luma size is required"; return false; }
+			if (!ScaleAxisServed(v.scale)) { m_error = "grain split variant: Scale not a whole number of eighths (not served)"; return false; }
 				const SourcePlaneView src = m_planes->Acquire(req.seq, 0);
 				if (!src.Valid()) { m_error = "grain split variant: no source plane for the frame"; return false; }
 				if (static_cast<uint32_t>(src.tex->params.w) != v.width || static_cast<uint32_t>(src.tex->params.h) != v.height)
