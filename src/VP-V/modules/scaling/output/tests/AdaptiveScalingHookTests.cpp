@@ -4,6 +4,7 @@
 // VP-V GPU hook tests (moved out of Bill's LibplaceboLutParserTests.cpp; test names unchanged).
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -1050,6 +1051,135 @@ namespace VideoProcessorTest
 				Assert::IsTrue(std::fabs(ePrivate - expected) <= 0.03 * expected, ExtendedRangeGpuProbe::ToWide("private Laplacian energy vs sqrt(20) sqrt(2/pi) sigma: " + report).c_str());
 				Assert::IsTrue(std::fabs(eShared - expected) <= 0.005 * expected, ExtendedRangeGpuProbe::ToWide("P10 energy vs the constant: " + report).c_str());
 				Assert::IsTrue(std::fabs(eShared - ePrivate) <= 0.03 * expected, ExtendedRangeGpuProbe::ToWide("P10 energy vs private energy: " + report).c_str());
+			}
+		}
+
+		TEST_METHOD(AdaptiveGrainSourceStageStatusAndFallbackForEveryCase)
+		{
+			// Gate cb-u1 r2 MUST 4 (r1 MUST 5 / SHOULD 6): the stage, driven as the host drives it (Stage::Register with a Host, the
+			// OutputGlueStagesGpuTests pattern), shows exactly one grain status line and the GrainSourceFallback decision of each
+			// case after a real scalar grain pass: no callback, a valid source, an empty crop (no usable block), a grid
+			// mismatch, and a valid source in a linear measure domain. ProductFallback() carries the grain decision (the
+			// temporal-detail part is not engaged in reset 1).
+			GrainRig rig;
+			Assert::IsTrue(rig.Init(), L"the WARP test device, formats and SSimDownscaler.glsl are available");
+			double sigma = 0.0;
+			pl_tex noisy = rig.Grey(WhiteNoiseField(2.0, 4242u, sigma));
+			pl_tex dark = rig.Grey(std::vector<double>(static_cast<size_t>(GrainRig::kSw) * GrainRig::kSh, 20.0));
+			const AdaptiveDownscale::Settings st = GrainRig::Ramp();
+			const AdaptiveDownscale::GrainSource good = rig.Source(sigma);
+			AdaptiveDownscale::GrainSource outside = good;
+			outside.sourceCrop = pl_rect2df{};
+			const AdaptiveDownscale::GrainSource mismatched = rig.Source(sigma, GrainRig::kBw, GrainRig::kBh, GrainRig::kBw / 2, GrainRig::kBh / 2);
+			Assert::IsFalse(mismatched.Valid(), L"precondition: the mismatched source is not valid");
+
+			struct Outcome
+			{
+				std::vector<std::string> grainLines;
+				FallbackCatalog::Decision grain, product, td;
+				bool active = false;
+			};
+			// dark -> noise (a cut), then two repeats of the noisy frame for the read-back, as GrainRig::Measure.
+			auto run = [&](const std::function<AdaptiveDownscale::GrainSource()>& source, bool gammaLight) -> Outcome
+			{
+				AdaptiveDownscale::Module module;
+				AdaptiveDownscaleStage::Stage stage{ module };
+				AdaptiveDownscaleStage::Host host;
+				host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
+				host.bitrate = [](double& q) { q = 1.0; return false; };
+				host.nlsMapping = []() { return NlsMaskMapping::Mapping(); };
+				host.ssimInChain = []() { return true; };
+				host.motion = []() { return AdaptiveDownscaleStage::MotionSource(); };
+				host.publishStatus = []() {};
+				host.grainSource = source;   // empty = the host offers no shared products
+				double weight = 1.0;
+				bool grainWanted = false, noSsim = false;
+				const pl_tex inputs[4] = { dark, noisy, noisy, noisy };
+				const uint64_t sequences[4] = { 1, 2, 2, 2 };
+				for (int i = 0; i < 4; ++i)
+				{
+					pl_tex_params tp{};
+					tp.w = 256; tp.h = 160; tp.format = rig.dstFmt; tp.renderable = true; tp.host_readable = true;
+					pl_tex target = pl_tex_create(rig.gpu, &tp);
+					pl_frame image = TargetLutGpuFixture::MakeRgbFrame(inputs[i]);
+					image.color.transfer = PL_COLOR_TRC_GAMMA22;
+					pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+					out.color.transfer = PL_COLOR_TRC_GAMMA22;
+					pl_render_params params = pl_render_default_params;
+					params.dither_params = nullptr;
+					params.error_diffusion = nullptr;
+					params.downscaler = &pl_filter_mitchell;
+					params.disable_linear_scaling = gammaLight;   // true: the hook sees the gamma code domain (mode 0)
+					AdaptiveDownscaleStage::Frame f;
+					f.adaptiveDownscale = true;
+					f.adaptive = &st;
+					f.lowBitrateOff = true;
+					f.fboFloat32 = 0;
+					f.sourceSequence = sequences[i];
+					f.nominalSourceRateHz = 24.0;
+					f.sourceCrop = { 0.0f, 0.0f, static_cast<float>(GrainRig::kSw), static_cast<float>(GrainRig::kSh) };
+					f.targetCrop = { 0.0f, 0.0f, 256.0f, 160.0f };
+					std::vector<const pl_hook*> list = { rig.ssim };
+					stage.Register(f, host, { weight, grainWanted, noSsim }, list);
+					Assert::IsTrue(list.size() == 3 && list.front() == module.Measure() && list.back() == module.Blend(),
+						L"the stage registered measure, SSIM, blend");
+					params.hooks = list.data();
+					params.num_hooks = static_cast<int>(list.size());
+					const bool ok = pl_render_image(rig.fixture.Renderer(), &image, &out, &params);
+					pl_gpu_finish(rig.gpu);
+					pl_tex_destroy(rig.gpu, &target);
+					Assert::IsTrue(ok, L"the render ran");
+				}
+				Outcome o;
+				o.active = module.Active() && module.Failures() == 0 && module.LastStats().valid;
+				for (const std::string& line : stage.StatusLines())
+					if (line.rfind("Adaptive grain:", 0) == 0) o.grainLines.push_back(line);
+				o.grain = stage.GrainSourceFallback();
+				o.product = stage.ProductFallback();
+				o.td = stage.TemporalDetailFallback();
+				module.Release();
+				Assert::AreEqual(0, pl_renderer_get_errors(rig.fixture.Renderer()).num_disabled_hooks, L"no hook was disabled");
+				return o;
+			};
+			struct Case
+			{
+				const char* name;
+				std::function<AdaptiveDownscale::GrainSource()> source;
+				bool gammaLight;
+				const char* line;
+				bool engaged;
+				const char* reason;
+			};
+			const std::vector<Case> cases = {
+				{ "no callback", nullptr, true,
+					"Adaptive grain: own estimate (the shared grain products are not supplied to the scaler)", false, "" },
+				{ "valid", [&]() { return good; }, true,
+					"Adaptive grain: from the shared grain split (P10) and region statistics (P11)", false, "" },
+				{ "empty crop", [&]() { return outside; }, true,
+					"Adaptive grain: own estimate (no usable shared grain block on the last read-back frame)", true,
+					"grain: no usable shared block" },
+				{ "grid mismatch", [&]() { return mismatched; }, true,
+					"Adaptive grain: own estimate (the shared grain products are not supplied to the scaler)", true,
+					"grain: the offered shared products are invalid (missing or grid mismatch)" },
+				{ "linear measure domain", [&]() { return good; }, false,
+					"Adaptive grain: own estimate (measure domain is linear / HDR; the shared products are in source codes)", true,
+					"grain: measure domain is linear / HDR" },
+			};
+			for (const Case& c : cases)
+			{
+				const Outcome o = run(c.source, c.gammaLight);
+				const std::wstring name = ExtendedRangeGpuProbe::ToWide(c.name);
+				Assert::IsTrue(o.active, (name + L": the scalar grain pass ran and its statistics were read back").c_str());
+				Assert::AreEqual(size_t(1), o.grainLines.size(), (name + L": exactly one grain status line").c_str());
+				Assert::AreEqual(std::string(c.line), o.grainLines[0], (name + L": the grain status line").c_str());
+				Assert::AreEqual(std::string("product.adaptive_downscale"), o.grain.id, (name + L": the fallback id").c_str());
+				Assert::IsTrue(c.engaged == o.grain.engaged, (name + L": GrainSourceFallback engaged / released").c_str());
+				Assert::AreEqual(std::string(c.reason), o.grain.reason, (name + L": the GrainSourceFallback reason").c_str());
+				// One decision per id: the merged decision is the grain decision while the temporal-detail part is released.
+				Assert::IsFalse(o.td.engaged, (name + L": precondition: the temporal-detail read path is not engaged").c_str());
+				Assert::AreEqual(o.grain.id, o.product.id, (name + L": ProductFallback has the same id").c_str());
+				Assert::IsTrue(o.grain.engaged == o.product.engaged, (name + L": ProductFallback follows the grain decision").c_str());
+				Assert::AreEqual(o.grain.reason, o.product.reason, (name + L": ProductFallback carries the grain reason").c_str());
 			}
 		}
 	};
