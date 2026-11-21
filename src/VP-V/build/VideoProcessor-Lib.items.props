@@ -121,6 +121,7 @@
     <ClInclude Include="DolbyVisionTunnelPresentation.h" />
     <ClInclude Include="..\VP-V\modules\input\signal\HdrInferenceSignalBuilder.h" />
     <ClInclude Include="..\VP-V\modules\input\signal\DolbyVisionTunnelHandoff.h" />
+    <ClInclude Include="..\VP-V\modules\input\signal\VpvDolbyVisionTunnelFormatter.h" />
     <ClInclude Include="ShortcutDefaults.h" />
     <ClInclude Include="ShortcutChord.h" />
     <ClInclude Include="SessionEndShutdown.h" />
@@ -199,6 +200,12 @@
     <ClCompile Include="..\VP-V\modules\control\diagnostics\RawCaptureRecorder.cpp" />
     <ClCompile Include="..\VP-V\modules\input\capture\CTwoPlane420VideoFrameFormatter.cpp" />
     <ClCompile Include="..\VP-V\modules\input\capture\DeckLinkTranslatePolicy.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\VpvDolbyVisionTunnelFormatter.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\VpvDolbyVisionTunnelFormatter.AVX2.cpp">
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\shaders\Temporal sigma-delta.glsl">
