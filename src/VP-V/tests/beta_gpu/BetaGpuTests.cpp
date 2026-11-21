@@ -4821,7 +4821,7 @@ namespace CameraAccuracy
 				sr.aheadRaw[p] = RawVsTruth(fc, tx / SizeDiv(), ty / SizeDiv());   // same source-px scale as the seed row (log.truthTx / SizeDiv)
 			}
 		}
-		sr.aheadHintsOn = replica.Producer().TemporalHints() ? 1 : 0;
+		sr.aheadHintsOn = replica.Producer().HintsInForce() ? 1 : 0;
 		sr.aheadHinted = replica.Producer().GetStats().hintedPairs;
 		replica.Stop();
 		pl_gpu_finish(g);

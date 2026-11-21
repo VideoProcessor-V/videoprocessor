@@ -325,14 +325,16 @@ namespace FallbackCatalog
 		return Engaged("composed vectors", text.empty() ? std::string("composed vectors reach fewer frames than asked") : text);
 	}
 
-	// Camfix R1: the temporal hints are off by default (owner 2026-11-12 04:52); the diagnostic opt-in VP_NVOF_TEMPORAL_HINTS=1
-	// (MotionAhead::Producer) runs the NVOF engine with them. A test / A-B switch, never a setting; while it is in force it is
-	// shown, never log-only.
-	inline Decision NvofTemporalHintsOn(bool on)
+	// Camfix R1: the NVOF temporal hints are resolved per consumer class (MotionAhead::Producer::HintConsumer). Defaults: the camera
+	// fit OFF (owner 2026-11-12 04:52, interim narrow reading), every other consumer ON. The diagnostic opt-in
+	// VP_NVOF_TEMPORAL_HINTS=1 turns the camera class on. A test / A-B switch, never a setting; while either class differs from its
+	// default the entry is engaged and names both states, never log-only.
+	inline Decision NvofTemporalHints(bool cameraOn, bool otherOn)
 	{
-		if (!on)
+		if (!cameraOn && otherOn)
 			return Released("nvof temporal hints");
-		return Engaged("nvof temporal hints", "motion engine: NVOF temporal hints ON (VP_NVOF_TEMPORAL_HINTS=1, a diagnostic opt-in; default is off)");
+		return Engaged("nvof temporal hints", std::string("motion engine: NVOF temporal hints camera fit ") + (cameraOn ? "ON" : "off") +
+			", other consumers " + (otherOn ? "ON" : "off") + " (defaults: camera off, others ON; VP_NVOF_TEMPORAL_HINTS=1 is the camera diagnostic opt-in)");
 	}
 
 	// SK-MV warm engine (protected tier): MotionEngineIdle released the matcher under video-memory pressure, which drops the de-judder's

@@ -186,8 +186,8 @@ namespace MotionAhead
 		const DWORD n = GetEnvironmentVariableA("VP_NVOF_TEMPORAL_HINTS", value, static_cast<DWORD>(sizeof(value)));
 		if (n == 1 && value[0] == '1')
 		{
-			temporalHints.store(true, std::memory_order_release);
-			DebugLog::Log("Motion ahead: NVOF temporal hints ON (VP_NVOF_TEMPORAL_HINTS=1, diagnostic opt-in)");
+			hintsCamera.store(true, std::memory_order_release);
+			DebugLog::Log("Motion ahead: NVOF temporal hints ON for the camera fit (VP_NVOF_TEMPORAL_HINTS=1, diagnostic opt-in)");
 		}
 	}
 

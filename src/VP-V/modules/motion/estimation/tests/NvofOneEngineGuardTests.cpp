@@ -8,6 +8,7 @@
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/core/VramUsers.h>
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
 #include <VP-V/modules/motion/estimation/longpair/LongPairService.h>
@@ -275,12 +276,15 @@ namespace VideoProcessorTest
 			char value[8] = {};
 			const DWORD n = GetEnvironmentVariableA("VP_NVOF_TEMPORAL_HINTS", value, static_cast<DWORD>(sizeof(value)));
 			const bool envOn = n == 1 && value[0] == '1';
+			using HC = MotionAhead::Producer::HintConsumer;
 			MotionAhead::Producer producer;
-			Assert::AreEqual(envOn, producer.TemporalHints(), L"default off (on only with VP_NVOF_TEMPORAL_HINTS=1)");
-			producer.SetTemporalHints(true);
-			Assert::IsTrue(producer.TemporalHints());
-			producer.SetTemporalHints(false);
-			Assert::IsFalse(producer.TemporalHints());
+			Assert::AreEqual(envOn, producer.TemporalHints(HC::Camera), L"camera class: default off (on only with VP_NVOF_TEMPORAL_HINTS=1)");
+			Assert::IsTrue(producer.TemporalHints(HC::Other), L"every other consumer class: default ON (interim narrow reading)");
+			producer.SetTemporalHints(HC::Camera, true);
+			Assert::IsTrue(producer.TemporalHints(HC::Camera));
+			producer.SetTemporalHints(HC::Camera, false);
+			Assert::IsFalse(producer.TemporalHints(HC::Camera));
+			Assert::IsTrue(producer.TemporalHints(HC::Other), L"the camera setting does not touch the others");
 			Assert::AreEqual(0ull, producer.GetStats().hintedPairs, L"no pair, none hinted");
 		}
 
@@ -288,13 +292,47 @@ namespace VideoProcessorTest
 		// Ctrl+I shows (TemporalHints) is the state both paths use: ON follows the chain continuity, OFF never hints.
 		TEST_METHOD(ScheduledAndOnDemandPathsAgreeOnTheHintsState)
 		{
+			using HC = MotionAhead::Producer::HintConsumer;
 			MotionAhead::Producer producer;
-			producer.SetTemporalHints(true);
+			producer.SetCameraConsumes(true);
+			producer.SetTemporalHints(HC::Camera, true);
 			Assert::IsTrue(producer.HintsApply(true), L"on + continuous chain: hinted");
 			Assert::IsFalse(producer.HintsApply(false), L"on + broken chain: not hinted");
-			producer.SetTemporalHints(false);
+			producer.SetTemporalHints(HC::Camera, false);
 			Assert::IsFalse(producer.HintsApply(true), L"off + continuous chain: not hinted (scheduled and on-demand)");
 			Assert::IsFalse(producer.HintsApply(false), L"off + broken chain: not hinted");
+		}
+
+		// Interim narrow ruling: one resolution per consumer class through HintsApply. Camera fit consuming = OFF by default and the
+		// opt-in turns it on; every other consumer = ON by default and a broken chain never hints; the Other setting is its own.
+		TEST_METHOD(HintsResolvePerConsumerClassThroughHintsApply)
+		{
+			using HC = MotionAhead::Producer::HintConsumer;
+			MotionAhead::Producer producer;
+			producer.SetTemporalHints(HC::Camera, false);   // independent of the environment opt-in
+			producer.SetCameraConsumes(false);
+			Assert::IsTrue(producer.HintsApply(true), L"others: hints ON by default on a continuous chain");
+			Assert::IsFalse(producer.HintsApply(false), L"others: a broken chain never hints");
+			producer.SetCameraConsumes(true);
+			Assert::IsFalse(producer.HintsApply(true), L"camera pairs: hints OFF by default");
+			producer.SetTemporalHints(HC::Camera, true);
+			Assert::IsTrue(producer.HintsApply(true), L"camera opt-in: hints ON (shown on Ctrl+I)");
+			Assert::IsTrue(producer.HintsInForce());
+			producer.SetCameraConsumes(false);
+			producer.SetTemporalHints(HC::Other, false);
+			Assert::IsFalse(producer.HintsApply(true), L"others switched off: not hinted");
+			Assert::IsTrue(producer.TemporalHints(HC::Camera), L"the classes are independent");
+		}
+
+		// The Ctrl+I entry names both classes and is released only at the defaults (camera off, others ON).
+		TEST_METHOD(HintsFallbackEntryShowsEachConsumerClass)
+		{
+			Assert::IsFalse(FallbackCatalog::NvofTemporalHints(false, true).engaged, L"defaults: released");
+			const FallbackCatalog::Decision camera = FallbackCatalog::NvofTemporalHints(true, true);
+			Assert::IsTrue(camera.engaged, L"camera opt-in shown");
+			Assert::IsTrue(camera.reason.find("camera fit ON") != std::string::npos && camera.reason.find("other consumers ON") != std::string::npos);
+			const FallbackCatalog::Decision other = FallbackCatalog::NvofTemporalHints(false, false);
+			Assert::IsTrue(other.engaged && other.reason.find("other consumers off") != std::string::npos, L"others off shown");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(ExactlyOneEngineAcrossProducerDejudderAndLongPair)

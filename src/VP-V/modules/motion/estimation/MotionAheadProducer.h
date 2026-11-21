@@ -262,10 +262,21 @@ namespace MotionAhead
 		// A diagnostic switch for tests and A/B runs; the environment variable VP_NVOF_TEMPORAL_HINTS=1 turns it on at
 		// construction (no configuration key); Ctrl+I shows the opt-in. Both the scheduled and the on-demand path decide through
 		// HintsApply, so the shown state is the real one.
-		void SetTemporalHints(bool on) { temporalHints.store(on, std::memory_order_release); }
-		bool TemporalHints() const { return temporalHints.load(std::memory_order_acquire); }
-		// The one decision both RunPair call sites use: hints only while on AND the engine's last pair ended at this pair's first frame.
-		bool HintsApply(bool chainContinuous) const { return chainContinuous && temporalHints.load(std::memory_order_acquire); }
+		// Interim ruling (coordinator, delegated; owner confirms): "camera hints OFF" (register 115 #40) is read NARROWLY. The
+		// setting is per consumer class: Camera (the camera-model fit, default OFF) and Other (de-judder, everyday viewing and every
+		// other NVOF consumer, default ON: hints off everywhere worsened slow pans, R1 120 px/s 59.94p bias +0.036 -> +0.464 px).
+		// The pair stream is computed once and shared (rule 21), so the rule is one resolution: while the camera fit consumes the
+		// stream (SetCameraConsumes, set by VectorEngine each update) the Camera setting governs the pair, otherwise the Other
+		// setting does. VP_NVOF_TEMPORAL_HINTS=1 turns the Camera setting on (the diagnostic opt-in); the Other setting has no env.
+		enum class HintConsumer { Camera, Other };
+		void SetTemporalHints(HintConsumer who, bool on) { (who == HintConsumer::Camera ? hintsCamera : hintsOther).store(on, std::memory_order_release); }
+		bool TemporalHints(HintConsumer who) const { return (who == HintConsumer::Camera ? hintsCamera : hintsOther).load(std::memory_order_acquire); }
+		void SetCameraConsumes(bool on) { cameraConsumes.store(on, std::memory_order_release); }
+		bool CameraConsumes() const { return cameraConsumes.load(std::memory_order_acquire); }
+		// The hints state in force for the pairs now being made (what Ctrl+I shows and HintsApply uses).
+		bool HintsInForce() const { return TemporalHints(CameraConsumes() ? HintConsumer::Camera : HintConsumer::Other); }
+		// The one decision both RunPair call sites use: hints only while in force AND the engine's last pair ended at this pair's first frame.
+		bool HintsApply(bool chainContinuous) const { return chainContinuous && HintsInForce(); }
 
 		// W2-C5b: an ON-DEMAND pair for a render-time consumer (OnDemandEstimate.h). Any thread; never blocks on the worker:
 		// a pair already in the slot answers FromSlot at once (zero work); not running / stopping / restarting answers
@@ -384,7 +395,9 @@ namespace MotionAhead
 			maxPendingJobs.store(PendingJobsFor(d > l ? d : l), std::memory_order_release);
 		}
 		std::atomic<bool> generalRates{ true };
-		std::atomic<bool> temporalHints{ false };   // camfix R1 (SetTemporalHints)
+		std::atomic<bool> hintsCamera{ false };   // camfix R1 (SetTemporalHints, Camera): owner 04:52, default OFF
+		std::atomic<bool> hintsOther{ true };     // camfix R1 (SetTemporalHints, Other): every other NVOF consumer keeps hints ON
+		std::atomic<bool> cameraConsumes{ false };   // the camera fit consumes the pair stream (VectorEngine, each update)
 		std::atomic<int> targetW{ 0 }, targetH{ 0 };
 		std::mutex p1Mutex;                                 // guards p1Source (set from the render thread, read by the worker)
 		std::shared_ptr<VpSkeleton::IP1Source> p1Source;

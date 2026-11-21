@@ -410,8 +410,12 @@ All numbers in this section were measured on the old tip f0322d84a; the re-seate
 **R1 result (NVOF temporal hints): MIXED.** Hints OFF fix the fast pans (1080 480 px/s fit bias 59.94p -0.595 -> -0.004 px,
 24p +0.07 -> +0.03) but make the slow pans worse (120 px/s 59.94p +0.036 -> +0.464, 24p -0.475 -> -0.609). The quantised NVOF flow
 (0.25 engine px) is biased at slow speeds either way; the hints change the bias at fast speeds. The hints are OFF by default
-(owner 2026-11-12 04:52: "camera hints OFF by default until R3 lands and is re-tested"; doc 91 A/H; register 115 #40); the diagnostic
-opt-in `VP_NVOF_TEMPORAL_HINTS=1` turns them on and Ctrl+I shows it. Both the scheduled and the on-demand pair decide through
+for the CAMERA fit only (owner 2026-11-12 04:52: "camera hints OFF by default until R3 lands and is re-tested"; doc 91 A/H; register 115 #40).
+Interim ruling (coordinator, delegated, 2026-11-21; the owner confirms): "camera hints" is read narrowly, so every other NVOF consumer
+(de-judder, everyday viewing) keeps hints ON, because off everywhere worsened the slow pans. The setting is per consumer class
+(`HintConsumer::Camera` off, `HintConsumer::Other` on), resolved by the one `HintsApply` (the camera fit's want selects the class; the
+pair stream is shared, so while the camera fit consumes it the camera setting governs). The diagnostic opt-in
+`VP_NVOF_TEMPORAL_HINTS=1` turns the camera class on; Ctrl+I names both states whenever either differs from its default. Both the scheduled and the on-demand pair decide through
 `Producer::HintsApply`, so the shown state is the real one. R3 (pixel-domain refinement) is the fix for all rows; its acceptance table measures hints ON and OFF
 on every speed row (120 / 480 px/s, 24p / 59.94p, 1080 / 4K, >= 3 ABAB repeats) and the hint default is picked from that table.
 - Cost line (NVOF engine ms per pair, hints on -> off, one run each, noisy): 1080 24p 9.78 -> 5.98; 1080 59.94p 5.58 -> 5.39;
@@ -441,7 +445,7 @@ EPE spread) or +2 pts <0.25 px share), PASS-FLOOR (no headroom, non-inferior), N
 
 | Knob | Kind | Values | Default | Effect | Visible |
 |---|---|---|---|---|---|
-| `VP_NVOF_TEMPORAL_HINTS` (R1) | process env, read by `MotionAhead::Producer` | 1 / unset | unset (hints off) | 1 (exactly) runs the NVOF engine with temporal hints, a diagnostic opt-in | Ctrl+I fallback entry "nvof temporal hints" while on (`FallbackCatalog::NvofTemporalHintsOn`) |
+| `VP_NVOF_TEMPORAL_HINTS` (R1) | process env, read by `MotionAhead::Producer` | 1 / unset | unset (camera fit: hints off; every other consumer: on) | 1 (exactly) runs the camera fit's pairs with temporal hints, a diagnostic opt-in | Ctrl+I fallback entry "nvof temporal hints" (both class states) while either differs from its default (`FallbackCatalog::NvofTemporalHints`) |
 | `PairInput::quantumPx` (R2) | internal field | >= 0 source px | 0 (no NVOF field); set by `AheadFlow` and `FieldCopy` | quantum floor + competitor separation | the record's ambiguity / precision in the camera status |
 | `VP_TEST_CAMERA_ACCURACY_D0` (R8) | test env | 0 / 1 | unset | adds the d = 0 variants, the extra 480 px/s rows (29.97p too) and the acceptance table | report only |
 | `VP_TEST_CAMERA_ACCURACY_REPEATS` (R8) | test env | >= 1 | 1 | interleaved ABAB runs of off / d0; 3 or more are needed for a verdict (fewer = INCONCLUSIVE) | report only |
