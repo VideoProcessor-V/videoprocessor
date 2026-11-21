@@ -320,13 +320,18 @@ namespace VpMotion
 		// failed start waits for its back-off, the matcher alone would give it nothing, so its want is not registered (its own
 		// "camera fit needs the optical-flow seed" status shows; the "motion engine" entry names it).
 		const bool cameraWanted = cameraFitWanted_.load(std::memory_order_acquire) || input.wants[cameraFit];
+		motionOpticalFlow = facts.opticalFlow;   // this frame's setting (PlanProducer refreshes it too)
+		motionCameraGated = cameraWanted && (!motionOpticalFlow ||
+			(motionProducerStartRetry.Recovering() && now < motionProducerStartRetry.RetryAtMs()));
+		// Audit-2 NIT 3: a gated camera fit (no optical flow / producer recovering) does not consume the stream, so the hints state
+		// shown as "camera fit active" is cameraWanted && !motionCameraGated, exactly what the stream now serves.
 		// Camfix R1 + audit MUST 1: one shared pair stream, so one hints state for ALL consumers: while the camera fit wants the
 		// stream its setting (default off) governs every pair, otherwise the everyday setting (default on). The entry is built from
 		// the producer's HintsInForce (the state HintsApply uses), so Ctrl+I shows the real state and why; synced on change only.
 		{
 			const std::shared_ptr<MotionAhead::Producer> producer = LoopProducer();
 			if (producer)
-				producer->SetCameraConsumes(cameraWanted);
+				producer->SetCameraConsumes(cameraWanted && !motionCameraGated);
 			const MotionAhead::Producer::HintsState hs = producer ? producer->HintsShown() : MotionAhead::Producer::HintsState();
 			const int shown = (hs.cameraOn ? 1 : 0) | (hs.otherOn ? 2 : 0) | (hs.cameraActive ? 4 : 0) | (hs.inForce ? 8 : 0);
 			if (shown != motionHintsShown)
@@ -335,9 +340,6 @@ namespace VpMotion
 				host.SyncFallback(FallbackCatalog::NvofTemporalHints(hs.cameraActive, hs.inForce, hs.cameraOn, hs.otherOn));
 			}
 		}
-		motionOpticalFlow = facts.opticalFlow;   // this frame's setting (PlanProducer refreshes it too)
-		motionCameraGated = cameraWanted && (!motionOpticalFlow ||
-			(motionProducerStartRetry.Recovering() && now < motionProducerStartRetry.RetryAtMs()));
 		// Batch B (plan-motion-engine-switch.md (b)): optical-flow pairs are EXPECTED when the optical-flow producer is configured and
 		// has not failed to start (previous-frame facts: the planner's motion_ahead_frames, -1 = not planned yet = expected). With none
 		// expected the field consumers use the matcher fallback and the statistics consumers are named unserved (VectorDemand::DecideForHost).
