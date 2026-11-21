@@ -1,0 +1,100 @@
+{
+  "schema": "vp-row27-grid/1",
+  "copyright": "Copyright(C) 2026 VP-V contributors",
+  "license": "GPL-3.0-only",
+  "about": "Row-27 render-ahead proof and general rate/mode loop-rig matrix. All rates are exact [num, den] rationals; all tolerances, cadence ratios, and convergence bounds are derived from source_period and display_period (never fixed ms literals).",
+  "axes": {
+    "source_rates": [
+      {"name": "23.976", "rate": [24000, 1001]},
+      {"name": "24.0",   "rate": [24, 1]},
+      {"name": "25.0",   "rate": [25, 1]},
+      {"name": "29.97",  "rate": [30000, 1001]},
+      {"name": "30.0",   "rate": [30, 1]},
+      {"name": "50.0",   "rate": [50, 1]},
+      {"name": "59.94",  "rate": [60000, 1001]},
+      {"name": "60.0",   "rate": [60, 1]}
+    ],
+    "display_modes": [
+      {"name": "24",    "rate": [24, 1],       "size": [1920, 1080]},
+      {"name": "48",    "rate": [48, 1],       "size": [1920, 1080]},
+      {"name": "50",    "rate": [50, 1],       "size": [1920, 1080]},
+      {"name": "59.94", "rate": [60000, 1001], "size": [1920, 1080]},
+      {"name": "60",    "rate": [60, 1],       "size": [1920, 1080]},
+      {"name": "120",   "rate": [120, 1],      "size": [1920, 1080]}
+    ],
+    "pathways": ["original", "vpv"],
+    "levels": [0, 1, 2, 3, 4],
+    "render_ahead": [false, true],
+    "queue_depths": [0, 1, 2, 3, 4, "auto"],
+    "dejudder": [false, true],
+    "color_modes": ["sdr", "hdr10", "dv_tunnel"],
+    "tracks": ["clean", "dirty", "rate_transition"]
+  },
+  "defaults": {
+    "duration_s": 12.0,
+    "phase_tolerance_periods": 0.25,
+    "delay_spread_slack_periods": 0.50,
+    "delay_drift_limit_periods": 0.35,
+    "landing_tolerance_vblanks": 0,
+    "max_late_landing_fraction": 0.0,
+    "dirty_recovery_source_periods": 8,
+    "transition_converge_source_periods": 12,
+    "min_frames": 48
+  },
+  "profiles": {
+    "smoke": {
+      "description": "Fast representative subset covering all 4 cadence classes, Original vs VP-V, render-ahead off/on, SDR/HDR10/DV-tunnel, clean/dirty/rate-transition.",
+      "cells": [
+        {"src": "23.976", "disp": "59.94", "pathway": "original", "level": 0, "render_ahead": false, "queue_depth": 0,      "dejudder": false, "color_mode": "sdr",       "track": "clean"},
+        {"src": "23.976", "disp": "59.94", "pathway": "vpv",      "level": 2, "render_ahead": false, "queue_depth": 0,      "dejudder": true,  "color_mode": "sdr",       "track": "clean"},
+        {"src": "23.976", "disp": "59.94", "pathway": "vpv",      "level": 2, "render_ahead": true,  "queue_depth": "auto", "dejudder": true,  "color_mode": "sdr",       "track": "clean"},
+        {"src": "25.0",   "disp": "50",    "pathway": "vpv",      "level": 1, "render_ahead": true,  "queue_depth": 2,      "dejudder": false, "color_mode": "hdr10",     "track": "clean"},
+        {"src": "25.0",   "disp": "60",    "pathway": "vpv",      "level": 3, "render_ahead": true,  "queue_depth": 3,      "dejudder": true,  "color_mode": "hdr10",     "track": "dirty"},
+        {"src": "23.976", "disp": "60",    "pathway": "vpv",      "level": 4, "render_ahead": true,  "queue_depth": 4,      "dejudder": true,  "color_mode": "dv_tunnel", "track": "clean"},
+        {"src": "59.94",  "disp": "59.94", "pathway": "vpv",      "level": 0, "render_ahead": false, "queue_depth": 0,      "dejudder": false, "color_mode": "sdr",       "track": "clean"},
+        {"src": "23.976", "disp": "59.94", "pathway": "vpv",      "level": 2, "render_ahead": true,  "queue_depth": "auto", "dejudder": true,  "color_mode": "dv_tunnel", "track": "rate_transition", "transition_to": "59.94"},
+        {"src": "24.0",   "disp": "120",   "pathway": "vpv",      "level": 3, "render_ahead": true,  "queue_depth": 3,      "dejudder": true,  "color_mode": "hdr10",     "track": "clean"}
+      ]
+    },
+    "row27": {
+      "description": "Owner Row-27 Render-Ahead proof matrix: Original vs VP-V Levels 0-4, render-ahead off/on (L=0,1,2,3,4,auto), de-judder off/on, all cadence classes, SDR/HDR10/DV-tunnel, clean/dirty/rate-transition.",
+      "cells": [
+        {"src": "23.976", "disp": "59.94", "pathway": "original", "level": 0, "render_ahead": false, "queue_depth": 0,      "dejudder": false, "color_mode": "sdr",       "track": "clean"},
+        {"src": "23.976", "disp": "59.94", "pathway": "vpv",      "level": 0, "render_ahead": false, "queue_depth": 0,      "dejudder": false, "color_mode": "sdr",       "track": "clean"},
+        {"src": "23.976", "disp": "59.94", "pathway": "vpv",      "level": 0, "render_ahead": true,  "queue_depth": 1,      "dejudder": true,  "color_mode": "sdr",       "track": "clean"},
+        {"src": "23.976", "disp": "59.94", "pathway": "vpv",      "level": 1, "render_ahead": true,  "queue_depth": 2,      "dejudder": true,  "color_mode": "sdr",       "track": "clean"},
+        {"src": "23.976", "disp": "59.94", "pathway": "vpv",      "level": 2, "render_ahead": true,  "queue_depth": 3,      "dejudder": true,  "color_mode": "hdr10",     "track": "clean"},
+        {"src": "23.976", "disp": "59.94", "pathway": "vpv",      "level": 3, "render_ahead": true,  "queue_depth": 4,      "dejudder": true,  "color_mode": "hdr10",     "track": "clean"},
+        {"src": "23.976", "disp": "59.94", "pathway": "vpv",      "level": 4, "render_ahead": true,  "queue_depth": "auto", "dejudder": true,  "color_mode": "dv_tunnel", "track": "clean"},
+        {"src": "23.976", "disp": "59.94", "pathway": "vpv",      "level": 2, "render_ahead": true,  "queue_depth": "auto", "dejudder": false, "color_mode": "sdr",       "track": "clean"},
+        {"src": "24.0",   "disp": "48",    "pathway": "original", "level": 0, "render_ahead": false, "queue_depth": 0,      "dejudder": false, "color_mode": "sdr",       "track": "clean"},
+        {"src": "24.0",   "disp": "48",    "pathway": "vpv",      "level": 2, "render_ahead": true,  "queue_depth": 2,      "dejudder": true,  "color_mode": "hdr10",     "track": "clean"},
+        {"src": "24.0",   "disp": "24",    "pathway": "vpv",      "level": 1, "render_ahead": true,  "queue_depth": 1,      "dejudder": false, "color_mode": "sdr",       "track": "clean"},
+        {"src": "24.0",   "disp": "60",    "pathway": "vpv",      "level": 2, "render_ahead": true,  "queue_depth": 3,      "dejudder": true,  "color_mode": "sdr",       "track": "clean"},
+        {"src": "24.0",   "disp": "120",   "pathway": "vpv",      "level": 3, "render_ahead": true,  "queue_depth": "auto", "dejudder": true,  "color_mode": "dv_tunnel", "track": "clean"},
+        {"src": "25.0",   "disp": "50",    "pathway": "original", "level": 0, "render_ahead": false, "queue_depth": 0,      "dejudder": false, "color_mode": "sdr",       "track": "clean"},
+        {"src": "25.0",   "disp": "50",    "pathway": "vpv",      "level": 2, "render_ahead": true,  "queue_depth": 2,      "dejudder": true,  "color_mode": "sdr",       "track": "clean"},
+        {"src": "25.0",   "disp": "60",    "pathway": "vpv",      "level": 3, "render_ahead": true,  "queue_depth": 3,      "dejudder": true,  "color_mode": "hdr10",     "track": "clean"},
+        {"src": "29.97",  "disp": "59.94", "pathway": "vpv",      "level": 2, "render_ahead": true,  "queue_depth": 2,      "dejudder": true,  "color_mode": "sdr",       "track": "clean"},
+        {"src": "29.97",  "disp": "60",    "pathway": "vpv",      "level": 3, "render_ahead": true,  "queue_depth": 3,      "dejudder": true,  "color_mode": "hdr10",     "track": "clean"},
+        {"src": "30.0",   "disp": "60",    "pathway": "original", "level": 0, "render_ahead": false, "queue_depth": 0,      "dejudder": false, "color_mode": "sdr",       "track": "clean"},
+        {"src": "30.0",   "disp": "60",    "pathway": "vpv",      "level": 2, "render_ahead": true,  "queue_depth": "auto", "dejudder": false, "color_mode": "hdr10",     "track": "clean"},
+        {"src": "50.0",   "disp": "50",    "pathway": "vpv",      "level": 1, "render_ahead": false, "queue_depth": 0,      "dejudder": false, "color_mode": "sdr",       "track": "clean"},
+        {"src": "50.0",   "disp": "120",   "pathway": "vpv",      "level": 3, "render_ahead": true,  "queue_depth": 3,      "dejudder": true,  "color_mode": "hdr10",     "track": "clean"},
+        {"src": "59.94",  "disp": "59.94", "pathway": "original", "level": 0, "render_ahead": false, "queue_depth": 0,      "dejudder": false, "color_mode": "sdr",       "track": "clean"},
+        {"src": "59.94",  "disp": "60",    "pathway": "vpv",      "level": 2, "render_ahead": true,  "queue_depth": 2,      "dejudder": false, "color_mode": "dv_tunnel", "track": "clean"},
+        {"src": "60.0",   "disp": "60",    "pathway": "vpv",      "level": 4, "render_ahead": true,  "queue_depth": 1,      "dejudder": false, "color_mode": "sdr",       "track": "clean"},
+        {"src": "60.0",   "disp": "120",   "pathway": "vpv",      "level": 3, "render_ahead": true,  "queue_depth": 2,      "dejudder": true,  "color_mode": "hdr10",     "track": "clean"},
+        {"src": "23.976", "disp": "60",    "pathway": "vpv",      "level": 2, "render_ahead": true,  "queue_depth": "auto", "dejudder": true,  "color_mode": "sdr",       "track": "dirty"},
+        {"src": "25.0",   "disp": "50",    "pathway": "vpv",      "level": 3, "render_ahead": true,  "queue_depth": 3,      "dejudder": true,  "color_mode": "dv_tunnel", "track": "dirty"},
+        {"src": "23.976", "disp": "59.94", "pathway": "vpv",      "level": 2, "render_ahead": true,  "queue_depth": "auto", "dejudder": true,  "color_mode": "sdr",       "track": "rate_transition", "transition_to": "59.94"},
+        {"src": "25.0",   "disp": "50",    "pathway": "vpv",      "level": 2, "render_ahead": true,  "queue_depth": 2,      "dejudder": true,  "color_mode": "hdr10",     "track": "rate_transition", "transition_to": "50.0"},
+        {"src": "59.94",  "disp": "120",   "pathway": "vpv",      "level": 4, "render_ahead": true,  "queue_depth": 4,      "dejudder": true,  "color_mode": "dv_tunnel", "track": "rate_transition", "transition_to": "23.976"}
+      ]
+    },
+    "full": {
+      "description": "Pairwise (2-way covering array) expansion over all source rates, display modes, pathways/levels, render-ahead depths, de-judder, color modes, and tracks.",
+      "expand": "pairwise"
+    }
+  }
+}
