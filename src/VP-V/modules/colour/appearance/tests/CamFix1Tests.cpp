@@ -403,7 +403,7 @@ namespace Tests
 		{
 			const double bt2020[9] = { 0.6370, 0.1446, 0.1689, 0.2627, 0.6780, 0.0593, 0.0, 0.0281, 1.0610 };
 			double inv[9] = {};
-			Assert::IsTrue(AppearanceStage::Invert3(bt2020, inv));
+			Assert::IsTrue(DvMath::Invert(bt2020, inv));   // CF1-FIN MUST 1: the one home
 			for (int r = 0; r < 3; ++r)
 				for (int c = 0; c < 3; ++c)
 				{
