@@ -160,7 +160,9 @@ inline const std::vector<ProductRow>& ProductRows()
         // producer, no live fill; its readers take the latest sealed record (lag 1) and fall back visibly when it is absent or stale.
         { kSourceGeometry, "input/source_analysis/identity", kExpectedSourceGeometryUnit, "" },
         { kEdgeMap, "input/source_analysis/regions", kExpectedRegionUnit, "edge map pass (per-frame memo); readers: focus map, busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3))" },
-        // CF-1 CAM-2: room_light is HELD STATE (single writer: the LED intent filter, no lane producer, no live fill); the appearance stage reads at lag 1.
+        // CF-1 CAM-2: room_light is HELD STATE (no lane producer, no live fill, no RegisterOwnerFill anywhere). The folder below owns the RECORD (layout
+        // and unit version: colour/appearance/RoomLight.h); the single WRITER is the LED intent's ambient filter (drive/led_compensation/LedIntentState.h),
+        // published from control/diagnostics/StatusMethods.inl; the reader is the appearance stage at lag 1 (CF-1 FIX1 MUST 7: checked, kept).
         { kRoomLight, "colour/appearance", kExpectedRoomLightUnit, "" },
     };
     return rows;
