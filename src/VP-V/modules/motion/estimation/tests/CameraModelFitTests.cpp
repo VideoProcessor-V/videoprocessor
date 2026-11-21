@@ -1677,5 +1677,46 @@ namespace VideoProcessorTest
 			const int cam = CountLabel(r, Label::Camera);
 			Require(cam >= static_cast<int>(0.9 * f.Count()), Fmt("noisy pan camera share", r) + " camera blocks=" + std::to_string(cam));
 		}
+
+		// Camfix R2 audit (sigma ratchet, GlobalModelFit.cpp Fitter::Run): a slow mover a few quanta off the camera (a quarter of the
+		// picture, 2.5 px and 4.5 px at a 1.0 px quantum) must not raise the robust scale until it is absorbed: the camera model stays
+		// on the pan, the threshold stays near the quantum floor, and the 4.5 px mover stays an object.
+		static void SlowMover(double offsetPx, unsigned seed, CameraMotion* out, Field* field)
+		{
+			Field& f = *field;
+			f.FromModel(PanModel(12.4, -4.6));
+			const int x0 = static_cast<int>(0.6 * f.gridW), w = f.gridW / 4;
+			f.AddObject(x0, 0, w, f.gridH, 12.4 + offsetPx, -4.6);
+			f.AddNoise(0.3, seed);
+			QuantizeField(f, 1.0);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 1.0;
+			Fitter fitter;
+			*out = fitter.Fit(in);
+		}
+
+		TEST_METHOD(CamfixR2SlowMoverDoesNotRatchetTheScale)
+		{
+			for (const double offset : { 2.5, 4.5 })
+			{
+				Field f(Grid4K());
+				CameraMotion r;
+				SlowMover(offset, 74, &r, &f);
+				const std::string tag = "slow mover " + std::to_string(offset) + " px, quantum 1.0";
+				Require(r.valid && r.blocks != nullptr, Fmt(tag.c_str(), r));
+				Logger::WriteMessage((Fmt(tag.c_str(), r) + " absThresholdPx=" + std::to_string(r.blocks->absThresholdPx)).c_str());
+				const double err = ModelError(r, PanModel(12.4, -4.6), f.picture) * f.Diagonal();
+				Require(err < 0.25, tag + ": camera model corner error px=" + std::to_string(err));
+				Require(r.blocks->absThresholdPx <= 3.0 * 1.5, tag + ": threshold ratcheted by the mover: " + std::to_string(r.blocks->absThresholdPx));
+			}
+			Field f(Grid4K());
+			CameraMotion r;
+			SlowMover(4.5, 75, &r, &f);
+			const int x0 = static_cast<int>(0.6 * f.gridW), w = f.gridW / 4;
+			const int moverBlocks = w * f.gridH;
+			const int notCamera = moverBlocks - CountLabelInRect(r, f, x0, 0, w, f.gridH, Label::Camera);
+			Require(notCamera >= static_cast<int>(0.9 * moverBlocks), Fmt("4.5 px mover", r) + " not-camera blocks=" + std::to_string(notCamera) +
+				" of " + std::to_string(moverBlocks));
+		}
 	};
 }

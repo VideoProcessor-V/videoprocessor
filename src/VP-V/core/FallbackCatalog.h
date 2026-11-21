@@ -325,6 +325,15 @@ namespace FallbackCatalog
 		return Engaged("composed vectors", text.empty() ? std::string("composed vectors reach fewer frames than asked") : text);
 	}
 
+	// Camfix R1: the diagnostic VP_NVOF_TEMPORAL_HINTS=0 override (MotionAhead::Producer) runs the NVOF engine without temporal hints.
+	// A test / A-B switch, never a setting; while it is in force it is shown, never log-only.
+	inline Decision NvofTemporalHintsOff(bool off)
+	{
+		if (!off)
+			return Released("nvof temporal hints");
+		return Engaged("nvof temporal hints", "motion engine: NVOF temporal hints OFF (VP_NVOF_TEMPORAL_HINTS=0, a diagnostic override)");
+	}
+
 	// SK-MV warm engine (protected tier): MotionEngineIdle released the matcher under video-memory pressure, which drops the de-judder's
 	// standing optical-flow demand until the pressure eases. Never silent.
 	inline Decision MotionEnginePressure(bool pressured)

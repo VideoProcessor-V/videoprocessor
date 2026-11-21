@@ -840,6 +840,7 @@ namespace Dejudder
 			bool modelGlobal = false, staticFromModel = false, matcherSkipped = false, narrowPass = false, e1Pass = false,
 				fadeNormalised = false;
 			bool narrowDroppedEngine = false;   // narrow planned but the engine seeds / replaces the searches
+			bool e1DroppedEngine = false;       // camfix R4: E1 skip planned but the engine's field seeds the refinement (E1 not run)
 			const char* rejected = "";          // non-empty: the per-block guidance was not used (reason)
 			const char* gpuNotApplied = "";     // plan parts the GPU matcher does not do yet (GuidanceFrame)
 		};

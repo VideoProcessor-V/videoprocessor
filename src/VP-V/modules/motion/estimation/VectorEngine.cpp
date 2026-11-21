@@ -315,6 +315,16 @@ namespace VpMotion
 	void VectorEngine::UpdateVectorEngine(const VectorDemand::Input& input, const UpdateFacts& facts, IVectorEngineHost& host)
 	{
 		const int cameraFit = static_cast<int>(VectorDemand::Consumer::CameraFit);
+		// Camfix R1: the producer's diagnostic hints override is never silent (synced on change only).
+		{
+			const std::shared_ptr<MotionAhead::Producer> producer = LoopProducer();
+			const bool hintsOff = producer && !producer->TemporalHints();
+			if (hintsOff != motionHintsOffShown)
+			{
+				motionHintsOffShown = hintsOff;
+				host.SyncFallback(FallbackCatalog::NvofTemporalHintsOff(hintsOff));
+			}
+		}
 		const ULONGLONG now = GetTickCount64();
 		// W2-C1: the camera fit reads only the optical-flow seed (SeedFieldOf): with optical flow off, or while the producer's
 		// failed start waits for its back-off, the matcher alone would give it nothing, so its want is not registered (its own

@@ -402,3 +402,42 @@ The fitter's own options are `Config` fields set by the tests and `tools/camera_
 Tiers: the fit is cheap CPU work and is not tiered (cost lines `CAMERA_COST`).
 
 **Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.
+
+## Camfix R1 / R2 / R4 / R8 (branch r2/camfix, 2026-11-11; doc 103)
+
+**R1 result (NVOF temporal hints).** The hint drift is real at 480 px/s: with hints on the fit bias is -0.60 px (1080 59.94p) and
+-1.19 px (4K); with hints off every 480 px/s row passes. The 120 px/s rows fail with hints on AND off: their bias (about -0.26
+engine px at 24p, +0.23 at 59.94p) is the NVOF quarter-pel quantum, not the hints, and R3 (pixel-domain refinement) is its fix.
+Hints stay ON (the default is unchanged); hints off is a diagnostic only.
+- Cost line (NVOF engine ms per pair, hints on -> off, one run each, noisy): 1080 24p 9.78 -> 5.98; 1080 59.94p 5.58 -> 5.39;
+  4K 24p 6.10 -> 10.47; 4K 59.94p 5.67 -> 7.15. No consistent cost either way.
+
+**R2 (quantum floor, robust scale, competitor separation; GlobalModelFit.cpp).** An NVOF field declares `PairInput::quantumPx`
+(0.25 engine px in source px: 1.0 at 4K quarter size, 0.5 at 1080 half size). The pair precision is never finer than the quantum,
+the robust residual scale is 1.4826 x MAD of the winner's inliers (three passes), and a competitor counts only when it is separated
+from the winner by more than max(3 sigma, 2 quanta) at the corners.
+- **Visible camera-fit change on the live seed path:** `link/FieldCopy.h` (`SeedToSourceGrid`) now sets `quantumPx = 0.25 x
+  scaleToSourcePx`, so the render-path fit from the F2 seed uses the same floor and separation as the ahead fit. Fewer records are
+  `Ambiguous` (4K 480 px/s: 115 of 117 -> 0 at 24p, 6 -> 0 at 59.94p), so more pairs are usable for guidance.
+- Cost line (ahead fit on the camera worker, 4K 480 px/s, median / p95 ms, before R2 = the R1 hints-on run, after = r2r8, one run
+  each): 24p 12.44 / 26.94 -> 7.49 / 9.88; 59.94p 7.66 / 11.37 -> 7.58 / 9.84. The extra nth_element (MAD) and the second
+  BuildCand pass cost less than the second-layer searches the ambiguous records used to trigger.
+
+**R4 (E1 skip).** E1 never runs on a seeded field. When it was planned but the engine's field seeded the refinement, that is
+counted (`GuidanceCounters::e1IdleEngine`) and shown with the narrow-idle line ("camera guidance: engine field used, E1 skip idle,
+N pairs").
+
+**R8 (d = 0 acceptance in BetaGpuTests `RunBetaCameraAccuracy`).** Verdicts: PASS (headroom row superior: dEPE <= -max(0.01, A/A
+EPE spread) or +2 pts <0.25 px share), PASS-FLOOR (no headroom, non-inferior), NO-GAIN (headroom row not superior: fails), DEFECT
+(a limit broken), INCONCLUSIVE (no limit broken but fewer than 3 runs of off or d0: never a pass). The low-contrast row is named
+`pan_480pxs_dark` (every level at 15% above black: low contrast, full texture).
+
+**Knobs (test / diagnostic only; none is a setting, none is in Config):**
+
+| Knob | Kind | Values | Default | Effect | Visible |
+|---|---|---|---|---|---|
+| `VP_NVOF_TEMPORAL_HINTS` (R1) | process env, read by `MotionAhead::Producer` | 0 / unset | unset (hints on) | 0 runs the NVOF engine without temporal hints | Ctrl+I fallback entry "nvof temporal hints" while 0 (`FallbackCatalog::NvofTemporalHintsOff`) |
+| `PairInput::quantumPx` (R2) | internal field | >= 0 source px | 0 (no NVOF field); set by `AheadFlow` and `FieldCopy` | quantum floor + competitor separation | the record's ambiguity / precision in the camera status |
+| `VP_TEST_CAMERA_ACCURACY_D0` (R8) | test env | 0 / 1 | unset | adds the d = 0 variants, the extra 480 px/s rows (29.97p too) and the acceptance table | report only |
+| `VP_TEST_CAMERA_ACCURACY_REPEATS` (R8) | test env | >= 1 | 1 | interleaved ABAB runs of off / d0; 3 or more are needed for a verdict (fewer = INCONCLUSIVE) | report only |
+| `VP_TEST_CAMERA_ACCURACY_LEAD` (R8) | test env | >= 1 | 2 | the live lead L for the on-time column | report only |

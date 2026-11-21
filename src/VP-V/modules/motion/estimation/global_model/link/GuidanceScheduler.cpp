@@ -400,6 +400,8 @@ namespace CameraLink
 			++m_counters.narrowIdleEngine;
 			m_narrowIdleRemaining = kGuidanceRefusalHoldSeconds;
 		}
+		if (o.e1DroppedEngine)
+			++m_counters.e1IdleEngine;
 		if (o.rejected && o.rejected[0] != 0)
 		{
 			++m_counters.rejectedByMatcher;
@@ -477,6 +479,12 @@ namespace CameraLink
 				(unsigned long long)m_counters.narrowIdleEngine);
 			lines.push_back(nb);
 		}
+		if (m_counters.e1IdleEngine > 0)
+		{
+			std::snprintf(nb, sizeof(nb), "camera guidance: engine field used, E1 skip idle, %llu pairs (E1 never runs on a seeded field)",
+				(unsigned long long)m_counters.e1IdleEngine);
+			lines.push_back(nb);
+		}
 		if (m_counters.rejectedByMatcher > 0 && !m_rejectedText.empty())
 		{
 			std::snprintf(nb, sizeof(nb), " (%llu pairs, full search)", (unsigned long long)m_counters.rejectedByMatcher);
@@ -542,6 +550,7 @@ namespace CameraLink
 		o.guidanceUsed = outcome.guidanceUsed;
 		o.narrowPass = outcome.countsTex != nullptr;
 		o.narrowDroppedEngine = outcome.narrowIdle;
+		o.e1DroppedEngine = outcome.e1Idle;
 		o.rejected = outcome.rejection != nullptr ? outcome.rejection : "";
 		o.gpuMs = outcome.gpuMs;
 		o.counts = outcome.countsTex;

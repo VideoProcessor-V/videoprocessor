@@ -98,6 +98,7 @@ namespace CameraLink
 		std::array<uint64_t, size_t(Refusal::Count)> refusals{};
 		uint64_t guided = 0, fromLane = 0, fromLive = 0, laneDiscarded = 0, lanePublished = 0, pairsJudged = 0;
 		uint64_t narrowIdleEngine = 0, rejectedByMatcher = 0;   // from EstimateOutcome (narrow idle under the engine / per-block guidance refused)
+		uint64_t e1IdleEngine = 0;     // camfix R4: E1 skip planned, the engine's field seeded the refinement (E1 not run), from EstimateOutcome
 		std::array<uint64_t, size_t(OnTimeMiss::Count)> notOnTime{};   // refusals[NotOnTime] by cause (index None unused)
 		uint64_t rejectedAtSeal = 0;   // R: guided pairs whose on-time seal later rejected camera(N) (expected 0; a defect, shown)
 		uint64_t countsFailed = 0;   // counts readbacks that failed (the pair is judged without counts; shown in StatusLines)
@@ -124,6 +125,7 @@ namespace CameraLink
 		bool guidanceUsed = false;         // any guided effect ran (model global, static, skip, narrow, E1, fade)
 		bool narrowPass = false, e1Pass = false;   // the passes that write the 16 B counts (the counts are stale otherwise)
 		bool narrowDroppedEngine = false;  // narrow planned, the engine's field seeds / replaces the searches (never a dropped seed)
+		bool e1DroppedEngine = false;      // camfix R4: E1 skip planned, the engine's field seeded the refinement (E1 not run)
 		const char* rejected = "";         // non-empty: the per-block guidance was not used (reason)
 		const char* gpuNotApplied = "";    // plan parts the GPU matcher does not do yet
 		double gpuMs = -1;                 // GPU ms of this Estimate (sum of the motion pass timers), < 0 = not measured

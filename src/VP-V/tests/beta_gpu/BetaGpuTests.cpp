@@ -4314,8 +4314,8 @@ namespace CameraAccuracy
 				CamScene f = base(r, 480.0, "pan_480pxs_fence", "pan + periodic texture");
 				f.scene.fencePeriod = 24.0f;                       // 4K px; the corpus's repetitive-texture fence
 				push(f);
-				CamScene l = base(r, 480.0, "pan_480pxs_lowtex", "pan + low contrast");
-				l.scene.level = 0.15f;                             // the corpus's dark, low-contrast scene
+				CamScene l = base(r, 480.0, "pan_480pxs_dark", "pan + dark picture (15% of the range: low contrast, full texture)");
+				l.scene.level = 0.15f;                             // the corpus's dark scene: every level scaled to 15% above black
 				push(l);
 				CamScene n = base(r, 480.0, "pan_480pxs_grain", "pan + heavy grain");
 				n.scene.grain = 3000.0f;                           // the corpus's heavy grain
@@ -5134,11 +5134,12 @@ namespace CameraAccuracy
 	// d = 0 A/B (doc 91 D 10:45, doc 103 s4; replaces the 93-prep section 4 "no slower in TOTAL and more accurate on every row" rule).
 	// Per row: NON-INFERIOR within the A/A noise (dEPE <= +0.002, dp95 <= +0.005, dwarp <= +0.005, or the A/A spread if larger; the
 	// mover subset by the same EPE and p95 limits); a HEADROOM row (EPE_off >= 0.05 px or the <0.25 px share of off < 95%) must be
-	// SUPERIOR (dEPE <= -0.01 or +2 pts <0.25 px share); TIME: the render-path matcher GPU ms (steady median, pairs >= 1) guided <= off +
+	// SUPERIOR (dEPE <= -max(0.01, A/A EPE spread) or +2 pts <0.25 px share); TIME: the render-path matcher GPU ms (steady median, pairs >= 1) guided <= off +
 	// max(2%, 0.1 ms), the median over the interleaved repeats (>= 3 for acceptance); the lane on time >= 90% at the live lead
 	// (AheadModel, the d0 run's own fit costs); the camera WORKER (mean fit ms / frame period) <= 20% of a core.
 	// Verdict: PASS (headroom row, superior), PASS-FLOOR (no headroom, non-inferior), NO-GAIN (headroom row, non-inferior but not
-	// superior: fails acceptance), DEFECT (any limit broken; the reasons follow). Also written to camera-accuracy-d0.csv.
+	// superior: fails acceptance), DEFECT (any limit broken; the reasons follow), INCONCLUSIVE (no limit broken but fewer than 3 runs
+	// of off or d0: never a pass). Also written to camera-accuracy-d0.csv.
 	void WriteD0Summary(std::ofstream& md, const std::string& dir, const std::vector<SceneResult>& all)
 	{
 		bool any = false;
@@ -5156,10 +5157,11 @@ namespace CameraAccuracy
 			"onto the 16-px consumer grid, no previous field. EPE = trusted blocks, scored pairs " << kGuideLag << "-" << (Frames() - 2) << " (the same pool "
 			"as off); every value is the median over the runs (the primary run and its interleaved repeats). NON-INFERIOR: dEPE <= +0.002, dp95 <= +0.005, "
 			"dwarp <= +0.005 (or the A/A spread of off, if larger), the mover subset by the same EPE and p95 limits. HEADROOM row (EPE_off >= 0.05 or "
-			"<0.25 px share of off < 95%): must be SUPERIOR (dEPE <= -0.01 or +2 pts <0.25 px share). TIME: render-path matcher GPU ms (steady median, "
-			"pairs >= 1) guided <= off + max(2%, 0.1 ms), median over the runs (fewer than 3 runs = indicative only). ON TIME at the live lead L = " << lead <<
+			"<0.25 px share of off < 95%): must be SUPERIOR (dEPE <= -max(0.01, A/A EPE spread) or +2 pts <0.25 px share). TIME: render-path matcher GPU ms (steady median, "
+			"pairs >= 1) guided <= off + max(2%, 0.1 ms), median over the runs. ON TIME at the live lead L = " << lead <<
 			" >= 90% (AheadModel). WORKER = mean fit ms / frame period <= 20% of a core (the fit runs on the camera worker, not the render path). "
-			"PASS = headroom row superior; PASS-FLOOR = no headroom, non-inferior; NO-GAIN = headroom row not superior (fails); DEFECT = a limit broken.\n\n";
+			"PASS = headroom row superior; PASS-FLOOR = no headroom, non-inferior; NO-GAIN = headroom row not superior (fails); DEFECT = a limit broken; "
+			"INCONCLUSIVE = no limit broken but fewer than 3 runs of off or d0 (never a pass).\n\n";
 		md << "| scene | variant | runs off / d0 | EPE off / d0 | dEPE | dp95 | dwarp | mover dEPE / dp95 | <0.25 px off / d0 | headroom | "
 			"matcher GPU ms off / d0 (limit) | on time L=" << lead << " | worker | guided | verdict |\n";
 		md << "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
@@ -5184,7 +5186,7 @@ namespace CameraAccuracy
 			m.epe = MedianOf(a); m.p95 = MedianOf(b); m.warp = MedianOf(c); m.mEpe = MedianOf(d); m.mP95 = MedianOf(e); m.lt025 = MedianOf(f); m.gpu = MedianOf(g);
 			return m;
 		};
-		int counts[4] = {};   // PASS, PASS-FLOOR, NO-GAIN, DEFECT
+		int counts[5] = {};   // PASS, PASS-FLOOR, NO-GAIN, DEFECT, INCONCLUSIVE
 		for (const SceneResult& s : all)
 		{
 			const VariantResult& off = s.variants[0];
@@ -5248,14 +5250,16 @@ namespace CameraAccuracy
 				fail(onTime < 0.90, "on time");
 				fail(worker > 0.20, "worker");
 				const bool headroom = mo.epe >= 0.05 || mo.lt025 < 0.95;
-				const bool superior = dE <= -0.01 || dShare >= 0.02;
-				const int verdict = !reasons.empty() ? 3 : (headroom ? (superior ? 0 : 2) : 1);
-				static const char* const kVerdicts[4] = { "PASS", "PASS-FLOOR", "NO-GAIN", "DEFECT" };
+				const bool superior = dE <= -std::max(0.01, aaEpe) || dShare >= 0.02;
+				const bool fewRuns = d0Runs.size() < 3 || offRuns.size() < 3;
+				const int judged = headroom ? (superior ? 0 : 2) : 1;
+				const int verdict = !reasons.empty() ? 3 : (fewRuns ? 4 : judged);
+				static const char* const kVerdicts[5] = { "PASS", "PASS-FLOOR", "NO-GAIN", "DEFECT", "INCONCLUSIVE" };
 				++counts[verdict];
 				if (verdict == 2)
 					reasons = "headroom not used";
-				if (d0Runs.size() < 3 || offRuns.size() < 3)
-					reasons += std::string(reasons.empty() ? "" : "; ") + "time indicative (< 3 runs)";
+				if (fewRuns)
+					reasons += std::string(reasons.empty() ? "" : "; ") + "< 3 runs (would be " + kVerdicts[judged] + ")";
 				char moverText[64] = "-";
 				if (mover)
 					std::snprintf(moverText, sizeof(moverText), "%+.4f / %+.4f", dmE, dmP);
@@ -5271,7 +5275,8 @@ namespace CameraAccuracy
 				csv << line;
 			}
 		}
-		std::snprintf(line, sizeof(line), "\nRows: %d PASS, %d PASS-FLOOR, %d NO-GAIN, %d DEFECT.\n", counts[0], counts[1], counts[2], counts[3]);
+		std::snprintf(line, sizeof(line), "\nRows: %d PASS, %d PASS-FLOOR, %d NO-GAIN, %d DEFECT, %d INCONCLUSIVE.\n", counts[0], counts[1], counts[2],
+			counts[3], counts[4]);
 		md << line;
 		// Share 0 => identical to off: the share-0 run (model_global_d0 with every guide built and withheld) must give off's fields bit for
 		// bit on every pair; the A/A column says whether off itself repeats bit for bit (if not, the check cannot tell the camera from noise).
@@ -5826,7 +5831,7 @@ void RunBetaCameraAccuracy()
 					log.use += name;
 				};
 				flag(u.modelGlobal, "modelGlobal"); flag(u.staticFromModel, "static"); flag(u.matcherSkipped, "skipped"); flag(u.narrowPass, "narrow");
-				flag(u.e1Pass, "e1"); flag(u.fadeNormalised, "fade"); flag(u.narrowDroppedEngine, "narrowIdle");
+				flag(u.e1Pass, "e1"); flag(u.fadeNormalised, "fade"); flag(u.narrowDroppedEngine, "narrowIdle"); flag(u.e1DroppedEngine, "e1Idle");
 				if (u.rejected && u.rejected[0])
 					log.use += std::string(log.use.empty() ? "" : "; ") + "rejected: " + u.rejected;
 				if (log.use.empty())

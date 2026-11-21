@@ -1034,6 +1034,30 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1, counts.requested);
 		}
 
+		// Camfix R4 audit: E1 never runs on a seeded field; when it was planned, that is counted and shown with the narrow-idle line.
+		TEST_METHOD(E1IdleUnderTheEngineIsCountedAndShown)
+		{
+			WireLink link;
+			link.AddPan(3);
+			link.Retime(3, 1.0 / 50);
+			CameraLink::GuidanceScheduler sched(link, GuideOn());
+			CameraLink::CameraGuidanceHook hook(sched, nullptr, link);
+			WireSink sink;
+			VpMotion::EstimateContext c;
+			c.pairSeq = 3;
+			c.nextPairSeconds = 1.0 / 50;
+			hook.BeforeEstimate(c, sink);
+			VpMotion::EstimateOutcome o;
+			o.guidanceUsed = true;
+			o.e1Idle = true;
+			hook.AfterEstimate(3, o);
+			Assert::AreEqual<uint64_t>(1, sched.Counters().e1IdleEngine, L"the engine-plain outcome reaches the counter");
+			bool line = false;
+			for (const std::string& l : sched.StatusLines())
+				line = line || l.find("E1 skip idle, 1 pairs") != std::string::npos;
+			Assert::IsTrue(line, L"E1 idle under the engine has a status line");
+		}
+
 		TEST_METHOD(NarrowIdleUnderTheEngineIsShownForHalfAMeasuredSecondAndNoSeedIsDropped)
 		{
 			WireLink link;

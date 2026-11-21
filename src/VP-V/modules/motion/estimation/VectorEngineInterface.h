@@ -303,6 +303,9 @@ namespace VpMotion
 		// CameraGuidanceUsed().narrowDroppedEngine (MotionWarp's "narrowDroppedEngine"): the narrow pass was planned but
 		// the optical-flow engine seeded or replaced the searches, so the narrow pass stayed idle. Absent: false.
 		bool narrowIdle = false;
+		// CameraGuidanceUsed().e1DroppedEngine (camfix R4): the E1 skip was planned but the optical-flow engine's field seeded the
+		// refinement, so E1 did not run (it never runs on a seeded field). Absent: false.
+		bool e1Idle = false;
 		// CameraGuidanceUsed().rejected: the reason the matcher did not use the per-block guidance (for example "camera
 		// guidance: texture upload failed"). A static-lifetime string (the matcher's literals): the hook may keep the
 		// pointer, never frees it. Absent: nullptr (the matcher's empty string is reported as nullptr).
