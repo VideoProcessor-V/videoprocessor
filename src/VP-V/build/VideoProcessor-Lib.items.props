@@ -188,6 +188,9 @@
     <ClCompile Include="filesource\FileSideData.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\HdrInference.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\CaptureColorimetry.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\queue_timing\AlphaArrivalRate.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceResolutionDetector.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\regions\CodingEvidence.cpp" />
     <ClCompile Include="..\VP-V\modules\scaling\rebase\KernelInverse.cpp" />
