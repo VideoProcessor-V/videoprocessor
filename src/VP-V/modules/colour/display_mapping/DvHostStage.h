@@ -182,6 +182,7 @@ public:
 		m_trimsConfigured = false;
 		m_appearanceHook.Clear();
 		m_appearanceConfigured = false;
+		m_trimsShaderMissing = false;   // GEM-009 (Gemini SHOULD-4, as written): the new device loads the shader afresh
 	}
 
 	// The DV comparison capture (dv_compare_capture) is the WP-17 diagnostics adapter's
@@ -293,6 +294,8 @@ public:
 		m_pending = Pending();
 		m_pending.trims = f.trims;
 		m_pending.trimsStageRuns = f.trimsStageRuns;   // GEM-004 part 2 (AMEND: the dm_trims slot, CF-1 P3)
+		if (!f.trims)
+			m_trimsShaderMissing = false;   // GEM-009 (Gemini SHOULD-4, as written): dv_trims off clears the missing-shader flag
 		m_pending.lut = f.target.lut != nullptr;
 		m_pending.dm = f.dm;
 		m_pending.libplaceboCurve = f.libplaceboCurve;
