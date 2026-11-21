@@ -843,6 +843,50 @@ namespace VideoProcessorTest
 				Require(Snapshot(r) == first[static_cast<size_t>(i)], "refit differs at pair " + std::to_string(i));
 			}
 		}
+
+		// Gemini SHOULD-3 (69d48423c): with the full-resolution final refine the signals Finish publishes are rebuilt on the REFINED model.
+		// Sampling keeps the highest-trust block of every 5 x 5 cell, here the lattice blocks (bx and by multiples of 4, trust 1, vector
+		// M_a: one lies in every cell). Every other block (trust 0.3) is 0.5 px away from M_a. The sampled fit is M_a exactly (zero
+		// residual, precision 1); the refine over every cell, weighted by trust, moves toward the bulk. Before the fix the published
+		// precision/inlier signals were still those of M_a on the sampled blocks (rms 0, precision 1.0); after it they are measured
+		// against the published, moved model, so the sampled blocks show the shift as a residual and the precision falls.
+		TEST_METHOD(FullFinalRefineRefreshesSignalsForPublishedModel)
+		{
+			const double ax = 6.0, ay = -2.0;
+			Field f(Grid4K());
+			f.FromModel(PanModel(ax, ay));
+			for (int y = 0; y < f.gridH; ++y)
+				for (int x = 0; x < f.gridW; ++x)
+				{
+					const size_t i = f.Index(x, y);
+					if (x % 4 == 0 && y % 4 == 0)
+						f.trust[i] = 1.0f;
+					else
+					{
+						f.fx[i] = static_cast<float>(ax + 0.5);
+						f.trust[i] = 0.3f;
+					}
+				}
+			PairInput in = f.Input(kPairSeconds, 5);
+			Fitter plain;
+			const CameraMotion s = plain.Fit(in);
+			Require(s.valid && s.finalRefineCells == 0, "premise: the sampled fit has no full refine: " + Describe(s));
+			Require(s.signals.precision > 0.97, "premise: the sampled fit is M_a on its own samples, precision " + std::to_string(s.signals.precision));
+			in.fullFinalRefine = true;
+			Fitter full;
+			const CameraMotion r = full.Fit(in);
+			Require(r.valid && r.finalRefineCells > 0, "premise: the full final refine ran: " + Describe(r));
+			double dx = 0, dy = 0;
+			Displacement(r.params, 0.0, 0.0, &dx, &dy);
+			const double shift = std::sqrt((dx - ax) * (dx - ax) + (dy - ay) * (dy - ay));
+			Require(shift >= 0.25 && shift <= 0.55, "premise: the refine moved the model toward the bulk by " + std::to_string(shift) + " px: " + Describe(r));
+			// The signal must be the one measured on the sampled blocks against the PUBLISHED model: rms = shift for every sampled block.
+			const double expected = 1.0 / (1.0 + (shift / (2.0 * 0.25)) * (shift / (2.0 * 0.25)));
+			Require(r.signals.precision < 0.9, "stale signal: precision still " + std::to_string(r.signals.precision) + " after a refine of " + std::to_string(shift) + " px");
+			Require(std::fabs(r.signals.precision - expected) < 0.1, "precision " + std::to_string(r.signals.precision) + " vs the published-model value "
+				+ std::to_string(expected));
+			Require(r.signals.precision < s.signals.precision, "the full refine reports the shift the sampled fit cannot see");
+		}
 	};
 
 	// Two-layer foreground fix (K10a, Config::twoLayer). Every test states its Config explicitly.
@@ -1400,6 +1444,40 @@ namespace VideoProcessorTest
 			const CameraMotion r = fitter.Fit(w2.Input(kPairSeconds, 7));
 			Require(r.reason == Reason::Ambiguous && r.signals.dynTemporal == 0.0, "after a cut: " + Describe(r) + " temporal=" + std::to_string(r.signals.dynTemporal));
 		}
+
+		// Gemini SHOULD-2 (5bf62a248): the detector verdict is applied BEFORE Labels, so a demoted pair (confidence x 0.495) stamps no
+		// Overlay (which needs a confident record) and does not run the object tracker. Before the fix Labels ran on the confident
+		// pre-verdict record: a zero-motion logo over the water became Overlay and the objects were tracked, then the demotion followed.
+		TEST_METHOD(DemotedDynTextureAndStaticDoNotStampOverlayOrPolluteObjects)
+		{
+			auto make = [](uint64_t seed)
+			{
+				Field f = AnchoredWater(seed, 3.0);
+				f.AddLogo(100, 60, 6, 4, false);          // a static logo: zero vectors, trust 1
+				f.AddObject(30, 20, 24, 16, -25, 14);     // a coherent mover for the object tracker
+				return f;
+			};
+			// Control: detector off, the confident pair stamps the logo as Overlay and tracks the object.
+			Config offCfg; offCfg.objects = true;
+			Fitter off(offCfg);
+			Field f0 = make(1000);
+			const CameraMotion a = off.Fit(f0.Input(kPairSeconds, 5));
+			Require(a.valid && a.confidence >= 0.5 && ReasonUsable(a.reason), "premise (detector off): the pair is confident: " + Describe(a));
+			Require(CountLabelInRect(a, f0, 100, 60, 6, 4, Label::Overlay) > 0, "premise (detector off): the logo is stamped Overlay: " + Describe(a));
+			Require(!a.objects.empty(), "premise (detector off): the object tracker ran: " + Describe(a));
+			// Detector on: the pair is demoted, and none of the above happens.
+			Config onCfg = DT(); onCfg.objects = true;
+			Fitter on(onCfg);
+			for (int i = 0; i < 2; ++i)
+			{
+				Field f = make(1000 + i);
+				const CameraMotion r = on.Fit(f.Input(kPairSeconds, 5 + i));
+				Require(r.valid && r.reason == Reason::Ambiguous && (r.verdictFlags & kVerdictDynamicTexture) != 0, "demoted, pair " + std::to_string(i) + ": " + Describe(r));
+				Require(CountLabel(r, Label::Overlay) == 0, "a demoted pair stamps no Overlay, pair " + std::to_string(i) + ": " + Describe(r) + " overlay="
+					+ std::to_string(CountLabel(r, Label::Overlay)));
+				Require(r.objects.empty(), "a demoted pair does not run the object tracker, pair " + std::to_string(i) + ": " + Describe(r));
+			}
+		}
 	};
 
 	// Static-camera hypothesis (R1-STATIC, Config::staticCamera). Every test states its Config explicitly.
@@ -1893,6 +1971,30 @@ namespace VideoProcessorTest
 			Require(r.blocks->absThresholdPx >= wanted, "the scale did not follow the noise: " + std::to_string(r.blocks->absThresholdPx) +
 				" < " + std::to_string(wanted));
 			Require(err < 0.25, "corner error px=" + std::to_string(err));
+		}
+
+		// Gemini SHOULD-2 (5bf62a248), static-camera side: the verdict is applied before Labels, so the demoted boat-like pair stamps no
+		// Overlay and runs no object tracker (before the fix the confident pre-verdict record did, then was demoted).
+		TEST_METHOD(DemotedDynTextureAndStaticDoNotStampOverlayOrPolluteObjects)
+		{
+			auto make = [](uint64_t seed)
+			{
+				Field f = BoatLike(seed);
+				f.AddLogo(5, 5, 6, 4, false);   // a zero-motion logo in the static water margin, outside the object
+				return f;
+			};
+			Config offCfg; offCfg.objects = true;
+			Fitter off(offCfg);
+			Field f0 = make(40);
+			const CameraMotion a = off.Fit(f0.Input(kPairSeconds, 5));
+			Require(Usable(a), "premise (off): the boat is taken as the camera, confidently: " + Flags(a));
+			Require(CountLabelInRect(a, f0, 5, 5, 6, 4, Label::Overlay) > 0, "premise (off): the logo is stamped Overlay: " + Flags(a));
+			Config onCfg = SC(); onCfg.objects = true;
+			Fitter on(onCfg);
+			const CameraMotion r = on.Fit(f0.Input(kPairSeconds, 5));
+			Require(r.valid && r.reason == Reason::Ambiguous && (r.verdictFlags & kVerdictStaticCamera) != 0, "demoted: " + Flags(r));
+			Require(CountLabel(r, Label::Overlay) == 0, "a demoted pair stamps no Overlay: " + Flags(r) + " overlay=" + std::to_string(CountLabel(r, Label::Overlay)));
+			Require(r.objects.empty(), "a demoted pair does not run the object tracker: " + Flags(r));
 		}
 	};
 }
