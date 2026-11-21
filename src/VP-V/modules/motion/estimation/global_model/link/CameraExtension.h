@@ -92,7 +92,7 @@ namespace Vpv
 			// no vectors to fit, which is shown ("camera: off, the motion engine is off (vector_demand)"), never silent. The lock survives
 			// only as a test seam: SetGuidanceLockForTesting(true) BEFORE the first lifecycle call restores the old locked state, shown
 			// with kGuidanceLockedText.
-			static constexpr const char* kGuidanceLockedText = "camera guidance locked: the d=0 rule is built, waiting for the owner's A/B decision (the camera_meas_* switches are off)";
+			static constexpr const char* kGuidanceLockedText = "camera guidance locked (test seam only; guidance is unlocked in production): the camera_meas_* switches are off";
 			static constexpr const char* kEngineOffText = "camera: off, the motion engine is off (vector_demand); the camera follows it and has no vectors to fit";
 			static constexpr const char* kGuidanceNeedsAheadText = "camera guidance (d=0) needs camera_ahead_fit: without it camera(N) is never on time";
 			void SetGuidanceLockForTesting(bool locked) { guidanceLocked_ = locked; }

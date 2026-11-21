@@ -922,11 +922,7 @@ namespace Vpv
 					lines.push_back(kEngineOffText);
 				if (!st.engineProblem.empty())
 					fb.push_back("camera_engine: " + st.engineProblem);
-				else if (engineOffByDemand)
-				{
-					// the wait for a first field below would be misleading: the engine is off by setting
-				}
-				else if (!st.liveWait.empty())
+				else if (!engineOffByDemand && !st.liveWait.empty())   // engine off by setting: the wait would be misleading (kEngineOffText says why)
 				{
 					// With every camera default off, a camera that is on was turned on explicitly: a missing resync_event is a visible
 					// fallback entry (Fallbacks, Ctrl+I, Config status, Ctrl+Alt+D), not a plain status line. "Waiting for the first field" is a state.
@@ -961,7 +957,7 @@ namespace Vpv
 					if (!st.aheadWanted)
 						lines.push_back(std::string("camera: ") + kGuidanceNeedsAheadText);
 				}
-				if (st.guideWanted)
+				if (st.guideWanted && !engineOffByDemand)   // engine off by setting: a status line only (register row 3), never a fallback entry
 				{
 					// d = 0 (refs 93-prep-cam-d0): guidance needs camera(N) ON TIME. Where that can never happen it is structural, named once
 					// here, not per pair: no ahead fit (off, or a deterministic run's bridge path), or no on-time target (no skeleton lane).
