@@ -1064,8 +1064,8 @@ namespace VideoProcessorTest
 			// Gate cb-u1 r2 MUST 4 (r1 MUST 5 / SHOULD 6): the stage, driven as the host drives it (Stage::Register with a Host, the
 			// OutputGlueStagesGpuTests pattern), shows exactly one grain status line and the GrainSourceFallback decision of each
 			// case after a real scalar grain pass: no callback, a valid source, an empty crop (no usable block), a grid
-			// mismatch, and a valid source in a linear measure domain. ProductFallback() carries the grain decision (the
-			// temporal-detail part is not engaged in reset 1).
+			// mismatch, and a valid source in a linear measure domain. The grain decision owns the bare id (a classical cause);
+			// the temporal-detail read is a separate, cause-keyed entry (gate cb-u1 r3 MUST 1).
 			GrainRig rig;
 			Assert::IsTrue(rig.Init(), L"the WARP test device, formats and SSimDownscaler.glsl are available");
 			double sigma = 0.0;
@@ -1081,7 +1081,7 @@ namespace VideoProcessorTest
 			struct Outcome
 			{
 				std::vector<std::string> grainLines;
-				FallbackCatalog::Decision grain, product, td;
+				FallbackCatalog::Decision grain, td;
 				bool active = false;
 			};
 			// dark -> noise (a cut), then two repeats of the noisy frame for the read-back, as GrainRig::Measure.
@@ -1140,7 +1140,6 @@ namespace VideoProcessorTest
 				for (const std::string& line : stage.StatusLines())
 					if (line.rfind("Adaptive grain:", 0) == 0) o.grainLines.push_back(line);
 				o.grain = stage.GrainSourceFallback();
-				o.product = stage.ProductFallback();
 				o.td = stage.TemporalDetailFallback();
 				module.Release();
 				Assert::AreEqual(0, pl_renderer_get_errors(rig.fixture.Renderer()).num_disabled_hooks, L"no hook was disabled");
@@ -1180,12 +1179,11 @@ namespace VideoProcessorTest
 				Assert::AreEqual(std::string("product.adaptive_downscale"), o.grain.id, (name + L": the fallback id").c_str());
 				Assert::IsTrue(c.engaged == o.grain.engaged, (name + L": GrainSourceFallback engaged / released").c_str());
 				Assert::AreEqual(std::string(c.reason), o.grain.reason, (name + L": the GrainSourceFallback reason").c_str());
-				// One decision per id: the merged decision is the grain decision while the temporal-detail part is released.
-				Assert::IsFalse(o.td.engaged, (name + L": precondition: the temporal-detail read path is not engaged").c_str());
-				Assert::AreEqual(o.grain.id, o.product.id, (name + L": ProductFallback has the same id").c_str());
-				Assert::IsTrue(o.grain.engaged == o.product.engaged, (name + L": ProductFallback follows the grain decision").c_str());
-				Assert::AreEqual(o.grain.reason, o.product.reason, (name + L": ProductFallback carries the grain reason").c_str());
+				// Two entries: the temporal-detail read is not engaged in reset 1, and it never uses the bare id (r3 MUST 1).
+				Assert::IsFalse(o.td.engaged, (name + L": the temporal-detail read path is not engaged").c_str());
 			}
+			Assert::IsTrue(TdProducts::FallbackKey(TdProducts::Consumer::AdaptiveScaler, TdProducts::kCauseAbsent) != std::string("product.adaptive_downscale"),
+				L"the temporal-detail read is keyed by cause, never under the grain decision's bare id");
 		}
 	};
 }
