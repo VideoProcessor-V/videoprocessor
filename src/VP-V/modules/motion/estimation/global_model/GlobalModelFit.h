@@ -14,6 +14,7 @@
 #include "GlobalModelGeometry.h"
 #include "GlobalModelObjects.h"
 #include "GlobalModelTemporal.h"
+#include "PhotometricWiring.h"
 #include "StaticHypothesis.h"
 
 namespace CameraModel
@@ -55,6 +56,11 @@ namespace CameraModel
 		// inlier weights) over EVERY cell of the field inside the picture that is not excluded and has trust > 0. Set for the ahead fit's
 		// native field (CameraLink::AssemblePair); off = byte-identical to before (the seed / live path).
 		bool fullFinalRefine = false;
+		// DIRECT PHOTOMETRIC REFINEMENT (R3, PhotometricWiring.h). Non-null = the chosen model is polished on this pair's luma pair after the
+		// full-resolution refine, verified against the record (a refine that does not fall returns the vector fit's model), and the outcome is
+		// written back into the pointed-to struct. null = byte-identical to before (the seed / look-ahead / test path). The struct and its planes
+		// belong to the caller and must outlive the Fit() call; the fit writes only outcome and result.
+		PhotometricInput* photometric = nullptr;
 	};
 
 	struct Config
@@ -165,6 +171,8 @@ namespace CameraModel
 		void Reset();
 		const CameraMotion* Previous() const { return m_havePrevious ? &m_previous : nullptr; }
 		const Config& GetConfig() const { return m_config; }
+		// The refiner's own counters (refined / fell back / skipped), for the fit worker's status.
+		const RefineCounters& PhotometricCounters() const { return m_photometric.Counters(); }
 
 	private:
 		struct Impl;
@@ -177,6 +185,8 @@ namespace CameraModel
 		bool m_haveGenerations = false;
 		bool m_seedPending = false;                 // previous call published a post-cut seed
 		TwoLayerState m_tl;
+		PhotometricRefiner m_photometric;           // scratch + counters of the R3 refine (PairInput::photometric)
+		std::vector<uint8_t> m_photoLabel;          // per-block camera label handed to the refine as its inlier mask (scratch)
 		DynTextureState m_dyn;                      // previous pair's residual field (Config::dynTexture)
 		// Reused buffers (cost only; never part of the output). Fresh multi-100 KB allocations every pair
 		// cost hundreds of first-touch page faults, so the per-block record and the per-pair scratch are

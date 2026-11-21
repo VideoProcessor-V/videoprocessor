@@ -22,6 +22,7 @@
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\StaticHypothesis.cpp"/>
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelObjects.cpp"/>
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelFit.cpp"/>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\PhotometricRefine.cpp"/>
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelSearchHints.cpp"/>
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelMeasurement.cpp"/>
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\GuidanceScheduler.cpp"/>

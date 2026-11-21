@@ -5,6 +5,7 @@
 // Pure C++14, deterministic: fixed loop orders, double sums, splitmix64, no clocks except the
 // injected Config::clock, no unordered containers, no threads.
 #include "GlobalModelFit.h"
+#include "PhotometricVerdict.h"
 #include <VP-V/core/Ramp.h>
 #include <VP-V/core/RobustStats.h>
 
@@ -718,6 +719,75 @@ namespace CameraModel
 			std::vector<Sample> used;
 			BuildWeighted(f, all, model, used);
 			return static_cast<uint32_t>(used.size());
+		}
+
+		// DIRECT PHOTOMETRIC REFINEMENT (R3). Runs only when the pair carries a PhotometricInput. The measured resolution rule first (a luma
+		// form too coarse for the accuracy target at this frame size is a counted skip, never a refine), then the refine over the camera-
+		// inlier blocks (every native cell the model explains within the fit's own threshold; bars / text guard excluded), then the verdict
+		// stub. Returns true when the model was replaced (the caller rebuilds the candidate on it). The outcome is always written back.
+		static bool ApplyPhotometric(Fitter& F, const PairInput& in, const Field& f, Params& model)
+		{
+			PhotometricInput* pi = in.photometric;
+			if (pi == nullptr)
+				return false;
+			pi->result = RefineResult();
+			pi->outcome = PhotometricOutcome::SkippedNoLuma;
+			const LumaPairView& lv = pi->luma;
+			if (!lv.from.Valid() || !lv.to.Valid() || lv.from.width != lv.to.width || lv.from.height != lv.to.height || !(lv.sourcePxPerPixel > 0))
+				return false;
+			// The frame's source rows: the field grid covers the whole frame (blocks anchored at its top-left).
+			if (!PhotometricFormPasses(lv.sourcePxPerPixel, static_cast<double>(in.gridH) * in.blockSize))
+			{
+				pi->outcome = PhotometricOutcome::SkippedResolution;
+				return false;
+			}
+			const size_t cells = static_cast<size_t>(in.gridW) * static_cast<size_t>(in.gridH);
+			if (cells == 0 || f.excluded.size() != cells)
+			{
+				pi->outcome = PhotometricOutcome::SkippedOther;
+				return false;
+			}
+			std::vector<uint8_t>& label = F.m_photoLabel;
+			label.assign(cells, static_cast<uint8_t>(Label::Unknown));
+			const bool aff = AffineRow(model);
+			for (int by = f.by0; by < f.by1; ++by)
+				for (int bx = f.bx0; bx < f.bx1; ++bx)
+				{
+					const int b = by * in.gridW + bx;
+					if (f.excluded[static_cast<size_t>(b)] != 0)
+						continue;
+					const float tr = in.fwdTrust[b];
+					if (!(tr > 0.0f) || !FiniteF(tr) || !FiniteF(in.fwdX[b]) || !FiniteF(in.fwdY[b]))
+						continue;
+					Sample s;
+					BlockCentre(bx, by, in.blockSize, in.picture, &s.x, &s.y);
+					s.dx = in.fwdX[b];
+					s.dy = in.fwdY[b];
+					s.w = tr;
+					double r2, pm2;
+					ResidualSq(model, aff, s, &r2, &pm2);
+					if (r2 <= Threshold2(f, pm2))
+						label[static_cast<size_t>(b)] = static_cast<uint8_t>(Label::Camera);
+				}
+			InlierMask mask;
+			mask.label = label.data();
+			mask.excluded = f.excluded.data();
+			mask.gridW = in.gridW;
+			mask.gridH = in.gridH;
+			mask.blockSize = in.blockSize;
+			const RefineResult raw = F.m_photometric.Refine(model, lv, in.picture, mask);
+			// The one call site of the verdict unit (plan lead20 W3): today it returns the R3 result unchanged.
+			const RefineResult r = PhotometricVerdict(model, raw, f.prec);
+			pi->result = r;
+			if (r.status == RefineStatus::Refined)
+			{
+				pi->outcome = PhotometricOutcome::Refined;
+				model = r.model;
+				return true;
+			}
+			pi->outcome = RefineFellBack(r.status) ? PhotometricOutcome::FellBack
+				: (r.status == RefineStatus::SkippedNoLuma ? PhotometricOutcome::SkippedNoLuma : PhotometricOutcome::SkippedOther);
+			return false;
 		}
 
 		static void Finish(Fitter& F, const PairInput& in, const Config& c, const Field& f, bool temporalRead, Cand& cd, double ambiguity, CameraMotion& rec)
@@ -1480,7 +1550,8 @@ namespace CameraModel
 			uint32_t fullCells = 0;
 			if (in.fullFinalRefine)
 				fullCells = FullFinalRefine(in, f, cam->model, irls);   // the chosen model over every native cell (owner)
-			if (fullCells > 0)
+			const bool photoMoved = ApplyPhotometric(F, in, f, cam->model);   // R3: after the full-resolution refine, before the signals are built
+			if (fullCells > 0 || photoMoved)
 			{
 				// The refine moved the model: the inliers, the share and every signal Finish publishes are rebuilt on the refined model.
 				const Params refined = cam->model;
