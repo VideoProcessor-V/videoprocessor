@@ -1006,7 +1006,18 @@ namespace VideoProcessorTest
 				core.OnPostSubmitGap();
 			}
 			Assert::AreEqual(0, calls);
-			Assert::AreEqual(size_t(7), core.CollectDecisions().size(), L"the decisions are exactly the camera's seven");
+			// The camera's seven plus the two R3 photometric decisions (0dc594f86: camera.photometric.not_running / .gpu_failed), both released
+			// here: nothing was fitted, so nothing was skipped or failed.
+			const std::vector<FallbackCatalog::Decision> decisions = core.CollectDecisions();
+			Assert::AreEqual(size_t(9), decisions.size(), L"the decisions are exactly the camera's seven and the two photometric ones");
+			int photometric = 0;
+			for (const FallbackCatalog::Decision& d : decisions)
+				if (d.id == CameraLink::kIdPhotometricNotRunning || d.id == CameraLink::kIdPhotometricGpuFailed)
+				{
+					++photometric;
+					Assert::IsFalse(d.engaged, L"a photometric decision is released while nothing ran");
+				}
+			Assert::AreEqual(2, photometric, L"both photometric decisions are collected");
 			std::vector<std::string> lines;
 			core.CollectStatus(lines);
 			Assert::IsFalse(Has(lines, "ahead"));

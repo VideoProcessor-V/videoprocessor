@@ -88,7 +88,8 @@ namespace Tests
 				Assert::AreEqual(27, int(kTdMaps));
 				Assert::AreEqual(28, int(kTdTrailSummary));
 				Assert::AreEqual(29, int(kSourceGeometry), L"wave S2: P14g source_geometry is appended after the doc 72 list");
-				Assert::AreEqual(35, int(kSkeletonProductEnd));
+				Assert::AreEqual(35, int(kCameraFitField), L"CP-A1-D4-CAMLABEL-FIELDCOPY: the camera fit field is id 35");
+				Assert::AreEqual(36, int(kSkeletonProductEnd));
 				Assert::AreEqual(size_t(kSkeletonProductEnd), reg.Size());
 				// The v1 names are aliases of the v2 ids.
 				Assert::AreEqual(int(kTdBlocks), int(kTdAnalysis));

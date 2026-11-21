@@ -239,6 +239,7 @@ namespace SchedulerS2Test
 				{
 				case kP1HalfLuma: case kP2VectorPair: case kP2mMatcherPair: case kP3AnalysisField: case kP4SourceStats:
 				case kP7CameraFit: case kP8CameraLabels: case kP11RegionBlockStats: case kQualityPattern: case kCodingEvidence:
+				case kCameraFitField:   // CP-A1-D4-CAMLABEL-FIELDCOPY: P7's fit field is published with P7 (core set)
 					want = JobClass::Core;
 					break;
 				case kRefinedField:

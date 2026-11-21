@@ -17,6 +17,7 @@
 #include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraReaders.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraStoreAdapter.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraFitFieldPod.h>
 
 #include "../../../../tests/SettingsTestSupport.h"
 
@@ -154,10 +155,31 @@ namespace CameraProductsTestsNs
 			Assert::IsTrue(p8.residency == Residency::Vram);
 			Assert::AreEqual(0, int(p8.history));
 			Assert::IsTrue(p8.tier == Tier::T0 && p8.variants == Variants::Identical);
-			// C10 15a K2 (F2): P8 is computed from the P7 record and that record's own fit field; P3 is not an input.
-			Assert::AreEqual(1, int(p8.inputCount));
+			// C10 15a K2 (F2) + CP-A1-D4-CAMLABEL-FIELDCOPY: P8 is computed from the P7 record and that record's own fit field, which is the
+			// DECLARED product p7f_camera_fit_field (same frame, lag 0); P3 is not an input.
+			Assert::AreEqual(2, int(p8.inputCount));
 			Assert::AreEqual(int(kP7CameraFit), int(p8.inputs[0].product));
 			Assert::IsTrue(p8.inputs[0].lag == 0 && p8.inputs[0].lead == 0);
+			Assert::AreEqual(int(kCameraFitField), int(p8.inputs[1].product));
+			Assert::IsTrue(p8.inputs[1].lag == 0 && p8.inputs[1].lead == 0);
+			for (size_t k = 0; k < p8.inputCount; ++k)
+				Assert::IsTrue(p8.inputs[k].product != kP3AnalysisField, L"P3 is never a P8 input (F2)");
+
+			// p7f_camera_fit_field (id 35): a CPU T0 SystemRam product with NO declared input (written before P7's publish under P7's stamp;
+			// P8 compares the stamps), one slot of history, the P7 content stamps.
+			const ProductDecl& pf = reg.Get(kCameraFitField);
+			Assert::AreEqual(std::string("p7f_camera_fit_field"), std::string(pf.token));
+			Assert::IsTrue(pf.backend == Backend::Cpu);
+			Assert::IsTrue(pf.residency == Residency::SystemRam);
+			Assert::IsTrue(pf.tier == Tier::T0);
+			Assert::AreEqual(1, int(pf.history));
+			Assert::AreEqual(0, int(pf.inputCount), L"no declared input");
+			Assert::AreEqual(content | Bit(kSettingsMotion), pf.reads);
+			Assert::AreEqual(content, pf.spanMask);
+			Assert::AreEqual(16384u, pf.size.fixedBytes);
+			Assert::AreEqual(1, int(pf.size.termCount));
+			Assert::AreEqual(3, int(pf.size.terms[0].shift), L"the native cell grid: >= 8 source px per cell (audit4 MUST 1)");
+			Assert::AreEqual(12, int(pf.size.terms[0].bytesPerCell), L"three float planes per cell");
 			Assert::AreEqual(content, p8.reads);
 			Assert::AreEqual(1, int(p8.size.termCount));
 			Assert::AreEqual(4, int(p8.size.terms[0].shift));
@@ -194,6 +216,25 @@ namespace CameraProductsTestsNs
 				Assert::AreEqual(uint64_t(1024), BytesOf(reg.Get(kP7CameraFit).size, d));
 				Assert::AreEqual(c.labels, BytesOf(reg.Get(kP8CameraLabels).size, d));
 				Assert::AreEqual(uint64_t(256), BytesOf(reg.Get(kP9CameraSmoothed).size, d));
+				// CP-A1-D4 / audit4 MUST 1: the fit field slot is 16384 + 12 B per 8 x 8 cell, and it holds the worst-case pod (the engine's
+				// native cell grid, ceil(w/8) x ceil(h/8), with trust) at every size.
+				const uint64_t cells = uint64_t((c.w + 7) / 8) * uint64_t((c.h + 7) / 8);
+				Assert::AreEqual(16384u + cells * 12u, BytesOf(reg.Get(kCameraFitField).size, d));
+				Assert::IsTrue(BytesOf(reg.Get(kCameraFitField).size, d) >= CameraLink::WorstCaseFitFieldPodBytes(c.w, c.h), L"the worst-case pod fits");
+			}
+			// Written out (audit5 NIT 1: the dims the size rule is given, not an assumed 1080 rows): 1920x1080 -> 240 x 135 cells;
+			// 1920x1088 (the 16-px source grid x 16, the lane dims at 1080) -> 240 x 136 cells.
+			{
+				Dims d1080{ 1920, 1080 }, d1088{ 1920, 1088 }, d4k{ 3840, 2160 };
+				Assert::AreEqual(uint64_t(405184), BytesOf(reg.Get(kCameraFitField).size, d1080));
+				Assert::AreEqual(uint64_t(408064), BytesOf(reg.Get(kCameraFitField).size, d1088));
+				Assert::AreEqual(uint64_t(1571584), BytesOf(reg.Get(kCameraFitField).size, d4k));
+				// The real 1080 ahead field: 240 x 135 cells of 8 px with trust = 24 + 32400 x 12 = 388 824 B (it did not fit the 16-px rule's
+				// 114 304 B before the fix).
+				Assert::AreEqual(size_t(388824), CameraLink::FitFieldPodBytes(240u * 135u, true));
+				Assert::IsTrue(BytesOf(reg.Get(kCameraFitField).size, d1088) >= 388824u);
+				Assert::IsTrue(BytesOf(reg.Get(kCameraFitField).size, d1080) >= 388824u);
+				Assert::IsTrue(uint64_t(16384u + 120u * 68u * 12u) < 388824u, L"premise: the old 16-px size rule was too small at 1080");
 			}
 			Assert::AreEqual(uint64_t(130816), uint64_t(120u * 68u * 16u + 256u));
 			Assert::AreEqual(uint64_t(518656), uint64_t(240u * 135u * 16u + 256u));
@@ -333,12 +374,14 @@ namespace CameraProductsTestsNs
 			const std::vector<ConsumerDecl> cs = Camera({ CameraLink::CameraConsumer::Diagnostics });
 			const Graph g = BuildGraph(reg, cs, Settings(1, true));
 			Assert::IsTrue(g.valid);
-			// C10 15a K2 (F2): P8 declares only P7 and P7 only P4 (G-A3), so P2 (reached only through P3) and P3 leave the closure.
+			// C10 15a K2 (F2): P8 declares only P7 + P7's fit field (CP-A1-D4-CAMLABEL-FIELDCOPY) and P7 only P4 (G-A3), so P2 (reached only
+			// through P3) and P3 leave the closure.
 			const ProductId expected[] = { ProductId(kP1HalfLuma), ProductId(kP4SourceStats), ProductId(kP7CameraFit),
-				ProductId(kP8CameraLabels) };
+				ProductId(kCameraFitField), ProductId(kP8CameraLabels) };
 			for (ProductId p : expected)
 				Assert::AreEqual(1, CountOf(g, p));
-			Assert::AreEqual(size_t(4), g.nodes.size());
+			Assert::AreEqual(size_t(5), g.nodes.size());
+			Assert::IsTrue(g.IndexOf(kCameraFitField) < g.IndexOf(kP8CameraLabels), L"the fit field before its reader P8");
 			Assert::IsFalse(g.Has(kP9CameraSmoothed));
 			Assert::IsFalse(g.Has(kP3AnalysisField), L"P8 declares P7 only (C10 15a K2, F2)");
 			Assert::IsFalse(g.Has(kP2VectorPair) || g.Has(kP2mMatcherPair), L"no motion pair enters a Diagnostics-only graph");
@@ -350,7 +393,8 @@ namespace CameraProductsTestsNs
 			const Graph noEngine = BuildGraph(reg, cs, Settings(1, false));
 			Assert::IsTrue(noEngine.valid);
 			Assert::IsFalse(noEngine.Has(kP2mMatcherPair) || noEngine.Has(kP2VectorPair) || noEngine.Has(kP3AnalysisField));
-			Assert::AreEqual(size_t(4), noEngine.nodes.size());
+			Assert::AreEqual(size_t(5), noEngine.nodes.size());
+			Assert::IsTrue(noEngine.Has(kCameraFitField));
 
 			// The P2 -> P2m resolution without an engine, kept on a consumer that still reads P3 (GrainMap: P8 + P3).
 			const std::vector<ConsumerDecl> grain = Camera({ CameraLink::CameraConsumer::GrainMap });
