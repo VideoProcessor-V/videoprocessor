@@ -338,7 +338,9 @@ namespace MotionAhead
 		void Answer(OnDemand::Pending& pending, OnDemand::PairResult result);
 		// The frame's 8-bit luma at the engine size (HalfLuma8, then the quarter step when the target asks for it).
 		// False = nothing to do: not a readable frame, or a size this producer does not make.
-		bool LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& w, int& h);
+		// GF-P4 MUST-12: privateSite names the U3 private-copy count, recorded only when the private HalfLuma8 ran.
+		bool LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& w, int& h,
+			const char* privateSite);
 		// One engine run on (a, b) at w x h, read back into a new Flow with its global motion and trust extras. ran = the
 		// engine itself succeeded (the readback may still fail). False = failed (error set).
 		bool RunPair(ID3D11Texture2D* a, ID3D11Texture2D* b, int w, int h, bool continuous, uint64_t timedSequence, bool& ran,

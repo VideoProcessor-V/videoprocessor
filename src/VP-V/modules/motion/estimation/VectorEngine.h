@@ -388,7 +388,7 @@ namespace VpMotion
 			unsigned long long live = 0;                 // leases held now
 			unsigned long long evictedWindow = 0;        // frame older than current - back (never by a newer FlowOf)
 			unsigned long long droppedPruned = 0;        // the pair left the P2 slot
-			unsigned long long droppedEpoch = 0;         // a validity / board epoch moved (all leases)
+			unsigned long long droppedEpoch = 0;         // a validity / board epoch moved, or the producer stopped (all leases; GF-P4 S8)
 			unsigned long long droppedSingle = 0;        // no board: the single lease replaced by another pair
 			unsigned long long window = 0;               // the bound's back term in frames (0 = not fed)
 		};

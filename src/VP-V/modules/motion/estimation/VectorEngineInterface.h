@@ -268,11 +268,34 @@ namespace VpMotion
 	// destroyed). Any thread (a mutex, never taken per frame by the engine). The pointer is valid until that renderer
 	// is destroyed: a consumer drops it at the host's GpuReleased / Shutdown and calls SetPreEstimateHook(nullptr)
 	// before its hook object goes.
+	// GF-P4 S7 (a): the P2 CPU form's one read of an engine: the record that ends at `to` and the engine's served / declined count
+	// for it (the reason rides `why`). Used by the directory under its lock and by a test's injected engine.
+	inline bool ReadP2RecordOf(const IVectorEngine& engine, uint64_t to, VpMotion::P2PairRecord& out, std::string& why)
+	{
+		const bool served = engine.P2RecordEndingAt(to, out, why);
+		engine.NoteP2CpuFormRead(served, served ? std::string() : why);
+		return served;
+	}
+
 	class IVectorEngineDirectory
 	{
 	public:
 		virtual ~IVectorEngineDirectory() {}
 		virtual IVectorEngine* EngineFor(const void* host) = 0;
+		// GF-P4 S7 (a): the P2 CPU form's read for an off-render-thread caller (the memo's owner fill: camera / C8-10 workers). The
+		// renderers' directory (VectorEngine.cpp) runs it UNDER its lock, so the engine cannot be destroyed during the read (no raw
+		// pointer outlives the lock). False + why: no engine for `host` ("p2 cpu form: engine absent") or the engine's decline.
+		// Default (a test's fake directory): through EngineFor.
+		virtual bool ReadP2Record(const void* host, uint64_t to, VpMotion::P2PairRecord& out, std::string& why)
+		{
+			IVectorEngine* engine = EngineFor(host);
+			if (engine == nullptr)
+			{
+				why = "p2 cpu form: engine absent";
+				return false;
+			}
+			return ReadP2RecordOf(*engine, to, out, why);
+		}
 	};
 
 	struct EstimateContext

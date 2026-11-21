@@ -778,7 +778,10 @@ namespace Vpv
 			// Vector pairs the veto let through because their frame had no confirmed verdict yet (process-wide, as the seam), and of them
 			// the pairs into a frame later CONFIRMED as a cut (vectors across a real cut were used before the verdict: one frame of the
 			// one-frame-late law). A small ring of the recent unjudged frames links the two; shown on "Skeleton scene:". Approximate:
-			// every ask counts (a frame asked twice counts twice), and a link older than kUnjudgedRing frames is lost.
+			// every ask counts (a frame asked twice counts twice), and a link older than kUnjudgedRing frames is lost. GF-P4 S-2: the asks
+			// come from ALL vector readers (PairValidAt / PairServes / PairSpansSlip: the estimate, FlowOf, the de-judder policy, the
+			// sigma-delta gate and the dither vector source, SharedMotionSource, EstimateState, the camera link, and the P2 CPU form, whose
+			// gap read asks each frame of its span), not only the estimate; the status line says so.
 			constexpr size_t kUnjudgedRing = 32;
 			std::atomic<uint64_t>& ScenePairsUnjudged() { static std::atomic<uint64_t> n{ 0 }; return n; }
 			std::atomic<uint64_t>& ScenePairsAcrossLateCut() { static std::atomic<uint64_t> n{ 0 }; return n; }
@@ -3112,7 +3115,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					const std::string vetoState = vetoOff.empty() ? std::string("on") : "off (" + vetoOff + ")";
 					char sceneLine[1024] = {};
 					std::snprintf(sceneLine, sizeof(sceneLine),
-						"Skeleton scene: %llu verdict(s) confirmed with the next frame, %llu provisional, %llu tracker restart(s), %llu group(s) confirmed later; %llu cut(s) delivered late (%llu more than one frame late); %llu no-grid fallback verdict(s) (v1 pair law); vector cut veto %s, %llu vector pair(s) refused at confirmed cuts, %llu asked before their frame's verdict (%llu of them into a cut confirmed later) (all renderers)",
+						"Skeleton scene: %llu verdict(s) confirmed with the next frame, %llu provisional, %llu tracker restart(s), %llu group(s) confirmed later; %llu cut(s) delivered late (%llu more than one frame late); %llu no-grid fallback verdict(s) (v1 pair law); vector cut veto %s, %llu vector pair(s) refused at confirmed cuts, %llu asked before their frame's verdict (%llu of them into a cut confirmed later) (all renderers and all vector readers, P2 CPU form included; a gap read asks each frame of its span)",
 						static_cast<unsigned long long>(st.sceneConfirmed.load(std::memory_order_relaxed)),
 						static_cast<unsigned long long>(st.sceneProvisional.load(std::memory_order_relaxed)),
 						static_cast<unsigned long long>(st.sceneReprimes.load(std::memory_order_relaxed)),

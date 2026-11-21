@@ -227,7 +227,13 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 		facts.dejudderEstimatedSequence = dejudderEstimatedSequence;
 		facts.vectorDemand = &vectorDemand;
 		ImplDecisionHost<Impl, DejudderEstimateCall> host{ *this, call };
-		if (VpMotion::RunDejudderDecision(activeSettings, dejudderPolicy, facts, host, &analysisEstimate) != VpMotion::DecisionOutcome::PairCheck)
+		const VpMotion::DecisionOutcome outcome = VpMotion::RunDejudderDecision(activeSettings, dejudderPolicy, facts, host, &analysisEstimate);
+		// GF-P4 S4: the settled-off branch (de-judder off, 60p / video rate, smooth motion, low latency, native RGB, Original): no estimate
+		// runs, so the matcher builds no pyramid of its own. Its row (synced only in RunDejudderEstimate) is released here, never left
+		// engaged. A transient NoEstimate (cadence repeat, the same frame) keeps the row as the last estimate set it.
+		if (outcome == VpMotion::DecisionOutcome::ReleaseBranch)
+			SyncFallback(FallbackCatalog::Released("product.motion_warp"));
+		if (outcome != VpMotion::DecisionOutcome::PairCheck)
 			return;
 	}
 	// MotionValidity step 1 D: (A, B) only as adjacent frames of the current epoch

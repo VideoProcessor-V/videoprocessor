@@ -175,5 +175,43 @@ namespace VideoProcessorTest
 			VpMotion::FlowView gone;
 			Assert::IsFalse(rig.engine.FlowOf(12, gone), L"the lease did not keep the pruned pair servable");
 		}
+
+		// GF-P4 S8: a FED engine's ABSENT read still drops every lease when the board's epoch moved (the old epoch's payloads are
+		// never held until a later valid read). FlowOf(20) has no pair: an absent read (the pair was never kept).
+		TEST_METHOD(FedAbsentReadDropsLeasesOnEpochOrProducerStop)
+		{
+			Rig rig;
+			rig.Window(14, 5, 1);
+			VpMotion::FlowView v;
+			for (uint64_t seq = 12; seq <= 14; ++seq)
+				Assert::IsTrue(rig.engine.FlowOf(seq, v));
+			Assert::AreEqual(3ull, rig.engine.Leases().live);
+			Assert::AreEqual(0ull, rig.engine.Leases().droppedEpoch);
+			rig.Window(14, 5, 2);   // the board's epoch moves
+			VpMotion::FlowView absent;
+			Assert::IsFalse(rig.engine.FlowOf(20, absent), L"an absent read");
+			Assert::AreEqual(3ull, rig.engine.Leases().droppedEpoch, L"the absent read dropped every old-epoch lease");
+			Assert::AreEqual(0ull, rig.engine.Leases().live);
+		}
+
+		// GF-P4 S8: the same fed absent read with NO epoch move keeps the window's leases (a plain miss of one pair); a producer
+		// stop then drops them all on the next absent read.
+		TEST_METHOD(FedPlainMissKeepsTheWindow)
+		{
+			Rig rig;
+			rig.Window(14, 5, 1);
+			VpMotion::FlowView v;
+			for (uint64_t seq = 12; seq <= 14; ++seq)
+				Assert::IsTrue(rig.engine.FlowOf(seq, v));
+			VpMotion::FlowView absent;
+			Assert::IsFalse(rig.engine.FlowOf(20, absent), L"a plain miss");
+			Assert::AreEqual(3ull, rig.engine.Leases().live, L"the window keeps its leases");
+			Assert::AreEqual(0ull, rig.engine.Leases().droppedEpoch);
+
+			rig.engine.PublishProducer(nullptr);   // the producer stops
+			Assert::IsFalse(rig.engine.FlowOf(13, absent), L"no producer: an absent read");
+			Assert::AreEqual(3ull, rig.engine.Leases().droppedEpoch, L"the producer stop dropped every lease");
+			Assert::AreEqual(0ull, rig.engine.Leases().live);
+		}
 	};
 }

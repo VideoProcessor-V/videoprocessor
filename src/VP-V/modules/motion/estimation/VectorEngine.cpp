@@ -93,6 +93,36 @@ namespace VpMotion
 				+ std::to_string(motionValidity.StreamGeneration()) + ")";
 			return false;
 		}
+		// GF-P4 S7 (b): the vector-validity rule for a P2 CPU reader (camera / C8-10). An adjacent pair is asked the one stamp form
+		// (PairValidAt: stamps across (from, to] and the confirmed-cut veto, counted there). A gap pair (from + 1 < to) is refused when
+		// any frame in (from, to] is a CONFIRMED cut (PairValidAt alone would refuse every gap pair: it requires adjacency).
+		if (from >= to)
+		{
+			why = "p2 cpu form: pair " + std::to_string(from) + " -> " + std::to_string(to) + " is not a forward pair";
+			return false;
+		}
+		if (from + 1u == to)
+		{
+			if (!motionValidity.PairValidAt(from, to))
+			{
+				why = "p2 cpu form: pair " + std::to_string(from) + " -> " + std::to_string(to) + " refused (stamps or confirmed cut)";
+				return false;
+			}
+		}
+		else
+		{
+			const ::MotionValidity::State::ConfirmedCutFn confirmedCut =
+				::MotionValidity::State::ConfirmedCutReader().load(std::memory_order_acquire);
+			if (confirmedCut != nullptr)
+				for (uint64_t seq = from + 1u; seq <= to; ++seq)
+					if (confirmedCut(seq))
+					{
+						motionValidity.NoteConfirmedCutRefusal();   // GF-P4 S-2: counted as PairValidAt counts an adjacent refusal
+						why = "p2 cpu form: gap pair " + std::to_string(from) + " -> " + std::to_string(to) + " crosses a confirmed cut at "
+							+ std::to_string(seq);
+						return false;
+					}
+		}
 		out = MakeP2PairRecord(from, to, pairGeneration, flow->global, flow->second, flow->globalSet, flow->globalGeneral);
 		return true;
 	}
@@ -563,12 +593,24 @@ namespace VpMotion
 		{
 		public:
 			// The raw pointer outlives the lock by CONTRACT: the engine's destructor removes it (Remove) and a caller that uses the
-			// pointer off the render thread (the P2 CPU form's owner fill) relies on its workers / the skeleton memo's off-thread
-			// fills having stopped before the renderer destroys its engine. A caller that cannot rely on that uses WithEngine.
+			// pointer off the render thread relies on its workers having stopped before the renderer destroys its engine. A caller
+			// that cannot rely on that uses WithEngine; the P2 CPU form's owner fill uses ReadP2Record (below, under the lock).
 			IVectorEngine* EngineFor(const void* host) override
 			{
 				std::lock_guard<std::mutex> lock(mutex_);
 				return Newest(host);
+			}
+			// GF-P4 S7 (a): the P2 CPU form's read under the lock (~VectorEngine's Remove waits for it): no raw pointer leaves.
+			bool ReadP2Record(const void* host, uint64_t to, P2PairRecord& out, std::string& why) override
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				const VectorEngine* engine = Newest(host);
+				if (engine == nullptr)
+				{
+					why = "p2 cpu form: engine absent";
+					return false;
+				}
+				return ReadP2RecordOf(*engine, to, out, why);
 			}
 			// f(engine) for the newest engine of `host`, under the lock (the engine cannot be removed meanwhile).
 			template<class F>
@@ -872,8 +914,34 @@ namespace VpMotion
 			++counter;
 			// Not fed (no board): today's single lease, nothing valid holds nothing. Fed: the window keeps the other pairs' leases (an
 			// absent read of one pair never drops a pair still inside the window; an epoch move does, below).
-			if (queueBoard_.load(std::memory_order_acquire) == nullptr)
+			const VpSkeleton::QueueWindowBoard* const absentBoard = queueBoard_.load(std::memory_order_acquire);
+			if (absentBoard == nullptr)
+			{
 				leaseCounters_.droppedSingle += flowLeases_.size(), flowLeases_.clear();
+				return false;
+			}
+			// GF-P4 S8: fed, an absent read still drops EVERY lease when the producer has stopped or a validity / board epoch moved
+			// (the old-epoch payloads are never held until a later valid read); a plain miss keeps the window's leases.
+			if (flowLeases_.empty())
+				return false;
+			bool drop = !LoopProducer();
+			if (!drop)
+			{
+				VpSkeleton::QueueWindow absentWin;
+				const uint64_t absentBoardEpoch = absentBoard->Read(&absentWin) ? absentWin.epoch : 0;
+				const uint64_t absentValidityEpoch = motionValidity.Epoch();
+				for (const auto& kv : flowLeases_)
+					if (kv.second->validityEpoch != absentValidityEpoch || kv.second->boardEpoch != absentBoardEpoch)
+					{
+						drop = true;
+						break;
+					}
+			}
+			if (drop)
+			{
+				leaseCounters_.droppedEpoch += flowLeases_.size();
+				flowLeases_.clear();
+			}
 			return false;
 		};
 		if (!LoopProducer() || motionLowLatencyNoVectors)
