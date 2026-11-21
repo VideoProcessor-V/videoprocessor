@@ -171,7 +171,11 @@ namespace P1Gpu
 			f.keepFrames = 1;      // A = frame n - 1 stays readable while n renders (SkeletonAcquire.h keepFrames)
 			f.historyFrames = 1;
 			f.jobClass = VpSkeleton::JobClass::Core;
-			f.aheadDepth = 0;      // render-time first; lane-ahead is L-B4-P3-UNPUBLISHED's step
+			// GF-P1 MUST-1: the matcher's consumers read two frames past the render seal (render pair B = N + 1, the EstimateAhead
+			// pair C = N + 2; VectorEngineEstimate.inl offer, VectorEngine.cpp P13 / P1 acquires). Declared here, the memo-wide
+			// window (DeriveMemoWindow's kAheadNeed term) computes aheadCompute >= 2 (bounded by the queue ahead), so neither is
+			// refused NotPlannedAhead; beyond the queue NotQueued stays the honest answer, and the P13 views need no exemption.
+			f.aheadDepth = 2;
 			f.fill = [](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo& memo, VpSkeleton::OwnerFillOutput& out) {
 				if (req.gpu == nullptr || req.gpu->Gpu() == nullptr || req.gpu->Dispatch() == nullptr)
 				{
