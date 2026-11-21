@@ -286,8 +286,48 @@ namespace Vpv
 				}
 				// L-CORE: the memo is the renderer's (it outlives this lane); off the render thread the lane's CPU products are read through
 				// `leaseOf` (the host's CURRENT bundle, held for the call: never this object after it ended).
+				// GF-P1 AHEAD-DECL call site (GF-P2b): the consumers are not known before the first Configure, so this first bind carries none;
+				// BindConsumers (after every Configure) rebinds with the configured list whenever the lane fills' ahead depths it gives move.
+				boundGpuHandleOf = gpuHandleOf;
+				boundLeaseOf = leaseOf;
 				VpSkeleton::BindLaneToMemo(lane, *memo, gpuHandleOf, std::move(leaseOf));
 			}
+
+			// GF-P1 AHEAD-DECL call site (GF-P2b, gate G6 C2): the lane fills' ahead depths follow the configured consumers (external demand
+			// included). The graph fingerprint leaves ConsumerDecl::aheadDepth out (a depth is not graph structure), so a change of depth alone
+			// keeps the graph: the key below is what decides the rebind, not the graph. BindLane replaces the binding (laneBinds_ moves). The
+			// workers call the lane's ahead sinks, which the binder reassigns: they are joined first when running (Begin restarts them).
+			// Render thread. True = rebound.
+			bool BindConsumers(const std::vector<VpSkeleton::ConsumerDecl>& consumers)
+			{
+				std::vector<AheadKey> key;
+				for (const VpSkeleton::ProductId id : lane.CpuLiveProducts())
+				{
+					const VpSkeleton::LaneAheadDepth d = VpSkeleton::LaneAheadDepthOf(id, 0, consumers);
+					AheadKey k;
+					k.id = id;
+					k.depth = d.depth;
+					k.asked = d.asked;
+					k.by = d.by;
+					key.push_back(k);
+				}
+				if (boundWithConsumers && key == boundAheadKey)
+					return false;
+				if (threads.Running())
+					threads.Stop();
+				VpSkeleton::BindLaneToMemo(lane, *memo, boundGpuHandleOf, boundLeaseOf, consumers);
+				boundAheadKey = key;
+				boundWithConsumers = true;
+				return true;
+			}
+			struct AheadKey
+			{
+				VpSkeleton::ProductId id = 0;
+				uint16_t depth = 0;
+				uint16_t asked = 0;
+				const char* by = nullptr;
+				bool operator==(const AheadKey& o) const { return id == o.id && depth == o.depth && asked == o.asked && by == o.by; }
+			};
 			// The binding is dropped on the render thread by StopBundle / a rebuild's new bind; this is the safety net (by token: a newer
 			// lane's binding is kept).
 			~Bundle() { VpSkeleton::UnbindLaneFromMemo(lane, *memo); }
@@ -343,6 +383,11 @@ namespace Vpv
 			uint64_t configuredVramVersion = 0;   // VramUsers::Version() at the last Configure
 			uint64_t configuredExtVersion = 0;     // externalVersion_ at the last Configure
 			uint64_t configuredMemoNeed = 0;       // GEM-W1A S1 / GF-P2b MUST-4: the memo's top GPU need level planned at the last Configure (0 = none)
+			// GF-P2b (AHEAD-DECL call sites): what the memo binding was made with, for BindConsumers' rebinds.
+			VpSkeleton::LaneGpuHandleOf boundGpuHandleOf;
+			VpSkeleton::LaneLeaseOf boundLeaseOf;
+			std::vector<AheadKey> boundAheadKey;
+			bool boundWithConsumers = false;
 			uint64_t framesSinceConfigure = 0;
 		};
 
@@ -2494,7 +2539,9 @@ namespace Vpv
 			{
 				VpSkeleton::AheadDemand ad;
 				ad.need = d.depth;
-				ad.consumer = d.form != 0 ? "owner fill (GPU)" : "owner fill (CPU)";
+				// GF-P1 AHEAD-DECL call site (GF-P2b): the requester's name (OwnerFill::aheadBy, a static string) reaches the window's existing
+				// ceiling notice ("ahead compute 6 (by X; ceiling 6)"); an unnamed request keeps the form wording.
+				ad.consumer = d.by != nullptr ? d.by : (d.form != 0 ? "owner fill (GPU)" : "owner fill (CPU)");
 				demands.push_back(ad);
 			}
 			VpSkeleton::SetAheadConsumers(t, demands);
@@ -2859,6 +2906,9 @@ namespace Vpv
 				b->registry = Bundle::MakeRegistry(b->wiring, st.periodMs, VpSkeleton::QueueFrames(gs));
 				b->lane.Configure(st.settings.lane, b->registry, consumers, gs, card, tier, seq, false);
 				b->lane.SetExternalProducts(outside);
+				// GF-P2b (gate G6 C2): the lane fills take the configured consumers' declared ahead depths (rebound when they move: also after
+				// an extMoved Configure whose only change is a depth, which keeps the graph).
+				b->BindConsumers(consumers);
 				{
 					// B1: the memo's GPU spots are budgeted against the VRAM ledger: the memo user's grant of this plan (GF-P2b S10: its own
 					// id kUserSkeletonMemo, MakeMemoVramUser above; the scratch arena's kUserScratchArena / Extra grants are the arena's).
