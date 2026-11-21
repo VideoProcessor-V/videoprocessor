@@ -326,9 +326,11 @@ public:
             uint16_t got = 0, degraded = 0;
             Got why = Got::Ok;
             std::string& dirWhy = d == Dir::Back ? r.backWhyText : r.aheadWhyText;
+            PlanePtr last;   // GF-P4 S9: plane k - 1 of this (t, d), handed to the next step (a degraded plane is not cached)
             for (uint16_t k = 1; k <= want; ++k) {
                 PlanePtr p;
-                why = Acquire(t, d, k, p, &dirWhy);
+                why = Acquire(t, d, k, p, &dirWhy, last);
+                last = p;
                 if (!dirWhy.empty())
                     r.lastWhy = dirWhy;
                 if (why != Got::Ok)
@@ -347,7 +349,9 @@ public:
     }
 
     // One plane. k == 0 is not a plane (identity). Beyond the plan: OutOfPlan.
-    Got Acquire(uint64_t t, Dir dir, uint16_t k, PlanePtr& out, std::string* why = nullptr)
+    // GF-P4 S9: `prev` (optional) = a plane the caller already holds; used ONLY when it is plane k - 1 of the same (t, dir) and step,
+    // so a chain of uncached degraded planes (no reverse pair) costs K computes, not K(K+1)/2. Any other value is ignored (recursion).
+    Got Acquire(uint64_t t, Dir dir, uint16_t k, PlanePtr& out, std::string* why = nullptr, PlanePtr prev = PlanePtr())
     {
         out.reset();
         if (k == 0) {
@@ -359,7 +363,7 @@ public:
             ++m_stats.outOfPlan;
             return Got::OutOfPlan;
         }
-        return Get(t, dir, k, out, why);
+        return Get(t, dir, k, out, why, prev);
     }
 
     // ---- lifetime ----
@@ -475,7 +479,7 @@ private:
         m_stats.bytes = 0;
     }
 
-    Got Get(uint64_t t, Dir dir, uint16_t k, PlanePtr& out, std::string* why)
+    Got Get(uint64_t t, Dir dir, uint16_t k, PlanePtr& out, std::string* why, const PlanePtr& prevHint = PlanePtr())
     {
         if (m_w <= 0 || m_h <= 0 || !m_source) {
             ++m_stats.badGeometry;
@@ -488,12 +492,17 @@ private:
             out = hit->second;
             return Got::Ok;
         }
-        // Prerequisite: plane k - 1 (recursive publish).
+        // Prerequisite: plane k - 1 (recursive publish), or the caller's hint when it IS that plane (GF-P4 S9).
         PlanePtr prev;
         if (k > 1) {
-            const Got g = Get(t, dir, static_cast<uint16_t>(k - 1), prev, why);
-            if (g != Got::Ok)
-                return g;
+            if (prevHint && prevHint->seq == t && prevHint->dir == dir && prevHint->k == static_cast<uint16_t>(k - 1) && prevHint->step == m_step &&
+                prevHint->srcW == m_w && prevHint->srcH == m_h)
+                prev = prevHint;
+            else {
+                const Got g = Get(t, dir, static_cast<uint16_t>(k - 1), prev, why);
+                if (g != Got::Ok)
+                    return g;
+            }
         }
         // The pair of this step: back = (t-k+1) -> (t-k), ahead = (t+k-1) -> (t+k); the reverse is the landing consistency check.
         if (dir == Dir::Back && t < k) {   // before the first frame
