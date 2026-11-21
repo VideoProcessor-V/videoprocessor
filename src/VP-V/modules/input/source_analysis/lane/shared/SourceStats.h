@@ -11,7 +11,8 @@
 //   percentile (unit v2, 2026-11-21 precision fix) the exact Q6 sample value: the smallest half-plane value whose
 //              cumulative count reaches the target (FirstBinReaching over the full-resolution histogram). v1 returned the
 //              centre of the 10-bit bin, up to half an axis code (32 Q6) off and above maxCode for a flat frame.
-//   rect       evidence rect: rows/cols whose mean exceeds p1 + (p99 - p1) / 16 (NOT Bill's active picture; see U8)
+//   rect       evidence rect: rows/cols whose mean exceeds p1 + (p99 - p1) / 16 (NOT Bill's active picture; see U8); its p1 / p99
+//              are the record-bin centres (the v1 rule, unchanged in v2)
 //   grain      median over 8x8 blocks of the RMS second difference
 //   distance   half the L1 distance of two normalised histograms (HalfL1Distance), the input of U7
 //   coarse     the matcher's 16-bin luma histogram of the 1/32 level (CoarseBin / CoarseL1 and its GLSL, the M3 cut input)
@@ -217,9 +218,14 @@ public:
         rec->p01 = Percentile((n + 99u) / 100u);
         rec->p50 = Percentile((n + 1u) / 2u);
         rec->p99 = Percentile((n * 99u + 99u) / 100u);
-        // Evidence rect: rows/cols whose mean exceeds p1 + (p99 - p1) / 16.
-        const uint32_t span = rec->p99 > rec->p01 ? rec->p99 - rec->p01 : 0u;
-        const uint64_t thr = uint64_t(rec->p01) + (span >> kRectFractionShift);
+        // Evidence rect: rows/cols whose mean exceeds p1 + (p99 - p1) / 16. The rect keeps its v1 rule bit for bit for every
+        // input (gate cb-chk r1 MUST 1): its p1 / p99 are the centres of the record bins that hold them (RectPercentile), not
+        // the exact record percentiles. The half plane is a 2x2 mean (multiples of 16 for ten-bit input), so "exact p1 + 32"
+        // would not reproduce v1.
+        const uint32_t rect01 = RectPercentile(rec->hist, (n + 99u) / 100u);
+        const uint32_t rect99 = RectPercentile(rec->hist, (n * 99u + 99u) / 100u);
+        const uint32_t span = rect99 > rect01 ? rect99 - rect01 : 0u;
+        const uint64_t thr = uint64_t(rect01) + (span >> kRectFractionShift);
         bool found = false;
         uint32_t y0 = 0, y1 = 0, x0 = 0, x1 = 0;
         for (uint32_t y = 0; y < hh_; ++y)
@@ -265,6 +271,14 @@ private:
     {
         const int i = FirstBinReaching<uint64_t>(q6Hist_.data(), static_cast<int>(kQ6Values), target);
         return i >= 0 ? static_cast<uint32_t>(i) : kQ6Values - 1u;
+    }
+
+    // The rect rule's p1 / p99 (unchanged from v1): the Q6 centre of the smallest RECORD bin (1024 whole-code bins) whose
+    // cumulative count reaches `target`. It reads the summed record bins, so no sample is narrowed here.
+    static uint32_t RectPercentile(const uint32_t* recordBins, uint64_t target)
+    {
+        const int i = FirstBinReaching<uint64_t>(recordBins, static_cast<int>(kHistBins), target);
+        return Vpv::AnalysisDomain::BinCenterQ6(i >= 0 ? static_cast<uint32_t>(i) : kHistBins - 1u);
     }
 
     uint32_t hw_ = 0, hh_ = 0, bw_ = 0, bh_ = 0;

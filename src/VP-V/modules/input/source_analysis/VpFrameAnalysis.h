@@ -117,8 +117,9 @@ namespace VpFrameAnalysis
 
 	// Sample().luma for [x0, x0 + count) of row y, in the sampler's domain, as Q6 (the 10-bit analysis axis x 64,
 	// AnalysisAxis10.h; 2026-11-21 precision fix: nothing is floored to ten bits here). In this order:
-	//   the 16-bit plane formats (P010 / P210 / decoded DV): the lanes ARE Q6, read in place (a 12-bit DV lane keeps its
-	//     two fraction bits); a full-range plane maps through PlaneLuma, interpolated between the whole codes (exact at
+	//   the 16-bit plane formats (P010 / P210 / decoded DV): the lanes ARE Q6. A limited decoded-DV lane is read in place
+	//     (a 12-bit lane keeps its two fraction bits); P010 / P210 lanes are ten-bit containers, so their six padding bits
+	//     are masked off (0xFFC0) and never read as a fraction; a full-range plane maps through PlaneLuma, interpolated between the whole codes (exact at
 	//     every whole code, so a ten-bit-origin lane gives PlaneLuma(code) x 64, the value Sample() gives);
 	//   the shared plane, the row decoder, or the per-pixel sampler: 10-bit Sample() codes, carried exactly as code x 64.
 	class LumaRowReader

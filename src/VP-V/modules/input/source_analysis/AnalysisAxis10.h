@@ -72,7 +72,8 @@ namespace Vpv { namespace AnalysisDomain
 	// Floor10FromQ6 and HistBinFromQ6 were removed; their consumers keep the fraction:
 	//  - VpFrameAnalysis reads Q6 rows (LumaRowReader::RowQ6) and reduces on the Q6 axis;
 	//  - SourceStats (P4) keeps a full-resolution Q6 histogram, and its percentiles are exact Q6 values.
-	// The Q6 centre of a whole-code bin (a representative value of a 1024-bin record bin).
+	// The Q6 centre of a whole-code bin (a representative value of a 1024-bin record bin): the P4 evidence-rect rule's
+	// p1 / p99 (SourceStats RectPercentile, the v1 rect law kept bit for bit).
 	inline uint32_t BinCenterQ6(uint32_t bin) { return (bin << kAxisFractionBits) | (1u << (kAxisFractionBits - 1)); }
 
 	// The legacy integer 12 -> 10 reduction of 12-bit RGB (Bill's Round12To10, AnalysisLumaSource.cpp; Original keeps

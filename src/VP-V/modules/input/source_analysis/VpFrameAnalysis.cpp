@@ -175,16 +175,26 @@ namespace VpFrameAnalysis
 			return nullptr;
 		if (const uint16_t* plane = m_source.LumaPlaneRow(y))
 		{
-			// The lanes are on the 16-bit lane scale = Q6: a plane that needs no decode (limited range, NeedsDecode) is read
-			// in place, fraction bits included.
-			if (!NeedsDecode(m_source))
+			// The lanes are on the 16-bit lane scale = Q6. P010 / P210 are ten-bit containers: their low six bits are padding
+			// (zero by the format; gate cb-chk r1 SHOULD 1), so they are masked off and never read as a fraction. Only the
+			// decoded DV plane (12-bit codes, code12 << 4) carries real fraction bits.
+			const bool tenBitLanes = m_source.format != AnalysisLumaFormat::DecodedDolbyVision422;
+			const uint16_t laneMask = tenBitLanes ? static_cast<uint16_t>(0xFFC0u) : static_cast<uint16_t>(0xFFFFu);
+			// A limited plane that needs no decode (NeedsDecode false) with real fraction bits is read in place.
+			if (!NeedsDecode(m_source) && !tenBitLanes)
 				return plane + x0;
+			m_buffer.resize(static_cast<size_t>(count));
+			if (!NeedsDecode(m_source))
+			{
+				for (int i = 0; i < count; ++i)
+					m_buffer[static_cast<size_t>(i)] = static_cast<uint16_t>(plane[x0 + i] & laneMask);
+				return m_buffer.data();
+			}
 			// Full range: Sample()'s remap (PlaneLuma, the source's own law) carried onto the Q6 axis.
 			if (m_planeQ6.empty())
 				BuildQ6Map(m_planeQ6, [this](int code) { return m_source.PlaneLuma(static_cast<uint16_t>(code)); });
-			m_buffer.resize(static_cast<size_t>(count));
 			for (int i = 0; i < count; ++i)
-				m_buffer[static_cast<size_t>(i)] = m_planeQ6[plane[x0 + i]];
+				m_buffer[static_cast<size_t>(i)] = m_planeQ6[plane[x0 + i] & laneMask];
 			return m_buffer.data();
 		}
 		// The ten-bit sources (Sample().luma): the shared plane, the row decoder, else the per-pixel sampler. Carried as

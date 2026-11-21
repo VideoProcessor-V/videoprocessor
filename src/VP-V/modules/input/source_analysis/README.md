@@ -330,6 +330,11 @@ Chain tests:
     move by at most 32 Q6 (half a code) for every source.
   - Cost (estimate, not measured): two 65536-entry tables and a 256 KB histogram per reduction (about 0.2 ms CPU per frame on the
     worker thread), and a 256 KB histogram per P4 accumulator.
+  - Gate r1 follow-up (2026-11-21, review-cb-chk-r1.md):
+    - The P4 evidence rect keeps its v1 rule bit for bit for every input (MUST 1). Its p1 / p99 are the centres of the record
+      bins (`RectPercentile`). "Exact p1 + 32" would not reproduce v1, because half-plane values are 2x2 means, i.e. multiples of 16.
+    - P010 / P210 lanes are ten-bit containers. Their six low padding bits are masked off (0xFFC0), so a producer that leaves junk
+      there cannot move a FrameAnalysis value (SHOULD 1). Only the decoded DV plane carries 12-bit fraction bits.
 
 ## Known issues / open items
 
