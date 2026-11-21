@@ -277,6 +277,13 @@
    "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
   },
   {
+   "kind": "method",
+   "value": "DetailPulseTests::DetailPulseGpuTiming",
+   "category": "GpuHardware",
+   "file": "src/VP-V/tests/suite/DetailPulseTests.cpp",
+   "note": "Timing; runs only with VP_TEST_GPU=hardware."
+  },
+  {
    "kind": "methodPrefix",
    "value": "DetailPulseGpu",
    "category": "GpuWarp",
@@ -286,9 +293,16 @@
   {
    "kind": "method",
    "value": "TextureRestoreTests::TextureRestoreRealClipBreathing",
-   "category": "GpuWarp",
+   "category": "Footage",
    "file": "src/VP-V/tests/suite/TextureRestoreTests.cpp",
-   "note": "Real-footage run; self-skips without VP_TEST_REAL_FOOTAGE."
+   "note": "Real-footage breathing clip run; requires VP_TEST_REAL_FOOTAGE."
+  },
+  {
+   "kind": "method",
+   "value": "TextureRestoreGpuTests::TextureRestoreGpuTiming",
+   "category": "GpuHardware",
+   "file": "src/VP-V/tests/suite/TextureRestoreTests.cpp",
+   "note": "Timing; runs only with VP_TEST_GPU=hardware."
   },
   {
    "kind": "class",
