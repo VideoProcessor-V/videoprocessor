@@ -67,7 +67,7 @@ namespace Tests
 			in.on = true;
 			const AppearanceStage::Decision d = AppearanceStage::Decide(in, s);
 			Assert::IsTrue(d.active);
-			Assert::AreEqual<size_t>(10 + 10 + 7 + 9, d.parameters.size());
+			Assert::AreEqual<size_t>(10 + 10 + 7 + 9 + 9 + 1, d.parameters.size());   // + apn_* (inverse) + apx_hunt_scale
 			Assert::IsTrue(d.status.find("screen white not measured") != std::string::npos);
 			in.screenWhiteMeasured = true;
 			Assert::IsTrue(AppearanceStage::Decide(in, s).status.find("not measured") == std::string::npos);
