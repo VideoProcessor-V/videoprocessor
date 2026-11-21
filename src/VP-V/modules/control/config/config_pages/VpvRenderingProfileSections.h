@@ -22,6 +22,8 @@ class QToolButton;
 class QVBoxLayout;
 class QWidget;
 
+namespace ConfigPageHost { class EditorKit; }
+
 namespace Vpv
 {
     struct RenderingSectionKit
@@ -69,4 +71,5 @@ namespace Vpv
     void AddVpvProcessingAndReorganise(const RenderingSectionKit& kit, const RenderingSectionHandles& handles);
     void RefreshVpvRenderingProfileState(QWidget* editorRoot, QWidget* profileFields,
         const QString& sectionPrefix, const QString& whenValue);
+    void AddStartupHardwareRows(QFormLayout* hardwareForm, ConfigPageHost::EditorKit& kit);
 }
