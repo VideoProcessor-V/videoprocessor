@@ -401,7 +401,7 @@ namespace SourceFrameTapTestsNs
 		// drive, through the skeleton), the frames that arrive after the raise get frame-analysis records and reach the tap's sink. If this is
 		// RED the follow-up is in VpFrameAnalysis::Host (the configured-off shared-plane flag), not here.
 		// The registered tap sink makes Tap::AnyWants true, as in production (the skeleton registers it), so AttachIfEnabled attaches the
-		// plane through the sink and the Host's SharedFlag (configured on AND full-luma readers) is NOT exercised here: the next test is
+		// plane through the sink and the Host's SharedCount share (the effective state AND full-luma readers) is NOT exercised here: the next test is
 		// the case without a sink.
 		TEST_METHOD(ARaisedStoreWithTheConfigurationOffProducesRecordsForTheFramesAfterTheRaise)
 		{
