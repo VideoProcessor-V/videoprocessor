@@ -301,6 +301,7 @@ namespace
 		CHECK(ordered[0].kind != PatchKind::Black);
 		// After white, the neutral patches step down in light (WTW first, then the ramp, near black, BTB).
 		double last = 1e9;
+		size_t neutralCount = 0;
 		for (size_t i = 1; i < ordered.size(); ++i)
 		{
 			const Patch& p = ordered[i];
@@ -308,10 +309,12 @@ namespace
 				p.kind == PatchKind::Greyscale || p.kind == PatchKind::NearBlack || p.kind == PatchKind::Btb ||
 				p.kind == PatchKind::Wtw);
 			if (!neutral) break;
+			++neutralCount;
 			const double sum = p.rgb[0] + p.rgb[1] + p.rgb[2];
 			CHECK(sum <= last + 1e-9);
 			last = sum;
 		}
+		CHECK(neutralCount >= 15);
 	}
 
 	void ColourMaths()

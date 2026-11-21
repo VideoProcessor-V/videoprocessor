@@ -125,6 +125,7 @@ namespace VideoProcessorTest
 				Assert::AreEqual(raised + (pacing ? 700 : 900), clock.Ms(), TestClock::TOLERANCE_MS);
 				const size_t before = projector->Writes().size();
 				const int atApply = projector->contrast;
+				Assert::AreEqual(51, atApply, L"reconfigure must land before CNTR 50 is written");
 				LedDriveConfig tuned = config;
 				tuned.highlightToleranceStops = 0.5;   // a compensate-only value: the script is unchanged
 				Assert::IsTrue(module.Reconfigure(Port(), tuned));
@@ -133,7 +134,7 @@ namespace VideoProcessorTest
 						L"tick loop: CNTR 50 sent after the cut-short tick");
 				Assert::IsTrue(clock.Run(1500));
 				const auto writes = projector->Writes();
-				Assert::AreEqual(static_cast<size_t>(atApply == 51 ? 1 : 0), Count(writes, before, ":CNTR50\r"),
+				Assert::AreEqual(static_cast<size_t>(1), Count(writes, before, ":CNTR50\r"),
 					L"CNTR 50 written once after the apply");
 				Assert::AreEqual(50, projector->contrast);
 				module.Stop();
@@ -305,6 +306,9 @@ namespace VideoProcessorTest
 			const DriverStatus status = module.ProjectorStatus();
 			Assert::IsTrue(status.nextSendAt != std::chrono::steady_clock::time_point(), L"known after a write");
 			Assert::IsTrue(status.nextSendAt >= status.lastLightSentAt, L"at or after the last write");
+			const auto gapMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+				status.nextSendAt - status.lastLightSentAt).count();
+			Assert::IsTrue(gapMs >= port.minCommandGapMs, L"nextSendAt must respect minCommandGapMs");
 			module.Stop();
 		}
 	};

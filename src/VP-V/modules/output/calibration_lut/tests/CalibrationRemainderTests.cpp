@@ -592,10 +592,13 @@ namespace VideoProcessorTest
 			MeterResult r = rig.meter->Read();
 			Assert::IsTrue(r.status == MeterStatus::Ok);
 			Assert::AreEqual(13.0, r.xyz[1], 1e-9);
-			// The next Read waits for the prompt (the duplicate result is dropped)
-			// and then sends its own key.
+			// The next Read must drop the redrawn duplicate result line, wait for the prompt,
+			// send its own key, and return the second distinct reading.
+			MeterResult r2 = rig.meter->Read();
+			Assert::IsTrue(r2.status == MeterStatus::Ok);
+			Assert::AreEqual(25.0, r2.xyz[1], 1e-9);
 			rig.meter->Close();
-			Assert::AreEqual(std::string(" q"), rig.meter->KeysSent());
+			Assert::AreEqual(std::string("  q"), rig.meter->KeysSent());
 		}
 
 		TEST_METHOD(AbortEndsAWaitAtOnce)
@@ -1011,7 +1014,11 @@ namespace VideoProcessorTest
 				++steps;
 			}
 			Assert::IsTrue(rig.RunUntil(SessionStep::Review));
-			Assert::IsTrue(std::fabs(rig.session->Status().driftPercent) > 0.5);
+			const SessionStatus st = rig.session->Status();
+			Assert::IsTrue(st.driftPercent < -0.5 && st.driftPercent > -5.0,
+				L"3% dimming must yield negative drift in (-5%, -0.5%)");
+			Assert::IsTrue(st.verifyPass && st.verifyMean < 1.5,
+				L"drift correction must keep verification passing with low mean delta E");
 		}
 
 		TEST_METHOD(StatusTextRoundTrips)
@@ -1222,6 +1229,31 @@ namespace VideoProcessorTest
 			Assert::IsTrue(s.step == SessionStep::Failed);
 			Assert::AreEqual(std::string("no meter (test)"), s.message);
 			Assert::IsFalse(controller.Active());
+			// Second check (CD-S10): cancel sent while starting is remembered and applied once the meter opens.
+			release->store(false);
+			hooks.meterFactory = [release](const CalibrationSettings&, IPatternSink&, double&, std::string&)
+			{
+				for (int i = 0; i < 500 && !release->load(); ++i) Sleep(10);
+				return std::unique_ptr<IMeter>(new SimulatedScreenMeter(
+					[](Vec3&) { return false; }, SimulatedDisplayParams(), SimulatedMeterParams()));
+			};
+			Calibration::CalibrationController cancelController(hooks);
+			Assert::IsTrue(ParseStatus(cancelController.Handle("start", ""), s));
+			Assert::IsTrue(s.step == SessionStep::OpeningMeter && s.message == "starting");
+			const std::string cancelReply = cancelController.Handle("cancel", "");
+			Assert::IsTrue(cancelReply.find("error:") == std::string::npos,
+				L"cancel while starting must be accepted without error");
+			release->store(true);
+			for (int i = 0; i < 300; ++i)
+			{
+				Assert::IsTrue(ParseStatus(cancelController.Handle("status", ""), s));
+				if (IsFinal(s.step)) break;
+				Sleep(10);
+			}
+			Assert::IsTrue(s.step == SessionStep::Cancelled,
+				L"a cancel queued while starting must end the run as Cancelled");
+			Assert::IsFalse(cancelController.Active());
+			cancelController.Shutdown();
 			controller.Shutdown();
 		}
 

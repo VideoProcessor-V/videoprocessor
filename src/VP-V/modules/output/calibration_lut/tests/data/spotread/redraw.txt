@@ -8,4 +8,8 @@ OUT \e[4;1H Result is XYZ: 12.500000 13.000000 14.000000, Yxy: 13.0 0.3 0.31\e[K
 OUT \e[5;1HPlace instrument on spot to be measured,
 PROMPT Hit ESC or Q to exit, any other key to take a reading:
 KEY
+OUT \e[6;1H Result is XYZ: 20.000000 25.000000 30.000000, Yxy: 25.0 0.3 0.31\e[K
+OUT \e[7;1HPlace instrument on spot to be measured,
+PROMPT Hit ESC or Q to exit, any other key to take a reading:
+KEY
 EXIT 0

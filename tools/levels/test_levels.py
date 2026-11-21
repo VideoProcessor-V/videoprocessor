@@ -316,7 +316,7 @@ class SyntheticCapture(unittest.TestCase):
         rep = check.evaluate(layout, ch, iter([frame_with(layout, m)]))
         self.assertFalse(rep["passthrough"])
         self.assertIn("de_itp", rep["rows"][0])
-        self.assertNotEqual(rep["verdict"], "FAIL", json.dumps([r for r in rep["rows"] if r["status"] == "FAIL"])[:300])
+        self.assertEqual(rep["verdict"], "PASS", json.dumps([r for r in rep["rows"] if r["status"] != "PASS"])[:300])
 
     def test_threshold_override(self):
         def m(y, cb, cr, lay):
