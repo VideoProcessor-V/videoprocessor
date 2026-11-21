@@ -531,7 +531,7 @@ namespace Vpv
 						return false;
 					bool decoded = false;
 					const VpSkeleton::PublishedRead pr = VpSkeleton::ReadPublishedBytes(lease, VpSkeleton::kP4SourceStats, seq,
-						VpLaneProducts::kStatsBytes, [out, &decoded](const uint8_t* bytes, size_t n) {
+						VpLaneProducts::kStatsBytes, [out, &decoded](const auto* bytes, size_t n) {   // the P4 stats record's bytes (not a pixel buffer)
 							decoded = VpLaneProducts::ReadSourceStats(bytes, n, out);
 						});
 					return pr == VpSkeleton::PublishedRead::Copied && decoded;
