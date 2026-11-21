@@ -118,7 +118,22 @@ def selftest():
     miss = verify(dims, lines)
     assert not inf and not miss, (inf, miss)
     assert generate(dims, 1)[0] == lines, "not deterministic"
-    print(f"selftest ok: {len(lines)} rows cover all pairs")
+    # Negative cases (TQ-RG-P8): verify() is the gate (run_chain_gate.ps1 --verify), so it must NAME missing pairs.
+    cross = sum(len(av) * len(bv) for (_, av), (_, bv) in itertools.combinations(dims, 2))
+    assert len(verify(dims, [])) == cross, ("no rows must leave every cross-axis pair uncovered", cross)
+    assert len(verify(dims, ["# a comment", ""])) == cross, "comment and blank lines cover nothing"
+    assert len(verify(dims, lines[:1])) > 0, "one row cannot cover every pair"
+    for axis, values in dims:
+        # drop every row that uses one value of this axis: every pair that holds this value is then uncovered (other
+        # pairs the dropped rows also covered may go missing too)
+        value = values[-1]
+        kept = [ln for ln in lines if parse_line(ln).get(axis) != value]
+        gone = verify(dims, kept)
+        with_value = [k for k in gone if (k[0] == axis and k[1] == value) or (k[2] == axis and k[3] == value)]
+        want = sum(len(vs) for name, vs in dims if name != axis)
+        assert len(with_value) == want, ("every pair with %s=%s must be reported missing" % (axis, value), len(with_value), want)
+    assert verify(dims, lines) == [], "the full set still covers everything"
+    print(f"selftest ok: {len(lines)} rows cover all pairs; verify() reports the missing ones")
 
 
 def main():
