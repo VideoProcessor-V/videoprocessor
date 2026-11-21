@@ -30,14 +30,22 @@ namespace VpMotion
 {
 	static constexpr const char* kP2CpuFormUnit = "motion/estimation";   // the catalog's kP2VectorPair owner
 
-	// `engineOf` answers the engine of a host (null = absent); the default goes through the hub's directory.
+	// `engineOf` answers the engine of a host (null = absent): a TEST seam (the test owns the engine's lifetime). The default goes
+	// through the hub's directory with its locked read (P2DefaultRead).
 	using P2EngineOf = std::function<IVectorEngine*(const void* host)>;
 
-	inline IVectorEngine* P2DefaultEngineOf(const void* host)
+	// GF-P4 S7 (a): the production read. The directory runs the whole read (record + count) under its lock
+	// (IVectorEngineDirectory::ReadP2Record), so no raw engine pointer is used outside it on this off-render-thread fill.
+	inline bool P2DefaultRead(const void* host, uint64_t to, P2PairRecord& out, std::string& why)
 	{
 		IVectorEngineDirectory* dir =
 			static_cast<IVectorEngineDirectory*>(Vpv::Hub::ExtensionHub::Instance().Query(kVectorEngineQueryId));
-		return dir != nullptr ? dir->EngineFor(host) : nullptr;
+		if (dir == nullptr)
+		{
+			why = "p2 cpu form: engine absent";
+			return false;
+		}
+		return dir->ReadP2Record(host, to, out, why);
 	}
 
 	inline VpSkeleton::OwnerFill MakeP2CpuOwnerFill(P2EngineOf engineOf = P2EngineOf())
@@ -47,29 +55,33 @@ namespace VpMotion
 		f.renderThreadOnly = false;   // the slot's own mutex: any thread may read (pinned by a test)
 		f.keepFrames = 1;             // a lag-1 reader (C8-10 / camera) trails the render frame by a frame
 		f.fill = [engineOf](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
-			IVectorEngine* engine = engineOf ? engineOf(req.host) : P2DefaultEngineOf(req.host);
-			if (engine == nullptr)
-			{
-				out.declineReason = "p2 cpu form: engine absent";
-				return false;
-			}
 			P2PairRecord rec;
 			std::string why;
-			if (!engine->P2RecordEndingAt(req.seq, rec, why))
+			bool read = false;
+			if (engineOf)
 			{
-				engine->NoteP2CpuFormRead(false, why);
+				IVectorEngine* engine = engineOf(req.host);
+				if (engine == nullptr)
+					why = "p2 cpu form: engine absent";
+				else
+					read = ReadP2RecordOf(*engine, req.seq, rec, why);   // the same read + count as the directory's
+			}
+			else
+				read = P2DefaultRead(req.host, req.seq, rec, why);
+			if (!read)
+			{
 				out.declineReason = why;
 				return false;
 			}
+			// The read is counted served (the engine's count, under the directory's lock); the buffer is sized to the record, so the
+			// encode cannot refuse it. Kept as a visible decline should the codec ever change.
 			out.bytes.resize(kP2PairRecordBytes);
 			if (EncodeP2PairRecord(rec, out.bytes.data(), out.bytes.size()) != kP2PairRecordBytes)
 			{
 				out.bytes.clear();
 				out.declineReason = "p2 cpu form: record not encoded";
-				engine->NoteP2CpuFormRead(false, out.declineReason);
 				return false;
 			}
-			engine->NoteP2CpuFormRead(true, std::string());
 			return true;
 		};
 		return f;
