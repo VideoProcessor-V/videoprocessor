@@ -108,6 +108,44 @@ namespace Tests
 			Assert::IsTrue(DvDolbyStyle::ForDm(dm, 0.0, 48.0).identity);
 		}
 
+		// GEM-006 ([C]:115, verbatim): a dark scene is never expanded above its own peak. ForDm with a scene whose peak (40
+		// nits) is below the target (48 nits) and whose minimum (0) is below the target's: before the fix the fit test failed on
+		// the shadows and the whole scene was stretched so that its peak landed on the 48-nit target peak.
+		TEST_METHOD(DarkSceneNeverExpandsAboveItsPeak)
+		{
+			using namespace DvDolby;
+			DolbyVisionTunnelFrameMetadata dm;
+			dm.valid = true;
+			dm.sourceMinPq = 62;
+			dm.sourceMaxPq = static_cast<uint16_t>(Pq(4000.0) * 4095.0);
+			dm.hasSceneMetadata = true;
+			dm.sceneMinPq = 0;
+			dm.sceneMaxPq = static_cast<uint16_t>(Pq(40.0) * 4095.0);
+			dm.sceneAvgPq = static_cast<uint16_t>(Pq(4.0) * 4095.0);
+			const DvDolbyStyle::Curve c = DvDolbyStyle::ForDm(dm, 0.005, 48.0);
+			Assert::IsTrue(c.Map(Pq(40.0)) <= Pq(40.0) + 1e-6, L"[C]:115: the 40-nit peak is not lifted toward 48 nits");
+			Assert::IsTrue(c.Map(c.sMax) <= c.sMax + 1e-9, L"the scene peak maps to no more than itself");
+			Assert::AreEqual(c.sMax, c.tMax, 1e-12, L"the upper anchor is the scene peak, not the target peak");
+			// Across the whole scene range nothing is mapped above the scene peak, the curve stays monotonic, and black stays black.
+			double last = -1.0;
+			for (int k = 0; k <= 1000; ++k)
+			{
+				const double x = c.sMax * k / 1000.0;
+				const double y = c.Map(x);
+				Assert::IsTrue(y <= c.sMax + 1e-9, L"no value of the scene is expanded above its peak");
+				Assert::IsTrue(y >= last - 1e-12, L"monotonic");
+				last = y;
+			}
+			Assert::AreEqual(0.0, c.Map(0.0), 1e-12, L"black stays black");
+			// The same for the direct Build call with other dark peaks and target peaks.
+			for (const double peakNits : { 5.0, 20.0, 40.0 })
+				for (const double targetNits : { 48.0, 100.0, 1000.0 })
+				{
+					const DvDolbyStyle::Curve d = DvDolbyStyle::Build(Pq(0.0), Pq(peakNits * 0.1), Pq(peakNits), Pq(0.005), Pq(targetNits));
+					Assert::IsTrue(d.Map(Pq(peakNits)) <= Pq(peakNits) + 1e-6, L"Build: a dark scene is never expanded above its peak");
+				}
+		}
+
 		TEST_METHOD(IctcpRoundTripsAndGreyIntensityIsPqOfLuminance)
 		{
 			const DvDolbyStyle::IctcpSignal s = DvDolby::Sdr(100.0);
