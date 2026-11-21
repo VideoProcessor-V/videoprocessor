@@ -220,7 +220,7 @@ namespace ProductCatalogTestsNs
 			for (const ProductDecl& d : reg.All())
 				if (ConsumersOf(d.id).empty() && d.backend != Backend::RenderOnly)
 					++unread;
-			Assert::AreEqual(size_t(4) + kReservedProductCount, unread, L"the matcher pair, the causal quality pattern (substitutes read by the declared id), the edge map (no reader row yet), room light (its reader is the appearance stage, a render-side reader of the held record) and the reserved absent slots of the fixed id table");
+			Assert::AreEqual(size_t(3) + kReservedProductCount, unread, L"the matcher pair, the causal quality pattern (substitutes read by the declared id), the edge map (no reader row yet) and the reserved absent slots of the fixed id table (room light is read by the appearance row, CF-1 FIX1 SHOULD 6)");
 
 			// Over the ACTIVE consumers: with the temporal-detail camera row off, P7's owner is the next lag-0 reader.
 			std::vector<uint16_t> active;
