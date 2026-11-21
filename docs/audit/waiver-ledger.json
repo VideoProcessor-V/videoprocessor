@@ -32,6 +32,7 @@
   {"sha": "de4e9a0f115e82e7481345b65ebfaf2e2568efad", "waiver_id": "WAIVER-X5-CUT-P4-FP1", "gate_record": "lead14/review-RULE19-checker-dodge.md"},
   {"sha": "ecc5a3e3ee75568ee14acd7093d306d392b2c98b", "waiver_id": "WAIVER-X5-CUT-P4-FP2", "gate_record": "lead14/review-RULE19-checker-dodge.md"},
   {"sha": "b7077c8c0893688197c31a3a96a4267614899fbc", "waiver_id": "WAIVER-X5-CUT-P4-FP3", "gate_record": "lead14/review-RULE19-checker-dodge.md"},
-  {"sha": "78e46ecc91b42de7d26d4f07ed994f6d19e3aed2", "waiver_id": "WAIVER-C5-R19-26-DIVREG", "gate_record": "lead20/gate-A20C5-tamper-78e46ecc9.md"}
+  {"sha": "78e46ecc91b42de7d26d4f07ed994f6d19e3aed2", "waiver_id": "WAIVER-C5-R19-26-DIVREG", "gate_record": "lead20/gate-A20C5-tamper-78e46ecc9.md"},
+  {"sha": "9a5681d61199a5033eda78720a158a6e9282ceea", "waiver_id": "WAIVER-GEM-W1-LED-T1", "gate_record": "lead20/gate-GEM-W1-LED-ad68a54d6.md"}
  ]
 }

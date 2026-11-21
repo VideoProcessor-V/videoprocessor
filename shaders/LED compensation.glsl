@@ -54,6 +54,23 @@
  * non-negatives to non-negatives. Off = the sign-preserving boost and gain
  * on negatives, as before.
  *
+ * A colour only partly out of range (GEM-Q15, owner rulings 2026-11-21: BTB
+ * and WTW kept, hue kept, compensated like its neighbours, no pulsing) is
+ * split along its own chroma: the in-range part is the same colour
+ * desaturated towards its luma just far enough to fit in 0-1 (same hue). That
+ * part takes the unchanged per-channel curve, exactly as an in-range
+ * neighbour of that colour would. The excursion beyond it (pure chroma, in
+ * the colour's own direction) is added back. When no channel is above white,
+ * a below-black channel therefore keeps its exact value (with a channel above
+ * white as well, it follows its in-range neighbour, continuously). Under a
+ * gain below 1, an above-white excursion
+ * follows the compensated white (scaled by the curve at 1), so headroom stays
+ * smooth across the white edge. The excursion is shortened, all channels by
+ * one factor, only as far as needed to stay inside the encodable extended
+ * range (extended_floor .. extended_ceiling), so the encode clip can never
+ * tilt the hue. A pixel whose luma is out of range (true BTB/WTW, every
+ * grey) leaves as it came in (preserve_extended).
+ *
  * Above 1 - knee the result rolls off with slope 1 at the knee point and
  * approaches 1.0, so a boosted highlight keeps its gradation instead of
  * clipping.
@@ -133,11 +150,25 @@
 1.0
 
 //!PARAM wtw_passthrough
-//!DESC led_wtw_passthrough: 1 = whiter-than-white keeps its value under a boost, 0 = rolled under white (before 2026-10-17)
+//!DESC led_wtw_passthrough: 1 = whiter-than-white keeps its value under the boost and any gain (a colour partly above white: split restore, hue kept); 0 = rolled under white (before 2026-10-17)
 //!TYPE float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 1.0
+
+//!PARAM extended_floor
+//!DESC Lowest encodable signal of the extended range (default: 10-bit limited code 4, 8-bit code 1)
+//!TYPE float
+//!MINIMUM -0.5
+//!MAXIMUM 0.0
+-0.0684932
+
+//!PARAM extended_ceiling
+//!DESC Highest encodable signal of the extended range (default: 10-bit limited code 1019)
+//!TYPE float
+//!MINIMUM 1.0
+//!MAXIMUM 2.0
+1.0901826
 
 //!HOOK PREOUTPUT
 //!BIND HOOKED
@@ -160,29 +191,11 @@ vec3 soft_knee(vec3 x, float k)
     return mix(x, rolled, step(vec3(t), x));
 }
 
-// Below black as it came in (btb_passthrough), applied to every result.
-vec3 below_black(vec3 result, vec3 original)
+// The picture curve, channel by channel: the boost (with its toe), the lift,
+// then the gain with its knee. Used for the pixel and, for a pixel partly out
+// of range, for its luma (preserve_extended).
+vec3 compensate(vec3 v, float lift)
 {
-    return btb_passthrough > 0.5 ? mix(result, original, vec3(lessThan(original, vec3(0.0)))) : result;
-}
-
-// GEM-W1B V6 MUST-2 (register 115 #17): true below black (btb_passthrough) AND true whiter-than-white
-// (wtw_passthrough, above 1) leave the hook as they came in, on every exit path and whatever the
-// gamma boost, the shadow lift or a gain above OR below 1 did to the picture.
-vec3 preserve_extended(vec3 result, vec3 original)
-{
-    result = below_black(result, original);
-    return wtw_passthrough > 0.5 ? mix(result, original, vec3(greaterThan(original, vec3(1.0)))) : result;
-}
-
-vec4 hook()
-{
-    vec4 color = HOOKED_texOff(0);
-    float lift = shadow_lift * veil;
-    if (gain == 1.0 && boost == 1.0 && !(lift > 0.0))
-        return color;
-    vec3 original = color.rgb;
-    vec3 v = color.rgb;
     // The gamma boost comes first: the old pipeline boosted VP's output, and
     // the projector's contrast or LED acted on that boosted signal.
     if (boost != 1.0) {
@@ -202,14 +215,15 @@ vec4 hook()
         v += vec3(lift * k * 1.6875) * u * (vec3(1.0) - u) * (vec3(1.0) - u);
     }
     if (gain == 1.0)
-        return vec4(preserve_extended(v, original), color.a);
+        return v;
     bool linear = gain_domain > 0.5;
     vec3 x = linear ? spow(v, compensation_eotf) : v;
     x *= gain;
     // Only a boost can push values past white; a reduction never needs the
     // knee. The knee acts on the bright end only (it never touches negatives);
     // below black is restored to its input value at the end when
-    // btb_passthrough is on (see the header), in both gain domains.
+    // btb_passthrough is on (see the header and preserve_extended), in both
+    // gain domains.
     // Bug hunt 2026-10-17: whiter-than-white (above 1, carried by the
     // extended-range restore) keeps its own value instead of being rolled
     // under white with the boosted picture. The knee's output stays below 1,
@@ -218,6 +232,61 @@ vec4 hook()
     if (gain > 1.0) {
         x = knee > 0.0001 ? soft_knee(x, knee) : min(x, vec3(1.0));
     }
-    color.rgb = preserve_extended(linear ? spow(x, 1.0 / compensation_eotf) : x, original);
+    return linear ? spow(x, 1.0 / compensation_eotf) : x;
+}
+
+// GEM-W1B V6 MUST-2 (register 115 #17) and GEM-Q15 (owner rulings 2026-11-21, GEM-W1-LED split restore).
+// True below black (btb_passthrough) and true whiter-than-white (wtw_passthrough) leave the hook as they
+// came in, on every exit path, whatever the boost, the lift or the gain did to the picture. A pixel with no
+// channel out of range keeps the per-channel result, byte for byte. Any other pixel is split (header):
+//   y = luma (BT.709 weights on the encoded RGB); luma out of range -> the input exactly;
+//   p = y + t (o - y), the largest t in [0, 1] that puts the out-of-range channels on 0 / 1 (same hue);
+//   e = o - p, the excursion, pure chroma in o's own direction;
+//   out = compensate(p) + k f e, where
+//   f = the curve at white under a gain below 1 when a channel is above white (headroom follows the
+//       compensated white), else 1 (a below-black channel stays exact when no channel is above white; with
+//       one above white too it follows its in-range neighbour; gains from 1 up match the neighbours);
+//   k = 1, lowered (one factor for all channels) only as far as keeps out inside extended_floor ..
+//       extended_ceiling, so the encode clip cannot tilt the hue.
+vec3 preserve_extended(vec3 result, vec3 original, float lift)
+{
+    bool wtw = wtw_passthrough > 0.5;
+    bool btb = btb_passthrough > 0.5;
+    bvec3 above = greaterThan(original, vec3(1.0));
+    bvec3 below = lessThan(original, vec3(0.0));
+    bool anyAbove = wtw && any(above);
+    bool anyBelow = btb && any(below);
+    if (!anyAbove && !anyBelow)
+        return result;
+    float y = dot(original, vec3(0.2126, 0.7152, 0.0722));
+    if ((wtw && (y > 1.0 || all(above))) || (btb && (!(y > 0.0) || all(below))))
+        return original;                       // true WTW / BTB, every grey: bit-identical
+    vec3 d = original - vec3(y);
+    // Above white: d > 0 and 1 - y >= 0; below black: d < 0 and y > 0. Every quotient is finite.
+    vec3 tv = vec3(1.0);
+    if (anyAbove)
+        tv = mix(tv, vec3(1.0 - y) / max(d, vec3(1e-6)), vec3(above));
+    if (anyBelow)
+        tv = mix(tv, vec3(y) / max(-d, vec3(1e-6)), vec3(below));
+    float t = clamp(min(tv.r, min(tv.g, tv.b)), 0.0, 1.0);
+    vec3 p = vec3(y) + t * d;
+    vec3 c = compensate(p, lift);
+    float f = (anyAbove && gain < 1.0) ? compensate(vec3(1.0), lift).x : 1.0;
+    vec3 e = (original - p) * f;
+    vec3 up = (vec3(extended_ceiling) - c) / max(e, vec3(1e-6));
+    vec3 dn = (c - vec3(extended_floor)) / max(-e, vec3(1e-6));
+    vec3 kv = mix(vec3(1.0), up, vec3(greaterThan(e, vec3(1e-6))));
+    kv = mix(kv, dn, vec3(lessThan(e, vec3(-1e-6))));
+    float k = clamp(min(kv.r, min(kv.g, kv.b)), 0.0, 1.0);
+    return c + k * e;
+}
+
+vec4 hook()
+{
+    vec4 color = HOOKED_texOff(0);
+    float lift = shadow_lift * veil;
+    if (gain == 1.0 && boost == 1.0 && !(lift > 0.0))
+        return color;
+    color.rgb = preserve_extended(compensate(color.rgb, lift), color.rgb, lift);
     return color;
 }
