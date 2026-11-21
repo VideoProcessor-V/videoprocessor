@@ -163,9 +163,10 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 				vf.served = false;
 				tracker.Note(DV::Choose(vf), false, nowMs);
 			}
-			if (compensation.Automatic())
-				for (const FallbackCatalog::Decision& decision : tracker.Decisions(nowMs))
-					SyncFallback(decision);
+			// GEM-SD-VECTORS MUST-3: every frame, whatever the compensation did: with extras active BuildSigmaDeltaVectorsWithoutExtras (the
+			// other sync) does not run, so a held entry would never release. Decisions() already applies the kHoldMs hold.
+			for (const FallbackCatalog::Decision& decision : tracker.Decisions(nowMs))
+				SyncFallback(decision);
 		}
 	}
 	dejudderSourceHz = sourceHz;
