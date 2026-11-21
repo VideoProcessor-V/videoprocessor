@@ -15,11 +15,13 @@
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/P2CpuForm.h>
 #include <VP-V/modules/motion/estimation/P2PairRecord.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
 
 #include <cstring>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -76,6 +78,35 @@ namespace VideoProcessorTest
 		{
 			return m.RegisterOwnerFill(VpSkeleton::kP2VectorPair, VpSkeleton::AcquireForm::Cpu, VpMotion::kP2CpuFormUnit,
 				VpMotion::MakeP2CpuOwnerFill(engineOf)) == VpSkeleton::SkeletonMemo::Registration::Registered;
+		}
+
+		// A host that answers nothing (UpdateVectorEngine needs one; the record under test goes to DiagnosticHistory).
+		struct QuietHost : VpMotion::IVectorEngineHost
+		{
+			void SyncFallback(const ::FallbackCatalog::Decision&) override {}
+			void PublishStatus(bool) override {}
+			bool DitherVectorsSupported() const override { return false; }
+			void NoteSourceMonitorMotion(double, uint64_t) override {}
+			bool IntentActive() const override { return false; }
+			void NoteIntentVectors(const ::IntentInterpreter::VectorSample&) override {}
+		};
+
+		// The "vector-p2-cpu-form" decision records written since ring index `from` (this module's recorder: VectorEngine.cpp is
+		// compiled into the test binary).
+		std::vector<DiagnosticHistory::EventRecord> P2FormRecordsSince(uint64_t from)
+		{
+			std::vector<DiagnosticHistory::EventRecord> out;
+			for (const auto& e : DiagnosticHistory::Global().decisions.Snapshot())
+				if (e.index >= from && std::strcmp(e.record.name, "vector-p2-cpu-form") == 0)
+					out.push_back(e.record);
+			return out;
+		}
+
+		uint64_t DecisionsWritten()
+		{
+			DiagnosticHistory::RingCounters c;
+			DiagnosticHistory::Global().decisions.Snapshot(&c, 1);
+			return c.written;
 		}
 	}
 
@@ -258,6 +289,59 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("P2 CPU form served 0, declined 1 (last: p2 cpu form: no pair store)"), bare.ProducerStatusSegment());
 			asInterface.NoteP2CpuFormRead(false);   // the one-argument form counts and keeps the last words
 			Assert::AreEqual(std::string("P2 CPU form served 0, declined 2 (last: p2 cpu form: no pair store)"), bare.ProducerStatusSegment());
+		}
+
+		// BBP-A-COUNTS-CTRLALTD (gate SHOULD-3): the 5-s block's DiagnosticHistory record "vector-p2-cpu-form" is written once at the
+		// first read and then only when the declines rose: served-only reads never add one, an unchanged count never adds one. The
+		// name is stored whole (18 chars < EventRecord::name[24]); a/b are the served / declined counts of the same snapshot as the
+		// text. vectorStatsTick = 0 opens the 5-s block on the next update (the block's own first-run rule), so no sleep is needed.
+		TEST_METHOD(TheP2CpuFormHistoryRecordIsWrittenAtTheFirstReadAndOnARiseInDeclinesOnly)
+		{
+			Assert::IsTrue(std::strlen("vector-p2-cpu-form") < sizeof(DiagnosticHistory::EventRecord().name), L"the name fits char[24]");
+			VpMotion::VectorEngine engine;
+			const VpMotion::IVectorEngine& reads = engine;
+			QuietHost host;
+			VpMotion::VectorEngine::UpdateFacts facts;
+			facts.vectorDemandSetting = true;
+			VectorDemand::Input in;
+			in.enabled = true;
+			in.slotsRun = true;
+			in.queueAheadCapacity = 4;
+			in.wants[static_cast<int>(VectorDemand::Consumer::GrainMap)] = true;
+			auto update = [&]() { engine.vectorStatsTick = 0; engine.UpdateVectorEngine(in, facts, host); };
+			const uint64_t from = DecisionsWritten();
+
+			update();
+			Assert::IsTrue(engine.vectorDemand.mode != VectorDemand::Mode::Off, L"the 5-s block runs only while the engine is on");
+			Assert::AreEqual<size_t>(0, P2FormRecordsSince(from).size(), L"no read yet: no record");
+
+			reads.NoteP2CpuFormRead(true);
+			update();
+			auto recs = P2FormRecordsSince(from);
+			Assert::AreEqual<size_t>(1, recs.size(), L"the first read is recorded");
+			Assert::AreEqual(std::string("vector-p2-cpu-form"), std::string(recs[0].name), L"the name whole, not cut");
+			Assert::AreEqual(std::string("P2 CPU form served 1, declined 0"), std::string(recs[0].detail));
+			Assert::AreEqual(int64_t(1), recs[0].a, L"a = served");
+			Assert::AreEqual(int64_t(0), recs[0].b, L"b = declined");
+
+			reads.NoteP2CpuFormRead(true);
+			update();
+			update();
+			Assert::AreEqual<size_t>(1, P2FormRecordsSince(from).size(), L"served-only reads and unchanged counts add no record");
+
+			reads.NoteP2CpuFormRead(false, "p2 cpu form: no pair store");
+			update();
+			recs = P2FormRecordsSince(from);
+			Assert::AreEqual<size_t>(2, recs.size(), L"a rise in declines is recorded");
+			const std::string full = "P2 CPU form served 2, declined 1 (last: p2 cpu form: no pair store)";
+			Assert::AreEqual(full.substr(0, sizeof(recs[1].detail) - 1), std::string(recs[1].detail), L"the status wording, cut to detail[56]");
+			Assert::AreEqual(int64_t(2), recs[1].a);
+			Assert::AreEqual(int64_t(1), recs[1].b);
+
+			update();
+			reads.NoteP2CpuFormRead(true);
+			update();
+			Assert::AreEqual<size_t>(2, P2FormRecordsSince(from).size(), L"no further decline: no further record");
 		}
 	};
 }
