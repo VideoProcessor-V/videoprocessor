@@ -970,6 +970,8 @@ class GateTwoMutationTest(unittest.TestCase):
             # a live include from a build-listed .cpp: Body.h defines Impl members, never shared
             _w(root, "src/VP-V/build/T.items.props",
                '<Project><ItemGroup><ClCompile Include="$(MSBuildThisFileDirectory)..\\host\\Dummy.cpp" /></ItemGroup></Project>\n')
+            # G-CC4 MUST-B 3: the .props compiles only through a project that imports it
+            _w(root, "src/T/T.vcxproj", GateFourMutationTest.PROJ)
             self.assertEqual(self._tu(root), {BILL: 10})
             # control: a genuine interface header behind the same listed .cpp is shared, so the exclusion still works
             _w(root, "src/VP-V/host/Api.h", "struct Api { int a; };\n")
@@ -1028,6 +1030,220 @@ class GateTwoMutationTest(unittest.TestCase):
             base = chg.vp_footprint.read_json(os.path.join(root, *chg.HOOK_LINES_PATH.split("/")))
             self.assertIn("RELOCATION allowance 1", base["_updates"][0])
             self.assertIn("tu +10, h2 -9, combined +1", base["_updates"][0])
+
+
+class GateFourMutationTest(unittest.TestCase):
+    """G-CC4 (lead20/CC-gate-4.md) MUST-B and SHOULD-D, end to end through check_hook_gating (--no-git trees): each
+    test is a gamed row of the gate and asserts that the moved body still counts in tu (commit 1d, WAIVER-CC-H2-METRIC)."""
+
+    FREE = "".join("void free%d();\n" % i for i in range(10))
+    PROJ = '<Project><Import Project="$(MSBuildThisFileDirectory)..\\VP-V\\build\\T.items.props" /></Project>\n'
+    ITEM = '<ClCompile Include="$(MSBuildThisFileDirectory)..\\host\\Body.cpp"%s'
+
+    def _tu(self, root):
+        return chg.run(root, chg.DEFAULT_BASE, [BILL], no_git=True)["site_checks"]["hook_lines"]["tu"].get(BILL, 0)
+
+    def _tree(self, root, body_h, cpp, props=None, proj=True):
+        _w(root, "src/VP-V/core/PipelineSlots.h", SLOTS)
+        _w(root, "src/VP-V/host/Body.h", body_h)
+        _w(root, "src/VP-V/host/Body.cpp", cpp)
+        _w(root, "src/VP-V/build/T.items.props", "<Project><ItemGroup>%s</ItemGroup></Project>\n" % (props or self.ITEM % " />"))
+        if proj:
+            _w(root, "src/T/T.vcxproj", self.PROJ)
+        _w(root, BILL, "struct Impl\n{\n\tPipelineSlots::Registry pipelineSlots;\n};\n#include <VP-V/host/Body.h>\n")
+
+    def test_must_b_1_and_2_dead_text_never_makes_a_header_shared(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._tree(root, self.FREE, "#include \"Body.h\"\n")
+            self.assertEqual(self._tu(root), 0, "control: a live include of a free-function header is shared")
+            for cpp in ("/*\n#include \"Body.h\"\n*/\n", "const char* s = R\"(\n#include \"Body.h\"\n)\";\n",
+                        "#ifndef _WIN32\n#define _WIN32\n#include \"Body.h\"\n#endif\n", "// x \\\n#include \"Body.h\"\n"):
+                _w(root, "src/VP-V/host/Body.cpp", cpp)
+                self.assertEqual(self._tu(root), 10, cpp)
+
+    def test_vgem_a_vp_cpp_including_a_body_heavy_header_never_lowers_tu(self):
+        """V-GEM (Gemini 2be3cebf4: tu -1401 shown, -155 honest): a header is exempt as shared only for its
+        declaration-only lines; its bodies compile in the Bill TU whatever else includes it."""
+        heavy = "namespace Vpv\n{\n" + "".join("\tinline int h%d(int x)\n\t{\n\t\treturn x + %d;\n\t}\n" % (i, i) for i in range(5)) + \
+            "\tstruct Decl;\n\tvoid Proto();\n}\n"
+        with tempfile.TemporaryDirectory() as root:
+            self._tree(root, heavy, "int unrelated;\n")
+            before = self._tu(root)
+            self.assertEqual(before, len([ln for ln in heavy.splitlines() if ln.strip()]))
+            # the gaming move: a new VP-V .cpp that includes the header
+            _w(root, "src/VP-V/host/Body.cpp", "#include \"Body.h\"\n")
+            self.assertEqual(self._tu(root), 15, "5 bodies x (head, return, }) still count; only the declarations are exempt")
+            self.assertGreater(self._tu(root), 0)
+
+    def test_must_b_3_only_items_a_project_really_compiles(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._tree(root, self.FREE, "#include \"Body.h\"\n")
+            self.assertEqual(self._tu(root), 0)
+            for props in (self.ITEM % ' Condition="false" />', self.ITEM % "><ExcludedFromBuild>true</ExcludedFromBuild></ClCompile>",
+                          self.ITEM % " Condition=\"'$(Configuration)'=='Debug'\" />", self.ITEM % ' Condition="$(VpvMaybe)" />'):
+                _w(root, "src/VP-V/build/T.items.props", "<Project><ItemGroup>%s</ItemGroup></Project>\n" % props)
+                self.assertEqual(self._tu(root), 10, props)
+            _w(root, "src/VP-V/build/T.items.props", "<Project><ItemGroup Condition=\"false\">%s</ItemGroup></Project>\n" % (self.ITEM % " />"))
+            self.assertEqual(self._tu(root), 10, "ItemGroup Condition false")
+            # Win32-only exclusion: the item compiles in x64 Release
+            _w(root, "src/VP-V/build/T.items.props", "<Project><ItemGroup>%s</ItemGroup></Project>\n" %
+               (self.ITEM % "><ExcludedFromBuild Condition=\"'$(Platform)'=='Win32'\">true</ExcludedFromBuild></ClCompile>"))
+            self.assertEqual(self._tu(root), 0)
+            # a stray .props no project imports
+            os.remove(os.path.join(root, "src", "T", "T.vcxproj"))
+            self.assertEqual(self._tu(root), 10, "stray .props")
+
+    def test_must_b_4_and_5_decoys_and_macro_qualifiers_stay_bill_member(self):
+        impl = "".join("void Impl::f%d() {}\n" % i for i in range(10))
+        with tempfile.TemporaryDirectory() as root:
+            self._tree(root, impl, "#include \"Body.h\"\n")
+            self.assertEqual(self._tu(root), 10, "control: Impl members are never shared")
+            for decoy, body in (("namespace Decoy {\nstruct Impl {};\n}\n", impl), ("#if 0\nstruct Impl {};\n#endif\n", impl),
+                                ("/*\nstruct Impl {};\n*/\n", impl), ("struct Impl\n;\n", impl),
+                                ("#define VPV_I Impl\n", impl.replace("Impl::", "VPV_I::"))):
+                _w(root, "src/VP-V/host/Body.h", decoy + body)
+                n = len([ln for ln in (decoy + body).splitlines() if ln.strip()])
+                self.assertEqual(self._tu(root), n, decoy)
+
+    def test_should_d_a_relocation_needs_a_real_h2_drop(self):
+        with tempfile.TemporaryDirectory() as root:
+            impl = "".join("void Impl::f%d() {}\n" % i for i in range(10))
+            self._tree(root, impl, "#include \"Api.h\"\n")
+            _w(root, "src/VP-V/host/Api.h", "struct Api { int a; };\n")
+            self.assertEqual(_run(root, extra=["--write-hook-lines-baseline", "--migrate", "WAIVER-T-SEED"])[0], 0)
+            # the gate's probe: N new Impl:: bodies straight into the file-scope header, h2 +0
+            for n, allowance in ((1, "1"), (8, "8")):
+                _w(root, "src/VP-V/host/Body.h", impl + "".join("void Impl::g%d() {}\n" % i for i in range(n)))
+                rc, out = _run(root, extra=["--write-hook-lines-baseline", "--relocation", "WAIVER-T-D", "--allowance", allowance])
+                self.assertEqual(rc, 1, out)
+                self.assertIn("real h2 drop", out)
+            rc, out = _run(root, extra=["--write-hook-lines-baseline", "--relocation", "WAIVER-T-D", "--allowance", "64"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn("--allowance N (0..%d)" % chg.RELOCATION_MAX_ALLOWANCE, out)
+
+
+class RebaseToUnionTest(unittest.TestCase):
+    """--rebase-to <union tip> --waiver (A20-CC ruling, commit 1d): a train that merged a landed union tip takes the
+    union's growth exactly as the union has it (ceilings = M(ours) + M(union) - M(merge base), never measured at
+    HEAD); anything on top of that stays gated."""
+
+    GIT_ENV = CheckHookGatingTest.GIT_ENV
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = self.td.name
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", self.root] + list(args), check=True, env=self.GIT_ENV,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode("utf-8", "replace").strip()
+
+    def _commit(self, msg):
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", msg)
+        return self._git("rev-parse", "--short=9", "HEAD")
+
+    def _cli(self, *extra):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = chg.main(["--root", self.root, "--base-ref", self.bill, "--files", BILL] + list(extra))
+        return rc, buf.getvalue()
+
+    def _hl(self):
+        return chg.run(self.root, self.bill, [BILL], False)["site_checks"]["hook_lines"]
+
+    def _baseline(self):
+        return chg.vp_footprint.read_json(os.path.join(self.root, *chg.HOOK_LINES_PATH.split("/")))
+
+    def _repo(self):
+        """bill -> ours (Ours.h, 5 lines, at file scope; baseline seeded) and bill -> r2/composite-t (Union.h, 7 lines),
+        merged into ours."""
+        self._git("init", "-q", "-b", "ours")
+        _w(self.root, BILL, "#include <x.h>\nstruct Impl\n{\n\tint bill;\n};\n")
+        self.bill = self._commit("bill")
+        _w(self.root, chg.SLOTS_HEADER, SLOTS)
+        _w(self.root, "src/VP-V/host/Ours.h", "".join("int ours%d;\n" % i for i in range(5)))
+        _w(self.root, BILL, "#include <x.h>\nstruct Impl\n{\n\tint bill;\n};\n#include <VP-V/host/Ours.h>\n")
+        self.ours = self._commit("ours: Ours.h")
+        rc, out = self._cli("--write-hook-lines-baseline", "--migrate", "WAIVER-T-SEED")
+        self.assertEqual(rc, 0, out)
+        self._commit("ours: baseline")
+        self._git("checkout", "-q", "-b", "r2/composite-t", self.bill)
+        _w(self.root, chg.SLOTS_HEADER, SLOTS)
+        _w(self.root, "src/VP-V/host/Union.h", "".join("int union%d;\n" % i for i in range(7)))
+        _w(self.root, BILL, "#include <VP-V/host/Union.h>\n#include <x.h>\nstruct Impl\n{\n\tint bill;\n};\n")
+        self.union = self._commit("union: Union.h")
+        self._git("checkout", "-q", "ours")
+        self._git("merge", "-q", "--no-edit", "r2/composite-t")
+        self.head = self._git("rev-parse", "--short=9", "HEAD")
+
+    def test_the_union_growth_is_taken_as_the_union_has_it_and_growth_on_top_fails(self):
+        self._repo()
+        hl = self._hl()
+        self.assertEqual((hl["tu"].get(BILL), hl["files"].get(BILL)), (12, 2), hl)
+        self.assertTrue(hl["tu_over"], "before the rebase the union's tu is over our ceiling")
+        rc, out = self._cli("--write-hook-lines-baseline", "--relocation", "WAIVER-T-R", "--allowance", "8")
+        self.assertEqual(rc, 1, "a union merge is no relocation (no h2 drop)")
+        measured = []
+        real = lambda rev: chg.run(self.root, self.bill, [BILL], False, False, rev, None)["site_checks"]["hook_lines"]
+        rc, msg = chg.rebase_hook_lines_baseline(self.root, self.bill, [BILL], "HEAD", self.union, "WAIVER-T-RB",
+                                                 measure=lambda rev: measured.append(rev) or real(rev))
+        self.assertEqual(rc, 0, msg)
+        self.assertNotIn(self.head, measured, "never measured at HEAD")
+        self.assertEqual(sorted(measured), sorted([self.ours, self.union, self.bill]))
+        base = self._baseline()
+        self.assertEqual((base["files"][BILL], base["tu"][BILL], base["combined"][BILL]), (2, 12, 14), base)
+        self.assertEqual(base["rebase"]["union"], self.union)
+        self.assertIn("WAIVER-T-RB: REBASE onto union tip %s" % self.union, base["_updates"][0])
+        self.assertEqual(base["tu_measure"], chg.TU_MEASURE_VERSION)
+        hl = self._hl()
+        self.assertEqual((hl["over"], hl["ratchet"]), ([], []), hl)
+        # MUTATION: a commit on top of the rebased base that adds tu must FAIL
+        self._commit("train: rebased baseline")
+        _w(self.root, "src/VP-V/host/Ours.h", "".join("int ours%d;\n" % i for i in range(8)))
+        self._commit("train: tu +3 on top")
+        hl = self._hl()
+        self.assertTrue(any("tu 15 > ceiling 12" in x for x in hl["tu_over"]), hl)
+        rc, out = self._cli("--write-hook-lines-baseline")
+        self.assertEqual(rc, 1, out)
+        # ... and a second rebase cannot launder it: the baseline is an unratcheted rebase
+        rc, msg = chg.rebase_hook_lines_baseline(self.root, self.bill, [BILL], "HEAD", self.union, "WAIVER-T-RB2")
+        self.assertEqual(rc, 1, msg)
+        self.assertIn("unratcheted rebase", msg)
+
+    def test_refusals(self):
+        self._repo()
+        rb = lambda tip, waiver="WAIVER-T-RB": chg.rebase_hook_lines_baseline(self.root, self.bill, [BILL], "HEAD", tip, waiver)
+        self.assertIn("--waiver", rb(self.union, None)[1])
+        self.assertIn("--waiver", rb(self.union, "NOT-A-WAIVER")[1])
+        # not a landed union tip: a side branch whose name matches no union pattern
+        self._git("checkout", "-q", "-b", "side", self.bill)
+        _w(self.root, "src/VP-V/host/Side.h", "int side;\n")
+        side = self._commit("side")
+        self._git("checkout", "-q", "ours")
+        self._git("merge", "-q", "--no-edit", "side")
+        rc, msg = rb(side)
+        self.assertEqual(rc, 1, msg)
+        self.assertIn("not a landed union tip", msg)
+        # not an ancestor of HEAD
+        self._git("checkout", "-q", "-b", "r2/composite-later", self.union)
+        _w(self.root, "src/VP-V/host/Later.h", "int later;\n")
+        later = self._commit("union later")
+        self._git("checkout", "-q", "ours")
+        rc, msg = rb(later)
+        self.assertEqual(rc, 1, msg)
+        self.assertIn("not an ancestor", msg)
+        # the CLI needs the write flag and git mode
+        rc, out = self._cli("--rebase-to", self.union, "--waiver", "WAIVER-T-RB")
+        self.assertEqual(rc, 2, out)
+        rc, out = self._cli("--write-hook-lines-baseline", "--rebase-to", self.union, "--waiver", "WAIVER-T-RB", "--migrate", "WAIVER-X")
+        self.assertEqual(rc, 2, out)
+        # nothing to rebase: the union tip is already in the baseline commit's history
+        rc, msg = rb(self.bill)
+        self.assertEqual(rc, 1, msg)
+        self.assertIn("nothing to rebase", msg)
 
 
 class HonestH2MetricTest(unittest.TestCase):
