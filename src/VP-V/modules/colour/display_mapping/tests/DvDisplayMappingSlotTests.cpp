@@ -173,6 +173,37 @@ namespace Tests
 		}
 
 
+		// CF1-G7a: a Config change from auto to vp takes the VP stage at once (not one libplacebo frame later). The Config
+		// apply path is ApplyProfileSettingsLiveLocked, which must reach the same seam as Initialize.
+		TEST_METHOD(AutoToVpChangeTakesTheVpStageAtOnce)
+		{
+			using namespace CalibrationLutHost;
+			// The per-frame state the colour segment leaves under auto: configured auto, no step wanting the LUT after it.
+			Assert::IsFalse(AutoKeepsVpStage(true, false), L"auto, no step: libplacebo's target LUT");
+			// The change to an explicit vp: the seam stores configuredAuto = false before the next TakeLut, so the very next
+			// frame keeps the VP stage even though stepWants is still the last frame's false.
+			StageFacts facts;
+			facts.vpStageWanted = true;
+			facts.slotRuns = true;
+			facts.vpStageWanted = facts.vpStageWanted && AutoKeepsVpStage(false, false);
+			Assert::IsTrue(UseVpStage(facts, false), L"the next frame takes the VP stage");
+			// The reverse change (vp to auto) hands the LUT back to libplacebo while no step wants it: the same seam.
+			Assert::IsFalse(AutoKeepsVpStage(true, false));
+			Assert::AreEqual(std::string("libplacebo"), ResolveStage("auto", false));
+			Assert::AreEqual(std::string("vp"), ResolveStage("vp", false));
+
+			// The live-apply path reaches the seam: both Initialize and ApplyProfileSettingsLiveLocked call UpdatePipelineSlots.
+			const std::string renderer = ReadUp("src\VideoProcessor-Lib\vprenderer\LibplaceboVideoRenderer.cpp");
+			const size_t live = renderer.find("bool ApplyProfileSettingsLiveLocked(const RendererSettings& settings)");
+			Assert::IsTrue(live != std::string::npos);
+			const size_t liveCall = renderer.find("UpdatePipelineSlots(settings);", live);
+			Assert::IsTrue(liveCall != std::string::npos && liveCall - live < 6000, L"the live apply calls the seam");
+			Assert::IsTrue(Has(renderer.substr(live, liveCall - live), "activeSettings = settings;"), L"after the new settings are active");
+			size_t calls = 0;
+			for (size_t at = renderer.find("\t\tUpdatePipelineSlots(settings);"); at != std::string::npos; at = renderer.find("\t\tUpdatePipelineSlots(settings);", at + 1))
+				++calls;
+			Assert::AreEqual<size_t>(2, calls, L"Initialize and the live apply each call the seam once");
+		}
 	};
 
 	TEST_CLASS(DmFallbackCatalogTests)
