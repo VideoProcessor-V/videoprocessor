@@ -251,18 +251,7 @@ if (gv_li == 0u)
 			return std::string(id) + ": " + problem;
 		}
 
-		// RETIRED (review-cb-p10g-r1 MUST-1: StatusKind::Lines does not route an unkeyed line, so nothing showed it). Kept only
-		// until its test assertions move to the Fallbacks texts (the next WAIVER commit); then deleted.
-		inline std::string StatusLine(bool registered, uint64_t fills, uint64_t declines, const std::string& lastDecline)
-		{
-			if (!registered)
-				return "grain level (P10g): no owner fill registered (no source size yet, or the skeleton is off)";
-			std::string s = "grain level (P10g): single-frame law (unit-4; temporal passes not built: no measured 4K cost); fills " +
-				std::to_string(fills) + ", declines " + std::to_string(declines);
-			if (!lastDecline.empty())
-				s += "; last decline: " + lastDecline;
-			return s;
-		}
+		// The single-frame law in use: once a reader has had a fill.
 		inline std::string FallbackLine(uint64_t fills)
 		{
 			if (fills == 0)
