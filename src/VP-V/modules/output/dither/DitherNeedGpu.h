@@ -22,7 +22,9 @@
 // Threading: render thread only.
 #pragma once
 
-#include <VP-V/modules/output/dither/CustomHookChain.h>
+// CustomHookParameters.h, not CustomHookChain.h: HookGuard needs only SetHookParameter, and this keeps the header MFC-free
+// (CustomHookChain.h -> MadVRShaderLoader.h -> VideoState.h -> afxstr.h), so the Beta test host can use the real HookGuard.
+#include <VP-V/modules/output/dither/CustomHookParameters.h>
 #include <VP-V/modules/output/dither/DitherNeed.h>
 #include <VP-V/modules/output/dither/DitherNeedGlsl.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>

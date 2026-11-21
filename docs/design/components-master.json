@@ -1531,6 +1531,7 @@
         "src/VP-V/modules/output/dither/OutputEncodingRepair.cpp",
         "src/VP-V/modules/output/dither/CustomHookChain.h",
         "src/VP-V/modules/output/dither/CustomHookChain.cpp",
+        "src/VP-V/modules/output/dither/CustomHookParameters.h",
         "shaders/Temporal sigma-delta.glsl",
         "src/VP-V/modules/output/dither/SigmaDeltaVectors.h",
         "src/VP-V/modules/output/dither/OutputDomainMap.h",

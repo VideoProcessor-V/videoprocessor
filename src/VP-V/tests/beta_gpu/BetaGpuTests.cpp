@@ -10,6 +10,7 @@
 #include <VP-V/modules/output/dither/OutputEncodingRepair.h>
 #include <VP-V/modules/output/dither/VpShaderInclude.h>
 #include <VP-V/modules/output/dither/tests/DitherNeedWarpModel.h>
+#include <VP-V/modules/output/dither/DitherNeedGpu.h>   // the real DitherNeed::Gpu::HookGuard (case g); MFC-free since GRANT #11b
 #include <VP-V/modules/motion/estimation/matcher/DejudderWarp.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/motion/consumers/RenderedWarp.h>
@@ -7281,41 +7282,6 @@ namespace
 			{ "noise_amplitude", noise } };
 	}
 
-	// The Beta host cannot compile DitherNeed::Gpu::HookGuard: DitherNeedGpu.h -> CustomHookChain.h -> VideoState.h needs MFC
-	// (afxstr.h), and this host is not an MFC project. This is a local mirror of HookGuard::Apply / Release (DitherNeedGpu.h): dither_need 1,
-	// the placement, VPDN bound; a refused texture puts dither_need back to 0; a null product binds nothing; Release (and the destructor)
-	// restore dither_need 0 and unbind VPDN. It exercises the hook's bind / unbind behaviour, NOT the HookGuard class code itself.
-	class BetaDnGuard
-	{
-	public:
-		BetaDnGuard() = default;
-		BetaDnGuard(const BetaDnGuard&) = delete;
-		BetaDnGuard& operator=(const BetaDnGuard&) = delete;
-		~BetaDnGuard() { Release(); }
-		bool Apply(const pl_hook* hook, pl_tex state, double blockPx)
-		{
-			if (!state || !hook) return false;
-			if (!SetParam(hook, "dither_need", 1.0)) return false;
-			SetParam(hook, "dn_scale_x", 1.0);
-			SetParam(hook, "dn_scale_y", 1.0);
-			SetParam(hook, "dn_off_x", 0.0);
-			SetParam(hook, "dn_off_y", 0.0);
-			SetParam(hook, "dn_block", blockPx);
-			if (pl_mpv_user_shader_set_texture(hook, "VPDN", state)) { m_hook = hook; return true; }
-			SetParam(hook, "dither_need", 0.0);
-			return false;
-		}
-		void Release()
-		{
-			if (!m_hook) return;
-			SetParam(m_hook, "dither_need", 0.0);
-			pl_mpv_user_shader_set_texture(m_hook, "VPDN", nullptr);
-			m_hook = nullptr;
-		}
-	private:
-		const pl_hook* m_hook = nullptr;
-	};
-
 	// DwSigmaCodes: a FRESH Gpu and sigma-delta hook per run at the default 2x2 output; `frames` refreshes at each grey (the hook's
 	// state carries across the greys); a bound map is an rgba32f mapW x mapH texture at VPDN (e in .x).
 	std::vector<int> BetaDnCodes(const std::map<std::string, double>& params, const std::vector<float>& greys, int frames, bool full,
@@ -7457,13 +7423,16 @@ void RunBetaDitherNeedWarpForkTests()
 		std::cout << "Beta DitherNeedWarp ExactCodesStayExactAtTheAmplitudeCap PASS, " << executed << " checks so far\n";
 		BetaRan("VideoProcessorTest::DitherNeedWarpTests::DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap");
 	}
-	// (g) HookGuard bound leg (TQ-CD-M6), via the local BetaDnGuard mirror (see its comment): native DitherNeedWarpHookGuardAppliesAndRestores. A null product binds nothing and the hook
-	// renders the off path; a real product is applied (and changes the codes); Release() and the destructor restore the hook byte
-	// for byte. Each run: a fresh Gpu and hook, the same grey sequence as the plain run.
+	// (g) HookGuard bound leg (TQ-CD-M6): the REAL DitherNeed::Gpu::HookGuard (DitherNeedGpu.h, MFC-free since GRANT #11b; its
+	// SetHookParameter is the production inline code in CustomHookParameters.h), the fork-only leg of native
+	// DitherNeedWarpHookGuardAppliesAndRestores. A null product binds nothing and the hook renders the off path; a real product is
+	// applied (and changes the codes); Release() and the destructor restore the hook byte for byte. Each run: a fresh Gpu and hook,
+	// the same grey sequence as the plain run. M6 closes only when a Beta run shows this case passing.
 	{
 		const std::map<std::string, double> params = BetaDnParams(true, 0.15);
 		const std::vector<int> base = BetaDnCodes(params, greys, frames, true);
-		const double blockPx = 16;
+		DitherNeed::Gpu::Placement place;   // scale 1, offset 0, as the native test
+		place.blockPx = 16;
 		enum class Mode { NullProduct, BoundThenRender, ReleaseThenRender, DestroyThenRender };
 		bool applied = false;
 		auto run = [&](Mode mode)
@@ -7471,6 +7440,7 @@ void RunBetaDitherNeedWarpForkTests()
 			Gpu gpu;
 			const auto shader = Load(gpu.GpuHandle(), "Temporal sigma-delta.glsl", params);
 			const pl_hook* hook = shader->hook;
+			const pl_hook* const hooks[1] = { hook };
 			const std::vector<float> data = DitherNeedWarpModel::ConstantMap(4, 3, 0.3f);
 			pl_tex map = nullptr;
 			if (mode != Mode::NullProduct)
@@ -7499,23 +7469,23 @@ void RunBetaDitherNeedWarpForkTests()
 			{
 			case Mode::NullProduct:
 			{
-				BetaDnGuard guard;
-				applied = guard.Apply(hook, nullptr, blockPx);
+				DitherNeed::Gpu::HookGuard guard;
+				applied = guard.Apply(hooks, 1, nullptr, place);
 				render();
 				break;
 			}
 			case Mode::BoundThenRender:
 			{
-				BetaDnGuard guard;
-				applied = guard.Apply(hook, map, blockPx);
+				DitherNeed::Gpu::HookGuard guard;
+				applied = guard.Apply(hooks, 1, map, place);
 				render();
 				guard.Release();
 				break;
 			}
 			case Mode::ReleaseThenRender:
 			{
-				BetaDnGuard guard;
-				guard.Apply(hook, map, blockPx);
+				DitherNeed::Gpu::HookGuard guard;
+				guard.Apply(hooks, 1, map, place);
 				guard.Release();
 				render();
 				break;
@@ -7523,8 +7493,8 @@ void RunBetaDitherNeedWarpForkTests()
 			case Mode::DestroyThenRender:
 			{
 				{
-					BetaDnGuard guard;
-					guard.Apply(hook, map, blockPx);
+					DitherNeed::Gpu::HookGuard guard;
+					guard.Apply(hooks, 1, map, place);
 				}   // destructor
 				render();
 				break;
