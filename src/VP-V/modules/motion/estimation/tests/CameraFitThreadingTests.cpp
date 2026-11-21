@@ -103,8 +103,10 @@ namespace VideoProcessorTest
 				// CE-SUBMIT-AFTER-STOP: no thread drains the queue after Stop, so a Submit is refused (never queued), counted and shown.
 				const uint64_t fittedAtStop = counters.fitted.load(), publishedAtStop = counters.published.load();
 				const uint64_t submittedAtStop = counters.submitted.load();
+				const uint64_t resetGenAtStop = producer.ResetGen();
 				for (int i = 5; i <= 7; ++i)
 					Assert::IsFalse(worker.Submit(CameraLinkTest::PanJob(static_cast<uint64_t>(i), 5.0)), L"Submit after Stop is refused");
+				Assert::IsTrue(producer.ResetGen() != resetGenAtStop, L"a refusal requests a fitter reset: a restarted worker never seeds across the hole");
 				Assert::AreEqual(uint64_t(3), counters.refusedAfterStop.load(), L"every refused submit is counted");
 				Assert::AreEqual(submittedAtStop, static_cast<uint64_t>(counters.submitted.load()), L"a refused submit is not counted as submitted");
 				Assert::AreEqual(uint64_t(0), counters.queueFull.load(), L"refused after stop, not called queue full");
