@@ -98,7 +98,8 @@ namespace CameraLink
 		bool Running() const { return m_running; }
 		static int ThreadsEverStarted();   // test hook: the CameraOff test asserts it stays at its starting value
 
-		// Render thread. True: queued (a thread, or ProcessQueued, runs it). False: the queue is full (counted, fitter reset requested).
+		// Render thread. True: queued (a thread, or ProcessQueued, runs it). False: the queue is full (counted, fitter reset requested),
+		// or the worker was stopped (Stop() after Start(), no Start() since: FitCounters::refusedAfterStop, fitter reset requested).
 		// Rebinds first (a changed lane generation is noticed here), then stamps the job with the lease's generation.
 		bool Submit(const CameraFitJob& job);
 
@@ -151,6 +152,9 @@ namespace CameraLink
 		std::deque<CameraFitJob> m_queue;
 		bool m_stop = false;
 		bool m_running = false;
+		// CE-SUBMIT-AFTER-STOP (under m_mutex): Stop() ran on a started worker and no Start() since. Distinct from !m_running, which is
+		// also the deterministic mode (never started: ProcessQueued drains the queue on the calling thread, Submit must still queue).
+		bool m_stopped = false;
 		bool m_busy = false;
 		bool m_tick = false;                  // AHEAD FIT: a Tick arrived (under m_mutex)
 		std::atomic<uint64_t> m_renderSeq{ 0 };

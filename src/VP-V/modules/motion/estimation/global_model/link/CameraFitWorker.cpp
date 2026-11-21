@@ -74,6 +74,7 @@ namespace CameraLink
 		if (m_running)
 			return false;
 		m_stop = false;
+		m_stopped = false;
 		m_running = true;
 		g_threadsStarted.fetch_add(1);
 		m_thread = std::thread([this]() { Loop(); });
@@ -87,6 +88,7 @@ namespace CameraLink
 			if (!m_running)
 				return;
 			m_stop = true;
+			m_stopped = true;   // CE-SUBMIT-AFTER-STOP: set under the queue mutex, so every Submit that locks after this refuses
 		}
 		m_cv.notify_all();
 		if (m_thread.joinable())
@@ -103,6 +105,17 @@ namespace CameraLink
 		job.laneGen = LaneGeneration();
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_stopped)
+			{
+				// CE-SUBMIT-AFTER-STOP: no thread will drain the queue (Stop has cleared it or is about to), so the job is refused, never
+				// queued: the caller still owns the job (its field copy dies with the caller's copy). Read under m_mutex, the same lock Stop
+				// sets it under and the push below takes, so no job can be queued after Stop's first block. Counted and shown in the
+				// camera fit status line; the pair chain has a hole if the worker is started again, so the next fit restarts its history.
+				if (m_env.counters)
+					m_env.counters->refusedAfterStop.fetch_add(1, std::memory_order_relaxed);
+				m_producer.NoteReset();
+				return false;
+			}
 			if (m_queue.size() >= m_env.queueCapacity)
 			{
 				if (m_env.counters)

@@ -46,6 +46,7 @@ namespace CameraLink
 	{
 		std::atomic<uint64_t> submitted{ 0 };        // jobs accepted by the worker queue
 		std::atomic<uint64_t> queueFull{ 0 };        // jobs dropped: the bounded queue was full (visible)
+		std::atomic<uint64_t> refusedAfterStop{ 0 }; // CE-SUBMIT-AFTER-STOP: Submit refused because the worker thread was stopped (never queued, never fitted)
 		std::atomic<uint64_t> fitted{ 0 };
 		std::atomic<uint64_t> published{ 0 };
 		std::atomic<uint64_t> late{ 0 };             // fitted, not published (seal first / claim stale / not writable / no inputs)
@@ -232,15 +233,15 @@ namespace CameraLink
 	// "camera: fits 120, published 118, late 2, unusable 3, slip 0, queue full 0"
 	inline std::string StatusLine(const FitCounters& c)
 	{
-		char b[960];
-		std::snprintf(b, sizeof(b), "camera fit: %llu fitted, %llu published, %llu late, %llu not used, %llu slip, %llu timing unknown, %llu queue full, %llu readback dropped, %llu stale lane (refused after a graph rebuild), %llu lane rebinds, %llu fit field too big for its product (no labels for those frames; last need %llu B, slot %llu B), %llu fit field encode failed, %llu fit field without storage, %llu fit field claim refused, %llu fits without a field",
+		char b[1024];
+		std::snprintf(b, sizeof(b), "camera fit: %llu fitted, %llu published, %llu late, %llu not used, %llu slip, %llu timing unknown, %llu queue full, %llu readback dropped, %llu stale lane (refused after a graph rebuild), %llu lane rebinds, %llu fit field too big for its product (no labels for those frames; last need %llu B, slot %llu B), %llu fit field encode failed, %llu fit field without storage, %llu fit field claim refused, %llu fits without a field, %llu refused after stop",
 			(unsigned long long)c.fitted.load(), (unsigned long long)c.published.load(), (unsigned long long)c.late.load(),
 			(unsigned long long)c.unusable.load(), (unsigned long long)c.notFittedSlip.load(),
 			(unsigned long long)c.timingUnknown.load(), (unsigned long long)c.queueFull.load(),
 			(unsigned long long)c.readbackDropped.load(), (unsigned long long)c.staleLane.load(), (unsigned long long)c.rebound.load(),
 			(unsigned long long)c.fieldUndersized.load(), (unsigned long long)c.fieldNeedBytes.load(), (unsigned long long)c.fieldSlotBytes.load(),
 			(unsigned long long)c.fieldEncodeFailed.load(), (unsigned long long)c.fieldNoStorage.load(), (unsigned long long)c.fieldClaimRefused.load(),
-			(unsigned long long)c.fieldNoField.load());
+			(unsigned long long)c.fieldNoField.load(), (unsigned long long)c.refusedAfterStop.load());
 		return b;
 	}
 }
