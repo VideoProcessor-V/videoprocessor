@@ -1907,6 +1907,11 @@ namespace SkeletonModuleTestsNs
 			other.join();
 			Assert::IsTrue(offThread.known || (offThread.why != nullptr && offThread.why[0] != 0),
 				L"off the render thread: the published copy, or a miss that names its cause");
+			// GF-P2a MUST-9 / S14.2b: a look-ahead miss off the render thread is a PEEK of the lane's published bytes, never the memo's
+			// Acquire: it raises no skeleton-acquire decision (no false "p4_source_stats" Fallbacks entry).
+			VpSkeleton::SkeletonMemo* memoOfHost = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memoOfHost);
+			Assert::IsTrue(memoOfHost->Decisions().empty(), L"the off-thread SceneOf raised no skeleton-acquire decision");
 
 			SealThrough6(rig);
 			rig.Begin(6);
