@@ -342,6 +342,48 @@ namespace VideoProcessorTest
 			Assert::IsTrue(optInIdle.engaged, L"a non-default camera setting is shown even while the camera fit is inactive");
 		}
 
+		// Audit 55ec5b497 MUST 1: ONE shared pair stream, so one hints state for ALL consumers. Camera fit inactive (camera OFF, the
+		// default) = hints ON for every consumer (today's behaviour, no entry); camera fit active = hints OFF for every consumer
+		// (de-judder included) and the entry says so; the state shown (built from HintsShown, as VectorEngine does) == the state
+		// HintsApply uses.
+		TEST_METHOD(HintsStateIsPerSharedStreamAndShownAsInForce)
+		{
+			using HC = MotionAhead::Producer::HintConsumer;
+			MotionAhead::Producer producer;
+			producer.SetTemporalHints(HC::Camera, false);   // the default, independent of the environment opt-in
+			const auto entryOf = [](const MotionAhead::Producer::HintsState& s)
+			{ return FallbackCatalog::NvofTemporalHints(s.cameraActive, s.inForce, s.cameraOn, s.otherOn); };
+
+			producer.SetCameraConsumes(false);
+			MotionAhead::Producer::HintsState s = producer.HintsShown();
+			Assert::IsTrue(producer.HintsInForce() && producer.HintsApply(true), L"camera inactive: hints ON for all consumers");
+			Assert::IsTrue(s.inForce == producer.HintsApply(true), L"shown == in force (camera inactive)");
+			Assert::IsFalse(s.cameraActive);
+			Assert::IsFalse(entryOf(s).engaged, L"today's everyday state: no entry");
+
+			producer.SetCameraConsumes(true);
+			s = producer.HintsShown();
+			Assert::IsFalse(producer.HintsInForce() || producer.HintsApply(true), L"camera active: hints OFF for all consumers, de-judder included");
+			Assert::IsTrue(s.inForce == producer.HintsApply(true), L"shown == in force (camera active)");
+			Assert::IsTrue(s.cameraActive && s.otherOn, L"the everyday setting stays ON but does not govern the shared stream");
+			const FallbackCatalog::Decision active = entryOf(s);
+			Assert::IsTrue(active.engaged, L"camera active: never silent");
+			Assert::IsTrue(active.reason.find("hints OFF for the whole shared pair stream (all consumers)") != std::string::npos,
+				L"names the state in force for every consumer");
+			Assert::IsTrue(active.reason.find("camera fit active") != std::string::npos &&
+				active.reason.find("de-judder and interpolation included") != std::string::npos, L"names why and the other consumers");
+
+			producer.SetTemporalHints(HC::Camera, true);   // the diagnostic opt-in while the camera is active
+			s = producer.HintsShown();
+			Assert::IsTrue(s.inForce && producer.HintsApply(true) && s.inForce == producer.HintsInForce(), L"shown == in force (opt-in)");
+			Assert::IsTrue(entryOf(s).reason.find("hints ON for the whole shared pair stream") != std::string::npos);
+
+			producer.SetTemporalHints(HC::Camera, false);
+			producer.SetCameraConsumes(false);
+			s = producer.HintsShown();
+			Assert::IsTrue(s.inForce && producer.HintsApply(true) && !entryOf(s).engaged, L"camera off again: back to hints ON, no entry");
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(ExactlyOneEngineAcrossProducerDejudderAndLongPair)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
