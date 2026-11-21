@@ -14,6 +14,7 @@
 #endif
 #include <VP-V/modules/input/source_analysis/lane/P1GpuFill.h>
 
+#include <VP-V/core/AheadCeiling.h>
 #include <VP-V/core/Products.h>
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/core/VariantShape.h>
@@ -164,7 +165,7 @@ namespace P1Gpu
 		// GF-P1 MUST-2 (GV AMEND of Gemini's two blocks): reserveBytes is the per-frame WORKING SET (levels 1..6 of the largest
 		// luma, lowRes included), the figure AheadNeedLocked multiplies by 1 + back + depth; reserveFor is the exact size of the
 		// asked level, so a level-6 fill reserves level 6, not level 1, and the levels one frame holds fit the grant.
-		VpSkeleton::OwnerFill MakeP1GpuOwnerFill(VpSkeleton::Dims maxLuma)
+		VpSkeleton::OwnerFill MakeP1GpuOwnerFill(VpSkeleton::Dims maxLuma, uint16_t aheadDepth)
 		{
 			VpSkeleton::OwnerFill f;
 			f.variantAxes = OwnerVariantAxes();
@@ -178,11 +179,12 @@ namespace P1Gpu
 			f.keepFrames = 1;      // A = frame n - 1 stays readable while n renders (SkeletonAcquire.h keepFrames)
 			f.historyFrames = 1;
 			f.jobClass = VpSkeleton::JobClass::Core;
-			// GF-P1 MUST-1: the matcher's consumers read two frames past the render seal (render pair B = N + 1, the EstimateAhead
-			// pair C = N + 2; VectorEngineEstimate.inl offer, VectorEngine.cpp P13 / P1 acquires). Declared here, the memo-wide
-			// window (DeriveMemoWindow's kAheadNeed term) computes aheadCompute >= 2 (bounded by the queue ahead), so neither is
-			// refused NotPlannedAhead; beyond the queue NotQueued stays the honest answer, and the P13 views need no exemption.
-			f.aheadDepth = 2;
+			// GF-P1 MUST-1: while the matcher is an ACTIVE consumer, its structural read ahead (kMatcherStructuralAhead: the render
+			// pair B = N + 1 and the EstimateAhead pair C = N + 2) is declared here, so the memo-wide window (DeriveMemoWindow's
+			// kAheadNeed term) computes aheadCompute >= 2 (bounded by the queue ahead) and neither is refused NotPlannedAhead; beyond
+			// the queue NotQueued stays the honest answer, and the P13 views need no exemption. With no active matcher the module
+			// registers 0 (owner OD 2026-11-14: ahead cap 6, derived from active consumers; 0 with none active).
+			f.aheadDepth = aheadDepth;
 			f.fill = [](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo& memo, VpSkeleton::OwnerFillOutput& out) {
 				if (req.gpu == nullptr || req.gpu->Gpu() == nullptr || req.gpu->Dispatch() == nullptr)
 				{
@@ -292,7 +294,10 @@ namespace P1Gpu
 		return total;
 	}
 
-	VpSkeleton::OwnerFill MatcherPyramidOwnerFill(const VpSkeleton::Dims& maxLuma) { return MakeP1GpuOwnerFill(maxLuma); }
+	VpSkeleton::OwnerFill MatcherPyramidOwnerFill(const VpSkeleton::Dims& maxLuma, uint16_t aheadDepth)
+	{
+		return MakeP1GpuOwnerFill(maxLuma, aheadDepth);
+	}
 }
 }
 
@@ -342,32 +347,46 @@ namespace Vpv
 				Observe(c.host, luma);
 				return false;
 			}
-			// onlyIfUnknown: the matcher's offers (NoteP1GpuSourceLuma) only seed a host's size before its first Entrance; the
-			// Entrance stays the one source of a host's size afterwards, so two notifiers can never alternate registrations.
-			bool Observe(const void* host, VpSkeleton::Dims luma, Skeleton::IExternalDemand* demand = nullptr, bool onlyIfUnknown = false)
+			// matcherOffer: a matcher offer (NoteP1GpuSourceLuma). It only seeds a host's size before its first Entrance (the
+			// Entrance stays the one source of a host's size afterwards, so two notifiers can never alternate registrations), and it
+			// marks the matcher an ACTIVE consumer of that host (GF-P1 MUST-1: the declared ahead depth, UpdateLocked).
+			bool Observe(const void* host, VpSkeleton::Dims luma, Skeleton::IExternalDemand* demand = nullptr, bool matcherOffer = false)
 			{
 				std::lock_guard<std::mutex> g(mutex_);
-				bool found = false;
+				HostSize* known = nullptr;
 				for (auto& h : hosts_)
 				{
 					if (h.host == host)
 					{
-						if (!onlyIfUnknown && (h.luma.width != luma.width || h.luma.height != luma.height))
+						if (!matcherOffer && (h.luma.width != luma.width || h.luma.height != luma.height))
 						{
 							h.luma = luma;
 							h.bytes = ReserveFor(luma);
 						}
-						found = true;
+						known = &h;
 						break;
 					}
 				}
-				if (!found && host != nullptr && hosts_.size() < kMaxHosts)
+				if (known == nullptr && host != nullptr && hosts_.size() < kMaxHosts)
 				{
 					HostSize h;
 					h.host = host;
 					h.luma = luma;
 					h.bytes = ReserveFor(luma);
 					hosts_.push_back(h);
+					known = &hosts_.back();
+				}
+				if (known != nullptr)
+				{
+					if (matcherOffer)
+					{
+						known->offered = true;
+						known->lastOfferAt = known->entrances;
+					}
+					else
+					{
+						++known->entrances;
+					}
 				}
 				return UpdateLocked(demand);
 			}
@@ -392,14 +411,24 @@ namespace Vpv
 				const void* host = nullptr;
 				VpSkeleton::Dims luma;
 				uint64_t bytes = 0;
+				// GF-P1 MUST-1: the matcher as an active consumer. `entrances` counts this host's Entrance frames, `lastOfferAt`
+				// is that count at its latest matcher offer (one per estimate).
+				uint64_t entrances = 0;
+				uint64_t lastOfferAt = 0;
+				bool offered = false;
+				// Active while its latest offer is no older than the deepest ahead result a consumer may still read (the one
+				// ceiling, kAheadCeiling): a de-judder that stops offering stops declaring within that many frames.
+				bool MatcherActive() const { return offered && entrances - lastOfferAt <= uint64_t(VpSkeleton::kAheadCeiling); }
 			};
 			static uint64_t ReserveFor(VpSkeleton::Dims luma) { return VpFrameAnalysis::P1Gpu::MatcherPyramidReserveBytes(luma); }
 			bool UpdateLocked(Skeleton::IExternalDemand* demand)
 			{
 				// The fill is sized from the per-axis maximum over the live hosts, so every host's level fits its exact reserve.
 				VpSkeleton::Dims maxLuma;
+				bool matcherActive = false;
 				for (const HostSize& h : hosts_)
 				{
+					matcherActive = matcherActive || h.MatcherActive();
 					if (h.bytes == 0)
 						continue;
 					if (h.luma.width > maxLuma.width)
@@ -408,20 +437,26 @@ namespace Vpv
 						maxLuma.height = h.luma.height;
 				}
 				const uint64_t want = ReserveFor(maxLuma);
+				// Owner OD 2026-11-14 (ahead cap 6, derived from active consumers): the matcher's structural need counts only
+				// while it is active; with no active matcher the fill declares 0. The registration is module-wide, so any active
+				// host's matcher declares it.
+				const uint16_t depth = matcherActive ? VpFrameAnalysis::P1Gpu::kMatcherStructuralAhead : uint16_t(0);
 				const bool ok = registered_.load(std::memory_order_acquire);
-				if (want == 0 || (ok && want == reserve_) || want == tried_)
+				if (want == 0 || (ok && want == reserve_ && depth == depth_) || (want == tried_ && depth == triedDepth_))
 					return ok;
 				if (demand == nullptr)
 					demand = static_cast<Skeleton::IExternalDemand*>(Hub::ExtensionHub::Instance().Query(Skeleton::kExternalDemandQueryId));
 				if (demand == nullptr)
 					return ok;   // no skeleton yet: retried at the next Entrance
-				tried_ = want;   // a refused registration is retried at the next size change, not every frame
+				tried_ = want;   // a refused registration is retried at the next size or activity change, not every frame
+				triedDepth_ = depth;
 				if (ok)
 					demand->UnregisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Gpu, kP1GpuUnit);
 				const VpSkeleton::SkeletonMemo::Registration r = demand->RegisterOwnerFill(VpSkeleton::kP1HalfLuma,
-					VpSkeleton::AcquireForm::Gpu, kP1GpuUnit, VpFrameAnalysis::P1Gpu::MakeP1GpuOwnerFill(maxLuma));
+					VpSkeleton::AcquireForm::Gpu, kP1GpuUnit, VpFrameAnalysis::P1Gpu::MakeP1GpuOwnerFill(maxLuma, depth));
 				const bool now = r == VpSkeleton::SkeletonMemo::Registration::Registered;
 				reserve_ = now ? want : uint64_t(0);
+				depth_ = now ? depth : uint16_t(0);
 				registered_.store(now, std::memory_order_release);
 				return now;
 			}
@@ -429,6 +464,8 @@ namespace Vpv
 			std::vector<HostSize> hosts_;
 			uint64_t reserve_ = 0;
 			uint64_t tried_ = 0;
+			uint16_t depth_ = 0;        // the registered fill's declared ahead depth
+			uint16_t triedDepth_ = 0;   // the depth of the last registration tried
 			std::atomic<bool> registered_{ false };
 		};
 
