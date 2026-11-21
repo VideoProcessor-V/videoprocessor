@@ -289,8 +289,9 @@ namespace AdaptiveDownscaleStage
 		if (!module.CutAvailable())
 			lines.push_back("Adaptive downscale: no cut verdict this frame (" + module.CutCause() + ")");
 		// GEM-W1B V3 MUST-6: fbo_float32 asked, the GPU gave 16-bit float for the faithful picture: shown, never silent.
-		if (module.HalfFloatPictureFallback())
-			lines.push_back("Adaptive scaler: 16-bit float picture (no 32-bit float format on this GPU)");
+		// Gated on `requested`: the flag is reset only when the module measures again, so a switch to off must not leave it on screen.
+		if (requested && module.HalfFloatPictureFallback())
+			lines.push_back("Adaptive scaler: 16-bit float picture (32-bit float not available)");
 		// The APL (diagnostic mean luma) was not read from the P4 record: shown, not a cut fault.
 		if (!module.AplCause().empty())
 			lines.push_back("Adaptive downscale: APL not read (" + module.AplCause() + ")");

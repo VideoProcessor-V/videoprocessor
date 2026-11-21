@@ -147,6 +147,10 @@ namespace AdaptiveDownscaleStage
 			// FIX-X5-CUT-P4 / C5: no scene group (the skeleton's scene product) for this frame: no cut verdict this frame (also on StatusLines()).
 			if (!base.engaged && requested && !module.CutAvailable())
 				return FallbackCatalog::Engaged("output scaling", "adaptive downscale: no cut verdict this frame (" + module.CutCause() + ")");
+			// GEM-W1B V3 MUST-6 (audit-W1B SHOULD-1): the 32 -> 16-bit float picture fallback reaches Config status and the
+			// problem report too, not only StatusLines().
+			if (!base.engaged && requested && module.HalfFloatPictureFallback())
+				return FallbackCatalog::Engaged("output scaling", "adaptive scaler: 16-bit float picture (32-bit float not available)");
 			return base;
 		}
 
