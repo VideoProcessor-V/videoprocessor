@@ -498,6 +498,33 @@ namespace Tests
 			Assert::IsFalse(reg.Has("Dolby Vision trims"));
 		}
 
+		// GEM-009 ([C]:131): a new device loads the trims shader afresh - ReleaseHooks clears the missing-shader flag, so the
+		// Dolby-style curve is not held back by the previous device's failure. Before the fix the flag survived the release
+		// and the next frame still fell back to bt2390 + trims.
+		TEST_METHOD(ReleaseHooksClearsTheMissingShaderFlag)
+		{
+			using namespace DvHost;
+			Registry reg;
+			DvHostStage stage(NoShaders(), reg.Engage(), reg.Release());
+			Run run;
+			run.mode = "dolby_style";
+			pl_color_map_params params = pl_color_map_default_params;
+			params.tone_mapping_function = &pl_tone_map_spline;
+			std::vector<const pl_hook*> hooks;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			// Frame 1: the trims shader does not load (the flag is set after the frame); frame 2: the curve is held back.
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsTrue(reg.Has("DV tone mapping"), L"precondition: the missing shader stops the Dolby-style curve");
+			Assert::IsTrue(params.tone_mapping_function == &pl_tone_map_bt2390);
+			// The device is released: the flag is cleared, so the next frame runs the Dolby-style curve again.
+			stage.ReleaseHooks();
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsFalse(reg.Has("DV tone mapping"), L"after ReleaseHooks the curve is not held back by the old failure");
+			Assert::IsTrue(params.tone_mapping_function == &DvDolbyStyle::Function());
+		}
+
 		TEST_METHOD(GpuUnpackSessionLogsOnceAndSwitchesTheSessionToTheCpuOnce)
 		{
 			DvGpuUnpackSession session;
