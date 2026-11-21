@@ -945,7 +945,10 @@ namespace SkeletonModuleTestsNs
 			rig.ResyncApply("on");
 			rig.Life(RE::Lifecycle::GpuCreated);
 			for (int64_t s = 1; s <= 3; ++s)
+			{
 				rig.Frame(s);
+				PresentFacts(rig, s);   // GF-P2a RIG: the present-lag term is fed each frame; the three queue terms stay unfed until delivered below
+			}
 			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks),
 				"skeleton_queue: record history: queue not yet wired (render-ahead depth, lane lead, look-ahead walk); floors in use"));
 			// The look-ahead walk arrives with the host's SettingsApplied call (value = the motion look-ahead depth): that term leaves the line.
@@ -954,6 +957,7 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual(0, int(rig.sk.CurrentQueue().renderAhead));
 			Assert::AreEqual(1, int(rig.sk.CurrentQueue().laneLead));
 			rig.Frame(4);
+			PresentFacts(rig, 4);
 			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks),
 				"skeleton_queue: record history: queue not yet wired (render-ahead depth, lane lead); floors in use"));
 			SkeletonModule::QueueShape q;
@@ -961,6 +965,7 @@ namespace SkeletonModuleTestsNs
 			rig.sk.SetQueueForTesting(q);
 			rig.Frame(5);
 			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue"), L"all three delivered: nothing to show");
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue"), L"the entry itself is gone (matched by id, not by substring)");
 			Assert::IsFalse(SkeletonModule::QueueDecision(SkeletonModule::QueueShape::kAll).engaged);
 			Assert::AreEqual(std::string("lane lead, look-ahead walk"), SkeletonModule::QueueNotWiredNote(SkeletonModule::QueueShape::kRenderAhead));
 		}
