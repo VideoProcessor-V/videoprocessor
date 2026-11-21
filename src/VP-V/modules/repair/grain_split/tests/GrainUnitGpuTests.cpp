@@ -13,6 +13,8 @@
 #include <VP-V/modules/repair/grain_split/GrainNodeGpu.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
+#include <VP-V/core/ComputeOnce.h>
+#include <VP-V/core/GpuAttribution.h>
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
 
@@ -122,6 +124,49 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 
 	constexpr int kW = 256, kH = 144, kB = 16;
 	constexpr double kCu10in16 = 64.0 / 65535.0;   // 10-bit codes in a 16-bit plane
+
+	// Compute-once detector 3 on for one test (the ComputeOnceTests EnabledScope): both registries reset around it, the flag off after.
+	struct ComputeOnceOn
+	{
+		ComputeOnceOn()
+		{
+			ComputeOnce::SetEnabled(true);
+			ComputeOnce::Global().Reset();
+			GpuAttribution::Global().Reset();
+			ComputeOnce::Current() = ComputeOnce::ThreadFrame();
+		}
+		~ComputeOnceOn()
+		{
+			ComputeOnce::Global().Reset();
+			GpuAttribution::Global().Reset();
+			ComputeOnce::Current() = ComputeOnce::ThreadFrame();
+			ComputeOnce::SetEnabled(false);
+		}
+	};
+
+	// `passes` one-texel-grid compute passes ("VP-V owner gpu probe": no attribution rule matches it) into the storable texture `dst`
+	// through `dispatch`, the GPU finished after each so the pass timer's callback has been delivered.
+	bool RunProbePasses(pl_gpu gpu, pl_dispatch dispatch, pl_tex dst, int passes)
+	{
+		for (int i = 0; i < passes; ++i)
+		{
+			const pl_shader_desc d[1] = { VpvGpu::Storage("dst", dst) };
+			if (!VpvGpu::Pass(dispatch, "VP-V owner gpu probe", std::string(),
+				"imageStore(dst, ivec2(gl_GlobalInvocationID.xy), vec4(1.0));\n", d, 1, nullptr, 0,
+				(dst->params.w + 15) / 16, (dst->params.h + 15) / 16, 0))
+				return false;
+			pl_gpu_finish(gpu);
+		}
+		return true;
+	}
+
+	const GpuAttribution::OwnerRow* OwnerRowOf(const std::vector<GpuAttribution::OwnerRow>& rows, const char* owner)
+	{
+		for (const GpuAttribution::OwnerRow& r : rows)
+			if (r.owner == owner)
+				return &r;
+		return nullptr;
+	}
 }
 
 namespace GrainUnitGpuTestsNs
@@ -639,6 +684,64 @@ namespace GrainUnitGpuTestsNs
 			Assert::AreEqual(uint64_t(0), st.live, L"every context texture was handed back");
 			device.Release();
 			pl_tex_destroy(gpu, &plane);
+		}
+
+		// GF-P5 S11: the owner GPU device's dispatch is watched by compute-once detector 3: with the detector ON when
+		// OwnerDispatch() creates it, a pass run through a variant owner's context (ctx.Dispatch()) arrives as an "owner_gpu" row and
+		// is not unattributed; a dispatch created while the detector is OFF installs no callback (the off cost is one flag load), so
+		// the same pass leaves no "owner_gpu" row. Asserts on what the callback delivered.
+		TEST_METHOD(OwnerGpuDeviceDispatchIsWatched)
+		{
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			VpSkeleton::TexShape shape;
+			shape.w = 16;
+			shape.h = 16;
+			shape.fmt = VpSkeleton::TexFormat::RGBA32F;
+			const uint64_t bytes = VpSkeleton::ShapeBytes(shape);
+			{
+				// (a) ON when the dispatch is created.
+				ComputeOnceOn on;
+				Vpv::Skeleton::OwnerGpuDevice device(gpu);
+				{
+					VpSkeleton::OwnerGpuContext ctx(&device, bytes);
+					VpSkeleton::GpuMemoHandle made;
+					std::string why;
+					Assert::IsTrue(ctx.Allocate(shape, made, why), Wide(why).c_str());
+					Assert::IsNotNull(made.resource, L"an owner texture");
+					pl_dispatch dispatch = static_cast<pl_dispatch>(ctx.Dispatch());
+					Assert::IsNotNull(dispatch, L"the context's dispatch");
+					Assert::IsTrue(RunProbePasses(gpu, dispatch, static_cast<pl_tex>(made.resource), 3), L"the probe passes ran");
+					const std::vector<GpuAttribution::OwnerRow> owners = GpuAttribution::Global().Owners();
+					const GpuAttribution::OwnerRow* row = OwnerRowOf(owners, "owner_gpu");
+					Assert::IsNotNull(row, L"a pass through the owner device is charged to owner_gpu");
+					Assert::IsTrue(row->passes >= 1u, L"at least one pass delivered to the detector");
+					Assert::AreEqual(uint64_t(0), GpuAttribution::Global().UnattributedPasses(), L"and none is unattributed");
+					made.keepAlive.reset();
+					ctx.Close();
+				}
+				device.FlushReleases();
+				device.Release();
+			}
+			{
+				// (b) OFF when the dispatch is created: nothing is installed, so nothing arrives, though the detector is ON afterwards.
+				Vpv::Skeleton::OwnerGpuDevice device(gpu);
+				ComputeOnce::SetEnabled(false);
+				Assert::IsNotNull(device.OwnerDispatch(), L"the dispatch is made with the detector off");
+				ComputeOnceOn on;   // ON from here, registries reset
+				VpSkeleton::OwnerGpuContext ctx(&device, bytes);
+				VpSkeleton::GpuMemoHandle made;
+				std::string why;
+				Assert::IsTrue(ctx.Allocate(shape, made, why), Wide(why).c_str());
+				Assert::IsTrue(RunProbePasses(gpu, static_cast<pl_dispatch>(ctx.Dispatch()), static_cast<pl_tex>(made.resource), 3),
+					L"the probe passes ran");
+				Assert::IsNull(OwnerRowOf(GpuAttribution::Global().Owners(), "owner_gpu"), L"a dispatch made while the detector was off is not watched");
+				made.keepAlive.reset();
+				ctx.Close();
+				device.FlushReleases();
+				device.Release();
+			}
 		}
 	};
 }
