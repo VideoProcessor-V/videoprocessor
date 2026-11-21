@@ -6,8 +6,11 @@
 // the VP-only consumers (HdrInference veto grid, VpFrameAnalysis Reducer percentiles) call ONE implementation.
 //
 // Law:
-//   histogram  1024 bins, bin = top 10 bits of the 16-bit half-plane sample (Histogram10 for 10-bit codes: bin = code)
-//   percentile the smallest bin whose cumulative count reaches the target (FirstBinReaching; lane: the bin centre)
+//   histogram  1024 bins, one per whole axis code: the totals of the full-resolution Q6 histogram (65536 values, one per
+//              16-bit half-plane sample value), 64 Q6 values per bin (Histogram10 for 10-bit codes: bin = code)
+//   percentile (unit v2, 2026-11-21 precision fix) the exact Q6 sample value: the smallest half-plane value whose
+//              cumulative count reaches the target (FirstBinReaching over the full-resolution histogram). v1 returned the
+//              centre of the 10-bit bin, up to half an axis code (32 Q6) off and above maxCode for a flat frame.
 //   rect       evidence rect: rows/cols whose mean exceeds p1 + (p99 - p1) / 16 (NOT Bill's active picture; see U8)
 //   grain      median over 8x8 blocks of the RMS second difference
 //   distance   half the L1 distance of two normalised histograms (HalfL1Distance), the input of U7
@@ -24,7 +27,7 @@
 #include <cstring>
 #include <vector>
 
-#include "../../AnalysisAxis10.h" // S-2a: bin = HistBinFromQ6, centre = BinCenterQ6 (one decode law, rule 20)
+#include "../../AnalysisAxis10.h" // S-2a: the Q6 axis (kAxisFractionBits, kAxisBins): one decode law, rule 20
 
 namespace VpUnit
 {
@@ -32,9 +35,13 @@ namespace SourceStats
 {
 // Bump on ANY change of the record layout, the bin law, the percentile law, the rect rule or the grain law
 // (P4's ProductDecl expected number, core/ProductCatalog.h kExpectedStatsUnit, and every stored record carry it).
-constexpr uint32_t kUnitVersion = 1;
+// v2 (2026-11-21): exact Q6 percentiles from the full-resolution histogram (v1: 10-bit bin centres).
+constexpr uint32_t kUnitVersion = 2;
 constexpr uint32_t kRecordVersion = kUnitVersion;
-constexpr uint32_t kHistBins = 1024;      // top 10 bits of the 16-bit half-plane sample
+constexpr uint32_t kHistBins = Vpv::AnalysisDomain::kAxisBins;   // 1024: one record bin per whole axis code
+constexpr uint32_t kQ6Values = 65536;     // full resolution: one count per 16-bit half-plane sample value
+constexpr uint32_t kQ6PerBin = 1u << Vpv::AnalysisDomain::kAxisFractionBits;   // 64 Q6 values per record bin
+static_assert(kHistBins * kQ6PerBin == kQ6Values, "the record bins tile the Q6 axis exactly");
 constexpr uint32_t kRecordBytes = 8192;   // the declared fixed size of P4
 constexpr uint32_t kGrainBlock = 8;       // grain: 8x8 blocks of the half plane
 constexpr uint32_t kRectFractionShift = 4; // rect threshold = p1 + (p99 - p1) / 16
@@ -133,7 +140,7 @@ public:
     {
         hw_ = hw;
         hh_ = hh;
-        std::memset(hist_, 0, sizeof(hist_));
+        q6Hist_.assign(kQ6Values, 0u);
         sum_ = 0;
         min_ = 0xFFFFu;
         max_ = 0;
@@ -155,7 +162,7 @@ public:
             uint64_t rs = 0;
             for (uint32_t x = 0; x < hw_; ++x) {
                 const uint32_t s = r[x];
-                ++hist_[Vpv::AnalysisDomain::HistBinFromQ6(s)];
+                ++q6Hist_[s];   // the whole sample value: nothing is narrowed (s < kQ6Values: a uint16_t)
                 rs += s;
                 colSum_[x] += s;
                 if (s < min_)
@@ -193,7 +200,15 @@ public:
         rec->halfHeight = hh_;
         const uint64_t n = uint64_t(hw_) * hh_;
         rec->pixelCount = uint32_t(n);
-        std::memcpy(rec->hist, hist_, sizeof(hist_));
+        // The record histogram: each axis-code bin is the total of its 64 Q6 values (the declared 1024-bin layout).
+        if (q6Hist_.size() == kQ6Values)
+            for (uint32_t bin = 0; bin < kHistBins; ++bin) {
+                uint32_t total = 0;
+                const uint32_t* q = q6Hist_.data() + size_t(bin) * kQ6PerBin;
+                for (uint32_t f = 0; f < kQ6PerBin; ++f)
+                    total += q[f];
+                rec->hist[bin] = total;
+            }
         if (n == 0)
             return;
         rec->mean = uint32_t(sum_ / n);
@@ -245,15 +260,15 @@ public:
     }
 
 private:
-    // Centre code of the smallest bin whose cumulative count reaches `target`.
+    // The exact sample value (Q6, the 16-bit half-plane scale) of the smallest value whose cumulative count reaches `target`.
     uint32_t Percentile(uint64_t target) const
     {
-        const int i = FirstBinReaching<uint64_t>(hist_, static_cast<int>(kHistBins), target);
-        return Vpv::AnalysisDomain::BinCenterQ6(i >= 0 ? static_cast<uint32_t>(i) : kHistBins - 1u);
+        const int i = FirstBinReaching<uint64_t>(q6Hist_.data(), static_cast<int>(kQ6Values), target);
+        return i >= 0 ? static_cast<uint32_t>(i) : kQ6Values - 1u;
     }
 
     uint32_t hw_ = 0, hh_ = 0, bw_ = 0, bh_ = 0;
-    uint32_t hist_[kHistBins] = {};
+    std::vector<uint32_t> q6Hist_;   // kQ6Values counts after Reset: one per 16-bit half-plane sample value
     uint64_t sum_ = 0;
     uint32_t min_ = 0xFFFFu;
     uint32_t max_ = 0;

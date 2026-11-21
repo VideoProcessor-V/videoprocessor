@@ -316,6 +316,20 @@ Chain tests:
 - Doc 91 A (verbatim): "Fewer, consolidated modules (fewer places for bugs, easier audits)"; "compute once / skip if present; no duplicate work".
 - Cost (estimate, nothing built or run in this slice): the decode is one shift per sample, no allocation; at 4K (8.3 M luma samples)
   and 1080p (2.1 M) it replaces the existing `>> 6` / `<< 6` instructions one for one, so the added cost is zero; the GPU wide-luma branch is off by default.
+- Precision fix (2026-11-21 13:xx UTC, A20-CB fix lane; coordinator directive "fix in source, do not baseline"; check_precision
+  CHK-SHIFT-AXISFRAC hits AnalysisAxis10.h:72/:77): the unit has no Q6 -> ten-bit floor any more (`Floor10FromQ6` and
+  `HistBinFromQ6` were removed).
+  - `VpFrameAnalysis` reads Q6 rows (`LumaRowReader::RowQ6`): 16-bit plane lanes in place, a full-range plane through `PlaneLuma`
+    interpolated between whole codes, and ten-bit Sample() codes as code x 64. The Reducer applies the studio map on the Q6 axis.
+    Mean / APL, the BTB / WTW / near-black / clipped shares and the grain variance use the exact value.
+  - The Store's histogram and its integer min / percentiles / max stay whole studio codes. That is the core `FrameAnalysis::LumaStats`
+    contract; widening it is a core interface change and was not made here.
+  - `SourceStats` (P4, unit v2) keeps a full-resolution Q6 histogram: the record percentiles are exact Q6 values, and the 1024
+    record bins are their totals.
+  - Ten-bit-origin input gives bit-identical FrameAnalysis results, because every scale step is a power of two. P4 percentiles
+    move by at most 32 Q6 (half a code) for every source.
+  - Cost (estimate, not measured): two 65536-entry tables and a 256 KB histogram per reduction (about 0.2 ms CPU per frame on the
+    worker thread), and a 256 KB histogram per P4 accumulator.
 
 ## Known issues / open items
 
