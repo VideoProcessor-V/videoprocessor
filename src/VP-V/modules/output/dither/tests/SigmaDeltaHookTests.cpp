@@ -1912,7 +1912,7 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DitherNeedWarpBoundMapCasesAreByteIdentical)
 		{
-			VP_FORK_ONLY_PL0004_OR_RETURN(L"VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpBoundMapCasesAreByteIdentical");
+			VP_FORK_ONLY_PL0004_OR_RETURN(L"VideoProcessorTest::DitherNeedWarpTests::DitherNeedWarpBoundMapCasesAreByteIdentical");
 			const std::vector<float> greys = DwGreys();
 			const int frames = 16;
 			const std::vector<int> base = DwSigmaCodes(DwSigmaParams(true, "0.15"), greys, frames, true);
@@ -1936,7 +1936,7 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel)
 		{
-			VP_FORK_ONLY_PL0004_OR_RETURN(L"VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel");
+			VP_FORK_ONLY_PL0004_OR_RETURN(L"VideoProcessorTest::DitherNeedWarpTests::DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel");
 			const std::vector<float> greys = DwGreys();
 			const int frames = 16;
 			const float aBase = 0.15f;
@@ -1990,7 +1990,7 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap)
 		{
-			VP_FORK_ONLY_PL0004_OR_RETURN(L"VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap");
+			VP_FORK_ONLY_PL0004_OR_RETURN(L"VideoProcessorTest::DitherNeedWarpTests::DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap");
 			// black, white, WTW (code 980), BTB (code 24): signal levels 0, 1, 1 + 40/876, -40/876 on the limited 64..940 grid (TQ-CD-M5).
 			const std::vector<float> levels = { 0.0f, 1.0f, 1.0f + 40.0f / 876.0f, -40.0f / 876.0f };
 			const int frames = 16;

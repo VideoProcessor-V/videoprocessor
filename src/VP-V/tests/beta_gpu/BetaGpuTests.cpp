@@ -7271,7 +7271,7 @@ void RunBetaSigmaBias()
 	std::free(out);
 }
 
-// ---- DitherNeedWarp fork-only cases (GEM-S10G): native SigmaDeltaHookTests::DitherNeedWarp{BoundMapCasesAreByteIdentical,
+// ---- DitherNeedWarp fork-only cases (GEM-S10G): native DitherNeedWarpTests::DitherNeedWarp{BoundMapCasesAreByteIdentical,
 // ConstantExtraFollowsTheCpuQuantiserModel,ExactCodesStayExactAtTheAmplitudeCap}, which need libplacebo fork patch 0004 and so
 // run on no native lane. Line-for-line mirrors of the native bodies; the CPU model is DitherNeedWarpModel.h (shared, not copied).
 namespace
@@ -7349,7 +7349,7 @@ void RunBetaDitherNeedWarpForkTests()
 			DitherNeedWarpModel::ConstantMap(4, 3, 0.3f), 4, 3);
 		check(unread == base, "dither_need 0 with a bound map differs: " + codesText(unread) + " vs " + codesText(base));
 		std::cout << "Beta DitherNeedWarp BoundMapCasesAreByteIdentical PASS, " << executed << " checks so far\n";
-		BetaRan("VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpBoundMapCasesAreByteIdentical");
+		BetaRan("VideoProcessorTest::DitherNeedWarpTests::DitherNeedWarpBoundMapCasesAreByteIdentical");
 	}
 
 	// (d) A constant extra e: the codes equal the CPU quantiser model at amplitude aBase + e (frame phase found from the plain run).
@@ -7389,7 +7389,7 @@ void RunBetaDitherNeedWarpForkTests()
 		}
 		check(differs, "a raised amplitude must change at least one code (the test would be vacuous)");
 		std::cout << "Beta DitherNeedWarp ConstantExtraFollowsTheCpuQuantiserModel PASS, " << executed << " checks so far\n";
-		BetaRan("VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel");
+		BetaRan("VideoProcessorTest::DitherNeedWarpTests::DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel");
 	}
 
 	// (e) Total amplitude 0.5: codes exact without dither stay exact. TQ-CD-M5: all four levels (codes 64, 940, 980, 24), exactly
@@ -7421,7 +7421,7 @@ void RunBetaDitherNeedWarpForkTests()
 		check(exact[2 * frames] > 940 && exact[3 * frames] < 64, "the WTW level must stay above 940 and the BTB level below 64; codes " +
 			std::to_string(exact[2 * frames]) + " / " + std::to_string(exact[3 * frames]));
 		std::cout << "Beta DitherNeedWarp ExactCodesStayExactAtTheAmplitudeCap PASS, " << executed << " checks so far\n";
-		BetaRan("VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap");
+		BetaRan("VideoProcessorTest::DitherNeedWarpTests::DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap");
 	}
 	// (g) HookGuard bound leg (TQ-CD-M6): native DitherNeedWarpHookGuardAppliesAndRestores. A null product binds nothing and the hook
 	// renders the off path; a real product is applied (and changes the codes); Release() and the destructor restore the hook byte
@@ -7512,7 +7512,7 @@ void RunBetaDitherNeedWarpForkTests()
 		check(destroyed == base, "after the destructor the hook must render the off path: " + codesText(destroyed));
 		check(bound != base, "a bound non-zero map must change the codes (the test would be vacuous)");
 		std::cout << "Beta DitherNeedWarp HookGuardAppliesAndRestores PASS, " << executed << " checks so far\n";
-		BetaRan("VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpHookGuardAppliesAndRestores");
+		BetaRan("VideoProcessorTest::DitherNeedWarpTests::DitherNeedWarpHookGuardAppliesAndRestores");
 	}
 	std::cout << "Beta DitherNeedWarp: 4 cases, " << executed << " checks executed\n";
 #endif
