@@ -127,6 +127,7 @@ namespace Tests
 			Assert::IsTrue(c.Map(Pq(40.0)) <= Pq(40.0) + 1e-6, L"[C]:115: the 40-nit peak is not lifted toward 48 nits");
 			Assert::IsTrue(c.Map(c.sMax) <= c.sMax + 1e-9, L"the scene peak maps to no more than itself");
 			Assert::AreEqual(c.sMax, c.tMax, 1e-12, L"the upper anchor is the scene peak, not the target peak");
+			Assert::AreEqual(c.tMin, c.Map(c.sMin), 1e-9, L"the scene minimum maps to the target minimum (the lifted black)");
 			// Across the whole scene range nothing is mapped above the scene peak and the curve stays monotonic (the lifted black is the
 			// target's own minimum, as for any scene whose shadows are below the target's).
 			double last = -1.0;
