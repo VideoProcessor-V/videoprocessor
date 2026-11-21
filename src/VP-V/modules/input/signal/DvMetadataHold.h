@@ -118,13 +118,15 @@ namespace DvMetadataHold
 				m_inRun = true;
 				m_runStart = counter;
 			}
+			// GEM-007 (Gemini colour-dv-hdr SHOULD-2, as written): the run's span is kept before the no-metadata
+			// return, so a gap of rejected pictures without held metadata still counts toward "lost".
+			const uint64_t span = counter - m_runStart + 1;
+			m_lastSpan = span;
 			if (!haveMetadata)
 			{
 				m_phase = Phase::Own;   // nothing held: the formatter shows black
 				return m_phase;
 			}
-			const uint64_t span = counter - m_runStart + 1;
-			m_lastSpan = span;
 			const Phase previous = m_phase;
 			m_phase = span <= m_holdPictures ? Phase::Held : Phase::Static;
 			m_enteredStatic = m_phase == Phase::Static && previous != Phase::Static;

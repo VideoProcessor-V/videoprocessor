@@ -338,7 +338,7 @@ public:
         const DvMetadataHold::Phase phase = m_hold.OnPicture(false, m_have, counter);
         s.phase = phase;
         s.lostFrames = m_lostFrames;
-        s.lost = m_lostFrames > m_hold.HoldPictures();
+        s.lost = SpanLost();   // GEM-007: from the phase and the run's span (a drop gap counts), not m_lostFrames
         if (m_have) {
             s.haveMetadata = true;
             s.metadata = m_dm;
@@ -354,7 +354,7 @@ public:
     // The visible fallback for the last picture (hand to FallbackCatalog::Sync).
     FallbackCatalog::Decision Fallback() const
     {
-        return DvMetadataLost(m_lostFrames > m_hold.HoldPictures() && ModeCarriesMetadata(m_mode),
+        return DvMetadataLost(SpanLost() && ModeCarriesMetadata(m_mode),
                               static_cast<int>(m_lostFrames > 0x7FFFFFFFu ? 0x7FFFFFFFu : m_lostFrames));
     }
 
@@ -363,7 +363,12 @@ public:
     bool TunnelDetected() const { return m_tunnelDetected; }
     bool AwaitingRelatch() const { return m_awaitingRelatch; }
     uint32_t LostFrames() const { return m_lostFrames; }
-    bool Lost() const { return ModeCarriesMetadata(m_mode) && m_lostFrames > m_hold.HoldPictures(); }
+    bool Lost() const { return ModeCarriesMetadata(m_mode) && SpanLost(); }
+    // GEM-007 (Gemini colour-dv-hdr SHOULD-2, as written): lost = the static phase, or a rejected run longer than the hold.
+    bool SpanLost() const
+    {
+        return m_hold.CurrentPhase() == DvMetadataHold::Phase::Static || m_hold.RunSpan() > m_hold.HoldPictures();
+    }
     uint64_t RelatchCount() const { return m_relatchCount; }    // reader acts: held metadata dropped
     uint64_t Relatched() const { return m_relatched; }          // re-latched from a valid picture afterwards
     uint64_t HoldCount() const { return m_holdCount; }
