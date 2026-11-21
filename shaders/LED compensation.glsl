@@ -166,6 +166,15 @@ vec3 below_black(vec3 result, vec3 original)
     return btb_passthrough > 0.5 ? mix(result, original, vec3(lessThan(original, vec3(0.0)))) : result;
 }
 
+// GEM-W1B V6 MUST-2 (register 115 #17): true below black (btb_passthrough) AND true whiter-than-white
+// (wtw_passthrough, above 1) leave the hook as they came in, on every exit path and whatever the
+// gamma boost, the shadow lift or a gain above OR below 1 did to the picture.
+vec3 preserve_extended(vec3 result, vec3 original)
+{
+    result = below_black(result, original);
+    return wtw_passthrough > 0.5 ? mix(result, original, vec3(greaterThan(original, vec3(1.0)))) : result;
+}
+
 vec4 hook()
 {
     vec4 color = HOOKED_texOff(0);
@@ -193,10 +202,9 @@ vec4 hook()
         v += vec3(lift * k * 1.6875) * u * (vec3(1.0) - u) * (vec3(1.0) - u);
     }
     if (gain == 1.0)
-        return vec4(below_black(v, original), color.a);
+        return vec4(preserve_extended(v, original), color.a);
     bool linear = gain_domain > 0.5;
     vec3 x = linear ? spow(v, compensation_eotf) : v;
-    vec3 before = x;
     x *= gain;
     // Only a boost can push values past white; a reduction never needs the
     // knee. The knee acts on the bright end only (it never touches negatives);
@@ -209,9 +217,7 @@ vec4 hook()
     // BTB and WTW kept in all cases).
     if (gain > 1.0) {
         x = knee > 0.0001 ? soft_knee(x, knee) : min(x, vec3(1.0));
-        if (wtw_passthrough > 0.5)
-            x = mix(x, before, vec3(greaterThan(before, vec3(1.0))));
     }
-    color.rgb = below_black(linear ? spow(x, 1.0 / compensation_eotf) : x, original);
+    color.rgb = preserve_extended(linear ? spow(x, 1.0 / compensation_eotf) : x, original);
     return color;
 }
