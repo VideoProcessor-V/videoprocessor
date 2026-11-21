@@ -138,35 +138,8 @@ namespace Vpv { namespace AnalysisDomain
 	}
 } }
 
-inline bool AnalysisLumaSource::FullRangeLevels() const
-{
-	// The levels Sample()'s RGB paths treat as full range (its limitedRgb rule), or a
-	// YCbCr source flagged / tagged full range.
-	if (format == AnalysisLumaFormat::NativeRgb)
-		return !(encoding == VideoFrameEncoding::R210 || encoding == VideoFrameEncoding::R10b ||
-			encoding == VideoFrameEncoding::R10l);
-	if (format == AnalysisLumaFormat::SdrTunnelRgb)
-		return range != AnalysisLumaRange::Limited;
-	return fullRangeYuv || range == AnalysisLumaRange::Full;
-}
-
-inline bool AnalysisLumaSource::MapsToLimitedDomain() const
-{
-	// VP-V DIV-AN-01: RGB under limitedDomain; YCbCr planes flagged fullRangeYuv.
-	if (format == AnalysisLumaFormat::NativeRgb || format == AnalysisLumaFormat::SdrTunnelRgb)
-		return limitedDomain && FullRangeLevels();
-	return fullRangeYuv;
-}
-
-inline bool AnalysisLumaSource::CodesFullRange() const
-{
-	return FullRangeLevels() && !MapsToLimitedDomain();
-}
-
-inline AnalysisLumaRange AnalysisLumaSource::CodesRange() const
-{
-	return MapsToLimitedDomain() ? AnalysisLumaRange::Limited : range;
-}
+// Domain query definitions (FullRangeLevels, MapsToLimitedDomain, CodesFullRange, CodesRange)
+// live in AnalysisLumaRowDecoder.cpp (compiled in VideoProcessor-Lib.items.props).
 
 // ---- 15c C6 (owner answer 3, 2026-11-15: "the central one should be able to be changed to accommodate for this") ----
 // The decode owner's analysis output for every format, RGB and full-range 4:2:x included: the frame's shared luma plane

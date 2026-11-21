@@ -181,18 +181,24 @@
     <ClCompile Include="..\VP-V\modules\drive\projector_control\ConnectionTest.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_measure\LedLookahead.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\VpFrameAnalysis.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\AnalysisLumaRowDecoder.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\projector_control\LedDriveArbiter.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedDriveHoldover.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\DynamicDriveHost.cpp" />
     <ClCompile Include="filesource\FileHost.cpp" />
     <ClCompile Include="filesource\FileSideData.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\HdrInference.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\CaptureColorimetry.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\queue_timing\AlphaArrivalRate.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceResolutionDetector.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\regions\CodingEvidence.cpp" />
     <ClCompile Include="..\VP-V\modules\scaling\rebase\KernelInverse.cpp" />
     <ClCompile Include="dv_loopback\DvLoopbackAnalyzer.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\RawCaptureRecorder.cpp" />
     <ClCompile Include="..\VP-V\modules\input\capture\CTwoPlane420VideoFrameFormatter.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\capture\DeckLinkTranslatePolicy.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\shaders\Temporal sigma-delta.glsl">
