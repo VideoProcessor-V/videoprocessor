@@ -14,7 +14,8 @@
 //      largest live size) under the catalog's owning unit, re-registers P10g only on a size change, never the P10 owner twice;
 //   3. the visible declines: no GPU context, no source plane (P13), the P10 split unavailable; each is counted for the status line;
 //   4. the Fallbacks texts (the route that reaches Ctrl+I, Config status, Ctrl+Alt+D) say the single-frame law is in use, name the
-//      declines with the last reason, and show a missing registration; an AlreadyRegistered P10 owner (15b A1) is benign.
+//      declines with the last reason while the most recent fill declined (released after a successful fill), and show a missing
+//      registration (again when a forgotten host's size returns); an AlreadyRegistered P10 owner (15b A1) is benign.
 // The GPU parity test (fill vs GrainSplit's CPU blocks and the f^2 block mean) is part of the T5 GPU run (not run here: CODE ONLY).
 
 #include <VP-V/core/GpuAllocator.h>
@@ -211,6 +212,17 @@ namespace VideoProcessorTest
 
 			module.Forget(&host, &demand);
 			Assert::IsTrue(module.FallbackLines().empty(), L"the host left: no size, nothing owed");
+
+			// The same size returns (GpuReleased, then the same source): still refused, so the line must be back (r2 MUST-1).
+			Assert::AreEqual(2, demand.registers, L"before the size returns: one P10 and one P10g attempt");
+			Assert::IsFalse(module.Observe(&host, GrainDims(1920, 1080), &demand), L"the same size returns: P10g still refused");
+			Assert::AreEqual(3, demand.registers, L"the returned size retries the P10g registration once (the P10 owner is not retried)");
+			Assert::AreEqual(1, demand.splitRegisters, L"the P10 owner is still registered once");
+			const std::vector<std::string> again = module.FallbackLines();
+			Assert::AreEqual(size_t(1), again.size(), L"the missing P10g registration is shown again");
+			Assert::AreEqual(want, again[0], L"the same refusal line is back");
+			Assert::IsFalse(module.Observe(&host, GrainDims(1920, 1080), &demand), L"the same size again");
+			Assert::AreEqual(3, demand.registers, L"and not retried every frame after the return");
 		}
 
 		TEST_METHOD(ModuleShowsARefusedP10OwnerButNotAnAlreadyRegisteredOne)
@@ -275,6 +287,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(uint64_t(1), c->declines.load(), L"counted for the status line");
 			Assert::AreEqual(uint64_t(0), c->fills.load(), L"no fill");
 			Assert::AreEqual(out.declineReason, c->LastDecline(), L"the last decline shown");
+			Assert::IsTrue(c->lastDeclined.load(), L"the most recent fill declined: the declined line is engaged");
 		}
 
 		TEST_METHOD(FillDeclinesVisiblyWithoutASourcePlane)
@@ -390,6 +403,36 @@ namespace VideoProcessorTest
 			const std::vector<std::string> lines = module.FallbackLines();
 			Assert::AreEqual(size_t(1), lines.size(), L"exactly the decline (no fill ran)");
 			Assert::AreEqual(std::string("grain_level_declined: grain level: no GPU context (1 decline)"), lines[0], L"on the Fallbacks route");
+			Assert::AreEqual(L::DeclineLineOf(module.Stats()), lines[0], L"FallbackLines shows the counters' declined line while it is set");
+		}
+
+		// The declined line releases after a successful fill (r2 SHOULD-1, Engage/Release): NoteFill is the exact call the fill makes
+		// after its pass dispatched (the pass itself needs a GPU: T5); the count and the last reason are kept for the next decline.
+		TEST_METHOD(DeclinedLineReleasesAfterASuccessfulFill)
+		{
+			using namespace VpSkeleton;
+			namespace L = GrainSplit::LevelGpu;
+			Assert::IsTrue(L::DeclineLine(1, "grain level: no GPU context", false).empty(), L"released: no line although a decline was counted");
+			Assert::IsTrue(L::DeclineLine(3, std::string(), false).empty(), L"released with no recorded reason: no line");
+
+			L::Counters c;
+			Assert::IsTrue(L::DeclineLineOf(c).empty(), L"nothing declined: no line");
+			OwnerFillOutput out;
+			Assert::IsFalse(L::Decline(out, &c, "no GPU context"), L"a decline");
+			Assert::AreEqual(std::string("grain_level_declined: grain level: no GPU context (1 decline)"), L::DeclineLineOf(c),
+				L"engaged while the most recent fill declined");
+
+			L::NoteFill(&c);
+			Assert::IsTrue(L::DeclineLineOf(c).empty(), L"a successful fill releases the declined line");
+			Assert::IsFalse(c.lastDeclined.load(), L"lastDeclined cleared by the fill");
+			Assert::AreEqual(uint64_t(1), c.fills.load(), L"the fill is counted");
+			Assert::AreEqual(uint64_t(1), c.declines.load(), L"the cumulative decline count is kept");
+			Assert::AreEqual(std::string("grain level: no GPU context"), c.LastDecline(), L"the last reason is kept");
+
+			OwnerFillOutput out2;
+			Assert::IsFalse(L::Decline(out2, &c, "RGB source (no luma plane to split)"), L"a later decline");
+			Assert::AreEqual(std::string("grain_level_declined: grain level: RGB source (no luma plane to split) (2 declines)"), L::DeclineLineOf(c),
+				L"re-engaged with the new reason and the cumulative count");
 		}
 	};
 }
