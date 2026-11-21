@@ -38,6 +38,7 @@
 // come from the picture's hdr.avg_pq_y / max_pq_y (L1); when they are absent the renderer says
 // "L1 missing -> mid-range fallback" in the status (the curve then uses the range's middle). BTB / WTW: below-black residuals are carried
 // around the trims and the curve continues above the scene peak with its end slope.
+#include <VP-V/modules/colour/display_mapping/DvMath.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
 
 #include <cmath>
@@ -160,34 +161,11 @@ namespace DvDolbyStyle
 	// ------------------------------------------------------------------ ICtCp (BT.2100)
 
 	// Linear BT.2020 RGB (1 = 10000 nits) <-> LMS, and PQ LMS <-> ICtCp (ITU-R BT.2100 Table 7).
-	constexpr double kRgb2020ToLms[3][3] = { { 1688.0 / 4096, 2146.0 / 4096, 262.0 / 4096 },
-		{ 683.0 / 4096, 2951.0 / 4096, 462.0 / 4096 }, { 99.0 / 4096, 309.0 / 4096, 3688.0 / 4096 } };
-	constexpr double kLmsToIctcp[3][3] = { { 0.5, 0.5, 0.0 }, { 6610.0 / 4096, -13613.0 / 4096, 7003.0 / 4096 },
-		{ 17933.0 / 4096, -17390.0 / 4096, -543.0 / 4096 } };
-
-	inline void Mul(const double m[3][3], const double v[3], double out[3])
-	{
-		for (int r = 0; r < 3; ++r)
-			out[r] = m[r][0] * v[0] + m[r][1] * v[1] + m[r][2] * v[2];
-	}
-
-	inline bool Invert(const double m[3][3], double inv[3][3])
-	{
-		const double d = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
-			m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-		if (!(std::fabs(d) > 1e-15))
-			return false;
-		inv[0][0] = (m[1][1] * m[2][2] - m[1][2] * m[2][1]) / d;
-		inv[0][1] = (m[0][2] * m[2][1] - m[0][1] * m[2][2]) / d;
-		inv[0][2] = (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / d;
-		inv[1][0] = (m[1][2] * m[2][0] - m[1][0] * m[2][2]) / d;
-		inv[1][1] = (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / d;
-		inv[1][2] = (m[0][2] * m[1][0] - m[0][0] * m[1][2]) / d;
-		inv[2][0] = (m[1][0] * m[2][1] - m[1][1] * m[2][0]) / d;
-		inv[2][1] = (m[0][1] * m[2][0] - m[0][0] * m[2][1]) / d;
-		inv[2][2] = (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / d;
-		return true;
-	}
+	// The ICtCp matrices and 3x3 helpers live in DvMath.h (CF-1 P2); same names, same arithmetic.
+	using DvMath::kRgb2020ToLms;
+	using DvMath::kLmsToIctcp;
+	using DvMath::Mul;
+	using DvMath::Invert;
 
 	// RGB -> XYZ of primaries (CIE xy of R, G, B, W).
 	inline void RgbToXyz(const double red[2], const double green[2], const double blue[2], const double white[2], double m[3][3])

@@ -9,6 +9,7 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DolbyVisionTrimsTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvMathTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\FileSideDataTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SceneDescriptorTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\ContentIntentTests.cpp" />

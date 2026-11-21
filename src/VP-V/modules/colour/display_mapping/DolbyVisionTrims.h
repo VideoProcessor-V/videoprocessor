@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DvMath.h"
+
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 
 #include <cmath>
@@ -107,24 +109,9 @@ namespace DolbyVisionTrims
 		return p;
 	}
 
-	// SMPTE ST 2084: nits <-> PQ signal (0..1).
-	inline double PqFromNits(double nits)
-	{
-		const double m1 = 2610.0 / 16384.0, m2 = 2523.0 / 4096.0 * 128.0;
-		const double c1 = 3424.0 / 4096.0, c2 = 2413.0 / 4096.0 * 32.0, c3 = 2392.0 / 4096.0 * 32.0;
-		const double y = (nits < 0.0 ? 0.0 : nits) / 10000.0;
-		const double p = std::pow(y, m1);
-		return std::pow((c1 + c2 * p) / (1.0 + c3 * p), m2);
-	}
-
-	inline double NitsFromPq(double pq)
-	{
-		const double m1 = 2610.0 / 16384.0, m2 = 2523.0 / 4096.0 * 128.0;
-		const double c1 = 3424.0 / 4096.0, c2 = 2413.0 / 4096.0 * 32.0, c3 = 2392.0 / 4096.0 * 32.0;
-		const double e = std::pow(pq < 0.0 ? 0.0 : pq, 1.0 / m2);
-		const double num = e - c1 > 0.0 ? e - c1 : 0.0;
-		return 10000.0 * std::pow(num / (c2 - c3 * e), 1.0 / m1);
-	}
+	// SMPTE ST 2084: nits <-> PQ signal (0..1); the one implementation is DvMath.h (CF-1 P2).
+	inline double PqFromNits(double nits) { return DvMath::PqFromNits(nits); }
+	inline double NitsFromPq(double pq) { return DvMath::NitsFromPq(pq); }
 
 	struct Selection
 	{
