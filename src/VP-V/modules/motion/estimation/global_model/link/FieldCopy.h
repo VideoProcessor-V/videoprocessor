@@ -69,6 +69,7 @@ namespace CameraLink
 		int gridW = 0, gridH = 0;               // seed texels
 		int per = 0;                            // 16-px source blocks per seed texel and axis (2^halvings)
 		float scaleToSourcePx = 0.0f;           // seed px -> source px
+		float quantumSourcePx = 0.0f;           // camfix R2: the NVOF vector quantum in source px, given by the seed's owner (0 = unknown: no floor)
 		int sourceGridW = 0, sourceGridH = 0;   // the 16-px source-block grid of the result
 		float sadTrustMax = 0.0f;               // the live SAD limit (taper_sad with block_taper, else match_tolerance)
 		float weightPenalty = 0.0f;             // the live engine-weight penalty (2 x sadTrustMax with trust weights, else 0)
@@ -91,7 +92,7 @@ namespace CameraLink
 		out.gridH = l.sourceGridH;
 		out.blockSize = 16.0;
 		out.origin = FieldOrigin::Seed;
-		out.quantumPx = 0.25 * l.scaleToSourcePx;   // camfix R2: the seed is the NVOF engine's field (seed px = engine px)
+		out.quantumPx = l.quantumSourcePx;   // camfix R2: the NVOF noise floor, as the seed's owner states it (0 = none)
 		const size_t blocks = static_cast<size_t>(l.sourceGridW) * static_cast<size_t>(l.sourceGridH);
 		out.fwdX.assign(blocks, 0.0f);
 		out.fwdY.assign(blocks, 0.0f);

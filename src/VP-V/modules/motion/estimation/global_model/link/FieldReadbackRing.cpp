@@ -220,6 +220,7 @@ namespace CameraLink
 		e.layout.gridH = f.gridH;
 		e.layout.per = per;
 		e.layout.scaleToSourcePx = f.scaleToSourcePx;
+		e.layout.quantumSourcePx = f.quantumSourcePx;
 		e.layout.sourceGridW = f.sourceGridW;
 		e.layout.sourceGridH = f.sourceGridH;
 		e.layout.sadTrustMax = f.sadTrustMax;

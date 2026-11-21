@@ -73,6 +73,7 @@ namespace VpMotion
 		int gridW = 0, gridH = 0;        // seed texels
 		int blockSize = 0;               // source px per seed texel
 		float scaleToSourcePx = 0.0f;    // seed px -> source px
+		float quantumSourcePx = 0.0f;    // camfix R2: one NVOF vector quantum (0.25 engine px) in source px, set by the engine that owns the seed; 0 = unknown (no floor)
 		int sourceGridW = 0, sourceGridH = 0;
 		enum { kSourceBlockSize = 16 };   // source px per block of the fit's grid (the live field's)
 		float sadTrustMax = 0.0f;        // the live SAD limit (taper_sad with block_taper, else match_tolerance)

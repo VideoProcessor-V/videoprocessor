@@ -841,6 +841,7 @@ namespace VpMotion
 		out.gridH = s.gridH;
 		out.blockSize = SeedField::kSourceBlockSize * per;
 		out.scaleToSourcePx = 2.0f * static_cast<float>(per);   // half-size px of the searching instance -> source px
+		out.quantumSourcePx = 0.25f * out.scaleToSourcePx;      // camfix R2: the seed is the NVOF engine's own field in those px (its quantum is 0.25 of one)
 		out.sourceGridW = s.liveGridW;
 		out.sourceGridH = s.liveGridH;
 		out.sadTrustMax = s.tolerance;

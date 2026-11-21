@@ -108,6 +108,21 @@ namespace VideoProcessorTest
 			}
 		}
 
+		// Camfix audit SHOULD 5: the seed's NVOF quantum is what the seed's owner states (SeedLayout::quantumSourcePx), never derived by the
+		// consumer; an unstated quantum gives no floor (0), a stated one is carried unchanged.
+		TEST_METHOD(TheSeedQuantumIsTheOwnersStatedValue)
+		{
+			std::vector<float> f, b;
+			Uniform(f, b, 6, 4, 2.0f, -1.25f);
+			CameraLink::SeedLayout l = Layout(6, 4, 1, 6, 4);
+			CameraLink::FieldCopy c;
+			Assert::IsTrue(CameraLink::SeedToSourceGrid(f.data(), b.data(), l, c));
+			Assert::AreEqual(0.0, c.quantumPx, L"unstated: no floor");
+			l.quantumSourcePx = 0.5f;   // 0.25 engine px x 2 (half-size px -> source px)
+			Assert::IsTrue(CameraLink::SeedToSourceGrid(f.data(), b.data(), l, c));
+			Assert::AreEqual(0.5, c.quantumPx, L"stated: carried");
+		}
+
 		// lowRes 4K: 32-px seed texels onto the 16-px grid: block t takes texel t / 2 (its centre's texel), clamped; vectors x 4.
 		TEST_METHOD(AHalvedSearchsSeedMapsOntoTheSixteenPixelGridDeterministically)
 		{
