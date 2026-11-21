@@ -6,6 +6,7 @@
 // injected Config::clock, no unordered containers, no threads.
 #include "GlobalModelFit.h"
 #include <VP-V/core/Ramp.h>
+#include <VP-V/core/RobustStats.h>
 
 #include <algorithm>
 #include <atomic>
@@ -577,16 +578,8 @@ namespace CameraModel
 			}
 			if (r.size() < 16)
 				return 0.0;
-			auto median = [](std::vector<double>& v) {
-				const size_t mid = v.size() / 2;
-				std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(mid), v.end());
-				return v[mid];
-			};
-			std::vector<double> tmp = r;
-			const double med = median(tmp);
-			for (double& v : r)
-				v = std::fabs(v - med);
-			return 1.4826 * median(r);
+			const double med = RobustStats::Median(r, RobustStats::MedianRule::Upper);
+			return RobustStats::MadSigma(RobustStats::MadAbout(r, med, RobustStats::MedianRule::Upper));
 		}
 
 		struct Cand
