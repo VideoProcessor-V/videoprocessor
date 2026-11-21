@@ -1269,6 +1269,14 @@ namespace Vpv
 			const std::shared_ptr<HostState> st = hosts_.Find(host);
 			return st ? st->dispatcher.get() : nullptr;
 		}
+		const void* SkeletonModule::MemoDeviceGpuForTesting(const void* host) const
+		{
+			const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host);
+			if (!mh)
+				return nullptr;
+			std::lock_guard<std::mutex> lock(ownerFillsMutex_);   // as the attach / detach sites
+			return mh->gpuDevice ? mh->gpuDevice->OwnerGpu() : nullptr;
+		}
 		unsigned long long SkeletonModule::GpuDispatchersCreated() { return DispatchersCreated().load(std::memory_order_relaxed); }
 
 		// ---- lifecycle (render thread) --------------------------------------------------------------

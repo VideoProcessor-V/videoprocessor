@@ -292,6 +292,9 @@ namespace Vpv
 			void SetWorkerThreadsForTesting(bool start) { startWorkers_ = start; }
 			// Tests: use this card profile instead of the device query (no render device exists in a unit test).
 			void SetCardForTesting(const VpSkeleton::CardProfile& card) { cardOverride_ = true; card_ = card; }
+			// Test seam (R2b E2 pin): the render pl_gpu of the memo's attached owner GPU device for `host` (null = no memo or no
+			// device). Read-only, under ownerFillsMutex_ as the attach / detach sites; no production caller. Any thread.
+			const void* MemoDeviceGpuForTesting(const void* host) const;
 			// 70b G5: the renderer's GPU dispatcher (null in Off / Shadow / the Original pathway / without a pl_gpu).
 			// Render thread / single-threaded tests only.
 			const SkeletonGpuDispatcher* GpuDispatcherFor(const void* host) const;
