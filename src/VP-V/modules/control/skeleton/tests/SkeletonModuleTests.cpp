@@ -2063,6 +2063,55 @@ namespace SkeletonModuleTestsNs
 			rig.After(4);
 		}
 
+		// GF-P2a S2b (measurement): the look-ahead walk asks the scene of the next frames between two renders. The fade runs of ahead frames
+		// are not kept in the 8-entry run ring, so the render frames' runs are never rebuilt with reduced evidence (sceneRunReduced).
+		// Before the change the walk's asks (8 deep: every ring slot) overwrote the render frames' entries and each render frame's run was
+		// rebuilt reduced; after it the delta over the render Begins is 0.
+		TEST_METHOD(ALookAheadWalkNeverForcesTheRenderFramesFadeRunsToBeRebuiltReduced)
+		{
+			Rig rig(Lane("on"));
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			FeedAheadWindow(rig, 12);
+			SkeletonModule::QueueShape deep;   // the queue is fed deep enough for the walk: the lane lead reaches past the ring depth
+			deep.renderAhead = 1;
+			deep.laneLead = 12;
+			deep.lookAheadWalk = 12;
+			rig.sk.SetQueueForTesting(deep);
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			constexpr uint64_t kSpan = 8;          // the ring depth: an ahead frame this far out lands on the seal frame's own entry
+			constexpr int64_t kWarm = 10, kLast = 30;
+			uint64_t delivered = 0;
+			uint64_t reducedAtWarm = 0, asked = 0, known = 0, knownDeep = 0;
+			for (int64_t s = 1; s <= kLast; ++s)
+			{
+				rig.Ingress(s);
+				while (delivered < uint64_t(s) + kSpan + 1)
+					rig.Deliver(++delivered);
+				store.Begin(SceneTestId(uint64_t(s)), FrameAnalysis::kScene);
+				rig.Begin(s);
+				if (s == kWarm)
+					reducedAtWarm = rig.sk.SceneCountersOf(rig.Host()).fadeRunReduced;
+				for (uint64_t k = 1; k <= kSpan; ++k)
+				{
+					const Vpv::Skeleton::SceneAnswer a = rig.sk.SceneOf(rig.Host(), uint64_t(s) + k);
+					++asked;
+					if (a.known)
+					{
+						++known;
+						if (k == kSpan)
+							++knownDeep;
+					}
+				}
+				rig.After(s);
+			}
+			Assert::IsTrue(known > 0 && knownDeep > 0, L"the walk really reached the ring depth (else this measures nothing)");
+			const uint64_t reducedAtEnd = rig.sk.SceneCountersOf(rig.Host()).fadeRunReduced;
+			Assert::AreEqual(reducedAtWarm, reducedAtEnd, L"no render frame's fade run was rebuilt with reduced evidence");
+		}
+
 		TEST_METHOD(ARegisteredButDisabledStoreCostsNothingAtTheSeal)
 		{
 			Rig rig(Lane("on"));
