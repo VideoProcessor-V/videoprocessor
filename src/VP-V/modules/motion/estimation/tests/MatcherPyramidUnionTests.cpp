@@ -241,6 +241,10 @@ namespace VideoProcessorTest
 			warp.SetPyramidSource(seam);
 			aheadWarp.SetPyramidSource(seam);
 
+			// Warm-up (R1 re-review): the production P1 module registers the fill at the first matcher offer, which would come AFTER
+			// Begin(1) has derived the window, so frame 1 would be refused. The matcher's offer of the source size is told first, exactly as
+			// OfferMatcherPlanes tells it, so the fill (with its declared structural ahead) is in the memo before the first Begin.
+			Vpv::FrameAnalysis::NoteP1GpuSourceLuma(rig.Host(), uint32_t(kSrcW), uint32_t(kSrcH));
 			uint64_t served = 0;
 			for (int n = 1; n <= kFrames; ++n)
 			{
