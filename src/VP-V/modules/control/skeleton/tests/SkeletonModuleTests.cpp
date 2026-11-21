@@ -2956,6 +2956,9 @@ namespace SkeletonModuleTestsNs
 				rig.sk.SetCardForTesting(tight);
 				rig.ResyncApply("on");
 				GpuCreatedWithDevice(rig, &fakeGpu);
+				// A no-lane memo exists only once a consumer asks for one (MemoFor makes it; a lane-off Begin never does): the ask a
+				// consumer's frame hook makes in production.
+				Assert::IsTrue(rig.sk.MemoFor(rig.Host(), 1).Valid(), L"a consumer's ask makes the no-lane memo");
 				VpSkeleton::OwnerFill g;
 				g.reserveBytes = 1u << 20;
 				g.aheadDepth = 2;   // an ahead consumer is active: the window computes ahead
@@ -3090,6 +3093,10 @@ namespace SkeletonModuleTestsNs
 			Rig rig(Lane("on"));
 			pl_gpu_t fakeGpu{};
 			rig.ResyncApply("on");
+			// The renderer's memo exists before its device is known (a consumer's MemoFor makes it; neither GpuCreated nor Reconcile
+			// does), so GpuCreated's own attach is what gives it the device.
+			Assert::IsTrue(rig.sk.MemoFor(rig.Host(), 1).Valid(), L"a consumer's ask makes the memo");
+			Assert::IsFalse(rig.sk.MemoOf(rig.Host())->HasGpuDevice(), L"no device before GpuCreated");
 			GpuCreatedWithDevice(rig, &fakeGpu);
 			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
 			Assert::IsNotNull(memo);
