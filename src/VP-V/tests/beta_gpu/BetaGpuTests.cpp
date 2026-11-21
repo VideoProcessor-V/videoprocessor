@@ -4637,8 +4637,8 @@ namespace CameraAccuracy
 		struct RawStats { double biasX = 0, biasY = 0, epe = 0; long long n = 0; };
 		std::vector<RawStats> aheadRaw, seedRaw;
 		size_t aheadCells = 0;        // native cells per pair (the memory figure)
-		// Camfix R1: the producer's temporal hints for this scene (VP_NVOF_TEMPORAL_HINTS=0 turns them off) and the pairs that ran hinted.
-		int aheadHintsOn = 1;
+		// Camfix R1: the producer's temporal hints for this scene (off by default; VP_NVOF_TEMPORAL_HINTS=1 turns them on) and the pairs that ran hinted.
+		int aheadHintsOn = 0;
 		unsigned long long aheadHinted = 0;
 		int aheadQuarter = 0;         // the engine searched at a quarter (lowRes)
 		std::string aheadProblem;
@@ -4984,7 +4984,7 @@ namespace CameraAccuracy
 			std::snprintf(line, sizeof(line), "| %s | %+.4f / %+.4f | %.4f | %+.4f / %+.4f | %.4f | %zu | %s | %llu | %+.4f | %+.4f | %.4f | %s (<= %.2f) |\n", s.scene.name.c_str(),
 				mean(s.aheadRaw, &SceneResult::RawStats::biasX), mean(s.aheadRaw, &SceneResult::RawStats::biasY), mean(s.aheadRaw, &SceneResult::RawStats::epe),
 				mean(s.seedRaw, &SceneResult::RawStats::biasX), mean(s.seedRaw, &SceneResult::RawStats::biasY), mean(s.seedRaw, &SceneResult::RawStats::epe), s.aheadCells,
-				s.aheadHintsOn ? "on" : "OFF", s.aheadHinted, s.aheadRaw.empty() || !s.aheadRaw[0].n ? 0.0 : s.aheadRaw[0].biasX, steady, steadyMaxAbs,
+				s.aheadHintsOn ? "ON" : "off", s.aheadHinted, s.aheadRaw.empty() || !s.aheadRaw[0].n ? 0.0 : s.aheadRaw[0].biasX, steady, steadyMaxAbs,
 				r1Pass ? "PASS" : "FAIL", r1Limit);
 			md << line;
 		}
@@ -5238,7 +5238,8 @@ namespace CameraAccuracy
 				const double tolE = std::max(0.002, aaEpe), tolP = std::max(0.005, aaP95), tolW = std::max(0.005, aaWarp);
 				const double dE = md0.epe - mo.epe, dP = md0.p95 - mo.p95, dW = md0.warp - mo.warp;
 				const double dmE = md0.mEpe - mo.mEpe, dmP = md0.mP95 - mo.mP95, dShare = md0.lt025 - mo.lt025;
-				const double gpuLimit = mo.gpu + std::max(0.02 * mo.gpu, 0.1);
+				const double gpuTol = std::max(std::max(0.02 * mo.gpu, 0.1), aaGpu);   // 2%, 0.1 ms, or the measured A/A spread
+				const double gpuLimit = mo.gpu + gpuTol;
 				std::string reasons;
 				auto fail = [&](bool bad, const char* why) { if (bad) { if (!reasons.empty()) reasons += ", "; reasons += why; } };
 				fail(dE > tolE, "EPE");
@@ -5250,7 +5251,8 @@ namespace CameraAccuracy
 				fail(onTime < 0.90, "on time");
 				fail(worker > 0.20, "worker");
 				const bool headroom = mo.epe >= 0.05 || mo.lt025 < 0.95;
-				const bool superior = dE <= -std::max(0.01, aaEpe) || dShare >= 0.02;
+				const bool cheaper = md0.gpu <= mo.gpu - gpuTol;   // doc 91 D 11-11 10:45: equal accuracy at lower cost also counts
+				const bool superior = dE <= -std::max(0.01, aaEpe) || dShare >= 0.02 || cheaper;
 				const bool fewRuns = d0Runs.size() < 3 || offRuns.size() < 3;
 				const int judged = headroom ? (superior ? 0 : 2) : 1;
 				const int verdict = !reasons.empty() ? 3 : (fewRuns ? 4 : judged);
