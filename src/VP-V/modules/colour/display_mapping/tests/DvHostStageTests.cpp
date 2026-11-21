@@ -123,14 +123,15 @@ namespace Tests
 				OutputSegments::ColourFrame colourFrame;
 				std::vector<const pl_hook*> user;
 				colourFrame.userPreOutput = &user;
-				stage.PrepareToneAndTrims({ mode, trims, curve, folder, colourRuns, image, target, dm, 2.4, state, nullptr, 1 },
+				stage.PrepareToneAndTrims({ mode, trims, curve, folder, colourRuns, image, target, dm, 2.4, state, nullptr, 1, colourRuns },
 					params, templates, colourFrame.dvTrims, colourFrame.dv);
 				CustomHookChain::Chain tone(NoShaders()), comp(NoShaders());
 				LedDrive::MeasurementHook measure;
 				CalibrationLutStage::Hook lut;
 				OutputSegments::OutputColourSegment s2(tone, stage.TrimsHook(), measure, comp, lut);
 				PipelineSlots::Registry registry;
-				registry.SetEnabled(PipelineSlots::Id::ColourSdrToneShape, colourRuns);
+				registry.SetEnabled(PipelineSlots::Id::ColourDmTrims, colourRuns);
+				registry.SetEnabled(PipelineSlots::Id::ColourDmCurve, colourRuns);
 				tags.clear();
 				const OutputSegments::ColourCounts counts = s2.Collect(colourFrame, registry, hooks,
 					[this, &hooks](size_t start, PipelineSlots::Id slot) { for (size_t i = start; i < hooks.size(); ++i) tags.push_back(slot); });
@@ -410,7 +411,7 @@ namespace Tests
 				run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
 				Assert::AreEqual<size_t>(1, run.trimsHooks, L"one trims hook from the segment");
 				Assert::AreEqual<ptrdiff_t>(1, std::count(hooks.begin(), hooks.end(), DummyHook()), L"exactly once in the frame");
-				Assert::IsTrue(run.tags.size() == 1 && run.tags[0] == PipelineSlots::Id::ColourSdrToneShape, L"tagged to its slot");
+				Assert::IsTrue(run.tags.size() == 1 && run.tags[0] == PipelineSlots::Id::ColourDmTrims, L"tagged to its slot");
 				Assert::IsFalse(reg.Has("Dolby Vision trims"), L"active: no fallback");
 				Assert::AreEqual(std::string("DV trims: L2"), stage.TrimsStatus());
 			}
