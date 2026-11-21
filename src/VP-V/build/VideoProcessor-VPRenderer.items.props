@@ -38,6 +38,7 @@
     <ClCompile Include="..\VP-V\modules\motion\consumers\IntentMotionMethods.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedSdrLiftMethods.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedIntentMethods.cpp" />
+    <ClCompile Include="..\VP-V\modules\control\skeleton\RendererHostHelpers.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\RenderedWarp.cpp" />
     <ClCompile Include="..\VP-V\modules\input\capture\GpuCaptureUnpack.cpp" />
     <ClCompile Include="..\VP-V\modules\input\capture\GpuRgbUnpack.cpp" />

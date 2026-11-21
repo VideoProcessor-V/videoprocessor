@@ -14,9 +14,9 @@
 #include <VP-V/modules/motion/consumers/IntentMotionMethods.h>   // P11a-f: compiled in IntentMotionMethods.cpp
 #include <VP-V/modules/drive/led_compensation/LedIntentMethods.h>   // P11a-f: compiled in LedIntentMethods.cpp
 #include <VP-V/modules/drive/led_compensation/LedSdrLiftMethods.h>   // P11a-d: compiled in LedSdrLiftMethods.cpp
-#include <VP-V/modules/output/calibration_lut/CalibrationPresentMethods.inl>   // P11a-e: the calibration pattern present (Impl member)
 #include <VP-V/modules/output/presentation/PresentationHostHelpers.h>   // Package C 4: compiled in PresentationHostHelpers.cpp
 #include <VP-V/modules/motion/consumers/MotionHostHelpers.h>   // Package C 5: compiled in MotionHostHelpers.cpp
+#include <VP-V/modules/control/skeleton/RendererHostHelpers.h>   // Package C 6: compiled in RendererHostHelpers.cpp
 
 void LibplaceboVideoRenderer::Impl::ConfigureIntentInterpreter() { ConfigureIntentMotion(); ConfigureIntentAmbient(); }
 void LibplaceboVideoRenderer::Impl::ConfigureIntentAmbient() { Vpv::LedIntent::ConfigureAmbient(vpv.led.intent, activeSettings); }
@@ -118,6 +118,36 @@ void LibplaceboVideoRenderer::Impl::BuildSigmaDeltaVectorsWithoutExtras(uint64_t
 		[this](uint64_t seq) { return DejudderLiveFieldFor(seq); },
 		[this](const FallbackCatalog::Decision& d) { SyncFallback(d); } };
 	Vpv::MotionHost::BuildSigmaDeltaVectorsWithoutExtras(h, sourceSequence, nextSourceSequence);
+}
+
+void LibplaceboVideoRenderer::Impl::EnsureRebaseDispatch() { Vpv::RendererHost::EnsureRebaseDispatch(rebaseDispatch, log, d3d11); }
+void LibplaceboVideoRenderer::Impl::TagSlotHooks(size_t start, PipelineSlots::Id slot) { Vpv::RendererHost::TagSlotHooks(frameHooks, frameSlotHooks, start, slot); }
+void LibplaceboVideoRenderer::Impl::EngageFallback(const char* id, const std::string& reason) { Vpv::RendererHost::EngageFallback(fallbacks, id, reason); }
+void LibplaceboVideoRenderer::Impl::ReleaseFallback(const char* id) { Vpv::RendererHost::ReleaseFallback(fallbacks, id); }
+void LibplaceboVideoRenderer::Impl::SyncFallback(const FallbackCatalog::Decision& decision) { Vpv::RendererHost::SyncFallback(fallbacks, decision); }
+CustomHookChain::Loader LibplaceboVideoRenderer::Impl::GlslHookLoader() { return Vpv::RendererHost::BuildGlslHookLoader(d3d11, &ReadUserShader); }
+void LibplaceboVideoRenderer::Impl::MaybeReloadDisplayLut() { Vpv::RendererHost::MaybeReloadDisplayLut(calibrationHost, displayLutPath, activeSettings.calibrationLutEnabled, [this]() { displayLutCache.Clear(); LoadDisplayLut(activeSettings, true); }); }
+bool LibplaceboVideoRenderer::Impl::PresentCalibrationPattern() { return Vpv::RendererHost::PresentCalibrationPattern(calibrationHost, d3d11, vpOwnedSwapchain, swapchain, negotiatedSwapchainFormat, outputResourcesRetired, [this](ID3D11Texture2D* b, std::vector<uint32_t>& px, D3D11_TEXTURE2D_DESC& d, std::string& err) { return ReadR10Texture(b, px, d, err); }, fallbacks); }
+bool LibplaceboVideoRenderer::Impl::IsSigmaDeltaRule(const ConfiguredShaderRule& rule) { return Vpv::RendererHost::IsSigmaDeltaRule(rule); }
+std::vector<ConfiguredShaderRule> LibplaceboVideoRenderer::Impl::TemporalDitherSelection(const std::vector<ConfiguredShaderRule>& requested, const std::string& mode) { return Vpv::RendererHost::TemporalDitherSelection(requested, mode); }
+NlsMaskMapping::Mapping LibplaceboVideoRenderer::Impl::KnownNlsMapping() const { return Vpv::RendererHost::KnownNlsMapping(nlsRule, FixedNlsParameters(nlsRule), nlsDecision.stretchRatio, nlsDecision.verticalWarp); }
+void LibplaceboVideoRenderer::Impl::SetNlsSampling(const struct pl_hook* hook, bool catmull) { Vpv::RendererHost::SetNlsSampling(hook, catmull); }
+
+void LibplaceboVideoRenderer::Impl::PublishCustomShaderStatus()
+{
+	Vpv::RendererHost::CustomShaderStatusHost h{ customHooks, lowLatencyQueueActive.load(std::memory_order_acquire),
+		activeSettings, adaptiveDownscale, adaptiveNoSsimLogged, bitrateWeightScale, adaptiveStage,
+		vpv.sourceAnalysis.sourceMonitor, debandLogged, debander, detailPulseRuns, detailPulseLogged,
+		textureRestoreRuns, textureRestoreLogged, shaderStatusMutex, activeCustomShaders };
+	Vpv::RendererHost::PublishCustomShaderStatus(h);
+}
+
+EntranceSegment::Bindings LibplaceboVideoRenderer::Impl::EntranceBindings()
+{
+	return EntranceSegment::Bindings{ &sourceRebase, &debander, &detailPulse, &textureRestore,
+		&pipelineSlots, &activeSettings.pipelineEntranceOnce, &rebaseFactor, &rebaseFactorX, &rebaseFromFactor,
+		&rebaseFromFactorX, &debandThreshold, &vpDebandParams, &detailPulseParams, &textureRestoreParams,
+		&detailPulseRuns, &textureRestoreRuns, &detailPulseInactive, &textureRestoreInactive, &detailPulseAheadSequence };
 }
 
 void LibplaceboVideoRenderer::Impl::ConfigureIntentMotion()

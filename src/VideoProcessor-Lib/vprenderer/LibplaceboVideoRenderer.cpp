@@ -5027,38 +5027,9 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		void EndStageSpan(int span) override { r.entranceSpans.End(span); }
 	};
-	EntranceSegment::Bindings EntranceBindings()
-	{
-		EntranceSegment::Bindings b;
-		b.sourceRebase = &sourceRebase;
-		b.debander = &debander;
-		b.detailPulse = &detailPulse;
-		b.textureRestore = &textureRestore;
-		b.slots = &pipelineSlots;
-		b.entranceOnceSetting = &activeSettings.pipelineEntranceOnce;
-		b.rebaseFactor = &rebaseFactor;
-		b.rebaseFactorX = &rebaseFactorX;
-		b.rebaseFromFactor = &rebaseFromFactor;
-		b.rebaseFromFactorX = &rebaseFromFactorX;
-		b.debandThreshold = &debandThreshold;
-		b.vpDebandParams = &vpDebandParams;
-		b.detailPulseParams = &detailPulseParams;
-		b.textureRestoreParams = &textureRestoreParams;
-		b.detailPulseRuns = &detailPulseRuns;
-		b.textureRestoreRuns = &textureRestoreRuns;
-		b.detailPulseInactive = &detailPulseInactive;
-		b.textureRestoreInactive = &textureRestoreInactive;
-		b.detailPulseAheadSequence = &detailPulseAheadSequence;
-		return b;
-	}
 	EntranceHost entranceHost{ *this };
 	EntranceSegment::Segment entrance{ entranceHost, EntranceBindings() };
 	using OwnedEntrance = EntranceSegment::OwnedEntrance;
-
-	void EnsureRebaseDispatch()
-	{
-		if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
-	}
 
 	// ---- B3: the input side once per source frame (pipeline_entrance_once, ADR-0024) ----
 	bool EntranceOnce() const { return entrance.Once(); }
@@ -5705,24 +5676,6 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t anamorphicSuppressedLayouts = 0;
 	std::string activeNlsShaderPath;
 	std::string lastNlsHookBindingPolicy;
-	// Custom GLSL hooks ([shader.standard.*] with glsl_file). Loaded lazily on
-	// the render thread; the status copy is read under shaderStatusMutex.
-	CustomHookChain::Loader GlslHookLoader()
-	{
-		return {
-			[](const std::string& filename, std::string& source, std::string& reason)
-			{
-				std::string resolvedPath;
-				return ReadUserShader(filename, source, resolvedPath, reason);
-			},
-			[this](const std::string& source) -> const pl_hook*
-			{
-				const pl_hook* hook = d3d11 ? pl_mpv_user_shader_parse(d3d11->gpu, source.data(), source.size()) : nullptr;
-				VpRepeatReuse::TemporalShaderRegistry::Global().Note(hook, source.data(), source.size());   // WP-24 M2
-				return hook;
-			},
-			[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } };
-	}
 	CustomHookChain::Chain customHooks{ GlslHookLoader() };
 	// Statistics consumers of the queued-frame walk (read-only).
 	std::shared_ptr<QueuedFrameStatistics::IObserver> queuedFrameObserver;
@@ -5748,11 +5701,6 @@ struct LibplaceboVideoRenderer::Impl
 	// since plumbing hooks are inserted in front later); OutputHookOrder::OrderSlotsInPlace
 	// puts them in the registry's order without moving any other hook.
 	std::vector<std::pair<const pl_hook*, PipelineSlots::Id>> frameSlotHooks;
-	void TagSlotHooks(size_t start, PipelineSlots::Id slot)
-	{
-		for (size_t i = start; i < frameHooks.size(); ++i)
-			frameSlotHooks.emplace_back(frameHooks[i], slot);
-	}
 	void OrderFrameSlotHooks();   // VPV-HOOK P4-2: defined in VP-V/segments/CoreSegments.inl
 	void ReportRenderErrors();   // VPV-HOOK P4-4: defined in VP-V/segments/CoreSegments.inl
 	void CollectFrameHooks(pl_frame& baseTarget, pl_frame& renderImage, pl_frame& target, const int width, const int height, bool cadenceRepeat, uint64_t frameGeneration, uint64_t sourceSequence, double captureRateHz, const double nominalSourceRateHz, const VideoState& state, const VideoFrame& videoFrame, const std::shared_ptr<const QueuedFrame::ConvertedPayload>& convertedPayload, HdrPeakAnalysisCrop::TrustedPicture& hdrTrustedPicture, SubtitleCutPasteGeometry& relocatedSubtitle, SubtitleBoxPadding& safeSubtitlePadding, bool subtitleCompositionSucceeded, const pl_hook* submittedNls, const bool lowLatencyQueue, CustomHookChain::TemplateValues& hookTemplates, SigmaDeltaVectors::NextVectorGuard& nextVectorGuard, pl_render_params& frameParams, pl_render_errors& renderErrors, bool& extendedRangeRelabelled, TemporalHistoryPolicy::Decision& temporalEntrance);   // VPV-HOOK P4 f: defined in VP-V/segments/CoreSegments.inl
@@ -5801,23 +5749,6 @@ struct LibplaceboVideoRenderer::Impl
 	FeatureTextureIdle::Releaser extendedRangeIdle;
 	// test/dv-synthetic 2026-10-24: the DV tunnel's SDR passthrough repacked to BGRA8 (tunnelSdrRepack).
 	std::vector<uint32_t> tunnelSdrBgra;
-	void EngageFallback(const char* id, const std::string& reason)
-	{
-		if (fallbacks.Engage(id, reason))
-			DebugLog::Log("%s", fallbacks.Heading().c_str());
-	}
-	void ReleaseFallback(const char* id)
-	{
-		if (fallbacks.Release(id))
-			DebugLog::Log("%s", fallbacks.Heading().c_str());
-	}
-	// Silent-fallbacks batch (module findings 2026-10-24): one line per site; the wording and when an
-	// entry is engaged live in VP-V/core/FallbackCatalog.h (CPU-tested).
-	void SyncFallback(const FallbackCatalog::Decision& decision)
-	{
-		if (FallbackCatalog::Sync(fallbacks, decision))
-			DebugLog::Log("%s", fallbacks.Heading().c_str());
-	}
 	FallbackCatalog::LookAheadFailures motionAheadFailures = FallbackCatalog::MotionAheadWorker(), sourceAheadFailures = FallbackCatalog::SourceResolutionWorker();   // render-loop thread only
 	// Pipeline skeleton (design freeze 2026-10-24): the ONE slot registry (VP-V/core/SlotRegistry.h). It
 	// decides which slots run and in which order: the entrance stage list (S1, EntranceSegment) and the
@@ -9443,17 +9374,6 @@ struct LibplaceboVideoRenderer::Impl
 		SetDisplayLutStatus("Loaded");
 	}
 
-	void MaybeReloadDisplayLut()
-	{
-		// WP-12: VP's automatic reload (the calibration adapter's reload policy; Bill's explicit
-		// Apply is the other choice, see CalibrationLutHostPolicy.h).
-		if (calibrationHost.LutReloadDue(displayLutPath, activeSettings.calibrationLutEnabled, GetTickCount64()))
-		{
-			// The parse cache is keyed on path only: a changed file must be re-read (as Bill's Apply does).
-			displayLutCache.Clear();
-			LoadDisplayLut(activeSettings, true);
-		}
-	}
     void ApplyPendingDisplayLutReloadLocked()
     {
         // Capture once. An Apply arriving during I/O must remain pending.
@@ -10723,39 +10643,6 @@ struct LibplaceboVideoRenderer::Impl
 		return true;
 	}
 
-	// temporal_dither (owner 2026-10-16): the sigma-delta rule removed (off, libplacebo) or added
-	// (sigma_delta) to the shader list's selection; auto leaves it as the list says.
-	static bool IsSigmaDeltaRule(const ConfiguredShaderRule& rule)
-	{
-		std::string f = rule.filename;
-		std::transform(f.begin(), f.end(), f.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-		return f.find("sigma-delta") != std::string::npos || f.find("sigma_delta") != std::string::npos;
-	}
-	static std::vector<ConfiguredShaderRule> TemporalDitherSelection(const std::vector<ConfiguredShaderRule>& requested,
-		const std::string& mode)
-	{
-		std::vector<ConfiguredShaderRule> out;
-		bool have = false;
-		for (const ConfiguredShaderRule& rule : requested)
-		{
-			if (IsSigmaDeltaRule(rule))
-			{
-				if (mode == "off" || mode == "libplacebo") continue;
-				have = true;
-			}
-			out.push_back(rule);
-		}
-		if (mode == "sigma_delta" && !have)
-		{
-			ConfiguredShaderRule rule;
-			rule.name = "vp.temporal_dither";
-			rule.label = "Temporal sigma-delta (VP)";
-			rule.filename = "Temporal sigma-delta.glsl";
-			rule.stageOrder = 90;
-			out.push_back(rule);
-		}
-		return out;
-	}
 	std::vector<ConfiguredShaderRule> requestedShaderSelection;
 	std::string requestedShaderSelectorRaw;
 	bool requestedShaderSelectionSet = false;
@@ -10865,65 +10752,6 @@ struct LibplaceboVideoRenderer::Impl
 			requestedShaderSelector.c_str(), nlsRule.name.c_str(),
 			nlsRule.filename.c_str(),
 			static_cast<unsigned long long>(nlsRendererGeneration), customCount);
-	}
-
-	void PublishCustomShaderStatus()
-	{
-		auto descriptions = customHooks.ActiveDescriptions(
-			lowLatencyQueueActive.load(std::memory_order_acquire));
-		// Stage 8-2: the blend's own line (what it is doing on this disc).
-		if (activeSettings.adaptiveDownscale)
-		{
-			char line[160];
-			const AdaptiveDownscale::Stats st = adaptiveDownscale.LastStats();
-			if (adaptiveNoSsimLogged)
-				std::snprintf(line, sizeof(line), "Adaptive downscale: needs SSimDownscaler");
-			else if (!adaptiveDownscale.Active())
-				std::snprintf(line, sizeof(line), "Adaptive downscale: idle (not downscaling)");
-			else if (!st.valid)
-				std::snprintf(line, sizeof(line), "Adaptive downscale: measuring");
-			else
-				std::snprintf(line, sizeof(line), "Adaptive downscale: grain %.2f, w %.2f%s%s", st.grainScale, st.meanW,
-					adaptiveDownscale.LastMapState() == AdaptiveDownscale::MapState::Used ? ", grain map" :
-					activeSettings.adaptive.grainMap ? ", no vectors (per-frame grain)" : "",
-					bitrateWeightScale < 1.0 ? (", low bitrate x" + std::to_string(bitrateWeightScale).substr(0, 4)).c_str() : "");
-			descriptions.push_back(line);
-		}
-		// Stage 8b's form and the motion-adapted blend (VP-V scaling.output: its own lines).
-		for (const std::string& stageLine : adaptiveStage.StatusLines())
-			descriptions.push_back(stageLine);
-		// Stage 12: the source's effective resolution, bitrate quality and bit depth.
-		descriptions.push_back(SourceResolutionMonitor::Describe(vpv.sourceAnalysis.sourceMonitor.Read(), vpv.sourceAnalysis.sourceMonitor.AutoRatio(),
-			activeSettings.sourceResolution == "auto"));
-		if (activeSettings.debandVp != "off" && !debandLogged.empty())
-		{
-			std::string line = debandLogged;
-			if (debander.HeldFrames() > 0)
-				line += "; held along the vectors (" + std::to_string(debander.HeldFrames()) + " frames)";
-			descriptions.push_back(line);
-		}
-		// detail_pulse_stabilise / texture_restore: one line each while they run.
-		if (detailPulseRuns && !detailPulseLogged.empty())
-			descriptions.push_back(detailPulseLogged);
-		if (textureRestoreRuns && !textureRestoreLogged.empty())
-			descriptions.push_back(textureRestoreLogged);
-		std::lock_guard<std::mutex> guard(shaderStatusMutex);
-		activeCustomShaders = descriptions;
-	}
-
-	// 6c-2 / 8-3: the NLS map of the submitted NLS rule, when it is one of the
-	// bundled files by its exact name (a user's MyNLS.glsl is not the bundled
-	// NLS; audit 6c-2); otherwise invalid.
-	NlsMaskMapping::Mapping KnownNlsMapping() const
-	{
-		const std::string file = nlsRule.filename;
-		const size_t slash = file.find_last_of("\\/");
-		const std::string name = slash == std::string::npos ? file : file.substr(slash + 1);
-		const bool plus = _stricmp(name.c_str(), "NLSPlus.glsl") == 0;
-		if (!plus && _stricmp(name.c_str(), "NLS.glsl") != 0)
-			return NlsMaskMapping::Mapping();
-		return NlsMaskMapping::FromParameters(FixedNlsParameters(nlsRule),
-			nlsDecision.stretchRatio, nlsDecision.verticalWarp, plus);
 	}
 
 	static std::map<std::string, std::string> FixedNlsParameters(
@@ -11207,19 +11035,6 @@ struct LibplaceboVideoRenderer::Impl
 		if (boundState)
 			*boundState = ReadNlsHookMapping(hook);
 		return stretchUpdated && axisUpdated;
-	}
-
-	// Hunt 2 M1: the NLS shaders' `sampling` parameter (DYNAMIC: no recompile).
-	// A user's own NLS shader without it is left alone.
-	static void SetNlsSampling(const struct pl_hook* hook, bool catmull)
-	{
-		for (int index = 0; hook && index < hook->num_parameters; ++index)
-		{
-			const struct pl_hook_par& parameter = hook->parameters[index];
-			if (parameter.name && parameter.data && parameter.type == PL_VAR_FLOAT &&
-				strcmp(parameter.name, "sampling") == 0)
-				parameter.data->f = catmull ? 1.0f : 0.0f;
-		}
 	}
 
 	void LogNlsHookBinding(const NlsMappingDecision& decision,
@@ -14063,6 +13878,19 @@ struct LibplaceboVideoRenderer::Impl
 	void ApplyResyncLibplaceboFlush(uint64_t sourceSequence);   // VPV-HOOK
 	void ApplyMotionInvalidate();   // VPV-HOOK
 	void UpdateDejudderEstimate(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& next, const std::shared_ptr<const QueuedFrame::ConvertedPayload>& current, const VideoFrameFormatterOutputContract& contract, int width, int height, size_t rowBytes, int chromaHeight, bool lossless422, bool flipped, uint64_t sourceSequence, bool cadenceRepeat, bool nativeRgb, bool interlaced, double sourceHz, uint64_t nextSourceSequence);   // VPV-HOOK
+	EntranceSegment::Bindings EntranceBindings();   // VPV-HOOK
+	void EnsureRebaseDispatch();   // VPV-HOOK
+	CustomHookChain::Loader GlslHookLoader();   // VPV-HOOK
+	void TagSlotHooks(size_t start, PipelineSlots::Id slot);   // VPV-HOOK
+	void EngageFallback(const char* id, const std::string& reason);   // VPV-HOOK
+	void ReleaseFallback(const char* id);   // VPV-HOOK
+	void SyncFallback(const FallbackCatalog::Decision& decision);   // VPV-HOOK
+	void MaybeReloadDisplayLut();   // VPV-HOOK
+	static bool IsSigmaDeltaRule(const ConfiguredShaderRule& rule);   // VPV-HOOK
+	static std::vector<ConfiguredShaderRule> TemporalDitherSelection(const std::vector<ConfiguredShaderRule>& requested, const std::string& mode);   // VPV-HOOK
+	void PublishCustomShaderStatus();   // VPV-HOOK
+	NlsMaskMapping::Mapping KnownNlsMapping() const;   // VPV-HOOK
+	static void SetNlsSampling(const struct pl_hook* hook, bool catmull);   // VPV-HOOK
 
 	void WarmIdleMotionEngine(const VideoFrameFormatterOutputContract& contract, bool lossless422, bool nativeRgb);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/EngineKeeper.inl
 
