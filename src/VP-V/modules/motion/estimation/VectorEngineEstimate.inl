@@ -302,8 +302,11 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			vectorEngine.motionProducer->SetTargetSize(engineW, engineH);
 		// MotionValidity step 1 D: a stored pair only for adjacent frames of the current
 		// epoch (otherwise the matcher runs).
-		MotionAhead::FlowPtr flow = motionValidity.PairServes(aSequence, bSequence, motionValidity.EpochOfLastKept(),
-			motionValidity.Epoch())   // W1-C2a A1 / S2
+		// GF-P4 MUST-11: asked ONCE per estimate (PairValidAt counts confirmed-cut refusals and ConfirmedCutAt unjudged pairs),
+		// and the on-demand gate below reuses the answer (the same expression, so one consistent verdict per pair).
+		const bool pairServes = motionValidity.PairServes(aSequence, bSequence, motionValidity.EpochOfLastKept(),
+			motionValidity.Epoch());   // W1-C2a A1 / S2
+		MotionAhead::FlowPtr flow = pairServes
 			? vectorEngine.FindCurrent(aSequence, bSequence) : nullptr;   // SK-MV: P2 read through the view; C2a-F 2: current stream generation only
 		if (flow) ++vectorEngine.motionAheadHits; else ++vectorEngine.motionAheadMisses;
 		// Latch review 2026-10-17: the engine's whole-frame motion (z < 0.9 usable) for
@@ -315,8 +318,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		// GEM VE-GLOBAL (MUST-4): BEFORE the global and the record sample below, so a pair filled on demand feeds them too (one sample per pair).
 		{
 			const bool onDemandAllowed = bSequence > aSequence + 1 ? motionValidity.LastCause() == MotionValidity::Cause::Gap :
-				motionValidity.PairValid(aSequence, bSequence, motionValidity.EpochOfLastKept(), motionValidity.Epoch()) &&
-				motionValidity.PairValidAt(aSequence, bSequence);
+				pairServes;
 			FallbackCatalog::NoPairCause onDemandCause = FallbackCatalog::NoPairCause::None;
 			flow = vectorEngine.OnDemandFill(std::move(flow), aSequence, bSequence, onDemandAllowed, onDemandCause);
 		}
