@@ -1079,7 +1079,7 @@ namespace SkeletonCoreContextTestsNs
 			// Precondition: some card flips a lane decision of this kept graph (the entries' grant / tier / history).
 			CardProfile card2 = r.card;
 			bool found = false;
-			const uint64_t frees[] = { 1ull, 4096ull, 1ull << 16, 1ull << 20, 1ull << 22 };
+			const uint64_t frees[] = { 1ull << 22, 1ull << 20, 1ull << 16, 4096ull, 1ull };   // descending: the first flip is the smallest one that flips
 			for (size_t i = 0; i < sizeof(frees) / sizeof(frees[0]) && !found; ++i)
 			{
 				CardProfile c = r.card;
@@ -1097,6 +1097,7 @@ namespace SkeletonCoreContextTestsNs
 			r.lane.Configure(OnSettings(), r.reg, r.consumers, r.gs, card2, r.tier, 0, false);
 			const std::shared_ptr<LaneState> after = r.lane.State();
 			Assert::IsTrue(after != nullptr, L"the rebuilt state is built");
+			Assert::IsTrue(r.lane.Active(), L"the lane is still active after the rebuild");
 			Assert::IsTrue(after.get() != before.get(), L"a new state");
 			Assert::IsTrue(after->generation > before->generation);
 			Assert::AreEqual(uint64_t(1), r.lane.PlanMovedRebuilds());
