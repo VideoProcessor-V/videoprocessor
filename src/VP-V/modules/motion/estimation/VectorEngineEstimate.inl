@@ -320,7 +320,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			FallbackCatalog::NoPairCause onDemandCause = FallbackCatalog::NoPairCause::None;
 			flow = vectorEngine.OnDemandFill(std::move(flow), aSequence, bSequence, onDemandAllowed, onDemandCause);
 		}
-		vectorEngine.NoteGlobalPair(flow != nullptr);   // VPV-HOOK
+		vectorEngine.NoteGlobalPair(flow != nullptr && bSequence == aSequence + 1);   // VPV-HOOK; GEM-W1A S3: adjacent pairs only, as the sample below (a gap pair feeds no global)
 		// W1-C4: the pair's ONE sample (MotionRecord::EstimatePair, audit MUST 1) is read by the engine's CPU record (K4:
 		// IVectorEngine::EngineGlobal) and feeds the source monitor's fast-pan motion and the motion intent (the same whole-frame
 		// motion for this valid pair, in picture heights per frame; read-only) through the one feed (MotionRecord::Feed). This path
