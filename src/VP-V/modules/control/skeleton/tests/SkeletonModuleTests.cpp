@@ -3043,6 +3043,29 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(GpuOwnerFillCause(rig, 6) != VpSkeleton::AcquireCause::NoGpuDispatcher, L"attached again");
 		}
 
+		// GF-P2b E2 (test first): on a fresh renderer the order GpuCreated (the device attaches) -> SettingsApplied (the store registers, the
+		// tap generation moves) -> Begin must leave the memo its device. The dead-renderer branch of Reconcile used to detach it.
+		TEST_METHOD(AStoreRegisteringAfterGpuCreatedDoesNotDetachTheNewRenderersDevice)
+		{
+			Rig rig(Lane("on"));
+			int fakeGpu = 0;
+			rig.ResyncApply("on");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			Assert::IsTrue(memo->HasGpuDevice(), L"attached by GpuCreated");
+			const uint64_t generationBefore = Tap::Generation(rig.Host());
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);   // the store registers at the first SettingsApplied of a fresh renderer
+			SceneStoreGuard guard(rig.Host());
+			Assert::IsTrue(Tap::Generation(rig.Host()) != generationBefore, L"the tap generation moved");
+			rig.Life(RE::Lifecycle::SettingsApplied);
+			rig.Frame(1);   // Begin
+			memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			Assert::IsTrue(memo->HasGpuDevice(), L"the new renderer's device is still attached after the Begin");
+		}
+
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
 		{
 			Rig rig(Lane("on"));
