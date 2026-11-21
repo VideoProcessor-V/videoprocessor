@@ -364,5 +364,62 @@ namespace Tests
 				Assert::IsTrue(rgb[c] >= -1e-9, (L"channel " + std::to_wstring(c) + L" stays at or above black").c_str());
 			Assert::IsTrue(DolbyVisionTrims::ToNits(rgb[1], signal) > nits[1], L"still lifted");
 		}
+		// GEM-008 ([C]:126): the trims' own ToNits / FromNits on a BT.1886 output match libplacebo's pl_color_linearize and keep
+		// the below-black / above-white odd symmetry. ExtendedRange::ToLinear for BT.1886 is BLACK-RELATIVE, (L(v) - L(0)) /
+		// (L(1) - L(0)), while pl_color_linearize is absolute (L(0) = the display black); the comparison therefore normalises
+		// libplacebo's output the same way before the 1e-5 check. Before the fix a BT.1886 output was a pure power law.
+		TEST_METHOD(Bt1886SignalMatchesLibplaceboLinearize)
+		{
+			for (const float blackNits : { 0.005f, 0.05f, 0.2f })
+			{
+				pl_color_space colour{};
+				colour.primaries = PL_COLOR_PRIM_BT_709;
+				colour.transfer = PL_COLOR_TRC_BT_1886;
+				colour.hdr.max_luma = 100.0f;
+				colour.hdr.min_luma = blackNits;
+				pl_color_space_infer(&colour);
+				const std::wstring label = L"black " + std::to_wstring(blackNits) + L" nits";
+
+				DolbyVisionTrims::Signal signal;
+				signal.pq = false;
+				signal.gamma = 2.4;
+				signal.peakNits = 100.0;
+				Assert::IsTrue(ExtendedRange::DescribeTransfer(colour, true, signal.transfer), label.c_str());
+				Assert::IsTrue(signal.transfer.kind == ExtendedRange::TransferKind::Bt1886, label.c_str());
+				Assert::IsTrue(signal.transfer.param > 0.0f, (label + L": a non-zero black gives a non-zero offset b").c_str());
+
+				auto libplacebo = [&](double v)
+				{
+					float rgb[3] = { static_cast<float>(v), static_cast<float>(v), static_cast<float>(v) };
+					pl_color_linearize(&colour, rgb);
+					return static_cast<double>(rgb[0]);
+				};
+				const double l0 = libplacebo(0.0), l1 = libplacebo(1.0);
+				Assert::IsTrue(l1 > l0, L"libplacebo's BT.1886 black is below its white");
+				for (int k = 0; k <= 20; ++k)
+				{
+					const double v = k / 20.0;
+					const double reference = (libplacebo(v) - l0) / (l1 - l0);   // normalised to black-relative
+					const double nits = DolbyVisionTrims::ToNits(v, signal);
+					Assert::AreEqual(reference, nits / signal.peakNits, 1e-5, (label + L": ToNits matches pl_color_linearize (normalised) at v " + std::to_wstring(v)).c_str());
+					// The inverse returns the signal, and the below-black / above-white side is odd-symmetric.
+					Assert::AreEqual(v, DolbyVisionTrims::FromNits(nits, signal), 1e-9, (label + L": FromNits inverts ToNits").c_str());
+					Assert::AreEqual(-nits, DolbyVisionTrims::ToNits(-v, signal), 0.0, (label + L": below black is odd-symmetric").c_str());
+					Assert::AreEqual(-v, DolbyVisionTrims::FromNits(-nits, signal), 1e-9, (label + L": the inverse keeps below black").c_str());
+				}
+				// BTB / WTW are carried, not clipped: whiter than white is above the peak, monotonic.
+				Assert::IsTrue(DolbyVisionTrims::ToNits(1.05, signal) > signal.peakNits, L"WTW stays above the peak");
+				Assert::IsTrue(DolbyVisionTrims::ToNits(-0.02, signal) < 0.0, L"BTB stays below zero");
+				// It is NOT the pure power law of the dv_gamma path (a non-zero black lifts the shadows).
+				if (blackNits >= 0.05f)
+				{
+					DolbyVisionTrims::Signal power = signal;
+					power.transfer = { ExtendedRange::TransferKind::Power, 0.0f };
+					Assert::IsTrue(std::fabs(DolbyVisionTrims::ToNits(0.05, signal) - DolbyVisionTrims::ToNits(0.05, power)) > 1e-3,
+						(label + L": differs from the pure 2.4 power in the shadows").c_str());
+				}
+			}
+		}
+
 	};
 }
