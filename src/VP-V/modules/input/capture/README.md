@@ -305,3 +305,5 @@ The D5 DV tap (refs/118 section 9) follows the same rule:
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+Source ring notes (CG-1): the ring epoch is the memo/queue-fact epoch (readers key on memo->Epoch()); OnQueueFact advances it between Begins. The graveyard is released at Begin (CaptureExtension::OnFrame, a FIRST-WINS phase); if Begin ever gains a consuming handler, the release must move to a fan-out phase. Only Wanted() feeds hold hand-offs; ~HostBinding clears Wanted and releases the graveyard before Unregister. The motion walk hands over opaque extensions; the decode lives here, so motion never includes capture.

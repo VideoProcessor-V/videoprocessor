@@ -20,6 +20,8 @@
 #include <VP-V/modules/motion/estimation/MotionValidity.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
+#include <VP-V/modules/input/capture/CaptureHost.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/TapSource.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
@@ -355,6 +357,7 @@ namespace Vpv
 
 			// Written by the lifecycle thread (the render thread), read there.
 			Settings settings;
+			Vpv::TapSource::Counters tapCounters;   // P10 D5: per-frame GPU-source / CPU-tap causes (the phase C reader counts into it)
 			std::atomic<bool> active{ false };
 			std::atomic<bool> reporting{ false };   // off, but an invalid key is being shown
 			std::atomic<uint32_t> settingsGen{ 1 };
@@ -1358,6 +1361,9 @@ namespace Vpv
 			st->settings = s;
 			st->laneRaise = laneRaise;               // 15c-c8: before UpdateDispatcher (a raised lane has no GPU dispatcher)
 			st->configuredLaneMode = configuredMode;
+			// P10 D5: the source ring is fed only while the lane runs with lane_tap_source = auto (Original: cpu, never fed).
+			if (const std::shared_ptr<Vpv::Capture::HostEntry> capture = Vpv::Capture::Find(host))
+				capture->sourceRing.SetWanted(s.TapRingWanted());
 			st->gpu = static_cast<pl_gpu>(gpuSlots_.Aux(host));   // const pl_gpu_t*
 			UpdateDispatcher(*st);
 			st->settingsGen.fetch_add(1, std::memory_order_relaxed);
@@ -1413,6 +1419,8 @@ namespace Vpv
 			const void* host = st->host;
 			st->active.store(false, std::memory_order_release);
 			st->reporting.store(false, std::memory_order_release);
+			if (const std::shared_ptr<Vpv::Capture::HostEntry> capture = Vpv::Capture::Find(host))
+				capture->sourceRing.SetWanted(false);   // no reader: the ring clears (its references drop at the next Begin)
 			if (st->tapOn)
 			{
 				VpFrameAnalysis::SourceFrameTap::Unregister(host);
@@ -2284,6 +2292,11 @@ namespace Vpv
 					break;
 				case RE::QueueEvent::BacklogFlush: break;
 				}
+				// P13 source ring: the epoch AT the fact (any thread), so the next Feed flushes the ring even before the next Begin's
+				// window publish. Not the board: it has one writer (Begin).
+				if (f.kind != RE::QueueEvent::Drop && f.kind != RE::QueueEvent::BacklogFlush)
+					if (const std::shared_ptr<Vpv::Capture::HostEntry> capture = Vpv::Capture::Find(f.host))
+						capture->sourceRing.OnQueueFact(mhq->memo->Epoch());
 			}
 			if (f.kind != RE::QueueEvent::Drop || f.seq <= 0 || f.frames == 0)
 				return;
@@ -2365,6 +2378,15 @@ namespace Vpv
 			const VpSkeleton::QueueWindow w = VpSkeleton::DeriveWindow(t, seq, memo->Epoch());
 			memo->SetWindow(w);
 			mh->board.Publish(w);
+			// P10 D5: the P13 ring's capacity and key epoch are DERIVED from this window (SourceRing::Update reads its own board).
+			if (const std::shared_ptr<Vpv::Capture::HostEntry> capture = Vpv::Capture::Find(host))
+				capture->sourceRing.Board().Publish(w);
+		}
+
+		static Vpv::Capture::SourceRing::Stats TapRingStats(const void* host)
+		{
+			const std::shared_ptr<Vpv::Capture::HostEntry> capture = Vpv::Capture::Find(host);
+			return capture ? capture->sourceRing.GetStats() : Vpv::Capture::SourceRing::Stats();
 		}
 
 		const VpSkeleton::QueueWindowBoard* SkeletonModule::WindowBoardOf(const void* host) const
@@ -2972,6 +2994,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					addDecision(FallbackCatalog::SkeletonGpuLive(true));   // RunDeferredLive is not called before the Entrance phase
 					addDecision(FallbackCatalog::SkeletonGpuGapAhead(gap));
 					addDecision(FallbackCatalog::SkeletonGpuGapOff(!gap));
+					addDecision(FallbackCatalog::SkeletonTapSource(Vpv::TapSource::Status(st.tapCounters, TapRingStats(st.host))));
 					addDecision(FallbackCatalog::SkeletonGpuChroma(true));   // P10c is not made before the source ring exists
 					addDecision(FallbackCatalog::SkeletonGpuLightPending(b->lightPendingAsNone.load(std::memory_order_relaxed)));   // A2: visible until G6
 					addDecision(FallbackCatalog::SkeletonGpuFailed(gd->Stats().failures, gd->LastError()));
@@ -3123,6 +3146,12 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					full.push_back("Skeleton scene: U7 fade run missing for " + std::to_string(rebuilt + reduced) + " frame(s): " +
 						std::to_string(rebuilt) + " rebuilt exactly from older P4 records, " + std::to_string(reduced) +
 						" with REDUCED evidence (the older records had left the lane ring; a slow fade there is found later)");
+			}
+			if (st.settings.LaneWanted() || st.tapCounters.Fallbacks() != 0)
+			{
+				const std::string ring = Vpv::TapSource::DescribeRing(TapRingStats(st.host));
+				full.push_back("Skeleton " + Vpv::TapSource::Describe(st.tapCounters) + (ring.empty() ? std::string() : "; " + ring) +
+					(st.settings.tapSource == TapSourceMode::Cpu ? " (lane_tap_source cpu)" : ""));
 			}
 			full.push_back("Skeleton: " + std::to_string(st.frames) + " frames, " + std::to_string(st.srcFrames.load(std::memory_order_relaxed)) +
 				" source frames tapped, " + std::to_string(st.dropsApplied) + " drops applied, " + std::to_string(st.gapsRun) +

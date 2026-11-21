@@ -153,6 +153,18 @@ public:
 		return nullptr;
 	}
 
+	// P10 D5 (refs/118 s3): a NON-MUTATING read for a second reader of a queued frame's slot (the P13 source ring). Returns the
+	// slot (a copy) only in the Attached state; otherwise null, with the state in *observed (Pending / Uploading = not yet; None /
+	// Abandoned = there will be no slot). Never waits, never abandons, never sets `taken`: the render's own Take() counts
+	// (Early / Late / WaitedThenEarly) are unchanged by any number of peeks.
+	std::shared_ptr<void> PeekAttached(State* observed = nullptr) const
+	{
+		std::lock_guard<std::mutex> lock(m);
+		if (observed)
+			*observed = state;
+		return state == State::Attached ? slot : std::shared_ptr<void>();
+	}
+
 	State Peek() const
 	{
 		std::lock_guard<std::mutex> lock(m);

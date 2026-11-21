@@ -36,6 +36,10 @@ namespace Vpv
 			void OnLifecycle(RE::LifecycleFacts& f) override;
 			bool OnConvertedFrame(RE::FrameContext& c, RE::ConvertContext& cc) override;
 			void OnAfterPublish(RE::FrameContext& c, RE::PublishView& pv) override;
+			// P10 D5 (refs/118): the P13 source ring. The ring is FED through the core interface (core/SourceRingFeed.h, carrier
+			// (a): the walk finds it by host, no phase carries the frames); Begin (render thread, no queue lock): the ring's
+			// graveyard is released. Observation only: always false, so every other module still sees the phase.
+			bool OnFrame(RE::FrameContext& c) override;
 		};
 
 		// Start-up only (HubBootstrap); idempotent.

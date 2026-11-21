@@ -61,6 +61,9 @@
     <ClCompile Include="..\VP-V\modules\input\source_analysis\lane\tests\EngineLumaGpuTwinTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\capture\tests\SourceRingTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\capture\tests\EarlyUploadHandoffTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
@@ -584,7 +587,9 @@
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelMetadataExtensionTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelTapLawTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelTapLawExhaustiveTests.cpp" />
-    <ClCompile Include="..\VP-V\modules\input\capture\tests\SourceUnpackGpuTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\capture\tests\SourceUnpackGpuTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\tests\suite\DetailRestoreConfigTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\KernelInverseTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\CustomHookChainTests.cpp" />
