@@ -108,7 +108,7 @@ namespace VideoProcessorTest
 			using namespace VpSkeleton;
 			SkeletonMemo m;
 			const OwnerFill f = Vpv::Regions::MakeEdgeMapOwnerFill(Vpv::Regions::EdgeMapReserveBytes(DimsOf(1920, 1080)));
-			Assert::AreEqual(uint32_t(0), f.variantAxes, L"default variant only");
+			Assert::AreEqual(uint32_t(Vpv::Regions::kEdgeMapAxes), f.variantAxes, L"the default variant plus the stage variant's axes (CB-18 S2b)");
 			Assert::IsTrue(f.frameScoped, L"a per-frame memo");
 			Assert::AreEqual(uint64_t(1920) * 1080u * 4u, f.reserveBytes, L"the reserve given");
 			Assert::AreEqual(std::string(Vpv::Regions::kEdgeMapUnit), SkeletonMemo::OwnerUnitOf(kEdgeMap), L"the catalog's owner unit");
@@ -133,8 +133,8 @@ namespace VideoProcessorTest
 
 			Assert::IsTrue(module.Observe(&hostA, DimsOf(1920, 1080), &demand), L"registered on the first size");
 			Assert::AreEqual(1, demand.registers);
-			Assert::AreEqual(uint64_t(1920) * 1080u * 4u, demand.lastReserve, L"1080p reserve");
-			Assert::AreEqual(uint64_t(1920) * 1080u * 4u, module.RegisteredReserveBytes());
+			Assert::AreEqual(uint64_t(1920) * 1080u * 8u, demand.lastReserve, L"1080p reserve (twice the declared size, CB-18 S2b)");
+			Assert::AreEqual(uint64_t(1920) * 1080u * 8u, module.RegisteredReserveBytes());
 			Assert::IsTrue(m.HasOwnerFill(kEdgeMap, AcquireForm::Gpu), L"the memo holds the fill");
 
 			Assert::IsTrue(module.Observe(&hostA, DimsOf(1920, 1080), &demand), L"same size");
@@ -143,14 +143,14 @@ namespace VideoProcessorTest
 			Assert::IsTrue(module.Observe(&hostB, DimsOf(3840, 2160), &demand), L"a larger host");
 			Assert::AreEqual(1, demand.unregisters, L"the old fill removed");
 			Assert::AreEqual(2, demand.registers, L"re-registered once");
-			Assert::AreEqual(uint64_t(3840) * 2160u * 4u, module.RegisteredReserveBytes(), L"the largest live size");
+			Assert::AreEqual(uint64_t(3840) * 2160u * 8u, module.RegisteredReserveBytes(), L"the largest live size");
 
 			Assert::IsTrue(module.Observe(&hostA, DimsOf(1280, 720), &demand), L"a smaller host below the largest");
 			Assert::AreEqual(2, demand.registers, L"the largest is unchanged: no re-registration");
 
 			module.Forget(&hostB, &demand);
 			Assert::AreEqual(3, demand.registers, L"the largest host left: re-registered");
-			Assert::AreEqual(uint64_t(1280) * 720u * 4u, module.RegisteredReserveBytes(), L"the remaining host's size");
+			Assert::AreEqual(uint64_t(1280) * 720u * 8u, module.RegisteredReserveBytes(), L"the remaining host's size");
 			Assert::IsTrue(m.HasOwnerFill(kEdgeMap, AcquireForm::Gpu), L"still held");
 
 			module.Forget(&hostA, &demand);
