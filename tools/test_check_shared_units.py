@@ -487,6 +487,26 @@ class NearDupUnitPatternsTest(unittest.TestCase):
             role = {h["line"]: h["role"] for h in res["hits"] if h["file"] == f}
             self.assertEqual(role, {1: "duplicate", 2: "duplicate", 3: "duplicate", 7: "consumer"})
 
+    def test_u26_owner_api_is_a_consumer_bare_weights_are_duplicates(self):
+        # C6-3 K1: LumaCoeff::LumaOf( and the VP_LUMA_*_TEXT macros are consumers; a bare 0.2126 or a private LumaOf stays a
+        # duplicate, also next to an accessor. OnePole::AlphaFor calls are not U23 hits at all.
+        with tempfile.TemporaryDirectory() as r:
+            f = "src/VP-V/modules/repair/c/Luma.cpp"
+            _w(r, f, "float y = LumaCoeff::LumaOf(r, g, b, kr, kb);\n"
+                     "float w = 0.2126f * r;\n"
+                     "\"float y = \" VP_LUMA_DOT_PARAM_GLSL_TEXT \";\"\n"
+                     "float z = LumaCoeff::LumaOf(r, g, b, kr, kb) + 0.0722f * b;\n"
+                     "inline float LumaOf(float r, float g, float b);\n"
+                     "double a = OnePole::AlphaFor(dt, tau, OnePole::DtRule::AsGiven);\n")
+            res = csu.scan(r, baseline={"units": {}})
+            role = {h["line"]: h["role"] for h in _unit(res, "U26")["hits"] if h["file"] == f}
+            self.assertEqual(role.get(1), "consumer")
+            self.assertEqual(role.get(2), "duplicate")
+            self.assertNotIn(3, role)   # the macro names carry no signature: not a hit
+            self.assertEqual(role.get(4), "duplicate")
+            self.assertEqual(role.get(5), "duplicate")
+            self.assertFalse([h for h in _unit(res, "U23")["hits"] if h["file"] == f])
+
 
 class RampAllowTest(unittest.TestCase):
     """C6-1 U25: RampMath:: calls are consumers; a bare or other-namespace Smoothstep/Clamp01 stays a duplicate."""
@@ -520,26 +540,6 @@ class RampAllowTest(unittest.TestCase):
             self.assertEqual(role.get(4), "consumer")
             self.assertEqual(role.get(5), "consumer")
             self.assertNotIn(6, role)
-
-    def test_u26_owner_api_is_a_consumer_bare_weights_are_duplicates(self):
-        # C6-3 K1: LumaCoeff::LumaOf( and the VP_LUMA_*_TEXT macros are consumers; a bare 0.2126 or a private LumaOf stays a
-        # duplicate, also next to an accessor. OnePole::AlphaFor calls are not U23 hits at all.
-        with tempfile.TemporaryDirectory() as r:
-            f = "src/VP-V/modules/repair/c/Luma.cpp"
-            _w(r, f, "float y = LumaCoeff::LumaOf(r, g, b, kr, kb);\n"
-                     "float w = 0.2126f * r;\n"
-                     "\"float y = \" VP_LUMA_DOT_PARAM_GLSL_TEXT \";\"\n"
-                     "float z = LumaCoeff::LumaOf(r, g, b, kr, kb) + 0.0722f * b;\n"
-                     "inline float LumaOf(float r, float g, float b);\n"
-                     "double a = OnePole::AlphaFor(dt, tau, OnePole::DtRule::AsGiven);\n")
-            res = csu.scan(r, baseline={"units": {}})
-            role = {h["line"]: h["role"] for h in _unit(res, "U26")["hits"] if h["file"] == f}
-            self.assertEqual(role.get(1), "consumer")
-            self.assertEqual(role.get(2), "duplicate")
-            self.assertNotIn(3, role)   # the macro names carry no signature: not a hit
-            self.assertEqual(role.get(4), "duplicate")
-            self.assertEqual(role.get(5), "duplicate")
-            self.assertFalse([h for h in _unit(res, "U23")["hits"] if h["file"] == f])
 
 
 class FocusAcquireAllowTest(unittest.TestCase):
