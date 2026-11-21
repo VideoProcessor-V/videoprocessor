@@ -447,21 +447,25 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1.0f, wMax, L"the grid reaches w = 1 (the sharp branch alone)");
 		}
 
+		// CF-2 switch-over (WAIVER): the stage's one ask per upscale frame is now kP10gGrainLevel (the default key); the edge
+		// term is the module measure's own kEdgeMap stage variant (S18), so the stage asks no kEdgeMap. Name kept (rule 12).
 		TEST_METHOD(HybridEdgeSeamAsksOncePerFrameForTheStageVariant)
 		{
 			OneAxisStageFixture x;
-			int asks = 0, motionReads = 0;
+			int asks = 0, edgeAsks = 0, motionReads = 0;
 			VpSkeleton::ProductId askedId = VpSkeleton::kNoProduct;
 			VpSkeleton::VariantKey askedKey;
 			uint64_t askedSeq = 0;
 			x.host.acquire = [&](VpSkeleton::ProductId id, uint64_t seq, const VpSkeleton::VariantKey& key)
 			{
 				++asks;
+				if (id == VpSkeleton::kEdgeMap)
+					++edgeAsks;
 				askedId = id;
 				askedKey = key;
 				askedSeq = seq;
 				VpSkeleton::AcquireResult r;
-				r.cause = VpSkeleton::AcquireCause::VariantUndeclared;   // this tip: the owner serves no stage variant
+				r.cause = VpSkeleton::AcquireCause::VariantUndeclared;   // not served: the grain floor
 				return r;
 			};
 			x.host.motion = [&]() { ++motionReads; return AdaptiveDownscaleStage::MotionSource(); };
@@ -470,18 +474,16 @@ namespace VideoProcessorTest
 			f.adaptiveUpscale = true;
 			x.Run(f, hooks);
 			Assert::AreEqual(1, asks, L"one Acquire per frame per product");
+			Assert::AreEqual(0, edgeAsks, L"the stage asks no kEdgeMap (the module measure's stage variant, S18)");
 			Assert::AreEqual(1, motionReads, L"one motion read per frame");
-			Assert::IsTrue(askedId == VpSkeleton::kEdgeMap);
-			Assert::AreEqual(static_cast<int>(VpSkeleton::VariantKey::StageAfter(static_cast<uint8_t>(PipelineSlots::Id::ScalingGeometry))),
-				static_cast<int>(askedKey.stage), L"the planes leaving scaling.geometry");
-			Assert::IsTrue(askedKey.cropX == 0 && askedKey.cropY == 0 && askedKey.cropW == 1920 && askedKey.cropH == 1080, L"the source crop");
+			Assert::IsTrue(askedId == VpSkeleton::kP10gGrainLevel);
+			Assert::IsTrue(askedKey.IsDefault(), L"the default key");
 			Assert::IsTrue(askedSeq == 3);
-			Assert::IsFalse(x.stage.EdgeTerm().published);
-			Assert::IsTrue(x.stage.EdgeTerm().cause.find("variant not served by the owner") != std::string::npos);
 			Assert::IsFalse(x.stage.GrainTerm().published);
-			Assert::IsTrue(HasLine(x.stage.StatusLines(), "edge/grain: private interim (edge: kEdgeMap stage variant"),
-				L"no silent fallback: the interim is on the status");
-			Assert::IsTrue(HasLine(x.stage.StatusLines(), "P10g grain product is not published"));
+			Assert::IsTrue(x.stage.GrainTerm().cause.find("variant not served by the owner") != std::string::npos);
+			Assert::IsTrue(HasLine(x.stage.StatusLines(), "Adaptive upscale grain: no grain level (alias-safe weight; kP10gGrainLevel"),
+				L"no silent fallback: the grain floor is on the status");
+			Assert::IsFalse(HasLine(x.stage.StatusLines(), "private interim"));
 			f.sourceSequence = 4;
 			hooks.clear();
 			x.Run(f, hooks);
@@ -492,10 +494,12 @@ namespace VideoProcessorTest
 			d.adaptiveDownscale = true;
 			hooks.clear();
 			x.Run(d, hooks);
-			Assert::AreEqual(2, asks, L"the downscale form is unchanged: no edge ask");
-			Assert::IsFalse(HasLine(x.stage.StatusLines(), "edge/grain"));
+			Assert::AreEqual(2, asks, L"the downscale form is unchanged: no grain-level ask");
+			Assert::IsFalse(HasLine(x.stage.StatusLines(), "Adaptive upscale grain"));
 		}
 
+		// CF-2 switch-over (WAIVER): a published kP10gGrainLevel clears the grain floor's cause and line; an Ok result without a
+		// texture is not published. The InterimLine checks are deleted with InterimLine. Name kept (rule 12).
 		TEST_METHOD(HybridPublishedEdgeClearsItsInterimCause)
 		{
 			OneAxisStageFixture x;
@@ -511,10 +515,10 @@ namespace VideoProcessorTest
 			AdaptiveDownscaleStage::Frame f = x.Frame(1920, 1080, 2560, 1440);
 			f.adaptiveUpscale = true;
 			x.Run(f, hooks);
-			Assert::IsTrue(x.stage.EdgeTerm().published, L"published: the module reads kEdgeMap");
-			const std::vector<std::string> lines = x.stage.StatusLines();
-			Assert::IsTrue(HasLine(lines, "edge/grain: private interim (grain:"), L"the grain term is still interim");
-			Assert::IsFalse(HasLine(lines, "edge: kEdgeMap"));
+			Assert::IsTrue(x.stage.GrainTerm().published, L"published: the module reads kP10gGrainLevel");
+			Assert::IsTrue(x.stage.GrainTerm().cause.empty());
+			Assert::IsFalse(HasLine(x.stage.StatusLines(), "Adaptive upscale grain"), L"published: no grain-floor line");
+			Assert::IsFalse(x.stage.Fallback().reason.find("no grain level") != std::string::npos);
 			// An Ok result without a texture is not published.
 			x.host.acquire = [](VpSkeleton::ProductId, uint64_t, const VpSkeleton::VariantKey&)
 			{
@@ -525,15 +529,8 @@ namespace VideoProcessorTest
 			f.sourceSequence = 4;
 			hooks.clear();
 			x.Run(f, hooks);
-			Assert::IsFalse(x.stage.EdgeTerm().published);
-			Assert::IsTrue(HasLine(x.stage.StatusLines(), "edge: kEdgeMap stage variant has no GPU texture"));
-			// Both published: no interim line.
-			AdaptiveDownscaleStage::TermSource e, g;
-			e.published = g.published = true;
-			Assert::IsTrue(AdaptiveDownscaleStage::InterimLine(e, g).empty());
-			g.published = false;
-			g.cause = "grain: x";
-			Assert::AreEqual(std::string("edge/grain: private interim (grain: x)"), AdaptiveDownscaleStage::InterimLine(e, g));
+			Assert::IsFalse(x.stage.GrainTerm().published);
+			Assert::IsTrue(HasLine(x.stage.StatusLines(), "kP10gGrainLevel has no GPU texture"));
 		}
 
 		TEST_METHOD(HybridMotionFallbacksNameTheirCause)
@@ -630,7 +627,8 @@ namespace VideoProcessorTest
 
 		// CF-2 FIX1 (gate M1): the module's own motion floor (no usable factor map while the stage found the vectors usable)
 		// engages the "output scaling" entry with its cause. Before FIX1 the entry read only the stage's cause, so this case
-		// was Released (a floor shown on Ctrl+I only). N2: every precedence pair at once. S2: the edge/grain interim is last.
+		// was Released (a floor shown on Ctrl+I only). N2: every precedence pair at once. S2: the grain floor is last (switch-over
+		// WAIVER: the edge/grain interim it replaced is deleted; kP10gGrainLevel not read = the grain floor, never on one axis).
 		TEST_METHOD(HybridModuleMotionFloorReachesTheCatalog)
 		{
 			using AdaptiveDownscale::MotionFloorCause;
@@ -657,12 +655,12 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("adaptive upscale: no vectors, alias-safe weight (resync)"), UpscaleScalingFallback(in).reason,
 				L"the stage's verdict names the cause when both are set");
 
-			// N2: failure + floor + no cut + interim: the failure first; then the floor; then the cut; then the interim.
+			// N2: failure + floor + no cut + grain floor: the failure first; then the floor; then the cut; then the grain floor.
 			in.failureHeld = true;
 			in.scalerError = "shader compile";
 			in.cutAvailable = false;
 			in.cutCause = "no scene group";
-			in.interim = "edge/grain: private interim (grain: x)";
+			in.grainCause = "x";
 			Assert::AreEqual(std::string("libplacebo main scaler alone (adaptive upscale failed on the GPU: alias-safe ScalerPass: shader compile)"),
 				UpscaleScalingFallback(in).reason);
 			in.failureHeld = false;
@@ -673,8 +671,12 @@ namespace VideoProcessorTest
 			in.cutAvailable = true;
 			d = UpscaleScalingFallback(in);
 			Assert::IsTrue(d.engaged && d.id == "output scaling");
-			Assert::AreEqual(std::string("adaptive upscale: edge/grain: private interim (grain: x)"), d.reason, L"S2: the interim on Config status");
-			in.interim.clear();
+			Assert::AreEqual(std::string("adaptive upscale: no grain level, alias-safe grain weight (x)"), d.reason,
+				L"S2: the grain floor on Config status");
+			in.oneAxis = true;
+			Assert::IsFalse(UpscaleScalingFallback(in).engaged, L"one axis is faithful only: no grain floor");
+			in.oneAxis = false;
+			in.grainCause.clear();
 			Assert::IsFalse(UpscaleScalingFallback(in).engaged, L"nothing stands in: released");
 			// A stage cause on one axis is faithful only already (no floor); the module floor flag is never set there.
 			in.stageMotionCause = "resync";
@@ -686,17 +688,17 @@ namespace VideoProcessorTest
 			in.requested = false;
 			in.moduleFloorUsed = true;
 			in.failureHeld = true;
-			in.interim = "x";
+			in.grainCause = "x";
 			Assert::IsFalse(UpscaleScalingFallback(in).engaged, L"not requested: released");
 
-			// The stage, CPU fixture: the upscale form's entry carries the interim (the grain seam is private at this tip).
+			// The stage, CPU fixture (no skeleton memo): the upscale form's entry carries the grain floor.
 			OneAxisStageFixture x;
 			std::vector<const pl_hook*> hooks;
 			AdaptiveDownscaleStage::Frame f = x.Frame(1920, 1080, 2560, 1440);
 			f.adaptiveUpscale = true;
 			x.Run(f, hooks);
 			d = x.stage.Fallback();
-			Assert::IsTrue(d.engaged && d.reason.find("private interim") != std::string::npos);
+			Assert::IsTrue(d.engaged && d.reason.find("no grain level") != std::string::npos);
 		}
 	};
 
