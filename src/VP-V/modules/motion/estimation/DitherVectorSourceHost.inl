@@ -14,6 +14,7 @@
 void LibplaceboVideoRenderer::Impl::BuildSigmaDeltaVectorsWithoutExtras(uint64_t sourceSequence, uint64_t nextSourceSequence)
 {
 	dejudderNextVectorsSequence = 0;
+	dejudderNextVectorsFrom = 0;   // GEM-SD-VECTORS MUST-2: cleared here, set when mapped (CoreSegments.inl CarryValid reads it)
 	ditherNextGate.Clear();
 	namespace DV = VpMotion::DitherVectors;
 	DV::Facts facts;
@@ -60,6 +61,7 @@ void LibplaceboVideoRenderer::Impl::BuildSigmaDeltaVectorsWithoutExtras(uint64_t
 			{
 				dejudderNextVectors = next;
 				dejudderNextVectorsSequence = nextSourceSequence;
+				dejudderNextVectorsFrom = sourceSequence;   // GEM-SD-VECTORS MUST-2: A, for the stamp check at B
 				ditherNextGate.Bind(sourceSequence, nextSourceSequence, dejudderEstimatedEpoch);
 				dejudderNextVectorsGeometry = dejudderGeometry;
 				dejudderNextVectorsW = w;
