@@ -20,6 +20,7 @@
 #include <ConfigFile.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <VP-V/modules/drive/projector_control/SerialPort.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <algorithm>
 #include <cmath>
@@ -1538,11 +1539,10 @@ namespace VideoProcessorTest
 		TEST_METHOD(ProjectorRestoreOnTheRealPort)
 		{
 			char port[32] = {};
-			if (GetEnvironmentVariableA("VP_TEST_PROJECTOR", port, sizeof(port)) == 0)
-			{
-				Logger::WriteMessage("SKIP-NO-PROJECTOR ProjectorRestoreOnTheRealPort (set VP_TEST_PROJECTOR=COMn)\n");
+			const bool hasPort = GetEnvironmentVariableA("VP_TEST_PROJECTOR", port, sizeof(port)) != 0 && port[0] != '\0';
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Hardware,
+				"ProjectorRestoreOnTheRealPort", hasPort, "set VP_TEST_PROJECTOR=COMn"))
 				return;
-			}
 			LedDrive::ProjectorConfig projector;
 			projector.port = port;
 			projector.readBack = true;
@@ -1643,11 +1643,10 @@ namespace VideoProcessorTest
 		TEST_METHOD(RecordRealSpotreadTranscript)
 		{
 			char flag[8] = {};
-			if (GetEnvironmentVariableA("VP_TEST_METER", flag, sizeof(flag)) == 0 || std::string(flag) != "1")
-			{
-				Logger::WriteMessage("SKIP-NO-METER RecordRealSpotreadTranscript (set VP_TEST_METER=1)\n");
+			const bool meterEnabled = GetEnvironmentVariableA("VP_TEST_METER", flag, sizeof(flag)) != 0 && std::string(flag) == "1";
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Hardware,
+				"RecordRealSpotreadTranscript", meterEnabled, "set VP_TEST_METER=1"))
 				return;
-			}
 			char argyll[MAX_PATH] = {}, portText[16] = {};
 			GetEnvironmentVariableA("VP_TEST_ARGYLL", argyll, sizeof(argyll));
 			GetEnvironmentVariableA("VP_TEST_METER_PORT", portText, sizeof(portText));
@@ -1664,6 +1663,7 @@ namespace VideoProcessorTest
 			o.readTimeoutSeconds = 60.0;
 			o.openTimeoutSeconds = 90.0;
 			const std::string name = probe.usage.instruments[0].name;
+			std::vector<Vec3> recorded;
 			{
 				SpotreadMeter meter(o, [path, name, &probe]()
 				{
@@ -1671,15 +1671,39 @@ namespace VideoProcessorTest
 						{ "meter: " + name, "ArgyllCMS spotread version: " + probe.usage.version }));
 				});
 				MeterResult r = meter.Open();
-				Assert::IsTrue(r.status == MeterStatus::Ok || r.status == MeterStatus::NeedsUserAction, W(r.message).c_str());
-				if (r.status == MeterStatus::Ok)
-					for (int i = 0; i < 3; ++i) meter.Read();
+				Assert::IsTrue(r.status == MeterStatus::Ok, W(r.message).c_str());
+				for (int i = 0; i < 3; ++i)
+				{
+					r = meter.Read();
+					Assert::IsTrue(r.status == MeterStatus::Ok, W(r.message).c_str());
+					recorded.push_back(r.xyz);
+				}
 				meter.Close();
 			}
 			const std::string script = ReadFile(path);
 			Logger::WriteMessage(("recorded to " + path + ":\n" + script).c_str());
 			Assert::IsTrue(script.find("OUT") != std::string::npos);
 			Assert::IsTrue(script.find("KEY") != std::string::npos);
+			// Replay the recorded transcript through ScriptedTerminal + SpotreadMeter and check XYZ parity.
+			std::vector<std::string> lines;
+			std::istringstream in(script);
+			for (std::string line; std::getline(in, line);) lines.push_back(line);
+			double now = 0.0;
+			SpotreadMeterOptions replayOpts;
+			replayOpts.spotread = L"C:\\Argyll\\bin\\spotread.exe";
+			replayOpts.readTimeoutSeconds = 5.0;
+			replayOpts.openTimeoutSeconds = 5.0;
+			replayOpts.closeTimeoutSeconds = 1.0;
+			SpotreadMeter replay(replayOpts, [&lines, &now]() { return std::unique_ptr<ITerminal>(new ScriptedTerminal(lines, &now)); },
+				[&now]() { return now; });
+			Assert::IsTrue(replay.Open().status == MeterStatus::Ok, L"replay Open must succeed");
+			for (int i = 0; i < 3; ++i)
+			{
+				const MeterResult rr = replay.Read();
+				Assert::IsTrue(rr.status == MeterStatus::Ok, W(rr.message).c_str());
+				for (int k = 0; k < 3; ++k) Assert::AreEqual(recorded[i][k], rr.xyz[k], 1e-6);
+			}
+			replay.Close();
 		}
 	};
 }
