@@ -13,7 +13,8 @@
 //   2. the fill is Derived, frame-scoped, default variant; the module registers BOTH fills (the P10 variant owner once, P10g at the
 //      largest live size) under the catalog's owning unit, re-registers P10g only on a size change, never the P10 owner twice;
 //   3. the visible declines: no GPU context, no source plane (P13), the P10 split unavailable; each is counted for the status line;
-//   4. the status and Fallbacks texts say the single-frame law is in use (never log-only).
+//   4. the Fallbacks texts (the route that reaches Ctrl+I, Config status, Ctrl+Alt+D) say the single-frame law is in use, name the
+//      declines with the last reason, and show a missing registration; an AlreadyRegistered P10 owner (15b A1) is benign.
 // The GPU parity test (fill vs GrainSplit's CPU blocks and the f^2 block mean) is part of the T5 GPU run (not run here: CODE ONLY).
 
 #include <VP-V/core/GpuAllocator.h>
@@ -41,6 +42,8 @@ namespace VideoProcessorTest
 			int registers = 0;
 			int unregisters = 0;
 			int splitRegisters = 0;
+			bool refuseSplit = false;   // answer the P10 owner NotOwner without forwarding (a refused split owner)
+			VpSkeleton::OwnerFill lastLevelFill;   // a copy of the last P10g fill registered (the module's counters ride in it)
 			void SetExternalDemand(const void*, const void*, const std::vector<VpSkeleton::ConsumerDecl>&,
 				const std::vector<VpSkeleton::ProductId>&) override {}
 			void ClearExternalDemand(const void*, const void*) override {}
@@ -48,8 +51,14 @@ namespace VideoProcessorTest
 				const std::string& unit, VpSkeleton::OwnerFill fill) override
 			{
 				++registers;
+				if (id == VpSkeleton::kP10gGrainLevel)
+					lastLevelFill = fill;
 				if (id == VpSkeleton::kP10GrainSplit)
+				{
 					++splitRegisters;
+					if (refuseSplit)
+						return VpSkeleton::SkeletonMemo::Registration::NotOwner;
+				}
 				return memo->RegisterOwnerFill(id, form, unit, fill);
 			}
 			bool UnregisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form, const std::string& unit) override
@@ -144,6 +153,8 @@ namespace VideoProcessorTest
 			Assert::IsTrue(m.HasOwnerFill(kP10GrainSplit, AcquireForm::Gpu), L"the memo holds the P10 fill");
 			Assert::IsTrue(m.HasOwnerFill(kP10gGrainLevel, AcquireForm::Gpu), L"the memo holds the P10g fill");
 			Assert::AreEqual(L::ReserveBytes(GrainDims(1920, 1080)), module.RegisteredReserveBytes(), L"1080p reserve");
+			Assert::IsFalse(module.SplitOwnerServedElsewhere(), L"the P10 owner is ours here");
+			Assert::IsTrue(module.FallbackLines().empty(), L"both registered, no fill yet: no Fallbacks line");
 
 			Assert::IsTrue(module.Observe(&hostA, GrainDims(1920, 1080), &demand), L"same size");
 			Assert::AreEqual(2, demand.registers, L"same size: no re-registration");
@@ -175,6 +186,71 @@ namespace VideoProcessorTest
 			Assert::IsFalse(module.Observe(&host, GrainDims(1920, 1080), &demand), L"the same size again");
 			Assert::AreEqual(2, demand.registers, L"not retried every frame");
 			Assert::AreEqual(uint64_t(0), module.RegisteredReserveBytes(), L"nothing of ours registered for P10g");
+		}
+
+		TEST_METHOD(ModuleShowsARefusedRegistrationOnTheFallbacksRoute)
+		{
+			using namespace VpSkeleton;
+			namespace L = GrainSplit::LevelGpu;
+			SkeletonMemo m;
+			Assert::IsTrue(m.RegisterOwnerFill(kP10gGrainLevel, AcquireForm::Gpu, L::kOwnerUnit, L::MakeOwnerFill(64, std::make_shared<L::Counters>()))
+				== SkeletonMemo::Registration::Registered, L"someone registered P10g first");
+			GrainMemoDemand demand;
+			demand.memo = &m;
+			L::GrainLevelModule module;
+			int host = 0;
+			Assert::IsFalse(module.Observe(&host, GrainDims(0, 0), &demand), L"no size yet");
+			Assert::IsTrue(module.FallbackLines().empty(), L"no size seen: nothing owed, no line");
+
+			Assert::IsFalse(module.Observe(&host, GrainDims(1920, 1080), &demand), L"P10g refused");
+			const std::vector<std::string> lines = module.FallbackLines();
+			Assert::AreEqual(size_t(1), lines.size(), L"exactly the missing P10g registration (P10 is ours; no fill, no decline)");
+			const std::string want = std::string(L::kUnregisteredId) + ": P10g owner fill refused: another fill is already registered (reserve "
+				+ std::to_string(L::ReserveBytes(GrainDims(1920, 1080))) + " B; retried at the next size change)";
+			Assert::AreEqual(want, lines[0], L"the refusal in words, on a Fallbacks line");
+
+			module.Forget(&host, &demand);
+			Assert::IsTrue(module.FallbackLines().empty(), L"the host left: no size, nothing owed");
+		}
+
+		TEST_METHOD(ModuleShowsARefusedP10OwnerButNotAnAlreadyRegisteredOne)
+		{
+			using namespace VpSkeleton;
+			namespace L = GrainSplit::LevelGpu;
+			int host = 0;
+			{
+				SkeletonMemo m;
+				GrainMemoDemand demand;
+				demand.memo = &m;
+				demand.refuseSplit = true;
+				L::GrainLevelModule module;
+				Assert::IsTrue(module.Observe(&host, GrainDims(1920, 1080), &demand), L"P10g registered");
+				Assert::IsFalse(module.SplitOwnerRegistered(), L"the P10 owner refused");
+				Assert::IsFalse(module.SplitOwnerServedElsewhere(), L"a refusal is not 'served elsewhere'");
+				const std::vector<std::string> lines = module.FallbackLines();
+				Assert::AreEqual(size_t(1), lines.size(), L"exactly the refused P10 owner");
+				Assert::AreEqual(std::string(L::kSplitUnregisteredId) + ": P10 variant owner refused: not the catalog's owning unit"
+					" (P10 variant Acquires stay NoOwnerFill; not retried)", lines[0], L"the refusal in words");
+				Assert::IsTrue(module.Observe(&host, GrainDims(3840, 2160), &demand), L"a size change");
+				Assert::AreEqual(1, demand.splitRegisters, L"a refused P10 owner is not retried");
+			}
+			{
+				// 15b A1 (or anyone) registered the P10 owner first: benign, nothing shown, never retried.
+				SkeletonMemo m;
+				GrainSplit::Gpu::VariantOwner a1;
+				Assert::IsTrue(a1.Register(m) == SkeletonMemo::Registration::Registered, L"the other P10 owner first");
+				GrainMemoDemand demand;
+				demand.memo = &m;
+				L::GrainLevelModule module;
+				Assert::IsTrue(module.Observe(&host, GrainDims(1920, 1080), &demand), L"P10g still registered");
+				Assert::AreEqual(1, demand.splitRegisters, L"one P10 attempt");
+				Assert::IsFalse(module.SplitOwnerRegistered(), L"not ours");
+				Assert::IsTrue(module.SplitOwnerServedElsewhere(), L"served by the other registration");
+				Assert::IsTrue(m.HasOwnerFill(kP10GrainSplit, AcquireForm::Gpu), L"P10 is served");
+				Assert::IsTrue(module.FallbackLines().empty(), L"AlreadyRegistered is benign: no Fallbacks line");
+				Assert::IsTrue(module.Observe(&host, GrainDims(3840, 2160), &demand), L"a size change");
+				Assert::AreEqual(1, demand.splitRegisters, L"never retried");
+			}
 		}
 
 		// Category Cpu: the name says GPU, the body is hardware-free (a refusing fake device, no pl_gpu).
@@ -271,16 +347,49 @@ namespace VideoProcessorTest
 			SourcePlanes::Forget(&host);
 		}
 
-		TEST_METHOD(StatusAndFallbackLinesSayTheSingleFrameLawIsInUse)
+		TEST_METHOD(FallbackLinesSayTheSingleFrameLawAndTheDeclines)
 		{
+			using namespace VpSkeleton;
 			namespace L = GrainSplit::LevelGpu;
-			Assert::IsTrue(L::StatusLine(false, 0, 0, std::string()).find("no owner fill registered") != std::string::npos, L"unregistered");
-			const std::string s = L::StatusLine(true, 12, 3, "grain level: no GPU context");
-			Assert::IsTrue(s.find("single-frame law") != std::string::npos, L"the law in use");
-			Assert::IsTrue(s.find("fills 12, declines 3") != std::string::npos, L"the counts");
-			Assert::IsTrue(s.find("last decline: grain level: no GPU context") != std::string::npos, L"the last decline");
 			Assert::IsTrue(L::FallbackLine(0).empty(), L"no Fallbacks line before any fill");
 			Assert::IsTrue(L::FallbackLine(1).find(std::string(L::kFallbackId) + ": ") == 0, L"the Fallbacks id once in use");
+			Assert::IsTrue(L::FallbackLine(12).find("single-frame law") != std::string::npos, L"the law in use");
+			Assert::IsTrue(L::DeclineLine(0, "grain level: no GPU context").empty(), L"no decline: no line");
+			Assert::AreEqual(std::string("grain_level_declined: grain level: no GPU context (3 declines)"),
+				L::DeclineLine(3, "grain level: no GPU context"), L"the last decline and the count");
+			Assert::AreEqual(std::string("grain_level_declined: grain level: RGB source (no luma plane to split) (1 decline)"),
+				L::DeclineLine(1, "grain level: RGB source (no luma plane to split)"), L"one decline");
+			Assert::AreEqual(std::string("grain_level_declined: a fill declined (2 declines)"), L::DeclineLine(2, std::string()),
+				L"a count without a recorded reason still shows");
+			Assert::IsTrue(L::UnregisteredLine(L::kUnregisteredId, std::string()).empty(), L"no problem: no line");
+			Assert::AreEqual(std::string("grain_level_unregistered: why"), L::UnregisteredLine(L::kUnregisteredId, "why"), L"P10g id");
+			Assert::AreEqual(std::string("grain_split_owner_unregistered: why"), L::UnregisteredLine(L::kSplitUnregisteredId, "why"),
+				L"P10 owner id");
+			Assert::AreEqual(std::string("refused: another fill is already registered"),
+				L::RegistrationText(SkeletonMemo::Registration::AlreadyRegistered), L"worded");
+			Assert::AreEqual(std::string("refused: not in the catalog"), L::RegistrationText(SkeletonMemo::Registration::NotInCatalog), L"worded");
+		}
+
+		// The module's own counters reach its Fallbacks lines: a fill made by the module declines (no GPU context) and shows.
+		TEST_METHOD(ModuleShowsItsFillsDeclineOnTheFallbacksRoute)
+		{
+			using namespace VpSkeleton;
+			namespace L = GrainSplit::LevelGpu;
+			SkeletonMemo m;
+			GrainMemoDemand demand;
+			demand.memo = &m;
+			L::GrainLevelModule module;
+			int host = 0;
+			Assert::IsTrue(module.Observe(&host, GrainDims(64, 48), &demand), L"registered");
+			OwnerFillRequest req;
+			req.id = kP10gGrainLevel;
+			req.seq = 7;
+			req.form = AcquireForm::Gpu;
+			OwnerFillOutput out;
+			Assert::IsFalse(demand.lastLevelFill.fill(req, m, out), L"the module's fill declines without a GPU context");
+			const std::vector<std::string> lines = module.FallbackLines();
+			Assert::AreEqual(size_t(1), lines.size(), L"exactly the decline (no fill ran)");
+			Assert::AreEqual(std::string("grain_level_declined: grain level: no GPU context (1 decline)"), lines[0], L"on the Fallbacks route");
 		}
 	};
 }
