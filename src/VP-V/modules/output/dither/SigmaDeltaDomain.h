@@ -27,7 +27,8 @@ namespace SigmaDeltaDomain
 		d.full = pl_color_levels_guess(&repr) == PL_COLOR_LEVELS_FULL;
 		d.sample = repr.bits.sample_depth > 0 ? repr.bits.sample_depth : 8;
 		d.color = repr.bits.color_depth > 0 ? repr.bits.color_depth : d.sample;
-		d.supported = d.sample >= 8 && d.sample <= 10 && d.color >= 8 && d.color <= d.sample;
+		// GEM-029: only the 8- and 10-bit domains the sigma-delta shader quantises (no 9-bit).
+		d.supported = (d.sample == 8 || d.sample == 10) && (d.color == 8 || d.color == 10) && d.color <= d.sample;
 		return d;
 	}
 
