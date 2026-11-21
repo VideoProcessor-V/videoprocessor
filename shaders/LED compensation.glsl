@@ -54,6 +54,12 @@
  * non-negatives to non-negatives. Off = the sign-preserving boost and gain
  * on negatives, as before.
  *
+ * A colour with only some channels out of range (GEM-Q15, owner 2026-11-21:
+ * keep the hue) is restored as a whole, not per channel: when its luma is
+ * out of range it leaves as it came in; otherwise it is scaled by the luma
+ * ratio of the curve, at most 1, so its hue and chroma ratios are unchanged
+ * and it is never pushed further out of range (preserve_extended).
+ *
  * Above 1 - knee the result rolls off with slope 1 at the knee point and
  * approaches 1.0, so a boosted highlight keeps its gradation instead of
  * clipping.
@@ -133,7 +139,7 @@
 1.0
 
 //!PARAM wtw_passthrough
-//!DESC led_wtw_passthrough: 1 = whiter-than-white keeps its value under a boost, 0 = rolled under white (before 2026-10-17)
+//!DESC led_wtw_passthrough: 1 = whiter-than-white keeps its value under the boost and any gain (a partly above-white colour keeps its hue), 0 = rolled under white (before 2026-10-17)
 //!TYPE float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
@@ -160,29 +166,11 @@ vec3 soft_knee(vec3 x, float k)
     return mix(x, rolled, step(vec3(t), x));
 }
 
-// Below black as it came in (btb_passthrough), applied to every result.
-vec3 below_black(vec3 result, vec3 original)
+// The picture curve, channel by channel: the boost (with its toe), the lift,
+// then the gain with its knee. Used for the pixel and, for a pixel partly out
+// of range, for its luma (preserve_extended).
+vec3 compensate(vec3 v, float lift)
 {
-    return btb_passthrough > 0.5 ? mix(result, original, vec3(lessThan(original, vec3(0.0)))) : result;
-}
-
-// GEM-W1B V6 MUST-2 (register 115 #17): true below black (btb_passthrough) AND true whiter-than-white
-// (wtw_passthrough, above 1) leave the hook as they came in, on every exit path and whatever the
-// gamma boost, the shadow lift or a gain above OR below 1 did to the picture.
-vec3 preserve_extended(vec3 result, vec3 original)
-{
-    result = below_black(result, original);
-    return wtw_passthrough > 0.5 ? mix(result, original, vec3(greaterThan(original, vec3(1.0)))) : result;
-}
-
-vec4 hook()
-{
-    vec4 color = HOOKED_texOff(0);
-    float lift = shadow_lift * veil;
-    if (gain == 1.0 && boost == 1.0 && !(lift > 0.0))
-        return color;
-    vec3 original = color.rgb;
-    vec3 v = color.rgb;
     // The gamma boost comes first: the old pipeline boosted VP's output, and
     // the projector's contrast or LED acted on that boosted signal.
     if (boost != 1.0) {
@@ -202,14 +190,15 @@ vec4 hook()
         v += vec3(lift * k * 1.6875) * u * (vec3(1.0) - u) * (vec3(1.0) - u);
     }
     if (gain == 1.0)
-        return vec4(preserve_extended(v, original), color.a);
+        return v;
     bool linear = gain_domain > 0.5;
     vec3 x = linear ? spow(v, compensation_eotf) : v;
     x *= gain;
     // Only a boost can push values past white; a reduction never needs the
     // knee. The knee acts on the bright end only (it never touches negatives);
     // below black is restored to its input value at the end when
-    // btb_passthrough is on (see the header), in both gain domains.
+    // btb_passthrough is on (see the header and preserve_extended), in both
+    // gain domains.
     // Bug hunt 2026-10-17: whiter-than-white (above 1, carried by the
     // extended-range restore) keeps its own value instead of being rolled
     // under white with the boosted picture. The knee's output stays below 1,
@@ -218,6 +207,38 @@ vec4 hook()
     if (gain > 1.0) {
         x = knee > 0.0001 ? soft_knee(x, knee) : min(x, vec3(1.0));
     }
-    color.rgb = preserve_extended(linear ? spow(x, 1.0 / compensation_eotf) : x, original);
+    return linear ? spow(x, 1.0 / compensation_eotf) : x;
+}
+
+// GEM-W1B V6 MUST-2 (register 115 #17) and GEM-Q15 (owner 2026-11-21: keep the hue). True below black
+// (btb_passthrough) and true whiter-than-white (wtw_passthrough) leave the hook as they came in, on every
+// exit path, whatever the boost, the lift or a gain above or below 1 did to the picture. A pixel with no
+// channel out of range keeps the per-channel result. A pixel with any channel out of range is restored
+// as a whole: its luma (BT.709 weights on the encoded RGB) is out of range, or about 0 -> the input
+// exactly (a grey or white BTB/WTW is bit-identical; nothing divides by a luma near 0). Otherwise the
+// curve runs on the grey luma and the input is scaled by the luma ratio, at most 1. One scale for the
+// three channels keeps the hue and chroma ratios; the cap pulls a pixel towards range under a gain below 1
+// but never pushes it further out (that would recreate the encode floor/ceiling clipping btb_passthrough
+// was introduced against, and the clip would tilt the hue again).
+vec3 preserve_extended(vec3 result, vec3 original, float lift)
+{
+    bool wtw = wtw_passthrough > 0.5;
+    bool below = btb_passthrough > 0.5 && any(lessThan(original, vec3(0.0)));
+    bool above = wtw && any(greaterThan(original, vec3(1.0)));
+    if (!below && !above)
+        return result;
+    float y = dot(original, vec3(0.2126, 0.7152, 0.0722));
+    if (!(y > 1e-6) || (wtw && (y > 1.0 || all(greaterThan(original, vec3(1.0))))))
+        return original;
+    return original * min(compensate(vec3(y), lift).x / y, 1.0);
+}
+
+vec4 hook()
+{
+    vec4 color = HOOKED_texOff(0);
+    float lift = shadow_lift * veil;
+    if (gain == 1.0 && boost == 1.0 && !(lift > 0.0))
+        return color;
+    color.rgb = preserve_extended(compensate(color.rgb, lift), color.rgb, lift);
     return color;
 }
