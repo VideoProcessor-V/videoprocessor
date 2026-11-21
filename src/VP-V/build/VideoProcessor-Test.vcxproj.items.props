@@ -100,6 +100,9 @@
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\ComposedVectorsTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\tests\GfP4MotionTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\LaneAheadPolicyTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
