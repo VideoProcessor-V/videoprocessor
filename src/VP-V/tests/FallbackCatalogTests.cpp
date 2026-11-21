@@ -376,6 +376,26 @@ namespace FallbackCatalogTest
 			Assert::IsFalse(registry.Engaged("vector producer"));
 		}
 
+		TEST_METHOD(VectorProducerBehindIsVisibleAndNeverSilent)
+		{
+			const Decision offNotWanted = VectorProducerBehind(false, true, 22.4, 16.7, 3);
+			Assert::IsFalse(offNotWanted.engaged);
+			Assert::AreEqual(std::string("vector producer behind"), offNotWanted.id);
+			Assert::IsFalse(VectorProducerBehind(true, false, 10.0, 16.7, 0).engaged);
+
+			const Decision on = VectorProducerBehind(true, true, 24.5, 16.7, 5);
+			Assert::IsTrue(on.engaged);
+			Assert::AreEqual(std::string("vector producer behind"), on.id);
+			Assert::IsTrue(Has(on, "vector producer: behind (service 24.5 ms > period 16.7 ms"));
+			Assert::IsTrue(Has(on, "5 late skipped, luma kept"));
+
+			FallbackStatus::Registry registry;
+			Assert::IsTrue(Sync(registry, on));
+			Assert::IsFalse(Sync(registry, on), L"idempotent sync does not churn");
+			Assert::IsTrue(Sync(registry, VectorProducerBehind(true, false, 12.0, 16.7, 5)));
+			Assert::IsFalse(registry.Engaged("vector producer behind"));
+		}
+
 		// Bug hunt 31 H3: a look-ahead worker exception is visible at once and released after a run of
 		// good batches (each batch retries on its own).
 		TEST_METHOD(LookAheadWorkerExceptionsAreVisibleThenRecover)
