@@ -46,6 +46,7 @@ namespace MotionTimingGpu
 		pl_gpu_finish(g);   // the test itself may wait; production never does
 		undrained.PollPassTimers();
 		double totalDrained = 0.0, totalUndrained = 0.0;
+		Check(!drained.PassGpuMs().empty(), "G1 drained PassGpuMs must not be empty");
 		for (const auto& entry : drained.PassGpuMs())
 		{
 			const auto it = undrained.PassGpuMs().find(entry.first);
@@ -55,6 +56,7 @@ namespace MotionTimingGpu
 			if (entry.second / reps >= 0.2)
 				Check(std::fabs(it->second - entry.second) <= 0.15 * entry.second, "G1 pass differs >15%: " + entry.first);
 		}
+		Check(totalDrained > 0.0 && totalUndrained > 0.0, "G1 drained and undrained GPU totals must be positive");
 		Check(totalUndrained <= 1.10 * totalDrained && totalUndrained >= 0.80 * totalDrained, "G1 total outside bounds");
 		std::cout << "  G1 motion passes: drained " << totalDrained / reps << " ms, undrained " << totalUndrained / reps << " ms per estimate\n";
 	}
