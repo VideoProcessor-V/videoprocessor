@@ -33,7 +33,7 @@ Counts: R 8, X 8, N 13, NP 33.
 | **P12** p12_light_level | L-B5 | LaneGpuLightKernel.cpp | P11 | R | LaneGpuLightKernel.cpp:174 |
 |  |  |  | P4 | R | LaneGpuLightKernel.cpp:192 |
 | **P13** p13_source_ring | - | SourcePlanes.h | (no inputs) | - | |
-| **td.blocks** td.blocks | L-B2 | TemporalDetailGpu.cpp | P10 | X | recompute: TemporalDetailGpu.cpp:97; TemporalDetailGpu.cpp:394; TemporalDetailGpu.cpp:424 |
+| **td.blocks** td.blocks | L-B2 | TemporalDetailGpu.cpp | P10 | X | recompute: TemporalDetailGpu.cpp:97; TemporalDetailGpu.cpp:400; TemporalDetailGpu.cpp:430 |
 |  |  |  | P11 | N |  |
 |  |  |  | P13 | N |  |
 |  |  |  | td.blocks lag1 | N |  |

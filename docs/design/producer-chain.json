@@ -802,12 +802,12 @@
       ],
       [
        "repair/temporal_detail/TemporalDetailGpu.cpp",
-       394,
+       400,
        "const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(sharedSplit, w, h, g.B, g.scale, cu, 0, param"
       ],
       [
        "repair/temporal_detail/TemporalDetailGpu.cpp",
-       424,
+       430,
        "const GrainSplit::Gpu::Frame& gs = shared ? *sharedSplit : m.split.Out();"
       ]
      ],
