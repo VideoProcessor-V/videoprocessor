@@ -185,6 +185,8 @@ namespace GfP4MotionTest
 			const size_t decode = body.find("HalfLuma8(luma, buffer");
 			Assert::IsTrue(decode != std::string::npos, L"the producer's own decode is in LumaAtTarget");
 			Assert::IsTrue(decode < count, L"the count comes after the HalfLuma8 decode");
+			Assert::IsTrue(body.substr(decode, count - decode).find('}') == std::string::npos,
+				L"the U3 count lies inside the HalfLuma8 branch's braces");
 
 			// The calls (not the definition): in the file's order the job, then the two request calls.
 			std::vector<std::string> calls;
