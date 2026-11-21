@@ -376,14 +376,21 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLogExceptPreOutputBug(log);
 		}
 
-		// GEM-W1-LED (owner GEM-Q15, register 115 #17): a colour with only some channels above white or
-		// below black keeps its hue through the LED compensation (luma-ratio restore, not per channel),
-		// under the boost and gains 0.6 / 1.3 / 2.5 in both domains, on a true 10-bit limited target:
-		// - out of range in part: every channel = input x min(curve(luma) / luma, 1) within 1 code, hue
-		//   angle (BT.709 Cb/Cr) within 0.75 deg; exactly the input where the ratio caps at 1;
+		// GEM-W1-LED split restore (owner GEM-Q15 rulings 2026-11-21, register 115 #17). True 10-bit limited
+		// target, gains 0.6 / 0.8 / 1.3 / 2.5 in both domains and the gain == 1 exit, boost 2.2/2.4 and off:
+		// - partly out of range: out = (the GPU's own compensation of the in-range part p, rendered as an
+		//   in-range colour) + k f e within 1.5 codes; under a gain below 1 an above-white excursion is
+		//   scaled by the compensated white C(1); k < 1 only to stay inside codes 4..1019;
+		// - below black exact: the below-black channel of a colour with nothing above white keeps its code;
+		// - hue at gains below 1 (BT.709 Cb/Cr angle): within 0.5 deg of the input with the boost off; with
+		//   the boost on, within 0.3 deg of the in-range part's own (neighbour) boost tilt;
 		// - luma out of range (grey WTW/BTB, a colour with negative luma): exactly the input;
 		// - in range (white 940 and black 64 included), or with the passthrough off: every channel the
-		//   same code as that channel's grey, i.e. the per-channel path, byte for byte.
+		//   same code as that channel's grey, i.e. the per-channel path, byte for byte;
+		// - edge pairs, one code past black/white vs the in-range neighbour: in-range channels within 8
+		//   codes, all channels within 10 (model 7 / 9);
+		// - no pulse: over gains 0.85 -> 1.01 in steps of 0.0025, each channel's step equals its in-range
+		//   part's step within 4 codes (model 3), and out - in-range part stays k f e within 1.5 codes.
 		TEST_METHOD(LedCompensationKeepsTheHueOfPartlyOutOfRangeColours)
 		{
 			TargetLutGpuFixture fixture;
@@ -525,18 +532,61 @@ namespace VideoProcessorTest
 			};
 
 			// Partly out of range, luma in range: orange above white, yellow with two channels above white
-			// (luma 0.998), and two colours with one channel below black.
-			const Codes partly[] = { { 1010, 700, 300 }, { 980, 1000, 200 }, { 40, 600, 300 }, { 300, 20, 700 } };
-			// Luma out of range: grey WTW (1019, 941 just above white), grey BTB (63, 8), and a colour with
-			// one channel below black and a negative luma.
-			const Codes extended[] = { { 1019, 1019, 1019 }, { 941, 941, 941 }, { 63, 63, 63 }, { 8, 8, 8 }, { 100, 30, 64 } };
+			// (luma 0.998), a red one code above white, two colours with one channel below black, and a red
+			// with blue below black.
+			const Codes partly[] = { { 1010, 700, 300 }, { 980, 1000, 200 }, { 941, 200, 100 }, { 40, 600, 300 },
+				{ 300, 20, 700 }, { 900, 70, 40 } };
+			// Luma out of range: grey WTW (1019, 941 just above white), grey BTB (63, 8), and a colour with a
+			// channel below black and a negative luma.
+			const Codes extended[] = { { 1019, 1019, 1019 }, { 941, 941, 941 }, { 63, 63, 63 }, { 8, 8, 8 },
+				{ 100, 30, 64 } };
+			auto aboveWhite = [](const Codes& c) { return c[0] > 940 || c[1] > 940 || c[2] > 940; };
+			// CPU mirror of the split (preserve_extended, both passthroughs on) for a colour with luma in (0, 1]:
+			// p = the in-range part, e = the excursion already scaled by f, k = the encode-range factor.
+			struct Split { Rgb p{}, e{}; double k = 1.0, f = 1.0; };
+			auto split = [&curve, &luma](const Rgb& o, double gain, double b, double domain)
+			{
+				Split s;
+				const double y = luma(o);
+				bool anyAbove = false;
+				double t = 1.0;
+				for (int k = 0; k < 3; ++k)
+				{
+					const double d = o[k] - y;
+					anyAbove = anyAbove || o[k] > 1.0;
+					if (o[k] > 1.0)
+						t = std::min(t, (1.0 - y) / std::max(d, 1e-6));
+					if (o[k] < 0.0)
+						t = std::min(t, y / std::max(-d, 1e-6));
+				}
+				t = std::clamp(t, 0.0, 1.0);
+				s.f = anyAbove && gain < 1.0 ? curve(1.0, gain, b, domain) : 1.0;
+				Rgb c{};
+				for (int k = 0; k < 3; ++k)
+				{
+					s.p[k] = std::clamp(y + t * (o[k] - y), 0.0, 1.0);
+					c[k] = curve(s.p[k], gain, b, domain);
+					s.e[k] = (o[k] - s.p[k]) * s.f;
+				}
+				const double lowest = -60.0 / 876.0, highest = 955.0 / 876.0;   // codes 4 and 1019
+				for (int k = 0; k < 3; ++k)
+				{
+					if (s.e[k] > 1e-6)
+						s.k = std::min(s.k, (highest - c[k]) / s.e[k]);
+					if (s.e[k] < -1e-6)
+						s.k = std::min(s.k, (c[k] - lowest) / -s.e[k]);
+				}
+				s.k = std::clamp(s.k, 0.0, 1.0);
+				return s;
+			};
 			// In range, white and black included (the per-channel path).
 			const Codes inRange[] = { { 900, 500, 200 }, { 930, 940, 64 } };
 			struct Setting { double gain, boost, domain; };
 			std::vector<Setting> settings;
-			for (const double domain : { 1.0, 0.0 })
-				for (const double g : { 0.6, 1.3, 2.5 })
-					settings.push_back({ g, boost, domain });
+			for (const double b : { boost, 1.0 })
+				for (const double domain : { 1.0, 0.0 })
+					for (const double g : { 0.6, 0.8, 1.3, 2.5 })
+						settings.push_back({ g, b, domain });
 			settings.push_back({ 1.0, boost, 1.0 });   // the gain == 1 exit with the boost
 
 			// Idle (gain 1, no boost): every test colour leaves as it came in.
@@ -547,39 +597,69 @@ namespace VideoProcessorTest
 				Assert::IsTrue(render(toSignal(c)) == c, (L"Idle hook moved " + text(c)).c_str());
 
 			std::wstring problems;
-			double worstHue = 0.0;
-			int scaledCases = 0;
+			double worstHueOff = 0.0, worstHueExcess = 0.0;
+			int scaledExcursions = 0, rangeLimited = 0, exactBelow = 0;
 			for (const Setting& s : settings)
 			{
 				set(s.gain, s.boost, s.domain);
-				const std::wstring where = L" at gain " + std::to_wstring(s.gain) + L", domain " +
-					std::to_wstring(static_cast<int>(s.domain)) + L"; ";
+				const std::wstring where = L" at gain " + std::to_wstring(s.gain) + L", boost " + std::to_wstring(s.boost) +
+					L", domain " + std::to_wstring(static_cast<int>(s.domain)) + L"; ";
+				// The compensated white C(1), as the GPU renders it (grey 1.0 is in range).
+				const double whiteGpu = signal(render(Rgb{ 1.0, 1.0, 1.0 })[0]);
 				for (const Codes& c : partly)
 				{
 					const Rgb in = toSignal(c);
 					const Codes out = render(in);
-					const double y = luma(in);
-					const double ratio = std::min(curve(y, s.gain, s.boost, s.domain) / y, 1.0);
-					if (ratio >= 1.0)
+					const Split sp = split(in, s.gain, s.boost, s.domain);
+					// The in-range part, rendered as an in-range colour: its neighbour's compensation.
+					const Codes part = render(sp.p);
+					for (int k = 0; k < 3; ++k)
 					{
-						if (out != c)
-							problems += L"capped " + text(c) + L" became " + text(out) + where;
+						const double expected = part[k] + 876.0 * sp.k * sp.e[k];
+						if (std::abs(out[k] - expected) > 1.5)
+							problems += L"channel " + std::to_wstring(k) + L" of " + text(c) + L": " + std::to_wstring(out[k]) +
+								L" for in-range part " + std::to_wstring(part[k]) + L" + k f e = " + std::to_wstring(expected) + where;
 					}
-					else
+					if (sp.f < 1.0)
 					{
-						++scaledCases;
+						++scaledExcursions;   // headroom follows the compensated white (the GPU's own C(1))
+						if (std::abs(sp.f - whiteGpu) > 1.0 / 876.0)
+							problems += L"C(1) " + std::to_wstring(sp.f) + L" vs rendered white " + std::to_wstring(whiteGpu) + where;
+					}
+					if (sp.k < 1.0)
+					{
+						++rangeLimited;
 						for (int k = 0; k < 3; ++k)
+							if (out[k] < 4 || out[k] > 1019)
+								problems += L"range-limited " + text(c) + L" left codes 4..1019: " + text(out) + where;
+					}
+					if (!aboveWhite(c) && sp.k == 1.0)
+						for (int k = 0; k < 3; ++k)
+							if (c[k] < 64)
+							{
+								++exactBelow;
+								if (out[k] != c[k])
+									problems += L"below black " + text(c) + L" channel " + std::to_wstring(k) + L" became " +
+										std::to_wstring(out[k]) + where;
+							}
+					if (s.gain < 1.0)
+					{
+						const double error = hueError(in, toSignal(out));
+						if (s.boost == 1.0)
 						{
-							const double expected = 64.0 + 876.0 * in[k] * ratio;
-							if (std::abs(out[k] - expected) > 1.0)
-								problems += L"channel " + std::to_wstring(k) + L" of " + text(c) + L": " +
-									std::to_wstring(out[k]) + L" for " + std::to_wstring(expected) + where;
+							worstHueOff = std::max(worstHueOff, error);
+							if (error > 0.5)
+								problems += L"hue of " + text(c) + L" moved " + std::to_wstring(error) + L" deg to " + text(out) + where;
+						}
+						else
+						{
+							const double excess = error - hueError(in, toSignal(part));
+							worstHueExcess = std::max(worstHueExcess, excess);
+							if (excess > 0.3)
+								problems += L"hue of " + text(c) + L" moved " + std::to_wstring(excess) +
+									L" deg beyond its in-range part's boost tilt, to " + text(out) + where;
 						}
 					}
-					const double error = hueError(in, toSignal(out));
-					worstHue = std::max(worstHue, error);
-					if (error > 0.75)
-						problems += L"hue of " + text(c) + L" moved " + std::to_wstring(error) + L" deg to " + text(out) + where;
 				}
 				for (const Codes& c : extended)
 				{
@@ -599,10 +679,84 @@ namespace VideoProcessorTest
 					}
 				}
 			}
-			// The ratio path ran: gain 0.6 scales 7 of its 8 cases (the dark blue 300/20/700 in linear light
-			// caps at 1, its boost outweighing the gain); the gains above 1 and the boost alone cap.
-			if (scaledCases != 7)
-				problems += L"scaled cases " + std::to_wstring(scaledCases) + L" (expected 7); ";
+			// Non-vacuous: the C(1) excursion scale, the encode-range factor and the exact below-black channel
+			// all ran (model: 980/1000/200 at encoded gain 0.6 with the boost has k = 0.80).
+			if (scaledExcursions == 0 || rangeLimited == 0 || exactBelow == 0)
+				problems += L"paths not exercised: scaled " + std::to_wstring(scaledExcursions) + L", range-limited " +
+					std::to_wstring(rangeLimited) + L", exact below black " + std::to_wstring(exactBelow) + L"; ";
+
+			// Edge continuity: a pixel one code past black or white against its neighbour just inside range,
+			// at gains 0.6 / 0.8 / 1.3 / 2.5 in both domains and the gain == 1 exit, boost on and off.
+			// In-range channels within 8 codes, all channels within 10 (model: 7 and 9). For comparison,
+			// 71e7b8322 stepped up to 281 codes and the W1B per-channel restore 168 codes (R of 941/700/300
+			// held at 941 against 773 at linear gain 0.6).
+			const std::pair<Codes, Codes> edges[] = { { { 900, 70, 65 }, { 900, 70, 63 } },
+				{ { 200, 65, 600 }, { 200, 63, 600 } }, { { 66, 70, 68 }, { 63, 70, 68 } },
+				{ { 940, 700, 300 }, { 941, 700, 300 } }, { { 939, 700, 300 }, { 941, 700, 300 } },
+				{ { 939, 200, 100 }, { 941, 200, 100 } } };
+			int worstEdgeIn = 0, worstEdgeAll = 0;
+			for (const Setting& s : settings)
+			{
+				set(s.gain, s.boost, s.domain);
+				for (const auto& pair : edges)
+				{
+					const Codes inside = render(toSignal(pair.first)), outside = render(toSignal(pair.second));
+					int stepIn = 0, stepAll = 0;
+					for (int k = 0; k < 3; ++k)
+					{
+						const int step = std::abs(inside[k] - outside[k]);
+						stepAll = std::max(stepAll, step);
+						if (pair.second[k] >= 64 && pair.second[k] <= 940)
+							stepIn = std::max(stepIn, step);
+					}
+					worstEdgeIn = std::max(worstEdgeIn, stepIn);
+					worstEdgeAll = std::max(worstEdgeAll, stepAll);
+					if (stepIn > 8 || stepAll > 10)
+						problems += L"edge " + text(pair.first) + L" -> " + text(inside) + L" vs " + text(pair.second) +
+							L" -> " + text(outside) + L": steps " + std::to_wstring(stepIn) + L" / " + std::to_wstring(stepAll) +
+							L" at gain " + std::to_wstring(s.gain) + L", boost " + std::to_wstring(s.boost) + L", domain " +
+							std::to_wstring(static_cast<int>(s.domain)) + L"; ";
+				}
+			}
+
+			// No pulse: the LED ramping through 1 (gains 0.85 -> 1.01 in steps of 0.0025, with the boost). A
+			// partly out-of-range pixel's in-range part tracks its in-range neighbour step for step: each
+			// channel's step equals the in-range part's step within 4 codes (model 3), and out - in-range part
+			// stays k f e within 1.5 codes at every gain.
+			int worstStep = 0;
+			for (const Codes& c : { Codes{ 1010, 700, 300 }, Codes{ 980, 1000, 200 }, Codes{ 40, 600, 300 },
+				Codes{ 300, 20, 700 } })
+				for (const double domain : { 1.0, 0.0 })
+				{
+					const Rgb in = toSignal(c);
+					Codes previous{}, previousPart{};
+					for (int i = 0; i <= 64; ++i)
+					{
+						const double g = static_cast<float>(0.85 + 0.0025 * i);   // the value the shader sees
+						set(g, boost, domain);
+						const Split sp = split(in, g, boost, domain);
+						const Codes out = render(in), part = render(sp.p);
+						for (int k = 0; k < 3; ++k)
+						{
+							if (std::abs(out[k] - (part[k] + 876.0 * sp.k * sp.e[k])) > 1.5)
+								problems += L"sweep " + text(c) + L" channel " + std::to_wstring(k) + L": " + std::to_wstring(out[k]) +
+									L" vs in-range part " + std::to_wstring(part[k]) + L" at gain " + std::to_wstring(g) + L", domain " +
+									std::to_wstring(static_cast<int>(domain)) + L"; ";
+							if (i > 0)
+							{
+								const int step = std::abs((out[k] - previous[k]) - (part[k] - previousPart[k]));
+								worstStep = std::max(worstStep, step);
+								if (step > 4)
+									problems += L"pulse " + text(c) + L" channel " + std::to_wstring(k) + L": " +
+										std::to_wstring(previous[k]) + L" -> " + std::to_wstring(out[k]) + L" while its in-range part " +
+										std::to_wstring(previousPart[k]) + L" -> " + std::to_wstring(part[k]) + L" at gain " +
+										std::to_wstring(g) + L", domain " + std::to_wstring(static_cast<int>(domain)) + L"; ";
+							}
+						}
+						previous = out;
+						previousPart = part;
+					}
+				}
 
 			// Passthrough off: never flagged, the per-channel path as before (WTW off for the WTW colours,
 			// BTB off for the BTB colours).
@@ -613,8 +767,9 @@ namespace VideoProcessorTest
 				const bool wtwOff = std::string(name) == "wtw_passthrough";
 				for (const Codes& c : partly)
 				{
-					const bool aboveWhite = c[0] > 940 || c[1] > 940 || c[2] > 940;
-					if (aboveWhite != wtwOff)
+					const bool above = aboveWhite(c);
+					const bool below = c[0] < 64 || c[1] < 64 || c[2] < 64;
+					if (above != wtwOff || (above && below))
 						continue;
 					const Codes out = render(toSignal(c));
 					for (int k = 0; k < 3; ++k)
@@ -627,8 +782,11 @@ namespace VideoProcessorTest
 				}
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, name, 1.0));
 			}
-			Logger::WriteMessage((L"GEM-W1-LED worst hue error over the partly out-of-range colours: " +
-				std::to_wstring(worstHue) + L" deg\n").c_str());
+			Logger::WriteMessage((L"GEM-W1-LED gain < 1 hue: worst " + std::to_wstring(worstHueOff) +
+				L" deg (boost off), worst excess over the in-range part's boost tilt " + std::to_wstring(worstHueExcess) +
+				L" deg; edge pairs worst in-range / all-channel step " + std::to_wstring(worstEdgeIn) + L" / " +
+				std::to_wstring(worstEdgeAll) + L" codes; sweep worst step against the in-range part " +
+				std::to_wstring(worstStep) + L" codes\n").c_str());
 			fixture.CaptureLog(nullptr);
 			Assert::IsTrue(problems.empty(), (problems + L"log: " + std::wstring(log.begin(), log.end())).c_str());
 			AssertCleanLibplaceboLogExceptPreOutputBug(log);
