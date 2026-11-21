@@ -94,14 +94,14 @@ namespace VideoProcessorTest
 				for (const auto& size : sizes)
 				{
 					const int w = size[0], hgt = size[1];
-					if (c.packing != SourceUnpack::Packing::V210 && (w & 1) != 0 && c.packing == SourceUnpack::Packing::Uyvy8)
-						continue;   // 4:2:2 packings carry an even width
+					if ((w & 1) != 0 || (c.fmt == AnalysisLumaFormat::P010 && (hgt & 1) != 0)) continue;   // the CPU reference (AnalysisLumaSource::IsValid) decodes even widths only, and P010 even heights
 					for (const size_t pad : { size_t(0), size_t(8) })
 					{
 						SourceUnpack::Request req;
 						req.packing = c.packing;
 						req.width = w;
 						req.height = hgt;
+						req.chromaSubsampleY = c.fmt == AnalysisLumaFormat::P010 ? 2 : 1;
 						req.rowBytes = SourceUnpack::MinRowBytes(c.packing, w) + pad;
 						const bool twoPlane = c.fmt == AnalysisLumaFormat::P010 || c.fmt == AnalysisLumaFormat::P210;
 						const size_t chromaRows = c.fmt == AnalysisLumaFormat::P010 ? (hgt + 1) / 2 : hgt;
@@ -324,6 +324,38 @@ namespace VideoProcessorTest
 			r.width = 63;
 			Assert::IsTrue(Validate(r) == Cause::BadGeometry);
 			Assert::AreEqual(std::string("dv container"), std::string(CauseName(Cause::DvContainer)));
+
+			// Geometry the CPU reference (AnalysisLumaSource::IsValid) does not decode: odd widths, odd P010 heights.
+			for (const Packing packing : { Packing::Planar16, Packing::V210, Packing::Uyvy8 })
+			{
+				Request odd;
+				odd.packing = packing;
+				odd.width = 65;
+				odd.height = 8;
+				odd.rowBytes = 1024;   // ample, so only the odd width can refuse
+				Assert::IsTrue(Validate(odd) == Cause::BadGeometry, L"odd width must be refused");
+				Assert::AreEqual(std::string("geometry"), std::string(CauseName(Validate(odd))));
+			}
+			Request p010;
+			p010.packing = Packing::Planar16;
+			p010.width = 64;
+			p010.height = 9;
+			p010.rowBytes = 128;
+			p010.chromaSubsampleY = 2;
+			Assert::IsTrue(Validate(p010) == Cause::BadGeometry, L"odd P010 height must be refused");
+			Assert::AreEqual(std::string("geometry"), std::string(CauseName(Validate(p010))));
+			p010.height = 8;
+			Assert::IsTrue(Validate(p010) == Cause::None, L"even P010 height is accepted");
+			p010.chromaSubsampleY = 0;
+			Assert::IsTrue(Validate(p010) == Cause::BadGeometry, L"chromaSubsampleY 0 must be refused");
+			Assert::AreEqual(std::string("geometry"), std::string(CauseName(Validate(p010))));
+			Request p210;
+			p210.packing = Packing::Planar16;
+			p210.width = 64;
+			p210.height = 9;
+			p210.rowBytes = 128;
+			p210.chromaSubsampleY = 1;
+			Assert::IsTrue(Validate(p210) == Cause::None, L"odd P210 height is accepted");
 		}
 	};
 }
