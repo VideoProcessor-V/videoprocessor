@@ -478,6 +478,9 @@ namespace Vpv
 			};
 			std::mutex sceneRunMutex;
 			SceneRunEntry sceneRuns[kSceneRunRing];
+			// GF-P2a S2b C1: the runs of frames classified AHEAD of the render seal (the LED walk front), in a ring of their own so they never
+			// overwrite a render frame's entry; SceneRunBefore checks it after sceneRuns (FadeRunEndsAt checks the record, so mixing is safe).
+			SceneRunEntry sceneRunsAhead[kSceneRunRing];
 			std::atomic<uint64_t> sceneRunRebuilt{ 0 }, sceneRunReduced{ 0 };   // ring misses rebuilt exactly / with reduced evidence (SceneRunBefore)
 			uint64_t feedEra = 0;
 			bool feedHadEra = false;
@@ -1714,11 +1717,18 @@ namespace Vpv
 			{
 				using VpUnit::CutFadeJudge::FadeRun;
 				const auto entryEndingAt = [&st](uint64_t s, const VpLaneProducts::SourceStatsRecord& r, FadeRun& out) {
-					const HostState::SceneRunEntry& en = st.sceneRuns[static_cast<size_t>(s % kSceneRunRing)];
-					if (en.seq != s || !VpUnit::CutFadeJudge::FadeRunEndsAt(en.run, r))
-						return false;
-					out = en.run;
-					return true;
+					// The render ring first, then the ahead ring (S2b C1): whichever holds the run that ends at this very record.
+					const HostState::SceneRunEntry* const rings[2] = { st.sceneRuns, st.sceneRunsAhead };
+					for (const HostState::SceneRunEntry* ring : rings)
+					{
+						const HostState::SceneRunEntry& en = ring[static_cast<size_t>(s % kSceneRunRing)];
+						if (en.seq == s && VpUnit::CutFadeJudge::FadeRunEndsAt(en.run, r))
+						{
+							out = en.run;
+							return true;
+						}
+					}
+					return false;
 				};
 				FadeRun run;
 				if (entryEndingAt(seq - 1, prev, run))
@@ -1759,9 +1769,10 @@ namespace Vpv
 			}
 
 			// SceneFactsOf's body; `done` (may be nullptr) gets the frames whose confirmed sequence verdict arrived in this call.
-			// `ahead` (GF-P2a S2b): `seq` is ahead of the render seal (SkeletonMemo::AheadOfSeal). Its fade run is folded as usual but NOT
-			// kept in the sceneRuns ring: an ahead frame 8+ out would overwrite the render frames' entries, and their runs would then be
-			// rebuilt with reduced evidence (sceneRunReduced). The render-order fill of the frame keeps its run.
+			// `ahead` (GF-P2a S2b): `seq` is ahead of the render seal (SkeletonMemo::AheadOfSeal). Its fade run is folded as usual and kept in
+			// the AHEAD ring (sceneRunsAhead, C1), never in sceneRuns: an ahead frame 8+ out would overwrite the render frames' entries, and
+			// their runs would then be rebuilt with reduced evidence (sceneRunReduced). With the store on the walk front is usually the only
+			// fill of a frame (the seal finds its confirmed group), so the ahead ring is what keeps that chain exact.
 			bool SceneFactsFor(HostState& st, Bundle& bundle, uint64_t seq, SceneFacts& out, std::vector<uint64_t>* done, bool ahead)
 			{
 				out = SceneFacts();
@@ -1801,12 +1812,10 @@ namespace Vpv
 					const bool runFade = VpUnit::CutFadeJudge::FoldFadeRun(a, c, e, run, &runKeep);
 					fadeKeep = VpUnit::CutFadeJudge::FrameFadeKeep(a, c, e.fade, runFade, runKeep);
 					e.fade = runFade || e.fade;
-					if (!ahead)
-					{
-						HostState::SceneRunEntry& kept = st.sceneRuns[static_cast<size_t>(seq % kSceneRunRing)];
-						kept.seq = seq;
-						kept.run = run;
-					}
+					// S2b C1: an ahead frame keeps its run in the ahead ring (the walk front chains exactly; render entries are never clobbered).
+					HostState::SceneRunEntry& kept = (ahead ? st.sceneRunsAhead : st.sceneRuns)[static_cast<size_t>(seq % kSceneRunRing)];
+					kept.seq = seq;
+					kept.run = run;
 				}
 				// U7 v2: cut / flash / cutPossible / strength from the sequence law (the renderer's tracker).
 				VpUnit::CutFadeJudge::CutVerdict v;
@@ -1901,7 +1910,7 @@ namespace Vpv
 				// MUST-7 (A20-C5 ruling (A), replacing GV's amendment): the fill is split by RENDER ORDER, not by thread. A frame ahead of
 				// the render seal (the LED look-ahead walk) is classified and its own group published (computed once, found by the seal:
 				// OD 2026-11-15), but it never claims an earlier frame's late cut except its natural predecessor's, never moves the late
-				// search (sceneLastFilled) and never writes the render frame's sceneCache or the sceneRuns ring (S2b).
+				// search (sceneLastFilled) and never writes the render frame's sceneCache or the render sceneRuns ring (S2b: it keeps its run in sceneRunsAhead).
 				ahead = b && b->memo && b->memo->AheadOfSeal(seq);
 				// seq - 1 has had its render-order fill (it is not ahead of the seal itself).
 				const bool prevRendered = ahead && seq > 1 && !b->memo->AheadOfSeal(seq - 1);
@@ -1957,6 +1966,11 @@ namespace Vpv
 							FrameAnalysis::Scene g;
 							claim = (deliveryStore->PeekScene(d, g) && g.origin == FrameAnalysis::SceneOrigin::Vp) || !deliveryStore->HasRecord(d);
 						}
+						// Gate N1: the claim must be kept somewhere: this frame's slot (carriesLate, so a re-fill carries it) or its store
+						// record (the published group). Without either (JudgeSceneApart far past the tracker, no record yet) the render-order
+						// fill delivers it instead.
+						if (claim && !ownSlot)
+							claim = deliveryStore != nullptr && deliveryStore->Enabled() && deliveryStore->HasRecord(seq);
 						if (claim)
 						{
 							late = true;
