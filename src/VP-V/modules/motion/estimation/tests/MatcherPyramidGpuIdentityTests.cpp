@@ -121,6 +121,8 @@ namespace VideoProcessorTest
 			GpuDemand demand;
 			TestOwnerDevice device;
 			std::shared_ptr<SkeletonMemo> memo = std::make_shared<SkeletonMemo>();
+			VpSkeleton::Dims luma;       // the source luma the module would have observed (the largest)
+			VpSkeleton::OwnerFill fill;  // the production P1 GPU owner fill, as registered
 			const void* Host() const { return &hostTag; }
 			ProductRig(pl_gpu gpu, pl_dispatch dispatch, uint32_t w, uint32_t h)
 			{
@@ -131,16 +133,17 @@ namespace VideoProcessorTest
 				memo->SetRenderThread(std::this_thread::get_id());
 				memo->SetGpuDispatcherPresent(true);
 				memo->SetGpuDevice(&device);
-				memo->SetGpuBudget(true, 1ull << 30);
 				Assert::IsTrue(memo->RegisterOwnerFill(VpSkeleton::kP13SourceRing, AcquireForm::Gpu, Vpv::Capture::SourcePlanes::kUnit,
 					Vpv::Capture::SourcePlanes::MakeOwnerFill()) == SkeletonMemo::Registration::Registered, L"P13 owner");
-				// The P1 module's reserve (P1GpuFill.cpp ReserveFor: level 1 of the source luma is the largest level).
-				VpSkeleton::Dims luma;
+				// GF-P1 MUST-2: the P1 module sizes its fill from the largest observed source luma (reserveBytes = the per-frame
+				// working set, reserveFor = the exact size of the asked level); the test registers the same fill with luma = w x h.
 				luma.width = w;
 				luma.height = h;
-				const uint64_t reserve = VpSkeleton::VariantReserveBytes(P1Gpu::MatcherPyramidKey(1), luma, 1, P1Gpu::MatcherStorageFormat());
+				fill = P1Gpu::MatcherPyramidOwnerFill(luma);
 				Assert::IsTrue(memo->RegisterOwnerFill(VpSkeleton::kP1HalfLuma, AcquireForm::Gpu, "input/source_analysis/lane",
-					P1Gpu::MatcherPyramidOwnerFill(reserve)) == SkeletonMemo::Registration::Registered, L"the production P1 GPU owner fill");
+					fill) == SkeletonMemo::Registration::Registered, L"the production P1 GPU owner fill");
+				// The ledger grant is the memo's own planned need (what the module's grant gives the memo), not a bare 1 GiB.
+				memo->SetGpuBudget(true, memo->GpuNeedBytes());
 				demand.memo = memo;
 				demand.host = Host();
 				Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new GpuSkeleton(&demand)));
@@ -242,7 +245,20 @@ namespace VideoProcessorTest
 			return l;
 		}
 
-		std::vector<EstimateResult> RunArm(TargetLutGpuFixture& fixture, const std::vector<Mode>& modes, int w, int h, bool lowRes)
+		// What the P1 ledger refused over an arm (GF-P1 MUST-2): the two budget causes, read from the memo before the rig goes.
+		struct ArmLedger
+		{
+			uint64_t overBudget = 0;
+			uint64_t noLedgerGrant = 0;
+			uint64_t made = 0;                 // frames the owner fill published (filled at read)
+			uint64_t reserveLevel1 = 0;        // fill.reserveFor(level 1)
+			uint64_t reserveLevel6 = 0;        // fill.reserveFor(level 6)
+			uint64_t reserveBytes = 0;         // fill.reserveBytes
+			uint64_t expectedReserveBytes = 0; // MatcherPyramidReserveBytes(luma)
+		};
+
+		std::vector<EstimateResult> RunArm(TargetLutGpuFixture& fixture, const std::vector<Mode>& modes, int w, int h, bool lowRes,
+			ArmLedger* ledger = nullptr)
 		{
 			pl_gpu gpu = fixture.Gpu();
 			struct DispatchHolder
@@ -321,6 +337,18 @@ namespace VideoProcessorTest
 				r.global = Snapshot(gpu, dispatch.d, warp.GlobalVector());
 				out.push_back(std::move(r));
 			}
+			if (ledger != nullptr)
+			{
+				const VpSkeleton::AcquireCounters c = rig.memo->CountersOf(VpSkeleton::kP1HalfLuma);
+				ledger->overBudget = c.unavailable[size_t(VpSkeleton::AcquireCause::OverBudget)];
+				ledger->noLedgerGrant = c.unavailable[size_t(VpSkeleton::AcquireCause::NoLedgerGrant)];
+				ledger->made = c.filledAtRead;
+				Assert::IsTrue(static_cast<bool>(rig.fill.reserveFor), L"the production fill declares reserveFor");
+				ledger->reserveLevel1 = rig.fill.reserveFor(P1Gpu::MatcherPyramidKey(1));
+				ledger->reserveLevel6 = rig.fill.reserveFor(P1Gpu::MatcherPyramidKey(6));
+				ledger->reserveBytes = rig.fill.reserveBytes;
+				ledger->expectedReserveBytes = P1Gpu::MatcherPyramidReserveBytes(rig.luma);
+			}
 			return out;
 		}
 
@@ -393,6 +421,42 @@ namespace VideoProcessorTest
 		TEST_METHOD(LowResInnerProductEqualsOwnPyramid)
 		{
 			CheckArms(2048, 1536, true);
+		}
+
+		// GF-P1 MUST-2 (S14.2a): the memo's ledger grant is its OWN planned need (GpuNeedBytes, from the fill's reserveBytes), not a
+		// bare 1 GiB. Over 6 frames of the production order (normal = levels 1 / 3 / 5, lowRes = adds 2 / 4 / 6, and the EstimateAhead
+		// pair) no Acquire of the pyramid is refused for the budget (0 OverBudget, 0 NoLedgerGrant) and every estimate after the
+		// first pair is served from the product; the per-level reserve is the exact size of the asked level (level 6 < level 1) and
+		// reserveBytes is the largest luma's per-frame working set.
+		BEGIN_TEST_METHOD_ATTRIBUTE(MatcherPyramidBudgetFromNeedServesEveryFrame)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(MatcherPyramidBudgetFromNeedServesEveryFrame)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Mode> engine(6, Mode::Engine);
+			const std::vector<Mode> ahead(6, Mode::EngineAhead);
+			ArmLedger normalLedger, lowResLedger, aheadLedger;
+			const std::vector<EstimateResult> normal = RunArm(fixture, engine, 512, 256, false, &normalLedger);
+			const std::vector<EstimateResult> lowRes = RunArm(fixture, engine, 2048, 1536, true, &lowResLedger);
+			const std::vector<EstimateResult> pair = RunArm(fixture, ahead, 512, 256, false, &aheadLedger);
+			CheckUsedAfterTheFirstPair(normal, false);
+			CheckUsedAfterTheFirstPair(lowRes, true);
+			for (const EstimateResult& r : pair)
+				Assert::IsTrue(r.bound && r.why.empty(), (L"ahead pair (A offered): served; fallback: " + Wide(r.why)).c_str());
+			const ArmLedger* const ledgers[3] = { &normalLedger, &lowResLedger, &aheadLedger };
+			const wchar_t* const names[3] = { L"normal", L"lowRes", L"ahead pair" };
+			for (int i = 0; i < 3; ++i)
+			{
+				const std::wstring at = std::wstring(names[i]) + L": ";
+				Assert::AreEqual(uint64_t(0), ledgers[i]->overBudget, (at + L"0 OverBudget").c_str());
+				Assert::AreEqual(uint64_t(0), ledgers[i]->noLedgerGrant, (at + L"0 NoLedgerGrant (the grant is the memo's need)").c_str());
+				Assert::IsTrue(ledgers[i]->made > 0, (at + L"the owner fill published (non-vacuous)").c_str());
+				Assert::IsTrue(ledgers[i]->reserveLevel6 < ledgers[i]->reserveLevel1, (at + L"reserveFor(level 6) < reserveFor(level 1)").c_str());
+				Assert::IsTrue(ledgers[i]->expectedReserveBytes > 0, (at + L"the working set of a luma is non-zero").c_str());
+				Assert::AreEqual(ledgers[i]->expectedReserveBytes, ledgers[i]->reserveBytes, (at + L"reserveBytes == MatcherPyramidReserveBytes(luma)").c_str());
+			}
 		}
 
 		// SHOULD-1 (LOW-3): one MotionWarp alternating bound -> forced fallback -> bound (A's own levels and the K set freed while
