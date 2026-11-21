@@ -31,7 +31,7 @@
 
 // libplacebo's texture handle, forward-declared (pl_tex = const pl_tex_t*, libplacebo gpu.h).
 struct pl_tex_t;
-namespace VpSkeleton { struct OwnerFill; }
+namespace VpSkeleton { struct OwnerFill; struct Dims; }
 
 namespace VpFrameAnalysis
 {
@@ -229,7 +229,13 @@ if (p.x < size.x && p.y < size.y) {
 		const pl_tex_t* l2, int from, int levels);
 	// THE (kP1HalfLuma, Gpu) owner fill of the matcher pyramid variant, as the P1 module registers it (defined in P1GpuFill.cpp);
 	// public so a GPU test registers the production fill itself, never a copy.
-	VpSkeleton::OwnerFill MatcherPyramidOwnerFill(uint64_t reserveBytes);
+	// GF-P1 MUST-2: sized from the LARGEST source luma (`maxLuma`, the module's largest observed size). reserveBytes = the
+	// per-frame working set MatcherPyramidReserveBytes(maxLuma) (the ahead planner's figure, which the window multiplies by
+	// 1 + back + depth); reserveFor = the exact size of the ASKED level (the reserve before each fill and its context's grant).
+	VpSkeleton::OwnerFill MatcherPyramidOwnerFill(const VpSkeleton::Dims& maxLuma);
+	// The per-frame working set of the matcher pyramid of a `luma`-sized source: the sum of levels 1..6 (one frame can hold every
+	// level: 1 / 3 / 5 for the outer matcher, 2 / 4 / 6 for the lowRes inner). 0 for an empty size.
+	uint64_t MatcherPyramidReserveBytes(const VpSkeleton::Dims& luma);
 }
 }
 

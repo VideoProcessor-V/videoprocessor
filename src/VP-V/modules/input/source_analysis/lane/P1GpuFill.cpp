@@ -161,12 +161,19 @@ namespace P1Gpu
 		// The lowRes inner's levels 2 / 4 / 6 keep the outer's pass names, as today.
 		bool IsFirstFourByFourStep(uint8_t level) { return level == 3 || level == 4; }
 
-		VpSkeleton::OwnerFill MakeP1GpuOwnerFill(uint64_t reserveBytes)
+		// GF-P1 MUST-2 (GV AMEND of Gemini's two blocks): reserveBytes is the per-frame WORKING SET (levels 1..6 of the largest
+		// luma, lowRes included), the figure AheadNeedLocked multiplies by 1 + back + depth; reserveFor is the exact size of the
+		// asked level, so a level-6 fill reserves level 6, not level 1, and the levels one frame holds fit the grant.
+		VpSkeleton::OwnerFill MakeP1GpuOwnerFill(VpSkeleton::Dims maxLuma)
 		{
 			VpSkeleton::OwnerFill f;
 			f.variantAxes = OwnerVariantAxes();
 			f.defaults = VpSkeleton::VariantKey();   // stage 0, every axis default: codeUnit / scale stay in the canonical key
-			f.reserveBytes = reserveBytes;
+			f.reserveBytes = MatcherPyramidReserveBytes(maxLuma);
+			f.reserveFor = [maxLuma](const VpSkeleton::VariantKey& v) {
+				return MatcherPyramidLevel(v) == 0 ? uint64_t(0)
+					: VpSkeleton::VariantReserveBytes(v, maxLuma, 1, MatcherStorageFormat());
+			};
 			f.pixelData = false;   // analysis data (block-match codes), never pixels: OD:670 (d), the R16F matcher variant
 			f.keepFrames = 1;      // A = frame n - 1 stays readable while n renders (SkeletonAcquire.h keepFrames)
 			f.historyFrames = 1;
@@ -275,7 +282,17 @@ namespace P1Gpu
 		}
 	}
 
-	VpSkeleton::OwnerFill MatcherPyramidOwnerFill(uint64_t reserveBytes) { return MakeP1GpuOwnerFill(reserveBytes); }
+	uint64_t MatcherPyramidReserveBytes(const VpSkeleton::Dims& luma)
+	{
+		if (luma.width == 0 || luma.height == 0)
+			return 0;
+		uint64_t total = 0;
+		for (uint8_t lv = 1; lv <= 6; ++lv)
+			total += VpSkeleton::VariantReserveBytes(MatcherPyramidKey(lv), luma, 1, MatcherStorageFormat());
+		return total;
+	}
+
+	VpSkeleton::OwnerFill MatcherPyramidOwnerFill(const VpSkeleton::Dims& maxLuma) { return MakeP1GpuOwnerFill(maxLuma); }
 }
 }
 
@@ -287,8 +304,8 @@ namespace Vpv
 		static constexpr const char* kP1GpuUnit = "input/source_analysis/lane";   // the catalog's kP1HalfLuma owner (ProductCatalog.h)
 
 		// Registers the (kP1HalfLuma, Gpu) fill with the skeleton found by the hub. The reserve is DERIVED (rule 6) from the
-		// LARGEST source luma size over the live hosts, observed at Entrance: one fill call allocates one level, the half (level 1)
-		// is the largest, so reserve = VariantReserveBytes(level 1, luma). Registered on the first size and re-registered only when
+		// LARGEST source luma size over the live hosts, observed at Entrance: the fill is sized from that luma (GF-P1 MUST-2: the
+		// per-frame working set of levels 1..6 as reserveBytes, the asked level's exact size as reserveFor). Registered on the first size and re-registered only when
 		// that largest size changes (like EdgeMapModule); a host is forgotten at GpuReleased / Shutdown. Nothing is registered
 		// before a size is known (an Acquire then is a visible NoOwnerFill). Cost per frame: one short lock and a lookup.
 		class P1GpuModule;
@@ -376,19 +393,21 @@ namespace Vpv
 				VpSkeleton::Dims luma;
 				uint64_t bytes = 0;
 			};
-			static uint64_t ReserveFor(VpSkeleton::Dims luma)
-			{
-				if (luma.width == 0 || luma.height == 0)
-					return 0;
-				return VpSkeleton::VariantReserveBytes(VpFrameAnalysis::P1Gpu::MatcherPyramidKey(1), luma, 1,
-					VpFrameAnalysis::P1Gpu::MatcherStorageFormat());
-			}
+			static uint64_t ReserveFor(VpSkeleton::Dims luma) { return VpFrameAnalysis::P1Gpu::MatcherPyramidReserveBytes(luma); }
 			bool UpdateLocked(Skeleton::IExternalDemand* demand)
 			{
-				uint64_t want = 0;
+				// The fill is sized from the per-axis maximum over the live hosts, so every host's level fits its exact reserve.
+				VpSkeleton::Dims maxLuma;
 				for (const HostSize& h : hosts_)
-					if (h.bytes > want)
-						want = h.bytes;
+				{
+					if (h.bytes == 0)
+						continue;
+					if (h.luma.width > maxLuma.width)
+						maxLuma.width = h.luma.width;
+					if (h.luma.height > maxLuma.height)
+						maxLuma.height = h.luma.height;
+				}
+				const uint64_t want = ReserveFor(maxLuma);
 				const bool ok = registered_.load(std::memory_order_acquire);
 				if (want == 0 || (ok && want == reserve_) || want == tried_)
 					return ok;
@@ -400,7 +419,7 @@ namespace Vpv
 				if (ok)
 					demand->UnregisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Gpu, kP1GpuUnit);
 				const VpSkeleton::SkeletonMemo::Registration r = demand->RegisterOwnerFill(VpSkeleton::kP1HalfLuma,
-					VpSkeleton::AcquireForm::Gpu, kP1GpuUnit, VpFrameAnalysis::P1Gpu::MakeP1GpuOwnerFill(want));
+					VpSkeleton::AcquireForm::Gpu, kP1GpuUnit, VpFrameAnalysis::P1Gpu::MakeP1GpuOwnerFill(maxLuma));
 				const bool now = r == VpSkeleton::SkeletonMemo::Registration::Registered;
 				reserve_ = now ? want : uint64_t(0);
 				registered_.store(now, std::memory_order_release);
