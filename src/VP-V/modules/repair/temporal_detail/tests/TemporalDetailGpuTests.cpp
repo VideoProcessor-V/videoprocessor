@@ -1645,7 +1645,6 @@ namespace VideoProcessorTest
 			// The statuses, model and GPU: the soft reset named; the consumers' note right after the status.
 			pl_gpu gpu = dev.Gpu();
 			Gpu::Module module;
-			MemoRig rig(dev);
 			Model model(Steady());
 			const MotionPair bwd = MotionPair::Uniform(kW, kH, 16.0, 0.0, 0.0);
 			FieldMotionSource motion;
@@ -1665,7 +1664,6 @@ namespace VideoProcessorTest
 				gp.settings = Steady();
 				gp.seq = static_cast<uint64_t>(t);
 				gp.backward.tex = bwdTex;
-				gp.memo = &rig.memo;
 				gp.sceneRestart = s;
 				gp.memo = &rig.memo;
 				pl_frame out{};
