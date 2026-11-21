@@ -1,10 +1,10 @@
 # DV display mapping: trims (`colour.dm_trims`)
 
-Unit: **colour** | side: output | order: 205 | status: **placeholder** | hook point: PRE_OUTPUT
+Unit: **colour** | side: output | order: 205 | status: **built** | hook point: PRE_OUTPUT
 
 ## Purpose / why
 
-Reserved stage dm.trims of the DV display-mapping split: the Dolby-style trims at PRE_OUTPUT, after the SDR tone shape and before CAM16.
+DV L8/L2 trims (CF-1 P3: own switch `dv_trims`, pinned before colour.appearance) of the DV display-mapping split: the Dolby-style trims at PRE_OUTPUT, after the SDR tone shape and before CAM16.
 
 ## Design goal, philosophy and decisions
 
@@ -14,8 +14,8 @@ Reserved by lane DVDM P1 (2026-11-14) from the VP-V DV display-mapping proposal 
 
 ## Settings
 
-- Keys: none yet.
-- Tiers: n/a (placeholder).
+- Keys: `dv_trims` (documented under colour.sdr_tone_shape), `dv_display_mapping` (under colour.dm_curve).
+- Tiers: none.
 - Fallback entry ("Fallbacks engaged"): `DV display mapping (trims): off (<reason>)`.
 
 ## Tests

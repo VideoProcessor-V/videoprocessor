@@ -13,6 +13,7 @@
 #include <RendererConfigView.h>
 #include <RetiredSettings.h>
 #include <VP-V/core/SlotSwitchSettings.h>
+#include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
 #include <VP-V/modules/output/presentation/PresentationOwner.h>
 #include <vprenderer/DetailPulse.h>
 #include <vprenderer/EdgeBlanking.h>
@@ -190,6 +191,7 @@ namespace VpvRendererSettings
 		readChoice("dejudder_low_res", settings.dejudderLowRes, { "off", "search", "all" });
 		readChoice("capture_path", settings.capturePath, { "standard", "gpu" });
 		readChoice("capture_upload", settings.captureUpload, { "auto", "render", "early" });
+		readChoice("dv_display_mapping", settings.dvDisplayMapping, { "vp", "original" });   // CF-1 P3
 		readChoice("dv_tone_mapping", settings.dvToneMapping, { "libplacebo", "dolby_style" });   // feat/dv-l8
 		config.TryGetString(rule.section, "dv_compare_capture_folder", settings.dvCompareCaptureFolder);   // feat/dv-l8 WIP
 		config.TryGetString(rule.section, "source_geometry_detect", settings.sourceGeometryDetect);   // SID r2: recognition set
@@ -932,10 +934,10 @@ namespace VpvRendererSettings
 		if (TryGetPipelineString(config, "calibration_lut_stage", raw))
 		{
 			const std::string value = ConfigFile::NormalizeName(raw);
-			if (value == "libplacebo" || value == "vp")
+			if (value == "libplacebo" || value == "vp" || value == "auto")
 				settings.calibrationLutStage = value;
 			else
-				settings.pipelineSettingsProblems += "calibration_lut_stage '" + raw + "' (libplacebo|vp); ";
+				settings.pipelineSettingsProblems += "calibration_lut_stage '" + raw + "' (libplacebo|vp|auto); ";
 		}
 		if (TryGetPipelineString(config, "output_segments_merged", raw))
 		{
@@ -1006,6 +1008,15 @@ namespace VpvRendererSettings
 			ApplyOriginal(settings);
 			overrides.chromaUpscaler = "bicubic";                 // key=chroma_upscaler (a host field, so returned)
 		}
+		// CF-1 P3: calibration_lut_stage auto -> vp while a VP colour step that must follow the LUT runs (dm_trims: the
+		// setting dv_trims on, dv_display_mapping vp, the slot not in pipeline_slots_off; never on the Original pathway).
+		// The renderer reads this field as vp | libplacebo, so the resolved text is stored; the config file keeps "auto".
+		{
+			const bool trimsSlotOff = settings.pipelineSlotsOff.find("colour.dm_trims") != std::string::npos;
+			const bool dmStepsRun = !settings.pipelineOriginalPathway && settings.dvDisplayMapping != "original" &&
+				settings.dvTrims && !trimsSlotOff;
+			settings.calibrationLutStage = CalibrationLutHost::ResolveStage(settings.calibrationLutStage, dmStepsRun);
+		}
 		// Motion + queue/timing slots switched off run in their upstream form (owner 2026-10-25).
 		SlotSwitchSettings::Apply(SlotSwitchSettings::FromText(settings.pipelineSlotsOff), settings);
 		// Batch B Q3: the motion engine is one switch; OFF forces de-judder and hiccup smoothing off, visibly (the line is the Ctrl+I text).
@@ -1033,6 +1044,7 @@ namespace VpvRendererSettings
 		settings.dvCompareCaptureFolder.clear();           // key=dv_compare_capture_folder
 		settings.dvTrims = false;                          // key=dv_trims
 		settings.dvToneMapping = "libplacebo";             // key=dv_tone_mapping
+		settings.dvDisplayMapping = "original";            // key=dv_display_mapping
 		settings.queueTimingFixes = false;                 // key=queue_timing_fixes
 		settings.pulldownFixes = false;                    // key=pulldown_fixes
 		settings.timingContinuityFixes = false;            // key=timing_continuity_fixes
@@ -1173,6 +1185,7 @@ namespace VpvRendererSettings
 			<< settings.sourceRange << '|'
 			<< settings.sourceResolution << '|'
 			<< settings.dvToneMapping << '|'
+			<< settings.dvDisplayMapping << '|'
 			<< settings.dvCompareCaptureFolder << '|'
 			<< settings.sourceResolutionAutoMinConfidence << '|'
 			<< settings.sourceResolutionEvidenceShots << '|'
@@ -1498,6 +1511,7 @@ namespace VpvRendererSettings
 		changed(current.dvTunnelGpuUnpack != next.dvTunnelGpuUnpack, "dv_tunnel_gpu_unpack");
 		changed(current.dvTrims != next.dvTrims, "dv_trims");
 		changed(current.dvToneMapping != next.dvToneMapping, "dv_tone_mapping");
+		changed(current.dvDisplayMapping != next.dvDisplayMapping, "dv_display_mapping");
 		changed(current.dvCompareCaptureFolder != next.dvCompareCaptureFolder, "dv_compare_capture_folder");
 		changed(current.dvTunnelFixes != next.dvTunnelFixes, "dv_tunnel_fixes");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
@@ -1625,6 +1639,7 @@ namespace VpvRendererSettings
 		<< "dv_tunnel_gpu_unpack=" << s.dvTunnelGpuUnpack << "\n"
 		<< "dv_trims=" << s.dvTrims << "\n"
 		<< "dv_tone_mapping=" << s.dvToneMapping << "\n"
+		<< "dv_display_mapping=" << s.dvDisplayMapping << "\n"
 		<< "dv_compare_capture_folder=" << s.dvCompareCaptureFolder << "\n"
 		<< "dv_tunnel_fixes=" << (s.dvTunnelFixes ? "on" : "off") << "\n"
 		<< "hdr_inference=" << s.hdrInference << "\n"

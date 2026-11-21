@@ -1189,9 +1189,12 @@
     {
       "slot": "colour.dm_curve",
       "order": 172,
-      "status": "placeholder",
-      "code_location": "placeholder (no component; the slot registers no pass and no hook)",
-      "live_files": [],
+      "status": "built",
+      "code_location": "built in CF-1 P3; the code lives in colour/display_mapping (module headers) and the call sites in segments/CoreSegments.inl + OutputSegments.cpp",
+      "live_files": [
+        "src/VP-V/modules/colour/display_mapping/DvDolbyStyle.h",
+        "src/VP-V/modules/colour/display_mapping/DvMath.h"
+      ],
       "components": {
         "files": {
           "required": [],
@@ -1202,12 +1205,15 @@
           "optional": []
         },
         "tools": [],
-        "config_keys": [],
+        "config_keys": [
+          "dv_display_mapping",
+          "dv_tone_mapping"
+        ],
         "upstream_modules": [
           "colour.tone_gamut"
         ]
       },
-      "fallback_when_missing": "Placeholder: registers no pass and no hook; nothing to fall back from."
+      "fallback_when_missing": "Slot off = the configured libplacebo curve / no trims, nothing listed; a stage that cannot run engages its Fallbacks-engaged entry."
     },
     {
       "slot": "colour.extended_range",
@@ -1264,8 +1270,6 @@
         },
         "tools": [],
         "config_keys": [
-          "dv_tone_mapping",
-          "dv_trims",
           "sdr_contrast_recovery",
           "sdr_knee_start",
           "sdr_knee_strength",
@@ -1281,9 +1285,13 @@
     {
       "slot": "colour.dm_trims",
       "order": 205,
-      "status": "placeholder",
-      "code_location": "placeholder (no component; the slot registers no pass and no hook)",
-      "live_files": [],
+      "status": "built",
+      "code_location": "built in CF-1 P3; the code lives in colour/display_mapping (module headers) and the call sites in segments/CoreSegments.inl + OutputSegments.cpp",
+      "live_files": [
+        "src/VP-V/modules/colour/display_mapping/DolbyVisionTrims.h",
+        "src/VP-V/modules/colour/display_mapping/DvTrimSelection.h",
+        "src/VP-V/modules/colour/display_mapping/DvHostStage.h"
+      ],
       "components": {
         "files": {
           "required": [],
@@ -1294,12 +1302,15 @@
           "optional": []
         },
         "tools": [],
-        "config_keys": [],
+        "config_keys": [
+          "dv_display_mapping",
+          "dv_trims"
+        ],
         "upstream_modules": [
           "colour.sdr_tone_shape"
         ]
       },
-      "fallback_when_missing": "Placeholder: registers no pass and no hook; nothing to fall back from."
+      "fallback_when_missing": "Slot off = the configured libplacebo curve / no trims, nothing listed; a stage that cannot run engages its Fallbacks-engaged entry."
     },
     {
       "slot": "colour.appearance",

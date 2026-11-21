@@ -602,6 +602,20 @@ namespace FallbackCatalog
 		return requested && !applied ? Engaged("SDR tone shape", "not applied" +
 			(why.empty() ? std::string() : " (" + why + ")")) : Released("SDR tone shape");
 	}
+	// CF-1 P3: the calibration LUT runs as VP's last colour step because the display mapping's trims (or Stage 13) must act
+	// after it (calibration_lut_stage = auto). Engaged while that substitution lasts: the LUT is not libplacebo's.
+	inline Decision CalibrationLutDisplayMapping(bool vpStageForMapping)
+	{
+		return vpStageForMapping ? Engaged("calibration LUT: display mapping", "VP applies the calibration LUT as its last colour step (the display mapping acts before it)")
+		                         : Released("calibration LUT: display mapping");
+	}
+	// CF-1 P3: the DV display mapping cannot read this capture container (R12B / R12L RGB containers carry no DV payload path):
+	// libplacebo's own mapping runs.
+	inline Decision DvDisplayMappingContainer(bool unsupported, const std::string& container)
+	{
+		return unsupported ? Engaged("DV display mapping: container", "unsupported capture container" + (container.empty() ? std::string() : " (" + container + ")") + ": libplacebo's mapping runs")
+		                   : Released("DV display mapping: container");
+	}
 	// Adaptive downscale: GPU failures leave plain SSIM (w = 1); a missing SSimDownscaler leaves
 	// libplacebo's downscaler.
 	inline Decision OutputScaling(bool adaptiveRequested, unsigned long long newFailures, bool ssimShaderMissing)

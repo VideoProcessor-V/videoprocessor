@@ -184,8 +184,8 @@ namespace Vpv
 				{ K::Section, "adaptiveDownscale" }, { K::Section, "adaptiveUpscale" } } },
 
 			// ---- Colour ----
-			{ "colour", "dv", "Dolby Vision", "How Dolby Vision pictures are mapped to your display.", false, false, {
-				{ K::Toggle, "dv_trims" }, { K::Row, "dv_tone_mapping" } } },
+			{ "colour", "dv", "Display mapping", "How Dolby Vision pictures are mapped to your display. VP's mapping is an approximation of Dolby's, not certified; Original uses libplacebo's own mapping.", false, false, {
+				{ K::Row, "dv_display_mapping" }, { K::Toggle, "dv_trims" }, { K::Row, "dv_tone_mapping" } } },
 			{ "colour", "range", "Range and precision", "Keeps every value the source carries.", false, false, {
 				{ K::Toggle, "preserve_extended_range" }, { K::Elsewhere, "fbo_float32" },
 				{ K::Note, "Full precision (32-bit float intermediates) is chosen once for every tier, under the global tier at the top of this page." } } },

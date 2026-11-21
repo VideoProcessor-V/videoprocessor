@@ -103,6 +103,7 @@ namespace ProfileSchemaHooks
 			// Owner 2026-10-13: the capture path (gpu = the low-latency GPU unpack).
 			if (key == "capture_path") return V(IsChoice(value, { "standard", "gpu" }));
 			if (key == "capture_upload") return V(IsChoice(value, { "auto", "render", "early" }));
+			if (key == "dv_display_mapping") return V(IsChoice(value, { "vp", "original" }));   // CF-1 P3
 			if (key == "dv_tone_mapping") return V(IsChoice(value, { "libplacebo", "dolby_style" }));   // feat/dv-l8
 			if (key == "dv_compare_capture_folder") return V(value.find('"') == std::string::npos);   // feat/dv-l8 WIP: a folder, "" = off
 			if (key == "source_range") return V(IsChoice(value, { "auto", "full", "limited" }));
@@ -309,7 +310,7 @@ namespace ProfileSchemaHooks
 				return V(IsChoice(value, { "approve", "keep" }));
 			if (key == "pipeline_order" || key == "pipeline_slots_off")
 				return V(value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_.,;> ") == std::string::npos);
-			if (key == "calibration_lut_stage") return V(IsChoice(value, { "libplacebo", "vp" }));
+			if (key == "calibration_lut_stage") return V(IsChoice(value, { "libplacebo", "vp", "auto" }));
 			if (key == "output_segments_merged") return V(IsChoice(value, { "on", "off" }));   // output segments S2/S3 (draft)
 			if (key == "hdr_inference") return V(IsChoice(value, { "vp", "original" }));   // F-8 (HdrInferenceChoice.h)
 			return Verdict::NotMine;

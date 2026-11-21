@@ -1,10 +1,10 @@
 # DV display mapping: curve (`colour.dm_curve`)
 
-Unit: **colour** | side: processing | order: 172 | status: **placeholder** | hook point: LIBPLACEBO
+Unit: **colour** | side: processing | order: 172 | status: **built** | hook point: LIBPLACEBO
 
 ## Purpose / why
 
-Reserved stage dm.curve of the DV display-mapping split: the tone curve inside libplacebo's colour map.
+The tone curve inside libplacebo's colour map for Dolby Vision pictures (CF-1 P3: own switch, independent of sdr_tone_shape; `dv_tone_mapping` = libplacebo | dolby_style, an approximation, never labelled Dolby Vision). `dv_display_mapping` = vp | original is the either/or master for both DV slots: original is Bill's libplacebo mapping, no VP curve or trims.
 
 ## Design goal, philosophy and decisions
 
@@ -14,8 +14,13 @@ Reserved by lane DVDM P1 (2026-11-14) from the VP-V DV display-mapping proposal 
 
 ## Settings
 
-- Keys: none yet.
-- Tiers: n/a (placeholder).
+
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `dv_display_mapping` | profile ([vprenderer.Default] and matching profiles) | enum | vp, original | vp | VP-V > Colour > Main > Display mapping | Original pathway sets `original` (ADR-0019) | DV display mapping: container; calibration LUT: display mapping | - |
+
+- Also owns `dv_tone_mapping` (documented under colour.sdr_tone_shape).
+- Tiers: none.
 - Fallback entry ("Fallbacks engaged"): `DV display mapping (curve): off (<reason>)`.
 
 ## Tests

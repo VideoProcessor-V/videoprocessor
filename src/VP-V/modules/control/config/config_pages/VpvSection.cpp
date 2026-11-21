@@ -1480,6 +1480,7 @@ namespace Vpv
 			lutStage->setObjectName(ObjectName(QStringLiteral("expert.calibration_lut_stage")));
 			lutStage->addItem(QStringLiteral("libplacebo (default; before VP's output steps)"), QString());
 			lutStage->addItem(QStringLiteral("VP (the last colour step, after LED compensation)"), QStringLiteral("vp"));
+			lutStage->addItem(QStringLiteral("Auto (VP's step while Dolby Vision trims run, else libplacebo)"), QStringLiteral("auto"));
 			lutStage->setToolTip(QStringLiteral("Key calibration_lut_stage. VP applies the LUT after Dynamic Drive, so the LED "
 				"measurement sees target light instead of projector codes (design R1)."));
 			form->addRow(QStringLiteral("Calibration LUT runs in"), lutStage);
@@ -1653,7 +1654,8 @@ namespace Vpv
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
 					const QSignalBlocker blocker(lutStage);
-					lutStage->setCurrentIndex(get("calibration_lut_stage").compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 : 0);
+					lutStage->setCurrentIndex(get("calibration_lut_stage").compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 :
+						get("calibration_lut_stage").compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0 ? 2 : 0);
 					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
 					lutStage->setEnabled(!original);
 					SetGreyReason(lutStage, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());

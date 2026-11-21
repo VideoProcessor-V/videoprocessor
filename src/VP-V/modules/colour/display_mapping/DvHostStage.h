@@ -79,6 +79,7 @@ public:
 		const VideoState& state;              // for the comparison capture
 		const VideoFrame* rawFrame;           // the raw capture frame, or null
 		uint64_t counter;                     // the frame counter
+		bool trimsStageRuns = true;           // the colour.dm_trims slot runs this frame (CF-1 P3; trailing so older initialisers compile)
 	};
 
 	DvHostStage(CustomHookChain::Loader loader, Engage engage, Release release)
@@ -247,7 +248,7 @@ public:
 				trc == PL_COLOR_TRC_GAMMA28 || trc == PL_COLOR_TRC_BT_1886 || trc == PL_COLOR_TRC_SRGB;
 			std::string params;
 			DvTrimSelection::Selection selection;   // feat/dv-l8: L8, else L2, else none
-			if (!f.trims || !f.colourStageRuns)
+			if (!f.trims || !f.trimsStageRuns)
 				state = "off";
 			else if (!dvPicture)
 				state = "idle (no Dolby Vision picture with DM)";

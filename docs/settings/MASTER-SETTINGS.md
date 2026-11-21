@@ -12,9 +12,9 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Count | Value |
 |---|---|
 | Modules | 48 |
-| Documented rows | 395 |
-| VP-V keys in code (outside Bill's schema lists) | 390 |
-| of which documented | 390 |
+| Documented rows | 396 |
+| VP-V keys in code (outside Bill's schema lists) | 391 |
+| of which documented | 391 |
 | of which undocumented (appendix A) | 0 |
 | Documented keys with no code entry (appendix B) | 0 |
 
@@ -53,11 +53,11 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Scaling | `scaling.output` | partial | [README](../../src/VP-V/modules/scaling/output/README.md) | 29 | 30 | 29/30 |
 | Colour | `colour.dm_pre` | placeholder | [README](../../src/VP-V/modules/colour/dm_pre/README.md) | 0 | 0 | 0/0 |
 | Colour | `colour.tone_gamut` | built | [README](../../src/VP-V/modules/colour/tone_gamut/README.md) | 1 | 5 | 0/5 |
-| Colour | `colour.dm_curve` | placeholder | [README](../../src/VP-V/modules/colour/dm_curve/README.md) | 0 | 0 | 0/0 |
+| Colour | `colour.dm_curve` | built | [README](../../src/VP-V/modules/colour/dm_curve/README.md) | 1 | 2 | 1/2 |
 | Colour | `colour.extended_range` | built | [README](../../src/VP-V/modules/colour/extended_range/README.md) | 2 | 2 | 2/2 |
 | Colour | `colour.display_mapping` | draft | [README](../../src/VP-V/modules/colour/display_mapping/README.md) | 0 | 0 | 0/0 |
-| Colour | `colour.sdr_tone_shape` | built | [README](../../src/VP-V/modules/colour/sdr_tone_shape/README.md) | 7 | 7 | 7/7 |
-| Colour | `colour.dm_trims` | placeholder | [README](../../src/VP-V/modules/colour/dm_trims/README.md) | 0 | 0 | 0/0 |
+| Colour | `colour.sdr_tone_shape` | built | [README](../../src/VP-V/modules/colour/sdr_tone_shape/README.md) | 7 | 5 | 5/5 |
+| Colour | `colour.dm_trims` | built | [README](../../src/VP-V/modules/colour/dm_trims/README.md) | 0 | 2 | 0/2 |
 | Colour | `colour.appearance` | placeholder | [README](../../src/VP-V/modules/colour/appearance/README.md) | 13 | 6 | 0/6 |
 | Dynamic drive | `drive.led_measure` | built | [README](../../src/VP-V/modules/drive/led_measure/README.md) | 0 | 13 | 0/13 |
 | Dynamic drive | `drive.led_compensation` | built | [README](../../src/VP-V/modules/drive/led_compensation/README.md) | 90 | 6 | 1/6 |
@@ -307,8 +307,9 @@ Modules: `colour.dm_pre`, `colour.tone_gamut`, `colour.dm_curve`, `colour.extend
 | `ambient_screen_reflect` | `colour.appearance` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 0.01 | 0.01 | VP-V > Colour > Advanced > Room-light adaptation: values | n/a (VP-only): unchanged by the Original pathway | Light the screen reflects back, cd/m2 per lux of room light; effective black = display black + strength x lux x this | same on all (not tiered) |
 | `ambient_tau_down_s` | `colour.appearance` | profile ([vprenderer.Default] and matching profiles) | float | 1.0 - 1800.0 | 90 | 90 | VP-V > Colour > Advanced > Room-light adaptation: values | n/a (VP-only): unchanged by the Original pathway | Seconds the target takes to follow a falling room light | same on all (not tiered) |
 | `ambient_tau_up_s` | `colour.appearance` | profile ([vprenderer.Default] and matching profiles) | float | 1.0 - 600.0 | 15 | 15 | VP-V > Colour > Advanced > Room-light adaptation: values | n/a (VP-only): unchanged by the Original pathway | Seconds the target takes to follow a rising room light | same on all (not tiered) |
-| `dv_tone_mapping` | `colour.sdr_tone_shape` | profile ([vprenderer.Default] and matching profiles) | enum | libplacebo, dolby_style | libplacebo | libplacebo | VP-V > Colour > Main > Dolby Vision | Original pathway sets `libplacebo` (ADR-0019) | Dolby Vision tone mapping: libplacebo's curve, or dolby_style (approximate: a Dolby-style curve from the scene metadata with the trims in ICtCp; not certified) | same on all (not tiered) |
-| `dv_trims` | `colour.sdr_tone_shape` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | 1 | VP-V > Colour > Main > Dolby Vision; also VP Renderer > Rendering > Fixes under test (upstream copy greyed while VP-V is on) | Original pathway sets `off` (ADR-0019) | VP applies the Dolby Vision L2 trims for the display's peak after libplacebo's tone mapping (shaders\DV trims.glsl; a non-certified reimplementation). status line: DV tone mapping: <why>: bt2390[ + trims] | same on all (not tiered) |
+| `dv_display_mapping` | `colour.dm_curve` | profile ([vprenderer.Default] and matching profiles) | enum | vp, original | vp |  | VP-V > Colour > Main > Display mapping | Original pathway sets `original` (ADR-0019) | DV display mapping: container; calibration LUT: display mapping | - |
+| `dv_tone_mapping` | `colour.sdr_tone_shape` | profile ([vprenderer.Default] and matching profiles) | enum | libplacebo, dolby_style | libplacebo | libplacebo | VP-V > Colour > Main > Display mapping | Original pathway sets `libplacebo` (ADR-0019) | Dolby Vision tone mapping: libplacebo's curve, or dolby_style (approximate: a Dolby-style curve from the scene metadata with the trims in ICtCp; not certified) | same on all (not tiered) |
+| `dv_trims` | `colour.sdr_tone_shape` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | 1 | VP-V > Colour > Main > Display mapping | Original pathway sets `off` (ADR-0019) | VP applies the Dolby Vision L2 trims for the display's peak after libplacebo's tone mapping (shaders\DV trims.glsl; a non-certified reimplementation). status line: DV tone mapping: <why>: bt2390[ + trims] | same on all (not tiered) |
 | `extended_range_more_cases` | `colour.extended_range` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | `on` |  | VP-V > Proposed retirement > Proven fixes (all on by default); built beside Bill's Processing rows; moved to Proven fixes | n/a (VP-only) | fix under test, proposed for retirement (group A); `off` = the Stage 10 eligibility; the Original pathway sets it `off` | same on all (not tiered) |
 | `preserve_extended_range` | `colour.extended_range` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | `on` | on | VP-V > Colour > Main > Range and precision; also VP Renderer > Rendering > Processing (upstream copy greyed while VP-V is on) | n/a (VP-only): libplacebo's standard path clips below-black and above-white | `BTB/WTW: clipped (<reason>)` (FallbackCatalog::BtbWtw); the Original pathway sets it `off` | same on all (not tiered) |
 | `saturation` | `colour.tone_gamut` | profile ([vprenderer.Default] and matching profiles) | int | -100 - 100 | 0 |  | VP Renderer > Rendering > Tone mapping: Saturation (-100 to +100) | n/a (VP-only): unchanged by the Original pathway | Profile saturation adjustment in percent (0 = none) | same on all (not tiered) |

@@ -75,9 +75,10 @@ namespace PipelineSlots
 			c.needLight = Light::Target;
 			c.modifies = id != Id::DriveLedMeasure;
 			break;
-		// DV display mapping placeholders (DVDM): no pass yet, so they change nothing and may sit anywhere in their zone;
-		// this keeps every existing custom order valid (rules 2 and 3b). Real contracts arrive with the passes.
-		case Id::ColourDmPre: case Id::ColourDmCurve: case Id::ColourDmTrims: break;
+		// DV display mapping: dm_pre is still a placeholder (no pass, changes nothing, may sit anywhere in its zone).
+		// dm_curve and dm_trims are built (CF-1 P3): they work on target light and change the picture.
+		case Id::ColourDmPre: break;
+		case Id::ColourDmCurve: case Id::ColourDmTrims: c.needLight = Light::Target; c.modifies = true; break;
 		case Id::OutputCalibrationLut: c.needLight = Light::Target; c.giveLight = Light::Codes; c.modifies = true; break;
 		default:
 			// Host, libplacebo-internal, quantiser and presentation slots stay where they are.
@@ -103,12 +104,14 @@ namespace PipelineSlots
 
 	// Hard precede rules beyond the domains: first must run before second.
 	struct Precede { Id first, second; const char* why; };
-	inline const std::array<Precede, 3>& HardRules()
+	inline const std::array<Precede, 5>& HardRules()
 	{
-		static const std::array<Precede, 3> rules = { {
+		static const std::array<Precede, 5> rules = { {
 			{ Id::DriveLedMeasure, Id::DriveLedCompensation, "the LED compensation uses the measurement of the same picture" },
 			{ Id::DriveLedCompensation, Id::DriveBlackLevel, "black level corrects the floor after the LED compensation" },
 			{ Id::ColourSdrToneShape, Id::ColourAppearance, "Stage 13 adapts the SDR-shaped picture (delta 13 first)" },
+			{ Id::ColourDmTrims, Id::ColourAppearance, "the DV display-mapping trims shape the picture before Stage 13 adapts it" },
+			{ Id::ColourAppearance, Id::DriveLedMeasure, "Stage 13 changes the picture, so the LED measurement must see its result" },
 		} };
 		return rules;
 	}

@@ -1360,22 +1360,22 @@
       "unit": "colour",
       "side": "processing",
       "order": 172,
-      "status": "placeholder",
+      "status": "built",
       "hook_point": "LIBPLACEBO",
-      "purpose": "Reserved stage dm.curve of the DV display-mapping split: the tone curve inside libplacebo's colour map.",
+      "purpose": "Stage dm.curve of the DV display-mapping split (built in CF-1 P3): the Dolby-style tone curve inside libplacebo's colour map, gated by this slot instead of colour.sdr_tone_shape.",
       "contract": {
         "input": "libplacebo colour-map input",
         "output": "same domain",
         "geometry": "processing size",
-        "delay_share": "0 frames (placeholder: no component, no hook)",
+        "delay_share": "0 frames (one libplacebo tone function)",
         "lookahead": "none"
       },
-      "settings_keys": [],
+      "settings_keys": ["dv_display_mapping", "dv_tone_mapping"],
       "planned_keys": [],
-      "tiers": "n/a (placeholder)",
+      "tiers": "all tiers (libplacebo tone function)",
       "fallback": {
         "entry": "DV display mapping (curve): off (<reason>)",
-        "behaviour": "Off = pass-through; the slot is a placeholder until its stage lands."
+        "behaviour": "Off (slot switched off or Original pathway) = the configured libplacebo curve, nothing listed; a curve that cannot run lists \"DV tone mapping\" under Fallbacks engaged."
       },
       "upstream": [
         "colour.tone_gamut"
@@ -1484,9 +1484,7 @@
         "sdr_white_headroom",
         "sdr_knee_start",
         "sdr_knee_strength",
-        "sdr_contrast_recovery",
-        "dv_trims",
-        "dv_tone_mapping"
+        "sdr_contrast_recovery"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
@@ -1531,22 +1529,22 @@
       "unit": "colour",
       "side": "output",
       "order": 205,
-      "status": "placeholder",
+      "status": "built",
       "hook_point": "PRE_OUTPUT",
-      "purpose": "Reserved stage dm.trims of the DV display-mapping split: the Dolby-style trims at PRE_OUTPUT, after the SDR tone shape and before CAM16.",
+      "purpose": "Stage dm.trims of the DV display-mapping split (built in CF-1 P3): the L8 / L2 trims at PRE_OUTPUT, after the SDR tone shape and before CAM16, gated by this slot instead of colour.sdr_tone_shape.",
       "contract": {
         "input": "target-light picture at output size",
         "output": "same domain",
         "geometry": "output size",
-        "delay_share": "0 frames (placeholder: no component, no hook)",
+        "delay_share": "0 frames (one PRE_OUTPUT hook)",
         "lookahead": "none"
       },
-      "settings_keys": [],
+      "settings_keys": ["dv_display_mapping", "dv_trims"],
       "planned_keys": [],
-      "tiers": "n/a (placeholder)",
+      "tiers": "all tiers (CPU-side selection; one hook)",
       "fallback": {
         "entry": "DV display mapping (trims): off (<reason>)",
-        "behaviour": "Off = pass-through; the slot is a placeholder until its stage lands."
+        "behaviour": "Off (slot switched off or Original pathway) = no trims, nothing listed; trims that cannot run list \"Dolby Vision trims\" under Fallbacks engaged."
       },
       "upstream": [
         "colour.sdr_tone_shape"

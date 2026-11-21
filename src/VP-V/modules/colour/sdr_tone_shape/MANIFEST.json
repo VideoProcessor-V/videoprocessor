@@ -32,8 +32,6 @@
     },
     "tools": [],
     "config_keys": [
-      "dv_tone_mapping",
-      "dv_trims",
       "sdr_contrast_recovery",
       "sdr_knee_start",
       "sdr_knee_strength",

@@ -32,6 +32,19 @@ namespace CalibrationLutHost
 		return facts.vpStageWanted && !facts.originalPathway && facts.slotRuns && !stageFailed;
 	}
 
+	// CF-1 P3: calibration_lut_stage = auto. VP's colour steps that shape the picture (dm_trims, and
+	// colour.appearance when it exists) must come AFTER the LUT never before it: a LUT applied by
+	// libplacebo runs before PRE_OUTPUT, so those steps would act on projector codes. Auto therefore
+	// takes the VP stage while one of them runs, and libplacebo's LUT otherwise. The Original pathway
+	// always keeps libplacebo's (the caller passes dmStepsRun = false there). "libplacebo" and "vp"
+	// pass through; anything else reads as libplacebo.
+	inline std::string ResolveStage(const std::string& configured, bool dmStepsRun)
+	{
+		if (configured == "auto")
+			return dmStepsRun ? "vp" : "libplacebo";
+		return configured == "vp" ? "vp" : "libplacebo";
+	}
+
 	constexpr const char* kVpStagePrefix = "Active (VP stage): ";
 	// The renderer's LoadDisplayLut writes this when a changed file fails to reload and the last good
 	// LUT stays (Bill's text; his ConfigureDisplayLutForTarget keeps it on the libplacebo stage).

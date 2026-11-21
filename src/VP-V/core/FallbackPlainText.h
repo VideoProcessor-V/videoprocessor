@@ -43,6 +43,8 @@ namespace FallbackPlainText
 			{ "skeleton_scene_veto", "Motion matching is not stopped at scene changes on this renderer; only its own continuity checks apply" },
 			{ "skeleton_scene_no_grid", "Scene changes in this small picture are judged by the simpler two-frame test" },
 			{ "SDR tone shape", "The SDR tone shape was not applied" },
+			{ "calibration LUT: display mapping", "The calibration table is applied as VP's last colour step so the Dolby Vision mapping acts before it" },
+			{ "DV display mapping: container", "The Dolby Vision display mapping cannot read this capture format, so the standard mapping runs" },
 			{ "output scaling", "The output scaler was replaced by a simpler one" },
 			{ "native readback", "Some graphics-card readbacks use a simpler ready check, so analysis results may arrive later" },
 			{ "early upload", "Early upload of frames to the graphics card is off" },

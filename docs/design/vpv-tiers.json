@@ -71,6 +71,7 @@
     "preserve_extended_range": "on",
     "sdr_tone_shape": "off",
     "source_range": "auto",
+    "dv_display_mapping": "vp",
     "dv_trims": "on",
     "intent_content": "off",
     "interpolation_fallback": "hold",
@@ -591,13 +592,22 @@
       "presets": {},
       "toggles": [
         {
+          "key": "dv_display_mapping",
+          "label": "Dolby Vision display mapping",
+          "values": [
+            "vp",
+            "original"
+          ],
+          "slot": "colour.dm_curve"
+        },
+        {
           "key": "dv_trims",
-          "label": "Dolby Vision trims for your display",
+          "label": "Dolby-style trims for your display (approximation)",
           "values": [
             "on",
             "off"
           ],
-          "slot": "colour.sdr_tone_shape"
+          "slot": "colour.dm_trims"
         },
         {
           "key": "preserve_extended_range",
