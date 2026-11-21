@@ -419,6 +419,17 @@ namespace VideoProcessorTest
 			ExpectOff(f, DV::CompensationWhy::NotConfigured, "motion_compensation 0 in the rule", false);
 		}
 
+		TEST_METHOD(ARepeatKeepsCompensationOnAndAConfirmedCutHasItsOwnVisibleReason)   // GEM W1A VE MUST-8 / sigma-delta MUST-7
+		{
+			DV::CompensationFacts repeat = ValidFrame();
+			repeat.continuity = MotionValidity::Continuity::Repeat;
+			repeat.keptPairValid = false;   // the pair (seq - 1, seq) is not the one a repeat draws
+			Assert::IsTrue(DV::DecideCompensation(repeat).on, L"a repeat is on even when the pair test fails");
+			DV::CompensationFacts f = ValidFrame();
+			f.confirmedCut = true;
+			ExpectOff(f, DV::CompensationWhy::ConfirmedCut, "a confirmed scene cut", true);
+		}
+
 		// The real MotionValidity state drives the facts: a resync and a drop make the pair ending at the next frame invalid.
 		TEST_METHOD(MotionCompensationFollowsTheRealValidityState)
 		{

@@ -138,6 +138,10 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 			cf.keptPairValid = sourceSequence > 1 && motionValidity.KeptPairValid(sourceSequence - 1, sourceSequence);
 			if (sourceSequence > 1)
 				cf.span = motionValidity.SpanStatus(sourceSequence - 1, sourceSequence);
+			// GEM W1A VE MUST-8 / sigma-delta MUST-7: the confirmed-cut veto lives only in PairValidAt. Asked (and counted) once per new
+			// frame, only where nothing else already refuses the pair, so a false answer can only be the cut: its own visible reason.
+			cf.confirmedCut = sourceSequence > 1 && keptContinuity == MotionValidity::Continuity::Contiguous && cf.keptPairValid &&
+				cf.span != MotionValidity::State::SpanState::Invalid && !motionValidity.PairValidAt(sourceSequence - 1, sourceSequence);
 			cf.invalidations = motionValidity.Total();
 			cf.lastCause = motionValidity.LastCause();
 			const DV::Compensation compensation = DV::DecideCompensation(cf);
