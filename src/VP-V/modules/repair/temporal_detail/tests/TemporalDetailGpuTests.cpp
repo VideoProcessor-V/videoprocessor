@@ -530,7 +530,10 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 	// --- TD-NONFINITE: a shared Full grain product whose block texture carries a planted grain level N (NaN or an infinity) ---
 	// One module over frames of a panning grainy scene reading the shared Full product of each frame; when `tamper` is set the
 	// product's per-block texture (N, e3, 0, 0) is replaced by a copy with block (bx, by)'s N set to `value`. Returns the outputs.
-	std::vector<Plane> RunTdPlantedN(GpuDevice& dev, const std::vector<Plane>& frames, bool tamper, float value, int bx, int by)
+	// hardAtBlock (gate cb-u1 r2 MUST 3): when set, every frame appends ev_a.x (`hard`) of block (bx, by) for each slot k, read
+	// from the module's evidence texture (Gpu::Module::LastEvidenceTexture(0), texel (k x bw + bx, by)); slots = K is returned.
+	std::vector<Plane> RunTdPlantedN(GpuDevice& dev, const std::vector<Plane>& frames, bool tamper, float value, int bx, int by,
+		std::vector<float>* hardAtBlock = nullptr, int* slots = nullptr)
 	{
 		pl_gpu gpu = dev.Gpu();
 		pl_tex bwdTex = UploadPair(gpu, MotionPair::Uniform(kW, kH, 16.0, -0.3, 0.0));
@@ -567,6 +570,18 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 			Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o), Wide(module.LastError()).c_str());
 			Assert::IsTrue(module.LastGrainStatus() == GrainSplit::GrainStatus::Ring, L"the (planted) shared product was read");
 			out.push_back(DownloadLuma(gpu, o.planes[0].texture));
+			if (hardAtBlock)
+			{
+				pl_tex evA = module.LastEvidenceTexture(0);
+				Assert::IsNotNull(evA, L"the evidence texture exists after an Apply");
+				const int bw = (kW + 15) / 16, texW = evA->params.w, k = texW / bw;
+				Assert::IsTrue(k >= 1 && k * bw == texW && evA->params.h == (kH + 15) / 16, L"the evidence texture is (K x bw) x bh");
+				const std::vector<float> ev = DownloadFloat(gpu, dev.dispatch, evA);
+				Assert::IsTrue(ev.size() == static_cast<size_t>(texW) * static_cast<size_t>(evA->params.h) * 4, L"the evidence texture was read back");
+				for (int slot = 0; slot < k; ++slot)
+					hardAtBlock->push_back(ev[(static_cast<size_t>(by) * texW + static_cast<size_t>(slot) * bw + bx) * 4]);
+				if (slots) *slots = k;
+			}
 			if (planted) pl_tex_destroy(gpu, &planted);
 			pl_tex_destroy(gpu, &tex);
 		}
@@ -1362,6 +1377,16 @@ namespace VideoProcessorTest
 				}
 			LogF("control: the block (%.0f, %.0f) changes by up to %.3f codes", bestX, bestY, best);
 			Assert::IsTrue(best > 0.25, L"control: the transfer changes the picture inside the block that is planted below (the test is not vacuous)");
+			// Gate cb-u1 r2 MUST 3: the closure itself. With a finite N at least one slot's `hard` (ev_a.x) at the block is > 0 on
+			// some frame; with a planted non-finite N every slot's `hard` there is exactly 0 on every frame. (On WARP the output
+			// alone does not tell: a NaN N already zeroed `stronger`, so no soft weight built, while `hard` stayed open.)
+			std::vector<float> controlHard;
+			int slots = 0;
+			RunTdPlantedN(dev, frames, false, 0.0f, bestX, bestY, &controlHard, &slots);
+			float controlHardMax = 0.0f;
+			for (float h : controlHard) controlHardMax = (std::max)(controlHardMax, h);
+			LogF("control: %.0f slots, largest hard at the block %.4f", static_cast<double>(slots), static_cast<double>(controlHardMax));
+			Assert::IsTrue(controlHardMax > 0.0f, L"control: with a finite N some slot's hard (ev_a.x) at the block is > 0");
 			const double controlWorstAll = WorstInBlock(control, frames, 0, 0, true);
 			const float values[3] = { std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity() };
 			const char* const names[3] = { "NaN", "+inf", "-inf" };
@@ -1370,7 +1395,13 @@ namespace VideoProcessorTest
 				const std::vector<Plane> planted = RunTdPlantedN(dev, frames, true, values[k], bestX, bestY);
 				const double inBlock = WorstInBlock(planted, frames, bestX, bestY);
 				const double all = WorstInBlock(planted, frames, 0, 0, true);
-				LogF("N = %.0f: block change %.4f codes, worst anywhere %.4f (control %.4f)", static_cast<double>(k), inBlock, all, controlWorstAll);
+				LogF((std::string("N = ") + names[k] + ": block change %.4f codes, worst anywhere %.4f (control %.4f)").c_str(), inBlock, all, controlWorstAll);
+				std::vector<float> hard;
+				RunTdPlantedN(dev, frames, true, values[k], bestX, bestY, &hard, nullptr);
+				Assert::IsTrue(hard.size() == controlHard.size(), L"the planted run read the same evidence texels");
+				bool closed = true;
+				for (float h : hard) closed = closed && h == 0.0f;
+				Assert::IsTrue(closed, Wide(std::string("N = ") + names[k] + ": hard (ev_a.x) at the planted block is 0 in every slot on every frame").c_str());
 				Assert::IsTrue(inBlock <= 0.05, Wide(std::string("N = ") + names[k] + ": the planted block transfers nothing (output = input)").c_str());
 				Assert::IsTrue(all <= controlWorstAll + 1.0, Wide(std::string("N = ") + names[k] + ": no pixel anywhere goes wrong").c_str());
 			}
