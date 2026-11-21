@@ -490,6 +490,7 @@ namespace VideoProcessorTest
 			declared = demand.Declarations();
 			Assert::AreEqual<size_t>(2, declared.size(), L"declared again once after the re-registration");
 			Assert::IsTrue(declared[1].host == &rendererA);
+			Assert::IsTrue(demand.Withdrawals().empty(), L"the same address re-registered: nothing to withdraw");
 
 			// Another renderer.
 			registration.Set(&rendererB, &storeB);
@@ -498,13 +499,16 @@ namespace VideoProcessorTest
 			declared = demand.Declarations();
 			Assert::AreEqual<size_t>(3, declared.size(), L"declared once on the new renderer");
 			Assert::IsTrue(declared[2].host == &rendererB);
-			Assert::IsTrue(demand.Withdrawals().empty(), L"nothing withdrawn while running");
+			std::vector<std::pair<const void*, const void*>> withdrawn = demand.Withdrawals();
+			Assert::AreEqual<size_t>(1, withdrawn.size(), L"the old renderer's entry withdrawn when declaring on another");
+			Assert::IsTrue(withdrawn[0].first == &rendererA, L"the old renderer's entry withdrawn when declaring on another");
+			Assert::IsTrue(withdrawn[0].second == static_cast<const void*>(&module), L"the old renderer's entry withdrawn when declaring on another");
 
 			module.Stop();
-			const std::vector<std::pair<const void*, const void*>> withdrawn = demand.Withdrawals();
-			Assert::AreEqual<size_t>(1, withdrawn.size(), L"withdrawn on stop");
-			Assert::IsTrue(withdrawn[0].first == &rendererB, L"from the renderer it was last declared on");
-			Assert::IsTrue(withdrawn[0].second == static_cast<const void*>(&module));
+			withdrawn = demand.Withdrawals();
+			Assert::AreEqual<size_t>(2, withdrawn.size(), L"withdrawn on stop");
+			Assert::IsTrue(withdrawn[1].first == &rendererB, L"from the renderer it was last declared on");
+			Assert::IsTrue(withdrawn[1].second == static_cast<const void*>(&module));
 		}
 
 		// GF-P3 MUST-10: a module that was never started declares nothing, even when measurements reach it, and so leaves nothing to
