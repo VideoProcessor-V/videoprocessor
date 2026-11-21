@@ -514,8 +514,11 @@ namespace VideoProcessorTest
 				}
 			}
 			Logger::WriteMessage((SourceResolutionMonitor::Describe(native.Read(), native.AutoRatio(), true) + "\n").c_str());
+			const SourceResolutionMonitor::Snapshot nativeSnap = native.Read();
+			Assert::IsTrue(nativeSnap.frames >= 8 && nativeSnap.reading,
+				L"native monitor must actually process frames and produce a reading");
 			Assert::AreEqual(0, engaged, L"native content never engages");
-			Assert::AreEqual(1.0, native.Read().declaredRatio);
+			Assert::AreEqual(1.0, nativeSnap.declaredRatio);
 			monitor.Release(gpu);
 			native.Release(gpu);
 			pl_dispatch_destroy(&dispatch);

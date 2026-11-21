@@ -205,10 +205,21 @@ namespace Tests
 		{
 			using namespace SourceIdCons;
 			Consensus c;
-			// The net must not be able to veto.
-			c.Submit(AxisVote(VoterId::IdNet, 0.5, 0.5, 0.9, 0, true));
-			const Result r = c.Evaluate(1, 0);
+			MockPort port;
+			uint64_t seq = 0;
+			// Converge to 0.5 first so a real veto would visibly revert the ratio to 1.0.
+			for (int64_t t = 0; t <= 6000000; t += 500000)
+			{
+				c.Submit(AxisVote(VoterId::ClassicalResolution, 0.5, 0.5, 0.9, t));
+				c.Evaluate(++seq, t, &port);
+			}
+			Assert::IsTrue(c.Current().ratioH == 0.5 && c.Current().ratioV == 0.5, L"precondition: locked at 0.5");
+			// The net must not be able to veto the locked ratio.
+			c.Submit(AxisVote(VoterId::IdNet, 0.5, 0.5, 0.9, 6500000, true));
+			const Result r = c.Evaluate(++seq, 6500000, &port);
+			Assert::IsTrue(c.Current().ratioH == 0.5 && c.Current().ratioV == 0.5, L"non-safety voter must not veto 0.5");
 			Assert::IsTrue(!Has(r.field[0].reason, "safety veto"));
+			Assert::AreEqual(uint64_t(0), c.GetStats().vetoes, L"veto count must stay 0");
 		}
 
 		TEST_METHOD(AnHOnlyChangeRebasesAxisZeroOnceAndNeverAxisOne)

@@ -70,20 +70,26 @@ namespace VideoProcessorTest
 			std::shared_ptr<State> holder = std::make_shared<State>();
 			State* raw = holder.get();   // what the callback reads (no ownership, as m_impl-> today)
 			std::atomic<State*> current{ raw };
+			std::atomic<bool> ready{ false };
 			std::atomic<bool> stop{ false };
+			std::atomic<int> entries{ 0 };
 			std::atomic<int> bad{ 0 };
 			std::thread capture([&]
 			{
+				ready.store(true);
 				while (!stop.load())
 				{
 					Vpv::Ingress::CallbackGate::Use use(gate);
 					if (!use)
 						continue;
+					entries.fetch_add(1);
 					State* s = current.load();
 					if (!s || s->alive.load() != 0x5eed)
 						bad.fetch_add(1);
 				}
 			});
+			while (!ready.load())
+				std::this_thread::yield();
 			for (int i = 0; i < 100000; ++i)
 			{
 				gate.CloseAndDrain();
@@ -95,6 +101,7 @@ namespace VideoProcessorTest
 			}
 			stop.store(true);
 			capture.join();
+			Assert::IsTrue(entries.load() > 0, L"capture callback must enter the gate at least once");
 			Assert::AreEqual(0, bad.load(), L"no callback ever saw a freed or missing state");
 		}
 	};

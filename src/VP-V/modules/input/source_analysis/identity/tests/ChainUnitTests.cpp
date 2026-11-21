@@ -839,12 +839,17 @@ namespace Tests
 					const int caller[7] = { 540, 720, 360, 450, 810, 945, 675 };
 					const AxisRun r = Analyse(a.v, std::vector<int>(caller, caller + 7), v);
 					Logger::WriteMessage(Describe("native V", r).c_str());
+					int validCandidates = 0;
 					for (size_t k = 0; k < r.vr.candidates.size(); ++k)
 					{
 						const CandidateResult& c = r.vr.candidates[k];
 						if (c.valid)
+						{
+							++validCandidates;
 							Assert::IsTrue(c.stat > (c.exactDone ? -0.2 : -0.3), L"a native picture shows no dip at a common size (coarse-only values use 8 lines, so a wider margin)");
+						}
 					}
+					Assert::IsTrue(validCandidates >= 4, L"expected at least 4 valid common-size candidates on a native picture");
 					for (size_t k = 0; k < r.props.size(); ++k)
 						Assert::IsTrue(r.props[k].source == kSourceCaller, L"no polyphase evidence on a native picture");
 				}
@@ -2016,10 +2021,13 @@ namespace Tests
 						VerifyOptions opt;
 						opt.forceExactN = ls.axisLen / 2;
 						VerifyResult vr;
-						verifier.Evaluate(ls, cand.data(), static_cast<int>(cand.size()), opt, vr);
+						Assert::IsTrue(verifier.Evaluate(ls, cand.data(), static_cast<int>(cand.size()), opt, vr), L"Evaluate must succeed");
+						Assert::IsTrue(vr.solves > 0, L"Evaluate must perform at least one solve");
+						if (pass == 1)
+							Assert::AreEqual(0, vr.operatorBuilds, L"warm pass must reuse cached operators");
 						const Clock::time_point t2 = Clock::now();
 						ProbeResult pr;
-						PowerProbe::Run(probeVerifier, ls, 0.29, 1.0, ProbeSettings(), pr);
+						Assert::IsTrue(PowerProbe::Run(probeVerifier, ls, 0.29, 1.0, ProbeSettings(), pr), L"PowerProbe::Run must succeed");
 						const Clock::time_point t3 = Clock::now();
 						AxisObservation o;
 						o.verify = &vr;
@@ -2029,7 +2037,7 @@ namespace Tests
 						o.probeSeen = pr.seen;
 						o.shotId = 1;
 						EvidenceUpdate u;
-						ev.Submit(axis, o, u);
+						Assert::IsTrue(ev.Submit(axis, o, u), L"ChainEvidence::Submit must succeed");
 						const Clock::time_point t4 = Clock::now();
 						m << " axis" << axis << "(proposer " << ms(t0, t1) << ", verifier " << ms(t1, t2) << " [reported " << vr.costMs
 							<< (vr.cold ? " cold, " : " warm, ") << vr.solves << " solves, " << vr.operatorBuilds << " builds], probe " << ms(t2, t3)

@@ -232,14 +232,23 @@ namespace Tests
 		{
 			using namespace GeoFx;
 			G::HeldState h;
+			std::atomic<bool> ready{ false };
 			std::atomic<bool> stop{ false };
+			std::atomic<int> reads{ 0 };
 			std::atomic<int> torn{ 0 };
 			std::thread reader([&] {
 				G::Record out;
+				ready.store(true);
 				while (!stop.load())
-					if (h.ReadLatest(0, out) && (out.appliedGen != out.geometryGen || out.applied[0].n != static_cast<int32_t>(out.appliedGen)))
-						++torn;
+					if (h.ReadLatest(0, out))
+					{
+						reads.fetch_add(1);
+						if (out.appliedGen != out.geometryGen || out.applied[0].n != static_cast<int32_t>(out.appliedGen))
+							++torn;
+					}
 			});
+			while (!ready.load())
+				std::this_thread::yield();
 			for (uint64_t i = 1; i <= 3000; ++i)
 			{
 				G::Record r = MakeRecord(i, static_cast<int64_t>(i), AppliedAxis(static_cast<int>(i), 5000, 5), AppliedAxis(1080, 2160, 5));
@@ -249,6 +258,7 @@ namespace Tests
 			}
 			stop.store(true);
 			reader.join();
+			Assert::IsTrue(reads.load() > 0, L"reader must observe published records concurrently");
 			Assert::AreEqual(0, torn.load(), L"every record read is one whole record");
 		}
 	};
