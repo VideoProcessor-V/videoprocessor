@@ -342,6 +342,7 @@ namespace Vpv
 			SkeletonModule::QueueShape configuredQueue;
 			uint64_t configuredVramVersion = 0;   // VramUsers::Version() at the last Configure
 			uint64_t configuredExtVersion = 0;     // externalVersion_ at the last Configure
+			uint64_t configuredMemoNeed = 0;       // GEM-W1A S1 / GF-P2b MUST-4: the memo's top GPU need level planned at the last Configure (0 = none)
 			uint64_t framesSinceConfigure = 0;
 		};
 
@@ -2718,7 +2719,15 @@ namespace Vpv
 			const bool vramMoved = b->configuredVramVersion != vramVersion && b->framesSinceConfigure >= kReconfigureMinFrames;
 			const uint64_t extVersion = externalVersion_.load(std::memory_order_acquire);
 			const bool extMoved = b->configuredExtVersion != extVersion || st.vramReplan;   // external demand changed, or the shortfall did: re-plan at once (rare)
-			if (rebuild || b->configuredGen != gen || queueMoved || vramMoved || extMoved || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
+			// GEM-W1A S1, restored by GF-P2b MUST-4 (GV AMEND 1): the memo's GPU need follows its window (re-derived every frame) and its
+			// lazily registered GPU fills (P1 GPU / edge map register at Entrance, after the first Begin's Configure), neither in QueueShape.
+			// A bound lane is planned only here (PlanNoLaneGpu returns early), so a moved need re-plans, rate-limited like vramMoved (as the
+			// no-lane path re-plans on plannedNeed). The lane's Configure re-plans a kept graph whose plan moved (AnalysisLane.h, MUST-4 (2)).
+			const std::vector<uint64_t> memoLevels = b->memo->GpuNeedLevels();
+			const uint64_t memoNeed = memoLevels.empty() ? 0u : memoLevels.front();
+			const bool memoNeedMoved = b->configuredMemoNeed != memoNeed && b->framesSinceConfigure >= kReconfigureMinFrames;
+			if (rebuild || b->configuredGen != gen || queueMoved || vramMoved || extMoved || memoNeedMoved
+				|| ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
 			{
 				CardProfile card;
 				std::string why;
@@ -2739,8 +2748,7 @@ namespace Vpv
 				{
 					// GEM SK-VRAM: the memo's GPU spots are a user of the SAME ledger (as PlanNoLaneGpu / MemoGpuGrant.h): added here from its
 					// need levels, so the plan's scratch-arena grant (read below) exists. No second ledger.
-					const std::vector<uint64_t> memoLevels = b->memo->GpuNeedLevels();
-					if (!memoLevels.empty() && memoLevels.front() != 0)
+					if (memoNeed != 0)
 						tier.otherUsers.push_back(VpSkeleton::MakeMemoVramUser(memoLevels, "skeleton memo"));
 				}
 				tier.ownUsageBytes = declared.heldBytes;
@@ -2830,6 +2838,11 @@ namespace Vpv
 							memoBudget = g->bytes;
 						}
 					b->memo->SetGpuBudget(memoGranted, memoBudget);
+					// GF-P2b MUST-4 (3) / S10b: the ahead plan follows the grant, exactly as the no-lane path (PlanNoLaneGpu), so a memo that was
+					// planned without a lane never keeps that stale plan (NotPlannedAhead limits) once a lane binds and grants it.
+					VpSkeleton::AheadNeed an = b->memo->MakeAheadNeed(b->memo->Window());
+					an.grantBytes = memoGranted ? memoBudget : 0u;
+					b->memo->SetAheadPlan(VpSkeleton::PlanAheadLadder(an));
 				}
 				{
 					// What the declared users still hold above their grant: planned as transient at the next Configure (once).
@@ -2856,6 +2869,7 @@ namespace Vpv
 				b->configuredQueue = queue;
 				b->configuredVramVersion = vramVersion;
 				b->configuredExtVersion = extVersion;
+				b->configuredMemoNeed = memoNeed;
 				b->framesSinceConfigure = 0;
 				++st.configures;
 			}
