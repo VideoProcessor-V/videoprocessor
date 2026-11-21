@@ -228,9 +228,10 @@ namespace SkeletonGraphTestsNs
 		return Registry(std::move(d));
 	}
 
-	// ---- the real catalog chain products: td.blocks, coding_evidence, quality_pattern (+ causal) ----
+	// ---- the real catalog chain products: td.blocks, quality_pattern (+ causal) ----
 	// The declarations are the catalog's own; only the reads that need OTHER lane products (grain split, region stats, source ring) are
 	// stripped from td.blocks and coding_evidence so the closure is the chain product itself (those products are exercised elsewhere).
+	// WAIVER-15D-P16: coding_evidence is no longer a chain (15d J5: its fill reads no history), so only a chain keeps its self read here.
 	Registry CatalogChainRegistry()
 	{
 		std::vector<ProductDecl> d = SkeletonProducts().All();
@@ -239,7 +240,8 @@ namespace SkeletonGraphTestsNs
 			ProductDecl& p = d[id];
 			p.inputs.fill(InputRef());
 			p.inputCount = 0;
-			detail::AddInput(p, id, 1);
+			if (p.orderedChain)
+				detail::AddInput(p, id, 1);
 		}
 		// P15-DECL: quality_pattern(.causal) also declare a held read of P14 source identity at lag 1 (Products.h). A lag-1 read of ANOTHER
 		// product cannot be satisfied at frame 0 (InputSeq: seq < lag, ProductSlots.h LaneAncestors: only the self chain input is optional), so
@@ -937,7 +939,8 @@ namespace SkeletonGraphTestsNs
 		{
 			const Registry reg = CatalogChainRegistry();
 			CatalogChainRuns(reg, kTdBlocks, false);
-			CatalogChainRuns(reg, kCodingEvidence, false);
+			// WAIVER-15D-P16: P16 declares no self read (15d J5), so it is not a chain; its lane job is a plain one (made above for P15's reads).
+			Assert::IsFalse(reg.Get(kCodingEvidence).orderedChain, L"coding_evidence reads no history today (15d J5): not an ordered chain");
 			CatalogChainRuns(reg, kQualityPatternCausal, false);
 			CatalogChainRuns(reg, kQualityPattern, true);
 			// The full catalog (nothing stripped) validates with every chain declared.
@@ -1335,16 +1338,13 @@ namespace SkeletonGraphTestsNs
 			Assert::AreEqual(int(kLeadReader), int(reads[0].reader));
 			Assert::AreEqual(int(kBase), int(reads[0].chain));
 			Assert::AreEqual(2, int(reads[0].lead));
-			// The catalog: quality_pattern reads coding_evidence (an ordered chain) at lead 1 and 2 - ONE entry, the largest lead.
+			// The catalog: quality_pattern still reads coding_evidence at lead 1 and 2, but coding_evidence is no longer an ordered chain
+			// (WAIVER-15D-P16, 15d J5: its fill reads no history), so the catalog has no lead read of a chain and no warning.
 			const Registry cat = SkeletonProducts();
-			std::string catWarning;
+			std::string catWarning = "stale";
 			Assert::IsTrue(cat.Validate(&why, &catWarning));
-			const std::vector<LeadChainRead> catReads = cat.LeadChainReads();
-			Assert::AreEqual(size_t(1), catReads.size(), L"only quality_pattern reads a chain at a lead today");
-			Assert::AreEqual(int(kQualityPattern), int(catReads[0].reader));
-			Assert::AreEqual(int(kCodingEvidence), int(catReads[0].chain));
-			Assert::AreEqual(2, int(catReads[0].lead));
-			Assert::IsTrue(Has(catWarning, "quality_pattern -> coding_evidence (lead 2): lead read of an ordered chain: reader live-fills its reduced form"));
+			Assert::IsTrue(cat.LeadChainReads().empty(), L"no catalog product reads an ordered chain at a lead (15d J5)");
+			Assert::IsTrue(catWarning.empty(), L"so the catalog has no lead-chain warning");
 		}
 
 		TEST_METHOD(TheGraphKeepsTheEffectiveLeadChainReadsAndNothingIsRejected)
@@ -1365,11 +1365,12 @@ namespace SkeletonGraphTestsNs
 			// A graph without the reader has none either.
 			const Graph none = BuildGraph(reg, OneConsumer(kBase), Rig::MakeSettings(4));
 			Assert::IsTrue(none.valid && none.leadChainReads.empty() && none.leadChainWarning.empty());
-			// The catalog's own quality_pattern: the warning when the lead is supplied, none through the causal form.
+			// The catalog's own quality_pattern: coding_evidence is not a chain (WAIVER-15D-P16, 15d J5), so no warning with the lead supplied
+			// either, nor through the causal form.
 			const Registry cat = SkeletonProducts();
 			const Graph withLead = BuildGraph(cat, OneConsumer(kQualityPattern), Rig::MakeSettings(4));
 			Assert::IsTrue(withLead.valid);
-			Assert::IsTrue(Has(withLead.leadChainWarning, "quality_pattern -> coding_evidence"));
+			Assert::IsTrue(withLead.leadChainReads.empty() && withLead.leadChainWarning.empty(), L"no lead read of a chain in the catalog");
 			const Graph causal = BuildGraph(cat, OneConsumer(kQualityPattern), Rig::MakeSettings(1));
 			Assert::IsTrue(causal.valid && causal.leadChainWarning.empty());
 		}

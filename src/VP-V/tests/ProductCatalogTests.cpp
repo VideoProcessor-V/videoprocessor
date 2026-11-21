@@ -723,8 +723,9 @@ namespace ProductCatalogTestsNs
 				// WAIVER-B3Z-02 (coordinator approved 2026-11-12, condition: exact item set, not a C/D prefix): every consumer flag names one of these register items.
 				{
 					const std::string item(f.item);
-					Assert::IsTrue(item == "C9" || item == "C9b" || item == "C10" || item == "C2-cam" || item == "D6-D8" || item == "D8" || item == "D10",
-						L"consumer flag item is in the exact register set {C9, C9b, C10, C2-cam, D6-D8, D8, D10}");
+					// WAIVER-15D-P16: + "TD" (the debander's temporal-detail read path of coding_evidence, row 23; the item UnwiredConsumers already uses).
+					Assert::IsTrue(item == "C9" || item == "C9b" || item == "C10" || item == "C2-cam" || item == "D6-D8" || item == "D8" || item == "D10" || item == "TD",
+						L"consumer flag item is in the exact register set {C9, C9b, C10, C2-cam, D6-D8, D8, D10, TD}");
 				}
 				Assert::IsTrue(f.note != nullptr && f.note[0] != '\0');
 				switch (f.kind) {
@@ -751,7 +752,12 @@ namespace ProductCatalogTestsNs
 					++dpTr;
 			Assert::AreEqual(size_t(6), dpTr, L"DP and TR each: P10, P11, P4 not read today");
 			// WAIVER-B3Z-02 (coordinator approved 2026-11-12): NotRead = DP / TR 6 + producer P1 + matcher P1, P4 + identification P4 = 10.
-			Assert::AreEqual(size_t(10), cNotRead, L"DP / TR's six + the F1 rows (782 P1, 781 P1 / P4, 776 P4)");
+			// WAIVER-15D-P16: + the debander TD read path's coding_evidence (row 23; P16 now has a producer) = 11.
+			Assert::AreEqual(size_t(11), cNotRead, L"DP / TR's six + the F1 rows (782 P1, 781 P1 / P4, 776 P4) + debander P16");
+			{
+				const ConsumerFlag* deb = ConsumerFlagOf(uint16_t(kCatalogConsumerIdBase + 23), kCodingEvidence);
+				Assert::IsTrue(deb && deb->kind == FlagKind::NotRead && std::string(deb->item) == "TD", L"row 23 P16: not read today, item TD");
+			}
 			const uint16_t idProducer = uint16_t(kCatalogConsumerIdBase + 14), idMatcher = uint16_t(kCatalogConsumerIdBase + 13),
 				idIdentity = uint16_t(kCatalogConsumerIdBase + 8);
 			for (const ProductId p : { kP1HalfLuma })
@@ -766,10 +772,10 @@ namespace ProductCatalogTestsNs
 				if (f.input == kP4SourceStats && (f.consumerId == kCatalogConsumerIdBase + 0 || f.consumerId == kCatalogConsumerIdBase + 1))
 					Assert::AreEqual(std::string("D10"), std::string(f.item), L"DP / TR P4: the D10 reader switch (C7 landed without it)");
 			// The exact P3 set: 4 synthesis consumers + DP, TR, adaptive downscale read the live matcher field at render (external view);
-			// the camera fit reads P3 through SeedFieldOf (view); identification reads P5 through the tap (view). 10 + 7 + 2 = 19.
+			// the camera fit reads P3 through SeedFieldOf (view); identification reads P5 through the tap (view). 11 + 7 + 2 = 20 (WAIVER-15D-P16).
 			Assert::AreEqual(size_t(7), cExt, L"synthesis x4 + DP + TR + adaptive downscale: P3 read at render");
 			Assert::AreEqual(size_t(2), cViews, L"camera fit: P3 via SeedFieldOf; identification: P5 via the tap");   // WAIVER-B3Z-02 (coordinator approved 2026-11-12)
-			Assert::AreEqual(size_t(19), ConsumerFlags().size());   // WAIVER-B3Z-02 (coordinator approved 2026-11-12)
+			Assert::AreEqual(size_t(20), ConsumerFlags().size());   // WAIVER-B3Z-02 (coordinator approved 2026-11-12); WAIVER-15D-P16: +1 (debander P16 NotRead)
 			for (const ConsumerFlag& f : ConsumerFlags())
 				if (f.kind != FlagKind::NotRead && !(f.consumerId == idIdentity && f.input == kP5MonitorTiles))
 					Assert::IsTrue(f.input == kP3AnalysisField, L"the view / external-view consumer flags are the P3 render-time reads (and 776 P5)");

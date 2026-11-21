@@ -278,15 +278,16 @@ class RepoTests(unittest.TestCase):
                 self.assertTrue(any(f.endswith("CodingEvidence.cpp") for f in t["producer_files"]))
                 self.assertTrue(all(e["status"] != "NP" for e in t["edges"]))
 
-    def test_p16_self_edge_is_not_R_while_the_fill_ignores_its_memo(self):
-        # jprod-a audit SHOULD 1: the declared P16 lag-1 self edge is read only if the owner fill asks its memo for the
-        # previous frame. MakeOwnerFill's fill takes the SkeletonMemo unnamed (ignored); Hub::AcquireTiles is the consumer.
+    def test_p16_has_no_self_edge_while_the_fill_ignores_its_memo(self):
+        # jprod-a audit SHOULD 1, then 15d J5 (WAIVER-15D-P16): MakeOwnerFill's fill takes the SkeletonMemo unnamed (ignored)
+        # and reads no history, so P16 declares no self read (the GPU fused pass re-declares lag 1 with a real Acquire).
         path = os.path.join(REPO, "src", "VP-V", "modules", "input", "source_analysis", "regions", "CodingEvidence.cpp")
         with open(path, encoding="utf-8") as f:
             text = f.read()
         self.assertRegex(text, r"OwnerFillRequest&\s*req\s*,\s*VpSkeleton::SkeletonMemo&\s*,",
-                         "the fill now names its memo: re-check the P16 lag-1 verdict and update this pin")
-        self.assertEqual(edge(self.doc, "kCodingEvidence", "kCodingEvidence")["status"], "N")
+                         "the fill now names its memo: re-check whether P16 must re-declare its lag-1 self read and update this pin")
+        with self.assertRaises(KeyError, msg="P16 declares no self edge (15d J5)"):
+            edge(self.doc, "kCodingEvidence", "kCodingEvidence")
 
     def test_every_no_producer_product_has_an_owner_or_trigger(self):
         self.assertEqual(self.doc["unowned_no_producer"], [])
