@@ -1891,6 +1891,10 @@ namespace Vpv
 			// U7 v2: frames whose confirmed verdict arrived with this frame (normally seq - 1); their Vp groups are rewritten below.
 			std::vector<uint64_t> done;
 			bool ahead = false;   // MUST-7: this frame is ahead of the render seal (set below for a classified frame)
+			// MUST-8: one hold of st.sceneMutex from the delivery decision through the store publish and the confirmation rewrite, so a
+			// provisional publish of seq can never land after (or between) the rewrite of seq by a fill of seq + 1 on another thread.
+			// Order: sceneMutex, then the store's own mutex (the store calls nothing back). SceneFactsFor runs before it (it locks itself).
+			std::unique_lock<std::mutex> sceneLock(st.sceneMutex, std::defer_lock);
 			if (!cached)
 			{
 				const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
@@ -1911,7 +1915,7 @@ namespace Vpv
 					return false;
 				}
 				FrameAnalysis::Store* const deliveryStore = VpFrameAnalysis::SourceFrameTap::StoreFor(st.host);
-				std::lock_guard<std::mutex> lock(st.sceneMutex);
+				sceneLock.lock();   // MUST-8: held through the store publish and the confirmation rewrite below
 				// Delivery (FrameAnalysis::Scene::cut): this frame's confirmed cut now, else the OLDEST confirmed cut since the last frame
 				// judged that did not go out with its own group (it was provisional then): exactly once per cut. Normally that is frame
 				// seq - 1 (one frame late); when frame c + 1 had no group (dropped, unsealed or no record) cut c is confirmed at the part end
@@ -1921,6 +1925,16 @@ namespace Vpv
 				// footage it holds false cuts the successor removes: refs/102b U7-accuracy).
 				HostState::SceneVerdictSlot& own = st.sceneVerdicts[seq % HostState::kSceneVerdicts];
 				const bool ownSlot = own.used && own.seq == seq;
+				// MUST-8: SceneFactsFor judged outside this lock; a fill of seq + 1 on another thread may have confirmed this frame's
+				// verdict since. Its confirmed verdict wins (never a downgrade: only a confirmed slot refreshes a provisional answer).
+				if (ownSlot && own.v.known && own.v.confirmed && !f.confirmed)
+				{
+					f.confirmed = true;
+					f.cut = own.v.cut;
+					f.flash = own.v.flash;
+					f.cutPossible = own.v.candidate;
+					f.cutStrength = own.v.strength;
+				}
 				bool late = false;
 				uint64_t nextUndelivered = 0;
 				if (ownSlot && own.carriesLate)
@@ -2048,6 +2062,8 @@ namespace Vpv
 			if (FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(st.host))
 				if (store->Enabled())
 				{
+					if (!sceneLock.owns_lock())
+						sceneLock.lock();   // MUST-8 (the cached path): the publish and the rewrite are under st.sceneMutex too
 					// SceneCounters::published counts records written at a SEAL (render order); an ahead publish is the reader's
 					// get-or-compute write, found by the seal later (alreadyPresent), so it is not counted there (MUST-7).
 					if (store->PublishScene(seq, scene) && !ahead)
@@ -2065,14 +2081,11 @@ namespace Vpv
 						FrameAnalysis::Scene old;
 						if (!store->PeekScene(d, old) || old.origin != FrameAnalysis::SceneOrigin::Vp || old.confirmed)
 							continue;
-						VpUnit::CutFadeJudge::CutVerdict v;
-						{
-							std::lock_guard<std::mutex> lock(st.sceneMutex);
-							const HostState::SceneVerdictSlot& slot = st.sceneVerdicts[d % HostState::kSceneVerdicts];
-							if (!(slot.used && slot.seq == d && slot.v.known && slot.v.confirmed))
-								continue;
-							v = slot.v;
-						}
+						// st.sceneMutex is held (sceneLock, MUST-8).
+						const HostState::SceneVerdictSlot& slot = st.sceneVerdicts[d % HostState::kSceneVerdicts];
+						if (!(slot.used && slot.seq == d && slot.v.known && slot.v.confirmed))
+							continue;
+						const VpUnit::CutFadeJudge::CutVerdict v = slot.v;
 						old.cutHere = v.cut;   // the delivered `cut` / cutLate stay as written (exactly once per cut)
 						old.flash = v.flash;
 						old.cutPossible = v.candidate;

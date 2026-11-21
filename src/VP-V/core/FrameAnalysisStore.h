@@ -423,6 +423,10 @@ namespace FrameAnalysis
 			std::lock_guard<std::mutex> lock(m_mutex);
 			Slot* slot = FindLocked(seq);
 			if (!slot) return false;
+			// MUST-8: a CONFIRMED scene group is never downgraded by a provisional one for the same record (a late provisional publish
+			// would strand the cut as unconfirmed: ConfirmedCutAt reads `confirmed`). A re-numbered frame (seek) opens a NEW record with
+			// Begin, which clears the group, so its provisional scene is written as usual.
+			if ((slot->record.valid & kScene) != 0 && slot->record.scene.confirmed && !scene.confirmed) return false;
 			slot->record.scene = scene;
 			slot->record.valid |= kScene;
 			return true;
