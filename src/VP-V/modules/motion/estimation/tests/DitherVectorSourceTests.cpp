@@ -152,11 +152,30 @@ namespace VideoProcessorTest
 			f.onDemandCause = Cause::OnDemandLate;
 			DV::Tracker t;
 			t.Note(DV::Choose(f), true, 7);
+			// NoPairNote leaves its own "(" open; OnDemandNote closes it and each caller closes its own, so both texts balance.
+			const auto balanced = [](const std::string& text) {
+				int depth = 0;
+				for (const char ch : text)
+				{
+					depth += ch == '(' ? 1 : ch == ')' ? -1 : 0;
+					if (depth < 0)
+						return false;
+				}
+				return depth == 0;
+			};
 			const std::string seg = t.VectorsSegment();
-			Assert::IsTrue(seg.find("))") == std::string::npos, W(seg).c_str());
-			int open = 0, close = 0;
-			for (const char ch : seg) { open += ch == '('; close += ch == ')'; }
-			Assert::AreEqual(open, close, W(seg).c_str());
+			Assert::IsTrue(Contains(seg, "on-demand"), W(seg).c_str());
+			Assert::IsTrue(balanced(seg), W(seg).c_str());
+			bool sawOwn = false;
+			for (const auto& d : t.Decisions(7))
+			{
+				if (d.id != "dither vectors own search")
+					continue;
+				sawOwn = true;
+				Assert::IsTrue(d.engaged, W(d.reason).c_str());
+				Assert::IsTrue(balanced(d.reason), W(d.reason).c_str());
+			}
+			Assert::IsTrue(sawOwn, L"the own-search decision is listed");
 		}
 
 		TEST_METHOD(OwnSearchNamesEveryMissingInput)
