@@ -14,4 +14,9 @@
   registration under the catalog owner, the module's re-registration on the largest live size (forget, no per-frame retry),
   and the worded declines (no GPU context, no source luma view, above the reserve, texture refused). GPU parity vs
   `BusyEdge::SobelMagnitude` is owed before the first reader row (102b KEDGEMAP-RULE3).
+- `EdgeMapStageTests.cpp` (CPU, CB slice 18 S2b): the kEdgeMap stage variant: R = `SobelMagnitude` of the measure luma
+  (`VpMeasure::MeasureLumaCode`) is X5's former private Sobel x 4 exactly and G is its luma (Laplacian exact), for the SDR,
+  linear and PQ / HLG measure domains; taps clamp to the whole picture, not a crop; the fill's axes, defaults, stage key and
+  reserve (8 B/px); RG32F at the stage picture's own size and ordinal; the worded declines (code unit, no size, not offered
+  with P13's cause, size without a stage, above the reserve, crop undeclared).
 - `RegionEvidenceSynthetic.h`: deterministic synthetic frames.

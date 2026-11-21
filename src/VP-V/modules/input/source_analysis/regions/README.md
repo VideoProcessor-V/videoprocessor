@@ -156,3 +156,18 @@ LumaWeightsGlsl, MeasureLumaCode) and MeasureDomainGlsl.h (the ad_lin / ad_luma 
 scaling/output/AdaptiveDownscale.h/.cpp: unchanged arithmetic and byte-identical shader text. Decisions: X5 keeps its names through
 using-declarations and keeps GuardCode / GuardSlope (its residual guard); MeasureDomainFor reads the weights from core/LumaWeights.h
 (LumaCoeff::ForSystem) directly, the table DetailPulse::LumaWeights forwarded to (identical values). Settings: none.
+
+## kEdgeMap stage variant (CB slice 18 S2b)
+
+Design goal (design-EDGEMAP-DOMAIN-AXIS rev 2 s2a): X5's measure pass and L-FOCUS read ONE edge map of the picture X5 measures,
+not a private Sobel. The fill serves VariantKey{stage, width x height, codeUnit 8, param1 = picture ordinal} (EdgeMapStageKey) on
+the P13 stage picture of the same key (SourcePlanes::OfferStage), as RG32F at the picture size: R = Sobel |G| in 8-bit measure
+codes, G = the measure luma (MeasureDomainFor of the picture's own colour facts). Philosophy: one body and one law for both
+variants (BusyEdgeGlsl.h: em_tap / em_store per variant, |G| = length(gx, gy), the expression order of X5's former Sobel, so
+X5's grad = R x 0.25 exactly); the default variant (R32F, source luma, 10-bit codes) is unchanged in value.
+Decisions: RG32F, not R32F, because X5's grain sums (Laplacian, energy) still read the luma at the base (slice 9 / X5-GRAIN-P10
+absent), so G has a reader; WHOLE picture, no crop axis (the design's kAxisCrop is not declared): X5's 3 x 3 neighbourhood at its
+src_rect border reads luma beyond the crop, which a crop-clamped map would change; code unit 8 only on the stage variant (the
+default stays 10); the fill's reserve is twice the declared default size (EdgeMapFillReserveBytes, 8 B/px of the source luma: an
+RG32F picture of the luma size fits; 265 MB at 8K, 66 MB at 4K), the declared product size and ledger term stay the default's; a
+larger stage picture declines visibly. Tests: tests/EdgeMapStageTests.cpp. Reader: X5 (S3). Settings: none.
