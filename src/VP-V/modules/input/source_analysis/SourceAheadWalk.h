@@ -60,10 +60,11 @@ namespace SourceResolution
 					int how = 0;   // 0 = no sample read yet, 1 = the shared 12-bit decode, 2 = own samples (counted)
 					SourceResolutionMonitor::CodedLumaSampler tap;
 					tap.codeMaximum = static_cast<uint32_t>(DvTunnelTapLaw::kLevels - 1);
-					tap.read = [&luma, &shared, &how, sequence](int x, int y) {
+					const void* const host = &impl;   // the key Host::Owner(this) registered: this host's kept views only
+					tap.read = [&luma, &shared, &how, sequence, host](int x, int y) {
 						if (how == 0)
 						{
-							how = VpFrameAnalysis::FindSharedViewOf12(sequence, luma, shared) ? 1 : 2;
+							how = VpFrameAnalysis::FindSharedViewOf12(sequence, luma, shared, host) ? 1 : 2;
 							if (how == 2)
 								VPV_COMPUTE_ONCE_PRIVATE_AT("analysis.tap12", sequence, "source-look-ahead samples");
 						}

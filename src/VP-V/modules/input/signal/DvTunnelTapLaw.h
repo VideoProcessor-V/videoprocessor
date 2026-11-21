@@ -126,11 +126,7 @@ namespace DvTunnelTapLaw
 		for (int x = 0; x < width; ++x)
 		{
 			const size_t at = static_cast<size_t>(x) * 4;   // one 32-bit container word per pixel
-			const uint32_t word = bigEndian ?
-				(static_cast<uint32_t>(row[at]) << 24) | (static_cast<uint32_t>(row[at + 1]) << 16) |
-					(static_cast<uint32_t>(row[at + 2]) << 8) | static_cast<uint32_t>(row[at + 3]) :
-				(static_cast<uint32_t>(row[at + 3]) << 24) | (static_cast<uint32_t>(row[at + 2]) << 16) |
-					(static_cast<uint32_t>(row[at + 1]) << 8) | static_cast<uint32_t>(row[at]);
+			const uint32_t word = R::Word(row + at, bigEndian);   // the reference's own word assembly (rule 1: no private copy)
 			// The lane word (I in the high 12 of 16) back to the whole 12-bit code: the axis header's owned inverse (Code12FromLane16).
 			dst[x] = ToLimited(static_cast<uint16_t>(Vpv::AnalysisDomain::Code12FromLane16(R::Intensity(word, shift))), fullRange);
 		}

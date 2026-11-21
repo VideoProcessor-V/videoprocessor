@@ -12,6 +12,7 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <map>
 #include <new>
 
 namespace VpFrameAnalysis
@@ -81,9 +82,11 @@ namespace VpFrameAnalysis
 			VpSkeleton::SourceFrameView view;
 		};
 		std::mutex& SharedViewMutex() { static std::mutex mutex; return mutex; }
-		std::vector<SharedView12>& SharedViews()
+		// One bounded set PER HOST (the renderer key of Host::Owner; nullptr = the unowned set tests and ownerless callers use), so two
+		// hosts with interleaved sequences never clear or read each other's views. Guarded by SharedViewMutex.
+		std::map<const void*, std::vector<SharedView12>>& SharedViewsByHost()
 		{
-			static std::vector<SharedView12> views;
+			static std::map<const void*, std::vector<SharedView12>> views;
 			return views;
 		}
 		bool SameFrame(const SharedView12& e, uint64_t seq, const AnalysisLumaSource& s)
@@ -93,11 +96,14 @@ namespace VpFrameAnalysis
 		}
 	}
 
-	void ReleasePlanePool()
+	void ReleasePlanePool(const void* host)
 	{
 		{
 			std::lock_guard<std::mutex> lock(SharedViewMutex());
-			SharedViews().clear();   // the kept 12-bit views hold pooled planes
+			if (host)
+				SharedViewsByHost().erase(host);   // this host's kept 12-bit views hold pooled planes; another host's stay
+			else
+				SharedViewsByHost().clear();
 		}
 		std::lock_guard<std::mutex> lock(PoolMutex());
 		Pool().clear();
@@ -404,7 +410,7 @@ namespace VpFrameAnalysis
 		return true;
 	}
 
-	bool ShareViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view)
+	bool ShareViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view, const void* host)
 	{
 		if (!SourceViewOf12(source, view))
 			return false;
@@ -421,7 +427,7 @@ namespace VpFrameAnalysis
 		kept.mapsToLimited = source.MapsToLimitedDomain();
 		kept.view = view;
 		std::lock_guard<std::mutex> lock(SharedViewMutex());
-		std::vector<SharedView12>& views = SharedViews();
+		std::vector<SharedView12>& views = SharedViewsByHost()[host];
 		if (!views.empty() && seq <= views.back().seq)
 			views.clear();   // the sequence did not advance (a new session or a repeated frame): start again
 		if (views.size() >= kSharedViewDepth)
@@ -430,12 +436,15 @@ namespace VpFrameAnalysis
 		return true;
 	}
 
-	bool FindSharedViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view)
+	bool FindSharedViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view, const void* host)
 	{
 		if (seq == 0 || source.format != AnalysisLumaFormat::PackedDolbyVision422)
 			return false;
 		std::lock_guard<std::mutex> lock(SharedViewMutex());
-		for (const SharedView12& kept : SharedViews())
+		const auto set = SharedViewsByHost().find(host);
+		if (set == SharedViewsByHost().end())
+			return false;
+		for (const SharedView12& kept : set->second)
 			if (SameFrame(kept, seq, source))
 			{
 				view = kept.view;
@@ -556,7 +565,7 @@ namespace VpFrameAnalysis
 		// ONE 12-bit decode per frame (rule 1), shared by the tap, the measure and the look-ahead walk (ShareViewOf12). IsValid() implies
 		// the 12-bit law, so the only refusal is an unallocatable plane, counted in SourceViewOf12; the 10-bit read is then its fallback.
 		if (dvSource && job.source.IsValid() && (wantTap || job.measure))
-			have12 = ShareViewOf12(job.identity.seq, job.source, view12);
+			have12 = ShareViewOf12(job.identity.seq, job.source, view12, job.host);
 		if (wantTap)
 			DeliverToTap(job, have12 ? &view12 : nullptr);
 		if (!job.measure)

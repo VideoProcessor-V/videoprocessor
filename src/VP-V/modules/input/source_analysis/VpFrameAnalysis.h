@@ -61,7 +61,7 @@ namespace VpFrameAnalysis
 	// claimed, a format that cannot be read).
 	using Vpv::AnalysisDomain::DecodeSharedLuma;
 	// Planes are recycled from a small pool once nothing holds them; the store's switch-off empties it.
-	void ReleasePlanePool();
+	void ReleasePlanePool(const void* host = nullptr);   // host given: only that host's kept 12-bit views are dropped; nullptr: all
 	size_t PlanePoolSize();
 
 	// ---- C9 commit A: the frame's luma view and the P1 engine reader (doc 93 C9P s2b) ----
@@ -191,8 +191,10 @@ namespace VpFrameAnalysis
 	// Bounded (half the plane pool); a sequence that does not advance starts the set again; ReleasePlanePool empties it.
 	// FindSharedViewOf12 (the source-resolution look-ahead walk, SourceAheadWalk.h) only reads: false when the frame's view is no longer
 	// held (the walk then reads its own samples and counts them as a private site).
-	bool ShareViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view);
-	bool FindSharedViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view);
+	// `host` = the renderer key of Host::Owner (Job::host; the look-ahead walk passes its Impl): each host keeps its OWN bounded set, so
+	// two hosts never read or clear each other's views. nullptr = the unowned set (tests, ownerless callers).
+	bool ShareViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view, const void* host = nullptr);
+	bool FindSharedViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view, const void* host = nullptr);
 
 	// ---- The producer ----
 	struct Job
@@ -202,6 +204,7 @@ namespace VpFrameAnalysis
 		bool decodePlane = true;            // fill the shared luma plane (some reader wants full luma)
 		bool measure = true;                // compute the measured groups
 		const void* owner = nullptr;        // set when a SourceFrameTap sink of this renderer wants the decoded plane
+		const void* host = nullptr;         // the renderer key of Host::Owner (always set when owned): keys the kept 12-bit views
 	};
 
 	// Decode + reduce + publish, on the calling thread (the worker; tests call it directly).
