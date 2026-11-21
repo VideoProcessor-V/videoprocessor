@@ -920,7 +920,7 @@ namespace CameraModel
 		}
 
 		// Fits one pair. Reads (never writes) the Fitter's history; objects are updated only when asked.
-		static CameraMotion Run(Fitter& F, const PairInput& in, const Params* h0, bool temporalRead, bool runObjects, bool genReset, TlNext* tlOut)
+		static CameraMotion Run(Fitter& F, const PairInput& in, const Params* h0, bool temporalRead, bool runObjects, bool genReset, TlNext* tlOut, bool detect = false)
 		{
 			const Config& c = F.m_config;
 			CameraMotion rec;
@@ -1575,9 +1575,53 @@ namespace CameraModel
 			}
 
 			CM_PROF_MARK(6);
-			Labels(F, in, f, rec, seed, runObjects);
+			// SHOULD-2 (Gemini audit): the dynamic-texture / static-camera verdicts are known BEFORE the object tracker runs, so a record that is
+			// demoted to Ambiguous does not update the tracker's history (it would otherwise learn from a water / static-ring pair). Both
+			// detectors off: nothing here runs and the record is the one it always was.
+			const bool demoted = detect && ApplyDetectors(F, in, rec);
+			Labels(F, in, f, rec, seed, runObjects && !demoted);
 			CM_PROF_MARK(7);
 			return rec;
+		}
+
+		// The dynamic-texture and static-camera detectors on the finished record (moved ahead of Labels). Returns true when either demoted the
+		// record. Not evaluated for an invalid record or once the deadline passed (Fitter::Fit then drops the record and resets the history).
+		static bool ApplyDetectors(Fitter& F, const PairInput& in, CameraMotion& fit)
+		{
+			const Config& c = F.m_config;
+			bool demoted = false;
+			if (!fit.valid || DeadlinePassed(c, in))
+				return false;
+			if (c.dynTexture)
+			{
+				const DynTextureResult dt = DetectDynamicTexture(c.dynTextureCfg, in, fit.params, F.m_dyn);
+				fit.signals.dynShare = dt.share;
+				fit.signals.dynTemporal = dt.temporal;
+				fit.signals.dynSpatial = dt.spatial;
+				fit.signals.dynField = dt.field;
+				if (dt.detected && (fit.reason == Reason::Ok || fit.reason == Reason::LowConfidence))
+				{
+					fit.reason = Reason::Ambiguous;
+					fit.verdictFlags |= kVerdictDynamicTexture;
+					fit.confidence *= 0.495;   // below 0.5 for any logistic confidence <= 1
+					demoted = true;
+				}
+			}
+			if (c.staticCamera)
+			{
+				const StaticCameraResult sc = EvaluateStaticCamera(c.staticCfg, in, fit.params);
+				fit.signals.staticRing = sc.staticShare;
+				fit.signals.staticFit = sc.fitShare;
+				// Only a record a consumer could use is judged: demote, never promote.
+				if (sc.detected && (fit.reason == Reason::Ok || fit.reason == Reason::LowConfidence))
+				{
+					fit.reason = Reason::Ambiguous;
+					fit.verdictFlags |= kVerdictStaticCamera;
+					fit.confidence *= 0.495;
+					demoted = true;
+				}
+			}
+			return demoted;
 		}
 
 		static void Labels(Fitter& F, const PairInput& in, const Field& f, CameraMotion& rec, uint64_t seed, bool runObjects)
@@ -1950,43 +1994,17 @@ namespace CameraModel
 				h0p = &h0;
 			}
 			TlNext tlNext;
-			CameraMotion fit = Impl::Run(*this, in, h0p, true, m_config.objects, genReset, &tlNext);
+			CameraMotion fit = Impl::Run(*this, in, h0p, true, m_config.objects, genReset, &tlNext, m_config.dynTexture || m_config.staticCamera);
 			if (fit.valid && Impl::DeadlinePassed(m_config, in))
 			{
 				// The consumers' slot has passed: no model for this frame (visible fallback); state is not updated.
 				fit.valid = false;
 				fit.confidence = 0;
 				fit.reason = Reason::DeadlineMissed;
+				fit.verdictFlags &= static_cast<uint8_t>(~(kVerdictDynamicTexture | kVerdictStaticCamera));   // a verdict reached before the clock ran out
 			}
 			if (m_config.dynTexture && !fit.valid)
 				m_dyn.Reset();   // an invalid pair breaks the sequence: the next pair has no previous residual field to compare against
-			if (m_config.dynTexture && fit.valid)
-			{
-				const DynTextureResult dt = DetectDynamicTexture(m_config.dynTextureCfg, in, fit.params, m_dyn);
-				fit.signals.dynShare = dt.share;
-				fit.signals.dynTemporal = dt.temporal;
-				fit.signals.dynSpatial = dt.spatial;
-				fit.signals.dynField = dt.field;
-				if (dt.detected && (fit.reason == Reason::Ok || fit.reason == Reason::LowConfidence))
-				{
-					fit.reason = Reason::Ambiguous;
-					fit.verdictFlags |= kVerdictDynamicTexture;
-					fit.confidence *= 0.495;   // below 0.5 for any logistic confidence <= 1
-				}
-			}
-			if (m_config.staticCamera && fit.valid)
-			{
-				const StaticCameraResult sc = EvaluateStaticCamera(m_config.staticCfg, in, fit.params);
-				fit.signals.staticRing = sc.staticShare;
-				fit.signals.staticFit = sc.fitShare;
-				// Only a record a consumer could use is judged: demote, never promote.
-				if (sc.detected && (fit.reason == Reason::Ok || fit.reason == Reason::LowConfidence))
-				{
-					fit.reason = Reason::Ambiguous;
-					fit.verdictFlags |= kVerdictStaticCamera;
-					fit.confidence *= 0.495;
-				}
-			}
 			if (fit.valid)
 			{
 				m_previous = fit;
