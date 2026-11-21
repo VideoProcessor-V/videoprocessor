@@ -1687,10 +1687,32 @@ namespace Vpv
 					++i;
 			}
 			if (erased != 0)
+			{
 				externalVersion_.fetch_add(1, std::memory_order_release);
+				// GF-P2b S3: the declaring components learn that their entry went (ExternalErasures), the tap generation untouched (moving it
+				// would run the dead-renderer teardown).
+				bool counted = false;
+				for (std::pair<const void*, uint64_t>& e : externalErasures_)
+					if (e.first == host)
+					{
+						++e.second;
+						counted = true;
+					}
+				if (!counted)
+					externalErasures_.push_back(std::make_pair(host, uint64_t(1)));
+			}
 			if (raising)
 				raiseVersion_.fetch_add(1, std::memory_order_release);
 			return erased;
+		}
+
+		uint64_t SkeletonModule::ExternalErasures(const void* host) const
+		{
+			std::lock_guard<std::mutex> lock(externalMutex_);
+			for (const std::pair<const void*, uint64_t>& e : externalErasures_)
+				if (e.first == host)
+					return e.second;
+			return 0;
 		}
 
 		size_t SkeletonModule::ExternalEntriesOf(const void* host) const

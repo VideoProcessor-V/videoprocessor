@@ -203,6 +203,8 @@ namespace Vpv
 			// Also IExternalDemand::SceneOf, the entry module code outside the skeleton uses (Vpv::Skeleton::SceneOf, SkeletonAccess.h).
 			SceneAnswer SceneOf(const void* host, uint64_t seq) const override;
 			SceneCounters SceneCountersOf(const void* host) const;
+			// GF-P2b S3: IExternalDemand::ExternalErasures (bumped by EraseExternal when it erased an entry of `host`). Any thread.
+			uint64_t ExternalErasures(const void* host) const override;
 
 			// The queue the lane graph is sized for: the terms the record histories are derived from (render-ahead R, lane lead L,
 			// look-ahead walk frames; VpSkeleton::QueueFramesFor). `wired` says which of the three a feed has delivered (kRenderAhead |
@@ -358,6 +360,7 @@ namespace Vpv
 			mutable std::mutex externalMutex_;
 			std::vector<ExternalEntry> external_;
 			std::atomic<uint64_t> externalVersion_{ 0 };
+			std::vector<std::pair<const void*, uint64_t>> externalErasures_;   // GF-P2b S3: per host address, under externalMutex_ (only grows)
 			// 15c-c8: bumped whenever the set of raising entries (or a reason) changes; a host's Begin compares it with the version its
 			// last Reconcile applied (raiseSeen_) and reconciles on the render thread. The pathway each host last reported at
 			// SettingsApplied is kept beside it: a demand-driven Reconcile never raises in the Original pathway (the renderer's word).
