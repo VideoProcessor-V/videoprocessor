@@ -601,6 +601,74 @@ namespace Tests
 			}
 		}
 
+		// GEM-016 ([C]:171): kr / kg / kb and the ICtCp matrices are cached keyed by display.primaries (and the ICtCp switch).
+		// A primaries switch must be followed, and a frame after the switch must carry exactly what a stage that never saw the
+		// old primaries computes: the cache never serves a stale value.
+		TEST_METHOD(CachedPrimariesFollowAPrimariesSwitch)
+		{
+			using namespace DvHost;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			pl_color_map_params params = pl_color_map_default_params;
+			pl_frame bt2020 = Target(PL_COLOR_TRC_PQ, 100.0f), bt709 = bt2020;
+			bt709.color.primaries = PL_COLOR_PRIM_BT_709;
+			auto frame = [&](DvHostStage& stage, const char* mode, const pl_frame& target)
+			{
+				Run run;
+				run.mode = mode;
+				std::vector<const pl_hook*> hooks;
+				run.Frame(stage, image, target, &dm, params, hooks);
+				Assert::IsTrue(run.lastTrimsWanted, L"the trims act");
+				return run.lastParams;
+			};
+			auto same = [](const DvHostStage::ParameterList& a, const DvHostStage::ParameterList& b)
+			{
+				if (a.size() != b.size()) return false;
+				for (size_t i = 0; i < a.size(); ++i)
+					if (std::strcmp(a[i].first, b[i].first) != 0 || a[i].second != b[i].second) return false;
+				return true;
+			};
+			for (const char* mode : { "libplacebo", "dolby_style" })
+			{
+				Registry regFresh, regCached;
+				DvHostStage fresh(DummyShaders(), regFresh.Engage(), regFresh.Release());
+				const DvHostStage::ParameterList want709 = frame(fresh, mode, bt709);
+				DvHostStage cached(DummyShaders(), regCached.Engage(), regCached.Release());
+				const DvHostStage::ParameterList first2020 = frame(cached, mode, bt2020);
+				Assert::IsFalse(same(first2020, want709), L"the two primaries give different parameters");
+				const double* krA = Param(first2020, "dv_kr");
+				const double* krB = Param(want709, "dv_kr");
+				Assert::IsTrue(krA && krB && *krA != *krB, L"dv_kr differs between BT.2020 and BT.709");
+				// The reference value for BT.709, from the same maths the stage uses.
+				{
+					const pl_raw_primaries* prim = pl_raw_primaries_get(PL_COLOR_PRIM_BT_709);
+					const double red[2] = { prim->red.x, prim->red.y }, green[2] = { prim->green.x, prim->green.y };
+					const double blue[2] = { prim->blue.x, prim->blue.y }, white[2] = { prim->white.x, prim->white.y };
+					double kr = 0, kg = 0, kb = 0;
+					DolbyVisionTrims::LuminanceWeights(red, green, blue, white, kr, kg, kb);
+					Assert::AreEqual(kr, *krB, 1e-15, L"dv_kr is the BT.709 luminance weight");
+					Assert::AreEqual(kb, ParamOr(want709, "dv_kb", -1.0), 1e-15, L"dv_kb is the BT.709 luminance weight");
+				}
+				const DvHostStage::ParameterList after = frame(cached, mode, bt709);
+				Assert::IsTrue(same(after, want709), L"after the switch: identical to a stage that never saw BT.2020");
+				const DvHostStage::ParameterList back = frame(cached, mode, bt2020);
+				Assert::IsTrue(same(back, first2020), L"switching back restores the BT.2020 values");
+				const DvHostStage::ParameterList steady = frame(cached, mode, bt2020);
+				Assert::IsTrue(same(steady, first2020), L"a steady frame (cache hit) repeats the values");
+			}
+			// The ICtCp switch is part of the key: the same primaries, the Dolby-style curve on, then off.
+			Registry reg;
+			DvHostStage stage(DummyShaders(), reg.Engage(), reg.Release());
+			const DvHostStage::ParameterList plain = frame(stage, "libplacebo", bt709);
+			const DvHostStage::ParameterList ictcp = frame(stage, "dolby_style", bt709);
+			const DvHostStage::ParameterList plainAgain = frame(stage, "libplacebo", bt709);
+			Assert::AreEqual(0.0, ParamOr(plain, "dv_space", -1.0), 0.0);
+			Assert::AreEqual(1.0, ParamOr(ictcp, "dv_space", -1.0), 0.0);
+			Assert::IsNotNull(Param(ictcp, "dv_lms00"), L"the ICtCp matrices are present with the Dolby-style curve");
+			Assert::IsNull(Param(plainAgain, "dv_lms00"), L"and gone when it stops");
+			Assert::IsTrue(same(plain, plainAgain), L"the libplacebo-mode parameters come back unchanged");
+		}
+
 		TEST_METHOD(GpuUnpackSessionLogsOnceAndSwitchesTheSessionToTheCpuOnce)
 		{
 			DvGpuUnpackSession session;
