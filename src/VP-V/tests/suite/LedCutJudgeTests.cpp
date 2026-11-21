@@ -685,5 +685,104 @@ namespace VideoProcessorTest
 				module->Stop();
 			}
 		}
+
+		// GF-P3 S-P3-1: the held walk depth follows the walk's current need. A shallower walk lowers it only after the walks have
+		// stayed below it for the hold window (the held depth's span at the source rate; led_lookahead_ms when set), to the deepest
+		// walk seen in that window; a walk at the held depth resets the window. Time is the module's injected test clock.
+		// Compiles only with GF-P1 (ConsumerDecl::aheadDepth): union only.
+		TEST_METHOD(TheDeclaredDepthDropsAfterTheNeedStaysLowerForTheHold)
+		{
+			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),
+				L"precondition: no store registered by an earlier test");
+			RecordingDemand demand;
+			DemandHubScope hub(&demand);
+			int rendererA = 0;
+			FrameAnalysis::Store storeA(FrameAnalysis::RingDepth(4, 4));
+			StoreRegistration registration;
+			registration.Set(&rendererA, &storeA);
+			auto projector = std::make_shared<FakeProjector>();
+			projector->openFails = true;   // a dry run: no port
+			TestClock clock;
+			auto makeModule = [&projector, &clock](const LedDriveConfig& config, double sourceFps) {
+				std::unique_ptr<LedDriveModule> module(new LedDriveModule(ProjectorConfig(), config,
+					[projector] { return std::make_unique<FakePort>(projector); }, clock));
+				module->SetSceneReaderForTesting(NoSceneCuts());
+				module->OnSourceRestart(1, sourceFps);   // a known source rate: the hold is the held depth's span
+				module->Start();
+				return module;
+			};
+
+			// Case 1: 24 fps, hold = 6 x 41.67 ms = 250 ms. Inside it nothing drops; past it the deepest walk of the window is declared.
+			{
+				LedDriveConfig config = CutCompensate();
+				config.lookahead = true;
+				config.ledLookaheadMs = 0;
+				std::unique_ptr<LedDriveModule> module = makeModule(config, 24.0);
+				const size_t base = demand.Declarations().size();   // the declaration made with Start
+				module->SetLookaheadDepth(6);
+				std::vector<RecordingDemand::Declared> declared = demand.Declarations();
+				Assert::AreEqual<size_t>(base + 1, declared.size());
+				Assert::AreEqual<int>(6, declared.back().aheadDepth);
+				const double t0 = clock.Ms();
+				module->SetLookaheadDepth(3);   // the low window opens at t0
+				clock.To(t0 + 200.0);           // less than 6 x 41.67 ms
+				module->SetLookaheadDepth(4);
+				Assert::AreEqual<size_t>(base + 1, demand.Declarations().size(), L"inside the hold: no new declaration");
+				clock.To(t0 + 260.0);           // past the hold, counted from t0
+				module->SetLookaheadDepth(3);
+				declared = demand.Declarations();
+				Assert::AreEqual<size_t>(base + 2, declared.size(), L"past the hold: exactly one new declaration");
+				Assert::AreEqual<int>(4, declared.back().aheadDepth, L"the deepest walk in the window, not the last (3)");
+				module->Stop();
+			}
+
+			// Case 2 (flap): from a held 6, walks alternating 5 / 6, each 6 within the hold, never drop it (a walk at the held depth
+			// resets the window), though the total time is well past one hold.
+			{
+				LedDriveConfig config = CutCompensate();
+				config.lookahead = true;
+				config.ledLookaheadMs = 0;
+				std::unique_ptr<LedDriveModule> module = makeModule(config, 24.0);
+				const size_t base = demand.Declarations().size();
+				module->SetLookaheadDepth(6);
+				Assert::AreEqual<size_t>(base + 1, demand.Declarations().size());
+				double t = clock.Ms();
+				for (int round = 0; round < 4; ++round)
+				{
+					module->SetLookaheadDepth(5);
+					t += 100.0;
+					clock.To(t);
+					module->SetLookaheadDepth(6);
+					t += 100.0;
+					clock.To(t);
+				}
+				Assert::AreEqual<size_t>(base + 1, demand.Declarations().size(), L"a flapping queue never lowers the held depth");
+				module->Stop();
+			}
+
+			// Case 3: led_lookahead_ms = 100 at 60 fps (6 frames): the hold is 100 ms whatever the depth.
+			{
+				LedDriveConfig config = CutCompensate();
+				config.lookahead = true;
+				config.ledLookaheadMs = 100;
+				std::unique_ptr<LedDriveModule> module = makeModule(config, 60.0);
+				const size_t base = demand.Declarations().size();
+				module->SetLookaheadDepth(6);
+				std::vector<RecordingDemand::Declared> declared = demand.Declarations();
+				Assert::AreEqual<size_t>(base + 1, declared.size());
+				Assert::AreEqual<int>(6, declared.back().aheadDepth);
+				const double t0 = clock.Ms();
+				module->SetLookaheadDepth(3);
+				clock.To(t0 + 99.0);
+				module->SetLookaheadDepth(4);
+				Assert::AreEqual<size_t>(base + 1, demand.Declarations().size(), L"99 ms: no drop");
+				clock.To(t0 + 100.0);
+				module->SetLookaheadDepth(3);
+				declared = demand.Declarations();
+				Assert::AreEqual<size_t>(base + 2, declared.size(), L"100 ms: the held depth drops");
+				Assert::AreEqual<int>(4, declared.back().aheadDepth);
+				module->Stop();
+			}
+		}
 	};
 }
