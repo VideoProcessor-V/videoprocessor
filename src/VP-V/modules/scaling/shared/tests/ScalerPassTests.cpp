@@ -221,6 +221,9 @@ namespace ScalerPassTestsNs
 
 		// The pre-step-2 BasicChroma loops, written out independently (6 taps a = 3, int32 horizontal intermediate unclamped, the
 		// container clamp at the end), as the reference the shared mode must reproduce exactly.
+		// Gate CF2 S3: the phase tables here come from F::BuildPhaseTable, so this reference is independent for the integer
+		// loops only. The tables' independence rests on BasicChromaTests PhaseTablesFromTheSharedKernelTableEqualTheLegacyQ14Tables
+		// (the kept private Lanczos(d) against the shared KernelTable).
 		static std::vector<uint16_t> LegacyQ14(const std::vector<uint16_t>& c, const ScalerPass::FixedQ14::Axis& ax,
 			const ScalerPass::FixedQ14::Axis& ay)
 		{
