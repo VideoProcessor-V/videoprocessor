@@ -14,7 +14,8 @@
 // rows are ESTIMATES for every temporal step) this fill runs the SINGLE-FRAME law, which equals the unit-4 law exactly
 // (GrainLevel.h: "Fallback is the unit-4 law bit for bit"; blocks.N is already N_unit4). It says so visibly on the Fallbacks route
 // (StatusKind::Fallbacks -> GetFallbacksStatus: Ctrl+I, Config status, Ctrl+Alt+D; never log-only): "grain_level_temporal" once a
-// reader has had a fill, "grain_level_declined" once a fill has declined (with the last reason and the count), and
+// reader has had a fill, "grain_level_declined" while the most recent fill declined (with the last reason and the cumulative
+// count; released when a fill publishes again), and
 // "grain_level_unregistered" / "grain_split_owner_unregistered" while a size has been seen but a registration is missing.
 //
 // T5 GATES (lead A20-CB, review-cb-p10g-r1 SHOULD-3; open until the T5 run closes them, no 102b row of their own):
@@ -37,7 +38,8 @@
 //
 // The module also registers the P10 variant owner's fill in production (it had no production registration: every variant
 // Acquire was a visible NoOwnerFill; this also means TD's P10 variant Acquires are now served). Both registrations go through
-// the skeleton's external demand, so nothing is registered while the skeleton is off, and nothing in the Original pathway.
+// the skeleton's external demand (SkeletonModule::Query answers whenever the skeleton module is registered, on or off), so nothing
+// is registered before the skeleton module is, and nothing in the Original pathway.
 // MERGE NOTE (review-cb-p10g-r1 SHOULD-1): 15b A1 is the SINGLE P10 owner registration. Until it lands this module registers
 // it; an AlreadyRegistered answer (A1, or anyone, registered first) is benign: the P10 owner is served by that registration
 // and nothing is shown. When A1 lands, delete the split registration here (splitOwner_, splitTried_, the RegisterThrough call).
@@ -97,11 +99,14 @@ namespace GrainSplit
 			return 10;
 		}
 
-		// What the module shows (status / Fallbacks): fills that published, fills that declined, the last decline.
+		// What the module shows (status / Fallbacks): fills that published, fills that declined, the last decline, and whether the
+		// most recent fill declined (lastDeclined: set by Decline, cleared by NoteFill; the declined line is shown only while set,
+		// so a transient decline releases once a fill publishes again; review-cb-p10g-r2 SHOULD-1).
 		struct Counters
 		{
 			std::atomic<uint64_t> fills{ 0 };
 			std::atomic<uint64_t> declines{ 0 };
+			std::atomic<bool> lastDeclined{ false };
 			mutable std::mutex mutex;
 			std::string lastDecline;
 			std::string LastDecline() const { std::lock_guard<std::mutex> g(mutex); return lastDecline; }
@@ -153,10 +158,22 @@ if (gv_li == 0u)
 			if (c)
 			{
 				c->declines.fetch_add(1, std::memory_order_relaxed);
-				std::lock_guard<std::mutex> g(c->mutex);
-				c->lastDecline = out.declineReason;
+				{
+					std::lock_guard<std::mutex> g(c->mutex);
+					c->lastDecline = out.declineReason;
+				}
+				c->lastDeclined.store(true, std::memory_order_release);
 			}
 			return false;
+		}
+
+		// A fill published: counted, and the declined line releases (the cumulative count and the last reason are kept).
+		inline void NoteFill(Counters* c)
+		{
+			if (c == nullptr)
+				return;
+			c->fills.fetch_add(1, std::memory_order_relaxed);
+			c->lastDeclined.store(false, std::memory_order_release);
 		}
 
 		inline VpSkeleton::OwnerFill MakeOwnerFill(uint64_t reserveBytes, std::shared_ptr<Counters> counters)
@@ -206,8 +223,7 @@ if (gv_li == 0u)
 				if (!VpvGpu::Pass(static_cast<pl_dispatch>(req.gpu->Dispatch()), "VP-V grain level (single-frame)", header, kBodyGlsl,
 						desc.data(), int(desc.size()), nullptr, 0, gs->bw, gs->bh, shmem, kGroupEdge, kGroupEdge))
 					return Decline(out, c, "shader rejected or dispatch failed");
-				if (c)
-					c->fills.fetch_add(1, std::memory_order_relaxed);
+				NoteFill(c);
 				return true;
 			};
 			return f;
@@ -234,13 +250,19 @@ if (gv_li == 0u)
 		}
 
 		// The Fallbacks texts (pure: tested on the CPU). All go to StatusKind::Fallbacks, the route that reaches the screen.
-		// Declines: once any fill has declined, the last reason and the count.
-		inline std::string DeclineLine(uint64_t declines, const std::string& lastDecline)
+		// Declines: while the most recent fill declined (`active`), the last reason and the cumulative count; released (empty) once
+		// a fill publishes again (Engage/Release, FallbackStatus.h).
+		inline std::string DeclineLine(uint64_t declines, const std::string& lastDecline, bool active = true)
 		{
-			if (declines == 0)
+			if (declines == 0 || !active)
 				return std::string();
 			return std::string(kDeclinedId) + ": " + (lastDecline.empty() ? std::string("a fill declined") : lastDecline) + " (" +
 				std::to_string(declines) + (declines == 1 ? " decline)" : " declines)");
+		}
+		// The declined line from the counters now (FallbackLines shows exactly this).
+		inline std::string DeclineLineOf(const Counters& c)
+		{
+			return DeclineLine(c.declines.load(std::memory_order_relaxed), c.LastDecline(), c.lastDeclined.load(std::memory_order_acquire));
 		}
 		// A missing registration after a source size was seen (`problem` empty = none): `id` is kUnregisteredId (P10g) or
 		// kSplitUnregisteredId (the P10 variant owner).
@@ -303,7 +325,7 @@ if (gv_li == 0u)
 				}
 				std::vector<std::string> out;
 				const std::string texts[4] = { FallbackLine(counters_->fills.load(std::memory_order_relaxed)),
-					DeclineLine(counters_->declines.load(std::memory_order_relaxed), counters_->LastDecline()),
+					DeclineLineOf(*counters_),
 					UnregisteredLine(kUnregisteredId, level), UnregisteredLine(kSplitUnregisteredId, split) };
 				for (const std::string& t : texts)
 					if (!t.empty())
@@ -379,7 +401,13 @@ if (gv_li == 0u)
 				const bool ok = registered_.load(std::memory_order_acquire);
 				const bool levelDone = (ok && want == reserve_) || want == tried_;
 				if (want == 0)
-					levelProblem_.clear();   // no live size: nothing is owed (the split's state stays: it is registered once)
+				{
+					// No live size: nothing is owed (the split's state stays: it is registered once). tried_ resets so a refused size
+					// is retried, and shown again, when it returns (review-cb-p10g-r2 MUST-1); a registered fill stays done through
+					// ok && want == reserve_.
+					levelProblem_.clear();
+					tried_ = 0;
+				}
 				if (want == 0 || (levelDone && splitTried_))
 					return ok;
 				if (demand == nullptr)
@@ -387,7 +415,7 @@ if (gv_li == 0u)
 				if (demand == nullptr)
 				{
 					// No skeleton yet: retried at the next Entrance, shown meanwhile (a size has been seen).
-					levelProblem_ = "no skeleton to register with (the skeleton is off or not started yet); retried at the next frame";
+					levelProblem_ = "no skeleton to register with (the skeleton module is not registered yet); retried at the next frame";
 					return ok;
 				}
 				if (!splitTried_)
