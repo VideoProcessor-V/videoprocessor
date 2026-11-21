@@ -53,7 +53,8 @@ namespace CameraLink
 		std::atomic<uint64_t> absent{ 0 };         // LabelsFor answered "unavailable"
 		std::atomic<uint64_t> staleLane{ 0 };      // lane productions REFUSED: the lane graph was rebuilt between the claim and the publish
 		std::atomic<uint64_t> rebound{ 0 };        // times the fill took a new lane lease (a rebuild was noticed)
-		std::atomic<uint64_t> fieldStampMismatch{ 0 };  // P7 present but the fit field product's stamp differs / is missing for that frame: no labels
+		std::atomic<uint64_t> fieldMissing{ 0 };        // P7 published but the fit field product is not (node absent or no published slot for the frame): no labels
+		std::atomic<uint64_t> fieldStampMismatch{ 0 };  // both published but the field's stamp differs from P7's: no labels
 		std::atomic<uint64_t> fieldUnreadable{ 0 };     // fit field product has no storage, bad content, or was recycled during the read: no labels
 	};
 
@@ -61,11 +62,11 @@ namespace CameraLink
 	inline std::string LabelFillStatusLine(const LabelFillCounters& c)
 	{
 		char b[640];
-		std::snprintf(b, sizeof(b), "camera labels: %llu lane, %llu late, %llu blocked, %llu live, %llu declined, %llu served, %llu absent, %llu stale lane (refused after a graph rebuild), %llu lane rebinds, %llu fit field stamp mismatch or missing (no labels), %llu fit field unreadable (no labels)",
+		std::snprintf(b, sizeof(b), "camera labels: %llu lane, %llu late, %llu blocked, %llu live, %llu declined, %llu served, %llu absent, %llu stale lane (refused after a graph rebuild), %llu lane rebinds, %llu fit field missing (no labels), %llu fit field stamp mismatch (no labels), %llu fit field unreadable (no labels)",
 			(unsigned long long)c.lane.load(), (unsigned long long)c.laneLate.load(), (unsigned long long)c.laneBlocked.load(),
 			(unsigned long long)c.live.load(), (unsigned long long)c.declined.load(), (unsigned long long)c.served.load(),
 			(unsigned long long)c.absent.load(), (unsigned long long)c.staleLane.load(), (unsigned long long)c.rebound.load(),
-			(unsigned long long)c.fieldStampMismatch.load(), (unsigned long long)c.fieldUnreadable.load());
+			(unsigned long long)c.fieldMissing.load(), (unsigned long long)c.fieldStampMismatch.load(), (unsigned long long)c.fieldUnreadable.load());
 		return b;
 	}
 
@@ -115,7 +116,9 @@ namespace CameraLink
 		// CP-A1-D4-CAMLABEL-FIELDCOPY: the fit field is read ONLY through the declared product p7f_camera_fit_field. True when its slot for
 		// `seq` is published (or sealed) and its stamp is EXACTLY P7(seq)'s. Missing product or a mismatch: false (no labels, counted by the
 		// caller as blocked / declined); never a fall-back to the pool's copy.
-		static bool FitFieldMatchesP7(const VpSkeleton::LaneLease& lease, uint64_t seq);
+		enum class FieldGate { Ok, Missing, StampMismatch };
+		static FieldGate FitFieldGate(const VpSkeleton::LaneLease& lease, uint64_t seq);
+		static bool FitFieldMatchesP7(const VpSkeleton::LaneLease& lease, uint64_t seq) { return FitFieldGate(lease, seq) == FieldGate::Ok; }
 		// Reads the field's CONTENT from the product slot (stamp gate first, then the slot's ring bytes, then a re-read of the slot so a
 		// recycled ring is never used). False: no field (no labels). No other source exists.
 		bool ReadFitField(const VpSkeleton::LaneLease& lease, uint64_t seq, FieldCopy& out);
@@ -123,6 +126,8 @@ namespace CameraLink
 		VpSkeleton::LaneLease m_lease;            // render thread only
 		VpSkeleton::LaneLeaseSource m_source;
 		VpSkeleton::LaneLeaseSource m_fieldSource;
+		FieldCopy m_field;                        // render thread only: the decode target, reused (no allocation at steady state)
+		uint64_t m_fieldMissNext = 0;             // NextSeq counts each frame's missing field once
 		ICameraLink& m_link;
 		ILabelDevice& m_device;
 		Gap m_gap;

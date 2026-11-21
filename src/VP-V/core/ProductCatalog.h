@@ -158,9 +158,9 @@ inline const std::vector<ProductRow>& ProductRows()
         // Wave S2: P14g source_geometry is HELD STATE like P14: the source-resolution side (single writer) publishes it on each evaluation, no lane
         // producer, no live fill; its readers take the latest sealed record (lag 1) and fall back visibly when it is absent or stale.
         { kSourceGeometry, "input/source_analysis/identity", kExpectedSourceGeometryUnit, "" },
-        // CP-A1-D4-CAMLABEL-FIELDCOPY: the P7 fit field is published by the camera worker in the same publish as P7 (the pool entry carries the
-        // content, the slot the stamp); its one reader is P8 (a declared input of P8, no consumer row).
-        { kCameraFitField, "motion/estimation/global_model", kExpectedCameraUnit, "camera fit field (camera worker, published with P7)" },
+        // CP-A1-D4-CAMLABEL-FIELDCOPY: the P7 fit field is published by the camera worker just before P7 (the product slot IS the storage:
+        // content and stamp; the pool keeps provenance only); its one reader is P8 (a declared input of P8, no consumer row).
+        { kCameraFitField, "motion/estimation/global_model", kExpectedCameraUnit, "camera fit field (storage of P7's fit field, camera worker, published before P7)" },
         { kEdgeMap, "input/source_analysis/regions", kExpectedRegionUnit, "edge map pass (per-frame memo); readers: focus map, busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3))" },
     };
     return rows;

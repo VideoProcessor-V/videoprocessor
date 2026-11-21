@@ -1073,7 +1073,11 @@ inline void AppendCameraFitFieldProduct(std::vector<ProductDecl>& decls)
     p.residency = Residency::SystemRam;
     p.spanMask = content;
     p.size.fixedBytes = 16384;   // pod header + the grid-rounding margin (see above)
-    AddTerm(p, 4, 12);           // three float planes per 16x16 block
+    // The ahead fit's field is the engine's NATIVE cell grid, not the 16 px grid: a cell is 4 x 4 engine px of the engine's luma, which is
+    // at most HALF the source size (VectorEngine: half-size luma, quarter on lowRes 4K), so a cell is >= 8 source px per axis and the cell
+    // count is ceil(w/8) x ceil(h/8) (exactly CellsAt(d, 3)). Three float planes per cell. The 16 px seed/bridge field is 4 x smaller and fits.
+    // CameraLane::Build checks this against the worst-case pod (CameraFitFieldPod.h WorstCaseFitFieldPodBytes) and fails visibly.
+    AddTerm(p, 3, 12);
     p.refRenderMs = 0.01f;
     decls.push_back(p);
 }

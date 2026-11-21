@@ -31,29 +31,30 @@ namespace CameraLink
 		return true;
 	}
 
-	bool CameraLabelFill::FitFieldMatchesP7(const VpSkeleton::LaneLease& lease, uint64_t seq)
+	CameraLabelFill::FieldGate CameraLabelFill::FitFieldGate(const VpSkeleton::LaneLease& lease, uint64_t seq)
 	{
 		if (!lease.table)
-			return false;
+			return FieldGate::Missing;
 		VpSkeleton::SlotSet* p7 = lease.table->Find(VpSkeleton::kP7CameraFit);
 		VpSkeleton::SlotSet* pf = lease.table->Find(VpSkeleton::kCameraFitField);
 		if (!p7 || !pf)
-			return false;   // the product is not in this graph: nothing to read
+			return FieldGate::Missing;   // the product is not in this graph: nothing to read
 		const VpSkeleton::ReadInfo a = p7->Read(seq, true);
 		const VpSkeleton::ReadInfo b = pf->Read(seq, true);
 		if (a.kind != VpSkeleton::ReadInfo::Ring || b.kind != VpSkeleton::ReadInfo::Ring || !a.header || !b.header)
-			return false;
+			return FieldGate::Missing;
 		const VpIndicator::Stamp sa = a.header->honoured;
 		const VpIndicator::Stamp sb = b.header->honoured;
-		return VpIndicator::SameFor(sa, sb, ~VpIndicator::CounterMask(0));
+		return VpIndicator::SameFor(sa, sb, ~VpIndicator::CounterMask(0)) ? FieldGate::Ok : FieldGate::StampMismatch;
 	}
 
 	bool CameraLabelFill::ReadFitField(const VpSkeleton::LaneLease& lease, uint64_t seq, FieldCopy& out)
 	{
 		auto unreadable = [&]() { m_counters.fieldUnreadable.fetch_add(1, std::memory_order_relaxed); return false; };
-		if (!FitFieldMatchesP7(lease, seq))
+		const FieldGate gate = FitFieldGate(lease, seq);
+		if (gate != FieldGate::Ok)
 		{
-			m_counters.fieldStampMismatch.fetch_add(1, std::memory_order_relaxed);
+			(gate == FieldGate::Missing ? m_counters.fieldMissing : m_counters.fieldStampMismatch).fetch_add(1, std::memory_order_relaxed);
 			return false;
 		}
 		if (!m_fieldSource)
@@ -86,19 +87,29 @@ namespace CameraLink
 		VpSkeleton::SlotSet* p8 = m_lease.table->Find(VpSkeleton::kP8CameraLabels);
 		VpSkeleton::SlotSet* p7 = m_lease.table->Find(VpSkeleton::kP7CameraFit);
 		VpSkeleton::SlotSet* pf = m_lease.table->Find(VpSkeleton::kCameraFitField);
-		if (!p8 || !p7 || !pf)
+		if (!p8 || !p7)
 			return false;
+		if (!pf)
+			return false;   // no field node in this graph (the camera-off / TD graph): P8 is not produced here
 		const uint64_t start = m_cursor > m_floor ? m_cursor : m_floor;
 		for (uint64_t s = start; s < start + p8->Ring(); ++s)
 		{
 			if (p7->StateOf(s) != VpSkeleton::SlotState::Published && p7->StateOf(s) != VpSkeleton::SlotState::Sealed)
 				continue;
-			if (pf->StateOf(s) != VpSkeleton::SlotState::Published && pf->StateOf(s) != VpSkeleton::SlotState::Sealed)
-				continue;
 			if (p8->StateOf(s) != VpSkeleton::SlotState::Empty && p8->StateOf(s) != VpSkeleton::SlotState::Released)
 				continue;
 			if (!m_link.CausalRecord(s))
 				continue;
+			if (pf->StateOf(s) != VpSkeleton::SlotState::Published && pf->StateOf(s) != VpSkeleton::SlotState::Sealed)
+			{
+				// P7 is ready for this frame but its fit field product is not: P8 gets no labels for it. Counted once per frame, by cause.
+				if (s >= m_fieldMissNext)
+				{
+					m_fieldMissNext = s + 1;
+					m_counters.fieldMissing.fetch_add(1, std::memory_order_relaxed);
+				}
+				continue;
+			}
 			if (out)
 				*out = s;
 			return true;
@@ -130,7 +141,7 @@ namespace CameraLink
 		}
 		hdr.honoured = lease.indicator ? lease.indicator->StampOf(seq) : VpIndicator::Stamp();
 		std::shared_ptr<const CameraModel::CameraMotion> rec;
-		FieldCopy field;
+		FieldCopy& field = m_field;                            // reused decode target (render thread)
 		bool haveField = false;
 		m_link.FitEntryOf(seq, rec);                           // the record only; the field comes from the product slot
 		haveField = rec && ReadFitField(lease, seq, field);    // stamp-gated; a miss is counted by cause (status line)
@@ -167,7 +178,7 @@ namespace CameraLink
 		VpSkeleton::SlotSet* p7 = m_lease.table ? m_lease.table->Find(VpSkeleton::kP7CameraFit) : nullptr;
 		const bool p7Sealed = p7 && p7->Read(seq).kind == VpSkeleton::ReadInfo::Ring;
 		std::shared_ptr<const CameraModel::CameraMotion> rec;
-		FieldCopy field;
+		FieldCopy& field = m_field;   // reused decode target (render thread)
 		bool haveField = false;
 		// The fit field product must be sealed too and carry P7's stamp (it is resolved before P8, like P7): else P8 stays absent (declined, counted).
 		if (p7Sealed)

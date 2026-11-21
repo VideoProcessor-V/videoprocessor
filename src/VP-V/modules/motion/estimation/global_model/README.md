@@ -379,6 +379,8 @@ under a frozen shader-mirror spec; measures, never refines: extended would distu
 (P7/P8/P9 consumers). No existing photometric / direct alignment code in the estimation module; the matcher's sub-pixel
 refine works per block on vectors, not on the global model.
 
+**Detector precision (SHOULD-1).** The dynamic-texture and static-camera detectors take the fit's final precision (`resolvedPrecPx`, `f.prec` from the fit); 0 = the nominal precision (`in.precisionPx`, else 0.25 x block / 16), used only by direct callers (tests), so their results stay byte-identical. Every production call passes `f.prec` > 0.
+
 ## Settings
 
 The fitter's own options are `Config` fields set by the tests and `tools/camera_eval`. Camera K3 added the `[vpv.camera]` keys (switches only, all off; table in `../README.md` Settings, parser `link/CameraSettings.h`). Config placement for the keys that exist (`camera_link`, `analysis_lane`): see `control/skeleton/README.md`. "Original (Bill)" = the Original pathway builds no camera link (`camera_link` off).

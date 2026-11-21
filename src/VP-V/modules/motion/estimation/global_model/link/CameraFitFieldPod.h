@@ -21,6 +21,14 @@ namespace CameraLink
 	// The bytes needed for a field with `blocks` blocks (three float planes with trust, two without).
 	inline size_t FitFieldPodBytes(size_t blocks, bool trust) { return kFitFieldPodHeaderBytes + blocks * sizeof(float) * (trust ? 3u : 2u); }
 
+	// The largest pod a fit can produce for a source of w x h px: the engine's native cell grid, cells of >= 8 source px per axis (a cell is
+	// 4 engine px of a luma at most half the source size), with trust. The declared slot size of p7f_camera_fit_field must cover this.
+	inline size_t WorstCaseFitFieldPodBytes(uint32_t w, uint32_t h)
+	{
+		const size_t cw = (static_cast<size_t>(w) + 7) / 8, ch = (static_cast<size_t>(h) + 7) / 8;
+		return FitFieldPodBytes(cw * ch, true);
+	}
+
 	// Encodes the forward field. Returns the byte count; 0 = invalid field or the buffer is too small (the product is then NOT published).
 	inline size_t EncodeFitFieldPod(const FieldCopy& f, uint8_t* out, size_t cap)
 	{
@@ -45,7 +53,7 @@ namespace CameraLink
 		return n;
 	}
 
-	// Decodes into `out` (the backward planes and the provenance stay empty). False on a bad magic or a short buffer (out untouched).
+	// Decodes into `out` (the backward planes and the provenance stay empty). False on a bad magic or a short buffer (out untouched). Backward planes are not touched (the caller's reused buffer never has any).
 	inline bool DecodeFitFieldPod(const uint8_t* in, size_t bytes, FieldCopy& out)
 	{
 		if (!in || bytes < kFitFieldPodHeaderBytes)
@@ -61,20 +69,21 @@ namespace CameraLink
 		const size_t blocks = static_cast<size_t>(gw) * static_cast<size_t>(gh);
 		if (blocks > bytes || FitFieldPodBytes(blocks, hasTrust != 0) > bytes)
 			return false;
-		FieldCopy f;
-		f.gridW = gw;
-		f.gridH = gh;
-		f.blockSize = bs;
-		f.fwdX.resize(blocks);
-		f.fwdY.resize(blocks);
-		get(f.fwdX.data(), blocks * sizeof(float));
-		get(f.fwdY.data(), blocks * sizeof(float));
+		// Decoded IN PLACE into `out` (its vectors keep their capacity: a reused buffer allocates nothing at steady state).
+		out.gridW = gw;
+		out.gridH = gh;
+		out.blockSize = bs;
+		out.fwdX.resize(blocks);
+		out.fwdY.resize(blocks);
+		get(out.fwdX.data(), blocks * sizeof(float));
+		get(out.fwdY.data(), blocks * sizeof(float));
 		if (hasTrust)
 		{
-			f.fwdTrust.resize(blocks);
-			get(f.fwdTrust.data(), blocks * sizeof(float));
+			out.fwdTrust.resize(blocks);
+			get(out.fwdTrust.data(), blocks * sizeof(float));
 		}
-		out = std::move(f);
+		else
+			out.fwdTrust.clear();
 		return true;
 	}
 }

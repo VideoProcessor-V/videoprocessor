@@ -362,43 +362,53 @@ namespace CameraLink
 		const VpIndicator::Stamp& honoured)
 	{
 		FitCounters* fc = m_env.counters;
-		auto missed = [&]() {   // every miss is counted and named in the status line (never silent)
+		auto count = [&](std::atomic<uint64_t> FitCounters::* cause) {   // every miss is counted by cause and named in the status line
 			if (fc)
-				fc->fieldNotPublished.fetch_add(1, std::memory_order_relaxed);
+				(fc->*cause).fetch_add(1, std::memory_order_relaxed);
 			return false;
 		};
 		const VpSkeleton::LaneLeaseSource& source = bridgeTarget ? m_env.fieldLeaseSource : m_env.fieldOnTimeSource;
-		if (!source || !job.field)
-			return missed();
+		if (!job.field)
+			return count(&FitCounters::fieldNoField);
+		if (!source)
+			return count(&FitCounters::fieldNoStorage);
 		const VpSkeleton::LaneLease fl = source();
 		if (!fl.table || !fl.bytes || fl.generation != p7Lease.generation)
-			return missed();   // no storage, or a rebuild between the two reads: the field is missing for this frame
+			return count(&FitCounters::fieldNoStorage);   // no storage, or a rebuild between the two reads: the field is missing for this frame
 		VpSkeleton::SlotSet* fs = fl.table->Find(VpSkeleton::kCameraFitField);
 		if (!fs)
-			return missed();
+			return count(&FitCounters::fieldNoStorage);
 		VpSkeleton::LaneTicket ticket;
 		if (fs->Claim(job.seq, VpAncestry::Provenance::AheadLane, ~uint64_t(0), &ticket) != VpSkeleton::ClaimResult::Claimed)
-			return missed();
+			return count(&FitCounters::fieldClaimRefused);
 		if (!fs->Writable(ticket))
 		{
 			fs->Abandon(ticket);
-			return missed();
+			return count(&FitCounters::fieldClaimRefused);
 		}
 		VpAncestry::Header& hdr = fs->LaneHeader(ticket);
 		VpSkeleton::LaneInputs pins;
 		if (!fl.table->LaneAncestors(VpSkeleton::kCameraFitField, job.seq, hdr, pins))
 		{
 			fs->Abandon(ticket);
-			return missed();
+			return count(&FitCounters::fieldClaimRefused);
 		}
 		// The content goes into the slot's own buffer, once; the product owns it from here on (nothing else keeps a copy).
 		if (EncodeFitFieldPod(*job.field, fl.bytes->Ring(static_cast<size_t>(ticket.slot)), fl.bytes->Bytes()) == 0)
 		{
 			pins.Unpin();
 			fs->Abandon(ticket);
-			if (fc)
-				fc->fieldUndersized.fetch_add(1, std::memory_order_relaxed);   // named in the status line: the product is smaller than the field
-			return false;   // the field does not fit the product's declared size: not published (counted, visible)
+			const size_t need = FitFieldPodBytes(job.field->Blocks(), job.field->fwdTrust.size() == job.field->Blocks());
+			if (job.field->Valid() && need > fl.bytes->Bytes())
+			{
+				if (fc)
+				{
+					fc->fieldNeedBytes.store(need, std::memory_order_relaxed);
+					fc->fieldSlotBytes.store(fl.bytes->Bytes(), std::memory_order_relaxed);
+				}
+				return count(&FitCounters::fieldUndersized);   // the product is smaller than the field: not published, named in the status line
+			}
+			return count(&FitCounters::fieldEncodeFailed);
 		}
 		hdr.honoured = honoured;   // the SAME stamp P7(seq) is published under: the pair is one record
 		fs->Publish(ticket);
