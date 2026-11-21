@@ -24939,17 +24939,7 @@ releaseDriftBaseRetention =
 	Vpv::Capture::HostBinding captureBinding{ this, Vpv::Capture::MakeCaptureHost(*this) };   // P10: last member (registered last, removed first)   // VPV-HOOK
 	Vpv::HostState vpv;   // P11a-0: the S8 state anchor (data only, no binding; core/hub/HostState.h)   // VPV-HOOK
 };
-#include <VP-V/modules/motion/estimation/VectorEngineEstimate.inl>   // VPV-HOOK P5a-5: the estimate and the engine keeper (Impl members)
-#include <VP-V/modules/motion/consumers/DejudderPolicyRunner.inl>   // VPV-HOOK M2 P5b-3: the de-judder policy (Impl members)
-#include <VP-V/modules/motion/consumers/PhaseTimeline.inl>   // VPV-HOOK M2 P5b-4: phase picture, timeline helpers, status, release (Impl members)
-#include <VP-V/modules/input/capture/CaptureImpl.inl>   // P10: the capture code (Impl members)   // VPV-HOOK
-#include <VP-V/segments/CoreSegments.inl>   // VPV-HOOK P4-2: UpdatePipelineSlots, OrderFrameSlotHooks (Impl members)
-#include <VP-V/segments/EntranceHostMembers.inl>   // VPV-HOOK P4-5: the entrance host B3 helpers, RenderCrossfadeMix, DrainEntranceBeforeRender (Impl members)
-#include <VP-V/segments/EntrancePlanner.inl>   // VPV-HOOK P4 e: the entrance planner (Impl member)
-#include <VP-V/modules/motion/consumers/IntentMotionMethods.inl>   // VPV-HOOK P11a-f: the motion-intent part of intent items 2-5 (Impl members)
-#include <VP-V/modules/drive/led_compensation/LedIntentMethods.inl>   // VPV-HOOK P11a-f: the ambient / black / LED-limit parts of intent items 2-5 (Impl members)
-#include <VP-V/modules/drive/led_compensation/LedSdrLiftMethods.inl>   // VPV-HOOK P11a-d: the ambient SDR lift and LedDisplayGamma (Impl members)
-#include <VP-V/modules/output/calibration_lut/CalibrationPresentMethods.inl>   // VPV-HOOK P11a-e: the calibration pattern present (Impl member)
+#include <VP-V/host/LvrHostAccess.inl>   // S8 (refs/112 P2): the VP-V Impl member bodies, the former eleven .inl lines in order   // VPV-HOOK
 
 
 namespace
