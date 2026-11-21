@@ -981,7 +981,8 @@
         "src/VP-V/modules/motion/consumers/DejudderPolicyRunner.h",
         "src/VP-V/modules/motion/consumers/DejudderPolicyRunner.inl",
         "src/VP-V/modules/motion/consumers/IntentMotionState.h",
-        "src/VP-V/modules/motion/consumers/IntentMotionMethods.inl",
+        "src/VP-V/modules/motion/consumers/IntentMotionMethods.h",
+        "src/VP-V/modules/motion/consumers/IntentMotionMethods.cpp",
         "src/VP-V/modules/motion/consumers/DejudderEstimateCall.h",
         "src/VP-V/modules/motion/consumers/tests/DejudderDecisionRunnerHost.h",
         "src/VP-V/modules/motion/consumers/DejudderState.h",
@@ -1416,7 +1417,8 @@
         "src/VP-V/modules/drive/led_compensation/LedIntentState.h",
         "src/VP-V/modules/drive/led_compensation/LedIntentMethods.inl",
         "src/VP-V/modules/drive/led_compensation/LedSdrLiftState.h",
-        "src/VP-V/modules/drive/led_compensation/LedSdrLiftMethods.inl",
+        "src/VP-V/modules/drive/led_compensation/LedSdrLiftMethods.h",
+        "src/VP-V/modules/drive/led_compensation/LedSdrLiftMethods.cpp",
         "src/VP-V/modules/drive/led_compensation/config_ui"
       ],
       "components": {

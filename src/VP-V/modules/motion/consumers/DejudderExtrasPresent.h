@@ -2,31 +2,45 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// CC series A (A1): the de-judder extras' state, moved verbatim (types, initialisers, comments) out of the renderer's
-// Impl struct into ONE member, `Vpv::Dejudder::ExtrasState dejudderExtras;` (no reference aliases: every reader and
-// writer names `dejudderExtras.<member>`, the member names are the old ones). The values and their meaning are the old
-// members'; nothing else changes. The render-ahead counters the Presenter already holds (RenderAheadPolicy.h, P6 rest
-// S3: frames, lead, shownError, ...) are not here: their readers name the Presenter's fields. The present-id bookkeeping
-// (dejudderExtraIds / dejudderMainRefresh / dejudderIdsSwapchain) keeps its own storage here, separate from the
-// Presenter's extraIds / mainRefresh (held for the owner with PresentContext::native).
-//
-// Later steps (series A): the extras' body (PresentDejudderExtras) becomes Vpv::Dejudder::PresentExtras over this state
-// and a host view, compiled in DejudderExtrasPresent.cpp.
+// CC series A (A1-A3): the de-judder extras' state, frame description, host interface and compiled body
+// (Vpv::Dejudder::PresentExtras, moved verbatim from LibplaceboVideoRenderer.cpp::Impl::PresentDejudderExtras).
+// Impl holds ONE member `Vpv::Dejudder::ExtrasState dejudderExtras;` and forwards through
+// `Vpv::HostAccess::PresentDejudderExtras(*this, extrasFrame)` in src/VP-V/host/LvrHostAccess.inl.
 //
 // Threading: the render thread only, as before, apart from renderAheadFlushReanchor (atomic: set at the render loop's
 // backlog flush, taken by the next frame's extras).
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/modules/control/config/VpvRendererFields.h>
+#include <VP-V/modules/input/signal/ResyncExtension.h>
+#include <VP-V/modules/motion/consumers/DejudderAhead.h>
+#include <VP-V/modules/motion/consumers/DejudderState.h>
+#include <VP-V/modules/motion/consumers/FrameInterpolator.h>
+#include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/motion/consumers/RenderedWarp.h>
+#include <VP-V/modules/motion/estimation/EstimateState.h>
 #include <VP-V/modules/motion/estimation/MotionValidity.h>
+#include <VP-V/modules/output/dither/OutputEncodingRepair.h>
+#include <VP-V/modules/output/presentation/OpenLoopDisplayRate.h>
+#include <VP-V/modules/output/presentation/RenderAheadPolicy.h>
+#include <VP-V/segments/EntranceSegment.h>
+#include <VP-V/segments/OutputSegmentsMerge.h>
+#include <vprenderer/AlphaD3D11FrameGpuTimer.h>
+#include <vprenderer/AlphaPresentationTelemetry.h>
+#include <vprenderer/PassTimerHook.h>
 
 #include <atlbase.h>
 #include <dxgi.h>
+#include <dxgi1_2.h>
+#include <libplacebo/d3d11.h>
 #include <libplacebo/gpu.h>
+#include <libplacebo/renderer.h>
+#include <libplacebo/swapchain.h>
 
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -121,5 +135,188 @@ namespace Vpv
 			uint64_t ditherVectorsNextUsed = 0;
 			bool ditherVectorsNextLogged = false;
 		};
+
+		// Per-frame inputs to PresentExtras (formerly Impl::DejudderExtrasFrame).
+		struct ExtrasFrame
+		{
+			const pl_frame* image = nullptr;           // A as rendered
+			const pl_frame* target = nullptr;          // A's target; the FBO is replaced per extra
+			const pl_render_params* params = nullptr;  // A's parameters and hooks
+			const pl_hook* ledMeasurementHook = nullptr;
+			bool lossless422 = false;
+			bool cadenceRepeat = false;
+			uint64_t frameGeneration = 0;
+			uint64_t sourceSequence = 0;
+			uint64_t nextSourceSequence = 0;   // B, if known
+			int64_t callbackQpc = 0;   // A's capture callback
+			int64_t mainCallQpc = 0;   // A's present call
+			double captureRateHz = 0.0;
+			// A's whole processing time, without waits: RenderLoop's pre-render
+			// work (look-ahead, conversion wait excluded) plus RenderLocked from
+			// entry to A's Present returning. B needs about as long from the
+			// moment it starts, so this is what must fit in one refresh.
+			double workMs = 0.0;
+			double renderMs = 0.0;   // A's render call: the after-call allowance for B
+			const std::function<bool()>* nextFrameArrived = nullptr;
+			int64_t swapEndQpc = 0;   // render-ahead: when A's Present returned (the target lead's base)
+		};
+
+		// Caller-bounded D3D11 timestamp-disjoint scope shared between PresentExtras and EstimateAhead
+		// (matches AlphaFrameGpuTimingScope in LibplaceboVideoRenderer.cpp).
+		class FrameGpuTimingScope
+		{
+		public:
+			FrameGpuTimingScope(AlphaD3D11FrameGpuTimer& timer,
+				ID3D11DeviceContext* context, uint64_t generation,
+				uint64_t sourceSequence)
+				: m_timer(timer), m_context(context),
+				m_issued(timer.BeginRender(context, generation, sourceSequence))
+			{
+			}
+
+			~FrameGpuTimingScope()
+			{
+				Reject();
+			}
+
+			FrameGpuTimingScope(const FrameGpuTimingScope&) = delete;
+			FrameGpuTimingScope& operator=(const FrameGpuTimingScope&) = delete;
+
+			void EndRender()
+			{
+				if (m_issued && !m_ended)
+				{
+					m_timer.EndRender(m_context);
+					m_ended = true;
+				}
+			}
+
+			bool BeginStage(AlphaD3D11FrameGpuTimer::Stage stage)
+			{
+				return m_issued && m_timer.BeginStage(m_context, stage);
+			}
+
+			void EndStage()
+			{
+				if (m_issued)
+				{
+					m_timer.EndStage(m_context);
+					m_context->Flush();
+				}
+			}
+
+			void Accept(uint64_t submissionSerial)
+			{
+				if (!m_issued || m_finalized)
+					return;
+				EndRender();
+				m_timer.SetFrameOutcome(true, submissionSerial);
+				m_finalized = true;
+			}
+
+			void Reject()
+			{
+				if (!m_issued || m_finalized)
+					return;
+				EndRender();
+				m_timer.SetFrameOutcome(false);
+				m_finalized = true;
+			}
+
+		private:
+			AlphaD3D11FrameGpuTimer& m_timer;
+			ID3D11DeviceContext* m_context = nullptr;
+			bool m_issued = false;
+			bool m_ended = false;
+			bool m_finalized = false;
+		};
+
+		// Forwarding callback interface implemented by Vpv::HostAccess::PresentDejudderExtras.
+		struct ExtrasHostCalls
+		{
+			virtual ~ExtrasHostCalls() = default;
+			virtual void DejudderHold(const char* why) = 0;
+			virtual void UpdateRenderAheadBudget(double captureRateHz) = 0;
+			virtual bool RenderAheadActive() const = 0;
+			virtual ::Dejudder::Settings RenderedWarpSettings(int outputHeight) const = 0;
+			virtual OpenLoopDisplayRate::Choice SelectDejudderDisplayRate() = 0;
+			virtual void ResolveRenderAheadTimers() = 0;
+			virtual void ResetRenderAheadGate(const char* why) = 0;
+			virtual double OpenLoopGridVsync(double displayHz, double now, double qpcFrequency) const = 0;
+			virtual int UpdateRenderAheadGate(double now, double sourcePeriod, double displayPeriod, bool late, int maxExtras) = 0;
+			virtual void LogRenderAhead(double ratio, int gateLevel, const char* holding) = 0;
+			virtual bool EntranceOnce() const = 0;
+			virtual bool EntranceOnceExtra(const pl_frame& image, uint64_t sourceSequence, uint64_t nextSourceSequence,
+				bool interpolating, const ::Dejudder::Planes& a, ::Dejudder::Planes& processedA,
+				::Dejudder::Planes& processedB, const pl_frame*& processedFrame) = 0;
+			virtual void DrainEntranceBeforeRender() = 0;
+			virtual bool DitherVectorsSupported() const = 0;
+			virtual bool RenderCrossfadeMix(const pl_frame& from, const pl_frame& to, pl_frame& target,
+				const pl_render_params& params, const pl_color_space* historyColor, double factor) = 0;
+			virtual bool EstimateAhead(uint64_t sourceSequence, uint64_t nextSourceSequence, bool renderedPath,
+				FrameGpuTimingScope* timing) = 0;
+			virtual void SyncFallback(const FallbackCatalog::Decision& entry) = 0;
+			virtual VpMotion::P3FieldSet LiveFieldSet() const = 0;
+			virtual void RefreshSnapshotFields(pl_tex& warpField, pl_tex& warpTrust, pl_tex& warpSub,
+				pl_tex& warpCamera, pl_tex& warpMask, pl_tex& warpVectorOk) const = 0;
+			virtual pl_tex Occlusion(int slot) const = 0;
+		};
+
+		// Host view built once per call by the forwarding adapter in LvrHostAccess.inl.
+		struct ExtrasHost
+		{
+			const void* host = nullptr;
+			pl_log log = nullptr;
+			pl_d3d11 d3d11 = nullptr;
+			pl_renderer renderer = nullptr;
+			pl_swapchain swapchain = nullptr;
+			IDXGISwapChain1* vpOwnedSwapchain = nullptr;
+			const VpvRenderer::Fields& activeSettings;
+			bool flipPresentation = false;
+			pl_tex (&textures)[2];
+			AlphaPresentationTelemetry& presentationTelemetry;
+			AlphaD3D11FrameGpuTimer& gpuFrameTimer;
+			PassTimerHook::Hook& passTimerHook;
+			ID3D11DeviceContext* renderTimingContext = nullptr;
+			OutputEncodingRepair::Hook& outputEncodingRepair;
+			OcclusionMask::Hook& occlusionMaskHook;
+			bool& grainToleranceParamSet;
+			bool& dejudderMaskParamSet;
+			bool temporalActive = false;
+			OutputSegments::Merger* outputMerger = nullptr;
+			EntranceSegment::Segment& entrance;
+			bool& entranceOnceAheadNow;
+			bool startupHoldBlack = false;
+			double rebaseFade = 1.0;
+			VpResync::Shadow& resync;
+			VpResync::Drive& resyncDrive;
+			std::unique_ptr<Interpolator::FrameInterpolator>& frameInterpolator;
+			AlphaD3D11FrameGpuTimer& renderAheadExtraTimer;
+			AlphaD3D11FrameGpuTimer& renderAheadEstimateTimer;
+			bool renderAheadTimersReady = false;
+
+			// Whole VP-V state objects (not per-field aliases).
+			VpMotion::DejudderPolicyState& dejudderPolicy;
+			RenderAhead::Presenter& renderAheadPresenter;
+			MotionValidity::State& motionValidity;
+			std::unique_ptr<::Dejudder::MotionWarp>& dejudder;
+			const uint64_t& dejudderEstimatedSequence;
+			const uint64_t& dejudderEstimatedEpoch;
+			const bool& dejudderLayoutValid;
+			const bool& dejudderLayoutRgb;
+			pl_tex (&dejudderNextTextures)[2];
+			::Dejudder::AheadSchedule& dejudderAhead;
+			const size_t& renderAheadBudgetCredit;
+
+			ExtrasHostCalls* calls = nullptr;
+		};
+
+		bool PresentExtras(ExtrasHost& h, ExtrasState& s, const ExtrasFrame& f);
+	}
+
+	namespace HostAccess
+	{
+		template<class HostImpl>
+		bool PresentDejudderExtras(HostImpl& i, const Dejudder::ExtrasFrame& f);
 	}
 }

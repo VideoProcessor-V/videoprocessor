@@ -554,7 +554,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 // 3050 Ti for an estimate of a few ms; render-ahead follow-up 2026-10-17).
 // forEntranceOnce: B3's B ahead (any path: its consumers read the snapshot; ProcessedB).
 bool LibplaceboVideoRenderer::Impl::EstimateAhead(uint64_t sourceSequence, uint64_t nextSourceSequence, bool renderedPath,
-	AlphaFrameGpuTimingScope* timing, bool forEntranceOnce)
+	Vpv::Dejudder::FrameGpuTimingScope* timing, bool forEntranceOnce)
 {
 	Dejudder::AheadSchedule::Conditions c;
 	c.enabled = activeSettings.dejudderEstimateAhead;
