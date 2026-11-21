@@ -1008,6 +1008,11 @@ namespace VideoProcessorTest
 			s0[block(8, 8)] = inf;               // +inf mean luma
 			s4[block(9, 9)] = nan;               // NaN coverage
 			s4[block(10, 10) + 1] = -inf;        // -inf off-edge share
+			// Gate cb-u1 r2 SHOULD 1: the P11-planted blocks carry a distinct P10 level (4 x the level, 16 x the variance), so a
+			// block whose mean-luma or coverage veto failed would move the energy by far more than the 1e-4 tolerance below
+			// (with shadow_bias 0 a uniform level made a non-vetoed P11 block invisible).
+			for (const size_t b : { block(7, 7), block(8, 8), block(9, 9), block(10, 10) })
+				p10[b] = static_cast<float>(16.0 * level * level);
 			AdaptiveDownscale::GrainSource planted = control;
 			planted.p10Blocks = rig.Grid(p10, GrainRig::kBw, GrainRig::kBh);
 			planted.p11Stats0 = rig.Grid(s0, GrainRig::kBw, GrainRig::kBh);
@@ -1018,7 +1023,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(std::isfinite(r.stats.grainScale) && r.stats.grainScale >= st.grainFloor - 1e-4f && r.stats.grainScale <= 1.0f + 1e-4f,
 				L"the grain scale stays finite and inside the ramp");
 			Assert::IsTrue(std::fabs(r.stats.grainScale - clean.stats.grainScale) < 1e-4f,
-				L"the vetoed blocks do not move the energy (a uniform level over the other blocks)");
+				L"the vetoed blocks do not move the energy (a uniform level over the other blocks; the P11-vetoed ones carry 4 x the level)");
 		}
 
 		TEST_METHOD(AdaptiveGrainSourceEnergyMatchesThePrivateEstimateOnWhiteNoise)

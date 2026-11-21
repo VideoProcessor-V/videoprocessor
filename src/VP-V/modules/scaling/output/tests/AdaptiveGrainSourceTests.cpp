@@ -94,18 +94,38 @@ namespace VideoProcessorTest
 			}
 		}
 
-		TEST_METHOD(GrainSourceUseEnumeratesEveryReportedCase)
+		TEST_METHOD(GrainEnergyPerSigmaIsTheWhiteNoiseLaplacianConstant)
 		{
-			// The four reported cases are distinct values (a status line and a fallback reason each), and the energy per sigma
-			// constant is sqrt(20) x sqrt(2 / pi) to float precision (the derivation in AdaptiveDownscale.h).
-			using AdaptiveDownscale::GrainSourceUse;
-			const GrainSourceUse all[4] = { GrainSourceUse::NotSupplied, GrainSourceUse::MeasureDomain, GrainSourceUse::NoUsableBlock, GrainSourceUse::Shared };
-			for (int i = 0; i < 4; ++i)
-				for (int j = i + 1; j < 4; ++j)
-					Assert::IsTrue(all[i] != all[j], L"distinct cases");
+			// The energy per sigma constant is sqrt(20) x sqrt(2 / pi) to float precision (the derivation in AdaptiveDownscale.h);
+			// it fails on the old mistyped literal 3.5682208 (2.7e-5 off). The mapping of each reported case to its status line
+			// and fallback reason is tested on the stage (AdaptiveScalingHookTests, WARP).
 			const double exact = std::sqrt(20.0) * std::sqrt(2.0 / 3.14159265358979323846);
 			Assert::IsTrue(std::fabs(static_cast<double>(AdaptiveDownscale::kEdgeEnergyPerSigma) - exact) < 1e-6,
 				L"kEdgeEnergyPerSigma = sqrt(20) sqrt(2/pi) = 3.5682482");
+		}
+
+		TEST_METHOD(GrainSourceSameGridIsNullSafe)
+		{
+			// Gate cb-u1 r2 NIT: SameGrid() is public; with any texture missing it answers "no shared grid" instead of
+			// dereferencing a null texture (before f41a2c1c5 each of these calls read through a null pointer).
+			pl_tex_t p10{}, s0{}, s4{};
+			for (pl_tex_t* t : { &p10, &s0, &s4 })
+			{
+				t->params.w = 24;
+				t->params.h = 15;
+			}
+			Assert::IsFalse(AdaptiveDownscale::GrainSource().SameGrid(), L"no textures: no shared grid");
+			for (int missing = 0; missing < 3; ++missing)
+			{
+				AdaptiveDownscale::GrainSource g;
+				g.p10Blocks = missing == 0 ? nullptr : &p10;
+				g.p11Stats0 = missing == 1 ? nullptr : &s0;
+				g.p11Stats4 = missing == 2 ? nullptr : &s4;
+				Assert::IsFalse(g.SameGrid(), L"one texture missing: no shared grid");
+			}
+			AdaptiveDownscale::GrainSource all;
+			all.p10Blocks = &p10; all.p11Stats0 = &s0; all.p11Stats4 = &s4;
+			Assert::IsTrue(all.SameGrid(), L"control: all three present on one grid share it");
 		}
 	};
 }

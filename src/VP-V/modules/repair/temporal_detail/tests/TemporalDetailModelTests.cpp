@@ -1801,20 +1801,47 @@ namespace VideoProcessorTest
 		TEST_METHOD(TemporalDetailNonFiniteBlockGateFactorsAreNeutral)
 		{
 			// The regionally adaptive factors are sanitised (non-finite -> 1) before they scale any threshold, so a non-finite
-			// factor behaves as the neutral one: the same result as no factors at all, never a poisoned or open gate.
+			// factor behaves as the neutral one: the same result as no factors at all, never a poisoned or open gate. A pin of
+			// the pre-existing sanitiser contract (SanitizeBlockGate), not a failing-before test.
+			// Gate cb-u1 r2 SHOULD 3: at an operating point where each factor CHANGES its gate (a finite control proves it), so
+			// "equals neutral" is told apart from "equals a clamp bound": the reference is weaker than the current block
+			// (s1 x sqrt(0.8): ratio 0.8, inside the harm ramp of the margin, factor 0), the motion uncertainty is 0.6 x uMax
+			// (factor 2) and the base differs by 1.5 x the allowance (factor 1). The strength factor (3) is not read by
+			// EvaluateBlock; the GPU texel test covers it end to end.
 			const double values[3] = { std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity() };
+			const double uMax = kUncertaintyPx * 1.0, allow = kBaseNoiseCodes + kBaseGrainSigmas * std::sqrt(1.0) / 4.0;   // scale 1, N = 1
+			auto sensitive = [&](EvalFixture& f)
+			{
+				for (double& v : f.src.s1.v) v *= std::sqrt(0.8);
+				std::fill(f.src.u.begin(), f.src.u.end(), 0.6 * uMax);
+				for (double& v : f.src.base.v) v += 1.5 * allow;
+			};
+			auto withFactor = [&](int k, double v)
+			{
+				EvalFixture f;
+				sensitive(f);
+				const size_t nb = static_cast<size_t>(f.A.bw) * static_cast<size_t>(f.A.bh);
+				std::vector<float>& g = f.model.*Grab(GatesTag{});
+				g.assign(nb * 4, 1.0f);
+				g[static_cast<size_t>(k)] = static_cast<float>(v);
+				return f.Eval();
+			};
 			EvalFixture control;
+			sensitive(control);
 			const Detail::Eval c = control.Eval();
-			Assert::IsTrue(c.hard > 0.1, L"control: the gates are open");
-			for (int k = 0; k < 4; ++k)
+			LogF("sensitive point: harm %.4f, base %.4f, unc %.4f, hard %.4f", c.harmGate, c.baseGate, c.uncGate, c.hard);
+			Assert::IsTrue(c.hard > 0.0, L"control: the gates are open");
+			Assert::IsTrue(c.harmGate > 0.0 && c.harmGate < 1.0, L"control: the harm gate is inside its ramp");
+			Assert::IsTrue(c.baseGate > 0.0 && c.baseGate < 1.0, L"control: the base gate is inside its ramp");
+			Assert::IsTrue(c.uncGate > 0.0 && c.uncGate < 1.0, L"control: the uncertainty gate is inside its ramp");
+			// Finite control: a factor of 0.5 moves the gate it scales, so a factor that leaked would show.
+			Assert::IsTrue(withFactor(0, 0.5).harmGate != c.harmGate, L"control: margin factor 0.5 changes the harm gate");
+			Assert::IsTrue(withFactor(1, 0.5).baseGate != c.baseGate, L"control: base allowance factor 0.5 changes the base gate");
+			Assert::IsTrue(withFactor(2, 0.5).uncGate != c.uncGate, L"control: uncertainty factor 0.5 changes the uncertainty gate");
+			for (int k = 0; k < 3; ++k)
 				for (double v : values)
 				{
-					EvalFixture f;
-					const size_t nb = static_cast<size_t>(f.A.bw) * static_cast<size_t>(f.A.bh);
-					std::vector<float>& g = f.model.*Grab(GatesTag{});
-					g.assign(nb * 4, 1.0f);
-					g[static_cast<size_t>(k)] = static_cast<float>(v);
-					const Detail::Eval e = f.Eval();
+					const Detail::Eval e = withFactor(k, v);
 					Assert::IsTrue(std::isfinite(e.hard) && e.hard == c.hard && e.baseGate == c.baseGate && e.uncGate == c.uncGate &&
 						e.strongerGate == c.strongerGate && e.harmGate == c.harmGate, L"a non-finite block gate factor equals the neutral factor");
 				}
