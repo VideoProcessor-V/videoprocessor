@@ -3,6 +3,7 @@
 #include <pch.h>
 #include "VpvProfileQueueAdvice.h"
 
+#include <VP-V/core/RunningPathwayLatch.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <ConfigFile.h>
 #include <RendererProfileConfig.h>
@@ -16,8 +17,10 @@ namespace Vpv
 	{
 		bool BillQueueOnOriginal(const ConfigFile* config, RendererProfileConfig::ResolvedQueue& queue)
 		{
-			const bool original = config && OriginalPathwayForConfig(
-				[config](const char* section, const char* key, std::string& out) { return config->TryGetString(section, key, out); });
+			// CC W4 B2: the pathway the process RUNS: the first configuration the runtime builds a snapshot from latches it
+			// (Vpv::RunningPathway); a later configuration with the other pathway applies at the next start.
+			const bool original = config && Vpv::RunningPathway::Latch(OriginalPathwayForConfig(
+				[config](const char* section, const char* key, std::string& out) { return config->TryGetString(section, key, out); }));
 			if (!original)
 				return false;
 			queue.hasTargetLatencyMs = true;

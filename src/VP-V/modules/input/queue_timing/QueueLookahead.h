@@ -14,6 +14,8 @@
 #include <cstddef>
 #include <string>
 
+#include <VP-V/core/RunningPathway.h>
+
 namespace QueueLookahead
 {
     // The renderer's own bound on the active-picture look-ahead.
@@ -24,6 +26,7 @@ namespace QueueLookahead
     {
         if (configured)
             return (std::min)(value, maxFrames);
+        if (Vpv::RunningPathway::Original()) return 0;   // CC W4 B1: unset on Original = Bill's 0 (no automatic look-ahead)
         if (lowLatencyPath)
             return 0;
         const size_t fromTarget = targetFrames > 0 ? targetFrames - 1 : 0;

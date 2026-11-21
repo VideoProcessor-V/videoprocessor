@@ -2,6 +2,8 @@
 
 #include <atomic>
 
+#include <VP-V/core/RunningPathway.h>
+
 // Post-merge audit 2026-10-17: [general] capture_display_fixes (default on), the
 // restore switch for two behaviour changes in Bill's capture / display code made
 // by the 2026-10-17 bug hunt:
@@ -20,7 +22,7 @@ namespace CaptureDisplayFixes
 		static std::atomic<bool> on{ true };
 		return on;
 	}
-	inline bool Enabled() { return Flag().load(std::memory_order_relaxed); }
+	inline bool Enabled() { return Flag().load(std::memory_order_relaxed) && !Vpv::RunningPathway::Original(); }   // GEM-221/MUST-8: off on Original (RunningPathway; unlatched = the switch)
 	// True when the value changed.
 	inline bool Set(bool on) { return Flag().exchange(on, std::memory_order_relaxed) != on; }
 }
