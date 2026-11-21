@@ -322,6 +322,25 @@ namespace VideoProcessorTest
 			pl_fmt rgba16 = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16,
 				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
 			Assert::IsNotNull(rgba16);
+			// CF-2 switch-over (WAIVER): the upscale form's grain term is kP10gGrainLevel only (no private scalar): a stand-in
+			// level, N_b = 1 in every 16 x 16 source block (y/z/w unused by the blend), handed to the module as the stage would.
+			// sqrt(1) x GrainLevelEnergyScale() (1.0, FIX-UPS-grain) = 1 sits inside every ramp below exactly where the old
+			// private energy did: above 0.001 and -1, below 1000. Without the level the term is grain_floor (checked below).
+			pl_fmt rgba32f = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			Assert::IsNotNull(rgba32f);
+			const int levelW = (width + 15) / 16, levelH = (height + 15) / 16;
+			std::vector<float> levelTexels(static_cast<size_t>(levelW) * levelH * 4, 0.0f);
+			for (size_t i = 0; i < levelTexels.size(); i += 4)
+				levelTexels[i] = 1.0f;
+			pl_tex_params lp{};
+			lp.w = levelW;
+			lp.h = levelH;
+			lp.format = rgba32f;
+			lp.sampleable = true;
+			lp.initial_data = levelTexels.data();
+			pl_tex grainLevelTex = pl_tex_create(gpu, &lp);
+			Assert::IsNotNull(grainLevelTex);
+			bool publishGrainLevel = true;
 			auto render = [&](int ow, int oh, std::vector<const pl_hook*> hooks, const pl_filter_config* upscaler)
 			{
 				pl_tex_params tp{};
@@ -375,9 +394,8 @@ namespace VideoProcessorTest
 			};
 			AdaptiveDownscale::Settings settings;
 			settings.grainMap = false;
-			// e = 0 everywhere: smoothstep(1e6, 2e6, grad) = 0 for any 8-bit gradient. Every pixel then counts
-			// as flat for the grain measure; the ramps below still force g (energy > 0.001, and far below 1000
-			// on this 31..218-code texture).
+			// e = 0 everywhere: smoothstep(1e6, 2e6, grad) = 0 for any 8-bit gradient. The ramps below force g
+			// through the stand-in level (energy 1: > 0.001, and far below 1000).
 			const float edgeOffLo = 1.0e6f, edgeOffHi = 2.0e6f;
 			settings.edgeLo = edgeOffLo;
 			settings.edgeHi = edgeOffHi;
@@ -398,6 +416,14 @@ namespace VideoProcessorTest
 				up.superresAlpha = superresAlpha;
 				up.nativeHeight = nativeH;
 				module.SetUpscale(up);
+				module.ClearGrainLevel();
+				if (publishGrainLevel)
+				{
+					AdaptiveDownscale::GrainLevelSource level;
+					level.level = grainLevelTex;
+					level.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+					module.SetGrainLevel(level);
+				}
 				hooks.insert(hooks.begin(), module.Measure());
 				if (blendAt < hooks.size())
 					hooks.insert(hooks.begin() + static_cast<std::ptrdiff_t>(blendAt) + 1, module.Blend());
@@ -440,6 +466,7 @@ namespace VideoProcessorTest
 			AdaptiveDownscale::Module module;
 			const std::vector<uint16_t> clean = withModule(module, 1000.0f, 2000.0f, 1.0f, static_cast<float>(height), ow, oh, { cnn });
 			Assert::AreEqual(2, module.LastUpscaleRatio(), L"the doubler's output should be averaged to the source");
+			Assert::IsTrue(module.PublishedGrainUsed(), L"the blend read the stand-in grain level");
 			const int cleanDiff = maxDiff(clean, cnnBranch);
 			// w_base 0: the luma of the faithful branch (chroma: the same scaler in both).
 			const std::vector<uint16_t> faithful = withModule(module, 1000.0f, 2000.0f, 0.0f, static_cast<float>(height), ow, oh, { cnn });
@@ -468,6 +495,21 @@ namespace VideoProcessorTest
 				const double expected = cnnBranch[i] + 0.6 * (static_cast<double>(faithful[i]) - cnnBranch[i]);
 				grainDiff = std::max(grainDiff, static_cast<int>(std::lround(std::fabs(grainy[i] - expected))));
 			}
+			// No grain level (the switch-over's alias-safe lean): g = grain_floor whatever the ramp: the clean ramp
+			// (g = 1 if published) gives the grain picture.
+			publishGrainLevel = false;
+			const std::vector<uint16_t> unpublished = withModule(module, 1000.0f, 2000.0f, 1.0f, static_cast<float>(height), ow, oh, { cnn });
+			publishGrainLevel = true;
+			Assert::IsFalse(module.PublishedGrainUsed(), L"no level: not published");
+			int floorDiff = 0;
+			for (size_t i = 0; i < unpublished.size(); ++i)
+			{
+				if (i % 4 == 3)
+					continue;
+				const double expected = cnnBranch[i] + 0.6 * (static_cast<double>(faithful[i]) - cnnBranch[i]);
+				floorDiff = (std::max)(floorDiff, static_cast<int>(std::lround(std::fabs(unpublished[i] - expected))));
+			}
+			Assert::IsTrue(floorDiff <= 96, (L"no grain level vs CNN + 0.6 (faithful - CNN): " + std::to_wstring(floorDiff)).c_str());
 			// Without the doubler the base is the source picture itself.
 			const std::vector<uint16_t> plain = withModule(module, 1000.0f, 2000.0f, 0.0f, static_cast<float>(height), ow, oh, {});
 			const int plainRatio = module.LastUpscaleRatio();
@@ -494,8 +536,8 @@ namespace VideoProcessorTest
 			// no vectors, no floor). The ramp forces e on every pixel:
 			//   e = 1:   smoothstep(-2, -1, grad) = 1 for any gradient >= 0, so w = 0 whatever g: out = alias-safe.
 			//   e = 0.5: smoothstep(-1e6, 1e6, grad) = 0.5 within 3e-4 (16-bit float edge texture: within 1e-3).
-			// A negative edge_lo leaves no flat pixel, so the grain energy is 0: grain ramp 1000..2000 gives g = 1,
-			// -2..-1 gives g = the floor 0.4. Predicted 1 - w (w_base 1): e = 1 -> 1 (g = 1 and g = 0.4);
+			// The stand-in level's energy 1: grain ramp 1000..2000 gives g = 1, -2..-1 gives g = the floor 0.4
+			// (switch-over WAIVER: was the private energy 0 with no flat pixel). Predicted 1 - w (w_base 1): e = 1 -> 1 (g = 1 and g = 0.4);
 			// e = 0.5 -> 0.5 (g = 1), 0.8 (g = 0.4). With the edge term removed these would be 0, 0.6, 0 and 0.6.
 			{
 				auto withEdge = [&](float edgeLo, float edgeHi, float grainLo, float grainHi)
@@ -591,6 +633,7 @@ namespace VideoProcessorTest
 			// real FSRCNNX + SSimSuperRes with the blend at the upscale scales.
 			pl_mpv_user_shader_destroy(&superres);
 			pl_mpv_user_shader_destroy(&cnn);
+			pl_tex_destroy(gpu, &grainLevelTex);
 			const std::wstring superMessage = L"SuperRes correction with g = 0.4: " + std::to_wstring(ratio) +
 				L" of the full one (correction energy " + std::to_wstring(den) + L"; SuperRes alone changes the plain upscale by " +
 				std::to_wstring(superAlone) + L"); clean scaled vs full " +
