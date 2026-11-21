@@ -1990,7 +1990,8 @@ namespace CameraModel
 			Params h0;
 			const Params* h0p = nullptr;
 			if (m_havePrevious && m_previous.valid && m_previous.pairSeconds > 0 && m_previous.picture == in.picture
-				&& m_previous.params.type != ModelType::None)
+				&& m_previous.params.type != ModelType::None
+				&& (m_previous.verdictFlags & (kVerdictDynamicTexture | kVerdictStaticCamera)) == 0)   // NIT-1: a demoted record seeds nothing (no h0, no early exit)
 			{
 				h0 = TimeScale(m_previous.params, in.pairSeconds / m_previous.pairSeconds, in.picture);
 				h0.type = m_previous.params.type;
