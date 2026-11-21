@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <string>
 
 // The ORIGINAL PATHWAY baseline as data (ADR-0019; skeleton audit item 7, 2026-10-24).
 //
@@ -103,5 +104,21 @@ namespace OriginalPathway
 			{ "interpolation_fallback", "hold", "motion.consumers" },
 		} };
 		return table;
+	}
+
+	// GEM-031 (config-schema MUST-1, owner Q4 2026-11-21): Bill's own five chroma filters (his Scaling
+	// page). On the Original pathway a saved one of them stays as chosen, as in Bill's program; any other
+	// value (unset "auto", or VP-only "catmull_rom" / "upscaler") takes the table's chroma_upscaler.
+	inline bool IsBillChromaFilter(const std::string& v)
+	{
+		return v == "ewa_lanczossharp" || v == "ewa_lanczos" || v == "lanczos" ||
+		       v == "bicubic" || v == "bilinear";
+	}
+
+	// The Original pathway's chroma_upscaler override for the host's value (nullptr = keep the host's; no host
+	// value given = the table's bicubic, as before GEM-031).
+	inline const char* ChromaOverride(const std::string* hostChromaUpscaler)
+	{
+		return hostChromaUpscaler && IsBillChromaFilter(*hostChromaUpscaler) ? nullptr : "bicubic";
 	}
 }

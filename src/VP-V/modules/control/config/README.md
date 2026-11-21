@@ -437,7 +437,7 @@ Bill's editor file only gets call sites; the logic is here (header-only):
 - `VpvQueueRows.h` (row c, RESTORED-CFG-04): VP-V's rows of the Queue profile page (VP's low-latency
   path, Target delay and its note, Queue target By frames / By time, the look-ahead note) and VP-V's
   look-ahead with Auto (`config.queue.active_picture_lookahead_frames.vpv`, explicit-0 notice) on the VP-V
-  card "Queue target and low latency" (On both pathways), built by Bill's addChoice / addInteger and bound to
+  card "Queue target and low latency" (Input unit, off on the Original pathway: GEM-049), built by Bill's addChoice / addInteger and bound to
   the queue profile selected on his list. Bill's Queue form is his a591ad3b form (one `VPV-HOOK` call); his
   0..8 look-ahead and VP-V's follow each other (DIV-D-10). Also the loader / preset hooks of these rows.
 - `VpvDitherChoices.h`: the Dithering choice sets: Bill's four (blue_noise, ordered_fixed,

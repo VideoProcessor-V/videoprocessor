@@ -12,6 +12,7 @@
 #include <vprenderer/DejudderWarp.h>
 #include <RendererConfigView.h>
 #include <RetiredSettings.h>
+#include <VP-V/core/OriginalPathway.h>
 #include <VP-V/core/SlotSwitchSettings.h>
 #include <VP-V/modules/output/presentation/PresentationOwner.h>
 #include <vprenderer/DetailPulse.h>
@@ -998,13 +999,15 @@ namespace VpvRendererSettings
 	// ---- PostLoad: the Original pathway overlay, the slot switches, the presentation owner ----
 	void ApplyOriginal(VpvRenderer::Fields& settings);   // below
 
-	Overrides PostLoad(VpvRenderer::Fields& settings, bool presentEveryVsyncRequested)
+	Overrides PostLoad(VpvRenderer::Fields& settings, bool presentEveryVsyncRequested, const std::string* hostChromaUpscaler)
 	{
 		Overrides overrides;
 		if (settings.pipelineOriginalPathway)
 		{
 			ApplyOriginal(settings);
-			overrides.chromaUpscaler = "bicubic";                 // key=chroma_upscaler (a host field, so returned)
+			// GEM-031 (config-schema MUST-1, owner Q4): a saved one of Bill's five filters stays (his program
+			// uses it); unset / VP-only values become bicubic. No host value given: bicubic, as before.
+			overrides.chromaUpscaler = OriginalPathway::ChromaOverride(hostChromaUpscaler);   // key=chroma_upscaler (a host field, so returned)
 		}
 		// Motion + queue/timing slots switched off run in their upstream form (owner 2026-10-25).
 		SlotSwitchSettings::Apply(SlotSwitchSettings::FromText(settings.pipelineSlotsOff), settings);

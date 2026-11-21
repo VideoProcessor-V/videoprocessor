@@ -68,7 +68,11 @@ namespace Vpv
 		SetByResult r;
 		std::string value = q.effectiveValue;
 		std::string original;
-		if (q.originalPathway && OriginalPathwayValue(q.key, original))
+		// GEM-031: on the Original pathway a saved one of Bill's five chroma filters is his own choice (the override
+		// does not apply), so it reads as the profile's value below. The saved value decides (unset = the override).
+		const std::string chosen = !q.ownValue.empty() ? q.ownValue : q.inheritedValue;
+		if (q.originalPathway && OriginalPathwayValue(q.key, original) &&
+			!(q.key == "chroma_upscaler" && OriginalPathway::IsBillChromaFilter(chosen)))
 		{
 			r.source = ValueSource::OriginalPathway;
 			r.text = "Set by the Original pathway (VP's additions are off): " + PlainValue(original);

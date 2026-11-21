@@ -269,7 +269,9 @@ namespace Vpv
 		if (billsRoot)
 			FollowLookahead(lookahead, billsRoot->findChild<QSpinBox*>(QStringLiteral("config.queue.active_picture_lookahead_frames")));
 		form = bills;
-		cards.push_back({ QStringLiteral("both"), QStringLiteral("queue_target"), QStringLiteral("Queue target and low latency"),
+		// GEM-049 (options MUST-3): unit Input, not "On both pathways": the Original pathway ignores these keys,
+		// so the card is off there with the rest of the unit's content (By frames / By time included).
+		cards.push_back({ QStringLiteral("input"), QStringLiteral("queue_target"), QStringLiteral("Queue target and low latency"),
 			QStringLiteral("VP-V's queue settings: the low-latency path, the target as a delay, and the automatic look-ahead. "
 				"Bill's queue values (depth, lead, pre-roll, Target frames, look-ahead, reset) are on the Queue page."), body });
 	}
