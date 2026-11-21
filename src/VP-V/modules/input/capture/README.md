@@ -197,13 +197,23 @@ P13 for the planes ON THE RENDER DEVICE in the current render frame. Contract: `
   set)` by another VP-V render-device uploader in the same render frame (e.g. the matcher's B upload). Offers are dropped at the
   next Begin of the host; at most four frames per render frame.
 - Read: `Acquire(kP13SourceRing, seq, AcquireForm::Gpu, VariantKey{plane})` (plane 0/1 first plane = luma of YUV, 2 second, 3
-  third; stage 0 only). The result is a VIEW: `gpu.resource` = the `pl_tex`, 0 bytes, frame-scoped (released at the next seal),
+  third; stage 0 for a source frame, stage pictures below). The result is a VIEW: `gpu.resource` = the `pl_tex`, 0 bytes, frame-scoped (released at the next seal),
   render thread only; `SourcePlanes::FactsOf(result)` gives the set (planes, components, `pl_color_repr`, rgb, full range).
 - Declines say why: "seq not offered this frame", "plane absent", "RGB source has no luma plane", "no texture" (Acquire's
   cause text and the skeleton's Fallbacks entry). Off the render thread: `asked off the render thread`.
 - Not in this slice: the queued-AHEAD ring of refs/118 Phase A/B (packed early-upload slots + the unpack kernel); it stays with
   the D5 lane and will serve frames ahead behind the same key. Tests: `src/VP-V/tests/SkeletonCoreContextTests.cpp`
   (`SourcePlaneProviderTests`).
+- Stage pictures (CB slice 18 S1, 2026-11-21; coreplan-CB-18-edgemap.md S1): a VP-V stage that holds a picture of a later
+  pipeline stage on the render device (X5: the PRE_KERNEL input of scaling.output, inside its existing hook) offers it with
+  `SourcePlanes::OfferStage(host, StagePicture)`; it is served by `Acquire(kP13SourceRing, seq, Gpu, SourcePlanes::StageKey(stage,
+  width, height, ordinal))`: stage = `VariantKey::StageAfter(PipelineSlots id)`, size = the picture's own texture size (a
+  ratio-2 half-size picture is a different offer), param1 = the picture ordinal in the render frame (a re-render of the same
+  seq, e.g. the de-judder extras, offers 1, 2, ...: 102b EDGEMAP-EXTRAS-KEY). The same view contract (0 bytes, render thread,
+  frame-scoped, dropped at the next Begin; at most eight per render frame, a refusal counted in `CountersOf`). No crop axis:
+  the view is the whole picture. `SourcePlanes::FactsOfStage(result)` gives the texture's colour space and luma system /
+  primaries. Declines: "stage not offered this frame", "stage picture has one plane", "size / ordinal only with a stage".
+  Tests: `tests/SourcePlanesStageTests.cpp`.
 
 ## Design goal, philosophy and decisions
 
@@ -214,6 +224,11 @@ P13 for the planes ON THE RENDER DEVICE in the current render frame. Contract: `
   first such input, so the P1 GPU form and the bands read them through `Acquire(P13)` instead of a renderer texture.
 - No Bill line for the provider (COORDINATOR 11-14 04:44 option B, log:664); first slice = render-device views, queued-ahead
   ring with the D5 lane (LEAD 8 2026-11-14 05:2x, lead8/iface-L-CORE.md s6).
+- Stage pictures share P13's provider rather than a new product id: a stage picture is the same kind of thing (a view of a
+  picture already on the render device, owned by its stage), so one owner, one key family and one frame-scope law serve both
+  (lead14/design-EDGEMAP-DOMAIN-AXIS.md rev 2 s2a). Size and ordinal are key axes, not facts, so two pictures of one seq in
+  one render frame never share a spot; a whole-picture view (no crop) lets a derived product (the edge map's stage variant)
+  read taps outside the reader's crop exactly as the reader's own clamped taps did.
 
 - S-2a: `GpuRgbUnpack::SetWideLuma(true)` writes the R12 matcher luma as Q6 fractions on the 10-bit axis (`AnalysisAxis10.h`);
   default off keeps the CPU formatter's ten-bit law bit for bit. 12-bit arrives only through the DV tunnel (OWNER 2026-11-14 08:30 EST,
