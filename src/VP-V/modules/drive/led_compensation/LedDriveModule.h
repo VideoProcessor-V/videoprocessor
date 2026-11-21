@@ -487,6 +487,9 @@ namespace LedDrive
 		// The registration generation of demandHost at declaration: the skeleton erases the demand when that renderer goes away, so a
 		// changed host or generation means the declaration is gone and is made again (never per frame: a declaration re-graphs the lane).
 		std::atomic<uint64_t> demandGen{ 0 };
+		// GF-P2b S3: IExternalDemand::ExternalErasures(demandHost) at declaration. A GPU-only reset of the same renderer erases the demand
+		// without moving the registration generation; a moved count re-declares. Under `mutex` (DeclareSceneDemand).
+		uint64_t demandErasures = 0;
 		// GF-P3 (lead ruling): the aheadDepth of the declaration on demandHost, and the held walk depth (SetLookaheadDepth: raised at
 		// once, lowered after the hold window; reset by ResetLookaheadLocked). S-P3-1: walkLowSinceMs = since when the walks are shallower
 		// (NowMs(), -1 = not lower), walkLowMax = the deepest walk in that window (the next held depth). All guarded by `mutex`.
