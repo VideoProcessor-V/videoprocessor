@@ -25,6 +25,7 @@
 #include <VP-V/core/AnalysisLane.h>
 #include <VP-V/core/MemoGpuGrant.h>
 #include <VP-V/core/PipelineSlots.h>
+#include <VP-V/core/QueueWindow.h>
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/core/SkeletonAcquireLane.h>
 #include <VP-V/core/VariantShape.h>
@@ -403,6 +404,44 @@ namespace SkeletonCoreContextTestsNs
 			Assert::IsTrue(d.size() == 1, L"only the declaring owner is listed");
 			Assert::IsTrue(d[0].id == uint16_t(kP10GrainSplit) && d[0].form == 0 && d[0].depth == 4 && d[0].cls == JobClass::Core, L"its id, CPU form, depth and class");
 			Assert::IsTrue(calls.load() == 0, L"read-only: no fill ran");
+		}
+
+		// WAIVER-C5-GF-T4 (GF-P1 AHEAD-DECL; owner OD 2026-11-14: ahead cap 6, derived from active consumers): a lane fill's ahead
+		// depth is the largest request of the consumers that READ its product, or the fill's structural need if that is larger.
+		static ConsumerDecl Reader(uint16_t id, const char* name, ProductId product, uint8_t aheadDepth)
+		{
+			ConsumerDecl c;
+			c.id = id;
+			c.name = name;
+			AddConsume(c, product);
+			c.aheadDepth = aheadDepth;
+			return c;
+		}
+
+		TEST_METHOD(LaneAheadDepthTakesTheLargestReaderRequest)
+		{
+			const std::vector<ConsumerDecl> consumers = {
+				Reader(1, "reader A", kP4SourceStats, 3), Reader(2, "reader B", kP1HalfLuma, 5), Reader(3, "reader C", kP4SourceStats, 2) };
+			const LaneAheadDepth p4 = LaneAheadDepthOf(kP4SourceStats, 0, consumers);
+			Assert::IsTrue(p4.depth == 3 && p4.asked == 3 && !p4.capped, L"P4: the largest of A 3 and C 2 is 3");
+			Assert::IsTrue(p4.by != nullptr && std::string(p4.by) == "reader A", L"P4: by A");
+			const LaneAheadDepth structural = LaneAheadDepthOf(kP4SourceStats, 4, consumers);
+			Assert::IsTrue(structural.depth == 4 && structural.asked == 4 && !structural.capped, L"P4 with a structural need of 4: 4 (larger than every reader)");
+			Assert::IsTrue(structural.by == nullptr, L"the structural need names nobody");
+			const LaneAheadDepth p1 = LaneAheadDepthOf(kP1HalfLuma, 0, consumers);
+			Assert::IsTrue(p1.depth == 5 && p1.asked == 5 && !p1.capped, L"P1: B reads it at 5");
+			Assert::IsTrue(p1.by != nullptr && std::string(p1.by) == "reader B", L"P1: by B");
+			const LaneAheadDepth unread = LaneAheadDepthOf(kP10GrainSplit, 0, consumers);
+			Assert::IsTrue(unread.depth == 0 && unread.asked == 0 && !unread.capped && unread.by == nullptr, L"an unread product: no request");
+		}
+
+		TEST_METHOD(LaneAheadDepthCapsAtTheCeiling)
+		{
+			const std::vector<ConsumerDecl> consumers = { Reader(1, "deep reader", kP4SourceStats, 9) };
+			const LaneAheadDepth d = LaneAheadDepthOf(kP4SourceStats, 0, consumers);
+			Assert::IsTrue(d.depth == kAheadCeiling && kAheadCeiling == 6, L"a request of 9 gives depth 6 (the ceiling)");
+			Assert::IsTrue(d.asked == 9 && d.capped, L"the uncapped request is kept and flagged");
+			Assert::IsTrue(d.by != nullptr && std::string(d.by) == "deep reader", L"named by the requester");
 		}
 	};
 
@@ -868,6 +907,64 @@ namespace SkeletonCoreContextTestsNs
 				if (!lane.StepWorker(Backend::Cpu, 1000))
 					return;
 			Assert::Fail(L"pump did not settle");
+		}
+	};
+
+	// WAIVER-C5-GF-T4 (GF-P1 AHEAD-DECL): the binder carries the consumers' declared depth onto the lane fill, capped at the
+	// ceiling, and the window names the ceiling. (A class of its own: it needs MiniLane, defined above this point and below the
+	// accessor class.)
+	TEST_CLASS(SkeletonDeclaredAheadBindingTests)
+	{
+	public:
+		TEST_METHOD(BoundLaneFillDeclaresTheCappedDepthAndTheWindowNamesTheCeiling)
+		{
+			static const char* const kName = "deep reader";
+			MiniLane r;
+			Assert::IsTrue(r.lane.Active(), L"built");
+			ConsumerDecl deep;
+			deep.id = 9;
+			deep.name = kName;
+			AddConsume(deep, kP4SourceStats);
+			deep.aheadDepth = 9;
+			SkeletonMemo m;
+			BindLaneToMemo(r.lane, m, LaneGpuHandleOf(), LaneLeaseOf(), std::vector<ConsumerDecl>{ deep });
+			const std::vector<SkeletonMemo::AheadDemand> demands = m.ActiveAheadDemands();
+			const SkeletonMemo::AheadDemand* p4 = nullptr;
+			for (const SkeletonMemo::AheadDemand& d : demands)
+				if (d.id == uint16_t(kP4SourceStats) && d.form == 0)
+					p4 = &d;
+			Assert::IsNotNull(p4, L"P4's lane fill declares an ahead demand");
+			Assert::IsTrue(p4->depth == 9, L"the demand is the uncapped request");
+			Assert::IsTrue(p4->by != nullptr && std::string(p4->by) == kName, L"by the requester's name");
+
+			// The window: the active demands feed the terms; with the queue ahead >= 6 the ceiling binds and says so.
+			QueueWindowTerms t;
+			t.laneLead = 6;
+			t.wired = uint8_t(t.wired | QueueWindowTerms::kLaneLead);
+			std::vector<VpSkeleton::AheadDemand> active;
+			for (const SkeletonMemo::AheadDemand& d : demands) {
+				VpSkeleton::AheadDemand a;
+				a.need = d.depth;
+				a.consumer = d.by != nullptr ? d.by : "";
+				active.push_back(a);
+			}
+			SetAheadConsumers(t, active);
+			const QueueWindow w = DeriveWindow(t, 10, 0);
+			Assert::IsTrue(w.ahead >= 6, L"the queue ahead is at least the ceiling");
+			Assert::IsTrue(w.aheadCompute == 6 && w.aheadBinding == AheadBinding::Ceiling, L"aheadCompute 6, bound by the ceiling");
+			Assert::IsTrue(AheadComputeCapped(w), L"the cap is shown");
+			Assert::IsTrue(AheadComputeText(w).find("by deep reader; ceiling 6") != std::string::npos, L"the text names the requester and the ceiling");
+
+			// No consumer depth: no demand.
+			MiniLane quiet;
+			Assert::IsTrue(quiet.lane.Active(), L"built");
+			SkeletonMemo mq;
+			ConsumerDecl shallow;
+			shallow.id = 10;
+			shallow.name = "shallow reader";
+			AddConsume(shallow, kP4SourceStats);
+			BindLaneToMemo(quiet.lane, mq, LaneGpuHandleOf(), LaneLeaseOf(), std::vector<ConsumerDecl>{ shallow });
+			Assert::IsTrue(mq.ActiveAheadDemands().empty(), L"no consumer depth: no demand");
 		}
 	};
 
