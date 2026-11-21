@@ -443,9 +443,18 @@ namespace Tests
 				const double closed = v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
 				const double nits = DolbyVisionTrims::ToNits(v, signal);
 				Assert::AreEqual(closed, nits / signal.peakNits, 1e-12, L"ToNits is the piecewise sRGB EOTF");
-				float rgb[3] = { static_cast<float>(v), static_cast<float>(v), static_cast<float>(v) };
-				pl_color_linearize(&colour, rgb);
-				Assert::AreEqual(static_cast<double>(rgb[0]), nits / signal.peakNits, 1e-5, L"and matches pl_color_linearize");
+				// libplacebo's linearize is scaled to the SDR white (203 nits) and carries the display black, so it is normalised
+				// exactly as the BT.1886 test does, (L(v) - L(0)) / (L(1) - L(0)), before the comparison: out = (peak - black) / 203 * X
+				// + black / 203 is affine in the relative sRGB EOTF X, so the normalised value is X itself.
+				auto libplacebo = [&colour](double x)
+				{
+					float rgb[3] = { static_cast<float>(x), static_cast<float>(x), static_cast<float>(x) };
+					pl_color_linearize(&colour, rgb);
+					return static_cast<double>(rgb[0]);
+				};
+				const double l0 = libplacebo(0.0), l1 = libplacebo(1.0);
+				Assert::IsTrue(l1 > l0, L"libplacebo's sRGB white is above its black");
+				Assert::AreEqual((libplacebo(v) - l0) / (l1 - l0), nits / signal.peakNits, 1e-5, L"and matches pl_color_linearize (normalised)");
 				Assert::AreEqual(v, DolbyVisionTrims::FromNits(nits, signal), 1e-9, L"FromNits inverts it");
 				Assert::AreEqual(-nits, DolbyVisionTrims::ToNits(-v, signal), 0.0, L"below black is odd-symmetric");
 			}
