@@ -10,6 +10,7 @@
 #include <VP-V/modules/output/dither/OutputEncodingRepair.h>
 #include <VP-V/modules/output/dither/VpShaderInclude.h>
 #include <VP-V/modules/output/dither/tests/DitherNeedWarpModel.h>
+#include <VP-V/modules/output/dither/DitherNeedGpu.h>
 #include <VP-V/modules/motion/estimation/matcher/DejudderWarp.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/motion/consumers/RenderedWarp.h>
@@ -7422,6 +7423,97 @@ void RunBetaDitherNeedWarpForkTests()
 		std::cout << "Beta DitherNeedWarp ExactCodesStayExactAtTheAmplitudeCap PASS, " << executed << " checks so far\n";
 		BetaRan("VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap");
 	}
-	std::cout << "Beta DitherNeedWarp: 3 cases, " << executed << " checks executed\n";
+	// (g) HookGuard bound leg (TQ-CD-M6): native DitherNeedWarpHookGuardAppliesAndRestores. A null product binds nothing and the hook
+	// renders the off path; a real product is applied (and changes the codes); Release() and the destructor restore the hook byte
+	// for byte. Each run: a fresh Gpu and hook, the same grey sequence as the plain run.
+	{
+		const std::map<std::string, double> params = BetaDnParams(true, 0.15);
+		const std::vector<int> base = BetaDnCodes(params, greys, frames, true);
+		DitherNeed::Gpu::Placement place;
+		place.blockPx = 16;
+		enum class Mode { NullProduct, BoundThenRender, ReleaseThenRender, DestroyThenRender };
+		bool applied = false;
+		auto run = [&](Mode mode)
+		{
+			Gpu gpu;
+			const auto shader = Load(gpu.GpuHandle(), "Temporal sigma-delta.glsl", params);
+			const pl_hook* hook = shader->hook;
+			const std::vector<float> data = DitherNeedWarpModel::ConstantMap(4, 3, 0.3f);
+			pl_tex map = nullptr;
+			if (mode != Mode::NullProduct)
+			{
+				pl_fmt fmt = pl_find_fmt(gpu.GpuHandle(), PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+				check(fmt != nullptr, "HookGuard: no rgba32f format");
+				pl_tex_params mp{};
+				mp.w = 4;
+				mp.h = 3;
+				mp.format = fmt;
+				mp.sampleable = true;
+				mp.initial_data = data.data();
+				map = pl_tex_create(gpu.GpuHandle(), &mp);
+				check(map != nullptr, "HookGuard: cannot create the product texture");
+			}
+			std::vector<int> codes;
+			auto render = [&]()
+			{
+				for (const float grey : greys)
+				{
+					const std::vector<int> c = gpu.Sequence(grey, frames, 10, { hook }, PL_COLOR_LEVELS_FULL);
+					codes.insert(codes.end(), c.begin(), c.end());
+				}
+			};
+			switch (mode)
+			{
+			case Mode::NullProduct:
+			{
+				DitherNeed::Gpu::HookGuard guard;
+				applied = guard.Apply(&hook, 1, nullptr, place);
+				render();
+				break;
+			}
+			case Mode::BoundThenRender:
+			{
+				DitherNeed::Gpu::HookGuard guard;
+				applied = guard.Apply(&hook, 1, map, place);
+				render();
+				guard.Release();
+				break;
+			}
+			case Mode::ReleaseThenRender:
+			{
+				DitherNeed::Gpu::HookGuard guard;
+				guard.Apply(&hook, 1, map, place);
+				guard.Release();
+				render();
+				break;
+			}
+			case Mode::DestroyThenRender:
+			{
+				{
+					DitherNeed::Gpu::HookGuard guard;
+					guard.Apply(&hook, 1, map, place);
+				}   // destructor
+				render();
+				break;
+			}
+			}
+			if (map) pl_tex_destroy(gpu.GpuHandle(), &map);
+			CheckCleanLog(gpu, "DitherNeedWarp HookGuard");
+			return codes;
+		};
+		const std::vector<int> skipped = run(Mode::NullProduct);
+		check(!applied, "a null product binds nothing");
+		check(skipped == base, "a skipped frame must render the off path: " + codesText(skipped) + " vs " + codesText(base));
+		const std::vector<int> bound = run(Mode::BoundThenRender);
+		check(applied, "Apply must bind the product");
+		const std::vector<int> released = run(Mode::ReleaseThenRender);
+		const std::vector<int> destroyed = run(Mode::DestroyThenRender);
+		check(released == base, "after Release() the hook must render the off path: " + codesText(released));
+		check(destroyed == base, "after the destructor the hook must render the off path: " + codesText(destroyed));
+		check(bound != base, "a bound non-zero map must change the codes (the test would be vacuous)");
+		std::cout << "Beta DitherNeedWarp HookGuardAppliesAndRestores PASS, " << executed << " checks so far\n";
+		BetaRan("VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpHookGuardAppliesAndRestores");
+	}
+	std::cout << "Beta DitherNeedWarp: 4 cases, " << executed << " checks executed\n";
 #endif
 }
