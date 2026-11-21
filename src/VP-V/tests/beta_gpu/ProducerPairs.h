@@ -132,26 +132,49 @@ namespace CameraAccuracyAhead
 		int m_srcW = 0, m_srcH = 0;
 	};
 
-	// The FlowView VectorEngine::FlowOf serves for this pair (SK-MV, r1s3/mv-fu): the raw payload, units and cell size, so the harness feeds
-	// the production CopyAhead exactly the shape the live path does. sourceW = the source width the engine size derives from.
+	// The FlowView VectorEngine::FlowOf serves for this pair (SK-MV, r1s3/mv-fu; W1-C3 extras per AUDIT-R3 F1): the raw payload, units,
+	// cell size and the producer's extras (global / second, costWeight, fbError, their arithmetic), with the same presence rules as
+	// VectorEngine.cpp FlowOf, so the production CopyAhead takes the producer's extras as it does live instead of recomputing them.
+	// Differences from live: x / y (the converted lease) and trustMemo stay null (no lease here = the live memo absent).
+	// sourceW = the source width the engine size derives from.
 	inline VpMotion::FlowView ViewOf(const MotionAhead::Flow& flow, uint64_t from, uint64_t to, int sourceW)
 	{
 		VpMotion::FlowView v;
 		const double scale = static_cast<double>(sourceW) / flow.halfW;
+		const size_t cells = static_cast<size_t>(flow.gridW) * static_cast<size_t>(flow.gridH);
 		v.gridW = flow.gridW;
 		v.gridH = flow.gridH;
 		v.blockSize = 4.0 * scale;
 		v.from = from;
 		v.to = to;
 		v.rawForward = flow.forward.data();
-		v.rawBackward = flow.backward.empty() ? nullptr : flow.backward.data();
-		v.forwardCost = flow.forwardCost.empty() ? nullptr : flow.forwardCost.data();
-		v.backwardCost = flow.backwardCost.empty() ? nullptr : flow.backwardCost.data();
+		v.rawBackward = flow.backward.size() >= cells * 2 ? flow.backward.data() : nullptr;
+		v.forwardCost = flow.forwardCost.size() >= cells ? flow.forwardCost.data() : nullptr;
+		v.backwardCost = flow.backwardCost.size() >= cells ? flow.backwardCost.data() : nullptr;
 		v.rawUnitsPerEnginePx = 32.0;
 		v.enginePxToSource = scale;
 		v.cellEnginePx = 4;
 		v.engineW = flow.halfW;
 		v.engineH = flow.halfH;
+		v.haveGlobal = flow.globalSet;
+		v.globalGeneral = flow.globalGeneral;
+		for (int d = 0; d < 2; ++d)
+			for (int k = 0; k < 4; ++k)
+			{
+				v.global[d][k] = flow.global[d][k];
+				v.second[d][k] = flow.second[d][k];
+			}
+		if (flow.blocksX > 0 && flow.blocksY > 0 &&
+			flow.costWeight.size() == static_cast<size_t>(flow.blocksX) * static_cast<size_t>(flow.blocksY))
+		{
+			v.costWeight = flow.costWeight.data();
+			v.blocksX = flow.blocksX;
+			v.blocksY = flow.blocksY;
+		}
+		v.fbError = flow.fbError.size() == cells ? flow.fbError.data() : nullptr;
+		v.extrasBlockPx = MotionAhead::Flow::kBlockPx;
+		v.extrasCellPx = NvOpticalFlow::Engine::Grid;
+		v.extrasUnitsPerEnginePx = 32.0;   // FbError reads S10.5
 		return v;
 	}
 }

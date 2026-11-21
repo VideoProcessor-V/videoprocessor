@@ -405,10 +405,11 @@ Tiers: the fit is cheap CPU work and is not tiered (cost lines `CAMERA_COST`).
 
 ## Camfix R1 / R2 / R4 / R8 (branch r2/camfix, 2026-11-11; doc 103)
 
-**R1 result (NVOF temporal hints).** The hint drift is real at 480 px/s: with hints on the fit bias is -0.60 px (1080 59.94p) and
--1.19 px (4K); with hints off every 480 px/s row passes. The 120 px/s rows fail with hints on AND off: their bias (about -0.26
-engine px at 24p, +0.23 at 59.94p) is the NVOF quarter-pel quantum, not the hints, and R3 (pixel-domain refinement) is its fix.
-Hints stay ON (the default is unchanged); hints off is a diagnostic only.
+**R1 result (NVOF temporal hints): MIXED.** Hints OFF fix the fast pans (1080 480 px/s fit bias 59.94p -0.595 -> -0.004 px,
+24p +0.07 -> +0.03) but make the slow pans worse (120 px/s 59.94p +0.036 -> +0.464, 24p -0.475 -> -0.609). The quantised NVOF flow
+(0.25 engine px) is biased at slow speeds either way; the hints change the bias at fast speeds. Hints stay ON (default unchanged;
+hints off is a diagnostic only). R3 (pixel-domain refinement) is the fix for all rows; its acceptance table measures hints ON and OFF
+on every speed row (120 / 480 px/s, 24p / 59.94p, 1080 / 4K, >= 3 ABAB repeats) and the hint default is picked from that table.
 - Cost line (NVOF engine ms per pair, hints on -> off, one run each, noisy): 1080 24p 9.78 -> 5.98; 1080 59.94p 5.58 -> 5.39;
   4K 24p 6.10 -> 10.47; 4K 59.94p 5.67 -> 7.15. No consistent cost either way.
 
