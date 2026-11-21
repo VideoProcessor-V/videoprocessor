@@ -23,10 +23,13 @@
 
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/core/hub/HostSlots.h>
+#include <VP-V/modules/output/presentation/PresentVsyncHistogram.h>
 
 #include <atomic>
 #include <cstdint>
 #include <memory>
+
+namespace RenderAhead { struct AfterPresentResult; }   // PresenterAfterPresent.h (windows.h stays out of this header)
 
 namespace Vpv
 {
@@ -42,6 +45,7 @@ namespace Vpv
 				std::atomic<int64_t> qpc{ 0 };            // the main present's end (swapEndQpc of the last R12)
 				std::atomic<bool> extrasSpentTime{ false };   // that frame's extras presented and spent time after it
 				std::atomic<bool> valid{ false };         // set by R12, cleared by R11 (a new frame) and at release
+				PresentVsyncHistogram vsync;              // CG-PVH: the present-vs-vsync histogram (render thread only; log-only)
 			};
 
 			const char* Name() const override { return "presenter"; }
@@ -55,6 +59,7 @@ namespace Vpv
 
 		private:
 			std::shared_ptr<PresentEnd> EndFor(const void* host, bool create);
+			static void ObservePresentVsync(PresentEnd& end, const RendererExtension::PresentContext& pc, const RenderAhead::AfterPresentResult& r);
 			Hub::HostSlots<PresentEnd> ends_;
 		};
 

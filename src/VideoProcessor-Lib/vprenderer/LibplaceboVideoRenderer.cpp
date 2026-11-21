@@ -24588,6 +24588,7 @@ releaseDriftBaseRetention =
 			afterPresent.submitted = submitted;   // VPV-HOOK
 			afterPresent.extrasSpentTime = dejudderExtrasSpentTime;   // VPV-HOOK
 			afterPresent.swapEndQpc = swapEndQpc;   // VPV-HOOK
+			CComPtr<IDXGISwapChain> afterPresentNative; afterPresentNative.Attach(pl_d3d11_swapchain_unwrap(swapchain)); afterPresent.native = afterPresentNative;   // VPV-HOOK (CG-PVH: the statistics feed; audit M1)
 			afterPresent.targetTimingKnown = presentationTargetTimingKnown;   // VPV-HOOK
 			afterPresent.hostTargetLeadMs = presentationTargetLeadMs;   // VPV-HOOK
 			afterPresent.openLoop = dejudderDisplayRate.openLoop;   // VPV-HOOK

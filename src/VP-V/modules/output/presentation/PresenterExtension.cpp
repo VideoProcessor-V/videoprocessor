@@ -1,12 +1,21 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 
+// This TU is built without the pch (NotUsing), so it does not get the pch's NOMINMAX. Define it before any include:
+// PresenterAfterPresent.h brings in <windows.h>, and Bill's DebugLogRetention.h (via DebugLog.h) uses the plain
+// std::numeric_limits<size_t>::max() form that the windows.h max macro breaks.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "PresenterExtension.h"
 
 // RenderAheadPolicy.h before PresenterAfterPresent.h: the latter includes <windows.h> (min / max macros) and
 // the Presenter's inline bodies use the plain std::min / std::max forms.
 #include "RenderAheadPolicy.h"
 #include "PresenterAfterPresent.h"
+
+#include <DebugLog.h>
 
 #include <utility>
 
@@ -76,7 +85,38 @@ namespace Vpv
 				end->qpc.store(pc.swapEndQpc, std::memory_order_relaxed);
 				end->extrasSpentTime.store(pc.extrasSpentTime, std::memory_order_relaxed);
 				end->valid.store(true, std::memory_order_release);
+				ObservePresentVsync(*end, pc, r);
 			}
+		}
+
+		// CG-PVH: present-vs-vsync histogram. Log-only (nothing here reaches a present). The statistics are the read
+		// PresenterAfterPresent already made (no second GetFrameStatistics); the one extra DXGI call is
+		// GetLastPresentCount, the id of the present just made, to pair its swap end with the statistics' PresentCount.
+		// An extras frame's last present is an extra, not the main one, so its lead is not recorded (the hold still is).
+		void PresenterExtension::ObservePresentVsync(PresentEnd& end, const RE::PresentContext& pc,
+			const RenderAhead::AfterPresentResult& r)
+		{
+			static const int64_t qpcHz = []() { LARGE_INTEGER hz; hz.QuadPart = 0; QueryPerformanceFrequency(&hz); return static_cast<int64_t>(hz.QuadPart); }();
+			if (qpcHz <= 0)
+				return;
+			if (pc.native && pc.submitted && !pc.extrasSpentTime)   // a present that was not made keeps the previous id: not noted again
+			{
+				UINT id = 0;
+				if (SUCCEEDED(pc.native->GetLastPresentCount(&id)))
+					end.vsync.NoteSubmitted(static_cast<uint32_t>(id), pc.swapEndQpc);
+			}
+			PresentVsyncSample s;
+			s.read = r.statistics.read;
+			s.available = r.statistics.available;
+			s.disjoint = r.statistics.disjoint;
+			s.hr = static_cast<int32_t>(r.statistics.result);
+			s.presentCount = r.statistics.presentCount;
+			s.presentRefreshCount = r.statistics.presentRefreshCount;
+			s.syncRefreshCount = r.statistics.syncRefreshCount;
+			s.syncQpc = r.statistics.syncQpc;
+			end.vsync.Observe(s);
+			if (end.vsync.ReportDue(pc.swapEndQpc, qpcHz))
+				DebugLog::Log("%s", end.vsync.TakeLine(pc.swapEndQpc, qpcHz).c_str());
 		}
 
 		// R14: the frame's present end. After an extras frame the queue timing measures from the moment the main present

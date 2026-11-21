@@ -1577,6 +1577,7 @@
       "live_files": [
         "src/VP-V/modules/output/presentation/PresentationOwner.h",
         "src/VP-V/modules/output/presentation/RenderAheadPolicy.h",
+        "src/VP-V/modules/output/presentation/PresentVsyncHistogram.h",
         "src/VP-V/modules/output/presentation/PresenterAfterPresent.h",
         "src/VP-V/modules/output/presentation/PresenterExtension.h",
         "src/VP-V/modules/output/presentation/PresenterExtension.cpp",
