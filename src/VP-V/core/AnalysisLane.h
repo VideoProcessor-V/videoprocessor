@@ -878,6 +878,11 @@ public:
         sealReducedSink_ = std::move(reduced);
         workerReusedSink_ = std::move(reused);
     }
+    // C5-SKREDS MUST-1: the lane WORKER's twin of SetPublishedLookup (LaneRunner::SetAdopt): a frame the product's owner fill already
+    // published for an Acquire reader is copied into the worker's claimed slot, not computed again. Set like the sinks above (the
+    // binder runs with the worker threads joined); called on the lane threads (the callee must be thread-safe: the memo's mutex).
+    using WorkerAdopt = std::function<bool(ProductId, uint64_t, uint8_t*, size_t)>;
+    void SetWorkerAdopt(WorkerAdopt f) { workerAdopt_ = std::move(f); }
     // 70b G0: GPU live deferral. On, a GPU-compute product's live fill at the seal (OnRenderStart, BEFORE the
     // render lock: no GPU recording there) only reserves the live buffer and records a LivePending entry; the
     // render thread later calls RunDeferredLive(seq) at a GPU-legal phase (Entrance), which dispatches the
@@ -1805,6 +1810,9 @@ private:
             if (workerReusedSink_)
                 workerReusedSink_(id);
         });
+        st->runner->SetAdopt([this](ProductId id, uint64_t seq, uint8_t* dst, size_t n) {
+            return workerAdopt_ ? workerAdopt_(id, seq, dst, n) : false;
+        });
         for (ILaneProducer* p : producers_)
             st->runner->Register(p);
         for (size_t i = 0; i < st->graph.nodes.size(); ++i) {
@@ -2162,6 +2170,7 @@ private:
     std::function<uint64_t(ProductId)> releaseCompleted_;
     std::function<void(ProductId)> sealReducedSink_;
     std::function<void(ProductId)> workerReusedSink_;
+    WorkerAdopt workerAdopt_;   // C5-SKREDS MUST-1 (SetWorkerAdopt)
     std::vector<ProductFrameResult> empty_;
     std::string error_;
     double periodMs_ = 0.0;

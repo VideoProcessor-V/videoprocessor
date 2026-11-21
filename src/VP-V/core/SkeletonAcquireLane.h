@@ -176,6 +176,14 @@ inline void BindLaneToMemo(AnalysisLane& lane, SkeletonMemo& memo, LaneGpuHandle
     // The lookup is asked for a seal with every input present; a missing-input seal computes another result (its own form).
     SkeletonMemo* m = &memo;
     lane.SetAheadSinks([m](ProductId id) { m->NoteSealComputedReduced(id); }, [m](ProductId id) { m->NoteWorkerReused(id); });
+    // C5-SKREDS MUST-1: the lane WORKER adopts a reader's owner-fill publication of a frame (an ahead frame the lane could not hold
+    // when it was asked: the memo's spot) instead of computing it again, as the seal does below. Counted workerAdopted.
+    lane.SetWorkerAdopt([m](ProductId id, uint64_t seq, uint8_t* dst, size_t n) {
+        if (!m->CopyPublished(id, seq, dst, n))
+            return false;
+        m->NoteWorkerAdopted(id);
+        return true;
+    });
     lane.SetPublishedLookup([m](ProductId id, uint64_t seq, uint8_t* dst, size_t n) {
         if (m->CopyPublished(id, seq, dst, n)) {
             m->NoteSealReused(id);
@@ -191,6 +199,7 @@ inline bool UnbindLaneFromMemo(AnalysisLane& lane, SkeletonMemo& memo)
 {
     lane.SetPublishedLookup(AnalysisLane::PublishedLookup());
     lane.SetAheadSinks(nullptr, nullptr);
+    lane.SetWorkerAdopt(AnalysisLane::WorkerAdopt());
     const bool unbound = memo.UnbindLane(&lane);
     if (unbound)
         memo.SetGpuDispatcherPresent(false);

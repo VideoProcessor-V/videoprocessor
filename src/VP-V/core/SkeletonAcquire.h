@@ -345,6 +345,7 @@ struct AcquireCounters {
     // aheadNow = Ran and the slot readable: made on this request. (A worker publishing between the slot read and the ask also
     // answers Ran: that frame is then counted here though it was made by the worker; rare, and it is never counted twice.)
     uint64_t laneAheadMade = 0;
+    uint64_t workerAdopted = 0;   // C5-SKREDS MUST-1: lane frames a WORKER copied from an owner-fill publication (not recomputed)
     uint64_t sealComputedReduced = 0;  // seal live fills COMPUTED in the reduced (missing-input) form: a compute, not a reuse
     uint64_t workerReused = 0;         // the lane's worker skipped a frame the render thread had made first (nothing recomputed)
     // Frames COMPUTED for this product (any variant): owner fills that published + seal computes. The compute-once ledger.
@@ -1191,6 +1192,12 @@ public:
     {
         std::lock_guard<std::mutex> g(mutex_);
         ++counters_[id].workerReused;
+    }
+    // C5-SKREDS MUST-1: a lane worker adopted an owner-fill publication (BindLaneToMemo's SetWorkerAdopt). Lane threads.
+    void NoteWorkerAdopted(ProductId id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        ++counters_[id].workerAdopted;
     }
     // The seal's question (SkeletonAcquireLane.h): did a reader publish the default CPU form of (id, seq)? Copies it.
     bool CopyPublished(ProductId id, uint64_t seq, uint8_t* dst, size_t n) const

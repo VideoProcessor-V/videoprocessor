@@ -52,6 +52,7 @@ struct LaneProductCounters {
     std::atomic<uint64_t> laneUs{ 0 };           // measured producer time
     std::atomic<uint64_t> chainCarryForward{ 0 };// ordered chain: jobs run in the declared reduced form (no predecessor)
     std::atomic<uint64_t> chainRefused{ 0 };     // ordered chain: out-of-order work refused (never run, never published)
+    std::atomic<uint64_t> workerAdopted{ 0 };    // C5-SKREDS MUST-1: frames a reader's owner fill had published (the memo's spot): copied, not recomputed
 };
 
 class LaneRunner {
@@ -106,6 +107,11 @@ public:
     void SetReleaseCompleted(std::function<uint64_t(ProductId)> f) { releaseCompleted_ = std::move(f); }
     // QKP slice C: told (worker thread) of each frame the render thread made first that this worker then skipped.
     void SetWorkerReusedSink(std::function<void(ProductId)> f) { workerReusedSink_ = std::move(f); }
+    // C5-SKREDS MUST-1 (one computation per frame): a CPU product's frame an Acquire reader already published by the owner fill (the
+    // memo's spot: an ahead frame the lane could not hold then) is COPIED into the claimed slot instead of being computed again, the
+    // same reuse the seal's live fill makes (SkeletonAcquireLane.h binds both). (product, frame, dst, bytes) -> copied. Set before
+    // the lane threads start (the binder runs with them joined); called on the product's lane thread.
+    void SetAdopt(std::function<bool(ProductId, uint64_t, uint8_t*, size_t)> f) { adopt_ = std::move(f); }
     void SetReadsSource(ProductId id, bool reads)
     {
         if (State* st = StateOf(id))
@@ -362,6 +368,14 @@ private:
                 if (st.pins.sets[k] != nullptr)   // null: an absent chain-self input (carry-forward)
                     job.inputData[k] = input_(st.pins.sets[k]->Product(), st.pins.seqs[k], st.pins.liveIndex[k]);
 
+        // C5-SKREDS MUST-1: a publication of this frame by the product's owner fill (the same law over the same inputs) is adopted:
+        // copied into the slot and published as the job's result, never computed a second time (counted workerAdopted).
+        if (adopt_ && st.node->backend == Backend::Cpu && job.out != nullptr && job.outBytes != 0
+            && adopt_(st.node->id, st.seq, job.out, job.outBytes)) {
+            st.counters.workerAdopted.fetch_add(1, std::memory_order_relaxed);
+            st.phase = Phase::Completing;   // began stays false: nothing was submitted (the default fence values apply)
+            return true;
+        }
         const ComputeOnce::FrameScope frameScope(static_cast<int64_t>(job.seq), "lane", static_cast<int64_t>(st.node->id));
         if (!st.producer->Begin(job)) {
             st.counters.beginFailures.fetch_add(1, std::memory_order_relaxed);
@@ -407,8 +421,9 @@ private:
         // The header is ours only while the slot is: after the seal it belongs to the slot's tenant.
         if (st.set->LaneContinue(st.ticket))
             st.set->LaneHeader(st.ticket).costUs = st.costUs > 0xFFFFFFFFull ? 0xFFFFFFFFu : uint32_t(st.costUs);
-        const PublishResult r = st.set->Publish(st.ticket, st.producer->ProducerSignal(),
-                                                st.producer->ProducerCompleted());
+        // An adopted frame never began the producer: the default fence values (as AbandonJob), not the producer's.
+        const PublishResult r = st.set->Publish(st.ticket, st.began ? st.producer->ProducerSignal() : uint64_t(0),
+                                                st.began ? st.producer->ProducerCompleted() : ~uint64_t(0));
         if (r == PublishResult::NotComplete)
             return StepOutcome::WaitingDevice;
         st.pins.Unpin();
@@ -449,6 +464,7 @@ private:
     std::function<bool(uint64_t, SourceFrameView*)> find_;
     std::function<uint64_t(ProductId)> releaseCompleted_;
     std::function<void(ProductId)> workerReusedSink_;
+    std::function<bool(ProductId, uint64_t, uint8_t*, size_t)> adopt_;
     std::atomic<uint64_t> arrived_{ 0 };
     std::atomic<uint64_t> skipBefore_{ 0 };
     std::atomic<uint64_t> lateSkipBefore_{ 0 };   // B3 X1: SetLateSkipBefore (lowered by each node's sealLag)
