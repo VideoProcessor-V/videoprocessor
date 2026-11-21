@@ -375,5 +375,263 @@ namespace VideoProcessorTest
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(log);
 		}
+
+		// GEM-W1-LED (owner GEM-Q15, register 115 #17): a colour with only some channels above white or
+		// below black keeps its hue through the LED compensation (luma-ratio restore, not per channel),
+		// under the boost and gains 0.6 / 1.3 / 2.5 in both domains, on a true 10-bit limited target:
+		// - out of range in part: every channel = input x min(curve(luma) / luma, 1) within 1 code, hue
+		//   angle (BT.709 Cb/Cr) within 0.75 deg; exactly the input where the ratio caps at 1;
+		// - luma out of range (grey WTW/BTB, a colour with negative luma): exactly the input;
+		// - in range (white 940 and black 64 included), or with the passthrough off: every channel the
+		//   same code as that channel's grey, i.e. the per-channel path, byte for byte.
+		TEST_METHOD(LedCompensationKeepsTheHueOfPartlyOutOfRangeColours)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			fixture.CaptureLog(&log);
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule rule;
+			rule.name = "led_compensation";
+			rule.filename = "LED compensation.glsl";
+			chain.Configure({ rule });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.outputHeight = 2;
+			chain.Ensure(values);
+			std::vector<const pl_hook*> compensation;
+			chain.Collect(false, compensation);
+			Assert::AreEqual(size_t{ 1 }, compensation.size(), L"libplacebo rejected LED compensation.glsl");
+			const pl_hook* hook = compensation[0];
+			OutputEncodingRepair::Hook repair;
+			pl_color_repr limited{};
+			limited.sys = PL_COLOR_SYSTEM_RGB;
+			limited.levels = PL_COLOR_LEVELS_LIMITED;
+			limited.bits.sample_depth = 10;
+			limited.bits.color_depth = 10;
+			repair.SetTarget(limited);
+			const std::vector<const pl_hook*> hooks = { repair.Get(), hook };
+			const double boost = 2.2 / 2.4, knee = 0.08, eotf = 2.41;
+			auto set = [hook, knee, eotf](double gain, double b, double domain)
+			{
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "boost", b));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain", gain));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain_domain", domain));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee", knee));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "compensation_eotf", eotf));
+			};
+			using Rgb = std::array<double, 3>;
+			using Codes = std::array<int, 3>;
+			// 10-bit limited code k <-> signal (k - 64) / 876 before the encode.
+			auto signal = [](int code) { return (code - 64.0) / 876.0; };
+			auto toSignal = [&signal](const Codes& c) { return Rgb{ signal(c[0]), signal(c[1]), signal(c[2]) }; };
+			// A constant colour through the hooks into a true 10-bit limited R10G10B10A2 target.
+			auto render = [&fixture, &hooks](const Rgb& in) -> Codes
+			{
+				pl_gpu gpu = fixture.Gpu();
+				pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+				pl_fmt targetFormat = nullptr;
+				const auto caps = PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE;
+				for (int i = 0; i < gpu->num_formats; ++i)
+				{
+					pl_fmt f = gpu->formats[i];
+					if (f->type == PL_FMT_UNORM && f->num_components == 4 && f->component_depth[0] == 10 &&
+						f->texel_size == 4 && (f->caps & caps) == caps && f->host_bits[0] == 10)
+					{ targetFormat = f; break; }
+				}
+				Assert::IsNotNull(sourceFormat);
+				Assert::IsNotNull(targetFormat, L"No host-readable RGB10A2 target format");
+				std::vector<float> texels(2 * 2 * 4);
+				for (int i = 0; i < 4; ++i)
+				{
+					for (int c = 0; c < 3; ++c)
+						texels[i * 4 + c] = static_cast<float>(in[c]);
+					texels[i * 4 + 3] = 1.0f;
+				}
+				pl_tex_params sp{};
+				sp.w = sp.h = 2;
+				sp.format = sourceFormat;
+				sp.sampleable = true;
+				sp.initial_data = texels.data();
+				pl_tex source = pl_tex_create(gpu, &sp);
+				pl_tex_params tp{};
+				tp.w = tp.h = 2;
+				tp.format = targetFormat;
+				tp.renderable = true;
+				tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(source);
+				Assert::IsNotNull(target);
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(source);
+				pl_frame output = TargetLutGpuFixture::MakeRgbFrame(target);
+				output.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				output.repr.bits.sample_depth = 10;
+				output.repr.bits.color_depth = 10;
+				output.repr.bits.bit_shift = 0;
+				pl_render_params params = pl_render_fast_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.hooks = hooks.data();
+				params.num_hooks = static_cast<int>(hooks.size());
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &output, &params));
+				pl_gpu_finish(gpu);
+				uint32_t pixels[4] = {};
+				pl_tex_transfer_params download{};
+				download.tex = target;
+				download.ptr = pixels;
+				Assert::IsTrue(pl_tex_download(gpu, &download));
+				pl_tex_destroy(gpu, &source);
+				pl_tex_destroy(gpu, &target);
+				return { static_cast<int>(pixels[0] & 1023u), static_cast<int>((pixels[0] >> 10) & 1023u),
+					static_cast<int>((pixels[0] >> 20) & 1023u) };
+			};
+			// CPU mirror of the shader's curve on one value (boost, gain in its domain, knee; no toe, no lift).
+			auto spow = [](double v, double e) { return (v < 0.0 ? -1.0 : 1.0) * std::pow(std::abs(v), e); };
+			auto curve = [&spow, knee, eotf](double v, double gain, double b, double domain)
+			{
+				v = spow(v, b);
+				if (gain == 1.0)
+					return v;
+				double x = domain > 0.5 ? spow(v, eotf) : v;
+				x *= gain;
+				if (gain > 1.0 && x >= 1.0 - knee)
+					x = 1.0 - knee + knee * (1.0 - std::exp(-(x - (1.0 - knee)) / knee));
+				return domain > 0.5 ? spow(x, 1.0 / eotf) : x;
+			};
+			auto luma = [](const Rgb& c) { return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+			auto hueDegrees = [&luma](const Rgb& c)
+			{
+				const double y = luma(c);
+				return std::atan2((c[0] - y) / 1.5748, (c[2] - y) / 1.8556) * 180.0 / 3.14159265358979323846;
+			};
+			auto hueError = [&hueDegrees](const Rgb& a, const Rgb& b)
+			{
+				const double d = std::fmod(std::abs(hueDegrees(a) - hueDegrees(b)), 360.0);
+				return std::min(d, 360.0 - d);
+			};
+			auto text = [](const Codes& c)
+			{
+				return L"(" + std::to_wstring(c[0]) + L", " + std::to_wstring(c[1]) + L", " + std::to_wstring(c[2]) + L")";
+			};
+
+			// Partly out of range, luma in range: orange above white, yellow with two channels above white
+			// (luma 0.998), and two colours with one channel below black.
+			const Codes partly[] = { { 1010, 700, 300 }, { 980, 1000, 200 }, { 40, 600, 300 }, { 300, 20, 700 } };
+			// Luma out of range: grey WTW (1019, 941 just above white), grey BTB (63, 8), and a colour with
+			// one channel below black and a negative luma.
+			const Codes extended[] = { { 1019, 1019, 1019 }, { 941, 941, 941 }, { 63, 63, 63 }, { 8, 8, 8 }, { 100, 30, 64 } };
+			// In range, white and black included (the per-channel path).
+			const Codes inRange[] = { { 900, 500, 200 }, { 930, 940, 64 } };
+			struct Setting { double gain, boost, domain; };
+			std::vector<Setting> settings;
+			for (const double domain : { 1.0, 0.0 })
+				for (const double g : { 0.6, 1.3, 2.5 })
+					settings.push_back({ g, boost, domain });
+			settings.push_back({ 1.0, boost, 1.0 });   // the gain == 1 exit with the boost
+
+			// Idle (gain 1, no boost): every test colour leaves as it came in.
+			set(1.0, 1.0, 1.0);
+			for (const Codes& c : partly)
+				Assert::IsTrue(render(toSignal(c)) == c, (L"Idle hook moved " + text(c)).c_str());
+			for (const Codes& c : extended)
+				Assert::IsTrue(render(toSignal(c)) == c, (L"Idle hook moved " + text(c)).c_str());
+
+			std::wstring problems;
+			double worstHue = 0.0;
+			int scaledCases = 0;
+			for (const Setting& s : settings)
+			{
+				set(s.gain, s.boost, s.domain);
+				const std::wstring where = L" at gain " + std::to_wstring(s.gain) + L", domain " +
+					std::to_wstring(static_cast<int>(s.domain)) + L"; ";
+				for (const Codes& c : partly)
+				{
+					const Rgb in = toSignal(c);
+					const Codes out = render(in);
+					const double y = luma(in);
+					const double ratio = std::min(curve(y, s.gain, s.boost, s.domain) / y, 1.0);
+					if (ratio >= 1.0)
+					{
+						if (out != c)
+							problems += L"capped " + text(c) + L" became " + text(out) + where;
+					}
+					else
+					{
+						++scaledCases;
+						for (int k = 0; k < 3; ++k)
+						{
+							const double expected = 64.0 + 876.0 * in[k] * ratio;
+							if (std::abs(out[k] - expected) > 1.0)
+								problems += L"channel " + std::to_wstring(k) + L" of " + text(c) + L": " +
+									std::to_wstring(out[k]) + L" for " + std::to_wstring(expected) + where;
+						}
+					}
+					const double error = hueError(in, toSignal(out));
+					worstHue = std::max(worstHue, error);
+					if (error > 0.75)
+						problems += L"hue of " + text(c) + L" moved " + std::to_wstring(error) + L" deg to " + text(out) + where;
+				}
+				for (const Codes& c : extended)
+				{
+					const Codes out = render(toSignal(c));
+					if (out != c)
+						problems += L"extended " + text(c) + L" became " + text(out) + where;
+				}
+				for (const Codes& c : inRange)
+				{
+					const Codes out = render(toSignal(c));
+					for (int k = 0; k < 3; ++k)
+					{
+						const int grey = render(Rgb{ signal(c[k]), signal(c[k]), signal(c[k]) })[k];
+						if (out[k] != grey)
+							problems += L"in-range " + text(c) + L" channel " + std::to_wstring(k) + L": " +
+								std::to_wstring(out[k]) + L", grey " + std::to_wstring(grey) + where;
+					}
+				}
+			}
+			// The ratio path ran: gain 0.6 scales 7 of its 8 cases (the dark blue 300/20/700 in linear light
+			// caps at 1, its boost outweighing the gain); the gains above 1 and the boost alone cap.
+			if (scaledCases != 7)
+				problems += L"scaled cases " + std::to_wstring(scaledCases) + L" (expected 7); ";
+
+			// Passthrough off: never flagged, the per-channel path as before (WTW off for the WTW colours,
+			// BTB off for the BTB colours).
+			set(0.6, boost, 1.0);
+			for (const char* name : { "wtw_passthrough", "btb_passthrough" })
+			{
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, name, 0.0));
+				const bool wtwOff = std::string(name) == "wtw_passthrough";
+				for (const Codes& c : partly)
+				{
+					const bool aboveWhite = c[0] > 940 || c[1] > 940 || c[2] > 940;
+					if (aboveWhite != wtwOff)
+						continue;
+					const Codes out = render(toSignal(c));
+					for (int k = 0; k < 3; ++k)
+					{
+						const int grey = render(Rgb{ signal(c[k]), signal(c[k]), signal(c[k]) })[k];
+						if (out[k] != grey)
+							problems += std::wstring(L"passthrough off: ") + text(c) + L" channel " + std::to_wstring(k) +
+								L": " + std::to_wstring(out[k]) + L", grey " + std::to_wstring(grey) + L"; ";
+					}
+				}
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, name, 1.0));
+			}
+			Logger::WriteMessage((L"GEM-W1-LED worst hue error over the partly out-of-range colours: " +
+				std::to_wstring(worstHue) + L" deg\n").c_str());
+			fixture.CaptureLog(nullptr);
+			Assert::IsTrue(problems.empty(), (problems + L"log: " + std::wstring(log.begin(), log.end())).c_str());
+			AssertCleanLibplaceboLogExceptPreOutputBug(log);
+		}
 	};
 }
