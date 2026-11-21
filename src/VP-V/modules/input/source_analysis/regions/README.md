@@ -169,9 +169,10 @@ X5's grad = R x 0.25 exactly); the default variant (R32F, source luma, 10-bit co
 Decisions: RG32F, not R32F, because X5's grain sums (Laplacian, energy) still read the luma at the base (slice 9 / X5-GRAIN-P10
 absent), so G has a reader; WHOLE picture, no crop axis (the design's kAxisCrop is not declared): X5's 3 x 3 neighbourhood at its
 src_rect border reads luma beyond the crop, which a crop-clamped map would change; code unit 8 only on the stage variant (the
-default stays 10); the fill's reserve is twice the declared default size (EdgeMapFillReserveBytes, 8 B/px of the source luma: an
-RG32F picture of the luma size fits; 265 MB at 8K, 66 MB at 4K), the declared product size and ledger term stay the default's; a
-larger stage picture declines visibly. Tests: tests/EdgeMapStageTests.cpp (CPU law and fill), tests/EdgeMapStageGpuParityTests.cpp (GPU parity, first run owed). Reader: X5 (S3). Settings: none.
+default stays 10); the declared product size (the ledger term) and the fill's reserve are ONE figure, the largest variant
+(EdgeMapFillReserveBytes == EdgeMapReserveBytes, 8 B/px of the source luma: an RG32F picture of the luma size fits; 265 MB at
+8K, 66 MB at 4K; the default R32F uses half), and the ahead budget counts it once per fill a frame makes (SkeletonMemo's
+measured fills per frame: one per stage ordinal; CB-18 SHOULD-2); a larger stage picture declines visibly. Tests: tests/EdgeMapStageTests.cpp (CPU law and fill), tests/EdgeMapStageGpuParityTests.cpp (GPU parity, first run owed). Reader: X5 (S3). Settings: none.
 
 S3 (the X5 reader): the stage dispatch is `DispatchEdgeMapStage(dispatch, picture, colour, system, primaries, dst, why)` in
 EdgeMapFill.h, one function shared by the owner's fill (FillEdgeMapStage delegates to it) and X5's visible no-memo fallback

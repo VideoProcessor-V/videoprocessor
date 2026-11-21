@@ -1059,7 +1059,9 @@ inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
                          Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
     p.sourceFrame = true;
     AddInput(p, kP13SourceRing, 0);
-    AddTerm(p, 0, 4);   // one R32F sample per source pixel (shift 0 = the full plane)
+    // 8 B per source pixel (shift 0 = the full plane): the LARGEST variant one fill serves, the stage variant's RG32F (CB-18
+    // SHOULD-2), so the ledger, the fill's reserve and the ahead cost are one figure. The default variant's R32F uses half.
+    AddTerm(p, 0, 8);
     p.refRenderMs = 0.05f;
     PadReservedUntil(decls, kEdgeMap);
     decls.push_back(p);

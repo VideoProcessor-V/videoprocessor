@@ -664,7 +664,8 @@ public:
         return epoch_;
     }
     // The S3 admission link (design s2.7). What the memo's ahead work costs for `w`: one AheadCost per registered GPU fill that
-    // allocates (its declared reserve, or the measured bytes of its last result when larger) and per CPU fill that has run (its
+    // allocates (its declared reserve, or the measured bytes of its largest result when larger, times the measured fills one frame
+    // makes: a per-picture keyed product fills several) and per CPU fill that has run (its
     // measured bytes; CPU bytes are not in the VRAM grant, listed for the cost ledger with bytesPerFrame 0 for the VRAM plan).
     // `budget`: the delay budget the scheduler plans the queue with (null = not fed: the ladder offers no S-C step and says so).
     AheadNeed MakeAheadNeed(const QueueWindow& w, QueueMode mode = QueueMode::Normal, const DelayBudget::Inputs* budget = nullptr) const
@@ -699,7 +700,13 @@ public:
             const auto m = measuredBytes_.find(kv.first);
             const uint64_t measured = m != measuredBytes_.end() ? m->second : 0u;
             if (gpu) {
-                c.bytesPerFrame = measured > f.reserveBytes ? measured : f.reserveBytes;
+                // One frame's spot holds EVERY GPU result the frame made of this product: a product keyed per picture (the
+                // edge map's stage ordinals, CB-18 SHOULD-2) fills several per frame, each against its own reserve. The count
+                // is MEASURED (the largest number of fills one frame has made so far, 1 before any), never a fixed constant.
+                const uint64_t perFill = measured > f.reserveBytes ? measured : f.reserveBytes;
+                const auto fp = fillsPerFrame_.find(kv.first);
+                const uint64_t fills = fp != fillsPerFrame_.end() && fp->second > 1u ? uint64_t(fp->second) : 1u;
+                c.bytesPerFrame = perFill * fills;
                 c.measured = measured != 0;
                 if (f.DeclaredHistory() > back)
                     back = f.DeclaredHistory();
@@ -1088,6 +1095,14 @@ public:
             const uint64_t got = form == AcquireForm::Gpu ? out.gpu.bytes : uint64_t(out.bytes.size());
             if (got > mb)
                 mb = got;
+            if (form == AcquireForm::Gpu) {
+                // The measured fills per frame (AheadNeed's multiplier): every distinct key of this (product, form) made for `seq`.
+                uint32_t& made = fillsBySeq_[OwnerKey(id, form)][seq];
+                ++made;
+                uint32_t& most = fillsPerFrame_[OwnerKey(id, form)];
+                if (made > most)
+                    most = made;
+            }
         }
         if (out.scope != OwnerFillOutput::Scope::FillDefault)
             e->frameScoped = out.scope == OwnerFillOutput::Scope::Frame;   // per-result lifetime (design s2.3)
@@ -1169,9 +1184,13 @@ public:
                 haveReleased_ = false;
                 releasedThrough_ = 0;
             }
+            if (haveSealed_ && seq < lastSeal_)
+                fillsBySeq_.clear();   // the old numbering's per-frame counts (the largest counts stay)
             numberingMayRestart_ = false;   // after a BumpEpoch the older epoch's spots go below; this epoch's fills stay
             haveSealed_ = true;
             lastSeal_ = seq;
+            for (auto& kv : fillsBySeq_)
+                kv.second.erase(kv.second.begin(), kv.second.lower_bound(seq));   // frames before the render frame are complete
             ++seals_;
             ReleaseIfLocked([](const Entry& e) { return e.frameScoped; }, drop);   // the previous render frame's views
             {
@@ -1202,6 +1221,7 @@ public:
             std::lock_guard<std::mutex> g(mutex_);
             ReleaseIfLocked([](const Entry&) { return true; }, drop);
             RetireCompletedLocked(drop);
+            fillsBySeq_.clear();
             haveReleased_ = false;
             releasedThrough_ = 0;
             haveSealed_ = false;
@@ -1560,6 +1580,10 @@ private:
     uint64_t invalidations_[size_t(InvalidateCause::Count)] = {};
     std::set<Key> invalidatedKeys_;
     std::map<uint32_t, uint64_t> measuredBytes_;   // the largest result size per (product, form)
+    // GPU fills made per frame, per (product, form): the open frames' counts (pruned at OnSeal below the sealed frame) and the
+    // largest count any frame reached (kept: like measuredBytes_, a measurement, not a spot).
+    std::map<uint32_t, std::map<uint64_t, uint32_t>> fillsBySeq_;
+    std::map<uint32_t, uint32_t> fillsPerFrame_;
     AheadPlan plan_;
     bool planSet_ = false;
     const void* host_ = nullptr;

@@ -14,7 +14,7 @@
 // MeasureDomain.h), taps clamped to the whole picture (no crop axis: a reader's 3 x 3 neighbourhood at its crop border reads the
 // picture beyond it, as X5's former private Sobel did). G is there because X5's grain sums (Laplacian, energy) read the same
 // luma; one law, one body for both variants (BusyEdgeGlsl.h).
-// Reserve: DERIVED, never a fixed resolution (rule 6): EdgeMapFillReserveBytes (twice kEdgeMap's declared size rule) at the largest
+// Reserve: DERIVED, never a fixed resolution (rule 6): EdgeMapFillReserveBytes (kEdgeMap's declared size rule, 8 B/px) at the largest
 // source luma size the Entrance image (the P13 view) shows on a live host; the module re-registers the fill when that size changes
 // (EdgeMapModule::Observe).
 // Declines (visible, with the cause): no GPU context, no luma view / no stage picture (P13's cause), a stage key without its size
@@ -47,9 +47,10 @@ namespace Vpv
 		namespace RE = RendererExtension;
 		static constexpr const char* kEdgeMapUnit = "input/source_analysis/regions";   // the catalog's kEdgeMap owner
 
-		// Reserve per fill, DERIVED from the source (rule 6): kEdgeMap's DECLARED size rule (AppendEdgeMapProduct: one R32F sample per
-		// source pixel) at the source luma size `luma`, so the ledger, the ahead cost and the fill agree on one figure (33 MB at a 4K
-		// source, 8.3 MB at 1080p). 0 = no size known yet. The grant is checked BEFORE the fill; a larger frame declines visibly.
+		// Reserve per fill, DERIVED from the source (rule 6): kEdgeMap's DECLARED size rule (AppendEdgeMapProduct: 8 B per source
+		// pixel, the largest variant's RG32F) at the source luma size `luma`, so the ledger, the ahead cost and the fill agree on one
+		// figure (66 MB at a 4K source, 16.6 MB at 1080p). 0 = no size known yet. The grant is checked BEFORE the fill; a larger frame
+		// declines visibly.
 		inline uint64_t EdgeMapReserveBytes(VpSkeleton::Dims luma)
 		{
 			if (luma.width == 0 || luma.height == 0)
@@ -61,14 +62,14 @@ namespace Vpv
 				? VpSkeleton::BytesOf(decls[VpSkeleton::kEdgeMap].size, luma) : uint64_t(0);
 		}
 
-		// The registered fill's reserve (CB slice 18 S2b, owner Q2): TWICE the declared default size, so the largest variant either
-		// form serves fits one grant: the default R32F at the source luma size (4 B/px) or the stage variant RG32F (8 B/px) at a
-		// stage picture of the source luma size (X5's measured picture; its ratio-2 half picture needs a quarter). The declared
-		// product size (AppendEdgeMapProduct, the ledger term) stays the default variant's; a larger stage picture declines visibly
-		// (Allocate, "...reserve"). 265 MB at an 8K source, 66 MB at 4K.
+		// The registered fill's reserve (CB slice 18 S2b, owner Q2; SHOULD-2): the DECLARED size itself, which is the largest variant
+		// either form serves: the default R32F at the source luma size (4 B/px) or the stage variant RG32F (8 B/px) at a stage picture
+		// of the source luma size (X5's measured picture; its ratio-2 half picture needs a quarter). A larger stage picture declines
+		// visibly (Allocate, "...reserve"). 265 MB at an 8K source, 66 MB at 4K. The ahead budget counts it once per fill a frame
+		// makes (SkeletonMemo::AheadNeedLocked, the measured fills per frame: one per stage ordinal).
 		inline uint64_t EdgeMapFillReserveBytes(VpSkeleton::Dims luma)
 		{
-			return 2u * EdgeMapReserveBytes(luma);
+			return EdgeMapReserveBytes(luma);
 		}
 
 		// The stage variant (design-EDGEMAP-DOMAIN-AXIS rev 2 s2a; coreplan-CB-18 S2b): the code unit of its measure luma, 8-bit
