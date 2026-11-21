@@ -112,6 +112,7 @@
     <ClInclude Include="vprenderer\DisplayRateHold.h" />
     <ClInclude Include="..\VP-V\modules\input\capture\UploadReuse.h" />
     <ClInclude Include="..\VP-V\modules\motion\estimation\MotionAhead.h" />
+    <ClInclude Include="..\VP-V\modules\control\config\VpvProfileQueueAdvice.h" />
     <ClInclude Include="GeneralRate.h" />
     <ClInclude Include="GeneralRateLog.h" />
     <ClInclude Include="RefreshKey.h" />
@@ -139,6 +140,7 @@
     <ClInclude Include="vprenderer\FileFrameSlotGate.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\VP-V\modules\control\config\VpvProfileQueueAdvice.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\CrashState.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\StateReport.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\StatusExtension.cpp" />

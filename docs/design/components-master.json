@@ -1794,6 +1794,7 @@
         "src/VP-V/modules/control/config/VpvStartupSchema.h",
         "src/VP-V/modules/control/config/VpvSchemaKeys.h",
         "src/VP-V/modules/control/config/VpvProfileQueueAdvice.h",
+        "src/VP-V/modules/control/config/VpvProfileQueueAdvice.cpp",
         "src/VideoProcessor-Lib/RendererProfileConfig.h",
         "src/VP-V/modules/control/config/config_pages/VpvBothPathwayCards.h",
         "src/VP-V/modules/control/config/config_pages/VpvConfigFormApi.h",
