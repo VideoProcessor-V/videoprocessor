@@ -240,6 +240,12 @@ namespace LedDrive
 		Vpv::Skeleton::IExternalDemand* demand = owners.size() == 1 ? Vpv::Skeleton::Demand() : nullptr;
 		if (demand == nullptr)
 			return;
+		// GF-P3 MUST-10: a declaration on another renderer withdraws the old one first (one entry per module, never a dangling owner).
+		if (declared != nullptr && declared != owners[0])
+		{
+			demand->ClearExternalDemand(declared, this);
+			demandHost.store(nullptr, std::memory_order_release);
+		}
 		VpSkeleton::ConsumerDecl d;
 		d.id = kSceneConsumerId;
 		d.name = "LED look-ahead cut";
@@ -400,6 +406,9 @@ namespace LedDrive
 	LedDriveModule::~LedDriveModule()
 	{
 		Stop();
+		// GF-P3 MUST-10: Stop() returns early for a module that never started, so a declaration it made (or a late one) is withdrawn
+		// here unconditionally: no "LED drive" demand and no owner key outlive the module.
+		WithdrawSceneDemand();
 	}
 
 	double LedDriveModule::NowMs() const
@@ -783,7 +792,10 @@ namespace LedDrive
 		// R3: a readback of the old source after a FULL resync (resync_event on only; 0 otherwise).
 		if (sequence != 0 && restartSequence != 0 && sequence < restartSequence) return;
 		lastMeasuredSequence = sequence;
-		DeclareSceneDemand();   // the renderer may register after Start(): declared with the first measurement at the latest
+		// The renderer may register after Start(): declared with the first measurement at the latest. GF-P3 MUST-10: only while
+		// running; a measurement submitted after Stop() (DynamicDriveFrame holds a shared_ptr) or before Start() declares nothing.
+		if (started && !stopping)
+			DeclareSceneDemand();
 		statsBuilder.SetSceneReader(SceneReader());   // applied before every Build (Reconfigure re-creates the builder)
 		const FrameStats stats = statsBuilder.Build(raw, NowMs(), sourceFps > 0.0 ? 1000.0 / sourceFps : 0.0, sequence);   // unmeasured: the 24p values
 		if (stats.blocks == 0) return;
