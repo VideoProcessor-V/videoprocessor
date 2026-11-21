@@ -18,6 +18,7 @@
     <ClCompile Include="..\VP-V\tests\suite\LedIntentLimitsTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\MotionIntentTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\IntentInterpreterTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\RunningPathwayTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\H3TimingTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\FileSourceRuleVariableTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\FileHostTests.cpp" />

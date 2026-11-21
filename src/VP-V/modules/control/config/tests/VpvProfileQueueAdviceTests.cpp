@@ -184,5 +184,38 @@ namespace VideoProcessorTest
 				Assert::IsTrue(vp->generalRateFixes, L"general-rate fixes lost on the VP pathway");
 			}
 		}
+
+		// CC W4 B2: the queue follows the pathway the process RUNS (latched by the first snapshot), not a later
+		// configuration: once Original is latched, a VP-V configuration still gets Bill's queue (and no look-ahead
+		// depth / rate fixes); the latch is reported as Original.
+		TEST_METHOD(LatchedOriginalKeepsBillsQueueForALaterVpConfiguration)
+		{
+			LatchReset unlatched;
+			SnapshotOf(std::string(kQueueText) + "[vpv]\npipeline_original_pathway: on\n");
+			Assert::IsTrue(Vpv::RunningPathway::Original(), L"the first (Original) snapshot did not latch Original");
+			const auto later = SnapshotOf(std::string(kQueueText) + "[vpv]\npipeline_original_pathway: off\n");
+			const auto& q = later->queue;
+			Assert::IsTrue(q.hasTargetLatencyMs && q.targetLatencyMs == 0, L"a later VP-V configuration's target_latency_ms reached the Original process");
+			Assert::IsFalse(q.lowLatencyPath, L"a later VP-V configuration's low-latency path reached the Original process");
+			Assert::IsTrue(q.hasActivePictureLookaheadFrames && q.activePictureLookaheadFrames == 0, L"the Original process's unset look-ahead is not Bill's 0");
+			Assert::IsFalse(later->generalRateFixes, L"general-rate fixes in the Original process");
+			Assert::IsTrue(Vpv::RunningPathway::Original(), L"a later configuration changed the latch");
+		}
+
+		// CC W4 B2, the other way: once VP-V is latched, a later Original configuration keeps the VP queue keys
+		// (the switch applies at the next start, as the renderer reads it).
+		TEST_METHOD(LatchedVpKeepsTheVpQueueKeysForALaterOriginalConfiguration)
+		{
+			LatchReset unlatched;
+			SnapshotOf(std::string(kQueueText));
+			Assert::IsFalse(Vpv::RunningPathway::Original(), L"the first (VP-V) snapshot latched Original");
+			Assert::AreEqual(int(Vpv::RunningPathway::kVpv), Vpv::RunningPathway::Value().load(), L"the first snapshot did not latch VP-V");
+			const auto later = SnapshotOf(std::string(kQueueText) + "[vpv]\npipeline_original_pathway: on\n");
+			const auto& q = later->queue;
+			Assert::IsTrue(q.hasTargetLatencyMs && q.targetLatencyMs == 267, L"the VP-V process lost target_latency_ms to a later Original configuration");
+			Assert::IsTrue(q.lowLatencyPath, L"the VP-V process lost low_latency_path to a later Original configuration");
+			Assert::IsFalse(q.hasActivePictureLookaheadFrames, L"the VP-V process's Auto look-ahead was replaced");
+			Assert::IsTrue(later->generalRateFixes, L"the VP-V process lost general-rate fixes");
+		}
 	};
 }
