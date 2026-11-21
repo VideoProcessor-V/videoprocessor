@@ -53,7 +53,8 @@ class ForkOnlyCli(unittest.TestCase):
                                                        "SKIP-FORK-ONLY-PL0004: x BETA-RAN " + self.FQ)]))
             beta = self._write(d, "b.trx", T._fixture([("BetaSuite", "RunBetaSuite", "Passed",
                                                         "VP-BUILD-ID:" + "ab" * 16 + "\nBETA-RAN " + self.FQ +
-                                                        "\nBeta suite exit code 0; whole chain passed")]))
+                                                        "\nBeta suite exit code 0; whole chain passed")],
+                                                      codebase=T.BETA_DLL_FIXTURE))
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 rc = T.main(["--filter", "FullyQualifiedName~SigmaDeltaHookTests", "--trx", nat, "--beta-trx", beta])
@@ -71,6 +72,17 @@ class ForkOnlyCli(unittest.TestCase):
                                                        "SKIP-FORK-ONLY-PL0004: x BETA-RAN " + self.FQ)]))
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(T.main(["--filter", "FullyQualifiedName~SigmaDeltaHookTests", "--trx", nat]), 1)
+
+    def test_transport_rule_is_printed(self):
+        with tempfile.TemporaryDirectory() as d:
+            beta = self._write(d, "b.trx", T._fixture([("BetaSuite", "RunBetaSuite", "Passed",
+                                                        "BETA-RAN BetaStage::K::T1\nBeta suite exit code 0; whole chain passed")],
+                                                      codebase=T.BETA_DLL_FIXTURE))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = T.main(["--filter", "FullyQualifiedName~BetaStage::K", "--beta-trx", beta])
+            self.assertEqual(rc, 0, buf.getvalue())
+            self.assertIn("Logger::WriteMessage", buf.getvalue())
 
     def test_allow_list_is_closed(self):
         self.assertEqual(sorted(T.FORK_ONLY_TAGS), ["PL0004"])

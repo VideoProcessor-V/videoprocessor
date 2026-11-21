@@ -39,15 +39,18 @@ Per test (TestDefinitions/UnitTest + its UnitTestResult rows):
 Fork-only tests (GEM-PKG s10g; --beta-trx FILE, repeatable):
   forkOnly     every row Passed and its only SKIP markers are SKIP-FORK-ONLY-<TAG> with TAG in the CLOSED
                FORK_ONLY_TAGS list ({"PL0004"}); any other tag is a plain skip (FAIL)
-  A Beta TRX is valid only when BetaSuite::RunBetaSuite executed and Passed, with no SKIP marker, its output
-  says "whole chain passed" and not "(VP_TEST_REPORT_MODE=1)". Only line-start "BETA-RAN <id>" lines in
+  A Beta TRX is valid only when BetaSuite::RunBetaSuite, from VideoProcessorBetaTestsHost.dll (its codeBase),
+  executed and Passed, with no SKIP marker, its output says "whole chain passed" and has no
+  VP_TEST_REPORT_MODE=1 token. The suite's stdout goes to VP_TEST_OUT, so BETA-RAN lines reach the TRX
+  only when the Beta host echoes them through Logger::WriteMessage. Only line-start "BETA-RAN <id>" lines in
   that test's output count; BETA-RAN lines anywhere else (a native TRX, another test, an invalid Beta TRX)
   are ignored with a NOTE. A forkOnly native test is "executed on the Beta host" only when a valid Beta TRX
   has "BETA-RAN <its exact FQN>" (case-insensitive full equality); credited tests count as executed and are
   listed with the Beta TRX path. An uncredited forkOnly test in the filter is a FAIL ("fork-only test
   selected on a native lane without Beta-host evidence"). A BETA-RAN id equal to a native test without the
-  tag credits nothing. Every other BETA-RAN id is a Beta pseudo-test (fqn = id, executed), so a term like
-  FullyQualifiedName~BetaStage::SigmaDeltaCameraGoldenTests needs at least one. SKIP-NO-GPU anywhere,
+  tag credits nothing. Every other BETA-RAN id under "BetaStage::" (any case) is a Beta pseudo-test (fqn = id,
+  executed), so a term like FullyQualifiedName~BetaStage::SigmaDeltaCameraGoldenTests needs at least one; an
+  unmatched id outside BetaStage:: credits nothing (NOTE), so Beta lines never cover a native term. SKIP-NO-GPU anywhere,
   Beta TRX included, is a FAIL. Each TRX's build lines (VP-BUILD-ID:<hex>, build/commit/sha = <hex>, the
   test DLL codeBase) are printed so a gate can compare the native and Beta builds.
 
@@ -92,6 +95,10 @@ PROPS = {"fullyqualifiedname": "FullyQualifiedName", "name": "Name", "classname"
 FORK_ONLY_TAGS = frozenset(["PL0004"])
 FORK_ONLY_PREFIX = "SKIP-FORK-ONLY-"
 BETA_SUITE_FQN = "betasuite::runbetasuite"
+BETA_HOST_DLL = re.compile(r"^videoprocessor-?betatestshost\.dll$", re.I)   # VideoProcessor-BetaTestsHost.vcxproj TargetName
+BETA_STAGE_PREFIX = "betastage::"   # Beta-only stage ids (GEM-PKG s10g): the only ids that may become pseudo-tests
+TRANSPORT_NOTE = ("the Beta host must echo each BETA-RAN line through Logger::WriteMessage (RunBetaSuite sends the "
+                  "suite's stdout to VP_TEST_OUT, not to the TRX)")
 BETA_RAN_LINE = re.compile(r"^[ \t]*BETA-RAN[ \t]+(\S+)[ \t]*\r?$", re.M)
 BUILD_LINE = re.compile(r"VP-BUILD-ID:[0-9A-Fa-f]{32}|\b(?:build|commit|sha|head)(?:[ \t]+sha)?[ \t]*[:=][ \t]*"
                         r"[0-9a-fA-F]{7,40}\b", re.I)
@@ -325,7 +332,8 @@ def parse_trx(path):
         if "::" not in fqn:
             fqn = (cls.replace(".", "::") + "::" + name) if cls else name
         tests[tid] = {"id": tid, "name": name, "class": cls or "(no class)", "fqn": fqn,
-                      "fqn_dot": fqn.replace("::", "."), "results": [], "trx": path}
+                      "fqn_dot": fqn.replace("::", "."), "results": [], "trx": path,
+                      "codebase": tm.get("codeBase", "") if tm is not None else ""}
     results = root.find(NS + "Results")
     if results is not None:
         for r in results:
@@ -371,8 +379,11 @@ def classify(test):
 def beta_evidence(path):
     """Read one --beta-trx. Return {"path", "valid", "why", "ids", "build_lines", "skip_no_gpu", "stray"}
     or raise ValueError (missing / unparsable). Valid = it holds BetaSuite::RunBetaSuite, which executed
-    and Passed (every row), with no SKIP marker, "whole chain passed" in its output and no
-    "(VP_TEST_REPORT_MODE=1)". ids = its line-start "BETA-RAN <id>" lines (only from that test's output)."""
+    and Passed (every row), from the Beta host DLL (its TestMethod codeBase is VideoProcessorBetaTestsHost.dll,
+    so a native class named BetaSuite cannot qualify), with no SKIP marker, "whole chain passed" in its output
+    and no VP_TEST_REPORT_MODE=1 token. ids = its line-start "BETA-RAN <id>" lines (only from that test's
+    output). TRANSPORT: RunBetaSuite redirects the suite's stdout to VP_TEST_OUT, so a BETA-RAN line reaches
+    the TRX only when BetaTestHost.cpp echoes it through Logger::WriteMessage after the suite returns."""
     if not os.path.isfile(path):
         raise ValueError("Beta TRX missing: %s" % path)
     tests, _counters, nogpu, info = parse_trx(path)
@@ -387,11 +398,14 @@ def beta_evidence(path):
         return ev
     s = suite[0]
     out = "\n".join(r["out"] for r in s["results"])
-    if not s["results"] or any(r["outcome"].lower() != "passed" for r in s["results"]):
+    if not BETA_HOST_DLL.search(os.path.basename(s["codebase"].replace("\\", "/"))):
+        ev["why"] = "RunBetaSuite is not from the Beta host DLL (codeBase '%s', want VideoProcessorBetaTestsHost.dll)" \
+            % (s["codebase"] or "none")
+    elif not s["results"] or any(r["outcome"].lower() != "passed" for r in s["results"]):
         ev["why"] = "RunBetaSuite did not execute and pass (%s)" % (",".join(r["outcome"] for r in s["results"]) or "no result")
     elif any(r["markers"] for r in s["results"]):
         ev["why"] = "RunBetaSuite output carries a SKIP marker (%s)" % ",".join(sorted({m for r in s["results"] for m in r["markers"]}))
-    elif "(VP_TEST_REPORT_MODE=1)" in out:
+    elif re.search(r"VP_TEST_REPORT_MODE\s*=\s*1\b", out):
         ev["why"] = "report-mode run (VP_TEST_REPORT_MODE=1): the gate chain did not run"
     elif "whole chain passed" not in out:
         ev["why"] = "no \"whole chain passed\" in the RunBetaSuite output"
@@ -459,6 +473,9 @@ def check(filter_text, trx_paths, newest=False, beta_paths=()):
             rep["notes"].append("INVALID Beta TRX %s: %s; its BETA-RAN lines are ignored" % (bp, ev["why"]))
         if ev["stray"]:
             rep["notes"].append("%d BETA-RAN line(s) in %s outside a valid RunBetaSuite output ignored" % (ev["stray"], bp))
+        if ev["valid"] and not ev["ids"]:
+            rep["notes"].append("valid Beta TRX %s has no BETA-RAN line in the RunBetaSuite output: %s"
+                                % (bp, TRANSPORT_NOTE))
         for i in ev["ids"]:
             beta_ids.setdefault(i.lower(), (i, bp))
     native_fqns = {t["fqn"].lower(): t for t in alltests}
@@ -473,6 +490,11 @@ def check(filter_text, trx_paths, newest=False, beta_paths=()):
             if nt.get("beta_credit") is None:
                 rep["notes"].append("BETA-RAN %s names a native test without an allow-listed SKIP-FORK-ONLY tag: "
                                     "credits nothing" % nt["fqn"])
+            continue
+        if not key.startswith(BETA_STAGE_PREFIX):
+            # Gate GR MUST-1: an unmatched non-BetaStage id would cover a native term with no native run and no tag.
+            rep["notes"].append("BETA-RAN %s names no native test of this run and is not a BetaStage id: credits nothing"
+                                % fqn)
             continue
         cls, _, name = fqn.rpartition("::")
         alltests.append({"id": "beta:" + fqn, "name": name or fqn, "class": (cls or fqn) + " (Beta pseudo-test)",
@@ -553,7 +575,7 @@ def render(rep):
             lines.append("  build: %s" % b)
     for b in rep["beta"]:
         lines.append("BETA TRX: %s %s" % (b["path"], "VALID" if b["valid"] else "INVALID (%s)" % b["why"]))
-        lines.append("  BETA-RAN ids used: %d" % len(b["ids"]))
+        lines.append("  BETA-RAN ids used: %d (transport: %s)" % (len(b["ids"]), TRANSPORT_NOTE))
         for x in b["build_lines"] or ["(no build line in this TRX)"]:
             lines.append("  build: %s" % x)
     if rep["beta_credited"]:
@@ -589,17 +611,22 @@ def render(rep):
 
 # ---------------------------------------------------------------- selftest
 
-def _fixture(tests, counters=True, outcome="Completed", extra="", total=None):
+BETA_DLL_FIXTURE = "D:\\w\\x64\\Release\\vprenderer-beta\\VideoProcessorBetaTestsHost.dll"
+NATIVE_DLL_FIXTURE = "D:\\w\\x64\\Release\\VideoProcessor-Test.dll"
+
+
+def _fixture(tests, counters=True, outcome="Completed", extra="", total=None, codebase=""):
     """tests: list of (class, method, outcome or None for definition only, stdout).
     outcome: the ResultSummary outcome; extra: extra Counters attributes (e.g. 'aborted="1"');
-    total: the Counters total (default: the number of result rows, = executed)."""
+    total: the Counters total (default: the number of result rows, = executed); codebase: the TestMethod codeBase."""
     defs, res = [], []
+    cb = ' codeBase="%s"' % codebase if codebase else ""
     for i, (cls, meth, toc, out) in enumerate(tests):
         tid = "00000000-0000-0000-0000-%012d" % i
         ns = cls.split(".")[0]
         short = cls.split(".")[-1]
-        defs.append('<UnitTest name="%s" id="%s"><TestMethod className="%s" name="%s::%s::%s" /></UnitTest>'
-                    % (meth, tid, cls, ns, short, meth))
+        defs.append('<UnitTest name="%s" id="%s"><TestMethod%s className="%s" name="%s::%s::%s" /></UnitTest>'
+                    % (meth, tid, cb, cls, ns, short, meth))
         if toc is not None:
             body = "<Output><StdOut>%s</StdOut></Output>" % out if out else ""
             res.append('<UnitTestResult testId="%s" testName="%s" outcome="%s">%s</UnitTestResult>'
@@ -720,9 +747,9 @@ def run_case(flt, fixtures):
         return (1 if rep["problems"] else 0), rep
 
 
-def _beta(out, outcome="Passed"):
-    """A Beta-host TRX fixture: BetaSuite::RunBetaSuite with this output."""
-    return ("BETA", _fixture([("BetaSuite", "RunBetaSuite", outcome, out)]))
+def _beta(out, outcome="Passed", codebase=BETA_DLL_FIXTURE):
+    """A Beta-host TRX fixture: BetaSuite::RunBetaSuite (from the Beta host DLL by default) with this output."""
+    return ("BETA", _fixture([("BetaSuite", "RunBetaSuite", outcome, out)], codebase=codebase))
 
 
 def fork_only_cases():
@@ -781,6 +808,29 @@ def fork_only_cases():
          [_beta("BETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail + " (VP_TEST_REPORT_MODE=1)")], 1,
          "0 executed", "report-mode run"),
         ("missing Beta TRX", flt, [_fixture([D, X]), ("BETA", "MISSING")], 1, "Beta TRX missing", ""),
+        # Gate GR MUST-1 probes (gate-A20C5-forkonly-b28cc15ce.md): Beta lines never cover a native term alone.
+        ("P1: native class term, no native test, Beta line only", flt,
+         [_fixture([("Other.OtherTests", "M", "Passed", "")]), _beta("BETA-RAN " + fq + ok_tail)], 1,
+         "term FullyQualifiedName~VideoProcessorTest::SigmaDeltaHookTests: 0 executed",
+         "BETA-RAN " + fq + " names no native test of this run and is not a BetaStage id: credits nothing"),
+        ("P2: fork-only test absent from the native TRX, Beta line names it", "Name~DitherNeedWarpX",
+         [_fixture([D]), _beta("BETA-RAN " + fq + ok_tail)], 1, "term Name~DitherNeedWarpX: 0 executed",
+         "is not a BetaStage id: credits nothing"),
+        ("BetaStage prefix is case-insensitive", "FullyQualifiedName~BetaStage::SigmaDeltaCameraGoldenTests",
+         [_beta("BETA-RAN betastage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail)], 0, "", ""),
+        # SHOULD 1: the report-mode token, with or without parentheses.
+        ("P7: report-mode token without parentheses is invalid", flt,
+         [_fixture([D, X]), _beta("BETA-RAN " + fq + ok_tail + "; VP_TEST_REPORT_MODE=1")], 1, nofq, "report-mode run"),
+        # SHOULD 3: RunBetaSuite must come from the Beta host DLL.
+        ("BetaSuite from a native DLL is not a Beta TRX", flt,
+         [_fixture([D, X]), _beta("BETA-RAN " + fq + ok_tail, codebase=NATIVE_DLL_FIXTURE)], 1, nofq,
+         "not from the Beta host DLL"),
+        ("BetaSuite with no codeBase is not a Beta TRX", flt,
+         [_fixture([D, X]), _beta("BETA-RAN " + fq + ok_tail, codebase="")], 1, nofq, "not from the Beta host DLL"),
+        # SHOULD 2: a valid Beta TRX without BETA-RAN lines names the Logger transport requirement.
+        ("valid Beta TRX with no BETA-RAN line states the transport rule", flt,
+         [_fixture([D, X]), _beta("Beta suite exit code 0; whole chain passed")], 1, nofq,
+         "echo each BETA-RAN line through Logger::WriteMessage"),
     ]
 
 
