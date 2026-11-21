@@ -630,12 +630,24 @@ public:
     //            GPU-legal phase, no compute registered, an ordered chain (worker only), the fill refused
     // A GPU lane product is never dispatched here: its ahead form is recorded by the seal / RunDeferredLive at Entrance, and a call
     // outside that phase is Declined "lane GPU ahead: not at a GPU-legal phase" (design s9.4 d). Render thread.
+    // C5-SKREDS (get-or-compute of the inputs, OD 11-12 17:26 / 11-13 13:34): an input of the frame that is itself a CPU lane product
+    // AHEAD of the render frame and not made yet is made FIRST by its own claim (the same law, into its own slot: one copy), then the
+    // pins are tried once more. Without it an ahead ask of P4 declined whenever no lane worker had made P1 of that frame (at lane
+    // lead 1 the workers publish nothing ahead by themselves), so a reader's ask could never make the frame it is meant to make.
+    // `ownerMayFill` (Declined only): the frame cannot be made in the lane's slots NOW (beyond its slots, or an input still not made),
+    // but the product's owner form may make it in the memo's own spot (SkeletonMemo::Acquire then runs the owner fill, whose inputs
+    // are got-or-computed through the same Acquire chain). False for every other decline (a GPU node, dropped, an ordered chain,
+    // published outside the lane, no compute, the fill refused, ...): those stay declined.
     enum class AheadRun : uint8_t { Ran, Claimed, NotNode, Declined };
     struct AheadRunResult {
         AheadRun kind = AheadRun::NotNode;
         const char* why = "";
+        bool ownerMayFill = false;
     };
-    AheadRunResult RunAheadNow(ProductId id, uint64_t seq)
+    AheadRunResult RunAheadNow(ProductId id, uint64_t seq) { return RunAheadNowAt(id, seq, 0u); }
+    // The input recursion is bounded by the graph (lag-0 edges are acyclic; a lead input is bounded by the slots); this is the guard.
+    static constexpr unsigned kAheadInputDepth = 8u;
+    AheadRunResult RunAheadNowAt(ProductId id, uint64_t seq, unsigned depth)
     {
         AheadRunResult out;
         LaneState* st = renderState_.get();
@@ -689,14 +701,38 @@ public:
         LaneInputs pins;
         // countWaits false: this is the render thread; the wait dedupe entries belong to the lane worker, which counts the wait once.
         if (!st->table->LaneAncestors(id, seq, scratch, pins, /*countWaits*/ false)) {
-            out.why = "an input is not published yet";
-            return out;
+            // C5-SKREDS: the missing ahead CPU lane inputs are made first (their own claims), then the pins are tried once more.
+            bool madeInput = false;
+            if (depth < kAheadInputDepth) {
+                for (size_t k = 0; k < n.inputCount; ++k) {
+                    const InputRef& in = n.inputs[k];
+                    uint64_t aseq = 0;
+                    if (in.product == id || !InputSeq(in, seq, &aseq) || aseq <= renderSeq_)
+                        continue;   // the product itself, or a render / sealed frame: never made here
+                    Backend ib = Backend::Cpu;
+                    if (!IsNode(in.product, &ib) || ib != Backend::Cpu)
+                        continue;
+                    const AheadRunResult ir = RunAheadNowAt(in.product, aseq, depth + 1u);
+                    if (ir.kind == AheadRun::Claimed) {
+                        out.kind = AheadRun::Claimed;   // a worker is writing the input right now: LanePending (visible, no wait)
+                        out.why = "a lane worker is making an input";
+                        return out;
+                    }
+                    madeInput = madeInput || ir.kind == AheadRun::Ran;
+                }
+            }
+            if (!madeInput || !st->table->LaneAncestors(id, seq, scratch, pins, /*countWaits*/ false)) {
+                out.why = "an input is not published yet";
+                out.ownerMayFill = true;
+                return out;
+            }
         }
         LaneTicket t;
         const ClaimResult cr = set.Claim(seq, Provenance::AheadLane, ~uint64_t(0), &t);
         if (cr == ClaimResult::TooEarly || cr == ClaimResult::ReleasePending || cr == ClaimResult::OutOfRange) {
             pins.Unpin();
             out.why = "beyond the lane's slots";   // design s9.4 a: not LanePending (no worker will ever have it)
+            out.ownerMayFill = cr != ClaimResult::OutOfRange;   // inside the window the memo's own spot may hold it
             ++aheadBeyondSlots_;
             return out;
         }

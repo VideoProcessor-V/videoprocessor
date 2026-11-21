@@ -320,9 +320,12 @@ struct LaneSlotSource {
     // (LanePending, visible, no wait); NotNode = not a lane product: the memo's own owner fill path; Declined = visible, `why`
     // names it. Mirrors AnalysisLane::AheadRun (the binder maps it); the memo never includes the lane header.
     enum class AheadNow : uint8_t { Ran, Claimed, NotNode, Declined };
+    // `ownerMayFill` (Declined only, C5-SKREDS): the lane cannot make the frame in its slots now (beyond its slots / an input not
+    // made), but the product's owner fill may make it in the memo's own spot: the memo runs the owner fill instead of declining.
     struct AheadNowResult {
         AheadNow kind = AheadNow::NotNode;
         const char* why = "";
+        bool ownerMayFill = false;
     };
     std::function<AheadNowResult(ProductId, uint64_t)> aheadNow;   // render thread; null = the lane has no ahead claim
     const void* token = nullptr;   // the bound lane (BindLane / UnbindLane by token)
@@ -977,6 +980,16 @@ public:
             lk.lock();
             if (ar.kind == LaneSlotSource::AheadNow::Claimed)
                 return Fail(c, id, seq, AcquireCause::LanePending);
+            if (ar.kind == LaneSlotSource::AheadNow::Declined && ar.ownerMayFill) {
+                // C5-SKREDS (get-or-compute, OD 11-12 17:26 / 11-13 13:34): the lane cannot make it in its slots now, the owner fill may
+                // (its inputs got-or-computed through this Acquire chain). As NotNode below: the lock was released, so start over with
+                // the lane not asked again; with no owner fill of the key the lane's decline stands (visible, named).
+                const OwnerFill* owNow = OwnerLocked(OwnerKey(id, form));
+                if (owNow != nullptr && owNow->fill) {
+                    lk.unlock();
+                    return Acquire(id, seq, form, vIn, true);
+                }
+            }
             if (ar.kind == LaneSlotSource::AheadNow::Declined) {
                 AcquireResult r = Fail(c, id, seq, AcquireCause::OwnerDeclined);
                 if (ar.why != nullptr && ar.why[0] != '\0')

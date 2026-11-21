@@ -110,6 +110,7 @@ inline void BindLaneToMemo(AnalysisLane& lane, SkeletonMemo& memo, LaneGpuHandle
         const AnalysisLane::AheadRunResult r = l->RunAheadNow(id, seq);
         LaneSlotSource::AheadNowResult out;
         out.why = r.why;
+        out.ownerMayFill = r.ownerMayFill;   // C5-SKREDS: a decline the owner fill may still answer (the memo's own spot)
         switch (r.kind) {
         case AnalysisLane::AheadRun::Ran: out.kind = LaneSlotSource::AheadNow::Ran; break;
         case AnalysisLane::AheadRun::Claimed: out.kind = LaneSlotSource::AheadNow::Claimed; break;

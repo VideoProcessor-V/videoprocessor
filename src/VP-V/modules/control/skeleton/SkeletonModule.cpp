@@ -586,7 +586,16 @@ namespace Vpv
 					return pr == VpSkeleton::PublishedRead::Copied && decoded;
 				}
 				const AnalysisLane::ProductRead r = b.lane.ReadOf(VpSkeleton::kP4SourceStats, seq);
-				return r.cpu != nullptr && VpLaneProducts::ReadSourceStats(r.cpu, r.cpuBytes, out);
+				if (r.cpu != nullptr)
+					return VpLaneProducts::ReadSourceStats(r.cpu, r.cpuBytes, out);
+				// C5-SKREDS: an ahead frame the lane could not make in its slots was made by P4's owner fill in the memo's own spot (the
+				// SceneFactsFor Acquire): a PEEK of that publication (SkeletonMemo::CopyPublished: no compute, no cause, nothing counted).
+				if (!b.memo)
+					return false;
+				const size_t statsBytes = VpLaneProducts::kStatsBytes;   // the P4 stats record (not a pixel buffer)
+				std::vector<uint8_t> record(statsBytes);
+				return b.memo->CopyPublished(VpSkeleton::kP4SourceStats, seq, record.data(), record.size())
+					&& VpLaneProducts::ReadSourceStats(record.data(), record.size(), out);
 			}
 
 			// FNV-1a over the record's histogram, cells and counts: a frame number reused for another picture (a seek) is seen.
