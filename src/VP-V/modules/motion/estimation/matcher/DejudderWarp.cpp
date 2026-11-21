@@ -2816,7 +2816,8 @@ if (q.x < size.x && q.y < size.y) {
 		{
 			const int side = 1 - s;
 			const Planes& p = side ? b : a;
-			const int levels = side ? levelsB : levelsA;
+			// B is asked for every level the NEXT pair's A will read (levelsA may exceed levelsB: the lowRes outer's picture area).
+			const int levels = side ? (levelsA > levelsB ? levelsA : levelsB) : levelsA;
 			const void* src = innerOfLowRes ? productLuma[side] : static_cast<const void*>(p.luma);
 			for (int lv = 0; lv <= levels && configured && why.empty(); ++lv)
 			{
