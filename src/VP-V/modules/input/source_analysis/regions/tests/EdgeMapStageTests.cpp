@@ -203,9 +203,20 @@ namespace EdgeMapStageTestsNs
 			const VpMeasure::MeasureDomain d2020 = VpMeasure::MeasureDomainFor(Space(PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_BT_1886),
 				PL_COLOR_SYSTEM_BT_2020_NC, PL_COLOR_PRIM_BT_2020);
 			Assert::IsTrue(d709.bt709 && !d2020.bt709, L"the source's own weights: BT.709 and BT.2020 differ");
+			// The weights are held at the shader's float precision (MeasureDomain::w), so a neutral grey reads 127.5 times the SUM
+			// of the float weights: exactly 127.5 for BT.709 (its float weights sum to 1 exactly in double), and 127.5 x (1 - 3.35e-8)
+			// = 127.4999957 for BT.2020 (0.2627f + 0.678f + 0.0593f). Exact where exact; the cross-weights claim is bounded by the
+			// float rounding of three weights (each within half an ulp, relative 2^-24), not by an arbitrary 1e-6.
 			const double grey[3] = { 0.5, 0.5, 0.5 };
-			Assert::AreEqual(VpMeasure::MeasureLumaCode(d709, grey), VpMeasure::MeasureLumaCode(d2020, grey), 1e-6,
-				L"a neutral grey has one luma under either weights");
+			const double sum709 = double(d709.w[0]) + double(d709.w[1]) + double(d709.w[2]);
+			const double sum2020 = double(d2020.w[0]) + double(d2020.w[1]) + double(d2020.w[2]);
+			Assert::AreEqual(127.5 * sum709, VpMeasure::MeasureLumaCode(d709, grey), L"grey = 127.5 x the float weights' sum, exactly (BT.709)");
+			Assert::AreEqual(127.5 * sum2020, VpMeasure::MeasureLumaCode(d2020, grey), L"grey = 127.5 x the float weights' sum, exactly (BT.2020)");
+			Assert::AreEqual(127.5, VpMeasure::MeasureLumaCode(d709, grey), L"BT.709's float weights sum to 1: grey is 127.5 exactly");
+			const double floatWeightBound = 127.5 * 3.0 * std::ldexp(1.0, -24);   // three weights, each within half an ulp
+			Assert::IsTrue(std::fabs(sum2020 - 1.0) <= 3.0 * std::ldexp(1.0, -24), L"the BT.2020 float weights sum to 1 within their rounding");
+			Assert::AreEqual(VpMeasure::MeasureLumaCode(d709, grey), VpMeasure::MeasureLumaCode(d2020, grey), floatWeightBound,
+				L"a neutral grey has one luma under either weights (to the float weights' rounding)");
 		}
 
 		TEST_METHOD(StageTapsClampToTheWholePictureNotACrop)
