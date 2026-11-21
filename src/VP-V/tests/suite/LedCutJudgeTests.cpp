@@ -522,8 +522,6 @@ namespace VideoProcessorTest
 			Assert::IsTrue(withdrawn[1].second == static_cast<const void*>(&module));
 		}
 
-		// GF-P3 MUST-10: a module that was never started declares nothing, even when measurements reach it, and so leaves nothing to
-		// withdraw when it is destroyed.
 		// GF-P2b S3 (1), LED side: a GPU-only reset of the same renderer erases the demand without moving the registration generation. The
 		// module folds the skeleton's erase count into its "already declared" key, so it declares again at the next measurement, and only then.
 		TEST_METHOD(TheDemandIsDeclaredAgainAfterTheSkeletonErasedIt)
@@ -557,6 +555,8 @@ namespace VideoProcessorTest
 			Assert::AreEqual<size_t>(2, demand.Declarations().size(), L"and not again per frame");
 		}
 
+		// GF-P3 MUST-10: a module that was never started declares nothing, even when measurements reach it, and so leaves nothing to
+		// withdraw when it is destroyed.
 		TEST_METHOD(ANeverStartedModuleDeclaresNothingAndLeavesNoDemand)
 		{
 			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),
