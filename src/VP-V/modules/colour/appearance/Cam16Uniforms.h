@@ -78,11 +78,29 @@ namespace Cam16
 		return c;
 	}
 
+	// FIX1 MUST 5 (refs/125 s4: the veil enters the SCREEN side as flare on the inverse). The flare is part of the screen
+	// viewing conditions (the eye adapts to the screen light plus the reflected room light), and the displayed light is
+	// brought down by a flare TOE, never a subtract-and-clip: g(o) = o (o + f) / (o + 2 f), normalised so g(1) = 1.
+	// For o >> f, g(o) + f ~ o (the seen light keeps the intended contrast); near black g has slope 1/2 and reaches 0 only
+	// at 0, so every displayed level stays distinct (no shadow crush, low-level grain kept). Monotonic on [0, 1];
+	// f = 0 is the identity. The shader's ap_flare (shadersp_cam16_appearance.glsl) is this function, per channel.
+	inline double FlareToDisplayed(double o, double f)
+	{
+		if (!(f > 0.0))
+			return o;
+		o = std::max(0.0, o);
+		const double g = o * (o + f) / (o + 2.0 * f);
+		const double g1 = (1.0 + f) / (1.0 + 2.0 * f);
+		return g / g1;
+	}
+
 	inline Cam16Uniforms PackUniforms(const UniformInputs& in)
 	{
 		Cam16Uniforms u = {};
 		u.reference = PackSide(Prepare(MakeConditions(in.referenceWhiteNits, in.referenceSurround, in.adaptingFraction, in.backgroundY)));
-		u.screen = PackSide(Prepare(MakeConditions(in.screenWhiteNits, in.screenSurround, in.adaptingFraction, in.backgroundY)));
+		Conditions screen = MakeConditions(in.screenWhiteNits, in.screenSurround, in.adaptingFraction, in.backgroundY);
+		screen.adaptingNits += std::max(0.0, in.veilNits);   // FIX1 MUST 5: the flare is in the screen's adapting field
+		u.screen = PackSide(Prepare(screen));
 		u.strength = static_cast<float>(std::min(1.0, std::max(0.0, in.strength)));
 		u.screenWhiteNits = static_cast<float>(in.screenWhiteNits);
 		u.referenceWhiteNits = static_cast<float>(in.referenceWhiteNits);

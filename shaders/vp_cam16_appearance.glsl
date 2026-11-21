@@ -390,6 +390,15 @@ vec3 ap_inverse(float J, float M, float h)
     return AP_M16_INV * rgb;
 }
 
+// Flare toe: g(o) = o (o + f) / (o + 2 f), normalised to g(1) = 1. Monotonic, no level crushed to 0, f = 0 identity.
+float ap_flare(float o, float f)
+{
+    if (f <= 0.0)
+        return o;
+    o = max(o, 0.0);
+    return (o * (o + f) / (o + 2.0 * f)) * ((1.0 + 2.0 * f) / (1.0 + f));
+}
+
 bool ap_out_of_range(vec3 c)
 {
     return min(c.r, min(c.g, c.b)) < -1e-4 || max(c.r, max(c.g, c.b)) > 1.0 + 1e-4;
@@ -426,8 +435,8 @@ vec4 hook()
         outLin = fromXyz * ap_inverse(jmh.x, lo, jmh.z) * 0.01;
     }
 
-    // Room light reflected by the screen is removed from the displayed light, the contrast kept.
-    outLin = max((outLin - vec3(apx_veil)) / max(1.0 - apx_veil, 1e-6), vec3(0.0));
+    // Room light reflected by the screen (flare): a toe, never a subtract-and-clip (FIX1 MUST 5; Cam16::FlareToDisplayed).
+    outLin = vec3(ap_flare(outLin.r, apx_veil), ap_flare(outLin.g, apx_veil), ap_flare(outLin.b, apx_veil));
 
     // Blend out below the toe knee, and by strength.
     float luma = dot(lin, vec3(0.2126, 0.7152, 0.0722));

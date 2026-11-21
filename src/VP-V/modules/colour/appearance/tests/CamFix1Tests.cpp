@@ -179,4 +179,61 @@ namespace Tests
 			Assert::IsTrue(Fix1Has(d.status, "reference mode"));
 		}
 	};
+
+	// MUST 5: the veil is flare in the screen conditions and a toe on the displayed light, never a subtract-and-clip.
+	TEST_CLASS(AppearanceVeilFix1Tests)
+	{
+	public:
+		TEST_METHOD(NearBlackRampKeepsEveryLevel)
+		{
+			const double f = 0.05;   // a lit room on a dim screen: well above any code step
+			double prev = -1.0;
+			for (int i = 0; i <= 4095; ++i)
+			{
+				const double o = i / 4095.0;
+				const double g = Cam16::FlareToDisplayed(o, f);
+				Assert::IsTrue(g > prev, L"strictly monotonic: no two levels merge");
+				if (i > 0)
+					Assert::IsTrue(g > 0.0, L"no level below the veil is crushed to 0");
+				prev = g;
+			}
+			Assert::AreEqual(0.0, Cam16::FlareToDisplayed(0.0, f), 0.0);
+			Assert::AreEqual(1.0, Cam16::FlareToDisplayed(1.0, f), 1e-12);
+			// The old subtract-and-clip sent every o <= f to 0; the toe keeps a code at o = f / 2.
+			Assert::IsTrue(Cam16::FlareToDisplayed(f * 0.5, f) > f * 0.1);
+			// Inside the range the displayed light is brought down, and the seen light (displayed + flare) is not below the intent.
+			for (int i = 1; i < 100; ++i)
+			{
+				const double o = i / 100.0;
+				Assert::IsTrue(Cam16::FlareToDisplayed(o, f) < o);
+				Assert::IsTrue(Cam16::FlareToDisplayed(o, f) + f > o);
+			}
+		}
+
+		TEST_METHOD(ZeroVeilIsTheIdentity)
+		{
+			for (int i = 0; i <= 100; ++i)
+				Assert::AreEqual(i / 100.0, Cam16::FlareToDisplayed(i / 100.0, 0.0), 0.0);
+		}
+
+		TEST_METHOD(FlareEntersTheScreenAdaptingField)
+		{
+			Cam16::UniformInputs in;
+			in.screenWhiteNits = 48.0;
+			const Cam16::Cam16Uniforms dark = Cam16::PackUniforms(in);
+			in.veilNits = 2.0;
+			const Cam16::Cam16Uniforms lit = Cam16::PackUniforms(in);
+			Assert::IsTrue(lit.screen.fl > dark.screen.fl, L"the veil raises the screen's adapting luminance");
+			Assert::AreEqual(dark.reference.fl, lit.reference.fl, L"the reference side is unchanged");
+		}
+
+		TEST_METHOD(ShaderUsesTheToeNotTheClip)
+		{
+			const std::string glsl = Fix1ReadUp("shaders\\vp_cam16_appearance.glsl");
+			if (glsl.empty())
+				return;   // not reachable from this working directory
+			Assert::IsTrue(Fix1Has(glsl, "float ap_flare(float o, float f)"));
+			Assert::IsFalse(Fix1Has(glsl, "(outLin - vec3(apx_veil))"), L"the subtract-and-clip is gone");
+		}
+	};
 }
