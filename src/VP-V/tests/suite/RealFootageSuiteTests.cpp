@@ -2780,26 +2780,26 @@ namespace RealFootage
 	// written on the step it belongs to (LastCutSeconds). Writes <film>.cuts.csv for the scoring script.
 	TEST_CLASS(SourceResolutionFilmCuts)
 	{
-		TEST_METHOD(RealFilmCutDecisionsCutFixes)
-		{
-			const std::string films = RealClip::Env("VP_TEST_CUT_FILMS");
 	public:
 		BEGIN_TEST_METHOD_ATTRIBUTE(RealFilmCutDecisionsCutFixes)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
 		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(RealFilmCutDecisionsCutFixes)
+		{
+			const std::string films = RealClip::Env("VP_TEST_CUT_FILMS");
 			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "RealFilmCutDecisionsCutFixes", !films.empty(), "VP_TEST_CUT_FILMS not set")) return;
+			int filmsChecked = 0;
 			size_t from = 0;
 			while (from < films.size())
 			{
-			int filmsChecked = 0;
 				const size_t end = films.find(';', from);
 				const std::string path = films.substr(from, end == std::string::npos ? std::string::npos : end - from);
 				from = end == std::string::npos ? films.size() : end + 1;
 				if (path.empty()) continue;
+				++filmsChecked;
 				FILE* file = nullptr;
 				Assert::AreEqual(0, static_cast<int>(fopen_s(&file, path.c_str(), "rb")), L"film not found");
 				char header[512] = {};
-				++filmsChecked;
 				Assert::IsTrue(fgets(header, sizeof(header), file) != nullptr);
 				int W = 0, H = 0;
 				for (const char* p = header; *p; ++p)
@@ -2862,10 +2862,10 @@ namespace RealFootage
 					haveLast = true;
 				}
 				fclose(file);
+				Assert::IsFalse(rows.empty(), L"RealFilmCutDecisionsCutFixes: film must contain at least one analysed frame");
 				std::string csv = "step,seconds,decorrelation,share,jump,judged,cut_fixes,cut_old,mean\n";
 				for (size_t i = 0; i < rows.size(); ++i)
 				{
-				Assert::IsFalse(rows.empty(), L"RealFilmCutDecisionsCutFixes: film must contain at least one analysed frame");
 					snprintf(line, sizeof(line), "%zu,%.2f,%.4f,%.4f,%.4f,%d,%d,%d,%.4f\n", i, rows[i].seconds, rows[i].dec, rows[i].share, rows[i].jump,
 						rows[i].judged, rows[i].cutOn, rows[i].cutOff, rows[i].mean);
 					csv += line;
@@ -2879,7 +2879,7 @@ namespace RealFootage
 				snprintf(line, sizeof(line), "RESULT %s: %zu analysed frames; cuts with cut fixes %llu, without %llu; flashes %llu; csv %s\n", path.c_str(), rows.size(), cutsOn, cutsOff, fixes.Flashes(), out.c_str());
 				Logger::WriteMessage(line);
 			}
+			Assert::IsTrue(filmsChecked > 0, L"RealFilmCutDecisionsCutFixes: at least one film path must be evaluated");
 		}
 	};
 }
-			Assert::IsTrue(filmsChecked > 0, L"RealFilmCutDecisionsCutFixes: at least one film path must be evaluated");
