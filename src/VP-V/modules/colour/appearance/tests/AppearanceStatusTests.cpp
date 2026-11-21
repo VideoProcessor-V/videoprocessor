@@ -204,6 +204,32 @@ namespace Tests
 				L"appearance idle with the replacement configured: given back");
 		}
 
+		// CF1-G7b residual (gate G1 MUST-5): the stale LED shadow cap is LISTED, never silent: the catalog row is engaged with its id and
+		// reason while it lasts and released otherwise, it has a plain sentence for Ctrl+I / the notice, and the host syncs it per frame
+		// (read as text inside CollectFrameHooks; a missing file FAILS).
+		TEST_METHOD(AmbientAdaptLedShadowCapSavedIsListedWhileItLasts)
+		{
+			const FallbackCatalog::Decision on = FallbackCatalog::AmbientAdaptLedShadowCapSaved(true);
+			Assert::IsTrue(on.engaged);
+			Assert::AreEqual(std::string("room-light: LED shadow cap"), on.id);
+			Assert::AreEqual(std::string("room-light: LED shadow cap uses saved ambient_adapt (off) while ambient_adapt is given back"), on.reason);
+			Assert::IsTrue(std::string(FallbackPlainText::Sentence(on.id)).size() > 0, L"a plain sentence for the id");
+			const FallbackCatalog::Decision off = FallbackCatalog::AmbientAdaptLedShadowCapSaved(false);
+			Assert::IsFalse(off.engaged);
+			Assert::AreEqual(std::string("room-light: LED shadow cap"), off.id);
+			Assert::IsTrue(off.reason.empty());
+			// The per-frame sync: inside the CollectFrameHooks body, fed by the exact-case function and this frame's appearance decision.
+			const std::string core = ReadUp("src/VP-V/segments/CoreSegments.inl");
+			const size_t begin = core.find("LibplaceboVideoRenderer::Impl::CollectFrameHooks(");
+			Assert::IsTrue(begin != std::string::npos);
+			const size_t end = core.find("\n}\n", begin);
+			Assert::IsTrue(end != std::string::npos);
+			const std::string frame = core.substr(begin, end - begin);
+			Assert::IsTrue(Has(frame, "SyncFallback(FallbackCatalog::AmbientAdaptLedShadowCapSaved(AppearanceStage::LedShadowCapUsesSavedAmbient("),
+				L"the row is synced per frame from LedShadowCapUsesSavedAmbient");
+			Assert::IsTrue(Has(frame, "AppearanceStage::AmbientAdaptGivenBack(activeSettings.ambientAdaptReplaced, dvStage.AppearanceDecision().active),"));
+		}
+
 		TEST_METHOD(SettingsPlumbingIsInPlace)
 		{
 			// CF1-FIN MUST 3: every separator escaped (the single-backslash literals never named a file).
