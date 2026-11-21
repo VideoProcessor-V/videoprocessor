@@ -643,6 +643,13 @@ public:
             out.why = "no lane graph";
             return out;
         }
+        // "Ahead" is relative to the render frame (the last OnRenderStart). Configure already holds the graph, but before the first
+        // seal there is no render frame: ReadOf could not read a Published slot made now (its ahead edge is unset), so a Ran here
+        // would break "the caller reads it through ReadOf". NotNode: the memo's own owner fill path, as with no graph.
+        if (!haveRenderSeq_) {
+            out.why = "no render frame sealed yet";
+            return out;
+        }
         const int idx = st->IndexOf(id);
         if (idx < 0) {
             out.why = "not a lane product";
@@ -1609,6 +1616,8 @@ private:
         stateGeneration_.fetch_add(1, std::memory_order_acq_rel);
             std::atomic_store(&state_, std::shared_ptr<LaneState>());
         renderState_.reset();
+        haveRenderSeq_ = false;   // the next render frame sets the ahead edge again (ReadOf, RunAheadNow)
+        renderSeq_ = 0;
         owner_ = GraphOwner();
         regProducts_.clear();
         regulator_.Configure(regProducts_, 1.0, false);
