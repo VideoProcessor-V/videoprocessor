@@ -1890,18 +1890,27 @@ namespace Vpv
 			}
 			// U7 v2: frames whose confirmed verdict arrived with this frame (normally seq - 1); their Vp groups are rewritten below.
 			std::vector<uint64_t> done;
+			bool ahead = false;   // MUST-7: this frame is ahead of the render seal (set below for a classified frame)
 			if (!cached)
 			{
 				const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
+				// MUST-7 (A20-C5 ruling (A), replacing GV's amendment): the fill is split by RENDER ORDER, not by thread. A frame ahead of
+				// the render seal (the LED look-ahead walk) is classified and its own group published (computed once, found by the seal:
+				// OD 2026-11-15), but it never claims an earlier frame's late cut except its natural predecessor's, never moves the late
+				// search (sceneLastFilled) and never writes the render frame's sceneCache or the sceneRuns ring (S2b).
+				ahead = b && b->memo && b->memo->AheadOfSeal(seq);
+				// seq - 1 has had its render-order fill (it is not ahead of the seal itself).
+				const bool prevRendered = ahead && seq > 1 && !b->memo->AheadOfSeal(seq - 1);
 				SceneFacts f;
 				if (!b)
 					f.why = "no analysis lane";
-				if (!b || !SceneFactsFor(st, *b, seq, f, &done) || !f.valid)
+				if (!b || !SceneFactsFor(st, *b, seq, f, &done, ahead) || !f.valid)
 				{
 					if (answer)
 						answer->why = f.why;
 					return false;
 				}
+				FrameAnalysis::Store* const deliveryStore = VpFrameAnalysis::SourceFrameTap::StoreFor(st.host);
 				std::lock_guard<std::mutex> lock(st.sceneMutex);
 				// Delivery (FrameAnalysis::Scene::cut): this frame's confirmed cut now, else the OLDEST confirmed cut since the last frame
 				// judged that did not go out with its own group (it was provisional then): exactly once per cut. Normally that is frame
@@ -1916,6 +1925,34 @@ namespace Vpv
 				uint64_t nextUndelivered = 0;
 				if (ownSlot && own.carriesLate)
 					late = true;   // a re-fill of the same picture: the late cut it carried stays with it
+				else if (ahead)
+				{
+					// MUST-7: an ahead fill claims only frame seq - 1's late cut (its natural successor's delivery), and only when that
+					// frame's own group can no longer carry it: seq - 1 had its render-order fill already, or its Vp group is out (the `done`
+					// rewrite below confirms it, so the seal skips it and the cut would otherwise be stranded). Anything older belongs to the
+					// render-order fills (frame N + 1 delivers cut N, never an ahead N + k).
+					const uint64_t d = seq - 1;
+					HostState::SceneVerdictSlot& c = st.sceneVerdicts[d % HostState::kSceneVerdicts];
+					if (d >= 1 && c.used && c.seq == d && c.v.known && c.v.confirmed && c.v.cut && !c.deliveredOwn && !c.deliveredLate)
+					{
+						bool claim = prevRendered;
+						if (!claim && deliveryStore != nullptr && deliveryStore->Enabled())
+						{
+							// Its group is out (the seal will skip it once confirmed), or it has no record at all (records open at
+							// arrival, so seq - 1 was dropped or evicted: it never gets a group of its own).
+							FrameAnalysis::Scene g;
+							claim = (deliveryStore->PeekScene(d, g) && g.origin == FrameAnalysis::SceneOrigin::Vp) || !deliveryStore->HasRecord(d);
+						}
+						if (claim)
+						{
+							late = true;
+							c.deliveredLate = true;
+							if (ownSlot)
+								own.carriesLate = true;
+							st.sceneLate.fetch_add(1, std::memory_order_relaxed);
+						}
+					}
+				}
 				else
 				{
 					uint64_t lowest = seq - 1;
@@ -1946,7 +1983,11 @@ namespace Vpv
 						}
 					}
 				}
-				if (nextUndelivered != 0)
+				if (ahead)
+				{
+					// MUST-7: the late search is the render order's (an ahead frame neither starts nor moves it).
+				}
+				else if (nextUndelivered != 0)
 				{
 					st.sceneHasFilled = true;
 					st.sceneLastFilled = nextUndelivered;   // still owed: the next fill delivers it
@@ -1971,17 +2012,20 @@ namespace Vpv
 				scene.fadeKeep = f.fadeKeep;   // U7 v3: 1 on a frame that is no fade
 				if (f.fade && f.fadeKeep < 1.0f)
 					st.sceneFadePartial.fetch_add(1, std::memory_order_relaxed);
-				st.sceneCacheSeq = seq;
-				st.sceneCacheValid = true;
-				st.sceneCacheCut = scene.cut;
-				st.sceneCacheFade = scene.fade;
-				st.sceneCacheLate = scene.cutLate;
-				st.sceneCacheHere = scene.cutHere;
-				st.sceneCacheFlash = scene.flash;
-				st.sceneCacheCutPossible = scene.cutPossible;
-				st.sceneCacheConfirmed = scene.confirmed;
-				st.sceneCacheStrength = scene.cutStrength;
-				st.sceneCacheFadeKeep = scene.fadeKeep;
+				if (!ahead)   // MUST-7: the cache is the render frame's (one frame's classification); an ahead fill never overwrites it
+				{
+					st.sceneCacheSeq = seq;
+					st.sceneCacheValid = true;
+					st.sceneCacheCut = scene.cut;
+					st.sceneCacheFade = scene.fade;
+					st.sceneCacheLate = scene.cutLate;
+					st.sceneCacheHere = scene.cutHere;
+					st.sceneCacheFlash = scene.flash;
+					st.sceneCacheCutPossible = scene.cutPossible;
+					st.sceneCacheConfirmed = scene.confirmed;
+					st.sceneCacheStrength = scene.cutStrength;
+					st.sceneCacheFadeKeep = scene.fadeKeep;
+				}
 			}
 			if (answer)
 			{
@@ -2004,7 +2048,9 @@ namespace Vpv
 			if (FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(st.host))
 				if (store->Enabled())
 				{
-					if (store->PublishScene(seq, scene))
+					// SceneCounters::published counts records written at a SEAL (render order); an ahead publish is the reader's
+					// get-or-compute write, found by the seal later (alreadyPresent), so it is not counted there (MUST-7).
+					if (store->PublishScene(seq, scene) && !ahead)
 						st.scenePublished.fetch_add(1, std::memory_order_relaxed);
 					if (scene.confirmed && scene.cutHere)
 						NoteConfirmedCut(seq);   // pairs into it the veto passed before this group was confirmed
