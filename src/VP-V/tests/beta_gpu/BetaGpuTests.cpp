@@ -57,6 +57,30 @@ namespace
 		if (!result) throw std::runtime_error("Beta GPU: " + message);
 	}
 
+	// The Beta entry points are plain functions (also built into the console exe, which has no CppUnitTest), so these mirror
+	// HardwarePrerequisites::Required(Kind::Gpu / Kind::Footage) instead of including it: VP_TEST_REQUIRE_ALL=1 makes every kind of
+	// missing precondition fail (TQ-MC-S15a/S15b).
+	bool BetaEnvIsOne(const char* name)
+	{
+		char* v = nullptr;
+		size_t n = 0;
+		const bool on = _dupenv_s(&v, &n, name) == 0 && v && std::string(v) == "1";
+		std::free(v);
+		return on;
+	}
+	bool BetaRequireAll() { return BetaEnvIsOne("VP_TEST_REQUIRE_ALL"); }
+	bool BetaRequireGpu() { return BetaRequireAll() || BetaEnvIsOne("VP_TEST_REQUIRE_GPU"); }
+	bool BetaRequireFootage() { return BetaRequireAll() || BetaEnvIsOne("VP_TEST_REQUIRE_FOOTAGE"); }
+
+	// A report mode explicitly asked for (VP_TEST_QUALITY, _DEJUDDER_QUALITY, _DITHER_COMPARE, _REAL_FOOTAGE) whose input is missing:
+	// logs the fixed marker "SKIP-NO-FOOTAGE <report>: <why>" (not executed for check_trx_coverage) and returns to the caller, or
+	// FAILS under VP_TEST_REQUIRE_FOOTAGE=1 / VP_TEST_REQUIRE_ALL=1. The report modes already exit with kBetaReportModeExitCode.
+	void BetaMissingFootage(const std::string& report, const std::string& why)
+	{
+		std::cout << "SKIP-NO-FOOTAGE " << report << ": " << why << "\n";
+		Check(!BetaRequireFootage(), report + ": " + why + " (VP_TEST_REQUIRE_FOOTAGE=1 or VP_TEST_REQUIRE_ALL=1: a missing clip fails)");
+	}
+
 	struct Pixel { int r, g, b; };
 
 	class Gpu
@@ -2321,7 +2345,7 @@ void RunBetaOptionQuality()
 	if (_dupenv_s(&dir, &length, "VP_TEST_CLIP") != 0 || !dir || !*dir)
 	{
 		std::free(dir);
-		std::cout << "Beta option quality: VP_TEST_CLIP not set\n";
+		BetaMissingFootage("Beta option quality", "VP_TEST_CLIP not set");
 		return;
 	}
 	const std::string folder(dir);
@@ -2628,7 +2652,7 @@ void RunBetaDejudderQuality()
 	if (_dupenv_s(&dir, &length, "VP_TEST_CLIP") != 0 || !dir || !*dir)
 	{
 		std::free(dir);
-		std::cout << "Beta de-judder quality: VP_TEST_CLIP not set\n";
+		BetaMissingFootage("Beta de-judder quality", "VP_TEST_CLIP not set");
 		return;
 	}
 	const std::string folder(dir);
@@ -2818,7 +2842,7 @@ void RunBetaDitherCompare()
 	if (_dupenv_s(&dir, &length, "VP_TEST_CLIP") != 0 || !dir || !*dir)
 	{
 		std::free(dir);
-		std::cout << "Beta dither compare: VP_TEST_CLIP not set\n";
+		BetaMissingFootage("Beta dither compare", "VP_TEST_CLIP not set");
 		return;
 	}
 	const std::string folder(dir);
@@ -5811,7 +5835,7 @@ void RunBetaRealFootage()
 	}
 	if (clips.empty())
 	{
-		std::cout << "Beta real footage: no 3840x2160 .yuv (120 fps, 10-bit) or 2160p50 .y4m in " << folder << "\n";
+		BetaMissingFootage("Beta real footage", "no 3840x2160 .yuv (120 fps, 10-bit) or 2160p50 .y4m in " + folder);
 		return;
 	}
 	Gpu gpu;
@@ -6921,13 +6945,10 @@ void RunBetaTimingGate()
 	ExtendedRangeGpuProbe::TestDeviceParams(&device);
 	if (!ExtendedRangeGpuProbe::OnHardwareGpu())
 	{
-		// A gate asked to run on the GPU (VP_TEST_REQUIRE_GPU=1) must not pass by skipping.
-		char* rq = nullptr;
-		size_t rqLength = 0;
-		const bool requireGpu = _dupenv_s(&rq, &rqLength, "VP_TEST_REQUIRE_GPU") == 0 && rq && std::string(rq) == "1";
-		std::free(rq);
-		Check(!requireGpu, "Beta timing gate: VP_TEST_REQUIRE_GPU=1 but not on the hardware GPU (set VP_TEST_GPU=hardware)");
-		std::cout << "Beta timing gate: needs VP_TEST_GPU=hardware (WARP times mean nothing); skipped\n";
+		// A gate asked to run on the GPU (VP_TEST_REQUIRE_GPU=1 or VP_TEST_REQUIRE_ALL=1) must not pass by skipping; without it the
+		// fixed marker SKIP-NO-GPU is logged (a skip is not an executed pass).
+		std::cout << "SKIP-NO-GPU Beta timing gate: needs VP_TEST_GPU=hardware (WARP times mean nothing); skipped\n";
+		Check(!BetaRequireGpu(), "Beta timing gate: VP_TEST_REQUIRE_GPU=1 or VP_TEST_REQUIRE_ALL=1 but not on the hardware GPU (set VP_TEST_GPU=hardware)");
 		return;
 	}
 	// The budgets file.
