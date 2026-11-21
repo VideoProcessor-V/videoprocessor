@@ -286,8 +286,48 @@ namespace Vpv
 				}
 				// L-CORE: the memo is the renderer's (it outlives this lane); off the render thread the lane's CPU products are read through
 				// `leaseOf` (the host's CURRENT bundle, held for the call: never this object after it ended).
+				// GF-P1 AHEAD-DECL call site (GF-P2b): the consumers are not known before the first Configure, so this first bind carries none;
+				// BindConsumers (after every Configure) rebinds with the configured list whenever the lane fills' ahead depths it gives move.
+				boundGpuHandleOf = gpuHandleOf;
+				boundLeaseOf = leaseOf;
 				VpSkeleton::BindLaneToMemo(lane, *memo, gpuHandleOf, std::move(leaseOf));
 			}
+
+			// GF-P1 AHEAD-DECL call site (GF-P2b, gate G6 C2): the lane fills' ahead depths follow the configured consumers (external demand
+			// included). The graph fingerprint leaves ConsumerDecl::aheadDepth out (a depth is not graph structure), so a change of depth alone
+			// keeps the graph: the key below is what decides the rebind, not the graph. BindLane replaces the binding (laneBinds_ moves). The
+			// workers call the lane's ahead sinks, which the binder reassigns: they are joined first when running (Begin restarts them).
+			// Render thread. True = rebound.
+			bool BindConsumers(const std::vector<VpSkeleton::ConsumerDecl>& consumers)
+			{
+				std::vector<AheadKey> key;
+				for (const VpSkeleton::ProductId id : lane.CpuLiveProducts())
+				{
+					const VpSkeleton::LaneAheadDepth d = VpSkeleton::LaneAheadDepthOf(id, 0, consumers);
+					AheadKey k;
+					k.id = id;
+					k.depth = d.depth;
+					k.asked = d.asked;
+					k.by = d.by;
+					key.push_back(k);
+				}
+				if (boundWithConsumers && key == boundAheadKey)
+					return false;
+				if (threads.Running())
+					threads.Stop();
+				VpSkeleton::BindLaneToMemo(lane, *memo, boundGpuHandleOf, boundLeaseOf, consumers);
+				boundAheadKey = key;
+				boundWithConsumers = true;
+				return true;
+			}
+			struct AheadKey
+			{
+				VpSkeleton::ProductId id = 0;
+				uint16_t depth = 0;
+				uint16_t asked = 0;
+				const char* by = nullptr;
+				bool operator==(const AheadKey& o) const { return id == o.id && depth == o.depth && asked == o.asked && by == o.by; }
+			};
 			// The binding is dropped on the render thread by StopBundle / a rebuild's new bind; this is the safety net (by token: a newer
 			// lane's binding is kept).
 			~Bundle() { VpSkeleton::UnbindLaneFromMemo(lane, *memo); }
@@ -342,6 +382,12 @@ namespace Vpv
 			SkeletonModule::QueueShape configuredQueue;
 			uint64_t configuredVramVersion = 0;   // VramUsers::Version() at the last Configure
 			uint64_t configuredExtVersion = 0;     // externalVersion_ at the last Configure
+			uint64_t configuredMemoNeed = 0;       // GEM-W1A S1 / GF-P2b MUST-4: the memo's top GPU need level planned at the last Configure (0 = none)
+			// GF-P2b (AHEAD-DECL call sites): what the memo binding was made with, for BindConsumers' rebinds.
+			VpSkeleton::LaneGpuHandleOf boundGpuHandleOf;
+			VpSkeleton::LaneLeaseOf boundLeaseOf;
+			std::vector<AheadKey> boundAheadKey;
+			bool boundWithConsumers = false;
 			uint64_t framesSinceConfigure = 0;
 		};
 
@@ -478,6 +524,9 @@ namespace Vpv
 			};
 			std::mutex sceneRunMutex;
 			SceneRunEntry sceneRuns[kSceneRunRing];
+			// GF-P2a S2b C1: the runs of frames classified AHEAD of the render seal (the LED walk front), in a ring of their own so they never
+			// overwrite a render frame's entry; SceneRunBefore checks it after sceneRuns (FadeRunEndsAt checks the record, so mixing is safe).
+			SceneRunEntry sceneRunsAhead[kSceneRunRing];
 			std::atomic<uint64_t> sceneRunRebuilt{ 0 }, sceneRunReduced{ 0 };   // ring misses rebuilt exactly / with reduced evidence (SceneRunBefore)
 			uint64_t feedEra = 0;
 			bool feedHadEra = false;
@@ -523,9 +572,18 @@ namespace Vpv
 					return false;
 				if (b.memo && !b.memo->OnRenderThread())
 				{
-					const VpSkeleton::AcquireResult a = b.memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
-					return a.Ok() && a.cpu != nullptr && a.cpuBytes == VpLaneProducts::kStatsBytes &&
-						VpLaneProducts::ReadSourceStats(a.cpu, a.cpuBytes, out);
+					// MUST-9: a PEEK of the lane's published bytes through its lease (the binder's copyPublished pattern,
+					// SkeletonAcquireLane.h), never the memo's Acquire: a miss here is a normal look-ahead miss, and an Acquire would set
+					// the memo's lastCause_ (a false "skeleton acquire p4_source_stats" Fallbacks entry) and count a failure.
+					const VpSkeleton::LaneLease lease = b.lane.Lease(VpSkeleton::kP4SourceStats);
+					if (!lease.Valid() || lease.bytes == nullptr || lease.bytes->Bytes() != VpLaneProducts::kStatsBytes)
+						return false;
+					bool decoded = false;
+					const VpSkeleton::PublishedRead pr = VpSkeleton::ReadPublishedBytes(lease, VpSkeleton::kP4SourceStats, seq,
+						VpLaneProducts::kStatsBytes, [out, &decoded](const auto* bytes, size_t n) {   // the P4 stats record's bytes (not a pixel buffer)
+							decoded = VpLaneProducts::ReadSourceStats(bytes, n, out);
+						});
+					return pr == VpSkeleton::PublishedRead::Copied && decoded;
 				}
 				const AnalysisLane::ProductRead r = b.lane.ReadOf(VpSkeleton::kP4SourceStats, seq);
 				return r.cpu != nullptr && VpLaneProducts::ReadSourceStats(r.cpu, r.cpuBytes, out);
@@ -946,7 +1004,7 @@ namespace Vpv
 		{
 			// R2: the memo's GPU device follows the renderer's pl_gpu. Render thread (GpuCreated) or under ownerFillsMutex_ at the memo's
 			// creation. Another pl_gpu at the same address = the old device died (its objects are forgotten, never destroyed).
-			void DetachMemoGpu(MemoHost& mh, bool gpuAlive);
+			void DetachMemoGpu(MemoHost& mh, bool gpuAlive, bool laneGpuDispatcher = false);
 			void AttachMemoGpu(MemoHost& mh, const void* gpu)
 			{
 				if (gpu == nullptr || (mh.gpuDevice && mh.gpuDevice->OwnerGpu() == gpu))
@@ -955,14 +1013,23 @@ namespace Vpv
 					DetachMemoGpu(mh, false);
 				mh.gpuDevice = std::make_shared<OwnerGpuDevice>(static_cast<pl_gpu>(gpu));
 				mh.memo->SetGpuDevice(mh.gpuDevice.get());
+				// GF-P2b MUST-3 (GV AMEND, attach side; the binder side is GF-P1 d0f2cbee3): a bound lane's binder set the presence from
+				// lane dispatcher || device at bind time, and PlanNoLaneGpu skips a lane-bound memo, so a device attached after the bind
+				// re-asserts it here (a shadow / raised lane has no dispatcher, yet the device serves the non-view GPU owner fills).
+				if (mh.memo->LaneBound())
+					mh.memo->SetGpuDispatcherPresent(true);
 			}
 			// The device goes: the memo stops handing the context out, releases every GPU spot (their textures go back to the device),
-			// then the device destroys them (alive) or forgets them (died).
-			void DetachMemoGpu(MemoHost& mh, bool gpuAlive)
+			// then the device destroys them (alive) or forgets them (died). `laneGpuDispatcher`: the bound lane has its own GPU dispatcher.
+			void DetachMemoGpu(MemoHost& mh, bool gpuAlive, bool laneGpuDispatcher)
 			{
 				if (!mh.gpuDevice)
 					return;
 				mh.memo->SetGpuDevice(nullptr);
+				// GF-P2b MUST-3 (detach side): while a lane is bound the presence is the lane's dispatcher only once the device is gone (the
+				// binder's rule, lane dispatcher || device); a memo without a lane is re-planned by PlanNoLaneGpu (pl_gpu known).
+				if (mh.memo->LaneBound())
+					mh.memo->SetGpuDispatcherPresent(laneGpuDispatcher);
 				if (!gpuAlive)
 					mh.gpuDevice->Abandon();
 				mh.memo->ReleaseGpuSpots();
@@ -1205,6 +1272,14 @@ namespace Vpv
 			const std::shared_ptr<HostState> st = hosts_.Find(host);
 			return st ? st->dispatcher.get() : nullptr;
 		}
+		const void* SkeletonModule::MemoDeviceGpuForTesting(const void* host) const
+		{
+			const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host);
+			if (!mh)
+				return nullptr;
+			std::lock_guard<std::mutex> lock(ownerFillsMutex_);   // as the attach / detach sites
+			return mh->gpuDevice ? mh->gpuDevice->OwnerGpu() : nullptr;
+		}
 		unsigned long long SkeletonModule::GpuDispatchersCreated() { return DispatchersCreated().load(std::memory_order_relaxed); }
 
 		// ---- lifecycle (render thread) --------------------------------------------------------------
@@ -1220,8 +1295,12 @@ namespace Vpv
 				// for it (its pl_dispatch is forgotten, not reused). Covers a memo-only host too (no lane state).
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
 				{
+					bool laneGpuDispatcher = false;   // GF-P2b MUST-3: the presence a bound lane keeps once the device is gone
+					if (const std::shared_ptr<HostState> hs = hosts_.Find(f.host))
+						if (const std::shared_ptr<Bundle> hb = std::atomic_load(&hs->bundle))
+							laneGpuDispatcher = hb->lane.HasGpuDispatcher();
 					std::lock_guard<std::mutex> lock(ownerFillsMutex_);
-					DetachMemoGpu(*mh, false);
+					DetachMemoGpu(*mh, false, laneGpuDispatcher);
 				}
 				hosts_.SetAux(f.host, f.device);   // the raw device, for the video memory query only
 				gpuSlots_.SetAux(f.host, const_cast<void*>(static_cast<const void*>(f.gpu)));   // 70b G5: the renderer's pl_gpu (null in a unit test: no GPU products)
@@ -1301,12 +1380,33 @@ namespace Vpv
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
 				{
 					std::lock_guard<std::mutex> memoLock(ownerFillsMutex_);   // GEM SK-LIFECYCLE: as the other two sites (the MemoHost is kept)
-					DetachMemoGpu(*mh, false);   // R2: nor are its owner textures (forgotten, counted)
+					// GF-P2b E2: only the DEAD renderer's device goes. A device on the host's current pl_gpu was attached by this renderer's
+					// GpuCreated (which abandons any older device first, audit S3): the store registering at the first SettingsApplied after it
+					// moves the tap generation and lands here, and detaching that device would leave the new renderer without one (never
+					// re-attached: every GPU owner fill would decline). A later GpuCreated still abandons a device it finds.
+					const void* currentGpu = gpuSlots_.Aux(host);
+					if (!(mh->gpuDevice && currentGpu != nullptr && mh->gpuDevice->OwnerGpu() == currentGpu))
+						DetachMemoGpu(*mh, false);   // R2: nor are its owner textures (forgotten, counted)
 				}
 				hosts_.Remove(host, false);
 				EraseExternal(host);          // nor is its external demand (declared for the dead renderer)
 				st.reset();
 			}
+			// GF-P2b S1 (ADR-0019: Original == Bill, zero cost): a live switch to the Original pathway ends the renderer's memo too. MemoHostOf
+			// returns an existing memo before its Original check, so a kept memo would still be sealed, windowed, planned (card query) and
+			// shown on the status lines. Its device goes while it lives (as at GpuReleased), then the table entry; MemoHostOf(false) is then
+			// null and every memo-host site is inert, and MemoFor makes none while the hub records Original. The renderer's word decides
+			// (as MemoHostOf: the hub's record when this Reconcile carries none), never the file alone.
+			const bool originalNow = originalFlag >= 0 ? originalFlag != 0 : Hub::ExtensionHub::Instance().OriginalPathway(host);
+			if (originalNow)
+				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
+				{
+					{
+						std::lock_guard<std::mutex> memoLock(ownerFillsMutex_);   // the one lock context for the memo's device (GpuReleased / GpuCreated)
+						DetachMemoGpu(*mh, true);
+					}
+					memoHosts_.Remove(host, true);
+				}
 			// 15c-c8 (coordinator ruling 2026-11-15; the TD fill rule's shape, core/AdmissionTable.h Admit: a product TD OFF still filled FOR the
 			// active consumer that depends on it): a registered consumer that needs the lane's results RAISES the effective lane mode to On (the
 			// least that serves it: Shadow's results are not used) and the frame-analysis store that feeds the lane, while it is registered.
@@ -1598,10 +1698,32 @@ namespace Vpv
 					++i;
 			}
 			if (erased != 0)
+			{
 				externalVersion_.fetch_add(1, std::memory_order_release);
+				// GF-P2b S3: the declaring components learn that their entry went (ExternalErasures), the tap generation untouched (moving it
+				// would run the dead-renderer teardown).
+				bool counted = false;
+				for (std::pair<const void*, uint64_t>& e : externalErasures_)
+					if (e.first == host)
+					{
+						++e.second;
+						counted = true;
+					}
+				if (!counted)
+					externalErasures_.push_back(std::make_pair(host, uint64_t(1)));
+			}
 			if (raising)
 				raiseVersion_.fetch_add(1, std::memory_order_release);
 			return erased;
+		}
+
+		uint64_t SkeletonModule::ExternalErasures(const void* host) const
+		{
+			std::lock_guard<std::mutex> lock(externalMutex_);
+			for (const std::pair<const void*, uint64_t>& e : externalErasures_)
+				if (e.first == host)
+					return e.second;
+			return 0;
 		}
 
 		size_t SkeletonModule::ExternalEntriesOf(const void* host) const
@@ -1708,11 +1830,18 @@ namespace Vpv
 			{
 				using VpUnit::CutFadeJudge::FadeRun;
 				const auto entryEndingAt = [&st](uint64_t s, const VpLaneProducts::SourceStatsRecord& r, FadeRun& out) {
-					const HostState::SceneRunEntry& en = st.sceneRuns[static_cast<size_t>(s % kSceneRunRing)];
-					if (en.seq != s || !VpUnit::CutFadeJudge::FadeRunEndsAt(en.run, r))
-						return false;
-					out = en.run;
-					return true;
+					// The render ring first, then the ahead ring (S2b C1): whichever holds the run that ends at this very record.
+					const HostState::SceneRunEntry* const rings[2] = { st.sceneRuns, st.sceneRunsAhead };
+					for (const HostState::SceneRunEntry* ring : rings)
+					{
+						const HostState::SceneRunEntry& en = ring[static_cast<size_t>(s % kSceneRunRing)];
+						if (en.seq == s && VpUnit::CutFadeJudge::FadeRunEndsAt(en.run, r))
+						{
+							out = en.run;
+							return true;
+						}
+					}
+					return false;
 				};
 				FadeRun run;
 				if (entryEndingAt(seq - 1, prev, run))
@@ -1753,7 +1882,11 @@ namespace Vpv
 			}
 
 			// SceneFactsOf's body; `done` (may be nullptr) gets the frames whose confirmed sequence verdict arrived in this call.
-			bool SceneFactsFor(HostState& st, Bundle& bundle, uint64_t seq, SceneFacts& out, std::vector<uint64_t>* done)
+			// `ahead` (GF-P2a S2b): `seq` is ahead of the render seal (SkeletonMemo::AheadOfSeal). Its fade run is folded as usual and kept in
+			// the AHEAD ring (sceneRunsAhead, C1), never in sceneRuns: an ahead frame 8+ out would overwrite the render frames' entries, and
+			// their runs would then be rebuilt with reduced evidence (sceneRunReduced). With the store on the walk front is usually the only
+			// fill of a frame (the seal finds its confirmed group), so the ahead ring is what keeps that chain exact.
+			bool SceneFactsFor(HostState& st, Bundle& bundle, uint64_t seq, SceneFacts& out, std::vector<uint64_t>* done, bool ahead)
 			{
 				out = SceneFacts();
 				if (seq < 2)
@@ -1792,7 +1925,8 @@ namespace Vpv
 					const bool runFade = VpUnit::CutFadeJudge::FoldFadeRun(a, c, e, run, &runKeep);
 					fadeKeep = VpUnit::CutFadeJudge::FrameFadeKeep(a, c, e.fade, runFade, runKeep);
 					e.fade = runFade || e.fade;
-					HostState::SceneRunEntry& kept = st.sceneRuns[static_cast<size_t>(seq % kSceneRunRing)];
+					// S2b C1: an ahead frame keeps its run in the ahead ring (the walk front chains exactly; render entries are never clobbered).
+					HostState::SceneRunEntry& kept = (ahead ? st.sceneRunsAhead : st.sceneRuns)[static_cast<size_t>(seq % kSceneRunRing)];
 					kept.seq = seq;
 					kept.run = run;
 				}
@@ -1830,6 +1964,12 @@ namespace Vpv
 				out.rectX1 = c.rectX1;
 				out.rectY1 = c.rectY1;
 				return true;
+			}
+
+			// The same, ahead-ness read from the renderer's memo now (SceneFactsOf).
+			bool SceneFactsFor(HostState& st, Bundle& bundle, uint64_t seq, SceneFacts& out, std::vector<uint64_t>* done)
+			{
+				return SceneFactsFor(st, bundle, seq, out, done, bundle.memo->AheadOfSeal(seq));
 			}
 		}
 
@@ -1872,19 +2012,32 @@ namespace Vpv
 			}
 			// U7 v2: frames whose confirmed verdict arrived with this frame (normally seq - 1); their Vp groups are rewritten below.
 			std::vector<uint64_t> done;
+			bool ahead = false;   // MUST-7: this frame is ahead of the render seal (set below for a classified frame)
+			// MUST-8: one hold of st.sceneMutex from the delivery decision through the store publish and the confirmation rewrite, so a
+			// provisional publish of seq can never land after (or between) the rewrite of seq by a fill of seq + 1 on another thread.
+			// Order: sceneMutex, then the store's own mutex (the store calls nothing back). SceneFactsFor runs before it (it locks itself).
+			std::unique_lock<std::mutex> sceneLock(st.sceneMutex, std::defer_lock);
 			if (!cached)
 			{
 				const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
+				// MUST-7 (A20-C5 ruling (A), replacing GV's amendment): the fill is split by RENDER ORDER, not by thread. A frame ahead of
+				// the render seal (the LED look-ahead walk) is classified and its own group published (computed once, found by the seal:
+				// OD 2026-11-15), but it never claims an earlier frame's late cut except its natural predecessor's, never moves the late
+				// search (sceneLastFilled) and never writes the render frame's sceneCache or the render sceneRuns ring (S2b: it keeps its run in sceneRunsAhead).
+				ahead = b && b->memo && b->memo->AheadOfSeal(seq);
+				// seq - 1 has had its render-order fill (it is not ahead of the seal itself).
+				const bool prevRendered = ahead && seq > 1 && !b->memo->AheadOfSeal(seq - 1);
 				SceneFacts f;
 				if (!b)
 					f.why = "no analysis lane";
-				if (!b || !SceneFactsFor(st, *b, seq, f, &done) || !f.valid)
+				if (!b || !SceneFactsFor(st, *b, seq, f, &done, ahead) || !f.valid)
 				{
 					if (answer)
 						answer->why = f.why;
 					return false;
 				}
-				std::lock_guard<std::mutex> lock(st.sceneMutex);
+				FrameAnalysis::Store* const deliveryStore = VpFrameAnalysis::SourceFrameTap::StoreFor(st.host);
+				sceneLock.lock();   // MUST-8: held through the store publish and the confirmation rewrite below
 				// Delivery (FrameAnalysis::Scene::cut): this frame's confirmed cut now, else the OLDEST confirmed cut since the last frame
 				// judged that did not go out with its own group (it was provisional then): exactly once per cut. Normally that is frame
 				// seq - 1 (one frame late); when frame c + 1 had no group (dropped, unsealed or no record) cut c is confirmed at the part end
@@ -1894,10 +2047,53 @@ namespace Vpv
 				// footage it holds false cuts the successor removes: refs/102b U7-accuracy).
 				HostState::SceneVerdictSlot& own = st.sceneVerdicts[seq % HostState::kSceneVerdicts];
 				const bool ownSlot = own.used && own.seq == seq;
+				// MUST-8: SceneFactsFor judged outside this lock; a fill of seq + 1 on another thread may have confirmed this frame's
+				// verdict since. Its confirmed verdict wins (never a downgrade: only a confirmed slot refreshes a provisional answer).
+				if (ownSlot && own.v.known && own.v.confirmed && !f.confirmed)
+				{
+					f.confirmed = true;
+					f.cut = own.v.cut;
+					f.flash = own.v.flash;
+					f.cutPossible = own.v.candidate;
+					f.cutStrength = own.v.strength;
+				}
 				bool late = false;
 				uint64_t nextUndelivered = 0;
 				if (ownSlot && own.carriesLate)
 					late = true;   // a re-fill of the same picture: the late cut it carried stays with it
+				else if (ahead)
+				{
+					// MUST-7: an ahead fill claims only frame seq - 1's late cut (its natural successor's delivery), and only when that
+					// frame's own group can no longer carry it: seq - 1 had its render-order fill already, or its Vp group is out (the `done`
+					// rewrite below confirms it, so the seal skips it and the cut would otherwise be stranded). Anything older belongs to the
+					// render-order fills (frame N + 1 delivers cut N, never an ahead N + k).
+					const uint64_t d = seq - 1;
+					HostState::SceneVerdictSlot& c = st.sceneVerdicts[d % HostState::kSceneVerdicts];
+					if (d >= 1 && c.used && c.seq == d && c.v.known && c.v.confirmed && c.v.cut && !c.deliveredOwn && !c.deliveredLate)
+					{
+						bool claim = prevRendered;
+						if (!claim && deliveryStore != nullptr && deliveryStore->Enabled())
+						{
+							// Its group is out (the seal will skip it once confirmed), or it has no record at all (records open at
+							// arrival, so seq - 1 was dropped or evicted: it never gets a group of its own).
+							FrameAnalysis::Scene g;
+							claim = (deliveryStore->PeekScene(d, g) && g.origin == FrameAnalysis::SceneOrigin::Vp) || !deliveryStore->HasRecord(d);
+						}
+						// Gate N1: the claim must be kept somewhere: this frame's slot (carriesLate, so a re-fill carries it) or its store
+						// record (the published group). Without either (JudgeSceneApart far past the tracker, no record yet) the render-order
+						// fill delivers it instead.
+						if (claim && !ownSlot)
+							claim = deliveryStore != nullptr && deliveryStore->Enabled() && deliveryStore->HasRecord(seq);
+						if (claim)
+						{
+							late = true;
+							c.deliveredLate = true;
+							if (ownSlot)
+								own.carriesLate = true;
+							st.sceneLate.fetch_add(1, std::memory_order_relaxed);
+						}
+					}
+				}
 				else
 				{
 					uint64_t lowest = seq - 1;
@@ -1928,7 +2124,11 @@ namespace Vpv
 						}
 					}
 				}
-				if (nextUndelivered != 0)
+				if (ahead)
+				{
+					// MUST-7: the late search is the render order's (an ahead frame neither starts nor moves it).
+				}
+				else if (nextUndelivered != 0)
 				{
 					st.sceneHasFilled = true;
 					st.sceneLastFilled = nextUndelivered;   // still owed: the next fill delivers it
@@ -1953,17 +2153,20 @@ namespace Vpv
 				scene.fadeKeep = f.fadeKeep;   // U7 v3: 1 on a frame that is no fade
 				if (f.fade && f.fadeKeep < 1.0f)
 					st.sceneFadePartial.fetch_add(1, std::memory_order_relaxed);
-				st.sceneCacheSeq = seq;
-				st.sceneCacheValid = true;
-				st.sceneCacheCut = scene.cut;
-				st.sceneCacheFade = scene.fade;
-				st.sceneCacheLate = scene.cutLate;
-				st.sceneCacheHere = scene.cutHere;
-				st.sceneCacheFlash = scene.flash;
-				st.sceneCacheCutPossible = scene.cutPossible;
-				st.sceneCacheConfirmed = scene.confirmed;
-				st.sceneCacheStrength = scene.cutStrength;
-				st.sceneCacheFadeKeep = scene.fadeKeep;
+				if (!ahead)   // MUST-7: the cache is the render frame's (one frame's classification); an ahead fill never overwrites it
+				{
+					st.sceneCacheSeq = seq;
+					st.sceneCacheValid = true;
+					st.sceneCacheCut = scene.cut;
+					st.sceneCacheFade = scene.fade;
+					st.sceneCacheLate = scene.cutLate;
+					st.sceneCacheHere = scene.cutHere;
+					st.sceneCacheFlash = scene.flash;
+					st.sceneCacheCutPossible = scene.cutPossible;
+					st.sceneCacheConfirmed = scene.confirmed;
+					st.sceneCacheStrength = scene.cutStrength;
+					st.sceneCacheFadeKeep = scene.fadeKeep;
+				}
 			}
 			if (answer)
 			{
@@ -1986,7 +2189,11 @@ namespace Vpv
 			if (FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(st.host))
 				if (store->Enabled())
 				{
-					if (store->PublishScene(seq, scene))
+					if (!sceneLock.owns_lock())
+						sceneLock.lock();   // MUST-8 (the cached path): the publish and the rewrite are under st.sceneMutex too
+					// SceneCounters::published counts records written at a SEAL (render order); an ahead publish is the reader's
+					// get-or-compute write, found by the seal later (alreadyPresent), so it is not counted there (MUST-7).
+					if (store->PublishScene(seq, scene) && !ahead)
 						st.scenePublished.fetch_add(1, std::memory_order_relaxed);
 					if (scene.confirmed && scene.cutHere)
 						NoteConfirmedCut(seq);   // pairs into it the veto passed before this group was confirmed
@@ -2001,14 +2208,11 @@ namespace Vpv
 						FrameAnalysis::Scene old;
 						if (!store->PeekScene(d, old) || old.origin != FrameAnalysis::SceneOrigin::Vp || old.confirmed)
 							continue;
-						VpUnit::CutFadeJudge::CutVerdict v;
-						{
-							std::lock_guard<std::mutex> lock(st.sceneMutex);
-							const HostState::SceneVerdictSlot& slot = st.sceneVerdicts[d % HostState::kSceneVerdicts];
-							if (!(slot.used && slot.seq == d && slot.v.known && slot.v.confirmed))
-								continue;
-							v = slot.v;
-						}
+						// st.sceneMutex is held (sceneLock, MUST-8).
+						const HostState::SceneVerdictSlot& slot = st.sceneVerdicts[d % HostState::kSceneVerdicts];
+						if (!(slot.used && slot.seq == d && slot.v.known && slot.v.confirmed))
+							continue;
+						const VpUnit::CutFadeJudge::CutVerdict v = slot.v;
 						old.cutHere = v.cut;   // the delivered `cut` / cutLate stay as written (exactly once per cut)
 						old.flash = v.flash;
 						old.cutPossible = v.candidate;
@@ -2368,7 +2572,9 @@ namespace Vpv
 			{
 				VpSkeleton::AheadDemand ad;
 				ad.need = d.depth;
-				ad.consumer = d.form != 0 ? "owner fill (GPU)" : "owner fill (CPU)";
+				// GF-P1 AHEAD-DECL call site (GF-P2b): the requester's name (OwnerFill::aheadBy, a static string) reaches the window's existing
+				// ceiling notice ("ahead compute 6 (by X; ceiling 6)"); an unnamed request keeps the form wording.
+				ad.consumer = d.by != nullptr ? d.by : (d.form != 0 ? "owner fill (GPU)" : "owner fill (CPU)");
 				demands.push_back(ad);
 			}
 			VpSkeleton::SetAheadConsumers(t, demands);
@@ -2627,7 +2833,15 @@ namespace Vpv
 			const bool vramMoved = b->configuredVramVersion != vramVersion && b->framesSinceConfigure >= kReconfigureMinFrames;
 			const uint64_t extVersion = externalVersion_.load(std::memory_order_acquire);
 			const bool extMoved = b->configuredExtVersion != extVersion || st.vramReplan;   // external demand changed, or the shortfall did: re-plan at once (rare)
-			if (rebuild || b->configuredGen != gen || queueMoved || vramMoved || extMoved || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
+			// GEM-W1A S1, restored by GF-P2b MUST-4 (GV AMEND 1): the memo's GPU need follows its window (re-derived every frame) and its
+			// lazily registered GPU fills (P1 GPU / edge map register at Entrance, after the first Begin's Configure), neither in QueueShape.
+			// A bound lane is planned only here (PlanNoLaneGpu returns early), so a moved need re-plans, rate-limited like vramMoved (as the
+			// no-lane path re-plans on plannedNeed). The lane's Configure re-plans a kept graph whose plan moved (AnalysisLane.h, MUST-4 (2)).
+			const std::vector<uint64_t> memoLevels = b->memo->GpuNeedLevels();
+			const uint64_t memoNeed = memoLevels.empty() ? 0u : memoLevels.front();
+			const bool memoNeedMoved = b->configuredMemoNeed != memoNeed && b->framesSinceConfigure >= kReconfigureMinFrames;
+			if (rebuild || b->configuredGen != gen || queueMoved || vramMoved || extMoved || memoNeedMoved
+				|| ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
 			{
 				CardProfile card;
 				std::string why;
@@ -2648,8 +2862,7 @@ namespace Vpv
 				{
 					// GEM SK-VRAM: the memo's GPU spots are a user of the SAME ledger (as PlanNoLaneGpu / MemoGpuGrant.h): added here from its
 					// need levels, so the plan's scratch-arena grant (read below) exists. No second ledger.
-					const std::vector<uint64_t> memoLevels = b->memo->GpuNeedLevels();
-					if (!memoLevels.empty() && memoLevels.front() != 0)
+					if (memoNeed != 0)
 						tier.otherUsers.push_back(VpSkeleton::MakeMemoVramUser(memoLevels, "skeleton memo"));
 				}
 				tier.ownUsageBytes = declared.heldBytes;
@@ -2726,26 +2939,35 @@ namespace Vpv
 				b->registry = Bundle::MakeRegistry(b->wiring, st.periodMs, VpSkeleton::QueueFrames(gs));
 				b->lane.Configure(st.settings.lane, b->registry, consumers, gs, card, tier, seq, false);
 				b->lane.SetExternalProducts(outside);
+				// GF-P2b (gate G6 C2): the lane fills take the configured consumers' declared ahead depths (rebound when they move: also after
+				// an extMoved Configure whose only change is a depth, which keeps the graph).
+				b->BindConsumers(consumers);
 				{
-					// B1: the memo's GPU spots are budgeted against the VRAM ledger: the scratch-arena grant (T0 + extra) of this plan.
+					// B1: the memo's GPU spots are budgeted against the VRAM ledger: the memo user's grant of this plan (GF-P2b S10: its own
+					// id kUserSkeletonMemo, MakeMemoVramUser above; the scratch arena's kUserScratchArena / Extra grants are the arena's).
 					// No grant = GPU memo fills decline visibly (NoLedgerGrant), nothing is allocated outside the ledger.
 					bool memoGranted = false;
 					uint64_t memoBudget = 0;
-					if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
-						for (const uint16_t uid : { uint16_t(VpSkeleton::kUserScratchArena), uint16_t(VpSkeleton::kUserScratchArenaExtra) })
-							if (const VpSkeleton::UserGrant* g = ls->plan.governor.Find(uid))
-							{
-								memoGranted = memoGranted || g->bytes > 0;
-								memoBudget += g->bytes;
-							}
+					// GF-P2b MUST-4 (2): the CURRENT users plan (a kept lane state's users re-plan when the memo's need moved, else the state's).
+					if (const std::shared_ptr<const VpSkeleton::GovernorPlan> gp = b->lane.CurrentGovernorPlan())
+						if (const VpSkeleton::UserGrant* g = gp->Find(uint16_t(VpSkeleton::kUserSkeletonMemo)))
+						{
+							memoGranted = g->bytes > 0;
+							memoBudget = g->bytes;
+						}
 					b->memo->SetGpuBudget(memoGranted, memoBudget);
+					// GF-P2b MUST-4 (3) / S10b: the ahead plan follows the grant, exactly as the no-lane path (PlanNoLaneGpu), so a memo that was
+					// planned without a lane never keeps that stale plan (NotPlannedAhead limits) once a lane binds and grants it.
+					VpSkeleton::AheadNeed an = b->memo->MakeAheadNeed(b->memo->Window());
+					an.grantBytes = memoGranted ? memoBudget : 0u;
+					b->memo->SetAheadPlan(VpSkeleton::PlanAheadLadder(an));
 				}
 				{
 					// What the declared users still hold above their grant: planned as transient at the next Configure (once).
 					uint64_t shortfall = 0;
-					if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
+					if (const std::shared_ptr<const VpSkeleton::GovernorPlan> gp = b->lane.CurrentGovernorPlan())
 						for (const std::pair<uint16_t, uint64_t>& h : declared.heldById)
-							if (const VpSkeleton::UserGrant* g = ls->plan.governor.Find(h.first))
+							if (const VpSkeleton::UserGrant* g = gp->Find(h.first))
 								if (g->bytes < h.second)
 									shortfall += h.second - g->bytes;
 					if (shortfall != st.vramShortfallUsed)
@@ -2765,6 +2987,7 @@ namespace Vpv
 				b->configuredQueue = queue;
 				b->configuredVramVersion = vramVersion;
 				b->configuredExtVersion = extVersion;
+				b->configuredMemoNeed = memoNeed;
 				b->framesSinceConfigure = 0;
 				++st.configures;
 			}
@@ -3024,8 +3247,8 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					full.push_back(memoLine);   // B1: reused / filled at read / unavailable (cause) per product asked
 				// MV7 ledger (Ctrl+Alt+D): the VRAM users outside the product catalog, as the governor granted them (one line each; products are
 				// listed by the lane's own status). A user below level 0 also has its governor notice in "Analysis: ..." (plan.notice).
-				if (const std::shared_ptr<VpSkeleton::LaneState> laneState = lane.State())
-					for (const VpSkeleton::UserGrant& g : laneState->plan.governor.grants)
+				if (const std::shared_ptr<const VpSkeleton::GovernorPlan> usersPlan = lane.CurrentGovernorPlan())   // GF-P2b MUST-4 (2): the current users plan
+					for (const VpSkeleton::UserGrant& g : usersPlan->grants)
 						if (g.id < VpSkeleton::kUserProductBase)
 							full.push_back(std::string("VRAM ") + VpSkeleton::Token(g.tier) + " " + g.name + ": " + VpSkeleton::FormatMB(g.bytes) + " level " +
 								std::to_string(g.level) + (g.shed ? " (off)" : g.reduced ? " (reduced)" : ""));

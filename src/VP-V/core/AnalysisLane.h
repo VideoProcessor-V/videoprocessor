@@ -769,6 +769,22 @@ public:
     uint64_t AheadBeyondSlots() const { return aheadBeyondSlots_; }
     uint64_t AheadGpuNotLegal() const { return aheadGpuNotLegal_; }
     uint64_t AheadSealReused() const { return aheadSealReused_; }
+    // GF-P2b MUST-4 (2): Configures that kept the graph but rebuilt the state because its lane decisions moved, and Configures that kept
+    // the state and re-planned only the other VRAM users (both shown on the status lines).
+    uint64_t PlanMovedRebuilds() const { return planMovedRebuilds_.load(std::memory_order_relaxed); }
+    uint64_t UsersReplans() const { return usersReplans_.load(std::memory_order_relaxed); }
+    // The CURRENT governor plan of every VRAM user: a kept state's users re-plan when one was made for it, else the state's own plan
+    // (null without a state). The skeleton reads the memo's grant (kUserSkeletonMemo) and the users' shortfall here. Any thread.
+    std::shared_ptr<const GovernorPlan> CurrentGovernorPlan() const
+    {
+        const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
+        if (!st)
+            return std::shared_ptr<const GovernorPlan>();
+        const std::shared_ptr<const UsersPlan> up = std::atomic_load(&usersPlan_);
+        if (up && up->generation == st->generation)
+            return std::shared_ptr<const GovernorPlan>(up, &up->plan);
+        return std::shared_ptr<const GovernorPlan>(st, &st->plan.governor);
+    }
     // The seal compute in a DECLARED reduced form (an input missing at the seal): counted apart from sealComputed, which is the
     // compute-once ledger of the full form (L-CORE s1 SHOULD): the two are different results of one frame.
     uint64_t SealComputedReduced() const { return sealComputedReduced_; }
@@ -898,7 +914,39 @@ public:
         periodMs_ = tier.framePeriodMs;
         chunkCapUs_.store(GapScheduler::DerivedChunkCapUs(tier.framePeriodMs, s.chunkUs), std::memory_order_relaxed);
 
+        // GF-P2b MUST-4 (2) (lead ruling, replaces GV's shared-LaneState publish: a LaneState owns its ring / table / bufs / runner and
+        // the runner's callbacks hold the raw state pointer, so a second state sharing them is unsafe): the graph is kept, but the VRAM
+        // plan of that graph may have moved (a new card reading, a new other-user such as the memo's raised GPU need). A PROBE on a copy
+        // of the governor plans the kept graph with this card / tier.
+        // - The lane's OWN decisions equal (every product's grant / tier / history depth, the product users' grants, the history caps,
+        //   the over-budget flags): the state is kept as before (never mutated). If only the OTHER users' grants moved (the memo,
+        //   the optical-flow engines, ...: ids below kUserProductBase), the probe's governor plan is published as the current users
+        //   plan (CurrentGovernorPlan; the lane's products are unaffected), counted UsersReplans and shown.
+        // - The lane's own decisions moved: fall through to BuildState on the SAME graph (the capsMismatch check stays). An ordinary
+        //   reconfigure, not a resync: a new state generation (leases re-lease), failed_ re-keyed by the state pointer at the next
+        //   OnRenderStart, ahead claims and render-made marks of the old tables gone (the next ask makes the frame once again), the
+        //   ring's frames carried over, nothing outside the lane told (no vector-validity or resync event). Counted (PlanMovedRebuilds)
+        //   and shown on the lane status lines.
+        bool planMoved = false;
         if (reasons == 0 && cur) {
+            VramGovernor probe = governor_;
+            const TierPlan& probed = probe.Update(reg, cur->graph, card, tier);
+            planMoved = !SameLaneDecisions(probed, cur->plan);
+            if (planMoved) {
+                planMovedLastSeq_.store(fromSeq, std::memory_order_relaxed);
+                planMovedRebuilds_.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                const std::shared_ptr<const GovernorPlan> users = CurrentGovernorPlan();
+                if (!users || !SameUserGrants(probed.governor, *users)) {
+                    std::shared_ptr<UsersPlan> up = std::make_shared<UsersPlan>();
+                    up->generation = cur->generation;
+                    up->plan = probed.governor;
+                    std::atomic_store(&usersPlan_, std::shared_ptr<const UsersPlan>(up));
+                    usersReplans_.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
+        if (reasons == 0 && cur && !planMoved) {
             cur->gap.SetChunkCapUs(ChunkCapUs());
             if (detChanged) {
                 ConfigureRegulator();
@@ -1551,6 +1599,16 @@ public:
             out.push_back("Analysis: " + notice);
         if (!st->plan.notice.empty())
             out.push_back("Analysis: " + st->plan.notice);
+        const uint64_t planMovedN = planMovedRebuilds_.load(std::memory_order_relaxed);
+        if (planMovedN > 0)
+            out.push_back("Analysis: lane state rebuilt " + std::to_string(planMovedN)
+                          + " time(s) on a kept graph because its VRAM plan moved (last at frame "
+                          + std::to_string(planMovedLastSeq_.load(std::memory_order_relaxed))
+                          + "; a reconfigure, not a resync)");
+        const uint64_t usersN = usersReplans_.load(std::memory_order_relaxed);
+        if (usersN > 0)
+            out.push_back("Analysis: other VRAM users re-planned " + std::to_string(usersN)
+                          + " time(s) on a kept lane state (the lane's own products unchanged)");
         return out;
     }
 
@@ -1797,6 +1855,49 @@ private:
     }
 
     void ConfigureRegulator() { regulator_.Configure(regProducts_, periodMs_, det_); }
+    // GF-P2b MUST-4 (2): do two plans of the SAME graph make the same decisions for the LANE's own products? Every product's grant /
+    // tier / history depth, the product users' grants (ids from kUserProductBase), the history caps and the over-budget flags.
+    // Plain-language text (notice, lines) and the measured figures (budget, totals, ms) are not decisions: a new card reading alone
+    // does not rebuild the lane. The other VRAM users' grants are compared apart (SameUserGrants).
+    static bool SameGrant(const UserGrant& x, const UserGrant& y)
+    {
+        return x.id == y.id && x.level == y.level && x.bytes == y.bytes && x.shed == y.shed;
+    }
+    static bool SameLaneDecisions(const TierPlan& a, const TierPlan& b)
+    {
+        if (a.entries.size() != b.entries.size() || a.historyCaps != b.historyCaps || a.t0OverBudget != b.t0OverBudget
+            || a.liveOverBudget != b.liveOverBudget)
+            return false;
+        for (size_t i = 0; i < a.entries.size(); ++i) {
+            const TierEntry& x = a.entries[i];
+            const TierEntry& y = b.entries[i];
+            if (x.id != y.id || x.grant != y.grant || x.tier != y.tier || x.historyGranted != y.historyGranted)
+                return false;
+        }
+        std::vector<const UserGrant*> pa, pb;
+        for (const UserGrant& g : a.governor.grants)
+            if (g.id >= kUserProductBase)
+                pa.push_back(&g);
+        for (const UserGrant& g : b.governor.grants)
+            if (g.id >= kUserProductBase)
+                pb.push_back(&g);
+        if (pa.size() != pb.size())
+            return false;
+        for (size_t i = 0; i < pa.size(); ++i)
+            if (!SameGrant(*pa[i], *pb[i]))
+                return false;
+        return true;
+    }
+    // Every user's grant, in order (the users plan the skeleton reads: the memo's kUserSkeletonMemo grant among them).
+    static bool SameUserGrants(const GovernorPlan& a, const GovernorPlan& b)
+    {
+        if (a.grants.size() != b.grants.size())
+            return false;
+        for (size_t i = 0; i < a.grants.size(); ++i)
+            if (!SameGrant(a.grants[i], b.grants[i]))
+                return false;
+        return true;
+    }
 
     // The regulator's states onto the runner and the slots: a product moved into the render or dropped
     // has no lane (its misses are expected, not counted); forced live stays laned.
@@ -1983,6 +2084,15 @@ private:
     std::function<uint64_t()> nowUs_;
     LaneSettings settings_;
     std::shared_ptr<LaneState> state_;         // swapped with std::atomic_store / atomic_load
+    std::atomic<uint64_t> planMovedRebuilds_{ 0 };   // GF-P2b MUST-4 (2): kept-graph Configures whose VRAM plan moved (written on the render thread)
+    std::atomic<uint64_t> planMovedLastSeq_{ 0 };    // the frame of the last one
+    // GF-P2b MUST-4 (2): the other VRAM users' re-plan of a KEPT state (its generation: a newer state's own plan wins).
+    struct UsersPlan {
+        uint64_t generation = 0;
+        GovernorPlan plan;
+    };
+    std::shared_ptr<const UsersPlan> usersPlan_;     // std::atomic_load / atomic_store (status lines read it from any thread)
+    std::atomic<uint64_t> usersReplans_{ 0 };
     std::atomic<uint64_t> stateGeneration_{ 0 };   // last LaneState::generation handed out; also bumped when the state is dropped (Lease() reads it)
     std::shared_ptr<LaneState> renderState_;   // the render thread's hold (keeps returned references valid)
     uint64_t renderSeq_ = 0;                    // the frame of the last OnRenderStart (render thread; ReadOf's ahead edge)

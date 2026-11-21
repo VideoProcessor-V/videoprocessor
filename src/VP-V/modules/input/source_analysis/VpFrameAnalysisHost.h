@@ -33,6 +33,16 @@ namespace VpFrameAnalysis
 		{
 			if (const void* owner = m_owner.load(std::memory_order_acquire))
 				SourceFrameTap::SetStoreDemandApplier(owner, SourceFrameTap::StoreDemandApplier(), nullptr);   // 15c-c8: waits for a call in flight
+			{
+				// FIX-SF (R4 gate): a destroyed Host withdraws its share of SharedCount. After the applier is gone, so no ApplyDemand
+				// can add it back.
+				std::lock_guard<std::mutex> lock(m_mutex);
+				if (m_sharedWanted)
+				{
+					m_sharedWanted = false;
+					SharedCount().fetch_sub(1, std::memory_order_acq_rel);
+				}
+			}
 			m_producer.Stop();
 			if (const void* owner = m_owner.load(std::memory_order_acquire))
 			{
@@ -91,8 +101,7 @@ namespace VpFrameAnalysis
 			m_fullLumaReaders = fullLumaReaders;
 			m_recordReaders = recordReaders;
 			m_configured = enabled;
-			SharedFlag().store(enabled && fullLumaReaders, std::memory_order_release);
-			ApplyLocked();
+			ApplyLocked();   // GF-P2b S3 (2): sets this Host's SharedCount share from the effective state
 		}
 
 		// The consumer demand (SourceFrameTap's applier, called with its demand mutex held; the skeleton's render thread).
@@ -116,7 +125,7 @@ namespace VpFrameAnalysis
 		// before it is cached and copied out, so every reader of this frame shares one decode.
 		static void AttachIfEnabled(AnalysisLumaSource& source)
 		{
-			if (SharedFlag().load(std::memory_order_acquire) || SourceFrameTap::AnyWants())
+			if (SharedCount().load(std::memory_order_acquire) > 0 || SourceFrameTap::AnyWants())
 				AttachSharedLuma(source);
 		}
 
@@ -253,6 +262,15 @@ namespace VpFrameAnalysis
 		void ApplyLocked()
 		{
 			const bool enabled = m_configured || m_demanded;
+			// GF-P2b S3 (2): the shared-plane want follows the EFFECTIVE state (a demand-raised store with full-luma readers shares
+			// one decode too), before the early return, so a readers-only Configure on a running store updates it as well.
+			// FIX-SF (R4 gate): per Host, as its own transition of the process-wide SharedCount, so one Host never turns off another's.
+			const bool sharedWanted = enabled && m_fullLumaReaders;
+			if (sharedWanted != m_sharedWanted)
+			{
+				m_sharedWanted = sharedWanted;
+				SharedCount().fetch_add(sharedWanted ? 1 : -1, std::memory_order_acq_rel);
+			}
 			m_raisedByDemand.store(enabled && !m_configured, std::memory_order_release);
 			if (enabled == m_enabled) return;
 			m_enabled = enabled;
@@ -271,10 +289,11 @@ namespace VpFrameAnalysis
 			m_haveUnique = false;
 		}
 
-		static std::atomic<bool>& SharedFlag()
+		// FIX-SF (R4 gate): the number of Hosts that want a shared plane (each counts once, under its own m_mutex).
+		static std::atomic<int>& SharedCount()
 		{
-			static std::atomic<bool> flag{ false };
-			return flag;
+			static std::atomic<int> count{ 0 };
+			return count;
 		}
 		static std::atomic<bool>& LimitedDomainFlag()
 		{
@@ -291,6 +310,7 @@ namespace VpFrameAnalysis
 		bool m_demanded = false;     // 15c-c8: a registered consumer's demand (ApplyDemand)
 		std::atomic<bool> m_raisedByDemand{ false };
 		bool m_fullLumaReaders = false;
+		bool m_sharedWanted = false;   // FIX-SF: this Host's contribution to SharedCount (under m_mutex)
 		bool m_recordReaders = false;
 		size_t m_pendingDepth = 0;
 		uint64_t m_lastUnique = 0;

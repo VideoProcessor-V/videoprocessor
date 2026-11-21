@@ -178,6 +178,10 @@ namespace Vpv
 			// the same with frame_analysis_store off. RENDER THREAD for the live path (it reads the lane's slots). Default: unknown (an
 			// implementer without a scene product; the caller shows its visible "unavailable").
 			virtual SceneAnswer SceneOf(const void* /*host*/, uint64_t /*seq*/) const { return SceneAnswer(); }
+			// GF-P2b S3 (GV AMEND 1): how many times the skeleton ERASED this host's external demand entries (GpuReleased / Shutdown, a dead
+			// renderer at the address). A declaring component folds it into its "already declared" key, so a GPU-only reset of the same
+			// renderer (the tap generation unchanged) still re-declares. Only ever grows. Any thread. Default 0 (nothing is ever erased).
+			virtual uint64_t ExternalErasures(const void* /*host*/) const { return 0; }
 		protected:
 			~IExternalDemand() {}
 		};

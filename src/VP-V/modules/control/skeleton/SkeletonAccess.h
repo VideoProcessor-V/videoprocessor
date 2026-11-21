@@ -78,8 +78,10 @@ namespace Vpv
 			const SceneAnswer a = d->SceneOf(host, seq);
 			if (!a.known)
 			{
+				// S12: the skeleton's own reason (an AcquireCause token, "no analysis lane", "unknown renderer", ...) when it gave one.
 				if (why)
-					*why = "the skeleton could not classify the frame (no sealed pair of P4 records: analysis lane off, unknown renderer or not primed yet)";
+					*why = (a.why != nullptr && a.why[0] != 0) ? a.why
+						: "the skeleton could not classify the frame (no sealed pair of P4 records: analysis lane off, unknown renderer or not primed yet)";
 				return false;
 			}
 			out = ::FrameAnalysis::Scene();

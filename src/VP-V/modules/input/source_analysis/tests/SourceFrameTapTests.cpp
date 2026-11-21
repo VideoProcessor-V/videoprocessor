@@ -16,6 +16,7 @@
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>
 #include <VP-V/tests/SyntheticAnalysisFrames.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -394,6 +395,91 @@ namespace SourceFrameTapTestsNs
 			host.Owner(&host).Configure(false);
 			Assert::IsFalse(host.Enabled());
 			host.Worker().Stop();
+		}
+
+		// GF-P2b S3 (2), test first (GV): with frame_analysis_store OFF by configuration and the store raised by a consumer's demand (the LED
+		// drive, through the skeleton), the frames that arrive after the raise get frame-analysis records and reach the tap's sink. If this is
+		// RED the follow-up is in VpFrameAnalysis::Host (the configured-off shared-plane flag), not here.
+		// The registered tap sink makes Tap::AnyWants true, as in production (the skeleton registers it), so AttachIfEnabled attaches the
+		// plane through the sink and the Host's SharedCount share (the effective state AND full-luma readers) is NOT exercised here: the next test is
+		// the case without a sink.
+		TEST_METHOD(ARaisedStoreWithTheConfigurationOffProducesRecordsForTheFramesAfterTheRaise)
+		{
+			VpFrameAnalysis::Host host;
+			std::vector<SourceFrameView> got;
+			Tap::Register(&host, [&got](const SourceFrameView& v) { got.push_back(v); });
+			host.Owner(&host).Configure(false);
+			Tap::SetStoreDemand(&host, true, "LED drive");
+			Assert::IsTrue(host.Enabled(), L"the demand turns the store on");
+			Assert::IsTrue(host.RaisedByDemand());
+			host.Worker().Stop();   // the raise started the worker; stopped so the arrival below is drained by the test
+			Frame frame = Make(Kind::Uyvy, 1);
+			VpFrameAnalysis::Host::AttachIfEnabled(frame.source);
+			host.OnArrival(5, frame.source, FrameAnalysis::Rect{}, 0, false);
+			host.Worker().Drain();
+			Assert::IsTrue(host.Store().HasRecord(5), L"a record exists for the frame that arrived after the raise");
+			Assert::AreEqual<size_t>(1, got.size(), L"and the tap's sink got the frame");
+			Tap::SetStoreDemand(&host, false, std::string());
+			Tap::Unregister(&host);
+			host.Worker().Stop();
+		}
+
+		// The same without a tap sink and with a full-luma reader configured (Configure(false, true, true)): the shared plane is attached by
+		// the Host's own flag. If this is RED (the flag is enabled AND readers, so a raised-only store attaches no plane), report it to
+		// GF-P2b / A20-C5; no code is changed here.
+		TEST_METHOD(ARaisedStoreWithTheConfigurationOffAttachesThePlaneForAConfiguredFullLumaReader)
+		{
+			VpFrameAnalysis::Host host;
+			host.Owner(&host).Configure(false, true, true);
+			Tap::SetStoreDemand(&host, true, "LED drive");
+			Assert::IsTrue(host.Enabled(), L"the demand turns the store on");
+			host.Worker().Stop();
+			Frame frame = Make(Kind::Uyvy, 1);
+			VpFrameAnalysis::Host::AttachIfEnabled(frame.source);
+			Assert::IsTrue(frame.source.sharedLuma != nullptr, L"the shared plane is attached for the reader");
+			host.OnArrival(5, frame.source, FrameAnalysis::Rect{}, 0, false);
+			host.Worker().Drain();
+			Assert::IsTrue(host.Store().HasRecord(5), L"a record exists for the frame that arrived after the raise");
+			Tap::SetStoreDemand(&host, false, std::string());
+			host.Worker().Stop();
+		}
+
+		// GF-P2b FIX-SF (R4 gate, T13): the shared-plane want is a per-Host share of a process-wide count. No tap sink is registered, so only
+		// the Hosts' own wants attach the plane. One Host turning off never turns off another's; a destroyed Host releases its share; a
+		// demand-raised store with full-luma readers shares the plane too.
+		TEST_METHOD(TwoHostsShareThePlaneIndependentlyAndADestroyedHostReleasesItsShare)
+		{
+			Assert::IsFalse(Tap::AnyWants(), L"precondition: no tap sink registered");
+			auto attached = []() {
+				Frame f = Make(Kind::Uyvy, 1);
+				VpFrameAnalysis::Host::AttachIfEnabled(f.source);
+				return f.source.sharedLuma != nullptr;
+			};
+			Assert::IsFalse(attached(), L"precondition: nobody wants the plane");
+			std::unique_ptr<VpFrameAnalysis::Host> a(new VpFrameAnalysis::Host());
+			VpFrameAnalysis::Host b;
+			a->Configure(true, true, false);
+			b.Configure(true, true, false);
+			Assert::IsTrue(attached(), L"(a) both want it");
+			b.Configure(false, true, false);   // B turns off: A still wants the plane
+			Assert::IsTrue(attached(), L"(a) A still wants it after B turned off");
+			b.Configure(true, false, false);   // B on, no full-luma readers
+			Assert::IsTrue(attached(), L"(b) still attached through A");
+			a.reset();   // A destroyed while B wants no plane
+			Assert::IsFalse(attached(), L"(c) a destroyed Host released its share");
+			b.Configure(false);
+			b.Worker().Stop();
+			// (d) the demand path: a configured-off store raised by a demand, with a full-luma reader.
+			VpFrameAnalysis::Host c;
+			c.Configure(false, true, true);
+			Assert::IsFalse(attached(), L"(d) configured off, no demand: no plane");
+			c.ApplyDemand(true);
+			Assert::IsTrue(attached(), L"(d) the demand-raised store shares the plane");
+			c.ApplyDemand(false);
+			Assert::IsFalse(attached(), L"(d) the demand withdrawn: no plane");
+			c.Configure(false);
+			c.Worker().Stop();
+			Assert::IsFalse(attached(), L"every Host is off: the count is back to 0");
 		}
 
 		TEST_METHOD(ADemandMadeBeforeTheHostRegisteredIsAppliedAtRegistrationAndAGoneHostIsNeverCalled)

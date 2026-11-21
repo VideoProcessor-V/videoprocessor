@@ -23,7 +23,9 @@
 // CPU only (no GPU object is touched: textures are plain structs), single process, every test bounded.
 
 #include <VP-V/core/AnalysisLane.h>
+#include <VP-V/core/GpuAllocator.h>
 #include <VP-V/core/MemoGpuGrant.h>
+#include <VP-V/core/VramUsers.h>
 #include <VP-V/core/PipelineSlots.h>
 #include <VP-V/core/QueueWindow.h>
 #include <VP-V/core/SkeletonAcquire.h>
@@ -970,6 +972,148 @@ namespace SkeletonCoreContextTestsNs
 		}
 	};
 
+	// GF-P2b MUST-4 (2) (lead conditions 1-3): Configure on a kept graph. An equal plan keeps the state; a plan that moved only in the
+	// OTHER users' grants re-plans the users on the kept state (CurrentGovernorPlan); a plan whose lane decisions moved rebuilds the state
+	// on the same graph (a reconfigure, not a resync) and carries the ring's frames over.
+	TEST_CLASS(LanePlanProbeTests)
+	{
+	public:
+		static LaneSettings OnSettings()
+		{
+			LaneSettings s;
+			s.mode = LaneSettings::Mode::On;
+			return s;
+		}
+
+		static bool LinesHave(const AnalysisLane& lane, const char* part)
+		{
+			for (const std::string& l : lane.StatusLines())
+				if (l.find(part) != std::string::npos)
+					return true;
+			return false;
+		}
+
+		static bool SameEntries(const TierPlan& a, const TierPlan& b)
+		{
+			if (a.entries.size() != b.entries.size())
+				return false;
+			for (size_t i = 0; i < a.entries.size(); ++i)
+				if (a.entries[i].id != b.entries[i].id || a.entries[i].grant != b.entries[i].grant || a.entries[i].tier != b.entries[i].tier ||
+					a.entries[i].historyGranted != b.entries[i].historyGranted)
+					return false;
+			return true;
+		}
+
+		TEST_METHOD(AnEqualPlanKeepsTheStateAndCountsNothing)
+		{
+			MiniLane r;
+			Assert::IsTrue(r.lane.Active(), L"built");
+			const LaneState* first = r.lane.State().get();
+			Assert::IsNotNull(first);
+			r.lane.Configure(OnSettings(), r.reg, r.consumers, r.gs, r.card, r.tier, 0, false);
+			Assert::IsTrue(r.lane.State().get() == first, L"the same state");
+			Assert::AreEqual(uint64_t(0), r.lane.PlanMovedRebuilds());
+			Assert::AreEqual(uint64_t(0), r.lane.UsersReplans());
+		}
+
+		TEST_METHOD(AMovedOtherUsersPlanReplansTheUsersOnTheKeptState)
+		{
+			MiniLane r;
+			const LaneState* first = r.lane.State().get();
+			Assert::IsNotNull(first);
+			r.tier.otherUsers.push_back(MakeMemoVramUser({ 1u << 20 }, "test memo"));
+			r.lane.Configure(OnSettings(), r.reg, r.consumers, r.gs, r.card, r.tier, 0, false);
+			Assert::IsTrue(r.lane.State().get() == first, L"the state is kept");
+			Assert::AreEqual(uint64_t(0), r.lane.PlanMovedRebuilds());
+			Assert::AreEqual(uint64_t(1), r.lane.UsersReplans());
+			const std::shared_ptr<const GovernorPlan> users = r.lane.CurrentGovernorPlan();
+			Assert::IsTrue(users != nullptr);
+			const UserGrant* g = users->Find(kUserSkeletonMemo);
+			Assert::IsNotNull(g, L"the memo's grant is in the current users plan");
+			Assert::IsTrue(g->bytes == (1u << 20));
+			Assert::IsTrue(r.lane.State()->plan.governor.Find(kUserSkeletonMemo) == nullptr, L"the live state is not mutated");
+			Assert::IsTrue(LinesHave(r.lane, "other VRAM users re-planned 1 time(s) on a kept lane state"));
+			r.lane.Configure(OnSettings(), r.reg, r.consumers, r.gs, r.card, r.tier, 0, false);
+			Assert::AreEqual(uint64_t(1), r.lane.UsersReplans(), L"the same call again re-plans nothing");
+			Assert::IsTrue(r.lane.State().get() == first);
+		}
+
+		// GF-P2b MUST-4 (2) (R4 T12): a second move of ONLY the other users' grants (the memo's level rises) re-plans the users once more on
+		// the same state: UsersReplans + 1, PlanMovedRebuilds + 0, the same state (pointer and generation), and the memo's grant in the
+		// current users plan follows the new level.
+		TEST_METHOD(UsersOnlyReplanKeepsTheStateAndFollowsTheGrant)
+		{
+			MiniLane r;
+			const std::shared_ptr<LaneState> first = r.lane.State();
+			Assert::IsTrue(first != nullptr);
+			const uint64_t generation = first->generation;
+			r.tier.otherUsers.push_back(MakeMemoVramUser({ 1u << 20 }, "test memo"));
+			r.lane.Configure(OnSettings(), r.reg, r.consumers, r.gs, r.card, r.tier, 0, false);
+			Assert::AreEqual(uint64_t(1), r.lane.UsersReplans());
+			const uint64_t movedBefore = r.lane.PlanMovedRebuilds();
+			r.tier.otherUsers.clear();
+			r.tier.otherUsers.push_back(MakeMemoVramUser({ 3u << 20 }, "test memo"));   // only the memo's need moved
+			r.lane.Configure(OnSettings(), r.reg, r.consumers, r.gs, r.card, r.tier, 0, false);
+			Assert::AreEqual(uint64_t(2), r.lane.UsersReplans(), L"one more users re-plan");
+			Assert::AreEqual(movedBefore, r.lane.PlanMovedRebuilds(), L"no state rebuild");
+			Assert::IsTrue(r.lane.State().get() == first.get(), L"the same state");
+			Assert::IsTrue(r.lane.State()->generation == generation, L"the same generation");
+			const std::shared_ptr<const GovernorPlan> users = r.lane.CurrentGovernorPlan();
+			Assert::IsTrue(users != nullptr);
+			const UserGrant* g = users->Find(kUserSkeletonMemo);
+			Assert::IsNotNull(g, L"the memo's grant is in the current users plan");
+			Assert::IsTrue(g->bytes == (3u << 20), L"the grant follows the new level");
+		}
+
+		TEST_METHOD(AMovedLaneDecisionRebuildsTheStateOnTheKeptGraphNotAResync)
+		{
+			MiniLane r;
+			Assert::IsTrue(r.lane.Active(), L"built");
+			SkeletonMemo memo;
+			BindLaneToMemo(r.lane, memo);
+			for (uint64_t s = 1; s <= 3; ++s)
+				r.lane.OnSourceFrame(r.View(s));
+			r.Pump();
+			SourceFrameView held;
+			Assert::IsTrue(r.lane.SourceOf(2, &held), L"a frame offered before the rebuild is held");
+			const std::shared_ptr<LaneState> before = r.lane.State();
+			Assert::IsTrue(before != nullptr);
+			// Precondition: some card flips a lane decision of this kept graph (the entries' grant / tier / history).
+			CardProfile card2 = r.card;
+			bool found = false;
+			const uint64_t frees[] = { 1ull << 22, 1ull << 20, 1ull << 16, 4096ull, 1ull };   // descending: the first flip is the smallest one that flips
+			for (size_t i = 0; i < sizeof(frees) / sizeof(frees[0]) && !found; ++i)
+			{
+				CardProfile c = r.card;
+				c.systemRamFreeBytes = frees[i];
+				VramGovernor probe;
+				const TierPlan& p = probe.Update(r.reg, before->graph, c, r.tier);
+				if (!SameEntries(p, before->plan))
+				{
+					card2 = c;
+					found = true;
+				}
+			}
+			Assert::IsTrue(found, L"precondition: a card change flips a lane grant on this graph (else use a GPU product registry, spec T2c)");
+			const uint64_t discBefore = memo.Discontinuities();
+			r.lane.Configure(OnSettings(), r.reg, r.consumers, r.gs, card2, r.tier, 0, false);
+			const std::shared_ptr<LaneState> after = r.lane.State();
+			Assert::IsTrue(after != nullptr, L"the rebuilt state is built");
+			Assert::IsTrue(r.lane.Active(), L"the lane is still active after the rebuild");
+			Assert::IsTrue(after.get() != before.get(), L"a new state");
+			Assert::IsTrue(after->generation > before->generation);
+			Assert::AreEqual(uint64_t(1), r.lane.PlanMovedRebuilds());
+			Assert::IsTrue(LinesHave(r.lane, "lane state rebuilt 1 time(s) on a kept graph because its VRAM plan moved"));
+			Assert::IsTrue(LinesHave(r.lane, "a reconfigure, not a resync"));
+			Assert::IsTrue(r.lane.SourceOf(2, &held), L"the ring's frames survive the rebuild");
+			// The same card again: the state is kept and the count stays.
+			r.lane.Configure(OnSettings(), r.reg, r.consumers, r.gs, card2, r.tier, 0, false);
+			Assert::AreEqual(uint64_t(1), r.lane.PlanMovedRebuilds());
+			Assert::IsTrue(r.lane.State().get() == after.get());
+			Assert::AreEqual(discBefore, memo.Discontinuities(), L"not a resync: the memo saw no discontinuity");
+		}
+	};
+
 	TEST_CLASS(SealAcquireIdentityTests)
 	{
 	public:
@@ -1206,6 +1350,41 @@ namespace SkeletonCoreContextTestsNs
 				rel.kind = RE::Lifecycle::GpuReleased;
 				sk.OnLifecycle(rel);
 			}
+		}
+
+		// GF-P2b S10: the memo is its OWN governor user (kUserSkeletonMemo), never the scratch arena's id; it is a lane-level user (below
+		// kUserProductBase) and is not one of the ids a module must declare (DeclarableVramUsers).
+		TEST_METHOD(TheMemoIsItsOwnVramUserAndNotTheScratchArena)
+		{
+			Assert::IsTrue(MakeMemoVramUser({ 4u << 20, 0 }, "m").id == kUserSkeletonMemo, L"the memo's own id");
+			CardProfile card;
+			card.vramBudgetBytes = 1ull << 30;
+			card.vramUsageBytes = 0;
+			const MemoGpuGrant g = PlanMemoGpuGrantLevels(card, true, 0, { 4u << 20 });
+			Assert::IsTrue(g.granted && g.bytes == (4ull << 20), L"granted its level with an ample card");
+			ArenaRequest rq;
+			rq.scope = 1;
+			rq.owner = "s10 test";
+			rq.tier = Tier::T0;
+			rq.shape.w = 64;
+			rq.shape.h = 64;
+			rq.count = 2;
+			GovernorInput in;
+			in.card = card;
+			in.users.push_back(ScratchArenaT0User({ rq }));
+			in.users.push_back(MakeMemoVramUser({ 4u << 20 }, "m"));
+			const GovernorPlan plan = PlanVram(in);
+			const UserGrant* memo = plan.Find(kUserSkeletonMemo);
+			const UserGrant* arena = plan.Find(kUserScratchArena);
+			Assert::IsNotNull(memo, L"the memo is planned");
+			Assert::IsNotNull(arena, L"the arena is planned");
+			Assert::IsTrue(memo != arena, L"two distinct grants");
+			Assert::IsTrue(memo->bytes == (4ull << 20), L"the memo's bytes are its level, whatever the arena's");
+			Assert::IsTrue(uint16_t(kUserSkeletonMemo) < uint16_t(kUserProductBase));
+			size_t n = 0;
+			const uint16_t* ids = DeclarableVramUsers(&n);
+			for (size_t i = 0; i < n; ++i)
+				Assert::IsTrue(ids[i] != uint16_t(kUserSkeletonMemo), L"not a declarable user");
 		}
 	};
 	// R14-97 M3: the reserved ids of the fixed product-id table (30 band_memo, 32 focus_map, 33 room_light, 34 composed_vectors) are ABSENT

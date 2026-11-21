@@ -18,12 +18,14 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/core/hub/HostSlots.h>
 #include <VP-V/core/hub/HostState.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/FramesInFlight.h>
 #include <VP-V/core/PostPresentSpare.h>
 #include <VP-V/core/VramUsers.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
@@ -37,6 +39,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -267,6 +270,25 @@ namespace SkeletonModuleTestsNs
 		c.host = rig.Host(); c.phase = RE::FramePhase::CollectAhead; c.phaseData = &view;
 		Assert::IsFalse(rig.sk.OnFrame(c), L"the skeleton never takes a phase over");
 	}
+
+	// A skeleton module in the hub whose scene product misses with a scripted `why` (what SceneGroupOf reads through the hub's query).
+	struct MissingSceneDemand : Vpv::Hub::ISkeletonModule, Vpv::Skeleton::IExternalDemand
+	{
+		const char* Name() const override { return "test skeleton (scene miss)"; }
+		void* Query(const char* iid) override
+		{
+			return iid != nullptr && std::strcmp(iid, Vpv::Skeleton::kExternalDemandQueryId) == 0 ? static_cast<Vpv::Skeleton::IExternalDemand*>(this) : nullptr;
+		}
+		void SetExternalDemand(const void*, const void*, const std::vector<VpSkeleton::ConsumerDecl>&, const std::vector<VpSkeleton::ProductId>&) override {}
+		void ClearExternalDemand(const void*, const void*) override {}
+		Vpv::Skeleton::SceneAnswer SceneOf(const void*, uint64_t) const override
+		{
+			Vpv::Skeleton::SceneAnswer a;   // known = false
+			a.why = why;
+			return a;
+		}
+		const char* why = "";
+	};
 
 	// A scripted vector engine (P5a's IVectorEngine): what the feed reads.
 	struct FakeEngine : VpMotion::IVectorEngine
@@ -784,9 +806,13 @@ namespace SkeletonModuleTestsNs
 		{
 			Rig rig(Lane("on"));
 			rig.ResyncApply("on");
+			FeedQueueTerms(rig);   // GF-P2a RIG: the queue window is fed, so no "skeleton_queue_window: not fed" line is left over
 			rig.Life(RE::Lifecycle::GpuCreated);
 			for (int64_t s = 1; s <= 3; ++s)
+			{
 				rig.Frame(s);
+				PresentFacts(rig, s);
+			}
 			Assert::IsNotNull(rig.sk.LaneOf(rig.Host()));
 			Assert::IsTrue(rig.sk.WorkersRunning(rig.Host()));
 			rig.cfg.Write(Lane("off"));
@@ -919,7 +945,10 @@ namespace SkeletonModuleTestsNs
 			rig.ResyncApply("on");
 			rig.Life(RE::Lifecycle::GpuCreated);
 			for (int64_t s = 1; s <= 3; ++s)
+			{
 				rig.Frame(s);
+				PresentFacts(rig, s);   // GF-P2a RIG: the present-lag term is fed each frame; the three queue terms stay unfed until delivered below
+			}
 			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks),
 				"skeleton_queue: record history: queue not yet wired (render-ahead depth, lane lead, look-ahead walk); floors in use"));
 			// The look-ahead walk arrives with the host's SettingsApplied call (value = the motion look-ahead depth): that term leaves the line.
@@ -928,6 +957,7 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual(0, int(rig.sk.CurrentQueue().renderAhead));
 			Assert::AreEqual(1, int(rig.sk.CurrentQueue().laneLead));
 			rig.Frame(4);
+			PresentFacts(rig, 4);
 			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks),
 				"skeleton_queue: record history: queue not yet wired (render-ahead depth, lane lead); floors in use"));
 			SkeletonModule::QueueShape q;
@@ -935,6 +965,7 @@ namespace SkeletonModuleTestsNs
 			rig.sk.SetQueueForTesting(q);
 			rig.Frame(5);
 			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue"), L"all three delivered: nothing to show");
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue"), L"the entry itself is gone (matched by id, not by substring)");
 			Assert::IsFalse(SkeletonModule::QueueDecision(SkeletonModule::QueueShape::kAll).engaged);
 			Assert::AreEqual(std::string("lane lead, look-ahead walk"), SkeletonModule::QueueNotWiredNote(SkeletonModule::QueueShape::kRenderAhead));
 		}
@@ -1847,6 +1878,60 @@ namespace SkeletonModuleTestsNs
 			rig.Deliver(7);
 		}
 
+		// GF-P2a RIG (UNION RED 4; compiles in the union only: ConsumerDecl::aheadDepth comes from GF-P1). The QKP-B queue window is derived
+		// from the fed terms at every Begin. These rigs need the window to hold what the test asks for:
+		//  - the presented frame, each frame (AfterPresent: the present-lag term),
+		//  - the three queue terms through the publish API (render-ahead, lane lead, look-ahead walk), the lane lead left at the default 1
+		//    so the lane still publishes nothing ahead by itself (an ahead record is made only by a reader's ask),
+		//  - an ACTIVE ahead consumer: an external demand whose ConsumerDecl::aheadDepth reaches past the frames asked ahead.
+		// Until a term is fed the status line "skeleton_queue_window: not fed" shows it (tests that look at the status feed all of them).
+		static void PresentFacts(Rig& rig, int64_t seq)
+		{
+			RE::FrameContext c;
+			c.host = rig.Host();
+			c.seq = seq;
+			c.phase = RE::FramePhase::AfterPresent;
+			RE::PresentContext pc;
+			pc.kind = RE::AfterPresentKind::NoExtras;
+			rig.sk.OnAfterPresent(c, pc);
+		}
+
+		static void FeedQueueTerms(Rig& rig)
+		{
+			rig.sk.PublishRenderAhead(1.0);
+			rig.sk.PublishLaneLead(1.0);
+			rig.sk.PublishLookAheadWalk(8.0);
+		}
+
+		static void DeclareAheadConsumer(Rig& rig, uint8_t aheadDepth)
+		{
+			VpSkeleton::ConsumerDecl d;
+			d.id = 0x0610;
+			d.name = "ahead scene walk (test)";
+			VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 0);
+			VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 1);
+			d.aheadDepth = aheadDepth;
+			rig.sk.SetExternalDemand(rig.Host(), &rig, std::vector<VpSkeleton::ConsumerDecl>(1, d), std::vector<VpSkeleton::ProductId>());
+		}
+
+		// QueueTwoAheadOfTheSeal with the queue window fed (see above): the same frames, the same arrivals.
+		static void QueueTwoAheadOfTheSealFed(Rig& rig)
+		{
+			rig.ResyncApply("on");
+			FeedQueueTerms(rig);
+			DeclareAheadConsumer(rig, 6);
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+			{
+				rig.Frame(s);
+				PresentFacts(rig, s);
+			}
+			rig.Ingress(4);
+			rig.Deliver(5);
+			rig.Ingress(5);
+			rig.Deliver(6);
+		}
+
 		// FIX-LED-CUT-U7 / C-1 (get-or-compute-and-publish, OD 11-12 17:26 / 11-13 13:34): the scene of a frame AHEAD of the seal is
 		// answered NOW (its two P4 records acquired through the renderer's memo), written into the frame's record, and the later seal
 		// finds it there (computed once: alreadyPresent + 1, published + 0) with the verdict the seal-time classification gives.
@@ -1857,7 +1942,7 @@ namespace SkeletonModuleTestsNs
 			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
 			Tap::SetStore(rig.Host(), &store);
 			SceneStoreGuard guard(rig.Host());
-			QueueTwoAheadOfTheSeal(rig);
+			QueueTwoAheadOfTheSealFed(rig);   // GF-P2a RIG: window fed
 			store.Begin(SceneTestId(6), FrameAnalysis::kScene);   // the record the source tap opens at ARRIVAL
 			const Vpv::Skeleton::SceneCounters before = rig.sk.SceneCountersOf(rig.Host());
 			const Vpv::Skeleton::SceneAnswer ahead = rig.sk.SceneOf(rig.Host(), 6);
@@ -1895,7 +1980,7 @@ namespace SkeletonModuleTestsNs
 		{
 			Rig rig(Lane("on"));
 			ShapeACutAtFrame(rig, 6);
-			QueueTwoAheadOfTheSeal(rig);
+			QueueTwoAheadOfTheSealFed(rig);   // GF-P2a RIG: window fed
 			const Vpv::Skeleton::SceneAnswer ahead = rig.sk.SceneOf(rig.Host(), 6);
 			Assert::IsTrue(ahead.known, (L"answered with the store off; " + WhyOf(ahead)).c_str());
 			Assert::IsTrue(ahead.from == Vpv::Skeleton::SceneAnswer::From::Live);
@@ -1907,6 +1992,11 @@ namespace SkeletonModuleTestsNs
 			other.join();
 			Assert::IsTrue(offThread.known || (offThread.why != nullptr && offThread.why[0] != 0),
 				L"off the render thread: the published copy, or a miss that names its cause");
+			// GF-P2a MUST-9 / S14.2b: a look-ahead miss off the render thread is a PEEK of the lane's published bytes, never the memo's
+			// Acquire: it raises no skeleton-acquire decision (no false "p4_source_stats" Fallbacks entry).
+			VpSkeleton::SkeletonMemo* memoOfHost = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memoOfHost);
+			Assert::IsTrue(memoOfHost->Decisions().empty(), L"the off-thread SceneOf raised no skeleton-acquire decision");
 
 			SealThrough6(rig);
 			rig.Begin(6);
@@ -1916,6 +2006,327 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual(ahead.fade, sealed.fade);
 			Assert::AreEqual(uint64_t(0), rig.sk.SceneCountersOf(rig.Host()).published);
 			rig.After(6);
+		}
+
+		// A static picture, then a 50-frame slow fade (every frame of the rig's store). Call before any frame is delivered.
+		// (Moved unchanged out of ASlowFadeThroughTheSceneProductEqualsTheStreamFold, which now calls it; GF-P2a T4R.)
+		static void ShapeASlowFade(Rig& rig)
+		{
+			for (int s = 0; s < int(rig.count); ++s)
+			{
+				const double g = s <= 4 ? 1.0 : (std::max)(0.25, 1.0 - 0.75 * (s - 4) / 50.0);   // static, then a 50-frame fade
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const uint32_t h = (x * 73856093u) ^ (y * 19349663u) ^ (uint32_t(s) * 83492791u);
+						const double v = 64.0 + g * (double(128 + 12 * x) - 64.0) + double(int(h % 17u) - 8);
+						rig.store[size_t(s) * kW * kH + y * kW + x] = uint16_t((std::min)(1023.0, (std::max)(0.0, std::floor(v + 0.5))));
+					}
+			}
+		}
+
+		// GF-P2a: the queue window the ahead asks need. The window's ahead depth is lane lead + look-ahead walk; the computed ahead depth
+		// needs an ACTIVE ahead consumer (an owner fill declaring aheadDepth). The lane lead stays 1 (the default the older tests ran
+		// with) so the lane publishes nothing ahead by itself: only a reader's ask makes an ahead record.
+		static void FeedAheadWindow(Rig& rig, uint16_t walk)
+		{
+			SkeletonModule::QueueShape q;
+			q.renderAhead = 1;
+			q.laneLead = 1;
+			q.lookAheadWalk = walk;
+			rig.sk.SetQueueForTesting(q);
+			VpSkeleton::OwnerFill fill;
+			fill.aheadDepth = VpSkeleton::kAheadCeiling;   // an ahead consumer is active (the ceiling: the most the window computes ahead)
+			fill.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput&) { return false; };
+			rig.sk.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu, "repair/grain_split", fill);
+		}
+
+		// The look-ahead walk makes the P4 record of an ahead frame before it asks the scene (render thread; the memo's get-or-compute).
+		static void WalkP4(Rig& rig, uint64_t seq)
+		{
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);   // the record stays in the lane's slot; the result is not needed
+		}
+
+		// GF-P2a MUST-7 (theft): a cut at N is provisional at N's seal. An ahead scene ask of N + 3 must not claim N's late cut; frame N + 1's
+		// own seal delivers it (cut + cutLate on N + 1's group), exactly once.
+		TEST_METHOD(AnAheadFrameNeverClaimsAnEarlierFramesLateCut)
+		{
+			Rig rig(Lane("on"));
+			ShapeTwoStillShots(rig);
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			FeedAheadWindow(rig, 8);
+			RunToTheSealOfTheCut(rig, &store);   // the cut frame sealed, its group out provisional; frame kCutFrame + 1 delivered, not sealed
+			rig.After(int64_t(kCutFrame));
+			FrameAnalysis::Scene atSeal;
+			Assert::IsTrue(store.PeekScene(kCutFrame, atSeal));
+			Assert::IsFalse(atSeal.confirmed || atSeal.cut, L"provisional at its seal");
+			const uint64_t n1 = kCutFrame + 1, n2 = kCutFrame + 2, n3 = kCutFrame + 3;
+			rig.Ingress(int64_t(n1));
+			rig.Deliver(n2);
+			rig.Ingress(int64_t(n2));
+			rig.Deliver(n3);
+			store.Begin(SceneTestId(n3), FrameAnalysis::kScene);
+			WalkP4(rig, n1);   // the walk reaches the frames in order: their P4 records exist
+			WalkP4(rig, n2);
+			WalkP4(rig, n3);
+			const uint64_t lateBefore = rig.sk.SceneCountersOf(rig.Host()).late;
+			const Vpv::Skeleton::SceneAnswer ahead = rig.sk.SceneOf(rig.Host(), n3);
+			Assert::IsTrue(ahead.known, (L"the ahead frame is answered; " + WhyOf(ahead)).c_str());
+			Assert::IsFalse(ahead.cutLate, L"an ahead frame never carries an earlier frame's late cut");
+			FrameAnalysis::Scene aheadGroup;
+			Assert::IsTrue(store.PeekScene(n3, aheadGroup), L"the ahead frame's own group was published");
+			Assert::IsFalse(aheadGroup.cutLate);
+			Assert::AreEqual(lateBefore, rig.sk.SceneCountersOf(rig.Host()).late, L"nothing was delivered by the ahead fill");
+			rig.Begin(int64_t(n1));   // the render-order seal of frame kCutFrame + 1
+			rig.After(int64_t(n1));
+			FrameAnalysis::Scene carrier, cutGroup;
+			Assert::IsTrue(store.PeekScene(n1, carrier));
+			Assert::IsTrue(carrier.cut && carrier.cutLate, L"the cut is delivered with its successor's own seal");
+			Assert::IsTrue(store.PeekScene(kCutFrame, cutGroup));
+			Assert::IsTrue(cutGroup.confirmed && cutGroup.cutHere);
+			Assert::IsFalse(cutGroup.cut, L"the delivered cut is not rewritten");
+			Assert::IsTrue(store.PeekScene(n3, aheadGroup));
+			Assert::IsFalse(aheadGroup.cutLate, L"still none on the ahead frame");
+			Assert::AreEqual(lateBefore + 1, rig.sk.SceneCountersOf(rig.Host()).late, L"one cut, one delivery");
+		}
+
+		// GF-P2a MUST-7 (stranded): the cut frame N is sealed and its group is out provisional. An ahead ask of N + 1 confirms N, whose Vp
+		// group the seal of N + 1 will skip (the seal finds N confirmed), so the cut could never be delivered: the ahead N + 1 carries it
+		// (its natural predecessor's late cut), once.
+		TEST_METHOD(AnAheadSuccessorOfTheCutFrameCarriesTheCutOnceInsteadOfStrandingIt)
+		{
+			Rig rig(Lane("on"));
+			ShapeTwoStillShots(rig);
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			FeedAheadWindow(rig, 8);
+			RunToTheSealOfTheCut(rig, &store);
+			rig.After(int64_t(kCutFrame));
+			FrameAnalysis::Scene cutGroup, carrier;
+			Assert::IsTrue(store.PeekScene(kCutFrame, cutGroup));
+			Assert::IsFalse(cutGroup.confirmed || cutGroup.cut, L"the cut frame's group is out provisional");
+			const uint64_t n1 = kCutFrame + 1, n2 = kCutFrame + 2;
+			store.Begin(SceneTestId(n2), FrameAnalysis::kScene);
+			rig.Ingress(int64_t(n1));
+			rig.Deliver(n2);
+			const uint64_t lateBefore = rig.sk.SceneCountersOf(rig.Host()).late;
+			const Vpv::Skeleton::SceneAnswer ahead = rig.sk.SceneOf(rig.Host(), n1);   // ahead of the seal (kCutFrame): confirms the cut frame
+			Assert::IsTrue(ahead.known, (L"the ahead successor is answered; " + WhyOf(ahead)).c_str());
+			Assert::IsTrue(store.PeekScene(n1, carrier));
+			Assert::IsTrue(carrier.cut && carrier.cutLate, L"the ahead successor carries the confirmed cut of its natural predecessor");
+			Assert::IsTrue(store.PeekScene(kCutFrame, cutGroup));
+			Assert::IsTrue(cutGroup.confirmed && cutGroup.cutHere, L"the cut frame's group was confirmed");
+			Assert::IsFalse(cutGroup.cut, L"the delivered cut is not rewritten");
+			Assert::AreEqual(lateBefore + 1, rig.sk.SceneCountersOf(rig.Host()).late);
+			// The walk goes on to N + 2: that confirms N + 1's group (the seal then finds it present), and delivers nothing more.
+			Assert::IsTrue(rig.sk.SceneOf(rig.Host(), n2).known);
+			const Vpv::Skeleton::SceneCounters before = rig.sk.SceneCountersOf(rig.Host());
+			rig.Begin(int64_t(n1));
+			const Vpv::Skeleton::SceneCounters after = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(before.alreadyPresent + 1, after.alreadyPresent, L"the seal found the ahead group present");
+			Assert::AreEqual(before.late, after.late, L"no second delivery");
+			Assert::IsTrue(store.PeekScene(n1, carrier));
+			Assert::IsTrue(carrier.cut && carrier.cutLate, L"the carried cut stays on the group");
+			FrameAnalysis::Scene next;
+			Assert::IsTrue(store.PeekScene(n2, next));
+			Assert::IsFalse(next.cut, L"exactly once");
+			rig.After(int64_t(n1));
+		}
+
+		// GF-P2a MUST-7 (cache): the scene cache is the render frame's classification. An ahead ask between two asks of the render frame
+		// must not overwrite it: the second ask of the render frame is still a cache hit with the same answer.
+		TEST_METHOD(AnAheadAskDoesNotEvictTheRenderFramesSceneCache)
+		{
+			Rig rig(Lane("on"));
+			FeedAheadWindow(rig, 8);
+			RunToTheSealOfFrame4(rig);
+			rig.Ingress(5);
+			rig.Deliver(6);
+			rig.Ingress(6);
+			rig.Deliver(7);
+			rig.Ingress(7);
+			rig.Deliver(8);
+			rig.Begin(4);
+			const Vpv::Skeleton::SceneAnswer first = rig.sk.SceneOf(rig.Host(), 4);
+			Assert::IsTrue(first.known, (L"the render frame is answered; " + WhyOf(first)).c_str());
+			const Vpv::Skeleton::SceneAnswer ahead = rig.sk.SceneOf(rig.Host(), 8);
+			Assert::IsTrue(ahead.known, (L"the ahead frame is answered; " + WhyOf(ahead)).c_str());
+			const Vpv::Skeleton::SceneCounters before = rig.sk.SceneCountersOf(rig.Host());
+			const Vpv::Skeleton::SceneAnswer second = rig.sk.SceneOf(rig.Host(), 4);
+			const Vpv::Skeleton::SceneCounters after = rig.sk.SceneCountersOf(rig.Host());
+			Assert::IsTrue(second.known);
+			Assert::AreEqual(before.cacheHits + 1, after.cacheHits, L"the second ask of the render frame is a cache hit");
+			Assert::AreEqual(before.liveFills, after.liveFills, L"and nothing was classified again");
+			Assert::AreEqual(first.cut, second.cut);
+			Assert::AreEqual(first.fade, second.fade);
+			Assert::AreEqual(first.cutLate, second.cutLate);
+			Assert::AreEqual(first.cutHere, second.cutHere);
+			Assert::AreEqual(first.confirmed, second.confirmed);
+			rig.After(4);
+		}
+
+		// GF-P2a S2b (T4 corrected after eec4406dd): the look-ahead walk keeps ONE new call at the front of the window, N + kAheadCeiling,
+		// each render frame; the store holds a record for every arrived frame, so the front's group is published ahead and the seal of
+		// every frame finds it (alreadyPresent). The ahead fills never keep their fade run in the 8-entry run ring and the render frames'
+		// runs are never rebuilt with reduced evidence: the whole-run sceneRunReduced delta is 0 once the walk is primed. (The front is
+		// the window's computed ahead depth: a first fill beyond it is NotPlannedAhead.) The published fadeKeep of a late fade frame
+		// equals a store-off, render-order reference run's.
+		TEST_METHOD(ALookAheadWalkNeverForcesTheRenderFramesFadeRunsToBeRebuiltReduced)
+		{
+			constexpr uint64_t kC = VpSkeleton::kAheadCeiling;
+			constexpr int64_t kLast = 40;
+			constexpr int64_t kLate = kLast - 2;   // a late fade frame (> 8 + kAheadCeiling)
+			Rig rig(Lane("on"));
+			ShapeASlowFade(rig);
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			FeedAheadWindow(rig, uint16_t(kC));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			uint64_t delivered = 0;
+			uint64_t reducedAfterPrime = 0;
+			FrameAnalysis::Scene lateGroup;
+			bool haveLate = false;
+			for (int64_t s = 1; s <= kLast; ++s)
+			{
+				rig.Ingress(s);
+				while (delivered < uint64_t(s) + kC + 1)
+				{
+					++delivered;
+					rig.Deliver(delivered);
+					store.Begin(SceneTestId(delivered), FrameAnalysis::kScene);   // the record opens at ARRIVAL, ahead frames included
+				}
+				const Vpv::Skeleton::SceneCounters before = rig.sk.SceneCountersOf(rig.Host());
+				rig.Begin(s);
+				const Vpv::Skeleton::SceneCounters afterSeal = rig.sk.SceneCountersOf(rig.Host());
+				PresentFacts(rig, s);
+				if (s == 1)
+				{
+					for (uint64_t f = 2; f <= kC; ++f)   // prime the walk in order: frames 2 .. kC (the front of frame 1 is 1 + kC, below)
+						Assert::IsTrue(rig.sk.SceneOf(rig.Host(), f).known, (L"priming frame " + std::to_wstring(f)).c_str());
+				}
+				else
+				{
+					Assert::AreEqual(before.alreadyPresent + 1, afterSeal.alreadyPresent, (L"the seal of frame " + std::to_wstring(s) + L" found the ahead group").c_str());
+					Assert::AreEqual(before.liveFills, afterSeal.liveFills, L"the seal classified nothing itself");
+				}
+				const Vpv::Skeleton::SceneAnswer front = rig.sk.SceneOf(rig.Host(), uint64_t(s) + kC);
+				Assert::IsTrue(front.known, (L"the walk front N + kAheadCeiling is answered; " + WhyOf(front)).c_str());
+				if (s == 1)
+					reducedAfterPrime = rig.sk.SceneCountersOf(rig.Host()).fadeRunReduced;
+				if (s == kLate)
+					haveLate = store.PeekScene(uint64_t(s), lateGroup);
+				rig.After(s);
+			}
+			Assert::AreEqual(reducedAfterPrime, rig.sk.SceneCountersOf(rig.Host()).fadeRunReduced, L"no fade run was rebuilt with reduced evidence");
+			Assert::IsTrue(haveLate, L"the late fade frame's group is in the store");
+
+			// The reference: store off, render order (Begin(s), then SceneOf(s)); the same picture shape.
+			Rig ref(Lane("on"));
+			ShapeASlowFade(ref);
+			ref.ResyncApply("on");
+			ref.Life(RE::Lifecycle::GpuCreated);
+			Vpv::Skeleton::SceneAnswer refLate;
+			for (int64_t s = 1; s <= kLate; ++s)
+			{
+				ref.Ingress(s);
+				if (s == 1)
+					ref.Deliver(1);
+				ref.Deliver(uint64_t(s) + 1);
+				ref.Begin(s);
+				const Vpv::Skeleton::SceneAnswer a = ref.sk.SceneOf(ref.Host(), uint64_t(s));
+				if (s == kLate)
+					refLate = a;
+				ref.After(s);
+			}
+			Assert::IsTrue(refLate.known, (L"the reference answers the late frame; " + WhyOf(refLate)).c_str());
+			Assert::AreEqual(refLate.fade, lateGroup.fade, L"the walked run's fade equals the render-order reference");
+			Assert::AreEqual(double(refLate.fadeKeep), double(lateGroup.fadeKeep), 1e-6, L"and so does the published fadeKeep");
+		}
+
+		// GF-P2a MUST-8 (order): one thread fills frame s (provisional: s + 1 not judged yet) while the render thread fills s + 1, which
+		// confirms s and rewrites its group. Whatever the interleaving, the group of s ends CONFIRMED (a late provisional publish never
+		// lands over, or after, the confirmation).
+		TEST_METHOD(AProvisionalFillOnAnotherThreadNeverLeavesAConfirmedFramesGroupProvisional)
+		{
+			constexpr int kIter = 200;
+			Rig rig(Lane("on"), 220);
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			FeedAheadWindow(rig, 8);
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			uint64_t delivered = 4;   // Frame(1..3) delivered 1 .. 4
+			int misses = 0;
+			for (int i = 0; i < kIter; ++i)
+			{
+				const int64_t s = 5 + i;
+				while (delivered < uint64_t(s) + 1)
+					rig.Deliver(++delivered);
+				rig.Ingress(s - 1);
+				rig.Begin(s - 1);
+				rig.After(s - 1);
+				store.Begin(SceneTestId(uint64_t(s)), FrameAnalysis::kScene);
+				WalkP4(rig, uint64_t(s));
+				WalkP4(rig, uint64_t(s) + 1);
+				std::atomic<bool> go{ false };
+				Vpv::Skeleton::SceneAnswer other;
+				std::thread t([&] {
+					while (!go.load())
+						std::this_thread::yield();
+					other = rig.sk.SceneOf(rig.Host(), uint64_t(s));
+				});
+				go = true;
+				const Vpv::Skeleton::SceneAnswer render = rig.sk.SceneOf(rig.Host(), uint64_t(s) + 1);
+				t.join();
+				Assert::IsTrue(render.known, (L"iteration " + std::to_wstring(i) + L": the render thread's ask is answered").c_str());
+				FrameAnalysis::Scene group;
+				if (!store.PeekScene(uint64_t(s), group))
+				{
+					++misses;   // neither fill wrote the group: the off-thread ask missed and the render fill had nothing to rewrite
+					continue;
+				}
+				Assert::IsTrue(group.confirmed, (L"iteration " + std::to_wstring(i) + L": frame " + std::to_wstring(s) + L" ends confirmed").c_str());
+			}
+			Assert::IsTrue(misses < kIter / 2, L"the other thread's fill really wrote groups (else this tests nothing)");
+		}
+
+		// GF-P2a S12: a scene miss shows the skeleton's own reason (SceneAnswer::why, an AcquireCause token or the like); only when it
+		// gives none does SceneGroupOf fall back to the generic text.
+		TEST_METHOD(ASceneGroupMissNamesTheSkeletonsOwnReasonAndFallsBackToTheGenericText)
+		{
+			MissingSceneDemand* fake = new MissingSceneDemand();
+			Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+			Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(fake));
+			struct HubReset
+			{
+				~HubReset() { Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); }
+			} hubReset;
+			int host = 0;
+			FrameAnalysis::Scene scene;
+			const char* why = nullptr;
+			fake->why = "not_planned_ahead";
+			Assert::IsFalse(Vpv::Skeleton::SceneGroupOf(&host, 7, scene, &why));
+			Assert::IsNotNull(why);
+			Assert::AreEqual(std::string("not_planned_ahead"), std::string(why), L"the skeleton's own token is the reason");
+			fake->why = "";
+			why = nullptr;
+			Assert::IsFalse(Vpv::Skeleton::SceneGroupOf(&host, 7, scene, &why));
+			Assert::IsNotNull(why);
+			Assert::IsTrue(std::string(why).find("the skeleton could not classify the frame") == 0, L"no reason given: the generic text");
+			fake->why = nullptr;   // a null reason is no reason either
+			why = nullptr;
+			Assert::IsFalse(Vpv::Skeleton::SceneGroupOf(&host, 7, scene, &why));
+			Assert::IsTrue(why != nullptr && std::string(why).find("the skeleton could not classify the frame") == 0);
 		}
 
 		TEST_METHOD(ARegisteredButDisabledStoreCostsNothingAtTheSeal)
@@ -2043,17 +2454,7 @@ namespace SkeletonModuleTestsNs
 		{
 			const int frames = 60, gap = 40;
 			Rig rig(Lane("on"), size_t(frames) + 4);
-			for (int s = 0; s < frames + 4; ++s)
-			{
-				const double g = s <= 4 ? 1.0 : (std::max)(0.25, 1.0 - 0.75 * (s - 4) / 50.0);   // static, then a 50-frame fade
-				for (uint32_t y = 0; y < kH; ++y)
-					for (uint32_t x = 0; x < kW; ++x)
-					{
-						const uint32_t h = (x * 73856093u) ^ (y * 19349663u) ^ (uint32_t(s) * 83492791u);
-						const double v = 64.0 + g * (double(128 + 12 * x) - 64.0) + double(int(h % 17u) - 8);
-						rig.store[size_t(s) * kW * kH + y * kW + x] = uint16_t((std::min)(1023.0, (std::max)(0.0, std::floor(v + 0.5))));
-					}
-			}
+			ShapeASlowFade(rig);
 			rig.ResyncApply("on");
 			rig.Life(RE::Lifecycle::GpuCreated);
 			VpUnit::CutFadeJudge::FadeRun stream;
@@ -2396,6 +2797,510 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(slots.Aux(&b) == &auxB, L"B is untouched");
 			slots.SetAux(&a, &auxA);
 			Assert::IsTrue(slots.Aux(&a) == &auxA && slots.Aux(&b) == &auxB && slots.Used() == 2u, L"each host its own aux");
+		}
+
+		// GF-P2b S14.2c: the same guarantee under concurrency. A reader loops Aux(A) while a writer releases A, lets B claim the freed slot and
+		// set its aux, releases B and re-claims A with its own aux. The reader must never see B's aux through A. Probabilistic by nature:
+		// 200000 iterations on each thread (a violation is counted, so a pass is not proof, a failure is).
+		TEST_METHOD(HostSlotsAuxOfAHostIsNeverAnotherHostsAuxWhileTheSlotIsReusedConcurrently)
+		{
+			struct Entry { const void* host = nullptr; };
+			constexpr int kIterations = 200000;
+			Vpv::Hub::HostSlots<Entry, 2> slots;
+			int a = 0, b = 0, aAux = 0, bAux = 0;
+			Assert::IsTrue(slots.Claim(&a), L"A claimed");
+			slots.SetAux(&a, &aAux);
+			std::atomic<bool> go{ false };
+			std::atomic<int> violations{ 0 };
+			std::thread reader([&] {
+				while (!go.load())
+					std::this_thread::yield();
+				for (int i = 0; i < kIterations; ++i)
+					if (slots.Aux(&a) == static_cast<void*>(&bAux))
+						violations.fetch_add(1);
+			});
+			std::thread writer([&] {
+				while (!go.load())
+					std::this_thread::yield();
+				for (int i = 0; i < kIterations; ++i)
+				{
+					slots.Remove(&a, true);
+					slots.Claim(&b);
+					slots.SetAux(&b, &bAux);
+					slots.Remove(&b, true);
+					slots.Claim(&a);
+					slots.SetAux(&a, &aAux);
+				}
+			});
+			go = true;
+			reader.join();
+			writer.join();
+			Assert::AreEqual(0, violations.load(), L"A's aux was never B's");
+		}
+
+		// GEM-W1A S1 (skeleton MUST-3): a lane-bound memo is planned only at the lane's Configure. Its GPU need follows its window and its
+		// lazily registered GPU fills, neither in the queue shape: a need that moves after the last Configure re-plans the memo's grant
+		// (rate-limited like the declared VRAM users), so the lane's memo is granted from the same ledger instead of declining for ever.
+		TEST_METHOD(ALaneBoundMemoGrantFollowsARaisedNeed)
+		{
+			VpSkeleton::VramUsers& registry = VpSkeleton::VramUsers::Instance();
+			registry.ResetForTesting();
+			const uint64_t mb = 1024ull * 1024ull;
+			{
+				Rig rig(Lane("on"));
+				VpSkeleton::CardProfile card;
+				card.key.luid = 78;
+				card.vramBudgetBytes = 1024 * mb;
+				card.vramUsageBytes = 0;
+				rig.sk.SetCardForTesting(card);
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				int64_t s = 1;
+				for (; s <= 150; ++s)   // past every first-period and queue re-plan: the graph is steady
+					rig.Frame(s);
+				const Vpv::Skeleton::FrameMemo fm = rig.sk.MemoFor(rig.Host(), uint64_t(s));
+				Assert::IsTrue(fm.Valid() && fm.memo->LaneBound(), L"the lane's memo");
+				Assert::AreEqual(uint64_t(0), fm.memo->GpuNeedBytes(), L"no GPU fill yet: no need");
+				Assert::IsFalse(fm.memo->GpuGranted(), L"nothing to grant");
+				VpSkeleton::OwnerFill g;
+				g.reserveBytes = 1u << 20;
+				g.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					static int tex = 0;
+					out.gpu.resource = &tex;
+					out.gpu.bytes = 1u << 20;
+					return true;
+				};
+				Assert::IsTrue(rig.sk.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, "repair/grain_split", g)
+					== VpSkeleton::SkeletonMemo::Registration::Registered, L"a GPU owner fill registers lazily, after the lane's Configure");
+				const uint64_t need = fm.memo->GpuNeedBytes();
+				Assert::IsTrue(need >= (1u << 20), L"the memo's need rose");
+				for (const int64_t end = s + 2; s <= end; ++s)
+					rig.Frame(s);
+				Assert::IsTrue(fm.memo->GpuGranted(), L"re-planned: the lane-bound memo is granted");
+				Assert::IsTrue(fm.memo->GpuBudget() >= fm.memo->GpuNeedBytes(), L"the grant covers the raised need");
+				// GF-P2b MUST-4 (2): the re-plan ran on the kept graph (a users re-plan) or rebuilt the state because its plan moved; which one is the probe's call.
+				Assert::IsTrue(rig.sk.LaneOf(rig.Host())->UsersReplans() >= 1u || rig.sk.LaneOf(rig.Host())->PlanMovedRebuilds() >= 1u,
+					L"the grant moved through the lane's re-plan");
+			}
+			registry.ResetForTesting();
+		}
+
+		// GF-P2b S10 (module level): a lane-bound memo's grant is the memo's own entry (kUserSkeletonMemo) of the lane's current users plan.
+		TEST_METHOD(TheLaneBoundMemoGrantIsTheMemosOwnEntryOfTheUsersPlan)
+		{
+			VpSkeleton::VramUsers& registry = VpSkeleton::VramUsers::Instance();
+			registry.ResetForTesting();
+			const uint64_t mb = 1024ull * 1024ull;
+			{
+				Rig rig(Lane("on"));
+				VpSkeleton::CardProfile card;
+				card.key.luid = 79;
+				card.vramBudgetBytes = 1024 * mb;
+				card.vramUsageBytes = 0;
+				rig.sk.SetCardForTesting(card);
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				int64_t s = 1;
+				for (; s <= 150; ++s)
+					rig.Frame(s);
+				const Vpv::Skeleton::FrameMemo fm = rig.sk.MemoFor(rig.Host(), uint64_t(s));
+				Assert::IsTrue(fm.Valid() && fm.memo->LaneBound(), L"the lane's memo");
+				VpSkeleton::OwnerFill g;
+				g.reserveBytes = 1u << 20;
+				g.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					static int tex = 0;
+					out.gpu.resource = &tex;
+					out.gpu.bytes = 1u << 20;
+					return true;
+				};
+				Assert::IsTrue(rig.sk.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, "repair/grain_split", g)
+					== VpSkeleton::SkeletonMemo::Registration::Registered);
+				for (const int64_t end = s + 2; s <= end; ++s)
+					rig.Frame(s);
+				Assert::IsTrue(fm.memo->GpuGranted(), L"granted");
+				const std::shared_ptr<const VpSkeleton::GovernorPlan> plan = rig.sk.LaneOf(rig.Host())->CurrentGovernorPlan();
+				Assert::IsTrue(plan != nullptr);
+				const VpSkeleton::UserGrant* u = plan->Find(VpSkeleton::kUserSkeletonMemo);
+				Assert::IsNotNull(u, L"the memo's own entry is in the lane's users plan");
+				Assert::AreEqual(uint64_t(u->bytes), uint64_t(fm.memo->GpuBudget()), L"the memo's grant is that entry's bytes");
+			}
+			registry.ResetForTesting();
+		}
+
+		// A GpuCreated with a fake render device (presence only: it is never dereferenced), as SkeletonCoreContextTests does.
+		static void GpuCreatedWithDevice(Rig& rig, int* fakeGpu)
+		{
+			RE::LifecycleFacts f;
+			f.host = rig.Host();
+			f.kind = RE::Lifecycle::GpuCreated;
+			f.gpu = reinterpret_cast<pl_gpu>(fakeGpu);
+			rig.sk.OnLifecycle(f);
+		}
+
+		// GF-P2b S10b / MUST-4 (3): a memo that began with no lane (its ahead plan made by the no-lane grant, nothing fits) and then gets a
+		// lane keeps no stale plan: the lane's Configure re-sets the memo's AheadPlan, so an ahead ask inside the window is not
+		// NotPlannedAhead.
+		TEST_METHOD(ALaneSwitchedOnAfterANoLaneMemoReplacesItsAheadPlan)
+		{
+			VpSkeleton::VramUsers& registry = VpSkeleton::VramUsers::Instance();
+			registry.ResetForTesting();
+			const uint64_t mb = 1024ull * 1024ull;
+			{
+				Rig rig(Lane("off"));
+				int fakeGpu = 0;
+				VpSkeleton::CardProfile tight;
+				tight.key.luid = 80;
+				tight.vramBudgetBytes = 8 * mb;
+				tight.vramUsageBytes = 7 * mb;
+				rig.sk.SetCardForTesting(tight);
+				rig.ResyncApply("on");
+				GpuCreatedWithDevice(rig, &fakeGpu);
+				VpSkeleton::OwnerFill g;
+				g.reserveBytes = 1u << 20;
+				g.aheadDepth = 2;   // an ahead consumer is active: the window computes ahead
+				g.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					static int tex = 0;
+					out.gpu.resource = &tex;
+					out.gpu.bytes = 1u << 20;
+					return true;
+				};
+				Assert::IsTrue(rig.sk.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, "repair/grain_split", g)
+					== VpSkeleton::SkeletonMemo::Registration::Registered);
+				SkeletonModule::QueueShape q;
+				q.renderAhead = 1;
+				q.laneLead = 1;
+				q.lookAheadWalk = 6;
+				rig.sk.SetQueueForTesting(q);
+				int64_t s = 1;
+				for (; s <= 8; ++s)
+				{
+					rig.Frame(s);
+					PresentFacts(rig, s);
+				}
+				Assert::IsNull(rig.sk.LaneOf(rig.Host()), L"no lane yet");
+				// The lane comes on with an ample card.
+				VpSkeleton::CardProfile ample;
+				ample.key.luid = 80;
+				ample.vramBudgetBytes = 1024 * mb;
+				ample.vramUsageBytes = 0;
+				rig.sk.SetCardForTesting(ample);
+				rig.cfg.Write(Lane("on"));
+				rig.Life(RE::Lifecycle::SettingsApplied);
+				VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+				Assert::IsNotNull(memo);
+				for (int i = 0; i < 200 && !(memo->LaneBound() && memo->GpuGranted()); ++i, ++s)
+				{
+					rig.Frame(s);
+					PresentFacts(rig, s);
+				}
+				Assert::IsTrue(memo->LaneBound() && memo->GpuGranted(), L"the lane-bound memo is granted");
+				const VpSkeleton::AcquireResult r = memo->Acquire(VpSkeleton::kP10GrainSplit, uint64_t(s - 1) + 1u, VpSkeleton::AcquireForm::Gpu);
+				Assert::IsTrue(r.cause != VpSkeleton::AcquireCause::NotPlannedAhead, L"the no-lane plan did not survive the lane's Configure");
+			}
+			registry.ResetForTesting();
+		}
+
+		// A non-view GPU owner fill (P10) registered after the lane bound, and the cause an Acquire of it gives at frame seq (render thread).
+		static void RegisterGpuOwnerFill(Rig& rig)
+		{
+			VpSkeleton::OwnerFill g;
+			g.reserveBytes = 1u << 20;
+			g.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				static int tex = 0;
+				out.gpu.resource = &tex;
+				out.gpu.bytes = 1u << 20;
+				return true;
+			};
+			Assert::IsTrue(rig.sk.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, "repair/grain_split", g)
+				== VpSkeleton::SkeletonMemo::Registration::Registered);
+		}
+
+		static VpSkeleton::AcquireCause GpuOwnerFillCause(Rig& rig, int64_t seq)
+		{
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			return memo->Acquire(VpSkeleton::kP10GrainSplit, uint64_t(seq), VpSkeleton::AcquireForm::Gpu).cause;
+		}
+
+		// GF-P2b MUST-3 (attach side), shadow lane: the lane has no GPU dispatcher, yet the attached device serves a non-view GPU owner fill.
+		TEST_METHOD(AShadowLaneBoundMemoWithADeviceIsNotWithoutADispatcher)
+		{
+			Rig rig(Lane("shadow"));
+			int fakeGpu = 0;
+			rig.ResyncApply("on");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(rig.sk.MemoOf(rig.Host()) != nullptr && rig.sk.MemoOf(rig.Host())->LaneBound(), L"the shadow lane is bound");
+			RegisterGpuOwnerFill(rig);   // after the lane bound
+			Assert::IsTrue(GpuOwnerFillCause(rig, 4) != VpSkeleton::AcquireCause::NoGpuDispatcher);
+		}
+
+		// The same with the lane switched off by configuration and RAISED by an external demand.
+		TEST_METHOD(ARaisedLaneBoundMemoWithADeviceIsNotWithoutADispatcher)
+		{
+			Rig rig(Lane("off"));
+			int fakeGpu = 0;
+			rig.ResyncApply("on");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			VpSkeleton::ConsumerDecl c;
+			c.id = 0x0611;
+			c.name = "raise test";
+			VpSkeleton::AddConsume(c, VpSkeleton::kP4SourceStats, 0);
+			int owner = 0;
+			rig.sk.SetRaisingExternalDemand(rig.Host(), &owner, std::vector<VpSkeleton::ConsumerDecl>(1, c), std::vector<VpSkeleton::ProductId>(), "test");
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(rig.sk.MemoOf(rig.Host()) != nullptr && rig.sk.MemoOf(rig.Host())->LaneBound(), L"the raised lane is bound");
+			RegisterGpuOwnerFill(rig);
+			Assert::IsTrue(GpuOwnerFillCause(rig, 4) != VpSkeleton::AcquireCause::NoGpuDispatcher);
+			rig.sk.ClearExternalDemand(rig.Host(), &owner);
+		}
+
+		// GF-P2b MUST-3 (detach / attach after bind): a second GpuCreated without a device detaches it (no dispatcher left: the visible
+		// cause NoGpuDispatcher); a GpuCreated with a device attaches it again.
+		TEST_METHOD(ADeviceDetachedAfterTheBindLeavesNoDispatcherAndAReattachRestoresIt)
+		{
+			Rig rig(Lane("on"));
+			int fakeGpu = 0;
+			rig.ResyncApply("on");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(rig.sk.MemoOf(rig.Host()) != nullptr && rig.sk.MemoOf(rig.Host())->LaneBound(), L"the lane is bound");
+			RegisterGpuOwnerFill(rig);
+			Assert::IsTrue(GpuOwnerFillCause(rig, 4) != VpSkeleton::AcquireCause::NoGpuDispatcher, L"attached: not without a dispatcher");
+			RE::LifecycleFacts none;
+			none.host = rig.Host();
+			none.kind = RE::Lifecycle::GpuCreated;
+			none.gpu = nullptr;   // the device goes, none comes
+			rig.sk.OnLifecycle(none);
+			rig.Frame(5);
+			Assert::IsTrue(GpuOwnerFillCause(rig, 5) == VpSkeleton::AcquireCause::NoGpuDispatcher, L"detached: the visible cause");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			rig.Frame(6);
+			Assert::IsTrue(GpuOwnerFillCause(rig, 6) != VpSkeleton::AcquireCause::NoGpuDispatcher, L"attached again");
+		}
+
+		// GF-P2b E2 (test first): on a fresh renderer the order GpuCreated (the device attaches) -> SettingsApplied (the store registers, the
+		// tap generation moves) -> Begin must leave the memo its device. The dead-renderer branch of Reconcile used to detach it.
+		TEST_METHOD(AStoreRegisteringAfterGpuCreatedDoesNotDetachTheNewRenderersDevice)
+		{
+			Rig rig(Lane("on"));
+			int fakeGpu = 0;
+			rig.ResyncApply("on");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			Assert::IsTrue(memo->HasGpuDevice(), L"attached by GpuCreated");
+			const uint64_t generationBefore = Tap::Generation(rig.Host());
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);   // the store registers at the first SettingsApplied of a fresh renderer
+			SceneStoreGuard guard(rig.Host());
+			Assert::IsTrue(Tap::Generation(rig.Host()) != generationBefore, L"the tap generation moved");
+			rig.Life(RE::Lifecycle::SettingsApplied);
+			rig.Frame(1);   // Begin
+			memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			Assert::IsTrue(memo->HasGpuDevice(), L"the new renderer's device is still attached after the Begin");
+			Assert::IsTrue(rig.sk.MemoDeviceGpuForTesting(rig.Host()) == static_cast<const void*>(&fakeGpu), L"and it is the device of the current pl_gpu");
+		}
+
+		// GF-P2b E2 counter-case through the PUBLIC lifecycle (R2b): the dead-renderer Reconcile keeps only a device that is on the host's
+		// CURRENT pl_gpu. A device not on it cannot be set up without a seam (every GpuCreated attaches its own pl_gpu as the current one), so
+		// the reachable counterpart is pinned: after GpuReleased the renderer has no device and no current pl_gpu, a store registering and a
+		// Begin make a new memo WITHOUT a device (nothing is resurrected), and a later GpuCreated attaches one.
+		TEST_METHOD(AStoreRegisteringAfterGpuReleasedDoesNotResurrectADevice)
+		{
+			Rig rig(Lane("on"));
+			int fakeGpu = 0;
+			rig.ResyncApply("on");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			rig.Frame(1);
+			Assert::IsTrue(rig.sk.MemoOf(rig.Host()) != nullptr && rig.sk.MemoOf(rig.Host())->HasGpuDevice(), L"attached");
+			rig.Life(RE::Lifecycle::GpuReleased);
+			Assert::IsNull(rig.sk.MemoOf(rig.Host()), L"the memo went with the renderer");
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			rig.Life(RE::Lifecycle::SettingsApplied);
+			rig.Frame(2);
+			const Vpv::Skeleton::FrameMemo fm = rig.sk.MemoFor(rig.Host(), 3);
+			Assert::IsTrue(fm.Valid(), L"a memo is made again");
+			Assert::IsFalse(fm.memo->HasGpuDevice(), L"but no device: the released one is not resurrected");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			Assert::IsTrue(rig.sk.MemoOf(rig.Host()) != nullptr && rig.sk.MemoOf(rig.Host())->HasGpuDevice(), L"a GpuCreated attaches one");
+		}
+
+		// GF-P2b E2 design behaviour (99ade1854): a renderer that died WITHOUT GpuReleased leaves its device on the host's current pl_gpu; the
+		// dead-renderer Reconcile cannot tell it from a new renderer's, so it is kept until the next GpuCreated, which abandons it and
+		// attaches the new renderer's own device.
+		TEST_METHOD(ADeadRenderersStaleDeviceIsKeptUntilTheNextGpuCreated)
+		{
+			Rig rig(Lane("on"));
+			int staleGpu = 0, newGpu = 0;
+			rig.ResyncApply("on");
+			GpuCreatedWithDevice(rig, &staleGpu);
+			rig.Frame(1);
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			Assert::IsTrue(memo->HasGpuDevice(), L"the old renderer's device");
+			// The renderer dies without GpuReleased; a new one at the same address registers its store (the generation moves).
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			rig.Life(RE::Lifecycle::SettingsApplied);
+			rig.Frame(2);
+			memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			Assert::IsTrue(memo->HasGpuDevice(), L"kept: indistinguishable from the new renderer's until its GpuCreated");
+			Assert::IsTrue(rig.sk.MemoDeviceGpuForTesting(rig.Host()) == static_cast<const void*>(&staleGpu), L"the kept device is the stale one");
+			GpuCreatedWithDevice(rig, &newGpu);   // abandons the stale device and attaches the new one
+			memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			Assert::IsTrue(memo->HasGpuDevice(), L"the new renderer's own device is attached");
+			Assert::IsTrue(rig.sk.MemoDeviceGpuForTesting(rig.Host()) == static_cast<const void*>(&newGpu), L"the stale device was abandoned and replaced");
+		}
+
+		// GF-P2b S1: a live switch to the Original pathway removes the renderer's memo host (nothing of the skeleton is left to seal or show);
+		// switching back makes a NEW memo.
+		TEST_METHOD(ALiveSwitchToTheOriginalPathwayRemovesTheMemoAndBackMakesANewOne)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			const Vpv::Skeleton::FrameMemo before = rig.sk.MemoFor(rig.Host(), 5);
+			Assert::IsTrue(before.Valid(), L"a memo with the lane on");
+			const std::shared_ptr<VpSkeleton::SkeletonMemo> oldMemo = before.memo;
+			const uint64_t sealsBefore = oldMemo->Seals();
+			rig.Life(RE::Lifecycle::SettingsApplied, 1);   // code 1: the Original pathway
+			Assert::IsNull(rig.sk.MemoOf(rig.Host()), L"the memo host is gone");
+			Assert::IsFalse(rig.sk.MemoFor(rig.Host(), 5).Valid(), L"no memo for a frame");
+			rig.Frame(5);
+			Assert::AreEqual(sealsBefore, oldMemo->Seals(), L"a Begin does not seal the old memo");
+			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+			Assert::IsFalse(Has(fb, "skeleton acquire"), L"no memo line");
+			Assert::IsFalse(Has(fb, "memo window"));
+			Assert::IsFalse(Has(fb, "skeleton_queue_window"), L"no window line");
+			rig.Life(RE::Lifecycle::SettingsApplied, 0);   // back to the VP-V pathway
+			rig.Frame(6);
+			const Vpv::Skeleton::FrameMemo after = rig.sk.MemoFor(rig.Host(), 7);
+			Assert::IsTrue(after.Valid(), L"a memo again");
+			Assert::IsTrue(after.memo.get() != oldMemo.get(), L"a NEW memo, not the old one");
+		}
+
+		// GF-P2b S3 (1), skeleton side: GpuReleased erases a host's external demand and the erase is COUNTED (ExternalErasures); a second
+		// release with no entry left does not move the count.
+		TEST_METHOD(AnExternalDemandEraseIsCountedOncePerErasedEntry)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 2; ++s)
+				rig.Frame(s);
+			VpSkeleton::ConsumerDecl c;
+			c.id = 0x0612;
+			c.name = "erase test";
+			VpSkeleton::AddConsume(c, VpSkeleton::kP4SourceStats, 0);
+			int owner = 0;
+			Vpv::Skeleton::IExternalDemand* demand = &rig.sk;
+			Assert::AreEqual(uint64_t(0), demand->ExternalErasures(rig.Host()));
+			rig.sk.SetRaisingExternalDemand(rig.Host(), &owner, std::vector<VpSkeleton::ConsumerDecl>(1, c), std::vector<VpSkeleton::ProductId>(), "test");
+			Assert::AreEqual(size_t(1), rig.sk.ExternalEntriesOf(rig.Host()));
+			rig.Life(RE::Lifecycle::GpuReleased);
+			Assert::AreEqual(uint64_t(1), demand->ExternalErasures(rig.Host()), L"one entry erased, once counted");
+			Assert::AreEqual(size_t(0), rig.sk.ExternalEntriesOf(rig.Host()));
+			rig.Life(RE::Lifecycle::GpuReleased);
+			Assert::AreEqual(uint64_t(1), demand->ExternalErasures(rig.Host()), L"nothing left to erase: the count does not move");
+		}
+
+		static bool HasAheadDemand(VpSkeleton::SkeletonMemo* memo, uint16_t depth, const char* by)
+		{
+			for (const VpSkeleton::SkeletonMemo::AheadDemand& d : memo->ActiveAheadDemands())
+				if (d.id == uint16_t(VpSkeleton::kP4SourceStats) && d.form == 0 && d.depth == depth && d.by != nullptr && std::string(d.by) == by)
+					return true;
+			return false;
+		}
+
+		static void DeclareT11Reader(Rig& rig, uint8_t aheadDepth, int* owner)
+		{
+			VpSkeleton::ConsumerDecl c;
+			c.id = 0x0613;
+			c.name = "t11 reader";
+			VpSkeleton::AddConsume(c, VpSkeleton::kP4SourceStats, 0);
+			c.aheadDepth = aheadDepth;
+			rig.sk.SetExternalDemand(rig.Host(), owner, std::vector<VpSkeleton::ConsumerDecl>(1, c), std::vector<VpSkeleton::ProductId>());
+		}
+
+		// GF-P2b AHEAD-DECL call sites (gate G6 C2): a consumer's declared ahead depth reaches the lane fills (the lane is re-bound, once per
+		// change), the requester is named, and a depth-only change neither rebuilds the lane state nor re-binds again when repeated. UNION
+		// test: ConsumerDecl::aheadDepth is GF-P1's. The window is read after the NEXT Begin in (b) / (c): it is derived at the start of
+		// a Begin, before that Begin's re-bind.
+		TEST_METHOD(ADeclaredAheadDepthReachesTheLaneFillsAndTheWindowNamesTheRequester)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			FeedQueueTerms(rig);
+			rig.Life(RE::Lifecycle::GpuCreated);
+			int64_t s = 1;
+			for (; s <= 4; ++s)
+			{
+				rig.Frame(s);
+				PresentFacts(rig, s);
+			}
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			int owner = 0;
+			// (a)
+			const uint64_t binds0 = memo->LaneBinds();
+			DeclareT11Reader(rig, 3, &owner);
+			rig.Frame(s);
+			PresentFacts(rig, s++);
+			Assert::IsTrue(HasAheadDemand(memo, 3, "t11 reader"), L"(a) P4's lane fill declares depth 3 by the reader");
+			Assert::AreEqual(binds0 + 1, memo->LaneBinds(), L"(a) one re-bind");
+			// (b) only the depth changes
+			const VpSkeleton::LaneState* stateBefore = rig.sk.LaneOf(rig.Host())->State().get();
+			const uint64_t binds1 = memo->LaneBinds();
+			DeclareT11Reader(rig, 9, &owner);
+			rig.Frame(s);
+			PresentFacts(rig, s++);
+			Assert::IsTrue(rig.sk.LaneOf(rig.Host())->State().get() == stateBefore, L"(b) the lane state is the same");
+			Assert::AreEqual(binds1 + 1, memo->LaneBinds(), L"(b) one re-bind");
+			Assert::IsTrue(HasAheadDemand(memo, 9, "t11 reader"), L"(b) the uncapped request is the demand");
+			// (c) the same declaration again
+			const uint64_t binds2 = memo->LaneBinds();
+			DeclareT11Reader(rig, 9, &owner);
+			rig.Frame(s);
+			PresentFacts(rig, s++);
+			Assert::AreEqual(binds2, memo->LaneBinds(), L"(c) nothing changed: no re-bind");
+			Assert::IsTrue(rig.sk.Active(rig.Host()), L"(c) the lane is still active");
+			const VpSkeleton::QueueWindow w = memo->Window();   // derived at the Begin after the depth-9 re-bind
+			Assert::IsTrue(w.aheadBinding == VpSkeleton::AheadBinding::Ceiling, L"(b) the ceiling binds");
+			Assert::IsTrue(w.aheadBy != nullptr && std::string(w.aheadBy) == "t11 reader", L"(b) the window names the requester");
+			const std::string text = VpSkeleton::AheadComputeText(w);
+			Assert::IsTrue(text.find("by t11 reader") != std::string::npos && text.find("ceiling") != std::string::npos,
+				std::wstring(text.begin(), text.end()).c_str());
+			rig.sk.ClearExternalDemand(rig.Host(), &owner);
+		}
+
+		// (d) an owner fill that declares an aheadDepth but names no requester reads "owner fill (CPU)" in the window.
+		TEST_METHOD(AnUnnamedAheadRequestKeepsTheFormWordingInTheWindow)
+		{
+			Rig rig(Lane("on"));
+			FeedAheadWindow(rig, 8);   // a P10 CPU owner fill with an aheadDepth and no aheadBy
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 5; ++s)
+			{
+				rig.Frame(s);
+				PresentFacts(rig, s);
+			}
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			const VpSkeleton::QueueWindow w = memo->Window();
+			Assert::IsTrue(w.aheadBy != nullptr && std::string(w.aheadBy) == "owner fill (CPU)");
 		}
 
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)

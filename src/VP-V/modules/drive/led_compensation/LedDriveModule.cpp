@@ -238,11 +238,13 @@ namespace LedDrive
 		const uint8_t aheadNeed = AheadNeedLocked();
 		const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
 		const void* declared = demandHost.load(std::memory_order_acquire);
+		Vpv::Skeleton::IExternalDemand* demand = owners.size() == 1 ? Vpv::Skeleton::Demand() : nullptr;
+		// GF-P2b S3: a GPU-only reset of the same renderer erases the demand (GpuReleased) without moving the registration generation:
+		// the skeleton's erase count of that host is part of the key, so the declaration is made again.
 		if (declared != nullptr && owners.size() == 1 && owners[0] == declared &&
 			VpFrameAnalysis::SourceFrameTap::Generation(declared) == demandGen.load(std::memory_order_acquire) &&
-			aheadNeed == demandAhead)
+			aheadNeed == demandAhead && (demand == nullptr || demand->ExternalErasures(declared) == demandErasures))
 			return;
-		Vpv::Skeleton::IExternalDemand* demand = owners.size() == 1 ? Vpv::Skeleton::Demand() : nullptr;
 		if (demand == nullptr)
 			return;
 		// GF-P3 MUST-10: a declaration on another renderer withdraws the old one first (one entry per module, never a dangling owner).
@@ -260,9 +262,12 @@ namespace LedDrive
 		// 15c-c8 (coordinator ruling 2026-11-15, the owner's demand-driven principle): an ENABLED drive (this module runs only then) needs the
 		// lane's results, so its demand RAISES the lane and the frame-analysis store while declared (Ctrl+I "(demand: LED drive)"); Stop()
 		// withdraws it. The configuration (analysis_lane, frame_analysis_store) is not changed.
+		// GF-P2b S3: the erase count is read BEFORE the declaration, so an erase that races it moves the count and the next call re-declares.
+		const uint64_t erasuresBefore = demand->ExternalErasures(owners[0]);
 		demand->SetRaisingExternalDemand(owners[0], this, std::vector<VpSkeleton::ConsumerDecl>(1, d), std::vector<VpSkeleton::ProductId>(),
 			std::string("LED drive"));
 		demandGen.store(VpFrameAnalysis::SourceFrameTap::Generation(owners[0]), std::memory_order_release);
+		demandErasures = erasuresBefore;
 		demandAhead = aheadNeed;
 		demandHost.store(owners[0], std::memory_order_release);
 	}

@@ -4,7 +4,7 @@
 
 // L-CORE (lead 8 ruling 2026-11-14 ~05:45 on 102b P13-NO-LANE-GPU-ALLOC; D9 "memo without analysis_lane"): the VRAM ledger
 // grant of a renderer's memo when NO lane plans it. The same ledger rule as with the lane (the memo's GPU spots are budgeted
-// as the scratch-arena user, kUserScratchArena, and reserved against the grant BEFORE the fill; released at the seal /
+// as its own user, kUserSkeletonMemo (GF-P2b S10; never the scratch arena's id), and reserved against the grant BEFORE the fill; released at the seal /
 // eviction): the governor (PlanVram) grants the memo's declared need out of what the card has left after every other VP-V
 // VRAM user, whose CURRENT holdings are taken as fixed (they do not shed for the memo). No grant = GPU fills that allocate stay
 // Unavailable(no VRAM ledger grant), visibly. Views (OwnerFill::view) need no grant. Header-only, C++14, no GPU API.
@@ -36,7 +36,7 @@ inline MemoGpuGrant PlanMemoGpuGrant(const CardProfile& card, bool cardKnown, ui
     if (!cardKnown || need == 0)
         return g;
     VramUser memo;
-    memo.id = kUserScratchArena;
+    memo.id = kUserSkeletonMemo;   // GF-P2b S10: the memo's own id (the scratch arena declares kUserScratchArena)
     memo.name = "skeleton memo (no lane)";
     memo.tier = Tier::T0;
     memo.shedOrder = 200;
@@ -52,7 +52,7 @@ inline MemoGpuGrant PlanMemoGpuGrant(const CardProfile& card, bool cardKnown, ui
     in.users.push_back(memo);
     const GovernorPlan plan = PlanVram(in);
     g.budget = plan.budgetBytes;
-    if (const UserGrant* u = plan.Find(kUserScratchArena)) {
+    if (const UserGrant* u = plan.Find(kUserSkeletonMemo)) {
         g.bytes = u->bytes;
         g.granted = u->bytes > 0;
     }
@@ -65,7 +65,7 @@ inline MemoGpuGrant PlanMemoGpuGrant(const CardProfile& card, bool cardKnown, ui
 inline VramUser MakeMemoVramUser(const std::vector<uint64_t>& levels, const char* name)
 {
     VramUser memo;
-    memo.id = kUserScratchArena;
+    memo.id = kUserSkeletonMemo;   // GF-P2b S10: the memo's own id (the scratch arena declares kUserScratchArena)
     memo.name = name;
     memo.tier = Tier::T0;
     memo.shedOrder = 200;
@@ -101,7 +101,7 @@ inline MemoGpuGrant PlanMemoGpuGrantLevels(const CardProfile& card, bool cardKno
     in.users.push_back(memo);
     const GovernorPlan plan = PlanVram(in);
     g.budget = plan.budgetBytes;
-    if (const UserGrant* u = plan.Find(kUserScratchArena)) {
+    if (const UserGrant* u = plan.Find(kUserSkeletonMemo)) {
         g.bytes = u->bytes;
         g.granted = u->bytes > 0;
     }
