@@ -297,7 +297,7 @@ namespace AdaptiveDownscaleStage
 		if (module.Active())
 			lines.push_back(module.LastGrainFromSharedProducts() ?
 				"Adaptive grain: from the shared grain split (P10) and region statistics (P11)" :
-				"Adaptive grain: own Laplacian estimate (the shared grain products are not supplied to the scaler)");
+				"Adaptive grain: own estimate (the shared grain products are not supplied to the scaler)");
 		const std::string td = TdProducts::StatusLine(TdProducts::Consumer::AdaptiveScaler, tdRead);
 		if (!td.empty())
 			lines.push_back(td);

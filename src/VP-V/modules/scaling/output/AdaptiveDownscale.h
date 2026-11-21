@@ -153,7 +153,7 @@ namespace AdaptiveDownscale
 
 	// One Gaussian-noise sigma in the mean-|Laplacian| energy units the grain ramp is defined in: the discrete
 	// Laplacian 4e - (b + d + f + h) of white noise has std sqrt(20) sigma, and E|x| = sqrt(2/pi) std for a Gaussian.
-	constexpr float kLaplacianPerSigma = 3.5682208f;   // sqrt(20) * sqrt(2 / pi)
+	constexpr float kEdgeEnergyPerSigma = 3.5682208f;   // sqrt(20) * sqrt(2 / pi)
 
 	// Stage 12 §2c / S8-1: the de-judder's motion for the source frame being
 	// rendered (from the last estimate; null = none: this frame's residual).

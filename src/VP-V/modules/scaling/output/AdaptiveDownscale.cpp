@@ -155,7 +155,7 @@ if (li == 0u && advance > 0.5) {
     vec4 t = ad_total[0];
 #ifdef AD_P10
     // No usable block (all vetoed or outside the crop): the private estimate stands in for this frame.
-    float energy = ad_p10[0].y > 1e-6 ? LAPLACIAN_PER_SIGMA * ad_p10[0].x / ad_p10[0].y : t.x / max(t.y, 1.0);
+    float energy = ad_p10[0].y > 1e-6 ? ENERGY_PER_SIGMA * ad_p10[0].x / ad_p10[0].y : t.x / max(t.y, 1.0);
 #else
     float energy = t.x / max(t.y, 1.0);
 #endif
@@ -1017,8 +1017,8 @@ float rs_slope(float y)
 				{ pl_var_float("p10_scale"), &codeScale, true },
 				{ pl_var_vec2("crop_lo"), cropLo, true },
 				{ pl_var_vec2("crop_hi"), cropHi, true } };
-			static const std::string p10Define = std::string("#define AD_P10 1\n#define LAPLACIAN_PER_SIGMA ") +
-				std::to_string(kLaplacianPerSigma) + "\n";
+			static const std::string p10Define = std::string("#define AD_P10 1\n#define ENERGY_PER_SIGMA ") +
+				std::to_string(kEdgeEnergyPerSigma) + "\n";
 			static const std::string finalImgHeader = std::string("#define AD_STATS_IMG 1\n") + FINAL_HEADER;
 			static const std::string finalP10Header = p10Define + FINAL_HEADER;
 			static const std::string finalImgP10Header = p10Define + finalImgHeader;
