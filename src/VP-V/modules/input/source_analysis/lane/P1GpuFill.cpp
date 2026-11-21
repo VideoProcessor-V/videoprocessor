@@ -110,9 +110,11 @@ namespace P1Gpu
 	{
 		// One pass through libplacebo's dispatch (the matcher's Dispatch, without its test-only timing): descriptors `src`
 		// (sampled, nearest, clamp) and `dst` (storage, write-only), the `codes` uniform on a 2x2 pass, one work group per
-		// group x group dst texels. `why` names a failure.
-		bool DispatchPass(pl_dispatch dispatch, const PyramidPass& p, std::string& why)
+		// group x group dst texels. `why` names a failure. The dispatch is the fill context's, taken here from `req` (the owner-fill
+		// dispatch provenance rule, PrivateTextureScanTests::OwnerFillsTakeNoPrivateGpu): never handed on as a pl_dispatch.
+		bool DispatchPass(const VpSkeleton::OwnerFillRequest& req, const PyramidPass& p, std::string& why)
 		{
+			const pl_dispatch dispatch = static_cast<pl_dispatch>(req.gpu->Dispatch());
 			pl_shader_desc desc[2]{};
 			desc[0].desc.name = "src";
 			desc[0].desc.type = PL_DESC_SAMPLED_TEX;
@@ -253,9 +255,8 @@ namespace P1Gpu
 					return false;
 				}
 				const pl_tex dst = static_cast<pl_tex>(out.gpu.resource);
-				const pl_dispatch dispatch = static_cast<pl_dispatch>(req.gpu->Dispatch());
 				std::string passError;
-				const PyramidPassRunner run = [&](const PyramidPass& p) { return DispatchPass(dispatch, p, passError); };
+				const PyramidPassRunner run = [&](const PyramidPass& p) { return DispatchPass(req, p, passError); };
 				bool ok;
 				if (law.twoByTwo)
 				{
