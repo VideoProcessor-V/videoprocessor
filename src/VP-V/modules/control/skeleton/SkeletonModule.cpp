@@ -1759,7 +1759,10 @@ namespace Vpv
 			}
 
 			// SceneFactsOf's body; `done` (may be nullptr) gets the frames whose confirmed sequence verdict arrived in this call.
-			bool SceneFactsFor(HostState& st, Bundle& bundle, uint64_t seq, SceneFacts& out, std::vector<uint64_t>* done)
+			// `ahead` (GF-P2a S2b): `seq` is ahead of the render seal (SkeletonMemo::AheadOfSeal). Its fade run is folded as usual but NOT
+			// kept in the sceneRuns ring: an ahead frame 8+ out would overwrite the render frames' entries, and their runs would then be
+			// rebuilt with reduced evidence (sceneRunReduced). The render-order fill of the frame keeps its run.
+			bool SceneFactsFor(HostState& st, Bundle& bundle, uint64_t seq, SceneFacts& out, std::vector<uint64_t>* done, bool ahead)
 			{
 				out = SceneFacts();
 				if (seq < 2)
@@ -1798,9 +1801,12 @@ namespace Vpv
 					const bool runFade = VpUnit::CutFadeJudge::FoldFadeRun(a, c, e, run, &runKeep);
 					fadeKeep = VpUnit::CutFadeJudge::FrameFadeKeep(a, c, e.fade, runFade, runKeep);
 					e.fade = runFade || e.fade;
-					HostState::SceneRunEntry& kept = st.sceneRuns[static_cast<size_t>(seq % kSceneRunRing)];
-					kept.seq = seq;
-					kept.run = run;
+					if (!ahead)
+					{
+						HostState::SceneRunEntry& kept = st.sceneRuns[static_cast<size_t>(seq % kSceneRunRing)];
+						kept.seq = seq;
+						kept.run = run;
+					}
 				}
 				// U7 v2: cut / flash / cutPossible / strength from the sequence law (the renderer's tracker).
 				VpUnit::CutFadeJudge::CutVerdict v;
@@ -1836,6 +1842,12 @@ namespace Vpv
 				out.rectX1 = c.rectX1;
 				out.rectY1 = c.rectY1;
 				return true;
+			}
+
+			// The same, ahead-ness read from the renderer's memo now (SceneFactsOf).
+			bool SceneFactsFor(HostState& st, Bundle& bundle, uint64_t seq, SceneFacts& out, std::vector<uint64_t>* done)
+			{
+				return SceneFactsFor(st, bundle, seq, out, done, bundle.memo->AheadOfSeal(seq));
 			}
 		}
 

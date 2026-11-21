@@ -498,6 +498,13 @@ public:
         std::lock_guard<std::mutex> g(mutex_);
         return seals_;
     }
+    // GF-P2a MUST-7: frame `seq` is AHEAD of the render seal (render order, not the thread): a seal happened and seq is past it.
+    // Read-only. False before the first seal (and after Clear): every frame counts as render order then.
+    bool AheadOfSeal(uint64_t seq) const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return haveSealed_ && seq > lastSeal_;
+    }
     uint32_t KeepFrames() const
     {
         std::lock_guard<std::mutex> g(mutex_);
