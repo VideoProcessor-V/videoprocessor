@@ -60,8 +60,10 @@
  * desaturated towards its luma just far enough to fit in 0-1 (same hue). That
  * part takes the unchanged per-channel curve, exactly as an in-range
  * neighbour of that colour would. The excursion beyond it (pure chroma, in
- * the colour's own direction) is added back. A below-black channel therefore
- * keeps its exact value. Under a gain below 1, an above-white excursion
+ * the colour's own direction) is added back. When no channel is above white,
+ * a below-black channel therefore keeps its exact value (with a channel above
+ * white as well, it follows its in-range neighbour, continuously). Under a
+ * gain below 1, an above-white excursion
  * follows the compensated white (scaled by the curve at 1), so headroom stays
  * smooth across the white edge. The excursion is shortened, all channels by
  * one factor, only as far as needed to stay inside the encodable extended
@@ -242,7 +244,8 @@ vec3 compensate(vec3 v, float lift)
 //   e = o - p, the excursion, pure chroma in o's own direction;
 //   out = compensate(p) + k f e, where
 //   f = the curve at white under a gain below 1 when a channel is above white (headroom follows the
-//       compensated white), else 1 (a below-black channel stays exact; gains from 1 up match the neighbours);
+//       compensated white), else 1 (a below-black channel stays exact when no channel is above white; with
+//       one above white too it follows its in-range neighbour; gains from 1 up match the neighbours);
 //   k = 1, lowered (one factor for all channels) only as far as keeps out inside extended_floor ..
 //       extended_ceiling, so the encode clip cannot tilt the hue.
 vec3 preserve_extended(vec3 result, vec3 original, float lift)
