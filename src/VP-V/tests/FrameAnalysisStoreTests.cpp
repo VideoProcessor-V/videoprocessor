@@ -251,6 +251,32 @@ namespace FrameAnalysisStoreTestsNs
 			Assert::IsFalse(store.PeekScene(5, seen), L"a disabled store answers nothing");
 		}
 
+		// GF-P2a MUST-8: a CONFIRMED scene group is never downgraded by a provisional publish for the same record; a new record (Begin of
+		// the same sequence number again: a seek) takes a provisional scene as usual.
+		TEST_METHOD(AConfirmedSceneIsNeverDowngradedByAProvisionalPublish)
+		{
+			Store store(RingDepth(4, 4));
+			store.Begin(Id(5), kScene);
+			Scene confirmed;
+			confirmed.cut = true;
+			confirmed.cutHere = true;
+			confirmed.confirmed = true;
+			confirmed.origin = SceneOrigin::Vp;
+			Assert::IsTrue(store.PublishScene(5, confirmed));
+			Scene provisional;
+			provisional.confirmed = false;
+			provisional.origin = SceneOrigin::Vp;
+			Assert::IsFalse(store.PublishScene(5, provisional), L"a late provisional publish is refused");
+			Scene seen;
+			Assert::IsTrue(store.PeekScene(5, seen));
+			Assert::IsTrue(seen.confirmed && seen.cut && seen.cutHere, L"the record stays confirmed, unchanged");
+			store.Begin(Id(5), kScene);   // the frame number is reused: a new record
+			Assert::IsFalse(store.PeekScene(5, seen), L"the new record holds no scene yet");
+			Assert::IsTrue(store.PublishScene(5, provisional), L"a provisional scene is written into the new record");
+			Assert::IsTrue(store.PeekScene(5, seen));
+			Assert::IsFalse(seen.confirmed);
+		}
+
 		TEST_METHOD(ACadenceRoundTripsThroughItsGroup)
 		{
 			Store store(RingDepth(4, 4));
