@@ -779,8 +779,9 @@ namespace Vpv
 			// the pairs into a frame later CONFIRMED as a cut (vectors across a real cut were used before the verdict: one frame of the
 			// one-frame-late law). A small ring of the recent unjudged frames links the two; shown on "Skeleton scene:". Approximate:
 			// every ask counts (a frame asked twice counts twice), and a link older than kUnjudgedRing frames is lost. GF-P4 S-2: the asks
-			// come from ALL vector readers (the estimate, FlowOf, the sigma-delta gate and the P2 CPU form, whose gap read asks each frame
-			// of its span), not only the estimate; the status line says so.
+			// come from ALL vector readers (PairValidAt / PairServes / PairSpansSlip: the estimate, FlowOf, the de-judder policy, the
+			// sigma-delta gate and the dither vector source, SharedMotionSource, EstimateState, the camera link, and the P2 CPU form, whose
+			// gap read asks each frame of its span), not only the estimate; the status line says so.
 			constexpr size_t kUnjudgedRing = 32;
 			std::atomic<uint64_t>& ScenePairsUnjudged() { static std::atomic<uint64_t> n{ 0 }; return n; }
 			std::atomic<uint64_t>& ScenePairsAcrossLateCut() { static std::atomic<uint64_t> n{ 0 }; return n; }

@@ -117,6 +117,7 @@ namespace VpMotion
 				for (uint64_t seq = from + 1u; seq <= to; ++seq)
 					if (confirmedCut(seq))
 					{
+						motionValidity.NoteConfirmedCutRefusal();   // GF-P4 S-2: counted as PairValidAt counts an adjacent refusal
 						why = "p2 cpu form: gap pair " + std::to_string(from) + " -> " + std::to_string(to) + " crosses a confirmed cut at "
 							+ std::to_string(seq);
 						return false;

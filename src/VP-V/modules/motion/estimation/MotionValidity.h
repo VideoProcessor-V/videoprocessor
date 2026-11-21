@@ -394,8 +394,9 @@ namespace MotionValidity
 		// the epoch form of PairValid).
 		// U7-accuracy (owner ruling Q5), bound or not: a pair whose `b` the scene product CONFIRMED as a cut (ConfirmedCutReader) is
 		// refused too, and counted (ConfirmedCutRefusals). No reader set, or no confirmed verdict yet: nothing is refused on the scene.
-		// GF-P4 S-2: the count is per ASK from every reader of this state (the estimate, FlowOf, the sigma-delta gate and the P2 CPU
-		// form), not per estimate.
+		// GF-P4 S-2: the count is per ASK from every reader of this state (PairValidAt / PairServes / PairSpansSlip: the estimate,
+		// FlowOf, the de-judder policy, the sigma-delta gate and the dither vector source, SharedMotionSource, EstimateState, the camera
+		// link, and the P2 CPU form, whose gap read counts through NoteConfirmedCutRefusal), not per estimate.
 		//
 		// The scene seam: true when frame `seq` is a CONFIRMED cut (the first frame of the new shot). Set by the scene producer's module
 		// (the skeleton, SkeletonModule: FrameAnalysis::Scene confirmed && cutHere); null = no scene veto (tests, no skeleton).
@@ -419,11 +420,17 @@ namespace MotionValidity
 			const ConfirmedCutFn reader = ConfirmedCutReader().load(std::memory_order_acquire);
 			if (reader != nullptr && reader(b))
 			{
-				confirmedCutRefusals.fetch_add(1, std::memory_order_relaxed);
-				ConfirmedCutRefusalsAll().fetch_add(1, std::memory_order_relaxed);
+				NoteConfirmedCutRefusal();
 				return false;
 			}
 			return true;
+		}
+		// One pair refused at a confirmed cut, counted in this state and process-wide: PairValidAt's own count, and the P2 CPU form's
+		// gap read (VectorEngine::P2RecordEndingAt), which asks the reader for each frame of its span itself (GF-P4 S-2).
+		void NoteConfirmedCutRefusal() const noexcept
+		{
+			confirmedCutRefusals.fetch_add(1, std::memory_order_relaxed);
+			ConfirmedCutRefusalsAll().fetch_add(1, std::memory_order_relaxed);
 		}
 		uint64_t ConfirmedCutRefusals() const noexcept { return confirmedCutRefusals.load(std::memory_order_relaxed); }
 
