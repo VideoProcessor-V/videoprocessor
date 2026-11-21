@@ -455,7 +455,7 @@ namespace CameraLink
 			if (f.p7SealedPublished)
 			{
 				PoolEntry e;
-				if (m_pool->Get(f.seq, e))
+				if (m_pool->Get(f.seq, e, /*includeUncommitted=*/true))   // GEM-128: the seal accepted a Published slot; the worker may not have Committed yet
 					rec = e.record;
 			}
 			const bool accepted = m_sealToStore.OnSealed(f.seq, rec);
@@ -859,7 +859,9 @@ namespace CameraLink
 	{
 		rec.reset();
 		PoolEntry e;
-		if (!m_pool || !m_pool->Get(seq, e))
+		// GEM-128: the callers (the P8 fill, live and lane) ask only for a frame whose P7 slot is Published or Sealed, i.e. after the worker's
+		// Publish; its Commit follows a moment later, so the uncommitted entry is read too (the same rule as the seal observer).
+		if (!m_pool || !m_pool->Get(seq, e, /*includeUncommitted=*/true))
 			return false;
 		rec = e.record;
 		return true;
