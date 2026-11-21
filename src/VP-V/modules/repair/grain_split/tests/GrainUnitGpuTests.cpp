@@ -690,6 +690,9 @@ namespace GrainUnitGpuTestsNs
 		// OwnerDispatch() creates it, a pass run through a variant owner's context (ctx.Dispatch()) arrives as an "owner_gpu" row and
 		// is not unattributed; a dispatch created while the detector is OFF installs no callback (the off cost is one flag load), so
 		// the same pass leaves no "owner_gpu" row. Asserts on what the callback delivered.
+		BEGIN_TEST_METHOD_ATTRIBUTE(OwnerGpuDeviceDispatchIsWatched)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(OwnerGpuDeviceDispatchIsWatched)
 		{
 			GpuDevice dev;
