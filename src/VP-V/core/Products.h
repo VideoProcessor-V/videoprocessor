@@ -92,9 +92,9 @@ enum : ProductId {
     kSourceGeometry,      // 29 source_geometry (P14g): HELD-STATE measured + applied source geometry (SourceGeometry unit v1)
     // THE fixed id table of the wave-S2 products (owner decision R14-95, 11-14; this file's owner is L-CORE). Explicit numbers: nobody else
     // reassigns them, a lane lands its product by declaring it under its number (and removes the number from kReservedProductIds).
-    // Id 30 (lead 8 allocation 30, 11-14; lead 12 R1: ids fixed, no renumbering) is NOT registered: a GpuCompute product is registered only
-    // with its owner fill (R13-8, 102b B3-ID30-EXCLUSIONS); the fill and the id land together (102b LB3-BAND-MEMO-GPU).
-    kBandMemo = 30,       // 30 band_memo (BandMemo; implementation not landed on this line: RESERVED)
+    // Id 30 (lead 8 allocation 30, 11-14; lead 12 R1: ids fixed, no renumbering) is registered by AppendBandMemoProduct together with its owner
+    // fill (repair/grain_split/BandMemoFill.h; R13-8, 102b B3-ID30-EXCLUSIONS, LB3-BAND-MEMO-GPU; C8 slice 8, coreplan-C8-8-U2).
+    kBandMemo = 30,       // 30 band_memo (BandMemo: the per-frame low band of the grain unit; owner repair/grain_split)
     kEdgeMap = 31,        // 31 edge_map (C3 fixed id table; per-frame memo of the source-luma Sobel; readers: L-FOCUS focus map, L-B5 busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3); frozen 17:19; 102b X5-EDGEMAP-CJ3, KEDGEMAP-RULE3 UPDATE :523); later deband guard, occlusion, TD); lead 8 allocation 31, 05:2x 11-14
     kFocusMap = 32,       // 32 focus_map (L-FOCUS; RESERVED until it lands)
     kRoomLight = 33,      // 33 room_light (DV block; RESERVED until it lands)
@@ -108,7 +108,7 @@ static_assert(kSourceGeometry == 29 && kBandMemo == kSourceGeometry + 1 && kSkel
 // token, no inputs, no reader row, no catalog row), so ids stay indexes and Size() == kSkeletonProductEnd. Registry::Validate accepts an
 // absent slot ONLY at a listed id and rejects a real declaration at a listed id; Has() is false for an absent slot, so any input naming one
 // fails closed ("unknown input product"). The lane that lands a product declares it under its fixed number and deletes the number here.
-constexpr ProductId kReservedProductIds[] = { kBandMemo, kFocusMap, kRoomLight, kComposedVectors };
+constexpr ProductId kReservedProductIds[] = { kFocusMap, kRoomLight, kComposedVectors };
 constexpr size_t kReservedProductCount = sizeof(kReservedProductIds) / sizeof(kReservedProductIds[0]);
 constexpr bool IsReservedProduct(ProductId id)
 {
@@ -120,7 +120,7 @@ constexpr bool IsReservedProduct(ProductId id)
 // The planned token of a reserved id (shown in the product-graph doc and the Ctrl+Alt+D status line; "" for any other id).
 constexpr const char* ReservedProductName(ProductId id)
 {
-    return id == kBandMemo ? "band_memo" : id == kFocusMap ? "focus_map" : id == kRoomLight ? "room_light"
+    return id == kFocusMap ? "focus_map" : id == kRoomLight ? "room_light"
          : id == kComposedVectors ? "composed_vectors" : "";
 }
 
@@ -1047,7 +1047,28 @@ inline void PadReservedUntil(std::vector<ProductDecl>& decls, ProductId upTo)
     }
 }
 
-// Pads the reserved ids before (30) and after (32..34) edge_map, so EVERY caller that completes the skeleton set (SkeletonProducts, RegionEvidence)
+// band_memo (fixed id 30; C8 slice 8, coreplan-C8-8-U2): the per-frame LOW BAND of the grain unit (repair/grain_split, BandFromBase law): one separable
+// Gaussian per (frame, BandKey), published by the owner fill (repair/grain_split/BandMemoFill.h) and discarded after the frame. It is the one blur the
+// interpolator, the debander, DetailPulse, TextureRestore and the frame-quality monitor each computed privately (shared unit U2). Declared with the
+// Cpu and GPU forms of the one key (the GPU form is the primary: GpuCompute); 4 B per cell per plane; reads P1 (the half plane) by nested Acquire.
+// Appended BEFORE edge_map (id 31): the ids stay dense.
+inline void AppendBandMemoProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    ProductDecl p = Make(kBandMemo, "band_memo", "grain band memo (per frame)", Backend::GpuCompute, 1, Tier::T1,
+                         Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
+    p.sourceFrame = true;
+    AddInput(p, kP1HalfLuma, 0);
+    AddTerm(p, 1, 4);   // per plane-component, half resolution, float32 (a full-resolution key reserves its own cells at Acquire)
+    p.refRenderMs = 0.3f;
+    PadReservedUntil(decls, kBandMemo);
+    decls.push_back(p);
+}
+
+// Pads the reserved ids after (32..34) edge_map, so EVERY caller that completes the skeleton set (SkeletonProducts, RegionEvidence)
 // gets the same id-indexed registry of Size() == kSkeletonProductEnd.
 inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
 {
@@ -1338,7 +1359,8 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double s
     AppendCameraGuideProduct(d);
     AppendTemporalDetailEngineProducts(d, sourcePeriodMs, queueFrames);
     AppendSourceGeometryProduct(d);   // wave S2: P14g, appended after the doc 72 list
-    AppendEdgeMapProduct(d);          // L-B5 / rule 3: fixed id 31, after source_geometry; pads reserved ids 30 and 32..34 (Size() == kSkeletonProductEnd)
+    AppendBandMemoProduct(d);         // C8 slice 8: fixed id 30, after source_geometry (U2 band memo)
+    AppendEdgeMapProduct(d);          // L-B5 / rule 3: fixed id 31; pads reserved ids 32..34 (Size() == kSkeletonProductEnd)
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }

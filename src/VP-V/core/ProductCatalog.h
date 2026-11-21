@@ -158,6 +158,8 @@ inline const std::vector<ProductRow>& ProductRows()
         // Wave S2: P14g source_geometry is HELD STATE like P14: the source-resolution side (single writer) publishes it on each evaluation, no lane
         // producer, no live fill; its readers take the latest sealed record (lag 1) and fall back visibly when it is absent or stale.
         { kSourceGeometry, "input/source_analysis/identity", kExpectedSourceGeometryUnit, "" },
+        // C8 slice 8 (coreplan-C8-8-U2): the per-frame low band of the grain unit (shared unit U2), an owner fill (repair/grain_split/BandMemoFill.h).
+        { kBandMemo, "repair/grain_split", kExpectedGrainSplitUnit, "band memo owner fill (Acquire); readers: interpolator, debander, detail pulse, texture restore, temporal detail" },
         { kEdgeMap, "input/source_analysis/regions", kExpectedRegionUnit, "edge map pass (per-frame memo); readers: focus map, busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3))" },
     };
     return rows;
@@ -300,19 +302,19 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         r.push_back(MakeRow(13, "matcher / motion warp", "VP-V/modules/motion/estimation/matcher/DejudderWarp", PathwayUnit::Motion,
                             20, { kP1HalfLuma, kP2VectorPair, kP4SourceStats }, own, "product.motion_warp"));
         r.push_back(MakeRow(9, "interpolator / hiccup repair", "VP-V/modules/motion/consumers", PathwayUnit::Motion, 40,
-                            { kP3AnalysisField, kP10GrainSplit }, own, "product.interpolator"));
+                            { kP3AnalysisField, kP10GrainSplit, kBandMemo }, own, "product.interpolator"));
         // Repair
         r.push_back(MakeRow(10, "temporal detail", "VP-V/modules/repair/temporal_detail", PathwayUnit::Repair, 10,
-                            { kP10GrainSplit, kP11RegionBlockStats, kP13SourceRing, kTdAnalysis, kTdRefstore, kTdAdmission },
+                            { kP10GrainSplit, kP11RegionBlockStats, kP13SourceRing, kTdAnalysis, kTdRefstore, kTdAdmission, kBandMemo },
                             lower, "product.temporal_detail"));
         r.push_back(MakeRow(0, "detail pulse", "VP-V/modules/repair/detail_pulse", PathwayUnit::Repair, 20,
-                            { kP10GrainSplit, kP11RegionBlockStats, kP4SourceStats }, own, "product.detail_pulse", false,
+                            { kP10GrainSplit, kP11RegionBlockStats, kP4SourceStats, kBandMemo }, own, "product.detail_pulse", false,
                             { kSourceIdentity }));
         r.push_back(MakeRow(1, "texture restore", "VP-V/modules/repair/texture_restore", PathwayUnit::Repair, 30,
-                            { kP10GrainSplit, kP11RegionBlockStats, kP4SourceStats }, own, "product.texture_restore", false,
+                            { kP10GrainSplit, kP11RegionBlockStats, kP4SourceStats, kBandMemo }, own, "product.texture_restore", false,
                             { kSourceIdentity }));
         r.push_back(MakeRow(2, "debander (with hold)", "VP-V/modules/repair/deband", PathwayUnit::Repair, 40,
-                            { kP10GrainSplit, kP11RegionBlockStats, kP12LightLevel, kP3AnalysisField }, own,
+                            { kP10GrainSplit, kP11RegionBlockStats, kP12LightLevel, kP3AnalysisField, kBandMemo }, own,
                             "product.debander", true, { kSourceIdentity }));
         // Contrast recovery gates itself off on a clean high-bitrate source (get out of the way): it reads only the held record.
         r.push_back(MakeRow(18, "contrast recovery need", "VP-V/modules/repair", PathwayUnit::Repair, 55,

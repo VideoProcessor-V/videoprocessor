@@ -984,6 +984,9 @@ namespace FallbackCatalog
 			// registered yet (declaration only), so every reader shows "frame pattern: not produced"; no behaviour reads the role.
 			{ "product.quality_pattern", "frame pattern record unavailable, stale or of another unit version: temporal detail and dither need show it as not produced and use their classical forms" },
 			{ "product.source_geometry", "source geometry record unavailable, stale or of another unit version: readers use the delivered raster and their classical forms" },
+			// Band memo (P30, repair/grain_split/BandMemoFill.h; C8 slice 8): the low band of a key could not be computed (no float format, allocation
+			// failure, or the fill declined), so the reader that asked takes its existing feature-off path for that frame.
+			{ "product.band_memo_unavailable", "grain band memo (low band) could not be computed: the readers that asked (interpolator, debander, detail pulse, texture restore, temporal detail) run their feature-off forms for the frame" },
 		};
 		if (count)
 			*count = sizeof(kEntries) / sizeof(kEntries[0]);
