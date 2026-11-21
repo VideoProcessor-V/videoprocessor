@@ -157,10 +157,15 @@ namespace GrainSplit
 					return Decline(out, "grain split variant: the source plane is not the requested size (crop axis not served)");
 				const double scale = ScaleOfAxis(v.scale);
 				const int B = BlockFor(scale);
-				const double cu = VpvGpu::CodeUnit(plane, facts->repr.bits, v.codeUnit ? v.codeUnit : 10);
+				// GF-P1 MUST-6 (Gemini's snippet, USE AS-IS): the law is depth-scaled to the variant's colour depth (GrainSplit.h
+				// DepthScale contract), so GS_CODE_SCALE / GS_FLOOR and the luma bins follow the code unit the plane is read in.
+				const int bits = v.codeUnit ? int(v.codeUnit) : DefaultParams().sourceBits;
+				const double cu = VpvGpu::CodeUnit(plane, facts->repr.bits, bits);
+				Params law = DefaultParams();
+				law.sourceBits = bits;
 				const std::shared_ptr<Held> held = std::make_shared<Held>();
 				Splitter splitter;   // holds no texture: every one is the context's (held->textures)
-				if (!splitter.Compute(*req.gpu, plane, 0, cu, scale, B, DefaultParams(), req.seq, held->textures))
+				if (!splitter.Compute(*req.gpu, plane, 0, cu, scale, B, law, req.seq, held->textures))
 					return Decline(out, "grain split variant: " + splitter.LastError());
 				held->frame = splitter.Out();
 				out.gpu.resource = &held->frame;
