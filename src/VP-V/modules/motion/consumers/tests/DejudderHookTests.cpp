@@ -648,7 +648,7 @@ namespace VideoProcessorTest
 			Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
 			DejudderRendered::Cache cache;
 			DejudderRendered::Warp rendered(fixture.Log(), gpu);
-			DejudderRendered::VectorField field(fixture.Log(), gpu);
+			DejudderRendered::VectorField field(fixture.Log(), gpu, true);   // host-readable vectors (tests only), as at the other use
 			pl_tex_params targetParams{};
 			targetParams.w = width;
 			targetParams.h = height;
@@ -774,35 +774,39 @@ namespace VideoProcessorTest
 				width, height, vectors), ExtendedRangeGpuProbe::ToWide(field.Error()).c_str());
 			Assert::IsNotNull(vectors);
 			{
+				// gate16-CB F2: the field texture has no blit_src, so a blit into a readable copy is refused and reads zeros;
+				// download the vectors themselves (the field is created host-readable above).
 				pl_tex_params vp{};
 				vp.w = vectors->params.w;
 				vp.h = vectors->params.h;
-				vp.format = vectors->params.format;
-				vp.host_readable = true;
-				vp.blit_dst = true;
-				pl_tex readable = pl_tex_create(gpu, &vp);
-				Assert::IsNotNull(readable, L"readable copy for dither vectors");
-				pl_tex_blit_params bp{};
-				bp.src = vectors;
-				bp.dst = readable;
-				pl_tex_blit(gpu, &bp);
+				Assert::IsTrue(vectors->params.host_readable, L"dither vectors host-readable (test flag)");
 				pl_gpu_finish(gpu);
 				std::vector<uint16_t> raw(static_cast<size_t>(vp.w) * vp.h * 4);
 				pl_tex_transfer_params dl{};
-				dl.tex = readable;
+				dl.tex = vectors;
 				dl.ptr = raw.data();
 				Assert::IsTrue(pl_tex_download(gpu, &dl), L"download dither vectors");
-				pl_tex_destroy(gpu, &readable);
 				auto halfToF = [](uint16_t h) {
 					const int s = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
 					const float v = e == 0 ? std::ldexp(static_cast<float>(m), -24) : std::ldexp(static_cast<float>(m | 1024), e - 25);
 					return s ? -v : v;
 				};
-				int heldBlocks = 0;
+				int heldBlocks = 0, movingBlocks = 0;
 				for (int by = 0; by < vp.h; ++by)
 					for (int bx = 0; bx < vp.w; ++bx)
 					{
 						const int cx = bx * 16 + 8, cy = by * 16 + 8;
+						bool farAway = true;
+						for (int k = 0; k < 2; ++k)
+						{
+							const pl_rect2df& rr = g.holds[k];
+							farAway = farAway && !(cx >= rr.x0 - 16 && cx < rr.x1 + 16 && cy >= rr.y0 - 16 && cy < rr.y1 + 16);
+						}
+						if (farAway)
+						{
+							const size_t at = (static_cast<size_t>(by) * vp.w + bx) * 4;
+							movingBlocks += (std::fabs(halfToF(raw[at])) > 0.0f || std::fabs(halfToF(raw[at + 1])) > 0.0f) ? 1 : 0;
+						}
 						if (inside(cx, cy, 0) || inside(cx, cy, 1))
 						{
 							++heldBlocks;
@@ -812,6 +816,7 @@ namespace VideoProcessorTest
 						}
 					}
 				Assert::IsTrue(heldBlocks > 0, L"expected blocks inside the held subtitle rectangles");
+				Assert::IsTrue(movingBlocks > 0, L"the pan's blocks outside the holds carry vectors (the readback is real)");
 			}
 		}
 
