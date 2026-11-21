@@ -896,7 +896,9 @@ if (p.x < GS_W && p.y < GS_H) {
 			const auto formatIs = [&](pl_tex t, pl_fmt fmt, VpSkeleton::TexFormat expected) {
 				if (gpu)
 					return t->params.format == fmt;
-				VpSkeleton::TexFormat got = VpSkeleton::TexFormat::R8;
+				// FormatOf writes `got` whenever it returns true; the initial value is never compared. R32F is never an
+				// `expected` here (only rg32f / rgba32f are), so even an unwritten `got` could not match.
+				VpSkeleton::TexFormat got = VpSkeleton::TexFormat::R32F;
 				return VpSkeleton::PlTexBackend::FormatOf(t->params.format, &got) && got == expected;
 			};
 			const VpSkeleton::TexFormat t2x = VpSkeleton::TexFormat::RG32F, t4x = VpSkeleton::TexFormat::RGBA32F;
