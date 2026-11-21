@@ -12,10 +12,11 @@
 //   Planar16  P010 / P210 luma plane: code = word16 >> 6 (AnalysisLumaSource P010Code), out = code << 6   (10 bit)
 //   V210      the 10-bit Y field of the six-pixel group (AnalysisLumaSource ReadNativeYuv422), out = code << 6 (10 bit)
 //   Uyvy8     UYVY / HDYC luma byte, out = byte << 8                                                        (8 bit)
-//   DvTunnel  the DV tunnel's 12-bit intensity: DolbyVisionTunnelUnpackReference (the DV_BODY helpers of
-//             GpuDolbyVisionTunnelUnpack.cpp, same GLSL), tap12 = DvTunnelTapLaw::TapCode, out = tap12 << 4 (12 bit);
+//   DvTunnel  the DV tunnel's 12-bit intensity: DolbyVisionTunnelUnpackReference (the shared
+//             DvTunnelGlsl::kHeader helpers, one GLSL copy with GpuDolbyVisionTunnelUnpack), tap12 = DvTunnelTapLaw::TapCode, out = tap12 << 4 (12 bit);
 //             full range goes through DvTunnelTapLaw::BuildRangeTable (4096 entries, built by the CPU law, exact)
-// The result carries `sourceBits` (10 / 8 / 12) so P10 / P11 set their Params::sourceBits from it, never assume 10.
+// SourceBits(packing) gives the plane's sourceBits (10 / 8 / 12); the owner fill (Track Q) stores it with the result,
+// so P10 / P11 set their Params::sourceBits from it, never assume 10.
 //
 // Every refusal is a Cause (CauseName for the status line, the notice and the dump); the caller shows it, never only
 // logs it (principles 5). The kernel owns no queue, no ring and no memo: the P13 owner fill (SourcePlanes.h) decides
