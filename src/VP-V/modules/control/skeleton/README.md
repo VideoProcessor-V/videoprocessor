@@ -313,8 +313,10 @@ Decisions (provenance: decision log = `D:/codex/vp-handover/refs/owner-decisions
   (SettingsApplied); back = H + max(R, P), ahead = L + W. Slice B wires it in SkeletonModule: the feeds run whenever a memo exists
   (lane or not), `DeriveMemoWindow` sets the memo window and publishes the `QueueWindowBoard` before the memo's seal, every OnQueue
   kind but BacklogFlush bumps the memo epoch AT the call and a Drop discards its seqs, and the no-lane VRAM grant asks for one level
-  per ahead-ladder step (never 0 while a level fits) with the interim S-A / S-B ahead plan applied. H and the active ahead need are
-  fed from the memo's DeclaredFillHistory() / ActiveAheadDemands() (L-CORE); the lane graph's lag edges join H later (102b QKP-B-LANE-GRAPH-H).
+  per ahead-ladder step (never 0 while a level fits) with the interim S-A / S-B ahead plan applied. The active ahead need is fed from
+  the memo's ActiveAheadDemands() (L-CORE). H is wired as 0 until the lane graph's lag edges join it (102b QKP-B-LANE-GRAPH-H): an owner
+  fill's declared reader lag (DeclaredFillHistory) is kept PER OWNER by the memo (Entry::keep, ReleasedForOwnerLocked), never memo-wide,
+  so P16's 6-frame monitor lag does not hold a keep-0 product's frames (released at the next seal without the lane).
   Basis (R14-67): H and the ahead need count CPU and GPU fills including views; the VRAM need (GpuNeedLevels) counts GPU allocating fills only.
   A term nobody feeds is named by Ctrl+Alt+D ("not fed: ...") and the Fallbacks line `skeleton_queue_window`, never a silent 0.
 - DEMAND-DRIVEN enabling (15c-c8): a registered consumer that needs the lane's results turns the lane and the store on, visibly, and
