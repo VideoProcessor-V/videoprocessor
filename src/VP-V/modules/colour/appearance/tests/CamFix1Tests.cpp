@@ -296,6 +296,10 @@ namespace Tests
 			Assert::IsTrue(Fix1Has(lookahead, "module.BoostReplaced()"), L"the measurement sees the picture without the boost");
 			Assert::IsTrue(Fix1Has(core, "led.appearanceActive = dvStage.AppearanceDecision().active;"));
 			Assert::IsTrue(Fix1Has(core, "FallbackCatalog::SaturationReplaced(settings.saturationReplaced"));
+			// CF1-FIN SHOULD B: replaced only while appearance acts: strength 0 replaces nothing, an inactive frame gives it back.
+			Assert::IsTrue(Fix1Has(settings, "settings.appearance && settings.appearanceStrength > 0.0 && !settings.pipelineOriginalPathway"));
+			Assert::IsTrue(Fix1Has(core, "const bool saturationGivenBack = activeSettings.saturationReplaced && !dvStage.AppearanceDecision().active;"));
+			Assert::IsTrue(Fix1Has(core, "frameColorAdjustment.saturation = 1.0f + static_cast<float>(activeSettings.saturationConfigured) / 100.0f;"));
 		}
 	};
 
