@@ -265,8 +265,8 @@ namespace EdgeMapStageTestsNs
 				rg.fmt = TexFormat::RG32F;
 				Assert::AreEqual(uint64_t(d.width) * d.height * 8u, Vpv::Regions::EdgeMapFillReserveBytes(d), L"8 B per source pixel");
 				Assert::AreEqual(ShapeBytes(rg), Vpv::Regions::EdgeMapFillReserveBytes(d), L"an RG32F stage picture of the luma size fits");
-				Assert::AreEqual(2u * Vpv::Regions::EdgeMapReserveBytes(d), Vpv::Regions::EdgeMapFillReserveBytes(d),
-					L"twice the declared default size");
+				Assert::AreEqual(Vpv::Regions::EdgeMapReserveBytes(d), Vpv::Regions::EdgeMapFillReserveBytes(d),
+					L"the declared size itself: ledger and fill reserve are one figure (CB-18 SHOULD-2)");
 			}
 			Assert::AreEqual(uint64_t(0), Vpv::Regions::EdgeMapFillReserveBytes(DimsOf(0, 0)), L"no size known: no reserve");
 		}
