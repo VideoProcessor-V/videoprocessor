@@ -102,6 +102,42 @@ namespace Tests
 			Assert::IsFalse(AppearanceStage::Decide(in, s).l11Ignored);
 		}
 
+		// CF1-G7b: ambient_adapt is replaced only while appearance really ACTS (the rule the saturation step uses per frame).
+		// PostLoad forces the stored ambient_adapt off for a configured appearance; a frame where the pass is not active (strength
+		// 0, a calibration LUT before it, a lost shader) gives it back and does not list it as replaced. Before the fix the
+		// replacement was decided at settings time, so such a frame lost ambient_adapt AND listed it as replaced.
+		TEST_METHOD(AmbientAdaptIsReplacedOnlyWhileAppearanceActs)
+		{
+			// Configured appearance (replaced: the stored ambient_adapt was forced off), the pass acts: replaced and listed.
+			Assert::IsFalse(AppearanceStage::AmbientAdaptGivenBack(true, true));
+			Assert::IsFalse(AppearanceStage::AmbientAdaptOn(false, true, true), L"appearance acts: ambient_adapt stays off");
+			Assert::IsTrue(FallbackCatalog::AmbientAdaptReplaced(true && !AppearanceStage::AmbientAdaptGivenBack(true, true)).engaged,
+				L"and the replacement is listed");
+			// Configured, but the pass does not act this frame: given back, not listed.
+			Assert::IsTrue(AppearanceStage::AmbientAdaptGivenBack(true, false));
+			Assert::IsTrue(AppearanceStage::AmbientAdaptOn(false, true, false), L"appearance idle: ambient_adapt runs again");
+			Assert::IsFalse(FallbackCatalog::AmbientAdaptReplaced(true && !AppearanceStage::AmbientAdaptGivenBack(true, false)).engaged,
+				L"and is not listed as replaced");
+			// Nothing was replaced (appearance off, strength 0, Original pathway): the user's own ambient_adapt decides, and an
+			// idle appearance never turns it on.
+			for (const bool active : { false, true })
+			{
+				Assert::IsFalse(AppearanceStage::AmbientAdaptGivenBack(false, active));
+				Assert::IsFalse(AppearanceStage::AmbientAdaptOn(false, false, active), L"not replaced and not asked for: off");
+				Assert::IsTrue(AppearanceStage::AmbientAdaptOn(true, false, active), L"the user's ambient_adapt is untouched");
+			}
+
+			// The wiring: both per-render-cycle consumers and the fallback row use the per-frame appearance decision.
+			const std::string intent = ReadUp("src\VP-V\modules\drive\led_compensation\LedIntentMethods.inl");
+			Assert::IsTrue(Has(intent, "ambient.enabled = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, dvStage.AppearanceDecision().active);"));
+			const std::string motion = ReadUp("src\VP-V\modules\motion\consumers\IntentMotionMethods.inl");
+			Assert::IsTrue(Has(motion, "switches.ambient = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, dvStage.AppearanceDecision().active);"));
+			const std::string core = ReadUp("src\VP-V\segments\CoreSegments.inl");
+			Assert::IsTrue(Has(core, "AppearanceStage::AmbientAdaptGivenBack(activeSettings.ambientAdaptReplaced, dvStage.AppearanceDecision().active)"),
+				L"the AmbientAdaptReplaced fallback is synced per frame");
+			Assert::IsTrue(Has(core, "SyncFallback(FallbackCatalog::AmbientAdaptReplaced(activeSettings.ambientAdaptReplaced &&"));
+		}
+
 		TEST_METHOD(SettingsPlumbingIsInPlace)
 		{
 			// CF1-FIN MUST 3: every separator escaped (the single-backslash literals never named a file).
