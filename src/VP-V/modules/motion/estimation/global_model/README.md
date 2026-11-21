@@ -403,12 +403,16 @@ Tiers: the fit is cheap CPU work and is not tiered (cost lines `CAMERA_COST`).
 
 **Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.
 
-## Camfix R1 / R2 / R4 / R8 (branch r2/camfix, 2026-11-11; doc 103)
+## Camfix R1 / R2 / R4 / R8 (branch r2/camfix-r, 2026-11-11; doc 103)
+
+All numbers in this section were measured on the old tip f0322d84a; the re-seated branch (r2/camfix-r on the union tip) has not been re-measured yet (re-measure in the harness slot before quoting them).
 
 **R1 result (NVOF temporal hints): MIXED.** Hints OFF fix the fast pans (1080 480 px/s fit bias 59.94p -0.595 -> -0.004 px,
 24p +0.07 -> +0.03) but make the slow pans worse (120 px/s 59.94p +0.036 -> +0.464, 24p -0.475 -> -0.609). The quantised NVOF flow
-(0.25 engine px) is biased at slow speeds either way; the hints change the bias at fast speeds. Hints stay ON (default unchanged;
-hints off is a diagnostic only). R3 (pixel-domain refinement) is the fix for all rows; its acceptance table measures hints ON and OFF
+(0.25 engine px) is biased at slow speeds either way; the hints change the bias at fast speeds. The hints are OFF by default
+(owner 2026-11-12 04:52: "camera hints OFF by default until R3 lands and is re-tested"; doc 91 A/H; register 115 #40); the diagnostic
+opt-in `VP_NVOF_TEMPORAL_HINTS=1` turns them on and Ctrl+I shows it. Both the scheduled and the on-demand pair decide through
+`Producer::HintsApply`, so the shown state is the real one. R3 (pixel-domain refinement) is the fix for all rows; its acceptance table measures hints ON and OFF
 on every speed row (120 / 480 px/s, 24p / 59.94p, 1080 / 4K, >= 3 ABAB repeats) and the hint default is picked from that table.
 - Cost line (NVOF engine ms per pair, hints on -> off, one run each, noisy): 1080 24p 9.78 -> 5.98; 1080 59.94p 5.58 -> 5.39;
   4K 24p 6.10 -> 10.47; 4K 59.94p 5.67 -> 7.15. No consistent cost either way.
@@ -417,8 +421,8 @@ on every speed row (120 / 480 px/s, 24p / 59.94p, 1080 / 4K, >= 3 ABAB repeats) 
 (0.25 engine px in source px: 1.0 at 4K quarter size, 0.5 at 1080 half size). The pair precision is never finer than the quantum,
 the robust residual scale is 1.4826 x MAD of the winner's inliers (three passes), and a competitor counts only when it is separated
 from the winner by more than max(3 sigma, 2 quanta) at the corners.
-- **Visible camera-fit change on the live seed path:** `link/FieldCopy.h` (`SeedToSourceGrid`) now sets `quantumPx = 0.25 x
-  scaleToSourcePx`, so the render-path fit from the F2 seed uses the same floor and separation as the ahead fit. Fewer records are
+- **Visible camera-fit change on the live seed path:** `link/FieldCopy.h` (`SeedToSourceGrid`) now sets `quantumPx` from
+  `SeedLayout::quantumSourcePx` (stated by the seed's owner, `VectorEngine::SeedFieldOf`: 0.25 x scaleToSourcePx; 0 = none), so the render-path fit from the F2 seed uses the same floor and separation as the ahead fit. Fewer records are
   `Ambiguous` (4K 480 px/s: 115 of 117 -> 0 at 24p, 6 -> 0 at 59.94p), so more pairs are usable for guidance.
 - Cost line (ahead fit on the camera worker, 4K 480 px/s, median / p95 ms, before R2 = the R1 hints-on run, after = r2r8, one run
   each): 24p 12.44 / 26.94 -> 7.49 / 9.88; 59.94p 7.66 / 11.37 -> 7.58 / 9.84. The extra nth_element (MAD) and the second
@@ -437,7 +441,7 @@ EPE spread) or +2 pts <0.25 px share), PASS-FLOOR (no headroom, non-inferior), N
 
 | Knob | Kind | Values | Default | Effect | Visible |
 |---|---|---|---|---|---|
-| `VP_NVOF_TEMPORAL_HINTS` (R1) | process env, read by `MotionAhead::Producer` | 0 / unset | unset (hints on) | 0 runs the NVOF engine without temporal hints | Ctrl+I fallback entry "nvof temporal hints" while 0 (`FallbackCatalog::NvofTemporalHintsOff`) |
+| `VP_NVOF_TEMPORAL_HINTS` (R1) | process env, read by `MotionAhead::Producer` | 1 / unset | unset (hints off) | 1 (exactly) runs the NVOF engine with temporal hints, a diagnostic opt-in | Ctrl+I fallback entry "nvof temporal hints" while on (`FallbackCatalog::NvofTemporalHintsOn`) |
 | `PairInput::quantumPx` (R2) | internal field | >= 0 source px | 0 (no NVOF field); set by `AheadFlow` and `FieldCopy` | quantum floor + competitor separation | the record's ambiguity / precision in the camera status |
 | `VP_TEST_CAMERA_ACCURACY_D0` (R8) | test env | 0 / 1 | unset | adds the d = 0 variants, the extra 480 px/s rows (29.97p too) and the acceptance table | report only |
 | `VP_TEST_CAMERA_ACCURACY_REPEATS` (R8) | test env | >= 1 | 1 | interleaved ABAB runs of off / d0; 3 or more are needed for a verdict (fewer = INCONCLUSIVE) | report only |
