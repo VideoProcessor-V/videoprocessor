@@ -700,6 +700,7 @@ namespace PipelineSkeletonTestsNs
 			std::set<std::string> keys;
 			for (const OriginalPathway::Override& o : OriginalPathway::Overrides())
 			{
+				Assert::IsNotNull(o.key, L"a null key: the table size does not match its initialiser list");
 				Assert::IsTrue(keys.insert(o.key).second, W(std::string("duplicate ") + o.key).c_str());
 				Assert::IsTrue(RendererProfileConfig::ValidateBaseSetting(o.key, o.value),
 					W(std::string(o.key) + ": " + o.value + " is not a valid renderer setting").c_str());
@@ -711,7 +712,8 @@ namespace PipelineSkeletonTestsNs
 			// Settings audit 2026-10-24: the VP additions the first table missed are switched off too.
 			for (const char* key : { "active_picture_startup_hold", "low_bitrate_handling", "ssim_residual_stabilise",
 				"cnn_residual_stabilise", "residual_stabilise_grain_guard", "dejudder_estimate_ahead", "interpolation_fallback",
-				"output_segments_merged", "dejudder_est_still_zero", "entrance_gpu_drain", "frame_analysis_store", "resync_event", "dither_need" })
+				"output_segments_merged", "dejudder_est_still_zero", "entrance_gpu_drain", "frame_analysis_store", "resync_event", "dither_need",
+					"source_geometry_detect" })
 				Assert::IsTrue(keys.count(key) == 1, W(std::string(key) + " is not in the Original pathway").c_str());
 		}
 

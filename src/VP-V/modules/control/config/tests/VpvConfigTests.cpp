@@ -1122,6 +1122,28 @@ namespace
 			require(!Vpv::OriginalPathwayValue(Vpv::DecisionKey(group), value), "a retirement decision has no render effect, so no Original-pathway entry");
 	}
 
+	// GEM-173: source_geometry_detect has a row in the Original pathway table, so the "Set by" line names it whatever
+	// the profile holds; with the pathway off the same inputs fall through to the profile / default.
+	void testSourceGeometryDetectRowShowsSetByOriginal()
+	{
+		Vpv::SetByQuery q;
+		q.key = "source_geometry_detect";
+		q.builtInDefault = "all";
+		q.ownValue = "hdv_1440x1080";
+		q.originalPathway = true;
+		std::string original;
+		require(Vpv::OriginalPathwayValue("source_geometry_detect", original) && original == "all", "the table carries the key with the value all");
+		Vpv::SetByResult r = Vpv::SetBy(q);
+		require(r.source == Vpv::ValueSource::OriginalPathway, ("Original pathway source: " + r.text).c_str());
+		require(r.text == "Set by the Original pathway (VP's additions are off): All", ("Original pathway text: " + r.text).c_str());
+		q.originalPathway = false;
+		r = Vpv::SetBy(q);
+		require(r.source == Vpv::ValueSource::ThisProfile && r.text == "Set by you: Hdv_1440x1080", ("pathway off, own value: " + r.text).c_str());
+		q.ownValue.clear();
+		r = Vpv::SetBy(q);
+		require(r.source == Vpv::ValueSource::BuiltInDefault && r.text == "Set by VP's built-in default: All", ("pathway off, nothing set: " + r.text).c_str());
+	}
+
 	// Every setting on a VP-V unit tab says where its value comes from, and every setting a lock greys says why.
 	void testSetByOnThePage()
 	{
@@ -1884,6 +1906,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: logic audit fixes", testLogicAuditFixes);
 	failures += run("VP-V: Set by wording and order", testSetByWording);
 	failures += run("VP-V: every setting says where its value comes from (Set by)", testSetByOnThePage);
+	failures += run("VP-V: source_geometry_detect shows Set by the Original pathway", testSourceGeometryDetectRowShowsSetByOriginal);
 	failures += run("VP-V: Dynamic Drive main page contents and greyed reasons", testDynamicDriveMainPage);
 	failures += run("VP-V: four tier steps, Upper shown as planned", testFourTierSteps);
 	failures += run("VP-V: a drag from Custom onto the planned step writes nothing", testPlannedDragFromCustomWritesNothing);
