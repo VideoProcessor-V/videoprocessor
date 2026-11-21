@@ -147,3 +147,12 @@ lead14-state.md:102) registers kEdgeMap under rule 3, first reader L-FOCUS; R14-
 kept X5 private, superseded by the owner's ruling of 2026-11-14 ~17:00 EST (design-EDGEMAP-DOMAIN-AXIS rev 2, 102b X5-EDGEMAP-CJ3): X5
 acquires a kEdgeMap stage variant in CJ-3.
 Settings: none added (no new keys); thresholds are the debander's existing lap_min / ext_min.
+
+## MeasureDomain (CB slice 18 S2a): the edge / grain measure domain
+
+Design goal: the kEdgeMap stage variant (S2b) computes its luma in the same domain X5's measure pass uses, so the law lives with
+the product's owner. MeasureDomain.h (namespace VpMeasure: GuardTransfer, GuardLinear, MeasureDomain, MeasureDomainFor,
+LumaWeightsGlsl, MeasureLumaCode) and MeasureDomainGlsl.h (the ad_lin / ad_luma GLSL text) are a PURE MOVE out of
+scaling/output/AdaptiveDownscale.h/.cpp: unchanged arithmetic and byte-identical shader text. Decisions: X5 keeps its names through
+using-declarations and keeps GuardCode / GuardSlope (its residual guard); MeasureDomainFor reads the weights from core/LumaWeights.h
+(LumaCoeff::ForSystem) directly, the table DetailPulse::LumaWeights forwarded to (identical values). Settings: none.

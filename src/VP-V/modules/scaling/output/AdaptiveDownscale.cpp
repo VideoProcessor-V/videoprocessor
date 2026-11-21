@@ -8,6 +8,7 @@
 #include <libplacebo/shaders/sampling.h>
 
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
+#include <VP-V/modules/input/source_analysis/regions/MeasureDomainGlsl.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
@@ -22,42 +23,12 @@ namespace AdaptiveDownscale
 {
 	namespace
 	{
-		// Luma in 8-bit codes of the encoded picture (a linear PREKERNEL is
-		// re-encoded with 1/2.2 so the code thresholds mean the same in both
-		// light domains), edges, and per-workgroup sums for the grain term. That 1/2.2
-		// is a fixed reference domain for the edge / grain thresholds (they were tuned in
-		// it), not a claim about the source; the residual guard's noise limit, which is in
+		// Luma in 8-bit codes of the encoded picture (ad_luma: VpMeasure::MeasureLumaGlsl,
+		// regions/MeasureDomainGlsl.h, CB slice 18 S2a, moved unchanged), edges, and
+		// per-workgroup sums for the grain term; the residual guard's noise limit, which is in
 		// the source's own codes, uses the source transfer (GuardTransfer).
-		// Bug hunt 33 F3 / F4: AD_KW = the source's luma weights; AD_HDR = a PQ / HLG picture
-		// decoded to relative linear first (MeasureDomain; CPU mirror MeasureLumaCode).
 		const char* const MEASURE_HEADER = R"GLSL(
 shared vec4 ad_sum[256];
-#ifdef AD_HDR
-float ad_lin(float c)
-{
-    c = max(c, 0.0);
-    if (ad_trc < 1.5) {
-        float e = pow(c, 1.0 / 78.84375);
-        float n = max(e - 0.8359375, 0.0) / (18.8515625 - 18.6875 * e);
-        return pow(n, 1.0 / 0.1593017578125) * (10000.0 / 203.0);
-    }
-    float x = (1.0 - ad_b) * c + ad_b;
-    float s = (x <= 0.5 ? 4.0 * x * x : exp((x - 0.55991073) / 0.17883277) + 0.28466892) / 12.0;
-    return ad_a * pow(max(s, 0.0), ad_g);
-}
-#endif
-float ad_luma(ivec2 p)
-{
-    ivec2 sz = textureSize(src, 0);
-    vec3 c = texelFetch(src, clamp(p, ivec2(0), sz - ivec2(1)), 0).rgb;
-#ifdef AD_HDR
-    c = vec3(ad_lin(c.r), ad_lin(c.g), ad_lin(c.b));
-#endif
-    float y = dot(c, AD_KW);
-    if (linear_in > 0.5)
-        y = sign(y) * pow(abs(y), 1.0 / 2.2);
-    return y * 255.0;
-}
 )GLSL";
 
 		const char* const MEASURE_BODY = R"GLSL(
@@ -581,85 +552,6 @@ float rs_slope(float y)
 			seconds : 1.0f / 24.0f;
 	}
 
-	GuardTransferParams GuardTransfer(const pl_color_space& source)
-	{
-		GuardTransferParams t;
-		float cspMin = 0.0f, cspMax = 1.0f;
-		pl_nominal_luma_params luma{};
-		luma.color = &source;
-		luma.metadata = PL_HDR_METADATA_HDR10;
-		luma.scaling = PL_HDR_NORM;
-		luma.out_min = &cspMin;
-		luma.out_max = &cspMax;
-		pl_color_space_nominal_luma_ex(&luma);
-		if (!(cspMax > 0.0f)) cspMax = 1.0f;
-		switch (source.transfer)
-		{
-		case PL_COLOR_TRC_LINEAR:
-			t.g = 1.0f;
-			break;
-		case PL_COLOR_TRC_BT_1886:
-		{
-			const float lb = std::pow((std::max)(cspMin, 0.0f), 1.0f / 2.4f);
-			const float lw = std::pow(cspMax, 1.0f / 2.4f);
-			t.a = std::pow((std::max)(lw - lb, 1e-6f), 2.4f);
-			t.b = lb / (std::max)(lw - lb, 1e-6f);
-			t.g = 2.4f;
-			break;
-		}
-		case PL_COLOR_TRC_GAMMA18: t.g = 1.8f; t.a = cspMax - cspMin; break;
-		case PL_COLOR_TRC_GAMMA20: t.g = 2.0f; t.a = cspMax - cspMin; break;
-		case PL_COLOR_TRC_GAMMA24: t.g = 2.4f; t.a = cspMax - cspMin; break;
-		case PL_COLOR_TRC_GAMMA26: t.g = 2.6f; t.a = cspMax - cspMin; break;
-		case PL_COLOR_TRC_GAMMA28: t.g = 2.8f; t.a = cspMax - cspMin; break;
-		case PL_COLOR_TRC_PQ:
-			t.mode = 1.0f;
-			break;
-		case PL_COLOR_TRC_HLG:
-		{
-			const float hlgRef = 1000.0f / PL_COLOR_SDR_WHITE;
-			t.mode = 2.0f;
-			t.a = cspMax;
-			t.g = 1.2f * std::pow(1.111f, std::log2(cspMax / hlgRef));
-			t.b = std::sqrt(3.0f * std::pow((std::max)(cspMin, 0.0f) / cspMax, 1.0f / t.g));
-			break;
-		}
-		default:   // unknown, gamma 2.2, sRGB, the log curves: gamma 2.2
-			t.g = 2.2f;
-			t.a = (std::max)(cspMax - cspMin, 1e-6f);
-			break;
-		}
-		if (!(t.a > 0.0f)) t.a = 1.0f;
-		return t;
-	}
-
-	MeasureDomain MeasureDomainFor(const pl_color_space& hooked, enum pl_color_system system,
-		enum pl_color_primaries primaries)
-	{
-		MeasureDomain d;
-		double k[3];
-		DetailPulse::LumaWeights(system, primaries, k);
-		for (int i = 0; i < 3; ++i) d.w[i] = static_cast<float>(k[i]);
-		d.bt709 = k[0] == 0.2126 && k[2] == 0.0722;
-		if (hooked.transfer == PL_COLOR_TRC_LINEAR)
-			d.mode = 1.0f;
-		else if (hooked.transfer == PL_COLOR_TRC_PQ || hooked.transfer == PL_COLOR_TRC_HLG)
-		{
-			d.mode = 2.0f;
-			d.transfer = GuardTransfer(hooked);
-		}
-		return d;
-	}
-
-	std::string LumaWeightsGlsl(const MeasureDomain& d)
-	{
-		if (d.bt709)
-			return "vec3(0.2126, 0.7152, 0.0722)";
-		char text[96];
-		snprintf(text, sizeof(text), "vec3(%.9g, %.9g, %.9g)", d.w[0], d.w[1], d.w[2]);
-		return text;
-	}
-
 	pl_hook_res Module::RunMeasure(void* priv, const pl_hook_params* params)
 	{
 		return static_cast<Module*>(priv)->Measuring(params);
@@ -891,7 +783,7 @@ float rs_slope(float y)
 		const float linearIn = domain.mode > 0.5f ? 1.0f : 0.0f;
 		const bool hdrDecode = domain.mode > 1.5f;
 		const std::string measureHeader = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" +
-			(hdrDecode ? "#define AD_HDR 1\n" : "") + MEASURE_HEADER;
+			(hdrDecode ? "#define AD_HDR 1\n" : "") + MEASURE_HEADER + VpMeasure::MeasureLumaGlsl();
 		const float origin[2] = { static_cast<float>(ox), static_cast<float>(oy) };
 		const float region[2] = { static_cast<float>(w), static_cast<float>(h) };
 		{

@@ -5,6 +5,7 @@
 
 #include <VP-V/modules/scaling/output/NlsMaskMapping.h>
 #include <VP-V/modules/drive/led_measure/ReadbackRing.h>
+#include <VP-V/modules/input/source_analysis/regions/MeasureDomain.h>
 
 #include <algorithm>
 #include <cmath>
@@ -151,37 +152,16 @@ namespace AdaptiveDownscale
 	// `floor` at 0.2 and below, in steps of 0.05 (no churn as the reading
 	// moves). SSIM and the CNN sharpen blocking and mosquito noise as if they
 	// were texture.
-	// Post-merge audit 2026-10-17 (general, not fixed): the residual grain guard's
-	// code -> linear-light conversion follows the source's own transfer, as
-	// pl_shader_linearize decodes it, instead of an assumed 2.2. mode 0: power,
-	// a (c + b)^g (gamma 1.8-2.8 and unknown scaled by the nominal peak; BT.1886 with
-	// its black lift; sRGB and the log curves as gamma 2.2, their nearest power);
-	// 1: PQ (1.0 = SDR white, 203 nits); 2: HLG - a = nominal peak, b = black lift,
-	// g = system gamma, the OOTF applied on luma.
-	struct GuardTransferParams
-	{
-		float mode = 0.0f;
-		float a = 1.0f;
-		float b = 0.0f;
-		float g = 2.2f;
-	};
-	GuardTransferParams GuardTransfer(const pl_color_space& source);
-	// CPU mirrors of the shader's rs_lin / rs_code / rs_slope (tests).
-	inline double GuardLinear(const GuardTransferParams& t, double c)
-	{
-		c = c > 0.0 ? c : 0.0;
-		if (t.mode < 0.5)
-			return t.a * std::pow(c + t.b, static_cast<double>(t.g));
-		if (t.mode < 1.5)
-		{
-			const double e = std::pow(c, 1.0 / 78.84375);
-			const double n = (std::max)(e - 0.8359375, 0.0) / (18.8515625 - 18.6875 * e);
-			return std::pow(n, 1.0 / 0.1593017578125) * (10000.0 / 203.0);
-		}
-		const double x = (1.0 - t.b) * c + t.b;
-		const double s = (x <= 0.5 ? 4.0 * x * x : std::exp((x - 0.55991073) / 0.17883277) + 0.28466892) / 12.0;
-		return t.a * std::pow((std::max)(s, 0.0), static_cast<double>(t.g));
-	}
+	// The guard transfer, its linear mirror and the measure domain moved to the edge map's owner (CB slice 18 S2a, unchanged:
+	// input/source_analysis/regions/MeasureDomain.h); the names stay usable here.
+	using VpMeasure::GuardTransferParams;
+	using VpMeasure::GuardTransfer;
+	using VpMeasure::GuardLinear;
+	using VpMeasure::MeasureDomain;
+	using VpMeasure::MeasureDomainFor;
+	using VpMeasure::LumaWeightsGlsl;
+	using VpMeasure::MeasureLumaCode;
+	// CPU mirrors of the shader's rs_code / rs_slope (tests); rs_lin's is GuardLinear (MeasureDomain.h).
 	inline double GuardCode(const GuardTransferParams& t, double y)
 	{
 		y = y > 0.0 ? y : 0.0;
@@ -201,40 +181,6 @@ namespace AdaptiveDownscale
 		const double c = (std::max)(GuardCode(t, y), 1e-3);
 		const double lo = (std::max)(c - 1e-3, 0.0), hi = c + 1e-3;
 		return (GuardLinear(t, hi) - GuardLinear(t, lo)) / (hi - lo);
-	}
-
-	// Bug hunt 33 F3 / F4 (2026-10-31): what the passes' "luma" is.
-	//  - Weights: the source's own Kr, Kg, Kb (DetailPulse::LumaWeights: its YCbCr system, else
-	//    BT.2020 for BT.2020 primaries, else BT.709). The passes run before colour management,
-	//    in source-primaries RGB; BT.709 weights on a BT.2020 picture turned chroma-only branch
-	//    differences into a neutral shift. BT.709 sources keep the literal weights (same shader).
-	//  - Measure domain: the edge / grain thresholds were tuned in 8-bit codes of a 2.2-encoded
-	//    picture. A linear PREKERNEL is re-encoded with 1/2.2 (mode 1, as before); a PQ or HLG
-	//    picture is decoded to relative linear light (1.0 = SDR white, the residual guard's
-	//    GuardLinear) and then re-encoded the same way (mode 2), so HDR gets the SDR thresholds'
-	//    strengths instead of acting on PQ codes; SDR gamma-encoded pictures are read as they are
-	//    (mode 0, as before).
-	struct MeasureDomain
-	{
-		float w[3] = { 0.2126f, 0.7152f, 0.0722f };
-		bool bt709 = true;            // the weights are BT.709's (the literal shader text)
-		float mode = 0.0f;            // 0 codes as they are, 1 linear -> 2.2, 2 HDR decode -> 2.2
-		GuardTransferParams transfer; // mode 2: the hooked picture's transfer
-	};
-	MeasureDomain MeasureDomainFor(const pl_color_space& hooked, enum pl_color_system system,
-		enum pl_color_primaries primaries);
-	// "vec3(Kr, Kg, Kb)" for the shaders (BT.709 exactly as the old literal).
-	std::string LumaWeightsGlsl(const MeasureDomain& d);
-	// CPU mirror of the measure pass's ad_luma: 8-bit reference codes of one pixel.
-	inline double MeasureLumaCode(const MeasureDomain& d, const double rgb[3])
-	{
-		double c[3] = { rgb[0], rgb[1], rgb[2] };
-		if (d.mode > 1.5)
-			for (double& v : c) v = GuardLinear(d.transfer, v);
-		double y = d.w[0] * c[0] + d.w[1] * c[1] + d.w[2] * c[2];
-		if (d.mode > 0.5)
-			y = (y < 0.0 ? -1.0 : 1.0) * std::pow(std::fabs(y), 1.0 / 2.2);
-		return y * 255.0;
 	}
 
 	inline double BitrateScale(double quality, double floor)

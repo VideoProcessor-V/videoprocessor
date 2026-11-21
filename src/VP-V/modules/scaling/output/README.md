@@ -55,6 +55,8 @@ Scale to the output active size inside libplacebo: hybrid SSIM downscale (adapti
 
 ## Design goal, philosophy and decisions
 
+- The measure domain (GuardTransfer, GuardLinear, MeasureDomain, MeasureDomainFor, LumaWeightsGlsl, MeasureLumaCode and the ad_lin / ad_luma shader text) moved to input/source_analysis/regions/MeasureDomain.h / MeasureDomainGlsl.h (CB slice 18 S2a, pure move, unchanged behaviour), next to the kEdgeMap owner that computes its stage variant in the same domain. AdaptiveDownscale keeps the names through using-declarations; GuardCode / GuardSlope stay here (the residual guard).
+
 - Intermediate pictures are float32 for every profile: `fbo_float32` is decided by the setting alone (auto = on), never by whether this slot runs (`PicturePrecision.h`). A profile with the slot off used to fall silently to float16, up to one 12-bit code of error near white. (S-12BIT, refs/119 #29/#30/#48/#49/#51; owner decision 2026-11-12 15:07 EST = 20:07 UTC, via lead 8 brief 2026-11-14 05:18 EST = 10:18 UTC; written 2026-11-14 10:40 UTC)
 - float16 is never silent: the `picture precision` entry (Ctrl+I, Config live status, Ctrl+Alt+D, one-time notice) shows when the intermediates are float16 in a VP pathway, with the reason (Stable 7.360 lane, or the setting off by hand). Original pathway: Bill's own table, not labelled. (S-12BIT, refs/119 #29/#30/#48/#49/#51; owner decision 2026-11-12 15:07 EST = 20:07 UTC, via lead 8 brief 2026-11-14 05:18 EST = 10:18 UTC; written 2026-11-14 10:40 UTC)
 
