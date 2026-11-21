@@ -20,6 +20,8 @@
 #include <QObject>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QRegularExpression>
+#include <QRegularExpressionValidator>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QStyle>
@@ -2415,5 +2417,214 @@ namespace Vpv
         handles.bitrateFloor = bitrateFloor;
         handles.cnnStabilise = cnnStabilise;
         return handles;
+    }
+
+    void AddVpvProcessingAndReorganise(const RenderingSectionKit& kit, const RenderingSectionHandles& h)
+    {
+        QFormLayout*& form = *kit.form;
+        QObject* const receiver = kit.receiver;
+        QWidget* const profileFields = kit.profileFields;
+        QVBoxLayout* const profileFieldsLayout = kit.profileFieldsLayout;
+        const auto& addCollapsibleSection = kit.addCollapsibleSection;
+        auto addText = [&](const QString& label, const QString& key,
+            const QString& unit = {}, double displayScale = 1.0) -> QLineEdit* {
+            return kit.addText(label, key, unit, displayScale);
+        };
+        auto addChoice = [&](const QString& label, const QString& key,
+            const QStringList& choices, bool allowInherited = true) -> QComboBox* {
+            return kit.addChoice(label, key, choices, allowInherited);
+        };
+        QComboBox* const capturePath = h.capturePath;
+        QComboBox* const sourceRange = h.sourceRange;
+        QWidget* const pictureBox = h.pictureBox;
+        QComboBox* const sourceResolution = h.sourceResolution;
+        QLineEdit* const autoConfidence = h.autoConfidence;
+        QLineEdit* const evidenceSeconds = h.evidenceSeconds;
+        QLineEdit* const evidenceShots = h.evidenceShots;
+        QComboBox* const textGuard = h.textGuard;
+        QComboBox* const mixedGuard = h.mixedGuard;
+        QComboBox* const kernelMatch = h.kernelMatch;
+        QComboBox* const debandVp = h.debandVp;
+        QComboBox* const lowBitrate = h.lowBitrate;
+        QComboBox* const ssimStabilise = h.ssimStabilise;
+        QComboBox* const bitrateAware = h.bitrateAware;
+        QLineEdit* const bitrateFloor = h.bitrateFloor;
+        QComboBox* const cnnStabilise = h.cnnStabilise;
+        form = addCollapsibleSection(QStringLiteral("processing"), QStringLiteral("Processing"),
+            QString(), false);
+        QFormLayout* processingForm = form;
+        // Debanding moved to Scaling / Quality (Bill, v1.4.02); its VP deband
+        // note is applied there.
+        // Film grain (owner 2026-10-17): libplacebo's deband adds no grain by default.
+        auto* debandGrain = addChoice(QStringLiteral("Debanding adds grain (libplacebo)"),
+            QStringLiteral("deband_grain"), { QStringLiteral("off"), QStringLiteral("on") });
+        debandGrain->setToolTip(QStringLiteral(
+            "Off (default): libplacebo's debanding adds no synthetic grain - VP's dither does that job and the "
+            "film's own grain is left as it is. On: libplacebo's grain is added as before 2026-10-17."));
+        auto* extendedRange = addChoice(QStringLiteral("Keep below-black and above-white (SDR)"),
+            QStringLiteral("preserve_extended_range"), { QStringLiteral("on"), QStringLiteral("off") });
+        extendedRange->setToolTip(QStringLiteral(
+            "Keeps SDR picture detail below video black and above video white through scaling and "
+            "the colour conversion, which otherwise clip it. Needs pure-power gammas (1.8 to 2.8) on "
+            "the source and the output, a BT.709 source and no calibration LUT; it turns itself off "
+            "otherwise and for HDR. On by default (owner: keep below-black and above-white). To reach the "
+            "projector they also need limited output range (Color profile: output range limited, with output "
+            "gamma 2.4). Off: libplacebo's standard path (clips them). Works with deinterlacing; libplacebo smooth motion "
+            "clips below-black on blended refreshes (libplacebo limitation) - VP's own motion engine keeps both."));
+        MarkGpuCost(form, extendedRange, 1);
+        auto* extendedMore = addChoice(QStringLiteral("Below-black / above-white: also BT.1886, sRGB, wide-gamut SDR, LUT, HDR"),
+            QStringLiteral("extended_range_more_cases"), { QStringLiteral("on"), QStringLiteral("off") });
+        extendedMore->setToolTip(QStringLiteral(
+            "Fix under test (audit 2026-10-16). On (default): the keeping of below-black and above-white also works "
+            "with BT.1886 and sRGB curves, SDR in wider colour spaces (BT.2020 / P3), a calibration 3D LUT (extended "
+            "past its edges by its own slope) and HDR shown without tone mapping. Off: only pure-power gammas with "
+            "BT.709 SDR and no LUT, as before."));
+        // Delta 13: the SDR tone shape and headroom, in their own section
+        // (audit 2026-10-14c).
+        form = addCollapsibleSection(QStringLiteral("sdrHighlights"), QStringLiteral("SDR highlights"),
+            QStringLiteral("How SDR highlights are shaped on an SDR output. Off by default."), false);
+        auto* sdrShape = addChoice(QStringLiteral("SDR tone shape"), QStringLiteral("sdr_tone_shape"),
+            { QStringLiteral("off"), QStringLiteral("knee") });
+        sdrShape->setItemText(sdrShape->findData(QStringLiteral("knee")), QStringLiteral("Knee (soft highlight roll-off)"));
+        sdrShape->setToolTip(QStringLiteral(
+            "SDR sources shown on an SDR output only. Knee: highlights roll off softly toward peak, the shape tone-mapped HDR has, "
+            "with no inverse tone map. Nothing is created above the master's white. Off is the standard path."));
+        MarkGpuCost(form, sdrShape, 1);
+        auto* sdrHeadroom = addText(QStringLiteral("SDR white headroom (share of peak, 0 to 0.5)"), QStringLiteral("sdr_white_headroom"));
+        sdrHeadroom->setValidator(new QDoubleValidator(0.0, 0.5, 3, sdrHeadroom));
+        sdrHeadroom->setPlaceholderText(QStringLiteral("0"));
+        sdrHeadroom->setToolTip(QStringLiteral(
+            "Places reference white below the projector's peak: 0.15 puts it at 85% of peak (in light), leaving room "
+            "above it for above-white detail and the knee. 0 = reference white at peak (off)."));
+        auto* sdrKneeStart = addText(QStringLiteral("SDR knee start (0.5 to 0.99 of peak)"), QStringLiteral("sdr_knee_start"));
+        sdrKneeStart->setValidator(new QDoubleValidator(0.5, 0.99, 3, sdrKneeStart));
+        sdrKneeStart->setPlaceholderText(QStringLiteral("0.80"));
+        sdrKneeStart->setToolTip(QStringLiteral(
+            "With the knee: where the highlights start to roll off, as a share of the projector's peak light. "
+            "Lower starts the roll-off earlier (softer highlights)."));
+        auto* sdrKneeStrength = addText(QStringLiteral("SDR knee strength (0 to 1)"), QStringLiteral("sdr_knee_strength"));
+        sdrKneeStrength->setValidator(new QDoubleValidator(0.0, 1.0, 3, sdrKneeStrength));
+        sdrKneeStrength->setPlaceholderText(QStringLiteral("0.5"));
+        sdrKneeStrength->setToolTip(QStringLiteral(
+            "With the knee: 0 = a straight line (headroom only), 1 = the full roll-off. 0.5 keeps most of the "
+            "highlight contrast and still avoids clipping with headroom 0.15."));
+        auto* sdrRecovery = addText(QStringLiteral("SDR contrast recovery (auto, off, 0 to 2)"),
+            QStringLiteral("sdr_contrast_recovery"));
+        sdrRecovery->setPlaceholderText(QStringLiteral("auto"));
+        sdrRecovery->setToolTip(QStringLiteral(
+            "With the knee: returns the local detail the knee flattens in the highlights (libplacebo's own contrast "
+            "recovery works only on HDR). Auto = follow Tone Mapping > Contrast recovery; off = none; or a strength "
+            "from 0 to 2."));
+        sdrRecovery->setValidator(new QRegularExpressionValidator(
+            QRegularExpression(QStringLiteral("^(|[Aa][Uu][Tt][Oo]|[Oo][Ff][Ff]|[01](\\.\\d{0,3})?|2(\\.0{0,3})?)$")),
+            sdrRecovery));
+        MarkGpuCost(form, sdrRecovery, 1);
+        {
+            auto greySdr = [sdrShape, sdrKneeStart, sdrKneeStrength, sdrRecovery]()
+            {
+                const bool knee = sdrShape->currentData().toString() == QStringLiteral("knee");
+                for (QWidget* row : { sdrKneeStart, sdrKneeStrength, sdrRecovery })
+                {
+                    row->setProperty("greyedOff", !knee);
+                    row->setEnabled(knee);
+                }
+            };
+            QObject::connect(sdrShape, qOverload<int>(&QComboBox::currentIndexChanged), receiver, [greySdr](int) { greySdr(); });
+            greySdr();
+        }
+        form = processingForm;
+        // Dithering and Dither target depth moved to Scaling / Quality (Bill, v1.4.02).
+        auto* fboFloat32 = addChoice(QStringLiteral("32-bit float intermediates"),
+            QStringLiteral("fbo_float32"), { QStringLiteral("auto"), QStringLiteral("on"), QStringLiteral("off") });
+        fboFloat32->setToolTip(QStringLiteral(
+            "Every intermediate picture in 32-bit float: exact highlights (half-float rounds values above white "
+            "a little) at more GPU memory bandwidth (a few ms per frame at high resolutions; check the render time in the stats "
+            "overlay). Auto (default): on everywhere, the low-latency path too (higher precision is the default). "
+            "Off only by choice. The final output stage is 32-bit float always."));
+        MarkGpuCost(form, fboFloat32, 2);
+
+        // Owner 2026-10-16 (reorganise if necessary): VP's own settings in signal order - capture, source
+        // resolution and re-base, scaling blends, motion, dither, then what is still under test. The rows
+        // were built where their logic lives; here they move to their sections (the controls, names and
+        // behaviour unchanged). Bill's sections keep their places.
+        {
+            auto sectionWidget = [profileFields](const QString& id) -> QWidget* {
+                auto* toggle = profileFields->findChild<QToolButton*>(QStringLiteral("rendererSection.") + id);
+                return toggle ? toggle->parentWidget() : nullptr;
+            };
+            auto sectionForm = [profileFields](const QString& id) -> QFormLayout* {
+                auto* content = profileFields->findChild<QWidget*>(QStringLiteral("rendererSection.%1.content").arg(id));
+                if (!content) return nullptr;
+                for (QWidget* child : content->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly))
+                    if (auto* layout = qobject_cast<QFormLayout*>(child->layout())) return layout;
+                return nullptr;
+            };
+            auto moveRow = [](QWidget* field, QFormLayout* to) {
+                // Bill's addChoice wraps its combo (with the Reset button) in a row widget, so the
+                // combo is not itself a form field: walk up to the widget that is.
+                for (QWidget* f = field; f && f->parentWidget(); f = f->parentWidget())
+                    if (auto* owner = qobject_cast<QFormLayout*>(f->parentWidget()->layout()))
+                    {
+                        int at = -1;
+                        QFormLayout::ItemRole itemRole;
+                        owner->getWidgetPosition(f, &at, &itemRole);
+                        if (at >= 0) { field = f; break; }
+                    }
+                if (!field || !to || !field->parentWidget()) return;
+                auto* from = qobject_cast<QFormLayout*>(field->parentWidget()->layout());
+                if (!from || from == to) return;
+                int row = -1;
+                QFormLayout::ItemRole role;
+                from->getWidgetPosition(field, &row, &role);
+                if (row < 0) return;
+                const bool visible = from->isRowVisible(row);
+                const QFormLayout::TakeRowResult taken = from->takeRow(row);
+                QWidget* label = taken.labelItem ? taken.labelItem->widget() : nullptr;
+                delete taken.labelItem;
+                delete taken.fieldItem;
+                if (label) to->addRow(label, field); else to->addRow(field);
+                to->setRowVisible(field, visible);
+            };
+            QFormLayout* captureForm = addCollapsibleSection(QStringLiteral("captureSource"), QStringLiteral("Capture & source"),
+                QStringLiteral("How the captured signal is read: unpacked on the GPU and its range (native RGB: Fixes under test). ") +
+                QString::fromLatin1(kGpuCostLegend), false);
+            // Native RGB stays in Fixes under test (owner: a Fixes switch, default native).
+            for (QWidget* w : { static_cast<QWidget*>(capturePath), static_cast<QWidget*>(sourceRange) })
+                moveRow(w, captureForm);
+            QFormLayout* rebaseForm = addCollapsibleSection(QStringLiteral("sourceRebase"), QStringLiteral("Source resolution & re-base"),
+                QStringLiteral("Finds a picture upscaled before VP (a 1080p film sent at 4K), re-bases it to its real resolution "
+                    "so VP's scaler works from the source, and debands there. ") + QString::fromLatin1(kGpuCostLegend), false);
+            for (QWidget* w : { static_cast<QWidget*>(pictureBox), static_cast<QWidget*>(sourceResolution),
+                    static_cast<QWidget*>(autoConfidence), static_cast<QWidget*>(evidenceSeconds),
+                    static_cast<QWidget*>(evidenceShots), static_cast<QWidget*>(textGuard), static_cast<QWidget*>(mixedGuard),
+                    static_cast<QWidget*>(kernelMatch), static_cast<QWidget*>(debandVp), static_cast<QWidget*>(lowBitrate) })
+                moveRow(w, rebaseForm);
+            if (QFormLayout* downscale = sectionForm(QStringLiteral("adaptiveDownscale")))
+                for (QWidget* w : { static_cast<QWidget*>(ssimStabilise), static_cast<QWidget*>(bitrateAware),
+                        static_cast<QWidget*>(bitrateFloor) })
+                    moveRow(w, downscale);
+            if (QFormLayout* upscale = sectionForm(QStringLiteral("adaptiveUpscale")))
+                moveRow(cnnStabilise, upscale);
+            // The dither's motion-reuse fix stays in Fixes under test (a fix with its switch); the
+            // extended-range widening (built beside Bill's Processing rows) joins it.
+            if (QFormLayout* fixes = sectionForm(QStringLiteral("fixesUnderTest")))
+                moveRow(extendedMore, fixes);
+            // The section order: Bill's opening sections, then VP's in signal order, then Bill's others.
+            const QStringList order = { QStringLiteral("captureSource"), QStringLiteral("sourceRebase"),
+                QStringLiteral("adaptiveDownscale"), QStringLiteral("adaptiveUpscale"), QStringLiteral("dejudder"),
+                QStringLiteral("dejudderEstimation"), QStringLiteral("temporalDither"), QStringLiteral("fixesUnderTest"),
+                QStringLiteral("dejudderExperiments") };
+            QWidget* anchor = sectionWidget(QStringLiteral("dejudder"));
+            int at = anchor ? profileFieldsLayout->indexOf(anchor) : -1;
+            for (const QString& id : order)
+                if (QWidget* section = sectionWidget(id); section && at >= 0)
+                {
+                    const int index = profileFieldsLayout->indexOf(section);
+                    if (index < 0) continue;
+                    profileFieldsLayout->removeWidget(section);
+                    if (index < at) --at;
+                    profileFieldsLayout->insertWidget(at++, section);
+                }
+        }
     }
 }

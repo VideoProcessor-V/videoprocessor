@@ -66,4 +66,5 @@ namespace Vpv
     void MarkChoiceButtons(const QComboBox* combo, const QList<QRadioButton*>& radios, QToolButton* unset);
 
     RenderingSectionHandles AddVpvRenderingSections(const RenderingSectionKit& kit);
+    void AddVpvProcessingAndReorganise(const RenderingSectionKit& kit, const RenderingSectionHandles& handles);
 }
