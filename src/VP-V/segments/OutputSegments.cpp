@@ -61,17 +61,17 @@ namespace OutputSegments
 		// colour.dm_trims (CF-1 P3): the DV L8 / L2 trims, their own slot and switch (before: the colour slot's).
 		auto dmTrimsStage = [&]()
 		{
-		if (f.dvTrims)
-		{
-			const size_t start = hooks.size();
-			dvTrims.Collect(false, hooks);
-			tag(start, Id::ColourDmTrims);   // CF-1 P3: the trims are the colour.dm_trims slot (own switch)
-			for (size_t i = start; i < hooks.size(); ++i)
-				for (const auto& parameter : f.dv)
-					SetHookParameter(hooks[i], parameter.first, parameter.second);
-			counts.dvTrims = hooks.size() - start;
-			note(start, Id::ColourDmTrims);
-		}
+			if (f.dvTrims)
+			{
+				const size_t start = hooks.size();
+				dvTrims.Collect(false, hooks);
+				tag(start, Id::ColourDmTrims);   // CF-1 P3: the trims are the colour.dm_trims slot (own switch)
+				for (size_t i = start; i < hooks.size(); ++i)
+					for (const auto& parameter : f.dv)
+						SetHookParameter(hooks[i], parameter.first, parameter.second);
+				counts.dvTrims = hooks.size() - start;
+				note(start, Id::ColourDmTrims);
+			}
 		};
 		// colour.appearance (CF-1 CAM-3): the CAM16 room and screen adaptation, after the DV trims and before the LED measurement.
 		auto appearanceStage = [&]()
@@ -180,7 +180,7 @@ namespace OutputSegments
 			case 2: compensationStage(); break;
 			case 3: lutStage(); break;
 			case 5: dmTrimsStage(); break;
-				case 6: appearanceStage(); break;
+			case 6: appearanceStage(); break;
 			default:
 				// A placeholder slot with a component but no S2 stage yet: counted for the host to report
 				// (it never runs silently, and never runs half-wired).
