@@ -25,6 +25,7 @@
 
 #include <VP-V/tests/support/LedDriveTestSupport.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <functional>
@@ -230,6 +231,14 @@ namespace
 			owner = ownerIn;
 			VpFrameAnalysis::SourceFrameTap::SetStore(owner, store);
 		}
+	};
+
+	// GF-P2b S3 (1): the recording demand, plus the skeleton's erase count (what ExternalErasures answers after a GPU-only reset).
+	class ErasingDemand : public RecordingDemand
+	{
+	public:
+		uint64_t ExternalErasures(const void*) const override { return erasures.load(); }
+		std::atomic<uint64_t> erasures{ 0 };
 	};
 }
 
@@ -515,6 +524,39 @@ namespace VideoProcessorTest
 
 		// GF-P3 MUST-10: a module that was never started declares nothing, even when measurements reach it, and so leaves nothing to
 		// withdraw when it is destroyed.
+		// GF-P2b S3 (1), LED side: a GPU-only reset of the same renderer erases the demand without moving the registration generation. The
+		// module folds the skeleton's erase count into its "already declared" key, so it declares again at the next measurement, and only then.
+		TEST_METHOD(TheDemandIsDeclaredAgainAfterTheSkeletonErasedIt)
+		{
+			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),
+				L"precondition: no store registered by an earlier test");
+			ErasingDemand demand;
+			DemandHubScope hub(&demand);
+			int renderer = 0;
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			StoreRegistration registration;
+			registration.Set(&renderer, &store);
+			auto projector = std::make_shared<FakeProjector>();
+			projector->openFails = true;   // a dry run: no port
+			LedDriveModule module(ProjectorConfig(), CutCompensate(),
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module.SetSceneReaderForTesting(NoSceneCuts());
+			module.Start();
+			Assert::AreEqual<size_t>(1, demand.Declarations().size(), L"declared with the module");
+			const uint64_t generation = VpFrameAnalysis::SourceFrameTap::Generation(&renderer);
+			for (uint64_t s = 1; s <= 3; ++s)
+				module.SubmitMeasurement(CutFrame(40.0), s);
+			Assert::AreEqual<size_t>(1, demand.Declarations().size(), L"nothing changed: no new declaration");
+			demand.erasures = 1;   // the skeleton erased the entry at GpuReleased; the same renderer comes back (GpuCreated)
+			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::Generation(&renderer) == generation, L"the tap generation did not move");
+			for (uint64_t s = 4; s <= 6; ++s)
+				module.SubmitMeasurement(CutFrame(40.0), s);
+			Assert::AreEqual<size_t>(2, demand.Declarations().size(), L"declared again once after the erase");
+			for (uint64_t s = 7; s <= 9; ++s)
+				module.SubmitMeasurement(CutFrame(40.0), s);
+			Assert::AreEqual<size_t>(2, demand.Declarations().size(), L"and not again per frame");
+		}
+
 		TEST_METHOD(ANeverStartedModuleDeclaresNothingAndLeavesNoDemand)
 		{
 			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),

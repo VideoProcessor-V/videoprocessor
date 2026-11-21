@@ -3095,6 +3095,31 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(after.memo.get() != oldMemo.get(), L"a NEW memo, not the old one");
 		}
 
+		// GF-P2b S3 (1), skeleton side: GpuReleased erases a host's external demand and the erase is COUNTED (ExternalErasures); a second
+		// release with no entry left does not move the count.
+		TEST_METHOD(AnExternalDemandEraseIsCountedOncePerErasedEntry)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 2; ++s)
+				rig.Frame(s);
+			VpSkeleton::ConsumerDecl c;
+			c.id = 0x0612;
+			c.name = "erase test";
+			VpSkeleton::AddConsume(c, VpSkeleton::kP4SourceStats, 0);
+			int owner = 0;
+			Vpv::Skeleton::IExternalDemand* demand = &rig.sk;
+			Assert::AreEqual(uint64_t(0), demand->ExternalErasures(rig.Host()));
+			rig.sk.SetRaisingExternalDemand(rig.Host(), &owner, std::vector<VpSkeleton::ConsumerDecl>(1, c), std::vector<VpSkeleton::ProductId>(), "test");
+			Assert::AreEqual(size_t(1), rig.sk.ExternalEntriesOf(rig.Host()));
+			rig.Life(RE::Lifecycle::GpuReleased);
+			Assert::AreEqual(uint64_t(1), demand->ExternalErasures(rig.Host()), L"one entry erased, once counted");
+			Assert::AreEqual(size_t(0), rig.sk.ExternalEntriesOf(rig.Host()));
+			rig.Life(RE::Lifecycle::GpuReleased);
+			Assert::AreEqual(uint64_t(1), demand->ExternalErasures(rig.Host()), L"nothing left to erase: the count does not move");
+		}
+
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
 		{
 			Rig rig(Lane("on"));
