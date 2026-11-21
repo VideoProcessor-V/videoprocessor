@@ -524,6 +524,31 @@ namespace VideoProcessorTest
 			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), "lag bridge"));
 		}
 
+		// audit5 MUST 1 (7028ff4f2): the camera-labels line, with P8's fit-field read-miss counters, is on the camera status surface while
+		// the camera is live, and absent while the camera is off or only reporting (camera-off status unchanged).
+		TEST_METHOD(TheCameraLabelsLineWithTheFitFieldMissesIsShownWhileLiveAndNothingWhenOff)
+		{
+			const char* const parts[] = { "camera labels", "fit field missing (no labels)", "fit field stamp mismatch (no labels)",
+				"fit field unreadable (no labels)" };
+			{
+				Rig off("[general]\nx=1\n");
+				off.Start(6);
+				for (const char* p : parts)
+					Assert::IsFalse(Has(off.Lines(RE::StatusKind::Lines), p), L"camera off: no labels line");
+			}
+			{
+				Rig report(kLinkOn);
+				report.Start(6);
+				Assert::IsFalse(report.ext.LiveBuilt(report.Host()), L"premise: reporting only, nothing live");
+				Assert::IsFalse(Has(report.Lines(RE::StatusKind::Lines), "fit field stamp mismatch"), L"not live: no labels line");
+			}
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\n");
+			rig.Start(6);
+			Assert::IsTrue(rig.ext.LiveBuilt(rig.Host()), L"premise: the camera is live");
+			for (const char* p : parts)
+				Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), p), L"live: the camera-labels line names every fit-field miss cause");
+		}
+
 		TEST_METHOD(TheCameraRunsOnTheLagBridgeWithoutTheSkeletonLane)
 		{
 			// No skeleton module and no analysis lane: until SK-W2 the camera declares nothing to the skeleton and does not depend on its lane;

@@ -1455,7 +1455,7 @@ namespace VideoProcessorTest
 			{
 				Field f = AnchoredWater(seed, 3.0);
 				f.AddLogo(100, 60, 6, 4, false);          // a static logo: zero vectors, trust 1
-				f.AddObject(30, 20, 24, 16, -25, 14);     // a coherent mover for the object tracker
+				f.AddObject(30, 20, 48, 32, -25, 14);     // a coherent mover for the object tracker (1536 blocks: above its 1 % support floor with margin)
 				return f;
 			};
 			// Control: detector off, the confident pair stamps the logo as Overlay and tracks the object.
@@ -2129,7 +2129,7 @@ namespace VideoProcessorTest
 			{
 				Field f = BoatLike(seed);
 				f.AddLogo(5, 5, 6, 4, false);   // a zero-motion logo in the static water margin, outside the object
-				f.AddObject(10, 60, 12, 10, -25, 14);   // a coherent mover in the free left margin (the boat spans blocks 36-203), for the object tracker
+				f.AddObject(2, 30, 32, 48, -25, 14);   // a coherent mover in the free left margin (the boat spans blocks 36-203), for the object tracker (1536 blocks)
 				return f;
 			};
 			Config offCfg; offCfg.objects = true;
