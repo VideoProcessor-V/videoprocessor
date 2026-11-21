@@ -565,7 +565,9 @@ namespace
 			QString list;
 			for (const char* group : { "A", "B", "C", "D" })
 				list += control<QLabel>(window, Vpv::ObjectName(QStringLiteral("retirement.group.") + QString::fromLatin1(group) + QStringLiteral(".list")))->text();
-			require(list.contains(QStringLiteral("VP-V &gt; Proposed retirement")) && list.contains(QStringLiteral("General page")) &&
+			// CC-GEM P2: the two [general] candidates (magewell_recover_faults, capture_display_fixes) left Bill's General
+			// page for the VP-V Input tab's Capture fixes card; the list names that card for them.
+			require(list.contains(QStringLiteral("VP-V &gt; Proposed retirement")) && list.contains(QStringLiteral("Capture fixes (under test)")) &&
 				list.contains(QStringLiteral("Queue page")),
 				"the Proposed retirement tab lists the candidates with their pages");
 			require(!list.contains(QStringLiteral("no control found")), "every retirement candidate's control is found");
@@ -1486,6 +1488,89 @@ namespace
 		require(file.open(QIODevice::ReadOnly) && file.readAll().contains("global_actions: config_editor"), "global_actions not saved");
 	}
 
+	// CC-GEM P2 (GEM-060 / GEM-222, owner Q13): the VP rows left on Bill's General page (the two capture fixes,
+	// Room lights, File playback) are on the VP-V page only; saved values load into them and edits save under the same
+	// keys; the Original pathway greys the capture fixes (Input tab) but not Room lights or File playback (both
+	// pathways); the Room lights card carries the GEM-222 note and Colour's Room-light adaptation card names it back.
+	void testGeneralPageRowsOnTheVpvPage()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\nmagewell_recover_faults: false\n"
+			"capture_display_fixes: false\nfile_av_offset_ms: -120\n[ambient]\nmode: manual\nroom: lit\nport: COM7\n");
+		ConfigEditorWindow window(path, 0, true);
+		QCoreApplication::processEvents();
+		const auto ancestorNamed = [](QWidget* w, const QString& name) -> QWidget*
+		{
+			for (QWidget* p = w ? w->parentWidget() : nullptr; p; p = p->parentWidget())
+				if (p->objectName() == name) return p;
+			return nullptr;
+		};
+		// Bill's General page: the scroll area around one of his own General behavior rows.
+		QWidget* general = ancestorNamed(control<QWidget>(window, QStringLiteral("config.general.renderer_failure_keep_fullscreen")),
+			QStringLiteral("pageViewport"));
+		require(general != nullptr, "Bill's General page not found");
+		const char* const inputCard = "vpv.input.card.capture_fixes";
+		const char* const roomCard = "vpv.both.card.room_lights";
+		const char* const fileCard = "vpv.both.card.file_playback";
+		const std::pair<const char*, const char*> moved[] = {
+			{ "config.general.magewell_recover_faults", inputCard }, { "config.general.capture_display_fixes", inputCard },
+			{ "config.ambient.mode", roomCard }, { "config.ambient.room", roomCard }, { "config.ambient.lux_lit", roomCard },
+			{ "config.ambient.lux_dark", roomCard }, { "config.ambient.hold_s", roomCard }, { "config.ambient.port", roomCard },
+			{ "config.ambient.baud", roomCard }, { "config.general.file_av_offset_ms", fileCard },
+			{ "config.general.file_led_holdover_ms", fileCard }, { "config.general.file_av_offset_ms.reset", fileCard } };
+		for (const auto& row : moved)
+		{
+			const QList<QWidget*> found = window.findChildren<QWidget*>(QString::fromLatin1(row.first));
+			require(found.size() == 1, (std::string("moved General row not there exactly once: ") + row.first).c_str());
+			require(!general->isAncestorOf(found.front()), (std::string("row still on Bill's General page: ") + row.first).c_str());
+			require(ancestorNamed(found.front(), QString::fromLatin1(row.second)) != nullptr,
+				(std::string("row not on its VP-V card: ") + row.first + " -> " + row.second).c_str());
+			require(ancestorNamed(found.front(), Vpv::ObjectName(QStringLiteral("section"))) != nullptr,
+				(std::string("row not on the VP-V page: ") + row.first).c_str());
+		}
+		// Saved values load into the moved controls.
+		auto* magewell = control<QCheckBox>(window, QStringLiteral("config.general.magewell_recover_faults"));
+		auto* displayFixes = control<QCheckBox>(window, QStringLiteral("config.general.capture_display_fixes"));
+		require(!magewell->isChecked() && !displayFixes->isChecked(), "a saved capture fix off is not shown");
+		require(control<QComboBox>(window, QStringLiteral("config.ambient.mode"))->currentData().toString() == QStringLiteral("manual") &&
+			control<QComboBox>(window, QStringLiteral("config.ambient.room"))->currentData().toString() == QStringLiteral("lit"),
+			"the saved room-light mode / room is not shown");
+		require(control<QLineEdit>(window, QStringLiteral("config.ambient.port"))->text() == QStringLiteral("COM7"), "the saved sensor port is not shown");
+		auto* offset = control<QSpinBox>(window, QStringLiteral("config.general.file_av_offset_ms"));
+		require(offset->value() == -120, "the saved picture offset is not shown");
+		// GEM-222 note and the GEM-060 cross-link (both directions).
+		auto* note = control<QLabel>(window, QStringLiteral("vpv.both.room_lights.note"));
+		require(note->text().contains(QStringLiteral("On Original, room lights only steer profile rules; the room-light picture adaptation is off")),
+			"the Room lights card lacks the Original-pathway note");
+		require(note->text().contains(QStringLiteral("Main > Room-light adaptation")), "the Room lights card does not name Colour's Room-light adaptation");
+		bool backLink = false;
+		for (QLabel* label : window.findChildren<QLabel*>())
+			backLink = backLink || label->text().contains(QStringLiteral("set on this page's Room lights card"));
+		require(backLink, "Colour's Room-light adaptation card does not name the Room lights card");
+		// Edits save under the same keys.
+		magewell->setChecked(true);
+		control<QLineEdit>(window, QStringLiteral("config.ambient.port"))->setText(QStringLiteral("COM9"));
+		offset->setValue(40);
+		QCoreApplication::processEvents();
+		require(control<QPushButton>(window, QStringLiteral("applyConfiguration"))->isEnabled(), "editing a moved row did not mark the document edited");
+		// Original pathway: the capture fixes are greyed, Room lights and File playback stay live.
+		require(magewell->isEnabled() && displayFixes->isEnabled(), "the capture fixes are greyed on the VP-V pathway");
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
+		QCoreApplication::processEvents();
+		require(!magewell->isEnabled() && !displayFixes->isEnabled(), "the capture fixes stay live on the Original pathway");
+		for (const char* name : { "config.ambient.mode", "config.ambient.room", "config.ambient.port", "config.general.file_av_offset_ms",
+				"config.general.file_led_holdover_ms" })
+			require(control<QWidget>(window, QString::fromLatin1(name))->isEnabled(),
+				(std::string("a both-pathway row is greyed on the Original pathway: ") + name).c_str());
+		save(window);
+		QFile file(path);
+		require(file.open(QIODevice::ReadOnly), "the saved file cannot be read");
+		const QByteArray saved = file.readAll();
+		require(saved.contains("magewell_recover_faults: true") && saved.contains("capture_display_fixes: false") &&
+			saved.contains("port: COM9") && saved.contains("room: lit") && saved.contains("file_av_offset_ms: 40"),
+			(QByteArray("the moved General rows did not save under their keys: ") + saved).constData());
+	}
+
 	// D3: Bill's tests find Bill's own Chroma upscaler (his five filters); VP-V's list is its own control of the
 	// same key, and a VP-V-only choice is written and shown on Bill's control as his loader shows it.
 	void testChromaBillsControlAndVpvList()
@@ -1972,6 +2057,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: retirement Approve and Keep are recorded without hiding", testRetirementDecisions);
 	failures += run("VP-V: Camera model group writes the keys VP reads", testCameraModelControlsReachVp);
 	failures += run("VP-V: both-pathway cards leave Bill's pages", testBothPathwayCardsLeaveBillsPages);
+	failures += run("VP-V: General page VP rows on the VP-V page (GEM-060/222)", testGeneralPageRowsOnTheVpvPage);
 	failures += run("VP-V: Bill's Chroma upscaler and VP-V's list", testChromaBillsControlAndVpvList);
 	failures += run("VP-V: Bill's Dithering stays his, VP-V's list shows the value", testBillsDitheringStaysHis);
 	failures += run("VP-V: Profile use card and the sync directions", testProfileUseAndSyncDirections);
