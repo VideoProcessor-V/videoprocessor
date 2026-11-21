@@ -144,6 +144,7 @@ namespace
 			uint8_t reads = 0;
 			VpSkeleton::ProductId firstProduct{};
 			uint8_t firstLag = 0, secondLag = 0;
+			uint8_t aheadDepth = 0;   // GF-P3: ConsumerDecl::aheadDepth (GF-P1), the walk's ahead need
 		};
 
 		void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
@@ -161,6 +162,7 @@ namespace
 				d.firstProduct = consumers[0].consumes[0].product;
 				d.firstLag = consumers[0].consumes[0].lag;
 				d.secondLag = consumers[0].consumes[1].lag;
+				d.aheadDepth = consumers[0].aheadDepth;
 			}
 			declared.push_back(d);
 		}
@@ -490,6 +492,7 @@ namespace VideoProcessorTest
 			declared = demand.Declarations();
 			Assert::AreEqual<size_t>(2, declared.size(), L"declared again once after the re-registration");
 			Assert::IsTrue(declared[1].host == &rendererA);
+			Assert::IsTrue(demand.Withdrawals().empty(), L"the same address re-registered: nothing to withdraw");
 
 			// Another renderer.
 			registration.Set(&rendererB, &storeB);
@@ -498,13 +501,288 @@ namespace VideoProcessorTest
 			declared = demand.Declarations();
 			Assert::AreEqual<size_t>(3, declared.size(), L"declared once on the new renderer");
 			Assert::IsTrue(declared[2].host == &rendererB);
-			Assert::IsTrue(demand.Withdrawals().empty(), L"nothing withdrawn while running");
+			std::vector<std::pair<const void*, const void*>> withdrawn = demand.Withdrawals();
+			Assert::AreEqual<size_t>(1, withdrawn.size(), L"the old renderer's entry withdrawn when declaring on another");
+			Assert::IsTrue(withdrawn[0].first == &rendererA, L"the old renderer's entry withdrawn when declaring on another");
+			Assert::IsTrue(withdrawn[0].second == static_cast<const void*>(&module), L"the old renderer's entry withdrawn when declaring on another");
 
 			module.Stop();
+			withdrawn = demand.Withdrawals();
+			Assert::AreEqual<size_t>(2, withdrawn.size(), L"withdrawn on stop");
+			Assert::IsTrue(withdrawn[1].first == &rendererB, L"from the renderer it was last declared on");
+			Assert::IsTrue(withdrawn[1].second == static_cast<const void*>(&module));
+		}
+
+		// GF-P3 MUST-10: a module that was never started declares nothing, even when measurements reach it, and so leaves nothing to
+		// withdraw when it is destroyed.
+		TEST_METHOD(ANeverStartedModuleDeclaresNothingAndLeavesNoDemand)
+		{
+			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),
+				L"precondition: no store registered by an earlier test");
+			RecordingDemand demand;
+			DemandHubScope hub(&demand);
+			int rendererA = 0;
+			FrameAnalysis::Store storeA(FrameAnalysis::RingDepth(4, 4));
+			StoreRegistration registration;
+			registration.Set(&rendererA, &storeA);
+
+			auto projector = std::make_shared<FakeProjector>();
+			projector->openFails = true;   // a dry run: no port
+			{
+				LedDriveModule module(ProjectorConfig(), CutCompensate(),
+					[projector] { return std::make_unique<FakePort>(projector); });
+				module.SetSceneReaderForTesting(NoSceneCuts());
+				for (uint64_t s = 1; s <= 3; ++s)
+					module.SubmitMeasurement(CutFrame(40.0), s);
+			}
+			Assert::AreEqual<size_t>(0, demand.Declarations().size(), L"a module that never started declares nothing");
+			Assert::AreEqual<size_t>(0, demand.Withdrawals().size(), L"nothing declared, so nothing to withdraw");
+		}
+
+		// GF-P3 MUST-10: a measurement submitted after Stop (the drive frame holds the module by shared_ptr) declares nothing again,
+		// and destroying the stopped module withdraws nothing more.
+		TEST_METHOD(AMeasurementAfterStopDeclaresNothing)
+		{
+			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),
+				L"precondition: no store registered by an earlier test");
+			RecordingDemand demand;
+			DemandHubScope hub(&demand);
+			int rendererA = 0;
+			FrameAnalysis::Store storeA(FrameAnalysis::RingDepth(4, 4));
+			StoreRegistration registration;
+			registration.Set(&rendererA, &storeA);
+
+			auto projector = std::make_shared<FakeProjector>();
+			projector->openFails = true;   // a dry run: no port
+			{
+				LedDriveModule module(ProjectorConfig(), CutCompensate(),
+					[projector] { return std::make_unique<FakePort>(projector); });
+				module.SetSceneReaderForTesting(NoSceneCuts());
+				module.Start();
+				Assert::AreEqual<size_t>(1, demand.Declarations().size(), L"declared with the module");
+				module.Stop();
+				Assert::AreEqual<size_t>(1, demand.Withdrawals().size(), L"withdrawn on stop");
+				for (uint64_t s = 10; s <= 12; ++s)
+					module.SubmitMeasurement(CutFrame(40.0), s);
+				Assert::AreEqual<size_t>(1, demand.Declarations().size(), L"a late measurement declares nothing");
+				Assert::AreEqual<size_t>(1, demand.Withdrawals().size(), L"and withdraws nothing");
+			}
+			Assert::AreEqual<size_t>(1, demand.Withdrawals().size(), L"destroying the stopped module withdraws nothing more");
+		}
+
+		// GF-P3 MUST-10: a started module destroyed without Stop withdraws its declaration (no "LED drive" demand or owner key
+		// outlives the module).
+		TEST_METHOD(TheDestructorWithdrawsADeclaration)
+		{
+			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),
+				L"precondition: no store registered by an earlier test");
+			RecordingDemand demand;
+			DemandHubScope hub(&demand);
+			int rendererA = 0;
+			FrameAnalysis::Store storeA(FrameAnalysis::RingDepth(4, 4));
+			StoreRegistration registration;
+			registration.Set(&rendererA, &storeA);
+
+			auto projector = std::make_shared<FakeProjector>();
+			projector->openFails = true;   // a dry run: no port
+			const void* moduleAddress = nullptr;
+			{
+				LedDriveModule module(ProjectorConfig(), CutCompensate(),
+					[projector] { return std::make_unique<FakePort>(projector); });
+				moduleAddress = static_cast<const void*>(&module);
+				module.SetSceneReaderForTesting(NoSceneCuts());
+				module.Start();
+				Assert::AreEqual<size_t>(1, demand.Declarations().size(), L"declared with the module");
+				Assert::AreEqual<size_t>(0, demand.Withdrawals().size(), L"nothing withdrawn while running");
+			}   // no Stop
 			const std::vector<std::pair<const void*, const void*>> withdrawn = demand.Withdrawals();
-			Assert::AreEqual<size_t>(1, withdrawn.size(), L"withdrawn on stop");
-			Assert::IsTrue(withdrawn[0].first == &rendererB, L"from the renderer it was last declared on");
-			Assert::IsTrue(withdrawn[0].second == static_cast<const void*>(&module));
+			Assert::AreEqual<size_t>(1, withdrawn.size(), L"the destructor withdrew the declaration");
+			Assert::IsTrue(withdrawn[0].first == &rendererA, L"from the renderer it was declared on");
+			Assert::IsTrue(withdrawn[0].second == moduleAddress, L"for this module");
+		}
+
+		// GF-P3 AHEAD-DECL (lead ruling): the declaration carries the walk's frame count as ConsumerDecl::aheadDepth (0 until a walk
+		// ran, 0 always without a look-ahead, capped by led_lookahead_ms when set); a DEEPER walk declares again (a ratchet, never per
+		// walk), the LED does not cap at the skeleton's ceiling (the binder does), and a stream reset re-measures. Compiles only with
+		// GF-P1 (ConsumerDecl::aheadDepth): union only.
+		TEST_METHOD(TheDeclarationCarriesTheWalkDepthAndNothingWithoutLookahead)
+		{
+			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),
+				L"precondition: no store registered by an earlier test");
+			RecordingDemand demand;
+			DemandHubScope hub(&demand);
+			int rendererA = 0;
+			FrameAnalysis::Store storeA(FrameAnalysis::RingDepth(4, 4));
+			StoreRegistration registration;
+			registration.Set(&rendererA, &storeA);
+			auto projector = std::make_shared<FakeProjector>();
+			projector->openFails = true;   // a dry run: no port
+			TestClock clock;   // never advanced: the ratchet's hold window (GF-P3 S-P3-1) cannot elapse between the calls below
+			auto makeModule = [&projector, &clock](const LedDriveConfig& config) {
+				return std::unique_ptr<LedDriveModule>(new LedDriveModule(ProjectorConfig(), config,
+					[projector] { return std::make_unique<FakePort>(projector); }, clock));
+			};
+
+			{
+				LedDriveConfig config = CutCompensate();
+				config.lookahead = true;
+				config.ledLookaheadMs = 0;
+				std::unique_ptr<LedDriveModule> module = makeModule(config);
+				module->SetSceneReaderForTesting(NoSceneCuts());
+				module->Start();
+				std::vector<RecordingDemand::Declared> declared = demand.Declarations();
+				Assert::AreEqual<size_t>(1, declared.size());
+				Assert::AreEqual<int>(0, declared[0].aheadDepth, L"no walk yet: no ahead need");
+				module->SetLookaheadDepth(4);
+				declared = demand.Declarations();
+				Assert::AreEqual<size_t>(2, declared.size(), L"the first walk declares its depth");
+				Assert::AreEqual<int>(4, declared[1].aheadDepth);
+				module->SetLookaheadDepth(3);
+				module->SetLookaheadDepth(4);
+				Assert::AreEqual<size_t>(2, demand.Declarations().size(), L"a shallower or equal walk declares nothing (ratchet)");
+				module->SetLookaheadDepth(9);
+				declared = demand.Declarations();
+				Assert::AreEqual<size_t>(3, declared.size(), L"a deeper walk declares again");
+				Assert::AreEqual<int>(9, declared[2].aheadDepth, L"not capped by the LED (the binder caps at its ceiling)");
+				module->ResetLookahead();
+				module->SetLookaheadDepth(5);
+				declared = demand.Declarations();
+				Assert::AreEqual<size_t>(4, declared.size(), L"a stream reset re-measures the depth");
+				Assert::AreEqual<int>(5, declared[3].aheadDepth);
+				module->Stop();
+			}
+
+			// Without a look-ahead the walk measures nothing: no ahead need, no new declaration.
+			const size_t before = demand.Declarations().size();
+			{
+				LedDriveConfig config = CutCompensate();
+				config.lookahead = false;
+				std::unique_ptr<LedDriveModule> module = makeModule(config);
+				module->SetSceneReaderForTesting(NoSceneCuts());
+				module->Start();
+				Assert::AreEqual<size_t>(before + 1, demand.Declarations().size());
+				module->SetLookaheadDepth(6);
+				const std::vector<RecordingDemand::Declared> declared = demand.Declarations();
+				Assert::AreEqual<size_t>(before + 1, declared.size(), L"no look-ahead: a walk makes no declaration");
+				Assert::AreEqual<int>(0, declared.back().aheadDepth);
+				module->Stop();
+			}
+
+			// led_lookahead_ms caps the need at its frames (33 ms at the module's 60 Hz period is 2 frames).
+			const size_t beforeCapped = demand.Declarations().size();
+			{
+				LedDriveConfig config = CutCompensate();
+				config.lookahead = true;
+				config.ledLookaheadMs = 33;
+				std::unique_ptr<LedDriveModule> module = makeModule(config);
+				module->SetSceneReaderForTesting(NoSceneCuts());
+				module->Start();
+				Assert::AreEqual<size_t>(beforeCapped + 1, demand.Declarations().size());
+				module->SetLookaheadDepth(6);
+				const std::vector<RecordingDemand::Declared> declared = demand.Declarations();
+				Assert::AreEqual<size_t>(beforeCapped + 2, declared.size(), L"the walk's depth is declared");
+				Assert::AreEqual<int>(2, declared.back().aheadDepth, L"capped at led_lookahead_ms's frames");
+				module->Stop();
+			}
+		}
+
+		// GF-P3 S-P3-1: the held walk depth follows the walk's current need. A shallower walk lowers it only after the walks have
+		// stayed below it for the hold window (the held depth's span at the source rate; led_lookahead_ms when set), to the deepest
+		// walk seen in that window; a walk at the held depth resets the window. Time is the module's injected test clock.
+		// Compiles only with GF-P1 (ConsumerDecl::aheadDepth): union only.
+		TEST_METHOD(TheDeclaredDepthDropsAfterTheNeedStaysLowerForTheHold)
+		{
+			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),
+				L"precondition: no store registered by an earlier test");
+			RecordingDemand demand;
+			DemandHubScope hub(&demand);
+			int rendererA = 0;
+			FrameAnalysis::Store storeA(FrameAnalysis::RingDepth(4, 4));
+			StoreRegistration registration;
+			registration.Set(&rendererA, &storeA);
+			auto projector = std::make_shared<FakeProjector>();
+			projector->openFails = true;   // a dry run: no port
+			TestClock clock;
+			auto makeModule = [&projector, &clock](const LedDriveConfig& config, double sourceFps) {
+				std::unique_ptr<LedDriveModule> module(new LedDriveModule(ProjectorConfig(), config,
+					[projector] { return std::make_unique<FakePort>(projector); }, clock));
+				module->SetSceneReaderForTesting(NoSceneCuts());
+				module->OnSourceRestart(1, sourceFps);   // a known source rate: the hold is the held depth's span
+				module->Start();
+				return module;
+			};
+
+			// Case 1: 24 fps, hold = 6 x 41.67 ms = 250 ms. Inside it nothing drops; past it the deepest walk of the window is declared.
+			{
+				LedDriveConfig config = CutCompensate();
+				config.lookahead = true;
+				config.ledLookaheadMs = 0;
+				std::unique_ptr<LedDriveModule> module = makeModule(config, 24.0);
+				const size_t base = demand.Declarations().size();   // the declaration made with Start
+				module->SetLookaheadDepth(6);
+				std::vector<RecordingDemand::Declared> declared = demand.Declarations();
+				Assert::AreEqual<size_t>(base + 1, declared.size());
+				Assert::AreEqual<int>(6, declared.back().aheadDepth);
+				const double t0 = clock.Ms();
+				module->SetLookaheadDepth(3);   // the low window opens at t0
+				clock.To(t0 + 200.0);           // less than 6 x 41.67 ms
+				module->SetLookaheadDepth(4);
+				Assert::AreEqual<size_t>(base + 1, demand.Declarations().size(), L"inside the hold: no new declaration");
+				clock.To(t0 + 260.0);           // past the hold, counted from t0
+				module->SetLookaheadDepth(3);
+				declared = demand.Declarations();
+				Assert::AreEqual<size_t>(base + 2, declared.size(), L"past the hold: exactly one new declaration");
+				Assert::AreEqual<int>(4, declared.back().aheadDepth, L"the deepest walk in the window, not the last (3)");
+				module->Stop();
+			}
+
+			// Case 2 (flap): from a held 6, walks alternating 5 / 6, each 6 within the hold, never drop it (a walk at the held depth
+			// resets the window), though the total time is well past one hold.
+			{
+				LedDriveConfig config = CutCompensate();
+				config.lookahead = true;
+				config.ledLookaheadMs = 0;
+				std::unique_ptr<LedDriveModule> module = makeModule(config, 24.0);
+				const size_t base = demand.Declarations().size();
+				module->SetLookaheadDepth(6);
+				Assert::AreEqual<size_t>(base + 1, demand.Declarations().size());
+				double t = clock.Ms();
+				for (int round = 0; round < 4; ++round)
+				{
+					module->SetLookaheadDepth(5);
+					t += 100.0;
+					clock.To(t);
+					module->SetLookaheadDepth(6);
+					t += 100.0;
+					clock.To(t);
+				}
+				Assert::AreEqual<size_t>(base + 1, demand.Declarations().size(), L"a flapping queue never lowers the held depth");
+				module->Stop();
+			}
+
+			// Case 3: led_lookahead_ms = 100 at 60 fps (6 frames): the hold is 100 ms whatever the depth.
+			{
+				LedDriveConfig config = CutCompensate();
+				config.lookahead = true;
+				config.ledLookaheadMs = 100;
+				std::unique_ptr<LedDriveModule> module = makeModule(config, 60.0);
+				const size_t base = demand.Declarations().size();
+				module->SetLookaheadDepth(6);
+				std::vector<RecordingDemand::Declared> declared = demand.Declarations();
+				Assert::AreEqual<size_t>(base + 1, declared.size());
+				Assert::AreEqual<int>(6, declared.back().aheadDepth);
+				const double t0 = clock.Ms();
+				module->SetLookaheadDepth(3);
+				clock.To(t0 + 99.0);
+				module->SetLookaheadDepth(4);
+				Assert::AreEqual<size_t>(base + 1, demand.Declarations().size(), L"99 ms: no drop");
+				clock.To(t0 + 100.0);
+				module->SetLookaheadDepth(3);
+				declared = demand.Declarations();
+				Assert::AreEqual<size_t>(base + 2, declared.size(), L"100 ms: the held depth drops");
+				Assert::AreEqual<int>(4, declared.back().aheadDepth);
+				module->Stop();
+			}
 		}
 	};
 }
