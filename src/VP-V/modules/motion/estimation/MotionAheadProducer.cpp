@@ -8,6 +8,7 @@
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/core/ComputeOnce.h>
+#include <VP-V/core/GpuAttribution.h>
 
 #include <dxgi.h>
 
@@ -1154,6 +1155,9 @@ namespace MotionAhead
 
 		if (PassTimers::Sampler().Take(s.toSeq) && engineMs > 0.0)
 			PassTimers::Inbox::Motion().Post(PassTimers::Kind::GpuGroup, "motion: NVOF producer engine (wall)", engineMs);
+		if (engineMs > 0.0)
+			GpuAttribution::NoteExternalTimed("nvof execute (wall)", "motion_engine_nvof",
+				static_cast<uint64_t>(engineMs * 1e6 + 0.5));
 
 		BackItem item;
 		item.flow = std::move(flow);

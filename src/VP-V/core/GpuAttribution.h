@@ -142,6 +142,18 @@ namespace GpuAttribution
 			}
 		}
 
+		// Sweep 11: add resolved GPU/wall duration to an owner already counted by NoteExternal at submit.
+		// Does NOT increment passes_ or o.passes so asynchronous query resolution never double-counts passes.
+		void NoteExternalTime(const char* /*step*/, const char* owner, uint64_t ns)
+		{
+			if (!owner || !owner[0] || ns == 0)
+				return;
+			std::lock_guard<std::mutex> lock(mutex_);
+			OwnerRow& o = owners_[owner];
+			o.owner = owner;
+			o.ns += ns;
+		}
+
 		std::vector<OwnerRow> Owners() const { std::lock_guard<std::mutex> lock(mutex_); return Values(owners_); }
 		std::vector<StepRow> Unattributed() const { std::lock_guard<std::mutex> lock(mutex_); return Values(unattributed_); }
 		std::vector<StepRow> PrivateCopies() const { std::lock_guard<std::mutex> lock(mutex_); return Values(private_); }
@@ -222,8 +234,8 @@ namespace GpuAttribution
 			Global().Note(steps, numSteps, description, ns, defaultOwner);
 	}
 
-	// One GPU pass issued outside libplacebo (raw D3D11 Dispatch, NVOF Execute): counted and attributed to its owner,
-	// untimed (ms 0) - no pl_dispatch callback exists for it. One line after the submit; off = one relaxed load.
+	// One GPU pass issued outside libplacebo (raw D3D11 Dispatch, NVOF Execute): counted and attributed to its owner
+	// at submit (ns = 0). One line after the submit; off = one relaxed load.
 	inline void NoteExternal(const char* step, const char* owner)
 	{
 		if (ComputeOnce::Enabled())
@@ -231,5 +243,13 @@ namespace GpuAttribution
 			const char* steps[1] = { step };
 			Global().Note(steps, 1, step, 0, owner);
 		}
+	}
+
+	// Sweep 11: called when the asynchronous timer (GpuSpanTimers or NVOF event wall query) resolves frames later.
+	// Adds resolved ns to the owner row without double-counting the pass submitted via NoteExternal.
+	inline void NoteExternalTimed(const char* step, const char* owner, uint64_t ns)
+	{
+		if (ComputeOnce::Enabled())
+			Global().NoteExternalTime(step, owner, ns);
 	}
 }

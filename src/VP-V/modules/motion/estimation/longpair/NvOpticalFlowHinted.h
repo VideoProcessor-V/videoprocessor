@@ -19,6 +19,7 @@
 #include <d3d11.h>
 #include <atlbase.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -49,10 +50,15 @@ namespace NvOpticalFlow
 
 	private:
 		void* Registered(ID3D11Texture2D* texture);
+		void PollPendingTiming(bool wait);
 		void Close();
 
 		void* functions = nullptr;   // NV_OF_D3D11_API_FUNCTION_LIST (own copy)
 		void* handle = nullptr;
+		CComPtr<ID3D11DeviceContext> context;
+		CComPtr<ID3D11Query> eventQuery;
+		std::chrono::steady_clock::time_point timingSubmitAt{};
+		bool timingPending = false;
 		std::map<ID3D11Texture2D*, void*> registered;
 		uint64_t sessionAdapter = 0;   // the GPU this session is counted under while its handle is open (NvOpticalFlow::Sessions)
 		int width = 0, height = 0;
