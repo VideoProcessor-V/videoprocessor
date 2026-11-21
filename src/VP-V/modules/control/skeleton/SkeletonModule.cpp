@@ -2937,8 +2937,9 @@ namespace Vpv
 					// No grant = GPU memo fills decline visibly (NoLedgerGrant), nothing is allocated outside the ledger.
 					bool memoGranted = false;
 					uint64_t memoBudget = 0;
-					if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
-						if (const VpSkeleton::UserGrant* g = ls->plan.governor.Find(uint16_t(VpSkeleton::kUserSkeletonMemo)))
+					// GF-P2b MUST-4 (2): the CURRENT users plan (a kept lane state's users re-plan when the memo's need moved, else the state's).
+					if (const std::shared_ptr<const VpSkeleton::GovernorPlan> gp = b->lane.CurrentGovernorPlan())
+						if (const VpSkeleton::UserGrant* g = gp->Find(uint16_t(VpSkeleton::kUserSkeletonMemo)))
 						{
 							memoGranted = g->bytes > 0;
 							memoBudget = g->bytes;
@@ -2953,9 +2954,9 @@ namespace Vpv
 				{
 					// What the declared users still hold above their grant: planned as transient at the next Configure (once).
 					uint64_t shortfall = 0;
-					if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
+					if (const std::shared_ptr<const VpSkeleton::GovernorPlan> gp = b->lane.CurrentGovernorPlan())
 						for (const std::pair<uint16_t, uint64_t>& h : declared.heldById)
-							if (const VpSkeleton::UserGrant* g = ls->plan.governor.Find(h.first))
+							if (const VpSkeleton::UserGrant* g = gp->Find(h.first))
 								if (g->bytes < h.second)
 									shortfall += h.second - g->bytes;
 					if (shortfall != st.vramShortfallUsed)
@@ -3235,8 +3236,8 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					full.push_back(memoLine);   // B1: reused / filled at read / unavailable (cause) per product asked
 				// MV7 ledger (Ctrl+Alt+D): the VRAM users outside the product catalog, as the governor granted them (one line each; products are
 				// listed by the lane's own status). A user below level 0 also has its governor notice in "Analysis: ..." (plan.notice).
-				if (const std::shared_ptr<VpSkeleton::LaneState> laneState = lane.State())
-					for (const VpSkeleton::UserGrant& g : laneState->plan.governor.grants)
+				if (const std::shared_ptr<const VpSkeleton::GovernorPlan> usersPlan = lane.CurrentGovernorPlan())   // GF-P2b MUST-4 (2): the current users plan
+					for (const VpSkeleton::UserGrant& g : usersPlan->grants)
 						if (g.id < VpSkeleton::kUserProductBase)
 							full.push_back(std::string("VRAM ") + VpSkeleton::Token(g.tier) + " " + g.name + ": " + VpSkeleton::FormatMB(g.bytes) + " level " +
 								std::to_string(g.level) + (g.shed ? " (off)" : g.reduced ? " (reduced)" : ""));
