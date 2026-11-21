@@ -7,9 +7,11 @@ Usage: python -I tools/check_test_tamper.py [--strict] [--range A..B | --base RE
 Walks every non-merge commit in a range (default merge-base(HEAD, base ref)..HEAD) and flags each
 commit that touches a guarded file class WITHOUT a WAIVER-<ID> trailer line in its message:
 
-  test       src/**/tests/**, *Tests.cpp, *Test.cpp   (a test-ADDING-only change passes with a note:
-                                                       only added lines, no removed/edited line)
-  checker    tools/check_*.py, tools/run_compliance.py (any change needs a waiver)
+  test       src/**/tests/**, *Tests.cpp, *Test.cpp, tools/**/test_*.py
+             (a test-ADDING-only change passes with a note: only added lines, no removed/edited line)
+  checker    tools/check_*.py, tools/run_compliance.py, tools/vp_footprint.py,
+             tools/vpv_tests/pairwise.py (any change needs a waiver)
+  selftest   removed/edited assert or selftest lines in any other tools/**/*.py (needs a waiver)
   baseline   tools/*baseline*.json, docs/audit/*baseline*.json, *budget*.json (a change that only
                                                        REMOVES lines, i.e. a shrink, passes with a note)
   register_owner  an added/edited/removed ProductRows() row in src/VP-V/core/ProductCatalog.h (its folder is a register owner)
@@ -34,7 +36,10 @@ import sys
 
 WAIVER_RX = re.compile(r"^WAIVER-[A-Za-z0-9_.\-]+(\s*:.*)?\s*$", re.M)
 CHECKER_GLOBS = ["tools/check_*.py", "tools/run_compliance.py", "tools/compliance_lib.py", "tools/ctlscan.py",
-                 "tools/test_ctlscan.py", "tools/test_check_test_tamper.py"]
+                 "tools/test_ctlscan.py", "tools/test_check_test_tamper.py",
+                 "tools/vp_footprint.py", "tools/vpv_tests/pairwise.py"]
+PY_TEST_RX = re.compile(r"^tools/(?:.+/)?test_[^/]+\.py$")
+PY_SELFTEST_RX = re.compile(r"\bassert\b|\bassert[A-Z]\w*\s*\(|\bselftest\b")
 BASELINE_GLOBS = ["tools/*baseline*.json", "docs/audit/*baseline*.json", "docs/audit/*budget*.json",
                   "tools/*budget*.json", "docs/audit/waiver-ledger.json"]
 # Ledger of commits whose waiver was gated but not written in the required trailer form (R14-108). A commit counts as
@@ -57,6 +62,8 @@ def classify(path):
     if any(fnmatch.fnmatch(path, g) for g in BASELINE_GLOBS):
         return "baseline"
     if "/tests/" in path or path.endswith(("Tests.cpp", "Test.cpp")) or "/VideoProcessor-Test/" in path:
+        return "test"
+    if PY_TEST_RX.match(path):
         return "test"
     return "other"
 
@@ -96,6 +103,8 @@ def judge(files, message):
                 viol.append(("allowlist", f["path"], "allow-list line added/edited"))
             elif [l for l in rem if ALLOW_RX.search(l)]:
                 notes.append("allow-list removal: " + f["path"])
+            elif f["path"].startswith("tools/") and f["path"].endswith(".py") and [l for l in rem if PY_SELFTEST_RX.search(l)]:
+                viol.append(("selftest", f["path"], "python selftest/assert line removed or edited"))
     if has_waiver(message):
         if viol:
             notes.append("WAIVER present: %d guarded change(s) waived" % len(viol))
@@ -284,7 +293,25 @@ def main(argv=None):
         f = [{"path": "tools/check_x.py", "status": "M", "added": ["a"], "removed": []}]
         v, _, _ = judge(f, "x")
         v2, _, w2 = judge(f, "t\n\nWAIVER-T1: ok\n")
-        ok = bool(v) and not v2 and w2
+        py_weaken = [{"path": "tools/looprig/test_looprig.py", "status": "M",
+                      "added": ["self.assertNotEqual(verdict, 'FAIL')"],
+                      "removed": ["self.assertEqual(verdict, 'PASS')"]}]
+        vp, _, _ = judge(py_weaken, "weaken py test")
+        vp_w, _, wp_w = judge(py_weaken, "weaken py test\n\nWAIVER-T2: ok\n")
+        py_add = [{"path": "tools/eval/test_light_eval.py", "status": "M",
+                   "added": ["self.assertTrue(r['mid']['value_ok'])"], "removed": []}]
+        va, na, _ = judge(py_add, "add py assert")
+        st_weaken = [{"path": "tools/eval/source_id/score_identity.py", "status": "M",
+                      "added": ["pass"], "removed": ["assert got == want"]}]
+        vs, _, _ = judge(st_weaken, "weaken selftest")
+        vs_w, _, ws_w = judge(st_weaken, "weaken selftest\n\nWAIVER-T3: ok\n")
+        pw_edit = [{"path": "tools/vpv_tests/pairwise.py", "status": "M", "added": ["x = 1"], "removed": []}]
+        vpw, _, _ = judge(pw_edit, "edit pairwise")
+        ok = (bool(v) and not v2 and w2
+              and bool(vp) and vp[0][0] == "test" and not vp_w and wp_w
+              and not va and bool(na)
+              and bool(vs) and vs[0][0] == "selftest" and not vs_w and ws_w
+              and bool(vpw) and vpw[0][0] == "checker")
         print("selftest " + ("ok" if ok else "FAIL"))
         return 0 if ok else 2
     try:
