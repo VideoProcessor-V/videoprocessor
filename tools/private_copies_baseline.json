@@ -379,15 +379,6 @@
    "max_hits": 1
   },
   {
-   "key": "b|X8|src/VP-V/modules/scaling/adaptive_downscale#-",
-   "rule": "b",
-   "site": "X8",
-   "refs": "126 s4 X8",
-   "reason": "declared product read never made, or owner compute without publish",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
    "key": "b|X8|src/VP-V/modules/scaling/chroma_upscale#kP13SourceRing",
    "rule": "b",
    "site": "X8",
