@@ -32,5 +32,6 @@
          It uses the GUI's precompiled header (pch.h: MFC, for AfxGetMainWnd). -->
     <ClCompile Include="..\VP-V\gui\ShortcutObserverStatus.cpp" />
     <ClCompile Include="..\VP-V\gui\VpvAmbientIntent.cpp" />
+    <ClCompile Include="..\VP-V\gui\VpvStateReport.cpp" />
   </ItemGroup>
 </Project>
