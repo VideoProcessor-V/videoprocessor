@@ -4758,7 +4758,7 @@ namespace CameraAccuracy
 			const VpMotion::FlowView view = CameraAccuracyAhead::ViewOf(flow, static_cast<uint64_t>(f - 1), static_cast<uint64_t>(f), srcW);
 			CameraLink::FieldCopy& fc = fields[p];
 			fc = CameraLink::FieldCopy();
-			const bool copied = CameraLink::CopyAhead(view, static_cast<uint64_t>(f), copy) == CameraLink::AheadRefusal::None;
+			const bool copied = CameraLink::CopyAhead(view, static_cast<uint64_t>(f), consistency, copy) == CameraLink::AheadRefusal::None;
 			const auto c1 = std::chrono::steady_clock::now();
 			sr.aheadCopyMs[p] = std::chrono::duration<double, std::milli>(c1 - c0).count();
 			bool converted = false;
@@ -4766,7 +4766,7 @@ namespace CameraAccuracy
 			{
 				float gl[4] = {}, second[4] = {};
 				MotionAhead::FlowGlobal(copy.forward, copy.forwardCost, copy.gridW, copy.gridH, gl, second);   // the worker's AheadGlobal
-				converted = CameraLink::AheadToSourceGrid(copy, consistency, blocksX, blocksY, fc);
+				converted = CameraLink::AheadToSourceGrid(copy, blocksX, blocksY, fc);
 			}
 			sr.aheadConvertMs[p] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c1).count();
 			if (converted)

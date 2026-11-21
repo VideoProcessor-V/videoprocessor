@@ -22,5 +22,10 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\beta_gpu\AnalysisLumaSourceTestStub.cpp"/>
     <!-- refs/105 phase 0 (PT-A): the producer throughput bench (VP_PT_BENCH=1; drives the real producer only). -->
     <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\beta_gpu\ProducerThroughputBench.cpp"/>
+    <!-- C5-BETALINK: BBP-B B3. DejudderWarp.cpp calls VpFrameAnalysis::P1Gpu::BuildPyramidInto (the one code copy of the pyramid law),
+         defined in P1GpuFill.cpp, as the VPRenderer / VPRendererBeta items list it (no pch there either). Its real dependencies follow. -->
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\lane\P1GpuFill.cpp"/>
+    <!-- P1GpuFill.cpp's module registration and source-luma note go through the hub (Instance / AddModule / OriginalPathway). -->
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\core\hub\ExtensionHub.cpp"/>
   </ItemGroup>
 </Project>
