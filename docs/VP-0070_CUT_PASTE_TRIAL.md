@@ -195,12 +195,12 @@ new lines, scene movement, context changes and geometry. Offscreen GPU readback
 checks immutable current pixels, overlap cleanup, disabled identity and expected
 backing values across sRGB, gamma 1.8/2.0/2.2/2.4/2.6/2.8 and PQ.
 
-`tools/test_subtitle_recording.py` replays the earlier original-pixel recording
+`tools/eval_subtitle_recording.py` replays the earlier original-pixel recording
 through the production detector/tracker. Its annotated cues informed earlier
 tuning: these are regressions, not unseen validation. Raw completeness/tightness
 and negative gates remain separate from the requested larger presentation padding.
 
-`tools/test_subtitle_recorded_output.py` observes the two newer recordings without
+`tools/eval_subtitle_recorded_output.py` observes the two newer recordings without
 altering them. Its SHA-pinned manifest records historical box loss, drift and
 movement reversions. Those videos contain already rendered boxes or relocated
 text, so passing the observer is not a detector acceptance test and changes to
@@ -208,7 +208,7 @@ source code cannot repair their recorded pixels. A fresh playback/capture is
 needed to confirm the new build fixes the same live scenes. HLG GPU behavior,
 live 4K throughput and arbitrary subtitle styles remain unqualified.
 
-`tools/test_subtitle_gap_diagnostics.py` separately exercises two manually
+`tools/eval_subtitle_gap_diagnostics.py` separately exercises two manually
 reviewed no-overlay gaps from the newer box recording. It pins original media
 and probe hashes, uses unchanged crop pixels, and checks complete bounds plus
 stable box/cue identity with lookahead 3 and 0. The longer slice contains only
@@ -253,7 +253,7 @@ The two-line truncation regression also covers short dialogue dashes that are
 narrower than half the learned glyph height. These must attach to their own
 baseline before the separate-row symbol pass runs; otherwise an upper row can
 incorrectly borrow the lower dash and exclude the remaining lower row.
-`tools/test_subtitle_large_font.py --probe x64/Release/SubtitleClipProbe.exe`
+`tools/eval_subtitle_large_font.py --probe x64/Release/SubtitleClipProbe.exe`
 checks this with real font rasterization over six font sizes and all four UHD
 sampling phases, using explicitly supplied synthetic picture boundaries.
 

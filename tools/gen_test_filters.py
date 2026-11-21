@@ -23,7 +23,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_categories_lib as lib  # noqa: E402
+import categories_lib as lib  # noqa: E402
 
 
 def clause(entry, negate):

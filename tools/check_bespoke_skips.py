@@ -26,7 +26,7 @@ import sys
 
 _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _here)
-import test_categories_lib as lib  # noqa: E402
+import categories_lib as lib  # noqa: E402
 
 
 def _compliance():

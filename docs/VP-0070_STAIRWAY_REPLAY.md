@@ -49,7 +49,7 @@ Run the production-path replay after building the x64 Release solution and
 `tools/subtitle_clip_probe.vcxproj` in Release x64:
 
 ```powershell
-python tools/test_subtitle_recording.py `
+python tools/eval_subtitle_recording.py `
   --video 'C:\Users\bslac\Videos\2026-10-03 19-50-41.mp4' `
   --probe x64/Release/SubtitleClipProbe.exe `
   --manifest tools/subtitle_stairway_clean_recording_manifest.json `
