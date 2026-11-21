@@ -5537,23 +5537,6 @@ QWidget* ConfigEditorWindow::createStartupPage()
         "10 s, then every 30 s, at most 10 times; then Restart Renderer). Off: the earlier behaviour - "
         "fullscreen is left and the renderer waits for a manual restart."));
     behaviorLayout->addWidget(keepFullscreen);
-    // Restore switch 2026-10-17: [general] magewell_recover_faults.
-    auto* magewellRecover = bindCheckField(QStringLiteral("Magewell: recover from capture faults (fix under test)"),
-        QStringLiteral("general"), QStringLiteral("magewell_recover_faults"), true);
-    magewellRecover->setToolTip(QStringLiteral(
-        "On (default): a Magewell fault the card recovers from (no frames for 2 s, a failed start, the capture "
-        "memory budget, a slow frame copy) holds the video invalid and restarts the device by itself. Off: the "
-        "earlier behaviour - capture stops and needs a manual Restart."));
-    behaviorLayout->addWidget(magewellRecover);
-    // Restore switch (post-merge audit 2026-10-17): [general] capture_display_fixes.
-    auto* captureDisplayFixes = bindCheckField(QStringLiteral("Capture / display fixes in Bill's code (fix under test)"),
-        QStringLiteral("general"), QStringLiteral("capture_display_fixes"), true);
-    captureDisplayFixes->setToolTip(QStringLiteral(
-        "On (default): the target-only full-screen session picks the monitor's largest mode first (then the "
-        "highest refresh) and never an interlaced one; a DeckLink Rec.601 source is recognised by its active "
-        "lines (486 / 480 NTSC, 576 PAL). Off: Bill's earlier behaviour - highest refresh first, interlaced "
-        "allowed, 486 lines left without a colour space and 576 on the analog PAL entry."));
-    behaviorLayout->addWidget(captureDisplayFixes);
     auto* persistSelection = bindCheckField(QStringLiteral("Keep key-selected profiles after restart"),
         QStringLiteral("general"), QStringLiteral("persist_profile_selection"), false);
     persistSelection->setToolTip(QStringLiteral(
@@ -5721,55 +5704,6 @@ QWidget* ConfigEditorWindow::createStartupPage()
         { QStringLiteral("FOLLOW_INPUT"), QStringLiteral("FOLLOW_INPUT_LLDV"), QStringLiteral("HDR_LUMINANCE_USER") },
         { QStringLiteral("Follow input"), QStringLiteral("Follow input (LLDV)"), QStringLiteral("User values") }));
 
-    // Stage 9: room lights (the profile rules' `ambient` variable).
-    auto* ambient = new QWidget;
-    auto* ambientForm = new QFormLayout(ambient);
-    ambientForm->setContentsMargins(0, 0, 0, 0);
-    ambientForm->setVerticalSpacing(8);
-    auto* ambientMode = bindChoiceField(QStringLiteral("ambient"), QStringLiteral("mode"),
-        { QStringLiteral("off"), QStringLiteral("manual"), QStringLiteral("sensor") },
-        { QStringLiteral("Off"), QStringLiteral("Manual"), QStringLiteral("Light sensor") });
-    ambientMode->setToolTip(QStringLiteral(
-        "Off: rules see no room state. Manual: the room is as set below. Light sensor: a light sensor "
-        "decides (an ESP32 / Arduino with a VEML7700 or TSL2591 on its own USB port; the bundled sketch is "
-        "tools/light-sensor/vp_light_sensor.ino). Without readings the room below is used."));
-    ambientForm->addRow(QStringLiteral("Room lights"), ambientMode);
-    auto* ambientRoom = bindChoiceField(QStringLiteral("ambient"), QStringLiteral("room"),
-        { QStringLiteral("dark"), QStringLiteral("lit") }, { QStringLiteral("Dark"), QStringLiteral("Lit") });
-    ambientRoom->setToolTip(QStringLiteral(
-        "The room in Manual mode, and the fallback when the light sensor is not reporting. The Room "
-        "lights key flips it until restart."));
-    ambientForm->addRow(QStringLiteral("Room"), ambientRoom);
-    struct AmbientNumber { const char* label; const char* key; double hi; const char* placeholder; const char* tip; };
-    const AmbientNumber ambientNumbers[] = {
-        { "Lit above (lux)", "lux_lit", 100000.0, "20", "Light sensor: above this the room is lit." },
-        { "Dark below (lux)", "lux_dark", 100000.0, "8", "Light sensor: below this the room is dark; in between it stays as it was." },
-        { "Hold (seconds)", "hold_s", 600.0, "5", "Light sensor: a change must last this long (a door, someone passing)." } };
-    for (const AmbientNumber& number : ambientNumbers)
-    {
-        auto* edit = bindTextField(QStringLiteral("ambient"), QString::fromLatin1(number.key));
-        edit->setValidator(new QDoubleValidator(0.0, number.hi, 3, edit));
-        edit->setPlaceholderText(QString::fromLatin1(number.placeholder));
-        edit->setToolTip(QString::fromLatin1(number.tip));
-        ambientForm->addRow(QString::fromLatin1(number.label), edit);
-    }
-    auto* ambientPort = bindTextField(QStringLiteral("ambient"), QStringLiteral("port"));
-    ambientPort->setPlaceholderText(QStringLiteral("COM5"));
-    ambientPort->setToolTip(QStringLiteral(
-        "Light sensor: its own USB serial port (Device Manager, Ports). Never the projector's RS-232 port: "
-        "a port opens for one user at a time, so Apply refuses the same port."));
-    ambientForm->addRow(QStringLiteral("Sensor port"), ambientPort);
-    auto* ambientBaud = bindTextField(QStringLiteral("ambient"), QStringLiteral("baud"));
-    ambientBaud->setValidator(new QIntValidator(1200, 921600, ambientBaud));
-    ambientBaud->setPlaceholderText(QStringLiteral("115200"));
-    ambientBaud->setToolTip(QStringLiteral("Light sensor: the serial speed its sketch uses (the bundled sketch: 115200)."));
-    ambientForm->addRow(QStringLiteral("Sensor speed (baud)"), ambientBaud);
-    auto* ambientNote = new QLabel(QStringLiteral(
-        "Profiles choose by it: a rendering profile with <b>when: $ambient==\"lit\"</b> and a raised SDR "
-        "black level renders to the lit room's black."));
-    ambientNote->setWordWrap(true);
-    ambientForm->addRow(ambientNote);
-
     Vpv::MakeCombosShrinkable(hardware, { QStringLiteral("config.decklink."), QStringLiteral("config.directshow.conversion.") });   // VPV-HOOK
     cards->addCard(createCard(QStringLiteral("Hardware"),
         QStringLiteral("Capture selection used when VP starts."), hardware));
@@ -5779,83 +5713,6 @@ QWidget* ConfigEditorWindow::createStartupPage()
         QStringLiteral("Choose the output renderer and profile notifications."), source));
     cards->addCard(createCard(QStringLiteral("Input processing"),
         QStringLiteral("Shared source conversion and metadata defaults. Apply restarts the renderer; renderer pages may override each value."), input));
-    // VP Renderer DirectShow filter (2026-10-17): [general] keys read only by the
-    // filter's FileHost when MPC-HC / MPC-BE play a local file through VP.
-    auto* filePlayback = new QWidget;
-    auto* fileForm = new QFormLayout(filePlayback);
-    fileForm->setContentsMargins(0, 0, 0, 0);
-    fileForm->setVerticalSpacing(8);
-    auto fileMillisecondsField = [this](const QString& key, const QString& accessible, int minimum,
-        int maximum, int fallback, const QString& special, const QString& tip) -> QWidget*
-    {
-        const QString general = QStringLiteral("general");
-        auto* row = new QWidget;
-        auto* rowLayout = new QHBoxLayout(row);
-        rowLayout->setContentsMargins(0, 0, 0, 0);
-        auto* spin = new QSpinBox;
-        spin->setObjectName(controlName(general, key));
-        spin->setAccessibleName(accessible);
-        spin->setRange(minimum, maximum);
-        spin->setSingleStep(10);
-        spin->setSuffix(QStringLiteral(" ms"));
-        spin->setButtonSymbols(QAbstractSpinBox::UpDownArrows);
-        spin->setAlignment(Qt::AlignRight);
-        spin->setMaximumWidth(128);
-        if (!special.isEmpty())
-            spin->setSpecialValueText(special);
-        spin->setToolTip(tip + QStringLiteral(" %1 to %2 ms; default %3 ms.").arg(minimum).arg(maximum).arg(fallback));
-        // Unset or out of range shows the default without writing it.
-        bool valid = false;
-        const int configured = value(general, key).trimmed().toInt(&valid);
-        spin->setValue(valid && configured >= minimum && configured <= maximum ? configured : fallback);
-        connect(spin, qOverload<int>(&QSpinBox::valueChanged), this, [this, spin, key](int milliseconds)
-        {
-            if (!document_) return;
-            const std::string keyText = key.toStdString();
-            if (!document_->SetKnown("general", keyText.c_str(), std::to_string(milliseconds)))
-            {
-                document_->AddSection("general");
-                document_->SetKnown("general", keyText.c_str(), std::to_string(milliseconds));
-            }
-            editOrder_[spin->objectName()] = ++editSerial_;
-            markDirty();
-        });
-        auto* reset = new QToolButton;
-        reset->setObjectName(spin->objectName() + QStringLiteral(".reset"));
-        reset->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
-        reset->setFixedSize(26, 26);
-        reset->setToolTip(QStringLiteral("Reset %1 to %2 ms (default)").arg(accessible).arg(fallback));
-        reset->setAccessibleName(reset->toolTip());
-        connect(reset, &QToolButton::clicked, spin, [spin, fallback] { spin->setValue(fallback); });
-        rowLayout->addWidget(spin);
-        rowLayout->addWidget(reset);
-        rowLayout->addStretch(1);
-        return row;
-    };
-    fileForm->addRow(QStringLiteral("Picture offset (A/V)"), fileMillisecondsField(
-        QStringLiteral("file_av_offset_ms"), QStringLiteral("File playback picture offset"),
-        MainConfigSchema::FileAvOffsetMinMs, MainConfigSchema::FileAvOffsetMaxMs,
-        MainConfigSchema::FileAvOffsetDefaultMs, QString(),
-        QStringLiteral("Moves the picture against the sound for files played through the VP Renderer filter: "
-            "positive shows the picture later, negative earlier. Capture is not affected.")));
-    fileForm->addRow(QStringLiteral("Dynamic Drive hold between files"), fileMillisecondsField(
-        QStringLiteral("file_led_holdover_ms"), QStringLiteral("Dynamic Drive hold between files"),
-        MainConfigSchema::FileLedHoldoverMinMs, MainConfigSchema::FileLedHoldoverMaxMs,
-        MainConfigSchema::FileLedHoldoverDefaultMs, QStringLiteral("Off"),
-        QStringLiteral("The player rebuilds its graph for every file. The filter keeps Dynamic Drive running this "
-            "long so the next file carries on from the current LED level instead of flashing the projector to "
-            "full light; with no next file it then restores full light as usual. Off: full light at once.")));
-    auto* fileNote = new QLabel(QStringLiteral(
-        "Profiles can tell the two apart: <b>when: $source==\"file\"</b> matches file playback, "
-        "<b>$source==\"capture\"</b> VideoProcessor.exe."));
-    fileNote->setWordWrap(true);
-    fileForm->addRow(fileNote);
-
-    cards->addCard(createCard(QStringLiteral("Room lights"),
-        QStringLiteral("Dark or lit room, for profiles that render to the room's black."), ambient));
-    cards->addCard(createCard(QStringLiteral("File playback (VP Renderer filter)"),
-        QStringLiteral("Local files played in MPC-HC / MPC-BE through VP's processing. Read by the filter when it starts and when this file changes."),
-        filePlayback));
     return createPage(QStringLiteral("General"), QStringLiteral("Choose how VideoProcessor starts and which hardware it uses."), cards);
 }
 

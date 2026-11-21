@@ -11,7 +11,7 @@
 //   ApplyMotionAheadText   the VP-V wording of Bill's "Motion vectors computed ahead" choice.
 // Included only by ConfigEditorWindow.cpp; nothing here runs unless the editor calls it.
 
-#include <VP-V/modules/control/config/config_pages/VpvSection.h>
+#include <VP-V/modules/control/config/config_pages/VpvGeneralPageCards.h>   // and VpvSection.h, which it includes
 #include <VP-V/core/AheadCeiling.h>
 
 namespace Vpv
@@ -101,7 +101,7 @@ namespace Vpv
 		};
 		vpvHost.openPage = [self](const QString& pageName) { self->selectPage(pageName); };
 		vpvHost.bothPathwayCards = [self] { return BothPathwayCards(self->formApi_.kit); };
-		vpvHost.unitCards = [self](const QString& unitId) { return self->vpvPages_.takeUnitCards(unitId); };
+		vpvHost.unitCards = [self](const QString& unitId) { return WithGeneralPageCards(self->formApi_.kit, unitId, self->vpvPages_.takeUnitCards(unitId)); };
 		self->vpvPages_.append(self->pages_, QStringLiteral("VP-V"), self->createPage(QStringLiteral("VP-V"),
 			QStringLiteral("Everything VP-V adds, by unit: one tier per unit plus a global tier, each unit's settings, and the fallbacks engaged."),
 			CreateSection(vpvHost)));
