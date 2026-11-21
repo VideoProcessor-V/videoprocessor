@@ -1909,12 +1909,10 @@ namespace VideoProcessorTest
 		// (b2) the bound-map cases of (b): an all-zero map, and a non-zero map with dither_need 0, are byte-identical too.
 		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpBoundMapCasesAreByteIdentical)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
-#ifndef PL_VP_MPV_USER_SHADER_SET_TEXTURE
-			TEST_IGNORE()   // needs the beta host's libplacebo fork (pl_mpv_user_shader_set_texture)
-#endif
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DitherNeedWarpBoundMapCasesAreByteIdentical)
 		{
+			VP_FORK_ONLY_PL0004_OR_RETURN(L"VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpBoundMapCasesAreByteIdentical");
 			const std::vector<float> greys = DwGreys();
 			const int frames = 16;
 			const std::vector<int> base = DwSigmaCodes(DwSigmaParams(true, "0.15"), greys, frames, true);
@@ -1935,12 +1933,10 @@ namespace VideoProcessorTest
 		// from the plain run (the shader's frame / 5 counter has an unknown but fixed start), then used for every run.
 		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
-#ifndef PL_VP_MPV_USER_SHADER_SET_TEXTURE
-			TEST_IGNORE()   // needs the beta host's libplacebo fork (pl_mpv_user_shader_set_texture)
-#endif
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel)
 		{
+			VP_FORK_ONLY_PL0004_OR_RETURN(L"VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel");
 			const std::vector<float> greys = DwGreys();
 			const int frames = 16;
 			const float aBase = 0.15f;
@@ -1991,13 +1987,12 @@ namespace VideoProcessorTest
 		// the footroom / headroom levels when libplacebo hands them through.
 		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
-#ifndef PL_VP_MPV_USER_SHADER_SET_TEXTURE
-			TEST_IGNORE()   // needs the beta host's libplacebo fork (pl_mpv_user_shader_set_texture)
-#endif
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap)
 		{
-			const std::vector<float> levels = { 0.0f, 1.0f, 1.05f, -0.04f };   // black, white, WTW, BTB (limited range)
+			VP_FORK_ONLY_PL0004_OR_RETURN(L"VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap");
+			// black, white, WTW (code 980), BTB (code 24): signal levels 0, 1, 1 + 40/876, -40/876 on the limited 64..940 grid (TQ-CD-M5).
+			const std::vector<float> levels = { 0.0f, 1.0f, 1.0f + 40.0f / 876.0f, -40.0f / 876.0f };
 			const int frames = 16;
 			const std::vector<int> exact = DwSigmaCodes(DwSigmaParams(false, "0"), levels, frames, false);
 			std::map<std::string, std::string> p = DwSigmaParams(false, "0.15");
@@ -2019,7 +2014,8 @@ namespace VideoProcessorTest
 					Assert::AreEqual(exact[g * frames], capped[g * frames + j],
 						(L"an exact code moved at total amplitude 0.5, level index " + std::to_wstring(g) + L" refresh " + std::to_wstring(j)).c_str());
 			}
-			Assert::IsTrue(asserted >= 2, L"black and white must be exact without dither");
+			Assert::AreEqual(4, asserted, L"black, white, WTW and BTB must all be exact (constant) without dither");
+			Assert::IsTrue(exact[2 * frames] > 940 && exact[3 * frames] < 64, L"the WTW level must stay above 940 and the BTB level below 64");
 		}
 
 		// (f) dn_extra against DitherNeed::SampleExtra: the text of DitherNeedGlsl.h in a probe compute pass (a test asserts it is the

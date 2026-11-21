@@ -209,3 +209,16 @@ namespace HardwarePrerequisites
 		return ok;
 	}
 }
+
+// A native test that needs the libplacebo fork's patch 0004 (pl_mpv_user_shader_set_texture, defined only by the Beta's
+// custom.h as PL_VP_MPV_USER_SHADER_SET_TEXTURE) cannot run on the native lanes. Its first body statement is
+// VP_FORK_ONLY_PL0004_OR_RETURN(L"<exact native FQN>"): with the patch it is a no-op; without it the test logs
+//   SKIP-FORK-ONLY-PL0004: ... Beta-host evidence: BETA-RAN <FQN>
+// and returns. The Beta host runs the same case and prints BETA-RAN <FQN>; the TRX coverage tool credits the native test
+// only when that id equals the FQN exactly. The FQN is passed explicitly (the tool needs the exact text).
+#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+#define VP_FORK_ONLY_PL0004_OR_RETURN(fqn) ((void)0)
+#else
+#define VP_FORK_ONLY_PL0004_OR_RETURN(fqn) do { ::Microsoft::VisualStudio::CppUnitTestFramework::Logger::WriteMessage(L"SKIP-FORK-ONLY-PL0004: needs libplacebo fork patch 0004 (pl_mpv_user_shader_set_texture); Beta-host evidence: BETA-RAN " fqn L"\n"); return; } while (0)
+#endif
+
