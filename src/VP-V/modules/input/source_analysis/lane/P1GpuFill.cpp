@@ -469,13 +469,13 @@ namespace Vpv
 			std::atomic<bool> registered_{ false };
 		};
 
-		// Start-up only (HubBootstrap), after the skeleton module; idempotent.
+		// Start-up only (HubBootstrap), after the skeleton module; idempotent while the hub holds the module. After a hub reset
+		// (ResetModulesForTesting destroys it and the destructor clears the pointer) it registers a fresh one, so a test can drive
+		// the production module (GF-P1: the matcher-active ahead declaration test). Start-up thread only, as before.
 		void RegisterP1GpuModule()
 		{
-			static bool registered = false;
-			if (registered)
+			if (RegisteredP1GpuModule().load(std::memory_order_acquire) != nullptr)
 				return;
-			registered = true;
 			P1GpuModule* const module = new P1GpuModule();
 			Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Hub::ISkeletonModule>(module));
 			RegisteredP1GpuModule().store(module, std::memory_order_release);
