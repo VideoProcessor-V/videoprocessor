@@ -1083,9 +1083,12 @@ namespace VideoProcessorTest
 				std::vector<std::string> grainLines;
 				FallbackCatalog::Decision grain, td;
 				bool active = false;
+				bool ran = false;   // the scalar grain pass ran without a failure (r3 SHOULD 1: no read-back needed)
+				AdaptiveDownscale::GrainSourceUse use = AdaptiveDownscale::GrainSourceUse::NotSupplied;
 			};
 			// dark -> noise (a cut), then two repeats of the noisy frame for the read-back, as GrainRig::Measure.
-			auto run = [&](const std::function<AdaptiveDownscale::GrainSource()>& source, bool gammaLight) -> Outcome
+			// frameCount 1 (r3 SHOULD 1): one bound frame only, so no read-back of a bound frame exists yet (Pending).
+			auto run = [&](const std::function<AdaptiveDownscale::GrainSource()>& source, bool gammaLight, int frameCount = 4) -> Outcome
 			{
 				AdaptiveDownscale::Module module;
 				AdaptiveDownscaleStage::Stage stage{ module };
@@ -1101,7 +1104,7 @@ namespace VideoProcessorTest
 				bool grainWanted = false, noSsim = false;
 				const pl_tex inputs[4] = { dark, noisy, noisy, noisy };
 				const uint64_t sequences[4] = { 1, 2, 2, 2 };
-				for (int i = 0; i < 4; ++i)
+				for (int i = 0; i < frameCount && i < 4; ++i)
 				{
 					pl_tex_params tp{};
 					tp.w = 256; tp.h = 160; tp.format = rig.dstFmt; tp.renderable = true; tp.host_readable = true;
@@ -1137,6 +1140,8 @@ namespace VideoProcessorTest
 				}
 				Outcome o;
 				o.active = module.Active() && module.Failures() == 0 && module.LastStats().valid;
+				o.ran = module.Active() && module.Failures() == 0;
+				o.use = module.LastGrainSourceUse();
 				for (const std::string& line : stage.StatusLines())
 					if (line.rfind("Adaptive grain:", 0) == 0) o.grainLines.push_back(line);
 				o.grain = stage.GrainSourceFallback();
@@ -1181,6 +1186,19 @@ namespace VideoProcessorTest
 				Assert::AreEqual(std::string(c.reason), o.grain.reason, (name + L": the GrainSourceFallback reason").c_str());
 				// Two entries: the temporal-detail read is not engaged in reset 1, and it never uses the bare id (r3 MUST 1).
 				Assert::IsFalse(o.td.engaged, (name + L": the temporal-detail read path is not engaged").c_str());
+			}
+			{
+				// r3 SHOULD 1: a valid source on the FIRST frame. The products are bound but no frame that bound them has been read
+				// back yet (PollStats runs before the pass; a fresh module has no statistics): Pending, never a transient
+				// NoUsableBlock, and no downgrade is claimed. Before f41a2c1c5 this read NoUsableBlock and engaged the fallback.
+				const Outcome o = run([&]() { return good; }, true, 1);
+				Assert::IsTrue(o.ran, L"valid, first frame: the scalar grain pass ran");
+				Assert::IsTrue(o.use == AdaptiveDownscale::GrainSourceUse::Pending, L"valid, first frame: LastGrainSourceUse is Pending");
+				Assert::AreEqual(size_t(1), o.grainLines.size(), L"valid, first frame: exactly one grain status line");
+				Assert::AreEqual(std::string("Adaptive grain: shared grain split (P10) bound; waiting for the first read-back of a bound frame"),
+					o.grainLines[0], L"valid, first frame: the Pending status line");
+				Assert::AreEqual(std::string("product.adaptive_downscale"), o.grain.id, L"valid, first frame: the fallback id");
+				Assert::IsFalse(o.grain.engaged, L"valid, first frame: GrainSourceFallback is Released (nothing dropped yet)");
 			}
 			Assert::IsTrue(TdProducts::FallbackKey(TdProducts::Consumer::AdaptiveScaler, TdProducts::kCauseAbsent) != std::string("product.adaptive_downscale"),
 				L"the temporal-detail read is keyed by cause, never under the grain decision's bare id");
