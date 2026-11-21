@@ -9,16 +9,20 @@
 //
 // BEFORE / AFTER procedure (gate G1 MUST-6, coordinator condition: a speed-up claim needs a measured before and after, and the test
 // fails if the speed-up is not there):
+//   (Gate G1 re-gate: the asserted DV trims cases are the L2-neutral and ICtCp-neutral ones; the L8 + rotation run is log-only.)
 //   1. BEFORE: build a SCRATCH (not landed) tree of the commit before the fix (012: c32d00b2e; 015: e41eab639^) with THIS test file
 //      copied in, and run the class on a gpu=yes line with VP_TEST_SPEEDUP_RECORD=1. The test is parameter-tolerant (it sets
 //      dv_peak_pq / dv_near_black_nits only when the shader declares them and logs which form ran) and logs lines
-//        SPEEDUP-RECORD dvtrims_l8_pass_ms=<ms> / dvtrims_ictcp_pass_ms=<ms> / toneshape_headroom_pass_ms=<ms>
+//        SPEEDUP-RECORD dvtrims_l2_pass_ms=<ms> / dvtrims_ictcp_pass_ms=<ms> / toneshape_headroom_pass_ms=<ms>
 //      without asserting anything about speed.
 //   2. AFTER: on the fixed tip run the class without VP_TEST_SPEEDUP_RECORD, supplying the recorded numbers as environment variables
-//      VP_TEST_BEFORE_DVTRIMS_L8_PASS_MS, VP_TEST_BEFORE_DVTRIMS_ICTCP_PASS_MS, VP_TEST_BEFORE_TONESHAPE_HEADROOM_PASS_MS (or one file
+//      VP_TEST_BEFORE_DVTRIMS_L2_PASS_MS, VP_TEST_BEFORE_DVTRIMS_ICTCP_PASS_MS, VP_TEST_BEFORE_TONESHAPE_HEADROOM_PASS_MS (or one file
 //      named by VP_TEST_SPEEDUP_BEFORE_FILE with key=value lines, same keys lower case). The test ASSERTS the measured pass cost is at
 //      least VP_TEST_SPEEDUP_MIN_PCT percent (default 3, the plan's threshold) below the BEFORE number and FAILS otherwise.
-//   3. A missing BEFORE number FAILS under VP_TEST_REQUIRE_GPU=1 (RequireOrSkip) and otherwise logs SKIP-NO-GPU. Never a silent pass.
+//   3. The floor is max(MIN_PCT, 2 x the run-to-run spread measured in the same run (3 samples)). Without a BEFORE number a row logs
+//      SKIP-NO-BEFORE <test> <key> (a plain gpu=yes sweep neither fails spuriously nor passes silently) and FAILS under
+//      VP_TEST_REQUIRE_SPEEDUP=1 (the train gate variable), which also FAILS a run left in record mode. VP_TEST_REQUIRE_GPU keeps its
+//      hardware-gate meaning. Keys: dvtrims_l2_pass_ms, dvtrims_ictcp_pass_ms, toneshape_headroom_pass_ms.
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/tests/support/HardwarePrerequisites.h>
@@ -144,30 +148,55 @@ namespace VideoProcessorTest
 			return false;
 		}
 
-		// Record mode logs the number for the BEFORE run; otherwise the measured pass cost must be at least the minimum percent below
-		// the recorded BEFORE number (a missing number FAILS under VP_TEST_REQUIRE_GPU=1).
-		inline void CheckSpeedup(const char* test, const std::string& key, double afterPassMs)
+		// Three pass-cost samples (median with the hook minus the hook-less median, 3840x2160, 40 frames each): the first sample set is
+		// the measurement, their spread is the run-to-run noise of THIS run (gate G1 SHOULD-5).
+		template <class Measure>
+		inline std::vector<double> ThreePassCosts(Measure measure)
 		{
-			char line[200];
+			std::vector<double> costs;
+			for (int k = 0; k < 3; ++k)
+				costs.push_back(measure());
+			return costs;
+		}
+
+		// Record mode logs the number and its spread for the BEFORE run (and FAILS under VP_TEST_REQUIRE_SPEEDUP=1: a gating run must
+		// not be left in record mode). Otherwise the measured pass cost (median of the three samples) must be at least
+		// max(VP_TEST_SPEEDUP_MIN_PCT (default 3), 2 x the measured spread) percent below the recorded BEFORE number. Without a BEFORE
+		// number the row logs a named SKIP-NO-BEFORE marker (no spurious failure on a plain gpu=yes sweep, never a silent pass) and FAILS
+		// under VP_TEST_REQUIRE_SPEEDUP=1, the train's gate variable. VP_TEST_REQUIRE_GPU keeps its own meaning (the hardware gate).
+		inline void CheckSpeedup(const char* test, const std::string& key, std::vector<double> costs)
+		{
+			char line[260];
+			std::sort(costs.begin(), costs.end());
+			const double after = costs[costs.size() / 2];
+			const double spreadPercent = after > 0.0 ? (costs.back() - costs.front()) / after * 100.0 : 0.0;
+			const bool gating = HardwarePrerequisites::EnvIsOne("VP_TEST_REQUIRE_SPEEDUP");
 			if (HardwarePrerequisites::EnvIsOne("VP_TEST_SPEEDUP_RECORD"))
 			{
-				std::snprintf(line, sizeof line, "SPEEDUP-RECORD %s=%.4f\n", key.c_str(), afterPassMs);
+				std::snprintf(line, sizeof line, "SPEEDUP-RECORD %s=%.4f\nSPEEDUP-RECORD-SPREAD %s=%.2f %%\n", key.c_str(), after, key.c_str(), spreadPercent);
 				Logger::WriteMessage(line);
+				Assert::IsFalse(gating, L"VP_TEST_SPEEDUP_RECORD is set in a gating run (VP_TEST_REQUIRE_SPEEDUP=1): the run would pass without asserting any speed-up");
 				return;
 			}
 			double before = 0.0;
-			const bool have = BeforeNumber(key, before);
-			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, test, have,
-				"no BEFORE number for " + key + " (record it from the pre-fix scratch build: VP_TEST_BEFORE_<KEY> or VP_TEST_SPEEDUP_BEFORE_FILE)"))
+			if (!BeforeNumber(key, before))
+			{
+				std::snprintf(line, sizeof line, "SKIP-NO-BEFORE %s %s: no BEFORE number (VP_TEST_BEFORE_<KEY> or VP_TEST_SPEEDUP_BEFORE_FILE); measured pass cost %.4f ms, spread %.2f %%\n",
+					test, key.c_str(), after, spreadPercent);
+				Logger::WriteMessage(line);
+				Assert::IsFalse(gating, (std::wstring(L"SKIP-NO-BEFORE under VP_TEST_REQUIRE_SPEEDUP=1: no BEFORE number for ") + std::wstring(key.begin(), key.end())).c_str());
 				return;
+			}
 			Assert::IsTrue(before > 0.0, (std::wstring(L"the BEFORE number is positive: ") + std::wstring(key.begin(), key.end())).c_str());
 			std::string minimum;
 			const double minPercent = EnvText("VP_TEST_SPEEDUP_MIN_PCT", minimum) ? std::atof(minimum.c_str()) : 3.0;
-			const double gain = (before - afterPassMs) / before * 100.0;
-			std::snprintf(line, sizeof line, "SPEEDUP %s: before %.4f ms, after %.4f ms, gain %.2f %% (required %.2f %%)\n", key.c_str(), before, afterPassMs, gain, minPercent);
+			const double floorPercent = (std::max)(minPercent, 2.0 * spreadPercent);
+			const double gain = (before - after) / before * 100.0;
+			std::snprintf(line, sizeof line, "SPEEDUP %s: before %.4f ms, after %.4f ms, gain %.2f %% (required %.2f %% = max(%.2f %%, 2 x spread %.2f %%))\n",
+				key.c_str(), before, after, gain, floorPercent, minPercent, spreadPercent);
 			Logger::WriteMessage(line);
-			Assert::IsTrue(gain >= minPercent, (std::wstring(L"the measured speed-up is there: ") + std::wstring(key.begin(), key.end()) + L" gained " +
-				std::to_wstring(gain) + L" % against the required " + std::to_wstring(minPercent) + L" %").c_str());
+			Assert::IsTrue(gain >= floorPercent, (std::wstring(L"the measured speed-up is there: ") + std::wstring(key.begin(), key.end()) + L" gained " +
+				std::to_wstring(gain) + L" % against the required " + std::to_wstring(floorPercent) + L" %").c_str());
 		}
 
 		inline bool Declares(const pl_hook* hook, const char* name)
@@ -254,11 +283,6 @@ namespace VideoProcessorTest
 			fixture.CaptureLog(&cleanLog);
 			BundledHook trims(fixture, "DV trims.glsl", "dv_trims");
 			const pl_hook* hook = trims.hook;
-			DvTrimSelection::ExtParams ext;
-			ext.base.slope = 1.1; ext.base.offset = 0.02; ext.base.power = 0.95; ext.base.chromaWeight = 0.15; ext.base.saturationGain = 1.1;
-			ext.midContrast = 0.2; ext.clipTrim = -0.15;
-			const double sat[6] = { 1.2, 1.0, 0.85, 1.0, 1.15, 1.0 }, hue[6] = { 0.0, 8.0, 0.0, -6.0, 0.0, 4.0 };
-			for (int k = 0; k < 6; ++k) { ext.saturation[k] = sat[k]; ext.hueDegrees[k] = hue[k]; }
 			const pl_raw_primaries* prim = pl_raw_primaries_get(PL_COLOR_PRIM_BT_2020);
 			DolbyVisionTrims::Signal signal;
 			signal.pq = true;
@@ -267,16 +291,35 @@ namespace VideoProcessorTest
 			const double b[2] = { prim->blue.x, prim->blue.y }, w[2] = { prim->white.x, prim->white.y };
 			DolbyVisionTrims::LuminanceWeights(r, g, b, w, signal.kr, signal.kg, signal.kb);
 			const Timing without = TimeRender(fixture, nullptr);
-			for (const bool ictcp : { false, true })
+			// The speed-up claim (Gemini [C]:146-150, "the 99 percent L2 / neutral-hue case") is asserted on the cases the fix targets: the
+			// L2 path (dv_ext 0, power 1, no rotation) and the ICtCp path with the same neutral trim. The L8 trim with rotation and
+			// dv_power 0.95 saves almost nothing (the guards do not apply) and is LOG-ONLY context (gate G1 MUST-7).
+			struct Case { const char* name; const char* key; bool ictcp; bool l8Rotation; };
+			const Case cases[] = {
+				{ "L2 neutral (dv_ext 0, power 1, no rotation)", "dvtrims_l2_pass_ms", false, false },
+				{ "ICtCp neutral (Dolby-style, same trim)", "dvtrims_ictcp_pass_ms", true, false },
+				{ "L8 with rotation, dv_power 0.95 (log only)", nullptr, false, true },
+			};
+			const bool recording = HardwarePrerequisites::EnvIsOne("VP_TEST_SPEEDUP_RECORD");
+			for (const Case& c : cases)
 			{
+				DvTrimSelection::ExtParams ext;
+				ext.base.slope = 1.1; ext.base.offset = 0.02; ext.base.power = c.l8Rotation ? 0.95 : 1.0; ext.base.chromaWeight = 0.15; ext.base.saturationGain = 1.1;
+				if (c.l8Rotation)
+				{
+					ext.midContrast = 0.2; ext.clipTrim = -0.15;
+					const double sat[6] = { 1.2, 1.0, 0.85, 1.0, 1.15, 1.0 }, hue[6] = { 0.0, 8.0, 0.0, -6.0, 0.0, 4.0 };
+					for (int k = 0; k < 6; ++k) { ext.saturation[k] = sat[k]; ext.hueDegrees[k] = hue[k]; }
+				}
 				for (const auto& kv : DvTrimSelection::ShaderParameters(ext))
 					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, kv.first, kv.second));
-				for (const auto& kv : DvDolbyStyle::ShaderParameters(ictcp, prim))
+				for (const auto& kv : DvDolbyStyle::ShaderParameters(c.ictcp, prim))
 					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, kv.first, kv.second));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_signal_pq", 1.0));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_peak_nits", signal.peakNits));
-				// Parameter-tolerant: the pre-GEM-012 shader does not declare these two (it recomputes them per pixel), and this test must be
-				// able to time that BEFORE shader. They are set when declared (the host does) and the form that ran is logged.
+				// Parameter-tolerant for the BEFORE run: the pre-GEM-012 shader does not declare these two (it recomputes them per pixel).
+				// They are set when declared (the host does) and the form that ran is logged; a normal (AFTER, non-RECORD) run ASSERTS the
+				// post-fix form, so a revert of e87f34151 cannot time the old shader and pass on noise.
 				const bool hostConstants = Declares(hook, "dv_peak_pq") && Declares(hook, "dv_near_black_nits");
 				if (hostConstants)
 				{
@@ -285,12 +328,16 @@ namespace VideoProcessorTest
 				}
 				Logger::WriteMessage(hostConstants ? "DvTrimsIctcpAndL8GpuTiming: shader form: host constants (dv_peak_pq, dv_near_black_nits)\n" :
 					"DvTrimsIctcpAndL8GpuTiming: shader form: pre-GEM-012 (per-pixel constants)\n");
+				if (!recording)
+					Assert::IsTrue(hostConstants, L"the AFTER run times the post-fix shader (it declares dv_peak_pq and dv_near_black_nits)");
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kr", signal.kr));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kb", signal.kb));
-				AssertHookActs(fixture, hook, ictcp ? L"ICtCp" : L"L8");
+				const std::string name = c.name;
+				AssertHookActs(fixture, hook, std::wstring(name.begin(), name.end()).c_str());
 				const Timing withHook = TimeRender(fixture, hook);
-				LogTiming("DvTrimsIctcpAndL8GpuTiming", ictcp ? "ICtCp (Dolby-style)" : "L8 (dv_ext)", withHook, without);
-				CheckSpeedup("DvTrimsIctcpAndL8GpuTiming", ictcp ? "dvtrims_ictcp_pass_ms" : "dvtrims_l8_pass_ms", withHook.median - without.median);
+				LogTiming("DvTrimsIctcpAndL8GpuTiming", c.name, withHook, without);
+				if (c.key)
+					CheckSpeedup("DvTrimsIctcpAndL8GpuTiming", c.key, ThreePassCosts([&]() { return TimeRender(fixture, hook).median - without.median; }));
 			}
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
@@ -332,7 +379,8 @@ namespace VideoProcessorTest
 				const Timing withHook = TimeRender(fixture, hook);
 				LogTiming("SdrToneShapeHeadroomOnlyGpuTiming", v.name, withHook, without);
 				if (v.strength == 0.0)   // the headroom-only short-circuit is the speed-up claim; the other two rows are context
-					CheckSpeedup("SdrToneShapeHeadroomOnlyGpuTiming", "toneshape_headroom_pass_ms", withHook.median - without.median);
+					CheckSpeedup("SdrToneShapeHeadroomOnlyGpuTiming", "toneshape_headroom_pass_ms",
+						ThreePassCosts([&]() { return TimeRender(fixture, hook).median - without.median; }));
 			}
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
