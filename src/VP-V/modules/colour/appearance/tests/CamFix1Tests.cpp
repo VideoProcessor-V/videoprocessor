@@ -78,6 +78,36 @@ namespace Tests
 			Assert::IsTrue(CalibrationLutHost::DisplayMappingStepsRun(false, "vp", true, true, "colour.dm_trims"));
 		}
 
+		TEST_METHOD(AutoTakesTheVpStageOnlyWhileAStepWantsIt)
+		{
+			// CF1-FIN SHOULD A: both resolutions of auto. Resolved vp (a step configured) and a step wanting to act this
+			// frame: the VP stage takes the LUT.
+			CalibrationLutHost::StageFacts facts;
+			facts.vpStageWanted = CalibrationLutHost::ResolveStage("auto",
+				CalibrationLutHost::DisplayMappingStepsRun(false, "vp", true, false, "")) == "vp";
+			facts.slotRuns = true;
+			Assert::IsTrue(facts.vpStageWanted);
+			CalibrationLutHost::StageFacts effective = facts;
+			effective.vpStageWanted = facts.vpStageWanted && CalibrationLutHost::AutoKeepsVpStage(true, true);
+			Assert::IsTrue(CalibrationLutHost::UseVpStage(effective, false), L"auto with a DV picture or appearance: vp");
+			// Resolved vp but nothing wants to act (an HDR10 or SDR picture, appearance off): libplacebo, byte-identical.
+			effective.vpStageWanted = facts.vpStageWanted && CalibrationLutHost::AutoKeepsVpStage(true, false);
+			Assert::IsFalse(CalibrationLutHost::UseVpStage(effective, false), L"auto with no step acting: libplacebo");
+			// An explicit vp passes through whatever the frame.
+			Assert::IsTrue(CalibrationLutHost::AutoKeepsVpStage(false, false));
+			// Resolved libplacebo never becomes vp.
+			Assert::IsFalse(CalibrationLutHost::ResolveStage("auto", false) == "vp" && CalibrationLutHost::AutoKeepsVpStage(true, true));
+			// The wiring: the host applies it, the colour segment feeds it after its decisions, the DV stage says when it wants it.
+			const std::string host = Fix1ReadUp("src\\VP-V\\modules\\output\\calibration_lut\\CalibrationLutHost.cpp");
+			Assert::IsTrue(Fix1Has(host, "AutoKeepsVpStage(autoConfigured, autoStepWants)"));
+			Assert::IsTrue(Fix1Has(host, "if (UseVpStage(effective, stageFailed))"));
+			const std::string core = Fix1ReadUp("src\\VP-V\\segments\\CoreSegments.inl");
+			Assert::IsTrue(Fix1Has(core, "calibrationHost.SetAutoNeed(activeSettings.calibrationLutStageConfigured == \"auto\","));
+			Assert::IsTrue(Fix1Has(core, "dvStage.DisplayMappingWantsLutAfter()"));
+			const std::string stage = Fix1ReadUp("src\\VP-V\\modules\\colour\\display_mapping\\DvHostStage.h");
+			Assert::IsTrue(Fix1Has(stage, "m_dmWantsLutAfter = dvTonePicture && ((f.trims && f.trimsStageRuns) || dvToneDolby);"));
+		}
+
 		TEST_METHOD(DefaultIsAutoAndTheResolvedStageIsSeparate)
 		{
 			const std::string cfg(kFix1ConfigDir);
