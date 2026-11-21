@@ -4,7 +4,10 @@
 """Fails when a test that uses the GPU has neither a Category attribute nor a manifest entry.
 
 CPU only, seconds. Also fails on a manifest entry that matches no test (stale), an unknown
-category, and an entry whose category disagrees with a Category attribute on the same test.
+category, an entry whose category disagrees with a Category attribute on the same test, and a Category
+attribute that names no known category (a typo such as Footge would leave the test in the CPU run, TQ-X2).
+Footage, Corpus and Bench are excluded categories: their tests run only in a dedicated job (see
+tools/gen_test_filters.py --job-env).
 Usage: python tools/check_test_categories.py
 """
 import os
@@ -30,6 +33,8 @@ def main():
                 if lib.entry_matches(e, cls, method):
                     used.add(i)
                     mapped = mapped or e['category']
+            if t['category'] and t['category'] not in lib.KNOWN_CATEGORIES:
+                problems.append(f'{rel}: {cls}::{method} has an unknown Category attribute {t["category"]}')
             if t['gpu']:
                 gpu += 1
                 if not t['category'] and not mapped:
