@@ -1650,6 +1650,21 @@ namespace VideoProcessorTest
 	{
 	public:
 		// The text of dn_extra in the DitherNeedGlsl.h string (run by the probe test below) is the text in the shader.
+		// GEM-W1B V1 sigma-delta MUST-1: the carried residual neither enters nor leaves an exact code (text guard: the
+		// quantiser must see r = 0 there, and write r_next = 0, so black 16 cannot dither into 15/17).
+		TEST_METHOD(ExactCodesAreNeverMovedByTheCarryTextInTheShader)
+		{
+			const std::string shader = DwLf(LoadBundledShader("Temporal sigma-delta.glsl"));
+			Assert::IsFalse(shader.empty(), L"bundled shader not found");
+			const size_t mask = shader.find("vec3 exact_code = vec3(equal(x, floor(x + 0.5)));");
+			const size_t cleared = shader.find("r = mix(r, vec3(0.0), exact_code);");
+			const size_t quantise = shader.find("k = clamp(floor(x + r + d + 0.5), code_min, code_max);");
+			const size_t next = shader.find("r_next = mix(r_next, vec3(0.0), exact_code);");
+			Assert::IsTrue(mask != std::string::npos && cleared != std::string::npos && quantise != std::string::npos &&
+				next != std::string::npos, L"the exact-code carry guard is missing");
+			Assert::IsTrue(mask < cleared && cleared < quantise && quantise < next, L"the guard must clear r before the quantiser and r_next after it");
+		}
+
 		TEST_METHOD(DitherNeedWarpAccessorTextIsInTheShader)
 		{
 			const std::string shader = DwLf(LoadBundledShader("Temporal sigma-delta.glsl"));
