@@ -247,7 +247,10 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 		Vpv::Skeleton::OwnerGpuDevice device;
 		GrainSplit::Gpu::VariantOwner owner;
 		VpSkeleton::SkeletonMemo memo;
-		explicit MemoRig(GpuDevice& dev) : device(dev.Gpu())
+		// WAIVER-C5-GF-T2 (GF-P1 MUST-5): Register takes the largest observed luma (w x h; the stream's size) and the owner sets
+		// reserveBytes from it, so the memo's planned need is non-zero before the first fill. `planned` sets the ledger grant to
+		// that need (memo.GpuNeedBytes()) instead of the roomy 4 GiB, as the module's grant does.
+		explicit MemoRig(GpuDevice& dev, int w = kW, int h = kH, bool planned = false) : device(dev.Gpu())
 		{
 			memo.SetHost(this);
 			memo.SetGpuDispatcherPresent(true);
@@ -255,7 +258,9 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 			memo.SetGpuDevice(&device);
 			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Gpu, Vpv::Capture::SourcePlanes::kUnit,
 				Vpv::Capture::SourcePlanes::MakeOwnerFill()) == VpSkeleton::SkeletonMemo::Registration::Registered, L"the P13 source-plane owner registers its fill");
-			Assert::IsTrue(owner.Register(memo) == VpSkeleton::SkeletonMemo::Registration::Registered, L"the grain split owner registers its fill");
+			Assert::IsTrue(owner.Register(memo, w, h) == VpSkeleton::SkeletonMemo::Registration::Registered, L"the grain split owner registers its fill");
+			if (planned)
+				memo.SetGpuBudget(true, memo.GpuNeedBytes());
 		}
 		~MemoRig()
 		{
@@ -1565,6 +1570,46 @@ namespace VideoProcessorTest
 			Assert::IsTrue(allMatch, L"the output planes equal the pinned (pre-change) planes bit for bit");
 		}
 
+		TEST_METHOD(GrainVariantNeedIsNonZeroBeforeTheFirstFill)
+		{
+			// WAIVER-C5-GF-T2 (GF-P1 MUST-5, GV AMEND): the grain split owner registers with the largest observed luma, so the memo's
+			// planned need is non-zero BEFORE any fill (it was 0: the ledger grant was never made and every Acquire failed
+			// NoLedgerGrant). With the ledger grant = that need, the first frame's variant is served: filled at read, no refusal.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			const std::vector<Plane> frames = Stream(2, "IB", 0.3, 0.0, 29u, 1.2);
+			pl_tex bwdTex = UploadPair(gpu, MotionPair::Uniform(kW, kH, 16.0, -0.3, 0.0));
+			pl_tex tex = UploadLuma(gpu, frames[0]);
+			{
+				MemoRig rig(dev, kW, kH, true);
+				Assert::IsTrue(rig.memo.GpuNeedBytes() > 0, L"the planned need is non-zero before the first fill");
+				Gpu::Module m;
+				Gpu::Params gp;
+				gp.settings = Steady();
+				gp.seq = 0;
+				gp.planeLines = 1080.0;
+				gp.contentHz = 4.0;
+				gp.backward.tex = bwdTex;
+				gp.memo = &rig.memo;
+				pl_frame out{};
+				rig.Begin(0, tex);
+				const bool ok = m.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, out);
+				const VpSkeleton::AcquireCause cause = m.LastAcquireCause();
+				const VpSkeleton::AcquireStatus status = m.LastAcquireStatus();
+				rig.End(0);
+				Assert::IsTrue(ok, Wide(m.LastError()).c_str());
+				Assert::IsTrue(cause != VpSkeleton::AcquireCause::NoLedgerGrant, L"the first frame is not refused for want of a ledger grant");
+				Assert::IsTrue(cause == VpSkeleton::AcquireCause::None, L"no refusal");
+				Assert::IsTrue(status == VpSkeleton::AcquireStatus::FilledAtRead, L"the first frame's variant is filled at read");
+				const VpSkeleton::AcquireCounters c = rig.memo.CountersOf(VpSkeleton::kP10GrainSplit);
+				Assert::AreEqual(uint64_t(0), c.unavailable[size_t(VpSkeleton::AcquireCause::NoLedgerGrant)], L"0 NoLedgerGrant");
+				m.Release(gpu);
+			}
+			pl_tex_destroy(gpu, &tex);
+			pl_tex_destroy(gpu, &bwdTex);
+		}
+
 		TEST_METHOD(TemporalDetailGpuSceneRestartInputFollowsTheModel)
 		{
 			// WAIVER-C5-SOFTRESET-TD (cut_soft_reset in temporal detail; review D:\codex\vp-handover\batchB\review-softreset-r1.md L1):
@@ -1601,6 +1646,9 @@ namespace VideoProcessorTest
 			FieldMotionSource motion;
 			for (int t = 0; t < 4; ++t) motion.SetBackward(static_cast<uint64_t>(t), bwd);
 			pl_tex bwdTex = UploadPair(gpu, bwd);
+			// WAIVER-C5-GF-T2 (MUST-13): the module's only grain split source is the skeleton memo (no shared product here), so this
+			// half runs on the memo rig too: Begin offers the frame's luma, End seals it; the sequence runs 0..3 as RunMatch uses it.
+			MemoRig rig(dev);
 			for (int t = 0; t < 4; ++t)
 			{
 				SceneRestartInput s;
@@ -1613,8 +1661,12 @@ namespace VideoProcessorTest
 				gp.seq = static_cast<uint64_t>(t);
 				gp.backward.tex = bwdTex;
 				gp.sceneRestart = s;
+				gp.memo = &rig.memo;
 				pl_frame out{};
-				Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, out), Wide(module.LastError()).c_str());
+				rig.Begin(gp.seq, tex);
+				const bool applied = module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, out);
+				rig.End(gp.seq);
+				Assert::IsTrue(applied, Wide(module.LastError()).c_str());
 				Model::FrameIn in;
 				in.luma = frames[static_cast<size_t>(t)];
 				in.seq = static_cast<uint64_t>(t);
