@@ -1244,7 +1244,10 @@ float rs_slope(float y)
 		// A new size recreated the textures: nothing previous to read (audit 2026-10-16: an
 		// undefined texture was mixed in for one frame after a resize / zoom / crop change).
 		if (w != residualW || h != residualH)
+		{
 			readIndex = -1;
+			residualPrevValid = false;   // GEM-W1B V3 MUST-2: both textures were recreated; a later repeat has no previous
+		}
 		residualW = w;
 		residualH = h;
 		const float prevValid = stabilise && readIndex >= 0 ? 1.0f : 0.0f;
