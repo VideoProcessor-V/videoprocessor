@@ -523,9 +523,18 @@ namespace Vpv
 					return false;
 				if (b.memo && !b.memo->OnRenderThread())
 				{
-					const VpSkeleton::AcquireResult a = b.memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
-					return a.Ok() && a.cpu != nullptr && a.cpuBytes == VpLaneProducts::kStatsBytes &&
-						VpLaneProducts::ReadSourceStats(a.cpu, a.cpuBytes, out);
+					// MUST-9: a PEEK of the lane's published bytes through its lease (the binder's copyPublished pattern,
+					// SkeletonAcquireLane.h), never the memo's Acquire: a miss here is a normal look-ahead miss, and an Acquire would set
+					// the memo's lastCause_ (a false "skeleton acquire p4_source_stats" Fallbacks entry) and count a failure.
+					const VpSkeleton::LaneLease lease = b.lane.Lease(VpSkeleton::kP4SourceStats);
+					if (!lease.Valid() || lease.bytes == nullptr || lease.bytes->Bytes() != VpLaneProducts::kStatsBytes)
+						return false;
+					bool decoded = false;
+					const VpSkeleton::PublishedRead pr = VpSkeleton::ReadPublishedBytes(lease, VpSkeleton::kP4SourceStats, seq,
+						VpLaneProducts::kStatsBytes, [out, &decoded](const uint8_t* bytes, size_t n) {
+							decoded = VpLaneProducts::ReadSourceStats(bytes, n, out);
+						});
+					return pr == VpSkeleton::PublishedRead::Copied && decoded;
 				}
 				const AnalysisLane::ProductRead r = b.lane.ReadOf(VpSkeleton::kP4SourceStats, seq);
 				return r.cpu != nullptr && VpLaneProducts::ReadSourceStats(r.cpu, r.cpuBytes, out);
