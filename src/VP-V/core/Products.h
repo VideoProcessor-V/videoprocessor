@@ -1091,6 +1091,7 @@ inline void AppendGrainLevelProduct(std::vector<ProductDecl>& decls)
                          Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
     p.sourceFrame = true;
     AddInput(p, kP10GrainSplit, 0);
+    AddInput(p, kP13SourceRing, 0);   // the frame's luma facts (size, bit encoding) that key the P10 variant it acquires
     AddTerm(p, 4, 16);   // one RGBA32F texel per 16-px block
     p.refRenderMs = 0.05f; // placeholder until the T5 idle-GPU timing measures it
     PadReservedUntil(decls, kP10gGrainLevel);
