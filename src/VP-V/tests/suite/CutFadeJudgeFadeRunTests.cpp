@@ -113,7 +113,7 @@ namespace CutFadeJudgeFadeRunTestsNs
 	TEST_CLASS(CutFadeJudgeFadeRunTests)
 	{
 	public:
-		TEST_METHOD(UnitVersionIsTwo)
+		TEST_METHOD(UnitVersionIsThree)
 		{
 			Assert::AreEqual(3u, VpUnit::CutFadeJudge::kUnitVersion, L"the multi-frame fade law is a registered law change (3, after U7-ACCURACY's 2)");
 		}
