@@ -71,6 +71,7 @@ namespace CameraLink
 		if (m_worker)
 			m_worker->Stop();
 		m_worker.reset();
+		m_smoother.reset();
 		m_producer.reset();
 		m_pool.reset();
 		m_ring.reset();
@@ -133,6 +134,8 @@ namespace CameraLink
 		m_pool.reset(new CameraRecordPool((std::max)((std::max)(static_cast<size_t>(ring), m_settings.poolRing), ahead ? kAheadPool : size_t(0))));
 		m_sealedMark.assign(ring, ~uint64_t(0));
 		m_producer.reset(new CameraFitProducer(m_settings.fit, &m_counters));
+		if (m_settings.p9Wanted)
+			m_smoother.reset(new CameraSmoother(m_settings.laneDepthZero ? 0 : m_settings.p9LaneLead));
 		CameraFitEnv env;
 		env.lease = first;
 		env.leaseSource = std::move(source);
@@ -657,6 +660,8 @@ namespace CameraLink
 			if (r.status == AssembleStatus::NotFittedSlip || r.status == AssembleStatus::NotFittedAncient)
 				m_events.fetch_or(1u << kEvSlip, std::memory_order_relaxed);
 		}
+		if (r.record && m_smoother)
+			m_smoother->Push(r.record);
 		if (job.ahead)
 		{
 			// AHEAD FIT: where the result went. On time: the render thread's on-time seal reads the mark at the frame's Begin.
@@ -734,6 +739,8 @@ namespace CameraLink
 			const std::string why = "camera: ahead fit has no on-time seal target (" + std::string(kAheadNoTargetText) + ")";
 			d.push_back(!usable ? FallbackCatalog::Engaged(kIdAheadNoTarget, why) : FallbackCatalog::Released(kIdAheadNoTarget));
 		}
+		if (m_settings.p9Wanted && m_smoother)
+			d.push_back(SmootherDecision(m_smoother->EffectiveLead(), f.graphHasP7));
 		return d;
 	}
 
@@ -743,6 +750,8 @@ namespace CameraLink
 			return;
 		lines.push_back(StatusLine(m_counters));
 		lines.push_back(PhotometricStatusLine(m_counters));
+		if (m_settings.p9Wanted && m_smoother)
+			lines.push_back(m_smoother->StatusLine());
 		if (m_settings.aheadFit)
 		{
 			lines.push_back(m_settings.deterministic ? std::string(kAheadDeterministicText)
@@ -853,6 +862,30 @@ namespace CameraLink
 	{
 		PoolEntry e;
 		return m_pool && m_pool->Get(seq, e) ? e.record : nullptr;
+	}
+
+	void CameraLinkCore::UpdateP9Lead(int laneLead)
+	{
+		m_settings.p9LaneLead = laneLead;
+		if (m_smoother)
+			m_smoother->SetLaneLead(m_settings.laneDepthZero ? 0 : laneLead);
+	}
+
+	std::shared_ptr<const CameraModel::CameraMotion> CameraLinkCore::SmoothedRecord(uint64_t seq, bool* smoothedOut) const
+	{
+		if (smoothedOut)
+			*smoothedOut = false;
+		if (m_smoother)
+		{
+			SmoothQueryResult q;
+			if (m_smoother->Query(seq, q) && q.record)
+			{
+				if (smoothedOut)
+					*smoothedOut = q.smoothed;
+				return q.record;
+			}
+		}
+		return CausalRecord(seq);
 	}
 
 	bool CameraLinkCore::FitEntryOf(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion>& rec) const

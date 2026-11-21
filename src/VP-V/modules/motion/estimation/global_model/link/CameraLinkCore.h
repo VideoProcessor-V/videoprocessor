@@ -17,6 +17,7 @@
 #include "AheadFlow.h"
 #include "CameraFitWorker.h"
 #include "CameraLink.h"
+#include "CameraSmoother.h"
 #include "FieldReadbackRing.h"
 #include "GuidanceTimers.h"
 #include "PairAssembly.h"
@@ -85,6 +86,10 @@ namespace CameraLink
 		// on time into the on-time target (AttachOnTime) when it finished before the frame's seal, else into the lag bridge. Ignored in
 		// deterministic mode (one path: the bridge; shown). Off: nothing below exists or runs.
 		bool aheadFit = false;
+		// K9-1 (P9 CameraSmoother, default OFF): smooths P7 over N +- min(kMaxCameraLead, p9LaneLead) where p9LaneLead comes from
+		// the measured queue / lane depth. Off = no smoother object exists and nothing runs.
+		bool p9Wanted = false;
+		int p9LaneLead = 0;
 	};
 
 	// AHEAD FIT: the render-thread source of the ahead pair of `seq` (IVectorEngine::FlowOf + CopyAhead, copied at once).
@@ -192,10 +197,14 @@ namespace CameraLink
 		CameraFitProducer* Producer() { return m_producer.get(); }
 		CameraFitWorker* Worker() { return m_worker.get(); }
 		CameraRecordPool* Pool() { return m_pool.get(); }
+		CameraSmoother* Smoother() { return m_smoother.get(); }
+		// Updates the P9 smoother's lead from the measured queue / lane depth (no-op when P9 is off).
+		void UpdateP9Lead(int laneLead);
 
 		// ---- ICameraLink ----
 		std::shared_ptr<const CameraModel::CameraMotion> SealedRecord(uint64_t seq) const override;
 		std::shared_ptr<const CameraModel::CameraMotion> CausalRecord(uint64_t seq) const override;
+		std::shared_ptr<const CameraModel::CameraMotion> SmoothedRecord(uint64_t seq, bool* smoothedOut = nullptr) const override;
 		std::shared_ptr<const CameraModel::CameraMotion> OnTimeRecord(uint64_t seq, OnTimeCheck check, OnTimeMiss& why) const override;
 		SealVerdict OnTimeSealVerdict(uint64_t seq) const override;
 		bool FitEntryOf(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion>& rec) const override;
@@ -239,6 +248,7 @@ namespace CameraLink
 		std::unique_ptr<CameraRecordPool> m_pool;
 		std::unique_ptr<CameraFitProducer> m_producer;
 		std::unique_ptr<CameraFitWorker> m_worker;
+		std::unique_ptr<CameraSmoother> m_smoother;
 		std::unique_ptr<FieldReadbackRing> m_ring;
 		pl_gpu m_gpu = nullptr;
 		pl_log m_log = nullptr;

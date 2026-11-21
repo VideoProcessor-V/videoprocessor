@@ -59,15 +59,18 @@ namespace CameraLink
 
 		// Builds the graph for a source of width x height (the dimensions only size the declarations; nothing is allocated per pixel).
 		// `labels` adds the P8 consumer. `indicator` is the stamp source the leases carry (kept alive by them; null = the holders use the
-		// stamp they were given). False and Error() when the registry refuses the graph (shown by the caller). Every call (and Clear)
+		// stamp they were given). `smoothed` adds a P9 consumer (kP9CameraSmoothed, K9-1) when `laneLead` > 0 (default false: identical to
+		// before). False and Error() when the registry refuses the graph (shown by the caller). Every call (and Clear)
 		// starts a new lease generation: a holder of the previous state rebinds and refuses work stamped with the old one.
-		bool Build(uint32_t width, uint32_t height, bool labels, std::shared_ptr<VpIndicator::Indicator> indicator = nullptr);
+		bool Build(uint32_t width, uint32_t height, bool labels, std::shared_ptr<VpIndicator::Indicator> indicator = nullptr,
+			bool smoothed = false, uint8_t laneLead = 2);
 		void Clear();
 		bool Built() const { return m_state != nullptr; }
 		const std::string& Error() const { return m_error; }
 
-		// The current lease (any thread). bytesProduct = kP7CameraFit adds the P7 bytes ring; any other id none. Without a state: an
-		// invalid lease carrying the generation counter (LaneLeaseNewer orders it against the states, as AnalysisLane::Lease does).
+		// The current lease (any thread). bytesProduct = kP7CameraFit / kCameraFitField / kP9CameraSmoothed adds that product's bytes ring;
+		// any other id none. Without a state: an invalid lease carrying the generation counter (LaneLeaseNewer orders it against the states,
+		// as AnalysisLane::Lease does).
 		VpSkeleton::LaneLease Lease(VpSkeleton::ProductId bytesProduct) const;
 		// A lease source bound to this bridge (the bridge outlives every holder of the source; the leases keep the state alive).
 		VpSkeleton::LaneLeaseSource Source(VpSkeleton::ProductId bytesProduct) const;
@@ -76,7 +79,10 @@ namespace CameraLink
 		// Render thread / tests: the current state's objects (null without one).
 		VpSkeleton::SlotTable* Table() const { return m_state ? m_state->table.get() : nullptr; }
 		VpSkeleton::CpuBuffers* P7Bytes() const { return m_state ? m_state->p7Bytes.get() : nullptr; }
+		VpSkeleton::CpuBuffers* P9Bytes() const { return m_state ? m_state->p9Bytes.get() : nullptr; }
 		bool HasLabels() const { return m_labels; }
+		bool HasSmoothed() const { return m_smoothed; }
+		int EffectiveCameraLead() const { return m_effectiveLead; }
 		// Ring slots and live buffers of P8 (the texture mirror the label producer is sized by); 0 without P8.
 		int LabelRing() const;
 		int LabelLive() const;
@@ -108,6 +114,7 @@ namespace CameraLink
 			std::unique_ptr<VpSkeleton::SlotTable> table;
 			std::unique_ptr<VpSkeleton::CpuBuffers> p7Bytes;
 			std::unique_ptr<VpSkeleton::CpuBuffers> fieldBytes;   // the storage of the fit field product (kCameraFitField); null without that node
+			std::unique_ptr<VpSkeleton::CpuBuffers> p9Bytes;      // K9-1: the storage of kP9CameraSmoothed (256 B/slot); null without P9
 			std::shared_ptr<VpIndicator::Indicator> indicator;
 			uint64_t generation = 0;
 		};
@@ -121,6 +128,8 @@ namespace CameraLink
 		std::string m_error;
 		uint32_t m_width = 0, m_height = 0;
 		bool m_labels = false;
+		bool m_smoothed = false;
+		int m_effectiveLead = 0;
 		bool m_started = false;
 		uint64_t m_lastSeq = 0;
 		uint64_t m_nextToSeal = 0;
