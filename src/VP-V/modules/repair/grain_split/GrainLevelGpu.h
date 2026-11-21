@@ -1,0 +1,369 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
+#pragma once
+
+// repair.grain_split: the OWNER FILL of kP10gGrainLevel ("grain.level", P10g, refs/120 T3; coreplan-C10-15b-PC-grain.md:19), GPU,
+// per-frame memo, get-or-compute-and-publish (SkeletonAcquire.h G3). Header-only, C++14.
+//
+// What it publishes: one RGBA32F texel per 16-px block of the source luma (the declared size rule, AppendGrainLevelProduct):
+//   x = N_b    the block grain level (noise variance, codes^2 of D; the P10 split's blocks.x),
+//   y = g      the temporal coherence gate (0: no temporal evidence),
+//   z = f'^2 N the retained grain share (block mean of the Wiener share squared, f' = f + g (1 - f) = f while g = 0, times N_b),
+//   w = rho1   the lag-1 temporal correlation (-1 = not measured).
+// Until the temporal passes are costed (GrainLevel.h: no GPU kernel without a measured 4K cost; lead14\design-grain-chain-cost.md
+// rows are ESTIMATES for every temporal step) this fill runs the SINGLE-FRAME law, which equals the unit-4 law exactly
+// (GrainLevel.h: "Fallback is the unit-4 law bit for bit"; blocks.N is already N_unit4). It says so visibly: a status line and a
+// Fallbacks line "grain_level_temporal" once a reader has used it (never log-only).
+//
+// Inputs (the producer chain, never a private source): the frame's luma facts from P13 (SourcePlanes::FactsOf: size, bit
+// encoding) and the P10 grain split of the FULL luma at scale 1.0 through the memo's variant Acquire (GrainSplitVariantOwner.h),
+// read ONLY through the unit's one read accessor (ViewGlsl / BindView). Device, dispatch and the output texture come ONLY from
+// OwnerFillRequest::gpu (L-CORE R2): nothing here holds a device or a texture across frames.
+//
+// Reserve: DERIVED (rule 6): the declared size rule at the LARGEST source luma size the Entrance image shows on a live host
+// (as EdgeMapFill.h); the module re-registers the fill when that size changes. The nested P10 variant has its own reserve
+// (VariantOwner::ReserveFor).
+//
+// Declines (visible, OwnerDeclined with the cause): no GPU context, no source facts, an RGB source (no luma plane), the P10
+// variant refused or not fitting, the texture refused / over the reserve, shader or dispatch failed.
+//
+// The module also registers the P10 variant owner's fill in production (it had no production registration: every variant
+// Acquire was a visible NoOwnerFill). Both registrations go through the skeleton's external demand, so nothing is registered
+// while the skeleton is off, and nothing in the Original pathway.
+#include <VP-V/core/Products.h>
+#include <VP-V/core/SkeletonAcquire.h>
+#include <VP-V/core/hub/ExtensionHub.h>
+#include <VP-V/core/hub/HostSlots.h>
+#include <VP-V/modules/control/skeleton/SkeletonFacts.h>
+#include <VP-V/modules/input/capture/SourcePlanes.h>
+#include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
+#include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
+#include <VP-V/modules/repair/grain_split/GrainSplitVariantOwner.h>
+
+#include <libplacebo/colorspace.h>
+#include <libplacebo/dispatch.h>
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace GrainSplit
+{
+	namespace LevelGpu
+	{
+		namespace RE = RendererExtension;
+		constexpr const char* kOwnerUnit = Gpu::kOwnerUnit;                // the catalog's kP10gGrainLevel owner (ProductCatalog.h)
+		constexpr const char* kFallbackId = "grain_level_temporal";        // the Fallbacks id (refs/120 fallback visibility)
+		constexpr int kGroupEdge = 16;                                       // workgroup edge: one workgroup per block
+
+		// Reserve per fill, DERIVED from the source (rule 6): kP10gGrainLevel's DECLARED size rule at the source luma size. 0 = no size.
+		inline uint64_t ReserveBytes(VpSkeleton::Dims luma)
+		{
+			if (luma.width == 0 || luma.height == 0)
+				return 0;
+			std::vector<VpSkeleton::ProductDecl> decls;
+			VpSkeleton::AppendGrainLevelProduct(decls);
+			return decls.size() > size_t(VpSkeleton::kP10gGrainLevel) && decls[VpSkeleton::kP10gGrainLevel].id == VpSkeleton::kP10gGrainLevel
+				? VpSkeleton::BytesOf(decls[VpSkeleton::kP10gGrainLevel].size, luma) : uint64_t(0);
+		}
+
+		// The signal's colour depth from the frame's bit encoding (the P10 variant key's code-unit axis): color_depth, else
+		// sample_depth, else 10 (the house default of VariantFor).
+		inline int ColorDepthOf(const pl_bit_encoding& bits)
+		{
+			if (bits.color_depth > 0)
+				return bits.color_depth;
+			if (bits.sample_depth > 0)
+				return bits.sample_depth;
+			return 10;
+		}
+
+		// What the module shows (status / Fallbacks): fills that published, fills that declined, the last decline.
+		struct Counters
+		{
+			std::atomic<uint64_t> fills{ 0 };
+			std::atomic<uint64_t> declines{ 0 };
+			mutable std::mutex mutex;
+			std::string lastDecline;
+			std::string LastDecline() const { std::lock_guard<std::mutex> g(mutex); return lastDecline; }
+		};
+
+		// The pass: one workgroup per block. Each invocation sums f^2 of its pixels of the block (gs_fetch .z = the Wiener share),
+		// the group reduces in shared memory and invocation 0 writes the block texel. GV_B / GV_W / GV_H are the frame's block edge
+		// and size (defines, so the text is fixed per geometry).
+		inline std::string HeaderGlsl(const Gpu::Frame& f)
+		{
+			return Gpu::ViewGlsl(f.storage, f.codeUnit) + "#define GV_B " + std::to_string(f.B) + "\n#define GV_W " + std::to_string(f.w) +
+				"\n#define GV_H " + std::to_string(f.h) + "\nshared vec2 gv_sum[256];\n";
+		}
+		constexpr const char* kBodyGlsl = R"GLSL(
+ivec2 gv_blk = ivec2(gl_WorkGroupID.xy);
+ivec2 gv_org = gv_blk * GV_B;
+uint gv_li = gl_LocalInvocationIndex;
+vec2 gv_acc = vec2(0.0);
+for (int y = int(gl_LocalInvocationID.y); y < GV_B; y += 16)
+    for (int x = int(gl_LocalInvocationID.x); x < GV_B; x += 16)
+    {
+        ivec2 p = gv_org + ivec2(x, y);
+        if (p.x < GV_W && p.y < GV_H)
+        {
+            float f = gs_fetch(p).z;
+            gv_acc += vec2(f * f, 1.0);
+        }
+    }
+gv_sum[gv_li] = gv_acc;
+barrier();
+for (uint s = 128u; s > 0u; s >>= 1u)
+{
+    if (gv_li < s)
+        gv_sum[gv_li] += gv_sum[gv_li + s];
+    barrier();
+}
+if (gv_li == 0u)
+{
+    vec2 t = gv_sum[0];
+    float n = gs_blocks(gv_blk).x;
+    float mf2 = t.y > 0.0 ? t.x / t.y : 0.0;
+    imageStore(gv_out, gv_blk, vec4(n, 0.0, mf2 * n, -1.0));
+}
+)GLSL";
+
+		inline bool Decline(VpSkeleton::OwnerFillOutput& out, Counters* c, const std::string& why)
+		{
+			out.declineReason = "grain level: " + why;
+			if (c)
+			{
+				c->declines.fetch_add(1, std::memory_order_relaxed);
+				std::lock_guard<std::mutex> g(c->mutex);
+				c->lastDecline = out.declineReason;
+			}
+			return false;
+		}
+
+		inline VpSkeleton::OwnerFill MakeOwnerFill(uint64_t reserveBytes, std::shared_ptr<Counters> counters)
+		{
+			VpSkeleton::OwnerFill f;
+			f.variantAxes = 0;
+			f.reserveBytes = reserveBytes;
+			f.frameScoped = true;
+			f.jobClass = VpSkeleton::JobClass::Derived;   // LaneSpareWork.h StaticClassOf: Derived, never a job
+			f.fill = [counters](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo& memo, VpSkeleton::OwnerFillOutput& out) {
+				Counters* c = counters.get();
+				if (req.gpu == nullptr || req.gpu->Gpu() == nullptr || req.gpu->Dispatch() == nullptr)
+					return Decline(out, c, "no GPU context");
+				// The frame's luma facts (size, bit encoding) from P13: the same plane the P10 variant fill splits.
+				const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireForm::Gpu);
+				const Vpv::Capture::SourcePlaneSet* facts = Vpv::Capture::SourcePlanes::FactsOf(src);
+				if (!src.Ok() || facts == nullptr || src.gpu.resource == nullptr)
+					return Decline(out, c, "no source plane for the frame (P13: " + memo.LastCause(VpSkeleton::kP13SourceRing) + ")");
+				if (facts->rgb)
+					return Decline(out, c, "RGB source (no luma plane to split)");
+				const pl_tex plane = static_cast<pl_tex>(src.gpu.resource);
+				const int w = plane->params.w, h = plane->params.h;
+				const int depth = ColorDepthOf(facts->repr.bits);
+				const double cu = VpvGpu::CodeUnit(plane, facts->repr.bits, depth);
+				const int B = Gpu::BlockFor(1.0);
+				// The P10 split of this frame's full luma at scale 1.0 (variant Acquire: the owner computes it once per frame and key).
+				const VpSkeleton::AcquireResult split = memo.Acquire(VpSkeleton::kP10GrainSplit, req.seq, VpSkeleton::AcquireForm::Gpu,
+					Gpu::VariantFor(w, h, 1.0, depth));
+				if (!split.Ok())
+					return Decline(out, c, std::string("grain split unavailable: ") + VpSkeleton::Token(split.cause));
+				const Gpu::Frame* gs = Gpu::FrameOf(split);
+				if (Gpu::CheckFit(gs, w, h, B, 1.0, cu, 0, req.seq) != Gpu::FitResult::Fits)
+					return Decline(out, c, "the grain split variant does not fit the frame's luma");
+				VpSkeleton::TexShape shape;
+				shape.w = uint32_t(gs->bw);
+				shape.h = uint32_t(gs->bh);
+				shape.fmt = VpSkeleton::TexFormat::RGBA32F;
+				std::string why;
+				if (!req.gpu->Allocate(shape, out.gpu, why))
+					return Decline(out, c, why);
+				const pl_tex dst = static_cast<pl_tex>(out.gpu.resource);
+				std::vector<pl_shader_desc> desc;
+				Gpu::BindView(*gs, desc);   // THE ONE READ ACCESSOR's descriptors
+				desc.push_back(VpvGpu::Storage("gv_out", dst));
+				const std::string header = HeaderGlsl(*gs);
+				const size_t shmem = size_t(kGroupEdge) * size_t(kGroupEdge) * 2u * sizeof(float);
+				if (!VpvGpu::Pass(static_cast<pl_dispatch>(req.gpu->Dispatch()), "VP-V grain level (single-frame)", header, kBodyGlsl,
+						desc.data(), int(desc.size()), nullptr, 0, gs->bw, gs->bh, shmem, kGroupEdge, kGroupEdge))
+					return Decline(out, c, "shader rejected or dispatch failed");
+				c->fills.fetch_add(1, std::memory_order_relaxed);
+				return true;
+			};
+			return f;
+		}
+
+		// The status texts (pure: tested on the CPU). Lines: always once registered. Fallbacks: only once a reader has had a fill
+		// (the single-frame law is then really in use).
+		inline std::string StatusLine(bool registered, uint64_t fills, uint64_t declines, const std::string& lastDecline)
+		{
+			if (!registered)
+				return "grain level (P10g): no owner fill registered (no source size yet, or the skeleton is off)";
+			std::string s = "grain level (P10g): single-frame law (unit-4; temporal passes not built: no measured 4K cost); fills " +
+				std::to_string(fills) + ", declines " + std::to_string(declines);
+			if (!lastDecline.empty())
+				s += "; last decline: " + lastDecline;
+			return s;
+		}
+		inline std::string FallbackLine(uint64_t fills)
+		{
+			if (fills == 0)
+				return std::string();
+			return std::string(kFallbackId) + ": grain level runs the single-frame law (temporal grain passes not built yet)";
+		}
+
+		// Registers, through the skeleton found by the hub (tests pass their own demand): the P10 variant owner's fill (once; its
+		// reserve is per variant) and the P10g fill with a reserve derived from the LARGEST source luma size over the live hosts,
+		// observed at Entrance; the P10g fill is re-registered only when that size changes (as EdgeMapModule). A host is forgotten at
+		// GpuReleased / Shutdown. Cost per frame: one short lock and a lookup in at most sixteen entries.
+		class GrainLevelModule : public Hub::ISkeletonModule
+		{
+		public:
+			GrainLevelModule() : counters_(std::make_shared<Counters>()) {}
+			const char* Name() const override { return "repair.grain_split.grain_level"; }
+			void OnLifecycle(RE::LifecycleFacts& f) override
+			{
+				if (f.host && (f.kind == RE::Lifecycle::GpuReleased || f.kind == RE::Lifecycle::Shutdown))
+					Forget(f.host);
+			}
+			bool OnFrame(RE::FrameContext& c) override
+			{
+				if (c.phase != RE::FramePhase::Entrance || c.image == nullptr || c.image->num_planes < 1
+					|| c.image->planes[0].texture == nullptr || Hub::ExtensionHub::Instance().OriginalPathway(c.host))
+					return false;
+				VpSkeleton::Dims luma;
+				luma.width = uint32_t(c.image->planes[0].texture->params.w);
+				luma.height = uint32_t(c.image->planes[0].texture->params.h);
+				Observe(c.host, luma);
+				return false;
+			}
+			void OnStatus(const RE::Context&, RE::StatusKind kind, std::vector<std::string>& lines, const char*, const char*) override
+			{
+				const uint64_t fills = counters_->fills.load(std::memory_order_relaxed);
+				if (kind == RE::StatusKind::Lines)
+					lines.push_back(StatusLine(Registered(), fills, counters_->declines.load(std::memory_order_relaxed), counters_->LastDecline()));
+				else if (kind == RE::StatusKind::Fallbacks)
+				{
+					const std::string f = FallbackLine(fills);
+					if (!f.empty())
+						lines.push_back(f);
+				}
+			}
+			// Records `host`'s source luma size and (re-)registers when the derived reserve changes. True = the P10g fill is
+			// registered with the current reserve.
+			bool Observe(const void* host, VpSkeleton::Dims luma, Skeleton::IExternalDemand* demand = nullptr)
+			{
+				std::lock_guard<std::mutex> g(mutex_);
+				bool found = false;
+				for (auto& h : hosts_)
+				{
+					if (h.host == host)
+					{
+						if (h.luma.width != luma.width || h.luma.height != luma.height)
+						{
+							h.luma = luma;
+							h.bytes = ReserveBytes(luma);
+						}
+						found = true;
+						break;
+					}
+				}
+				if (!found && host != nullptr && hosts_.size() < kMaxHosts)
+				{
+					HostSize h;
+					h.host = host;
+					h.luma = luma;
+					h.bytes = ReserveBytes(luma);
+					hosts_.push_back(h);
+				}
+				return UpdateLocked(demand);
+			}
+			void Forget(const void* host, Skeleton::IExternalDemand* demand = nullptr)
+			{
+				std::lock_guard<std::mutex> g(mutex_);
+				for (size_t i = 0; i < hosts_.size(); ++i)
+				{
+					if (hosts_[i].host == host)
+					{
+						hosts_.erase(hosts_.begin() + std::ptrdiff_t(i));
+						break;
+					}
+				}
+				UpdateLocked(demand);
+			}
+			bool Registered() const { return registered_.load(std::memory_order_acquire); }
+			bool SplitOwnerRegistered() const { return splitRegistered_.load(std::memory_order_acquire); }
+			uint64_t RegisteredReserveBytes() const
+			{
+				std::lock_guard<std::mutex> g(mutex_);
+				return registered_.load(std::memory_order_acquire) ? reserve_ : uint64_t(0);
+			}
+			const Counters& Stats() const { return *counters_; }
+		private:
+			static constexpr size_t kMaxHosts = 16;   // the skeleton's renderer table (HostSlots)
+			struct HostSize
+			{
+				const void* host = nullptr;
+				VpSkeleton::Dims luma;
+				uint64_t bytes = 0;   // ReserveBytes(luma)
+			};
+			bool UpdateLocked(Skeleton::IExternalDemand* demand)
+			{
+				uint64_t want = 0;
+				for (const HostSize& h : hosts_)
+					if (h.bytes > want)
+						want = h.bytes;
+				const bool ok = registered_.load(std::memory_order_acquire);
+				const bool levelDone = (ok && want == reserve_) || want == tried_;
+				if (want == 0 || (levelDone && splitTried_))
+					return ok;
+				if (demand == nullptr)
+					demand = static_cast<Skeleton::IExternalDemand*>(Hub::ExtensionHub::Instance().Query(Skeleton::kExternalDemandQueryId));
+				if (demand == nullptr)
+					return ok;   // no skeleton yet: retried at the next Entrance
+				if (!splitTried_)
+				{
+					splitTried_ = true;   // the P10 variant owner: registered once (its reserve is per variant); a refusal is not retried
+					const VpSkeleton::SkeletonMemo::Registration rs =
+						demand->RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, Gpu::kOwnerUnit, splitOwner_.MakeOwnerFill());
+					splitRegistered_.store(rs == VpSkeleton::SkeletonMemo::Registration::Registered, std::memory_order_release);
+				}
+				if (levelDone)
+					return ok;
+				tried_ = want;   // a refused registration is retried at the next size change, not every frame
+				if (ok)
+					demand->UnregisterOwnerFill(VpSkeleton::kP10gGrainLevel, VpSkeleton::AcquireForm::Gpu, kOwnerUnit);
+				const VpSkeleton::SkeletonMemo::Registration r =
+					demand->RegisterOwnerFill(VpSkeleton::kP10gGrainLevel, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, MakeOwnerFill(want, counters_));
+				const bool now = r == VpSkeleton::SkeletonMemo::Registration::Registered;
+				reserve_ = now ? want : uint64_t(0);
+				registered_.store(now, std::memory_order_release);
+				return now;
+			}
+			mutable std::mutex mutex_;
+			std::vector<HostSize> hosts_;
+			Gpu::VariantOwner splitOwner_;   // the P10 variant owner (outlives its registration: the module lives for the process)
+			std::shared_ptr<Counters> counters_;
+			uint64_t reserve_ = 0;
+			uint64_t tried_ = 0;
+			bool splitTried_ = false;
+			std::atomic<bool> registered_{ false };
+			std::atomic<bool> splitRegistered_{ false };
+		};
+
+		// Start-up only (HubBootstrap), after the skeleton module and the P13 source planes; idempotent.
+		inline void RegisterGrainLevelModule()
+		{
+			static bool registered = false;
+			if (registered)
+				return;
+			registered = true;
+			Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Hub::ISkeletonModule>(new GrainLevelModule()));
+		}
+	}
+}
