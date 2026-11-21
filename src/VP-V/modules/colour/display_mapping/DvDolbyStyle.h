@@ -116,13 +116,15 @@ namespace DvDolbyStyle
 	inline Curve Build(double sMin, double sAvg, double sMax, double tMin, double tMax)
 	{
 		Curve c;
-		if (!(sMax > sMin) || !(tMax > tMin))
-			return c;   // nothing usable: identity
 		// GEM-006 (Gemini colour-dv-hdr SHOULD-1, as written): a dark scene (sMax < tMax) is never expanded up to the
 		// target peak when tMin > sMin fails the fit test: the upper anchor is the lower of the two peaks. libplacebo
 		// 7.360.1's pl_tone_map_params_infer already limits output_max to input_max for a function without map_inverse
 		// (this one), so MapLut is bit-identical; direct callers (ForDm, DmCurve) get the clamp.
+		// Gate G1 MUST-4: clamped BEFORE the usability (degeneracy) test, as Gemini wrote: a scene whose peak is at or
+		// below the display black (effTMax <= tMin) is "nothing usable" (identity), never a decreasing chord.
 		const double effTMax = (std::min)(tMax, sMax);
+		if (!(sMax > sMin) || !(effTMax > tMin))
+			return c;   // nothing usable: identity
 		c.sMin = sMin; c.sMax = sMax; c.tMin = tMin; c.tMax = effTMax;
 		if (sMax <= effTMax + 1e-6 && sMin >= tMin - 1e-5)   // PQ(0 nits) is 7e-7, not 0: a tolerance
 		{
