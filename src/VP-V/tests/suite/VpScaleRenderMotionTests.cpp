@@ -173,15 +173,18 @@ namespace VpScaleRenderMotionTests
 			// The repo's sample configuration and the deployed-style fixture: the form is kept (unified stays unified),
 			// the renderer's own reader accepts the result whenever it accepts the original, and the keys sit in
 			// [vprenderer] (the tool refuses to render, rc 8, when this ever fails).
+			int checked = 0, validOriginals = 0;
 			for (const char* rel : { "VideoProcessor.cfg", "test-fixtures\\deployed-VideoProcessor-20260807-current.cfg",
 				"docs\\examples\\VideoProcessorRenderer.unified.proposed.cfg" })
 			{
 				const std::string path = RepoFile(rel);
 				std::ifstream in(path, std::ios::binary);
 				if (!in) { Logger::WriteMessage((std::string("absent: ") + rel + "\n").c_str()); continue; }
+				++checked;
 				const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 				std::string errOriginal, errMotion;
 				const bool okOriginal = VpScaleRenderCore::ValidateRendererConfig(path, errOriginal);
+				if (okOriginal) ++validOriginals;
 				Seq::SectionPlan plan;
 				const std::string out = Seq::WithMotionOverrides(text, &plan);
 				const std::string tmp = WriteTemp("sample.cfg", out);
@@ -197,6 +200,7 @@ namespace VpScaleRenderMotionTests
 				std::string v;   // the renderer's own display-key lookup (RendererConfigView)
 				Assert::IsTrue(RendererConfigView(b).TryGetDisplayString("occlusion_mask", v) && v == "on", L"the override is where the renderer reads it");
 			}
+			Assert::IsTrue(checked > 0 && validOriginals > 0, L"expected at least one present and valid repo config fixture");
 		}
 
 		TEST_METHOD(MotionOverridesKeepALegacyFileLegacy)
@@ -215,7 +219,7 @@ namespace VpScaleRenderMotionTests
 			Assert::IsTrue(plan.added == "vprenderer" && unifiedBare.find("[vprenderer]\nocclusion_mask: on") != std::string::npos);
 			const std::string legacyExample = RepoFile("docs\\examples\\VideoProcessorRenderer.legacy.cfg");
 			std::ifstream in(legacyExample, std::ios::binary);
-			if (in)
+			Assert::IsTrue(static_cast<bool>(in), L"committed legacy example docs\\examples\\VideoProcessorRenderer.legacy.cfg must exist");
 			{
 				const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 				const std::string tmp = WriteTemp("legacy.cfg", Seq::WithMotionOverrides(text, &plan));

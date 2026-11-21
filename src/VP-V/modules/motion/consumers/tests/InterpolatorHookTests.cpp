@@ -618,6 +618,22 @@ namespace VideoProcessorTest
 									std::to_wstring(x) + L": " + std::to_wstring(got) + L" for " +
 									std::to_wstring(code(x - sx))).c_str());
 						}
+					// Also verify chroma plane precision (Cb = 32768 constant, Cr = shifted ramp at half width).
+					const std::vector<uint16_t> chroma = DownloadPlane(gpu, out.chroma);
+					const int cw = width / 2, ch = height / 2, csx = sx / 2;
+					for (int y = 0; y < ch; ++y)
+						for (int x = dx / 2 + 2; x < cw - dx / 2 - 2; ++x)
+						{
+							const size_t idx = (static_cast<size_t>(y) * cw + x) * 2;
+							Assert::AreEqual(static_cast<int>(32768), static_cast<int>(chroma[idx]),
+								L"interpolated Cb must stay at 32768");
+							const uint16_t gotCr = chroma[idx + 1];
+							const uint16_t expCr = code(2 * (x - csx));
+							if (std::abs(static_cast<int>(gotCr) - static_cast<int>(expCr)) > 1)
+								Assert::Fail((std::wstring(ramp == 0 ? L"10-bit" : L"PQ") + L" chroma Cr changed at x " +
+									std::to_wstring(x) + L": " + std::to_wstring(gotCr) + L" for " +
+									std::to_wstring(expCr)).c_str());
+						}
 				}
 			}
 			fixture.CaptureLog(nullptr);

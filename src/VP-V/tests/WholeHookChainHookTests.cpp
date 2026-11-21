@@ -188,7 +188,8 @@ namespace VideoProcessorTest
 				for (int i = 0; i < 3; ++i) Assert::IsTrue(pass(), ExtendedRangeGpuProbe::ToWide(std::string(name) + ": failed").c_str());
 				pl_gpu_finish(gpu);
 				const auto start = std::chrono::steady_clock::now();
-				for (int i = 0; i < 20; ++i) pass();
+				for (int i = 0; i < 20; ++i)
+					Assert::IsTrue(pass(), ExtendedRangeGpuProbe::ToWide(std::string(name) + ": failed in timed loop").c_str());
 				pl_gpu_finish(gpu);
 				const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 20.0;
 				char line[160];
@@ -201,12 +202,20 @@ namespace VideoProcessorTest
 			pl_frame out{};
 			rebase.separable = false;
 			timed("re-base 2:1, polar (luma + chroma)", [&] { return rebase.Apply(gpu, dispatch, source, 0.5, out); });
+			Assert::IsTrue(out.planes[0].texture && out.planes[0].texture->params.w == W / 2 && out.planes[0].texture->params.h == H / 2,
+				L"2:1 polar rebase output dimensions");
 			rebase.separable = true;
 			timed("re-base 2:1, polar luma + separable chroma (default)", [&] { return rebase.Apply(gpu, dispatch, source, 0.5, out); });
+			Assert::IsTrue(out.planes[0].texture && out.planes[0].texture->params.w == W / 2 && out.planes[0].texture->params.h == H / 2,
+				L"2:1 separable rebase output dimensions");
 			rebase.SetKernel(KernelInverse::Find("lanczos3"));
 			timed("re-base 2:1, kernel inverse (luma) + separable (chroma)", [&] { return rebase.Apply(gpu, dispatch, source, 0.5, out); });
+			Assert::IsTrue(out.planes[0].texture && out.planes[0].texture->params.w == W / 2 && out.planes[0].texture->params.h == H / 2,
+				L"2:1 kernel-inverse rebase output dimensions");
 			rebase.SetKernel(-1);
 			timed("re-base height only (1D, luma + chroma)", [&] { return rebase.Apply(gpu, dispatch, source, 1.0, 0.5, out); });
+			Assert::IsTrue(out.planes[0].texture && out.planes[0].texture->params.w == W && out.planes[0].texture->params.h == H / 2,
+				L"1D height rebase output dimensions");
 			timed("re-base 1440 (polar luma + separable chroma)", [&] { return rebase.Apply(gpu, dispatch, source, 1440.0 / 2160.0, out); });
 			VpDebander::Params params;
 			params.thresholdCodes = VpDebander::Strength(8.0, 10, 1.0, true);
@@ -233,6 +242,7 @@ namespace VideoProcessorTest
 				seconds += 0.6;   // past its 2 Hz spacing: every call copies
 				return true;
 			});
+			Assert::IsTrue(monitor.Read().notRead.empty(), L"monitor tile copies must succeed without refusal");
 			monitor.Release(gpu);
 			rebase.Release(gpu);
 			deband.Release(gpu);
@@ -612,6 +622,7 @@ namespace VideoProcessorTest
 				++passed;
 			}
 			Logger::WriteMessage((report + std::to_string(passed) + " combinations passed\n").c_str());
+			Assert::IsTrue(passed > 0, L"expected at least one combination to match and pass");
 		}
 
 		TEST_METHOD(WholeHookChainUpscales)
