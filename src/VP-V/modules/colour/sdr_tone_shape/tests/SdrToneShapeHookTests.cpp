@@ -115,6 +115,9 @@ namespace VideoProcessorTest
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_signal_pq", s.pq ? 1.0 : 0.0));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_gamma", s.gamma));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_peak_nits", s.peakNits));
+				// GEM-012: the per-pixel constants are host parameters now (the host pushes them next to dv_peak_nits).
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_peak_pq", DolbyVisionTrims::PqFromNits(s.peakNits)));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_near_black_nits", DolbyVisionTrims::NitsFromPq(DolbyVisionTrims::kNearBlackPq)));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kr", s.kr));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kb", s.kb));
 			};
@@ -291,6 +294,9 @@ namespace VideoProcessorTest
 					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_signal_pq", pq ? 1.0 : 0.0));
 					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_gamma", signal.gamma));
 					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_peak_nits", signal.peakNits));
+					// GEM-012: the per-pixel constants are host parameters now (the host pushes them next to dv_peak_nits).
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_peak_pq", DolbyVisionTrims::PqFromNits(signal.peakNits)));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_near_black_nits", DolbyVisionTrims::NitsFromPq(DolbyVisionTrims::kNearBlackPq)));
 					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kr", signal.kr));
 					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kb", signal.kb));
 					const DvDolbyStyle::IctcpSignal is = DvDolbyStyle::MakeSignal(signal, r, g, b, w);
