@@ -5183,190 +5183,6 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t diagExtrasCounter = 0;          // capture counter of the frame whose extras run
 	uint64_t diagExtrasSequence = 0;         // its accepted source sequence
 
-	// The chain ends (a frame not queued by the plan): the next present is not
-	// predicted. The queue credit is latched (bug hunt 05 M4): a single break keeps it;
-	// it is returned once the chain has stayed broken for CreditLatch::kReleaseSeconds.
-	void RenderAheadBreak()
-	{
-		renderAheadPresenter.Break(RenderAheadNow());   // VPV-HOOK
-	}
-
-	// A new epoch for the gate (bug hunt 05 H3): a new queue generation, a new cadence
-	// or render_ahead switched on. The ladder, its cost windows, the held costs, the
-	// drift-lateness count and the queue credit start again.
-	void ResetRenderAheadGate(const char* why)
-	{
-		const int level = renderAheadPresenter.ResetGate();   // VPV-HOOK
-		DebugLog::Log("Render-ahead gate: reset (%s; was %s)", why,
-			level == 0 ? "full" : "degraded");
-		DiagnosticHistory::Global().RecordDecision("ra-gate-reset", why, level);
-	}
-
-	// The display rate the de-judder extras plan with. The statistics' measured rate
-	// when there is one; else, with render_ahead on only, the open-loop fallback (the
-	// monitor's exact mode, DWM's composition rate, the application's rate, the
-	// whole-hertz mode, a vblank cadence) - the old hold stays with render_ahead off.
-	// Logged when the source or the rate changes.
-	OpenLoopDisplayRate::Choice SelectDejudderDisplayRate()
-	{
-		OpenLoopDisplayRate::Candidates c;
-		int64_t dwmVblank = 0;
-		c.statisticsHz = presentationTelemetry.Snapshot().measuredDisplayHz;
-		if (RenderAheadActive() && !DisplayRefreshBounds::Accepts(c.statisticsHz))
-		{
-			const ULONGLONG now = GetTickCount64();
-			if (openLoopCandidatesTick == 0 || now - openLoopCandidatesTick >= 2000)
-			{
-				openLoopCandidatesTick = now;
-				openLoopDisplayConfigHz = MonitorDisplayConfigHz(videoHwnd);
-				openLoopModeIntegerHz = MonitorRefreshHz(videoHwnd);
-			}
-			DwmCompositionTiming(c.dwmHz, dwmVblank);
-			c.displayConfigHz = openLoopDisplayConfigHz;
-			c.modeIntegerHz = openLoopModeIntegerHz;
-			c.hostHz = renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
-			// The last resort, when nothing else is known: a short vblank sample on the
-			// swapchain's output (blocks about ten refreshes, at most once per 10 s).
-			// Hunt 2 05-renderahead M5 (queue_timing_fixes): a whole-hertz mode alone is
-			// not enough to skip it (the cadence now ranks above that mode).
-			const bool nothing = !DisplayRefreshBounds::Accepts(c.displayConfigHz) &&
-				!DisplayRefreshBounds::Accepts(c.dwmHz) && !DisplayRefreshBounds::Accepts(c.hostHz) &&
-				(activeSettings.queueTimingFixes || !DisplayRefreshBounds::Accepts(c.modeIntegerHz));
-			if (nothing && !(openLoopCadence.Hz() > 0.0) && swapchain &&
-				(openLoopCadenceTick == 0 || now - openLoopCadenceTick >= 10000))
-			{
-				openLoopCadenceTick = now;
-				openLoopCadence.Reset();
-				CComPtr<IDXGISwapChain> native;
-				native.Attach(pl_d3d11_swapchain_unwrap(swapchain));
-				CComPtr<IDXGIOutput> output;
-				LARGE_INTEGER frequency{};
-				if (native && SUCCEEDED(native->GetContainingOutput(&output)) && output &&
-					QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0)
-				{
-					for (size_t i = 0; i <= OpenLoopDisplayRate::VBlankCadence::kMinIntervals; ++i)
-					{
-						if (FAILED(output->WaitForVBlank()))
-							break;
-						openLoopCadence.Add(static_cast<double>(PerformanceCounterNow()) / static_cast<double>(frequency.QuadPart));
-					}
-				}
-			}
-			c.cadenceHz = openLoopCadence.Hz();
-		}
-		OpenLoopDisplayRate::Choice choice = OpenLoopDisplayRate::Select(c, RenderAheadActive(), activeSettings.queueTimingFixes);
-		// Hunt 2 05-renderahead M5 (queue_timing_fixes): in open loop the planned rate is
-		// refined to the display's real refresh, measured from DWM's vblank times, so the
-		// chain does not drift into a lateness correction (a dropped extra) every few
-		// minutes. Only DWM vblanks at the planned rate (the same display) are used.
-		if (activeSettings.queueTimingFixes && choice.openLoop)
-		{
-			LARGE_INTEGER frequency{};
-			if (dwmVblank > 0 && QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0 &&
-				DisplayRefreshBounds::Accepts(c.dwmHz) &&
-				std::abs(c.dwmHz - choice.hz) <= OpenLoopDisplayRate::kDwmAgreesWithMode * choice.hz)
-				openLoopGridRate.Add(static_cast<double>(dwmVblank) / static_cast<double>(frequency.QuadPart), choice.hz);
-			const double refined = openLoopGridRate.Refine(choice.hz);
-			if (refined != choice.hz && !openLoopGridRateLogged)
-			{
-				openLoopGridRateLogged = true;
-				DebugLog::Log("Render-ahead: open loop, display rate refined from DWM vblanks: %.6f Hz (planned %.6f Hz from %s)",
-					refined, choice.hz, OpenLoopDisplayRate::Name(choice.source));
-			}
-			choice.hz = refined;
-		}
-		else
-		{
-			openLoopGridRate.Reset();
-			openLoopGridRateLogged = false;
-		}
-		if (RenderAheadActive() && OpenLoopDisplayRate::Changed(dejudderDisplayRateLogged, choice))
-		{
-			if (choice.openLoop)
-				DebugLog::Log("Render-ahead: open loop, display rate %.3f Hz from %s (no DXGI frame statistics; candidates: "
-					"display config %.3f, DWM %.3f, application %.3f, whole-Hz mode %.0f, vblank cadence %.3f Hz)",
-					choice.hz, OpenLoopDisplayRate::Name(choice.source), c.displayConfigHz, c.dwmHz, c.hostHz,
-					c.modeIntegerHz, c.cadenceHz);
-			else if (choice.source == OpenLoopDisplayRate::Source::Statistics)
-				DebugLog::Log("Render-ahead: closed loop, display rate %.3f Hz from %s", choice.hz,
-					OpenLoopDisplayRate::Name(choice.source));
-			else
-				DebugLog::Log("Render-ahead: no display rate from any source (statistics, display config, DWM, "
-					"application, mode, vblank cadence)");
-			// a = 1 open loop / 0 closed (or none), x = display Hz.
-			DiagnosticHistory::Global().RecordDecision(choice.openLoop ? "ra-open-loop" : "ra-closed-loop",
-				OpenLoopDisplayRate::Name(choice.source), choice.openLoop ? 1 : 0, 0, choice.hz);
-			dejudderDisplayRateLogged = choice;
-		}
-		// Silent-fallbacks batch: open-loop presentation and a de-judder held for want of a display rate.
-		SyncFallback(FallbackCatalog::Presentation(RenderAheadActive() && choice.openLoop, dejudderExtras.dejudderHeldNoDisplayRate,
-			choice.openLoop ? OpenLoopDisplayRate::Name(choice.source) : ""));
-		return choice;
-	}
-
-	// Open loop: the vsync grid from DWM's last vblank, when DWM composes at the
-	// planned rate (relative tolerance) and its vblank is recent; 0 otherwise.
-	static double OpenLoopGridVsync(double displayHz, double now, double qpcFrequency)
-	{
-		double dwmHz = 0.0;
-		int64_t vblank = 0;
-		if (!DwmCompositionTiming(dwmHz, vblank) || vblank <= 0 || !(displayHz > 0.0) ||
-			std::abs(dwmHz - displayHz) > OpenLoopDisplayRate::kDwmAgreesWithMode * displayHz)
-			return 0.0;
-		const double vblankSeconds = static_cast<double>(vblank) / qpcFrequency;
-		return std::abs(now - vblankSeconds) < 1.0 ? vblankSeconds : 0.0;
-	}
-
-	static double RenderAheadNow()
-	{
-		return std::chrono::duration<double>(SteadyClock::now().time_since_epoch()).count();
-	}
-
-	// The extras' and the estimate ahead's GPU times (resolved late, never flushing).
-	void ResolveRenderAheadTimers()
-	{
-		if (renderAheadTimersReady && renderTimingContext)   // CC series C: the Presenter's own ResolveTimers (P6 rest, same body)
-			renderAheadPresenter.ResolveTimers(renderAheadExtraTimer, renderAheadEstimateTimer, renderTimingContext.p, RenderAheadNow(),
-				dejudderExtras.dejudderExtraStats.ditherLastExternal);
-	}
-
-	// The gate per source period (dejudder_gate period): p95 costs over 5 s, the
-	// average and single-frame budgets, the ladder one step at a time (logged).
-	int UpdateRenderAheadGate(double now, double sourcePeriod, double displayPeriod, bool late, int maxExtras)
-	{
-		RenderAhead::PresenterGateFrame frame;   // VPV-HOOK
-		frame.sourcePeriod = sourcePeriod;   // VPV-HOOK
-		frame.displayPeriod = displayPeriod;   // VPV-HOOK
-		frame.utilisation = activeSettings.renderAheadUtilisation;   // VPV-HOOK
-		frame.vpOwnedChain = vpOwnedSwapchain != nullptr;   // VPV-HOOK
-		frame.l1Available = activeSettings.ditherVectorsOwn && DitherVectorsSupported();   // VPV-HOOK
-		frame.ditherMsOwn = dejudderExtras.dejudderExtraStats.ditherMsOwn;   // VPV-HOOK
-		frame.ditherMsExternal = dejudderExtras.dejudderExtraStats.ditherMsExternal;   // VPV-HOOK
-		frame.late = late;   // VPV-HOOK
-		frame.maxExtras = maxExtras;   // VPV-HOOK
-		return RenderAhead::HostSteps::UpdateGateLogged(renderAheadPresenter, now, frame);   // VPV-HOOK CC series C: the log lines moved
-	}
-
-	// Number of extra presents with ids in (from, to].
-	UINT DejudderExtrasBetween(UINT from, UINT to) const
-	{
-		return DejudderPolicy::ExtrasBetween(dejudderExtras.dejudderExtraIds, from, to);
-	}
-
-	// Audit 6b-2a: when the latest picture on screen is an extra, report the
-	// main present before it (and the refresh it showed on) instead, as the
-	// statistics would read without extras. Identity when no extras ran.
-	void AdjustSampleForDejudderExtras(AlphaDxgiPresentationSample& sample, IDXGISwapChain* native) const
-	{
-		if (native != dejudderExtras.dejudderIdsSwapchain)
-			return;
-		uint32_t count = sample.presentCount, refresh = sample.presentRefreshCount;
-		if (DejudderPolicy::MainPresentFor(dejudderExtras.dejudderExtraIds, dejudderExtras.dejudderMainRefresh, count, refresh))
-		{
-			sample.presentCount = count;
-			sample.presentRefreshCount = refresh;
-		}
-	}
 	// VP's 50/60p interpolation (docs/VP-interpolator-50-60-plan.md step 4, Stage A):
 	// the refreshes a source frame owns after its own present show the interpolated
 	// picture at their true phase instead of repeating it. The extras' machinery
@@ -5459,57 +5275,6 @@ struct LibplaceboVideoRenderer::Impl
 	bool repeatNextQueued = false;   // the render loop: the queue holds a repeat of the frame being drawn
 	VpRepeatReuse::Glue repeatReuse{ [this](const char* id, const std::string& reason) { EngageFallback(id, reason); },
 		[this](const char* id) { ReleaseFallback(id); } };
-	VpRepeatReuse::VpContext RepeatReuseContext(const pl_frame& image, const pl_frame& target)
-	{
-		VpRepeatReuse::VpContext c;
-		c.temporal.phasePicture = interpolating || VpPhaseDrawn(image);
-		c.temporal.dejudderExtras = dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed;
-		c.temporal.crossfade = rebaseFade < 1.0;
-		c.temporal.startupHoldBlack = startupHoldBlack;
-		c.temporal.deinterlacing = temporalRenderer.Active();
-		c.temporal.frameMixing = smoothMotionEngine || temporalRenderer.Mixing();
-		c.temporal.ledMeasurePerRefresh = std::find(frameHooks.begin(), frameHooks.end(), dynamicDrive.MeasurementHookPointer()) != frameHooks.end();
-		c.cache = &dejudderExtras.dejudderCache;
-		c.gpu = d3d11 ? d3d11->gpu : nullptr;
-		c.encodingRepair = outputEncodingRepair.Get();
-		c.image = &image;
-		c.target = &target;
-		const uint64_t lut = DisplayLutSignature();
-		c.extension = { rebaseFactor, rebaseFactorX, sourceRebase.Kernel(), lut, 0,
-			RepeatRenderReuse::Signature().Add(fallbacks.Heading()).Value(), VpRepeatReuse::RegistryFingerprint(pipelineSlots) };
-		using K = VpRepeatReuse::HookKind;
-		const VpRepeatReuse::KnownHook known[] = {
-			{ dynamicDrive.MeasurementHookPointer(), K::PictureNeutral, 0, "LED measurement" },
-			{ dejudderExtras.dejudderCache.Hook(), K::PictureNeutral, 0, "rendered-picture cache" },
-			{ calibrationHost.Stage().Get(), K::Generation, lut, "calibration LUT stage" },
-			{ outputEncodingRepair.Get(), K::Static, 0, "output encoding repair" },
-			// Extended Range: a function of the source frame, the colours, the LUT and the settings
-			// (all in the key) - static per source frame (audit H1).
-			{ extendedRangeHooks.Carry(), K::Static, 0, "Extended Range carry" },
-			{ extendedRangeHooks.LateRestore(), K::Static, 0, "Extended Range late restore" },
-			{ extendedRangeHooks.Restore(false), K::Static, 0, "Extended Range restore" },
-			{ extendedRangeHooks.Restore(true), K::Static, 0, "Extended Range restore" },
-			// AdaptiveDownscale smooths its grain map over time: opaque until it exposes a state generation.
-			{ adaptiveDownscale.Measure(), K::Opaque, 0, "AdaptiveDownscale" },
-			{ adaptiveDownscale.Blend(), K::Opaque, 0, "AdaptiveDownscale" },
-		};
-		for (const auto& k : known)
-			if (c.knownCount < static_cast<int>(c.known.size()))
-				c.known[c.knownCount++] = k;
-		// Left out of the reuse draw: picture-neutral only. The occlusion mask hook stays (audit M3): on a
-		// repeat it carries the sigma-delta's grain-tolerance map.
-		c.exclude[c.excludeCount++] = dynamicDrive.MeasurementHookPointer();
-		c.exclude[c.excludeCount++] = dejudderExtras.dejudderCache.Hook();
-		return c;
-	}
-	// The display LUT's identity (observed file version + parsed state): moves on a hot reload or a
-	// reject without touching the LUT code (audit H2).
-	uint64_t DisplayLutSignature() const
-	{
-		return RepeatRenderReuse::Signature().Add(calibrationHost.Reload().ObservedBytes())
-			.Add(calibrationHost.Reload().ObservedWriteTime())
-			.Add(displayLutParsed).Add(displayLut != nullptr).Value();
-	}
 	// Stage 6d registration (WP-13: VP-V/modules/motion/consumers/DejudderCacheStage.h).
 	DejudderCacheStage::Stage dejudderCacheStage{ dejudderExtras.dejudderCache, dejudderExtras.dejudderGeometry, dejudderExtras.dejudderGeometryValid };
 	// Stage 8-2: the adaptive downscale blend.
@@ -6104,40 +5869,6 @@ struct LibplaceboVideoRenderer::Impl
 	bool renderAheadBudgetVeto = false;
 	size_t renderAheadBudgetCredit = 0;   // the frames the budget lets the queue give back
 	bool RenderAheadActive() const { return activeSettings.renderAhead && !renderAheadBudgetVeto; }
-	void UpdateRenderAheadBudget(double captureRateHz)
-	{
-		if (!activeSettings.renderAhead)
-		{
-			renderAheadBudgetVeto = false;
-			renderAheadBudgetCredit = 0;
-			ReleaseFallback("render-ahead");
-			return;
-		}
-		double displayHz = renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
-		if (!(displayHz > 0.0))
-			displayHz = presentationTelemetry.Snapshot().measuredDisplayHz;
-		const RenderAhead::HostSteps::BudgetStep step = RenderAhead::HostSteps::StepDelayBudget(renderAheadBudgetVeto, captureRateHz, displayHz,
-			earlyUploadQueueTarget.load(std::memory_order_acquire), activeSettings.renderAheadQueueCredit);   // CC series C: decision + log
-		if (!step.decided)
-			return;   // rates not known yet: the last decision stands
-		renderAheadBudgetCredit = step.credit;
-		if (step.changed)
-		{
-			if (step.veto)
-			{
-				RenderAheadBreak();
-				renderAheadCredit.Reset();
-				renderAheadPresenter.creditFrames.store(0, std::memory_order_release);
-			}
-			else
-				renderAheadEpoch.Invalidate();   // as render_ahead switched on: the gate starts again
-			renderAheadBudgetVeto = step.veto;
-		}
-		if (step.veto)
-			EngageFallback("render-ahead", step.why);
-		else
-			ReleaseFallback("render-ahead");
-	}
 	bool customHooksPublishedLowLatency = false;
 	double customHookRefreshHz = 0.0;
 	ULONGLONG customHookRefreshTick = 0;
@@ -8838,41 +8569,6 @@ struct LibplaceboVideoRenderer::Impl
 		vpOwnedPresentFailureLoggedGeneration = 0;
 		successfulPresentCount = 0;
 		vpOwnedClearLoggedGeneration = 0;
-	}
-
-	// Refreshes per source frame for the chain's depth (0 = not known yet).
-	double RenderAheadChainRatio() const
-	{
-		const double displayHz = renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
-		return dejudderSourceHz > 0.0 && displayHz > 0.0 ? displayHz / dejudderSourceHz : 0.0;
-	}
-
-	// Render-ahead (bug hunt 05 M6): the VP-owned chain is made before the first frame
-	// sets the source rate, so it starts at today's depth; once the depth wanted
-	// (ChainDepthFor: the cadence, low latency) has differed for kSettleSeconds the chain
-	// is made again at the render safe point. render_ahead off never gets here.
-	void CheckRenderAheadChainDepthLocked()
-	{
-		if (!activeSettings.renderAhead || !vpOwnedSwapchain || swapchainBlit || !swapchain)
-		{
-			renderAheadChainWantedSince = -1.0;
-			return;
-		}
-		const double ratio = RenderAheadChainRatio();
-		const bool lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
-		const RenderAhead::ChainDepth wanted = RenderAhead::ChainDepthFor(RenderAheadActive(), lowLatency, ratio);
-		if (!RenderAhead::HostSteps::ChainDepthSettled(renderAheadChainWantedSince, renderAheadChainDepth, wanted, RenderAheadNow(), ratio, lowLatency))
-			return;   // CC series C: the settle and its log line
-		RenderAheadBreak();
-		renderAheadEpoch.Invalidate();   // another queue depth: the gate starts again
-		if (!RecreateSwapchain(swapchainBlit, suppressLimitedNegotiation, "render-ahead chain depth"))
-		{
-			// Keep the attempt from repeating every frame; ConfigureAndFallback recovers
-			// a missing chain as for any other recreation failure.
-			renderAheadChainDepth = wanted;
-			return;
-		}
-		EnsureAutoLimitedFallback("render-ahead chain depth");
 	}
 
 	bool CreateVpOwnedSwapchain(bool blit, const char* trigger)
@@ -14503,6 +14199,20 @@ struct LibplaceboVideoRenderer::Impl
 	void UpdateAmbientSdrLift(double renderBlackNits, bool inputIsSdr, const pl_frame& image);   // VPV-HOOK P11a-d: defined in LedSdrLiftMethods.inl
 	static double LedDisplayGamma(enum pl_color_transfer transfer);   // VPV-HOOK P11a-d: defined in LedSdrLiftMethods.inl
 	bool PresentCalibrationPattern();   // VPV-HOOK P11a-e: defined in VP-V/modules/output/calibration_lut/CalibrationPresentMethods.inl
+	static double RenderAheadNow();   // VPV-HOOK
+	void RenderAheadBreak();   // VPV-HOOK
+	void ResetRenderAheadGate(const char* why);   // VPV-HOOK
+	OpenLoopDisplayRate::Choice SelectDejudderDisplayRate();   // VPV-HOOK
+	static double OpenLoopGridVsync(double displayHz, double now, double qpcFrequency);   // VPV-HOOK
+	void ResolveRenderAheadTimers();   // VPV-HOOK
+	int UpdateRenderAheadGate(double now, double sourcePeriod, double displayPeriod, bool late, int maxExtras);   // VPV-HOOK
+	UINT DejudderExtrasBetween(UINT from, UINT to) const;   // VPV-HOOK
+	void AdjustSampleForDejudderExtras(AlphaDxgiPresentationSample& sample, IDXGISwapChain* native) const;   // VPV-HOOK
+	VpRepeatReuse::VpContext RepeatReuseContext(const pl_frame& image, const pl_frame& target);   // VPV-HOOK
+	uint64_t DisplayLutSignature() const;   // VPV-HOOK
+	void UpdateRenderAheadBudget(double captureRateHz);   // VPV-HOOK
+	double RenderAheadChainRatio() const;   // VPV-HOOK
+	void CheckRenderAheadChainDepthLocked();   // VPV-HOOK
 
 	void WarmIdleMotionEngine(const VideoFrameFormatterOutputContract& contract, bool lossless422, bool nativeRgb);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/EngineKeeper.inl
 

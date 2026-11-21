@@ -12,9 +12,62 @@
 #include <VP-V/segments/EntranceHostMembers.inl>   // P4-5: the entrance host B3 helpers, RenderCrossfadeMix, DrainEntranceBeforeRender (Impl members)
 #include <VP-V/segments/EntrancePlanner.inl>   // P4 e: the entrance planner (Impl member)
 #include <VP-V/modules/motion/consumers/IntentMotionMethods.h>   // P11a-f: compiled in IntentMotionMethods.cpp
-#include <VP-V/modules/drive/led_compensation/LedIntentMethods.inl>   // P11a-f: the ambient / black / LED-limit parts of intent items 2-5 (Impl members)
+#include <VP-V/modules/drive/led_compensation/LedIntentMethods.h>   // P11a-f: compiled in LedIntentMethods.cpp
 #include <VP-V/modules/drive/led_compensation/LedSdrLiftMethods.h>   // P11a-d: compiled in LedSdrLiftMethods.cpp
 #include <VP-V/modules/output/calibration_lut/CalibrationPresentMethods.inl>   // P11a-e: the calibration pattern present (Impl member)
+#include <VP-V/modules/output/presentation/PresentationHostHelpers.h>   // Package C 4: compiled in PresentationHostHelpers.cpp
+
+void LibplaceboVideoRenderer::Impl::ConfigureIntentInterpreter() { ConfigureIntentMotion(); ConfigureIntentAmbient(); }
+void LibplaceboVideoRenderer::Impl::ConfigureIntentAmbient() { Vpv::LedIntent::ConfigureAmbient(vpv.led.intent, activeSettings); }
+double LibplaceboVideoRenderer::Impl::IntentTargetBlackNits(uint64_t sourceSequence) { return Vpv::LedIntent::TargetBlackNits(vpv.led.intent, vpv.motion.intent, sdrBlackNits, sourceSequence); }
+void LibplaceboVideoRenderer::Impl::EvaluateIntentBlackDisplay(const SceneDescriptor& scene, const DisplayProfile& display) { Vpv::LedIntent::EvaluateBlackDisplay(vpv.led.intent, vpv.motion.intent, activeSettings, sdrBlackNits, dynamicDrive, scene, display); }
+
+double LibplaceboVideoRenderer::Impl::RenderAheadNow() { return Vpv::PresentationHost::RenderAheadNow(); }
+void LibplaceboVideoRenderer::Impl::RenderAheadBreak() { Vpv::PresentationHost::RenderAheadBreak(renderAheadPresenter); }
+void LibplaceboVideoRenderer::Impl::ResetRenderAheadGate(const char* why) { Vpv::PresentationHost::ResetRenderAheadGate(renderAheadPresenter, why); }
+double LibplaceboVideoRenderer::Impl::OpenLoopGridVsync(double displayHz, double now, double qpcFrequency) { return Vpv::PresentationHost::OpenLoopGridVsync(displayHz, now, qpcFrequency, &DwmCompositionTiming); }
+void LibplaceboVideoRenderer::Impl::ResolveRenderAheadTimers() { Vpv::PresentationHost::ResolveRenderAheadTimers(renderAheadPresenter, renderAheadTimersReady, renderTimingContext.p, renderAheadExtraTimer, renderAheadEstimateTimer, dejudderExtras.dejudderExtraStats.ditherLastExternal); }
+int LibplaceboVideoRenderer::Impl::UpdateRenderAheadGate(double now, double sourcePeriod, double displayPeriod, bool late, int maxExtras) { return Vpv::PresentationHost::UpdateRenderAheadGate(renderAheadPresenter, now, sourcePeriod, displayPeriod, late, maxExtras, activeSettings.renderAheadUtilisation, vpOwnedSwapchain != nullptr, activeSettings.ditherVectorsOwn && DitherVectorsSupported(), dejudderExtras.dejudderExtraStats.ditherMsOwn, dejudderExtras.dejudderExtraStats.ditherMsExternal); }
+UINT LibplaceboVideoRenderer::Impl::DejudderExtrasBetween(UINT from, UINT to) const { return Vpv::PresentationHost::DejudderExtrasBetween(dejudderExtras, from, to); }
+void LibplaceboVideoRenderer::Impl::AdjustSampleForDejudderExtras(AlphaDxgiPresentationSample& sample, IDXGISwapChain* native) const { Vpv::PresentationHost::AdjustSampleForDejudderExtras(dejudderExtras, sample, native); }
+double LibplaceboVideoRenderer::Impl::RenderAheadChainRatio() const { return Vpv::PresentationHost::RenderAheadChainRatio(dejudderSourceHz, renderLoadDisplayRefreshHz.load(std::memory_order_acquire)); }
+uint64_t LibplaceboVideoRenderer::Impl::DisplayLutSignature() const { return Vpv::PresentationHost::DisplayLutSignature(calibrationHost.Reload().ObservedBytes(), calibrationHost.Reload().ObservedWriteTime(), displayLutParsed, displayLut != nullptr); }
+
+OpenLoopDisplayRate::Choice LibplaceboVideoRenderer::Impl::SelectDejudderDisplayRate()
+{
+	Vpv::PresentationHost::DisplayRateHost h{ RenderAheadActive(), activeSettings.queueTimingFixes, dejudderExtras.dejudderHeldNoDisplayRate,
+		videoHwnd, swapchain, presentationTelemetry, renderLoadDisplayRefreshHz, openLoopCandidatesTick, openLoopCadenceTick,
+		openLoopDisplayConfigHz, openLoopModeIntegerHz, openLoopCadence, openLoopGridRate, openLoopGridRateLogged, dejudderDisplayRateLogged,
+		&MonitorDisplayConfigHz, &MonitorRefreshHz, &DwmCompositionTiming, [this](const FallbackCatalog::Decision& d) { SyncFallback(d); } };
+	return Vpv::PresentationHost::SelectDejudderDisplayRate(h);
+}
+
+void LibplaceboVideoRenderer::Impl::UpdateRenderAheadBudget(double captureRateHz)
+{
+	Vpv::PresentationHost::BudgetHost h{ activeSettings.renderAhead, activeSettings.renderAheadQueueCredit, renderAheadBudgetVeto, renderAheadBudgetCredit,
+		renderLoadDisplayRefreshHz, earlyUploadQueueTarget, presentationTelemetry, renderAheadPresenter,
+		[this](const char* id, const std::string& reason) { EngageFallback(id, reason); }, [this](const char* id) { ReleaseFallback(id); } };
+	Vpv::PresentationHost::UpdateRenderAheadBudget(h, captureRateHz);
+}
+
+void LibplaceboVideoRenderer::Impl::CheckRenderAheadChainDepthLocked()
+{
+	Vpv::PresentationHost::ChainDepthHost h{ activeSettings.renderAhead, RenderAheadActive(), vpOwnedSwapchain != nullptr, swapchainBlit, swapchain != nullptr,
+		lowLatencyQueueActive.load(std::memory_order_acquire), RenderAheadChainRatio(), renderAheadChainWantedSince, renderAheadPresenter,
+		[this]() { return RecreateSwapchain(swapchainBlit, suppressLimitedNegotiation, "render-ahead chain depth"); },
+		[this]() { EnsureAutoLimitedFallback("render-ahead chain depth"); } };
+	Vpv::PresentationHost::CheckRenderAheadChainDepthLocked(h);
+}
+
+VpRepeatReuse::VpContext LibplaceboVideoRenderer::Impl::RepeatReuseContext(const pl_frame& image, const pl_frame& target)
+{
+	Vpv::PresentationHost::RepeatReuseHost h{ interpolating || VpPhaseDrawn(image), dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed,
+		rebaseFade < 1.0, startupHoldBlack, temporalRenderer.Active(), smoothMotionEngine || temporalRenderer.Mixing(),
+		frameHooks, dynamicDrive.MeasurementHookPointer(), &dejudderExtras.dejudderCache, d3d11 ? d3d11->gpu : nullptr,
+		outputEncodingRepair.Get(), calibrationHost.Stage().Get(), extendedRangeHooks, adaptiveDownscale,
+		rebaseFactor, rebaseFactorX, sourceRebase.Kernel(), DisplayLutSignature(), fallbacks.Heading(), pipelineSlots };
+	return Vpv::PresentationHost::BuildRepeatReuseContext(h, image, target);
+}
 
 void LibplaceboVideoRenderer::Impl::ConfigureIntentMotion()
 {
