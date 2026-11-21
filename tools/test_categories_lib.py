@@ -220,12 +220,12 @@ def scan_text(text, path='<text>'):
             body = text[pos:end]
             category = spec[1] if spec is not None and spec[1] else attrs.get(name)
             gpu = bool(GPU_PATTERNS.search(body)) or name_says_gpu(name) or bool(spec is not None and spec[2])
-            out.append({'cls': cls, 'method': name, 'category': category, 'gpu': gpu})
+            out.append({'cls': cls, 'method': name, 'category': category, 'gpu': gpu, 'pos': pos})
     return out
 
 
 def scan_file(path):
-    """Return a list of dicts: cls, method, category (attribute or None), gpu (bool).
+    """Return a list of dicts: cls, method, category (attribute or None), gpu (bool), pos (character offset of the macro).
 
     A #define body is not scanned as code (its TEST_METHOD(NAME) names a parameter, not a test); each invocation of
     a test-method wrapper macro is a test named by its argument. Raises ScanError on an ALL-CAPS placeholder name."""
