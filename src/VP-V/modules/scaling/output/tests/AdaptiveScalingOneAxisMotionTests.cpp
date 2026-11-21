@@ -399,12 +399,18 @@ namespace VideoProcessorTest
 			}
 		}
 
-		TEST_METHOD(HybridGrainBandsRetainTheGrainCpuModel)
+		TEST_METHOD(HybridGrainRetentionIsTheWeightedBranchMixCpuModel)
 		{
 			// CPU law model (the coded-input row G3 is for W4): a grain field n is carried by both branches; in the flat and
 			// dark-flat bands both scalers reproduce it, on texture the alias-safe branch is modelled at 0.92 of it.
 			// Retention = rms(out - base) / rms(n) over the law's whole term grid (edge, grain, motion incl. the floor).
+			// What this asserts (gate CF2-R2 SHOULD 3; the old name "...RetainTheGrain" claimed more than a model whose
+			// branches both carry n can show): the blend is the law's weighted mix of the two branches' grain, retention =
+			// 1 - (1 - w)(1 - safeGain) exactly at every grid point, and the grid spans the whole weight range (w 0 and 1
+			// both reached), so the texture band really runs from the alias-safe branch's 0.92 to the sharp branch's 1.
+			// It does not measure real scalers' grain retention; that is G3 (coded input, W4 FIX-UPS-grain).
 			using namespace HybridBlend;
+			float wMin = 1.0f, wMax = 0.0f;
 			auto noise = [](int i) { return static_cast<float>(((static_cast<unsigned>(i) * 1103515245u + 12345u) >> 16) & 1023u) / 1023.0f - 0.5f; };
 			struct Band { const wchar_t* name; float base; float texture; float safeGain; double floor; };
 			const Band bands[] = { { L"flat", 512.0f / 1023.0f, 0.0f, 1.0f, 0.95 }, { L"dark flat", 80.0f / 1023.0f, 0.0f, 1.0f, 0.95 },
@@ -419,6 +425,8 @@ namespace VideoProcessorTest
 							t.grain = gi * 0.25f;
 							t.motion = MotionTerm(mi < 4, mi * 0.25f, 0.25f);
 							const float w = Weight(t);
+							wMin = (std::min)(wMin, w);
+							wMax = (std::max)(wMax, w);
 							double num = 0.0, den = 0.0;
 							for (int i = 0; i < 4096; ++i)
 							{
@@ -430,7 +438,12 @@ namespace VideoProcessorTest
 							}
 							const double retention = std::sqrt(num / den);
 							Assert::IsTrue(retention >= b.floor, (std::wstring(b.name) + L" retention " + std::to_wstring(retention)).c_str());
+							const double expected = 1.0 - (1.0 - static_cast<double>(w)) * (1.0 - static_cast<double>(b.safeGain));
+							Assert::IsTrue(std::fabs(retention - expected) <= 1.0e-3, (std::wstring(b.name) + L" retention " +
+								std::to_wstring(retention) + L" != weighted mix " + std::to_wstring(expected) + L" at w " + std::to_wstring(w)).c_str());
 						}
+			Assert::AreEqual(0.0f, wMin, L"the grid reaches w = 0 (the alias-safe branch alone)");
+			Assert::AreEqual(1.0f, wMax, L"the grid reaches w = 1 (the sharp branch alone)");
 		}
 
 		TEST_METHOD(HybridEdgeSeamAsksOncePerFrameForTheStageVariant)
