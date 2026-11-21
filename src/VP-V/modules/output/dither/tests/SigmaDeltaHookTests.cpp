@@ -10,6 +10,7 @@
 #include <VP-V/modules/output/dither/DitherNeedGlsl.h>
 #include <VP-V/modules/output/dither/DitherNeedGpu.h>
 #include "DitherNeedGolden.generated.h"
+#include "DitherNeedWarpModel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1624,30 +1625,17 @@ namespace VideoProcessorTest
 			return codes;
 		}
 
-		// Greys that are exact in the rgba16f OUTPUT texture (m / 2048, m in [1024, 2047]): the quantiser's input is then
-		// x = grey * 1023 exactly (full range, true 10-bit), with a fraction well away from a whole code.
-		std::vector<float> DwGreys() { return { 1100.0f / 2048.0f, 1357.0f / 2048.0f, 1601.0f / 2048.0f, 1999.0f / 2048.0f }; }
+		// The model of the DitherNeedWarp cases lives in DitherNeedWarpModel.h (shared with the Beta-host port).
+		std::vector<float> DwGreys() { return DitherNeedWarpModel::Greys(); }
 
-		// The CPU model of `frames` refreshes of the quantiser at one grey: SigmaDeltaDomain::QuantiseStep with the shader's
-		// dither (frame / 5 = firstFrame + j), amplitude `amp` (float, as the shader's), x moved by dx. True when every code matches.
 		bool DwModelMatches(const int* got, int frames, float grey, int firstFrame, float amp, double dx)
 		{
-			const auto limits = SigmaDeltaDomain::Limits(10, true);
-			const double x = static_cast<double>(grey * 1023.0f) + dx;
-			double r = 0.0;
-			for (int j = 0; j < frames; ++j)
-			{
-				const double d = static_cast<double>((SigmaDeltaDomain::Ign(0.0f, 0.0f, firstFrame + j) - 0.5f) * 2.0f * amp);
-				if (static_cast<int>(SigmaDeltaDomain::QuantiseStep(x, r, d, limits, amp)) != got[j]) return false;
-			}
-			return true;
+			return DitherNeedWarpModel::ModelMatches(got, frames, grey, firstFrame, amp, dx);
 		}
 
 		bool DwModelMatchesAnyDx(const int* got, int frames, float grey, int firstFrame, float amp)
 		{
-			for (const double dx : { 0.0, 1e-4, -1e-4, 3e-4, -3e-4 })
-				if (DwModelMatches(got, frames, grey, firstFrame, amp, dx)) return true;
-			return false;
+			return DitherNeedWarpModel::ModelMatchesAnyDx(got, frames, grey, firstFrame, amp);
 		}
 
 		std::wstring DwCodes(const std::vector<int>& c)
@@ -1657,12 +1645,7 @@ namespace VideoProcessorTest
 			return s;
 		}
 
-		std::vector<float> DwConstantMap(int w, int h, float e)
-		{
-			std::vector<float> m(static_cast<size_t>(w) * h * 4, 0.0f);
-			for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i) m[i * 4] = e;
-			return m;
-		}
+		std::vector<float> DwConstantMap(int w, int h, float e) { return DitherNeedWarpModel::ConstantMap(w, h, e); }
 
 		bool DwHaveSetTexture()
 		{
