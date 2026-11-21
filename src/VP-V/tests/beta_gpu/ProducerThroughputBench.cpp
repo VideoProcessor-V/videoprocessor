@@ -16,7 +16,9 @@
 // producer's existing Stats (MotionAheadProducer.* is not edited in this lane).
 // A determinism A/A (refs/105 risk 1): the same 24-frame sequence is run serially twice on fresh producers and the P2 payload hashes are
 // compared.
-// Gated: runs only with VP_PT_BENCH=1. VP_PT_BENCH_OUT = output directory (CSV + summary appended). VP_PT_BENCH_PART = A (determinism,
+// Gated (category Bench, TQ-RG-MISS-1): runs only with VP_PT_BENCH=1 or the generic bench opt-in VP_TEST_BENCH=1. Without it the test logs
+// "SKIP-OPT-IN ProducerThroughputBefore: ..." (not executed: tools/check_trx_coverage.py), and it FAILS under VP_TEST_REQUIRE_BENCH=1 or
+// VP_TEST_REQUIRE_ALL=1 (the Bench job: tools/gen_test_filters.py --job-env Bench). VP_PT_BENCH_OUT = output directory (CSV + summary appended). VP_PT_BENCH_PART = A (determinism,
 // A/A first row, repeats 1-2) | B (repeat 3, A/A last row) | ALL (default). VP_PT_BENCH_SECONDS = measured seconds per run (default 5).
 #include <CppUnitTest.h>
 
@@ -29,6 +31,7 @@
 #include <dxgi.h>
 #include <windows.h>
 #include <timeapi.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <algorithm>
 #include <chrono>
@@ -529,14 +532,16 @@ namespace ProducerThroughput
 TEST_CLASS(ProducerThroughputBench)
 {
 public:
+	BEGIN_TEST_METHOD_ATTRIBUTE(ProducerThroughputBefore)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"Bench")
+	END_TEST_METHOD_ATTRIBUTE()
 	TEST_METHOD(ProducerThroughputBefore)
 	{
 		using namespace ProducerThroughput;
-		if (Env("VP_PT_BENCH", "") != "1")
-		{
-			Logger::WriteMessage("ProducerThroughputBench: VP_PT_BENCH is not 1; nothing run.\n");
+		if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Bench, "ProducerThroughputBefore",
+				Env("VP_PT_BENCH", "") == "1" || HardwarePrerequisites::BenchOptedIn(),
+				"the producer throughput bench is opt-in: set VP_PT_BENCH=1 (or VP_TEST_BENCH=1); nothing run"))
 			return;
-		}
 		const std::string outDir = Env("VP_PT_BENCH_OUT", ".");
 		const std::string part = Env("VP_PT_BENCH_PART", "ALL");
 		const double seconds = std::atof(Env("VP_PT_BENCH_SECONDS", "5").c_str());

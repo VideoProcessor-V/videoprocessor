@@ -246,8 +246,21 @@ def entry_matches(entry, cls, method):
     raise ValueError(f'unknown entry kind {kind}')
 
 
+TEST_CLASS_TEXT = re.compile(r'\bTEST_CLASS\s*\(')
+
+
 def test_sources(root):
+    """Every .cpp under src that declares a TEST_CLASS: the *Tests.cpp files and the ones that do not follow the
+    name (LongPairBenchDump.cpp, GrainSplitV3CostBench.cpp, GrainLevelShiftBench.cpp, ProducerThroughputBench.cpp:
+    TQ-RG-C2 / MISS-1). A file whose only TEST_CLASS is in a comment is read and yields no test."""
     for base, _dirs, files in os.walk(os.path.join(root, 'src')):
-        for name in files:
+        for name in sorted(files):
+            if not name.endswith('.cpp'):
+                continue
+            path = os.path.join(base, name)
             if name.endswith('Tests.cpp'):
-                yield os.path.join(base, name)
+                yield path
+                continue
+            with open(path, encoding='utf-8', errors='replace') as f:
+                if TEST_CLASS_TEXT.search(f.read()):
+                    yield path

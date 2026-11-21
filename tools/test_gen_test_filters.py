@@ -240,5 +240,50 @@ class DedicatedJobCategories(unittest.TestCase):
         self.assertNotIn("Category=GpuHardware", out.split("|"))
 
 
+class ScanEveryTestClassFile(unittest.TestCase):
+    """TQ-RG-C2 / MISS-1: the scan reads every .cpp that declares a TEST_CLASS, not only *Tests.cpp."""
+
+    def _tree(self, files):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        for rel, text in files.items():
+            path = os.path.join(d.name, "src", *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        return d.name
+
+    def test_a_cpp_without_the_tests_suffix_is_scanned_when_it_has_a_test_class(self):
+        root = self._tree({
+            "a/FooBench.cpp": "TEST_CLASS(FooBench)\n{\n\tTEST_METHOD(Runs) { }\n};\n",
+            "a/NotATest.cpp": "int main() { return 0; }\n",
+            "a/CommentOnly.cpp": "// TEST_CLASS(Phantom) lives in another file\nint x;\n",
+            "a/FooTests.cpp": "TEST_CLASS(FooTests)\n{\n\tTEST_METHOD(Also) { }\n};\n",
+            "a/header.h": "TEST_CLASS(InAHeader)\n",
+        })
+        names = sorted(os.path.basename(p) for p in L.test_sources(root))
+        self.assertEqual(names, ["CommentOnly.cpp", "FooBench.cpp", "FooTests.cpp"])
+        scanned = [t["method"] for p in L.test_sources(root) for t in L.scan_file(p)]
+        self.assertEqual(sorted(scanned), ["Also", "Runs"])   # the comment-only file adds no test
+
+    def test_the_repository_bench_classes_are_scanned_and_registered(self):
+        by_class = {}
+        for path in L.test_sources(L.repo_root()):
+            for t in L.scan_file(path):
+                by_class.setdefault(t["cls"], []).append(t)
+        for cls in ("LongPairBenchDumpTests", "GrainSplitV3CostBench", "GrainLevelShiftBench", "ProducerThroughputBench"):
+            self.assertIn(cls, by_class)
+        self.assertEqual(len(by_class["GrainLevelShiftBench"]), 2)
+        self.assertEqual(by_class["ProducerThroughputBench"][0]["category"], "Bench")
+        cpu = G.cpu_filter(L.load_manifest()).split("&")
+        for clause in ("FullyQualifiedName!~LongPairBenchDumpTests", "FullyQualifiedName!~GrainSplitV3CostBench",
+                       "FullyQualifiedName!~ProducerThroughputBench"):
+            self.assertIn(clause, cpu)
+        # the two CPU methods of GrainLevelShiftBench stay in the CPU run
+        self.assertNotIn("FullyQualifiedName!~GrainLevelShiftBench", cpu)
+        self.assertIn("FullyQualifiedName~GrainSplitV3CostBench", G.gpu_filter(L.load_manifest()).split("|"))
+        self.assertIn("FullyQualifiedName~ProducerThroughputBench", G.gpu_filter(L.load_manifest(), ["Bench"]).split("|"))
+
+
 if __name__ == "__main__":
     unittest.main()
