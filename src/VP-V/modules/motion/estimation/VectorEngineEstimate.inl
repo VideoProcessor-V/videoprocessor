@@ -281,7 +281,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	// is rendered.
 	int maskSlot = -1;
 	if (activeSettings.occlusionMask)
-		maskSlot = dejudderMaskSequence[0] == aSequence ? 1 : 0;
+		maskSlot = dejudderExtras.dejudderMaskSequence[0] == aSequence ? 1 : 0;
 	// Black bars: the latest trusted active picture when it is this
 	// raster's (else the matcher finds the bars itself).
 	const int width = a.luma ? a.luma->params.w : 0, height = a.luma ? a.luma->params.h : 0;
@@ -416,8 +416,8 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		return true;   // r6 fix 1: warm-up only; nothing counted, logged or handed on
 	if (maskSlot >= 0)
 	{
-		dejudderMaskSequence[maskSlot] = bSequence;
-		dejudderMaskEpoch[maskSlot] = motionValidity.Epoch();
+		dejudderExtras.dejudderMaskSequence[maskSlot] = bSequence;
+		dejudderExtras.dejudderMaskEpoch[maskSlot] = motionValidity.Epoch();
 	}
 	if (vectorEngine.motionRecoveryLogPending)
 	{
