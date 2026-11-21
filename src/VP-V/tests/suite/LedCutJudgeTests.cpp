@@ -563,5 +563,36 @@ namespace VideoProcessorTest
 			}
 			Assert::AreEqual<size_t>(1, demand.Withdrawals().size(), L"destroying the stopped module withdraws nothing more");
 		}
+
+		// GF-P3 MUST-10: a started module destroyed without Stop withdraws its declaration (no "LED drive" demand or owner key
+		// outlives the module).
+		TEST_METHOD(TheDestructorWithdrawsADeclaration)
+		{
+			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),
+				L"precondition: no store registered by an earlier test");
+			RecordingDemand demand;
+			DemandHubScope hub(&demand);
+			int rendererA = 0;
+			FrameAnalysis::Store storeA(FrameAnalysis::RingDepth(4, 4));
+			StoreRegistration registration;
+			registration.Set(&rendererA, &storeA);
+
+			auto projector = std::make_shared<FakeProjector>();
+			projector->openFails = true;   // a dry run: no port
+			const void* moduleAddress = nullptr;
+			{
+				LedDriveModule module(ProjectorConfig(), CutCompensate(),
+					[projector] { return std::make_unique<FakePort>(projector); });
+				moduleAddress = static_cast<const void*>(&module);
+				module.SetSceneReaderForTesting(NoSceneCuts());
+				module.Start();
+				Assert::AreEqual<size_t>(1, demand.Declarations().size(), L"declared with the module");
+				Assert::AreEqual<size_t>(0, demand.Withdrawals().size(), L"nothing withdrawn while running");
+			}   // no Stop
+			const std::vector<std::pair<const void*, const void*>> withdrawn = demand.Withdrawals();
+			Assert::AreEqual<size_t>(1, withdrawn.size(), L"the destructor withdrew the declaration");
+			Assert::IsTrue(withdrawn[0].first == &rendererA, L"from the renderer it was declared on");
+			Assert::IsTrue(withdrawn[0].second == moduleAddress, L"for this module");
+		}
 	};
 }
