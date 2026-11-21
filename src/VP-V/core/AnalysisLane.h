@@ -1813,7 +1813,7 @@ private:
             uint64_t aseq = 0;
             if (j < 0 || !st.bufs[size_t(j)] || !InputSeq(n.inputs[k], seq, &aseq))
                 continue;
-            const ReadInfo ri = st.table->At(size_t(j)).Read(aseq, n.inputs[k].lead > 0);   // a lead reads the published result
+            const ReadInfo ri = st.table->At(size_t(j)).Read(aseq, n.inputs[k].lead > 0 || holdSource);   // a lead reads the published result; so does an AHEAD run (holdSource): its lag-0 input is Published, not yet Sealed (GEM SK-LANE-AHEAD)
             if (ri.kind == ReadInfo::Ring)
                 in[k] = st.bufs[size_t(j)]->Ring(size_t(ri.index));
             else if (ri.kind == ReadInfo::Live)
