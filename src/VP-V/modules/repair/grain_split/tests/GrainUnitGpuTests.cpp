@@ -737,55 +737,90 @@ namespace GrainUnitGpuTestsNs
 		// GF-P1 MUST-6: the variant fill's law is depth-scaled to the variant's code unit (GrainSplit.h DepthScale): the 8-bit and
 		// the 12-bit variants equal the CPU GrainSplit::Compute with Params.sourceBits = 8 / 12 on the same codes, within the
 		// unit's tolerance (bands 0.002 codes, Wiener share 1e-3, grain level 1e-4 relative: GrainSplitGpuMatchesModel).
+		// R1 fix 4 (the control): on a quiet plane (grain energy near the depth-scaled energy floor) the 10-bit law
+		// (DefaultParams: the behaviour before MUST-6) DIFFERS from the 8-bit and 12-bit model beyond the same tolerance, so
+		// a revert of MUST-6 (the fill ignoring the code unit) fails this test on the model comparison.
+		struct LawWorst
+		{
+			double s = 0.0, f = 0.0, base = 0.0, n = 0.0;
+			bool Within() const { return s < 2e-3 && base < 2e-3 && f < 1e-3 && n < 1e-4; }
+		};
+
+		static LawWorst CompareToModel(const std::vector<float>& s, const std::vector<float>& b, const GrainSplit::Split& m, const GrainSplit::Plane& y)
+		{
+			LawWorst w;
+			for (size_t i = 0; i < y.v.size(); ++i)
+			{
+				w.s = (std::max)(w.s, (std::max)(std::fabs(s[i * 4] - m.s1.v[i]), std::fabs(s[i * 4 + 1] - m.s2.v[i])));
+				w.f = (std::max)(w.f, std::fabs(s[i * 4 + 2] - m.f.v[i]));
+				w.base = (std::max)(w.base, std::fabs(s[i * 4 + 3] - m.base.v[i]));
+			}
+			for (size_t i = 0; i < m.N.size(); ++i)
+				w.n = (std::max)(w.n, std::fabs(b[i * 4] - m.N[i]) / (std::fabs(m.N[i]) + 1e-3));
+			return w;
+		}
+
 		TEST_METHOD(GrainVariantLawFollowsTheCodeUnit)
 		{
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			pl_gpu gpu = dev.Gpu();
-			const std::vector<double> codes = MakeCodes(kW, kH, 31u);
-			pl_tex plane = UploadR16(gpu, codes, kW, kH, 64.0);
-			Assert::IsNotNull(plane, L"plane");
-			// The CPU plane is the codes the texture holds (the 16-bit value is round(code * 64); one code = 64 values).
-			GrainSplit::Plane y(kW, kH);
-			for (size_t i = 0; i < codes.size(); ++i)
-				y.v[i] = static_cast<double>((std::min)(65535L, (std::max)(0L, std::lround(codes[i] * 64.0)))) / 64.0;
+			// Plane 1: the usual grain on a gradient. Plane 2 (the control): a quiet plane, noise of about 0.03 codes, so the
+			// depth-scaled energy floor (1e-3 x 2^(2 (bits - 10)) codes^2) decides the Wiener share.
+			std::vector<double> quiet(static_cast<size_t>(kW) * kH);
+			{
+				std::mt19937 g(5u);
+				std::normal_distribution<double> noise(0.0, 0.03);
+				for (int yy = 0; yy < kH; ++yy)
+					for (int xx = 0; xx < kW; ++xx)
+						quiet[static_cast<size_t>(yy) * kW + xx] = 300.0 + 0.05 * xx + noise(g);
+			}
+			const std::vector<double> planes[2] = { MakeCodes(kW, kH, 31u), quiet };
+			pl_tex tex[2] = { UploadR16(gpu, planes[0], kW, kH, 64.0), UploadR16(gpu, planes[1], kW, kH, 64.0) };
+			Assert::IsNotNull(tex[0], L"plane");
+			Assert::IsNotNull(tex[1], L"quiet plane");
 			const int depths[2] = { 8, 12 };
 			{
 				VariantRig rig(gpu, kW, kH);
-				rig.Begin(3, plane);
-				for (int bits : depths)
+				for (int pi = 0; pi < 2; ++pi)
 				{
-					const std::wstring tag = std::to_wstring(bits) + L"-bit variant: ";
-					GrainSplit::Params law = GrainSplit::DefaultParams();
-					law.sourceBits = bits;
-					const GrainSplit::Split m = GrainSplit::Compute(y, 1.0, kB, law);
-					const VpSkeleton::AcquireResult res = rig.memo.Acquire(VpSkeleton::kP10GrainSplit, 3, VpSkeleton::AcquireForm::Gpu,
-						GrainSplit::Gpu::VariantFor(kW, kH, 1.0, bits));
-					Assert::IsTrue(res.Ok(), (tag + Wide(rig.owner.LastError())).c_str());
-					const GrainSplit::Gpu::Frame* f = GrainSplit::Gpu::FrameOf(res);
-					Assert::IsNotNull(f, (tag + L"a published frame").c_str());
-					const std::vector<float> s = DownloadRGBA(gpu, dev.dispatch, f->split);
-					const std::vector<float> b = DownloadRGBA(gpu, dev.dispatch, f->blocks);
-					Assert::IsTrue(!s.empty() && !b.empty() && s.size() >= y.v.size() * 4u, (tag + L"downloaded").c_str());
-					double worstS = 0.0, worstF = 0.0, worstBase = 0.0, worstN = 0.0;
-					for (size_t i = 0; i < y.v.size(); ++i)
+					// The CPU plane is the codes the texture holds (the 16-bit value is round(code * 64); one code = 64 values).
+					GrainSplit::Plane y(kW, kH);
+					for (size_t i = 0; i < planes[pi].size(); ++i)
+						y.v[i] = static_cast<double>((std::min)(65535L, (std::max)(0L, std::lround(planes[pi][i] * 64.0)))) / 64.0;
+					const uint64_t seq = static_cast<uint64_t>(3 + pi);
+					rig.Begin(seq, tex[pi]);
+					for (int bits : depths)
 					{
-						worstS = (std::max)(worstS, (std::max)(std::fabs(s[i * 4] - m.s1.v[i]), std::fabs(s[i * 4 + 1] - m.s2.v[i])));
-						worstF = (std::max)(worstF, std::fabs(s[i * 4 + 2] - m.f.v[i]));
-						worstBase = (std::max)(worstBase, std::fabs(s[i * 4 + 3] - m.base.v[i]));
+						const std::wstring tag = std::wstring(pi == 0 ? L"grain plane, " : L"quiet plane, ") + std::to_wstring(bits) + L"-bit variant: ";
+						GrainSplit::Params law = GrainSplit::DefaultParams();
+						law.sourceBits = bits;
+						const GrainSplit::Split m = GrainSplit::Compute(y, 1.0, kB, law);
+						const GrainSplit::Split m10 = GrainSplit::Compute(y, 1.0, kB, GrainSplit::DefaultParams());
+						const VpSkeleton::AcquireResult res = rig.memo.Acquire(VpSkeleton::kP10GrainSplit, seq, VpSkeleton::AcquireForm::Gpu,
+							GrainSplit::Gpu::VariantFor(kW, kH, 1.0, bits));
+						Assert::IsTrue(res.Ok(), (tag + Wide(rig.owner.LastError())).c_str());
+						const GrainSplit::Gpu::Frame* f = GrainSplit::Gpu::FrameOf(res);
+						Assert::IsNotNull(f, (tag + L"a published frame").c_str());
+						const std::vector<float> s = DownloadRGBA(gpu, dev.dispatch, f->split);
+						const std::vector<float> b = DownloadRGBA(gpu, dev.dispatch, f->blocks);
+						Assert::IsTrue(!s.empty() && !b.empty() && s.size() >= y.v.size() * 4u, (tag + L"downloaded").c_str());
+						Assert::IsTrue(b.size() >= m.N.size() * 4u, (tag + L"one grain level per block").c_str());
+						const LawWorst own = CompareToModel(s, b, m, y);
+						const LawWorst ten = CompareToModel(s, b, m10, y);
+						char line[260];
+						std::snprintf(line, sizeof line, "%s %d-bit variant: vs its own model |s| %.2e |f| %.2e |base| %.2e N rel %.2e; vs the 10-bit model |s| %.2e |f| %.2e |base| %.2e N rel %.2e",
+							pi == 0 ? "grain plane," : "quiet plane,", bits, own.s, own.f, own.base, own.n, ten.s, ten.f, ten.base, ten.n);
+						Logger::WriteMessage(line);
+						Assert::IsTrue(own.Within(), (tag + L"within tolerance of the depth-scaled model (sourceBits = the code unit)").c_str());
+						if (pi == 1)
+							Assert::IsFalse(ten.Within(), (tag + L"control: the 10-bit law is NOT within tolerance of this variant, so a revert of the depth scaling goes red").c_str());
 					}
-					Assert::IsTrue(b.size() >= m.N.size() * 4u, (tag + L"one grain level per block").c_str());
-					for (size_t i = 0; i < m.N.size(); ++i)
-						worstN = (std::max)(worstN, std::fabs(b[i * 4] - m.N[i]) / (std::fabs(m.N[i]) + 1e-3));
-					char line[200];
-					std::snprintf(line, sizeof line, "%d-bit variant vs model: |s| %.2e, |f| %.2e, |base| %.2e codes, N rel %.2e", bits, worstS, worstF, worstBase, worstN);
-					Logger::WriteMessage(line);
-					Assert::IsTrue(worstS < 2e-3 && worstBase < 2e-3, (tag + L"bands within 0.002 codes of the depth-scaled model").c_str());
-					Assert::IsTrue(worstF < 1e-3 && worstN < 1e-4, (tag + L"Wiener share and grain level follow the depth-scaled model").c_str());
+					rig.End(seq);
 				}
-				rig.End(3);
 			}
-			pl_tex_destroy(gpu, &plane);
+			pl_tex_destroy(gpu, &tex[0]);
+			pl_tex_destroy(gpu, &tex[1]);
 		}
 	};
 }
