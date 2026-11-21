@@ -184,6 +184,9 @@ void LibplaceboVideoRenderer::Impl::ReportRenderErrors()
         PublishCustomShaderStatus();
     dynamicDrive.OnHookErrors(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
     extendedRange.NoteDisabledHooks(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
+    // GEM-025(a): the occlusion mask hook disabled by libplacebo is latched (OutputFinishSegment) and reported visibly.
+    if (outputFinish.NoteDisabledHooks(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks))
+        SyncFallback(FallbackCatalog::OcclusionMaskDisabled(true));
     // output.calibration_lut (VP stage, R1): a disabled or failing hook reverts to libplacebo's
     // target LUT for the rest of the session, visibly (skeleton audit item 5).
     {
@@ -536,6 +539,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
                 grainInstall = false;
             }
         }
+        if (outputFinish.OcclusionMaskDisabled()) { install = false; grainInstall = false; }   // GEM-025(a): libplacebo disabled the mask hook
         // S3 step 3: the mask's parameters and its place just before the dither.
         const size_t sigmaIndex = outputFinish.MarkMask(frameHooks, install, grainInstall,
             activeSettings.ditherGrainToleranceScale);

@@ -163,6 +163,11 @@ namespace OutputSegments
 		// 4. The libplacebo 7.360 encoding repair, first at OUTPUT (24786-24799). True = inserted.
 		bool Repair(std::vector<const pl_hook*>& hooks, const pl_render_errors* errors, enum pl_lut_type targetLut,
 			const pl_color_repr& targetRepr);
+		// 5. GEM-025(a) (sigma-delta MUST-8): libplacebo disabled the occlusion mask hook (its signature is in the render's
+		//    disabled_hooks). Latches for the session (the hook stays disabled in libplacebo); true only on the call that latched.
+		//    While latched the host installs neither the mask nor the grain map (install = grainInstall = false).
+		bool NoteDisabledHooks(const uint64_t* signatures, int count);
+		bool OcclusionMaskDisabled() const { return maskDisabled; }
 		bool Member(const pl_hook* hook) const;
 		// The stage a member hook is ("encoding_repair", "occlusion_mask", "sigma_delta").
 		const char* StageName(const pl_hook* hook) const;
@@ -176,5 +181,6 @@ namespace OutputSegments
 		SegmentRunner::Segment segment;
 		DitherNeedSeam::Stage ditherNeed;
 		std::string ditherNeedLogged;
+		bool maskDisabled = false;
 	};
 }

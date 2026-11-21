@@ -275,6 +275,20 @@ namespace OutputSegments
 		return true;
 	}
 
+	bool OutputFinishSegment::NoteDisabledHooks(const uint64_t* signatures, int count)
+	{
+		if (maskDisabled || !signatures || count <= 0)
+			return false;
+		const uint64_t maskSignature = mask.Get()->signature;
+		for (int i = 0; i < count; ++i)
+			if (signatures[i] == maskSignature)
+			{
+				maskDisabled = true;
+				return true;
+			}
+		return false;
+	}
+
 	const char* OutputFinishSegment::StageName(const pl_hook* hook) const
 	{
 		return hook == repair.Get() ? "encoding_repair" : hook == mask.Get() ? "occlusion_mask" : "sigma_delta";

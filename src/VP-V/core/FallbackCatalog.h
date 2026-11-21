@@ -572,6 +572,12 @@ namespace FallbackCatalog
 			(why.empty() ? std::string() : ": " + why) + "); LCD/OLED readings are affected") :
 			Released("calibration patch");
 	}
+	// GEM-025(a) (sigma-delta MUST-8): libplacebo disabled the occlusion mask hook; the mask and the grain map are off.
+	inline Decision OcclusionMaskDisabled(bool disabled)
+	{
+		return disabled ? Engaged("occlusion mask", "disabled by libplacebo; the sigma-delta runs without the mask and the grain map") :
+			Released("occlusion mask");
+	}
 	inline Decision OutputRangeComposed(bool composed, const std::string& reason)
 	{
 		return composed ? Engaged("output range", "AUTO Limited unavailable: composed Full/sRGB swapchain" +
