@@ -1,3 +1,5 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
 #include "pch.h"
 #include "CppUnitTest.h"
 
@@ -10,6 +12,7 @@
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>
 #include "SyntheticAnalysisFrames.h"
+#include <VP-V/modules/input/source_analysis/tests/DvWideReference.h>
 
 #include <chrono>
 #include <cmath>
@@ -32,6 +35,13 @@ namespace FrameAnalysisProducerTestsNs
 	{
 		VpFrameAnalysis::Measured out;
 		const auto studio = VpFrameAnalysis::StudioLumaMap(source);
+		// WAIVER-S21-O3: a packed DV tunnel source is measured on its 12-bit tap (DvTunnelTapLaw code12 = Intensity >> 4, tap16 =
+		// tap12 << 4, a 12-bit sample is Q6 on the 10-bit axis), not on the ten-bit Sample().luma: its reference is the 12-bit one.
+		if (source.format == AnalysisLumaFormat::PackedDolbyVision422)
+		{
+			Assert::IsTrue(DvWideReference::Reduce12(source, picture, !DvWideReference::MapIsIdentity(studio), out.luma, out.range));
+			return out;
+		}
 		double sum = 0.0;
 		uint64_t n = 0, btb = 0, wtw = 0;
 		for (int y = picture.top; y < picture.bottom; ++y)
