@@ -15,6 +15,8 @@
  *   dv_chroma_weight          saturation follows (Y'/Y)^chroma_weight
  *   dv_sat_gain               saturation gain
  *   dv_signal_pq              1: PQ output; 0: gamma output (gamma, peak_nits)
+ *   dv_trc_kind, dv_trc_param the gamma output's transfer (GEM-008): 0 a pure power (dv_gamma),
+ *                             1 BT.1886 (param = b, the black offset), 2 sRGB (piecewise)
  *   dv_peak_nits              the display peak the trims refer to
  *   dv_kr, dv_kb              luminance coefficients (kg = 1 - kr - kb)
  *   dv_ext                    1: the CM v4.0 L8 extras below are active (feat/dv-l8);
@@ -83,6 +85,20 @@
 //!MINIMUM 1.0
 //!MAXIMUM 3.0
 2.2
+
+//!PARAM dv_trc_kind
+//!DESC Output transfer of a gamma signal: 0 power (dv_gamma), 1 BT.1886, 2 sRGB
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 2.0
+0.0
+
+//!PARAM dv_trc_param
+//!DESC BT.1886 black offset b (0 = pure 2.4)
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 100.0
+0.0
 
 //!PARAM dv_peak_nits
 //!DESC Display peak (nits)
@@ -374,10 +390,41 @@ float nits_from_pq(float pq)
     return 10000.0 * pow(max(e - PQ_C1, 0.0) / (den > 1e-4 ? den : 1e-4), 1.0 / PQ_M1);
 }
 
+// GEM-008 (Gemini colour-dv-hdr SHOULD-3): BT.1886 and sRGB outputs in relative linear light, odd below 0.
+// A mirror of ExtendedRange's er_lin1 / er_enc1 (ExtendedRange.cpp TRANSFER_GLSL; the C++ reference
+// DolbyVisionTrims::ToNits / FromNits calls ExtendedRange::ToLinear / FromLinear): kind 1 BT.1886 (p = b), 2 sRGB.
+float dv_trc_lin(float v)
+{
+    float a = abs(v);
+    float r = a;
+    if (dv_trc_kind < 1.5) {
+        float k = pow(dv_trc_param, 2.4);
+        r = (pow(a + dv_trc_param, 2.4) - k) / (pow(1.0 + dv_trc_param, 2.4) - k);
+    } else {
+        r = a <= 0.04045 ? a * (1.0 / 12.92) : pow((a + 0.055) * (1.0 / 1.055), 2.4);
+    }
+    return v < 0.0 ? -r : r;
+}
+
+float dv_trc_enc(float l)
+{
+    float a = abs(l);
+    float r = a;
+    if (dv_trc_kind < 1.5) {
+        float k = pow(dv_trc_param, 2.4);
+        r = pow(a * (pow(1.0 + dv_trc_param, 2.4) - k) + k, 1.0 / 2.4) - dv_trc_param;
+    } else {
+        r = a <= 0.0031308 ? a * 12.92 : 1.055 * pow(a, 1.0 / 2.4) - 0.055;
+    }
+    return l < 0.0 ? -r : r;
+}
+
 float to_nits(float v)
 {
     if (dv_signal_pq > 0.5)
         return sign(v) * nits_from_pq(abs(v));   // below-black kept
+    if (dv_trc_kind > 0.5)
+        return dv_trc_lin(v) * dv_peak_nits;     // GEM-008: BT.1886 / sRGB
     return sign(v) * pow(abs(v), dv_gamma) * dv_peak_nits;
 }
 
@@ -385,6 +432,8 @@ float from_nits(float n)
 {
     if (dv_signal_pq > 0.5)
         return sign(n) * pq_from_nits(abs(n));
+    if (dv_trc_kind > 0.5)
+        return dv_trc_enc(n / dv_peak_nits);     // GEM-008: BT.1886 / sRGB
     return sign(n) * pow(abs(n) / dv_peak_nits, 1.0 / dv_gamma);
 }
 

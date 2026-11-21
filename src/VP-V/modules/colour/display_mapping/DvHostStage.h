@@ -383,9 +383,15 @@ public:
 			// Review C5: only transfers that are a pure power law (or BT.1886 / sRGB,
 			// which LedDisplayGamma maps to 2.4 / 2.2); linear, HLG and others: off.
 			const enum pl_color_transfer trc = target.color.transfer;
-			const bool gammaSignal = trc == PL_COLOR_TRC_GAMMA18 || trc == PL_COLOR_TRC_GAMMA20 ||
+			// GEM-008 (Gemini colour-dv-hdr SHOULD-3, AMEND): BT.1886 and sRGB use their own curve, described by
+			// ExtendedRange::DescribeTransfer with piecewise = true (BT.1886 b from libplacebo's linearize of the inferred
+			// display). It cannot describe one (false): the existing visible state "off for this output transfer".
+			ExtendedRange::Transfer trimsTransfer = { ExtendedRange::TransferKind::Power, 0.0f };
+			const bool piecewiseTransfer = trc == PL_COLOR_TRC_BT_1886 || trc == PL_COLOR_TRC_SRGB;
+			const bool transferDescribed = !piecewiseTransfer || ExtendedRange::DescribeTransfer(display, true, trimsTransfer);
+			const bool gammaSignal = (trc == PL_COLOR_TRC_GAMMA18 || trc == PL_COLOR_TRC_GAMMA20 ||
 				trc == PL_COLOR_TRC_GAMMA22 || trc == PL_COLOR_TRC_GAMMA24 || trc == PL_COLOR_TRC_GAMMA26 ||
-				trc == PL_COLOR_TRC_GAMMA28 || trc == PL_COLOR_TRC_BT_1886 || trc == PL_COLOR_TRC_SRGB;
+				trc == PL_COLOR_TRC_GAMMA28 || piecewiseTransfer) && transferDescribed;
 			std::string params;
 			DvTrimSelection::Selection selection;   // feat/dv-l8: L8, else L2, else none
 			if (!f.trims || !f.trimsStageRuns)
@@ -432,6 +438,9 @@ public:
 					trimsParams.insert(trimsParams.end(), ictcp.begin(), ictcp.end());
 					trimsParams.push_back({ "dv_signal_pq", pq ? 1.0 : 0.0 });
 					trimsParams.push_back({ "dv_gamma", f.outputGamma });
+					// GEM-008: the output transfer kind (0 power: dv_gamma; 1 BT.1886; 2 sRGB) and its parameter (BT.1886 b).
+					trimsParams.push_back({ "dv_trc_kind", piecewiseTransfer ? static_cast<double>(static_cast<int>(trimsTransfer.kind)) : 0.0 });
+					trimsParams.push_back({ "dv_trc_param", piecewiseTransfer ? static_cast<double>(trimsTransfer.param) : 0.0 });
 					trimsParams.push_back({ "dv_peak_nits", display.hdr.max_luma });
 					trimsParams.push_back({ "dv_kr", kr });
 					trimsParams.push_back({ "dv_kb", kb });

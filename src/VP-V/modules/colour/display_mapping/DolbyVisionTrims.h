@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DvMath.h"
+#include <VP-V/modules/colour/extended_range/ExtendedRange.h>   // GEM-008: the output transfer (TransferKind, ToLinear)
 
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 
@@ -187,6 +188,10 @@ namespace DolbyVisionTrims
 	{
 		bool pq = true;              // PQ output (HDR); else a gamma signal
 		double gamma = 2.2;          // gamma output: linear = v^gamma x peak nits
+		// GEM-008 (Gemini colour-dv-hdr SHOULD-3): a BT.1886 or sRGB output uses its own curve
+		// (ExtendedRange::DescribeTransfer, piecewise; BT.1886 b from libplacebo's linearize), not the pure power.
+		// Power (the default) keeps the gamma above, bit-identical.
+		ExtendedRange::Transfer transfer = { ExtendedRange::TransferKind::Power, 0.0f };
 		double peakNits = 1000.0;    // the display peak (the trims' reference)
 		double kr = 0.2627, kg = 0.6780, kb = 0.0593;   // luminance coefficients
 	};
@@ -213,6 +218,8 @@ namespace DolbyVisionTrims
 	{
 		if (s.pq)
 			return v < 0.0 ? -NitsFromPq(-v) : NitsFromPq(v);   // below-black kept
+		if (s.transfer.kind == ExtendedRange::TransferKind::Bt1886 || s.transfer.kind == ExtendedRange::TransferKind::Srgb)
+			return ExtendedRange::ToLinear(s.transfer, v) * s.peakNits;   // GEM-008: sign-preserving (below-black kept)
 		const double a = std::pow(std::fabs(v), s.gamma) * s.peakNits;
 		return v < 0.0 ? -a : a;
 	}
@@ -221,6 +228,8 @@ namespace DolbyVisionTrims
 	{
 		if (s.pq)
 			return nits < 0.0 ? -PqFromNits(-nits) : PqFromNits(nits);
+		if (s.transfer.kind == ExtendedRange::TransferKind::Bt1886 || s.transfer.kind == ExtendedRange::TransferKind::Srgb)
+			return ExtendedRange::FromLinear(s.transfer, nits / s.peakNits);   // GEM-008
 		const double a = std::pow(std::fabs(nits) / s.peakNits, 1.0 / s.gamma);
 		return nits < 0.0 ? -a : a;
 	}
