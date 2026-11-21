@@ -1981,6 +1981,7 @@ namespace VideoProcessorTest
 			{
 				Field f = BoatLike(seed);
 				f.AddLogo(5, 5, 6, 4, false);   // a zero-motion logo in the static water margin, outside the object
+				f.AddObject(10, 60, 12, 10, -25, 14);   // a coherent mover in the free left margin (the boat spans blocks 36-203), for the object tracker
 				return f;
 			};
 			Config offCfg; offCfg.objects = true;
@@ -1989,6 +1990,7 @@ namespace VideoProcessorTest
 			const CameraMotion a = off.Fit(f0.Input(kPairSeconds, 5));
 			Require(Usable(a), "premise (off): the boat is taken as the camera, confidently: " + Flags(a));
 			Require(CountLabelInRect(a, f0, 5, 5, 6, 4, Label::Overlay) > 0, "premise (off): the logo is stamped Overlay: " + Flags(a));
+			Require(!a.objects.empty(), "premise (off): the object tracker ran: " + Flags(a));
 			Config onCfg = SC(); onCfg.objects = true;
 			Fitter on(onCfg);
 			const CameraMotion r = on.Fit(f0.Input(kPairSeconds, 5));
