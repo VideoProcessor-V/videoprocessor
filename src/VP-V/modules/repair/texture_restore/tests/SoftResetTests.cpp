@@ -477,6 +477,11 @@ namespace SoftResetTestsNs
 			Assert::IsTrue(on[c].softPartial && !on[c].restart && !on[c].fadePartial, L"on: the candidate is a soft partial reset");
 			Assert::AreEqual(0.5, on[c].historyKeep, 1e-6, L"keep 0.5 at strength 1");
 			Assert::IsTrue(on[c].g1 <= none[c].g1 + 1e-12 && on[c].g2 <= none[c].g2 + 1e-12, L"the history is only reduced");
+			bool strictlyReduced = false;
+			for (size_t u = c; u < 19; ++u)
+				if (on[u].g1 < none[u].g1 - 1e-6 || on[u].g2 < none[u].g2 - 1e-6)
+					strictlyReduced = true;
+			Assert::IsTrue(strictlyReduced, L"soft reset keep=0.5 must strictly reduce gain on at least one lifted frame");
 			Assert::IsTrue(on[19].restart, L"a cut still restarts");
 			Assert::AreEqual(1.0, on[19].g1);
 			Assert::AreEqual(1.0, on[19].g2);
@@ -498,7 +503,8 @@ namespace SoftResetTestsNs
 				{
 					const GrainModel::Image g = Textured(w, h, uint32_t(k));
 					TextureRestoreModel::Image im(w, h);
-					for (size_t i = 0; i < im.v.size(); ++i) im.v[i] = g.v[i];
+					for (size_t i = 0; i < im.v.size(); ++i)
+						im.v[i] = (k % 2) ? (400.0 + 0.6 * (g.v[i] - 400.0)) : g.v[i];
 					TextureRestore::Params p;
 					p.colorDepth = 10; p.sourceHz = 23.976; p.bitrateQuality = 1.0; p.sequence = uint64_t(k) + 1;
 					p.sceneReader = &PlanReader;
@@ -526,6 +532,11 @@ namespace SoftResetTestsNs
 			const size_t c = 11;   // sequence 12
 			Assert::IsTrue(on.soft[c] != 0 && on.cut[c] == 0, L"on: the candidate is a soft reset, no restart");
 			Assert::AreEqual(0.5, on.keep[c], 1e-6, L"keep 0.5 at strength 1");
+			double maxSoftDiff = 0.0;
+			for (size_t u = c; u < 19; ++u)
+				for (size_t i = 0; i < on.pictures[u].size(); ++i)
+					maxSoftDiff = (std::max)(maxSoftDiff, std::fabs(on.pictures[u][i] - none.pictures[u][i]));
+			Assert::IsTrue(maxSoftDiff > 1e-3, L"soft reset must visibly alter restored output on lifted frames after candidate");
 			Assert::IsTrue(on.cut[19] != 0, L"a cut still restarts");
 		}
 

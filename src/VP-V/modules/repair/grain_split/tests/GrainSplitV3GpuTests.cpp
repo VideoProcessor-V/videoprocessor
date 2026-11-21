@@ -486,11 +486,26 @@ public:
 				Assert::IsTrue(p.ok, Wide(p.error).c_str());
 				const uint64_t h = fnv(fnv(fnv(14695981039346656037ull, p.a), p.b), p.blocks);
 				const uint64_t pin = st == 0 ? cs.full : cs.compact;
-				char line[256];
-				std::snprintf(line, sizeof line, "v5 vs unit 4 %dx%d B %d %s: hash 0x%016llx pin 0x%016llx (%s)", cs.w, cs.h, cs.B,
-					st == 0 ? "full" : "compact", static_cast<unsigned long long>(h), static_cast<unsigned long long>(pin), warp ? "WARP" : "hardware, logged only");
-				Logger::WriteMessage(line);
-				if (warp && h != pin) all = false;
+				if (warp)
+				{
+					char line[256];
+					std::snprintf(line, sizeof line, "v5 vs unit 4 %dx%d B %d %s: hash 0x%016llx pin 0x%016llx (WARP pinned)", cs.w, cs.h, cs.B,
+						st == 0 ? "full" : "compact", static_cast<unsigned long long>(h), static_cast<unsigned long long>(pin));
+					Logger::WriteMessage(line);
+					if (h != pin) all = false;
+				}
+				else
+				{
+					// SR-S14: on hardware assert run-to-run bit-identical determinism (WARP stays the pinned reference).
+					const Product p2 = Run(dev, tex, cs.B, cs.B / 16.0, storage, false);
+					Assert::IsTrue(p2.ok, Wide(p2.error).c_str());
+					const uint64_t h2 = fnv(fnv(fnv(14695981039346656037ull, p2.a), p2.b), p2.blocks);
+					char line[256];
+					std::snprintf(line, sizeof line, "v5 hw determinism %dx%d B %d %s: run1 0x%016llx run2 0x%016llx (WARP pin 0x%016llx)", cs.w, cs.h, cs.B,
+						st == 0 ? "full" : "compact", static_cast<unsigned long long>(h), static_cast<unsigned long long>(h2), static_cast<unsigned long long>(pin));
+					Logger::WriteMessage(line);
+					if (h != h2) all = false;
+				}
 			}
 			pl_tex_destroy(gpu, &tex);
 		}

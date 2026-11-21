@@ -774,6 +774,13 @@ namespace D8SceneJudgeAgreementNs
 		Assert::AreEqual(0, tr.keepOutOfRange, Wide(partial).c_str());
 		Assert::AreEqual(0ull, dpGpuFadeRestarts, Wide(partial).c_str());
 		Assert::AreEqual(0ull, trGpuFadeRestarts, Wide(partial).c_str());
+		Assert::AreEqual(static_cast<unsigned long long>(dp.fadePartial), dpGpuPartials, Wide(partial).c_str());
+		Assert::AreEqual(static_cast<unsigned long long>(tr.fadePartial), trGpuPartials, Wide(partial).c_str());
+		if (facts.truthFades > 0)
+		{
+			Assert::IsTrue(dpGpuPartials > 0, Wide(partial).c_str());
+			Assert::IsTrue(trGpuPartials > 0, Wide(partial).c_str());
+		}
 		if (synthetic == Synthetic::Fade && begin <= kFadeOutBegin && end >= kFadeOutEnd)
 		{
 			Assert::IsTrue(dp.fadeOutKeep <= kFadeOutKeepMax, Wide(partial).c_str());
