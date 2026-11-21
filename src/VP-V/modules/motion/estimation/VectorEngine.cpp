@@ -421,8 +421,11 @@ namespace VpMotion
 			{
 				p2CpuFormRecordedAny_ = true;
 				p2CpuFormRecorded_ = p2Declined;
-				const std::string p2Segment = P2CpuFormStatusSegment();
-				const std::string p2Detail = p2Segment.empty() ? "P2 CPU form served " + std::to_string(p2Served) + ", declined 0" : p2Segment;
+				// The text is built from the same snapshot as the two ints (the atomics may move off-thread meanwhile);
+				// same wording as P2CpuFormStatusSegment().
+				std::string p2Detail = "P2 CPU form served " + std::to_string(p2Served) + ", declined " + std::to_string(p2Declined);
+				if (p2Declined != 0)
+					p2Detail += " (last: " + P2CpuFormLastDecline() + ")";
 				DiagnosticHistory::Global().RecordDecision("vector-p2-cpu-form", p2Detail.c_str(),
 					static_cast<int64_t>(p2Served), static_cast<int64_t>(p2Declined), 0.0, 0.0);
 			}

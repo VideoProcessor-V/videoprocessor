@@ -88,7 +88,7 @@ namespace Tests
 				Assert::AreEqual(27, int(kTdMaps));
 				Assert::AreEqual(28, int(kTdTrailSummary));
 				Assert::AreEqual(29, int(kSourceGeometry), L"wave S2: P14g source_geometry is appended after the doc 72 list");
-				Assert::AreEqual(35, int(kSkeletonProductEnd));
+				Assert::AreEqual(36, int(kSkeletonProductEnd), L"P10g T3 appended grain.level at 35");
 				Assert::AreEqual(size_t(kSkeletonProductEnd), reg.Size());
 				// The v1 names are aliases of the v2 ids.
 				Assert::AreEqual(int(kTdBlocks), int(kTdAnalysis));

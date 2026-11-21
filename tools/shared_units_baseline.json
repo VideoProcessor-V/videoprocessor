@@ -59,6 +59,18 @@
      "pattern": "^enum class Reader : uint8_t \\{ P10gGrainLevel = 0, TemporalDetail, kCount \\};$|^\\s*case Reader::P10gGrainLevel: return \"grain level\";$",
      "kind": "false_positive",
      "reason": "reader identity of the composed-vectors depth law (enum Reader::P10gGrainLevel :35 and its Ctrl+I display name \"grain level\" :40): names the P10g reader, computes no grain estimate (ECV3 audit c5-audit-ecv3.md; WAIVER-ECV-U1-KFP)"
+    },
+    {
+     "file": "src/VP-V/core/hub/HubBootstrap.cpp",
+     "pattern": "^#include <VP-V/modules/repair/grain_split/GrainLevelGpu\\.h>$|^\\s*GrainSplit::LevelGpu::RegisterGrainLevelModule\\(\\);",
+     "kind": "false_positive",
+     "reason": "bootstrap include + registration call of the OWNER's P10g module (the estimate lives in repair/grain_split/GrainLevelGpu.h, inside the owning unit); computes nothing (P10g T3; WAIVER-P10G-U1-KFP)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/regions/RegionEvidence.h",
+     "pattern": "^\\s*AppendGrainLevelProduct\\(decls\\);",
+     "kind": "false_positive",
+     "reason": "the skeleton product-set assembly call that appends the P10g declaration (core/Products.h); a declaration, computes no grain estimate (P10g T3; WAIVER-P10G-U1-KFP)"
     }
    ]
   },

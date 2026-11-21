@@ -1,9 +1,9 @@
 {
  "schema": 1,
  "counts": {
-  "R": 8,
+  "R": 11,
   "X": 7,
-  "N": 13,
+  "N": 12,
   "NP": 33
  },
  "products": [
@@ -539,8 +539,14 @@
      ],
      "leads": [],
      "declared": true,
-     "status": "N",
-     "evidence": [],
+     "status": "R",
+     "evidence": [
+      [
+       "repair/grain_split/GrainSplitVariantOwner.h",
+       162,
+       "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
+      ]
+     ],
      "kind": "",
      "note": "INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)); flag ViewIsActual: C9b",
      "interim": "interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)"
@@ -1071,6 +1077,64 @@
       [
        "input/source_analysis/regions/EdgeMapFill.h",
        65,
+       "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP10gGrainLevel",
+   "label": "P10g",
+   "token": "grain.level",
+   "name": "grain level (P10g)",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B2",
+   "producer_files": [
+    "repair/grain_split/GrainLevelGpu.h"
+   ],
+   "producer_text": "grain level pass (per-frame memo, owner fill; single-frame law until the temporal passes are costed); first reader: hybrid upscaler",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP10GrainSplit",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "repair/grain_split/GrainLevelGpu.h",
+       203,
+       "const VpSkeleton::AcquireResult split = memo.Acquire(VpSkeleton::kP10GrainSplit, req.seq, VpSkeleton::AcquireF"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP13SourceRing",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "repair/grain_split/GrainLevelGpu.h",
+       191,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -1627,6 +1691,10 @@
    ],
    [
     "kP10GrainSplit",
+    "kP10gGrainLevel"
+   ],
+   [
+    "kP10GrainSplit",
     "kP11RegionBlockStats"
    ],
    [
@@ -1676,6 +1744,10 @@
    [
     "kP13SourceRing",
     "kP10cGrainSplitChroma"
+   ],
+   [
+    "kP13SourceRing",
+    "kP10gGrainLevel"
    ],
    [
     "kP13SourceRing",
@@ -1921,6 +1993,7 @@
    "kP4SourceStats",
    "kP10GrainSplit",
    "kP10cGrainSplitChroma",
+   "kP10gGrainLevel",
    "kP11RegionBlockStats",
    "kCodingEvidence",
    "kP12LightLevel",
@@ -1954,6 +2027,7 @@
    "kP4SourceStats": 1,
    "kP10GrainSplit": 2,
    "kP10cGrainSplitChroma": 2,
+   "kP10gGrainLevel": 3,
    "kP11RegionBlockStats": 3,
    "kCodingEvidence": 4,
    "kP12LightLevel": 4,

@@ -244,7 +244,7 @@ namespace SchedulerS2Test
 				case kRefinedField:
 					want = JobClass::Derived;
 					break;
-				case kP12LightLevel:
+				case kP12LightLevel: case kP10gGrainLevel:
 					want = JobClass::Derived;
 					jobbed = false;
 					break;

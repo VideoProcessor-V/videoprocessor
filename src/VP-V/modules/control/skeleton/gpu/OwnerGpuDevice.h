@@ -60,6 +60,7 @@ namespace Vpv
 					m_dispatch = pl_dispatch_create(m_gpu->log, m_gpu);
 				return static_cast<void*>(m_dispatch);
 			}
+			uint64_t OwnerMaxSharedMemory() const override { return m_gpu != nullptr ? uint64_t(m_gpu->glsl.max_shmem_size) : 0u; }
 			bool CreateOwnerTexture(const VpSkeleton::TexShape& shape, VpSkeleton::GpuMemoHandle& out, std::string& why) override
 			{
 				out = VpSkeleton::GpuMemoHandle();

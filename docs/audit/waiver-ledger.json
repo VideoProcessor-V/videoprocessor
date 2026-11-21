@@ -31,6 +31,7 @@
   {"sha": "f0b8d6b58b1286a34f7c868e93a634edff033571", "waiver_id": "WAIVER-S3CT2-07", "gate_record": "lead14/review-RULE19-checker-dodge.md"},
   {"sha": "de4e9a0f115e82e7481345b65ebfaf2e2568efad", "waiver_id": "WAIVER-X5-CUT-P4-FP1", "gate_record": "lead14/review-RULE19-checker-dodge.md"},
   {"sha": "ecc5a3e3ee75568ee14acd7093d306d392b2c98b", "waiver_id": "WAIVER-X5-CUT-P4-FP2", "gate_record": "lead14/review-RULE19-checker-dodge.md"},
-  {"sha": "b7077c8c0893688197c31a3a96a4267614899fbc", "waiver_id": "WAIVER-X5-CUT-P4-FP3", "gate_record": "lead14/review-RULE19-checker-dodge.md"}
+  {"sha": "b7077c8c0893688197c31a3a96a4267614899fbc", "waiver_id": "WAIVER-X5-CUT-P4-FP3", "gate_record": "lead14/review-RULE19-checker-dodge.md"},
+  {"sha": "78e46ecc91b42de7d26d4f07ed994f6d19e3aed2", "waiver_id": "WAIVER-C5-R19-26-DIVREG", "gate_record": "lead20/gate-A20C5-tamper-78e46ecc9.md"}
  ]
 }

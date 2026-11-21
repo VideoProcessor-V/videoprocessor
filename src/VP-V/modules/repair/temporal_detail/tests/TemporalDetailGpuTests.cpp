@@ -12,6 +12,8 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/ScratchArena.h>
 #include <VP-V/modules/control/skeleton/PlTexBackend.h>
+#include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
+#include <VP-V/modules/input/capture/SourcePlanes.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
@@ -232,23 +234,54 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 	}
 
 	// WAIVER-B2-TD-OWNSPLIT: the module computes no grain split of its own; with no fitting shared product it Acquires the
-	// owner's variant from the skeleton memo. The rig is the test's skeleton side: the source-plane stand-in (behind the P13
-	// signature), repair.grain_split's variant owner registered on a memo with a GPU dispatcher and a budget. Per frame:
-	// Begin (the source plane published) before the modules run, End (the frame sealed, the plane retired) after them.
-	// One rig per stream: a sealed frame is never served again (FrameReleased).
+	// owner's variant from the skeleton memo. The rig is the test's skeleton side: the REAL P13 source-plane provider
+	// (input/capture SourcePlanes: its owner fill, the frame's luma offered for this rig's host), the skeleton's owner GPU device
+	// (the sanctioned GPU context of the grain split fill: device, dispatch, textures) and repair.grain_split's variant owner,
+	// registered on a memo with a GPU dispatcher and a budget. Per frame: Begin (the source plane offered) before the modules
+	// run, End (the frame sealed, the offers dropped, the released textures destroyed) after them. One rig per stream: a sealed
+	// frame is never served again (FrameReleased).
+	// WAIVER-C5-GSVO-RIG: the stand-in and the owner's captured device are gone (C5 MUST-2, option 1), so the rig wires the
+	// production chain instead (P13 owner + OwnerGpuDevice); no assertion changes.
 	struct MemoRig
 	{
-		GrainSplit::Gpu::SourcePlaneStandIn planes;
+		Vpv::Skeleton::OwnerGpuDevice device;
 		GrainSplit::Gpu::VariantOwner owner;
 		VpSkeleton::SkeletonMemo memo;
-		explicit MemoRig(GpuDevice& dev) : owner(dev.Gpu(), dev.dispatch, &planes)
+		explicit MemoRig(GpuDevice& dev) : device(dev.Gpu())
 		{
+			memo.SetHost(this);
 			memo.SetGpuDispatcherPresent(true);
 			memo.SetGpuBudget(true, uint64_t(1) << 32);
+			memo.SetGpuDevice(&device);
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Gpu, Vpv::Capture::SourcePlanes::kUnit,
+				Vpv::Capture::SourcePlanes::MakeOwnerFill()) == VpSkeleton::SkeletonMemo::Registration::Registered, L"the P13 source-plane owner registers its fill");
 			Assert::IsTrue(owner.Register(memo) == VpSkeleton::SkeletonMemo::Registration::Registered, L"the grain split owner registers its fill");
 		}
-		void Begin(uint64_t seq, pl_tex tex) { planes.Publish(seq, 0, tex, LumaFrame(tex).repr.bits); }
-		void End(uint64_t seq) { memo.OnSeal(seq); planes.AfterRender(); }
+		~MemoRig()
+		{
+			memo.ReleaseGpuSpots();   // the spots hand their textures back to the device first
+			device.Release();         // then the device destroys them (the GPU is still alive here)
+			Vpv::Capture::SourcePlanes::Forget(this);
+		}
+		MemoRig(const MemoRig&) = delete;
+		MemoRig& operator=(const MemoRig&) = delete;
+		void Begin(uint64_t seq, pl_tex tex)
+		{
+			Vpv::Capture::SourcePlaneSet set;
+			set.seq = seq;
+			set.planes = 1;
+			set.tex[0] = tex;
+			set.components[0] = 1;
+			set.repr = LumaFrame(tex).repr;
+			set.origin = "temporal detail GPU test rig";
+			Assert::IsTrue(Vpv::Capture::SourcePlanes::Offer(this, set), L"the frame's luma is offered to P13");
+		}
+		void End(uint64_t seq)
+		{
+			memo.OnSeal(seq);
+			Vpv::Capture::SourcePlanes::BeginFrame(this);
+			device.FlushReleases();
+		}
 	};
 
 	struct Compare

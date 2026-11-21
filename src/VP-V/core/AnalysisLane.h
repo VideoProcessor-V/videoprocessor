@@ -602,7 +602,8 @@ public:
     // The registered CPU live computes ARE the owning units' fills of their lane products: Acquire runs them through
     // ComputeCpuOwnerForm (the same RunCpuLive law as the seal's live fill, never a second law). A product a reader
     // already published for frame N before its seal (an Acquire memo of the default variant) is COPIED into the slot's
-    // live buffer by the seal instead of being computed twice (`PublishedLookup`, counted SealReusedPublished()).
+    // live buffer by the seal instead of being computed twice (`PublishedLookup`, counted SealReusedPublished()). A frame an
+    // Acquire had the lane make AHEAD (RunAheadNow) is accepted by its seal and counted there too (design s9.4 b; AheadSealReused()).
     // Render thread.
     using PublishedLookup = std::function<bool(ProductId, uint64_t, uint8_t*, size_t)>;
     using InputResolver = std::function<const uint8_t*(ProductId, uint64_t, size_t)>;
@@ -956,6 +957,8 @@ public:
             failed_.clear();   // another graph: its failures named the old graph's slots
         pendingState_ = st.get();
         renderState_ = st;
+        renderSeq_ = seq;   // ReadOf: frames after this one are ahead (their Published slot is readable)
+        haveRenderSeq_ = true;
         lastSlackUs_ = presentSlackUs;
 
         if (externalSeal_) {
@@ -999,8 +1002,10 @@ public:
             if (r.seal.outcome == SealOutcome::Sealed && r.seal.reason == SealReason::Accepted) {
                 ++lastAhead_;
                 const int ri = st->IndexOf(r.id);
-                if (ri >= 0 && st->table->At(size_t(ri)).RenderMade(seq))
+                if (ri >= 0 && st->table->At(size_t(ri)).RenderMade(seq)) {
                     ++aheadSealReused_;   // design s9.4 b: the seal of a frame RunAheadNow made accepts it, computes nothing
+                    ++sealReusedPublished_;   // s9.4 b "counted sealReused": the Acquire's (ahead) publication reused by the seal; AheadSealReused is its share
+                }
             }
             if (r.liveFilled)
                 ++lastInRender_;
@@ -1209,7 +1214,11 @@ public:
                 out.state = ProductRead::Pending;
                 return out;
             }
-        out.info = st->table->At(size_t(idx)).Read(seq);
+        // QKP slice C (RunAheadNow contract: "the caller reads it through ReadOf"): a CPU product's frame AHEAD of the render frame
+        // (after the last OnRenderStart) is read from its Published slot: its seal has not run yet, and RunAheadNow / the worker made
+        // it with the one law the seal accepts. The render frame and older frames stay sealed-only (a lagged seal is not bypassed).
+        const bool ahead = haveRenderSeq_ && seq > renderSeq_ && st->graph.nodes[size_t(idx)].backend == Backend::Cpu;
+        out.info = st->table->At(size_t(idx)).Read(seq, ahead);
         if (out.info.kind == ReadInfo::None)
             return out;
         out.state = out.info.kind == ReadInfo::Ring ? ProductRead::Ring : ProductRead::Live;
@@ -1813,7 +1822,7 @@ private:
             uint64_t aseq = 0;
             if (j < 0 || !st.bufs[size_t(j)] || !InputSeq(n.inputs[k], seq, &aseq))
                 continue;
-            const ReadInfo ri = st.table->At(size_t(j)).Read(aseq, n.inputs[k].lead > 0);   // a lead reads the published result
+            const ReadInfo ri = st.table->At(size_t(j)).Read(aseq, n.inputs[k].lead > 0 || holdSource);   // a lead reads the published result; so does an AHEAD run (holdSource): its lag-0 input is Published, not yet Sealed (GEM SK-LANE-AHEAD)
             if (ri.kind == ReadInfo::Ring)
                 in[k] = st.bufs[size_t(j)]->Ring(size_t(ri.index));
             else if (ri.kind == ReadInfo::Live)
@@ -1967,6 +1976,8 @@ private:
     std::shared_ptr<LaneState> state_;         // swapped with std::atomic_store / atomic_load
     std::atomic<uint64_t> stateGeneration_{ 0 };   // last LaneState::generation handed out; also bumped when the state is dropped (Lease() reads it)
     std::shared_ptr<LaneState> renderState_;   // the render thread's hold (keeps returned references valid)
+    uint64_t renderSeq_ = 0;                    // the frame of the last OnRenderStart (render thread; ReadOf's ahead edge)
+    bool haveRenderSeq_ = false;
     GraphOwner owner_;
     VramGovernor governor_;
     Regulator regulator_;
@@ -1990,7 +2001,7 @@ private:
     uint64_t aheadGpuNotLegal_ = 0;
     uint64_t aheadSealReused_ = 0;
     uint64_t sealComputedReduced_ = 0;
-    uint64_t sealReusedPublished_ = 0;     // seal live fills served from that publication (never computed twice)
+    uint64_t sealReusedPublished_ = 0;     // seal live fills served from that publication, plus seals accepting a RunAheadNow frame (never computed twice)
     std::vector<ProductId> externalIds_;   // products published outside the lane (SetExternalProducts)
     uint64_t externalDeclined_ = 0;        // seal-time live fills of those products that were declined (nothing published in time)
     std::function<uint64_t(ProductId)> releaseCompleted_;

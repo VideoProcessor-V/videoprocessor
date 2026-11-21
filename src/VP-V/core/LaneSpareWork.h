@@ -43,7 +43,7 @@ struct StaticClass {
 
 // Every id of the fixed table is classed EXPLICITLY: there is no default class (C4 s3a; owner OD:391, 2026-11-11 07:45: the regulator
 // switches off optional extras only, "never core, never TD"; 115 #47 / #59). A new id fails this assert and the per-id test until classed.
-static_assert(kSkeletonProductEnd == 35, "a new product id: class it explicitly in StaticClassOf (no default class)");
+static_assert(kSkeletonProductEnd == 36,"a new product id: class it explicitly in StaticClassOf (no default class)");
 
 inline StaticClass StaticClassOf(ProductId id)
 {
@@ -56,7 +56,9 @@ inline StaticClass StaticClassOf(ProductId id)
     case kRefinedField:
         return StaticClass{ JobClass::Derived, true };
     // derived-live: filled at first read through Acquire, never a job
-    case kP12LightLevel:
+    // P10g grain level (T3): an owner fill at first read, like P12; it runs only when a reader acquires it (reader-driven, so it stops
+    // with its readers) and P10 under it stays optional fill
+    case kP12LightLevel: case kP10gGrainLevel:
         return StaticClass{ JobClass::Derived, false };
     // TD's own products: the jobs of the TD reserved slice (OD:391 (2)/(3); 115 #47 "regulator can never shed TD"). Admitted inside the
     // slice (AdmissionTable.h Admit), never optional fill, never in the arbiter's FillOff list: TD steps down only its own ladder (OD:612 (3)).
