@@ -77,7 +77,10 @@ def gpu_filter(manifest, cats=None):
 
 
 def gpuwarp_filter(manifest):
-    return gpu_filter(manifest, ['GpuWarp'])
+    # A GpuWarp class entry selects every method of the class, including one that an earlier entry or a Category
+    # attribute puts in a dedicated-job category (TQ-X2): take those out again, so they run only in their own job.
+    away = clauses(manifest, True, lib.DEDICATED_JOB_ONLY) + [f'Category!={c}' for c in lib.DEDICATED_JOB_ONLY]
+    return '(' + gpu_filter(manifest, ['GpuWarp']) + ')&' + '&'.join(away)
 
 
 def main():
