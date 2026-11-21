@@ -3,7 +3,7 @@
  "counts": {
   "R": 8,
   "X": 8,
-  "N": 13,
+  "N": 12,
   "NP": 33
  },
  "products": [
@@ -1215,19 +1215,6 @@
      "kind": "",
      "note": "",
      "interim": ""
-    },
-    {
-     "input": "kCodingEvidence",
-     "lags": [
-      1
-     ],
-     "leads": [],
-     "declared": true,
-     "status": "N",
-     "evidence": [],
-     "kind": "",
-     "note": "read shape scoped to the owner fill asking for its own previous frame (req.seq - 1, through its SkeletonMemo parameter); Hub::AcquireTiles is the consumer-side Acquire the monitor uses, not the fill's lag-1 read; MakeOwnerFill ignores its memo today, so the declared lag-1 edge is N",
-     "interim": ""
     }
    ]
   },
@@ -1888,12 +1875,6 @@
    {
     "from": "kTdMemory",
     "to": "kTdAnchorPass",
-    "kind": "lag",
-    "n": 1
-   },
-   {
-    "from": "kCodingEvidence",
-    "to": "kCodingEvidence",
     "kind": "lag",
     "n": 1
    },

@@ -4,7 +4,7 @@
 
 Machine-checked (refs/129 L-PROD). R = read shape found (a regex hit on the owner fill, NOT proven Acquire); X = it recomputes it privately or reads it outside Acquire; N = declared but never read; NP = the product has no production producer. Fix owners are the lanes of refs/129. Counts count declared (product, input) pairs.
 
-Counts: R 8, X 8, N 13, NP 33.
+Counts: R 8, X 8, N 12, NP 33.
 
 | Product | Lane | Producer files | Input (lag/lead) | St | Evidence / note |
 |---|---|---|---|---|---|
@@ -53,7 +53,6 @@ Counts: R 8, X 8, N 13, NP 33.
 | **P16** coding_evidence | L-B5 | CodingEvidence.cpp<br>SkeletonModule.cpp | P10 | N |  |
 |  |  |  | P11 | N |  |
 |  |  |  | P13 | N |  |
-|  |  |  | P16 lag1 | N | read shape scoped to the owner fill asking for its own previous frame (req.seq - 1, through its SkeletonMemo parameter); Hub::AcquireTiles is the consumer-side Acquire the monitor uses, not the fill's lag-1 read; MakeOwnerFill ignores its memo today, so the declared lag-1 edge is N |
 | **P15** quality_pattern (variants, short-queue P15c) | L-B5 | - | P16 lead1,lead2 | NP | no production producer |
 |  |  |  | P15 lag1 | NP | no production producer |
 |  |  |  | P5 | NP | no production producer; flag ViewIsActual: C9b |

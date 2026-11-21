@@ -639,8 +639,8 @@ public:
         return out;
     }
 
-    // "quality_pattern -> coding_evidence (lead 2): lead read of an ordered chain: reader live-fills its reduced form" (entries joined by
-    // "; "); "" when there are none.
+    // "<reader> -> <chain> (lead 2): lead read of an ordered chain: reader live-fills its reduced form" (entries joined by
+    // "; "); "" when there are none (the catalog has none since 15d J5).
     std::string LeadChainWarningText(const std::vector<LeadChainRead>& reads) const
     {
         std::string text;
@@ -1209,8 +1209,9 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
     AddInput(ce, kP10GrainSplit, 0);
     AddInput(ce, kP11RegionBlockStats, 0);
     AddInput(ce, kP13SourceRing, 0);
-    AddInput(ce, kCodingEvidence, 1);   // the hash history (lag 2 joins when the declarations catch up to the contract table)
-    ce.orderedChain = true;         // self lag 1: ordered-chain lane jobs (frame 0 in the reduced form; needs missingInputForm below)
+    // No self read (15d J5): the CPU per-tile owner fill (regions/CodingEvidence.cpp MakeOwnerFill) measures the staged P5 tile pack and
+    // reads no history, so P16 is not an ordered chain. The GPU fused P11 pass (hash32 / copy vs N-1) re-declares lag 1 (then lag 2) with
+    // a real Acquire(kCodingEvidence, seq - 1) in its fill. History 2 (the contract's N-1 / N-2 depth) and missingInputForm stay.
     AddTerm(ce, 3, 8);
     ce.size.fixedBytes = kCodingEvidenceSummaryBytes;
     ce.rebasedPlane = true;
