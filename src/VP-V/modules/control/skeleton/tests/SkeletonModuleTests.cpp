@@ -3103,6 +3103,7 @@ namespace SkeletonModuleTestsNs
 			memo = rig.sk.MemoOf(rig.Host());
 			Assert::IsNotNull(memo);
 			Assert::IsTrue(memo->HasGpuDevice(), L"the new renderer's device is still attached after the Begin");
+			Assert::IsTrue(rig.sk.MemoDeviceGpuForTesting(rig.Host()) == static_cast<const void*>(&fakeGpu), L"and it is the device of the current pl_gpu");
 		}
 
 		// GF-P2b E2 counter-case through the PUBLIC lifecycle (R2b): the dead-renderer Reconcile keeps only a device that is on the host's
@@ -3153,10 +3154,12 @@ namespace SkeletonModuleTestsNs
 			memo = rig.sk.MemoOf(rig.Host());
 			Assert::IsNotNull(memo);
 			Assert::IsTrue(memo->HasGpuDevice(), L"kept: indistinguishable from the new renderer's until its GpuCreated");
+			Assert::IsTrue(rig.sk.MemoDeviceGpuForTesting(rig.Host()) == static_cast<const void*>(&staleGpu), L"the kept device is the stale one");
 			GpuCreatedWithDevice(rig, &newGpu);   // abandons the stale device and attaches the new one
 			memo = rig.sk.MemoOf(rig.Host());
 			Assert::IsNotNull(memo);
 			Assert::IsTrue(memo->HasGpuDevice(), L"the new renderer's own device is attached");
+			Assert::IsTrue(rig.sk.MemoDeviceGpuForTesting(rig.Host()) == static_cast<const void*>(&newGpu), L"the stale device was abandoned and replaced");
 		}
 
 		// GF-P2b S1: a live switch to the Original pathway removes the renderer's memo host (nothing of the skeleton is left to seal or show);
