@@ -103,6 +103,13 @@ namespace Vpv
 			// Render thread (S1). The picture of stage `pic.stage` of frame `pic.seq` is on the render device for this render frame.
 			// A second offer of one (seq, stage, size, ordinal) replaces the first. False = no host / texture / stage, or the table is
 			// full (counted).
+			// INVARIANT (CB-18 SHOULD-3): a stage key names ONE picture. Every offerer of a stage gives each distinct picture of a
+			// frame its own ordinal (per seq: scaling/output EdgeMapStageOrdinal.h for X5), never reusing (seq, ordinal) for a
+			// different picture. Why: a product keyed on the stage key (kEdgeMap's stage variant) is memoised per key for the
+			// frame, so a later picture offered under a used key would be measured from the FIRST picture's memoised result, and a
+			// re-render that reuses the key overwrites the texture the earlier result was computed from. The replace above is for
+			// re-offering the SAME picture (a retry), not a new one. Not asserted: replacing is a legal re-offer here and only the
+			// offerer knows whether the picture is the same.
 			static bool OfferStage(const void* host, const StagePicture& pic)
 			{
 				if (!host || pic.tex == nullptr || pic.stage == 0)

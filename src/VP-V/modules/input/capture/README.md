@@ -229,6 +229,12 @@ P13 for the planes ON THE RENDER DEVICE in the current render frame. Contract: `
   (lead14/design-EDGEMAP-DOMAIN-AXIS.md rev 2 s2a). Size and ordinal are key axes, not facts, so two pictures of one seq in
   one render frame never share a spot; a whole-picture view (no crop) lets a derived product (the edge map's stage variant)
   read taps outside the reader's crop exactly as the reader's own clamped taps did.
+- Invariant (CB-18 SHOULD-3): a stage key (seq, stage, size, ordinal) names ONE picture. Each offerer gives every distinct
+  picture of a frame its own ordinal and never reuses (seq, ordinal) for a different picture, because products keyed on the
+  stage key are memoised per key for the frame: a reused key would serve the first picture's result for the second, and a later
+  re-render overwrites the texture that result was computed from. A second `OfferStage` of one key replaces the entry only as a
+  re-offer of the same picture. Documented, not asserted (only the offerer knows whether the picture is the same; the replace
+  itself is tested as legal).
 
 - S-2a: `GpuRgbUnpack::SetWideLuma(true)` writes the R12 matcher luma as Q6 fractions on the 10-bit axis (`AnalysisAxis10.h`);
   default off keeps the CPU formatter's ten-bit law bit for bit. 12-bit arrives only through the DV tunnel (OWNER 2026-11-14 08:30 EST,
