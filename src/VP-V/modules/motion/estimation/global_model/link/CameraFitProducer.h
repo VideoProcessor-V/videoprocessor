@@ -25,7 +25,7 @@ namespace CameraLink
 {
 	struct AheadCopy;   // AheadFlow.h
 
-	// One pair to fit. The FieldCopy is shared (kept alive by the pool entry of a published record).
+	// One pair to fit. The FieldCopy is the fit input; its content is published into the product slot p7f_camera_fit_field (the pool keeps provenance only).
 	struct CameraFitJob
 	{
 		uint64_t seq = 0;

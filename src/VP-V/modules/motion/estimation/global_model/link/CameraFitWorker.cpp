@@ -3,6 +3,7 @@
 #include "CameraFitWorker.h"
 
 #include "AheadFlow.h"
+#include "CameraFitFieldPod.h"
 #include "CameraUsable.h"
 
 #include <atomic>
@@ -357,29 +358,44 @@ namespace CameraLink
 		return PublishInto(lease, job, fit, true);
 	}
 
-	void CameraFitWorker::PublishFitField(const VpSkeleton::LaneLease& lease, uint64_t seq, const VpIndicator::Stamp& honoured)
+	bool CameraFitWorker::PublishFitField(const VpSkeleton::LaneLease& p7Lease, bool bridgeTarget, const CameraFitJob& job,
+		const VpIndicator::Stamp& honoured)
 	{
-		VpSkeleton::SlotSet* fs = lease.table ? lease.table->Find(VpSkeleton::kCameraFitField) : nullptr;
+		const VpSkeleton::LaneLeaseSource& source = bridgeTarget ? m_env.fieldLeaseSource : m_env.fieldOnTimeSource;
+		if (!source || !job.field)
+			return false;
+		const VpSkeleton::LaneLease fl = source();
+		if (!fl.table || !fl.bytes || fl.generation != p7Lease.generation)
+			return false;   // no storage, or a rebuild between the two reads: the field is missing for this frame
+		VpSkeleton::SlotSet* fs = fl.table->Find(VpSkeleton::kCameraFitField);
 		if (!fs)
-			return;
+			return false;
 		VpSkeleton::LaneTicket ticket;
-		if (fs->Claim(seq, VpAncestry::Provenance::AheadLane, ~uint64_t(0), &ticket) != VpSkeleton::ClaimResult::Claimed)
-			return;
+		if (fs->Claim(job.seq, VpAncestry::Provenance::AheadLane, ~uint64_t(0), &ticket) != VpSkeleton::ClaimResult::Claimed)
+			return false;
 		if (!fs->Writable(ticket))
 		{
 			fs->Abandon(ticket);
-			return;
+			return false;
 		}
 		VpAncestry::Header& hdr = fs->LaneHeader(ticket);
 		VpSkeleton::LaneInputs pins;
-		if (!lease.table->LaneAncestors(VpSkeleton::kCameraFitField, seq, hdr, pins))
+		if (!fl.table->LaneAncestors(VpSkeleton::kCameraFitField, job.seq, hdr, pins))
 		{
 			fs->Abandon(ticket);
-			return;
+			return false;
 		}
-		hdr.honoured = honoured;   // the SAME stamp P7(seq) was published under: the pair is one record
+		// The content goes into the slot's own buffer, once; the product owns it from here on (nothing else keeps a copy).
+		if (EncodeFitFieldPod(*job.field, fl.bytes->Ring(static_cast<size_t>(ticket.slot)), fl.bytes->Bytes()) == 0)
+		{
+			pins.Unpin();
+			fs->Abandon(ticket);
+			return false;   // the field does not fit the product's declared size: not published
+		}
+		hdr.honoured = honoured;   // the SAME stamp P7(seq) is published under: the pair is one record
 		fs->Publish(ticket);
 		pins.Unpin();
+		return true;
 	}
 
 	PublishOutcome CameraFitWorker::PublishInto(const VpSkeleton::LaneLease& lease, const CameraFitJob& job, const CameraFitResult& fit,
@@ -436,7 +452,11 @@ namespace CameraLink
 			EncodeRecordPod(*fit.record, bytes, kRecordPodMaxBytes);
 		// The pool entry is written BEFORE the publish (the seal can accept the instant it is Published) and erased if the
 		// publish turns out late, so a late record is never served.
-		m_env.pool->Put(job.seq, fit.record, job.field, m_env.aheadMode ? &hdr.honoured : nullptr, !countLate);
+		m_env.pool->Put(job.seq, fit.record, ProvenanceOf(job.field.get()), m_env.aheadMode ? &hdr.honoured : nullptr, !countLate);
+		// CP-A1-D4-CAMLABEL-FIELDCOPY: the fit field goes into its declared product BEFORE P7 is published (P8 needs the pair and compares the
+		// two stamps). A field that could not be published leaves that product missing for the frame: P8 produces no labels (its blocked /
+		// declined counts); P7 itself stays valid for its own readers. A P7 publish that then turns out late leaves an unused field slot.
+		PublishFitField(lease, countLate, job, hdr.honoured);
 		const VpSkeleton::PublishResult pr = set->Publish(ticket);
 		pins.Unpin();
 		if (pr != VpSkeleton::PublishResult::Published)
@@ -444,11 +464,6 @@ namespace CameraLink
 			m_env.pool->Erase(job.seq);
 			return late(PublishOutcome::LateSeal);
 		}
-		// CP-A1-D4-CAMLABEL-FIELDCOPY: the fit field is a declared lane product published WITH P7 under P7's own stamp (hdr.honoured above),
-		// after P7 (its ancestor). A graph without a reader of it (no P8) has no such slot. A claim / ancestry / publish that fails leaves
-		// the product missing for that frame: P8 reads it through the slot and then produces no labels (visible in its blocked / declined
-		// counts); P7 itself stays valid for its own readers.
-		PublishFitField(lease, job.seq, hdr.honoured);
 		m_env.pool->Commit(job.seq);
 		if (c)
 		{

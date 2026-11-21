@@ -78,6 +78,9 @@ namespace CameraLink
 		CameraLabelFill(VpSkeleton::LaneLeaseSource source, ICameraLink& link, ILabelDevice& device);
 		// Takes the lane's current lease when it is newer; true when it changed (the lane cursor restarts: its sequences belong to the old graph).
 		bool Rebind();
+		// The fit field product's bytes (AnalysisLane/CameraLane Lease(kCameraFitField)): the product slot IS the field's storage, P8's only
+		// read of it. Not set (or a generation that differs from P8's): no field, so no labels.
+		void SetFieldSource(VpSkeleton::LaneLeaseSource source) { m_fieldSource = std::move(source); }
 		uint64_t LaneGeneration() const { return m_lease.generation; }
 
 		// Render thread, at the seal: the SlotTable::Resolve fill callback target for P8.
@@ -110,9 +113,13 @@ namespace CameraLink
 		// `seq` is published (or sealed) and its stamp is EXACTLY P7(seq)'s. Missing product or a mismatch: false (no labels, counted by the
 		// caller as blocked / declined); never a fall-back to the pool's copy.
 		static bool FitFieldMatchesP7(const VpSkeleton::LaneLease& lease, uint64_t seq);
+		// Reads the field's CONTENT from the product slot (stamp gate first, then the slot's ring bytes, then a re-read of the slot so a
+		// recycled ring is never used). False: no field (no labels). No other source exists.
+		bool ReadFitField(const VpSkeleton::LaneLease& lease, uint64_t seq, FieldCopy& out) const;
 
 		VpSkeleton::LaneLease m_lease;            // render thread only
 		VpSkeleton::LaneLeaseSource m_source;
+		VpSkeleton::LaneLeaseSource m_fieldSource;
 		ICameraLink& m_link;
 		ILabelDevice& m_device;
 		Gap m_gap;

@@ -53,6 +53,11 @@ namespace CameraLink
 		// `lease` is the first one. Standalone / tests without a lane: lease = LaneLease::Borrow(...) and no source (never stale).
 		VpSkeleton::LaneLease lease;
 		VpSkeleton::LaneLeaseSource leaseSource;
+		// CP-A1-D4-CAMLABEL-FIELDCOPY: the leases whose bytes ring is the declared product p7f_camera_fit_field (the product's storage), one
+		// per publish target: `fieldLeaseSource` for the lag bridge (the worker's own lane), `fieldOnTimeSource` for the on-time target.
+		// Empty = no field storage there: the product is not published and P8 produces no labels for that frame (visibly).
+		VpSkeleton::LaneLeaseSource fieldLeaseSource;
+		VpSkeleton::LaneLeaseSource fieldOnTimeSource;
 		CameraRecordPool* pool = nullptr;
 		FitCounters* counters = nullptr;
 		// Optional overrides; unset, the lease's bytes ring (>= kRecordPodMaxBytes per slot) and Indicator::StampOf are used.
@@ -123,8 +128,10 @@ namespace CameraLink
 		void Loop();
 		// The publish into one lease (Claim -> pins -> stamp -> bytes -> pool -> Publish). countLate: count a refusal as late (the bridge).
 		PublishOutcome PublishInto(const VpSkeleton::LaneLease& lease, const CameraFitJob& job, const CameraFitResult& fit, bool countLate);
-		// The P7 fit field product (kCameraFitField), published right after P7 with P7's stamp; a graph without the slot publishes nothing.
-		static void PublishFitField(const VpSkeleton::LaneLease& lease, uint64_t seq, const VpIndicator::Stamp& honoured);
+		// The P7 fit field product (kCameraFitField): the fit's field is encoded into the product slot's own buffer and published with P7's
+		// stamp, BEFORE P7 is published. `p7Lease` is the lease P7 goes into (the field lease must be of the same generation). False =
+		// not published (no slot / no storage / no fit / another generation): P8 then has no field for that frame.
+		bool PublishFitField(const VpSkeleton::LaneLease& p7Lease, bool bridgeTarget, const CameraFitJob& job, const VpIndicator::Stamp& honoured);
 		struct ParkedResult
 		{
 			CameraFitJob job;

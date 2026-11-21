@@ -141,6 +141,8 @@ namespace CameraLink
 		env.queueCapacity = ahead ? (std::max)(m_settings.queueCapacity, kAheadQueue) : m_settings.queueCapacity;
 		env.aheadMode = ahead;
 		env.onTimeSource = ahead ? m_onTimeSource : VpSkeleton::LaneLeaseSource();
+		env.fieldLeaseSource = m_fieldBridgeSource;
+		env.fieldOnTimeSource = ahead ? m_fieldOnTimeSource : VpSkeleton::LaneLeaseSource();
 		env.p2Epoch = ahead ? m_p2Epoch : std::function<uint64_t()>();
 		env.aheadGlobal = ahead ? m_aheadGlobal : std::function<void(AheadCopy&)>();
 		env.onResult = [this](const CameraFitJob& j, const CameraFitResult& r, PublishOutcome o) { OnResult(j, r, o); };
@@ -804,7 +806,7 @@ namespace CameraLink
 				why = m_aheadAsked[seq % kAheadMarks].load(std::memory_order_acquire) == seq + 1 ? OnTimeMiss::NotPublished : OnTimeMiss::NoAheadPair;
 			return nullptr;
 		}
-		if (!e.field || e.field->origin != FieldOrigin::Ahead)
+		if (!e.field.have || e.field.origin != FieldOrigin::Ahead)
 		{
 			why = OnTimeMiss::NoAheadPair;   // a seed / live record: read back after the matcher ran, never on time by construction
 			return nullptr;
@@ -853,16 +855,13 @@ namespace CameraLink
 		return m_pool && m_pool->Get(seq, e) ? e.record : nullptr;
 	}
 
-	bool CameraLinkCore::FitEntryOf(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion>& rec,
-		std::shared_ptr<const FieldCopy>& field) const
+	bool CameraLinkCore::FitEntryOf(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion>& rec) const
 	{
 		rec.reset();
-		field.reset();
 		PoolEntry e;
 		if (!m_pool || !m_pool->Get(seq, e))
 			return false;
 		rec = e.record;
-		field = e.field;
 		return true;
 	}
 

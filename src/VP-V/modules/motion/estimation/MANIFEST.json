@@ -121,6 +121,7 @@
     "src/VP-V/modules/motion/estimation/global_model/link/CameraFitStatus.h",
     "src/VP-V/modules/motion/estimation/global_model/link/CameraFitWorker.cpp",
     "src/VP-V/modules/motion/estimation/global_model/link/CameraFitWorker.h",
+    "src/VP-V/modules/motion/estimation/global_model/link/CameraFitFieldPod.h",
     "src/VP-V/modules/motion/estimation/global_model/link/CameraGuideProduct.h",
     "src/VP-V/modules/motion/estimation/global_model/link/CameraLabelFill.cpp",
     "src/VP-V/modules/motion/estimation/global_model/link/CameraLabelFill.h",

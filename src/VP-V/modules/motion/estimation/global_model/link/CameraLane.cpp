@@ -42,6 +42,8 @@ namespace CameraLink
 			return false;
 		}
 		st->p7Bytes.reset(new VpSkeleton::CpuBuffers(*p7));
+		if (const VpSkeleton::Node* pf = st->table->NodeOf(VpSkeleton::kCameraFitField))
+			st->fieldBytes.reset(new VpSkeleton::CpuBuffers(*pf));
 		st->indicator = std::move(indicator);
 		st->generation = m_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
 		m_labels = labels && st->table->NodeOf(VpSkeleton::kP8CameraLabels) != nullptr;
@@ -86,7 +88,8 @@ namespace CameraLink
 		}
 		l.hold = st;
 		l.table = st->table.get();
-		l.bytes = bytesProduct == VpSkeleton::kP7CameraFit ? st->p7Bytes.get() : nullptr;
+		l.bytes = bytesProduct == VpSkeleton::kP7CameraFit ? st->p7Bytes.get()
+			: (bytesProduct == VpSkeleton::kCameraFitField ? st->fieldBytes.get() : nullptr);
 		l.indicator = st->indicator.get();
 		l.generation = st->generation;
 		return l;

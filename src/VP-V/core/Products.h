@@ -804,9 +804,9 @@ inline void AppendCameraProducts(std::vector<ProductDecl>& decls)
     // C10 15a K2: P3 is NOT an input of P8. P8 is computed from the P7 record and that record's own fit field (the P2 optical-flow seed
     // copy the fit used). F2: the fit reads only the optical-flow seed and the labels are residuals against that fit, so a P3 (matcher)
     // field would mix two motion sources. CP-A1-D4-CAMLABEL-FIELDCOPY: that field is a DECLARED shared lane product (p7f_camera_fit_field,
-    // published with P7 under P7's own stamp), so P8 declares it as an input and reads it through the product (stamp checked against P7's;
-    // a missing or mismatched product gives no labels, visibly); the private FieldCopy read is gone. The P2 read behind the field is still
-    // catalogued as an ExternalView flag.
+    // published with P7 under P7's own stamp), and the product slot IS its storage: P8 declares it as an input and reads the content and the
+    // stamp from the slot (stamp checked against P7's; a missing or mismatched product gives no labels, visibly). There is no pool copy of
+    // the field any more. The P2 read behind the field is still catalogued as an ExternalView flag.
     AddInput(p8, kCameraFitField, 0);
     AddTerm(p8, 4, 16);
     p8.size.fixedBytes = 256;
@@ -1058,20 +1058,22 @@ inline void PadReservedUntil(std::vector<ProductDecl>& decls, ProductId upTo)
 }
 
 // p7f_camera_fit_field (CP-A1-D4-CAMLABEL-FIELDCOPY): the P7 fit's own field, a declared CPU lane product published by the camera worker in
-// the same publish as P7(N) with P7's stamp (the content, the P2 seed copy, rides the camera record pool entry of that frame, exactly as the
-// P7 record does; the slot carries the ancestry and the stamp). Its one reader is P8, which reads it instead of a private field copy. Input:
-// P7 at lag 0 (it is published after P7, so P7 is its ancestor and the seal checks the pair together).
+// the same publish as P7(N) with P7's stamp (hdr.honoured copied from P7's claim). The slot's CPU buffer IS the storage of the field the labels
+// read (grid, block size, forward vector and trust planes; link/CameraFitFieldPod.h): written once by the camera worker BEFORE it publishes P7,
+// read only by P8 through the product, with no pool copy. Its one reader is P8. No declared input: it is written before P7's publish and P8
+// compares its stamp with P7's, so a field without a sealed P7 is never used. Size: 12 B per 16x16 block (the three float planes) plus a
+// margin for a grid one block row / column larger than ceil(dims / 16); a field that does not fit is not published (P8 then has no labels).
 inline void AppendCameraFitFieldProduct(std::vector<ProductDecl>& decls)
 {
-    using detail::AddInput;
+    using detail::AddTerm;
     using detail::Make;
     using namespace VpIndicator;
     const CounterMask content = Bit(kFull) | Bit(kContinuity);
     ProductDecl p = Make(kCameraFitField, "p7f_camera_fit_field", "camera fit field", Backend::Cpu, 1, Tier::T0, content, Bit(kSettingsMotion));
-    AddInput(p, kP7CameraFit, 0);
     p.residency = Residency::SystemRam;
     p.spanMask = content;
-    p.size.fixedBytes = 256;   // the slot carries the header only; the field itself is the pool entry's shared copy
+    p.size.fixedBytes = 16384;   // pod header + the grid-rounding margin (see above)
+    AddTerm(p, 4, 12);           // three float planes per 16x16 block
     p.refRenderMs = 0.01f;
     decls.push_back(p);
 }

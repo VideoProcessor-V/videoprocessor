@@ -107,6 +107,7 @@ namespace CameraLink
 			VpSkeleton::Graph graph;
 			std::unique_ptr<VpSkeleton::SlotTable> table;
 			std::unique_ptr<VpSkeleton::CpuBuffers> p7Bytes;
+			std::unique_ptr<VpSkeleton::CpuBuffers> fieldBytes;   // the storage of the fit field product (kCameraFitField); null without that node
 			std::shared_ptr<VpIndicator::Indicator> indicator;
 			uint64_t generation = 0;
 		};
