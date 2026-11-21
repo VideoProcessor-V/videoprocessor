@@ -4,6 +4,7 @@
 // VP-V GPU hook tests (moved out of Bill's LibplaceboLutParserTests.cpp; test names unchanged).
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 namespace VideoProcessorTest
 {
@@ -192,17 +193,18 @@ namespace VideoProcessorTest
 		// of the tunnel wrote (tools/dv_synth/make_corpus.py, VP_TEST_DV_SYNTH_CORPUS): every
 		// accuracy segment (r210 / R10b / R10l, low8 / high8 / high8 with replicated bits,
 		// 1080p and 2160p), bit-exact; the 4K pass timed (hardware). WARP by default.
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Corpus")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus)
 		{
 			char* rootValue = nullptr;
 			size_t rootLength = 0;
 			const std::string root = _dupenv_s(&rootValue, &rootLength, "VP_TEST_DV_SYNTH_CORPUS") == 0 && rootValue ? rootValue : "";
 			std::free(rootValue);
-			if (root.empty())
-			{
-				Logger::WriteMessage("SKIP-NO-CORPUS GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus (VP_TEST_DV_SYNTH_CORPUS)\n");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Corpus,
+				"GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus", !root.empty(), "set VP_TEST_DV_SYNTH_CORPUS"))
 				return;
-			}
 			char* gpuValue = nullptr;
 			size_t gpuLength = 0;
 			const bool hardware = _dupenv_s(&gpuValue, &gpuLength, "VP_TEST_GPU") == 0 && gpuValue && std::string(gpuValue) == "hardware";
