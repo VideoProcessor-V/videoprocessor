@@ -138,6 +138,33 @@ namespace Tests
 			Assert::IsTrue(Has(core, "SyncFallback(FallbackCatalog::AmbientAdaptReplaced(activeSettings.ambientAdaptReplaced &&"));
 		}
 
+		// CF1-G7b: the replacement follows the pass frame by frame: appearance acting, then idle, then acting again. The
+		// stored ambient_adapt stays off throughout (PostLoad); what the intent interpreter and the Fallbacks list see per frame
+		// is AmbientAdaptOn / the catalog row, so ambient_adapt returns on the idle frames and the listing goes with it.
+		TEST_METHOD(AmbientAdaptReturnsWhenAppearanceStopsActing)
+		{
+			const bool acting[] = { true, true, false, false, true, false, true };
+			bool wasListed = false;
+			for (size_t frame = 0; frame < sizeof(acting) / sizeof(acting[0]); ++frame)
+			{
+				const bool active = acting[frame];
+				const bool on = AppearanceStage::AmbientAdaptOn(false, true, active);
+				const FallbackCatalog::Decision row = FallbackCatalog::AmbientAdaptReplaced(true && !AppearanceStage::AmbientAdaptGivenBack(true, active));
+				const std::wstring label = L"frame " + std::to_wstring(frame);
+				Assert::AreEqual(!active, on, (label + L": ambient_adapt runs exactly when appearance does not").c_str());
+				Assert::AreEqual(active, row.engaged, (label + L": listed exactly while appearance acts").c_str());
+				Assert::AreEqual(std::string("ambient_adapt: replaced by appearance"), row.id);
+				// Never both: a frame is either replaced (and listed) or given back (and not listed).
+				Assert::IsTrue(on != row.engaged, (label + L": one owner of the room-light correction per frame").c_str());
+				wasListed = wasListed || row.engaged;
+			}
+			Assert::IsTrue(wasListed);
+			// The settings-time decision stays as the configured fact the per-frame rule reads (not removed).
+			const std::string settings = ReadUp("src\VP-V\modules\control\config\VpvRendererSettings.cpp");
+			Assert::IsTrue(Has(settings, "settings.ambientAdaptReplaced = appearanceRuns && settings.ambientAdapt;"));
+			Assert::IsTrue(Has(settings, "settings.ambientAdapt = false;"));
+		}
+
 		TEST_METHOD(SettingsPlumbingIsInPlace)
 		{
 			// CF1-FIN MUST 3: every separator escaped (the single-backslash literals never named a file).
