@@ -11,7 +11,10 @@
 // OriginalPathwayByteIdenticalToBill (RendererCaptureHarnessTests, GPU) covers them.
 #include "pch.h"
 #include "CppUnitTest.h"
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/OriginalPathway.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
+#include "../SettingsTestSupport.h"
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/modules/input/queue_timing/IngressPolicy.h>
 #include <VP-V/modules/input/queue_timing/IngressState.h>
@@ -450,6 +453,51 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("released"), log[0]);
 			VpMotion::ReleaseVpTimeline(st, take);
 			Assert::AreEqual<size_t>(1, log.size(), L"idempotent: no second line");
+		}
+
+		// GEM-173: Bill has no source_geometry_detect, so the Original pathway forces it to the built-in default "all"
+		// (the renderer's own loader, no device). The control arm proves the configured value reaches the field.
+		TEST_METHOD(SourceGeometryDetectIsForcedToTheDefaultInTheOriginalPathway)
+		{
+			SettingsTestSupport::Renderer renderer;
+			Assert::IsTrue(renderer.Ready(), L"the renderer DLL and its settings exports");
+			const std::string profile = "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n"
+				"source_geometry_detect: zzz_unknown, 1920x1080\n";
+			const SettingsTestSupport::Evaluation off = renderer.Evaluate(profile);
+			Assert::IsTrue(off.ok, L"the control configuration loads");
+			Assert::AreEqual(std::string("zzz_unknown, 1920x1080"),
+				SettingsTestSupport::DescribeValue(off.describe, "source_geometry_detect"),
+				L"control arm (pathway off): the configured value reaches the field");
+			const SettingsTestSupport::Evaluation on = renderer.Evaluate(profile + "[vpv]\npipeline_original_pathway: on\n");
+			Assert::IsTrue(on.ok, L"the Original configuration loads");
+			Assert::AreEqual(std::string("all"),
+				SettingsTestSupport::DescribeValue(on.describe, "source_geometry_detect"),
+				L"Original pathway: forced to the built-in default after PostLoad");
+		}
+
+		// Entering the Original pathway releases the "source geometry detect" line a VP-V value engaged: the forced value
+		// parses with no unknown id, and the monitor reports the change so the settings seam syncs the line away.
+		TEST_METHOD(EnteringTheOriginalPathwayReleasesTheUnknownGeometryLine)
+		{
+			SettingsTestSupport::Renderer renderer;
+			Assert::IsTrue(renderer.Ready(), L"the renderer DLL and its settings exports");
+			const SettingsTestSupport::Evaluation on = renderer.Evaluate(
+				"[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n"
+				"source_geometry_detect: zzz_unknown\n[vpv]\npipeline_original_pathway: on\n");
+			Assert::IsTrue(on.ok);
+			const std::string originalValue = SettingsTestSupport::DescribeValue(on.describe, "source_geometry_detect");
+
+			SourceResolutionMonitor::Monitor monitor;
+			Assert::IsTrue(monitor.SetGeometryDetect("zzz_unknown"));
+			const FallbackCatalog::Decision engaged = monitor.GeometryDetectFallback();
+			Assert::IsTrue(engaged.engaged, L"control: an unknown id engages the line");
+			Assert::AreEqual(std::string("source geometry detect"), engaged.id);
+			Assert::IsTrue(engaged.reason.find("zzz_unknown") != std::string::npos);
+
+			Assert::IsTrue(monitor.SetGeometryDetect(originalValue), L"the Original value is a change: the seam re-syncs the line");
+			const FallbackCatalog::Decision released = monitor.GeometryDetectFallback();
+			Assert::IsFalse(released.engaged, L"released in the Original pathway");
+			Assert::IsTrue(released.reason.empty());
 		}
 	};
 }
