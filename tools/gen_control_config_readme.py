@@ -18,7 +18,10 @@ Sources (no hand-kept key list):
   coverage audit has no row for yet (the audit needs a Config test inventory, so it lags new keys),
   and the shipped default of a boolean key whose audit default disagrees (the audit predates the change);
 - the Config coverage test allow-list (ConfigEditorWindowTests.cpp, read only): the reason of a key the
-  coverage audit has no row for yet (the audit's flags column carries the same reason).
+  coverage audit has no row for yet (the audit's flags column carries the same reason);
+- the Config card table (VpvOrganisation.h Organisation(), resolved by check_config_placement.build_table,
+  read only): the VP-V card of a key that is neither a tier toggle nor a taste key, in place of the
+  audit's VP-V placement (the audit predates card moves).
 The table says nothing about any particular display: tiers are budget-driven.
 """
 import json
@@ -186,6 +189,14 @@ def allow_list_reasons():
     return {m.group(1): m.group(2) for m in re.finditer(r'\{\s*"renderer:(\w+)",\s*"((?:[^"\\]|\\.)*)"\s*\}', text)}
 
 
+def card_placements(keys):
+    """key -> 'VP-V > <Unit> > <Main|Advanced> > <card title>' from the one placement table (read only)."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import check_config_placement as P   # noqa: E402  (pure text parsing, no writes)
+    _cards, placement, _sections, _errors = P.build_table(str(ROOT), set(keys))
+    return {k: card["text"] for k, card in placement.items() if k in keys}
+
+
 BOOL_WORDS = {"on": True, "checked": True, "true": True, "off": False, "unchecked": False, "false": False}
 
 
@@ -207,6 +218,7 @@ def build():
     master = master_rows()
     reasons = allow_list_reasons()
     entries = []
+    cards = {}
     for k, (g, t) in prof.items():
         entries.append((k, GROUP_SECTION[g], t, g))
     for k, (s, t) in start.items():
@@ -219,6 +231,7 @@ def build():
         if k not in seen:
             entries.append((k, "[vpv]", "see ValidateBaseSetting", "base"))
     entries.sort(key=lambda e: (e[3], e[0]))
+    cards = card_placements({e[0] for e in entries})
     lines = ["| Key | Section | Type / range | Default | Config placement | Original (Bill) | Fallback / status | Tier differences |",
              "|---|---|---|---|---|---|---|---|"]
     for k, sec, typ, grp in entries:
@@ -237,11 +250,16 @@ def build():
                 a0["default"] = shown_default(ms0["default"])   # the shipped default (golden-checked)
         place = []
         if a0.get("upstream") and a0["upstream"] != "-":
-            place.append(a0["upstream"])
+            # a key on a VP-V card: the audit's coarse VP-V entry gives way to the card (Bill pages stay)
+            up = [p for p in a0["upstream"].split("; ") if not (k in cards and p.startswith("VP-V"))]
+            if up:
+                place.append("; ".join(up))
         if k in toggle:
             place.append("VP-V page > %s (toggle)" % toggle[k][0])
         elif k in taste:
             place.append("VP-V page > %s (taste)" % taste[k])
+        elif k in cards:
+            place.append(cards[k])   # the card the Config editor builds the key on
         elif a0.get("vpv") and a0["vpv"] != "-":
             place.append(a0["vpv"])
         if not place:
