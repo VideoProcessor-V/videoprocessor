@@ -105,6 +105,9 @@ public:
     // One sampleable + storable texture of `shape`: out.resource = the pl_tex, out.width / height / format / bytes (ShapeBytes) set,
     // out.keepAlive destroys it at the device's next GPU-legal phase (or forgets it when the device died). False: `why`.
     virtual bool CreateOwnerTexture(const TexShape& shape, GpuMemoHandle& out, std::string& why) = 0;
+    // The device's compute shared memory per workgroup in bytes (libplacebo glsl.max_shmem_size), so a fill's kernels can check
+    // their need without naming the device. 0 = not known: a fill that needs shared memory refuses visibly.
+    virtual uint64_t OwnerMaxSharedMemory() const { return 0; }
 };
 
 class OwnerGpuContext {
@@ -115,6 +118,8 @@ public:
 
     void* Gpu() const { return open_ && device_ != nullptr ? device_->OwnerGpu() : nullptr; }
     void* Dispatch() const { return open_ && device_ != nullptr ? device_->OwnerDispatch() : nullptr; }
+    // The device's compute shared memory per workgroup (bytes); 0 when closed, with no device, or not known (IOwnerGpuDevice).
+    uint64_t MaxSharedMemory() const { return open_ && device_ != nullptr ? device_->OwnerMaxSharedMemory() : 0u; }
     // A texture of `shape`, accounted against the grant. False (nothing allocated): closed, no device, over the grant or refused by
     // the device; `why` says which.
     bool Allocate(const TexShape& shape, GpuMemoHandle& out, std::string& why)
