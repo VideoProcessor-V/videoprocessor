@@ -579,6 +579,60 @@ namespace VideoProcessorTest
 				s.k = std::min(std::max(s.k, 0.0), 1.0);
 				return s;
 			};
+			// CPU mirror of the whole hook for any colour (both passthroughs on): in range -> the per-channel
+			// curve; luma out of range, all channels above white or all below black -> the input; else the split.
+			auto modelOut = [&curve, &luma, &split](const Rgb& o, double gain, double b, double domain)
+			{
+				bool above = false, below = false, allAbove = true, allBelow = true;
+				for (int k = 0; k < 3; ++k)
+				{
+					above = above || o[k] > 1.0;
+					below = below || o[k] < 0.0;
+					allAbove = allAbove && o[k] > 1.0;
+					allBelow = allBelow && o[k] < 0.0;
+				}
+				Rgb r{};
+				const double y = luma(o);
+				if (!above && !below)
+				{
+					for (int k = 0; k < 3; ++k)
+						r[k] = curve(o[k], gain, b, domain);
+					return r;
+				}
+				if (y > 1.0 || allAbove || !(y > 0.0) || allBelow)
+					return o;
+				const Split sp = split(o, gain, b, domain);
+				for (int k = 0; k < 3; ++k)
+					r[k] = curve(sp.p[k], gain, b, domain) + sp.k * sp.e[k];
+				return r;
+			};
+			// Largest channel difference in codes between two model outputs.
+			auto modelStep = [](const Rgb& a, const Rgb& b)
+			{
+				return 876.0 * std::max(std::abs(a[0] - b[0]), std::max(std::abs(a[1] - b[1]), std::abs(a[2] - b[2])));
+			};
+			auto codeStep = [](const Codes& a, const Codes& b)
+			{
+				return std::max(std::abs(a[0] - b[0]), std::max(std::abs(a[1] - b[1]), std::abs(a[2] - b[2])));
+			};
+			// How far out - (in-range part + k f e) moves, in codes, when the input moves by one code: the in-range
+			// part's own sensitivity to input quantisation, which the residual check cannot reference away.
+			auto partSensitivity = [&curve, &split](const Rgb& o, double gain, double b, double domain)
+			{
+				const Split base = split(o, gain, b, domain);
+				double worst = 0.0;
+				for (int k = 0; k < 3; ++k)
+					for (const double sign : { -1.0, 1.0 })
+					{
+						Rgb moved = o;
+						moved[k] += sign / 876.0;
+						const Split nudged = split(moved, gain, b, domain);   // not "near": a Windows macro
+						for (int j = 0; j < 3; ++j)
+							worst = std::max(worst, 876.0 * std::abs(curve(nudged.p[j], gain, b, domain) -
+								curve(base.p[j], gain, b, domain) - base.k * base.f * (nudged.p[j] - base.p[j])));
+					}
+				return worst;
+			};
 			// In range, white and black included (the per-channel path).
 			const Codes inRange[] = { { 900, 500, 200 }, { 930, 940, 64 } };
 			struct Setting { double gain, boost, domain; };
@@ -610,6 +664,24 @@ namespace VideoProcessorTest
 			Logger::WriteMessage((L"GEM-W1-LED idle round trip: " + idleText + L"\n").c_str());
 			Assert::IsTrue(idleOff <= 1, (L"Idle hook moved a colour by " + std::to_wstring(idleOff) + L" codes: " + idleText).c_str());
 
+			// GEM-Q15d ruling (a): the excursion of a channel above white is measured from that channel's idle
+			// code (the WARP round trip reads up to ~1 code low near the top, 1010 -> 1009), as the exact checks
+			// are. Other channels keep their input code.
+			auto excursionCodes = [&idle](const Codes& c, const Split& sp, int k)
+			{
+				const double from = c[k] > 940 ? idle.at(c)[k] - 64.0 : c[k] - 64.0;
+				return sp.k * sp.f * (from - 876.0 * sp.p[k]);
+			};
+			// Ruling (b) (GEM-Q15d): near white (luma > 0.99) at gain > 1 the in-range part itself moves several
+			// codes per input code (model: 9 on 980/1000/200), so the WARP input quantisation cannot be referenced
+			// away there. The residual is not asserted for those cases; the near-white noise check below bounds
+			// them instead. Every other case keeps the 1.5-code residual.
+			auto residualCheckable = [&luma, &partSensitivity](const Rgb& in, double gain, double b, double domain)
+			{
+				return !(luma(in) > 0.99 && partSensitivity(in, gain, b, domain) > 2.0);
+			};
+			int residualChecked = 0, residualNearWhite = 0;
+
 			std::wstring problems;
 			double worstHueOff = 0.0, worstHueExcess = 0.0;
 			int scaledExcursions = 0, rangeLimited = 0, exactBelow = 0;
@@ -627,13 +699,19 @@ namespace VideoProcessorTest
 					const Split sp = split(in, s.gain, s.boost, s.domain);
 					// The in-range part, rendered as an in-range colour: its neighbour's compensation.
 					const Codes part = render(sp.p);
-					for (int k = 0; k < 3; ++k)
+					if (residualCheckable(in, s.gain, s.boost, s.domain))
 					{
-						const double expected = part[k] + 876.0 * sp.k * sp.e[k];
-						if (std::abs(out[k] - expected) > 1.5)
-							problems += L"channel " + std::to_wstring(k) + L" of " + text(c) + L": " + std::to_wstring(out[k]) +
-								L" for in-range part " + std::to_wstring(part[k]) + L" + k f e = " + std::to_wstring(expected) + where;
+						++residualChecked;
+						for (int k = 0; k < 3; ++k)
+						{
+							const double expected = part[k] + excursionCodes(c, sp, k);
+							if (std::abs(out[k] - expected) > 1.5)
+								problems += L"channel " + std::to_wstring(k) + L" of " + text(c) + L": " + std::to_wstring(out[k]) +
+									L" for in-range part " + std::to_wstring(part[k]) + L" + k f e = " + std::to_wstring(expected) + where;
+						}
 					}
+					else
+						++residualNearWhite;
 					if (sp.f < 1.0)
 					{
 						++scaledExcursions;   // headroom follows the compensated white (the GPU's own C(1))
@@ -733,6 +811,114 @@ namespace VideoProcessorTest
 				}
 			}
 
+			// Near-white edge pairs (GEM-Q15d): the top channel one code past white, luma just below 1. These step
+			// further than the pairs above because the knee lifts the in-range neighbour's lower channels to about
+			// white while luma > 1 keeps them (achieved worst: model 19.2 codes, 940/940/340 at encoded gain 2.5).
+			// Bound: the model's own step for that setting (<= 19.5 codes), and the GPU within 3 codes of the
+			// model (the input quantisation measured on 980/1000/200 in the fbe29f028 TRX).
+			const std::pair<Codes, Codes> nearWhiteEdges[] = { { { 940, 940, 820 }, { 941, 940, 820 } },
+				{ { 940, 940, 700 }, { 941, 940, 700 } }, { { 940, 940, 500 }, { 941, 940, 500 } },
+				{ { 940, 940, 340 }, { 941, 940, 340 } } };
+			double worstNearWhiteEdgeModel = 0.0;
+			int worstNearWhiteEdge = 0;
+			for (const Setting& s : settings)
+			{
+				set(s.gain, s.boost, s.domain);
+				for (const auto& pair : nearWhiteEdges)
+				{
+					const int step = codeStep(render(toSignal(pair.first)), render(toSignal(pair.second)));
+					const double model = modelStep(modelOut(toSignal(pair.first), s.gain, s.boost, s.domain),
+						modelOut(toSignal(pair.second), s.gain, s.boost, s.domain));
+					worstNearWhiteEdge = std::max(worstNearWhiteEdge, step);
+					worstNearWhiteEdgeModel = std::max(worstNearWhiteEdgeModel, model);
+					if (model > 19.5 || step > model + 3.0)
+						problems += L"near-white edge " + text(pair.first) + L" vs " + text(pair.second) + L": step " +
+							std::to_wstring(step) + L" codes, model " + std::to_wstring(model) + L" at gain " +
+							std::to_wstring(s.gain) + L", boost " + std::to_wstring(s.boost) + L", domain " +
+							std::to_wstring(static_cast<int>(s.domain)) + L"; ";
+				}
+			}
+
+			// Near-white noise (GEM-Q15d). Any design that keeps in-range pixels byte-identical and luma > 1
+			// exact must, on a 1-code lattice path from in-range A to luma > 1 B, take some step of at least
+			// |out(A) - out(B)| / steps: the proven minimum. Paths: (940, 940, b) -> (941, 940, b) -> G up one code
+			// at a time until luma > 1, for b = 820 / 500 / 200; plus +-1 code on each channel of 980/1000/200,
+			// 942/942/340 and 942/942/820. Achieved = the largest 1-code step found. Asserted: achieved >= the
+			// proven minimum; the model's achieved within the stated factor of it (1.4x; 2.1x at encoded gain 2.5;
+			// model 1.28 / 1.32 / 1.35 / 2.00); the GPU's achieved within 3 codes of the model's; the GPU's proven
+			// minimum within 0.25 code of the model's (its endpoints do not depend on the split).
+			struct NearWhite { double gain, domain, factor; };
+			const NearWhite nearWhiteSettings[] = { { 1.3, 0.0, 1.4 }, { 2.5, 0.0, 2.1 }, { 1.3, 1.0, 1.4 }, { 2.5, 1.0, 1.4 } };
+			std::vector<std::vector<Codes>> nearWhitePaths;
+			for (const int blue : { 820, 500, 200 })
+			{
+				std::vector<Codes> path = { Codes{ 940, 940, blue }, Codes{ 941, 940, blue } };
+				while (!(luma(toSignal(path.back())) > 1.0))
+				{
+					Codes next = path.back();
+					++next[1];
+					path.push_back(next);
+				}
+				nearWhitePaths.push_back(path);
+			}
+			const Codes nearWhiteProbes[] = { { 980, 1000, 200 }, { 942, 942, 340 }, { 942, 942, 820 } };
+			std::wstring nearWhiteText;
+			for (const NearWhite& s : nearWhiteSettings)
+			{
+				set(s.gain, 1.0, s.domain);
+				double minimumModel = 0.0, minimumGpu = 0.0, achievedModel = 0.0;
+				int achievedGpu = 0;
+				for (const auto& path : nearWhitePaths)
+				{
+					std::vector<Codes> gpu;
+					std::vector<Rgb> model;
+					for (const Codes& c : path)
+					{
+						gpu.push_back(render(toSignal(c)));
+						model.push_back(modelOut(toSignal(c), s.gain, 1.0, s.domain));
+					}
+					const double steps = static_cast<double>(path.size() - 1);
+					minimumModel = std::max(minimumModel, modelStep(model.front(), model.back()) / steps);
+					minimumGpu = std::max(minimumGpu, codeStep(gpu.front(), gpu.back()) / steps);
+					for (size_t i = 1; i < path.size(); ++i)
+					{
+						achievedModel = std::max(achievedModel, modelStep(model[i], model[i - 1]));
+						achievedGpu = std::max(achievedGpu, codeStep(gpu[i], gpu[i - 1]));
+					}
+				}
+				for (const Codes& c : nearWhiteProbes)
+				{
+					const Codes baseGpu = render(toSignal(c));
+					const Rgb baseModel = modelOut(toSignal(c), s.gain, 1.0, s.domain);
+					for (int k = 0; k < 3; ++k)
+						for (const int sign : { -1, 1 })
+						{
+							Codes moved = c;
+							moved[k] += sign;
+							achievedGpu = std::max(achievedGpu, codeStep(render(toSignal(moved)), baseGpu));
+							achievedModel = std::max(achievedModel, modelStep(modelOut(toSignal(moved), s.gain, 1.0, s.domain), baseModel));
+						}
+				}
+				const std::wstring where = L" at gain " + std::to_wstring(s.gain) + L", domain " +
+					std::to_wstring(static_cast<int>(s.domain)) + L"; ";
+				nearWhiteText += L"gain " + std::to_wstring(s.gain) + L" domain " + std::to_wstring(static_cast<int>(s.domain)) +
+					L": proven minimum " + std::to_wstring(minimumModel) + L" (GPU " + std::to_wstring(minimumGpu) + L"), achieved model " +
+					std::to_wstring(achievedModel) + L", GPU " + std::to_wstring(achievedGpu) + L"; ";
+				if (achievedModel + 1e-9 < minimumModel || achievedGpu + 1e-9 < minimumGpu)
+					problems += L"near-white achieved below the proven minimum" + where;
+				if (achievedModel > s.factor * minimumModel)
+					problems += L"near-white model achieved " + std::to_wstring(achievedModel) + L" beyond " +
+						std::to_wstring(s.factor) + L"x the proven minimum " + std::to_wstring(minimumModel) + where;
+				if (achievedGpu > achievedModel + 3.0)
+					problems += L"near-white GPU achieved " + std::to_wstring(achievedGpu) + L" vs model " +
+						std::to_wstring(achievedModel) + where;
+				if (std::abs(minimumGpu - minimumModel) > 0.25)
+					problems += L"near-white proven minimum GPU " + std::to_wstring(minimumGpu) + L" vs model " +
+						std::to_wstring(minimumModel) + where;
+			}
+			Logger::WriteMessage((L"GEM-W1-LED near-white noise: " + nearWhiteText + L"edge pairs worst " +
+				std::to_wstring(worstNearWhiteEdge) + L" codes (model " + std::to_wstring(worstNearWhiteEdgeModel) + L")\n").c_str());
+
 			// No pulse: the LED ramping through 1 (gains 0.85 -> 1.01 in steps of 0.0025, with the boost). A
 			// partly out-of-range pixel's in-range part tracks its in-range neighbour step for step: each
 			// channel's step equals the in-range part's step within 4 codes (model 3), and out - in-range part
@@ -750,9 +936,14 @@ namespace VideoProcessorTest
 						set(g, boost, domain);
 						const Split sp = split(in, g, boost, domain);
 						const Codes out = render(in), part = render(sp.p);
+						const bool checkable = residualCheckable(in, g, boost, domain);
+						if (checkable)
+							++residualChecked;
+						else
+							++residualNearWhite;
 						for (int k = 0; k < 3; ++k)
 						{
-							if (std::abs(out[k] - (part[k] + 876.0 * sp.k * sp.e[k])) > 1.5)
+							if (checkable && std::abs(out[k] - (part[k] + excursionCodes(c, sp, k))) > 1.5)
 								problems += L"sweep " + text(c) + L" channel " + std::to_wstring(k) + L": " + std::to_wstring(out[k]) +
 									L" vs in-range part " + std::to_wstring(part[k]) + L" at gain " + std::to_wstring(g) + L", domain " +
 									std::to_wstring(static_cast<int>(domain)) + L"; ";
@@ -800,7 +991,13 @@ namespace VideoProcessorTest
 				L" deg (boost off), worst excess over the in-range part's boost tilt " + std::to_wstring(worstHueExcess) +
 				L" deg; edge pairs worst in-range / all-channel step " + std::to_wstring(worstEdgeIn) + L" / " +
 				std::to_wstring(worstEdgeAll) + L" codes; sweep worst step against the in-range part " +
-				std::to_wstring(worstStep) + L" codes\n").c_str());
+				std::to_wstring(worstStep) + L" codes; residual asserted " + std::to_wstring(residualChecked) +
+				L", near-white (bounded by the noise check) " + std::to_wstring(residualNearWhite) + L"\n").c_str());
+			// Non-vacuous, and the near-white exemption is exactly the model's: 980/1000/200 at gains 1.3 / 2.5
+			// (8 settings) and in the sweep above gain 1 (4 gains x 2 domains).
+			if (residualChecked < 100 || residualNearWhite != 16)
+				problems += L"residual coverage: asserted " + std::to_wstring(residualChecked) + L", near-white " +
+					std::to_wstring(residualNearWhite) + L" (expected 16); ";
 			fixture.CaptureLog(nullptr);
 			Assert::IsTrue(problems.empty(), (problems + L"log: " + std::wstring(log.begin(), log.end())).c_str());
 			AssertCleanLibplaceboLogExceptPreOutputBug(log);
