@@ -29,6 +29,7 @@
         "src/VP-V/modules/input/capture/CapturePayload.h",
         "src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.cpp",
         "src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.h",
+        "src/VP-V/modules/input/capture/DeckLinkTranslatePolicy.cpp",
         "src/VideoProcessor-Lib/CaptureInput.h",
         "src/VideoProcessor-Lib/blackmagic_decklink",
         "src/VideoProcessor-Lib/magewell",
