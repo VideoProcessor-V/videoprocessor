@@ -165,5 +165,30 @@ namespace GfP4MotionTest
 			Assert::IsTrue(calls[1].find("\"motion_ahead_request\")") != std::string::npos, L"the request's to-frame names motion_ahead_request");
 			Assert::IsTrue(calls[2].find("\"motion_ahead_request\")") != std::string::npos, L"the request's from-frame names motion_ahead_request");
 		}
+
+		// GF-P4 S4 (source pin): the product.motion_warp fallback row is released on the settled-off branch of the de-judder policy
+		// and in ReleaseDejudder, never left engaged when no estimate (and so no matcher pyramid of its own) runs.
+		TEST_METHOD(MotionWarpReleasedOnSettledOffAndRelease)
+		{
+			const char* released = "Released(\"product.motion_warp\")";
+
+			const std::string runner = ReadSource("src\\VP-V\\modules\\motion\\consumers\\DejudderPolicyRunner.inl");
+			Assert::IsFalse(runner.empty(), L"DejudderPolicyRunner.inl found from __FILE__");
+			const size_t branch = runner.find("outcome == VpMotion::DecisionOutcome::ReleaseBranch");
+			Assert::IsTrue(branch != std::string::npos, L"the ReleaseBranch outcome is tested");
+			const size_t release = runner.find(released, branch);
+			Assert::IsTrue(release != std::string::npos, L"the row is released after the ReleaseBranch test");
+			const size_t pairCheck = runner.find("outcome != VpMotion::DecisionOutcome::PairCheck", branch);
+			Assert::IsTrue(pairCheck != std::string::npos, L"the PairCheck early return follows");
+			Assert::IsTrue(release < pairCheck, L"released BEFORE the early return for every outcome but PairCheck");
+
+			const std::string timeline = ReadSource("src\\VP-V\\modules\\motion\\consumers\\PhaseTimeline.inl");
+			Assert::IsFalse(timeline.empty(), L"PhaseTimeline.inl found from __FILE__");
+			const std::string body = BodyBetween(timeline, "void LibplaceboVideoRenderer::Impl::ReleaseDejudder()", "}");
+			Assert::IsFalse(body.empty(), L"the body of ReleaseDejudder was found");
+			const size_t reset = body.find("dejudder.reset();");
+			Assert::IsTrue(reset != std::string::npos, L"the matcher is reset in ReleaseDejudder");
+			Assert::IsTrue(body.find(released, reset) != std::string::npos, L"the row is released after dejudder.reset();");
+		}
 	};
 }
