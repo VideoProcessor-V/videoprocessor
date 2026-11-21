@@ -349,6 +349,37 @@ namespace VideoProcessorTest
 			}
 		}
 
+		// GF-P4 S-2 FIX (f4916b359): the gap read's refusal at a confirmed cut is COUNTED like PairValidAt's adjacent refusal: once in this
+		// state (ConfirmedCutRefusals) and once process-wide (ConfirmedCutRefusalsAll). With no confirmed cut the same read is served
+		// and neither count moves.
+		TEST_METHOD(GapRefusalAtAConfirmedCutIsCounted)
+		{
+			VpMotion::VectorEngine engine;   // only the gap pair 8 -> 11
+			engine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			engine.p2Slot->SetGeneration(engine.motionValidity.StreamGeneration());
+			engine.p2Slot->Publish(8, 11, engine.p2Slot->Generation(), MakeFlow(3.0f, true, false));
+			VpMotion::P2PairRecord rec;
+			std::string why;
+			{
+				const CutSeamScope scope(&CutAtTen);
+				const unsigned long long r0 = engine.motionValidity.ConfirmedCutRefusals();
+				const unsigned long long a0 = ::MotionValidity::State::ConfirmedCutRefusalsAll().load();
+				Assert::IsFalse(engine.P2RecordEndingAt(11, rec, why), L"the gap pair crosses the confirmed cut at 10");
+				Assert::IsTrue(Has(why, "crosses a confirmed cut at 10"));
+				Assert::AreEqual(r0 + 1ull, static_cast<unsigned long long>(engine.motionValidity.ConfirmedCutRefusals()), L"counted once in this state");
+				Assert::AreEqual(a0 + 1ull, static_cast<unsigned long long>(::MotionValidity::State::ConfirmedCutRefusalsAll().load()), L"and once process-wide");
+			}
+			{
+				const CutSeamScope scope(&CutNowhere);
+				why.clear();
+				const unsigned long long r1 = engine.motionValidity.ConfirmedCutRefusals();
+				const unsigned long long a1 = ::MotionValidity::State::ConfirmedCutRefusalsAll().load();
+				Assert::IsTrue(engine.P2RecordEndingAt(11, rec, why), L"no confirmed cut: the same read is served");
+				Assert::AreEqual(r1, static_cast<unsigned long long>(engine.motionValidity.ConfirmedCutRefusals()), L"nothing counted");
+				Assert::AreEqual(a1, static_cast<unsigned long long>(::MotionValidity::State::ConfirmedCutRefusalsAll().load()));
+			}
+		}
+
 		// BBP-A-COUNTS-CTRLALTD: the form's declines reach the status segment (Config status / Ctrl+Alt+D), never log-only:
 		// served + declined + the last decline's words; nothing shown while every read was served; shown without a producer too.
 		TEST_METHOD(ProducerStatusSegmentNamesTheP2CpuFormDeclines)
