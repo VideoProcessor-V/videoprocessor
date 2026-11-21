@@ -239,6 +239,34 @@ class DedicatedJobCategories(unittest.TestCase):
         self.assertIn("Category=Corpus", out.split("|"))
         self.assertNotIn("Category=GpuHardware", out.split("|"))
 
+    def test_names_only_drops_every_category_term_for_a_queue_line(self):
+        self.assertEqual(G.names_only("Name~A|Category=X|FullyQualifiedName~B", "|"), "Name~A|FullyQualifiedName~B")
+        self.assertEqual(G.names_only("Name!~A&Category!=X&FullyQualifiedName!~B", "&"), "Name!~A&FullyQualifiedName!~B")
+        self.assertEqual(G.names_only("Category=Footage", "|"), "")
+
+    def test_cli_names_only_has_no_category_term_in_any_selection(self):
+        for argv, sep in ((("--cpu",), "&"), (("--gpu",), "|"), (("--gpuwarp",), "|"), (("--gpu", "--categories", "Bench"), "|")):
+            with self.subTest(argv=argv):
+                rc, out, _err = self._run_main(*argv, "--names-only")
+                self.assertEqual(rc, 0)
+                self.assertTrue(out)
+                self.assertFalse([t for t in out.split(sep) if t.startswith("Category")], out)
+        # the Bench class entry keeps its name clause, so a Bench queue line can be coverage-checked
+        self.assertIn("FullyQualifiedName~ProducerThroughputBench", self._run_main("--gpu", "--categories", "Bench", "--names-only")[1])
+
+    def test_cli_names_only_fails_when_the_category_leaves_no_name_clause(self):
+        real_sources, real_manifest = L.test_sources, L.load_manifest
+        L.test_sources = lambda _root: iter([])
+        L.load_manifest = lambda path=None: {"entries": []}
+        try:
+            rc, out, err = self._run_main("--gpu", "--categories", "Footage", "--names-only")
+            self.assertEqual((rc, out), (2, ""))
+            self.assertIn("no name clause", err)
+            rc, out, _err = self._run_main("--gpu", "--categories", "Footage")   # without the flag the Category term remains
+            self.assertEqual((rc, out), (0, "Category=Footage"))
+        finally:
+            L.test_sources, L.load_manifest = real_sources, real_manifest
+
 
 WARP_SOURCE = r"""
 TEST_CLASS(WarpTests)
