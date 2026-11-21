@@ -43,6 +43,8 @@ namespace LedDrive
 		virtual LedDriveConfig Config() const = 0;
 		virtual std::shared_ptr<const RawTransfer> CurrentRawTransfer() const = 0;
 		virtual double DisplayGamma() const = 0;
+		// FIX1 MUST 6: colour.appearance replaces the gamma boost this frame (the measurement then sees no boost either).
+		virtual bool BoostReplaced() const { return false; }
 		virtual int SourceRange() const = 0;
 		virtual double SourceFramePeriodMs() const = 0;
 		virtual void SubmitPrediction(uint64_t sequence, const FrameStats& predicted) = 0;

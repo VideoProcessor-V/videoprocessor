@@ -1029,6 +1029,12 @@ namespace VpvRendererSettings
 			settings.ambientAdaptReplaced = appearanceRuns && settings.ambientAdapt;
 			if (settings.ambientAdaptReplaced)
 				settings.ambientAdapt = false;
+			// FIX1 MUST 6 (refs/125 s4 "replaces gamma boost + saturation"; doc 115 B15): the saturation step is the
+			// appearance model's job while it runs (its M), so the step is off, visibly; the user's value is kept for the line.
+			settings.saturationReplaced = appearanceRuns && settings.saturation != 0;
+			settings.saturationConfigured = settings.saturationReplaced ? settings.saturation : 0;
+			if (settings.saturationReplaced)
+				settings.saturation = 0;
 		}
 		// Motion + queue/timing slots switched off run in their upstream form (owner 2026-10-25).
 		SlotSwitchSettings::Apply(SlotSwitchSettings::FromText(settings.pipelineSlotsOff), settings);

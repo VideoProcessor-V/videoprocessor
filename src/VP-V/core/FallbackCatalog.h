@@ -636,6 +636,18 @@ namespace FallbackCatalog
 		return replaced ? Engaged("ambient_adapt: replaced by appearance", "ambient_adapt is off while appearance is on (one owner of the room-light correction)")
 		                : Released("ambient_adapt: replaced by appearance");
 	}
+	// CF-1 FIX1 MUST 6: appearance replaces the gamma boost and the saturation step (doc 115 B15: one owner per correction).
+	inline Decision GammaBoostReplaced(bool replaced)
+	{
+		return replaced ? Engaged("gamma boost: replaced by appearance", "gamma_boost is not applied while appearance is on (one owner of the screen-brightness correction)")
+		                : Released("gamma boost: replaced by appearance");
+	}
+	inline Decision SaturationReplaced(bool replaced, int configured)
+	{
+		return replaced ? Engaged("saturation: replaced by appearance", "saturation " + std::string(configured > 0 ? "+" : "") + std::to_string(configured) +
+		                      " is not applied while appearance is on (one owner of the colourfulness correction)")
+		                : Released("saturation: replaced by appearance");
+	}
 	// CF-1 FIX1 MUST 2: appearance on, but libplacebo applies the calibration LUT before it (calibration_lut_stage libplacebo): off.
 	inline Decision AppearanceCalibrationLut(bool conflict)
 	{

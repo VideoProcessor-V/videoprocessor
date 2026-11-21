@@ -6,6 +6,7 @@
 #include <VP-V/core/FallbackPlainText.h>
 #include <VP-V/modules/colour/appearance/AppearanceStage.h>
 #include <VP-V/modules/colour/display_mapping/DvHostStage.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
 
 #include <fstream>
@@ -234,6 +235,47 @@ namespace Tests
 				return;   // not reachable from this working directory
 			Assert::IsTrue(Fix1Has(glsl, "float ap_flare(float o, float f)"));
 			Assert::IsFalse(Fix1Has(glsl, "(outLin - vec3(apx_veil))"), L"the subtract-and-clip is gone");
+		}
+	};
+	// MUST 6: appearance replaces the gamma boost and the saturation step (doc 115 B15), visibly.
+	TEST_CLASS(AppearanceReplacesFix1Tests)
+	{
+	public:
+		TEST_METHOD(GammaBoostStepsAsideWhileAppearanceRuns)
+		{
+			Assert::AreEqual(1.0, LedDrive::BoostExponentUnderAppearance(2.0, 2.4, true), 0.0);
+			Assert::AreEqual(1.2, LedDrive::BoostExponentUnderAppearance(2.0, 2.4, false), 1e-12);
+			Assert::AreEqual(1.0, LedDrive::BoostExponentUnderAppearance(0.0, 2.4, false), 0.0);
+			const FallbackCatalog::Decision row = FallbackCatalog::GammaBoostReplaced(true);
+			Assert::IsTrue(row.engaged);
+			Assert::AreEqual(std::string("gamma boost: replaced by appearance"), row.id);
+			Assert::IsTrue(std::string(FallbackPlainText::Sentence(row.id)).size() > 0);
+			Assert::IsFalse(FallbackCatalog::GammaBoostReplaced(false).engaged);
+		}
+
+		TEST_METHOD(SaturationStepsAsideAndSaysTheValue)
+		{
+			const FallbackCatalog::Decision row = FallbackCatalog::SaturationReplaced(true, 5);
+			Assert::IsTrue(row.engaged);
+			Assert::AreEqual(std::string("saturation: replaced by appearance"), row.id);
+			Assert::IsTrue(Fix1Has(row.reason, "saturation +5"));
+			Assert::IsTrue(std::string(FallbackPlainText::Sentence(row.id)).size() > 0);
+			Assert::IsFalse(FallbackCatalog::SaturationReplaced(false, 0).engaged);
+		}
+
+		TEST_METHOD(BothAreWiredInProduction)
+		{
+			const std::string settings = Fix1ReadUp(std::string(kFix1ConfigDir) + "VpvRendererSettings.cpp");
+			const std::string frame = Fix1ReadUp("src\VP-V\modules\drive\led_compensation\DynamicDriveFrame.cpp");
+			const std::string lookahead = Fix1ReadUp("src\VP-V\modules\drive\led_measure\LedLookahead.cpp");
+			const std::string core = Fix1ReadUp("src\VP-V\segments\CoreSegments.inl");
+			if (settings.empty() || frame.empty() || lookahead.empty() || core.empty())
+				return;   // not reachable from this working directory
+			Assert::IsTrue(Fix1Has(settings, "settings.saturationReplaced = appearanceRuns && settings.saturation != 0;"));
+			Assert::IsTrue(Fix1Has(frame, "BoostExponentUnderAppearance(configuredBoost, displayGamma, in.appearanceActive)"));
+			Assert::IsTrue(Fix1Has(lookahead, "module.BoostReplaced()"), L"the measurement sees the picture without the boost");
+			Assert::IsTrue(Fix1Has(core, "led.appearanceActive = dvStage.AppearanceDecision().active;"));
+			Assert::IsTrue(Fix1Has(core, "FallbackCatalog::SaturationReplaced(settings.saturationReplaced"));
 		}
 	};
 }

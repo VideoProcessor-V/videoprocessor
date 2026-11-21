@@ -235,6 +235,8 @@ inline void VpvDumpRendererSettings(const RendererSettings& s, std::ostream& o)
 	Put(o, "appearanceScreenWhiteMeasured", s.appearanceScreenWhiteMeasured);
 	Put(o, "appearanceHonourL11", s.appearanceHonourL11);
 	Put(o, "ambientAdaptReplaced", s.ambientAdaptReplaced);
+	Put(o, "saturationReplaced", s.saturationReplaced);
+	Put(o, "saturationConfigured", s.saturationConfigured);
 	Put(o, "intentBlack", s.intentBlack);
 	Put(o, "intentDisplay", s.intentDisplay);
 	Put(o, "interpolationGrain", s.interpolationGrain);

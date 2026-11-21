@@ -50,6 +50,8 @@ namespace FallbackPlainText
 			{ "room light sensor", "The room light sensor is not giving a live reading, so the room adaptation uses a held or dark value" },
 			{ "appearance: L11 reference mode", "The picture asks for reference viewing conditions, so the room light is ignored and the reference room (dim, no veil) is used; the screen-white step still runs" },
 			{ "ambient_adapt: replaced by appearance", "The older room-light correction is off because the colour appearance setting is on and does that job" },
+			{ "gamma boost: replaced by appearance", "The gamma boost is not applied because the colour appearance setting is on and does that job" },
+			{ "saturation: replaced by appearance", "The saturation setting is not applied because the colour appearance setting is on and does that job" },
 			{ "appearance: calibration LUT", "The room and screen colour adaptation is off because the calibration table is applied before it" },
 			{ "native readback", "Some graphics-card readbacks use a simpler ready check, so analysis results may arrive later" },
 			{ "early upload", "Early upload of frames to the graphics card is off" },

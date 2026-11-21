@@ -59,6 +59,12 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 			EngageFallback(replaced.id.c_str(), replaced.reason);   // VPV-FALLBACK ambient_adapt: replaced by appearance
 		else
 			ReleaseFallback(replaced.id.c_str());
+		// FIX1 MUST 6: the saturation step is replaced by appearance (forced off in PostLoad), said here
+		const FallbackCatalog::Decision saturation = FallbackCatalog::SaturationReplaced(settings.saturationReplaced, settings.saturationConfigured);
+		if (saturation.engaged)
+			EngageFallback(saturation.id.c_str(), saturation.reason);   // VPV-FALLBACK saturation: replaced by appearance
+		else
+			ReleaseFallback(saturation.id.c_str());
 	}
 	next.SetEntranceOnce(settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway);   // B3: consumers after the entrance
 	(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
@@ -378,6 +384,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         led.hookTemplates = &hookTemplates;
         led.sourceRange = &activeSettings.sourceRange;
         led.displayGamma = LedDisplayGamma(target.color.transfer);
+        led.appearanceActive = dvStage.AppearanceDecision().active;   // FIX1 MUST 6: appearance replaces the gamma boost
         led.captureRateHz = captureRateHz;
         led.nominalSourceRateHz = nominalSourceRateHz;
         led.renderAheadActive = RenderAheadActive() && renderAheadSchedule.Active();
