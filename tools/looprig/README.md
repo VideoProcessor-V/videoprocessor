@@ -68,3 +68,62 @@ mode (1080p60 or 2160p30) and stays awake; VP's input is a file (`-PlayerArgs`, 
 to confirm) with a test configuration in the copied folder; the VP host reads `VP_RESYNC_SCHEDULE` (from
 feat/resync-q0-q3); the run is on mains with >= 10 GB free on D:. Manual steps (Apple TV switches, HDMI
 re-plugs) are outside the unattended set: `-OwnerAttended` adds those scenarios and prompts before each.
+
+## Row-27 Render-Ahead Proof & General Rate/Mode Grid Runner
+
+Post-core hardware runner and parameterized grid for Row 27 (render-ahead proof across general source/display
+rates, pathways, levels, render-ahead depths, de-judder, color modes, and clean/dirty/rate-transition tracks).
+
+### Pieces
+
+- `row27_grid.json` & `row27_grid.py`: exact rational `[num, den]` rate/mode matrix generator. Never
+  hardcoded to 23.976/60 — supports arbitrary rational/decimal rates (e.g. `47.952 -> 119.88`, `24000/1001`,
+  PAL, NTSC, HFR). Classifies every pair into `exact_integer`, `pulldown_3_2`, `fractional_drift`, or
+  `non_integer_judder`, and expands profiles `row27`, `smoke`, `full` (deterministic 2-way pairwise covering
+  array), or `custom` (`--expand pairwise|cartesian`, `--source-rates`, `--display-rates`, `--filter`).
+- `stamp_verify.py`: self-verifying end-to-end stamp codec (`vp-e2e-stamp/1`, integrating with
+  `tools/framestamp/framestamp.py` 64-bit `vp-stamp/1` visual codes + CRC-16/CCITT-FALSE) and verifier
+  checking `stamp_integrity`, `monotonic_progression` (drops/duplicates/out-of-order), `constant_delay`
+  (spread & drift scaled strictly to `1 / display_hz`), `render_ahead_proof` (landing accuracy, depth
+  adherence, no silent fallback to depth 0, de-judder extras), `cadence_stability`, `original_baseline`
+  (`Original == Bill` byte-identical reference check), and `track_continuity` (clean / dirty recovery /
+  rate-transition convergence bounded in measured source periods). Also imports existing `stamps.csv` +
+  `sent.csv` loop-rig captures via `from_looprig_artifacts()`.
+- `grid_runner.py` & `run_row27_loop.ps1`: orchestrator with three explicit modes:
+  - `--mode hardware` (default): probes `VideoProcessor.exe`, `VideoProcessorStreamRecorder.exe`, capture
+    device (`--list`), display loop confirmation (`VP_LOOPRIG_DISPLAY_READY=1`), and required footage clips.
+    Whenever hardware is absent, EVERY hardware cell logs explicit **`SKIP-NO-HARDWARE`** with the exact
+    missing prerequisite (missing clip logs **`SKIP-NO-FOOTAGE`**) — NEVER reported as PASS.
+  - `--mode synthetic` (`--synthetic`): drives the full resolved grid through a deterministic synthetic
+    loop simulator + verifier, with optional `--include-negative-controls` fault injection (drop, duplicate,
+    out-of-order, CRC corruption, delay drift, render-ahead silent fallback, late landing, transition stall,
+    Original baseline mismatch).
+  - `--mode plan` (`--dry-run`): validates and writes `plan.json` + `plan.md` without touching hardware.
+- `test_row27_runner.py`: offline self-tests (`python -I -B tools/looprig/test_row27_runner.py`).
+
+### Exit codes (`grid_runner.py` / `run_row27_loop.ps1`)
+
+| Exit code | Meaning | `hardware_verified` |
+|---:|---|---|
+| `0` | All executed cells `PASS` (and all negative controls caught) — or `--mode plan` valid | `true` in hardware mode only |
+| `1` | One or more cells `FAIL` (or a negative control was missed) | `false` |
+| `2` | CLI / grid / schema usage error | `false` |
+| `3` | `SKIP-NO-HARDWARE` / `SKIP-NO-FOOTAGE` (0 FAIL, >= 1 skipped cell; never mistaken for PASS) | `false` |
+
+### Usage (post-core on the owner's rig, or offline synthetic/plan)
+
+```text
+python -I tools/looprig/grid_runner.py --mode plan --profile row27 --out D:\codex\row27-plan
+python -I tools/looprig/grid_runner.py --mode synthetic --profile row27 --include-negative-controls --out D:\codex\row27-synth
+python -I tools/looprig/grid_runner.py --mode hardware --profile row27 --build-dir x64\Release --clips-dir D:\testclips --out D:\codex\row27-hw --trx D:\codex\row27-hw\row27.trx --junit D:\codex\row27-hw\row27.junit.xml
+tools\looprig\run_row27_loop.ps1 -Mode hardware -Profile row27 -EmitTrx -EmitJUnit
+```
+
+Self-tests (all three suites in `tools/looprig/`):
+
+```text
+python -I -B tools/looprig/test_looprig.py
+python -I -B tools/looprig/test_loop_tier.py
+python -I -B tools/looprig/test_row27_runner.py
+```
+

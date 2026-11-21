@@ -251,18 +251,21 @@ def read_csv(path):
     return records
 
 
-def from_looprig_artifacts(stamps_csv_path, sent_csv_path, cell, t0_ns=0):
+def from_looprig_artifacts(stamps_csv_path, sent_csv_path, cell, t0_ns=0, capture_offset_vblanks=None):
     """Convert existing StreamRecorder stamps.csv + sent.csv into vp-e2e-stamp/1 records.
 
     Allows real hardware rig captures from tools/looprig/run_loop_tier.ps1 or
     VideoProcessorStreamRecorder.exe --stamps to be scored directly by stamp_verify.py.
     """
     sent_by_idx = {}
+    has_wall_t = False
     with open(sent_csv_path, "r", encoding="utf-8", newline="") as f:
         for r in csv.DictReader(f):
             idx = int(r["index"])
             pts = Fraction(int(r["pts_num"]), int(r["pts_den"]))
             t_ms = r.get("t_ms") or r.get("qpc_ms")
+            if t_ms:
+                has_wall_t = True
             sent_by_idx[idx] = {
                 "aux": int(r.get("aux") or 0),
                 "pts_ns": int(round(float(pts) * 1e9)),
@@ -271,6 +274,13 @@ def from_looprig_artifacts(stamps_csv_path, sent_csv_path, cell, t0_ns=0):
 
     disp_rate = rg.parse_rate(cell["display_rate"])
     disp_period_ns = float(Fraction(10**9) / disp_rate)
+    if capture_offset_vblanks is None:
+        if has_wall_t:
+            offset_vb = 0
+        else:
+            offset_vb = (3 + int(cell["resolved_queue_depth"])) if cell.get("render_ahead") else 3
+    else:
+        offset_vb = int(capture_offset_vblanks)
     seen_seq = set()
     records = []
     with open(stamps_csv_path, "r", encoding="utf-8", newline="") as f:
@@ -283,7 +293,7 @@ def from_looprig_artifacts(stamps_csv_path, sent_csv_path, cell, t0_ns=0):
                     source_pts_ns=0,
                     capture_ts_ns=t0_ns,
                     render_submit_ts_ns=t0_ns,
-                    present_ts_ns=int(round(t0_ns + pos * disp_period_ns)),
+                    present_ts_ns=int(round(t0_ns + (offset_vb + pos) * disp_period_ns)),
                     display_vblank_idx=pos,
                     queue_depth=cell["resolved_queue_depth"],
                     pathway=cell["pathway"],
@@ -295,8 +305,8 @@ def from_looprig_artifacts(stamps_csv_path, sent_csv_path, cell, t0_ns=0):
             k = int(raw_src)
             aux = int(r.get("src_aux") or 0)
             sinfo = sent_by_idx.get(k, {"aux": aux, "pts_ns": 0, "t_ns": 0})
-            present_ns = int(round(t0_ns + pos * disp_period_ns))
-            cap_ns = t0_ns + sinfo["t_ns"]
+            present_ns = int(round(t0_ns + (offset_vb + pos) * disp_period_ns))
+            cap_ns = sinfo["t_ns"] if has_wall_t else (t0_ns + sinfo["t_ns"])
             sub_ns = min(present_ns, max(cap_ns, present_ns - int(round(0.25 * disp_period_ns))))
             is_extra = (k in seen_seq) and bool(cell.get("dejudder"))
             seen_seq.add(k)
