@@ -688,5 +688,61 @@ namespace VideoProcessorTest
 			Logger::WriteMessage(("DV trims shader (BT.1886 / sRGB): " + std::to_string(checked) + " pixels matched the reference\n").c_str());
 		}
 
+
+		// GEM-015 ([C]:166): the headroom-only short-circuit (strength 0: one factor, (1 - headroom)^(1/eotf), in the signal) equals the
+		// full form within an ulp-scale 1e-6. "The full form" is the pre-change shader (tests/fixtures, the fixture copy: the same
+		// maths through the linear-light round trip); both run on the same float source through the same libplacebo pipeline and
+		// are read back as 32-bit floats, so what differs is only the algebra. The result also matches the CPU reference
+		// SdrToneShape::Map within the fp16 intermediate's precision (the shader acted: it is not an identity). Below-black and
+		// above-white source values are included (sign kept).
+		TEST_METHOD(SdrToneShapeHeadroomOnlyMatchesTheFullFormWithinAnUlp)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
+			ShaderHook current(fixture, "SDR tone shape.glsl", "sdr_tone_shape");
+			ShaderHook full(fixture, "pre-GEM-015 SDR tone shape.glsl", "sdr_tone_shape");
+			const int width = 64, height = 64;
+			const std::vector<float> source = TexturedField(width, height, 20261121u, -0.05f, 1.1f);
+			const std::vector<float> baseline = RenderFloatField(fixture, nullptr, width, height, source);
+			size_t compared = 0, rgb = 0, moved = 0;
+			double worst = 0.0;
+			for (const double headroom : { 0.05, 0.15, 0.3 })
+				for (const double eotf : { 2.2, 2.4 })
+					for (const double recovery : { 0.0, 1.5 })   // recovery is ignored without a knee: both forms
+					{
+						SetToneShape(current.hook, headroom, 0.8, 0.0, eotf, recovery);
+						SetToneShape(full.hook, headroom, 0.8, 0.0, eotf, recovery);
+						const std::vector<float> a = RenderFloatField(fixture, current.hook, width, height, source);
+						const std::vector<float> b = RenderFloatField(fixture, full.hook, width, height, source);
+						Assert::AreEqual(b.size(), a.size());
+						for (size_t i = 0; i < a.size(); ++i)
+						{
+							const double tolerance = 1e-6 * (std::max)(1.0, std::fabs(static_cast<double>(b[i])));
+							const double error = std::fabs(static_cast<double>(a[i]) - static_cast<double>(b[i]));
+							worst = (std::max)(worst, error / (std::max)(1.0, std::fabs(static_cast<double>(b[i]))));
+							Assert::IsTrue(error <= tolerance, (L"headroom " + std::to_wstring(headroom) + L" eotf " + std::to_wstring(eotf) +
+								L" sample " + std::to_wstring(i) + L": " + std::to_wstring(a[i]) + L" vs the full form " + std::to_wstring(b[i])).c_str());
+							++compared;
+							if (i % 4 != 3)
+							{
+								// The short-circuit really shaped the picture, and as the CPU reference says (fp16 intermediate: 3e-3).
+								const double expected = SdrToneShape::Map(static_cast<double>(baseline[i]), eotf, headroom, 0.8, 0.0);
+								Assert::AreEqual(expected, static_cast<double>(a[i]), 3e-3 * (std::max)(1.0, std::fabs(expected)),
+									(L"the CPU reference at sample " + std::to_wstring(i)).c_str());
+								++rgb;
+								moved += std::fabs(static_cast<double>(a[i]) - static_cast<double>(baseline[i])) > 0.005 ? 1 : 0;
+							}
+						}
+					}
+			Assert::IsTrue(compared > 100000, L"the sweep compared real samples");
+			Assert::IsTrue(moved * 2 > rgb, L"the shader changed most of the picture (not an identity on both sides)");
+			Logger::WriteMessage(("SDR tone shape headroom-only vs the full form: worst relative error " + std::to_string(worst) + " over " +
+				std::to_string(compared) + " samples\n").c_str());
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
+		}
+
 	};
 }
