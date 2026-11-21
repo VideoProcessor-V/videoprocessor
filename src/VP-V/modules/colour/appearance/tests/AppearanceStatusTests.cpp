@@ -175,6 +175,35 @@ namespace Tests
 				"switches.ambient = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, dvStage.AppearanceDecision().active);"));
 		}
 
+		// CF1-G7b residual (gate G1 MUST-5): the host's LED intent evaluation is gated on the SAVED ambient_adapt (or intent_black,
+		// intent_display, or a non-zero LED limit already sent). LedShadowCapUsesSavedAmbient is true ONLY while ambient_adapt is given
+		// back and none of those runs it; each exception turns it off.
+		TEST_METHOD(LedShadowCapUsesSavedAmbientOnlyInItsExactCase)
+		{
+			using AppearanceStage::LedShadowCapUsesSavedAmbient;
+			Assert::IsTrue(LedShadowCapUsesSavedAmbient(true, false, false, false, 0.0, 0.0), L"the exact case: given back, nothing else runs the evaluation");
+			Assert::IsFalse(LedShadowCapUsesSavedAmbient(false, false, false, false, 0.0, 0.0), L"ambient_adapt is not given back this frame");
+			Assert::IsFalse(LedShadowCapUsesSavedAmbient(true, true, false, false, 0.0, 0.0), L"the saved ambient_adapt is on: the evaluation runs");
+			Assert::IsFalse(LedShadowCapUsesSavedAmbient(true, false, true, false, 0.0, 0.0), L"intent_black is on: the evaluation runs");
+			Assert::IsFalse(LedShadowCapUsesSavedAmbient(true, false, false, true, 0.0, 0.0), L"intent_display is on: the evaluation runs");
+			Assert::IsFalse(LedShadowCapUsesSavedAmbient(true, false, false, false, 0.05, 0.0), L"a non-zero shadow limit was already sent");
+			Assert::IsFalse(LedShadowCapUsesSavedAmbient(true, false, false, false, 0.0, 0.01), L"a non-zero ambient black was already sent");
+			// Every input combination: true for exactly one of the 2^4 boolean cases with zero limits, and never with a limit sent.
+			int trueCases = 0;
+			for (int bits = 0; bits < 16; ++bits)
+			{
+				const bool result = LedShadowCapUsesSavedAmbient((bits & 1) != 0, (bits & 2) != 0, (bits & 4) != 0, (bits & 8) != 0, 0.0, 0.0);
+				trueCases += result ? 1 : 0;
+				Assert::IsFalse(LedShadowCapUsesSavedAmbient((bits & 1) != 0, (bits & 2) != 0, (bits & 4) != 0, (bits & 8) != 0, 0.2, 0.3));
+			}
+			Assert::AreEqual(1, trueCases, L"exactly one boolean combination is the stale case");
+			// It is the negation of the host's gate for its given-back frames: with appearance acting it is never true.
+			Assert::IsFalse(LedShadowCapUsesSavedAmbient(AppearanceStage::AmbientAdaptGivenBack(true, true), false, false, false, 0.0, 0.0),
+				L"appearance acting: ambient_adapt is not given back");
+			Assert::IsTrue(LedShadowCapUsesSavedAmbient(AppearanceStage::AmbientAdaptGivenBack(true, false), false, false, false, 0.0, 0.0),
+				L"appearance idle with the replacement configured: given back");
+		}
+
 		TEST_METHOD(SettingsPlumbingIsInPlace)
 		{
 			// CF1-FIN MUST 3: every separator escaped (the single-backslash literals never named a file).
