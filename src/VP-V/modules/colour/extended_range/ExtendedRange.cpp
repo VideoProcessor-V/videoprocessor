@@ -646,6 +646,9 @@ color.a = 1.0;
 		}
 		if (!EnsureFloat(params->gpu, ownerA, self->clipped, w, h))
 			return Failure();
+		// GEM-W1B V1 colour-dv-hdr MUST-5: the clipped texture now exists on this GPU, so Release/the next frame own it
+		// even when the remainder below fails (the owner stayed null: the next frame leaked it and made another).
+		self->gpu = params->gpu;
 		if (onePass && !EnsureFloat(params->gpu, ownerB, self->remainder, w, h, true))
 		{
 			// Not storable here: the two-pass form, a plain renderable texture.
