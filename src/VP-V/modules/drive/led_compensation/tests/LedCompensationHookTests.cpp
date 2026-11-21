@@ -213,16 +213,42 @@ namespace VideoProcessorTest
 			set(1.0, 0.0);
 			const auto unity = fixture.RenderCoordinateField(hook);
 			for (size_t i = 0; i < unity.size(); ++i)
+			{
 				Assert::AreEqual(static_cast<int>(baseline[i].r), static_cast<int>(unity[i].r));
+				Assert::AreEqual(static_cast<int>(baseline[i].g), static_cast<int>(unity[i].g));
+				Assert::AreEqual(static_cast<int>(baseline[i].b), static_cast<int>(unity[i].b));
+			}
 
 			const size_t quarter = 16;           // r = 16/63 of full scale
-			const size_t bright = 62;            // r close to white
+			const size_t kneeProbe = 55;         // r = 55/63 (~0.87): gain 1.25 pushes above 1.0 -> soft knee < 255
+			auto softKneeRef = [](double v, double gain, double knee) {
+				const double x = v * gain;
+				const double t = 1.0 - knee;
+				const double out = x < t ? x : t + knee * (1.0 - std::exp(-(x - t) / knee));
+				return 255.0 * out;
+			};
 			set(1.25, 0.0);
 			const auto encoded = fixture.RenderCoordinateField(hook);
 			Assert::AreEqual(baseline[quarter].r * 1.25, static_cast<double>(encoded[quarter].r), 1.5);
-			Assert::IsTrue(encoded[bright].r >= baseline[bright].r && encoded[bright].r <= 255);
-			for (size_t x = 1; x < 64; ++x)
-				Assert::IsTrue(encoded[x].r >= encoded[x - 1].r, L"The knee keeps the ramp monotonic");
+			// Verify exact soft-knee maths across all three channels (r along row 0, g along col 0, b along diagonal).
+			for (size_t k = 0; k < 64; ++k)
+			{
+				const size_t idxR = k;
+				const size_t idxG = k * 64;
+				const size_t idxB = k * 64 + k;
+				Assert::AreEqual(softKneeRef(baseline[idxR].r / 255.0, 1.25, 0.08), static_cast<double>(encoded[idxR].r), 1.5);
+				Assert::AreEqual(softKneeRef(baseline[idxG].g / 255.0, 1.25, 0.08), static_cast<double>(encoded[idxG].g), 1.5);
+				Assert::AreEqual(softKneeRef(baseline[idxB].b / 255.0, 1.25, 0.08), static_cast<double>(encoded[idxB].b), 1.5);
+			}
+			Assert::IsTrue(encoded[kneeProbe].r > baseline[kneeProbe].r && encoded[kneeProbe].r < 255,
+				L"soft knee rolls off highlights below white instead of hard-clipping at 255");
+			Assert::IsTrue(encoded[63].r > encoded[kneeProbe].r, L"soft knee keeps highlight gradation up to white");
+			for (size_t k = 1; k < 64; ++k)
+			{
+				Assert::IsTrue(encoded[k].r >= encoded[k - 1].r, L"The knee keeps the R ramp monotonic");
+				Assert::IsTrue(encoded[k * 64].g >= encoded[(k - 1) * 64].g, L"The knee keeps the G ramp monotonic");
+				Assert::IsTrue(encoded[k * 64 + k].b >= encoded[(k - 1) * 64 + (k - 1)].b, L"The knee keeps the B ramp monotonic");
+			}
 
 			set(2.0, 1.0);
 			const auto linear = fixture.RenderCoordinateField(hook);

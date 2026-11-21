@@ -395,6 +395,9 @@ namespace Tests
 
 		// (a) Decode accuracy: bit-exact planes on every accuracy segment, for the AVX2 and
 		// scalar CPU unpack and the GPU shader's transcription; the stamp read back.
+		BEGIN_TEST_METHOD_ATTRIBUTE(SyntheticCorpusDecodesBitExact)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Corpus")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(SyntheticCorpusDecodesBitExact)
 		{
 			using namespace DvSynth;
@@ -480,6 +483,9 @@ namespace Tests
 
 		// (b) Metadata coverage: every authored field VP parses comes back exactly
 		// (meta-, cuts-, policy- and acc- segments).
+		BEGIN_TEST_METHOD_ATTRIBUTE(SyntheticCorpusMetadataMatchesTheAuthoredDm)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Corpus")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(SyntheticCorpusMetadataMatchesTheAuthoredDm)
 		{
 			using namespace DvSynth;
@@ -520,6 +526,9 @@ namespace Tests
 
 		// (b) Robustness: per frame, what the renderer would show; never packed pixels or a
 		// crash; black where the DM is missing; the picture back (recovery) after every fault.
+		BEGIN_TEST_METHOD_ATTRIBUTE(SyntheticCorpusRobustness)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Corpus")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(SyntheticCorpusRobustness)
 		{
 			using namespace DvSynth;
@@ -597,6 +606,9 @@ namespace Tests
 
 		// (c) RPU <-> frame alignment: every frame of the cut segments decodes the L1 of its own
 		// scene (same-frame DM; advance DM announced one frame early; picture changes).
+		BEGIN_TEST_METHOD_ATTRIBUTE(SyntheticCorpusRpuFrameAlignmentAtCuts)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Corpus")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(SyntheticCorpusRpuFrameAlignmentAtCuts)
 		{
 			using namespace DvSynth;
@@ -653,11 +665,16 @@ namespace Tests
 
 		// CPU cost of the tunnel at 4K: the full CPU unpack (AVX2, scalar) and the GPU route's
 		// CPU share (AnalyzeFrame: the DM packet only), per frame, on the 2160p corpus frames.
+		BEGIN_TEST_METHOD_ATTRIBUTE(SyntheticCorpusCpuUnpackCost4K)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Corpus")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(SyntheticCorpusCpuUnpackCost4K)
 		{
 			using namespace DvSynth;
 			if (SkipWithoutCorpus("SyntheticCorpusCpuUnpackCost4K")) return;
-			for (const std::string& folder : Segments("acc-2160p"))
+			const std::vector<std::string> segments = Segments("acc-2160p");
+			Assert::IsFalse(segments.empty(), L"no acc-2160p segments in the corpus");
+			for (const std::string& folder : segments)
 			{
 				RawCorpusSegment seg;
 				std::string error;

@@ -770,6 +770,7 @@ namespace VideoProcessorTest
 			const double significant = 0.02;
 			std::string report = "sigma-delta flat-field bias (shaders: " + (dir.empty() ? std::string("bundled") : dir) + ")\n";
 			double worstLoop = 0.0, worstStore = 0.0;
+			size_t checkedLoop = 0;
 			for (const SigmaDeltaBiasProbe::Mode& mode : SigmaDeltaBiasProbe::Modes())
 				for (const bool chain : { false, true })
 				{
@@ -786,8 +787,12 @@ namespace VideoProcessorTest
 						if (rep.levels[i].family == 1 && std::fabs(rep.levels[i].offset) >= 0.25 &&
 							std::fabs(rep.levels[i].xExact - std::round(rep.levels[i].xExact)) > 1.05 * rep.results[i].storeStep &&
 							rep.levels[i].xExact >= rep.codeMin && rep.levels[i].xExact <= rep.codeMax)
+						{
+							++checkedLoop;
 							worstLoop = (std::max)(worstLoop, std::fabs(rep.results[i].errHook));
+						}
 				}
+			Assert::IsTrue(checkedLoop > 0, L"expected at least one non-exact-code family-1 level to be checked");
 			{
 				char* value = nullptr;
 				size_t length = 0;

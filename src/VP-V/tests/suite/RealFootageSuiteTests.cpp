@@ -1496,6 +1496,9 @@ namespace RealFootage
 	public:
 		// The manifest parses, every clip file exists, sizes were probed and the README's
 		// events were all typed (the counts the README lists).
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealClipManifestIsComplete)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealClipManifestIsComplete)
 		{
 			using namespace RealFootage;
@@ -1535,18 +1538,22 @@ namespace RealFootage
 		// Pulldown / cadence on every clip: frame-repeat pulldown locks to the right cadence within
 		// FramesToLock + 2 cycles and stays locked (>= 98%); native, video, field-telecine and PsF
 		// clips never lock; rate conversions lock at the expected cadence.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealClipCadenceAndFilmClock)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealClipCadenceAndFilmClock)
 		{
 			using namespace RealFootage;
 			Suite& s = Suite::Get();
 			if (s.Skip("RealClipCadenceAndFilmClock"))
 				return;
-			int failures = 0;
+			int failures = 0, evaluated = 0;
 			const auto clips = s.Clips([](const RealClip::Clip& c) {
 				return c.group == "variants" || c.group == "timing/rates" || c.id == "cad_mixed_30p_overlay_on_24p_5994p";
 			});
 			for (const RealClip::Clip* c : clips)
 			{
+				++evaluated;
 				RunSpec spec;
 				spec.clip = c->id;
 				spec.sourceResolution = c->group == "variants";
@@ -1607,20 +1614,25 @@ namespace RealFootage
 					s.Info("cadence", c->id, r.lanes[i].cfg.name, Fmt("locks %d unlocks %d rephases %d;%s", CountLocks(r.lanes[i]),
 						CountUnlocks(r.lanes[i]), CountRephases(r.lanes[i]), LockSummary(r.lanes[i], 6).c_str()));
 			}
+			Assert::IsTrue(evaluated > 0, L"RealClipCadenceAndFilmClock: at least one clip must be evaluated");
 			Assert::AreEqual(0, failures, L"see the RESULT rows");
 		}
 
 		// Cadence breaks: re-lock after each splice / phase break / slip at the logged frame.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealClipCadenceBreaksAndSplices)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealClipCadenceBreaksAndSplices)
 		{
 			using namespace RealFootage;
 			Suite& s = Suite::Get();
 			if (s.Skip("RealClipCadenceBreaksAndSplices"))
 				return;
-			int failures = 0;
+			int failures = 0, evaluated = 0;
 			// Film -> native 30p -> film -> 30p at 59.94: lock, unlock, re-lock to each segment's cadence.
 			if (const RealClip::Clip* c = s.manifest.Find("cad_32_30p_32_30p_5994p"))
 			{
+				++evaluated;
 				RunSpec spec;
 				spec.clip = c->id;
 				const RunResult& r = s.Result(spec);
@@ -1668,8 +1680,8 @@ namespace RealFootage
 			for (const char* id : { "cad_32_phase_jumps_5994p", "cad_22_50p_phase_breaks" })
 			{
 				const RealClip::Clip* c = s.manifest.Find(id);
-				if (!c)
-					continue;
+				Assert::IsNotNull(c, L"expected cadence break clip missing from manifest");
+				++evaluated;
 				RunSpec spec;
 				spec.clip = c->id;
 				const RunResult& r = s.Result(spec);
@@ -1714,18 +1726,22 @@ namespace RealFootage
 						s.Info("splice", c->id, lane.cfg.name, numbers);
 				}
 			}
+			Assert::IsTrue(evaluated > 0, L"RealClipCadenceBreaksAndSplices: at least one clip must be evaluated");
 			Assert::AreEqual(0, failures, L"see the RESULT rows");
 		}
 
 		// Film / video / animation classification (ContentIntent over source_class) on every
 		// variant and timing clip; the dark film variant is film; Meridian 59.94p is video.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealClipContentClassification)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealClipContentClassification)
 		{
 			using namespace RealFootage;
 			Suite& s = Suite::Get();
 			if (s.Skip("RealClipContentClassification"))
 				return;
-			int failures = 0;
+			int failures = 0, evaluated = 0;
 			const auto clips = s.Clips([](const RealClip::Clip& c) {
 				return c.group == "variants" || c.group == "timing/motion" || c.group == "timing/cadence" ||
 					c.id == "drift_10min_23976p_lowbitrate" || c.id == "rate_59.94" || c.id == "rate_25";
@@ -1737,7 +1753,12 @@ namespace RealFootage
 				spec.sourceResolution = c->group == "variants";
 				const RunResult& r = s.Result(spec);
 				if (!r.ok)
+				{
+					s.Add("classifier", c->id, "decode", false, r.error);
+					++failures;
 					continue;
+				}
+				++evaluated;
 				const LaneResult& on = On(r);
 				// The expectation from the manifest: the content and its picture rate (the owner's split:
 				// up to 30.5 fps film-like, 50/60p video), and for synthetic pans their speed in picture
@@ -1794,20 +1815,25 @@ namespace RealFootage
 				if (off)
 					s.Info("classifier", c->id, "cadence_class_fixes off", Fmt("final %s;%s", ClassName(FinalClass(*off)), ClassSummary(*off).c_str()));
 			}
+			Assert::IsTrue(evaluated > 0, L"RealClipContentClassification: at least one clip must be evaluated");
 			Assert::AreEqual(0, failures, L"see the RESULT rows");
 		}
 
 		// Drops, duplicates, gaps, the rate change and +-2 ms jitter: each flagged at its logged
 		// frame (and nowhere else), vectors invalidated there, the hiccup repair offered for single
 		// missed frames, never across a break.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealClipDiscontinuities)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealClipDiscontinuities)
 		{
 			using namespace RealFootage;
 			Suite& s = Suite::Get();
 			if (s.Skip("RealClipDiscontinuities"))
 				return;
-			int failures = 0;
+			int failures = 0, evaluated = 0;
 			auto check = [&](const std::string& clip, const std::string& what, bool pass, const std::string& numbers) {
+				++evaluated;
 				s.Add("discontinuity", clip, what, pass, numbers);
 				failures += pass ? 0 : 1;
 			};
@@ -1959,19 +1985,24 @@ namespace RealFootage
 					Fmt("change at signal %d; first lock %d; unlock %d (+%d); re-lock after %d;%s; class%s", changeSignal,
 						first ? first->signal : -1, unlockAt, unlockAt - changeSignal, relockAfter, LockSummary(pl).c_str(), ClassSummary(pl).c_str()));
 			}
+			Assert::IsTrue(evaluated > 0, L"RealClipDiscontinuities: at least one clip check must be evaluated");
 			Assert::AreEqual(0, failures, L"see the RESULT rows");
 		}
 
 		// Synthetic pans (and fades over a pan): constant motion, no event; the vectors stay valid.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealClipMotionValidityOnPans)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealClipMotionValidityOnPans)
 		{
 			using namespace RealFootage;
 			Suite& s = Suite::Get();
 			if (s.Skip("RealClipMotionValidityOnPans"))
 				return;
-			int failures = 0;
+			int failures = 0, evaluated = 0;
 			for (const RealClip::Clip* c : s.Clips([](const RealClip::Clip& c) { return c.group == "timing/motion"; }))
 			{
+				++evaluated;
 				RunSpec spec;
 				spec.clip = c->id;
 				spec.sourceResolution = !c->EventsOf("fade_in").empty();
@@ -1991,12 +2022,16 @@ namespace RealFootage
 				s.Add("motion", c->id, fade ? "pan with fades: no event, no cut" : "pan: no event, vectors valid", pass, numbers);
 				failures += pass ? 0 : 1;
 			}
+			Assert::IsTrue(evaluated > 0, L"RealClipMotionValidityOnPans: at least one pan clip must be evaluated");
 			Assert::AreEqual(0, failures, L"see the RESULT rows");
 		}
 
 		// The alpha queue's presentation at 59.94 / 60 / 50 / 23.976 / 120 Hz: the 10-minute drift
 		// clip never flushes (the 80-second regression) with queue_timing_fixes, captured directly and
 		// played out with 3:2 (a film queue), the display clock 0 / +-100 ppm off.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealClipDriftQueueNeverFlushes)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealClipDriftQueueNeverFlushes)
 		{
 			using namespace RealFootage;
@@ -2005,8 +2040,7 @@ namespace RealFootage
 				return;
 			int failures = 0;
 			const RealClip::Clip* c = s.manifest.Find("drift_10min_23976p_lowbitrate");
-			if (!c)
-				return;
+			Assert::IsNotNull(c, L"drift_10min_23976p_lowbitrate missing from real-clip manifest");
 			for (int model = 0; model < 2; ++model)
 			{
 				RunSpec spec;
@@ -2055,15 +2089,19 @@ namespace RealFootage
 		// Source resolution: the tracker's cuts at the real cut points (scene ground truth), no cut
 		// on fades / flashes / long takes; native footage never declared lower; an upscaled long
 		// take crossfades after the wait from its confirmation; an upscaled 3-minute trim engages at a cut.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealClipSourceResolutionCutsAndLatch)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealClipSourceResolutionCutsAndLatch)
 		{
 			using namespace RealFootage;
 			Suite& s = Suite::Get();
 			if (s.Skip("RealClipSourceResolutionCutsAndLatch"))
 				return;
-			int failures = 0;
+			int failures = 0, evaluated = 0;
 			for (const RealClip::Clip* c : s.Clips([](const RealClip::Clip& c) { return c.group == "variants"; }))
 			{
+				++evaluated;
 				RunSpec spec;
 				spec.clip = c->id;
 				spec.sourceResolution = true;
@@ -2195,18 +2233,22 @@ namespace RealFootage
 						engage ? engage->toY : 1.0, on.srOn.changes.size(), on.srOff.changes.size()));
 				failures += pass ? 0 : 1;
 			}
+			Assert::IsTrue(evaluated > 0, L"RealClipSourceResolutionCutsAndLatch: at least one variant clip must be evaluated");
 			Assert::AreEqual(0, failures, L"see the RESULT rows");
 		}
 
 		// Player-made pulldown (a player outputting film to 59.94 / 60 / 50 Hz, bit-exact repeats as
 		// over HDMI): every film source locks, the dark film too; Meridian 59.94p never locks.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealClipPlayerPulldown)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealClipPlayerPulldown)
 		{
 			using namespace RealFootage;
 			Suite& s = Suite::Get();
 			if (s.Skip("RealClipPlayerPulldown"))
 				return;
-			int failures = 0;
+			int failures = 0, evaluated = 0;
 			struct P { const char* id; double hz; };
 			const P runs[] = { { "tos_23976p_3min", 60000.0 / 1001.0 }, { "tos_24p_3min", 60.0 }, { "tos_25p_speedup_3min", 50.0 },
 				{ "tos_dark_2stops_23976p_3min", 60000.0 / 1001.0 }, { "cosmos_23976p_3min", 60000.0 / 1001.0 },
@@ -2215,8 +2257,9 @@ namespace RealFootage
 			for (const P& p : runs)
 			{
 				const RealClip::Clip* c = s.manifest.Find(p.id);
-				if (!c || !RealClip::FileExists(s.manifest.FullPath(*c)))
-					continue;
+				Assert::IsTrue(c != nullptr && RealClip::FileExists(s.manifest.FullPath(*c)),
+					L"RealClipPlayerPulldown: required clip missing from manifest or disk");
+				++evaluated;
 				RunSpec spec;
 				spec.clip = c->id;
 				spec.model = Model::Player;
@@ -2246,25 +2289,30 @@ namespace RealFootage
 					failures += pass ? 0 : 1;
 				}
 			}
+			Assert::IsTrue(evaluated > 0, L"RealClipPlayerPulldown: at least one clip must be evaluated");
 			Assert::AreEqual(0, failures, L"see the RESULT rows");
 		}
 
 		// The queue at every display rate for every clip run already decoded (fixes on vs off):
 		// periodic flushes are the regression; logged for the comparison table.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealClipQueueAcrossDisplayRates)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealClipQueueAcrossDisplayRates)
 		{
 			using namespace RealFootage;
 			Suite& s = Suite::Get();
 			if (s.Skip("RealClipQueueAcrossDisplayRates"))
 				return;
-			int failures = 0;
+			int failures = 0, evaluated = 0;
 			const char* ids[] = { "tos_23976p_3min", "tos_24p_3min", "tos_25p_speedup_3min", "tos_32_5994p_3min", "tos_22_50p_3min",
 				"meridian_5994p_3min", "meridian_2997p_3min", "rate_120", "dis_dropped_frames_23976_vfr", "dis_vfr_jitter_2ms_23976" };
 			for (const char* id : ids)
 			{
 				const RealClip::Clip* c = s.manifest.Find(id);
-				if (!c || !RealClip::FileExists(s.manifest.FullPath(*c)))
-					continue;
+				Assert::IsTrue(c != nullptr && RealClip::FileExists(s.manifest.FullPath(*c)),
+					L"RealClipQueueAcrossDisplayRates: required clip missing from manifest or disk");
+				++evaluated;
 				RunSpec spec;
 				spec.clip = id;
 				spec.sourceResolution = c->group == "variants";
@@ -2285,6 +2333,7 @@ namespace RealFootage
 				s.Add("queue", id, "no flush at 59.94/60/50/23.976/120 (fixes / off)", pass, numbers + Fmt("total %d vs %d off", flushes, oldFlushes));
 				failures += pass ? 0 : 1;
 			}
+			Assert::IsTrue(evaluated > 0, L"RealClipQueueAcrossDisplayRates: at least one clip must be evaluated");
 			Assert::AreEqual(0, failures, L"see the RESULT rows");
 		}
 	};
@@ -2731,10 +2780,15 @@ namespace RealFootage
 	// written on the step it belongs to (LastCutSeconds). Writes <film>.cuts.csv for the scoring script.
 	TEST_CLASS(SourceResolutionFilmCuts)
 	{
+	public:
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealFilmCutDecisionsCutFixes)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealFilmCutDecisionsCutFixes)
 		{
 			const std::string films = RealClip::Env("VP_TEST_CUT_FILMS");
 			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "RealFilmCutDecisionsCutFixes", !films.empty(), "VP_TEST_CUT_FILMS not set")) return;
+			int filmsChecked = 0;
 			size_t from = 0;
 			while (from < films.size())
 			{
@@ -2742,6 +2796,7 @@ namespace RealFootage
 				const std::string path = films.substr(from, end == std::string::npos ? std::string::npos : end - from);
 				from = end == std::string::npos ? films.size() : end + 1;
 				if (path.empty()) continue;
+				++filmsChecked;
 				FILE* file = nullptr;
 				Assert::AreEqual(0, static_cast<int>(fopen_s(&file, path.c_str(), "rb")), L"film not found");
 				char header[512] = {};
@@ -2807,6 +2862,7 @@ namespace RealFootage
 					haveLast = true;
 				}
 				fclose(file);
+				Assert::IsFalse(rows.empty(), L"RealFilmCutDecisionsCutFixes: film must contain at least one analysed frame");
 				std::string csv = "step,seconds,decorrelation,share,jump,judged,cut_fixes,cut_old,mean\n";
 				for (size_t i = 0; i < rows.size(); ++i)
 				{
@@ -2816,10 +2872,14 @@ namespace RealFootage
 				}
 				const std::string out = RealClip::Env("VP_TEST_CUT_OUT").empty() ? path + ".h3.cuts.csv" : RealClip::Env("VP_TEST_CUT_OUT") + "\\" + path.substr(path.find_last_of("\\/") + 1) + ".h3.cuts.csv";
 				FILE* o = nullptr;
-				if (fopen_s(&o, out.c_str(), "wb") == 0 && o) { fwrite(csv.data(), 1, csv.size(), o); fclose(o); }
+				Assert::AreEqual(0, static_cast<int>(fopen_s(&o, out.c_str(), "wb")), L"failed to open output cuts CSV");
+				Assert::IsNotNull(o, L"output cuts CSV FILE handle null");
+				Assert::AreEqual(csv.size(), fwrite(csv.data(), 1, csv.size(), o), L"failed to write full output cuts CSV");
+				fclose(o);
 				snprintf(line, sizeof(line), "RESULT %s: %zu analysed frames; cuts with cut fixes %llu, without %llu; flashes %llu; csv %s\n", path.c_str(), rows.size(), cutsOn, cutsOff, fixes.Flashes(), out.c_str());
 				Logger::WriteMessage(line);
 			}
+			Assert::IsTrue(filmsChecked > 0, L"RealFilmCutDecisionsCutFixes: at least one film path must be evaluated");
 		}
 	};
 }

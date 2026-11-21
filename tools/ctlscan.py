@@ -148,7 +148,10 @@ def scan(files, out=print):
 
 def selftest():
     cases = {"nul.h": (b"a\x00b\r\n", 1), "vt.h": (b"a\x0bb\r\n", 1), "bs.h": (b"a\x08b\r\n", 1),
-             "cr.h": (b"a\rb\r\n", 1), "clean.h": (b"\ta\tb\r\n\tc\r\nlast\n", 0)}
+             "cr.h": (b"a\rb\r\n", 1), "two.h": (b"a\x00b\x08c\r\n", 2),
+             "clean.h": (b"\ta\tb\r\n\tc\r\nlast\n", 0),
+             "utf16le.h": (codecs.BOM_UTF16_LE + "ok\r\n".encode("utf-16-le"), 0),
+             "utf16be.h": (codecs.BOM_UTF16_BE + "ok\r\n".encode("utf-16-be"), 0)}
     bad = 0
     with tempfile.TemporaryDirectory() as d:
         for name, (data, want) in cases.items():
@@ -156,8 +159,32 @@ def selftest():
             with open(p, "wb") as fh:
                 fh.write(data)
             got = scan_file(p, out=lambda _x: None)
-            ok = (got > 0) == (want > 0)
-            print("selftest %-8s %s" % (name, "ok" if ok else "WRONG"))
+            ok = (got == want)
+            print("selftest %-10s %s (got=%d want=%d)" % (name, "ok" if ok else "WRONG", got, want))
+            bad += 0 if ok else 1
+        # looks_binary / select / walk(.bak-) checks
+        bin_extless = os.path.join(d, "binblob")
+        txt_extless = os.path.join(d, "README")
+        bak_file = os.path.join(d, "keep.h.bak-1")
+        png_file = os.path.join(d, "img.png")
+        with open(bin_extless, "wb") as fh:
+            fh.write(bytes([0, 1, 2, 3, 4]) * 100)
+        with open(txt_extless, "wb") as fh:
+            fh.write(b"plain text\n")
+        with open(bak_file, "wb") as fh:
+            fh.write(b"a\x00b\n")
+        with open(png_file, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n")
+        extra_checks = [
+            ("looks_bin_true", looks_binary(bin_extless) is True),
+            ("looks_bin_utf16", looks_binary(os.path.join(d, "utf16le.h")) is True),
+            ("looks_bin_false", looks_binary(txt_extless) is False),
+            ("select", set(select(d, ["nul.h", "img.png", "README", "binblob"], None))
+             == {os.path.join(d, "nul.h"), txt_extless}),
+            ("walk_bak_skip", bak_file not in list(walk([d])) and png_file not in list(walk([d]))),
+        ]
+        for label, ok in extra_checks:
+            print("selftest %-15s %s" % (label, "ok" if ok else "WRONG"))
             bad += 0 if ok else 1
     return 1 if bad else 0
 

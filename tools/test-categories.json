@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "about": "Category of tests that use the GPU and carry no Category attribute (or whose file must stay untouched). Categories: GpuHardware, GpuOnScreen, MeterHardware, ProjectorHardware, Slow are excluded from the CPU run; UpstreamStale (Bill tests made stale by a later Bill commit, Bill code unchanged on both pathways) is excluded from the CPU run (select only it with gen_test_filters --gpu --categories UpstreamStale); GpuWarp renders on WARP and stays in it; Cpu marks a reviewed false positive of the name heuristic. First matching entry wins. Checked by tools/check_test_categories.py; the CPU filter comes from tools/gen_test_filters.py. Copyright(C) 2026 VP-V contributors; SPDX-License-Identifier: GPL-3.0-only",
+ "about": "Category of tests that use the GPU and carry no Category attribute (or whose file must stay untouched). Categories: GpuHardware, GpuOnScreen, MeterHardware, ProjectorHardware, Slow, LoopRig are excluded from the CPU run; UpstreamStale (Bill tests made stale by a later Bill commit, Bill code unchanged on both pathways) is excluded from the CPU run (select only it with gen_test_filters --gpu --categories UpstreamStale); Footage (real clips), Corpus (a generated or recorded corpus) and Bench (an opt-in timing benchmark) are excluded from the CPU run and from the default --gpu set: each runs only in its own job (gen_test_filters --gpu --categories Footage, env from --job-env Footage: VP_TEST_REQUIRE_FOOTAGE=1 / VP_TEST_REQUIRE_CORPUS=1 / VP_TEST_BENCH=1 and VP_TEST_REQUIRE_BENCH=1) so a missing clip, corpus or opt-in FAILS instead of logging SKIP-NO-FOOTAGE / SKIP-NO-CORPUS / SKIP-OPT-IN and passing; GpuWarp renders on WARP and stays in it; Cpu marks a reviewed false positive of the name heuristic. First matching entry wins. Checked by tools/check_test_categories.py; the CPU filter comes from tools/gen_test_filters.py. Copyright(C) 2026 VP-V contributors; SPDX-License-Identifier: GPL-3.0-only",
  "scope": "Native-test sources named *Tests.cpp under src. Not covered: the Beta host tests (VideoProcessor-BetaTests/BetaGpuTests.cpp, BetaTestHost.cpp) use no TEST_METHOD macros, so the scanner cannot see them; the checker also does not follow helper calls, so a test that reaches the GPU only through a helper needs a Gpu in its name or a manifest entry.",
  "entries": [
   {
@@ -165,6 +165,13 @@
    "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
   },
   {
+   "kind": "method",
+   "value": "DvTunnelUnpackHookTests::GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus",
+   "category": "Corpus",
+   "file": "src/VP-V/modules/input/signal/tests/DvTunnelUnpackHookTests.cpp",
+   "note": "Requires synthetic DV corpus (VP_TEST_DV_SYNTH_CORPUS); runs in dedicated Corpus job."
+  },
+  {
    "kind": "class",
    "value": "DvTunnelUnpackHookTests",
    "category": "GpuWarp",
@@ -256,11 +263,25 @@
    "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
   },
   {
+   "kind": "method",
+   "value": "WholeHookChainHookTests::EfficiencyStageCostsOnThisGpu",
+   "category": "GpuHardware",
+   "file": "src/VP-V/tests/WholeHookChainHookTests.cpp",
+   "note": "Hardware GPU timing; runs only with VP_TEST_GPU=hardware (Category=GpuHardware)."
+  },
+  {
    "kind": "class",
    "value": "WholeHookChainHookTests",
    "category": "GpuWarp",
    "file": "src/VP-V/tests/WholeHookChainHookTests.cpp",
    "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "method",
+   "value": "DetailPulseTests::DetailPulseGpuTiming",
+   "category": "GpuHardware",
+   "file": "src/VP-V/tests/suite/DetailPulseTests.cpp",
+   "note": "Timing; runs only with VP_TEST_GPU=hardware."
   },
   {
    "kind": "methodPrefix",
@@ -272,9 +293,16 @@
   {
    "kind": "method",
    "value": "TextureRestoreTests::TextureRestoreRealClipBreathing",
-   "category": "GpuWarp",
+   "category": "Footage",
    "file": "src/VP-V/tests/suite/TextureRestoreTests.cpp",
-   "note": "Real-footage run; self-skips without VP_TEST_REAL_FOOTAGE."
+   "note": "Real-footage breathing clip run; requires VP_TEST_REAL_FOOTAGE."
+  },
+  {
+   "kind": "method",
+   "value": "TextureRestoreGpuTests::TextureRestoreGpuTiming",
+   "category": "GpuHardware",
+   "file": "src/VP-V/tests/suite/TextureRestoreTests.cpp",
+   "note": "Timing; runs only with VP_TEST_GPU=hardware."
   },
   {
    "kind": "class",
@@ -391,9 +419,9 @@
   {
    "kind": "methodPrefix",
    "value": "RealClipCadenceAndFilmClock",
-   "category": "Slow",
+   "category": "Footage",
    "file": "src/VP-V/tests/suite/RealFootageSuiteTests.cpp",
-   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+   "note": "Real-footage clip run; runs only in the dedicated Footage job (TQ-X2)."
   },
   {
    "kind": "methodPrefix",
@@ -419,16 +447,16 @@
   {
    "kind": "methodPrefix",
    "value": "RealClipPlayerPulldown",
-   "category": "Slow",
+   "category": "Footage",
    "file": "src/VP-V/tests/suite/RealFootageSuiteTests.cpp",
-   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+   "note": "Real-footage clip run; runs only in the dedicated Footage job (TQ-X2)."
   },
   {
    "kind": "methodPrefix",
    "value": "RealClipSourceResolutionCutsAndLatch",
-   "category": "Slow",
+   "category": "Footage",
    "file": "src/VP-V/tests/suite/RealFootageSuiteTests.cpp",
-   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+   "note": "Real-footage clip run; runs only in the dedicated Footage job (TQ-X2)."
   },
   {
    "kind": "methodPrefix",
@@ -454,9 +482,9 @@
   {
    "kind": "methodPrefix",
    "value": "RealClipDiscontinuities",
-   "category": "Slow",
+   "category": "Footage",
    "file": "src/VP-V/tests/suite/RealFootageSuiteTests.cpp",
-   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+   "note": "Real-footage clip run; runs only in the dedicated Footage job (TQ-X2)."
   },
   {
    "kind": "methodPrefix",

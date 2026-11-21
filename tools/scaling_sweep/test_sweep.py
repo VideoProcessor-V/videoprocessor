@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """CPU-only tests for sweep.py (no GPU, no renders):
 python -I -m unittest discover -s tools/scaling_sweep -p "test_*.py" -v"""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -71,8 +73,13 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(cmd.count("-fps_mode"), 3)
         self.assertIn("format=yuv420p10le,extractplanes=y", cmd[cmd.index("-filter_complex") + 1])
         self.assertEqual(sorted(sweep.prepared(plan)), sorted(x["id"] for x in plan.geoms))
-        a2 = sweep.parse_args(["render", "--work", os.path.join(self.dir, "work"), "--sweeps", "3"])
-        self.assertEqual(sweep.main(["render", "--work", os.path.join(self.dir, "work"), "--sweeps", "3"]) if not sweep.Plan(a2).problems else 1, 1)
+        missing = os.path.join(self.dir, "no-ffmpeg.exe")   # a plan problem by construction, on any machine
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = sweep.main(["render", "--work", os.path.join(self.dir, "work"), "--sweeps", "3", "--ffmpeg", missing])
+        self.assertEqual(rc, 1)
+        self.assertIn("PROBLEM: ffmpeg not found: " + missing, out.getvalue(), "render must refuse on the plan's problems")
+        self.assertNotIn("prepare output missing", out.getvalue(), "the refusal must come from the plan check, not the prepare check")
 
     def test_camera_model_doubles(self):
         a0, a1 = self.args(), self.args("--camera-model-key", "camera_model")

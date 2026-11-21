@@ -8,6 +8,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/ScratchArena.h>
@@ -1172,11 +1173,9 @@ namespace VideoProcessorTest
 		{
 			// Hardware only (VP_TEST_GPU=hardware): Apply at 3840x2160 and 1920x1080 on a panning, I/B-coded, grainy scene,
 			// median wall time with pl_gpu_finish per frame, split into frames with and without an admission (the cleaner).
-			if (!ExtendedRangeGpuProbe::OnHardwareGpu())
-			{
-				Logger::WriteMessage("TemporalDetailGpuTiming: VP_TEST_GPU=hardware only; not run");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu,
+				"TemporalDetailGpuTiming", ExtendedRangeGpuProbe::OnHardwareGpu(), "needs VP_TEST_GPU=hardware"))
 				return;
-			}
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			pl_gpu gpu = dev.Gpu();
@@ -1219,9 +1218,13 @@ namespace VideoProcessorTest
 					if (k >= 8) (c.admitted ? msAdmit : msOther).push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
 				}
 				auto median = [](std::vector<double> v) { if (v.empty()) return 0.0; std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+				const double medAdmit = median(msAdmit), medOther = median(msOther);
+				Assert::IsTrue(!msAdmit.empty() || !msOther.empty(), L"at least one timed frame bucket must be populated");
+				if (!msAdmit.empty()) Assert::IsTrue(std::isfinite(medAdmit) && medAdmit > 0.0, L"admission median ms must be finite and positive");
+				if (!msOther.empty()) Assert::IsTrue(std::isfinite(medOther) && medOther > 0.0, L"non-admission median ms must be finite and positive");
 				char text[220];
 				std::snprintf(text, sizeof text, "temporal detail %dx%d: median %.3f ms on admission frames (%zu), %.3f ms otherwise (%zu); textures %.0f MB", w, h,
-					median(msAdmit), msAdmit.size(), median(msOther), msOther.size(), Gpu::Module::TextureBytes(w, h, h) / 1048576.0);
+					medAdmit, msAdmit.size(), medOther, msOther.size(), Gpu::Module::TextureBytes(w, h, h) / 1048576.0);
 				Logger::WriteMessage(text);
 				module.Release(gpu);
 				pl_tex_destroy(gpu, &bwdTex);
@@ -1347,7 +1350,8 @@ namespace VideoProcessorTest
 				Assert::IsTrue(module.Failures() == before + 1, L"one failure counted");
 				const FallbackCatalog::Decision d = arena.FrameDecision();
 				Assert::IsTrue(d.engaged && d.id == "scratch_arena", L"scratch_arena engaged");
-				Assert::IsTrue(arena.Shed() > 0 || arena.Exhausted() > 0, L"counted");
+				Assert::IsTrue(tierCase == 0 ? arena.Exhausted() > 0 : arena.Shed() > 0,
+					tierCase == 0 ? L"empty plan counted as Exhausted" : L"T0 plan counted as Shed");
 				// Recovery: a proper plan, a new frame.
 				arena.BeginFrame();
 				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T2)), L"arena reserve");

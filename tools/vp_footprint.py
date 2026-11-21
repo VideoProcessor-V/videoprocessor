@@ -18,9 +18,11 @@ import csv
 import datetime
 import fnmatch
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 
 VPV_PREFIX = "src/VP-V/"
 PROJECT_EXT = (".vcxproj", ".filters", ".sln", ".props", ".targets")
@@ -205,10 +207,12 @@ def render(res, top):
 def selftest():
     diff = ("diff --git a/src/A.cpp b/src/A.cpp\n--- a/src/A.cpp\n+++ b/src/A.cpp\n"
             "@@ -3,0 +4,2 @@ x\n+one\n+two // VPV-HOOK\n@@ -10 +12 @@\n-old\n+new\n"
-            "diff --git a/src/B.h b/src/B.h\n--- /dev/null\n+++ b/src/B.h\n@@ -0,0 +1 @@\n+z\n")
+            "diff --git a/src/B.h b/src/B.h\n--- /dev/null\n+++ b/src/B.h\n@@ -0,0 +1 @@\n+z\n"
+            "diff --git a/src/Del.cpp b/src/Del.cpp\n--- a/src/Del.cpp\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-gone1\n-gone2\n")
     p = parse_diff(diff)
     assert p["src/A.cpp"]["adds"] == 3 and p["src/A.cpp"]["dels"] == 1 and p["src/A.cpp"]["hunks"] == 2, p
     assert p["src/A.cpp"]["added_lines"] == [4, 5, 12], p
+    assert "/dev/null" not in p and "src/Del.cpp" not in p, p
     hs = hook_line_set("a\n// VPV-HOOK\nb\nc\n// VPV-HOOK-END\nd // VPV-HOOK\ne\n")
     assert hs == {2, 3, 4, 5, 6}, hs
     assert hook_line_set("// VPV-HOOK-FILE\nx\n") == {1, 2}
@@ -220,6 +224,27 @@ def selftest():
     b["upstream_candidates"]["t.cpp"]["lines"] = 11
     assert len(check_budget(rows, b)[0]) == 2, check_budget(rows, b)
     assert check_budget([{"path": "t.cpp", "stray": 11}], {"default": 0, "files": {"t.cpp": 10}})[0]
+    with tempfile.TemporaryDirectory() as d:
+        git(["init", "-q"], d)
+        git(["config", "user.email", "t@example.invalid"], d)
+        git(["config", "user.name", "t"], d)
+        os.makedirs(os.path.join(d, "src", "Bill"), exist_ok=True)
+        with open(os.path.join(d, "src", "Bill", "A.cpp"), "w", newline="\n") as fh:
+            fh.write("int a = 1;\n")
+        git(["add", "."], d)
+        git(["commit", "-q", "-m", "bill"], d)
+        bill_sha = git(["rev-parse", "HEAD"], d).strip()
+        with open(os.path.join(d, "src", "Bill", "A.cpp"), "w", newline="\n") as fh:
+            fh.write("int a = 1;\nint h = 2; // VPV-HOOK\nint s = 3;\n")
+        with open(os.path.join(d, "src", "Bill", "Extra.cpp"), "w", newline="\n") as fh:
+            fh.write("int e = 1;\n")
+        with open(os.path.join(d, "src", "Bill", "HookFile.cpp"), "w", newline="\n") as fh:
+            fh.write("// VPV-HOOK-FILE\nint hf = 1;\n")
+        git(["add", "."], d)
+        git(["commit", "-q", "-m", "head"], d)
+        m = measure(bill_sha, "HEAD", repo=d)
+        assert len(m["files"]) == 1 and m["files"][0]["adds"] == 2 and m["files"][0]["hook"] == 1 and m["files"][0]["stray"] == 1, m
+        assert m["misplaced"]["count"] == 1 and m["hook_files"]["count"] == 1, m
     print("selftest OK")
 
 

@@ -372,10 +372,10 @@ namespace VideoProcessorTest
 			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"libplacebo rejected SDR tone shape.glsl");
 			Assert::IsTrue((hooks[0]->stages & PL_HOOK_PRE_OUTPUT) != 0);
 			const pl_hook* hook = hooks[0];
-			auto set = [hook](double headroom, double strength, double recovery = 0.0)
+			auto set = [hook](double headroom, double strength, double recovery = 0.0, double kneeStart = 0.8)
 			{
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "headroom", headroom));
-				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee_start", 0.8));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee_start", kneeStart));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "strength", strength));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "eotf", 2.2));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "recovery", recovery));
@@ -383,18 +383,32 @@ namespace VideoProcessorTest
 			set(0.0, 0.0);
 			const auto unity = fixture.RenderCoordinateField(hook);
 			for (size_t i = 0; i < unity.size(); ++i)
-				Assert::AreEqual(static_cast<int>(baseline[i].r), static_cast<int>(unity[i].r), L"neutral = untouched");
+			{
+				Assert::AreEqual(static_cast<int>(baseline[i].r), static_cast<int>(unity[i].r), L"neutral R = untouched");
+				Assert::AreEqual(static_cast<int>(baseline[i].g), static_cast<int>(unity[i].g), L"neutral G = untouched");
+				Assert::AreEqual(static_cast<int>(baseline[i].b), static_cast<int>(unity[i].b), L"neutral B = untouched");
+			}
 			for (const double strength : { 0.0, 0.5, 1.0 })
 			{
 				set(0.15, strength);
 				const auto shaped = fixture.RenderCoordinateField(hook);
 				for (size_t x = 0; x < shaped.size(); ++x)
 				{
-					const double expected = 255.0 * SdrToneShape::Map(baseline[x].r / 255.0, 2.2, 0.15, 0.8, strength);
-					Assert::AreEqual(expected, static_cast<double>(shaped[x].r), 1.5,
-						(L"x " + std::to_wstring(x) + L" strength " + std::to_wstring(strength)).c_str());
+					const double expectedR = 255.0 * SdrToneShape::Map(baseline[x].r / 255.0, 2.2, 0.15, 0.8, strength);
+					const double expectedG = 255.0 * SdrToneShape::Map(baseline[x].g / 255.0, 2.2, 0.15, 0.8, strength);
+					const double expectedB = 255.0 * SdrToneShape::Map(baseline[x].b / 255.0, 2.2, 0.15, 0.8, strength);
+					Assert::AreEqual(expectedR, static_cast<double>(shaped[x].r), 1.5,
+						(L"R x " + std::to_wstring(x) + L" strength " + std::to_wstring(strength)).c_str());
+					Assert::AreEqual(expectedG, static_cast<double>(shaped[x].g), 1.5,
+						(L"G x " + std::to_wstring(x) + L" strength " + std::to_wstring(strength)).c_str());
+					Assert::AreEqual(expectedB, static_cast<double>(shaped[x].b), 1.5,
+						(L"B x " + std::to_wstring(x) + L" strength " + std::to_wstring(strength)).c_str());
 					if (x % 64 != 0)
-						Assert::IsTrue(shaped[x].r >= shaped[x - 1].r, L"monotonic");
+						Assert::IsTrue(shaped[x].r >= shaped[x - 1].r, L"R monotonic");
+					if (x % 64 != 0)
+						Assert::IsTrue(shaped[x].b >= shaped[x - 1].b, L"B monotonic");
+					if (x >= 64)
+						Assert::IsTrue(shaped[x].g >= shaped[x - 64].g, L"G monotonic");
 				}
 			}
 			// Contrast recovery on a smooth ramp: almost no local detail, so the
@@ -404,8 +418,68 @@ namespace VideoProcessorTest
 			set(0.15, 0.5, 0.0);
 			const auto plain = fixture.RenderCoordinateField(hook);
 			for (size_t x = 2; x + 2 < plain.size(); ++x)
+			{
 				Assert::IsTrue(std::abs(static_cast<int>(recovered[x].r) - static_cast<int>(plain[x].r)) <= 1,
-					L"recovery adds nothing on a smooth ramp");
+					L"recovery adds nothing on a smooth ramp (R)");
+				Assert::IsTrue(std::abs(static_cast<int>(recovered[x].g) - static_cast<int>(plain[x].g)) <= 1,
+					L"recovery adds nothing on a smooth ramp (G)");
+				Assert::IsTrue(std::abs(static_cast<int>(recovered[x].b) - static_cast<int>(plain[x].b)) <= 1,
+					L"recovery adds nothing on a smooth ramp (B)");
+			}
+			// Contrast recovery on a 2-pixel vertical stripe pattern inside the knee (knee_start=0.5):
+			// the 5x5 stride-2 blur sees opposite stripes at +-2 px, so recovery=2.0 must raise local contrast.
+			{
+				pl_gpu gpu = fixture.Gpu();
+				const enum pl_fmt_caps caps = static_cast<enum pl_fmt_caps>(
+					PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE);
+				pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8, caps);
+				Assert::IsNotNull(fmt);
+				std::vector<RgbaPixel> stripes(64 * 64);
+				for (int y = 0; y < 64; ++y)
+					for (int x = 0; x < 64; ++x)
+					{
+						const uint8_t v = ((x / 2) & 1) ? 245 : 215;
+						stripes[static_cast<size_t>(y) * 64 + x] = { v, v, v, 255 };
+					}
+				pl_tex_params sp{}; sp.w = 64; sp.h = 64; sp.format = fmt; sp.sampleable = true; sp.initial_data = stripes.data();
+				pl_tex_params tp{}; tp.w = 64; tp.h = 64; tp.format = fmt; tp.renderable = true; tp.host_readable = true;
+				pl_tex srcTex = pl_tex_create(gpu, &sp), dstTex = pl_tex_create(gpu, &tp);
+				Assert::IsTrue(srcTex && dstTex);
+				auto renderStripes = [&](double rec) {
+					set(0.15, 0.8, rec, 0.5);
+					pl_frame img = TargetLutGpuFixture::MakeRgbFrame(srcTex);
+					pl_frame out = TargetLutGpuFixture::MakeRgbFrame(dstTex);
+					pl_render_params rp = pl_render_fast_params;
+					rp.hooks = &hook;
+					rp.num_hooks = 1;
+					Assert::IsTrue(pl_render_image(fixture.Renderer(), &img, &out, &rp));
+					pl_gpu_finish(gpu);
+					std::vector<RgbaPixel> px(64 * 64);
+					pl_tex_transfer_params dl{}; dl.tex = dstTex; dl.ptr = px.data();
+					Assert::IsTrue(pl_tex_download(gpu, &dl));
+					return px;
+				};
+				const auto sPlain = renderStripes(0.0);
+				const auto sRec = renderStripes(2.0);
+				pl_tex_destroy(gpu, &srcTex);
+				pl_tex_destroy(gpu, &dstTex);
+				double plainContrast = 0.0, recContrast = 0.0;
+				int pairs = 0;
+				for (int y = 8; y < 56; ++y)
+					for (int x = 8; x < 56; x += 4)
+					{
+						const size_t lo = static_cast<size_t>(y) * 64 + x;
+						const size_t hi = static_cast<size_t>(y) * 64 + (x + 2);
+						plainContrast += static_cast<double>(sPlain[hi].r) - static_cast<double>(sPlain[lo].r);
+						recContrast += static_cast<double>(sRec[hi].r) - static_cast<double>(sRec[lo].r);
+						++pairs;
+					}
+				plainContrast /= pairs;
+				recContrast /= pairs;
+				Assert::IsTrue(recContrast > plainContrast + 1.0,
+					(L"contrast recovery must raise stripe contrast inside the knee: plain=" +
+						std::to_wstring(plainContrast) + L" rec=" + std::to_wstring(recContrast)).c_str());
+			}
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
 		}

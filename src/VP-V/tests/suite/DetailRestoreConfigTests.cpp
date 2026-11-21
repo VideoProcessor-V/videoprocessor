@@ -12,6 +12,8 @@
 
 #include <VP-V/tests/support/DetailPulseModel.h>
 #include <VP-V/tests/support/TextureRestoreModel.h>
+#include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <libplacebo/dispatch.h>
 
 #include <algorithm>
 #include <cctype>
@@ -270,25 +272,129 @@ namespace DetailRestoreConfigTestsNs
 
 		// Owner requirement: the stages cannot change what the source-resolution detector reads.
 		// The renderer takes the monitor's input (renderImage) before the render hook; the hook's
-		// stages write to new textures. (a) The input is bit-identical with the stages on and off;
-		// (b) even a worst-case output (both bands at the maximum caps) would decide the same.
+		// stages write to new textures. Drive the real DetailPulse::Module and TextureRestore::Module
+		// on a pl_frame and assert the input pl_tex handle and pixels stay bit-identical while
+		// distinct modified output textures are returned.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DetailRestoreSourceResolutionInputUnchanged)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DetailRestoreSourceResolutionInputUnchanged)
 		{
 			std::vector<std::vector<float>> original;
 			for (unsigned seed = 1; seed <= 4; ++seed) original.push_back(UpscaledTile(seed));
-			const Rendered off = RenderModel(original, 1.0);
-			const Rendered pulse = RenderModel(original, DetailPulse::kCapMax);
-			const Rendered restore = RenderModel(original, TextureRestore::kCapMax);
-			const Rendered both = RenderModel(original, DetailPulse::kCapMax * TextureRestore::kCapMax);
-			Assert::IsTrue(SameBytes(off.monitorInput, original), L"off: the monitor's input is the original frame");
-			Assert::IsTrue(SameBytes(pulse.monitorInput, off.monitorInput), L"detail pulse on: the monitor's input is unchanged");
-			Assert::IsTrue(SameBytes(restore.monitorInput, off.monitorInput), L"texture restore on: the monitor's input is unchanged");
-			Assert::IsTrue(SameBytes(both.monitorInput, off.monitorInput), L"both on: the monitor's input is unchanged");
-			Assert::IsFalse(SameBytes(both.hookOutput, off.hookOutput), L"the model's worst case does change the hook's output (the check can see a change)");
-			Assert::IsTrue(SameBytes(off.hookOutput, original), L"off: the hook passes the frame through");
-			const SourceResolution::FrameReading before = Read(off.monitorInput);
-			const SourceResolution::FrameReading after = Read(both.monitorInput);
-			Assert::AreEqual(before.ratio, after.ratio, 1e-12, L"same reading from the same input");
+			const int W = 2 * kTile;
+			std::vector<uint16_t> sharp(static_cast<size_t>(W) * W), softened(static_cast<size_t>(W) * W);
+			for (int q = 0; q < 4; ++q)
+			{
+				const int ox = (q % 2) * kTile, oy = (q / 2) * kTile;
+				for (int y = 0; y < kTile; ++y)
+					for (int x = 0; x < kTile; ++x)
+					{
+						const double code = std::min(1023.0, std::max(0.0, static_cast<double>(original[q][static_cast<size_t>(y) * kTile + x]) * 1023.0));
+						const uint16_t s16 = static_cast<uint16_t>(std::lround(code)) << 6;
+						sharp[static_cast<size_t>(oy + y) * W + ox + x] = s16;
+						// Soften frame 2 slightly toward mid-grey so DetailPulse boosts and TextureRestore engages.
+						const double softCode = 0.65 * code + 0.35 * 512.0;
+						softened[static_cast<size_t>(oy + y) * W + ox + x] = static_cast<uint16_t>(std::lround(softCode)) << 6;
+					}
+			}
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			Assert::IsNotNull(dispatch, L"dispatch creation failed");
+			pl_fmt r16 = pl_find_named_fmt(gpu, "r16");
+			Assert::IsNotNull(r16, L"r16 format unavailable");
+			auto makeTex = [&](const uint16_t* data, bool hostReadable) {
+				pl_tex_params tp{};
+				tp.w = W; tp.h = W; tp.format = r16;
+				tp.sampleable = true; tp.blit_src = true; tp.blit_dst = hostReadable; tp.host_readable = hostReadable;
+				tp.initial_data = data;
+				pl_tex t = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(t, L"r16 texture allocation failed");
+				return t;
+			};
+			auto download = [&](pl_tex tex) {
+				pl_tex stage = makeTex(nullptr, true);
+				pl_tex_blit_params bp{};
+				bp.src = tex; bp.dst = stage;
+				pl_tex_blit(gpu, &bp);
+				std::vector<uint16_t> out(static_cast<size_t>(W) * W);
+				pl_tex_transfer_params dl{};
+				dl.tex = stage; dl.ptr = out.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"r16 readback failed");
+				pl_tex_destroy(gpu, &stage);
+				return out;
+			};
+			auto makeFrame = [&](pl_tex tex) {
+				pl_frame f{};
+				f.num_planes = 1;
+				f.planes[0].texture = tex;
+				f.planes[0].components = 1;
+				f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				f.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				f.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				f.repr.bits.sample_depth = 16;
+				f.repr.bits.color_depth = 10;
+				f.repr.bits.bit_shift = 6;
+				f.color = pl_color_space_bt709;
+				return f;
+			};
+			pl_tex frame1Tex = makeTex(sharp.data(), true);
+			pl_tex frame2Tex = makeTex(softened.data(), true);
+			const std::vector<uint16_t> beforeBytes = download(frame2Tex);
+
+			DetailPulse::Module pulse;
+			TextureRestore::Module restore;
+			DetailPulse::Params dp;
+			dp.cap = DetailPulse::kCapMax;
+			dp.sourceHz = 23.976;
+			TextureRestore::Params tp;
+			tp.cap = TextureRestore::kCapMax;
+			tp.sourceHz = 23.976;
+
+			// Frame 1 establishes reference detail; Frame 2 triggers real GPU DetailPulse + TextureRestore output.
+			dp.sequence = 1; tp.sequence = 1;
+			pl_frame p1{}, r1{};
+			Assert::IsTrue(pulse.Apply(gpu, dispatch, makeFrame(frame1Tex), dp, p1), Wide(pulse.LastError()).c_str());
+			Assert::IsTrue(restore.Apply(gpu, dispatch, p1, tp, r1), Wide(restore.LastError()).c_str());
+
+			dp.sequence = 2; tp.sequence = 2;
+			pl_frame in2 = makeFrame(frame2Tex);
+			pl_frame p2{}, r2{};
+			Assert::IsTrue(pulse.Apply(gpu, dispatch, in2, dp, p2), Wide(pulse.LastError()).c_str());
+			Assert::IsTrue(restore.Apply(gpu, dispatch, p2, tp, r2), Wide(restore.LastError()).c_str());
+
+			Assert::IsNotNull(p2.planes[0].texture, L"DetailPulse must return an output texture");
+			Assert::IsNotNull(r2.planes[0].texture, L"TextureRestore must return an output texture");
+			Assert::IsTrue(p2.planes[0].texture != frame2Tex, L"DetailPulse must write to a distinct output texture");
+			Assert::IsTrue(r2.planes[0].texture != frame2Tex, L"TextureRestore must write to a distinct output texture");
+
+			const std::vector<uint16_t> afterBytes = download(frame2Tex);
+			const std::vector<uint16_t> outputBytes = download(r2.planes[0].texture);
+			Assert::IsTrue(afterBytes == beforeBytes, L"input pl_tex contents must remain bit-identical after both GPU stages");
+			Assert::IsTrue(outputBytes != beforeBytes, L"real GPU stages must produce a modified output frame");
+
+			auto toTiles = [&](const std::vector<uint16_t>& buf) {
+				std::vector<std::vector<float>> tiles(4, std::vector<float>(static_cast<size_t>(kTile) * kTile));
+				for (int q = 0; q < 4; ++q)
+				{
+					const int ox = (q % 2) * kTile, oy = (q / 2) * kTile;
+					for (int y = 0; y < kTile; ++y)
+						for (int x = 0; x < kTile; ++x)
+							tiles[q][static_cast<size_t>(y) * kTile + x] = static_cast<float>((buf[static_cast<size_t>(oy + y) * W + ox + x] >> 6) / 1023.0);
+				}
+				return tiles;
+			};
+			const SourceResolution::FrameReading before = Read(toTiles(beforeBytes));
+			const SourceResolution::FrameReading after = Read(toTiles(afterBytes));
+			Assert::AreEqual(before.ratio, after.ratio, 1e-12, L"source-resolution reading on input pl_tex must be unchanged");
+
+			restore.Release(gpu);
+			pulse.Release(gpu);
+			pl_tex_destroy(gpu, &frame2Tex);
+			pl_tex_destroy(gpu, &frame1Tex);
+			pl_dispatch_destroy(&dispatch);
 		}
 
 		TEST_METHOD(DetailRestoreSourceResolutionInputWorstCaseStillDecides1080)
@@ -390,7 +496,7 @@ namespace DetailRestoreConfigTestsNs
 			tp.cap = TextureRestore::kCapMax;
 			tp.planeLines = 2160.0;
 			tp.sourceHz = 23.976;
-			double maxPulse = 1.0, maxChange = 0.0, worstShift = 0.0;
+			double maxPulse = 1.0, maxChange = 0.0, maxRestoreChange = 0.0, worstShift = 0.0;
 			for (int f = 0; f < 12; ++f)
 			{
 				const bool iFrame = f % 6 == 0;
@@ -403,7 +509,11 @@ namespace DetailRestoreConfigTestsNs
 				in.v.assign(stabilised.out.v.begin(), stabilised.out.v.end());
 				tp.sequence = static_cast<uint64_t>(f + 1);
 				const TextureRestoreModel::Image out = restore.Frame(in, tp);
-				for (size_t i = 0; i < out.v.size(); ++i) maxChange = (std::max)(maxChange, std::fabs(out.v[i] - coded.v[i]));
+				for (size_t i = 0; i < out.v.size(); ++i)
+				{
+					maxChange = (std::max)(maxChange, std::fabs(out.v[i] - coded.v[i]));
+					maxRestoreChange = (std::max)(maxRestoreChange, std::fabs(out.v[i] - in.v[i]));
+				}
 				const SourceResolution::FrameReading codedReading = Read(split(coded.v));
 				const SourceResolution::FrameReading staged = Read(split(out.v));
 				char line[200];
@@ -415,9 +525,11 @@ namespace DetailRestoreConfigTestsNs
 				Assert::IsTrue(std::fabs(staged.ratio - 0.5) < 0.02, L"the real stages' output would still read 1080");
 			}
 			char line[160];
-			snprintf(line, sizeof(line), "max pulse gain %.3f, max code change %.2f, worst ratio shift %.4f\n", maxPulse, maxChange, worstShift);
+			snprintf(line, sizeof(line), "max pulse gain %.3f, max code change %.2f, max restore change %.2f, worst ratio shift %.4f\n",
+				maxPulse, maxChange, maxRestoreChange, worstShift);
 			Logger::WriteMessage(line);
 			Assert::IsTrue(maxPulse > 1.05, L"the detail pulse engaged (the check exercised the stage)");
+			Assert::IsTrue(maxRestoreChange > 1e-3, L"TextureRestore must independently modify the picture");
 		}
 
 		// The renderer's own order, pinned in the source: the monitor reads renderImage before the

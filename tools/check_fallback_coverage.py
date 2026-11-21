@@ -142,14 +142,66 @@ def scan(root):
     return hits
 
 
+def selftest_failures():
+    """Names of the failed selftest checks (empty when all pass): the three site classes (log, cap, plerr) each flagged,
+    covered by a visible report or a tag, and not flagged without their words; and catalog_hits on a synthetic tree
+    (a missing formatter row, a missing test reference, and a complete catalog)."""
+    import shutil
+    import tempfile
+    failed = []
+
+    def check(name, cond):
+        if not cond:
+            failed.append(name)
+    wrap = "void F() {\n  %s\n}\n"
+    for label, line, expect in (
+            ("log bad", 'Log("x falling back to y");', "log"),
+            ("log: disabled word", 'DebugLog::Log("engine disabled");', "log"),
+            ("cap bad", "n = std::min(n, kMaxLead);", "cap"),
+            ("plerr bad", "pl_renderer_get_errors(r);", "plerr")):
+        found = scan_text("a.cpp", wrap % line)
+        check(label, [h["pattern"] for h in found] == [expect])
+    for label, body in (
+            ("log covered by Engage", 'Log("x falling back to y");\n  fallbacks.Engage("x", "y");'),
+            ("log covered by FallbackStatus", 'Log("x unavailable");\n  FallbackStatus st;'),
+            ("cap covered by Engage", 'n = std::min(n, kMaxLead);\n  fallbacks.Engage("cap", "n");'),
+            ("plerr covered by Notices", "pl_renderer_get_errors(r);\n  Notices(1);"),
+            ("log tagged", '// VPV-FALLBACK x\n  Log("x falling back");'),
+            ("cap tagged", "// VPV-FALLBACK kMaxLead: not a fallback\n  n = std::min(n, kMaxLead);"),
+            ("plerr tagged", "// VPV-FALLBACK pl: note\n  pl_renderer_get_errors(r);"),
+            ("log without a fallback word", 'Log("frame 12 presented");'),
+            ("std::min without a kMax cap", "n = std::min(n, limit);")):
+        check(label, not scan_text("a.cpp", wrap % body))
+    check("log in a comment is no site", not scan_text("a.cpp", wrap % '// Log("x falling back");'))
+    root = tempfile.mkdtemp()
+    try:
+        def put(rel, text):
+            path = os.path.join(root, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(text)
+        put(CATALOG, 'static const Entry a = Engaged("alpha");\n')
+        put(PLAIN, '{ "alpha", "Alpha fell back" },\n')
+        put("src/VP-V/tests/FallbackTests.cpp", 'Assert::IsTrue(Has("alpha"));\n')
+        check("catalog ids read", catalog_ids(root) == ["alpha"])
+        check("complete catalog has no hit", catalog_hits(root) == [])
+        put(PLAIN, '{ "other", "Other" },\n')
+        check("missing formatter row", [h["file"] for h in catalog_hits(root)] == ["catalog:alpha:formatter"])
+        put(PLAIN, '{ "alpha", "Alpha fell back" },\n')
+        put("src/VP-V/tests/FallbackTests.cpp", "// no reference\n")
+        check("missing test reference", [h["file"] for h in catalog_hits(root)] == ["catalog:alpha:test"])
+        put(CATALOG, 'static const Entry a = Engaged("alpha");\nstatic const Entry b = Engaged("beta");\n')
+        put("src/VP-V/tests/FallbackTests.cpp", 'Has("alpha"); Has("beta");\n')
+        check("a second id needs its own formatter row", [h["file"] for h in catalog_hits(root)] == ["catalog:beta:formatter"])
+    finally:
+        shutil.rmtree(root, True)
+    return failed
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     if "--selftest" in argv:
-        bad = "void F() {\n  Log(\"x falling back to y\");\n}\n"
-        good = "void F() {\n  Log(\"x falling back to y\");\n  fallbacks.Engage(\"x\", \"y\");\n}\n"
-        tagged = "void F() {\n  // VPV-FALLBACK x\n  Log(\"x falling back\");\n}\n"
-        ok = len(scan_text("a.cpp", bad)) == 1 and not scan_text("a.cpp", good) and not scan_text("a.cpp", tagged)
-        return L.selftest_ok("fallback coverage", ok)
+        return L.selftest_ok("fallback coverage", not selftest_failures())
     return L.run_ratchet("N3 fallback-coverage", scan, argv, BASELINE,
                          "a fallback / binding cap that is only logged; report it through FallbackStatus (Ctrl+I, notice) or tag // VPV-FALLBACK <id>.",
                          per_class=lambda hits: {k: sum(1 for h in hits if h["pattern"] == k) for k in ("log", "cap", "plerr", "catalog")})

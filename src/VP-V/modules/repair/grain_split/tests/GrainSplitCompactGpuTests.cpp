@@ -261,23 +261,30 @@ public:
 			Assert::IsTrue(worstClean <= 0.5, L"max |clean| error within 0.5 code");
 			Assert::IsTrue(worstG <= 0.5, L"max |G| error within 0.5 code");
 
-			struct Cls { const char* name; const std::vector<char>* mask; };
-			const Cls classes[4] = { { "all", &clsAll }, { "grain-only (f<0.1)", &clsGrain }, { "mixed", &clsMixed }, { "structure (f>0.9)", &clsStruct } };
-			for (const Cls& c : classes)
-			{
-				double sdF, r1F, sdC, r1C;
-				size_t cnt, cnt2;
-				Moments(gFull, *c.mask, w, h, sdF, r1F, cnt);
-				Moments(gComp, *c.mask, w, h, sdC, r1C, cnt2);
-				char line[320];
-				std::snprintf(line, sizeof line, "  class %-20s %6zu px: std(G) full %.4f compact %.4f (%.3f %%), lag-1 full %.4f compact %.4f (delta %.4f)", c.name, cnt, sdF,
-					sdC, sdF > 0 ? 100.0 * std::fabs(sdC - sdF) / sdF : 0.0, r1F, r1C, std::fabs(r1C - r1F));
-				Logger::WriteMessage(line);
-				if (cnt < 200) { Logger::WriteMessage("    (class skipped: fewer than 200 px)"); continue; }
-				Assert::IsTrue(std::fabs(sdC - sdF) <= 0.05 * sdF, Wide(std::string("std(G) within 5 % in class ") + c.name + ": " + line).c_str());
-				// within 5 % of the full value (an absolute floor of 0.005 for a correlation near zero)
-				Assert::IsTrue(std::fabs(r1C - r1F) <= (std::max)(0.05 * std::fabs(r1F), 0.005), Wide(std::string("lag-1 autocorrelation within 5 % in class ") + c.name + ": " + line).c_str());
-			}
+				struct Cls { const char* name; const std::vector<char>* mask; bool required; };
+				const Cls classes[4] = {
+					{ "all", &clsAll, true },
+					{ "grain-only (f<0.1)", &clsGrain, true },
+					{ "mixed", &clsMixed, false },
+					{ "structure (f>0.9)", &clsStruct, true }
+				};
+				for (const Cls& c : classes)
+				{
+					double sdF, r1F, sdC, r1C;
+					size_t cnt, cnt2;
+					Moments(gFull, *c.mask, w, h, sdF, r1F, cnt);
+					Moments(gComp, *c.mask, w, h, sdC, r1C, cnt2);
+					char line[320];
+					std::snprintf(line, sizeof line, "  class %-20s %6zu px: std(G) full %.4f compact %.4f (%.3f %%), lag-1 full %.4f compact %.4f (delta %.4f)", c.name, cnt, sdF,
+						sdC, sdF > 0 ? 100.0 * std::fabs(sdC - sdF) / sdF : 0.0, r1F, r1C, std::fabs(r1C - r1F));
+					Logger::WriteMessage(line);
+					if (c.required)
+						Assert::IsTrue(cnt >= 200, Wide(std::string("required class ") + c.name + " must have >= 200 px: " + line).c_str());
+					else if (cnt < 200) { Logger::WriteMessage("    (class skipped: fewer than 200 px)"); continue; }
+					Assert::IsTrue(std::fabs(sdC - sdF) <= 0.05 * sdF, Wide(std::string("std(G) within 5 % in class ") + c.name + ": " + line).c_str());
+					// within 5 % of the full value (an absolute floor of 0.005 for a correlation near zero)
+					Assert::IsTrue(std::fabs(r1C - r1F) <= (std::max)(0.05 * std::fabs(r1F), 0.005), Wide(std::string("lag-1 autocorrelation within 5 % in class ") + c.name + ": " + line).c_str());
+				}
 			// the block texels are bit-identical (N and e3: the .x and .y of the texel)
 			bool blocksSame = full.blocks.size() == comp.blocks.size();
 			size_t differing = 0;
@@ -511,7 +518,7 @@ if (p.x < TBW && p.y < TBH) imageStore(out_blocks, p, vec4(gs_blocks(p), 0.0, 0.
 				{
 					const std::vector<float> raw = DownloadRGBA(gpu, dev.dispatch, f.split), rawBlocks = DownloadRGBA(gpu, dev.dispatch, f.blocks);
 					Assert::IsTrue(SameBits(raw, fetch[0]), L"Full gs_fetch returns the stored texel exactly");
-					bool same = raw.size() == fetch[0].size();
+					bool same = rawBlocks.size() == blocks[0].size();
 					for (size_t i = 0; same && i < static_cast<size_t>(f.bw) * f.bh; ++i)
 						same = rawBlocks[i * 4] == blocks[0][i * 4] && rawBlocks[i * 4 + 1] == blocks[0][i * 4 + 1];
 					Assert::IsTrue(same, L"Full gs_blocks returns (N, e3) exactly");

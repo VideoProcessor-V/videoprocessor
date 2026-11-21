@@ -4,6 +4,7 @@
 // VP-V GPU hook tests (moved out of Bill's LibplaceboLutParserTests.cpp; test names unchanged).
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 namespace VideoProcessorTest
 {
@@ -192,17 +193,18 @@ namespace VideoProcessorTest
 		// of the tunnel wrote (tools/dv_synth/make_corpus.py, VP_TEST_DV_SYNTH_CORPUS): every
 		// accuracy segment (r210 / R10b / R10l, low8 / high8 / high8 with replicated bits,
 		// 1080p and 2160p), bit-exact; the 4K pass timed (hardware). WARP by default.
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Corpus")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus)
 		{
 			char* rootValue = nullptr;
 			size_t rootLength = 0;
 			const std::string root = _dupenv_s(&rootValue, &rootLength, "VP_TEST_DV_SYNTH_CORPUS") == 0 && rootValue ? rootValue : "";
 			std::free(rootValue);
-			if (root.empty())
-			{
-				Logger::WriteMessage("SKIP-NO-CORPUS GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus (VP_TEST_DV_SYNTH_CORPUS)\n");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Corpus,
+				"GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus", !root.empty(), "set VP_TEST_DV_SYNTH_CORPUS"))
 				return;
-			}
 			char* gpuValue = nullptr;
 			size_t gpuLength = 0;
 			const bool hardware = _dupenv_s(&gpuValue, &gpuLength, "VP_TEST_GPU") == 0 && gpuValue && std::string(gpuValue) == "hardware";
@@ -365,19 +367,13 @@ namespace VideoProcessorTest
 				}
 				else
 				{
-					// No trusted DM: the renderer hands on zero planes (never the packed bytes).
-					out.intensity.assign(planePixels, 0);
-					out.chroma.assign(planePixels, 0);
+					// No trusted DM: AnalyzeFrame returned BLACK; verify the CPU formatter also produces all zeros.
+					Assert::IsTrue(out.result == CRGBDolbyVisionTunnelFormatter::FrameResult::BLACK,
+						(std::wstring(name) + L": expected FrameResult::BLACK").c_str());
 					for (size_t i = 0; i < 2 * planePixels; ++i)
 						Assert::AreEqual(0, static_cast<int>(want[i]), (std::wstring(name) + L": the CPU formatter is not black").c_str());
 				}
 				return out;
-			};
-			auto black = [](const Routed& r)
-			{
-				for (uint16_t v : r.intensity) if (v != 0) return false;
-				for (uint16_t v : r.chroma) if (v != 0) return false;
-				return true;
 			};
 			// The packed pixels of the damaged frame, unpacked anyway: not black (what the route
 			// must never show).
@@ -405,18 +401,16 @@ namespace VideoProcessorTest
 			{
 				const Routed r = route(analyzed, cpu, damaged.input, counter++, L"DM lost");
 				if (r.result == CRGBDolbyVisionTunnelFormatter::FrameResult::BLACK)
-				{
-					Assert::IsTrue(black(r), L"DM lost: black planes");
 					blackAt = lost;
-				}
 			}
 			Logger::WriteMessage(("DM loss: black after " + std::to_string(blackAt + 1) + " damaged frame(s)\n").c_str());
 			Assert::IsTrue(blackAt >= 0, L"a lasting DM loss reaches black within the loss limit");
 			Assert::IsFalse(analyzed.GetDolbyVisionTunnelMetadata().valid || analyzed.GetDolbyVisionTunnelMetadata().allowSdrFallback,
 				L"after DV lock a lost DM is neither trusted nor allowed the SDR passthrough (the packed pixels)");
-			// Still lost: stays black.
+			// Still lost: stays BLACK.
 			for (int more = 0; more < 5; ++more)
-				Assert::IsTrue(black(route(analyzed, cpu, damaged.input, counter++, L"still lost")), L"stays black while the DM is lost");
+				Assert::IsTrue(route(analyzed, cpu, damaged.input, counter++, L"still lost").result ==
+					CRGBDolbyVisionTunnelFormatter::FrameResult::BLACK, L"stays BLACK while the DM is lost");
 			// A fresh, complete DM (a new metadata ID, as a sender restarts): the GPU picture again.
 			Tests::DvSender::SenderPicture fresh = picture;
 			fresh.Embed(Tests::DvSender::Packetize(Tests::DvSender::DmBody(2048)));
@@ -425,7 +419,7 @@ namespace VideoProcessorTest
 				restored = route(analyzed, cpu, fresh.input, counter++, L"fresh DM").result ==
 					CRGBDolbyVisionTunnelFormatter::FrameResult::PICTURE;
 			Assert::IsTrue(restored, L"a fresh DM brings the GPU picture back");
-			// A stream whose first frame already has a damaged DM: zero DV planes from the start (before
+			// A stream whose first frame already has a damaged DM: BLACK from the start (before
 			// any lock the renderer may still choose the SDR passthrough - allowSdrFallback, reported).
 			{
 				CRGBDolbyVisionTunnelFormatter coldAnalyzed, coldCpu;
@@ -434,8 +428,8 @@ namespace VideoProcessorTest
 				for (uint64_t n = 1; n <= 3; ++n)
 				{
 					const Routed r = route(coldAnalyzed, coldCpu, damaged.input, n, L"never locked");
-					Assert::IsTrue(r.result == CRGBDolbyVisionTunnelFormatter::FrameResult::BLACK && black(r),
-						L"never locked with a damaged DM: zero planes, not the packed pixels");
+					Assert::IsTrue(r.result == CRGBDolbyVisionTunnelFormatter::FrameResult::BLACK,
+						L"never locked with a damaged DM: BLACK, not the packed pixels");
 				}
 				Logger::WriteMessage(coldAnalyzed.GetDolbyVisionTunnelMetadata().allowSdrFallback ?
 					"never locked: SDR passthrough allowed (no DV lock yet)\n" : "never locked: SDR passthrough not allowed\n");

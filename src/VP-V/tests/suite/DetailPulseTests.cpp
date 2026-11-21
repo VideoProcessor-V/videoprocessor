@@ -4,6 +4,7 @@
 #include <VP-V/tests/support/DetailPulseModel.h>
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
 #include <VP-V/tests/support/GrainReferenceModel.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
@@ -1067,6 +1068,7 @@ namespace DetailPulseTestsNs
 			snprintf(text, sizeof(text), "repeat of a picture moved (6, 4) px: stale-low ghost RMS %.4f codes (g2 %.3f); correct delta vs A's moved delta %.2e (flat weights %d)",
 				ghost, a.g2, follow, flat ? 1 : 0);
 			Logger::WriteMessage(text);
+			Assert::IsTrue(flat, L"tile weights must be flat (>0.999) so shift-equivariance check runs");
 			Assert::IsTrue(ghost > 0.02, W(text).c_str());
 			Assert::IsTrue(follow < 1e-9, W(text).c_str());
 		}
@@ -1288,6 +1290,8 @@ namespace DetailPulseTestsNs
 				Logger::WriteMessage(text);
 				if (debandAhead)
 					Assert::IsTrue(moved == 0.0, W(text).c_str());
+				else
+					Assert::IsTrue(moved > 0.0, W(text).c_str());
 				module.Release(g.gpu);
 			}
 			debander.Release(g.gpu);
@@ -1409,6 +1413,9 @@ namespace DetailPulseTestsNs
 			Assert::IsTrue(worstLuma <= 1.0 / 64.0 + 1e-9 && worstRgb < 0.01 && worstModel < 0.05, W(text).c_str());
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(DetailPulseGpuTiming)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DetailPulseGpuTiming)
 		{
 			// Apply at 3840x2160, 2560x1600 and 1920x1080 (r16 luma, 4:2:0 chroma passing through),
@@ -1418,11 +1425,9 @@ namespace DetailPulseTestsNs
 			//  - new frames steady (one picture: gain exactly 1 after the first);
 			//  - repeats of another picture (hunt 3 F6: a de-judder extra or gap fill; the apply
 			//    pass alone, with a gain above 1).
-			if (!ExtendedRangeGpuProbe::OnHardwareGpu())
-			{
-				Logger::WriteMessage("DetailPulseGpuTiming: skipped (VP_TEST_GPU=hardware not set)");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu,
+				"DetailPulseGpuTiming", ExtendedRangeGpuProbe::OnHardwareGpu(), "needs VP_TEST_GPU=hardware"))
 				return;
-			}
 			PulseGpu g;
 			LARGE_INTEGER freq;
 			QueryPerformanceFrequency(&freq);
@@ -1546,6 +1551,11 @@ namespace DetailPulseTestsNs
 						gpuLines += gt;
 					}
 					char text[256];
+					for (int mode = 0; mode < 3; ++mode)
+					{
+						Assert::IsTrue(std::isfinite(median[mode]) && median[mode] > 0.0, L"DetailPulse median GPU time must be finite and positive");
+						Assert::IsTrue(std::isfinite(batched[mode]) && batched[mode] > 0.0, L"DetailPulse batched GPU time must be finite and positive");
+					}
 					snprintf(text, sizeof(text), " | %s: new %.3f ms, steady %.3f ms, repeat %.3f ms (batched %.3f / %.3f / %.3f)", fast ? "fast" : "original",
 						median[0], median[1], median[2], batched[0], batched[1], batched[2]);
 					line += text;
@@ -1556,20 +1566,22 @@ namespace DetailPulseTestsNs
 			}
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(DetailPulseRealClipBreathing)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DetailPulseRealClipBreathing)
 		{
 			// D:\hfr\breathing (research material): x265 CRF 24 / 32 of a clean 1536x768 clip,
 			// yuv420p10le, 48 frames. The CPU model without vectors, causal and with the look-ahead.
 			char* folder = nullptr;
 			size_t length = 0;
-			if (_dupenv_s(&folder, &length, "VP_TEST_REAL_FOOTAGE") != 0 || !folder || !*folder)
-			{
-				std::free(folder);
-				Logger::WriteMessage("DetailPulseRealClipBreathing: skipped (VP_TEST_REAL_FOOTAGE not set)");
-				return;
-			}
-			const std::string dir = std::string(folder) + "\\breathing\\";
+			const bool hasFolder = _dupenv_s(&folder, &length, "VP_TEST_REAL_FOOTAGE") == 0 && folder && *folder;
+			const std::string folderStr = hasFolder ? folder : "";
 			std::free(folder);
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage,
+				"DetailPulseRealClipBreathing", !folderStr.empty(), "set VP_TEST_REAL_FOOTAGE"))
+				return;
+			const std::string dir = folderStr + "\\breathing\\";
 			const int w = 1536, h = 768, n = 48;
 			const size_t frameSamples = static_cast<size_t>(w) * h * 3 / 2;
 			auto luma = [&](const std::string& name, int k) {

@@ -280,27 +280,38 @@ namespace VideoProcessorTest
 			Case on;
 			on.scale = 0.5;
 			run("off down", off);
-			run("on down (1st)", on);
+			const auto first1 = run("on down (1st)", on);
 			run("on down (2nd)", on);
 			Case offUp = off;
 			offUp.scale = 1.5;
 			run("off up", offUp);
-			run("on down after off up", on);
+			const auto first2 = run("on down after off up", on);
 			Case gammaOff = off;
 			gammaOff.linear = false;
 			run("off down, gamma light", gammaOff);
-			run("on down after gamma light", on);
+			const auto first3 = run("on down after gamma light", on);
 			Case mitchellOff = off;
 			mitchellOff.mitchell = true;
 			run("off down, mitchell", mitchellOff);
 			Case mitchellOn = on;
 			mitchellOn.mitchell = true;
-			run("on down mitchell after off mitchell", mitchellOn);
+			const auto first4 = run("on down mitchell after off mitchell", mitchellOn);
 			Logger::WriteMessage(report.c_str());
-			for (const std::string& row : { std::string("on down (1st): "), std::string("on down after off up: "),
-				std::string("on down after gamma light: "), std::string("on down mitchell after off mitchell: ") })
-				Assert::IsTrue(report.find(row + "4 16 40 64 100 502 900 940") != std::string::npos,
-					ExtendedRangeGpuProbe::ToWide("a first carry frame is wrong\n" + report).c_str());
+			const std::vector<std::pair<const char*, std::vector<int>>> checked = {
+				{ "on down (1st)", first1 },
+				{ "on down after off up", first2 },
+				{ "on down after gamma light", first3 },
+				{ "on down mitchell after off mitchell", first4 },
+			};
+			for (const auto& entry : checked)
+			{
+				Assert::AreEqual(codes.size(), entry.second.size(),
+					ExtendedRangeGpuProbe::ToWide(std::string(entry.first) + " column count\n" + report).c_str());
+				for (size_t i = 0; i < codes.size(); ++i)
+					Assert::IsTrue(std::abs(entry.second[i] - codes[i]) <= (i < 8 ? 0 : 1),
+						ExtendedRangeGpuProbe::ToWide(std::string(entry.first) + " code[" + std::to_string(i) + (i < 8 ? "] exactly " : "] within 1 of ") +
+							std::to_string(codes[i]) + " got " + std::to_string(entry.second[i]) + "\n" + report).c_str());
+			}
 		}
 
 		TEST_METHOD(ExtendedRangeBt1886Carry)
@@ -914,6 +925,16 @@ namespace VideoProcessorTest
 			pl_mpv_user_shader_destroy(&nls);
 			Assert::IsTrue(r.ok && r.restores > 0, (L"mode " + std::to_wstring(mode)).c_str());
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks);
+			// Interior RGB pixels of a constant 0.5 full-range source must land at limited-range 10-bit code 502 (+/-2).
+			for (int y : { r.height / 4, r.height / 2, (3 * r.height) / 4 })
+				for (int x : { r.width / 4, r.width / 2, (3 * r.width) / 4 })
+					for (int ch = 0; ch < 3; ++ch)
+					{
+						const int got = r.Channel(x, y, ch);
+						Assert::IsTrue(std::abs(got - 502) <= 2,
+							(L"mode " + std::to_wstring(mode) + L" pixel (" + std::to_wstring(x) + L"," + std::to_wstring(y) +
+								L") ch " + std::to_wstring(ch) + L" got " + std::to_wstring(got)).c_str());
+					}
 			}
 		}
 
@@ -1023,6 +1044,14 @@ namespace VideoProcessorTest
 				const Result r = Render(gpu, fixture.Renderer(), a, c);
 				Assert::IsTrue(r.ok && r.restores > 0, (L"mode " + std::to_wstring(mode)).c_str());
 				{ const pl_render_errors e = pl_renderer_get_errors(fixture.Renderer()); Assert::AreEqual(0, e.num_disabled_hooks, (L"mode " + std::to_wstring(mode) + L" disabled " + (e.num_disabled_hooks ? std::to_wstring(e.disabled_hooks[0]) : L"")).c_str()); }
+				const std::vector<int> got = Columns(r, static_cast<int>(ramp.size()), c.scale);
+				Assert::AreEqual(ramp.size(), got.size(), (L"mode " + std::to_wstring(mode) + L" columns").c_str());
+				Assert::IsTrue(got.front() < 64, (L"mode " + std::to_wstring(mode) + L" BTB lost: " + std::to_wstring(got.front())).c_str());
+				Assert::IsTrue(got.back() > 940, (L"mode " + std::to_wstring(mode) + L" WTW lost: " + std::to_wstring(got.back())).c_str());
+				for (size_t i = 0; i < ramp.size(); ++i)
+					Assert::IsTrue(std::abs(got[i] - ramp[i]) <= 3,
+						(L"mode " + std::to_wstring(mode) + L" col " + std::to_wstring(i) + L" expected " +
+							std::to_wstring(ramp[i]) + L" got " + std::to_wstring(got[i])).c_str());
 			}
 		}
 	};

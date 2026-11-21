@@ -8,6 +8,7 @@
 //    the GPU, the blend on fast / steady motion and the one-axis upscale = the faithful branch.
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
 #include <VP-V/core/OnePole.h>
@@ -437,7 +438,15 @@ namespace VideoProcessorTest
 					const float expected = y == 0 || x >= bw / 2 ? 0.25f : 1.0f;
 					Assert::AreEqual(expected, v, 1e-4f, L"frame 1: steady 1, fast / untrusted the floor");
 				}
-			frame(field1, 1);   // a repeat of the same source frame: the map stands
+			frame(field2, 1);   // a repeat of the same source frame with a different field: the map must stand unchanged
+			t = read();
+			for (int y = 0; y < bh; ++y)
+				for (int x = 0; x < bw; ++x)
+				{
+					const float v = t[(static_cast<size_t>(y) * bw + x) * 4];
+					const float expected = y == 0 || x >= bw / 2 ? 0.25f : 1.0f;
+					Assert::AreEqual(expected, v, 1e-4f, L"repeat seq 1 with field2: frame 1 map must stay unchanged");
+				}
 			frame(field2, 2);
 			t = read();
 			const float alpha = OnePole::AlphaForMs((1.0f / 24.0f) * 1000.0f, 250.0f, OnePole::DtRule::AsGiven);

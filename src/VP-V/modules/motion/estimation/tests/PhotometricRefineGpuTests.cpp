@@ -12,6 +12,7 @@
 #include <VP-V/modules/motion/estimation/global_model/PhotometricRefineGpu.h>
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h>
 #include "PhotometricRefineScenes.h"
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 #include "CppUnitTest.h"
 #include <d3d11.h>
 #include <dxgi.h>
@@ -606,7 +607,7 @@ namespace VideoProcessorTest
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(GpuCostLine)
-			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Bench")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GpuCostLine)
 		{
@@ -614,12 +615,11 @@ namespace VideoProcessorTest
 			// (the AnalysisLumaSource upload, codeScale 255 / 1023, s 1). Input path: CPU upload. Per call: wall ms (Submit to
 			// the collected result), GPU ms (timestamps), upload ms (UpdateSubresource CPU time + the copy until the GPU is
 			// idle), pixels, iterations; QUALITY 2 band: ns per unit (one candidate pixel, or one sampled pixel-iteration
-			// counted as 16 taps) must lie in a sane GPU band. Opt-in (VP_R3_GPU_COST=1): timing belongs under GPU-QUIET.
-			if (EnvText("VP_R3_GPU_COST") != "1")
-			{
-				GLog("gpu cost line: VP_R3_GPU_COST not set, not run\n");
+			// counted as 16 taps) must lie in a sane GPU band. Opt-in (VP_TEST_BENCH=1 and VP_R3_GPU_COST=1): timing belongs under GPU-QUIET.
+			const bool optedIn = HardwarePrerequisites::BenchOptedIn() || EnvText("VP_R3_GPU_COST") == "1";
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Bench, "GpuCostLine",
+				optedIn, "VP_TEST_BENCH=1 or VP_R3_GPU_COST=1 not set"))
 				return;
-			}
 			Rig& g = RequireRig();
 			struct Case { const char* name; int frameW, frameH; int s; bool full10; };
 			const Case cases[6] = { { "1080 Q", 1920, 1080, 4, false }, { "1080 H", 1920, 1080, 2, false }, { "1080 F", 1920, 1080, 1, true },

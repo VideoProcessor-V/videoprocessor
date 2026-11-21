@@ -150,6 +150,7 @@ namespace D8SceneJudgeAgreementNs
 		double msOld = 0.0, msShared = 0.0, msGpu = 0.0;
 		// WAIVER-U7FADE-PARTIAL: the partial reset on fade frames (scored frames only).
 		int fadeFrames = 0, fadePartial = 0, fadeRestarts = 0, partialOutsideFade = 0, keepOutOfRange = 0;
+		int sharedPartials = 0;           // gate16-CB F3: every frame the GPU module also runs whose shared verdict is a fade partial
 		int fadeMissed = 0;               // WAIVER-U7FADE-PARTIAL-2: a fade frame with neither a restart nor a partial reset
 		double tileRestartShareSum = 0.0, tileRestartShareMax = 0.0;   // TR only: its per-tile restart share on fade frames (information)
 		double fadeKeepProduct = 1.0;     // product of the applied keeps over the current fade event
@@ -635,6 +636,7 @@ namespace D8SceneJudgeAgreementNs
 				const DetailPulseModel::Frame fs = dpShared.Process(dpImage, seq, sShared);
 				dp.msShared += MsSince(b);
 				++dp.frames;
+				dp.sharedPartials += fs.fadePartial ? 1 : 0;
 				dp.oldRestarts += fo.restart ? 1 : 0;
 				dp.sharedRestarts += fs.restart ? 1 : 0;
 				dumpDpShared = fs.restart; dumpDpOld = fo.restart;
@@ -659,6 +661,7 @@ namespace D8SceneJudgeAgreementNs
 				tr.msShared += MsSince(b);
 				const bool rs = trShared.LastWasCut();
 				++tr.frames;
+				tr.sharedPartials += trShared.LastWasFadePartial() ? 1 : 0;
 				tr.oldRestarts += ro ? 1 : 0;
 				tr.sharedRestarts += rs ? 1 : 0;
 				dumpTrShared = rs; dumpTrOld = ro;
@@ -774,6 +777,15 @@ namespace D8SceneJudgeAgreementNs
 		Assert::AreEqual(0, tr.keepOutOfRange, Wide(partial).c_str());
 		Assert::AreEqual(0ull, dpGpuFadeRestarts, Wide(partial).c_str());
 		Assert::AreEqual(0ull, trGpuFadeRestarts, Wide(partial).c_str());
+		// gate16-CB F3: like for like. The GPU modules count every frame they apply whose store answer is a fade partial; the
+		// CPU shared models read the same store verdict on the same frames (sharedPartials), so the counts are equal exactly.
+		Assert::AreEqual(static_cast<unsigned long long>(dp.sharedPartials), dpGpuPartials, Wide(partial).c_str());
+		Assert::AreEqual(static_cast<unsigned long long>(tr.sharedPartials), trGpuPartials, Wide(partial).c_str());
+		if (facts.truthFades > 0)
+		{
+			Assert::IsTrue(dpGpuPartials > 0, Wide(partial).c_str());
+			Assert::IsTrue(trGpuPartials > 0, Wide(partial).c_str());
+		}
 		if (synthetic == Synthetic::Fade && begin <= kFadeOutBegin && end >= kFadeOutEnd)
 		{
 			Assert::IsTrue(dp.fadeOutKeep <= kFadeOutKeepMax, Wide(partial).c_str());

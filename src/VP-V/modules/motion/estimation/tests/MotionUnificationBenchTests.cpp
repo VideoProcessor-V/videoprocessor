@@ -445,16 +445,15 @@ namespace VideoProcessorTest
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(BeforeAfterSingleNvofSource)
-			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Bench")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(BeforeAfterSingleNvofSource)
 		{
 			const std::string clipPath = MvEnv("VP_MV_BENCH_CLIP"), outPath = MvEnv("VP_MV_BENCH_OUT");
-			if (clipPath.empty() || outPath.empty())
-			{
-				Logger::WriteMessage("MotionUnificationBench: VP_MV_BENCH_CLIP / VP_MV_BENCH_OUT not set: not run\n");
+			const bool optedIn = HardwarePrerequisites::BenchOptedIn() && !clipPath.empty() && !outPath.empty();
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Bench, "BeforeAfterSingleNvofSource",
+				optedIn, "set VP_TEST_BENCH=1, VP_MV_BENCH_CLIP and VP_MV_BENCH_OUT"))
 				return;
-			}
 			CComPtr<IDXGIFactory1> factory;
 			CComPtr<IDXGIAdapter1> nvidia;
 			if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
@@ -658,17 +657,16 @@ namespace VideoProcessorTest
 		// nvof_occupancy = the producer's summed pair time / the wall time; vram_*_mb = this process's video memory on the NVIDIA
 		// adapter (DXGI QueryVideoMemoryInfo) after the producer's engine opened and after the matcher estimated, over the start.
 		BEGIN_TEST_METHOD_ATTRIBUTE(SteadyStateCostPerMode)
-			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Bench")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(SteadyStateCostPerMode)
 		{
 			const std::string clipPath = MvEnv("VP_MV_BENCH_CLIP"), outPath = MvEnv("VP_MV_BENCH_OUT");
 			const int frames = MvEnvInt("VP_MV_BENCH_STEADY_FRAMES", 0), start = MvEnvInt("VP_MV_BENCH_START", 0);
-			if (clipPath.empty() || outPath.empty() || frames <= 0)
-			{
-				Logger::WriteMessage("MotionUnificationBench steady: VP_MV_BENCH_CLIP / VP_MV_BENCH_OUT / VP_MV_BENCH_STEADY_FRAMES not set: not run\n");
+			const bool optedIn = HardwarePrerequisites::BenchOptedIn() && !clipPath.empty() && !outPath.empty() && frames > 0;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Bench, "SteadyStateCostPerMode",
+				optedIn, "set VP_TEST_BENCH=1, VP_MV_BENCH_CLIP, VP_MV_BENCH_OUT and VP_MV_BENCH_STEADY_FRAMES"))
 				return;
-			}
 			CComPtr<IDXGIFactory1> factory;
 			CComPtr<IDXGIAdapter1> nvidia;
 			if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
@@ -806,6 +804,10 @@ namespace VideoProcessorTest
 				}
 				const double wallMs = nowMs();
 				producer.Stop();
+				Assert::IsTrue(used > 0, L"SteadyStateCostPerMode: at least one frame must be processed");
+				Assert::IsFalse(pairMs.empty(), L"SteadyStateCostPerMode: producer must emit pair timings");
+				if (mode.renderWithPair || mode.renderNoPair)
+					Assert::IsFalse(renderMs.empty(), L"SteadyStateCostPerMode: render mode must emit render timings");
 				auto avg = [](const std::vector<double>& v) { double s = 0; for (double x : v) s += x; return v.empty() ? 0.0 : s / v.size(); };
 				auto p95 = [](std::vector<double> v) { if (v.empty()) return 0.0; std::sort(v.begin(), v.end()); return v[static_cast<size_t>(0.95 * (v.size() - 1))]; };
 				double pairSum = 0.0;
@@ -830,6 +832,8 @@ namespace VideoProcessorTest
 					row(mode.name, "ring_bytes_mb", 2.0 * (hw * hh + cells * 5.0) / (1024.0 * 1024.0));
 				}
 			}
+			csv.flush();
+			Assert::IsTrue(csv.good(), L"SteadyStateCostPerMode: CSV write must succeed");
 			csv.close();
 			Logger::WriteMessage(("MotionUnificationBench steady: written to " + outPath + ".steady.csv\n").c_str());
 		}
@@ -854,18 +858,17 @@ namespace VideoProcessorTest
 		// fill wait, matcher ms with and without a pair, render-thread ms (hand-over -> matcher done: the in-process latency proxy) p50 / p99,
 		// the hook's time p50 / p99 / max (us), the budget and the measured render time (the engine's EWMA), the engine's counters.
 		BEGIN_TEST_METHOD_ATTRIBUTE(OnDemandServedShareAndStallPerMode)
-			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Bench")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(OnDemandServedShareAndStallPerMode)
 		{
 			const std::string clipPath = MvEnv("VP_MV_BENCH_CLIP"), outPath = MvEnv("VP_MV_BENCH_OUT");
 			const int frames = MvEnvInt("VP_MV_BENCH_ONDEMAND_FRAMES", 0), start = MvEnvInt("VP_MV_BENCH_START", 0);
 			const int dropEvery = std::max(2, MvEnvInt("VP_MV_BENCH_DROP_EVERY", 25)), warmCycles = std::max(0, MvEnvInt("VP_MV_BENCH_ONDEMAND_WARM", 30));
-			if (clipPath.empty() || outPath.empty() || frames <= 0)
-			{
-				Logger::WriteMessage("MotionUnificationBench on demand: VP_MV_BENCH_CLIP / VP_MV_BENCH_OUT / VP_MV_BENCH_ONDEMAND_FRAMES not set: not run\n");
+			const bool optedIn = HardwarePrerequisites::BenchOptedIn() && !clipPath.empty() && !outPath.empty() && frames > 0;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Bench, "OnDemandServedShareAndStallPerMode",
+				optedIn, "set VP_TEST_BENCH=1, VP_MV_BENCH_CLIP, VP_MV_BENCH_OUT and VP_MV_BENCH_ONDEMAND_FRAMES"))
 				return;
-			}
 			CComPtr<IDXGIFactory1> factory;
 			CComPtr<IDXGIAdapter1> nvidia;
 			if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
@@ -1057,6 +1060,8 @@ namespace VideoProcessorTest
 				producer->Stop();
 				unsigned long long measured = 0;
 				for (unsigned long long n : counts) measured += n;
+				Assert::IsTrue(measured > 0, L"OnDemandServedShareAndStallPerMode: at least one frame pair must be measured");
+				Assert::IsFalse(renderMs.empty(), L"OnDemandServedShareAndStallPerMode: render timings must not be empty");
 				const double scale = measured ? 100.0 / static_cast<double>(measured) : 0.0;
 				row(mode.name, "width", width);
 				row(mode.name, "height", height);
@@ -1102,6 +1107,8 @@ namespace VideoProcessorTest
 				row(mode.name, "c_idle_skips", static_cast<double>(c.idleSkips));
 				row(mode.name, "c_uncached", static_cast<double>(c.uncached));
 			}
+			csv.flush();
+			Assert::IsTrue(csv.good(), L"OnDemandServedShareAndStallPerMode: CSV write must succeed");
 			csv.close();
 			Logger::WriteMessage(("MotionUnificationBench on demand: written to " + outPath + ".ondemand.csv\n").c_str());
 		}

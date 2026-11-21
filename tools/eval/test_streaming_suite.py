@@ -315,9 +315,10 @@ class NoReference(unittest.TestCase):
 
     def test_committed_thresholds_parse_if_present(self):
         thr = nr.load_thresholds()
-        if thr is not None:
-            self.assertTrue(set(thr["poor"]) <= {"band", "block", "ring"})
-            self.assertTrue(all(v >= 0 for v in thr["poor"].values()))
+        if thr is None:
+            self.skipTest("SKIP-NO-CORPUS: committed NR thresholds file is absent")
+        self.assertTrue(set(thr["poor"]) <= {"band", "block", "ring"})
+        self.assertTrue(all(v >= 0 for v in thr["poor"].values()))
 
 
 # ------------------------------------------------------------------ validation helpers
@@ -480,6 +481,7 @@ class HarnessHook(Base):
 class CommittedSuites(unittest.TestCase):
     def test_streaming_suites_parse(self):
         d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "suites")
+        checked = 0
         for fn in sorted(os.listdir(d)):
             if not fn.startswith("streaming_"):
                 continue
@@ -492,6 +494,8 @@ class CommittedSuites(unittest.TestCase):
                 self.assertEqual(c["protocol"], "same")
                 self.assertIn("streaming", c)
                 self.assertIn(c["master"]["kind"], ("ffmpeg", "raw"))
+            checked += 1
+        self.assertGreater(checked, 0, "expected at least one committed streaming_*.json suite")
 
 
 if __name__ == "__main__":

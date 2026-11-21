@@ -144,16 +144,17 @@
 	TEST_CLASS(X5AbCaptureTests)
 	{
 	public:
+		BEGIN_TEST_METHOD_ATTRIBUTE(X5AbCaptureClips)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Bench")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(X5AbCaptureClips)
 		{
 			std::string listEnv, outDir, side;
-			if (!X5AbSupport::Env("VP_X5AB_LIST", listEnv) || listEnv.empty())
-			{
-				// An opt-in capture, never a silent pass: the skip is written to the test log in the house SKIP-<KIND> marker form, so
-				// check_trx_coverage counts it as skipped (HardwarePrerequisites.h RequireOrSkip pattern).
-				Logger::WriteMessage("SKIP-OPT-IN X5AbCaptureClips: VP_X5AB_LIST is not set (opt-in capture)\n");
+			const bool optedIn = HardwarePrerequisites::BenchOptedIn() &&
+				X5AbSupport::Env("VP_X5AB_LIST", listEnv) && !listEnv.empty();
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Bench,
+				"X5AbCaptureClips", optedIn, "set VP_TEST_BENCH=1 and VP_X5AB_LIST"))
 				return;
-			}
 			const bool outSet = X5AbSupport::Env("VP_X5AB_OUT", outDir);
 			const bool sideSet = X5AbSupport::Env("VP_X5AB_SIDE", side);
 			Assert::IsTrue(outSet && sideSet, L"VP_X5AB_OUT and VP_X5AB_SIDE are required with VP_X5AB_LIST");
@@ -327,7 +328,9 @@
 					text.replace(text.find("@HERE@"), 6, here);
 					csv << text;
 				}
+				Assert::IsTrue(rows.size() == static_cast<size_t>(c.frames), L"every requested clip frame must be written");
 			}
 			csv.flush();
+			Assert::IsTrue(csv.good(), L"CSV output stream must remain healthy");
 		}
 	};

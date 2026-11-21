@@ -127,11 +127,21 @@ class Pacing(unittest.TestCase):
         self.assertEqual((d["status"], d["vp_repeated"]), ("FAIL", 1))
 
     def test_repeat_allowance_scales_with_hours(self):
-        # 3 hours of steady play at 60 fps would allow 3 VP-caused corrections at 1/h; one drop passes
-        src = make_src(60 * 3600 * 3 // 60, 1, drop={5000})       # 3 h at 1 capture per 1/60 s -> 648000 frames /60
-        rep = run(src, sent_rows(len(src) + 1, 60, 1), max_vp_per_hour=1.0)
-        d = rowd(rep, "drops_repeats")
-        self.assertEqual(d["allowed"], int(len(src) / 60 / 3600))
+        # TQ-RG-P10: a 1 fps output (out_rate 1/1) makes 7300 frames just over 2 hours (the old 60 * 3600 * 3 // 60 frames at
+        # 60 fps was 3 MINUTES, allowed 0, and the assertion restated that formula). At 1 VP-caused correction per hour the
+        # allowance over 2.03 h is exactly 2: one drop and two drops pass, three fail, and a short run allows only 1.
+        def drops_row(frames, drops):
+            src = make_src(frames, 1, drop=drops)
+            rep = run(src, sent_rows(frames + 1, 1, 1), out_rate=[1, 1], max_vp_per_hour=1.0)
+            return rowd(rep, "drops_repeats")
+        one = drops_row(7300, {100})
+        self.assertEqual((one["allowed"], one["vp_dropped"], one["status"]), (2, 1, "PASS"))
+        two = drops_row(7300, {100, 200})
+        self.assertEqual((two["allowed"], two["vp_dropped"], two["status"]), (2, 2, "PASS"))
+        three = drops_row(7300, {100, 200, 300})
+        self.assertEqual((three["allowed"], three["vp_dropped"], three["status"]), (2, 3, "FAIL"))
+        short = drops_row(3700, {100, 200})
+        self.assertEqual((short["allowed"], short["vp_dropped"], short["status"]), (1, 2, "FAIL"))
 
     def test_cadence_error_detected(self):
         # 2:3 pulldown that turns into 3:3 for a stretch

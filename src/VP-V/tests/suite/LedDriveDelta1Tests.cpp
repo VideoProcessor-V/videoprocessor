@@ -1615,6 +1615,8 @@ namespace VideoProcessorTest
 			rect.bottom = 32;
 			module.Lookahead().BeginWalk(3);
 			module.Lookahead().ObserveFrame(1, 0, luma, rect);
+			FrameStats predicted;
+			Assert::IsFalse(module.PredictionFor(1, predicted), L"script_lookahead off: observer stored no prediction");
 			Assert::AreEqual(1.0, module.CorrectionRatio(), 1e-12);
 			Assert::IsTrue(LedDriveModule(ProjectorConfig(), Compensate()).WantsPredictions());
 		}

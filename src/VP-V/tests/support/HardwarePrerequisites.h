@@ -43,7 +43,7 @@ namespace HardwarePrerequisites
 		return RequireAll() || EnvIsOne("VP_TEST_REQUIRE_HARDWARE");
 	}
 
-	enum class Kind { Hardware, Gpu, Footage, Corpus };
+	enum class Kind { Hardware, Gpu, Footage, Corpus, Bench, ParkedNets };
 
 	inline bool Required(Kind kind)
 	{
@@ -55,6 +55,8 @@ namespace HardwarePrerequisites
 		case Kind::Gpu: return EnvIsOne("VP_TEST_REQUIRE_GPU");
 		case Kind::Footage: return EnvIsOne("VP_TEST_REQUIRE_FOOTAGE");
 		case Kind::Corpus: return EnvIsOne("VP_TEST_REQUIRE_CORPUS");
+		case Kind::Bench: return EnvIsOne("VP_TEST_REQUIRE_BENCH");
+		case Kind::ParkedNets: return EnvIsOne("VP_TEST_REQUIRE_NETS");
 		}
 		return false;
 	}
@@ -67,6 +69,8 @@ namespace HardwarePrerequisites
 		case Kind::Gpu: return "SKIP-NO-GPU";
 		case Kind::Footage: return "SKIP-NO-FOOTAGE";
 		case Kind::Corpus: return "SKIP-NO-CORPUS";
+		case Kind::Bench: return "SKIP-OPT-IN"; // a benchmark is opt-in (VP_TEST_BENCH=1); check_trx_coverage counts it as not executed
+		case Kind::ParkedNets: return "SKIP-PARKED-NETS"; // owner-parked neural-net tests; check_trx_coverage counts as not executed
 		}
 		return "SKIP";
 	}
@@ -79,6 +83,8 @@ namespace HardwarePrerequisites
 		case Kind::Gpu: return "VP_TEST_REQUIRE_GPU";
 		case Kind::Footage: return "VP_TEST_REQUIRE_FOOTAGE";
 		case Kind::Corpus: return "VP_TEST_REQUIRE_CORPUS";
+		case Kind::Bench: return "VP_TEST_REQUIRE_BENCH";
+		case Kind::ParkedNets: return "VP_TEST_REQUIRE_NETS";
 		}
 		return "VP_TEST_REQUIRE_ALL";
 	}
@@ -99,6 +105,14 @@ namespace HardwarePrerequisites
 		}
 		Logger::WriteMessage((marker + "\n").c_str());
 		return false;
+	}
+
+	// True when a Bench test is opted in: VP_TEST_BENCH=1. Use RequireOrSkip(Kind::Bench, test, BenchOptedIn(), "set VP_TEST_BENCH=1"):
+	// without the opt-in the test logs SKIP-OPT-IN (not executed) and returns; under VP_TEST_REQUIRE_BENCH=1 or
+	// VP_TEST_REQUIRE_ALL=1 (the dedicated Bench job, gen_test_filters --job-env Bench) the missing opt-in fails.
+	inline bool BenchOptedIn()
+	{
+		return EnvIsOne("VP_TEST_BENCH");
 	}
 
 	// True when the test can run. Otherwise logs the SKIP-NO-HARDWARE marker and returns

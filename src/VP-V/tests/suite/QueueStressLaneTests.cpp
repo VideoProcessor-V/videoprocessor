@@ -481,6 +481,7 @@ namespace QueueStressTest
 				}
 			}
 			LaneLog(Fmt("intent: %d scenarios, %d class changes", scenarios, changes));
+			Assert::IsTrue(scenarios > 0 && changes > 0, L"intent observer must classify and record transitions across scenarios");
 			Assert::IsTrue(failures.empty(), Wide(failures.substr(0, 4000)).c_str());
 		}
 
@@ -589,6 +590,8 @@ namespace QueueStressTest
 				}
 			}
 			LaneLog(Fmt("source resolution: %d analyses, %d engaged frames, %d discontinuities", analyses, engaged, resets));
+			Assert::IsTrue(analyses > 0 && engaged > 0 && resets > 0,
+				L"bilinear-2x upscaled source scenarios must analyse, engage, and exercise discontinuities");
 			Assert::IsTrue(failures.empty(), Wide(failures.substr(0, 4000)).c_str());
 		}
 	};

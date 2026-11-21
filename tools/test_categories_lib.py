@@ -32,11 +32,27 @@ CAT_RE = re.compile(r'TEST_METHOD_ATTRIBUTE\s*\(\s*L"Category"\s*,\s*L"(\w+)"\s*
 # complementary --gpu selection) and listed by name in the manifest with the upstream commit; run
 # only them with --gpu --categories UpstreamStale.
 QUARANTINED = ['UpstreamStale']
-# Categories that must not run in the CPU CI (a real device, a screen, a meter, a projector).
-# LoopRig: needs the DeckLink loop rig; run by tools/looprig/run_loop_tier.ps1 only. Excluded from the CPU
-# run AND from the default --gpu set (GPU_DEFAULT_EXCLUDED); select it with --gpu --categories LoopRig.
-EXCLUDED_FROM_CPU = ['GpuHardware', 'GpuOnScreen', 'MeterHardware', 'ProjectorHardware', 'Slow', 'LoopRig'] + QUARANTINED
-GPU_DEFAULT_EXCLUDED = [c for c in EXCLUDED_FROM_CPU if c != 'LoopRig']
+# Categories that must not run in the CPU CI (a real device, a screen, a meter, a projector, real footage,
+# a corpus, a benchmark).
+# LoopRig: needs the DeckLink loop rig; run by tools/looprig/run_loop_tier.ps1 only.
+# Footage / Corpus / Bench (TQ-X2): tests whose input (real clips, a generated corpus) or opt-in (a timing
+# benchmark) is absent in the CPU and WARP lanes, where HardwarePrerequisites::RequireOrSkip would log a
+# SKIP-NO-FOOTAGE / SKIP-NO-CORPUS / SKIP-OPT-IN marker and PASS. They run only in a dedicated job that
+# sets JOB_ENV, so a missing clip or corpus FAILS there (VP_TEST_REQUIRE_<KIND>=1); in every other lane they
+# are not selected at all. Like LoopRig they are excluded from the CPU run AND from the default --gpu set
+# (DEDICATED_JOB_ONLY); select one with --gpu --categories Footage (and print its env with --job-env Footage).
+# Category -> the environment its dedicated job must set (queue-line env= field, or the chain gate switch).
+# Bench is a timing benchmark that is opt-in by VP_TEST_BENCH=1: the job opts in and requires it.
+JOB_ENV = {
+    'Footage': {'VP_TEST_REQUIRE_FOOTAGE': '1'},
+    'Corpus': {'VP_TEST_REQUIRE_CORPUS': '1'},
+    'Bench': {'VP_TEST_BENCH': '1', 'VP_TEST_REQUIRE_BENCH': '1'},
+}
+# ParkedNets (ced6d204a): owner-parked neural-net tests log SKIP-PARKED-NETS; excluded everywhere, no dedicated job (parked).
+DEDICATED_JOB_ONLY = ['LoopRig'] + list(JOB_ENV) + ['ParkedNets']
+EXCLUDED_FROM_CPU = ['GpuHardware', 'GpuOnScreen', 'MeterHardware', 'ProjectorHardware', 'Slow'] + DEDICATED_JOB_ONLY + QUARANTINED
+GPU_DEFAULT_EXCLUDED = [c for c in EXCLUDED_FROM_CPU if c not in DEDICATED_JOB_ONLY]
+DEDICATED_ONLY = tuple(DEDICATED_JOB_ONLY)   # ced6d204a's name for the same set
 KNOWN_CATEGORIES = EXCLUDED_FROM_CPU + ['GpuWarp', 'Cpu']
 
 

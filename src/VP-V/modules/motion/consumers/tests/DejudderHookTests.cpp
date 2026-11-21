@@ -148,6 +148,18 @@ namespace VideoProcessorTest
 			off.estStillZero = false;
 			Dejudder::MotionWarp offWarp(fixture.Log(), gpu, off);
 			Assert::IsTrue(offWarp.Estimate(planesA.planes, planesB.planes), L"the estimate with the switch off");
+			const DejudderField offField = DownloadField(gpu, offWarp);
+			Assert::IsTrue(offField.blocksX == parent.blocksX && offField.blocksY == parent.blocksY && offField.blocksX > 0,
+				L"offWarp produces a downloadable motion field of matching grid dimensions");
+			int offFinite = 0;
+			for (int by = 0; by < offField.blocksY; ++by)
+				for (int bx = 0; bx < offField.blocksX; ++bx)
+				{
+					Assert::IsTrue(std::isfinite(offField.vx(bx, by)) && std::isfinite(offField.vy(bx, by)),
+						L"offWarp vectors must be finite");
+					++offFinite;
+				}
+			Assert::IsTrue(offFinite > 0);
 		}
 
 		TEST_METHOD(DejudderFollowsAMovingPictureAndWarpsBySDelta)
@@ -636,7 +648,7 @@ namespace VideoProcessorTest
 			Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
 			DejudderRendered::Cache cache;
 			DejudderRendered::Warp rendered(fixture.Log(), gpu);
-			DejudderRendered::VectorField field(fixture.Log(), gpu);
+			DejudderRendered::VectorField field(fixture.Log(), gpu, true);   // host-readable vectors (tests only), as at the other use
 			pl_tex_params targetParams{};
 			targetParams.w = width;
 			targetParams.h = height;
@@ -761,6 +773,51 @@ namespace VideoProcessorTest
 			Assert::IsTrue(field.Run(warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare, 0.5f, g,
 				width, height, vectors), ExtendedRangeGpuProbe::ToWide(field.Error()).c_str());
 			Assert::IsNotNull(vectors);
+			{
+				// gate16-CB F2: the field texture has no blit_src, so a blit into a readable copy is refused and reads zeros;
+				// download the vectors themselves (the field is created host-readable above).
+				pl_tex_params vp{};
+				vp.w = vectors->params.w;
+				vp.h = vectors->params.h;
+				Assert::IsTrue(vectors->params.host_readable, L"dither vectors host-readable (test flag)");
+				pl_gpu_finish(gpu);
+				std::vector<uint16_t> raw(static_cast<size_t>(vp.w) * vp.h * 4);
+				pl_tex_transfer_params dl{};
+				dl.tex = vectors;
+				dl.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"download dither vectors");
+				auto halfToF = [](uint16_t h) {
+					const int s = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
+					const float v = e == 0 ? std::ldexp(static_cast<float>(m), -24) : std::ldexp(static_cast<float>(m | 1024), e - 25);
+					return s ? -v : v;
+				};
+				int heldBlocks = 0, movingBlocks = 0;
+				for (int by = 0; by < vp.h; ++by)
+					for (int bx = 0; bx < vp.w; ++bx)
+					{
+						const int cx = bx * 16 + 8, cy = by * 16 + 8;
+						bool farAway = true;
+						for (int k = 0; k < 2; ++k)
+						{
+							const pl_rect2df& rr = g.holds[k];
+							farAway = farAway && !(cx >= rr.x0 - 16 && cx < rr.x1 + 16 && cy >= rr.y0 - 16 && cy < rr.y1 + 16);
+						}
+						if (farAway)
+						{
+							const size_t at = (static_cast<size_t>(by) * vp.w + bx) * 4;
+							movingBlocks += (std::fabs(halfToF(raw[at])) > 0.0f || std::fabs(halfToF(raw[at + 1])) > 0.0f) ? 1 : 0;
+						}
+						if (inside(cx, cy, 0) || inside(cx, cy, 1))
+						{
+							++heldBlocks;
+							const size_t at = (static_cast<size_t>(by) * vp.w + bx) * 4;
+							Assert::AreEqual(0.0f, halfToF(raw[at]), 1e-4f, L"vx inside held subtitle rectangle must be 0");
+							Assert::AreEqual(0.0f, halfToF(raw[at + 1]), 1e-4f, L"vy inside held subtitle rectangle must be 0");
+						}
+					}
+				Assert::IsTrue(heldBlocks > 0, L"expected blocks inside the held subtitle rectangles");
+				Assert::IsTrue(movingBlocks > 0, L"the pan's blocks outside the holds carry vectors (the readback is real)");
+			}
 		}
 
 		// Bug hunt 2026-10-17: the cached picture (PRE_OUTPUT) already has the

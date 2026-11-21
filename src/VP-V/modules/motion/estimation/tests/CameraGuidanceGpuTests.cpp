@@ -153,6 +153,7 @@ namespace VideoProcessorTest
 				}
 			Logger::WriteMessage(("CAMERA_GPU_GUIDED pan trusted today=" + std::to_string(trustedToday) + " guided=" +
 				std::to_string(trustedGuided) + " differ=" + std::to_string(differ) + "\n").c_str());
+			Assert::IsTrue(trustedToday > 0, L"the full search must trust interior pan blocks (test setup)");
 			Assert::AreEqual(0, differ, L"a guided vector moved more than half a pixel from the full search");
 			Assert::IsTrue(trustedGuided >= trustedToday, L"the guidance lost trusted blocks on a pan");
 		}
@@ -219,13 +220,18 @@ namespace VideoProcessorTest
 			Dejudder::MotionWarp::CameraGuidanceUse use;
 			const DejudderField guided = Run(fixture, false, g, &use);
 			Assert::IsTrue(use.modelGlobal);
-			int differ = 0;
+			int trusted = 0, differ = 0;
 			for (int by = 1; by + 1 < today.blocksY; ++by)
 				for (int bx = 1; bx + 1 < today.blocksX; ++bx)
+				{
+					if (today.trusted(bx, by))
+						++trusted;
 					if (today.trusted(bx, by) != guided.trusted(bx, by) ||
 						(today.trusted(bx, by) && (std::fabs(today.vx(bx, by) - guided.vx(bx, by)) > 0.5f ||
 							std::fabs(today.vy(bx, by) - guided.vy(bx, by)) > 0.5f)))
 						++differ;
+				}
+			Assert::IsTrue(trusted > 0, L"the full search must trust interior pan blocks (test setup)");
 			Assert::AreEqual(0, differ, L"the model as D1 changed the pan field");
 		}
 		BEGIN_TEST_METHOD_ATTRIBUTE(StaticFromTheModelKeepsTheStillField)

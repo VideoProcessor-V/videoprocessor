@@ -766,7 +766,7 @@ namespace VideoProcessorTest
 			const Stream st = BuildPan(Pattern("IBBBPBBB", 20), 0.0);
 			FieldMotionSource mo;
 			SetPan(mo, 20, 0.0, 0.0);
-			(void)Go(m, st.frames, &mo);
+			const Run prev = Go(m, st.frames, &mo);
 			const int base = m.Diag().resets;
 			{
 				// F2: a repeat (same sequence) returns the last output unchanged and advances nothing.
@@ -778,7 +778,7 @@ namespace VideoProcessorTest
 				const Plane again = m.Process(rep);
 				Assert::AreEqual(base, m.Diag().resets, L"a repeat does not reset");
 				Assert::AreEqual(20, m.Diag().frames, L"a repeat advances no state");
-				(void)again;
+				Assert::IsTrue(Same(again, prev.out.back()), L"a repeat returns the last frame's output unchanged");
 			}
 			Settings s2 = Steady();
 			s2.strength = 0.5;
@@ -886,10 +886,16 @@ namespace VideoProcessorTest
 			LogF("max |Y_out - base - S_out - G_in| = %.3g", worst);
 			Assert::IsTrue(worst < 1e-9, L"only the structure changes: the grain component is untouched everywhere");
 			double go[4], gn[4];
-			spectrum([&](int t, int x, int y) { return on.diag[static_cast<size_t>(t)].grain.at(x, y); }, 8, kW - 8, gn);
-			// the grain of the input frames, from an Off-equivalent analysis of the same frames: G_in is in the same diagnostics (identical by (3)).
-			for (int b = 0; b < 4; ++b) go[b] = gn[b];
-			for (int b = 0; b < 4; ++b) Assert::IsTrue(std::fabs(gn[b] / go[b] - 1.0) <= 0.05, L"grain component temporal spectrum within 5%");
+			spectrum([&](int t, int x, int y) { return on.diag[static_cast<size_t>(t)].grain.at(x, y); }, 8, kW - 8, go);
+			spectrum([&](int t, int x, int y) {
+				const size_t u = static_cast<size_t>(t);
+				return on.out[u].at(x, y) - on.diag[u].base.at(x, y) - on.diag[u].structureOut.at(x, y);
+			}, 8, kW - 8, gn);
+			for (int b = 0; b < 4; ++b)
+			{
+				Assert::IsTrue(go[b] > 0.0, L"input grain component temporal spectrum must be positive");
+				Assert::IsTrue(std::fabs(gn[b] / go[b] - 1.0) <= 0.05, L"grain component temporal spectrum within 5%");
+			}
 			// Owner bounds, ASSERTED on the grain isolate (seed 11 above, seed 12 here, the same scene): textured grain RMS
 			// within 5%, frozen-grain lag-1 correlation increase <= 0.05, whole-field temporal bands within 0.95 .. 1.05.
 			const Stream b = KeepsGrainScene(12, sigma, n);
@@ -1351,6 +1357,8 @@ namespace VideoProcessorTest
 			src.Prune(100);
 			Assert::AreEqual(size_t{ 0 }, src.CameraCount());
 			for (int i = 0; i < 12; ++i) Assert::AreEqual(1, static_cast<int>(v.label[i]), L"view's labels intact");
+#else
+			Assert::Fail(L"TEMPORAL_DETAIL_HAVE_CAMERA_MODEL must be defined");
 #endif
 		}
 
