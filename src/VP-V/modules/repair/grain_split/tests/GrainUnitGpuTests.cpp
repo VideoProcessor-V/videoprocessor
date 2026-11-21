@@ -13,6 +13,8 @@
 #include <VP-V/modules/repair/grain_split/GrainNodeGpu.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
+#include <VP-V/modules/repair/grain_split/GrainSplitVariantOwner.h>
+#include <VP-V/modules/input/capture/SourcePlanes.h>
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
 
@@ -122,6 +124,55 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 
 	constexpr int kW = 256, kH = 144, kB = 16;
 	constexpr double kCu10in16 = 64.0 / 65535.0;   // 10-bit codes in a 16-bit plane
+
+	// WAIVER-C5-GF-T3: the skeleton side of the grain split's memo variant (as TemporalDetailGpuTests' MemoRig): the real P13
+	// source-plane owner, the skeleton's owner GPU device and repair.grain_split's variant owner on a memo with a GPU dispatcher
+	// and a roomy ledger grant. Begin offers the frame's luma, End seals the frame and frees what it released.
+	struct VariantRig
+	{
+		Vpv::Skeleton::OwnerGpuDevice device;
+		GrainSplit::Gpu::VariantOwner owner;
+		VpSkeleton::SkeletonMemo memo;
+		VariantRig(pl_gpu gpu, int w, int h) : device(gpu)
+		{
+			memo.SetHost(this);
+			memo.SetGpuDispatcherPresent(true);
+			memo.SetGpuBudget(true, uint64_t(1) << 32);
+			memo.SetGpuDevice(&device);
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Gpu, Vpv::Capture::SourcePlanes::kUnit,
+				Vpv::Capture::SourcePlanes::MakeOwnerFill()) == VpSkeleton::SkeletonMemo::Registration::Registered, L"the P13 source-plane owner registers its fill");
+			Assert::IsTrue(owner.Register(memo, w, h) == VpSkeleton::SkeletonMemo::Registration::Registered, L"the grain split owner registers its fill");
+		}
+		~VariantRig()
+		{
+			memo.ReleaseGpuSpots();
+			device.Release();
+			Vpv::Capture::SourcePlanes::Forget(this);
+		}
+		VariantRig(const VariantRig&) = delete;
+		VariantRig& operator=(const VariantRig&) = delete;
+		void Begin(uint64_t seq, pl_tex tex)
+		{
+			Vpv::Capture::SourcePlaneSet set;
+			set.seq = seq;
+			set.planes = 1;
+			set.tex[0] = tex;
+			set.components[0] = 1;
+			set.repr.sys = PL_COLOR_SYSTEM_BT_709;
+			set.repr.levels = PL_COLOR_LEVELS_LIMITED;
+			set.repr.bits.sample_depth = 16;
+			set.repr.bits.color_depth = 10;
+			set.repr.bits.bit_shift = 6;
+			set.origin = "grain unit GPU test rig";
+			Assert::IsTrue(Vpv::Capture::SourcePlanes::Offer(this, set), L"the frame's luma is offered to P13");
+		}
+		void End(uint64_t seq)
+		{
+			memo.OnSeal(seq);
+			Vpv::Capture::SourcePlanes::BeginFrame(this);
+			device.FlushReleases();
+		}
+	};
 }
 
 namespace GrainUnitGpuTestsNs
@@ -607,8 +658,12 @@ namespace GrainUnitGpuTestsNs
 					GrainSplit::Gpu::Splitter splitter;
 					GrainSplit::Gpu::ContextHold hold;
 					Assert::IsTrue(splitter.Compute(ctx, plane, 0, kCu10in16, va.scale, va.B, law, 41, hold), (tag + Wide(splitter.LastError())).c_str());
-					Assert::AreEqual(size_t(7), hold.keep.size(), (tag + L"seven textures: split, blocks, tmp, low, part, quiet, level").c_str());
-					Assert::AreEqual(shapes.Bytes(), hold.bytes, (tag + L"the bytes made are the reserve").c_str());
+					// WAIVER-C5-GF-T3 (GF-P1 S6): after a successful Compute the hold keeps only the two outputs; the five scratch
+					// textures are let go after the last pass (the device retires and frees them), so the expected keep-alive count
+					// is 2, not 7. The bytes kept are the outputs' bytes; the context still accounted and made all seven (below).
+					Assert::AreEqual(size_t(2), hold.keep.size(), (tag + L"two textures kept: split and blocks (the scratch is let go)").c_str());
+					Assert::AreEqual(VpSkeleton::ShapeBytes(shapes.split) + VpSkeleton::ShapeBytes(shapes.blocks), hold.bytes,
+						(tag + L"the bytes kept are the two outputs'").c_str());
 					Assert::AreEqual(shapes.Bytes(), ctx.Used(), (tag + L"all accounted against the context's grant").c_str());
 					Assert::AreEqual(uint64_t(7), ctx.Made(), (tag + L"made through the context").c_str());
 					const GrainSplit::Gpu::Frame f = splitter.Out();
@@ -638,6 +693,98 @@ namespace GrainUnitGpuTestsNs
 			const Vpv::Skeleton::OwnerGpuDevice::Stats st = device.GetStats();
 			Assert::AreEqual(uint64_t(0), st.live, L"every context texture was handed back");
 			device.Release();
+			pl_tex_destroy(gpu, &plane);
+		}
+
+		// GF-P1 S6 (MUST-6 measurement): a 4K luma at B 16 through the memo variant. The context is granted every texture the fill
+		// makes (ContextShapesOf: the peak), but the memo's spot keeps only the two outputs once the fill returns, so the memo's
+		// GPU bytes after the fill and the seal are split + blocks, not the seven-texture total. Logs the before and after in MB.
+		TEST_METHOD(GrainVariantSpotHoldsOnlyTheOutputs4K)
+		{
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			const int w = 3840, h = 2160;
+			pl_tex plane = UploadR16(gpu, MakeCodes(w, h, 29u), w, h, 64.0);
+			Assert::IsNotNull(plane, L"the 4K plane");
+			const GrainSplit::Gpu::ContextShapes shapes = GrainSplit::Gpu::ContextShapesOf(w, h, kB, GrainSplit::DefaultParams());
+			Assert::IsTrue(shapes.Valid() && shapes.Bytes() > 0, L"the size law gives the shapes");
+			const uint64_t outputs = VpSkeleton::ShapeBytes(shapes.split) + VpSkeleton::ShapeBytes(shapes.blocks);
+			{
+				VariantRig rig(gpu, w, h);
+				rig.Begin(7, plane);
+				{
+					const VpSkeleton::AcquireResult res = rig.memo.Acquire(VpSkeleton::kP10GrainSplit, 7, VpSkeleton::AcquireForm::Gpu,
+						GrainSplit::Gpu::VariantFor(w, h, 1.0, 10));
+					Assert::IsTrue(res.Ok(), Wide(rig.owner.LastError()).c_str());
+					Assert::IsTrue(res.status == VpSkeleton::AcquireStatus::FilledAtRead, L"the variant was filled at read");
+					Assert::IsNotNull(GrainSplit::Gpu::FrameOf(res), L"a published frame");
+					Assert::AreEqual(outputs, rig.memo.GpuBytes(), L"after the fill: the spot is the two outputs");
+				}
+				rig.End(7);
+				const uint64_t after = rig.memo.GpuBytes();
+				char line[220];
+				std::snprintf(line, sizeof line, "4K grain variant spot: before (all seven textures) %.2f MB, after (split + blocks) %.2f MB",
+					static_cast<double>(shapes.Bytes()) / 1048576.0, static_cast<double>(after) / 1048576.0);
+				Logger::WriteMessage(line);
+				Assert::AreEqual(outputs, after, L"after the fill and the seal: the memo holds split + blocks only");
+				Assert::AreEqual(uint64_t(133228800), after, L"3840x2160 at B 16: 133,228,800 B (127.06 MiB)");
+				Assert::IsTrue(after < shapes.Bytes(), L"smaller than the seven-texture total");
+			}
+			pl_tex_destroy(gpu, &plane);
+		}
+
+		// GF-P1 MUST-6: the variant fill's law is depth-scaled to the variant's code unit (GrainSplit.h DepthScale): the 8-bit and
+		// the 12-bit variants equal the CPU GrainSplit::Compute with Params.sourceBits = 8 / 12 on the same codes, within the
+		// unit's tolerance (bands 0.002 codes, Wiener share 1e-3, grain level 1e-4 relative: GrainSplitGpuMatchesModel).
+		TEST_METHOD(GrainVariantLawFollowsTheCodeUnit)
+		{
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			const std::vector<double> codes = MakeCodes(kW, kH, 31u);
+			pl_tex plane = UploadR16(gpu, codes, kW, kH, 64.0);
+			Assert::IsNotNull(plane, L"plane");
+			// The CPU plane is the codes the texture holds (the 16-bit value is round(code * 64); one code = 64 values).
+			GrainSplit::Plane y(kW, kH);
+			for (size_t i = 0; i < codes.size(); ++i)
+				y.v[i] = static_cast<double>((std::min)(65535L, (std::max)(0L, std::lround(codes[i] * 64.0)))) / 64.0;
+			const int depths[2] = { 8, 12 };
+			{
+				VariantRig rig(gpu, kW, kH);
+				rig.Begin(3, plane);
+				for (int bits : depths)
+				{
+					const std::wstring tag = std::to_wstring(bits) + L"-bit variant: ";
+					GrainSplit::Params law = GrainSplit::DefaultParams();
+					law.sourceBits = bits;
+					const GrainSplit::Split m = GrainSplit::Compute(y, 1.0, kB, law);
+					const VpSkeleton::AcquireResult res = rig.memo.Acquire(VpSkeleton::kP10GrainSplit, 3, VpSkeleton::AcquireForm::Gpu,
+						GrainSplit::Gpu::VariantFor(kW, kH, 1.0, bits));
+					Assert::IsTrue(res.Ok(), (tag + Wide(rig.owner.LastError())).c_str());
+					const GrainSplit::Gpu::Frame* f = GrainSplit::Gpu::FrameOf(res);
+					Assert::IsNotNull(f, (tag + L"a published frame").c_str());
+					const std::vector<float> s = DownloadRGBA(gpu, dev.dispatch, f->split);
+					const std::vector<float> b = DownloadRGBA(gpu, dev.dispatch, f->blocks);
+					Assert::IsTrue(!s.empty() && !b.empty() && s.size() >= y.v.size() * 4u, (tag + L"downloaded").c_str());
+					double worstS = 0.0, worstF = 0.0, worstBase = 0.0, worstN = 0.0;
+					for (size_t i = 0; i < y.v.size(); ++i)
+					{
+						worstS = (std::max)(worstS, (std::max)(std::fabs(s[i * 4] - m.s1.v[i]), std::fabs(s[i * 4 + 1] - m.s2.v[i])));
+						worstF = (std::max)(worstF, std::fabs(s[i * 4 + 2] - m.f.v[i]));
+						worstBase = (std::max)(worstBase, std::fabs(s[i * 4 + 3] - m.base.v[i]));
+					}
+					Assert::IsTrue(b.size() >= m.N.size() * 4u, (tag + L"one grain level per block").c_str());
+					for (size_t i = 0; i < m.N.size(); ++i)
+						worstN = (std::max)(worstN, std::fabs(b[i * 4] - m.N[i]) / (std::fabs(m.N[i]) + 1e-3));
+					char line[200];
+					std::snprintf(line, sizeof line, "%d-bit variant vs model: |s| %.2e, |f| %.2e, |base| %.2e codes, N rel %.2e", bits, worstS, worstF, worstBase, worstN);
+					Logger::WriteMessage(line);
+					Assert::IsTrue(worstS < 2e-3 && worstBase < 2e-3, (tag + L"bands within 0.002 codes of the depth-scaled model").c_str());
+					Assert::IsTrue(worstF < 1e-3 && worstN < 1e-4, (tag + L"Wiener share and grain level follow the depth-scaled model").c_str());
+				}
+				rig.End(3);
+			}
 			pl_tex_destroy(gpu, &plane);
 		}
 	};
