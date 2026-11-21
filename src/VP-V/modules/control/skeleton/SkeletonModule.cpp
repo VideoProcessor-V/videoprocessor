@@ -342,7 +342,6 @@ namespace Vpv
 			SkeletonModule::QueueShape configuredQueue;
 			uint64_t configuredVramVersion = 0;   // VramUsers::Version() at the last Configure
 			uint64_t configuredExtVersion = 0;     // externalVersion_ at the last Configure
-			uint64_t configuredMemoNeed = 0;       // GEM-W1A S1: the memo's top GPU need level planned at the last Configure (0 = none)
 			uint64_t framesSinceConfigure = 0;
 		};
 
@@ -2621,14 +2620,7 @@ namespace Vpv
 			const bool vramMoved = b->configuredVramVersion != vramVersion && b->framesSinceConfigure >= kReconfigureMinFrames;
 			const uint64_t extVersion = externalVersion_.load(std::memory_order_acquire);
 			const bool extMoved = b->configuredExtVersion != extVersion || st.vramReplan;   // external demand changed, or the shortfall did: re-plan at once (rare)
-			// GEM-W1A S1 (skeleton MUST-3): the memo's GPU need follows its window (re-derived every frame) and its lazily registered GPU fills,
-			// neither in QueueShape. A bound lane is planned only here (PlanNoLaneGpu returns early), so a moved need re-plans, rate-limited like
-			// vramMoved (as the no-lane path re-plans on plannedNeed).
-			const std::vector<uint64_t> memoLevels = b->memo->GpuNeedLevels();
-			const uint64_t memoNeed = memoLevels.empty() ? 0u : memoLevels.front();
-			const bool memoNeedMoved = b->configuredMemoNeed != memoNeed && b->framesSinceConfigure >= kReconfigureMinFrames;
-			if (rebuild || b->configuredGen != gen || queueMoved || vramMoved || extMoved || memoNeedMoved
-				|| ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
+			if (rebuild || b->configuredGen != gen || queueMoved || vramMoved || extMoved || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
 			{
 				CardProfile card;
 				std::string why;
@@ -2649,7 +2641,8 @@ namespace Vpv
 				{
 					// GEM SK-VRAM: the memo's GPU spots are a user of the SAME ledger (as PlanNoLaneGpu / MemoGpuGrant.h): added here from its
 					// need levels, so the plan's scratch-arena grant (read below) exists. No second ledger.
-					if (memoNeed != 0)
+					const std::vector<uint64_t> memoLevels = b->memo->GpuNeedLevels();
+					if (!memoLevels.empty() && memoLevels.front() != 0)
 						tier.otherUsers.push_back(VpSkeleton::MakeMemoVramUser(memoLevels, "skeleton memo"));
 				}
 				tier.ownUsageBytes = declared.heldBytes;
@@ -2765,7 +2758,6 @@ namespace Vpv
 				b->configuredQueue = queue;
 				b->configuredVramVersion = vramVersion;
 				b->configuredExtVersion = extVersion;
-				b->configuredMemoNeed = memoNeed;
 				b->framesSinceConfigure = 0;
 				++st.configures;
 			}
