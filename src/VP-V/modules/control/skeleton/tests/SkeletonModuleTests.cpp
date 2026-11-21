@@ -1918,6 +1918,75 @@ namespace SkeletonModuleTestsNs
 			rig.After(6);
 		}
 
+		// GF-P2a: the queue window the ahead asks need. The window's ahead depth is lane lead + look-ahead walk; the computed ahead depth
+		// needs an ACTIVE ahead consumer (an owner fill declaring aheadDepth). The lane lead stays 1 (the default the older tests ran
+		// with) so the lane publishes nothing ahead by itself: only a reader's ask makes an ahead record.
+		static void FeedAheadWindow(Rig& rig, uint16_t walk)
+		{
+			SkeletonModule::QueueShape q;
+			q.renderAhead = 1;
+			q.laneLead = 1;
+			q.lookAheadWalk = walk;
+			rig.sk.SetQueueForTesting(q);
+			VpSkeleton::OwnerFill fill;
+			fill.aheadDepth = 6;   // the ceiling (kAheadCeiling): an ahead consumer is active
+			fill.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput&) { return false; };
+			rig.sk.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu, "repair/grain_split", fill);
+		}
+
+		// The look-ahead walk makes the P4 record of an ahead frame before it asks the scene (render thread; the memo's get-or-compute).
+		static void WalkP4(Rig& rig, uint64_t seq)
+		{
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);   // the record stays in the lane's slot; the result is not needed
+		}
+
+		// GF-P2a MUST-7 (theft): a cut at N is provisional at N's seal. An ahead scene ask of N + 3 must not claim N's late cut; frame N + 1's
+		// own seal delivers it (cut + cutLate on N + 1's group), exactly once.
+		TEST_METHOD(AnAheadFrameNeverClaimsAnEarlierFramesLateCut)
+		{
+			Rig rig(Lane("on"));
+			ShapeTwoStillShots(rig);
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			FeedAheadWindow(rig, 8);
+			RunToTheSealOfTheCut(rig, &store);   // the cut frame sealed, its group out provisional; frame kCutFrame + 1 delivered, not sealed
+			rig.After(int64_t(kCutFrame));
+			FrameAnalysis::Scene atSeal;
+			Assert::IsTrue(store.PeekScene(kCutFrame, atSeal));
+			Assert::IsFalse(atSeal.confirmed || atSeal.cut, L"provisional at its seal");
+			const uint64_t n1 = kCutFrame + 1, n2 = kCutFrame + 2, n3 = kCutFrame + 3;
+			rig.Ingress(int64_t(n1));
+			rig.Deliver(n2);
+			rig.Ingress(int64_t(n2));
+			rig.Deliver(n3);
+			store.Begin(SceneTestId(n3), FrameAnalysis::kScene);
+			WalkP4(rig, n1);   // the walk reaches the frames in order: their P4 records exist
+			WalkP4(rig, n2);
+			WalkP4(rig, n3);
+			const uint64_t lateBefore = rig.sk.SceneCountersOf(rig.Host()).late;
+			const Vpv::Skeleton::SceneAnswer ahead = rig.sk.SceneOf(rig.Host(), n3);
+			Assert::IsTrue(ahead.known, (L"the ahead frame is answered; " + WhyOf(ahead)).c_str());
+			Assert::IsFalse(ahead.cutLate, L"an ahead frame never carries an earlier frame's late cut");
+			FrameAnalysis::Scene aheadGroup;
+			Assert::IsTrue(store.PeekScene(n3, aheadGroup), L"the ahead frame's own group was published");
+			Assert::IsFalse(aheadGroup.cutLate);
+			Assert::AreEqual(lateBefore, rig.sk.SceneCountersOf(rig.Host()).late, L"nothing was delivered by the ahead fill");
+			rig.Begin(int64_t(n1));   // the render-order seal of frame kCutFrame + 1
+			rig.After(int64_t(n1));
+			FrameAnalysis::Scene carrier, cutGroup;
+			Assert::IsTrue(store.PeekScene(n1, carrier));
+			Assert::IsTrue(carrier.cut && carrier.cutLate, L"the cut is delivered with its successor's own seal");
+			Assert::IsTrue(store.PeekScene(kCutFrame, cutGroup));
+			Assert::IsTrue(cutGroup.confirmed && cutGroup.cutHere);
+			Assert::IsFalse(cutGroup.cut, L"the delivered cut is not rewritten");
+			Assert::IsTrue(store.PeekScene(n3, aheadGroup));
+			Assert::IsFalse(aheadGroup.cutLate, L"still none on the ahead frame");
+			Assert::AreEqual(lateBefore + 1, rig.sk.SceneCountersOf(rig.Host()).late, L"one cut, one delivery");
+		}
+
 		TEST_METHOD(ARegisteredButDisabledStoreCostsNothingAtTheSeal)
 		{
 			Rig rig(Lane("on"));
