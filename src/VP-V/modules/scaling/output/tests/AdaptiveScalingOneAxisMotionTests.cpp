@@ -8,6 +8,7 @@
 //    the GPU, the blend on fast / steady motion and the one-axis upscale = the faithful branch.
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
 #include <VP-V/core/OnePole.h>

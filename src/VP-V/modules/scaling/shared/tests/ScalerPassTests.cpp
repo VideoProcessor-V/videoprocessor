@@ -8,6 +8,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
 #include <VP-V/modules/scaling/rebase/SourceRebase.h>
@@ -573,11 +574,14 @@ namespace ScalerPassTestsNs
 			ScalerPass::Source s;
 			s.tex = tex;
 			pl_tex out = nullptr;
-			if (pass.Apply(gpu, dev.dispatch, s, 64, 48, st, out))
-				Assert::IsTrue(pass.Note().empty(), L"f32 default: no downgrade note");
+			Assert::IsTrue(pass.Apply(gpu, dev.dispatch, s, 64, 48, st, out), Wide(pass.LastError()).c_str());
+			Assert::IsNotNull(out, L"F32 output texture");
+			Assert::IsTrue(pass.Note().empty(), L"f32 default: no downgrade note");
+			out = nullptr;
 			st.precision = ScalerPass::Precision::F16;
-			if (pass.Apply(gpu, dev.dispatch, s, 64, 48, st, out))
-				Assert::IsFalse(pass.Note().empty(), L"f16 is visible (no silent fallback)");
+			Assert::IsTrue(pass.Apply(gpu, dev.dispatch, s, 64, 48, st, out), Wide(pass.LastError()).c_str());
+			Assert::IsNotNull(out, L"F16 output texture");
+			Assert::IsFalse(pass.Note().empty(), L"f16 is visible (no silent fallback)");
 			st.precision = ScalerPass::Precision::F32;
 			st.light = ScalerPass::Light::Linear;
 			Assert::IsFalse(pass.Apply(gpu, dev.dispatch, s, 64, 48, st, out));
@@ -613,11 +617,9 @@ namespace ScalerPassTestsNs
 		{
 			// Hardware only (VP_TEST_GPU=hardware): 1920x1080 -> 3840x2160 luma, one ScalerPass call, median over 40
 			// frames with pl_gpu_finish per frame. Logged, not asserted (the brief expects ~1.5 ms on the laptop).
-			if (!ExtendedRangeGpuProbe::OnHardwareGpu())
-			{
-				Log("ScalerGpuTiming: VP_TEST_GPU=hardware only; not run");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu,
+				"ScalerGpuTiming", ExtendedRangeGpuProbe::OnHardwareGpu(), "needs VP_TEST_GPU=hardware"))
 				return;
-			}
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			pl_gpu gpu = dev.Gpu();
@@ -642,13 +644,16 @@ namespace ScalerPassTestsNs
 					pl_gpu_finish(gpu);
 					const auto t0 = std::chrono::steady_clock::now();
 					Assert::IsTrue(pass.Apply(gpu, dev.dispatch, s, 3840, 2160, st, out), Wide(pass.LastError()).c_str());
+					Assert::IsNotNull(out, L"scaler output texture must be non-null");
 					pl_gpu_finish(gpu);
 					ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 				}
 				std::sort(ms.begin(), ms.end());
+				const double medianMs = ms[ms.size() / 2];
+				Assert::IsTrue(std::isfinite(medianMs) && medianMs > 0.0, L"median GPU timing must be finite and positive");
 				char line[200];
 				std::snprintf(line, sizeof line, "ScalerPass 1080->2160 luma (%s): median %.3f ms over %zu frames (first %.3f ms)",
-					pass.Status().c_str(), ms[ms.size() / 2], ms.size(), ms.front());
+					pass.Status().c_str(), medianMs, ms.size(), ms.front());
 				Log(line);
 				pass.Release(gpu);
 			}

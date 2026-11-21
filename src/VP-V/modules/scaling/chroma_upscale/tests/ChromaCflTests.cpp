@@ -7,6 +7,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/ScratchArena.h>
@@ -906,11 +907,9 @@ namespace VideoProcessorTest
 		{
 			// Hardware only (VP_TEST_GPU=hardware): Apply at 3840x2160 and 1920x1080 4:2:0, median wall time over 40 frames with
 			// pl_gpu_finish per frame.
-			if (!ExtendedRangeGpuProbe::OnHardwareGpu())
-			{
-				Logger::WriteMessage("ChromaCflGpuTiming: VP_TEST_GPU=hardware only; not run");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu,
+				"ChromaCflGpuTiming", ExtendedRangeGpuProbe::OnHardwareGpu(), "needs VP_TEST_GPU=hardware"))
 				return;
-			}
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			pl_gpu gpu = dev.Gpu();
@@ -946,9 +945,11 @@ namespace VideoProcessorTest
 					ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
 				}
 				std::sort(ms.begin(), ms.end());
+				const double medianMs = ms[ms.size() / 2];
+				Assert::IsTrue(std::isfinite(medianMs) && medianMs > 0.0, L"median CfL GPU timing must be finite and positive");
 				char text[200];
 				std::snprintf(text, sizeof text, "chroma upscale CfL %dx%d 4:2:0: median %.3f ms over %zu frames (first %.3f ms); textures %.0f MB", w, h,
-					ms[ms.size() / 2], ms.size(), ms.front(), ChromaUpscale::Gpu::CflModule::TextureBytes(w, h, cw, ch) / 1048576.0);
+					medianMs, ms.size(), ms.front(), ChromaUpscale::Gpu::CflModule::TextureBytes(w, h, cw, ch) / 1048576.0);
 				Logger::WriteMessage(text);
 				module.Release(gpu);
 				pl_tex_destroy(gpu, &luma);
