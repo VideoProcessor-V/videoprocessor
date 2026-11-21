@@ -82,11 +82,9 @@ namespace VpFrameAnalysis
 	// out = HalfDim(w) x HalfDim(h) bytes. False when there is no view.
 	bool LiveEngine8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& hw, int& hh);
 
-	// The named exception (doc 105 phase 4b, doc 91 D C9): formats whose producer half (MotionAhead::HalfLuma8) decodes its
-	// own codes, which are not the shared decode's - RGB structure luma (R + 2G + B) / 4 (R12B, R12L, r210, R10b, R10l, 8-bit
-	// BGRA / ARGB) and raw full-range 4:2:x words (P010 / P210 / v210 / UYVY at full range). For these the engine view of P1
-	// is NOT byte-identical to the producer's; commit B keeps the producer's own decode for them unless EPE evidence shows
-	// the shared-decode view is as good. Every other format: the reader's bytes are the producer's.
+	// RETIRED named exception (doc 105 phase 4b, doc 91 D C9; MAP-RGB-LUMA-PROXY, OD 11-15 11:11 (3)): it named the formats
+	// whose producer half (MotionAhead::HalfLuma8) decoded its own codes (RGB structure luma, raw full-range words). That
+	// private decode is gone, so this is always false; the declaration stays until the old tests are rewritten.
 	bool P1EngineViewDiffersFromProducer(const AnalysisLumaSource& source);
 
 	// IP1Source: the lane's published P1 under the slot seqlock when `published` has it, else the live fill above (counted:

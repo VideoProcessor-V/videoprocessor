@@ -240,8 +240,8 @@ namespace MotionAhead
 		// quarter with the half-size inner matcher); 0 = the frame's half size.
 		void SetTargetSize(int w, int h) { targetW.store(w, std::memory_order_release); targetH.store(h, std::memory_order_release); }
 		// L-B4 (a): the frame's P1 (the skeleton's half luma) is the source of the 8-bit engine luma, read through this reader
-		// (Acquire(kP1HalfLuma, seq, Cpu) from this thread); null / a miss / a format whose engine codes differ from P1's
-		// (RGB, full-range 4:2:x: FIX-B4-RGB) = the producer's own HalfLuma8 decode. Any thread.
+		// (Acquire(kP1HalfLuma, seq, Cpu) from this thread); null / a miss = HalfLuma8, which reads the same shared luma plane
+		// (RGB and full range included: MAP-RGB-LUMA-PROXY, no private luma law). Any thread.
 		void SetP1Source(std::shared_ptr<VpSkeleton::IP1Source> source)
 		{ std::lock_guard<std::mutex> lock(p1Mutex); p1Source = std::move(source); }
 		uint64_t LastSubmitted() const { return lastSubmitted.load(std::memory_order_acquire); }

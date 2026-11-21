@@ -343,18 +343,11 @@ namespace VpFrameAnalysis
 		return true;
 	}
 
-	bool P1EngineViewDiffersFromProducer(const AnalysisLumaSource& source)
+	bool P1EngineViewDiffersFromProducer(const AnalysisLumaSource&)
 	{
-		// Mirrors MotionAheadProducer.cpp HalfLuma8's planar16 / rgbOwnDecode / full-range 4:2:2 split (the producer's own
-		// codes): planar P010 / P210 at limited range equal the shared decode's codes; at full range they are raw words.
-		const VideoFrameEncoding e = source.encoding;
-		if (source.format == AnalysisLumaFormat::NativeRgb)
-			return e == VideoFrameEncoding::R12B || e == VideoFrameEncoding::R12L || e == VideoFrameEncoding::R210 ||
-				e == VideoFrameEncoding::R10b || e == VideoFrameEncoding::R10l || e == VideoFrameEncoding::BGRA_8BIT ||
-				e == VideoFrameEncoding::ARGB_8BIT;
-		if (source.format == AnalysisLumaFormat::P010 || source.format == AnalysisLumaFormat::P210 ||
-			source.format == AnalysisLumaFormat::NativeYuv422)
-			return source.fullRangeYuv;
+		// Retired (MAP-RGB-LUMA-PROXY, OD 11-15 11:11 (3)): the producer's HalfLuma8 has no private luma law any more, so no
+		// format's engine view differs from the producer's. Kept (always false) only until the tests that pin the old
+		// exception are rewritten by the opus lane; then this declaration goes.
 		return false;
 	}
 
