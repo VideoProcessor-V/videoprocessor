@@ -556,7 +556,8 @@ namespace CameraModel
 		Params o;
 		o.type = (static_cast<int>(a.type) >= static_cast<int>(b.type)) ? a.type : b.type;
 		Mul3(ha, hb, o.h);
-		NormaliseH8(o.h);
+		if (!NormaliseH8(o.h))   // GEM-136: a composition that cannot be normalised is not a model (never the unnormalised product)
+			return IdentityParams(ModelType::None);
 		return o;
 	}
 
