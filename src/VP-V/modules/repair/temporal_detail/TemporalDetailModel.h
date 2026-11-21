@@ -757,6 +757,12 @@ namespace TemporalDetail
 			if (off & Tuning::kGateUnc) e.uncGate = 1.0;
 			if ((off & Tuning::kGateAge) && e.ageSeconds < m_set.maxAgeSeconds * 4.0) e.ageGate = 1.0;
 		}
+		// TD-NONFINITE: non-finite evidence (or a non-finite gate from a source-side value) closes every gate (weight 0),
+		// regardless of the diagnostic gate switches.
+		if (!(Finite(e.e1c) && Finite(e.e1w) && Finite(e2c) && Finite(e2w) && Finite(e.corr) && Finite(e.u) && Finite(e.baseDiff) &&
+			Finite(A.N[bi]) && Finite(A.F[bi]) && Finite(e.corrGate) && Finite(e.strongerGate) && Finite(e.harmGate) &&
+			Finite(e.hbGate) && Finite(e.focusGate) && Finite(e.uncGate) && Finite(e.baseGate)))
+			e.corrGate = e.strongerGate = e.harmGate = e.hbGate = e.focusGate = e.uncGate = e.baseGate = 0.0;
 		e.hard = e.uncGate * e.baseGate * e.corrGate * e.harmGate * e.hbGate * e.focusGate;
 		e.valid = true;
 		return e;
@@ -1040,7 +1046,7 @@ namespace TemporalDetail
 					if (st.xf >= 1.0) st.prevSlot = -1;
 				}
 				const double hint = (i < in.quality.size()) ? Clamp(in.quality[i], 0.0, 1.0) : 1.0;
-				wk.evidence = (std::max)(Smoothstep(kEvidenceLo, kEvidenceHi, st.rebounds), 1.0 - hint);
+				wk.evidence = (std::max)(GateS(kEvidenceLo, kEvidenceHi, st.rebounds), 1.0 - hint);
 				if (m_tune.gatesOff & Tuning::kGateEvidence) wk.evidence = 1.0;
 				const bool cam = camBlock[i] != 0;
 				Source* ps = st.slot >= 0 ? FindSlot(st.slot) : nullptr;
@@ -1069,7 +1075,7 @@ namespace TemporalDetail
 						if (wk.pastId >= 0)
 						{
 							const double ratio = bestQ / (wk.pe.e1w + kEnergyFloor);
-							wk.referee = (m_tune.gatesOff & Tuning::kGateEvidence) ? 1.0 : Smoothstep(0.8 * kSoftFuture, 1.2 * kSoftFuture, ratio);
+							wk.referee = (m_tune.gatesOff & Tuning::kGateEvidence) ? 1.0 : GateS(0.8 * kSoftFuture, 1.2 * kSoftFuture, ratio);
 						}
 					}
 				}
@@ -1246,10 +1252,10 @@ namespace TemporalDetail
 				const double raw = std::sqrt((std::max)(st.qPeak, q) / q) - 1.0;
 				const double boostMax = m_set.boost ? m_set.boostMax : 0.0;   // the boost switch (off by default)
 				double bn = boostMax > 0.0 ? Clamp(raw / boostMax, 0.0, 1.0) : 0.0;
-				const double hbP = Smoothstep(kRho2Lo, kRho2Hi, (A.e2[u] + kEnergyFloor) / (st.e2Peak + kEnergyFloor));
-				const double fP = Smoothstep(kPullLo, kPullHi, A.F[u] / (st.fPeak + 1e-6));
-				const double noRef = 1.0 - Smoothstep(0.0, 0.5, weight);
-				const double refB = wk.futQ >= 0.0 ? Smoothstep(0.8 * kSoftFuture, 1.2 * kSoftFuture, wk.futQ / (st.qPeak + kEnergyFloor)) : 1.0;
+				const double hbP = GateS(kRho2Lo, kRho2Hi, (A.e2[u] + kEnergyFloor) / (st.e2Peak + kEnergyFloor));
+				const double fP = GateS(kPullLo, kPullHi, A.F[u] / (st.fPeak + 1e-6));
+				const double noRef = GateInv(0.0, 0.5, weight);
+				const double refB = wk.futQ >= 0.0 ? GateS(0.8 * kSoftFuture, 1.2 * kSoftFuture, wk.futQ / (st.qPeak + kEnergyFloor)) : 1.0;
 				bn *= hbP * fP * wk.evidence * noRef * refB * m_set.strength * Bg(u, 3);
 				bn = (st.retired ? 0.0 : bn);
 				if (!st.bOn && bn >= kEnterWeight) st.bOn = true;
@@ -1327,7 +1333,7 @@ namespace TemporalDetail
 					lambda = txt > 1e-9 ? Clamp(sxt / txt, 0.0, 1.0) : 1.0;
 					if (!(txt > 1e-9)) return 0.0;
 					const double rho = sxt / std::sqrt(txt * sxs + 1e-12);
-					return (1.0 - lambda) * (cohOff ? 1.0 : Smoothstep(kCoherenceLo, kCoherenceHi, rho));
+					return (1.0 - lambda) * (cohOff ? 1.0 : GateS(kCoherenceLo, kCoherenceHi, rho));
 				};
 				c.tau1 = share(st1, tt1, ss1, c.lam1);
 				c.tau2 = share(st2, tt2, ss2, c.lam2);

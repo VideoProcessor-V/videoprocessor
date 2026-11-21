@@ -43,6 +43,10 @@ vec4 td_bgate(vec4 v)
     return vec4(clamp(v.xyz, vec3(TD_BGATE_MIN), vec3(TD_BGATE_MAX)), clamp(v.w, 0.0, 1.0));
 }
 float td_ss(float e0, float e1, float x) { float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
+// TD-NONFINITE (TemporalDetail::GateS / GateInv): non-finite evidence closes the gate (weight 0) in both the S and 1 - S forms.
+bool td_fin(float x) { return !(isnan(x) || isinf(x)); }
+float td_gs(float e0, float e1, float x) { return td_fin(x) ? td_ss(e0, e1, x) : 0.0; }
+float td_gi(float e0, float e1, float x) { return td_fin(x) ? 1.0 - td_ss(e0, e1, x) : 0.0; }
 vec4 td_cr(float t)
 {
     float t2 = t * t, t3 = t2 * t;
@@ -312,21 +316,21 @@ if (gl_LocalInvocationIndex == 0u) {
 #endif
         float margin = TD_STRONGER_MARGIN * bgv.x;
         float corr = a1.z / sqrt(a1.x * a1.y + 1e-12);
-        float corrGate = td_ss(0.5 * TD_CORR_MIN, TD_CORR_MIN, corr);
+        float corrGate = td_gs(0.5 * TD_CORR_MIN, TD_CORR_MIN, corr);
         float ratio = (e1w + fl) / (e1c + fl);
-        float stronger = td_ss(1.0 + margin, 1.0 + 3.0 * margin, ratio) * td_ss(TD_SIG_LO, TD_SIG_HI, e1w / (N + fl));
-        float harm = td_ss(1.0 - 3.0 * margin, 1.0 - margin, ratio);
-        float hb = td_ss(TD_RHO2_LO, TD_RHO2_HI, (e2c + fl) / (e2w + fl));
+        float stronger = td_gs(1.0 + margin, 1.0 + 3.0 * margin, ratio) * td_gs(TD_SIG_LO, TD_SIG_HI, e1w / (N + fl));
+        float harm = td_gs(1.0 - 3.0 * margin, 1.0 - margin, ratio);
+        float hb = td_gs(TD_RHO2_LO, TD_RHO2_HI, (e2c + fl) / (e2w + fl));
         float cx = (float(b.x) + 0.5) * float(TD_B) - 0.5, cy = (float(b.y) + 0.5) * float(TD_B) - 0.5;
         vec2 sp = td_position(k, int(cx), int(cy));
         int sbx = clamp(int(floor((sp.x + 0.5) / float(TD_B))), 0, TD_BW - 1), sby = clamp(int(floor((sp.y + 0.5) / float(TD_B))), 0, TD_BH - 1);
         float Fw = texelFetch(slot_blk, ivec2(k * TD_BW + sbx, sby), 0).x;
-        float focus = td_ss(TD_PULL_LO, TD_PULL_HI, texelFetch(meas, b, 0).z / (Fw + 1e-6));
+        float focus = td_gs(TD_PULL_LO, TD_PULL_HI, texelFetch(meas, b, 0).z / (Fw + 1e-6));
         float u = td_mot_grid(k, vec2(cx, cy)).z;
         float umax = TD_UMAX * bgv.z;
-        float unc = 1.0 - td_ss(0.3 * umax, umax, u);
+        float unc = td_gi(0.3 * umax, umax, u);
         float allow = (TD_BASE_NOISE + TD_BASE_GRAIN_SIGMAS * sqrt(max(0.0, N)) / 4.0) * bgv.y;
-        float bgate = 1.0 - td_ss(allow, 2.0 * allow, a1.w / n);
+        float bgate = td_gi(allow, 2.0 * allow, a1.w / n);
         float ageSec = (tab.z + 1.0) / hz;
         float ageGate = clamp((max_age - ageSec) / (max_age * TD_AGE_FADE), 0.0, 1.0);
         float hard = unc * bgate * corrGate * harm * hb * focus;
@@ -373,7 +377,7 @@ if (b.x < TD_BW && b.y < TD_BH) {
 #else
     float hint = 1.0;
 #endif
-    float evidence = max(td_ss(TD_EV_LO, TD_EV_HI, st.rebounds), 1.0 - hint);
+    float evidence = max(td_gs(TD_EV_LO, TD_EV_HI, st.rebounds), 1.0 - hint);
     int slot = int(st.slot);
     bool live = slot >= 0 && slot < TD_K && slots_valid > 0.5 && texelFetch(tab_old, ivec2(slot, 0), 0).x > 0.5;
     if (slot >= 0 && !live) { st.slot = -1.0; st.prevSlot = -1.0; st.xf = 1.0; st.qref = 0.0; }
@@ -675,9 +679,9 @@ if (b.x < TD_BW && b.y < TD_BH) {
     float q = m.w;
     float raw = sqrt(max(st.qPeak, q) / q) - 1.0;
     float bn = boost_max > 0.0 ? clamp(raw / boost_max, 0.0, 1.0) : 0.0;
-    float hbP = td_ss(TD_RHO2_LO, TD_RHO2_HI, (m.y + TD_FLOOR) / (st.e2Peak + TD_FLOOR));
-    float fP = td_ss(TD_PULL_LO, TD_PULL_HI, m.z / (st.fPeak + 1e-6));
-    float noRef = 1.0 - td_ss(0.0, 0.5, weight);
+    float hbP = td_gs(TD_RHO2_LO, TD_RHO2_HI, (m.y + TD_FLOOR) / (st.e2Peak + TD_FLOOR));
+    float fP = td_gs(TD_PULL_LO, TD_PULL_HI, m.z / (st.fPeak + 1e-6));
+    float noRef = td_gi(0.0, 0.5, weight);
     bn *= hbP * fP * evidence * noRef * bstrength;
     bn = st.retired > 0.5 ? 0.0 : bn;
     if (st.bOn < 0.5 && bn >= TD_ENTER) st.bOn = 1.0;
@@ -796,8 +800,8 @@ if (gl_LocalInvocationIndex == 0u) {
         float st1 = a0.x, tt1 = a0.y, ss1 = a0.z, st2 = a0.w, tt2 = a1.x, ss2 = a1.y;
         float lam1 = tt1 > 1e-9 ? clamp(st1 / tt1, 0.0, 1.0) : 1.0;
         float lam2 = tt2 > 1e-9 ? clamp(st2 / tt2, 0.0, 1.0) : 1.0;
-        float tau1 = tt1 > 1e-9 ? (1.0 - lam1) * td_ss(TD_COHERENCE_LO, TD_COHERENCE_HI, st1 / sqrt(tt1 * ss1 + 1e-12)) : 0.0;
-        float tau2 = tt2 > 1e-9 ? (1.0 - lam2) * td_ss(TD_COHERENCE_LO, TD_COHERENCE_HI, st2 / sqrt(tt2 * ss2 + 1e-12)) : 0.0;
+        float tau1 = tt1 > 1e-9 ? (1.0 - lam1) * td_gs(TD_COHERENCE_LO, TD_COHERENCE_HI, st1 / sqrt(tt1 * ss1 + 1e-12)) : 0.0;
+        float tau2 = tt2 > 1e-9 ? (1.0 - lam2) * td_gs(TD_COHERENCE_LO, TD_COHERENCE_HI, st2 / sqrt(tt2 * ss2 + 1e-12)) : 0.0;
         tl = vec4(tau1, tau2, lam1, lam2);
         w = (tau1 <= 0.0 && tau2 <= 0.0) ? 0.0 : c.x;
     }

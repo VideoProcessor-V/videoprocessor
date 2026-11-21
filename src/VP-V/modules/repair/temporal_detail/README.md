@@ -352,3 +352,12 @@ split runs. Off / auto idle read no grain: Ring. Tests: TemporalDetailGpuGrainPr
 ## Private GPU textures (skeleton rule)
 
 This module still creates its own GPU textures through the `Ensure` wrapper (its persistent state, `prevg`, the output, the block grids and, when no shared product fits, its own grain split; see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): kept state moves to skeleton product nodes and per-render temporaries to the shared scratch arena (src/VP-V/core/ScratchArena.h). SA6 (reduced) moved the per-render temporaries (cleaner accumulators, delta, own split intermediates) to the arena behind `Params::arena`; the reference store (`td.refstore`), `prevg` and the output remain, see "Products" above. Its grain reads already go through the one accessor (`gs_fetch` / `gs_blocks`); a shared product that is Missing, Stale (another frame or unit version, `Params::grainSeq`), WrongSize or Shed (`Params::grainShed`) makes it use its own split, visibly (FallbackCatalog "grain split (...)"), and it recovers on the first fitting frame.
+
+## Non-finite evidence (TD-NONFINITE)
+
+Every gate over a measured value (correlation, stronger / harm, high band, focus, uncertainty, base, evidence, referee,
+boost high-band / pull / no-reference / referee, coherence) closes explicitly when that value is NaN or infinite: the gate is
+0 and the block gets weight 0. The CPU model uses `Finite`, `GateS` and `GateInv` (TemporalDetail.h) and `EvaluateBlock` closes
+all gates when any evidence or gate value is non-finite (also with a diagnostic gate switch on); the shaders mirror this with
+`td_fin` / `td_gs` / `td_gi` (TemporalDetailShaders.h). The 1 - S gates (uncertainty, base, no-reference) would otherwise OPEN
+on NaN. Needed test (opus lane): non-finite A.N / A.F / source energies / u give hard = 0 and no non-finite output.

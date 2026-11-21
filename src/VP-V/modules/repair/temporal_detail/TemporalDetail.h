@@ -96,12 +96,18 @@ namespace TemporalDetail
 	constexpr double kGuardTemplateShare = 0.25;         // the guard ignores the template's structure transfer where T^2 > this x the grain level N
 	constexpr double kCameraMinConfidence = 0.5;         // the model ignores a camera view below this
 
+	// TD-NONFINITE: evidence that is NaN or infinite closes its gates (weight 0) explicitly; the comparison-based
+	// Smoothstep would otherwise pass NaN through (S-form gates) or open on it (1 - S gates).
+	inline bool Finite(double v) { return std::isfinite(v); }
 	inline double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 	inline double Smoothstep(double e0, double e1, double x)
 	{
 		const double t = Clamp((x - e0) / (e1 - e0), 0.0, 1.0);
 		return t * t * (3.0 - 2.0 * t);
 	}
+	// Gate forms with explicit non-finite closing (TD-NONFINITE): non-finite evidence x gives weight 0 in both forms.
+	inline double GateS(double e0, double e1, double x) { return Finite(x) ? Smoothstep(e0, e1, x) : 0.0; }
+	inline double GateInv(double e0, double e1, double x) { return Finite(x) ? 1.0 - Smoothstep(e0, e1, x) : 0.0; }
 
 	// Frames of a duration at the measured content rate (round, minimum 1). hz <= 0: the reference rate.
 	inline int Frames(double seconds, double hz)
