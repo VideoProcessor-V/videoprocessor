@@ -2888,6 +2888,79 @@ namespace SkeletonModuleTestsNs
 			registry.ResetForTesting();
 		}
 
+		// A GpuCreated with a fake render device (presence only: it is never dereferenced), as SkeletonCoreContextTests does.
+		static void GpuCreatedWithDevice(Rig& rig, int* fakeGpu)
+		{
+			RE::LifecycleFacts f;
+			f.host = rig.Host();
+			f.kind = RE::Lifecycle::GpuCreated;
+			f.gpu = reinterpret_cast<pl_gpu>(fakeGpu);
+			rig.sk.OnLifecycle(f);
+		}
+
+		// GF-P2b S10b / MUST-4 (3): a memo that began with no lane (its ahead plan made by the no-lane grant, nothing fits) and then gets a
+		// lane keeps no stale plan: the lane's Configure re-sets the memo's AheadPlan, so an ahead ask inside the window is not
+		// NotPlannedAhead.
+		TEST_METHOD(ALaneSwitchedOnAfterANoLaneMemoReplacesItsAheadPlan)
+		{
+			VpSkeleton::VramUsers& registry = VpSkeleton::VramUsers::Instance();
+			registry.ResetForTesting();
+			const uint64_t mb = 1024ull * 1024ull;
+			{
+				Rig rig(Lane("off"));
+				int fakeGpu = 0;
+				VpSkeleton::CardProfile tight;
+				tight.key.luid = 80;
+				tight.vramBudgetBytes = 8 * mb;
+				tight.vramUsageBytes = 7 * mb;
+				rig.sk.SetCardForTesting(tight);
+				rig.ResyncApply("on");
+				GpuCreatedWithDevice(rig, &fakeGpu);
+				VpSkeleton::OwnerFill g;
+				g.reserveBytes = 1u << 20;
+				g.aheadDepth = 2;   // an ahead consumer is active: the window computes ahead
+				g.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					static int tex = 0;
+					out.gpu.resource = &tex;
+					out.gpu.bytes = 1u << 20;
+					return true;
+				};
+				Assert::IsTrue(rig.sk.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, "repair/grain_split", g)
+					== VpSkeleton::SkeletonMemo::Registration::Registered);
+				SkeletonModule::QueueShape q;
+				q.renderAhead = 1;
+				q.laneLead = 1;
+				q.lookAheadWalk = 6;
+				rig.sk.SetQueueForTesting(q);
+				int64_t s = 1;
+				for (; s <= 8; ++s)
+				{
+					rig.Frame(s);
+					PresentFacts(rig, s);
+				}
+				Assert::IsNull(rig.sk.LaneOf(rig.Host()), L"no lane yet");
+				// The lane comes on with an ample card.
+				VpSkeleton::CardProfile ample;
+				ample.key.luid = 80;
+				ample.vramBudgetBytes = 1024 * mb;
+				ample.vramUsageBytes = 0;
+				rig.sk.SetCardForTesting(ample);
+				rig.cfg.Write(Lane("on"));
+				rig.Life(RE::Lifecycle::SettingsApplied);
+				VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+				Assert::IsNotNull(memo);
+				for (int i = 0; i < 200 && !(memo->LaneBound() && memo->GpuGranted()); ++i, ++s)
+				{
+					rig.Frame(s);
+					PresentFacts(rig, s);
+				}
+				Assert::IsTrue(memo->LaneBound() && memo->GpuGranted(), L"the lane-bound memo is granted");
+				const VpSkeleton::AcquireResult r = memo->Acquire(VpSkeleton::kP10GrainSplit, uint64_t(s - 1) + 1u, VpSkeleton::AcquireForm::Gpu);
+				Assert::IsTrue(r.cause != VpSkeleton::AcquireCause::NotPlannedAhead, L"the no-lane plan did not survive the lane's Configure");
+			}
+			registry.ResetForTesting();
+		}
+
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
 		{
 			Rig rig(Lane("on"));
