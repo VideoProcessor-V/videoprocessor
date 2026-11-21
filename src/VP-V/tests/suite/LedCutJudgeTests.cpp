@@ -506,5 +506,31 @@ namespace VideoProcessorTest
 			Assert::IsTrue(withdrawn[0].first == &rendererB, L"from the renderer it was last declared on");
 			Assert::IsTrue(withdrawn[0].second == static_cast<const void*>(&module));
 		}
+
+		// GF-P3 MUST-10: a module that was never started declares nothing, even when measurements reach it, and so leaves nothing to
+		// withdraw when it is destroyed.
+		TEST_METHOD(ANeverStartedModuleDeclaresNothingAndLeavesNoDemand)
+		{
+			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),
+				L"precondition: no store registered by an earlier test");
+			RecordingDemand demand;
+			DemandHubScope hub(&demand);
+			int rendererA = 0;
+			FrameAnalysis::Store storeA(FrameAnalysis::RingDepth(4, 4));
+			StoreRegistration registration;
+			registration.Set(&rendererA, &storeA);
+
+			auto projector = std::make_shared<FakeProjector>();
+			projector->openFails = true;   // a dry run: no port
+			{
+				LedDriveModule module(ProjectorConfig(), CutCompensate(),
+					[projector] { return std::make_unique<FakePort>(projector); });
+				module.SetSceneReaderForTesting(NoSceneCuts());
+				for (uint64_t s = 1; s <= 3; ++s)
+					module.SubmitMeasurement(CutFrame(40.0), s);
+			}
+			Assert::AreEqual<size_t>(0, demand.Declarations().size(), L"a module that never started declares nothing");
+			Assert::AreEqual<size_t>(0, demand.Withdrawals().size(), L"nothing declared, so nothing to withdraw");
+		}
 	};
 }
