@@ -211,9 +211,20 @@ P11's flat coverage (picture share x off-edge share). `grain_lo` / `grain_hi` ke
 map (`MAP_BODY`) is the motion product's and is unchanged.
 
 The host supplies `AdaptiveDownscale::GrainSource` (P10 blocks, P11 S0 and S4, the block size, the code-unit scale to 8-bit codes and
-the source crop) through `AdaptiveDownscaleStage::Host::grainSource`. Without a valid source (the callback null, a texture
-missing, or no usable block on the frame) the private Laplacian partial sums (`MEASURE_BODY`, `FINAL_BODY_A`) give the energy and
-the stage status says "Adaptive grain: own estimate" (`LastGrainFromSharedProducts()`); nothing is latched. Once the host
+the source crop) through `AdaptiveDownscaleStage::Host::grainSource`. The private Laplacian partial sums (`MEASURE_BODY`,
+`FINAL_BODY_A`) give the energy instead, nothing latched, in four cases. `LastGrainSourceUse()` and the status line name the
+reason (gate cb-u1 r1, 2026-11-21):
+- not supplied: the callback is null, a texture is missing, or the three grids differ (`GrainSource::SameGrid`, SHOULD 5);
+- measure domain: the measure domain is linear or HDR (`domain.mode` > 0). P10 N is in source codes there, not the ramp's gamma
+  units, so the shared products are not bound (MUST 6);
+- no usable block: the products were bound, but the read-back frame had no usable block. The final pass writes a stats tag
+  (w = 2: energy from P10 / P11, w = 1: own estimate), so the status is never "shared" on such a frame (MUST 5);
+- shared: the read-back frame's energy came from P10 / P11.
+
+When the host offers the products but they are not used, `Stage::GrainSourceFallback()` engages FallbackCatalog
+"product.adaptive_downscale" with the reason (SHOULD 6). The per-block non-finite test uses the IEEE bit pattern (SHOULD 2).
+`kEdgeEnergyPerSigma` is 3.5682482 (SHOULD 1). The white-noise mapping still needs the registered GPU calibration
+(FIX-X5-GRAIN-P10) before a host wires the source. Once the host
 supplies the source on every frame the private partial terms (`MEASURE_BODY` lap / flat_px, the `AD_P10`-less branch) are deleted.
 The catalog row 3 path is `VP-V/modules/scaling/output/AdaptiveDownscale`. Row 3 declares only what this module reads today
 (check_private_copies X8, 2026-11-21 A20-CB fix): it has no skeleton `Acquire` of P4, P10 or P11, P4 is not read at all, and P10 /

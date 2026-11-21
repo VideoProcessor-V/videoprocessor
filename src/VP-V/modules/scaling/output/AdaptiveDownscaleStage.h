@@ -150,6 +150,24 @@ namespace AdaptiveDownscaleStage
 		const TdProducts::ReadResult& TemporalDetailRead() const { return tdRead; }
 		FallbackCatalog::Decision TemporalDetailFallback() const { return tdRead.fallback; }
 
+		// X5-GRAIN-P10 (gate cb-u1 r1 SHOULD 6): the host offers the shared grain products (Host::grainSource) but the scaler
+		// did not use them on the last read-back frame. That engages "product.adaptive_downscale" with the reason, as the
+		// temporal-detail read path does; not offered (no callback) is no downgrade (the private estimate is then the design).
+		FallbackCatalog::Decision GrainSourceFallback() const
+		{
+			const char* id = "product.adaptive_downscale";
+			if (!grainOffered || !module.Active())
+				return FallbackCatalog::Released(id);
+			switch (module.LastGrainSourceUse())
+			{
+			case AdaptiveDownscale::GrainSourceUse::Shared: return FallbackCatalog::Released(id);
+			case AdaptiveDownscale::GrainSourceUse::NoUsableBlock: return FallbackCatalog::Engaged(id, "grain: no usable shared block");
+			case AdaptiveDownscale::GrainSourceUse::MeasureDomain: return FallbackCatalog::Engaged(id, "grain: measure domain is linear / HDR");
+			case AdaptiveDownscale::GrainSourceUse::NotSupplied: break;
+			}
+			return FallbackCatalog::Engaged(id, "grain: the offered shared products are invalid (missing or grid mismatch)");
+		}
+
 	private:
 		AdaptiveDownscale::Module& module;
 		bool upscaleThisFrame = false;   // Stage 8b on the frame being built
@@ -168,5 +186,6 @@ namespace AdaptiveDownscaleStage
 		unsigned long long lastFailureTick = 0;   // GetTickCount64() of the last frame with new failures
 		bool failureHeld = false;          // a failure within kFailureHoldMs
 		TdProducts::ReadResult tdRead;     // the temporal-detail read path of the frame just registered (nothing used in reset 1)
+		bool grainOffered = false;         // X5-GRAIN-P10: the host offered the shared grain products on the frame just registered
 	};
 }

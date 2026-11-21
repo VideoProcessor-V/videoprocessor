@@ -108,6 +108,8 @@ if (q.x < size.x && q.y < size.y)
 shared vec4 ad_total[256];
 #ifdef AD_P10
 shared vec2 ad_p10[256];
+// Non-finite by the IEEE bit pattern (exponent all ones), not isnan / isinf, which a non-strict compile may fold.
+bool ad_nonfinite(float x) { return (floatBitsToUint(x) & 0x7fffffffu) >= 0x7f800000u; }
 #endif
 )GLSL";
 
@@ -134,7 +136,7 @@ for (int idx = int(li); idx < nb.x * nb.y; idx += 256) {
     vec4 s4 = texelFetch(p11_s4, bk, 0);
     float cov = s4.x * s4.y;
     float my = texelFetch(p11_s0, clamp(bk, ivec2(0), textureSize(p11_s0, 0) - ivec2(1)), 0).x;
-    if (isnan(lvl) || isinf(lvl) || lvl < 0.0 || isnan(cov) || isinf(cov) || cov <= 0.0 || isnan(my) || isinf(my))
+    if (ad_nonfinite(lvl) || lvl < 0.0 || ad_nonfinite(cov) || cov <= 0.0 || ad_nonfinite(my))
         continue;
     float wgt = max(mix(1.0, 2.0 * (1.0 - clamp(my * p10_scale / 255.0, 0.0, 1.0)), shadow_bias), 0.0);
     pacc += vec2(sqrt(lvl) * p10_scale * wgt * cov, cov);
@@ -154,10 +156,14 @@ for (uint s = 128u; s > 0u; s >>= 1u) {
 if (li == 0u && advance > 0.5) {
     vec4 t = ad_total[0];
 #ifdef AD_P10
-    // No usable block (all vetoed or outside the crop): the private estimate stands in for this frame.
-    float energy = ad_p10[0].y > 1e-6 ? ENERGY_PER_SIGMA * ad_p10[0].x / ad_p10[0].y : t.x / max(t.y, 1.0);
+    // No usable block (all vetoed or outside the crop): the private estimate stands in for this frame, and the stats tag
+    // says so (1 = own estimate, 2 = the shared products), so the stage status is never "shared" on such a frame.
+    bool p10_used = ad_p10[0].y > 1e-6;
+    float energy = p10_used ? ENERGY_PER_SIGMA * ad_p10[0].x / ad_p10[0].y : t.x / max(t.y, 1.0);
+    float stats_tag = p10_used ? 2.0 : 1.0;
 #else
     float energy = t.x / max(t.y, 1.0);
+    float stats_tag = 1.0;
 #endif
     float free_mean = t.z / max(total_pixels, 1.0);
     float luma_mean = t.w / max(total_pixels, 1.0);
@@ -170,9 +176,9 @@ if (li == 0u && advance > 0.5) {
     imageStore(state_io, ivec2(0), vec4(scale, free_mean, luma_mean, cut ? 2.0 : 1.0));
     if (write_stats > 0.5) {
 #ifdef AD_STATS_IMG
-        imageStore(ad_stats_img, ivec2(0), vec4(scale, free_mean, luma_mean, 1.0));
+        imageStore(ad_stats_img, ivec2(0), vec4(scale, free_mean, luma_mean, stats_tag));
 #else
-        ad_out = vec4(scale, free_mean, luma_mean, 1.0);
+        ad_out = vec4(scale, free_mean, luma_mean, stats_tag);
 #endif
     }
 }
@@ -601,6 +607,7 @@ float rs_slope(float y)
 		grainField = GrainField();
 		grainSource = GrainSource();
 		grainFromShared = false;
+		grainDomainRefused = false;
 		readback = nullptr;
 		readbackPending = false;
 		gpu = nullptr;
@@ -720,6 +727,7 @@ float rs_slope(float y)
 			stats.grainScale = values[0];
 			stats.meanW = upscale.on ? upscale.wBase * values[0] : settings.wBase * values[1] * values[0];
 			stats.meanLuma = values[2];
+			stats.grainFromShared = values[3] > 1.5f;   // X5-GRAIN-P10 stats tag: 2 = energy from P10 / P11, 1 = own estimate
 		};
 		if (NativeStatsReadback())
 		{
@@ -991,7 +999,11 @@ float rs_slope(float y)
 			}
 			// X5-GRAIN-P10: the shared products (P10 N, P11 meanY and flat coverage) when supplied; else the
 			// private Laplacian estimate (visible: LastGrainFromSharedProducts() false, the stage status line).
-			const bool shared = grainSource.Valid();
+			// Gate cb-u1 r1 MUST 6: P10 N is in the source code domain, so it maps onto the ramp's Laplacian units only when
+			// the measure domain is the gamma code domain (mode 0). A linear or HDR measure keeps the private estimate, visibly.
+			const bool supplied = grainSource.Valid();
+			const bool shared = supplied && domain.mode < 0.5f;
+			grainDomainRefused = supplied && !shared;
 			const float blockPx = static_cast<float>(grainSource.blockPx);
 			const float codeScale = grainSource.codeToEightBit;
 			const float cropLo[2] = { (std::min)(grainSource.sourceCrop.x0, grainSource.sourceCrop.x1),

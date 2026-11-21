@@ -1251,11 +1251,15 @@ namespace TemporalDetail
 				const double q = A.q[u];
 				const double raw = std::sqrt((std::max)(st.qPeak, q) / q) - 1.0;
 				const double boostMax = m_set.boost ? m_set.boostMax : 0.0;   // the boost switch (off by default)
-				double bn = boostMax > 0.0 ? Clamp(raw / boostMax, 0.0, 1.0) : 0.0;
+				// TD-NONFINITE (gate cb-u1 r1 MUST 3): non-finite evidence q, or a NaN ramp (0 / 0), closes the boost; Clamp
+				// passes NaN, which would poison the hysteresis state bLim for good. A finite q = 0 under a positive peak keeps
+				// its old meaning (raw = +inf: fully soft, bn 1), so the finite path is unchanged.
+				double bn = (boostMax > 0.0 && Finite(q) && !std::isnan(raw)) ? Clamp(raw / boostMax, 0.0, 1.0) : 0.0;
 				const double hbP = GateS(kRho2Lo, kRho2Hi, (A.e2[u] + kEnergyFloor) / (st.e2Peak + kEnergyFloor));
 				const double fP = GateS(kPullLo, kPullHi, A.F[u] / (st.fPeak + 1e-6));
 				const double noRef = GateInv(0.0, 0.5, weight);
-				const double refB = wk.futQ >= 0.0 ? GateS(0.8 * kSoftFuture, 1.2 * kSoftFuture, wk.futQ / (st.qPeak + kEnergyFloor)) : 1.0;
+				// A NaN future energy closes the referee (the `>= 0` test is false on NaN and would OPEN it at 1).
+				const double refB = !Finite(wk.futQ) ? 0.0 : wk.futQ >= 0.0 ? GateS(0.8 * kSoftFuture, 1.2 * kSoftFuture, wk.futQ / (st.qPeak + kEnergyFloor)) : 1.0;
 				bn *= hbP * fP * wk.evidence * noRef * refB * m_set.strength * Bg(u, 3);
 				bn = (st.retired ? 0.0 : bn);
 				if (!st.bOn && bn >= kEnterWeight) st.bOn = true;

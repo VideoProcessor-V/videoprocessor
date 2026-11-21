@@ -23,15 +23,31 @@ namespace AdaptiveDownscaleStage
 
 		// X5-GRAIN-P10: this frame's shared grain products (P10 N, P11 meanY and coverage) from the host, when it
 		// supplies them; none (no callback, or an invalid source) leaves the private Laplacian estimate, shown in StatusLines.
-		void SetSharedGrain(AdaptiveDownscale::Module& module, const Host& host)
+		// The status text of each grain estimate (one line; the same reasons as GrainSourceFallback).
+		const char* GrainStatusLine(AdaptiveDownscale::GrainSourceUse use)
+		{
+			using U = AdaptiveDownscale::GrainSourceUse;
+			switch (use)
+			{
+			case U::Shared: return "Adaptive grain: from the shared grain split (P10) and region statistics (P11)";
+			case U::NoUsableBlock: return "Adaptive grain: own estimate (no usable shared grain block on the last read-back frame)";
+			case U::MeasureDomain: return "Adaptive grain: own estimate (measure domain is linear / HDR; the shared products are in source codes)";
+			case U::NotSupplied: break;
+			}
+			return "Adaptive grain: own estimate (the shared grain products are not supplied to the scaler)";
+		}
+
+		// Returns whether the host offers the shared products at all (a callback): an offered source that is not used is a
+		// FallbackCatalog downgrade (GrainSourceFallback), not only a status line.
+		bool SetSharedGrain(AdaptiveDownscale::Module& module, const Host& host)
 		{
 			module.ClearGrainSource();
-			if (host.grainSource)
-			{
-				const AdaptiveDownscale::GrainSource source = host.grainSource();
-				if (source.Valid())
-					module.SetGrainSource(source);
-			}
+			if (!host.grainSource)
+				return false;
+			const AdaptiveDownscale::GrainSource source = host.grainSource();
+			if (source.Valid())
+				module.SetGrainSource(source);
+			return true;
 		}
 
 		// Stage 12 §2c / S8-1: the motion for holding the CNN / SSIM residual (vectors of this source
@@ -79,6 +95,7 @@ namespace AdaptiveDownscaleStage
 		failuresSeen = module.Failures();
 		requested = upscaleBlend || downscaleOn;
 		ssimMissing = false;
+		grainOffered = false;   // set below when the scalar pass is registered and the host offers the shared products
 		// SSimSuperRes takes the grain term through alpha only when the blend runs (its
 		// vp_grain_strength; 0 otherwise).
 		// One-axis: SuperRes takes the (zero) grain term through alpha whatever the setting, so it
@@ -147,7 +164,7 @@ namespace AdaptiveDownscaleStage
 			}
 			module.SetUpscale(up);
 			module.ClearGrainField();
-			SetSharedGrain(module, host);
+			grainOffered = SetSharedGrain(module, host);
 			const MotionSource m = host.motion();
 			SetResidualMotion(module, frame, m);
 			if (adaptive.grainMap && m.live && m.grainError)
@@ -204,7 +221,7 @@ namespace AdaptiveDownscaleStage
 				// at upload); the map follows NLS's own map (bundled NLS / NLS+ only; otherwise the
 				// scalar).
 				module.ClearGrainField();
-				SetSharedGrain(module, host);
+				grainOffered = SetSharedGrain(module, host);
 				const MotionSource m = host.motion();
 				SetResidualMotion(module, frame, m);
 				if (adaptive.grainMap && m.live && m.grainError)
@@ -294,10 +311,9 @@ namespace AdaptiveDownscaleStage
 				"Motion-adapted blend: idle (the blend did not run on the last frame)");
 		}
 		// X5-GRAIN-P10 (no silent fallbacks): which grain estimate the last scalar pass used.
+		// Gate cb-u1 r1 MUST 5: "shared" only when the read-back stats tag says the frame's energy came from P10 / P11.
 		if (module.Active())
-			lines.push_back(module.LastGrainFromSharedProducts() ?
-				"Adaptive grain: from the shared grain split (P10) and region statistics (P11)" :
-				"Adaptive grain: own estimate (the shared grain products are not supplied to the scaler)");
+			lines.push_back(GrainStatusLine(module.LastGrainSourceUse()));
 		const std::string td = TdProducts::StatusLine(TdProducts::Consumer::AdaptiveScaler, tdRead);
 		if (!td.empty())
 			lines.push_back(td);

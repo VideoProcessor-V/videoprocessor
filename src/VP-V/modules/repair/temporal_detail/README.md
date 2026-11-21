@@ -357,7 +357,18 @@ This module still creates its own GPU textures through the `Ensure` wrapper (its
 
 Every gate over a measured value (correlation, stronger / harm, high band, focus, uncertainty, base, evidence, referee,
 boost high-band / pull / no-reference / referee, coherence) closes explicitly when that value is NaN or infinite: the gate is
-0 and the block gets weight 0. The CPU model uses `Finite`, `GateS` and `GateInv` (TemporalDetail.h) and `EvaluateBlock` closes
-all gates when any evidence or gate value is non-finite (also with a diagnostic gate switch on); the shaders mirror this with
-`td_fin` / `td_gs` / `td_gi` (TemporalDetailShaders.h). The 1 - S gates (uncertainty, base, no-reference) would otherwise OPEN
-on NaN. Needed test (opus lane): non-finite A.N / A.F / source energies / u give hard = 0 and no non-finite output.
+0 and the block gets weight 0. The CPU model uses `Finite` (TemporalDetail.h) with `GateS` / `GateInv`, which now live in
+`core/Ramp.h` (RampMath, the U25 owner). `EvaluateBlock` closes all gates when any evidence or gate value is non-finite (also with
+a diagnostic gate switch on). The shaders mirror this with `td_fin` / `td_gs` / `td_gi` (TemporalDetailShaders.h). The 1 - S
+gates (uncertainty, base, no-reference) would otherwise OPEN on NaN.
+
+Gate r1 follow-up (2026-11-21, review-cb-u1-r1.md):
+- MUST 2: the evidence shader closes every gate on non-finite N, energies, correlation, u, base difference or any gate (also
+  the ones built from the per-block factors), exactly as `EvaluateBlock`.
+- MUST 3: the boost closes on a non-finite q or a NaN ramp, on the CPU and in the shader. A finite q = 0 under a positive peak keeps
+  its old meaning (raw = +inf, bn 1). The CPU referee `refB` closes (0) on a NaN future energy.
+- SHOULD 2: `td_fin` / `td_nan` test the IEEE bit pattern (`floatBitsToUint`), not `isnan` / `isinf`, so a compile without IEEE
+  strictness cannot fold them; `td_bgate` uses them too.
+- SHOULD 4: the gate forms are in core/Ramp. The U25 duplicate count drop from wrapping is structure, not consolidation, and is not
+  claimed.
+- Tests owed (paired sonnet writer + opus reviewer): see the lane's inbox / report.

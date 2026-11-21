@@ -35,16 +35,19 @@ namespace TemporalDetail
 	{
 		// Smoothstep, Catmull-Rom, slot-major block index; needs only the #defines.
 		constexpr const char* kCore = R"GLSL(
+// TD-NONFINITE: finite / NaN by the IEEE bit pattern (exponent all ones), not isnan / isinf, which a compile without IEEE
+// strictness may fold away (gate cb-u1 r1 SHOULD 2).
+bool td_fin(float x) { return (floatBitsToUint(x) & 0x7fffffffu) < 0x7f800000u; }
+bool td_nan(float x) { return (floatBitsToUint(x) & 0x7fffffffu) > 0x7f800000u; }
 // TemporalDetail::SanitizeBlockGate on the GPU: non-finite -> 1, thresholds to [TD_BGATE_MIN, TD_BGATE_MAX], strength to [0, 1].
 vec4 td_bgate(vec4 v)
 {
-    bvec4 bad = bvec4(isnan(v.x) || isinf(v.x), isnan(v.y) || isinf(v.y), isnan(v.z) || isinf(v.z), isnan(v.w) || isinf(v.w));
+    bvec4 bad = bvec4(!td_fin(v.x), !td_fin(v.y), !td_fin(v.z), !td_fin(v.w));
     v = mix(v, vec4(1.0), bvec4(bad));
     return vec4(clamp(v.xyz, vec3(TD_BGATE_MIN), vec3(TD_BGATE_MAX)), clamp(v.w, 0.0, 1.0));
 }
 float td_ss(float e0, float e1, float x) { float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
-// TD-NONFINITE (TemporalDetail::GateS / GateInv): non-finite evidence closes the gate (weight 0) in both the S and 1 - S forms.
-bool td_fin(float x) { return !(isnan(x) || isinf(x)); }
+// TD-NONFINITE (RampMath::GateS / GateInv): non-finite evidence closes the gate (weight 0) in both the S and 1 - S forms.
 float td_gs(float e0, float e1, float x) { return td_fin(x) ? td_ss(e0, e1, x) : 0.0; }
 float td_gi(float e0, float e1, float x) { return td_fin(x) ? 1.0 - td_ss(e0, e1, x) : 0.0; }
 vec4 td_cr(float t)
@@ -333,6 +336,13 @@ if (gl_LocalInvocationIndex == 0u) {
         float bgate = td_gi(allow, 2.0 * allow, a1.w / n);
         float ageSec = (tab.z + 1.0) / hz;
         float ageGate = clamp((max_age - ageSec) / (max_age * TD_AGE_FADE), 0.0, 1.0);
+        // TD-NONFINITE (gate cb-u1 r1 MUST 2; the CPU EvaluateBlock closing): non-finite evidence, or a non-finite gate
+        // from N or the per-block factors, closes every gate.
+        if (!(td_fin(N) && td_fin(e1c) && td_fin(e1w) && td_fin(e2c) && td_fin(e2w) && td_fin(corr) && td_fin(u) &&
+              td_fin(a1.w / n) && td_fin(corrGate) && td_fin(stronger) && td_fin(harm) && td_fin(hb) && td_fin(focus) &&
+              td_fin(unc) && td_fin(bgate))) {
+            corrGate = 0.0; stronger = 0.0; harm = 0.0; hb = 0.0; focus = 0.0; unc = 0.0; bgate = 0.0;
+        }
         float hard = unc * bgate * corrGate * harm * hb * focus;
         ea = vec4(hard, ageGate, stronger, e1w);
         eb = vec4(hb, focus, unc * bgate * corrGate, ageSec);
@@ -678,7 +688,8 @@ if (b.x < TD_BW && b.y < TD_BH) {
     // fallback boost (structure only)
     float q = m.w;
     float raw = sqrt(max(st.qPeak, q) / q) - 1.0;
-    float bn = boost_max > 0.0 ? clamp(raw / boost_max, 0.0, 1.0) : 0.0;
+    // TD-NONFINITE (gate cb-u1 r1 MUST 3): non-finite q or a NaN ramp closes the boost (GLSL clamp is undefined on NaN).
+    float bn = (boost_max > 0.0 && td_fin(q) && !td_nan(raw)) ? clamp(raw / boost_max, 0.0, 1.0) : 0.0;
     float hbP = td_gs(TD_RHO2_LO, TD_RHO2_HI, (m.y + TD_FLOOR) / (st.e2Peak + TD_FLOOR));
     float fP = td_gs(TD_PULL_LO, TD_PULL_HI, m.z / (st.fPeak + 1e-6));
     float noRef = td_gi(0.0, 0.5, weight);

@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 
+#include <VP-V/core/Ramp.h>
+
 namespace TemporalDetail
 {
 	// --- Shared constants (CPU model and shaders) ---
@@ -106,8 +108,9 @@ namespace TemporalDetail
 		return t * t * (3.0 - 2.0 * t);
 	}
 	// Gate forms with explicit non-finite closing (TD-NONFINITE): non-finite evidence x gives weight 0 in both forms.
-	inline double GateS(double e0, double e1, double x) { return Finite(x) ? Smoothstep(e0, e1, x) : 0.0; }
-	inline double GateInv(double e0, double e1, double x) { return Finite(x) ? 1.0 - Smoothstep(e0, e1, x) : 0.0; }
+	// They live in core/Ramp.h (U25 owner; gate cb-u1 r1 SHOULD 4); every caller passes ascending double edges.
+	using RampMath::GateS;
+	using RampMath::GateInv;
 
 	// Frames of a duration at the measured content rate (round, minimum 1). hz <= 0: the reference rate.
 	inline int Frames(double seconds, double hz)
