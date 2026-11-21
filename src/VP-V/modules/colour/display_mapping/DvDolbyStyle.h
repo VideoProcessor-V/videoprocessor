@@ -41,6 +41,7 @@
 #include <VP-V/modules/colour/display_mapping/DvMath.h>
 #include <VP-V/modules/colour/display_mapping/DvTrimSelection.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -117,27 +118,32 @@ namespace DvDolbyStyle
 		Curve c;
 		if (!(sMax > sMin) || !(tMax > tMin))
 			return c;   // nothing usable: identity
-		c.sMin = sMin; c.sMax = sMax; c.tMin = tMin; c.tMax = tMax;
-		if (sMax <= tMax + 1e-6 && sMin >= tMin - 1e-5)   // PQ(0 nits) is 7e-7, not 0: a tolerance
+		// GEM-006 (Gemini colour-dv-hdr SHOULD-1, as written): a dark scene (sMax < tMax) is never expanded up to the
+		// target peak when tMin > sMin fails the fit test: the upper anchor is the lower of the two peaks. libplacebo
+		// 7.360.1's pl_tone_map_params_infer already limits output_max to input_max for a function without map_inverse
+		// (this one), so MapLut is bit-identical; direct callers (ForDm, DmCurve) get the clamp.
+		const double effTMax = (std::min)(tMax, sMax);
+		c.sMin = sMin; c.sMax = sMax; c.tMin = tMin; c.tMax = effTMax;
+		if (sMax <= effTMax + 1e-6 && sMin >= tMin - 1e-5)   // PQ(0 nits) is 7e-7, not 0: a tolerance
 		{
 			c.sMid = c.tMid = sAvg > 0.0 ? sAvg : DolbyVisionTrims::Clamp(sMin + (sMax - sMin) * kDefaultMidShare, sMin, sMax);
 			return c;   // the scene fits the target: no compression, no expansion
 		}
 		const double mid = sAvg > 0.0 ? sAvg : sMin + (sMax - sMin) * kDefaultMidShare;
 		c.sMid = DolbyVisionTrims::Clamp(mid, sMin + (sMax - sMin) * kMidMinShare, sMin + (sMax - sMin) * kMidMaxShare);
-		const double proportional = tMin + (c.sMid - sMin) * (tMax - tMin) / (sMax - sMin);
-		const double ceiling = tMin + (tMax - tMin) * kMidCeiling;
+		const double proportional = tMin + (c.sMid - sMin) * (effTMax - tMin) / (sMax - sMin);
+		const double ceiling = tMin + (effTMax - tMin) * kMidCeiling;
 		const double goal = c.sMid < ceiling ? c.sMid : ceiling;
 		// The target mid moves from the chord toward the source mid (never below the chord:
 		// the curve stays concave or straight, so it has no pole in range and is monotonic).
 		c.tMid = goal > proportional ? proportional + kMidAdaptation * (goal - proportional) : proportional;
-		if (!Solve(sMin, tMin, c.sMid, c.tMid, sMax, tMax, c.c1, c.c2, c.c3) || !(c.c2 - c.c1 * c.c3 > 0.0) ||
+		if (!Solve(sMin, tMin, c.sMid, c.tMid, sMax, effTMax, c.c1, c.c2, c.c3) || !(c.c2 - c.c1 * c.c3 > 0.0) ||
 			!(1.0 + c.c3 * sMin > 0.0) || !(1.0 + c.c3 * sMax > 0.0))
 		{
 			// Degenerate: the straight chord (still hits min / max).
 			c.tMid = proportional;
 			c.c3 = 0.0;
-			c.c2 = (tMax - tMin) / (sMax - sMin);
+			c.c2 = (effTMax - tMin) / (sMax - sMin);
 			c.c1 = tMin - c.c2 * sMin;
 		}
 		c.identity = false;
