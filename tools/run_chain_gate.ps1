@@ -47,6 +47,7 @@ param(
     [string]$Dll = (Join-Path $PSScriptRoot "..\x64\Release\VideoProcessor-Test.dll"),
     [string]$Names = "ExtendedRange|SigmaDelta|Interpolator|DolbyVision|DelayGate|CombinationRunner|PipelineSkeletonTests",
     [switch]$NoSettingsChecks,   # skip the VP-V data checks (settings agent 2026-10-24)
+    [switch]$NoPatternLibTests,  # skip the pattern library stand-alone tests (run_pattern_lib_tests.ps1: cl.exe build + run, TQ-RG-C3)
     [switch]$NoPySuites,         # skip the PY lane (every Python unittest suite under tools/, TQ-RG-P1; needs the Release build at the Dll folder)
     [switch]$AllowBattery,       # GPU runs need mains power (owner rule); this overrides the check
     [switch]$Footage,            # also run the Footage category with VP_TEST_REQUIRE_FOOTAGE=1 (a missing clip fails)
@@ -110,6 +111,15 @@ if (-not $NoPySuites) {
     if ($LASTEXITCODE -ne 0) { throw "PY lane failed (tools/run_py_suites.py exit $LASTEXITCODE)" }
 }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
+# The pattern library's stand-alone self test (src/VP-V/modules/output/calibration_lut/pattern_lib/tests/PatternLibSelfTest.cpp) is
+# not a TEST_CLASS and is in no project: this CPU step builds it with cl.exe and runs it; its exit code must be 0 (TQ-RG-C3: it was
+# never compiled or run by any gate; GitHub Actions are disabled on the fork, so the local runner calls it).
+if (-not $NoPatternLibTests) {
+    $patternScript = Join-Path $PSScriptRoot "../src/VP-V/modules/output/calibration_lut/pattern_lib/run_pattern_lib_tests.ps1"
+    if (-not (Test-Path $patternScript)) { throw "pattern library test runner missing: $patternScript" }
+    & $patternScript -OutDir (Join-Path $OutDir "pattern-lib") | ForEach-Object { "$_" }
+    if ($LASTEXITCODE -ne 0) { throw "pattern library self test failed (run_pattern_lib_tests.ps1 exit $LASTEXITCODE)" }
+}
 $vstest = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter vstest.console.exe -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -like "*TestPlatform*" } | Select-Object -First 1
 if (-not $vstest) { throw "vstest.console.exe not found" }
