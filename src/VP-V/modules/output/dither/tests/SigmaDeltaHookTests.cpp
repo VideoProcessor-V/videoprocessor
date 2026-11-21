@@ -2014,7 +2014,8 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap)
 		{
-			const std::vector<float> levels = { 0.0f, 1.0f, 1.05f, -0.04f };   // black, white, WTW, BTB (limited range)
+			// Exact 10-bit limited-range integer codes: black (64), white (940), WTW (980), BTB (24).
+			const std::vector<float> levels = { 0.0f, 1.0f, 1.0f + 40.0f / 876.0f, -40.0f / 876.0f };
 			const int frames = 16;
 			const std::vector<int> exact = DwSigmaCodes(DwSigmaParams(false, "0"), levels, frames, false);
 			std::map<std::string, std::string> p = DwSigmaParams(false, "0.15");
@@ -2036,7 +2037,9 @@ namespace VideoProcessorTest
 					Assert::AreEqual(exact[g * frames], capped[g * frames + j],
 						(L"an exact code moved at total amplitude 0.5, level index " + std::to_wstring(g) + L" refresh " + std::to_wstring(j)).c_str());
 			}
-			Assert::IsTrue(asserted >= 2, L"black and white must be exact without dither");
+			Assert::AreEqual(4, asserted, L"black, white, WTW and BTB must all be exact integer codes without dither");
+			Assert::IsTrue(exact[2 * frames] > 940 && exact[3 * frames] < 64,
+				L"WTW must exceed 940 and BTB must stay below 64");
 		}
 
 		// (f) dn_extra against DitherNeed::SampleExtra: the text of DitherNeedGlsl.h in a probe compute pass (a test asserts it is the
@@ -2329,7 +2332,8 @@ if (g.y == 0 && g.x < DN_N) {
 				Assert::IsFalse(applied, L"without set_texture Apply must return false");
 				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kNoSetTexture), missingBit);
 				Assert::IsTrue(bound == base, L"without set_texture nothing is bound: the off path");
-				return;   // the unsupported leg is fully asserted above; the bound leg runs on the beta host
+				Logger::WriteMessage("SKIP-FORK-ONLY-PL0004 DitherNeedWarpHookGuardAppliesAndRestores: bound leg requires libplacebo fork pl_mpv_user_shader_set_texture\n");
+				return;   // unsupported leg asserted above; bound leg requires fork build / Beta-host TRX (--beta-trx)
 			}
 			Assert::IsTrue(applied, L"Apply must bind the product");
 			Assert::IsTrue(bound != base, L"a bound non-zero map must change the codes (the test would be vacuous)");

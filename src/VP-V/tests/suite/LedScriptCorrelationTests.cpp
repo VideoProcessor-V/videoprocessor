@@ -6,6 +6,7 @@
 #include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <VP-V/modules/drive/led_measure/LedLookahead.h>
 #include <VP-V/modules/drive/led_measure/LedMeasurement.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <algorithm>
 #include <cmath>
@@ -374,13 +375,15 @@ namespace VideoProcessorTest
 	TEST_CLASS(LedScriptCorrelationTests)
 	{
 	public:
+		BEGIN_TEST_METHOD_ATTRIBUTE(ScriptAndVpCopyAgreeOnRealClips)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(ScriptAndVpCopyAgreeOnRealClips)
 		{
-			if (Env("VP_TEST_LED_CORRELATION") != "1")
-			{
-				Logger::WriteMessage(L"LED correlation: set VP_TEST_LED_CORRELATION=1 (and VP_TEST_REAL_FOOTAGE) to run");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage,
+				"ScriptAndVpCopyAgreeOnRealClips", Env("VP_TEST_LED_CORRELATION") == "1",
+				"set VP_TEST_LED_CORRELATION=1 (and VP_TEST_REAL_FOOTAGE)"))
 				return;
-			}
 			std::string footage = Env("VP_TEST_REAL_FOOTAGE");
 			if (footage.empty()) footage = "D:\\hfr";
 			if (footage.back() != '\\') footage += "\\";
@@ -620,10 +623,21 @@ namespace VideoProcessorTest
 				<< aplDifferenceMax << " codes\n";
 			std::ofstream(outDir + "led-correlation.txt", std::ios::trunc) << report.str();
 			Logger::WriteMessage(report.str().c_str());
-			// The intent: the same highlight decisions as the whole picture gives
-			// (near-threshold frames may round differently: 8-bit screenshot, bounded read).
+			// The intent: exact rule identity on Section A, finite/populated B' and C timelines
+			// (numeric B'/C bounds require a measured reel run), and the same highlight decisions
+			// as the whole picture gives (near-threshold frames may round differently).
 			const std::string text = report.str();
-			Assert::IsTrue(highlightAgree >= 0.97 * shown.size(), std::wstring(text.begin(), text.end()).c_str());
+			const std::wstring wtext(text.begin(), text.end());
+			Assert::IsTrue(compared > 0, L"Section A: at least one script loop must be compared");
+			Assert::AreEqual(0, lightTargetDiffer, wtext.c_str());
+			Assert::AreEqual(0, contrastTargetDiffer, wtext.c_str());
+			Assert::AreEqual(0, commandsDiffer, wtext.c_str());
+			Assert::IsFalse(pacedCommands.empty(), L"Section B': paced commands must not be empty");
+			Assert::IsFalse(scriptCommands.empty(), L"Section B'/C: script commands must not be empty");
+			Assert::IsFalse(shotCommands.empty(), L"Section C: screenshot commands must not be empty");
+			Assert::IsTrue(std::isfinite(pacedVsScript.sameShare) && std::isfinite(pacedVsScript.meanLight) &&
+				std::isfinite(fedVsShots.meanLight) && std::isfinite(fedVsShots.meanContrast), wtext.c_str());
+			Assert::IsTrue(highlightAgree >= 0.97 * shown.size(), wtext.c_str());
 		}
 	};
 }
