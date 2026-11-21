@@ -1,7 +1,7 @@
 {
  "_note": "a site = one maximal run of consecutive VPV-HOOK lines (vp_footprint hook_line_set widened to any line carrying `// VPV-HOOK`) in a Bill-owned file (present at the base ref, outside src/VP-V/); matched by file + whitespace-insensitive text; the anchor (enclosing symbol, Bill lines before / after) is for the re-graft script; seam / expiry are filled by hand from refs/107-host-seams-plan.md s2; regenerate with `python -I tools/check_hook_gating.py --write-manifest` (matches sites by file and text, identical-text duplicates by anchor then nearest line then order; keeps their ids, hand-filled seam / expiry and order; never reuses a dropped id)",
  "base_ref": "a591ad3b5",
- "generated_at": "2026-11-15",
+ "generated_at": "2026-11-21",
  "sites": [
   {
    "id": "BPT.cpp-0001",
@@ -1905,34 +1905,6 @@
    ],
    "text": "ProfileSchemaHooks::WithExpressionVariables({",
    "gate": "declaration",
-   "seam": null,
-   "expiry": null
-  },
-  {
-   "id": "UPR.cpp-0001",
-   "file": "src/VideoProcessor-Lib/UnifiedProfileRuntime.cpp",
-   "start": 1226,
-   "end": 1231,
-   "anchor": {
-    "symbol": "Runtime::BuildSnapshot",
-    "before": [
-     "DisplayRuleExpression::ParseNumber(cadence, sourceHz);",
-     "}"
-    ],
-    "after": [
-     "}"
-    ]
-   },
-   "lines": [
-    "\t\t\t// VPV-HOOK",
-    "\t\t\t// P14: the VP-V look-ahead / general_rate_fixes rule lives in the control\\config module.",
-    "\t\t\tconst Vpv::ProfileQueueAdvice::Advice advice = Vpv::ProfileQueueAdvice::Compute(setting, sourceHz);",
-    "\t\t\tlookAheadQueueFrames = advice.lookAheadQueueFrames;",
-    "\t\t\tgeneralRateFixes = advice.generalRateFixes;",
-    "\t\t\t// VPV-HOOK-END"
-   ],
-   "text": "const Vpv::ProfileQueueAdvice::Advice advice = Vpv::ProfileQueueAdvice::Compute(setting, sourceHz); lookAheadQueueFrames = advice.lookAheadQueueFrames; generalRateFixes = advice.generalRateFixes;",
-   "gate": "non-pathway",
    "seam": null,
    "expiry": null
   },
@@ -6126,6 +6098,34 @@
    ],
    "text": "[](void* self) { static_cast<Impl*>(self)->dejudderPolicy.vpQueueErrorReset.store(true, std::memory_order_release); }, this } }; Vpv::Capture::HostBinding captureBinding{ this, Vpv::Capture::MakeCaptureHost(*this) }; Vpv::HostState vpv;",
    "gate": "declaration",
+   "seam": null,
+   "expiry": null
+  },
+  {
+   "id": "UPR.cpp-0002",
+   "file": "src/VideoProcessor-Lib/UnifiedProfileRuntime.cpp",
+   "start": 1226,
+   "end": 1231,
+   "anchor": {
+    "symbol": "Runtime::BuildSnapshot",
+    "before": [
+     "DisplayRuleExpression::ParseNumber(cadence, sourceHz);",
+     "}"
+    ],
+    "after": [
+     "}"
+    ]
+   },
+   "lines": [
+    "\t\t\t// VPV-HOOK",
+    "\t\t\tconst bool originalPathway = Vpv::ProfileQueueAdvice::BillQueueOnOriginal(m_configuration.get(), queue);   // P14, GEM-032/034: the VP-V queue rules live in control\\config",
+    "\t\t\tconst Vpv::ProfileQueueAdvice::Advice advice = Vpv::ProfileQueueAdvice::Compute(setting, sourceHz, originalPathway);",
+    "\t\t\tlookAheadQueueFrames = advice.lookAheadQueueFrames;",
+    "\t\t\tgeneralRateFixes = advice.generalRateFixes;",
+    "\t\t\t// VPV-HOOK-END"
+   ],
+   "text": "const bool originalPathway = Vpv::ProfileQueueAdvice::BillQueueOnOriginal(m_configuration.get(), queue); const Vpv::ProfileQueueAdvice::Advice advice = Vpv::ProfileQueueAdvice::Compute(setting, sourceHz, originalPathway); lookAheadQueueFrames = advice.lookAheadQueueFrames; generalRateFixes = advice.generalRateFixes;",
+   "gate": "non-pathway",
    "seam": null,
    "expiry": null
   }
