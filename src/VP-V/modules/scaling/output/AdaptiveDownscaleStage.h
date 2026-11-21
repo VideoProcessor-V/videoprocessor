@@ -95,6 +95,8 @@ namespace AdaptiveDownscaleStage
 		pl_rect2df sourceCrop{};       // renderImage.crop
 		pl_rect2df targetCrop{};       // target.crop
 		bool slotRuns = true;          // scaling.output's slot switch: off = libplacebo's linear light
+		double rebaseFactor = 1.0;     // Stage 12: the vertical re-base factor (libplacebo samples crop x factor)
+		double rebaseFactorX = 1.0;    // ... and the horizontal one
 	};
 
 	// fbo_float32 no longer lives here: PicturePrecision.h decides it from the setting alone (S-12BIT).
@@ -145,6 +147,10 @@ namespace AdaptiveDownscaleStage
 			// FIX-X5-CUT-P4 / C5: no scene group (the skeleton's scene product) for this frame: no cut verdict this frame (also on StatusLines()).
 			if (!base.engaged && requested && !module.CutAvailable())
 				return FallbackCatalog::Engaged("output scaling", "adaptive downscale: no cut verdict this frame (" + module.CutCause() + ")");
+			// GEM-W1B V3 MUST-6 (audit-W1B SHOULD-1): the 32 -> 16-bit float picture fallback reaches Config status and the
+			// problem report too, not only StatusLines().
+			if (!base.engaged && requested && module.HalfFloatPictureFallback())
+				return FallbackCatalog::Engaged("output scaling", "adaptive scaler: 16-bit float picture (32-bit float not available)");
 			return base;
 		}
 

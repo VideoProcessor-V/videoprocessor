@@ -340,6 +340,27 @@ namespace VideoProcessorTest
 			Assert::IsTrue(wtw >= white && wtw <= 1023, (L"White " + std::to_wstring(white) +
 				L", above white " + std::to_wstring(wtw)).c_str());
 
+			// GEM-W1B V6 MUST-2 (register 115 #17): true whiter-than-white (and true below black) leave the
+			// hook exactly as captured under the boost and any gain, above AND below 1, in both gain domains.
+			set(1.0, 1.0);
+			const int idleWtw = code(signal(1019.0)), idleWtw2 = code(signal(990.0)), idleBtb = code(signal(40.0));
+			Assert::IsTrue(idleWtw > code(signal(940.0)), L"the idle hook does not keep whiter than white");
+			for (const double domain : { 1.0, 0.0 })
+			{
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain_domain", domain));
+				for (const double g : { 0.6, 1.3, 2.5 })
+				{
+					set(g, boost);
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain_domain", domain));
+					Assert::AreEqual(idleWtw, code(signal(1019.0)), L"Whiter than white moved (1019)");
+					Assert::AreEqual(idleWtw2, code(signal(990.0)), L"Whiter than white moved (990)");
+					Assert::AreEqual(idleBtb, code(signal(40.0)), L"Below black moved");
+				}
+			}
+			set(1.0, boost);   // the gain == 1 exit with a boost: the same preservation
+			Assert::AreEqual(idleWtw, code(signal(1019.0)), L"Whiter than white moved under the boost alone");
+			Assert::AreEqual(idleBtb, code(signal(40.0)), L"Below black moved under the boost alone");
+
 			// Delta 4: light constant through LED 255 -> 100 (linear flux, 2.55x).
 			const double grey = (126.0 - 16.0) / 219.0;   // 8-bit 126 as the signal
 			for (const double b : { boost, 1.0 })

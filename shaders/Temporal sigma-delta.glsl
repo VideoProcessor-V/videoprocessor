@@ -646,10 +646,17 @@ void hook()
         if (!have && !occluded)
             have = carried(spos, x, gate_scale, amp, r);
 
+        // GEM-W1B V1 sigma-delta MUST-1: an exact code is never moved, so the carried residual does not
+        // act on it either (r = 0.3 then -0.7 dithered black 16 into 15/17). Where the snap above fired or
+        // x is exactly a whole code: no carry in, none out.
+        vec3 exact_code = vec3(equal(x, floor(x + 0.5)));
+        r = mix(r, vec3(0.0), exact_code);
+
         // First-order sigma-delta: quantise the error-corrected value, carry
         // the new residual. The dither term is not fed back.
         k = clamp(floor(x + r + d + 0.5), code_min, code_max);
         vec3 r_next = clamp(x + r - k, -resid_bound(amp), resid_bound(amp));
+        r_next = mix(r_next, vec3(0.0), exact_code);
 
         if (write_a_) {
             imageStore(RESID, spos, vec4(r_next, VALID_TAG));

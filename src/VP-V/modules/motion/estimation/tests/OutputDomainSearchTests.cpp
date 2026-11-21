@@ -4,9 +4,12 @@
 // W2-C8 step 1: the sigma-delta's own hierarchical block search (LUMAQ / LUMAC / MV passes) moved into motion.estimation
 // (fallback/OutputDomainSearchGlsl.h) and is named by the shader with one `// VP_INCLUDE motion.output_domain_search` line.
 // These CPU tests pin that the expanded shader is BYTE-IDENTICAL to Temporal sigma-delta.glsl at b5ae6eda5 (the file the
-// passes were cut from), for LF and CRLF copies, that the shader file itself keeps no search pass, and that an unknown
+// passes were cut from) plus the GEM-W1B V1 sigma-delta MUST-1 quantiser hunk (9db725b55: the exact-code carry guard,
+// +7 lines), for LF and CRLF copies, that the shader file itself keeps no search pass, and that an unknown
 // include id fails the load (no silent shader without its search). The GPU proof (dither_vectors own capture hashes) is
 // RendererCaptureHarnessTests; this golden is the text form of the same claim (rule 28: never edit it to pass).
+// Re-pinned once under a lead WAIVER (A20-GEM rule 28, audit-W1B-9db725b55 M2/M3): the W2-C8 move itself was proven against
+// the plain b5ae6eda5 text (46000 bytes, FNV-1a 64 0xd631910eb881f914) up to dbbef8c07; the quantiser changed on purpose after.
 #include "pch.h"
 #include "CppUnitTest.h"
 
@@ -23,9 +26,10 @@ namespace VideoProcessorTest
 {
 	namespace
 	{
-		// FNV-1a 64 of `git show b5ae6eda5:"shaders/Temporal sigma-delta.glsl"` (LF line ends, 46000 bytes).
-		constexpr uint64_t kOriginalFnv1a64 = 0xd631910eb881f914ull;
-		constexpr size_t kOriginalBytes = 46000;
+		// FNV-1a 64 of `git show b5ae6eda5:"shaders/Temporal sigma-delta.glsl"` with the 9db725b55 quantiser hunk
+		// (`git diff dbbef8c07 9db725b55 -- "shaders/Temporal sigma-delta.glsl"`) applied (LF line ends, 46429 bytes).
+		constexpr uint64_t kOriginalFnv1a64 = 0x0d641f7c4ab28cb3ull;
+		constexpr size_t kOriginalBytes = 46429;
 
 		uint64_t Fnv1a64(const std::string& text)
 		{
@@ -97,7 +101,7 @@ namespace VideoProcessorTest
 				}
 				const std::string lf = ToLf(source);
 				Assert::AreEqual(kOriginalBytes, lf.size(), crlf ? L"CRLF copy: size" : L"LF copy: size");
-				Assert::IsTrue(Fnv1a64(lf) == kOriginalFnv1a64, crlf ? L"CRLF copy: not the b5ae6eda5 text" : L"LF copy: not the b5ae6eda5 text");
+				Assert::IsTrue(Fnv1a64(lf) == kOriginalFnv1a64, crlf ? L"CRLF copy: not the b5ae6eda5 + MUST-1 text" : L"LF copy: not the b5ae6eda5 + MUST-1 text");
 			}
 		}
 

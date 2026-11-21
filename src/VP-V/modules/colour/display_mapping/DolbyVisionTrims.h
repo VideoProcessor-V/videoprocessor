@@ -123,7 +123,10 @@ namespace DolbyVisionTrims
 		const double c1 = 3424.0 / 4096.0, c2 = 2413.0 / 4096.0 * 32.0, c3 = 2392.0 / 4096.0 * 32.0;
 		const double e = std::pow(pq < 0.0 ? 0.0 : pq, 1.0 / m2);
 		const double num = e - c1 > 0.0 ? e - c1 : 0.0;
-		return 10000.0 * std::pow(num / (c2 - c3 * e), 1.0 / m1);
+		// GEM-W1B V1 colour-dv-hdr MUST-2: c2 - c3*e reaches 0 at pq ~1.99 (whiter than white plus saturation/hue
+		// trims); beyond it the quotient was negative and pow gave NaN. Floored (mirrored in DV trims.glsl).
+		const double den = c2 - c3 * e;
+		return 10000.0 * std::pow(num / (den > 1e-4 ? den : 1e-4), 1.0 / m1);
 	}
 
 	struct Selection

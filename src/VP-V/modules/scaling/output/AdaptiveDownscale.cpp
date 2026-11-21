@@ -459,10 +459,13 @@ float rs_slope(float y)
 
 		// Audit 2026-10-16: a picture texture (the faithful branch) in 32-bit
 		// float when wanted, else (or without a suitable rgba32f) 16-bit float.
-		bool EnsurePicture(pl_gpu gpu, pl_tex& tex, int w, int h, bool float32)
+		bool EnsurePicture(pl_gpu gpu, pl_tex& tex, int w, int h, bool float32, bool* halfFallback = nullptr)
 		{
-			return (float32 && Ensure(gpu, tex, w, h, 4, 32, true, true)) ||
-				Ensure(gpu, tex, w, h, 4, 16, true, true);
+			if (float32 && Ensure(gpu, tex, w, h, 4, 32, true, true))
+				return true;
+			if (float32 && halfFallback)
+				*halfFallback = true;   // GEM-W1B V3 MUST-6: 32-bit asked, 16-bit used: reported by the stage
+			return Ensure(gpu, tex, w, h, 4, 16, true, true);
 		}
 
 		bool Compute(pl_dispatch dispatch, const char* description, const char* header, const char* body,
@@ -836,7 +839,16 @@ float rs_slope(float y)
 		const int w = std::max(1, static_cast<int>(std::ceil(sx1)) - ox);
 		const int h = std::max(1, static_cast<int>(std::ceil(sy1)) - oy);
 		const int gx = (w + 15) / 16, gy = (h + 15) / 16;
-		if (!EnsurePicture(gpu, faithful, dw, dh, settings.float32Picture) || !Ensure(gpu, edge, w, h, 1, 16, false, true) ||
+		// GEM-W1B V3 MUST-6: fbo_float32 switched off: the 32-bit textures are kept by Ensure's ">= depth"
+		// rule, so recreate them once on the toggle (not every frame: the per-frame state rationale above).
+		if (pictureWas32 && !settings.float32Picture)
+		{
+			if (faithful) pl_tex_destroy(gpu, &faithful);
+			if (faithfulMid) pl_tex_destroy(gpu, &faithfulMid);
+		}
+		pictureWas32 = settings.float32Picture;
+		halfFloatPicture = false;
+		if (!EnsurePicture(gpu, faithful, dw, dh, settings.float32Picture, &halfFloatPicture) || !Ensure(gpu, edge, w, h, 1, 16, false, true) ||
 			!Ensure(gpu, partial, gx, gy, 4, 32, false, false) || !Ensure(gpu, state, 1, 1, 4, 32, false, false))
 		{
 			++failures;
@@ -860,7 +872,7 @@ float rs_slope(float y)
 		const bool unequal = std::max(ratioX, ratioY) > 1.1 * std::max(1e-6, std::min(ratioX, ratioY));
 		if (settings.faithfulOrtho || (settings.faithfulAuto && unequal))
 		{
-			if (!EnsurePicture(gpu, faithfulMid, w, dh, settings.float32Picture))
+			if (!EnsurePicture(gpu, faithfulMid, w, dh, settings.float32Picture, &halfFloatPicture))
 			{
 				++failures;
 				return unchanged;
@@ -1232,7 +1244,10 @@ float rs_slope(float y)
 		// A new size recreated the textures: nothing previous to read (audit 2026-10-16: an
 		// undefined texture was mixed in for one frame after a resize / zoom / crop change).
 		if (w != residualW || h != residualH)
+		{
 			readIndex = -1;
+			residualPrevValid = false;   // GEM-W1B V3 MUST-2: both textures were recreated; a later repeat has no previous
+		}
 		residualW = w;
 		residualH = h;
 		const float prevValid = stabilise && readIndex >= 0 ? 1.0f : 0.0f;
@@ -1324,7 +1339,7 @@ float rs_slope(float y)
 		{
 			if (!repeat)
 			{
-				residualPrevValid = consecutive;
+				residualPrevValid = consecutive && readIndex >= 0;   // GEM-W1B V3 MUST-2: a resize frame wrote no previous
 				residualIndex = writeIndex;
 				residualSequence = sequence;
 			}

@@ -369,7 +369,9 @@ float pq_from_nits(float nits)
 float nits_from_pq(float pq)
 {
     float e = pow(max(pq, 0.0), 1.0 / PQ_M2);
-    return 10000.0 * pow(max(e - PQ_C1, 0.0) / (PQ_C2 - PQ_C3 * e), 1.0 / PQ_M1);
+    // GEM-W1B V1 colour-dv-hdr MUST-2: the denominator floored (DolbyVisionTrims::NitsFromPq mirrors this).
+    float den = PQ_C2 - PQ_C3 * e;
+    return 10000.0 * pow(max(e - PQ_C1, 0.0) / (den > 1e-4 ? den : 1e-4), 1.0 / PQ_M1);
 }
 
 float to_nits(float v)
@@ -529,6 +531,12 @@ vec3 dv_from_ictcp(vec3 ictcp)
                        vec3(dv_ilms20, dv_ilms21, dv_ilms22), lms) * 10000.0;
 }
 
+// A channel below the tolerance, or not finite (negated comparison), is out of gamut (GEM-W1B V1 MUST-2).
+bool dv_out_of_gamut(vec3 o, float tolerance)
+{
+    return !(o.r >= tolerance) || !(o.g >= tolerance) || !(o.b >= tolerance);
+}
+
 vec4 dv_hook_ictcp(vec4 color)
 {
     vec3 L = vec3(to_nits(color.r), to_nits(color.g), to_nits(color.b));
@@ -579,14 +587,23 @@ vec4 dv_hook_ictcp(vec4 color)
     float k = gain;
     vec3 outn = dv_from_ictcp(vec3(I2, ct * k, cp * k));
     float tolerance = -1e-4 * (pos.r + pos.g + pos.b);   // DvDolbyStyle::kBelowTolerance
-    for (int iter = 0; iter < 12; iter++) {
-        bool below = false;
-        for (int c = 0; c < 3; c++)
-            below = below || outn[c] < tolerance;
-        if (!below)
-            break;
-        k *= 0.5;
-        outn = iter == 11 ? dv_from_ictcp(vec3(I2, 0.0, 0.0)) : dv_from_ictcp(vec3(I2, ct * k, cp * k));
+    // GEM-W1B V1 colour-dv-hdr MUST-1 / MUST-2: bisection on k in [0, gain] (10 steps) keeping the last in-gamut
+    // result, the grey the floor; non-finite counts as out of gamut. Bit-for-bit DvDolbyStyle::ApplyPixelIctcp.
+    if (dv_out_of_gamut(outn, tolerance)) {
+        float lo = 0.0;
+        float hi = k;
+        vec3 best = dv_from_ictcp(vec3(I2, 0.0, 0.0));
+        for (int iter = 0; iter < 10; iter++) {
+            float mid = 0.5 * (lo + hi);
+            vec3 cand = dv_from_ictcp(vec3(I2, ct * mid, cp * mid));
+            if (!dv_out_of_gamut(cand, tolerance)) {
+                lo = mid;
+                best = cand;
+            } else {
+                hi = mid;
+            }
+        }
+        outn = best;
     }
     outn = max(outn, vec3(0.0)) + carry;
     color.rgb = vec3(from_nits(outn.r), from_nits(outn.g), from_nits(outn.b));

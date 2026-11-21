@@ -382,6 +382,8 @@ namespace AdaptiveDownscale
 		unsigned long long CutLateSnaps() const { return cutLateSnaps; }
 		// The APL of the last asked frame was not read (the P4 Acquire failed): why. Empty when read. Not a cut fault.
 		const std::string& AplCause() const { return aplCause; }
+		// GEM-W1B V3 MUST-6: the faithful picture was asked in 32-bit float and the GPU gave 16-bit (visible, never silent).
+		bool HalfFloatPictureFallback() const { return halfFloatPicture; }
 		// The SSIM shader's condition for this frame: the source crop is
 		// taller than the destination rectangle.
 		void SetSourceDownscales(bool value) { sourceDownscales = value; }
@@ -453,6 +455,8 @@ namespace AdaptiveDownscale
 		uint64_t cutResolvedPrevious = 0;
 		bool cutResolvedValue = false;
 		bool cutAvailable = true;
+		bool halfFloatPicture = false;      // see HalfFloatPictureFallback()
+		bool pictureWas32 = true;           // the last frame's float32Picture: a switch off recreates the picture textures once
 		std::string cutCause;
 		unsigned long long cutUnavailableFrames = 0;
 		unsigned long long cutFadeFrames = 0;
