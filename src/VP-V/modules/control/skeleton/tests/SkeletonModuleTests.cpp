@@ -17,6 +17,7 @@
 #include <windows.h>
 #include "CppUnitTest.h"
 
+#include <VP-V/core/ComputeOnce.h>
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/core/hub/HostSlots.h>
@@ -2248,6 +2249,84 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(refLate.known, (L"the reference answers the late frame; " + WhyOf(refLate)).c_str());
 			Assert::AreEqual(refLate.fade, lateGroup.fade, L"the walked run's fade equals the render-order reference");
 			Assert::AreEqual(double(refLate.fadeKeep), double(lateGroup.fadeKeep), 1e-6, L"and so does the published fadeKeep");
+		}
+
+		// C5-SKREDS MUST-1 (gate R4 on a23f8c3b3; one computation per frame, consolidation rule): a walk front N + kAheadCeiling is beyond
+		// the lane's slots, so P4 and (through the Acquire chain) P1 of that frame are made by the owner fill in the memo's spot. When the
+		// frame later fits the lane, the lane WORKER claims it: it must ADOPT that publication (copy, counted workerAdopted), never compute
+		// P1 / P4 of the frame a second time. The worker law is the real one, stepped on this thread (threads off: deterministic, no seal
+		// can cancel a running job, so the compute-once detector's per-frame count is exact). Every lane compute path notes "lane:<id>"
+		// (worker, seal live, ahead claim, owner form) and the kernels note U3 (P1) / U6 (P4): a duplicate frame in any of those rows is a
+		// second computation. Not vacuous: the worker made frames itself, the memo made walk fronts, and the worker met and adopted them.
+		TEST_METHOD(AWalkFrontTheMemoMadeIsAdoptedByTheLaneWorkerNotComputedTwice)
+		{
+			constexpr uint64_t kC = VpSkeleton::kAheadCeiling;
+			constexpr int64_t kLast = 24;
+			ComputeOnce::SetEnabled(true);
+			ComputeOnce::Global().Reset();
+			struct DetectorOff
+			{
+				~DetectorOff()
+				{
+					ComputeOnce::Global().Reset();
+					ComputeOnce::SetEnabled(false);
+				}
+			} detectorOff;
+			Rig rig(Lane("on"));
+			VpSkeleton::CardProfile card;   // no render device in a unit test: a card with room for the lane (the CPU products are laned)
+			card.vramBudgetBytes = 1ull << 30;
+			card.systemRamFreeBytes = 1ull << 30;
+			card.uploadGBps = 10.0;
+			rig.sk.SetCardForTesting(card);
+			rig.sk.SetWorkerThreadsForTesting(false);   // the worker law is stepped below
+			FeedAheadWindow(rig, uint16_t(kC));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			uint64_t delivered = 0;
+			for (int64_t s = 1; s <= kLast; ++s)
+			{
+				rig.Ingress(s);
+				while (delivered < uint64_t(s) + kC + 1)
+					rig.Deliver(++delivered);
+				rig.Begin(s);
+				PresentFacts(rig, s);
+				VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+				Assert::IsNotNull(lane);
+				int steps = 0;
+				while (lane->StepWorker(VpSkeleton::Backend::Cpu, 0) && ++steps < 10000)
+				{
+				}
+				Assert::IsTrue(steps < 10000, L"the lane worker went idle");
+				WalkP4(rig, uint64_t(s) + kC);   // the walk front: the memo's owner fill when the lane cannot hold it
+				rig.After(s);
+			}
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			Assert::IsNotNull(lane);
+			const std::shared_ptr<VpSkeleton::LaneState> st = lane->State();
+			Assert::IsTrue(st != nullptr && st->runner != nullptr, L"the lane state");
+			const VpSkeleton::LaneProductCounters& c1 = st->runner->Counters(VpSkeleton::kP1HalfLuma);
+			const VpSkeleton::LaneProductCounters& c4 = st->runner->Counters(VpSkeleton::kP4SourceStats);
+			Assert::IsTrue(c1.published.load() > c1.workerAdopted.load() && c4.published.load() > c4.workerAdopted.load(),
+				L"the lane worker computed frames itself (not vacuous)");
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			Assert::IsTrue(memo->CountersOf(VpSkeleton::kP4SourceStats).filledAtRead > 0 && memo->CountersOf(VpSkeleton::kP1HalfLuma).filledAtRead > 0,
+				L"the owner fill made walk fronts the lane could not hold (not vacuous)");
+			Assert::IsTrue(c1.workerAdopted.load() > 0 && c4.workerAdopted.load() > 0, L"the worker met frames the owner fill had made, and adopted them");
+			Assert::IsTrue(memo->CountersOf(VpSkeleton::kP1HalfLuma).workerAdopted > 0 && memo->CountersOf(VpSkeleton::kP4SourceStats).workerAdopted > 0,
+				L"counted in the memo's ledger too");
+			const std::string units[] = { "lane:" + std::to_string(int(VpSkeleton::kP1HalfLuma)), "lane:" + std::to_string(int(VpSkeleton::kP4SourceStats)),
+				"U3", "U6" };
+			int seen = 0;
+			for (const ComputeOnce::UnitRow& r : ComputeOnce::Global().Rows())
+				for (const std::string& u : units)
+					if (r.unit == u)
+					{
+						++seen;
+						Assert::IsTrue(r.frames > 0, L"the detector saw the unit's frames");
+						Assert::AreEqual(uint64_t(0), r.dupFrames, (L"one computation per frame: " + std::wstring(u.begin(), u.end())).c_str());
+					}
+			Assert::IsTrue(seen >= 4, L"every lane compute row of P1 and P4 was seen");
 		}
 
 		// GF-P2a MUST-8 (order): one thread fills frame s (provisional: s + 1 not judged yet) while the render thread fills s + 1, which
