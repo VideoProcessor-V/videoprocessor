@@ -1869,6 +1869,60 @@ namespace SkeletonModuleTestsNs
 			rig.Deliver(7);
 		}
 
+		// GF-P2a RIG (UNION RED 4; compiles in the union only: ConsumerDecl::aheadDepth comes from GF-P1). The QKP-B queue window is derived
+		// from the fed terms at every Begin. These rigs need the window to hold what the test asks for:
+		//  - the presented frame, each frame (AfterPresent: the present-lag term),
+		//  - the three queue terms through the publish API (render-ahead, lane lead, look-ahead walk), the lane lead left at the default 1
+		//    so the lane still publishes nothing ahead by itself (an ahead record is made only by a reader's ask),
+		//  - an ACTIVE ahead consumer: an external demand whose ConsumerDecl::aheadDepth reaches past the frames asked ahead.
+		// Until a term is fed the status line "skeleton_queue_window: not fed" shows it (tests that look at the status feed all of them).
+		static void PresentFacts(Rig& rig, int64_t seq)
+		{
+			RE::FrameContext c;
+			c.host = rig.Host();
+			c.seq = seq;
+			c.phase = RE::FramePhase::AfterPresent;
+			RE::PresentContext pc;
+			pc.kind = RE::AfterPresentKind::NoExtras;
+			rig.sk.OnAfterPresent(c, pc);
+		}
+
+		static void FeedQueueTerms(Rig& rig)
+		{
+			rig.sk.PublishRenderAhead(1.0);
+			rig.sk.PublishLaneLead(1.0);
+			rig.sk.PublishLookAheadWalk(8.0);
+		}
+
+		static void DeclareAheadConsumer(Rig& rig, uint8_t aheadDepth)
+		{
+			VpSkeleton::ConsumerDecl d;
+			d.id = 0x0610;
+			d.name = "ahead scene walk (test)";
+			VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 0);
+			VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 1);
+			d.aheadDepth = aheadDepth;
+			rig.sk.SetExternalDemand(rig.Host(), &rig, std::vector<VpSkeleton::ConsumerDecl>(1, d), std::vector<VpSkeleton::ProductId>());
+		}
+
+		// QueueTwoAheadOfTheSeal with the queue window fed (see above): the same frames, the same arrivals.
+		static void QueueTwoAheadOfTheSealFed(Rig& rig)
+		{
+			rig.ResyncApply("on");
+			FeedQueueTerms(rig);
+			DeclareAheadConsumer(rig, 6);
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+			{
+				rig.Frame(s);
+				PresentFacts(rig, s);
+			}
+			rig.Ingress(4);
+			rig.Deliver(5);
+			rig.Ingress(5);
+			rig.Deliver(6);
+		}
+
 		// FIX-LED-CUT-U7 / C-1 (get-or-compute-and-publish, OD 11-12 17:26 / 11-13 13:34): the scene of a frame AHEAD of the seal is
 		// answered NOW (its two P4 records acquired through the renderer's memo), written into the frame's record, and the later seal
 		// finds it there (computed once: alreadyPresent + 1, published + 0) with the verdict the seal-time classification gives.
@@ -1879,7 +1933,7 @@ namespace SkeletonModuleTestsNs
 			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
 			Tap::SetStore(rig.Host(), &store);
 			SceneStoreGuard guard(rig.Host());
-			QueueTwoAheadOfTheSeal(rig);
+			QueueTwoAheadOfTheSealFed(rig);   // GF-P2a RIG: window fed
 			store.Begin(SceneTestId(6), FrameAnalysis::kScene);   // the record the source tap opens at ARRIVAL
 			const Vpv::Skeleton::SceneCounters before = rig.sk.SceneCountersOf(rig.Host());
 			const Vpv::Skeleton::SceneAnswer ahead = rig.sk.SceneOf(rig.Host(), 6);
