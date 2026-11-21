@@ -138,7 +138,7 @@ libplacebo (hooks, dispatch, filters), `pch.h`, `VP-V/modules/scaling/output/Nls
 
 ### Test it standalone
 
-- CPU: `OutputGlueStagesTests` methods `Adaptive*` and `DownscaleLight*`; `PostMergeAudit20261017Tests`; `EdgeMapStageOrdinalTests` (tests/EdgeMapStageOrdinalTests.cpp).
+- CPU: `OutputGlueStagesTests` methods `Adaptive*` and `DownscaleLight*`; `PostMergeAudit20261017Tests`; `EdgeMapStageOrdinalTests` (tests/EdgeMapStageOrdinalTests.cpp); `MeasureEdgeMapTests` (tests/MeasureEdgeMapTests.cpp: the X5 key through the owner's Acquire, the visible Unavailable, one compute per (seq, picture) and the ahead cost per fill, the no-memo dispatch).
 - GPU (WARP unless `VP_TEST_GPU=hardware`; only when allowed): `LibplaceboLutParserTests` Stage 8 methods, `OutputGlueStagesGpuTests.AdaptiveUpscaleStageRendersTodaysCodes` (Category GpuHardware).
 
 `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~OutputGlueStagesTests|FullyQualifiedName~PostMergeAudit20261017Tests" /Logger:"trx;LogFileName=scaling_output.trx"`
