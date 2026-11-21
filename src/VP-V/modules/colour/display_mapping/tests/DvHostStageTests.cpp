@@ -19,6 +19,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -103,6 +105,20 @@ namespace Tests
 				[](const pl_hook*& hook) { hook = nullptr; } };
 		}
 
+		// The value of a named shader parameter, or nullptr when the list does not carry it.
+		inline const double* Param(const DvHostStage::ParameterList& list, const char* name)
+		{
+			for (const auto& entry : list)
+				if (std::strcmp(entry.first, name) == 0)
+					return &entry.second;
+			return nullptr;
+		}
+		inline double ParamOr(const DvHostStage::ParameterList& list, const char* name, double missing)
+		{
+			const double* v = Param(list, name);
+			return v ? *v : missing;
+		}
+
 		// One render frame as the host runs it (group D): DvHostStage phase 1, the S2 output
 		// segment collecting (the ONE emitter of the trims hook), DvHostStage phase 2.
 		struct Run
@@ -112,6 +128,9 @@ namespace Tests
 			std::string curve = "bt2390";
 			std::string folder;
 			bool colourRuns = true;
+			int trimsSlot = -1;                          // -1: the dm_trims slot follows colourRuns; 0 / 1: forced off / on (GEM-004)
+			DvHostStage::ParameterList lastParams;       // the trims parameters phase 1 handed to the segment this frame
+			bool lastTrimsWanted = false;
 			VideoState state;
 			size_t trimsHooks = 0;                       // the segment's count this frame
 			std::vector<PipelineSlots::Id> tags;         // the slots the segment tagged this frame
@@ -123,14 +142,17 @@ namespace Tests
 				OutputSegments::ColourFrame colourFrame;
 				std::vector<const pl_hook*> user;
 				colourFrame.userPreOutput = &user;
-				stage.PrepareToneAndTrims({ mode, trims, curve, folder, colourRuns, image, target, dm, 2.4, state, nullptr, 1, colourRuns },
+				const bool trimsRuns = trimsSlot < 0 ? colourRuns : trimsSlot != 0;
+				stage.PrepareToneAndTrims({ mode, trims, curve, folder, colourRuns, image, target, dm, 2.4, state, nullptr, 1, trimsRuns },
 					params, templates, colourFrame.dvTrims, colourFrame.dv);
+				lastParams = colourFrame.dv;
+				lastTrimsWanted = colourFrame.dvTrims;
 				CustomHookChain::Chain tone(NoShaders()), comp(NoShaders());
 				LedDrive::MeasurementHook measure;
 				CalibrationLutStage::Hook lut;
 				OutputSegments::OutputColourSegment s2(tone, stage.TrimsHook(), measure, comp, lut);
 				PipelineSlots::Registry registry;
-				registry.SetEnabled(PipelineSlots::Id::ColourDmTrims, colourRuns);
+				registry.SetEnabled(PipelineSlots::Id::ColourDmTrims, trimsRuns);
 				registry.SetEnabled(PipelineSlots::Id::ColourDmCurve, colourRuns);
 				tags.clear();
 				const OutputSegments::ColourCounts counts = s2.Collect(colourFrame, registry, hooks,
@@ -433,6 +455,47 @@ namespace Tests
 				Assert::IsTrue(hooks.empty() && run.tags.empty());
 				Assert::IsTrue(reg.engaged.empty(), L"slot off: nothing listed");
 			}
+		}
+
+		// GEM-004 part 2 ([C]:97(b), AMEND: the dm_trims slot, not the colour slot): dv_trims on, a DV picture with DM, a
+		// calibration LUT, the colour slot ON but the colour.dm_trims slot OFF: the trims are OFF (F-12), not a fallback.
+		// Before the fix the trims engaged "Dolby Vision trims" (off with a calibration LUT) whatever the trims slot said.
+		TEST_METHOD(TrimsSlotOffWithALutIsOffNotAFallback)
+		{
+			using namespace DvHost;
+			Registry reg;
+			DvHostStage stage(NoShaders(), reg.Engage(), reg.Release());
+			Run run;
+			run.trims = true;
+			run.colourRuns = true;
+			run.trimsSlot = 0;   // colour.dm_trims off
+			pl_color_map_params params = pl_color_map_default_params;
+			std::vector<const pl_hook*> hooks;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			pl_frame lutTarget = Target(PL_COLOR_TRC_PQ, 100.0f);
+			static const int dummy = 0;
+			lutTarget.lut = reinterpret_cast<const pl_custom_lut*>(&dummy);
+			for (int k = 0; k < 3; ++k)
+				run.Frame(stage, image, lutTarget, &dm, params, hooks);
+			Assert::IsFalse(reg.Has("Dolby Vision trims"), L"trims slot off + LUT: off, not listed as a fallback");
+			Assert::AreEqual(std::string("DV trims: off"), stage.TrimsStatus());
+			Assert::IsTrue(hooks.empty());
+			// The same without a LUT: still off, no shader-missing entry either.
+			hooks.clear();
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsFalse(reg.Has("Dolby Vision trims"), L"trims slot off, no LUT: nothing listed");
+			Assert::AreEqual(std::string("DV trims: off"), stage.TrimsStatus());
+			Assert::IsFalse(run.lastTrimsWanted, L"no trims parameters for the segment");
+			// Control: the slot back on, the same LUT: the fallback is listed with its reason.
+			run.trimsSlot = 1;
+			run.Frame(stage, image, lutTarget, &dm, params, hooks);
+			Assert::IsTrue(reg.Has("Dolby Vision trims"));
+			Assert::AreEqual(std::string("off with a calibration LUT (it would act after the LUT)"), reg.engaged["Dolby Vision trims"]);
+			// And off again: released.
+			run.trimsSlot = 0;
+			run.Frame(stage, image, lutTarget, &dm, params, hooks);
+			Assert::IsFalse(reg.Has("Dolby Vision trims"));
 		}
 
 		TEST_METHOD(GpuUnpackSessionLogsOnceAndSwitchesTheSessionToTheCpuOnce)
