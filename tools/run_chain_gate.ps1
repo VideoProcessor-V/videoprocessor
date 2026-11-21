@@ -16,8 +16,18 @@ real GPU (-GpuWarp here).
   run_chain_gate.ps1 -LoopTier                        # + the unattended loop tier when the DeckLink rig is present
   run_chain_gate.ps1 -PrintFilter                     # show the generated /TestCaseFilter and stop
 
+  run_chain_gate.ps1 -Footage -Corpus -Bench          # + the dedicated jobs (TQ-X2), see below
+
   run_chain_gate.ps1 -OnScreen                        # + the opt-in on-screen tests, windowed
   run_chain_gate.ps1 -OnScreen -Fullscreen both       # windowed, then fullscreen (reported apart)
+
+Dedicated jobs (TQ-X2): the Footage, Corpus and Bench test categories are in no other lane (not the CPU run,
+not the default GPU set, not WARP). -Footage / -Corpus / -Bench add that category's tests and set its environment from
+tools/gen_test_filters.py --job-env (VP_TEST_REQUIRE_FOOTAGE=1, VP_TEST_REQUIRE_CORPUS=1, VP_TEST_BENCH=1 plus
+VP_TEST_REQUIRE_BENCH=1), so a missing clip or corpus, or a bench not opted in, FAILS the test. A skipped test
+passes natively, so the gate also fails on the SKIP-NO-FOOTAGE / SKIP-NO-CORPUS / SKIP-OPT-IN markers of a
+requested category. The same selection as a queue line: filter from gen_test_filters.py --gpu --categories <Kind>,
+env= field from --job-env <Kind>.
 
 Reads the TRX (vstest prints no summary for some hosts here) and fails (exit 1) when any test
 not on the KNOWN FAILURES allow-list (below, with reasons) failed or did not run, when no test ran, or when a SKIP-NO-GPU marker appears (a hardware test
@@ -38,6 +48,9 @@ param(
     [string]$Names = "ExtendedRange|SigmaDelta|Interpolator|DolbyVision|DelayGate|CombinationRunner|PipelineSkeletonTests",
     [switch]$NoSettingsChecks,   # skip the VP-V data checks (settings agent 2026-10-24)
     [switch]$AllowBattery,       # GPU runs need mains power (owner rule); this overrides the check
+    [switch]$Footage,            # also run the Footage category with VP_TEST_REQUIRE_FOOTAGE=1 (a missing clip fails)
+    [switch]$Corpus,             # also run the Corpus category with VP_TEST_REQUIRE_CORPUS=1 (a missing corpus fails)
+    [switch]$Bench,              # also run the Bench category opted in (VP_TEST_BENCH=1) with VP_TEST_REQUIRE_BENCH=1
     [switch]$NoHarness,          # skip the generated hardware set (harness and the other GpuHardware/GpuOnScreen tests)
     [switch]$GpuWarp,            # also run every GpuWarp test (manifest set) on the hardware GPU (VP_TEST_GPU=hardware)
     [switch]$PrintFilter,        # print the /TestCaseFilter and exit (no run, no power or vstest checks)
@@ -59,10 +72,15 @@ $ErrorActionPreference = "Stop"
 $clauses = @()
 if (-not $NoHarness) { $clauses += Get-VpTestFilter -Kind gpu -Categories GpuHardware, GpuOnScreen }
 if ($GpuWarp) { $clauses += Get-VpTestFilter -Kind gpuwarp }
+$dedicatedJobs = @()
+if ($Footage) { $dedicatedJobs += 'Footage' }
+if ($Corpus) { $dedicatedJobs += 'Corpus' }
+if ($Bench) { $dedicatedJobs += 'Bench' }
+foreach ($job in $dedicatedJobs) { $clauses += Get-VpTestFilter -Kind gpu -Categories $job }
 foreach ($name in ($Names -split '\|')) { if ($name) { $clauses += "FullyQualifiedName~$name" } }
 if ($clauses.Count -eq 0) { throw "nothing selected" }
 $filter = $clauses -join '|'
-if ($PrintFilter) { $filter; exit 0 }
+if ($PrintFilter) { $filter; foreach ($job in $dedicatedJobs) { "env $($job): " + (& python -I (Join-Path $PSScriptRoot "gen_test_filters.py") --job-env $job) }; exit 0 }
 # GPU tests only on mains power (BatteryStatus 2 = on AC; no battery = a desktop).
 $battery = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue
 if ($battery -and $battery.BatteryStatus -ne 2 -and -not $AllowBattery) { throw "on battery: the GPU chain gate runs on mains only (-AllowBattery overrides)" }
@@ -88,7 +106,7 @@ if (-not $vstest) { throw "vstest.console.exe not found" }
 $trx = Join-Path $OutDir "chain-gate.trx"
 Remove-Item $trx -ErrorAction SilentlyContinue
 $saved = @{}
-foreach ($k in "VP_TEST_GPU", "VP_TEST_ADAPTER", "VP_TEST_REQUIRE_GPU", "VP_TEST_REQUIRE_HARDWARE", "VP_TEST_HARNESS_ONSCREEN", "VP_TEST_HARNESS_FULLSCREEN", "VP_DELAY_GATE_STRICT", "VP_TEST_BASELINE_RENDERER_DLL", "VP_TEST_FILTER_CLIP") {
+foreach ($k in "VP_TEST_GPU", "VP_TEST_ADAPTER", "VP_TEST_REQUIRE_GPU", "VP_TEST_REQUIRE_HARDWARE", "VP_TEST_HARNESS_ONSCREEN", "VP_TEST_HARNESS_FULLSCREEN", "VP_DELAY_GATE_STRICT", "VP_TEST_BASELINE_RENDERER_DLL", "VP_TEST_FILTER_CLIP", "VP_TEST_REQUIRE_FOOTAGE", "VP_TEST_REQUIRE_CORPUS", "VP_TEST_REQUIRE_BENCH", "VP_TEST_BENCH") {
     $saved[$k] = [Environment]::GetEnvironmentVariable($k)
 }
 # WARNING when the primary display is not on the render adapter: timing tests are then invalid (2026-11-01:
@@ -115,6 +133,15 @@ if ($BaselineRendererDll) { $env:VP_TEST_BASELINE_RENDERER_DLL = (Resolve-Path $
 # Fail closed on the owner's machine: a test whose hardware precondition (desktop size, CPU class,
 # hardware D3D11 renderer) is missing fails instead of logging SKIP-NO-HARDWARE.
 $env:VP_TEST_REQUIRE_HARDWARE = "1"
+# The dedicated jobs' environment comes from the generator (one source with the queue-line env= field).
+foreach ($job in $dedicatedJobs) {
+    $jobEnv = (& python -I (Join-Path $PSScriptRoot "gen_test_filters.py") --job-env $job | ForEach-Object { "$_" }) -join ''
+    if ($LASTEXITCODE -ne 0 -or -not $jobEnv) { throw "gen_test_filters.py --job-env $job failed" }
+    foreach ($pair in ($jobEnv.Trim() -split ';')) {
+        $kv = $pair -split '=', 2
+        [Environment]::SetEnvironmentVariable($kv[0], $kv[1])
+    }
+}
 if ($OnScreen) { $env:VP_TEST_HARNESS_ONSCREEN = "1" }
 if ($Fullscreen) { $env:VP_TEST_HARNESS_FULLSCREEN = $Fullscreen }
 try {
@@ -192,12 +219,18 @@ $markers | Where-Object { $m = $_; $noGpu -notcontains $m } | ForEach-Object {
     $isNotRun = @($notRunKinds | Where-Object { $m -like $_ }).Count -gt 0
     if ($isNotRun) { "  evidence not run (input absent / display or opt-in limited): $m" } else { "  unclassified skip marker (not run, review): $m" }
 }
+# A requested dedicated job whose test skipped produced no evidence: the markers fail the gate (the tests themselves
+# fail under the REQUIRE env; this catches a bespoke log-and-return that bypasses RequireOrSkip).
+$dedicatedMarkers = @{ Footage = "SKIP-NO-FOOTAGE *"; Corpus = "SKIP-NO-CORPUS *"; Bench = "SKIP-OPT-IN *" }
+$noDedicated = @()
+foreach ($job in $dedicatedJobs) { $pat = $dedicatedMarkers[$job]; $noDedicated += @($markers | Where-Object { $_ -like $pat }) }
+$noDedicated | ForEach-Object { "  dedicated job evidence missing (skipped, fails the gate): $_" }
 $noTiming = @()
 if ($onScreenRequested) {
     $noTiming = @($markers | Where-Object { $_ -like "SKIP-NO-DISPLAY-TIMING *" })
     $noTiming | ForEach-Object { "  on-screen run without display timing (inconclusive, fails the gate): $_" }
 }
-if ($results.Count -eq 0 -or $bad.Count -gt 0 -or $noGpu.Count -gt 0 -or $noTiming.Count -gt 0) { "Chain gate: FAILED"; exit 1 }
+if ($results.Count -eq 0 -or $bad.Count -gt 0 -or $noGpu.Count -gt 0 -or $noDedicated.Count -gt 0 -or $noTiming.Count -gt 0) { "Chain gate: FAILED"; exit 1 }
 if ($LoopTier) {
     # The loop tier holds D:\codex\GPU-QUIET itself and runs unattended; SKIP-NO-RIG (exit 0) is reported, not failed.
     & (Join-Path $PSScriptRoot "looprig\run_loop_tier.ps1") -Mode $LoopTierMode -AllowBattery:$AllowBattery -BuildDir (Split-Path -Parent $Dll) | ForEach-Object { "$_" }
