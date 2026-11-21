@@ -8,6 +8,14 @@ BEGIN_TEST_METHOD_ATTRIBUTE(Name) ... TEST_METHOD_ATTRIBUTE(L"Category", L"X") .
 the method. A method "uses the GPU" when its body references a GPU fixture (the patterns below) or
 its name has the word "gpu" (any case). The manifest gives the category of tests that carry no attribute, so a
 source file (Bill's LibplaceboLutParserTests.cpp) need not be edited.
+
+Rules for test authors:
+- A test-method name must not be ALL CAPS (^[A-Z][A-Z0-9_]*$, e.g. TEST_METHOD(HDR)): the scan raises
+  ScanError, gen_test_filters exits 2 with no filter and check_test_categories FAILs. Such a name looks
+  like a macro parameter, and vstest's Name~ / Name!~ is a case-insensitive substring match, so a clause
+  on it would select or drop every test whose name holds it. Use mixed case (HdrOutputStaysTen).
+- Test macros are found in code only: comments and string / character literals are blanked first, so a
+  commented-out TEST_METHOD or a wrapper call inside a comment or string is not a test.
 """
 import json
 import os
@@ -84,6 +92,63 @@ def _split_args(text, start):
     return None
 
 
+def blank_comments_and_strings(text):
+    """text with every // and /* */ comment and every string / character literal (incl. raw R"d(...)d")
+    blanked to spaces, same length and line breaks. Used only to FIND test macros (TEST_CLASS, TEST_METHOD,
+    BEGIN_TEST_METHOD_ATTRIBUTE, wrapper calls), so a comment such as "D8_ROW_METHOD(Foo, ...)" or a string
+    holding "TEST_METHOD(X)" adds no phantom test; attribute values and GPU patterns are still read from the
+    unblanked text. A ' between digits (C++14 digit separator, 1'000) is not a literal."""
+    out = list(text)
+    n, i = len(text), 0
+
+    def blank(a, b):
+        for k in range(a, min(b, n)):
+            if out[k] not in '\r\n':
+                out[k] = ' '
+
+    while i < n:
+        ch = text[i]
+        if ch == '/' and text.startswith('//', i):
+            j = text.find('\n', i)
+            j = n if j < 0 else j
+            blank(i, j)
+            i = j
+        elif ch == '/' and text.startswith('/*', i):
+            j = text.find('*/', i + 2)
+            j = n if j < 0 else j + 2
+            blank(i, j)
+            i = j
+        elif ch == '"':
+            raw = re.match(r'R"([^ ()\\\t\r\n]{0,16})\(', text[i - 1:i + 19]) if i > 0 and text[i - 1] == 'R' else None
+            if raw:
+                close = ')' + raw.group(1) + '"'
+                j = text.find(close, i)
+                j = n if j < 0 else j + len(close)
+            else:
+                j = i + 1
+                while j < n and text[j] != '"' and text[j] != '\n':
+                    j += 2 if text[j] == '\\' else 1
+                j = min(j + 1, n)
+            blank(i - 1 if raw else i, j)
+            i = j
+        elif ch == "'":
+            k = i - 1
+            while k >= 0 and (text[k].isalnum() or text[k] in "_.'"):
+                k -= 1
+            if k + 1 < i and text[k + 1].isdigit():   # digit separator inside a number
+                i += 1
+                continue
+            j = i + 1
+            while j < n and text[j] != "'" and text[j] != '\n':
+                j += 2 if text[j] == '\\' else 1
+            j = min(j + 1, n)
+            blank(i, j)
+            i = j
+        else:
+            i += 1
+    return ''.join(out)
+
+
 def strip_defines(text):
     """(text with every #define blanked, same length and line breaks; {macro: (param index, category, gpu)}).
 
@@ -109,16 +174,17 @@ def strip_defines(text):
 def scan_text(text, path='<text>'):
     """scan_file on source text (see scan_file)."""
     text, wrappers = strip_defines(text)
+    code = blank_comments_and_strings(text)   # macro search only: comments and literals add no test
     events = []  # (pos, kind, name, wrapper spec or None)
-    for m in CLASS_RE.finditer(text):
+    for m in CLASS_RE.finditer(code):
         events.append((m.start(), 'class', m.group(1), None))
-    for m in BEGIN_RE.finditer(text):
+    for m in BEGIN_RE.finditer(code):
         events.append((m.start(), 'begin', m.group(1), None))
-    for m in METHOD_RE.finditer(text):
+    for m in METHOD_RE.finditer(code):
         events.append((m.start(), 'method', m.group(1), None))
     for macro, spec in wrappers.items():
-        for m in re.finditer(r'\b' + re.escape(macro) + r'\s*\(', text):
-            args = _split_args(text, m.end() - 1)
+        for m in re.finditer(r'\b' + re.escape(macro) + r'\s*\(', code):
+            args = _split_args(code, m.end() - 1)
             if args is not None and spec[0] < len(args) and re.fullmatch(r'\w+', args[spec[0]]):
                 events.append((m.start(), 'method', args[spec[0]], spec))
     events.sort(key=lambda e: e[0])

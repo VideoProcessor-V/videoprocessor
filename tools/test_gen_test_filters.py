@@ -80,6 +80,28 @@ class MacroScan(unittest.TestCase):
         tests = L.scan_text("TEST_CLASS(C)\n{\n\tTEST_METHOD(D8_Rate24_Part1)\n\t{\n\t}\n\tTEST_METHOD(OnAMenuEnd)\n\t{\n\t}\n};\n")
         self.assertEqual([t["method"] for t in tests], ["D8_Rate24_Part1", "OnAMenuEnd"])
 
+    def test_comments_and_literals_add_no_test(self):
+        # Gate SHOULD 1 (gate-A20C5-rgc1-10a31bff6.md): the macro search skips comments and string/char literals.
+        src = MACRO_SOURCE.replace(
+            "\t\tTEST_METHOD(FileNameFormatStaysCpu)",
+            "\t\t// ROW_METHOD(Phantom_LineComment, \"clip\", 1)\n"
+            "\t\t/* ROW_METHOD(Phantom_BlockComment, \"clip\", 1)\n\t\t   TEST_METHOD(Phantom_BlockMethod) */\n"
+            "\t\tconst char* s = \"TEST_METHOD(Phantom_String) ROW_METHOD(Phantom_StringRow, x, 1)\";\n"
+            "\t\tconst char* r = R\"x(TEST_METHOD(Phantom_Raw) \" ROW_METHOD(Phantom_RawRow, x, 1))x\";\n"
+            "\t\tconst char q = '(';\n"
+            "\t\tconst int big = 1'000'000;\n"
+            "\t\tTEST_METHOD(FileNameFormatStaysCpu)")
+        tests = L.scan_text(src)
+        self.assertEqual([t["method"] for t in tests], ["Row_Clip_Part1", "Row_Clip_Part2", "FileNameFormatStaysCpu"])
+        self.assertEqual({t["method"]: t["category"] for t in tests}["Row_Clip_Part1"], "GpuHardware")
+
+    def test_blanking_keeps_length_and_line_breaks(self):
+        src = "a // c(\nb /* x\ny */ \"s\\\"t\" 'c' 1'000 R\"d(q)\")d\" z"
+        out = L.blank_comments_and_strings(src)
+        self.assertEqual(len(out), len(src))
+        self.assertEqual(out.count("\n"), src.count("\n"))
+        self.assertEqual(out.split(), ["a", "b", "1'000", "z"])
+
 
 class RepositoryFilters(unittest.TestCase):
     """The generated filters of the repository itself."""
