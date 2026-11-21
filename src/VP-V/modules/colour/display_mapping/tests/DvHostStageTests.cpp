@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>
@@ -667,6 +668,47 @@ namespace Tests
 			Assert::IsNotNull(Param(ictcp, "dv_lms00"), L"the ICtCp matrices are present with the Dolby-style curve");
 			Assert::IsNull(Param(plainAgain, "dv_lms00"), L"and gone when it stops");
 			Assert::IsTrue(same(plain, plainAgain), L"the libplacebo-mode parameters come back unchanged");
+		}
+
+		// GEM-016 (the speed-up method: the timing test lands BEFORE the fix commit's measurement): the QPC median of 2,000
+		// PrepareToneAndTrims calls on a DV picture with the trims acting. The median is logged for the gate to quote before and
+		// after; every call must still produce the trims parameters (a faster no-op would not pass).
+		TEST_METHOD(DvHostStageCpuTiming)
+		{
+			using namespace DvHost;
+			Registry reg;
+			DvHostStage stage(DummyShaders(), reg.Engage(), reg.Release());
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			const pl_frame target = Target(PL_COLOR_TRC_PQ, 100.0f);
+			pl_color_map_params params = pl_color_map_default_params;
+			const std::string mode = "dolby_style", curve = "bt2390", folder;
+			VideoState state;
+			DvHostStage::ParameterList list;
+			CustomHookChain::TemplateValues templates;
+			LARGE_INTEGER freq{};
+			QueryPerformanceFrequency(&freq);
+			std::vector<double> micros;
+			micros.reserve(2000);
+			for (int k = 0; k < 2000; ++k)
+			{
+				bool wanted = false;
+				LARGE_INTEGER t0{}, t1{};
+				QueryPerformanceCounter(&t0);
+				stage.PrepareToneAndTrims({ mode, true, curve, folder, true, image, target, &dm, 2.4, state, nullptr, static_cast<uint64_t>(k + 1), true },
+					params, templates, wanted, list);
+				QueryPerformanceCounter(&t1);
+				micros.push_back(static_cast<double>(t1.QuadPart - t0.QuadPart) * 1e6 / static_cast<double>(freq.QuadPart));
+				Assert::IsTrue(wanted, L"the trims act on every call");
+				Assert::IsNotNull(Param(list, "dv_peak_nits"), L"and carry their parameters");
+				Assert::IsTrue(list.size() > 10, L"the full parameter list");
+				stage.FinishTrims(1);
+			}
+			std::sort(micros.begin(), micros.end());
+			char line[160];
+			std::snprintf(line, sizeof line, "DvHostStageCpuTiming: PrepareToneAndTrims median %.3f us over %zu calls (min %.3f us)",
+				micros[micros.size() / 2], micros.size(), micros.front());
+			Logger::WriteMessage((std::string(line) + "\n").c_str());
 		}
 
 		TEST_METHOD(GpuUnpackSessionLogsOnceAndSwitchesTheSessionToTheCpuOnce)
