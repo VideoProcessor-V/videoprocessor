@@ -11,6 +11,13 @@
    "note": "Every method also carries its own attribute; the class clause is how the CPU run and the chain gate select it."
   },
   {
+   "kind": "class",
+   "value": "D8SceneJudgeAgreementTests",
+   "category": "GpuHardware",
+   "file": "src/VP-V/modules/repair/texture_restore/tests/D8SceneJudgeAgreementTests.cpp",
+   "note": "The 15 D8 rows are declared through the D8_ROW_METHOD macro (its body carries the GpuHardware attribute); the class clause selects them for the CPU exclusion and the GPU run (RG-C1)."
+  },
+  {
    "kind": "methodPrefix",
    "value": "NlsHookFailureRetry",
    "category": "GpuHardware",

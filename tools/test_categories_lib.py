@@ -50,22 +50,82 @@ def name_says_gpu(name):
     return any(w.lower() == 'gpu' for w in WORD_RE.findall(name))
 
 
-def scan_file(path):
-    """Return a list of dicts: cls, method, category (attribute or None), gpu (bool)."""
-    with open(path, encoding='utf-8', errors='replace') as f:
-        text = f.read()
-    events = []  # (pos, kind, name)
+class ScanError(Exception):
+    """A test source the scanner cannot read reliably (callers print it and exit non-zero)."""
+
+
+# A #define logical line: the directive and every backslash-continued line after it.
+DEFINE_RE = re.compile(r'^[ \t]*#[ \t]*define[ \t]+(\w+)(\([^)]*\))?((?:[^\n]*\\\r?\n)*[^\n]*)', re.M)
+# An ALL-CAPS name (a macro parameter such as NAME), never a real test name: MSTest's Name~ / Name!~ is a
+# case-insensitive substring match, so a clause on it would select or drop every test whose name holds it.
+PLACEHOLDER_RE = re.compile(r'^[A-Z][A-Z0-9_]*$')
+
+
+def _split_args(text, start):
+    """Top-level comma-separated arguments of the call whose '(' is at text[start]; None if it never closes."""
+    depth, args, cur = 0, [], []
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == '(':
+            depth += 1
+            if depth > 1:
+                cur.append(ch)
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                args.append(''.join(cur).strip())
+                return args
+            cur.append(ch)
+        elif ch == ',' and depth == 1:
+            args.append(''.join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    return None
+
+
+def strip_defines(text):
+    """(text with every #define blanked, same length and line breaks; {macro: (param index, category, gpu)}).
+
+    A macro whose body declares TEST_METHOD(<one of its parameters>) is a test-method wrapper: each of its
+    invocations is a test named by that argument, with the body's Category attribute and GPU patterns."""
+    wrappers = {}
+    out = list(text)
+    for m in DEFINE_RE.finditer(text):
+        name, params, body = m.group(1), m.group(2), m.group(3)
+        for k in range(m.start(), m.end()):
+            if out[k] not in '\r\n':
+                out[k] = ' '
+        if not params:
+            continue
+        plist = [p.strip() for p in params[1:-1].split(',')]
+        tm = METHOD_RE.search(body)
+        if tm and tm.group(1) in plist:
+            cat = CAT_RE.search(body)
+            wrappers[name] = (plist.index(tm.group(1)), cat.group(1) if cat else None, bool(GPU_PATTERNS.search(body)))
+    return ''.join(out), wrappers
+
+
+def scan_text(text, path='<text>'):
+    """scan_file on source text (see scan_file)."""
+    text, wrappers = strip_defines(text)
+    events = []  # (pos, kind, name, wrapper spec or None)
     for m in CLASS_RE.finditer(text):
-        events.append((m.start(), 'class', m.group(1)))
+        events.append((m.start(), 'class', m.group(1), None))
     for m in BEGIN_RE.finditer(text):
-        events.append((m.start(), 'begin', m.group(1)))
+        events.append((m.start(), 'begin', m.group(1), None))
     for m in METHOD_RE.finditer(text):
-        events.append((m.start(), 'method', m.group(1)))
-    events.sort()
+        events.append((m.start(), 'method', m.group(1), None))
+    for macro, spec in wrappers.items():
+        for m in re.finditer(r'\b' + re.escape(macro) + r'\s*\(', text):
+            args = _split_args(text, m.end() - 1)
+            if args is not None and spec[0] < len(args) and re.fullmatch(r'\w+', args[spec[0]]):
+                events.append((m.start(), 'method', args[spec[0]], spec))
+    events.sort(key=lambda e: e[0])
     cls = None
     attrs = {}
     out = []
-    for i, (pos, kind, name) in enumerate(events):
+    for i, (pos, kind, name, spec) in enumerate(events):
         end = events[i + 1][0] if i + 1 < len(events) else len(text)
         if kind == 'class':
             cls = name
@@ -74,10 +134,23 @@ def scan_file(path):
             if cat:
                 attrs[name] = cat.group(1)
         else:
+            if PLACEHOLDER_RE.match(name):
+                raise ScanError(f'{path}: test method name {name!r} is an ALL-CAPS placeholder (a macro parameter?): '
+                                'a Name~ clause on it would match every test whose name contains it, in any case')
             body = text[pos:end]
-            out.append({'cls': cls, 'method': name, 'category': attrs.get(name),
-                        'gpu': bool(GPU_PATTERNS.search(body)) or name_says_gpu(name)})
+            category = spec[1] if spec is not None and spec[1] else attrs.get(name)
+            gpu = bool(GPU_PATTERNS.search(body)) or name_says_gpu(name) or bool(spec is not None and spec[2])
+            out.append({'cls': cls, 'method': name, 'category': category, 'gpu': gpu})
     return out
+
+
+def scan_file(path):
+    """Return a list of dicts: cls, method, category (attribute or None), gpu (bool).
+
+    A #define body is not scanned as code (its TEST_METHOD(NAME) names a parameter, not a test); each invocation of
+    a test-method wrapper macro is a test named by its argument. Raises ScanError on an ALL-CAPS placeholder name."""
+    with open(path, encoding='utf-8', errors='replace') as f:
+        return scan_text(f.read(), path)
 
 
 def entry_matches(entry, cls, method):
