@@ -2,19 +2,21 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // L-B4 (BBP-B B4, run in B5): the matcher reading the SHARED luma pyramid (kP1HalfLuma, Gpu, MatcherPyramidKey(L)) gives the same
-// motion outputs, byte for byte, as the matcher building its own pyramid (the visible fallback, row product.motion_warp) and as
-// the matcher without a seam at all (the pre-B3 behaviour). Each arm runs two real MotionWarp Estimates (A = 1, B = 2, then
-// A = 2, B = 3: the second A is the product's level of seq 2, the former reuse) on the real wiring: a skeleton memo, the P13 owner
-// fill (SourcePlanes::MakeOwnerFill), the matcher's offers (VectorEngine::OfferMatcherPlanes) and the engine's read seam
-// (VectorEngine::MatcherPyramidSource). Product arm: PyramidFromProduct() on every estimate and PyramidFallbackWhy() empty (USED,
-// not falling back); lowRes: InnerPyramidFromProduct() (levels 2 / 4 / 6). Forced arm: a seam answering Unavailable ->
-// PyramidFallbackWhy() names it. Outputs compared: Forward, Backward, Field, GlobalVector (copied to RGBA32F: the product path
-// requires settings.hostReadable = false, so the matcher's own textures are not host-readable).
-// STAND-IN (B5 must replace it): the (kP1HalfLuma, Gpu) owner fill here is the test's copy of P1GpuFill.cpp MakeP1GpuOwnerFill's
-// body (the owner's law function P1Gpu::BuildPyramidInto, MatcherLevelLawOf, MatcherCodes, VariantTexShape + MatcherStorageFormat,
-// one test dispatch runner). The real fill is reachable only through RegisterP1GpuModule, whose module the hub owns and
-// ResetModulesForTesting deletes while RegisteredP1GpuModule() keeps the pointer (a later NoteP1GpuSourceLuma would use it):
-// unsafe in a test process. WARP unless VP_TEST_GPU=hardware; category GpuHardware (the B5 gate run).
+// motion outputs, byte for byte and estimate by estimate, as the matcher building its own pyramid (the visible fallback, row
+// product.motion_warp) and as the matcher without a seam at all (the pre-B3 behaviour).
+// Wiring = production: a skeleton memo with the PRODUCTION owner fill P1Gpu::MatcherPyramidOwnerFill(reserve) (the fill the P1
+// module registers; only its GPU device is the test's, in SkeletonGpuDispatcher's role), the P13 owner fill
+// (SourcePlanes::MakeOwnerFill), and per render frame the production order: memo->OnSeal(render seq), SourcePlanes::BeginFrame,
+// the Entrance offer of the render frame (its P13 = the Entrance image), NoteMatcherEpoch, the matcher offering B only
+// (VectorEngine::OfferMatcherPlanes; the ahead arm offers A + B), the engine's read seam (VectorEngine::MatcherPyramidSource).
+// So A of estimate n >= 2 is the product made when it was B (keepFrames 1, kept across the seal), the real path of 115 MOTION 1.
+//   estimate 1: a visible own build with the first-pair cause; estimates 2..: PyramidFromProduct() and no fallback row.
+//   forced arm: a seam answering Unavailable; no-seam arm: SetPyramidSource never called.
+//   alternation (LOW-3): one MotionWarp bound -> forced -> bound, every estimate byte-equal to the no-seam arm.
+//   lowRes (height >= 1528): the inner reads levels 2 / 4 / 6; a seam declining only those shows "lowRes inner: ..." (MED-1).
+// Outputs compared: Forward, Backward, Field, GlobalVector, copied to RGBA32F after every estimate (the product path requires
+// settings.hostReadable = false, so the matcher's own textures are not host-readable). WARP unless VP_TEST_GPU=hardware;
+// category GpuHardware (the B5 gate run).
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
@@ -74,47 +76,6 @@ namespace VideoProcessorTest
 			}
 		};
 
-		// One pass of the owner's law on the test's dispatch (the descriptors of P1GpuFill.cpp DispatchPass / MotionWarp::Dispatch).
-		bool RunPyramidPass(pl_dispatch dispatch, const P1Gpu::PyramidPass& p)
-		{
-			pl_shader_desc d[2]{};
-			d[0].desc.name = "src";
-			d[0].desc.type = PL_DESC_SAMPLED_TEX;
-			d[0].binding.object = p.src;
-			d[0].binding.address_mode = PL_TEX_ADDRESS_CLAMP;
-			d[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
-			d[1].desc.name = "dst";
-			d[1].desc.type = PL_DESC_STORAGE_IMG;
-			d[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
-			d[1].binding.object = p.dst;
-			pl_shader_var v{ pl_var_float("codes"), &p.codes, true };
-			pl_custom_shader custom{};
-			custom.description = p.description;
-			custom.header = p.header.empty() ? nullptr : p.header.c_str();
-			custom.body = p.body->c_str();
-			custom.input = PL_SHADER_SIG_NONE;
-			custom.output = PL_SHADER_SIG_NONE;
-			custom.descriptors = d;
-			custom.num_descriptors = 2;
-			custom.variables = p.hasCodes ? &v : nullptr;
-			custom.num_variables = p.hasCodes ? 1 : 0;
-			custom.compute = true;
-			custom.compute_group_size[0] = p.group;
-			custom.compute_group_size[1] = p.group;
-			pl_shader sh = pl_dispatch_begin(dispatch);
-			if (!pl_shader_custom(sh, &custom))
-			{
-				pl_dispatch_abort(dispatch, &sh);
-				return false;
-			}
-			pl_dispatch_compute_params compute{};
-			compute.shader = &sh;
-			compute.dispatch_size[0] = (p.width + p.group - 1) / p.group;
-			compute.dispatch_size[1] = (p.height + p.group - 1) / p.group;
-			compute.dispatch_size[2] = 1;
-			return pl_dispatch_compute(dispatch, &compute);
-		}
-
 		// The sanctioned GPU context's device side (SkeletonGpuDispatcher's role): R16F level textures on the test gpu.
 		struct TestOwnerDevice : VpSkeleton::IOwnerGpuDevice
 		{
@@ -154,56 +115,6 @@ namespace VideoProcessorTest
 			}
 		};
 
-		// STAND-IN for P1GpuFill.cpp MakeP1GpuOwnerFill (see the file header): the same declaration and body.
-		VpSkeleton::OwnerFill StandInP1Fill(uint64_t reserveBytes)
-		{
-			VpSkeleton::OwnerFill f;
-			f.variantAxes = P1Gpu::OwnerVariantAxes();
-			f.reserveBytes = reserveBytes;
-			f.pixelData = false;
-			f.keepFrames = 1;
-			f.historyFrames = 1;
-			f.fill = [](const VpSkeleton::OwnerFillRequest& req, SkeletonMemo& memo, VpSkeleton::OwnerFillOutput& out) {
-				if (req.gpu == nullptr || req.gpu->Dispatch() == nullptr)
-					return false;
-				const uint8_t level = P1Gpu::MatcherPyramidLevel(req.variant);
-				P1Gpu::MatcherLevelLaw law;
-				if (level == 0 || !P1Gpu::MatcherLevelLawOf(level, &law))
-					return false;
-				const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, AcquireForm::Gpu);
-				if (!src.Ok() || src.gpu.resource == nullptr)
-					return false;
-				const pl_tex luma = static_cast<pl_tex>(src.gpu.resource);
-				VpSkeleton::Dims full;
-				full.width = uint32_t(luma->params.w);
-				full.height = uint32_t(luma->params.h);
-				pl_tex in = luma;
-				VpSkeleton::AcquireResult above;
-				if (law.input != 0)
-				{
-					above = memo.Acquire(VpSkeleton::kP1HalfLuma, req.seq, AcquireForm::Gpu, P1Gpu::MatcherPyramidKey(law.input));
-					if (!above.Ok() || above.gpu.resource == nullptr)
-						return false;
-					in = static_cast<pl_tex>(above.gpu.resource);
-				}
-				const Vpv::Capture::SourcePlaneSet* facts = Vpv::Capture::SourcePlanes::FactsOf(src);
-				const bool fullRange = facts != nullptr && facts->fullRange;
-				VpSkeleton::TexShape shape;
-				std::string why;
-				if (!VpSkeleton::VariantTexShape(req.variant, full, 1, P1Gpu::MatcherStorageFormat(), &shape) || !req.gpu->Allocate(shape, out.gpu, why))
-					return false;
-				const pl_tex dst = static_cast<pl_tex>(out.gpu.resource);
-				const pl_dispatch dispatch = static_cast<pl_dispatch>(req.gpu->Dispatch());
-				const P1Gpu::PyramidPassRunner run = [dispatch](const P1Gpu::PyramidPass& p) { return RunPyramidPass(dispatch, p); };
-				if (law.twoByTwo)
-					return P1Gpu::BuildPyramidInto(run, in, P1Gpu::MatcherCodes(!law.rangeCodes, fullRange), dst, nullptr, nullptr, -1, 0);
-				if (level == 3 || level == 4)
-					return P1Gpu::BuildPyramidInto(run, nullptr, 0.0f, in, dst, nullptr, 0, 1);
-				return P1Gpu::BuildPyramidInto(run, nullptr, 0.0f, nullptr, in, dst, 1, 2);
-			};
-			return f;
-		}
-
 		struct ProductRig
 		{
 			int hostTag = 0;
@@ -223,12 +134,13 @@ namespace VideoProcessorTest
 				memo->SetGpuBudget(true, 1ull << 30);
 				Assert::IsTrue(memo->RegisterOwnerFill(VpSkeleton::kP13SourceRing, AcquireForm::Gpu, Vpv::Capture::SourcePlanes::kUnit,
 					Vpv::Capture::SourcePlanes::MakeOwnerFill()) == SkeletonMemo::Registration::Registered, L"P13 owner");
+				// The P1 module's reserve (P1GpuFill.cpp ReserveFor: level 1 of the source luma is the largest level).
 				VpSkeleton::Dims luma;
 				luma.width = w;
 				luma.height = h;
 				const uint64_t reserve = VpSkeleton::VariantReserveBytes(P1Gpu::MatcherPyramidKey(1), luma, 1, P1Gpu::MatcherStorageFormat());
-				Assert::IsTrue(memo->RegisterOwnerFill(VpSkeleton::kP1HalfLuma, AcquireForm::Gpu, "input/source_analysis/lane", StandInP1Fill(reserve))
-					== SkeletonMemo::Registration::Registered, L"P1 GPU owner (stand-in)");
+				Assert::IsTrue(memo->RegisterOwnerFill(VpSkeleton::kP1HalfLuma, AcquireForm::Gpu, "input/source_analysis/lane",
+					P1Gpu::MatcherPyramidOwnerFill(reserve)) == SkeletonMemo::Registration::Registered, L"the production P1 GPU owner fill");
 				demand.memo = memo;
 				demand.host = Host();
 				Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new GpuSkeleton(&demand)));
@@ -295,13 +207,25 @@ namespace VideoProcessorTest
 			return v;
 		}
 
-		enum class Arm { Product, Forced, NoSeam };
+		const char* const kFirstPair = "first pair after a start or a gap: A has no kept product yet";
+		const char* const kForced = "forced fallback (test)";
+		const char* const kInnerDeclined = "inner declined (test)";
 
-		struct ArmResult
+		// What one estimate of an arm does with the seam.
+		enum class Mode
+		{
+			Engine,             // production: B offered, the engine's seam
+			EngineAhead,        // the ahead pair: A and B offered, the engine's seam
+			EngineInnerDecline, // the engine's seam, levels 2 / 4 / 6 (the lowRes inner's) answered Unavailable
+			Forced,             // B offered, a seam answering Unavailable for every level
+			NoSeam              // B offered, SetPyramidSource never called (pre-B3)
+		};
+
+		struct EstimateResult
 		{
 			std::vector<float> forward, backward, field, global;
-			int productEstimates = 0;
-			int innerProductEstimates = 0;
+			bool bound = false;
+			bool innerBound = false;
 			std::string why;
 		};
 
@@ -310,7 +234,15 @@ namespace VideoProcessorTest
 			return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0);
 		}
 
-		ArmResult RunArm(TargetLutGpuFixture& fixture, Arm arm, int w, int h, bool lowRes)
+		VpMotion::MatcherPyramid::Level Declined(const char* cause)
+		{
+			VpMotion::MatcherPyramid::Level l;
+			l.state = VpMotion::MatcherPyramid::Level::State::Unavailable;
+			l.cause = cause;
+			return l;
+		}
+
+		std::vector<EstimateResult> RunArm(TargetLutGpuFixture& fixture, const std::vector<Mode>& modes, int w, int h, bool lowRes)
 		{
 			pl_gpu gpu = fixture.Gpu();
 			struct DispatchHolder
@@ -318,15 +250,17 @@ namespace VideoProcessorTest
 				pl_dispatch d;
 				~DispatchHolder() { pl_dispatch_destroy(&d); }
 			} dispatch{ pl_dispatch_create(gpu->log, gpu) };
-			DejudderGpuPlanes frames[3];
-			for (int i = 0; i < 3; ++i)
+			const size_t n = modes.size();
+			std::vector<std::unique_ptr<DejudderGpuPlanes>> frames;
+			for (size_t i = 0; i <= n; ++i)
 			{
-				const int dx = 12 * i, dy = 6 * i;
+				const int dx = 12 * int(i), dy = 6 * int(i);
 				const DejudderFrame f = MakeDejudderFrame(w, h, [dx, dy](int x, int y) { return DejudderTexture(x - dx, y - dy); },
 					[dx, dy](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
-				UploadDejudderFrame(gpu, f, frames[i]);
-				frames[i].planes.sequence = uint64_t(i + 1);
-				frames[i].planes.fullRange = false;   // YUV limited
+				frames.emplace_back(new DejudderGpuPlanes());
+				UploadDejudderFrame(gpu, f, *frames.back());
+				frames.back()->planes.sequence = uint64_t(i + 1);
+				frames.back()->planes.fullRange = false;   // YUV limited
 			}
 			ProductRig rig(gpu, dispatch.d, uint32_t(w), uint32_t(h));
 			VpMotion::VectorEngine engine(rig.Host());
@@ -335,72 +269,120 @@ namespace VideoProcessorTest
 			settings.globalPrior = true;     // a global vector to compare
 			settings.lowRes = lowRes;
 			Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
-			ArmResult out;
-			for (int i = 0; i < 2; ++i)
+			const VpMotion::MatcherPyramid::Source engineSeam = engine.MatcherPyramidSource();
+			std::vector<EstimateResult> out;
+			for (size_t i = 0; i < n; ++i)
 			{
-				const Dejudder::Planes& a = frames[i].planes;
-				const Dejudder::Planes& b = frames[i + 1].planes;
+				const Dejudder::Planes& a = frames[i]->planes;   // the render frame
+				const Dejudder::Planes& b = frames[i + 1]->planes;
+				// The render frame's Begin: the seal, the last frame's offers dropped, its Entrance image offered (the same luma here).
+				rig.memo->OnSeal(a.sequence);
 				Vpv::Capture::SourcePlanes::BeginFrame(rig.Host());
-				if (arm == Arm::Product)
+				pl_frame image{};
+				image.num_planes = 2;
+				image.planes[0].texture = a.luma;
+				image.planes[0].components = 1;
+				image.planes[1].texture = a.chroma;
+				image.planes[1].components = 2;
+				image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				image.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				Assert::IsTrue(Vpv::Capture::SourcePlanes::OfferFrame(rig.Host(), a.sequence, int64_t(i + 1), image), L"Entrance offer");
+				// RunDejudderEstimate's order: the epoch, the offers, the seam.
+				engine.NoteMatcherEpoch(1);
+				if (modes[i] == Mode::EngineAhead)
+					Assert::IsTrue(engine.OfferMatcherPlanes(a.sequence, a.luma, a.chroma, a.fullRange), L"ahead: A offered");
+				Assert::IsTrue(engine.OfferMatcherPlanes(b.sequence, b.luma, b.chroma, b.fullRange), L"B offered");
+				switch (modes[i])
 				{
-					Assert::IsTrue(engine.OfferMatcherPlanes(a.sequence, a.luma, a.chroma, a.fullRange), L"A offered");
-					Assert::IsTrue(engine.OfferMatcherPlanes(b.sequence, b.luma, b.chroma, b.fullRange), L"B offered");
-					warp.SetPyramidSource(engine.MatcherPyramidSource());
-				}
-				else if (arm == Arm::Forced)
-				{
-					warp.SetPyramidSource([](const VpMotion::MatcherPyramid::Request&) {
-						VpMotion::MatcherPyramid::Level l;
-						l.state = VpMotion::MatcherPyramid::Level::State::Unavailable;
-						l.cause = "forced fallback (test)";
-						return l;
+				case Mode::Engine:
+				case Mode::EngineAhead:
+					warp.SetPyramidSource(engineSeam);
+					break;
+				case Mode::EngineInnerDecline:
+					warp.SetPyramidSource([engineSeam](const VpMotion::MatcherPyramid::Request& q) {
+						return q.level == 2 || q.level == 4 || q.level == 6 ? Declined(kInnerDeclined) : engineSeam(q);
 					});
+					break;
+				case Mode::Forced:
+					warp.SetPyramidSource([](const VpMotion::MatcherPyramid::Request&) { return Declined(kForced); });
+					break;
+				case Mode::NoSeam:
+					break;
 				}
 				Assert::IsTrue(warp.Estimate(a, b), L"estimate");
-				out.productEstimates += warp.PyramidFromProduct() ? 1 : 0;
-				out.innerProductEstimates += warp.InnerPyramidFromProduct() ? 1 : 0;
-				out.why = warp.PyramidFallbackWhy();
+				EstimateResult r;
+				r.bound = warp.PyramidFromProduct();
+				r.innerBound = warp.InnerPyramidFromProduct();
+				r.why = warp.PyramidFallbackWhy();
+				r.forward = Snapshot(gpu, dispatch.d, warp.Forward());
+				r.backward = Snapshot(gpu, dispatch.d, warp.Backward());
+				r.field = Snapshot(gpu, dispatch.d, warp.Field());
+				r.global = Snapshot(gpu, dispatch.d, warp.GlobalVector());
+				out.push_back(std::move(r));
 			}
-			out.forward = Snapshot(gpu, dispatch.d, warp.Forward());
-			out.backward = Snapshot(gpu, dispatch.d, warp.Backward());
-			out.field = Snapshot(gpu, dispatch.d, warp.Field());
-			out.global = Snapshot(gpu, dispatch.d, warp.GlobalVector());
 			return out;
 		}
 
-		void CheckIdentity(int w, int h, bool lowRes)
+		std::wstring Wide(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+
+		void CheckSameOutputs(const std::vector<EstimateResult>& x, const std::vector<EstimateResult>& ref, const wchar_t* arm)
+		{
+			Assert::AreEqual(ref.size(), x.size(), arm);
+			for (size_t i = 0; i < x.size(); ++i)
+			{
+				const std::wstring at = std::wstring(arm) + L", estimate " + std::to_wstring(i + 1) + L": ";
+				Assert::IsFalse(ref[i].forward.empty() || ref[i].field.empty(), (at + L"non-vacuous: the matcher produced vectors").c_str());
+				Assert::IsTrue(SameBytes(x[i].forward, ref[i].forward), (at + L"Forward byte-equal").c_str());
+				Assert::IsTrue(SameBytes(x[i].backward, ref[i].backward), (at + L"Backward byte-equal").c_str());
+				Assert::IsTrue(SameBytes(x[i].field, ref[i].field), (at + L"Field byte-equal").c_str());
+				Assert::IsTrue(SameBytes(x[i].global, ref[i].global), (at + L"GlobalVector byte-equal").c_str());
+			}
+		}
+
+		void CheckUsedAfterTheFirstPair(const std::vector<EstimateResult>& r, bool lowRes)
+		{
+			Assert::IsFalse(r[0].bound, L"estimate 1: A has no kept product: own build");
+			Assert::AreEqual(std::string(kFirstPair), r[0].why, L"estimate 1: visible, with the first-pair cause");
+			for (size_t i = 1; i < r.size(); ++i)
+			{
+				Assert::IsTrue(r[i].bound, (L"estimate " + std::to_wstring(i + 1) + L": the product was USED; fallback: " + Wide(r[i].why)).c_str());
+				Assert::IsTrue(r[i].why.empty(), L"no fallback row while bound");
+				if (lowRes)
+					Assert::IsTrue(r[i].innerBound, L"lowRes: the inner read levels 2 / 4 / 6 from the product");
+			}
+		}
+
+		void CheckArms(int w, int h, bool lowRes)
 		{
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
-			const ArmResult product = RunArm(fixture, Arm::Product, w, h, lowRes);
-			const ArmResult forced = RunArm(fixture, Arm::Forced, w, h, lowRes);
-			const ArmResult none = RunArm(fixture, Arm::NoSeam, w, h, lowRes);
-			Assert::AreEqual(2, product.productEstimates, (L"the product was USED on both estimates; fallback: "
-				+ std::wstring(product.why.begin(), product.why.end())).c_str());
-			Assert::IsTrue(product.why.empty(), L"product arm: no fallback row");
-			if (lowRes)
-				Assert::AreEqual(2, product.innerProductEstimates, L"lowRes: the inner read levels 2 / 4 / 6 from the product");
-			Assert::AreEqual(0, forced.productEstimates, L"forced arm: never bound");
-			Assert::AreEqual(std::string("forced fallback (test)"), forced.why, L"forced arm: the row names the cause");
-			Assert::AreEqual(0, none.productEstimates, L"no seam: never bound");
-			Assert::IsTrue(none.why.empty(), L"no seam: silent (nothing to fall back from)");
-			Assert::IsFalse(product.forward.empty() || product.field.empty(), L"non-vacuous: the matcher produced vectors");
-			Assert::IsTrue(SameBytes(product.forward, forced.forward) && SameBytes(product.forward, none.forward), L"Forward byte-equal");
-			Assert::IsTrue(SameBytes(product.backward, forced.backward) && SameBytes(product.backward, none.backward), L"Backward byte-equal");
-			Assert::IsTrue(SameBytes(product.field, forced.field) && SameBytes(product.field, none.field), L"Field byte-equal");
-			Assert::IsTrue(SameBytes(product.global, forced.global) && SameBytes(product.global, none.global), L"GlobalVector byte-equal");
+			const std::vector<EstimateResult> none = RunArm(fixture, { Mode::NoSeam, Mode::NoSeam, Mode::NoSeam }, w, h, lowRes);
+			const std::vector<EstimateResult> product = RunArm(fixture, { Mode::Engine, Mode::Engine, Mode::Engine }, w, h, lowRes);
+			const std::vector<EstimateResult> ahead = RunArm(fixture, { Mode::EngineAhead, Mode::EngineAhead, Mode::EngineAhead }, w, h, lowRes);
+			const std::vector<EstimateResult> forced = RunArm(fixture, { Mode::Forced, Mode::Forced, Mode::Forced }, w, h, lowRes);
+			for (const EstimateResult& r : none)
+				Assert::IsTrue(!r.bound && r.why.empty(), L"no seam: never bound, silent (nothing to fall back from)");
+			CheckUsedAfterTheFirstPair(product, lowRes);
+			for (const EstimateResult& r : ahead)
+				Assert::IsTrue(r.bound && r.why.empty(), (L"ahead (A offered): bound on every estimate; fallback: " + Wide(r.why)).c_str());
+			for (const EstimateResult& r : forced)
+				Assert::IsTrue(!r.bound && r.why == kForced, L"forced: own build, the row names the cause");
+			CheckSameOutputs(product, none, L"product");
+			CheckSameOutputs(ahead, none, L"ahead");
+			CheckSameOutputs(forced, none, L"forced");
 		}
 	}
 
 	TEST_CLASS(MatcherPyramidGpuIdentityTests)
 	{
 	public:
+		// MUST-1: production fill and order, YUV limited: product / ahead / forced / no seam, estimate by estimate.
 		BEGIN_TEST_METHOD_ATTRIBUTE(YuvLimitedProductEqualsOwnPyramid)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(YuvLimitedProductEqualsOwnPyramid)
 		{
-			CheckIdentity(512, 256, false);
+			CheckArms(512, 256, false);
 		}
 
 		// lowRes (height >= 1528: the matcher searches on its half): the inner reads levels 2 / 4 / 6 of the same frames.
@@ -409,7 +391,49 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(LowResInnerProductEqualsOwnPyramid)
 		{
-			CheckIdentity(2048, 1536, true);
+			CheckArms(2048, 1536, true);
+		}
+
+		// SHOULD-1 (LOW-3): one MotionWarp alternating bound -> forced fallback -> bound (A's own levels and the K set freed while
+		// bound, made again on the fallback): no failure, every estimate byte-equal to the no-seam arm.
+		BEGIN_TEST_METHOD_ATTRIBUTE(BoundForcedBoundAlternationEqualsOwnPyramid)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(BoundForcedBoundAlternationEqualsOwnPyramid)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Mode> modes = { Mode::Engine, Mode::Engine, Mode::Forced, Mode::Engine, Mode::Engine };
+			const std::vector<EstimateResult> none = RunArm(fixture, std::vector<Mode>(modes.size(), Mode::NoSeam), 512, 256, false);
+			const std::vector<EstimateResult> alt = RunArm(fixture, modes, 512, 256, false);
+			const bool wantBound[5] = { false, true, false, true, true };
+			for (size_t i = 0; i < alt.size(); ++i)
+				Assert::AreEqual(wantBound[i], alt[i].bound, (L"estimate " + std::to_wstring(i + 1) + L" bound: " + Wide(alt[i].why)).c_str());
+			Assert::AreEqual(std::string(kForced), alt[2].why, L"the forced estimate is visible");
+			Assert::IsTrue(alt[3].why.empty() && alt[4].why.empty(), L"bound again: the row released");
+			CheckSameOutputs(alt, none, L"alternation");
+		}
+
+		// SHOULD-2 (MED-1): lowRes with a seam that declines only the inner's levels 2 / 4 / 6: the outer is bound, the inner builds its
+		// own and says so ("lowRes inner: <cause>"); outputs byte-equal to the no-seam arm.
+		BEGIN_TEST_METHOD_ATTRIBUTE(LowResInnerDeclineIsVisibleAndEqualsOwnPyramid)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(LowResInnerDeclineIsVisibleAndEqualsOwnPyramid)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			const std::vector<EstimateResult> none = RunArm(fixture, { Mode::NoSeam, Mode::NoSeam, Mode::NoSeam }, 2048, 1536, true);
+			const std::vector<EstimateResult> inner = RunArm(fixture, { Mode::EngineInnerDecline, Mode::EngineInnerDecline,
+				Mode::EngineInnerDecline }, 2048, 1536, true);
+			Assert::AreEqual(std::string(kFirstPair), inner[0].why, L"estimate 1: the outer's first-pair cause");
+			for (size_t i = 1; i < inner.size(); ++i)
+			{
+				Assert::IsTrue(inner[i].bound, (L"the outer is bound; fallback: " + Wide(inner[i].why)).c_str());
+				Assert::IsFalse(inner[i].innerBound, L"the inner is not");
+				Assert::AreEqual(std::string("lowRes inner: ") + kInnerDeclined, inner[i].why, L"the inner's decline is visible");
+			}
+			CheckSameOutputs(inner, none, L"lowRes inner decline");
 		}
 	};
 }

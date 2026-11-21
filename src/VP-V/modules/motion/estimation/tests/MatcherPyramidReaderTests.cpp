@@ -220,7 +220,7 @@ namespace VideoProcessorTest
 				Assert::IsTrue(Ask(src, 11, lv, &rig.lumaB).state == Level::State::Product, L"frame 1: B from the product");
 			Assert::AreEqual(3, rig.p1Calls, L"B's three levels filled once");
 			const Level a1 = Ask(src, 10, 1, &rig.lumaA);
-			Assert::IsTrue(a1.state == Level::State::Unavailable && a1.cause == "no shared source luma for this frame",
+			Assert::IsTrue(a1.state == Level::State::Unavailable && a1.cause == "first pair after a start or a gap: A has no kept product yet",
 				L"the first pair's A has no product (visible own build)");
 			Assert::IsTrue(Vpv::Capture::SourcePlanes::OfferFrame(rig.Host(), 10, 1, rig.Image(&rig.other, &rig.chromaA, false)), L"Entrance of 10");
 			const AcquireResult e1 = rig.memo->Acquire(VpSkeleton::kP13SourceRing, 10, AcquireForm::Gpu);
@@ -243,6 +243,36 @@ namespace VideoProcessorTest
 			Assert::IsTrue(e2.Ok() && e2.gpu.resource == &rig.other, L"frame 2's P13 is its Entrance image, not the matcher's upload");
 		}
 
+		// SHOULD-4: a motion-validity epoch change forgets the offer log, so a frame offered as B before the change is never read as A
+		// after it (its kept product is not reused across a discontinuity); the same epoch keeps it.
+		TEST_METHOD(AnEpochChangeForgetsTheOffersSoANewAHasNoKeptProduct)
+		{
+			Rig rig;
+			VpMotion::VectorEngine engine(rig.Host());
+			const VpMotion::MatcherPyramid::Source src = engine.MatcherPyramidSource();
+			// Frame 1 (render seq 70, epoch 1): B = 71 offered and filled.
+			rig.memo->OnSeal(70);
+			Vpv::Capture::SourcePlanes::BeginFrame(rig.Host());
+			engine.NoteMatcherEpoch(1);
+			Assert::IsTrue(engine.OfferMatcherPlanes(71, &rig.lumaB, &rig.chromaB, false), L"B offered");
+			Assert::IsTrue(Ask(src, 71, 1, &rig.lumaB).state == Level::State::Product, L"frame 1: B from the product");
+			// Frame 2, same epoch: 71 is A, served from its kept product.
+			rig.memo->OnSeal(71);
+			Vpv::Capture::SourcePlanes::BeginFrame(rig.Host());
+			engine.NoteMatcherEpoch(1);
+			Assert::IsTrue(engine.OfferMatcherPlanes(72, &rig.lumaA, &rig.chromaA, false), L"the new B offered");
+			Assert::IsTrue(Ask(src, 71, 1, &rig.lumaB).state == Level::State::Product, L"same epoch: A from the kept product");
+			// Frame 3, the epoch changed (resync / seek): 72 was offered before the change, so as A it has no kept product.
+			rig.memo->OnSeal(72);
+			Vpv::Capture::SourcePlanes::BeginFrame(rig.Host());
+			engine.NoteMatcherEpoch(2);
+			Assert::IsTrue(engine.OfferMatcherPlanes(73, &rig.lumaB, &rig.chromaB, false), L"B offered after the change");
+			const Level a = Ask(src, 72, 1, &rig.lumaA);
+			Assert::IsTrue(a.state == Level::State::Unavailable, L"declined");
+			Assert::AreEqual(std::string("first pair after a start or a gap: A has no kept product yet"), a.cause, L"the first-pair cause");
+			Assert::IsTrue(Ask(src, 73, 1, &rig.lumaB).state == Level::State::Product, L"the new epoch's B is served");
+		}
+
 		// (b) MED-2: a seq that was not offered is declined from the offer table, before any P13 Acquire: no decline is cached,
 		// so the frame's later offer and P13 readers are served.
 		TEST_METHOD(ASeqNotOfferedIsDeclinedWithoutCachingADecline)
@@ -253,7 +283,7 @@ namespace VideoProcessorTest
 			const VpMotion::MatcherPyramid::Source src = engine.MatcherPyramidSource();
 			const Level r = Ask(src, 42, 1, &rig.lumaA);
 			Assert::IsTrue(r.state == Level::State::Unavailable, L"asked and not served");
-			Assert::AreEqual(std::string("no shared source luma for this frame"), r.cause, L"the cause");
+			Assert::AreEqual(std::string("first pair after a start or a gap: A has no kept product yet"), r.cause, L"the cause (never offered = an A without a kept product)");
 			Assert::AreEqual(0, rig.p1Calls, L"the P1 owner was not asked");
 			Assert::IsTrue(engine.OfferMatcherPlanes(42, &rig.lumaA, nullptr, false), L"offered afterwards (luma only)");
 			const AcquireResult p13 = rig.memo->Acquire(VpSkeleton::kP13SourceRing, 42, AcquireForm::Gpu);
