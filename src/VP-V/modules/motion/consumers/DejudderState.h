@@ -23,6 +23,7 @@
 #include <VP-V/modules/motion/consumers/InterpolationPolicy.h>
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
+#include <VP-V/modules/motion/consumers/DejudderCameraBindings.h>
 #include <vprenderer/DisplayRateHold.h>
 
 #include <atomic>
@@ -86,6 +87,8 @@ namespace VpMotion
 		// while a cadence reset zeroes it (DisplayRateHold); the monitor's rate only when
 		// nothing was measured since start or a mode change. Render thread.
 		mutable DisplayRateHold timelineDisplayRateHold; // train2: TimelineDisplayHz() const mutates it (was a reference alias before S-P11B)
+		// K9-3 (B4, default OFF): smoothed P9 camera bindings (hiccup, R-A, de-judder, R-B); Original pathway forces off.
+		DejudderCameraState cameraBindings;
 		// W1-C2a MUST 2: the `motion-history` reader the apply point takes from is VectorEngineState::motionResyncReaders
 		// (the readers the resync "motion" provider registers); the separate, never-registered copy here was removed.
 	};

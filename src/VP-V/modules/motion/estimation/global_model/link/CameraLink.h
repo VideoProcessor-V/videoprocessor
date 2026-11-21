@@ -18,6 +18,7 @@
 namespace CameraLink
 {
 	constexpr const char* kCameraQueryId = "vpv.camera.v1";
+	constexpr const char* kCameraDirectoryQueryId = "vpv.camera.dir.v1";
 
 	// What a consumer gets for P8 of one frame: the label texture (GPU) when available. available == false means the
 	// consumer runs with enabled = 0 (today's values), shown under the camera status.
@@ -91,5 +92,14 @@ namespace CameraLink
 		virtual bool LabelsFor(uint64_t seq, CameraConsumer c, CameraLabelsView& out) = 0;
 		// The guidance frame for the pair about to be searched (K4); null = refused or all switches off.
 		virtual std::shared_ptr<const CameraModel::GuidanceFrame> GuideFor(uint64_t seq) = 0;
+	};
+
+	// Per-host directory returned by ExtensionHub::Query(kCameraDirectoryQueryId), matching the
+	// IVectorEngineDirectory / IDejudderDirectory pattern (render thread only).
+	class ICameraLinkDirectory
+	{
+	public:
+		virtual ~ICameraLinkDirectory() {}
+		virtual ICameraLink* LinkFor(const void* host) const = 0;
 	};
 }

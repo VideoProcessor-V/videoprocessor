@@ -10,6 +10,7 @@
 // Render thread (RenderLocked, renderMutex held); ReleaseDejudder also from RetireOutput (stop path, renderMutex).
 #pragma once
 
+#include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/modules/motion/consumers/TimelinePlanner.h>
 #include <VP-V/modules/motion/estimation/DitherVectorSource.h>
 
@@ -181,6 +182,15 @@ void LibplaceboVideoRenderer::Impl::PrepareVpPhasePicture(uint64_t sourceSequenc
 	vpPhaseB = b;
 	vpPhaseMotion = motion;
 	vpPhaseT = static_cast<float>(vpOutputPhase) * (vpGapFillStandalone ? dejudderPolicy.vpGapPhaseScale : 1.0f);
+	// K9-3 (B4, default OFF): when camera_use_dejudder is enabled, evaluate P9 camera availability / phase weight
+	// (strictest policy) for visible status and late fallback; off = zero work, byte-identical.
+	if (dejudderPolicy.cameraBindings.config.enabled)
+	{
+		const auto* dir = static_cast<const CameraLink::ICameraLinkDirectory*>(
+			Vpv::Hub::ExtensionHub::Instance().Query(CameraLink::kCameraDirectoryQueryId));
+		const CameraLink::ICameraLink* camLink = dir ? dir->LinkFor(this) : nullptr;
+		dejudderPolicy.cameraBindings.Prepare(camLink, sourceSequence, static_cast<double>(vpPhaseT));
+	}
 	// B3: made in the draw from the processed planes (the same inputs).
 	vpPhaseDeferred = EntranceOnce();
 	if (!vpPhaseDeferred && !RunVpPhaseInterpolation())
@@ -296,6 +306,9 @@ void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
 		if (activeSettings.occlusionMask)
 			text += dejudderMaskUsedTick != 0 && now - dejudderMaskUsedTick < 1000 ? std::string(", mask on") :
 				", " + (dejudderMaskState.empty() ? std::string("mask waiting") : dejudderMaskState);
+		// K9-3 (B4, default OFF): visible camera P9 weight / causal / late fallback suffix (empty when off).
+		if (dejudderPolicy.cameraBindings.config.enabled)
+			text += dejudderPolicy.cameraBindings.StatusSuffix();
 		// Planner 2026-10-16: the motion source on the stats line (NVIDIA optical-flow engine,
 		// Turing or later, driver 528+; without it the block searches, as before).
 		if (!motionSourceLogged.empty())
