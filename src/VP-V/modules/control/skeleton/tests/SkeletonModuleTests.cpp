@@ -2846,6 +2846,48 @@ namespace SkeletonModuleTestsNs
 			registry.ResetForTesting();
 		}
 
+		// GF-P2b S10 (module level): a lane-bound memo's grant is the memo's own entry (kUserSkeletonMemo) of the lane's current users plan.
+		TEST_METHOD(TheLaneBoundMemoGrantIsTheMemosOwnEntryOfTheUsersPlan)
+		{
+			VpSkeleton::VramUsers& registry = VpSkeleton::VramUsers::Instance();
+			registry.ResetForTesting();
+			const uint64_t mb = 1024ull * 1024ull;
+			{
+				Rig rig(Lane("on"));
+				VpSkeleton::CardProfile card;
+				card.key.luid = 79;
+				card.vramBudgetBytes = 1024 * mb;
+				card.vramUsageBytes = 0;
+				rig.sk.SetCardForTesting(card);
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				int64_t s = 1;
+				for (; s <= 150; ++s)
+					rig.Frame(s);
+				const Vpv::Skeleton::FrameMemo fm = rig.sk.MemoFor(rig.Host(), uint64_t(s));
+				Assert::IsTrue(fm.Valid() && fm.memo->LaneBound(), L"the lane's memo");
+				VpSkeleton::OwnerFill g;
+				g.reserveBytes = 1u << 20;
+				g.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					static int tex = 0;
+					out.gpu.resource = &tex;
+					out.gpu.bytes = 1u << 20;
+					return true;
+				};
+				Assert::IsTrue(rig.sk.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, "repair/grain_split", g)
+					== VpSkeleton::SkeletonMemo::Registration::Registered);
+				for (const int64_t end = s + 2; s <= end; ++s)
+					rig.Frame(s);
+				Assert::IsTrue(fm.memo->GpuGranted(), L"granted");
+				const std::shared_ptr<const VpSkeleton::GovernorPlan> plan = rig.sk.LaneOf(rig.Host())->CurrentGovernorPlan();
+				Assert::IsTrue(plan != nullptr);
+				const VpSkeleton::UserGrant* u = plan->Find(VpSkeleton::kUserSkeletonMemo);
+				Assert::IsNotNull(u, L"the memo's own entry is in the lane's users plan");
+				Assert::AreEqual(uint64_t(u->bytes), uint64_t(fm.memo->GpuBudget()), L"the memo's grant is that entry's bytes");
+			}
+			registry.ResetForTesting();
+		}
+
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
 		{
 			Rig rig(Lane("on"));

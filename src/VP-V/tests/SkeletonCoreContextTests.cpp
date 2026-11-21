@@ -23,7 +23,9 @@
 // CPU only (no GPU object is touched: textures are plain structs), single process, every test bounded.
 
 #include <VP-V/core/AnalysisLane.h>
+#include <VP-V/core/GpuAllocator.h>
 #include <VP-V/core/MemoGpuGrant.h>
+#include <VP-V/core/VramUsers.h>
 #include <VP-V/core/PipelineSlots.h>
 #include <VP-V/core/QueueWindow.h>
 #include <VP-V/core/SkeletonAcquire.h>
@@ -1318,6 +1320,41 @@ namespace SkeletonCoreContextTestsNs
 				rel.kind = RE::Lifecycle::GpuReleased;
 				sk.OnLifecycle(rel);
 			}
+		}
+
+		// GF-P2b S10: the memo is its OWN governor user (kUserSkeletonMemo), never the scratch arena's id; it is a lane-level user (below
+		// kUserProductBase) and is not one of the ids a module must declare (DeclarableVramUsers).
+		TEST_METHOD(TheMemoIsItsOwnVramUserAndNotTheScratchArena)
+		{
+			Assert::IsTrue(MakeMemoVramUser({ 4u << 20, 0 }, "m").id == kUserSkeletonMemo, L"the memo's own id");
+			CardProfile card;
+			card.vramBudgetBytes = 1ull << 30;
+			card.vramUsageBytes = 0;
+			const MemoGpuGrant g = PlanMemoGpuGrantLevels(card, true, 0, { 4u << 20 });
+			Assert::IsTrue(g.granted && g.bytes == (4ull << 20), L"granted its level with an ample card");
+			ArenaRequest rq;
+			rq.scope = 1;
+			rq.owner = "s10 test";
+			rq.tier = Tier::T0;
+			rq.shape.w = 64;
+			rq.shape.h = 64;
+			rq.count = 2;
+			GovernorInput in;
+			in.card = card;
+			in.users.push_back(ScratchArenaT0User({ rq }));
+			in.users.push_back(MakeMemoVramUser({ 4u << 20 }, "m"));
+			const GovernorPlan plan = PlanVram(in);
+			const UserGrant* memo = plan.Find(kUserSkeletonMemo);
+			const UserGrant* arena = plan.Find(kUserScratchArena);
+			Assert::IsNotNull(memo, L"the memo is planned");
+			Assert::IsNotNull(arena, L"the arena is planned");
+			Assert::IsTrue(memo != arena, L"two distinct grants");
+			Assert::IsTrue(memo->bytes == (4ull << 20), L"the memo's bytes are its level, whatever the arena's");
+			Assert::IsTrue(uint16_t(kUserSkeletonMemo) < uint16_t(kUserProductBase));
+			size_t n = 0;
+			const uint16_t* ids = DeclarableVramUsers(&n);
+			for (size_t i = 0; i < n; ++i)
+				Assert::IsTrue(ids[i] != uint16_t(kUserSkeletonMemo), L"not a declarable user");
 		}
 	};
 	// R14-97 M3: the reserved ids of the fixed product-id table (30 band_memo, 32 focus_map, 33 room_light, 34 composed_vectors) are ABSENT
