@@ -423,7 +423,11 @@ namespace VideoProcessorTest
 			snprintf(line, sizeof(line), "  polar filter:   text %.1f codes RMS, %ld halo pixels, worst %.1f codes; picture %.2f codes\n",
 				rp.textRms, rp.halo, rp.worstOvershoot, rp.pictureRms);
 			Logger::WriteMessage(line);
-			Assert::IsTrue(std::isfinite(ri.textRms) && std::isfinite(rp.textRms), L"measured");
+			Assert::IsTrue(textPixels > 0, L"subtitle text mask must cover pixels");
+			Assert::IsTrue(std::isfinite(ri.textRms) && std::isfinite(rp.textRms) && ri.textRms > 0.0 && rp.textRms > 0.0, L"text RMS measured");
+			Assert::IsTrue(std::isfinite(ri.worstOvershoot) && std::isfinite(rp.worstOvershoot), L"overshoot finite");
+			Assert::IsTrue(ri.textRms < 300.0 && rp.textRms < 300.0 && ri.worstOvershoot < 512.0 && rp.worstOvershoot < 512.0,
+				L"subtitle text RMS and overshoot within sanity bounds");
 			Assert::IsTrue(ri.pictureRms < rp.pictureRms, L"the picture: the inverse still the closer");
 			pl_tex_destroy(gpu, &lumaTex);
 			pl_dispatch_destroy(&dispatch);

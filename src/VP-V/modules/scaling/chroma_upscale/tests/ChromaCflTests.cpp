@@ -875,9 +875,11 @@ namespace VideoProcessorTest
 				Assert::IsTrue(r[i].engaged == engaged[i], L"engaged exactly while a shared product does not fit");
 			Assert::IsTrue(r[0].grain == GrainSplit::GrainStatus::Missing && r[3].grain == GrainSplit::GrainStatus::WrongSize &&
 				r[1].grain == GrainSplit::GrainStatus::Ring && r[4].grain == GrainSplit::GrainStatus::Ring, L"statuses follow the products");
-			for (size_t i = 0; i < seq.size(); ++i)
+			for (size_t i = 1; i < seq.size(); ++i)
 				Assert::IsTrue(CflWorstDiff(r[0], r[i]) <= 1.0, L"the output does not change visibly across the switches");
-			Assert::IsTrue(CflWorstDiff(r[0], r[1]) == 0.0 && CflWorstDiff(r[0], r[3]) == 0.0 && CflWorstDiff(r[0], r[5]) == 0.0, L"Full and own are exact");
+			Assert::IsTrue(CflWorstDiff(r[0], r[4]) <= kCompactVsFullMaxCodes, L"Compact output within measured bound");
+			Assert::IsTrue(CflWorstDiff(r[0], r[1]) == 0.0 && CflWorstDiff(r[0], r[2]) == 0.0 &&
+				CflWorstDiff(r[0], r[3]) == 0.0 && CflWorstDiff(r[0], r[5]) == 0.0, L"Full and own are exact");
 		}
 
 		TEST_METHOD(ChromaCflGpu444IsNothing)
@@ -1054,7 +1056,8 @@ namespace VideoProcessorTest
 				Assert::IsTrue(module.Failures() == before + 1, L"one failure counted");
 				const FallbackCatalog::Decision d = arena.FrameDecision();
 				Assert::IsTrue(d.engaged && d.id == "scratch_arena", L"scratch_arena engaged");
-				Assert::IsTrue(arena.Shed() > 0 || arena.Exhausted() > 0, L"counted");
+				Assert::IsTrue(tierCase == 0 ? arena.Exhausted() > 0 : arena.Shed() > 0,
+					tierCase == 0 ? L"empty plan counted as Exhausted" : L"T0 plan counted as Shed");
 				// Recovery: a proper plan, a new frame.
 				arena.BeginFrame();
 				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T2)), L"arena reserve");

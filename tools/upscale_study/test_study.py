@@ -40,11 +40,30 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(study.fit(3840, 1714, 1920, 1080), (1920, 856))
 
     def test_every_vp_setting_is_one_the_renderer_accepts(self):
-        for v in study.variants():
-            for st in v["stages"]:
-                for k, val in st["settings"].items():
-                    if k in study.VALID:
-                        self.assertIn(val, study.VALID[k], f"{v['id']} {k}")
+        extra_enum = {
+            "adaptive_downscale": {"on", "off"},
+            "adaptive_upscale": {"on", "off"},
+            "adaptive_upscale_superres_scale": {"on", "off"},
+            "sigmoid": {"auto", "on", "off"},
+        }
+        numeric_unit = {"adaptive_w_base", "adaptive_upscale_w_base"}
+        checked = 0
+        for case in study.CASES + [None]:
+            for v in study.variants(case):
+                for st in v["stages"]:
+                    for k, val in st["settings"].items():
+                        checked += 1
+                        if k in study.VALID:
+                            self.assertIn(val, study.VALID[k], f"{v['id']} {k}")
+                        elif k in extra_enum:
+                            self.assertIn(val, extra_enum[k], f"{v['id']} {k}")
+                        elif k in numeric_unit:
+                            f = float(val)
+                            self.assertGreaterEqual(f, 0.0, f"{v['id']} {k}")
+                            self.assertLessEqual(f, 1.0, f"{v['id']} {k}")
+                        else:
+                            self.fail(f"unknown VP setting key '{k}' (val={val!r}) in variant {v['id']}")
+        self.assertGreater(checked, 0)
 
     def test_plan_writes_valid_jobs(self):
         import argparse
