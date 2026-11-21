@@ -118,10 +118,45 @@ namespace
 		pc.native = chain;
 		pc.kind = extrasSpent ? RE::AfterPresentKind::AfterLastExtra : RE::AfterPresentKind::Plain;
 		pc.extrasSpentTime = extrasSpent;
+		pc.rendered = pc.submitted = true;   // a real present was made (the host's facts; as in PresenterExtensionTests)
 		const LONGLONG display = 1000000 + static_cast<LONGLONG>(100 + i) * period;
 		pc.swapEndQpc = display - static_cast<LONGLONG>(leadPeriods * period);
 		pc.now = 1.0 + 0.0167 * i;
 		ext.OnAfterPresent(c, pc);
+	}
+
+	// The same call with the host's facts: whether the frame was submitted, the host's measured presentation target
+	// (known + lead before this step) and the extras' open loop, and the outcome the handler answered.
+	RE::PresentOutcome CallAfterPresentFacts(PresenterExtension& ext, RenderAhead::Presenter& p, FakeChain* chain, const void* host,
+		uint32_t i, double leadPeriods, bool extrasSpent, bool submitted,
+		bool targetTimingKnown = false, double hostTargetLeadMs = 0.0, bool openLoop = false)
+	{
+		const LONGLONG period = 166667;
+		if (chain)
+		{
+			chain->presentCount = i;
+			chain->presentRefreshCount = 100 + i;
+			chain->syncRefreshCount = 101 + i;
+			chain->syncQpc = 1000000 + static_cast<LONGLONG>(101 + i) * period;
+		}
+		RE::FrameContext c;
+		c.host = host;
+		c.phase = RE::FramePhase::AfterPresent;
+		c.generation = 1;
+		RE::PresentContext pc;
+		pc.presenter = &p;
+		pc.native = chain;
+		pc.kind = extrasSpent ? RE::AfterPresentKind::AfterLastExtra : RE::AfterPresentKind::Plain;
+		pc.extrasSpentTime = extrasSpent;
+		pc.rendered = pc.submitted = submitted;
+		pc.targetTimingKnown = targetTimingKnown;
+		pc.hostTargetLeadMs = hostTargetLeadMs;
+		pc.openLoop = openLoop;
+		const LONGLONG display = 1000000 + static_cast<LONGLONG>(100 + i) * period;
+		pc.swapEndQpc = display - static_cast<LONGLONG>(leadPeriods * period);
+		pc.now = 1.0 + 0.0167 * i;
+		ext.OnAfterPresent(c, pc);
+		return pc.outcome;
 	}
 }
 
@@ -398,6 +433,76 @@ namespace VpvTests
 			Assert::IsTrue(line.find("no stats") != std::string::npos);
 			Assert::IsTrue(line.find("5 without a swapchain") != std::string::npos);
 			Assert::IsTrue(line.find("not a pass") != std::string::npos);
+		}
+		TEST_METHOD(APresentThatWasNotMadeIsNotNoted)
+		{
+			PresenterExtension ext;
+			RenderAhead::Presenter p;
+			int host = 0;
+			FakeChain chain;
+			for (uint32_t i = 1; i <= 30; ++i)
+				CallAfterPresentFacts(ext, p, &chain, &host, i, 1.5, false, false);   // R12 ran, nothing was submitted
+			const std::shared_ptr<PresenterExtension::PresentEnd> end = ext.PresentEndOf(&host);
+			Assert::IsTrue(end != nullptr);
+			Assert::AreEqual(0u, end->vsync.LeadCount(), L"no id was noted for a present that was not made");
+			Assert::IsTrue(end->vsync.LeadMissing() > 0u, L"visible as unmatched");
+		}
+
+		TEST_METHOD(ARepeatedPresentIdKeepsTheFirstSwapEnd)
+		{
+			PresentVsyncHistogram h;
+			const Display d{ kQpcHz / 59.950 };
+			for (int i = 0; i < 20; ++i)
+			{
+				const uint32_t id = static_cast<uint32_t>(1 + i), ref = d.baseRef + static_cast<uint32_t>(i);
+				h.NoteSubmitted(id, d.TimeOf(ref) - static_cast<int64_t>(1.5 * d.periodQpc));
+				h.NoteSubmitted(id, d.TimeOf(ref) + static_cast<int64_t>(5 * d.periodQpc));   // the same id again, much later
+				h.Observe(d.Stats(id, ref));
+			}
+			Assert::AreEqual(0u, h.LeadNegative());
+			Assert::AreEqual(1.5, h.LeadPercentile(0.5), 0.02, L"the first swap end of the id stands");
+		}
+
+		TEST_METHOD(TheStatisticsNeverChangeThePresentersDecision)
+		{
+			// The same call sequence with and without a swapchain: the outcome of every call is identical. Committed and
+			// uncommitted plans, a known and an unknown target, open loop on and off, so the raise and the open-loop
+			// estimate (PresenterAfterPresent's extras branch) are both reached and compared.
+			PresenterExtension extA, extB;
+			RenderAhead::Presenter pA, pB;
+			int hostA = 0, hostB = 0;
+			FakeChain chain;
+			unsigned raises = 0, estimates = 0;
+			for (uint32_t i = 1; i <= 40; ++i)
+			{
+				const bool extras = (i % 3) == 0, submitted = (i % 7) != 0;
+				const bool committed = (i % 2) == 0, known = (i % 4) < 2, openLoop = (i % 5) == 0;
+				const double planLeadMs = 20.0 + i;
+				pA.committed = pB.committed = committed;   // this frame's plan was (not) queued
+				pA.targetLeadMs = pB.targetLeadMs = planLeadMs;
+				const RE::PresentOutcome a = CallAfterPresentFacts(extA, pA, nullptr, &hostA, i, 1.5, extras, submitted, known, 10.0, openLoop);
+				const RE::PresentOutcome b = CallAfterPresentFacts(extB, pB, &chain, &hostB, i, 1.5, extras, submitted, known, 10.0, openLoop);
+				Assert::AreEqual(a.committed, b.committed);
+				Assert::AreEqual(a.raiseTargetLead, b.raiseTargetLead);
+				Assert::AreEqual(a.targetLeadMs, b.targetLeadMs);
+				Assert::AreEqual(a.estimatedLeadMs, b.estimatedLeadMs);
+				Assert::AreEqual(pA.committed, pB.committed);
+				Assert::AreEqual(pA.targetLeadMs, pB.targetLeadMs);
+				if (b.raiseTargetLead)
+				{
+					++raises;
+					Assert::AreEqual(planLeadMs, b.targetLeadMs, L"the raise is the planned lead");
+				}
+				if (b.estimatedLeadMs > 0.0)
+				{
+					++estimates;
+					Assert::AreEqual(planLeadMs, b.estimatedLeadMs, L"open loop publishes the planned lead");
+				}
+			}
+			// Extras + committed + known: i = 12, 24, 36. Extras + committed + unknown + open loop: i = 30.
+			Assert::AreEqual(3u, raises, L"the raise branch was reached");
+			Assert::AreEqual(1u, estimates, L"the open-loop estimate branch was reached");
+			Assert::IsTrue(chain.reads > 0, L"side B really read statistics");
 		}
 	};
 }

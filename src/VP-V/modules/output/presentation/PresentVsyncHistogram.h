@@ -69,6 +69,8 @@ namespace Vpv
 			// The present made at swap end `swapEndQpc` has id `presentId` (the swapchain's present count after it).
 			void NoteSubmitted(uint32_t presentId, int64_t swapEndQpc)
 			{
+				if (!ring_.empty() && ring_.back().first == presentId)
+					return;   // the same id again: no new present was made, the first swap end stands
 				ring_.emplace_back(presentId, swapEndQpc);
 				if (ring_.size() > kRing)
 					ring_.erase(ring_.begin());

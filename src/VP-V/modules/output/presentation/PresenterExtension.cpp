@@ -99,7 +99,7 @@ namespace Vpv
 			static const int64_t qpcHz = []() { LARGE_INTEGER hz; hz.QuadPart = 0; QueryPerformanceFrequency(&hz); return static_cast<int64_t>(hz.QuadPart); }();
 			if (qpcHz <= 0)
 				return;
-			if (pc.native && !pc.extrasSpentTime)
+			if (pc.native && pc.submitted && !pc.extrasSpentTime)   // a present that was not made keeps the previous id: not noted again
 			{
 				UINT id = 0;
 				if (SUCCEEDED(pc.native->GetLastPresentCount(&id)))
