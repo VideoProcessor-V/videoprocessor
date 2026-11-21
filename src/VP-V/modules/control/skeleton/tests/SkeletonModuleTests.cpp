@@ -2799,6 +2799,45 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(slots.Aux(&a) == &auxA && slots.Aux(&b) == &auxB && slots.Used() == 2u, L"each host its own aux");
 		}
 
+		// GF-P2b S14.2c: the same guarantee under concurrency. A reader loops Aux(A) while a writer releases A, lets B claim the freed slot and
+		// set its aux, releases B and re-claims A with its own aux. The reader must never see B's aux through A. Probabilistic by nature:
+		// 200000 iterations on each thread (a violation is counted, so a pass is not proof, a failure is).
+		TEST_METHOD(HostSlotsAuxOfAHostIsNeverAnotherHostsAuxWhileTheSlotIsReusedConcurrently)
+		{
+			struct Entry { const void* host = nullptr; };
+			constexpr int kIterations = 200000;
+			Vpv::Hub::HostSlots<Entry, 2> slots;
+			int a = 0, b = 0, aAux = 0, bAux = 0;
+			Assert::IsTrue(slots.Claim(&a), L"A claimed");
+			slots.SetAux(&a, &aAux);
+			std::atomic<bool> go{ false };
+			std::atomic<int> violations{ 0 };
+			std::thread reader([&] {
+				while (!go.load())
+					std::this_thread::yield();
+				for (int i = 0; i < kIterations; ++i)
+					if (slots.Aux(&a) == static_cast<void*>(&bAux))
+						violations.fetch_add(1);
+			});
+			std::thread writer([&] {
+				while (!go.load())
+					std::this_thread::yield();
+				for (int i = 0; i < kIterations; ++i)
+				{
+					slots.Remove(&a, true);
+					slots.Claim(&b);
+					slots.SetAux(&b, &bAux);
+					slots.Remove(&b, true);
+					slots.Claim(&a);
+					slots.SetAux(&a, &aAux);
+				}
+			});
+			go = true;
+			reader.join();
+			writer.join();
+			Assert::AreEqual(0, violations.load(), L"A's aux was never B's");
+		}
+
 		// GEM-W1A S1 (skeleton MUST-3): a lane-bound memo is planned only at the lane's Configure. Its GPU need follows its window and its
 		// lazily registered GPU fills, neither in the queue shape: a need that moves after the last Configure re-plans the memo's grant
 		// (rate-limited like the declared VRAM users), so the lane's memo is granted from the same ledger instead of declining for ever.
