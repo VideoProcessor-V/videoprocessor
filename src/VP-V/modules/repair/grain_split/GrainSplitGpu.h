@@ -215,12 +215,14 @@ namespace GrainSplit
 			bool Compute(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B,
 				const Params& params, const Options& options);
 			// The same split made ENTIRELY through a fill's GPU context (core/SkeletonAcquire.h OwnerGpuContext; valid during the
-			// fill only): the device and the dispatch are the context's, and every texture (both outputs, the four intermediates
-			// and the level table: ContextShapesOf) is ctx.Allocate'd, accounted against the fill's reserve; `hold` keeps them
-			// alive and the device frees them. Full layout, no arena, no private texture (Release has nothing to free). False with
-			// LastError on any refusal (a closed context, a format the device lacks, an allocation over the reserve: the
-			// context's reason), and `hold` is then empty. Out() is valid while `hold` is held. Byte-identical to
-			// Compute(gpu, dispatch, plane, ..., Options{seq}) on the same inputs (GrainUnitGpuTests).
+			// fill only). R19-27: no device handle is taken. The passes run on the context's dispatch (house form, at the call),
+			// the shared-memory check uses ctx.MaxSharedMemory(), and every texture (both outputs, the four intermediates and
+			// the level table: ContextShapesOf, rg32f / rgba32f) is ctx.Allocate'd, accounted against the fill's reserve. The
+			// made textures are validated by their formats (no device lookup). `hold` keeps them alive and the device frees
+			// them. Full layout, no arena, no private texture (Release has nothing to free). False with LastError on any refusal
+			// (a closed context, an unknown shared-memory limit, an allocation over the reserve: the context's reason), and
+			// `hold` is then empty. Out() is valid while `hold` is held. Byte-identical to Compute(gpu, dispatch, plane, ...,
+			// Options{seq}) on the same inputs (GrainUnitGpuTests::GrainUnitContextEntryEqualsCompute).
 			bool Compute(VpSkeleton::OwnerGpuContext& ctx, pl_tex plane, int component, double codeUnit, double scale, int B,
 				const Params& params, uint64_t seq, ContextHold& hold);
 			// The seven passes of Compute as separate calls (70b lane form: one chunk per pass): Step(0..6) with the SAME arguments
@@ -261,8 +263,17 @@ namespace GrainSplit
 				int w = 0, h = 0, bw = 0, bh = 0;
 				pl_tex tmp = nullptr, low = nullptr, part = nullptr, quiet = nullptr, level = nullptr, blocks = nullptr, outFull = nullptr, outA = nullptr, outB = nullptr;
 			};
-			bool Begin(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, int B, const Params& params, const Options& options,
-				double scale);
+			// What a run knows of its device: the handle for the private-texture and format paths (null on the context entry,
+			// which supplies every texture), and the compute shared-memory limit (bytes).
+			struct Device
+			{
+				pl_gpu gpu = nullptr;
+				uint64_t maxShmem = 0;
+			};
+			bool StepOn(const Device& dev, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B,
+				const Params& params, const Options& options, uint32_t step);
+			bool Begin(const Device& dev, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, int B, const Params& params,
+				const Options& options, double scale);
 			Run m_run;
 			pl_tex m_tmp = nullptr, m_low = nullptr, m_part = nullptr, m_quiet = nullptr, m_level = nullptr, m_blocks = nullptr, m_outFull = nullptr, m_outA = nullptr, m_outB = nullptr;
 			Frame m_out;
