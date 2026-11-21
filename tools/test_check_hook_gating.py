@@ -920,5 +920,204 @@ class SinceKeepsUnverifiedMarkersTest(unittest.TestCase):
         self.assertIn(BILL + ":", out)
 
 
+class HookgateHolesTest(unittest.TestCase):
+    """HOOKGATE-CHECKER-HOLES S1 / S4 / S5 (102b; lead17 opus-audit-hookgate SHOULDs): planted fixtures."""
+
+    GATED = "src/VP-V/modules/motion/estimation/Lease.h"
+    PARAM_MARKER = ("struct State\n{\n\tbool EndLease(bool originalPathway)   // VPV-GATED\n\t{\n"
+                    "\t\tif (originalPathway) return false;\n\t\tReset();\n\t\treturn true;\n\t}\n"
+                    "\ttemplate <typename F> bool Drop(bool originalPathway, F f)   // VPV-GATED\n\t{\n"
+                    "\t\tif (originalPathway) return false;\n\t\treturn f();\n\t}\n};\n")
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = self.td.name
+        _w(self.root, chg.SLOTS_HEADER, SLOTS)
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    # S1: an argument passed to a gated call's predicate parameter
+    def test_red_s1_a_constant_passed_for_the_gated_predicate_parameter_fails(self):
+        _w(self.root, self.GATED, self.PARAM_MARKER)
+        for arg in ("false", "0", "wanted", "pipelineSlots.OriginalPathway() && false || x"):
+            with self.subTest(arg):
+                _w(self.root, BILL, _bill("\t\tvectorEstimate.EndLease(%s);   // VPV-HOOK\n" % arg))
+                rc, out = _run(self.root)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("UNGUARDED %s:7 " % BILL, out)
+                self.assertIn("gated-arg-unverified: EndLease", out)
+                self.assertIn("parameter 0", out)
+
+    def test_green_s1_a_predicate_form_passed_for_the_parameter(self):
+        _w(self.root, self.GATED, self.PARAM_MARKER)
+        for arg in ("pipelineSlots.OriginalPathway()", "activeSettings.pipelineOriginalPathway", "originalPathwayOn()",
+                    "m_impl->pipelineSlots.OriginalPathway()"):
+            with self.subTest(arg):
+                _w(self.root, BILL, _bill("\t\tvectorEstimate.EndLease(%s);   // VPV-HOOK\n" % arg))
+                rc, out = _run(self.root)
+                self.assertEqual(rc, 0, out)
+                self.assertIn(" 0 unguarded, 0 unverified markers", out)
+
+    def test_s1_a_call_cut_at_a_lambda_body_still_judges_the_completed_argument(self):
+        # the statement ends at the lambda's `{` (ConfigEditorWindow QueueDelayShowsOff form): parameter 0 is complete
+        _w(self.root, self.GATED, self.PARAM_MARKER)
+        call = "\t\tvectorEstimate.Drop(%s,   // VPV-HOOK\n\t\t\t[&] { return n > 0; });\n"
+        _w(self.root, BILL, _bill(call % "originalPathwayOn()"))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        _w(self.root, BILL, _bill(call % "true"))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("gated-arg-unverified: Drop", out)
+
+    def test_s1_a_member_predicate_marker_does_not_judge_arguments(self):
+        _w(self.root, self.GATED, "struct State\n{\n\tbool originalPathway;\n\tbool EndLease(int n)   // VPV-GATED\n\t{\n"
+                                  "\t\tif (originalPathway) return false;\n\t\treturn n > 0;\n\t}\n};\n")
+        _w(self.root, BILL, _bill("\t\tvectorEstimate.EndLease(0);   // VPV-HOOK\n"))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+
+    # S5: a local that shadows a predicate name
+    def test_red_s5_a_shadowing_local_is_not_a_guard(self):
+        for name, body in (
+                ("constant local", "\t\tbool originalPathway = false;\n\t\tif (!originalPathway) vectorEngine.PlanAhead(frame);   // VPV-HOOK\n"),
+                ("call local", "\t\tconst bool originalPathway = Decide(frame);\n\t\tif (!originalPathway) vectorEngine.PlanAhead(frame);   // VPV-HOOK\n"),
+                ("reassigned", "\t\tconst bool originalPathway = pipelineSlots.OriginalPathway();\n\t\toriginalPathway = false;\n"
+                               "\t\tif (!originalPathway) vectorEngine.PlanAhead(frame);   // VPV-HOOK\n"),
+                ("early return on a shadow", "\t\tbool originalPathway = false;\n\t\tif (originalPathway)\n\t\t\treturn;\n"
+                                             "\t\tvectorEngine.PlanAhead(frame);   // VPV-HOOK\n")):
+            with self.subTest(name):
+                _w(self.root, BILL, _bill(body))
+                rc, out = _run(self.root)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("UNGUARDED %s:" % BILL, out)
+
+    def test_green_s5_the_pathway_query_declaration_still_guards(self):
+        for decl in ("const bool originalPathway = pipelineSlots.OriginalPathway();",
+                     "const bool originalPathway = OriginalPathwayOf(frame);"):
+            with self.subTest(decl):
+                _w(self.root, BILL, _bill("\t\t%s\n\t\tif (!originalPathway) vectorEngine.PlanAhead(frame);   // VPV-HOOK\n" % decl))
+                rc, out = _run(self.root)
+                self.assertEqual(rc, 0, out)
+
+    def test_red_s5_a_gated_body_with_a_shadowing_local_is_unverified(self):
+        _w(self.root, self.GATED, "struct State\n{\n\tbool EndLease(Ctx& c)   // VPV-GATED\n\t{\n"
+                                  "\t\tbool originalPathway = false;\n\t\tif (originalPathway) return false;\n\t\treturn true;\n\t}\n};\n")
+        _w(self.root, BILL, _bill("\t\tvectorEstimate.EndLease(ctx);   // VPV-HOOK\n"))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("UNVERIFIED VPV-GATED marker", out)
+
+    # S4: one approval row admits at most max_sites new sites
+    def _two_new_sites(self):
+        _w(self.root, BILL, _bill("\t\tint keep = 0;   // VPV-HOOK\n"))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(chg.main(["--root", self.root, "--no-git", "--files", BILL, "--write-manifest", "--write-budget"]), 0)
+        site = "\t\tif (!pipelineSlots.OriginalPathway()) vectorEngine.PlanAhead(frame);   // VPV-HOOK\n"
+        _w(self.root, BILL, _bill("\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n" + site + "\t\tdoBill();\n" + site))
+        _w(self.root, chg.BUDGET_PATH, '{"files": {"%s": 3}}' % BILL)
+
+    def _approval(self, extra=""):
+        _w(self.root, chg.APPROVALS_PATH, '{"approvals": [{"id": "HOOK-APPROVAL-1", "file": "%s", "text_contains": '
+                                          '"vectorEngine.PlanAhead(frame)", "seam": "S2", "who": "coordinator", '
+                                          '"when": "2026-11-21", "expiry": null%s}]}' % (BILL, extra))
+
+    def test_red_s4_one_approval_row_admitting_two_sites_fails(self):
+        self._two_new_sites()
+        self._approval()
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("APPROVAL OVER HOOK-APPROVAL-1 approves 2 sites > max_sites 1", out)
+        self.assertIn("FAIL (rule 32 approvals)", out)
+
+    def test_green_s4_an_explicit_max_sites_admits_them(self):
+        self._two_new_sites()
+        self._approval(', "max_sites": 2')
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("2 new (2 approved)", out)
+
+    def test_red_s4_an_invalid_max_sites_fails(self):
+        self._two_new_sites()
+        for bad in ('0', '"2"', 'true', '-1'):
+            with self.subTest(bad):
+                self._approval(', "max_sites": %s' % bad)
+                rc, out = _run(self.root)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("APPROVAL INVALID HOOK-APPROVAL-1", out)
+
+
+class HeaderEditDoesNotExemptTest(unittest.TestCase):
+    """HOOKGATE-CHECKER-HOLES S2: an added header line of a Bill function no longer exempts its whole body."""
+
+    GIT_ENV = CheckHookGatingTest.GIT_ENV
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = self.td.name
+        _w(self.root, BILL, _bill("\t\tdoBill();\n"))
+        self._git("init", "-q")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "bill")
+        self.bill = self._git("rev-parse", "HEAD")
+        _w(self.root, chg.SLOTS_HEADER, SLOTS)
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", self.root] + list(args), check=True, env=self.GIT_ENV,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode("utf-8", "replace").strip()
+
+    def _check(self, text):
+        _w(self.root, BILL, text)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "vp")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = chg.main(["--root", self.root, "--base-ref", self.bill, "--files", BILL, "--rev", "HEAD"])
+        return rc, buf.getvalue()
+
+    def test_red_s2_an_edited_bill_header_does_not_exempt_the_body(self):
+        text = _bill("\t\tdoBill();\n\t\tvectorEngine.PlanAhead(frame);   // VPV-HOOK\n").replace(
+            "\tvoid Render()\n", "\tvoid Render(int extra)\n")
+        rc, out = self._check(text)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("UNGUARDED %s:" % BILL, out)
+        self.assertIn("PlanAhead", out)
+
+    def test_red_s2_a_new_overload_reusing_a_bill_name_is_judged(self):
+        text = _bill("\t\tdoBill();\n").replace(
+            "};\n", "\tvoid doBill(int n)\n\t{\n\t\tvectorEngine.PlanAhead(frame);   // VPV-HOOK\n\t}\n};\n")
+        rc, out = self._check(text)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("UNGUARDED %s:" % BILL, out)
+
+    def test_green_s2_a_wholly_new_function_is_still_vp_function(self):
+        text = _bill("\t\tdoBill();\n").replace(
+            "};\n", "\tvoid VpPlanAhead()\n\t{\n\t\tvectorEngine.PlanAhead(frame);   // VPV-HOOK\n\t}\n};\n")
+        rc, out = self._check(text)
+        self.assertEqual(rc, 0, out)
+        self.assertIn(" 0 unguarded, 0 unverified markers", out)
+
+    def test_green_s2_a_new_member_initialiser_lambda_is_vp_function(self):
+        # LibplaceboVideoRenderer.cpp dejudderBinding form: a new member whose lambda body is VP-V's
+        text = _bill("\t\tdoBill();\n").replace(
+            "};\n", "\tVpMotion::Binding vpBinding{ this,   // VPV-HOOK\n"
+                    "\t\t[](void* self) { static_cast<Impl*>(self)->vpReset.store(true); } };   // VPV-HOOK\n};\n")
+        rc, out = self._check(text)
+        self.assertEqual(rc, 0, out)
+        self.assertIn(" 0 unguarded, 0 unverified markers", out)
+
+    def test_red_s2_a_lambda_inside_an_edited_bill_function_is_judged(self):
+        text = _bill("\t\tdoBill();\n\t\tauto f = [&]()\n\t\t{\n\t\t\tvectorEngine.PlanAhead(frame);   // VPV-HOOK\n\t\t};\n").replace(
+            "\tvoid Render()\n", "\tvoid Render(int extra)\n")
+        rc, out = self._check(text)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("UNGUARDED %s:" % BILL, out)
+
+
 if __name__ == "__main__":
     unittest.main()

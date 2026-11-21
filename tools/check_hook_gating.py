@@ -29,7 +29,12 @@ Every hook STATEMENT inside a function body of a Bill-owned production file must
             (predicate from the list above) at the body's top level, preceded only by inert statements
             (declarations without calls, and `const bool originalPathway = <...>OriginalPathway[Of](<x>.host);`,
             the guard's own predicate); any earlier block, call or assignment leaves the marker unverified.
-            A marker without that early return is a hit ("gated-marker-unverified").
+            A marker without that early return is a hit ("gated-marker-unverified"). When the early return tests
+            a PARAMETER, every call must pass a predicate form for it ("gated-arg-unverified" otherwise, S1).
+            A local `bool originalPathway = <not the pathway query>;` or a plain assignment to a predicate name
+            shadows it for the whole function: no guard, early return or gated body may rely on it (S5).
+  vp-function  the innermost NAMED enclosing function is absent at --base-ref (header line added, name unused
+            by Bill's base file); an edited header of a Bill function no longer exempts its body (S2).
   allowed   its callee is in ALLOW_CALLEES or the site is in ALLOW_SITES (reason required; reported).
   inert     a declaration without a call, a guard line itself, a brace / comment / preprocessor line.
 Anything else is a hit ("unguarded"): file:line, exit 1.
@@ -58,7 +63,7 @@ file (a block, a cluster, or one line). docs/audit/hook-sites.json is the MANIFE
 anchor = enclosing symbol + 1-2 Bill lines before/after, the hook lines, the gate class; seeded with --write-manifest,
 the re-graft script's input); docs/audit/hook-budget.json holds the sites-per-file ceilings (only DOWN; seeded with
 --write-budget); docs/audit/hook-approvals.json lists the coordinator-approved seam ids (HOOK-APPROVAL-<n>: file +
-a text fragment + seam + expiry). A site whose (file, whitespace-insensitive text) is not in the manifest is NEW and
+a text fragment + seam + expiry; one row approves at most `max_sites` new sites, default 1, S4). A site whose (file, whitespace-insensitive text) is not in the manifest is NEW and
 fails unless an approval matches it; a production file over its ceiling fails; a count below the ceiling is reported
 as "ratchet down". Second summary line: `hook sites: <n> sites, <new> new (<approved> approved), <removed> removed,
 <over> over budget; manifest <state>`.
@@ -528,11 +533,17 @@ def _unparen(t):
     return t
 
 
-def negative_guard(cond, vp_slots):
+def _pred_term(term, bad=frozenset()):
+    """`term` is a predicate form, and not a bare local name shadowed by a non-pathway value (HOOKGATE-CHECKER-HOLES S5)."""
+    t = _unparen(term)
+    return bool(PRED_RE.fullmatch(t)) and t not in bad
+
+
+def negative_guard(cond, vp_slots, bad=frozenset()):
     """True when the condition is false in the Original pathway: a top-level && term is `!<pred>` or Runs(VpSlot)."""
     for term in _top_split(cond, "&&"):
         t = _unparen(term)
-        if t.startswith("!") and PRED_RE.fullmatch(_unparen(t[1:])):
+        if t.startswith("!") and _pred_term(t[1:], bad):
             return True
         m = RUNS_RE.fullmatch(t)
         if m and m.group(1) in vp_slots:
@@ -540,15 +551,15 @@ def negative_guard(cond, vp_slots):
     return False
 
 
-def positive_guard(cond):
+def positive_guard(cond, bad=frozenset()):
     """True when the condition is true in the Original pathway: a top-level || term is `<pred>`."""
     for term in _top_split(cond, "||"):
-        if PRED_RE.fullmatch(_unparen(term)):
+        if _pred_term(term, bad):
             return True
     return False
 
 
-def early_return_before(func, stmt_start, parse_only=False):
+def early_return_before(func, stmt_start, parse_only=False, bad=frozenset()):
     """An `if (<positive>) return ...;` at the function's top level before line stmt_start."""
     for ch in func.children:
         if ch.start >= stmt_start and not parse_only:
@@ -560,17 +571,70 @@ def early_return_before(func, stmt_start, parse_only=False):
         body = rest
         if ch.kind == "open":
             body = " ".join(x.text for x in ch.children)
-        if positive_guard(cond) and re.match(r"^\s*(?:\{\s*)?return\b", body):
+        if positive_guard(cond, bad) and re.match(r"^\s*(?:\{\s*)?return\b", body):
             return True
     return False
 
 
-def _positive_early_return(ch):
+def _positive_early_return(ch, bad=frozenset()):
     c = _cond_of(ch.text)
     if not c:
         return False
     body = " ".join(x.text for x in ch.children) if ch.kind == "open" else c[1]
-    return positive_guard(c[0]) and bool(re.match(r"^\s*(?:\{\s*)?return\b", body))
+    return positive_guard(c[0], bad) and bool(re.match(r"^\s*(?:\{\s*)?return\b", body))
+
+
+# HOOKGATE-CHECKER-HOLES S5: PRED_RE matches the predicate by NAME, so `bool originalPathway = false;` used to satisfy
+# a guard. A bare predicate name declared in the enclosing function counts only when its value is the pathway query
+# itself (a PRED_RE form, OriginalPathwayOf(<x>) or the hub query); a declaration without a value, any other value, or
+# a plain assignment to it anywhere in the function shadows the predicate, and guards naming it no longer count.
+PRED_DECL_RE = re.compile(r"^(?:(?:const|static|constexpr)\s+)*bool\s+(originalPathway|pipelineOriginalPathway)\s*"
+                          r"(?:=\s*(?P<eq>.+?)|\{(?P<br>.*)\}|\((?P<pa>.*)\))?\s*$", re.S)
+PRED_ASSIGN_RE = re.compile(r"^(originalPathway|pipelineOriginalPathway)\s*(?:=(?!=)|\|=|&=|\^=)")
+PATHWAY_INIT_RE = re.compile(
+    r"(?:[A-Za-z_][\w:]*(?:\.|->))*(?:OriginalPathway\(\s*\)|pipelineOriginalPathway|originalPathwayOn\(\s*\))"
+    r"|(?:OriginalPathwayOf|Vpv::Hub::ExtensionHub::Instance\(\s*\)\.OriginalPathway)\(\s*[A-Za-z_]\w*(?:(?:\.|->)\w+)*\s*\)")
+_SHADOW_CACHE = {}
+
+
+def _walk(node):
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        for ch in n.children:
+            yield ch
+            if ch.kind == "open":
+                stack.append(ch)
+
+
+def _shadowing_piece(piece):
+    """The predicate name a statement piece shadows (a non-pathway declaration or a plain assignment), or None."""
+    m = PRED_DECL_RE.match(piece)
+    if m:
+        init = m.group("eq") or m.group("br") or m.group("pa")
+        if init is None or not PATHWAY_INIT_RE.fullmatch(_unparen(init.strip())):
+            return m.group(1)
+        return None
+    m = PRED_ASSIGN_RE.match(piece)
+    return m.group(1) if m else None
+
+
+def shadowed_predicates(func):
+    """The bare predicate names `func` declares or assigns with a value that is not the pathway query (S5)."""
+    if func is None:
+        return frozenset()
+    hit = _SHADOW_CACHE.get(id(func))
+    if hit is not None and hit[0] is func:
+        return hit[1]
+    bad = set()
+    for ch in _walk(func):
+        for piece in ch.text.split(";"):
+            name = _shadowing_piece(piece.strip())
+            if name:
+                bad.add(name)
+    bad = frozenset(bad)
+    _SHADOW_CACHE[id(func)] = (func, bad)
+    return bad
 
 
 # The one call allowed before a VPV-GATED guard: the declaration of the guard's own predicate from the pathway query
@@ -593,9 +657,69 @@ def gated_guard_first(func):
         if PATHWAY_QUERY_DECL_RE.match(ch.text.strip()):
             continue   # `const bool originalPathway = <...>OriginalPathway[Of](<x>.host);`: the guard's own predicate
         pieces = [p.strip() for p in ch.text.split(";") if p.strip()]
+        if any(_shadowing_piece(p) for p in pieces):
+            return False   # S5: `bool originalPathway = false;` before the guard is a declaration without a call, not the query
         if not all(_inert_piece(p, set()) for p in pieces):
             return False
     return False
+
+
+def _top_args(text, open_at, angles=False, partial=False):
+    """The top-level comma-separated arguments of the parenthesis that opens at text[open_at], or None if unbalanced.
+    angles: `<` / `>` nest too (a parameter list's template types; never used for call arguments, where `<` compares).
+    partial: when the text ends first (a statement cut at a lambda body's `{`), the arguments completed so far."""
+    opens, closes = ("([{<", ")]}>") if angles else ("([{", ")]}")
+    depth, cur, args = 0, [], []
+    for ch in text[open_at:]:
+        if ch in opens:
+            depth += 1
+            if depth == 1:
+                continue
+        elif ch in closes:
+            depth -= 1
+            if depth == 0:
+                last = "".join(cur).strip()
+                return args + [last] if (args or last) else []
+        elif ch == "," and depth == 1:
+            args.append("".join(cur).strip())
+            cur = []
+            continue
+        cur.append(ch)
+    return args if partial else None
+
+
+def gated_predicate_param(func):
+    """HOOKGATE-CHECKER-HOLES S1: the index of the parameter a VPV-GATED body's early return tests, or None (the
+    predicate is a member, or the body declares it from the pathway query)."""
+    for ch in func.children:
+        if not _positive_early_return(ch):
+            continue
+        c = _cond_of(ch.text)
+        names = [_unparen(t) for t in _top_split(c[0], "||") if PRED_RE.fullmatch(_unparen(t))]
+        bare = [n for n in names if re.fullmatch(r"[A-Za-z_]\w*", n)]
+        if not bare:
+            return None
+        header = func.text
+        k = header.rfind(")")
+        depth, open_at = 0, None
+        for i in range(k, -1, -1):
+            if header[i] == ")":
+                depth += 1
+            elif header[i] == "(":
+                depth -= 1
+                if depth == 0:
+                    open_at = i
+                    break
+        if open_at is None:
+            return None
+        params = _top_args(header.replace("->", "\x00\x01"), open_at, angles=True) or []
+        for idx, p in enumerate(params):
+            decl = p.split("=", 1)[0].strip()
+            m = re.search(r"([A-Za-z_]\w*)\s*$", decl)
+            if m and m.group(1) in bare:
+                return idx
+        return None
+    return None
 
 
 def allowed_callee(text):
@@ -605,14 +729,33 @@ def allowed_callee(text):
     return None
 
 
-def gated_callee(text, gated):
+def _gated_args_ok(text, name, idx, bad=frozenset()):
+    """S1: every call of `name` in `text` passes a predicate form (PRED_RE, not a shadowed local) at parameter `idx`."""
+    calls = list(re.finditer(r"\b%s\s*\(" % re.escape(name), text))
+    if not calls:
+        return False
+    for m in calls:
+        args = _top_args(text, m.end() - 1, partial=True)
+        if args is None or idx >= len(args) or not _pred_term(args[idx], bad):
+            return False
+    return True
+
+
+def gated_callee(text, gated, bad=frozenset()):
+    """(name, file, line, verified, args_ok) of the first VPV-GATED callee called in `text`, or None. args_ok is False
+    when the marker's early return tests a PARAMETER and a call passes anything but a predicate form for it (S1)."""
+    params = getattr(gated, "param", {})
     for name, (rel, line, verified) in gated.items():
         if re.search(r"\b%s\s*\(" % re.escape(name), text):
-            return name, rel, line, verified
+            idx = params.get(name)
+            ok = True if idx is None else _gated_args_ok(text, name, idx, bad)
+            return name, rel, line, verified, ok
     return None
 
 
 def guarded(stmt, vp_slots, gated=None):
+    func = enclosing_function(stmt)
+    bad = shadowed_predicates(func)
     # 1. enclosing blocks (the function's own body counts up to the function)
     s = stmt
     while s is not None and s.kind != "root":
@@ -620,12 +763,12 @@ def guarded(stmt, vp_slots, gated=None):
             if is_function_header(s.text):
                 break
             c = _cond_of(s.text)
-            if c and negative_guard(c[0], vp_slots):
+            if c and negative_guard(c[0], vp_slots, bad):
                 return "guarded"
             if allowed_callee(s.text) is not None:
                 return "allowed-enclosing"
-            g = gated_callee(s.text, gated or {})
-            if g and g[3]:
+            g = gated_callee(s.text, gated or {}, bad)
+            if g and g[3] and g[4]:
                 return "gated-enclosing"
             if s.text.strip() == "else" or s.text.strip().startswith("else "):
                 # the else of a positive check: the previous sibling header
@@ -633,24 +776,23 @@ def guarded(stmt, vp_slots, gated=None):
                 k = sib.index(s)
                 if k > 0:
                     pc = _cond_of(sib[k - 1].text)
-                    if pc and positive_guard(pc[0]):
+                    if pc and positive_guard(pc[0], bad):
                         return "guarded"
         s = s.parent
     # 2. brace-less if: the statement itself or its previous sibling carries the condition
     c = _cond_of(stmt.text)
-    if c and negative_guard(c[0], vp_slots):
+    if c and negative_guard(c[0], vp_slots, bad):
         return "guarded"
     sib = stmt.parent.children
     k = sib.index(stmt)
     if k > 0:
         pc = _cond_of(sib[k - 1].text)
-        if pc and sib[k - 1].kind == "stmt" and pc[1] == "" and negative_guard(pc[0], vp_slots):
+        if pc and sib[k - 1].kind == "stmt" and pc[1] == "" and negative_guard(pc[0], vp_slots, bad):
             return "guarded"
         if sib[k - 1].kind == "open":
             pass
     # 3. early return in the enclosing function
-    func = enclosing_function(stmt)
-    if func is not None and early_return_before(func, stmt.start):
+    if func is not None and early_return_before(func, stmt.start, bad=bad):
         return "guarded"
     # 4. a short-circuit: `x = !<pred> && call(...)` or `!<pred> && call(...)` (the call never runs in Original)
     expr = stmt.text
@@ -661,7 +803,7 @@ def guarded(stmt, vp_slots, gated=None):
     terms = _top_split(expr.rstrip(";"), "&&")
     if len(terms) > 1:
         first = _unparen(terms[0])
-        if first.startswith("!") and PRED_RE.fullmatch(_unparen(first[1:])):
+        if first.startswith("!") and _pred_term(first[1:], bad):
             return "guarded"
     # 5. an inline `if (<allowed callee>(...)) stmt;` runs its body only when the callee says so
     if c and c[1] and allowed_callee(c[0]) is not None:
@@ -671,9 +813,18 @@ def guarded(stmt, vp_slots, gated=None):
 
 # ---------------------------------------------------------------- gated callees
 
+class GatedMap(dict):
+    """{name: (file, line, verified)}; .param[name] = the index of the parameter the early return tests (S1), when it
+    tests a parameter."""
+
+    def __init__(self, *a, **k):
+        dict.__init__(self, *a, **k)
+        self.param = {}
+
+
 def gated_markers(tree, files):
     """{name: (file, line, verified)} for every `// VPV-GATED` function definition in `files`."""
-    out = {}
+    out = GatedMap()
     pre = tree.grep_l("VPV-GATED")
     if pre is not None:
         files = [f for f in files if f in set(pre)]
@@ -706,6 +857,11 @@ def gated_markers(tree, files):
                         name = m.group(1).split("::")[-1]
                         verified = gated_guard_first(ch)
                         out[name] = (rel, ch.start, verified)
+                        idx = gated_predicate_param(ch) if verified else None
+                        if idx is not None:
+                            out.param[name] = idx
+                        else:
+                            out.param.pop(name, None)
     return out
 
 
@@ -777,7 +933,71 @@ def _inert_piece(piece, locals_, inputs=frozenset()):
     return False
 
 
-def classify_statement(stmt, hook_lines, added, vp_slots, gated, allow_used):
+NO_BASE = object()   # check_file / classify_statement called without the base-ref identifiers (legacy callers)
+FUNC_NAME_RE = re.compile(r"([A-Za-z_][\w:]*)\s*\([^()]*(?:\([^()]*\)[^()]*)*\)\s*(?:const|noexcept|override|final|volatile|&|&&)?\s*$")
+
+
+class BaseIdents(frozenset):
+    """The call/definition names of the base file, plus `.words`: every identifier it uses (for declarator names)."""
+    words = frozenset()
+
+
+DECL_SCOPE_RE = re.compile(r"^\s*(?:template\s*<.*>\s*)?(?:class|struct|union|enum|namespace|extern)\b")
+DECLARATOR_RE = re.compile(r"([A-Za-z_]\w*)\s*(?:=\s*)?$")
+
+
+def base_identifiers(text):
+    """The names Bill's base file calls or defines (an identifier followed by `(`); None = the file is absent at base."""
+    if text is None:
+        return None
+    code = strip_code(text)
+    out = BaseIdents(re.findall(r"\b([A-Za-z_]\w*)\s*\(", code))
+    out.words = frozenset(re.findall(r"\b[A-Za-z_]\w*\b", code))
+    return out
+
+
+def _new_declaration(lam, added, base_idents):
+    """A lambda with no named function around it (a member / namespace-scope initializer): it is VP-V's only when
+    every enclosing node up to the class / namespace scope starts on an added line and the declaration it initialises
+    names something Bill's base file never uses."""
+    n, top = lam, None
+    while n is not None and n.kind != "root" and not DECL_SCOPE_RE.match(n.text):
+        if n.kind == "open" and n.start not in added:
+            return False
+        top = n
+        n = n.parent
+    if top is None or top is lam:
+        return False
+    d = DECLARATOR_RE.search(top.text.strip())
+    if not d:
+        return False
+    return base_idents is None or d.group(1) not in getattr(base_idents, "words", base_idents)
+
+
+def vp_function(func, added, base_idents=NO_BASE):
+    """HOOKGATE-CHECKER-HOLES S2: `func` is a function ABSENT at the base ref (its body is VP-V's; its call sites are
+    checked instead). An added header line alone (a new parameter, a reformat) no longer exempts a Bill function: the
+    innermost NAMED enclosing function (a lambda defers to the function around it) must have an added header and a
+    name Bill's base file never uses."""
+    if func is None or func.start not in added:
+        return False
+    if base_idents is NO_BASE:
+        return True
+    f, lam = func, func
+    while f is not None:
+        m = None if LAMBDA_HEADER_RE.search(f.text.strip()) else FUNC_NAME_RE.search(f.text)
+        if m:
+            break
+        lam = f
+        f = enclosing_function(f)
+    if f is None:
+        return _new_declaration(lam, added, base_idents)
+    if f.start not in added:
+        return False
+    return base_idents is None or m.group(1).split("::")[-1] not in base_idents
+
+
+def classify_statement(stmt, hook_lines, added, vp_slots, gated, allow_used, base_idents=NO_BASE):
     text = stmt.text
     if INERT_RE.match(text) or not text:
         return "inert", None
@@ -787,16 +1007,20 @@ def classify_statement(stmt, hook_lines, added, vp_slots, gated, allow_used):
     g = guarded(stmt, vp_slots, gated)
     if g:
         return g, None
-    gc = gated_callee(text, gated)
+    func = enclosing_function(stmt)
+    gc = gated_callee(text, gated, shadowed_predicates(func))
     if gc:
-        name, rel, line, verified = gc
-        return ("gated" if verified else "gated-marker-unverified"), "%s (%s:%d)" % (name, rel, line)
+        name, rel, line, verified, args_ok = gc
+        if not verified:
+            return "gated-marker-unverified", "%s (%s:%d)" % (name, rel, line)
+        if not args_ok:
+            return "gated-arg-unverified", "%s (%s:%d) parameter %d" % (name, rel, line, gated.param[name])
+        return "gated", "%s (%s:%d)" % (name, rel, line)
     k = allowed_callee(text)
     if k is not None:
         allow_used[("callee", k)] = allow_used.get(("callee", k), 0) + 1
         return "allowed", "callee: " + ALLOW_CALLEES[k]["callee"]
-    func = enclosing_function(stmt)
-    if func is not None and func.start in added:
+    if vp_function(func, added, base_idents):
         return "vp-function", None   # a function absent at the base ref: its CALL SITES are checked, not its body
     if c and stmt.kind == "open" and c[1] == "":
         return "inert", None   # an `if (<vp condition>)` header: its body statements are judged on their own
@@ -933,7 +1157,7 @@ def extract_sites(rel, text, hook_lines, tree_parse, classes_by_line):
             i += 1
         site_lines = [lines[n - 1].rstrip() for n in range(a, b + 1)]
         gate = "declaration"
-        order = ["unguarded", "gated-marker-unverified", "non-pathway", "vp-function", "allowed", "allowed-enclosing",
+        order = ["unguarded", "gated-marker-unverified", "gated-arg-unverified", "non-pathway", "vp-function", "allowed", "allowed-enclosing",
                  "gated", "gated-enclosing", "guarded", "inert", "declaration"]
         found = [classes_by_line[n] for n in range(a, b + 1) if n in classes_by_line]
         for cls in order:
@@ -1046,7 +1270,7 @@ def site_checks(tree, per_file, root=None, rev=None, no_git=True):
     res = {"sites": len(sites), "new": [], "approved": [], "removed": [], "over": [], "ratchet": [],
            "manifest": "none" if manifest is None else MANIFEST_PATH, "budget": "none" if budget is None else BUDGET_PATH,
            "approvals_used": [], "expired": [], "unknown": [], "temporary": [], "trigger_errors": [],
-           "approval_missing": [], "budget_errors": [], "headroom": []}
+           "approval_missing": [], "budget_errors": [], "headroom": [], "approval_over": []}
     ts = trigger_scan(tree, root, rev, no_git)
     known_t, landed_t = ts["known"], ts["landed"]
     res["trigger_errors"] = ts["errors"]
@@ -1094,6 +1318,18 @@ def site_checks(tree, per_file, root=None, rev=None, no_git=True):
         for key, ids in known.items():
             if key not in seen:
                 res["removed"].extend(ids)
+        # HOOKGATE-CHECKER-HOLES (4): one approval row approves at most max_sites new sites (default 1), so a single
+        # `text_contains` cannot silently admit every later copy of the same statement.
+        used = {}
+        for aid in res["approvals_used"]:
+            used[aid] = used.get(aid, 0) + 1
+        rows = {ap.get("id"): ap for ap in approvals.get("approvals", [])}
+        for aid, n in sorted(used.items()):
+            cap = rows.get(aid, {}).get("max_sites", 1)
+            if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
+                res["approval_over"].append("APPROVAL INVALID %s max_sites %r (a positive integer)" % (aid, cap))
+            elif n > cap:
+                res["approval_over"].append("APPROVAL OVER %s approves %d sites > max_sites %d" % (aid, n, cap))
     if budget is not None:
         limits = dict(budget.get("files", {}))
         for f, tmp in sorted((budget.get("temporary") or {}).items()):
@@ -1138,7 +1374,7 @@ def non_pathway(rel):
     return rel.startswith(NON_PATHWAY_PREFIXES) or rel in NON_PATHWAY_FILES
 
 
-def check_file(tree, rel, vp_slots, gated, allow_used, base_ref=None, no_git=False, added=None):
+def check_file(tree, rel, vp_slots, gated, allow_used, base_ref=None, no_git=False, added=None, base_idents=NO_BASE):
     text = tree.read(rel)
     hook_lines = hook_line_set(text)
     if text.splitlines() and text.splitlines()[0].strip().startswith("// VPV-HOOK-FILE"):
@@ -1169,7 +1405,7 @@ def check_file(tree, rel, vp_slots, gated, allow_used, base_ref=None, no_git=Fal
                 results.append({"file": rel, "line": st.start, "class": "allowed", "why": "site: " + e["reason"][:60], "text": st.text[:120]})
                 break
         else:
-            cls, why = classify_statement(st, hook_lines, added, vp_slots, gated, allow_used)
+            cls, why = classify_statement(st, hook_lines, added, vp_slots, gated, allow_used, base_idents)
             if cls == "unguarded" and non_pathway(rel):
                 cls = "non-pathway"
             results.append({"file": rel, "line": st.start, "class": cls, "why": why, "text": st.text[:120]})
@@ -1388,8 +1624,18 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
             added_by_file = {}
     per_file = []
     tree.prefetch([rel for rel, _ in files])
+    # S2: the names each changed file uses at Bill's base, so `vp-function` means a function ABSENT at the base ref
+    base_tree = Tree(root, base_ref) if (not no_git and added_by_file) else None
+    if base_tree is not None:
+        base_tree.prefetch([rel for rel, _ in files if added_by_file.get(rel)])
     for rel, bucket in files:
-        r = check_file(tree, rel, vp_slots, gated, allow_used, base_ref, no_git, added_by_file.get(rel))
+        idents = NO_BASE
+        if base_tree is not None:
+            try:
+                idents = base_identifiers(base_tree.read(rel))
+            except (OSError, RuntimeError):
+                idents = None   # absent at the base ref: every function in it is VP-V's
+        r = check_file(tree, rel, vp_slots, gated, allow_used, base_ref, no_git, added_by_file.get(rel), idents)
         r["bucket"] = bucket
         per_file.append(r)
     hits, unverified, untagged, allowed, counts = [], [], [], [], {}
@@ -1400,8 +1646,8 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
                 continue
             if s["class"] == "unguarded":
                 hits.append(s)
-            elif s["class"] == "gated-marker-unverified":
-                hits.append(s)   # the call site of an unverified marker is an unguarded hook
+            elif s["class"] in ("gated-marker-unverified", "gated-arg-unverified"):
+                hits.append(s)   # the call site of an unverified marker, or one passing a non-predicate argument (S1)
             elif s["class"] == "allowed":
                 allowed.append(s)
         if r["bucket"] == "production":
@@ -1436,8 +1682,9 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
             return any(n in since_added.get(s["file"], set()) for n in range(s["start"], s["end"] + 1))
         # A VPV-GATED marker lives in src/VP-V (outside since_added) and its body can lose the early return
         # without any Bill line changing: unverified markers are a whole-tree invariant (0 at a green base), so
-        # they and their call sites are kept under --since (HOOKGATE-CHECKER-HOLES (1)).
-        hits = [h for h in hits if _new(h) or h["class"] == "gated-marker-unverified"]
+        # they and their call sites are kept under --since (HOOKGATE-CHECKER-HOLES (1)). A marker that starts testing
+        # a parameter re-judges its old call sites without a Bill line changing, so S1 argument hits are kept too.
+        hits = [h for h in hits if _new(h) or h["class"] in ("gated-marker-unverified", "gated-arg-unverified")]
         untagged = [u for u in untagged if _new(u)]
         untagged_vpv = untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_used)
         stale = [x for x in stale if x not in allow_used]
@@ -1446,7 +1693,7 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
     hl = hook_lines_metric(tree, per_file, added_by_file, no_git, root)
     sc["hook_lines"] = hl
     rc = 1 if (hl["over"] or hits or unverified or (fail_untagged and untagged) or sc["new"] or sc["over"] or sc["expired"] or sc["unknown"] or
-                 sc["trigger_errors"] or sc["approval_missing"] or sc["budget_errors"] or untagged_vpv) else 0
+                 sc["trigger_errors"] or sc["approval_missing"] or sc["budget_errors"] or sc["approval_over"] or untagged_vpv) else 0
     return {"base_ref": base_ref, "rev": rev, "since": since, "vp_slots": sorted(vp_slots), "site_checks": sc, "gated": {k: list(v) for k, v in gated.items()},
             "files": per_file, "counts": counts, "hits": hits, "unverified": unverified, "untagged": untagged, "untagged_vpv": untagged_vpv,
             "allowed": allowed, "allow_used": {"%s:%d" % k: v for k, v in allow_used.items()}, "stale_allow": stale, "rc": rc}
@@ -1458,7 +1705,9 @@ def render(res):
     c = res["counts"]
     hook_stmts = sum(v for k, v in c.items() if k != "declaration")
     for s in res["hits"]:
-        out.append("  UNGUARDED %s:%d %s" % (s["file"], s["line"], s["text"]))
+        tail = ("   [gated-arg-unverified: %s is not passed a pathway predicate]" % s.get("why")
+                if s["class"] == "gated-arg-unverified" else "")
+        out.append("  UNGUARDED %s:%d %s%s" % (s["file"], s["line"], s["text"], tail))
     for s in res["unverified"]:
         out.append("  UNVERIFIED VPV-GATED marker (no `if (<original>) return` found) %s:%d %s" % (s["file"], s["line"], s["text"]))
     for s in res["untagged"]:
@@ -1498,7 +1747,7 @@ def render(res):
         out.append("  " + line)
     for line in sc["unknown"]:
         out.append("  UNKNOWN TRIGGER " + line)
-    for line in sc["trigger_errors"] + sc["approval_missing"] + sc["budget_errors"]:
+    for line in sc["trigger_errors"] + sc["approval_missing"] + sc["budget_errors"] + sc.get("approval_over", []):
         out.append("  " + line)
     for x in sc["temporary"]:
         out.append("  temporary ceiling %s %d (reverts to %d when %s land)" % (x["file"], x["limit"], x["reverts_to"], ", ".join(x["pending"])))
@@ -1531,12 +1780,15 @@ def render(res):
     if sc["trigger_errors"] or sc["approval_missing"] or sc["budget_errors"]:
         out.append("FAIL (rule 32 expiry inputs): the trigger source, an approval's file or the budget cannot be trusted; a missed "
                    "trigger never passes silently. Fix the trailer/id, the approval's file (renamed or moved?), or the budget.")
+    if sc.get("approval_over"):
+        out.append("FAIL (rule 32 approvals): one HOOK-APPROVAL row admits more new sites than its max_sites (default 1); each "
+                   "further site needs its own approval id from the coordinator, or an explicit max_sites on the row.")
     if sc["new"] or sc["over"]:
         out.append("FAIL (rule 32): a NEW hook site in a Bill file, or a file over its site ceiling: route the feature through an "
                    "existing seam (refs/107-host-seams-plan.md s1), or get a HOOK-APPROVAL id from the coordinator "
                    "(docs/audit/hook-approvals.json); ceilings only go down.")
     if res["rc"] and not (sc["new"] or sc["over"] or sc["expired"] or sc["unknown"] or sc["trigger_errors"] or sc["approval_missing"] or
-                          sc["budget_errors"] or res.get("untagged_vpv")) or res["hits"] or res["unverified"]:
+                          sc["budget_errors"] or sc.get("approval_over") or res.get("untagged_vpv")) or res["hits"] or res["unverified"]:
         out.append("FAIL: a VP-V hook in a Bill file runs in the Original pathway. Wrap the call site in the canonical guard "
                    "(`if (!pipelineSlots.OriginalPathway())`), or move the logic into its VP-V module behind a `// VPV-GATED` "
                    "function with `if (originalPathway) return;`, or ask the lead for an allow-list entry with a reason.")
