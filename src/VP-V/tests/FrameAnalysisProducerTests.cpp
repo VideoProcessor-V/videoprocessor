@@ -45,7 +45,9 @@ namespace FrameAnalysisProducerTestsNs
 				uint32_t q6 = static_cast<uint32_t>(sample.luma) * 64u;
 				if (const uint16_t* lanes = source.LumaPlaneRow(y))
 				{
-					const uint32_t lane = lanes[x], c = lane / 64u, f = lane % 64u;
+					// P010 / P210 are ten-bit containers (padding bits carry no fraction); decoded DV lanes are 12-bit.
+					const bool dv = source.format == AnalysisLumaFormat::DecodedDolbyVision422;
+					const uint32_t lane = lanes[x], c = lane / 64u, f = dv ? lane % 64u : 0u;
 					const int lo = source.PlaneLuma(static_cast<uint16_t>(c));
 					const int hi = source.PlaneLuma(static_cast<uint16_t>(c < 1023u ? c + 1u : c));
 					Assert::AreEqual(static_cast<int>(sample.luma), lo, L"Sample() is the whole-code value of the lane");
@@ -351,9 +353,18 @@ namespace FrameAnalysisProducerTestsNs
 					Put16(&data[static_cast<size_t>(y) * frame.source.rowBytes + static_cast<size_t>(x) * 2], lane);
 		}
 
+		// A limited 12-bit plane: the P210 layout declared as the decoded DV plane (code12 << 4 lanes; same 4:2:2 layout).
+		static Frame TwelveBitPlane()
+		{
+			Frame frame = Make(Kind::P210, 0);
+			frame.source.format = AnalysisLumaFormat::DecodedDolbyVision422;
+			return frame;
+		}
+
 		TEST_METHOD(TwelveBitPlaneKeepsItsFractionOnTheAxis)
 		{
-			Frame frame = Make(Kind::P010, 0);
+			Frame frame = TwelveBitPlane();
+			Assert::IsTrue(frame.source.IsValid(), L"decoded DV plane (precondition)");
 			Assert::IsFalse(VpFrameAnalysis::SamplerCodesAreFullRange(frame.source), L"identity studio map (precondition)");
 			Assert::IsFalse(VpFrameAnalysis::NeedsDecode(frame.source), L"limited plane: lanes read in place (precondition)");
 			const uint64_t n = static_cast<uint64_t>(kWidth) * kHeight;
@@ -379,17 +390,32 @@ namespace FrameAnalysisProducerTestsNs
 			Assert::AreEqual(0.0, m.range.clipped, 0.0, L"below 1019.0");
 			Assert::AreEqual(static_cast<uint32_t>(n), m.luma.histogram[940]);
 
-			FillLanes(frame, static_cast<uint16_t>((1018u << 6) | 63u)); // 1018.984: still below clipped 1019.0
+			FillLanes(frame, static_cast<uint16_t>((1018u << 6) | 48u)); // 1018.75 (12-bit code 4075): below clipped 1019.0
 			Assert::IsTrue(VpFrameAnalysis::Reduce(frame.source, all, m));
 			Assert::AreEqual(0.0, m.range.clipped, 0.0);
-			Assert::AreEqual(1018.0 + 63.0 / 64.0, m.luma.mean, 0.0);
+			Assert::AreEqual(1018.75, m.luma.mean, 0.0);
+		}
+
+		// Gate cb-chk r1 SHOULD 1: P010 / P210 are ten-bit containers; junk in the six padding bits never becomes a fraction.
+		TEST_METHOD(TenBitPlanePaddingBitsAreIgnored)
+		{
+			for (Kind kind : { Kind::P010, Kind::P210 })
+			{
+				Frame frame = Make(kind, 0);
+				FillLanes(frame, static_cast<uint16_t>((81u << 6) | 37u));   // code 81 + junk 37 in the padding
+				VpFrameAnalysis::Measured m;
+				Assert::IsTrue(VpFrameAnalysis::Reduce(frame.source, Rect{ 0, 0, kWidth, kHeight }, m), KindName(kind));
+				Assert::AreEqual(81.0, m.luma.mean, 0.0, KindName(kind));
+				Assert::AreEqual(1.0, m.range.nearBlack, 0.0, L"code 81 is near black; the padding is not a fraction");
+				Assert::AreEqual(0.0, m.grain.rms, 0.0, KindName(kind));
+			}
 		}
 
 		TEST_METHOD(TwelveBitGrainIsMeasuredBelowOneCode)
 		{
 			// A checkerboard of 500.0 and 500.25 (Q6 32000 / 32016): each 8x8 block holds 32 of each, so its variance is
 			// (16 / 2)^2 = 64 Q6^2 = 1/64 code^2 and the RMS is exactly 0.125 code. v1 floored both to 500: RMS 0.
-			Frame frame = Make(Kind::P010, 0);
+			Frame frame = TwelveBitPlane();
 			std::vector<uint8_t>& data = *frame.bytes;
 			for (int y = 0; y < kHeight; ++y)
 				for (int x = 0; x < kWidth; ++x)

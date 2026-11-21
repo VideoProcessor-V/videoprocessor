@@ -372,6 +372,32 @@ namespace SharedUnitsW1TestsNs2
 			Assert::AreEqual(16048u, r.p99);
 		}
 
+		// Gate cb-chk r1 MUST 1: the evidence rect keeps its v1 (ten-bit) rule. An 8 x 10 half plane of ten-bit-origin 2x2
+		// means (multiples of 16): rows 0-1 bar 4096 (code 64), rows 2-7 picture 32000 (code 500), rows 8-9 a lighter bar 5856
+		// (91.5). v1 rect threshold: bin centres 4128 and 32032, 4128 + 27904 / 16 = 5872, so the 5856 rows are NOT evidence.
+		// With exact p1 / p99 the threshold would be 4096 + 1744 = 5840 and those rows would count (y1 10).
+		TEST_METHOD(LaneStatsRectKeepsTheTenBitRule)
+		{
+			const uint32_t hw = 8, hh = 10;
+			std::vector<uint16_t> half(static_cast<size_t>(hw) * hh);
+			for (uint32_t y = 0; y < hh; ++y)
+				for (uint32_t x = 0; x < hw; ++x)
+					half[static_cast<size_t>(y) * hw + x] = static_cast<uint16_t>(y < 2u ? 4096u : (y < 8u ? 32000u : 5856u));
+			std::vector<uint8_t> out(VpUnit::SourceStats::kRecordBytes, 0);
+			Assert::IsTrue(VpUnit::SourceStats::ComputeRecord(half.data(), hw, hh, out.data(), out.size()));
+			VpUnit::SourceStats::Record r;
+			Assert::IsTrue(VpUnit::SourceStats::ReadRecord(out.data(), out.size(), &r));
+			Assert::AreEqual(1u, r.rectFound);
+			Assert::AreEqual(0u, r.rectX0);
+			Assert::AreEqual(8u, r.rectX1);
+			Assert::AreEqual(2u, r.rectY0);
+			Assert::AreEqual(8u, r.rectY1, L"the 5856 bar rows stay below the v1 threshold 5872");
+			// The published percentiles are exact (unit v2): targets 1, 40, 80.
+			Assert::AreEqual(4096u, r.p01);
+			Assert::AreEqual(32000u, r.p50);
+			Assert::AreEqual(32000u, r.p99);
+		}
+
 		// Exact percentiles always lie inside the samples' own range (v1's bin centre could exceed maxCode or undercut minCode).
 		TEST_METHOD(LaneStatsPercentilesLieWithinMinAndMax)
 		{
