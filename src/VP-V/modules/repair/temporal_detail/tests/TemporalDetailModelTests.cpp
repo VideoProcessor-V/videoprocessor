@@ -766,7 +766,7 @@ namespace VideoProcessorTest
 			const Stream st = BuildPan(Pattern("IBBBPBBB", 20), 0.0);
 			FieldMotionSource mo;
 			SetPan(mo, 20, 0.0, 0.0);
-			(void)Go(m, st.frames, &mo);
+			const Run prev = Go(m, st.frames, &mo);
 			const int base = m.Diag().resets;
 			{
 				// F2: a repeat (same sequence) returns the last output unchanged and advances nothing.
@@ -778,7 +778,7 @@ namespace VideoProcessorTest
 				const Plane again = m.Process(rep);
 				Assert::AreEqual(base, m.Diag().resets, L"a repeat does not reset");
 				Assert::AreEqual(20, m.Diag().frames, L"a repeat advances no state");
-				(void)again;
+				Assert::IsTrue(Same(again, prev.out.back()), L"a repeat returns the last frame's output unchanged");
 			}
 			Settings s2 = Steady();
 			s2.strength = 0.5;
@@ -1357,6 +1357,8 @@ namespace VideoProcessorTest
 			src.Prune(100);
 			Assert::AreEqual(size_t{ 0 }, src.CameraCount());
 			for (int i = 0; i < 12; ++i) Assert::AreEqual(1, static_cast<int>(v.label[i]), L"view's labels intact");
+#else
+			Assert::Fail(L"TEMPORAL_DETAIL_HAVE_CAMERA_MODEL must be defined");
 #endif
 		}
 

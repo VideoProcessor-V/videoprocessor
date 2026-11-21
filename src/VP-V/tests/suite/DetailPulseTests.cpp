@@ -1068,6 +1068,7 @@ namespace DetailPulseTestsNs
 			snprintf(text, sizeof(text), "repeat of a picture moved (6, 4) px: stale-low ghost RMS %.4f codes (g2 %.3f); correct delta vs A's moved delta %.2e (flat weights %d)",
 				ghost, a.g2, follow, flat ? 1 : 0);
 			Logger::WriteMessage(text);
+			Assert::IsTrue(flat, L"tile weights must be flat (>0.999) so shift-equivariance check runs");
 			Assert::IsTrue(ghost > 0.02, W(text).c_str());
 			Assert::IsTrue(follow < 1e-9, W(text).c_str());
 		}
@@ -1289,6 +1290,8 @@ namespace DetailPulseTestsNs
 				Logger::WriteMessage(text);
 				if (debandAhead)
 					Assert::IsTrue(moved == 0.0, W(text).c_str());
+				else
+					Assert::IsTrue(moved > 0.0, W(text).c_str());
 				module.Release(g.gpu);
 			}
 			debander.Release(g.gpu);

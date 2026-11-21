@@ -302,6 +302,7 @@ namespace U7FadePartialResetTestsNs
 				return out;
 			};
 			const std::vector<DetailPulseModel::Frame> full = run(1.0f, 0), partial = run(0.7f, 0), cut = run(0.7f, 25);
+			bool strictlyReduced = false;
 			for (int k = 8; k < 21; ++k)
 			{
 				const size_t u = size_t(k) - 1;   // sequence k is frame index k - 1
@@ -309,7 +310,10 @@ namespace U7FadePartialResetTestsNs
 				Assert::IsTrue(partial[u].fadePartial, L"the fade frame is a partial reset");
 				Assert::AreEqual(0.7, partial[u].historyKeep, 1e-6, L"its keep is applied");
 				Assert::IsTrue(partial[u].g1 <= full[u].g1 + 1e-12 && partial[u].g2 <= full[u].g2 + 1e-12, L"the history is only reduced");
+				if (partial[u].g1 < full[u].g1 - 1e-6 || partial[u].g2 < full[u].g2 - 1e-6)
+					strictlyReduced = true;
 			}
+			Assert::IsTrue(strictlyReduced, L"fade keep=0.7 must strictly reduce gain on at least one lifted fade frame");
 			Assert::IsTrue(cut[24].restart, L"the cut restarts");
 			Assert::AreEqual(1.0, cut[24].g1);
 			Assert::AreEqual(1.0, cut[24].g2);
@@ -319,30 +323,45 @@ namespace U7FadePartialResetTestsNs
 		TEST_METHOD(TextureRestoreModelFadeIsPartialAndCutRestarts)
 		{
 			const int w = 96, h = 64, frames = 30;
-			g_plan = ReaderPlan();
-			g_plan.fadeFrom = 8; g_plan.fadeTo = 21; g_plan.fadeKeep = 0.7f; g_plan.cutAt = 25;
-			TextureRestoreModel::Model m;
-			for (int k = 0; k < frames; ++k)
-			{
-				const GrainModel::Image g = Textured(w, h, uint32_t(k));
-				TextureRestoreModel::Image im(w, h);
-				for (size_t i = 0; i < im.v.size(); ++i) im.v[i] = g.v[i];
-				TextureRestore::Params p;
-				p.colorDepth = 10; p.sourceHz = 23.976; p.bitrateQuality = 1.0; p.sequence = uint64_t(k) + 1;
-				p.sceneReader = &PlanReader;
-				m.Frame(im, p);
-				const uint64_t seq = p.sequence;
-				if (seq >= 8 && seq < 21)
+			auto run = [&](float keep, uint64_t cutAt) {
+				g_plan = ReaderPlan();
+				g_plan.fadeFrom = 8; g_plan.fadeTo = 21; g_plan.fadeKeep = keep; g_plan.cutAt = cutAt;
+				TextureRestoreModel::Model m;
+				std::vector<std::vector<double>> out;
+				for (int k = 0; k < frames; ++k)
 				{
-					Assert::IsFalse(m.LastWasCut(), L"no full restart on a fade frame");
-					Assert::IsTrue(m.LastWasFadePartial(), L"the fade frame is a partial reset");
-					Assert::AreEqual(0.7, m.LastHistoryKeep(), 1e-6);
+					const GrainModel::Image g = Textured(w, h, uint32_t(k));
+					TextureRestoreModel::Image im(w, h);
+					for (size_t i = 0; i < im.v.size(); ++i)
+						im.v[i] = (k % 2) ? (400.0 + 0.6 * (g.v[i] - 400.0)) : g.v[i];
+					TextureRestore::Params p;
+					p.colorDepth = 10; p.sourceHz = 23.976; p.bitrateQuality = 1.0; p.sequence = uint64_t(k) + 1;
+					p.sceneReader = &PlanReader;
+					out.push_back(m.Frame(im, p).v);
+					const uint64_t seq = p.sequence;
+					if (seq >= 8 && seq < 21)
+					{
+						Assert::IsFalse(m.LastWasCut(), L"no full restart on a fade frame");
+						Assert::IsTrue(m.LastWasFadePartial(), L"the fade frame is a partial reset");
+						Assert::AreEqual(static_cast<double>(keep), m.LastHistoryKeep(), 1e-6);
+					}
+					else if (cutAt != 0 && seq == cutAt)
+						Assert::IsTrue(m.LastWasCut(), L"the cut restarts");
+					else if (seq > 1)
+						Assert::IsFalse(m.LastWasCut() || m.LastWasFadePartial(), L"elsewhere: neither");
 				}
-				else if (seq == 25)
-					Assert::IsTrue(m.LastWasCut(), L"the cut restarts");
-				else if (seq > 1)
-					Assert::IsFalse(m.LastWasCut() || m.LastWasFadePartial(), L"elsewhere: neither");
+				return out;
+			};
+			const auto outPartial = run(0.7f, 25);
+			const auto outFull = run(1.0f, 25);
+			double maxFadeDiff = 0.0;
+			for (int k = 8; k < 21; ++k)
+			{
+				const size_t u = static_cast<size_t>(k) - 1;
+				for (size_t i = 0; i < outPartial[u].size(); ++i)
+					maxFadeDiff = (std::max)(maxFadeDiff, std::fabs(outPartial[u][i] - outFull[u][i]));
 			}
+			Assert::IsTrue(maxFadeDiff > 1e-3, L"partial fade keep=0.7 must visibly alter restored output vs keep=1.0");
 		}
 
 		// temporal detail's model: a fade with its keep resets nothing (the store is reduced instead), a fade without a keep and a

@@ -496,7 +496,7 @@ namespace DetailRestoreConfigTestsNs
 			tp.cap = TextureRestore::kCapMax;
 			tp.planeLines = 2160.0;
 			tp.sourceHz = 23.976;
-			double maxPulse = 1.0, maxChange = 0.0, worstShift = 0.0;
+			double maxPulse = 1.0, maxChange = 0.0, maxRestoreChange = 0.0, worstShift = 0.0;
 			for (int f = 0; f < 12; ++f)
 			{
 				const bool iFrame = f % 6 == 0;
@@ -509,7 +509,11 @@ namespace DetailRestoreConfigTestsNs
 				in.v.assign(stabilised.out.v.begin(), stabilised.out.v.end());
 				tp.sequence = static_cast<uint64_t>(f + 1);
 				const TextureRestoreModel::Image out = restore.Frame(in, tp);
-				for (size_t i = 0; i < out.v.size(); ++i) maxChange = (std::max)(maxChange, std::fabs(out.v[i] - coded.v[i]));
+				for (size_t i = 0; i < out.v.size(); ++i)
+				{
+					maxChange = (std::max)(maxChange, std::fabs(out.v[i] - coded.v[i]));
+					maxRestoreChange = (std::max)(maxRestoreChange, std::fabs(out.v[i] - in.v[i]));
+				}
 				const SourceResolution::FrameReading codedReading = Read(split(coded.v));
 				const SourceResolution::FrameReading staged = Read(split(out.v));
 				char line[200];
@@ -521,9 +525,11 @@ namespace DetailRestoreConfigTestsNs
 				Assert::IsTrue(std::fabs(staged.ratio - 0.5) < 0.02, L"the real stages' output would still read 1080");
 			}
 			char line[160];
-			snprintf(line, sizeof(line), "max pulse gain %.3f, max code change %.2f, worst ratio shift %.4f\n", maxPulse, maxChange, worstShift);
+			snprintf(line, sizeof(line), "max pulse gain %.3f, max code change %.2f, max restore change %.2f, worst ratio shift %.4f\n",
+				maxPulse, maxChange, maxRestoreChange, worstShift);
 			Logger::WriteMessage(line);
 			Assert::IsTrue(maxPulse > 1.05, L"the detail pulse engaged (the check exercised the stage)");
+			Assert::IsTrue(maxRestoreChange > 1e-3, L"TextureRestore must independently modify the picture");
 		}
 
 		// The renderer's own order, pinned in the source: the monitor reads renderImage before the

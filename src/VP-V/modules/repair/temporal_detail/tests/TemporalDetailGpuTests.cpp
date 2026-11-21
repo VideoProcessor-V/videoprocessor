@@ -1350,7 +1350,8 @@ namespace VideoProcessorTest
 				Assert::IsTrue(module.Failures() == before + 1, L"one failure counted");
 				const FallbackCatalog::Decision d = arena.FrameDecision();
 				Assert::IsTrue(d.engaged && d.id == "scratch_arena", L"scratch_arena engaged");
-				Assert::IsTrue(arena.Shed() > 0 || arena.Exhausted() > 0, L"counted");
+				Assert::IsTrue(tierCase == 0 ? arena.Exhausted() > 0 : arena.Shed() > 0,
+					tierCase == 0 ? L"empty plan counted as Exhausted" : L"T0 plan counted as Shed");
 				// Recovery: a proper plan, a new frame.
 				arena.BeginFrame();
 				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T2)), L"arena reserve");

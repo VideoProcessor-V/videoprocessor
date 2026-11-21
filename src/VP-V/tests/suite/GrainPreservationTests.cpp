@@ -783,6 +783,7 @@ namespace GrainPreservationTest
 		TEST_METHOD(LibplaceboDebandGrainOffZeroesOnlyTheGrain)
 		{
 			using namespace LibplaceboRenderParameters;
+			int checked = 0;
 			for (const char* strength : { "auto", "default", "light" })
 				for (Toggle toggle : { Toggle::Auto, Toggle::On })
 				{
@@ -799,12 +800,14 @@ namespace GrainPreservationTest
 					Assert::AreEqual(pOn.renderParams.deband_params == nullptr, pOff.renderParams.deband_params == nullptr);
 					if (!pOff.renderParams.deband_params)
 						continue;
+					++checked;
 					Assert::AreEqual(0.0f, pOff.renderParams.deband_params->grain);
 					Assert::IsTrue(pOn.renderParams.deband_params->grain > 0.0f, L"on: libplacebo's grain");
 					Assert::AreEqual(pOn.renderParams.deband_params->threshold, pOff.renderParams.deband_params->threshold);
 					Assert::AreEqual(pOn.renderParams.deband_params->radius, pOff.renderParams.deband_params->radius);
 					Assert::AreEqual(pOn.renderParams.deband_params->iterations, pOff.renderParams.deband_params->iterations);
 				}
+			Assert::IsTrue(checked > 0, L"expected at least one strength/toggle pair with active deband_params");
 			Settings defaults;
 			Assert::IsFalse(defaults.debandGrain, L"the faithful default: no added grain");
 			Settings none;
