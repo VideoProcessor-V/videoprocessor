@@ -82,7 +82,7 @@ int camera_field_vector(ivec2 blk, bool measured_trusted, vec2 m, out vec2 o)
 		int gridW = 0, gridH = 0;
 	};
 
-	// enabled = the CPU's ModelUsable (policy enabled, valid record with block data) and a non-empty grid; the
+	// enabled = the CPU's ModelUsable (policy enabled, valid record, a usable reason, block data; one rule for CPU and GLSL, GEM-124) and a non-empty grid; the
 	// weight is the BlendState's. weight 0 or an unusable record make the shader return the caller's value.
 	inline AccessorConstants MakeAccessorConstants(const Policy& policy, const BlendState& state, const CameraMotion* record)
 	{

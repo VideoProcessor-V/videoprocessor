@@ -72,7 +72,7 @@ namespace CameraModel
 
 	inline bool ModelUsable(const Policy& policy, const CameraMotion* record)
 	{
-		return policy.enabled && record != nullptr && record->valid && record->blocks != nullptr;
+		return policy.enabled && record != nullptr && record->valid && ReasonUsable(record->reason) && record->blocks != nullptr;
 	}
 
 	class BlendState
@@ -90,11 +90,10 @@ namespace CameraModel
 				return 0.0;
 			}
 			double target = 0.0;
-			if (record == nullptr || !record->valid || ForcesZero(record->reason))
-				target = 0.0;
-			else if (record->confidence < policy.floor)
+			if (record == nullptr || !record->valid || ForcesZero(record->reason) || record->confidence < policy.floor)
 			{
-				// Hard fallback: immediately, no rate limit.
+				// Hard fallback: a rejected verdict (no record, invalid, an unusable reason, or confidence under the floor) drops the settled
+				// weight immediately, no rate limit (GEM-124: the same rule as ModelUsable and the GLSL mirror).
 				m_weight = 0.0;
 				return 0.0;
 			}
