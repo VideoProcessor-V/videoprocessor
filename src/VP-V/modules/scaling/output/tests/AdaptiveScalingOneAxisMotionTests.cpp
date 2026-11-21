@@ -10,6 +10,9 @@
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
+#include <VP-V/modules/scaling/shared/HybridBlend.h>
+#include <VP-V/core/PipelineSlots.h>
+#include <VP-V/core/Products.h>
 #include <VP-V/core/OnePole.h>
 #include <VP-V/core/hub/CurrentFrame.h>
 #include <VP-V/core/hub/ExtensionHub.h>
@@ -289,6 +292,326 @@ namespace VideoProcessorTest
 			hooks.clear();
 			x.Run(f, hooks);
 			Assert::IsTrue(x.stage.StatusLines().empty(), L"slot off: nothing");
+		}
+
+		// ---- CF-2 B1 (refs/123 v2 N1.2 / N1.4): the hybrid law, the edge / grain seams, the motion fallbacks ----
+		// GPU rows the W4 build must prove (not provable on the CPU): (G1) the published kEdgeMap sampled at the output
+		// pixel's source position (AD_EDGE_PUBLISHED) gives the private term's ramp within FIX-UPS-edge's domain note;
+		// (G2) the shader motion floor (AD_MOTION_FLOOR) gives the CPU Weight() below; (G3) coded-input grain bands
+		// (flat / dark-flat >= 0.95, texture >= 0.90 retention) on a real encode; (G4) OriginalPathwayByteIdenticalToBill
+		// unchanged; (G5) AdaptiveUpscaleBlendsCnnAndFaithfulByGrain with the edge term now in the law.
+
+		TEST_METHOD(HybridBaseRatioIsGeneralOverOutputRatiosAndUnequalAxes)
+		{
+			using AdaptiveDownscale::UpscaleBaseRatioOf;
+			// No prescaler (PRE_KERNEL = the native source): ratio 1 whatever the output ratio, equal or unequal axes.
+			const float ratios[][2] = { { 1.48f, 1.48f }, { 2.0f, 2.0f }, { 2.22f, 2.22f }, { 3.0f, 3.0f }, { 3.75f, 3.75f },
+				{ 1.48f, 2.22f }, { 3.75f, 1.48f }, { 2.0f, 3.0f }, { 1.0f, 2.0f }, { 2.0f, 1.0f } };
+			const float nw = 1024.0f, nh = 576.0f;
+			for (const auto& r : ratios)
+			{
+				const int dw = static_cast<int>(std::lround(nw * r[0])), dh = static_cast<int>(std::lround(nh * r[1]));
+				const std::wstring m = L"output ratio " + std::to_wstring(r[0]) + L" x " + std::to_wstring(r[1]);
+				Assert::AreEqual(1, UpscaleBaseRatioOf(nw, nh, nw, nh, dw, dh), m.c_str());
+				// A 2x LUMA prescaler (the CNN evaluation arm): ratio 2 at every output ratio.
+				Assert::AreEqual(2, UpscaleBaseRatioOf(nw, nh, 2.0f * nw, 2.0f * nh, dw, dh), m.c_str());
+				// Any other PRE_KERNEL size: not applied (the visible "not applied" line, never a guessed ratio).
+				Assert::AreEqual(0, UpscaleBaseRatioOf(nw, nh, 1.5f * nw, 1.5f * nh, dw, dh), m.c_str());
+				Assert::AreEqual(0, UpscaleBaseRatioOf(nw, nh, 2.0f * nw, nh, dw, dh), (m + L": a one-axis prescale").c_str());
+			}
+			// No upscale on either axis: 0 (the downscale and native forms are untouched).
+			Assert::AreEqual(0, UpscaleBaseRatioOf(nw, nh, nw, nh, static_cast<int>(nw), static_cast<int>(nh)));
+			Assert::AreEqual(0, UpscaleBaseRatioOf(nw, nh, nw, nh, 512, 288));
+			// The gate agrees on unequal axes (either axis upscaled; the other 1:1 = one axis).
+			Assert::IsTrue(AdaptiveDownscale::UpscaleAxesOf(1024, 576, 3840, 853).any);
+			Assert::IsFalse(AdaptiveDownscale::UpscaleAxesOf(1024, 576, 3840, 853).oneAxis);
+			Assert::IsTrue(AdaptiveDownscale::UpscaleAxesOf(1024, 576, 3840, 576).oneAxis);
+		}
+
+		TEST_METHOD(HybridWeightOrderMotionAfterTheClampAndTheEdgeTerm)
+		{
+			using namespace HybridBlend;
+			Terms t;
+			Assert::AreEqual(1.0f, Weight(t), L"defaults: the sharp branch");
+			t.wBase = 1.6f;   // an over-unity setting x bitrate term clamps first ...
+			t.motion = 0.5f;  // ... then the motion term scales (today's order)
+			Assert::AreEqual(0.5f, Weight(t), 1e-6f);
+			t.wBase = 0.8f;
+			t.edge = 0.25f;
+			t.grain = 0.5f;
+			t.motion = 1.0f;
+			Assert::AreEqual(0.8f * 0.75f * 0.5f, Weight(t), 1e-6f, L"edge term 1 - e, grain multiplies");
+			t.edge = 1.0f;
+			Assert::AreEqual(0.0f, Weight(t), L"a full edge: the alias-safe branch");
+			t.edge = 2.0f;
+			Assert::AreEqual(0.0f, Weight(t), L"e clamps to 1");
+			t.edge = -1.0f;
+			Assert::AreEqual(0.4f, Weight(t), 1e-6f, L"e clamps to 0");
+			Assert::AreEqual(0.3f, MotionTerm(true, 0.3f, 0.25f), 1e-6f, L"valid vectors: the map's factor");
+			Assert::AreEqual(0.25f, MotionTerm(false, 0.9f, 0.25f), 1e-6f, L"no or invalid vectors: the floor (alias-safe lean)");
+			Assert::AreEqual(1.0f, MotionTerm(false, 0.0f, 3.0f), L"the floor clamps");
+			// Monotone: more edge never raises the sharp weight.
+			for (int i = 0; i < 20; ++i)
+			{
+				Terms a, b;
+				a.wBase = b.wBase = 0.9f;
+				a.edge = i * 0.05f;
+				b.edge = a.edge + 0.05f;
+				Assert::IsTrue(Weight(b) <= Weight(a) + 1e-7f);
+			}
+			// The GLSL text is the same law (order and clamps).
+			const std::string glsl = WeightGlsl();
+			Assert::IsTrue(glsl.find("clamp(w_base * (1.0 - clamp(e, 0.0, 1.0)) * g, 0.0, 1.0) * clamp(m, 0.0, 1.0)") != std::string::npos);
+		}
+
+		TEST_METHOD(HybridBlendPassesBtbWtwAndTwelveBitCodes)
+		{
+			using namespace HybridBlend;
+			const float kw[3] = { 0.2627f, 0.6780f, 0.0593f };   // BT.2020 luma weights (the probe is R = G = B)
+			const float ws[] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+			// Below black (40 of 1023 < 64) and above white (960, 1023 > 940): no clamp of the output, exact through the blend.
+			const float probes[] = { 4.0f / 1023.0f, 40.0f / 1023.0f, 960.0f / 1023.0f, 1023.0f / 1023.0f };
+			for (float w : ws)
+				for (float v : probes)
+				{
+					Assert::AreEqual(v, BlendLuma(v, v, w), L"equal branches: the code itself");
+					const float sharp[3] = { v, v, v }, safe[3] = { v, v, v };
+					float out[3];
+					BlendRgb(sharp, safe, kw, w, out);
+					for (int c = 0; c < 3; ++c)
+						Assert::AreEqual(v, out[c], 1e-7f, L"BTB and WTW survive exactly");
+				}
+			// An excursion between branches stays where the branches put it (no 0..1 clamp, no limited-range clamp).
+			Assert::AreEqual(-0.02f, BlendLuma(-0.02f, -0.02f, 0.3f), 1e-7f);
+			Assert::AreEqual(1.03f, BlendLuma(1.05f, 1.01f, 0.5f), 1e-6f);
+			// 12-bit ramp 0..4095: equal branches exact; a one-code branch difference lands between the two codes.
+			for (int code = 0; code <= 4095; ++code)
+			{
+				const float v = code / 4095.0f;
+				const int up = (std::min)(code + 1, 4095);
+				const float v1 = up / 4095.0f;
+				for (float w : ws)
+				{
+					Assert::AreEqual(code, static_cast<int>(std::lround(BlendLuma(v, v, w) * 4095.0f)));
+					const float y = BlendLuma(v, v1, w) * 4095.0f;
+					Assert::IsTrue(y >= code - 1e-3f && y <= up + 1e-3f);
+				}
+			}
+		}
+
+		TEST_METHOD(HybridGrainBandsRetainTheGrainCpuModel)
+		{
+			// CPU law model (the coded-input row G3 is for W4): a grain field n is carried by both branches; in the flat and
+			// dark-flat bands both scalers reproduce it, on texture the alias-safe branch is modelled at 0.92 of it.
+			// Retention = rms(out - base) / rms(n) over the law's whole term grid (edge, grain, motion incl. the floor).
+			using namespace HybridBlend;
+			auto noise = [](int i) { return static_cast<float>(((static_cast<unsigned>(i) * 1103515245u + 12345u) >> 16) & 1023u) / 1023.0f - 0.5f; };
+			struct Band { const wchar_t* name; float base; float texture; float safeGain; double floor; };
+			const Band bands[] = { { L"flat", 512.0f / 1023.0f, 0.0f, 1.0f, 0.95 }, { L"dark flat", 80.0f / 1023.0f, 0.0f, 1.0f, 0.95 },
+				{ L"texture", 512.0f / 1023.0f, 0.08f, 0.92f, 0.90 } };
+			for (const Band& b : bands)
+				for (int ei = 0; ei <= 4; ++ei)
+					for (int gi = 0; gi <= 4; ++gi)
+						for (int mi = 0; mi <= 4; ++mi)
+						{
+							Terms t;
+							t.edge = ei * 0.25f;
+							t.grain = gi * 0.25f;
+							t.motion = MotionTerm(mi < 4, mi * 0.25f, 0.25f);
+							const float w = Weight(t);
+							double num = 0.0, den = 0.0;
+							for (int i = 0; i < 4096; ++i)
+							{
+								const float base = b.base + b.texture * std::sin(i * 0.37f);
+								const float n = 4.0f / 1023.0f * noise(i);
+								const float out = BlendLuma(base + n, base + b.safeGain * n, w);
+								num += static_cast<double>(out - base) * (out - base);
+								den += static_cast<double>(n) * n;
+							}
+							const double retention = std::sqrt(num / den);
+							Assert::IsTrue(retention >= b.floor, (std::wstring(b.name) + L" retention " + std::to_wstring(retention)).c_str());
+						}
+		}
+
+		TEST_METHOD(HybridEdgeSeamAsksOncePerFrameForTheStageVariant)
+		{
+			OneAxisStageFixture x;
+			int asks = 0, motionReads = 0;
+			VpSkeleton::ProductId askedId = VpSkeleton::kNoProduct;
+			VpSkeleton::VariantKey askedKey;
+			uint64_t askedSeq = 0;
+			x.host.acquire = [&](VpSkeleton::ProductId id, uint64_t seq, const VpSkeleton::VariantKey& key)
+			{
+				++asks;
+				askedId = id;
+				askedKey = key;
+				askedSeq = seq;
+				VpSkeleton::AcquireResult r;
+				r.cause = VpSkeleton::AcquireCause::VariantUndeclared;   // this tip: the owner serves no stage variant
+				return r;
+			};
+			x.host.motion = [&]() { ++motionReads; return AdaptiveDownscaleStage::MotionSource(); };
+			std::vector<const pl_hook*> hooks;
+			AdaptiveDownscaleStage::Frame f = x.Frame(1920, 1080, 2560, 1440);
+			f.adaptiveUpscale = true;
+			x.Run(f, hooks);
+			Assert::AreEqual(1, asks, L"one Acquire per frame per product");
+			Assert::AreEqual(1, motionReads, L"one motion read per frame");
+			Assert::IsTrue(askedId == VpSkeleton::kEdgeMap);
+			Assert::AreEqual(static_cast<int>(VpSkeleton::VariantKey::StageAfter(static_cast<uint8_t>(PipelineSlots::Id::ScalingGeometry))),
+				static_cast<int>(askedKey.stage), L"the planes leaving scaling.geometry");
+			Assert::IsTrue(askedKey.cropX == 0 && askedKey.cropY == 0 && askedKey.cropW == 1920 && askedKey.cropH == 1080, L"the source crop");
+			Assert::IsTrue(askedSeq == 3);
+			Assert::IsFalse(x.stage.EdgeTerm().published);
+			Assert::IsTrue(x.stage.EdgeTerm().cause.find("variant not served by the owner") != std::string::npos);
+			Assert::IsFalse(x.stage.GrainTerm().published);
+			Assert::IsTrue(HasLine(x.stage.StatusLines(), "edge/grain: private interim (edge: kEdgeMap stage variant"),
+				L"no silent fallback: the interim is on the status");
+			Assert::IsTrue(HasLine(x.stage.StatusLines(), "P10g grain product is not published"));
+			f.sourceSequence = 4;
+			hooks.clear();
+			x.Run(f, hooks);
+			Assert::AreEqual(2, asks);
+			Assert::AreEqual(2, motionReads);
+			// The downscale form never asks.
+			AdaptiveDownscaleStage::Frame d = x.Frame(3840, 2160, 2560, 1440);
+			d.adaptiveDownscale = true;
+			hooks.clear();
+			x.Run(d, hooks);
+			Assert::AreEqual(2, asks, L"the downscale form is unchanged: no edge ask");
+			Assert::IsFalse(HasLine(x.stage.StatusLines(), "edge/grain"));
+		}
+
+		TEST_METHOD(HybridPublishedEdgeClearsItsInterimCause)
+		{
+			OneAxisStageFixture x;
+			static int dummyTexture = 0;
+			x.host.acquire = [](VpSkeleton::ProductId, uint64_t, const VpSkeleton::VariantKey&)
+			{
+				VpSkeleton::AcquireResult r;
+				r.status = VpSkeleton::AcquireStatus::Reused;
+				r.gpu.resource = &dummyTexture;   // never sampled here (no GPU): only the seam's choice is checked
+				return r;
+			};
+			std::vector<const pl_hook*> hooks;
+			AdaptiveDownscaleStage::Frame f = x.Frame(1920, 1080, 2560, 1440);
+			f.adaptiveUpscale = true;
+			x.Run(f, hooks);
+			Assert::IsTrue(x.stage.EdgeTerm().published, L"published: the module reads kEdgeMap");
+			const std::vector<std::string> lines = x.stage.StatusLines();
+			Assert::IsTrue(HasLine(lines, "edge/grain: private interim (grain:"), L"the grain term is still interim");
+			Assert::IsFalse(HasLine(lines, "edge: kEdgeMap"));
+			// An Ok result without a texture is not published.
+			x.host.acquire = [](VpSkeleton::ProductId, uint64_t, const VpSkeleton::VariantKey&)
+			{
+				VpSkeleton::AcquireResult r;
+				r.status = VpSkeleton::AcquireStatus::Reused;
+				return r;
+			};
+			f.sourceSequence = 4;
+			hooks.clear();
+			x.Run(f, hooks);
+			Assert::IsFalse(x.stage.EdgeTerm().published);
+			Assert::IsTrue(HasLine(x.stage.StatusLines(), "edge: kEdgeMap stage variant has no GPU texture"));
+			// Both published: no interim line.
+			AdaptiveDownscaleStage::TermSource e, g;
+			e.published = g.published = true;
+			Assert::IsTrue(AdaptiveDownscaleStage::InterimLine(e, g).empty());
+			g.published = false;
+			g.cause = "grain: x";
+			Assert::AreEqual(std::string("edge/grain: private interim (grain: x)"), AdaptiveDownscaleStage::InterimLine(e, g));
+		}
+
+		TEST_METHOD(HybridMotionFallbacksNameTheirCause)
+		{
+			using AdaptiveDownscaleStage::MotionDiscontinuity;
+			Assert::AreEqual("motion vectors off", MotionDiscontinuity(false, false, true, true, 3, 4));
+			Assert::AreEqual("NLS active", MotionDiscontinuity(true, true, true, true, 3, 4));
+			Assert::AreEqual("resync", MotionDiscontinuity(true, false, true, true, 5, 4));
+			Assert::AreEqual("dropped source frames", MotionDiscontinuity(true, false, true, true, 3, 5));
+			Assert::AreEqual("no live estimate", MotionDiscontinuity(true, false, false, true, 3, 4));
+			Assert::IsNull(MotionDiscontinuity(true, false, true, true, 3, 4), L"the next frame with a live estimate");
+			Assert::IsNull(MotionDiscontinuity(true, false, true, false, 0, 9), L"the first frame has no history");
+
+			// The stage: adaptive_motion on, the upscale form; the cause is on the status and on the Fallbacks entry.
+			OneAxisStageFixture x;
+			x.settings.motionAdaptive = true;
+			static int tex = 0;
+			bool live = false;
+			x.host.motion = [&]()
+			{
+				AdaptiveDownscaleStage::MotionSource m;
+				m.live = live;
+				m.field = m.frameTrust = live ? reinterpret_cast<pl_tex>(&tex) : nullptr;
+				return m;
+			};
+			std::vector<const pl_hook*> hooks;
+			AdaptiveDownscaleStage::Frame f = x.Frame(1920, 1080, 2560, 1440);
+			f.adaptiveUpscale = true;
+			x.Run(f, hooks);
+			Assert::IsTrue(HasLine(x.stage.StatusLines(), "Adaptive upscale motion: no vectors (alias-safe weight; no live estimate)"));
+			const FallbackCatalog::Decision d = x.stage.Fallback();
+			Assert::IsTrue(d.engaged && d.reason.find("alias-safe weight (no live estimate)") != std::string::npos);
+			live = true;
+			f.sourceSequence = 4;
+			hooks.clear();
+			x.Run(f, hooks);
+			Assert::IsTrue(x.stage.UpscaleMotionCause().empty(), L"live and in sequence: the vectors are used");
+			Assert::IsFalse(HasLine(x.stage.StatusLines(), "Adaptive upscale motion: no vectors"));
+			hooks.clear();
+			x.Run(f, hooks);   // a repeat of 4: keeps the verdict
+			Assert::IsTrue(x.stage.UpscaleMotionCause().empty(), L"a repeated frame keeps its verdict");
+			f.sourceSequence = 6;   // 5 dropped
+			hooks.clear();
+			x.Run(f, hooks);
+			Assert::AreEqual(std::string("dropped source frames"), x.stage.UpscaleMotionCause());
+			Assert::IsTrue(HasLine(x.stage.StatusLines(), "(alias-safe weight; dropped source frames)"));
+			hooks.clear();
+			x.Run(f, hooks);   // a repeat of 6: still the drop's verdict (no flicker)
+			Assert::AreEqual(std::string("dropped source frames"), x.stage.UpscaleMotionCause());
+			f.sourceSequence = 5;   // back in time: a resync
+			hooks.clear();
+			x.Run(f, hooks);
+			Assert::AreEqual(std::string("resync"), x.stage.UpscaleMotionCause());
+			f.sourceSequence = 6;
+			hooks.clear();
+			x.Run(f, hooks);
+			Assert::IsTrue(x.stage.UpscaleMotionCause().empty());
+			f.vectorsRun = false;
+			f.sourceSequence = 7;
+			hooks.clear();
+			x.Run(f, hooks);
+			Assert::AreEqual(std::string("motion vectors off"), x.stage.UpscaleMotionCause());
+			// One axis: faithful only already; no motion line.
+			AdaptiveDownscaleStage::Frame o = x.Frame(1920, 1440, 2560, 1440);
+			o.adaptiveUpscale = true;
+			o.vectorsRun = false;
+			hooks.clear();
+			x.Run(o, hooks);
+			Assert::IsFalse(HasLine(x.stage.StatusLines(), "Adaptive upscale motion: no vectors"));
+			// The downscale form: unchanged (no upscale motion cause, today's lines).
+			AdaptiveDownscaleStage::Frame dn = x.Frame(3840, 2160, 2560, 1440);
+			dn.adaptiveDownscale = true;
+			hooks.clear();
+			x.Run(dn, hooks);
+			Assert::IsTrue(x.stage.UpscaleMotionCause().empty());
+			Assert::IsTrue(HasLine(x.stage.StatusLines(), "Motion-adapted blend: idle"));
+		}
+
+		TEST_METHOD(HybridFallbackCatalogEntries)
+		{
+			using FallbackCatalog::OutputScalingUpscale;
+			Assert::IsFalse(OutputScalingUpscale(false, true, "x", true, "y").engaged, L"not requested: released");
+			FallbackCatalog::Decision d = OutputScalingUpscale(true, true, "shader compile", true, "resync");
+			Assert::IsTrue(d.engaged && d.id == "output scaling");
+			Assert::AreEqual(std::string("libplacebo main scaler alone (adaptive upscale failed on the GPU: alias-safe ScalerPass: shader compile)"), d.reason);
+			d = OutputScalingUpscale(true, true, "", false, "");
+			Assert::AreEqual(std::string("libplacebo main scaler alone (adaptive upscale failed on the GPU)"), d.reason);
+			d = OutputScalingUpscale(true, false, "", true, "resync");
+			Assert::AreEqual(std::string("adaptive upscale: no vectors, alias-safe weight (resync)"), d.reason);
+			d = OutputScalingUpscale(true, false, "", true, "");
+			Assert::AreEqual(std::string("adaptive upscale: no vectors, alias-safe weight (no motion map)"), d.reason);
+			Assert::IsFalse(OutputScalingUpscale(true, false, "", false, "").engaged);
 		}
 	};
 

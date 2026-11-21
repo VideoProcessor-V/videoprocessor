@@ -11,6 +11,7 @@
 #include <VP-V/core/OnePole.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
+#include <VP-V/modules/scaling/shared/HybridBlend.h>
 #include <VP-V/modules/scaling/shared/ScalerPass.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <VP-V/modules/drive/led_measure/NativeReadback.h>
@@ -266,14 +267,25 @@ if (q.x < size.x && q.y < size.y) {
     }
 #endif
 #ifdef AD_UPSCALE
-    // 8b: grain only; the CNN branch is the base (its chroma stays), luma
-    // pulled toward the faithful branch by 1 - w.
-    float w = clamp(w_base * g, 0.0, 1.0);
-    float ga = g;   // the strength handed to SSimSuperRes
-#ifdef AD_MOTION
-    w *= mf;
-    ga *= mf;
+    // CF-2 B1 (refs/123 N1.2, HybridBlend.h): the sharp branch (POST_KERNEL) is the base (its chroma stays), luma
+    // pulled toward the alias-safe branch by 1 - w; w = clamp(w_base (1 - e) g) x motion.
+#ifdef AD_EDGE_PUBLISHED
+    {
+        // kEdgeMap (the skeleton's product over the source frame): this pixel's source position, the same ramp.
+        vec2 eu = (s - src_origin) / max(edge_src_size, vec2(1e-6));
+        vec2 ep = edge_crop.xy + eu * edge_crop.zw;
+        e = smoothstep(edge_lo, edge_hi, texture(edge_pub, ep / vec2(textureSize(edge_pub, 0))).r * edge_pub_scale);
+    }
 #endif
+    float mt = 1.0;
+#ifdef AD_MOTION
+    mt = mf;
+#endif
+#ifdef AD_MOTION_FLOOR
+    mt = motion_floor;   // no / invalid vectors: the alias-safe lean (N1.4)
+#endif
+    float w = hb_weight(w_base, e, g, mt);
+    float ga = g * clamp(mt, 0.0, 1.0);   // the strength handed to SSimSuperRes
 #ifdef AD_FAITHFUL_ONLY
     // 8b one-axis: faithful branch only, and no SuperRes correction.
     w = 0.0;
@@ -774,15 +786,9 @@ float rs_slope(float y)
 			// gate); the base is PRE_KERNEL or a doubler's exact 2x.
 			// One-axis (N9-P12): with the width given, either axis upscaled opens the gate and
 			// the prescale ratio must hold on both axes.
-			const float nativeH = upscale.nativeHeight;
-			const float nativeW = upscale.nativeWidth;
-			const float rh = nativeH > 0.0f ? (sy1 - sy0) / nativeH : 0.0f;
-			const float rw = nativeW > 0.0f ? (sx1 - sx0) / nativeW : rh;
-			ratio = std::fabs(rh - 1.0f) < 0.01f && std::fabs(rw - 1.0f) < 0.01f ? 1 :
-				(std::fabs(rh - 2.0f) < 0.01f && std::fabs(rw - 2.0f) < 0.01f ? 2 : 0);
-			const bool upscales = nativeH + 0.5f < static_cast<float>(dh) ||
-				(nativeW > 0.0f && nativeW + 0.5f < static_cast<float>(dw));
-			if (ratio == 0 || !upscales)
+			// CF-2 B1: the same test as a pure function (UpscaleBaseRatioOf, tests); any output ratio.
+			ratio = UpscaleBaseRatioOf(upscale.nativeWidth, upscale.nativeHeight, sx1 - sx0, sy1 - sy0, dw, dh);
+			if (ratio == 0)
 				return unchanged;
 		}
 		// The SSIM shader's own condition: the source is made shorter (the
@@ -1209,9 +1215,19 @@ float rs_slope(float y)
 			Sampled("edge", edge, true), Sampled("state", state, false), Storage("dst", out) };
 		if (useMap) d.push_back(Sampled("grain_map", map[mapIndex], false));
 		// Motion-adapted blend: the factor map for this source frame (else no binding, no code).
-		const bool useMotion = settings.motionAdaptive && motionState == MotionState::Used && motionReady &&
+		// CF-2 B1 (N1.4): the stage's discontinuity verdict (resync, a drop, no live estimate) also takes the map out.
+		const bool vectorsInvalid = upscale.on && upscale.vectorsInvalid;
+		const bool useMotion = settings.motionAdaptive && !vectorsInvalid && motionState == MotionState::Used && motionReady &&
 			motionSequence == sequence && motionMap[motionIndex];
 		if (useMotion) d.push_back(Sampled("motion_map", motionMap[motionIndex], false));
+		// The upscale form with adaptive_motion on and no usable map: the motion floor (the alias-safe lean), visibly
+		// (MotionFloorUsed; the stage's status line). One-axis is faithful only already. The downscale form is unchanged.
+		const bool motionFloor = upscale.on && settings.motionAdaptive && !useMotion && !upscale.oneAxis;
+		motionFloorUsed = motionFloor;
+		// Ruling (a): the published edge map when the stage acquired it; else the private ramp (`edge`, the interim).
+		const bool edgePublished = upscale.on && edgeSource.map != nullptr;
+		publishedEdgeUsed = edgePublished;
+		if (edgePublished) d.push_back(Sampled("edge_pub", edgeSource.map, false));   // R32F: nearest (float32 need not filter)
 		if (stabilise)
 		{
 			d.push_back(Sampled("rs_field", motion.field, false));
@@ -1222,9 +1238,11 @@ float rs_slope(float y)
 		}
 		static const std::string mapHeader = std::string("#define AD_USE_MAP 1\n") + OcclusionMask::NlsMapGlsl();
 		// 8b: the upscale form (and alpha for SSimSuperRes) as defines.
-		const std::string upHeader = upscale.on ? std::string("#define AD_UPSCALE 1\n") +
+		const std::string upHeader = upscale.on ? std::string("#define AD_UPSCALE 1\n") + HybridBlend::WeightGlsl() +
 			(upscale.superresAlpha ? "#define AD_SUPERRES_ALPHA 1\n" : "") +
-			(upscale.oneAxis ? "#define AD_FAITHFUL_ONLY 1\n" : "") : std::string();
+			(upscale.oneAxis ? "#define AD_FAITHFUL_ONLY 1\n" : "") +
+			(motionFloor ? "#define AD_MOTION_FLOOR 1\n" : "") +
+			(edgePublished ? "#define AD_EDGE_PUBLISHED 1\n" : "") : std::string();
 		const bool guard = stabilise && settings.residualGrainGuard;
 		const std::string header = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" + upHeader +
 			(useMotion ? std::string("#define AD_MOTION 1\n") : std::string()) +
@@ -1275,6 +1293,20 @@ float rs_slope(float y)
 		{
 			v.push_back({ pl_var_vec2("mw_src_size"), srcSize, true });
 			v.push_back({ pl_var_vec4("mw_crop"), mwCrop, true });
+		}
+		const float motionFloorValue = RampMath::Clamp01(settings.motionFloor);
+		if (motionFloor)
+			v.push_back({ pl_var_float("motion_floor"), &motionFloorValue, true });
+		const pl_rect2df& ec = edgeSource.sourceCrop;
+		const float edgeCrop[4] = { ec.x0, ec.y0, ec.x1 - ec.x0, ec.y1 - ec.y0 };
+		const float edgePubScale = PublishedEdgeScale();
+		if (edgePublished)
+		{
+			v.push_back({ pl_var_vec2("edge_src_size"), srcSize, true });
+			v.push_back({ pl_var_vec4("edge_crop"), edgeCrop, true });
+			v.push_back({ pl_var_float("edge_lo"), &settings.edgeLo, true });
+			v.push_back({ pl_var_float("edge_hi"), &settings.edgeHi, true });
+			v.push_back({ pl_var_float("edge_pub_scale"), &edgePubScale, true });
 		}
 		if (!Compute(p->dispatch, upscale.on ? "VideoProcessor adaptive upscale: blend" : "VideoProcessor adaptive downscale: blend",
 			header.c_str(), BLEND_BODY, d.data(), static_cast<int>(d.size()), v.data(), static_cast<int>(v.size()),

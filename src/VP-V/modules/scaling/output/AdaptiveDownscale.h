@@ -7,6 +7,7 @@
 #include <VP-V/modules/scaling/output/NlsMaskMapping.h>
 #include <VP-V/modules/drive/led_measure/ReadbackRing.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleCut.h>
+#include <VP-V/modules/input/source_analysis/regions/BusyEdgeGlsl.h>
 #include <VP-V/modules/scaling/shared/ScalerPass.h>
 
 #include <algorithm>
@@ -305,12 +306,15 @@ namespace AdaptiveDownscale
 		// meanW (those are read back a few frames late).
 	};
 
-	// Stage 8b (docs/VP-stage8b-upscale-blend.md): the same module upscaling a
-	// shorter source (1080p -> 1600p). Luma only, grain only (no edge term):
-	//     w = up_w_base x grain_scale;  out = cnn + (1 - w)(Y_faithful - Y_cnn)
-	// so a clean picture is the CNN branch exactly and chroma stays the CNN
-	// branch's (CfL). The faithful branch is libplacebo's ewa_lanczossharp
-	// (anti-ringing) from the source-resolution picture: PRE_KERNEL itself,
+	// Stage 8b (docs/VP-stage8b-upscale-blend.md), CF-2 B1 (refs/123 v2 N1.2: the hybrid law, scaling/shared/HybridBlend.h):
+	// the same module upscaling a shorter source (1080p -> 1600p), any output ratio. Luma only:
+	//     w = clamp(up_w_base x (1 - e) x grain_scale) x motion;  out = sharp + (1 - w)(Y_alias_safe - Y_sharp)
+	// sharp = the POST_KERNEL picture (libplacebo's main scaler; a LUMA prescaler before it = the CNN evaluation arm),
+	// alias_safe = the faithful ScalerPass from the PRE_KERNEL source-resolution picture. e = the edge ramp: kEdgeMap when the
+	// skeleton publishes its stage variant (SetEdgeSource), else the module's private Sobel (the interim, shown in the status).
+	// Motion: the map's factor; motion_floor when the vectors are absent or invalid (vectorsInvalid; N1.4 alias-safe lean).
+	// A clean flat picture is the sharp branch exactly and chroma stays the sharp
+	// branch's (CfL). The faithful branch (anti-ringing) is from the source-resolution picture: PRE_KERNEL itself,
 	// or, when a luma doubler (FSRCNNX / ArtCNN) made it exactly 2x the source
 	// crop, its 2x2 box average (the doubler's own consistency, which
 	// SSimSuperRes relies on too). Other prescale ratios: not applied (the
@@ -330,7 +334,36 @@ namespace AdaptiveDownscale
 		// with superresAlpha the grain term handed to SSimSuperRes is 0, so it adds nothing).
 		float nativeWidth = 0.0f;
 		bool oneAxis = false;
+		// CF-2 B1 (N1.4): the vectors of this frame are absent or invalid (no live estimate, a resync, a drop, NLS, motion off):
+		// with adaptive_motion on, the motion term is motion_floor (the alias-safe lean), never the plain factor 1.
+		bool vectorsInvalid = false;
 	};
+
+	// CF-2 B1 ruling (a): the published edge map (kEdgeMap, R32F Sobel |G| in 10-bit codes over the source frame) for this frame,
+	// acquired by the stage through the skeleton; the pin keeps it alive until the next frame. map null = the private interim.
+	struct EdgeSource
+	{
+		pl_tex map = nullptr;
+		std::shared_ptr<const void> pin;
+		pl_rect2df sourceCrop{};   // the source crop in the map's pixels (the frame's source pixels)
+	};
+
+	// The published |G| (10-bit codes, RegionEvidence::kSourceTapCodesPerUnit) -> the private ramp's gradient unit (8-bit codes x 0.25,
+	// MEASURE_BODY). The light-domain difference (the private 1/2.2 reference) is FIX-UPS-edge, owed after the W4 build.
+	inline float PublishedEdgeScale() { return 0.25f * 255.0f / RegionEvidence::kSourceTapCodesPerUnit; }
+
+	// The prescale ratio of PRE_KERNEL to the source crop the measure accepts: 1 (the source), 2 (a doubler's exact 2x), 0 (not
+	// applied: another ratio, or nothing upscaled). Independent of the output ratio (any destination size). Pure (tests).
+	inline int UpscaleBaseRatioOf(float nativeW, float nativeH, float preW, float preH, int dw, int dh)
+	{
+		const float rh = nativeH > 0.0f ? preH / nativeH : 0.0f;
+		const float rw = nativeW > 0.0f ? preW / nativeW : rh;
+		const int ratio = std::fabs(rh - 1.0f) < 0.01f && std::fabs(rw - 1.0f) < 0.01f ? 1 :
+			(std::fabs(rh - 2.0f) < 0.01f && std::fabs(rw - 2.0f) < 0.01f ? 2 : 0);
+		const bool upscales = nativeH + 0.5f < static_cast<float>(dh) ||
+			(nativeW > 0.0f && nativeW + 0.5f < static_cast<float>(dw));
+		return upscales ? ratio : 0;
+	}
 
 	// The motion-adapted blend on the last blended frame (status, tests).
 	enum class MotionState { Off, NoVectors, Used };
@@ -391,6 +424,14 @@ namespace AdaptiveDownscale
 		// The last measured frame's source-resolution base: 1 (PRE_KERNEL),
 		// 2 (a doubler's output averaged), 0 not applied; tests and the log.
 		int LastUpscaleRatio() const { return upscaleRatio; }
+		// CF-2 B1: per frame (the stage): the published edge map, or none (the private interim).
+		void SetEdgeSource(const EdgeSource& value) { edgeSource = value; }
+		void ClearEdgeSource() { edgeSource = EdgeSource(); }
+		// The last blended frame read the published edge map / used the motion floor (status, tests).
+		bool PublishedEdgeUsed() const { return publishedEdgeUsed; }
+		bool MotionFloorUsed() const { return motionFloorUsed; }
+		// Why the alias-safe ScalerPass failed last (empty: never); for the fallback line.
+		const std::string& ScalerError() const { return faithfulScaler.LastError(); }
 		// 8-3: after SetFrame, the field for this source frame (none: the
 		// scalar). Call every frame; the textures are the matcher's.
 		void SetGrainField(const GrainField& field) { grainField = field; }
@@ -470,6 +511,9 @@ namespace AdaptiveDownscale
 		pl_tex lowres = nullptr;          // 8b: a doubler's output at source resolution
 		Upscale upscale{};
 		int upscaleRatio = 0;
+		EdgeSource edgeSource{};
+		bool publishedEdgeUsed = false;
+		bool motionFloorUsed = false;
 		pl_tex edge = nullptr;
 		pl_tex partial = nullptr;
 		pl_tex state = nullptr;

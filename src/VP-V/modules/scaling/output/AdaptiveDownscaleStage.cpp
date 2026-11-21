@@ -2,6 +2,9 @@
 #include "AdaptiveDownscaleStage.h"
 
 #include <DebugLog.h>
+#include <VP-V/core/PipelineSlots.h>
+#include <VP-V/core/Products.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/DownscaleLight.h>
 #include <vprenderer/GrainPreserve.h>
@@ -36,6 +39,84 @@ namespace AdaptiveDownscaleStage
 				module.SetMotion(motion);
 			}
 		}
+
+		// CF-2 B1 ruling (a): the edge term's single seam. kEdgeMap's stage variant (the planes leaving scaling.geometry, the
+		// source crop) through the skeleton: published = the module reads it; anything else = the private Sobel (the interim),
+		// with the cause. One ask per frame.
+		TermSource ReadEdge(const Frame& frame, const Host& host, AdaptiveDownscale::Module& module)
+		{
+			module.ClearEdgeSource();
+			TermSource t;
+			VpSkeleton::VariantKey key;
+			key.stage = VpSkeleton::VariantKey::StageAfter(static_cast<uint8_t>(PipelineSlots::Id::ScalingGeometry));
+			const pl_rect2df& c = frame.sourceCrop;
+			const float cx0 = (std::max)(0.0f, std::floor((std::min)(c.x0, c.x1)));
+			const float cy0 = (std::max)(0.0f, std::floor((std::min)(c.y0, c.y1)));
+			const float cx1 = std::ceil((std::max)(c.x0, c.x1)), cy1 = std::ceil((std::max)(c.y0, c.y1));
+			if (cx1 > cx0 && cy1 > cy0)
+			{
+				key.cropX = static_cast<uint32_t>(cx0);
+				key.cropY = static_cast<uint32_t>(cy0);
+				key.cropW = static_cast<uint32_t>(cx1 - cx0);
+				key.cropH = static_cast<uint32_t>(cy1 - cy0);
+			}
+			VpSkeleton::AcquireResult r;
+			if (host.acquire)
+				r = host.acquire(VpSkeleton::kEdgeMap, frame.sourceSequence, key);
+			else
+			{
+				const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::CurrentFrameMemo();
+				if (!fm.Valid())
+				{
+					t.cause = "edge: no skeleton memo for this renderer";
+					return t;
+				}
+				r = fm.memo->Acquire(VpSkeleton::kEdgeMap, fm.seq, VpSkeleton::AcquireForm::Gpu, key);
+			}
+			if (!r.Ok() || !r.gpu.Valid() || r.gpu.resource == nullptr)
+			{
+				t.cause = std::string("edge: kEdgeMap stage variant ") + (r.Ok() ? "has no GPU texture" : VpSkeleton::Token(r.cause));
+				return t;
+			}
+			AdaptiveDownscale::EdgeSource es;
+			es.map = static_cast<pl_tex>(r.gpu.resource);
+			es.pin = r.pin;
+			es.sourceCrop = frame.sourceCrop;
+			module.SetEdgeSource(es);
+			t.published = true;
+			return t;
+		}
+
+		// The grain term's seam: kP10gGrainLevel is a reader of the composed vector plan, not a product, at this tip (no id to
+		// Acquire); the private grain scale / map stands in, visibly. The switch-over is an Acquire here when P-b publishes it.
+		TermSource ReadGrain()
+		{
+			TermSource t;
+			t.cause = "grain: the P10g grain product is not published (no product id at this tip)";
+			return t;
+		}
+	}
+
+	std::string InterimLine(const TermSource& edge, const TermSource& grain)
+	{
+		if (edge.published && grain.published)
+			return std::string();
+		std::string causes;
+		const TermSource* terms[2] = { &edge, &grain };
+		for (const TermSource* t : terms)
+			if (!t->published)
+				causes += (causes.empty() ? std::string() : std::string("; ")) + t->cause;
+		return "edge/grain: private interim (" + causes + ")";
+	}
+
+	const char* MotionDiscontinuity(bool vectorsRun, bool nls, bool live, bool haveLast, uint64_t lastSequence, uint64_t sequence)
+	{
+		if (!vectorsRun) return "motion vectors off";
+		if (nls) return "NLS active";
+		if (haveLast && sequence < lastSequence) return "resync";
+		if (haveLast && sequence > lastSequence + 1) return "dropped source frames";
+		if (!live) return "no live estimate";
+		return nullptr;
 	}
 
 	void Stage::Register(const Frame& frame, const Host& host, SharedState state, std::vector<const pl_hook*>& hooks)
@@ -61,6 +142,14 @@ namespace AdaptiveDownscaleStage
 			(upscaleBlend || frame.adaptiveDownscale);
 		const bool downscaleOn = frame.slotRuns && frame.adaptiveDownscale;   // slot off: as adaptive_downscale off
 		upscaleThisFrame = upscaleBlend;
+		if (!upscaleBlend)
+		{
+			module.ClearEdgeSource();   // the pin is not held past the upscale form
+			edgeTerm = TermSource();
+			grainTerm = TermSource();
+			upscaleMotionCause.clear();
+			haveMotionSequence = false;   // the next upscale run starts a new motion history
+		}
 		// Findings 2026-10-25 #1: what Fallback() reports (no effect on the picture).
 		NoteFailures(module.Failures() - failuresSeen, GetTickCount64());
 		failuresSeen = module.Failures();
@@ -131,16 +220,29 @@ namespace AdaptiveDownscaleStage
 			up.nativeHeight = sourceCropH;
 			up.nativeWidth = sourceCropW;
 			up.oneAxis = oneAxis;
+			// CF-2 B1: the motion read (the ExternalView of P3, the live estimate: once per frame) and its verdict (N1.4). A
+			// repeat of the last sequence keeps the first presentation's verdict (no flicker on a repeated frame).
+			const MotionSource m = host.motion();
+			if (!(haveMotionSequence && frame.sourceSequence == motionSequenceSeen))
+			{
+				const char* why = MotionDiscontinuity(frame.vectorsRun, frame.nlsSubmitted, m.live && m.field && m.frameTrust,
+					haveMotionSequence, motionSequenceSeen, frame.sourceSequence);
+				upscaleMotionCause = why ? why : "";
+				haveMotionSequence = true;
+				motionSequenceSeen = frame.sourceSequence;
+			}
+			up.vectorsInvalid = !upscaleMotionCause.empty();
+			edgeTerm = ReadEdge(frame, host, module);
+			grainTerm = ReadGrain();
 			if (oneAxis != oneAxisLogged)
 			{
 				oneAxisLogged = oneAxis;
 				DebugLog::Log("Adaptive upscale: %s", oneAxis ?
-					"faithful only (one-axis upscale; CNN doubler skipped)" : "both axes (CNN + faithful blend)");
+					"faithful only (one-axis upscale; CNN doubler skipped)" : "both axes (hybrid: sharp + alias-safe blend)");
 			}
 			module.SetUpscale(up);
 			vectorUser = frame.vectorsRun;   // batch B Q1: the hybrid upscaler reads the motion (residual hold, grain map, motion-adapted blend)
 			module.ClearGrainField();
-			const MotionSource m = host.motion();
 			SetResidualMotion(module, frame, m);
 			if (adaptive.grainMap && m.live && m.grainError)
 			{
@@ -275,12 +377,23 @@ namespace AdaptiveDownscaleStage
 				lines.push_back(oneAxisThisFrame ?
 					(droppedPrescalers > 0 ? "Adaptive upscale: faithful only (one-axis upscale; CNN doubler skipped)" :
 						"Adaptive upscale: faithful only (one-axis upscale)") :
-					"Adaptive upscale: CNN + faithful blend");
+					module.LastUpscaleRatio() == 2 ?
+					"Adaptive upscale: hybrid (sharp = CNN prescaler + main scaler: the CNN evaluation arm; alias-safe = ScalerPass)" :
+					"Adaptive upscale: hybrid (sharp = main scaler, alias-safe = ScalerPass)");
+			// CF-2 B1 ruling (a): the edge / grain terms are the private in-shader ones until their products are published.
+			const std::string interim = InterimLine(edgeTerm, grainTerm);
+			if (!interim.empty())
+				lines.push_back(interim);
+			// N1.4: no / invalid vectors with adaptive_motion on: the motion floor, with the cause (one-axis: faithful only already).
+			if (motionAdaptiveOn && !oneAxisThisFrame && !upscaleMotionCause.empty())
+				lines.push_back("Adaptive upscale motion: no vectors (alias-safe weight; " + upscaleMotionCause + ")");
 		}
 		if (motionAdaptiveOn)
 		{
 			const AdaptiveDownscale::MotionState m = module.LastMotionState();
-			lines.push_back(m == AdaptiveDownscale::MotionState::Used ?
+			lines.push_back(upscaleThisFrame && module.MotionFloorUsed() ?
+				"Motion-adapted blend: no vectors on this frame (upscale: the motion floor, alias-safe lean)" :
+				m == AdaptiveDownscale::MotionState::Used ?
 				"Motion-adapted blend: on (vectors; untracked or fast motion uses the faithful scaler)" :
 				m == AdaptiveDownscale::MotionState::NoVectors ? "Motion-adapted blend: no vectors on this frame (plain blend)" :
 				"Motion-adapted blend: idle (the blend did not run on the last frame)");

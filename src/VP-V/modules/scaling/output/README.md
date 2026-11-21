@@ -4,7 +4,7 @@ Unit: **scaling** | side: processing | order: 160 | status: **partial** | hook p
 
 ## Purpose / why
 
-Scale to the output active size inside libplacebo: hybrid SSIM downscale (adaptive_w_base 0.2) with the optional D refine add-on; Lanczos fallback; polar retired.
+Scale to the output active size inside libplacebo: hybrid SSIM downscale (adaptive_w_base default 1.0; the Scaling tier Mid writes 0.2) with the optional D refine add-on, and the hybrid upscale (CF-2 B1, below); Lanczos fallback. The faithful branch keeps polar ewa_lanczossharp under `adaptive_faithful` auto (only the `polar` value is retired: it runs as auto).
 
 ## Contract
 
@@ -91,6 +91,13 @@ Chain tests:
 - **Stage 8b one-axis** (N9-P12): the upscale gate (`UpscaleAxesOf`) also opens for a width-only upscale with the height 1:1 (the height-only gate missed it); mixed frames (one axis up, one down) keep the old routing. A frame upscaled on one axis with the other 1:1 is **faithful only** (w = 0; SSimSuperRes gets a zero grain term, so it adds nothing) and any LUMA prescaler (a CNN doubler, recognised from its shader source by `CustomHookChain::IsLumaPrescaler`) is dropped from that frame's hooks, so the CNN invents no detail on the axis that is not upscaled. The faithful branch is already separable there (`adaptive_faithful` auto: the axes' ratios differ), which is identity on the 1:1 axis. Status: "Adaptive upscale: faithful only (one-axis upscale; CNN doubler skipped)" / "Adaptive upscale: CNN + faithful blend".
 - **Optimal blend**: the non-net default stays VP's full blend (edge term, grain map, auto faithful, residual hold); `adaptive_w_base` / `adaptive_upscale_w_base` defaults are re-set from the downscale and upscale sweeps (`tools/scaling_sweep/`), re-run with the camera model on/off once it lands. The kit's locked set (w 0.2, ortho) stays a D/TrainKit concern only.
 - Config UI controls for the `adaptive_motion*` keys: present since 81c38abe0 (the choice `adaptive_motion` and the four number fields, built by the adaptive scaler sections on the Scaling > Advanced card "Grain-aware scaler thresholds"); the earlier "not added yet" note was stale (P8-5, 2026-11-11). Their rows are in the Settings table above.
+
+## Hybrid upscale (CF-2 B1, refs/123 v2 N1.2 / N1.4)
+
+- The upscale form is the hybrid law, written once in `../shared/HybridBlend.h` (CPU + GLSL `hb_weight`): out = sharp + (1 - w)(alias_safe - sharp) on luma, w = clamp(w_base x (1 - e) x g) x motion term (the motion term after the clamp). sharp = libplacebo's main scaler (the POST_KERNEL picture; a 2x LUMA prescaler there is kept as the CNN evaluation arm, status says so); alias_safe = ScalerPass from the PRE_KERNEL source. Any output ratio and unequal axes (`UpscaleBaseRatioOf`: PRE_KERNEL against the native source, 1 or 2). The edge term is now part of the upscale law (a behaviour change from the CNN + faithful blend).
+- Edge term: one seam (`AdaptiveDownscaleStage.cpp` ReadEdge): `Acquire(kEdgeMap)` stage variant StageAfter(scaling.geometry) + the source crop, once per frame; published = the module samples it (AD_EDGE_PUBLISHED, R32F Sobel in tap codes x `PublishedEdgeScale()`); otherwise the private in-shader Sobel. Grain term: kP10gGrainLevel has no product id at this tip, so the private grain scale / map stands in. Either interim is shown: "edge/grain: private interim (<cause>)". When P-b publishes both, the interim branches are deleted.
+- Motion term: the P3 live estimate read once per frame through `Host::motion` (the C9b ExternalView; the matcher is never started). No live estimate, NLS, vectors off, a drop or a resync: the motion floor (`adaptive_motion_floor`, the alias-safe lean; was factor 1), shown as "Adaptive upscale motion: no vectors (alias-safe weight; <cause>)" and on the Fallbacks entry; a repeated frame keeps its verdict. The downscale form is unchanged (factor 1).
+- ScalerPass failure: the main scaler alone, Fallbacks entry "libplacebo main scaler alone (adaptive upscale failed on the GPU: alias-safe ScalerPass: <error>)" (`FallbackCatalog::OutputScalingUpscale`).
 
 ## Known issues / open items
 
