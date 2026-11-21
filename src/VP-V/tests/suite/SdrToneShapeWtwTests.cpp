@@ -185,5 +185,24 @@ namespace VideoProcessorTest
 				for (double v : { 1.0, 1.05, 1.0913, 1.3 })
 					Assert::AreEqual(SdrToneShape::Map(v, 2.2, 0.3, 0.8, 0.0), SdrToneShape::Map(v, 2.2, 0.3, 0.8, st), 1e-12);
 		}
+
+		// GEM-004 ([C]:97(a)): state 4 (off with a calibration LUT) is requested but not applied, so the
+		// fallback is engaged and listed with its reason; it was released (silent) before the fix.
+		TEST_METHOD(CalibrationLutStateIsAVisibleFallback)
+		{
+			const FallbackCatalog::Decision lut = SdrToneShape::StateFallback(4);
+			Assert::IsTrue(lut.engaged, L"state 4 (calibration LUT) must be an engaged, listed fallback");
+			Assert::AreEqual(std::string("SDR tone shape"), lut.id);
+			Assert::IsTrue(lut.reason.find("calibration LUT") != std::string::npos, L"the reason names the calibration LUT");
+			Assert::IsTrue(lut.reason.find("not applied") != std::string::npos);
+
+			// The neighbouring states keep their meaning.
+			Assert::IsFalse(SdrToneShape::StateFallback(0).engaged, L"off is not a fallback");
+			Assert::IsFalse(SdrToneShape::StateFallback(1).engaged, L"active is not a fallback");
+			Assert::IsFalse(SdrToneShape::StateFallback(2).engaged, L"off for HDR is not a fallback");
+			const FallbackCatalog::Decision missing = SdrToneShape::StateFallback(3);
+			Assert::IsTrue(missing.engaged);
+			Assert::IsTrue(missing.reason.find("the shader did not load") != std::string::npos);
+		}
 	};
 }
