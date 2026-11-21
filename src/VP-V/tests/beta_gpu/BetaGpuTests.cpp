@@ -21,7 +21,7 @@
 #include <VP-V/modules/motion/estimation/global_model/link/PairAssembly.h>
 #include <VP-V/modules/motion/estimation/global_model/link/AheadFlow.h>
 #include "ProducerPairs.h"
-#include "D0Time.h"
+#include <VP-V/tests/support/D0Time.h>
 
 #include <algorithm>
 #include <fstream>

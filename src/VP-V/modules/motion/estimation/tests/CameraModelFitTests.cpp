@@ -5,7 +5,7 @@
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h>
 #include <VP-V/modules/motion/estimation/global_model/StaticHypothesis.h>
 #include "SyntheticCameraFields.h"
-#include <VP-V/tests/beta_gpu/D0Time.h>
+#include <VP-V/tests/support/D0Time.h>
 #include "CppUnitTest.h"
 
 #include <algorithm>
