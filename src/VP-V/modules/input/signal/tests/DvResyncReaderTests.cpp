@@ -340,6 +340,52 @@ namespace Tests
 			Assert::IsFalse(r.holder.Fallback().engaged);
 		}
 
+		// GEM-007 ([C]:120): a run of rejected pictures that outlasts the hold is LOST and listed even when the drops left a
+		// gap in the picture counter (counters 100 and 110, HoldPictures 6). Before the fix the run's span was not kept when no
+		// metadata was held, and "lost" counted only the rejected pictures seen (2 here), so the gap read as healthy.
+		TEST_METHOD(GapBeyondTheHoldIsLostAndListed)
+		{
+			// (a) Metadata held: the rejected picture at 100 is inside the hold, the one at 110 (span 11 > 6) is static.
+			{
+				DvResync::Rig r;
+				r.holder.SetRate(24.0, 2.0);
+				Assert::AreEqual<uint32_t>(6, r.holder.Hold().HoldPictures(), L"0.25 s at 24 Hz");
+				r.Run(5);
+				const auto first = r.holder.OnPicture(nullptr, 100);
+				Assert::IsTrue(first.phase == DvMetadataHold::Phase::Held);
+				Assert::IsFalse(first.lost, L"inside the hold");
+				Assert::IsFalse(r.holder.Fallback().engaged);
+				const auto shown = r.holder.OnPicture(nullptr, 110);
+				Assert::IsTrue(shown.phase == DvMetadataHold::Phase::Static, L"the gap is beyond the hold");
+				Assert::IsTrue(shown.lost);
+				Assert::IsTrue(r.holder.Lost());
+				const FallbackCatalog::Decision d = r.holder.Fallback();
+				Assert::IsTrue(d.engaged, L"listed under Fallbacks engaged");
+				Assert::AreEqual<std::string>("dv_metadata_lost", d.id);
+			}
+			// (b) Nothing held (no valid picture yet): the span still counts, so the gap is lost and listed.
+			{
+				DvResync::Rig r;
+				r.holder.SetRate(24.0, 2.0);
+				const auto first = r.holder.OnPicture(nullptr, 100);
+				Assert::IsFalse(first.haveMetadata);
+				Assert::IsFalse(first.lost, L"span 1 is inside the hold");
+				Assert::IsFalse(r.holder.Fallback().engaged);
+				const auto shown = r.holder.OnPicture(nullptr, 110);
+				Assert::IsFalse(shown.haveMetadata, L"still nothing to show");
+				Assert::AreEqual<uint32_t>(2, shown.lostFrames, L"only two rejected pictures were seen");
+				Assert::IsTrue(shown.lost, L"but the run spans 11 pictures, beyond the hold of 6");
+				Assert::IsTrue(r.holder.Lost());
+				const FallbackCatalog::Decision d = r.holder.Fallback();
+				Assert::IsTrue(d.engaged, L"listed under Fallbacks engaged");
+				Assert::AreEqual<std::string>("dv_metadata_lost", d.id);
+				// A valid picture ends the run: released.
+				const auto back = r.holder.OnPicture(&r.dm, 111);
+				Assert::IsFalse(back.lost);
+				Assert::IsFalse(r.holder.Fallback().engaged);
+			}
+		}
+
 		TEST_METHOD(AnUnmeasuredRateIsSaidSo)
 		{
 			DvResync::Rig r(false);
