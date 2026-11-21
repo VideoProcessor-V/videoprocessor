@@ -43,13 +43,13 @@
 #include <microsoft_directshow/MadVRShaderLoader.h>
 #include <VP-V/core/LumaWeights.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
-#include <VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h>
-#include <VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h>
+#include <VP-V/modules/colour/display_mapping/DolbyVisionTrims.h>
+#include <VP-V/modules/colour/display_mapping/DvDolbyStyle.h>
 #include <VP-V/modules/colour/display_mapping/DmCurve.h>
 #include <VP-V/modules/colour/display_mapping/DmContainer.h>
 #include <VP-V/modules/colour/appearance/AppearanceStage.h>
 #include <VP-V/core/FallbackCatalog.h>
-#include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
+#include <VP-V/modules/colour/display_mapping/DvTrimSelection.h>
 #include <VP-V/modules/input/signal/DvCompareCapture.h>
 #include <VP-V/modules/input/signal/DvMetadataHold.h>
 #include <VP-V/modules/input/signal/DvTunnelPolicy.h>

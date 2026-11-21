@@ -168,7 +168,7 @@ HdrInferenceUpdate HdrInferenceTracker::OnSignal(
 			}
 			if (m_state == HdrInferenceState::Suspended)
 			{
-				if (nowMs - m_suspendedSinceMs < m_options.resumeWindowMs)
+				if (nowMs < m_suspendedSinceMs || nowMs - m_suspendedSinceMs < m_options.resumeWindowMs)   // GEM-010: an earlier tick is not elapsed
 					return update;
 				m_state = HdrInferenceState::NotEligible;
 				m_reason = "capture state invalid (signal gap longer than the resume window)";
@@ -199,7 +199,7 @@ HdrInferenceUpdate HdrInferenceTracker::OnSignal(
 
 	if (m_state == HdrInferenceState::Suspended)
 	{
-		if (nowMs - m_suspendedSinceMs < m_options.resumeWindowMs)
+		if (nowMs < m_suspendedSinceMs || nowMs - m_suspendedSinceMs < m_options.resumeWindowMs)   // GEM-010
 		{
 			// Bug hunt 37 S1: the signal is back and eligible within the window. A new epoch
 			// (as a valid-to-valid mode change) that stays PQ, with fresh veto evidence.
@@ -252,7 +252,7 @@ HdrInferenceUpdate HdrInferenceTracker::OnTick(uint64_t nowMs)
 {
 	HdrInferenceUpdate update;
 	if (m_state == HdrInferenceState::Suspended &&
-		nowMs - m_suspendedSinceMs >= m_options.resumeWindowMs)
+		nowMs >= m_suspendedSinceMs && nowMs - m_suspendedSinceMs >= m_options.resumeWindowMs)   // GEM-010
 	{
 		m_state = HdrInferenceState::NotEligible;
 		m_reason = "capture state invalid (signal gap longer than the resume window)";
@@ -260,7 +260,7 @@ HdrInferenceUpdate HdrInferenceTracker::OnTick(uint64_t nowMs)
 		return update;
 	}
 	if (m_state == HdrInferenceState::Waiting &&
-		nowMs - m_candidateSinceMs >= m_options.confirmMs)
+		nowMs >= m_candidateSinceMs && nowMs - m_candidateSinceMs >= m_options.confirmMs)   // GEM-010
 	{
 		m_state = HdrInferenceState::InferredPq;
 		m_reason = "inferred";
@@ -269,7 +269,7 @@ HdrInferenceUpdate HdrInferenceTracker::OnTick(uint64_t nowMs)
 		return update;
 	}
 	if (m_state == HdrInferenceState::InferredPq && VetoOn() &&
-		m_vetoArmed && nowMs - m_vetoArmedMs >= m_options.noCutFallbackMs)
+		m_vetoArmed && nowMs >= m_vetoArmedMs && nowMs - m_vetoArmedMs >= m_options.noCutFallbackMs)   // GEM-010
 		return Flip(HdrInferenceEvent::VetoWithoutCut);
 	return update;
 }
@@ -286,7 +286,7 @@ HdrInferenceUpdate HdrInferenceTracker::OnPicture(
 	if (!picture.measured)
 		return update;
 
-	const uint64_t dt = m_havePicture ?
+	const uint64_t dt = m_havePicture && nowMs >= m_lastPictureMs ?   // GEM-010: an earlier tick adds no evidence time
 		std::min<uint64_t>(nowMs - m_lastPictureMs, m_options.maxSampleGapMs) : 0;
 	m_lastPictureMs = nowMs;
 	m_havePicture = true;
@@ -325,7 +325,7 @@ HdrInferenceUpdate HdrInferenceTracker::OnPicture(
 		update.event = HdrInferenceEvent::VetoArmed;
 		m_reason = "SDR veto armed; waiting for a cut";
 	}
-	else if (m_vetoArmed && nowMs - m_vetoArmedMs >= m_options.noCutFallbackMs)
+	else if (m_vetoArmed && nowMs >= m_vetoArmedMs && nowMs - m_vetoArmedMs >= m_options.noCutFallbackMs)   // GEM-010
 		return Flip(HdrInferenceEvent::VetoWithoutCut);
 	return update;
 }
