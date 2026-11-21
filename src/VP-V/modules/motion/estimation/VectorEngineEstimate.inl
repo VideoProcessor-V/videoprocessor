@@ -585,7 +585,7 @@ bool LibplaceboVideoRenderer::Impl::EstimateAhead(uint64_t sourceSequence, uint6
 	};
 	steps.uploadAfter = [this]() { return UploadDejudderPlanes(dejudderAheadPayload, dejudderAheadTextures, &dejudderAheadUpload,
 		dejudderAheadPayloadSequence); };
-	steps.estimate = [this, timing](uint64_t bSequence, uint64_t cSequence)
+	steps.estimate = [this, timing, sourceSequence](uint64_t bSequence, uint64_t cSequence)
 	{
 		Dejudder::Planes b, c;
 		b.luma = dejudderNextTextures[0];
@@ -599,6 +599,10 @@ bool LibplaceboVideoRenderer::Impl::EstimateAhead(uint64_t sourceSequence, uint6
 		if (timing) timing->BeginStage(AlphaD3D11FrameGpuTimer::Stage::CoreRender);
 		const bool done = RunDejudderEstimate(b, c, bSequence, cSequence, true);   // ahead: EstimateContext::ahead for the K4 hook
 		if (timing) timing->EndStage();
+		// GEM-W1A N1: doc 91's 3-behind rule in estimate-ahead mode too (the regular estimate, which prunes, is skipped for a pair
+		// estimated ahead). Pruned at the RENDER frame (c.source), never at b: that would drop the render frame's pair.
+		if (vectorEngine.motionProducer && vectorEngine.motionProducer->Running())
+			vectorEngine.PruneBehindRender(sourceSequence);
 		return done;
 	};
 	return dejudderAhead.TryAhead(c, steps);
