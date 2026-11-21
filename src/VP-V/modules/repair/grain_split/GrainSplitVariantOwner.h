@@ -103,10 +103,14 @@ namespace GrainSplit
 				return ContextShapesOf(static_cast<int>(v.width), static_cast<int>(v.height), BlockFor(ScaleOfAxis(v.scale)), DefaultParams()).Bytes();
 			}
 
-			VpSkeleton::SkeletonMemo::Registration Register(VpSkeleton::SkeletonMemo& memo)
+			// GF-P1 MUST-5 (GV AMEND): `maxWidth` x `maxHeight` = the largest observed source luma. reserveBytes is the ahead
+			// planner's figure before a fill is measured (AheadNeedLocked): left 0, the memo's need was 0, the grant was never
+			// made and every Acquire failed NoLedgerGrant before a fill could run. reserveFor stays the exact per-variant reserve.
+			VpSkeleton::SkeletonMemo::Registration Register(VpSkeleton::SkeletonMemo& memo, int maxWidth, int maxHeight)
 			{
 				VpSkeleton::OwnerFill f;
 				f.variantAxes = ServedAxes();
+				f.reserveBytes = maxWidth > 0 && maxHeight > 0 ? ReserveFor(VariantFor(maxWidth, maxHeight, 1.0, 10)) : uint64_t(0);
 				f.reserveFor = &VariantOwner::ReserveFor;
 				f.fill = [this](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo& m, VpSkeleton::OwnerFillOutput& out) {
 					return Fill(req, m, out);
