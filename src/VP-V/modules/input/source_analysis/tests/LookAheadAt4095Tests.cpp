@@ -324,7 +324,7 @@ namespace LookAheadAt4095TestsNs
 		}
 
 		// W8: the blank threshold is an axis-level fraction (3 / kAxisMax), whatever the sampler's code range. A flat near-black frame
-		// whose texture is ONE native code (a tenth of an axis code at 12 bits, one axis code at 10) is blank at both depths, so the
+		// whose texture is ONE native code (a quarter of an axis code at 12 bits, one axis code at 10) is blank at both depths, so the
 		// look-ahead flags it as an event; a texture of 16 axis codes is not blank at either (the control: the threshold still bites).
 		TEST_METHOD(OneNativeCodeTextureDoesNotChangeBlank)
 		{
@@ -332,6 +332,7 @@ namespace LookAheadAt4095TestsNs
 			const Case cases[] = {
 				{ true, 1, true, L"12-bit, one native code" },
 				{ false, 1, true, L"10-bit, one native code" },
+				{ true, 16, true, L"12-bit, four axis codes (spread about 2 axis codes) is still blank" },
 				{ true, 64, false, L"12-bit, sixteen axis codes" },
 				{ false, 16, false, L"10-bit, sixteen axis codes" },
 			};

@@ -185,10 +185,10 @@ namespace VideoProcessorTest
 		// The P10 grain-split kernel (the lane form and the live form) on a msbShift 4 view of code10 * 4 gives every term byte for byte
 		// what it gives on the msbShift 6 view of code10: nothing in the kernel depends on the tap's depth, only on the Q6 axis. The
 		// terms are not empty and at least one varies (the comparison is not between blank planes).
-		BEGIN_TEST_METHOD_ATTRIBUTE(LaneKernelsRunOnMsbShift4View)
+		BEGIN_TEST_METHOD_ATTRIBUTE(GrainKernelSameOnMsbShift4AndShift6)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()
-		TEST_METHOD(LaneKernelsRunOnMsbShift4View)
+		TEST_METHOD(GrainKernelSameOnMsbShift4AndShift6)
 		{
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
