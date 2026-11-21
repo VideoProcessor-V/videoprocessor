@@ -35,5 +35,6 @@
     <ClCompile Include="..\VP-V\gui\VpvStateReport.cpp" />
     <ClCompile Include="..\VP-V\gui\VpvShutdownAndRetry.cpp" />
     <ClCompile Include="..\VP-V\gui\VpvRpcExtensions.cpp" />
+    <ClCompile Include="..\VP-V\gui\VpvHdrInference.cpp" />
   </ItemGroup>
 </Project>
