@@ -33,6 +33,7 @@
 #include <VP-V/core/FallbackCatalog.h>
 
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <string>
 #include <vector>
