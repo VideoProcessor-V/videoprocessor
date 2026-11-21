@@ -1335,6 +1335,10 @@ for (int q = 0; q < 4; q++) {
 	void Module::Forget()
 	{
 		softWatch.Forget();   // cut_soft_reset M3: a stage that starts over judges confirmation afresh
+		// GF-P5 S5: a stage that starts over has no scene verdict yet: no stale scene-judge fallback or keep on the status line.
+		sceneUnavailable = false;
+		sceneWhy = nullptr;
+		lastHistoryKeep = 1.0f;
 		if (!impl) return;
 		impl->decided = false;
 		impl->behind = 0;
@@ -1438,6 +1442,13 @@ for (int q = 0; q < 4; q++) {
 				}
 				softWatch.Note(scene);   // M3: provisional groups only = the switch is inert, shown on the status line
 				lastHistoryKeep = scene.historyKeep;
+			}
+			else
+			{
+				// GF-P5 S5: a self-restart frame (no valid history) asks no scene verdict: the last frame's is not carried over.
+				sceneUnavailable = false;
+				sceneWhy = nullptr;
+				lastHistoryKeep = 0.0f;
 			}
 			if (!MeasureAndReduce(dispatch, luma, params, c, m.stats[next], m.weight,
 				consecutive && m.stats[m.statsIndex] ? m.stats[m.statsIndex] : nullptr, m.ring,
