@@ -3105,6 +3105,60 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(memo->HasGpuDevice(), L"the new renderer's device is still attached after the Begin");
 		}
 
+		// GF-P2b E2 counter-case through the PUBLIC lifecycle (R2b): the dead-renderer Reconcile keeps only a device that is on the host's
+		// CURRENT pl_gpu. A device not on it cannot be set up without a seam (every GpuCreated attaches its own pl_gpu as the current one), so
+		// the reachable counterpart is pinned: after GpuReleased the renderer has no device and no current pl_gpu, a store registering and a
+		// Begin make a new memo WITHOUT a device (nothing is resurrected), and a later GpuCreated attaches one.
+		TEST_METHOD(AStoreRegisteringAfterGpuReleasedDoesNotResurrectADevice)
+		{
+			Rig rig(Lane("on"));
+			int fakeGpu = 0;
+			rig.ResyncApply("on");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			rig.Frame(1);
+			Assert::IsTrue(rig.sk.MemoOf(rig.Host()) != nullptr && rig.sk.MemoOf(rig.Host())->HasGpuDevice(), L"attached");
+			rig.Life(RE::Lifecycle::GpuReleased);
+			Assert::IsNull(rig.sk.MemoOf(rig.Host()), L"the memo went with the renderer");
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			rig.Life(RE::Lifecycle::SettingsApplied);
+			rig.Frame(2);
+			const Vpv::Skeleton::FrameMemo fm = rig.sk.MemoFor(rig.Host(), 3);
+			Assert::IsTrue(fm.Valid(), L"a memo is made again");
+			Assert::IsFalse(fm.memo->HasGpuDevice(), L"but no device: the released one is not resurrected");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			Assert::IsTrue(rig.sk.MemoOf(rig.Host()) != nullptr && rig.sk.MemoOf(rig.Host())->HasGpuDevice(), L"a GpuCreated attaches one");
+		}
+
+		// GF-P2b E2 design behaviour (99ade1854): a renderer that died WITHOUT GpuReleased leaves its device on the host's current pl_gpu; the
+		// dead-renderer Reconcile cannot tell it from a new renderer's, so it is kept until the next GpuCreated, which abandons it and
+		// attaches the new renderer's own device.
+		TEST_METHOD(ADeadRenderersStaleDeviceIsKeptUntilTheNextGpuCreated)
+		{
+			Rig rig(Lane("on"));
+			int staleGpu = 0, newGpu = 0;
+			rig.ResyncApply("on");
+			GpuCreatedWithDevice(rig, &staleGpu);
+			rig.Frame(1);
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			Assert::IsTrue(memo->HasGpuDevice(), L"the old renderer's device");
+			// The renderer dies without GpuReleased; a new one at the same address registers its store (the generation moves).
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			rig.Life(RE::Lifecycle::SettingsApplied);
+			rig.Frame(2);
+			memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			Assert::IsTrue(memo->HasGpuDevice(), L"kept: indistinguishable from the new renderer's until its GpuCreated");
+			GpuCreatedWithDevice(rig, &newGpu);   // abandons the stale device and attaches the new one
+			memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			Assert::IsTrue(memo->HasGpuDevice(), L"the new renderer's own device is attached");
+		}
+
 		// GF-P2b S1: a live switch to the Original pathway removes the renderer's memo host (nothing of the skeleton is left to seal or show);
 		// switching back makes a NEW memo.
 		TEST_METHOD(ALiveSwitchToTheOriginalPathwayRemovesTheMemoAndBackMakesANewOne)
