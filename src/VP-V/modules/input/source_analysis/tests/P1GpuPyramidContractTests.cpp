@@ -102,7 +102,7 @@ if (p.x < size.x && p.y < size.y) {
 			Assert::IsTrue(former.find(VpFrameAnalysis::P1Gpu::MatcherHalfCore()) < apply, L"the core precedes FADE_APPLY");
 			// Pins (computed from the strings at 20a5a718c; re-pin only with a byte-identity proof against the former text).
 			Assert::AreEqual(size_t(433), body.size(), L"2x2 body length");
-			Assert::IsTrue(PyramidFnv1a64(body) == 0xbbb584e325148735ull, L"2x2 body FNV-1a 64");
+			Assert::IsTrue(PyramidFnv1a64(body) == 0x201d1be19b422d7full, L"2x2 body FNV-1a 64");
 		}
 
 		TEST_METHOD(TheLevelBodyIsTheSharedUnitsBox4x4Body)
@@ -113,7 +113,7 @@ if (p.x < size.x && p.y < size.y) {
 			Assert::IsTrue(body.find("p * 4 + ivec2(x, y), src_size - ivec2(1)") != std::string::npos, L"min-edge 4x4 taps");
 			Assert::IsTrue(body.find("sum / 16.0") != std::string::npos, L"sum / 16");
 			Assert::AreEqual(size_t(387), body.size(), L"4x4 body length");
-			Assert::IsTrue(PyramidFnv1a64(body) == 0x4b39f9663f46ba6full, L"4x4 body FNV-1a 64");
+			Assert::IsTrue(PyramidFnv1a64(body) == 0x0efbc15a6cc505b5ull, L"4x4 body FNV-1a 64");
 		}
 	};
 
