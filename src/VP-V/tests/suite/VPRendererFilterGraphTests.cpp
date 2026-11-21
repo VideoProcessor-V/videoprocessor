@@ -221,12 +221,12 @@ namespace VideoProcessorTest
 				HWND owner = CreateOwnerWindow();
 				CComQIPtr<IVideoWindow> window(renderer);
 				Assert::IsTrue(window != nullptr, L"IVideoWindow");
-				window->put_Owner(reinterpret_cast<OAHWND>(owner));
-				window->put_WindowStyle(WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN);
+				Assert::IsTrue(SUCCEEDED(window->put_Owner(reinterpret_cast<OAHWND>(owner))), L"put_Owner");
+				Assert::IsTrue(SUCCEEDED(window->put_WindowStyle(WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN)), L"put_WindowStyle");
 				RECT rc = {};
 				GetClientRect(owner, &rc);
-				window->SetWindowPosition(0, 0, rc.right, rc.bottom);
-				window->put_Visible(OATRUE);
+				Assert::IsTrue(SUCCEEDED(window->SetWindowPosition(0, 0, rc.right, rc.bottom)), L"SetWindowPosition");
+				Assert::IsTrue(SUCCEEDED(window->put_Visible(OATRUE)), L"put_Visible");
 
 				CComQIPtr<IBasicVideo2> basic(renderer);
 				long width = 0, height = 0;
@@ -237,15 +237,15 @@ namespace VideoProcessorTest
 				CComQIPtr<IMediaEventEx> events(graph);
 				CComQIPtr<IMediaSeeking> seeking(graph);
 				CComQIPtr<IQualProp, &IID_IQualProp> quality(renderer);
-				Assert::IsTrue(control && events && quality);
+				Assert::IsTrue(control && events && seeking && quality, L"graph control/events/seeking/quality interfaces");
 				long abortCode = 0;
 
 				// Play.
 				Assert::IsTrue(SUCCEEDED(control->Run()));
 				PumpFor(phaseMs, events, &abortCode);
 				int drawn = 0, dropped = 0;
-				quality->get_FramesDrawn(&drawn);
-				quality->get_FramesDroppedInRenderer(&dropped);
+				Assert::IsTrue(SUCCEEDED(quality->get_FramesDrawn(&drawn)), L"get_FramesDrawn");
+				Assert::IsTrue(SUCCEEDED(quality->get_FramesDroppedInRenderer(&dropped)), L"get_FramesDroppedInRenderer");
 				Logger::WriteMessage(("play: drawn " + std::to_string(drawn) + " dropped " +
 					std::to_string(dropped) + "\n").c_str());
 				Assert::AreEqual(0L, abortCode, L"the graph aborted while playing");
@@ -253,23 +253,23 @@ namespace VideoProcessorTest
 				Assert::AreEqual(0, dropped, L"the VP renderer dropped file frames");
 
 				// Seek to the start (flush + new segment: a discontinuity for VP).
-				if (seeking)
 				{
 					LONGLONG zero = 0;
 					Assert::IsTrue(SUCCEEDED(seeking->SetPositions(&zero, AM_SEEKING_AbsolutePositioning,
 						nullptr, AM_SEEKING_NoPositioning)));
 					PumpFor(phaseMs / 2, events, &abortCode);
 					int afterSeek = 0;
-					quality->get_FramesDrawn(&afterSeek);
+					Assert::IsTrue(SUCCEEDED(quality->get_FramesDrawn(&afterSeek)), L"get_FramesDrawn after seek");
 					Assert::IsTrue(afterSeek > drawn, L"no frames after the seek");
 					drawn = afterSeek;
 				}
 
-				// Pause and step one frame.
+				// Pause and step one frame (asserted where the VP renderer advertises IVideoFrameStep).
 				Assert::IsTrue(SUCCEEDED(control->Pause()));
 				PumpFor(500, events, &abortCode);
 				CComQIPtr<IVideoFrameStep> step(graph);
-				if (step && step->CanStep(0, nullptr) == S_OK)
+				Assert::IsTrue(step != nullptr, L"IVideoFrameStep on graph");
+				if (step->CanStep(0, nullptr) == S_OK)
 				{
 					Assert::IsTrue(SUCCEEDED(step->Step(1, nullptr)));
 					Assert::IsTrue(WaitForEvent(events, EC_STEP_COMPLETE, 5000), L"no EC_STEP_COMPLETE");
@@ -278,20 +278,24 @@ namespace VideoProcessorTest
 					Logger::WriteMessage("frame step: the graph does not offer IVideoFrameStep stepping\n");
 
 				// Run again at a different rate when the source allows it (motion off in VP).
-				if (seeking && SUCCEEDED(seeking->SetRate(2.0)))
+				if (SUCCEEDED(seeking->SetRate(2.0)))
 				{
 					Assert::IsTrue(SUCCEEDED(control->Run()));
 					PumpFor(phaseMs / 2, events, &abortCode);
-					seeking->SetRate(1.0);
+					int afterRate = 0;
+					Assert::IsTrue(SUCCEEDED(quality->get_FramesDrawn(&afterRate)), L"get_FramesDrawn at 2x rate");
+					Assert::IsTrue(afterRate > drawn, L"no frames drawn at 2x rate");
+					drawn = afterRate;
+					Assert::IsTrue(SUCCEEDED(seeking->SetRate(1.0)), L"restore 1x rate");
 				}
 
 				Assert::IsTrue(SUCCEEDED(control->Stop()));
 				Assert::AreEqual(0L, abortCode, L"the graph aborted");
-				quality->get_FramesDroppedInRenderer(&dropped);
+				Assert::IsTrue(SUCCEEDED(quality->get_FramesDroppedInRenderer(&dropped)), L"get_FramesDroppedInRenderer after stop");
 				Assert::AreEqual(0, dropped, L"the VP renderer dropped file frames");
 
-				window->put_Visible(OAFALSE);
-				window->put_Owner(0);
+				Assert::IsTrue(SUCCEEDED(window->put_Visible(OAFALSE)), L"put_Visible(OAFALSE)");
+				Assert::IsTrue(SUCCEEDED(window->put_Owner(0)), L"put_Owner(0)");
 				DestroyWindow(owner);
 			}
 			if (SUCCEEDED(com))

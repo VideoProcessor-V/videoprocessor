@@ -14,6 +14,7 @@
 #include "../VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h"
 #include <VP-V/abi/VpvAbi.h>
 #include <VP-V/abi/VpvInterfaces.h>
+#include <VP-V/abi/VpvHostCalls.h>
 #include "../VideoProcessor-Lib/VpBuildIdentity.h"
 #include "../VideoProcessor-Lib/vprenderer/RendererDiagnosticCodes.h"
 #include <DiagnosticHistory.h>
@@ -136,6 +137,88 @@ namespace VideoProcessorTest
 			Assert::IsTrue((std::is_same_v<
 				decltype(&Vpv::IVpvStatus::WriteDiagnosticHistory),
 				bool (Vpv::IVpvStatus::*)(VpDiagnosticHistorySink, void*, int64_t) const>));
+		}
+
+		// CS-S10: runtime QueryExtension forwarding over a fake inner IVideoRenderer through Vpv::Query / VpvCalls
+		// (without touching Bill's LibplaceboPluginVideoRenderer files).
+		TEST_METHOD(QueryExtensionRuntimeForwardingOverFakeInnerRenderer)
+		{
+			struct FakeStatus final : public Vpv::IVpvStatus
+			{
+				mutable int calls = 0;
+				mutable int64_t lastQpc = 0;
+				bool GetDejudderStatus(Vpv::IVpvTextSink& s) const override { s.Write("dejudder-ok", 11); return true; }
+				bool GetSourceResolutionStatus(Vpv::IVpvTextSink&) const override { return false; }
+				bool GetFallbacksStatus(Vpv::IVpvTextSink& s) const override { s.Write("none", 4); return true; }
+				bool WriteDiagnosticHistory(VpDiagnosticHistorySink sink, void* ctx, int64_t refQpc) const override
+				{
+					++calls;
+					lastQpc = refQpc;
+					if (!sink) return false;
+					const char row[] = "{\"src\":\"renderer\",\"ok\":true}\n";
+					sink(ctx, row, sizeof(row) - 1);
+					return true;
+				}
+			};
+			struct FakeInnerRenderer : public IVideoRenderer
+			{
+				size_t GetConvertedQueueSize() override { return 0; }
+				bool OnVideoState(VideoStateComPtr&) override { return true; }
+				void OnVideoFrame(VideoFrame&) override {}
+				HRESULT OnWindowsEvent(LONG_PTR, LONG_PTR) override { return S_OK; }
+				void Build() override {}
+				void Start() override {}
+				void Stop() override {}
+				void Reset() override {}
+				void OnSize() override {}
+				void OnPaint() override {}
+				void SetFrameQueueMaxSize(size_t) override {}
+				void SetSceneAwareTimingCorrection(bool) override {}
+				size_t GetFrameQueueSize() override { return 0; }
+				double EntryLatencyMs() const override { return 0; }
+				double ExitLatencyMs() const override { return 0; }
+				uint64_t DroppedFrameCount() const override { return 0; }
+				void* QueryExtension(const char* iid) override
+				{
+					++queries;
+					if (status && iid && std::string(iid) == Vpv::IVpvStatus::Iid())
+						return status;
+					return nullptr;
+				}
+				FakeStatus* status = nullptr;
+				int queries = 0;
+			};
+			struct ForwardingProxy final : public FakeInnerRenderer
+			{
+				IVideoRenderer* inner = nullptr;
+				void* QueryExtension(const char* iid) override { return inner ? inner->QueryExtension(iid) : nullptr; }
+			};
+
+			FakeStatus status;
+			FakeInnerRenderer inner;
+			inner.status = &status;
+			ForwardingProxy proxy;
+			proxy.inner = &inner;
+
+			Assert::IsTrue(Vpv::Query<Vpv::IVpvStatus>(&proxy) == &status, L"known IID forwarded to inner");
+			Assert::IsNull(Vpv::Query<Vpv::IVpvLed>(&proxy), L"unknown IID returns nullptr");
+			Assert::AreEqual(2, inner.queries, L"every query reached the inner renderer");
+
+			CString dejudder;
+			Assert::IsTrue(VpvCalls::GetDejudderStatus(&proxy, dejudder));
+			Assert::AreEqual(std::wstring(L"dejudder-ok"), std::wstring(dejudder.GetString()));
+
+			std::string captured;
+			auto sink = [](void* ctx, const char* data, size_t len) { static_cast<std::string*>(ctx)->append(data, len); };
+			Assert::IsTrue(VpvCalls::WriteDiagnosticHistory(&proxy, sink, &captured, 123456));
+			Assert::AreEqual(1, status.calls);
+			Assert::AreEqual(int64_t(123456), status.lastQpc);
+			Assert::AreEqual(std::string("{\"src\":\"renderer\",\"ok\":true}\n"), captured);
+			Assert::IsFalse(VpvCalls::WriteDiagnosticHistory(&proxy, nullptr, &captured, 0), L"null sink guarded");
+
+			proxy.inner = nullptr;
+			Assert::IsNull(Vpv::Query<Vpv::IVpvStatus>(&proxy), L"null inner returns nullptr safely");
+			Assert::IsFalse(VpvCalls::WriteDiagnosticHistory(&proxy, sink, &captured, 0));
 		}
 
 		// What LibplaceboVideoRenderer::WriteDiagnosticHistory sends across the plugin
