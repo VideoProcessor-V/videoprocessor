@@ -566,8 +566,10 @@ namespace
 			for (const char* group : { "A", "B", "C", "D" })
 				list += control<QLabel>(window, Vpv::ObjectName(QStringLiteral("retirement.group.") + QString::fromLatin1(group) + QStringLiteral(".list")))->text();
 			// CC-GEM P2: the two [general] candidates (magewell_recover_faults, capture_display_fixes) left Bill's General
-			// page for the VP-V Input tab's Capture fixes card; the list names that card for them.
+			// page for the VP-V Input tab's Capture fixes card (capture_display_fixes) and, MUST-C, the both-pathway Magewell
+			// fault recovery card (magewell_recover_faults); the list names those cards for them.
 			require(list.contains(QStringLiteral("VP-V &gt; Proposed retirement")) && list.contains(QStringLiteral("Capture fixes (under test)")) &&
+				list.contains(QStringLiteral("Magewell fault recovery (under test)")) &&
 				list.contains(QStringLiteral("Queue page")),
 				"the Proposed retirement tab lists the candidates with their pages");
 			require(!list.contains(QStringLiteral("no control found")), "every retirement candidate's control is found");
@@ -1490,8 +1492,8 @@ namespace
 
 	// CC-GEM P2 (GEM-060 / GEM-222, owner Q13): the VP rows left on Bill's General page (the two capture fixes,
 	// Room lights, File playback) are on the VP-V page only; saved values load into them and edits save under the same
-	// keys; the Original pathway greys the capture fixes (Input tab) but not Room lights or File playback (both
-	// pathways); the Room lights card carries the GEM-222 note and Colour's Room-light adaptation card names it back.
+	// keys; the Original pathway greys the capture / display fix (Input tab) but not Magewell recovery, Room lights or
+	// File playback (both pathways; MUST-C); the Room lights card carries the GEM-222 note and Colour's Room-light adaptation card names it back.
 	void testGeneralPageRowsOnTheVpvPage()
 	{
 		QTemporaryDir dir;
@@ -1505,15 +1507,17 @@ namespace
 				if (p->objectName() == name) return p;
 			return nullptr;
 		};
-		// Bill's General page: the scroll area around one of his own General behavior rows.
-		QWidget* general = ancestorNamed(control<QWidget>(window, QStringLiteral("config.general.renderer_failure_keep_fullscreen")),
+		// Bill's General page: the scroll area around one of his own General behavior rows (SHOULD-E: "Start as Video
+		// Only", [general] noui, is Bill's at a591ad3b5; renderer_failure_keep_fullscreen is a VP row and could move).
+		QWidget* general = ancestorNamed(control<QWidget>(window, QStringLiteral("config.general.noui")),
 			QStringLiteral("pageViewport"));
 		require(general != nullptr, "Bill's General page not found");
 		const char* const inputCard = "vpv.input.card.capture_fixes";
+		const char* const magewellCard = "vpv.both.card.magewell_recovery";
 		const char* const roomCard = "vpv.both.card.room_lights";
 		const char* const fileCard = "vpv.both.card.file_playback";
 		const std::pair<const char*, const char*> moved[] = {
-			{ "config.general.magewell_recover_faults", inputCard }, { "config.general.capture_display_fixes", inputCard },
+			{ "config.general.magewell_recover_faults", magewellCard }, { "config.general.capture_display_fixes", inputCard },
 			{ "config.ambient.mode", roomCard }, { "config.ambient.room", roomCard }, { "config.ambient.lux_lit", roomCard },
 			{ "config.ambient.lux_dark", roomCard }, { "config.ambient.hold_s", roomCard }, { "config.ambient.port", roomCard },
 			{ "config.ambient.baud", roomCard }, { "config.general.file_av_offset_ms", fileCard },
@@ -1553,11 +1557,22 @@ namespace
 		offset->setValue(40);
 		QCoreApplication::processEvents();
 		require(control<QPushButton>(window, QStringLiteral("applyConfiguration"))->isEnabled(), "editing a moved row did not mark the document edited");
-		// Original pathway: the capture fixes are greyed, Room lights and File playback stay live.
+		// MUST-C (G-CC4 P2 review): each card says only what the runtime does. capture_display_fixes is off on Original
+		// (CaptureDisplayFixes::Enabled); magewell_recover_faults is not gated (Bill's Magewell code, owner item).
+		auto* captureNote = control<QLabel>(window, QStringLiteral("vpv.input.capture_fixes.note"));
+		require(captureNote->text().contains(QStringLiteral("On the Original pathway this is off")) &&
+			captureNote->text().contains(QStringLiteral("target-only full-screen session opened before that still follows this switch")),
+			"the capture fixes note does not state the Original off and its start-up limit");
+		require(!captureNote->text().contains(QStringLiteral("both are off")), "the capture fixes note still says both are off");
+		auto* magewellNote = control<QLabel>(window, QStringLiteral("vpv.both.magewell_recovery.note"));
+		require(magewellNote->text().contains(QStringLiteral("Applies on both pathways for now")),
+			"the Magewell card does not say it applies on both pathways");
+		// Original pathway: the capture / display fix is greyed; Magewell recovery, Room lights and File playback stay live.
 		require(magewell->isEnabled() && displayFixes->isEnabled(), "the capture fixes are greyed on the VP-V pathway");
 		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
 		QCoreApplication::processEvents();
-		require(!magewell->isEnabled() && !displayFixes->isEnabled(), "the capture fixes stay live on the Original pathway");
+		require(!displayFixes->isEnabled(), "capture_display_fixes stays live on the Original pathway");
+		require(magewell->isEnabled(), "Magewell recovery is greyed on the Original pathway, but its runtime still runs there");
 		for (const char* name : { "config.ambient.mode", "config.ambient.room", "config.ambient.port", "config.general.file_av_offset_ms",
 				"config.general.file_led_holdover_ms" })
 			require(control<QWidget>(window, QString::fromLatin1(name))->isEnabled(),
