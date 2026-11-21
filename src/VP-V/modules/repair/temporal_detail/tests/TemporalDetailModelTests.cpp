@@ -1907,6 +1907,64 @@ namespace VideoProcessorTest
 			}
 		}
 
+		TEST_METHOD(TemporalDetailNonFiniteInfinitePeakNeverOpensTheBoost)
+		{
+			// Gate cb-u1 r2 MUST 1: a +inf decayed peak (one q = +inf frame) stays +inf for good (inf x decay = inf, no finite q
+			// replaces it), and raw = sqrt(inf / q) - 1 = +inf passed the old `Finite(q) && !isnan(raw)` test, so bn = 1: the
+			// boost OPENED on every later frame. It must stay closed. The stream is TemporalDetailBoostFallbackBounded's (no
+			// motion: only the structure-only boost can act), where the boost gates downstream of raw are open.
+			const int n = 56, plantAt = 32;
+			const Stream s = BuildPan(Pattern("IBBBPBBB", n), 0.0);
+			// infinite = false is the control: a FINITE huge peak (1e6 x the last q) on the same stream. raw is then large and
+			// finite, so the boost must act in at least one block (the downstream gates are open: the test is not vacuous).
+			auto runPlanted = [&](bool infinite, double& maxBoost, int& plantedKept, bool& closedWhilePlanted)
+			{
+				Model m(Steady());
+				maxBoost = 0.0; plantedKept = 0; closedWhilePlanted = true;
+				for (int t = 0; t < n; ++t)
+				{
+					if (t == plantAt)
+					{
+						std::vector<Detail::BlockState>& blocks = m.*Grab(BlocksTag{});
+						Assert::IsTrue(!blocks.empty(), L"the block states exist");
+						for (Detail::BlockState& st : blocks)
+						{
+							st.bOn = false;
+							st.bLim = 0.0;
+							st.qPeak = infinite ? std::numeric_limits<double>::infinity() : 1e6 * st.qPrev;
+						}
+					}
+					Model::FrameIn in;
+					in.luma = s.frames[static_cast<size_t>(t)];
+					in.seq = static_cast<uint64_t>(t);
+					in.contentHz = kHz;
+					const Plane out = m.Process(in);
+					if (t < plantAt) continue;
+					const std::vector<Detail::BlockState>& blocks = m.*Grab(BlocksTag{});
+					const std::vector<double>& boost = m.Diag().boost;
+					Assert::IsTrue(AllFinite(boost) && AllFinite(out.v), L"the boost and the picture stay finite");
+					plantedKept = 0;
+					for (size_t i = 0; i < blocks.size() && i < boost.size(); ++i)
+					{
+						maxBoost = (std::max)(maxBoost, boost[i]);
+						if (!std::isinf(blocks[i].qPeak)) continue;   // a re-initialised block state is no longer planted
+						++plantedKept;
+						if (boost[i] != 0.0 || blocks[i].bLim != 0.0 || blocks[i].bOn) closedWhilePlanted = false;
+					}
+				}
+			};
+			double controlBoost = 0.0, infBoost = 0.0;
+			int controlKept = 0, infKept = 0;
+			bool controlClosed = true, infClosed = true;
+			runPlanted(false, controlBoost, controlKept, controlClosed);
+			runPlanted(true, infBoost, infKept, infClosed);
+			LogF("finite huge peak: largest boost %.4f; +inf peak: largest boost %.4f, blocks still planted at the end %d", controlBoost, infBoost, infKept);
+			Assert::IsTrue(controlBoost > 0.0, L"control: a finite huge peak opens the boost in at least one block (the downstream gates are open)");
+			Assert::IsTrue(infKept > 0, L"the +inf peak is still held at the last frame (the planted path was exercised)");
+			Assert::IsTrue(infClosed, L"while a block holds a +inf peak its boost, bLim and bOn stay 0 on every frame");
+			Assert::IsTrue(infBoost == 0.0, L"the +inf peak run never boosts any block");
+		}
+
 		TEST_METHOD(TemporalDetailGateRampsCloseOnNonFiniteAndEqualSmoothstepWhenFinite)
 		{
 			// RampMath::GateS / GateInv (core/Ramp.h, the U25 owner): non-finite x gives 0 in both forms (the S form does not
