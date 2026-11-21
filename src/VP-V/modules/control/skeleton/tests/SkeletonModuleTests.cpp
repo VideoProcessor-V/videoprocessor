@@ -2927,13 +2927,14 @@ namespace SkeletonModuleTestsNs
 			registry.ResetForTesting();
 		}
 
-		// A GpuCreated with a fake render device (presence only: it is never dereferenced), as SkeletonCoreContextTests does.
-		static void GpuCreatedWithDevice(Rig& rig, int* fakeGpu)
+		// A GpuCreated with a fake render device: a zero-filled pl_gpu_t (log null), never used for a texture or a pass. With the lane on,
+		// Reconcile constructs a SkeletonGpuDispatcher on it, whose pl_dispatch_create(gpu->log, gpu) only stores the two pointers.
+		static void GpuCreatedWithDevice(Rig& rig, pl_gpu_t* fakeGpu)
 		{
 			RE::LifecycleFacts f;
 			f.host = rig.Host();
 			f.kind = RE::Lifecycle::GpuCreated;
-			f.gpu = reinterpret_cast<pl_gpu>(fakeGpu);
+			f.gpu = fakeGpu;
 			rig.sk.OnLifecycle(f);
 		}
 
@@ -2947,7 +2948,7 @@ namespace SkeletonModuleTestsNs
 			const uint64_t mb = 1024ull * 1024ull;
 			{
 				Rig rig(Lane("off"));
-				int fakeGpu = 0;
+				pl_gpu_t fakeGpu{};
 				VpSkeleton::CardProfile tight;
 				tight.key.luid = 80;
 				tight.vramBudgetBytes = 8 * mb;
@@ -3026,7 +3027,7 @@ namespace SkeletonModuleTestsNs
 		TEST_METHOD(AShadowLaneBoundMemoWithADeviceIsNotWithoutADispatcher)
 		{
 			Rig rig(Lane("shadow"));
-			int fakeGpu = 0;
+			pl_gpu_t fakeGpu{};
 			rig.ResyncApply("on");
 			GpuCreatedWithDevice(rig, &fakeGpu);
 			for (int64_t s = 1; s <= 4; ++s)
@@ -3040,7 +3041,7 @@ namespace SkeletonModuleTestsNs
 		TEST_METHOD(ARaisedLaneBoundMemoWithADeviceIsNotWithoutADispatcher)
 		{
 			Rig rig(Lane("off"));
-			int fakeGpu = 0;
+			pl_gpu_t fakeGpu{};
 			rig.ResyncApply("on");
 			GpuCreatedWithDevice(rig, &fakeGpu);
 			VpSkeleton::ConsumerDecl c;
@@ -3062,7 +3063,7 @@ namespace SkeletonModuleTestsNs
 		TEST_METHOD(ADeviceDetachedAfterTheBindLeavesNoDispatcherAndAReattachRestoresIt)
 		{
 			Rig rig(Lane("on"));
-			int fakeGpu = 0;
+			pl_gpu_t fakeGpu{};
 			rig.ResyncApply("on");
 			GpuCreatedWithDevice(rig, &fakeGpu);
 			for (int64_t s = 1; s <= 4; ++s)
@@ -3087,7 +3088,7 @@ namespace SkeletonModuleTestsNs
 		TEST_METHOD(AStoreRegisteringAfterGpuCreatedDoesNotDetachTheNewRenderersDevice)
 		{
 			Rig rig(Lane("on"));
-			int fakeGpu = 0;
+			pl_gpu_t fakeGpu{};
 			rig.ResyncApply("on");
 			GpuCreatedWithDevice(rig, &fakeGpu);
 			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
@@ -3113,7 +3114,7 @@ namespace SkeletonModuleTestsNs
 		TEST_METHOD(AStoreRegisteringAfterGpuReleasedDoesNotResurrectADevice)
 		{
 			Rig rig(Lane("on"));
-			int fakeGpu = 0;
+			pl_gpu_t fakeGpu{};
 			rig.ResyncApply("on");
 			GpuCreatedWithDevice(rig, &fakeGpu);
 			rig.Frame(1);
@@ -3138,7 +3139,7 @@ namespace SkeletonModuleTestsNs
 		TEST_METHOD(ADeadRenderersStaleDeviceIsKeptUntilTheNextGpuCreated)
 		{
 			Rig rig(Lane("on"));
-			int staleGpu = 0, newGpu = 0;
+			pl_gpu_t staleGpu{}, newGpu{};
 			rig.ResyncApply("on");
 			GpuCreatedWithDevice(rig, &staleGpu);
 			rig.Frame(1);

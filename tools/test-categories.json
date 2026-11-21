@@ -337,21 +337,21 @@
    "value": "SkeletonModuleTests::AStoreRegisteringAfterGpuCreatedDoesNotDetachTheNewRenderersDevice",
    "category": "Cpu",
    "file": "src/VP-V/modules/control/skeleton/tests/SkeletonModuleTests.cpp",
-   "note": "GpuCreated carries a FAKE pl_gpu (the address of an int, presence only, never dereferenced); no device, no dispatcher, no GPU call. CPU only (reviewed, GF-P2b E2)."
+   "note": "GpuCreated carries a fake, zero-filled pl_gpu_t (never used for a texture or a pass); with analysis_lane=on a SkeletonGpuDispatcher is constructed (pl_dispatch_create stores the pointers, no GPU work runs); no device needed, identical on every lane. CPU (reviewed, GF-P2b E2)."
   },
   {
    "kind": "method",
    "value": "SkeletonModuleTests::AStoreRegisteringAfterGpuReleasedDoesNotResurrectADevice",
    "category": "Cpu",
    "file": "src/VP-V/modules/control/skeleton/tests/SkeletonModuleTests.cpp",
-   "note": "GpuCreated carries a FAKE pl_gpu (the address of an int, presence only, never dereferenced); no device, no dispatcher, no GPU call. CPU only (reviewed, GF-P2b E2)."
+   "note": "GpuCreated carries a fake, zero-filled pl_gpu_t (never used for a texture or a pass); with analysis_lane=on a SkeletonGpuDispatcher is constructed (pl_dispatch_create stores the pointers, no GPU work runs); no device needed, identical on every lane. CPU (reviewed, GF-P2b E2)."
   },
   {
    "kind": "method",
    "value": "SkeletonModuleTests::ADeadRenderersStaleDeviceIsKeptUntilTheNextGpuCreated",
    "category": "Cpu",
    "file": "src/VP-V/modules/control/skeleton/tests/SkeletonModuleTests.cpp",
-   "note": "GpuCreated carries FAKE pl_gpu values (addresses of ints, presence only, never dereferenced); no device, no dispatcher, no GPU call. CPU only (reviewed, GF-P2b E2)."
+   "note": "GpuCreated carries two distinct fake, zero-filled pl_gpu_t objects (never used for a texture or a pass); with analysis_lane=on a SkeletonGpuDispatcher is constructed (pl_dispatch_create stores the pointers, no GPU work runs); no device needed, identical on every lane. CPU (reviewed, GF-P2b E2)."
   },
   {
    "kind": "method",
