@@ -31,5 +31,6 @@
     <!-- S-3f b: the default report key's background hook and its static DialogExtension registration.
          It uses the GUI's precompiled header (pch.h: MFC, for AfxGetMainWnd). -->
     <ClCompile Include="..\VP-V\gui\ShortcutObserverStatus.cpp" />
+    <ClCompile Include="..\VP-V\gui\VpvAmbientIntent.cpp" />
   </ItemGroup>
 </Project>
