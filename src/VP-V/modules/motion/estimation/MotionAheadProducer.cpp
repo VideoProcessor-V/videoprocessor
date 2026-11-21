@@ -28,7 +28,90 @@ namespace MotionAhead
 		inline uint16_t LumaOf(unsigned r, unsigned g, unsigned b) { return static_cast<uint16_t>((r + 2 * g + b + 2) >> 2); }
 	}
 
-	bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH)
+	void HalfLumaPool::Start(int workers)
+	{
+		Stop();
+		if (workers <= 0)
+			return;
+		std::lock_guard<std::mutex> lock(mutex_);
+		stop_ = false;
+		totalWorkers_ = workers + 1;
+		for (int i = 0; i < workers; ++i)
+		{
+			const int workerIdx = i + 1;
+			threads_.emplace_back([this, workerIdx] {
+				uint64_t seen = 0;
+				for (;;)
+				{
+					const std::function<void(int, int)>* fn = nullptr;
+					int rows = 0;
+					int total = 1;
+					{
+						std::unique_lock<std::mutex> lk(mutex_);
+						workCv_.wait(lk, [this, seen] { return stop_ || generation_ != seen; });
+						if (stop_)
+							return;
+						seen = generation_;
+						fn = fn_;
+						rows = totalRows_;
+						total = totalWorkers_;
+					}
+					if (fn && rows > 0)
+					{
+						const int chunk = (rows + total - 1) / total;
+						const int fromY = (std::min)(rows, workerIdx * chunk);
+						const int toY = (std::min)(rows, (workerIdx + 1) * chunk);
+						if (fromY < toY)
+							(*fn)(fromY, toY);
+					}
+					std::lock_guard<std::mutex> lk(mutex_);
+					if (--remaining_ == 0)
+						doneCv_.notify_one();
+				}
+			});
+		}
+	}
+
+	void HalfLumaPool::Stop()
+	{
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			stop_ = true;
+		}
+		workCv_.notify_all();
+		for (std::thread& t : threads_)
+			if (t.joinable()) t.join();
+		threads_.clear();
+		std::lock_guard<std::mutex> lock(mutex_);
+		fn_ = nullptr;
+		remaining_ = 0;
+	}
+
+	void HalfLumaPool::Run(int totalRows, const std::function<void(int, int)>& fn)
+	{
+		if (threads_.empty() || totalRows < 256)
+		{
+			fn(0, totalRows);
+			return;
+		}
+		int total = 1;
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			fn_ = &fn;
+			totalRows_ = totalRows;
+			remaining_ = static_cast<int>(threads_.size());
+			total = totalWorkers_;
+			++generation_;
+		}
+		workCv_.notify_all();
+		const int chunk = (totalRows + total - 1) / total;
+		fn(0, (std::min)(totalRows, chunk));
+		std::unique_lock<std::mutex> lock(mutex_);
+		doneCv_.wait(lock, [this] { return remaining_ == 0 || stop_; });
+		fn_ = nullptr;
+	}
+
+	bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH, HalfLumaPool* pool)
 	{
 		if (!source.IsValid()) return false;
 		const int w = source.width, h = source.height;
@@ -162,18 +245,23 @@ namespace MotionAhead
 				}
 			}
 		};
+		if (pool && pool->Active())
+		{
+			pool->Run(halfH, rows);
+			return true;
+		}
 		const unsigned cores = (std::max)(1u, std::thread::hardware_concurrency());
 		const int threads = halfH >= 256 ? static_cast<int>((std::min)(4u, (std::max)(1u, cores / 2))) : 1;
 		if (threads <= 1)
 			rows(0, halfH);
 		else
 		{
-			std::vector<std::thread> pool;
+			std::vector<std::thread> poolThreads;
 			const int chunk = (halfH + threads - 1) / threads;
 			for (int t = 1; t < threads; ++t)
-				pool.emplace_back(rows, (std::min)(halfH, t * chunk), (std::min)(halfH, (t + 1) * chunk));
+				poolThreads.emplace_back(rows, (std::min)(halfH, t * chunk), (std::min)(halfH, (t + 1) * chunk));
 			rows(0, (std::min)(halfH, chunk));
-			for (std::thread& th : pool) th.join();
+			for (std::thread& th : poolThreads) th.join();
 		}
 		return true;
 	}
@@ -219,8 +307,11 @@ namespace MotionAhead
 		recovery = ProducerRecovery();
 		stopError.clear();
 		slot->Clear();   // a fresh producer starts from an empty P2 slot (the pairs of an older one are not its own)
+		backQueue.Reopen();
+		publishGate.Reset();
 		renderAdapter = adapter;
 		running = true;
+		StartPipelineThreads();
 		worker = std::thread([this] {
 			std::string why;
 			if (!CreateDevice(why))
@@ -234,6 +325,163 @@ namespace MotionAhead
 			Worker();
 		});
 		return true;
+	}
+
+	void Producer::StartPipelineThreads()
+	{
+		frontPool.Start(2);
+		{
+			std::lock_guard<std::mutex> lock(voteMutex);
+			voteFlow = nullptr;
+			votePending = false;
+			voteStop = false;
+		}
+		voteThread = std::thread([this] { VoteWorker(); });
+		backThread = std::thread([this] { BackWorker(); });
+	}
+
+	void Producer::StopPipelineThreads()
+	{
+		backQueue.Close();
+		if (backThread.joinable())
+			backThread.join();
+		{
+			std::lock_guard<std::mutex> lock(voteMutex);
+			voteStop = true;
+		}
+		voteWorkCv.notify_all();
+		if (voteThread.joinable())
+			voteThread.join();
+		frontPool.Stop();
+	}
+
+	void Producer::VoteWorker()
+	{
+		for (;;)
+		{
+			Flow* flow = nullptr;
+			bool general = true;
+			{
+				std::unique_lock<std::mutex> lock(voteMutex);
+				voteWorkCv.wait(lock, [this] { return voteStop || votePending; });
+				if (voteStop && !votePending)
+					return;
+				flow = voteFlow;
+				general = voteGeneral;
+			}
+			if (flow)
+				FlowGlobal(flow->backward, flow->backwardCost, flow->gridW, flow->gridH, flow->global[1], flow->second[1], general);
+			{
+				std::lock_guard<std::mutex> lock(voteMutex);
+				voteFlow = nullptr;
+				votePending = false;
+			}
+			voteDoneCv.notify_one();
+		}
+	}
+
+	void Producer::RunFlowGlobalsParallel(Flow& flow, bool general)
+	{
+		if (voteThread.joinable())
+		{
+			{
+				std::lock_guard<std::mutex> lock(voteMutex);
+				voteFlow = &flow;
+				voteGeneral = general;
+				votePending = true;
+			}
+			voteWorkCv.notify_one();
+			FlowGlobal(flow.forward, flow.forwardCost, flow.gridW, flow.gridH, flow.global[0], flow.second[0], general);
+			std::unique_lock<std::mutex> lock(voteMutex);
+			voteDoneCv.wait(lock, [this] { return !votePending; });
+			flow.globalSet = true;
+			flow.globalGeneral = general;
+		}
+		else
+		{
+			FlowGlobals(flow, general);
+		}
+	}
+
+	void Producer::BackWorker()
+	{
+		Pipeline::BackQueue<BackItem>::Entry entry;
+		while (backQueue.Pop(entry))
+		{
+			backQueue.MarkBusy(true);
+			BackItem& item = entry.item;
+			const bool liveStart = backQueue.IsLive(entry.generation, entry.epoch, entry.ignoreGeneration);
+			if (!liveStart || !item.flow)
+			{
+				if (item.isRequest && item.pendingRequest.state)
+				{
+					OnDemand::PairResult res;
+					res.status = OnDemand::Status::Unavailable;
+					res.queuedMs = item.requestQueuedMs;
+					res.runMs = OnDemand::MsBetween(item.requestTaken, OnDemand::Clock::now());
+					Answer(item.pendingRequest, std::move(res));
+				}
+				backQueue.MarkBusy(false);
+				continue;
+			}
+			const auto voteStart = std::chrono::steady_clock::now();
+			VPV_COMPUTE_ONCE_AT("U10", item.toSeq, 0);
+			RunFlowGlobalsParallel(*item.flow, item.generalRates);
+			const auto extrasStart = std::chrono::steady_clock::now();
+			FlowExtras(*item.flow);
+			const auto extrasEnd = std::chrono::steady_clock::now();
+			const double voteMs = std::chrono::duration<double, std::milli>(extrasStart - voteStart).count();
+			const double flowExtrasMs = std::chrono::duration<double, std::milli>(extrasEnd - extrasStart).count();
+			const double combinedExtrasMs = voteMs + flowExtrasMs;
+
+			if (!backQueue.IsLive(entry.generation, entry.epoch, entry.ignoreGeneration))
+			{
+				if (item.isRequest && item.pendingRequest.state)
+				{
+					OnDemand::PairResult res;
+					res.status = OnDemand::Status::Unavailable;
+					res.queuedMs = item.requestQueuedMs;
+					res.runMs = OnDemand::MsBetween(item.requestTaken, OnDemand::Clock::now());
+					Answer(item.pendingRequest, std::move(res));
+				}
+				backQueue.MarkBusy(false);
+				continue;
+			}
+
+			if (!item.isRequest)
+			{
+				if (publishGate.Accept(item.generation, item.fromSeq, item.toSeq))
+				{
+					slot->Publish(item.fromSeq, item.toSeq, item.generation, item.flow);   // P2: ordered publish
+					const auto published = std::chrono::steady_clock::now();
+					item.stage.voteMs = voteMs;
+					item.stage.extrasMs = flowExtrasMs;
+					item.stage.serviceMs = item.stage.lumaMs + item.stage.engineMs + item.stage.mapMs + combinedExtrasMs;
+					item.stage.submitToPublishMs = item.submitTime.time_since_epoch().count() != 0 ?
+						(std::max)(0.0, std::chrono::duration<double, std::milli>(published - item.submitTime).count()) : item.stage.serviceMs;
+					engineReady = true;
+					std::lock_guard<std::mutex> lock(mutex);
+					++stats.pairs;
+					stats.extrasMs = combinedExtrasMs;
+					stats.lastPairMs = item.stage.serviceMs;
+					stats.pairMsSum += stats.lastPairMs;
+					stats.RecordStage(item.stage);
+				}
+			}
+			else
+			{
+				if (item.publishToSlot && !item.forceOffChain)
+					slot->Publish(item.fromSeq, item.toSeq, item.generation, item.flow);
+				engineReady = true;
+				OnDemand::PairResult res;
+				res.status = OnDemand::Status::Ready;
+				res.flow = item.flow;
+				res.queuedMs = item.requestQueuedMs;
+				res.runMs = OnDemand::MsBetween(item.requestTaken, OnDemand::Clock::now());
+				Answer(item.pendingRequest, std::move(res));
+			}
+			backQueue.MarkBusy(false);
+		}
 	}
 
 	bool Producer::CreateDevice(std::string& why)
@@ -261,12 +509,28 @@ namespace MotionAhead
 	// The engine first (it unregisters its textures), then the textures.
 	void Producer::ReleaseEngine()
 	{
+		for (int k = 0; k < kStagingSets; ++k)
+		{
+			FailStagingSetRequest(k, OnDemand::Status::Unavailable);
+			ReleaseStagingSetMeta(k);
+		}
+		stagingRing.UnbindEngineThread();
+		stagingRing.Clear();
 		engine.reset();
 		VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserNvofProducer);   // MV7: the ring textures go with the engine
 		VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserNvofProducer, false);
 		for (int i = 0; i < 2; ++i)
 		{
-			flowTex[i].Release(); costTex[i].Release(); flowRead[i].Release(); costRead[i].Release();
+			flowTex[i].Release(); costTex[i].Release();
+		}
+		for (int k = 0; k < kStagingSets; ++k)
+		{
+			for (int i = 0; i < 2; ++i)
+			{
+				stagingSets[k].flowRead[i].Release();
+				stagingSets[k].costRead[i].Release();
+			}
+			stagingSets[k].eventQuery.Release();
 		}
 		for (int i = 0; i < kLumaRingSlots; ++i)
 			lumaTex[i].Release();
@@ -303,8 +567,10 @@ namespace MotionAhead
 			jobs.clear();
 			requestStats.unavailable += requests.FailAll(OnDemand::Status::Unavailable);   // W2-C5b: every waiting request answered
 		}
+		backQueue.Close();   // wake BACK and unblock any Push on ENGINE before joining
 		wake.notify_all();
 		if (worker.joinable()) worker.join();
+		StopPipelineThreads();
 		running = false;
 		// The engine first (it unregisters its textures), then the textures, then the device.
 		ReleaseEngine();
@@ -352,15 +618,114 @@ namespace MotionAhead
 
 	void Producer::Worker()
 	{
+		stagingRing.BindEngineThread();
+		struct ThreadGuard
+		{
+			Producer* p;
+			~ThreadGuard()
+			{
+				p->DrainStagingSets(true);
+				p->stagingRing.UnbindEngineThread();
+			}
+		} guard{ this };
+
 		for (;;)
 		{
+			// 1. Poll any completed staging sets (non-blocking GetData(DONOTFLUSH)) and forward to BACK.
+			if (!testEngine && context && stagingRing.SubmittedCount() > 0)
+			{
+				bool anyCompleted = false;
+				if (!PollReadyStagingSets(anyCompleted))
+				{
+					std::unique_lock<std::mutex> lock(mutex);
+					++stats.failures;
+					if (++consecutiveFailures >= 3)
+					{
+						lock.unlock();
+						DrainStagingSets(true);
+						backQueue.DiscardAllAndBumpEpoch();
+						backQueue.WaitIdle();
+						publishGate.Reset();
+						lock.lock();
+						running = false;
+						engineReady = false;
+						jobs.clear();
+						requestStats.unavailable += requests.FailAll(OnDemand::Status::Unavailable);
+						stopError = error.empty() ? std::string("three failed jobs in a row") : error;
+						for (;;)
+						{
+							const uint64_t delay = recovery.OnStopped(NowMs());
+							const unsigned divisor = recoveryDivisor.load(std::memory_order_acquire);
+							error = stopError + "; restarting in " + std::to_string((delay + 999) / 1000) + " s (stop " +
+								std::to_string(recovery.Stops()) + ")";
+							DebugLog::Log("Motion ahead: the producer stopped (%s)", error.c_str());
+							if (wake.wait_for(lock, std::chrono::milliseconds(delay / divisor), [this] { return stopping; }))
+								return;
+							lock.unlock();
+							ReleaseEngine();
+							stagingRing.BindEngineThread();
+							{
+								std::lock_guard<std::mutex> deviceLock(mutex);
+								context.Release();
+								device.Release();
+							}
+							std::string why;
+							const bool created = CreateDevice(why);
+							lock.lock();
+							if (stopping) return;
+							if (created)
+								break;
+							stopError = why;
+						}
+						jobs.clear();
+						requestStats.unavailable += requests.FailAll(OnDemand::Status::Unavailable);
+						consecutiveFailures = 0;
+						recovery.OnRestarted(NowMs());
+						error.clear();
+						DebugLog::Log("Motion ahead: the producer restarted on a new device (restart %u after: %s)",
+							recovery.Restarts(), stopError.c_str());
+						running = true;
+					}
+					continue;
+				}
+			}
+
 			Job job;
 			OnDemand::Pending request;   // W2-C5b: an on-demand request, taken after the waiting look-ahead (core) jobs
 			bool isRequest = false;
+			bool hasWork = false;
 			{
 				std::unique_lock<std::mutex> lock(mutex);
-				wake.wait(lock, [this] { return stopping || !requests.Empty() || !jobs.empty(); });
+				const bool canSubmit = testEngine || stagingRing.AcquireFree() != Pipeline::StagingRing<kStagingSets>::kNoSlot;
+				if (!stopping && !(canSubmit && (!requests.Empty() || !jobs.empty())))
+				{
+					if (!testEngine && stagingRing.SubmittedCount() > 0)
+					{
+						// Wait on whichever comes first: new job (if a staging slot is free) or oldest GPU event.
+						// Spin-then-sleep: brief polls before a short timed wait so we neither stall nor burn CPU.
+						lock.unlock();
+						bool completed = false;
+						for (int spin = 0; spin < 8 && !completed; ++spin)
+						{
+							if (!PollReadyStagingSets(completed))
+								break;
+							if (!completed)
+								std::this_thread::yield();
+						}
+						if (completed)
+							continue;
+						lock.lock();
+						if (!stopping && !(canSubmit && (!requests.Empty() || !jobs.empty())))
+							wake.wait_for(lock, std::chrono::microseconds(500), [this, canSubmit] {
+								return stopping || (canSubmit && (!requests.Empty() || !jobs.empty()));
+							});
+						continue;
+					}
+					wake.wait(lock, [this] { return stopping || !requests.Empty() || !jobs.empty(); });
+				}
 				if (stopping) return;
+				if (!canSubmit)
+					continue;
 				// One pure chooser (ProducerJobs.h, 105 s3.3): core pair > on-demand request > long pair (register 115 #57).
 				ProducerJobs::Queues queues;
 				queues.corePairs = jobs.size();
@@ -374,6 +739,7 @@ namespace MotionAhead
 					requestRunning = isRequest;
 					if (!isRequest)
 						continue;
+					hasWork = true;
 				}
 				else
 				{
@@ -381,8 +747,11 @@ namespace MotionAhead
 						++requestStats.coreAheadOfRequests;
 					job = std::move(jobs.front());
 					jobs.pop_front();
+					hasWork = true;
 				}
 			}
+			if (!hasWork)
+				continue;
 			// An exception escaping the worker would end the process: counted as a failure instead.
 			// Three failures IN A ROW stop the producer (audit 2026-10-16: three over a whole session did).
 			bool ok = false;
@@ -408,6 +777,12 @@ namespace MotionAhead
 				continue;
 			// Persistent failure: stop (the matcher covers everything meanwhile). Bug hunt 35 #1: no
 			// longer for the session - restart with a back-off on a fresh device while still wanted.
+			lock.unlock();
+			DrainStagingSets(true);
+			backQueue.DiscardAllAndBumpEpoch();
+			backQueue.WaitIdle();
+			publishGate.Reset();
+			lock.lock();
 			running = false;
 			engineReady = false;
 			jobs.clear();
@@ -425,6 +800,7 @@ namespace MotionAhead
 				lock.unlock();
 				// The old engine, textures and device go (a removed device cannot recover in place).
 				ReleaseEngine();
+				stagingRing.BindEngineThread();
 				{
 					std::lock_guard<std::mutex> deviceLock(mutex);
 					context.Release();
@@ -452,12 +828,26 @@ namespace MotionAhead
 	bool Producer::EnsureSize(int halfW, int halfH)
 	{
 		if (halfW == sizeW && halfH == sizeH && engine && engine->IsOpen()) return true;
+		// Drain all in-flight staging sets and wait for BACK before destroying the old staging textures.
+		DrainStagingSets(false);
+		backQueue.WaitIdle();
+		stagingRing.Clear();
 		engine.reset();
 		VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserNvofProducer);   // MV7: re-declared below for the new size
 		VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserNvofProducer, true);   // an open that fails below leaves it active without a declaration: shown by the skeleton
 		for (int i = 0; i < 2; ++i)
 		{
-			flowTex[i].Release(); costTex[i].Release(); flowRead[i].Release(); costRead[i].Release();
+			flowTex[i].Release(); costTex[i].Release();
+		}
+		for (int k = 0; k < kStagingSets; ++k)
+		{
+			for (int i = 0; i < 2; ++i)
+			{
+				stagingSets[k].flowRead[i].Release();
+				stagingSets[k].costRead[i].Release();
+			}
+			stagingSets[k].eventQuery.Release();
+			ReleaseStagingSetMeta(k);
 		}
 		for (int i = 0; i < kLumaRingSlots; ++i)
 			lumaTex[i].Release();
@@ -482,14 +872,31 @@ namespace MotionAhead
 			}
 		for (int i = 0; i < 2; ++i)
 			if (!make(gw, gh, NvOpticalFlow::Engine::FlowFormat(), false, flowTex[i]) ||
-				!make(gw, gh, NvOpticalFlow::Engine::CostFormat(), false, costTex[i]) ||
-				!make(gw, gh, NvOpticalFlow::Engine::FlowFormat(), true, flowRead[i]) ||
-				!make(gw, gh, NvOpticalFlow::Engine::CostFormat(), true, costRead[i]))
+				!make(gw, gh, NvOpticalFlow::Engine::CostFormat(), false, costTex[i]))
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				error = "cannot create its textures";
 				return false;
 			}
+		D3D11_QUERY_DESC qd{};
+		qd.Query = D3D11_QUERY_EVENT;
+		for (int k = 0; k < kStagingSets; ++k)
+		{
+			for (int i = 0; i < 2; ++i)
+				if (!make(gw, gh, NvOpticalFlow::Engine::FlowFormat(), true, stagingSets[k].flowRead[i]) ||
+					!make(gw, gh, NvOpticalFlow::Engine::CostFormat(), true, stagingSets[k].costRead[i]))
+				{
+					std::lock_guard<std::mutex> lock(mutex);
+					error = "cannot create its textures";
+					return false;
+				}
+			if (FAILED(device->CreateQuery(&qd, &stagingSets[k].eventQuery)))
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				error = "cannot create its event query";
+				return false;
+			}
+		}
 		engine = std::make_unique<NvOpticalFlow::Engine>();
 		if (!engine->Open(device, context, halfW, halfH, preset, true))
 		{
@@ -529,7 +936,11 @@ namespace MotionAhead
 		requestOwnsGeneration = false;
 		if (slot->Generation() != job.generation)
 		{
+			stagingRing.MarkDiscardedOtherThan(job.generation);
+			backQueue.SetActiveGeneration(job.generation);
+			backQueue.WaitIdle();
 			slot->SetGeneration(job.generation);
+			publishGate.SetGeneration(job.generation);
 			havePrevious = false;
 			lumaRing.ClearGenerationsOtherThan(job.generation);   // a new generation: no frame of the old one stays (pins too)
 		}
@@ -550,6 +961,8 @@ namespace MotionAhead
 			NoteRingMiss("the engine-luma ring could not hold the frame");
 			return false;
 		}
+		if (!WaitForLumaSlotFree(texIndex))
+			return false;
 		context->UpdateSubresource(lumaTex[texIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(halfW), 0);
 		bool ok = true;
 		if (prevSlot != EngineLumaRing::kNoSlot)
@@ -557,34 +970,39 @@ namespace MotionAhead
 			const int prev = prevSlot;
 			// The temporal hints only when the engine's last pair ended at this pair's first frame
 			// (audit 2026-10-16: they carried across seeks, dropped jobs and size skips).
-			const bool continuous = hintSequence == previousSequence && hintGeneration == job.generation;
+			const bool continuous = temporalHintsForTest.load(std::memory_order_acquire) &&
+				hintSequence == previousSequence && hintGeneration == job.generation;
 			hintSequence = UINT64_MAX;
 			bool ran = false;
-			std::shared_ptr<Flow> flow;
-			double extrasMs = 0.0;
-			StageSample stage;
-			stage.queueWaitMs = queueWaitMs;
-			stage.lumaMs = lumaMs;
-			ok = RunPair(lumaTex[prev], lumaTex[texIndex], halfW, halfH, continuous, job.sequence, ran, flow, extrasMs, &stage);
+			int setIdx = Pipeline::StagingRing<kStagingSets>::kNoSlot;
+			ok = SubmitPairAsync(lumaTex[prev], lumaTex[texIndex], halfW, halfH, continuous, job.sequence, ran, setIdx);
 			if (ran)
 			{
 				hintSequence = job.sequence;
 				hintGeneration = job.generation;
 			}
-			if (ok && flow)
+			if (ok && setIdx != Pipeline::StagingRing<kStagingSets>::kNoSlot)
 			{
-				slot->Publish(previousSequence, job.sequence, job.generation, flow);   // P2: the pair, for the readers' P2View
-				const auto published = std::chrono::steady_clock::now();
-				stage.serviceMs = std::chrono::duration<double, std::milli>(published - started).count();
-				stage.submitToPublishMs = job.submitTime.time_since_epoch().count() != 0 ?
-					(std::max)(0.0, std::chrono::duration<double, std::milli>(published - job.submitTime).count()) : stage.serviceMs;
-				engineReady = true;
-				std::lock_guard<std::mutex> lock(mutex);
-				++stats.pairs;
-				stats.extrasMs = extrasMs;
-				stats.lastPairMs = stage.serviceMs;
-				stats.pairMsSum += stats.lastPairMs;
-				stats.RecordStage(stage);
+				StagingSet& s = stagingSets[setIdx];
+				s.halfW = halfW;
+				s.halfH = halfH;
+				s.lumaSlotA = prev;
+				s.lumaSlotB = texIndex;
+				s.usesRequestTex = false;
+				s.fromSeq = previousSequence;
+				s.toSeq = job.sequence;
+				s.generation = job.generation;
+				s.epoch = backQueue.Epoch();
+				s.isRequest = false;
+				s.publishToSlot = true;
+				s.forceOffChain = false;
+				s.generalRates = generalRates.load(std::memory_order_acquire);
+				s.submitTime = job.submitTime;
+				s.workStartTime = started;
+				s.queueWaitMs = queueWaitMs;
+				s.lumaMs = lumaMs;
+				const Pipeline::JobKey key{ job.generation, previousSequence, job.sequence, false, job.breakBefore };
+				stagingRing.MarkSubmitted(setIdx, key, s.epoch, std::chrono::steady_clock::now());
 			}
 		}
 		{
@@ -610,7 +1028,7 @@ namespace MotionAhead
 		VpSkeleton::P1ReadKind how = VpSkeleton::P1ReadKind::None;
 		if (!(p1 && luma.IsValid() && p1->ReadEngine8(sequence, luma, buffer, halfW, halfH, how) && how != VpSkeleton::P1ReadKind::None))
 		{
-			if (!HalfLuma8(luma, buffer, halfW, halfH))
+			if (!HalfLuma8(luma, buffer, halfW, halfH, &frontPool))
 				return false;   // not a readable frame: nothing to do, not a failure
 			// GF-P4 MUST-12: U3 is a private copy only when the producer decoded the half luma itself (a shared P1 read is not).
 			VPV_COMPUTE_ONCE_PRIVATE_AT("U3", sequence, privateSite);
@@ -630,36 +1048,85 @@ namespace MotionAhead
 		return true;
 	}
 
-	bool Producer::RunPair(ID3D11Texture2D* a, ID3D11Texture2D* b, int halfW, int halfH, bool continuous, uint64_t timedSequence, bool& ran,
-		std::shared_ptr<Flow>& flowOut, double& extrasMs, StageSample* stageOut)
+	void Producer::ReleaseStagingSetMeta(int setIndex)
+	{
+		if (setIndex < 0 || setIndex >= kStagingSets)
+			return;
+		StagingSet& s = stagingSets[setIndex];
+		s.halfW = s.halfH = 0;
+		s.lumaSlotA = s.lumaSlotB = EngineLumaRing::kNoSlot;
+		s.usesRequestTex = false;
+		s.fromSeq = s.toSeq = s.generation = s.epoch = 0;
+		s.isRequest = s.publishToSlot = s.forceOffChain = false;
+		s.queueWaitMs = s.lumaMs = s.requestQueuedMs = 0.0;
+		s.pendingRequest = OnDemand::Pending{};
+	}
+
+	void Producer::FailStagingSetRequest(int setIndex, OnDemand::Status status)
+	{
+		if (setIndex < 0 || setIndex >= kStagingSets)
+			return;
+		StagingSet& s = stagingSets[setIndex];
+		if (s.isRequest && s.pendingRequest.state && !s.pendingRequest.state->fulfilled.load(std::memory_order_acquire))
+		{
+			OnDemand::PairResult res;
+			res.status = status;
+			res.queuedMs = s.requestQueuedMs;
+			res.runMs = OnDemand::MsBetween(s.requestTaken, OnDemand::Clock::now());
+			Answer(s.pendingRequest, std::move(res));
+		}
+	}
+
+	bool Producer::SubmitPairAsync(ID3D11Texture2D* a, ID3D11Texture2D* b, int halfW, int halfH, bool continuous, uint64_t timedSequence,
+		bool& ran, int& outSetIndex)
 	{
 		ran = false;
+		outSetIndex = Pipeline::StagingRing<kStagingSets>::kNoSlot;
+		stagingRing.AssertEngineThread();
 		VPV_COMPUTE_ONCE_AT("nvof.pair", timedSequence, 0);
-		flowOut.reset();
-		extrasMs = 0.0;
-		const auto engineStart = std::chrono::steady_clock::now();
-		// MV7: 1 pair in N is timed (the GPU idle first, then the engine's completion, on this worker's own device) and posted to the
-		// pass-timer inbox the render thread drains; the other pairs run untimed exactly as before.
-		NvOpticalFlow::Result timing;
-		const bool timed = PassTimers::Sampler().Take(timedSequence);
-		if (!engine->Run(a, b, flowTex[0], flowTex[1], costTex[0], costTex[1], timed ? &timing : nullptr, continuous))
+		int setIdx = stagingRing.AcquireFree();
+		if (setIdx == Pipeline::StagingRing<kStagingSets>::kNoSlot)
+		{
+			const int oldest = stagingRing.OldestSubmitted();
+			if (oldest == Pipeline::StagingRing<kStagingSets>::kNoSlot || !DrainStagingSets(false, oldest))
+				return false;
+			setIdx = stagingRing.AcquireFree();
+			if (setIdx == Pipeline::StagingRing<kStagingSets>::kNoSlot)
+				return false;
+		}
+		// Slice 16 P2 (105 s3.6): steady path never drains inside NvOpticalFlow::Engine::Run (nullptr timing);
+		// wall time is measured non-blockingly from submit -> stagingSets[setIdx].eventQuery signalling S_OK.
+		if (!engine->Run(a, b, flowTex[0], flowTex[1], costTex[0], costTex[1], nullptr, continuous))
 		{
 			std::lock_guard<std::mutex> lock(mutex);
 			error = engine->LastError();
 			return false;
 		}
 		ran = true;
-		if (timed && timing.gpuMs > 0.0)
-			PassTimers::Inbox::Motion().Post(PassTimers::Kind::GpuGroup, "motion: NVOF producer engine (idle to completion)", timing.gpuMs);
+		StagingSet& s = stagingSets[setIdx];
 		for (int i = 0; i < 2; ++i)
 		{
-			context->CopyResource(flowRead[i], flowTex[i]);
-			context->CopyResource(costRead[i], costTex[i]);
+			context->CopyResource(s.flowRead[i], flowTex[i]);
+			context->CopyResource(s.costRead[i], costTex[i]);
 		}
+		context->End(s.eventQuery);
+		context->Flush();
+		outSetIndex = setIdx;
+		(void)halfW;
+		(void)halfH;
+		return true;
+	}
+
+	bool Producer::MapAndForwardStagingSet(int setIndex, double engineMs)
+	{
+		stagingRing.AssertEngineThread();
+		StagingSet& s = stagingSets[setIndex];
 		const auto mapStart = std::chrono::steady_clock::now();
 		auto flow = std::make_shared<Flow>();
-		flow->halfW = halfW; flow->halfH = halfH;
-		flow->gridW = (halfW + 3) / 4; flow->gridH = (halfH + 3) / 4;
+		flow->halfW = s.halfW;
+		flow->halfH = s.halfH;
+		flow->gridW = (s.halfW + 3) / 4;
+		flow->gridH = (s.halfH + 3) / 4;
 		const size_t cells = static_cast<size_t>(flow->gridW) * flow->gridH;
 		for (int i = 0; i < 2; ++i)
 		{
@@ -668,35 +1135,166 @@ namespace MotionAhead
 			vectors.resize(cells * 2);
 			costs.resize(cells);
 			D3D11_MAPPED_SUBRESOURCE map{};
-			if (FAILED(context->Map(flowRead[i], 0, D3D11_MAP_READ, 0, &map))) return false;
+			if (FAILED(context->Map(s.flowRead[i], 0, D3D11_MAP_READ, 0, &map)))
+				return false;
 			for (int y = 0; y < flow->gridH; ++y)
-				std::memcpy(&vectors[static_cast<size_t>(y) * flow->gridW * 2], static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch,
+				std::memcpy(&vectors[static_cast<size_t>(y) * flow->gridW * 2],
+					static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch,
 					static_cast<size_t>(flow->gridW) * 4);
-			context->Unmap(flowRead[i], 0);
-			if (FAILED(context->Map(costRead[i], 0, D3D11_MAP_READ, 0, &map))) return false;
+			context->Unmap(s.flowRead[i], 0);
+			if (FAILED(context->Map(s.costRead[i], 0, D3D11_MAP_READ, 0, &map)))
+				return false;
 			for (int y = 0; y < flow->gridH; ++y)
-				std::memcpy(&costs[static_cast<size_t>(y) * flow->gridW], static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch,
+				std::memcpy(&costs[static_cast<size_t>(y) * flow->gridW],
+					static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch,
 					static_cast<size_t>(flow->gridW));
-			context->Unmap(costRead[i], 0);
+			context->Unmap(s.costRead[i], 0);
 		}
-		// Planner Q1: the whole frame's motion, here on the worker (no render cost).
-		const auto voteStart = std::chrono::steady_clock::now();
-		const bool general = generalRates.load(std::memory_order_acquire);   // fixed-constant batch B4 2026-10-18
-		VPV_COMPUTE_ONCE_AT("U10", timedSequence, 0);
-		FlowGlobals(*flow, general);   // both directions, flagged for the FlowOf view (W1-C3)
-		// The cost and the engine's own forward/backward consistency as trust inputs.
-		const auto flowExtrasStart = std::chrono::steady_clock::now();
-		FlowExtras(*flow);
-		const auto flowExtrasEnd = std::chrono::steady_clock::now();
-		extrasMs = std::chrono::duration<double, std::milli>(flowExtrasEnd - voteStart).count();
-		if (stageOut)
+		const double mapMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - mapStart).count();
+
+		if (PassTimers::Sampler().Take(s.toSeq) && engineMs > 0.0)
+			PassTimers::Inbox::Motion().Post(PassTimers::Kind::GpuGroup, "motion: NVOF producer engine (wall)", engineMs);
+
+		BackItem item;
+		item.flow = std::move(flow);
+		item.fromSeq = s.fromSeq;
+		item.toSeq = s.toSeq;
+		item.generation = s.generation;
+		item.epoch = s.epoch;
+		item.isRequest = s.isRequest;
+		item.publishToSlot = s.publishToSlot;
+		item.forceOffChain = s.forceOffChain;
+		item.generalRates = s.generalRates;
+		item.submitTime = s.submitTime;
+		item.workStartTime = s.workStartTime;
+		item.stage.queueWaitMs = s.queueWaitMs;
+		item.stage.lumaMs = s.lumaMs;
+		item.stage.engineMs = engineMs;
+		item.stage.mapMs = mapMs;
+		item.pendingRequest = std::move(s.pendingRequest);
+		item.requestTaken = s.requestTaken;
+		item.requestQueuedMs = s.requestQueuedMs;
+
+		const uint64_t gen = item.generation;
+		const uint64_t ep = item.epoch;
+		const bool ignoreGen = item.forceOffChain;
+		backQueue.Push(std::move(item), gen, ep, ignoreGen);
+		return true;
+	}
+
+	bool Producer::PollReadyStagingSets(bool& anyCompleted)
+	{
+		anyCompleted = false;
+		if (!context)
+			return true;
+		stagingRing.AssertEngineThread();
+		for (;;)
 		{
-			stageOut->engineMs = std::chrono::duration<double, std::milli>(mapStart - engineStart).count();
-			stageOut->mapMs = std::chrono::duration<double, std::milli>(voteStart - mapStart).count();
-			stageOut->voteMs = std::chrono::duration<double, std::milli>(flowExtrasStart - voteStart).count();
-			stageOut->extrasMs = std::chrono::duration<double, std::milli>(flowExtrasEnd - flowExtrasStart).count();
+			const int oldest = stagingRing.OldestSubmitted();
+			if (oldest == Pipeline::StagingRing<kStagingSets>::kNoSlot)
+				return true;
+			StagingSet& s = stagingSets[oldest];
+			const HRESULT hr = s.eventQuery ? context->GetData(s.eventQuery, nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) : S_OK;
+			if (hr == S_FALSE)
+				return true;
+			if (FAILED(hr))
+			{
+				FailStagingSetRequest(oldest, OnDemand::Status::Failed);
+				ReleaseStagingSetMeta(oldest);
+				stagingRing.Release(oldest);
+				std::lock_guard<std::mutex> lock(mutex);
+				error = "staging event query failed";
+				return false;
+			}
+			const auto now = std::chrono::steady_clock::now();
+			const auto& slotMeta = stagingRing.At(oldest);
+			const double engineMs = (std::max)(0.0, std::chrono::duration<double, std::milli>(now - slotMeta.submittedAt).count());
+			const bool discarded = slotMeta.discarded;
+			stagingRing.MarkReady(oldest);
+			bool ok = true;
+			if (discarded)
+			{
+				FailStagingSetRequest(oldest, OnDemand::Status::Late);
+			}
+			else
+			{
+				ok = MapAndForwardStagingSet(oldest, engineMs);
+				if (!ok)
+					FailStagingSetRequest(oldest, OnDemand::Status::Failed);
+			}
+			ReleaseStagingSetMeta(oldest);
+			stagingRing.Release(oldest);
+			anyCompleted = true;
+			if (!ok)
+				return false;
 		}
-		flowOut = std::move(flow);
+	}
+
+	bool Producer::DrainStagingSets(bool discard, int targetSlot)
+	{
+		if (!context)
+		{
+			for (int k = 0; k < kStagingSets; ++k)
+			{
+				if (targetSlot == -1 || targetSlot == k)
+				{
+					FailStagingSetRequest(k, OnDemand::Status::Unavailable);
+					ReleaseStagingSetMeta(k);
+				}
+			}
+			if (targetSlot == -1)
+				stagingRing.Clear();
+			return true;
+		}
+		stagingRing.AssertEngineThread();
+		if (discard)
+			stagingRing.MarkAllDiscarded();
+		for (;;)
+		{
+			if (targetSlot != -1 && stagingRing.At(targetSlot).state == Pipeline::SlotState::Free)
+				return true;
+			if (targetSlot == -1 && stagingRing.SubmittedCount() == 0)
+				return true;
+			bool any = false;
+			if (!PollReadyStagingSets(any))
+				return false;
+			if (targetSlot != -1 && stagingRing.At(targetSlot).state == Pipeline::SlotState::Free)
+				return true;
+			if (targetSlot == -1 && stagingRing.SubmittedCount() == 0)
+				return true;
+			if (!any)
+				std::this_thread::yield();
+		}
+	}
+
+	bool Producer::WaitForLumaSlotFree(int lumaSlot)
+	{
+		if (lumaSlot == EngineLumaRing::kNoSlot || stagingRing.SubmittedCount() == 0)
+			return true;
+		for (int k = 0; k < kStagingSets; ++k)
+		{
+			if (stagingRing.At(k).state == Pipeline::SlotState::Submitted &&
+				(stagingSets[k].lumaSlotA == lumaSlot || stagingSets[k].lumaSlotB == lumaSlot))
+			{
+				if (!DrainStagingSets(false, k))
+					return false;
+			}
+		}
+		return true;
+	}
+
+	bool Producer::WaitForRequestTexFree()
+	{
+		if (stagingRing.SubmittedCount() == 0)
+			return true;
+		for (int k = 0; k < kStagingSets; ++k)
+		{
+			if (stagingRing.At(k).state == Pipeline::SlotState::Submitted && stagingSets[k].usesRequestTex)
+			{
+				if (!DrainStagingSets(false, k))
+					return false;
+			}
+		}
 		return true;
 	}
 
@@ -870,6 +1468,13 @@ namespace MotionAhead
 		// A newer generation with no walk clears the P2 slot and the chain, exactly as for a job.
 		if (rq.generation > slotGeneration && !forceOffChain)
 		{
+			if (!testEngine)
+			{
+				stagingRing.MarkDiscardedOtherThan(rq.generation);
+				backQueue.SetActiveGeneration(rq.generation);
+				backQueue.WaitIdle();
+				publishGate.SetGeneration(rq.generation);
+			}
 			slot->SetGeneration(rq.generation);
 			havePrevious = false;
 			lumaRing.ClearGenerationsOtherThan(rq.generation);   // a new generation: no frame of the old one stays
@@ -890,7 +1495,6 @@ namespace MotionAhead
 			adoptOverWalk = true;   // the walk's next job may now sit behind the chain (counted in NoteWalkJob)
 		bool ok = true;
 		std::shared_ptr<Flow> flow;
-		double extrasMs = 0.0;
 		bool ran = false;
 		if (testEngine)
 		{
@@ -898,75 +1502,115 @@ namespace MotionAhead
 			ok = testEngine->request ? testEngine->request(rq, mode, *flow) : true;
 			ran = ok;
 			if (!ok) flow.reset();
+			// The chain now holds `to` (Chain / Adopt); an off-chain run leaves it for the walk.
+			if (mode != Mode::OffChain)
+			{
+				havePrevious = true;
+				previousSequence = rq.to;
+				previousGeneration = rq.generation;
+			}
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				if (mode == Mode::Chain) ++requestStats.chainRuns;
+				else if (mode == Mode::Adopt) ++requestStats.adoptRuns;
+				else ++requestStats.offChainRuns;
+			}
+			if (!ok || !flow)
+			{
+				answer(Status::Failed);
+				return false;
+			}
+			if (rq.Adjacent() && !forceOffChain)
+				slot->Publish(rq.from, rq.to, rq.generation, flow);
+			engineReady = true;
+			result.flow = flow;
+			answer(Status::Ready);
+			return true;
+		}
+		if (mode != Mode::Chain)
+		{
+			int fw = 0, fh = 0;
+			if (!LumaAtTarget(rq.from, rq.lumaFrom, requestLumaBuffer, fw, fh, "motion_ahead_request") || fw != w || fh != h)
+			{
+				engineRan = false;        // nothing ran: leaves the failure count alone
+				answer(Status::Failed);   // the two frames are not one size: no pair
+				return true;
+			}
+		}
+		ID3D11Texture2D* texFrom = nullptr;
+		ID3D11Texture2D* texTo = nullptr;
+		int lumaSlotA = EngineLumaRing::kNoSlot;
+		int lumaSlotB = EngineLumaRing::kNoSlot;
+		bool usesReqTex = false;
+		// The engine-luma ring (105 s3.5): frames by key. Chain pairs the chain's last frame with `to`; Adopt puts `from` and `to` in.
+		if (mode == Mode::Chain)
+		{
+			const int fromIndex = lumaRing.Find(previousGeneration, previousSequence);
+			const int toIndex = lumaRing.Acquire(rq.generation, rq.to);
+			if (fromIndex == EngineLumaRing::kNoSlot || toIndex == EngineLumaRing::kNoSlot || fromIndex == toIndex)
+			{
+				NoteRingMiss("the engine-luma ring lost the chain's last frame");
+				engineRan = false;        // nothing ran: leaves the failure count alone
+				answer(Status::Failed);   // the chain's last frame is not held: no pair (cannot happen while the chain is valid)
+				return true;
+			}
+			if (!WaitForLumaSlotFree(toIndex))
+			{
+				answer(Status::Failed);
+				return false;
+			}
+			context->UpdateSubresource(lumaTex[toIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(w), 0);
+			texFrom = lumaTex[fromIndex];
+			texTo = lumaTex[toIndex];
+			lumaSlotA = fromIndex;
+			lumaSlotB = toIndex;
+		}
+		else if (mode == Mode::Adopt)
+		{
+			const int fromIndex = lumaRing.Acquire(rq.generation, rq.from);
+			const int toIndex = lumaRing.Acquire(rq.generation, rq.to);
+			if (fromIndex == EngineLumaRing::kNoSlot || toIndex == EngineLumaRing::kNoSlot || fromIndex == toIndex)
+			{
+				NoteRingMiss("the engine-luma ring could not hold the adopted pair");
+				engineRan = false;
+				answer(Status::Failed);
+				return true;
+			}
+			if (!WaitForLumaSlotFree(fromIndex) || !WaitForLumaSlotFree(toIndex))
+			{
+				answer(Status::Failed);
+				return false;
+			}
+			context->UpdateSubresource(lumaTex[fromIndex], 0, nullptr, requestLumaBuffer.data(), static_cast<UINT>(w), 0);
+			context->UpdateSubresource(lumaTex[toIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(w), 0);
+			texFrom = lumaTex[fromIndex];
+			texTo = lumaTex[toIndex];
+			lumaSlotA = fromIndex;
+			lumaSlotB = toIndex;
 		}
 		else
 		{
-			if (mode != Mode::Chain)
+			if (!WaitForRequestTexFree() || !EnsureRequestTextures(w, h))
 			{
-				int fw = 0, fh = 0;
-				if (!LumaAtTarget(rq.from, rq.lumaFrom, requestLumaBuffer, fw, fh, "motion_ahead_request") || fw != w || fh != h)
-				{
-					engineRan = false;        // nothing ran: leaves the failure count alone
-					answer(Status::Failed);   // the two frames are not one size: no pair
-					return true;
-				}
+				answer(Status::Failed);
+				return false;
 			}
-			ID3D11Texture2D* texFrom = nullptr;
-			ID3D11Texture2D* texTo = nullptr;
-			// The engine-luma ring (105 s3.5): frames by key. Chain pairs the chain's last frame with `to`; Adopt puts `from` and `to` in.
-			if (mode == Mode::Chain)
-			{
-				const int fromIndex = lumaRing.Find(previousGeneration, previousSequence);
-				const int toIndex = lumaRing.Acquire(rq.generation, rq.to);
-				if (fromIndex == EngineLumaRing::kNoSlot || toIndex == EngineLumaRing::kNoSlot || fromIndex == toIndex)
-				{
-					NoteRingMiss("the engine-luma ring lost the chain's last frame");
-					engineRan = false;        // nothing ran: leaves the failure count alone
-					answer(Status::Failed);   // the chain's last frame is not held: no pair (cannot happen while the chain is valid)
-					return true;
-				}
-				context->UpdateSubresource(lumaTex[toIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(w), 0);
-				texFrom = lumaTex[fromIndex];
-				texTo = lumaTex[toIndex];
-			}
-			else if (mode == Mode::Adopt)
-			{
-				const int fromIndex = lumaRing.Acquire(rq.generation, rq.from);
-				const int toIndex = lumaRing.Acquire(rq.generation, rq.to);
-				if (fromIndex == EngineLumaRing::kNoSlot || toIndex == EngineLumaRing::kNoSlot || fromIndex == toIndex)
-				{
-					NoteRingMiss("the engine-luma ring could not hold the adopted pair");
-					engineRan = false;
-					answer(Status::Failed);
-					return true;
-				}
-				context->UpdateSubresource(lumaTex[fromIndex], 0, nullptr, requestLumaBuffer.data(), static_cast<UINT>(w), 0);
-				context->UpdateSubresource(lumaTex[toIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(w), 0);
-				texFrom = lumaTex[fromIndex];
-				texTo = lumaTex[toIndex];
-			}
-			else
-			{
-				if (!EnsureRequestTextures(w, h))
-				{
-					answer(Status::Failed);
-					return false;
-				}
-				context->UpdateSubresource(requestTex[0], 0, nullptr, requestLumaBuffer.data(), static_cast<UINT>(w), 0);
-				context->UpdateSubresource(requestTex[1], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(w), 0);
-				texFrom = requestTex[0];
-				texTo = requestTex[1];
-			}
-			// The temporal hints only for an adjacent Chain pair right after the engine's last pair ended at `from`.
-			const bool continuous = mode == Mode::Chain && rq.Adjacent() && hintSequence == rq.from && hintGeneration == rq.generation;
-			hintSequence = UINT64_MAX;   // any run here moves the engine's internal hint state
-			requestResetHints = true;    // a walk pair that would have used them runs without (counted in NoteWalkJob)
-			ok = RunPair(texFrom, texTo, w, h, continuous, rq.to, ran, flow, extrasMs);
-			if (ran && mode != Mode::OffChain && rq.Adjacent())
-			{
-				hintSequence = rq.to;
-				hintGeneration = rq.generation;
-			}
+			context->UpdateSubresource(requestTex[0], 0, nullptr, requestLumaBuffer.data(), static_cast<UINT>(w), 0);
+			context->UpdateSubresource(requestTex[1], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(w), 0);
+			texFrom = requestTex[0];
+			texTo = requestTex[1];
+			usesReqTex = true;
+		}
+		// The temporal hints only for an adjacent Chain pair right after the engine's last pair ended at `from`.
+		const bool continuous = mode == Mode::Chain && rq.Adjacent() && hintSequence == rq.from && hintGeneration == rq.generation;
+		hintSequence = UINT64_MAX;   // any run here moves the engine's internal hint state
+		requestResetHints = true;    // a walk pair that would have used them runs without (counted in NoteWalkJob)
+		int setIdx = Pipeline::StagingRing<kStagingSets>::kNoSlot;
+		ok = SubmitPairAsync(texFrom, texTo, w, h, continuous, rq.to, ran, setIdx);
+		if (ran && mode != Mode::OffChain && rq.Adjacent())
+		{
+			hintSequence = rq.to;
+			hintGeneration = rq.generation;
 		}
 		// The chain now holds `to` (Chain / Adopt); an off-chain run leaves it for the walk.
 		if (mode != Mode::OffChain)
@@ -981,18 +1625,31 @@ namespace MotionAhead
 			else if (mode == Mode::Adopt) ++requestStats.adoptRuns;
 			else ++requestStats.offChainRuns;
 		}
-		if (!ok || !flow)
+		if (!ok || setIdx == Pipeline::StagingRing<kStagingSets>::kNoSlot)
 		{
 			answer(Status::Failed);
 			return false;   // counted like a failed job (three in a row stop and restart the producer)
 		}
-		// Adjacent pairs into P2 as well (any later reader hits); gap pairs are returned only (P2 stays adjacency-only).
-		// A forced off-chain pair is of a generation the slot has not reached: returned only.
-		if (rq.Adjacent() && !forceOffChain)
-			slot->Publish(rq.from, rq.to, rq.generation, flow);
-		engineReady = true;
-		result.flow = flow;
-		answer(Status::Ready);
+		// Requests ride the same staging + BackQueue stages so their publish and answer stay strictly ordered.
+		StagingSet& s = stagingSets[setIdx];
+		s.halfW = w;
+		s.halfH = h;
+		s.lumaSlotA = lumaSlotA;
+		s.lumaSlotB = lumaSlotB;
+		s.usesRequestTex = usesReqTex;
+		s.fromSeq = rq.from;
+		s.toSeq = rq.to;
+		s.generation = rq.generation;
+		s.epoch = backQueue.Epoch();
+		s.isRequest = true;
+		s.publishToSlot = rq.Adjacent() && !forceOffChain;
+		s.forceOffChain = forceOffChain;
+		s.generalRates = generalRates.load(std::memory_order_acquire);
+		s.requestTaken = taken;
+		s.requestQueuedMs = result.queuedMs;
+		s.pendingRequest = std::move(pending);
+		const Pipeline::JobKey key{ rq.generation, rq.from, rq.to, true, false };
+		stagingRing.MarkSubmitted(setIdx, key, s.epoch, std::chrono::steady_clock::now());
 		return true;
 	}
 
