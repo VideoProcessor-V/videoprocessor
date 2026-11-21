@@ -53,6 +53,8 @@ namespace Tests
 			std::string reason;
 			const auto order = Moved(PipelineSlots::DefaultOrder(), Id::ColourAppearance, Id::DriveLedCompensation);
 			Assert::IsFalse(PipelineSlots::Validate(order, &reason));
+			// CF1-FIN SHOULD D: rejected by THIS rule, not by another one.
+			Assert::IsTrue(reason.find("colour.appearance must run before drive.led_measure") != std::string::npos, Wide(reason).c_str());
 		}
 		TEST_METHOD(DmSlotsAreBuiltAndModifyTheTargetLight)
 		{

@@ -59,6 +59,7 @@ namespace Tests
 			in.honourL11 = false;
 			d = AppearanceStage::Decide(in, s);
 			Assert::IsTrue(d.active);
+			Assert::IsFalse(d.l11Ignored);   // CF1-FIN SHOULD D: not honoured = the room is used
 		}
 
 		TEST_METHOD(OnBuildsTheShaderParameterListAndNamesTheUnmeasuredScreen)
@@ -82,9 +83,14 @@ namespace Tests
 			in.strength = 0.0;
 			const AppearanceStage::Decision d = AppearanceStage::Decide(in, s);
 			Assert::IsFalse(d.active);
+			bool strengthRow = false;   // CF1-FIN SHOULD D: the row must exist (an empty list passed before)
 			for (const auto& p : d.parameters)
 				if (std::string(p.first) == "apx_strength")
+				{
+					strengthRow = true;
 					Assert::AreEqual(0.0, p.second, 0.0);
+				}
+			Assert::IsTrue(strengthRow, L"apx_strength is in the parameter list");
 		}
 
 		TEST_METHOD(RgbToXyzBt709HasWhiteAtYOne)
