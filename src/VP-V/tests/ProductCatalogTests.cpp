@@ -369,6 +369,18 @@ namespace ProductCatalogTestsNs
 				Assert::IsNotNull(row);
 				Assert::IsTrue(row->unit != nullptr && row->unit[0] != '\0');
 			}
+			// The row the [register_owner] WAIVER of 0c359a5c4 / 6dbfb9883 grants: P7's fit field is owned by the camera's own folder, the
+			// same register owner as P7 / P8 (one row, registered once).
+			{
+				const ProductRow* field = RowOf(kCameraFitField);
+				Assert::IsNotNull(field, L"the camera fit field has its catalog row");
+				Assert::AreEqual(std::string("motion/estimation/global_model"), std::string(field->unit), L"owned by the camera unit's folder");
+				Assert::AreEqual(std::string(RowOf(kP7CameraFit)->unit), std::string(field->unit), L"the same register owner as P7");
+				int rows = 0;
+				for (const ProductRow& r : ProductRows())
+					rows += r.id == kCameraFitField ? 1 : 0;
+				Assert::AreEqual(1, rows, L"registered once");
+			}
 			// No consumer row drops a read: every declared read count fits (MakeRow asserts it) and is non-empty.
 			for (const ConsumerRow& c : ConsumerRows())
 				Assert::IsTrue(c.decl.count > 0 && c.decl.count <= kMaxConsumes && !c.overflow && !c.decl.overflow);
@@ -399,6 +411,7 @@ namespace ProductCatalogTestsNs
 				{ kP4SourceStats, VpLaneProducts::kStatsVersion },
 				{ kP7CameraFit, CameraLink::kCameraUnitVersion }, { kP8CameraLabels, CameraLink::kCameraUnitVersion },
 				{ kP9CameraSmoothed, CameraLink::kCameraUnitVersion },
+				{ kCameraFitField, CameraLink::kCameraUnitVersion },   // CP-A1-D4-CAMLABEL-FIELDCOPY: the camera unit's fit field
 				{ kP11RegionBlockStats, RegionEvidence::kUnitVersion },
 				{ kP12LightLevel, LightLevel::kUnitVersion },
 				{ kTdAnalysis, TdProducts::kUnitVersion }, { kTdRefstore, TdProducts::kUnitVersion },

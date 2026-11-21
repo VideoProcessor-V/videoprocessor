@@ -146,17 +146,20 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(ARealTenEightyAheadFieldFitsItsDeclaredProduct)
 		{
-			// audit4 MUST 1: the ahead field is the engine's native cell grid, 240 x 135 cells of 8 px at 1080 (24 + 32400 x 12 B with trust).
+			// audit4 MUST 1: the ahead field is the engine's native cell grid of the rig's source size, cells of 8 px (240 x 135 at 1080).
 			WorkerRig w;
 			w.rig.PublishInputs(1);
+			const VpSkeleton::Dims dims = CameraLinkTest::Settings().dims;
+			const int cw = static_cast<int>((dims.width + 7) / 8), ch = static_cast<int>((dims.height + 7) / 8);
 			CameraLink::CameraFitJob job = CameraLinkTest::PanJob(1, 10.0);
-			auto f = std::make_shared<CameraLink::FieldCopy>(MakeField(240, 135, 8.0, true));
+			auto f = std::make_shared<CameraLink::FieldCopy>(MakeField(cw, ch, 8.0, true));
 			f->seq = 1;
 			f->pairFrom = 0;
 			f->pairTo = 1;
 			f->stamp = job.field->stamp;
 			job.field = f;
-			Assert::IsTrue(w.rig.fieldBytes->Bytes() >= CameraLink::FitFieldPodBytes(240u * 135u, true), L"premise: the declared slot holds it");
+			Assert::IsTrue(w.rig.fieldBytes->Bytes() >= CameraLink::FitFieldPodBytes(static_cast<size_t>(cw) * static_cast<size_t>(ch), true),
+				L"premise: the declared slot holds it");
 			w.worker->ProcessJob(job);
 			Assert::IsTrue(w.Field()->StateOf(1) == VpSkeleton::SlotState::Published, L"the 1080 native-grid field is published");
 			Assert::AreEqual(uint64_t(0), w.counters.fieldUndersized.load());
@@ -192,7 +195,8 @@ namespace VideoProcessorTest
 				w.rig.PublishInputs(1);
 				CameraLink::CameraFitJob job = CameraLinkTest::PanJob(1, 10.0);
 				const size_t slot = w.rig.fieldBytes->Bytes();
-				const int cells = static_cast<int>(slot / 12) + 64;   // more cells than the slot can hold
+				const size_t perCell = CameraLink::FitFieldPodBytes(1, true) - CameraLink::kFitFieldPodHeaderBytes;   // bytes per cell with trust
+				const int cells = static_cast<int>(slot / perCell) + 64;   // more cells than the slot can hold
 				auto f = std::make_shared<CameraLink::FieldCopy>(MakeField(cells, 1, 8.0, true));
 				f->seq = 1;
 				f->stamp = job.field->stamp;

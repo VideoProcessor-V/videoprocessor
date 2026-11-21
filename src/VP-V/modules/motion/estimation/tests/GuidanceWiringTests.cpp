@@ -41,7 +41,6 @@ namespace VideoProcessorTest
 		struct WireLink : CameraLink::ICameraLink
 		{
 			std::map<uint64_t, std::shared_ptr<const CameraModel::CameraMotion>> records;
-			std::map<uint64_t, std::shared_ptr<const CameraLink::FieldCopy>> fields;
 			std::map<uint64_t, CameraLink::OnTimeMiss> late;       // camera(seq) published but NOT on time, with this cause
 			std::map<uint64_t, CameraLink::SealVerdict> seals;     // the on-time seal's verdict (absent: Pending)
 			std::shared_ptr<const CameraModel::CameraMotion> OnTimeRecord(uint64_t s, CameraLink::OnTimeCheck check, CameraLink::OnTimeMiss& why) const override
@@ -79,11 +78,9 @@ namespace VideoProcessorTest
 				CameraSynth::Field f(CameraSynth::Grid4K());
 				f.FromModel(CameraSynth::PanModel(tx, 0));
 				f.AddNoise(0.05, 7 + seq);
-				auto copy = CameraLinkTest::CopyOf(f, seq);
 				CameraModel::PairInput in = f.Input(1.0 / 24, seq);
 				CameraModel::Fitter fitter;
 				records[seq] = std::make_shared<const CameraModel::CameraMotion>(fitter.Fit(in));
-				fields[seq] = copy;
 			}
 
 			// camera(seq) measured its pair over `seconds` (SameCameraPair compares it with the matcher's pair duration).

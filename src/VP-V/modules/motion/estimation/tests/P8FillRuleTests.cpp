@@ -277,11 +277,14 @@ namespace VideoProcessorTest
 			Assert::IsFalse(gap->HasWork(), L"the lane has nothing to produce without the field");
 			Assert::IsFalse(gap->HasWork());
 			Assert::AreEqual(uint64_t(1), t.fill.Counters().fieldMissing.load(), L"the missing field is counted once for the frame, not per poll");
+			const uint64_t declinedBefore = t.fill.Counters().declined.load();
 			const auto& res = t.Seal(1);
 			const auto* p8 = Setup::Of(res, VpSkeleton::kP8CameraLabels);
 			Assert::IsTrue(p8 && p8->final != VpSkeleton::SealOutcome::Sealed, L"no labels for the frame");
 			Assert::AreEqual(0, t.device.produced, L"no fallback to any other field copy: the device never ran");
-			Assert::IsTrue(t.fill.Counters().fieldMissing.load() >= 1);
+			// The seal's live fill is a second attempt for the frame (counted per attempt, audit5 NIT 2): it declines, and counts the miss.
+			Assert::AreEqual(declinedBefore + 1, t.fill.Counters().declined.load(), L"the seal's live fill declines the frame once");
+			Assert::AreEqual(uint64_t(2), t.fill.Counters().fieldMissing.load(), L"the lane attempt and the seal attempt each count the missing field");
 			Assert::AreEqual(uint64_t(0), t.fill.Counters().fieldStampMismatch.load() + t.fill.Counters().fieldUnreadable.load(), L"named by its cause");
 			const std::string line = CameraLink::LabelFillStatusLine(t.fill.Counters());
 			Assert::IsTrue(line.find("fit field missing (no labels)") != std::string::npos);

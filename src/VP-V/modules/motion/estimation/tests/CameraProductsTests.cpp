@@ -234,7 +234,6 @@ namespace CameraProductsTestsNs
 				Assert::AreEqual(size_t(388824), CameraLink::FitFieldPodBytes(240u * 135u, true));
 				Assert::IsTrue(BytesOf(reg.Get(kCameraFitField).size, d1088) >= 388824u);
 				Assert::IsTrue(BytesOf(reg.Get(kCameraFitField).size, d1080) >= 388824u);
-				Assert::IsTrue(uint64_t(16384u + 120u * 68u * 12u) < 388824u, L"premise: the old 16-px size rule was too small at 1080");
 			}
 			Assert::AreEqual(uint64_t(130816), uint64_t(120u * 68u * 16u + 256u));
 			Assert::AreEqual(uint64_t(518656), uint64_t(240u * 135u * 16u + 256u));
@@ -383,7 +382,7 @@ namespace CameraProductsTestsNs
 			Assert::AreEqual(size_t(5), g.nodes.size());
 			Assert::IsTrue(g.IndexOf(kCameraFitField) < g.IndexOf(kP8CameraLabels), L"the fit field before its reader P8");
 			Assert::IsFalse(g.Has(kP9CameraSmoothed));
-			Assert::IsFalse(g.Has(kP3AnalysisField), L"P8 declares P7 only (C10 15a K2, F2)");
+			Assert::IsFalse(g.Has(kP3AnalysisField), L"P8 declares P7 + its fit field only (C10 15a K2, F2)");
 			Assert::IsFalse(g.Has(kP2VectorPair) || g.Has(kP2mMatcherPair), L"no motion pair enters a Diagnostics-only graph");
 			// P7 before P8 (lag-0 edge), and both after their inputs.
 			Assert::IsTrue(g.IndexOf(kP7CameraFit) < g.IndexOf(kP8CameraLabels));
