@@ -6,10 +6,13 @@
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 #include <VP-V/core/RobustStats.h>
+#include <VP-V/core/ComputeOnce.h>
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cmath>
+#include <new>
 
 namespace VpFrameAnalysis
 {
@@ -209,23 +212,69 @@ namespace VpFrameAnalysis
 		return true;
 	}
 
+	namespace
+	{
+		std::atomic<uint64_t>& DvRefusalCounter() { static std::atomic<uint64_t> n{ 0 }; return n; }
+	}
+
+	uint64_t DvTapRefusals() { return DvRefusalCounter().load(std::memory_order_relaxed); }
+	void ResetDvTapRefusals() { DvRefusalCounter().store(0, std::memory_order_relaxed); }
+
+	void NoteDvTapRefusal() { DvRefusalCounter().fetch_add(1, std::memory_order_relaxed); }   // visible: Ctrl+I skeleton_lane line, never log-only
+
 	bool SourceViewOf12(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view)
 	{
 		if (source.format != AnalysisLumaFormat::PackedDolbyVision422 || !source.IsValid())
+			return false;   // not a packed DV tunnel frame, or not a readable one: nothing to tap (not a refusal)
+		// INVARIANT (DvTunnelTapLaw.h): IsValid() implies the 12-bit law's Supports() for a packed DV frame, so a valid frame is never
+		// refused by the law. Should a merge of Bill's IsValid() ever widen it, a debug build stops here and a release build refuses the
+		// frame through the one visible refusal (counted, Ctrl+I) instead of mis-decoding it.
+		const bool lawCovers = DvTunnelTapLaw::Supports(source.encoding, source.rgbBitAlignment, source.width);
+		assert(lawCovers && "AnalysisLumaSource::IsValid() must imply DvTunnelTapLaw::Supports() for packed DV");
+		if (!lawCovers)
+		{
+			NoteDvTapRefusal();
 			return false;
-		auto codes = std::make_shared<std::vector<uint16_t>>(static_cast<size_t>(source.width) * static_cast<size_t>(source.height));
+		}
+		// Row-wise tap (the container checks hoisted out of the per-pixel law) into a pooled plane: no allocation per frame. A full pool
+		// gives an unpooled plane (AcquirePlane), so the one reachable refusal is a plane that cannot be allocated at all.
+		const size_t samples = static_cast<size_t>(source.width) * static_cast<size_t>(source.height);
+		std::shared_ptr<AnalysisLumaPlane> plane;
+		try
+		{
+			plane = AcquirePlane();
+			plane->codes.resize(samples);
+		}
+		catch (const std::bad_alloc&)
+		{
+			NoteDvTapRefusal();   // no memory for the 12-bit plane: the caller's 10-bit view is the visible fallback
+			return false;
+		}
+		plane->width = source.width;
+		plane->height = source.height;
 		for (int y = 0; y < source.height; ++y)
-			for (int x = 0; x < source.width; ++x)
-				if (!DvTunnelTapLaw::SourceTap12(source, x, y, (*codes)[static_cast<size_t>(y) * source.width + x]))
-					return false;
+			DvTunnelTapLaw::SourceTapRow12(source, y, plane->codes.data() + static_cast<size_t>(y) * static_cast<size_t>(source.width));
+		VPV_COMPUTE_ONCE("analysis.tap12", DvTunnelTapLaw::kBits);   // THE 12-bit decode, counted here whoever calls (rule 1)
 		view = VpSkeleton::SourceFrameView();
-		view.luma = codes->data();
+		view.luma = plane->codes.data();
 		view.width = static_cast<uint32_t>(source.width);
 		view.height = static_cast<uint32_t>(source.height);
 		view.strideSamples = view.width;
-		view.msbShift = 4;   // 12-bit tap codes in the low bits of 16
-		view.keepAlive = std::shared_ptr<const void>(codes);
+		view.msbShift = static_cast<uint8_t>(DvTunnelTapLaw::kLaneShift);   // MsbAlign(code12) is the Q6 axis value
+		view.keepAlive = std::shared_ptr<const void>(plane);
 		return true;
+	}
+
+	bool TapViewOf(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view, bool* refused)
+	{
+		if (refused) *refused = false;
+		if (source.format == AnalysisLumaFormat::PackedDolbyVision422 && source.IsValid())
+		{
+			if (SourceViewOf12(source, view))
+				return true;
+			if (refused) *refused = true;   // refused and counted in SourceViewOf12: the 10-bit view below, visibly
+		}
+		return SourceViewOf(source, view);
 	}
 
 	bool P1EngineViewDiffersFromProducer(const AnalysisLumaSource& source)
@@ -296,11 +345,15 @@ namespace VpFrameAnalysis
 	namespace
 	{
 		// Hands the decoded luma plane to the skeleton's sink (SourceFrameTap.h): SourceViewOf's view (a format read in place
-		// is decoded into a pooled plane here, only because a sink asked; the view's keepAlive blocks its recycling).
-		void DeliverToTap(const Job& job)
+		// is decoded into a pooled plane here, only because a sink asked; the view's keepAlive blocks its recycling). A valid packed DV
+		// tunnel source delivers the 12-bit tap: `view12`, the frame's single 12-bit decode made by Process, delivered as is (the same
+		// law as TapViewOf). Without it (any other source, or a DV decode refused and counted in SourceViewOf12) the 10-bit view.
+		void DeliverToTap(const Job& job, const VpSkeleton::SourceFrameView* view12)
 		{
 			VpSkeleton::SourceFrameView view;
-			if (!SourceViewOf(job.source, view))
+			if (view12)
+				view = *view12;
+			else if (!SourceViewOf(job.source, view))
 			{
 				SourceFrameTap::NoteSkipped(job.owner);
 				return;
@@ -312,10 +365,19 @@ namespace VpFrameAnalysis
 
 	void Process(FrameAnalysis::Store& store, const Job& job)
 	{
+		// Every compute-once note inside (SourceViewOf12's "analysis.tap12") is on this job's frame.
+		::ComputeOnce::FrameScope frame(static_cast<int64_t>(job.identity.seq), "frame-analysis", 0);
 		if (job.decodePlane)
 			DecodeSharedLuma(job.source);
 		if (job.owner && SourceFrameTap::Wants(job.owner))
-			DeliverToTap(job);
+		{
+			// The frame's 12-bit decode for the tap (a valid packed DV source). IsValid() implies the 12-bit law, so the only refusal is an
+			// unallocatable plane, counted in SourceViewOf12; the 10-bit view is then its visible fallback.
+			VpSkeleton::SourceFrameView view12;
+			const bool have12 = job.source.format == AnalysisLumaFormat::PackedDolbyVision422 && job.source.IsValid() &&
+				SourceViewOf12(job.source, view12);
+			DeliverToTap(job, have12 ? &view12 : nullptr);
+		}
 		if (!job.measure)
 			return;
 		Measured measured;

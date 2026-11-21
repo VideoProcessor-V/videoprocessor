@@ -76,7 +76,25 @@ namespace VpFrameAnalysis
 	// the ten-bit code); the lane's other readers keep SourceViewOf (msbShift 6). The tap is the Q6 analysis axis (AnalysisAxis10.h): a
 	// 12-bit sample is code12 << 4 = Q6 (msbShift 4), so a consumer keeps the axis law (GrainSplit sourceBits 10, codeUnit 64 / 65535,
 	// the same for every tap; W21-3 proves it equal to the native 12-bit law sourceBits 12, codeUnit 16 / 65535).
+	// THE 12-bit decode (rule 1): every call that decodes is counted here, as ComputeOnce unit "analysis.tap12" (variant 12) on the
+	// calling thread's frame scope (Process sets it to the job's seq; a call outside any scope is a counted coverage gap).
+	// False, with nothing counted, for a non-DV or an invalid source (nothing to tap). For a VALID packed DV source IsValid() implies the
+	// 12-bit law (DvTunnelTapLaw::Supports invariant, asserted), so the one reachable refusal is a 12-bit plane that cannot be allocated
+	// (the pool is full and an unpooled plane cannot be had either): false, counted in DvTapRefusals.
 	bool SourceViewOf12(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view);
+
+	// W21-1: the view the source frame tap delivers (12-bit end to end), the same law Process applies to its shared decode. A valid
+	// packed DV tunnel source delivers SourceViewOf12 (the Q6 axis at 12 bits, msbShift 4, pooled plane); every other source, and an
+	// invalid DV source (not a refusal: nothing to tap), delivers exactly SourceViewOf. When SourceViewOf12 refuses a valid DV frame
+	// (its 12-bit plane could not be allocated; counted there and shown on Ctrl+I, skeleton_lane line "analysis tap: 10-bit (DV 12-bit
+	// tap refused: N frame(s), no memory for the 12-bit plane)") the 10-bit SourceViewOf is delivered instead: never silent.
+	// `refused` (optional) is set when this call fell back. False when no view could be made at all.
+	bool TapViewOf(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view, bool* refused = nullptr);
+	// Valid DV frames whose 12-bit tap was refused (see SourceViewOf12) and whose readers fell back to the 10-bit view (process total;
+	// one count per refused decode, i.e. per frame: Process decodes each frame at most once; shown, never log-only).
+	uint64_t DvTapRefusals();
+	void NoteDvTapRefusal();   // counts one refused frame; called by SourceViewOf12 only (tests may call it to drive the Ctrl+I line)
+	void ResetDvTapRefusals();
 
 	// The P1 engine half of a frame through its shared decode (the live fill): DecodeSharedLuma when nobody has (a no-op when
 	// published or claimed), SourceViewOf, the P1 half law (HalfLumaRows), then Engine8Half - the lane's law, one recipe.
