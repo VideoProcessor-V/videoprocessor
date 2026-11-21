@@ -1550,20 +1550,24 @@ namespace VideoProcessorTest
 			{ Field f(Grid4K()); f.AddObject(30, 17, 180, 101, 5, 2); f.AddNoise(0.05, 14); set.push_back(f); }
 			Rect lb; lb.left = 0; lb.top = 160; lb.right = 3840; lb.bottom = 2000;
 			{ Field f(Grid4K(), lb); f.FromModel(PanModel(2.0, 0.0)); f.AddNoise(0.05, 15); set.push_back(f); }
-			int demoted = 0;
+			int demoted = 0, usableCount = 0;
 			for (size_t i = 0; i < set.size(); ++i)
 			{
 				Fitter off, on(SC());   // a fresh pair of fitters per case: no state carries over
 				const CameraMotion a = off.Fit(set[i].Input(kPairSeconds, 5 + i)), r = on.Fit(set[i].Input(kPairSeconds, 5 + i));
 				if (Usable(r))
+				{
+					++usableCount;
 					Require(Usable(a) && SameParams(a.params, r.params) && r.verdictFlags == 0, "no new usable verdict, case " + std::to_string(i) + ": " + Flags(r));
+				}
 				if ((r.verdictFlags & kVerdictStaticCamera) != 0)
 				{
 					++demoted;
 					Require(Usable(a) && r.reason == Reason::Ambiguous && r.confidence < 0.5, "a demotion only follows a usable record, case " + std::to_string(i));
 				}
 			}
-			Require(demoted <= 3, "at most the three boat-like cases are demoted, got " + std::to_string(demoted));
+			Require(demoted > 0 && demoted <= 3, "expected 1..3 boat-like demotions, got " + std::to_string(demoted));
+			Require(usableCount > 0, "expected at least one usable non-demoted case, got 0");
 		}
 
 		TEST_METHOD(DemotedPairDoesNotFeedTheCameraPrediction)

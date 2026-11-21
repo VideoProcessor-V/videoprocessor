@@ -65,6 +65,7 @@ namespace VideoProcessorTest
 		{
 			using namespace CameraGpuSupport;
 			const std::vector<Scenario> scenarios = MakeScenarios();
+			size_t checked = 0;
 			for (const Scenario& s : scenarios)
 			{
 				CameraModel::Config cfg;
@@ -74,6 +75,7 @@ namespace VideoProcessorTest
 				const CameraModel::CameraMotion rec = fitter.Fit(in);
 				if (!rec.blocks || rec.blocks->label.empty())
 					continue;
+				++checked;
 				std::vector<float> up;
 				Assert::IsTrue(CameraLink::PackLabelTexels(*rec.blocks, up));
 				const CameraModel::LabelConstants k = CameraModel::MakeLabelConstants(rec, cfg, in);
@@ -96,6 +98,7 @@ namespace VideoProcessorTest
 				Assert::AreEqual(size_t(0), outside, L"a label difference away from a documented tie");
 				Assert::IsTrue(mismatches * 200 <= n, L"ties are rare");
 			}
+			Assert::IsTrue(checked > 0, L"expected at least one scenario with CPU labels to be checked");
 		}
 
 		TEST_METHOD(RecordsWithoutCpuLabelsCannotBeUploadedAndTheModeRuleIsEitherOr)

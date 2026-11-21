@@ -180,12 +180,18 @@ namespace VideoProcessorTest
 			{
 				std::unique_ptr<CameraLink::FieldReadbackRing> ring(new CameraLink::FieldReadbackRing(gpu, 4));
 				for (uint64_t s = 0; s < 4; ++s)
-					ring->Request(MakeVerified(fwd, bwd, w, h, s, 1.0f));
+					Assert::IsTrue(ring->Request(MakeVerified(fwd, bwd, w, h, s, 1.0f)), L"ring request must succeed");
+				const auto st = ring->Stats();
+				Assert::AreEqual(uint64_t(4), st.requested, L"4 copies queued in flight");
+				Assert::AreEqual(uint64_t(0), st.completed, L"none polled before teardown");
+				Assert::AreEqual(uint64_t(0), st.failed, L"no copy submission failures");
 				ring.reset();   // no Poll
 			}
 			{
 				CameraLink::FieldReadbackRing ring(gpu, 3, fixture.Log());
-				ring.Request(MakeVerified(fwd, bwd, w, h, 1, 1.0f));
+				Assert::IsTrue(ring.Request(MakeVerified(fwd, bwd, w, h, 1, 1.0f)), L"ring request before Clear must succeed");
+				Assert::AreEqual(uint64_t(1), ring.Stats().requested);
+				Assert::AreEqual(uint64_t(0), ring.Stats().completed);
 				ring.Clear();   // graph swap with a copy in flight
 				std::vector<std::shared_ptr<CameraLink::FieldCopy>> ready;
 				ring.Poll(ready);

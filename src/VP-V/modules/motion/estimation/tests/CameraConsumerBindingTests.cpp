@@ -67,7 +67,9 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1, c.constants.enabled);
 			Assert::AreEqual(1.0f, c.constants.weight);
 			Assert::AreEqual(0.5f, c.constants.absThr);
+			Assert::AreEqual(0.05f, c.constants.relThr);
 			Assert::AreEqual(4, c.constants.gridW);
+			Assert::AreEqual(3, c.constants.gridH);
 			Assert::IsTrue(c.defineActive);
 			Assert::AreEqual(std::string("CAMERA_MODEL_GRAIN_MAP"), c.defineName);
 			Assert::IsTrue(c.tex != nullptr);
