@@ -1115,8 +1115,11 @@ namespace Vpv
 				return m->memo;
 			if (!create)
 				return nullptr;
-			// Never in the Original pathway (no VP-V state: Original == Bill, zero cost).
-			if (Hub::ExtensionHub::Instance().OriginalPathway(host))
+			// Never in the Original pathway (no VP-V state: Original == Bill, zero cost). GF-P2b S1 / C5-SKREDS: the renderer's own word as
+			// this module recorded it at SettingsApplied (NotePathway) counts too. The hub records the pathway only AFTER its SettingsApplied
+			// fan-out, so between this module's Reconcile (which removed the memo host) and that record, a MemoFor (a later module's
+			// SettingsApplied handler, another thread) would otherwise make a new memo for an Original renderer.
+			if (Hub::ExtensionHub::Instance().OriginalPathway(host) || RecordedPathway(host) == 1)
 				return nullptr;
 			// L-CORE M3: made and published UNDER the registration lock, so a RegisterOwnerFill running at the same time either sees this
 			// memo in the table (and installs into it) or ran before the copy below (and is in it): never neither. A second thread making the
