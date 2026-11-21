@@ -269,6 +269,100 @@ def scan(root, rng, ledger=None, gate_root=None):
     return results
 
 
+def selftest_failures():
+    """Names of the failed selftest checks (empty when all pass): classify() for every class and glob, judge() for every class
+    and verdict (test deleted / edited / added, checker, baseline shrink and growth, register owner, allow-list add and
+    remove, waiver trailer), late_waivers(), parse_ledger() rejections and gate_check() on a temp gate root."""
+    import shutil
+    import tempfile
+    failed = []
+
+    def check(name, cond):
+        if not cond:
+            failed.append(name)
+    classes = {
+        "tools/check_x.py": "checker", "tools/run_compliance.py": "checker", "tools/compliance_lib.py": "checker",
+        "tools/ctlscan.py": "checker", "tools/test_ctlscan.py": "checker", "tools/test_check_test_tamper.py": "checker",
+        "tools/x-baseline.json": "baseline", "docs/audit/a-baseline.json": "baseline", "docs/audit/b-budget.json": "baseline",
+        "tools/timing-budget.json": "baseline", "docs/audit/waiver-ledger.json": "baseline",
+        "src/VP-V/m/tests/FooTests.cpp": "test", "src/VideoProcessor-Test/Bar.cpp": "test", "src/x/BazTest.cpp": "test",
+        "src/VP-V/core/X.h": "other", "docs/readme.md": "other"}
+    for path, want in classes.items():
+        check("classify %s -> %s" % (path, want), classify(path) == want)
+
+    def f(path, status="M", added=(), removed=()):
+        return {"path": path, "status": status, "added": list(added), "removed": list(removed)}
+    t = "src/VP-V/m/tests/FooTests.cpp"
+    check("test deleted is flagged", [v[2] for v in judge([f(t, "D")], "m")[0]] == ["deleted"])
+    check("test edited is flagged", [v[0] for v in judge([f(t, added=["a"], removed=["b"])], "m")[0]] == ["test"])
+    check("test removal only is flagged", len(judge([f(t, removed=["b"])], "m")[0]) == 1)
+    check("test-adding only passes with a note", judge([f(t, added=["a"])], "m")[0] == [] and judge([f(t, added=["a"])], "m")[1])
+    check("a new test file passes with a note", judge([f(t, "A", added=["a"])], "m")[0] == [])
+    check("checker change is flagged", [v[0] for v in judge([f("tools/check_x.py", added=["a"])], "m")[0]] == ["checker"])
+    bl = "tools/x-baseline.json"
+    check("baseline growth is flagged", [v[0] for v in judge([f(bl, added=["a"])], "m")[0]] == ["baseline"])
+    check("baseline edit is flagged", len(judge([f(bl, added=["a"], removed=["b"])], "m")[0]) == 1)
+    check("baseline shrink passes with a note", judge([f(bl, removed=["b"])], "m")[0] == [] and judge([f(bl, removed=["b"])], "m")[1])
+    row = '    { kPe, "modules/x", "p" },'
+    check("a ProductRows row change is flagged", [v[0] for v in judge([f(PRODUCT_CATALOG, added=[row])], "m")[0]] == ["register_owner"])
+    check("a ProductRows row removal is flagged", [v[0] for v in judge([f(PRODUCT_CATALOG, removed=[row])], "m")[0]] == ["register_owner"])
+    check("another catalog line is not a register change", judge([f(PRODUCT_CATALOG, added=["// c"])], "m")[0] == [])
+    check("an allow-list line added is flagged", [v[0] for v in judge([f("src/x.cpp", added=["const ALLOW_SITES = 1;"])], "m")[0]] == ["allowlist"])
+    check("an ALLOW entry added is flagged", len(judge([f("tools/x.json", added=['  "allow_x": 1'])], "m")[0]) == 1)
+    check("an allow-list removal passes with a note", judge([f("src/x.cpp", removed=["ALLOW_SITES = 1;"])], "m")[0] == [])
+    check("an ordinary change passes", judge([f("src/VP-V/core/X.h", added=["int a;"], removed=["int b;"])], "m") == ([], [], False))
+    viol, notes, waived = judge([f("tools/check_x.py", added=["a"])], "t\n\nWAIVER-T1: ok\n")
+    check("a WAIVER trailer waives and says so", viol == [] and waived and any("WAIVER present" in n for n in notes))
+    check("a waiver on a clean commit is not 'waived'", judge([f("src/VP-V/core/X.h", added=["a"])], "t\n\nWAIVER-T1: ok\n")[2] is False)
+    check("a WAIVER mid-line is not a trailer", has_waiver("see WAIVER-T1: not a trailer") is False)
+    check("a bare WAIVER id counts", has_waiver("x\nWAIVER-ABC_1.2\n") is True)
+    check("late waivers need a WAIVER in the waiving commit",
+          late_waivers(["fix\nWaives: abcdef1\nWAIVER-X: y", "no waiver\nWaives: 1234567"]) == {"abcdef1"})
+    check("tip_of", tip_of("a..b") == "b" and tip_of("a..") == "HEAD" and tip_of("x") == "x")
+    sha = "a" * 40
+    good = json.dumps({"entries": [{"sha": sha, "waiver_id": "W", "gate_record": "g.md"}]})
+    check("a valid ledger parses", len(parse_ledger(good)) == 1 and len(parse_ledger("\ufeff" + good)) == 1)
+    for label, text in (("not json", "{"), ("no entries", "{}"), ("entries not a list", '{"entries": 1}'),
+                        ("short sha", '{"entries": [{"sha": "abc"}]}'), ("upper-case sha", json.dumps({"entries": [{"sha": "A" * 40}]})),
+                        ("duplicate sha", json.dumps({"entries": [{"sha": sha}, {"sha": sha}]})),
+                        ("entry not an object", '{"entries": [1]}'),
+                        ("gate_record not a string", json.dumps({"entries": [{"sha": sha, "gate_record": 3}]}))):
+        try:
+            parse_ledger(text)
+            check("ledger rejects: " + label, False)
+        except RuntimeError:
+            pass
+    root = tempfile.mkdtemp()
+    try:
+        def put(rel, text):
+            path = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(path) or root, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        put("g/ok.md", "verdict: GRANT aaaaaaaaa\n")
+        put("g/cond.md", "verdict: GRANT-WITH-CONDITIONS aaaaaaaaa\n")
+        put("g/empty.md", "   \n")
+        put("g/none.md", "verdict: GRANT bbbbbbbbb\n")
+        put("g/deny.md", "verdict: DENIED GRANT aaaaaaaaa\n")
+        put("g/nogrant.md", "aaaaaaaaa NO-GRANT\n")
+        put("g/novert.md", "aaaaaaaaa looked fine\n")
+        check("a GRANT line naming the sha passes", gate_check(root, "g/ok.md", sha)[0])
+        check("GRANT-WITH-CONDITIONS passes", gate_check(root, "g/cond.md", sha)[0])
+        check("the sha prefix match is case-insensitive", gate_check(root, "g/ok.md", "A" * 40)[0])
+        check("a missing record waives nothing", gate_check(root, "", sha)[0] is False and gate_check(root, None, sha)[0] is False)
+        check("a missing file waives nothing", gate_check(root, "g/absent.md", sha) == (False, "gate file not found"))
+        check("an empty file waives nothing", gate_check(root, "g/empty.md", sha) == (False, "gate file is empty"))
+        check("a verdict for another sha waives nothing", gate_check(root, "g/none.md", sha)[0] is False)
+        check("a DENIED verdict waives nothing", gate_check(root, "g/deny.md", sha)[0] is False)
+        check("a NO-GRANT line waives nothing", gate_check(root, "g/nogrant.md", sha)[0] is False)
+        check("a line without GRANT waives nothing", gate_check(root, "g/novert.md", sha)[0] is False)
+        for esc in ("../x.md", "g/../../x.md", "/abs.md", "C:/abs.md", "\\abs.md"):
+            check("gate_record escape refused: " + esc, gate_check(root, esc, sha) == (False, "gate_record escapes the gate root"))
+    finally:
+        shutil.rmtree(root, True)
+    return failed
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Flag commits that touch tests/checkers/baselines/allow-lists without a WAIVER trailer.")
     ap.add_argument("--root", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -281,12 +375,11 @@ def main(argv=None):
     ap.add_argument("--ledger", default=None, help="ledger file to use instead of <root>/%s" % LEDGER_PATH)
     a = ap.parse_args(argv)
     if a.selftest:
-        f = [{"path": "tools/check_x.py", "status": "M", "added": ["a"], "removed": []}]
-        v, _, _ = judge(f, "x")
-        v2, _, w2 = judge(f, "t\n\nWAIVER-T1: ok\n")
-        ok = bool(v) and not v2 and w2
-        print("selftest " + ("ok" if ok else "FAIL"))
-        return 0 if ok else 2
+        failed = selftest_failures()
+        for name in failed:
+            print("selftest FAILED check: " + name)
+        print("selftest " + ("ok" if not failed else "FAIL"))
+        return 0 if not failed else 2
     try:
         rng = a.range or default_range(a.root, a.base)
         if a.ledger:
