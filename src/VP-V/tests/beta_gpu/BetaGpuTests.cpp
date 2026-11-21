@@ -1738,6 +1738,8 @@ namespace
 		}
 		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / reps;
 	}
+
+#include <VP-V/tests/gpu/MotionTimingGpuTests.inc>
 }
 
 // The live matcher alone, quickly (VP_TEST_MATCHER_TIMING=1, hardware GPU; a
@@ -2192,6 +2194,8 @@ void RunBetaPassTiming()
 			warp.SubField(), &warp.GetSettings()), "pass timing: field failed"); });
 	std::cout << "  de-judder matcher (4K, every refinement) " << matcherMs << " ms; rendered warp " << warpMs
 		<< " ms; R1 vector field " << fieldMs << " ms (wall-clock, GPU drained)\n";
+	MotionTimingGpu::UndrainedTimersAgreeWithDrained(gpu, g, a, b);
+	MotionTimingGpu::SampledTimersCostNothing(gpu, g, a, b);
 	for (pl_tex* t : { &a.luma, &a.chroma, &b.luma, &b.chroma, &cached, &source, &target })
 		pl_tex_destroy(g, t);
 }
