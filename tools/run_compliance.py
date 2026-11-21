@@ -91,6 +91,68 @@ def run_all(root, tools=None, since=None, only=None, out=None):
     return worst, text
 
 
+def selftest_failures():
+    """Names of the failed selftest checks (empty when all pass): unique TOOLS names, and run_all() on stub tools in a temp
+    root for every outcome (clean, violation rc 1, error rc 2, crash rc 7, absent script = SKIP, --only, --since only to the
+    tools that take it) with the exact worst exit code and summary text."""
+    import shutil
+    import tempfile
+    failed = []
+
+    def check(name, cond):
+        if not cond:
+            failed.append(name)
+    check("TOOLS names are unique", len(TOOLS) == len({t[0] for t in TOOLS}))
+    root = tempfile.mkdtemp()
+    try:
+        os.makedirs(os.path.join(root, "tools"))
+
+        def slurp(path):
+            with open(path, encoding="utf-8") as fh:
+                return fh.read()
+
+        def stub(name, code, record=False):
+            body = "import sys\nprint('stub %s')\n" % name
+            if record:
+                body += "open(sys.argv[0] + '.args', 'w').write(' '.join(sys.argv[1:]))\n"
+            with open(os.path.join(root, "tools", name + ".py"), "w", newline="\n") as fh:
+                fh.write(body + "sys.exit(%d)\n" % code)
+        for name, code in (("ok", 0), ("bad", 1), ("err", 2), ("crash", 7)):
+            stub(name, code, record=True)
+        tools = {n: (n, n + ".py", [], n == "ok") for n in ("ok", "bad", "err", "crash")}
+        tools["gone"] = ("gone", "gone.py", [], False)
+        t = lambda *names: [tools[n] for n in names]
+        rc, text = run_all(root, t("ok"))
+        check("clean run exits 0 with one pass", rc == 0 and "1 pass, 0 fail, 0 error, 0 skipped (absent); exit 0" in text)
+        rc, text = run_all(root, t("ok", "bad"))
+        check("a violation exits 1 and its tail is listed", rc == 1 and "1 fail" in text and "-- bad" in text and "stub bad" in text)
+        rc, text = run_all(root, t("ok", "err"))
+        check("a checker error exits 2", rc == 2 and "1 error" in text and "-- err" in text)
+        rc, text = run_all(root, t("crash"))
+        check("any other exit code is an error (2)", rc == 2 and "ERROR" in text)
+        rc, text = run_all(root, t("bad", "err"))
+        check("the worst code wins", rc == 2 and "1 fail, 1 error" in text)
+        rc, text = run_all(root, t("ok", "gone"))
+        check("an absent script is SKIP and does not change the exit", rc == 0 and "SKIP" in text and "1 skipped (absent)" in text)
+        results = [run_one(root, os.path.join(root, "tools"), *tools["gone"], None)]
+        check("an absent script reports rc None", results[0]["status"] == "SKIP" and results[0]["rc"] is None)
+        rc, text = run_all(root, t("ok", "bad"), only={"ok"})
+        check("--only runs just the named checker", rc == 0 and "bad" not in text)
+        rc, text = run_all(root, t("ok", "bad"), only={"nope"})
+        check("--only with no match runs nothing", rc == 0 and "0 pass" in text)
+        out = os.path.join(root, "out", "summary.txt")
+        run_all(root, t("ok"), out=out)
+        check("--out writes the summary", os.path.isfile(out) and "compliance:" in slurp(out))
+        run_all(root, t("ok", "bad"), since="abc123")
+        ok_args = slurp(os.path.join(root, "tools", "ok.py.args"))
+        bad_args = slurp(os.path.join(root, "tools", "bad.py.args"))
+        check("--since goes to a tool that takes it, with --root", "--since abc123" in ok_args and "--root" in ok_args)
+        check("--since is not passed to a tool that does not", "--since" not in bad_args)
+    finally:
+        shutil.rmtree(root, True)
+    return failed
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="run every compliance checker, write one summary file")
     ap.add_argument("--root", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -101,9 +163,11 @@ def main(argv=None):
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
     if a.selftest:
-        ok = len(TOOLS) == len({t[0] for t in TOOLS})
-        print("selftest run_compliance %s" % ("ok" if ok else "FAIL"))
-        return 0 if ok else 2
+        failed = selftest_failures()
+        for name in failed:
+            print("selftest FAILED check: " + name)
+        print("selftest run_compliance %s" % ("ok" if not failed else "FAIL"))
+        return 0 if not failed else 2
     if a.list:
         for t in TOOLS:
             print("%-17s %s" % (t[0], t[1]))
