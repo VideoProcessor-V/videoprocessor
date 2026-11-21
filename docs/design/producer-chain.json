@@ -2,7 +2,7 @@
  "schema": 1,
  "counts": {
   "R": 8,
-  "X": 8,
+  "X": 7,
   "N": 13,
   "NP": 33
  },
@@ -74,17 +74,17 @@
      "evidence": [
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       30,
+       31,
        "bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH)"
       ],
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       513,
+       514,
        "if (!LumaAtTarget(job.sequence, job.luma, lumaBuffer, halfW, halfH))"
       ],
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       589,
+       591,
        "bool Producer::LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, i"
       ]
      ],
@@ -124,17 +124,17 @@
      "evidence": [
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2694,
+       2675,
        "bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int l"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2708,
+       2689,
        "Pyramid(half, l1, l2, 0, levels);"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2711,
+       2692,
        "bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)"
       ]
      ],
@@ -174,17 +174,17 @@
      "evidence": [
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2694,
+       2675,
        "bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int l"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2708,
+       2689,
        "Pyramid(half, l1, l2, 0, levels);"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2711,
+       2692,
        "bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)"
       ]
      ],
@@ -236,12 +236,12 @@
      "evidence": [
       [
        "input/source_analysis/lane/LaneCpuProducts.h",
-       292,
+       296,
        "|| job.inputData[0] == nullptr)"
       ],
       [
        "input/source_analysis/lane/LaneCpuProducts.h",
-       304,
+       309,
        "if (job.out == nullptr || job.inputData[0] == nullptr || hh_ == 0)"
       ]
      ],
@@ -427,40 +427,11 @@
       ],
       [
        "motion/estimation/global_model/link/CameraLabelFill.cpp",
-       82,
+       163,
        "const std::shared_ptr<const CameraModel::CameraMotion> rec = m_link.CausalRecord(seq);"
-      ],
-      [
-       "motion/estimation/global_model/link/CameraLabelFill.cpp",
-       116,
-       "const std::shared_ptr<const CameraModel::CameraMotion> rec = p7Sealed ? m_link.CausalRecord(seq) : nullptr;"
       ]
      ],
      "kind": "partial",
-     "note": "",
-     "interim": ""
-    },
-    {
-     "input": "kP3AnalysisField",
-     "lags": [
-      0
-     ],
-     "leads": [],
-     "declared": true,
-     "status": "X",
-     "evidence": [
-      [
-       "motion/estimation/global_model/link/CameraLabelFill.cpp",
-       83,
-       "const std::shared_ptr<const FieldCopy> field = m_link.FieldOf(seq);"
-      ],
-      [
-       "motion/estimation/global_model/link/CameraLabelFill.cpp",
-       125,
-       "if (!m_device.Produce(*rec, m_link.FieldOf(seq).get(), target))"
-      ]
-     ],
-     "kind": "outside-acquire",
      "note": "",
      "interim": ""
     }
@@ -529,7 +500,8 @@
    "lane": "L-B2",
    "producer_files": [
     "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
-    "input/source_analysis/lane/LaneGpuProducts.cpp"
+    "input/source_analysis/lane/LaneGpuProducts.cpp",
+    "repair/grain_split/GrainSplitVariantOwner.h"
    ],
    "producer_text": "grain split pass",
    "reserved": false,
@@ -547,12 +519,12 @@
      "evidence": [
       [
        "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
-       497,
+       499,
        "const VpLaneProducts::GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
       ],
       [
        "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
-       572,
+       574,
        "const VpLaneProducts::GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
       ]
      ],
@@ -650,7 +622,7 @@
      "evidence": [
       [
        "input/source_analysis/lane/LaneGpuRegionKernel.cpp",
-       120,
+       122,
        "const GpuInput* p10 = c.Input(VpSkeleton::kP10GrainSplit);"
       ]
      ],
@@ -669,7 +641,7 @@
      "evidence": [
       [
        "input/source_analysis/lane/LaneGpuRegionKernel.cpp",
-       141,
+       143,
        "const RegionEvidence::Rect pic = RegionEvidence::PictureOrFrame(c.picture, w, h);"
       ]
      ],
@@ -721,7 +693,7 @@
      "evidence": [
       [
        "input/source_analysis/lane/LaneGpuLightKernel.cpp",
-       174,
+       176,
        "const GpuInput* p11 = c.Input(VpSkeleton::kP11RegionBlockStats);"
       ]
      ],
@@ -740,7 +712,7 @@
      "evidence": [
       [
        "input/source_analysis/lane/LaneGpuLightKernel.cpp",
-       192,
+       194,
        "const GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
       ]
      ],
@@ -798,18 +770,13 @@
      "evidence": [
       [
        "repair/temporal_detail/TemporalDetailGpu.cpp",
-       97,
-       "GrainSplit::Gpu::Splitter split;"
-      ],
-      [
-       "repair/temporal_detail/TemporalDetailGpu.cpp",
-       394,
+       393,
        "const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(sharedSplit, w, h, g.B, g.scale, cu, 0, param"
       ],
       [
        "repair/temporal_detail/TemporalDetailGpu.cpp",
        424,
-       "const GrainSplit::Gpu::Frame& gs = shared ? *sharedSplit : m.split.Out();"
+       "if (GrainSplit::Gpu::CheckFit(split, w, h, g.B, g.scale, cu, 0, params.seq) != GrainSplit::Gpu::FitResult::Fit"
       ]
      ],
      "kind": "recompute",
@@ -1761,10 +1728,6 @@
    [
     "kP3AnalysisField",
     "kP6EntranceAhead"
-   ],
-   [
-    "kP3AnalysisField",
-    "kP8CameraLabels"
    ],
    [
     "kP3AnalysisField",
