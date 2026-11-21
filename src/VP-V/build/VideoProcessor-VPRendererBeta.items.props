@@ -27,6 +27,7 @@
     <ClCompile Include="..\VP-V\modules\scaling\output\AdaptiveDownscaleStage.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderCacheStage.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderExtrasPresent.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\MotionHostHelpers.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\IntentMotionMethods.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedSdrLiftMethods.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedIntentMethods.cpp" />

@@ -590,4 +590,4 @@ double LibplaceboVideoRenderer::CurrentQueueHoldFraction() const
 }
 
 // W2-C8: BuildSigmaDeltaVectorsWithoutExtras (the dither vector chain, renderer side).
-#include <VP-V/modules/motion/estimation/DitherVectorSourceHost.inl>
+// BuildSigmaDeltaVectorsWithoutExtras now forwards to compiled MotionHostHelpers.cpp via LvrHostAccess.inl.

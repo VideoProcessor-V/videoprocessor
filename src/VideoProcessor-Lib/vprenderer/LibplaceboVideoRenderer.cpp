@@ -5283,13 +5283,6 @@ struct LibplaceboVideoRenderer::Impl
 	// 8-3: the grain map wants the matcher (set where the hooks are chosen,
 	// read by the next source frame's estimate: the blend ran on a downscale).
 	bool adaptiveGrainMapWanted = false;
-	// Owner 2026-10-25 (zero-cost rule): with motion.estimation or motion.vector_delivery switched off no
-	// estimate pass runs at all; every vector reader then takes its no-vector form (SlotSwitchSettings.h).
-	bool MotionVectorsRun() const
-	{
-		return pipelineSlots.Runs(PipelineSlots::Id::MotionEstimation) && pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery);
-	}
-
 	// ---- Vector engine on demand (VP-V/modules/motion/estimation/VectorDemand.h) --------------------
 	// M2 P5a: the vector engine's state (vector demand, producer, look-ahead, validity, invalidation) lives in
 	// VpMotion::VectorEngineState; the aliases keep every reader outside P5a's ranges unchanged. Each alias
@@ -5325,39 +5318,8 @@ struct LibplaceboVideoRenderer::Impl
 	// C10: the debug switches are read once, not per frame.
 	const bool debugPhaseNoVectors = [] { char f[4] = {}; return GetEnvironmentVariableA("VP_DEBUG_PHASE_NOVECTORS", f, sizeof(f)) > 0 && f[0] == '1'; }();
 	const bool debugPhaseAb = [] { char f[4] = {}; return GetEnvironmentVariableA("VP_DEBUG_PHASE_AB", f, sizeof(f)) > 0 && f[0] == '1'; }();
-	VectorDemand::Input VectorDemandInput(bool interlaced) const
-	{
-		using C = VectorDemand::Consumer;
-		VectorDemand::Input in;
-		in.enabled = activeSettings.vectorDemand;
-		in.slotsRun = MotionVectorsRun();
-		in.lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
-		in.queueAheadCapacity = queueAheadCapacity.load(std::memory_order_acquire);
-		in.smoothMotion = smoothMotionEngine || temporalRenderer.Mixing();
-		in.interlaced = interlaced;
-		// Stable while smooth motion mixes (Active() flips with each drawn mix); interlaced-only temporal frames count.
-		const bool temporal = smoothMotionEngine || (temporalRenderer.Active() && !temporalRenderer.Mixing());
-		auto want = [&in](C c, bool on) { in.wants[static_cast<int>(c)] = on; };
-		want(C::DejudderExtras, activeSettings.dejudderStrength > 0.0 || activeSettings.dejudderStrengthEven > 0.0);
-		want(C::Interpolator, activeSettings.interpolation != InterpolationPolicy::Mode::Off);
-		want(C::HiccupRepair, activeSettings.interpolationFillGaps);
-		want(C::OcclusionMask, activeSettings.occlusionMask);
-		want(C::SigmaDelta, sigmaDeltaRanLast && !activeSettings.ditherVectorsOwn && DitherVectorsSupported());
-		want(C::GrainMap, adaptiveGrainMapWanted);
-		want(C::DebandHold, activeSettings.debandVp != "off" && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband) && !temporal);
-		want(C::DetailPulse, (activeSettings.detailPulseStabilise || activeSettings.textureRestore) && !temporal);
-		want(C::EntranceSegment, EntranceOnce());
-		want(C::SourceMonitorPan, activeSettings.sourceResolution == "auto");
-		want(C::MotionIntent, vpv.motion.intent.intentInterpreter && vpv.motion.intent.intentInterpreter->Active());
-		return in;
-	}
 	// The sigma-delta's vectors on a frame whose extras do not run (W2-C8): defined in VP-V/modules/motion/estimation/DitherVectorSourceHost.inl.
 	void BuildSigmaDeltaVectorsWithoutExtras(uint64_t, uint64_t);   // (source sequence, next source sequence)
-	// output.dither's vector producers run only while the slot runs (WP-13, DitherSlot.h).
-	bool DitherVectorsSupported() const
-	{
-		return DitherSlot::VectorsWanted(pipelineSlots.Runs(PipelineSlots::Id::OutputDither), SigmaDeltaVectorsSupported());
-	}
 	// Stage 8-1 / 8-2 / 8b registration (WP-13: VP-V/modules/scaling/output/AdaptiveDownscaleStage.h).
 	AdaptiveDownscaleStage::Stage adaptiveStage{ adaptiveDownscale };
 	// Stage 10: the BTB/WTW carry and VP's SDR conversion (WP-13: VP-V/modules/colour/
@@ -11493,112 +11455,7 @@ struct LibplaceboVideoRenderer::Impl
 	// Bug hunt 2026-10-17: this frame's state is on the Dolby Vision tunnel
 	// (set by the render before UpdateDejudderEstimate).
 	bool dejudderDolbyVisionTunnel = false;
-	static bool SameGeometry(const DejudderRendered::Geometry& a, const DejudderRendered::Geometry& b)
-	{
-		auto same = [](const pl_rect2df& x, const pl_rect2df& y)
-		{
-			return std::fabs(x.x0 - y.x0) < 0.01f && std::fabs(x.y0 - y.y0) < 0.01f &&
-				std::fabs(x.x1 - y.x1) < 0.01f && std::fabs(x.y1 - y.y1) < 0.01f;
-		};
-		if (!same(a.sourceCrop, b.sourceCrop) || !same(a.targetCrop, b.targetCrop) || a.nls.valid != b.nls.valid ||
-			a.numHolds != b.numHolds)
-			return false;
-		if (a.nls.valid && (!same(a.nlsDomain, b.nlsDomain) || a.nls.curve != b.nls.curve || a.nls.geometry != b.nls.geometry ||
-			a.nls.xScale != b.nls.xScale || a.nls.yScale != b.nls.yScale || a.nls.xProtect != b.nls.xProtect ||
-			a.nls.yProtect != b.nls.yProtect))
-			return false;
-		for (int i = 0; i < a.numHolds && i < 4; ++i)
-			if (!same(a.holds[i], b.holds[i]))
-				return false;
-		return true;
-	}
-	// When the source rate is not known: one display refresh (general; the
-	// last resort is a film frame).
-	float AdaptiveFallbackFramePeriod() const
-	{
-		static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
-		return GeneralRate::NoteFallback(fallback, customHookRefreshHz > 0.0, "custom hook frame time", 24.0) ?
-			static_cast<float>(1.0 / customHookRefreshHz) : 1.0f / 24.0f;
-	}
-	// The rendered warp's matcher settings: the scaled ones, with the feather
-	// (output pixels there) scaled by the output height (general).
-	Dejudder::Settings RenderedWarpSettings(int outputHeight) const
-	{
-		Dejudder::Settings s = dejudder->EffectiveSettings();
-		s.holdFeatherPx = dejudder->GetSettings().holdFeatherPx *
-			(outputHeight > 0 ? static_cast<float>(outputHeight) / 2160.0f : 1.0f);
-		return s;
-	}
 	uint64_t pulldownSkipped = 0;
-	double SourceRateHz(const VideoState& state) const
-	{
-		if (pulldownFilmHz > 0.0)
-			return pulldownFilmHz;
-		return state.displayMode ? state.displayMode->RefreshRateHz() : 0.0;
-	}
-
-	// The cause names the discontinuity (MotionValidity::Describe for the log);
-	// Resync and SourceFormatChange also release the de-judder's resources.
-	// Any thread; applied on the render thread before the next estimate.
-	void RequestMotionInvalidate(MotionValidity::Cause cause)
-	{
-		motionValidity.Invalidate(cause);
-		frameAnalysis.OnDiscontinuity(static_cast<int>(cause));   // WP-23: the one shared epoch
-	}
-	// L1 (resync_event on, VP pathway only; Original and off/shadow keep Bill's behaviour): on the
-	// frame that carries a FULL resync, before the temporal mixer takes it, libplacebo's frame-mix
-	// textures and detected peak are dropped (pl_renderer_flush_cache: no shader rebuild) with the
-	// retained mix frames, so the old source's peak history does not tone-map the new one.
-	// Render thread, renderMutex held. Divergence register: VP-only.
-	void ApplyResyncLibplaceboFlush(uint64_t sourceSequence)
-	{
-		if ((VpResync::TakeIfDriving(resync, resyncDrive, VpResync::Reader::Libplacebo) & VpIndicator::Bit(VpIndicator::kFull)) == 0 ||
-			!renderer || activeSettings.pipelineOriginalPathway)
-			return;
-		pl_renderer_flush_cache(renderer);
-		temporalRenderer.Clear();   // retained frames borrow the flushed cache (as the DV matrix recycle)
-		++resyncLibplaceboFlushes;
-		if (resyncLibplaceboFlushes <= 20 || (resyncLibplaceboFlushes & (resyncLibplaceboFlushes - 1)) == 0)
-			DebugLog::Log("Resync (on): FULL at source frame %llu - libplacebo frame-mix cache and detected peak flushed (%llu so far)",
-				static_cast<unsigned long long>(sourceSequence), static_cast<unsigned long long>(resyncLibplaceboFlushes));
-	}
-
-	// The render thread's apply point: everything built from vectors of an older
-	// epoch is forgotten (each consumer also checks the epoch it was made in).
-	void ApplyMotionInvalidate()
-	{
-		MotionValidity::Pending pending;   // VPV-HOOK
-		const bool epochMoved = vectorEngine.TakeInvalidation(pending);   // VPV-HOOK
-		if (!VpMotion::TakeDejudderHistoryAction(resync.Driving(), epochMoved, pending, vectorEngine.motionResyncReaders))   // VPV-HOOK M2 P5b-7 / W1-C2a MUST 2: the readers the provider registers
-			return;
-		vectorEstimate.EndSnapshotLease(pipelineSlots.OriginalPathway());   // VPV-HOOK W1-C2a A2 / E3: the lease ends with the epoch (VPV-GATED, never in Original)
-		if (pending.release)
-		{
-			ReleaseDejudder();
-			motionEngineWarmPending = true;   // H3 F4: a new source loads the idle engine again
-		}
-		else
-		{
-			if (dejudder)
-				dejudder->ForgetHistory();
-			dejudderAhead.Reset();
-			dejudderAheadPayload.reset();
-			dejudderAheadPayloadSequence = 0;
-			dejudderExtras.dejudderMaskSequence[0] = dejudderExtras.dejudderMaskSequence[1] = 0;
-		}
-		dejudderExtras.dejudderMaskEpoch[0] = dejudderExtras.dejudderMaskEpoch[1] = 0;
-		dejudderEstimatedSequence = 0;
-		dejudderEstimatedEpoch = 0;
-		dejudderLiveFieldFrom = 0;
-		motionSegment.Retract(VpMotion::Direction::Forward);
-		adaptiveDownscale.ForgetMap();
-		debander.ForgetHold();
-		detailPulse.Forget();      // detail restore: both histories restart (docs/VP-detail-restore.md)
-		textureRestore.Forget();
-		if (epochMoved)   // VPV-HOOK M2 P5b-7: a reader-only act (rebase axis) has no epoch move to log
-			vectorEngine.LogInvalidation(pending);   // VPV-HOOK
-	}
-
 	// Consumed after RenderLocked returns, so this frame's geometry references
 	// remain valid and its full-raster presentation completes before withdrawal.
 	bool nativeBoundaryReacquisitionPending = false;
@@ -14169,24 +14026,6 @@ struct LibplaceboVideoRenderer::Impl
 		}
 	}
 
-	// The caller holds renderMutex. Queue-generation validation and rendering
-	// share that lock so a frame removed before a reset cannot cross the reset
-	// boundary while waiting to enter libplacebo.
-	// Stage 6b-1: decide whether the de-judder runs for this source frame and,
-	// if so, upload B (the next frame) and estimate the motion A->B once per
-	// source frame. Nothing is presented differently yet (6b-2). Off: B is
-	// not uploaded, nothing is estimated, and the matcher is freed.
-	void UpdateDejudderEstimate(
-		const std::shared_ptr<const QueuedFrame::ConvertedPayload>& next,
-		const std::shared_ptr<const QueuedFrame::ConvertedPayload>& current,
-		const VideoFrameFormatterOutputContract& contract,
-		int width, int height, size_t rowBytes, int chromaHeight, bool lossless422,
-		bool flipped, uint64_t sourceSequence, bool cadenceRepeat, bool nativeRgb, bool interlaced,
-		double sourceHz, uint64_t nextSourceSequence)
-	{
-		RunDejudderPolicy(DejudderEstimateCall{ next, current, contract, width, height, rowBytes, chromaHeight, lossless422,
-			flipped, sourceSequence, cadenceRepeat, nativeRgb, interlaced, sourceHz, nextSourceSequence });   // VPV-HOOK M2 P5b-3
-	}
 	using DejudderEstimateCall = VpMotion::DejudderEstimateCallT<QueuedFrame::ConvertedPayload, VideoFrameFormatterOutputContract>;   // VPV-HOOK M2 P5b-3
 	void RunDejudderPolicy(const DejudderEstimateCall& call);   // VPV-HOOK M2 P5b-3: defined in VP-V/modules/motion/consumers/DejudderPolicyRunner.inl
 	void ConfigureIntentInterpreter();   // VPV-HOOK P11a-f: defined in VP-V/modules/drive/led_compensation/LedIntentMethods.inl
@@ -14213,6 +14052,17 @@ struct LibplaceboVideoRenderer::Impl
 	void UpdateRenderAheadBudget(double captureRateHz);   // VPV-HOOK
 	double RenderAheadChainRatio() const;   // VPV-HOOK
 	void CheckRenderAheadChainDepthLocked();   // VPV-HOOK
+	bool MotionVectorsRun() const;   // VPV-HOOK
+	VectorDemand::Input VectorDemandInput(bool interlaced) const;   // VPV-HOOK
+	bool DitherVectorsSupported() const;   // VPV-HOOK
+	static bool SameGeometry(const DejudderRendered::Geometry& a, const DejudderRendered::Geometry& b);   // VPV-HOOK
+	float AdaptiveFallbackFramePeriod() const;   // VPV-HOOK
+	Dejudder::Settings RenderedWarpSettings(int outputHeight) const;   // VPV-HOOK
+	double SourceRateHz(const VideoState& state) const;   // VPV-HOOK
+	void RequestMotionInvalidate(MotionValidity::Cause cause);   // VPV-HOOK
+	void ApplyResyncLibplaceboFlush(uint64_t sourceSequence);   // VPV-HOOK
+	void ApplyMotionInvalidate();   // VPV-HOOK
+	void UpdateDejudderEstimate(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& next, const std::shared_ptr<const QueuedFrame::ConvertedPayload>& current, const VideoFrameFormatterOutputContract& contract, int width, int height, size_t rowBytes, int chromaHeight, bool lossless422, bool flipped, uint64_t sourceSequence, bool cadenceRepeat, bool nativeRgb, bool interlaced, double sourceHz, uint64_t nextSourceSequence);   // VPV-HOOK
 
 	void WarmIdleMotionEngine(const VideoFrameFormatterOutputContract& contract, bool lossless422, bool nativeRgb);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/EngineKeeper.inl
 

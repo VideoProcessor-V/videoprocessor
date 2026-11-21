@@ -16,6 +16,7 @@
 #include <VP-V/modules/drive/led_compensation/LedSdrLiftMethods.h>   // P11a-d: compiled in LedSdrLiftMethods.cpp
 #include <VP-V/modules/output/calibration_lut/CalibrationPresentMethods.inl>   // P11a-e: the calibration pattern present (Impl member)
 #include <VP-V/modules/output/presentation/PresentationHostHelpers.h>   // Package C 4: compiled in PresentationHostHelpers.cpp
+#include <VP-V/modules/motion/consumers/MotionHostHelpers.h>   // Package C 5: compiled in MotionHostHelpers.cpp
 
 void LibplaceboVideoRenderer::Impl::ConfigureIntentInterpreter() { ConfigureIntentMotion(); ConfigureIntentAmbient(); }
 void LibplaceboVideoRenderer::Impl::ConfigureIntentAmbient() { Vpv::LedIntent::ConfigureAmbient(vpv.led.intent, activeSettings); }
@@ -67,6 +68,56 @@ VpRepeatReuse::VpContext LibplaceboVideoRenderer::Impl::RepeatReuseContext(const
 		outputEncodingRepair.Get(), calibrationHost.Stage().Get(), extendedRangeHooks, adaptiveDownscale,
 		rebaseFactor, rebaseFactorX, sourceRebase.Kernel(), DisplayLutSignature(), fallbacks.Heading(), pipelineSlots };
 	return Vpv::PresentationHost::BuildRepeatReuseContext(h, image, target);
+}
+
+bool LibplaceboVideoRenderer::Impl::MotionVectorsRun() const { return Vpv::MotionHost::MotionVectorsRun(pipelineSlots); }
+bool LibplaceboVideoRenderer::Impl::DitherVectorsSupported() const { return Vpv::MotionHost::DitherVectorsSupported(pipelineSlots); }
+bool LibplaceboVideoRenderer::Impl::SameGeometry(const DejudderRendered::Geometry& a, const DejudderRendered::Geometry& b) { return Vpv::MotionHost::SameGeometry(a, b); }
+float LibplaceboVideoRenderer::Impl::AdaptiveFallbackFramePeriod() const { return Vpv::MotionHost::AdaptiveFallbackFramePeriod(customHookRefreshHz); }
+Dejudder::Settings LibplaceboVideoRenderer::Impl::RenderedWarpSettings(int outputHeight) const { return Vpv::MotionHost::RenderedWarpSettings(*dejudder, outputHeight); }
+double LibplaceboVideoRenderer::Impl::SourceRateHz(const VideoState& state) const { return Vpv::MotionHost::SourceRateHz(pulldownFilmHz, state.displayMode ? state.displayMode->RefreshRateHz() : 0.0); }
+void LibplaceboVideoRenderer::Impl::RequestMotionInvalidate(MotionValidity::Cause cause) { Vpv::MotionHost::RequestMotionInvalidate(motionValidity, frameAnalysis, cause); }
+void LibplaceboVideoRenderer::Impl::ApplyResyncLibplaceboFlush(uint64_t sourceSequence) { Vpv::MotionHost::ApplyResyncLibplaceboFlush(resync, resyncDrive, renderer, activeSettings.pipelineOriginalPathway, resyncLibplaceboFlushes, sourceSequence, [this]() { temporalRenderer.Clear(); }); }
+
+VectorDemand::Input LibplaceboVideoRenderer::Impl::VectorDemandInput(bool interlaced) const
+{
+	Vpv::MotionHost::VectorDemandHost h{ activeSettings, pipelineSlots, lowLatencyQueueActive.load(std::memory_order_acquire),
+		queueAheadCapacity.load(std::memory_order_acquire), smoothMotionEngine, temporalRenderer.Active(), temporalRenderer.Mixing(),
+		sigmaDeltaRanLast, DitherVectorsSupported(), adaptiveGrainMapWanted, EntranceOnce(),
+		vpv.motion.intent.intentInterpreter && vpv.motion.intent.intentInterpreter->Active() };
+	return Vpv::MotionHost::BuildVectorDemandInput(h, interlaced);
+}
+
+void LibplaceboVideoRenderer::Impl::ApplyMotionInvalidate()
+{
+	Vpv::MotionHost::MotionInvalidateHost h{ pipelineSlots.OriginalPathway(), resync, vectorEngine, dejudder, dejudderAhead,
+		dejudderExtras, dejudderEstimatedSequence, dejudderEstimatedEpoch, dejudderLiveFieldFrom, motionEngineWarmPending,
+		adaptiveDownscale, debander, detailPulse, textureRestore,
+		[this]() { vectorEstimate.EndSnapshotLease(pipelineSlots.OriginalPathway()); },
+		[this]() { ReleaseDejudder(); },
+		[this]() { dejudderAheadPayload.reset(); dejudderAheadPayloadSequence = 0; } };
+	Vpv::MotionHost::ApplyMotionInvalidate(h);
+}
+
+void LibplaceboVideoRenderer::Impl::UpdateDejudderEstimate(
+	const std::shared_ptr<const QueuedFrame::ConvertedPayload>& next,
+	const std::shared_ptr<const QueuedFrame::ConvertedPayload>& current,
+	const VideoFrameFormatterOutputContract& contract,
+	int width, int height, size_t rowBytes, int chromaHeight, bool lossless422,
+	bool flipped, uint64_t sourceSequence, bool cadenceRepeat, bool nativeRgb, bool interlaced,
+	double sourceHz, uint64_t nextSourceSequence)
+{
+	RunDejudderPolicy(DejudderEstimateCall{ next, current, contract, width, height, rowBytes, chromaHeight, lossless422,
+		flipped, sourceSequence, cadenceRepeat, nativeRgb, interlaced, sourceHz, nextSourceSequence });
+}
+
+void LibplaceboVideoRenderer::Impl::BuildSigmaDeltaVectorsWithoutExtras(uint64_t sourceSequence, uint64_t nextSourceSequence)
+{
+	Vpv::MotionHost::DitherVectorsHost h{ this, log, d3d11, activeSettings, pipelineSlots, customHooks, vectorDemand, vectorEngine,
+		motionValidity, dejudderExtras, dejudder, dejudderEstimatedEpoch, interpolating, vpTimelineActive,
+		[this](uint64_t seq) { return DejudderLiveFieldFor(seq); },
+		[this](const FallbackCatalog::Decision& d) { SyncFallback(d); } };
+	Vpv::MotionHost::BuildSigmaDeltaVectorsWithoutExtras(h, sourceSequence, nextSourceSequence);
 }
 
 void LibplaceboVideoRenderer::Impl::ConfigureIntentMotion()
