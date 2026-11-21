@@ -351,6 +351,50 @@ namespace SharedUnitsW1TestsNs2
 			Assert::IsFalse(VpUnit::SourceStats::ComputeRecord(half.data(), 40, 25, out.data(), 16), L"too small a buffer");
 		}
 
+		// 2026-11-21 precision fix (unit v2): two 12-bit codes inside ONE ten-bit bin keep their own values.
+		TEST_METHOD(LaneStatsTwelveBitPercentilesAreExact)
+		{
+			Assert::AreEqual(2u, VpUnit::SourceStats::kUnitVersion, L"the percentile law changed: unit v2");
+			// 12-bit codes 1001 and 1003 as lane words (code12 << 4): 16016 and 16048, both in ten-bit bin 250 (16000..16063).
+			const std::vector<uint16_t> half = { 16016, 16016, 16048, 16048 };
+			std::vector<uint8_t> out(VpUnit::SourceStats::kRecordBytes, 0);
+			Assert::IsTrue(VpUnit::SourceStats::ComputeRecord(half.data(), 4, 1, out.data(), out.size()));
+			VpUnit::SourceStats::Record r;
+			Assert::IsTrue(VpUnit::SourceStats::ReadRecord(out.data(), out.size(), &r));
+			Assert::AreEqual(4u, r.hist[250], L"the record bin law is unchanged: both codes in bin 250");
+			Assert::AreEqual(4u, r.pixelCount);
+			Assert::AreEqual(16032u, r.mean);
+			Assert::AreEqual(16016u, r.minCode);
+			Assert::AreEqual(16048u, r.maxCode);
+			// Targets: p01 (4 + 99) / 100 = 1, p50 (4 + 1) / 2 = 2, p99 (396 + 99) / 100 = 4. v1 gave 16032 (the bin centre) for all three.
+			Assert::AreEqual(16016u, r.p01);
+			Assert::AreEqual(16016u, r.p50);
+			Assert::AreEqual(16048u, r.p99);
+		}
+
+		// Exact percentiles always lie inside the samples' own range (v1's bin centre could exceed maxCode or undercut minCode).
+		TEST_METHOD(LaneStatsPercentilesLieWithinMinAndMax)
+		{
+			std::mt19937 rng(20261121);
+			for (int rep = 0; rep < 20; ++rep)
+			{
+				const uint32_t hw = 16 + static_cast<uint32_t>(rng() % 48), hh = 9 + static_cast<uint32_t>(rng() % 27);
+				const uint32_t base = static_cast<uint32_t>(rng() % 3000);
+				std::vector<uint16_t> half(static_cast<size_t>(hw) * hh);
+				for (uint16_t& s : half)
+					s = static_cast<uint16_t>((base + rng() % (1u + static_cast<uint32_t>(rep) * 50u)) << 4);   // 12-bit codes, lane words
+				std::vector<uint8_t> out(VpUnit::SourceStats::kRecordBytes, 0);
+				Assert::IsTrue(VpUnit::SourceStats::ComputeRecord(half.data(), hw, hh, out.data(), out.size()));
+				VpUnit::SourceStats::Record r;
+				Assert::IsTrue(VpUnit::SourceStats::ReadRecord(out.data(), out.size(), &r));
+				Assert::IsTrue(r.minCode <= r.p01 && r.p01 <= r.p50 && r.p50 <= r.p99 && r.p99 <= r.maxCode);
+				uint64_t total = 0;
+				for (uint32_t b = 0; b < VpUnit::SourceStats::kHistBins; ++b)
+					total += r.hist[b];
+				Assert::AreEqual(static_cast<uint64_t>(hw) * hh, total, L"the record bins total every sample");
+			}
+		}
+
 		TEST_METHOD(HistBin10MatchesTheVetoBinLawAndTheLaneShift)
 		{
 			for (uint32_t code = 0; code < 1200; ++code)

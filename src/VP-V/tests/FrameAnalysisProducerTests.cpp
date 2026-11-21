@@ -341,6 +341,71 @@ namespace FrameAnalysisProducerTestsNs
 			Assert::AreEqual(uint32_t((kWidth / 16) * (kHeight / 8)), measured.grain.flatBlocks);
 		}
 
+		// 2026-11-21 precision fix: a 16-bit plane lane with fraction bits (a 12-bit source: code12 << 4) keeps them on the
+		// Q6 axis. Thresholds keep their 10-bit meaning (81.25 is above near-black 81.0; 940.5 is above white 940.0).
+		static void FillLanes(Frame& frame, uint16_t lane)
+		{
+			std::vector<uint8_t>& data = *frame.bytes;
+			for (int y = 0; y < kHeight; ++y)
+				for (int x = 0; x < kWidth; ++x)
+					Put16(&data[static_cast<size_t>(y) * frame.source.rowBytes + static_cast<size_t>(x) * 2], lane);
+		}
+
+		TEST_METHOD(TwelveBitPlaneKeepsItsFractionOnTheAxis)
+		{
+			Frame frame = Make(Kind::P010, 0);
+			Assert::IsFalse(VpFrameAnalysis::SamplerCodesAreFullRange(frame.source), L"identity studio map (precondition)");
+			Assert::IsFalse(VpFrameAnalysis::NeedsDecode(frame.source), L"limited plane: lanes read in place (precondition)");
+			const uint64_t n = static_cast<uint64_t>(kWidth) * kHeight;
+			const Rect all{ 0, 0, kWidth, kHeight };
+			VpFrameAnalysis::Measured m;
+
+			FillLanes(frame, static_cast<uint16_t>((81u << 6) | 16u));   // 81.25 on the axis
+			Assert::IsTrue(VpFrameAnalysis::Reduce(frame.source, all, m));
+			Assert::AreEqual(81.25, m.luma.mean, 0.0, L"v1: 81.0");
+			Assert::AreEqual((81.25 - 64.0) / (940.0 - 64.0), m.luma.apl, 1e-15);
+			Assert::AreEqual(0.0, m.range.nearBlack, 0.0, L"81.25 > 81.0: not near black (v1: 1.0)");
+			Assert::AreEqual(0.0, m.range.btb, 0.0);
+			Assert::AreEqual(0.0, m.range.wtw, 0.0);
+			Assert::AreEqual(static_cast<uint32_t>(n), m.luma.histogram[81], L"the Store bin is the whole studio code");
+			Assert::AreEqual(81, static_cast<int>(m.luma.minimum));
+			Assert::AreEqual(81, static_cast<int>(m.luma.p50));
+			Assert::AreEqual(81, static_cast<int>(m.luma.maximum));
+
+			FillLanes(frame, static_cast<uint16_t>((940u << 6) | 32u));  // 940.5
+			Assert::IsTrue(VpFrameAnalysis::Reduce(frame.source, all, m));
+			Assert::AreEqual(940.5, m.luma.mean, 0.0, L"v1: 940.0");
+			Assert::AreEqual(1.0, m.range.wtw, 0.0, L"940.5 > 940.0: whiter than white (v1: 0.0)");
+			Assert::AreEqual(0.0, m.range.clipped, 0.0, L"below 1019.0");
+			Assert::AreEqual(static_cast<uint32_t>(n), m.luma.histogram[940]);
+
+			FillLanes(frame, static_cast<uint16_t>((1018u << 6) | 63u)); // 1018.984: still below clipped 1019.0
+			Assert::IsTrue(VpFrameAnalysis::Reduce(frame.source, all, m));
+			Assert::AreEqual(0.0, m.range.clipped, 0.0);
+			Assert::AreEqual(1018.0 + 63.0 / 64.0, m.luma.mean, 0.0);
+		}
+
+		TEST_METHOD(TwelveBitGrainIsMeasuredBelowOneCode)
+		{
+			// A checkerboard of 500.0 and 500.25 (Q6 32000 / 32016): each 8x8 block holds 32 of each, so its variance is
+			// (16 / 2)^2 = 64 Q6^2 = 1/64 code^2 and the RMS is exactly 0.125 code. v1 floored both to 500: RMS 0.
+			Frame frame = Make(Kind::P010, 0);
+			std::vector<uint8_t>& data = *frame.bytes;
+			for (int y = 0; y < kHeight; ++y)
+				for (int x = 0; x < kWidth; ++x)
+					Put16(&data[static_cast<size_t>(y) * frame.source.rowBytes + static_cast<size_t>(x) * 2],
+						static_cast<uint16_t>(((x + y) & 1) ? (500u << 6) | 16u : 500u << 6));
+			VpFrameAnalysis::Measured m;
+			Assert::IsTrue(VpFrameAnalysis::Reduce(frame.source, Rect{ 0, 0, kWidth, kHeight }, m));
+			Assert::AreEqual(500.125, m.luma.mean, 0.0);
+			Assert::AreEqual(0.125, m.grain.rms, 1e-12);
+			const uint32_t blocks = uint32_t((kWidth / 8) * (kHeight / 8));
+			Assert::AreEqual(blocks, m.grain.blocks);
+			Assert::AreEqual(blocks, m.grain.flatBlocks, L"every block equally flat");
+			Assert::AreEqual(1.0, m.grain.confidence, 0.0);
+			Assert::AreEqual(static_cast<uint32_t>(kWidth * kHeight), m.luma.histogram[500]);
+		}
+
 		TEST_METHOD(ProducerPublishesAsynchronously)
 		{
 			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
