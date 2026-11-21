@@ -6,6 +6,7 @@
   "status": "built",
   "code_location": "built in CF-1 P3; the code lives in colour/display_mapping (module headers) and the call sites in segments/CoreSegments.inl + OutputSegments.cpp",
   "live_files": [
+    "src/VP-V/modules/colour/display_mapping/DmCurve.h",
     "src/VP-V/modules/colour/display_mapping/DvDolbyStyle.h",
     "src/VP-V/modules/colour/display_mapping/DvMath.h"
   ],

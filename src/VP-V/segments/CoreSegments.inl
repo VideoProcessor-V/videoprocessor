@@ -289,13 +289,19 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     // trims hook - the one emitter), and the DV comparison capture.
     // CF-1 P3 (either/or): dv_display_mapping=original is Bill's libplacebo DV mapping, byte-identical to
     // dv_tone_mapping=libplacebo with dv_trims off; the stored dv_* values are kept, only the effective ones change.
+    // CF-1 P4: the contrast-recovery need for Dolby-style DV pictures is the P14 view (never a private estimate).
+    const bool dvNeedsView = activeSettings.dvDisplayMapping != "original" && activeSettings.dvToneMapping == "dolby_style" &&
+        pipelineSlots.Runs(PipelineSlots::Id::ColourDmCurve);
+    SourceIdentity::QualityView dvQualityView;
+    if (dvNeedsView) dvQualityView = vpv.sourceAnalysis.sourceMonitor.QualityView();
     static const std::string dvOriginalTone = "libplacebo";
     const bool dvVpMapping = activeSettings.dvDisplayMapping != "original";
     dvStage.PrepareToneAndTrims({ dvVpMapping ? activeSettings.dvToneMapping : dvOriginalTone, dvVpMapping && activeSettings.dvTrims, activeSettings.toneMapping,
         activeSettings.dvCompareCaptureFolder, pipelineSlots.Runs(PipelineSlots::Id::ColourDmCurve), renderImage, target,
         convertedPayload ? &convertedPayload->dolby : nullptr, LedDisplayGamma(target.color.transfer), state,
         convertedPayload ? Vpv::Capture::RawFrameOf(*convertedPayload) : nullptr, videoFrame.GetCounter(),
-        pipelineSlots.Runs(PipelineSlots::Id::ColourDmTrims) },   // VPV-HOOK
+        pipelineSlots.Runs(PipelineSlots::Id::ColourDmTrims),
+        dvNeedsView ? &dvQualityView : nullptr },   // VPV-HOOK
         colorMapParams, hookTemplates, colourFrame.dvTrims, colourFrame.dv);
     // Rendered-frame captures (DV comparison capture; the WP-17 diagnostics adapter is the one
     // caller). The context is built only while one is on (it consumes the trim selection).

@@ -32,3 +32,7 @@ Reserved by lane DVDM P1 (2026-11-14) from the VP-V DV display-mapping proposal 
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+## Contrast recovery and tone LUT size (CF-1 P4)
+
+`display_mapping/DmCurve.h`: for Dolby-style DV pictures the contrast recovery given to libplacebo follows the P14 need (`SourceQualityView`, never a private estimate; absent reading shows the existing "contrast recovery: classical quality" line), and the tone LUT size is the smallest of a ladder whose linear interpolation stays under 0.25 12-bit codes of the analytic curve over every I code of the scene range (measured, cached per scene). No new key; Original pathway leaves both at libplacebo's values.

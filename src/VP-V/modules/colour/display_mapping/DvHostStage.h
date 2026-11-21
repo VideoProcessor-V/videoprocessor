@@ -45,6 +45,7 @@
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h>
+#include <VP-V/modules/colour/display_mapping/DmCurve.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
 #include <VP-V/modules/input/signal/DvCompareCapture.h>
 #include <VP-V/modules/input/signal/DvMetadataHold.h>
@@ -80,6 +81,7 @@ public:
 		const VideoFrame* rawFrame;           // the raw capture frame, or null
 		uint64_t counter;                     // the frame counter
 		bool trimsStageRuns = true;           // the colour.dm_trims slot runs this frame (CF-1 P3; trailing so older initialisers compile)
+		const SourceIdentity::QualityView* quality = nullptr;   // CF-1 P4: the P14 view for the contrast-recovery need (null = leave libplacebo's value)
 	};
 
 	DvHostStage(CustomHookChain::Loader loader, Engage engage, Release release)
@@ -168,6 +170,8 @@ public:
 	double TrimsTargetNits() const { return m_trimsTargetNits; }
 
 	// The reference viewing conditions of the last DV picture (for the later CAM16 stage).
+	const std::string& ContrastRecoveryStatus() const { return m_recoveryStatus; }
+	const std::string& ToneLutStatus() const { return m_lutStatus; }
 	const DvDolbyStyle::ReferenceConditions& ReferenceConditions() const { return m_referenceConditions; }
 	const std::string& TrimsStatus() const { return m_trimsStatus; }
 	const std::string& ToneStatus() const { return m_toneStatus; }
@@ -211,6 +215,36 @@ public:
 			target.color.transfer, f.colourStageRuns, f.trims && m_trimsShaderMissing);
 		m_toneDolbyRunning = dvToneDolby && dvTonePicture && dvToneFallback.empty();
 		m_toneSwitch.Apply(colorMapParams, m_toneDolbyRunning ? &DvDolbyStyle::Function() : !dvToneFallback.empty() ? &pl_tone_map_bt2390 : nullptr);
+		// CF-1 P4 (DmCurve.h): the tone LUT size from the interpolation measurement and the contrast recovery from the P14 need,
+		// Dolby-style DV pictures only; everything else gets the configured values back (Original = Bill).
+		{
+			DmCurve::LutChoice lutChoice;
+			if (m_toneDolbyRunning)
+			{
+				pl_color_space screen = target.color;
+				pl_color_space_infer(&screen);
+				const pl_hdr_metadata& src = renderImage.color.hdr;
+				const double sMax = src.max_pq_y > 0.0f ? src.max_pq_y : DvMath::PqFromNits(src.max_luma);
+				const double key[5] = { DvMath::PqFromNits(src.min_luma), src.avg_pq_y, sMax,
+					DvMath::PqFromNits(screen.hdr.min_luma), DvMath::PqFromNits(screen.hdr.max_luma) };
+				if (!m_lutKeyValid || !std::equal(key, key + 5, m_lutKey))
+				{
+					std::copy(key, key + 5, m_lutKey);
+					m_lutKeyValid = true;
+					m_lutChoice = DmCurve::ChooseLutSize(DvDolbyStyle::Build(key[0], key[1], key[2], key[3], key[4]));
+				}
+				lutChoice = m_lutChoice;
+			}
+			DmCurve::Recovery recovery;
+			const bool useRecovery = m_toneDolbyRunning && f.quality != nullptr;
+			if (useRecovery)
+				recovery = DmCurve::RecoveryFromNeed(*f.quality, m_mapSwitch.ConfiguredRecovery(colorMapParams));
+			m_mapSwitch.Apply(colorMapParams, m_toneDolbyRunning, lutChoice.size, useRecovery, recovery.value);
+			m_recoveryStatus = recovery.status;
+			m_lutStatus = m_toneDolbyRunning && lutChoice.size > 0 && !lutChoice.withinBudget ?
+				"DV tone LUT: largest size misses the interpolation budget" : std::string();
+			if (!m_recoveryStatus.empty()) m_engage("DV contrast recovery", m_recoveryStatus); else m_release("DV contrast recovery");
+		}
 		if (!dvToneFallback.empty()) m_engage("DV tone mapping", dvToneFallback + ": " + DvDolbyStyle::FallbackName(f.trims)); else m_release("DV tone mapping");
 		// Audit 7: libplacebo's input_avg / input_max for the curve come from L1 via hdr.avg_pq_y / max_pq_y.
 		const bool dvToneL1Missing = m_toneDolbyRunning && !(renderImage.color.hdr.max_pq_y > 0.0f && renderImage.color.hdr.avg_pq_y > 0.0f);
@@ -395,6 +429,11 @@ private:
 	// feat/dv-l8 task 5: the Dolby-style DV tone mapping (dv_tone_mapping), its status, and the
 	// reference viewing conditions of the last DV picture (for the later CAM16 stage).
 	DvDolbyStyle::ToneSwitch m_toneSwitch;
+	DmCurve::MapSwitch m_mapSwitch;   // CF-1 P4
+	double m_lutKey[5] = {};
+	bool m_lutKeyValid = false;
+	DmCurve::LutChoice m_lutChoice;
+	std::string m_recoveryStatus, m_lutStatus;
 	bool m_toneDolbyRunning = false;
 	std::string m_toneStatus = "DV tone mapping: libplacebo";
 	DvDolbyStyle::ReferenceConditions m_referenceConditions;
