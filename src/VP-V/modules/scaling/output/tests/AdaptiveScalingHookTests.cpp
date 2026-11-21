@@ -291,6 +291,9 @@ namespace VideoProcessorTest
 		// source exactly, so the faithful branch must equal libplacebo's own
 		// ewa_lanczossharp render). The grain term is forced by the ramp:
 		// grain_lo 1000 (clean, g = 1) or grain_hi 0.001 (grain, g = floor 0.4).
+		// CF-2 B1 (HybridBlend.h): w = clamp(w_base (1 - e) g) x m, out = sharp + (1 - w)(alias_safe - sharp)
+		// on luma. The identity / grain assertions run with the edge ramp forced to e = 0 on every pixel
+		// (unchanged tolerances); the edge term is then checked with the ramp forced to e = 1 and e = 0.5.
 		TEST_METHOD(AdaptiveUpscaleBlendsCnnAndFaithfulByGrain)
 		{
 			TargetLutGpuFixture fixture;
@@ -372,6 +375,12 @@ namespace VideoProcessorTest
 			};
 			AdaptiveDownscale::Settings settings;
 			settings.grainMap = false;
+			// e = 0 everywhere: smoothstep(1e6, 2e6, grad) = 0 for any 8-bit gradient. Every pixel then counts
+			// as flat for the grain measure; the ramps below still force g (energy > 0.001, and far below 1000
+			// on this 31..218-code texture).
+			const float edgeOffLo = 1.0e6f, edgeOffHi = 2.0e6f;
+			settings.edgeLo = edgeOffLo;
+			settings.edgeHi = edgeOffHi;
 			auto withModule = [&](AdaptiveDownscale::Module& module, float grainLo, float grainHi, float wBase,
 				float nativeH, int ow, int oh, std::vector<const pl_hook*> hooks, bool superresAlpha = false,
 				size_t blendAt = static_cast<size_t>(-1))
@@ -427,7 +436,7 @@ namespace VideoProcessorTest
 					std::to_string(frame.luma[static_cast<size_t>(wy / 2) * width + wx / 2 + 1])).c_str());
 			}
 
-			// Clean (g = 1, w = 1): exactly the CNN branch, edges included.
+			// Clean (g = 1, e = 0, w = 1): exactly the CNN branch, edges included.
 			AdaptiveDownscale::Module module;
 			const std::vector<uint16_t> clean = withModule(module, 1000.0f, 2000.0f, 1.0f, static_cast<float>(height), ow, oh, { cnn });
 			Assert::AreEqual(2, module.LastUpscaleRatio(), L"the doubler's output should be averaged to the source");
@@ -479,6 +488,66 @@ namespace VideoProcessorTest
 			Assert::IsTrue(grainDiff <= 96, message.c_str());
 			Assert::AreEqual(0, maxDiff(native, nativeRef), (L"native size must be untouched; " + message).c_str());
 			Assert::AreEqual(0, maxDiff(down, downRef), (L"a downscale must be untouched; " + message).c_str());
+
+			// CF-2 B1 edge term (FIX-UPS-edge change (a)): edge pixels move from the sharp branch (here the CNN)
+			// toward the alias-safe branch (`faithful`, w_base 0) by 1 - w, w = clamp(w_base (1 - e) g) x m (m = 1:
+			// no vectors, no floor). The ramp forces e on every pixel:
+			//   e = 1:   smoothstep(-2, -1, grad) = 1 for any gradient >= 0, so w = 0 whatever g: out = alias-safe.
+			//   e = 0.5: smoothstep(-1e6, 1e6, grad) = 0.5 within 3e-4 (16-bit float edge texture: within 1e-3).
+			// A negative edge_lo leaves no flat pixel, so the grain energy is 0: grain ramp 1000..2000 gives g = 1,
+			// -2..-1 gives g = the floor 0.4. Predicted 1 - w (w_base 1): e = 1 -> 1 (g = 1 and g = 0.4);
+			// e = 0.5 -> 0.5 (g = 1), 0.8 (g = 0.4). With the edge term removed these would be 0, 0.6, 0 and 0.6.
+			{
+				auto withEdge = [&](float edgeLo, float edgeHi, float grainLo, float grainHi)
+				{
+					settings.edgeLo = edgeLo;
+					settings.edgeHi = edgeHi;
+					const std::vector<uint16_t> out = withModule(module, grainLo, grainHi, 1.0f, static_cast<float>(height), ow, oh, { cnn });
+					settings.edgeLo = edgeOffLo;
+					settings.edgeHi = edgeOffHi;
+					return out;
+				};
+				// out against sharp + toward (alias_safe - sharp), every colour channel (the luma difference moves all three).
+				auto checkToward = [&](const std::vector<uint16_t>& out, double toward, int tolerance, const wchar_t* label)
+				{
+					int worst = 0, wrongWay = 0, overshoot = 0, moving = 0;
+					double num = 0.0, den = 0.0;
+					for (size_t i = 0; i < out.size(); ++i)
+					{
+						if (i % 4 == 3)
+							continue;
+						const double sharp = cnnBranch[i], safe = faithful[i];
+						const double moved = out[i] - sharp, span = safe - sharp;
+						worst = std::max(worst, static_cast<int>(std::lround(std::fabs(out[i] - (sharp + toward * span)))));
+						num += moved * span;
+						den += span * span;
+						if (std::fabs(span) >= 512.0)
+						{
+							++moving;
+							if (moved * span <= 0.0)
+								++wrongWay;       // not moved, or moved away from the alias-safe branch
+							if (std::fabs(moved) > std::fabs(span) + tolerance)
+								++overshoot;      // moved past the alias-safe branch
+						}
+					}
+					const double fraction = den > 0.0 ? num / den : 0.0;
+					const std::wstring m = std::wstring(label) + L": predicted 1 - w " + std::to_wstring(toward) + L", measured " +
+						std::to_wstring(fraction) + L", max vs prediction " + std::to_wstring(worst) + L" (tolerance " +
+						std::to_wstring(tolerance) + L"), moving channels " + std::to_wstring(moving) + L", wrong way " +
+						std::to_wstring(wrongWay) + L", overshoot " + std::to_wstring(overshoot) + L" (16-bit codes)";
+					Assert::IsTrue(moving > 0 && den > 0.0, m.c_str());
+					Assert::IsTrue(worst <= tolerance, m.c_str());
+					Assert::IsTrue(std::fabs(fraction - toward) < 0.02, m.c_str());
+					Assert::AreEqual(0, wrongWay, m.c_str());
+					Assert::AreEqual(0, overshoot, m.c_str());
+				};
+				// e = 1, w = 0 (as w_base 0): the alias-safe branch, at the identity tolerance.
+				checkToward(withEdge(-2.0f, -1.0f, 1000.0f, 2000.0f), 1.0, 32, L"e = 1, g = 1");
+				checkToward(withEdge(-2.0f, -1.0f, -2.0f, -1.0f), 1.0, 32, L"e = 1, g = 0.4");
+				// e = 0.5: a mixed expectation, at the grain assertion's tolerance.
+				checkToward(withEdge(-1.0e6f, 1.0e6f, 1000.0f, 2000.0f), 0.5, 96, L"e = 0.5, g = 1 (w = 0.5)");
+				checkToward(withEdge(-1.0e6f, 1.0e6f, -2.0f, -1.0f), 0.8, 96, L"e = 0.5, g = 0.4 (w = 0.2)");
+			}
 
 			// SuperRes strength follows the grain term (its vp_grain_strength,
 			// alpha from the blend): with g = 0.4 its correction is scaled by 0.4.
