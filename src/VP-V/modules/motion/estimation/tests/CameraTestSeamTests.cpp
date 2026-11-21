@@ -12,11 +12,13 @@
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelFit.h>
 #include <VP-V/modules/motion/estimation/global_model/PhotometricVerdict.h>
 #include <VP-V/modules/motion/estimation/global_model/PhotometricWiring.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraUsable.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraFitFieldPod.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraLabelFill.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraLane.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraLinkCore.h>
 
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -358,6 +360,159 @@ namespace VideoProcessorTest
 			Assert::AreEqual(-1.5, out.model.h[5]);
 			Assert::AreEqual(before, CameraTestSeams::VerdictCounter().calls.load(std::memory_order_acquire),
 				L"disarmed PhotometricVerdict must not increment counter");
+		}
+	};
+
+	TEST_CLASS(CameraComposeFailureSeamTests)
+	{
+	private:
+		static constexpr double kControlInverseScoreMin = 0.9; // noiseless synthetic forward/backward pan yields near-1.0 inverse consistency
+		static constexpr double kControlRefineTolPx = 0.1;     // noiseless 8-bit wave scene refines within 0.1 px of true 8.0 px pan
+		static constexpr double kControlVectorPanTolPx = 0.05; // noiseless synthetic 8.4 px pan vector field fits well within 0.05 px
+
+		static bool AllFiniteParams(const CameraModel::Params& p)
+		{
+			for (int i = 0; i < 9; ++i)
+				if (!std::isfinite(p.h[i]))
+					return false;
+			return true;
+		}
+
+		static CameraSynth::Field MakePanField640x320(double tx, double ty, bool withBackward)
+		{
+			CameraSynth::GridSpec g;
+			g.w = 40;
+			g.h = 20;
+			g.blockSize = 16;
+			CameraSynth::Field f(g, R3Scenes::Pic(640, 320));
+			f.FromModel(CameraSynth::PanModel(tx, ty), withBackward);
+			return f;
+		}
+
+	public:
+		// Seam 5 (GEM-136 GlobalModelFit inverse check): a compose normalisation failure during Finish()'s backward
+		// consistency check leaves devTerm = 0 -> sg.inverse = 0 -> Reason::InverseMismatch, confidence = 0, not usable,
+		// and preserves finite params (no NaN/Inf/corrupt homography propagated).
+		TEST_METHOD(GlobalModelFitComposeFailureSetsInverseMismatchWithoutCorruptModel)
+		{
+			using namespace CameraModel;
+			const CameraSynth::Field field = MakePanField640x320(8.0, 0.0, true);
+			Fitter fitter;
+
+			// Control (unarmed): backward check passes with high inverse score and usable Ok verdict.
+			{
+				const CameraMotion r = fitter.Fit(field.Input(1.0 / 24.0, 1));
+				Assert::IsTrue(r.valid && r.reason == Reason::Ok, L"control fit must succeed with Reason::Ok");
+				Assert::IsTrue(r.signals.haveBackward && r.signals.inverse > kControlInverseScoreMin,
+					L"control backward inverse signal must be high");
+				Assert::IsTrue(CameraLink::Usable(r), L"control fit must be usable");
+			}
+
+			// Armed seam: force Compose(B, model, &composeOk) to fail normalisation (h[8] = 0, ok = false).
+			{
+				CameraTestSeams::ScopedComposeFail guard(CameraTestSeams::ComposeFailSite::GlobalModelFitInverse, 1);
+				const CameraMotion r = fitter.Fit(field.Input(1.0 / 24.0, 2));
+				Assert::AreEqual(0, CameraTestSeams::ComposeFailArmed(CameraTestSeams::ComposeFailSite::GlobalModelFitInverse).load(std::memory_order_acquire),
+					L"GlobalModelFitInverse seam must be consumed exactly once");
+				Assert::IsTrue(r.signals.haveBackward, L"backward check must have run");
+				Assert::AreEqual(0.0, r.signals.inverse, L"compose failure must force sg.inverse == 0");
+				Assert::IsTrue(r.reason == Reason::InverseMismatch, L"compose failure must yield Reason::InverseMismatch");
+				Assert::AreEqual(0.0, r.confidence, L"verdict gate must drive confidence to 0 when sg.inverse == 0");
+				Assert::IsFalse(CameraLink::Usable(r), L"InverseMismatch record must never be usable");
+				Assert::IsTrue(AllFiniteParams(r.params), L"record params must remain finite");
+				Assert::AreEqual(1.0, r.params.h[8], L"record params h[8] must stay normalised (never 0/corrupt)");
+			}
+
+			// After guard exits (disarmed): next fit recovers cleanly.
+			{
+				const CameraMotion r = fitter.Fit(field.Input(1.0 / 24.0, 3));
+				Assert::IsTrue(r.valid && r.reason == Reason::Ok && r.signals.inverse > kControlInverseScoreMin,
+					L"disarmed fit must resume normal backward inverse check");
+			}
+		}
+
+		// Seam 6 (GEM-136 PhotometricRefine Gauss-Newton step): a compose normalisation failure on the update step exits
+		// immediately via FellBackDegenerate, leaving res.model bit-equal to the input model (no NaN/Inf/corrupt h[8]=0).
+		TEST_METHOD(PhotometricRefineComposeFailureFallsBackDegeneratePreservingInputModel)
+		{
+			using namespace CameraModel;
+			const int w = 640, h = 320;
+			const double s = 1.0;
+			const std::vector<R3Scenes::Wave> waves = R3Scenes::MakeWaves(77, s, 45.0);
+			const std::vector<uint8_t> imgA = R3Scenes::To8(R3Scenes::RenderD(w, h, s, { R3Scenes::Shifted(waves, 0.0, 0.0) }, 1.0, 0.0, 201, 0.0));
+			const std::vector<uint8_t> imgB = R3Scenes::To8(R3Scenes::RenderD(w, h, s, { R3Scenes::Shifted(waves, 8.0, 0.0) }, 1.0, 0.0, 202, 0.0));
+			const LumaPairView lv = R3Scenes::View8(imgA, imgB, w, h, s);
+			const Rect pic = R3Scenes::Pic(w, h);
+			const Params initial = R3Scenes::Translation(8.4, 0.0);
+			const InlierMask noMask;
+
+			PhotometricRefiner refiner;
+
+			// Control (unarmed): refines cleanly toward (8.0, 0.0).
+			{
+				const RefineResult r = refiner.Refine(initial, lv, pic, noMask);
+				Assert::IsTrue(r.status == RefineStatus::Refined, L"control refine must succeed");
+				Assert::IsTrue(std::fabs(r.model.h[2] - 8.0) < kControlRefineTolPx, L"control refine must converge near true 8.0 px pan");
+				Assert::AreEqual<uint64_t>(1, refiner.Counters().refined);
+				Assert::AreEqual<uint64_t>(0, refiner.Counters().fellBack);
+			}
+
+			// Armed seam: force Compose(p, Si, &composeOk) to fail normalisation (h[8] = 0, ok = false).
+			{
+				CameraTestSeams::ScopedComposeFail guard(CameraTestSeams::ComposeFailSite::PhotometricRefineStep, 1);
+				const RefineResult r = refiner.Refine(initial, lv, pic, noMask);
+				Assert::AreEqual(0, CameraTestSeams::ComposeFailArmed(CameraTestSeams::ComposeFailSite::PhotometricRefineStep).load(std::memory_order_acquire),
+					L"PhotometricRefineStep seam must be consumed exactly once");
+				Assert::IsTrue(r.status == RefineStatus::FellBackDegenerate, L"compose failure must report FellBackDegenerate");
+				Assert::IsTrue(AllFiniteParams(r.model), L"returned model must be finite");
+				Assert::IsTrue(r.model.type == initial.type, L"returned model type must match input");
+				for (int i = 0; i < 9; ++i)
+					Assert::AreEqual(initial.h[i], r.model.h[i], L"FellBackDegenerate must preserve input model bit-identically");
+				Assert::AreEqual<uint64_t>(1, refiner.Counters().refined, L"refined counter must not increment");
+				Assert::AreEqual<uint64_t>(1, refiner.Counters().fellBack, L"fellBack counter must increment once");
+			}
+
+			// Disarmed: next refine succeeds cleanly.
+			{
+				const RefineResult r = refiner.Refine(initial, lv, pic, noMask);
+				Assert::IsTrue(r.status == RefineStatus::Refined, L"disarmed refine must succeed again");
+				Assert::AreEqual<uint64_t>(2, refiner.Counters().refined);
+			}
+		}
+
+		// Seams 5 & 6 isolation + end-to-end safety: arming ONLY PhotometricRefineStep inside Fitter::Fit() makes R3
+		// report FellBack / FellBackDegenerate while leaving GlobalModelFit's backward inverse check unaffected and the
+		// returned CameraMotion valid, finite, and matching the clean vector fit.
+		TEST_METHOD(FitterWithPhotometricComposeFailureKeepsCleanVectorModel)
+		{
+			using namespace CameraModel;
+			const int w = 640, h = 320;
+			const double s = 1.0;
+			const std::vector<R3Scenes::Wave> waves = R3Scenes::MakeWaves(99, s, 45.0);
+			const std::vector<uint8_t> imgA = R3Scenes::To8(R3Scenes::RenderD(w, h, s, { R3Scenes::Shifted(waves, 0.0, 0.0) }, 1.0, 0.0, 301, 0.0));
+			const std::vector<uint8_t> imgB = R3Scenes::To8(R3Scenes::RenderD(w, h, s, { R3Scenes::Shifted(waves, 8.0, 0.0) }, 1.0, 0.0, 302, 0.0));
+			const CameraSynth::Field biasedField = MakePanField640x320(8.4, 0.0, true);
+
+			Fitter fitter;
+			PairInput in = biasedField.Input(1.0 / 24.0, 1);
+			PhotometricInput pi;
+			pi.luma = R3Scenes::View8(imgA, imgB, w, h, s);
+			in.photometric = &pi;
+
+			CameraTestSeams::ScopedComposeFail guard(CameraTestSeams::ComposeFailSite::PhotometricRefineStep, 1);
+			const CameraMotion r = fitter.Fit(in);
+			Assert::AreEqual(0, CameraTestSeams::ComposeFailArmed(CameraTestSeams::ComposeFailSite::PhotometricRefineStep).load(std::memory_order_acquire),
+				L"PhotometricRefineStep seam must be consumed exactly once");
+
+			Assert::IsTrue(pi.outcome == PhotometricOutcome::FellBack, L"photometric compose failure must report FellBack outcome");
+			Assert::IsTrue(pi.result.status == RefineStatus::FellBackDegenerate, L"underlying refine status must be FellBackDegenerate");
+			Assert::IsTrue(r.valid && r.reason == Reason::Ok, L"GlobalModelFit inverse check must remain unaffected (site isolation)");
+			Assert::IsTrue(r.signals.haveBackward && r.signals.inverse > kControlInverseScoreMin,
+				L"backward inverse check must still succeed");
+			Assert::IsTrue(AllFiniteParams(r.params), L"returned record params must be finite");
+			Assert::AreEqual(1.0, r.params.h[8], L"returned record params h[8] must be 1.0");
+			Assert::IsTrue(std::fabs(r.params.h[2] - 8.4) < kControlVectorPanTolPx,
+				L"record must keep the clean vector model pan (8.4 px)");
 		}
 	};
 }

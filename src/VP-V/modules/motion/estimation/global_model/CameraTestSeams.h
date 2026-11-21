@@ -137,5 +137,56 @@ namespace CameraModel
 			ScopedVerdictCallCounter(const ScopedVerdictCallCounter&) = delete;
 			ScopedVerdictCallCounter& operator=(const ScopedVerdictCallCounter&) = delete;
 		};
+
+		// ---- Seams 5 & 6: GEM-136 compose-failure sites (GlobalModelFit inverse check & PhotometricRefine step) ---------
+		// Mirrors repair/CameraPassFailSeam.h: arm one site to deterministically fail the next N Compose() normalisations
+		// at that call site. Unarmed in production: one relaxed atomic load reading 0 (zero behaviour change).
+		enum class ComposeFailSite : int
+		{
+			GlobalModelFitInverse = 0,   // GlobalModelFit.cpp: Finish() backward inverse check Compose(B, model, &composeOk)
+			PhotometricRefineStep,       // PhotometricRefine.cpp: Gauss-Newton update Compose(p, Si, &composeOk)
+			Count
+		};
+
+		inline std::atomic<int>& ComposeFailArmed(ComposeFailSite s)
+		{
+			static std::atomic<int> armed[static_cast<int>(ComposeFailSite::Count)];
+			return armed[static_cast<int>(s)];
+		}
+
+		inline void FailNextCompose(ComposeFailSite s, int count = 1)
+		{
+			ComposeFailArmed(s).store(count, std::memory_order_release);
+		}
+
+		inline bool TakeComposeFail(ComposeFailSite s)
+		{
+			std::atomic<int>& a = ComposeFailArmed(s);
+			int n = a.load(std::memory_order_relaxed);
+			while (n > 0)
+				if (a.compare_exchange_weak(n, n - 1, std::memory_order_acq_rel, std::memory_order_relaxed))
+					return true;
+			return false;
+		}
+
+		class ScopedComposeFail
+		{
+		public:
+			explicit ScopedComposeFail(ComposeFailSite site, int count = 1)
+				: m_site(site)
+				, m_prev(ComposeFailArmed(site).exchange(count, std::memory_order_acq_rel))
+			{
+			}
+			~ScopedComposeFail()
+			{
+				ComposeFailArmed(m_site).store(m_prev, std::memory_order_release);
+			}
+			ScopedComposeFail(const ScopedComposeFail&) = delete;
+			ScopedComposeFail& operator=(const ScopedComposeFail&) = delete;
+
+		private:
+			ComposeFailSite m_site;
+			int m_prev = 0;
+		};
 	}
 }

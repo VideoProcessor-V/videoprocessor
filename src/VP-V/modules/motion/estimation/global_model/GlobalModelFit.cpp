@@ -840,7 +840,13 @@ namespace CameraModel
 							// GEM-136 AMEND-2: a composition that cannot be normalised fails the inverse check (devTerm stays 0, so
 							// sg.inverse is 0 and the record's reason is InverseMismatch: counted and shown like any refusal).
 							bool composeOk = true;
-							const Params BM = Compose(B, model, &composeOk);
+							Params BM = Compose(B, model, &composeOk);
+							// Test-only seam (CameraTestSeams.h, GEM-136): unarmed = one relaxed load reading 0, zero behaviour change.
+							if (CameraTestSeams::TakeComposeFail(CameraTestSeams::ComposeFailSite::GlobalModelFitInverse))
+							{
+								BM.h[8] = 0.0;
+								composeOk = false;
+							}
 							if (composeOk)
 							{
 								const double dev = MaxCornerDifference(BM, IdentityParams(model.type), f.pic);

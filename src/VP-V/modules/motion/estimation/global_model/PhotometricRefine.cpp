@@ -7,6 +7,7 @@
 // normal equations of  gain * T(W(x; d)) + offset - I(W(x; p))  are accumulated in a fixed order in double, solved
 // by Gaussian elimination, and the model is updated  W(p) <- W(p) o W(d)^-1.  See PhotometricRefine.h.
 #include "PhotometricRefine.h"
+#include "CameraTestSeams.h"
 
 #include <algorithm>
 #include <cmath>
@@ -359,6 +360,12 @@ namespace CameraModel
 				}
 				bool composeOk = true;
 				Params next = Compose(p, Si, &composeOk);
+				// Test-only seam (CameraTestSeams.h, GEM-136): unarmed = one relaxed load reading 0, zero behaviour change.
+				if (CameraTestSeams::TakeComposeFail(CameraTestSeams::ComposeFailSite::PhotometricRefineStep))
+				{
+					next.h[8] = 0.0;
+					composeOk = false;
+				}
 				next.type = model.type;
 				if (!composeOk || !ParamsFinite(next))   // GEM-136 AMEND-2: an unnormalisable step takes the FellBackDegenerate exit
 				{
