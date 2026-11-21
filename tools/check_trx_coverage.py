@@ -439,9 +439,10 @@ def render(rep):
 
 # ---------------------------------------------------------------- selftest
 
-def _fixture(tests, counters=True, outcome="Completed", extra=""):
+def _fixture(tests, counters=True, outcome="Completed", extra="", total=None):
     """tests: list of (class, method, outcome or None for definition only, stdout).
-    outcome: the ResultSummary outcome; extra: extra Counters attributes (e.g. 'aborted="1"')."""
+    outcome: the ResultSummary outcome; extra: extra Counters attributes (e.g. 'aborted="1"');
+    total: the Counters total (default: the number of result rows, = executed)."""
     defs, res = [], []
     for i, (cls, meth, toc, out) in enumerate(tests):
         tid = "00000000-0000-0000-0000-%012d" % i
@@ -454,7 +455,8 @@ def _fixture(tests, counters=True, outcome="Completed", extra=""):
             res.append('<UnitTestResult testId="%s" testName="%s" outcome="%s">%s</UnitTestResult>'
                        % (tid, meth, toc, body))
     summary = ('<ResultSummary outcome="%s"><Counters total="%d" executed="%d" passed="%d" failed="0" %s/>'
-               '</ResultSummary>' % (outcome, len(res), len(res), len(res), extra)) if counters else ""
+               '</ResultSummary>' % (outcome, len(res) if total is None else total, len(res), len(res), extra)) \
+        if counters else ""
     return ('<?xml version="1.0" encoding="utf-8"?>\n<TestRun xmlns="http://microsoft.com/schemas/VisualStudio/'
             'TeamTest/2010"><Results>%s</Results><TestDefinitions>%s</TestDefinitions>%s</TestRun>'
             % ("".join(res), "".join(defs), summary))
@@ -525,6 +527,9 @@ def selftest_cases():
          "Counters aborted=1"),
         ("notExecuted counter", "FullyQualifiedName~PairTimingTests", [_fixture([B], extra='notExecuted="3" ')], 1,
          "Counters notExecuted=3"),
+        # Only total != executed marks this run partial (no other counter, outcome Completed, all rows Passed).
+        ("total above executed", "FullyQualifiedName~PairTimingTests", [_fixture([B], total=4)], 1,
+         "Counters total=4 != executed=1"),
         # S4: the exclusion must really exclude, and matching is case-insensitive.
         ("exclusion removes a not-executed test",
          "FullyQualifiedName~VectorEngineTests&FullyQualifiedName!~Late",
