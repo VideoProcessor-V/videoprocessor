@@ -3066,6 +3066,35 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(memo->HasGpuDevice(), L"the new renderer's device is still attached after the Begin");
 		}
 
+		// GF-P2b S1: a live switch to the Original pathway removes the renderer's memo host (nothing of the skeleton is left to seal or show);
+		// switching back makes a NEW memo.
+		TEST_METHOD(ALiveSwitchToTheOriginalPathwayRemovesTheMemoAndBackMakesANewOne)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			const Vpv::Skeleton::FrameMemo before = rig.sk.MemoFor(rig.Host(), 5);
+			Assert::IsTrue(before.Valid(), L"a memo with the lane on");
+			const std::shared_ptr<VpSkeleton::SkeletonMemo> oldMemo = before.memo;
+			const uint64_t sealsBefore = oldMemo->Seals();
+			rig.Life(RE::Lifecycle::SettingsApplied, 1);   // code 1: the Original pathway
+			Assert::IsNull(rig.sk.MemoOf(rig.Host()), L"the memo host is gone");
+			Assert::IsFalse(rig.sk.MemoFor(rig.Host(), 5).Valid(), L"no memo for a frame");
+			rig.Frame(5);
+			Assert::AreEqual(sealsBefore, oldMemo->Seals(), L"a Begin does not seal the old memo");
+			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+			Assert::IsFalse(Has(fb, "skeleton acquire"), L"no memo line");
+			Assert::IsFalse(Has(fb, "memo window"));
+			Assert::IsFalse(Has(fb, "skeleton_queue_window"), L"no window line");
+			rig.Life(RE::Lifecycle::SettingsApplied, 0);   // back to the VP-V pathway
+			rig.Frame(6);
+			const Vpv::Skeleton::FrameMemo after = rig.sk.MemoFor(rig.Host(), 7);
+			Assert::IsTrue(after.Valid(), L"a memo again");
+			Assert::IsTrue(after.memo.get() != oldMemo.get(), L"a NEW memo, not the old one");
+		}
+
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
 		{
 			Rig rig(Lane("on"));
