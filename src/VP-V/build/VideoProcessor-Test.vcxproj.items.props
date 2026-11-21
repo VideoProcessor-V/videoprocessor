@@ -12,6 +12,7 @@
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvMathTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvDisplayMappingSlotTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DmCurveTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\appearance\tests\Cam16ModelTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\FileSideDataTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SceneDescriptorTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\ContentIntentTests.cpp" />
