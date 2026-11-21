@@ -571,7 +571,9 @@ namespace VideoProcessorTest
 		}
 
 		// GF-P3 MUST-10: a started module destroyed without Stop withdraws its declaration (no "LED drive" demand or owner key
-		// outlives the module).
+		// outlives the module). A regression guard: the destructor's Stop() already withdraws for a started module, so this pins
+		// that the withdrawal is not lost, while the destructor's own unconditional WithdrawSceneDemand() is what covers a module
+		// that never started (ANeverStartedModuleDeclaresNothingAndLeavesNoDemand).
 		TEST_METHOD(TheDestructorWithdrawsADeclaration)
 		{
 			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),
