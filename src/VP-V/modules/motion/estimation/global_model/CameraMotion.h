@@ -117,6 +117,8 @@ namespace CameraModel
 		// Dynamic-texture detector statistics (Config::dynTexture; 0 otherwise): share of trusted blocks that disagree with the
 		// camera model, and the temporal / spatial incoherence of that disagreement.
 		double dynShare = 0, dynTemporal = 0, dynSpatial = 0, dynField = 0;
+		// CE-WATER-C1 (Config::waterBlockExclude; 0 when off): share of evaluated blocks excluded as incoherent dynamic texture / water.
+		double waterExcludedShare = 0;
 		// Static-camera hypothesis statistics (Config::staticCamera; 0 otherwise): share of the trusted border-ring blocks the
 		// identity model explains, and the share the fitted model explains.
 		double staticRing = 0, staticFit = 0;

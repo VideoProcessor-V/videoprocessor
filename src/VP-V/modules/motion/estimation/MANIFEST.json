@@ -176,6 +176,7 @@
     "src/VP-V/modules/motion/estimation/tests/P8FillRuleTests.cpp",
     "src/VP-V/modules/motion/estimation/tests/CameraPhaseInterpTests.cpp",
     "src/VP-V/modules/motion/estimation/tests/CameraSmootherTests.cpp",
+    "src/VP-V/modules/motion/estimation/tests/WaterBlockExclusionTests.cpp",
     "src/VP-V/modules/motion/estimation/tests/GuidanceSchedulingTests.cpp",
     "src/VP-V/modules/motion/estimation/tests/GuideProductTests.cpp",
     "src/VP-V/modules/motion/estimation/tests/GuidanceGovernorTests.cpp",
