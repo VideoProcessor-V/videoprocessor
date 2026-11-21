@@ -302,6 +302,7 @@ namespace MotionAhead
 		engineReady = false;
 		sizeW = sizeH = 0;
 		consecutiveFailures = 0;
+		onTimeRecoveryRun = 0;
 		requestRunning = requestOwnsGeneration = false;
 		lastJobMs = 0;
 		adoptOverWalk = requestResetHints = false;
@@ -404,6 +405,38 @@ namespace MotionAhead
 		}
 	}
 
+	void Producer::UpdateBehindLocked(bool wasLate, double serviceMs)
+	{
+		const double period = sourcePeriodMs.load(std::memory_order_acquire);
+		stats.periodMs = period;
+		if (serviceMs > 0.0)
+			stats.serviceEmaMs = stats.serviceEmaMs == 0.0 ? serviceMs : (0.8 * stats.serviceEmaMs + 0.2 * serviceMs);
+		if (wasLate)
+		{
+			++stats.late;
+			onTimeRecoveryRun = 0;
+			if (period > 0.0 && stats.serviceEmaMs > period)
+				stats.behind = true;
+		}
+		else
+		{
+			if (period <= 0.0)
+			{
+				stats.behind = false;
+				onTimeRecoveryRun = 0;
+			}
+			else if (stats.serviceEmaMs <= period)
+			{
+				if (++onTimeRecoveryRun >= 8)
+					stats.behind = false;
+			}
+			else
+			{
+				onTimeRecoveryRun = 0;
+			}
+		}
+	}
+
 	void Producer::BackWorker()
 	{
 		Pipeline::BackQueue<BackItem>::Entry entry;
@@ -467,6 +500,7 @@ namespace MotionAhead
 					stats.lastPairMs = item.stage.serviceMs;
 					stats.pairMsSum += stats.lastPairMs;
 					stats.RecordStage(item.stage);
+					UpdateBehindLocked(false, item.stage.serviceMs);
 				}
 			}
 			else
@@ -611,7 +645,12 @@ namespace MotionAhead
 						DebugLog::Log("Motion ahead: %llu look-ahead job(s) dropped while on-demand requests were served", n);
 				}
 			}
-			jobs.push_back(Job{ sequence, generation, luma, breakBefore, std::chrono::steady_clock::now() });
+			const auto submitNow = std::chrono::steady_clock::now();
+			const int lead = pendingLead.load(std::memory_order_acquire);
+			const int depth = pendingDepth.load(std::memory_order_acquire);
+			const int activeLead = lead > 0 ? lead : depth;
+			const auto deadline = DeadlineFor(submitNow, activeLead, sourcePeriodMs.load(std::memory_order_acquire));
+			jobs.push_back(Job{ sequence, generation, luma, breakBefore, submitNow, deadline });
 		}
 		lastSubmitted.store(sequence, std::memory_order_release);
 		wake.notify_all();
@@ -965,8 +1004,19 @@ namespace MotionAhead
 		if (!WaitForLumaSlotFree(texIndex))
 			return false;
 		context->UpdateSubresource(lumaTex[texIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(halfW), 0);
+		// Slice 16 D1 (refs/105 s3.4): if this core job is already past its deadline (frame already shown),
+		// skip the NVOF pair run (counted `late`), keep its luma in the ring so (N, N+1) survives, and reset
+		// temporal hints so the next pair runs non-continuous. Guarded by historyBehindRender (owner item 1).
+		const bool pastDeadline = !historyBehindRender.load(std::memory_order_acquire) &&
+			PastDeadline(started, job.deadline);
 		bool ok = true;
-		if (prevSlot != EngineLumaRing::kNoSlot)
+		if (pastDeadline)
+		{
+			hintSequence = UINT64_MAX;
+			std::lock_guard<std::mutex> lock(mutex);
+			UpdateBehindLocked(true, 0.0);
+		}
+		else if (prevSlot != EngineLumaRing::kNoSlot)
 		{
 			const int prev = prevSlot;
 			// The temporal hints only when the engine's last pair ended at this pair's first frame
@@ -1706,6 +1756,7 @@ namespace MotionAhead
 		engineReady = false;
 		sizeW = sizeH = 0;
 		consecutiveFailures = 0;
+		onTimeRecoveryRun = 0;
 		requestRunning = requestOwnsGeneration = false;
 		lastJobMs = 0;
 		adoptOverWalk = requestResetHints = false;
@@ -1746,6 +1797,26 @@ namespace MotionAhead
 			NoteRingMiss(PairStartLostText());   // Process's FindPairStart(...).Lost() path: counted, named, no pair
 			pairs = false;
 		}
+		const bool pastDeadline = !historyBehindRender.load(std::memory_order_acquire) &&
+			PastDeadline(started, job.deadline);
+		if (pastDeadline)
+		{
+			hintSequence = UINT64_MAX;
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				++stats.frames;
+				UpdateBehindLocked(true, 0.0);
+			}
+			// Keep luma/chain state so (N, N+1) survives on the next frame.
+			havePrevious = true;
+			previousSequence = job.sequence;
+			previousGeneration = job.generation;
+			return true;
+		}
+		const bool continuous = temporalHintsForTest.load(std::memory_order_acquire) &&
+			hintSequence == previousSequence && hintGeneration == job.generation;
+		if (pairs && testEngine->onPairContinuous)
+			testEngine->onPairContinuous(job.sequence, continuous);
 		const auto engineStart = std::chrono::steady_clock::now();
 		const bool ok = testEngine->job ? testEngine->job(job.sequence, job.generation) : true;
 		const auto engineEnd = std::chrono::steady_clock::now();
@@ -1765,6 +1836,7 @@ namespace MotionAhead
 			stats.lastPairMs = stage.serviceMs;
 			stats.pairMsSum += stage.serviceMs;
 			stats.RecordStage(stage);
+			UpdateBehindLocked(false, stage.serviceMs);
 		}
 		else
 		{
@@ -1774,7 +1846,15 @@ namespace MotionAhead
 		havePrevious = true;
 		previousSequence = job.sequence;
 		previousGeneration = job.generation;
-		hintSequence = UINT64_MAX;
+		if (ok && pairs)
+		{
+			hintSequence = job.sequence;
+			hintGeneration = job.generation;
+		}
+		else
+		{
+			hintSequence = UINT64_MAX;
+		}
 		return ok;
 	}
 }

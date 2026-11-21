@@ -315,10 +315,12 @@ namespace VpMotion
 		const MotionAhead::Decision& ahead = plan.ahead;
 		motionAheadDepth.store(plan.storedDepth, std::memory_order_release);
 		motionAheadConfigured.store(plan.storedConfigured, std::memory_order_release);
-		if (motionProducer)   // fixed-constant batch B3/B4 2026-10-18
+		if (motionProducer)   // fixed-constant batch B3/B4 2026-10-18; Slice 16 D1 measured period hand-over
 		{
 			motionProducer->SetDepth(ahead.configured);
 			motionProducer->SetGeneralRates(in.generalRateFixes);
+			const double measuredPeriodMs = (in.sourceHz > 0.0 && std::isfinite(in.sourceHz)) ? (1000.0 / in.sourceHz) : 0.0;
+			motionProducer->SetSourcePeriodMs(measuredPeriodMs);
 		}
 		if (plan.disengage)
 			motionAheadEngaged = false;   // no frames collected below: no stale engagement (audit 2026-10-16)
@@ -385,6 +387,11 @@ namespace VpMotion
 				motionLeadCapShown = false;
 				host.SyncFallback(FallbackCatalog::MotionLookaheadCapped(false, MotionAhead::kMaxLead));
 			}
+			if (motionProducerBehindShown)   // Slice 16 D1: an engaged behind entry never outlives vector_demand
+			{
+				motionProducerBehindShown = false;
+				host.SyncFallback(FallbackCatalog::VectorProducerBehind(false, false, 0.0, 0.0));
+			}
 			return;
 		}
 		// What decides the output dither's want, logged when it changes (a dither that runs but is not served
@@ -421,18 +428,30 @@ namespace VpMotion
 			host.PublishStatus(true);
 		}
 		// The look-ahead stores nothing for this size while pairs are submitted: sustained = visible.
+		MotionAhead::Producer::Stats producerStats;
+		bool producerActive = false;
 		if (motionProducer && motionProducer->Running() && vectorDemand.producer)
 		{
+			producerActive = true;
 			const uint64_t last = motionProducer->LastSubmitted();
 			if (vectorProducerFirstSubmit == 0 && last != 0) vectorProducerFirstSubmit = last;
-			const auto ps = motionProducer->GetStats();
-			if (ps.pairs > 0) vectorProducerSkipSustained = false;
+			producerStats = motionProducer->GetStats();
+			if (producerStats.pairs > 0) vectorProducerSkipSustained = false;
 			else if (vectorProducerFirstSubmit != 0 && last >= vectorProducerFirstSubmit + 48) vectorProducerSkipSustained = true;
 		}
 		else
 		{
 			vectorProducerFirstSubmit = 0;
 			vectorProducerSkipSustained = false;
+		}
+		// Slice 16 D1: sustained late > 0 with service EMA > measured period is visible (synced on change only,
+		// outside VectorEngineFallbackSync so its exact 5-entry group count stays unchanged).
+		const bool behindShown = producerActive && producerStats.behind;
+		if (behindShown != motionProducerBehindShown)
+		{
+			motionProducerBehindShown = behindShown;
+			host.SyncFallback(FallbackCatalog::VectorProducerBehind(producerActive, behindShown,
+				producerStats.serviceEmaMs, producerStats.periodMs, producerStats.late));
 		}
 		VectorEngineFallbackSync::Sync(*this, host);
 		if (vectorDemand.mode != VectorDemand::Mode::Off && (vectorStatsTick == 0 || now - vectorStatsTick >= 5000))
@@ -1606,6 +1625,14 @@ namespace VpMotion
 			const MotionAhead::Producer::RequestStats s = motionProducer->GetRequestStats();
 			if (s.ringMisses != 0)
 				ring = "engine-luma ring misses " + std::to_string(s.ringMisses) + " (last: " + s.lastRingMiss + ")";
+			const MotionAhead::Producer::Stats ps = motionProducer->GetStats();
+			if (ps.behind)
+			{
+				char buf[160];
+				std::snprintf(buf, sizeof(buf), "vector producer: behind (service %.1f ms > period %.1f ms; late %llu)",
+					ps.serviceEmaMs, ps.periodMs, ps.late);
+				ring = ring.empty() ? std::string(buf) : ring + "; " + buf;
+			}
 		}
 		// BBP-A-COUNTS-CTRLALTD: the P2 CPU form's declines (Config status / Ctrl+Alt+D), shown with or without a producer.
 		const std::string p2 = P2CpuFormStatusSegment();

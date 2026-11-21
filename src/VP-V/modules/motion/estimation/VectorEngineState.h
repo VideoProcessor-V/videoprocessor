@@ -67,6 +67,7 @@ namespace VpMotion
 		// R3: the Ctrl+I info text (the designed state at the ceiling) and the fallback entry (the depth asks more), MotionAhead::LeadCapState.
 		MotionAhead::LeadCapState motionLeadCap;
 		bool motionLeadCapShown = false;   // the "motion_lookahead_capped" entry as last synced (synced on change only)
+		bool motionProducerBehindShown = false;   // Slice 16 D1: "vector producer behind" entry as last synced
 
 		// ---- W2-C1 (B9): the one motion-engine state (VectorDemand::MotionEngineStatus; IVectorEngine::State / Work) ----------
 		// Derived in UpdateVectorEngine from this frame's decision and re-derived at the end of PlanProducer, so the published state

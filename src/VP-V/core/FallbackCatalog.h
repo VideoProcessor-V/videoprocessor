@@ -451,6 +451,22 @@ namespace FallbackCatalog
 			(error.empty() ? std::string() : ": " + error) + "; restarting with back-off (stop " + std::to_string(stops) + ")");
 	}
 
+	// Slice 16 D1 (refs/105 s3.4): the optical-flow producer is sustained behind the measured source period
+	// (late > 0 with service EMA > period). Visible on Ctrl+I, Config status, Ctrl+Alt+D, and one-time notice;
+	// never silent and never steps down the NVOF preset (doc 91 C 07:45).
+	inline Decision VectorProducerBehind(bool wanted, bool behind, double serviceMs, double periodMs, unsigned long long lateSkips = 0)
+	{
+		if (!wanted || !behind)
+			return Released("vector producer behind");
+		char buf[192];
+		if (lateSkips > 0)
+			std::snprintf(buf, sizeof(buf), "vector producer: behind (service %.1f ms > period %.1f ms; %llu late skipped, luma kept)",
+				serviceMs, periodMs, lateSkips);
+		else
+			std::snprintf(buf, sizeof(buf), "vector producer: behind (service %.1f ms > period %.1f ms)", serviceMs, periodMs);
+		return Engaged("vector producer behind", buf);
+	}
+
 	// ---- look-ahead workers (bug hunt 31 H3) ----------------------------------------------------
 	// A look-ahead batch threw (the motion-ahead hand-off, the source-resolution look-ahead): its
 	// frames went without that work. Engaged at the failure with the exception text, released after

@@ -282,6 +282,12 @@ namespace MotionAhead
 		// before RunQueueWalk (renderer :31352) submits that pass's frames: the capacity always covers the frames handed over.
 		void SetDepth(int depth) { pendingDepth.store(depth, std::memory_order_release); UpdatePendingCapacity(); }
 		void SetLead(int lead) { pendingLead.store(lead, std::memory_order_release); UpdatePendingCapacity(); }
+		// Slice 16 D1 (refs/105 s3.4): measured source frame period in ms (0 = unknown -> no deadline, never skip).
+		void SetSourcePeriodMs(double periodMs) { sourcePeriodMs.store(periodMs > 0.0 && std::isfinite(periodMs) ? periodMs : 0.0, std::memory_order_release); }
+		double SourcePeriodMs() const { return sourcePeriodMs.load(std::memory_order_acquire); }
+		// Owner item 1 guard (105 O5): while any reader declares P2 history behind the render, do not skip late core pairs.
+		void SetHistoryBehindRender(bool needed) { historyBehindRender.store(needed, std::memory_order_release); }
+		bool HistoryBehindRender() const { return historyBehindRender.load(std::memory_order_acquire); }
 		size_t PendingCapacity() const { return maxPendingJobs.load(std::memory_order_acquire); }
 		// general_rate_fixes for the engine's global vote range (FlowVoteRange).
 		void SetGeneralRates(bool on) { generalRates.store(on, std::memory_order_release); }
@@ -327,6 +333,7 @@ namespace MotionAhead
 			std::function<bool(uint64_t sequence, uint64_t generation)> job;
 			std::function<bool(const OnDemand::PairRequest& request, OnDemand::Mode mode, Flow& flow)> request;
 			std::function<bool(uint64_t sequence, uint64_t generation)> lostPairStart;
+			std::function<void(uint64_t sequence, bool continuous)> onPairContinuous;
 		};
 		bool StartForTest(std::shared_ptr<TestEngine> engine);
 
@@ -354,9 +361,12 @@ namespace MotionAhead
 		// extrasMs: the trust extras of the last pair (global, cost, consistency) on the worker.
 		struct Stats
 		{
-			unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0;
+			unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0, late = 0;
 			double lastPairMs = 0.0, lumaMs = 0.0, extrasMs = 0.0;
 			double pairMsSum = 0.0; /* SK-MV: the sum of all pair times, for the standing-cost line */
+			double serviceEmaMs = 0.0;   // Slice 16 D1: EMA of pair service time (ms)
+			double periodMs = 0.0;       // Slice 16 D1: last measured source period (ms; 0 = unknown)
+			bool behind = false;         // Slice 16 D1: sustained late > 0 with serviceEmaMs > periodMs
 			StageSample lastStage;
 			std::array<StageSample, kStageRingSize> stageRing{};
 			size_t stageCount = 0;
@@ -407,6 +417,7 @@ namespace MotionAhead
 			AnalysisLumaSource luma;
 			bool breakBefore = false;
 			std::chrono::steady_clock::time_point submitTime{};
+			std::chrono::steady_clock::time_point deadline{};
 		};
 		void Worker();
 		bool Process(const Job& job);
@@ -525,6 +536,10 @@ namespace MotionAhead
 		std::atomic<uint64_t> lastSubmitted{ 0 };
 		std::atomic<size_t> maxPendingJobs{ 6 };
 		std::atomic<int> pendingDepth{ 0 }, pendingLead{ 0 };   // B1: the inputs of maxPendingJobs
+		std::atomic<double> sourcePeriodMs{ 0.0 };              // D1: measured source frame period in ms (0 = unknown)
+		std::atomic<bool> historyBehindRender{ false };         // D1 owner guard: keep computing late pairs for backward P2 readers
+		unsigned onTimeRecoveryRun = 0;                         // under mutex: consecutive on-time pairs to clear `stats.behind`
+		void UpdateBehindLocked(bool wasLate, double serviceMs);
 		void UpdatePendingCapacity()
 		{
 			const int d = pendingDepth.load(std::memory_order_acquire), l = pendingLead.load(std::memory_order_acquire);

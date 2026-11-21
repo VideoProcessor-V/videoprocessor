@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 
@@ -207,4 +208,32 @@ namespace MotionAhead
 	// the larger of the depth and the lead (Producer::SetDepth / SetLead), so a walk that hands it the
 	// whole queue at an engage (up to lead + 1 frames in one pass) drops nothing.
 	inline size_t PendingJobsFor(int depth) { return (std::max)(size_t{ 6 }, QueueFramesFor(depth) + 1); }
+
+	// Slice 16 D1 (refs/105 s3.4): per-job deadline from the MEASURED source frame period and the capped lead
+	// (always clamped to kMaxLead, never kRingMaxLead). Unknown period (<= 0 or non-finite) returns a zero
+	// time_point meaning "no deadline -> never skip".
+	inline double DeadlineBudgetMs(int lead, double periodMs)
+	{
+		if (!(periodMs > 0.0) || !std::isfinite(periodMs))
+			return 0.0;
+		const int cappedLead = (std::max)(1, (std::min)(kMaxLead, lead));
+		return static_cast<double>(cappedLead) * periodMs;
+	}
+
+	template <class TimePoint>
+	inline TimePoint DeadlineFor(TimePoint submit, int lead, double periodMs)
+	{
+		const double budgetMs = DeadlineBudgetMs(lead, periodMs);
+		if (!(budgetMs > 0.0))
+			return TimePoint{};
+		const auto delta = std::chrono::duration_cast<typename TimePoint::duration>(
+			std::chrono::duration<double, std::milli>(budgetMs));
+		return submit + delta;
+	}
+
+	template <class TimePoint>
+	inline bool PastDeadline(TimePoint now, TimePoint deadline)
+	{
+		return deadline.time_since_epoch().count() != 0 && now > deadline;
+	}
 }
