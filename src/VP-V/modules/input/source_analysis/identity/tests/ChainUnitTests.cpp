@@ -1940,12 +1940,15 @@ namespace Tests
 			const Axes& a = Native(10.0, 1001u, 10);
 			DescaleVerifier v1;
 			DescaleVerifier v2;
-			ProbeResult p1;
-			ProbeResult p2;
-			PowerProbe::Run(v1, a.v, 0.29, 1.0, ProbeSettings(), p1);
-			PowerProbe::Run(v2, a.v, 0.29, 1.0, ProbeSettings(), p2);
-			PowerProbe::Run(v1, a.v, 0.29, 1.0, ProbeSettings(), p2);   // warm cache
-			Assert::IsTrue(std::memcmp(&p1.stat, &p2.stat, sizeof(double)) == 0 && p1.gatedLines == p2.gatedLines && p1.seen == p2.seen);
+			ProbeResult p1, p2, p3;
+			Assert::IsTrue(PowerProbe::Run(v1, a.v, 0.29, 1.0, ProbeSettings(), p1), L"first cold probe must succeed");
+			Assert::IsTrue(PowerProbe::Run(v2, a.v, 0.29, 1.0, ProbeSettings(), p2), L"second cold probe must succeed");
+			Assert::IsTrue(PowerProbe::Run(v1, a.v, 0.29, 1.0, ProbeSettings(), p3), L"warm cache probe must succeed");
+			Assert::IsTrue(p1.ran && p2.ran && p3.ran, L"all three probes must have run");
+			Assert::IsTrue(std::memcmp(&p1.stat, &p2.stat, sizeof(double)) == 0 && p1.gatedLines == p2.gatedLines && p1.seen == p2.seen,
+				L"cold vs cold probes must match identically");
+			Assert::IsTrue(std::memcmp(&p1.stat, &p3.stat, sizeof(double)) == 0 && p1.gatedLines == p3.gatedLines && p1.seen == p3.seen,
+				L"cold vs warm cache probes must match identically");
 		}
 	};
 
