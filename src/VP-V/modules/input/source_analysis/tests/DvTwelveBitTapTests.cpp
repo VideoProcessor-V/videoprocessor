@@ -19,8 +19,10 @@
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>
 #include <VP-V/tests/SyntheticAnalysisFrames.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -38,13 +40,15 @@ namespace DvTwelveBitTapTestsNs
 	{
 		std::vector<uint8_t> bytes;
 		AnalysisLumaSource source;
-		explicit Ramp(bool fullRange)
+		// Pixel `code` carries intensity min(code + offset, 4095): distinct offsets give distinct ramps.
+		explicit Ramp(bool fullRange, uint32_t offset = 0)
 		{
 			const int width = 64, height = 64;
 			bytes.assign(static_cast<size_t>(width) * height * 4, 0);
 			for (uint32_t code = 0; code < 4096u; ++code)
 			{
-				const uint32_t word = ((code >> 4) << 10) | (code & 15u);
+				const uint32_t intensity = (std::min)(code + offset, 4095u);
+				const uint32_t word = ((intensity >> 4) << 10) | (intensity & 15u);
 				for (unsigned k = 0; k < 4; ++k) bytes[code * 4 + k] = static_cast<uint8_t>(word >> (24 - 8 * k));
 			}
 			source.format = AnalysisLumaFormat::PackedDolbyVision422;
@@ -58,6 +62,29 @@ namespace DvTwelveBitTapTestsNs
 			source.rowBytes = static_cast<size_t>(width) * 4;
 		}
 	};
+
+	// The production path: Host::OnArrival begins the record, the worker drains it, and the registered sink gets the frame's tap view.
+	struct Delivery
+	{
+		bool got = false;
+		SourceFrameView view;
+	};
+
+	Delivery ThroughHost(const AnalysisLumaSource& in, uint64_t seq)
+	{
+		VpFrameAnalysis::Host host;
+		Delivery d;
+		Tap::Register(&host, [&d](const SourceFrameView& v) { d.got = true; d.view = v; });
+		host.Owner(&host).Configure(true, false, false);
+		host.Worker().Stop();
+		AnalysisLumaSource source = in;
+		VpFrameAnalysis::Host::AttachIfEnabled(source);
+		host.OnArrival(seq, source, FrameAnalysis::Rect{}, 0, false);
+		host.Worker().Drain();
+		Tap::Unregister(&host);
+		host.Configure(false);
+		return d;
+	}
 
 	TEST_CLASS(DvTwelveBitTapTests)
 	{
@@ -168,25 +195,93 @@ namespace DvTwelveBitTapTestsNs
 			Assert::IsFalse(anyTap12, L"no 12-bit decode ran");
 		}
 
-		TEST_METHOD(NonDvSourcesDeliverIdenticalView)
+		// W5: every non-DV source, through the Host, delivers its ten-bit plane unchanged: msbShift 6 and every pixel is the sampler's own
+		// Sample().luma (an independent decode path from the plane the tap reads).
+		TEST_METHOD(NonDvTapThroughHostIsTheTenBitSample)
 		{
+			uint64_t seq = 0;
+			int kinds = 0;
 			for (int k = 0; k < static_cast<int>(Kind::Count); ++k)
 			{
-				if (static_cast<Kind>(k) == Kind::PackedDvR210) continue;
-				Frame frame = Make(static_cast<Kind>(k), 2);
-				SourceFrameView a, b;
-				bool refused = true;
-				Assert::IsTrue(VpFrameAnalysis::SourceViewOf(frame.source, a), KindName(static_cast<Kind>(k)));
-				Assert::IsTrue(VpFrameAnalysis::TapViewOf(frame.source, b, &refused), KindName(static_cast<Kind>(k)));
-				Assert::IsFalse(refused);
-				Assert::AreEqual<int>(a.msbShift, b.msbShift);
-				Assert::AreEqual<uint32_t>(a.width, b.width);
-				Assert::AreEqual<uint32_t>(a.height, b.height);
-				Assert::AreEqual<uint32_t>(a.strideSamples, b.strideSamples);
-				for (size_t i = 0; i < static_cast<size_t>(a.width) * a.height; ++i)
-					if (a.luma[i] != b.luma[i])
-						Assert::Fail(L"a non-DV tap view differs from SourceViewOf");
+				const Kind kind = static_cast<Kind>(k);
+				if (kind == Kind::PackedDvR210) continue;
+				Frame frame = Make(kind, 2);
+				const Delivery d = ThroughHost(frame.source, ++seq);
+				Assert::IsTrue(d.got, KindName(kind));
+				Assert::AreEqual<int>(6, d.view.msbShift, KindName(kind));
+				Assert::AreEqual<uint32_t>(static_cast<uint32_t>(kWidth), d.view.width, KindName(kind));
+				Assert::AreEqual<uint32_t>(static_cast<uint32_t>(kHeight), d.view.height, KindName(kind));
+				int mismatches = 0;
+				for (int y = 0; y < kHeight; ++y)
+					for (int x = 0; x < kWidth; ++x)
+					{
+						AnalysisLumaSample sample;
+						if (!frame.source.Sample(x, y, sample) ||
+							d.view.luma[static_cast<size_t>(y) * d.view.strideSamples + x] != sample.luma)
+							++mismatches;
+					}
+				Assert::AreEqual(0, mismatches, KindName(kind));
+				++kinds;
 			}
+			Assert::AreEqual(static_cast<int>(Kind::Count) - 1, kinds, L"every non-DV kind was checked");
+			VpFrameAnalysis::ReleasePlanePool();
+		}
+
+		// W5: a DV source through the Host delivers the 12-bit law: limited codes are the ramp (4096 distinct values), full-range codes
+		// are FullLumaToLimited12, the ten-bit floor of the Q6 value is the legacy Sample() (within one code for full range); and a
+		// synthetic DV frame at the scene size delivers a 12-bit view whose ten-bit floor is its Sample().
+		TEST_METHOD(DvTapThroughHostIsTheTwelveBitLaw)
+		{
+			using namespace Vpv::AnalysisDomain;
+			uint64_t seq = 100;
+			for (int pass = 0; pass < 2; ++pass)
+			{
+				const bool full = pass == 1;
+				Ramp ramp(full);
+				const Delivery d = ThroughHost(ramp.source, ++seq);
+				Assert::IsTrue(d.got);
+				Assert::AreEqual<int>(4, d.view.msbShift);
+				Assert::AreEqual<uint64_t>(seq, d.view.seq);
+				Assert::AreEqual<uint32_t>(64, d.view.width);
+				Assert::AreEqual<uint32_t>(64, d.view.height);
+				std::set<uint16_t> distinct;
+				int maxDiff = 0;
+				for (uint32_t code = 0; code < 4096u; ++code)
+				{
+					const uint16_t tap = d.view.luma[code];
+					distinct.insert(tap);
+					const uint16_t expect = full ? DvTunnelTapLaw::FullLumaToLimited12(static_cast<int>(code)) : static_cast<uint16_t>(code);
+					Assert::AreEqual<int>(expect, tap, L"the delivered tap is the DvTunnelTapLaw code");
+					AnalysisLumaSample sample;
+					Assert::IsTrue(ramp.source.Sample(static_cast<int>(code % 64), static_cast<int>(code / 64), sample));
+					const int diff = std::abs(static_cast<int>(Floor10FromQ6(d.view.MsbAlign(tap))) - static_cast<int>(sample.luma));
+					if (diff > maxDiff) maxDiff = diff;
+				}
+				if (!full)
+				{
+					Assert::AreEqual<size_t>(4096, distinct.size(), L"limited ramp: 4096 distinct codes");
+					Assert::AreEqual<int>(0, maxDiff, L"limited: the ten-bit floor equals the legacy Sample()");
+				}
+				else
+					Assert::IsTrue(maxDiff <= 1, L"full range: within one code of the legacy Sample()");
+			}
+			Frame frame = Make(Kind::PackedDvR210, 3);
+			const Delivery d = ThroughHost(frame.source, ++seq);
+			Assert::IsTrue(d.got);
+			Assert::AreEqual<int>(4, d.view.msbShift);
+			Assert::AreEqual<uint32_t>(static_cast<uint32_t>(kWidth), d.view.width);
+			Assert::AreEqual<uint32_t>(static_cast<uint32_t>(kHeight), d.view.height);
+			int mismatches = 0;
+			for (int y = 0; y < kHeight; ++y)
+				for (int x = 0; x < kWidth; ++x)
+				{
+					AnalysisLumaSample sample;
+					if (!frame.source.Sample(x, y, sample) ||
+						Floor10FromQ6(d.view.MsbAlign(d.view.luma[static_cast<size_t>(y) * d.view.strideSamples + x])) != sample.luma)
+						++mismatches;
+				}
+			Assert::AreEqual(0, mismatches, L"the ten-bit floor of every 12-bit tap is the legacy Sample()");
+			VpFrameAnalysis::ReleasePlanePool();
 		}
 
 		TEST_METHOD(TwelveBitTapDecodedOncePerFrame)
@@ -356,25 +451,68 @@ namespace DvTwelveBitTapTestsNs
 			Assert::AreEqual<uint64_t>(0, VpFrameAnalysis::DvTapRefusals());
 		}
 
-		// The pooled plane is bounded (12) but a full pool allocates an unpooled plane: a consumer holding many views cannot push
-		// frames into the 10-bit fallback (so no silent downgrade hides behind pool exhaustion).
-		TEST_METHOD(PoolExhaustionNeverForcesTenBitFallback)
+		// W3: the pooled plane is bounded (12) but a full pool allocates an unpooled plane, so a consumer holding many views cannot push
+		// frames into the ten-bit fallback. Forty distinct ramps are held at once: every view keeps its own plane (distinct pointers) and
+		// still reads ITS ramp (a recycled plane would show another frame's codes), and nothing is refused.
+		TEST_METHOD(HeldViewsNeverForceTenBitFallback)
+		{
+			VpFrameAnalysis::ReleasePlanePool();
+			VpFrameAnalysis::ResetDvTapRefusals();
+			std::vector<std::unique_ptr<Ramp>> ramps;
+			std::vector<SourceFrameView> held;
+			std::set<const uint16_t*> planes;
+			for (uint32_t i = 0; i < 40u; ++i)
+			{
+				ramps.emplace_back(new Ramp(false, i));
+				SourceFrameView view;
+				Assert::IsTrue(VpFrameAnalysis::SourceViewOf12(ramps.back()->source, view), L"a view is always obtainable");
+				Assert::AreEqual<int>(4, view.msbShift);
+				planes.insert(view.luma);
+				held.push_back(view);
+			}
+			Assert::AreEqual<size_t>(40, planes.size(), L"every held view has its own plane");
+			int wrong = 0;
+			for (uint32_t i = 0; i < 40u; ++i)
+				for (uint32_t code = 0; code < 4096u; ++code)
+					if (held[i].luma[code] != (std::min)(code + i, 4095u))
+						++wrong;
+			Assert::AreEqual(0, wrong, L"each held view still reads its own ramp");
+			Assert::IsTrue(VpFrameAnalysis::PlanePoolSize() <= 12u, L"the pool stays bounded");
+			Assert::AreEqual<uint64_t>(0, VpFrameAnalysis::DvTapRefusals(), L"no refusal, so no hidden ten-bit fallback");
+			held.clear();
+			VpFrameAnalysis::ReleasePlanePool();
+		}
+
+		// W3: the kept 12-bit views (the source-resolution look-ahead reads a queued frame some frames later) are bounded to half the pool
+		// (six), oldest dropped first, keyed by sequence AND the frame's bytes, and dropped by ReleasePlanePool.
+		TEST_METHOD(SharedViewsAreBoundedAndKeyed)
 		{
 			VpFrameAnalysis::ReleasePlanePool();
 			VpFrameAnalysis::ResetDvTapRefusals();
 			Ramp ramp(false);
-			std::vector<SourceFrameView> held;
-			for (int i = 0; i < 40; ++i)
+			Ramp other(false, 1);
+			std::vector<SourceFrameView> shared(9);
+			SourceFrameView found;
+			for (uint64_t seq = 1; seq <= 7; ++seq)
+				Assert::IsTrue(VpFrameAnalysis::ShareViewOf12(seq, ramp.source, shared[seq]));
+			Assert::IsFalse(VpFrameAnalysis::FindSharedViewOf12(1, ramp.source, found), L"after seq 7 the oldest (1) is dropped");
+			Assert::IsTrue(VpFrameAnalysis::FindSharedViewOf12(2, ramp.source, found), L"the six newest are kept");
+			Assert::IsTrue(VpFrameAnalysis::ShareViewOf12(8, ramp.source, shared[8]));
+			for (uint64_t seq = 3; seq <= 8; ++seq)
 			{
-				SourceFrameView view;
-				Assert::IsTrue(VpFrameAnalysis::SourceViewOf12(ramp.source, view), L"a view is always obtainable");
-				Assert::AreEqual<int>(4, view.msbShift);
-				held.push_back(view);
+				SourceFrameView again;
+				Assert::IsTrue(VpFrameAnalysis::FindSharedViewOf12(seq, ramp.source, again), L"seq 3..8 are found");
+				Assert::IsTrue(again.luma == shared[seq].luma, L"the found view is the frame's own decode");
+				Assert::AreEqual<int>(4, again.msbShift);
+				Assert::IsFalse(VpFrameAnalysis::FindSharedViewOf12(seq, other.source, found), L"another buffer is not the frame");
 			}
+			Assert::IsFalse(VpFrameAnalysis::FindSharedViewOf12(2, ramp.source, found), L"seq 2 left when 8 arrived");
+			Assert::IsFalse(VpFrameAnalysis::FindSharedViewOf12(0, ramp.source, found), L"sequence 0 is never kept");
 			Assert::IsTrue(VpFrameAnalysis::PlanePoolSize() <= 12u);
 			Assert::AreEqual<uint64_t>(0, VpFrameAnalysis::DvTapRefusals());
-			held.clear();
 			VpFrameAnalysis::ReleasePlanePool();
+			for (uint64_t seq = 3; seq <= 8; ++seq)
+				Assert::IsFalse(VpFrameAnalysis::FindSharedViewOf12(seq, ramp.source, found), L"released views are gone");
 		}
 	};
 }
