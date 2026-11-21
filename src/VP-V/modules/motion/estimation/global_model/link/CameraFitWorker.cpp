@@ -361,36 +361,44 @@ namespace CameraLink
 	bool CameraFitWorker::PublishFitField(const VpSkeleton::LaneLease& p7Lease, bool bridgeTarget, const CameraFitJob& job,
 		const VpIndicator::Stamp& honoured)
 	{
+		FitCounters* fc = m_env.counters;
+		auto missed = [&]() {   // every miss is counted and named in the status line (never silent)
+			if (fc)
+				fc->fieldNotPublished.fetch_add(1, std::memory_order_relaxed);
+			return false;
+		};
 		const VpSkeleton::LaneLeaseSource& source = bridgeTarget ? m_env.fieldLeaseSource : m_env.fieldOnTimeSource;
 		if (!source || !job.field)
-			return false;
+			return missed();
 		const VpSkeleton::LaneLease fl = source();
 		if (!fl.table || !fl.bytes || fl.generation != p7Lease.generation)
-			return false;   // no storage, or a rebuild between the two reads: the field is missing for this frame
+			return missed();   // no storage, or a rebuild between the two reads: the field is missing for this frame
 		VpSkeleton::SlotSet* fs = fl.table->Find(VpSkeleton::kCameraFitField);
 		if (!fs)
-			return false;
+			return missed();
 		VpSkeleton::LaneTicket ticket;
 		if (fs->Claim(job.seq, VpAncestry::Provenance::AheadLane, ~uint64_t(0), &ticket) != VpSkeleton::ClaimResult::Claimed)
-			return false;
+			return missed();
 		if (!fs->Writable(ticket))
 		{
 			fs->Abandon(ticket);
-			return false;
+			return missed();
 		}
 		VpAncestry::Header& hdr = fs->LaneHeader(ticket);
 		VpSkeleton::LaneInputs pins;
 		if (!fl.table->LaneAncestors(VpSkeleton::kCameraFitField, job.seq, hdr, pins))
 		{
 			fs->Abandon(ticket);
-			return false;
+			return missed();
 		}
 		// The content goes into the slot's own buffer, once; the product owns it from here on (nothing else keeps a copy).
 		if (EncodeFitFieldPod(*job.field, fl.bytes->Ring(static_cast<size_t>(ticket.slot)), fl.bytes->Bytes()) == 0)
 		{
 			pins.Unpin();
 			fs->Abandon(ticket);
-			return false;   // the field does not fit the product's declared size: not published
+			if (fc)
+				fc->fieldUndersized.fetch_add(1, std::memory_order_relaxed);   // named in the status line: the product is smaller than the field
+			return false;   // the field does not fit the product's declared size: not published (counted, visible)
 		}
 		hdr.honoured = honoured;   // the SAME stamp P7(seq) is published under: the pair is one record
 		fs->Publish(ticket);

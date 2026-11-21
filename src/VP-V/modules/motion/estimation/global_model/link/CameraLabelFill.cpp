@@ -48,25 +48,33 @@ namespace CameraLink
 		return VpIndicator::SameFor(sa, sb, ~VpIndicator::CounterMask(0));
 	}
 
-	bool CameraLabelFill::ReadFitField(const VpSkeleton::LaneLease& lease, uint64_t seq, FieldCopy& out) const
+	bool CameraLabelFill::ReadFitField(const VpSkeleton::LaneLease& lease, uint64_t seq, FieldCopy& out)
 	{
-		if (!m_fieldSource || !FitFieldMatchesP7(lease, seq))
+		auto unreadable = [&]() { m_counters.fieldUnreadable.fetch_add(1, std::memory_order_relaxed); return false; };
+		if (!FitFieldMatchesP7(lease, seq))
+		{
+			m_counters.fieldStampMismatch.fetch_add(1, std::memory_order_relaxed);
 			return false;
+		}
+		if (!m_fieldSource)
+			return unreadable();
 		const VpSkeleton::LaneLease fl = m_fieldSource();
 		if (!fl.table || !fl.bytes || fl.generation != lease.generation)
-			return false;
+			return unreadable();
 		VpSkeleton::SlotSet* pf = fl.table->Find(VpSkeleton::kCameraFitField);
 		if (!pf)
-			return false;
+			return unreadable();
 		const VpSkeleton::ReadInfo a = pf->Read(seq, true);
 		if (a.kind != VpSkeleton::ReadInfo::Ring || a.index < 0)
-			return false;
+			return unreadable();
 		const uint8_t* bytes = fl.bytes->Ring(static_cast<size_t>(a.index));
 		if (!bytes || !DecodeFitFieldPod(bytes, fl.bytes->Bytes(), out))
-			return false;
+			return unreadable();
 		// The ring may have been recycled while it was copied: the slot must still be the same published ring.
 		const VpSkeleton::ReadInfo b = pf->Read(seq, true);
-		return b.kind == VpSkeleton::ReadInfo::Ring && b.index == a.index && FitFieldMatchesP7(lease, seq);
+		if (b.kind == VpSkeleton::ReadInfo::Ring && b.index == a.index && FitFieldMatchesP7(lease, seq))
+			return true;
+		return unreadable();
 	}
 
 	// The next frame the lane can produce: P7 and its fit field product published (the record is in the pool), P8 slot not yet used, not below the floor.
@@ -124,11 +132,8 @@ namespace CameraLink
 		std::shared_ptr<const CameraModel::CameraMotion> rec;
 		FieldCopy field;
 		bool haveField = false;
-		if (FitFieldMatchesP7(lease, seq))
-		{
-			m_link.FitEntryOf(seq, rec);                       // the record only; the field comes from the product slot
-			haveField = rec && ReadFitField(lease, seq, field);
-		}
+		m_link.FitEntryOf(seq, rec);                           // the record only; the field comes from the product slot
+		haveField = rec && ReadFitField(lease, seq, field);    // stamp-gated; a miss is counted by cause (status line)
 		LabelTarget target;
 		target.live = false;
 		target.index = ticket.slot;
@@ -165,11 +170,10 @@ namespace CameraLink
 		FieldCopy field;
 		bool haveField = false;
 		// The fit field product must be sealed too and carry P7's stamp (it is resolved before P8, like P7): else P8 stays absent (declined, counted).
-		VpSkeleton::SlotSet* pf = m_lease.table ? m_lease.table->Find(VpSkeleton::kCameraFitField) : nullptr;
-		if (p7Sealed && pf && pf->Read(seq).kind == VpSkeleton::ReadInfo::Ring && FitFieldMatchesP7(m_lease, seq))
+		if (p7Sealed)
 		{
 			m_link.FitEntryOf(seq, rec);
-			haveField = rec && ReadFitField(m_lease, seq, field);   // content from the product slot, stamp-gated; else no labels
+			haveField = rec && ReadFitField(m_lease, seq, field);   // content from the product slot, stamp-gated; a miss is counted by cause
 		}
 		if (!rec || !haveField)
 		{

@@ -53,16 +53,19 @@ namespace CameraLink
 		std::atomic<uint64_t> absent{ 0 };         // LabelsFor answered "unavailable"
 		std::atomic<uint64_t> staleLane{ 0 };      // lane productions REFUSED: the lane graph was rebuilt between the claim and the publish
 		std::atomic<uint64_t> rebound{ 0 };        // times the fill took a new lane lease (a rebuild was noticed)
+		std::atomic<uint64_t> fieldStampMismatch{ 0 };  // P7 present but the fit field product's stamp differs / is missing for that frame: no labels
+		std::atomic<uint64_t> fieldUnreadable{ 0 };     // fit field product has no storage, bad content, or was recycled during the read: no labels
 	};
 
 	// "camera labels: lane 12, late 0, blocked 0, live 3, declined 1, served 15, absent 2, stale lane 0 (refused after a graph rebuild), lane rebinds 0"
 	inline std::string LabelFillStatusLine(const LabelFillCounters& c)
 	{
-		char b[384];
-		std::snprintf(b, sizeof(b), "camera labels: %llu lane, %llu late, %llu blocked, %llu live, %llu declined, %llu served, %llu absent, %llu stale lane (refused after a graph rebuild), %llu lane rebinds",
+		char b[640];
+		std::snprintf(b, sizeof(b), "camera labels: %llu lane, %llu late, %llu blocked, %llu live, %llu declined, %llu served, %llu absent, %llu stale lane (refused after a graph rebuild), %llu lane rebinds, %llu fit field stamp mismatch or missing (no labels), %llu fit field unreadable (no labels)",
 			(unsigned long long)c.lane.load(), (unsigned long long)c.laneLate.load(), (unsigned long long)c.laneBlocked.load(),
 			(unsigned long long)c.live.load(), (unsigned long long)c.declined.load(), (unsigned long long)c.served.load(),
-			(unsigned long long)c.absent.load(), (unsigned long long)c.staleLane.load(), (unsigned long long)c.rebound.load());
+			(unsigned long long)c.absent.load(), (unsigned long long)c.staleLane.load(), (unsigned long long)c.rebound.load(),
+			(unsigned long long)c.fieldStampMismatch.load(), (unsigned long long)c.fieldUnreadable.load());
 		return b;
 	}
 
@@ -115,7 +118,7 @@ namespace CameraLink
 		static bool FitFieldMatchesP7(const VpSkeleton::LaneLease& lease, uint64_t seq);
 		// Reads the field's CONTENT from the product slot (stamp gate first, then the slot's ring bytes, then a re-read of the slot so a
 		// recycled ring is never used). False: no field (no labels). No other source exists.
-		bool ReadFitField(const VpSkeleton::LaneLease& lease, uint64_t seq, FieldCopy& out) const;
+		bool ReadFitField(const VpSkeleton::LaneLease& lease, uint64_t seq, FieldCopy& out);
 
 		VpSkeleton::LaneLease m_lease;            // render thread only
 		VpSkeleton::LaneLeaseSource m_source;

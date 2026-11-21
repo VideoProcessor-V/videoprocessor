@@ -60,6 +60,8 @@ namespace CameraLink
 		std::atomic<uint64_t> relatches{ 0 };
 		std::atomic<uint64_t> staleLane{ 0 };        // posts REFUSED: the job's lane generation is not the worker's (the lane graph was rebuilt)
 		std::atomic<uint64_t> rebound{ 0 };          // times the worker took a new lane lease (a rebuild was noticed)
+		std::atomic<uint64_t> fieldUndersized{ 0 };  // fit field larger than its product's size (gs.dims): NOT published, P8 gets no labels for that frame
+		std::atomic<uint64_t> fieldNotPublished{ 0 };// fit field product not published for another reason (no storage / claim / pins / rebuild)
 		std::atomic<uint64_t> guidedRefused{ 0 };    // F2: copies of the guided live field refused by SubmitField (never fitted)
 		std::atomic<uint64_t> seedAbsent{ 0 };       // F2: engine pairs without an optical-flow seed (no fit; camera_fit fallback)
 		// AHEAD FIT (camera_ahead_fit; all stay 0 when it is off). On time = P7 sealed with the frame in the on-time target;
@@ -225,12 +227,13 @@ namespace CameraLink
 	// "camera: fits 120, published 118, late 2, unusable 3, slip 0, queue full 0"
 	inline std::string StatusLine(const FitCounters& c)
 	{
-		char b[512];
-		std::snprintf(b, sizeof(b), "camera fit: %llu fitted, %llu published, %llu late, %llu not used, %llu slip, %llu timing unknown, %llu queue full, %llu readback dropped, %llu stale lane (refused after a graph rebuild), %llu lane rebinds",
+		char b[640];
+		std::snprintf(b, sizeof(b), "camera fit: %llu fitted, %llu published, %llu late, %llu not used, %llu slip, %llu timing unknown, %llu queue full, %llu readback dropped, %llu stale lane (refused after a graph rebuild), %llu lane rebinds, %llu fit field too big for its product (no labels for those frames), %llu fit field not published",
 			(unsigned long long)c.fitted.load(), (unsigned long long)c.published.load(), (unsigned long long)c.late.load(),
 			(unsigned long long)c.unusable.load(), (unsigned long long)c.notFittedSlip.load(),
 			(unsigned long long)c.timingUnknown.load(), (unsigned long long)c.queueFull.load(),
-			(unsigned long long)c.readbackDropped.load(), (unsigned long long)c.staleLane.load(), (unsigned long long)c.rebound.load());
+			(unsigned long long)c.readbackDropped.load(), (unsigned long long)c.staleLane.load(), (unsigned long long)c.rebound.load(),
+			(unsigned long long)c.fieldUndersized.load(), (unsigned long long)c.fieldNotPublished.load());
 		return b;
 	}
 }
