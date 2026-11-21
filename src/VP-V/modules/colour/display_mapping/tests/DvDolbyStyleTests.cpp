@@ -196,6 +196,47 @@ namespace Tests
 			Assert::AreEqual(-0.05, btb[2], 1e-6, L"a below-black channel is carried unchanged by neutral trims");
 		}
 
+		// GEM-W1B V1 colour-dv-hdr MUST-1: bisection on the chroma scale: saturation rises smoothly across the gamut edge
+		// (halving cut the chroma 50% at the first step) and the result is never out of gamut.
+		TEST_METHOD(SaturationIsMonotoneAcrossTheGamutEdge)
+		{
+			const DvDolbyStyle::IctcpSignal s = DvDolby::Sdr();
+			const double src[3] = { 0.9, 0.1, 0.05 };
+			double before[3], n[3];
+			for (int c = 0; c < 3; ++c) n[c] = DolbyVisionTrims::ToNits(src[c], s.signal);
+			DvDolbyStyle::ToIctcp(n, s.toLms, before);
+			double previous = 0.0;
+			for (int step = 0; step <= 20; ++step)
+			{
+				DvTrimSelection::ExtParams p;
+				p.base.saturationGain = 1.0 + 0.05 * step;
+				double px[3] = { src[0], src[1], src[2] }, out[3], nn[3];
+				DvDolbyStyle::ApplyPixelIctcp(px, p, s);
+				for (int c = 0; c < 3; ++c)
+				{
+					nn[c] = DolbyVisionTrims::ToNits(px[c], s.signal);
+					Assert::IsTrue(std::isfinite(px[c]) && nn[c] >= -1e-9, L"in gamut and finite");
+				}
+				DvDolbyStyle::ToIctcp(nn, s.toLms, out);
+				const double chroma = std::hypot(out[1], out[2]);
+				Assert::IsTrue(chroma >= previous * 0.99, L"chroma never steps down as the gain rises (no 50% cliff)");
+				previous = chroma;
+			}
+			Assert::IsTrue(previous > std::hypot(before[1], before[2]) * 0.9, L"the edge keeps most of the chroma");
+		}
+
+		// GEM-W1B V1 colour-dv-hdr MUST-2: the PQ decode has no pole above 1 (WTW + saturation/hue trims).
+		TEST_METHOD(NitsFromPqIsFiniteAbovePqOne)
+		{
+			double last = 0.0;
+			for (double pq = 0.9; pq <= 3.0; pq += 0.01)
+			{
+				const double nits = DolbyVisionTrims::NitsFromPq(pq);
+				Assert::IsTrue(std::isfinite(nits) && nits >= last, L"finite and non-decreasing");
+				last = nits;
+			}
+		}
+
 		TEST_METHOD(LibplaceboFunctionSwitchAndFallback)
 		{
 			using namespace DvDolby;
