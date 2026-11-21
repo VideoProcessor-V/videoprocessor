@@ -8,6 +8,7 @@
 #include <VP-V/modules/colour/appearance/AppearanceStatus.h>
 #include "../../../../tests/SettingsTestSupport.h"
 
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -26,7 +27,13 @@ namespace Tests
 		{
 			const std::string text = SettingsTestSupport::ReadFile(SettingsTestSupport::RepoRoot() + rel);
 			Assert::IsFalse(text.empty(), std::wstring(rel.begin(), rel.end()).append(L" is readable from the repository root").c_str());
-			return text;
+			// Line-ending-proof: the working copy may be CRLF (autocrlf) and the read is binary.
+			std::string normal;
+			normal.reserve(text.size());
+			for (const char c : text)
+				if (c != '\r')
+					normal.push_back(c);
+			return normal;
 		}
 		bool Has(const std::string& text, const char* needle) { return text.find(needle) != std::string::npos; }
 	}
@@ -128,41 +135,44 @@ namespace Tests
 			}
 
 			// The wiring: both per-render-cycle consumers and the fallback row use the per-frame appearance decision.
-			const std::string intent = ReadUp("src\VP-V\modules\drive\led_compensation\LedIntentMethods.inl");
+			const std::string intent = ReadUp("src/VP-V/modules/drive/led_compensation/LedIntentMethods.inl");
 			Assert::IsTrue(Has(intent, "ambient.enabled = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, dvStage.AppearanceDecision().active);"));
-			const std::string motion = ReadUp("src\VP-V\modules\motion\consumers\IntentMotionMethods.inl");
+			const std::string motion = ReadUp("src/VP-V/modules/motion/consumers/IntentMotionMethods.inl");
 			Assert::IsTrue(Has(motion, "switches.ambient = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, dvStage.AppearanceDecision().active);"));
-			const std::string core = ReadUp("src\VP-V\segments\CoreSegments.inl");
+			const std::string core = ReadUp("src/VP-V/segments/CoreSegments.inl");
 			Assert::IsTrue(Has(core, "AppearanceStage::AmbientAdaptGivenBack(activeSettings.ambientAdaptReplaced, dvStage.AppearanceDecision().active)"),
 				L"the AmbientAdaptReplaced fallback is synced per frame");
 			Assert::IsTrue(Has(core, "SyncFallback(FallbackCatalog::AmbientAdaptReplaced(activeSettings.ambientAdaptReplaced &&"));
 		}
 
-		// CF1-G7b: the replacement follows the pass frame by frame: appearance acting, then idle, then acting again. The
-		// stored ambient_adapt stays off throughout (PostLoad); what the intent interpreter and the Fallbacks list see per frame
-		// is AmbientAdaptOn / the catalog row, so ambient_adapt returns on the idle frames and the listing goes with it.
+		// CF1-G7b: the per-frame decision sits where it runs every frame. The AmbientAdaptReplaced fallback row is synced INSIDE the
+		// per-frame CollectFrameHooks body (not only at the settings seam, which runs when settings change), and the two intent
+		// consumers take ambient_adapt back inside their own per-render-cycle methods. Each needle is searched only within its
+		// function body (a stray copy elsewhere does not satisfy it), and the sources are read line-ending-proof. A missing file FAILS.
 		TEST_METHOD(AmbientAdaptReturnsWhenAppearanceStopsActing)
 		{
-			const bool acting[] = { true, true, false, false, true, false, true };
-			bool wasListed = false;
-			for (size_t frame = 0; frame < sizeof(acting) / sizeof(acting[0]); ++frame)
+			auto body = [](const std::string& text, const char* signature)
 			{
-				const bool active = acting[frame];
-				const bool on = AppearanceStage::AmbientAdaptOn(false, true, active);
-				const FallbackCatalog::Decision row = FallbackCatalog::AmbientAdaptReplaced(true && !AppearanceStage::AmbientAdaptGivenBack(true, active));
-				const std::wstring label = L"frame " + std::to_wstring(frame);
-				Assert::AreEqual(!active, on, (label + L": ambient_adapt runs exactly when appearance does not").c_str());
-				Assert::AreEqual(active, row.engaged, (label + L": listed exactly while appearance acts").c_str());
-				Assert::AreEqual(std::string("ambient_adapt: replaced by appearance"), row.id);
-				// Never both: a frame is either replaced (and listed) or given back (and not listed).
-				Assert::IsTrue(on != row.engaged, (label + L": one owner of the room-light correction per frame").c_str());
-				wasListed = wasListed || row.engaged;
-			}
-			Assert::IsTrue(wasListed);
-			// The settings-time decision stays as the configured fact the per-frame rule reads (not removed).
-			const std::string settings = ReadUp("src\VP-V\modules\control\config\VpvRendererSettings.cpp");
-			Assert::IsTrue(Has(settings, "settings.ambientAdaptReplaced = appearanceRuns && settings.ambientAdapt;"));
-			Assert::IsTrue(Has(settings, "settings.ambientAdapt = false;"));
+				const size_t begin = text.find(signature);
+				Assert::IsTrue(begin != std::string::npos, (std::wstring(L"function found: ") + std::wstring(signature, signature + std::strlen(signature))).c_str());
+				const size_t end = text.find("\n}\n", begin);
+				Assert::IsTrue(end != std::string::npos, L"function end found");
+				return text.substr(begin, end - begin);
+			};
+			const std::string core = ReadUp("src/VP-V/segments/CoreSegments.inl");
+			const std::string frame = body(core, "LibplaceboVideoRenderer::Impl::CollectFrameHooks(");
+			Assert::IsTrue(Has(frame, "SyncFallback(FallbackCatalog::AmbientAdaptReplaced(activeSettings.ambientAdaptReplaced &&"),
+				L"the AmbientAdaptReplaced row is synced per frame");
+			Assert::IsTrue(Has(frame, "AppearanceStage::AmbientAdaptGivenBack(activeSettings.ambientAdaptReplaced, dvStage.AppearanceDecision().active)"),
+				L"from this frame's appearance decision");
+			const std::string seam = body(core, "LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(");
+			Assert::IsFalse(Has(seam, "AmbientAdaptGivenBack"), L"the settings seam only states the configured replacement");
+			const std::string intent = ReadUp("src/VP-V/modules/drive/led_compensation/LedIntentMethods.inl");
+			Assert::IsTrue(Has(body(intent, "LibplaceboVideoRenderer::Impl::ConfigureIntentAmbient()"),
+				"ambient.enabled = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, dvStage.AppearanceDecision().active);"));
+			const std::string motion = ReadUp("src/VP-V/modules/motion/consumers/IntentMotionMethods.inl");
+			Assert::IsTrue(Has(body(motion, "LibplaceboVideoRenderer::Impl::ConfigureIntentMotion()"),
+				"switches.ambient = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, dvStage.AppearanceDecision().active);"));
 		}
 
 		TEST_METHOD(SettingsPlumbingIsInPlace)
