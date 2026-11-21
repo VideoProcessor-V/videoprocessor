@@ -1661,6 +1661,38 @@ namespace VideoProcessorTest
 			Require(r.confidence < 0.5 && r.reason == Reason::Ambiguous, Fmt("60% object over 40% pan, quantum 1.0", r));
 		}
 
+		// Camfix audit SHOULD 4: the 1080p-half quantum (0.5 px) with two layers far beyond the separation stays flagged.
+		TEST_METHOD(CamfixR2TwoLayersStayAmbiguousWithHalfPixelQuantum)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12, 0));
+			const int x0 = static_cast<int>(0.4 * f.gridW);
+			f.AddObject(x0, 0, f.gridW - x0, f.gridH, -30, 8);
+			f.AddNoise(0.3, 76);
+			QuantizeField(f, 0.5);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 0.5;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			Require(r.confidence < 0.5 && r.reason == Reason::Ambiguous, Fmt("60% object over 40% pan, quantum 0.5", r));
+		}
+
+		// Camfix audit SHOULD 4: at noise sigma about 2 px (separation max(3 sigma, 2 quanta) about 8 px) a real second motion 42 px away
+		// is still a second layer: the widened separation must not hide it.
+		TEST_METHOD(CamfixR2WidenedSeparationDoesNotHideARealSecondLayer)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12, 0));
+			const int x0 = static_cast<int>(0.4 * f.gridW);
+			f.AddObject(x0, 0, f.gridW - x0, f.gridH, -30, 8);
+			f.AddNoise(2.0, 77);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 0.5;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			Require(r.confidence < 0.5 && r.reason == Reason::Ambiguous, Fmt("noisy two motions, quantum 0.5", r));
+		}
+
 		// Noise well above the quantum floor: the threshold follows 1.4826 x MAD of the residuals, not the floor.
 		TEST_METHOD(CamfixR2RobustScaleRaisesThreshold)
 		{
