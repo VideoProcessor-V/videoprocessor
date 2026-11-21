@@ -446,22 +446,30 @@ namespace VideoProcessorTest
 				const MotionAhead::Flow f = FlowOfPair(p, true);
 				const VpMotion::FlowView plainView = p.View(3), extrasView = ViewWithExtras(p, f, 3);
 				const int reps = 20;
-				float g[4] = {}, second[4] = {};
+				float g[4] = {}, second[4] = {}, gBefore[4] = {}, gAfter[4] = {};
+				bool beforeHadGlobal = false, afterHadGlobal = true, trustPresent = true;
+				bool taken = true;
 				double sink = 0;
 				const auto t0 = std::chrono::steady_clock::now();
 				for (int r = 0; r < reps; ++r)
 				{
 					CameraLink::AheadCopy a;
-					CameraLink::CopyAhead(plainView, 3, 1.5f, a);
+					taken = taken && CameraLink::CopyAhead(plainView, 3, 1.5f, a) == CameraLink::AheadRefusal::None;
+					trustPresent = trustPresent && !a.trust.empty();
+					beforeHadGlobal = beforeHadGlobal || a.haveProducerGlobal;
 					MotionAhead::FlowGlobal(a.forward, a.forwardCost, a.gridW, a.gridH, g, second);
+					for (int k = 0; k < 4; ++k) gBefore[k] = g[k];
 					sink += a.trust.empty() ? 0.0 : a.trust[0] + g[0];
 				}
 				const auto t1 = std::chrono::steady_clock::now();
 				for (int r = 0; r < reps; ++r)
 				{
 					CameraLink::AheadCopy a;
-					CameraLink::CopyAhead(extrasView, 3, 1.5f, a);
+					taken = taken && CameraLink::CopyAhead(extrasView, 3, 1.5f, a) == CameraLink::AheadRefusal::None;
+					trustPresent = trustPresent && !a.trust.empty();
+					afterHadGlobal = afterHadGlobal && a.haveProducerGlobal;
 					for (int k = 0; k < 4; ++k) g[k] = a.producerGlobal[k];
+					for (int k = 0; k < 4; ++k) gAfter[k] = g[k];
 					sink += a.trust.empty() ? 0.0 : a.trust[0] + g[0];
 				}
 				const auto t2 = std::chrono::steady_clock::now();
@@ -472,6 +480,12 @@ namespace VideoProcessorTest
 					p.gridW, p.gridH, before, after, sink);
 				Logger::WriteMessage(line);
 				Assert::IsTrue(before > 0.0 && after > 0.0);
+				Assert::IsTrue(taken, L"every CopyAhead of the cost line returned AheadRefusal::None");
+				Assert::IsTrue(trustPresent, L"every copy carries the engine's cell trust");
+				Assert::IsFalse(beforeHadGlobal, L"the plain view has no producer vote: the vote is recomputed (before)");
+				Assert::IsTrue(afterHadGlobal, L"the extras view carries the producer vote (after)");
+				for (int k = 0; k < 4; ++k)
+					Assert::AreEqual(gBefore[k], gAfter[k], 1e-6f, L"the recomputed vote equals the producer's");
 			}
 		}
 

@@ -90,14 +90,17 @@ namespace VideoProcessorTest
 			CameraLink::CameraFitProducer producer(CameraModel::Config(), &counters);
 			{
 				CameraLink::CameraFitWorker worker(producer, rig.Env(&pool, &counters, 8));
-				worker.Start();
+				Assert::IsTrue(worker.Start(), L"the worker thread started");
+				Assert::IsTrue(worker.Running(), L"Running() is true after Start()");
 				for (int i = 1; i <= 4; ++i)
 				{
 					rig.PublishInputs(static_cast<uint64_t>(i));
-					worker.Submit(CameraLinkTest::PanJob(static_cast<uint64_t>(i), 5.0));
+					Assert::IsTrue(worker.Submit(CameraLinkTest::PanJob(static_cast<uint64_t>(i), 5.0)), L"a job was queued");
 				}
-			}   // the destructor stops and joins: no crash, no hang
-			Assert::IsTrue(true);
+				Assert::AreEqual(static_cast<uint64_t>(4), static_cast<uint64_t>(counters.submitted.load()), L"all four jobs counted as submitted");
+				worker.Stop();   // stops and joins with jobs possibly still queued: no crash, no hang
+				Assert::IsFalse(worker.Running(), L"Running() is false after Stop()");
+			}   // the destructor after an explicit Stop() is a no-op
 		}
 		// Resets and relatches are stamped into the job at SUBMIT: a reset requested between two queued jobs applies before the
 		// second job's Fit, whenever the worker gets to the queue. Fill the queue first (no WaitIdle per submit), then run it by
