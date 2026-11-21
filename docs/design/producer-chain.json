@@ -73,17 +73,17 @@
      "evidence": [
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       30,
+       29,
        "bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH)"
       ],
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       513,
+       448,
        "if (!LumaAtTarget(job.sequence, job.luma, lumaBuffer, halfW, halfH))"
       ],
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       589,
+       524,
        "bool Producer::LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, i"
       ]
      ],
