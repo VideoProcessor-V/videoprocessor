@@ -578,7 +578,9 @@ namespace VideoProcessorTest
 				for (const char* p : kLabelsLineParts)
 					Assert::IsFalse(Has(report.Lines(RE::StatusKind::Lines), p), L"not live: no labels line");
 			}
-			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\n");
+			// Labels are wanted (camera_model_overlay=labels: CameraExtension labelsWanted), so the only thing missing for P8's fill is the
+			// render device; without the overlay the line would be absent for want of a labels consumer, not for the device.
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\ncamera_model_overlay=labels\n");
 			rig.Start(6);
 			Assert::IsTrue(rig.ext.LiveBuilt(rig.Host()), L"premise: the camera is live");
 			for (const char* p : kLabelsLineParts)
@@ -639,7 +641,9 @@ namespace VideoProcessorTest
 		{
 			TestDevice device;
 			Assert::IsTrue(device.Create(), L"Could not create the libplacebo test device (WARP unless VP_TEST_GPU=hardware)");
-			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\n");
+			// P8 exists only when labels are wanted (CameraExtension labelsWanted: overlay, a use switch or camera_labels_gpu); the overlay is
+			// the consumer that changes nothing else in the camera's wiring. ce-train1 (69c96794a) ran this without it: no P8, no line.
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\ncamera_model_overlay=labels\n");
 			rig.gpu = device.Gpu();
 			rig.Start(6);
 			Assert::IsTrue(rig.ext.LiveBuilt(rig.Host()), L"premise: the camera is live");
