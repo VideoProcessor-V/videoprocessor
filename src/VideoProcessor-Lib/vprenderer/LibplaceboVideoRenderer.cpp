@@ -5347,37 +5347,6 @@ struct LibplaceboVideoRenderer::Impl
 		return RenderAhead::HostSteps::UpdateGateLogged(renderAheadPresenter, now, frame);   // VPV-HOOK CC series C: the log lines moved
 	}
 
-	// One line per 5 s while render-ahead queues extras.
-	// holding: the hold this frame took instead of a plan (nullptr when it planned).
-	void LogRenderAhead(double ratio, int gateLevel, const char* holding = nullptr)
-	{
-		const ULONGLONG now = GetTickCount64();
-		if (dejudderExtras.renderAheadLogTick != 0 && now - dejudderExtras.renderAheadLogTick < 5000)
-			return;
-		dejudderExtras.renderAheadLogTick = now;
-		DebugLog::Log("Render-ahead: %s%s%s%llu extras presented, %llu frames planned, %llu restarts, %llu late, %llu extras dropped, %llu refreshes held "
-			"(%llu presents after a hold), lead %.2f ms, target lead %.2f ms, gate %s (%s), latency floor %.2f ms, "
-			"p95 new frame %.2f ms, extra %.2f ms (own vectors) / %.2f ms (de-judder vectors), estimate %.2f ms, queue credit %zu, cadence %.3f, %s, "
-			"display %.3f Hz from %s (%s loop, %llu open-loop frames, %llu presents late by QPC, %llu early-shown chain corrections, %llu re-anchors, %llu anchors lowered, %llu after a backlog flush; shown - planned: interval 1 %+.2f refreshes "
-			"(%llu, %llu on time), after holds %+.2f (%llu, %llu on time))",
-			holding ? "holding (" : "", holding ? holding : "", holding ? "), " : "", dejudderExtras.dejudderExtraStats.extras,
-			renderAheadPresenter.frames, renderAheadPresenter.restarts, renderAheadPresenter.late, renderAheadPresenter.dropped, renderAheadPresenter.held,
-			renderAheadIntervalPresents, renderAheadPresenter.lead * 1000.0, renderAheadPresenter.targetLeadMs,
-			RenderAhead::LevelName(gateLevel, DejudderPolicy::MaxExtras(ratio)).c_str(),
-			RenderAhead::ResolveGate(activeSettings.dejudderGate, RenderAheadActive()) == RenderAhead::GateMode::Period ?
-				"period" : "refresh",
-			dejudderLatencyFloor.Floor() * 1000.0, renderAheadNewFrameCost.P95(), renderAheadExtraCostOwn.P95(),
-			renderAheadExtraCostExternal.P95(), renderAheadEstimateCost.P95(),
-			renderAheadPresenter.creditFrames.load(std::memory_order_relaxed), ratio,
-			renderAheadTimersReady ? "GPU timers" : "CPU timings", renderAheadPresenter.displayRate.hz,
-			OpenLoopDisplayRate::Name(renderAheadPresenter.displayRate.source), renderAheadPresenter.displayRate.openLoop ? "open" : "closed",
-			renderAheadPresenter.openLoopFrames, renderAheadPresenter.lateByPresent, renderAheadSchedule.EarlyCorrections(),
-			renderAheadSchedule.Reanchors(), renderAheadSchedule.AnchorsLowered(), renderAheadPresenter.flushReanchors,
-			renderAheadPresenter.shownCount[0] ? renderAheadPresenter.shownError[0] / renderAheadPresenter.shownCount[0] : 0.0, renderAheadPresenter.shownCount[0],
-			renderAheadPresenter.shownOnTime[0], renderAheadPresenter.shownCount[1] ? renderAheadPresenter.shownError[1] / renderAheadPresenter.shownCount[1] : 0.0,
-			renderAheadPresenter.shownCount[1], renderAheadPresenter.shownOnTime[1]);
-	}
-
 	// Number of extra presents with ids in (from, to].
 	UINT DejudderExtrasBetween(UINT from, UINT to) const
 	{

@@ -102,6 +102,38 @@ namespace Vpv
 			};
 		}
 
+		void LogRenderAhead(ExtrasState& dejudderExtras, const VpMotion::DejudderPolicyState& dejudderPolicy,
+			const RenderAhead::Presenter& renderAheadPresenter, const std::string& dejudderGate,
+			bool renderAheadActive, bool renderAheadTimersReady, double ratio, int gateLevel,
+			const char* holding)
+		{
+			const ULONGLONG now = GetTickCount64();
+			if (dejudderExtras.renderAheadLogTick != 0 && now - dejudderExtras.renderAheadLogTick < 5000)
+				return;
+			dejudderExtras.renderAheadLogTick = now;
+			DebugLog::Log("Render-ahead: %s%s%s%llu extras presented, %llu frames planned, %llu restarts, %llu late, %llu extras dropped, %llu refreshes held "
+				"(%llu presents after a hold), lead %.2f ms, target lead %.2f ms, gate %s (%s), latency floor %.2f ms, "
+				"p95 new frame %.2f ms, extra %.2f ms (own vectors) / %.2f ms (de-judder vectors), estimate %.2f ms, queue credit %zu, cadence %.3f, %s, "
+				"display %.3f Hz from %s (%s loop, %llu open-loop frames, %llu presents late by QPC, %llu early-shown chain corrections, %llu re-anchors, %llu anchors lowered, %llu after a backlog flush; shown - planned: interval 1 %+.2f refreshes "
+				"(%llu, %llu on time), after holds %+.2f (%llu, %llu on time))",
+				holding ? "holding (" : "", holding ? holding : "", holding ? "), " : "", dejudderExtras.dejudderExtraStats.extras,
+				renderAheadPresenter.frames, renderAheadPresenter.restarts, renderAheadPresenter.late, renderAheadPresenter.dropped, renderAheadPresenter.held,
+				renderAheadPresenter.intervalPresents, renderAheadPresenter.lead * 1000.0, renderAheadPresenter.targetLeadMs,
+				RenderAhead::LevelName(gateLevel, DejudderPolicy::MaxExtras(ratio)).c_str(),
+				RenderAhead::ResolveGate(dejudderGate, renderAheadActive) == RenderAhead::GateMode::Period ?
+					"period" : "refresh",
+				dejudderPolicy.dejudderLatencyFloor.Floor() * 1000.0, renderAheadPresenter.newFrameCost.P95(), renderAheadPresenter.extraCostOwn.P95(),
+				renderAheadPresenter.extraCostExternal.P95(), renderAheadPresenter.estimateCost.P95(),
+				renderAheadPresenter.creditFrames.load(std::memory_order_relaxed), ratio,
+				renderAheadTimersReady ? "GPU timers" : "CPU timings", renderAheadPresenter.displayRate.hz,
+				OpenLoopDisplayRate::Name(renderAheadPresenter.displayRate.source), renderAheadPresenter.displayRate.openLoop ? "open" : "closed",
+				renderAheadPresenter.openLoopFrames, renderAheadPresenter.lateByPresent, renderAheadPresenter.schedule.EarlyCorrections(),
+				renderAheadPresenter.schedule.Reanchors(), renderAheadPresenter.schedule.AnchorsLowered(), renderAheadPresenter.flushReanchors,
+				renderAheadPresenter.shownCount[0] ? renderAheadPresenter.shownError[0] / renderAheadPresenter.shownCount[0] : 0.0, renderAheadPresenter.shownCount[0],
+				renderAheadPresenter.shownOnTime[0], renderAheadPresenter.shownCount[1] ? renderAheadPresenter.shownError[1] / renderAheadPresenter.shownCount[1] : 0.0,
+				renderAheadPresenter.shownCount[1], renderAheadPresenter.shownOnTime[1]);
+		}
+
 		bool PresentExtras(ExtrasHost& host, ExtrasState& dejudderExtras, const ExtrasFrame& f)
 		{
 			if (!host.calls)
@@ -183,7 +215,11 @@ namespace Vpv
 			auto ResetRenderAheadGate = [&calls](const char* why) { calls.ResetRenderAheadGate(why); };
 			auto OpenLoopGridVsync = [&calls](double displayHz, double now, double qpcFrequency) { return calls.OpenLoopGridVsync(displayHz, now, qpcFrequency); };
 			auto UpdateRenderAheadGate = [&calls](double now, double sourcePeriod, double displayPeriod, bool late, int maxExtras) { return calls.UpdateRenderAheadGate(now, sourcePeriod, displayPeriod, late, maxExtras); };
-			auto LogRenderAhead = [&calls](double ratio, int gateLevel, const char* holding = nullptr) { calls.LogRenderAhead(ratio, gateLevel, holding); };
+			auto LogRenderAhead = [&](double ratio, int gateLevel, const char* holding = nullptr)
+			{
+				Vpv::Dejudder::LogRenderAhead(dejudderExtras, dejudderPolicy, renderAheadPresenter,
+					activeSettings.dejudderGate, RenderAheadActive(), renderAheadTimersReady, ratio, gateLevel, holding);
+			};
 			auto EntranceOnce = [&calls]() { return calls.EntranceOnce(); };
 			auto EntranceOnceExtra = [&calls](const pl_frame& image, uint64_t sourceSequence, uint64_t nextSourceSequence,
 				bool interp, const ::Dejudder::Planes& a, ::Dejudder::Planes& processedA,

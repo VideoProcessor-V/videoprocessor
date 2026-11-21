@@ -244,7 +244,6 @@ namespace Vpv
 			virtual void ResetRenderAheadGate(const char* why) = 0;
 			virtual double OpenLoopGridVsync(double displayHz, double now, double qpcFrequency) const = 0;
 			virtual int UpdateRenderAheadGate(double now, double sourcePeriod, double displayPeriod, bool late, int maxExtras) = 0;
-			virtual void LogRenderAhead(double ratio, int gateLevel, const char* holding) = 0;
 			virtual bool EntranceOnce() const = 0;
 			virtual bool EntranceOnceExtra(const pl_frame& image, uint64_t sourceSequence, uint64_t nextSourceSequence,
 				bool interpolating, const ::Dejudder::Planes& a, ::Dejudder::Planes& processedA,
@@ -310,6 +309,12 @@ namespace Vpv
 
 			ExtrasHostCalls* calls = nullptr;
 		};
+
+		// One line per 5 s while render-ahead queues extras (formerly Impl::LogRenderAhead).
+		void LogRenderAhead(ExtrasState& dejudderExtras, const VpMotion::DejudderPolicyState& dejudderPolicy,
+			const RenderAhead::Presenter& renderAheadPresenter, const std::string& dejudderGate,
+			bool renderAheadActive, bool renderAheadTimersReady, double ratio, int gateLevel,
+			const char* holding = nullptr);
 
 		bool PresentExtras(ExtrasHost& h, ExtrasState& s, const ExtrasFrame& f);
 	}

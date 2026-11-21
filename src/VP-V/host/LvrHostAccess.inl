@@ -59,7 +59,6 @@ bool Vpv::HostAccess::PresentDejudderExtras(HostImpl& i, const Vpv::Dejudder::Ex
 		void ResetRenderAheadGate(const char* why) override { i.ResetRenderAheadGate(why); }
 		double OpenLoopGridVsync(double displayHz, double now, double qpcFrequency) const override { return HostImpl::OpenLoopGridVsync(displayHz, now, qpcFrequency); }
 		int UpdateRenderAheadGate(double now, double sourcePeriod, double displayPeriod, bool late, int maxExtras) override { return i.UpdateRenderAheadGate(now, sourcePeriod, displayPeriod, late, maxExtras); }
-		void LogRenderAhead(double ratio, int gateLevel, const char* holding) override { i.LogRenderAhead(ratio, gateLevel, holding); }
 		bool EntranceOnce() const override { return i.EntranceOnce(); }
 		bool EntranceOnceExtra(const pl_frame& image, uint64_t sourceSequence, uint64_t nextSourceSequence,
 			bool interpolating, const ::Dejudder::Planes& a, ::Dejudder::Planes& processedA,

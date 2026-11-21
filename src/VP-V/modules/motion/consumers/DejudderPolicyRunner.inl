@@ -352,7 +352,8 @@ void LibplaceboVideoRenderer::Impl::DejudderHold(const char* why)
 	dejudderHoldLog.OnHold(why, dejudderExtras.dejudderExtraStats.holds);
 	// Render-ahead: every hold also shows on the "Render-ahead:" line with the gate's level.
 	if (RenderAheadActive())
-		LogRenderAhead(dejudderExtras.dejudderExtraStats.cadenceRatio, renderAheadPresenter.gate.Level(), why);
+		Vpv::Dejudder::LogRenderAhead(dejudderExtras, dejudderPolicy, renderAheadPresenter, activeSettings.dejudderGate,
+			true, renderAheadTimersReady, dejudderExtras.dejudderExtraStats.cadenceRatio, renderAheadPresenter.gate.Level(), why);
 }
 
 // The last hold lines at teardown, so the last holds are never lost.
