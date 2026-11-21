@@ -58,7 +58,7 @@ namespace CameraLink
 		std::atomic<uint64_t> fieldUnreadable{ 0 };     // fit field product has no storage, bad content, or was recycled during the read: no labels
 	};
 
-	// "camera labels: lane 12, late 0, blocked 0, live 3, declined 1, served 15, absent 2, stale lane 0 (refused after a graph rebuild), lane rebinds 0"
+	// "camera labels: lane 12, late 0, blocked 0, live 3, declined 1, served 15, absent 2, stale lane 0 (refused after a graph rebuild), lane rebinds 0, fit field missing 0 (no labels), fit field stamp mismatch 0 (no labels), fit field unreadable 0 (no labels)"
 	inline std::string LabelFillStatusLine(const LabelFillCounters& c)
 	{
 		char b[640];

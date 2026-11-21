@@ -85,11 +85,15 @@ namespace Vpv
 			const CameraLink::CameraLane* LaneOf(const void* host) const;
 			CameraLink::CameraGuidanceAdapter* AdapterOf(const void* host) const;   // null: no measurement switch on, or not live yet
 			std::string EngineProblemOf(const void* host) const;   // "" when the engine was found (or not asked for)
-			// GUIDANCE LOCK (owner, reset 1): every camera guidance switch (camera_meas_*) is forced off until the on-time rule (d = 0, the
-			// camera of frame N guides only N's matcher and only when ready before it) is built next reset; a late camera never guides.
-			// The switches parse and are shown ("camera guidance waits for the on-time rule"); no adapter, no hook. Tests of the wiring the
-			// next reset unlocks call SetGuidanceLockForTesting(false) BEFORE the first lifecycle call.
+			// GUIDANCE UNLOCKED (CAM-GUIDANCE-LOCKED, camera ladder): the camera_meas_* switches take effect once camera_model is on. The d = 0
+			// on-time rule is built (the camera of frame N guides only N's matcher and only when ready before it; a late camera never
+			// guides) and the guidance governor is always applied (it trips back to the full search). The camera itself stays OFF by default
+			// (camera_model = off until the whole ladder passes), and it follows the motion engine: with vector_demand off the camera has
+			// no vectors to fit, which is shown ("camera: off, the motion engine is off (vector_demand)"), never silent. The lock survives
+			// only as a test seam: SetGuidanceLockForTesting(true) BEFORE the first lifecycle call restores the old locked state, shown
+			// with kGuidanceLockedText.
 			static constexpr const char* kGuidanceLockedText = "camera guidance locked: the d=0 rule is built, waiting for the owner's A/B decision (the camera_meas_* switches are off)";
+			static constexpr const char* kEngineOffText = "camera: off, the motion engine is off (vector_demand); the camera follows it and has no vectors to fit";
 			static constexpr const char* kGuidanceNeedsAheadText = "camera guidance (d=0) needs camera_ahead_fit: without it camera(N) is never on time";
 			void SetGuidanceLockForTesting(bool locked) { guidanceLocked_ = locked; }
 			bool GuidanceLocked() const { return guidanceLocked_; }
@@ -107,7 +111,7 @@ namespace Vpv
 			Skeleton::ConfigLoader loader_;
 			EngineDirectoryProvider engines_;
 			Hub::HostSlots<CameraHostState> hosts_;
-			bool guidanceLocked_ = true;
+			bool guidanceLocked_ = false;   // unlocked (see above); true only through the test seam
 		};
 
 		// Adds CameraExtension to the hub. Start-up only; idempotent. After SkeletonModule.

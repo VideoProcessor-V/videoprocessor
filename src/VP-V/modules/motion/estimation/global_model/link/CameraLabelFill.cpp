@@ -27,6 +27,7 @@ namespace CameraLink
 			return false;
 		m_lease = std::move(cur);   // the old state dies with its last holder
 		m_cursor = 0;               // the old graph's sequences
+		m_fieldMissNext = 0;       // the per-frame missing-field dedup follows the graph's sequences too
 		m_counters.rebound.fetch_add(1, std::memory_order_relaxed);
 		return true;
 	}
