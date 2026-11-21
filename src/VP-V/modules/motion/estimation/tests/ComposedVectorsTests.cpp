@@ -10,6 +10,7 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/composed/ComposedVectors.h>
 
+#include <chrono>
 #include <map>
 #include <string>
 
@@ -540,6 +541,97 @@ namespace ComposedVectorsTest
 			Assert::IsTrue(st.engaged);
 			Assert::IsTrue(st.text.find("back gap") != std::string::npos);
 			Assert::IsTrue(st.text.find("ahead gap") == std::string::npos);
+		}
+
+		// GF-P4 S9 (THE MEASUREMENT): six AHEAD planes whose reverse pair is absent are all degraded, so none is cached. Prepare hands
+		// plane k - 1 to Acquire: the chain costs K computes, where six hint-less Acquires (the old Prepare loop) cost K(K+1)/2.
+		TEST_METHOD(ReverseAbsentChainComputesEachPlaneOnce)
+		{
+			FakeSource src;
+			for (uint64_t k = 1; k <= 6; ++k)
+				src.missing[std::make_pair(100 + k, 99 + k)] = true;   // the reverse pair of ahead step k: (t + k) -> (t + k - 1)
+			auto setup = [](Product& product) {
+				product.SetSourceSize(kW, kH);
+				product.Activate(Reader::P10gGrainLevel, true);
+				product.Activate(Reader::TemporalDetail, true);
+				product.SetWindow(10, 0);   // back 0, ahead 6
+			};
+
+			Product p(&src);
+			setup(p);
+			const Reached r = p.Prepare(100);
+			Assert::AreEqual(6, (int)r.ahead);
+			Assert::AreEqual(6, (int)r.degradedAhead);
+			Assert::AreEqual((uint64_t)6, p.GetStats().planesComputed, L"AFTER: each plane of the chain is computed once");
+			Assert::AreEqual((uint64_t)6, p.GetStats().reverseAbsent);
+			Assert::AreEqual((size_t)0, p.PlaneCount(), L"a degraded plane is not cached");
+
+			// BEFORE, in the same test: the same setup asked plane by plane with no hint (what Prepare did before this fix).
+			Product q(&src);
+			setup(q);
+			for (uint16_t k = 1; k <= 6; ++k)
+			{
+				PlanePtr pl;
+				Assert::IsTrue(q.Acquire(100, Dir::Ahead, k, pl) == Got::Ok);
+				Assert::IsTrue(pl->degraded);
+			}
+			Assert::AreEqual((uint64_t)21, q.GetStats().planesComputed, L"BEFORE: 1 + 2 + ... + 6 computes");
+
+			// The measurement: counts for one frame, and the time of 1000 frames each way (the log lines are the evidence).
+			const int rounds = 1000;
+			Product timedAfter(&src);
+			setup(timedAfter);
+			const auto afterStart = std::chrono::steady_clock::now();
+			for (int i = 0; i < rounds; ++i)
+				timedAfter.Prepare(100);
+			const double afterMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - afterStart).count();
+			Product timedBefore(&src);
+			setup(timedBefore);
+			const auto beforeStart = std::chrono::steady_clock::now();
+			for (int i = 0; i < rounds; ++i)
+				for (uint16_t k = 1; k <= 6; ++k)
+				{
+					PlanePtr pl;
+					timedBefore.Acquire(100, Dir::Ahead, k, pl);
+				}
+			const double beforeMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - beforeStart).count();
+			const std::string line = "GF-P4 S9 measurement: planes computed per frame AFTER " + std::to_string(p.GetStats().planesComputed) +
+				", BEFORE " + std::to_string(q.GetStats().planesComputed) + "; 1000 frames AFTER " + std::to_string(afterMs) + " ms (" +
+				std::to_string(timedAfter.GetStats().planesComputed) + " planes), BEFORE " + std::to_string(beforeMs) + " ms (" +
+				std::to_string(timedBefore.GetStats().planesComputed) + " planes)\n";
+			Logger::WriteMessage(line.c_str());
+			Assert::AreEqual((uint64_t)6000, timedAfter.GetStats().planesComputed, L"1000 frames, 6 computes each");
+			Assert::AreEqual((uint64_t)21000, timedBefore.GetStats().planesComputed, L"1000 frames, 21 computes each");
+		}
+
+		// GF-P4 S9: a hint that is not plane k - 1 of the same (t, direction) is ignored: the recursion runs and the plane is the
+		// no-hint plane. Here the hint is the AHEAD plane 1 for a BACK plane 2 (reverse pairs present: planes are cached).
+		TEST_METHOD(PrevHintIgnoredWhenNotPlaneKMinus1)
+		{
+			FakeSource src;
+			Product donor(&src);
+			ActivateBoth(donor);
+			PlanePtr hint;
+			Assert::IsTrue(donor.Acquire(100, Dir::Ahead, 1, hint) == Got::Ok);
+			Assert::IsTrue(hint != nullptr);
+
+			Product withHint(&src);
+			ActivateBoth(withHint);
+			PlanePtr hinted;
+			Assert::IsTrue(withHint.Acquire(100, Dir::Back, 2, hinted, nullptr, hint) == Got::Ok);
+			Assert::AreEqual((uint64_t)2, withHint.GetStats().planesComputed, L"the recursion ran: back 1 and back 2");
+
+			Product plain(&src);
+			ActivateBoth(plain);
+			PlanePtr unhinted;
+			Assert::IsTrue(plain.Acquire(100, Dir::Back, 2, unhinted) == Got::Ok);
+
+			const Sampled a = Product::Value(hinted, 64.0, 32.0);
+			const Sampled b = Product::Value(unhinted, 64.0, 32.0);
+			Assert::AreEqual(-2.0, (double)a.dx, 1e-3, L"back 2 is two pixels back");
+			Assert::AreEqual((double)b.dx, (double)a.dx, 1e-9, L"equal to the no-hint result");
+			Assert::AreEqual((double)b.dy, (double)a.dy, 1e-9);
+			Assert::AreEqual((double)b.trust, (double)a.trust, 1e-9);
 		}
 	};
 }
