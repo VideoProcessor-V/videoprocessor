@@ -66,6 +66,8 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 		else
 			ReleaseFallback(saturation.id.c_str());
 	}
+	// CF1-G7a: the calibration LUT stage's configured value (auto or not) from these settings, before the next frame's TakeLut.
+	calibrationHost.NoteConfiguredStage(settings.calibrationLutStageConfigured == "auto");
 	next.SetEntranceOnce(settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway);   // B3: consumers after the entrance
 	(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
 	pipelineSlots = next;

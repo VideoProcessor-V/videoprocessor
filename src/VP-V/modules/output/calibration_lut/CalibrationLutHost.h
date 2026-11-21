@@ -133,6 +133,10 @@ namespace CalibrationLutHost
 		// CF1-FIN SHOULD A: the colour segment, per frame, after its decisions: calibration_lut_stage is auto and whether a
 		// step that must follow the LUT wants to act (AutoKeepsVpStage). Read by the next TakeLut.
 		void SetAutoNeed(bool configuredAuto, bool stepWants) { autoConfigured = configuredAuto; autoStepWants = stepWants; }
+		// CF1-G7a: when settings apply (the settings seam, before the next TakeLut), the configured stage is taken at once:
+		// an explicit calibration_lut_stage = vp takes the VP stage on the first frame and right after an auto -> vp change,
+		// instead of one libplacebo frame until the colour segment's SetAutoNeed. The step need stays per frame (SetAutoNeed).
+		void NoteConfiguredStage(bool configuredAuto) { autoConfigured = configuredAuto; }
 
 		// The render path: the hook to push after the user PRE_OUTPUT shaders, or null.
 		const pl_hook* HookForFrame();
@@ -205,7 +209,7 @@ namespace CalibrationLutHost
 		CalibrationLutStage::Hook stage;
 		bool stageLogged = false;
 		bool stageFailed = false;   // the VP stage failed once: libplacebo's target LUT for the instance
-		bool autoConfigured = true;    // CF1-FIN SHOULD A (SetAutoNeed): until the first colour frame, auto with no step -> libplacebo LUT
+		bool autoConfigured = true;    // CF1-FIN SHOULD A (SetAutoNeed; CF1-G7a: NoteConfiguredStage when settings apply)
 		bool autoStepWants = false;
 		ReloadPolicy reload;
 
