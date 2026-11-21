@@ -525,6 +525,54 @@ namespace Tests
 			Assert::IsTrue(params.tone_mapping_function == &DvDolbyStyle::Function());
 		}
 
+		// GEM-008: the trims shader gets the OUTPUT transfer's kind (0 power, 1 BT.1886, 2 sRGB) and its parameter (the
+		// BT.1886 black offset b from ExtendedRange::DescribeTransfer with piecewise = true) next to dv_gamma. A power-law
+		// output keeps kind 0. Before the fix neither parameter existed (BT.1886 and sRGB were a pure power law).
+		TEST_METHOD(TrimsCarryTheOutputTransferKind)
+		{
+			using namespace DvHost;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			pl_color_map_params params = pl_color_map_default_params;
+			struct Case { enum pl_color_transfer trc; ExtendedRange::TransferKind kind; const wchar_t* name; };
+			const Case cases[] = {
+				{ PL_COLOR_TRC_BT_1886, ExtendedRange::TransferKind::Bt1886, L"BT.1886" },
+				{ PL_COLOR_TRC_SRGB, ExtendedRange::TransferKind::Srgb, L"sRGB" },
+				{ PL_COLOR_TRC_GAMMA24, ExtendedRange::TransferKind::Power, L"gamma 2.4" },
+				{ PL_COLOR_TRC_PQ, ExtendedRange::TransferKind::Power, L"PQ" },
+			};
+			for (const Case& c : cases)
+			{
+				Registry reg;
+				DvHostStage stage(DummyShaders(), reg.Engage(), reg.Release());
+				Run run;
+				pl_frame target = Target(c.trc, 100.0f);
+				target.color.hdr.min_luma = 0.05f;   // a non-zero black: the BT.1886 offset b is then non-zero
+				std::vector<const pl_hook*> hooks;
+				run.Frame(stage, image, target, &dm, params, hooks);
+				const std::wstring name = c.name;
+				Assert::IsTrue(run.lastTrimsWanted, (name + L": the trims act").c_str());
+				const double* kind = Param(run.lastParams, "dv_trc_kind");
+				const double* param = Param(run.lastParams, "dv_trc_param");
+				Assert::IsNotNull(kind, (name + L": dv_trc_kind is pushed").c_str());
+				Assert::IsNotNull(param, (name + L": dv_trc_param is pushed").c_str());
+				Assert::AreEqual(static_cast<double>(static_cast<int>(c.kind)), *kind, 0.0, (name + L": the transfer kind").c_str());
+				if (c.kind == ExtendedRange::TransferKind::Bt1886)
+				{
+					pl_color_space display = target.color;
+					pl_color_space_infer(&display);
+					ExtendedRange::Transfer expected{};
+					Assert::IsTrue(ExtendedRange::DescribeTransfer(display, true, expected));
+					Assert::AreEqual(static_cast<double>(expected.param), *param, 0.0, L"BT.1886 b from the inferred display");
+					Assert::IsTrue(*param > 0.0, L"a non-zero black gives a non-zero b");
+				}
+				else
+					Assert::AreEqual(0.0, *param, 0.0, (name + L": no parameter").c_str());
+				if (c.trc == PL_COLOR_TRC_GAMMA24)
+					Assert::AreEqual(2.4, ParamOr(run.lastParams, "dv_gamma", -1.0), 0.0, L"dv_gamma stays the power-law gamma");
+			}
+		}
+
 		TEST_METHOD(GpuUnpackSessionLogsOnceAndSwitchesTheSessionToTheCpuOnce)
 		{
 			DvGpuUnpackSession session;
