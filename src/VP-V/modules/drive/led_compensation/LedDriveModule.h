@@ -11,6 +11,7 @@
 #include <VP-V/core/FallbackStatus.h>
 
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <map>
 #include <memory>
@@ -486,6 +487,11 @@ namespace LedDrive
 		// The registration generation of demandHost at declaration: the skeleton erases the demand when that renderer goes away, so a
 		// changed host or generation means the declaration is gone and is made again (never per frame: a declaration re-graphs the lane).
 		std::atomic<uint64_t> demandGen{ 0 };
+		// GF-P3 (lead ruling): the aheadDepth of the declaration on demandHost, and the deepest walk (SetLookaheadDepth) since the stream
+		// began (ResetLookaheadLocked). Both guarded by `mutex`.
+		uint8_t demandAhead = 0;
+		size_t walkAheadSeen = 0;
+		uint8_t AheadNeedLocked() const;
 		void DeclareSceneDemand();
 		void WithdrawSceneDemand();
 		// Its own small lock (not `mutex`): the walk thread reads it per frame while the module's thread may hold `mutex` across a measure.
