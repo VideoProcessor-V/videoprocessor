@@ -71,8 +71,8 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(cmd.count("-fps_mode"), 3)
         self.assertIn("format=yuv420p10le,extractplanes=y", cmd[cmd.index("-filter_complex") + 1])
         self.assertEqual(sorted(sweep.prepared(plan)), sorted(x["id"] for x in plan.geoms))
-        a2 = sweep.parse_args(["render", "--work", os.path.join(self.dir, "work"), "--sweeps", "3"])
-        self.assertEqual(sweep.main(["render", "--work", os.path.join(self.dir, "work"), "--sweeps", "3"]) if not sweep.Plan(a2).problems else 1, 1)
+        rc = sweep.main(["render", "--work", os.path.join(self.dir, "work"), "--sweeps", "3"])
+        self.assertEqual(rc, 1)
 
     def test_camera_model_doubles(self):
         a0, a1 = self.args(), self.args("--camera-model-key", "camera_model")

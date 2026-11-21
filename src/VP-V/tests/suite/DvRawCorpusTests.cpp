@@ -9,6 +9,7 @@
 // committed: the corpus lives outside the checkout (VP_TEST_RAW_CORPUS_DIR).
 #include "pch.h"
 #include "CppUnitTest.h"
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <dv_loopback/DvLoopbackHarness.h>
 #include <VP-V/modules/control/diagnostics/RawCaptureRecorder.h>
@@ -287,17 +288,19 @@ namespace Tests
 		// Invariants on real captures: no rejected frames, scalar and AVX2
 		// planes identical, and - when the segment holds a dovi_tool export of
 		// the same title (rpu.json) - every decoded L1 tuple occurs in the RPU.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RecordedCorpusReplaysThroughTheTunnelPath)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Corpus")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RecordedCorpusReplaysThroughTheTunnelPath)
 		{
 			const std::string root = EnvString("VP_TEST_RAW_CORPUS_DIR");
-			if (root.empty())
-			{
-				Logger::WriteMessage("SKIP-NO-CORPUS RecordedCorpusReplaysThroughTheTunnelPath (set VP_TEST_RAW_CORPUS_DIR)\n");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Corpus,
+				"RecordedCorpusReplaysThroughTheTunnelPath", !root.empty(), "set VP_TEST_RAW_CORPUS_DIR"))
 				return;
-			}
 			const bool bless = EnvString("VP_TEST_RAW_CORPUS_BLESS") == "1";
 			const std::vector<std::string> segments = FindRawCorpusSegments(root);
 			Assert::IsFalse(segments.empty(), L"no corpus segments under VP_TEST_RAW_CORPUS_DIR");
+			size_t tunnelSegmentsChecked = 0;
 			for (const std::string& folder : segments)
 			{
 				RawCorpusSegment seg;
@@ -310,6 +313,7 @@ namespace Tests
 					Logger::WriteMessage((folder + ": not a tunnel container (" + seg.keys["encoding"] + "); skipped here, used by the LLDV comparison\n").c_str());
 					continue;
 				}
+				++tunnelSegmentsChecked;
 				const Replay replay = ReplaySegment(seg, true);
 				const Replay scalar = ReplaySegment(seg, true, true);
 				Logger::WriteMessage((folder + ": " + replay.report.Summary() + "\n").c_str());
@@ -355,6 +359,7 @@ namespace Tests
 					Assert::AreEqual<size_t>(0, missing, L"decoded L1 not found in dovi_tool's reading of the title");
 				}
 			}
+			Assert::IsTrue(tunnelSegmentsChecked > 0, L"at least one tunnel-capable corpus segment must be checked");
 		}
 
 		// A hardware loopback run (opt-in: VP_TEST_DV_LOOPBACK_DIR = the folder
@@ -362,14 +367,15 @@ namespace Tests
 		// The pattern is regenerated from the sender's header line, frames are
 		// identified by their stamps, and the run must be bit-exact; latency
 		// uses the QPC both processes logged (same PC).
+		BEGIN_TEST_METHOD_ATTRIBUTE(HardwareLoopbackRecordingAnalyses)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"LoopRig")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(HardwareLoopbackRecordingAnalyses)
 		{
 			const std::string root = EnvString("VP_TEST_DV_LOOPBACK_DIR");
-			if (root.empty())
-			{
-				Logger::WriteMessage("SKIP-NO-LOOPBACK HardwareLoopbackRecordingAnalyses (set VP_TEST_DV_LOOPBACK_DIR)\n");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Hardware,
+				"HardwareLoopbackRecordingAnalyses", !root.empty(), "set VP_TEST_DV_LOOPBACK_DIR"))
 				return;
-			}
 			std::ifstream sent(root + "\\sent.csv");
 			Assert::IsTrue(static_cast<bool>(sent), L"sent.csv missing (the VPV sender's log)");
 			std::string header;
@@ -403,12 +409,14 @@ namespace Tests
 			options.expected = [&sequence, &sentAt](uint32_t i, LoopFrame& f) { if (!sentAt.count(i)) return false; f = sequence.Make(i); return true; };
 			options.sentQpc = [&sentAt](uint32_t i) { const auto it = sentAt.find(i); return it == sentAt.end() ? int64_t(0) : it->second; };
 			options.qpcFrequency = qpcFrequency;
+			size_t analyzedSegments = 0;
 			for (const std::string& folder : FindRawCorpusSegments(root))
 			{
 				RawCorpusSegment seg;
 				std::string error;
 				if (!LoadRawCorpusSegment(folder, seg, error))
 					continue;
+				++analyzedSegments;
 				DvLoopbackAnalyzer analyzer(options);
 				analyzer.OnState(seg.MakeState(true));
 				std::vector<uint8_t> bytes;
@@ -423,6 +431,7 @@ namespace Tests
 				Assert::IsTrue(r.identified > 0, L"no stamped frame came back");
 				Assert::IsTrue(r.BitExact(), std::wstring(folder.begin(), folder.end()).c_str());
 			}
+			Assert::IsTrue(analyzedSegments > 0, L"at least one hardware loopback recording segment must be analysed");
 		}
 	};
 }

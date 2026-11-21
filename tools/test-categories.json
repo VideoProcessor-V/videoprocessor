@@ -165,6 +165,13 @@
    "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
   },
   {
+   "kind": "method",
+   "value": "DvTunnelUnpackHookTests::GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus",
+   "category": "Corpus",
+   "file": "src/VP-V/modules/input/signal/tests/DvTunnelUnpackHookTests.cpp",
+   "note": "Requires synthetic DV corpus (VP_TEST_DV_SYNTH_CORPUS); runs in dedicated Corpus job."
+  },
+  {
    "kind": "class",
    "value": "DvTunnelUnpackHookTests",
    "category": "GpuWarp",
