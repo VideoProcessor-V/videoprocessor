@@ -1,9 +1,9 @@
 {
  "schema": 1,
  "counts": {
-  "R": 8,
+  "R": 9,
   "X": 7,
-  "N": 13,
+  "N": 12,
   "NP": 33
  },
  "products": [
@@ -539,8 +539,14 @@
      ],
      "leads": [],
      "declared": true,
-     "status": "N",
-     "evidence": [],
+     "status": "R",
+     "evidence": [
+      [
+       "repair/grain_split/GrainSplitVariantOwner.h",
+       147,
+       "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
+      ]
+     ],
      "kind": "",
      "note": "INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)); flag ViewIsActual: C9b",
      "interim": "interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)"
