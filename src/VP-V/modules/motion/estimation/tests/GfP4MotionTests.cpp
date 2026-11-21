@@ -229,6 +229,43 @@ namespace GfP4MotionTest
 			Assert::IsTrue(body.find(released, reset) != std::string::npos, L"the row is released after dejudder.reset();");
 		}
 
+		// GF-P4 S4 (GC S-3), SOURCE SCAN ONLY (the renderer's Impl cannot be driven in a unit test): with de-judder off the policy
+		// decision is the ReleaseBranch outcome on every frame, the row is released there UNCONDITIONALLY (nothing between the
+		// outcome test and the release), and the only site that can (re-)engage product.motion_warp is RunDejudderEstimate, which the
+		// policy runner never reaches after a non-PairCheck outcome. So the row stays released over the following frames.
+		TEST_METHOD(MotionWarpStaysReleasedAfterDejudderOff)
+		{
+			const std::string runner = ReadSource("src\\VP-V\\modules\\motion\\consumers\\DejudderPolicyRunner.inl");
+			const std::string timeline = ReadSource("src\\VP-V\\modules\\motion\\consumers\\PhaseTimeline.inl");
+			const std::string estimate = ReadSource("src\\VP-V\\modules\\motion\\estimation\\VectorEngineEstimate.inl");
+			Assert::IsFalse(runner.empty() || timeline.empty() || estimate.empty(), L"the three sources are found from __FILE__");
+
+			// The release is the very statement the ReleaseBranch test guards (no condition or block in between).
+			const std::string guard = "outcome == VpMotion::DecisionOutcome::ReleaseBranch";
+			const size_t branch = runner.find(guard);
+			Assert::IsTrue(branch != std::string::npos, L"the ReleaseBranch outcome is tested");
+			const size_t release = runner.find("Released(\"product.motion_warp\")", branch);
+			Assert::IsTrue(release != std::string::npos);
+			Assert::AreEqual(std::string(guard + ") SyncFallback(FallbackCatalog::"), Collapsed(runner.substr(branch, release - branch)),
+				L"released unconditionally on the ReleaseBranch outcome");
+
+			// Every non-PairCheck outcome returns, so RunDejudderEstimate (the only engage site) is not reached.
+			const size_t pairCheck = runner.find("outcome != VpMotion::DecisionOutcome::PairCheck", release);
+			Assert::IsTrue(pairCheck != std::string::npos);
+			const size_t early = runner.find("return;", pairCheck);
+			Assert::IsTrue(early != std::string::npos);
+			Assert::AreEqual(std::string("outcome != VpMotion::DecisionOutcome::PairCheck)"), Collapsed(runner.substr(pairCheck, early - pairCheck)),
+				L"a non-PairCheck outcome returns at once");
+
+			// The engage form, ProductFallback("product.motion_warp", ...), exists only in RunDejudderEstimate.
+			const std::string engage = "ProductFallback(\"product.motion_warp\"";
+			Assert::AreEqual<size_t>(0, CountOf(runner, engage), L"the policy runner never engages the row");
+			Assert::AreEqual<size_t>(0, CountOf(timeline, engage), L"ReleaseDejudder never engages the row");
+			const std::string body = BodyBetween(estimate, "bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(", "}");
+			Assert::AreEqual<size_t>(1, CountOf(body, engage), L"the one engage site is inside RunDejudderEstimate");
+			Assert::AreEqual<size_t>(1, CountOf(estimate, engage), L"and nowhere else in the estimate file");
+		}
+
 		// GF-P4 S7 (a): the interface's DEFAULT ReadP2Record (a fake directory that only knows EngineFor) forwards to the engine's
 		// P2RecordEndingAt once and counts the one decline; with no engine it answers "engine absent" and counts nothing.
 		TEST_METHOD(FakeDirectoryDefaultReadUsesEngineFor)
