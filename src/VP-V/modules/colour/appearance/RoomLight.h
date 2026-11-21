@@ -199,6 +199,7 @@ namespace RoomLight
 		double veilNits = 0.0;
 		double appliedLux = 0.0;
 		bool fromSensor = false;
+		bool sensorHeld = false, sensorDecaying = false, sensorMissing = false;   // CAM-4: the sensor states that reach the Fallbacks line
 		std::string status;          // plain text for the Ctrl+I / Config status line
 	};
 
@@ -226,6 +227,9 @@ namespace RoomLight
 		r.appliedLux = smoother.Step(record.smoothedLux, atCut, now);
 		r.surround = SurroundForLux(r.appliedLux, p.anchors);
 		r.veilNits = VeilNits(r.appliedLux, p.reflectNitsPerLux, p.maxBlackNits);
+		r.sensorHeld = record.holding && !record.decaying && !record.lost;
+		r.sensorDecaying = record.decaying && !record.lost;
+		r.sensorMissing = record.lost || (!record.valid && !record.holding && !record.decaying);
 		if (record.lost || (!record.valid && !record.holding && !record.decaying))
 			r.status = "room: sensor (no reading; dark assumed)";
 		else if (record.decaying)

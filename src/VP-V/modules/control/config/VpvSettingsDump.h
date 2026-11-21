@@ -228,6 +228,13 @@ inline void VpvDumpRendererSettings(const RendererSettings& s, std::ostream& o)
 	Put(o, "ambientMaxBlackNits", s.ambientMaxBlackNits);
 	Put(o, "ambientTauUpSeconds", s.ambientTauUpSeconds);
 	Put(o, "ambientTauDownSeconds", s.ambientTauDownSeconds);
+	Put(o, "appearance", s.appearance);
+	Put(o, "appearanceStrength", s.appearanceStrength);
+	Put(o, "appearanceRoom", s.appearanceRoom);
+	Put(o, "appearanceScreenWhiteNits", s.appearanceScreenWhiteNits);
+	Put(o, "appearanceScreenWhiteMeasured", s.appearanceScreenWhiteMeasured);
+	Put(o, "appearanceHonourL11", s.appearanceHonourL11);
+	Put(o, "ambientAdaptReplaced", s.ambientAdaptReplaced);
 	Put(o, "intentBlack", s.intentBlack);
 	Put(o, "intentDisplay", s.intentDisplay);
 	Put(o, "interpolationGrain", s.interpolationGrain);

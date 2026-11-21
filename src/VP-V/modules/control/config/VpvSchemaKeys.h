@@ -175,6 +175,13 @@ namespace ProfileSchemaHooks
 			if (key == "ambient_max_black_nits") return V(IsNumberInRange(value, 0.0, 10.0));
 			if (key == "ambient_tau_up_s") return V(IsNumberInRange(value, 1.0, 600.0));
 			if (key == "ambient_tau_down_s") return V(IsNumberInRange(value, 1.0, 1800.0));
+			// CF-1 CAM-4 (colour.appearance, refs/125): the CAM16 room and screen adaptation.
+			if (key == "appearance") return V(IsChoice(value, { "off", "on" }));
+			if (key == "appearance_strength") return V(IsNumberInRange(value, 0.0, 1.0));
+			if (key == "appearance_room") return V(IsChoice(value, { "cinema", "living_low", "living_lit", "auto" }));
+			if (key == "appearance_screen_white_nits") return V(IsNumberInRange(value, 1.0, 1000.0));
+			if (key == "appearance_screen_white_measured") return V(IsChoice(value, { "off", "on" }));
+			if (key == "appearance_honour_l11") return V(IsChoice(value, { "off", "on" }));
 			if (key == "intent_black") return V(IsChoice(value, { "off", "report", "led_protect" }));
 			if (key == "intent_display") return V(IsChoice(value, { "off", "report" }));
 			if (key == "temporal_dither") return V(IsChoice(value, { "auto", "off", "libplacebo", "sigma_delta" }));

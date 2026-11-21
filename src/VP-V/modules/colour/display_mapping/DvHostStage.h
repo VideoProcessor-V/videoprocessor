@@ -47,6 +47,7 @@
 #include <VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h>
 #include <VP-V/modules/colour/display_mapping/DmCurve.h>
 #include <VP-V/modules/colour/appearance/AppearanceStage.h>
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
 #include <VP-V/modules/input/signal/DvCompareCapture.h>
 #include <VP-V/modules/input/signal/DvMetadataHold.h>
@@ -215,16 +216,30 @@ public:
 	}
 	void FinishAppearance(size_t collected)
 	{
-		if (m_appearanceDecision.active && collected == 0)
+		const bool shaderMissing = m_appearanceDecision.active && collected == 0;
+		auto sync = [this](const FallbackCatalog::Decision& d)
 		{
+			if (d.engaged)
+				m_engage(d.id.c_str(), d.reason);
+			else
+				m_release(d.id.c_str());
+		};
+		const bool live = m_appearanceDecision.active && !shaderMissing;
+		const RoomLight::Resolved& room = m_appearanceDecision.room;
+		// VPV-FALLBACK Colour appearance
+		sync(FallbackCatalog::AppearanceShader(shaderMissing));
+		// VPV-FALLBACK room light sensor
+		sync(FallbackCatalog::RoomLightSensor(live && room.sensorHeld, live && room.sensorDecaying, live && room.sensorMissing));
+		// VPV-FALLBACK appearance: L11 reference mode
+		sync(FallbackCatalog::AppearanceL11Reference(m_appearanceWanted && m_appearanceDecision.l11Ignored));
+		if (shaderMissing)
 			m_appearanceStatus = "appearance: shader missing (shaders\\vp_cam16_appearance.glsl did not load)";
-			// VPV-FALLBACK Colour appearance
-			m_engage("Colour appearance", "shaders\\vp_cam16_appearance.glsl did not load");
-		}
 		else
-		{
 			m_appearanceStatus = m_appearanceWanted ? m_appearanceDecision.status : std::string("appearance: off");
-			m_release("Colour appearance");
+		if (m_appearanceStatus != m_appearanceLogged)   // on change only
+		{
+			m_appearanceLogged = m_appearanceStatus;
+			DebugLog::Log("%s%s", m_appearanceStatus.c_str(), m_appearanceWanted ? " (replaces the gamma boost and saturation steps)" : "");
 		}
 	}
 
@@ -467,6 +482,7 @@ private:
 	std::string m_appearanceStatus = "appearance: off";
 	bool m_appearanceConfigured = false;
 	bool m_appearanceWanted = false;
+	std::string m_appearanceLogged;     // CAM-4: the status last logged (on change)
 	uint64_t m_cutsSeen = 0;
 	Engage m_engage;
 	Release m_release;

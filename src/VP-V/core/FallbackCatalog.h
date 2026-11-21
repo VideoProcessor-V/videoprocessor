@@ -616,6 +616,26 @@ namespace FallbackCatalog
 		return unsupported ? Engaged("DV display mapping: container", "unsupported capture container" + (container.empty() ? std::string() : " (" + container + ")") + ": libplacebo's mapping runs")
 		                   : Released("DV display mapping: container");
 	}
+	// CF-1 CAM-4 (colour.appearance): every state in which the appearance pass is on but not doing its full job is listed.
+	inline Decision AppearanceShader(bool missing, const std::string& path = "shaders\\vp_cam16_appearance.glsl")
+	{
+		return missing ? Engaged("Colour appearance", path + " did not load") : Released("Colour appearance");
+	}
+	inline Decision RoomLightSensor(bool held, bool decaying, bool missing)
+	{
+		if (!held && !decaying && !missing)
+			return Released("room light sensor");
+		return Engaged("room light sensor", missing ? "no reading, dark assumed" : decaying ? "sensor lost, value decaying toward dark" : "sensor lost, last value held");
+	}
+	inline Decision AppearanceL11Reference(bool ignored)
+	{
+		return ignored ? Engaged("appearance: L11 reference mode", "room light ignored") : Released("appearance: L11 reference mode");
+	}
+	inline Decision AmbientAdaptReplaced(bool replaced)
+	{
+		return replaced ? Engaged("ambient_adapt: replaced by appearance", "ambient_adapt is off while appearance is on (one owner of the room-light correction)")
+		                : Released("ambient_adapt: replaced by appearance");
+	}
 	// Adaptive downscale: GPU failures leave plain SSIM (w = 1); a missing SSimDownscaler leaves
 	// libplacebo's downscaler.
 	inline Decision OutputScaling(bool adaptiveRequested, unsigned long long newFailures, bool ssimShaderMissing)

@@ -64,6 +64,9 @@ namespace Vpv
             t.defaults.push_back({ "cnn_residual_stabilise", "on" });
             t.defaults.push_back({ "fbo_float32", "auto" });
             t.defaults.push_back({ "ambient_adapt", "off" });
+            t.defaults.push_back({ "appearance", "off" });
+            t.defaults.push_back({ "appearance_honour_l11", "on" });
+            t.defaults.push_back({ "appearance_screen_white_measured", "off" });
             t.defaults.push_back({ "occlusion_mask", "off" });
             t.slotList.push_back({ "input.capture", "Capture", "input", "built", 10, "capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: the render upload (<error>)" });
             t.slotList.push_back({ "input.signal", "Signal", "input", "built", 20, "Dolby Vision GPU unpack: CPU unpack for the session: <error> | DV metadata: <held | static>" });
@@ -261,7 +264,7 @@ namespace Vpv
             }
             {
                 Unit u;
-                u.id = "colour"; u.name = "Colour"; u.summary = "libplacebo tone and gamut mapping, below-black/above-white kept, SDR tone shape, Stage 13 appearance (planned).";
+                u.id = "colour"; u.name = "Colour"; u.summary = "libplacebo tone and gamut mapping, below-black/above-white kept, SDR tone shape, CAM16 room and screen appearance (off by default).";
                 u.untieredReason = "libplacebo does the colour in every tier; the cheaper combined HDR->SDR LUT for Classic/Low is not yet implemented.";
                 u.more = "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Rendering and Color / Output. The calibration LUT file: Color / Output.";
                 u.slotIds.push_back("colour.tone_gamut");
@@ -277,8 +280,10 @@ namespace Vpv
                 u.toggles.push_back({ "sdr_tone_shape", "SDR tone shape", { "off", "knee" }, "colour.sdr_tone_shape" });
                 u.toggles.push_back({ "fbo_float32", "Full precision for every tier (32-bit float intermediates)", { "auto", "on", "off" }, "colour.tone_gamut" });
                 u.toggles.push_back({ "ambient_adapt", "Room-light adaptation (experimental)", { "on", "off" }, "colour.appearance" });
+                u.toggles.push_back({ "appearance", "Room and appearance (CAM16, experimental)", { "on", "off" }, "colour.appearance" });
+                u.toggles.push_back({ "appearance_screen_white_measured", "Appearance: screen white measured", { "on", "off" }, "colour.appearance" });
+                u.toggles.push_back({ "appearance_honour_l11", "Appearance: honour the L11 reference mode", { "on", "off" }, "colour.appearance" });
                 u.planned.push_back({ "combined_hdr_lut", "Combined HDR->SDR LUT (low-end cards)", "colour.tone_gamut" });
-                u.planned.push_back({ "appearance_adaptation", "Stage 13 appearance (dim screen)", "colour.appearance" });
                 t.units.push_back(u);
             }
             {

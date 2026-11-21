@@ -86,6 +86,9 @@
     "cnn_residual_stabilise": "on",
     "fbo_float32": "auto",
     "ambient_adapt": "off",
+    "appearance": "off",
+    "appearance_honour_l11": "on",
+    "appearance_screen_white_measured": "off",
     "occlusion_mask": "off"
   },
   "units": [
@@ -577,7 +580,7 @@
     {
       "id": "colour",
       "name": "Colour",
-      "summary": "libplacebo tone and gamut mapping, below-black/above-white kept, SDR tone shape, Stage 13 appearance (planned).",
+      "summary": "libplacebo tone and gamut mapping, below-black/above-white kept, SDR tone shape, CAM16 room and screen appearance (off by default).",
       "slots": [
         "colour.tone_gamut",
         "colour.extended_range",
@@ -645,6 +648,33 @@
             "off"
           ],
           "slot": "colour.appearance"
+        },
+        {
+          "key": "appearance",
+          "label": "Room and appearance (CAM16, experimental)",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "colour.appearance"
+        },
+        {
+          "key": "appearance_screen_white_measured",
+          "label": "Appearance: screen white measured",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "colour.appearance"
+        },
+        {
+          "key": "appearance_honour_l11",
+          "label": "Appearance: honour the L11 reference mode",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "colour.appearance"
         }
       ],
       "planned": [
@@ -652,11 +682,6 @@
           "key": "combined_hdr_lut",
           "label": "Combined HDR->SDR LUT (low-end cards)",
           "slot": "colour.tone_gamut"
-        },
-        {
-          "key": "appearance_adaptation",
-          "label": "Stage 13 appearance (dim screen)",
-          "slot": "colour.appearance"
         }
       ],
       "more_settings": "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Rendering and Color / Output. The calibration LUT file: Color / Output."

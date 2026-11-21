@@ -1591,15 +1591,15 @@
         "delay_share": "0 frames; a few dozen ALU ops per pixel",
         "lookahead": "none"
       },
-      "settings_keys": [],
-      "planned_keys": [
-        "appearance_adaptation",
-        "appearance_strength",
-        "appearance_reference_white_nits",
-        "appearance_reference_surround",
+      "settings_keys": [
+        "appearance",
+        "appearance_honour_l11",
+        "appearance_room",
+        "appearance_screen_white_measured",
         "appearance_screen_white_nits",
-        "appearance_screen_surround"
+        "appearance_strength"
       ],
+      "planned_keys": [],
       "tiers": "every tier when on (cost ~0)",
       "fallback": {
         "entry": "Colour appearance (shader missing: shaders\\vp_cam16_appearance.glsl did not load)",
@@ -1633,7 +1633,10 @@
       "origin": "vp",
       "original_pathway": {
         "mode": "off",
-        "settings": {}
+        "settings": {
+          "appearance": "off",
+          "appearance_room": "cinema"
+        }
       },
       "zone": "output_hooks",
       "movable": true

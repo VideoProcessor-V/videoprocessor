@@ -25,9 +25,9 @@ namespace OriginalPathway
 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
 	};
 
-	inline const std::array<Override, 72>& Overrides()
+	inline const std::array<Override, 74>& Overrides()
 	{
-		static const std::array<Override, 72> table = { {
+		static const std::array<Override, 74> table = { {
 			{ "capture_path", "standard", "input.capture" },
 			{ "capture_upload", "render", "input.capture" },
 			{ "native_rgb_ingest", "off", "input.capture" },
@@ -87,6 +87,8 @@ namespace OriginalPathway
 			{ "intent_display", "off", "control.config" },
 			{ "intent_black", "off", "control.config" },
 			{ "ambient_adapt", "off", "control.config" },
+			{ "appearance", "off", "colour.appearance" },        // CF-1 CAM-4: VP addition, never in Bill's pathway
+			{ "appearance_room", "cinema", "colour.appearance" },
 			{ "temporal_dither", "libplacebo", "output.dither" },
 			{ "output_segments_merged", "off", "output.dither" },   // VP's merged output hooks: never in Bill's pathway
 			{ "dither_need", "off", "output.dither" },   // per-block extra dither amplitude: VP addition, not in Bill's pathway

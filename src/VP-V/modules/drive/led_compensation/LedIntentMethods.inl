@@ -32,6 +32,7 @@ void LibplaceboVideoRenderer::Impl::ConfigureIntentAmbient()
 	std::lock_guard<std::mutex> guard(vpv.led.intent.intentMutex);
 	vpv.led.intent.intentBlackPublished = s.intentBlack;
 	vpv.led.intent.intentDisplayPublished = s.intentDisplay;
+	vpv.led.intent.roomLightFeed = s.appearance && !s.pipelineOriginalPathway;   // CF-1 CAM-4: the appearance stage reads the one sensor filter
 	const AmbientAdapt::Settings& was = vpv.led.intent.ambientSettings;
 	if (was.enabled != ambient.enabled || was.strength != ambient.strength ||
 		was.screenReflectNitsPerLux != ambient.screenReflectNitsPerLux || was.maxBlackNits != ambient.maxBlackNits ||

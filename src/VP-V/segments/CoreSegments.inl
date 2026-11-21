@@ -53,6 +53,13 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 		EngageFallback(PresentationOwner::FallbackId(), PresentationOwner::WithheldText());
 	else
 		ReleaseFallback(PresentationOwner::FallbackId());
+	{   // CF-1 CAM-4: appearance owns the room-light correction; ambient_adapt was forced off (VpvRendererSettings PostLoad), said here
+		const FallbackCatalog::Decision replaced = FallbackCatalog::AmbientAdaptReplaced(settings.ambientAdaptReplaced);
+		if (replaced.engaged)
+			EngageFallback(replaced.id.c_str(), replaced.reason);   // VPV-FALLBACK ambient_adapt: replaced by appearance
+		else
+			ReleaseFallback(replaced.id.c_str());
+	}
 	next.SetEntranceOnce(settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway);   // B3: consumers after the entrance
 	(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
 	pipelineSlots = next;

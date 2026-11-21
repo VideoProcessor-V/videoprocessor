@@ -64,6 +64,12 @@ inline bool IsVpvOnlyKey(const QString& key)
         "anti_pump_band",
         "apl_persist_ms",
         "apl_weights",
+        "appearance",
+        "appearance_honour_l11",
+        "appearance_room",
+        "appearance_screen_white_measured",
+        "appearance_screen_white_nits",
+        "appearance_strength",
         "applied",
         "apply",
         "argyll_path",
@@ -579,6 +585,10 @@ inline bool IsVpvChoiceKey(const QString& key)
         "adaptive_motion",
         "adaptive_upscale",
         "adaptive_upscale_superres_scale",
+        "appearance",
+        "appearance_honour_l11",
+        "appearance_room",
+        "appearance_screen_white_measured",
         "cadence_class_fixes",
         "capture_path",
         "capture_upload",
@@ -720,6 +730,7 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
             { "cut_soft_reset", "on" },   // C5 batch B (owner 2026-11-15 08:35 U7 Q4): default on, high bar
             // Intent remainder (2026-10-17): all experimental, default off.
             { "intent_motion", "off" }, { "intent_motion_policy", "display" }, { "ambient_adapt", "off" },
+            { "appearance", "off" }, { "appearance_honour_l11", "on" }, { "appearance_screen_white_measured", "off" }, { "appearance_room", "cinema" },   // CF-1 CAM-4
             { "intent_black", "off" }, { "intent_display", "off" } };
         for (const auto& entry : choiceDefaults)
             if (key == QLatin1String(entry.first)) { out = QString::fromLatin1(entry.second); return true; }
@@ -738,6 +749,7 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
                 key == QStringLiteral("intent_content_hold_seconds") ||
                 key == QStringLiteral("detail_pulse_cap") || key == QStringLiteral("texture_restore_cap") ||
                 key.startsWith(QStringLiteral("intent_motion_")) || key == QStringLiteral("intent_ease_s") ||
+                key.startsWith(QStringLiteral("appearance_")) ||
                 key.startsWith(QStringLiteral("ambient_"))) &&
             key != QStringLiteral("dejudder_preset"))
         { out = QString(); return true; }

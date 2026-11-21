@@ -27,6 +27,12 @@ CAM16 Stevens/Hunt appearance matching from reference to dim-screen conditions (
 | `baud` | [ambient] | int | 1200 to 921600 | 115200 | Config > General page > Room lights card > Sensor speed (baud) | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | Serial speed of the light sensor. | not tiered |
 | `ambient_adapt` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | VP-V > Colour > Main > Room-light adaptation (experimental); also VP Renderer > Rendering > Experimental content-adaptive settings (upstream copy greyed while VP-V is on) | Original pathway sets `off` (ADR-0019) | Experimental ambient adaptation: renders to the black the room light leaves visible (screen reflection of the room light adds to the display's black), using the [ambient] light sensor (or manual lux_lit), applied at cuts with slow time constants; never moves code 0 or below-black. status line: Appearance: off (shader failed) | same on all (not tiered) |
 | `ambient_adapt_strength` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 1 | VP-V > Colour > Advanced > Room-light adaptation: values | n/a (VP-only): unchanged by the Original pathway | How much of the room light's veil is rendered into the black (0 changes nothing) | same on all (not tiered) |
+| `appearance` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | VP-V > Colour > Main > Room and appearance (experimental) | Original pathway sets `off` (ADR-0019) | CAM16 room and screen adaptation; replaces the gamma boost and saturation steps and takes over from `ambient_adapt` while on. OFF is shown on the Config card; a lost shader, a lost room sensor, L11 reference mode and the `ambient_adapt` exclusion are listed under Fallbacks engaged | same on all (not tiered) |
+| `appearance_room` | profile ([vprenderer.Default] and matching profiles) | enum | cinema, living_low, living_lit, auto | cinema | VP-V > Colour > Main > Room and appearance (experimental) | Original pathway sets `cinema` (ADR-0019) | The room the picture is adapted to; auto follows the room light sensor (no reading: dark assumed, listed under Fallbacks engaged) | same on all (not tiered) |
+| `appearance_strength` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 1 | VP-V > Colour > Main > Room and appearance (experimental) | n/a (VP-only): unchanged by the Original pathway | How much of the adaptation is applied (0 leaves the picture unchanged) | same on all (not tiered) |
+| `appearance_screen_white_nits` | profile ([vprenderer.Default] and matching profiles) | float | 1 - 1000 | 48 | VP-V > Colour > Main > Room and appearance (experimental) | n/a (VP-only): unchanged by the Original pathway | The screen white the picture is adapted to, used as given until the measured switch is on | same on all (not tiered) |
+| `appearance_screen_white_measured` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | VP-V > Colour > Main > Room and appearance (experimental) | n/a (VP-only): unchanged by the Original pathway | Says the screen white above was measured; while off the Config card says it is not measured | same on all (not tiered) |
+| `appearance_honour_l11` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | VP-V > Colour > Main > Room and appearance (experimental) | n/a (VP-only): unchanged by the Original pathway | A picture that carries the L11 reference-mode flag keeps reference viewing conditions: the room is ignored (listed under Fallbacks engaged) | same on all (not tiered) |
 | `ambient_max_black_nits` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 10.0 | 1 | VP-V > Colour > Advanced > Room-light adaptation: values | n/a (VP-only): unchanged by the Original pathway | The black level (nits) the adaptation never exceeds | same on all (not tiered) |
 | `ambient_screen_reflect` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 0.01 | VP-V > Colour > Advanced > Room-light adaptation: values | n/a (VP-only): unchanged by the Original pathway | Light the screen reflects back, cd/m2 per lux of room light; effective black = display black + strength x lux x this | same on all (not tiered) |
 | `ambient_tau_down_s` | profile ([vprenderer.Default] and matching profiles) | float | 1.0 - 1800.0 | 90 | VP-V > Colour > Advanced > Room-light adaptation: values | n/a (VP-only): unchanged by the Original pathway | Seconds the target takes to follow a falling room light | same on all (not tiered) |
@@ -34,7 +40,7 @@ CAM16 Stevens/Hunt appearance matching from reference to dim-screen conditions (
 
 
 - Existing keys: (none)
-- Planned keys: `appearance_adaptation`, `appearance_strength`, `appearance_reference_white_nits`, `appearance_reference_surround`, `appearance_screen_white_nits`, `appearance_screen_surround`
+- Keys: `appearance`, `appearance_strength`, `appearance_room`, `appearance_screen_white_nits`, `appearance_screen_white_measured`, `appearance_honour_l11`
 - Tiers: every tier when on (cost ~0)
 
 ## Fallbacks
@@ -93,7 +99,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Settings
 
 - Keys: none yet.
-- Planned keys (not yet implemented): `appearance_adaptation`, `appearance_strength`, `appearance_reference_white_nits`, `appearance_reference_surround`, `appearance_screen_white_nits`, `appearance_screen_surround`.
+- Keys: `appearance`, `appearance_strength`, `appearance_room`, `appearance_screen_white_nits`, `appearance_screen_white_measured`, `appearance_honour_l11` (CAM-4). While `appearance` runs, `ambient_adapt` is forced off and listed under Fallbacks engaged (one owner of the room-light correction).
 - Tiers: every tier when on (cost ~0).
 - VP-V page, Colour tab: not tiered (libplacebo does the colour in every tier; the cheaper combined HDR->SDR LUT for Classic/Low is not yet implemented.).
 - Listed under the tier: `ambient_adapt`.

@@ -223,6 +223,7 @@ namespace VpvRenderer
 		double appearanceScreenWhiteNits = 48.0;          // the placeholder until measured
 		bool appearanceScreenWhiteMeasured = false;
 		bool appearanceHonourL11 = true;
+		bool ambientAdaptReplaced = false;                // CAM-4: ambient_adapt was on and appearance (the one owner) switched it off (PostLoad)
 		// Film grain (owner 2026-10-17: never averaged or interpolated away; each switch's
 		// default is the faithful path, the other value the established one byte for byte;
 		// docs/audit/grain-audit-2026-10-17.md): interpolation_grain, deband_vp_grain_guard,

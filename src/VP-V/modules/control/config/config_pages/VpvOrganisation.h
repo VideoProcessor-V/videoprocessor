@@ -194,6 +194,11 @@ namespace Vpv
 			{ "colour", "room", "Room-light adaptation (experimental)",
 				"Adjusts black and contrast to the room light the sensor measures.", false, false, {
 				{ K::Toggle, "ambient_adapt" } } },
+			{ "colour", "appearance", "Room and appearance (experimental)",
+				"Adapts the picture to the room and to the screen white (CAM16). While on it replaces the gamma boost and the saturation steps and takes over from room-light adaptation.", false, false, {
+				{ K::Toggle, "appearance" }, { K::Text, "appearance_room" }, { K::Text, "appearance_strength" }, { K::Text, "appearance_screen_white_nits" },
+				{ K::Toggle, "appearance_screen_white_measured" }, { K::Toggle, "appearance_honour_l11" },
+				{ K::Note, "@appearance_status" } } },
 			{ "colour", "upstream", "Tone mapping and display (Bill's pages)", "Where the colour settings that are not VP-V's live.", false, false, {
 				{ K::Note, "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Rendering (Tone mapping cards) and "
 					"VP Renderer > Color / Output. The calibration LUT file: Color / Output; where it runs: the Pipeline (expert) tab." },

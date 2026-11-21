@@ -50,6 +50,7 @@ namespace AppearanceStage
 	struct Decision
 	{
 		bool active = false;                   // the hook runs this frame
+		bool l11Ignored = false;               // CAM-4: the L11 reference-mode flag held the room back this frame
 		double referenceWhiteNits = 100.0;
 		Cam16::Cam16Uniforms uniforms = {};
 		RoomLight::Resolved room;
@@ -142,6 +143,7 @@ namespace AppearanceStage
 		{
 			// The picture asks for reference viewing conditions: the room is not applied (and its slow adaptation restarts).
 			smoother.Reset();
+			d.l11Ignored = true;
 			d.status = "appearance on: L11 reference mode: room light ignored";
 			return d;
 		}

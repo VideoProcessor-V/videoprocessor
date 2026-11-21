@@ -193,6 +193,7 @@ namespace VpvRendererSettings
 		readChoice("capture_upload", settings.captureUpload, { "auto", "render", "early" });
 		readChoice("dv_display_mapping", settings.dvDisplayMapping, { "vp", "original" });   // CF-1 P3
 		readChoice("dv_tone_mapping", settings.dvToneMapping, { "libplacebo", "dolby_style" });   // feat/dv-l8
+		readChoice("appearance_room", settings.appearanceRoom, { "cinema", "living_low", "living_lit", "auto" });   // CF-1 CAM-4
 		config.TryGetString(rule.section, "dv_compare_capture_folder", settings.dvCompareCaptureFolder);   // feat/dv-l8 WIP
 		config.TryGetString(rule.section, "source_geometry_detect", settings.sourceGeometryDetect);   // SID r2: recognition set
 		readChoice("source_range", settings.sourceRange, { "auto", "full", "limited" });
@@ -312,7 +313,9 @@ namespace VpvRendererSettings
 			std::make_tuple("ambient_screen_reflect", 0.0, 1.0, &settings.ambientScreenReflect),
 			std::make_tuple("ambient_max_black_nits", 0.0, 10.0, &settings.ambientMaxBlackNits),
 			std::make_tuple("ambient_tau_up_s", 1.0, 600.0, &settings.ambientTauUpSeconds),
-			std::make_tuple("ambient_tau_down_s", 1.0, 1800.0, &settings.ambientTauDownSeconds) })
+			std::make_tuple("ambient_tau_down_s", 1.0, 1800.0, &settings.ambientTauDownSeconds),
+			std::make_tuple("appearance_strength", 0.0, 1.0, &settings.appearanceStrength),   // CF-1 CAM-4
+			std::make_tuple("appearance_screen_white_nits", 1.0, 1000.0, &settings.appearanceScreenWhiteNits) })
 		{
 			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
 				continue;
@@ -691,7 +694,10 @@ namespace VpvRendererSettings
 		}
 		// Intent interpreter items 2-5 (2026-10-17).
 		for (const auto& toggle : { std::make_pair("intent_motion", &settings.intentMotion),
-			std::make_pair("ambient_adapt", &settings.ambientAdapt) })
+			std::make_pair("ambient_adapt", &settings.ambientAdapt),
+			std::make_pair("appearance", &settings.appearance),   // CF-1 CAM-4
+			std::make_pair("appearance_screen_white_measured", &settings.appearanceScreenWhiteMeasured),
+			std::make_pair("appearance_honour_l11", &settings.appearanceHonourL11) })
 		{
 			if (!tryChoice(toggle.first, raw))
 				continue;
@@ -1017,6 +1023,15 @@ namespace VpvRendererSettings
 				settings.dvTrims && !trimsSlotOff;
 			settings.calibrationLutStage = CalibrationLutHost::ResolveStage(settings.calibrationLutStage, dmStepsRun);
 		}
+		// CF-1 CAM-4: colour.appearance owns the room-light correction (doc 115 A2): while it runs (appearance on, the slot not in
+		// pipeline_slots_off, never on the Original pathway) ambient_adapt is forced off, and the Fallbacks line says so.
+		{
+			const bool appearanceSlotOff = settings.pipelineSlotsOff.find("colour.appearance") != std::string::npos;
+			const bool appearanceRuns = settings.appearance && !settings.pipelineOriginalPathway && !appearanceSlotOff;
+			settings.ambientAdaptReplaced = appearanceRuns && settings.ambientAdapt;
+			if (settings.ambientAdaptReplaced)
+				settings.ambientAdapt = false;
+		}
 		// Motion + queue/timing slots switched off run in their upstream form (owner 2026-10-25).
 		SlotSwitchSettings::Apply(SlotSwitchSettings::FromText(settings.pipelineSlotsOff), settings);
 		// Batch B Q3: the motion engine is one switch; OFF forces de-judder and hiccup smoothing off, visibly (the line is the Ctrl+I text).
@@ -1090,6 +1105,8 @@ namespace VpvRendererSettings
 		settings.intentDisplay = false;                    // key=intent_display
 		settings.intentBlack = BlackIntentMode::Off;       // key=intent_black
 		settings.ambientAdapt = false;                     // key=ambient_adapt
+		settings.appearance = false;                       // key=appearance
+		settings.appearanceRoom = "cinema";                // key=appearance_room
 		settings.temporalDither = "libplacebo";            // key=temporal_dither
 		settings.outputSegmentsMerged = false;             // key=output_segments_merged
 		settings.renderAhead = false;                      // key=render_ahead
@@ -1245,6 +1262,12 @@ namespace VpvRendererSettings
 			<< settings.ambientMaxBlackNits << '|'
 			<< settings.ambientTauUpSeconds << '|'
 			<< settings.ambientTauDownSeconds << '|'
+			<< settings.appearance << '|'
+			<< settings.appearanceStrength << '|'
+			<< settings.appearanceRoom << '|'
+			<< settings.appearanceScreenWhiteNits << '|'
+			<< settings.appearanceScreenWhiteMeasured << '|'
+			<< settings.appearanceHonourL11 << '|'
 			<< static_cast<int>(settings.intentBlack) << '|'
 			<< settings.intentDisplay << '|'
 			<< settings.temporalDither << '|'
@@ -1446,6 +1469,10 @@ namespace VpvRendererSettings
 			current.ambientScreenReflect != next.ambientScreenReflect || current.ambientMaxBlackNits != next.ambientMaxBlackNits ||
 			current.ambientTauUpSeconds != next.ambientTauUpSeconds ||
 			current.ambientTauDownSeconds != next.ambientTauDownSeconds, "ambient_adapt");
+		changed(current.appearance != next.appearance || current.appearanceStrength != next.appearanceStrength ||
+			current.appearanceRoom != next.appearanceRoom || current.appearanceScreenWhiteNits != next.appearanceScreenWhiteNits ||
+			current.appearanceScreenWhiteMeasured != next.appearanceScreenWhiteMeasured ||
+			current.appearanceHonourL11 != next.appearanceHonourL11, "appearance");
 		changed(current.intentBlack != next.intentBlack, "intent_black");
 		changed(current.intentDisplay != next.intentDisplay, "intent_display");
 		changed(current.temporalDither != next.temporalDither, "temporal_dither");
@@ -1604,6 +1631,12 @@ namespace VpvRendererSettings
 		<< "ambient_max_black_nits=" << s.ambientMaxBlackNits << "\n"
 		<< "ambient_tau_up_s=" << s.ambientTauUpSeconds << "\n"
 		<< "ambient_tau_down_s=" << s.ambientTauDownSeconds << "\n"
+		<< "appearance=" << (s.appearance ? "on" : "off") << "\n"
+		<< "appearance_strength=" << s.appearanceStrength << "\n"
+		<< "appearance_room=" << s.appearanceRoom << "\n"
+		<< "appearance_screen_white_nits=" << s.appearanceScreenWhiteNits << "\n"
+		<< "appearance_screen_white_measured=" << (s.appearanceScreenWhiteMeasured ? "on" : "off") << "\n"
+		<< "appearance_honour_l11=" << (s.appearanceHonourL11 ? "on" : "off") << "\n"
 		<< "intent_black=" << ToString(s.intentBlack) << "\n"
 		<< "intent_display=" << (s.intentDisplay ? "report" : "off") << "\n"
 		<< "temporal_dither=" << s.temporalDither << "\n"

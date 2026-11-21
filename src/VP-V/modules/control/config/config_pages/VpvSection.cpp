@@ -8,6 +8,7 @@
 #include "VpvTierTable.generated.h"
 
 #include <VP-V/core/DelayBudgetLadder.h>
+#include <VP-V/modules/colour/appearance/AppearanceStatus.h>
 
 #include <QAbstractButton>
 #include <QAbstractItemModel>
@@ -555,6 +556,15 @@ namespace Vpv
 					"its GPU work runs after the frame is submitted, so the same clip gives the same picture every time and "
 					"the work cannot disturb the frame in flight. The switch lands on the next cut, read ahead. Off: the earlier "
 					"mode, where the decision arrives whenever the GPU finishes." },
+				// CF-1 CAM-4 (colour.appearance): the room, the strength and the screen white of the CAM16 pass.
+				{ "appearance_room", "Room (cinema | living_low | living_lit | auto)", "cinema",
+					"Default cinema (a dark room). living_low: a living room with low light (dim). living_lit: a lit living room (average). "
+					"auto: follow the room light sensor (the Dynamic Drive ambient sensor); with no reading the room is taken as dark and the "
+					"Fallbacks line says so." },
+				{ "appearance_strength", "Appearance strength (0 to 1)", "1",
+					"Default 1: the full adaptation. 0 leaves the picture unchanged; values between blend the adaptation in." },
+				{ "appearance_screen_white_nits", "Screen white (nits, 1 to 1000)", "48",
+					"The luminance of the screen white the picture is adapted to. Used as given until the measured switch below is on."},
 			};
 			for (const TextRowSpec& r : kRows)
 				if (std::string(r.key) == key) return &r;
@@ -988,6 +998,20 @@ namespace Vpv
 					break;
 				case ItemKind::Note:
 				{
+					if (id == QStringLiteral("@appearance_status"))
+					{
+						// CF-1 CAM-4: the live state of the appearance setting, OFF included (never silent).
+						auto* status = Help(QString());
+						status->setObjectName(ObjectName(unitId + QStringLiteral(".appearance.status")));
+						status->setProperty("help", true);
+						card.Add(status);
+						state->refreshers.push_back([state, status]()
+						{
+							const auto on = [state](const char* k) { return state->Get(k) == "on"; };
+							status->setText(QString::fromStdString(AppearanceStatus::ConfigLine(on("appearance"), on("appearance_screen_white_measured"), on("ambient_adapt"))));
+						});
+						break;
+					}
 					auto* note = Help(id);
 					note->setProperty("help", true);
 					card.Add(note);
