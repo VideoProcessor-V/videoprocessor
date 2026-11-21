@@ -215,5 +215,10 @@ the source crop) through `AdaptiveDownscaleStage::Host::grainSource`. Without a 
 missing, or no usable block on the frame) the private Laplacian partial sums (`MEASURE_BODY`, `FINAL_BODY_A`) give the energy and
 the stage status says "Adaptive grain: own estimate" (`LastGrainFromSharedProducts()`); nothing is latched. Once the host
 supplies the source on every frame the private partial terms (`MEASURE_BODY` lap / flat_px, the `AD_P10`-less branch) are deleted.
-The catalog row 3 path is `VP-V/modules/scaling/output/AdaptiveDownscale`. Registered change: FIX-X5-GRAIN-P10 (before / after
+The catalog row 3 path is `VP-V/modules/scaling/output/AdaptiveDownscale`. Row 3 declares only what this module reads today
+(check_private_copies X8, 2026-11-21 A20-CB fix): it has no skeleton `Acquire` of P4, P10 or P11, P4 is not read at all, and P10 /
+P11 arrive only through `Host::grainSource`, which no host supplies yet. So the row declares none of the three. Its lag-1 reads
+(P14 source identity, P14g source geometry) are unchanged. P10 and P11 are declared again when the module acquires them itself
+(REBASE-ON-CA, with C5+A). The design decision is that a declaration follows the code, so the product graph never orders or
+keeps a product for a read that does not happen. Registered change: FIX-X5-GRAIN-P10 (before / after
 grain_scale trace and X5AbCapture CSV on the D8 clip set and two grainy clips; the calibration check is a GPU measurement).

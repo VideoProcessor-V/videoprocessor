@@ -323,8 +323,12 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         r.push_back(MakeRow(11, "chroma from luma", "VP-V/modules/scaling/chroma_upscale", PathwayUnit::Scaling, 10,
                             { kP10GrainSplit, kP10cGrainSplitChroma, kP13SourceRing }, lower, "product.chroma_cfl", false,
                             { kSourceGeometry }));
+        // Row 3 declares only what the module reads today (X8): no skeleton Acquire of P4, P10 or P11 exists in
+        // scaling/output. P4 is not read at all; P10 N and P11 S0/S4 reach the grain pass only through
+        // AdaptiveDownscaleStage::Host::grainSource, which no host supplies yet (the private Laplacian runs, visibly).
+        // The P10 / P11 reads are declared again with the module's own Acquire wiring (REBASE-ON-CA, C5+A).
         r.push_back(MakeRow(3, "adaptive downscale (grain map)", "VP-V/modules/scaling/output/AdaptiveDownscale",
-                            PathwayUnit::Scaling, 20, { kP11RegionBlockStats, kP10GrainSplit, kP4SourceStats }, own,
+                            PathwayUnit::Scaling, 20, {}, own,
                             "product.adaptive_downscale", false, { kSourceIdentity, kSourceGeometry }));
         // Drive and output
         r.push_back(MakeRow(5, "LED look-ahead", "VP-V/modules/drive/led_measure", PathwayUnit::Drive, 10, { kP4SourceStats },
