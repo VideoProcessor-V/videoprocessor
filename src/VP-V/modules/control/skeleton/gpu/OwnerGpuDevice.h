@@ -15,6 +15,7 @@
 // went away (counted: Stats().forgotten). The destructor calls no libplacebo function (Release() first while the device lives).
 // Render thread, except the keep-alive (any thread: it only queues).
 
+#include <VP-V/core/GpuAttributionPl.h>
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/control/skeleton/GpuProductTexBackend.h>
 
@@ -57,7 +58,10 @@ namespace Vpv
 			void* OwnerDispatch() const override
 			{
 				if (m_dispatch == nullptr && m_gpu != nullptr)
+				{
 					m_dispatch = pl_dispatch_create(m_gpu->log, m_gpu);
+					GpuAttribution::Watch(m_dispatch, "owner_gpu");   // GF-P5 S11: compute-once detector 3 sees GPU owner fills too
+				}
 				return static_cast<void*>(m_dispatch);
 			}
 			uint64_t OwnerMaxSharedMemory() const override { return m_gpu != nullptr ? uint64_t(m_gpu->glsl.max_shmem_size) : 0u; }
