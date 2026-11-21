@@ -1296,7 +1296,10 @@ namespace Vpv
 				// the old state's seal hooks, tap and lane belong to the dead one.
 				Teardown(st, false, false);   // the dead renderer's device objects are not ours to destroy
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
+				{
+					std::lock_guard<std::mutex> memoLock(ownerFillsMutex_);   // GEM SK-LIFECYCLE: as the other two sites (the MemoHost is kept)
 					DetachMemoGpu(*mh, false);   // R2: nor are its owner textures (forgotten, counted)
+				}
 				hosts_.Remove(host, false);
 				EraseExternal(host);          // nor is its external demand (declared for the dead renderer)
 				st.reset();
