@@ -8,6 +8,7 @@
 
 #include <libplacebo/shaders/custom.h>
 #include <microsoft_directshow/MadVRShaderLoader.h>
+#include <VP-V/modules/output/dither/CustomHookParameters.h>
 
 // Custom GLSL hooks for the VP Renderer: [shader.standard.*] rules with a
 // glsl_file. NLS keeps its own geometry-coupled lifecycle in the renderer; this
@@ -63,19 +64,8 @@ namespace CustomHookChain
     // rebuild it and discard its storage textures.
     std::string TemplateKey(const std::string& source, const TemplateValues& values);
 
-    // Sets //!PARAM values from rule parameters by name, clamped to the
-    // parameter's declared range. Returns the names that were applied.
-    std::vector<std::string> ApplyHookParameters(const pl_hook* hook,
-        const std::map<std::string, std::string>& parameters);
-
-    // Sets one //!PARAM by name, clamped to its range, without reparsing (the
-    // per-frame pattern NLS uses for stretch_ratio). False if it is absent.
-    bool SetHookParameter(const pl_hook* hook, const char* name, double value);
-
-    inline bool HooksOutput(const pl_hook* hook)
-    {
-        return hook && (hook->stages & PL_HOOK_OUTPUT) != 0;
-    }
+    // ApplyHookParameters, SetHookParameter and HooksOutput (//!PARAM access on a parsed hook) are in the MFC-free
+    // CustomHookParameters.h, included above (GRANT #11b: DitherNeedGpu.h's HookGuard uses them without this header).
 
     // Audit 2026-10-16: a hook that quantises the output itself (replaces
     // libplacebo's dither). Only such a hook suppresses the dither; any other
