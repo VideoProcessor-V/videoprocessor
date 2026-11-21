@@ -65,8 +65,8 @@ namespace Vpv
 		// The registered fill's reserve (CB slice 18 S2b, owner Q2; SHOULD-2): the DECLARED size itself, which is the largest variant
 		// either form serves: the default R32F at the source luma size (4 B/px) or the stage variant RG32F (8 B/px) at a stage picture
 		// of the source luma size (X5's measured picture; its ratio-2 half picture needs a quarter). A larger stage picture declines
-		// visibly (Allocate, "...reserve"). 265 MB at an 8K source, 66 MB at 4K. The ahead budget counts it once per fill a frame
-		// makes (SkeletonMemo::AheadNeedLocked, the measured fills per frame: one per stage ordinal).
+		// visibly (Allocate, "...reserve"). 265 MB at an 8K source, 66 MB at 4K. The ahead budget counts it once per fill one
+		// render frame holds (SkeletonMemo::AheadNeedLocked: one per stage ordinal held at once; a cadence repeat does not add).
 		inline uint64_t EdgeMapFillReserveBytes(VpSkeleton::Dims luma)
 		{
 			return EdgeMapReserveBytes(luma);
