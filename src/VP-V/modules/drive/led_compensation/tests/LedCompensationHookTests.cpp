@@ -589,12 +589,26 @@ namespace VideoProcessorTest
 						settings.push_back({ g, b, domain });
 			settings.push_back({ 1.0, boost, 1.0 });   // the gain == 1 exit with the boost
 
-			// Idle (gain 1, no boost): every test colour leaves as it came in.
+			// Idle (gain 1, no boost: the hook returns its input). The idle codes are the "as it came in"
+			// reference for every exact check below, as in LedCompensationKeepsBelowBlackAndLightExact. They
+			// must sit within 1 code of the input codes (the round trip through the 10-bit encode).
 			set(1.0, 1.0, 1.0);
+			std::map<Codes, Codes> idle;
+			int idleOff = 0;
+			std::wstring idleText;
+			auto recordIdle = [&](const Codes& c)
+			{
+				idle[c] = render(toSignal(c));
+				for (int k = 0; k < 3; ++k)
+					idleOff = std::max(idleOff, std::abs(idle[c][k] - c[k]));
+				idleText += text(c) + L" -> " + text(idle[c]) + L"; ";
+			};
 			for (const Codes& c : partly)
-				Assert::IsTrue(render(toSignal(c)) == c, (L"Idle hook moved " + text(c)).c_str());
+				recordIdle(c);
 			for (const Codes& c : extended)
-				Assert::IsTrue(render(toSignal(c)) == c, (L"Idle hook moved " + text(c)).c_str());
+				recordIdle(c);
+			Logger::WriteMessage((L"GEM-W1-LED idle round trip: " + idleText + L"\n").c_str());
+			Assert::IsTrue(idleOff <= 1, (L"Idle hook moved a colour by " + std::to_wstring(idleOff) + L" codes: " + idleText).c_str());
 
 			std::wstring problems;
 			double worstHueOff = 0.0, worstHueExcess = 0.0;
@@ -638,9 +652,9 @@ namespace VideoProcessorTest
 							if (c[k] < 64)
 							{
 								++exactBelow;
-								if (out[k] != c[k])
+								if (out[k] != idle[c][k])
 									problems += L"below black " + text(c) + L" channel " + std::to_wstring(k) + L" became " +
-										std::to_wstring(out[k]) + where;
+										std::to_wstring(out[k]) + L", idle " + std::to_wstring(idle[c][k]) + where;
 							}
 					if (s.gain < 1.0)
 					{
@@ -664,8 +678,8 @@ namespace VideoProcessorTest
 				for (const Codes& c : extended)
 				{
 					const Codes out = render(toSignal(c));
-					if (out != c)
-						problems += L"extended " + text(c) + L" became " + text(out) + where;
+					if (out != idle[c])
+						problems += L"extended " + text(c) + L" became " + text(out) + L", idle " + text(idle[c]) + where;
 				}
 				for (const Codes& c : inRange)
 				{
