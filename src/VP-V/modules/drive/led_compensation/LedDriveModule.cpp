@@ -228,30 +228,66 @@ namespace LedDrive
 	{
 		// FIX-LED-CUT-U7 C-4 (coordinator ruling 2026-11-15): the LED declares the P4 it needs for the scene verdict (the pair for frame n
 		// is P4 at lag 0 and lag 1) as an external demand on the ONE registered renderer, so the lane keeps those records for the frames
-		// the look-ahead asks about. The ahead DEPTH is not part of a ConsumerDecl: it comes from the skeleton's own plan (queue shape and
-		// owner fills), so the declaration names the products, not the walk depth. Cheap no-op once declared or while no skeleton/renderer.
+		// the look-ahead asks about. Cheap no-op once declared (same host, generation and ahead need) or while no skeleton/renderer.
 		// A renderer change (the skeleton erases the demand at GpuReleased / a dead renderer) shows as another host or another
 		// registration generation: the declaration is then made again on the current one. Never per frame without a change.
+		// GF-P3 (lead ruling, one ahead-depth mechanism; owner OD 2026-11-14): the declaration also carries the walk's need as
+		// ConsumerDecl::aheadDepth (AheadNeedLocked: the walk's real frame count, 0 when this mode does not look ahead); the binder
+		// caps it at its ceiling and shows the ceiling notice. A changed need is a changed declaration (made again, not per frame).
+		// Called with `mutex` held (Start, SubmitMeasurement, SetLookaheadDepth).
+		const uint8_t aheadNeed = AheadNeedLocked();
 		const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
 		const void* declared = demandHost.load(std::memory_order_acquire);
 		if (declared != nullptr && owners.size() == 1 && owners[0] == declared &&
-			VpFrameAnalysis::SourceFrameTap::Generation(declared) == demandGen.load(std::memory_order_acquire))
+			VpFrameAnalysis::SourceFrameTap::Generation(declared) == demandGen.load(std::memory_order_acquire) &&
+			aheadNeed == demandAhead)
 			return;
 		Vpv::Skeleton::IExternalDemand* demand = owners.size() == 1 ? Vpv::Skeleton::Demand() : nullptr;
 		if (demand == nullptr)
 			return;
+		// GF-P3 MUST-10: a declaration on another renderer withdraws the old one first (one entry per module, never a dangling owner).
+		if (declared != nullptr && declared != owners[0])
+		{
+			demand->ClearExternalDemand(declared, this);
+			demandHost.store(nullptr, std::memory_order_release);
+		}
 		VpSkeleton::ConsumerDecl d;
 		d.id = kSceneConsumerId;
 		d.name = "LED look-ahead cut";
 		VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 0);
 		VpSkeleton::AddConsume(d, VpSkeleton::kP4SourceStats, 1);
+		d.aheadDepth = aheadNeed;
 		// 15c-c8 (coordinator ruling 2026-11-15, the owner's demand-driven principle): an ENABLED drive (this module runs only then) needs the
 		// lane's results, so its demand RAISES the lane and the frame-analysis store while declared (Ctrl+I "(demand: LED drive)"); Stop()
 		// withdraws it. The configuration (analysis_lane, frame_analysis_store) is not changed.
 		demand->SetRaisingExternalDemand(owners[0], this, std::vector<VpSkeleton::ConsumerDecl>(1, d), std::vector<VpSkeleton::ProductId>(),
 			std::string("LED drive"));
 		demandGen.store(VpFrameAnalysis::SourceFrameTap::Generation(owners[0]), std::memory_order_release);
+		demandAhead = aheadNeed;
 		demandHost.store(owners[0], std::memory_order_release);
+	}
+
+	uint8_t LedDriveModule::AheadNeedLocked() const
+	{
+		// The frames past the frame on screen whose scene the walk asks for: the held walk depth (SetLookaheadDepth: raised at once,
+		// lowered after the hold window), capped by led_lookahead_ms when set; 0 when this mode
+		// does not look ahead (the walk measures nothing then, WantsPredictions). Not capped at the skeleton's ceiling: the binder does.
+		if (!LookaheadWantedLocked())
+			return 0;
+		size_t depth = walkAheadSeen;
+		if (led.ledLookaheadMs > 0)
+			depth = std::min(depth, LedLookaheadFramesLocked());
+		return static_cast<uint8_t>(std::min<size_t>(depth, UINT8_MAX));
+	}
+
+	double LedDriveModule::LookaheadHoldMsLocked() const
+	{
+		// How long the walks must stay shallower before the held need drops: led_lookahead_ms when set (the span the look-ahead is
+		// asked to cover), else the span of the held depth at the source rate (the time the deeper walk's frames covered).
+		if (led.ledLookaheadMs > 0)
+			return static_cast<double>(led.ledLookaheadMs);
+		const double periodMs = sourceFps > 0.0 ? 1000.0 / sourceFps : framePeriodMs;
+		return static_cast<double>(walkAheadSeen) * std::max(1.0, periodMs);
 	}
 
 	void LedDriveModule::WithdrawSceneDemand()
@@ -400,6 +436,9 @@ namespace LedDrive
 	LedDriveModule::~LedDriveModule()
 	{
 		Stop();
+		// GF-P3 MUST-10: Stop() returns early for a module that never started, so a declaration it made (or a late one) is withdrawn
+		// here unconditionally: no "LED drive" demand and no owner key outlive the module.
+		WithdrawSceneDemand();
 	}
 
 	double LedDriveModule::NowMs() const
@@ -590,6 +629,9 @@ namespace LedDrive
 			}
 		}
 		++configGeneration;
+		// GF-P3: the ahead need follows the new settings (look-ahead on / off, led_lookahead_ms); re-declared only if it changed.
+		if (started && !stopping)
+			DeclareSceneDemand();
 		wake.notify_all();
 		DebugLog::Log("Dynamic Drive: settings applied to the running module (mode=%s); the LED carries on from its current level",
 			ModeName(led.mode));
@@ -783,7 +825,10 @@ namespace LedDrive
 		// R3: a readback of the old source after a FULL resync (resync_event on only; 0 otherwise).
 		if (sequence != 0 && restartSequence != 0 && sequence < restartSequence) return;
 		lastMeasuredSequence = sequence;
-		DeclareSceneDemand();   // the renderer may register after Start(): declared with the first measurement at the latest
+		// The renderer may register after Start(): declared with the first measurement at the latest. GF-P3 MUST-10: only while
+		// running; a measurement submitted after Stop() (DynamicDriveFrame holds a shared_ptr) or before Start() declares nothing.
+		if (started && !stopping)
+			DeclareSceneDemand();
 		statsBuilder.SetSceneReader(SceneReader());   // applied before every Build (Reconfigure re-creates the builder)
 		const FrameStats stats = statsBuilder.Build(raw, NowMs(), sourceFps > 0.0 ? 1000.0 / sourceFps : 0.0, sequence);   // unmeasured: the 24p values
 		if (stats.blocks == 0) return;
@@ -835,6 +880,40 @@ namespace LedDrive
 		std::lock_guard<std::mutex> guard(mutex);
 		lookaheadDepth = futureFrames;
 		lastWalkWallMs = NowMs();   // review 2026-10-17
+		// GF-P3 (lead ruling; owner OD 2026-11-14: derived from what the active consumer asks): the walk's real frame count is the
+		// look-ahead's ahead need. A deeper walk raises the held need at once. A shallower one lowers it only after the walks have
+		// stayed below it for a hold window (LookaheadHoldMsLocked), to the deepest walk seen in that window, so a queue whose fill
+		// moves by a frame does not flap the declaration. DeclareSceneDemand re-declares only when the held need changed (running only).
+		if (LookaheadWantedLocked())
+		{
+			const double now = NowMs();
+			bool moved = false;
+			if (futureFrames > walkAheadSeen)
+			{
+				walkAheadSeen = futureFrames;
+				walkLowSinceMs = -1.0;
+				moved = true;
+			}
+			else if (futureFrames == walkAheadSeen)
+				walkLowSinceMs = -1.0;
+			else if (walkLowSinceMs < 0.0)
+			{
+				walkLowSinceMs = now;
+				walkLowMax = futureFrames;
+			}
+			else
+			{
+				walkLowMax = std::max(walkLowMax, futureFrames);
+				if (now - walkLowSinceMs >= LookaheadHoldMsLocked())
+				{
+					walkAheadSeen = walkLowMax;
+					walkLowSinceMs = -1.0;
+					moved = true;
+				}
+			}
+			if (moved && started && !stopping)
+				DeclareSceneDemand();
+		}
 		// A new walk begins: the previous one is judged as a whole (release only after a complete walk with every scene known).
 		if (walkHadPredictions && !walkFailed && fallbacks.Release(kCutJudgeAheadFallbackId))
 			DebugLog::Log("Dynamic Drive: shared scene available for look-ahead frames again; cuts predicted");
@@ -865,6 +944,9 @@ namespace LedDrive
 		lastMeasuredSequence = 0;
 		lastFrameSequence = 0;
 		restartSequence = 0;
+		walkAheadSeen = 0;   // GF-P3: a new stream re-measures the walk depth (the next walk re-declares only if the need moved)
+		walkLowSinceMs = -1.0;
+		walkLowMax = 0;
 		lookaheadEpoch.fetch_add(1, std::memory_order_acq_rel);
 	}
 
