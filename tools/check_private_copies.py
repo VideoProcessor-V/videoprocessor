@@ -60,7 +60,8 @@ SITES = [
      "only": [_M + "motion/estimation/global_model/link/CameraLabelFill.cpp"]},
     {"id": "D5", "product": "kP13SourceRing", "refs": "122 s9 D5",
      "what": "producer CPU luma decode (code >> 6) / GPU row upload shift",
-     "re": r">>\s*6\b|<<\s*(view\.)?(msbShift|shift)\b",
+     # CHK-SHIFT-AXISFRAC: `>> kAxisFractionBits` (AnalysisAxis10.h, = 6) is the same decode as `>> 6`
+     "re": r">>\s*6\b|>>\s*(?:[\w:]*::)?kAxisFractionBits\b|<<\s*(view\.)?(msbShift|shift)\b",
      "only": [_M + "input/source_analysis/VpFrameAnalysis.cpp", _M + "input/source_analysis/lane/LaneGpuProducts.cpp"]},
     {"id": "D6", "product": "kP13SourceRing", "refs": "122 s9 D6 / doc 91 D C9",
      "what": "C9 producer own RGB / full-range luma decode (named exception until EPE is compared)",

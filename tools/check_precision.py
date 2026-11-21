@@ -43,7 +43,10 @@ SHIFT = re.compile(r">>\s*(2|4|6)\b")
 # A named constant equal to an axis shift (2/4/6) counts exactly like the literal (rule 19: renaming the
 # literal to a constant of the same value is not a fix).
 SHIFT_CONST_DEF = re.compile(r"\b(?:constexpr|const)\s+(?:static\s+)?(?:inline\s+)?[\w:]+\s+(\w+)\s*=\s*(?:2|4|6)\s*[;,]")
-SHIFT_CTX = re.compile(r"luma|chroma|plane|sample|code|word|y10|intensity|p010", re.I)
+# CHK-SHIFT-AXISFRAC (102b; lead17 c4-s2a-fix G6): `q6` (a sample on the Q6 analysis axis) and `axis` (so a shift by
+# the axis constant kAxisFractionBits names its own context) are sample words too; `q6 >> kAxisFractionBits` is the
+# same 16 -> 10 floor as `plane >> 6` (AnalysisAxis10.h Floor10FromQ6 / HistBinFromQ6).
+SHIFT_CTX = re.compile(r"luma|chroma|plane|sample|code|word|y10|intensity|p010|q6|axis", re.I)
 U8 = re.compile(r"uint8_t\s*\*|vector\s*<\s*(std::)?uint8_t")
 U8_CTX = re.compile(r"pixel|plane|luma|chroma", re.I)
 TAG = re.compile(r"PRECISION-OK\s+\S+:\s*\S")
