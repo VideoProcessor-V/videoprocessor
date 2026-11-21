@@ -531,6 +531,12 @@ public:
         std::lock_guard<std::mutex> g(mutex_);
         gpuDevice_ = device;
     }
+    // GF-P1 MUST-3: an owner GPU device is attached (SetGpuDevice non-null). Read-only; the binder keeps presence while one is.
+    bool HasGpuDevice() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return gpuDevice_ != nullptr;
+    }
     // R2 (audit S1): textures a reader still pinned when the device went: forgotten by the device (never destroyed through a device
     // that may be gone; the driver frees them with the device). Counted here and on the status lines (not silent).
     void NoteGpuForgotten(uint64_t textures, uint64_t bytes)

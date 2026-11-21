@@ -126,7 +126,11 @@ inline void BindLaneToMemo(AnalysisLane& lane, SkeletonMemo& memo, LaneGpuHandle
         fills[std::make_pair(id, AcquireForm::Cpu)] = std::move(f);
     }
     memo.BindLane(std::move(src), std::move(fills));
-    memo.SetGpuDispatcherPresent(lane.HasGpuDispatcher());
+    // GF-P1 MUST-3 (GV AMEND, binder side): binding never clears the owner-device presence. A shadow or raised lane makes no lane
+    // GPU dispatcher (SkeletonModule UpdateDispatcher), yet the memo's attached OwnerGpuDevice still serves the non-view GPU owner
+    // fills (P1, edge map, grain split variant); PlanNoLaneGpu skips a lane-bound memo, so nothing would restore it. The gate in
+    // Acquire is unchanged; SkeletonModule's AttachMemoGpu / DetachMemoGpu re-assert presence while a lane is bound (P2b).
+    memo.SetGpuDispatcherPresent(lane.HasGpuDispatcher() || memo.HasGpuDevice());
 
     // L-CORE M5 (coordinator ruling on B1-SEAL-VIA-ACQUIRE): the seal (1) REUSES a frame an Acquire reader published (copy, counted
     // sealReused) and (2) when it computes, its result IS the publication: the lane slot is the memo's first source for that frame
