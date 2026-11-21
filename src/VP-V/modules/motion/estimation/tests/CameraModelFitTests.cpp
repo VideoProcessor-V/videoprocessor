@@ -1727,9 +1727,19 @@ namespace VideoProcessorTest
 			const CameraMotion r = fitter.Fit(in);
 			Require(r.valid && r.blocks != nullptr, Fmt("noisy pan, quantum 0.5", r));
 			Logger::WriteMessage((Fmt("noisy pan, quantum 0.5", r) + " absThresholdPx=" + std::to_string(r.blocks->absThresholdPx)).c_str());
-			Require(r.blocks->absThresholdPx >= 4.5, "threshold follows the measured noise: " + std::to_string(r.blocks->absThresholdPx));
-			const int cam = CountLabel(r, Label::Camera);
-			Require(cam >= static_cast<int>(0.9 * f.Count()), Fmt("noisy pan camera share", r) + " camera blocks=" + std::to_string(cam));
+			// Camfix R2F: uniform noise has no mode, so the floor winner sits anywhere on the plateau (about 2.8 px off here) and
+			// moves when refined under the raised gate; the scale is then kept at the floor and the pair is not confident. Either
+			// outcome is allowed - the raised scale with the camera's share and model, or no confident fit - never a confident
+			// wrong one. The raise itself on a stable winner is CamfixR2FStableWinnerStillRaisesTheScale.
+			const double err = ModelError(r, Pan4K(), f.picture) * f.Diagonal();
+			if (r.blocks->absThresholdPx >= 4.5)
+			{
+				const int cam = CountLabel(r, Label::Camera);
+				Require(cam >= static_cast<int>(0.9 * f.Count()), Fmt("noisy pan camera share", r) + " camera blocks=" + std::to_string(cam));
+				Require(err < 0.5, Fmt("noisy pan, raised scale", r) + " corner error px=" + std::to_string(err));
+			}
+			else
+				Require(r.confidence < 0.5, Fmt("noisy pan at the floor must not be confident", r) + " corner error px=" + std::to_string(err));
 		}
 
 		// Camfix R2 audit (sigma ratchet, GlobalModelFit.cpp Fitter::Run): a slow mover a few quanta off the camera (a quarter of the
@@ -1771,6 +1781,95 @@ namespace VideoProcessorTest
 			const int notCamera = moverBlocks - CountLabelInRect(r, f, x0, 0, w, f.gridH, Label::Camera);
 			Require(notCamera >= static_cast<int>(0.9 * moverBlocks), Fmt("4.5 px mover", r) + " not-camera blocks=" + std::to_string(notCamera) +
 				" of " + std::to_string(moverBlocks));
+		}
+
+		// ---- Camfix R2F (CE-FIX-R2, regression of R2 on the real sets "sol" and "crowd") ----
+
+		// sol: a winner that only a minority of the field supports at the floor (8-19 % on sol_1080p_vlow nvof) must not become
+		// confident because the robust scale measured its own gate. R2 raised sigma 0.5 -> 1.96 -> 5.9 -> 9.0 px there (never settling),
+		// the gate then admitted 85-98 % of the blocks and 11 pairs became confident 2.9-11.6 px away from the true camera. Here a
+		// 15 % strip moves exactly with pan A and the dominant 85 % moves 4 px away with uniform noise (sigma 2 px): reporting A as the
+		// camera with the whole field as its inliers is a confident-wrong fit.
+		TEST_METHOD(CamfixR2FRobustScaleDoesNotAdoptADifferentMotion)
+		{
+			Field f(Grid4K());
+			const Params a = PanModel(12.4, -4.6), bulk = PanModel(16.4, -4.6);
+			f.FromModel(bulk);
+			SplitMix64 rng(81);
+			const double amp = 2.0 * std::sqrt(12.0);
+			const int strip = static_cast<int>(0.15 * f.gridW);
+			for (int y = 0; y < f.gridH; ++y)
+				for (int x = 0; x < f.gridW; ++x)
+				{
+					const size_t i = static_cast<size_t>(y) * f.gridW + x;
+					if (x < strip) { f.fx[i] = 12.4f; f.fy[i] = -4.6f; }
+					else { f.fx[i] += static_cast<float>((rng.Unit() - 0.5) * amp); f.fy[i] += static_cast<float>((rng.Unit() - 0.5) * amp); }
+				}
+			f.AddNoise(0.1, 82);
+			QuantizeField(f, 0.5);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 0.5;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			const double errBulk = ModelError(r, bulk, f.picture) * f.Diagonal();
+			Logger::WriteMessage((Fmt("minority winner over a 4 px-offset noisy bulk, quantum 0.5", r) + " bulk corner error px=" + std::to_string(errBulk) +
+				(r.blocks ? " absThresholdPx=" + std::to_string(r.blocks->absThresholdPx) : std::string())).c_str());
+			Require(!(r.confidence >= 0.5 && errBulk > 1.5), Fmt("confident-wrong: the robust scale adopted the bulk as the winner's noise", r) +
+				" bulk corner error px=" + std::to_string(errBulk));
+			if (r.blocks != nullptr)
+				Require(r.blocks->absThresholdPx < 4.0, "the gate opened over a different motion: " + std::to_string(r.blocks->absThresholdPx));
+		}
+
+		// crowd: movers about one quantum off the camera over 40 % of the picture. R2 used the quantum itself as sigma (gate 3 x 0.5 =
+		// 1.5 px at the 1080 half quantum), so the movers joined the camera's inliers and pulled the winner about 0.5 px (crowd_1080p_vlow
+		// nvof: 12 confident pairs 1.0-1.2 px off, 0.4 % -> 2.6 %). A rounding error is uniform over one quantum: sigma = q / sqrt(12).
+		TEST_METHOD(CamfixR2FQuantumFloorIsTheRoundingSigma)
+		{
+			Field f(Grid4K());
+			const Params cam = PanModel(12.4, -4.6);
+			f.FromModel(cam);
+			SplitMix64 rng(83);
+			for (size_t i = 0; i < f.Count(); ++i)   // scattered movers (people in a crowd), 40 % of the blocks, one 1080-half quantum x 2 off
+				if (rng.Unit() < 0.4)
+					f.fx[i] += 1.0f;
+			f.AddNoise(0.1, 85);
+			QuantizeField(f, 0.5);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 0.5;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			const double err = ModelError(r, cam, f.picture) * f.Diagonal();
+			Logger::WriteMessage((Fmt("pan with 1 px movers over 40 %, quantum 0.5", r) + " corner error px=" + std::to_string(err) +
+				(r.blocks ? " absThresholdPx=" + std::to_string(r.blocks->absThresholdPx) : std::string())).c_str());
+			Require(r.valid && r.blocks != nullptr, Fmt("pan with 1 px movers", r));
+			Require(!(r.confidence >= 0.5 && err >= 0.25), Fmt("confident-wrong: the movers pulled the camera", r) + " corner error px=" + std::to_string(err));
+			Require(r.blocks->absThresholdPx < 3.0 * 0.5, "gate at the quantum itself: " + std::to_string(r.blocks->absThresholdPx));
+		}
+
+		// R2's intent is kept: noise above the floor around a winner that the widened inlier set does not move still raises the
+		// threshold (a peaked field: most vectors within a quantum, a wide noisy share around the same camera).
+		TEST_METHOD(CamfixR2FStableWinnerStillRaisesTheScale)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12.4, -4.6));
+			SplitMix64 rng(84);
+			for (size_t i = 0; i < f.Count(); ++i)
+			{
+				const double amp = (rng.Unit() < 0.5 ? 0.6 : 3.0) * std::sqrt(12.0);
+				f.fx[i] += static_cast<float>((rng.Unit() - 0.5) * amp);
+				f.fy[i] += static_cast<float>((rng.Unit() - 0.5) * amp);
+			}
+			QuantizeField(f, 0.5);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 0.5;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			Require(r.valid && r.blocks != nullptr, Fmt("peaked noisy pan, quantum 0.5", r));
+			const double err = ModelError(r, PanModel(12.4, -4.6), f.picture) * f.Diagonal();
+			Logger::WriteMessage((Fmt("peaked noisy pan, quantum 0.5", r) + " corner error px=" + std::to_string(err) + " absThresholdPx=" +
+				std::to_string(r.blocks->absThresholdPx)).c_str());
+			Require(r.blocks->absThresholdPx > 3.0 * 0.25 * 1.05, "the scale did not follow the noise: " + std::to_string(r.blocks->absThresholdPx));
+			Require(err < 0.25, "corner error px=" + std::to_string(err));
 		}
 	};
 }

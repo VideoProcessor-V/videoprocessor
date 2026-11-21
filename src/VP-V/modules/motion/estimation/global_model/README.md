@@ -422,8 +422,12 @@ on every speed row (120 / 480 px/s, 24p / 59.94p, 1080 / 4K, >= 3 ABAB repeats) 
   4K 24p 6.10 -> 10.47; 4K 59.94p 5.67 -> 7.15. No consistent cost either way.
 
 **R2 (quantum floor, robust scale, competitor separation; GlobalModelFit.cpp).** An NVOF field declares `PairInput::quantumPx`
-(0.25 engine px in source px: 1.0 at 4K quarter size, 0.5 at 1080 half size). The pair precision is never finer than the quantum,
-the robust residual scale is 1.4826 x MAD of the winner's inliers (three passes), and a competitor counts only when it is separated
+(0.25 engine px in source px: 1.0 at 4K quarter size, 0.5 at 1080 half size). The pair precision is never finer than the
+rounding error's sigma, quantum / sqrt(12) (R2F; R2 used the quantum itself, a 3.5 x wider gate that let movers one quantum off
+bias the winner: crowd nvof 0.4 % -> 2.6 % confident-wrong). The robust residual scale is 1.4826 x MAD of the winner's inliers
+(three passes); R2F keeps it only when the winner, refined under the raised gate, moves no more than its fit precision
+(absThresholdSigmas x sigma x sqrt(params / inliers) at the corners), else the floor stays (sol nvof: the scale had grown
+0.5 -> 9 px around a winner with 8 % support and 11 pairs became confident 2.9-11.6 px off). A competitor counts only when it is separated
 from the winner by more than max(3 sigma, 2 quanta) at the corners.
 - **Visible camera-fit change on the live seed path:** `link/FieldCopy.h` (`SeedToSourceGrid`) now sets `quantumPx` from
   `SeedLayout::quantumSourcePx` (stated by the seed's owner, `VectorEngine::SeedFieldOf`: 0.25 x scaleToSourcePx; 0 = none), so the render-path fit from the F2 seed uses the same floor and separation as the ahead fit. Fewer records are

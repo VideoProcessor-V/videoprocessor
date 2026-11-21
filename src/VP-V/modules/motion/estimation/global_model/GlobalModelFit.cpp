@@ -40,12 +40,17 @@ namespace CameraModel
 		inline bool FiniteF(float v) { return IsFiniteBits(v); }
 
 		// Expected vector precision of a pair (source px): the caller's, else a quarter px per 16 px of block size.
-		// Camfix R2: an NVOF field (quantumPx > 0) never assumes a precision finer than its own quantum (the robust residual scale may
+		// Camfix R2: an NVOF field (quantumPx > 0) never assumes a precision finer than its own rounding (the robust residual scale may
 		// raise it further after the winner, Fitter::Run); without a quantum this is unchanged.
+		// Camfix R2F: a vector rounded to a quantum q carries an error uniform over one quantum, whose standard deviation is
+		// q / sqrt(12). R2 used q itself as the sigma: a gate 3.5 x too wide, so movers one quantum off the camera joined its inliers and
+		// biased the winner (real set crowd, nvof: 0.4 % -> 2.6 % confident-wrong).
+		inline double QuantumSigma(double quantumPx) { return quantumPx / std::sqrt(12.0); }
+
 		inline double PairPrecision(const PairInput& in)
 		{
 			const double base = in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0;
-			return in.quantumPx > 0 ? std::max(base, in.quantumPx) : base;
+			return in.quantumPx > 0 ? std::max(base, QuantumSigma(in.quantumPx)) : base;
 		}
 
 
@@ -1043,6 +1048,7 @@ namespace CameraModel
 			// noise is above the floor, the threshold follows it and the winner's inliers are counted again under it.
 			if (in.quantumPx > 0)
 			{
+				const double floorPrec = f.prec, floorAbsThr = f.absThr;
 				bool raised = false;
 				for (int pass = 0; pass < 3; ++pass)   // the gate widens with the scale; 3 passes settle it
 				{
@@ -1054,7 +1060,25 @@ namespace CameraModel
 					raised = true;
 				}
 				if (raised)
+				{
 					BuildCand(f, c, in, cellsTotal, chA.model, cdA);
+					// Camfix R2F: the raised scale is the winner's noise only if the samples it admits are the winner's motion. Refined
+					// under the raised gate, the winner must stay within the precision a fit of its parameter count has over those n
+					// inliers at that noise (absThresholdSigmas x sigma x sqrt(params / n), at the picture corners). If it moves further,
+					// the scale measured another motion or its own gate (real set sol, nvof: 0.5 -> 2.0 -> 5.9 -> 9.0 px, never
+					// settling; 11 pairs confident 2.9-11.6 px off): the floor stays and the winner is counted under it again.
+					Params refined = chA.model;
+					Refine(f, f.s, refined, std::max(1, irls));
+					const double movedPx = MaxCornerDifference(refined, chA.model, f.pic) * f.diag;
+					const double fitPrecPx = c.absThresholdSigmas * f.prec *
+						std::sqrt(static_cast<double>(ParamCount(chA.model.type)) / std::max(1, cdA.inlierCount));
+					if (!(movedPx <= fitPrecPx))
+					{
+						f.prec = floorPrec;
+						f.absThr = floorAbsThr;
+						BuildCand(f, c, in, cellsTotal, chA.model, cdA);
+					}
+				}
 			}
 			// Camfix R2: the separation a competitor needs from the winner (source px at the corners): max(3 sigma, 2 quanta); 0 = none
 			// (not an NVOF field: unchanged).

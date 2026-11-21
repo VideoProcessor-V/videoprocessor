@@ -44,8 +44,9 @@ namespace CameraModel
 		uint64_t resyncGeneration = 0, rebaseGeneration = 0;
 		double precisionPx = 0;                     // <= 0 -> 0.25 * blockSize / 16
 		// Camfix R2 (doc 103 s4 R2): one vector quantum of an NVOF field in source px (0.25 engine px x enginePxToSource); 0 = not an
-		// NVOF field (unchanged). With it the pair's precision is max(the above, quantumPx, 1.4826 x MAD of the winner's inlier
-		// residuals), and a competitor counts only when its MaxCornerDifference from the winner exceeds max(3 sigma, 2 quanta).
+		// NVOF field (unchanged). With it the pair's precision is max(the above, quantumPx / sqrt(12) (the rounding error's sigma, R2F),
+		// 1.4826 x MAD of the winner's inlier residuals - kept only when the winner refined under it stays within its fit precision, R2F),
+		// and a competitor counts only when its MaxCornerDifference from the winner exceeds max(3 sigma, 2 quanta).
 		double quantumPx = 0;
 		int64_t deadlineMicros = 0;                 // absolute, in Clock microseconds; 0 = none
 		const PairInput* next = nullptr;            // queued next pair (or null)
