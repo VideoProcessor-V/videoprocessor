@@ -394,6 +394,8 @@ namespace MotionValidity
 		// the epoch form of PairValid).
 		// U7-accuracy (owner ruling Q5), bound or not: a pair whose `b` the scene product CONFIRMED as a cut (ConfirmedCutReader) is
 		// refused too, and counted (ConfirmedCutRefusals). No reader set, or no confirmed verdict yet: nothing is refused on the scene.
+		// GF-P4 S-2: the count is per ASK from every reader of this state (the estimate, FlowOf, the sigma-delta gate and the P2 CPU
+		// form), not per estimate.
 		//
 		// The scene seam: true when frame `seq` is a CONFIRMED cut (the first frame of the new shot). Set by the scene producer's module
 		// (the skeleton, SkeletonModule: FrameAnalysis::Scene confirmed && cutHere); null = no scene veto (tests, no skeleton).
@@ -403,8 +405,8 @@ namespace MotionValidity
 			static std::atomic<ConfirmedCutFn> reader{ nullptr };
 			return reader;
 		}
-		// Every state's confirmed-cut refusals, process-wide: the scene producer shows it on its status lines (the states live in the
-		// engines, which the producer cannot see; audit U7ACC MUST 4, never log-only).
+		// Every state's confirmed-cut refusals, process-wide and from all readers (GF-P4 S-2): the scene producer shows it on its status
+		// lines (the states live in the engines, which the producer cannot see; audit U7ACC MUST 4, never log-only).
 		static std::atomic<uint64_t>& ConfirmedCutRefusalsAll()
 		{
 			static std::atomic<uint64_t> all{ 0 };
