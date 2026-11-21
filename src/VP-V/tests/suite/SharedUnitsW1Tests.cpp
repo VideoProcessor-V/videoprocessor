@@ -332,9 +332,10 @@ namespace SharedUnitsW1TestsNs2
 			}
 		}
 
-		TEST_METHOD(LaneStatsRecordPercentilesAreBinCentres)
+		TEST_METHOD(LaneStatsRecordPercentilesAreExactSamples)
 		{
-			// 1000 samples, a flat ramp over 16-bit codes: p50 sits at the centre of the bin holding sample 500
+			// 1000 samples, a flat ramp over 16-bit codes. Unit v2 (2026-11-21 precision fix): p50 IS sample 500, the ramp's
+			// half[499] (v1: the centre of the bin holding it, (half[499] >> 6) << 6 | 32); p01 / p99 are samples 10 / 990.
 			std::vector<uint16_t> half(1000);
 			for (size_t i = 0; i < half.size(); ++i)
 				half[i] = static_cast<uint16_t>(i * 65);
@@ -343,7 +344,9 @@ namespace SharedUnitsW1TestsNs2
 			VpUnit::SourceStats::Record r;
 			Assert::IsTrue(VpUnit::SourceStats::ReadRecord(out.data(), out.size(), &r));
 			Assert::AreEqual(1000u, r.pixelCount);
-			Assert::AreEqual(uint32_t((half[499] >> 6) << 6 | 32u), r.p50);
+			Assert::AreEqual(uint32_t(half[499]), r.p50);      // 32435
+			Assert::AreEqual(uint32_t(half[9]), r.p01);        // 585: target (1000 + 99) / 100 = 10
+			Assert::AreEqual(uint32_t(half[989]), r.p99);      // 64285: target (99000 + 99) / 100 = 990
 			Assert::IsTrue(r.p01 < r.p50 && r.p50 < r.p99);
 			Assert::IsFalse(VpUnit::SourceStats::ComputeRecord(half.data(), 40, 25, out.data(), 16), L"too small a buffer");
 		}

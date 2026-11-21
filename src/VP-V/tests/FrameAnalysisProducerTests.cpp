@@ -3,7 +3,7 @@
 
 // WP-23 producer (src/VP-V/modules/input/source_analysis/VpFrameAnalysis.*): the single shared
 // luma decode equals Sample().luma at every pixel for every format; the reductions equal a plain
-// reference over Sample() (histogram exact, means within 1e-6 relative) incl. BTB/WTW codes; the
+// reference over Sample() plus the plane lanes' Q6 fraction (histogram exact, means within 1e-6 relative) incl. BTB/WTW; the
 // range model (one studio mapping); the grain estimate on known noise; the async producer (records
 // late until published, drop-oldest when behind with a visible reason, repeats). CPU only.
 
@@ -27,11 +27,14 @@ namespace FrameAnalysisProducerTestsNs
 		return kind == Kind::P010 || kind == Kind::P210;
 	}
 
-	// The reference: every pixel of `picture` through Sample(), mapped with the studio map.
+	// The reference: every pixel of `picture` through Sample(), mapped with the studio map. 2026-11-21 precision fix: a pixel
+	// of a 16-bit plane format also carries its lane's fraction (lane % 64), Sample()'s whole-code map (PlaneLuma) and the
+	// studio map taken linear between whole codes on the Q6 axis (exact at whole codes, so ten-bit lanes are unchanged).
 	VpFrameAnalysis::Measured Reference(const AnalysisLumaSource& source, const Rect& picture)
 	{
 		VpFrameAnalysis::Measured out;
 		const auto studio = VpFrameAnalysis::StudioLumaMap(source);
+		auto lerp = [](int lo, int hi, uint32_t f) { return static_cast<uint32_t>(lo * 64 + (hi - lo) * static_cast<int>(f)); };
 		double sum = 0.0;
 		uint64_t n = 0, btb = 0, wtw = 0;
 		for (int y = picture.top; y < picture.bottom; ++y)
@@ -39,12 +42,22 @@ namespace FrameAnalysisProducerTestsNs
 			{
 				AnalysisLumaSample sample;
 				Assert::IsTrue(source.Sample(x, y, sample));
-				const uint16_t code = studio[sample.luma];
-				++out.luma.histogram[code];
-				sum += code;
+				uint32_t q6 = static_cast<uint32_t>(sample.luma) * 64u;
+				if (const uint16_t* lanes = source.LumaPlaneRow(y))
+				{
+					const uint32_t lane = lanes[x], c = lane / 64u, f = lane % 64u;
+					const int lo = source.PlaneLuma(static_cast<uint16_t>(c));
+					const int hi = source.PlaneLuma(static_cast<uint16_t>(c < 1023u ? c + 1u : c));
+					Assert::AreEqual(static_cast<int>(sample.luma), lo, L"Sample() is the whole-code value of the lane");
+					q6 = lerp(lo, hi, f);
+				}
+				const uint32_t c2 = q6 / 64u, f2 = q6 % 64u;
+				const uint32_t v = lerp(studio[c2], studio[c2 < 1023u ? c2 + 1u : c2], f2);
+				++out.luma.histogram[v / 64u];
+				sum += v / 64.0;
 				++n;
-				btb += code < 64 ? 1 : 0;
-				wtw += code > 940 ? 1 : 0;
+				btb += v < 64u * 64u ? 1 : 0;
+				wtw += v > 940u * 64u ? 1 : 0;
 			}
 		out.luma.samples = n;
 		out.luma.mean = sum / n;

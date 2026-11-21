@@ -25,7 +25,7 @@ namespace Tests
 	public:
 		TEST_METHOD(DecodeIsExactForEveryFormat)
 		{
-			// Shift law: every depth 8..12 is code << (16 - bits), exactly, and Floor10 of it is the legacy value.
+			// Shift law: every depth 8..12 is code << (16 - bits), exactly, and its whole axis code (q6 / 64) is the legacy value.
 			for (int bits = 8; bits <= 12; ++bits)
 			{
 				const uint32_t maximum = CodeMaximum(bits);
@@ -35,7 +35,7 @@ namespace Tests
 				{
 					const uint32_t q6 = AxisQ6(code, maximum, AxisLaw::Shift);
 					Assert::AreEqual(code << (16 - bits), q6);
-					Assert::AreEqual(bits >= 10 ? code >> (bits - 10) : code << (10 - bits), Floor10FromQ6(q6));
+					Assert::AreEqual(bits >= 10 ? code >> (bits - 10) : code << (10 - bits), q6 / 64u);
 				}
 			}
 			// Scale law, 12-bit RGB: within half a ten-bit code of Bill's integer Round12To10 for every code.
@@ -62,12 +62,12 @@ namespace Tests
 				{
 					const uint32_t q6 = AxisQ6(code, 1023, law ? AxisLaw::Scale : AxisLaw::Shift);
 					Assert::AreEqual(code * 64u, q6);
-					Assert::AreEqual(code, Floor10FromQ6(q6));
-					Assert::AreEqual(code, HistBinFromQ6(q6));
+					Assert::AreEqual(code, q6 / 64u);
+					Assert::AreEqual(0u, q6 % 64u, L"a ten-bit code carries no fraction on the axis");
 					Assert::AreEqual(static_cast<float>(code), ToAxis10(code, 1023, law ? AxisLaw::Scale : AxisLaw::Shift));
 				}
 			}
-			// Histogram bins and percentile centres agree with the legacy `>> 6` / `(bin << 6) | 32`.
+			// The Q6 centre of a whole-code bin is `(bin << 6) | 32`.
 			for (uint32_t bin = 0; bin < kAxisBins; ++bin)
 				Assert::AreEqual((bin << 6) | 32u, BinCenterQ6(bin));
 		}
@@ -124,7 +124,7 @@ namespace Tests
 						// Independent expected value: the 12-bit tap code times 16 (literal), not the shared shift.
 						Assert::AreEqual(static_cast<uint32_t>(DvTunnelTapLaw::TapCode(pixel, c, 1, fullRange != 0)) * 16u, q6);
 						++samples;
-						Assert::AreEqual(static_cast<uint32_t>(DvTunnelTapLaw::TapCode(pixel, c, 1, fullRange != 0)) >> 2, Floor10FromQ6(q6));
+						Assert::AreEqual(static_cast<uint32_t>(DvTunnelTapLaw::TapCode(pixel, c, 1, fullRange != 0)) >> 2, q6 / 64u);
 						if ((q6 & 63u) != 0u) { sawFraction = true; ++fractional; }
 					}
 				}
