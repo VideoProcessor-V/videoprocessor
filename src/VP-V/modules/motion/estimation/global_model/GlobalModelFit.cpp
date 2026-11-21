@@ -1910,7 +1910,7 @@ namespace CameraModel
 				{
 					double seedPrec = 0;
 					CameraMotion seed = Impl::Run(*this, *in.next, nullptr, false, m_config.objects, false, nullptr, false, &seedPrec);
-					if (seed.valid)
+					if (seed.valid && ReasonUsable(seed.reason))   // GEM-131: a seed fit that is itself unusable (Ambiguous, ...) seeds nothing
 					{
 						rec.valid = true;
 						rec.seededFromNext = true;
@@ -1925,6 +1925,7 @@ namespace CameraModel
 						rec.hypotheses = seed.hypotheses;
 						rec.objects = seed.objects;
 						rec.blocks = seed.blocks;
+						rec.labelsOnGpu = seed.labelsOnGpu;   // GEM-131: the labels' home follows the blocks that are carried over
 						m_previous = rec;
 						m_havePrevious = true;
 						m_temporal.Update(in.next->pairSeconds, seed.rates, updateFloor(*in.next, seedPrec));
@@ -1946,7 +1947,7 @@ namespace CameraModel
 					const Params pre = TimeScale(m_previous.params, in.pairSeconds / m_previous.pairSeconds, in.picture);
 					const Params preForNext = TimeScale(m_previous.params, in.next->pairSeconds / m_previous.pairSeconds, in.next->picture);
 					CameraMotion nx = Impl::Run(*this, *in.next, &preForNext, false, false, false, nullptr);
-					if (nx.valid)
+					if (nx.valid && ReasonUsable(nx.reason))   // GEM-131: the same verdict gate for the flash bridge
 					{
 						const Params nextP = TimeScale(nx.params, in.pairSeconds / in.next->pairSeconds, in.picture);
 						const double hw = 0.5 * in.picture.Width(), hh = 0.5 * in.picture.Height();
