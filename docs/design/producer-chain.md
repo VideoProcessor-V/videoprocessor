@@ -9,10 +9,10 @@ Counts: R 9, X 7, N 12, NP 33.
 | Product | Lane | Producer files | Input (lag/lead) | St | Evidence / note |
 |---|---|---|---|---|---|
 | **P0** p0_rebase_decision | - | - | (no inputs) | - | |
-| **P1** p1_half_luma | L-B4 | LaneCpuProducts.h | (no inputs) | - | |
+| **P1** p1_half_luma | L-B4 | LaneCpuProducts.h<br>P1GpuFill.cpp | (no inputs) | - | |
 | **P2** p2_vector_pair (variants, no-OFA P2m) | L-B4 | MotionAheadProducer.cpp<br>P2CpuForm.h | P1 lag0,1 | X | recompute: MotionAheadProducer.cpp:31; MotionAheadProducer.cpp:514; MotionAheadProducer.cpp:591 / flag NotYetConsumed: C9 |
-| **P2m** p2m_matcher_pair | L-B4 | DejudderWarp.cpp | P1 lag0,1 | X | recompute: DejudderWarp.cpp:2675; DejudderWarp.cpp:2689; DejudderWarp.cpp:2692 / flag NotYetConsumed: C9 |
-| **P3** p3_analysis_field | L-B4 | DejudderWarp.cpp | P1 lag0,1 | X | recompute: DejudderWarp.cpp:2675; DejudderWarp.cpp:2689; DejudderWarp.cpp:2692 / flag NotYetConsumed: C9 |
+| **P2m** p2m_matcher_pair | L-B4 | DejudderWarp.cpp | P1 lag0,1 | X | recompute: DejudderWarp.cpp:2673; DejudderWarp.cpp:2691; DejudderWarp.cpp:2694 / flag NotYetConsumed: C9 |
+| **P3** p3_analysis_field | L-B4 | DejudderWarp.cpp | P1 lag0,1 | X | recompute: DejudderWarp.cpp:2673; DejudderWarp.cpp:2691; DejudderWarp.cpp:2694 / flag NotYetConsumed: C9 |
 |  |  |  | P2 | N |  |
 | **P4** p4_source_stats | L-B4 | LaneCpuProducts.h | P1 | R | LaneCpuProducts.h:296; LaneCpuProducts.h:309 |
 | **P5** p5_monitor_tiles | - | SourceResolutionMonitor.h | (no inputs) | - | |

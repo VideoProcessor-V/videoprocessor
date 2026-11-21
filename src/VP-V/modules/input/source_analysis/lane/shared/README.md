@@ -11,8 +11,9 @@ The one 2x2 box law of the half / quarter luma pyramid behind product P1 (doc 62
   emitted by `Detail::GlslBox` with the one mean `Detail::kGlslMean`; the entries differ only in value type / channel
   select, source origin and edge rule (min vs clamp). The emitted text is byte-identical to the former hand-written
   bodies (pinned by `HalfLumaUnitTests::FoldedGlslEntriesAreByteIdenticalToTheFormerBodies`), so `kUnitVersion` stays 1.
-  - `Glsl()`: `vpu_half_luma` / `vpu_quarter_luma` (R channel). Consumers: the matcher's DOWNSAMPLE_BODY
-    (`DejudderWarp.cpp`, since 5b43fc22a) and the P1 GPU fill (`P1GpuFill.h`).
+  - `Glsl()`: `vpu_half_luma` / `vpu_quarter_luma` (R channel). Consumers: the P1 GPU fill (`P1GpuFill.h`: `FillBody` and the
+    matcher pyramid 2x2 level body `MatcherHalfHead/Core/Tail`, moved from the matcher's former DOWNSAMPLE_BODY in BBP-B B1;
+    the matcher splices its fade pieces between them, `DejudderWarp.cpp` MatcherHalfPass).
   - `GlslComponent()`: `vpu_half_luma_comp(src, q, comp)` (any one channel). Consumer: grain split v3 HALF pass
     (`GrainSplitGpu.cpp`).
   - `GlslRgbaAt()`: `vpu_half_luma_rgba_at(src, origin, q)` (all four channels, source offset `origin`, taps clamped to
@@ -28,7 +29,8 @@ The one 2x2 box law of the half / quarter luma pyramid behind product P1 (doc 62
   consumers, byte-identical to the bodies it replaced (`HalfLumaUnitTests::Box4x4VariantIsByteIdenticalToTheFormerPrivateCopies`,
   and `OutputDomainSearchTests`' b5ae6eda5 golden for the sigma-delta text):
   - `GlslBox4x4Sum(indent, tap)` + `GlslBox4x4Fetch(tex, q, size)`: consumer the output-domain search's LUMAC pass.
-  - `GlslBox4x4LevelBody()`: consumer the matcher's pyramid step (`DejudderWarp.cpp` PyramidBody, half -> 1/8 -> 1/32).
+  - `GlslBox4x4LevelBody()`: consumer the matcher's pyramid step (`P1GpuFill.h` MatcherPyramidLevelBody, read by
+    `DejudderWarp.cpp` PyramidBody, half -> 1/8 -> 1/32).
   - `GlslBox4x4TileDecl()` / `GlslBox4x4TileLoad(...)` / `GlslBox4x4TileSum(indent)`: the shared-memory tile form (16 x 16
     work group, 64 x 64 tile `lq_tile_`); consumer the output-domain search's LUMAQ pass.
 

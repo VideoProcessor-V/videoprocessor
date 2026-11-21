@@ -567,7 +567,7 @@ inline const std::vector<ProductFlag>& ProductFlags()
         // D1: P2 / P2m / P3 keep their P1 declaration; they read their own half-luma copies until C9 makes it true (doc 93 section 2 D1).
         { kP2VectorPair, kP1HalfLuma, FlagKind::NotYetConsumed, "C9", "reads its own half-luma copy (producer HalfLuma8); core/Products.h P2 declaration kept" },
         { kP2mMatcherPair, kP1HalfLuma, FlagKind::NotYetConsumed, "C9", "reads the matcher's own Downsample copies; core/Products.h P2m declaration kept" },
-        { kP3AnalysisField, kP1HalfLuma, FlagKind::NotYetConsumed, "C9", "reads the matcher's own inner pyramids; core/Products.h P3 declaration kept" },
+        { kP3AnalysisField, kP1HalfLuma, FlagKind::NotYetConsumed, "C9", "reads the P1 matcher pyramid variant (BBP-B L-B4) except the named exceptions (fade-corrected B, RGB structure luma, DV unpack output) and the visible product.motion_warp fallback; core/Products.h P3 declaration kept" },
         // D2: P10 declares P13 and reads the lane's extended TAP (the one GPU luma of the frame), not the ring planes.
         { kP10GrainSplit, kP13SourceRing, FlagKind::ViewIsActual, "C9b",
           "actual input = the lane tap view (modules/input/source_analysis/lane/LaneGpuProducts.cpp UploadTapRows: SourceFrameView luma uploaded to the tap texture)" },

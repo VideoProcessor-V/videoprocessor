@@ -12,6 +12,7 @@
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/capture/CaptureExtension.h>
 #include <VP-V/modules/input/capture/SourcePlanes.h>
+#include <VP-V/modules/input/source_analysis/lane/P1GpuFill.h>
 #include <VP-V/modules/input/source_analysis/regions/EdgeMapFill.h>
 #include <VP-V/modules/input/queue_timing/IngressPolicy.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
@@ -52,6 +53,7 @@ namespace
 		Vpv::Capture::RegisterSourcePlanesModule();
 		Vpv::Regions::RegisterEdgeMapModule();   // L-B5: kEdgeMap owner fill (rule 3; needs the skeleton + P13 views)
 		VpMotion::RegisterP2CpuFormModule();   // B-prereq (a): kP2VectorPair CPU form (pair + global); needs the skeleton + the vector engine
+		Vpv::FrameAnalysis::RegisterP1GpuModule();   // L-B4 (BBP-B B2): kP1HalfLuma GPU owner fill, the matcher pyramid variant
 		Vpv::Camera::RegisterCameraExtension();
 		// The de-judder / per-refresh timeline (M2 P5b): after the vector engine and the camera link, before the
 		// entrance and core segments (doc 59 2.2 list order); its views, PlanOutputs and the QueueFlush steering reset.

@@ -167,7 +167,7 @@ A declaration is what a product or consumer is wired to read, not proof the code
 |---|---|---|---|---|
 | product p2_vector_pair | p1_half_luma | declared, not yet consumed | C9 | reads its own half-luma copy (producer HalfLuma8); core/Products.h P2 declaration kept |
 | product p2m_matcher_pair | p1_half_luma | declared, not yet consumed | C9 | reads the matcher's own Downsample copies; core/Products.h P2m declaration kept |
-| product p3_analysis_field | p1_half_luma | declared, not yet consumed | C9 | reads the matcher's own inner pyramids; core/Products.h P3 declaration kept |
+| product p3_analysis_field | p1_half_luma | declared, not yet consumed | C9 | reads the P1 matcher pyramid variant (BBP-B L-B4) except the named exceptions (fade-corrected B, RGB structure luma, DV unpack output) and the visible product.motion_warp fallback; core/Products.h P3 declaration kept |
 | product grain.split | p13_source_ring | actual input is a view | C9b | actual input = the lane tap view (modules/input/source_analysis/lane/LaneGpuProducts.cpp UploadTapRows: SourceFrameView luma uploaded to the tap texture) |
 | product grain.split.chroma | (whole product) | reserved, no producer | C10 | no lane job (modules/control/skeleton/SkeletonModule.cpp registers P10/P11/P12 only), no live fill |
 | product source_geometry | p5_monitor_tiles | actual input is a view | C9b | pixel evidence = the SourceFrameTap view (modules/input/source_analysis/identity/chain/ChainEstimator.cpp UpdateTap); P5 stays the declared monitor snapshot |

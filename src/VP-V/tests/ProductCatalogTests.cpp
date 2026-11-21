@@ -708,6 +708,15 @@ namespace ProductCatalogTestsNs
 				Assert::IsTrue(declaresP1, L"the P1 declaration is kept");
 				Assert::IsTrue(flagged, L"and carries the not-yet-consumed (C9) flag");
 			}
+			// BBP-B (L-B4): the matcher reads the P1 matcher pyramid variant; P3's flag names only what still builds its own.
+			for (const ProductFlag& f : ProductFlags())
+				if (f.product == kP3AnalysisField && f.input == kP1HalfLuma) {
+					const std::string note(f.note);
+					Assert::IsTrue(note.find("own inner pyramids") == std::string::npos, L"P3 no longer flagged as reading the matcher's own pyramids");
+					Assert::IsTrue(note.find("fade-corrected B") != std::string::npos && note.find("RGB structure luma") != std::string::npos
+						&& note.find("DV unpack") != std::string::npos && note.find("product.motion_warp") != std::string::npos,
+						L"the named exceptions and the visible fallback row");
+				}
 
 			// 3. P10c: reserved, no producer: its catalog row says so and no consumer row other than chroma-from-luma reads it.
 			const ProductRow* c = RowOf(kP10cGrainSplitChroma);

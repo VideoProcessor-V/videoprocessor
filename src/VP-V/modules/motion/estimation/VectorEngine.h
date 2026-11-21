@@ -20,6 +20,7 @@
 #include <VP-V/modules/motion/estimation/OnDemandEstimate.h>
 #include <VP-V/modules/motion/estimation/ProducerPlan.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
+#include <VP-V/modules/motion/estimation/matcher/MatcherPyramidSource.h>
 #include <VP-V/modules/motion/estimation/VectorEngineState.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <IntentInterpreterObserver.h>
@@ -498,8 +499,37 @@ namespace VpMotion
 		// without a producer) "; " + P2CpuFormStatusSegment(): "P2 CPU form served N, declined N (last: <why>)", empty with no decline.
 		std::string ProducerStatusSegment() const;
 		std::string P2CpuFormStatusSegment() const;
+		// L-B4 (BBP-B B3): the matcher's read seam for the shared luma pyramid (kP1HalfLuma, Gpu, MatcherPyramidKey(level)) of the
+		// renderer registered under this engine's host. NotConfigured without a skeleton memo for the frame (nothing to fall back
+		// from); Unavailable with the cause when the product is asked and not served (the matcher then shows the catalog row 13 id
+		// product.motion_warp). `namedException` (non-null: RGB structure luma, DV unpack output) = every level is Unavailable with
+		// "named exception: <it>" (plan (b): those lumas are not the shared source plane).
+		MatcherPyramid::Source MatcherPyramidSource(const char* namedException = nullptr) const;
+		// L-B4 (BBP-B HIGH-1): the matcher's B upload (and the ahead pair's B / C) ARE the unpacked planes of those queued frames on
+		// the render device: offered as P13 views (SourcePlanes::Offer, VP-V code, no host line) for this render frame BEFORE the
+		// estimate, so the P1 owner fill finds its source and the read seam its identity. The render frame's own seq (the pair's A)
+		// is NEVER offered (its P13 stays the Entrance image, as at base): A's levels are the product made when it was the last
+		// pair's B (keepFrames 1), recognised through the log of these offers. Render thread. `luma` / `chroma` are pl_tex (chroma
+		// may be null). The generation is below every render frame's. False = not offered (Original pathway, no host, table full).
+		bool OfferMatcherPlanes(uint64_t seq, const void* luma, const void* chroma, bool fullRange) const;
+		static constexpr int64_t kMatcherOfferGeneration = -1;
+		// The last matcher offers (seq, range), shared with the read seam.
+		struct MatcherOfferLog
+		{
+			static constexpr size_t kEntries = 4;   // B, the ahead B / C, and the previous frame's B (the next A)
+			struct Entry { uint64_t seq = 0; bool fullRange = false; };
+			std::mutex m;
+			Entry entries[kEntries];
+			size_t next = 0;
+			uint64_t epoch = 0;
+			bool epochKnown = false;
+		};
+		// Render thread, before the offers of an estimate: a motion-validity epoch change (resync, seek, discontinuity) forgets every
+		// earlier offer, so a frame of an older epoch is never recognised as A (its kept product is not reused across the change).
+		void NoteMatcherEpoch(uint64_t epoch) const;
 
 	private:
+		std::shared_ptr<MatcherOfferLog> matcherOffers_ = std::make_shared<MatcherOfferLog>();
 		void NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence, uint64_t epochAtChoice);
 		FallbackCatalog::Decision NoteHookOutcome(bool failed, const std::string& what);   // counts and logs a failure
 		FallbackCatalog::Decision ReleaseHookFailures();
