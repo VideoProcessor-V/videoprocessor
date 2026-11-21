@@ -3,13 +3,13 @@
  "version": 2,
  "metric": "H2",
  "base_ref": "a591ad3b5",
- "measured_at": "dbbef8c07",
- "total": 23279,
+ "measured_at": "d51854afc",
+ "total": 23186,
  "totals": {
-  "production": 18645,
+  "production": 18552,
   "tests": 4577,
   "project": 57,
-  "renderer_information": 5523
+  "renderer_information": 5430
  },
  "files": {
   "src/VideoProcessor-BetaTests/BetaParametersTests.cpp": 155,
@@ -125,7 +125,7 @@
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRenderParameters.cpp": 55,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRenderParameters.h": 15,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h": 13,
-  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 5191,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 5098,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 190,
   "src/VideoProcessor-Lib/vprenderer/NlsHookRecovery.h": 44,
   "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h": 17,
