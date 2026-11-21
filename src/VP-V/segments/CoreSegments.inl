@@ -730,6 +730,10 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     const bool saturationGivenBack = activeSettings.saturationReplaced && !dvStage.AppearanceDecision().active;
     SyncFallback(FallbackCatalog::SaturationReplaced(activeSettings.saturationReplaced && !saturationGivenBack,
         activeSettings.saturationConfigured));   // VPV-FALLBACK saturation: replaced by appearance
+    // CF1-G7b: ambient_adapt likewise, per frame: replaced only while appearance acts (the intent interpreter's
+    // ConfigureIntentAmbient gives it back on the other frames, AppearanceStage::AmbientAdaptOn).
+    SyncFallback(FallbackCatalog::AmbientAdaptReplaced(activeSettings.ambientAdaptReplaced &&
+        !AppearanceStage::AmbientAdaptGivenBack(activeSettings.ambientAdaptReplaced, dvStage.AppearanceDecision().active)));   // VPV-FALLBACK ambient_adapt: replaced by appearance
     if (saturationGivenBack || vpv.led.sdrLift.ambientSdrLift)
     {
         frameColorAdjustment = renderParams.color_adjustment ? *renderParams.color_adjustment : pl_color_adjustment_neutral;

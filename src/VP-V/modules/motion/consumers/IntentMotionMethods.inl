@@ -22,7 +22,7 @@ void LibplaceboVideoRenderer::Impl::ConfigureIntentMotion()
 	IntentInterpreter::Switches switches;
 	switches.content = s.intentContent;
 	switches.motion = s.intentMotion;
-	switches.ambient = s.ambientAdapt;
+	switches.ambient = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, dvStage.AppearanceDecision().active);   // CF1-G7b
 	switches.black = s.intentBlack != BlackIntentMode::Off;
 	switches.display = s.intentDisplay;
 	IntentInterpreter::MotionSettings motion;

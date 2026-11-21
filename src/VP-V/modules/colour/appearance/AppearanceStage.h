@@ -165,6 +165,15 @@ namespace AppearanceStage
 	}
 
 	// One decision per frame. Off: nothing (the status line "appearance: off" is the host's). Never silent otherwise.
+	// CF1-G7b: ambient_adapt is replaced only while appearance really acts (the rule the saturation step uses per frame,
+	// CF1-FIN SHOULD B). PostLoad forced ambient_adapt off for a configured appearance (replaced); a frame where the pass is
+	// not active (strength 0 is never replaced; a calibration LUT before it, a lost shader) gives ambient_adapt back.
+	inline bool AmbientAdaptGivenBack(bool replaced, bool appearanceActive) { return replaced && !appearanceActive; }
+	inline bool AmbientAdaptOn(bool ambientAdapt, bool replaced, bool appearanceActive)
+	{
+		return ambientAdapt || AmbientAdaptGivenBack(replaced, appearanceActive);
+	}
+
 	inline Decision Decide(const Inputs& in, RoomLight::Smoother& smoother)
 	{
 		Decision d;

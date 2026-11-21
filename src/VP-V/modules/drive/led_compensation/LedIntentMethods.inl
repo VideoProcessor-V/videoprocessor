@@ -23,7 +23,7 @@ void LibplaceboVideoRenderer::Impl::ConfigureIntentAmbient()
 {
 	const RendererSettings& s = activeSettings;
 	AmbientAdapt::Settings ambient;
-	ambient.enabled = s.ambientAdapt;
+	ambient.enabled = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, dvStage.AppearanceDecision().active);   // CF1-G7b: per active state
 	ambient.strength = s.ambientAdaptStrength;
 	ambient.screenReflectNitsPerLux = s.ambientScreenReflect;
 	ambient.maxBlackNits = s.ambientMaxBlackNits;
