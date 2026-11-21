@@ -81,7 +81,15 @@ namespace SourceUnpack
 		VideoFrameEncoding container = VideoFrameEncoding::UNKNOWN; // DvTunnel only: R210 / R10b / R10l
 		int rgbBitAlignment = 1;                                    // DvTunnel only: 1 = high eight bits, 2 = low
 		bool fullRange = false;                                     // DvTunnel only (YUV full range stays on the CPU path)
+		int chromaSubsampleY = 1;                                   // Planar16: vertical chroma subsampling (P010 = 2, P210 = 1); the height must be a multiple
 	};
+
+	// Horizontal chroma subsampling factor of a packing's luma geometry (the pixel-pair grouping the CPU reference
+	// AnalysisLumaSource::IsValid requires); 1 when chroma is not horizontally subsampled (the DV tunnel RGB container).
+	constexpr int ChromaSubsampleX(Packing packing)
+	{
+		return packing == Packing::DvTunnel ? 1 : 2;
+	}
 
 	// The bytes one row of `width` pixels needs (rowBytes >= this; the raw texture row is rowBytes / 4 texels).
 	size_t MinRowBytes(Packing packing, int width);

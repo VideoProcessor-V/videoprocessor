@@ -134,6 +134,10 @@ namespace SourceUnpack
 		if (request.width <= 0 || request.height <= 0 || request.rowBytes % 4 != 0 ||
 			request.rowBytes < MinRowBytes(request.packing, request.width))
 			return Cause::BadGeometry;
+		// The CPU reference (AnalysisLumaSource::IsValid) refuses a width or height the chroma subsampling cannot tile.
+		if (request.chromaSubsampleY < 1 || request.width % ChromaSubsampleX(request.packing) != 0 ||
+			request.height % request.chromaSubsampleY != 0)
+			return Cause::BadGeometry;
 		if (request.packing == Packing::DvTunnel)
 		{
 			if (!DolbyVisionTunnelUnpackReference::SupportsContainer(request.container))
