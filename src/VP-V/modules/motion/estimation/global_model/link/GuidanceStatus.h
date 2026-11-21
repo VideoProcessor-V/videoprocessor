@@ -41,6 +41,9 @@ namespace CameraLink
 		return liveBuilt && !demand ? "no on-time target (analysis_lane off)" : nullptr;
 	}
 
+	// Camfix R8: the Fallbacks line CameraExtension's Refresh prints for a structural cause (cause from GuidanceStructuralCause).
+	inline std::string GuidanceUnguidedLine(const char* cause) { return std::string("camera_guidance: unguided - ") + cause; }
+
 	// Engages for kGuidanceRefusalHoldSeconds of measured time after each refusal worth showing.
 	class RefusalHold
 	{

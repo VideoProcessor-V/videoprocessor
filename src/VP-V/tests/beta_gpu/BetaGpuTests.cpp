@@ -4150,6 +4150,13 @@ void RunBetaMotionCorpus()
 // camera(p), the AHEAD fit of pair p itself (records[p], fitted BEFORE the matcher of p, regridded onto the 16-px consumer grid as
 // CameraFitWorker does, prevField null as in production). This is the runtime rule. The d = 2 rows (model_global, all_switches and
 // their _ahead twins) are a HISTORICAL reference only, not a runtime path. Scoring pools the same pairs (d .. last) in every variant.
+// Camfix R8 (doc 91 D 10:45, doc 103 s4): the d = 0 acceptance per row is NON-INFERIOR within the A/A noise (dEPE <= +0.002, dp95 <=
+// +0.005, dwarp <= +0.005 source px or the A/A spread if larger; the mover subset included); a HEADROOM row (EPE_off >= 0.05 or the
+// <0.25 px share < 95%) must be SUPERIOR (dEPE <= -0.01 or +2 pts <0.25 px share); render-path matcher GPU ms guided <= off +
+// max(2%, 0.1 ms), the median of >= 3 interleaved ABAB repeats (VP_TEST_CAMERA_ACCURACY_REPEATS, default 1); the lane on time >= 90% at
+// the live lead (VP_TEST_CAMERA_ACCURACY_LEAD, default 2); the camera worker (fit ms / frame period) <= 20% of a core. The d = 0 run adds
+// rows per rate: zoom + rotation, a periodic fence, low contrast and heavy grain (all 480 px/s), one A/A off repeat per scene and a
+// share-0 run (model_global_d0 with every guide withheld) whose fields must be bit-identical to off.
 namespace CameraAccuracy
 {
 	using Corpus::Obj;
@@ -4296,6 +4303,24 @@ namespace CameraAccuracy
 			c.scene.objects.push_back(o);
 			push(c);
 		}
+		// Camfix R8 (doc 103 s4): the d = 0 acceptance's extra rows, 480 px/s at every rate, only with VP_TEST_CAMERA_ACCURACY_D0=1.
+		if (rates.size() > 2)
+			for (const Rate& r : rates)
+			{
+				CamScene z = base(r, 480.0, "pan_480pxs_zoomrot", "pan + zoom + rotation");
+				z.scene.zoom = static_cast<float>(0.02 / z.fps);   // 2% a second, in
+				z.scene.rot = static_cast<float>(0.5 / z.fps);     // 0.5 degree a second
+				push(z);
+				CamScene f = base(r, 480.0, "pan_480pxs_fence", "pan + periodic texture");
+				f.scene.fencePeriod = 24.0f;                       // 4K px; the corpus's repetitive-texture fence
+				push(f);
+				CamScene l = base(r, 480.0, "pan_480pxs_lowtex", "pan + low contrast");
+				l.scene.level = 0.15f;                             // the corpus's dark, low-contrast scene
+				push(l);
+				CamScene n = base(r, 480.0, "pan_480pxs_grain", "pan + heavy grain");
+				n.scene.grain = 3000.0f;                           // the corpus's heavy grain
+				push(n);
+			}
 		return list;
 	}
 
@@ -4540,6 +4565,7 @@ namespace CameraAccuracy
 	struct PairLog
 	{
 		int pair = 0;
+		uint64_t fieldHash = 0;        // camfix R8: FNV-1a of the downloaded (scored) field of this pair; share 0 and A/A compare it with off
 		bool eligible = false, guided = false, nvof = false;
 		std::string refusal, use, fitReason;
 		double gpuMs = 0, wallMs = 0, planMs = 0, fitMs = 0, fitConf = 0, fitTx = 0, fitTy = 0;
@@ -4555,6 +4581,8 @@ namespace CameraAccuracy
 	struct VariantResult
 	{
 		std::string name;
+		int spec = -1;      // camfix R8: the Spec index this run measured
+		std::string role;   // camfix R8: "" = the primary run (variants[]), "aa" = an off repeat (A/A), "repeat" = a d0 repeat, "share0" = guides withheld
 		SubsetStats stats[3];
 		double hold = 0, warp = 0;
 		int instance = 0;   // the MotionWarp instance number in execution order (0 = the first of the run)
@@ -4601,6 +4629,8 @@ namespace CameraAccuracy
 		std::vector<CameraAccuracyAhead::PairTiming> aheadTiming;
 		std::vector<double> aheadConvertMs;   // camera WORKER: AheadToSourceGrid (native field + trust) + FlowGlobal (audit F3)
 		std::vector<double> aheadCopyMs;      // RENDER thread: CopyAhead only (FlowOf's view copied at once)
+		// Camfix R8: the d = 0 run's extra runs (A/A off repeats, d0 repeats, the share-0 run), in execution order; never in variants[].
+		std::vector<VariantResult> extra;
 		std::vector<int> aheadHave;   // 1 = the ahead pair existed and converted
 		// RAW field vs the exact camera translation (trusted samples, trust >= 0.5; source px): the native P2 field and the F2 seed field
 		// of the same pairs (does NVOF itself under-estimate slow motion?). Index = pair.
@@ -4615,6 +4645,13 @@ namespace CameraAccuracy
 	};
 
 	const char* const kSubsetNames[3] = { "all", "background", "mover" };
+
+	// Camfix R8: the d = 2 variants are a historical reference only (the runtime rule is d = 0); the summary tables say so.
+	inline std::string Shown(const std::string& name)
+	{
+		return name == "model_global" || name == "all_switches" || name == "model_global_ahead" || name == "all_switches_ahead" ?
+			name + " (d=2, historical)" : name;
+	}
 
 	void WriteCsv(const std::string& dir, const std::vector<SceneResult>& all)
 	{
@@ -5078,74 +5115,192 @@ namespace CameraAccuracy
 		md << line;
 	}
 
-	// d = 0 A/B (refs 93-prep-cam-d0 section 4; owner rule: guided TOTAL time (camera fit + plan + guided matcher) no slower than the
-	// unguided matcher AND more accurate than the matcher alone, on EVERY row). EPE_expected(L) = share(L) x EPE_d0 + (1 - share(L)) x
-	// EPE_off, share(L) from the FIFO on-time model of this run (AheadModel, the d0 variant's own fit costs).
-	void WriteD0Summary(std::ofstream& md, const std::vector<SceneResult>& all)
+	// Camfix R8 helpers: the median of a value over runs; the A/A spread of a value (max |repeat - primary| over the off repeats).
+	inline double MedianOf(std::vector<double> v)
+	{
+		if (v.empty()) return 0.0;
+		std::sort(v.begin(), v.end());
+		const size_t n = v.size();
+		return n % 2 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+	}
+
+	// The lead the live lane runs at (VP_TEST_CAMERA_ACCURACY_LEAD, default 2: the 93-prep proposal), 1 .. 4.
+	inline int LiveLead()
+	{
+		const int lead = static_cast<int>(EnvDouble("VP_TEST_CAMERA_ACCURACY_LEAD", 2));
+		return lead < 1 ? 1 : (lead > 4 ? 4 : lead);
+	}
+
+	// d = 0 A/B (doc 91 D 10:45, doc 103 s4; replaces the 93-prep section 4 "no slower in TOTAL and more accurate on every row" rule).
+	// Per row: NON-INFERIOR within the A/A noise (dEPE <= +0.002, dp95 <= +0.005, dwarp <= +0.005, or the A/A spread if larger; the
+	// mover subset by the same EPE and p95 limits); a HEADROOM row (EPE_off >= 0.05 px or the <0.25 px share of off < 95%) must be
+	// SUPERIOR (dEPE <= -0.01 or +2 pts <0.25 px share); TIME: the render-path matcher GPU ms (steady median, pairs >= 1) guided <= off +
+	// max(2%, 0.1 ms), the median over the interleaved repeats (>= 3 for acceptance); the lane on time >= 90% at the live lead
+	// (AheadModel, the d0 run's own fit costs); the camera WORKER (mean fit ms / frame period) <= 20% of a core.
+	// Verdict: PASS (headroom row, superior), PASS-FLOOR (no headroom, non-inferior), NO-GAIN (headroom row, non-inferior but not
+	// superior: fails acceptance), DEFECT (any limit broken; the reasons follow). Also written to camera-accuracy-d0.csv.
+	void WriteD0Summary(std::ofstream& md, const std::string& dir, const std::vector<SceneResult>& all)
 	{
 		bool any = false;
 		for (const SceneResult& s : all)
 			any = any || !s.variants[5].name.empty();
 		if (!any)
 			return;
-		char line[1600];
-		md << "\n## d = 0 A/B (the runtime rule; owner acceptance)\n\n";
+		const int lead = LiveLead();
+		char line[2000];
+		std::ofstream csv(dir + "\\camera-accuracy-d0.csv", std::ios::trunc);
+		csv << "scene,variant,runs_off,runs_d0,epe_off,epe_d0,d_epe,d_p95,d_warp,mover_d_epe,mover_d_p95,share025_off,share025_d0,headroom,"
+			"tol_epe,tol_p95,tol_warp,gpu_ms_off,gpu_ms_d0,gpu_limit_ms,on_time_lead,lead,worker_share,guided,pairs,verdict,reasons\n";
+		md << "\n## d = 0 A/B (the runtime rule; acceptance per doc 91 D 10:45 / doc 103 s4)\n\n";
 		md << "model_global_d0 / all_switches_d0: pair p guided by camera(p), the ahead fit of pair p itself, fitted before its matcher, regridded "
 			"onto the 16-px consumer grid, no previous field. EPE = trusted blocks, scored pairs " << kGuideLag << "-" << (Frames() - 2) << " (the same pool "
-			"as off). Time = steady medians (pairs >= 1): off = matcher GPU ms; guided total = guided matcher GPU ms + camera fit ms + plan ms (the fit "
-			"runs on the camera worker, counted anyway per the owner rule); total p95 uses the fit p95. PASS = more accurate (EPE_d0 <= EPE_off on all blocks "
-			"and on mover blocks where the scene has a mover, strictly lower on at least one) AND no slower (guided total p50 and p95 <= off). NO-GAIN = "
-			"no worse and no slower but not more accurate (equal EPE). DEFECT = worse EPE or slower. EPE_expected(L) uses the on-time share at lead L.\n\n";
-		md << "| scene | variant | EPE off | EPE d0 | mover EPE off / d0 | matcher ms off | matcher ms d0 | fit ms p50 / p95 | plan ms p50 | total d0 p50 / p95 | "
-			"guided (all pairs) | on time L=1..4 | EPE_expected L=1..4 | verdict |\n";
-		md << "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
+			"as off); every value is the median over the runs (the primary run and its interleaved repeats). NON-INFERIOR: dEPE <= +0.002, dp95 <= +0.005, "
+			"dwarp <= +0.005 (or the A/A spread of off, if larger), the mover subset by the same EPE and p95 limits. HEADROOM row (EPE_off >= 0.05 or "
+			"<0.25 px share of off < 95%): must be SUPERIOR (dEPE <= -0.01 or +2 pts <0.25 px share). TIME: render-path matcher GPU ms (steady median, "
+			"pairs >= 1) guided <= off + max(2%, 0.1 ms), median over the runs (fewer than 3 runs = indicative only). ON TIME at the live lead L = " << lead <<
+			" >= 90% (AheadModel). WORKER = mean fit ms / frame period <= 20% of a core (the fit runs on the camera worker, not the render path). "
+			"PASS = headroom row superior; PASS-FLOOR = no headroom, non-inferior; NO-GAIN = headroom row not superior (fails); DEFECT = a limit broken.\n\n";
+		md << "| scene | variant | runs off / d0 | EPE off / d0 | dEPE | dp95 | dwarp | mover dEPE / dp95 | <0.25 px off / d0 | headroom | "
+			"matcher GPU ms off / d0 (limit) | on time L=" << lead << " | worker | guided | verdict |\n";
+		md << "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
+		struct Metrics { double epe = 0, p95 = 0, warp = 0, mEpe = 0, mP95 = 0, lt025 = 0, gpu = 0; };
+		auto metricsOf = [](const VariantResult& v)
+		{
+			Metrics m;
+			m.epe = v.stats[0].Mean();
+			m.p95 = v.stats[0].Percentile(0.95);
+			m.warp = v.warp;
+			m.mEpe = v.stats[2].Mean();
+			m.mP95 = v.stats[2].Percentile(0.95);
+			m.lt025 = SubsetStats::Share(v.stats[0].lt025, v.stats[0].eval);
+			m.gpu = v.Quantile(&PairLog::gpuMs, 1, false, false, 0.5);
+			return m;
+		};
+		auto medianMetrics = [](const std::vector<Metrics>& runs)
+		{
+			Metrics m;
+			std::vector<double> a, b, c, d, e, f, g;
+			for (const Metrics& r : runs) { a.push_back(r.epe); b.push_back(r.p95); c.push_back(r.warp); d.push_back(r.mEpe); e.push_back(r.mP95); f.push_back(r.lt025); g.push_back(r.gpu); }
+			m.epe = MedianOf(a); m.p95 = MedianOf(b); m.warp = MedianOf(c); m.mEpe = MedianOf(d); m.mP95 = MedianOf(e); m.lt025 = MedianOf(f); m.gpu = MedianOf(g);
+			return m;
+		};
+		int counts[4] = {};   // PASS, PASS-FLOOR, NO-GAIN, DEFECT
 		for (const SceneResult& s : all)
 		{
 			const VariantResult& off = s.variants[0];
+			std::vector<Metrics> offRuns(1, metricsOf(off));
+			double aaEpe = 0, aaP95 = 0, aaWarp = 0, aaGpu = 0;
+			for (const VariantResult& x : s.extra)
+				if (x.role == "aa")
+				{
+					const Metrics m = metricsOf(x);
+					aaEpe = std::max(aaEpe, std::fabs(m.epe - offRuns[0].epe));
+					aaP95 = std::max(aaP95, std::fabs(m.p95 - offRuns[0].p95));
+					aaWarp = std::max(aaWarp, std::fabs(m.warp - offRuns[0].warp));
+					aaGpu = std::max(aaGpu, std::fabs(m.gpu - offRuns[0].gpu));
+					offRuns.push_back(m);
+				}
+			const Metrics mo = medianMetrics(offRuns);
+			const bool mover = off.stats[2].eval > 0;
+			if (offRuns.size() > 1)
+			{
+				std::snprintf(line, sizeof(line), "| %s | off (A/A) | %zu | spread %.4f | - | spread %.4f | spread %.4f | - | - | - | spread %.3f ms | - | - | - | A/A |\n",
+					s.scene.name.c_str(), offRuns.size(), aaEpe, aaP95, aaWarp, aaGpu);
+				md << line;
+			}
 			for (int vi = 5; vi <= 6; ++vi)
 			{
 				const VariantResult& d0 = s.variants[vi];
 				if (d0.name.empty())
 					continue;
-				double share[5] = {};
+				std::vector<Metrics> d0Runs(1, metricsOf(d0));
+				for (const VariantResult& x : s.extra)
+					if (x.role == "repeat" && x.spec == vi)
+						d0Runs.push_back(metricsOf(x));
+				const Metrics md0 = medianMetrics(d0Runs);
 				const double periodMs = 1000.0 / s.scene.fps;
+				double onTime = 0.0;
 				if (!s.aheadTiming.empty() && s.aheadProblem.empty())
 				{
 					const AheadLatency lat = AheadModel(s, d0);
 					int n = 0;
 					for (size_t p = 1; p < lat.latencyMs.size(); ++p, ++n)
-						for (int L = 1; L <= 4; ++L)
-							share[L] += lat.latencyMs[p] <= L * periodMs ? 1.0 : 0.0;
-					for (int L = 1; L <= 4; ++L)
-						share[L] = n ? share[L] / n : 0.0;
+						onTime += lat.latencyMs[p] <= lead * periodMs ? 1.0 : 0.0;
+					onTime = n ? onTime / n : 0.0;
 				}
-				const double eOff = off.stats[0].Mean(), eD0 = d0.stats[0].Mean();
-				const bool mover = off.stats[2].eval > 0 && d0.stats[2].eval > 0;
-				const double mOff = off.stats[2].Mean(), mD0 = d0.stats[2].Mean();
-				const double tOff = off.Quantile(&PairLog::gpuMs, 1, false, false, 0.5);
-				const double tD0 = d0.Quantile(&PairLog::gpuMs, 1, false, false, 0.5);
-				const double fit50 = d0.Quantile(&PairLog::fitMs, 1, false, false, 0.5), fit95 = d0.Quantile(&PairLog::fitMs, 1, false, false, 0.95);
-				const double plan50 = d0.Quantile(&PairLog::planMs, 1, true, false, 0.5);
-				const double total = tD0 + fit50 + plan50, total95 = tD0 + fit95 + plan50;
-				const bool noWorse = eD0 <= eOff && (!mover || mD0 <= mOff);
-				const bool better = noWorse && (eD0 < eOff || (mover && mD0 < mOff));
-				const bool fast = total <= tOff && total95 <= tOff;
-				const char* verdict = !noWorse || !fast ? "DEFECT" : better ? "PASS" : "NO-GAIN";
+				double fitSum = 0.0;
+				int fitN = 0;
+				for (const PairLog& pl : d0.pairs)
+					if (pl.pair >= 1) { fitSum += pl.fitMs; ++fitN; }
+				const double worker = fitN ? fitSum / fitN / periodMs : 0.0;
+				const double tolE = std::max(0.002, aaEpe), tolP = std::max(0.005, aaP95), tolW = std::max(0.005, aaWarp);
+				const double dE = md0.epe - mo.epe, dP = md0.p95 - mo.p95, dW = md0.warp - mo.warp;
+				const double dmE = md0.mEpe - mo.mEpe, dmP = md0.mP95 - mo.mP95, dShare = md0.lt025 - mo.lt025;
+				const double gpuLimit = mo.gpu + std::max(0.02 * mo.gpu, 0.1);
+				std::string reasons;
+				auto fail = [&](bool bad, const char* why) { if (bad) { if (!reasons.empty()) reasons += ", "; reasons += why; } };
+				fail(dE > tolE, "EPE");
+				fail(dP > tolP, "p95");
+				fail(dW > tolW, "warp");
+				fail(mover && dmE > tolE, "mover EPE");
+				fail(mover && dmP > tolP, "mover p95");
+				fail(md0.gpu > gpuLimit, "time");
+				fail(onTime < 0.90, "on time");
+				fail(worker > 0.20, "worker");
+				const bool headroom = mo.epe >= 0.05 || mo.lt025 < 0.95;
+				const bool superior = dE <= -0.01 || dShare >= 0.02;
+				const int verdict = !reasons.empty() ? 3 : (headroom ? (superior ? 0 : 2) : 1);
+				static const char* const kVerdicts[4] = { "PASS", "PASS-FLOOR", "NO-GAIN", "DEFECT" };
+				++counts[verdict];
+				if (verdict == 2)
+					reasons = "headroom not used";
+				if (d0Runs.size() < 3 || offRuns.size() < 3)
+					reasons += std::string(reasons.empty() ? "" : "; ") + "time indicative (< 3 runs)";
 				char moverText[64] = "-";
 				if (mover)
-					std::snprintf(moverText, sizeof(moverText), "%.4f / %.4f", mOff, mD0);
-				double expected[5] = {};
-				for (int L = 1; L <= 4; ++L)
-					expected[L] = share[L] * eD0 + (1.0 - share[L]) * eOff;
-				std::snprintf(line, sizeof(line), "| %s | %s | %.4f | %.4f | %s | %.3f | %.3f | %.3f / %.3f | %.3f | %.3f / %.3f | %d of %d | %.0f / %.0f / %.0f / %.0f%% | "
-					"%.4f / %.4f / %.4f / %.4f | %s%s%s |\n",
-					s.scene.name.c_str(), d0.name.c_str(), eOff, eD0,
-					moverText,
-					tOff, tD0, fit50, fit95, plan50, total, total95, d0.Count(&PairLog::guided, false), Frames() - 1,
-					100.0 * share[1], 100.0 * share[2], 100.0 * share[3], 100.0 * share[4], expected[1], expected[2], expected[3], expected[4],
-					verdict, noWorse ? "" : " (accuracy)", fast ? "" : " (time)");
+					std::snprintf(moverText, sizeof(moverText), "%+.4f / %+.4f", dmE, dmP);
+				std::snprintf(line, sizeof(line), "| %s | %s | %zu / %zu | %.4f / %.4f | %+.4f | %+.4f | %+.4f | %s | %.1f%% / %.1f%% | %s | %.3f / %.3f (%.3f) | %.0f%% | %.1f%% | %d of %d | %s%s%s%s |\n",
+					s.scene.name.c_str(), d0.name.c_str(), offRuns.size(), d0Runs.size(), mo.epe, md0.epe, dE, dP, dW, moverText,
+					100.0 * mo.lt025, 100.0 * md0.lt025, headroom ? "yes" : "no", mo.gpu, md0.gpu, gpuLimit, 100.0 * onTime, 100.0 * worker,
+					d0.Count(&PairLog::guided, false), Frames() - 1, kVerdicts[verdict], reasons.empty() ? "" : " (", reasons.c_str(), reasons.empty() ? "" : ")");
 				md << line;
+				std::snprintf(line, sizeof(line), "%s,%s,%zu,%zu,%.5f,%.5f,%+.5f,%+.5f,%+.5f,%+.5f,%+.5f,%.4f,%.4f,%d,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f,%.4f,%d,%.4f,%d,%d,%s,\"%s\"\n",
+					s.scene.name.c_str(), d0.name.c_str(), offRuns.size(), d0Runs.size(), mo.epe, md0.epe, dE, dP, dW, mover ? dmE : 0.0, mover ? dmP : 0.0,
+					mo.lt025, md0.lt025, headroom ? 1 : 0, tolE, tolP, tolW, mo.gpu, md0.gpu, gpuLimit, onTime, lead, worker,
+					d0.Count(&PairLog::guided, false), Frames() - 1, kVerdicts[verdict], reasons.c_str());
+				csv << line;
 			}
+		}
+		std::snprintf(line, sizeof(line), "\nRows: %d PASS, %d PASS-FLOOR, %d NO-GAIN, %d DEFECT.\n", counts[0], counts[1], counts[2], counts[3]);
+		md << line;
+		// Share 0 => identical to off: the share-0 run (model_global_d0 with every guide built and withheld) must give off's fields bit for
+		// bit on every pair; the A/A column says whether off itself repeats bit for bit (if not, the check cannot tell the camera from noise).
+		md << "\n### Share 0 => bit-identical to off\n\n| scene | A/A identical pairs | share-0 identical pairs | result |\n|---|---|---|---|\n";
+		for (const SceneResult& s : all)
+		{
+			const VariantResult& off = s.variants[0];
+			auto identical = [&](const VariantResult& x)
+			{
+				int same = 0;
+				for (size_t p = 0; p < x.pairs.size() && p < off.pairs.size(); ++p)
+					same += x.pairs[p].fieldHash == off.pairs[p].fieldHash ? 1 : 0;
+				return same;
+			};
+			const VariantResult* aa = nullptr;
+			const VariantResult* zero = nullptr;
+			for (const VariantResult& x : s.extra)
+			{
+				if (x.role == "aa" && !aa) aa = &x;
+				if (x.role == "share0" && !zero) zero = &x;
+			}
+			if (!zero)
+				continue;
+			const int n = static_cast<int>(off.pairs.size());
+			const int aaSame = aa ? identical(*aa) : -1, zeroSame = identical(*zero);
+			const char* result = zeroSame == n ? "IDENTICAL" : (aaSame >= 0 && aaSame < n ? "not decidable (off does not repeat bit for bit)" : "DEFECT (share 0 changed the field)");
+			std::snprintf(line, sizeof(line), "| %s | %s | %d of %d | %s |\n", s.scene.name.c_str(),
+				aaSame < 0 ? "-" : (std::to_string(aaSame) + " of " + std::to_string(n)).c_str(), zeroSame, n, result);
+			md << line;
 		}
 		md << "\nPlausibility: a d0 row's guided count should be " << (Frames() - 1) << " (no warm-up at d = 0) unless the ahead pair or the gate "
 			"refused a pair (camera-accuracy-pairs.csv, column refusal).\n";
@@ -5202,7 +5357,7 @@ namespace CameraAccuracy
 				if (v.name.empty()) continue;   // a variant this run did not ask for
 				const SubsetStats& st = v.stats[0];
 				std::snprintf(line, sizeof(line), "| %s | %s | %.1f%% | %.3f | %.3f | %.3f | %.1f%% / %.1f%% | %.1f%% / %.1f%% | %.2f | %.2f | %.2f | %.2f | %d/%d |\n",
-					s.scene.name.c_str(), v.name.c_str(), 100.0 * SubsetStats::Share(st.trusted, st.eval), st.Mean(), st.Percentile(0.5), st.Percentile(0.95),
+					s.scene.name.c_str(), Shown(v.name).c_str(), 100.0 * SubsetStats::Share(st.trusted, st.eval), st.Mean(), st.Percentile(0.5), st.Percentile(0.95),
 					100.0 * SubsetStats::Share(st.lt025, st.eval), 100.0 * SubsetStats::Share(st.lt025, st.trusted),
 					100.0 * SubsetStats::Share(st.lt05, st.eval), 100.0 * SubsetStats::Share(st.lt05, st.trusted), v.hold, v.warp,
 					v.MeanEligible(&PairLog::gpuMs), v.MeanEligible(&PairLog::wallMs), v.Count(&PairLog::guided, true), Frames() - 1 - kGuideLag);
@@ -5220,7 +5375,7 @@ namespace CameraAccuracy
 				const SubsetStats& a = off.stats[0];
 				const SubsetStats& b = on.stats[0];
 				std::snprintf(line, sizeof(line), "| %s | %s | %+.3f | %+.3f | %+.1f pts | %+.1f pts | %+.1f pts | %+.2f | %+.2f | %+.2f |\n", s.scene.name.c_str(),
-					on.name.c_str(), b.Mean() - a.Mean(), b.Percentile(0.95) - a.Percentile(0.95),
+					Shown(on.name).c_str(), b.Mean() - a.Mean(), b.Percentile(0.95) - a.Percentile(0.95),
 					100.0 * (SubsetStats::Share(b.lt025, b.eval) - SubsetStats::Share(a.lt025, a.eval)),
 					100.0 * (SubsetStats::Share(b.lt05, b.eval) - SubsetStats::Share(a.lt05, a.eval)),
 					100.0 * (SubsetStats::Share(b.trusted, b.eval) - SubsetStats::Share(a.trusted, a.eval)), on.warp - off.warp,
@@ -5240,7 +5395,7 @@ namespace CameraAccuracy
 						for (int k = 1; k < 3 && !v.name.empty(); ++k)
 						{
 							const SubsetStats& st = v.stats[k];
-							std::snprintf(line, sizeof(line), "| %s | %s | %s | %lld | %.1f%% | %.3f | %.3f | %.3f | %.1f%% | %.1f%% |\n", s.scene.name.c_str(), v.name.c_str(),
+							std::snprintf(line, sizeof(line), "| %s | %s | %s | %lld | %.1f%% | %.3f | %.3f | %.3f | %.1f%% | %.1f%% |\n", s.scene.name.c_str(), Shown(v.name).c_str(),
 								kSubsetNames[k], st.eval, 100.0 * SubsetStats::Share(st.trusted, st.eval), st.Mean(), st.Percentile(0.5), st.Percentile(0.95),
 								100.0 * SubsetStats::Share(st.lt025, st.eval), 100.0 * SubsetStats::Share(st.lt05, st.eval));
 							md << line;
@@ -5269,7 +5424,7 @@ namespace CameraAccuracy
 				}
 				cpuMedAll[vi].push_back(cpuMed);
 				cpuP95All[vi].push_back(cpu95);
-				std::snprintf(line, sizeof(line), "| %s | %s | %.2f | %.2f | %+.2f | %+.2f | %.3f | %.3f | %.3f | %.4f | %d |\n", s.scene.name.c_str(), on.name.c_str(), gpuOff, gpuOn,
+				std::snprintf(line, sizeof(line), "| %s | %s | %.2f | %.2f | %+.2f | %+.2f | %.3f | %.3f | %.3f | %.4f | %d |\n", s.scene.name.c_str(), Shown(on.name).c_str(), gpuOff, gpuOn,
 					gpuOn - gpuOff, wallOn - wallOff, cpuMed, cpu95, on.Quantile(&PairLog::fitMs, 1, false, true, 0.5), on.Quantile(&PairLog::planMs, 1, true, true, 0.5), guidedPairs);
 				md << line;
 			}
@@ -5278,7 +5433,7 @@ namespace CameraAccuracy
 		md << "\nAcross the scenes (the bound to quote): ";
 		for (int vi = 1; vi < 3; ++vi)
 		{
-			std::snprintf(line, sizeof(line), "**%s** dGPU median %+.2f max %+.2f ms, dwall median %+.2f max %+.2f ms, CPU ms median %.3f, worst p95 %.3f. ", vi == 1 ? "model_global" : "all_switches",
+			std::snprintf(line, sizeof(line), "**%s** dGPU median %+.2f max %+.2f ms, dwall median %+.2f max %+.2f ms, CPU ms median %.3f, worst p95 %.3f. ", vi == 1 ? "model_global (d=2, historical)" : "all_switches (d=2, historical)",
 				medianOf(dGpuAll[vi]), maxOf(dGpuAll[vi]), medianOf(dWallAll[vi]), maxOf(dWallAll[vi]), medianOf(cpuMedAll[vi]), maxOf(cpuP95All[vi]));
 			md << line;
 		}
@@ -5379,7 +5534,7 @@ namespace CameraAccuracy
 			"PairFacts.haveEngineGlobal is not set (the fit's engine-agreement signal stays neutral; live sets it when the engine's global is used); "
 			"all_switches understates guidedCandidate and tinyMoverRoi (the CPU plan only: the GPU matcher does not apply them yet).\n";
 		WriteAheadSummary(md, all);
-		WriteD0Summary(md, all);
+		WriteD0Summary(md, dir, all);
 	}
 }
 
@@ -5448,6 +5603,8 @@ void RunBetaCameraAccuracy()
 	// pair, from the real producer: ProducerPairs.h) through the production CopyAhead -> AheadToSourceGrid, instead of the F2 seed.
 	const bool d0Run = EnvText("VP_TEST_CAMERA_ACCURACY_D0") == "1";
 	const bool aheadRun = EnvText("VP_TEST_CAMERA_ACCURACY_AHEAD") == "1" || d0Run;   // the d = 0 rows need the ahead pairs and the on-time model
+	// Camfix R8: the interleaved runs of off / model_global_d0 / all_switches_d0 per scene (d = 0 run only; >= 3 for the time acceptance).
+	const int repeats = std::max(1, std::min(9, static_cast<int>(EnvDouble("VP_TEST_CAMERA_ACCURACY_REPEATS", 1))));
 	if (aheadRun)
 	{
 		specs.push_back(Spec{ "model_global_ahead", true, ModelGlobalOnly(), true, kGuideLag });
@@ -5503,12 +5660,36 @@ void RunBetaCameraAccuracy()
 		std::vector<std::vector<int8_t>> classes(Frames() - 1);   // the block classes of each scored pair, shared by the variants
 		for (int p = kGuideLag; p + 1 < Frames(); ++p)   // the scored pairs (the same pool in every variant, d = 0 included)
 			classes[p] = ClassifyAll(cs.scene, p, lumas[p], blocksX, blocksY);
+		// Camfix R8: the runs of this scene. The primary runs fill variants[] (spec order, or reversed); the d = 0 run then adds, interleaved
+		// (ABAB), off / model_global_d0 / all_switches_d0 per extra repeat (VP_TEST_CAMERA_ACCURACY_REPEATS - 1; an off repeat is also the A/A),
+		// one A/A off repeat when there is no extra repeat, and the share-0 run (model_global_d0 with every guide withheld).
+		struct Run { size_t spec; std::string role; };
+		std::vector<Run> runs;
 		for (size_t vk = 0; vk < specs.size(); ++vk)
+			runs.push_back(Run{ reverse ? specs.size() - 1 - vk : vk, "" });
+		if (d0Run)
 		{
-			const size_t vi = reverse ? specs.size() - 1 - vk : vk;
+			for (int r = 1; r < repeats; ++r)
+			{
+				runs.push_back(Run{ 0, "aa" });
+				runs.push_back(Run{ 5, "repeat" });
+				runs.push_back(Run{ 6, "repeat" });
+			}
+			if (repeats < 2)
+				runs.push_back(Run{ 0, "aa" });
+			runs.push_back(Run{ 5, "share0" });
+		}
+		sr.extra.resize(runs.size() - specs.size());   // sized once: the runs below hold references into it
+		for (size_t rk = 0; rk < runs.size(); ++rk)
+		{
+			const size_t vi = runs[rk].spec;
+			const bool primary = rk < specs.size();
+			const bool share0 = runs[rk].role == "share0";
 			const Spec& spec = specs[vi];
-			VariantResult& vr = sr.variants[vi];
-			vr.name = spec.name;
+			VariantResult& vr = primary ? sr.variants[vi] : sr.extra[rk - specs.size()];
+			vr.name = primary ? std::string(spec.name) : std::string(spec.name) + " [" + runs[rk].role + "]";
+			vr.spec = static_cast<int>(vi);
+			vr.role = runs[rk].role;
 			vr.instance = instance++;
 			if (!aheadMade)
 			{
@@ -5604,6 +5785,13 @@ void RunBetaCameraAccuracy()
 						log.guideGy = frame->globalFwd[1];
 					}
 				}
+				if (share0 && frame)
+				{
+					// Camfix R8 share 0: the guide was built (the camera ran) but never reaches the matcher (the lane never on time).
+					frame.reset();
+					log.guided = false;
+					log.refusal = "share 0 (guide withheld)";
+				}
 				warp.SetCameraGuidance(frame);
 				Dejudder::Planes a, b;
 				if (p == 0)
@@ -5648,6 +5836,14 @@ void RunBetaCameraAccuracy()
 				pl_tex_transfer_params d{};
 				d.tex = warp.Field(); d.ptr = fieldHalf.data();
 				Check(pl_tex_download(g, &d), "camera accuracy: field download");   // the live (guided) field: scored, never fitted
+				{
+					// Camfix R8: FNV-1a of the field (share 0 and A/A compare it with off, bit for bit).
+					uint64_t h = 1469598103934665603ull;
+					const unsigned char* bytes = reinterpret_cast<const unsigned char*>(fieldHalf.data());
+					for (size_t i = 0; i < fieldHalf.size() * sizeof(uint16_t); ++i)
+						h = (h ^ bytes[i]) * 1099511628211ull;
+					log.fieldHash = h;
+				}
 				// F2 (as production): the fit reads the optical-flow SEED of this pair (MotionWarp::LastSeed, the searching
 				// instance's ofSearch), converted onto the 16-px source grid by the live readback's own CPU step
 				// (CameraLink::SeedToSourceGrid). No seed (WARP: no engine) = no fit, as live (camera_fit fallback).
@@ -5706,7 +5902,7 @@ void RunBetaCameraAccuracy()
 					layout.consistencyPx = seed.consistencyPx;
 					Check(CameraLink::SeedToSourceGrid(seedRgba[0].data(), seedRgba[1].data(), layout, fc), "camera accuracy: seed layout");
 					log.seedBlockPx = 16 * per;
-					if (aheadRun && vi == 1)
+					if (aheadRun && vi == 1 && primary)
 					{
 						// The F2 seed field's raw accuracy of the same pair (the A/B's raw row).
 						if (sr.seedRaw.size() < static_cast<size_t>(Frames() - 1))

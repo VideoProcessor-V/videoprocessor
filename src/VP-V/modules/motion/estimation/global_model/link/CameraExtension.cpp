@@ -279,14 +279,9 @@ namespace Vpv
 				{
 					FrameAnalysis::Record rec;
 					const FrameAnalysis::ReadStatus rs = store->Read(seq - 1, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kCadence, rec);
-					if (rs == FrameAnalysis::ReadStatus::Ok)
-					{
-						read = CameraLink::CadenceRead::Ok;
+					read = CameraLink::CadenceReadOf(rs);
+					if (read == CameraLink::CadenceRead::Ok)
 						filmHz = rec.cadence.filmHz;
-					}
-					else
-						read = rs == FrameAnalysis::ReadStatus::Missing || rs == FrameAnalysis::ReadStatus::Late ? CameraLink::CadenceRead::NotYet :
-							CameraLink::CadenceRead::Refused;
 				}
 				CameraLink::ApplyCadenceRead(t, read, filmHz, st.haveTiming, st.timing);
 				auto moved = [](double a, double b) { return (a > 0.0) != (b > 0.0) || (a > 0.0 && std::fabs(a - b) > 0.01 * b); };
@@ -958,7 +953,7 @@ namespace Vpv
 					// here, not per pair: no ahead fit (off, or a deterministic run's bridge path), or no on-time target (no skeleton lane).
 					const char* cause = CameraLink::GuidanceStructuralCause(st.aheadWanted, st.aheadDeterministic, st.liveBuilt, st.demand != nullptr);
 					if (cause)
-						fb.push_back(std::string("camera_guidance: unguided - ") + cause);
+						fb.push_back(CameraLink::GuidanceUnguidedLine(cause));
 				}
 				if (st.adapter)
 				{

@@ -7,6 +7,9 @@
 
 // Camera link K1-1: the pair duration. CPU only.
 #include <VP-V/modules/motion/estimation/global_model/link/PairTiming.h>
+#include <VP-V/core/FrameAnalysisStore.h>
+
+#include <utility>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -129,6 +132,49 @@ namespace VideoProcessorTest
 			latched.filmHz = 0.0;
 			t = apply(CameraLink::CadenceRead::NotYet, 0.0, true);
 			Assert::IsFalse(t.cadenceLocked, L"an unlocked latch is held unlocked");
+		}
+
+		// Camfix R8 (SHOULD): through a real frame-analysis store, a seq-1 cadence record that is missing (never begun) or late (begun,
+		// cadence not published yet) keeps the latched film lock; every other outcome unlocks. CadenceReadOf is the mapping
+		// CameraExtension's UpdateTiming uses.
+		TEST_METHOD(AMissingSeqMinusOneCadenceRecordKeepsTheFilmLock)
+		{
+			const double film = 24000.0 / 1001.0;
+			FrameAnalysis::Store store;
+			auto id = [](uint64_t seq) { FrameAnalysis::Identity i; i.seq = seq; return i; };
+			auto readAt = [&store](uint64_t seq) {
+				FrameAnalysis::Record rec;
+				const FrameAnalysis::ReadStatus rs = store.Read(seq - 1, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kCadence, rec);
+				return std::make_pair(CameraLink::CadenceReadOf(rs), rec.cadence.filmHz);
+			};
+			// Frame 5 publishes a film lock; frame 6 reads it (Ok) and latches.
+			store.Begin(id(5), FrameAnalysis::kCadence);
+			FrameAnalysis::Cadence c;
+			c.filmHz = film;
+			Assert::IsTrue(store.PublishCadence(5, c));
+			std::pair<CameraLink::CadenceRead, double> r = readAt(6);
+			Assert::IsTrue(r.first == CameraLink::CadenceRead::Ok, L"a published record reads Ok");
+			CameraLink::TimingFacts latched;
+			CameraLink::ApplyCadenceRead(latched, r.first, r.second, false, CameraLink::TimingFacts());
+			Assert::IsTrue(latched.cadenceLocked, L"the Ok read latches the film lock");
+			// Frame 8 reads seq 7, never begun: Missing -> NotYet -> the lock is held.
+			r = readAt(8);
+			Assert::IsTrue(r.first == CameraLink::CadenceRead::NotYet, L"a missing seq-1 record is NotYet");
+			CameraLink::TimingFacts t;
+			CameraLink::ApplyCadenceRead(t, r.first, r.second, true, latched);
+			Assert::IsTrue(t.cadenceLocked, L"a missing seq-1 record keeps cadenceLocked");
+			Assert::AreEqual(film, t.filmHz);
+			// Frame 10 reads seq 9, begun but its cadence not published: Late -> NotYet -> held.
+			store.Begin(id(9), FrameAnalysis::kCadence);
+			r = readAt(10);
+			Assert::IsTrue(r.first == CameraLink::CadenceRead::NotYet, L"a late seq-1 record is NotYet");
+			CameraLink::TimingFacts t2;
+			CameraLink::ApplyCadenceRead(t2, r.first, r.second, true, latched);
+			Assert::IsTrue(t2.cadenceLocked, L"a late seq-1 record keeps cadenceLocked");
+			// Every other outcome unlocks (a stale epoch after a discontinuity, an invalid group, the store off).
+			Assert::IsTrue(CameraLink::CadenceReadOf(FrameAnalysis::ReadStatus::StaleEpoch) == CameraLink::CadenceRead::Refused);
+			Assert::IsTrue(CameraLink::CadenceReadOf(FrameAnalysis::ReadStatus::GroupInvalid) == CameraLink::CadenceRead::Refused);
+			Assert::IsTrue(CameraLink::CadenceReadOf(FrameAnalysis::ReadStatus::Disabled) == CameraLink::CadenceRead::Refused);
 		}
 	};
 }

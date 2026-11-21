@@ -335,6 +335,19 @@ namespace VideoProcessorTest
 			Assert::IsNull(GuidanceStructuralCause(true, false, false, false), L"live parts not built yet: not claimed structural");
 		}
 
+		// Camfix R8 (SHOULD): the exact Fallbacks line Refresh prints for each structural cause.
+		TEST_METHOD(TheUnguidedRefreshLineNamesTheCause)
+		{
+			using CameraLink::GuidanceStructuralCause;
+			using CameraLink::GuidanceUnguidedLine;
+			Assert::AreEqual(std::string("camera_guidance: unguided - camera_ahead_fit is off"),
+				GuidanceUnguidedLine(GuidanceStructuralCause(false, false, true, true)));
+			Assert::AreEqual(std::string("camera_guidance: unguided - deterministic run"),
+				GuidanceUnguidedLine(GuidanceStructuralCause(false, true, true, true)));
+			Assert::AreEqual(std::string("camera_guidance: unguided - no on-time target (analysis_lane off)"),
+				GuidanceUnguidedLine(GuidanceStructuralCause(true, false, true, false)));
+		}
+
 		TEST_METHOD(WithGapsInTheNumberingPairNStillReadsCameraNOnlyAndLaneEqualsLive)
 		{
 			WireLink link;
