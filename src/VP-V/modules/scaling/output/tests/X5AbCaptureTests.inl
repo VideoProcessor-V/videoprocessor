@@ -144,11 +144,18 @@
 	TEST_CLASS(X5AbCaptureTests)
 	{
 	public:
+		BEGIN_TEST_METHOD_ATTRIBUTE(X5AbCaptureClips)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"X5AbCapture")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(X5AbCaptureClips)
 		{
 			std::string listEnv, outDir, side;
 			if (!X5AbSupport::Env("VP_X5AB_LIST", listEnv) || listEnv.empty())
-				return;   // not requested: nothing to capture
+			{
+				// An opt-in capture, never a silent pass: the skip is written to the test log (HardwarePrerequisites.h RequireOrSkip pattern).
+				Logger::WriteMessage("SKIPPED: X5AbCaptureClips: VP_X5AB_LIST is not set (opt-in capture)\n");
+				return;
+			}
 			const bool outSet = X5AbSupport::Env("VP_X5AB_OUT", outDir);
 			const bool sideSet = X5AbSupport::Env("VP_X5AB_SIDE", side);
 			Assert::IsTrue(outSet && sideSet, L"VP_X5AB_OUT and VP_X5AB_SIDE are required with VP_X5AB_LIST");
