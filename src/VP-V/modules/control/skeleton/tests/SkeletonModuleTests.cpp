@@ -1987,6 +1987,50 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual(lateBefore + 1, rig.sk.SceneCountersOf(rig.Host()).late, L"one cut, one delivery");
 		}
 
+		// GF-P2a MUST-7 (stranded): the cut frame N is sealed and its group is out provisional. An ahead ask of N + 1 confirms N, whose Vp
+		// group the seal of N + 1 will skip (the seal finds N confirmed), so the cut could never be delivered: the ahead N + 1 carries it
+		// (its natural predecessor's late cut), once.
+		TEST_METHOD(AnAheadSuccessorOfTheCutFrameCarriesTheCutOnceInsteadOfStrandingIt)
+		{
+			Rig rig(Lane("on"));
+			ShapeTwoStillShots(rig);
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			FeedAheadWindow(rig, 8);
+			RunToTheSealOfTheCut(rig, &store);
+			rig.After(int64_t(kCutFrame));
+			FrameAnalysis::Scene cutGroup, carrier;
+			Assert::IsTrue(store.PeekScene(kCutFrame, cutGroup));
+			Assert::IsFalse(cutGroup.confirmed || cutGroup.cut, L"the cut frame's group is out provisional");
+			const uint64_t n1 = kCutFrame + 1, n2 = kCutFrame + 2;
+			store.Begin(SceneTestId(n2), FrameAnalysis::kScene);
+			rig.Ingress(int64_t(n1));
+			rig.Deliver(n2);
+			const uint64_t lateBefore = rig.sk.SceneCountersOf(rig.Host()).late;
+			const Vpv::Skeleton::SceneAnswer ahead = rig.sk.SceneOf(rig.Host(), n1);   // ahead of the seal (kCutFrame): confirms the cut frame
+			Assert::IsTrue(ahead.known, (L"the ahead successor is answered; " + WhyOf(ahead)).c_str());
+			Assert::IsTrue(store.PeekScene(n1, carrier));
+			Assert::IsTrue(carrier.cut && carrier.cutLate, L"the ahead successor carries the confirmed cut of its natural predecessor");
+			Assert::IsTrue(store.PeekScene(kCutFrame, cutGroup));
+			Assert::IsTrue(cutGroup.confirmed && cutGroup.cutHere, L"the cut frame's group was confirmed");
+			Assert::IsFalse(cutGroup.cut, L"the delivered cut is not rewritten");
+			Assert::AreEqual(lateBefore + 1, rig.sk.SceneCountersOf(rig.Host()).late);
+			// The walk goes on to N + 2: that confirms N + 1's group (the seal then finds it present), and delivers nothing more.
+			Assert::IsTrue(rig.sk.SceneOf(rig.Host(), n2).known);
+			const Vpv::Skeleton::SceneCounters before = rig.sk.SceneCountersOf(rig.Host());
+			rig.Begin(int64_t(n1));
+			const Vpv::Skeleton::SceneCounters after = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(before.alreadyPresent + 1, after.alreadyPresent, L"the seal found the ahead group present");
+			Assert::AreEqual(before.late, after.late, L"no second delivery");
+			Assert::IsTrue(store.PeekScene(n1, carrier));
+			Assert::IsTrue(carrier.cut && carrier.cutLate, L"the carried cut stays on the group");
+			FrameAnalysis::Scene next;
+			Assert::IsTrue(store.PeekScene(n2, next));
+			Assert::IsFalse(next.cut, L"exactly once");
+			rig.After(int64_t(n1));
+		}
+
 		TEST_METHOD(ARegisteredButDisabledStoreCostsNothingAtTheSeal)
 		{
 			Rig rig(Lane("on"));
