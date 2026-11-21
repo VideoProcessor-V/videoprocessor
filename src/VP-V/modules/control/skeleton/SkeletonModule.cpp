@@ -719,8 +719,8 @@ namespace Vpv
 				std::shared_ptr<Bundle> old = std::atomic_exchange(&st.bundle, std::shared_ptr<Bundle>());
 				if (old)
 				{
-					VpSkeleton::UnbindLaneFromMemo(old->lane, *old->memo);   // L-CORE: on the render thread, before anything else
-					old->threads.Stop();   // joined here, before anything the threads read goes away
+					old->threads.Stop();   // joined here first: the workers call the lane's ahead sinks, so nothing may reassign them yet
+					VpSkeleton::UnbindLaneFromMemo(old->lane, *old->memo);   // L-CORE: on the render thread, after the join
 				}
 			}
 
@@ -2566,6 +2566,8 @@ namespace Vpv
 							return cur->lane.Lease(id);
 					return VpSkeleton::LaneLease();
 				};
+				if (current)
+					current->threads.Stop();   // GEM SK-LIFECYCLE: the current bundle's workers are joined before the replacement is built
 				if (current)
 					hostMemo->Clear();   // G0 S4: a graph rebuild is a discontinuity: every memo spot of the old graph is released
 				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring, hostMemo, std::move(leaseOf),
