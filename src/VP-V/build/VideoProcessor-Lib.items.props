@@ -112,6 +112,7 @@
     <ClInclude Include="vprenderer\DisplayRateHold.h" />
     <ClInclude Include="..\VP-V\modules\input\capture\UploadReuse.h" />
     <ClInclude Include="..\VP-V\modules\motion\estimation\MotionAhead.h" />
+    <ClInclude Include="..\VP-V\modules\motion\estimation\ProducerStages.h" />
     <ClInclude Include="GeneralRate.h" />
     <ClInclude Include="GeneralRateLog.h" />
     <ClInclude Include="RefreshKey.h" />
