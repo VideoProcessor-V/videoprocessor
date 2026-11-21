@@ -240,6 +240,69 @@ class DedicatedJobCategories(unittest.TestCase):
         self.assertNotIn("Category=GpuHardware", out.split("|"))
 
 
+WARP_SOURCE = r"""
+TEST_CLASS(WarpTests)
+{
+public:
+	TEST_METHOD(RendersOnWarp) { }
+	TEST_METHOD(SlowMatrixCombos) { }
+	BEGIN_TEST_METHOD_ATTRIBUTE(TimesOnTheAdapter)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(TimesOnTheAdapter) { }
+};
+"""
+
+
+class WarpSelectionExcludesOtherCategories(unittest.TestCase):
+    """TQ-RG-C4: a test of a GpuWarp class that is Slow or GpuHardware leaves the GpuWarp selection."""
+
+    def _manifest(self, order):
+        entries = {"class": {"kind": "class", "value": "WarpTests", "category": "GpuWarp"},
+                   "slow": {"kind": "methodPrefix", "value": "SlowMatrix", "category": "Slow"}}
+        return {"entries": [entries[k] for k in order]}
+
+    def _warp(self, manifest):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "WarpTests.cpp")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(WARP_SOURCE)
+            real = L.test_sources
+            L.test_sources = lambda _root: iter([p])
+            try:
+                return G.gpuwarp_filter(manifest), G.gpu_filter(manifest, ["Slow"]), G.cpu_filter(manifest)
+            finally:
+                L.test_sources = real
+
+    def test_slow_and_gpu_hardware_methods_leave_the_warp_selection_in_either_order(self):
+        for order in (["class", "slow"], ["slow", "class"]):
+            with self.subTest(order=order):
+                warp, slow, _cpu = self._warp(self._manifest(order))
+                clauses = warp.split("|")
+                self.assertIn("FullyQualifiedName~WarpTests&FullyQualifiedName!~WarpTests::SlowMatrixCombos"
+                              "&FullyQualifiedName!~WarpTests::TimesOnTheAdapter", clauses)
+                self.assertNotIn("FullyQualifiedName~WarpTests", clauses)
+                self.assertNotIn("FullyQualifiedName!~WarpTests::RendersOnWarp", warp)
+
+    def test_the_slow_tier_still_selects_the_slow_method_and_the_cpu_run_keeps_the_warp_class(self):
+        _warp, slow, cpu = self._warp(self._manifest(["class", "slow"]))
+        self.assertIn("Name~SlowMatrix", slow.split("|"))
+        self.assertIn("Name!~SlowMatrix", cpu.split("&"))
+        self.assertNotIn("FullyQualifiedName!~WarpTests", cpu.split("&"))
+
+    def test_a_class_with_nothing_shadowed_keeps_the_plain_clause(self):
+        warp, _slow, _cpu = self._warp({"entries": [{"kind": "class", "value": "OtherTests", "category": "GpuWarp"}]})
+        self.assertIn("FullyQualifiedName~OtherTests", warp.split("|"))
+
+    def test_repository_matrix_leaves_the_warp_run_but_stays_in_the_slow_tier(self):
+        manifest = L.load_manifest()
+        warp = G.gpuwarp_filter(manifest).split("|")
+        self.assertIn("FullyQualifiedName~WholeHookChainHookTests&"
+                      "FullyQualifiedName!~WholeHookChainHookTests::WholeHookChainCombinationMatrix", warp)
+        self.assertNotIn("FullyQualifiedName~WholeHookChainHookTests", warp)
+        self.assertIn("Name~WholeHookChainCombinationMatrix", G.gpu_filter(manifest, ["Slow"]).split("|"))
+
+
 class ScanEveryTestClassFile(unittest.TestCase):
     """TQ-RG-C2 / MISS-1: the scan reads every .cpp that declares a TEST_CLASS, not only *Tests.cpp."""
 

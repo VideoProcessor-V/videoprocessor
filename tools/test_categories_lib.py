@@ -246,6 +246,25 @@ def entry_matches(entry, cls, method):
     raise ValueError(f'unknown entry kind {kind}')
 
 
+# How specific an entry kind is: a method entry beats a method prefix, which beats a class, which beats a class prefix
+# (TQ-RG-C4: a Slow methodPrefix inside a GpuWarp class must win over the class entry, whatever the manifest order).
+ENTRY_SPECIFICITY = {'method': 4, 'methodPrefix': 3, 'class': 2, 'classPrefix': 1}
+
+
+def entry_rank(entry):
+    """Sort key of an entry's specificity: its kind, then the length of its value (a longer prefix is more specific)."""
+    return (ENTRY_SPECIFICITY[entry['kind']], len(entry['value']))
+
+
+def best_entry(entries, cls, method):
+    """The most specific manifest entry matching the test, or None. Ties keep the first entry in manifest order."""
+    best = None
+    for e in entries:
+        if entry_matches(e, cls, method) and (best is None or entry_rank(e) > entry_rank(best)):
+            best = e
+    return best
+
+
 TEST_CLASS_TEXT = re.compile(r'\bTEST_CLASS\s*\(')
 
 

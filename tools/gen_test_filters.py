@@ -76,8 +76,41 @@ def gpu_filter(manifest, cats=None):
     return '|'.join(parts)
 
 
+def shadowed_in_warp_classes(manifest):
+    """(class, method, entry) for each test inside a class that a GpuWarp class entry selects but whose most specific
+    classification is another excluded category (a Slow methodPrefix, a GpuHardware attribute): it must leave the GpuWarp run
+    (TQ-RG-C4: WholeHookChainCombinationMatrix is Slow inside the GpuWarp class WholeHookChainHookTests)."""
+    entries = manifest['entries']
+    warp_classes = [e for e in entries if e['category'] == 'GpuWarp' and e['kind'] in ('class', 'classPrefix')]
+    out = []
+    for path in lib.test_sources(lib.repo_root()):
+        for t in lib.scan_file(path):
+            cls, method = t['cls'], t['method']
+            if not any(lib.entry_matches(e, cls, method) for e in warp_classes):
+                continue
+            best = lib.best_entry(entries, cls, method)
+            effective = best['category'] if best and best['kind'] in ('method', 'methodPrefix') else t['category']
+            if effective in lib.EXCLUDED_FROM_CPU and (cls, method) not in [(c, m) for c, m, _ in out]:
+                out.append((cls, method, best))
+    return out
+
+
 def gpuwarp_filter(manifest):
-    return gpu_filter(manifest, ['GpuWarp'])
+    """The GpuWarp selection: the class entries stay, each ANDed with FullyQualifiedName!~Class::method for every test of the
+    class that is classified in another excluded category (the AND binds tighter than the OR of the clauses)."""
+    shadow = {}
+    for cls, method, _entry in shadowed_in_warp_classes(manifest):
+        shadow.setdefault(cls, []).append(method)
+    parts = []
+    for c in clauses(manifest, False, ['GpuWarp']):
+        value = c.split('~', 1)[-1]
+        if c.startswith('FullyQualifiedName~'):
+            exclusions = [f'FullyQualifiedName!~{cls}::{m}' for cls, methods in shadow.items()
+                          if cls == value or cls.startswith(value) for m in methods]
+            c = '&'.join([c] + sorted(set(exclusions)))
+        parts.append(c)
+    parts.append('Category=GpuWarp')
+    return '|'.join(parts)
 
 
 def main():

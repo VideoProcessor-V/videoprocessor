@@ -88,5 +88,39 @@ class DedicatedCategories(unittest.TestCase):
         self.assertEqual(rc, 0, out.getvalue())
 
 
+class MostSpecificEntryWins(unittest.TestCase):
+    """TQ-RG-C4: a Slow methodPrefix inside a GpuWarp class is classified Slow whatever the manifest order."""
+
+    CLASS_WARP = {"kind": "class", "value": "KindTests", "category": "GpuWarp"}
+    PREFIX_SLOW = {"kind": "methodPrefix", "value": "TheTe", "category": "Slow"}
+    METHOD_SLOW = {"kind": "method", "value": "KindTests::TheTest", "category": "Slow"}
+
+    def test_specific_entry_after_the_class_entry_is_not_shadowed(self):
+        rc, out = run_checker("Slow", [self.CLASS_WARP, self.PREFIX_SLOW])
+        self.assertEqual(rc, 0, out)
+
+    def test_specific_entry_before_the_class_entry_is_not_shadowed(self):
+        rc, out = run_checker("Slow", [self.PREFIX_SLOW, self.CLASS_WARP])
+        self.assertEqual(rc, 0, out)
+
+    def test_a_method_entry_beats_a_prefix_entry_in_either_order(self):
+        for order in ([self.PREFIX_SLOW, self.METHOD_SLOW, self.CLASS_WARP], [self.CLASS_WARP, self.METHOD_SLOW, self.PREFIX_SLOW]):
+            rc, out = run_checker("Slow", order)
+            self.assertEqual(rc, 0, out)
+
+    def test_the_class_entry_alone_still_disagrees_with_a_slow_attribute(self):
+        # With no more specific entry the class entry (GpuWarp, not excluded) is the classification: the old check holds.
+        rc, out = run_checker("Slow", [self.CLASS_WARP])
+        self.assertEqual(rc, 1)
+        self.assertIn("disagrees with the manifest", out)
+
+    def test_best_entry_ranks_by_kind_then_prefix_length(self):
+        entries = [{"kind": "classPrefix", "value": "Kind", "category": "A"}, self.CLASS_WARP,
+                   {"kind": "methodPrefix", "value": "The", "category": "B"}, self.PREFIX_SLOW]
+        self.assertEqual(L.best_entry(entries, "KindTests", "TheTest")["value"], "TheTe")
+        self.assertEqual(L.best_entry(entries, "KindTests", "Other")["value"], "KindTests")
+        self.assertIsNone(L.best_entry(entries, "Unrelated", "Other"))
+
+
 if __name__ == "__main__":
     unittest.main()
