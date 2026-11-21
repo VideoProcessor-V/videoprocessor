@@ -228,10 +228,12 @@ void LibplaceboVideoRenderer::SetAmbientLux(double lux, bool valid, double nowSe
 	if (!m_impl)
 		return;
 	std::lock_guard<std::mutex> guard(m_impl->vpv.led.intent.intentMutex);
-	if (!m_impl->vpv.led.intent.ambientSettings.enabled)
+	if (!m_impl->vpv.led.intent.ambientSettings.enabled && !m_impl->vpv.led.intent.roomLightFeed)
 		return;
 	if (valid && std::isfinite(lux))
 		m_impl->vpv.led.intent.ambientFilter.AddReading(lux < 0.0 ? 0.0 : lux, nowSeconds);
 	else
 		m_impl->vpv.led.intent.ambientFilter.Tick(nowSeconds);
+	// CF-1 CAM-2: the one filter, published as the room_light product (the appearance stage reads it; nothing else is estimated).
+	m_impl->vpv.led.intent.roomLight.Publish(RoomLight::MakeRecord(m_impl->vpv.led.intent.ambientFilter, 0));
 }

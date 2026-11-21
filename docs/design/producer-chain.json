@@ -1042,6 +1042,25 @@
    ]
   },
   {
+   "id": "kRoomLight",
+   "label": "room_light",
+   "token": "room_light",
+   "name": "room light (held state)",
+   "backend": "Cpu",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "-",
+   "producer_files": [
+    "colour/appearance/RoomLight.h"
+   ],
+   "producer_text": "",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": []
+  },
+  {
    "id": "kEdgeMap",
    "label": "edge_map",
    "token": "edge_map",
@@ -1933,6 +1952,7 @@
    "kQualityPattern",
    "kQualityPatternCausal",
    "kRefinedField",
+   "kRoomLight",
    "kSourceGeometry",
    "kSourceIdentity",
    "kTdAnchorPass",
@@ -1966,6 +1986,7 @@
    "kQualityPattern": 5,
    "kQualityPatternCausal": 5,
    "kRefinedField": 4,
+   "kRoomLight": 0,
    "kSourceGeometry": 1,
    "kSourceIdentity": 1,
    "kTdAnchorPass": 4,

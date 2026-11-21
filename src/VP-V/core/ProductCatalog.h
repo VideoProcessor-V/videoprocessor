@@ -93,6 +93,7 @@ constexpr uint32_t kExpectedCodingEvidenceUnit = 1;
 constexpr uint32_t kExpectedQualityPatternUnit = 1;
 constexpr uint32_t kExpectedFieldRefineUnit = 1;
 constexpr uint32_t kExpectedTdMapsViewUnit = 1;
+constexpr uint32_t kExpectedRoomLightUnit = 1;   // CF-1 CAM-2: room_light held state (LED intent publishes, appearance reads)
 
 // Doc 83 MV4: SERVICE products. The long-pair field is not a per-frame ring product (its pair distance is the measured GOP length and the
 // service is asynchronous), so it has no id in the per-frame registry (adding one would move kSkeletonProductEnd and the live-fill owner
@@ -159,6 +160,8 @@ inline const std::vector<ProductRow>& ProductRows()
         // producer, no live fill; its readers take the latest sealed record (lag 1) and fall back visibly when it is absent or stale.
         { kSourceGeometry, "input/source_analysis/identity", kExpectedSourceGeometryUnit, "" },
         { kEdgeMap, "input/source_analysis/regions", kExpectedRegionUnit, "edge map pass (per-frame memo); readers: focus map, busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3))" },
+        // CF-1 CAM-2: room_light is HELD STATE (single writer: the LED intent filter, no lane producer, no live fill); the appearance stage reads at lag 1.
+        { kRoomLight, "colour/appearance", kExpectedRoomLightUnit, "" },
     };
     return rows;
 }

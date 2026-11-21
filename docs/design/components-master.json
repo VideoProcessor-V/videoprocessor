@@ -1317,12 +1317,13 @@
       "slot": "colour.appearance",
       "order": 210,
       "status": "placeholder",
-      "code_location": "module (ambient adaptation config/logic, SdrAmbientLift; slot placeholder; CPU reference CAM16 + uniform pack, switch off)",
+      "code_location": "module (ambient adaptation config/logic, SdrAmbientLift; slot placeholder; CPU reference CAM16 + uniform pack + room_light reader, switch off)",
       "live_files": [
         "src/VP-V/modules/colour/appearance/SdrAmbientLift.h",
         "src/VP-V/modules/colour/appearance/AmbientConfig.h",
         "src/VP-V/modules/colour/appearance/Cam16.h",
-        "src/VP-V/modules/colour/appearance/Cam16Uniforms.h"
+        "src/VP-V/modules/colour/appearance/Cam16Uniforms.h",
+        "src/VP-V/modules/colour/appearance/RoomLight.h"
       ],
       "components": {
         "files": {

@@ -31,6 +31,7 @@
     "kP12LightLevel": {"files": ["input/source_analysis/lane/LaneGpuLightKernel.cpp"]},
     "kSourceIdentity": {"files": ["input/source_analysis/identity/SourceIdPipeline.h"]},
     "kSourceGeometry": {"files": ["input/source_analysis/identity/SourceGeometryProduct.h"]},
+    "kRoomLight": {"files": ["colour/appearance/RoomLight.h"]},
     "kCodingEvidence": {"files": ["input/source_analysis/regions/CodingEvidence.cpp"], "ignore_reserved": true, "note": "P16 is a real producer since L-P16 (r2/job1-p16): CPU per-tile owner fill registered in SkeletonModule.cpp, measure in regions/CodingEvidence.cpp; the ProductCatalog.h / product-graph.md row text still says reserved (stale, catalog owner)"},
     "kTdBlocks": {"files": ["repair/temporal_detail/TemporalDetailGpu.cpp"], "ignore_reserved": true, "note": "catalog says reserved; the legacy TemporalDetailGpu pass is the only code that computes td.blocks today, so it is scanned"}
   },
