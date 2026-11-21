@@ -5,6 +5,7 @@
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h>
 #include <VP-V/modules/motion/estimation/global_model/StaticHypothesis.h>
 #include "SyntheticCameraFields.h"
+#include <VP-V/tests/beta_gpu/D0Time.h>
 #include "CppUnitTest.h"
 
 #include <chrono>
@@ -1694,6 +1695,27 @@ namespace VideoProcessorTest
 		}
 
 		// Noise well above the quantum floor: the threshold follows 1.4826 x MAD of the residuals, not the floor.
+		// Camfix R8D: the d = 0 GPU-time tolerance grows with the A/A spread but is capped at max(5% of off, 0.25 ms); a spread above
+		// the cap is a noisy run (INCONCLUSIVE in the harness), never a widened limit.
+		TEST_METHOD(CamfixR8DTimeToleranceIsCappedAndNoisyIsFlagged)
+		{
+			using CameraAccuracy::GpuTimeToleranceFor;
+			const auto quiet = GpuTimeToleranceFor(10.0, 0.05);
+			Assert::AreEqual(0.2, quiet.tolerance, 1e-9, L"2% of 10 ms");
+			Assert::IsFalse(quiet.noisy);
+			const auto floorTol = GpuTimeToleranceFor(1.0, 0.0);
+			Assert::AreEqual(0.1, floorTol.tolerance, 1e-9, L"0.1 ms floor");
+			const auto spread = GpuTimeToleranceFor(10.0, 0.4);
+			Assert::AreEqual(0.4, spread.tolerance, 1e-9, L"A/A spread within the cap (0.5 ms)");
+			Assert::IsFalse(spread.noisy);
+			const auto noisy = GpuTimeToleranceFor(10.0, 2.0);
+			Assert::AreEqual(0.5, noisy.tolerance, 1e-9, L"capped at 5% of off");
+			Assert::IsTrue(noisy.noisy, L"a 2 ms A/A spread is noisy: INCONCLUSIVE, never PASS");
+			const auto smallOff = GpuTimeToleranceFor(1.0, 0.3);
+			Assert::AreEqual(0.25, smallOff.tolerance, 1e-9, L"0.25 ms absolute cap");
+			Assert::IsTrue(smallOff.noisy);
+		}
+
 		TEST_METHOD(CamfixR2RobustScaleRaisesThreshold)
 		{
 			Field f(Grid4K());

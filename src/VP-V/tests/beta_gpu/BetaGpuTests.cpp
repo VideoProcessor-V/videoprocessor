@@ -21,6 +21,7 @@
 #include <VP-V/modules/motion/estimation/global_model/link/PairAssembly.h>
 #include <VP-V/modules/motion/estimation/global_model/link/AheadFlow.h>
 #include "ProducerPairs.h"
+#include "D0Time.h"
 
 #include <algorithm>
 #include <fstream>
@@ -5135,7 +5136,7 @@ namespace CameraAccuracy
 	// Per row: NON-INFERIOR within the A/A noise (dEPE <= +0.002, dp95 <= +0.005, dwarp <= +0.005, or the A/A spread if larger; the
 	// mover subset by the same EPE and p95 limits); a HEADROOM row (EPE_off >= 0.05 px or the <0.25 px share of off < 95%) must be
 	// SUPERIOR (dEPE <= -max(0.01, A/A EPE spread) or +2 pts <0.25 px share); TIME: the render-path matcher GPU ms (steady median, pairs >= 1) guided <= off +
-	// max(2%, 0.1 ms), the median over the interleaved repeats (>= 3 for acceptance); the lane on time >= 90% at the live lead
+	// max(2%, 0.1 ms, the A/A spread) capped at max(5% of off, 0.25 ms) (D0Time.h), the median over the interleaved repeats (>= 3 for acceptance); the lane on time >= 90% at the live lead
 	// (AheadModel, the d0 run's own fit costs); the camera WORKER (mean fit ms / frame period) <= 20% of a core.
 	// Verdict: PASS (headroom row, superior), PASS-FLOOR (no headroom, non-inferior), NO-GAIN (headroom row, non-inferior but not
 	// superior: fails acceptance), DEFECT (any limit broken; the reasons follow), INCONCLUSIVE (no limit broken but fewer than 3 runs
@@ -5158,10 +5159,10 @@ namespace CameraAccuracy
 			"as off); every value is the median over the runs (the primary run and its interleaved repeats). NON-INFERIOR: dEPE <= +0.002, dp95 <= +0.005, "
 			"dwarp <= +0.005 (or the A/A spread of off, if larger), the mover subset by the same EPE and p95 limits. HEADROOM row (EPE_off >= 0.05 or "
 			"<0.25 px share of off < 95%): must be SUPERIOR (dEPE <= -max(0.01, A/A EPE spread) or +2 pts <0.25 px share). TIME: render-path matcher GPU ms (steady median, "
-			"pairs >= 1) guided <= off + max(2%, 0.1 ms), median over the runs. ON TIME at the live lead L = " << lead <<
+			"pairs >= 1) guided <= off + max(2%, 0.1 ms, the A/A spread), the tolerance capped at max(5% of off, 0.25 ms); an A/A spread above the cap is INCONCLUSIVE; median over the runs. ON TIME at the live lead L = " << lead <<
 			" >= 90% (AheadModel). WORKER = mean fit ms / frame period <= 20% of a core (the fit runs on the camera worker, not the render path). "
 			"PASS = headroom row superior; PASS-FLOOR = no headroom, non-inferior; NO-GAIN = headroom row not superior (fails); DEFECT = a limit broken; "
-			"INCONCLUSIVE = no limit broken but fewer than 3 runs of off or d0 (never a pass).\n\n";
+			"INCONCLUSIVE = no limit broken but fewer than 3 runs of off or d0, or a noisy A/A time (never a pass).\n\n";
 		md << "| scene | variant | runs off / d0 | EPE off / d0 | dEPE | dp95 | dwarp | mover dEPE / dp95 | <0.25 px off / d0 | headroom | "
 			"matcher GPU ms off / d0 (limit) | on time L=" << lead << " | worker | guided | verdict |\n";
 		md << "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
@@ -5238,7 +5239,8 @@ namespace CameraAccuracy
 				const double tolE = std::max(0.002, aaEpe), tolP = std::max(0.005, aaP95), tolW = std::max(0.005, aaWarp);
 				const double dE = md0.epe - mo.epe, dP = md0.p95 - mo.p95, dW = md0.warp - mo.warp;
 				const double dmE = md0.mEpe - mo.mEpe, dmP = md0.mP95 - mo.mP95, dShare = md0.lt025 - mo.lt025;
-				const double gpuTol = std::max(std::max(0.02 * mo.gpu, 0.1), aaGpu);   // 2%, 0.1 ms, or the measured A/A spread
+				const GpuTimeTolerance timeTol = GpuTimeToleranceFor(mo.gpu, aaGpu);   // 2%, 0.1 ms or the A/A spread, capped (D0Time.h)
+				const double gpuTol = timeTol.tolerance;
 				const double gpuLimit = mo.gpu + gpuTol;
 				std::string reasons;
 				auto fail = [&](bool bad, const char* why) { if (bad) { if (!reasons.empty()) reasons += ", "; reasons += why; } };
@@ -5254,14 +5256,21 @@ namespace CameraAccuracy
 				const bool cheaper = md0.gpu <= mo.gpu - gpuTol;   // doc 91 D 11-11 10:45: equal accuracy at lower cost also counts
 				const bool superior = dE <= -std::max(0.01, aaEpe) || dShare >= 0.02 || cheaper;
 				const bool fewRuns = d0Runs.size() < 3 || offRuns.size() < 3;
+				const bool noisyTime = timeTol.noisy;   // A/A GPU spread above the cap: INCONCLUSIVE, never PASS (R8D)
 				const int judged = headroom ? (superior ? 0 : 2) : 1;
-				const int verdict = !reasons.empty() ? 3 : (fewRuns ? 4 : judged);
+				const int verdict = !reasons.empty() ? 3 : ((fewRuns || noisyTime) ? 4 : judged);
 				static const char* const kVerdicts[5] = { "PASS", "PASS-FLOOR", "NO-GAIN", "DEFECT", "INCONCLUSIVE" };
 				++counts[verdict];
 				if (verdict == 2)
 					reasons = "headroom not used";
 				if (fewRuns)
 					reasons += std::string(reasons.empty() ? "" : "; ") + "< 3 runs (would be " + kVerdicts[judged] + ")";
+				if (noisyTime)
+				{
+					char noisy[96];
+					std::snprintf(noisy, sizeof(noisy), "noisy A/A time %.3f ms > cap %.3f ms (would be %s)", aaGpu, (std::max)(0.05 * mo.gpu, 0.25), kVerdicts[judged]);
+					reasons += std::string(reasons.empty() ? "" : "; ") + noisy;
+				}
 				char moverText[64] = "-";
 				if (mover)
 					std::snprintf(moverText, sizeof(moverText), "%+.4f / %+.4f", dmE, dmP);
