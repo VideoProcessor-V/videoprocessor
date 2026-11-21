@@ -622,7 +622,7 @@ namespace Vpv
 
 		namespace
 		{
-			// R2: the memo's GPU device follows the renderer's pl_gpu. Render thread (GpuCreated) or under ownerFillsMutex_ at the memo's
+			// R2: the memo's GPU device follows the renderer's pl_gpu. EVERY caller holds ownerFillsMutex_ (GpuCreated, GpuReleased / Shutdown, the Reconcile dead-renderer rebuild; T-AR3 / C2-GATE-SHOULD-ADV: one lock context, MemoHostOf runs on any thread) - at the memo's
 			// creation. Another pl_gpu at the same address = the old device died (its objects are forgotten, never destroyed).
 			void DetachMemoGpu(MemoHost& mh, bool gpuAlive);
 			void AttachMemoGpu(MemoHost& mh, const void* gpu)
@@ -961,7 +961,10 @@ namespace Vpv
 				// the old state's seal hooks, tap and lane belong to the dead one.
 				Teardown(st, false, false);   // the dead renderer's device objects are not ours to destroy
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
+				{
+					std::lock_guard<std::mutex> lock(ownerFillsMutex_);   // T-AR3 / C2-GATE-SHOULD-ADV: the same lock context as GpuCreated / GpuReleased
 					DetachMemoGpu(*mh, false);   // R2: nor are its owner textures (forgotten, counted)
+				}
 				hosts_.Remove(host, false);
 				EraseExternal(host);          // nor is its external demand (declared for the dead renderer)
 				st.reset();
