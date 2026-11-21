@@ -285,8 +285,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     }
     auto logSdrToneShape = [&](int state)
     {
-        SyncFallback(FallbackCatalog::SdrToneShape(state == 1 || state == 3, state == 1,
-            state == 3 ? "the shader did not load" : ""));
+        SyncFallback(SdrToneShape::StateFallback(state));   // GEM-004: state 4 (calibration LUT) is listed
         if (state != sdrToneShapeLogged)
         {
             sdrToneShapeLogged = state;

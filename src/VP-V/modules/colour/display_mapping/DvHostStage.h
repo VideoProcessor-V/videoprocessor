@@ -292,6 +292,7 @@ public:
 	{
 		m_pending = Pending();
 		m_pending.trims = f.trims;
+		m_pending.trimsStageRuns = f.trimsStageRuns;   // GEM-004 part 2 (AMEND: the dm_trims slot, CF-1 P3)
 		m_pending.lut = f.target.lut != nullptr;
 		m_pending.dm = f.dm;
 		m_pending.libplaceboCurve = f.libplaceboCurve;
@@ -474,11 +475,13 @@ public:
 			// test/dv-synthetic 2026-10-24 (no silent fallbacks): dv_trims on, a DV picture with DM,
 			// but the trim cannot act (a calibration LUT, an unsupported output transfer, the shader
 			// missing): listed. Neutral (no L2 for this picture) is the trims' own answer, not a fallback.
-			m_trimsStatus = DvTrimSelection::StatusText(trims, selection);
+			// GEM-004 (Gemini MUST-4 part 2, AMEND): the dm_trims slot switched off is OFF, not a fallback (F-12).
+			const bool trimsEffective = p.trims && p.trimsStageRuns;
+			m_trimsStatus = DvTrimSelection::StatusText(trimsEffective, selection);
 			m_trimsShaderMissing = state.compare(0, 11, "NOT applied") == 0;
 			// Audit 5: L8 present but every L8 target unknown and no L2: nothing applies - listed too.
 			const bool dvTrimsUnknownTargets = dvPicture && selection.level == DvTrimSelection::Level::None && selection.l8Unresolved > 0;
-			if (trims && dvPicture &&
+			if (trimsEffective && dvPicture &&
 				(lut || (!pq && !gammaSignal) || m_trimsShaderMissing || dvTrimsUnknownTargets))
 				m_engage("Dolby Vision trims", dvTrimsUnknownTargets && !lut && (pq || gammaSignal) && !m_trimsShaderMissing ?
 					"L8 trims present but every L8 target is unknown (no L10, not a known preset) and no L2: none applied" : state);
@@ -510,6 +513,7 @@ private:
 		bool ran = false;            // the trims block ran (dv_trims on, or a last state to clear)
 		bool collect = false;        // a trims hook was asked of the segment
 		bool trims = false, lut = false, dvPicture = false, dvTonePicture = false, pq = false, gammaSignal = false;
+		bool trimsStageRuns = false; // GEM-004: the colour.dm_trims slot runs this frame
 		double peak = 0.0;
 		std::string state, params, libplaceboCurve;
 		DvTrimSelection::Selection selection;
