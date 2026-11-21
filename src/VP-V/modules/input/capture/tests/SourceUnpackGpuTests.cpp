@@ -200,6 +200,102 @@ namespace VideoProcessorTest
 			Assert::AreEqual(12, ran);
 		}
 
+		// One yuv case against the CPU decode (the same compare as YuvPackingsMatchTheCpuLumaDecode, used by the 4K / 8K cases).
+		static void RunYuvCase(Harness& h, VideoFrameEncoding enc, AnalysisLumaFormat fmt, SourceUnpack::Packing packing, int w, int hgt, size_t pad)
+		{
+			SourceUnpack::Request req;
+			req.packing = packing;
+			req.width = w;
+			req.height = hgt;
+			req.rowBytes = SourceUnpack::MinRowBytes(packing, w) + pad;
+			const bool twoPlane = fmt == AnalysisLumaFormat::P010 || fmt == AnalysisLumaFormat::P210;
+			const size_t chromaRows = fmt == AnalysisLumaFormat::P010 ? (hgt + 1) / 2 : hgt;
+			std::vector<uint8_t> raw(req.rowBytes * (hgt + (twoPlane ? chromaRows : 0)));
+			for (auto& b : raw)
+				b = static_cast<uint8_t>(h.Next() >> 11);
+			AnalysisLumaSource src;
+			src.data = raw.data();
+			src.dataBytes = raw.size();
+			src.width = w;
+			src.height = hgt;
+			src.rowBytes = req.rowBytes;
+			src.chromaRowBytes = req.rowBytes;
+			src.format = fmt;
+			src.encoding = enc;
+			Assert::IsTrue(src.IsValid(), L"the CPU source rejected the case");
+			const std::wstring name = std::to_wstring(static_cast<int>(enc)) + L" " + std::to_wstring(w) + L"x" +
+				std::to_wstring(hgt) + L" pad" + std::to_wstring(pad);
+			h.RunBoth(req, raw, [&](const std::vector<uint16_t>& got, const wchar_t* route)
+			{
+				for (int y = 0; y < hgt; ++y)
+					for (int x = 0; x < w; ++x)
+					{
+						AnalysisLumaSample s;
+						Assert::IsTrue(src.Sample(x, y, s));
+						const uint16_t want = static_cast<uint16_t>(s.luma << 6);
+						if (got[static_cast<size_t>(y) * w + x] != want)
+							Assert::Fail((name + L" " + route + L": differs at (" + std::to_wstring(x) + L", " +
+								std::to_wstring(y) + L")").c_str());
+					}
+			});
+		}
+
+		// D5-QK K1 SHOULD 1 (brief s4, rule 6): the production frame sizes. 4K for every yuv packing, padded stride.
+		TEST_METHOD(YuvPackingsMatchTheCpuLumaDecodeAt4K)
+		{
+			Harness h;
+			Assert::IsTrue(h.Init(), L"Could not create the libplacebo test device");
+			RunYuvCase(h, VideoFrameEncoding::P010, AnalysisLumaFormat::P010, SourceUnpack::Packing::Planar16, 3840, 2160, 8);
+			RunYuvCase(h, VideoFrameEncoding::P210, AnalysisLumaFormat::P210, SourceUnpack::Packing::Planar16, 3840, 2160, 8);
+			RunYuvCase(h, VideoFrameEncoding::V210, AnalysisLumaFormat::NativeYuv422, SourceUnpack::Packing::V210, 3840, 2160, 8);
+			RunYuvCase(h, VideoFrameEncoding::UYVY, AnalysisLumaFormat::NativeYuv422, SourceUnpack::Packing::Uyvy8, 3840, 2160, 8);
+			RunYuvCase(h, VideoFrameEncoding::HDYC, AnalysisLumaFormat::NativeYuv422, SourceUnpack::Packing::Uyvy8, 3840, 2160, 8);
+		}
+
+		// One 8K case (v210: the most involved field mapping; 7680 is a whole number of six-pixel groups).
+		TEST_METHOD(V210MatchesTheCpuLumaDecodeAt8K)
+		{
+			Harness h;
+			Assert::IsTrue(h.Init(), L"Could not create the libplacebo test device");
+			RunYuvCase(h, VideoFrameEncoding::V210, AnalysisLumaFormat::NativeYuv422, SourceUnpack::Packing::V210, 7680, 4320, 0);
+		}
+
+		// One 4K DV tunnel case per range: arbitrary frame bytes, every pixel against the tap law.
+		TEST_METHOD(DvTunnelMatchesTheTapLawAt4K)
+		{
+			Harness h;
+			Assert::IsTrue(h.Init(), L"Could not create the libplacebo test device");
+			struct DvCase { VideoFrameEncoding container; int alignment; bool full; };
+			const DvCase cases[] = { { VideoFrameEncoding::R210, 1, false }, { VideoFrameEncoding::R10l, 2, true } };
+			for (const DvCase& c : cases)
+			{
+				const int w = 3840, hgt = 2160;
+				SourceUnpack::Request req;
+				req.packing = SourceUnpack::Packing::DvTunnel;
+				req.width = w;
+				req.height = hgt;
+				req.rowBytes = static_cast<size_t>(w) * 4 + 8;
+				req.container = c.container;
+				req.rgbBitAlignment = c.alignment;
+				req.fullRange = c.full;
+				std::vector<uint8_t> raw(req.rowBytes * hgt);
+				for (auto& b : raw)
+					b = static_cast<uint8_t>(h.Next() >> 9);
+				h.RunBoth(req, raw, [&](const std::vector<uint16_t>& got, const wchar_t* route)
+				{
+					for (int y = 0; y < hgt; ++y)
+						for (int x = 0; x < w; ++x)
+						{
+							const uint8_t* p = raw.data() + req.rowBytes * y + static_cast<size_t>(x) * 4;
+							const uint16_t want = DvTunnelTapLaw::Tap16(p, c.container, c.alignment, c.full);
+							if (got[static_cast<size_t>(y) * w + x] != want)
+								Assert::Fail((std::wstring(route) + L": 4K DV tap differs at (" + std::to_wstring(x) + L", " +
+									std::to_wstring(y) + L")").c_str());
+						}
+				});
+			}
+		}
+
 		TEST_METHOD(RefusalsNameTheirCauseAndKeepSourceBits)
 		{
 			using namespace SourceUnpack;
