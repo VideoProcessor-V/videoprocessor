@@ -737,10 +737,16 @@ void hook()
         if (!have && !occluded)
             have = carried(spos, x, gate_scale, r);
 
+        // (mirror of the bundled shader, GEM-W1B V1 sigma-delta MUST-1) an exact code takes no carried
+        // residual in and carries none out.
+        vec3 exact_code = vec3(equal(x, floor(x + 0.5)));
+        r = mix(r, vec3(0.0), exact_code);
+
         // First-order sigma-delta: quantise the error-corrected value, carry
         // the new residual. The dither term is not fed back.
         k = clamp(floor(x + r + d + 0.5), code_min, code_max);
         vec3 r_next = clamp(x + r - k, -(0.5 + noise_amplitude), 0.5 + noise_amplitude);
+        r_next = mix(r_next, vec3(0.0), exact_code);
 
         imageStore(RESID_NEXT, spos, vec4(r_next, VALID_TAG));
         imageStore(PREV_NEXT, spos, vec4(x, 1.0));
