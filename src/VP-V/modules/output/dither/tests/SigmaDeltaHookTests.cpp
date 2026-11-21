@@ -10,6 +10,7 @@
 #include <VP-V/modules/output/dither/DitherNeedGlsl.h>
 #include <VP-V/modules/output/dither/DitherNeedGpu.h>
 #include "DitherNeedGolden.generated.h"
+#include "DitherNeedWarpModel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1624,30 +1625,17 @@ namespace VideoProcessorTest
 			return codes;
 		}
 
-		// Greys that are exact in the rgba16f OUTPUT texture (m / 2048, m in [1024, 2047]): the quantiser's input is then
-		// x = grey * 1023 exactly (full range, true 10-bit), with a fraction well away from a whole code.
-		std::vector<float> DwGreys() { return { 1100.0f / 2048.0f, 1357.0f / 2048.0f, 1601.0f / 2048.0f, 1999.0f / 2048.0f }; }
+		// The model of the DitherNeedWarp cases lives in DitherNeedWarpModel.h (shared with the Beta-host port).
+		std::vector<float> DwGreys() { return DitherNeedWarpModel::Greys(); }
 
-		// The CPU model of `frames` refreshes of the quantiser at one grey: SigmaDeltaDomain::QuantiseStep with the shader's
-		// dither (frame / 5 = firstFrame + j), amplitude `amp` (float, as the shader's), x moved by dx. True when every code matches.
 		bool DwModelMatches(const int* got, int frames, float grey, int firstFrame, float amp, double dx)
 		{
-			const auto limits = SigmaDeltaDomain::Limits(10, true);
-			const double x = static_cast<double>(grey * 1023.0f) + dx;
-			double r = 0.0;
-			for (int j = 0; j < frames; ++j)
-			{
-				const double d = static_cast<double>((SigmaDeltaDomain::Ign(0.0f, 0.0f, firstFrame + j) - 0.5f) * 2.0f * amp);
-				if (static_cast<int>(SigmaDeltaDomain::QuantiseStep(x, r, d, limits, amp)) != got[j]) return false;
-			}
-			return true;
+			return DitherNeedWarpModel::ModelMatches(got, frames, grey, firstFrame, amp, dx);
 		}
 
 		bool DwModelMatchesAnyDx(const int* got, int frames, float grey, int firstFrame, float amp)
 		{
-			for (const double dx : { 0.0, 1e-4, -1e-4, 3e-4, -3e-4 })
-				if (DwModelMatches(got, frames, grey, firstFrame, amp, dx)) return true;
-			return false;
+			return DitherNeedWarpModel::ModelMatchesAnyDx(got, frames, grey, firstFrame, amp);
 		}
 
 		std::wstring DwCodes(const std::vector<int>& c)
@@ -1657,12 +1645,7 @@ namespace VideoProcessorTest
 			return s;
 		}
 
-		std::vector<float> DwConstantMap(int w, int h, float e)
-		{
-			std::vector<float> m(static_cast<size_t>(w) * h * 4, 0.0f);
-			for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i) m[i * 4] = e;
-			return m;
-		}
+		std::vector<float> DwConstantMap(int w, int h, float e) { return DitherNeedWarpModel::ConstantMap(w, h, e); }
 
 		bool DwHaveSetTexture()
 		{
@@ -1926,12 +1909,10 @@ namespace VideoProcessorTest
 		// (b2) the bound-map cases of (b): an all-zero map, and a non-zero map with dither_need 0, are byte-identical too.
 		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpBoundMapCasesAreByteIdentical)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
-#ifndef PL_VP_MPV_USER_SHADER_SET_TEXTURE
-			TEST_IGNORE()   // needs the beta host's libplacebo fork (pl_mpv_user_shader_set_texture)
-#endif
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DitherNeedWarpBoundMapCasesAreByteIdentical)
 		{
+			VP_FORK_ONLY_PL0004_OR_RETURN(L"VideoProcessorTest::DitherNeedWarpTests::DitherNeedWarpBoundMapCasesAreByteIdentical");
 			const std::vector<float> greys = DwGreys();
 			const int frames = 16;
 			const std::vector<int> base = DwSigmaCodes(DwSigmaParams(true, "0.15"), greys, frames, true);
@@ -1952,12 +1933,10 @@ namespace VideoProcessorTest
 		// from the plain run (the shader's frame / 5 counter has an unknown but fixed start), then used for every run.
 		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
-#ifndef PL_VP_MPV_USER_SHADER_SET_TEXTURE
-			TEST_IGNORE()   // needs the beta host's libplacebo fork (pl_mpv_user_shader_set_texture)
-#endif
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel)
 		{
+			VP_FORK_ONLY_PL0004_OR_RETURN(L"VideoProcessorTest::DitherNeedWarpTests::DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel");
 			const std::vector<float> greys = DwGreys();
 			const int frames = 16;
 			const float aBase = 0.15f;
@@ -2008,13 +1987,12 @@ namespace VideoProcessorTest
 		// the footroom / headroom levels when libplacebo hands them through.
 		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
-#ifndef PL_VP_MPV_USER_SHADER_SET_TEXTURE
-			TEST_IGNORE()   // needs the beta host's libplacebo fork (pl_mpv_user_shader_set_texture)
-#endif
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap)
 		{
-			const std::vector<float> levels = { 0.0f, 1.0f, 1.05f, -0.04f };   // black, white, WTW, BTB (limited range)
+			VP_FORK_ONLY_PL0004_OR_RETURN(L"VideoProcessorTest::DitherNeedWarpTests::DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap");
+			// black, white, WTW (code 980), BTB (code 24): signal levels 0, 1, 1 + 40/876, -40/876 on the limited 64..940 grid (TQ-CD-M5).
+			const std::vector<float> levels = { 0.0f, 1.0f, 1.0f + 40.0f / 876.0f, -40.0f / 876.0f };
 			const int frames = 16;
 			const std::vector<int> exact = DwSigmaCodes(DwSigmaParams(false, "0"), levels, frames, false);
 			std::map<std::string, std::string> p = DwSigmaParams(false, "0.15");
@@ -2036,7 +2014,8 @@ namespace VideoProcessorTest
 					Assert::AreEqual(exact[g * frames], capped[g * frames + j],
 						(L"an exact code moved at total amplitude 0.5, level index " + std::to_wstring(g) + L" refresh " + std::to_wstring(j)).c_str());
 			}
-			Assert::IsTrue(asserted >= 2, L"black and white must be exact without dither");
+			Assert::AreEqual(4, asserted, L"black, white, WTW and BTB must all be exact (constant) without dither");
+			Assert::IsTrue(exact[2 * frames] > 940 && exact[3 * frames] < 64, L"the WTW level must stay above 940 and the BTB level below 64");
 		}
 
 		// (f) dn_extra against DitherNeed::SampleExtra: the text of DitherNeedGlsl.h in a probe compute pass (a test asserts it is the
@@ -2261,7 +2240,7 @@ if (g.y == 0 && g.x < DN_N) {
 
 		// HookGuard: a skipped frame (no product) binds nothing and renders the off path; with the fork call the guard binds the map
 		// and Release() / the destructor restore the hook byte for byte. Without the fork call (standard 7.360 build) Apply returns
-		// false, reports kNoSetTexture, sets nothing, and that leg is asserted in full (the bound leg runs where the fork call exists).
+		// false, reports kNoSetTexture, sets nothing, and that leg is asserted in full (the bound leg runs on the Beta host: BetaStage RunBetaDitherNeedWarpForkTests, case g, which prints BETA-RAN with this test's FQN).
 		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpHookGuardAppliesAndRestores)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()
@@ -2329,7 +2308,7 @@ if (g.y == 0 && g.x < DN_N) {
 				Assert::IsFalse(applied, L"without set_texture Apply must return false");
 				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kNoSetTexture), missingBit);
 				Assert::IsTrue(bound == base, L"without set_texture nothing is bound: the off path");
-				return;   // the unsupported leg is fully asserted above; the bound leg runs on the beta host
+				return;   // the unsupported leg is fully asserted above; the bound leg is asserted on the Beta host (RunBetaDitherNeedWarpForkTests, case g)
 			}
 			Assert::IsTrue(applied, L"Apply must bind the product");
 			Assert::IsTrue(bound != base, L"a bound non-zero map must change the codes (the test would be vacuous)");
