@@ -350,6 +350,7 @@ void LibplaceboVideoRenderer::Impl::ReleaseDejudder()
 	frameInterpolator.reset();
 	dejudder.reset();
 	VpSkeleton::VramUsers::Instance().Release(this, VpSkeleton::kUserMotionMatcher);   // W2-C1 C1-3: the matcher's memory is freed
+	SyncFallback(FallbackCatalog::Released("product.motion_warp"));   // GF-P4 S4: no matcher, no own pyramid (the row goes with it)
 	dejudderLiveFieldFrom = 0;
 	motionSegment.Retract(VpMotion::Direction::Forward);
 	vectorEstimate.dejudderMotionSourceKey = -1;
