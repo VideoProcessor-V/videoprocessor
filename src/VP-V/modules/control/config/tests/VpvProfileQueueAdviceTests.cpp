@@ -4,6 +4,7 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/modules/control/config/VpvProfileQueueAdvice.h>
+#include <VP-V/modules/motion/estimation/MotionAhead.h>   // the expected depths (the advice header declares only)
 #include <VP-V/modules/input/queue_timing/QueueLatency.h>
 #include <ConfigFile.h>
 #include <RendererProfileConfig.h>
