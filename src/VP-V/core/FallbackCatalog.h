@@ -1077,6 +1077,9 @@ namespace FallbackCatalog
 			{ "product.source_geometry", "source geometry record unavailable, stale or of another unit version: readers use the delivered raster and their classical forms" },
 			// ECV composed vectors (motion/estimation/composed): not produced or short of the asked offsets: the grain level and the neighbour warp use their single-frame / causal forms.
 			{ "product.composed_vectors", "composed vectors unavailable or short of the asked frames: readers use their single-frame forms (grain level) or their causal substitute (neighbour warp)" },
+			// Room light (CF-1 FIX1 SHOULD 6; colour/appearance/RoomLight.h): the held record is absent or the sensor is lost, so the appearance
+			// stage holds, then decays toward a dark room, and says so on its status line.
+			{ "product.room_light", "room light record unavailable or sensor lost: the appearance stage holds the last value, then assumes a dark room, shown on its status line" },
 		};
 		if (count)
 			*count = sizeof(kEntries) / sizeof(kEntries[0]);

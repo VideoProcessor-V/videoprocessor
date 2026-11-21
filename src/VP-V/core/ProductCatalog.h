@@ -162,7 +162,7 @@ inline const std::vector<ProductRow>& ProductRows()
         { kEdgeMap, "input/source_analysis/regions", kExpectedRegionUnit, "edge map pass (per-frame memo); readers: focus map, busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3))" },
         // CF-1 CAM-2: room_light is HELD STATE (no lane producer, no live fill, no RegisterOwnerFill anywhere). The folder below owns the RECORD (layout
         // and unit version: colour/appearance/RoomLight.h); the single WRITER is the LED intent's ambient filter (drive/led_compensation/LedIntentState.h),
-        // published from control/diagnostics/StatusMethods.inl; the reader is the appearance stage at lag 1 (CF-1 FIX1 MUST 7: checked, kept).
+        // published from control/diagnostics/StatusMethods.inl; the reader is the appearance stage at lag 1 (CF-1 FIX1 MUST 7: checked, kept; SHOULD 6: its catalog reader row is MakeRow 28).
         { kRoomLight, "colour/appearance", kExpectedRoomLightUnit, "" },
     };
     return rows;
@@ -390,6 +390,10 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         r.back().family = "temporal detail";
         r.push_back(MakeRow(27, "source geometry status", "VP-V/core/StatusText", PathwayUnit::Output, 95, {}, own,
                             "product.source_geometry", false, { kSourceGeometry }));
+        // CF-1 FIX1 SHOULD 6: the appearance stage reads room_light (HELD STATE) at lag 1, the latest sealed record; absent or lost = a dark
+        // room assumed, visibly (RoomLight::Resolve status "room: sensor (no reading; dark assumed)", "product.room_light").
+        r.push_back(MakeRow(28, "appearance (room light)", "VP-V/modules/colour/appearance/AppearanceStage", PathwayUnit::Colour, 10, {}, own,
+                            "product.room_light", false, { kRoomLight }));
         // VectorDemand consumers: ids and reads from VectorDemandProducts.h
         for (int i = 0; i < VectorDemand::kConsumerCount; ++i) {
             const VectorDemand::Consumer c = VectorDemand::ConsumerAt(i);

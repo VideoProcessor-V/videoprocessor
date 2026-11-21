@@ -4,6 +4,7 @@
 #include "CppUnitTest.h"
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/FallbackPlainText.h>
+#include <VP-V/core/ProductCatalog.h>
 #include <VP-V/modules/colour/appearance/AppearanceStage.h>
 #include <VP-V/modules/colour/display_mapping/DvHostStage.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
@@ -423,6 +424,34 @@ namespace Tests
 				return;   // not reachable from this working directory
 			Assert::IsFalse(Fix1Has(glsl, "inverse(toXyz)"));
 			Assert::IsTrue(Fix1Has(glsl, "a hard 6-step bisection"), L"NIT 2: the comment says what the compression is");
+		}
+	};
+
+	// SHOULD 6 (gate CF1-347e0546f): room_light has a catalog reader row, the appearance stage at lag 1 (held state), with its own
+	// fallback entry, so the graph checks the read instead of counting it unread.
+	TEST_CLASS(AppearanceRoomLightFix1Tests)
+	{
+	public:
+		TEST_METHOD(AppearanceReadsRoomLightAtLagOneWithItsFallback)
+		{
+			using namespace VpSkeleton;
+			using namespace VpSkeleton::Catalog;
+			const std::vector<const ConsumerRow*> readers = ConsumersOf(kRoomLight);
+			Assert::AreEqual(size_t(1), readers.size(), L"one reader row: the appearance stage");
+			const ConsumerRow& row = *readers[0];
+			Assert::AreEqual(std::string("VP-V/modules/colour/appearance/AppearanceStage"), std::string(row.module));
+			Assert::IsTrue(row.unit == PathwayUnit::Colour);
+			bool read = false;
+			for (size_t k = 0; k < row.decl.count; ++k)
+				if (row.decl.consumes[k].product == kRoomLight)
+				{
+					read = true;
+					Assert::IsTrue(row.decl.consumes[k].lag >= 1, L"a held-state read is lag >= 1");
+				}
+			Assert::IsTrue(read);
+			Assert::IsNull(LiveFillOwner(kRoomLight), L"held state: nothing fills it live");
+			Assert::AreEqual(std::string("product.room_light"), std::string(row.fallbackId));
+			Assert::IsNotNull(FallbackCatalog::FindProductEntry("product.room_light"), L"the fallback id exists");
 		}
 	};
 }
