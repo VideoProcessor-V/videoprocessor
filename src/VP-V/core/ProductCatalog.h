@@ -159,6 +159,9 @@ inline const std::vector<ProductRow>& ProductRows()
         // producer, no live fill; its readers take the latest sealed record (lag 1) and fall back visibly when it is absent or stale.
         { kSourceGeometry, "input/source_analysis/identity", kExpectedSourceGeometryUnit, "" },
         { kEdgeMap, "input/source_analysis/regions", kExpectedRegionUnit, "edge map pass (per-frame memo); readers: focus map, busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3))" },
+        // P10g (T3): an owner fill from the acquired P10 variant; no lane job. Single-frame law (= the unit-4 law) until the temporal passes
+        // are costed (GrainLevel.h), shown as the Fallbacks line "grain_level_temporal".
+        { kP10gGrainLevel, "repair/grain_split", kExpectedGrainSplitUnit, "grain level pass (per-frame memo, owner fill; single-frame law until the temporal passes are costed); first reader: hybrid upscaler" },
     };
     return rows;
 }
