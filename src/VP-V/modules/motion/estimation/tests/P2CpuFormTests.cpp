@@ -268,6 +268,32 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0ull, rig.engine.P2CpuFormDeclined());
 		}
 
+		// GF-P4 S7 (a): the directory's ReadP2Record runs the whole read and its count under the directory lock for a REAL engine
+		// registered for its host; an unknown host answers "engine absent" and counts nothing.
+		TEST_METHOD(DirectoryReadRunsUnderTheLockAndCounts)
+		{
+			int hostTag = 0, otherHost = 0;
+			VpMotion::VectorEngine engine(&hostTag);   // registered in the directory for &hostTag
+			engine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			engine.p2Slot->SetGeneration(engine.motionValidity.StreamGeneration());
+			engine.p2Slot->Publish(10, 11, engine.p2Slot->Generation(), MakeFlow(3.0f, true, false));
+
+			VpMotion::P2PairRecord rec;
+			std::string why;
+			Assert::IsTrue(VpMotion::VectorEngine::Directory().ReadP2Record(&hostTag, 11, rec, why), L"the registered engine's pair is read");
+			Assert::AreEqual(uint64_t(10), rec.from);
+			Assert::AreEqual(uint64_t(11), rec.to);
+			Assert::AreEqual(1ull, engine.P2CpuFormServed(), L"the read is counted served, once");
+			Assert::AreEqual(0ull, engine.P2CpuFormDeclined());
+
+			VpMotion::P2PairRecord none;
+			std::string noneWhy;
+			Assert::IsFalse(VpMotion::VectorEngine::Directory().ReadP2Record(&otherHost, 11, none, noneWhy), L"no engine for another host");
+			Assert::AreEqual(std::string("p2 cpu form: engine absent"), noneWhy);
+			Assert::AreEqual(1ull, engine.P2CpuFormServed(), L"an unknown host changes no count");
+			Assert::AreEqual(0ull, engine.P2CpuFormDeclined());
+		}
+
 		// BBP-A-COUNTS-CTRLALTD: the form's declines reach the status segment (Config status / Ctrl+Alt+D), never log-only:
 		// served + declined + the last decline's words; nothing shown while every read was served; shown without a producer too.
 		TEST_METHOD(ProducerStatusSegmentNamesTheP2CpuFormDeclines)

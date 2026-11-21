@@ -92,6 +92,44 @@ namespace GfP4MotionTest
 		};
 
 		bool CutAtTen(uint64_t seq) { return seq == 10; }
+
+		// Every pure virtual answered "absent"; P2RecordEndingAt declines with a fixed reason and counts its calls, and the
+		// P2 CPU form's read count is kept (the same fake shape as P2CpuFormHeaderTests).
+		struct CountingEngine : VpMotion::IVectorEngine
+		{
+			mutable int p2Calls = 0;
+			mutable int served = 0;
+			mutable int declined = 0;
+			uint64_t LatestVerifiedFieldSeq() const override { return 0; }
+			uint64_t FieldEra() const override { return 1; }
+			bool FieldOf(uint64_t, VpMotion::VerifiedField&) const override { return false; }
+			float FieldScale() const override { return 1; }
+			bool GlobalFromEngine() const override { return false; }
+			bool EngineGlobal(uint64_t, VpMotion::GlobalVec&) const override { return false; }
+			bool PairSpansSlip(uint64_t, uint64_t) const override { return false; }
+			bool FlowIsCpuResident() const override { return false; }
+			bool FlowOf(uint64_t, VpMotion::FlowView&) const override { return false; }
+			void SetPreEstimateHook(VpMotion::IPreEstimateHook*) override {}
+			bool P2RecordEndingAt(uint64_t, VpMotion::P2PairRecord&, std::string& why) const override
+			{
+				++p2Calls;
+				why = "p2 cpu form: fake decline";
+				return false;
+			}
+			void NoteP2CpuFormRead(bool ok) const override { (ok ? served : declined) += 1; }
+		};
+
+		// A directory that only knows EngineFor: ReadP2Record is the interface's default.
+		struct FakeDirectory : VpMotion::IVectorEngineDirectory
+		{
+			VpMotion::IVectorEngine* engine = nullptr;
+			mutable int asked = 0;
+			VpMotion::IVectorEngine* EngineFor(const void*) override
+			{
+				++asked;
+				return engine;
+			}
+		};
 	}
 
 	TEST_CLASS(GfP4MotionTests)
@@ -189,6 +227,31 @@ namespace GfP4MotionTest
 			const size_t reset = body.find("dejudder.reset();");
 			Assert::IsTrue(reset != std::string::npos, L"the matcher is reset in ReleaseDejudder");
 			Assert::IsTrue(body.find(released, reset) != std::string::npos, L"the row is released after dejudder.reset();");
+		}
+
+		// GF-P4 S7 (a): the interface's DEFAULT ReadP2Record (a fake directory that only knows EngineFor) forwards to the engine's
+		// P2RecordEndingAt once and counts the one decline; with no engine it answers "engine absent" and counts nothing.
+		TEST_METHOD(FakeDirectoryDefaultReadUsesEngineFor)
+		{
+			int host = 0;
+			CountingEngine engine;
+			FakeDirectory dir;
+			dir.engine = &engine;
+			VpMotion::P2PairRecord rec;
+			std::string why;
+			Assert::IsFalse(dir.ReadP2Record(&host, 11, rec, why), L"the fake engine declines");
+			Assert::AreEqual(1, dir.asked, L"the engine is found through EngineFor once");
+			Assert::AreEqual(1, engine.p2Calls, L"P2RecordEndingAt is asked once");
+			Assert::AreEqual(std::string("p2 cpu form: fake decline"), why, L"the engine's reason is returned");
+			Assert::AreEqual(1, engine.declined, L"one decline counted");
+			Assert::AreEqual(0, engine.served, L"nothing counted served");
+
+			dir.engine = nullptr;
+			std::string absentWhy;
+			Assert::IsFalse(dir.ReadP2Record(&host, 11, rec, absentWhy), L"no engine");
+			Assert::AreEqual(std::string("p2 cpu form: engine absent"), absentWhy);
+			Assert::AreEqual(1, engine.p2Calls, L"no further engine call");
+			Assert::AreEqual(1, engine.declined, L"no count when the engine is absent");
 		}
 	};
 }
