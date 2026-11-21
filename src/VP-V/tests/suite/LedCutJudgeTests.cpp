@@ -532,5 +532,36 @@ namespace VideoProcessorTest
 			Assert::AreEqual<size_t>(0, demand.Declarations().size(), L"a module that never started declares nothing");
 			Assert::AreEqual<size_t>(0, demand.Withdrawals().size(), L"nothing declared, so nothing to withdraw");
 		}
+
+		// GF-P3 MUST-10: a measurement submitted after Stop (the drive frame holds the module by shared_ptr) declares nothing again,
+		// and destroying the stopped module withdraws nothing more.
+		TEST_METHOD(AMeasurementAfterStopDeclaresNothing)
+		{
+			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),
+				L"precondition: no store registered by an earlier test");
+			RecordingDemand demand;
+			DemandHubScope hub(&demand);
+			int rendererA = 0;
+			FrameAnalysis::Store storeA(FrameAnalysis::RingDepth(4, 4));
+			StoreRegistration registration;
+			registration.Set(&rendererA, &storeA);
+
+			auto projector = std::make_shared<FakeProjector>();
+			projector->openFails = true;   // a dry run: no port
+			{
+				LedDriveModule module(ProjectorConfig(), CutCompensate(),
+					[projector] { return std::make_unique<FakePort>(projector); });
+				module.SetSceneReaderForTesting(NoSceneCuts());
+				module.Start();
+				Assert::AreEqual<size_t>(1, demand.Declarations().size(), L"declared with the module");
+				module.Stop();
+				Assert::AreEqual<size_t>(1, demand.Withdrawals().size(), L"withdrawn on stop");
+				for (uint64_t s = 10; s <= 12; ++s)
+					module.SubmitMeasurement(CutFrame(40.0), s);
+				Assert::AreEqual<size_t>(1, demand.Declarations().size(), L"a late measurement declares nothing");
+				Assert::AreEqual<size_t>(1, demand.Withdrawals().size(), L"and withdraws nothing");
+			}
+			Assert::AreEqual<size_t>(1, demand.Withdrawals().size(), L"destroying the stopped module withdraws nothing more");
+		}
 	};
 }
