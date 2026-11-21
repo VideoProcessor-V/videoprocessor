@@ -303,8 +303,9 @@ namespace VideoProcessorTest
 			Assert::IsFalse(producer.HintsApply(false), L"off + broken chain: not hinted");
 		}
 
-		// Interim narrow ruling: one resolution per consumer class through HintsApply. Camera fit consuming = OFF by default and the
-		// opt-in turns it on; every other consumer = ON by default and a broken chain never hints; the Other setting is its own.
+		// Shared-stream rule: there is ONE NVOF pair stream, so HintsApply gives every consumer the same answer. While the camera fit is
+		// active (consuming) every consumer gets hints OFF by default and the camera opt-in turns them on; with the camera off all get
+		// hints ON by default; a broken chain never hints; the Other setting is its own.
 		TEST_METHOD(HintsResolvePerConsumerClassThroughHintsApply)
 		{
 			using HC = MotionAhead::Producer::HintConsumer;
@@ -314,7 +315,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(producer.HintsApply(true), L"others: hints ON by default on a continuous chain");
 			Assert::IsFalse(producer.HintsApply(false), L"others: a broken chain never hints");
 			producer.SetCameraConsumes(true);
-			Assert::IsFalse(producer.HintsApply(true), L"camera pairs: hints OFF by default");
+			Assert::IsFalse(producer.HintsApply(true), L"camera fit active: the shared pair stream has hints OFF for every consumer by default");
 			producer.SetTemporalHints(HC::Camera, true);
 			Assert::IsTrue(producer.HintsApply(true), L"camera opt-in: hints ON (shown on Ctrl+I)");
 			Assert::IsTrue(producer.HintsInForce());
