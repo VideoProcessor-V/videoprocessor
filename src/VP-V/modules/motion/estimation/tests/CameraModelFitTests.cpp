@@ -1496,6 +1496,9 @@ namespace VideoProcessorTest
 			Field w = AnchoredWater(3002, 3.0);
 			const CameraMotion d = on.Fit(w.Input(kPairSeconds, 5));
 			Require(d.valid && d.reason == Reason::Ambiguous && (d.verdictFlags & kVerdictDynamicTexture) != 0, "premise: the first pair is demoted: " + Describe(d));
+			double mx = 0, my = 0;
+			Displacement(d.params, 0.0, 0.0, &mx, &my);
+			Require(std::fabs(mx - 12.3) < 0.5 && std::fabs(my + 4.7) < 0.5, "premise: the demoted record's model would explain the pan, model=(" + std::to_string(mx) + ", " + std::to_string(my) + ")");
 			Field c3(Grid4K()); c3.FromModel(Pan4K()); c3.AddNoise(0.05, 3001);
 			const CameraMotion n = on.Fit(c3.Input(kPairSeconds, 6));
 			Require(n.valid && n.reason == Reason::Ok && n.verdictFlags == 0, "the pair after the demotion is a clean fit: " + Describe(n));
@@ -1538,27 +1541,59 @@ namespace VideoProcessorTest
 				Require(rb[i].computed && rb[i].share == 0.0 && !rb[i].detected, "infinite-trust blocks are skipped, pair " + std::to_string(i) + " share=" + std::to_string(rb[i].share));
 		}
 
-		// (b) a coherent mover (25 % patch, 6 px per pair relative to the camera) over a panned background: the patch follows its own
-		// vector, so the advected lookup finds the same residual and the pair is not a dynamic texture.
+		// (b) a coherent mover (25 % patch, about 6 px per pair relative to the camera) over a panned background. The mover is TEXTURED: each
+		// block carries a content-attached residual offset (+-3 px, a fixed pattern indexed by its position inside the patch) that moves with
+		// the object, one block per pair. Only the advected lookup (this block's centre minus its own vector) finds the same content in the
+		// previous pair; the same-index lookup of the earlier code compares different content. Sensitivity control: the same mover with the
+		// pattern re-drawn at random every pair must read as incoherent.
+		static Field TexturedMover(int pair, bool randomPattern)
+		{
+			Field f(Grid4K());
+			f.FromModel(Pan4K());
+			SplitMix64 rng(3300 + pair);
+			const int x0 = 40 + pair, y0 = 50, w = 120, h = 68;
+			for (int v = 0; v < h; ++v)
+				for (int u = 0; u < w; ++u)
+				{
+					const size_t i = f.Index(x0 + u, y0 + v);
+					double ox = ((u * 7 + v * 13) % 5 - 2) * 1.5, oy = ((u * 3 + v * 7) % 5 - 2) * 1.5;
+					if (randomPattern) { ox = (rng.Unit() - 0.5) * 12.0; oy = (rng.Unit() - 0.5) * 12.0; }
+					f.fx[i] = static_cast<float>(18.3 + ox);
+					f.fy[i] = static_cast<float>(-4.7 + oy);
+					f.trust[i] = 1.0f;
+				}
+			return f;
+		}
+
 		TEST_METHOD(CamfixR2FDynTextureCoherentMoverIsNotIncoherent)
 		{
-			std::vector<Field> fields;
-			for (int i = 0; i < 4; ++i)
+			std::vector<Field> fields, shuffled;
+			for (int i = 0; i < 4; ++i) { fields.push_back(TexturedMover(i, false)); shuffled.push_back(TexturedMover(i, true)); }
+			// Premise: a same-index lookup would call this textured mover incoherent (the old comparison), so the advected one earns the pass.
 			{
-				Field f(Grid4K());
-				f.FromModel(Pan4K());
-				const int x0 = 40 + static_cast<int>(std::lround(18.3 / 16.0 * i));
-				const int y0 = 50 + static_cast<int>(std::lround(-4.7 / 16.0 * i));
-				f.AddObject(x0, y0, 120, 68, 18.3, -4.7);
-				fields.push_back(f);
+				const Field& a = fields[0];
+				const Field& b = fields[1];
+				int compared = 0, incoh = 0;
+				for (int v = 0; v < 68; ++v)
+					for (int u = 0; u < 120; ++u)
+					{
+						const size_t i = b.Index(41 + u, 50 + v);
+						const double rx = b.fx[i] - 12.3, ry = b.fy[i] + 4.7, px = a.fx[i] - 12.3, py = a.fy[i] + 4.7;
+						const double rm = std::sqrt(rx * rx + ry * ry), pm = std::sqrt(px * px + py * py);
+						++compared;
+						if (std::sqrt((rx - px) * (rx - px) + (ry - py) * (ry - py)) > std::max(0.75, 0.5 * std::max(rm, pm))) ++incoh;
+					}
+				Require(static_cast<double>(incoh) / compared >= 0.4, "premise: a same-index lookup sees this mover as incoherent, share=" + std::to_string(static_cast<double>(incoh) / compared));
 			}
 			const std::vector<DynTextureResult> r = RunDetector(fields, Pan4K());
+			const std::vector<DynTextureResult> s = RunDetector(shuffled, Pan4K());
 			for (size_t i = 1; i < r.size(); ++i)
 			{
 				Require(r[i].computed && r[i].share > 0.15 && r[i].share < 0.4, "premise: the mover is about a quarter of the blocks, pair " + std::to_string(i)
 					+ " share=" + std::to_string(r[i].share));
 				Require(r[i].haveTemporal, "premise: the mover blocks are compared with the previous pair, pair " + std::to_string(i));
-				Require(r[i].temporal < 0.2 && !r[i].detected, "a coherent mover must stay coherent, pair " + std::to_string(i) + " temporal=" + std::to_string(r[i].temporal));
+				Require(r[i].temporal < 0.2 && !r[i].detected, "a coherent textured mover must stay coherent, pair " + std::to_string(i) + " temporal=" + std::to_string(r[i].temporal));
+				Require(s[i].haveTemporal && s[i].temporal >= 0.6, "sensitivity control: a re-drawn pattern is incoherent, pair " + std::to_string(i) + " temporal=" + std::to_string(s[i].temporal));
 			}
 		}
 
