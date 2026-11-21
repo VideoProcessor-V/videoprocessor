@@ -302,7 +302,10 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     SourceIdentity::QualityView dvQualityView;
     if (dvNeedsView) dvQualityView = vpv.sourceAnalysis.sourceMonitor.QualityView();
     static const std::string dvOriginalTone = "libplacebo";
-    const bool dvVpMapping = activeSettings.dvDisplayMapping != "original";
+    // CF-1 FIX1 MUST 3: an R12B / R12L tunnel picture cannot carry VP's mapping: libplacebo's runs, listed (DmContainer.h).
+    const char* const dvContainer = state.videoFrameEncoding == VideoFrameEncoding::R12B ? "R12B" :
+        state.videoFrameEncoding == VideoFrameEncoding::R12L ? "R12L" : "";
+    const bool dvVpMapping = dvStage.SyncContainer(state.dolbyVisionTunnel, dvContainer, activeSettings.dvDisplayMapping);
     dvStage.PrepareToneAndTrims({ dvVpMapping ? activeSettings.dvToneMapping : dvOriginalTone, dvVpMapping && activeSettings.dvTrims, activeSettings.toneMapping,
         activeSettings.dvCompareCaptureFolder, pipelineSlots.Runs(PipelineSlots::Id::ColourDmCurve), renderImage, target,
         convertedPayload ? &convertedPayload->dolby : nullptr, LedDisplayGamma(target.color.transfer), state,
@@ -407,6 +410,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     customHooks.Collect(lowLatencyQueue, userFrameHooks);
     colourFrame.userPreOutput = &userFrameHooks;
     colourFrame.calibrationLut = calibrationHost.HookForFrame() != nullptr;   // S2 pushes it (WP-12: the adapter never does)
+    dvStage.SyncCalibrationLut(activeSettings.calibrationLutStageConfigured, activeSettings.calibrationLutStage, colourFrame.calibrationLut);   // FIX1 MUST 3
     const OutputSegments::ColourCounts colourCounts = outputColour.Collect(colourFrame, pipelineSlots, frameHooks,
         [this](size_t start, PipelineSlots::Id slot) { TagSlotHooks(start, slot); });
     logSdrToneShape(sdrToneShapeState == 1 && colourCounts.toneShape == 0 ? 3 : sdrToneShapeState);

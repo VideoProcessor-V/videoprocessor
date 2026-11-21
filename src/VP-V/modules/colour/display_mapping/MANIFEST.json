@@ -12,6 +12,7 @@
     "src/VP-V/modules/colour/display_mapping/DvTrimSelection.h",
     "src/VP-V/modules/colour/display_mapping/DvDolbyStyle.h",
     "src/VP-V/modules/colour/display_mapping/DvHostStage.h",
+    "src/VP-V/modules/colour/display_mapping/DmContainer.h",
     "src/VP-V/modules/colour/display_mapping/AmbientAdaptation.h"
   ],
   "components": {

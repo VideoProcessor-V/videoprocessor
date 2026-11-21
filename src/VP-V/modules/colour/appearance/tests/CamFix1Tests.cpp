@@ -5,9 +5,11 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/FallbackPlainText.h>
 #include <VP-V/modules/colour/appearance/AppearanceStage.h>
+#include <VP-V/modules/colour/display_mapping/DvHostStage.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
 
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 
@@ -36,6 +38,21 @@ namespace Tests
 		}
 		bool Fix1Has(const std::string& text, const char* needle) { return text.find(needle) != std::string::npos; }
 		const char* const kFix1ConfigDir = "src\\VP-V\\modules\\control\\config\\";
+
+		struct Fix1Registry
+		{
+			std::map<std::string, std::string> engaged;
+			DvHostStage::Engage Engage() { return [this](const char* id, const std::string& r) { engaged[id] = r; }; }
+			DvHostStage::Release Release() { return [this](const char* id) { engaged.erase(id); }; }
+			bool Has(const char* id) const { return engaged.count(id) != 0; }
+		};
+		inline CustomHookChain::Loader Fix1NoShaders()
+		{
+			return {
+				[](const std::string&, std::string&, std::string& reason) { reason = "not found (test)"; return false; },
+				[](const std::string&) -> const pl_hook* { return nullptr; },
+				[](const pl_hook*& hook) { hook = nullptr; } };
+		}
 	}
 
 	// MUST 1 / MUST 2 / SHOULD 7: the calibration LUT moves to VP's last step by default whenever a VP display-mapping step
@@ -95,6 +112,42 @@ namespace Tests
 			Assert::IsFalse(FallbackCatalog::AppearanceCalibrationLut(false).engaged);
 			in.calibrationLutBefore = false;
 			Assert::IsTrue(AppearanceStage::Decide(in, s).active, L"without the LUT before it the pass runs");
+		}
+	};
+
+	// MUST 3: the R12B/R12L container row and the LUT-substitution row are engaged by the production sync, not only by
+	// the catalogue helpers.
+	TEST_CLASS(DvContainerFix1Tests)
+	{
+	public:
+		TEST_METHOD(TwelveBitRgbTunnelStepsBackVisibly)
+		{
+			Fix1Registry reg;
+			DvHostStage stage(Fix1NoShaders(), reg.Engage(), reg.Release());
+			Assert::IsFalse(stage.SyncContainer(true, "R12B", "vp"), L"VP's mapping cannot read a 12-bit RGB tunnel picture");
+			Assert::IsTrue(reg.Has("DV display mapping: container"), L"the step-back is listed");
+			Assert::IsTrue(stage.SyncContainer(false, "R12B", "vp"), L"no tunnel: VP's mapping runs");
+			Assert::IsFalse(reg.Has("DV display mapping: container"), L"the row is released");
+			Assert::IsFalse(stage.SyncContainer(true, "R12L", "vp"));
+			Assert::IsTrue(reg.Has("DV display mapping: container"));
+			Assert::IsTrue(stage.SyncContainer(true, "", "vp"), L"a readable container runs VP's mapping");
+			Assert::IsFalse(reg.Has("DV display mapping: container"));
+			Assert::IsFalse(stage.SyncContainer(true, "R12B", "original"), L"original asks for libplacebo's mapping");
+			Assert::IsFalse(reg.Has("DV display mapping: container"), L"a requested original is not a fallback");
+		}
+
+		TEST_METHOD(AutoMovedLutIsListedOnlyWhenItApplies)
+		{
+			Fix1Registry reg;
+			DvHostStage stage(Fix1NoShaders(), reg.Engage(), reg.Release());
+			stage.SyncCalibrationLut("auto", "vp", true);
+			Assert::IsTrue(reg.Has("calibration LUT: display mapping"), L"auto moved the LUT: listed");
+			stage.SyncCalibrationLut("vp", "vp", true);
+			Assert::IsFalse(reg.Has("calibration LUT: display mapping"), L"the user asked for vp: not a fallback");
+			stage.SyncCalibrationLut("auto", "vp", false);
+			Assert::IsFalse(reg.Has("calibration LUT: display mapping"), L"no LUT this frame");
+			stage.SyncCalibrationLut("auto", "libplacebo", true);
+			Assert::IsFalse(reg.Has("calibration LUT: display mapping"));
 		}
 	};
 }

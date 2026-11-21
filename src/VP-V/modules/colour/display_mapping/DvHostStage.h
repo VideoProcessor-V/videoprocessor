@@ -46,6 +46,7 @@
 #include <VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h>
 #include <VP-V/modules/colour/display_mapping/DmCurve.h>
+#include <VP-V/modules/colour/display_mapping/DmContainer.h>
 #include <VP-V/modules/colour/appearance/AppearanceStage.h>
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
@@ -110,6 +111,25 @@ public:
 			m_release("Dolby Vision scene metadata");
 			m_release("Dolby Vision trims");
 		}
+	}
+
+	// CF-1 FIX1 MUST 3: per picture, before PrepareToneAndTrims. Returns whether VP's DV mapping runs (dv_display_mapping not
+	// original and the capture container can carry it); an R12B / R12L tunnel picture steps back to libplacebo's mapping,
+	// listed under "Fallbacks engaged" (refs/125 s5), never silently.
+	bool SyncContainer(bool dolbyVisionTunnel, const std::string& containerName, const std::string& dvDisplayMapping)
+	{
+		const FallbackCatalog::Decision row = DmContainer::ContainerRow(dolbyVisionTunnel, containerName, dvDisplayMapping);
+		// VPV-FALLBACK DV display mapping: container
+		if (row.engaged) m_engage(row.id.c_str(), row.reason); else m_release(row.id.c_str());
+		return DmContainer::VpMapping(dolbyVisionTunnel, containerName, dvDisplayMapping);
+	}
+	// CF-1 FIX1 MUST 3: per frame, once the host knows whether VP's calibration LUT stage holds a LUT: calibration_lut_stage
+	// auto moved it to VP's last step (the display mapping acts before it), listed while it lasts.
+	void SyncCalibrationLut(const std::string& configuredStage, const std::string& resolvedStage, bool lutThisFrame)
+	{
+		const FallbackCatalog::Decision row = DmContainer::LutRow(configuredStage, resolvedStage, lutThisFrame);
+		// VPV-FALLBACK calibration LUT: display mapping
+		if (row.engaged) m_engage(row.id.c_str(), row.reason); else m_release(row.id.c_str());
 	}
 
 	// The tail of the ingress status line for a DV tunnel picture.
