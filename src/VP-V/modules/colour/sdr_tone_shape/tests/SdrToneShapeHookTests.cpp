@@ -405,6 +405,8 @@ namespace VideoProcessorTest
 						(L"B x " + std::to_wstring(x) + L" strength " + std::to_wstring(strength)).c_str());
 					if (x % 64 != 0)
 						Assert::IsTrue(shaped[x].r >= shaped[x - 1].r, L"R monotonic");
+					if (x % 64 != 0)
+						Assert::IsTrue(shaped[x].b >= shaped[x - 1].b, L"B monotonic");
 					if (x >= 64)
 						Assert::IsTrue(shaped[x].g >= shaped[x - 64].g, L"G monotonic");
 				}
@@ -416,8 +418,14 @@ namespace VideoProcessorTest
 			set(0.15, 0.5, 0.0);
 			const auto plain = fixture.RenderCoordinateField(hook);
 			for (size_t x = 2; x + 2 < plain.size(); ++x)
+			{
 				Assert::IsTrue(std::abs(static_cast<int>(recovered[x].r) - static_cast<int>(plain[x].r)) <= 1,
-					L"recovery adds nothing on a smooth ramp");
+					L"recovery adds nothing on a smooth ramp (R)");
+				Assert::IsTrue(std::abs(static_cast<int>(recovered[x].g) - static_cast<int>(plain[x].g)) <= 1,
+					L"recovery adds nothing on a smooth ramp (G)");
+				Assert::IsTrue(std::abs(static_cast<int>(recovered[x].b) - static_cast<int>(plain[x].b)) <= 1,
+					L"recovery adds nothing on a smooth ramp (B)");
+			}
 			// Contrast recovery on a 2-pixel vertical stripe pattern inside the knee (knee_start=0.5):
 			// the 5x5 stride-2 blur sees opposite stripes at +-2 px, so recovery=2.0 must raise local contrast.
 			{
