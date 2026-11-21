@@ -256,6 +256,12 @@ namespace MotionAhead
 		size_t PendingCapacity() const { return maxPendingJobs.load(std::memory_order_acquire); }
 		// general_rate_fixes for the engine's global vote range (FlowVoteRange).
 		void SetGeneralRates(bool on) { generalRates.store(on, std::memory_order_release); }
+		// Camfix R1 (doc 103 s2: NVOF temporal-hint drift): the engine's temporal hints between consecutive pairs. On by
+		// default (unchanged); off = every pair runs with disableTemporalHints (NvOpticalFlow::Engine::Run continuous = false).
+		// A diagnostic switch for tests and A/B runs; the environment variable VP_NVOF_TEMPORAL_HINTS=0 turns it off at
+		// construction (no configuration key; a default change is an owner decision).
+		void SetTemporalHints(bool on) { temporalHints.store(on, std::memory_order_release); }
+		bool TemporalHints() const { return temporalHints.load(std::memory_order_acquire); }
 
 		// W2-C5b: an ON-DEMAND pair for a render-time consumer (OnDemandEstimate.h). Any thread; never blocks on the worker:
 		// a pair already in the slot answers FromSlot at once (zero work); not running / stopping / restarting answers
@@ -308,7 +314,7 @@ namespace MotionAhead
 		VpMotion::P2Slot::Stats StoreStats() const { return slot->GetStats(); }
 
 		// extrasMs: the trust extras of the last pair (global, cost, consistency) on the worker.
-		struct Stats { unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0; double lastPairMs = 0.0, lumaMs = 0.0, extrasMs = 0.0; double pairMsSum = 0.0; /* SK-MV: the sum of all pair times, for the standing-cost line */ };
+		struct Stats { unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0; double lastPairMs = 0.0, lumaMs = 0.0, extrasMs = 0.0; double pairMsSum = 0.0; /* SK-MV: the sum of all pair times, for the standing-cost line */ unsigned long long hintedPairs = 0; /* camfix R1: pairs run with temporal hints */ };
 		Stats GetStats() const;
 
 		// Bug hunt 35 #1: the stop/restart state (FallbackCatalog::VectorProducer builds the entry).
@@ -374,6 +380,7 @@ namespace MotionAhead
 			maxPendingJobs.store(PendingJobsFor(d > l ? d : l), std::memory_order_release);
 		}
 		std::atomic<bool> generalRates{ true };
+		std::atomic<bool> temporalHints{ true };   // camfix R1 (SetTemporalHints)
 		std::atomic<int> targetW{ 0 }, targetH{ 0 };
 		std::mutex p1Mutex;                                 // guards p1Source (set from the render thread, read by the worker)
 		std::shared_ptr<VpSkeleton::IP1Source> p1Source;

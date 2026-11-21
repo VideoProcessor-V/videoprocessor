@@ -178,7 +178,17 @@ namespace MotionAhead
 		return true;
 	}
 
-	Producer::Producer() = default;
+	Producer::Producer()
+	{
+		// Camfix R1: the diagnostic override of the temporal hints (default on, unchanged).
+		char value[8] = {};
+		const DWORD n = GetEnvironmentVariableA("VP_NVOF_TEMPORAL_HINTS", value, static_cast<DWORD>(sizeof(value)));
+		if (n > 0 && n < sizeof(value) && value[0] == '0')
+		{
+			temporalHints.store(false, std::memory_order_release);
+			DebugLog::Log("Motion ahead: NVOF temporal hints OFF (VP_NVOF_TEMPORAL_HINTS=0, diagnostic)");
+		}
+	}
 
 	Producer::~Producer()
 	{
@@ -556,7 +566,8 @@ namespace MotionAhead
 			const int prev = prevSlot;
 			// The temporal hints only when the engine's last pair ended at this pair's first frame
 			// (audit 2026-10-16: they carried across seeks, dropped jobs and size skips).
-			const bool continuous = hintSequence == previousSequence && hintGeneration == job.generation;
+			// Camfix R1: and only while the temporal hints are on (SetTemporalHints; default on).
+			const bool continuous = temporalHints.load(std::memory_order_acquire) && hintSequence == previousSequence && hintGeneration == job.generation;
 			hintSequence = UINT64_MAX;
 			bool ran = false;
 			std::shared_ptr<Flow> flow;
@@ -576,6 +587,8 @@ namespace MotionAhead
 				stats.extrasMs = extrasMs;
 				stats.lastPairMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 				stats.pairMsSum += stats.lastPairMs;
+				if (continuous)
+					++stats.hintedPairs;
 			}
 		}
 		{

@@ -4607,6 +4607,9 @@ namespace CameraAccuracy
 		struct RawStats { double biasX = 0, biasY = 0, epe = 0; long long n = 0; };
 		std::vector<RawStats> aheadRaw, seedRaw;
 		size_t aheadCells = 0;        // native cells per pair (the memory figure)
+		// Camfix R1: the producer's temporal hints for this scene (VP_NVOF_TEMPORAL_HINTS=0 turns them off) and the pairs that ran hinted.
+		int aheadHintsOn = 1;
+		unsigned long long aheadHinted = 0;
 		int aheadQuarter = 0;         // the engine searched at a quarter (lowRes)
 		std::string aheadProblem;
 	};
@@ -4781,6 +4784,8 @@ namespace CameraAccuracy
 				sr.aheadRaw[p] = RawVsTruth(fc, tx / SizeDiv(), ty / SizeDiv());   // same source-px scale as the seed row (log.truthTx / SizeDiv)
 			}
 		}
+		sr.aheadHintsOn = replica.Producer().TemporalHints() ? 1 : 0;
+		sr.aheadHinted = replica.Producer().GetStats().hintedPairs;
 		replica.Stop();
 		pl_gpu_finish(g);
 	}
@@ -4822,7 +4827,8 @@ namespace CameraAccuracy
 	{
 		std::ofstream csv(dir + "\\camera-accuracy-ahead.csv", std::ios::trunc);
 		csv << "scene,fps,period_ms,pair,engine_quarter,have_ahead,luma_ms,engine_ms,readback_ms,extras_ms,pair_ms,convert_ms,fit_ms_ahead,"
-			"latency_ms,on_time_lead1,on_time_lead2,on_time_lead3,on_time_lead4,fit_err_ahead_px,fit_err_seed_px,fit_reason_ahead,fit_reason_seed\n";
+			"latency_ms,on_time_lead1,on_time_lead2,on_time_lead3,on_time_lead4,fit_err_ahead_px,fit_err_seed_px,fit_reason_ahead,fit_reason_seed,"
+			"raw_bias_x,raw_bias_y,raw_epe,hints_on\n";
 		for (const SceneResult& s : all)
 		{
 			if (s.aheadTiming.empty() || s.variants[3].name.empty())
@@ -4836,12 +4842,15 @@ namespace CameraAccuracy
 				const CameraAccuracyAhead::PairTiming& t = s.aheadTiming[p];
 				const PairLog* a = p < aheadV.pairs.size() ? &aheadV.pairs[p] : nullptr;
 				const PairLog* b = p < seedV.pairs.size() ? &seedV.pairs[p] : nullptr;
+				// Camfix R1: the raw P2 field vs truth of this pair (trusted samples; source px) and the producer's hint state.
+				const SceneResult::RawStats r = p < s.aheadRaw.size() ? s.aheadRaw[p] : SceneResult::RawStats();
 				char row[1024];
-				std::snprintf(row, sizeof(row), "%s,%.3f,%.3f,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.4f,%.4f,\"%s\",\"%s\"\n",
+				std::snprintf(row, sizeof(row), "%s,%.3f,%.3f,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.4f,%.4f,\"%s\",\"%s\",%+.5f,%+.5f,%.5f,%d\n",
 					s.scene.name.c_str(), s.scene.fps, periodMs, static_cast<int>(p), s.aheadQuarter, s.aheadHave[p], t.lumaMs, t.engineMs, t.readbackMs, t.extrasMs,
 					t.PairMs(), s.aheadConvertMs[p], a ? a->fitMs : 0.0, lat.latencyMs[p], lat.latencyMs[p] <= 1 * periodMs ? 1 : 0,
 					lat.latencyMs[p] <= 2 * periodMs ? 1 : 0, lat.latencyMs[p] <= 3 * periodMs ? 1 : 0, lat.latencyMs[p] <= 4 * periodMs ? 1 : 0,
-					a ? FitError(*a) : 0.0, b ? FitError(*b) : 0.0, a ? a->fitReason.c_str() : "", b ? b->fitReason.c_str() : "");
+					a ? FitError(*a) : 0.0, b ? FitError(*b) : 0.0, a ? a->fitReason.c_str() : "", b ? b->fitReason.c_str() : "",
+					r.biasX, r.biasY, r.epe, s.aheadHintsOn);
 				csv << row;
 			}
 		}
@@ -4909,7 +4918,8 @@ namespace CameraAccuracy
 		}
 
 		md << "\n### Raw field vs truth (trusted samples; source px): native P2 vs the F2 seed, pairs >= 1\n\n";
-		md << "| scene | raw P2 bias x / y | raw P2 EPE | raw seed bias x / y | raw seed EPE | native cells per pair |\n|---|---|---|---|---|---|\n";
+		md << "| scene | raw P2 bias x / y | raw P2 EPE | raw seed bias x / y | raw seed EPE | native cells per pair | hints | hinted pairs | "
+			"pair-0 bias x | steady bias x (pairs 2..) | max abs bias x (pairs 2..) | R1 |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n";
 		for (const SceneResult& s : all)
 		{
 			if (s.variants[3].name.empty() || s.aheadRaw.empty())
@@ -4919,9 +4929,26 @@ namespace CameraAccuracy
 				for (size_t p = 1; p < v.size(); ++p) if (v[p].n) { sum += v[p].*m; ++n; }
 				return n ? sum / n : 0.0;
 			};
-			std::snprintf(line, sizeof(line), "| %s | %+.4f / %+.4f | %.4f | %+.4f / %+.4f | %.4f | %zu |\n", s.scene.name.c_str(),
+			// Camfix R1 (doc 103 s2): the steady raw P2 bias over pairs 2.. (the hint drift settles by pair 2-5) against pair 0 (no hint yet);
+			// acceptance |steady bias x| <= 0.05 source px at 1080, <= 0.1 at 4K (hints off).
+			double steadySum = 0, steadyMaxAbs = 0;
+			int steadyN = 0;
+			for (size_t p = 2; p < s.aheadRaw.size(); ++p)
+			{
+				if (!s.aheadRaw[p].n)
+					continue;
+				steadySum += s.aheadRaw[p].biasX;
+				steadyMaxAbs = (std::max)(steadyMaxAbs, std::fabs(s.aheadRaw[p].biasX));
+				++steadyN;
+			}
+			const double steady = steadyN ? steadySum / steadyN : 0.0;
+			const double r1Limit = SizeDiv() == 1 ? 0.1 : 0.05;   // 4K (divisor 1) vs 1080 (divisor 2)
+			const bool r1Pass = steadyN > 0 && std::fabs(steady) <= r1Limit;
+			std::snprintf(line, sizeof(line), "| %s | %+.4f / %+.4f | %.4f | %+.4f / %+.4f | %.4f | %zu | %s | %llu | %+.4f | %+.4f | %.4f | %s (<= %.2f) |\n", s.scene.name.c_str(),
 				mean(s.aheadRaw, &SceneResult::RawStats::biasX), mean(s.aheadRaw, &SceneResult::RawStats::biasY), mean(s.aheadRaw, &SceneResult::RawStats::epe),
-				mean(s.seedRaw, &SceneResult::RawStats::biasX), mean(s.seedRaw, &SceneResult::RawStats::biasY), mean(s.seedRaw, &SceneResult::RawStats::epe), s.aheadCells);
+				mean(s.seedRaw, &SceneResult::RawStats::biasX), mean(s.seedRaw, &SceneResult::RawStats::biasY), mean(s.seedRaw, &SceneResult::RawStats::epe), s.aheadCells,
+				s.aheadHintsOn ? "on" : "OFF", s.aheadHinted, s.aheadRaw.empty() || !s.aheadRaw[0].n ? 0.0 : s.aheadRaw[0].biasX, steady, steadyMaxAbs,
+				r1Pass ? "PASS" : "FAIL", r1Limit);
 			md << line;
 		}
 

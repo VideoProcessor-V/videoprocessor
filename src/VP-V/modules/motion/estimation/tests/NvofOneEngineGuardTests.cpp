@@ -268,6 +268,22 @@ namespace VideoProcessorTest
 			Assert::IsFalse(r.Sustained(4), L"a clean window releases it");
 		}
 
+		// Camfix R1: the temporal-hint switch defaults on (unchanged behaviour) unless the diagnostic environment variable says 0,
+		// and a set is read back; a producer that has run no pair has run none hinted.
+		TEST_METHOD(TemporalHintsSwitchDefaultsOnAndIsSettable)
+		{
+			char value[8] = {};
+			const DWORD n = GetEnvironmentVariableA("VP_NVOF_TEMPORAL_HINTS", value, static_cast<DWORD>(sizeof(value)));
+			const bool envOff = n > 0 && n < sizeof(value) && value[0] == '0';
+			MotionAhead::Producer producer;
+			Assert::AreEqual(!envOff, producer.TemporalHints(), L"default on (off only with VP_NVOF_TEMPORAL_HINTS=0)");
+			producer.SetTemporalHints(false);
+			Assert::IsFalse(producer.TemporalHints());
+			producer.SetTemporalHints(true);
+			Assert::IsTrue(producer.TemporalHints());
+			Assert::AreEqual(0ull, producer.GetStats().hintedPairs, L"no pair, none hinted");
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(ExactlyOneEngineAcrossProducerDejudderAndLongPair)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
