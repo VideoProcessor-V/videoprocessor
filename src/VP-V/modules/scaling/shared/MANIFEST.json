@@ -11,6 +11,7 @@
     "src/VP-V/modules/scaling/shared/ScalerGeometry.h",
     "src/VP-V/modules/scaling/shared/ScalerReference.h",
     "src/VP-V/modules/scaling/shared/ScalerPass.h",
+    "src/VP-V/modules/scaling/shared/ScalerPassFixed.h",
     "src/VP-V/modules/scaling/shared/ScalerPass.cpp",
     "src/VP-V/modules/scaling/shared/README.md",
     "src/VP-V/modules/scaling/shared/tests/ScalerPassTests.cpp",

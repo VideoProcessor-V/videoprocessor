@@ -30,10 +30,14 @@
 //
 // CPU reference = this header. The GLSL form (BasicChromaGlsl in BasicChromaGpu.h) is generated from the same tables and runs the
 // same integer arithmetic. Header-only, C++14, no Windows headers.
+//
+// CF-2 B5a-2 step 2: the tables, the phase location, the tap clamps and both integer passes (CPU and GLSL) are ScalerPass's Q14
+// fixed-point mode (scaling/shared/ScalerPassFixed.h); this unit keeps its geometry, sitings, checks and status and calls it.
 #pragma once
 
 #include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
 #include <VP-V/modules/scaling/shared/KernelTable.h>
+#include <VP-V/modules/scaling/shared/ScalerPassFixed.h>
 
 #include <algorithm>
 #include <cmath>
@@ -108,61 +112,17 @@ namespace BasicChroma
 	}
 
 	// The Q14 weights of every phase of a factor f (phases 0 .. 4f-1; phase p is the chroma fraction p / 4f), 6 taps each for
-	// the taps i0-2 .. i0+3. Exactly kWeightOne per phase.
-	struct PhaseTable
-	{
-		int factor = 1;
-		int phases = 4;
-		int w[kMaxPhases][kTaps] = {};
-		const int* Row(int phase) const { return w[phase]; }
-	};
+	// the taps i0-2 .. i0+3. Exactly kWeightOne per phase. The shared fixed-point mode builds them from the table's Lanczos a = 3.
+	using PhaseTable = ScalerPass::FixedQ14::PhaseTable;
 
-	inline PhaseTable BuildPhaseTable(int factor)
-	{
-		PhaseTable t;
-		t.factor = factor;
-		t.phases = 4 * factor;
-		for (int p = 0; p < t.phases && p < kMaxPhases; ++p)
-		{
-			const double frac = static_cast<double>(p) / t.phases;   // j - i0
-			double raw[kTaps], dsum = 0.0;
-			for (int k = 0; k < kTaps; ++k)
-			{
-				const double d = (k - (kLobes - 1)) - frac;          // tap index i0 + (k - 2), distance to j
-				raw[k] = ScalerKernels::Weight(LanczosSpec(), d);
-				dsum += raw[k];
-			}
-			// Normalise the truncated kernel first (its taps do not sum to 1), then round; only the true rounding remainder
-			// (a few units of 1/16384) goes to the largest tap.
-			int sum = 0, best = 0;
-			for (int k = 0; k < kTaps; ++k)
-			{
-				t.w[p][k] = static_cast<int>(std::floor(raw[k] / dsum * kWeightOne + 0.5));
-				sum += t.w[p][k];
-				if (std::abs(t.w[p][k]) > std::abs(t.w[p][best])) best = k;
-			}
-			t.w[p][best] += kWeightOne - sum;
-		}
-		return t;
-	}
+	inline PhaseTable BuildPhaseTable(int factor) { return ScalerPass::FixedQ14::BuildPhaseTable(LanczosSpec(), factor); }
 
 	inline bool SupportedFactor(int f) { return f == 1 || f == 2 || f == 4; }
 
-	inline int FloorDiv(int a, int b)   // b > 0
-	{
-		int q = a / b;
-		if ((a % b) != 0 && a < 0) --q;
-		return q;
-	}
+	inline int FloorDiv(int a, int b) { return ScalerPass::FixedQ14::FloorDiv(a, b); }   // b > 0
 
 	// i0 and phase of luma pixel x for factor f and the quadrupled shift s4.
-	inline void Locate(int x, int f, int s4, int& i0, int& phase)
-	{
-		const int n = 4 * x + 2 - s4 - 2 * f;
-		const int den = 4 * f;
-		i0 = FloorDiv(n, den);
-		phase = n - i0 * den;
-	}
+	inline void Locate(int x, int f, int s4, int& i0, int& phase) { ScalerPass::FixedQ14::Locate(x, f, s4, i0, phase); }
 
 	// ---- planes and geometry --------------------------------------------------------------------------------------------
 
@@ -235,9 +195,18 @@ namespace BasicChroma
 	// side outside. L, R: the active interval in luma pixels, cL, cR in chroma samples, cn: chroma plane size.
 	inline void ClampRange(int x, int L, int R, int cL, int cR, int cn, int& lo, int& hi)
 	{
-		if (x >= L && x < R) { lo = cL; hi = cR - 1; }
-		else if (x < L) { lo = 0; hi = (std::max)(cL - 1, 0); }
-		else { lo = (std::min)(cR, cn - 1); hi = cn - 1; }
+		ScalerPass::FixedQ14::ClampRange(x, L, R, cL, cR, cn, lo, hi);
+	}
+
+	// The two axes of the shared fixed-point mode for a geometry (luma = output, chroma = source; the active picture and its
+	// outward-rounded chroma rectangle as the clamp intervals).
+	inline void AxesOf(const Geometry& g, ScalerPass::FixedQ14::Axis& ax, ScalerPass::FixedQ14::Axis& ay)
+	{
+		const int cw = g.chromaW(), ch = g.chromaH();
+		const Rect lr = g.active.Empty() ? Rect{ 0, 0, g.lumaW, g.lumaH } : g.active;
+		const Rect cr = ChromaRect(lr, g.fx, g.fy, cw, ch);
+		ax.out = g.lumaW; ax.in = cw; ax.factor = g.fx; ax.s4 = g.s4x; ax.L = lr.x0; ax.R = lr.x1; ax.cL = cr.x0; ax.cR = cr.x1;
+		ay.out = g.lumaH; ay.in = ch; ay.factor = g.fy; ay.s4 = g.s4y; ay.L = lr.y0; ay.R = lr.y1; ay.cL = cr.y0; ay.cR = cr.y1;
 	}
 
 	// ---- the CPU reference -----------------------------------------------------------------------------------------------
@@ -250,43 +219,11 @@ namespace BasicChroma
 		// geometry, so a smaller or mislabelled plane would read outside it. No picture (an empty plane) rather than undefined reads.
 		if (c.w != g.chromaW() || c.h != g.chromaH() || c.w <= 0 || c.h <= 0 ||
 			c.v.size() < static_cast<size_t>(c.w) * static_cast<size_t>(c.h)) return Plane16();
-		const int W = g.lumaW, H = g.lumaH, cw = c.w, ch = c.h;
-		Plane16 out(W, H);
+		Plane16 out(g.lumaW, g.lumaH);
 		if (g.fx == 1 && g.fy == 1) { out.v = c.v; return out; }
-		const PhaseTable tx = BuildPhaseTable(g.fx), ty = BuildPhaseTable(g.fy);
-		const Rect lr = g.active.Empty() ? Rect{ 0, 0, W, H } : g.active;
-		const Rect cr = ChromaRect(lr, g.fx, g.fy, cw, ch);
-		// Horizontal pass over every chroma row, per output column (the clamp interval depends on the column only).
-		std::vector<int> hrow(static_cast<size_t>(W) * ch);
-		for (int x = 0; x < W; ++x)
-		{
-			int i0 = 0, ph = 0, lo = 0, hi = 0;
-			Locate(x, g.fx, g.s4x, i0, ph);
-			ClampRange(x, lr.x0, lr.x1, cr.x0, cr.x1, cw, lo, hi);
-			const int* wt = tx.Row(ph);
-			for (int y = 0; y < ch; ++y)
-			{
-				int acc = 0;
-				for (int k = 0; k < kTaps; ++k)
-					acc += static_cast<int>(c.at((std::min)((std::max)(i0 - (kLobes - 1) + k, lo), hi), y)) * wt[k];
-				hrow[static_cast<size_t>(y) * W + x] = (acc + kWeightOne / 2) >> kWeightBits;
-			}
-		}
-		for (int y = 0; y < H; ++y)
-		{
-			int j0 = 0, ph = 0, lo = 0, hi = 0;
-			Locate(y, g.fy, g.s4y, j0, ph);
-			ClampRange(y, lr.y0, lr.y1, cr.y0, cr.y1, ch, lo, hi);
-			const int* wt = ty.Row(ph);
-			for (int x = 0; x < W; ++x)
-			{
-				int acc = 0;
-				for (int k = 0; k < kTaps; ++k)
-					acc += hrow[static_cast<size_t>((std::min)((std::max)(j0 - (kLobes - 1) + k, lo), hi)) * W + x] * wt[k];
-				const int v = (acc + kWeightOne / 2) >> kWeightBits;
-				out.at(x, y) = static_cast<uint16_t>((std::min)((std::max)(v, 0), kContainerMax));
-			}
-		}
+		ScalerPass::FixedQ14::Axis ax, ay;
+		AxesOf(g, ax, ay);
+		if (!ScalerPass::FixedQ14::Upsample(c.v.data(), c.v.size(), ax, ay, LanczosSpec(), out.v)) return Plane16();
 		return out;
 	}
 
