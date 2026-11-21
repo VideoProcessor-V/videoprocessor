@@ -127,7 +127,7 @@ namespace MotionAhead
 	// size back into its own floor (a ratchet: the queue could never shrink).
 	// The structural bound: the P2 slot ring holds kP2RingPairs pairs (VectorEngineState::p2Slot and the standalone Producer::slot
 	// are built with it) and keeps kPairsKeptBehind of them for frames already at the render (the current pair (N-1, N) and the two
-	// Prune keeps behind it: VectorEngine.cpp P2().Prune(sequence - 2)); a lead above the rest would evict the pairs of the next frames
+	// Prune keeps behind it: VectorEngineState::PruneBehindRender(renderSeq), i.e. Prune(renderSeq - 2)); a lead above the rest would evict the pairs of the next frames
 	// to show before they are read (NVOF work thrown away, a matcher run instead). kRingMaxLead 13. Unchanged.
 	constexpr int kP2RingPairs = 16;
 	constexpr int kPairsKeptBehind = 3;

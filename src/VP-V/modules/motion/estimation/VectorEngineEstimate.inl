@@ -342,7 +342,8 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			vectorEngine.motionLastSharedEpoch = motionShadowEpoch;
 		}
 		dejudder->SetExternalFlow(std::move(flow));
-		vectorEngine.P2().Prune(aSequence);
+		if (!ahead)   // GEM VE-P2-LIFE: an ahead estimate's frame is past the render frame: it never prunes (the render path does)
+			vectorEngine.PruneBehindRender(aSequence);
 	}
 	bool gapSeedHanded = false;   // a valid seed was given to the matcher: counted "seeded" only if its D1 actually started from it (SearchSeedUsed)
 	if (!vectorEstimate.motionEngineWarming && bSequence > aSequence + 1 && vectorEngine.OnDemandServed(aSequence, bSequence))

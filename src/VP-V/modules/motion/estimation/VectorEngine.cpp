@@ -487,7 +487,7 @@ namespace VpMotion
 			++motionAheadMisses;
 			if (recordStore && nextSequence > sequence)
 				MotionRecord::Publish(recordStore, nextSequence, MotionRecord::Absent());
-			P2().Prune(sequence);
+			PruneBehindRender(sequence);   // GEM VE-P2-LIFE: the one prune (3 pairs behind the render frame)
 			return;
 		}
 		++motionAheadHits;
@@ -500,7 +500,7 @@ namespace VpMotion
 				motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()), sample));   // W1-C2a A1 / S2
 		MotionRecord::Feed(sample, vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan),
 			vectorDemand.Serves(VectorDemand::Consumer::MotionIntent), host);
-		P2().Prune(sequence);
+		PruneBehindRender(sequence);   // GEM VE-P2-LIFE: the one prune (3 pairs behind the render frame)
 	}
 
 	void VectorEngine::MotionShadowCheck(bool deliveryRuns, uint64_t sequence, uint64_t nextSequence, bool hostLive)
