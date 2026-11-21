@@ -107,6 +107,64 @@ def evaluate(hits, allow, added=None):
     return new, stale
 
 
+def selftest_failures():
+    """Names of the failed selftest checks (empty when all pass): every pattern with a positive and a negative line, the .cmd
+    wrapper rule, and the allow-list evaluation (allowed, new, entry without reason/row, stale, --since added lines)."""
+    failed = []
+
+    def check(name, cond):
+        if not cond:
+            failed.append(name)
+    positives = [
+        ("exec-policy", "a.ps1", "powershell -ExecutionPolicy Bypass -File x"),
+        ("exec-policy", "a.ps1", "powershell -executionpolicy Unrestricted -File x"),
+        ("exec-policy", "a.ps1", "Set-ExecutionPolicy RemoteSigned"),
+        ("unblock", "a.ps1", "Unblock-File ./x.ps1"),
+        ("encoded", "a.ps1", "powershell -EncodedCommand AAAA"),
+        ("encoded", "a.ps1", "powershell -enc AAAA"),
+        ("nested-ps", "a.ps1", "Start-Process powershell -ArgumentList x"),
+        ("nested-ps", "a.ps1", "Start-Process -FilePath powershell.exe"),
+        ("nested-ps", "a.cmd", "cmd /c powershell -Command x"),
+        ("kill-by-name", "a.cmd", "taskkill /F /IM VideoProcessor.exe"),
+        ("kill-by-name", "a.ps1", "Stop-Process -Force -Name VideoProcessor"),
+        ("no-verify", "a.sh", "git commit --no-verify -m x"),
+        ("cmd-wrapper", "run.cmd", "powershell -File b.ps1"),
+        ("cmd-wrapper", "run.bat", "call b.ps1"),
+    ]
+    for pid, rel, line in positives:
+        check("%s: %s" % (pid, line), pid in classify_line(rel, line))
+    negatives = [
+        ("a.py", "print('hi')"),
+        ("a.ps1", "Get-ExecutionPolicy"),
+        ("a.ps1", "Stop-Process -Id 123"),
+        ("a.ps1", "$encoding = 'utf8'"),
+        ("a.ps1", "Start-Process notepad"),
+        ("a.sh", "git commit -m x"),
+        ("run.cmd", "rem powershell -File b.ps1"),
+        ("run.cmd", ":: call b.ps1"),
+        ("a.ps1", "& ./b.ps1"),
+    ]
+    for rel, line in negatives:
+        check("negative: %s" % line, not classify_line(rel, line))
+    hit = {"file": "a.cmd", "line": 3, "pattern": "cmd-wrapper", "text": "powershell -File b.ps1"}
+    entry = {"file": "a.cmd", "line": "powershell -File b.ps1", "reason": "r", "row": "ROW-1"}
+    new, stale = evaluate([hit], [entry])
+    check("allowed hit is not new", not new and not stale)
+    new, stale = evaluate([hit], [])
+    check("unlisted hit is new", new == [hit] and not stale)
+    new, stale = evaluate([hit], [dict(entry, reason="")])
+    check("entry without a reason allows nothing", new == [hit])
+    new, stale = evaluate([hit], [dict(entry, row="")])
+    check("entry without a row allows nothing", new == [hit])
+    new, stale = evaluate([], [entry])
+    check("entry with no hit is stale", not new and len(stale) == 1)
+    new, stale = evaluate([hit], [entry], added={"a.cmd": {99}})
+    check("--since ignores a hit on an old line (and keeps its entry used)", not new and not stale)
+    new, stale = evaluate([hit], [], added={"a.cmd": {3}})
+    check("--since flags a hit on an added line", new == [hit])
+    return failed
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="N6 launcher-workaround checker")
     ap.add_argument("--root", default=L.repo_root())
@@ -118,10 +176,7 @@ def main(argv=None):
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
     if a.selftest:
-        ok = classify_line("a.ps1", "powershell -ExecutionPolicy Bypass -File x") == ["exec-policy"] \
-            and classify_line("a.cmd", "powershell -File b.ps1") == ["cmd-wrapper"] \
-            and not classify_line("a.py", "print('hi')")
-        return L.selftest_ok("launcher patterns", ok)
+        return L.selftest_ok("launcher patterns", not selftest_failures())
     try:
         hits = scan(a.root, a.extra_dir)
         apath = a.allow or os.path.join(a.root, ALLOW_PATH)
