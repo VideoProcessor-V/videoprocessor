@@ -1036,6 +1036,33 @@ namespace SkeletonCoreContextTestsNs
 			Assert::IsTrue(r.lane.State().get() == first);
 		}
 
+		// GF-P2b MUST-4 (2) (R4 T12): a second move of ONLY the other users' grants (the memo's level rises) re-plans the users once more on
+		// the same state: UsersReplans + 1, PlanMovedRebuilds + 0, the same state (pointer and generation), and the memo's grant in the
+		// current users plan follows the new level.
+		TEST_METHOD(UsersOnlyReplanKeepsTheStateAndFollowsTheGrant)
+		{
+			MiniLane r;
+			const std::shared_ptr<LaneState> first = r.lane.State();
+			Assert::IsTrue(first != nullptr);
+			const uint64_t generation = first->generation;
+			r.tier.otherUsers.push_back(MakeMemoVramUser({ 1u << 20 }, "test memo"));
+			r.lane.Configure(OnSettings(), r.reg, r.consumers, r.gs, r.card, r.tier, 0, false);
+			Assert::AreEqual(uint64_t(1), r.lane.UsersReplans());
+			const uint64_t movedBefore = r.lane.PlanMovedRebuilds();
+			r.tier.otherUsers.clear();
+			r.tier.otherUsers.push_back(MakeMemoVramUser({ 3u << 20 }, "test memo"));   // only the memo's need moved
+			r.lane.Configure(OnSettings(), r.reg, r.consumers, r.gs, r.card, r.tier, 0, false);
+			Assert::AreEqual(uint64_t(2), r.lane.UsersReplans(), L"one more users re-plan");
+			Assert::AreEqual(movedBefore, r.lane.PlanMovedRebuilds(), L"no state rebuild");
+			Assert::IsTrue(r.lane.State().get() == first.get(), L"the same state");
+			Assert::IsTrue(r.lane.State()->generation == generation, L"the same generation");
+			const std::shared_ptr<const GovernorPlan> users = r.lane.CurrentGovernorPlan();
+			Assert::IsTrue(users != nullptr);
+			const UserGrant* g = users->Find(kUserSkeletonMemo);
+			Assert::IsNotNull(g, L"the memo's grant is in the current users plan");
+			Assert::IsTrue(g->bytes == (3u << 20), L"the grant follows the new level");
+		}
+
 		TEST_METHOD(AMovedLaneDecisionRebuildsTheStateOnTheKeptGraphNotAResync)
 		{
 			MiniLane r;
