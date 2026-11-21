@@ -183,12 +183,20 @@ namespace SkeletonDvTapLineTestsNs
 		return false;
 	}
 
+	// Resets the process-global refusal counter on every exit, including a failed assert.
+	struct RefusalGuard
+	{
+		RefusalGuard() { VpFrameAnalysis::ResetDvTapRefusals(); }
+		~RefusalGuard() { VpFrameAnalysis::ResetDvTapRefusals(); }
+	};
+
 	TEST_CLASS(SkeletonDvTapLineTests)
 	{
 	public:
 		// The line reads the counter: absent at 0, exact text at 1 and at 2 (a hard-coded count or a constant line fails one of them).
 		TEST_METHOD(RefusalLineReadsTheCounter)
 		{
+			RefusalGuard guard;
 			for (unsigned long long count = 0; count <= 2; ++count)
 			{
 				VpFrameAnalysis::ResetDvTapRefusals();

@@ -106,15 +106,13 @@ namespace DvTwelveBitTapTestsNs
 		// Sweeps every encoding x alignment x width; at least one combination must be valid (the sweep is not vacuous).
 		TEST_METHOD(DvValidImpliesTapSupported)
 		{
-			const VideoFrameEncoding encodings[] = { VideoFrameEncoding::UNKNOWN, VideoFrameEncoding::UYVY, VideoFrameEncoding::HDYC,
-				VideoFrameEncoding::V210, VideoFrameEncoding::ARGB_8BIT, VideoFrameEncoding::BGRA_8BIT, VideoFrameEncoding::R210,
-				VideoFrameEncoding::R10b, VideoFrameEncoding::R10l, VideoFrameEncoding::R12B, VideoFrameEncoding::R12L };
 			const int widths[] = { 0, 1, 2, 63, 64 };
 			int valid = 0;
-			for (VideoFrameEncoding encoding : encodings)
+			for (int e = 0; e <= static_cast<int>(VideoFrameEncoding::P016); ++e)
 				for (int alignment = 0; alignment <= 3; ++alignment)
 					for (int width : widths)
 					{
+						const VideoFrameEncoding encoding = static_cast<VideoFrameEncoding>(e);
 						const size_t rowBytes = static_cast<size_t>(4 * (width > 1 ? width : 1));
 						std::vector<uint8_t> bytes(rowBytes * 2, 0);
 						AnalysisLumaSource source;
@@ -155,6 +153,7 @@ namespace DvTwelveBitTapTestsNs
 			source.data = &neverRead;
 			const bool valid = source.IsValid();
 			SourceFrameView view;
+			::ComputeOnce::FrameScope scope(1, "test", 0);   // unscoped notes go to Gaps(), not Rows(): the row check needs a frame
 			const bool served = valid && VpFrameAnalysis::SourceViewOf12(source, view);
 			const uint64_t refusals = VpFrameAnalysis::DvTapRefusals();
 			bool anyTap12 = false;
