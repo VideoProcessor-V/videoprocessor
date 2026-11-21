@@ -8,6 +8,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
 #include <VP-V/modules/scaling/rebase/SourceRebase.h>
@@ -810,11 +811,10 @@ namespace ScalerPassTestsNs
 		{
 			// Hardware only (VP_TEST_GPU=hardware): 1920x1080 -> 3840x2160 luma, one ScalerPass call, median over 40
 			// frames with pl_gpu_finish per frame. Logged, not asserted (the brief expects ~1.5 ms on the laptop).
-			if (!ExtendedRangeGpuProbe::OnHardwareGpu())
-			{
-				Log("ScalerGpuTiming: VP_TEST_GPU=hardware only; not run");
+			// Not on hardware: the SKIP-NO-GPU marker, or a failure under VP_TEST_REQUIRE_GPU=1 (rule 11(d): a skip is never a pass).
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "ScalerGpuTiming",
+				ExtendedRangeGpuProbe::OnHardwareGpu(), "VP_TEST_GPU=hardware only; not run"))
 				return;
-			}
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			pl_gpu gpu = dev.Gpu();
