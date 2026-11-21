@@ -69,9 +69,8 @@ namespace Vpv
 				layout->addWidget(captureDisplayFixes);
 			}
 			auto* note = Note(kit, QStringLiteral(
-				"On the Original pathway this is off: Bill's own capture and display behaviour, from the moment VideoProcessor "
-				"has read its profiles at start-up (a target-only full-screen session opened before that still follows this "
-				"switch). Read when VideoProcessor starts."));
+				"On the Original pathway this is off: Bill's own capture and display behaviour, from the start-up configuration "
+				"on (the target-only full-screen session included). Read when VideoProcessor starts."));
 			note->setObjectName(QStringLiteral("vpv.input.capture_fixes.note"));
 			layout->addWidget(note);
 			return { QStringLiteral("input"), QStringLiteral("capture_fixes"), QStringLiteral("Capture fixes (under test)"),
@@ -79,7 +78,8 @@ namespace Vpv
 		}
 
 		// Both pathways (MUST-C): Magewell fault recovery under test (was in General > General behavior). Its runtime is
-		// inside Bill's Magewell code and is NOT tied to the Original pathway yet (owner item), so it is not greyed there.
+		// inside Bill's Magewell code and is NOT tied to the Original pathway yet (PENDING, owner item: it needs a Bill line), so it is
+		// not greyed there.
 		UnitCard MagewellRecoveryCard(EditorKit& kit)
 		{
 			auto* body = new QWidget;
@@ -97,8 +97,8 @@ namespace Vpv
 				layout->addWidget(magewellRecover);
 			}
 			auto* note = Note(kit, QStringLiteral(
-				"Applies on both pathways for now: this fix sits inside Bill's Magewell capture code and the Original pathway "
-				"does not switch it off yet (a known difference from Bill, waiting on the owner). Read when VideoProcessor starts."));
+				"Original pathway: switching this off is PENDING (it sits inside Bill's Magewell capture code; the change "
+				"waits on the owner), so for now it still applies on Original too. Read when VideoProcessor starts."));
 			note->setObjectName(QStringLiteral("vpv.both.magewell_recovery.note"));
 			layout->addWidget(note);
 			return { QStringLiteral("both"), QStringLiteral("magewell_recovery"), QStringLiteral("Magewell fault recovery (under test)"),

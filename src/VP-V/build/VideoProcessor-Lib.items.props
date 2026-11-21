@@ -141,6 +141,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\VP-V\modules\control\config\VpvProfileQueueAdvice.cpp" />
+    <ClCompile Include="..\VP-V\core\RunningPathway.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\capture\CaptureDisplayFixes.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\queue_timing\QueueLookahead.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\CrashState.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\StateReport.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\StatusExtension.cpp" />

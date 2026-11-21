@@ -152,6 +152,7 @@
         "src/VP-V/modules/input/queue_timing/QueueLatency.h",
         "src/VideoProcessor-Lib/QueueConfiguration.h",
         "src/VP-V/modules/input/queue_timing/QueueLookahead.h",
+        "src/VP-V/modules/input/queue_timing/QueueLookahead.cpp",
         "src/VideoProcessor-Lib/CaptureFrameQueue.h",
         "src/VideoProcessor-Lib/VideoTimingController.cpp",
         "src/VideoProcessor-Lib/TimingClock.cpp",
