@@ -116,13 +116,56 @@ def per_class(hits):
     return c
 
 
+def selftest_failures():
+    """Names of the failed selftest checks (empty when all pass): every format spelling, the literal axis shifts, a named
+    shift constant (constexpr/const, plain and namespace-qualified, only for the values 2/4/6), the uint8 pixel-buffer rule
+    with its context word, and the PRECISION-OK waiver on the same or the previous line."""
+    failed = []
+
+    def check(name, cond):
+        if not cond:
+            failed.append(name)
+    for fmt in ("DXGI_FORMAT_R8_UNORM,", "DXGI_FORMAT_R8G8_UNORM", "DXGI_FORMAT_R8G8B8A8_UNORM", "DXGI_FORMAT_B8G8R8A8_UNORM",
+                "DXGI_FORMAT_R10G10B10A2_UNORM", "DXGI_FORMAT_R16_FLOAT", "DXGI_FORMAT_R16G16_FLOAT", "x = R8_UNORM;",
+                "TexFormat::R8", "auto f = RGBA16F;", 'fmt = "rgba8";', 'fmt = "r16f";'):
+        check("format: " + fmt, classify_line(fmt) == ["fmt"])
+    for fmt in ("DXGI_FORMAT_R32_FLOAT", "DXGI_FORMAT_R16_UNORM", "int r8bits = 3;"):
+        check("not a format: " + fmt, classify_line(fmt) == [])
+    for n in (2, 4, 6):
+        check("literal shift %d" % n, classify_line("v = luma >> %d;" % n) == ["shift"])
+    check("shift 3 is not an axis shift", classify_line("v = luma >> 3;") == [])
+    check("shift 8 is not an axis shift", classify_line("v = luma >> 8;") == [])
+    check("a shift without a sample word", classify_line("int x = y >> 6;") == [])
+    check("shift context words", all(classify_line("v = %s >> 4;" % w) == ["shift"] for w in ("chroma", "plane", "sample", "code", "word", "y10", "intensity", "p010")))
+    defs = shift_constants("constexpr int kAxisShift = 4;\nstatic const uint32_t kOther = 5;\nconstexpr int kSix = 6, kEight = 8;\n")
+    check("named shift constants are the 2/4/6 ones", defs == {"kAxisShift", "kSix"})
+    check("named shift is flagged like the literal", classify_line("v = luma >> kAxisShift;", {"kAxisShift"}) == ["shift"])
+    check("namespace-qualified named shift", classify_line("v = luma >> Ns::kAxisShift;", {"kAxisShift"}) == ["shift"])
+    check("a named constant not in the set is not flagged", classify_line("v = luma >> kOther;", {"kAxisShift"}) == [])
+    check("named shift without a sample word", classify_line("v = a >> kAxisShift;", {"kAxisShift"}) == [])
+    check("named shift needs the names", classify_line("v = luma >> kAxisShift;") == [])
+    check("scan_text takes a constant defined in the same file",
+          [h["pattern"] for h in scan_text("a.h", "constexpr int kS = 6;\nauto v = luma >> kS;\n", {})] == ["shift"])
+    check("scan_text takes a constant from other files", [h["pattern"] for h in scan_text("a.h", "auto v = luma >> kS;\n", {}, {"kS"})] == ["shift"])
+    check("a constant of another value is not a shift", not scan_text("a.h", "constexpr int kS = 7;\nauto v = luma >> kS;\n", {}))
+    check("u8 pixel buffer", classify_line("std::vector<uint8_t> pixels;") == ["u8"] and classify_line("uint8_t* luma;") == ["u8"])
+    check("u8 without a pixel word", classify_line("std::vector<uint8_t> bytes;") == [])
+    check("shift and u8 together", classify_line("uint8_t* plane = p >> 4;") == ["shift", "u8"])
+    waived = "// PRECISION-OK 119#7: bytes\nx = \"r8\";\n"
+    check("waiver on the previous line", not scan_text("a.h", waived, {}))
+    check("waiver on the same line", not scan_text("a.h", 'x = "r8"; // PRECISION-OK 119#7: bytes\n', {}))
+    check("a waiver needs a reason", len(scan_text("a.h", '// PRECISION-OK 119#7:\nx = "r8";\n', {})) == 1)
+    check("a waiver two lines up does not count", len(scan_text("a.h", '// PRECISION-OK 119#7: why\n\nx = "r8";\n', {})) == 1)
+    check("comments are stripped", not scan_text("a.h", '// x = "r8";\n', {}))
+    check("the class comes from the sites table", scan_text("a.h", 'x = "r8";\n', {"a.h": {"class": "A"}})[0]["class"] == "A")
+    check("an unlisted file is class U", scan_text("a.h", 'x = "r8";\n', {})[0]["class"] == "U")
+    return failed
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     if "--selftest" in argv:
-        ok = classify_line("DXGI_FORMAT_R8_UNORM,") == ["fmt"] and classify_line("v = luma >> 6;") == ["shift"] \
-            and classify_line("std::vector<uint8_t> pixels;") == ["u8"] and not classify_line("int x = y >> 6;") \
-            and not scan_text("a.h", "// PRECISION-OK 119#7: bytes\nx = \"r8\";\n", {})
-        return L.selftest_ok("precision", ok)
+        return L.selftest_ok("precision", not selftest_failures())
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--root", default=L.repo_root())
     pre.add_argument("--baseline")
