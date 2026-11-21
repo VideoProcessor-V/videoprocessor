@@ -54,6 +54,8 @@
     "src/VP-V/modules/motion/estimation/global_model/PhotometricRefineGpu.h",
     "src/VP-V/modules/motion/estimation/global_model/PhotometricRefineGpu.cpp",
     "src/VP-V/modules/motion/estimation/global_model/PhotometricRefineGpuShaders.inl",
+    "src/VP-V/modules/motion/estimation/global_model/PhotometricWiring.h",
+    "src/VP-V/modules/motion/estimation/global_model/PhotometricVerdict.h",
     "src/VP-V/modules/motion/estimation/global_model/CameraAccessor.h",
     "src/VP-V/modules/motion/estimation/tests/CameraRecordPodTests.cpp",
     "src/VP-V/modules/motion/estimation/global_model/CameraAccessorGlsl.h",
