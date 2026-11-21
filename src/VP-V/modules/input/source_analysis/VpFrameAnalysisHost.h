@@ -91,8 +91,7 @@ namespace VpFrameAnalysis
 			m_fullLumaReaders = fullLumaReaders;
 			m_recordReaders = recordReaders;
 			m_configured = enabled;
-			SharedFlag().store(enabled && fullLumaReaders, std::memory_order_release);
-			ApplyLocked();
+			ApplyLocked();   // GF-P2b S3 (2): sets SharedFlag from the effective state
 		}
 
 		// The consumer demand (SourceFrameTap's applier, called with its demand mutex held; the skeleton's render thread).
@@ -253,6 +252,9 @@ namespace VpFrameAnalysis
 		void ApplyLocked()
 		{
 			const bool enabled = m_configured || m_demanded;
+			// GF-P2b S3 (2): the shared-plane flag follows the EFFECTIVE state (a demand-raised store with full-luma readers shares
+			// one decode too), before the early return, so a readers-only Configure on a running store updates it as well.
+			SharedFlag().store(enabled && m_fullLumaReaders, std::memory_order_release);
 			m_raisedByDemand.store(enabled && !m_configured, std::memory_order_release);
 			if (enabled == m_enabled) return;
 			m_enabled = enabled;
