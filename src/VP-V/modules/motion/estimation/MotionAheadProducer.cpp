@@ -511,9 +511,8 @@ namespace MotionAhead
 	{
 		const auto started = std::chrono::steady_clock::now();
 		int halfW = 0, halfH = 0;
-		if (!LumaAtTarget(job.sequence, job.luma, lumaBuffer, halfW, halfH))
+		if (!LumaAtTarget(job.sequence, job.luma, lumaBuffer, halfW, halfH, "motion_ahead"))
 			return true;   // not a readable frame, or a size this producer does not make: nothing published (the consumer takes the matcher path, shown as a fallback)
-		VPV_COMPUTE_ONCE_PRIVATE_AT("U3", job.sequence, "motion_ahead");   // counted only when the private luma was computed
 		const double lumaMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 		if (!EnsureSize(halfW, halfH)) return false;
 		ReleaseStaleRequestTextures(halfW, halfH);   // W2-C5b
@@ -588,7 +587,8 @@ namespace MotionAhead
 		previousGeneration = job.generation;
 		return ok;
 	}
-	bool Producer::LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& halfW, int& halfH)
+	bool Producer::LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& halfW, int& halfH,
+		const char* privateSite)
 	{
 		// The engine half: the skeleton's P1 (one decode per frame, Acquire from this thread) when it has the frame and the
 		// codes are the engine's; else the producer's own decode (RGB / full-range: FIX-B4-RGB; no source or a miss: shown).
@@ -599,8 +599,12 @@ namespace MotionAhead
 		}
 		VpSkeleton::P1ReadKind how = VpSkeleton::P1ReadKind::None;
 		if (!(p1 && luma.IsValid() && p1->ReadEngine8(sequence, luma, buffer, halfW, halfH, how) && how != VpSkeleton::P1ReadKind::None))
+		{
 			if (!HalfLuma8(luma, buffer, halfW, halfH))
 				return false;   // not a readable frame: nothing to do, not a failure
+			// GF-P4 MUST-12: U3 is a private copy only when the producer decoded the half luma itself (a shared P1 read is not).
+			VPV_COMPUTE_ONCE_PRIVATE_AT("U3", sequence, privateSite);
+		}
 		// The de-judder's engine size: the half size, or half again (its inner matcher).
 		const int tw = targetW.load(std::memory_order_acquire), th = targetH.load(std::memory_order_acquire);
 		if (tw > 0 && th > 0 && !(tw == halfW && th == halfH))
@@ -828,12 +832,11 @@ namespace MotionAhead
 		int w = 0, h = 0;
 		if (!testEngine)
 		{
-			if (!LumaAtTarget(rq.to, rq.lumaTo, lumaBuffer, w, h))
+			if (!LumaAtTarget(rq.to, rq.lumaTo, lumaBuffer, w, h, "motion_ahead_request"))
 			{
 				answer(Status::Failed);   // not a readable frame / a size not made: nothing to run, not an engine failure
 				return true;
 			}
-			VPV_COMPUTE_ONCE_PRIVATE_AT("U3", rq.to, "motion_ahead_request");   // counted only when the private luma was computed
 			engineRan = true;   // EnsureSize may open the engine: from here on a failure is the engine's
 			if (!EnsureSize(w, h))
 			{
@@ -880,7 +883,7 @@ namespace MotionAhead
 			if (mode != Mode::Chain)
 			{
 				int fw = 0, fh = 0;
-				if (!LumaAtTarget(rq.from, rq.lumaFrom, requestLumaBuffer, fw, fh) || fw != w || fh != h)
+				if (!LumaAtTarget(rq.from, rq.lumaFrom, requestLumaBuffer, fw, fh, "motion_ahead_request") || fw != w || fh != h)
 				{
 					engineRan = false;        // nothing ran: leaves the failure count alone
 					answer(Status::Failed);   // the two frames are not one size: no pair
