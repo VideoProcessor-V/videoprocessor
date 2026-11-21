@@ -19,7 +19,9 @@
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
+#include <VP-V/modules/motion/estimation/global_model/CameraTestSeams.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraExtension.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraFitFieldPod.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraFitWorker.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraLane.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraLinkCore.h>
@@ -562,6 +564,50 @@ namespace VideoProcessorTest
 			lf.kind = RE::Lifecycle::GpuReleased;
 			ext.OnLifecycle(lf);
 			Tap::SetStore(&r, nullptr);
+		}
+
+		// Seam 2 visibility (verify-gemini-ce-seams-1bde9f30e.md:118 SHOULD 1): an undersized fit-field slot refused by
+		// CameraLane::Build surfaces as a visible camera_graph: Fallback, and graphRefused stops a retry on the next frame
+		// even after the seam disarms (until SettingsApplied clears graphRefused).
+		TEST_METHOD(AnUndersizedFitFieldSlotIsAVisibleCameraGraphFallbackAndDoesNotRetry)
+		{
+			const uint32_t w = 120u * static_cast<uint32_t>(VpMotion::SeedField::kSourceBlockSize);
+			const uint32_t h = 68u * static_cast<uint32_t>(VpMotion::SeedField::kSourceBlockSize);
+			const size_t worst = CameraLink::WorstCaseFitFieldPodBytes(w, h);
+			Assert::IsTrue(worst > 64, L"premise: worst-case fit-field pod size exceeds 64 B");
+
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\ncamera_labels_gpu=on\n");
+			{
+				CameraModel::CameraTestSeams::ScopedFitFieldSlotBytesOverride guard(worst - 1);
+				rig.Start(4);
+				Assert::IsFalse(rig.ext.LiveBuilt(rig.Host()), L"undersized fit-field slot must refuse live build");
+				const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+				Assert::IsTrue(Has(fb, "camera_graph: camera fit field product too small"),
+					L"undersized fit-field refusal must surface as a camera_graph fallback");
+				Assert::IsTrue(Has(fb, ("slot " + std::to_string(worst - 1) + " B").c_str()),
+					L"fallback must name the actual slot bytes");
+				Assert::IsTrue(Has(fb, ("worst-case field " + std::to_string(worst) + " B").c_str()),
+					L"fallback must name the worst-case field bytes");
+				Assert::IsTrue(Has(fb, (std::to_string(w) + "x" + std::to_string(h)).c_str()),
+					L"fallback must name the source dimensions");
+			}
+
+			// Seam is now disarmed: a fresh lane.Build would succeed, so staying unbuilt proves graphRefused stops retry.
+			Assert::AreEqual<size_t>(0, CameraModel::CameraTestSeams::TakeFitFieldSlotBytesOverride(),
+				L"RAII guard must disarm slot-size override");
+			rig.Frame(5);
+			rig.Frame(6);
+			Assert::IsFalse(rig.ext.LiveBuilt(rig.Host()), L"graphRefused must stop a retry on the next frame");
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "camera_graph: camera fit field product too small"),
+				L"camera_graph fallback must remain visible while graphRefused holds");
+
+			// Control: SettingsApplied clears graphRefused and allows the disarmed lane build to succeed cleanly.
+			rig.Life(RE::Lifecycle::SettingsApplied);
+			rig.Frame(7);
+			rig.Frame(8);
+			Assert::IsTrue(rig.ext.LiveBuilt(rig.Host()), L"control: SettingsApplied clears graphRefused so disarmed build succeeds");
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Fallbacks), "camera_graph:"),
+				L"control: camera_graph fallback clears once live build succeeds");
 		}
 	};
 }

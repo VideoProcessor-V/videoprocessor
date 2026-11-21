@@ -172,4 +172,64 @@ namespace VideoProcessorTest
 			Assert::AreEqual<uint64_t>(1, rig.fill->Counters().laneBlocked.load(), L"P8 publish must be blocked");
 		}
 	};
+
+	TEST_CLASS(CameraLaneSlotSizeSeamTests)
+	{
+	public:
+		// Seam 2: when the fit-field product slot is even 1 byte below WorstCaseFitFieldPodBytes(w, h),
+		// CameraLane::Build refuses visibly with an error naming slot bytes, required bytes, and dimensions.
+		TEST_METHOD(CameraLaneBuildRejectsUndersizedFitFieldSlotVisibly)
+		{
+			const uint32_t w = 1920, h = 1080;
+			const size_t worst = CameraLink::WorstCaseFitFieldPodBytes(w, h);
+			Assert::IsTrue(worst > 64, L"premise: worst-case 1080p fit-field pod exceeds 64 bytes");
+
+			// 1 byte short of the exact worst-case bound.
+			{
+				CameraModel::CameraTestSeams::ScopedFitFieldSlotBytesOverride guard(worst - 1);
+				CameraLink::CameraLane lane;
+				Assert::IsFalse(lane.Build(w, h, true), L"1-byte-short slot must fail Build visibly");
+				Assert::IsFalse(lane.Built(), L"failed Build must leave lane unbuilt");
+				Assert::IsNull(lane.Table(), L"failed Build must publish no SlotTable");
+				Assert::IsTrue(lane.Error().find("camera fit field product too small") != std::string::npos, L"error must name undersized fit-field product");
+				Assert::IsTrue(lane.Error().find("slot " + std::to_string(worst - 1) + " B") != std::string::npos, L"error must report actual slot bytes");
+				Assert::IsTrue(lane.Error().find("worst-case field " + std::to_string(worst) + " B") != std::string::npos, L"error must report required worst-case bytes");
+				Assert::IsTrue(lane.Error().find(std::to_string(w) + "x" + std::to_string(h)) != std::string::npos, L"error must report source dimensions");
+			}
+
+			// Severely undersized slot (64 B).
+			{
+				CameraModel::CameraTestSeams::ScopedFitFieldSlotBytesOverride guard(64);
+				CameraLink::CameraLane lane;
+				Assert::IsFalse(lane.Build(w, h, true), L"64-byte slot must fail Build visibly");
+				Assert::IsTrue(lane.Error().find("slot 64 B") != std::string::npos, L"error must include overridden 64 B slot size");
+			}
+		}
+
+		// Seam 2: exact worst-case slot size succeeds (non-strict inequality), and disarming restores declared sizing.
+		TEST_METHOD(CameraLaneBuildAcceptsExactWorstCaseSlotSizeAndDisarmsCleanly)
+		{
+			const uint32_t w = 1920, h = 1080;
+			const size_t worst = CameraLink::WorstCaseFitFieldPodBytes(w, h);
+
+			{
+				CameraModel::CameraTestSeams::ScopedFitFieldSlotBytesOverride guard(worst);
+				CameraLink::CameraLane lane;
+				Assert::IsTrue(lane.Build(w, h, true), L"exact worst-case slot size must be accepted");
+				Assert::IsTrue(lane.Built());
+				Assert::IsTrue(lane.Error().empty(), L"successful Build must leave Error empty");
+				const VpSkeleton::LaneLease fl = lane.Lease(VpSkeleton::kCameraFitField);
+				Assert::IsNotNull(fl.bytes, L"fit-field CpuBuffers must be allocated");
+				Assert::AreEqual<size_t>(worst, fl.bytes->Bytes(), L"allocated slot size must equal exact override");
+			}
+
+			// Guard exited -> seam disarmed -> declared product size (>= worst) used.
+			Assert::AreEqual<size_t>(0, CameraModel::CameraTestSeams::TakeFitFieldSlotBytesOverride(), L"RAII guard must disarm to 0");
+			CameraLink::CameraLane lane;
+			Assert::IsTrue(lane.Build(w, h, true), L"unarmed Build must succeed with declared size");
+			const VpSkeleton::LaneLease fl = lane.Lease(VpSkeleton::kCameraFitField);
+			Assert::IsNotNull(fl.bytes);
+			Assert::IsTrue(fl.bytes->Bytes() >= worst, L"declared slot size must cover worst-case fit-field pod");
+		}
+	};
 }

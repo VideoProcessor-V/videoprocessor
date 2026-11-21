@@ -61,5 +61,38 @@ namespace CameraModel
 			ReadFitFieldHookSlot m_slot;
 			const ReadFitFieldHookSlot* m_prev = nullptr;
 		};
+
+		// ---- Seam 2: CameraLane::Build fit-field slot-size override ------------------------------------------------------
+		// 0 = unarmed (use the declared Node::bufferBytes unchanged). Non-zero = test-only override for the fit-field slot
+		// size (bytes) seen by CameraLane::Build, allowing deterministic testing of the WorstCaseFitFieldPodBytes startup
+		// check and exact-boundary slot sizing (CameraLane.cpp).
+		inline std::atomic<size_t>& FitFieldSlotBytesOverride()
+		{
+			static std::atomic<size_t> bytes{ 0 };
+			return bytes;
+		}
+
+		inline size_t TakeFitFieldSlotBytesOverride()
+		{
+			return FitFieldSlotBytesOverride().load(std::memory_order_relaxed);
+		}
+
+		class ScopedFitFieldSlotBytesOverride
+		{
+		public:
+			explicit ScopedFitFieldSlotBytesOverride(size_t bytes)
+				: m_prev(FitFieldSlotBytesOverride().exchange(bytes, std::memory_order_acq_rel))
+			{
+			}
+			~ScopedFitFieldSlotBytesOverride()
+			{
+				FitFieldSlotBytesOverride().store(m_prev, std::memory_order_release);
+			}
+			ScopedFitFieldSlotBytesOverride(const ScopedFitFieldSlotBytesOverride&) = delete;
+			ScopedFitFieldSlotBytesOverride& operator=(const ScopedFitFieldSlotBytesOverride&) = delete;
+
+		private:
+			size_t m_prev = 0;
+		};
 	}
 }
