@@ -640,6 +640,13 @@ if (p.x < GS_W && p.y < GS_H) {
 					hold = ContextHold();
 					return false;
 				}
+			// GF-P1 S6 (GV AMEND): after the last pass only the two outputs are read (Frame: split, blocks). The five scratch
+			// keep-alives (tmp, low, part, quiet, level table: want[0..4]) are let go here, so the memo spot pins only the outputs;
+			// the context's device retires them and destroys them at its FlushReleases, after the passes that used them. The fill's
+			// reserve (ReserveFor, ContextShapesOf(...).Bytes()) stays the seven-texture peak; `hold.bytes` is what the spot keeps.
+			static_assert(sizeof(want) / sizeof(want[0]) == 7, "five scratch textures, then split and blocks");
+			hold.keep.erase(hold.keep.begin(), hold.keep.begin() + 5);
+			hold.bytes = VpSkeleton::ShapeBytes(shapes.split) + VpSkeleton::ShapeBytes(shapes.blocks);
 			return true;
 		}
 
