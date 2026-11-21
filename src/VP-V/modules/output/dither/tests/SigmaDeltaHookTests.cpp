@@ -2240,7 +2240,9 @@ if (g.y == 0 && g.x < DN_N) {
 
 		// HookGuard: a skipped frame (no product) binds nothing and renders the off path; with the fork call the guard binds the map
 		// and Release() / the destructor restore the hook byte for byte. Without the fork call (standard 7.360 build) Apply returns
-		// false, reports kNoSetTexture, sets nothing, and that leg is asserted in full (the bound leg runs on the Beta host: BetaStage RunBetaDitherNeedWarpForkTests, case g, which prints BETA-RAN with this test's FQN).
+		// false, reports kNoSetTexture, sets nothing, and that leg is asserted in full. The bound leg needs the fork call, so no native
+		// lane runs it: it is Beta-host case g (BetaStage RunBetaDitherNeedWarpForkTests), which drives this same HookGuard class (not a
+		// mirror; GRANT #11b) and prints BETA-RAN with this test's FQN. TQ-CD-M6 is closed only by a Beta run that shows case g passing.
 		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpHookGuardAppliesAndRestores)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()
@@ -2308,7 +2310,7 @@ if (g.y == 0 && g.x < DN_N) {
 				Assert::IsFalse(applied, L"without set_texture Apply must return false");
 				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kNoSetTexture), missingBit);
 				Assert::IsTrue(bound == base, L"without set_texture nothing is bound: the off path");
-				return;   // the unsupported leg is fully asserted above; the bound leg is asserted on the Beta host (RunBetaDitherNeedWarpForkTests, case g)
+				return;   // the unsupported leg is fully asserted above; the bound leg is Beta-host case g (RunBetaDitherNeedWarpForkTests), on the real HookGuard
 			}
 			Assert::IsTrue(applied, L"Apply must bind the product");
 			Assert::IsTrue(bound != base, L"a bound non-zero map must change the codes (the test would be vacuous)");
