@@ -51,14 +51,7 @@ namespace DvTunnelTapLaw
 	inline uint32_t Intensity16(const uint8_t* pixel, VideoFrameEncoding container, int alignment)
 	{
 		namespace R = DolbyVisionTunnelUnpackReference;
-		const uint32_t shift = R::ContainerShift(container, alignment == 1);
-		const bool bigEndian = R::ContainerBigEndian(container);
-		const uint32_t word = bigEndian ?
-			(static_cast<uint32_t>(pixel[0]) << 24) | (static_cast<uint32_t>(pixel[1]) << 16) |
-				(static_cast<uint32_t>(pixel[2]) << 8) | static_cast<uint32_t>(pixel[3]) :
-			(static_cast<uint32_t>(pixel[3]) << 24) | (static_cast<uint32_t>(pixel[2]) << 16) |
-				(static_cast<uint32_t>(pixel[1]) << 8) | static_cast<uint32_t>(pixel[0]);
-		return R::Intensity(word, shift);
+		return R::Intensity(R::Word(pixel, R::ContainerBigEndian(container)), R::ContainerShift(container, alignment == 1));
 	}
 
 	// The 12-bit code before the range map: I itself.
