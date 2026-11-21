@@ -210,7 +210,8 @@ computes it once and publishes it into the skeleton spot; nobody computes privat
 - Budget: GPU spots are reserved, before the fill, against the VRAM ledger grant of the plan's scratch arena users
   (`kUserScratchArena` + `kUserScratchArenaExtra`, `SetGpuBudget` at each Configure). No grant = no GPU spot.
 - The seal reuses a default-variant CPU frame an Acquire reader published before it (copied, counted
-  `SealReusedPublished()`), only when no input is missing at the seal.
+  `SealReusedPublished()`), only when no input is missing at the seal. `SealReusedPublished()` also counts the seals that
+  accept a frame an Acquire had the lane make ahead through `RunAheadNow` (QKP design s9.4 b; that share is `AheadSealReused()`).
 
 Fallbacks (G5): while a product's last Acquire was Unavailable, the entry `skeleton acquire <product token>` is engaged
 with `<cause>, frame <seq>` (Ctrl+I line, Config status, Ctrl+Alt+D; released when it is served again). Causes: no owner
@@ -314,7 +315,8 @@ Decisions (provenance: decision log = `D:/codex/vp-handover/refs/owner-decisions
   (lane or not), `DeriveMemoWindow` sets the memo window and publishes the `QueueWindowBoard` before the memo's seal, every OnQueue
   kind but BacklogFlush bumps the memo epoch AT the call and a Drop discards its seqs, and the no-lane VRAM grant asks for one level
   per ahead-ladder step (never 0 while a level fits) with the interim S-A / S-B ahead plan applied. The active ahead need is fed from
-  the memo's ActiveAheadDemands() (L-CORE). H is wired as 0 until the lane graph's lag edges join it (102b QKP-B-LANE-GRAPH-H): an owner
+  the memo's ActiveAheadDemands() (L-CORE). H is wired as 0 until the lane graph's lag edges join it (102b QKP-B-LANE-GRAPH-H); that 0 means
+  "lane lag edges not fed", not a measurement. An owner
   fill's declared reader lag (DeclaredFillHistory) is kept PER OWNER by the memo (Entry::keep, ReleasedForOwnerLocked), never memo-wide,
   so P16's 6-frame monitor lag does not hold a keep-0 product's frames (released at the next seal without the lane).
   Basis (R14-67): H and the ahead need count CPU and GPU fills including views; the VRAM need (GpuNeedLevels) counts GPU allocating fills only.

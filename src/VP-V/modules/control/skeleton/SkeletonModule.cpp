@@ -2348,7 +2348,8 @@ namespace Vpv
 			// BASIS (R14-67): H and the ahead need count CPU AND GPU fills, views included: the window is about frames any reader may still
 			// hold or compute ahead, whatever the form. The VRAM view (GPU allocating fills only, views excluded) stays in GpuNeedLevels, a different
 			// question that must not be mixed into these terms.
-			// H: wired, from the lane graph's input lag edges once the lane hands its graph here (TODO 102b QKP-B-LANE-GRAPH-H); none yet = 0.
+			// H: wired, from the lane graph's input lag edges once the lane hands its graph here (TODO 102b QKP-B-LANE-GRAPH-H). Until then H
+			// is 0 because those lag edges are NOT FED, not a measurement of zero (per-owner history is kept by the memo, below).
 			// The owner fills' declared reader lag (DeclaredFillHistory) is NOT folded in: the memo already keeps each owner's spots by ITS
 			// declared history (Entry::keep, EdgeLocked(seal, keep), ReleasedForOwnerLocked; P16-LATCH-EVIDENCE), and one owner's lag in the
 			// memo-wide H would hold every other product's frames too (P16 kCodingEvidence, keepFrames = Monitor::kLatencyFrames = 6, is
