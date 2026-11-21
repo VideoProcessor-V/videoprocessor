@@ -687,10 +687,14 @@ void hook()
     // mid grey, and so on down): within one step of a whole code there is no
     // finer information to carry, so the snap follows the step at the value's
     // own brightness (WARP truncates libplacebo's 940 to 939.55 when storing).
-    vec3 snap = vec3(0.13);
-    if (ten)
-        snap = max(vec3(0.13), exp2(floor(log2(max(src.rgb, vec3(1e-6)))) - 10.0) * in_scale * 1.04);
-    x = mix(x, whole, vec3(lessThan(abs(x - whole), snap)));
+    // C5-SDSNAP (mirror of the bundled shader since db548bb4c, 2026-10-18 "snap bias fixed"): the snap is an exact
+    // code's arrival window and nothing wider - one rgba16f step below (a truncating store) to half a step above
+    // (a rounding store), at the step of the value's own octave; 1e-3 code covers colour-math error. The old
+    // symmetric 0.13 window (at least 0.13 at 10 bits) was several steps wide below mid grey.
+    vec3 step16 = exp2(floor(log2(max(src.rgb, vec3(6.103515625e-05)))) - 10.0) * in_scale;
+    vec3 below = max(vec3(1e-3), step16 * 1.04), above = max(vec3(1e-3), step16 * 0.52);
+    vec3 offset = x - whole;
+    x = mix(x, whole, vec3(lessThan(offset, above)) * vec3(greaterThan(offset, -below)));
 
     if (test_ramp > 0.5) {
         // 10-bit horizontal ramp across the legal range, in 8-bit code units.
