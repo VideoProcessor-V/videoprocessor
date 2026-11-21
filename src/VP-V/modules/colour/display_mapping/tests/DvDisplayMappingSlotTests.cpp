@@ -30,7 +30,13 @@ namespace Tests
 		{
 			const std::string text = SettingsTestSupport::ReadFile(SettingsTestSupport::RepoRoot() + rel);
 			Assert::IsFalse(text.empty(), Wide(rel + " is readable from the repository root").c_str());
-			return text;
+			// Line-ending-proof: the working copy may be CRLF (autocrlf) and the read is binary.
+			std::string normal;
+			normal.reserve(text.size());
+			for (const char c : text)
+				if (c != '\r')
+					normal.push_back(c);
+			return normal;
 		}
 		inline bool Has(const std::string& text, const char* needle) { return text.find(needle) != std::string::npos; }
 		inline std::vector<Id> Moved(const std::vector<Id>& base, Id id, Id before)
@@ -156,11 +162,11 @@ namespace Tests
 			Assert::IsFalse(AutoKeepsVpStage(true, false), L"the stale initial value (auto, no step) is the libplacebo frame the fix removes");
 
 			// The wiring: the Adapter takes the configured stage from the settings, without touching the per-frame step need.
-			const std::string host = ReadUp("src\VP-V\modules\output\calibration_lut\CalibrationLutHost.h");
+			const std::string host = ReadUp("src/VP-V/modules/output/calibration_lut/CalibrationLutHost.h");
 			Assert::IsTrue(Has(host, "void NoteConfiguredStage(bool configuredAuto) { autoConfigured = configuredAuto; }"),
 				L"NoteConfiguredStage stores the configured stage and nothing else");
 			// The settings seam calls it from the settings' resolved-or-configured value, inside UpdatePipelineSlots.
-			const std::string core = ReadUp("src\VP-V\segments\CoreSegments.inl");
+			const std::string core = ReadUp("src/VP-V/segments/CoreSegments.inl");
 			const size_t begin = core.find("LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& settings)");
 			Assert::IsTrue(begin != std::string::npos, L"UpdatePipelineSlots is the settings seam");
 			const size_t end = core.find("\n}\n", begin);
@@ -193,7 +199,7 @@ namespace Tests
 			Assert::AreEqual(std::string("vp"), ResolveStage("vp", false));
 
 			// The live-apply path reaches the seam: both Initialize and ApplyProfileSettingsLiveLocked call UpdatePipelineSlots.
-			const std::string renderer = ReadUp("src\VideoProcessor-Lib\vprenderer\LibplaceboVideoRenderer.cpp");
+			const std::string renderer = ReadUp("src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp");
 			const size_t live = renderer.find("bool ApplyProfileSettingsLiveLocked(const RendererSettings& settings)");
 			Assert::IsTrue(live != std::string::npos);
 			const size_t liveCall = renderer.find("UpdatePipelineSlots(settings);", live);
