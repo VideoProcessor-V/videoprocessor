@@ -1079,7 +1079,8 @@ inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
 // A per-frame GPU memo filled by the owner fill (grain_split/GrainLevelGpu.h) from the P10 grain split it acquires (variant form); the
 // producer is the owner fill, there is no lane job (class Derived, like P12). Until the temporal passes are costed (GrainLevel.h: no GPU
 // kernel without a measured 4K cost) the fill publishes the SINGLE-FRAME law, which equals the unit-4 law exactly (g = 0, lag-1 = -1
-// "not measured"), and says so visibly (status line + Fallbacks "grain_level_temporal"). RGBA32F rather than refs/120's rgba16f: N_b in
+// "not measured"), and says so visibly (Fallbacks "grain_level_temporal"; declines and missing registrations have their own Fallbacks
+// lines, GrainLevelGpu.h). T5 gates (GrainLevelGpu.h header): not compiled yet, GPU parity, 4K cost, this refRenderMs. RGBA32F rather than refs/120's rgba16f: N_b in
 // codes^2 of a 12-bit source exceeds what fp16 holds exactly (precision rule 7).
 inline void AppendGrainLevelProduct(std::vector<ProductDecl>& decls)
 {
@@ -1093,7 +1094,7 @@ inline void AppendGrainLevelProduct(std::vector<ProductDecl>& decls)
     AddInput(p, kP10GrainSplit, 0);
     AddInput(p, kP13SourceRing, 0);   // the frame's luma facts (size, bit encoding) that key the P10 variant it acquires
     AddTerm(p, 4, 16);   // one RGBA32F texel per 16-px block
-    p.refRenderMs = 0.05f; // placeholder until the T5 idle-GPU timing measures it
+    p.refRenderMs = 0.05f; // PLACEHOLDER (T5 gate 4): replaced by the T5 measured cost of the single-frame pass (T5 gate 3)
     PadReservedUntil(decls, kP10gGrainLevel);
     decls.push_back(p);
     PadReservedUntil(decls, kSkeletonProductEnd);

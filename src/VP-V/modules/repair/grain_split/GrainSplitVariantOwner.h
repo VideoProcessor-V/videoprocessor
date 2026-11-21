@@ -103,9 +103,8 @@ namespace GrainSplit
 				return ContextShapesOf(static_cast<int>(v.width), static_cast<int>(v.height), BlockFor(ScaleOfAxis(v.scale)), DefaultParams()).Bytes();
 			}
 
-			// The owner fill as registered: Register() on a memo directly, or a module through the skeleton's external demand
-			// (Skeleton::IExternalDemand::RegisterOwnerFill, GrainLevelGpu.h GrainLevelModule). This owner must outlive the
-			// registration.
+			// The owner fill as registered: Register() on a memo directly, or RegisterThrough() a module's skeleton external demand
+			// (GrainLevelGpu.h GrainLevelModule). This owner must outlive the registration.
 			VpSkeleton::OwnerFill MakeOwnerFill()
 			{
 				VpSkeleton::OwnerFill f;
@@ -120,6 +119,14 @@ namespace GrainSplit
 			VpSkeleton::SkeletonMemo::Registration Register(VpSkeleton::SkeletonMemo& memo)
 			{
 				return memo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, MakeOwnerFill());
+			}
+			// The same registration through the skeleton's external demand (Skeleton::IExternalDemand, or any type with its
+			// RegisterOwnerFill): the production path (GrainLevelGpu.h GrainLevelModule). A template so this header needs no
+			// skeleton-module include; the call stays here, in the P10 owner's file (producer_chain.py attributes P10 by it).
+			template <class Demand>
+			VpSkeleton::SkeletonMemo::Registration RegisterThrough(Demand& demand)
+			{
+				return demand.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, MakeOwnerFill());
 			}
 
 			// Fills run so far (one per (frame, variant): the compute-once counter of this owner).

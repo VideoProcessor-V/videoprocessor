@@ -12,8 +12,16 @@
 //   w = rho1   the lag-1 temporal correlation (-1 = not measured).
 // Until the temporal passes are costed (GrainLevel.h: no GPU kernel without a measured 4K cost; lead14\design-grain-chain-cost.md
 // rows are ESTIMATES for every temporal step) this fill runs the SINGLE-FRAME law, which equals the unit-4 law exactly
-// (GrainLevel.h: "Fallback is the unit-4 law bit for bit"; blocks.N is already N_unit4). It says so visibly: a status line and a
-// Fallbacks line "grain_level_temporal" once a reader has used it (never log-only).
+// (GrainLevel.h: "Fallback is the unit-4 law bit for bit"; blocks.N is already N_unit4). It says so visibly on the Fallbacks route
+// (StatusKind::Fallbacks -> GetFallbacksStatus: Ctrl+I, Config status, Ctrl+Alt+D; never log-only): "grain_level_temporal" once a
+// reader has had a fill, "grain_level_declined" once a fill has declined (with the last reason and the count), and
+// "grain_level_unregistered" / "grain_split_owner_unregistered" while a size has been seen but a registration is missing.
+//
+// T5 GATES (lead A20-CB, review-cb-p10g-r1 SHOULD-3; open until the T5 run closes them, no 102b row of their own):
+//   1. NOT COMPILED: this file and tests/GrainLevelFillTests.cpp were written CODE ONLY; the T5 build is their first compile.
+//   2. GPU PARITY: the fill's texels vs GrainSplit's CPU blocks.N and the CPU f^2 block mean (GPU tier, VP_TEST_GPU=hardware).
+//   3. 4K COST: the single-frame pass's measured 4K time on the laptop (and the 3090 when available).
+//   4. refRenderMs: Products.h AppendGrainLevelProduct's 0.05 ms is a PLACEHOLDER; replace it with gate 3's measured cost.
 //
 // Inputs (the producer chain, never a private source): the frame's luma facts from P13 (SourcePlanes::FactsOf: size, bit
 // encoding) and the P10 grain split of the FULL luma at scale 1.0 through the memo's variant Acquire (GrainSplitVariantOwner.h),
@@ -28,8 +36,14 @@
 // variant refused or not fitting, the texture refused / over the reserve, shader or dispatch failed.
 //
 // The module also registers the P10 variant owner's fill in production (it had no production registration: every variant
-// Acquire was a visible NoOwnerFill). Both registrations go through the skeleton's external demand, so nothing is registered
-// while the skeleton is off, and nothing in the Original pathway.
+// Acquire was a visible NoOwnerFill; this also means TD's P10 variant Acquires are now served). Both registrations go through
+// the skeleton's external demand, so nothing is registered while the skeleton is off, and nothing in the Original pathway.
+// MERGE NOTE (review-cb-p10g-r1 SHOULD-1): 15b A1 is the SINGLE P10 owner registration. Until it lands this module registers
+// it; an AlreadyRegistered answer (A1, or anyone, registered first) is benign: the P10 owner is served by that registration
+// and nothing is shown. When A1 lands, delete the split registration here (splitOwner_, splitTried_, the RegisterThrough call).
+// The module-wide RegisterOwnerFill already is the atomic "has an owner fill" check (it answers AlreadyRegistered under the
+// skeleton's owner-fill lock, before any memo is touched); a separate HasOwnerFill pre-check would need a memo (MemoFor
+// creates one) and could race with A1's registration, so there is none.
 #include <VP-V/core/Products.h>
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/core/hub/ExtensionHub.h>
@@ -192,14 +206,53 @@ if (gv_li == 0u)
 				if (!VpvGpu::Pass(static_cast<pl_dispatch>(req.gpu->Dispatch()), "VP-V grain level (single-frame)", header, kBodyGlsl,
 						desc.data(), int(desc.size()), nullptr, 0, gs->bw, gs->bh, shmem, kGroupEdge, kGroupEdge))
 					return Decline(out, c, "shader rejected or dispatch failed");
-				c->fills.fetch_add(1, std::memory_order_relaxed);
+				if (c)
+					c->fills.fetch_add(1, std::memory_order_relaxed);
 				return true;
 			};
 			return f;
 		}
 
-		// The status texts (pure: tested on the CPU). Lines: always once registered. Fallbacks: only once a reader has had a fill
-		// (the single-frame law is then really in use).
+		constexpr const char* kDeclinedId = "grain_level_declined";                     // Fallbacks id: a fill declined
+		constexpr const char* kUnregisteredId = "grain_level_unregistered";             // Fallbacks id: no P10g owner fill of ours
+		constexpr const char* kSplitUnregisteredId = "grain_split_owner_unregistered";  // Fallbacks id: the P10 owner refused
+
+		// A registration answer in words (the Fallbacks lines quote it).
+		inline std::string RegistrationText(VpSkeleton::SkeletonMemo::Registration r)
+		{
+			using R = VpSkeleton::SkeletonMemo::Registration;
+			switch (r)
+			{
+			case R::Registered: return "registered";
+			case R::Replaced: return "replaced";
+			case R::NotOwner: return "refused: not the catalog's owning unit";
+			case R::NotInCatalog: return "refused: not in the catalog";
+			case R::AlreadyRegistered: return "refused: another fill is already registered";
+			case R::BadDefaults: return "refused: bad defaults";
+			}
+			return "refused";
+		}
+
+		// The Fallbacks texts (pure: tested on the CPU). All go to StatusKind::Fallbacks, the route that reaches the screen.
+		// Declines: once any fill has declined, the last reason and the count.
+		inline std::string DeclineLine(uint64_t declines, const std::string& lastDecline)
+		{
+			if (declines == 0)
+				return std::string();
+			return std::string(kDeclinedId) + ": " + (lastDecline.empty() ? std::string("a fill declined") : lastDecline) + " (" +
+				std::to_string(declines) + (declines == 1 ? " decline)" : " declines)");
+		}
+		// A missing registration after a source size was seen (`problem` empty = none): `id` is kUnregisteredId (P10g) or
+		// kSplitUnregisteredId (the P10 variant owner).
+		inline std::string UnregisteredLine(const char* id, const std::string& problem)
+		{
+			if (problem.empty())
+				return std::string();
+			return std::string(id) + ": " + problem;
+		}
+
+		// RETIRED (review-cb-p10g-r1 MUST-1: StatusKind::Lines does not route an unkeyed line, so nothing showed it). Kept only
+		// until its test assertions move to the Fallbacks texts (the next WAIVER commit); then deleted.
 		inline std::string StatusLine(bool registered, uint64_t fills, uint64_t declines, const std::string& lastDecline)
 		{
 			if (!registered)
@@ -244,15 +297,29 @@ if (gv_li == 0u)
 			}
 			void OnStatus(const RE::Context&, RE::StatusKind kind, std::vector<std::string>& lines, const char*, const char*) override
 			{
-				const uint64_t fills = counters_->fills.load(std::memory_order_relaxed);
-				if (kind == RE::StatusKind::Lines)
-					lines.push_back(StatusLine(Registered(), fills, counters_->declines.load(std::memory_order_relaxed), counters_->LastDecline()));
-				else if (kind == RE::StatusKind::Fallbacks)
+				if (kind != RE::StatusKind::Fallbacks)
+					return;
+				const std::vector<std::string> f = FallbackLines();
+				lines.insert(lines.end(), f.begin(), f.end());
+			}
+			// The module's Fallbacks lines now (OnStatus pushes exactly these): the single-frame law once a fill ran, the declines,
+			// and each missing registration. Empty when none applies.
+			std::vector<std::string> FallbackLines() const
+			{
+				std::string level, split;
 				{
-					const std::string f = FallbackLine(fills);
-					if (!f.empty())
-						lines.push_back(f);
+					std::lock_guard<std::mutex> g(mutex_);
+					level = levelProblem_;
+					split = splitProblem_;
 				}
+				std::vector<std::string> out;
+				const std::string texts[4] = { FallbackLine(counters_->fills.load(std::memory_order_relaxed)),
+					DeclineLine(counters_->declines.load(std::memory_order_relaxed), counters_->LastDecline()),
+					UnregisteredLine(kUnregisteredId, level), UnregisteredLine(kSplitUnregisteredId, split) };
+				for (const std::string& t : texts)
+					if (!t.empty())
+						out.push_back(t);
+				return out;
 			}
 			// Records `host`'s source luma size and (re-)registers when the derived reserve changes. True = the P10g fill is
 			// registered with the current reserve.
@@ -298,6 +365,8 @@ if (gv_li == 0u)
 			}
 			bool Registered() const { return registered_.load(std::memory_order_acquire); }
 			bool SplitOwnerRegistered() const { return splitRegistered_.load(std::memory_order_acquire); }
+			// The P10 owner was already registered by someone else (15b A1): benign, P10 is served by that registration.
+			bool SplitOwnerServedElsewhere() const { return splitElsewhere_.load(std::memory_order_acquire); }
 			uint64_t RegisteredReserveBytes() const
 			{
 				std::lock_guard<std::mutex> g(mutex_);
@@ -320,18 +389,27 @@ if (gv_li == 0u)
 						want = h.bytes;
 				const bool ok = registered_.load(std::memory_order_acquire);
 				const bool levelDone = (ok && want == reserve_) || want == tried_;
+				if (want == 0)
+					levelProblem_.clear();   // no live size: nothing is owed (the split's state stays: it is registered once)
 				if (want == 0 || (levelDone && splitTried_))
 					return ok;
 				if (demand == nullptr)
 					demand = static_cast<Skeleton::IExternalDemand*>(Hub::ExtensionHub::Instance().Query(Skeleton::kExternalDemandQueryId));
 				if (demand == nullptr)
-					return ok;   // no skeleton yet: retried at the next Entrance
+				{
+					// No skeleton yet: retried at the next Entrance, shown meanwhile (a size has been seen).
+					levelProblem_ = "no skeleton to register with (the skeleton is off or not started yet); retried at the next frame";
+					return ok;
+				}
 				if (!splitTried_)
 				{
 					splitTried_ = true;   // the P10 variant owner: registered once (its reserve is per variant); a refusal is not retried
-					const VpSkeleton::SkeletonMemo::Registration rs =
-						demand->RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, Gpu::kOwnerUnit, splitOwner_.MakeOwnerFill());
-					splitRegistered_.store(rs == VpSkeleton::SkeletonMemo::Registration::Registered, std::memory_order_release);
+					using R = VpSkeleton::SkeletonMemo::Registration;
+					const R rs = splitOwner_.RegisterThrough(*demand);
+					splitRegistered_.store(rs == R::Registered, std::memory_order_release);
+					splitElsewhere_.store(rs == R::AlreadyRegistered, std::memory_order_release);   // benign: see MERGE NOTE
+					splitProblem_ = rs == R::Registered || rs == R::AlreadyRegistered ? std::string()
+						: "P10 variant owner " + RegistrationText(rs) + " (P10 variant Acquires stay NoOwnerFill; not retried)";
 				}
 				if (levelDone)
 					return ok;
@@ -343,6 +421,8 @@ if (gv_li == 0u)
 				const bool now = r == VpSkeleton::SkeletonMemo::Registration::Registered;
 				reserve_ = now ? want : uint64_t(0);
 				registered_.store(now, std::memory_order_release);
+				levelProblem_ = now ? std::string()
+					: "P10g owner fill " + RegistrationText(r) + " (reserve " + std::to_string(want) + " B; retried at the next size change)";
 				return now;
 			}
 			mutable std::mutex mutex_;
@@ -352,8 +432,11 @@ if (gv_li == 0u)
 			uint64_t reserve_ = 0;
 			uint64_t tried_ = 0;
 			bool splitTried_ = false;
+			std::string levelProblem_;   // the P10g registration's missing state in words (empty = none); guarded by mutex_
+			std::string splitProblem_;   // the P10 owner's refusal in words (empty = registered or served elsewhere); guarded by mutex_
 			std::atomic<bool> registered_{ false };
 			std::atomic<bool> splitRegistered_{ false };
+			std::atomic<bool> splitElsewhere_{ false };
 		};
 
 		// Start-up only (HubBootstrap), after the skeleton module and the P13 source planes; idempotent.
