@@ -50,7 +50,10 @@ Fork-only tests (GEM-PKG s10g; --beta-trx FILE, repeatable):
   selected on a native lane without Beta-host evidence"). A BETA-RAN id equal to a native test without the
   tag credits nothing. Every other BETA-RAN id under "BetaStage::" (any case) is a Beta pseudo-test (fqn = id,
   executed), so a term like FullyQualifiedName~BetaStage::SigmaDeltaCameraGoldenTests needs at least one; an
-  unmatched id outside BetaStage:: credits nothing (NOTE), so Beta lines never cover a native term. SKIP-NO-GPU anywhere,
+  unmatched id outside BetaStage:: credits nothing (NOTE), so Beta lines never cover a native term. A
+  pseudo-test satisfies ONLY positive FullyQualifiedName~/= terms whose value starts with BetaStage::; it never
+  counts toward any other term (a broad FullyQualifiedName~Sigma, a Name~ term) and is never selected by
+  exclusions alone. SKIP-NO-GPU anywhere,
   Beta TRX included, is a FAIL. Each TRX's build lines (VP-BUILD-ID:<hex>, build/commit/sha = <hex>, the
   test DLL codeBase) are printed so a gate can compare the native and Beta builds.
 
@@ -203,10 +206,18 @@ def _hit(op, value, cand):
     return v == c if op in ("=", "!=") else v in c
 
 
+def beta_stage_leaf(lf):
+    """A positive FullyQualifiedName~ / = term on the Beta namespace (value starts with BetaStage::, any case)."""
+    return (lf["prop"] == "FullyQualifiedName" and lf["op"] in ("~", "=")
+            and lf["value"].lower().startswith("betastage::"))
+
+
 def leaf_match(lf, test):
     # Only the forms vstest is shown to match (module docstring: runner.log C4-gpu04b rc=96 vs C4-gpu04c rc=0).
     if lf["prop"] == "ClassName":
         return False   # unproven for the native adapter: never credited (negatives are rejected at parse)
+    if test.get("pseudo") and not lf["op"].startswith("!") and not beta_stage_leaf(lf):
+        return False   # gate GR MUST-2: a Beta pseudo-test satisfies only FullyQualifiedName~BetaStage::... terms
     cand = test["name"] if lf["prop"] == "Name" else test["fqn"]
     hit = _hit(lf["op"], lf["value"], cand)
     return (not hit) if lf["op"].startswith("!") else hit
@@ -504,7 +515,8 @@ def check(filter_text, trx_paths, newest=False, beta_paths=()):
     for t in alltests:
         if t.get("pseudo"):
             t["state"], t["markers"] = "executed", []
-        if evaluate(ast, t):
+        # A pseudo-test is selected only through a BetaStage:: term it matches (a pure exclusion never selects it).
+        if evaluate(ast, t) and (not t.get("pseudo") or any(beta_stage_leaf(lf) and leaf_match(lf, t) for lf in leaves)):
             if t.get("beta_credit"):
                 rep["beta_credited"].append({"fqn": t["fqn"], "beta_trx": t["beta_credit"],
                                              "kind": "Beta pseudo-test" if t.get("pseudo") else "native fork-only"})
@@ -818,6 +830,22 @@ def fork_only_cases():
          "is not a BetaStage id: credits nothing"),
         ("BetaStage prefix is case-insensitive", "FullyQualifiedName~BetaStage::SigmaDeltaCameraGoldenTests",
          [_beta("BETA-RAN betastage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail)], 0, "", ""),
+        # Gate GR MUST-2: a pseudo-test satisfies only FullyQualifiedName~BetaStage::... terms.
+        ("pseudo-test does not satisfy a broad FQN term", "FullyQualifiedName~Sigma",
+         [_beta("BETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail)], 1,
+         "term FullyQualifiedName~Sigma: 0 executed", ""),
+        ("pseudo-test does not satisfy a Name~ term", "Name~T17a",
+         [_beta("BETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail)], 1, "term Name~T17a: 0 executed", ""),
+        ("pseudo-test beside a native term counts only for its BetaStage term",
+         "FullyQualifiedName~BetaStage::SigmaDeltaCameraGoldenTests|FullyQualifiedName~SigmaDelta",
+         [_fixture([("Other.OtherTests", "M", "Passed", "")]),
+          _beta("BETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail)], 1,
+         "term FullyQualifiedName~SigmaDelta: 0 executed", ""),
+        ("pure exclusion never selects a pseudo-test", "FullyQualifiedName!~Nothing",
+         [_beta("BETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail)], 1, "nothing executed", ""),
+        ("exact FullyQualifiedName= BetaStage term is covered",
+         "FullyQualifiedName=BetaStage::SigmaDeltaCameraGoldenTests::T17a",
+         [_beta("BETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail)], 0, "", ""),
         # SHOULD 1: the report-mode token, with or without parentheses.
         ("P7: report-mode token without parentheses is invalid", flt,
          [_fixture([D, X]), _beta("BETA-RAN " + fq + ok_tail + "; VP_TEST_REPORT_MODE=1")], 1, nofq, "report-mode run"),
