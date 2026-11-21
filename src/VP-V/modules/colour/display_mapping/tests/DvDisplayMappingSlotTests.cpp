@@ -8,6 +8,7 @@
 #include <VP-V/core/OriginalPathway.h>
 #include <VP-V/core/SlotRegistry.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
+#include "../../../../tests/SettingsTestSupport.h"
 
 #include <algorithm>
 #include <cstring>
@@ -24,6 +25,14 @@ namespace Tests
 	{
 		using PipelineSlots::Id;
 		inline std::wstring Wide(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+		// The source tree from this file's own path (SettingsTestSupport::RepoRoot); an unreadable file FAILS the test.
+		inline std::string ReadUp(const std::string& rel)
+		{
+			const std::string text = SettingsTestSupport::ReadFile(SettingsTestSupport::RepoRoot() + rel);
+			Assert::IsFalse(text.empty(), Wide(rel + " is readable from the repository root").c_str());
+			return text;
+		}
+		inline bool Has(const std::string& text, const char* needle) { return text.find(needle) != std::string::npos; }
 		inline std::vector<Id> Moved(const std::vector<Id>& base, Id id, Id before)
 		{
 			std::vector<Id> order = base;
@@ -126,6 +135,44 @@ namespace Tests
 			Assert::AreEqual(std::string("libplacebo"), CalibrationLutHost::ResolveStage("libplacebo", true));
 			Assert::AreEqual(std::string("libplacebo"), CalibrationLutHost::ResolveStage("", true));
 		}
+		// CF1-G7a: an explicit calibration_lut_stage = vp must take the VP stage on the FIRST frame. The Adapter's
+		// autoConfigured started true (auto) and only the colour segment's per-frame SetAutoNeed, which runs AFTER TakeLut,
+		// corrected it, so the first frame went to libplacebo's target LUT. The fix initialises it from the resolved setting at
+		// the settings seam. The Adapter (CalibrationLutHost.cpp) is not linked into this project, so the decision is checked
+		// as the real policy functions plus the wiring read as text (as CamFix1Tests does): reverting the seam call fails here.
+		TEST_METHOD(ExplicitVpTakesTheVpStageOnTheFirstFrame)
+		{
+			using namespace CalibrationLutHost;
+			// The policy on the first frame: nothing has wanted a step yet (stepWants false). Auto keeps libplacebo's LUT; an
+			// explicit vp (configuredAuto false, from the seam) takes the VP stage.
+			StageFacts facts;
+			facts.vpStageWanted = true;   // calibration_lut_stage resolves to vp
+			facts.slotRuns = true;
+			Assert::AreEqual(std::string("vp"), ResolveStage("vp", false));
+			Assert::IsTrue(AutoKeepsVpStage(false, false), L"explicit vp keeps the VP stage with no step wanting it");
+			StageFacts effective = facts;
+			effective.vpStageWanted = facts.vpStageWanted && AutoKeepsVpStage(false, false);
+			Assert::IsTrue(UseVpStage(effective, false), L"first frame: the VP stage takes the LUT");
+			Assert::IsFalse(AutoKeepsVpStage(true, false), L"the stale initial value (auto, no step) is the libplacebo frame the fix removes");
+
+			// The wiring: the Adapter takes the configured stage from the settings, without touching the per-frame step need.
+			const std::string host = ReadUp("src\VP-V\modules\output\calibration_lut\CalibrationLutHost.h");
+			Assert::IsTrue(Has(host, "void NoteConfiguredStage(bool configuredAuto) { autoConfigured = configuredAuto; }"),
+				L"NoteConfiguredStage stores the configured stage and nothing else");
+			// The settings seam calls it from the settings' resolved-or-configured value, inside UpdatePipelineSlots.
+			const std::string core = ReadUp("src\VP-V\segments\CoreSegments.inl");
+			const size_t begin = core.find("LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& settings)");
+			Assert::IsTrue(begin != std::string::npos, L"UpdatePipelineSlots is the settings seam");
+			const size_t end = core.find("\n}\n", begin);
+			Assert::IsTrue(end != std::string::npos);
+			const std::string seam = core.substr(begin, end - begin);
+			Assert::IsTrue(Has(seam, "calibrationHost.NoteConfiguredStage(settings.calibrationLutStageConfigured == \"auto\");"),
+				L"the seam initialises the stage from the user's configured value");
+			// SetAutoNeed stays per frame (the step need), after the frame's decisions.
+			Assert::IsTrue(Has(core, "calibrationHost.SetAutoNeed(activeSettings.calibrationLutStageConfigured == \"auto\","));
+		}
+
+
 	};
 
 	TEST_CLASS(DmFallbackCatalogTests)
