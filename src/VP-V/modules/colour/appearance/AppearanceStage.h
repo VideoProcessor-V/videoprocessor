@@ -17,6 +17,7 @@
 
 #include "Cam16Uniforms.h"
 #include "RoomLight.h"
+#include <VP-V/modules/colour/display_mapping/DvMath.h>
 
 #include <algorithm>
 #include <cmath>
@@ -49,8 +50,11 @@ namespace AppearanceStage
 		double outputGamma = 2.4;
 		bool l11ReferenceMode = false;         // the picture carries the L11 reference-mode flag
 		bool honourL11 = true;                 // appearance_honour_l11
-		double rgbToXyz[9] = { 0.4124, 0.3576, 0.1805, 0.2126, 0.7152, 0.0722, 0.0193, 0.1192, 0.9505 };   // output primaries, white Y = 1
+		double rgbToXyz[9] = {};               // output primaries, white Y = 1 (row-major); BT.709 / D65 until set
 		bool calibrationLutBefore = false;     // FIX1 MUST 2: libplacebo applies a calibration LUT before this pass (target.lut)
+
+		// CF1-FIN MUST 1: the default matrix comes from DvMath (the one home of the primaries maths), not a literal.
+		Inputs() { DvMath::RgbToXyz(DvMath::kBt709Red, DvMath::kBt709Green, DvMath::kBt709Blue, DvMath::kD65, rgbToXyz); }
 	};
 
 	struct Decision
@@ -113,49 +117,9 @@ namespace AppearanceStage
 		return Cam16::CappedHuntGain(trimSaturationGain, huntGain) / huntGain;
 	}
 
-	// NIT 1: the inverse of the output matrix, published so the shader does not invert per pixel. false: singular.
-	inline bool Invert3(const double m[9], double out[9])
-	{
-		const double det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
-		if (!(std::fabs(det) > 1e-12))
-			return false;
-		out[0] = (m[4] * m[8] - m[5] * m[7]) / det;
-		out[1] = (m[2] * m[7] - m[1] * m[8]) / det;
-		out[2] = (m[1] * m[5] - m[2] * m[4]) / det;
-		out[3] = (m[5] * m[6] - m[3] * m[8]) / det;
-		out[4] = (m[0] * m[8] - m[2] * m[6]) / det;
-		out[5] = (m[2] * m[3] - m[0] * m[5]) / det;
-		out[6] = (m[3] * m[7] - m[4] * m[6]) / det;
-		out[7] = (m[1] * m[6] - m[0] * m[7]) / det;
-		out[8] = (m[0] * m[4] - m[1] * m[3]) / det;
-		return true;
-	}
-
-	// Output primaries (xy) -> RGB to XYZ with the white at Y = 1 (row-major), for the shader's matrix.
-	inline bool RgbToXyz(const double red[2], const double green[2], const double blue[2], const double white[2], double out[9])
-	{
-		if (!(red[1] > 0.0) || !(green[1] > 0.0) || !(blue[1] > 0.0) || !(white[1] > 0.0))
-			return false;
-		const double xr = red[0] / red[1], zr = (1.0 - red[0] - red[1]) / red[1];
-		const double xg = green[0] / green[1], zg = (1.0 - green[0] - green[1]) / green[1];
-		const double xb = blue[0] / blue[1], zb = (1.0 - blue[0] - blue[1]) / blue[1];
-		const double xw = white[0] / white[1], zw = (1.0 - white[0] - white[1]) / white[1];
-		const double m[3][3] = { { xr, xg, xb }, { 1, 1, 1 }, { zr, zg, zb } };
-		const double det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
-			m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-		if (!(std::fabs(det) > 1e-12))
-			return false;
-		const double inv[3][3] = {
-			{ (m[1][1] * m[2][2] - m[1][2] * m[2][1]) / det, (m[0][2] * m[2][1] - m[0][1] * m[2][2]) / det, (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / det },
-			{ (m[1][2] * m[2][0] - m[1][0] * m[2][2]) / det, (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / det, (m[0][2] * m[1][0] - m[0][0] * m[1][2]) / det },
-			{ (m[1][0] * m[2][1] - m[1][1] * m[2][0]) / det, (m[0][1] * m[2][0] - m[0][0] * m[2][1]) / det, (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / det } };
-		const double s[3] = { inv[0][0] * xw + inv[0][1] * 1.0 + inv[0][2] * zw, inv[1][0] * xw + inv[1][1] * 1.0 + inv[1][2] * zw,
-			inv[2][0] * xw + inv[2][1] * 1.0 + inv[2][2] * zw };
-		for (int r = 0; r < 3; ++r)
-			for (int c = 0; c < 3; ++c)
-				out[r * 3 + c] = m[r][c] * s[c];
-		return true;
-	}
+	// Output primaries (xy) -> RGB to XYZ with the white at Y = 1 (row-major [9]): DvMath.h (CF1-FIN MUST 1).
+	// false: a y <= 0 or singular primaries, the matrix untouched.
+	using DvMath::RgbToXyz;
 
 	inline void AddSide(ParameterList& p, const char* const names[10], const Cam16::SideUniforms& s)
 	{
@@ -190,8 +154,10 @@ namespace AppearanceStage
 		p.push_back({ "apx_knee", std::min(0.5, std::max(0.0, in.toeKnee)) });   // FIX1 SHOULD 3: gamma_boost_knee, not a fixed 0
 		for (int i = 0; i < 9; ++i)
 			p.push_back({ mat[i], in.rgbToXyz[i] });
-		double fromXyz[9] = { 3.2406, -1.5372, -0.4986, -0.9689, 1.8758, 0.0415, 0.0557, -0.2040, 1.0570 };   // BT.709
-		Invert3(in.rgbToXyz, fromXyz);   // false (singular): the BT.709 inverse stays
+		// NIT 1: the inverse is published so the shader does not invert per pixel. Singular: the BT.709 inverse.
+		double fromXyz[9];
+		if (!DvMath::Invert(in.rgbToXyz, fromXyz))
+			DvMath::Invert(Inputs().rgbToXyz, fromXyz);
 		for (int i = 0; i < 9; ++i)
 			p.push_back({ inv[i], fromXyz[i] });
 		p.push_back({ "apx_hunt_scale", huntScale });   // FIX1 SHOULD 2

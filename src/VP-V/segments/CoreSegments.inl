@@ -359,7 +359,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             {
                 const double red[2] = { prim->red.x, prim->red.y }, green[2] = { prim->green.x, prim->green.y };
                 const double blue[2] = { prim->blue.x, prim->blue.y }, white[2] = { prim->white.x, prim->white.y };
-                AppearanceStage::RgbToXyz(red, green, blue, white, appearance.rgbToXyz);   // false: the BT.709 default stays
+                DvMath::RgbToXyz(red, green, blue, white, appearance.rgbToXyz);   // false: the BT.709 default stays
             }
         }
         const AppearanceStage::Decision& decision = dvStage.PrepareAppearance(appearance, hookTemplates,

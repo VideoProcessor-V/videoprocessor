@@ -167,21 +167,8 @@ namespace DvDolbyStyle
 	using DvMath::Mul;
 	using DvMath::Invert;
 
-	// RGB -> XYZ of primaries (CIE xy of R, G, B, W).
-	inline void RgbToXyz(const double red[2], const double green[2], const double blue[2], const double white[2], double m[3][3])
-	{
-		auto xyz = [](const double c[2], double v[3]) { v[0] = c[0] / c[1]; v[1] = 1.0; v[2] = (1.0 - c[0] - c[1]) / c[1]; };
-		double R[3], G[3], B[3], W[3];
-		xyz(red, R); xyz(green, G); xyz(blue, B); xyz(white, W);
-		const double P[3][3] = { { R[0], G[0], B[0] }, { R[1], G[1], B[1] }, { R[2], G[2], B[2] } };
-		double Pi[3][3];
-		Invert(P, Pi);
-		double S[3];
-		Mul(Pi, W, S);
-		for (int r = 0; r < 3; ++r)
-			for (int c = 0; c < 3; ++c)
-				m[r][c] = P[r][c] * S[c];
-	}
+	// RGB -> XYZ of primaries (CIE xy of R, G, B, W): DvMath.h (CF1-FIN MUST 1), same arithmetic.
+	using DvMath::RgbToXyz;
 
 	// The output RGB -> LMS matrix (linear, output primaries in, BT.2100 LMS out).
 	inline void OutputToLms(const double red[2], const double green[2], const double blue[2], const double white[2], double m[3][3])
