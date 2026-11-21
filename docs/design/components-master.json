@@ -989,7 +989,9 @@
         "src/VP-V/modules/motion/consumers/DejudderInterface.h",
         "src/VP-V/modules/motion/consumers/DejudderExtension.h",
         "src/VP-V/modules/motion/consumers/DejudderExtension.cpp",
-        "src/VP-V/modules/motion/consumers/DejudderViews.h"
+        "src/VP-V/modules/motion/consumers/DejudderViews.h",
+        "src/VP-V/modules/motion/consumers/DejudderExtrasPresent.h",
+        "src/VP-V/modules/motion/consumers/DejudderExtrasPresent.cpp"
       ],
       "components": {
         "files": {
@@ -1580,6 +1582,8 @@
         "src/VP-V/modules/output/presentation/PresenterAfterPresent.h",
         "src/VP-V/modules/output/presentation/PresenterExtension.h",
         "src/VP-V/modules/output/presentation/PresenterExtension.cpp",
+        "src/VP-V/modules/output/presentation/RenderAheadHostSteps.h",
+        "src/VP-V/modules/output/presentation/RenderAheadHostSteps.cpp",
         "src/VideoProcessor-Lib/vprenderer/AlphaPresentationTelemetry.cpp",
         "src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h",
         "src/VideoProcessor-Lib/DisplayRefreshRatePolicy.cpp",

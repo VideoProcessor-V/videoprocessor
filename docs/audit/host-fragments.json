@@ -1,0 +1,5 @@
+{
+ "_note": "Registry of VP-authored files textually included at CLASS or FUNCTION scope of a Bill-owned file (tools/check_hook_gating.py fragment_check, CC-audit-1 spec 2). Each entry {fragment, includer, anchor_text}; a fragment is included exactly once and its non-blank lines count toward the includer's honest H2. An unregistered fragment, a second include or a stale entry fails the gate. Standing order (A20-CC, rule 19): NO fragment includes at class or function scope; the list stays empty.",
+ "version": 1,
+ "fragments": []
+}

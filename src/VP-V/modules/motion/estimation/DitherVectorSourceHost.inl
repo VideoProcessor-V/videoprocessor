@@ -13,9 +13,9 @@
 // (previousShift 0), exactly as the extras path builds them (payback of the own search).
 void LibplaceboVideoRenderer::Impl::BuildSigmaDeltaVectorsWithoutExtras(uint64_t sourceSequence, uint64_t nextSourceSequence)
 {
-	dejudderNextVectorsSequence = 0;
-	dejudderNextVectorsFrom = 0;   // GEM-SD-VECTORS MUST-2: cleared here, set when mapped (CoreSegments.inl CarryValid reads it)
-	ditherNextGate.Clear();
+	dejudderExtras.dejudderNextVectorsSequence = 0;
+	dejudderExtras.dejudderNextVectorsFrom = 0;   // GEM-SD-VECTORS MUST-2: cleared here, set when mapped (CoreSegments.inl CarryValid reads it)
+	dejudderExtras.ditherNextGate.Clear();
 	namespace DV = VpMotion::DitherVectors;
 	DV::Facts facts;
 	double motionCompensation = 0.0;
@@ -31,7 +31,7 @@ void LibplaceboVideoRenderer::Impl::BuildSigmaDeltaVectorsWithoutExtras(uint64_t
 	facts.sequences = sourceSequence != 0 && nextSourceSequence != 0;
 	facts.timelineDrew = interpolating || vpTimelineActive;   // the timeline / hiccup repair drew refreshes: A was not at shift 0
 	facts.matcher = dejudder != nullptr;
-	facts.geometryValid = dejudderGeometryValid;
+	facts.geometryValid = dejudderExtras.dejudderGeometryValid;
 	if (facts.sequences && facts.matcher)
 	{
 		VpMotion::VerifiedField field;
@@ -46,26 +46,26 @@ void LibplaceboVideoRenderer::Impl::BuildSigmaDeltaVectorsWithoutExtras(uint64_t
 	bool mapped = false;
 	if (choice.Reuses() && d3d11 && d3d11->gpu)
 	{
-		const int w = static_cast<int>(std::lround(std::fabs(dejudderGeometry.targetCrop.x1 - dejudderGeometry.targetCrop.x0)));
-		const int h = static_cast<int>(std::lround(std::fabs(dejudderGeometry.targetCrop.y1 - dejudderGeometry.targetCrop.y0)));
+		const int w = static_cast<int>(std::lround(std::fabs(dejudderExtras.dejudderGeometry.targetCrop.x1 - dejudderExtras.dejudderGeometry.targetCrop.x0)));
+		const int h = static_cast<int>(std::lround(std::fabs(dejudderExtras.dejudderGeometry.targetCrop.y1 - dejudderExtras.dejudderGeometry.targetCrop.y0)));
 		if (w > 0 && h > 0)
 		{
-			if (!dejudderNextVectorField)
-				dejudderNextVectorField = std::make_unique<DejudderRendered::VectorField>(log, d3d11->gpu);
+			if (!dejudderExtras.dejudderNextVectorField)
+				dejudderExtras.dejudderNextVectorField = std::make_unique<DejudderRendered::VectorField>(log, d3d11->gpu);
 			const Dejudder::Settings matcher = RenderedWarpSettings(h);
 			pl_tex next = nullptr;
 			// Steps 1-3 read the same matcher outputs (FieldOf's field IS the matcher's live field). A direct read: this file is
 			// motion.estimation's own (the P5c view rule covers readers outside the module), so it holds with or without P5c.
-			if (dejudderNextVectorField->Run(dejudder->Field(), dejudder->FrameTrust(), dejudder->GetSettings().minTrustedShare, 0.0f,
-					dejudderGeometry, w, h, next, dejudder->SubField(), &matcher, dejudder->Camera(), true) && next)
+			if (dejudderExtras.dejudderNextVectorField->Run(dejudder->Field(), dejudder->FrameTrust(), dejudder->GetSettings().minTrustedShare, 0.0f,
+					dejudderExtras.dejudderGeometry, w, h, next, dejudder->SubField(), &matcher, dejudder->Camera(), true) && next)
 			{
-				dejudderNextVectors = next;
-				dejudderNextVectorsSequence = nextSourceSequence;
-				dejudderNextVectorsFrom = sourceSequence;   // GEM-SD-VECTORS MUST-2: A, for the stamp check at B
-				ditherNextGate.Bind(sourceSequence, nextSourceSequence, dejudderEstimatedEpoch);
-				dejudderNextVectorsGeometry = dejudderGeometry;
-				dejudderNextVectorsW = w;
-				dejudderNextVectorsH = h;
+				dejudderExtras.dejudderNextVectors = next;
+				dejudderExtras.dejudderNextVectorsSequence = nextSourceSequence;
+				dejudderExtras.dejudderNextVectorsFrom = sourceSequence;   // GEM-SD-VECTORS MUST-2: A, for the stamp check at B
+				dejudderExtras.ditherNextGate.Bind(sourceSequence, nextSourceSequence, dejudderEstimatedEpoch);
+				dejudderExtras.dejudderNextVectorsGeometry = dejudderExtras.dejudderGeometry;
+				dejudderExtras.dejudderNextVectorsW = w;
+				dejudderExtras.dejudderNextVectorsH = h;
 				mapped = true;
 			}
 		}

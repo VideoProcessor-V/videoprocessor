@@ -46,7 +46,9 @@
     "src/VP-V/modules/motion/consumers/DejudderInterface.h",
     "src/VP-V/modules/motion/consumers/DejudderExtension.h",
     "src/VP-V/modules/motion/consumers/DejudderExtension.cpp",
-    "src/VP-V/modules/motion/consumers/DejudderViews.h"
+    "src/VP-V/modules/motion/consumers/DejudderViews.h",
+    "src/VP-V/modules/motion/consumers/DejudderExtrasPresent.h",
+    "src/VP-V/modules/motion/consumers/DejudderExtrasPresent.cpp"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/DejudderAhead.h",

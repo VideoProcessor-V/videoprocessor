@@ -20,12 +20,12 @@ bool LibplaceboVideoRenderer::Impl::RunVpPhaseInterpolation()
 	frameInterpolator->SetGrain(activeSettings.interpolationGrain);
 	const bool ran = frameInterpolator->Run(vpPhaseA, vpPhaseB, vpPhaseMotion, vpPhaseT, activeSettings.interpolationFallback,
 		vpPhasePlanes);
-	SyncFallback(motionConsumerFailures.Note(GetTickCount64(), ran ? nullptr : "interpolation failed"));   // D3
+	SyncFallback(dejudderExtras.motionConsumerFailures.Note(GetTickCount64(), ran ? nullptr : "interpolation failed"));   // D3
 	if (!ran)
 	{
-		if (++interpolationFailures == 1 || interpolationFailures % 2400 == 0)
+		if (++dejudderExtras.interpolationFailures == 1 || dejudderExtras.interpolationFailures % 2400 == 0)
 			DebugLog::Log("Interpolation: failed (%s; %llu failures); the source frame is shown",
-				frameInterpolator->LastError().c_str(), interpolationFailures);
+				frameInterpolator->LastError().c_str(), dejudderExtras.interpolationFailures);
 		return false;
 	}
 	return true;
@@ -99,7 +99,7 @@ void LibplaceboVideoRenderer::Impl::PrepareVpPhasePicture(uint64_t sourceSequenc
 		}
 		motion.minTrustedShare = vectorEstimate.MinTrustedShare();
 		for (int slot = 0; slot < 2; ++slot)
-			if (dejudderMaskSequence[slot] == nextSourceSequence && motionValidity.Current(dejudderMaskEpoch[slot]))
+			if (dejudderExtras.dejudderMaskSequence[slot] == nextSourceSequence && motionValidity.Current(dejudderExtras.dejudderMaskEpoch[slot]))
 				motion.occlusionB = vectorEstimate.Occlusion(slot);
 	}
 	// WIP DEBUG (near-black residual, 2026-10-24; VP_DEBUG_PHASE_AB=1 only): are A's and B's raw
@@ -224,7 +224,7 @@ void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
 	if (on)
 	{
 		char line[260];
-		const DejudderExtraStats& st = dejudderExtraStats;
+		const Vpv::Dejudder::DejudderExtraStats& st = dejudderExtras.dejudderExtraStats;
 		// R1: the sigma-delta's GPU time per extra, in the mode in use.
 		char dither[64] = "";
 		if (st.ditherMsExternal > 0.0 || st.ditherMsOwn > 0.0)
@@ -264,20 +264,20 @@ void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
 			text += ahead;
 		}
 		// Render-ahead: queued, its lead, late frames and the gate's level.
-		if (RenderAheadActive() && renderAheadFrames > 0)
+		if (RenderAheadActive() && renderAheadPresenter.frames > 0)
 		{
 			char ahead[160];
 			std::snprintf(ahead, sizeof(ahead), ", render-ahead lead %.1f ms, late %llu, dropped %llu, gate level %d",
-				renderAheadLead * 1000.0, renderAheadLate, renderAheadDropped, renderAheadPresenter.gate.Level());
+				renderAheadPresenter.lead * 1000.0, renderAheadPresenter.late, renderAheadPresenter.dropped, renderAheadPresenter.gate.Level());
 			text += ahead;
 		}
 		// Efficiency: new frames whose sigma-delta took the de-judder's
 		// vectors (its own search skipped).
-		if (ditherVectorsNextUsed > 0)
+		if (dejudderExtras.ditherVectorsNextUsed > 0)
 		{
 			char next[64];
 			std::snprintf(next, sizeof(next), ", dither new-frame vectors %llu",
-				static_cast<unsigned long long>(ditherVectorsNextUsed));
+				static_cast<unsigned long long>(dejudderExtras.ditherVectorsNextUsed));
 			text += next;
 		}
 		if (activeSettings.dejudderPulldown)
@@ -346,7 +346,7 @@ void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
 
 void LibplaceboVideoRenderer::Impl::ReleaseDejudder()
 {
-	dejudderMaskSequence[0] = dejudderMaskSequence[1] = 0;
+	dejudderExtras.dejudderMaskSequence[0] = dejudderExtras.dejudderMaskSequence[1] = 0;
 	frameInterpolator.reset();
 	dejudder.reset();
 	VpSkeleton::VramUsers::Instance().Release(this, VpSkeleton::kUserMotionMatcher);   // W2-C1 C1-3: the matcher's memory is freed
@@ -355,16 +355,16 @@ void LibplaceboVideoRenderer::Impl::ReleaseDejudder()
 	vectorEstimate.dejudderMotionSourceKey = -1;
 	// 6d: the cache and the rendered warp hold textures (and a dispatch)
 	// of this device (audit stage10-6d blocker 1).
-	dejudderCache.Release();
+	dejudderExtras.dejudderCache.Release();
 	repeatReuse.Release();   // WP-24: its probe hook while the GPU exists; its fallback entry
-	dejudderRenderedWarp.reset();
-	dejudderVectorField.reset();
+	dejudderExtras.dejudderRenderedWarp.reset();
+	dejudderExtras.dejudderVectorField.reset();
 	// The next-frame vector field owns a texture of this device too (the sigma-delta's vectors on B's first
 	// present): released with the device, never left for ~Impl (access violation after the GPU was gone).
-	dejudderNextVectorField.reset();
-	dejudderNextVectors = nullptr;
-	dejudderNextVectorsSequence = 0;
-	ditherNextGate.Clear();
+	dejudderExtras.dejudderNextVectorField.reset();
+	dejudderExtras.dejudderNextVectors = nullptr;
+	dejudderExtras.dejudderNextVectorsSequence = 0;
+	dejudderExtras.ditherNextGate.Clear();
 	VpMotion::DitherVectors::Registry::Forget(this);   // W2-C8: the chain's counters and entries go with the device
 	for (const FallbackCatalog::Decision& decision : VpMotion::DitherVectors::Tracker::Released())
 		SyncFallback(decision);
@@ -548,7 +548,7 @@ void LibplaceboVideoRenderer::Impl::RegisterDejudderCacheFrame(const pl_frame& t
 	uint64_t sourceSequence)
 {
     if (pipelineSlots.OriginalPathway()) return;   // PHASE 1: no cache stage, no geometry (Bill's hooks only)
-    dejudderSubtitleComposed = subtitleCompositionSucceeded;
+    dejudderExtras.dejudderSubtitleComposed = subtitleCompositionSucceeded;
     {
         const pl_tex framebuffer = target.planes[0].texture;
         const SubtitleBoxRect subtitleHolds[] = { relocatedSubtitle.source, relocatedSubtitle.generatedCleanup,
