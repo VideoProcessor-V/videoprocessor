@@ -210,11 +210,25 @@ namespace DvTrimSelection
 		const char* reason = "";
 	};
 
+	// GEM-016 (Gemini colour-dv-hdr PERF-6, as written): the candidates on the stack, Candidate[kMaxTrims] (a DM
+	// carries at most kMaxTrims trims), not a heap vector per level per frame. Same order, same contents.
+	struct CandidateList
+	{
+		Candidate items[DolbyVisionTunnelFrameMetadata::kMaxTrims];
+		int count = 0;
+		void push_back(const Candidate& c) { if (count < DolbyVisionTunnelFrameMetadata::kMaxTrims) items[count++] = c; }
+		size_t size() const { return static_cast<size_t>(count); }
+		bool empty() const { return count == 0; }
+		const Candidate& operator[](int k) const { return items[k]; }
+		const Candidate* begin() const { return items; }
+		const Candidate* end() const { return items + count; }
+	};
+
 	// The usable trims of one level, in DM order.
-	inline std::vector<Candidate> Candidates(const DolbyVisionTunnelFrameMetadata& dm, Level level,
+	inline CandidateList Candidates(const DolbyVisionTunnelFrameMetadata& dm, Level level,
 		int* l8Present = nullptr, int* l8Unresolved = nullptr, int* firstUnresolved = nullptr)
 	{
-		std::vector<Candidate> out;
+		CandidateList out;
 		for (int i = 0; i < dm.trimCount && i < DolbyVisionTunnelFrameMetadata::kMaxTrims; ++i)
 		{
 			const Trim& t = dm.trims[i];
@@ -248,7 +262,7 @@ namespace DvTrimSelection
 
 	// How well a level's targets cover the display (12-bit PQ codes): 0 when some target is at or
 	// below it and some at or above it (bracketed or exact), else the distance to the nearest.
-	inline double Coverage(const std::vector<Candidate>& cands, double displayPq)
+	inline double Coverage(const CandidateList& cands, double displayPq)
 	{
 		bool below = false, above = false;
 		double nearest = 1e9;
@@ -263,7 +277,7 @@ namespace DvTrimSelection
 	}
 
 	// L2's rule over one level's candidates (identical to DolbyVisionTrims::Select for L2).
-	inline void SelectAmong(const DolbyVisionTunnelFrameMetadata& dm, const std::vector<Candidate>& cands, Selection& s)
+	inline void SelectAmong(const DolbyVisionTunnelFrameMetadata& dm, const CandidateList& cands, Selection& s)
 	{
 		int lower = -1, upper = -1;   // indices into cands
 		for (int k = 0; k < static_cast<int>(cands.size()); ++k)
@@ -320,8 +334,8 @@ namespace DvTrimSelection
 		if (!dm.valid) { s.reason = "no DM"; return s; }
 		if (!(displayPeakNits > 0.0)) { s.reason = "no display peak"; return s; }
 		s.displayPq = DolbyVisionTrims::PqFromNits(displayPeakNits) * 4095.0;
-		const std::vector<Candidate> l8 = Candidates(dm, Level::L8, &s.l8Present, &s.l8Unresolved, &s.firstUnresolvedIndex);
-		const std::vector<Candidate> l2 = Candidates(dm, Level::L2);
+		const CandidateList l8 = Candidates(dm, Level::L8, &s.l8Present, &s.l8Unresolved, &s.firstUnresolvedIndex);
+		const CandidateList l2 = Candidates(dm, Level::L2);
 		// Audit 2026-10-24: L8 only when its known targets cover the display target at least as
 		// well as L2's (bracketed beats one-sided; else the nearer target in PQ). A stream with
 		// L8 at 100 nits (other L8 targets unknown) and L2 at 100/600/1000 on a 600-1000-nit
@@ -502,19 +516,31 @@ namespace DvTrimSelection
 	// The trim's //!PARAM values for shaders/DV trims.glsl (the signal ones - dv_signal_pq,
 	// dv_gamma, dv_peak_nits, dv_kr, dv_kb - are set by the renderer). dv_ext = 0 keeps the
 	// shader on the L2 arithmetic exactly.
-	inline std::vector<std::pair<const char*, double>> ShaderParameters(const ExtParams& p)
+	// GEM-016: appended to a caller's buffer (DvHostStage reuses one member list per frame); ShaderParameters is this
+	// into a fresh list. Same names, same order.
+	inline void AppendShaderParameters(const ExtParams& p, std::vector<std::pair<const char*, double>>& out)
 	{
 		static const char* const sat[kHues] = { "dv_sat_r", "dv_sat_y", "dv_sat_g", "dv_sat_c", "dv_sat_b", "dv_sat_m" };
 		static const char* const hue[kHues] = { "dv_hue_r", "dv_hue_y", "dv_hue_g", "dv_hue_c", "dv_hue_b", "dv_hue_m" };
-		std::vector<std::pair<const char*, double>> out = {
-			{ "dv_slope", p.base.slope }, { "dv_offset", p.base.offset }, { "dv_power", p.base.power },
-			{ "dv_chroma_weight", p.base.chromaWeight }, { "dv_sat_gain", p.base.saturationGain },
-			{ "dv_ext", ExtrasNeutral(p) ? 0.0 : 1.0 }, { "dv_rotate", HueVectorNeutral(p) ? 0.0 : 1.0 },
-			{ "dv_mid_contrast", p.midContrast }, { "dv_clip_trim", p.clipTrim } };
+		out.emplace_back("dv_slope", p.base.slope);
+		out.emplace_back("dv_offset", p.base.offset);
+		out.emplace_back("dv_power", p.base.power);
+		out.emplace_back("dv_chroma_weight", p.base.chromaWeight);
+		out.emplace_back("dv_sat_gain", p.base.saturationGain);
+		out.emplace_back("dv_ext", ExtrasNeutral(p) ? 0.0 : 1.0);
+		out.emplace_back("dv_rotate", HueVectorNeutral(p) ? 0.0 : 1.0);
+		out.emplace_back("dv_mid_contrast", p.midContrast);
+		out.emplace_back("dv_clip_trim", p.clipTrim);
 		for (int k = 0; k < kHues; ++k)
 			out.emplace_back(sat[k], p.saturation[k]);
 		for (int k = 0; k < kHues; ++k)
 			out.emplace_back(hue[k], p.hueDegrees[k]);
+	}
+
+	inline std::vector<std::pair<const char*, double>> ShaderParameters(const ExtParams& p)
+	{
+		std::vector<std::pair<const char*, double>> out;
+		AppendShaderParameters(p, out);
 		return out;
 	}
 }

@@ -284,6 +284,9 @@ public:
 	// The DV shader parameters in the order the host always set them (selection, ICtCp, then the
 	// fixed five): the segment's ParameterList.
 	using ParameterList = std::vector<std::pair<const char*, double>>;
+	// GEM-016 (Gemini PERF-6, as written): the member ParameterList the host swaps into the frame's trims parameters and
+	// back after the segment collected, so the list keeps its capacity across frames (no per-frame heap growth).
+	ParameterList& TrimsParameterBuffer() { return m_trimsParameterBuffer; }
 
 	// PRE_OUTPUT, phase 1 (before the S2 segment collects): the Dolby-style curve hook, the trims
 	// decision and their parameters (trimsWanted / trimsParams, for the segment's ColourFrame),
@@ -292,6 +295,7 @@ public:
 		const CustomHookChain::TemplateValues& hookTemplates, bool& trimsWanted, ParameterList& trimsParams)
 	{
 		m_pending = Pending();
+		trimsParams.clear();   // GEM-016: the caller may hand in last frame's buffer (TrimsParameterBuffer)
 		m_pending.trims = f.trims;
 		m_pending.trimsStageRuns = f.trimsStageRuns;   // GEM-004 part 2 (AMEND: the dm_trims slot, CF-1 P3)
 		if (!f.trims)
@@ -423,18 +427,31 @@ public:
 					}
 					m_trimsHook.Ensure(hookTemplates);
 					// Review C4: the luminance coefficients of the output's own primaries.
-					const pl_raw_primaries* prim = pl_raw_primaries_get(display.primaries);
-					double kr = LumaCoeff::kBt709Kr, kg = LumaCoeff::kBt709Kg, kb = LumaCoeff::kBt709Kb;
-					if (prim)
+					// GEM-016 (Gemini colour-dv-hdr PERF-6, as written): kr / kg / kb and the toLms / fromLms parameters
+					// cached, keyed by display.primaries (and the ICtCp switch), instead of recomputed (a matrix inversion) per frame.
+					if (!m_primariesCache.valid || m_primariesCache.primaries != display.primaries ||
+						m_primariesCache.ictcp != m_toneDolbyRunning)
 					{
-						const double red[2] = { prim->red.x, prim->red.y }, green[2] = { prim->green.x, prim->green.y };
-						const double blue[2] = { prim->blue.x, prim->blue.y }, white[2] = { prim->white.x, prim->white.y };
-						DolbyVisionTrims::LuminanceWeights(red, green, blue, white, kr, kg, kb);
+						const pl_raw_primaries* prim = pl_raw_primaries_get(display.primaries);
+						double kr = LumaCoeff::kBt709Kr, kg = LumaCoeff::kBt709Kg, kb = LumaCoeff::kBt709Kb;
+						if (prim)
+						{
+							const double red[2] = { prim->red.x, prim->red.y }, green[2] = { prim->green.x, prim->green.y };
+							const double blue[2] = { prim->blue.x, prim->blue.y }, white[2] = { prim->white.x, prim->white.y };
+							DolbyVisionTrims::LuminanceWeights(red, green, blue, white, kr, kg, kb);
+						}
+						m_primariesCache.valid = true;
+						m_primariesCache.primaries = display.primaries;
+						m_primariesCache.ictcp = m_toneDolbyRunning;
+						m_primariesCache.kr = kr;
+						m_primariesCache.kb = kb;
+						m_primariesCache.ictcpParams = DvDolbyStyle::ShaderParameters(m_toneDolbyRunning, prim);   // dv_space + output RGB -> LMS
 					}
-					const auto ictcp = DvDolbyStyle::ShaderParameters(m_toneDolbyRunning, prim);   // dv_space + output RGB -> LMS
+					const double kr = m_primariesCache.kr, kb = m_primariesCache.kb;
+					const ParameterList& ictcp = m_primariesCache.ictcpParams;
 					// The parameters in the order the host always set them; the S2 segment sets them.
 					trimsWanted = true;
-					trimsParams = DvTrimSelection::ShaderParameters(selection.params);
+					DvTrimSelection::AppendShaderParameters(selection.params, trimsParams);   // GEM-016: into the reused buffer
 					trimsParams.insert(trimsParams.end(), ictcp.begin(), ictcp.end());
 					trimsParams.push_back({ "dv_signal_pq", pq ? 1.0 : 0.0 });
 					trimsParams.push_back({ "dv_gamma", f.outputGamma });
@@ -535,6 +552,17 @@ private:
 		const DolbyVisionTunnelFrameMetadata* dm = nullptr;
 	};
 	Pending m_pending;
+	// GEM-016: the output primaries' luminance weights and ICtCp matrices, recomputed only when the primaries change.
+	struct PrimariesCache
+	{
+		bool valid = false;
+		pl_color_primaries primaries = PL_COLOR_PRIM_UNKNOWN;
+		bool ictcp = false;
+		double kr = 0.0, kb = 0.0;
+		ParameterList ictcpParams;
+	};
+	PrimariesCache m_primariesCache;
+	ParameterList m_trimsParameterBuffer;   // GEM-016: TrimsParameterBuffer
 	CustomHookChain::Chain m_trimsHook;      // DV L2 trims (dv_trims)
 	CustomHookChain::Chain m_appearanceHook; // CAM-3: the CAM16 appearance pass
 	RoomLight::Smoother m_roomSmoother;      // CAM-3: the appearance path's own minutes-scale room adaptation

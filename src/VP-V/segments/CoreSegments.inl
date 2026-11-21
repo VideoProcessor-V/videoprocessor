@@ -313,6 +313,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     const char* const dvContainer = state.videoFrameEncoding == VideoFrameEncoding::R12B ? "R12B" :
         state.videoFrameEncoding == VideoFrameEncoding::R12L ? "R12L" : "";
     const bool dvVpMapping = dvStage.SyncContainer(state.dolbyVisionTunnel, dvContainer, activeSettings.dvDisplayMapping);
+    colourFrame.dv.swap(dvStage.TrimsParameterBuffer());   // GEM-016: last frame's list capacity (PrepareToneAndTrims clears it)
     dvStage.PrepareToneAndTrims({ dvVpMapping ? activeSettings.dvToneMapping : dvOriginalTone, dvVpMapping && activeSettings.dvTrims, activeSettings.toneMapping,
         activeSettings.dvCompareCaptureFolder, pipelineSlots.Runs(PipelineSlots::Id::ColourDmCurve), renderImage, target,
         convertedPayload ? &convertedPayload->dolby : nullptr, LedDisplayGamma(target.color.transfer), state,
@@ -435,6 +436,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         [this](size_t start, PipelineSlots::Id slot) { TagSlotHooks(start, slot); });
     logSdrToneShape(sdrToneShapeState == 1 && colourCounts.toneShape == 0 ? 3 : sdrToneShapeState);
     dvStage.FinishTrims(colourCounts.dvTrims);   // WP-14 phase 2: state, status, fallback, logs
+    colourFrame.dv.swap(dvStage.TrimsParameterBuffer());   // GEM-016: the list back to its owner for the next frame
     dvStage.FinishAppearance(colourCounts.appearance);   // CF-1 CAM-3: shader-missing fallback and the status line
     SyncFallback(colourCounts.unhandled ? FallbackCatalog::Engaged("S2 placeholder stage",
         "a placeholder slot has a component but no output-segment stage yet (not run)") :
