@@ -205,15 +205,41 @@ namespace CustomHookChain
 
     bool SetHookParameter(const pl_hook* hook, const char* name, double value)
     {
+        if (!hook || !name) return false;   // GEM-029: checked first, before any text round trip
         if (!std::isfinite(value) || value != std::floor(value) || std::fabs(value) >= 1e9)
         {
-            // Non-integral or large values keep the "%.9g" text round trip.
-            char text[64];
-            std::snprintf(text, sizeof(text), "%.9g", value);
-            const auto applied = ApplyHookParameters(hook, { { name, text } });
-            return !applied.empty();
+            // GEM-225: a finite non-integral or large value lands directly in a PL_VAR_FLOAT parameter
+            // (Bounded like the integral path), with no per-frame map/vector/text allocation.
+            // Other types, and non-finite values, keep the "%.9g" text round trip.
+            bool applied = false;
+            bool needsText = !std::isfinite(value);
+            if (!needsText)
+            {
+                for (int i = 0; i < hook->num_parameters; ++i)
+                {
+                    const pl_hook_par& parameter = hook->parameters[i];
+                    if (!parameter.name || !parameter.data || std::strcmp(parameter.name, name) != 0)
+                        continue;
+                    if (parameter.type == PL_VAR_FLOAT)
+                    {
+                        const float next = static_cast<float>(Bounded(value,
+                            static_cast<double>(parameter.minimum.f),
+                            static_cast<double>(parameter.maximum.f)));
+                        if (parameter.data->f != next) parameter.data->f = next;
+                        applied = true;
+                    }
+                    else
+                        needsText = true;
+                }
+            }
+            if (needsText)
+            {
+                char text[64];
+                std::snprintf(text, sizeof(text), "%.9g", value);
+                applied = !ApplyHookParameters(hook, { { name, text } }).empty() || applied;
+            }
+            return applied;
         }
-        if (!hook || !name) return false;
         // Integral and below 1e9: the "%.9g" text parses back to exactly this value.
         bool applied = false;
         for (int i = 0; i < hook->num_parameters; ++i)
