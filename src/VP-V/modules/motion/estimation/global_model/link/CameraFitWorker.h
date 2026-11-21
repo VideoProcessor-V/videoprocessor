@@ -150,6 +150,7 @@ namespace CameraLink
 		std::condition_variable m_cv, m_idleCv;
 		std::deque<CameraFitJob> m_queue;
 		bool m_stop = false;
+		bool m_stopped = false;               // CE-SUBMIT-AFTER-STOP: set by Stop(), cleared by Start() (deterministic ProcessQueued before Start still works)
 		bool m_running = false;
 		bool m_busy = false;
 		bool m_tick = false;                  // AHEAD FIT: a Tick arrived (under m_mutex)

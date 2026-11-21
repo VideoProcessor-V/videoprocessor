@@ -74,6 +74,7 @@ namespace CameraLink
 		if (m_running)
 			return false;
 		m_stop = false;
+		m_stopped = false;
 		m_running = true;
 		g_threadsStarted.fetch_add(1);
 		m_thread = std::thread([this]() { Loop(); });
@@ -84,8 +85,12 @@ namespace CameraLink
 	{
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
+			m_stopped = true;
 			if (!m_running)
+			{
+				m_queue.clear();
 				return;
+			}
 			m_stop = true;
 		}
 		m_cv.notify_all();
@@ -103,6 +108,13 @@ namespace CameraLink
 		job.laneGen = LaneGeneration();
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_stopped || m_stop)
+			{
+				// CE-SUBMIT-AFTER-STOP: never queue a job nothing will drain (and never retain its field copy).
+				if (m_env.counters)
+					m_env.counters->submitAfterStop.fetch_add(1, std::memory_order_relaxed);
+				return false;
+			}
 			if (m_queue.size() >= m_env.queueCapacity)
 			{
 				if (m_env.counters)

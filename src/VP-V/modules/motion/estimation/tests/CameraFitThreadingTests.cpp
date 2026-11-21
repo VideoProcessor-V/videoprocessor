@@ -349,5 +349,41 @@ namespace VideoProcessorTest
 			Assert::IsTrue(counters.rebound.load() >= 1, L"the rebuilds were noticed");
 			Assert::IsTrue(counters.staleLane.load() + counters.late.load() + counters.published.load() <= uint64_t(submitted));
 		}
+
+		// CE-SUBMIT-AFTER-STOP (PENDING-MASTER.md:963): Submit after Stop refuses visibly, keeps the queue empty, releases the field
+		// copy immediately, and reports the refusal count on the camera fit status line. Restarting via Start accepts jobs again.
+		TEST_METHOD(SubmitAfterStopRefusesVisiblyWithoutRetainingField)
+		{
+			CameraLinkTest::Rig rig(2);
+			CameraLink::CameraRecordPool pool(rig.Ring());
+			CameraLink::FitCounters counters;
+			CameraLink::CameraFitProducer producer(CameraModel::Config(), &counters);
+			CameraLink::CameraFitWorker worker(producer, rig.Env(&pool, &counters, 8));
+			Assert::IsTrue(worker.Start());
+			rig.PublishInputs(1);
+			Assert::IsTrue(worker.Submit(CameraLinkTest::PanJob(1, 5.0)));
+			worker.WaitIdle();
+			worker.Stop();
+			Assert::IsFalse(worker.Running());
+
+			CameraLink::CameraFitJob afterStop = CameraLinkTest::PanJob(2, 6.0);
+			std::weak_ptr<const CameraLink::FieldCopy> weakField = afterStop.field;
+			Assert::IsFalse(worker.Submit(afterStop), L"Submit after Stop must refuse");
+			afterStop.field.reset();
+			Assert::IsTrue(weakField.expired(), L"refused Submit must not retain the job's field copy");
+			Assert::AreEqual(size_t(0), worker.Pending(), L"nothing queued after Stop");
+			Assert::AreEqual(uint64_t(1), counters.submitAfterStop.load(), L"refusal counted");
+			Assert::AreEqual(uint64_t(1), counters.submitted.load(), L"refused job not counted as submitted");
+			const std::string line = CameraLink::StatusLine(counters);
+			Assert::IsTrue(line.find("1 refused after stop") != std::string::npos, L"refusal count visible on status line");
+
+			// Restarting the worker clears the stopped latch so subsequent submits succeed.
+			Assert::IsTrue(worker.Start());
+			rig.PublishInputs(2);
+			Assert::IsTrue(worker.Submit(CameraLinkTest::PanJob(2, 6.0)));
+			worker.WaitIdle();
+			worker.Stop();
+			Assert::AreEqual(uint64_t(2), counters.submitted.load());
+		}
 	};
 }
