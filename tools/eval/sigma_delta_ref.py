@@ -34,9 +34,13 @@ def quantise_step(x, r, d, lim, amplitude):
     x = np.asarray(x, dtype=np.float64)
     r = np.asarray(r, dtype=np.float64)
     d = np.asarray(d, dtype=np.float64)
+    # GEM-W1B V1 sigma-delta MUST-1 (mirrors the shader and the C++): an exact code takes no carried
+    # residual in and carries none out.
+    exact = x == np.floor(x + 0.5)
+    r = np.where(exact, 0.0, r)
     k = np.minimum(np.maximum(np.floor(x + r + d + 0.5), lim[0]), lim[1])
     b = residual_bound(amplitude)
-    return k, np.minimum(np.maximum(x + r - k, -b), b)
+    return k, np.where(exact, 0.0, np.minimum(np.maximum(x + r - k, -b), b))
 
 
 def ign(px, py, frame):

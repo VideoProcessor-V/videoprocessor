@@ -64,11 +64,15 @@ namespace SigmaDeltaDomain
 	// CPU model of one quantiser step of `Temporal sigma-delta.glsl` (one
 	// channel, same pixel, gate passed): x and r in output codes, d the
 	// decorrelation dither. Returns the emitted code; r is updated in place.
+	// GEM-W1B V1 sigma-delta MUST-1 (mirrors the shader): an exact code takes no carried residual in and
+	// carries none out, so with amplitude <= 0.5 it is emitted unchanged (black 16 stays 16).
 	inline double QuantiseStep(double x, double& r, double d, const CodeLimits& limits, double noiseAmplitude)
 	{
+		const bool exact = x == std::floor(x + 0.5);
+		if (exact) r = 0.0;
 		const double k = (std::min)((std::max)(std::floor(x + r + d + 0.5), limits.min), limits.max);
 		const double bound = ResidualBound(noiseAmplitude);
-		r = (std::min)((std::max)(x + r - k, -bound), bound);
+		r = exact ? 0.0 : (std::min)((std::max)(x + r - k, -bound), bound);
 		return k;
 	}
 
