@@ -143,7 +143,7 @@ namespace VpMotion
 		// for Ctrl+I, refreshed every 5 s by PlanProducer. Render thread.
 		std::string motionStandingLine;
 		bool motionStandingHookSeen = false;   // the host has set ProducerInputs::dejudderCanEngage at least once
-		bool motionHintsOffShown = false;      // camfix R1: the "nvof temporal hints" entry is engaged (synced on change only)
+		bool motionHintsOnShown = false;       // camfix R1: the "nvof temporal hints" opt-in entry is engaged (synced on change only)
 		std::chrono::steady_clock::time_point motionStandingAt{};
 		unsigned long long motionStandingPairs = 0;
 		double motionStandingMsSum = 0.0;

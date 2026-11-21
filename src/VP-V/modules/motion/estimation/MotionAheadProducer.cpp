@@ -180,13 +180,14 @@ namespace MotionAhead
 
 	Producer::Producer()
 	{
-		// Camfix R1: the diagnostic override of the temporal hints (default on, unchanged).
+		// Camfix R1: the temporal hints are OFF by default (owner 2026-11-12 04:52, doc 91 A/H, register 115 #40); the diagnostic
+		// opt-in VP_NVOF_TEMPORAL_HINTS=1 (exactly "1") turns them on, and Ctrl+I shows it while it is in force.
 		char value[8] = {};
 		const DWORD n = GetEnvironmentVariableA("VP_NVOF_TEMPORAL_HINTS", value, static_cast<DWORD>(sizeof(value)));
-		if (n > 0 && n < sizeof(value) && value[0] == '0')
+		if (n == 1 && value[0] == '1')
 		{
-			temporalHints.store(false, std::memory_order_release);
-			DebugLog::Log("Motion ahead: NVOF temporal hints OFF (VP_NVOF_TEMPORAL_HINTS=0, diagnostic)");
+			temporalHints.store(true, std::memory_order_release);
+			DebugLog::Log("Motion ahead: NVOF temporal hints ON (VP_NVOF_TEMPORAL_HINTS=1, diagnostic opt-in)");
 		}
 	}
 
@@ -566,8 +567,8 @@ namespace MotionAhead
 			const int prev = prevSlot;
 			// The temporal hints only when the engine's last pair ended at this pair's first frame
 			// (audit 2026-10-16: they carried across seeks, dropped jobs and size skips).
-			// Camfix R1: and only while the temporal hints are on (SetTemporalHints; default on).
-			const bool continuous = temporalHints.load(std::memory_order_acquire) && hintSequence == previousSequence && hintGeneration == job.generation;
+			// Camfix R1: and only while the temporal hints are on (SetTemporalHints; default off).
+			const bool continuous = HintsApply(hintSequence == previousSequence && hintGeneration == job.generation);
 			hintSequence = UINT64_MAX;
 			bool ran = false;
 			std::shared_ptr<Flow> flow;
@@ -881,6 +882,7 @@ namespace MotionAhead
 		std::shared_ptr<Flow> flow;
 		double extrasMs = 0.0;
 		bool ran = false;
+		bool hinted = false;   // the on-demand pair ran with temporal hints (counted in stats.hintedPairs)
 		if (testEngine)
 		{
 			flow = std::make_shared<Flow>();
@@ -947,7 +949,9 @@ namespace MotionAhead
 				texTo = requestTex[1];
 			}
 			// The temporal hints only for an adjacent Chain pair right after the engine's last pair ended at `from`.
-			const bool continuous = mode == Mode::Chain && rq.Adjacent() && hintSequence == rq.from && hintGeneration == rq.generation;
+			// Camfix R1: through HintsApply like the scheduled path, so the displayed hints state is the real one.
+			const bool continuous = HintsApply(mode == Mode::Chain && rq.Adjacent() && hintSequence == rq.from && hintGeneration == rq.generation);
+			hinted = continuous;
 			hintSequence = UINT64_MAX;   // any run here moves the engine's internal hint state
 			requestResetHints = true;    // a walk pair that would have used them runs without (counted in NoteWalkJob)
 			ok = RunPair(texFrom, texTo, w, h, continuous, rq.to, ran, flow, extrasMs);
@@ -966,6 +970,7 @@ namespace MotionAhead
 		}
 		{
 			std::lock_guard<std::mutex> lock(mutex);
+			if (hinted && ok && flow) ++stats.hintedPairs;
 			if (mode == Mode::Chain) ++requestStats.chainRuns;
 			else if (mode == Mode::Adopt) ++requestStats.adoptRuns;
 			else ++requestStats.offChainRuns;

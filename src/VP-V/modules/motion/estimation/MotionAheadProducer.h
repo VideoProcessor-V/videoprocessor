@@ -257,11 +257,15 @@ namespace MotionAhead
 		// general_rate_fixes for the engine's global vote range (FlowVoteRange).
 		void SetGeneralRates(bool on) { generalRates.store(on, std::memory_order_release); }
 		// Camfix R1 (doc 103 s2: NVOF temporal-hint drift): the engine's temporal hints between consecutive pairs. On by
-		// default (unchanged); off = every pair runs with disableTemporalHints (NvOpticalFlow::Engine::Run continuous = false).
-		// A diagnostic switch for tests and A/B runs; the environment variable VP_NVOF_TEMPORAL_HINTS=0 turns it off at
-		// construction (no configuration key; a default change is an owner decision).
+		// default OFF (owner 2026-11-12 04:52, doc 91 A/H, register 115 #40: camera hints off until R3); on = a continuous pair runs
+		// with the temporal hints, off = every pair runs with disableTemporalHints (NvOpticalFlow::Engine::Run continuous = false).
+		// A diagnostic switch for tests and A/B runs; the environment variable VP_NVOF_TEMPORAL_HINTS=1 turns it on at
+		// construction (no configuration key); Ctrl+I shows the opt-in. Both the scheduled and the on-demand path decide through
+		// HintsApply, so the shown state is the real one.
 		void SetTemporalHints(bool on) { temporalHints.store(on, std::memory_order_release); }
 		bool TemporalHints() const { return temporalHints.load(std::memory_order_acquire); }
+		// The one decision both RunPair call sites use: hints only while on AND the engine's last pair ended at this pair's first frame.
+		bool HintsApply(bool chainContinuous) const { return chainContinuous && temporalHints.load(std::memory_order_acquire); }
 
 		// W2-C5b: an ON-DEMAND pair for a render-time consumer (OnDemandEstimate.h). Any thread; never blocks on the worker:
 		// a pair already in the slot answers FromSlot at once (zero work); not running / stopping / restarting answers
@@ -380,7 +384,7 @@ namespace MotionAhead
 			maxPendingJobs.store(PendingJobsFor(d > l ? d : l), std::memory_order_release);
 		}
 		std::atomic<bool> generalRates{ true };
-		std::atomic<bool> temporalHints{ true };   // camfix R1 (SetTemporalHints)
+		std::atomic<bool> temporalHints{ false };   // camfix R1 (SetTemporalHints)
 		std::atomic<int> targetW{ 0 }, targetH{ 0 };
 		std::mutex p1Mutex;                                 // guards p1Source (set from the render thread, read by the worker)
 		std::shared_ptr<VpSkeleton::IP1Source> p1Source;

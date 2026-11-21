@@ -268,20 +268,33 @@ namespace VideoProcessorTest
 			Assert::IsFalse(r.Sustained(4), L"a clean window releases it");
 		}
 
-		// Camfix R1: the temporal-hint switch defaults on (unchanged behaviour) unless the diagnostic environment variable says 0,
-		// and a set is read back; a producer that has run no pair has run none hinted.
-		TEST_METHOD(TemporalHintsSwitchDefaultsOnAndIsSettable)
+		// Camfix R1: the temporal-hint switch defaults OFF (owner 2026-11-12 04:52, doc 91 A/H, register 115 #40) unless the diagnostic
+		// environment variable says exactly 1, and a set is read back; a producer that has run no pair has run none hinted.
+		TEST_METHOD(TemporalHintsSwitchDefaultsOffAndIsSettable)
 		{
 			char value[8] = {};
 			const DWORD n = GetEnvironmentVariableA("VP_NVOF_TEMPORAL_HINTS", value, static_cast<DWORD>(sizeof(value)));
-			const bool envOff = n > 0 && n < sizeof(value) && value[0] == '0';
+			const bool envOn = n == 1 && value[0] == '1';
 			MotionAhead::Producer producer;
-			Assert::AreEqual(!envOff, producer.TemporalHints(), L"default on (off only with VP_NVOF_TEMPORAL_HINTS=0)");
-			producer.SetTemporalHints(false);
-			Assert::IsFalse(producer.TemporalHints());
+			Assert::AreEqual(envOn, producer.TemporalHints(), L"default off (on only with VP_NVOF_TEMPORAL_HINTS=1)");
 			producer.SetTemporalHints(true);
 			Assert::IsTrue(producer.TemporalHints());
+			producer.SetTemporalHints(false);
+			Assert::IsFalse(producer.TemporalHints());
 			Assert::AreEqual(0ull, producer.GetStats().hintedPairs, L"no pair, none hinted");
+		}
+
+		// Camfix audit MUST 1: the scheduled path and the on-demand Chain path decide through the one HintsApply, so the state
+		// Ctrl+I shows (TemporalHints) is the state both paths use: ON follows the chain continuity, OFF never hints.
+		TEST_METHOD(ScheduledAndOnDemandPathsAgreeOnTheHintsState)
+		{
+			MotionAhead::Producer producer;
+			producer.SetTemporalHints(true);
+			Assert::IsTrue(producer.HintsApply(true), L"on + continuous chain: hinted");
+			Assert::IsFalse(producer.HintsApply(false), L"on + broken chain: not hinted");
+			producer.SetTemporalHints(false);
+			Assert::IsFalse(producer.HintsApply(true), L"off + continuous chain: not hinted (scheduled and on-demand)");
+			Assert::IsFalse(producer.HintsApply(false), L"off + broken chain: not hinted");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(ExactlyOneEngineAcrossProducerDejudderAndLongPair)

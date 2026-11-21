@@ -315,14 +315,14 @@ namespace VpMotion
 	void VectorEngine::UpdateVectorEngine(const VectorDemand::Input& input, const UpdateFacts& facts, IVectorEngineHost& host)
 	{
 		const int cameraFit = static_cast<int>(VectorDemand::Consumer::CameraFit);
-		// Camfix R1: the producer's diagnostic hints override is never silent (synced on change only).
+		// Camfix R1: the producer's diagnostic hints opt-in is never silent (synced on change only).
 		{
 			const std::shared_ptr<MotionAhead::Producer> producer = LoopProducer();
-			const bool hintsOff = producer && !producer->TemporalHints();
-			if (hintsOff != motionHintsOffShown)
+			const bool hintsOn = producer && producer->TemporalHints();
+			if (hintsOn != motionHintsOnShown)
 			{
-				motionHintsOffShown = hintsOff;
-				host.SyncFallback(FallbackCatalog::NvofTemporalHintsOff(hintsOff));
+				motionHintsOnShown = hintsOn;
+				host.SyncFallback(FallbackCatalog::NvofTemporalHintsOn(hintsOn));
 			}
 		}
 		const ULONGLONG now = GetTickCount64();
