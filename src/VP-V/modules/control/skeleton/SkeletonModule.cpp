@@ -2818,17 +2818,17 @@ namespace Vpv
 				b->lane.Configure(st.settings.lane, b->registry, consumers, gs, card, tier, seq, false);
 				b->lane.SetExternalProducts(outside);
 				{
-					// B1: the memo's GPU spots are budgeted against the VRAM ledger: the scratch-arena grant (T0 + extra) of this plan.
+					// B1: the memo's GPU spots are budgeted against the VRAM ledger: the memo user's grant of this plan (GF-P2b S10: its own
+					// id kUserSkeletonMemo, MakeMemoVramUser above; the scratch arena's kUserScratchArena / Extra grants are the arena's).
 					// No grant = GPU memo fills decline visibly (NoLedgerGrant), nothing is allocated outside the ledger.
 					bool memoGranted = false;
 					uint64_t memoBudget = 0;
 					if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
-						for (const uint16_t uid : { uint16_t(VpSkeleton::kUserScratchArena), uint16_t(VpSkeleton::kUserScratchArenaExtra) })
-							if (const VpSkeleton::UserGrant* g = ls->plan.governor.Find(uid))
-							{
-								memoGranted = memoGranted || g->bytes > 0;
-								memoBudget += g->bytes;
-							}
+						if (const VpSkeleton::UserGrant* g = ls->plan.governor.Find(uint16_t(VpSkeleton::kUserSkeletonMemo)))
+						{
+							memoGranted = g->bytes > 0;
+							memoBudget = g->bytes;
+						}
 					b->memo->SetGpuBudget(memoGranted, memoBudget);
 				}
 				{
