@@ -145,7 +145,7 @@
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRenderParameters.cpp": 55,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRenderParameters.h": 15,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h": 13,
-  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 5098,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 5011,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 190,
   "src/VideoProcessor-Lib/vprenderer/NlsHookRecovery.h": 44,
   "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h": 17,

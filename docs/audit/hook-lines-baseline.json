@@ -4,12 +4,12 @@
  "metric": "H2",
  "base_ref": "a591ad3b5",
  "measured_at": "working tree",
- "total": 23186,
+ "total": 23099,
  "totals": {
-  "production": 18552,
+  "production": 18465,
   "tests": 4577,
   "project": 57,
-  "renderer_information": 5430
+  "renderer_information": 5343
  },
  "files": {
   "src/VideoProcessor-BetaTests/BetaParametersTests.cpp": 155,
@@ -125,7 +125,7 @@
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRenderParameters.cpp": 55,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRenderParameters.h": 15,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h": 13,
-  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 5098,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 5011,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 190,
   "src/VideoProcessor-Lib/vprenderer/NlsHookRecovery.h": 44,
   "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h": 17,
@@ -195,7 +195,7 @@
   "src/VideoProcessor-Lib/microsoft_directshow/MadVRShaderLoader.cpp": 290,
   "src/VideoProcessor-Lib/microsoft_directshow/live_source_filter/CBufferedLiveSourceVideoOutputPin.cpp": 106,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRenderParameters.cpp": 120,
-  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 20274,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 20187,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 1314,
   "src/VideoProcessor-Test/ConfigFileTests.cpp": 129,
   "src/VideoProcessor-Test/DolbyVisionTunnelFormatterTests.cpp": 400,
