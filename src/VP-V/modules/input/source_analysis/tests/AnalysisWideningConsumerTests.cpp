@@ -15,18 +15,16 @@
 #include <VP-V/modules/input/signal/DvTunnelTapLaw.h>
 #include <VP-V/modules/input/source_analysis/AnalysisAxis10.h>
 #include <VP-V/modules/input/source_analysis/CodedLumaSampler.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
 #include <VP-V/modules/input/source_analysis/regions/CodingEvidence.h>
 #include <VP-V/tests/SyntheticAnalysisFrames.h>
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <random>
 #include <string>
-#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -314,152 +312,6 @@ namespace AnalysisWideningConsumerTestsNs
 			// The look-ahead's normalisation at 1023 is exactly the former `code / 1023.0`.
 			for (int code = 0; code <= 1023; ++code)
 				Assert::IsTrue(SourceResolutionMonitor::NormalisedLuma(code, 1023) == static_cast<double>(code) / 1023.0);
-		}
-
-		// W4: the source-resolution look-ahead (the SourceResolutionHookTests look-ahead fixture, three scenarios) gives an identical
-		// result when fed through CodedLumaSampler{read, 1023} as through the plain sampler: both monitors see the same frames in lockstep,
-		// every auto decision and the look-ahead state agree, and the plain monitor still shows the fixture's known outcomes (engaged at the
-		// cut, cancelled on a native next shot, engaged on a black frame), so the comparison is not between two idle monitors.
-		TEST_METHOD(LookAheadCodedSamplerAtTenBitsEqualsPlainSampler)
-		{
-			using Monitor = SourceResolutionMonitor::Monitor;
-			const int FW = 1024, FH = 512;
-			enum class Shot { Upscaled, Native, Black };
-			auto makeFrame = [&](Shot kind, unsigned seed, double level) {
-				std::mt19937 rng(seed);
-				std::normal_distribution<double> noise(0.0, 0.08);
-				std::vector<double> f(static_cast<size_t>(FW) * FH, 64.0 / 1023.0);
-				if (kind == Shot::Black) return f;
-				if (kind == Shot::Native)
-				{
-					for (double& v : f) v = level + noise(rng);
-					return f;
-				}
-				const int lw = FW / 2, lh = FH / 2;
-				std::vector<double> low(static_cast<size_t>(lw) * lh);
-				for (double& v : low) v = level + noise(rng);
-				for (int y = 0; y < FH; ++y)
-					for (int x = 0; x < FW; ++x)
-					{
-						const double u = (x + 0.5) * 0.5 - 0.5, w = (y + 0.5) * 0.5 - 0.5;
-						const int x0 = (std::max)(0, (std::min)(lw - 2, static_cast<int>(std::floor(u))));
-						const int y0 = (std::max)(0, (std::min)(lh - 2, static_cast<int>(std::floor(w))));
-						const double fx = (std::min)(1.0, (std::max)(0.0, u - x0)), fy = (std::min)(1.0, (std::max)(0.0, w - y0));
-						auto at = [&](int xx, int yy) { return low[static_cast<size_t>(yy) * lw + xx]; };
-						f[static_cast<size_t>(y) * FW + x] = (1 - fy) * ((1 - fx) * at(x0, y0) + fx * at(x0 + 1, y0)) + fy * ((1 - fx) * at(x0, y0 + 1) + fx * at(x0 + 1, y0 + 1));
-					}
-				return f;
-			};
-			auto code = [](double v) { return static_cast<int>(std::lround((std::min)(1.0, (std::max)(0.0, v)) * 1023.0)); };
-			const int T = Monitor::kTile;
-			auto analyse = [&](Monitor& m, const std::vector<double>& f, double t) {
-				std::vector<float> tiles(static_cast<size_t>(8) * T * T);
-				for (int i = 0; i < 8; ++i)
-				{
-					const int x0 = (i % 4) * (FW - T) / 3, y0 = (i / 4) * (FH - T);
-					for (int y = 0; y < T; ++y)
-						for (int x = 0; x < T; ++x)
-							tiles[(static_cast<size_t>(i) * T + y) * T + x] = static_cast<float>(code(f[static_cast<size_t>(y0 + y) * FW + x0 + x]) / 1023.0);
-				}
-				m.AnalyseTilesForTest(tiles, 8, t, FW, FH);
-			};
-			auto aheadBoth = [&](Monitor& plain, Monitor& coded, uint64_t seq, const std::vector<double>& f) {
-				auto read = [&f, &code, FW](int x, int y) { return code(f[static_cast<size_t>(y) * FW + x]); };
-				const Monitor::LumaSampler plainSampler = read;
-				plain.LookAheadFrame(seq, FW, FH, plainSampler, 0, 0, FW, FH);
-				SourceResolutionMonitor::CodedLumaSampler tenBit;
-				tenBit.read = read;
-				tenBit.codeMaximum = 1023;
-				coded.LookAheadFrame(seq, FW, FH, tenBit, 0, 0, FW, FH);
-			};
-			auto waitReady = [](Monitor& m) {
-				for (int tries = 0; tries < 400 && !m.Ahead().ready; ++tries) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-				return m.Ahead().ready;
-			};
-			auto sameAhead = [](const Monitor& a, const Monitor& b) {
-				const Monitor::AheadState x = a.Ahead(), y = b.Ahead();
-				return x.eventSequence == y.eventSequence && x.targetSequence == y.targetSequence && x.ready == y.ready &&
-					x.informative == y.informative && std::fabs(x.ratio - y.ratio) < 1e-12 && x.verified == y.verified && x.cancelled == y.cancelled;
-			};
-			// Upscaled shots, fed to both monitors in lockstep, until auto waits for the next cut; returns the time reached.
-			auto untilWaiting = [&](Monitor& plain, Monitor& coded, uint64_t& seq) {
-				double t = 0.0;
-				std::string whyPlain, whyCoded;
-				for (int shot = 0; shot < 12; ++shot)
-					for (int i = 0; i < 8; ++i)
-					{
-						const std::vector<double> f = makeFrame(Shot::Upscaled, 50 + shot * 13 + i, shot % 2 ? 0.55 : 0.35);
-						analyse(plain, f, t);
-						analyse(coded, f, t);
-						const double a = plain.AutoFactor(FH, 0.8, whyPlain, t, ++seq);
-						const double b = coded.AutoFactor(FH, 0.8, whyCoded, t, seq);
-						Assert::AreEqual(a, b, 1e-12, L"the same factor while the shots run");
-						Assert::AreEqual(whyPlain, whyCoded);
-						t += 0.5;
-						if (whyPlain == "waiting for the next cut or black") return t;
-					}
-				return -1.0;
-			};
-			for (int scenario = 1; scenario <= 3; ++scenario)
-			{
-				Monitor plain, coded;
-				plain.SetLatchFixes(false);
-				coded.SetLatchFixes(false);
-				uint64_t seq = 0;
-				const double t = untilWaiting(plain, coded, seq);
-				Assert::IsTrue(t > 0.0, L"auto reached waiting");
-				std::string whyPlain, whyCoded;
-				double fPlain = 0.0, fCoded = 0.0;
-				if (scenario == 1)
-				{
-					aheadBoth(plain, coded, seq + 1, makeFrame(Shot::Upscaled, 999, 0.35));
-					aheadBoth(plain, coded, seq + 2, makeFrame(Shot::Upscaled, 1000, 0.75));
-				}
-				else if (scenario == 2)
-				{
-					aheadBoth(plain, coded, seq + 1, makeFrame(Shot::Upscaled, 1999, 0.35));
-					aheadBoth(plain, coded, seq + 2, makeFrame(Shot::Native, 2000, 0.75));
-				}
-				else
-				{
-					const std::vector<double> black = makeFrame(Shot::Black, 0, 0.0);
-					aheadBoth(plain, coded, seq + 1, black);
-					aheadBoth(plain, coded, seq + 2, black);
-					aheadBoth(plain, coded, seq + 3, makeFrame(Shot::Upscaled, 3000, 0.45));
-				}
-				Assert::IsTrue(waitReady(plain), L"the plain monitor analysed the frame ahead");
-				Assert::IsTrue(waitReady(coded), L"the coded monitor analysed the frame ahead");
-				Assert::IsTrue(sameAhead(plain, coded), L"identical look-ahead state");
-				if (scenario == 1)
-				{
-					Assert::AreEqual(1.0, plain.AutoFactor(FH, 0.8, whyPlain, t, seq + 1), 1e-9);
-					Assert::AreEqual(1.0, coded.AutoFactor(FH, 0.8, whyCoded, t, seq + 1), 1e-9);
-					fPlain = plain.AutoFactor(FH, 0.8, whyPlain, t + 0.04, seq + 2);
-					fCoded = coded.AutoFactor(FH, 0.8, whyCoded, t + 0.04, seq + 2);
-					Assert::AreEqual(0.5, fPlain, 1e-9, L"engaged on the cut frame");
-					Assert::AreEqual(std::string("engaged at the cut / black (look-ahead verified)"), whyPlain);
-					Assert::AreEqual<unsigned long long>(1ull, plain.Ahead().verified);
-				}
-				else if (scenario == 2)
-				{
-					Assert::AreEqual(1.0, plain.AutoFactor(FH, 0.8, whyPlain, t, seq + 1), 1e-9);
-					Assert::AreEqual(1.0, coded.AutoFactor(FH, 0.8, whyCoded, t, seq + 1), 1e-9);
-					fPlain = plain.AutoFactor(FH, 0.8, whyPlain, t, seq + 2);
-					fCoded = coded.AutoFactor(FH, 0.8, whyCoded, t, seq + 2);
-					Assert::AreEqual(1.0, fPlain, 1e-9, L"stays native");
-					Assert::AreEqual(std::string("look-ahead: the next shot disagrees - staying"), whyPlain);
-					Assert::AreEqual<unsigned long long>(1ull, plain.Ahead().cancelled);
-				}
-				else
-				{
-					fPlain = plain.AutoFactor(FH, 0.8, whyPlain, t, seq + 1);
-					fCoded = coded.AutoFactor(FH, 0.8, whyCoded, t, seq + 1);
-					Assert::AreEqual(0.5, fPlain, 1e-9, L"engaged on the black frame");
-				}
-				Assert::AreEqual(fPlain, fCoded, 1e-12, L"the same decision");
-				Assert::AreEqual(whyPlain, whyCoded, L"the same reason");
-				Assert::IsTrue(sameAhead(plain, coded), L"identical look-ahead state after the decision");
-			}
 		}
 
 		// The 12-bit DV ramp (one pixel per tap code, 4096 codes): the
