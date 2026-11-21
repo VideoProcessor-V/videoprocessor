@@ -148,7 +148,12 @@
 		{
 			std::string listEnv, outDir, side;
 			if (!X5AbSupport::Env("VP_X5AB_LIST", listEnv) || listEnv.empty())
-				return;   // not requested: nothing to capture
+			{
+				// An opt-in capture, never a silent pass: the skip is written to the test log in the house SKIP-<KIND> marker form, so
+				// check_trx_coverage counts it as skipped (HardwarePrerequisites.h RequireOrSkip pattern).
+				Logger::WriteMessage("SKIP-OPT-IN X5AbCaptureClips: VP_X5AB_LIST is not set (opt-in capture)\n");
+				return;
+			}
 			const bool outSet = X5AbSupport::Env("VP_X5AB_OUT", outDir);
 			const bool sideSet = X5AbSupport::Env("VP_X5AB_SIDE", side);
 			Assert::IsTrue(outSet && sideSet, L"VP_X5AB_OUT and VP_X5AB_SIDE are required with VP_X5AB_LIST");

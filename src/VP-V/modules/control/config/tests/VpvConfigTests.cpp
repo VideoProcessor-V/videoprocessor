@@ -1486,6 +1486,32 @@ namespace
 		require(file.open(QIODevice::ReadOnly) && file.readAll().contains("global_actions: config_editor"), "global_actions not saved");
 	}
 
+	// GF-P5 S13: the global_actions default the Config shows for an ABSENT key follows the file's pathway as the player reads it:
+	// none in the Original pathway, state_report otherwise; an explicit key is always shown as written; the pathway key is found
+	// in [vpv] and in [vprenderer], its value matched case-insensitively (NormalizeName).
+	void testGlobalActionsDefaultFollowsThePathway()
+	{
+		auto globalActionsText = [](const char* fixture) {
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir, fixture);
+			ConfigEditorWindow window(path, 0, true);
+			return control<QLineEdit>(window, QStringLiteral("config.shortcuts.global_actions"))->text();
+		};
+		// A: the Original pathway, no [shortcuts]: no default.
+		require(globalActionsText("[general]\nrenderer: VP Renderer\n[vpv]\npipeline_original_pathway: on\n").isEmpty(),
+			"Original pathway, key absent: global_actions shows a default");
+		// B: no pathway key: the player's default.
+		require(globalActionsText("[general]\nrenderer: VP Renderer\n") == QStringLiteral("state_report"),
+			"no pathway key, key absent: global_actions does not show state_report");
+		// C: the pathway key in [vprenderer], value spelt On.
+		require(globalActionsText("[general]\nrenderer: VP Renderer\n[vprenderer]\npipeline_original_pathway: On\n").isEmpty(),
+			"Original pathway in [vprenderer] (On): global_actions shows a default");
+		// D: an explicit key wins in the Original pathway.
+		require(globalActionsText("[general]\nrenderer: VP Renderer\n[vpv]\npipeline_original_pathway: on\n"
+				"[shortcuts]\nglobal_actions: config_editor\n") == QStringLiteral("config_editor"),
+			"Original pathway, key present: global_actions is not shown as written");
+	}
+
 	// D3: Bill's tests find Bill's own Chroma upscaler (his five filters); VP-V's list is its own control of the
 	// same key, and a VP-V-only choice is written and shown on Bill's control as his loader shows it.
 	void testChromaBillsControlAndVpvList()
@@ -1890,6 +1916,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: retirement Approve and Keep are recorded without hiding", testRetirementDecisions);
 	failures += run("VP-V: Camera model group writes the keys VP reads", testCameraModelControlsReachVp);
 	failures += run("VP-V: both-pathway cards leave Bill's pages", testBothPathwayCardsLeaveBillsPages);
+	failures += run("VP-V: global_actions default follows the pathway", testGlobalActionsDefaultFollowsThePathway);
 	failures += run("VP-V: Bill's Chroma upscaler and VP-V's list", testChromaBillsControlAndVpvList);
 	failures += run("VP-V: Bill's Dithering stays his, VP-V's list shows the value", testBillsDitheringStaysHis);
 	failures += run("VP-V: Profile use card and the sync directions", testProfileUseAndSyncDirections);

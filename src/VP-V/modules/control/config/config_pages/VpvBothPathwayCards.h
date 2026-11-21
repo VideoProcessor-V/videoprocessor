@@ -37,6 +37,8 @@
 #include <QVBoxLayout>
 #include <QWidget>
 #include <VideoProcessor-Config/ConfigPageHost.h>
+#include <ShortcutDefaults.h>
+#include <string>
 #include <vector>
 
 namespace Vpv
@@ -216,8 +218,20 @@ namespace Vpv
 				auto* globalActionsLayout = new QHBoxLayout(globalActionsRow);
 				globalActionsLayout->setContentsMargins(0, 0, 0, 0);
 				auto* globalActionsLabel = new QLabel(QStringLiteral("Global actions"));
+				// GF-P5 S13: the default shown for an absent key follows the file's pathway, as the player reads it
+				// (ShortcutDefaults.h OriginalPathwayForConfig through the kit's value lookup): none in the Original pathway.
+				const QString absent = QStringLiteral("\x01");   // not a value a key can hold: "the key is absent"
+				const bool originalPathway = ::OriginalPathwayForConfig(
+					[&kit, &absent](const char* section, const char* key, std::string& out)
+					{
+						const QString v = kit.value(QString::fromLatin1(section), QString::fromLatin1(key), absent);
+						if (v == absent)
+							return false;
+						out = v.toStdString();
+						return true;
+					});
 				auto* globalActions = new QLineEdit(kit.value(QStringLiteral("shortcuts"),
-					QStringLiteral("global_actions"), QStringLiteral("state_report")));
+					QStringLiteral("global_actions"), originalPathway ? QString() : QStringLiteral("state_report")));
 				globalActions->setObjectName(kit.controlName(QStringLiteral("shortcuts"), QStringLiteral("global_actions")));
 				globalActions->setAccessibleName(QStringLiteral("Global actions"));
 				globalActions->setPlaceholderText(QStringLiteral("none (for example: state_report, config_editor, toggle_noui)"));

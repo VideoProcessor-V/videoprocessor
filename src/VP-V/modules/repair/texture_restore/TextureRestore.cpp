@@ -571,6 +571,10 @@ if (p.x < sz.x && p.y < sz.y) {
 	void Module::Forget()
 	{
 		softWatch.Forget();   // cut_soft_reset M3: a stage that starts over judges confirmation afresh
+		// GF-P5 S5: a stage that starts over has no scene verdict yet: no stale scene-judge fallback or keep on the status line.
+		sceneUnavailable = false;
+		sceneWhy = nullptr;
+		lastHistoryKeep = 1.0f;
 		if (impl) impl->forget = true;
 	}
 
@@ -858,6 +862,13 @@ if (p.x < sz.x && p.y < sz.y) {
 				}
 				softWatch.Note(scene);   // M3: provisional groups only = the switch is inert, shown on the status line
 				lastHistoryKeep = scene.historyKeep;
+			}
+			else
+			{
+				// GF-P5 S5: a self-restart frame (restartAll) asks no scene verdict: the last frame's is not carried over.
+				sceneUnavailable = false;
+				sceneWhy = nullptr;
+				lastHistoryKeep = 0.0f;
 			}
 			const float restartF = restartAll || sceneRestart ? 1.0f : 0.0f;
 			const float fg = static_cast<float>(std::pow(kGrainFloorCodes8 * eight * cu, 2.0));
