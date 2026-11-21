@@ -956,7 +956,7 @@ namespace Vpv
 		{
 			// R2: the memo's GPU device follows the renderer's pl_gpu. Render thread (GpuCreated) or under ownerFillsMutex_ at the memo's
 			// creation. Another pl_gpu at the same address = the old device died (its objects are forgotten, never destroyed).
-			void DetachMemoGpu(MemoHost& mh, bool gpuAlive);
+			void DetachMemoGpu(MemoHost& mh, bool gpuAlive, bool laneGpuDispatcher = false);
 			void AttachMemoGpu(MemoHost& mh, const void* gpu)
 			{
 				if (gpu == nullptr || (mh.gpuDevice && mh.gpuDevice->OwnerGpu() == gpu))
@@ -965,14 +965,23 @@ namespace Vpv
 					DetachMemoGpu(mh, false);
 				mh.gpuDevice = std::make_shared<OwnerGpuDevice>(static_cast<pl_gpu>(gpu));
 				mh.memo->SetGpuDevice(mh.gpuDevice.get());
+				// GF-P2b MUST-3 (GV AMEND, attach side; the binder side is GF-P1 d0f2cbee3): a bound lane's binder set the presence from
+				// lane dispatcher || device at bind time, and PlanNoLaneGpu skips a lane-bound memo, so a device attached after the bind
+				// re-asserts it here (a shadow / raised lane has no dispatcher, yet the device serves the non-view GPU owner fills).
+				if (mh.memo->LaneBound())
+					mh.memo->SetGpuDispatcherPresent(true);
 			}
 			// The device goes: the memo stops handing the context out, releases every GPU spot (their textures go back to the device),
-			// then the device destroys them (alive) or forgets them (died).
-			void DetachMemoGpu(MemoHost& mh, bool gpuAlive)
+			// then the device destroys them (alive) or forgets them (died). `laneGpuDispatcher`: the bound lane has its own GPU dispatcher.
+			void DetachMemoGpu(MemoHost& mh, bool gpuAlive, bool laneGpuDispatcher)
 			{
 				if (!mh.gpuDevice)
 					return;
 				mh.memo->SetGpuDevice(nullptr);
+				// GF-P2b MUST-3 (detach side): while a lane is bound the presence is the lane's dispatcher only once the device is gone (the
+				// binder's rule, lane dispatcher || device); a memo without a lane is re-planned by PlanNoLaneGpu (pl_gpu known).
+				if (mh.memo->LaneBound())
+					mh.memo->SetGpuDispatcherPresent(laneGpuDispatcher);
 				if (!gpuAlive)
 					mh.gpuDevice->Abandon();
 				mh.memo->ReleaseGpuSpots();
@@ -1230,8 +1239,12 @@ namespace Vpv
 				// for it (its pl_dispatch is forgotten, not reused). Covers a memo-only host too (no lane state).
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
 				{
+					bool laneGpuDispatcher = false;   // GF-P2b MUST-3: the presence a bound lane keeps once the device is gone
+					if (const std::shared_ptr<HostState> hs = hosts_.Find(f.host))
+						if (const std::shared_ptr<Bundle> hb = std::atomic_load(&hs->bundle))
+							laneGpuDispatcher = hb->lane.HasGpuDispatcher();
 					std::lock_guard<std::mutex> lock(ownerFillsMutex_);
-					DetachMemoGpu(*mh, false);
+					DetachMemoGpu(*mh, false, laneGpuDispatcher);
 				}
 				hosts_.SetAux(f.host, f.device);   // the raw device, for the video memory query only
 				gpuSlots_.SetAux(f.host, const_cast<void*>(static_cast<const void*>(f.gpu)));   // 70b G5: the renderer's pl_gpu (null in a unit test: no GPU products)
