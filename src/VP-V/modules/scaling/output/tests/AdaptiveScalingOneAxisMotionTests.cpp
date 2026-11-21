@@ -423,7 +423,8 @@ namespace VideoProcessorTest
 							Terms t;
 							t.edge = ei * 0.25f;
 							t.grain = gi * 0.25f;
-							t.motion = MotionTerm(mi < 4, mi * 0.25f, 0.25f);
+							// The valid map factors span the model's whole domain 0..1 (mi 0..3: 0, 1/3, 2/3, 1); mi 4 = no vectors, the floor.
+							t.motion = MotionTerm(mi < 4, mi / 3.0f, 0.25f);
 							const float w = Weight(t);
 							wMin = (std::min)(wMin, w);
 							wMax = (std::max)(wMax, w);
