@@ -12,7 +12,16 @@ Sources (no hand-kept key list):
   section, Config control, default, flags;
 - docs/design/vpv-tiers.json: the VP-V page sub-page (pipeline unit), tier presets (`set`) and toggles;
 - VpvRendererSettings.cpp ApplyOriginal ("// key=" lines): the Original-pathway value;
-- the module MANIFEST.json files: the "Fallbacks engaged" entry of the slot behind a key.
+- the module MANIFEST.json files: the "Fallbacks engaged" entry of the slot behind a key;
+- docs/settings/MASTER-SETTINGS.md (generated from the module README '## Settings' tables, defaults
+  checked against the golden by check_master_settings): default, placement and status of a key the
+  coverage audit has no row for yet (the audit needs a Config test inventory, so it lags new keys),
+  and the shipped default of a boolean key whose audit default disagrees (the audit predates the change);
+- the Config coverage test allow-list (ConfigEditorWindowTests.cpp, read only): the reason of a key the
+  coverage audit has no row for yet (the audit's flags column carries the same reason);
+- the Config card table (VpvOrganisation.h Organisation(), resolved by check_config_placement.build_table,
+  read only): the VP-V card of a key that is neither a tier toggle nor a taste key, in place of the
+  audit's VP-V placement (the audit predates card moves).
 The table says nothing about any particular display: tiers are budget-driven.
 """
 import json
@@ -159,6 +168,48 @@ def fallback_entries():
     return out
 
 
+def master_rows():
+    """key -> list of MASTER-SETTINGS rows (type, default, placement, status), one per section."""
+    out = {}
+    for line in read(ROOT / "docs" / "settings" / "MASTER-SETTINGS.md").split("\n"):
+        m = re.match(r"\| `([^`]+)` \| `[^`]*` \| (.*) \|$", line)
+        if not m:
+            continue
+        c = [x.strip() for x in m.group(2).split(" | ")]
+        if len(c) < 9:
+            continue
+        # columns after Key, Module: Section, Type, Range, Default, Golden, Placement, Original, Status, Tiers
+        out.setdefault(m.group(1), []).append(dict(type=c[1], default=c[3], placement=c[5], status=c[7]))
+    return out
+
+
+def allow_list_reasons():
+    """renderer key -> reason, from the Config coverage test's allow-list (read only)."""
+    text = read(ROOT / "src" / "VideoProcessor-ConfigTests" / "ConfigEditorWindowTests.cpp")
+    return {m.group(1): m.group(2) for m in re.finditer(r'\{\s*"renderer:(\w+)",\s*"((?:[^"\\]|\\.)*)"\s*\}', text)}
+
+
+def card_placements(keys):
+    """key -> 'VP-V > <Unit> > <Main|Advanced> > <card title>' from the one placement table (read only).
+
+    Calls check_config_placement.build_table READ-ONLY: it parses VpvOrganisation.h and Bill's
+    ConfigEditorWindow.cpp section spans and returns the table; nothing is written (its --write path is
+    not used). The checker belongs to S-CHK and is not changed here; this only reuses its parser so the
+    README and the checker agree on one source."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import check_config_placement as P   # noqa: E402  (read-only use of build_table; checker owned by S-CHK)
+    _cards, placement, _sections, _errors = P.build_table(str(ROOT), set(keys))
+    return {k: card["text"] for k, card in placement.items() if k in keys}
+
+
+BOOL_WORDS = {"on": True, "checked": True, "true": True, "off": False, "unchecked": False, "false": False}
+
+
+def shown_default(text):
+    t = text.strip().strip("`")
+    return t[:1].upper() + t[1:]
+
+
 def cell(s):
     return (s or "-").replace("|", "/").replace("\n", " ")
 
@@ -169,6 +220,8 @@ def build():
     toggle, taste, sets = tiers()
     orig = original()
     fb = fallback_entries()
+    master = master_rows()
+    reasons = allow_list_reasons()
     entries = []
     for k, (g, t) in prof.items():
         entries.append((k, GROUP_SECTION[g], t, g))
@@ -182,17 +235,35 @@ def build():
         if k not in seen:
             entries.append((k, "[vpv]", "see ValidateBaseSetting", "base"))
     entries.sort(key=lambda e: (e[3], e[0]))
+    cards = card_placements({e[0] for e in entries})
     lines = ["| Key | Section | Type / range | Default | Config placement | Original (Bill) | Fallback / status | Tier differences |",
              "|---|---|---|---|---|---|---|---|"]
     for k, sec, typ, grp in entries:
-        a0 = audit.get(k, [{}])[0]
+        a0 = dict(audit.get(k, [{}])[0])
+        ms = master.get(k, [])
+        ms0 = ms[0] if len(ms) == 1 else None   # a name in several sections: no unambiguous row
+        master_status = ""
+        if not a0 and ms0:
+            # No coverage-audit row yet: the module's Settings row (via MASTER-SETTINGS) and the
+            # coverage test's allow-list reason stand in for the audit's columns.
+            a0 = dict(default=shown_default(ms0["default"]), vpv=ms0["placement"], flags=reasons.get(k, ""))
+            master_status = ms0["status"]
+        elif ms0 and ms0["type"] == "bool":
+            a, d = BOOL_WORDS.get(a0.get("default", "").lower()), BOOL_WORDS.get(ms0["default"].strip("`").lower())
+            if a is not None and d is not None and a != d:
+                a0["default"] = shown_default(ms0["default"])   # the shipped default (golden-checked)
         place = []
         if a0.get("upstream") and a0["upstream"] != "-":
-            place.append(a0["upstream"])
+            # a key on a VP-V card: the audit's coarse VP-V entry gives way to the card (Bill pages stay)
+            up = [p for p in a0["upstream"].split("; ") if not (k in cards and p.startswith("VP-V"))]
+            if up:
+                place.append("; ".join(up))
         if k in toggle:
-            place.append("VP-V page > %s (toggle)" % toggle[k][0])
+            place.append("%s (toggle)" % cards[k] if k in cards else "VP-V page > %s (toggle)" % toggle[k][0])
         elif k in taste:
-            place.append("VP-V page > %s (taste)" % taste[k])
+            place.append("%s (taste)" % cards[k] if k in cards else "VP-V page > %s (taste)" % taste[k])
+        elif k in cards:
+            place.append(cards[k])   # the card the Config editor builds the key on
         elif a0.get("vpv") and a0["vpv"] != "-":
             place.append(a0["vpv"])
         if not place:
@@ -205,12 +276,16 @@ def build():
             status.append(fb[slot])
         if a0.get("flags"):
             status.append(a0["flags"])
+        if master_status and master_status != "-":
+            status.append(master_status)
         tier = "; ".join("%s %s=%s" % (u, t, v) for u, t, v in sets.get(k, []))
         lines.append("| `%s` | %s | %s | %s | %s | %s | %s | %s |" % (
             k, cell(sec), cell(typ), cell("" if a0.get("default", "") in ("px", "ms", "s", "%", "unit", "value") else a0.get("default", "")), cell("; ".join(place)),
             cell(original_cell), cell("; ".join(status)), cell(tier)))
     head = ("Generated by `tools/gen_control_config_readme.py` from the schema headers, the settings coverage audit, "
-            "`docs/design/vpv-tiers.json`, `ApplyOriginal` and the module manifests; do not edit by hand. "
+            "`docs/design/vpv-tiers.json`, `ApplyOriginal`, the module manifests and, for keys the audit has no row for "
+            "yet, `docs/settings/MASTER-SETTINGS.md` and the Config coverage test's allow-list; do not edit by hand (notes go "
+            "in the module's Settings row). "
             "%d settings. Tiers are budget-driven (the tier presets list the values they set); no setting is tied to "
             "one display or GPU model.\n\n" % len(entries))
     return head + "\n".join(lines) + "\n"
