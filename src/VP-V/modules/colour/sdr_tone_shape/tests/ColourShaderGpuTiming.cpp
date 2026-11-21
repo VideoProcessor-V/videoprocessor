@@ -201,5 +201,44 @@ namespace VideoProcessorTest
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
 		}
+
+		// GEM-015: SDR tone shape.glsl, the headroom-only short-circuit (strength 0) next to the knee-only and knee + recovery
+		// forms for context (those two paths change only by the centre-tap reuse). Quote BEFORE (the commit before e41eab639)
+		// and AFTER from the TRX StdOut.
+		BEGIN_TEST_METHOD_ATTRIBUTE(SdrToneShapeHeadroomOnlyGpuTiming)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SdrToneShapeHeadroomOnlyGpuTiming)
+		{
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "SdrToneShapeHeadroomOnlyGpuTiming",
+				ExtendedRangeGpuProbe::OnHardwareGpu(), "VP_TEST_GPU=hardware is not set: the timing test runs only on a gpu=yes line"))
+				return;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
+			BundledHook shape(fixture, "SDR tone shape.glsl", "sdr_tone_shape");
+			const pl_hook* hook = shape.hook;
+			const Timing without = TimeRender(fixture, nullptr);
+			struct Variant { const char* name; double headroom, strength, recovery; };
+			const Variant variants[] = {
+				{ "headroom only (strength 0)", 0.15, 0.0, 0.0 },
+				{ "knee only (strength 0.5)", 0.15, 0.5, 0.0 },
+				{ "knee + recovery 1.0", 0.15, 0.5, 1.0 },
+			};
+			for (const Variant& v : variants)
+			{
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "headroom", v.headroom));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee_start", 0.8));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "strength", v.strength));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "eotf", 2.2));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "recovery", v.recovery));
+				const std::string name = v.name;
+				AssertHookActs(fixture, hook, std::wstring(name.begin(), name.end()).c_str());
+				LogTiming("SdrToneShapeHeadroomOnlyGpuTiming", v.name, TimeRender(fixture, hook), without);
+			}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
+		}
 	};
 }
