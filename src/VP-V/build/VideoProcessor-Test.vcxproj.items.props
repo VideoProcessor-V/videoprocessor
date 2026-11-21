@@ -531,6 +531,7 @@
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvTrimSelectionTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvDolbyStyleTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvHostStageTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvSyntheticIdentityTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvSignalL8HoldTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncEventTests.cpp" />
