@@ -938,6 +938,8 @@ namespace SkeletonCoreContextTestsNs
 			Assert::IsTrue(p4->by != nullptr && std::string(p4->by) == kName, L"by the requester's name");
 
 			// The window: the active demands feed the terms; with the queue ahead >= 6 the ceiling binds and says so.
+			// NOTE: the mapping d.by -> AheadDemand::consumer below is written here, in the test. In production that naming is the
+			// SkeletonModule call-site glue of P2b (gate C2), not yet in DeriveMemoWindow; this test proves the binder and the window law.
 			QueueWindowTerms t;
 			t.laneLead = 6;
 			t.wired = uint8_t(t.wired | QueueWindowTerms::kLaneLead);
