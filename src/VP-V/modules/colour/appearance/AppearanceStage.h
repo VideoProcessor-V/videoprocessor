@@ -173,6 +173,15 @@ namespace AppearanceStage
 	{
 		return ambientAdapt || AmbientAdaptGivenBack(replaced, appearanceActive);
 	}
+	// Gate G1 MUST-5: the host's LED intent evaluation runs on the SAVED ambient_adapt (or intent_black / intent_display, or
+	// a non-zero LED limit already sent). True while ambient_adapt is given back but none of those runs it: the LED shadow
+	// cap's ambient term is then not refreshed (FallbackCatalog::AmbientAdaptLedShadowCapSaved lists it).
+	inline bool LedShadowCapUsesSavedAmbient(bool givenBack, bool savedAmbientAdapt, bool intentBlackOn, bool intentDisplay,
+		double sentShadowMinimumShare, double sentAmbientBlackNits)
+	{
+		return givenBack && !savedAmbientAdapt && !intentBlackOn && !intentDisplay &&
+			sentShadowMinimumShare == 0.0 && sentAmbientBlackNits == 0.0;
+	}
 
 	inline Decision Decide(const Inputs& in, RoomLight::Smoother& smoother)
 	{

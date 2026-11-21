@@ -736,6 +736,12 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     // ConfigureIntentAmbient gives it back on the other frames, AppearanceStage::AmbientAdaptOn).
     SyncFallback(FallbackCatalog::AmbientAdaptReplaced(activeSettings.ambientAdaptReplaced &&
         !AppearanceStage::AmbientAdaptGivenBack(activeSettings.ambientAdaptReplaced, dvStage.AppearanceDecision().active)));   // VPV-FALLBACK ambient_adapt: replaced by appearance
+    // Gate G1 MUST-5: ambient_adapt given back, but the LED intent evaluation follows the saved setting: listed (Ctrl+I,
+    // Config status, problem report), never silent.
+    SyncFallback(FallbackCatalog::AmbientAdaptLedShadowCapSaved(AppearanceStage::LedShadowCapUsesSavedAmbient(
+        AppearanceStage::AmbientAdaptGivenBack(activeSettings.ambientAdaptReplaced, dvStage.AppearanceDecision().active),
+        activeSettings.ambientAdapt, activeSettings.intentBlack != BlackIntentMode::Off, activeSettings.intentDisplay,
+        vpv.led.intent.ledIntentLimitsSent.shadowMinimumShare, vpv.led.intent.ledIntentLimitsSent.ambientBlackNits)));   // VPV-FALLBACK room-light: LED shadow cap
     if (saturationGivenBack || vpv.led.sdrLift.ambientSdrLift)
     {
         frameColorAdjustment = renderParams.color_adjustment ? *renderParams.color_adjustment : pl_color_adjustment_neutral;
