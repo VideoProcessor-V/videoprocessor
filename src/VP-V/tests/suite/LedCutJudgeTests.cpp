@@ -617,9 +617,10 @@ namespace VideoProcessorTest
 			registration.Set(&rendererA, &storeA);
 			auto projector = std::make_shared<FakeProjector>();
 			projector->openFails = true;   // a dry run: no port
-			auto makeModule = [&projector](const LedDriveConfig& config) {
+			TestClock clock;   // never advanced: the ratchet's hold window (GF-P3 S-P3-1) cannot elapse between the calls below
+			auto makeModule = [&projector, &clock](const LedDriveConfig& config) {
 				return std::unique_ptr<LedDriveModule>(new LedDriveModule(ProjectorConfig(), config,
-					[projector] { return std::make_unique<FakePort>(projector); }));
+					[projector] { return std::make_unique<FakePort>(projector); }, clock));
 			};
 
 			{
