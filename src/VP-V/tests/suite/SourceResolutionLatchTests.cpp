@@ -934,13 +934,6 @@ namespace VideoProcessorTest
 				return st.Add(c);
 			}
 
-			bool Skip(const std::string& root, const char* test)
-			{
-				if (!root.empty()) return false;
-				Logger::WriteMessage((std::string(test) + ": no real footage (VP_TEST_REAL_FOOTAGE or D:\\hfr): skipped\n").c_str());
-				return true;
-			}
-
 			// The first change that engages (either factor below 1) at or after `from` (-1 none).
 			const Change* FirstEngage(const RunResult& r, double from = -1e9)
 			{
@@ -1205,7 +1198,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "NativeFourKNeverEngages")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::NativeFourKNeverEngages", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete(), L"the corpus clips");
@@ -1252,7 +1245,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "UvgFourKUniformNeverEngages")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::UvgFourKUniformNeverEngages", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1284,7 +1277,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "UpscalesEngageAtACutWithTheirClassAndKernel")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::UpscalesEngageAtACutWithTheirClassAndKernel", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1346,7 +1339,7 @@ namespace VideoProcessorTest
 		{
 			using namespace SrcLatch;
 			const std::string root = Root();
-			if (Skip(root, "KernelFitDoesNotHoldTheReadLock")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::KernelFitDoesNotHoldTheReadLock", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1379,7 +1372,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "CutFromNativeToUpscaleAndBack")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::CutFromNativeToUpscaleAndBack", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1421,7 +1414,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "FadeThroughBlackAndLongDarkScene")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::FadeThroughBlackAndLongDarkScene", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1475,7 +1468,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "SoftNativeShotAfterAnEngagedUpscale")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::SoftNativeShotAfterAnEngagedUpscale", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1509,7 +1502,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "MixedScreenGuardOverAnEngagedUpscale")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::MixedScreenGuardOverAnEngagedUpscale", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1599,7 +1592,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "MixedScreenResumeTime")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::MixedScreenResumeTime", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1640,7 +1633,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "LetterboxAndPillarbox")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::LetterboxAndPillarbox", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1710,7 +1703,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "LadderSwitchMidShotAt24_50_60")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::LadderSwitchMidShotAt24_50_60", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1769,7 +1762,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "ClassChangeAtACut")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::ClassChangeAtACut", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1807,7 +1800,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "StaticStill")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::StaticStill", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1844,7 +1837,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "NoiseAndJitterInTheReadings")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::NoiseAndJitterInTheReadings", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1895,7 +1888,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "LookAheadEngagesOnTheCutFrame")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::LookAheadEngagesOnTheCutFrame", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -1936,7 +1929,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "RealCodecStreams")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::RealCodecStreams", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			struct F { const char* file; double truth; };
 			const char* scenes[] = { "Bosphorus", "ShakeNDry", "YachtRide", "park", "Bosphorus", "crowd", "YachtRide", "park", "Jockey" };
@@ -1953,7 +1946,8 @@ namespace VideoProcessorTest
 					const char* kind = pass == 0 ? nativeKinds[i % 4] : upKinds[i % 4];
 					const std::string file = std::string("coded\\") + scenes[i] + "_" + kind + ".yuv";
 					const int clip = st.corpus.Add(file, false, 4);
-					if (clip < 0) { Logger::WriteMessage(("missing " + file + ": skipped\n").c_str()); return; }
+					if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::RealCodecStreams", clip >= 0, "missing " + file))
+						return;
 					Content ct;
 					ct.name = std::string(scenes[i]) + " " + kind;
 					ct.clip = clip; ct.frame0 = 0; ct.frameStep = 1; ct.cycle = 4;
@@ -1979,7 +1973,7 @@ namespace VideoProcessorTest
 		{
 			using namespace SrcLatch;
 			const std::string root = Root();
-			if (Skip(root, "LatchDiagnostics")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::LatchDiagnostics", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -2091,7 +2085,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "LongTakeCrossfadesAfterTheWait")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::LongTakeCrossfadesAfterTheWait", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -2128,7 +2122,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "FastPanSwitchesInALongTake")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::FastPanSwitchesInALongTake", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -2157,7 +2151,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "FadesAndFlashesAreNotCuts")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::FadesAndFlashesAreNotCuts", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -2193,7 +2187,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "DarkAndSoftNativeUnlatchQuickly")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::DarkAndSoftNativeUnlatchQuickly", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
@@ -2240,7 +2234,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "Source1080UsesHeightRelativeTiles")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::Source1080UsesHeightRelativeTiles", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			OutputFrame frame1080(1920, 1080);
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
@@ -2304,7 +2298,7 @@ namespace VideoProcessorTest
 			using namespace SrcLatch;
 			const auto started = std::chrono::steady_clock::now();
 			const std::string root = Root();
-			if (Skip(root, "LatchFixesCalibration")) return;
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::LatchFixesCalibration", !root.empty(), "no real footage (VP_TEST_REAL_FOOTAGE or D:\hfr)")) return;
 			Studio st(root);
 			const Clips c = AddClips(st.corpus);
 			Assert::IsTrue(c.Complete());
