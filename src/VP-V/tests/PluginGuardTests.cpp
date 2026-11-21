@@ -160,6 +160,8 @@ namespace PluginGuardTestsNs
 			for (const bool beta : { false, true })
 			{
 				const std::wstring pluginPath = OptionalRendererLayout::PluginPath(root, beta);
+				Assert::IsNull(GetModuleHandleW(pluginPath.c_str()),
+					L"renderer DLL must not already be pinned in-process before probing the unattached branch");
 				HMODULE plugin = LoadLibraryExW(pluginPath.c_str(), nullptr,
 					LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
 				Assert::IsNotNull(plugin, L"Build the Release renderer DLLs before this test");
@@ -174,18 +176,14 @@ namespace PluginGuardTestsNs
 				g_factoryLog.clear();
 				Assert::IsNull(create(nullptr, 1, nullptr, nullptr, true, 4, VideoConversionOverride::VIDEOCONVERSION_NONE, "", &CollectFactoryLog));
 				const bool unattached = Contains(g_factoryLog, "did not attach");
-				if (unattached)
-				{
-					// The host passes a (dummy) callback: still no renderer, the factory never touches it.
-					char dummy = 0;
-					g_factoryLog.clear();
-					Assert::IsNull(create(reinterpret_cast<IRendererCallback*>(&dummy), 1, nullptr, nullptr, true, 4,
-						VideoConversionOverride::VIDEOCONVERSION_NONE, "", &CollectFactoryLog),
-						L"an unattached DLL builds no renderer");
-					Assert::IsTrue(Contains(g_factoryLog, "did not attach"));
-				}
-				else
-					Logger::WriteMessage("INCONCLUSIVE-UNATTACHED-BRANCH: this DLL instance was attached earlier in the process\n");
+				Assert::IsTrue(unattached, L"a freshly loaded unattached DLL must report did not attach");
+				// The host passes a (dummy) callback: still no renderer, the factory never touches it.
+				char dummy = 0;
+				g_factoryLog.clear();
+				Assert::IsNull(create(reinterpret_cast<IRendererCallback*>(&dummy), 1, nullptr, nullptr, true, 4,
+					VideoConversionOverride::VIDEOCONVERSION_NONE, "", &CollectFactoryLog),
+					L"an unattached DLL builds no renderer");
+				Assert::IsTrue(Contains(g_factoryLog, "did not attach"));
 				create(nullptr, 1, nullptr, nullptr, true, 4, VideoConversionOverride::VIDEOCONVERSION_NONE, "", nullptr);   // drop the test's log sink
 				FreeLibrary(plugin);
 			}

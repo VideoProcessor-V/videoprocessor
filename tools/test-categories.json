@@ -263,6 +263,13 @@
    "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
   },
   {
+   "kind": "method",
+   "value": "WholeHookChainHookTests::EfficiencyStageCostsOnThisGpu",
+   "category": "GpuHardware",
+   "file": "src/VP-V/tests/WholeHookChainHookTests.cpp",
+   "note": "Hardware GPU timing; runs only with VP_TEST_GPU=hardware (Category=GpuHardware)."
+  },
+  {
    "kind": "class",
    "value": "WholeHookChainHookTests",
    "category": "GpuWarp",

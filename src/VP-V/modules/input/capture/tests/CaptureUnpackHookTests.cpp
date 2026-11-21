@@ -25,11 +25,8 @@ namespace VideoProcessorTest
 			std::string log;
 			fixture.CaptureLog(&log);
 			EarlyUpload early;
-			if (!early.Open(fixture.Device(), gpu, 2))
-			{
-				Logger::WriteMessage(("EarlyUpload not available on this device: " + early.LastError() + "\n").c_str());
-				return;   // the renderer then keeps the normal upload
-			}
+			Assert::IsTrue(early.Open(fixture.Device(), gpu, 2),
+				ExtendedRangeGpuProbe::ToWide("EarlyUpload::Open failed: " + early.LastError()).c_str());
 			uint32_t seed = 0xabcdef1u;
 			auto next = [&seed]() { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed; };
 			auto download = [&](pl_tex tex)

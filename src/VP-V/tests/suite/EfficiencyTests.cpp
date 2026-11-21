@@ -369,14 +369,21 @@ namespace VideoProcessorTest
 				const int runs = 10;
 				const auto start = std::chrono::steady_clock::now();
 				int available = 0;
+				ActivePictureEvidence lastEv;
 				for (int i = 0; i < runs; ++i)
-					available += ExtractActivePictureEvidence(source).available ? 1 : 0;
+				{
+					lastEv = ExtractActivePictureEvidence(source);
+					available += lastEv.available ? 1 : 0;
+				}
 				const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / runs;
 				char line[200];
 				snprintf(line, sizeof(line), "ExtractActivePictureEvidence %dx%d: %.3f ms per frame (%d/%d available); "
 					"saved per source frame with a 5-frame queue: about %.3f ms\n",
 					size.first, size.second, ms, available, runs, 4.0 * ms);
 				Logger::WriteMessage(line);
+				Assert::AreEqual(runs, available, L"every run must produce available active-picture evidence");
+				Assert::IsTrue(lastEv.available && lastEv.trustedBounds.top > 0 && lastEv.trustedBounds.bottom < size.second,
+					L"letterboxed picture must yield trusted vertical bounds inside the frame");
 				Assert::IsTrue(ms >= 0.0);
 			}
 		}

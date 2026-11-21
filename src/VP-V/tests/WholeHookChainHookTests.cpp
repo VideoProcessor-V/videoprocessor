@@ -400,9 +400,12 @@ namespace VideoProcessorTest
 		//   - the de-judder's PRE_OUTPUT cache of the rendered picture (a full render with and
 		//     without the cache hook armed: the candidate "fused cache" of the report);
 		//   - re-base 2:1 and the source-resolution monitor for scale.
+		BEGIN_TEST_METHOD_ATTRIBUTE(EfficiencyStageCostsOnThisGpu)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(EfficiencyStageCostsOnThisGpu)
 		{
-			if (!HardwarePrerequisites::RequireConditionOrSkip("EfficiencyStageCostsOnThisGpu",
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "EfficiencyStageCostsOnThisGpu",
 				ExtendedRangeGpuProbe::OnHardwareGpu(), "needs VP_TEST_GPU=hardware (WARP times mean nothing)"))
 				return;
 			TargetLutGpuFixture fixture;
@@ -415,7 +418,8 @@ namespace VideoProcessorTest
 				pl_gpu_finish(gpu);
 				const int runs = 12;
 				const auto start = std::chrono::steady_clock::now();
-				for (int i = 0; i < runs; ++i) pass();
+				for (int i = 0; i < runs; ++i)
+					Assert::IsTrue(pass(), ExtendedRangeGpuProbe::ToWide(name + ": timed run failed").c_str());
 				pl_gpu_finish(gpu);
 				const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / runs;
 				char line[200];
@@ -533,19 +537,23 @@ namespace VideoProcessorTest
 					"frame with the de-judder on; the cache costs %.3f ms per new frame with extras (fused-cache candidate)\n",
 					tag.c_str(), rawMs, cpuRouteMs[0], cpuRouteMs[1], cachedMs - renderMs);
 				Logger::WriteMessage(line);
+				Assert::IsNotNull(cache.Texture(sequence), L"de-judder cache must hold rendered texture after armed pass");
 				cache.Release();
 				// For scale: the re-base and the monitor's tile copy.
 				SourceRebase::Module rebase;
 				pl_frame rebased{};
 				timed(tag + " re-base 2:1 (polar luma + separable chroma)", [&] { return rebase.Apply(gpu, dispatch, source, 0.5, rebased); });
+				Assert::AreEqual(2, rebased.num_planes, L"re-base 2:1 must produce 2 planes");
 				rebase.Release(gpu);
 				SourceResolutionMonitor::Monitor monitor;
 				double seconds = 0.0;
 				timed(tag + " source-resolution monitor tile copy (2 Hz)", [&] {
 					monitor.Frame(gpu, dispatch, source, ++sequence, seconds);
 					seconds += 0.6;
-					return true;
+					return monitor.Read().error.empty();
 				});
+				const SourceResolutionMonitor::Snapshot monSnap = monitor.Read();
+				Assert::IsTrue(monSnap.error.empty(), ExtendedRangeGpuProbe::ToWide("monitor error: " + monSnap.error).c_str());
 				monitor.Release(gpu);
 				pl_tex_destroy(gpu, &target);
 				pl_tex_destroy(gpu, &planes[0]);

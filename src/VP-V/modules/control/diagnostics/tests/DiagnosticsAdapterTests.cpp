@@ -486,8 +486,8 @@ namespace VideoProcessorTest
 		TEST_METHOD(TestAdapterMatchSelectsAndLogs)
 		{
 			IDXGIFactory1* factory = nullptr;
-			if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
-				return;
+			Assert::IsTrue(SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))) && factory != nullptr,
+				L"CreateDXGIFactory1 must succeed on Windows");
 			IDXGIAdapter1* first = nullptr;
 			DXGI_ADAPTER_DESC1 desc{};
 			const bool any = factory->EnumAdapters1(0, &first) != DXGI_ERROR_NOT_FOUND && first &&
@@ -495,8 +495,8 @@ namespace VideoProcessorTest
 			if (first)
 				first->Release();
 			factory->Release();
-			if (!any || !desc.Description[0])
-				return;   // no adapter on this machine: nothing to match
+			Assert::IsTrue(any && desc.Description[0] != 0,
+				L"at least one DXGI adapter with a non-empty description must enumerate on Windows");
 			const EnvRestore restore("VP_TEST_ADAPTER");
 			_putenv_s("VP_TEST_ADAPTER", std::string(CStringA(desc.Description).GetString()).c_str());
 			LogCapture capture;

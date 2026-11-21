@@ -314,21 +314,44 @@ namespace U7CutTruthGateTest
 		return std::string(text);
 	}
 
+	// Checks manifest, ffmpeg, and every required clip id upfront so a missing later clip never returns mid-loop.
+	inline bool RequireAllClips(const char* test, const std::vector<const char*>& clipIds)
+	{
+		const RealClip::Manifest manifest = RealClip::Manifest::Load();
+		if (!HP::RequireOrSkip(HP::Kind::Footage, test, manifest.Loaded(), "clip manifest not loaded: " + manifest.error))
+			return false;
+		if (!HP::RequireOrSkip(HP::Kind::Footage, test, RealClip::FileExists(manifest.ffmpeg), "ffmpeg not found at " + manifest.ffmpeg))
+			return false;
+		for (const char* clipId : clipIds)
+		{
+			const RealClip::Clip* clip = manifest.Find(clipId);
+			if (!HP::RequireOrSkip(HP::Kind::Footage, test, clip != nullptr && RealClip::FileExists(manifest.FullPath(*clip)),
+					std::string("clip ") + clipId + " not in the manifest or its file is missing (" + manifest.path + ")"))
+				return false;
+		}
+		return true;
+	}
+
 	TEST_CLASS(U7CutTruthGateTests)
 	{
 	public:
 		// The combined truth set (Q1): recall and precision >= 99.5 %.
+		BEGIN_TEST_METHOD_ATTRIBUTE(U7Gate_CombinedTruthRecallAndPrecision)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(U7Gate_CombinedTruthRecallAndPrecision)
 		{
 			const char* test = "U7Gate_CombinedTruthRecallAndPrecision";
 			struct Row { const char* id; Truth truth; };
 			const Row rows[] = { { "tos_24p_3min", TosTruth() }, { "cosmos_23976p_3min", CosmosTruth() },
 				{ "meridian_2997p_3min", MeridianTruth() } };
+			if (!RequireAllClips(test, { "tos_24p_3min", "cosmos_23976p_3min", "meridian_2997p_3min" }))
+				return;
 			Score combined;
 			for (const Row& row : rows)
 			{
 				const ClipRun run = RunClip(test, row.id, Synthetic::None);
-				if (!run.ran) return;   // skipped visibly (SKIP-NO-FOOTAGE)
+				Assert::IsTrue(run.ran, L"U7 gate: upfront clip check guaranteed runnable clip");
 				Score own;
 				own.Add(run, row.truth);
 				combined.Add(run, row.truth);
@@ -343,6 +366,9 @@ namespace U7CutTruthGateTest
 		}
 
 		// Pan, flash and fade: ZERO cuts.
+		BEGIN_TEST_METHOD_ATTRIBUTE(U7Gate_ZeroCutsOnPanFlashFade)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(U7Gate_ZeroCutsOnPanFlashFade)
 		{
 			const char* test = "U7Gate_ZeroCutsOnPanFlashFade";
@@ -351,18 +377,14 @@ namespace U7CutTruthGateTest
 				{ "rate_24", "rate_24", Synthetic::None }, { "pan_480pxs_23976p", "pan_480pxs_23976p", Synthetic::None },
 				{ "pan_1440pxs_5994p", "pan_1440pxs_5994p", Synthetic::None },
 				{ "pan_480pxs_fade_23976p", "pan_480pxs_fade_23976p", Synthetic::None } };
+			if (!RequireAllClips(test, { "rate_24", "pan_480pxs_23976p", "pan_1440pxs_5994p", "pan_480pxs_fade_23976p" }))
+				return;
 			Score all;
 			std::string red;
 			for (const Row& row : rows)
 			{
 				const ClipRun run = RunClip(test, row.id, row.synthetic);
-				if (!run.ran)
-				{
-					// Skipped visibly (SKIP-NO-FOOTAGE); cuts already seen on earlier rows still fail the gate.
-					Assert::AreEqual(0, all.falseCuts, Wide("U7GATE " + Line("cut-free set (partial)", all) + " (gate: zero cuts; red rows:" +
-						red + ")").c_str());
-					return;
-				}
+				Assert::IsTrue(run.ran, L"U7 gate: upfront clip check guaranteed runnable clip");
 				Score own;
 				own.Add(run, Truth());
 				all.Add(run, Truth());
