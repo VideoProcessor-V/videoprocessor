@@ -124,7 +124,7 @@ namespace VideoProcessorTest
 			VpSkeleton::Dims luma;       // the source luma the module would have observed (the largest)
 			VpSkeleton::OwnerFill fill;  // the production P1 GPU owner fill, as registered
 			const void* Host() const { return &hostTag; }
-			ProductRig(pl_gpu gpu, pl_dispatch dispatch, uint32_t w, uint32_t h)
+			ProductRig(pl_gpu gpu, pl_dispatch dispatch, uint32_t w, uint32_t h, uint16_t aheadDepth = P1Gpu::kMatcherStructuralAhead)
 			{
 				Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
 				device.gpu = gpu;
@@ -139,7 +139,7 @@ namespace VideoProcessorTest
 				// working set, reserveFor = the exact size of the asked level); the test registers the same fill with luma = w x h.
 				luma.width = w;
 				luma.height = h;
-				fill = P1Gpu::MatcherPyramidOwnerFill(luma);
+				fill = P1Gpu::MatcherPyramidOwnerFill(luma, aheadDepth);
 				Assert::IsTrue(memo->RegisterOwnerFill(VpSkeleton::kP1HalfLuma, AcquireForm::Gpu, "input/source_analysis/lane",
 					fill) == SkeletonMemo::Registration::Registered, L"the production P1 GPU owner fill");
 				// The ledger grant is the memo's own planned need (what the module's grant gives the memo), not a bare 1 GiB.
@@ -258,7 +258,7 @@ namespace VideoProcessorTest
 		};
 
 		std::vector<EstimateResult> RunArm(TargetLutGpuFixture& fixture, const std::vector<Mode>& modes, int w, int h, bool lowRes,
-			ArmLedger* ledger = nullptr)
+			ArmLedger* ledger = nullptr, uint16_t aheadDepth = P1Gpu::kMatcherStructuralAhead)
 		{
 			pl_gpu gpu = fixture.Gpu();
 			struct DispatchHolder
@@ -278,7 +278,7 @@ namespace VideoProcessorTest
 				frames.back()->planes.sequence = uint64_t(i + 1);
 				frames.back()->planes.fullRange = false;   // YUV limited
 			}
-			ProductRig rig(gpu, dispatch.d, uint32_t(w), uint32_t(h));
+			ProductRig rig(gpu, dispatch.d, uint32_t(w), uint32_t(h), aheadDepth);
 			VpMotion::VectorEngine engine(rig.Host());
 			Dejudder::Settings settings = DejudderTestSettings();
 			settings.hostReadable = false;   // a host-readable matcher declines the product (its own format); outputs are snapshotted
@@ -437,17 +437,23 @@ namespace VideoProcessorTest
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
 			const std::vector<Mode> engine(6, Mode::Engine);
 			const std::vector<Mode> ahead(6, Mode::EngineAhead);
-			ArmLedger normalLedger, lowResLedger, aheadLedger;
+			ArmLedger normalLedger, lowResLedger, aheadLedger, normalZeroLedger, lowResZeroLedger;
 			const std::vector<EstimateResult> normal = RunArm(fixture, engine, 512, 256, false, &normalLedger);
 			const std::vector<EstimateResult> lowRes = RunArm(fixture, engine, 2048, 1536, true, &lowResLedger);
 			const std::vector<EstimateResult> pair = RunArm(fixture, ahead, 512, 256, false, &aheadLedger);
+			// R1 fix 3: the same arms registered with aheadDepth 0 (no ahead slack in the memo's need: the failing case of GV's
+			// review). A MUST-2 revert (level 1 reserved for every level, reserveBytes of one level) goes over budget here.
+			const std::vector<EstimateResult> normalZero = RunArm(fixture, engine, 512, 256, false, &normalZeroLedger, 0);
+			const std::vector<EstimateResult> lowResZero = RunArm(fixture, engine, 2048, 1536, true, &lowResZeroLedger, 0);
 			CheckUsedAfterTheFirstPair(normal, false);
 			CheckUsedAfterTheFirstPair(lowRes, true);
+			CheckUsedAfterTheFirstPair(normalZero, false);
+			CheckUsedAfterTheFirstPair(lowResZero, true);
 			for (const EstimateResult& r : pair)
 				Assert::IsTrue(r.bound && r.why.empty(), (L"ahead pair (A offered): served; fallback: " + Wide(r.why)).c_str());
-			const ArmLedger* const ledgers[3] = { &normalLedger, &lowResLedger, &aheadLedger };
-			const wchar_t* const names[3] = { L"normal", L"lowRes", L"ahead pair" };
-			for (int i = 0; i < 3; ++i)
+			const ArmLedger* const ledgers[5] = { &normalLedger, &lowResLedger, &aheadLedger, &normalZeroLedger, &lowResZeroLedger };
+			const wchar_t* const names[5] = { L"normal", L"lowRes", L"ahead pair", L"normal, aheadDepth 0", L"lowRes, aheadDepth 0" };
+			for (int i = 0; i < 5; ++i)
 			{
 				const std::wstring at = std::wstring(names[i]) + L": ";
 				Assert::AreEqual(uint64_t(0), ledgers[i]->overBudget, (at + L"0 OverBudget").c_str());
