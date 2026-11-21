@@ -198,6 +198,7 @@
     <ClCompile Include="dv_loopback\DvLoopbackAnalyzer.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\RawCaptureRecorder.cpp" />
     <ClCompile Include="..\VP-V\modules\input\capture\CTwoPlane420VideoFrameFormatter.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\capture\DeckLinkTranslatePolicy.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\shaders\Temporal sigma-delta.glsl">
