@@ -2031,6 +2031,38 @@ namespace SkeletonModuleTestsNs
 			rig.After(int64_t(n1));
 		}
 
+		// GF-P2a MUST-7 (cache): the scene cache is the render frame's classification. An ahead ask between two asks of the render frame
+		// must not overwrite it: the second ask of the render frame is still a cache hit with the same answer.
+		TEST_METHOD(AnAheadAskDoesNotEvictTheRenderFramesSceneCache)
+		{
+			Rig rig(Lane("on"));
+			FeedAheadWindow(rig, 8);
+			RunToTheSealOfFrame4(rig);
+			rig.Ingress(5);
+			rig.Deliver(6);
+			rig.Ingress(6);
+			rig.Deliver(7);
+			rig.Ingress(7);
+			rig.Deliver(8);
+			rig.Begin(4);
+			const Vpv::Skeleton::SceneAnswer first = rig.sk.SceneOf(rig.Host(), 4);
+			Assert::IsTrue(first.known, (L"the render frame is answered; " + WhyOf(first)).c_str());
+			const Vpv::Skeleton::SceneAnswer ahead = rig.sk.SceneOf(rig.Host(), 8);
+			Assert::IsTrue(ahead.known, (L"the ahead frame is answered; " + WhyOf(ahead)).c_str());
+			const Vpv::Skeleton::SceneCounters before = rig.sk.SceneCountersOf(rig.Host());
+			const Vpv::Skeleton::SceneAnswer second = rig.sk.SceneOf(rig.Host(), 4);
+			const Vpv::Skeleton::SceneCounters after = rig.sk.SceneCountersOf(rig.Host());
+			Assert::IsTrue(second.known);
+			Assert::AreEqual(before.cacheHits + 1, after.cacheHits, L"the second ask of the render frame is a cache hit");
+			Assert::AreEqual(before.liveFills, after.liveFills, L"and nothing was classified again");
+			Assert::AreEqual(first.cut, second.cut);
+			Assert::AreEqual(first.fade, second.fade);
+			Assert::AreEqual(first.cutLate, second.cutLate);
+			Assert::AreEqual(first.cutHere, second.cutHere);
+			Assert::AreEqual(first.confirmed, second.confirmed);
+			rig.After(4);
+		}
+
 		TEST_METHOD(ARegisteredButDisabledStoreCostsNothingAtTheSeal)
 		{
 			Rig rig(Lane("on"));
