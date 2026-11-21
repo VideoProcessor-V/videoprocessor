@@ -9,6 +9,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 
 #include <VP-V/core/ProductGraph.h>
@@ -106,11 +107,9 @@ public:
 	TEST_METHOD(V3PassCosts)
 	{
 		using namespace GrainSplitV3CostBenchNs;
-		if (!ExtendedRangeGpuProbe::OnHardwareGpu())
-		{
-			Logger::WriteMessage("GrainSplitV3CostBench: not on a hardware GPU (VP_TEST_GPU=hardware): the cost bench returns without a measurement");
+		if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "V3PassCosts",
+			ExtendedRangeGpuProbe::OnHardwareGpu(), "needs VP_TEST_GPU=hardware"))
 			return;
-		}
 		TargetLutGpuFixture fixture;
 		Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
 		pl_gpu gpu = fixture.Gpu();
@@ -185,6 +184,8 @@ public:
 						Fmt(": gpu ms mean %.4f p95 %.4f max %.4f", st.mean, st.p95, st.peak));
 				}
 				const Stat tt = StatOf(total), ww = StatOf(wall);
+				Assert::IsTrue(std::isfinite(tt.mean) && tt.mean > 0.0, L"GPU total mean ms must be finite and positive");
+				Assert::IsTrue(std::isfinite(ww.mean) && ww.mean > 0.0, L"wall total mean ms must be finite and positive");
 				LogLine(Fmt("V3 cost %.0fx%.0f B %.0f ", w, h, B) + name + Fmt(" TOTAL (%.0f frames): gpu ms mean %.4f p95 %.4f max %.4f", kTimed, tt.mean, tt.p95, tt.peak) +
 					Fmt("; wall ms (7 passes + finish) mean %.4f p95 %.4f max %.4f", ww.mean, ww.p95, ww.peak));
 

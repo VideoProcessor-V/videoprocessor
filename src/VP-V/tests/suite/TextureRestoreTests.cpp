@@ -3,6 +3,7 @@
 
 #include <VP-V/tests/support/TextureRestoreModel.h>
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <VP-V/modules/repair/texture_restore/TextureRestore.h>
 #include <VP-V/core/Ramp.h>
@@ -794,6 +795,9 @@ namespace TextureRestoreTestsNs
 		}
 
 		// ---- Real clip (VP_TEST_REAL_FOOTAGE\breathing: x265 CRF 24 / 32 of a clean 1536x768 source) ----
+		BEGIN_TEST_METHOD_ATTRIBUTE(TextureRestoreRealClipBreathing)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(TextureRestoreRealClipBreathing)
 		{
 			char* folderValue = nullptr;
@@ -801,11 +805,9 @@ namespace TextureRestoreTestsNs
 			std::string folder;
 			if (_dupenv_s(&folderValue, &folderLength, "VP_TEST_REAL_FOOTAGE") == 0 && folderValue) folder = folderValue;
 			std::free(folderValue);
-			if (folder.empty())
-			{
-				Log("TextureRestoreRealClipBreathing: VP_TEST_REAL_FOOTAGE not set; skipped");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage,
+				"TextureRestoreRealClipBreathing", !folder.empty(), "set VP_TEST_REAL_FOOTAGE"))
 				return;
-			}
 			const std::string dir = folder + "\\breathing\\";
 			const int W = 1536, H = 768, N = 48;
 			auto readLuma = [&](const std::string& name, int i, Image& y) {
@@ -828,11 +830,10 @@ namespace TextureRestoreTestsNs
 			};
 			auto psnr = [](double mse) { return 10.0 * std::log10(1023.0 * 1023.0 / (std::max)(mse, 1e-12)); };
 			Image probe;
-			if (!readLuma("orig.yuv", 0, probe))
-			{
-				Log("TextureRestoreRealClipBreathing: breathing clips not found; skipped");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage,
+				"TextureRestoreRealClipBreathing", readLuma("orig.yuv", 0, probe),
+				"breathing clips not found under " + dir))
 				return;
-			}
 			for (int run = 0; run < 4; ++run)
 			{
 				const int crf = run < 2 ? 24 : 32;
@@ -1350,16 +1351,17 @@ namespace TextureRestoreTestsNs
 			pl_tex_destroy(gpu, &tex);
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(TextureRestoreGpuTiming)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(TextureRestoreGpuTiming)
 		{
 			// Hardware only (VP_TEST_GPU=hardware): Apply at 3840x2160 and 1920x1080, median wall
 			// time with pl_gpu_finish per frame (targets: 4K <= 2.5 ms on an RTX 3050 Ti laptop,
 			// about 0.6 ms on an RTX 3090).
-			if (!ExtendedRangeGpuProbe::OnHardwareGpu())
-			{
-				Logger::WriteMessage("TextureRestoreGpuTiming: VP_TEST_GPU=hardware only; not run");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu,
+				"TextureRestoreGpuTiming", ExtendedRangeGpuProbe::OnHardwareGpu(), "needs VP_TEST_GPU=hardware"))
 				return;
-			}
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			pl_gpu gpu = dev.Gpu();
@@ -1387,8 +1389,10 @@ namespace TextureRestoreTestsNs
 					if (k >= 8) ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
 				}
 				std::sort(ms.begin(), ms.end());
+				const double medianMs = ms[ms.size() / 2];
+				Assert::IsTrue(std::isfinite(medianMs) && medianMs > 0.0, L"TextureRestore median GPU time must be finite and positive");
 				char text[160];
-				snprintf(text, sizeof(text), "texture restore %dx%d: median %.3f ms (min %.3f, max %.3f) over %zu frames", s[0], s[1], ms[ms.size() / 2], ms.front(), ms.back(), ms.size());
+				snprintf(text, sizeof(text), "texture restore %dx%d: median %.3f ms (min %.3f, max %.3f) over %zu frames", s[0], s[1], medianMs, ms.front(), ms.back(), ms.size());
 				Logger::WriteMessage(text);
 				module.Release(gpu);
 				pl_tex_destroy(gpu, &tex);
