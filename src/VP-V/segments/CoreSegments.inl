@@ -723,11 +723,23 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         outputEncodingRepairLogged = true;
     }
     frameParams = renderParams;
+    // CF1-FIN SHOULD B: saturation is replaced only while appearance is ACTIVE this frame. PostLoad forced the step off for a
+    // configured appearance; a frame where the pass is not active (a calibration LUT before it) gets the user's saturation
+    // back, and the Fallbacks row follows the frame. Never on the Original pathway (saturationReplaced is false there).
+    const bool saturationGivenBack = activeSettings.saturationReplaced && !dvStage.AppearanceDecision().active;
+    SyncFallback(FallbackCatalog::SaturationReplaced(activeSettings.saturationReplaced && !saturationGivenBack,
+        activeSettings.saturationConfigured));   // VPV-FALLBACK saturation: replaced by appearance
+    if (saturationGivenBack || vpv.led.sdrLift.ambientSdrLift)
+    {
+        frameColorAdjustment = renderParams.color_adjustment ? *renderParams.color_adjustment : pl_color_adjustment_neutral;
+        if (saturationGivenBack)
+            frameColorAdjustment.saturation = 1.0f + static_cast<float>(activeSettings.saturationConfigured) / 100.0f;
+        frameParams.color_adjustment = &frameColorAdjustment;
+    }
     // Hunt 3 F2: ambient adaptation's SDR black lift, on top of the configured adjustment
     // (saturation): libplacebo's colour decode, before anything else sees the picture.
     if (vpv.led.sdrLift.ambientSdrLift)
     {
-        frameColorAdjustment = renderParams.color_adjustment ? *renderParams.color_adjustment : pl_color_adjustment_neutral;
         LibplaceboRenderParameters::ApplySdrAmbientLift(vpv.led.sdrLift.ambientSdrContrast, vpv.led.sdrLift.ambientSdrBrightness, frameColorAdjustment);
         frameParams.color_adjustment = &frameColorAdjustment;
     }

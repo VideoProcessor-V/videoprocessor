@@ -1036,7 +1036,10 @@ namespace VpvRendererSettings
 		// pipeline_slots_off, never on the Original pathway) ambient_adapt is forced off, and the Fallbacks line says so.
 		{
 			const bool appearanceSlotOff = settings.pipelineSlotsOff.find("colour.appearance") != std::string::npos;
-			const bool appearanceRuns = settings.appearance && !settings.pipelineOriginalPathway && !appearanceSlotOff;
+			// CF1-FIN SHOULD B: strength 0 is the identity (the pass is not active), so it replaces nothing. A calibration LUT
+			// before the pass (lutConflict) is per frame: the colour segment gives saturation back on such frames.
+			const bool appearanceRuns = settings.appearance && settings.appearanceStrength > 0.0 && !settings.pipelineOriginalPathway &&
+				!appearanceSlotOff;
 			settings.ambientAdaptReplaced = appearanceRuns && settings.ambientAdapt;
 			if (settings.ambientAdaptReplaced)
 				settings.ambientAdapt = false;
