@@ -191,6 +191,16 @@ namespace CameraExtensionTestsNs
 			CameraLink::CameraLinkCore* core = rig.ext.CoreOf(rig.Host());
 			Assert::IsNotNull(core);
 			Assert::IsFalse(core->Allocated());
+			// The same seal-less setup with the fit wanted (camera_model on) must SAY so: a Fallbacks entry with the real wording
+			// (CameraExtension.cpp, DriveFrame), never a silent idle.
+			Rig wanted("[vpv.skeleton]\ncamera_link=report\n[vpv.camera]\ncamera_model=on\n");
+			wanted.ResyncApply("off");
+			wanted.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				wanted.Frame(s);
+			Assert::IsTrue(wanted.ext.FitWanted(wanted.Host()), L"camera_model on wants the fit");
+			Assert::IsTrue(Has(wanted.Lines(RE::StatusKind::Fallbacks), "camera_fit: camera fit waits for resync_event: turn resync_event on"),
+				L"the missing seal is a named fallback, not silence");
 		}
 
 		TEST_METHOD(OriginalPathwayForcesOff)
