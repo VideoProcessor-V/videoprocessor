@@ -165,16 +165,17 @@ namespace BandFromBase
 	// GLSL for one band: weights as literals from Weight(), plus the two edge-replicating taps loops.
 	// Entry names: vpu_band_from_base_r (radius), vpu_band_from_base_w(k), vpu_band_from_base_across / _down.
 	// Not wired into a pass yet (consumers keep their own pass structure); the text is the contract.
-	inline std::string Glsl(const Params& p)
+	// The same text from explicit taps -r..r (odd length): Glsl(Params) is exactly GlslFromTaps(Taps<double>(...)). The band memo (BandMemo.h,
+	// P30) also feeds it the taps of Bill's low-band law (GrainPreserve::LowWeight), so ONE emitter serves both laws.
+	inline std::string GlslFromTaps(const std::vector<double>& taps)
 	{
-		const double sigma = p.SigmaPx();
-		const int r = Radius(p);
+		const int r = static_cast<int>(taps.size() / 2);
 		std::string s = "#define VPU_BAND_FROM_BASE_VERSION " + std::to_string(kUnitVersion) + "\n";
 		s += "#define VPU_BAND_FROM_BASE_R " + std::to_string(r) + "\n";
 		s += "const float vpu_band_from_base_tab[" + std::to_string(2 * r + 1) + "] = float[" + std::to_string(2 * r + 1) + "](";
 		for (int i = -r; i <= r; ++i)
 		{
-			s += GlslNum(Weight(i, sigma, r));
+			s += GlslNum(taps[static_cast<size_t>(i + r)]);
 			if (i < r) s += ", ";
 		}
 		s += ");\n";
@@ -186,6 +187,10 @@ namespace BandFromBase
 			"    for (int i = -VPU_BAND_FROM_BASE_R; i <= VPU_BAND_FROM_BASE_R; i++)\n"
 			"        acc += vpu_band_from_base_w(i) * texelFetch(src, clamp(q + ivec2(0, i), ivec2(0), hi), 0);\n    return acc;\n}\n";
 		return s;
+	}
+	inline std::string Glsl(const Params& p)
+	{
+		return GlslFromTaps(Taps<double>(p.SigmaPx(), p.factor, p.minOne, p.eps));
 	}
 	// CPU reference of the shared low band (B3). Input is the HALF-resolution plane (P1, the shared half_luma_downsample
 	// product, acquired from the skeleton; this unit holds no 2x2 box of its own). Applies Bill's Gaussian law

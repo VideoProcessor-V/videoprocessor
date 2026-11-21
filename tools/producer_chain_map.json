@@ -27,6 +27,7 @@
     "kP9CameraSmoothed": {"files": ["motion/estimation/global_model/link/CameraLinkCore.cpp"]},
     "kP7gCameraGuide": {"files": ["motion/estimation/global_model/link/GuideLaneJob.cpp"]},
     "kP10GrainSplit": {"files": ["control/skeleton/gpu/SkeletonGpuDispatcher.cpp", "input/source_analysis/lane/LaneGpuProducts.cpp"]},
+    "kBandMemo": {"files": ["repair/grain_split/BandMemoFill.h"]},
     "kP11RegionBlockStats": {"files": ["control/skeleton/gpu/SkeletonGpuDispatcher.cpp", "input/source_analysis/lane/LaneGpuRegionKernel.cpp", "input/source_analysis/lane/LaneGpuJobs.h"]},
     "kP12LightLevel": {"files": ["input/source_analysis/lane/LaneGpuLightKernel.cpp"]},
     "kSourceIdentity": {"files": ["input/source_analysis/identity/SourceIdPipeline.h"]},
