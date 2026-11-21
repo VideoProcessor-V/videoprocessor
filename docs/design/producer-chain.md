@@ -22,8 +22,8 @@ Counts: R 11, X 7, N 12, NP 33.
 |  |  |  | P2 (undeclared) | X | outside-acquire: CameraExtension.cpp:239; CameraExtension.cpp:480; CameraExtension.cpp:629 / undeclared external view: P2 via FlowOf (decision G-A3, ProductFlags ExternalView) |
 | **P8** p8_camera_labels | L-B6 | CameraLabelFill.cpp | P7 | X | partial: CameraLabelFill.cpp:50; CameraLabelFill.cpp:163 |
 | **P9** p9_camera_smoothed (variants, short-queue P7) | L-B4 | CameraLinkCore.cpp | P7 lead2 | X | outside-acquire: CameraLinkCore.cpp:357; CameraLinkCore.cpp:456; CameraLinkCore.cpp:764 |
-| **P10** grain.split | L-B2 | SkeletonGpuDispatcher.cpp<br>LaneGpuProducts.cpp<br>GrainLevelGpu.h<br>GrainSplitVariantOwner.h | P4 | R | SkeletonGpuDispatcher.cpp:499; SkeletonGpuDispatcher.cpp:574 / shared dispatcher read; its picture feeds the ownsTap (P10) tap build |
-|  |  |  | P13 | R | GrainLevelGpu.h:160; GrainSplitVariantOwner.h:155 / INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)); flag ViewIsActual: C9b |
+| **P10** grain.split | L-B2 | SkeletonGpuDispatcher.cpp<br>LaneGpuProducts.cpp<br>GrainSplitVariantOwner.h | P4 | R | SkeletonGpuDispatcher.cpp:499; SkeletonGpuDispatcher.cpp:574 / shared dispatcher read; its picture feeds the ownsTap (P10) tap build |
+|  |  |  | P13 | R | GrainSplitVariantOwner.h:162 / INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)); flag ViewIsActual: C9b |
 | **P10c** grain.split.chroma | L-B2 | - | P4 | NP | no production producer |
 |  |  |  | P13 | NP | no production producer |
 | **P11** region_block_stats | L-B5 | SkeletonGpuDispatcher.cpp<br>LaneGpuRegionKernel.cpp<br>LaneGpuJobs.h | P10 | R | LaneGpuRegionKernel.cpp:122 |
@@ -47,8 +47,8 @@ Counts: R 11, X 7, N 12, NP 33.
 | **P14** p14_source_identity | - | SourceIdPipeline.h | P5 | R | SourceIdPipeline.h:126; SourceIdPipeline.h:214 / type-token match only: FrameInput.classical is a monitor snapshot copied by the call site, not an Acquire |
 | **P14g** source_geometry | - | SourceGeometryProduct.h | P5 | N | flag ViewIsActual: C9b |
 | **edge_map** edge_map | L-B5 | EdgeMapFill.h | P13 | R | EdgeMapFill.h:65 |
-| **P10g** grain.level | L-B2 | GrainLevelGpu.h | P10 | R | GrainLevelGpu.h:172 |
-|  |  |  | P13 | R | GrainLevelGpu.h:160 |
+| **P10g** grain.level | L-B2 | GrainLevelGpu.h | P10 | R | GrainLevelGpu.h:186 |
+|  |  |  | P13 | R | GrainLevelGpu.h:174 |
 | **P7g** p7g_camera_guide | L-B6 | GuideLaneJob.cpp | P7 | N |  |
 |  |  |  | P4 | N |  |
 | **P16** coding_evidence | L-B5 | CodingEvidence.cpp<br>SkeletonModule.cpp | P10 | N |  |
