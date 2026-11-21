@@ -959,6 +959,10 @@ namespace Vpv
 					if (cause)
 						fb.push_back(CameraLink::GuidanceUnguidedLine(cause));
 				}
+				// P8's fill counters, including the fit-field read misses (missing / stamp mismatch / unreadable): on every surface the
+				// camera-fit counters reach (Ctrl+I, status, Ctrl+Alt+D), never counted silently. Atomics; read on the status path only.
+				if (st.labelFill && st.liveBuilt)
+					lines.push_back(CameraLink::LabelFillStatusLine(st.labelFill->Counters()));
 				if (st.adapter)
 				{
 					st.adapter->CollectStatus(lines);
