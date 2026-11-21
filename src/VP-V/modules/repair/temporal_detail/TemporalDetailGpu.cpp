@@ -184,6 +184,12 @@ namespace TemporalDetail
 			return m_impl && m_impl->split.Out().split != nullptr;
 		}
 
+		pl_tex Module::LastEvidenceTexture(int which) const
+		{
+			if (!m_impl) return nullptr;
+			return which == 0 ? m_impl->evA : which == 1 ? m_impl->evB : nullptr;
+		}
+
 		int Module::SlotsForBudget(uint64_t budgetBytes, int w, int h, double planeLines)
 		{
 			for (int k = kMaxK; k > 1; --k)

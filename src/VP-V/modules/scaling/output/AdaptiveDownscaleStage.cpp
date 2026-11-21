@@ -32,6 +32,7 @@ namespace AdaptiveDownscaleStage
 			case U::Shared: return "Adaptive grain: from the shared grain split (P10) and region statistics (P11)";
 			case U::NoUsableBlock: return "Adaptive grain: own estimate (no usable shared grain block on the last read-back frame)";
 			case U::MeasureDomain: return "Adaptive grain: own estimate (measure domain is linear / HDR; the shared products are in source codes)";
+			case U::Pending: return "Adaptive grain: shared grain split (P10) bound; waiting for the first read-back of a bound frame";
 			case U::NotSupplied: break;
 			}
 			return "Adaptive grain: own estimate (the shared grain products are not supplied to the scaler)";

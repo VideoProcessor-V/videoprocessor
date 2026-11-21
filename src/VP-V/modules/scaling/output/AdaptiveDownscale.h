@@ -149,9 +149,11 @@ namespace AdaptiveDownscale
 		float codeToEightBit = 1.0f;   // 255 / the code unit's white: N and meanY to the 8-bit codes the thresholds use
 		pl_rect2df sourceCrop{};       // the source crop libplacebo scales, in the blocks' source pixels (blocks centred in it count)
 		// Gate cb-u1 r1 SHOULD 5: the three textures must share ONE block grid, or the per-block reads would misalign.
+		// Null-safe (r2 NIT): any missing texture is no shared grid.
 		bool SameGrid() const
 		{
-			return p10Blocks->params.w == p11Stats0->params.w && p10Blocks->params.h == p11Stats0->params.h &&
+			return p10Blocks && p11Stats0 && p11Stats4 &&
+				p10Blocks->params.w == p11Stats0->params.w && p10Blocks->params.h == p11Stats0->params.h &&
 				p10Blocks->params.w == p11Stats4->params.w && p10Blocks->params.h == p11Stats4->params.h;
 		}
 		bool Valid() const { return p10Blocks && p11Stats0 && p11Stats4 && blockPx > 0 && codeToEightBit > 0.0f && SameGrid(); }
@@ -164,6 +166,7 @@ namespace AdaptiveDownscale
 		MeasureDomain,   // supplied, but the measure domain is linear / HDR, so P10 N (source codes) is not in the ramp's units
 		NoUsableBlock,   // bound, but the last read-back frame had no usable block (all vetoed or outside the crop)
 		Shared,          // the last read-back frame's energy came from P10 / P11
+		Pending,         // bound now, but no read-back yet of a frame that bound them (r2 NIT): the outcome is not known yet
 	};
 
 	// One Gaussian-noise sigma in the mean-|Laplacian| energy units the grain ramp is defined in: the discrete
@@ -335,6 +338,7 @@ namespace AdaptiveDownscale
 		float meanW = 0.0f;     // w_base x mean(1 - edge) x grain_scale
 		float meanLuma = 0.0f;  // the frame's mean luma (8-bit codes; the cut detector)
 		bool grainFromShared = false;   // X5-GRAIN-P10: the frame's grain energy came from P10 / P11 (stats tag 2)
+		bool grainBound = false;        // ... and that frame's scalar pass bound the shared products (r2 NIT: Pending until then)
 	};
 
 	// Stage 8b (docs/VP-stage8b-upscale-blend.md): the same module upscaling a
@@ -418,12 +422,16 @@ namespace AdaptiveDownscale
 		void SetGrainSource(const GrainSource& value) { grainSource = value; }
 		void ClearGrainSource() { grainSource = GrainSource(); }
 		// Which estimate the grain energy came from (status, tests; gate cb-u1 r1 MUST 5). The per-frame "no usable block"
-		// fallback runs inside the shader, so Shared needs the read-back stats tag, not only the binding.
+		// fallback runs inside the shader, so Shared needs the read-back stats tag, not only the binding. Gate cb-u1 r2 NIT:
+		// the read-back lags the binding by a few frames, so until a read-back of a frame that BOUND the products arrives
+		// (stats.grainBound) the outcome is Pending, never a transient NoUsableBlock.
 		GrainSourceUse LastGrainSourceUse() const
 		{
 			if (!grainFromShared)
 				return grainDomainRefused ? GrainSourceUse::MeasureDomain : GrainSourceUse::NotSupplied;
-			return stats.valid && stats.grainFromShared ? GrainSourceUse::Shared : GrainSourceUse::NoUsableBlock;
+			if (!stats.valid || !stats.grainBound)
+				return GrainSourceUse::Pending;
+			return stats.grainFromShared ? GrainSourceUse::Shared : GrainSourceUse::NoUsableBlock;
 		}
 		// True when the last read-back grain energy came from the shared products (false: the private estimate).
 		bool LastGrainFromSharedProducts() const { return LastGrainSourceUse() == GrainSourceUse::Shared; }
@@ -515,6 +523,10 @@ namespace AdaptiveDownscale
 		bool statsNativeTried = false;
 		LedDrive::ReadbackRing statsSchedule{ kStatsSlots, 8 };
 		uint64_t statsFrames = 0;
+		// Whether the scalar pass whose statistics a slot (native ring) / the buffer holds bound the shared grain products
+		// (gate cb-u1 r2 NIT: LastGrainSourceUse Pending until such a frame is read back).
+		bool statsSlotBound[kStatsSlots] = {};
+		bool readbackBound = false;
 		pl_shader_obj polarLut = nullptr;
 		pl_shader_obj orthoLut[2] = { nullptr, nullptr };
 		bool active = false;

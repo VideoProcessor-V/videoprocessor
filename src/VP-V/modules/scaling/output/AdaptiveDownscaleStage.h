@@ -163,9 +163,28 @@ namespace AdaptiveDownscaleStage
 			case AdaptiveDownscale::GrainSourceUse::Shared: return FallbackCatalog::Released(id);
 			case AdaptiveDownscale::GrainSourceUse::NoUsableBlock: return FallbackCatalog::Engaged(id, "grain: no usable shared block");
 			case AdaptiveDownscale::GrainSourceUse::MeasureDomain: return FallbackCatalog::Engaged(id, "grain: measure domain is linear / HDR");
+			// r2 NIT: bound, outcome not read back yet; nothing has been dropped, so no downgrade is claimed (the status line says pending).
+			case AdaptiveDownscale::GrainSourceUse::Pending: return FallbackCatalog::Released(id);
 			case AdaptiveDownscale::GrainSourceUse::NotSupplied: break;
 			}
 			return FallbackCatalog::Engaged(id, "grain: the offered shared products are invalid (missing or grid mismatch)");
+		}
+
+		// Gate cb-u1 r2 NIT (one id): TemporalDetailFallback() and GrainSourceFallback() are two reasons of ONE catalog entry.
+		// "product.adaptive_downscale" is the id the product catalog rows of this consumer name (ProductCatalog.h) and its
+		// FallbackCatalog::ProductEntries text already covers "its own edge, grain and cut terms", so a second id would be a
+		// second notice for the same consumer. Because a registry keyed by id keeps one decision per id, a host must Sync THIS
+		// merged decision, never the two parts one after the other (the second would overwrite the first): engaged when
+		// either part is, with both reasons joined by "; ".
+		FallbackCatalog::Decision ProductFallback() const
+		{
+			const FallbackCatalog::Decision td = TemporalDetailFallback(), grain = GrainSourceFallback();
+			if (!td.engaged && !grain.engaged)
+				return FallbackCatalog::Released("product.adaptive_downscale");
+			std::string reason = td.engaged ? td.reason : std::string();
+			if (grain.engaged)
+				reason += (reason.empty() ? "" : "; ") + grain.reason;
+			return FallbackCatalog::Engaged("product.adaptive_downscale", reason);
 		}
 
 	private:

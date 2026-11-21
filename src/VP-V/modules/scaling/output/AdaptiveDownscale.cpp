@@ -610,6 +610,9 @@ float rs_slope(float y)
 		grainDomainRefused = false;
 		readback = nullptr;
 		readbackPending = false;
+		readbackBound = false;
+		for (bool& b : statsSlotBound)
+			b = false;
 		gpu = nullptr;
 		active = false;
 		advancedSequence = 0;
@@ -721,9 +724,10 @@ float rs_slope(float y)
 
 	void Module::PollStats()
 	{
-		auto take = [this](const float values[4])
+		auto take = [this](const float values[4], bool bound)
 		{
 			stats.valid = true;
+			stats.grainBound = bound;   // r2 NIT: the read-back frame's pass bound the shared products (else Pending)
 			stats.grainScale = values[0];
 			stats.meanW = upscale.on ? upscale.wBase * values[0] : settings.wBase * values[1] * values[0];
 			stats.meanLuma = values[2];
@@ -746,7 +750,7 @@ float rs_slope(float y)
 					statsSchedule.Release(slot);
 					continue;
 				}
-				take(values);
+				take(values, slot >= 0 && slot < kStatsSlots && statsSlotBound[slot]);
 				statsSchedule.Release(slot);
 			}
 			return;
@@ -755,7 +759,7 @@ float rs_slope(float y)
 			return;
 		float values[4] = {};
 		if (pl_buf_read(gpu, readback, 0, values, sizeof(values)))
-			take(values);
+			take(values, readbackBound);
 		readbackPending = false;
 	}
 
@@ -1045,13 +1049,18 @@ float rs_slope(float y)
 				return unchanged;
 			}
 			grainFromShared = shared;
+			if (statsSlot >= 0 && statsSlot < kStatsSlots)
+				statsSlotBound[statsSlot] = shared;
 			if (statsSlot >= 0)
 				statsNative->QueueDeferred(statsSlot);   // this pass runs inside libplacebo's frame: the native copy follows the frame (NativeReadback.h)
 			if (advance > 0.5f)
 			{
 				advancedSequence = sequence;
 				if (writeStats && !native)
+				{
 					readbackPending = true;
+					readbackBound = shared;
+				}
 			}
 			// 4. 8-3: the map, after the scalar (it reads the cut flag).
 			if (!UpdateMap(p->dispatch, advance > 0.5f))

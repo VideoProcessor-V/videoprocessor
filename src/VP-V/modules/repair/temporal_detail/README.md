@@ -372,3 +372,11 @@ Gate r1 follow-up (2026-11-21, review-cb-u1-r1.md):
 - SHOULD 4: the gate forms are in core/Ramp. The U25 duplicate count drop from wrapping is structure, not consolidation, and is not
   claimed.
 - Tests owed (paired sonnet writer + opus reviewer): see the lane's inbox / report.
+
+Gate r2 follow-up (2026-11-21, review-cb-u1-r2.md):
+- MUST 1: the decayed boost peak (qPeak, with e2Peak / fPeak) ignores a frame whose q, e2 or F is non-finite, at the first frame
+  (peak 0) and on update; one +inf q would otherwise hold the peak at +inf for good and open the boost. The boost ramp also needs a
+  finite peak. CPU and shader alike.
+- MUST 2: the shader closure tests the focus input itself (the current F and the F ratio): `td_gs` maps a non-finite ratio to a
+  finite 0, so the gate checks alone could not see it, while the model closes on `Finite(A.F)` and a NaN focus gate.
+- MUST 3: `Gpu::Module::LastEvidenceTexture(which)` exposes the last Apply's ev_a / ev_b (diagnostics and tests, read-only).

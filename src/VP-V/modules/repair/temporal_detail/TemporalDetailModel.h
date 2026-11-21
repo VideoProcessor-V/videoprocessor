@@ -1014,11 +1014,15 @@ namespace TemporalDetail
 				BlockState& st = m_blocks[i];
 				Work& wk = work[i];
 				const double q = A.q[i], e2 = A.e2[i], F = A.F[i];
+				// TD-NONFINITE (gate cb-u1 r2 MUST 1): the decayed peak ignores a non-finite observation. One q = +inf would
+				// otherwise hold qPeak at +inf for good (inf x decay stays inf) and open the boost (raw = +inf) on every later
+				// frame; a NaN at the first frame would close the block's boost for good.
+				const bool peakObs = Finite(q) && Finite(e2) && Finite(F);
 				// trackers (rebound counter, softening run, decayed peak)
 				if (!st.have)
 				{
 					st.have = true; st.qPrev = q; st.e2Prev = e2; st.qHigh = q; st.qLow = q; st.rstate = 0;
-					st.qPeak = q; st.e2Peak = e2; st.fPeak = F;
+					st.qPeak = peakObs ? q : 0.0; st.e2Peak = peakObs ? e2 : 0.0; st.fPeak = peakObs ? F : 0.0;
 				}
 				else
 				{
@@ -1036,7 +1040,7 @@ namespace TemporalDetail
 					const bool falling = q < st.qPrev * (1.0 - kSoftStep) && e2 < st.e2Prev * (1.0 - kSoftStep) && st.qPrev >= kRetireMinEnergy;
 					st.softRun = falling ? (std::min)(st.softRun + 1, kRunSaturate) : 0;
 					st.qPeak *= peakDecay;
-					if (q >= st.qPeak) { st.qPeak = q; st.e2Peak = e2; st.fPeak = F; }
+					if (peakObs && q >= st.qPeak) { st.qPeak = q; st.e2Peak = e2; st.fPeak = F; }
 					st.qPrev = q; st.e2Prev = e2;
 				}
 				// crossfade progress
@@ -1253,8 +1257,9 @@ namespace TemporalDetail
 				const double boostMax = m_set.boost ? m_set.boostMax : 0.0;   // the boost switch (off by default)
 				// TD-NONFINITE (gate cb-u1 r1 MUST 3): non-finite evidence q, or a NaN ramp (0 / 0), closes the boost; Clamp
 				// passes NaN, which would poison the hysteresis state bLim for good. A finite q = 0 under a positive peak keeps
-				// its old meaning (raw = +inf: fully soft, bn 1), so the finite path is unchanged.
-				double bn = (boostMax > 0.0 && Finite(q) && !std::isnan(raw)) ? Clamp(raw / boostMax, 0.0, 1.0) : 0.0;
+				// its old meaning (raw = +inf: fully soft, bn 1), so the finite path is unchanged. A non-finite peak (r2 MUST 1;
+				// the tracker no longer stores one, this is the second guard) also closes it: +inf / q is not evidence.
+				double bn = (boostMax > 0.0 && Finite(q) && Finite(st.qPeak) && !std::isnan(raw)) ? Clamp(raw / boostMax, 0.0, 1.0) : 0.0;
 				const double hbP = GateS(kRho2Lo, kRho2Hi, (A.e2[u] + kEnergyFloor) / (st.e2Peak + kEnergyFloor));
 				const double fP = GateS(kPullLo, kPullHi, A.F[u] / (st.fPeak + 1e-6));
 				const double noRef = GateInv(0.0, 0.5, weight);

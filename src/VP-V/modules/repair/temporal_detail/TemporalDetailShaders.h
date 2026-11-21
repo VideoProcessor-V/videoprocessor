@@ -328,7 +328,8 @@ if (gl_LocalInvocationIndex == 0u) {
         vec2 sp = td_position(k, int(cx), int(cy));
         int sbx = clamp(int(floor((sp.x + 0.5) / float(TD_B))), 0, TD_BW - 1), sby = clamp(int(floor((sp.y + 0.5) / float(TD_B))), 0, TD_BH - 1);
         float Fw = texelFetch(slot_blk, ivec2(k * TD_BW + sbx, sby), 0).x;
-        float focus = td_gs(TD_PULL_LO, TD_PULL_HI, texelFetch(meas, b, 0).z / (Fw + 1e-6));
+        float fcur = texelFetch(meas, b, 0).z, fx = fcur / (Fw + 1e-6);
+        float focus = td_gs(TD_PULL_LO, TD_PULL_HI, fx);
         float u = td_mot_grid(k, vec2(cx, cy)).z;
         float umax = TD_UMAX * bgv.z;
         float unc = td_gi(0.3 * umax, umax, u);
@@ -337,10 +338,11 @@ if (gl_LocalInvocationIndex == 0u) {
         float ageSec = (tab.z + 1.0) / hz;
         float ageGate = clamp((max_age - ageSec) / (max_age * TD_AGE_FADE), 0.0, 1.0);
         // TD-NONFINITE (gate cb-u1 r1 MUST 2; the CPU EvaluateBlock closing): non-finite evidence, or a non-finite gate
-        // from N or the per-block factors, closes every gate.
+        // from N or the per-block factors, closes every gate. The focus input is tested directly (r2 MUST 2): td_gs maps a
+        // non-finite ratio to a finite 0, so only the model's Finite(A.F) and NaN focus-gate checks mirror it.
         if (!(td_fin(N) && td_fin(e1c) && td_fin(e1w) && td_fin(e2c) && td_fin(e2w) && td_fin(corr) && td_fin(u) &&
               td_fin(a1.w / n) && td_fin(corrGate) && td_fin(stronger) && td_fin(harm) && td_fin(hb) && td_fin(focus) &&
-              td_fin(unc) && td_fin(bgate))) {
+              td_fin(unc) && td_fin(bgate) && td_fin(fcur) && !td_nan(fx))) {
             corrGate = 0.0; stronger = 0.0; harm = 0.0; hb = 0.0; focus = 0.0; unc = 0.0; bgate = 0.0;
         }
         float hard = unc * bgate * corrGate * harm * hb * focus;
@@ -360,9 +362,11 @@ if (b.x < TD_BW && b.y < TD_BH) {
     if (motion_lost > 0.5) { st.slot = -1.0; st.prevSlot = -1.0; st.xf = 1.0; st.qref = 0.0; }
     vec4 m = texelFetch(meas, b, 0);
     float q = m.w, e2 = m.y, F = m.z;
+    // TD-NONFINITE (gate cb-u1 r2 MUST 1): the decayed peak ignores a non-finite observation (as the model).
+    bool peakObs = td_fin(q) && td_fin(e2) && td_fin(F);
     if (st.have < 0.5) {
         st.have = 1.0; st.qPrev = q; st.e2Prev = e2; st.qHigh = q; st.qLow = q; st.rstate = 0.0;
-        st.qPeak = q; st.e2Peak = e2; st.fPeak = F;
+        st.qPeak = peakObs ? q : 0.0; st.e2Peak = peakObs ? e2 : 0.0; st.fPeak = peakObs ? F : 0.0;
     } else {
         st.rebounds *= rebound_decay;
         if (st.rstate < 0.5) {
@@ -375,7 +379,7 @@ if (b.x < TD_BW && b.y < TD_BH) {
         bool falling = q < st.qPrev * (1.0 - TD_SOFT_STEP) && e2 < st.e2Prev * (1.0 - TD_SOFT_STEP) && st.qPrev >= TD_RETIRE_MIN;
         st.softRun = falling ? min(st.softRun + 1.0, 1048576.0) : 0.0;   // saturates at TemporalDetail::kRunSaturate = 1 << 20 (as the model)
         st.qPeak *= peak_decay;
-        if (q >= st.qPeak) { st.qPeak = q; st.e2Peak = e2; st.fPeak = F; }
+        if (peakObs && q >= st.qPeak) { st.qPeak = q; st.e2Peak = e2; st.fPeak = F; }
         st.qPrev = q; st.e2Prev = e2;
     }
     if (st.prevSlot >= 0.0) {
@@ -688,8 +692,9 @@ if (b.x < TD_BW && b.y < TD_BH) {
     // fallback boost (structure only)
     float q = m.w;
     float raw = sqrt(max(st.qPeak, q) / q) - 1.0;
-    // TD-NONFINITE (gate cb-u1 r1 MUST 3): non-finite q or a NaN ramp closes the boost (GLSL clamp is undefined on NaN).
-    float bn = (boost_max > 0.0 && td_fin(q) && !td_nan(raw)) ? clamp(raw / boost_max, 0.0, 1.0) : 0.0;
+    // TD-NONFINITE (gate cb-u1 r1 MUST 3, r2 MUST 1): non-finite q, a non-finite peak or a NaN ramp closes the boost
+    // (GLSL clamp is undefined on NaN).
+    float bn = (boost_max > 0.0 && td_fin(q) && td_fin(st.qPeak) && !td_nan(raw)) ? clamp(raw / boost_max, 0.0, 1.0) : 0.0;
     float hbP = td_gs(TD_RHO2_LO, TD_RHO2_HI, (m.y + TD_FLOOR) / (st.e2Peak + TD_FLOOR));
     float fP = td_gs(TD_PULL_LO, TD_PULL_HI, m.z / (st.fPeak + 1e-6));
     float noRef = td_gi(0.0, 0.5, weight);

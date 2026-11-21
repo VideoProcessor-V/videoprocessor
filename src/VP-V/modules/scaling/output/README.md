@@ -219,10 +219,14 @@ reason (gate cb-u1 r1, 2026-11-21):
   units, so the shared products are not bound (MUST 6);
 - no usable block: the products were bound, but the read-back frame had no usable block. The final pass writes a stats tag
   (w = 2: energy from P10 / P11, w = 1: own estimate), so the status is never "shared" on such a frame (MUST 5);
-- shared: the read-back frame's energy came from P10 / P11.
+- shared: the read-back frame's energy came from P10 / P11;
+- pending (gate cb-u1 r2): the products are bound, but the statistics read back so far are of frames that did not bind them (the
+  read-back lags a few frames). Each stats slot remembers whether its pass bound the products, so the first frames after binding
+  are never a transient "no usable block".
 
 When the host offers the products but they are not used, `Stage::GrainSourceFallback()` engages FallbackCatalog
-"product.adaptive_downscale" with the reason (SHOULD 6). The per-block non-finite test uses the IEEE bit pattern (SHOULD 2).
+"product.adaptive_downscale" with the reason (SHOULD 6); pending engages nothing. The temporal-detail read path uses the same id
+(the consumer's one catalog entry), so a host syncs `Stage::ProductFallback()`, which merges both reasons into one decision. The per-block non-finite test uses the IEEE bit pattern (SHOULD 2).
 `kEdgeEnergyPerSigma` is 3.5682482 (SHOULD 1). The white-noise mapping still needs the registered GPU calibration
 (FIX-X5-GRAIN-P10) before a host wires the source. Once the host
 supplies the source on every frame the private partial terms (`MEASURE_BODY` lap / flat_px, the `AD_P10`-less branch) are deleted.

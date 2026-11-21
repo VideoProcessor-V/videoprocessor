@@ -151,6 +151,12 @@ namespace TemporalDetail
 			// Whether the module currently holds its own grain split's output textures (diagnostics and tests): true after a
 			// frame that computed its own split, false once the shared product has fitted for kSplitReleaseSeconds.
 			bool OwnSplitHeld() const;
+			// Diagnostics and tests only, read-only (gate cb-u1 r2 MUST 3): the per (slot, block) evidence textures the
+			// step 6 validation wrote on the last Apply. which = 0: ev_a (hard, ageGate, stronger, e1w); which = 1: ev_b (hb,
+			// focus, unc x base x corr, ageSec). Layout (K x bw) x bh rgba32f, texel td_blk(k, b) = (k x bw + bx, by). Null
+			// before the first Apply, after Release, or for any other `which`. The module owns the texture; it stays valid
+			// until the next Apply / Release, and the caller must not write it.
+			pl_tex LastEvidenceTexture(int which) const;
 
 			// The scratch-arena requests of one Apply for an ACTIVE PICTURE of w x h (the module's working size): scope
 			// kArenaScope, owner kArenaOwner, tier T1 (an optional repair: shed before the T0 temporaries), count 3 of one
