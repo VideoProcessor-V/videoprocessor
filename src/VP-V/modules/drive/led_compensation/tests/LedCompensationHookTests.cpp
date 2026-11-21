@@ -682,56 +682,116 @@ namespace VideoProcessorTest
 			// exceeds 0.5 code per code, a fixed 1.5 codes does not fit.
 			// (15fdbd39c / ed0e6021f TRX, 2.0 threshold: 980/1000/200 R in the boosted sweep at gain < 1 was off by
 			// 1.84 codes from its input code and 1.72 from its idle code, depending on the gain.)
-			// Coordinator rulings on 6972991f7 / dacadec18 (WAIVER-GEM-W1-LED-T4): no case is exempt, and no
-			// budget is widened. For those near-white cases the WARP input error is removed instead of budgeted:
-			// the residual is measured against the idle render of the same colour on the same device. The model
-			// split is taken of the idle codes (what the hook saw, to the 10-bit round trip), its in-range part
-			// is rendered, and its excursion is taken from the idle codes. Tolerance 1.5 codes, as for every case.
-			// For information, the approved fallback form is also logged: the plain residual against
-			// 1 + slope x that colour's measured idle round-trip error.
+			// Coordinator rulings on 6972991f7 / dacadec18 / 400c300e7 (WAIVER-GEM-W1-LED-T5): no case is exempt,
+			// no budget is widened, and no either/or. Neither the input code nor the rounded idle code is what the
+			// hook received: the pipeline before PREOUTPUT holds the picture at reduced precision, and 980 reaches
+			// the hook as about 979.x. So for those near-white cases the TRUE hook input is read back. The same
+			// hooks run idle into a 32-bit float target, which is calibrated with black (0) and white (1)
+			// rendered the same way. The model split is then computed from those exact values: the expected output
+			// is the CPU mirror of the whole hook (in-range part p, curve(p) + k f e) at the exact input, encoded
+			// to codes. Tolerance 1.5 codes, as for every case. The capture is validated against the 10-bit idle:
+			// each channel must round to its idle code.
 			auto nearWhiteSlope = [&luma, &partSensitivity](const Rgb& in, double gain, double b, double domain)
 			{
 				return luma(in) > 0.99 ? partSensitivity(in, gain, b, domain) : 0.0;
 			};
-			struct IdleResidual { double idleRelative = 0.0, plain = 0.0, fallbackBudget = 0.0; };
-			auto idleResidual = [&](const Codes& c, double gain, double b, double domain, const Codes& out,
-				const Codes& part, const Split& sp, double slope)
+			auto renderFloat = [&fixture, &hooks](const Rgb& in) -> Rgb
 			{
-				IdleResidual r;
-				const Codes& seen = idle.at(c);
-				const Split fromIdle = split(toSignal(seen), gain, b, domain);
-				const Codes partIdle = render(fromIdle.p);
-				int idleError = 0;
-				for (int k = 0; k < 3; ++k)
-					idleError = std::max(idleError, std::abs(seen[k] - c[k]));
-				r.fallbackBudget = 1.0 + slope * idleError;
-				for (int k = 0; k < 3; ++k)
+				pl_gpu gpu = fixture.Gpu();
+				pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+				pl_fmt targetFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE);
+				Assert::IsNotNull(sourceFormat);
+				Assert::IsNotNull(targetFormat, L"No host-readable RGBA32F target format for the hook-input capture");
+				std::vector<float> texels(2 * 2 * 4);
+				for (int i = 0; i < 4; ++i)
 				{
-					const double expected = partIdle[k] + fromIdle.k * fromIdle.f * ((seen[k] - 64.0) - 876.0 * fromIdle.p[k]);
-					r.idleRelative = std::max(r.idleRelative, std::abs(out[k] - expected));
-					r.plain = std::max(r.plain, std::abs(out[k] - (part[k] + excursionCodes(c, sp, k))));
+					for (int c = 0; c < 3; ++c)
+						texels[i * 4 + c] = static_cast<float>(in[c]);
+					texels[i * 4 + 3] = 1.0f;
 				}
-				return r;
+				pl_tex_params sp{};
+				sp.w = sp.h = 2;
+				sp.format = sourceFormat;
+				sp.sampleable = true;
+				sp.initial_data = texels.data();
+				pl_tex source = pl_tex_create(gpu, &sp);
+				pl_tex_params tp{};
+				tp.w = tp.h = 2;
+				tp.format = targetFormat;
+				tp.renderable = true;
+				tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(source);
+				Assert::IsNotNull(target);
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(source);
+				pl_frame output = TargetLutGpuFixture::MakeRgbFrame(target);
+				output.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				output.repr.bits.sample_depth = 10;
+				output.repr.bits.color_depth = 10;
+				output.repr.bits.bit_shift = 0;
+				pl_render_params params = pl_render_fast_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.hooks = hooks.data();
+				params.num_hooks = static_cast<int>(hooks.size());
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &output, &params));
+				pl_gpu_finish(gpu);
+				float pixels[16] = {};
+				pl_tex_transfer_params download{};
+				download.tex = target;
+				download.ptr = pixels;
+				Assert::IsTrue(pl_tex_download(gpu, &download));
+				pl_tex_destroy(gpu, &source);
+				pl_tex_destroy(gpu, &target);
+				return { pixels[0], pixels[1], pixels[2] };
 			};
-			int residualChecked = 0, residualNearWhite = 0, residualExempt = 0, fallbackMisses = 0;
-			double worstIdleRelative = 0.0, worstFallbackRatio = 0.0;
-			std::wstring fallbackText;
-			// Asserts one near-white case (idle-relative, 1.5 codes) and records the fallback form.
-			auto checkNearWhite = [&](const Codes& c, double gain, double b, double domain, const Codes& out,
-				const Codes& part, const Split& sp, double slope, const std::wstring& where)
+			// The hook is idle here (gain 1, no boost: it returns its input), so the float target holds the hook
+			// input after the affine limited-range encode; black and white calibrate that encode.
+			std::map<Codes, Rgb> exactInput;
+			std::wstring exactText;
 			{
-				const IdleResidual r = idleResidual(c, gain, b, domain, out, part, sp, slope);
-				worstIdleRelative = std::max(worstIdleRelative, r.idleRelative);
-				worstFallbackRatio = std::max(worstFallbackRatio, r.plain / r.fallbackBudget);
-				if (r.plain > r.fallbackBudget)
+				const Rgb black = renderFloat(Rgb{ 0.0, 0.0, 0.0 }), white = renderFloat(Rgb{ 1.0, 1.0, 1.0 });
+				for (const Codes& c : partly)
 				{
-					++fallbackMisses;
-					fallbackText += text(c) + L" " + std::to_wstring(r.plain) + L" > " + std::to_wstring(r.fallbackBudget) + where;
+					if (!(luma(toSignal(c)) > 0.99))
+						continue;
+					const Rgb raw = renderFloat(toSignal(c));
+					Rgb x{};
+					std::wstring codes;
+					for (int k = 0; k < 3; ++k)
+					{
+						x[k] = (raw[k] - black[k]) / (white[k] - black[k]);
+						const double code = 64.0 + 876.0 * x[k];
+						codes += std::to_wstring(code) + L" ";
+						Assert::IsTrue(std::abs(code - idle.at(c)[k]) <= 0.5 + 1e-3,
+							(L"Hook-input capture of " + text(c) + L" channel " + std::to_wstring(k) + L" is code " +
+								std::to_wstring(code) + L", which does not round to its idle code " + std::to_wstring(idle.at(c)[k])).c_str());
+					}
+					exactInput[c] = x;
+					exactText += text(c) + L" reaches the hook as codes " + codes + L"; ";
 				}
-				if (r.idleRelative > 1.5)
-					return L"near-white " + text(c) + L": idle-relative residual " + std::to_wstring(r.idleRelative) +
-						L" > 1.5 (plain " + std::to_wstring(r.plain) + L", fallback budget " + std::to_wstring(r.fallbackBudget) +
-						L")" + where;
+			}
+			Logger::WriteMessage((L"GEM-W1-LED hook-input capture: " + exactText + L"\n").c_str());
+			int residualChecked = 0, residualNearWhite = 0, residualExempt = 0;
+			double worstExactResidual = 0.0;
+			std::wstring exactWorstText;
+			// Asserts one near-white case: the output against the model at the exact hook input, 1.5 codes.
+			auto checkNearWhite = [&](const Codes& c, double gain, double b, double domain, const Codes& out,
+				const Codes&, const Split&, double, const std::wstring& where)
+			{
+				const Rgb expected = modelOut(exactInput.at(c), gain, b, domain);
+				double worst = 0.0;
+				for (int k = 0; k < 3; ++k)
+					worst = std::max(worst, std::abs(out[k] - (64.0 + 876.0 * expected[k])));
+				if (worst > worstExactResidual)
+				{
+					worstExactResidual = worst;
+					exactWorstText = text(c) + where;
+				}
+				if (worst > 1.5)
+					return L"near-white " + text(c) + L": " + text(out) + L" against the model at the exact hook input (" +
+						std::to_wstring(64.0 + 876.0 * expected[0]) + L", " + std::to_wstring(64.0 + 876.0 * expected[1]) + L", " +
+						std::to_wstring(64.0 + 876.0 * expected[2]) + L"), residual " + std::to_wstring(worst) + L" > 1.5" + where;
 				return std::wstring();
 			};
 
@@ -1063,18 +1123,16 @@ namespace VideoProcessorTest
 				L" deg; edge pairs worst in-range / all-channel step " + std::to_wstring(worstEdgeIn) + L" / " +
 				std::to_wstring(worstEdgeAll) + L" codes; sweep worst step against the in-range part " +
 				std::to_wstring(worstStep) + L" codes; residual asserted " + std::to_wstring(residualChecked + residualNearWhite) +
-				L" (input-referenced " + std::to_wstring(residualChecked) + L", near-white idle-referenced " +
+				L" (input-referenced " + std::to_wstring(residualChecked) + L", near-white at the exact hook input " +
 				std::to_wstring(residualNearWhite) + L", all at 1.5 codes), exempt " + std::to_wstring(residualExempt) +
-				L"; near-white worst idle-relative residual " + std::to_wstring(worstIdleRelative) +
-				L"; fallback form (plain residual <= 1 + slope x idle error): worst ratio " + std::to_wstring(worstFallbackRatio) +
-				L", misses " + std::to_wstring(fallbackMisses) + L" " + fallbackText + L"\n").c_str());
-			// Every case asserted at 1.5 codes (622, none exempt). The idle reference applies exactly where the
-			// model says: 980/1000/200 in 12 of the 17 settings and in all 130 boosted sweep steps (142); 480 others.
+				L"; near-white worst residual " + std::to_wstring(worstExactResidual) + L" (" + exactWorstText + L")\n").c_str());
+			// Every case asserted at 1.5 codes (622, none exempt). The exact-input reference applies exactly where
+			// the model says: 980/1000/200 in 12 of the 17 settings and in all 130 boosted sweep steps (142); 480 others.
 			if (residualChecked + residualNearWhite != 622 || residualExempt != 0 || residualChecked != 480 ||
 				residualNearWhite != 142)
 				problems += L"residual coverage: asserted " + std::to_wstring(residualChecked + residualNearWhite) +
 					L" (expected 622: " + std::to_wstring(residualChecked) + L" at 1.5 codes, expected 480; " +
-					std::to_wstring(residualNearWhite) + L" idle-referenced, expected 142), exempt " + std::to_wstring(residualExempt) +
+					std::to_wstring(residualNearWhite) + L" at the exact hook input, expected 142), exempt " + std::to_wstring(residualExempt) +
 					L" (expected 0); ";
 			fixture.CaptureLog(nullptr);
 			Assert::IsTrue(problems.empty(), (problems + L"log: " + std::wstring(log.begin(), log.end())).c_str());
