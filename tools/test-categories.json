@@ -334,6 +334,27 @@
   },
   {
    "kind": "method",
+   "value": "SkeletonModuleTests::AStoreRegisteringAfterGpuCreatedDoesNotDetachTheNewRenderersDevice",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/control/skeleton/tests/SkeletonModuleTests.cpp",
+   "note": "GpuCreated carries a FAKE pl_gpu (the address of an int, presence only, never dereferenced); no device, no dispatcher, no GPU call. CPU only (reviewed, GF-P2b E2)."
+  },
+  {
+   "kind": "method",
+   "value": "SkeletonModuleTests::AStoreRegisteringAfterGpuReleasedDoesNotResurrectADevice",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/control/skeleton/tests/SkeletonModuleTests.cpp",
+   "note": "GpuCreated carries a FAKE pl_gpu (the address of an int, presence only, never dereferenced); no device, no dispatcher, no GPU call. CPU only (reviewed, GF-P2b E2)."
+  },
+  {
+   "kind": "method",
+   "value": "SkeletonModuleTests::ADeadRenderersStaleDeviceIsKeptUntilTheNextGpuCreated",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/control/skeleton/tests/SkeletonModuleTests.cpp",
+   "note": "GpuCreated carries FAKE pl_gpu values (addresses of ints, presence only, never dereferenced); no device, no dispatcher, no GPU call. CPU only (reviewed, GF-P2b E2)."
+  },
+  {
+   "kind": "method",
    "value": "LedDriveDelta1Tests::RawFramesAreMeasuredThroughTheTransferLikeTheGpuPass",
    "category": "Cpu",
    "file": "src/VP-V/tests/suite/LedDriveDelta1Tests.cpp",
