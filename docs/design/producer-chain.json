@@ -54,7 +54,8 @@
    "shortQueueSubstitute": null,
    "lane": "L-B4",
    "producer_files": [
-    "motion/estimation/MotionAheadProducer.cpp"
+    "motion/estimation/MotionAheadProducer.cpp",
+    "motion/estimation/P2CpuForm.h"
    ],
    "producer_text": "NVOF producer (MotionAheadProducer)",
    "reserved": false,

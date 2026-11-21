@@ -78,6 +78,18 @@ namespace VpMotion
 			generation = entry.generation;
 			return entry.payload;
 		}
+		// The pair that ends at `to` (newest `from`, current generation): its `from` and generation come back; null on a miss.
+		MotionAhead::FlowPtr FindTo(uint64_t to, uint64_t& from, uint64_t& generation)
+		{
+			Store::Entry entry;
+			from = 0;
+			generation = 0;
+			if (!store_.GetTo(to, entry))
+				return nullptr;
+			from = entry.from;
+			generation = entry.generation;
+			return entry.payload;
+		}
 		bool Has(uint64_t from, uint64_t to) const { return store_.Has(from, to); }
 		// Pairs that end before `oldestNeeded` go (the frame being rendered, or the previous one for the causal consumers).
 		void Prune(uint64_t oldestNeeded) { store_.Prune(oldestNeeded); }
@@ -147,6 +159,14 @@ namespace VpMotion
 			generation = 0;
 			return slot_ ? slot_->Find(from, to, generation) : nullptr;
 		}
+		MotionAhead::FlowPtr FindTo(uint64_t to, uint64_t& from, uint64_t& generation) const
+		{
+			from = 0;
+			generation = 0;
+			return slot_ ? slot_->FindTo(to, from, generation) : nullptr;
+		}
+		// The slot's current continuity generation (0 when unbound): the decline text of the P2 CPU form names it.
+		uint64_t Generation() const { return slot_ ? slot_->Generation() : 0; }
 		bool Has(uint64_t from, uint64_t to) const { return slot_ && slot_->Has(from, to); }
 		// The consumer's prune of what it no longer needs (a retention, not a write of a product).
 		void Prune(uint64_t oldestNeeded) const { if (slot_) slot_->Prune(oldestNeeded); }

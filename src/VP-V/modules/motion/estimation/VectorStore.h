@@ -40,6 +40,8 @@ public:
 
 	struct Stats
 	{
+		// hits / misses count BOTH the pair reads (Get) and the frame-keyed reads (GetTo, the P2 CPU form); the form's own served /
+		// declined counts are the engine's (VectorEngine::P2CpuFormServed / Declined).
 		unsigned long long stored = 0, hits = 0, misses = 0, stale = 0, evicted = 0, cleared = 0;
 		uint64_t newestTo = 0;   // the furthest frame with a stored pair
 	};
@@ -102,6 +104,23 @@ public:
 		out = it->second;
 		++stats.hits;
 		return true;
+	}
+	// The pair that ENDS at `to` (the newest `from` when several, current generation only), without the caller knowing `from`
+	// (the P2 CPU form's reader asks for a frame, not a pair). A hit/miss like Get.
+	bool GetTo(uint64_t to, Entry& out)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		for (auto it = entries.rbegin(); it != entries.rend(); ++it)   // largest from first
+		{
+			if (it->second.to == to && it->second.generation == generation)
+			{
+				out = it->second;
+				++stats.hits;
+				return true;
+			}
+		}
+		++stats.misses;
+		return false;
 	}
 	bool Has(uint64_t from, uint64_t to) const
 	{

@@ -66,6 +66,34 @@ namespace VpMotion
 		}
 	}
 
+	// B-prereq (a): the P2 CPU form's reader. Any thread: the slot has its own mutex and the validity counts are atomics.
+	bool VectorEngine::P2RecordEndingAt(uint64_t to, P2PairRecord& out, std::string& why) const
+	{
+		const P2View view = P2();
+		if (!view.Bound())
+		{
+			why = "p2 cpu form: no pair store";
+			return false;
+		}
+		uint64_t from = 0, pairGeneration = 0;
+		const MotionAhead::FlowPtr flow = view.FindTo(to, from, pairGeneration);
+		if (!flow)
+		{
+			why = "p2 cpu form: no pair ahead for frame " + std::to_string(to) + " (generation " + std::to_string(view.Generation()) + ")";
+			return false;
+		}
+		// C2a-F 2: the slot keeps a pair computed before a resync / seek / queue reset / format change until the producer's
+		// asynchronous re-key; never serve its global.
+		if (!motionValidity.PairGenerationCurrent(pairGeneration))
+		{
+			why = "p2 cpu form: pair from generation " + std::to_string(pairGeneration) + " (current "
+				+ std::to_string(motionValidity.StreamGeneration()) + ")";
+			return false;
+		}
+		out = MakeP2PairRecord(from, to, pairGeneration, flow->global, flow->second, flow->globalSet, flow->globalGeneral);
+		return true;
+	}
+
 	VectorDemand::MotionEngineWork VectorEngine::Work() const
 	{
 		VectorDemand::MotionEngineWork w = motionEngineWork;
@@ -383,6 +411,21 @@ namespace VpMotion
 			if (fr.requests)
 				DebugLog::Log("Vector engine: flow reads %llu, served %llu, absent %llu (no producer %llu, no pair %llu, invalidated %llu, size unknown %llu)",
 					fr.requests, fr.served, fr.requests - fr.served, fr.noProducer, fr.noPair, fr.invalidated, fr.unscaled);
+			if (P2CpuFormServed() + P2CpuFormDeclined())   // the P2 CPU form's reads (the declines feed the no-pair-ahead path)
+				DebugLog::Log("Vector engine: P2 CPU form reads served %llu, declined %llu", P2CpuFormServed(), P2CpuFormDeclined());
+			// BBP-A-COUNTS-CTRLALTD: the report's history gets the counts too (never log-only): once at the first read, then only when
+			// the declines rose (served-only reads every frame would otherwise fill the decision ring every 5 s). The name fits the
+			// history's 23-character field (DiagnosticHistory EventRecord::name[24]).
+			const unsigned long long p2Served = P2CpuFormServed(), p2Declined = P2CpuFormDeclined();
+			if ((!p2CpuFormRecordedAny_ && p2Served + p2Declined != 0) || p2Declined != p2CpuFormRecorded_)
+			{
+				p2CpuFormRecordedAny_ = true;
+				p2CpuFormRecorded_ = p2Declined;
+				const std::string p2Segment = P2CpuFormStatusSegment();
+				const std::string p2Detail = p2Segment.empty() ? "P2 CPU form served " + std::to_string(p2Served) + ", declined 0" : p2Segment;
+				DiagnosticHistory::Global().RecordDecision("vector-p2-cpu-form", p2Detail.c_str(),
+					static_cast<int64_t>(p2Served), static_cast<int64_t>(p2Declined), 0.0, 0.0);
+			}
 		}
 	}
 
@@ -513,6 +556,9 @@ namespace VpMotion
 		class EngineDirectory : public IVectorEngineDirectory
 		{
 		public:
+			// The raw pointer outlives the lock by CONTRACT: the engine's destructor removes it (Remove) and a caller that uses the
+			// pointer off the render thread (the P2 CPU form's owner fill) relies on its workers / the skeleton memo's off-thread
+			// fills having stopped before the renderer destroys its engine. A caller that cannot rely on that uses WithEngine.
 			IVectorEngine* EngineFor(const void* host) override
 			{
 				std::lock_guard<std::mutex> lock(mutex_);
@@ -1331,13 +1377,28 @@ namespace VpMotion
 		return line;
 	}
 
+	std::string VectorEngine::P2CpuFormStatusSegment() const
+	{
+		const unsigned long long declined = P2CpuFormDeclined();
+		if (declined == 0)
+			return std::string();
+		return "P2 CPU form served " + std::to_string(P2CpuFormServed()) + ", declined " + std::to_string(declined) +
+			" (last: " + P2CpuFormLastDecline() + ")";
+	}
+
 	std::string VectorEngine::ProducerStatusSegment() const
 	{
-		if (!motionProducer)
-			return std::string();
-		const MotionAhead::Producer::RequestStats s = motionProducer->GetRequestStats();
-		if (s.ringMisses == 0)
-			return std::string();
-		return "engine-luma ring misses " + std::to_string(s.ringMisses) + " (last: " + s.lastRingMiss + ")";
+		std::string ring;
+		if (motionProducer)
+		{
+			const MotionAhead::Producer::RequestStats s = motionProducer->GetRequestStats();
+			if (s.ringMisses != 0)
+				ring = "engine-luma ring misses " + std::to_string(s.ringMisses) + " (last: " + s.lastRingMiss + ")";
+		}
+		// BBP-A-COUNTS-CTRLALTD: the P2 CPU form's declines (Config status / Ctrl+Alt+D), shown with or without a producer.
+		const std::string p2 = P2CpuFormStatusSegment();
+		if (p2.empty())
+			return ring;
+		return ring.empty() ? p2 : ring + "; " + p2;
 	}
 }

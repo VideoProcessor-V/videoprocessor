@@ -689,6 +689,7 @@ inline Registry FirstProducts()
     d.push_back(p1);
 
     // P2: vector-engine pair (forward + backward + cost + global) on the 4x4 grid of half luma.
+    // Its CPU form (AcquireForm::Cpu) = the pair identity + the global (motion/estimation/P2PairRecord.h), served by the owner fill in P2CpuForm.h.
     ProductDecl p2 = Make(kP2VectorPair, "p2_vector_pair", "vector-engine pair", Backend::Ofa, 1, Tier::T0, content,
                           Bit(kSettingsMotion));
     AddInput(p2, kP1HalfLuma, 0);

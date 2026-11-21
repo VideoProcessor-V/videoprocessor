@@ -50,6 +50,40 @@ namespace VectorStoreTest
 			Assert::AreEqual(1ull, store.GetStats().cleared);
 		}
 
+		// B-prereq (a) A3: the frame-keyed read of the P2 CPU form (the pair that ENDS at `to`, the newest `from`, current
+		// generation only); it counts in hits / misses like Get (the documented Stats choice, review bbp-a r1 LOW-3).
+		TEST_METHOD(GetToFindsTheNewestPairEndingAtAFrame)
+		{
+			VectorStore<int> store;
+			store.SetGeneration(3);
+			Assert::IsTrue(store.Put(8, 10, 3, 80));
+			Assert::IsTrue(store.Put(9, 10, 3, 90));
+			Assert::IsTrue(store.Put(9, 11, 3, 91));
+			VectorStore<int>::Entry e;
+			Assert::IsTrue(store.GetTo(10, e), L"a pair ends at 10");
+			Assert::AreEqual(uint64_t(9), e.from, L"the largest from");
+			Assert::AreEqual(uint64_t(10), e.to);
+			Assert::AreEqual(uint64_t(3), e.generation);
+			Assert::AreEqual(90, e.payload);
+			Assert::IsTrue(store.GetTo(11, e));
+			Assert::AreEqual(91, e.payload);
+			e.payload = -1;
+			Assert::IsFalse(store.GetTo(12, e), L"nothing ends at 12");
+			Assert::AreEqual(-1, e.payload, L"a miss leaves the entry alone");
+			Assert::AreEqual(2ull, store.GetStats().hits, L"GetTo hits counted with the pair reads");
+			Assert::AreEqual(1ull, store.GetStats().misses);
+			Assert::IsTrue(store.Get(9, 10, e), L"the pair read is unchanged");
+			Assert::AreEqual(3ull, store.GetStats().hits, L"one shared hit count");
+
+			store.SetGeneration(4);   // a discontinuity: the older generation's pairs are never answered
+			Assert::IsFalse(store.GetTo(10, e), L"another generation: a miss");
+			Assert::AreEqual(2ull, store.GetStats().misses);
+			Assert::IsTrue(store.Put(9, 10, 4, 94));
+			Assert::IsTrue(store.GetTo(10, e));
+			Assert::AreEqual(94, e.payload, L"the current generation's pair");
+			Assert::AreEqual(uint64_t(4), e.generation);
+		}
+
 		TEST_METHOD(PruneAndCapacityKeepItSmall)
 		{
 			VectorStore<int> store(4);

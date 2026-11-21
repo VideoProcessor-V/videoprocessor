@@ -10,12 +10,15 @@
 
 #include <VP-V/core/Indicator.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
+#include <VP-V/modules/motion/estimation/VectorProducts.h>
+#include <VP-V/modules/motion/estimation/P2PairRecord.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
 
 #include <libplacebo/gpu.h>
 
 #include <cstdint>
 #include <memory>
+#include <string>
 
 namespace VpMotion
 {
@@ -239,6 +242,25 @@ namespace VpMotion
 		// State() and take their non-motion path when it is not On / Degraded. Defaults: Off / None and zero work (existing fakes).
 		virtual VectorDemand::MotionEngineStatus State() const { return VectorDemand::MotionEngineStatus(); }
 		virtual VectorDemand::MotionEngineWork Work() const { return VectorDemand::MotionEngineWork(); }
+
+		// B-prereq (a): the read-only view of the engine's P2 slot (the NVOF pair + its global), for the P2 CPU form's owner fill
+		// (P2CpuForm.h). Any thread (the slot has its own mutex); an unbound view (default: a fake, an older engine) finds nothing,
+		// so the fill declines with its visible reason. NoteP2CpuFormRead counts one read (served / declined) for the engine's
+		// debug line; default: ignored. Any thread (atomics). The two-argument form (the fill's call) also carries a decline's
+		// reason for the engine's status segment (Config status / Ctrl+Alt+D, never log-only); default: the count only.
+		virtual VpMotion::P2View P2Pairs() const { return VpMotion::P2View(); }
+		virtual void NoteP2CpuFormRead(bool /*served*/) const {}
+		virtual void NoteP2CpuFormRead(bool served, const std::string& /*why*/) const { NoteP2CpuFormRead(served); }
+		// B-prereq (a), the ONE reader of the P2 CPU form: the record of the stored pair that ENDS at `to`, only when it was published
+		// under the current stream generation (C2a-F 2: MotionValidity::State::PairGenerationCurrent; the slot keeps a pre-resync
+		// pair until the producer's asynchronous re-key). False + `why` = declined (the reason rides the Acquire's OwnerDeclined
+		// cause). Implemented where MotionAhead::Flow is complete (VectorEngine.cpp), so this header and P2CpuForm.h stay free of the
+		// Flow layout. Any thread. Default (a fake, an older engine): no pair store.
+		virtual bool P2RecordEndingAt(uint64_t /*to*/, VpMotion::P2PairRecord& /*out*/, std::string& why) const
+		{
+			why = "p2 cpu form: no pair store";
+			return false;
+		}
 	};
 
 	// What Query(kVectorEngineQueryId) returns. EngineFor(host) = the engine of that renderer (host = the pointer the
