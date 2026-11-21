@@ -9,6 +9,7 @@
 //    would encode twice and must be switched off for the Beta.
 #include <VP-V/modules/output/dither/OutputEncodingRepair.h>
 #include <VP-V/modules/output/dither/VpShaderInclude.h>
+#include <VP-V/modules/output/dither/tests/DitherNeedWarpModel.h>
 #include <VP-V/modules/motion/estimation/matcher/DejudderWarp.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/motion/consumers/RenderedWarp.h>
@@ -7267,4 +7268,160 @@ void RunBetaSigmaBias()
 	if (_dupenv_s(&out, &length, "VP_BETA_SIGMA_BIAS_OUT") == 0 && out)
 		std::ofstream(out, std::ios::binary) << report;
 	std::free(out);
+}
+
+// ---- DitherNeedWarp fork-only cases (GEM-S10G): native SigmaDeltaHookTests::DitherNeedWarp{BoundMapCasesAreByteIdentical,
+// ConstantExtraFollowsTheCpuQuantiserModel,ExactCodesStayExactAtTheAmplitudeCap}, which need libplacebo fork patch 0004 and so
+// run on no native lane. Line-for-line mirrors of the native bodies; the CPU model is DitherNeedWarpModel.h (shared, not copied).
+namespace
+{
+	std::map<std::string, double> BetaDnParams(bool full, double noise)
+	{
+		return { { "enabled", 1 }, { "levels_full", full ? 1 : 0 }, { "swapchain_bits", 10 }, { "color_bits", 10 },
+			{ "noise_amplitude", noise } };
+	}
+
+	// DwSigmaCodes: a FRESH Gpu and sigma-delta hook per run at the default 2x2 output; `frames` refreshes at each grey (the hook's
+	// state carries across the greys); a bound map is an rgba32f mapW x mapH texture at VPDN (e in .x).
+	std::vector<int> BetaDnCodes(const std::map<std::string, double>& params, const std::vector<float>& greys, int frames, bool full,
+		const std::vector<float>& mapData = std::vector<float>(), int mapW = 0, int mapH = 0)
+	{
+		Gpu gpu;
+		const auto shader = Load(gpu.GpuHandle(), "Temporal sigma-delta.glsl", params);
+		const pl_hook* hook = shader->hook;
+		pl_tex map = nullptr;
+		if (!mapData.empty())
+		{
+			pl_fmt fmt = pl_find_fmt(gpu.GpuHandle(), PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			Check(fmt != nullptr, "DitherNeedWarp: no rgba32f format");
+			pl_tex_params mp{};
+			mp.w = mapW;
+			mp.h = mapH;
+			mp.format = fmt;
+			mp.sampleable = true;
+			mp.initial_data = mapData.data();
+			map = pl_tex_create(gpu.GpuHandle(), &mp);
+			Check(map != nullptr, "DitherNeedWarp: cannot create the VPDN map texture");
+			Check(pl_mpv_user_shader_set_texture(hook, "VPDN", map), "DitherNeedWarp: VPDN not accepted");
+		}
+		const enum pl_color_levels levels = full ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+		std::vector<int> codes;
+		for (const float grey : greys)
+		{
+			const std::vector<int> c = gpu.Sequence(grey, frames, 10, { hook }, levels);
+			codes.insert(codes.end(), c.begin(), c.end());
+		}
+		if (map)
+		{
+			pl_mpv_user_shader_set_texture(hook, "VPDN", nullptr);
+			pl_tex_destroy(gpu.GpuHandle(), &map);
+		}
+		CheckCleanLog(gpu, "DitherNeedWarp");
+		return codes;
+	}
+}
+
+void RunBetaDitherNeedWarpForkTests()
+{
+#ifndef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+	throw std::runtime_error("FORK-ONLY stage built without libplacebo patch 0004");
+#else
+	int executed = 0;
+	auto check = [&executed](bool ok, const std::string& message) { ++executed; Check(ok, "DitherNeedWarp: " + message); };
+	auto codesText = [](const std::vector<int>& c) { return Codes(c); };
+	const std::vector<float> greys = DitherNeedWarpModel::Greys();
+	const int frames = 16;
+
+	// (b2) the bound-map cases: an all-zero map, and a non-zero map with dither_need 0, are byte-identical to no map.
+	{
+		const std::vector<int> base = BetaDnCodes(BetaDnParams(true, 0.15), greys, frames, true);
+		auto withDn = [](std::map<std::string, double> p, double need)
+		{
+			p["dither_need"] = need;
+			p["dn_scale_x"] = 3.7; p["dn_scale_y"] = 0.5; p["dn_off_x"] = 11; p["dn_off_y"] = -4; p["dn_block"] = 32;
+			return p;
+		};
+		const std::vector<int> zero = BetaDnCodes(withDn(BetaDnParams(true, 0.15), 1), greys, frames, true,
+			DitherNeedWarpModel::ConstantMap(4, 3, 0.0f), 4, 3);
+		check(zero == base, "dither_need 1 with an all-zero map differs: " + codesText(zero) + " vs " + codesText(base));
+		const std::vector<int> unread = BetaDnCodes(withDn(BetaDnParams(true, 0.15), 0), greys, frames, true,
+			DitherNeedWarpModel::ConstantMap(4, 3, 0.3f), 4, 3);
+		check(unread == base, "dither_need 0 with a bound map differs: " + codesText(unread) + " vs " + codesText(base));
+		std::cout << "Beta DitherNeedWarp BoundMapCasesAreByteIdentical PASS, " << executed << " checks so far\n";
+		BetaRan("VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpBoundMapCasesAreByteIdentical");
+	}
+
+	// (d) A constant extra e: the codes equal the CPU quantiser model at amplitude aBase + e (frame phase found from the plain run).
+	{
+		const float aBase = 0.15f;
+		const std::vector<int> base = BetaDnCodes(BetaDnParams(true, 0.15), greys, frames, true);
+		std::vector<int> phases;
+		for (int o = 0; o < 64; ++o)
+			if (DitherNeedWarpModel::ModelMatchesAnyDx(&base[0], frames, greys[0], o, aBase)) phases.push_back(o);
+		check(!phases.empty(), "no frame phase makes the CPU model reproduce the plain run at grey 0");
+		bool differs = false;
+		for (const float e : { 0.1f, 0.25f, 0.35f })
+		{
+			std::map<std::string, double> p = BetaDnParams(true, 0.15);
+			p["dither_need"] = 1;
+			p["dn_block"] = 16;
+			const std::vector<int> got = BetaDnCodes(p, greys, frames, true, DitherNeedWarpModel::ConstantMap(4, 3, e), 4, 3);
+			const float amp = (std::min)(aBase + (std::max)(e, 0.0f), 0.5f);
+			for (size_t g = 0; g < greys.size(); ++g)
+			{
+				const int* c = &got[g * frames];
+				bool match = true;
+				if (g == 0)
+				{
+					match = false;
+					for (const int o : phases) match = match || DitherNeedWarpModel::ModelMatchesAnyDx(c, frames, greys[0], o, amp);
+				}
+				else
+				{
+					const double x = static_cast<double>(greys[g] * 1023.0f);
+					for (int j = 0; j < frames; ++j) match = match && std::fabs(c[j] - x) <= 1.0 + amp + 1e-3;
+				}
+				check(match, "extra " + std::to_string(e) + ": the codes at grey " + std::to_string(g) +
+					" leave the CPU model / bound at amplitude " + std::to_string(amp));
+				for (int j = 0; j < frames; ++j) differs = differs || c[j] != base[g * frames + j];
+			}
+		}
+		check(differs, "a raised amplitude must change at least one code (the test would be vacuous)");
+		std::cout << "Beta DitherNeedWarp ConstantExtraFollowsTheCpuQuantiserModel PASS, " << executed << " checks so far\n";
+		BetaRan("VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel");
+	}
+
+	// (e) Total amplitude 0.5: codes exact without dither stay exact. TQ-CD-M5: all four levels (codes 64, 940, 980, 24), exactly
+	// four asserted, and the WTW / BTB codes stay beyond 940 / 64.
+	{
+		const std::vector<float> levels = { 0.0f, 1.0f, 1.0f + 40.0f / 876.0f, -40.0f / 876.0f };
+		const std::vector<int> exact = BetaDnCodes(BetaDnParams(false, 0.0), levels, frames, false);
+		std::map<std::string, double> p = BetaDnParams(false, 0.15);
+		p["dither_need"] = 1;
+		p["dn_block"] = 16;
+		const std::vector<int> capped = BetaDnCodes(p, levels, frames, false, DitherNeedWarpModel::ConstantMap(4, 3, 0.35f), 4, 3);
+		int asserted = 0;
+		for (size_t g = 0; g < levels.size(); ++g)
+		{
+			bool constant = true;
+			for (int j = 1; j < frames; ++j) constant = constant && exact[g * frames + j] == exact[g * frames];
+			if (!constant)
+			{
+				std::cout << "level " << levels[g] << " is not constant without dither; not asserted\n";
+				continue;
+			}
+			++asserted;
+			for (int j = 0; j < frames; ++j)
+				check(exact[g * frames] == capped[g * frames + j],
+					"an exact code moved at total amplitude 0.5, level index " + std::to_string(g) + " refresh " + std::to_string(j));
+		}
+		check(asserted == 4, "black, white, WTW and BTB must all be exact (constant) without dither; asserted " + std::to_string(asserted) +
+			", codes " + codesText(exact));
+		check(exact[2 * frames] > 940 && exact[3 * frames] < 64, "the WTW level must stay above 940 and the BTB level below 64; codes " +
+			std::to_string(exact[2 * frames]) + " / " + std::to_string(exact[3 * frames]));
+		std::cout << "Beta DitherNeedWarp ExactCodesStayExactAtTheAmplitudeCap PASS, " << executed << " checks so far\n";
+		BetaRan("VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap");
+	}
+	std::cout << "Beta DitherNeedWarp: 3 cases, " << executed << " checks executed\n";
+#endif
 }
