@@ -5,8 +5,159 @@
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <vector>
+
 namespace VideoProcessorTest
 {
+	namespace
+	{
+		// GEM-015 / GEM-008 (G1 tests): a float readback of a hook render, the shader as a hook, and the pre-change SDR tone shape
+		// shader (tests/fixtures) for the A/B checks. The fixture renders 8-bit; the headroom-only short-circuit and the recovery
+		// sum order are float-level properties, so these render a float source into a float target.
+		inline pl_frame FloatRgbFrame(pl_tex texture)
+		{
+			pl_frame frame{};
+			frame.num_planes = 1;
+			frame.planes[0].texture = texture;
+			frame.planes[0].components = 4;
+			frame.planes[0].component_mapping[0] = 0;
+			frame.planes[0].component_mapping[1] = 1;
+			frame.planes[0].component_mapping[2] = 2;
+			frame.planes[0].component_mapping[3] = 3;
+			frame.repr.sys = PL_COLOR_SYSTEM_RGB;
+			frame.repr.levels = PL_COLOR_LEVELS_FULL;
+			frame.color.primaries = PL_COLOR_PRIM_BT_709;
+			frame.color.transfer = PL_COLOR_TRC_SRGB;
+			return frame;
+		}
+
+		// The pre-change shader the A/B tests compare against: tests/fixtures next to this file. A missing file FAILS the test.
+		inline std::string LoadToneShapeFixture(const std::string& name)
+		{
+			std::string path = __FILE__;
+			const size_t separator = path.find_last_of("\\/");
+			Assert::IsTrue(separator != std::string::npos);
+			path.resize(separator);
+			path += "\\fixtures\\" + name;
+			std::ifstream input(path, std::ios::binary);
+			std::string source{ std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>() };
+			Assert::IsFalse(source.empty(), (std::wstring(L"fixture shader is readable: ") + std::wstring(name.begin(), name.end())).c_str());
+			return source;
+		}
+
+		// One bundled (or fixture) shader as a libplacebo hook on the fixture's device. Fixture files are named "pre-GEM-015 ...".
+		struct ShaderHook
+		{
+			CustomHookChain::Chain chain;
+			const pl_hook* hook = nullptr;
+
+			ShaderHook(TargetLutGpuFixture& fixture, const std::string& file, const char* ruleName)
+				: chain({
+					[](const std::string& name, std::string& source, std::string& reason)
+					{
+						source = name.rfind("pre-GEM-015", 0) == 0 ? LoadToneShapeFixture(name) : LoadBundledShader(name.c_str());
+						reason = "shader not found";
+						return !source.empty();
+					},
+					[&fixture](const std::string& source) -> const pl_hook*
+					{
+						return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+					},
+					[](const pl_hook*& h) { pl_mpv_user_shader_destroy(&h); } })
+			{
+				ConfiguredShaderRule rule;
+				rule.name = ruleName;
+				rule.filename = file;
+				chain.Configure({ rule });
+				CustomHookChain::TemplateValues values;
+				values.outputWidth = values.outputHeight = 64;
+				chain.Ensure(values);
+				std::vector<const pl_hook*> hooks;
+				chain.Collect(false, hooks);
+				Assert::AreEqual(size_t{ 1 }, hooks.size(), (std::wstring(L"libplacebo rejected ") + std::wstring(file.begin(), file.end())).c_str());
+				Assert::IsTrue((hooks[0]->stages & PL_HOOK_PRE_OUTPUT) != 0);
+				hook = hooks[0];
+			}
+		};
+
+		// A deterministic textured float RGBA field in [lo, hi] (alpha 1): below-black and above-white values included when the
+		// range reaches past 0 / 1.
+		inline std::vector<float> TexturedField(int width, int height, uint32_t seed, float lo, float hi)
+		{
+			std::vector<float> rgba(static_cast<size_t>(width) * height * 4);
+			uint32_t state = seed;
+			auto next = [&state]() { state = state * 1664525u + 1013904223u; return static_cast<float>((state >> 8) & 0xFFFF) / 65535.0f; };
+			for (size_t i = 0; i < rgba.size(); i += 4)
+			{
+				for (int c = 0; c < 3; ++c)
+					rgba[i + c] = lo + (hi - lo) * next();
+				rgba[i + 3] = 1.0f;
+			}
+			return rgba;
+		}
+
+		// Renders the float field through `hook` (null: no hook) into a 32-bit float target and reads it back (RGBA floats).
+		inline std::vector<float> RenderFloatField(TargetLutGpuFixture& fixture, const pl_hook* hook, int width, int height,
+			const std::vector<float>& rgba)
+		{
+			pl_gpu gpu = fixture.Gpu();
+			pl_fmt format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, static_cast<enum pl_fmt_caps>(
+				PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(format, L"No host-readable RGBA32F render format is available");
+			pl_tex_params sourceParams{};
+			sourceParams.w = width;
+			sourceParams.h = height;
+			sourceParams.format = format;
+			sourceParams.sampleable = true;
+			sourceParams.initial_data = rgba.data();
+			pl_tex source = pl_tex_create(gpu, &sourceParams);
+			Assert::IsNotNull(source);
+			pl_tex_params targetParams{};
+			targetParams.w = width;
+			targetParams.h = height;
+			targetParams.format = format;
+			targetParams.renderable = true;
+			targetParams.host_readable = true;
+			pl_tex target = pl_tex_create(gpu, &targetParams);
+			Assert::IsNotNull(target);
+			pl_frame image = FloatRgbFrame(source);
+			pl_frame out = FloatRgbFrame(target);
+			pl_render_params params = pl_render_fast_params;
+			params.dither_params = nullptr;   // deterministic readback
+			if (hook)
+			{
+				params.hooks = &hook;
+				params.num_hooks = 1;
+			}
+			Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &out, &params));
+			pl_gpu_finish(gpu);
+			std::vector<float> result(rgba.size());
+			pl_tex_transfer_params download{};
+			download.tex = target;
+			download.ptr = result.data();
+			Assert::IsTrue(pl_tex_download(gpu, &download));
+			pl_tex_destroy(gpu, &target);
+			pl_tex_destroy(gpu, &source);
+			return result;
+		}
+
+		inline void SetToneShape(const pl_hook* hook, double headroom, double kneeStart, double strength, double eotf, double recovery)
+		{
+			Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "headroom", headroom));
+			Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee_start", kneeStart));
+			Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "strength", strength));
+			Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "eotf", eotf));
+			Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "recovery", recovery));
+		}
+	}
+
 	TEST_CLASS(SdrToneShapeHookTests)
 	{
 	public:
@@ -415,5 +566,127 @@ namespace VideoProcessorTest
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
 		}
+
+		// GEM-008: DV trims.glsl on a BT.1886 or sRGB output (dv_trc_kind 1 / 2, dv_trc_param = the BT.1886 b) matches
+		// DolbyVisionTrims::ApplyPixel with the same transfer Signal on the GPU, with the tolerance rule of the other DV trims
+		// reference tests, and the transfer parameters are what makes the difference (the same trim with dv_trc_kind 0, the
+		// pure-power path of the old shader, lands several codes away). The display black is 5 nits on a 100-nit peak (b about
+		// 0.4) so the difference is large against the tolerance. Before the fix the shader had no dv_trc_kind / dv_trc_param.
+		TEST_METHOD(DolbyVisionTrimShaderBt1886MatchesItsReference)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
+			const std::vector<RgbaPixel> baseline = fixture.RenderCoordinateField(nullptr);
+			ShaderHook trims(fixture, "DV trims.glsl", "dv_trims");
+			const pl_hook* hook = trims.hook;
+			auto half = [](double x)
+			{
+				if (x == 0.0) return 0.0;
+				int e = 0;
+				const double m = std::frexp(x, &e);
+				return std::ldexp(std::round(m * 2048.0) / 2048.0, e);   // libplacebo hands PRE_OUTPUT an rgba16f intermediate
+			};
+			int checked = 0;
+			for (const enum pl_color_transfer trc : { PL_COLOR_TRC_BT_1886, PL_COLOR_TRC_SRGB })
+			{
+				const bool bt1886 = trc == PL_COLOR_TRC_BT_1886;
+				const std::wstring name = bt1886 ? L"BT.1886" : L"sRGB";
+				pl_color_space colour{};
+				colour.primaries = PL_COLOR_PRIM_BT_709;
+				colour.transfer = trc;
+				colour.hdr.max_luma = 100.0f;
+				colour.hdr.min_luma = 5.0f;
+				pl_color_space_infer(&colour);
+				DolbyVisionTrims::Signal signal;
+				signal.pq = false;
+				signal.gamma = bt1886 ? 2.4 : 2.2;
+				signal.peakNits = 100.0;
+				signal.kr = 0.2126; signal.kg = 0.7152; signal.kb = 0.0722;
+				Assert::IsTrue(ExtendedRange::DescribeTransfer(colour, true, signal.transfer));
+				Assert::IsTrue(signal.transfer.kind == (bt1886 ? ExtendedRange::TransferKind::Bt1886 : ExtendedRange::TransferKind::Srgb));
+				if (bt1886)
+					Assert::IsTrue(signal.transfer.param > 0.3f, L"a 5-nit black on a 100-nit peak gives a large offset b");
+				auto set = [hook](const DolbyVisionTrims::Params& p, const DolbyVisionTrims::Signal& s, double kind)
+				{
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_slope", p.slope));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_offset", p.offset));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_power", p.power));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_chroma_weight", p.chromaWeight));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_sat_gain", p.saturationGain));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_signal_pq", 0.0));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_gamma", s.gamma));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_trc_kind", kind));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_trc_param", kind > 0.5 ? static_cast<double>(s.transfer.param) : 0.0));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_peak_nits", s.peakNits));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_peak_pq", DolbyVisionTrims::PqFromNits(s.peakNits)));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_near_black_nits", DolbyVisionTrims::NitsFromPq(DolbyVisionTrims::kNearBlackPq)));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kr", s.kr));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kb", s.kb));
+				};
+				const double kind = static_cast<double>(static_cast<int>(signal.transfer.kind));
+				// Neutral = untouched (within a code: the round trip through the transfer is not bit exact).
+				set(DolbyVisionTrims::Params(), signal, kind);
+				const auto unity = fixture.RenderCoordinateField(hook);
+				for (size_t i = 0; i < unity.size(); ++i)
+					Assert::IsTrue(std::abs(static_cast<int>(unity[i].r) - baseline[i].r) <= 1 && std::abs(static_cast<int>(unity[i].g) - baseline[i].g) <= 1 &&
+						std::abs(static_cast<int>(unity[i].b) - baseline[i].b) <= 1, (name + L": neutral = untouched at " + std::to_wstring(i)).c_str());
+				for (int variant = 0; variant < 2; ++variant)
+				{
+					DolbyVisionTrims::Params trim;
+					if (variant == 0) { trim.slope = 0.85; trim.offset = 0.02; trim.power = 1.15; trim.chromaWeight = 0.2; trim.saturationGain = 1.2; }
+					else { trim.slope = 1.3; trim.offset = 0.1; trim.power = 0.9; trim.chromaWeight = -0.3; trim.saturationGain = 1.15; }
+					set(trim, signal, kind);
+					const auto trimmed = fixture.RenderCoordinateField(hook);
+					int changed = 0, loose = 0;
+					for (size_t i = 0; i < trimmed.size(); ++i)
+					{
+						double v[3] = { half(baseline[i].r / 255.0), half(baseline[i].g / 255.0), half(baseline[i].b / 255.0) };
+						double scale = 0.0;
+						for (int c = 0; c < 3; ++c)
+							scale = (std::max)(scale, std::fabs(DolbyVisionTrims::ToNits(v[c], signal)));
+						DolbyVisionTrims::ApplyPixel(v, trim, signal);
+						const uint8_t got[3] = { trimmed[i].r, trimmed[i].g, trimmed[i].b };
+						for (int c = 0; c < 3; ++c)
+						{
+							const double expected = 255.0 * (std::min)(1.0, (std::max)(0.0, v[c]));
+							const double diff = std::fabs(expected - static_cast<double>(got[c]));
+							if (diff <= 1.5)
+								continue;
+							const double nitsDiff = std::fabs(DolbyVisionTrims::ToNits(expected / 255.0, signal) -
+								DolbyVisionTrims::ToNits(got[c] / 255.0, signal));
+							Assert::IsTrue(nitsDiff <= 2e-3 * scale + 1e-3, (name + L" variant " +
+								std::to_wstring(variant) + L" pixel " + std::to_wstring(i) + L" channel " + std::to_wstring(c) + L": " +
+								std::to_wstring(expected) + L" vs " + std::to_wstring(got[c])).c_str());
+							++loose;
+						}
+						changed += got[0] != baseline[i].r || got[1] != baseline[i].g || got[2] != baseline[i].b;
+						++checked;
+					}
+					Assert::IsTrue(changed > static_cast<int>(trimmed.size()) / 2, L"the trim changes the picture");
+					Assert::IsTrue(loose * 100 <= static_cast<int>(trimmed.size()) * 3 * 5, L"at most 5% of samples beyond 1.5 codes");
+					// The transfer parameters are what matters (BT.1886 with its large black: the pure-power path, dv_trc_kind 0, of the
+					// same trim is far from it; sRGB is close to a 2.2 power away from its toe, so only the reference match applies).
+					int apart = 0;
+					if (bt1886)
+					{
+						set(trim, signal, 0.0);
+						const auto asPower = fixture.RenderCoordinateField(hook);
+						for (size_t i = 0; i < trimmed.size(); ++i)
+							apart += std::abs(static_cast<int>(asPower[i].r) - trimmed[i].r) > 3 || std::abs(static_cast<int>(asPower[i].g) - trimmed[i].g) > 3 ||
+								std::abs(static_cast<int>(asPower[i].b) - trimmed[i].b) > 3;
+						Assert::IsTrue(apart * 100 >= static_cast<int>(trimmed.size()) * 10, (name +
+							L": the transfer curve is what the shader uses, not the pure power (pixels more than 3 codes apart: " + std::to_wstring(apart) + L")").c_str());
+					}
+					Logger::WriteMessage(((bt1886 ? std::string("BT.1886") : std::string("sRGB")) + " variant " + std::to_string(variant) + ": " +
+						std::to_string(loose) + " samples beyond 1.5 codes, " + std::to_string(apart) + " pixels differ from the power path\n").c_str());
+				}
+			}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
+			Logger::WriteMessage(("DV trims shader (BT.1886 / sRGB): " + std::to_string(checked) + " pixels matched the reference\n").c_str());
+		}
+
 	};
 }
