@@ -248,7 +248,7 @@ namespace SegmentRunnerTestsNs
 			PipelineSlots::Registry registry;
 			Segment s2(kS2FallbackId, OutputColourStages(), OutputColourEntry());
 			for (const StageInfo& st : s2.Active(registry))
-				Assert::IsTrue(st.slot != Id::ColourAppearance && st.slot != Id::DriveBlackLevel, W(st.name).c_str());
+				Assert::IsTrue(st.slot != Id::DriveBlackLevel, W(st.name).c_str());   // CF-1 CAM-3: colour.appearance is Built now
 			registry.SetEnabled(Id::DriveLedMeasure, false);
 			for (const StageInfo& st : s2.Active(registry))
 				Assert::IsTrue(st.slot != Id::DriveLedMeasure);
@@ -663,11 +663,10 @@ namespace SegmentRunnerTestsNs
 			PipelineSlots::Registry original;
 			original.ApplyOriginalPathway();
 			CompareWithLegacy(original, L"Original pathway");
-			// Placeholders (Stage 13, black level) switched on have no component: nothing changes.
+			// The placeholder (black level) switched on has no component: nothing changes.
 			PipelineSlots::Registry placeholders;
-			placeholders.SetEnabled(Id::ColourAppearance, true);
 			placeholders.SetEnabled(Id::DriveBlackLevel, true);
-			Assert::IsFalse(placeholders.Runs(Id::ColourAppearance) || placeholders.Runs(Id::DriveBlackLevel));
+			Assert::IsFalse(placeholders.Runs(Id::DriveBlackLevel));
 			CompareWithLegacy(placeholders, L"placeholders on");
 			PipelineSlots::Registry designed;
 			CompareWithLegacy(designed, L"designed order");
@@ -780,8 +779,8 @@ namespace SegmentRunnerTestsNs
 		{
 			Modules m(false);
 			PipelineSlots::Registry registry;
-			registry.SetComponent(Id::ColourAppearance, true);
-			registry.SetEnabled(Id::ColourAppearance, true);
+			registry.SetComponent(Id::DriveBlackLevel, true);
+			registry.SetEnabled(Id::DriveBlackLevel, true);
 			std::vector<const pl_hook*> hooks, plain;
 			OutputSegments::OutputColourSegment s2(m.tone, m.dv, m.measure, m.comp, m.lut);
 			const OutputSegments::ColourCounts c = s2.Collect(Frame(63), registry, hooks, [](size_t, Id) {});
