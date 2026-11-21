@@ -11,6 +11,7 @@
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/core/ComputeOnce.h>
+#include <VP-V/core/SkeletonAcquire.h>
 
 #include <algorithm>
 #include <cmath>
@@ -440,6 +441,29 @@ if (p.x < GS_W && p.y < GS_H) {
 				+ uint64_t(s.bw) * uint64_t(s.bh) * 16u;       // quiet, rgba32f
 		}
 
+		ContextShapes ContextShapesOf(int w, int h, int B, const Params& params, VpSkeleton::TexFormat t2, VpSkeleton::TexFormat t4)
+		{
+			ContextShapes c;
+			if (w < 1 || h < 1 || B < 1 || params.subBlocks < 1 || params.levelBins < 1)
+				return c;   // all empty: not Valid, 0 bytes
+			const WorkingShapes s = WorkingOf(w, h, B, params.subBlocks);   // the shapes of ArenaRequests / WorkingBytes and of Begin
+			const auto shape = [](int sw, int sh, VpSkeleton::TexFormat f) {
+				VpSkeleton::TexShape t;
+				t.w = static_cast<uint32_t>(sw);
+				t.h = static_cast<uint32_t>(sh);
+				t.fmt = f;
+				return t;
+			};
+			c.tmp = shape(s.hw, s.hh, t2);
+			c.low = shape(s.hw, s.hh, t2);
+			c.part = shape(s.pw, s.ph, t4);
+			c.quiet = shape(s.bw, s.bh, t4);
+			c.level = shape(params.levelBins, 1, t4);
+			c.split = shape(w, h, t4);         // Full: (s1, s2, f, base)
+			c.blocks = shape(s.bw, s.bh, t4);  // (N, e3, 0, 0)
+			return c;
+		}
+
 		// ND03: the law's one band Gaussian (the U2 unit's VpUnit::BandFromBase::BandRadius / BandWeight).
 		int GaussRadius(double sigma) { return VpUnit::BandFromBase::BandRadius(sigma); }
 
@@ -550,6 +574,75 @@ if (p.x < GS_W && p.y < GS_H) {
 			return true;
 		}
 
+		bool Splitter::Compute(VpSkeleton::OwnerGpuContext& ctx, pl_tex plane, int component, double codeUnit, double scale, int B,
+			const Params& params, uint64_t seq, ContextHold& hold)
+		{
+			hold = ContextHold();
+			m_out = Frame();
+			m_error.clear();
+			m_scratchShort = false;
+			// R19-27: no device handle is taken here. The context's dispatch is handed to the passes in the house form (the cast
+			// of ctx.Dispatch() at each call), its shared-memory limit replaces the device's, and every texture is the context's.
+			if (ctx.Dispatch() == nullptr)
+			{
+				m_error = "grain split: no GPU context (used after its fill returned, or no skeleton GPU device)";
+				return false;
+			}
+			if (ctx.MaxSharedMemory() == 0)
+			{
+				m_error = "grain split: the GPU context does not report the device's compute shared memory";
+				return false;
+			}
+			if (!plane)
+			{
+				m_error = "grain split: invalid input";
+				return false;
+			}
+			const ContextShapes shapes = ContextShapesOf(plane->params.w, plane->params.h, B, params);   // rg32f / rgba32f
+			if (!shapes.Valid())
+			{
+				m_error = "grain split: invalid input";
+				return false;
+			}
+			Options o;
+			o.storage = GrainSplit::Storage::Full;
+			o.seq = seq;
+			struct Want
+			{
+				const VpSkeleton::TexShape* shape;
+				pl_tex* tex;
+				const char* name;
+			};
+			const Want want[7] = {
+				{ &shapes.tmp, &o.scratch.tmp, "tmp" }, { &shapes.low, &o.scratch.low, "low" }, { &shapes.part, &o.scratch.part, "part" },
+				{ &shapes.quiet, &o.scratch.quiet, "quiet" }, { &shapes.level, &o.scratch.level, "level table" },
+				{ &shapes.split, &o.targets.split, "split" }, { &shapes.blocks, &o.targets.blocks, "blocks" },
+			};
+			for (const Want& item : want)
+			{
+				VpSkeleton::GpuMemoHandle made;
+				std::string why;
+				if (!ctx.Allocate(*item.shape, made, why) || made.resource == nullptr)
+				{
+					m_error = std::string("grain split: the ") + item.name + " texture was refused: " + why;
+					hold = ContextHold();   // what was made goes back to the device
+					return false;
+				}
+				*item.tex = static_cast<pl_tex>(made.resource);
+				hold.keep.push_back(made.keepAlive);
+				hold.bytes += made.bytes;
+			}
+			Device dev;
+			dev.maxShmem = ctx.MaxSharedMemory();   // dev.gpu stays null: every texture above is supplied, no lookup is needed
+			for (uint32_t i = 0; i < StepCount(); ++i)
+				if (!StepOn(dev, static_cast<pl_dispatch>(ctx.Dispatch()), plane, component, codeUnit, scale, B, params, o, i))
+				{
+					hold = ContextHold();
+					return false;
+				}
+			return true;
+		}
+
 		namespace
 		{
 			struct PassText
@@ -584,6 +677,15 @@ if (p.x < GS_W && p.y < GS_H) {
 		bool Splitter::Step(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B, const Params& params,
 			const Options& options, uint32_t step)
 		{
+			Device dev;
+			dev.gpu = gpu;
+			dev.maxShmem = gpu ? uint64_t(gpu->glsl.max_shmem_size) : 0u;
+			return StepOn(dev, dispatch, plane, component, codeUnit, scale, B, params, options, step);
+		}
+
+		bool Splitter::StepOn(const Device& dev, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B,
+			const Params& params, const Options& options, uint32_t step)
+		{
 			using namespace VpvGpu;
 			if (step >= StepCount())
 			{
@@ -594,7 +696,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			if (step == 0)
 			{
 				m_run = Run();
-				if (!Begin(gpu, dispatch, plane, component, codeUnit, B, params, options, scale))
+				if (!Begin(dev, dispatch, plane, component, codeUnit, B, params, options, scale))
 					return false;
 			}
 			else if (!m_run.active || m_run.next != step)
@@ -716,16 +818,23 @@ if (p.x < GS_W && p.y < GS_H) {
 			return true;
 		}
 
-		bool Splitter::Begin(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, int B, const Params& params,
+		bool Splitter::Begin(const Device& dev, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, int B, const Params& params,
 			const Options& options, double scale)
 		{
 			using namespace VpvGpu;
+			const pl_gpu gpu = dev.gpu;   // null on the context entry: every texture is supplied, nothing is looked up or made here
 			m_error.clear();
 			m_scratchShort = false;
 			m_out = Frame();   // a failed Compute never leaves the previous frame's product looking valid
-			if (!gpu || !dispatch || !plane || !plane->params.sampleable || component < 0 || component > 3 || !(codeUnit > 0.0) || B < 1)
+			if (!dispatch || !plane || !plane->params.sampleable || component < 0 || component > 3 || !(codeUnit > 0.0) || B < 1)
 			{
 				m_error = "grain split: invalid input";
+				return false;
+			}
+			if (!gpu && (options.storage != GrainSplit::Storage::Full || options.arena || !options.scratch.All() || !options.targets.split ||
+				!options.targets.blocks || options.targets.splitB))
+			{
+				m_error = "grain split: invalid input (without a device every texture of the Full layout is supplied by the caller)";
 				return false;
 			}
 			if (!(params.sigmaFine > 0.0) || !(params.sigmaBase * scale >= GrainSplit::kV3MinLowSigma) || !(params.sigmaLow * scale >= GrainSplit::kV3MinLowSigma) ||
@@ -747,10 +856,10 @@ if (p.x < GS_W && p.y < GS_H) {
 					sizeof(float) * (size_t(aa) * aa + size_t(aa) * kApplyTile + 2u * size_t(lapp) * lapp + size_t(aw) * aw),
 					sizeof(uint32_t) * (size_t(params.levelBins) * 160u + size_t(params.levelBins)) };
 				const size_t most = (std::max)((std::max)(need[0], need[1]), (std::max)((std::max)(need[2], need[3]), need[4]));
-				if (most > gpu->glsl.max_shmem_size)
+				if (uint64_t(most) > dev.maxShmem)
 				{
 					m_error = "grain split: the passes need " + std::to_string(most) + " B of shared memory, the device offers " +
-						std::to_string(gpu->glsl.max_shmem_size) + " B";
+						std::to_string(dev.maxShmem) + " B";
 					return false;
 				}
 			}
@@ -765,9 +874,9 @@ if (p.x < GS_W && p.y < GS_H) {
 			}
 			const int w = plane->params.w, h = plane->params.h;
 			const int bw = (w + B - 1) / B, bh = (h + B - 1) / B, hw = HalfOf(w), hh = HalfOf(h);
-			const pl_fmt f4 = FloatFormat(gpu, 4), f2 = FloatFormat(gpu, 2);
+			const pl_fmt f4 = gpu ? FloatFormat(gpu, 4) : nullptr, f2 = gpu ? FloatFormat(gpu, 2) : nullptr;
 			pl_fmt fA = nullptr, fB = nullptr, fBlocks = f4;
-			if (compact)
+			if (compact)   // a device-free run is Full (refused above otherwise)
 			{
 				fA = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG16F);
 				fB = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG16);
@@ -777,14 +886,25 @@ if (p.x < GS_W && p.y < GS_H) {
 					return false;
 				}
 			}
-			if (!f4 || !f2)
+			if (gpu && (!f4 || !f2))
 			{
 				m_error = "grain split: no rgba32f / rg32f storage texture";
 				return false;
 			}
-			auto usable = [&](pl_tex t, int tw, int th, pl_fmt fmt) { return t && t->params.w == tw && t->params.h == th && t->params.format == fmt && t->params.sampleable && t->params.storable; };
-			if ((tg.split && !usable(tg.split, w, h, compact ? fA : f4)) || (tg.blocks && !usable(tg.blocks, bw, bh, fBlocks)) ||
-				(compact && tg.splitB && !usable(tg.splitB, w, h, fB)))
+			// A supplied texture fits: its size, sampleable + storable, and its format: the device's (with a device) or, device-free,
+			// the ledger format of the context's shapes (ContextShapesOf: rg32f for the half planes, rgba32f for the rest).
+			const auto formatIs = [&](pl_tex t, pl_fmt fmt, VpSkeleton::TexFormat expected) {
+				if (gpu)
+					return t->params.format == fmt;
+				VpSkeleton::TexFormat got = VpSkeleton::TexFormat::R8;
+				return VpSkeleton::PlTexBackend::FormatOf(t->params.format, &got) && got == expected;
+			};
+			const VpSkeleton::TexFormat t2x = VpSkeleton::TexFormat::RG32F, t4x = VpSkeleton::TexFormat::RGBA32F;
+			auto usable = [&](pl_tex t, int tw, int th, pl_fmt fmt, VpSkeleton::TexFormat expected) {
+				return t && t->params.w == tw && t->params.h == th && formatIs(t, fmt, expected) && t->params.sampleable && t->params.storable;
+			};
+			if ((tg.split && !usable(tg.split, w, h, compact ? fA : f4, t4x)) || (tg.blocks && !usable(tg.blocks, bw, bh, fBlocks, t4x)) ||
+				(compact && tg.splitB && !usable(tg.splitB, w, h, fB, t4x)))
 			{
 				m_error = "grain split: unusable target texture";
 				return false;
@@ -794,7 +914,27 @@ if (p.x < GS_W && p.y < GS_H) {
 			pl_tex tmp = nullptr, low = nullptr, part = nullptr, quiet = nullptr, levelTex = nullptr;
 			int pw = 0, ph = 0;
 			PartialSize(bw, bh, B, params.subBlocks, &pw, &ph);
-			if (options.arena)
+			const Scratch& sc = options.scratch;
+			if (sc.Any() && (!sc.All() || options.arena))
+			{
+				m_error = "grain split: caller intermediates are all five or none, and never with an arena";
+				return false;
+			}
+			if (sc.All())
+			{
+				// The caller's intermediates (the context entry's: made through a fill's GPU context). Nothing private is made.
+				if (!usable(sc.tmp, hw, hh, f2, t2x) || !usable(sc.low, hw, hh, f2, t2x) || !usable(sc.part, pw, ph, f4, t4x) ||
+					!usable(sc.quiet, bw, bh, f4, t4x) || !usable(sc.level, params.levelBins, 1, f4, t4x))
+				{
+					m_error = "grain split: unusable intermediate texture";
+					return false;
+				}
+				tmp = sc.tmp;
+				low = sc.low;
+				part = sc.part;
+				quiet = sc.quiet;
+			}
+			else if (options.arena)
 			{
 				// The private temporaries of the non-arena path are not used any more: free them.
 				for (pl_tex* t : { &m_tmp, &m_low, &m_part, &m_quiet })
@@ -833,12 +973,17 @@ if (p.x < GS_W && p.y < GS_H) {
 				part = m_part;
 				quiet = m_quiet;
 			}
-			if (!Ensure(gpu, m_level, params.levelBins, 1, f4))
+			if (sc.All())
+				levelTex = sc.level;
+			else
 			{
-				m_error = "grain split: no rgba32f noise level table";
-				return false;
+				if (!Ensure(gpu, m_level, params.levelBins, 1, f4))
+				{
+					m_error = "grain split: no rgba32f noise level table";
+					return false;
+				}
+				levelTex = m_level;
 			}
-			levelTex = m_level;
 			// Outputs: the caller's targets, else the Splitter's own.
 			pl_tex outA = nullptr, outB = nullptr, outFull = nullptr, blocksTex = tg.blocks;
 			if (compact)

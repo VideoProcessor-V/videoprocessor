@@ -974,5 +974,38 @@ namespace SkeletonAcquireTestsNs
 			Assert::IsTrue(why.find("after its fill returned") != std::string::npos, L"worded");
 			Assert::AreEqual(3, device.created, L"the device was asked only within the grant and while open");
 		}
+
+		// R19-27 (C5 MUST-2): the context carries the device's compute shared-memory limit, so a fill's kernels check their need
+		// without naming the device. Open: the device's figure; closed or no device: 0; a device that does not say: 0 (the default).
+		// Category Cpu: hardware-free (fake IOwnerGpuDevice implementations; no device).
+		BEGIN_TEST_METHOD_ATTRIBUTE(OwnerGpuContextCarriesTheSharedMemoryLimit)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(OwnerGpuContextCarriesTheSharedMemoryLimit)
+		{
+			struct SayingDevice : IOwnerGpuDevice
+			{
+				int handle = 0;
+				void* OwnerGpu() const override { return const_cast<int*>(&handle); }
+				void* OwnerDispatch() const override { return const_cast<int*>(&handle); }
+				bool CreateOwnerTexture(const TexShape&, GpuMemoHandle&, std::string&) override { return false; }
+				uint64_t OwnerMaxSharedMemory() const override { return 49152u; }
+			} saying;
+			struct SilentDevice : IOwnerGpuDevice
+			{
+				int handle = 0;
+				void* OwnerGpu() const override { return const_cast<int*>(&handle); }
+				void* OwnerDispatch() const override { return const_cast<int*>(&handle); }
+				bool CreateOwnerTexture(const TexShape&, GpuMemoHandle&, std::string&) override { return false; }
+			} silent;
+			OwnerGpuContext live(&saying, 0);
+			Assert::AreEqual(uint64_t(49152), live.MaxSharedMemory(), L"open: the device's limit");
+			live.Close();
+			Assert::AreEqual(uint64_t(0), live.MaxSharedMemory(), L"closed: 0, like Gpu() / Dispatch()");
+			OwnerGpuContext none(nullptr, 0);
+			Assert::AreEqual(uint64_t(0), none.MaxSharedMemory(), L"no device: 0");
+			OwnerGpuContext quiet(&silent, 0);
+			Assert::AreEqual(uint64_t(0), quiet.MaxSharedMemory(), L"a device that does not say: 0 (not known)");
+		}
 	};
 }

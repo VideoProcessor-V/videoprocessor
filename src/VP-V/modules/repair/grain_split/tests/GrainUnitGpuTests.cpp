@@ -13,6 +13,8 @@
 #include <VP-V/modules/repair/grain_split/GrainNodeGpu.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
+#include <VP-V/core/SkeletonAcquire.h>
+#include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
 
 #include <libplacebo/d3d11.h>
 #include <libplacebo/dispatch.h>
@@ -567,6 +569,75 @@ namespace GrainUnitGpuTestsNs
 			Assert::IsTrue(fill.Fill(3, GrainSplit::GrainTarget{ true, 0 }), L"recovers once laid out again");
 			splitter.Release(gpu);
 			for (pl_tex& t : tx) backend.Destroy(t);
+			pl_tex_destroy(gpu, &plane);
+		}
+
+		// C5 MUST-2 / R19-27: the context entry Splitter::Compute(OwnerGpuContext&, ...) (the variant owner's path: no device handle,
+		// every texture ctx.Allocate'd, the context's dispatch and shared-memory limit) writes the SAME bytes as the plain
+		// Compute(gpu, dispatch, ..., Options{seq}) on the same plane: split and blocks bit-identical, the same Frame stamps. Two
+		// variants: the default law at B 16 and an eighth scale (1.5) at its block edge 24. It makes exactly the ContextShapesOf
+		// textures (the reserve = what is made); one byte under that reserve, or a closed context, refuses visibly and keeps nothing.
+		TEST_METHOD(GrainUnitContextEntryEqualsCompute)
+		{
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			pl_tex plane = UploadR16(gpu, MakeCodes(kW, kH, 23u), kW, kH, 64.0);
+			Assert::IsNotNull(plane, L"plane");
+			Vpv::Skeleton::OwnerGpuDevice device(gpu);
+			const GrainSplit::Params law = GrainSplit::DefaultParams();
+			struct Variant { double scale; int B; };
+			const Variant variants[2] = { { 1.0, 16 }, { 1.5, 24 } };
+			for (const Variant& va : variants)
+			{
+				const std::wstring tag = L"scale " + std::to_wstring(va.scale) + L", B " + std::to_wstring(va.B) + L": ";
+				GrainSplit::Gpu::Splitter reference;
+				GrainSplit::Gpu::Options o;
+				o.seq = 41;
+				Assert::IsTrue(reference.Compute(gpu, dev.dispatch, plane, 0, kCu10in16, va.scale, va.B, law, o), (tag + Wide(reference.LastError())).c_str());
+				const GrainSplit::Gpu::Frame rf = reference.Out();
+				const std::vector<float> refSplit = DownloadRGBA(gpu, dev.dispatch, rf.split);
+				const std::vector<float> refBlocks = DownloadRGBA(gpu, dev.dispatch, rf.blocks);
+				Assert::IsTrue(!refSplit.empty() && !refBlocks.empty(), (tag + L"reference downloaded").c_str());
+
+				const GrainSplit::Gpu::ContextShapes shapes = GrainSplit::Gpu::ContextShapesOf(kW, kH, va.B, law);
+				Assert::IsTrue(shapes.Valid() && shapes.Bytes() > 0, (tag + L"the size law gives the shapes").c_str());
+				{
+					VpSkeleton::OwnerGpuContext ctx(&device, shapes.Bytes());
+					GrainSplit::Gpu::Splitter splitter;
+					GrainSplit::Gpu::ContextHold hold;
+					Assert::IsTrue(splitter.Compute(ctx, plane, 0, kCu10in16, va.scale, va.B, law, 41, hold), (tag + Wide(splitter.LastError())).c_str());
+					Assert::AreEqual(size_t(7), hold.keep.size(), (tag + L"seven textures: split, blocks, tmp, low, part, quiet, level").c_str());
+					Assert::AreEqual(shapes.Bytes(), hold.bytes, (tag + L"the bytes made are the reserve").c_str());
+					Assert::AreEqual(shapes.Bytes(), ctx.Used(), (tag + L"all accounted against the context's grant").c_str());
+					Assert::AreEqual(uint64_t(7), ctx.Made(), (tag + L"made through the context").c_str());
+					const GrainSplit::Gpu::Frame f = splitter.Out();
+					Assert::IsTrue(f.w == rf.w && f.h == rf.h && f.bw == rf.bw && f.bh == rf.bh && f.B == rf.B && f.scale == rf.scale &&
+						f.codeUnit == rf.codeUnit && f.component == rf.component && f.storage == Storage::Full && f.seq == 41u &&
+						f.version == GrainSplit::kUnitVersion && f.splitB == nullptr, (tag + L"the same Frame stamps").c_str());
+					Assert::IsTrue(SameBits(DownloadRGBA(gpu, dev.dispatch, f.split), refSplit), (tag + L"split bit-identical to Compute").c_str());
+					Assert::IsTrue(SameBits(DownloadRGBA(gpu, dev.dispatch, f.blocks), refBlocks), (tag + L"blocks bit-identical to Compute").c_str());
+					ctx.Close();
+					GrainSplit::Gpu::Splitter late;
+					GrainSplit::Gpu::ContextHold none;
+					Assert::IsFalse(late.Compute(ctx, plane, 0, kCu10in16, va.scale, va.B, law, 42, none), (tag + L"a closed context refuses").c_str());
+					Assert::IsTrue(none.keep.empty() && late.LastError().find("no GPU context") != std::string::npos, (tag + Wide(late.LastError())).c_str());
+				}
+				{
+					VpSkeleton::OwnerGpuContext under(&device, shapes.Bytes() - 1u);
+					GrainSplit::Gpu::Splitter splitter;
+					GrainSplit::Gpu::ContextHold hold;
+					Assert::IsFalse(splitter.Compute(under, plane, 0, kCu10in16, va.scale, va.B, law, 43, hold), (tag + L"one byte under the reserve refuses").c_str());
+					Assert::IsTrue(hold.keep.empty() && hold.bytes == 0u, (tag + L"nothing kept on a refusal").c_str());
+					Assert::IsTrue(under.Refused() == 1u && splitter.LastError().find("refused") != std::string::npos, (tag + Wide(splitter.LastError())).c_str());
+					Assert::IsTrue(splitter.Out().split == nullptr, (tag + L"no frame on a refusal").c_str());
+				}
+				reference.Release(gpu);
+				device.FlushReleases();
+			}
+			const Vpv::Skeleton::OwnerGpuDevice::Stats st = device.GetStats();
+			Assert::AreEqual(uint64_t(0), st.live, L"every context texture was handed back");
+			device.Release();
 			pl_tex_destroy(gpu, &plane);
 		}
 	};
