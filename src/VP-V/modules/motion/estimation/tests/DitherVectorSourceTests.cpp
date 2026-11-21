@@ -144,6 +144,21 @@ namespace VideoProcessorTest
 			Assert::IsFalse(DV::SigmaDeltaWantsVectors(false, true));
 		}
 
+		TEST_METHOD(AnOnDemandMissNoteClosesItsParenthesisOnce)   // GEM-SD-VECTORS SHOULD-3
+		{
+			DV::Facts f = AllPresent();
+			f.engineField = false;
+			f.matcherLive = false;
+			f.onDemandCause = Cause::OnDemandLate;
+			DV::Tracker t;
+			t.Note(DV::Choose(f), true, 7);
+			const std::string seg = t.VectorsSegment();
+			Assert::IsTrue(seg.find("))") == std::string::npos, W(seg).c_str());
+			int open = 0, close = 0;
+			for (const char ch : seg) { open += ch == '('; close += ch == ')'; }
+			Assert::AreEqual(open, close, W(seg).c_str());
+		}
+
 		TEST_METHOD(OwnSearchNamesEveryMissingInput)
 		{
 			struct Row { void (*knock)(DV::Facts&); DV::Why why; };

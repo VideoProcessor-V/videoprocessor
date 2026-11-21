@@ -4,6 +4,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <limits>
 #include "CppUnitTest.h"
 
 // K7-1: OutputDomainMap (CPU). Source-plane points and vectors to output pixels: identity, crop / letterbox, the P0 re-base
@@ -85,6 +86,9 @@ namespace OutputDomainMapTestsNs
 			Require(Near(v.x, 40.0, 1e-9) && Near(v.y, -8.0, 1e-9) && v.inside, L"a vector scales by the output scale");
 			const Result out = MapVector(c, 400.0, 150.0, 0.0, -30.0);
 			Require(!out.inside, L"a vector that leaves the active picture is flagged");
+			const double nan = std::numeric_limits<double>::quiet_NaN();   // GEM-SD-VECTORS MUST-6
+			const Result bad = MapVector(c, 400.0, 500.0, nan, 1.0);
+			Require(!bad.valid && bad.x == 0.0 && bad.y == 0.0, L"a non-finite vector is invalid and zero");
 			// A presentation crop left and right: only the inner picture is shown.
 			Config pc = c;
 			pc.active = MakeBox(48, 140, 1872, 940);

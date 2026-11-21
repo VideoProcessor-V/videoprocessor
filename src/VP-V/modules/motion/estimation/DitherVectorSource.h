@@ -445,7 +445,7 @@ namespace DitherVectors
 			if (c.why != Why::OnDemandMissed)
 				return std::string();
 			const std::string note = FallbackCatalog::NoPairNote(c.onDemandCause);
-			return note.empty() ? std::string() : ": " + note + ")";
+			return note.empty() ? std::string() : ": " + note;   // GEM-SD-VECTORS SHOULD-3: the callers close the parenthesis (once)
 		}
 		unsigned long long Total() const
 		{
