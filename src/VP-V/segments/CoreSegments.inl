@@ -303,6 +303,47 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         pipelineSlots.Runs(PipelineSlots::Id::ColourDmTrims),
         dvNeedsView ? &dvQualityView : nullptr },   // VPV-HOOK
         colorMapParams, hookTemplates, colourFrame.dvTrims, colourFrame.dv);
+    // CF-1 CAM-3 (colour.appearance, refs/125): the CAM16 room and screen adaptation. Off by default; off on the Original pathway.
+    // The decision, hook and status live in DvHostStage (VP-V); this is the one call site. The room is the room_light product
+    // (the LED intent's one sensor filter); the picture's L11 reference-mode flag and the trim that ran come from the DV metadata.
+    {
+        AppearanceStage::Inputs appearance;
+        appearance.on = activeSettings.appearance && pipelineSlots.Runs(PipelineSlots::Id::ColourAppearance) && !pipelineSlots.OriginalPathway();
+        if (appearance.on)
+        {
+            appearance.strength = activeSettings.appearanceStrength;
+            appearance.room.room = activeSettings.appearanceRoom == "living_low" ? RoomLight::Room::LivingLow :
+                activeSettings.appearanceRoom == "living_lit" ? RoomLight::Room::LivingLit :
+                activeSettings.appearanceRoom == "auto" ? RoomLight::Room::Auto : RoomLight::Room::Cinema;
+            appearance.room.reflectNitsPerLux = activeSettings.ambientScreenReflect;
+            appearance.room.maxBlackNits = activeSettings.ambientMaxBlackNits;
+            appearance.recordAvailable = vpv.led.intent.roomLight.ReadLatest(appearance.record);
+            appearance.now = static_cast<double>(GetTickCount64()) / 1000.0;
+            appearance.screenWhiteNits = activeSettings.appearanceScreenWhiteNits;
+            appearance.screenWhiteMeasured = activeSettings.appearanceScreenWhiteMeasured;
+            appearance.trimApplied = colourFrame.dvTrims;
+            appearance.trimTargetNits = dvStage.TrimsTargetNits();
+            appearance.signalPq = target.color.transfer == PL_COLOR_TRC_PQ;
+            appearance.outputGamma = LedDisplayGamma(target.color.transfer);
+            appearance.honourL11 = activeSettings.appearanceHonourL11;
+            const DolbyVisionTunnelFrameMetadata* dolbyMetadata = convertedPayload ? &convertedPayload->dolby : nullptr;
+            appearance.l11ReferenceMode = dolbyMetadata && dolbyMetadata->valid && dolbyMetadata->hasL11 && dolbyMetadata->l11ReferenceMode;
+            pl_color_space display = target.color;
+            pl_color_space_infer(&display);
+            appearance.sdrTargetNits = display.hdr.max_luma > 0.0f && !pl_color_space_is_hdr(&target.color) ? display.hdr.max_luma : 0.0;
+            if (const pl_raw_primaries* prim = pl_raw_primaries_get(display.primaries))
+            {
+                const double red[2] = { prim->red.x, prim->red.y }, green[2] = { prim->green.x, prim->green.y };
+                const double blue[2] = { prim->blue.x, prim->blue.y }, white[2] = { prim->white.x, prim->white.y };
+                AppearanceStage::RgbToXyz(red, green, blue, white, appearance.rgbToXyz);   // false: the BT.709 default stays
+            }
+        }
+        const AppearanceStage::Decision& decision = dvStage.PrepareAppearance(appearance, hookTemplates,
+            vpv.motion.intent.intentInterpreter ? vpv.motion.intent.intentInterpreter->DisplayedCuts() : 0);
+        colourFrame.appearance = decision.active;
+        colourFrame.appearanceParams = decision.parameters;
+        colourFrame.appearanceChain = &dvStage.AppearanceHook();
+    }
     // Rendered-frame captures (DV comparison capture; the WP-17 diagnostics adapter is the one
     // caller). The context is built only while one is on (it consumes the trim selection).
     captures.Configure(DvCompareCapture::kCommand, activeSettings.dvCompareCaptureFolder);
@@ -362,6 +403,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         [this](size_t start, PipelineSlots::Id slot) { TagSlotHooks(start, slot); });
     logSdrToneShape(sdrToneShapeState == 1 && colourCounts.toneShape == 0 ? 3 : sdrToneShapeState);
     dvStage.FinishTrims(colourCounts.dvTrims);   // WP-14 phase 2: state, status, fallback, logs
+    dvStage.FinishAppearance(colourCounts.appearance);   // CF-1 CAM-3: shader-missing fallback and the status line
     SyncFallback(colourCounts.unhandled ? FallbackCatalog::Engaged("S2 placeholder stage",
         "a placeholder slot has a component but no output-segment stage yet (not run)") :
         FallbackCatalog::Released("S2 placeholder stage"));

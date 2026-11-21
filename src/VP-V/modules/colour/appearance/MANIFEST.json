@@ -3,14 +3,16 @@
   "slot": "colour.appearance",
   "unit": "colour",
   "order": 210,
-  "status": "placeholder",
-  "code_location": "module (ambient adaptation config/logic, SdrAmbientLift; slot placeholder; CPU reference CAM16 + uniform pack + room_light reader, switch off)",
+  "status": "built",
+  "code_location": "module (ambient adaptation config/logic, SdrAmbientLift; CAM16 appearance pass (AppearanceStage + shaders/vp_cam16_appearance.glsl), CPU reference CAM16 + uniform pack + room_light reader; the switch arrives in CAM-4, off)",
   "live_files": [
     "src/VP-V/modules/colour/appearance/SdrAmbientLift.h",
     "src/VP-V/modules/colour/appearance/AmbientConfig.h",
     "src/VP-V/modules/colour/appearance/Cam16.h",
     "src/VP-V/modules/colour/appearance/Cam16Uniforms.h",
-    "src/VP-V/modules/colour/appearance/RoomLight.h"
+    "src/VP-V/modules/colour/appearance/RoomLight.h",
+    "src/VP-V/modules/colour/appearance/AppearanceStage.h",
+    "shaders/vp_cam16_appearance.glsl"
   ],
   "components": {
     "files": {

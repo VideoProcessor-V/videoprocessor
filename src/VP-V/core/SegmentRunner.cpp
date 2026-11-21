@@ -111,7 +111,7 @@ namespace SegmentRunner
 		// RenderLocked's PRE_OUTPUT list today (fd60b650 / d0212534 24000-24330), in order.
 		add(Id::ColourSdrToneShape, "sdr_tone_shape", Role::Vp, Light::Target, 0, true);
 		add(Id::ColourDmTrims, "dv_trims", Role::Vp, Light::Target, 0, true);    // DV L8/L2 trims: the colour.dm_trims slot (CF-1 P3)
-		add(Id::ColourAppearance, "stage13", Role::Vp, Light::Target, 0, true);       // placeholder: no component, never runs
+		add(Id::ColourAppearance, "stage13", Role::Vp, Light::Target, 0, true);       // CAM-3: the CAM16 appearance pass (off by default)
 		add(Id::DriveLedMeasure, "led_measure", Role::Vp, Light::Target, 0, false);
 		add(Id::DriveLedCompensation, "led_compensation", Role::Vp, Light::Target, 0, true);  // adaptive gamma / boost
 		add(Id::DriveBlackLevel, "black_level", Role::Vp, Light::Target, 0, true);    // placeholder

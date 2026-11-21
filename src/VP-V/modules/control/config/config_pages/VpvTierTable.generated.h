@@ -88,7 +88,7 @@ namespace Vpv
             t.slotList.push_back({ "colour.extended_range", "BTB/WTW preservation", "colour", "built", 175, "BTB/WTW: clipped (<reason>)" });
             t.slotList.push_back({ "colour.sdr_tone_shape", "SDR tone shape + DV trims", "colour", "built", 200, "DV tone mapping: <why>: bt2390[ + trims] | Dolby Vision trims: <state> | SDR tone shape: not applied (<why>)" });
             t.slotList.push_back({ "colour.dm_trims", "DV display mapping: trims", "colour", "built", 205, "DV display mapping (trims): off (<reason>)" });
-            t.slotList.push_back({ "colour.appearance", "Stage 13 appearance (CAM16)", "colour", "placeholder", 210, "Appearance: off (shader failed)" });
+            t.slotList.push_back({ "colour.appearance", "Stage 13 appearance (CAM16)", "colour", "built", 210, "Colour appearance (shader missing: shaders\\vp_cam16_appearance.glsl did not load)" });
             t.slotList.push_back({ "drive.led_measure", "LED measurement", "drive", "built", 220, "LED measurement (<reason>; the LED follows the last statistics)" });
             t.slotList.push_back({ "drive.led_compensation", "LED compensation (adaptive gamma)", "drive", "built", 230, "LED drive (held at full: picture compensation unavailable (<reason>))" });
             t.slotList.push_back({ "drive.black_level", "Black level correction", "drive", "placeholder", 240, "Black level: off (<reason>)" });

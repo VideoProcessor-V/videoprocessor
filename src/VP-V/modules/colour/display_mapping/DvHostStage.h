@@ -46,6 +46,7 @@
 #include <VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h>
 #include <VP-V/modules/colour/display_mapping/DmCurve.h>
+#include <VP-V/modules/colour/appearance/AppearanceStage.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
 #include <VP-V/modules/input/signal/DvCompareCapture.h>
 #include <VP-V/modules/input/signal/DvMetadataHold.h>
@@ -85,7 +86,7 @@ public:
 	};
 
 	DvHostStage(CustomHookChain::Loader loader, Engage engage, Release release)
-		: m_trimsHook(std::move(loader)), m_engage(std::move(engage)), m_release(std::move(release))
+		: m_trimsHook(loader), m_appearanceHook(std::move(loader)), m_engage(std::move(engage)), m_release(std::move(release))
 	{
 	}
 
@@ -157,6 +158,8 @@ public:
 	{
 		m_trimsHook.Clear();
 		m_trimsConfigured = false;
+		m_appearanceHook.Clear();
+		m_appearanceConfigured = false;
 	}
 
 	// The DV comparison capture (dv_compare_capture) is the WP-17 diagnostics adapter's
@@ -180,6 +183,50 @@ public:
 	// collects the hook into the frame, tags it to colour.sdr_tone_shape and sets the parameters
 	// PrepareToneAndTrims supplies. DvHostStage never pushes hooks itself (group D, 2026-10-25).
 	CustomHookChain::Chain& TrimsHook() { return m_trimsHook; }
+
+	// CF-1 CAM-3 (colour.appearance): the CAM16 pass's chain, decision and status. The stage rides on this adapter only because
+	// it already owns the hook loader and runs beside the trims; it is the S2 segment (OutputColourSegment) that emits the hook.
+	//   PrepareAppearance (phase 1, with PrepareToneAndTrims): decide, configure and ensure the hook when it will run;
+	//   FinishAppearance  (phase 2, with FinishTrims): the shader-missing fallback and the status line.
+	CustomHookChain::Chain& AppearanceHook() { return m_appearanceHook; }
+	const std::string& AppearanceStatus() const { return m_appearanceStatus; }
+	const AppearanceStage::Decision& AppearanceDecision() const { return m_appearanceDecision; }
+	// displayedCuts: the intent interpreter's running count of displayed cuts (a change = the room change may land now).
+	const AppearanceStage::Decision& PrepareAppearance(AppearanceStage::Inputs in, const CustomHookChain::TemplateValues& hookTemplates,
+		uint64_t displayedCuts)
+	{
+		in.atCut = displayedCuts != m_cutsSeen;
+		m_cutsSeen = displayedCuts;
+		m_appearanceDecision = AppearanceStage::Decide(in, m_roomSmoother);
+		if (m_appearanceDecision.active)
+		{
+			if (!m_appearanceConfigured)
+			{
+				ConfiguredShaderRule rule;
+				rule.name = "vp_cam16_appearance";
+				rule.filename = "vp_cam16_appearance.glsl";
+				m_appearanceHook.Configure({ rule });
+				m_appearanceConfigured = true;
+			}
+			m_appearanceHook.Ensure(hookTemplates);
+		}
+		m_appearanceWanted = in.on;
+		return m_appearanceDecision;
+	}
+	void FinishAppearance(size_t collected)
+	{
+		if (m_appearanceDecision.active && collected == 0)
+		{
+			m_appearanceStatus = "appearance: shader missing (shaders\\vp_cam16_appearance.glsl did not load)";
+			// VPV-FALLBACK Colour appearance
+			m_engage("Colour appearance", "shaders\\vp_cam16_appearance.glsl did not load");
+		}
+		else
+		{
+			m_appearanceStatus = m_appearanceWanted ? m_appearanceDecision.status : std::string("appearance: off");
+			m_release("Colour appearance");
+		}
+	}
 
 	// The DV shader parameters in the order the host always set them (selection, ICtCp, then the
 	// fixed five): the segment's ParameterList.
@@ -414,6 +461,13 @@ private:
 	};
 	Pending m_pending;
 	CustomHookChain::Chain m_trimsHook;      // DV L2 trims (dv_trims)
+	CustomHookChain::Chain m_appearanceHook; // CAM-3: the CAM16 appearance pass
+	RoomLight::Smoother m_roomSmoother;      // CAM-3: the appearance path's own minutes-scale room adaptation
+	AppearanceStage::Decision m_appearanceDecision;
+	std::string m_appearanceStatus = "appearance: off";
+	bool m_appearanceConfigured = false;
+	bool m_appearanceWanted = false;
+	uint64_t m_cutsSeen = 0;
 	Engage m_engage;
 	Release m_release;
 	bool m_trimsConfigured = false;

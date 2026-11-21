@@ -1581,7 +1581,7 @@
       "unit": "colour",
       "side": "output",
       "order": 210,
-      "status": "placeholder",
+      "status": "built",
       "hook_point": "PRE_OUTPUT",
       "purpose": "CAM16 Stevens/Hunt appearance matching from reference to dim-screen conditions (static per viewing setup), replacing the manual gamma boost + saturation. Off by default; on after the i1Pro screen-white measurement.",
       "contract": {
@@ -1602,7 +1602,7 @@
       ],
       "tiers": "every tier when on (cost ~0)",
       "fallback": {
-        "entry": "Appearance: off (shader failed)",
+        "entry": "Colour appearance (shader missing: shaders\\vp_cam16_appearance.glsl did not load)",
         "behaviour": "Failure -> off, previous gamma boost/saturation restored."
       },
       "upstream": [

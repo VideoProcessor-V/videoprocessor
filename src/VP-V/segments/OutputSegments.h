@@ -67,6 +67,10 @@ namespace OutputSegments
 		ToneShapeParams tone;
 		bool dvTrims = false;
 		ParameterList dv;
+		// CF-1 CAM-3: colour.appearance. The chain is DvHostStage's (it owns the loader); null or appearance = false adds nothing.
+		bool appearance = false;
+		ParameterList appearanceParams;
+		CustomHookChain::Chain* appearanceChain = nullptr;
 		bool ledMeasure = false;        // led && pipelineSlots.Runs(DriveLedMeasure)
 		bool ledBlock = false;          // led || boost != 1 || shadow lift > 0 (the compensation block)
 		bool ledCompensation = false;   // pipelineSlots.Runs(DriveLedCompensation)
@@ -78,7 +82,7 @@ namespace OutputSegments
 	// How many hooks each stage contributed (the host's "NOT applied" states read these).
 	// unhandled = slots that run but have no S2 stage yet (a component registered in a placeholder
 	// slot before its stage is written): the host reports them, never silently skipped.
-	struct ColourCounts { size_t toneShape = 0, dvTrims = 0, ledMeasure = 0, ledCompensation = 0, user = 0, lut = 0, unhandled = 0; };
+	struct ColourCounts { size_t toneShape = 0, dvTrims = 0, appearance = 0, ledMeasure = 0, ledCompensation = 0, user = 0, lut = 0, unhandled = 0; };
 
 	// What PrepareDither did. A domain drop (the sigma-delta cannot quantise this target) is a
 	// fallback; the slot switched off is a choice and never engages one (merge audit 2026-10-25).

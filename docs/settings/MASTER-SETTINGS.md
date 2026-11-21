@@ -58,7 +58,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Colour | `colour.display_mapping` | draft | [README](../../src/VP-V/modules/colour/display_mapping/README.md) | 0 | 0 | 0/0 |
 | Colour | `colour.sdr_tone_shape` | built | [README](../../src/VP-V/modules/colour/sdr_tone_shape/README.md) | 7 | 5 | 5/5 |
 | Colour | `colour.dm_trims` | built | [README](../../src/VP-V/modules/colour/dm_trims/README.md) | 0 | 2 | 0/2 |
-| Colour | `colour.appearance` | placeholder | [README](../../src/VP-V/modules/colour/appearance/README.md) | 13 | 6 | 0/6 |
+| Colour | `colour.appearance` | built | [README](../../src/VP-V/modules/colour/appearance/README.md) | 13 | 6 | 0/6 |
 | Dynamic drive | `drive.led_measure` | built | [README](../../src/VP-V/modules/drive/led_measure/README.md) | 0 | 13 | 0/13 |
 | Dynamic drive | `drive.led_compensation` | built | [README](../../src/VP-V/modules/drive/led_compensation/README.md) | 90 | 6 | 1/6 |
 | Dynamic drive | `drive.black_level` | placeholder | [README](../../src/VP-V/modules/drive/black_level/README.md) | 0 | 1 | 0/1 |

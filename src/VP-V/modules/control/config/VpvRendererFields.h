@@ -215,6 +215,14 @@ namespace VpvRenderer
 		double ambientTauDownSeconds = 90.0;
 		BlackIntentMode intentBlack = BlackIntentMode::Off;
 		bool intentDisplay = false;
+		// CF-1 CAM-3: colour.appearance (CAM16 room and screen adaptation). In-memory fields only; the VP-V keys and the Config
+		// card are CAM-4. Off by default; the Original pathway forces it off.
+		bool appearance = false;
+		double appearanceStrength = 1.0;
+		std::string appearanceRoom = "cinema";            // cinema | living_low | living_lit | auto
+		double appearanceScreenWhiteNits = 48.0;          // the placeholder until measured
+		bool appearanceScreenWhiteMeasured = false;
+		bool appearanceHonourL11 = true;
 		// Film grain (owner 2026-10-17: never averaged or interpolated away; each switch's
 		// default is the faithful path, the other value the established one byte for byte;
 		// docs/audit/grain-audit-2026-10-17.md): interpolation_grain, deband_vp_grain_guard,

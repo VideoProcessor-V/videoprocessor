@@ -92,7 +92,7 @@ namespace PipelineSlots
 		{ Id::ColourToneGamut, "colour.tone_gamut", Side::Processing, 170, HookPoint::Libplacebo, Status::Built, Origin::Upstream },
 		{ Id::ColourExtendedRange, "colour.extended_range", Side::Processing, 175, HookPoint::Libplacebo, Status::Built, Origin::Vp },
 		{ Id::ColourSdrToneShape, "colour.sdr_tone_shape", Side::Output, 200, HookPoint::PreOutput, Status::Built, Origin::Vp },
-		{ Id::ColourAppearance, "colour.appearance", Side::Output, 210, HookPoint::PreOutput, Status::Placeholder, Origin::Vp },
+		{ Id::ColourAppearance, "colour.appearance", Side::Output, 210, HookPoint::PreOutput, Status::Built, Origin::Vp },
 		{ Id::DriveLedMeasure, "drive.led_measure", Side::Output, 220, HookPoint::PreOutput, Status::Built, Origin::Vp },
 		{ Id::DriveLedCompensation, "drive.led_compensation", Side::Output, 230, HookPoint::PreOutput, Status::Built, Origin::Vp },
 		{ Id::DriveBlackLevel, "drive.black_level", Side::Output, 240, HookPoint::PreOutput, Status::Placeholder, Origin::Vp },
