@@ -1971,7 +1971,7 @@ namespace SkeletonModuleTestsNs
 		{
 			Rig rig(Lane("on"));
 			ShapeACutAtFrame(rig, 6);
-			QueueTwoAheadOfTheSeal(rig);
+			QueueTwoAheadOfTheSealFed(rig);   // GF-P2a RIG: window fed
 			const Vpv::Skeleton::SceneAnswer ahead = rig.sk.SceneOf(rig.Host(), 6);
 			Assert::IsTrue(ahead.known, (L"answered with the store off; " + WhyOf(ahead)).c_str());
 			Assert::IsTrue(ahead.from == Vpv::Skeleton::SceneAnswer::From::Live);
