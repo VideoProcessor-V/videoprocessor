@@ -353,6 +353,19 @@ namespace VpMotion
 				static_cast<double>(vectorDemand.unserved), 0.0);
 			host.PublishStatus(true);
 		}
+		// The producer's own P1 reads (L-B4-P1-COUNTERS-NO-CONSUMER): recorded when the count moves; the Config status / Ctrl+I
+		// segment is VectorEngine::ProducerStatusSegment.
+		if (motionProducer)
+		{
+			const MotionAhead::Producer::RequestStats p1Stats = motionProducer->GetRequestStats();
+			if (p1Stats.p1OwnReads != producerP1OwnLogged)
+			{
+				producerP1OwnLogged = p1Stats.p1OwnReads;
+				DiagnosticHistory::Global().RecordDecision("vector-engine", "engine luma read directly: P1 not available",
+					static_cast<int64_t>(p1Stats.p1OwnReads), static_cast<int64_t>(p1Stats.p1Reads), 0.0, 0.0);
+				host.PublishStatus(true);
+			}
+		}
 		// The look-ahead stores nothing for this size while pairs are submitted: sustained = visible.
 		if (motionProducer && motionProducer->Running() && vectorDemand.producer)
 		{
@@ -1266,8 +1279,15 @@ namespace VpMotion
 		if (!motionProducer)
 			return std::string();
 		const MotionAhead::Producer::RequestStats s = motionProducer->GetRequestStats();
-		if (s.ringMisses == 0)
-			return std::string();
-		return "engine-luma ring misses " + std::to_string(s.ringMisses) + " (last: " + s.lastRingMiss + ")";
+		std::string text;
+		if (s.ringMisses != 0)
+			text = "engine-luma ring misses " + std::to_string(s.ringMisses) + " (last: " + s.lastRingMiss + ")";
+		if (s.p1OwnReads != 0)   // L-B4-P1-COUNTERS-NO-CONSUMER: the P1 read missed and the producer read the frame itself (never silent)
+		{
+			if (!text.empty()) text += "; ";
+			text += "engine luma read directly (P1 not available) " + std::to_string(s.p1OwnReads) + " of " +
+				std::to_string(s.p1OwnReads + s.p1Reads) + " frames";
+		}
+		return text;
 	}
 }

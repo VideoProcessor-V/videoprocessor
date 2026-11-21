@@ -91,7 +91,7 @@ namespace VpFrameAnalysis
 
 		// Threading + lifetime: ReadEngine8 runs on the producer thread; the AcquireFn the owner supplies (VectorEngine) captures
 		// only the renderer host key (host_), which outlives the producer (VectorEngine owns it and stops the producer first).
-		// The counters' consumer: VectorEngine::P1ReadStatusSegment (Config status / Ctrl+Alt+D) and a DiagnosticHistory
+		// The counters' consumer: VectorEngine::ProducerStatusSegment (Config status / Ctrl+Alt+D) and a DiagnosticHistory
 		// decision record when a count changes (L-B4-P1-COUNTERS-NO-CONSUMER).
 		uint64_t Acquired() const { return m_acquired.load(std::memory_order_relaxed); }
 		uint64_t Unread() const { return m_unread.load(std::memory_order_relaxed); }

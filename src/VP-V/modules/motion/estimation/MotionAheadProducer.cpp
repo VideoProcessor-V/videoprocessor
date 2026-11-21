@@ -525,7 +525,7 @@ namespace MotionAhead
 	{
 		// The engine half: the skeleton's P1 (one decode per frame, Acquire from this thread) when it has the frame and the
 		// codes are the engine's (every format since MAP-RGB-LUMA-PROXY); on no source or a miss HalfLuma8 reads the same shared luma
-		// plane / sampler (no private luma law) and the miss is counted and shown (VectorEngine::P1ReadStatusSegment).
+		// plane / sampler (no private luma law) and the miss is counted (requestStats.p1OwnReads) and shown (VectorEngine::ProducerStatusSegment).
 		std::shared_ptr<VpSkeleton::IP1Source> p1;
 		{
 			std::lock_guard<std::mutex> lock(p1Mutex);
@@ -533,8 +533,14 @@ namespace MotionAhead
 		}
 		VpSkeleton::P1ReadKind how = VpSkeleton::P1ReadKind::None;
 		if (!(p1 && luma.IsValid() && p1->ReadEngine8(sequence, luma, buffer, halfW, halfH, how) && how != VpSkeleton::P1ReadKind::None))
+		{
 			if (!HalfLuma8(luma, buffer, halfW, halfH))
 				return false;   // not a readable frame: nothing to do, not a failure
+			if (p1)   // a P1 reader is wired and missed: this frame's engine luma came from the producer's own read (shown, never silent)
+				p1OwnReadCount.fetch_add(1, std::memory_order_relaxed);   // atomic: callers may hold `mutex`
+		}
+		else
+			p1ReadCount.fetch_add(1, std::memory_order_relaxed);
 		// The de-judder's engine size: the half size, or half again (its inner matcher).
 		const int tw = targetW.load(std::memory_order_acquire), th = targetH.load(std::memory_order_acquire);
 		if (tw > 0 && th > 0 && !(tw == halfW && th == halfH))
@@ -682,7 +688,10 @@ namespace MotionAhead
 	Producer::RequestStats Producer::GetRequestStats() const
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		return requestStats;
+		RequestStats s = requestStats;
+		s.p1Reads = p1ReadCount.load(std::memory_order_relaxed);
+		s.p1OwnReads = p1OwnReadCount.load(std::memory_order_relaxed);
+		return s;
 	}
 
 	void Producer::Answer(OnDemand::Pending& pending, OnDemand::PairResult result)

@@ -52,6 +52,7 @@ namespace VpMotion
 		std::atomic<int> queueAheadCapacity{ 0 };         // frames the queue holds after the current one (queue pass)
 		std::atomic<bool> motionAheadBackward{ false };   // backward pairs: the producer is fed the current frame
 		std::string vectorEngineLogged;
+		unsigned long long producerP1OwnLogged = 0;   // the producer's P1-miss count last recorded in DiagnosticHistory
 		int vectorDeliveredLogged = -1;
 		int vectorDitherKeyLogged = -1;
 		unsigned long long vectorPairs = 0, vectorBackwardPairs = 0;
