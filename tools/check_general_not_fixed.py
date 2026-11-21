@@ -72,7 +72,9 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if "--selftest" in argv:
         ok = classify_line("double fps = 23.976;") == ["rate"] and classify_line("int width = 3840;") == ["size"] \
-            and not classify_line("int x = 60;") and len(scan_text("a.h", "auto fps = 24;\n")) == 1 \
+            and not classify_line("int x = 60;") and not classify_line("int n = 1080;") \
+            and len(scan_text("a.h", "auto fps = 24;\n")) == 1 \
+            and len(scan_text("a.h", "// int width = 3840;\n/* double fps = 23.976; */\n")) == 0 \
             and len(scan_text("a.h", "// GENERAL-REF: ref\nauto fps = 24;\n")) == 0
         return L.selftest_ok("general-not-fixed", ok)
     return L.run_ratchet("N4 general-not-fixed", scan, argv, BASELINE,

@@ -143,7 +143,6 @@ def run_ratchet(name, scan, argv, default_baseline, extra_doc="", per_class=None
     ap.add_argument("--write-baseline", action="store_true", help="write the baseline; refused if any count grew")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--strict", action="store_true", help="accepted for gate uniformity (always strict)")
-    ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
     bpath = a.baseline or os.path.join(a.root, default_baseline)
     try:
