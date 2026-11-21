@@ -2112,6 +2112,56 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual(reducedAtWarm, reducedAtEnd, L"no render frame's fade run was rebuilt with reduced evidence");
 		}
 
+		// GF-P2a MUST-8 (order): one thread fills frame s (provisional: s + 1 not judged yet) while the render thread fills s + 1, which
+		// confirms s and rewrites its group. Whatever the interleaving, the group of s ends CONFIRMED (a late provisional publish never
+		// lands over, or after, the confirmation).
+		TEST_METHOD(AProvisionalFillOnAnotherThreadNeverLeavesAConfirmedFramesGroupProvisional)
+		{
+			constexpr int kIter = 200;
+			Rig rig(Lane("on"), 220);
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			FeedAheadWindow(rig, 8);
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			uint64_t delivered = 4;   // Frame(1..3) delivered 1 .. 4
+			int misses = 0;
+			for (int i = 0; i < kIter; ++i)
+			{
+				const int64_t s = 5 + i;
+				while (delivered < uint64_t(s) + 1)
+					rig.Deliver(++delivered);
+				rig.Ingress(s - 1);
+				rig.Begin(s - 1);
+				rig.After(s - 1);
+				store.Begin(SceneTestId(uint64_t(s)), FrameAnalysis::kScene);
+				WalkP4(rig, uint64_t(s));
+				WalkP4(rig, uint64_t(s) + 1);
+				std::atomic<bool> go{ false };
+				Vpv::Skeleton::SceneAnswer other;
+				std::thread t([&] {
+					while (!go.load())
+						std::this_thread::yield();
+					other = rig.sk.SceneOf(rig.Host(), uint64_t(s));
+				});
+				go = true;
+				const Vpv::Skeleton::SceneAnswer render = rig.sk.SceneOf(rig.Host(), uint64_t(s) + 1);
+				t.join();
+				Assert::IsTrue(render.known, (L"iteration " + std::to_wstring(i) + L": the render thread's ask is answered").c_str());
+				FrameAnalysis::Scene group;
+				if (!store.PeekScene(uint64_t(s), group))
+				{
+					++misses;   // neither fill wrote the group: the off-thread ask missed and the render fill had nothing to rewrite
+					continue;
+				}
+				Assert::IsTrue(group.confirmed, (L"iteration " + std::to_wstring(i) + L": frame " + std::to_wstring(s) + L" ends confirmed").c_str());
+			}
+			Assert::IsTrue(misses < kIter / 2, L"the other thread's fill really wrote groups (else this tests nothing)");
+		}
+
 		TEST_METHOD(ARegisteredButDisabledStoreCostsNothingAtTheSeal)
 		{
 			Rig rig(Lane("on"));
