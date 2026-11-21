@@ -659,26 +659,32 @@ namespace IndicatorTestsNs
 		TEST_METHOD(LastCauseInUnderAConcurrentWriterReturnsConsistentAnswers)
 		{
 			Indicator ind(NextEra(), 64);
+			std::atomic<bool> started(false);
 			std::atomic<bool> stop(false);
+			std::atomic<int> hits(0);
 			std::atomic<int> violations(0);
 			std::thread writer([&]() {
 				uint64_t seq = 1;
 				while (!stop.load()) {
 					ind.Advance(kContinuity, Cause::DriftDrop, seq, 0, 5);
 					ind.Advance(kTiming, Cause::RateStep, seq);
+					if (seq == 1) started.store(true);
 					++seq;
 				}
 			});
 			std::thread reader([&]() {
+				while (!started.load()) std::this_thread::yield();
 				for (int i = 0; i < 20000; ++i) {
 					Cause c = Cause::None;
 					uint8_t d = 0;
 					const uint64_t lo = ind.AncientBelow();
 					if (ind.LastCauseIn(kContinuity, lo, ~uint64_t(0), c, &d)) {
+						hits.fetch_add(1);
 						if (c != Cause::DriftDrop || d != 5)
 							violations.fetch_add(1);
 					}
 					if (ind.LastCauseIn(kTiming, 0, ~uint64_t(0), c)) {
+						hits.fetch_add(1);
 						if (c != Cause::RateStep)
 							violations.fetch_add(1);
 					}
@@ -687,6 +693,7 @@ namespace IndicatorTestsNs
 			reader.join();
 			stop.store(true);
 			writer.join();
+			Assert::IsTrue(hits.load() > 0, L"reader must observe concurrent advances");
 			Assert::AreEqual(0, violations.load());
 		}
 	};

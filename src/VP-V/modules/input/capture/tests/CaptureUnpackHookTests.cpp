@@ -183,6 +183,7 @@ namespace VideoProcessorTest
 			std::snprintf(line, sizeof(line), "Pinned upload 4K R12B (%zu MB) pointer upload: the call blocks %.2f ms, with the GPU transfer %.2f ms (%.1f GB/s)\n",
 				bytes >> 20, pointerCallMs, pointerMs, bytes / (pointerMs * 1e6));
 			Logger::WriteMessage(line);
+			int mappedTested = 0;
 			for (const enum pl_buf_mem_type mem : { PL_BUF_MEM_HOST, PL_BUF_MEM_DEVICE })
 			{
 				const char* name = mem == PL_BUF_MEM_HOST ? "mapped host" : "mapped vram";
@@ -199,6 +200,7 @@ namespace VideoProcessorTest
 					pl_buf_destroy(gpu, &buf);
 					continue;
 				}
+				++mappedTested;
 				double copyMs = 1e30, uploadMs = 1e30;
 				for (int run = 0; run < 6; ++run)
 				{
@@ -223,16 +225,19 @@ namespace VideoProcessorTest
 				u.tex = tex;
 				u.buf = buf;
 				u.row_pitch = rowBytes;
-				pl_tex_upload(gpu, &u);
+				Assert::IsTrue(pl_tex_upload(gpu, &u), L"reuse upload must succeed");
 				const bool busyAfterQueue = pl_buf_poll(gpu, buf, 0);
 				pl_gpu_finish(gpu);
 				const bool busyAfterFinish = pl_buf_poll(gpu, buf, 0);
+				Assert::IsFalse(busyAfterFinish, L"mapped upload buffer must be idle after pl_gpu_finish");
 				std::snprintf(line, sizeof(line),
 					"Pinned upload 4K R12B (%zu MB): %s copy-in %.2f ms + upload from buffer %.2f ms (pointer upload %.2f ms); busy after queue %d, after finish %d\n",
 					bytes >> 20, name, copyMs, uploadMs, pointerMs, busyAfterQueue, busyAfterFinish);
 				Logger::WriteMessage(line);
 				pl_buf_destroy(gpu, &buf);
 			}
+			if (mappedTested == 0)
+				Logger::WriteMessage("Pinned upload: device exposes no 4K host-mapped buffers (pointer upload verified)\n");
 			pl_tex_destroy(gpu, &tex);
 		}
 

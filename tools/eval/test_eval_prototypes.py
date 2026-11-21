@@ -184,10 +184,10 @@ class Mosquito(unittest.TestCase):
 
     def test_changes_only_inside_zone_and_chroma_untouched(self):
         masters, coded = self.edge_clip()
-        for C in (cm.RepairMosquitoMC, cm.RepairMosquitoSpatial):
-            outs, _ = ec.run_python_candidate(C(), coded) if HAVE_CV2 or not C.lookahead else (None, None)
-            if outs is None:
-                continue
+        for C in (cm.RepairMosquitoSpatial, cm.RepairMosquitoMC):
+            if C.lookahead and not HAVE_CV2:
+                self.skipTest("SKIP-NO-HARDWARE: OpenCV not installed for RepairMosquitoMC")
+            outs, _ = ec.run_python_candidate(C(), coded)
             for o, c in zip(outs, coded):
                 d = np.abs(o.Y - c.Y)
                 self.assertEqual(float(d[:, :48].max()), 0.0)       # far from the edge: bit-exact
@@ -219,7 +219,9 @@ class Mosquito(unittest.TestCase):
     def test_pixels_beyond_nominal_limits_untouched(self):
         masters, coded = self.edge_clip(n=3)
         hot = [c.with_planes(Y=np.where(c.Y > 690, c.Y + 300.0, c.Y)) for c in coded]   # bright side above 940
-        for C in (cm.RepairMosquitoSpatial,) + ((cm.RepairMosquitoMC,) if HAVE_CV2 else ()):
+        for C in (cm.RepairMosquitoSpatial, cm.RepairMosquitoMC):
+            if C.lookahead and not HAVE_CV2:
+                self.skipTest("SKIP-NO-HARDWARE: OpenCV not installed for RepairMosquitoMC")
             outs, _ = ec.run_python_candidate(C(), hot)
             for o, c in zip(outs, hot):
                 beyond = c.Y > 940
@@ -281,7 +283,7 @@ class TrueChromaProtocolAndEdgeGrainGate(unittest.TestCase):
         self.assertAlmostEqual(none["grain_probe_keep_edge_vs_input_Y"], 1.0)
         naive = eh.grain_probe_rows(cm.RepairMosquitoNaiveMC(), fr, fr, {})
         mc = eh.grain_probe_rows(cm.RepairMosquitoMC(), fr, fr, {})
-        self.assertLess(naive["grain_probe_keep_edge_vs_input_Y"], mc["grain_probe_keep_edge_vs_input_Y"] + 1e-9)
+        self.assertLess(naive["grain_probe_keep_edge_vs_input_Y"], mc["grain_probe_keep_edge_vs_input_Y"])
         self.assertAlmostEqual(mc["grain_probe_keep_flat_vs_input_Y"], 1.0)
 
 

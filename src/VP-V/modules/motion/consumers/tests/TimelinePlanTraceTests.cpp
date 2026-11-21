@@ -98,8 +98,11 @@ namespace TimelinePlanTraceTest
 		// libplacebo smooth motion owns the frame.
 		TEST_METHOD(TimelineNeverEngagesInLowLatencyOrSmoothMotion)
 		{
+			size_t checkedFrames = 0;
 			for (const TimelinePlanLegacy::Scenario& sc : TimelinePlanLegacy::Scenarios())
 			{
+				const std::vector<std::string> prodTrace = TimelinePlanRunner::Trace(sc);
+				Assert::AreEqual(sc.frames.size(), prodTrace.size(), Wide(sc.name + " prod trace size").c_str());
 				TimelinePlanLegacy::State st;
 				if (sc.setup)
 					sc.setup(st);
@@ -109,9 +112,15 @@ namespace TimelinePlanTraceTest
 						sc.beforeFrame(st, i);
 					st.Run(sc.frames[i]);
 					if (st.lowLatency || sc.frames[i].temporalActive)
+					{
+						++checkedFrames;
 						Assert::IsFalse(st.vpTimelineActive, Wide(sc.name + " frame " + std::to_string(i)).c_str());
+						Assert::IsTrue(prodTrace[i].find(" act=0 ") != std::string::npos,
+							Wide("production TimelinePlanRunner engaged in lowLatency/smoothMotion: " + sc.name + " frame " + std::to_string(i) + ": " + prodTrace[i]).c_str());
+					}
 				}
 			}
+			Assert::IsTrue(checkedFrames > 0, L"expected low-latency or smooth-motion frames to be exercised");
 		}
 	};
 

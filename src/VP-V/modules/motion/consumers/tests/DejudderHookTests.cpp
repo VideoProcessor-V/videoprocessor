@@ -148,6 +148,18 @@ namespace VideoProcessorTest
 			off.estStillZero = false;
 			Dejudder::MotionWarp offWarp(fixture.Log(), gpu, off);
 			Assert::IsTrue(offWarp.Estimate(planesA.planes, planesB.planes), L"the estimate with the switch off");
+			const DejudderField offField = DownloadField(gpu, offWarp);
+			Assert::IsTrue(offField.blocksX == parent.blocksX && offField.blocksY == parent.blocksY && offField.blocksX > 0,
+				L"offWarp produces a downloadable motion field of matching grid dimensions");
+			int offFinite = 0;
+			for (int by = 0; by < offField.blocksY; ++by)
+				for (int bx = 0; bx < offField.blocksX; ++bx)
+				{
+					Assert::IsTrue(std::isfinite(offField.vx(bx, by)) && std::isfinite(offField.vy(bx, by)),
+						L"offWarp vectors must be finite");
+					++offFinite;
+				}
+			Assert::IsTrue(offFinite > 0);
 		}
 
 		TEST_METHOD(DejudderFollowsAMovingPictureAndWarpsBySDelta)
@@ -761,6 +773,46 @@ namespace VideoProcessorTest
 			Assert::IsTrue(field.Run(warp.Field(), warp.FrameTrust(), warp.GetSettings().minTrustedShare, 0.5f, g,
 				width, height, vectors), ExtendedRangeGpuProbe::ToWide(field.Error()).c_str());
 			Assert::IsNotNull(vectors);
+			{
+				pl_tex_params vp{};
+				vp.w = vectors->params.w;
+				vp.h = vectors->params.h;
+				vp.format = vectors->params.format;
+				vp.host_readable = true;
+				vp.blit_dst = true;
+				pl_tex readable = pl_tex_create(gpu, &vp);
+				Assert::IsNotNull(readable, L"readable copy for dither vectors");
+				pl_tex_blit_params bp{};
+				bp.src = vectors;
+				bp.dst = readable;
+				pl_tex_blit(gpu, &bp);
+				pl_gpu_finish(gpu);
+				std::vector<uint16_t> raw(static_cast<size_t>(vp.w) * vp.h * 4);
+				pl_tex_transfer_params dl{};
+				dl.tex = readable;
+				dl.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"download dither vectors");
+				pl_tex_destroy(gpu, &readable);
+				auto halfToF = [](uint16_t h) {
+					const int s = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
+					const float v = e == 0 ? std::ldexp(static_cast<float>(m), -24) : std::ldexp(static_cast<float>(m | 1024), e - 25);
+					return s ? -v : v;
+				};
+				int heldBlocks = 0;
+				for (int by = 0; by < vp.h; ++by)
+					for (int bx = 0; bx < vp.w; ++bx)
+					{
+						const int cx = bx * 16 + 8, cy = by * 16 + 8;
+						if (inside(cx, cy, 0) || inside(cx, cy, 1))
+						{
+							++heldBlocks;
+							const size_t at = (static_cast<size_t>(by) * vp.w + bx) * 4;
+							Assert::AreEqual(0.0f, halfToF(raw[at]), 1e-4f, L"vx inside held subtitle rectangle must be 0");
+							Assert::AreEqual(0.0f, halfToF(raw[at + 1]), 1e-4f, L"vy inside held subtitle rectangle must be 0");
+						}
+					}
+				Assert::IsTrue(heldBlocks > 0, L"expected blocks inside the held subtitle rectangles");
+			}
 		}
 
 		// Bug hunt 2026-10-17: the cached picture (PRE_OUTPUT) already has the

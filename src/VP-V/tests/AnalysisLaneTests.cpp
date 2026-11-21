@@ -1837,7 +1837,7 @@ namespace AnalysisLaneTestsNs
 			uint64_t hash = 0;
 			unsigned eras = 0;
 			uint64_t fulls = 0, minors = 0, frames = 0;
-			unsigned pulldownAbsorbs = 0, pulldownResets = 0, ledRestarts = 0, dvRelatches = 0, dvHolds = 0;
+			unsigned pulldownAbsorbs = 0, pulldownResets = 0, ledRestarts = 0, expectedLedRestarts = 0, dvRelatches = 0, dvHolds = 0;
 			unsigned stormFrames = 0, metricsLines = 0;
 			uint64_t metricsTracked = 0, metricsSettled = 0, metricsUnsettled = 0;
 			bool violation = false;
@@ -2067,6 +2067,7 @@ namespace AnalysisLaneTestsNs
 					const VpResync::PulldownResyncAction act = VpResync::PulldownResyncPolicy::DecideFromIndicator(
 						*cur, newEra ? 0 : lastCursorSeq, f, changed, false, 0.0, 0.0, [](double) { return 0; });
 					if ((changed & VpIndicator::Bit(VpIndicator::kFull)) != 0) {
+						++res.expectedLedRestarts;
 						const bool wantReset = newEra || AnyFullOtherThanSeek(*cur, lastCursorSeq, f) || !AnyEvent(*cur, VpIndicator::Bit(VpIndicator::kFull), lastCursorSeq, f);
 						if (act.reset != wantReset || act.absorb == wantReset)
 							Fail(res, "pulldown policy at frame " + std::to_string(f));
@@ -2169,7 +2170,8 @@ namespace AnalysisLaneTestsNs
 			Assert::IsTrue(a.eras >= 2, L"and era swaps");
 			Assert::IsTrue(a.pulldownAbsorbs > 0 && a.pulldownResets > 0, L"both pulldown outcomes occur");
 			Assert::IsTrue(a.dvRelatches > 0 && a.dvHolds > 0, L"both DV outcomes occur");
-			Assert::IsTrue(a.ledRestarts == a.fulls || a.ledRestarts > 0);
+			Assert::AreEqual(a.expectedLedRestarts, a.ledRestarts, L"LED restarts must match FULL cursor transitions");
+			Assert::IsTrue(a.ledRestarts > 0, L"expected at least one LED restart");
 			Assert::IsTrue(a.metricsTracked > 0);
 		}
 

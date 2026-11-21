@@ -1905,8 +1905,9 @@ namespace SkeletonModuleTestsNs
 			Vpv::Skeleton::SceneAnswer offThread;
 			std::thread other([&] { offThread = rig.sk.SceneOf(rig.Host(), 5); });
 			other.join();
-			Assert::IsTrue(offThread.known || (offThread.why != nullptr && offThread.why[0] != 0),
-				L"off the render thread: the published copy, or a miss that names its cause");
+			Assert::IsFalse(offThread.known, L"store off + off the render thread must not fabricate a live answer");
+			Assert::IsTrue(offThread.why != nullptr && offThread.why[0] != 0,
+				L"off the render thread: a miss must name its cause");
 
 			SealThrough6(rig);
 			rig.Begin(6);
