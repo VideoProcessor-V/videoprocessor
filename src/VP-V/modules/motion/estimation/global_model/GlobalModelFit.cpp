@@ -837,9 +837,16 @@ namespace CameraModel
 						Params B = inv;
 						if (Refine(f, bs, B, 1))
 						{
-							const double dev = MaxCornerDifference(Compose(B, model), IdentityParams(model.type), f.pic);
-							const double tol = 4.0 * f.prec / f.diag;
-							devTerm = 1.0 - RampMath::Clamp01<double>(dev / tol);
+							// GEM-136 AMEND-2: a composition that cannot be normalised fails the inverse check (devTerm stays 0, so
+							// sg.inverse is 0 and the record's reason is InverseMismatch: counted and shown like any refusal).
+							bool composeOk = true;
+							const Params BM = Compose(B, model, &composeOk);
+							if (composeOk)
+							{
+								const double dev = MaxCornerDifference(BM, IdentityParams(model.type), f.pic);
+								const double tol = 4.0 * f.prec / f.diag;
+								devTerm = 1.0 - RampMath::Clamp01<double>(dev / tol);
+							}
 						}
 						const double shareTerm = std::min(1.0, bShare / (0.7 * rawShare + 1e-9));
 						sg.inverse = RampMath::Clamp01<double>(devTerm * shareTerm);

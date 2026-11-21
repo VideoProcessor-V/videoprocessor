@@ -195,8 +195,8 @@ namespace CameraLink
 		}
 
 		// Reader. False when the slot holds another frame (or nothing).
-		// includeUncommitted is for the seal observer only (the seal accepted a Published slot: the entry exists even if the worker
-		// has not yet committed it).
+		// includeUncommitted: also reads a Published-but-not-yet-Committed slot (a worker between Publish and Commit). It is for callers
+		// whose precondition is that the frame is already Published/Sealed (the seal observer, FitEntryOf); the default stays committed-only.
 		bool Get(uint64_t seq, PoolEntry& out, bool includeUncommitted = false) const
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);

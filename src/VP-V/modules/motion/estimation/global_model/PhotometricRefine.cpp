@@ -357,9 +357,10 @@ namespace CameraModel
 					degenerate = true;
 					break;
 				}
-				Params next = Compose(p, Si);
+				bool composeOk = true;
+				Params next = Compose(p, Si, &composeOk);
 				next.type = model.type;
-				if (!ParamsFinite(next))
+				if (!composeOk || !ParamsFinite(next))   // GEM-136 AMEND-2: an unnormalisable step takes the FellBackDegenerate exit
 				{
 					degenerate = true;
 					break;

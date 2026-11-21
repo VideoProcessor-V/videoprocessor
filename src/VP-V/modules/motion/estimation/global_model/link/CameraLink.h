@@ -75,7 +75,8 @@ namespace CameraLink
 		}
 		// The on-time seal's verdict on frame `seq` (Pending until OnTimeSeal(seq) ran; render thread). Default (fakes): Pending.
 		virtual SealVerdict OnTimeSealVerdict(uint64_t seq) const { (void)seq; return SealVerdict::Pending; }
-		// The P7 pool entry's record of `seq`. False (output cleared) when the entry is absent. The fit field is NOT read here: it is the
+		// The P7 pool entry's record of `seq`. Caller precondition (P7): `seq` is Published or Sealed (the read includes an entry the worker has
+		// published but not yet committed). False (output cleared) when the entry is absent. The fit field is NOT read here: it is the
 		// declared product p7f_camera_fit_field (CP-A1-D4-CAMLABEL-FIELDCOPY), read from its slot by P8 (CameraLabelFill).
 		virtual bool FitEntryOf(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion>& rec) const = 0;
 		// P8 for consumer `c` at frame `seq` (K2: first consumer fills, later ones reuse).
