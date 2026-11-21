@@ -101,6 +101,28 @@ namespace AdaptiveDownscaleStage
 	// sequence keeps the first presentation's verdict (the caller). Pure (tests).
 	const char* MotionDiscontinuity(bool vectorsRun, bool nls, bool live, bool haveLast, uint64_t lastSequence, uint64_t sequence);
 
+	// CF-2 FIX1 (gate M1, S2): the inputs of the upscale form's "output scaling" entry for one frame.
+	struct UpscaleFallbackInputs
+	{
+		bool requested = false;
+		bool failureHeld = false;
+		std::string scalerError;
+		bool motionAdaptiveOn = false;
+		bool oneAxis = false;
+		std::string stageMotionCause;    // the stage's discontinuity verdict (empty: the vectors are usable)
+		bool moduleFloorUsed = false;    // the module leaned on the motion floor on its own (no usable factor map)
+		std::string moduleFloorCause;
+		bool cutAvailable = true;
+		std::string cutCause;
+		std::string interim;             // InterimLine(edge, grain); empty when both products are read
+	};
+
+	// The upscale form's one "output scaling" decision (the host engages one per frame, CoreSegments): a GPU failure first,
+	// then the motion floor (the stage's verdict, or the module's own floor with its cause: gate M1), then no cut verdict,
+	// then the edge/grain private interim (gate S2: the interim reaches Config status and the notice, not only Ctrl+I).
+	// Pure (Fallback() and the tests).
+	FallbackCatalog::Decision UpscaleScalingFallback(const UpscaleFallbackInputs& in);
+
 	// Host members other host code still reads (status line, the de-judder's grain-map request).
 	struct SharedState
 	{
@@ -162,11 +184,25 @@ namespace AdaptiveDownscaleStage
 		static constexpr unsigned long long kFailureHoldMs = 5000;
 		FallbackCatalog::Decision Fallback() const
 		{
-			// CF-2 B1: the upscale form's own entry (the alias-safe ScalerPass failed: the main scaler alone; no vectors: the floor).
-			const FallbackCatalog::Decision base = upscaleThisFrame ?
-				FallbackCatalog::OutputScalingUpscale(requested, failureHeld, module.ScalerError(),
-					motionAdaptiveOn && !oneAxisThisFrame && !upscaleMotionCause.empty(), upscaleMotionCause) :
-				FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
+			// CF-2 B1 / FIX1: the upscale form's own entry (the alias-safe ScalerPass failed: the main scaler alone; no vectors,
+			// by the stage's verdict or the module's own floor: the floor; no cut verdict; the edge/grain interim).
+			if (upscaleThisFrame)
+			{
+				UpscaleFallbackInputs in;
+				in.requested = requested;
+				in.failureHeld = failureHeld;
+				in.scalerError = module.ScalerError();
+				in.motionAdaptiveOn = motionAdaptiveOn;
+				in.oneAxis = oneAxisThisFrame;
+				in.stageMotionCause = upscaleMotionCause;
+				in.moduleFloorUsed = module.MotionFloorUsed();
+				in.moduleFloorCause = module.MotionFloorCauseText();
+				in.cutAvailable = module.CutAvailable();
+				in.cutCause = in.cutAvailable ? std::string() : module.CutCause();
+				in.interim = InterimLine(edgeTerm, grainTerm);
+				return UpscaleScalingFallback(in);
+			}
+			const FallbackCatalog::Decision base = FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
 			// FIX-X5-CUT-P4 / C5: no scene group (the skeleton's scene product) for this frame: no cut verdict this frame (also on StatusLines()).
 			if (!base.engaged && requested && !module.CutAvailable())
 				return FallbackCatalog::Engaged("output scaling", "adaptive downscale: no cut verdict this frame (" + module.CutCause() + ")");

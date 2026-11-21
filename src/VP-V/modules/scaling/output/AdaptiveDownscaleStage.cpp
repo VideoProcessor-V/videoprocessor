@@ -109,6 +109,21 @@ namespace AdaptiveDownscaleStage
 		return "edge/grain: private interim (" + causes + ")";
 	}
 
+	FallbackCatalog::Decision UpscaleScalingFallback(const UpscaleFallbackInputs& in)
+	{
+		const bool stageFloor = in.motionAdaptiveOn && !in.oneAxis && !in.stageMotionCause.empty();
+		const bool floor = stageFloor || in.moduleFloorUsed;
+		const FallbackCatalog::Decision base = FallbackCatalog::OutputScalingUpscale(in.requested, in.failureHeld, in.scalerError,
+			floor, stageFloor ? in.stageMotionCause : in.moduleFloorCause);
+		if (base.engaged || !in.requested)
+			return base;
+		if (!in.cutAvailable)
+			return FallbackCatalog::Engaged("output scaling", "adaptive downscale: no cut verdict this frame (" + in.cutCause + ")");
+		if (!in.interim.empty())
+			return FallbackCatalog::Engaged("output scaling", "adaptive upscale: " + in.interim);
+		return base;
+	}
+
 	const char* MotionDiscontinuity(bool vectorsRun, bool nls, bool live, bool haveLast, uint64_t lastSequence, uint64_t sequence)
 	{
 		if (!vectorsRun) return "motion vectors off";
@@ -387,6 +402,9 @@ namespace AdaptiveDownscaleStage
 			// N1.4: no / invalid vectors with adaptive_motion on: the motion floor, with the cause (one-axis: faithful only already).
 			if (motionAdaptiveOn && !oneAxisThisFrame && !upscaleMotionCause.empty())
 				lines.push_back("Adaptive upscale motion: no vectors (alias-safe weight; " + upscaleMotionCause + ")");
+			// FIX1 (gate M1): the module's own floor (no usable factor map) while the stage found the vectors usable.
+			else if (module.MotionFloorUsed())
+				lines.push_back("Adaptive upscale motion: no vectors (alias-safe weight; " + module.MotionFloorCauseText() + ")");
 		}
 		if (motionAdaptiveOn)
 		{

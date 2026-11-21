@@ -772,6 +772,8 @@ float rs_slope(float y)
 		active = false;
 		upscaleRatio = 0;
 		motionState = MotionState::Off;   // set again by UpdateMotionMap when the measure runs
+		motionFloorUsed = false;           // FIX1: set again by the blend (a frame it skips leaves no stale floor)
+		motionFloorCause.clear();
 		if (!p->tex)
 			return unchanged;
 		float sx0 = std::fmin(p->src_rect.x0, p->src_rect.x1), sx1 = std::fmax(p->src_rect.x0, p->src_rect.x1);
@@ -1224,6 +1226,10 @@ float rs_slope(float y)
 		// (MotionFloorUsed; the stage's status line). One-axis is faithful only already. The downscale form is unchanged.
 		const bool motionFloor = upscale.on && settings.motionAdaptive && !useMotion && !upscale.oneAxis;
 		motionFloorUsed = motionFloor;
+		// CF-2 FIX1 (gate M1): the floor's cause, for the stage's catalog entry (Stage::Fallback) and status line.
+		const char* floorCause = motionFloor ? MotionFloorCause(vectorsInvalid, motionState, motionReady,
+			motionSequence == sequence, motionMap[motionIndex] != nullptr) : nullptr;
+		motionFloorCause = motionFloor ? std::string(floorCause ? floorCause : "no motion map") : std::string();
 		// Ruling (a): the published edge map when the stage acquired it; else the private ramp (`edge`, the interim).
 		const bool edgePublished = upscale.on && edgeSource.map != nullptr;
 		publishedEdgeUsed = edgePublished;

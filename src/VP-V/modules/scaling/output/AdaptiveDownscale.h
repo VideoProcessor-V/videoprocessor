@@ -368,6 +368,25 @@ namespace AdaptiveDownscale
 	// The motion-adapted blend on the last blended frame (status, tests).
 	enum class MotionState { Off, NoVectors, Used };
 
+	// CF-2 FIX1 (gate M1): why the upscale form leans on the motion floor on a blended frame (nullptr = the factor map is
+	// used). The stage's own verdict comes first (vectorsInvalid); the rest are the module's: the map did not run, is not
+	// ready, belongs to another source frame, or has no texture. Pure (the module and the tests); the stage feeds the cause
+	// into its "output scaling" entry, so a floor taken here is never only a status line.
+	inline const char* MotionFloorCause(bool vectorsInvalid, MotionState state, bool mapReady, bool sameSequence, bool haveTexture)
+	{
+		if (vectorsInvalid)
+			return "vectors invalid";
+		if (state != MotionState::Used)
+			return state == MotionState::Off ? "motion map not built on this frame" : "no motion map for this source frame";
+		if (!mapReady)
+			return "motion map not ready";
+		if (!sameSequence)
+			return "motion map from another source frame";
+		if (!haveTexture)
+			return "motion map texture missing";
+		return nullptr;
+	}
+
 	// Stage 8b's gate and its one-axis form, from the re-based source crop and the destination
 	// (half a pixel tolerance). The upscale form: the height upscaled (today's gate, whatever the
 	// width does), or the width upscaled with the height 1:1 (new: the height-only gate missed it).
@@ -430,6 +449,8 @@ namespace AdaptiveDownscale
 		// The last blended frame read the published edge map / used the motion floor (status, tests).
 		bool PublishedEdgeUsed() const { return publishedEdgeUsed; }
 		bool MotionFloorUsed() const { return motionFloorUsed; }
+		// CF-2 FIX1 (gate M1): the cause of that floor (empty when it was not used).
+		const std::string& MotionFloorCauseText() const { return motionFloorCause; }
 		// Why the alias-safe ScalerPass failed last (empty: never); for the fallback line.
 		const std::string& ScalerError() const { return faithfulScaler.LastError(); }
 		// 8-3: after SetFrame, the field for this source frame (none: the
@@ -514,6 +535,7 @@ namespace AdaptiveDownscale
 		EdgeSource edgeSource{};
 		bool publishedEdgeUsed = false;
 		bool motionFloorUsed = false;
+		std::string motionFloorCause;
 		pl_tex edge = nullptr;
 		pl_tex partial = nullptr;
 		pl_tex state = nullptr;
