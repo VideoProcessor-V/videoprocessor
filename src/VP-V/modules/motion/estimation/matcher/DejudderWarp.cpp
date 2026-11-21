@@ -2794,8 +2794,27 @@ if (q.x < size.x && q.y < size.y) {
 		std::shared_ptr<const void> held[6];
 		std::string why;
 		bool configured = true;
-		for (int side = 0; side < 2 && configured && why.empty(); ++side)
+		// B first: B is offered in this render frame, A only kept from when it was B. Asking B's levels first makes them even when
+		// A's are not served (the first pair after a start, a gap or a fallback), so the NEXT pair's A is served; A first would
+		// leave every later A without a kept product (a permanent fallback).
+		if (!innerOfLowRes && HalvesForSearch())
 		{
+			// The lowRes outer: its inner reads levels 2 / 4 / 6 only when this instance is bound; B's are made here in any case,
+			// for the same reason (the next pair's inner A).
+			for (int lv = 2; lv <= 6; lv += 2)
+			{
+				VpMotion::MatcherPyramid::Request q;
+				q.seq = b.sequence;
+				q.level = lv;
+				q.lumaTex = b.luma;
+				q.fullRange = b.fullRange;
+				if (pyramidSource(q).state != VpMotion::MatcherPyramid::Level::State::Product)
+					break;   // not served: the inner's own bind shows why when it reads them
+			}
+		}
+		for (int s = 0; s < 2 && configured && why.empty(); ++s)
+		{
+			const int side = 1 - s;
 			const Planes& p = side ? b : a;
 			const int levels = side ? levelsB : levelsA;
 			const void* src = innerOfLowRes ? productLuma[side] : static_cast<const void*>(p.luma);
