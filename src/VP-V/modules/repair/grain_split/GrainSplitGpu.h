@@ -190,8 +190,9 @@ namespace GrainSplit
 		ContextShapes ContextShapesOf(int w, int h, int B, const Params& params, VpSkeleton::TexFormat t2 = VpSkeleton::TexFormat::RG32F,
 			VpSkeleton::TexFormat t4 = VpSkeleton::TexFormat::RGBA32F);
 
-		// What a context Compute made: the keep-alive of every texture (the context's device frees each once the last holder
-		// lets go: never the Splitter, never the caller) and their accounted bytes.
+		// What a context Compute keeps: the keep-alive of each texture still read (after a successful Compute: split and blocks
+		// only, GF-P1 S6; the context's device frees each once the last holder lets go: never the Splitter, never the caller)
+		// and their bytes.
 		struct ContextHold
 		{
 			std::vector<std::shared_ptr<void>> keep;
@@ -219,8 +220,10 @@ namespace GrainSplit
 			// fill only). R19-27: no device handle is taken. The passes run on the context's dispatch (house form, at the call),
 			// the shared-memory check uses ctx.MaxSharedMemory(), and every texture (both outputs, the four intermediates and
 			// the level table: ContextShapesOf, rg32f / rgba32f) is ctx.Allocate'd, accounted against the fill's reserve. The
-			// made textures are validated by their formats (no device lookup). `hold` keeps them alive and the device frees
-			// them. Full layout, no arena, no private texture (Release has nothing to free). False with LastError on any refusal
+			// made textures are validated by their formats (no device lookup). On success `hold` keeps only the two outputs
+			// (split, blocks; GF-P1 S6): the five scratch textures are let go after the last pass (the device retires them and
+			// frees them at FlushReleases), and `hold.bytes` is the outputs' bytes; the context's Used() stays the seven-texture
+			// peak. Full layout, no arena, no private texture (Release has nothing to free). False with LastError on any refusal
 			// (a closed context, an unknown shared-memory limit, an allocation over the reserve: the context's reason), and
 			// `hold` is then empty. Out() is valid while `hold` is held. Byte-identical to Compute(gpu, dispatch, plane, ...,
 			// Options{seq}) on the same inputs (GrainUnitGpuTests::GrainUnitContextEntryEqualsCompute).

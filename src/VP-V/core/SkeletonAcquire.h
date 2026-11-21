@@ -293,6 +293,11 @@ struct OwnerFill {
     // declared (a Core product keeps at least this much when memory is short).
     JobClass jobClass = JobClass::Core;
     uint16_t aheadDepth = 0;
+    // GF-P1 (lead ruling; owner OD 2026-11-14: ahead cap 6): aheadDepth is stored CAPPED at kAheadCeiling (the ladder's Core floor
+    // reads it); `aheadAsked` is the uncapped request when it was larger (0 = aheadDepth is the request) and `aheadBy` names the
+    // requester (a static string; null = unnamed). Both only feed the window's existing ceiling notice (ActiveAheadDemands).
+    uint16_t aheadAsked = 0;
+    const char* aheadBy = nullptr;
 };
 
 // The lane's slots as the first G2 source (SkeletonAcquireLane.h binds it). Default variant only.
@@ -538,6 +543,12 @@ public:
         std::lock_guard<std::mutex> g(mutex_);
         gpuDevice_ = device;
     }
+    // GF-P1 MUST-3: an owner GPU device is attached (SetGpuDevice non-null). Read-only; the binder keeps presence while one is.
+    bool HasGpuDevice() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return gpuDevice_ != nullptr;
+    }
     // R2 (audit S1): textures a reader still pinned when the device went: forgotten by the device (never destroyed through a device
     // that may be gone; the driver frees them with the device). Counted here and on the status lines (not silent).
     void NoteGpuForgotten(uint64_t textures, uint64_t bytes)
@@ -750,8 +761,9 @@ public:
     struct AheadDemand {
         uint16_t id = 0;     // ProductId
         uint8_t form = 0;    // 0 = CPU, 1 = GPU
-        uint16_t depth = 0;  // the declared ahead depth in frames
+        uint16_t depth = 0;  // the declared ahead REQUEST in frames (uncapped: DeriveWindow caps it and names the ceiling)
         JobClass cls = JobClass::Core;
+        const char* by = nullptr;   // the requester (OwnerFill::aheadBy), null = unnamed
     };
     // The kAheadNeed term's input: every registered fill (lane fill shadowing a module's) declaring an ahead depth > 0, ordered
     // by owner key. Empty = no consumer (aheadCompute stays 0 / NoConsumer upstream).
@@ -765,8 +777,9 @@ public:
             AheadDemand d;
             d.id = uint16_t(kv.first >> 1);
             d.form = (kv.first & 1u) != 0u ? uint8_t(1) : uint8_t(0);
-            d.depth = kv.second->aheadDepth;
+            d.depth = kv.second->aheadAsked > kv.second->aheadDepth ? kv.second->aheadAsked : kv.second->aheadDepth;
             d.cls = kv.second->jobClass;
+            d.by = kv.second->aheadBy;
             out.push_back(d);
         }
         return out;
