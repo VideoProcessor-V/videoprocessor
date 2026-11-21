@@ -200,3 +200,20 @@ This module still creates its own GPU textures (see the static test src/VP-V/tes
 | Slot-off bandwidth (FBO read/write) | f16 | f32, about 2x intermediate bandwidth for those profiles | GPU frame-time rise only for slot-off profiles, to be timed on the laptop RTX 3050 Ti | pending TRAIN-1 |
 | Stable 7.360 lane | f16 (no flag) | f16, now labelled "picture precision ... below 12-bit" | label shown, no pixel change | pending TRAIN-1 |
 | `SyncFallback` cost per frame | none | two compares plus a registry sync, no string work when unchanged | below measurement noise | pending TRAIN-1 |
+
+## Grain energy from the shared products (X5-GRAIN-P10)
+
+The scalar grain term (`grain_scale`, the ramp over `grain_lo` / `grain_hi`) derives its energy from the one shared grain
+estimate instead of a private Laplacian: P10's per-block grain level N (a variance), mapped to the Laplacian-per-sigma units the
+ramp is defined in (`kLaplacianPerSigma` = sqrt(20) * sqrt(2/pi) = 3.568, the mean |discrete Laplacian| of unit white noise; a
+derivation, not a fitted figure), weighted per block by the shadow law (`shadow_bias`, unchanged) of P11's block mean luma, over
+P11's flat coverage (picture share x off-edge share). `grain_lo` / `grain_hi` keep their meaning. The per-block `GrainError`
+map (`MAP_BODY`) is the motion product's and is unchanged.
+
+The host supplies `AdaptiveDownscale::GrainSource` (P10 blocks, P11 S0 and S4, the block size, the code-unit scale to 8-bit codes and
+the source crop) through `AdaptiveDownscaleStage::Host::grainSource`. Without a valid source (the callback null, a texture
+missing, or no usable block on the frame) the private Laplacian partial sums (`MEASURE_BODY`, `FINAL_BODY_A`) give the energy and
+the stage status says "Adaptive grain: own Laplacian estimate" (`LastGrainFromSharedProducts()`); nothing is latched. Once the host
+supplies the source on every frame the private partial terms (`MEASURE_BODY` lap / flat_px, the `AD_P10`-less branch) are deleted.
+The catalog row 3 path is `VP-V/modules/scaling/output/AdaptiveDownscale`. Registered change: FIX-X5-GRAIN-P10 (before / after
+grain_scale trace and X5AbCapture CSV on the D8 clip set and two grainy clips; the calibration check is a GPU measurement).

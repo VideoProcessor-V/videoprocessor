@@ -21,6 +21,19 @@ namespace AdaptiveDownscaleStage
 				host.fallbackFramePeriod();
 		}
 
+		// X5-GRAIN-P10: this frame's shared grain products (P10 N, P11 meanY and coverage) from the host, when it
+		// supplies them; none (no callback, or an invalid source) leaves the private Laplacian estimate, shown in StatusLines.
+		void SetSharedGrain(AdaptiveDownscale::Module& module, const Host& host)
+		{
+			module.ClearGrainSource();
+			if (host.grainSource)
+			{
+				const AdaptiveDownscale::GrainSource source = host.grainSource();
+				if (source.Valid())
+					module.SetGrainSource(source);
+			}
+		}
+
 		// Stage 12 §2c / S8-1: the motion for holding the CNN / SSIM residual (vectors of this source
 		// frame only; never with NLS - its map is not linear; never starts the matcher).
 		void SetResidualMotion(AdaptiveDownscale::Module& module, const Frame& frame, const MotionSource& m)
@@ -134,6 +147,7 @@ namespace AdaptiveDownscaleStage
 			}
 			module.SetUpscale(up);
 			module.ClearGrainField();
+			SetSharedGrain(module, host);
 			const MotionSource m = host.motion();
 			SetResidualMotion(module, frame, m);
 			if (adaptive.grainMap && m.live && m.grainError)
@@ -190,6 +204,7 @@ namespace AdaptiveDownscaleStage
 				// at upload); the map follows NLS's own map (bundled NLS / NLS+ only; otherwise the
 				// scalar).
 				module.ClearGrainField();
+				SetSharedGrain(module, host);
 				const MotionSource m = host.motion();
 				SetResidualMotion(module, frame, m);
 				if (adaptive.grainMap && m.live && m.grainError)
@@ -278,6 +293,11 @@ namespace AdaptiveDownscaleStage
 				m == AdaptiveDownscale::MotionState::NoVectors ? "Motion-adapted blend: no vectors on this frame (plain blend)" :
 				"Motion-adapted blend: idle (the blend did not run on the last frame)");
 		}
+		// X5-GRAIN-P10 (no silent fallbacks): which grain estimate the last scalar pass used.
+		if (module.Active())
+			lines.push_back(module.LastGrainFromSharedProducts() ?
+				"Adaptive grain: from the shared grain split (P10) and region statistics (P11)" :
+				"Adaptive grain: own Laplacian estimate (the shared grain products are not supplied to the scaler)");
 		const std::string td = TdProducts::StatusLine(TdProducts::Consumer::AdaptiveScaler, tdRead);
 		if (!td.empty())
 			lines.push_back(td);

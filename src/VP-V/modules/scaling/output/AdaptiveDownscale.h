@@ -136,6 +136,25 @@ namespace AdaptiveDownscale
 		NlsMaskMapping::Mapping nls{};
 	};
 
+	// X5-GRAIN-P10: the frame's grain energy derived from the shared products instead of the private Laplacian
+	// partial sums: P10's grain level N per block (p10Blocks, .x), P11's block mean luma (p11Stats0, .x) and flat
+	// coverage (p11Stats4: .x picture share x .y off-edge share), all on one block grid of blockPx source pixels.
+	// No source (any null texture): the private Laplacian estimate stays as the VISIBLE fallback (Stage status line).
+	struct GrainSource
+	{
+		pl_tex p10Blocks = nullptr;    // GrainSplit::Gpu view: gs_blocks(b).x = N (codes^2 in the product's code unit)
+		pl_tex p11Stats0 = nullptr;    // RegionEvidence S0: meanY in codes (the product's code unit)
+		pl_tex p11Stats4 = nullptr;    // RegionEvidence S4: coverage, offShare
+		int blockPx = 16;              // source pixels per block edge
+		float codeToEightBit = 1.0f;   // 255 / the code unit's white: N and meanY to the 8-bit codes the thresholds use
+		pl_rect2df sourceCrop{};       // the source crop libplacebo scales, in the blocks' source pixels (blocks centred in it count)
+		bool Valid() const { return p10Blocks && p11Stats0 && p11Stats4 && blockPx > 0 && codeToEightBit > 0.0f; }
+	};
+
+	// One Gaussian-noise sigma in the mean-|Laplacian| energy units the grain ramp is defined in: the discrete
+	// Laplacian 4e - (b + d + f + h) of white noise has std sqrt(20) sigma, and E|x| = sqrt(2/pi) std for a Gaussian.
+	constexpr float kLaplacianPerSigma = 3.5682208f;   // sqrt(20) * sqrt(2 / pi)
+
 	// Stage 12 §2c / S8-1: the de-judder's motion for the source frame being
 	// rendered (from the last estimate; null = none: this frame's residual).
 	struct Motion
@@ -378,6 +397,12 @@ namespace AdaptiveDownscale
 		// scalar). Call every frame; the textures are the matcher's.
 		void SetGrainField(const GrainField& field) { grainField = field; }
 		void ClearGrainField() { grainField = GrainField(); }
+		// X5-GRAIN-P10: after SetFrame, the shared grain products for this source frame (call every frame;
+		// ClearGrainSource = none: the private Laplacian estimate runs, shown in the stage status).
+		void SetGrainSource(const GrainSource& value) { grainSource = value; }
+		void ClearGrainSource() { grainSource = GrainSource(); }
+		// True when the last scalar grain pass read the shared products (false: the private estimate); status, tests.
+		bool LastGrainFromSharedProducts() const { return grainFromShared; }
 		// Stage 12 §2c / S8-1: after SetFrame, the motion for this source frame
 		// (call every frame; ClearMotion when there is none or NLS is active).
 		void SetMotion(const Motion& value) { motion = value; }
@@ -441,6 +466,8 @@ namespace AdaptiveDownscale
 		uint64_t mapSequence = 0;
 		MapState mapState = MapState::Off;
 		GrainField grainField{};
+		GrainSource grainSource{};
+		bool grainFromShared = false;
 		Motion motion{};
 		pl_tex residual[2] = { nullptr, nullptr };   // luma residual: this source frame's and the previous one's
 		int residualIndex = 0;                        // residual[residualIndex] = residualSequence's

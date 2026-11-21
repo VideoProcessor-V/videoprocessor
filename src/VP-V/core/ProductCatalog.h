@@ -323,7 +323,7 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         r.push_back(MakeRow(11, "chroma from luma", "VP-V/modules/scaling/chroma_upscale", PathwayUnit::Scaling, 10,
                             { kP10GrainSplit, kP10cGrainSplitChroma, kP13SourceRing }, lower, "product.chroma_cfl", false,
                             { kSourceGeometry }));
-        r.push_back(MakeRow(3, "adaptive downscale (grain map)", "VP-V/modules/scaling/adaptive_downscale",
+        r.push_back(MakeRow(3, "adaptive downscale (grain map)", "VP-V/modules/scaling/output/AdaptiveDownscale",
                             PathwayUnit::Scaling, 20, { kP11RegionBlockStats, kP10GrainSplit, kP4SourceStats }, own,
                             "product.adaptive_downscale", false, { kSourceIdentity, kSourceGeometry }));
         // Drive and output

@@ -74,6 +74,9 @@ namespace AdaptiveDownscaleStage
 		std::function<NlsMaskMapping::Mapping()> nlsMapping;     // KnownNlsMapping()
 		std::function<bool()> ssimInChain;                       // customHooks.SubmitsFile("SSimDownscaler.glsl", lowLatency)
 		std::function<MotionSource()> motion;
+		// X5-GRAIN-P10: this source frame's shared grain products (P10 N blocks, P11 meanY / coverage); null or an invalid
+		// source = none, and the scaler keeps its own Laplacian estimate (a status line says so).
+		std::function<AdaptiveDownscale::GrainSource()> grainSource;
 		std::function<void()> publishStatus;                     // PublishCustomShaderStatus()
 		// Stage 8b one-axis: true for a LUMA prescaler hook (customHooks.IsPrescalerHook); null =
 		// none known (a doubler then stays in the list; the blend is still faithful-only).
