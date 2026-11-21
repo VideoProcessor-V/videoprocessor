@@ -3,6 +3,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/core/RunningPathwayLatch.h>
 #include <VP-V/modules/control/config/VpvProfileQueueAdvice.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>   // the expected depths (the advice header declares only)
 #include <VP-V/modules/input/queue_timing/QueueLatency.h>
@@ -59,6 +60,14 @@ namespace
 	const char* kQueueText =
 		"[general]\nrenderer: VP Renderer\n"
 		"[queue]\ntarget_frames: 3\ntarget_latency_ms: 267\nlow_latency_path: on\n";
+
+	// CC W4 B2: the snapshot builder latches the process's running pathway (Vpv::RunningPathway) from the first
+	// configuration it sees; the latch is process-wide in the test DLL, so each snapshot test starts and ends unlatched.
+	struct LatchReset
+	{
+		LatchReset() { Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kUnknown); }
+		~LatchReset() { Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kUnknown); }
+	};
 
 	std::shared_ptr<const UnifiedProfileRuntime::Snapshot> SnapshotOf(const std::string& text)
 	{
@@ -142,6 +151,7 @@ namespace VideoProcessorTest
 		// queue: 3 frames (target_latency_ms ignored), look-ahead 0 (not Auto), no low-latency path, no rate fixes.
 		TEST_METHOD(OriginalPathwaySnapshotIsBillsQueue)
 		{
+			LatchReset unlatched;   // CC W4 B2: this configuration is the first the (fresh) runtime latches
 			const auto original = SnapshotOf(std::string(kQueueText) + "[vpv]\npipeline_original_pathway: on\n");
 			const auto& q = original->queue;
 			Assert::IsTrue(q.hasTargetFrames && q.targetFrames == 3, L"Bill's target_frames changed");
@@ -165,6 +175,7 @@ namespace VideoProcessorTest
 		{
 			for (const char* pathway : { "", "[vpv]\npipeline_original_pathway: off\n" })
 			{
+				LatchReset unlatched;   // CC W4 B2: this configuration is the first the (fresh) runtime latches
 				const auto vp = SnapshotOf(std::string(kQueueText) + pathway);
 				const auto& q = vp->queue;
 				Assert::IsTrue(q.hasTargetLatencyMs && q.targetLatencyMs == 267, L"target_latency_ms lost on the VP pathway");
