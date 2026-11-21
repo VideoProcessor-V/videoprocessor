@@ -1336,6 +1336,21 @@ namespace Vpv
 				EraseExternal(host);          // nor is its external demand (declared for the dead renderer)
 				st.reset();
 			}
+			// GF-P2b S1 (ADR-0019: Original == Bill, zero cost): a live switch to the Original pathway ends the renderer's memo too. MemoHostOf
+			// returns an existing memo before its Original check, so a kept memo would still be sealed, windowed, planned (card query) and
+			// shown on the status lines. Its device goes while it lives (as at GpuReleased), then the table entry; MemoHostOf(false) is then
+			// null and every memo-host site is inert, and MemoFor makes none while the hub records Original. The renderer's word decides
+			// (as MemoHostOf: the hub's record when this Reconcile carries none), never the file alone.
+			const bool originalNow = originalFlag >= 0 ? originalFlag != 0 : Hub::ExtensionHub::Instance().OriginalPathway(host);
+			if (originalNow)
+				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
+				{
+					{
+						std::lock_guard<std::mutex> memoLock(ownerFillsMutex_);   // the one lock context for the memo's device (GpuReleased / GpuCreated)
+						DetachMemoGpu(*mh, true);
+					}
+					memoHosts_.Remove(host, true);
+				}
 			// 15c-c8 (coordinator ruling 2026-11-15; the TD fill rule's shape, core/AdmissionTable.h Admit: a product TD OFF still filled FOR the
 			// active consumer that depends on it): a registered consumer that needs the lane's results RAISES the effective lane mode to On (the
 			// least that serves it: Shadow's results are not used) and the frame-analysis store that feeds the lane, while it is registered.
