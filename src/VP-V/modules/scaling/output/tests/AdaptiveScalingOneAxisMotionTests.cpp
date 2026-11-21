@@ -953,6 +953,107 @@ namespace VideoProcessorTest
 			g.fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
 		}
+
+		// CF-2 G9 (gate CF2-R2 SHOULD 2): the stage reads the module's own motion floor through Fallback() on a real Measure.
+		// The host's vectors are live and consecutive, so the stage's verdict is usable (no stage cause); the map's input is
+		// then withheld from the module (ClearMotion after Register), so the module's measure has no motion map and the blend
+		// takes the motion floor (0: the alias-safe branch). Expected: the "output scaling" entry engaged with the module's
+		// cause, the status line with that cause, and the floored picture = the alias-safe branch. Next frame, vectors kept:
+		// the map is used, the floor and its line are gone. Before FIX1 (Fallback read the stage cause only) the entry would
+		// name the cut verdict or the interim, not the floor.
+		TEST_METHOD(StageFallbackCarriesTheModuleMotionFloorOnARealMeasure)
+		{
+			Gpu g;
+			Assert::IsTrue(g.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			g.fixture.CaptureLog(&log);
+			auto wide = [](const std::string& s) { return std::wstring(s.begin(), s.end()); };
+			const int w = 128, h = 64, bw = w / 16, bh = h / 16, ow = w * 3 / 2, oh = h * 3 / 2;
+			pl_tex src = g.Picture(w, h);
+			pl_tex trust = g.Trust(1.0f);
+			pl_tex steady = g.Field(bw, bh, [](int, int, float* c) { c[0] = 0.0f; c[1] = 0.0f; c[2] = 1.0f; c[3] = 0.0f; });
+			{
+				AdaptiveDownscale::Module module;
+				AdaptiveDownscaleStage::Stage stage{ module };
+				AdaptiveDownscale::Settings settings;
+				settings.cnnResidualStabilise = false;   // the comparison is the weight alone
+				settings.ssimResidualStabilise = false;
+				settings.grainMap = false;
+				settings.motionAdaptive = true;
+				settings.motionFloor = 0.0f;
+				double weight = 1.0;
+				bool grainWanted = false, noSsim = false;
+				AdaptiveDownscaleStage::Host host;
+				host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
+				host.bitrate = [](double& q) { q = 1.0; return false; };
+				host.nlsMapping = []() { return NlsMaskMapping::Mapping(); };
+				host.ssimInChain = []() { return false; };
+				host.publishStatus = []() {};
+				host.motion = [&]()
+				{
+					AdaptiveDownscaleStage::MotionSource m;
+					m.live = true;
+					m.field = steady;
+					m.frameTrust = trust;
+					return m;
+				};
+				uint64_t sequence = 0;
+				// One source frame through the stage: Register, optionally withhold the map's input, render its hooks.
+				auto frame = [&](double wBase, bool withhold)
+				{
+					AdaptiveDownscaleStage::Frame f;
+					f.adaptive = &settings;
+					f.adaptiveUpscale = true;
+					f.upscaleWBase = wBase;
+					f.upscaleSuperresScale = false;
+					f.lowBitrateOff = true;
+					f.sourceSequence = ++sequence;
+					f.nominalSourceRateHz = 24.0;
+					f.sourceCrop = pl_rect2df{ 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
+					f.targetCrop = pl_rect2df{ 0.0f, 0.0f, static_cast<float>(ow), static_cast<float>(oh) };
+					std::vector<const pl_hook*> hooks;
+					stage.Register(f, host, { weight, grainWanted, noSsim }, hooks);
+					Assert::IsTrue(stage.UpscaleThisFrame(), L"the upscale form registered");
+					Assert::IsTrue(hooks.size() == 2 && hooks[0] == module.Measure() && hooks[1] == module.Blend(),
+						L"the stage placed the measure and the blend (Render binds exactly these)");
+					if (withhold)
+						module.ClearMotion();
+					std::vector<RgbaPixel> px = g.Render(module, src, ow, oh, true);
+					Assert::IsTrue(module.Active() && module.LastUpscaleRatio() == 1 && module.Failures() == 0, L"the blend did not run");
+					return px;
+				};
+				const std::string cause = "no motion map for this source frame";
+				const std::string floorReason = "adaptive upscale: no vectors, alias-safe weight (" + cause + ")";
+				const std::string floorLine = "Adaptive upscale motion: no vectors (alias-safe weight; " + cause + ")";
+
+				// Frame 1: the stage's verdict usable, the module without its map: the module's floor.
+				const std::vector<RgbaPixel> floored = frame(1.0, true);
+				Assert::IsTrue(module.MotionFloorUsed(), L"the module took the motion floor");
+				Assert::AreEqual(cause, module.MotionFloorCauseText());
+				FallbackCatalog::Decision d = stage.Fallback();
+				Assert::IsTrue(d.engaged && d.id == "output scaling", wide("not engaged: " + d.reason).c_str());
+				Assert::AreEqual(floorReason, d.reason, L"the module's floor and its cause reach the catalog through Fallback()");
+				std::vector<std::string> lines = stage.StatusLines();
+				Assert::IsTrue(HasLine(lines, floorLine.c_str()), L"the status line names the module's floor cause");
+
+				// Frame 2: vectors kept: the map is built and used; no floor, no floor line, the entry no longer names it.
+				const std::vector<RgbaPixel> mapped = frame(1.0, false);
+				Assert::IsFalse(module.MotionFloorUsed(), L"the map is used: no floor");
+				d = stage.Fallback();
+				Assert::IsTrue(d.reason.find("no vectors") == std::string::npos, wide("still the floor: " + d.reason).c_str());
+				lines = stage.StatusLines();
+				Assert::IsFalse(HasLine(lines, "Adaptive upscale motion: no vectors"), L"no floor line with the map in use");
+
+				// Frame 3: w_base 0, the alias-safe branch. The floored frame (floor 0) is that picture; the mapped one is not.
+				const std::vector<RgbaPixel> aliasSafe = frame(0.0, false);
+				Assert::IsTrue(MaxDiff(mapped, aliasSafe) > 0, L"the branches must differ for the test to mean anything");
+				Assert::AreEqual(0, MaxDiff(floored, aliasSafe), L"floor 0: the alias-safe branch");
+				module.Release();
+			}
+			for (pl_tex* tex : { &src, &trust, &steady }) pl_tex_destroy(g.gpu, tex);
+			g.fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
 	};
 
 	// FIX-X5-CUT-P4 / C5 (CPU; audit x5dup MUST 1, WAIVER-X5DUP-SCENE-READ): the grain term's cut event is the skeleton's published
