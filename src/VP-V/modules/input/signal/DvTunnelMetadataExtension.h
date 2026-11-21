@@ -16,7 +16,7 @@
 // Behaviour and log lines are the code that was inline in the formatter (feat/dv-l8), moved
 // verbatim. Installed by VP where the formatter is created (renderer, DV loopback analyzer):
 // docs/design/m2-dv-formatter-hook.patch.
-#include <video_frame_formatter/DolbyVisionMetadataExtension.h>
+#include <VP-V/modules/input/signal/DolbyVisionMetadataExtension.h>
 #include <VP-V/modules/input/signal/DvMetadataHold.h>
 #include <VP-V/modules/input/signal/DvSignalLevels.h>
 

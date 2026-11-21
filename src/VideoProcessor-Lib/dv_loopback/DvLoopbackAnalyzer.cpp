@@ -124,14 +124,14 @@ namespace DvLoopback
 		m_handoff.Reset(signal);
 		if (!m_formatter)
 		{
-			m_formatter.reset(new CRGBDolbyVisionTunnelFormatter());
+			m_formatter.reset(new VpvDolbyVisionTunnelFormatter());
 			// WP-14: VP's DM additions (L9/L10, the bounded hold) through the formatter's hook.
 			m_formatter->SetMetadataExtension(std::make_shared<DvTunnelMetadataExtension>());
 		}
 		m_formatter->SetBugHuntFixes(m_options.bugHuntFixes);
 		m_formatter->SetAcceptR10Containers(m_options.bugHuntFixes);   // DIV-DV-08: wired from dv_tunnel_fixes, as in the renderer
 		if (m_options.scalarUnpack)
-			m_formatter->SetConversionMethod(CRGBDolbyVisionTunnelFormatter::ConversionMethod::SCALAR);
+			m_formatter->SetConversionMethod(VpvDolbyVisionTunnelFormatter::ConversionMethod::SCALAR);
 		try
 		{
 			VideoStateComPtr copy = state;
@@ -184,7 +184,7 @@ namespace DvLoopback
 
 		// 2. VP's decode and the renderer's presentation decision.
 		DolbyVisionTunnelFrameMetadata md;
-		CRGBDolbyVisionTunnelFormatter::RasterView raster;
+		VpvDolbyVisionTunnelFormatter::RasterView raster;
 		raster.data = data;
 		raster.width = width;
 		raster.height = height;

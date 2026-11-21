@@ -3,7 +3,7 @@
 #pragma once
 
 #include <video_frame_formatter/IVideoFrameFormatter.h>
-#include <video_frame_formatter/DolbyVisionMetadataExtension.h>
+#include <VP-V/modules/input/signal/DolbyVisionMetadataExtension.h>
 #include <VideoFrameEncoding.h>
 #include <Windows.h>
 #include <array>

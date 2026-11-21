@@ -52,7 +52,7 @@
 // The GUI defines BLACK as a colour macro (WindowedVideoWindow.h).
 #pragma push_macro("BLACK")
 #undef BLACK
-#include <video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h>
+#include <VP-V/modules/input/signal/VpvDolbyVisionTunnelFormatter.h>
 #pragma pop_macro("BLACK")
 
 #include <algorithm>
@@ -76,8 +76,8 @@ public:
 	// A tunnel carries a CRC-valid header in every picture.
 	static constexpr double kHandoffSeconds = 1.0;
 
-	using Raster = CRGBDolbyVisionTunnelFormatter::RasterView;
-	using Content = CRGBDolbyVisionTunnelFormatter::RgbContent;
+	using Raster = VpvDolbyVisionTunnelFormatter::RasterView;
+	using Content = VpvDolbyVisionTunnelFormatter::RgbContent;
 
 	void Reset(const DolbyVisionTunnelHandoffSignal& signal)
 	{
@@ -102,7 +102,7 @@ public:
 		{
 			// Only a CRC-valid header takes the signal back (content cues are
 			// not proof, and the hand-off was decided on content already).
-			if (CRGBDolbyVisionTunnelFormatter::HasTunnelHeader(raster))
+			if (VpvDolbyVisionTunnelFormatter::HasTunnelHeader(raster))
 			{
 				m_handedOff = false;
 				m_hasCandidate = false;
@@ -116,17 +116,17 @@ public:
 			m_reason = "Dolby VSIF says TV-led (tunnel)";
 			return DolbyVisionTunnelHandoffEvent::None;
 		}
-		if (CRGBDolbyVisionTunnelFormatter::HasTunnelHeader(raster))
+		if (VpvDolbyVisionTunnelFormatter::HasTunnelHeader(raster))
 		{
 			ClearCandidate("CRC-valid tunnel header");
 			return DolbyVisionTunnelHandoffEvent::None;
 		}
-		if (CRGBDolbyVisionTunnelFormatter::LooksLikeTunnelContent(raster))
+		if (VpvDolbyVisionTunnelFormatter::LooksLikeTunnelContent(raster))
 		{
 			ClearCandidate("tunnel-like content (damaged or converted tunnel stays with the tunnel path)");
 			return DolbyVisionTunnelHandoffEvent::None;
 		}
-		const Content content = CRGBDolbyVisionTunnelFormatter::ClassifyRgbContent(raster);
+		const Content content = VpvDolbyVisionTunnelFormatter::ClassifyRgbContent(raster);
 		m_lastContent = content;
 		if (content == Content::UNKNOWN)
 			return DolbyVisionTunnelHandoffEvent::None;   // dark / undecided: no evidence either way
@@ -187,13 +187,13 @@ private:
 	uint64_t m_analysed = 0;
 };
 
-inline const char* ToString(CRGBDolbyVisionTunnelFormatter::RgbContent content)
+inline const char* ToString(VpvDolbyVisionTunnelFormatter::RgbContent content)
 {
 	switch (content)
 	{
-	case CRGBDolbyVisionTunnelFormatter::RgbContent::HIGH8: return "RGB8 high8";
-	case CRGBDolbyVisionTunnelFormatter::RgbContent::LOW8: return "RGB8 low8 (or dark 10-bit)";
-	case CRGBDolbyVisionTunnelFormatter::RgbContent::TEN_BIT: return "10-bit RGB";
+	case VpvDolbyVisionTunnelFormatter::RgbContent::HIGH8: return "RGB8 high8";
+	case VpvDolbyVisionTunnelFormatter::RgbContent::LOW8: return "RGB8 low8 (or dark 10-bit)";
+	case VpvDolbyVisionTunnelFormatter::RgbContent::TEN_BIT: return "10-bit RGB";
 	default: return "undecided";
 	}
 }

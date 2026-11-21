@@ -359,7 +359,7 @@ DolbyVisionTunnelHandoffEvent CVideoProcessorDlg::ProbeDvTunnelHandoff(const Vid
 		m_dvTunnelHandoffCaptureGeneration = generation;
 		m_dvTunnelHandoffCaptureActive = true;
 	}
-	CRGBDolbyVisionTunnelFormatter::RasterView raster;
+	VpvDolbyVisionTunnelFormatter::RasterView raster;
 	raster.data = frame.GetData();
 	raster.width = static_cast<uint32_t>(state->displayMode->FrameWidth());
 	raster.height = static_cast<uint32_t>(state->displayMode->FrameHeight());

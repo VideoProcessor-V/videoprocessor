@@ -25,6 +25,7 @@ void LibplaceboVideoRenderer::Impl::CaptureApplySettings()
 	earlyWanted.store(activeSettings.captureUpload == "early", std::memory_order_release);
 	earlyAuto.store(activeSettings.captureUpload == "auto", std::memory_order_release);   // live too (audit 2026-10-16)
 	earlyEfficiency.store(activeSettings.efficiencyFixes, std::memory_order_release);   // modularity 2026-10-25
+	dvUnpack.Tunnel().ApplySettings(activeSettings.dvTunnelFixes, formatterMutex);   // OQ1(a): VP-V DV reader fixes switch
 }
 
 // Item d (P10-2): the capture unpackers, the RGB luma and the early-upload pool at the renderer's GPU release.
@@ -38,6 +39,7 @@ void LibplaceboVideoRenderer::Impl::CaptureReleaseGpu()
 				captureUnpack.reset();   // its textures and dispatch, before the device
 				rgbUnpack.reset();       // the same for the RGB unpack, and its planes
 				dvUnpack.Reset();        // and the Dolby Vision tunnel unpack
+				dvUnpack.Tunnel().Reset(formatterMutex);
 				dvGpuFailed.store(false, std::memory_order_release);   // a new device may unpack again
 				ReleaseFallback("Dolby Vision GPU unpack");
 				pl_tex_destroy(d3d11->gpu, &rgbIngestLuma);
@@ -104,7 +106,12 @@ bool LibplaceboVideoRenderer::Impl::CaptureConvert(RendererExtension::ConvertCon
 	flags.dvFailed = dvGpuFailed.load(std::memory_order_acquire);
 	const Vpv::Capture::ConvertRoute route = Vpv::Capture::ChooseRoute(Vpv::Capture::FactsOf(*state, m_videoConversionOverride,
 		IsNativeRgbUpload(state->videoFrameEncoding, m_videoConversionOverride, state->dolbyVisionTunnel), flags));
-	if (route == Vpv::Capture::ConvertRoute::CpuFormatter)
+	// Original pathway runs Bill's a591ad3b5 CRGBDolbyVisionTunnelFormatter untouched.
+	if (pipelineSlots.OriginalPathway() && state->dolbyVisionTunnel)
+		return false;
+	const bool vpDvCpu = route == Vpv::Capture::ConvertRoute::CpuFormatter &&
+		state->dolbyVisionTunnel && !pipelineSlots.OriginalPathway();
+	if (route == Vpv::Capture::ConvertRoute::CpuFormatter && !vpDvCpu)
 		return false;
 	try
 	{
@@ -170,40 +177,24 @@ bool LibplaceboVideoRenderer::Impl::CaptureConvert(RendererExtension::ConvertCon
 					raw->contract = GpuCaptureUnpack::Contract(state->videoFrameEncoding);
 				converted = raw;
 			}
+			else if (vpDvCpu)   // OQ1(a): VP-V DV reader CPU unpack (Original took Bill's formatter above)
+			{
+				converted = host->AcquireConversionPayload();
+				const VpvDvTunnelSession::FormatOutcome out =
+					dvUnpack.Tunnel().FormatFrame(formatterMutex, state, frame, converted->pixels);
+				converted->contract = out.contract;
+				converted->dolby = out.dolby;
+			}
 			else   // ConvertRoute::DvAnalyse
 			{
-				CRGBDolbyVisionTunnelFormatter::FrameResult result = CRGBDolbyVisionTunnelFormatter::FrameResult::REJECTED;
-				bool highAligned = false;
-				LONG byteCount = 0;
-				VideoFrameFormatterOutputContract contract;
-				DolbyVisionTunnelFrameMetadata dolby;
-				{
-					std::lock_guard<std::mutex> formatterGuard(formatterMutex);
-					if (!formatterState ||
-						formatterState->colorspace != state->colorspace)
-					{
-						formatter->OnVideoState(state);
-						formatterState = state;
-					}
-					auto* dv = dynamic_cast<CRGBDolbyVisionTunnelFormatter*>(formatter.get());
-					if (!dv)
-						throw std::runtime_error("Dolby Vision tunnel formatter unavailable");
-					byteCount = dv->GetOutFrameSize();
-					if (byteCount <= 0)
-						throw std::runtime_error("formatter returned an empty frame size");
-					result = dv->AnalyzeFrame(frame);
-					if (result == CRGBDolbyVisionTunnelFormatter::FrameResult::REJECTED)
-						throw std::runtime_error("frame conversion failed");
-					highAligned = dv->PlanesHighAligned();
-					contract = dv->GetOutputContract();
-					dolby = dv->GetDolbyVisionTunnelMetadata();
-				}
-				if (result == CRGBDolbyVisionTunnelFormatter::FrameResult::PICTURE)
+				const VpvDvTunnelSession::AnalyzeOutcome out =
+					dvUnpack.Tunnel().AnalyzeFrame(formatterMutex, state, frame);
+				if (out.result == VpvDolbyVisionTunnelFormatter::FrameResult::PICTURE)
 				{
 					std::shared_ptr<Vpv::Capture::PayloadExtension> capture;
 					auto raw = makeRaw(capture);
 					capture->dvTunnelRaw = true;
-					capture->dvTunnelHighAligned = highAligned;
+					capture->dvTunnelHighAligned = out.highAligned;
 					raw->extension = std::move(capture);
 					converted = raw;
 				}
@@ -212,10 +203,10 @@ bool LibplaceboVideoRenderer::Impl::CaptureConvert(RendererExtension::ConvertCon
 					// No lock / no valid DM: the CPU path's zero planes (the render
 					// presents black or the SDR RGB passthrough; never these bytes).
 					converted = host->AcquireConversionPayload();
-					converted->pixels.assign(static_cast<size_t>(byteCount), 0);
+					converted->pixels.assign(static_cast<size_t>(out.byteCount), 0);
 				}
-				converted->contract = contract;
-				converted->dolby = dolby;
+				converted->contract = out.contract;
+				converted->dolby = out.dolby;
 			}
 	}
 	catch (const std::exception& e)
@@ -425,16 +416,8 @@ bool LibplaceboVideoRenderer::Impl::UnpackDolbyVisionOnCpu(const QueuedFrame::Co
 		raw->rawRowBytes < static_cast<size_t>(width) * 4 ||
 		raw->rawBytes < raw->rawRowBytes * static_cast<size_t>(height))
 		return false;
-	std::lock_guard<std::mutex> formatterGuard(formatterMutex);
-	auto* dv = dynamic_cast<CRGBDolbyVisionTunnelFormatter*>(formatter.get());
-	const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
-	if (!dv || !formatterState || !formatterState->displayMode ||
-		formatterState->videoFrameEncoding != raw->rawEncoding ||
-		static_cast<size_t>(dv->GetOutFrameSize()) != bytes ||
-		static_cast<size_t>(formatterState->BytesPerRow()) != raw->rawRowBytes)
-		return false;
-	pixels.resize(bytes);
-	return dv->UnpackPicture(raw->rawFrame->GetData(), pixels.data(), raw->dvTunnelHighAligned);
+	return dvUnpack.Tunnel().UnpackPicture(formatterMutex, raw->rawFrame->GetData(), raw->rawEncoding,
+		raw->rawRowBytes, width, height, raw->dvTunnelHighAligned, pixels);
 }
 
 bool LibplaceboVideoRenderer::Impl::UnpackDolbyVisionPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],

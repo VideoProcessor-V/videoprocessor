@@ -121,6 +121,7 @@
     <ClInclude Include="DolbyVisionTunnelPresentation.h" />
     <ClInclude Include="..\VP-V\modules\input\signal\HdrInferenceSignalBuilder.h" />
     <ClInclude Include="..\VP-V\modules\input\signal\DolbyVisionTunnelHandoff.h" />
+    <ClInclude Include="..\VP-V\modules\input\signal\DolbyVisionMetadataExtension.h" />
     <ClInclude Include="..\VP-V\modules\input\signal\VpvDolbyVisionTunnelFormatter.h" />
     <ClInclude Include="ShortcutDefaults.h" />
     <ClInclude Include="ShortcutChord.h" />

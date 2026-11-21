@@ -16,6 +16,7 @@
 //   return session.Finish(unpacked, width, height, highAligned, sessionFallback, failed, engage);
 //   device teardown: session.Reset() (before the device goes).
 #include <VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.h>
+#include <VP-V/modules/input/signal/VpvDolbyVisionTunnelFormatter.h>
 
 #include <DebugLog.h>
 
@@ -76,6 +77,8 @@ public:
 		return false;
 	}
 
+	VpvDvTunnelSession& Tunnel() { return m_tunnel; }
+
 	// Device teardown: the unpack's textures and dispatch go before the device; a new device logs
 	// its first GPU unpack again. (The host clears its failed flag and the fallback entry.)
 	void Reset()
@@ -86,6 +89,7 @@ public:
 
 private:
 	std::unique_ptr<GpuDolbyVisionTunnelUnpack> m_unpack;
+	VpvDvTunnelSession m_tunnel;
 	bool m_logged = false;
 	uint64_t m_dejudderFailures = 0;      // de-judder frames whose GPU unpack failed
 	ULONGLONG m_dejudderFailureLogTick = 0;
