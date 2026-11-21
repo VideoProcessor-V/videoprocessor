@@ -45,6 +45,9 @@
     <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\SdrToneShapeHookTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\ColourShaderGpuTiming.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\tests\LedCompensationHookTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
