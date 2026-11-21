@@ -1090,7 +1090,8 @@
         "src/VP-V/modules/scaling/output/PicturePrecision.h",
         "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp",
         "src/VP-V/modules/scaling/output/NlsMaskMapping.h",
-        "src/VP-V/modules/scaling/output/EdgeMapStageOrdinal.h"
+        "src/VP-V/modules/scaling/output/EdgeMapStageOrdinal.h",
+        "src/VP-V/modules/scaling/output/MeasureEdgeMap.h"
       ],
       "components": {
         "files": {

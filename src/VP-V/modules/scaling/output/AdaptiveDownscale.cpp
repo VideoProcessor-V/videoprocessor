@@ -13,6 +13,7 @@
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/input/capture/SourcePlanes.h>
 #include <VP-V/modules/input/source_analysis/regions/EdgeMapFill.h>
+#include <VP-V/modules/scaling/output/MeasureEdgeMap.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
@@ -798,51 +799,21 @@ float rs_slope(float y)
 		// rev 2): this picture is offered to P13 as the stage after scaling.geometry and its edge map asked for under
 		// (seq, stage, size, ordinal); EdgeMapStageOrdinal keeps two pictures of one seq (the de-judder extras, a repeat)
 		// apart. The crop is applied where the map is read (MEASURE_BODY), so no crop axis is needed in the key.
-		pl_tex em = nullptr;
-		const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::CurrentFrameMemo();
-		if (fm.Valid())
+		// The memo path, its visible Unavailable and the no-memo dispatch live in MeasureEdgeMap.h (CPU-tested seam,
+		// tests/MeasureEdgeMapTests.cpp); the no-memo branch dispatches THE shared fill into the module's own texture.
+		const pl_tex em = AcquireMeasureEdgeMap(Vpv::Skeleton::CurrentFrameMemo(), edgeOrdinal, base, p->color, lumaSystem,
+			lumaPrimaries,
+			[&](std::string& why) -> pl_tex {
+				if (!Ensure(gpu, edgeLocal, base->params.w, base->params.h, 2, 32, false, false) ||
+					!Vpv::Regions::DispatchEdgeMapStage(p->dispatch, base, p->color, lumaSystem, lumaPrimaries, edgeLocal, why))
+					return nullptr;
+				return edgeLocal;
+			},
+			edgeMapStatus);
+		if (em == nullptr)
 		{
-			const uint16_t ordinal = edgeOrdinal.Next(fm.seq);
-			const uint8_t stage = VpSkeleton::VariantKey::StageAfter(static_cast<uint8_t>(PipelineSlots::Id::ScalingGeometry));
-			Vpv::Capture::StagePicture pic;
-			pic.seq = fm.seq;
-			pic.stage = stage;
-			pic.ordinal = ordinal;
-			pic.tex = base;
-			pic.color = p->color;
-			pic.system = lumaSystem;
-			pic.primaries = lumaPrimaries;
-			pic.origin = "scaling.output (X5)";
-			const bool offered = Vpv::Capture::SourcePlanes::OfferStage(fm.host, pic);
-			const VpSkeleton::AcquireResult r = fm.memo->Acquire(VpSkeleton::kEdgeMap, fm.seq, VpSkeleton::AcquireForm::Gpu,
-				Vpv::Regions::EdgeMapStageKey(stage, static_cast<uint32_t>(base->params.w), static_cast<uint32_t>(base->params.h), ordinal));
-			if (!r.Ok() || !r.gpu.Valid() || r.gpu.resource == nullptr)
-			{
-				// Plan line 69: a genuine Unavailable is visible (the status line) and takes the measure-failure path.
-				const std::string cause = fm.memo->LastCause(VpSkeleton::kEdgeMap);
-				edgeMapStatus = "Adaptive downscale: edge map unavailable (" +
-					(cause.empty() ? std::string(offered ? "not served" : "stage picture not offered") : cause) + ")";
-				++failures;
-				return unchanged;
-			}
-			em = static_cast<pl_tex>(r.gpu.resource);
-			edgeMapStatus.clear();
-		}
-		else
-		{
-			// No skeleton memo on this thread (the Original pathway, a test host): visible, and the module dispatches THE shared
-			// fill (Regions::DispatchEdgeMapStage, the owner fill's own function: one law, rule 20) into its own texture.
-			edgeMapStatus = "Adaptive downscale: edge map computed in the module (no skeleton memo)";
-			std::string why;
-			if (!Ensure(gpu, edgeLocal, base->params.w, base->params.h, 2, 32, false, false) ||
-				!Vpv::Regions::DispatchEdgeMapStage(p->dispatch, base, p->color, lumaSystem, lumaPrimaries, edgeLocal, why))
-			{
-				if (!why.empty())
-					edgeMapStatus += " - " + why;
-				++failures;
-				return unchanged;
-			}
-			em = edgeLocal;
+			++failures;
+			return unchanged;
 		}
 		const float origin[2] = { static_cast<float>(ox), static_cast<float>(oy) };
 		const float region[2] = { static_cast<float>(w), static_cast<float>(h) };
