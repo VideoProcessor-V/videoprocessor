@@ -4,6 +4,12 @@
 // VP-V GPU hook tests (moved out of Bill's LibplaceboLutParserTests.cpp; test names unchanged).
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <algorithm>
+#include <cmath>
+#include <functional>
+#include <limits>
+#include <string>
+#include <vector>
 
 namespace VideoProcessorTest
 {
@@ -714,6 +720,337 @@ namespace VideoProcessorTest
 			pl_mpv_user_shader_destroy(&ssim);
 			AssertCleanLibplaceboLog(log);
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
+		}
+
+		// ---- X5-GRAIN-P10 (gate cb-u1 r1 MUST 4 / 5 / 6, SHOULD 5): the shared grain source on the adaptive downscale ----------
+		// A downscale through the real hook chain (measure, SSIM, blend) with white-noise sources, so the private Laplacian
+		// energy and the P10-derived energy have a known common value. The grain ramp is turned into an energy readout: the
+		// smoothing is off (grain_smooth_ms 1) and a cut (dark -> noise) snaps, so grain_scale = the ramp's target and the
+		// energy is recovered by inverting grain_scale = floor + (1 - floor) (1 - smoothstep(lo, hi, energy)).
+		struct GrainRig
+		{
+			static constexpr int kSw = 384, kSh = 240, kBw = 24, kBh = 15;   // source size and its 16 px block grid
+			TargetLutGpuFixture fixture;
+			pl_gpu gpu = nullptr;
+			const pl_hook* ssim = nullptr;
+			pl_fmt srcFmt = nullptr, dstFmt = nullptr, gridFmt = nullptr;
+			std::vector<pl_tex> owned;
+
+			~GrainRig()
+			{
+				for (pl_tex& t : owned)
+					pl_tex_destroy(gpu, &t);
+				if (ssim)
+					pl_mpv_user_shader_destroy(&ssim);
+			}
+
+			bool Init()
+			{
+				if (!fixture.Create())
+					return false;
+				gpu = fixture.Gpu();
+				const std::string source = LoadBundledShader("SSimDownscaler.glsl");
+				if (source.empty())
+					return false;
+				ssim = pl_mpv_user_shader_parse(gpu, source.data(), source.size());
+				srcFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16,
+					static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+				dstFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+					static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+				gridFmt = pl_find_named_fmt(gpu, "rgba32f");
+				return ssim && srcFmt && dstFmt && gridFmt;
+			}
+
+			pl_tex Grey(const std::vector<double>& codes)
+			{
+				std::vector<uint16_t> px(static_cast<size_t>(kSw) * kSh * 4);
+				for (size_t i = 0; i < codes.size(); ++i)
+				{
+					const double c = (std::min)(255.0, (std::max)(0.0, codes[i]));
+					const uint16_t v = static_cast<uint16_t>(std::lround(c * 257.0));
+					px[i * 4] = px[i * 4 + 1] = px[i * 4 + 2] = v;
+					px[i * 4 + 3] = 65535;
+				}
+				pl_tex_params tp{};
+				tp.w = kSw; tp.h = kSh; tp.format = srcFmt; tp.sampleable = true; tp.initial_data = px.data();
+				pl_tex t = pl_tex_create(gpu, &tp);
+				owned.push_back(t);
+				return t;
+			}
+
+			pl_tex Grid(const std::vector<float>& rgba, int w, int h)
+			{
+				pl_tex_params tp{};
+				tp.w = w; tp.h = h; tp.format = gridFmt; tp.sampleable = true; tp.initial_data = rgba.data();
+				pl_tex t = pl_tex_create(gpu, &tp);
+				owned.push_back(t);
+				return t;
+			}
+
+			// Per block: N (the grain variance in 8-bit codes squared, P10 .x), meanY, coverage x off-edge share.
+			AdaptiveDownscale::GrainSource Source(double sigma, int w = kBw, int h = kBh, int s4w = kBw, int s4h = kBh)
+			{
+				const size_t n = static_cast<size_t>(w) * h;
+				std::vector<float> p10(n * 4, 0.0f), s0(n * 4, 0.0f), s4(static_cast<size_t>(s4w) * s4h * 4, 0.0f);
+				for (size_t i = 0; i < n; ++i)
+				{
+					p10[i * 4] = static_cast<float>(sigma * sigma);
+					s0[i * 4] = 128.0f;
+				}
+				for (size_t i = 0; i < static_cast<size_t>(s4w) * s4h; ++i)
+					s4[i * 4] = s4[i * 4 + 1] = 1.0f;
+				AdaptiveDownscale::GrainSource g;
+				g.p10Blocks = Grid(p10, w, h);
+				g.p11Stats0 = Grid(s0, w, h);
+				g.p11Stats4 = Grid(s4, s4w, s4h);
+				g.blockPx = 16;
+				g.codeToEightBit = 1.0f;
+				g.sourceCrop = pl_rect2df{ 0.0f, 0.0f, static_cast<float>(kSw), static_cast<float>(kSh) };
+				return g;
+			}
+
+			static AdaptiveDownscale::Settings Ramp()
+			{
+				AdaptiveDownscale::Settings st;
+				st.edgeLo = 250.0f; st.edgeHi = 255.0f;   // every pixel is flat: the private energy is the mean |Laplacian|
+				st.shadowBias = 0.0f;                     // no shadow weighting in either estimate
+				st.grainLo = 2.0f; st.grainHi = 16.0f; st.grainFloor = 0.4f;
+				st.grainSmoothMs = 1.0f;
+				return st;
+			}
+
+			void Render(AdaptiveDownscale::Module& module, uint64_t& sequence, pl_tex src, const AdaptiveDownscale::Settings& st,
+				bool gammaLight, bool advance, const AdaptiveDownscale::GrainSource* grain)
+			{
+				pl_tex_params tp{};
+				tp.w = 256; tp.h = 160; tp.format = dstFmt; tp.renderable = true; tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(src);
+				image.color.transfer = PL_COLOR_TRC_GAMMA22;
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				out.color.transfer = PL_COLOR_TRC_GAMMA22;
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.downscaler = &pl_filter_mitchell;
+				params.disable_linear_scaling = gammaLight;   // true: the hook sees the gamma code domain (mode 0)
+				if (advance)
+					++sequence;
+				module.SetFrame(st, sequence, 1.0f / 24.0f);
+				if (grain)
+					module.SetGrainSource(*grain);
+				else
+					module.ClearGrainSource();
+				const pl_hook* hooks[3] = { module.Measure(), ssim, module.Blend() };
+				params.hooks = hooks;
+				params.num_hooks = 3;
+				const bool ok = pl_render_image(fixture.Renderer(), &image, &out, &params);
+				pl_gpu_finish(gpu);
+				pl_tex_destroy(gpu, &target);
+				Assert::IsTrue(ok, L"the render ran");
+			}
+
+			struct Result
+			{
+				AdaptiveDownscale::Stats stats;
+				AdaptiveDownscale::GrainSourceUse use = AdaptiveDownscale::GrainSourceUse::NotSupplied;
+				bool fromShared = false;
+			};
+
+			// dark -> noise (a cut: grain_scale snaps to the target), two more frames for the read-back to arrive.
+			Result Measure(pl_tex dark, pl_tex noisy, const AdaptiveDownscale::Settings& st, bool gammaLight,
+				const AdaptiveDownscale::GrainSource* grain)
+			{
+				AdaptiveDownscale::Module module;
+				uint64_t sequence = 0;
+				Render(module, sequence, dark, st, gammaLight, true, grain);
+				Render(module, sequence, noisy, st, gammaLight, true, grain);
+				Render(module, sequence, noisy, st, gammaLight, false, grain);
+				Render(module, sequence, noisy, st, gammaLight, false, grain);
+				Assert::IsTrue(module.Active() && module.Failures() == 0, L"the blend ran without a GPU failure");
+				Assert::IsTrue(module.LastStats().valid, L"the statistics arrived");
+				Result r;
+				r.stats = module.LastStats();
+				r.use = module.LastGrainSourceUse();
+				r.fromShared = module.LastGrainFromSharedProducts();
+				module.Release();
+				Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"no hook was disabled");
+				return r;
+			}
+		};
+
+		// Seeded white Gaussian noise around 128 codes (Box-Muller on an LCG); sigmaOut = the field's own standard deviation.
+		static std::vector<double> WhiteNoiseField(double sigma, uint32_t seed, double& sigmaOut)
+		{
+			std::vector<double> v(static_cast<size_t>(GrainRig::kSw) * GrainRig::kSh);
+			uint32_t state = seed;
+			auto uniform = [&state]() { state = state * 1664525u + 1013904223u; return (static_cast<double>(state >> 8) + 0.5) / 16777216.0; };
+			double sum = 0.0;
+			for (double& x : v)
+			{
+				x = 128.0 + sigma * std::sqrt(-2.0 * std::log(uniform())) * std::cos(6.283185307179586 * uniform());
+				sum += x;
+			}
+			const double mean = sum / static_cast<double>(v.size());
+			double ss = 0.0;
+			for (double x : v) ss += (x - mean) * (x - mean);
+			sigmaOut = std::sqrt(ss / static_cast<double>(v.size()));
+			return v;
+		}
+
+		// The energy the grain ramp saw: grain_scale = floor + (1 - floor) (1 - smoothstep(lo, hi, energy)), inverted.
+		static double EnergyOfScale(float scale, const AdaptiveDownscale::Settings& st)
+		{
+			const double u = (std::min)(1.0, (std::max)(0.0, 1.0 - (static_cast<double>(scale) - st.grainFloor) / (1.0 - st.grainFloor)));
+			double lo = 0.0, hi = 1.0;
+			for (int i = 0; i < 60; ++i)
+			{
+				const double t = 0.5 * (lo + hi);
+				if (t * t * (3.0 - 2.0 * t) < u) lo = t; else hi = t;
+			}
+			return st.grainLo + (st.grainHi - st.grainLo) * 0.5 * (lo + hi);
+		}
+
+		TEST_METHOD(AdaptiveGrainSourceUseIsReportedForEveryCase)
+		{
+			using AdaptiveDownscale::GrainSourceUse;
+			GrainRig rig;
+			Assert::IsTrue(rig.Init(), L"the WARP test device, formats and SSimDownscaler.glsl are available");
+			double sigma = 0.0;
+			pl_tex noisy = rig.Grey(WhiteNoiseField(2.0, 12345u, sigma));
+			pl_tex dark = rig.Grey(std::vector<double>(static_cast<size_t>(GrainRig::kSw) * GrainRig::kSh, 20.0));
+			const AdaptiveDownscale::Settings st = GrainRig::Ramp();
+			const AdaptiveDownscale::GrainSource good = rig.Source(sigma);
+
+			// NotSupplied: no source at all (the design when the host offers none).
+			const GrainRig::Result own = rig.Measure(dark, noisy, st, true, nullptr);
+			Assert::IsTrue(own.use == GrainSourceUse::NotSupplied && !own.fromShared, L"no source: NotSupplied");
+
+			// Shared: a valid source in the gamma code domain.
+			const GrainRig::Result shared = rig.Measure(dark, noisy, st, true, &good);
+			Assert::IsTrue(shared.use == GrainSourceUse::Shared && shared.fromShared, L"a valid source in the code domain: Shared");
+
+			// NoUsableBlock: bound, but every block is outside the crop (an empty crop) ...
+			AdaptiveDownscale::GrainSource outside = good;
+			outside.sourceCrop = pl_rect2df{};
+			const GrainRig::Result outsideResult = rig.Measure(dark, noisy, st, true, &outside);
+			Assert::IsTrue(outsideResult.use == GrainSourceUse::NoUsableBlock && !outsideResult.fromShared,
+				L"every block outside the crop: NoUsableBlock, never Shared");
+			Assert::IsTrue(std::fabs(outsideResult.stats.grainScale - own.stats.grainScale) < 1e-3f,
+				L"no usable block: the energy is the private estimate (the same grain scale as the unsupplied run)");
+			// ... or every block vetoed (zero flat coverage).
+			AdaptiveDownscale::GrainSource vetoed = rig.Source(sigma);
+			{
+				const std::vector<float> zero(static_cast<size_t>(GrainRig::kBw) * GrainRig::kBh * 4, 0.0f);
+				vetoed.p11Stats4 = rig.Grid(zero, GrainRig::kBw, GrainRig::kBh);
+			}
+			const GrainRig::Result vetoedResult = rig.Measure(dark, noisy, st, true, &vetoed);
+			Assert::IsTrue(vetoedResult.use == GrainSourceUse::NoUsableBlock && !vetoedResult.fromShared,
+				L"every block vetoed (no flat coverage): NoUsableBlock, never Shared");
+			Assert::IsTrue(std::fabs(vetoedResult.stats.grainScale - own.stats.grainScale) < 1e-3f,
+				L"all blocks vetoed: the energy is the private estimate");
+
+			// MeasureDomain: a valid source, but the measure domain is linear light (P10 N is in source codes).
+			const GrainRig::Result ownLinear = rig.Measure(dark, noisy, st, false, nullptr);
+			const GrainRig::Result linear = rig.Measure(dark, noisy, st, false, &good);
+			Assert::IsTrue(ownLinear.use == GrainSourceUse::NotSupplied, L"linear light, no source: NotSupplied");
+			Assert::IsTrue(linear.use == GrainSourceUse::MeasureDomain && !linear.fromShared,
+				L"a valid source in a linear measure domain is refused: MeasureDomain");
+			Assert::IsTrue(std::fabs(linear.stats.grainScale - ownLinear.stats.grainScale) < 1e-3f,
+				L"the refused source leaves the private estimate in force");
+
+			// Grid mismatch: the three textures do not share one block grid. Valid() is false and the module ignores it.
+			const AdaptiveDownscale::GrainSource mismatched = rig.Source(sigma, GrainRig::kBw, GrainRig::kBh, GrainRig::kBw / 2, GrainRig::kBh / 2);
+			Assert::IsFalse(mismatched.SameGrid(), L"the coverage texture has another block grid");
+			Assert::IsFalse(mismatched.Valid(), L"a grid mismatch is not a valid source");
+			const GrainRig::Result mismatchedResult = rig.Measure(dark, noisy, st, true, &mismatched);
+			Assert::IsTrue(mismatchedResult.use == GrainSourceUse::NotSupplied && !mismatchedResult.fromShared,
+				L"a source with mismatched grids is not bound: NotSupplied");
+			Assert::IsTrue(std::fabs(mismatchedResult.stats.grainScale - own.stats.grainScale) < 1e-3f,
+				L"a grid mismatch leaves the private estimate in force");
+		}
+
+		TEST_METHOD(AdaptiveGrainSourceNonFiniteBlocksAreVetoed)
+		{
+			// A NaN, an infinity or a negative level in a P10 block, or a NaN in P11's mean luma or coverage, vetoes that block
+			// (the energy is built from the other blocks); it never reaches the ramp. The planted blocks lie inside the crop.
+			using AdaptiveDownscale::GrainSourceUse;
+			GrainRig rig;
+			Assert::IsTrue(rig.Init(), L"the WARP test device, formats and SSimDownscaler.glsl are available");
+			double sigma = 0.0;
+			pl_tex noisy = rig.Grey(WhiteNoiseField(2.0, 777u, sigma));
+			pl_tex dark = rig.Grey(std::vector<double>(static_cast<size_t>(GrainRig::kSw) * GrainRig::kSh, 20.0));
+			const AdaptiveDownscale::Settings st = GrainRig::Ramp();
+			const double level = 1.5 * sigma;   // a level that differs from the private estimate, so the P10 path is what is read
+			const size_t nb = static_cast<size_t>(GrainRig::kBw) * GrainRig::kBh;
+			auto block = [](int bx, int by) { return (static_cast<size_t>(by) * GrainRig::kBw + bx) * 4; };
+
+			const AdaptiveDownscale::GrainSource control = rig.Source(level);
+			const GrainRig::Result own = rig.Measure(dark, noisy, st, true, nullptr);
+			const GrainRig::Result clean = rig.Measure(dark, noisy, st, true, &control);
+			Assert::IsTrue(clean.use == GrainSourceUse::Shared, L"control: the P10 path is read");
+			Assert::IsTrue(std::fabs(clean.stats.grainScale - own.stats.grainScale) > 0.02f, L"control: the P10 level changes the energy (the path is really used)");
+
+			const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+			std::vector<float> p10(nb * 4, 0.0f), s0(nb * 4, 0.0f), s4(nb * 4, 0.0f);
+			for (size_t i = 0; i < nb; ++i)
+			{
+				p10[i * 4] = static_cast<float>(level * level);
+				s0[i * 4] = 128.0f;
+				s4[i * 4] = s4[i * 4 + 1] = 1.0f;
+			}
+			p10[block(3, 3)] = nan;              // NaN grain level
+			p10[block(4, 4)] = inf;              // +inf grain level
+			p10[block(5, 5)] = -inf;             // -inf grain level
+			p10[block(6, 6)] = -4.0f;            // negative variance
+			s0[block(7, 7)] = nan;               // NaN mean luma
+			s0[block(8, 8)] = inf;               // +inf mean luma
+			s4[block(9, 9)] = nan;               // NaN coverage
+			s4[block(10, 10) + 1] = -inf;        // -inf off-edge share
+			AdaptiveDownscale::GrainSource planted = control;
+			planted.p10Blocks = rig.Grid(p10, GrainRig::kBw, GrainRig::kBh);
+			planted.p11Stats0 = rig.Grid(s0, GrainRig::kBw, GrainRig::kBh);
+			planted.p11Stats4 = rig.Grid(s4, GrainRig::kBw, GrainRig::kBh);
+			Assert::IsTrue(planted.Valid(), L"the planted source is a valid-shaped source");
+			const GrainRig::Result r = rig.Measure(dark, noisy, st, true, &planted);
+			Assert::IsTrue(r.use == GrainSourceUse::Shared, L"the unplanted blocks are still usable: Shared");
+			Assert::IsTrue(std::isfinite(r.stats.grainScale) && r.stats.grainScale >= st.grainFloor - 1e-4f && r.stats.grainScale <= 1.0f + 1e-4f,
+				L"the grain scale stays finite and inside the ramp");
+			Assert::IsTrue(std::fabs(r.stats.grainScale - clean.stats.grainScale) < 1e-4f,
+				L"the vetoed blocks do not move the energy (a uniform level over the other blocks)");
+		}
+
+		TEST_METHOD(AdaptiveGrainSourceEnergyMatchesThePrivateEstimateOnWhiteNoise)
+		{
+			// FIX-X5-GRAIN-P10: on i.i.d. Gaussian noise of standard deviation s the 4-neighbour Laplacian 4e - (b + d + f + h)
+			// has variance 20 s^2 and E|x| = sqrt(2/pi) std, so the private mean |Laplacian| is kEdgeEnergyPerSigma x s
+			// (3.5682482 s). The P10 path is that constant times N^(1/2); with N = s^2 both must read the same energy.
+			// Tolerance from the derivation: the relative standard error of a mean of |L| is sqrt(pi/2 - 1) / sqrt(N_eff) with
+			// N_eff >= N / 5 (each Laplacian shares its 5 taps with at most 4 neighbours) = 0.755 / sqrt(92160 / 5) = 0.56%,
+			// so 5 standard errors = 2.8% < 3%. The P10 path itself is exact up to float rounding of the readout (0.5%).
+			using AdaptiveDownscale::GrainSourceUse;
+			GrainRig rig;
+			Assert::IsTrue(rig.Init(), L"the WARP test device, formats and SSimDownscaler.glsl are available");
+			pl_tex dark = rig.Grey(std::vector<double>(static_cast<size_t>(GrainRig::kSw) * GrainRig::kSh, 20.0));
+			const AdaptiveDownscale::Settings st = GrainRig::Ramp();
+			for (double target : { 2.0, 3.0 })
+			{
+				double sigma = 0.0;
+				pl_tex noisy = rig.Grey(WhiteNoiseField(target, static_cast<uint32_t>(1000.0 * target) + 7u, sigma));
+				const double expected = AdaptiveDownscale::kEdgeEnergyPerSigma * sigma;
+				const AdaptiveDownscale::GrainSource source = rig.Source(sigma);
+				const GrainRig::Result own = rig.Measure(dark, noisy, st, true, nullptr);
+				const GrainRig::Result shared = rig.Measure(dark, noisy, st, true, &source);
+				Assert::IsTrue(shared.use == GrainSourceUse::Shared, L"the P10 path was read");
+				const double ePrivate = EnergyOfScale(own.stats.grainScale, st), eShared = EnergyOfScale(shared.stats.grainScale, st);
+				const std::string report = "sigma " + std::to_string(sigma) + ": expected " + std::to_string(expected) + ", private " +
+					std::to_string(ePrivate) + ", shared " + std::to_string(eShared);
+				Logger::WriteMessage(report.c_str());
+				Assert::IsTrue(expected > st.grainLo + 2.0 && expected < st.grainHi - 2.0, L"the energy sits inside the ramp (readable)");
+				Assert::IsTrue(std::fabs(ePrivate - expected) <= 0.03 * expected, ExtendedRangeGpuProbe::ToWide("private Laplacian energy vs sqrt(20) sqrt(2/pi) sigma: " + report).c_str());
+				Assert::IsTrue(std::fabs(eShared - expected) <= 0.005 * expected, ExtendedRangeGpuProbe::ToWide("P10 energy vs the constant: " + report).c_str());
+				Assert::IsTrue(std::fabs(eShared - ePrivate) <= 0.03 * expected, ExtendedRangeGpuProbe::ToWide("P10 energy vs private energy: " + report).c_str());
+			}
 		}
 	};
 }
