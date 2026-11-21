@@ -84,6 +84,18 @@ namespace DvTrimSelection
 		double hueDegrees[kHues] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 	};
 
+	// CF-1 FIX1 SHOULD 2 (doc 115 B13): the largest saturation gain the trim can apply (its global gain times its largest
+	// per-hue gain, clamped as the trim clamps it), for the trim x Hunt cap in colour.appearance. The chroma-weight factor
+	// is left out: it scales with the pixel's own chroma ratio, not a fixed gain.
+	inline double PeakSaturationGain(const ExtParams& p)
+	{
+		double hue = p.saturation[0];
+		for (int k = 1; k < kHues; ++k)
+			hue = p.saturation[k] > hue ? p.saturation[k] : hue;
+		const double g = p.base.saturationGain * hue;
+		return g < 0.0 ? 0.0 : (g > 2.0 ? 2.0 : g);
+	}
+
 	inline bool HueVectorNeutral(const ExtParams& p)
 	{
 		for (int k = 0; k < kHues; ++k)

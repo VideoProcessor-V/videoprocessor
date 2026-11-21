@@ -333,12 +333,16 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
                 activeSettings.appearanceRoom == "auto" ? RoomLight::Room::Auto : RoomLight::Room::Cinema;
             appearance.room.reflectNitsPerLux = activeSettings.ambientScreenReflect;
             appearance.room.maxBlackNits = activeSettings.ambientMaxBlackNits;
+            appearance.room.anchors.luxDark = activeSettings.ambientLuxDark;   // FIX1 SHOULD 3: [ambient] lux_dark / lux_lit
+            appearance.room.anchors.luxLit = activeSettings.ambientLuxLit;
             appearance.recordAvailable = vpv.led.intent.roomLight.ReadLatest(appearance.record);
             appearance.now = static_cast<double>(GetTickCount64()) / 1000.0;
             appearance.screenWhiteNits = activeSettings.appearanceScreenWhiteNits;
             appearance.screenWhiteMeasured = activeSettings.appearanceScreenWhiteMeasured;
             appearance.trimApplied = colourFrame.dvTrims;
             appearance.trimTargetNits = dvStage.TrimsTargetNits();
+            appearance.trimSaturationGain = dvStage.TrimsSaturationGain();   // FIX1 SHOULD 2: the trim x Hunt cap
+            appearance.toeKnee = dynamicDrive.PublishedParams().boostKnee;   // FIX1 SHOULD 3: gamma_boost_knee, not a fixed 0
             appearance.signalPq = target.color.transfer == PL_COLOR_TRC_PQ;
             appearance.outputGamma = LedDisplayGamma(target.color.transfer);
             appearance.honourL11 = activeSettings.appearanceHonourL11;
@@ -347,7 +351,10 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             appearance.l11ReferenceMode = dolbyMetadata && dolbyMetadata->valid && dolbyMetadata->hasL11 && dolbyMetadata->l11ReferenceMode;
             pl_color_space display = target.color;
             pl_color_space_infer(&display);
-            appearance.sdrTargetNits = display.hdr.max_luma > 0.0f && !pl_color_space_is_hdr(&target.color) ? display.hdr.max_luma : 0.0;
+            // FIX1 SHOULD 1 (refs/125 s2): keyed by the SOURCE content: SDR content refers to 100 nits; HDR10, DV without a
+            // trim and LLDV refer to the configured sdr_target_nits (the trim target comes first when a trim ran).
+            appearance.sourceSdr = !pl_color_space_is_hdr(&renderImage.color);
+            appearance.sdrTargetNits = activeSettings.sdrTargetNits;
             if (const pl_raw_primaries* prim = pl_raw_primaries_get(display.primaries))
             {
                 const double red[2] = { prim->red.x, prim->red.y }, green[2] = { prim->green.x, prim->green.y };

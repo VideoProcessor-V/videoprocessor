@@ -192,6 +192,8 @@ public:
 		return std::exchange(m_trimsEvaluated, false) ? &m_trimsSelection : nullptr;
 	}
 	double TrimsTargetNits() const { return m_trimsTargetNits; }
+	// FIX1 SHOULD 2: the trim's largest saturation gain this frame (1 = none), for colour.appearance's trim x Hunt cap.
+	double TrimsSaturationGain() const { return m_trimsSaturationGain; }
 
 	// The reference viewing conditions of the last DV picture (for the later CAM16 stage).
 	const std::string& ContrastRecoveryStatus() const { return m_recoveryStatus; }
@@ -380,6 +382,7 @@ public:
 				m_trimsSelection = selection;
 				m_trimsEvaluated = true;
 				m_trimsTargetNits = display.hdr.max_luma;
+				m_trimsSaturationGain = selection.apply ? DvTrimSelection::PeakSaturationGain(selection.params) : 1.0;   // FIX1 SHOULD 2
 				if (!selection.apply)
 					state = std::string("neutral: ") + selection.reason;
 				else
@@ -518,6 +521,7 @@ private:
 	DvTrimSelection::Selection m_trimsSelection;
 	bool m_trimsEvaluated = false;
 	double m_trimsTargetNits = 0.0;
+	double m_trimsSaturationGain = 1.0;
 	// feat/dv-l8 task 5: the Dolby-style DV tone mapping (dv_tone_mapping), its status, and the
 	// reference viewing conditions of the last DV picture (for the later CAM16 stage).
 	DvDolbyStyle::ToneSwitch m_toneSwitch;

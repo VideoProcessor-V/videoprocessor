@@ -211,6 +211,8 @@ namespace VpvRenderer
 		double ambientAdaptStrength = 1.0;
 		double ambientScreenReflect = 0.01;
 		double ambientMaxBlackNits = 1.0;
+		double ambientLuxDark = 8.0;    // CF-1 FIX1 SHOULD 3: [ambient] lux_dark (Ambient::Read), the appearance room anchors
+		double ambientLuxLit = 20.0;    // [ambient] lux_lit
 		double ambientTauUpSeconds = 15.0;
 		double ambientTauDownSeconds = 90.0;
 		BlackIntentMode intentBlack = BlackIntentMode::Off;

@@ -278,4 +278,151 @@ namespace Tests
 			Assert::IsTrue(Fix1Has(core, "FallbackCatalog::SaturationReplaced(settings.saturationReplaced"));
 		}
 	};
+
+	// SHOULD 1-4 and NIT 1-2 (gate CF1-347e0546f): the reference white follows the content, the trim x Hunt cap, the configured
+	// anchors / knee / white / luma, the per-channel BTB / WTW pass and the published inverse matrix.
+	TEST_CLASS(AppearanceShouldFix1Tests)
+	{
+	public:
+		static double Fix1Param(const AppearanceStage::Decision& d, const char* name)
+		{
+			for (const auto& p : d.parameters)
+				if (std::string(p.first) == name)
+					return p.second;
+			Assert::Fail(L"parameter missing");
+			return 0.0;
+		}
+
+		TEST_METHOD(ReferenceWhiteFollowsTheSourceContentNotTheOutput)
+		{
+			AppearanceStage::Inputs in;
+			in.sdrTargetNits = 203.0;
+			in.sourceSdr = true;
+			Assert::AreEqual(100.0, AppearanceStage::ReferenceWhite(in), 0.0, L"SDR content refers to 100 nits");
+			in.sourceSdr = false;
+			Assert::AreEqual(203.0, AppearanceStage::ReferenceWhite(in), 0.0, L"HDR10 / DV without a trim / LLDV: sdr_target_nits");
+			in.sourceSdr = true;
+			in.trimApplied = true;
+			in.trimTargetNits = 600.0;
+			Assert::AreEqual(600.0, AppearanceStage::ReferenceWhite(in), 0.0, L"the trim target comes first");
+			const std::string core = Fix1ReadUp("src\\VP-V\\segments\\CoreSegments.inl");
+			if (core.empty())
+				return;   // not reachable from this working directory
+			Assert::IsTrue(Fix1Has(core, "appearance.sourceSdr = !pl_color_space_is_hdr(&renderImage.color);"));
+			Assert::IsTrue(Fix1Has(core, "appearance.sdrTargetNits = activeSettings.sdrTargetNits;"));
+			Assert::IsFalse(Fix1Has(core, "!pl_color_space_is_hdr(&target.color) ? display.hdr.max_luma"), L"no longer keyed by the output");
+		}
+
+		TEST_METHOD(TrimTimesHuntStaysWithinTheLargerAlone)
+		{
+			DvTrimSelection::ExtParams p;
+			p.base.saturationGain = 1.2;
+			p.saturation[3] = 1.25;
+			Assert::AreEqual(1.5, DvTrimSelection::PeakSaturationGain(p), 1e-12);
+			p.base.saturationGain = 1.9;
+			Assert::AreEqual(2.0, DvTrimSelection::PeakSaturationGain(p), 0.0, L"clamped as the trim clamps it");
+
+			Assert::AreEqual(1.0, AppearanceStage::HuntScale(false, 1.5, 1.3), 0.0, L"no trim: no cap");
+			const double scale = AppearanceStage::HuntScale(true, 1.5, 1.3);
+			Assert::IsTrue(1.5 * 1.3 * scale <= 1.5 + 1e-12, L"T x H x scale within max(T, H)");
+			Assert::IsTrue(scale < 1.0);
+
+			RoomLight::Smoother s;
+			AppearanceStage::Inputs in;
+			in.on = true;
+			in.screenWhiteNits = 48.0;
+			const AppearanceStage::Decision uncapped = AppearanceStage::Decide(in, s);
+			Assert::AreEqual(1.0, Fix1Param(uncapped, "apx_hunt_scale"), 0.0);
+			Assert::IsTrue(uncapped.huntGain > 1.0, L"a dimmer screen than the reference raises chroma (Hunt)");
+			in.trimApplied = true;
+			in.trimTargetNits = 100.0;
+			in.trimSaturationGain = 1.5;
+			const AppearanceStage::Decision capped = AppearanceStage::Decide(in, s);
+			Assert::IsTrue(Fix1Param(capped, "apx_hunt_scale") < 1.0, L"the cap reaches the shader");
+			Assert::IsTrue(1.5 * capped.huntGain * capped.huntScale <= std::max(1.5, capped.huntGain) + 1e-9);
+
+			const std::string core = Fix1ReadUp("src\\VP-V\\segments\\CoreSegments.inl");
+			const std::string glsl = Fix1ReadUp("shaders\\vp_cam16_appearance.glsl");
+			if (core.empty() || glsl.empty())
+				return;   // not reachable from this working directory
+			Assert::IsTrue(Fix1Has(core, "appearance.trimSaturationGain = dvStage.TrimsSaturationGain();"));
+			Assert::IsTrue(Fix1Has(glsl, "jmh.y *= apx_hunt_scale;"));
+		}
+
+		TEST_METHOD(WhiteKneeAnchorsAndLumaAreConfiguredNotFixed)
+		{
+			// The output white is the matrix's own white (BT.709 primaries: D65).
+			double white[3] = {};
+			const double bt709[9] = { 0.4124, 0.3576, 0.1805, 0.2126, 0.7152, 0.0722, 0.0193, 0.1192, 0.9505 };
+			AppearanceStage::WhiteXyz(bt709, white);
+			Assert::AreEqual(95.05, white[0], 0.01);
+			Assert::AreEqual(100.0, white[1], 1e-9);
+			Assert::AreEqual(108.9, white[2], 0.01);
+			const double d50[3] = { 96.42, 100.0, 82.51 };
+			const Cam16::Conditions c = Cam16::MakeConditions(100.0, Cam16::kSurroundDim, 0.2, 20.0, d50);
+			Assert::AreEqual(82.51, c.whiteXyz[2], 1e-9, L"the conditions carry the output's white, not a fixed D65");
+			Cam16::UniformInputs a, b;
+			b.whiteXyz[0] = d50[0];
+			b.whiteXyz[2] = d50[2];
+			Assert::AreNotEqual(Cam16::PackUniforms(a).reference.dc[2], Cam16::PackUniforms(b).reference.dc[2]);
+
+			RoomLight::Smoother s;
+			AppearanceStage::Inputs in;
+			in.on = true;
+			in.toeKnee = 0.1;
+			Assert::AreEqual(0.1, Fix1Param(AppearanceStage::Decide(in, s), "apx_knee"), 1e-12, L"the knee is gamma_boost_knee");
+
+			const std::string core = Fix1ReadUp("src\\VP-V\\segments\\CoreSegments.inl");
+			const std::string settings = Fix1ReadUp(std::string(kFix1ConfigDir) + "VpvRendererSettings.cpp");
+			const std::string glsl = Fix1ReadUp("shaders\\vp_cam16_appearance.glsl");
+			if (core.empty() || settings.empty() || glsl.empty())
+				return;   // not reachable from this working directory
+			Assert::IsTrue(Fix1Has(settings, "Ambient::Read(config, ambientRoom, ambientError)"), L"[ambient] lux anchors read by their owner");
+			Assert::IsTrue(Fix1Has(core, "appearance.room.anchors.luxDark = activeSettings.ambientLuxDark;"));
+			Assert::IsTrue(Fix1Has(core, "appearance.room.anchors.luxLit = activeSettings.ambientLuxLit;"));
+			Assert::IsTrue(Fix1Has(core, "appearance.toeKnee = dynamicDrive.PublishedParams().boostKnee;"));
+			Assert::IsTrue(Fix1Has(glsl, "dot(lin, vec3(apm_10, apm_11, apm_12))"), L"luma from the output primaries");
+			Assert::IsFalse(Fix1Has(glsl, "dot(lin, vec3(0.2126, 0.7152, 0.0722))"));
+		}
+
+		TEST_METHOD(BtbWtwPassesPerChannelWithoutAnEdge)
+		{
+			const std::string glsl = Fix1ReadUp("shaders\\vp_cam16_appearance.glsl");
+			if (glsl.empty())
+				return;   // not reachable from this working directory
+			Assert::IsFalse(Fix1Has(glsl, "color.r < 0.0 || color.g < 0.0 || color.b < 0.0 || color.r > 1.0"),
+				L"no whole-pixel skip when one channel leaves the range");
+			Assert::IsTrue(Fix1Has(glsl, "if (outside && (allBelow || allAbove))"), L"a pixel wholly outside still passes exactly");
+			Assert::IsTrue(Fix1Has(glsl, "ap_to_rel(inRange.r)"), L"the model runs on the in-range colour");
+			Assert::IsTrue(Fix1Has(glsl, "+ excess;"), L"each channel's excess is restored");
+		}
+
+		TEST_METHOD(InverseMatrixIsPublishedNotInvertedPerPixel)
+		{
+			const double bt2020[9] = { 0.6370, 0.1446, 0.1689, 0.2627, 0.6780, 0.0593, 0.0, 0.0281, 1.0610 };
+			double inv[9] = {};
+			Assert::IsTrue(AppearanceStage::Invert3(bt2020, inv));
+			for (int r = 0; r < 3; ++r)
+				for (int c = 0; c < 3; ++c)
+				{
+					double v = 0.0;
+					for (int k = 0; k < 3; ++k)
+						v += bt2020[r * 3 + k] * inv[k * 3 + c];
+					Assert::AreEqual(r == c ? 1.0 : 0.0, v, 1e-9);
+				}
+			RoomLight::Smoother s;
+			AppearanceStage::Inputs in;
+			in.on = true;
+			for (int i = 0; i < 9; ++i)
+				in.rgbToXyz[i] = bt2020[i];
+			const AppearanceStage::Decision d = AppearanceStage::Decide(in, s);
+			Assert::AreEqual(inv[0], Fix1Param(d, "apn_00"), 1e-12);
+			Assert::AreEqual(inv[8], Fix1Param(d, "apn_22"), 1e-12);
+			const std::string glsl = Fix1ReadUp("shaders\\vp_cam16_appearance.glsl");
+			if (glsl.empty())
+				return;   // not reachable from this working directory
+			Assert::IsFalse(Fix1Has(glsl, "inverse(toXyz)"));
+			Assert::IsTrue(Fix1Has(glsl, "a hard 6-step bisection"), L"NIT 2: the comment says what the compression is");
+		}
+	};
 }

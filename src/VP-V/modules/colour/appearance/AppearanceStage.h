@@ -8,7 +8,8 @@
 // shader is shaders\vp_cam16_appearance.glsl.
 //
 // Reference white (refs/125 s2): the DV trim target's peak when a trim was applied (the picture is graded for it),
-// else the configured SDR target nits, else 100 nits (SDR). An LLDV picture is treated as HDR10 (no DV reference).
+// else, for SDR content, 100 nits; else (HDR10, DV without a trim, LLDV) the configured sdr_target_nits; else 100 nits.
+// FIX1 SHOULD 1: keyed by the SOURCE content, not the output transfer. An LLDV picture is treated as HDR10 (no DV reference).
 // Reference mode (L11): when the picture says it is a reference-mode picture and appearance_honour_l11 is on, the room
 // is replaced by the reference room (dim, no veil) and the screen-white step still runs (said in the status, never silent).
 //
@@ -17,6 +18,7 @@
 #include "Cam16Uniforms.h"
 #include "RoomLight.h"
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -40,6 +42,9 @@ namespace AppearanceStage
 		bool trimApplied = false;              // the DV trim ran this frame
 		double trimTargetNits = 0.0;           // the trim's display peak
 		double sdrTargetNits = 0.0;            // the configured SDR target nits (0 = unknown)
+		bool sourceSdr = false;                // FIX1 SHOULD 1: the source picture is SDR (its reference white is 100 nits)
+		double trimSaturationGain = 1.0;       // FIX1 SHOULD 2: the trim's largest saturation gain (doc 115 B13 cap)
+		double toeKnee = 0.0;                  // FIX1 SHOULD 3: gamma_boost_knee (encoded fraction 0..0.5; 0 = no toe)
 		bool signalPq = false;                 // the output transfer is PQ (else a power-law gamma)
 		double outputGamma = 2.4;
 		bool l11ReferenceMode = false;         // the picture carries the L11 reference-mode flag
@@ -54,6 +59,8 @@ namespace AppearanceStage
 		bool l11Ignored = false;               // CAM-4: the L11 reference-mode flag held the room back this frame
 		bool lutConflict = false;              // FIX1 MUST 2: off because a calibration LUT runs before it (listed, never silent)
 		double referenceWhiteNits = 100.0;
+		double huntGain = 1.0;                 // FIX1 SHOULD 2: the model's own saturation gain this frame
+		double huntScale = 1.0;                // the factor on M that keeps trim x Hunt within the cap (1 without a trim)
 		Cam16::Cam16Uniforms uniforms = {};
 		RoomLight::Resolved room;
 		ParameterList parameters;              // the shader's parameters, in a fixed order
@@ -64,9 +71,64 @@ namespace AppearanceStage
 	{
 		if (in.trimApplied && in.trimTargetNits > 0.0)
 			return in.trimTargetNits;
+		if (in.sourceSdr)
+			return 100.0;
 		if (in.sdrTargetNits > 0.0)
 			return in.sdrTargetNits;
 		return 100.0;
+	}
+
+	// FIX1 SHOULD 3: the output white (Y = 100) is the matrix's white (row sums of RGB to XYZ, white Y = 1).
+	inline void WhiteXyz(const double rgbToXyz[9], double out[3])
+	{
+		for (int r = 0; r < 3; ++r)
+			out[r] = 100.0 * (rgbToXyz[r * 3 + 0] + rgbToXyz[r * 3 + 1] + rgbToXyz[r * 3 + 2]);
+	}
+
+	// FIX1 SHOULD 2 (doc 115 B13): the model's own saturation gain H, measured as the xy chroma gain of a representative
+	// colour (linear RGB 0.4 / 0.2 / 0.2 of the output primaries, through the reference side then the screen side).
+	inline double HuntChromaGain(const Cam16::UniformInputs& ui, const double rgbToXyz[9])
+	{
+		const double rgb[3] = { 0.4, 0.2, 0.2 };
+		Cam16::Vec3 xyz = { { 0.0, 0.0, 0.0 } };
+		for (int r = 0; r < 3; ++r)
+			xyz[r] = 100.0 * (rgbToXyz[r * 3 + 0] * rgb[0] + rgbToXyz[r * 3 + 1] * rgb[1] + rgbToXyz[r * 3 + 2] * rgb[2]);
+		const Cam16::Appearance a = Cam16::Forward(Cam16::Prepare(Cam16::ReferenceConditions(ui)), xyz);
+		const Cam16::Vec3 out = Cam16::Inverse(Cam16::Prepare(Cam16::ScreenConditions(ui)), a.J, a.M, a.h);
+		const double ws = ui.whiteXyz[0] + ui.whiteXyz[1] + ui.whiteXyz[2];
+		const double si = xyz[0] + xyz[1] + xyz[2], so = out[0] + out[1] + out[2];
+		if (!(ws > 0.0) || !(si > 0.0) || !(so > 0.0))
+			return 1.0;
+		const double wx = ui.whiteXyz[0] / ws, wy = ui.whiteXyz[1] / ws;
+		const double di = std::hypot(xyz[0] / si - wx, xyz[1] / si - wy), dout = std::hypot(out[0] / so - wx, out[1] / so - wy);
+		return di > 1e-9 && std::isfinite(dout) ? dout / di : 1.0;
+	}
+
+	// FIX1 SHOULD 2: the factor on the shader's M that keeps trim gain x Hunt gain within the larger of the two alone
+	// (Cam16::CappedHuntGain). 1 without a trim.
+	inline double HuntScale(bool trimApplied, double trimSaturationGain, double huntGain)
+	{
+		if (!trimApplied || !(trimSaturationGain > 0.0) || !(huntGain > 0.0))
+			return 1.0;
+		return Cam16::CappedHuntGain(trimSaturationGain, huntGain) / huntGain;
+	}
+
+	// NIT 1: the inverse of the output matrix, published so the shader does not invert per pixel. false: singular.
+	inline bool Invert3(const double m[9], double out[9])
+	{
+		const double det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
+		if (!(std::fabs(det) > 1e-12))
+			return false;
+		out[0] = (m[4] * m[8] - m[5] * m[7]) / det;
+		out[1] = (m[2] * m[7] - m[1] * m[8]) / det;
+		out[2] = (m[1] * m[5] - m[2] * m[4]) / det;
+		out[3] = (m[5] * m[6] - m[3] * m[8]) / det;
+		out[4] = (m[0] * m[8] - m[2] * m[6]) / det;
+		out[5] = (m[2] * m[3] - m[0] * m[5]) / det;
+		out[6] = (m[3] * m[7] - m[4] * m[6]) / det;
+		out[7] = (m[1] * m[6] - m[0] * m[7]) / det;
+		out[8] = (m[0] * m[4] - m[1] * m[3]) / det;
+		return true;
 	}
 
 	// Output primaries (xy) -> RGB to XYZ with the white at Y = 1 (row-major), for the shader's matrix.
@@ -110,11 +172,12 @@ namespace AppearanceStage
 	}
 
 	// The shader's parameters from a packed block (names match shaders\vp_cam16_appearance.glsl).
-	inline ParameterList ShaderParameters(const Cam16::Cam16Uniforms& u, const Inputs& in)
+	inline ParameterList ShaderParameters(const Cam16::Cam16Uniforms& u, const Inputs& in, double huntScale = 1.0)
 	{
 		static const char* const ref[10] = { "apr_dc_r", "apr_dc_g", "apr_dc_b", "apr_fl", "apr_nbb", "apr_aw", "apr_cz", "apr_nc", "apr_t", "apr_flq" };
 		static const char* const scr[10] = { "aps_dc_r", "aps_dc_g", "aps_dc_b", "aps_fl", "aps_nbb", "aps_aw", "aps_cz", "aps_nc", "aps_t", "aps_flq" };
 		static const char* const mat[9] = { "apm_00", "apm_01", "apm_02", "apm_10", "apm_11", "apm_12", "apm_20", "apm_21", "apm_22" };
+		static const char* const inv[9] = { "apn_00", "apn_01", "apn_02", "apn_10", "apn_11", "apn_12", "apn_20", "apn_21", "apn_22" };
 		ParameterList p;
 		AddSide(p, ref, u.reference);
 		AddSide(p, scr, u.screen);
@@ -124,9 +187,14 @@ namespace AppearanceStage
 		p.push_back({ "apx_ref_nits", u.referenceWhiteNits });
 		p.push_back({ "apx_pq", in.signalPq ? 1.0 : 0.0 });
 		p.push_back({ "apx_gamma", in.outputGamma });
-		p.push_back({ "apx_knee", 0.0 });
+		p.push_back({ "apx_knee", std::min(0.5, std::max(0.0, in.toeKnee)) });   // FIX1 SHOULD 3: gamma_boost_knee, not a fixed 0
 		for (int i = 0; i < 9; ++i)
 			p.push_back({ mat[i], in.rgbToXyz[i] });
+		double fromXyz[9] = { 3.2406, -1.5372, -0.4986, -0.9689, 1.8758, 0.0415, 0.0557, -0.2040, 1.0570 };   // BT.709
+		Invert3(in.rgbToXyz, fromXyz);   // false (singular): the BT.709 inverse stays
+		for (int i = 0; i < 9; ++i)
+			p.push_back({ inv[i], fromXyz[i] });
+		p.push_back({ "apx_hunt_scale", huntScale });   // FIX1 SHOULD 2
 		return p;
 	}
 
@@ -170,8 +238,11 @@ namespace AppearanceStage
 		ui.screenSurround = d.room.surround;
 		ui.veilNits = d.room.veilNits;
 		ui.strength = in.strength;
+		WhiteXyz(in.rgbToXyz, ui.whiteXyz);   // FIX1 SHOULD 3: the output's own white
 		d.uniforms = Cam16::PackUniforms(ui);
-		d.parameters = ShaderParameters(d.uniforms, in);
+		d.huntGain = HuntChromaGain(ui, in.rgbToXyz);
+		d.huntScale = HuntScale(in.trimApplied, in.trimSaturationGain, d.huntGain);
+		d.parameters = ShaderParameters(d.uniforms, in, d.huntScale);
 		d.active = d.uniforms.strength > 0.0f;
 		d.status = std::string("appearance on: ") + d.room.status + (in.screenWhiteMeasured ? "" : " (screen white not measured)");
 		return d;

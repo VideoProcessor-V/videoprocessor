@@ -226,6 +226,8 @@ inline void VpvDumpRendererSettings(const RendererSettings& s, std::ostream& o)
 	Put(o, "ambientAdaptStrength", s.ambientAdaptStrength);
 	Put(o, "ambientScreenReflect", s.ambientScreenReflect);
 	Put(o, "ambientMaxBlackNits", s.ambientMaxBlackNits);
+	Put(o, "ambientLuxDark", s.ambientLuxDark);
+	Put(o, "ambientLuxLit", s.ambientLuxLit);
 	Put(o, "ambientTauUpSeconds", s.ambientTauUpSeconds);
 	Put(o, "ambientTauDownSeconds", s.ambientTauDownSeconds);
 	Put(o, "appearance", s.appearance);

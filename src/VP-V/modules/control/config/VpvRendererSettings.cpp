@@ -13,6 +13,7 @@
 #include <RendererConfigView.h>
 #include <RetiredSettings.h>
 #include <VP-V/core/SlotSwitchSettings.h>
+#include <VP-V/modules/colour/appearance/AmbientConfig.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
 #include <VP-V/modules/output/presentation/PresentationOwner.h>
 #include <vprenderer/DetailPulse.h>
@@ -1021,6 +1022,16 @@ namespace VpvRendererSettings
 		settings.calibrationLutStage = CalibrationLutHost::ResolveStage(settings.calibrationLutStageConfigured,
 			CalibrationLutHost::DisplayMappingStepsRun(settings.pipelineOriginalPathway, settings.dvDisplayMapping,
 				settings.dvTrims, settings.appearance, settings.pipelineSlotsOff));
+		// CF-1 FIX1 SHOULD 3: the room anchors are [ambient] lux_dark / lux_lit, read by their owner (Ambient::Read; an invalid
+		// value keeps that key's default and is listed with the pipeline problems, never silent).
+		{
+			Ambient::Settings ambientRoom;
+			std::string ambientError;
+			if (!Ambient::Read(config, ambientRoom, ambientError))
+				settings.pipelineSettingsProblems += ambientError + "; ";
+			settings.ambientLuxDark = ambientRoom.luxDark;
+			settings.ambientLuxLit = ambientRoom.luxLit;
+		}
 		// CF-1 CAM-4: colour.appearance owns the room-light correction (doc 115 A2): while it runs (appearance on, the slot not in
 		// pipeline_slots_off, never on the Original pathway) ambient_adapt is forced off, and the Fallbacks line says so.
 		{
@@ -1265,6 +1276,8 @@ namespace VpvRendererSettings
 			<< settings.ambientAdaptStrength << '|'
 			<< settings.ambientScreenReflect << '|'
 			<< settings.ambientMaxBlackNits << '|'
+			<< settings.ambientLuxDark << '|'
+			<< settings.ambientLuxLit << '|'
 			<< settings.ambientTauUpSeconds << '|'
 			<< settings.ambientTauDownSeconds << '|'
 			<< settings.appearance << '|'
@@ -1473,6 +1486,7 @@ namespace VpvRendererSettings
 			current.intentEaseSeconds != next.intentEaseSeconds, "intent_motion");
 		changed(current.ambientAdapt != next.ambientAdapt || current.ambientAdaptStrength != next.ambientAdaptStrength ||
 			current.ambientScreenReflect != next.ambientScreenReflect || current.ambientMaxBlackNits != next.ambientMaxBlackNits ||
+			current.ambientLuxDark != next.ambientLuxDark || current.ambientLuxLit != next.ambientLuxLit ||
 			current.ambientTauUpSeconds != next.ambientTauUpSeconds ||
 			current.ambientTauDownSeconds != next.ambientTauDownSeconds, "ambient_adapt");
 		changed(current.appearance != next.appearance || current.appearanceStrength != next.appearanceStrength ||
@@ -1635,6 +1649,8 @@ namespace VpvRendererSettings
 		<< "ambient_adapt_strength=" << s.ambientAdaptStrength << "\n"
 		<< "ambient_screen_reflect=" << s.ambientScreenReflect << "\n"
 		<< "ambient_max_black_nits=" << s.ambientMaxBlackNits << "\n"
+		<< "ambient_lux_dark=" << s.ambientLuxDark << "\n"
+		<< "ambient_lux_lit=" << s.ambientLuxLit << "\n"
 		<< "ambient_tau_up_s=" << s.ambientTauUpSeconds << "\n"
 		<< "ambient_tau_down_s=" << s.ambientTauDownSeconds << "\n"
 		<< "appearance=" << (s.appearance ? "on" : "off") << "\n"

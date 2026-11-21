@@ -4,9 +4,11 @@
  * Maps the picture from the reference viewing conditions (large Lw_ref, dim surround) to the
  * screen's (own Lw_screen, the room's surround and veil) with the CIE 2016 colour appearance model:
  * forward with the reference side, inverse with the screen side (M compressed hue-preservingly
- * when a channel would leave the range). Installed by the renderer only when appearance is on.
- * Hooked at PREOUTPUT after the DV trims (the host's slot order). Codes below black and above white
- * (BTB / WTW) pass through unchanged; the model blends out below apx_knee (the delta-11 toe).
+ * when a channel would leave the range: a hard 6-step bisection to the gamut boundary, not a soft roll-off).
+ * Installed by the renderer only when appearance is on. Hooked at PREOUTPUT after the DV trims (the host's
+ * slot order). Codes below black and above white (BTB / WTW) are kept: a pixel wholly outside passes unchanged,
+ * a pixel with some channels outside is adapted on its in-range colour and each channel's excess is restored
+ * (no gamut-edge discontinuity). The model blends out below apx_knee (gamma_boost_knee, the delta-11 toe).
  * The CPU reference is src/VP-V/modules/colour/appearance/Cam16.h and Cam16Uniforms.h packs these
  * params; the two must stay identical.
  *
@@ -197,7 +199,7 @@
 2.4
 
 //!PARAM apx_knee
-//!DESC relative light below which the model blends out (delta-11 toe)
+//!DESC encoded level below which the model blends out (gamma_boost_knee, the delta-11 toe; 0 = none)
 //!TYPE float
 //!MINIMUM 0.0
 //!MAXIMUM 0.5
@@ -265,6 +267,76 @@
 //!MINIMUM -5.0
 //!MAXIMUM 5.0
 0.9505
+
+//!PARAM apn_00
+//!DESC XYZ to output RGB (inverse of apm), row 0 col 0
+//!TYPE float
+//!MINIMUM -20.0
+//!MAXIMUM 20.0
+3.2406
+
+//!PARAM apn_01
+//!DESC XYZ to output RGB (inverse of apm), row 0 col 1
+//!TYPE float
+//!MINIMUM -20.0
+//!MAXIMUM 20.0
+-1.5372
+
+//!PARAM apn_02
+//!DESC XYZ to output RGB (inverse of apm), row 0 col 2
+//!TYPE float
+//!MINIMUM -20.0
+//!MAXIMUM 20.0
+-0.4986
+
+//!PARAM apn_10
+//!DESC XYZ to output RGB (inverse of apm), row 1 col 0
+//!TYPE float
+//!MINIMUM -20.0
+//!MAXIMUM 20.0
+-0.9689
+
+//!PARAM apn_11
+//!DESC XYZ to output RGB (inverse of apm), row 1 col 1
+//!TYPE float
+//!MINIMUM -20.0
+//!MAXIMUM 20.0
+1.8758
+
+//!PARAM apn_12
+//!DESC XYZ to output RGB (inverse of apm), row 1 col 2
+//!TYPE float
+//!MINIMUM -20.0
+//!MAXIMUM 20.0
+0.0415
+
+//!PARAM apn_20
+//!DESC XYZ to output RGB (inverse of apm), row 2 col 0
+//!TYPE float
+//!MINIMUM -20.0
+//!MAXIMUM 20.0
+0.0557
+
+//!PARAM apn_21
+//!DESC XYZ to output RGB (inverse of apm), row 2 col 1
+//!TYPE float
+//!MINIMUM -20.0
+//!MAXIMUM 20.0
+-0.2040
+
+//!PARAM apn_22
+//!DESC XYZ to output RGB (inverse of apm), row 2 col 2
+//!TYPE float
+//!MINIMUM -20.0
+//!MAXIMUM 20.0
+1.0570
+
+//!PARAM apx_hunt_scale
+//!DESC factor on M keeping trim x Hunt saturation within the larger alone (doc 115 B13)
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 4.0
+1.0
 
 //!HOOK PREOUTPUT
 //!BIND HOOKED
@@ -409,19 +481,29 @@ vec4 hook()
     vec4 color = HOOKED_texOff(0);
     if (apx_strength <= 0.0)
         return color;
-    // BTB / WTW (below black, above white): untouched, exactly.
-    if (color.r < 0.0 || color.g < 0.0 || color.b < 0.0 || color.r > 1.0 || color.g > 1.0 || color.b > 1.0)
+    // BTB / WTW (below black, above white), FIX1 SHOULD 4: a pixel wholly below black or wholly above white passes
+    // exactly; otherwise the model runs on the in-range colour and each channel's excess is restored afterwards, so a
+    // colour that just leaves the range on one channel is adapted like its neighbours (no gamut-edge discontinuity).
+    vec3 inRange = clamp(color.rgb, 0.0, 1.0);
+    vec3 excess = color.rgb - inRange;
+    bool outside = excess.r != 0.0 || excess.g != 0.0 || excess.b != 0.0;
+    bool allBelow = color.r <= 0.0 && color.g <= 0.0 && color.b <= 0.0;
+    bool allAbove = color.r >= 1.0 && color.g >= 1.0 && color.b >= 1.0;
+    if (outside && (allBelow || allAbove))
         return color;
 
-    // Row-major published values, column-major constructor: transpose by listing columns.
+    // Row-major published values, column-major constructor: transpose by listing columns. The inverse is published
+    // (apn_*, NIT 1), not inverted per pixel.
     mat3 toXyz = mat3(apm_00, apm_10, apm_20, apm_01, apm_11, apm_21, apm_02, apm_12, apm_22);
-    mat3 fromXyz = inverse(toXyz);
+    mat3 fromXyz = mat3(apn_00, apn_10, apn_20, apn_01, apn_11, apn_21, apn_02, apn_12, apn_22);
 
-    vec3 lin = vec3(ap_to_rel(color.r), ap_to_rel(color.g), ap_to_rel(color.b));
+    vec3 lin = vec3(ap_to_rel(inRange.r), ap_to_rel(inRange.g), ap_to_rel(inRange.b));
     vec3 jmh = ap_forward(toXyz * (lin * 100.0));
+    jmh.y *= apx_hunt_scale;   // FIX1 SHOULD 2: trim x Hunt within the larger of the two alone (1 without a trim)
     vec3 outLin = fromXyz * ap_inverse(jmh.x, jmh.y, jmh.z) * 0.01;
 
-    // Hue-preserving M compression: bisect M at the same J and h until the result is in range.
+    // M compression at the same J and h when a channel would leave the range: a hard 6-step bisection of M to the
+    // gamut boundary (about 1.6 % of M left as residual), not a soft roll-off (NIT 2).
     if (ap_out_of_range(outLin)) {
         float lo = 0.0;
         float hi = jmh.y;
@@ -439,13 +521,15 @@ vec4 hook()
     outLin = vec3(ap_flare(outLin.r, apx_veil), ap_flare(outLin.g, apx_veil), ap_flare(outLin.b, apx_veil));
 
     // Blend out below the toe knee, and by strength.
-    float luma = dot(lin, vec3(0.2126, 0.7152, 0.0722));
-    float toe = apx_knee > 0.0 ? smoothstep(0.0, apx_knee, luma) : 1.0;
+    // FIX1 SHOULD 3: the luma weights are the output primaries' own (the Y row of apm), the knee the configured
+    // gamma_boost_knee (an encoded level, taken to relative light).
+    float luma = dot(lin, vec3(apm_10, apm_11, apm_12));
+    float toe = apx_knee > 0.0 ? smoothstep(0.0, ap_to_rel(apx_knee), luma) : 1.0;
     float w = clamp(apx_strength, 0.0, 1.0) * toe;
 
     // The identity side on the screen scale: a PQ picture keeps its nits, a gamma picture its relative light.
     vec3 inScreen = apx_pq > 0.5 ? lin * (apx_ref_nits / max(apx_screen_nits, 1e-6)) : lin;
     vec3 res = mix(inScreen, outLin, w);
-    color.rgb = vec3(ap_from_rel(res.r), ap_from_rel(res.g), ap_from_rel(res.b));
+    color.rgb = vec3(ap_from_rel(res.r), ap_from_rel(res.g), ap_from_rel(res.b)) + excess;   // the BTB / WTW excess kept
     return color;
 }
