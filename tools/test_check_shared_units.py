@@ -347,6 +347,30 @@ class CheckSharedUnitsTest(unittest.TestCase):
         _w(self.root, "src/VP-V/modules/repair/other/Cut.h", "constexpr double kCutShare = 0.5;\n")
         self.assertEqual(_unit(csu.scan(self.root), "U7")["duplicates"], 1)
 
+    def test_confirmed_cut_status_text_is_a_known_false_positive_only_on_its_line(self):
+        # WAIVER-GEM-W1-U7-T1: CompensationWhyName's "a confirmed scene cut" names a fact passed in (the scene product's verdict through
+        # PairValidAt), it judges nothing. The repo baseline's anchor covers exactly that name-table line: a scene-cut computation in the
+        # same file, or the literal with code after it, is still a duplicate.
+        rel = "src/VP-V/modules/motion/estimation/DitherVectorSource.h"
+        repo = next(e for e in csu.load_baseline(ROOT)["units"]["U7"]["known_false_positive"] if e["file"] == rel)
+        self.assertTrue(repo["reason"].startswith("WAIVER-GEM-W1-U7-T1:"))
+        u7 = next(u for u in csu.REGISTRY if u["id"] == "U7")
+        with open(os.path.join(ROOT, *rel.split("/")), encoding="utf-8") as f:
+            repo_hits = [l for l in f.read().splitlines() if any(s.search(l) for s in u7["signatures"])]
+        self.assertTrue(repo_hits, "the status text is still in the repo file")
+        for l in repo_hits:
+            self.assertRegex(l, repo["pattern"], "every U7 hit of the repo file is the anchored status text")
+        _w(self.root, "tools/shared_units_baseline.json", json.dumps(
+            {"schema": 1, "units": {"U7": {"blocking": True, "baseline_duplicates": 0, "known_false_positive": [repo]}}}))
+        _w(self.root, rel,
+           "\t\tcase CompensationWhy::ConfirmedCut: return \"a confirmed scene cut\";\n"
+           "\t\tconst bool sceneCut = histDiff > 0.5;\n"
+           "\t\tcase CompensationWhy::ConfirmedCut: return \"a confirmed scene cut\"; if (scene_cut) x = 0;\n")
+        hits = [(h["line"], h["role"]) for h in _unit(csu.scan(self.root), "U7")["hits"]]
+        self.assertEqual(hits, [(1, "known_false_positive"), (2, "duplicate"), (3, "duplicate")])
+        rc, out = _run(["--strict", "--root", self.root])
+        self.assertEqual(rc, 1, out[-400:])
+
     def test_contract_lists_are_declarations(self):
         _w(self.root, "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h", "block_stats\n")
         self.assertEqual(_unit(csu.scan(self.root), "U4")["duplicates"], 0)

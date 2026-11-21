@@ -565,6 +565,12 @@
      "reason": "diagnostic reason text; the cut flag is the unit event passed in"
     },
     {
+     "file": "src/VP-V/modules/motion/estimation/DitherVectorSource.h",
+     "pattern": "^\\s*case CompensationWhy::ConfirmedCut:\\s*return \"a confirmed scene cut\";\\s*$",
+     "kind": "false_positive",
+     "reason": "WAIVER-GEM-W1-U7-T1: status text of CompensationWhy::ConfirmedCut (CompensationWhyName name table); the cut is the skeleton scene product's verdict (FrameAnalysis::Store::PeekScene: Scene::confirmed && cutHere, SkeletonModule ConfirmedCutAt) read through MotionValidity::PairValidAt's veto and passed in as CompensationFacts::confirmedCut; no judgement here"
+    },
+    {
      "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
      "pattern": "float meanLuma = 0\\.0f;",
      "kind": "false_positive",
