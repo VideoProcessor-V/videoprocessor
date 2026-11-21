@@ -148,6 +148,17 @@ namespace MotionAhead
 		};
 		// Rows in parallel (4K RGB at 60 frames: several ms per frame on one core).
 		auto rows = [&](int fromY, int toY) {
+			if (planar16)
+			{
+				// R6 (0a): fused bit-identical planar-16 (P010/P210) 2x2 decimation (zero intermediate row copies).
+				for (int y = fromY; y < toY; ++y)
+				{
+					const uint16_t* row0 = reinterpret_cast<const uint16_t*>(source.data + static_cast<size_t>(VpUnit::HalfLuma::Tap0(y, h)) * source.rowBytes);
+					const uint16_t* row1 = reinterpret_cast<const uint16_t*>(source.data + static_cast<size_t>(VpUnit::HalfLuma::Tap1(y, h)) * source.rowBytes);
+					R6::FusedPlanar16HalfLuma8Row(row0, row1, w, halfW, &out[static_cast<size_t>(y) * halfW]);
+				}
+				return;
+			}
 			std::vector<uint16_t> r0(static_cast<size_t>(w)), r1(static_cast<size_t>(w));
 			for (int y = fromY; y < toY; ++y)
 			{
@@ -188,6 +199,14 @@ namespace MotionAhead
 		{
 			hintsCamera.store(true, std::memory_order_release);
 			DebugLog::Log("Motion ahead: NVOF temporal hints ON for the camera fit (VP_NVOF_TEMPORAL_HINTS=1, diagnostic opt-in)");
+		}
+		// R6 (0a): async extras overlap is OFF by default; VP_R6_ASYNC_EXTRAS=1 enables it for 4K throughput evaluation.
+		char r6Val[8] = {};
+		const DWORD r6N = GetEnvironmentVariableA("VP_R6_ASYNC_EXTRAS", r6Val, static_cast<DWORD>(sizeof(r6Val)));
+		if (r6N == 1 && r6Val[0] == '1')
+		{
+			r6AsyncExtras.store(true, std::memory_order_release);
+			DebugLog::Log("Motion ahead: R6 async extras overlap ON (VP_R6_ASYNC_EXTRAS=1, diagnostic opt-in)");
 		}
 	}
 
@@ -316,6 +335,7 @@ namespace MotionAhead
 		}
 		wake.notify_all();
 		if (worker.joinable()) worker.join();
+		r6ExtrasWorker.Stop();   // R6: drain and join any in-flight overlapped extras before releasing slot/engine
 		running = false;
 		// The engine first (it unregisters its textures), then the textures, then the device.
 		ReleaseEngine();
@@ -539,6 +559,7 @@ namespace MotionAhead
 		requestOwnsGeneration = false;
 		if (slot->Generation() != job.generation)
 		{
+			r6ExtrasWorker.Flush();   // R6: preserve strict generation boundary ordering before SetGeneration clears the slot
 			slot->SetGeneration(job.generation);
 			havePrevious = false;
 			lumaRing.ClearGenerationsOtherThan(job.generation);   // a new generation: no frame of the old one stays (pins too)
@@ -578,7 +599,8 @@ namespace MotionAhead
 			bool ran = false;
 			std::shared_ptr<Flow> flow;
 			double extrasMs = 0.0;
-			ok = RunPair(lumaTex[prev], lumaTex[texIndex], halfW, halfH, continuous, job.sequence, ran, flow, extrasMs);
+			const bool asyncExtras = r6AsyncExtras.load(std::memory_order_acquire);
+			ok = RunPair(lumaTex[prev], lumaTex[texIndex], halfW, halfH, continuous, job.sequence, ran, flow, extrasMs, !asyncExtras);
 			if (ran)
 			{
 				hintSequence = job.sequence;
@@ -591,15 +613,46 @@ namespace MotionAhead
 					flow->lumaFrom = previousLuma;
 					flow->lumaTo = currentLuma;
 				}
-				slot->Publish(previousSequence, job.sequence, job.generation, flow);   // P2: the pair, for the readers' P2View
-				engineReady = true;
-				std::lock_guard<std::mutex> lock(mutex);
-				++stats.pairs;
-				stats.extrasMs = extrasMs;
-				stats.lastPairMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-				stats.pairMsSum += stats.lastPairMs;
-				if (continuous)
-					++stats.hintedPairs;
+				if (asyncExtras)
+				{
+					const size_t cap = PendingCapacity();
+					if (!r6ExtrasWorker.Running())
+						r6ExtrasWorker.Start(cap);
+					else
+						r6ExtrasWorker.SetCapacity(cap);
+					const uint64_t fromSeq = previousSequence;
+					const uint64_t toSeq = job.sequence;
+					const uint64_t gen = job.generation;
+					const bool general = generalRates.load(std::memory_order_acquire);
+					r6ExtrasWorker.Submit([this, flow, fromSeq, toSeq, gen, general, started, continuous]() mutable {
+						const auto exStart = std::chrono::steady_clock::now();
+						VPV_COMPUTE_ONCE_AT("U10", toSeq, 0);
+						FlowGlobals(*flow, general);
+						FlowExtras(*flow);
+						const double exMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - exStart).count();
+						slot->Publish(fromSeq, toSeq, gen, flow);
+						engineReady = true;
+						std::lock_guard<std::mutex> lock(mutex);
+						++stats.pairs;
+						stats.extrasMs = exMs;
+						stats.lastPairMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+						stats.pairMsSum += stats.lastPairMs;
+						if (continuous)
+							++stats.hintedPairs;
+					});
+				}
+				else
+				{
+					slot->Publish(previousSequence, job.sequence, job.generation, flow);   // P2: the pair, for the readers' P2View
+					engineReady = true;
+					std::lock_guard<std::mutex> lock(mutex);
+					++stats.pairs;
+					stats.extrasMs = extrasMs;
+					stats.lastPairMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+					stats.pairMsSum += stats.lastPairMs;
+					if (continuous)
+						++stats.hintedPairs;
+				}
 			}
 		}
 		{
@@ -642,7 +695,7 @@ namespace MotionAhead
 	}
 
 	bool Producer::RunPair(ID3D11Texture2D* a, ID3D11Texture2D* b, int halfW, int halfH, bool continuous, uint64_t timedSequence, bool& ran,
-		std::shared_ptr<Flow>& flowOut, double& extrasMs)
+		std::shared_ptr<Flow>& flowOut, double& extrasMs, bool runExtrasSync)
 	{
 		ran = false;
 		VPV_COMPUTE_ONCE_AT("nvof.pair", timedSequence, 0);
@@ -689,13 +742,17 @@ namespace MotionAhead
 			context->Unmap(costRead[i], 0);
 		}
 		// Planner Q1: the whole frame's motion, here on the worker (no render cost).
-		const auto extrasStart = std::chrono::steady_clock::now();
-		const bool general = generalRates.load(std::memory_order_acquire);   // fixed-constant batch B4 2026-10-18
-		VPV_COMPUTE_ONCE_AT("U10", timedSequence, 0);
-		FlowGlobals(*flow, general);   // both directions, flagged for the FlowOf view (W1-C3)
-		// The cost and the engine's own forward/backward consistency as trust inputs.
-		FlowExtras(*flow);
-		extrasMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - extrasStart).count();
+		// R6 opt-in (runExtrasSync == false): deferred to r6ExtrasWorker so pair N+1 starts immediately.
+		if (runExtrasSync)
+		{
+			const auto extrasStart = std::chrono::steady_clock::now();
+			const bool general = generalRates.load(std::memory_order_acquire);   // fixed-constant batch B4 2026-10-18
+			VPV_COMPUTE_ONCE_AT("U10", timedSequence, 0);
+			FlowGlobals(*flow, general);   // both directions, flagged for the FlowOf view (W1-C3)
+			// The cost and the engine's own forward/backward consistency as trust inputs.
+			FlowExtras(*flow);
+			extrasMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - extrasStart).count();
+		}
 		flowOut = std::move(flow);
 		return true;
 	}

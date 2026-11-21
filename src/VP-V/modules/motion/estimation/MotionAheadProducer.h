@@ -31,6 +31,8 @@
 #include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
 #include <VP-V/modules/motion/estimation/ProducerRecovery.h>
 #include <VP-V/modules/motion/estimation/OnDemandEstimate.h>
+#include <VP-V/modules/motion/estimation/R6LumaPass.h>
+#include <VP-V/modules/motion/estimation/R6PipelineOverlap.h>
 
 #include <d3d11.h>
 #include <atlbase.h>
@@ -294,6 +296,14 @@ namespace MotionAhead
 		// The one decision both RunPair call sites use: hints only while in force AND the engine's last pair ended at this pair's first frame.
 		bool HintsApply(bool chainContinuous) const { return chainContinuous && HintsInForce(); }
 
+		// R6 (0a, default OFF): overlap CPU FlowGlobals + FlowExtras + P2Slot publish of pair N with LumaAtTarget(N+1) + NVOF Run(N+1)
+		// on a dedicated bounded FIFO extras thread. Off (default) = zero extra thread, exact synchronous path.
+		// Diagnostic env opt-in: VP_R6_ASYNC_EXTRAS=1. Visible via GetR6ExtrasStats() / R6StatusLine().
+		void SetR6AsyncExtras(bool on) { r6AsyncExtras.store(on, std::memory_order_release); }
+		bool R6AsyncExtras() const { return r6AsyncExtras.load(std::memory_order_acquire); }
+		R6::ExtrasStats GetR6ExtrasStats() const { return r6ExtrasWorker.Stats(); }
+		std::string R6StatusLine() const { return R6::ExtrasWorker::StatusLine(r6ExtrasWorker.Stats()); }
+
 		// W2-C5b: an ON-DEMAND pair for a render-time consumer (OnDemandEstimate.h). Any thread; never blocks on the worker:
 		// a pair already in the slot answers FromSlot at once (zero work); not running / stopping / restarting answers
 		// Unavailable; budgetMs <= 0 answers NoBudget; else the request is queued (at most OnDemand::Queue::kMaxPending; the
@@ -378,8 +388,9 @@ namespace MotionAhead
 		bool LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& w, int& h);
 		// One engine run on (a, b) at w x h, read back into a new Flow with its global motion and trust extras. ran = the
 		// engine itself succeeded (the readback may still fail). False = failed (error set).
+		// runExtrasSync = false (R6 opt-in only): leaves FlowGlobals/FlowExtras for r6ExtrasWorker to overlap with pair N+1.
 		bool RunPair(ID3D11Texture2D* a, ID3D11Texture2D* b, int w, int h, bool continuous, uint64_t timedSequence, bool& ran,
-			std::shared_ptr<Flow>& flow, double& extrasMs);
+			std::shared_ptr<Flow>& flow, double& extrasMs, bool runExtrasSync = true);
 		bool EnsureRequestTextures(int w, int h);   // W2-C5b: the off-chain pair (made on first use; its own VRAM declaration)
 		void ReleaseRequestTextures();
 		bool EnsureSize(int halfW, int halfH);
@@ -414,6 +425,8 @@ namespace MotionAhead
 		std::atomic<bool> hintsCamera{ false };   // camfix R1 (SetTemporalHints, Camera): owner 04:52, default OFF
 		std::atomic<bool> hintsOther{ true };     // camfix R1 (SetTemporalHints, Other): the everyday setting (default ON); governs the shared stream while the camera fit is inactive
 		std::atomic<bool> cameraConsumes{ false };   // the camera fit consumes the pair stream (VectorEngine, each update)
+		std::atomic<bool> r6AsyncExtras{ false };    // R6 (0a) opt-in: overlap CPU extras with next NVOF pair (default OFF)
+		R6::ExtrasWorker r6ExtrasWorker;             // started lazily only when r6AsyncExtras is true
 		std::atomic<int> targetW{ 0 }, targetH{ 0 };
 		std::mutex p1Mutex;                                 // guards p1Source (set from the render thread, read by the worker)
 		std::shared_ptr<VpSkeleton::IP1Source> p1Source;
