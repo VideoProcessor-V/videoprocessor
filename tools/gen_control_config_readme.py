@@ -190,9 +190,14 @@ def allow_list_reasons():
 
 
 def card_placements(keys):
-    """key -> 'VP-V > <Unit> > <Main|Advanced> > <card title>' from the one placement table (read only)."""
+    """key -> 'VP-V > <Unit> > <Main|Advanced> > <card title>' from the one placement table (read only).
+
+    Calls check_config_placement.build_table READ-ONLY: it parses VpvOrganisation.h and Bill's
+    ConfigEditorWindow.cpp section spans and returns the table; nothing is written (its --write path is
+    not used). The checker belongs to S-CHK and is not changed here; this only reuses its parser so the
+    README and the checker agree on one source."""
     sys.path.insert(0, str(ROOT / "tools"))
-    import check_config_placement as P   # noqa: E402  (pure text parsing, no writes)
+    import check_config_placement as P   # noqa: E402  (read-only use of build_table; checker owned by S-CHK)
     _cards, placement, _sections, _errors = P.build_table(str(ROOT), set(keys))
     return {k: card["text"] for k, card in placement.items() if k in keys}
 
@@ -218,7 +223,6 @@ def build():
     master = master_rows()
     reasons = allow_list_reasons()
     entries = []
-    cards = {}
     for k, (g, t) in prof.items():
         entries.append((k, GROUP_SECTION[g], t, g))
     for k, (s, t) in start.items():
@@ -255,9 +259,9 @@ def build():
             if up:
                 place.append("; ".join(up))
         if k in toggle:
-            place.append("VP-V page > %s (toggle)" % toggle[k][0])
+            place.append("%s (toggle)" % cards[k] if k in cards else "VP-V page > %s (toggle)" % toggle[k][0])
         elif k in taste:
-            place.append("VP-V page > %s (taste)" % taste[k])
+            place.append("%s (taste)" % cards[k] if k in cards else "VP-V page > %s (taste)" % taste[k])
         elif k in cards:
             place.append(cards[k])   # the card the Config editor builds the key on
         elif a0.get("vpv") and a0["vpv"] != "-":
