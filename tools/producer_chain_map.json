@@ -2,7 +2,8 @@
   "_comment": "Hand-maintained signature map for tools/producer_chain.py. The tool reads the DECLARED inputs from core/Products.h; this file only says WHERE each product's owner fill lives and WHICH code shapes count as an Acquire-style read (R) or as a private recompute / read outside Acquire (X). Paths are relative to src/VP-V/modules. Regexes run on comment-stripped lines. Not a claim: the tool prints the file:line evidence. Copyright(C) 2026 VP-V contributors, SPDX-License-Identifier: GPL-3.0-only.",
   "labels": {
     "kSourceIdentity": "P14", "kSourceGeometry": "P14g", "kCodingEvidence": "P16",
-    "kQualityPattern": "P15", "kQualityPatternCausal": "P15c", "kRefinedField": "P3r"
+    "kQualityPattern": "P15", "kQualityPatternCausal": "P15c", "kRefinedField": "P3r",
+    "kP10gGrainLevel": "P10g"
   },
   "lanes": {
     "kP1HalfLuma": "L-B4", "kP2VectorPair": "L-B4", "kP2mMatcherPair": "L-B4", "kP3AnalysisField": "L-B4",
@@ -12,7 +13,8 @@
     "kTdAnchorPass": "L-B2", "kTdAnchorRefs": "L-B2", "kTdDelta": "L-B2", "kTdMaps": "L-B2", "kTdTrailSummary": "L-B2",
     "kP11RegionBlockStats": "L-B5", "kP12LightLevel": "L-B5",
     "kCodingEvidence": "L-B5", "kQualityPattern": "L-B5", "kQualityPatternCausal": "L-B5",
-    "kEdgeMap": "L-B5"
+    "kEdgeMap": "L-B5",
+    "kP10gGrainLevel": "L-B2"
   },
   "default_read": ["\\bInput\\(\\s*(VpSkeleton::)?{k}\\b", "\\bAcquire\\(\\s*(VpSkeleton::)?{k}\\b", "\\bReadOf\\(\\s*(VpSkeleton::)?{k}\\b", "\\bFind\\(\\s*(VpSkeleton::)?{k}\\b"],
   "products": {
@@ -29,6 +31,7 @@
     "kP10GrainSplit": {"files": ["control/skeleton/gpu/SkeletonGpuDispatcher.cpp", "input/source_analysis/lane/LaneGpuProducts.cpp"]},
     "kP11RegionBlockStats": {"files": ["control/skeleton/gpu/SkeletonGpuDispatcher.cpp", "input/source_analysis/lane/LaneGpuRegionKernel.cpp", "input/source_analysis/lane/LaneGpuJobs.h"]},
     "kP12LightLevel": {"files": ["input/source_analysis/lane/LaneGpuLightKernel.cpp"]},
+    "kP10gGrainLevel": {"files": ["repair/grain_split/GrainLevelGpu.h"], "note": "P10g T3 owner fill (GrainLevelModule): reads P10 through the memo's variant Acquire; single-frame law until the temporal passes are costed"},
     "kSourceIdentity": {"files": ["input/source_analysis/identity/SourceIdPipeline.h"]},
     "kSourceGeometry": {"files": ["input/source_analysis/identity/SourceGeometryProduct.h"]},
     "kCodingEvidence": {"files": ["input/source_analysis/regions/CodingEvidence.cpp"], "ignore_reserved": true, "note": "P16 is a real producer since L-P16 (r2/job1-p16): CPU per-tile owner fill registered in SkeletonModule.cpp, measure in regions/CodingEvidence.cpp; the ProductCatalog.h / product-graph.md row text still says reserved (stale, catalog owner)"},
