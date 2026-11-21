@@ -682,25 +682,57 @@ namespace VideoProcessorTest
 			// exceeds 0.5 code per code, a fixed 1.5 codes does not fit.
 			// (15fdbd39c / ed0e6021f TRX, 2.0 threshold: 980/1000/200 R in the boosted sweep at gain < 1 was off by
 			// 1.84 codes from its input code and 1.72 from its idle code, depending on the gain.)
-			// Coordinator ruling on 6972991f7 (WAIVER-GEM-W1-LED-T3): no case is exempt. Those near-white cases are
-			// asserted against their own derived budget, 1 code (rounding) + 0.5 x the in-range part's per-code
-			// slope x 1 code (input error); every other case keeps 1.5 codes, unchanged.
-			auto residualBudget = [&luma, &partSensitivity](const Rgb& in, double gain, double b, double domain, bool& derived)
+			// Coordinator rulings on 6972991f7 / dacadec18 (WAIVER-GEM-W1-LED-T4): no case is exempt, and no
+			// budget is widened. For those near-white cases the WARP input error is removed instead of budgeted:
+			// the residual is measured against the idle render of the same colour on the same device. The model
+			// split is taken of the idle codes (what the hook saw, to the 10-bit round trip), its in-range part
+			// is rendered, and its excursion is taken from the idle codes. Tolerance 1.5 codes, as for every case.
+			// For information, the approved fallback form is also logged: the plain residual against
+			// 1 + slope x that colour's measured idle round-trip error.
+			auto nearWhiteSlope = [&luma, &partSensitivity](const Rgb& in, double gain, double b, double domain)
 			{
-				const double slope = luma(in) > 0.99 ? partSensitivity(in, gain, b, domain) : 0.0;
-				derived = slope > 0.5;
-				return derived ? 1.0 + 0.5 * slope * 1.0 : 1.5;
+				return luma(in) > 0.99 ? partSensitivity(in, gain, b, domain) : 0.0;
 			};
-			int residualChecked = 0, residualNearWhite = 0, residualExempt = 0;
-			double worstDerivedResidual = 0.0, worstDerivedBudget = 0.0, worstDerivedRatio = 0.0;
-			auto noteDerived = [&](double residual, double budget)
+			struct IdleResidual { double idleRelative = 0.0, plain = 0.0, fallbackBudget = 0.0; };
+			auto idleResidual = [&](const Codes& c, double gain, double b, double domain, const Codes& out,
+				const Codes& part, const Split& sp, double slope)
 			{
-				if (residual / budget > worstDerivedRatio)
+				IdleResidual r;
+				const Codes& seen = idle.at(c);
+				const Split fromIdle = split(toSignal(seen), gain, b, domain);
+				const Codes partIdle = render(fromIdle.p);
+				int idleError = 0;
+				for (int k = 0; k < 3; ++k)
+					idleError = std::max(idleError, std::abs(seen[k] - c[k]));
+				r.fallbackBudget = 1.0 + slope * idleError;
+				for (int k = 0; k < 3; ++k)
 				{
-					worstDerivedRatio = residual / budget;
-					worstDerivedResidual = residual;
-					worstDerivedBudget = budget;
+					const double expected = partIdle[k] + fromIdle.k * fromIdle.f * ((seen[k] - 64.0) - 876.0 * fromIdle.p[k]);
+					r.idleRelative = std::max(r.idleRelative, std::abs(out[k] - expected));
+					r.plain = std::max(r.plain, std::abs(out[k] - (part[k] + excursionCodes(c, sp, k))));
 				}
+				return r;
+			};
+			int residualChecked = 0, residualNearWhite = 0, residualExempt = 0, fallbackMisses = 0;
+			double worstIdleRelative = 0.0, worstFallbackRatio = 0.0;
+			std::wstring fallbackText;
+			// Asserts one near-white case (idle-relative, 1.5 codes) and records the fallback form.
+			auto checkNearWhite = [&](const Codes& c, double gain, double b, double domain, const Codes& out,
+				const Codes& part, const Split& sp, double slope, const std::wstring& where)
+			{
+				const IdleResidual r = idleResidual(c, gain, b, domain, out, part, sp, slope);
+				worstIdleRelative = std::max(worstIdleRelative, r.idleRelative);
+				worstFallbackRatio = std::max(worstFallbackRatio, r.plain / r.fallbackBudget);
+				if (r.plain > r.fallbackBudget)
+				{
+					++fallbackMisses;
+					fallbackText += text(c) + L" " + std::to_wstring(r.plain) + L" > " + std::to_wstring(r.fallbackBudget) + where;
+				}
+				if (r.idleRelative > 1.5)
+					return L"near-white " + text(c) + L": idle-relative residual " + std::to_wstring(r.idleRelative) +
+						L" > 1.5 (plain " + std::to_wstring(r.plain) + L", fallback budget " + std::to_wstring(r.fallbackBudget) +
+						L")" + where;
+				return std::wstring();
 			};
 
 			std::wstring problems;
@@ -721,19 +753,22 @@ namespace VideoProcessorTest
 					// The in-range part, rendered as an in-range colour: its neighbour's compensation.
 					const Codes part = render(sp.p);
 					{
-						bool derived = false;
-						const double budget = residualBudget(in, s.gain, s.boost, s.domain, derived);
-						++(derived ? residualNearWhite : residualChecked);
-						for (int k = 0; k < 3; ++k)
+						const double slope = nearWhiteSlope(in, s.gain, s.boost, s.domain);
+						if (slope > 0.5)
 						{
-							const double expected = part[k] + excursionCodes(c, sp, k);
-							const double residual = std::abs(out[k] - expected);
-							if (derived)
-								noteDerived(residual, budget);
-							if (residual > budget)
-								problems += L"channel " + std::to_wstring(k) + L" of " + text(c) + L": " + std::to_wstring(out[k]) +
-									L" for in-range part " + std::to_wstring(part[k]) + L" + k f e = " + std::to_wstring(expected) +
-									L", residual " + std::to_wstring(residual) + L" > budget " + std::to_wstring(budget) + where;
+							++residualNearWhite;
+							problems += checkNearWhite(c, s.gain, s.boost, s.domain, out, part, sp, slope, where);
+						}
+						else
+						{
+							++residualChecked;
+							for (int k = 0; k < 3; ++k)
+							{
+								const double expected = part[k] + excursionCodes(c, sp, k);
+								if (std::abs(out[k] - expected) > 1.5)
+									problems += L"channel " + std::to_wstring(k) + L" of " + text(c) + L": " + std::to_wstring(out[k]) +
+										L" for in-range part " + std::to_wstring(part[k]) + L" + k f e = " + std::to_wstring(expected) + where;
+							}
 						}
 					}
 					if (sp.f < 1.0)
@@ -967,18 +1002,21 @@ namespace VideoProcessorTest
 						set(g, boost, domain);
 						const Split sp = split(in, g, boost, domain);
 						const Codes out = render(in), part = render(sp.p);
-						bool derived = false;
-						const double budget = residualBudget(in, g, boost, domain, derived);
-						++(derived ? residualNearWhite : residualChecked);
+						const double slope = nearWhiteSlope(in, g, boost, domain);
+						const bool nearWhite = slope > 0.5;
+						if (nearWhite)
+						{
+							++residualNearWhite;
+							problems += checkNearWhite(c, g, boost, domain, out, part, sp, slope, L" (sweep) at gain " +
+								std::to_wstring(g) + L", domain " + std::to_wstring(static_cast<int>(domain)) + L"; ");
+						}
+						else
+							++residualChecked;
 						for (int k = 0; k < 3; ++k)
 						{
-							const double residual = std::abs(out[k] - (part[k] + excursionCodes(c, sp, k)));
-							if (derived)
-								noteDerived(residual, budget);
-							if (residual > budget)
+							if (!nearWhite && std::abs(out[k] - (part[k] + excursionCodes(c, sp, k))) > 1.5)
 								problems += L"sweep " + text(c) + L" channel " + std::to_wstring(k) + L": " + std::to_wstring(out[k]) +
-									L" vs in-range part " + std::to_wstring(part[k]) + L", residual " + std::to_wstring(residual) +
-									L" > budget " + std::to_wstring(budget) + L" at gain " + std::to_wstring(g) + L", domain " +
+									L" vs in-range part " + std::to_wstring(part[k]) + L" at gain " + std::to_wstring(g) + L", domain " +
 									std::to_wstring(static_cast<int>(domain)) + L"; ";
 							if (i > 0)
 							{
@@ -1025,17 +1063,18 @@ namespace VideoProcessorTest
 				L" deg; edge pairs worst in-range / all-channel step " + std::to_wstring(worstEdgeIn) + L" / " +
 				std::to_wstring(worstEdgeAll) + L" codes; sweep worst step against the in-range part " +
 				std::to_wstring(worstStep) + L" codes; residual asserted " + std::to_wstring(residualChecked + residualNearWhite) +
-				L" (1.5-code budget " + std::to_wstring(residualChecked) + L", derived near-white budget " +
-				std::to_wstring(residualNearWhite) + L"), exempt " + std::to_wstring(residualExempt) +
-				L"; worst derived-budget case: residual " + std::to_wstring(worstDerivedResidual) + L" of budget " +
-				std::to_wstring(worstDerivedBudget) + L"\n").c_str());
-			// Every case asserted (622, none exempt). The derived budget applies exactly where the model says:
-			// 980/1000/200 in 12 of the 17 settings and in all 130 boosted sweep steps (142); 480 at 1.5 codes.
+				L" (input-referenced " + std::to_wstring(residualChecked) + L", near-white idle-referenced " +
+				std::to_wstring(residualNearWhite) + L", all at 1.5 codes), exempt " + std::to_wstring(residualExempt) +
+				L"; near-white worst idle-relative residual " + std::to_wstring(worstIdleRelative) +
+				L"; fallback form (plain residual <= 1 + slope x idle error): worst ratio " + std::to_wstring(worstFallbackRatio) +
+				L", misses " + std::to_wstring(fallbackMisses) + L" " + fallbackText + L"\n").c_str());
+			// Every case asserted at 1.5 codes (622, none exempt). The idle reference applies exactly where the
+			// model says: 980/1000/200 in 12 of the 17 settings and in all 130 boosted sweep steps (142); 480 others.
 			if (residualChecked + residualNearWhite != 622 || residualExempt != 0 || residualChecked != 480 ||
 				residualNearWhite != 142)
 				problems += L"residual coverage: asserted " + std::to_wstring(residualChecked + residualNearWhite) +
 					L" (expected 622: " + std::to_wstring(residualChecked) + L" at 1.5 codes, expected 480; " +
-					std::to_wstring(residualNearWhite) + L" derived, expected 142), exempt " + std::to_wstring(residualExempt) +
+					std::to_wstring(residualNearWhite) + L" idle-referenced, expected 142), exempt " + std::to_wstring(residualExempt) +
 					L" (expected 0); ";
 			fixture.CaptureLog(nullptr);
 			Assert::IsTrue(problems.empty(), (problems + L"log: " + std::wstring(log.begin(), log.end())).c_str());
