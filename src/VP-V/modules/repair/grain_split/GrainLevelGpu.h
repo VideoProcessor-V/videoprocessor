@@ -73,6 +73,9 @@ namespace GrainSplit
 	namespace LevelGpu
 	{
 		namespace RE = RendererExtension;
+		// The hub and the skeleton's external demand live in Vpv (ExtensionHub.h, SkeletonFacts.h); this namespace is outside it.
+		namespace Hub = Vpv::Hub;
+		namespace Skeleton = Vpv::Skeleton;
 		constexpr const char* kOwnerUnit = Gpu::kOwnerUnit;                // the catalog's kP10gGrainLevel owner (ProductCatalog.h)
 		constexpr const char* kFallbackId = "grain_level_temporal";        // the Fallbacks id (refs/120 fallback visibility)
 		constexpr int kGroupEdge = 16;                                       // workgroup edge: one workgroup per block
