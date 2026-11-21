@@ -806,9 +806,13 @@ namespace SkeletonModuleTestsNs
 		{
 			Rig rig(Lane("on"));
 			rig.ResyncApply("on");
+			FeedQueueTerms(rig);   // GF-P2a RIG: the queue window is fed, so no "skeleton_queue_window: not fed" line is left over
 			rig.Life(RE::Lifecycle::GpuCreated);
 			for (int64_t s = 1; s <= 3; ++s)
+			{
 				rig.Frame(s);
+				PresentFacts(rig, s);
+			}
 			Assert::IsNotNull(rig.sk.LaneOf(rig.Host()));
 			Assert::IsTrue(rig.sk.WorkersRunning(rig.Host()));
 			rig.cfg.Write(Lane("off"));
