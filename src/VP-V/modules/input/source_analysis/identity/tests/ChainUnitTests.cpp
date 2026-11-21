@@ -858,12 +858,21 @@ namespace Tests
 			const int caller[7] = { 540, 810, 945, 675, 720, 360, 450 };
 			const AxisRun r = Analyse(a.v, std::vector<int>(caller, caller + 7), v);
 			Logger::WriteMessage(Describe("blocky native V", r).c_str());
+			int validCount = 0;
+			bool valid540 = false, valid810 = false;
 			for (size_t k = 0; k < r.vr.candidates.size(); ++k)
 			{
 				const CandidateResult& c = r.vr.candidates[k];
 				if (c.valid)
+				{
+					++validCount;
+					if (c.nProposed == 540) valid540 = true;
+					if (c.nProposed == 810) valid810 = true;
 					Assert::IsTrue(c.stat > -0.3, L"a coding grid dips far less than an upscale");
+				}
 			}
+			Assert::IsTrue(validCount >= 4, L"at least 4 candidate sizes must be validly evaluated");
+			Assert::IsTrue(valid540 && valid810, L"grid sizes 540 and 810 must be validly evaluated");
 		}
 
 		TEST_METHOD(LatchedSizeIsAlwaysVerifiedAndFewerLinesAreHonoured)
@@ -1940,12 +1949,15 @@ namespace Tests
 			const Axes& a = Native(10.0, 1001u, 10);
 			DescaleVerifier v1;
 			DescaleVerifier v2;
-			ProbeResult p1;
-			ProbeResult p2;
-			PowerProbe::Run(v1, a.v, 0.29, 1.0, ProbeSettings(), p1);
-			PowerProbe::Run(v2, a.v, 0.29, 1.0, ProbeSettings(), p2);
-			PowerProbe::Run(v1, a.v, 0.29, 1.0, ProbeSettings(), p2);   // warm cache
-			Assert::IsTrue(std::memcmp(&p1.stat, &p2.stat, sizeof(double)) == 0 && p1.gatedLines == p2.gatedLines && p1.seen == p2.seen);
+			ProbeResult p1, p2, p3;
+			Assert::IsTrue(PowerProbe::Run(v1, a.v, 0.29, 1.0, ProbeSettings(), p1), L"first cold probe must succeed");
+			Assert::IsTrue(PowerProbe::Run(v2, a.v, 0.29, 1.0, ProbeSettings(), p2), L"second cold probe must succeed");
+			Assert::IsTrue(PowerProbe::Run(v1, a.v, 0.29, 1.0, ProbeSettings(), p3), L"warm cache probe must succeed");
+			Assert::IsTrue(p1.ran && p2.ran && p3.ran, L"all three probes must have run");
+			Assert::IsTrue(std::memcmp(&p1.stat, &p2.stat, sizeof(double)) == 0 && p1.gatedLines == p2.gatedLines && p1.seen == p2.seen,
+				L"cold vs cold probes must match identically");
+			Assert::IsTrue(std::memcmp(&p1.stat, &p3.stat, sizeof(double)) == 0 && p1.gatedLines == p3.gatedLines && p1.seen == p3.seen,
+				L"cold vs warm cache probes must match identically");
 		}
 	};
 

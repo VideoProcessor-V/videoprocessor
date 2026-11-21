@@ -154,6 +154,26 @@ namespace Tests
 			Assert::AreEqual(50.0, PulldownSignalHz(shadow, 50.0), 1e-12, L"shadow does not drive");
 			shadow.Configure(Shadow::Mode::On, 32);
 			Assert::AreEqual(50.0, PulldownSignalHz(shadow, 50.0), 1e-12, L"driving but the window has not filled (0)");
+
+			// Populate the 10 s windowed rate at 59.94 Hz (60000/1001) while in Shadow mode.
+			shadow.Configure(Shadow::Mode::Shadow, 32);
+			for (uint64_t i = 1; i <= 620; ++i)
+			{
+				EnqueueFacts f;
+				f.sequence = i;
+				f.queueGeneration = 1;
+				f.stateKey = 0x1000;
+				f.formatKey = 1;
+				f.frameCounter = i;
+				f.timestampTicks = static_cast<int64_t>(i * 1001);
+				f.ticksPerSecond = 60000;
+				f.measuredRateHz = 59.94;
+				shadow.OnEnqueue(f, static_cast<double>(i) * 1001.0 / 60000.0);
+			}
+			Assert::AreEqual(59.94, shadow.WindowedRateHz(), 0.01, L"windowed rate populated at 59.94 Hz");
+			Assert::AreEqual(50.0, PulldownSignalHz(shadow, 50.0), 1e-12, L"shadow still returns fallback even when window is full");
+			shadow.Configure(Shadow::Mode::On, 32);
+			Assert::AreEqual(59.94, PulldownSignalHz(shadow, 50.0), 0.01, L"driving uses the populated windowed rate");
 		}
 	};
 }

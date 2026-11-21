@@ -262,6 +262,22 @@ namespace Tests
 				Assert::AreEqual(60.0, ext.OnResolve(RE::Resolve::DisplayRefreshRate, c, 60.0));
 				RE::Context none;
 				Assert::AreEqual(25.0, ext.OnResolve(RE::Resolve::SourceSignalRate, none, 25.0));
+
+				// Drive ingress at 59.94 Hz (60000/1001) across >10 s to fill the windowed rate.
+				for (int64_t s = 1; s <= 620; ++s)
+				{
+					RE::IngressContext ic = Frame(&r, s);
+					ic.ticksPerSecond = 60000;
+					ic.timestamp = s * 1001;
+					ic.measuredRateHz = 59.94;
+					ext.OnIngress(ic);
+				}
+				Assert::AreEqual(59.94, r.resync.WindowedRateHz(), 0.05, L"windowed rate populated at 59.94 Hz");
+				Assert::AreEqual(29.97, ext.OnResolve(RE::Resolve::SourceSignalRate, c, 29.97), 1e-12,
+					L"shadow still returns Bill's fallback rate when window is populated");
+				Apply(ext, &r, "on");
+				Assert::AreEqual(59.94, ext.OnResolve(RE::Resolve::SourceSignalRate, c, 29.97), 0.05,
+					L"driving returns the populated windowed rate");
 			}
 
 			TEST_METHOD(PulldownStepKeepsTodaysRules)
@@ -311,12 +327,21 @@ namespace Tests
 				ResyncExtension ext;
 				FakeRenderer r;
 				Apply(ext, &r, "shadow");
+				(void)VpResync::RefusalNote::Take();   // clear any prior process-global note
 				RE::LifecycleFacts f; f.host = &r; f.kind = RE::Lifecycle::StateRefused;
 				f.code = Vpv::Resync::kRefusalInitRace; ext.OnLifecycle(f);
+				Assert::IsTrue(VpResync::RefusalNote::Take() == VpResync::RefusalReason::InitRace,
+					L"kRefusalInitRace must set RefusalReason::InitRace");
 				f.code = Vpv::Resync::kRefusalSettingsRebuild; ext.OnLifecycle(f);
+				Assert::IsTrue(VpResync::RefusalNote::Take() == VpResync::RefusalReason::SettingsRebuild,
+					L"kRefusalSettingsRebuild must set RefusalReason::SettingsRebuild");
 				f.code = Vpv::Resync::kRefusalClassify; ext.OnLifecycle(f);   // no states given: ignored
+				Assert::IsTrue(VpResync::RefusalNote::Take() == VpResync::RefusalReason::None,
+					L"kRefusalClassify without states must not set a refusal note");
 				RE::LifecycleFacts a; a.host = &r; a.kind = RE::Lifecycle::StateAccepted; a.subject = &r;
 				ext.OnLifecycle(a);
+				Assert::AreEqual(reinterpret_cast<uint64_t>(&r), r.resync.Arms().Read(VpResync::ArmBox::State).key,
+					L"StateAccepted must arm ArmBox::State with subject key");
 				Assert::AreEqual(0ull, ResyncExtension::ContainedFaults(&r));
 			}
 
