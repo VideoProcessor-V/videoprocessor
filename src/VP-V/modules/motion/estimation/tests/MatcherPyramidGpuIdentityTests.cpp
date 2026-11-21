@@ -275,7 +275,8 @@ namespace VideoProcessorTest
 			{
 				const Dejudder::Planes& a = frames[i]->planes;   // the render frame
 				const Dejudder::Planes& b = frames[i + 1]->planes;
-				// The render frame's Begin: the seal, the last frame's offers dropped, its Entrance image offered (the same luma here).
+				// The render frame's Begin: the seal and the last frame's offers dropped. Its Entrance image is offered only AFTER the
+				// estimate, as in production (NotifyEntrance follows UpdateDejudderEstimate): A can never be filled from it.
 				rig.memo->OnSeal(a.sequence);
 				Vpv::Capture::SourcePlanes::BeginFrame(rig.Host());
 				pl_frame image{};
@@ -286,7 +287,6 @@ namespace VideoProcessorTest
 				image.planes[1].components = 2;
 				image.repr.sys = PL_COLOR_SYSTEM_BT_709;
 				image.repr.levels = PL_COLOR_LEVELS_LIMITED;
-				Assert::IsTrue(Vpv::Capture::SourcePlanes::OfferFrame(rig.Host(), a.sequence, int64_t(i + 1), image), L"Entrance offer");
 				// RunDejudderEstimate's order: the epoch, the offers, the seam.
 				engine.NoteMatcherEpoch(1);
 				if (modes[i] == Mode::EngineAhead)
@@ -310,6 +310,7 @@ namespace VideoProcessorTest
 					break;
 				}
 				Assert::IsTrue(warp.Estimate(a, b), L"estimate");
+				Assert::IsTrue(Vpv::Capture::SourcePlanes::OfferFrame(rig.Host(), a.sequence, int64_t(i + 1), image), L"Entrance offer (after the estimate)");
 				EstimateResult r;
 				r.bound = warp.PyramidFromProduct();
 				r.innerBound = warp.InnerPyramidFromProduct();
@@ -406,11 +407,14 @@ namespace VideoProcessorTest
 			const std::vector<Mode> modes = { Mode::Engine, Mode::Engine, Mode::Forced, Mode::Engine, Mode::Engine };
 			const std::vector<EstimateResult> none = RunArm(fixture, std::vector<Mode>(modes.size(), Mode::NoSeam), 512, 256, false);
 			const std::vector<EstimateResult> alt = RunArm(fixture, modes, 512, 256, false);
-			const bool wantBound[5] = { false, true, false, true, true };
+			// Estimate 4's A was the forced estimate's B, whose product was never asked: no kept product, an own build (visible),
+			// then bound again at 5. The Entrance image of A comes after the estimate, so A is never filled from it.
+			const bool wantBound[5] = { false, true, false, false, true };
 			for (size_t i = 0; i < alt.size(); ++i)
 				Assert::AreEqual(wantBound[i], alt[i].bound, (L"estimate " + std::to_wstring(i + 1) + L" bound: " + Wide(alt[i].why)).c_str());
 			Assert::AreEqual(std::string(kForced), alt[2].why, L"the forced estimate is visible");
-			Assert::IsTrue(alt[3].why.empty() && alt[4].why.empty(), L"bound again: the row released");
+			Assert::IsFalse(alt[3].why.empty(), L"estimate 4 (no kept A after the forced estimate) builds its own, visibly");
+			Assert::IsTrue(alt[4].why.empty(), L"bound again: the row released");
 			CheckSameOutputs(alt, none, L"alternation");
 		}
 
