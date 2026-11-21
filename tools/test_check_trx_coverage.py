@@ -65,8 +65,27 @@ class MainEntry(unittest.TestCase):
                 rc = T.main(["--json", "--filter", "FullyQualifiedName~KTests|FullyQualifiedName~Absent", d])
             rep = json.loads(buf.getvalue())
             self.assertEqual(rc, 1)
-            self.assertEqual(rep["verdict"], "FAIL")
+            self.assertEqual(rep["verdict"], "COVERAGE FAIL")
             self.assertEqual([r["executed"] for r in rep["terms"]], [1, 0])
+
+    def test_trx_file_option_and_failed_tests_printed_apart(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "r.trx")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(T._fixture([("N.KTests", "M", "Failed", "")]))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = T.main(["--filter", "FullyQualifiedName~KTests", "--trx", p])
+            text = buf.getvalue()
+            self.assertEqual(rc, 0)
+            self.assertIn("READ 1 TRX file(s):", text)
+            self.assertIn("FAILED N.KTests::M", text)
+            self.assertIn("VERDICT: COVERAGE PASS (1 failed: see the runner rc)", text)
+
+    def test_trx_option_refuses_a_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(T.main(["--filter", "Name=M", "--trx", d]), 2)
 
     def test_queue_file_lane_lookup_takes_the_last_line(self):
         with tempfile.TemporaryDirectory() as d:
