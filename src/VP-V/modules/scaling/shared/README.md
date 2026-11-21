@@ -86,6 +86,12 @@ model. Each decision cites the owner lines of refs/123 N0.
   both, down first) equals what the REAL `AdaptiveDownscale::Module` (faithful_ortho, w_base 0) renders through libplacebo, within one 8-bit
   code (the pipeline writes an 8-bit target). AdaptiveDownscale is only driven, never edited. It does not replace the bit-exact test.
 
+## Users migrated in B5a (CF-2)
+
+- `AdaptiveDownscale`'s faithful branch (ortho and polar) now calls `ScalerPass::Module::Apply` (slot 0); `faithful` aliases the unit's texture. A failed Apply is the existing counted pass-through (no silent 32-to-16-bit fallback: `float32Picture` off asks for F16 explicitly).
+- `KernelInverse::Candidates()` is built from `ScalerKernels::Table()` (`inKernelInverse` entries); `ChromaUpscale::CatmullRomWeights` calls `ScalerKernels::CatmullRomTapWeights`.
+- NOT migrated: the `BasicChroma` integer Q14 model and its byte-identical GPU pass (U20); the float ScalerPass cannot express it (reported to the lead).
+
 ## Open / not verified in B0
 
 Nothing was built or run when this slice was written (code-only; the build + TRX are queued by the dispatcher after audit): the tests are unrun, the anti-ring and polar unequal-axis semantics of

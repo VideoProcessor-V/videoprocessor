@@ -7,6 +7,7 @@
 #include <VP-V/modules/scaling/output/NlsMaskMapping.h>
 #include <VP-V/modules/drive/led_measure/ReadbackRing.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleCut.h>
+#include <VP-V/modules/scaling/shared/ScalerPass.h>
 
 #include <algorithm>
 #include <cmath>
@@ -462,8 +463,10 @@ namespace AdaptiveDownscale
 		float frameSeconds = 1.0f / 24.0f;
 		bool sourceDownscales = true;
 		pl_gpu gpu = nullptr;
+		// The faithful branch is a ScalerPass (B5a, refs/123 N1): `faithful` aliases that unit's slot-0 texture (owned and
+		// released by faithfulScaler, never destroyed here); its LUT objects live in the unit too.
 		pl_tex faithful = nullptr;
-		pl_tex faithfulMid = nullptr;   // the ortho branch's vertical pass
+		ScalerPass::Module faithfulScaler;
 		pl_tex lowres = nullptr;          // 8b: a doubler's output at source resolution
 		Upscale upscale{};
 		int upscaleRatio = 0;
@@ -498,8 +501,6 @@ namespace AdaptiveDownscale
 		bool statsNativeTried = false;
 		LedDrive::ReadbackRing statsSchedule{ kStatsSlots, 8 };
 		uint64_t statsFrames = 0;
-		pl_shader_obj polarLut = nullptr;
-		pl_shader_obj orthoLut[2] = { nullptr, nullptr };
 		bool active = false;
 		pl_rect2df srcRect{};
 		pl_rect2d dstRect{};

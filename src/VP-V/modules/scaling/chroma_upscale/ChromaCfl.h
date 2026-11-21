@@ -31,6 +31,7 @@
 #pragma once
 
 #include <VP-V/core/Ramp.h>
+#include <VP-V/modules/scaling/shared/KernelTable.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
 #include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
@@ -121,13 +122,11 @@ namespace ChromaUpscale
 	}
 
 	// Catmull-Rom weights for the taps floor(u) - 1 .. floor(u) + 2 at fraction t.
+	// B5a (102b ECV-BICUBIC-CHROMA): the weights are the shared kernel table's (ScalerKernels::CatmullRomTapWeights), the
+	// same polynomial that was copied here before, so every CfL sum is unchanged.
 	inline void CatmullRomWeights(double t, double w[4])
 	{
-		const double t2 = t * t, t3 = t2 * t;
-		w[0] = -0.5 * t3 + t2 - 0.5 * t;
-		w[1] = 1.5 * t3 - 2.5 * t2 + 1.0;
-		w[2] = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
-		w[3] = 0.5 * t3 - 0.5 * t2;
+		ScalerKernels::CatmullRomTapWeights(t, w);
 	}
 
 	// 4 x 4 Catmull-Rom at (u, v) of `p`, tap indices clamped to [xlo, xhi] x [ylo, yhi]; row-inner sum.

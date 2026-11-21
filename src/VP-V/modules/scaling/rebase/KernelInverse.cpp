@@ -4,17 +4,21 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
-#include <functional>
+
+#include <VP-V/modules/scaling/shared/KernelTable.h>   // the ONE kernel table (refs/123 B5a): the candidates are drawn from it
 
 namespace KernelInverse
 {
 	namespace
 	{
 		constexpr double kPi = 3.14159265358979323846;
-		double Sinc(double x) { return std::fabs(x) < 1e-12 ? 1.0 : std::sin(kPi * x) / (kPi * x); }
 
-		Candidate Make(const std::string& name, const std::function<double(double)>& k, int radius)
+		// B5a: the 1-D weight and the support radius come from the shared kernel table (ScalerKernels::Weight; the same
+		// expressions this file carried before, so every tap is unchanged).
+		Candidate Make(const std::string& name, const ScalerKernels::Spec& spec)
 		{
+			const int radius = spec.kind == ScalerKernels::Kind::Bilinear ? 1 : spec.kind == ScalerKernels::Kind::Lanczos ? spec.radius : 2;
+			auto k = [&spec](double x) { return ScalerKernels::Weight(spec, x); };
 			Candidate c;
 			c.name = name;
 			// The upscale's phases: output 2i + p sits at 1080 position i - 0.25 (p = 0)
@@ -73,33 +77,17 @@ namespace KernelInverse
 			for (size_t t = 0; t < wd.size(); ++t) c.weights[t] = static_cast<float>(wd[t] / sum);   // truncation: keep DC exact
 			return c;
 		}
-
-		std::function<double(double)> Bicubic(double B, double C)
-		{
-			return [B, C](double x) {
-				x = std::fabs(x);
-				if (x < 1) return ((12 - 9 * B - 6 * C) * x * x * x + (-18 + 12 * B + 6 * C) * x * x + (6 - 2 * B)) / 6;
-				if (x < 2) return ((-B - 6 * C) * x * x * x + (6 * B + 30 * C) * x * x + (-12 * B - 48 * C) * x + (8 * B + 24 * C)) / 6;
-				return 0.0;
-			};
-		}
-		std::function<double(double)> Lanczos(int a)
-		{
-			return [a](double x) { return std::fabs(x) < a ? Sinc(x) * Sinc(x / a) : 0.0; };
-		}
 	}
 
 	const std::vector<Candidate>& Candidates()
 	{
 		static const std::vector<Candidate> list = [] {
 			std::vector<Candidate> v;
-			v.push_back(Make("bicubic C0.5 (Catmull-Rom)", Bicubic(0.0, 0.5), 2));
-			v.push_back(Make("bicubic C0.6", Bicubic(0.0, 0.6), 2));
-			v.push_back(Make("bicubic C0.75", Bicubic(0.0, 0.75), 2));
-			v.push_back(Make("lanczos2", Lanczos(2), 2));
-			v.push_back(Make("lanczos3", Lanczos(3), 3));
-			v.push_back(Make("lanczos4", Lanczos(4), 4));
-			v.push_back(Make("bilinear", [](double x) { return (std::max)(0.0, 1.0 - std::fabs(x)); }, 1));
+			// The table's KernelInverse entries, in the table's order (the seven candidates: bicubic C0.5 / 0.6 / 0.75,
+			// lanczos 2 / 3 / 4, bilinear).
+			for (const ScalerKernels::Entry& e : ScalerKernels::Table())
+				if (e.inKernelInverse)
+					v.push_back(Make(e.name, e.spec));
 			return v;
 		}();
 		return list;

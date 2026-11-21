@@ -11,6 +11,7 @@
 
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
 #include <VP-V/modules/scaling/rebase/SourceRebase.h>
+#include <VP-V/modules/scaling/chroma_upscale/ChromaCfl.h>
 #include <VP-V/modules/scaling/shared/KernelTable.h>
 #include <VP-V/modules/scaling/shared/ScalerGeometry.h>
 #include <VP-V/modules/scaling/shared/ScalerPass.h>
@@ -101,6 +102,26 @@ namespace ScalerPassTestsNs
 			Assert::IsTrue(ScalerKernels::Find("hermite") >= 0);
 			Assert::IsTrue(ScalerKernels::IsPolar(t[static_cast<size_t>(ScalerKernels::Find("ewa_lanczossharp"))].spec.kind));
 			Assert::AreEqual(-1, ScalerKernels::Find("no such kernel"));
+		}
+
+		TEST_METHOD(ScalerCatmullRomTapWeightsSharedWithChromaCfl)
+		{
+			for (int i = 0; i <= 16; ++i)
+			{
+				const double t = i / 16.0;
+				double a[4], b[4];
+				ScalerKernels::CatmullRomTapWeights(t, a);
+				ChromaUpscale::CatmullRomWeights(t, b);
+				double sum = 0.0;
+				for (int k = 0; k < 4; ++k)
+				{
+					Assert::IsTrue(a[k] == b[k], L"chroma CfL weights are the shared table weights (bit for bit)");
+					sum += a[k];
+					const double viaKernel = ScalerKernels::Cubic(0.0, 0.5, std::fabs(t - (k - 1)));
+					Assert::IsTrue(std::fabs(a[k] - viaKernel) < 1e-12, L"tap weight equals Cubic(0,0.5) at its distance");
+				}
+				Assert::IsTrue(std::fabs(sum - 1.0) < 1e-12, L"Catmull-Rom taps sum to one");
+			}
 		}
 
 		TEST_METHOD(ScalerGeometryDerivesRatiosPerAxis)

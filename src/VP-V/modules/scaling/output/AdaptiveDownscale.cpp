@@ -11,6 +11,7 @@
 #include <VP-V/core/OnePole.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
+#include <VP-V/modules/scaling/shared/ScalerPass.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <VP-V/modules/drive/led_measure/NativeReadback.h>
 
@@ -532,7 +533,7 @@ float rs_slope(float y)
 		{
 			// The residual pair too (found 2026-10-31: it outlived Release and a new GPU recreated
 			// it through the old one's texture).
-			for (pl_tex* tex : { &faithful, &faithfulMid, &lowres, &edge, &partial, &state, &map[0], &map[1], &motionMap[0], &motionMap[1],
+			for (pl_tex* tex : { &lowres, &edge, &partial, &state, &map[0], &map[1], &motionMap[0], &motionMap[1],
 				&residual[0], &residual[1] })
 				if (*tex)
 					pl_tex_destroy(gpu, tex);
@@ -544,12 +545,8 @@ float rs_slope(float y)
 		statsNative.reset();
 		statsNativeTried = false;
 		statsSchedule.Reset();
-		if (polarLut)
-			pl_shader_obj_destroy(&polarLut);
-		for (pl_shader_obj& lut : orthoLut)
-			if (lut)
-				pl_shader_obj_destroy(&lut);
-		faithful = faithfulMid = lowres = edge = partial = state = map[0] = map[1] = motionMap[0] = motionMap[1] = nullptr;
+		faithfulScaler.Release(gpu);
+		faithful = lowres = edge = partial = state = map[0] = map[1] = motionMap[0] = motionMap[1] = nullptr;
 		residual[0] = residual[1] = nullptr;
 		residualIndex = 0;
 		residualPrevValid = false;
@@ -836,7 +833,7 @@ float rs_slope(float y)
 		const int w = std::max(1, static_cast<int>(std::ceil(sx1)) - ox);
 		const int h = std::max(1, static_cast<int>(std::ceil(sy1)) - oy);
 		const int gx = (w + 15) / 16, gy = (h + 15) / 16;
-		if (!EnsurePicture(gpu, faithful, dw, dh, settings.float32Picture) || !Ensure(gpu, edge, w, h, 1, 16, false, true) ||
+		if (!Ensure(gpu, edge, w, h, 1, 16, false, true) ||
 			!Ensure(gpu, partial, gx, gy, 4, 32, false, false) || !Ensure(gpu, state, 1, 1, 4, 32, false, false))
 		{
 			++failures;
@@ -858,72 +855,38 @@ float rs_slope(float y)
 		// axes' ratios differ by more than 10 %.
 		const double ratioX = (sx1 - sx0) / std::max(1, dw), ratioY = (sy1 - sy0) / std::max(1, dh);
 		const bool unequal = std::max(ratioX, ratioY) > 1.1 * std::max(1e-6, std::min(ratioX, ratioY));
-		if (settings.faithfulOrtho || (settings.faithfulAuto && unequal))
+		// ScalerPass (refs/123 N1): ortho = Lanczos r3 down-first (vertical over whole source columns, then across),
+		// polar = ewa_lanczossharp; the call sequence is the one this branch always made. 32-bit float unless
+		// float32Picture is off (an explicit setting, announced by the unit's Note).
 		{
-			if (!EnsurePicture(gpu, faithfulMid, w, dh, settings.float32Picture))
+			ScalerPass::Settings fs;
+			fs.axis = ScalerPass::Axis::Both;
+			fs.order = ScalerPass::Order::DownFirst;
+			fs.antiring = settings.antiring;
+			fs.precision = settings.float32Picture ? ScalerPass::Precision::F32 : ScalerPass::Precision::F16;
+			if (settings.faithfulOrtho || (settings.faithfulAuto && unequal))
 			{
+				fs.filter.kind = ScalerKernels::Kind::Lanczos;
+				fs.filter.radius = 3;
+			}
+			else
+			{
+				fs.filter.kind = ScalerKernels::Kind::EwaLanczosSharp;
+			}
+			ScalerPass::Source fsrc;
+			fsrc.tex = base;
+			fsrc.x0 = sx0;
+			fsrc.y0 = sy0;
+			fsrc.x1 = sx1;
+			fsrc.y1 = sy1;
+			pl_tex out = nullptr;
+			if (!faithfulScaler.Apply(gpu, p->dispatch, fsrc, dw, dh, fs, out, 0))
+			{
+				// Visible, not silent: the frame is passed through unchanged and counted.
 				++failures;
 				return unchanged;
 			}
-			for (int pass = 0; pass < 2; ++pass)
-			{
-				pl_shader sh = pl_dispatch_begin(p->dispatch);
-				pl_sample_src src{};
-				src.components = 4;
-				if (pass == 0)
-				{
-					// Vertical: whole source columns ox..ox+w, rows to dh.
-					src.tex = base;
-					src.rect = { static_cast<float>(ox), sy0, static_cast<float>(ox + w), sy1 };
-					src.new_w = w;
-					src.new_h = dh;
-				}
-				else
-				{
-					src.tex = faithfulMid;
-					src.rect = { sx0 - ox, 0.0f, sx1 - ox, static_cast<float>(dh) };
-					src.new_w = dw;
-					src.new_h = dh;
-				}
-				pl_sample_filter_params filter{};
-				filter.filter = pl_filter_lanczos;
-				filter.antiring = settings.antiring;
-				filter.lut = &orthoLut[pass];
-				pl_dispatch_params dp{};
-				dp.shader = &sh;
-				dp.target = pass == 0 ? faithfulMid : faithful;
-				if (!pl_shader_sample_ortho2(sh, &src, &filter) || !pl_dispatch_finish(p->dispatch, &dp))
-				{
-					if (sh)
-						pl_dispatch_abort(p->dispatch, &sh);
-					++failures;
-					return unchanged;
-				}
-			}
-		}
-		else
-		{
-			pl_shader sh = pl_dispatch_begin(p->dispatch);
-			pl_sample_src src{};
-			src.tex = base;
-			src.rect = { sx0, sy0, sx1, sy1 };
-			src.new_w = dw;
-			src.new_h = dh;
-			src.components = 4;
-			pl_sample_filter_params filter{};
-			filter.filter = pl_filter_ewa_lanczossharp;
-			filter.antiring = settings.antiring;
-			filter.lut = &polarLut;
-			pl_dispatch_params dp{};
-			dp.shader = &sh;
-			dp.target = faithful;
-			if (!pl_shader_sample_polar(sh, &src, &filter) || !pl_dispatch_finish(p->dispatch, &dp))
-			{
-				if (sh)
-					pl_dispatch_abort(p->dispatch, &sh);
-				++failures;
-				return unchanged;
-			}
+			faithful = out;
 		}
 
 		// 2. Edges and the per-workgroup grain sums (bug hunt 33 F3 / F4: the source's luma
