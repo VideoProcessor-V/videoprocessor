@@ -317,6 +317,7 @@ Chain tests:
   bit/decision identical (COORDINATOR 2026-11-14 08:40 EST, `D:/codex/vp-handover/refs/owner-decisions-2026-11-07.md:691`: "Q1 shared analysis-luma decode (12-bit as fractions on 10-bit axis)").
 - 12-bit comes only through the DV tunnel (OWNER 2026-11-14 08:30 EST, same file: "neither Magewell nor DeckLink captures 12-bit directly;
   12-bit comes through the DV TUNNEL, sent as 8-bit RGB, recovered by VP's DV unpack"); the tap is `DvTunnelTapLaw.h` (`TapAxisQ6`).
+  Tap law (slice 21): the tap is the Q6 axis (axis value x 64) for every depth: a 10-bit code is code << 6 (msbShift 6), a 12-bit DV code is code12 << 4 (msbShift 4), codeUnit 64 / 65535 for every tap; only STEP-derived constants (2^(10 - declared bits)) move with depth, LEVEL thresholds keep their axis meaning.
 - Bill's CPU fallback and his `Round12To10` stay Original (08:40: "Bill fallback = Original + 'below 12-bit' label"); the unit holds a
   twin of the law and the tests pin the two together. Sample() stays ten-bit integer (a fraction field would change Bill's struct, rule 33).
 - Doc 91 A (verbatim): "Fewer, consolidated modules (fewer places for bugs, easier audits)"; "compute once / skip if present; no duplicate work".

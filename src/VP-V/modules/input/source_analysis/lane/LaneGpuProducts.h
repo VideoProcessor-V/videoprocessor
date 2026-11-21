@@ -9,9 +9,11 @@
 // form (one step per lane chunk) and the live form (all steps at once): the same shaders, defines, uniforms and inputs,
 // so lane == live by construction.
 //
-// The common input is the TAP plane: the lane SourceFrameView luma (10-bit studio codes, msbShift 6) uploaded as an
-// R16 unorm texture of code << 6, so a texel is code * 64 / 65535 and floor(texel * 65535 + 0.5) / 64 recovers the code
-// exactly; and the EXTENDED plane: the tap with the bars outside the picture rect replaced by the picture mirrored about
+// The common input is the TAP plane: the lane SourceFrameView luma (the Q6 analysis axis: 10-bit studio codes at msbShift 6, a 12-bit
+// DV tap at msbShift 4, both MsbAlign to the same 16-bit lane scale; codeUnit 64 / 65535 for every tap) uploaded as an
+// R16 unorm texture of the MsbAlign value (the Q6 axis value), so a texel is Q6 / 65535 and floor(texel * 65535 + 0.5) recovers
+// Q6 exactly: / 64 is the 10-bit code (a 10-bit tap, an integer), while a 12-bit DV tap keeps two fraction bits (Q6 = code12 * 16);
+// and the EXTENDED plane: the tap with the bars outside the picture rect replaced by the picture mirrored about
 // its edge (RegionEvidence::ExtendPicture, same law, R16 unorm, exact copies of tap codes). Provenance: kTapProvenance,
 // unit kTapFormUnitVersion (LaneGpuJobs.h).
 

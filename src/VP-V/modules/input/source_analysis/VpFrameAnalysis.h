@@ -73,8 +73,9 @@ namespace VpFrameAnalysis
 	// P10 N fix (refs/116b, owner 2026-11-12: 12-bit end to end): the SAME frame's luma at TWELVE bits (msbShift 4: the
 	// DvTunnelTapLaw 12-bit tap code, limited domain), for a packed DV tunnel source only (false for every other format: those
 	// carry no more than their own ten-bit codes). A VP-V side product of Bill's untouched AnalysisLumaSource (Sample().luma stays
-	// the ten-bit code); the lane's other readers keep SourceViewOf (msbShift 6). A consumer of this view states its source depth
-	// (GrainSplit::Params::sourceBits = 12, codeUnit 16 / 65535).
+	// the ten-bit code); the lane's other readers keep SourceViewOf (msbShift 6). The tap is the Q6 analysis axis (AnalysisAxis10.h): a
+	// 12-bit sample is code12 << 4 = Q6 (msbShift 4), so a consumer keeps the axis law (GrainSplit sourceBits 10, codeUnit 64 / 65535,
+	// the same for every tap; W21-3 proves it equal to the native 12-bit law sourceBits 12, codeUnit 16 / 65535).
 	bool SourceViewOf12(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view);
 
 	// The P1 engine half of a frame through its shared decode (the live fill): DecodeSharedLuma when nobody has (a no-op when

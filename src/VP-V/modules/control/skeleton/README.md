@@ -179,7 +179,7 @@ No `VP_*` variable changes the module's behaviour.
 | P12 light level (GPU) | 3 (`kExpectedLightLevelUnit`) | one pass; reads P11 S0/S3/S4 and its own previous frame; no P11: frame level from P4's APL ("P12 frame-level"); CPU LUT built at Prepare / settings generation | light-level users use the global level (`product.light_level`) |
 | P10c grain split chroma | n/a | **declined**: "P10c declined: chroma needs the source ring (M2 P10)" | chroma upscale runs a lower tier without the grain guard (`product.chroma_cfl`) |
 
-**Tap form (70b section 3):** until the source ring (P13, M2 P10) exists, P10 and P11 read the *tap plane*: the lane's analysis luma (10-bit studio codes << 6,
+**Tap form (70b section 3):** until the source ring (P13, M2 P10) exists, P10 and P11 read the *tap plane*: the lane's analysis luma (studio codes << msbShift: 10-bit << 6, a packed DV tunnel source's 12-bit tap << 4,
 R16 unorm, uploaded in row bands). Unit version `VpLaneProducts::kTapFormUnitVersion` = 1, provenance `VpLaneProducts::kTapProvenance`. At the migration to
 P13 both change, and every consumer's `CheckFit` falls back visibly (WrongSize / Stale) instead of reading a plane of another provenance.
 Nothing reads P10-P12 yet (the `skeleton.report` consumer only declares them).

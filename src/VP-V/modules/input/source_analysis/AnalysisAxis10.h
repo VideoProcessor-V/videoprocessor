@@ -41,6 +41,15 @@ namespace Vpv { namespace AnalysisDomain
 
 	constexpr uint32_t CodeMaximum(int bits) { return bits >= 1 && bits <= 16 ? (1u << bits) - 1u : kAxisMax; }
 
+	// Slice 21 (W21-0): the STEP of a declared depth on the axis (2^(10 - bits): 4 for 8-bit, 1 for 10-bit, 1/4 for 12-bit,
+	// 1/64 for 16-bit) and the native codes per axis code ((codeMaximum + 1) / 1024). Only STEP-derived constants use these; LEVEL
+	// thresholds (black 64, white 940, APL ...) keep their axis meaning. Derived from the depth, never a hard-coded table.
+	constexpr double AxisStepOfBits(int bits)
+	{
+		return bits < 1 || bits > 16 ? 1.0 : (bits <= kAxisBits ? static_cast<double>(1u << (kAxisBits - bits)) : 1.0 / static_cast<double>(1u << (bits - kAxisBits)));
+	}
+	constexpr double NativeCodesPerAxisCode(uint32_t codeMaximum) { return static_cast<double>(codeMaximum + 1u) / static_cast<double>(kAxisBins); }
+
 	// Depth of a codeMaximum of the form 2^n - 1 (anything else reports the nearest power below).
 	constexpr int BitsOf(uint32_t codeMaximum)
 	{
