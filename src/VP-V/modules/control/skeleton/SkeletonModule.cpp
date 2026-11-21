@@ -1910,6 +1910,18 @@ namespace Vpv
 				// A sealed / live slot is served through the lane binder exactly as ReadOf did; a frame AHEAD of the seal makes P4 in the lane's own
 				// slot now (or reuses the published one, never twice); off the render thread the lane's published bytes are copied. Both results
 				// stay alive (their pins) until both records are decoded.
+				// C5-SKREDS: the sequence judge below reads P4 of every frame from its tracker's newest up to `seq` (ReadP4, a peek); a frame
+				// between the seal and seq - 1 that nobody asked for yet would be unreadable and END the judge's part there (its rule), so an
+				// ahead frame would be judged without its context (a real cut two frames ahead of the seal judged no cut). On the render
+				// thread those frames are got-or-computed too, in order, through the same memo (made once: the seal later accepts them).
+				if (ahead && seq >= 3 && bundle.memo->OnRenderThread())
+				{
+					uint64_t first = seq - 1;
+					while (first > 1 && seq - first < kScenePrimeFrames && bundle.memo->AheadOfSeal(first - 1))
+						--first;
+					for (uint64_t s = first; s + 1 < seq; ++s)
+						(void)bundle.memo->Acquire(VpSkeleton::kP4SourceStats, s, VpSkeleton::AcquireForm::Cpu);   // the record stays in its slot / spot
+				}
 				const VpSkeleton::AcquireResult cur = bundle.memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
 				const VpSkeleton::AcquireResult prev = bundle.memo->Acquire(VpSkeleton::kP4SourceStats, seq - 1, VpSkeleton::AcquireForm::Cpu);
 				VpLaneProducts::SourceStatsRecord a, c;
