@@ -57,6 +57,14 @@ namespace
 		if (!result) throw std::runtime_error("Beta GPU: " + message);
 	}
 
+	// Evidence line for a fork-only case that ran to its last check (Check throws first on a failure). The Beta host echoes
+	// these lines into the TRX; ids are BetaStage::SigmaDeltaCameraGoldenTests::T17a .. T17f.
+	void BetaRan(const char* id)
+	{
+		std::cout << "BETA-RAN " << id << "\n";
+		std::cout.flush();
+	}
+
 	struct Pixel { int r, g, b; };
 
 	class Gpu
