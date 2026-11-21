@@ -444,7 +444,7 @@ namespace GrainNodeTestsNs
 				h *= 1099511628211ull;
 			}
 			Assert::AreEqual(size_t(49845), text.size(), L"the reversed text has the K0 text size plus the TD-NONFINITE hunks (K0: 48008)");
-			Assert::AreEqual(uint64_t(0xa9edf33a5a9f55a1ull), h,L"the reversed text hashes to the K0 shader text plus the TD-NONFINITE hunks (K0: 0xb77b206dff1cdaf2)");
+			Assert::AreEqual(uint64_t(0xa9edf33a5a9f55a1ull), h, L"the reversed text hashes to the K0 shader text plus the TD-NONFINITE hunks (K0: 0xb77b206dff1cdaf2)");
 		}
 
 		// Finisher MUST 2: the node's declaration is built from the GRANTED storage (NodeLayout::decl = GrainDecl(choice.storage)),

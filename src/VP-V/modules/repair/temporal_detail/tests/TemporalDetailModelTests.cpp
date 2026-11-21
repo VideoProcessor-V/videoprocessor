@@ -1985,7 +1985,7 @@ namespace VideoProcessorTest
 			bool controlClosed = true, infClosed = true;
 			runPlanted(false, controlBoost, controlKept, controlClosed);
 			runPlanted(true, infBoost, infKept, infClosed);
-			LogF("finite huge peak: largest boost %.4f; +inf peak: largest boost %.4f, blocks still planted at the end %d", controlBoost, infBoost, infKept);
+			LogF("finite huge peak: largest boost %.4f; +inf peak: largest boost %.4f, blocks still planted at the end %.0f", controlBoost, infBoost, infKept);
 			Assert::IsTrue(controlBoost > 0.0, L"control: a finite huge peak opens the boost in at least one block (the downstream gates are open)");
 			Assert::IsTrue(infKept > 0, L"the +inf peak is still held at the last frame (the planted path was exercised)");
 			Assert::IsTrue(infClosed, L"while a block holds a +inf peak its boost, bLim and bOn stay 0 on every frame");
