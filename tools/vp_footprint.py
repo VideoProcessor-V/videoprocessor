@@ -30,6 +30,7 @@ import csv
 import datetime
 import fnmatch
 import json
+import os
 import posixpath
 import re
 import subprocess
@@ -395,10 +396,137 @@ def is_compiled_vp_source(path, bill_tree):
     return path.lower().endswith((".cpp", ".cc", ".cxx")) and is_vp_authored(path, bill_tree) and bucket_of(path) == "production"
 
 
-def shared_vp_headers(sources, read, bill_tree):
-    """Every VP-authored file a VP-authored production .cpp reaches through its #includes (recursively): these compile
-    in VP-V's own translation units too (shared interface headers), so the `tu` measure does not count them."""
+COND_OPEN_RE = re.compile(r'^\s*#\s*(?:if|ifdef|ifndef)\b')
+COND_END_RE = re.compile(r'^\s*#\s*endif\b')
+GUARD_IFNDEF_RE = re.compile(r'^\s*#\s*ifndef\s+(\w+)')
+DEFINE_NAME_RE = re.compile(r'^\s*#\s*define\s+(\w+)')
+
+
+def live_includes(text):
+    """The #include names of `text` OUTSIDE every preprocessor conditional (G-CC2 MUST-A: an include under `#if 0`,
+    `#ifdef NEVER` or any other condition is not proof that a VP-V translation unit compiles the file). The one
+    exception is a classic include guard: `#ifndef X` / `#define X` as the file's first two directives."""
+    lines = text.splitlines()
+    directives = [i for i, ln in enumerate(lines) if ln.lstrip().startswith("#")]
+    guard = None
+    if len(directives) >= 2:
+        m1 = GUARD_IFNDEF_RE.match(lines[directives[0]])
+        m2 = DEFINE_NAME_RE.match(lines[directives[1]])
+        if m1 and m2 and m1.group(1) == m2.group(1):
+            guard = directives[0]
+    out = []
+    depth = 0
+    for i, ln in enumerate(lines):
+        if COND_OPEN_RE.match(ln):
+            if i != guard:
+                depth += 1
+            continue
+        if COND_END_RE.match(ln):
+            if depth > 0:
+                depth -= 1
+            continue
+        if depth == 0:
+            m = INCLUDE_RE.match(ln)
+            if m:
+                out.append(m.group(1))
+    return out
+
+
+CLCOMPILE_RE = re.compile(r'<ClCompile\s+Include\s*=\s*"([^"]+)"', re.IGNORECASE)
+
+
+def build_listed_sources(build_texts, files):
+    """The repo files of `files` that some build file lists as `<ClCompile Include=...>` (G-CC2 MUST-A: a .cpp no
+    project compiles proves nothing). `build_texts` = {path: text} of the .vcxproj / .props files. An item path is
+    taken relative to the build file's folder, else (an .items.props, resolved against the importing project) matched
+    by its path below the leading `..` segments; an item with an MSBuild property ($(...)) or wildcard is ignored."""
+    files = set(files)
+    by_suffix = {}
+    for f in files:
+        by_suffix.setdefault(f.lower(), f)
+    out = set()
+    for path, text in build_texts.items():
+        d = posixpath.dirname(path)
+        for m in CLCOMPILE_RE.finditer(text or ""):
+            item = m.group(1).replace("\\", "/").strip()
+            # $(MSBuildThisFileDirectory) = the build file's own folder (with a trailing separator)
+            prop = "$(MSBuildThisFileDirectory)"
+            this_dir = item.startswith(prop)
+            if this_dir:
+                item = item[len(prop):].lstrip("/")
+            if "$(" in item or "*" in item or "?" in item:
+                continue
+            cand = posixpath.normpath(posixpath.join(d, item)) if d else posixpath.normpath(item)
+            if this_dir:
+                if cand in files:
+                    out.add(cand)
+                continue
+            if cand in files:
+                out.add(cand)
+                continue
+            rest = item
+            while rest.startswith("../") or rest.startswith("./"):
+                rest = rest[3:] if rest.startswith("../") else rest[2:]
+            rest = rest.lower()
+            hits = [f for f in files if f.lower() == rest or f.lower().endswith("/" + rest)]
+            if len(hits) == 1:
+                out.add(hits[0])
+    return out
+
+
+CLASS_NAME_RE = re.compile(r'^\s*(?:class|struct)\s+(?:__declspec\([^)]*\)\s*)?([A-Za-z_]\w*)\s*(?:final\s*)?(?::|\{|$)')
+MEMBER_DEF_RE = re.compile(r'^(?:[\w:<>,*&\s]+?\s+)?(?:[*&]\s*)?((?:[A-Za-z_]\w*::)+)~?[A-Za-z_]\w*\s*\(')
+
+
+def bill_class_names(read, bill_tree):
+    """Class / struct names declared in Bill-owned headers, plus `Impl` (the renderer's private Impl, declared in Bill's
+    LibplaceboVideoRenderer.cpp)."""
+    names = {"Impl"}
+    for p in sorted(bill_tree or ()):
+        if not p.startswith("src/") or not p.lower().endswith((".h", ".hpp")):
+            continue
+        t = read(p)
+        if not t:
+            continue
+        for ln in t.splitlines():
+            m = CLASS_NAME_RE.match(ln)
+            if m:
+                names.add(m.group(1))
+    return names
+
+
+def defines_bill_members(text, bill_classes):
+    """True when `text` defines a member of a Bill-owned class out of line (`Ret Impl::f(...)`, `Bill::Impl::f(`): such
+    a file is a body moved out of Bill's TU, never a shared interface header (G-CC2 MUST-A 2). Only lines at file
+    (namespace / global) scope are definition heads (scope_map), whatever their indentation."""
+    text = text or ""
+    # a class the file itself defines (`class Model {`, a VP-V class in its own namespace) is not Bill's, whatever
+    # Bill names one; a forward declaration (`struct Impl;`) does not count as defining it
+    own = {m.group(1) for m in (CLASS_NAME_RE.match(ln) for ln in text.splitlines()) if m}
+    bill_classes = set(bill_classes) - own
+    scopes = scope_map(text)
+    for n, ln in enumerate(text.splitlines()):
+        if n < len(scopes) and scopes[n] != "file":
+            continue
+        if ln.rstrip().endswith(";"):
+            continue   # a declaration or a call statement, not a definition head
+        m = MEMBER_DEF_RE.match(ln)
+        if not m:
+            continue
+        quals = [q for q in m.group(1).split("::") if q]
+        if any(q in bill_classes for q in quals):
+            return True
+    return False
+
+
+def shared_vp_headers(sources, read, bill_tree, bill_classes=None):
+    """Every VP-authored file a VP-authored production .cpp reaches through LIVE #includes (recursively; see
+    live_includes): these compile in VP-V's own translation units too (shared interface headers), so the `tu` measure
+    does not count them. The caller passes only sources a build file compiles (build_listed_sources). A file that
+    defines members of a Bill-owned class (defines_bill_members) is never shared, whatever includes it."""
+    classes = bill_classes if bill_classes is not None else {"Impl"}
     seen = set()
+    visited = set()
     stack = []
     for s in sources:
         t = read(s)
@@ -406,14 +534,13 @@ def shared_vp_headers(sources, read, bill_tree):
             stack.append((s, t))
     while stack:
         q, t = stack.pop()
-        for ln in t.splitlines():
-            m = INCLUDE_RE.match(ln)
-            if not m:
+        for name in live_includes(t):
+            r, u = resolve_include(name, q, read)
+            if r is None or r in visited or not is_vp_authored(r, bill_tree):
                 continue
-            r, u = resolve_include(m.group(1), q, read)
-            if r is None or r in seen or not is_vp_authored(r, bill_tree):
-                continue
-            seen.add(r)
+            visited.add(r)
+            if not defines_bill_members(u, classes):
+                seen.add(r)
             stack.append((r, u))
     return seen
 
@@ -670,6 +797,19 @@ def write_budget(path, res, migrate_note=None, migrate=None):
     if migrating and not (migrate and re.match(r"^WAIVER-[A-Za-z0-9_.\-]+$", migrate)):
         return ["the budget needs a migration (missing, not on metric H2, or no stray_ceiling): refused without "
                 "--migrate WAIVER-<ID> (G-CC1 SHOULD-2)"]
+    if migrating:
+        # G-CC2 SHOULD-A: a migration (a budget swapped for a non-H2 one, or deleted) never raises an h2 ceiling the
+        # sibling docs/audit/hook-budget.json h2_ceiling already holds
+        try:
+            hb = read_json(os.path.join(os.path.dirname(path), "hook-budget.json"))
+        except (OSError, ValueError):
+            hb = None
+        ceil = (hb or {}).get("h2_ceiling") if isinstance(hb, dict) else None
+        if isinstance(ceil, dict):
+            bad = ["%s h2 %d > hook-budget h2_ceiling %d (a migration never raises h2)" % (r["path"], r["h2"], int(ceil[r["path"]]))
+                   for r in rows if r["path"] in ceil and r["h2"] > int(ceil[r["path"]])]
+            if bad:
+                return bad
     if budget is None:
         budget = {"default": 0}
     if budget.get("metric") == BUDGET_METRIC:
@@ -859,6 +999,26 @@ def h2_selftest():
     shared = shared_vp_headers(["src/VP-V/host/Api.cpp"], read, bill_tree)
     assert shared == {"src/VP-V/host/Api.h", "src/VP-V/host/F.h"}, shared
     assert tu_row("src/A.cpp", [1], read, bill_tree, shared, "#include <VP-V/host/Api.h>\n")[0] == 0
+    # G-CC2 MUST-A: only LIVE includes make a file shared (an include guard is not a condition) ...
+    assert live_includes("#if 0\n#include \"Body.h\"\n#endif\n#include \"Api.h\"\n") == ["Api.h"]
+    assert live_includes("#ifdef VPV_NEVER\n#include \"Body.h\"\n#else\n#include \"X.h\"\n#endif\n") == []
+    assert live_includes("#ifndef G_H\n#define G_H\n#include \"Api.h\"\n#if 1\n#include \"Body.h\"\n#endif\n#endif\n") == ["Api.h"]
+    files["src/VP-V/host/Dummy.cpp"] = "#if 0\n#include \"Body.h\"\n#endif\n"
+    assert shared_vp_headers(["src/VP-V/host/Dummy.cpp"], read, bill_tree) == set()
+    # ... a file defining members of a Bill-owned class is never shared, even through a live include ...
+    files["src/VP-V/host/Live.cpp"] = "#include \"Body.h\"\n#include \"Api.h\"\n"
+    assert shared_vp_headers(["src/VP-V/host/Live.cpp"], read, bill_tree) == {"src/VP-V/host/Api.h", "src/VP-V/host/F.h"}
+    assert defines_bill_members("void Impl::f0() {}\n", {"Impl"})
+    assert defines_bill_members("namespace X {\n\tinline bool AnalysisLumaSource::Full() const\n\t{ return true; }\n}\n",
+                                {"Impl", "AnalysisLumaSource"})
+    assert not defines_bill_members("class Model\n{\n};\ninline void Model::Run()\n{\n}\n", {"Impl", "Model"})   # its own class
+    assert not defines_bill_members("void f()\n{\n\tImpl::g(1,\n\t\t2);\n}\n", {"Impl"})   # a call inside a function
+    # ... and only a .cpp a build file lists counts as a source
+    listed = build_listed_sources({"src/VP-V/build/R.items.props": '<ClCompile Include="$(MSBuildThisFileDirectory)..\\host\\Live.cpp" />\n'
+                                                                  '<ClCompile Include="..\\VP-V\\host\\Api.cpp" />\n'
+                                                                  '<ClCompile Include="$(Other)\\Dummy.cpp" />\n'},
+                                  ["src/VP-V/host/Live.cpp", "src/VP-V/host/Api.cpp", "src/VP-V/host/Dummy.cpp"])
+    assert listed == {"src/VP-V/host/Live.cpp", "src/VP-V/host/Api.cpp"}, listed
     # a nested VP include is counted once; a system header is skipped; a computed one fails closed
     files["src/VP-V/host/Outer.inl"] = "a\n#include <VP-V/host/Body.h>\n#include <windows.h>\n"
     t = tu_row("src/A.cpp", [1, 2], read, bill_tree, set(), "#include <VP-V/host/Outer.inl>\n#include <VP-V/host/Body.h>\n")

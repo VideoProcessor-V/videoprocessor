@@ -935,6 +935,101 @@ class HookLinesTest(unittest.TestCase):
             self.assertEqual(rc, 1, "a value below its ceiling fails until the ratchet commit (G-CC1 SHOULD-7)")
 
 
+class GateTwoMutationTest(unittest.TestCase):
+    """G-CC2 (lead20/CC-gate-2.md) MUST-A, SHOULD-A, SHOULD-B: each test reproduces the gaming attempt the gate found and
+    asserts that the checker now refuses it (WAIVER-CC-H2-METRIC, commit 1c)."""
+
+    BODY = "".join("void Impl::f%d() {}\n" % i for i in range(10))
+    MOVED = "struct Impl\n{\n\tPipelineSlots::Registry pipelineSlots;\n};\n#include <VP-V/host/Body.h>\n"
+
+    def _tu(self, root):
+        return chg.run(root, chg.DEFAULT_BASE, [BILL], no_git=True)["site_checks"]["hook_lines"]["tu"]
+
+    def _relocated(self, root):
+        """A Bill file whose 10 inline bodies moved to a FILE-scope VP header, baseline seeded before the move and
+        re-seeded under a bounded relocation after it (h2 14 -> 5, tu 0 -> 10, combined 14 -> 15)."""
+        _w(root, "src/VP-V/core/PipelineSlots.h", SLOTS)
+        _w(root, BILL, "struct Impl\n{\n\tPipelineSlots::Registry pipelineSlots;\n" +
+           "".join("\tvoid f%d() {}\n" % i for i in range(10)) + "};\n")
+        self.assertEqual(_run(root, extra=["--write-hook-lines-baseline", "--migrate", "WAIVER-T-SEED"])[0], 0)
+        _w(root, "src/VP-V/host/Body.h", self.BODY)
+        _w(root, BILL, self.MOVED)
+
+    def test_must_a_a_dead_or_unlisted_include_never_makes_a_moved_body_shared(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._relocated(root)
+            self.assertEqual(self._tu(root), {BILL: 10})
+            # the gate's probe: a dummy VP-V .cpp with the include switched off
+            for dummy in ("#if 0\n#include \"Body.h\"\n#endif\n", "#ifdef VPV_NEVER\n#include \"Body.h\"\n#endif\n",
+                          "#if defined(VPV_NEVER)\n#include \"Body.h\"\n#endif\n"):
+                _w(root, "src/VP-V/host/Dummy.cpp", dummy)
+                self.assertEqual(self._tu(root), {BILL: 10}, dummy)
+            # a live include from a .cpp that no build file lists
+            _w(root, "src/VP-V/host/Dummy.cpp", "#include \"Body.h\"\n")
+            self.assertEqual(self._tu(root), {BILL: 10})
+            # a live include from a build-listed .cpp: Body.h defines Impl members, never shared
+            _w(root, "src/VP-V/build/T.items.props",
+               '<Project><ItemGroup><ClCompile Include="$(MSBuildThisFileDirectory)..\\host\\Dummy.cpp" /></ItemGroup></Project>\n')
+            self.assertEqual(self._tu(root), {BILL: 10})
+            # control: a genuine interface header behind the same listed .cpp is shared, so the exclusion still works
+            _w(root, "src/VP-V/host/Api.h", "struct Api { int a; };\n")
+            _w(root, "src/VP-V/host/Dummy.cpp", "#include \"Api.h\"\n")
+            _w(root, BILL, self.MOVED + "#include <VP-V/host/Api.h>\n")
+            self.assertEqual(self._tu(root), {BILL: 10})
+            _w(root, "src/VP-V/host/Dummy.cpp", "#if 0\n#include \"Api.h\"\n#endif\n")
+            self.assertEqual(self._tu(root), {BILL: 11}, "the same header behind #if 0 is not shared")
+
+    def test_should_a_a_v1_swap_under_migrate_never_raises_h2(self):
+        with tempfile.TemporaryDirectory() as root:
+            _w(root, "src/VP-V/core/PipelineSlots.h", SLOTS)
+            _w(root, BILL, _bill(""))   # 8 non-blank lines
+            self.assertEqual(_run(root, extra=["--write-hook-lines-baseline", "--migrate", "WAIVER-T-SEED"])[0], 0)
+            _w(root, chg.BUDGET_PATH, json.dumps({"h2_ceiling": {BILL: 8}}))
+            _w(root, BILL, _bill("\t\tmore();\n\t\tevenMore();\n"))   # h2 8 -> 10
+            # the gate's probe: replace the baseline with a v1 file and migrate
+            _w(root, chg.HOOK_LINES_PATH, json.dumps({"base_ref": chg.DEFAULT_BASE, "total": 99, "files": {BILL: 99}}))
+            rc, out = _run(root, extra=["--write-hook-lines-baseline", "--migrate", "WAIVER-GAME"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn("h2 10 > ceiling 8", out)
+            # a v2 baseline with an old tu measure (a tu re-seed) keeps its own h2 ceilings even without h2_ceiling
+            _w(root, chg.BUDGET_PATH, json.dumps({}))
+            _w(root, chg.HOOK_LINES_PATH, json.dumps({"version": 2, "metric": "H2", "base_ref": chg.DEFAULT_BASE, "total": 8,
+                                                     "totals": {"production": 8}, "files": {BILL: 8}, "tu": {}, "combined": {}}))
+            rc, out = _run(root, extra=["--write-hook-lines-baseline", "--migrate", "WAIVER-GAME"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn("h2 10 > ceiling 8", out)
+            # ... while the same re-seed without h2 growth passes and records the new tu measure
+            _w(root, BILL, _bill(""))
+            self.assertEqual(_run(root, extra=["--write-hook-lines-baseline", "--migrate", "WAIVER-T-TU"])[0], 0)
+            base = chg.vp_footprint.read_json(os.path.join(root, *chg.HOOK_LINES_PATH.split("/")))
+            self.assertEqual((base["files"][BILL], base["tu_measure"]), (8, chg.TU_MEASURE_VERSION))
+
+    def test_should_b_a_relocation_is_bounded_by_its_stated_allowance(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._relocated(root)
+            reloc = ["--write-hook-lines-baseline", "--relocation", "WAIVER-T-RELOC"]
+            rc, out = _run(root, extra=reloc)
+            self.assertEqual(rc, 1, "a relocation states its allowance")
+            self.assertIn("--allowance", out)
+            rc, out = _run(root, extra=reloc + ["--allowance", "0"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn("combined +1", out)
+            # the gate's probe: NEW VP code added straight into the file-scope header passes as a "relocation"
+            _w(root, "src/VP-V/host/Body.h", self.BODY + "".join("void Impl::g%d() {}\n" % i for i in range(20)))
+            rc, out = _run(root, extra=reloc + ["--allowance", "2"])
+            self.assertEqual(rc, 1, out)
+            self.assertIn("tu +30", out)
+            rc, out = _run(root, extra=reloc + ["--allowance", str(chg.RELOCATION_MAX_ALLOWANCE + 1)])
+            self.assertEqual(rc, 1, "an allowance above the cap is refused")
+            # the real move inside its allowance passes and is recorded with its deltas
+            _w(root, "src/VP-V/host/Body.h", self.BODY)
+            rc, out = _run(root, extra=reloc + ["--allowance", "1"])
+            self.assertEqual(rc, 0, out)
+            base = chg.vp_footprint.read_json(os.path.join(root, *chg.HOOK_LINES_PATH.split("/")))
+            self.assertIn("RELOCATION allowance 1", base["_updates"][0])
+            self.assertIn("tu +10, h2 -9, combined +1", base["_updates"][0])
+
+
 class HonestH2MetricTest(unittest.TestCase):
     """CC-audit-1 CHECKER-TIGHTENING SPEC (WAIVER-CC-H2-METRIC): T1-T13 and the dbbef8c07 -> a68b5e7f7 regression fixture."""
 

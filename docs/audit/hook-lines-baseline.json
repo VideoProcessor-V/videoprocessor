@@ -2,8 +2,9 @@
  "_note": "Honest H2 per Bill-owned file (tools/check_hook_gating.py, CC-audit-1): non-blank added or changed lines vs the Bill baseline, tagged or not, plus the non-blank lines of every VP-authored file included at class or function scope; production, tests and project files (documentation files are reported, not gated). tu (G-CC1 (7)): per Bill includer, the non-blank lines of VP-authored files reached from its added FILE-scope includes (shared VP-V headers that a VP-V production .cpp also compiles are excluded); combined = h2 + tu per includer. Ratchet: every ceiling only shrinks (measure = ceiling); a tu / combined raise needs a RELOCATION waiver recorded in _updates. Written with --write-hook-lines-baseline.",
  "version": 2,
  "metric": "H2",
+ "tu_measure": 2,
  "base_ref": "a591ad3b5",
- "measured_at": "working tree",
+ "measured_at": "5035a86dc (working tree)",
  "total": 23099,
  "totals": {
   "production": 18465,
@@ -154,6 +155,7 @@
   "src/VideoProcessor-GUI/VideoProcessorDlg.h": 1221,
   "src/VideoProcessor-Lib/AnalysisFrame.cpp": 5,
   "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 5,
+  "src/VideoProcessor-Lib/AnalysisLumaSource.h": 215,
   "src/VideoProcessor-Lib/ConfigFile.cpp": 198,
   "src/VideoProcessor-Lib/ConfigSchema.h": 122,
   "src/VideoProcessor-Lib/DisplayTopologySession.cpp": 24,
@@ -183,6 +185,7 @@
   "src/VideoProcessor-GUI/VideoProcessorDlg.h": 1511,
   "src/VideoProcessor-Lib/AnalysisFrame.cpp": 59,
   "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 309,
+  "src/VideoProcessor-Lib/AnalysisLumaSource.h": 306,
   "src/VideoProcessor-Lib/ConfigFile.cpp": 200,
   "src/VideoProcessor-Lib/ConfigSchema.h": 129,
   "src/VideoProcessor-Lib/DisplayTopologySession.cpp": 237,
@@ -204,6 +207,7 @@
   "src/VideoProcessor-Test/WindowResizeLayoutTests.cpp": 210
  },
  "_updates": [
+  "2026-11-21 WAIVER-CC-H2-METRIC: migration at 5035a86dc (working tree) (docs/audit/hook-lines-baseline.json was seeded with tu measure 1, the checker measures tu 2 (G-CC2 MUST-A: live includes from build-listed VP-V .cpp files only, no Bill-member files): re-seed tu / combined with --write-hook-lines-baseline --migrate WAIVER-<ID>): raised src/VideoProcessor-Lib/AnalysisLumaSource.h tu 0 -> 215; src/VideoProcessor-Lib/AnalysisLumaSource.h combined 91 -> 306",
   "2026-11-21 WAIVER-CC-H2-METRIC: migration at working tree (docs/audit/hook-lines-baseline.json has no tu / combined ceilings (G-CC1 (7)): seed them with --write-hook-lines-baseline --migrate WAIVER-<ID>)"
  ]
 }

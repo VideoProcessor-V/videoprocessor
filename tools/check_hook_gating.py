@@ -1398,6 +1398,13 @@ def untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_us
 # rule 29); project files are counted. The old narrow count (vp_footprint.hook_line_set on added production lines) is
 # kept as `tagged`, for information only. Rule 19: no move of lines between a Bill scope and a fragment lowers H2.
 H2_METRIC_VERSION = 2
+# The tu measure's own version (G-CC2 MUST-A): 2 = shared headers only through LIVE includes (not under #if / #ifdef)
+# from VP-V .cpp files a build file lists as ClCompile, and never a file defining members of a Bill-owned class. A
+# baseline seeded with an older tu measure is re-seeded by a named migration (--migrate WAIVER-<ID>).
+TU_MEASURE_VERSION = 2
+# The most a named RELOCATION may let one includer's combined h2 + tu grow (G-CC2 SHOULD-B; bookkeeping lines:
+# a declaration and an include per moved definition): --allowance N, 0 <= N <= this.
+RELOCATION_MAX_ALLOWANCE = 64
 DOC_EXT = (".md", ".txt", ".html", ".htm", ".rst")
 H2_BUCKETS = ("production", "tests", "project")
 RENDERER_FILES = ("src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
@@ -1436,7 +1443,7 @@ def h2_rows(tree, root, base_ref, diff, no_git, only):
             rows[rel] = vp_footprint.h2_row(rel, nb, inc, read, None, text)
             rows[rel]["bucket"] = vp_footprint.bucket_of(rel)
             if inc and shared is None:
-                shared = _shared_headers(tree, read, None)
+                shared = _shared_headers(tree, read, None, root, no_git)
             _add_tu(rows[rel], rel, inc, read, None, shared or set())
         return rows
     bill_tree = set(git(["ls-tree", "-r", "--name-only", base_ref], root).splitlines())
@@ -1446,7 +1453,7 @@ def h2_rows(tree, root, base_ref, diff, no_git, only):
         pats = {p.replace("\\", "/") for p in only}
         want = [p for p in want if p in pats]
     tree.prefetch([p for p in want if diff[p]["include_lines"]])
-    shared = _shared_headers(tree, read, bill_tree) if any(diff[p]["include_lines"] for p in want) else set()
+    shared = _shared_headers(tree, read, bill_tree, root, no_git) if any(diff[p]["include_lines"] for p in want) else set()
     macros = _build_macros(tree, root, no_git) if shared else {}
     for p in want:
         d = diff[p]
@@ -1460,11 +1467,45 @@ def h2_rows(tree, root, base_ref, diff, no_git, only):
     return rows
 
 
-def _shared_headers(tree, read, bill_tree):
-    """The VP-authored files a VP-authored production .cpp reaches (vp_footprint.shared_vp_headers): not part of tu."""
+def _shared_headers(tree, read, bill_tree, root=None, no_git=False):
+    """The VP-authored files a VP-authored production .cpp reaches through live includes (vp_footprint.shared_vp_headers):
+    not part of tu. G-CC2 MUST-A: only a .cpp that a build file lists as ClCompile counts as a source, and a file
+    defining members of a Bill-owned class is never shared."""
     vp = [f for f in tree.code_files() if vp_footprint.is_vp_authored(f, bill_tree)]
     tree.prefetch(vp)
-    return vp_footprint.shared_vp_headers([f for f in vp if vp_footprint.is_compiled_vp_source(f, bill_tree)], read, bill_tree)
+    compiled = [f for f in vp if vp_footprint.is_compiled_vp_source(f, bill_tree)]
+    listed = vp_footprint.build_listed_sources(_build_texts(tree, root, no_git, (".vcxproj", ".props")), compiled)
+    tree.prefetch([p for p in (bill_tree or ()) if p.startswith("src/") and p.lower().endswith((".h", ".hpp"))])
+    classes = vp_footprint.bill_class_names(read, bill_tree)
+    return vp_footprint.shared_vp_headers(sorted(listed), read, bill_tree, classes)
+
+
+def _build_texts(tree, root, no_git, exts):
+    """{path: text} of the tree's build files with these extensions (outside x64/ and 3rdparty/). Git mode: the tracked
+    files of the checked tree; --no-git: a walk of <root>/src."""
+    names = []
+    if no_git:
+        base = os.path.join(root or ".", "src")
+        for d, _, fs in os.walk(base):
+            for f in fs:
+                rel = os.path.relpath(os.path.join(d, f), root or ".").replace("\\", "/")
+                names.append(rel)
+    else:
+        try:
+            names = git(["ls-tree", "-r", "--name-only", tree.rev] if tree.rev else ["ls-files"], root).splitlines()
+        except RuntimeError:
+            return {}
+    out = {}
+    if not no_git:
+        tree.prefetch([n for n in names if n.lower().endswith(exts) and "/x64/" not in n and "/3rdparty/" not in n])
+    for n in names:
+        if n.lower().endswith(exts) and "/x64/" not in n and "/3rdparty/" not in n:
+            try:
+                out[n] = tree.read(n) if not no_git else open(os.path.join(root or ".", *n.split("/")), encoding="utf-8",
+                                                                 errors="replace").read()
+            except (OSError, RuntimeError):
+                continue
+    return out
 
 
 def _build_macros(tree, root, no_git):
@@ -1680,6 +1721,11 @@ def load_h2_baseline(tree, no_git=False):
     if not isinstance(base.get("tu"), dict) or not isinstance(base.get("combined"), dict):
         return base, ("%s has no tu / combined ceilings (G-CC1 (7)): seed them with --write-hook-lines-baseline --migrate "
                       "WAIVER-<ID>" % HOOK_LINES_PATH)
+    if base.get("tu_measure") != TU_MEASURE_VERSION:
+        return base, ("%s was seeded with tu measure %s, the checker measures tu %d (G-CC2 MUST-A: live includes from "
+                      "build-listed VP-V .cpp files only, no Bill-member files): re-seed tu / combined with "
+                      "--write-hook-lines-baseline --migrate WAIVER-<ID>" % (HOOK_LINES_PATH, base.get("tu_measure", 1),
+                                                                            TU_MEASURE_VERSION))
     return base, None
 
 
@@ -1727,9 +1773,14 @@ def hook_lines_metric(tree, per_file, h2, added_by_file, no_git, root):
     budget = load_json(tree, BUDGET_PATH) or {}
     over, ratchet, tu_over = [], [], []
     extra = budget.get("h2_ceiling") or {}
-    if base is None and extra:
-        # G-CC1 SHOULD-1: the hook-budget h2_ceiling holds on its own when the baseline is absent
-        _ceiling_check("h2", files, None, over, ratchet, extra)
+    if base is None or base_error is not None:
+        # G-CC1 SHOULD-1 / G-CC2 SHOULD-A: when the baseline is absent OR unusable (v1, no tu, an old tu measure: a
+        # migration), the h2 ceilings still hold: the hook-budget h2_ceiling, and the per-file h2 ceilings of a v2 H2
+        # baseline (the lower one), so a swapped-in v1 file plus --migrate never raises h2
+        v2_files = base.get("files") if (isinstance(base, dict) and base.get("version") == H2_METRIC_VERSION and
+                                         base.get("metric") == "H2" and isinstance(base.get("files"), dict)) else None
+        if extra or v2_files is not None:
+            _ceiling_check("h2", files, v2_files, over, ratchet if base is None else [], extra)
     if base is not None and base_error is None:
         _ceiling_check("h2", files, base.get("files", {}), over, ratchet, extra)
         # G-CC1 (7): tu per includer, and the combined h2 + tu per includer, are non-increasing too; growth passes
@@ -2119,15 +2170,68 @@ def selftest():
         rc, out = cli(root)
         assert rc == 1 and "FAIL (tu)" in out and "combined h2+tu 15 > ceiling 0" in out, out
         assert cli(root, "--write-hook-lines-baseline")[0] == 1, "a tu raise needs --relocation"
+        # G-CC2 SHOULD-B: a relocation needs a stated allowance and stays inside it: h2 14 -> 5, tu 0 -> 10, combined
+        # 14 -> 15 (+1, the include line): allowance 0 is refused, 1 passes
         rc, out = cli(root, "--write-hook-lines-baseline", "--relocation", "WAIVER-T-RELOC")
+        assert rc == 1 and "--allowance" in out, out
+        rc, out = cli(root, "--write-hook-lines-baseline", "--relocation", "WAIVER-T-RELOC", "--allowance", "0")
+        assert rc == 1 and "beyond its allowance 0" in out and "combined +1" in out, out
+        rc, out = cli(root, "--write-hook-lines-baseline", "--relocation", "WAIVER-T-RELOC", "--allowance", "1")
         assert rc == 0, out
         base = vp_footprint.read_json(os.path.join(root, *HOOK_LINES_PATH.split("/")))
-        assert base["tu"] == {bill: 10} and base["combined"] == {bill: 15} and "RELOCATION" in base["_updates"][0], base
+        assert base["tu"] == {bill: 10} and base["combined"] == {bill: 15} and "RELOCATION allowance 1" in base["_updates"][0], base
+        assert base["tu_measure"] == TU_MEASURE_VERSION, base
         assert cli(root)[0] == 0
-        # a shared header (a VP-V production .cpp compiles it) is not tu
+        # MUTATION (G-CC2 SHOULD-B): new VP code written straight into the file-scope header (no h2 taken away) is
+        # not a relocation, whatever the allowance
+        w(root, "src/VP-V/host/Body.h", "".join("void Impl::f%d() {}\n" % i for i in range(30)))
+        rc, out = cli(root, "--write-hook-lines-baseline", "--relocation", "WAIVER-T-GROW", "--allowance", "2")
+        assert rc == 1 and "beyond its allowance 2" in out and "tu +20" in out, out
+        rc, out = cli(root, "--write-hook-lines-baseline", "--relocation", "WAIVER-T-GROW", "--allowance", str(RELOCATION_MAX_ALLOWANCE + 1))
+        assert rc == 1 and "--allowance" in out, out
+        w(root, "src/VP-V/host/Body.h", "".join("void Impl::f%d() {}\n" % i for i in range(10)))
+        assert cli(root)[0] == 0
+        # MUTATION (G-CC2 MUST-A): a dummy VP-V .cpp with the include switched off (`#if 0`) does not make the moved
+        # body "shared": tu stays 10 (before the fix: tu 0 < ceiling 10)
+        w(root, "src/VP-V/host/Body.cpp", "#if 0\n#include \"Body.h\"\n#endif\n")
+        rc, out = cli(root)
+        assert rc == 0 and "< ceiling 10" not in out, out
+        # ... nor `#ifdef` a macro nobody defines, nor a live include in a .cpp no build file lists
+        w(root, "src/VP-V/host/Body.cpp", "#ifdef VPV_NEVER\n#include \"Body.h\"\n#endif\n")
+        assert "< ceiling 10" not in cli(root)[1]
         w(root, "src/VP-V/host/Body.cpp", "#include \"Body.h\"\n")
         rc, out = cli(root)
-        assert rc == 1 and "tu 0 < ceiling 10" in out, out
+        assert rc == 0 and "< ceiling 10" not in out, out
+        # ... nor a live include from a build-listed .cpp: Body.h defines members of Bill's Impl, never shared
+        w(root, "src/VP-V/build/T.items.props", '<Project><ItemGroup><ClCompile Include="$(MSBuildThisFileDirectory)..\\host\\Body.cpp" />'
+                                                 '</ItemGroup></Project>\n')
+        rc, out = cli(root)
+        assert rc == 0 and "< ceiling 10" not in out, out
+        # a genuine interface header that a build-listed VP-V .cpp includes live is shared (not tu)
+        w(root, "src/VP-V/host/Api.h", "struct Api { int a; };\n")
+        w(root, "src/VP-V/host/Body.cpp", "#include \"Api.h\"\n")
+        w(root, bill, "struct Impl\n{\n\tPipelineSlots::Registry pipelineSlots;\n};\n#include <VP-V/host/Body.h>\n"
+                      "#include <VP-V/host/Api.h>\n")
+        res = run(root, DEFAULT_BASE, [bill], no_git=True)["site_checks"]["hook_lines"]
+        assert res["tu"] == {bill: 10}, res["tu"]
+        # MUTATION (G-CC2 SHOULD-A): grow h2, swap in a v1 baseline and --migrate: refused while the hook-budget
+        # h2_ceiling holds (before the fix: exit 0, the baseline written at the grown value)
+        w(root, bill, "struct Impl\n{\n\tPipelineSlots::Registry pipelineSlots;\n};\n#include <VP-V/host/Body.h>\n")
+        assert cli(root)[0] == 0
+        w(root, BUDGET_PATH, json.dumps({"h2_ceiling": {bill: 5}}))
+        w(root, bill, "struct Impl\n{\n\tPipelineSlots::Registry pipelineSlots;\n\tint more;\n\tint evenMore;\n};\n"
+                      "#include <VP-V/host/Body.h>\n")
+        w(root, HOOK_LINES_PATH, json.dumps({"base_ref": DEFAULT_BASE, "total": 99, "files": {bill: 99}}))
+        rc, out = cli(root, "--write-hook-lines-baseline", "--migrate", "WAIVER-GAME")
+        assert rc == 1 and "grew" in out and "h2 7 > ceiling 5" in out, out
+        # ... and a v2 baseline with an old tu measure (a re-seed of tu) still holds its own h2 ceilings
+        w(root, BUDGET_PATH, json.dumps({}))
+        w(root, HOOK_LINES_PATH, json.dumps({"version": 2, "metric": "H2", "base_ref": DEFAULT_BASE, "total": 5,
+                                             "totals": {"production": 5}, "files": {bill: 5}, "tu": {}, "combined": {}}))
+        rc, out = cli(root)
+        assert rc == 2 and "tu measure" in out, out
+        rc, out = cli(root, "--write-hook-lines-baseline", "--migrate", "WAIVER-GAME")
+        assert rc == 1 and "h2 7 > ceiling 5" in out, out
     print("selftest OK")
     return 0
 
@@ -2153,6 +2257,9 @@ def main(argv=None):
                                                           "or without tu / combined); recorded in _updates (G-CC1 SHOULD-2)")
     ap.add_argument("--relocation", metavar="WAIVER-ID", help="with --write-hook-lines-baseline: allow a tu / combined ceiling to "
                                                              "rise (a named RELOCATION, G-CC1 (7)); recorded in _updates")
+    ap.add_argument("--allowance", type=int, metavar="N", help="with --relocation: the most one includer's combined h2 + tu may "
+                                                              "grow, and tu may rise beyond the h2 it took away (0..%d; G-CC2 "
+                                                              "SHOULD-B)" % RELOCATION_MAX_ALLOWANCE)
     args = ap.parse_args(argv)
     if args.selftest:
         return selftest()
@@ -2168,9 +2275,10 @@ def main(argv=None):
             return 1
         waiver_rx = re.compile(r"^WAIVER-[A-Za-z0-9_.\-]+$")
         sha = args.rev or "working tree"
-        if args.rev and not args.no_git:
+        if not args.no_git:
+            # G-CC2 SHOULD-C: the sha is recorded on the working tree too (HEAD, the commit the tree sits on)
             try:
-                sha = git(["rev-parse", "--short=9", args.rev], args.root).strip()
+                sha = git(["rev-parse", "--short=9", args.rev or "HEAD"], args.root).strip() + ("" if args.rev else " (working tree)")
             except RuntimeError:
                 pass
         bl_path = os.path.join(args.root, *HOOK_LINES_PATH.split("/"))
@@ -2187,12 +2295,54 @@ def main(argv=None):
                 print("refusing to migrate %s (%s) without --migrate WAIVER-<ID> (G-CC1 SHOULD-2)" % (HOOK_LINES_PATH, why))
                 return 1
             print("migrating %s under %s (needs its own WAIVER commit, rule 19/28)" % (HOOK_LINES_PATH, args.migrate))
-            updates.insert(0, "%s %s: migration at %s (%s)" % (today, args.migrate, sha, why))
+            # every tu / combined ceiling the migration raises is named in the record (G-CC2 SHOULD-B spirit)
+            try:
+                old = vp_footprint.read_json(bl_path)
+            except (OSError, ValueError):
+                old = {}
+            raised = []
+            for key in ("tu", "combined"):
+                prev = old.get(key) if isinstance(old.get(key), dict) else None
+                if prev is None:
+                    continue
+                for f, n in sorted((hl.get(key) or {}).items()):
+                    # an includer without tu had combined = its h2
+                    was = prev.get(f, (old.get("files") or {}).get(f, 0) if key == "combined" else 0)
+                    if n > was:
+                        raised.append("%s %s %d -> %d" % (f, key, was, n))
+            updates.insert(0, "%s %s: migration at %s (%s)%s" % (today, args.migrate, sha, why,
+                                                               (": raised " + "; ".join(raised)) if raised else ""))
         if hl.get("tu_over"):
             if not (args.relocation and waiver_rx.match(args.relocation)):
                 print("refusing to raise a tu / combined ceiling without --relocation WAIVER-<ID>: " + "; ".join(hl["tu_over"]))
                 return 1
-            updates.insert(0, "%s %s: RELOCATION allowance at %s: %s" % (today, args.relocation, sha, "; ".join(hl["tu_over"])))
+            # G-CC2 SHOULD-B: a relocation is bounded. Per includer the combined h2 + tu may grow by at most the
+            # stated --allowance N (bookkeeping), and tu may rise by at most the h2 it took away plus N: new VP code
+            # written straight into a file-scope header is not a relocation.
+            if args.allowance is None or not (0 <= args.allowance <= RELOCATION_MAX_ALLOWANCE):
+                print("refusing a RELOCATION without --allowance N (0..%d): the most one includer's combined h2 + tu may "
+                      "grow (G-CC2 SHOULD-B)" % RELOCATION_MAX_ALLOWANCE)
+                return 1
+            old = vp_footprint.read_json(bl_path) if os.path.exists(bl_path) else {}
+            old_files, old_tu, old_comb = old.get("files") or {}, old.get("tu") or {}, old.get("combined") or {}
+            deltas, beyond = [], []
+            for f in sorted(set(hl.get("tu", {})) | set(hl.get("combined", {})) | set(old_tu) | set(old_comb)):
+                # an includer without tu has combined = h2 (the combined map lists only includers with tu)
+                d_tu = hl.get("tu", {}).get(f, 0) - old_tu.get(f, 0)
+                d_comb = (hl.get("combined", {}).get(f, hl["files"].get(f, 0)) -
+                          old_comb.get(f, old_files.get(f, 0)))
+                h2_drop = old_files.get(f, 0) - hl["files"].get(f, 0)
+                if d_tu <= 0 and d_comb <= 0:
+                    continue
+                deltas.append("%s tu %+d, h2 %+d, combined %+d" % (f, d_tu, -h2_drop, d_comb))
+                if d_comb > args.allowance or d_tu > h2_drop + args.allowance:
+                    beyond.append(deltas[-1])
+            if beyond:
+                print("refusing a RELOCATION beyond its allowance %d (combined growth <= N and tu rise <= h2 drop + N per "
+                      "includer, G-CC2 SHOULD-B): %s" % (args.allowance, "; ".join(beyond)))
+                return 1
+            updates.insert(0, "%s %s: RELOCATION allowance %d at %s: %s" % (today, args.relocation, args.allowance, sha,
+                                                                         "; ".join(deltas)))
         totals = {b: hl["totals"][b] for b in H2_BUCKETS}
         os.makedirs(os.path.join(args.root, "docs", "audit"), exist_ok=True)
         doc = {"_note": "Honest H2 per Bill-owned file (tools/check_hook_gating.py, CC-audit-1): non-blank added or changed lines vs "
@@ -2202,7 +2352,8 @@ def main(argv=None):
                         "FILE-scope includes (shared VP-V headers that a VP-V production .cpp also compiles are excluded); combined = "
                         "h2 + tu per includer. Ratchet: every ceiling only shrinks (measure = ceiling); a tu / combined raise needs "
                         "a RELOCATION waiver recorded in _updates. Written with --write-hook-lines-baseline.",
-               "version": H2_METRIC_VERSION, "metric": "H2", "base_ref": args.base_ref, "measured_at": sha,
+               "version": H2_METRIC_VERSION, "metric": "H2", "tu_measure": TU_MEASURE_VERSION,
+               "base_ref": args.base_ref, "measured_at": sha,
                "total": sum(totals.values()), "totals": dict(totals, renderer_information=hl["totals"]["renderer"]),
                "files": dict(sorted(hl["files"].items())), "tu": dict(sorted(hl.get("tu", {}).items())),
                "combined": dict(sorted(hl.get("combined", {}).items()))}
