@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -1478,6 +1479,118 @@ namespace VideoProcessorTest
 				Require(r.objects.empty(), "a demoted pair does not run the object tracker, pair " + std::to_string(i) + ": " + Describe(r));
 			}
 		}
+
+		// Gemini NIT-1 (840f28a02): a record that carries a verdict flag seeds no h0 and so triggers no early exit on the next pair.
+		// rec.hypotheses counts the candidates tried: an h0 that explains the field exits early after one (the refined h0), no h0 runs the
+		// full search (more than one). Control: after a clean pan the next clean pan exits early; after a demoted water pair it does not.
+		TEST_METHOD(DemotedPreviousDoesNotTriggerEarlyExit)
+		{
+			Fitter ctl(DT());
+			Field c1(Grid4K()); c1.FromModel(Pan4K()); c1.AddNoise(0.05, 3000);
+			const CameraMotion p1 = ctl.Fit(c1.Input(kPairSeconds, 5));
+			Require(p1.valid && p1.verdictFlags == 0, "premise: a clean pan carries no verdict: " + Describe(p1));
+			Field c2(Grid4K()); c2.FromModel(Pan4K()); c2.AddNoise(0.05, 3001);
+			const CameraMotion p2 = ctl.Fit(c2.Input(kPairSeconds, 6));
+			Require(p2.valid && p2.hypotheses == 1, "premise (control): a clean previous seeds h0 and the pair exits early, hypotheses=" + std::to_string(p2.hypotheses));
+			Fitter on(DT());
+			Field w = AnchoredWater(3002, 3.0);
+			const CameraMotion d = on.Fit(w.Input(kPairSeconds, 5));
+			Require(d.valid && d.reason == Reason::Ambiguous && (d.verdictFlags & kVerdictDynamicTexture) != 0, "premise: the first pair is demoted: " + Describe(d));
+			Field c3(Grid4K()); c3.FromModel(Pan4K()); c3.AddNoise(0.05, 3001);
+			const CameraMotion n = on.Fit(c3.Input(kPairSeconds, 6));
+			Require(n.valid && n.reason == Reason::Ok && n.verdictFlags == 0, "the pair after the demotion is a clean fit: " + Describe(n));
+			Require(n.hypotheses > 1, "a demoted previous seeds no h0 and no early exit, hypotheses=" + std::to_string(n.hypotheses));
+		}
+
+		// Audit4 (2de379b5b, SHOULD-4): the previous pair's residual is read where this block's content WAS (centre minus its own vector /
+		// k), not at the same index. The detector is run directly, one state, on the exact model.
+		static std::vector<DynTextureResult> RunDetector(const std::vector<Field>& fields, const Params& model)
+		{
+			DynTextureState state;
+			std::vector<DynTextureResult> out;
+			for (size_t i = 0; i < fields.size(); ++i)
+				out.push_back(DetectDynamicTexture(DynTextureConfig(), fields[i].Input(kPairSeconds, 5 + i), model, state));
+			return out;
+		}
+
+		// (a) a uniform pan: nothing disagrees, the advected raw-vector comparison is coherent everywhere (field == 0), no verdict.
+		TEST_METHOD(DynTextureRejectsInfTrustAndAdvectsTemporalResidualsUnderPan)
+		{
+			std::vector<Field> fields;
+			for (int i = 0; i < 3; ++i) { Field f(Grid4K()); f.FromModel(Pan4K()); fields.push_back(f); }
+			const std::vector<DynTextureResult> r = RunDetector(fields, Pan4K());
+			for (size_t i = 0; i < r.size(); ++i)
+				Require(r[i].computed && r[i].share == 0.0 && r[i].field == 0.0 && r[i].temporal == 0.0 && !r[i].detected,
+					"uniform pan, pair " + std::to_string(i) + ": share=" + std::to_string(r[i].share) + " field=" + std::to_string(r[i].field)
+					+ " temporal=" + std::to_string(r[i].temporal));
+			// An infinite trust is not a trusted block: one block in seven carries trust +inf and a vector 50 px off the pan. They are
+			// skipped (share stays 0); counted, they would be 14 % disagreeing blocks.
+			std::vector<Field> bad;
+			for (int i = 0; i < 3; ++i)
+			{
+				Field f(Grid4K());
+				f.FromModel(Pan4K());
+				for (size_t b = 0; b < f.Count(); b += 7) { f.trust[b] = std::numeric_limits<float>::infinity(); f.fx[b] += 50.0f; f.fy[b] -= 50.0f; }
+				bad.push_back(f);
+			}
+			const std::vector<DynTextureResult> rb = RunDetector(bad, Pan4K());
+			for (size_t i = 0; i < rb.size(); ++i)
+				Require(rb[i].computed && rb[i].share == 0.0 && !rb[i].detected, "infinite-trust blocks are skipped, pair " + std::to_string(i) + " share=" + std::to_string(rb[i].share));
+		}
+
+		// (b) a coherent mover (25 % patch, 6 px per pair relative to the camera) over a panned background: the patch follows its own
+		// vector, so the advected lookup finds the same residual and the pair is not a dynamic texture.
+		TEST_METHOD(CamfixR2FDynTextureCoherentMoverIsNotIncoherent)
+		{
+			std::vector<Field> fields;
+			for (int i = 0; i < 4; ++i)
+			{
+				Field f(Grid4K());
+				f.FromModel(Pan4K());
+				const int x0 = 40 + static_cast<int>(std::lround(18.3 / 16.0 * i));
+				const int y0 = 50 + static_cast<int>(std::lround(-4.7 / 16.0 * i));
+				f.AddObject(x0, y0, 120, 68, 18.3, -4.7);
+				fields.push_back(f);
+			}
+			const std::vector<DynTextureResult> r = RunDetector(fields, Pan4K());
+			for (size_t i = 1; i < r.size(); ++i)
+			{
+				Require(r[i].computed && r[i].share > 0.15 && r[i].share < 0.4, "premise: the mover is about a quarter of the blocks, pair " + std::to_string(i)
+					+ " share=" + std::to_string(r[i].share));
+				Require(r[i].haveTemporal, "premise: the mover blocks are compared with the previous pair, pair " + std::to_string(i));
+				Require(r[i].temporal < 0.2 && !r[i].detected, "a coherent mover must stay coherent, pair " + std::to_string(i) + " temporal=" + std::to_string(r[i].temporal));
+			}
+		}
+
+		// (c) water over the same pan: random residuals, no coherence across pairs or neighbours.
+		TEST_METHOD(CamfixR2FDynTextureWaterIsDetectedUnderPan)
+		{
+			std::vector<Field> fields;
+			for (int i = 0; i < 3; ++i) fields.push_back(AnchoredWater(3100 + i, 3.0));
+			const std::vector<DynTextureResult> r = RunDetector(fields, Pan4K());
+			for (size_t i = 1; i < r.size(); ++i)
+				Require(r[i].computed && r[i].haveTemporal && r[i].share >= 0.5 && r[i].temporal >= 0.6 && r[i].spatial >= 0.5 && r[i].detected,
+					"water, pair " + std::to_string(i) + " share=" + std::to_string(r[i].share) + " temporal=" + std::to_string(r[i].temporal)
+					+ " spatial=" + std::to_string(r[i].spatial));
+		}
+
+		// Gemini SHOULD-1 (e34f08a3e): with resolvedPrecPx > 0 the detector uses the fit's final precision for its threshold (3 x it); 0 keeps
+		// the nominal precision. Water of +-1.2 px: against the nominal 0.25 px (threshold 0.75) it disagrees; against a final precision
+		// of 1.0 px (threshold 3) every residual agrees.
+		TEST_METHOD(CamfixR2FDynTextureAndStaticUseFitPrecision)
+		{
+			Field f = AnchoredWater(3200, 1.2);
+			auto run = [&](double resolved)
+			{
+				DynTextureState s;
+				const PairInput in = f.Input(kPairSeconds, 5);
+				return DetectDynamicTexture(DynTextureConfig(), in, Pan4K(), s, resolved);
+			};
+			const DynTextureResult nominal = run(0.0), same = run(0.25), widened = run(1.0);
+			Require(nominal.computed && nominal.share >= 0.5, "premise: against the nominal precision the water disagrees, share=" + std::to_string(nominal.share));
+			Require(same.share == nominal.share, "premise: an explicit 0.25 is the nominal value");
+			Require(widened.computed && widened.share == 0.0 && !widened.detected, "the fit's final precision sets the threshold, share=" + std::to_string(widened.share));
+		}
 	};
 
 	// Static-camera hypothesis (R1-STATIC, Config::staticCamera). Every test states its Config explicitly.
@@ -1997,6 +2110,21 @@ namespace VideoProcessorTest
 			Require(r.valid && r.reason == Reason::Ambiguous && (r.verdictFlags & kVerdictStaticCamera) != 0, "demoted: " + Flags(r));
 			Require(CountLabel(r, Label::Overlay) == 0, "a demoted pair stamps no Overlay: " + Flags(r) + " overlay=" + std::to_string(CountLabel(r, Label::Overlay)));
 			Require(r.objects.empty(), "a demoted pair does not run the object tracker: " + Flags(r));
+		}
+
+		// Gemini SHOULD-1 (e34f08a3e), static-camera side: resolvedPrecPx > 0 sets the ring threshold (3 x it); 0 keeps the nominal 0.25 px.
+		TEST_METHOD(CamfixR2FDynTextureAndStaticUseFitPrecision)
+		{
+			Field f = BoatLike(40);
+			const PairInput in = f.Input(kPairSeconds, 5);
+			const Params model = PanModel(1.2, -0.36);
+			const StaticCameraConfig cfg;
+			const StaticCameraResult nominal = EvaluateStaticCamera(cfg, in, model);
+			const StaticCameraResult same = EvaluateStaticCamera(cfg, in, model, 0.25);
+			const StaticCameraResult widened = EvaluateStaticCamera(cfg, in, model, 3.0);
+			Require(nominal.computed && nominal.staticShare < 0.6, "premise: against the nominal precision the water margin is not static, staticShare=" + std::to_string(nominal.staticShare));
+			Require(same.staticShare == nominal.staticShare, "premise: an explicit 0.25 is the nominal value");
+			Require(widened.computed && widened.staticShare > 0.99, "the fit's final precision sets the threshold, staticShare=" + std::to_string(widened.staticShare));
 		}
 	};
 }
