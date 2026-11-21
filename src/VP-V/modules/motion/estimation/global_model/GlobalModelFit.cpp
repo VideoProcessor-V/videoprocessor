@@ -920,7 +920,7 @@ namespace CameraModel
 		}
 
 		// Fits one pair. Reads (never writes) the Fitter's history; objects are updated only when asked.
-		static CameraMotion Run(Fitter& F, const PairInput& in, const Params* h0, bool temporalRead, bool runObjects, bool genReset, TlNext* tlOut, bool detect = false)
+		static CameraMotion Run(Fitter& F, const PairInput& in, const Params* h0, bool temporalRead, bool runObjects, bool genReset, TlNext* tlOut, bool detect = false, double* precOut = nullptr)
 		{
 			const Config& c = F.m_config;
 			CameraMotion rec;
@@ -1578,7 +1578,9 @@ namespace CameraModel
 			// SHOULD-2 (Gemini audit): the dynamic-texture / static-camera verdicts are known BEFORE the object tracker runs, so a record that is
 			// demoted to Ambiguous does not update the tracker's history (it would otherwise learn from a water / static-ring pair). Both
 			// detectors off: nothing here runs and the record is the one it always was.
-			const bool demoted = detect && ApplyDetectors(F, in, rec);
+			if (precOut != nullptr)
+				*precOut = f.prec;   // the FINAL precision (quantum floor, raised noise scale): the detectors and the temporal floor use it
+			const bool demoted = detect && ApplyDetectors(F, in, rec, f.prec);
 			Labels(F, in, f, rec, seed, runObjects && !demoted);
 			CM_PROF_MARK(7);
 			return rec;
@@ -1586,7 +1588,7 @@ namespace CameraModel
 
 		// The dynamic-texture and static-camera detectors on the finished record (moved ahead of Labels). Returns true when either demoted the
 		// record. Not evaluated for an invalid record or once the deadline passed (Fitter::Fit then drops the record and resets the history).
-		static bool ApplyDetectors(Fitter& F, const PairInput& in, CameraMotion& fit)
+		static bool ApplyDetectors(Fitter& F, const PairInput& in, CameraMotion& fit, double resolvedPrecPx)
 		{
 			const Config& c = F.m_config;
 			bool demoted = false;
@@ -1594,7 +1596,7 @@ namespace CameraModel
 				return false;
 			if (c.dynTexture)
 			{
-				const DynTextureResult dt = DetectDynamicTexture(c.dynTextureCfg, in, fit.params, F.m_dyn);
+				const DynTextureResult dt = DetectDynamicTexture(c.dynTextureCfg, in, fit.params, F.m_dyn, resolvedPrecPx);
 				fit.signals.dynShare = dt.share;
 				fit.signals.dynTemporal = dt.temporal;
 				fit.signals.dynSpatial = dt.spatial;
@@ -1609,7 +1611,7 @@ namespace CameraModel
 			}
 			if (c.staticCamera)
 			{
-				const StaticCameraResult sc = EvaluateStaticCamera(c.staticCfg, in, fit.params);
+				const StaticCameraResult sc = EvaluateStaticCamera(c.staticCfg, in, fit.params, resolvedPrecPx);
 				fit.signals.staticRing = sc.staticShare;
 				fit.signals.staticFit = sc.fitShare;
 				// Only a record a consumer could use is judged: demote, never promote.
@@ -1872,11 +1874,11 @@ namespace CameraModel
 			}
 
 			double floorBuf[4];
-			auto updateFloor = [&](const PairInput& p) -> const double*
+			auto updateFloor = [&](const PairInput& p, double resolvedPrecPx) -> const double*
 			{
 				if (!m_config.temporalNoiseFloor)
 					return nullptr;
-				const double prec = PairPrecision(p);
+				const double prec = resolvedPrecPx > 0 ? resolvedPrecPx : PairPrecision(p);   // SHOULD-1: the final f.prec of the fit
 				TemporalFloor(prec, p.picture, p.pairSeconds, floorBuf);
 				return floorBuf;
 			};
@@ -1906,7 +1908,8 @@ namespace CameraModel
 				rec.confidence = 0;
 				if (in.next != nullptr)
 				{
-					CameraMotion seed = Impl::Run(*this, *in.next, nullptr, false, m_config.objects, false, nullptr);
+					double seedPrec = 0;
+					CameraMotion seed = Impl::Run(*this, *in.next, nullptr, false, m_config.objects, false, nullptr, false, &seedPrec);
 					if (seed.valid)
 					{
 						rec.valid = true;
@@ -1924,7 +1927,7 @@ namespace CameraModel
 						rec.blocks = seed.blocks;
 						m_previous = rec;
 						m_havePrevious = true;
-						m_temporal.Update(in.next->pairSeconds, seed.rates, updateFloor(*in.next));
+						m_temporal.Update(in.next->pairSeconds, seed.rates, updateFloor(*in.next, seedPrec));
 						m_seedPending = true;
 					}
 				}
@@ -1994,7 +1997,8 @@ namespace CameraModel
 				h0p = &h0;
 			}
 			TlNext tlNext;
-			CameraMotion fit = Impl::Run(*this, in, h0p, true, m_config.objects, genReset, &tlNext, m_config.dynTexture || m_config.staticCamera);
+			double fitPrec = 0;
+			CameraMotion fit = Impl::Run(*this, in, h0p, true, m_config.objects, genReset, &tlNext, m_config.dynTexture || m_config.staticCamera, &fitPrec);
 			if (fit.valid && Impl::DeadlinePassed(m_config, in))
 			{
 				// The consumers' slot has passed: no model for this frame (visible fallback); state is not updated.
@@ -2011,7 +2015,7 @@ namespace CameraModel
 				m_havePrevious = true;
 				m_seedPending = false;
 				if ((fit.verdictFlags & (kVerdictDynamicTexture | kVerdictStaticCamera)) == 0)
-					m_temporal.Update(in.pairSeconds, fit.rates, updateFloor(in));   // a water-locked fit never feeds the camera prediction
+					m_temporal.Update(in.pairSeconds, fit.rates, updateFloor(in, fitPrec));   // a water-locked fit never feeds the camera prediction
 			}
 			if (m_config.twoLayer)
 				Impl::ApplyTl(*this, in, fit, tlNext);

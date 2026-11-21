@@ -71,5 +71,6 @@ namespace CameraModel
 
 	// Evaluates one pair against `model` and the previous residuals in `state`, then stores this pair's residuals in
 	// `state` (state is updated for every call with computed == true, so call it once per fitted pair, in order).
-	DynTextureResult DetectDynamicTexture(const DynTextureConfig& cfg, const PairInput& in, const Params& model, DynTextureState& state);
+	DynTextureResult DetectDynamicTexture(const DynTextureConfig& cfg, const PairInput& in, const Params& model, DynTextureState& state,
+		double resolvedPrecPx = 0);
 }

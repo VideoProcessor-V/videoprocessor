@@ -15,7 +15,8 @@ namespace CameraModel
 		inline double Len(double x, double y) { return std::sqrt(x * x + y * y); }
 	}
 
-	DynTextureResult DetectDynamicTexture(const DynTextureConfig& cfg, const PairInput& in, const Params& model, DynTextureState& state)
+	DynTextureResult DetectDynamicTexture(const DynTextureConfig& cfg, const PairInput& in, const Params& model, DynTextureState& state,
+		double resolvedPrecPx)
 	{
 		DynTextureResult out;
 		const int gw = in.gridW, gh = in.gridH;
@@ -23,7 +24,8 @@ namespace CameraModel
 			|| in.fwdY == nullptr || in.fwdTrust == nullptr || model.type == ModelType::None)
 			return out;
 		const size_t nb = static_cast<size_t>(gw) * static_cast<size_t>(gh);
-		const double prec = in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0;
+		// SHOULD-1: the fitter's FINAL precision (quantum floor, raised noise scale) when it passes one; 0 = the pair's nominal precision.
+		const double prec = resolvedPrecPx > 0 ? resolvedPrecPx : (in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0);
 		const double absThr = cfg.absSigmas * prec;
 		const bool prevOk = state.have && state.gridW == gw && state.gridH == gh && state.picture == in.picture && state.seconds > 0;
 		const double k = prevOk ? in.pairSeconds / state.seconds : 1.0;

@@ -47,5 +47,6 @@ namespace CameraModel
 	};
 
 	// Evaluates `model` against the identity model on the ring of `in`. Pure function of its arguments.
-	StaticCameraResult EvaluateStaticCamera(const StaticCameraConfig& cfg, const PairInput& in, const Params& model);
+	StaticCameraResult EvaluateStaticCamera(const StaticCameraConfig& cfg, const PairInput& in, const Params& model,
+		double resolvedPrecPx = 0);
 }
