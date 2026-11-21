@@ -3,6 +3,7 @@
 
 #include "VpvRenderingProfileSections.h"
 #include "VpvConfigFormApi.h"
+#include <DisplayRuleExpression.h>
 
 #include <QAction>
 #include <QBoxLayout>
@@ -2625,6 +2626,64 @@ namespace Vpv
                     if (index < at) --at;
                     profileFieldsLayout->insertWidget(at++, section);
                 }
+        }
+    }
+
+    void RefreshVpvRenderingProfileState(QWidget* editorRoot, QWidget* profileFields,
+        const QString& sectionPrefix, const QString& whenValue)
+    {
+        const auto findProfileWidget = [editorRoot, profileFields](const QString& objectName) -> QWidget* {
+            QWidget* found = profileFields ? profileFields->findChild<QWidget*>(objectName) : nullptr;
+            return found ? found : (editorRoot ? editorRoot->findChild<QWidget*>(objectName) : nullptr);
+        };
+        const auto findProfileAction = [editorRoot, profileFields](const QString& objectName) -> QAction* {
+            QAction* found = profileFields ? profileFields->findChild<QAction*>(objectName) : nullptr;
+            return found ? found : (editorRoot ? editorRoot->findChild<QAction*>(objectName) : nullptr);
+        };
+        static const QStringList kContentGateKeys = { QStringLiteral("intent_content"),
+            QStringLiteral("intent_content.check"), QStringLiteral("source_class"),
+            QStringLiteral("dejudder_pulldown"), QStringLiteral("cadence_class_fixes") };
+        if (sectionPrefix != QStringLiteral("vprenderer"))
+            return;
+        for (const QString& key : kContentGateKeys)
+            if (QWidget* widget = findProfileWidget(controlName(sectionPrefix, key)))
+                if (widget->property("contentGateIgnored").toBool())
+                {
+                    widget->setProperty("contentGateIgnored", false);
+                    widget->setProperty("greyedOff", false);
+                    widget->setEnabled(true);
+                    widget->setToolTip(widget->property("contentGateTooltip").toString());
+                }
+        for (const char* name : { "motion_preset_refresh", "picture_preset_refresh",
+                "adaptive_faithful_refresh", "optical_flow_refresh", "interpolation_refresh",
+                "temporal_dither_refresh", "intent_content_refresh", "detail_restore_refresh",
+                "intent_adaptive_refresh", "greyed_state_refresh" })
+            if (auto* refresh = findProfileAction(controlName(sectionPrefix, QString::fromLatin1(name))))
+                refresh->trigger();
+        {
+            bool contentGated = false;
+            const std::string when = whenValue.trimmed().toStdString();
+            if (!when.empty())
+            {
+                DisplayRuleExpression::Expression expression;
+                std::string error;
+                contentGated = expression.Compile(when, error, true) && expression.Variables().count("content") != 0;
+            }
+            const QString cadenceFixes = effectiveChoiceValue(qobject_cast<QComboBox*>(findProfileWidget(
+                controlName(sectionPrefix, QStringLiteral("cadence_class_fixes")))));
+            const bool ignored = contentGated && cadenceFixes != QStringLiteral("off");
+            for (const QString& key : kContentGateKeys)
+            {
+                QWidget* widget = findProfileWidget(controlName(sectionPrefix, key));
+                if (!widget || !ignored) continue;
+                widget->setProperty("contentGateTooltip", widget->toolTip());
+                widget->setProperty("contentGateIgnored", true);
+                widget->setProperty("greyedOff", true);
+                widget->setEnabled(false);
+                widget->setToolTip(widget->toolTip() + QStringLiteral(
+                    "\n\nIgnored in this profile: its when: rule reads $content, which this setting changes, "
+                    "so the renderer keeps the value from outside this profile (cadence_class_fixes)."));
+            }
         }
     }
 }

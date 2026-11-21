@@ -67,4 +67,6 @@ namespace Vpv
 
     RenderingSectionHandles AddVpvRenderingSections(const RenderingSectionKit& kit);
     void AddVpvProcessingAndReorganise(const RenderingSectionKit& kit, const RenderingSectionHandles& handles);
+    void RefreshVpvRenderingProfileState(QWidget* editorRoot, QWidget* profileFields,
+        const QString& sectionPrefix, const QString& whenValue);
 }
