@@ -28,6 +28,9 @@ namespace AdaptiveDownscaleStage
 {
 	// The de-judder outputs for this source frame (host: DejudderLiveFieldFor(sequence) &&
 	// !VpPhaseDrawn(renderImage); the textures only when live).
+	// CF-2 switch-over: motion stays on this read (the ExternalView of P3) until P3 has a GPU Acquire publication: at this tip
+	// kP3AnalysisField has no dispatcher texture set and no owner fill (SkeletonModule::gpuHandleOf answers NoGpuHandle), and
+	// frameTrust / grainError are in no product. The switch is an Acquire in Register when that lands.
 	struct MotionSource
 	{
 		bool live = false;
@@ -84,17 +87,14 @@ namespace AdaptiveDownscaleStage
 		std::function<VpSkeleton::AcquireResult(VpSkeleton::ProductId, uint64_t, const VpSkeleton::VariantKey&)> acquire;
 	};
 
-	// CF-2 B1 ruling (a): the edge / grain terms' seam. Each term reads the published product when it is published, else the
-	// module's private in-shader term (the interim), and says which with the cause. Grain: kP10gGrainLevel has no product id at
-	// this tip, so it is always the interim (the cause says so). Pure data (tests).
+	// CF-2 switch-over: the grain term's seam (kP10gGrainLevel, one Acquire per upscale frame). Published = the module reads it;
+	// anything else = grain_floor (the alias-safe lean) with the cause, on the status and the catalog. The edge term is the
+	// module's own kEdgeMap reader (CB-18 S18: the measure acquires the stage variant; EdgeMapStatus). Pure data (tests).
 	struct TermSource
 	{
 		bool published = false;
-		std::string cause;   // why the interim stands in (empty when published)
+		std::string cause;   // why the product was not read (empty when published)
 	};
-
-	// The status line of the interim ("edge/grain: private interim (...)"); empty when both terms read their products.
-	std::string InterimLine(const TermSource& edge, const TermSource& grain);
 
 	// CF-2 B1 (N1.4): why the vectors of this source frame are not usable by the upscale form's motion term (nullptr = usable):
 	// motion off, NLS, no live estimate, a drop (a sequence gap) or a resync (the sequence went back). A repeat of the last
@@ -114,13 +114,12 @@ namespace AdaptiveDownscaleStage
 		std::string moduleFloorCause;
 		bool cutAvailable = true;
 		std::string cutCause;
-		std::string interim;             // InterimLine(edge, grain); empty when both products are read
+		std::string grainCause;          // kP10gGrainLevel not read this frame (grain_floor); empty when read or one-axis
 	};
 
 	// The upscale form's one "output scaling" decision (the host engages one per frame, CoreSegments): a GPU failure first,
 	// then the motion floor (the stage's verdict, or the module's own floor with its cause: gate M1), then no cut verdict,
-	// then the edge/grain private interim (gate S2: the interim reaches Config status and the notice, not only Ctrl+I).
-	// Pure (Fallback() and the tests).
+	// then the grain floor (kP10gGrainLevel not read: Config status and the notice, not only Ctrl+I). Pure (Fallback(), tests).
 	FallbackCatalog::Decision UpscaleScalingFallback(const UpscaleFallbackInputs& in);
 
 	// Host members other host code still reads (status line, the de-judder's grain-map request).
@@ -185,7 +184,7 @@ namespace AdaptiveDownscaleStage
 		FallbackCatalog::Decision Fallback() const
 		{
 			// CF-2 B1 / FIX1: the upscale form's own entry (the alias-safe ScalerPass failed: the main scaler alone; no vectors,
-			// by the stage's verdict or the module's own floor: the floor; no cut verdict; the edge/grain interim).
+			// by the stage's verdict or the module's own floor: the floor; no cut verdict; no grain level: the grain floor).
 			if (upscaleThisFrame)
 			{
 				UpscaleFallbackInputs in;
@@ -199,7 +198,7 @@ namespace AdaptiveDownscaleStage
 				in.moduleFloorCause = module.MotionFloorCauseText();
 				in.cutAvailable = module.CutAvailable();
 				in.cutCause = in.cutAvailable ? std::string() : module.CutCause();
-				in.interim = InterimLine(edgeTerm, grainTerm);
+				in.grainCause = oneAxisThisFrame || grainTerm.published ? std::string() : grainTerm.cause;
 				return UpscaleScalingFallback(in);
 			}
 			const FallbackCatalog::Decision base = FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
@@ -214,8 +213,7 @@ namespace AdaptiveDownscaleStage
 		// (classical weights, byte-identical, no status line). Once the engine is requested and a product is absent, the classical
 		// bitrate-quality weights stand in VISIBLY: the "product.adaptive_downscale" decision is engaged and StatusLines() carries its line.
 		const TdProducts::ReadResult& TemporalDetailRead() const { return tdRead; }
-		// CF-2 B1: this frame's edge / grain seam and the upscale motion verdict (status, tests).
-		const TermSource& EdgeTerm() const { return edgeTerm; }
+		// CF-2 B1: this frame's grain seam and the upscale motion verdict (status, tests).
 		const TermSource& GrainTerm() const { return grainTerm; }
 		const std::string& UpscaleMotionCause() const { return upscaleMotionCause; }
 		FallbackCatalog::Decision TemporalDetailFallback() const { return tdRead.fallback; }
@@ -239,8 +237,7 @@ namespace AdaptiveDownscaleStage
 		unsigned long long lastFailureTick = 0;   // GetTickCount64() of the last frame with new failures
 		bool failureHeld = false;          // a failure within kFailureHoldMs
 		TdProducts::ReadResult tdRead;     // the temporal-detail read path of the frame just registered (nothing used in reset 1)
-		TermSource edgeTerm;               // CF-2 B1: this frame's edge seam
-		TermSource grainTerm;              // ... grain seam
+		TermSource grainTerm;              // CF-2 B1: this frame's grain seam (kP10gGrainLevel)
 		std::string upscaleMotionCause;    // ... why the upscale motion term is floored (empty: vectors usable)
 		bool haveMotionSequence = false;   // the last upscale frame's sequence (drop / resync / repeat)
 		uint64_t motionSequenceSeen = 0;

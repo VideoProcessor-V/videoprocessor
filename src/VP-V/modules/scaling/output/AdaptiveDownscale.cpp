@@ -251,13 +251,29 @@ if (q.x < size.x && q.y < size.y) {
 #ifdef AD_UPSCALE
     // CF-2 B1 (refs/123 N1.2, HybridBlend.h): the sharp branch (POST_KERNEL) is the base (its chroma stays), luma
     // pulled toward the alias-safe branch by 1 - w; w = clamp(w_base (1 - e) g) x motion.
-#ifdef AD_EDGE_PUBLISHED
+    // The grain term on this form is kP10gGrainLevel only (no private scalar or map): the block's N_b at this pixel's source
+    // position, bilinear between block centres, through the grain ramp (energy -> target). FIX-UPS-grain: grain_level_scale
+    // (GrainLevelEnergyScale) takes sqrt(N_b) to the ramp's unit and is measured at W4. A block without a level (N_b < 0) and a
+    // frame without the product take grain_floor: the alias-safe lean, shown by the stage (never silent).
+#ifdef AD_GRAIN_PUBLISHED
     {
-        // kEdgeMap (the skeleton's product over the source frame): this pixel's source position, the same ramp.
-        vec2 eu = (s - src_origin) / max(edge_src_size, vec2(1e-6));
-        vec2 ep = edge_crop.xy + eu * edge_crop.zw;
-        e = smoothstep(edge_lo, edge_hi, texture(edge_pub, ep / vec2(textureSize(edge_pub, 0))).r * edge_pub_scale);
+        vec2 gu = (s - src_origin) / max(src_size, vec2(1e-6));
+        vec2 gsp = grain_crop.xy + gu * grain_crop.zw;
+        ivec2 lsize = textureSize(grain_level, 0);
+        vec2 lpos = gsp / 16.0 - vec2(0.5);
+        ivec2 l0 = ivec2(floor(lpos));
+        vec2 lt = lpos - vec2(l0);
+        float gacc = 0.0;
+        for (int y = 0; y <= 1; y++)
+            for (int x = 0; x <= 1; x++) {
+                float nb = texelFetch(grain_level, clamp(l0 + ivec2(x, y), ivec2(0), lsize - ivec2(1)), 0).x;
+                float gtarget = mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb, 0.0)) * grain_level_scale));
+                gacc += (x == 1 ? lt.x : 1.0 - lt.x) * (y == 1 ? lt.y : 1.0 - lt.y) * (nb >= 0.0 ? gtarget : grain_floor);
+            }
+        g = gacc;
     }
+#else
+    g = grain_floor;
 #endif
     float mt = 1.0;
 #ifdef AD_MOTION
@@ -1092,7 +1108,8 @@ float rs_slope(float y)
 		const float chroma = settings.chromaSsim ? 1.0f : 0.0f;
 		// 8-3: the map for this source frame (else the scalar; the binding
 		// then repeats the state texture, never read).
-		const bool useMap = mapState == MapState::Used && mapReady && mapSequence == sequence;
+		// The upscale form's grain term is kP10gGrainLevel only (below): the private map is the downscale form's.
+		const bool useMap = !upscale.on && mapState == MapState::Used && mapReady && mapSequence == sequence;
 		const float srcSize[2] = { srcRect.x1 - srcRect.x0, srcRect.y1 - srcRect.y0 };
 		const pl_rect2df& sc = grainField.sourceCrop;
 		const float crop[4] = { sc.x0, sc.y0, sc.x1 - sc.x0, sc.y1 - sc.y0 };
@@ -1149,10 +1166,10 @@ float rs_slope(float y)
 		const char* floorCause = motionFloor ? MotionFloorCause(vectorsInvalid, motionState, motionReady,
 			motionSequence == sequence, motionMap[motionIndex] != nullptr) : nullptr;
 		motionFloorCause = motionFloor ? std::string(floorCause ? floorCause : "no motion map") : std::string();
-		// Ruling (a): the published edge map when the stage acquired it; else the private ramp (`edge`, the interim).
-		const bool edgePublished = upscale.on && edgeSource.map != nullptr;
-		publishedEdgeUsed = edgePublished;
-		if (edgePublished) d.push_back(Sampled("edge_pub", edgeSource.map, false));   // R32F: nearest (float32 need not filter)
+		// Switch-over: kP10gGrainLevel when the stage acquired it; else grain_floor (no private grain term on this form).
+		const bool grainPublished = upscale.on && grainLevel.level != nullptr;
+		publishedGrainUsed = grainPublished;
+		if (grainPublished) d.push_back(Sampled("grain_level", grainLevel.level, false));   // RGBA32F: texelFetch only
 		if (stabilise)
 		{
 			d.push_back(Sampled("rs_field", motion.field, false));
@@ -1167,7 +1184,7 @@ float rs_slope(float y)
 			(upscale.superresAlpha ? "#define AD_SUPERRES_ALPHA 1\n" : "") +
 			(upscale.oneAxis ? "#define AD_FAITHFUL_ONLY 1\n" : "") +
 			(motionFloor ? "#define AD_MOTION_FLOOR 1\n" : "") +
-			(edgePublished ? "#define AD_EDGE_PUBLISHED 1\n" : "") : std::string();
+			(grainPublished ? "#define AD_GRAIN_PUBLISHED 1\n" : "") : std::string();
 		const bool guard = stabilise && settings.residualGrainGuard;
 		const std::string header = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" + upHeader +
 			(useMotion ? std::string("#define AD_MOTION 1\n") : std::string()) +
@@ -1222,16 +1239,19 @@ float rs_slope(float y)
 		const float motionFloorValue = RampMath::Clamp01(settings.motionFloor);
 		if (motionFloor)
 			v.push_back({ pl_var_float("motion_floor"), &motionFloorValue, true });
-		const pl_rect2df& ec = edgeSource.sourceCrop;
-		const float edgeCrop[4] = { ec.x0, ec.y0, ec.x1 - ec.x0, ec.y1 - ec.y0 };
-		const float edgePubScale = PublishedEdgeScale();
-		if (edgePublished)
+		const pl_rect2df& gc = grainLevel.sourceCrop;
+		const float grainCrop[4] = { gc.x0, gc.y0, gc.x1 - gc.x0, gc.y1 - gc.y0 };
+		const float grainLevelScale = GrainLevelEnergyScale();
+		if (upscale.on)
+			v.push_back({ pl_var_float("grain_floor"), &settings.grainFloor, true });   // published or not (the floor)
+		if (grainPublished)
 		{
-			v.push_back({ pl_var_vec2("edge_src_size"), srcSize, true });
-			v.push_back({ pl_var_vec4("edge_crop"), edgeCrop, true });
-			v.push_back({ pl_var_float("edge_lo"), &settings.edgeLo, true });
-			v.push_back({ pl_var_float("edge_hi"), &settings.edgeHi, true });
-			v.push_back({ pl_var_float("edge_pub_scale"), &edgePubScale, true });
+			if (!stabilise)
+				v.push_back({ pl_var_vec2("src_size"), srcSize, true });   // useMap is off on this form; stabilise already has it
+			v.push_back({ pl_var_vec4("grain_crop"), grainCrop, true });
+			v.push_back({ pl_var_float("grain_lo"), &settings.grainLo, true });
+			v.push_back({ pl_var_float("grain_hi"), &settings.grainHi, true });
+			v.push_back({ pl_var_float("grain_level_scale"), &grainLevelScale, true });
 		}
 		if (!Compute(p->dispatch, upscale.on ? "VideoProcessor adaptive upscale: blend" : "VideoProcessor adaptive downscale: blend",
 			header.c_str(), BLEND_BODY, d.data(), static_cast<int>(d.size()), v.data(), static_cast<int>(v.size()),

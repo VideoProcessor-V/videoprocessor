@@ -7,7 +7,6 @@
 #include <VP-V/modules/scaling/output/NlsMaskMapping.h>
 #include <VP-V/modules/drive/led_measure/ReadbackRing.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleCut.h>
-#include <VP-V/modules/input/source_analysis/regions/BusyEdgeGlsl.h>
 #include <VP-V/modules/scaling/shared/ScalerPass.h>
 #include <VP-V/modules/input/source_analysis/regions/MeasureDomain.h>
 #include <VP-V/modules/scaling/output/EdgeMapStageOrdinal.h>
@@ -257,8 +256,10 @@ namespace AdaptiveDownscale
 	// the same module upscaling a shorter source (1080p -> 1600p), any output ratio. Luma only:
 	//     w = clamp(up_w_base x (1 - e) x grain_scale) x motion;  out = sharp + (1 - w)(Y_alias_safe - Y_sharp)
 	// sharp = the POST_KERNEL picture (libplacebo's main scaler; a LUMA prescaler before it = the CNN evaluation arm),
-	// alias_safe = the faithful ScalerPass from the PRE_KERNEL source-resolution picture. e = the edge ramp: kEdgeMap when the
-	// skeleton publishes its stage variant (SetEdgeSource), else the module's private Sobel (the interim, shown in the status).
+	// alias_safe = the faithful ScalerPass from the PRE_KERNEL source-resolution picture. e = the edge ramp: kEdgeMap's stage variant
+	// (CB-18: the measure pass offers its base picture and acquires EdgeMapStageKey; EdgeMapStatus names any other source).
+	// grain_scale on this form = kP10gGrainLevel (SetGrainLevel, the stage's one ask per frame); not published = grain_floor
+	// (the alias-safe lean, visible: PublishedGrainUsed false, the stage's status line and catalog entry). No private grain term.
 	// Motion: the map's factor; motion_floor when the vectors are absent or invalid (vectorsInvalid; N1.4 alias-safe lean).
 	// A clean flat picture is the sharp branch exactly and chroma stays the sharp
 	// branch's (CfL). The faithful branch (anti-ringing) is from the source-resolution picture: PRE_KERNEL itself,
@@ -286,18 +287,18 @@ namespace AdaptiveDownscale
 		bool vectorsInvalid = false;
 	};
 
-	// CF-2 B1 ruling (a): the published edge map (kEdgeMap, R32F Sobel |G| in 10-bit codes over the source frame) for this frame,
-	// acquired by the stage through the skeleton; the pin keeps it alive until the next frame. map null = the private interim.
-	struct EdgeSource
+	// CF-2 switch-over: kP10gGrainLevel (id 35, "grain.level") for the upscale form's grain term, acquired by the stage once per
+	// frame through the skeleton; the pin keeps it alive until the next frame. level null = not published (grain_floor).
+	struct GrainLevelSource
 	{
-		pl_tex map = nullptr;
+		pl_tex level = nullptr;                // RGBA32F per 16 x 16 source-luma block: x = N_b, y = gate, z = f'^2 N_b, w = lag-1
 		std::shared_ptr<const void> pin;
-		pl_rect2df sourceCrop{};   // the source crop in the map's pixels (the frame's source pixels)
+		pl_rect2df sourceCrop{};               // the source crop in the level's source-luma pixels
 	};
 
-	// The published |G| (10-bit codes, RegionEvidence::kSourceTapCodesPerUnit) -> the private ramp's gradient unit (8-bit codes x 0.25,
-	// MEASURE_BODY). The light-domain difference (the private 1/2.2 reference) is FIX-UPS-edge, owed after the W4 build.
-	inline float PublishedEdgeScale() { return 0.25f * 255.0f / RegionEvidence::kSourceTapCodesPerUnit; }
+	// sqrt(N_b) (codes of D) -> the grain ramp's energy unit (grain_lo / grain_hi). FIX-UPS-grain: 1.0 is a named placeholder,
+	// to be measured at W4 against the P10 split's code scale; it is not a derived constant.
+	inline float GrainLevelEnergyScale() { return 1.0f; }
 
 	// The prescale ratio of PRE_KERNEL to the source crop the measure accepts: 1 (the source), 2 (a doubler's exact 2x), 0 (not
 	// applied: another ratio, or nothing upscaled). Independent of the output ratio (any destination size). Pure (tests).
@@ -390,11 +391,11 @@ namespace AdaptiveDownscale
 		// The last measured frame's source-resolution base: 1 (PRE_KERNEL),
 		// 2 (a doubler's output averaged), 0 not applied; tests and the log.
 		int LastUpscaleRatio() const { return upscaleRatio; }
-		// CF-2 B1: per frame (the stage): the published edge map, or none (the private interim).
-		void SetEdgeSource(const EdgeSource& value) { edgeSource = value; }
-		void ClearEdgeSource() { edgeSource = EdgeSource(); }
-		// The last blended frame read the published edge map / used the motion floor (status, tests).
-		bool PublishedEdgeUsed() const { return publishedEdgeUsed; }
+		// CF-2 switch-over: per frame (the stage): the published grain level, or none (grain_floor on the upscale form).
+		void SetGrainLevel(const GrainLevelSource& value) { grainLevel = value; }
+		void ClearGrainLevel() { grainLevel = GrainLevelSource(); }
+		// The last blended frame read the published grain level / used the motion floor (status, tests).
+		bool PublishedGrainUsed() const { return publishedGrainUsed; }
 		bool MotionFloorUsed() const { return motionFloorUsed; }
 		// CF-2 FIX1 (gate M1): the cause of that floor (empty when it was not used).
 		const std::string& MotionFloorCauseText() const { return motionFloorCause; }
@@ -482,8 +483,8 @@ namespace AdaptiveDownscale
 		pl_tex lowres = nullptr;          // 8b: a doubler's output at source resolution
 		Upscale upscale{};
 		int upscaleRatio = 0;
-		EdgeSource edgeSource{};
-		bool publishedEdgeUsed = false;
+		GrainLevelSource grainLevel{};
+		bool publishedGrainUsed = false;
 		bool motionFloorUsed = false;
 		std::string motionFloorCause;
 		pl_tex edge = nullptr;
