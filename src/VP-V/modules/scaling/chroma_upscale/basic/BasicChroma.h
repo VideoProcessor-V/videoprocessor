@@ -33,6 +33,7 @@
 #pragma once
 
 #include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
+#include <VP-V/modules/scaling/shared/KernelTable.h>
 
 #include <algorithm>
 #include <cmath>
@@ -86,6 +87,8 @@ namespace BasicChroma
 
 	// ---- the polyphase tables ------------------------------------------------------------------------------------------
 
+	// The pre-CF-2 private kernel, kept only as the reference the equality test compares the shared table against (BuildPhaseTable
+	// takes its weights from ScalerKernels, the one kernel table, refs/123 N1).
 	inline double Lanczos(double d)
 	{
 		const double ad = std::fabs(d);
@@ -94,6 +97,14 @@ namespace BasicChroma
 		const double pi = 3.14159265358979323846;
 		const double pd = pi * d;
 		return kLobes * std::sin(pd) * std::sin(pd / kLobes) / (pd * pd);
+	}
+
+	inline ScalerKernels::Spec LanczosSpec()   // the table's Lanczos a = 3 entry
+	{
+		ScalerKernels::Spec sp;
+		sp.kind = ScalerKernels::Kind::Lanczos;
+		sp.radius = kLobes;
+		return sp;
 	}
 
 	// The Q14 weights of every phase of a factor f (phases 0 .. 4f-1; phase p is the chroma fraction p / 4f), 6 taps each for
@@ -118,7 +129,7 @@ namespace BasicChroma
 			for (int k = 0; k < kTaps; ++k)
 			{
 				const double d = (k - (kLobes - 1)) - frac;          // tap index i0 + (k - 2), distance to j
-				raw[k] = Lanczos(d);
+				raw[k] = ScalerKernels::Weight(LanczosSpec(), d);
 				dsum += raw[k];
 			}
 			// Normalise the truncated kernel first (its taps do not sum to 1), then round; only the true rounding remainder

@@ -178,6 +178,32 @@ namespace BasicChromaTestsNs
 			}
 		}
 
+		TEST_METHOD(PhaseTablesFromTheSharedKernelTableEqualTheLegacyQ14Tables)
+		{
+			// CF-2 B5a-2: BuildPhaseTable draws its double weights from ScalerKernels (Lanczos a = 3); the Q14 tables are what the
+			// private kernel produced, for every factor and phase.
+			for (int f = 1; f <= 4; f *= 2)
+			{
+				const PhaseTable t = BuildPhaseTable(f);
+				for (int p = 0; p < 4 * f; ++p)
+				{
+					const double frac = static_cast<double>(p) / (4 * f);
+					double raw[kTaps], dsum = 0.0;
+					for (int k = 0; k < kTaps; ++k) { raw[k] = Lanczos((k - (kLobes - 1)) - frac); dsum += raw[k]; }
+					int ref[kTaps], sum = 0, best = 0;
+					for (int k = 0; k < kTaps; ++k)
+					{
+						ref[k] = static_cast<int>(std::floor(raw[k] / dsum * kWeightOne + 0.5));
+						sum += ref[k];
+						if (std::abs(ref[k]) > std::abs(ref[best])) best = k;
+					}
+					ref[best] += kWeightOne - sum;
+					for (int k = 0; k < kTaps; ++k)
+						Assert::AreEqual(ref[k], t.w[p][k], L"Q14 tap equal to the legacy table");
+				}
+			}
+		}
+
 		TEST_METHOD(PositionLogicMatchesDoubleMathForEveryFactorAndSiting)
 		{
 			for (int f : { 1, 2, 4 })
