@@ -550,6 +550,63 @@ namespace SkeletonAcquireTestsNs
 			const std::vector<uint8_t> slot = r.SlotBytes(kP5MonitorTiles, 0);
 			Assert::IsTrue(!slot.empty() && slot[0] == 0xAA, L"the missing-input form, computed by the law");
 		}
+
+		// WAIVER-C5-GF-T5 (GF-P1 MUST-3, GV AMEND, binder side): a lane with NO GPU dispatcher (a shadow or raised lane) bound to a memo
+		// that has an owner GPU device attached keeps GPU presence: the non-view GPU owner fill is served, not refused
+		// NoGpuDispatcher. The memo's device is attached BEFORE the bind (the attach-after-bind order is the SkeletonModule's: P2b).
+		// Category Cpu: hardware-free (a fake IOwnerGpuDevice; no device).
+		BEGIN_TEST_METHOD_ATTRIBUTE(BindKeepsPresenceWithAnOwnerDevice)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(BindKeepsPresenceWithAnOwnerDevice)
+		{
+			struct FakeDevice : IOwnerGpuDevice
+			{
+				int gpu = 0, dispatch = 0, texture = 0;
+				void* OwnerGpu() const override { return const_cast<int*>(&gpu); }
+				void* OwnerDispatch() const override { return const_cast<int*>(&dispatch); }
+				bool CreateOwnerTexture(const TexShape& shape, GpuMemoHandle& out, std::string&) override
+				{
+					out.resource = &texture;
+					out.width = shape.w;
+					out.height = shape.h;
+					out.keepAlive = std::make_shared<int>(1);
+					return true;
+				}
+			} device;
+			LaneRig r;
+			Assert::IsTrue(r.Configure(), L"built");
+			Assert::IsFalse(r.lane.HasGpuDispatcher(), L"the lane has no GPU dispatcher");
+			SkeletonMemo m;
+			m.SetGpuDevice(&device);
+			Assert::IsTrue(m.HasGpuDevice(), L"the owner device is attached");
+			m.SetGpuBudget(true, 1u << 20);
+			int gpuCalls = 0;
+			m.RegisterOwnerFill(kP1HalfLuma, AcquireForm::Gpu, kLaneUnit, GpuFill(&gpuCalls, 64, 64));
+			BindLaneToMemo(r.lane, m);
+			const AcquireResult a = m.Acquire(kP1HalfLuma, 1, AcquireForm::Gpu);
+			Assert::IsTrue(a.cause != AcquireCause::NoGpuDispatcher, L"presence is kept: not refused for want of a dispatcher");
+			Assert::IsTrue(a.Ok() && a.status == AcquireStatus::FilledAtRead && a.gpu.Valid(), L"the non-view GPU fill is served");
+			Assert::AreEqual(1, gpuCalls, L"the owner's GPU fill ran");
+			m.SetGpuDevice(nullptr);
+		}
+
+		// WAIVER-C5-GF-T5: and without an owner device the bind does not invent presence: the same fill is refused NoGpuDispatcher.
+		TEST_METHOD(BindWithoutDeviceStaysAbsent)
+		{
+			LaneRig r;
+			Assert::IsTrue(r.Configure(), L"built");
+			Assert::IsFalse(r.lane.HasGpuDispatcher(), L"the lane has no GPU dispatcher");
+			SkeletonMemo m;
+			Assert::IsFalse(m.HasGpuDevice(), L"no owner device");
+			m.SetGpuBudget(true, 1u << 20);
+			int gpuCalls = 0;
+			m.RegisterOwnerFill(kP1HalfLuma, AcquireForm::Gpu, kLaneUnit, GpuFill(&gpuCalls, 64));
+			BindLaneToMemo(r.lane, m);
+			const AcquireResult a = m.Acquire(kP1HalfLuma, 1, AcquireForm::Gpu);
+			Assert::IsTrue(a.status == AcquireStatus::Unavailable && a.cause == AcquireCause::NoGpuDispatcher, L"no device, no dispatcher: NoGpuDispatcher");
+			Assert::AreEqual(0, gpuCalls, L"no GPU work");
+		}
 	};
 
 	// G0 gate (owner rule 2026-11-13, refs/129 COMMON RULE): RECURSIVE get-or-compute-and-publish. A fill that needs a

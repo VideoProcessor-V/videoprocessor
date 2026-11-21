@@ -6,6 +6,7 @@ Usage:
   python -I tools/check_trx_coverage.py --filter "FullyQualifiedName~A|FullyQualifiedName~B" TRX [TRX|DIR ...]
   python -I tools/check_trx_coverage.py --queue-line "<build-queue line>" TRX|DIR ...
   python -I tools/check_trx_coverage.py --queue-file D:/codex/build-queue/queue.txt --lane LANE TRX|DIR ...
+  python -I tools/check_trx_coverage.py --filter F --trx NATIVE.trx --beta-trx BETA.trx
   python -I tools/check_trx_coverage.py --selftest
   (add --json for a machine-readable report)
 
@@ -34,6 +35,27 @@ Per test (TestDefinitions/UnitTest + its UnitTestResult rows):
                tests/support/HardwarePrerequisites.h, where a skip reports Passed with the marker)
   notExecuted  any other outcome (Timeout, Error, Aborted, NotExecuted, NotRunnable, Pending, ...; a
                timed-out or errored test proved nothing), or a test definition with no result row
+
+Fork-only tests (GEM-PKG s10g; --beta-trx FILE, repeatable):
+  forkOnly     every row Passed and its only SKIP markers are SKIP-FORK-ONLY-<TAG> with TAG in the CLOSED
+               FORK_ONLY_TAGS list ({"PL0004"}); any other tag is a plain skip (FAIL)
+  A Beta TRX is valid only when BetaSuite::RunBetaSuite, from VideoProcessorBetaTestsHost.dll (its codeBase),
+  executed and Passed, with no SKIP marker, its output says "whole chain passed" and has no
+  VP_TEST_REPORT_MODE=1 token. The suite's stdout goes to VP_TEST_OUT, so BETA-RAN lines reach the TRX
+  only when the Beta host echoes them through Logger::WriteMessage. Only line-start "BETA-RAN <id>" lines in
+  that test's output count; BETA-RAN lines anywhere else (a native TRX, another test, an invalid Beta TRX)
+  are ignored with a NOTE. A forkOnly native test is "executed on the Beta host" only when a valid Beta TRX
+  has "BETA-RAN <its exact FQN>" (case-insensitive full equality); credited tests count as executed and are
+  listed with the Beta TRX path. An uncredited forkOnly test in the filter is a FAIL ("fork-only test
+  selected on a native lane without Beta-host evidence"). A BETA-RAN id equal to a native test without the
+  tag credits nothing. Every other BETA-RAN id under "BetaStage::" (any case) is a Beta pseudo-test (fqn = id,
+  executed), so a term like FullyQualifiedName~BetaStage::SigmaDeltaCameraGoldenTests needs at least one; an
+  unmatched id outside BetaStage:: credits nothing (NOTE), so Beta lines never cover a native term. A
+  pseudo-test satisfies ONLY positive FullyQualifiedName~/= terms whose value starts with BetaStage::; it never
+  counts toward any other term (a broad FullyQualifiedName~Sigma, a Name~ term) and is never selected by
+  exclusions alone. SKIP-NO-GPU anywhere,
+  Beta TRX included, is a FAIL. Each TRX's build lines (VP-BUILD-ID:<hex>, build/commit/sha = <hex>, the
+  test DLL codeBase) are printed so a gate can compare the native and Beta builds.
 
 Run level: a ResultSummary outcome other than Completed/Passed/Failed, Counters aborted, error,
 timeout, notRunnable or notExecuted above 0, or Counters total != executed is an aborted/partial run.
@@ -70,6 +92,19 @@ SKIP_MARKER = re.compile(r"SKIP-[A-Z][A-Z0-9-]*")
 COUNTER_KEYS = ("total", "executed", "passed", "failed", "error", "timeout", "aborted", "inconclusive",
                 "notRunnable", "notExecuted")
 PROPS = {"fullyqualifiedname": "FullyQualifiedName", "name": "Name", "classname": "ClassName"}
+# Fork-only (GEM-PKG s10g, agreed with A20-C5 2026-11-21): a native test that needs a libplacebo fork patch
+# logs SKIP-FORK-ONLY-<TAG> and returns; it is credited only by a valid Beta TRX's "BETA-RAN <FQN>" line.
+# CLOSED allow-list: a new tag is a reviewed change to this line (WAIVER commit), never a pattern.
+FORK_ONLY_TAGS = frozenset(["PL0004"])
+FORK_ONLY_PREFIX = "SKIP-FORK-ONLY-"
+BETA_SUITE_FQN = "betasuite::runbetasuite"
+BETA_HOST_DLL = re.compile(r"^videoprocessor-?betatestshost\.dll$", re.I)   # VideoProcessor-BetaTestsHost.vcxproj TargetName
+BETA_STAGE_PREFIX = "betastage::"   # Beta-only stage ids (GEM-PKG s10g): the only ids that may become pseudo-tests
+TRANSPORT_NOTE = ("the Beta host must echo each BETA-RAN line through Logger::WriteMessage (RunBetaSuite sends the "
+                  "suite's stdout to VP_TEST_OUT, not to the TRX)")
+BETA_RAN_LINE = re.compile(r"^[ \t]*BETA-RAN[ \t]+(\S+)[ \t]*\r?$", re.M)
+BUILD_LINE = re.compile(r"VP-BUILD-ID:[0-9A-Fa-f]{32}|\b(?:build|commit|sha|head)(?:[ \t]+sha)?[ \t]*[:=][ \t]*"
+                        r"[0-9a-fA-F]{7,40}\b", re.I)
 
 
 class FilterError(Exception):
@@ -171,10 +206,18 @@ def _hit(op, value, cand):
     return v == c if op in ("=", "!=") else v in c
 
 
+def beta_stage_leaf(lf):
+    """A positive FullyQualifiedName~ / = term on the Beta namespace (value starts with BetaStage::, any case)."""
+    return (lf["prop"] == "FullyQualifiedName" and lf["op"] in ("~", "=")
+            and lf["value"].lower().startswith("betastage::"))
+
+
 def leaf_match(lf, test):
     # Only the forms vstest is shown to match (module docstring: runner.log C4-gpu04b rc=96 vs C4-gpu04c rc=0).
     if lf["prop"] == "ClassName":
         return False   # unproven for the native adapter: never credited (negatives are rejected at parse)
+    if test.get("pseudo") and not lf["op"].startswith("!") and not beta_stage_leaf(lf):
+        return False   # gate GR MUST-2: a Beta pseudo-test satisfies only FullyQualifiedName~BetaStage::... terms
     cand = test["name"] if lf["prop"] == "Name" else test["fqn"]
     hit = _hit(lf["op"], lf["value"], cand)
     return (not hit) if lf["op"].startswith("!") else hit
@@ -257,8 +300,24 @@ def _output_text(elem):
     return "\n".join(parts)
 
 
+def build_lines(text):
+    """Build identity lines in a TRX (VP-BUILD-ID:<32 hex>, or build/commit/sha/head = <hex>), plus the
+    test DLL codeBase folders, so a gate can compare the native and Beta builds."""
+    found = []
+    for m in BUILD_LINE.finditer(text):
+        s = m.group(0).strip()
+        if s not in found:
+            found.append(s)
+    for m in re.finditer(r'codeBase="([^"]*)"', text):
+        s = "codeBase=" + m.group(1)
+        if s not in found:
+            found.append(s)
+    return found
+
+
 def parse_trx(path):
-    """Return (tests, counters, skip_no_gpu_count) or raise ValueError."""
+    """Return (tests, counters, skip_no_gpu_count, info) or raise ValueError.
+    info: {"build_lines": [...]}; each result row keeps its output text in "out"."""
     try:
         with open(path, "rb") as fh:
             raw = fh.read()
@@ -284,7 +343,8 @@ def parse_trx(path):
         if "::" not in fqn:
             fqn = (cls.replace(".", "::") + "::" + name) if cls else name
         tests[tid] = {"id": tid, "name": name, "class": cls or "(no class)", "fqn": fqn,
-                      "fqn_dot": fqn.replace("::", "."), "results": [], "trx": path}
+                      "fqn_dot": fqn.replace("::", "."), "results": [], "trx": path,
+                      "codebase": tm.get("codeBase", "") if tm is not None else ""}
     results = root.find(NS + "Results")
     if results is not None:
         for r in results:
@@ -297,16 +357,28 @@ def parse_trx(path):
                 t = tests[tid] = {"id": tid, "name": nm, "class": "(no definition)", "fqn": nm,
                                   "fqn_dot": nm, "results": [], "trx": path}
             out = _output_text(r)
-            t["results"].append({"outcome": r.get("outcome", ""), "markers": sorted(set(SKIP_MARKER.findall(out)))})
-    return list(tests.values()), counters, nogpu
+            t["results"].append({"outcome": r.get("outcome", ""), "markers": sorted(set(SKIP_MARKER.findall(out))),
+                                 "out": out})
+    return list(tests.values()), counters, nogpu, {"build_lines": build_lines(text)}
+
+
+def fork_only_tags(markers):
+    """The SKIP-FORK-ONLY-<TAG> tags among markers."""
+    return [m[len(FORK_ONLY_PREFIX):] for m in markers if m.startswith(FORK_ONLY_PREFIX)]
 
 
 def classify(test):
-    """executed / skipped / notExecuted for one test definition (all its result rows)."""
+    """executed / forkOnly / skipped / notExecuted for one test definition (all its result rows).
+    forkOnly: every row Passed, and its only SKIP markers are SKIP-FORK-ONLY-<TAG> with TAG in the closed
+    FORK_ONLY_TAGS list; any other tag (or any other marker beside it) is a plain skip."""
     if not test["results"]:
         return "notExecuted", ["no result row"]
     markers = sorted({m for r in test["results"] for m in r["markers"]})
     outs = [r["outcome"].lower() for r in test["results"]]
+    tags = fork_only_tags(markers)
+    if (tags and len(tags) == len(markers) and all(tg in FORK_ONLY_TAGS for tg in tags)
+            and all(o == "passed" for o in outs)):
+        return "forkOnly", markers
     if markers or any(o in SKIP_OUTCOMES for o in outs):
         return "skipped", markers or ["Inconclusive"]
     if all(o in EXECUTED_OUTCOMES for o in outs):
@@ -315,26 +387,74 @@ def classify(test):
                                   if r["outcome"].lower() not in EXECUTED_OUTCOMES})
 
 
+def beta_evidence(path):
+    """Read one --beta-trx. Return {"path", "valid", "why", "ids", "build_lines", "skip_no_gpu", "stray"}
+    or raise ValueError (missing / unparsable). Valid = it holds BetaSuite::RunBetaSuite, which executed
+    and Passed (every row), from the Beta host DLL (its TestMethod codeBase is VideoProcessorBetaTestsHost.dll,
+    so a native class named BetaSuite cannot qualify), with no SKIP marker, "whole chain passed" in its output
+    and no VP_TEST_REPORT_MODE=1 token. ids = its line-start "BETA-RAN <id>" lines (only from that test's
+    output). TRANSPORT: RunBetaSuite redirects the suite's stdout to VP_TEST_OUT, so a BETA-RAN line reaches
+    the TRX only when BetaTestHost.cpp echoes it through Logger::WriteMessage after the suite returns."""
+    if not os.path.isfile(path):
+        raise ValueError("Beta TRX missing: %s" % path)
+    tests, _counters, nogpu, info = parse_trx(path)
+    suite = [t for t in tests if t["fqn"].lower() == BETA_SUITE_FQN or t["fqn"].lower().endswith("::" + BETA_SUITE_FQN)]
+    ev = {"path": path, "valid": False, "why": "", "ids": [], "build_lines": info["build_lines"],
+          "skip_no_gpu": nogpu, "stray": 0}
+    for t in tests:
+        if t not in suite:
+            ev["stray"] += sum(len(BETA_RAN_LINE.findall(r["out"])) for r in t["results"])
+    if not suite:
+        ev["why"] = "no BetaSuite::RunBetaSuite test (not a Beta TRX)"
+        return ev
+    s = suite[0]
+    out = "\n".join(r["out"] for r in s["results"])
+    if not BETA_HOST_DLL.search(os.path.basename(s["codebase"].replace("\\", "/"))):
+        ev["why"] = "RunBetaSuite is not from the Beta host DLL (codeBase '%s', want VideoProcessorBetaTestsHost.dll)" \
+            % (s["codebase"] or "none")
+    elif not s["results"] or any(r["outcome"].lower() != "passed" for r in s["results"]):
+        ev["why"] = "RunBetaSuite did not execute and pass (%s)" % (",".join(r["outcome"] for r in s["results"]) or "no result")
+    elif any(r["markers"] for r in s["results"]):
+        ev["why"] = "RunBetaSuite output carries a SKIP marker (%s)" % ",".join(sorted({m for r in s["results"] for m in r["markers"]}))
+    elif re.search(r"VP_TEST_REPORT_MODE\s*=\s*1\b", out):
+        ev["why"] = "report-mode run (VP_TEST_REPORT_MODE=1): the gate chain did not run"
+    elif "whole chain passed" not in out:
+        ev["why"] = "no \"whole chain passed\" in the RunBetaSuite output"
+    else:
+        ev["valid"] = True
+    ids = BETA_RAN_LINE.findall(out)
+    if ev["valid"]:
+        ev["ids"] = ids
+    else:
+        ev["stray"] += len(ids)
+    return ev
+
+
 # ---------------------------------------------------------------- the check
 
-def check(filter_text, trx_paths, newest=False):
+def check(filter_text, trx_paths, newest=False, beta_paths=()):
     rep = {"filter": filter_text, "trx": [], "read": [], "terms": [], "classes": [], "failed_tests": [],
-           "problems": [], "notes": []}
+           "problems": [], "notes": [], "beta": [], "beta_credited": []}
     ast, leaves = parse_filter(filter_text)
     files, errs, notes = expand_trx(trx_paths, newest)
     rep["problems"].extend(errs)
     rep["notes"].extend(notes)
     rep["read"] = list(files)
-    if not trx_paths:
+    if not trx_paths and not beta_paths:
         rep["problems"].append("no TRX given")
     alltests = []
     for f in files:
         try:
-            tests, counters, nogpu = parse_trx(f)
+            tests, counters, nogpu, info = parse_trx(f)
         except ValueError as e:
             rep["problems"].append(str(e))
             continue
-        rep["trx"].append({"path": f, "counters": counters, "skip_no_gpu": nogpu, "tests": len(tests)})
+        rep["trx"].append({"path": f, "counters": counters, "skip_no_gpu": nogpu, "tests": len(tests),
+                           "build_lines": info["build_lines"]})
+        stray = sum(len(BETA_RAN_LINE.findall(r["out"])) for t in tests for r in t["results"])
+        if stray:
+            rep["notes"].append("%d BETA-RAN line(s) in the native TRX %s ignored (only a valid --beta-trx is "
+                                "Beta-host evidence)" % (stray, f))
         if nogpu:
             rep["problems"].append("SKIP-NO-GPU marker (%d occurrence(s)) in %s" % (nogpu, f))
         oc = counters["_outcome"]
@@ -347,10 +467,59 @@ def check(filter_text, trx_paths, newest=False):
             rep["problems"].append("aborted/partial run: Counters total=%d != executed=%d in %s"
                                    % (counters["total"], counters["executed"], f))
         alltests.extend(tests)
-    selected, outside = [], 0
+    # Beta-host evidence: id (lower case) -> Beta TRX path, from valid --beta-trx files only.
+    beta_ids = {}
+    for bp in beta_paths:
+        try:
+            ev = beta_evidence(bp)
+        except ValueError as e:
+            rep["problems"].append(str(e))
+            continue
+        rep["read"].append(bp)
+        rep["beta"].append({"path": bp, "valid": ev["valid"], "why": ev["why"], "ids": ev["ids"],
+                            "build_lines": ev["build_lines"], "skip_no_gpu": ev["skip_no_gpu"]})
+        if ev["skip_no_gpu"]:
+            rep["problems"].append("SKIP-NO-GPU marker (%d occurrence(s)) in the Beta TRX %s" % (ev["skip_no_gpu"], bp))
+        if not ev["valid"]:
+            rep["notes"].append("INVALID Beta TRX %s: %s; its BETA-RAN lines are ignored" % (bp, ev["why"]))
+        if ev["stray"]:
+            rep["notes"].append("%d BETA-RAN line(s) in %s outside a valid RunBetaSuite output ignored" % (ev["stray"], bp))
+        if ev["valid"] and not ev["ids"]:
+            rep["notes"].append("valid Beta TRX %s has no BETA-RAN line in the RunBetaSuite output: %s"
+                                % (bp, TRANSPORT_NOTE))
+        for i in ev["ids"]:
+            beta_ids.setdefault(i.lower(), (i, bp))
+    native_fqns = {t["fqn"].lower(): t for t in alltests}
     for t in alltests:
         t["state"], t["markers"] = classify(t)
-        if evaluate(ast, t):
+        if t["state"] == "forkOnly" and t["fqn"].lower() in beta_ids:
+            t["state"], t["beta_credit"] = "executed", beta_ids[t["fqn"].lower()][1]
+    for key, (fqn, bp) in sorted(beta_ids.items()):
+        nt = native_fqns.get(key)
+        if nt is not None:
+            # Full case-insensitive equality with a native test: only an allow-listed fork-only test is credited.
+            if nt.get("beta_credit") is None:
+                rep["notes"].append("BETA-RAN %s names a native test without an allow-listed SKIP-FORK-ONLY tag: "
+                                    "credits nothing" % nt["fqn"])
+            continue
+        if not key.startswith(BETA_STAGE_PREFIX):
+            # Gate GR MUST-1: an unmatched non-BetaStage id would cover a native term with no native run and no tag.
+            rep["notes"].append("BETA-RAN %s names no native test of this run and is not a BetaStage id: credits nothing"
+                                % fqn)
+            continue
+        cls, _, name = fqn.rpartition("::")
+        alltests.append({"id": "beta:" + fqn, "name": name or fqn, "class": (cls or fqn) + " (Beta pseudo-test)",
+                         "fqn": fqn, "fqn_dot": fqn.replace("::", "."), "trx": bp, "beta_credit": bp,
+                         "results": [{"outcome": "Passed", "markers": [], "out": ""}], "pseudo": True})
+    selected, outside = [], 0
+    for t in alltests:
+        if t.get("pseudo"):
+            t["state"], t["markers"] = "executed", []
+        # A pseudo-test is selected only through a BetaStage:: term it matches (a pure exclusion never selects it).
+        if evaluate(ast, t) and (not t.get("pseudo") or any(beta_stage_leaf(lf) and leaf_match(lf, t) for lf in leaves)):
+            if t.get("beta_credit"):
+                rep["beta_credited"].append({"fqn": t["fqn"], "beta_trx": t["beta_credit"],
+                                             "kind": "Beta pseudo-test" if t.get("pseudo") else "native fork-only"})
             selected.append(t)
         else:
             outside += 1
@@ -364,7 +533,7 @@ def check(filter_text, trx_paths, newest=False):
             for t in selected:
                 if not leaf_match(lf, t):
                     continue
-                row[t["state"]] += 1
+                row["skipped" if t["state"] == "forkOnly" else t["state"]] += 1
                 if t["state"] == "executed":
                     if all(r["outcome"].lower() == "passed" for r in t["results"]):
                         row["passed"] += 1
@@ -383,15 +552,19 @@ def check(filter_text, trx_paths, newest=False):
         c = classes.setdefault(t["class"], {"class": t["class"], "executed": 0, "total": 0, "skipped": 0,
                                             "notExecuted": 0})
         c["total"] += 1
-        c[t["state"]] += 1
-        if t["state"] == "skipped":
+        c["skipped" if t["state"] == "forkOnly" else t["state"]] += 1
+        if t["state"] == "forkOnly":
+            rep["problems"].append("fork-only test selected on a native lane without Beta-host evidence: %s (%s)"
+                                   % (t["fqn"], ",".join(t["markers"])))
+        elif t["state"] == "skipped":
             rep["problems"].append("skipped: %s::%s %s" % (t["class"], t["name"], ",".join(t["markers"])))
         elif t["state"] == "notExecuted":
             rep["problems"].append("not executed: %s::%s (%s)" % (t["class"], t["name"], ",".join(t["markers"])))
         elif any(r["outcome"].lower() != "passed" for r in t["results"]):
             rep["failed_tests"].append("%s::%s" % (t["class"], t["name"]))
     rep["classes"] = [classes[k] for k in sorted(classes)]
-    if files and not any(t["state"] == "executed" for t in selected) and not any(p.startswith("term ") for p in rep["problems"]):
+    if (files or beta_paths) and not any(t["state"] == "executed" for t in selected) \
+            and not any(p.startswith("term ") for p in rep["problems"]):
         rep["problems"].append("nothing executed")
     rep["executed_total"] = sum(1 for t in selected if t["state"] == "executed")
     rep["selected_total"] = len(selected)
@@ -410,6 +583,17 @@ def render(rep):
         lines.append("  Counters: " + " ".join("%s=%d" % (k, c[k]) for k in COUNTER_KEYS) +
                      " SKIP-NO-GPU occurrences=%d" % t["skip_no_gpu"])
         lines.append("  ResultSummary outcome=%s" % (c["_outcome"] or "(none)"))
+        for b in t["build_lines"] or ["(no build line in this TRX)"]:
+            lines.append("  build: %s" % b)
+    for b in rep["beta"]:
+        lines.append("BETA TRX: %s %s" % (b["path"], "VALID" if b["valid"] else "INVALID (%s)" % b["why"]))
+        lines.append("  BETA-RAN ids used: %d (transport: %s)" % (len(b["ids"]), TRANSPORT_NOTE))
+        for x in b["build_lines"] or ["(no build line in this TRX)"]:
+            lines.append("  build: %s" % x)
+    if rep["beta_credited"]:
+        lines.append("EXECUTED ON THE BETA HOST (credited by BETA-RAN):")
+        for c in rep["beta_credited"]:
+            lines.append("  %s [%s] <- %s" % (c["fqn"], c["kind"], c["beta_trx"]))
     lines.append("TERMS (executed = really run; skipped/notExecuted never count):")
     for r in rep["terms"]:
         if r["negative"]:
@@ -439,17 +623,22 @@ def render(rep):
 
 # ---------------------------------------------------------------- selftest
 
-def _fixture(tests, counters=True, outcome="Completed", extra="", total=None):
+BETA_DLL_FIXTURE = "D:\\w\\x64\\Release\\vprenderer-beta\\VideoProcessorBetaTestsHost.dll"
+NATIVE_DLL_FIXTURE = "D:\\w\\x64\\Release\\VideoProcessor-Test.dll"
+
+
+def _fixture(tests, counters=True, outcome="Completed", extra="", total=None, codebase=""):
     """tests: list of (class, method, outcome or None for definition only, stdout).
     outcome: the ResultSummary outcome; extra: extra Counters attributes (e.g. 'aborted="1"');
-    total: the Counters total (default: the number of result rows, = executed)."""
+    total: the Counters total (default: the number of result rows, = executed); codebase: the TestMethod codeBase."""
     defs, res = [], []
+    cb = ' codeBase="%s"' % codebase if codebase else ""
     for i, (cls, meth, toc, out) in enumerate(tests):
         tid = "00000000-0000-0000-0000-%012d" % i
         ns = cls.split(".")[0]
         short = cls.split(".")[-1]
-        defs.append('<UnitTest name="%s" id="%s"><TestMethod className="%s" name="%s::%s::%s" /></UnitTest>'
-                    % (meth, tid, cls, ns, short, meth))
+        defs.append('<UnitTest name="%s" id="%s"><TestMethod%s className="%s" name="%s::%s::%s" /></UnitTest>'
+                    % (meth, tid, cb, cls, ns, short, meth))
         if toc is not None:
             body = "<Output><StdOut>%s</StdOut></Output>" % out if out else ""
             res.append('<UnitTestResult testId="%s" testName="%s" outcome="%s">%s</UnitTestResult>'
@@ -553,19 +742,124 @@ def selftest_cases():
 def run_case(flt, fixtures):
     """Run one case in a temp folder; return (rc, report)."""
     with tempfile.TemporaryDirectory() as d:
-        paths = []
+        paths, betas = [], []
         for i, fx in enumerate(fixtures):
             p = os.path.join(d, "run%d.trx" % i)
+            dest = paths
+            if isinstance(fx, tuple):   # ("BETA", text): a --beta-trx file; ("BETA", "MISSING"): a missing one
+                dest, fx = betas, fx[1]
+            dest.append(p)
             if fx == "MISSING":
-                paths.append(p)
                 continue
             with open(p, "w", encoding="utf-8") as fh:
                 fh.write(fx)
-            paths.append(p)
         if flt.startswith("QUEUE:"):
             flt = filter_from_queue_line(flt[len("QUEUE:"):])[0]
-        rep = check(flt, paths)
+        rep = check(flt, paths, beta_paths=betas)
         return (1 if rep["problems"] else 0), rep
+
+
+def _beta(out, outcome="Passed", codebase=BETA_DLL_FIXTURE):
+    """A Beta-host TRX fixture: BetaSuite::RunBetaSuite (from the Beta host DLL by default) with this output."""
+    return ("BETA", _fixture([("BetaSuite", "RunBetaSuite", outcome, out)], codebase=codebase))
+
+
+def fork_only_cases():
+    """(name, filter, fixtures, expected rc, problem substring or '', note substring or '')."""
+    fq = "VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpX"
+    mark = "SKIP-FORK-ONLY-PL0004: needs libplacebo fork patch 0004; Beta-host evidence: BETA-RAN " + fq
+    D = ("VideoProcessorTest.SigmaDeltaHookTests", "DitherNeedOnCpu", "Passed", "")
+    X = ("VideoProcessorTest.SigmaDeltaHookTests", "DitherNeedWarpX", "Passed", mark)
+    ok_tail = "\nBeta suite exit code 0; whole chain passed"
+    flt = "FullyQualifiedName~VideoProcessorTest::SigmaDeltaHookTests"
+    nofq = "fork-only test selected on a native lane without Beta-host evidence: " + fq
+    return [
+        ("fork-only credited by a valid Beta TRX", flt, [_fixture([D, X]), _beta("BETA-RAN " + fq + ok_tail)], 0, "", ""),
+        ("fork-only credit is case-insensitive full equality", flt,
+         [_fixture([D, X]), _beta("BETA-RAN " + fq.lower() + ok_tail)], 0, "", ""),
+        ("fork-only without --beta-trx", flt, [_fixture([D, X])], 1, nofq, ""),
+        ("fork-only, Beta id is only a prefix of the FQN", flt,
+         [_fixture([D, X]), _beta("BETA-RAN VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarp" + ok_tail)], 1, nofq, ""),
+        ("fork-only, mismatched FQN", flt,
+         [_fixture([D, X]), _beta("BETA-RAN VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpY" + ok_tail)], 1, nofq, ""),
+        ("non-allow-listed fork tag is a plain skip", flt,
+         [_fixture([D, ("VideoProcessorTest.SigmaDeltaHookTests", "DitherNeedWarpX", "Passed",
+                        "SKIP-FORK-ONLY-PL0009: x BETA-RAN " + fq)]), _beta("BETA-RAN " + fq + ok_tail)], 1,
+         "skipped: VideoProcessorTest.SigmaDeltaHookTests::DitherNeedWarpX SKIP-FORK-ONLY-PL0009", "credits nothing"),
+        ("fork tag beside another SKIP marker is a plain skip", flt,
+         [_fixture([D, ("VideoProcessorTest.SigmaDeltaHookTests", "DitherNeedWarpX", "Passed", mark + "\nSKIP-NO-FOOTAGE")]),
+          _beta("BETA-RAN " + fq + ok_tail)], 1, "skipped: VideoProcessorTest.SigmaDeltaHookTests::DitherNeedWarpX", ""),
+        ("BETA-RAN lines in the native TRX credit nothing", flt,
+         [_fixture([D, X, ("VideoProcessorTest.SigmaDeltaHookTests", "Echo", "Passed", "BETA-RAN " + fq)])], 1, nofq,
+         "BETA-RAN line(s) in the native TRX"),
+        ("a --beta-trx without RunBetaSuite is not a Beta TRX", flt,
+         [_fixture([D, X]), ("BETA", _fixture([("Other.OtherTests", "M", "Passed", "BETA-RAN " + fq + ok_tail)]))], 1,
+         nofq, "not a Beta TRX"),
+        ("report-mode Beta TRX is invalid", flt,
+         [_fixture([D, X]), _beta("BETA-RAN " + fq + ok_tail + " (VP_TEST_REPORT_MODE=1)")], 1, nofq, "report-mode run"),
+        ("Beta TRX without whole chain passed is invalid", flt,
+         [_fixture([D, X]), _beta("BETA-RAN " + fq + "\nBeta suite exit code 0; whole chain NOT reached")], 1, nofq,
+         "no \"whole chain passed\""),
+        ("Beta TRX whose RunBetaSuite failed is invalid", flt,
+         [_fixture([D, X]), _beta("BETA-RAN " + fq + ok_tail, outcome="Failed")], 1, nofq, "did not execute and pass"),
+        ("Beta TRX with a SKIP marker is invalid", flt,
+         [_fixture([D, X]), _beta("SKIP-NO-CORPUS c\nBETA-RAN " + fq + ok_tail)], 1, nofq, "carries a SKIP marker"),
+        ("SKIP-NO-GPU in a Beta TRX fails", flt,
+         [_fixture([D, X]), _beta("SKIP-NO-GPU g\nBETA-RAN " + fq + ok_tail)], 1, "in the Beta TRX", ""),
+        ("BETA-RAN naming an untagged native test credits nothing", flt,
+         [_fixture([D, ("VideoProcessorTest.SigmaDeltaHookTests", "NeedsClip", "Passed", "SKIP-NO-FOOTAGE f")]),
+          _beta("BETA-RAN VideoProcessorTest::SigmaDeltaHookTests::NeedsClip" + ok_tail)], 1,
+         "skipped: VideoProcessorTest.SigmaDeltaHookTests::NeedsClip SKIP-NO-FOOTAGE", "credits nothing"),
+        ("Beta pseudo-test covers a BetaStage term", "FullyQualifiedName~BetaStage::SigmaDeltaCameraGoldenTests",
+         [_beta("BETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17a\nBETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17b"
+                + ok_tail)], 0, "", ""),
+        ("BetaStage term with no BETA-RAN line is a zero-match", "FullyQualifiedName~BetaStage::SigmaDeltaCameraGoldenTests",
+         [_beta("BETA-RAN BetaStage::OtherTests::T1" + ok_tail)], 1,
+         "term FullyQualifiedName~BetaStage::SigmaDeltaCameraGoldenTests: 0 executed", ""),
+        ("BetaStage ids of an invalid Beta TRX are no pseudo-tests", "FullyQualifiedName~BetaStage::SigmaDeltaCameraGoldenTests",
+         [_beta("BETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail + " (VP_TEST_REPORT_MODE=1)")], 1,
+         "0 executed", "report-mode run"),
+        ("missing Beta TRX", flt, [_fixture([D, X]), ("BETA", "MISSING")], 1, "Beta TRX missing", ""),
+        # Gate GR MUST-1 probes (gate-A20C5-forkonly-b28cc15ce.md): Beta lines never cover a native term alone.
+        ("P1: native class term, no native test, Beta line only", flt,
+         [_fixture([("Other.OtherTests", "M", "Passed", "")]), _beta("BETA-RAN " + fq + ok_tail)], 1,
+         "term FullyQualifiedName~VideoProcessorTest::SigmaDeltaHookTests: 0 executed",
+         "BETA-RAN " + fq + " names no native test of this run and is not a BetaStage id: credits nothing"),
+        ("P2: fork-only test absent from the native TRX, Beta line names it", "Name~DitherNeedWarpX",
+         [_fixture([D]), _beta("BETA-RAN " + fq + ok_tail)], 1, "term Name~DitherNeedWarpX: 0 executed",
+         "is not a BetaStage id: credits nothing"),
+        ("BetaStage prefix is case-insensitive", "FullyQualifiedName~BetaStage::SigmaDeltaCameraGoldenTests",
+         [_beta("BETA-RAN betastage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail)], 0, "", ""),
+        # Gate GR MUST-2: a pseudo-test satisfies only FullyQualifiedName~BetaStage::... terms.
+        ("pseudo-test does not satisfy a broad FQN term", "FullyQualifiedName~Sigma",
+         [_beta("BETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail)], 1,
+         "term FullyQualifiedName~Sigma: 0 executed", ""),
+        ("pseudo-test does not satisfy a Name~ term", "Name~T17a",
+         [_beta("BETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail)], 1, "term Name~T17a: 0 executed", ""),
+        ("pseudo-test beside a native term counts only for its BetaStage term",
+         "FullyQualifiedName~BetaStage::SigmaDeltaCameraGoldenTests|FullyQualifiedName~SigmaDelta",
+         [_fixture([("Other.OtherTests", "M", "Passed", "")]),
+          _beta("BETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail)], 1,
+         "term FullyQualifiedName~SigmaDelta: 0 executed", ""),
+        ("pure exclusion never selects a pseudo-test", "FullyQualifiedName!~Nothing",
+         [_beta("BETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail)], 1, "nothing executed", ""),
+        ("exact FullyQualifiedName= BetaStage term is covered",
+         "FullyQualifiedName=BetaStage::SigmaDeltaCameraGoldenTests::T17a",
+         [_beta("BETA-RAN BetaStage::SigmaDeltaCameraGoldenTests::T17a" + ok_tail)], 0, "", ""),
+        # SHOULD 1: the report-mode token, with or without parentheses.
+        ("P7: report-mode token without parentheses is invalid", flt,
+         [_fixture([D, X]), _beta("BETA-RAN " + fq + ok_tail + "; VP_TEST_REPORT_MODE=1")], 1, nofq, "report-mode run"),
+        # SHOULD 3: RunBetaSuite must come from the Beta host DLL.
+        ("BetaSuite from a native DLL is not a Beta TRX", flt,
+         [_fixture([D, X]), _beta("BETA-RAN " + fq + ok_tail, codebase=NATIVE_DLL_FIXTURE)], 1, nofq,
+         "not from the Beta host DLL"),
+        ("BetaSuite with no codeBase is not a Beta TRX", flt,
+         [_fixture([D, X]), _beta("BETA-RAN " + fq + ok_tail, codebase="")], 1, nofq, "not from the Beta host DLL"),
+        # SHOULD 2: a valid Beta TRX without BETA-RAN lines names the Logger transport requirement.
+        ("valid Beta TRX with no BETA-RAN line states the transport rule", flt,
+         [_fixture([D, X]), _beta("Beta suite exit code 0; whole chain passed")], 1, nofq,
+         "echo each BETA-RAN line through Logger::WriteMessage"),
+    ]
 
 
 def newest_dir_cases():
@@ -611,7 +905,15 @@ def selftest():
         if not ok:
             bad += 1
             print("SELFTEST FAIL %s" % name)
-    n = len(selftest_cases()) + len(bad_filters) + len(dir_cases)
+    fork = fork_only_cases()
+    for name, flt, fx, want_rc, want_sub, want_note in fork:
+        rc, rep = run_case(flt, fx)
+        ok = (rc == want_rc and (not want_sub or any(want_sub in p for p in rep["problems"]))
+              and (not want_note or any(want_note in n for n in rep["notes"])))
+        if not ok:
+            bad += 1
+            print("SELFTEST FAIL %s: rc=%d want %d; problems=%s notes=%s" % (name, rc, want_rc, rep["problems"], rep["notes"]))
+    n = len(selftest_cases()) + len(bad_filters) + len(dir_cases) + len(fork)
     print("selftest: %d/%d OK" % (n - bad, n))
     return 0 if bad == 0 else 1
 
@@ -623,6 +925,9 @@ def main(argv=None):
     ap.add_argument("trx", nargs="*", help="TRX files or directories holding .trx files")
     ap.add_argument("--trx", dest="trx_files", action="append", default=[],
                     help="one TRX file (repeatable); read exactly as given")
+    ap.add_argument("--beta-trx", dest="beta_trx", action="append", default=[],
+                    help="a Beta-host TRX (BetaSuite::RunBetaSuite, repeatable): its BETA-RAN lines credit "
+                         "allow-listed fork-only native tests and become Beta pseudo-tests")
     ap.add_argument("--newest", action="store_true",
                     help="a directory gives only its newest .trx, as runner.sh does (ls -t | head -1)")
     ap.add_argument("--filter", help="vstest /TestCaseFilter text")
@@ -644,10 +949,10 @@ def main(argv=None):
         else:
             print("usage error: give --filter, --queue-line, or --queue-file with --lane", file=sys.stderr)
             return 2
-        for f in a.trx_files:
+        for f in a.trx_files + a.beta_trx:
             if os.path.isdir(f):
-                raise FilterError("--trx takes a file, not a directory: %s" % f)
-        rep = check(flt, list(a.trx_files) + list(a.trx), newest=a.newest)
+                raise FilterError("--trx / --beta-trx take a file, not a directory: %s" % f)
+        rep = check(flt, list(a.trx_files) + list(a.trx), newest=a.newest, beta_paths=a.beta_trx)
     except FilterError as e:
         print("usage error: %s" % e, file=sys.stderr)
         return 2

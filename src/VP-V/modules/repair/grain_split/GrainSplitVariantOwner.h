@@ -103,10 +103,14 @@ namespace GrainSplit
 				return ContextShapesOf(static_cast<int>(v.width), static_cast<int>(v.height), BlockFor(ScaleOfAxis(v.scale)), DefaultParams()).Bytes();
 			}
 
-			VpSkeleton::SkeletonMemo::Registration Register(VpSkeleton::SkeletonMemo& memo)
+			// GF-P1 MUST-5 (GV AMEND): `maxWidth` x `maxHeight` = the largest observed source luma. reserveBytes is the ahead
+			// planner's figure before a fill is measured (AheadNeedLocked): left 0, the memo's need was 0, the grant was never
+			// made and every Acquire failed NoLedgerGrant before a fill could run. reserveFor stays the exact per-variant reserve.
+			VpSkeleton::SkeletonMemo::Registration Register(VpSkeleton::SkeletonMemo& memo, int maxWidth, int maxHeight)
 			{
 				VpSkeleton::OwnerFill f;
 				f.variantAxes = ServedAxes();
+				f.reserveBytes = maxWidth > 0 && maxHeight > 0 ? ReserveFor(VariantFor(maxWidth, maxHeight, 1.0, 10)) : uint64_t(0);
 				f.reserveFor = &VariantOwner::ReserveFor;
 				f.fill = [this](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo& m, VpSkeleton::OwnerFillOutput& out) {
 					return Fill(req, m, out);
@@ -153,10 +157,15 @@ namespace GrainSplit
 					return Decline(out, "grain split variant: the source plane is not the requested size (crop axis not served)");
 				const double scale = ScaleOfAxis(v.scale);
 				const int B = BlockFor(scale);
-				const double cu = VpvGpu::CodeUnit(plane, facts->repr.bits, v.codeUnit ? v.codeUnit : 10);
+				// GF-P1 MUST-6 (Gemini's snippet, USE AS-IS): the law is depth-scaled to the variant's colour depth (GrainSplit.h
+				// DepthScale contract), so GS_CODE_SCALE / GS_FLOOR and the luma bins follow the code unit the plane is read in.
+				const int bits = v.codeUnit ? int(v.codeUnit) : DefaultParams().sourceBits;
+				const double cu = VpvGpu::CodeUnit(plane, facts->repr.bits, bits);
+				Params law = DefaultParams();
+				law.sourceBits = bits;
 				const std::shared_ptr<Held> held = std::make_shared<Held>();
 				Splitter splitter;   // holds no texture: every one is the context's (held->textures)
-				if (!splitter.Compute(*req.gpu, plane, 0, cu, scale, B, DefaultParams(), req.seq, held->textures))
+				if (!splitter.Compute(*req.gpu, plane, 0, cu, scale, B, law, req.seq, held->textures))
 					return Decline(out, "grain split variant: " + splitter.LastError());
 				held->frame = splitter.Out();
 				out.gpu.resource = &held->frame;

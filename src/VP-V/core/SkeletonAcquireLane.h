@@ -37,8 +37,40 @@ using LaneGpuHandleOf = std::function<bool(ProductId, bool, int, uint64_t, GpuMe
 // The lane's CURRENT lease of a product's bytes ring, from any thread (empty = no lane / not in the graph).
 using LaneLeaseOf = std::function<LaneLease(ProductId)>;
 
+// GF-P1 (lead ruling; owner OD 2026-11-14: ahead cap 6, derived from active consumers): the ahead depth of the fill of `id` =
+// the larger of the fill's own structural need and the largest ConsumerDecl::aheadDepth of the consumers that read `id`, capped at
+// kAheadCeiling. `asked` / `by` = the uncapped request and its requester (null = the structural need or nobody), kept for the
+// window's existing ceiling notice ("ahead compute 6 (by X; ceiling 6)"); `capped` = asked > kAheadCeiling. 0 with no request.
+struct LaneAheadDepth {
+    uint16_t depth = 0;
+    uint16_t asked = 0;
+    const char* by = nullptr;
+    bool capped = false;
+};
+inline LaneAheadDepth LaneAheadDepthOf(ProductId id, uint16_t structural, const std::vector<ConsumerDecl>& consumers)
+{
+    LaneAheadDepth r;
+    r.asked = structural;
+    for (const ConsumerDecl& c : consumers) {
+        if (c.aheadDepth <= r.asked)
+            continue;
+        bool reads = false;
+        for (size_t k = 0; k < c.count && k < kMaxConsumes; ++k)
+            reads = reads || c.consumes[k].product == id;
+        if (reads) {
+            r.asked = c.aheadDepth;
+            r.by = c.name;
+        }
+    }
+    r.capped = r.asked > kAheadCeiling;
+    r.depth = r.capped ? kAheadCeiling : r.asked;
+    return r;
+}
+
+// `consumers` (GF-P1): the lane's configured consumers, external demand included (SkeletonModule's Configure list); their
+// declared ahead depths set each lane fill's aheadDepth (LaneAheadDepthOf). Rebind after a Configure whose consumers changed.
 inline void BindLaneToMemo(AnalysisLane& lane, SkeletonMemo& memo, LaneGpuHandleOf gpuHandleOf = LaneGpuHandleOf(),
-                           LaneLeaseOf leaseOf = LaneLeaseOf())
+                           LaneLeaseOf leaseOf = LaneLeaseOf(), const std::vector<ConsumerDecl>& consumers = std::vector<ConsumerDecl>())
 {
     AnalysisLane* l = &lane;
     LaneSlotSource src;
@@ -107,6 +139,11 @@ inline void BindLaneToMemo(AnalysisLane& lane, SkeletonMemo& memo, LaneGpuHandle
     for (ProductId id : lane.CpuLiveProducts()) {
         OwnerFill f;
         f.renderThreadOnly = true;   // RunCpuLive reads the lane's render state
+        // The lane's live compute reads nothing ahead itself (structural 0): its depth is its consumers' declared request.
+        const LaneAheadDepth ad = LaneAheadDepthOf(id, 0, consumers);
+        f.aheadDepth = ad.depth;
+        f.aheadAsked = ad.capped ? ad.asked : uint16_t(0);
+        f.aheadBy = ad.by;
         f.fill = [l](const OwnerFillRequest& req, SkeletonMemo& m, OwnerFillOutput& out) {
             const size_t n = l->CpuBytesOf(req.id);
             if (n == 0)
@@ -126,7 +163,11 @@ inline void BindLaneToMemo(AnalysisLane& lane, SkeletonMemo& memo, LaneGpuHandle
         fills[std::make_pair(id, AcquireForm::Cpu)] = std::move(f);
     }
     memo.BindLane(std::move(src), std::move(fills));
-    memo.SetGpuDispatcherPresent(lane.HasGpuDispatcher());
+    // GF-P1 MUST-3 (GV AMEND, binder side): binding never clears the owner-device presence. A shadow or raised lane makes no lane
+    // GPU dispatcher (SkeletonModule UpdateDispatcher), yet the memo's attached OwnerGpuDevice still serves the non-view GPU owner
+    // fills (P1, edge map, grain split variant); PlanNoLaneGpu skips a lane-bound memo, so nothing would restore it. The gate in
+    // Acquire is unchanged; SkeletonModule's AttachMemoGpu / DetachMemoGpu re-assert presence while a lane is bound (P2b).
+    memo.SetGpuDispatcherPresent(lane.HasGpuDispatcher() || memo.HasGpuDevice());
 
     // L-CORE M5 (coordinator ruling on B1-SEAL-VIA-ACQUIRE): the seal (1) REUSES a frame an Acquire reader published (copy, counted
     // sealReused) and (2) when it computes, its result IS the publication: the lane slot is the memo's first source for that frame

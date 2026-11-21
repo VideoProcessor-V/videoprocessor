@@ -1365,6 +1365,11 @@ struct ConsumerDecl {
     // Set by AddConsume when more than kMaxConsumes reads were named: the extra read was NOT recorded.
     // BuildGraph rejects the graph with a plain reason (fail closed, visible; Release has no assert).
     bool overflow = false;
+    // GF-P1 (lead ruling; owner OD 2026-11-14: ahead cap 6, derived from active consumers): how many frames past the render seal
+    // this ACTIVE consumer reads the products it consumes (0 = render frame and behind only). The binder gives each lane fill the
+    // largest request of the consumers that read it (SkeletonAcquireLane.h LaneAheadDepthOf), capped at kAheadCeiling; a request
+    // above the ceiling is shown by the window's ceiling notice. Not part of the graph (ConsumerFingerprint leaves it out).
+    uint8_t aheadDepth = 0;
 };
 
 inline void AddConsume(ConsumerDecl& c, ProductId p, uint8_t lag = 0)
