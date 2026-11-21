@@ -47,10 +47,13 @@ JOB_ENV = {
     'Footage': {'VP_TEST_REQUIRE_FOOTAGE': '1'},
     'Corpus': {'VP_TEST_REQUIRE_CORPUS': '1'},
     'Bench': {'VP_TEST_BENCH': '1', 'VP_TEST_REQUIRE_BENCH': '1'},
+    # ParkedNets (ced6d204a): owner-parked neural-net tests log SKIP-PARKED-NETS; their job requires the nets.
+    'ParkedNets': {'VP_TEST_REQUIRE_NETS': '1'},
 }
 DEDICATED_JOB_ONLY = ['LoopRig'] + list(JOB_ENV)
 EXCLUDED_FROM_CPU = ['GpuHardware', 'GpuOnScreen', 'MeterHardware', 'ProjectorHardware', 'Slow'] + DEDICATED_JOB_ONLY + QUARANTINED
 GPU_DEFAULT_EXCLUDED = [c for c in EXCLUDED_FROM_CPU if c not in DEDICATED_JOB_ONLY]
+DEDICATED_ONLY = tuple(DEDICATED_JOB_ONLY)   # ced6d204a's name for the same set
 KNOWN_CATEGORIES = EXCLUDED_FROM_CPU + ['GpuWarp', 'Cpu']
 
 
