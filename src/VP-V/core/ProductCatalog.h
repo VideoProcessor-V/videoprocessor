@@ -158,6 +158,9 @@ inline const std::vector<ProductRow>& ProductRows()
         // Wave S2: P14g source_geometry is HELD STATE like P14: the source-resolution side (single writer) publishes it on each evaluation, no lane
         // producer, no live fill; its readers take the latest sealed record (lag 1) and fall back visibly when it is absent or stale.
         { kSourceGeometry, "input/source_analysis/identity", kExpectedSourceGeometryUnit, "" },
+        // CP-A1-D4-CAMLABEL-FIELDCOPY: the P7 fit field is published by the camera worker in the same publish as P7 (the pool entry carries the
+        // content, the slot the stamp); its one reader is P8 (a declared input of P8, no consumer row).
+        { kCameraFitField, "motion/estimation/global_model", kExpectedCameraUnit, "camera fit field (camera worker, published with P7)" },
         { kEdgeMap, "input/source_analysis/regions", kExpectedRegionUnit, "edge map pass (per-frame memo); readers: focus map, busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3))" },
     };
     return rows;
@@ -583,8 +586,10 @@ inline const std::vector<ProductFlag>& ProductFlags()
           "actual input = the FrameQuality view of the P5 monitor tiles (modules/input/source_analysis/identity/FrameQuality.h); P5 stays the declared monitor snapshot" },
         // D3: P7 reads P2 through IVectorEngine::FlowOf (pair id recorded) and declares only P4 (by design).
         { kP7CameraFit, kP2VectorPair, FlagKind::ExternalView, "C3", "external view: P2 via FlowOf (modules/motion/estimation/global_model/link/CameraExtension.cpp ahead fit); pair id recorded, not a declared input" },
-        // C10 15a K2: P8 is computed from the P7 record and that record's fit field (not from P3; F2).
-        { kP8CameraLabels, kP2VectorPair, FlagKind::ExternalView, "C3", "the P7 record's fit field (pool entry via CameraLink::FitEntryOf): the P2 pair via FlowOf (ahead fit) or the optical-flow seed via SeedFieldOf (bridge); never P3" },
+        // C10 15a K2 + CP-A1-D4-CAMLABEL-FIELDCOPY: P8 is computed from the P7 record and that record's fit field (not from P3; F2). The field is
+        // the declared product p7f_camera_fit_field (published with P7 under P7's stamp, P8's declared input); the P2 pair behind it is the
+        // flagged external view. P8 has no private field copy any more.
+        { kP8CameraLabels, kP2VectorPair, FlagKind::ExternalView, "C3", "behind the declared p7f_camera_fit_field (P7's fit field, same stamp): the P2 pair via FlowOf (ahead fit) or the optical-flow seed via SeedFieldOf (bridge); never P3" },
     };
     return flags;
 }

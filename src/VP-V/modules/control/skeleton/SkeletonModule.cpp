@@ -103,7 +103,7 @@ namespace Vpv
 				for (size_t i = 0; i < c.count; ++i)
 				{
 					const VpSkeleton::ProductId p = c.consumes[i].product;
-					if (p == VpSkeleton::kP7CameraFit || p == VpSkeleton::kP8CameraLabels || p == VpSkeleton::kP9CameraSmoothed || p == VpSkeleton::kP7gCameraGuide)
+					if (p == VpSkeleton::kP7CameraFit || p == VpSkeleton::kP8CameraLabels || p == VpSkeleton::kP9CameraSmoothed || p == VpSkeleton::kP7gCameraGuide || p == VpSkeleton::kCameraFitField)
 						return true;
 				}
 				return false;

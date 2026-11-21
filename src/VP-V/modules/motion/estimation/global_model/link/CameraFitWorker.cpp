@@ -357,6 +357,31 @@ namespace CameraLink
 		return PublishInto(lease, job, fit, true);
 	}
 
+	void CameraFitWorker::PublishFitField(const VpSkeleton::LaneLease& lease, uint64_t seq, const VpIndicator::Stamp& honoured)
+	{
+		VpSkeleton::SlotSet* fs = lease.table ? lease.table->Find(VpSkeleton::kCameraFitField) : nullptr;
+		if (!fs)
+			return;
+		VpSkeleton::LaneTicket ticket;
+		if (fs->Claim(seq, VpAncestry::Provenance::AheadLane, ~uint64_t(0), &ticket) != VpSkeleton::ClaimResult::Claimed)
+			return;
+		if (!fs->Writable(ticket))
+		{
+			fs->Abandon(ticket);
+			return;
+		}
+		VpAncestry::Header& hdr = fs->LaneHeader(ticket);
+		VpSkeleton::LaneInputs pins;
+		if (!lease.table->LaneAncestors(VpSkeleton::kCameraFitField, seq, hdr, pins))
+		{
+			fs->Abandon(ticket);
+			return;
+		}
+		hdr.honoured = honoured;   // the SAME stamp P7(seq) was published under: the pair is one record
+		fs->Publish(ticket);
+		pins.Unpin();
+	}
+
 	PublishOutcome CameraFitWorker::PublishInto(const VpSkeleton::LaneLease& lease, const CameraFitJob& job, const CameraFitResult& fit,
 		bool countLate)
 	{
@@ -419,6 +444,11 @@ namespace CameraLink
 			m_env.pool->Erase(job.seq);
 			return late(PublishOutcome::LateSeal);
 		}
+		// CP-A1-D4-CAMLABEL-FIELDCOPY: the fit field is a declared lane product published WITH P7 under P7's own stamp (hdr.honoured above),
+		// after P7 (its ancestor). A graph without a reader of it (no P8) has no such slot. A claim / ancestry / publish that fails leaves
+		// the product missing for that frame: P8 reads it through the slot and then produces no labels (visible in its blocked / declined
+		// counts); P7 itself stays valid for its own readers.
+		PublishFitField(lease, job.seq, hdr.honoured);
 		m_env.pool->Commit(job.seq);
 		if (c)
 		{

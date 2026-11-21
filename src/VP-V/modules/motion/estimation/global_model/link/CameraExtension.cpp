@@ -516,7 +516,7 @@ namespace Vpv
 				{
 					std::vector<VpSkeleton::ConsumerDecl> consumers;
 					CameraLink::DeclareCameraConsumers(CameraLink::LiveCameraDemand(false), consumers);
-					demand->SetExternalDemand(host, &st, consumers, { VpSkeleton::kP7CameraFit });
+					demand->SetExternalDemand(host, &st, consumers, { VpSkeleton::kP7CameraFit, VpSkeleton::kCameraFitField });
 					st.demand = demand;
 					st.core->AttachOnTime([demand, host]() { return demand->LeaseFor(host, VpSkeleton::kP7CameraFit); }, "skeleton lane");
 				}

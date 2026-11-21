@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Camera link (K2-2): the P8 fill rule (TEAM-RULES "How a shared item gets filled"). One implementation, three entrances:
-//   * LANE   an IGapWork (LaneCompute) produces P8(N) in an idle gap once P7(N) is PUBLISHED: claim -> pins -> write ->
+//   * LANE   an IGapWork (LaneCompute) produces P8(N) in an idle gap once P7(N) and its fit field product (p7f_camera_fit_field,
+//            published with P7 under P7's stamp) are PUBLISHED: claim -> pins -> write ->
 //            stamp -> publish, before the seal. A publish after the seal is Late: the SlotSet discards it (never merged).
 //   * LIVE   if P8(N) was not published by the seal, the seal's live fill (SlotTable::Resolve calls FillLive) is the ONE
 //            producer for the frame, and only when P7(N) was SEALED; every later consumer reuses the result.
@@ -105,6 +106,10 @@ namespace CameraLink
 
 		bool NextSeq(uint64_t* out);
 		void RunLane();
+		// CP-A1-D4-CAMLABEL-FIELDCOPY: the fit field is read ONLY through the declared product p7f_camera_fit_field. True when its slot for
+		// `seq` is published (or sealed) and its stamp is EXACTLY P7(seq)'s. Missing product or a mismatch: false (no labels, counted by the
+		// caller as blocked / declined); never a fall-back to the pool's copy.
+		static bool FitFieldMatchesP7(const VpSkeleton::LaneLease& lease, uint64_t seq);
 
 		VpSkeleton::LaneLease m_lease;            // render thread only
 		VpSkeleton::LaneLeaseSource m_source;

@@ -146,7 +146,7 @@ namespace CameraLink
 		return true;
 	}
 
-	// Every node but P7..P9, in topological order, as a lane producer would publish it: the ancestors recorded, the honoured stamp
+	// Every node but P7..P9 and the P7 fit field, in topological order, as a lane producer would publish it: the ancestors recorded, the honoured stamp
 	// read AFTER the pins. The slot content is empty (see the header): what it carries is the ancestry the lagged seal checks.
 	void CameraLane::PublishMarkers(uint64_t seq, VpIndicator::Indicator& indicator, bool warmUp)
 	{
@@ -154,7 +154,7 @@ namespace CameraLink
 		for (size_t i = 0; i < table.Count(); ++i)
 		{
 			const VpSkeleton::Node& n = table.NodeAt(i);
-			if (n.id == VpSkeleton::kP7CameraFit || n.id == VpSkeleton::kP8CameraLabels || n.id == VpSkeleton::kP9CameraSmoothed)
+			if (n.id == VpSkeleton::kP7CameraFit || n.id == VpSkeleton::kCameraFitField || n.id == VpSkeleton::kP8CameraLabels || n.id == VpSkeleton::kP9CameraSmoothed)
 				continue;
 			VpSkeleton::SlotSet& set = table.At(i);
 			VpSkeleton::LaneTicket ticket;

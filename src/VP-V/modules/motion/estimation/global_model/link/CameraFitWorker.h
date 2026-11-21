@@ -123,6 +123,8 @@ namespace CameraLink
 		void Loop();
 		// The publish into one lease (Claim -> pins -> stamp -> bytes -> pool -> Publish). countLate: count a refusal as late (the bridge).
 		PublishOutcome PublishInto(const VpSkeleton::LaneLease& lease, const CameraFitJob& job, const CameraFitResult& fit, bool countLate);
+		// The P7 fit field product (kCameraFitField), published right after P7 with P7's stamp; a graph without the slot publishes nothing.
+		static void PublishFitField(const VpSkeleton::LaneLease& lease, uint64_t seq, const VpIndicator::Stamp& honoured);
 		struct ParkedResult
 		{
 			CameraFitJob job;

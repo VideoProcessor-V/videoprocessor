@@ -30,7 +30,24 @@ namespace CameraLink
 		return true;
 	}
 
-	// The next frame the lane can produce: P7 published (its record is in the pool), P8 slot not yet used, not below the floor.
+	bool CameraLabelFill::FitFieldMatchesP7(const VpSkeleton::LaneLease& lease, uint64_t seq)
+	{
+		if (!lease.table)
+			return false;
+		VpSkeleton::SlotSet* p7 = lease.table->Find(VpSkeleton::kP7CameraFit);
+		VpSkeleton::SlotSet* pf = lease.table->Find(VpSkeleton::kCameraFitField);
+		if (!p7 || !pf)
+			return false;   // the product is not in this graph: nothing to read
+		const VpSkeleton::ReadInfo a = p7->Read(seq, true);
+		const VpSkeleton::ReadInfo b = pf->Read(seq, true);
+		if (a.kind != VpSkeleton::ReadInfo::Ring || b.kind != VpSkeleton::ReadInfo::Ring || !a.header || !b.header)
+			return false;
+		const VpIndicator::Stamp sa = a.header->honoured;
+		const VpIndicator::Stamp sb = b.header->honoured;
+		return VpIndicator::SameFor(sa, sb, ~VpIndicator::CounterMask(0));
+	}
+
+	// The next frame the lane can produce: P7 and its fit field product published (the record is in the pool), P8 slot not yet used, not below the floor.
 	bool CameraLabelFill::NextSeq(uint64_t* out)
 	{
 		Rebind();
@@ -38,12 +55,15 @@ namespace CameraLink
 			return false;
 		VpSkeleton::SlotSet* p8 = m_lease.table->Find(VpSkeleton::kP8CameraLabels);
 		VpSkeleton::SlotSet* p7 = m_lease.table->Find(VpSkeleton::kP7CameraFit);
-		if (!p8 || !p7)
+		VpSkeleton::SlotSet* pf = m_lease.table->Find(VpSkeleton::kCameraFitField);
+		if (!p8 || !p7 || !pf)
 			return false;
 		const uint64_t start = m_cursor > m_floor ? m_cursor : m_floor;
 		for (uint64_t s = start; s < start + p8->Ring(); ++s)
 		{
 			if (p7->StateOf(s) != VpSkeleton::SlotState::Published && p7->StateOf(s) != VpSkeleton::SlotState::Sealed)
+				continue;
+			if (pf->StateOf(s) != VpSkeleton::SlotState::Published && pf->StateOf(s) != VpSkeleton::SlotState::Sealed)
 				continue;
 			if (p8->StateOf(s) != VpSkeleton::SlotState::Empty && p8->StateOf(s) != VpSkeleton::SlotState::Released)
 				continue;
@@ -81,7 +101,8 @@ namespace CameraLink
 		hdr.honoured = lease.indicator ? lease.indicator->StampOf(seq) : VpIndicator::Stamp();
 		std::shared_ptr<const CameraModel::CameraMotion> rec;
 		std::shared_ptr<const FieldCopy> field;
-		m_link.FitEntryOf(seq, rec, field);   // ONE pool read: the record and its fit field are the same entry
+		if (FitFieldMatchesP7(lease, seq))
+			m_link.FitEntryOf(seq, rec, field);   // the record and its fit field are the same pool entry; the field's PRODUCT stamp was just matched to P7's
 		LabelTarget target;
 		target.live = false;
 		target.index = ticket.slot;
@@ -116,8 +137,10 @@ namespace CameraLink
 		const bool p7Sealed = p7 && p7->Read(seq).kind == VpSkeleton::ReadInfo::Ring;
 		std::shared_ptr<const CameraModel::CameraMotion> rec;
 		std::shared_ptr<const FieldCopy> field;
-		if (p7Sealed)
-			m_link.FitEntryOf(seq, rec, field);   // ONE pool read: the record and its fit field are the same entry
+		// The fit field product must be sealed too and carry P7's stamp (it is resolved before P8, like P7): else P8 stays absent (declined, counted).
+		VpSkeleton::SlotSet* pf = m_lease.table ? m_lease.table->Find(VpSkeleton::kCameraFitField) : nullptr;
+		if (p7Sealed && pf && pf->Read(seq).kind == VpSkeleton::ReadInfo::Ring && FitFieldMatchesP7(m_lease, seq))
+			m_link.FitEntryOf(seq, rec, field);   // the record and its fit field are the same pool entry
 		if (!rec)
 		{
 			m_counters.declined.fetch_add(1, std::memory_order_relaxed);
