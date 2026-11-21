@@ -532,8 +532,11 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 	// product's per-block texture (N, e3, 0, 0) is replaced by a copy with block (bx, by)'s N set to `value`. Returns the outputs.
 	// hardAtBlock (gate cb-u1 r2 MUST 3): when set, every frame appends ev_a.x (`hard`) of block (bx, by) for each slot k, read
 	// from the module's evidence texture (Gpu::Module::LastEvidenceTexture(0), texel (k x bw + bx, by)); slots = K is returned.
+	// channel (gate cb-u1 r3 MUST 2): the block texture component planted, 0 = N (.x), 1 = e3 (.y, which feeds F = e2 / (e2 +
+	// e3 + floor)). evA / evB: when set, every frame appends all four components of ev_a / ev_b at block (bx, by), slot-major.
 	std::vector<Plane> RunTdPlantedN(GpuDevice& dev, const std::vector<Plane>& frames, bool tamper, float value, int bx, int by,
-		std::vector<float>* hardAtBlock = nullptr, int* slots = nullptr)
+		std::vector<float>* hardAtBlock = nullptr, int* slots = nullptr, int channel = 0, std::vector<float>* evAAtBlock = nullptr,
+		std::vector<float>* evBAtBlock = nullptr)
 	{
 		pl_gpu gpu = dev.Gpu();
 		pl_tex bwdTex = UploadPair(gpu, MotionPair::Uniform(kW, kH, 16.0, -0.3, 0.0));
@@ -551,7 +554,7 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 			{
 				std::vector<float> blocks = DownloadFloat(gpu, dev.dispatch, product.blocks);
 				Assert::IsTrue(blocks.size() == static_cast<size_t>(product.bw) * static_cast<size_t>(product.bh) * 4, L"the block texture was read back");
-				blocks[(static_cast<size_t>(by) * product.bw + bx) * 4] = value;
+				blocks[(static_cast<size_t>(by) * product.bw + bx) * 4 + static_cast<size_t>(channel)] = value;
 				pl_tex_params tp{};
 				tp.w = product.bw; tp.h = product.bh; tp.format = pl_find_named_fmt(gpu, "rgba32f"); tp.sampleable = true; tp.initial_data = blocks.data();
 				planted = pl_tex_create(gpu, &tp);
@@ -581,6 +584,20 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 				for (int slot = 0; slot < k; ++slot)
 					hardAtBlock->push_back(ev[(static_cast<size_t>(by) * texW + static_cast<size_t>(slot) * bw + bx) * 4]);
 				if (slots) *slots = k;
+			}
+			for (int which = 0; which < 2; ++which)
+			{
+				std::vector<float>* dst = which == 0 ? evAAtBlock : evBAtBlock;
+				if (!dst) continue;
+				pl_tex ev = module.LastEvidenceTexture(which);
+				Assert::IsNotNull(ev, L"the evidence texture exists after an Apply");
+				const int bw = (kW + 15) / 16, texW = ev->params.w, k = texW / bw;
+				Assert::IsTrue(k >= 1 && k * bw == texW && ev->params.h == (kH + 15) / 16, L"the evidence texture is (K x bw) x bh");
+				const std::vector<float> v = DownloadFloat(gpu, dev.dispatch, ev);
+				Assert::IsTrue(v.size() == static_cast<size_t>(texW) * static_cast<size_t>(ev->params.h) * 4, L"the evidence texture was read back");
+				for (int slot = 0; slot < k; ++slot)
+					for (int c = 0; c < 4; ++c)
+						dst->push_back(v[(static_cast<size_t>(by) * texW + static_cast<size_t>(slot) * bw + bx) * 4 + static_cast<size_t>(c)]);
 			}
 			if (planted) pl_tex_destroy(gpu, &planted);
 			pl_tex_destroy(gpu, &tex);
@@ -1405,6 +1422,64 @@ namespace VideoProcessorTest
 				Assert::IsTrue(inBlock <= 0.05, Wide(std::string("N = ") + names[k] + ": the planted block transfers nothing (output = input)").c_str());
 				Assert::IsTrue(all <= controlWorstAll + 1.0, Wide(std::string("N = ") + names[k] + ": no pixel anywhere goes wrong").c_str());
 			}
+		}
+
+		TEST_METHOD(TemporalDetailGpuNonFiniteFocusInputClosesTheBlock)
+		{
+			// Gate cb-u1 r3 MUST 2 (the r2 MUST 2 shader closure): a NaN e3 in the shared block texture makes the block's F
+			// (meas.z = e2 / (e2 + e3 + floor)) NaN, and the F the slot stores from it. td_gs maps the NaN focus ratio to a finite 0,
+			// so before f41a2c1c5 only `focus` (and with it `hard`) closed while stronger (ev_a.z), the high band (ev_b.x) and
+			// unc x base x corr (ev_b.z) stayed open; the model closes every gate on a non-finite F. Every slot on every frame must
+			// now read 0 there.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Plane> frames = Stream(12, "IBBBPBBB", 0.3, 0.0, 29u, 1.2);
+			const std::vector<Plane> control = RunTdPlantedN(dev, frames, false, 0.0f, 0, 0);
+			const int bw = (kW + 15) / 16, bh = (kH + 15) / 16;
+			int bestX = 1, bestY = 1;
+			double best = -1.0;
+			for (int by = 1; by < bh - 1; ++by)
+				for (int bx = 1; bx < bw - 1; ++bx)
+				{
+					const double c = WorstInBlock(control, frames, bx, by);
+					if (c > best) { best = c; bestX = bx; bestY = by; }
+				}
+			LogF("control: the block (%.0f, %.0f) changes by up to %.3f codes", bestX, bestY, best);
+			Assert::IsTrue(best > 0.25, L"control: the transfer runs in the block planted below");
+			std::vector<float> ca, cb;
+			RunTdPlantedN(dev, frames, false, 0.0f, bestX, bestY, nullptr, nullptr, 1, &ca, &cb);
+			Assert::IsTrue(!ca.empty() && ca.size() == cb.size() && ca.size() % 4 == 0, L"control: the evidence texels were read");
+			float strongerMax = 0.0f, ebzMax = 0.0f;
+			for (size_t i = 0; i < ca.size(); i += 4)
+			{
+				strongerMax = (std::max)(strongerMax, ca[i + 2]);
+				ebzMax = (std::max)(ebzMax, cb[i + 2]);
+			}
+			LogF("control: largest stronger %.4f, unc x base x corr %.4f", static_cast<double>(strongerMax), static_cast<double>(ebzMax));
+			Assert::IsTrue(strongerMax > 0.0f, L"control: with a finite e3 some slot's stronger (ev_a.z) at the block is > 0");
+			Assert::IsTrue(ebzMax > 0.0f, L"control: with a finite e3 some slot's unc x base x corr (ev_b.z) at the block is > 0");
+			std::vector<float> pa, pb;
+			const std::vector<Plane> planted = RunTdPlantedN(dev, frames, true, std::numeric_limits<float>::quiet_NaN(), bestX, bestY,
+				nullptr, nullptr, 1, &pa, &pb);
+			Assert::IsTrue(pa.size() == ca.size() && pb.size() == cb.size(), L"the planted run read the same evidence texels");
+			bool stronger = true, hb = true, ebz = true;
+			for (size_t i = 0; i < pa.size(); i += 4)
+			{
+				stronger = stronger && pa[i + 2] == 0.0f;
+				hb = hb && pb[i] == 0.0f;
+				ebz = ebz && pb[i + 2] == 0.0f;
+			}
+			Assert::IsTrue(stronger, L"e3 = NaN: stronger (ev_a.z) is 0 in every slot on every frame");
+			Assert::IsTrue(hb, L"e3 = NaN: the high-band gate (ev_b.x) is 0 in every slot on every frame");
+			Assert::IsTrue(ebz, L"e3 = NaN: unc x base x corr (ev_b.z) is 0 in every slot on every frame");
+			double worst = 0.0;
+			bool finite = true;
+			for (const Plane& p : planted)
+				for (double v : p.v) finite = finite && std::isfinite(v);
+			worst = WorstInBlock(planted, frames, bestX, bestY);
+			LogF("e3 = NaN: block change %.4f codes", worst);
+			Assert::IsTrue(finite, L"e3 = NaN: the output is finite");
+			Assert::IsTrue(worst <= 0.05, L"e3 = NaN: the planted block transfers nothing (output = input)");
 		}
 
 		TEST_METHOD(TemporalDetailGpuNonFiniteBlockGateTexelIsNeutral)
