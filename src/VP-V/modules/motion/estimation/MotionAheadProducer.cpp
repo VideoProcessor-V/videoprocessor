@@ -344,7 +344,7 @@ namespace MotionAhead
 						DebugLog::Log("Motion ahead: %llu look-ahead job(s) dropped while on-demand requests were served", n);
 				}
 			}
-			jobs.push_back(Job{ sequence, generation, luma, breakBefore });
+			jobs.push_back(Job{ sequence, generation, luma, breakBefore, std::chrono::steady_clock::now() });
 		}
 		lastSubmitted.store(sequence, std::memory_order_release);
 		wake.notify_all();
@@ -510,6 +510,8 @@ namespace MotionAhead
 	bool Producer::Process(const Job& job)
 	{
 		const auto started = std::chrono::steady_clock::now();
+		const double queueWaitMs = job.submitTime.time_since_epoch().count() != 0 ?
+			(std::max)(0.0, std::chrono::duration<double, std::milli>(started - job.submitTime).count()) : 0.0;
 		int halfW = 0, halfH = 0;
 		if (!LumaAtTarget(job.sequence, job.luma, lumaBuffer, halfW, halfH, "motion_ahead"))
 			return true;   // not a readable frame, or a size this producer does not make: nothing published (the consumer takes the matcher path, shown as a fallback)
@@ -560,7 +562,10 @@ namespace MotionAhead
 			bool ran = false;
 			std::shared_ptr<Flow> flow;
 			double extrasMs = 0.0;
-			ok = RunPair(lumaTex[prev], lumaTex[texIndex], halfW, halfH, continuous, job.sequence, ran, flow, extrasMs);
+			StageSample stage;
+			stage.queueWaitMs = queueWaitMs;
+			stage.lumaMs = lumaMs;
+			ok = RunPair(lumaTex[prev], lumaTex[texIndex], halfW, halfH, continuous, job.sequence, ran, flow, extrasMs, &stage);
 			if (ran)
 			{
 				hintSequence = job.sequence;
@@ -569,12 +574,17 @@ namespace MotionAhead
 			if (ok && flow)
 			{
 				slot->Publish(previousSequence, job.sequence, job.generation, flow);   // P2: the pair, for the readers' P2View
+				const auto published = std::chrono::steady_clock::now();
+				stage.serviceMs = std::chrono::duration<double, std::milli>(published - started).count();
+				stage.submitToPublishMs = job.submitTime.time_since_epoch().count() != 0 ?
+					(std::max)(0.0, std::chrono::duration<double, std::milli>(published - job.submitTime).count()) : stage.serviceMs;
 				engineReady = true;
 				std::lock_guard<std::mutex> lock(mutex);
 				++stats.pairs;
 				stats.extrasMs = extrasMs;
-				stats.lastPairMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+				stats.lastPairMs = stage.serviceMs;
 				stats.pairMsSum += stats.lastPairMs;
+				stats.RecordStage(stage);
 			}
 		}
 		{
@@ -621,12 +631,13 @@ namespace MotionAhead
 	}
 
 	bool Producer::RunPair(ID3D11Texture2D* a, ID3D11Texture2D* b, int halfW, int halfH, bool continuous, uint64_t timedSequence, bool& ran,
-		std::shared_ptr<Flow>& flowOut, double& extrasMs)
+		std::shared_ptr<Flow>& flowOut, double& extrasMs, StageSample* stageOut)
 	{
 		ran = false;
 		VPV_COMPUTE_ONCE_AT("nvof.pair", timedSequence, 0);
 		flowOut.reset();
 		extrasMs = 0.0;
+		const auto engineStart = std::chrono::steady_clock::now();
 		// MV7: 1 pair in N is timed (the GPU idle first, then the engine's completion, on this worker's own device) and posted to the
 		// pass-timer inbox the render thread drains; the other pairs run untimed exactly as before.
 		NvOpticalFlow::Result timing;
@@ -645,6 +656,7 @@ namespace MotionAhead
 			context->CopyResource(flowRead[i], flowTex[i]);
 			context->CopyResource(costRead[i], costTex[i]);
 		}
+		const auto mapStart = std::chrono::steady_clock::now();
 		auto flow = std::make_shared<Flow>();
 		flow->halfW = halfW; flow->halfH = halfH;
 		flow->gridW = (halfW + 3) / 4; flow->gridH = (halfH + 3) / 4;
@@ -668,13 +680,22 @@ namespace MotionAhead
 			context->Unmap(costRead[i], 0);
 		}
 		// Planner Q1: the whole frame's motion, here on the worker (no render cost).
-		const auto extrasStart = std::chrono::steady_clock::now();
+		const auto voteStart = std::chrono::steady_clock::now();
 		const bool general = generalRates.load(std::memory_order_acquire);   // fixed-constant batch B4 2026-10-18
 		VPV_COMPUTE_ONCE_AT("U10", timedSequence, 0);
 		FlowGlobals(*flow, general);   // both directions, flagged for the FlowOf view (W1-C3)
 		// The cost and the engine's own forward/backward consistency as trust inputs.
+		const auto flowExtrasStart = std::chrono::steady_clock::now();
 		FlowExtras(*flow);
-		extrasMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - extrasStart).count();
+		const auto flowExtrasEnd = std::chrono::steady_clock::now();
+		extrasMs = std::chrono::duration<double, std::milli>(flowExtrasEnd - voteStart).count();
+		if (stageOut)
+		{
+			stageOut->engineMs = std::chrono::duration<double, std::milli>(mapStart - engineStart).count();
+			stageOut->mapMs = std::chrono::duration<double, std::milli>(voteStart - mapStart).count();
+			stageOut->voteMs = std::chrono::duration<double, std::milli>(flowExtrasStart - voteStart).count();
+			stageOut->extrasMs = std::chrono::duration<double, std::milli>(flowExtrasEnd - flowExtrasStart).count();
+		}
 		flowOut = std::move(flow);
 		return true;
 	}
@@ -1038,6 +1059,9 @@ namespace MotionAhead
 
 	bool Producer::ProcessJobForTest(const Job& job)
 	{
+		const auto started = std::chrono::steady_clock::now();
+		const double queueWaitMs = job.submitTime.time_since_epoch().count() != 0 ?
+			(std::max)(0.0, std::chrono::duration<double, std::milli>(started - job.submitTime).count()) : 0.0;
 		// Process's chain bookkeeping without a device (the seam's engine stands in for the GPU work).
 		// Re-check S1: never back below a generation a no-walk request already started (it would wipe the request's pair).
 		if (requestOwnsGeneration && job.generation < slot->Generation())
@@ -1061,13 +1085,30 @@ namespace MotionAhead
 			NoteRingMiss(PairStartLostText());   // Process's FindPairStart(...).Lost() path: counted, named, no pair
 			pairs = false;
 		}
+		const auto engineStart = std::chrono::steady_clock::now();
 		const bool ok = testEngine->job ? testEngine->job(job.sequence, job.generation) : true;
+		const auto engineEnd = std::chrono::steady_clock::now();
 		if (ok && pairs)
+		{
 			slot->Publish(previousSequence, job.sequence, job.generation, std::make_shared<Flow>());
+			const auto published = std::chrono::steady_clock::now();
+			StageSample stage;
+			stage.queueWaitMs = queueWaitMs;
+			stage.engineMs = std::chrono::duration<double, std::milli>(engineEnd - engineStart).count();
+			stage.serviceMs = std::chrono::duration<double, std::milli>(published - started).count();
+			stage.submitToPublishMs = job.submitTime.time_since_epoch().count() != 0 ?
+				(std::max)(0.0, std::chrono::duration<double, std::milli>(published - job.submitTime).count()) : stage.serviceMs;
+			std::lock_guard<std::mutex> lock(mutex);
+			++stats.frames;
+			++stats.pairs;
+			stats.lastPairMs = stage.serviceMs;
+			stats.pairMsSum += stage.serviceMs;
+			stats.RecordStage(stage);
+		}
+		else
 		{
 			std::lock_guard<std::mutex> lock(mutex);
 			++stats.frames;
-			if (ok && pairs) ++stats.pairs;
 		}
 		havePrevious = true;
 		previousSequence = job.sequence;

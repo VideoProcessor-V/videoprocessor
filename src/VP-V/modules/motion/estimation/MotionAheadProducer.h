@@ -35,14 +35,15 @@
 #include <d3d11.h>
 #include <atlbase.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
-#include <algorithm>
-#include <cmath>
-#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -307,8 +308,54 @@ namespace MotionAhead
 		void Prune(uint64_t oldestNeeded) { slot->Prune(oldestNeeded); }
 		VpMotion::P2Slot::Stats StoreStats() const { return slot->GetStats(); }
 
+		// Slice 16 T0 (refs/105 s3.6 / s4 row 0): per-pair stage timings (ms) recorded into a 32-sample ring in Stats.
+		// engineMs is wall time (submit -> completion event: the OFA runs beside the graphics queue, NvOpticalFlow.cpp).
+		struct StageSample
+		{
+			double queueWaitMs = 0.0;
+			double lumaMs = 0.0;
+			double engineMs = 0.0;
+			double mapMs = 0.0;
+			double voteMs = 0.0;
+			double extrasMs = 0.0;
+			double submitToPublishMs = 0.0;
+			double serviceMs = 0.0;
+		};
+		static constexpr size_t kStageRingSize = 32;
+
 		// extrasMs: the trust extras of the last pair (global, cost, consistency) on the worker.
-		struct Stats { unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0; double lastPairMs = 0.0, lumaMs = 0.0, extrasMs = 0.0; double pairMsSum = 0.0; /* SK-MV: the sum of all pair times, for the standing-cost line */ };
+		struct Stats
+		{
+			unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0;
+			double lastPairMs = 0.0, lumaMs = 0.0, extrasMs = 0.0;
+			double pairMsSum = 0.0; /* SK-MV: the sum of all pair times, for the standing-cost line */
+			StageSample lastStage;
+			std::array<StageSample, kStageRingSize> stageRing{};
+			size_t stageCount = 0;
+			size_t stageNext = 0;
+
+			void RecordStage(const StageSample& sample)
+			{
+				lastStage = sample;
+				stageRing[stageNext] = sample;
+				stageNext = (stageNext + 1) % kStageRingSize;
+				if (stageCount < kStageRingSize)
+					++stageCount;
+			}
+
+			double StagePercentile(double StageSample::*field, double pct) const
+			{
+				if (stageCount == 0)
+					return 0.0;
+				std::array<double, kStageRingSize> sorted{};
+				for (size_t i = 0; i < stageCount; ++i)
+					sorted[i] = stageRing[i].*field;
+				std::sort(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(stageCount));
+				const double clamped = pct < 0.0 ? 0.0 : (pct > 1.0 ? 1.0 : pct);
+				const size_t idx = static_cast<size_t>(clamped * static_cast<double>(stageCount - 1) + 0.5);
+				return sorted[(std::min)(idx, stageCount - 1)];
+			}
+		};
 		Stats GetStats() const;
 
 		// Bug hunt 35 #1: the stop/restart state (FallbackCatalog::VectorProducer builds the entry).
@@ -324,7 +371,13 @@ namespace MotionAhead
 		void SetRecoveryTimeDivisorForTest(unsigned divisor) { recoveryDivisor.store(divisor < 1 ? 1 : divisor, std::memory_order_release); }
 
 	private:
-		struct Job { uint64_t sequence = 0, generation = 0; AnalysisLumaSource luma; bool breakBefore = false; };
+		struct Job
+		{
+			uint64_t sequence = 0, generation = 0;
+			AnalysisLumaSource luma;
+			bool breakBefore = false;
+			std::chrono::steady_clock::time_point submitTime{};
+		};
 		void Worker();
 		bool Process(const Job& job);
 		bool ProcessJobForTest(const Job& job);
@@ -344,7 +397,7 @@ namespace MotionAhead
 		// One engine run on (a, b) at w x h, read back into a new Flow with its global motion and trust extras. ran = the
 		// engine itself succeeded (the readback may still fail). False = failed (error set).
 		bool RunPair(ID3D11Texture2D* a, ID3D11Texture2D* b, int w, int h, bool continuous, uint64_t timedSequence, bool& ran,
-			std::shared_ptr<Flow>& flow, double& extrasMs);
+			std::shared_ptr<Flow>& flow, double& extrasMs, StageSample* stageOut = nullptr);
 		bool EnsureRequestTextures(int w, int h);   // W2-C5b: the off-chain pair (made on first use; its own VRAM declaration)
 		void ReleaseRequestTextures();
 		bool EnsureSize(int halfW, int halfH);
