@@ -51,7 +51,7 @@ if (q.x < int(region.x) && q.y < int(region.y)) {
     float d = texelFetch(em, clamp(p + ivec2(-1, 0), ivec2(0), lim), 0).y;
     float f = texelFetch(em, clamp(p + ivec2(1, 0), ivec2(0), lim), 0).y;
     float h = texelFetch(em, clamp(p + ivec2(0, 1), ivec2(0), lim), 0).y;
-    float grad = m.x * 0.25;
+    float grad = 0.25 * m.x;
     float ed = smoothstep(edge_lo, edge_hi, grad);
     imageStore(edge_out, q, vec4(ed));
     float lap = abs(4.0 * e - b - d - f - h);
