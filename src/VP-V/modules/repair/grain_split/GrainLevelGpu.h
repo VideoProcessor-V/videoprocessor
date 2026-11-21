@@ -200,13 +200,16 @@ if (gv_li == 0u)
 				const pl_tex plane = static_cast<pl_tex>(src.gpu.resource);
 				const int w = plane->params.w, h = plane->params.h;
 				const int depth = ColorDepthOf(facts->repr.bits);
-				const double cu = VpvGpu::CodeUnit(plane, facts->repr.bits, depth);
 				const int B = Gpu::BlockFor(1.0);
 				// The P10 split of this frame's full luma at scale 1.0 (variant Acquire: the owner computes it once per frame and key).
 				const VpSkeleton::AcquireResult split = memo.Acquire(VpSkeleton::kP10GrainSplit, req.seq, VpSkeleton::AcquireForm::Gpu,
 					Gpu::VariantFor(w, h, 1.0, depth));
 				if (!split.Ok())
 					return Decline(out, c, std::string("grain split unavailable: ") + VpSkeleton::Token(split.cause));
+				// The code unit reads the plane's texture format: only the fit test needs it, and a plane without one declines.
+				if (plane->params.format == nullptr)
+					return Decline(out, c, "the source plane has no texture format");
+				const double cu = VpvGpu::CodeUnit(plane, facts->repr.bits, depth);
 				const Gpu::Frame* gs = Gpu::FrameOf(split);
 				if (Gpu::CheckFit(gs, w, h, B, 1.0, cu, 0, req.seq) != Gpu::FitResult::Fits)
 					return Decline(out, c, "the grain split variant does not fit the frame's luma");
