@@ -74,6 +74,23 @@ namespace VideoProcessorTest
 
 		bool Has(const std::string& text, const char* part) { return text.find(part) != std::string::npos; }
 
+		// The process-wide confirmed-cut seam for one scope, restored after (the seam is shared by every test).
+		struct CutSeamScope
+		{
+			::MotionValidity::State::ConfirmedCutFn before;
+			explicit CutSeamScope(::MotionValidity::State::ConfirmedCutFn fn)
+				: before(::MotionValidity::State::ConfirmedCutReader().load())
+			{
+				::MotionValidity::State::ConfirmedCutReader().store(fn);
+			}
+			~CutSeamScope() { ::MotionValidity::State::ConfirmedCutReader().store(before); }
+			CutSeamScope(const CutSeamScope&) = delete;
+			CutSeamScope& operator=(const CutSeamScope&) = delete;
+		};
+		bool CutAtEleven(uint64_t seq) { return seq == 11; }
+		bool CutAtTen(uint64_t seq) { return seq == 10; }
+		bool CutNowhere(uint64_t) { return false; }
+
 		bool RegisterFill(VpSkeleton::SkeletonMemo& m, VpMotion::P2EngineOf engineOf)
 		{
 			return m.RegisterOwnerFill(VpSkeleton::kP2VectorPair, VpSkeleton::AcquireForm::Cpu, VpMotion::kP2CpuFormUnit,
@@ -292,6 +309,44 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("p2 cpu form: engine absent"), noneWhy);
 			Assert::AreEqual(1ull, engine.P2CpuFormServed(), L"an unknown host changes no count");
 			Assert::AreEqual(0ull, engine.P2CpuFormDeclined());
+		}
+
+		// GF-P4 S7 (b): an ADJACENT pair whose end is a confirmed cut is declined through the one stamp form (PairValidAt), counted
+		// once there, and the reason says so.
+		TEST_METHOD(AdjacentPairAcrossAConfirmedCutIsDeclined)
+		{
+			Rig rig;   // the pair 10 -> 11
+			const CutSeamScope scope(&CutAtEleven);
+			VpMotion::P2PairRecord rec;
+			std::string why;
+			Assert::AreEqual(0ull, static_cast<unsigned long long>(rig.engine.motionValidity.ConfirmedCutRefusals()));
+			Assert::IsFalse(rig.engine.P2RecordEndingAt(11, rec, why), L"the pair ending on a confirmed cut is declined");
+			Assert::IsTrue(Has(why, "refused (stamps or confirmed cut)"), L"the reason names the refusal");
+			Assert::AreEqual(1ull, static_cast<unsigned long long>(rig.engine.motionValidity.ConfirmedCutRefusals()), L"counted once, in PairValidAt");
+		}
+
+		// GF-P4 S7 (b): a GAP pair (from + 1 < to) is declined when any frame in (from, to] is a confirmed cut, with the frame named;
+		// with no confirmed cut it is served.
+		TEST_METHOD(GapPairAcrossAConfirmedCutIsDeclined)
+		{
+			VpMotion::VectorEngine engine;   // only the gap pair 8 -> 11 (no adjacent 10 -> 11 for the reader to prefer)
+			engine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			engine.p2Slot->SetGeneration(engine.motionValidity.StreamGeneration());
+			engine.p2Slot->Publish(8, 11, engine.p2Slot->Generation(), MakeFlow(3.0f, true, false));
+			VpMotion::P2PairRecord rec;
+			std::string why;
+			{
+				const CutSeamScope scope(&CutAtTen);
+				Assert::IsFalse(engine.P2RecordEndingAt(11, rec, why), L"the gap pair crosses the confirmed cut at 10");
+				Assert::IsTrue(Has(why, "crosses a confirmed cut at 10"), L"the cut frame is named");
+			}
+			{
+				const CutSeamScope scope(&CutNowhere);
+				why.clear();
+				Assert::IsTrue(engine.P2RecordEndingAt(11, rec, why), L"no confirmed cut: the gap pair is served");
+				Assert::AreEqual(uint64_t(8), rec.from, L"the record names the gap pair");
+				Assert::AreEqual(uint64_t(11), rec.to);
+			}
 		}
 
 		// BBP-A-COUNTS-CTRLALTD: the form's declines reach the status segment (Config status / Ctrl+Alt+D), never log-only:
