@@ -442,6 +442,9 @@ public:
 					trimsParams.push_back({ "dv_trc_kind", piecewiseTransfer ? static_cast<double>(static_cast<int>(trimsTransfer.kind)) : 0.0 });
 					trimsParams.push_back({ "dv_trc_param", piecewiseTransfer ? static_cast<double>(trimsTransfer.param) : 0.0 });
 					trimsParams.push_back({ "dv_peak_nits", display.hdr.max_luma });
+					// GEM-012 (AMEND): the per-pixel constants once per frame on the CPU, from the CPU reference's own maths.
+					trimsParams.push_back({ "dv_peak_pq", DvMath::PqFromNits(display.hdr.max_luma) });
+					trimsParams.push_back({ "dv_near_black_nits", DvMath::NitsFromPq(DolbyVisionTrims::kNearBlackPq) });
 					trimsParams.push_back({ "dv_kr", kr });
 					trimsParams.push_back({ "dv_kb", kb });
 					m_pending.collect = true;   // state and params once the segment has collected
