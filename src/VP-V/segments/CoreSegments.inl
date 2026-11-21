@@ -165,6 +165,7 @@ void LibplaceboVideoRenderer::Impl::OrderFrameSlotHooks()
 // every name is an Impl member). Render thread, renderMutex held, immediately after the render call, as before.
 void LibplaceboVideoRenderer::Impl::ReportRenderErrors()
 {
+    outputFinish.EndFrameDraws();   // GEM-025(b): the frame's draws are over; drops the callback that references the frame's guard
     pl_render_errors hookErrors = pl_renderer_get_errors(renderer);
     // output_segments_merged (audit M4): a stage that failed inside a merged hook takes the
     // same path as a hook libplacebo disabled; a disabled merged hook falls back visibly.
@@ -236,6 +237,7 @@ static void TraceFrameHookList(const void* renderer, const pl_render_params& fra
 // render) and comes in by reference. Render thread, renderMutex held, immediately before the render call, as before.
 void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_frame& renderImage, pl_frame& target, const int width, const int height, bool cadenceRepeat, uint64_t frameGeneration, uint64_t sourceSequence, double captureRateHz, const double nominalSourceRateHz, const VideoState& state, const VideoFrame& videoFrame, const std::shared_ptr<const QueuedFrame::ConvertedPayload>& convertedPayload, HdrPeakAnalysisCrop::TrustedPicture& hdrTrustedPicture, SubtitleCutPasteGeometry& relocatedSubtitle, SubtitleBoxPadding& safeSubtitlePadding, bool subtitleCompositionSucceeded, const pl_hook* submittedNls, const bool lowLatencyQueue, CustomHookChain::TemplateValues& hookTemplates, SigmaDeltaVectors::NextVectorGuard& nextVectorGuard, pl_render_params& frameParams, pl_render_errors& renderErrors, bool& extendedRangeRelabelled, TemporalHistoryPolicy::Decision& temporalEntrance)
 {
+    outputFinish.BeginFrameDraws(pipelineSlots.OriginalPathway() ? std::function<void()>() : std::function<void()>([&nextVectorGuard] { nextVectorGuard.Release(); }));   // GEM-025(b)
     frameHooks.clear();
     frameSlotHooks.clear();
     // S2 (output colour + drive): the blocks below decide; outputColour.Collect adds the hooks.

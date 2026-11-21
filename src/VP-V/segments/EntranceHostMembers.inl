@@ -228,6 +228,7 @@ bool LibplaceboVideoRenderer::Impl::RenderCrossfadeMix(const pl_frame& from, con
 // (the retry), with `parameters` non-const as before. Render thread, renderMutex held, as before.
 bool LibplaceboVideoRenderer::Impl::DrawFrame(const pl_frame& source, const pl_frame& destination, pl_render_params& parameters, const pl_frame& image, uint64_t sourceSequence, uint64_t nextSourceSequence, bool cadenceRepeat, const pl_render_errors& renderErrors, const TemporalHistoryPolicy::Decision& temporalEntrance, bool extendedRangeRelabelled)
 {
+    if (!pipelineSlots.OriginalPathway()) outputFinish.OnDraw(parameters, dejudderMaskParamSet);   // GEM-025(b): the 2nd draw of a frame is the NLS retry
     // output_segments_merged: S2/S3 as one hook each for this draw only (restored after).
     OutputSegments::Merger::Scope mergedOutput(outputMerger.get(), parameters, &renderErrors);
     // WP-24 repeat reuse, call 2 of 3 (upstreamable): a reusable repeat runs the OUTPUT stage only.

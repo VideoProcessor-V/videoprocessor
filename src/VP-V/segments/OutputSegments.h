@@ -166,6 +166,17 @@ namespace OutputSegments
 		// 5. GEM-025(a) (sigma-delta MUST-8): libplacebo disabled the occlusion mask hook (its signature is in the render's
 		//    disabled_hooks). Latches for the session (the hook stays disabled in libplacebo); true only on the call that latched.
 		//    While latched the host installs neither the mask nor the grain map (install = grainInstall = false).
+		// 6. GEM-025(b) (sigma-delta MUST-8): the NLS retry redraw must not read the failed draw's vectors or mask.
+		//    NlsHookRecovery::RenderOwned calls the frame's draw exactly twice only on an NLS retry, so the 2nd OnDraw of a frame is
+		//    the retry. The callback is type-erased: SigmaDeltaVectors::NextVectorGuard is internal to each translation unit.
+		//    BeginFrameDraws: per frame, before the render; resets the draw count (an empty callback = Original pathway, OnDraw no-op).
+		void BeginFrameDraws(std::function<void()> releaseVectors);
+		//    OnDraw: ++draws; on the 2nd: releaseVectors(), occlusion_mask 0 on every parameters.hooks entry, maskParamSet = false,
+		//    ++NlsRetryReleases. Returns true then.
+		bool OnDraw(pl_render_params& parameters, bool& maskParamSet);
+		//    EndFrameDraws: after the render; drops the callback (it references the frame's local guard).
+		void EndFrameDraws();
+		unsigned long long NlsRetryReleases() const { return nlsRetryReleases; }
 		bool NoteDisabledHooks(const uint64_t* signatures, int count);
 		bool OcclusionMaskDisabled() const { return maskDisabled; }
 		bool Member(const pl_hook* hook) const;
@@ -182,5 +193,8 @@ namespace OutputSegments
 		DitherNeedSeam::Stage ditherNeed;
 		std::string ditherNeedLogged;
 		bool maskDisabled = false;
+		std::function<void()> releaseVectors;
+		int draws = 0;
+		unsigned long long nlsRetryReleases = 0;
 	};
 }
