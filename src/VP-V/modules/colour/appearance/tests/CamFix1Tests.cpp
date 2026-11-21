@@ -10,6 +10,7 @@
 #include <VP-V/modules/colour/display_mapping/DvHostStage.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
+#include "../../../../tests/SettingsTestSupport.h"
 
 #include <fstream>
 #include <map>
@@ -24,20 +25,13 @@ namespace Tests
 {
 	namespace
 	{
+		// CF1-FIN MUST 4: the source tree from this file's own path (SettingsTestSupport::RepoRoot), never the working
+		// directory; an unreadable file FAILS the test (it used to return early and pass).
 		std::string Fix1ReadUp(const std::string& rel)
 		{
-			std::string dir;
-			for (int up = 0; up < 9; ++up, dir += "..\\")
-			{
-				std::ifstream f(dir + rel, std::ios::binary);
-				if (f)
-				{
-					std::ostringstream ss;
-					ss << f.rdbuf();
-					return ss.str();
-				}
-			}
-			return std::string();
+			const std::string text = SettingsTestSupport::ReadFile(SettingsTestSupport::RepoRoot() + rel);
+			Assert::IsFalse(text.empty(), std::wstring(rel.begin(), rel.end()).append(L" is readable from the repository root").c_str());
+			return text;
 		}
 		bool Fix1Has(const std::string& text, const char* needle) { return text.find(needle) != std::string::npos; }
 		const char* const kFix1ConfigDir = "src\\VP-V\\modules\\control\\config\\";
@@ -89,8 +83,6 @@ namespace Tests
 			const std::string cfg(kFix1ConfigDir);
 			const std::string fields = Fix1ReadUp(cfg + "VpvRendererFields.h");
 			const std::string settings = Fix1ReadUp(cfg + "VpvRendererSettings.cpp");
-			if (fields.empty() || settings.empty())
-				return;   // not reachable from this working directory: the tool-side checkers cover it
 			Assert::IsTrue(Fix1Has(fields, "std::string calibrationLutStageConfigured = \"auto\";"), L"the user's default is auto");
 			Assert::IsTrue(Fix1Has(settings, "settings.calibrationLutStageConfigured = value;"), L"the parse keeps the user's value");
 			Assert::IsTrue(Fix1Has(settings, "CalibrationLutHost::ResolveStage(settings.calibrationLutStageConfigured,"),
@@ -233,8 +225,6 @@ namespace Tests
 		TEST_METHOD(ShaderUsesTheToeNotTheClip)
 		{
 			const std::string glsl = Fix1ReadUp("shaders\\vp_cam16_appearance.glsl");
-			if (glsl.empty())
-				return;   // not reachable from this working directory
 			Assert::IsTrue(Fix1Has(glsl, "float ap_flare(float o, float f)"));
 			Assert::IsFalse(Fix1Has(glsl, "(outLin - vec3(apx_veil))"), L"the subtract-and-clip is gone");
 		}
@@ -271,8 +261,6 @@ namespace Tests
 			const std::string frame = Fix1ReadUp("src\\VP-V\\modules\\drive\\led_compensation\\DynamicDriveFrame.cpp");
 			const std::string lookahead = Fix1ReadUp("src\\VP-V\\modules\\drive\\led_measure\\LedLookahead.cpp");
 			const std::string core = Fix1ReadUp("src\\VP-V\\segments\\CoreSegments.inl");
-			if (settings.empty() || frame.empty() || lookahead.empty() || core.empty())
-				return;   // not reachable from this working directory
 			Assert::IsTrue(Fix1Has(settings, "settings.saturationReplaced = appearanceRuns && settings.saturation != 0;"));
 			Assert::IsTrue(Fix1Has(frame, "BoostExponentUnderAppearance(configuredBoost, displayGamma, in.appearanceActive)"));
 			Assert::IsTrue(Fix1Has(lookahead, "module.BoostReplaced()"), L"the measurement sees the picture without the boost");
@@ -308,8 +296,6 @@ namespace Tests
 			in.trimTargetNits = 600.0;
 			Assert::AreEqual(600.0, AppearanceStage::ReferenceWhite(in), 0.0, L"the trim target comes first");
 			const std::string core = Fix1ReadUp("src\\VP-V\\segments\\CoreSegments.inl");
-			if (core.empty())
-				return;   // not reachable from this working directory
 			Assert::IsTrue(Fix1Has(core, "appearance.sourceSdr = !pl_color_space_is_hdr(&renderImage.color);"));
 			Assert::IsTrue(Fix1Has(core, "appearance.sdrTargetNits = activeSettings.sdrTargetNits;"));
 			Assert::IsFalse(Fix1Has(core, "!pl_color_space_is_hdr(&target.color) ? display.hdr.max_luma"), L"no longer keyed by the output");
@@ -345,8 +331,6 @@ namespace Tests
 
 			const std::string core = Fix1ReadUp("src\\VP-V\\segments\\CoreSegments.inl");
 			const std::string glsl = Fix1ReadUp("shaders\\vp_cam16_appearance.glsl");
-			if (core.empty() || glsl.empty())
-				return;   // not reachable from this working directory
 			Assert::IsTrue(Fix1Has(core, "appearance.trimSaturationGain = dvStage.TrimsSaturationGain();"));
 			Assert::IsTrue(Fix1Has(glsl, "jmh.y *= apx_hunt_scale;"));
 		}
@@ -377,8 +361,6 @@ namespace Tests
 			const std::string core = Fix1ReadUp("src\\VP-V\\segments\\CoreSegments.inl");
 			const std::string settings = Fix1ReadUp(std::string(kFix1ConfigDir) + "VpvRendererSettings.cpp");
 			const std::string glsl = Fix1ReadUp("shaders\\vp_cam16_appearance.glsl");
-			if (core.empty() || settings.empty() || glsl.empty())
-				return;   // not reachable from this working directory
 			Assert::IsTrue(Fix1Has(settings, "Ambient::Read(config, ambientRoom, ambientError)"), L"[ambient] lux anchors read by their owner");
 			Assert::IsTrue(Fix1Has(core, "appearance.room.anchors.luxDark = activeSettings.ambientLuxDark;"));
 			Assert::IsTrue(Fix1Has(core, "appearance.room.anchors.luxLit = activeSettings.ambientLuxLit;"));
@@ -390,8 +372,6 @@ namespace Tests
 		TEST_METHOD(BtbWtwPassesPerChannelWithoutAnEdge)
 		{
 			const std::string glsl = Fix1ReadUp("shaders\\vp_cam16_appearance.glsl");
-			if (glsl.empty())
-				return;   // not reachable from this working directory
 			Assert::IsFalse(Fix1Has(glsl, "color.r < 0.0 || color.g < 0.0 || color.b < 0.0 || color.r > 1.0"),
 				L"no whole-pixel skip when one channel leaves the range");
 			Assert::IsTrue(Fix1Has(glsl, "if (outside && (allBelow || allAbove))"), L"a pixel wholly outside still passes exactly");
@@ -421,8 +401,6 @@ namespace Tests
 			Assert::AreEqual(inv[0], Fix1Param(d, "apn_00"), 1e-12);
 			Assert::AreEqual(inv[8], Fix1Param(d, "apn_22"), 1e-12);
 			const std::string glsl = Fix1ReadUp("shaders\\vp_cam16_appearance.glsl");
-			if (glsl.empty())
-				return;   // not reachable from this working directory
 			Assert::IsFalse(Fix1Has(glsl, "inverse(toXyz)"));
 			Assert::IsTrue(Fix1Has(glsl, "a hard 6-step bisection"), L"NIT 2: the comment says what the compression is");
 		}
@@ -482,8 +460,6 @@ namespace Tests
 			const std::string ext = Fix1ReadUp("src\\VP-V\\modules\\control\\diagnostics\\StatusExtension.cpp");
 			const std::string methods = Fix1ReadUp("src\\VP-V\\modules\\control\\diagnostics\\StatusMethods.inl");
 			const std::string stage = Fix1ReadUp("src\\VP-V\\modules\\colour\\display_mapping\\DvHostStage.h");
-			if (ext.empty() || methods.empty() || stage.empty())
-				return;   // not reachable from this working directory
 			Assert::IsTrue(Fix1Has(ext, "lines.appearance = snapshot.vp.appearance.text;"), L"the GUI side passes it to the rows");
 			Assert::IsTrue(Fix1Has(methods, "lines.appearance.Set(true, CString(m_impl->dvStage.AppearanceStatusShown().c_str()).GetString());"),
 				L"the renderer fills it from the stage");

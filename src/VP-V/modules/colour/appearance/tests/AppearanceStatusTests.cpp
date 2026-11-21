@@ -6,6 +6,7 @@
 #include <VP-V/core/FallbackPlainText.h>
 #include <VP-V/modules/colour/appearance/AppearanceStage.h>
 #include <VP-V/modules/colour/appearance/AppearanceStatus.h>
+#include "../../../../tests/SettingsTestSupport.h"
 
 #include <fstream>
 #include <sstream>
@@ -19,20 +20,13 @@ namespace Tests
 {
 	namespace
 	{
+		// CF1-FIN MUST 3 / 4: read from the repository root (this file's own path), never the working directory; an
+		// unreadable file FAILS the test.
 		std::string ReadUp(const std::string& rel)
 		{
-			std::string dir;
-			for (int up = 0; up < 9; ++up, dir += "..\\")
-			{
-				std::ifstream f(dir + rel, std::ios::binary);
-				if (f)
-				{
-					std::ostringstream ss;
-					ss << f.rdbuf();
-					return ss.str();
-				}
-			}
-			return std::string();
+			const std::string text = SettingsTestSupport::ReadFile(SettingsTestSupport::RepoRoot() + rel);
+			Assert::IsFalse(text.empty(), std::wstring(rel.begin(), rel.end()).append(L" is readable from the repository root").c_str());
+			return text;
 		}
 		bool Has(const std::string& text, const char* needle) { return text.find(needle) != std::string::npos; }
 	}
@@ -110,10 +104,9 @@ namespace Tests
 
 		TEST_METHOD(SettingsPlumbingIsInPlace)
 		{
-			const std::string cfg = "src\VP-V\modules\control\config\\";
+			// CF1-FIN MUST 3: every separator escaped (the single-backslash literals never named a file).
+			const std::string cfg = "src\\VP-V\\modules\\control\\config\\";
 			const std::string settings = ReadUp(cfg + "VpvRendererSettings.cpp");
-			if (settings.empty())
-				return;   // not reachable from this working directory: the tool-side checkers cover it
 			// Off by default; the slot gate, the Original pathway and the one-owner exclusion live in PostLoad.
 			Assert::IsTrue(Has(settings, "settings.ambientAdaptReplaced = appearanceRuns && settings.ambientAdapt;"));
 			Assert::IsTrue(Has(settings, "settings.ambientAdapt = false;"));
@@ -123,13 +116,13 @@ namespace Tests
 			Assert::IsTrue(Has(fields, "bool appearance = false;"));
 			Assert::IsTrue(Has(fields, "bool appearanceHonourL11 = true;"));
 			Assert::IsTrue(Has(fields, "std::string appearanceRoom = \"cinema\";"));
-			const std::string org = ReadUp(cfg + "config_pages\VpvOrganisation.h");
+			const std::string org = ReadUp(cfg + "config_pages\\VpvOrganisation.h");
 			Assert::IsTrue(Has(org, "{ K::Toggle, \"appearance\" }"));
 			Assert::IsTrue(Has(org, "{ K::Text, \"appearance_room\" }"));
 			Assert::IsTrue(Has(org, "@appearance_status"));
-			const std::string intent = ReadUp("src\VP-V\modules\drive\led_compensation\LedIntentMethods.inl");
+			const std::string intent = ReadUp("src\\VP-V\\modules\\drive\\led_compensation\\LedIntentMethods.inl");
 			Assert::IsTrue(Has(intent, "roomLightFeed = s.appearance && !s.pipelineOriginalPathway"));
-			const std::string core = ReadUp("src\VP-V\segments\CoreSegments.inl");
+			const std::string core = ReadUp("src\\VP-V\\segments\\CoreSegments.inl");
 			Assert::IsTrue(Has(core, "FallbackCatalog::AmbientAdaptReplaced(settings.ambientAdaptReplaced)"));
 		}
 	};

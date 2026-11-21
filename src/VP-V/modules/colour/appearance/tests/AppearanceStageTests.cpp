@@ -3,6 +3,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <VP-V/modules/colour/appearance/AppearanceStage.h>
+#include "../../../../tests/SettingsTestSupport.h"
 
 #include <cmath>
 #include <fstream>
@@ -108,21 +109,9 @@ namespace Tests
 			std::set<std::string> names;
 			for (const auto& p : d.parameters)
 				Assert::IsTrue(names.insert(p.first).second, L"duplicate parameter name");
-			// The shader sits at <repo>\shaders; the tests run from the build tree, so look upward for it.
-			std::string text;
-			std::string dir = "";
-			for (int up = 0; up < 8 && text.empty(); ++up, dir += "..\\")
-			{
-				std::ifstream f(dir + "shaders\\vp_cam16_appearance.glsl", std::ios::binary);
-				if (f)
-				{
-					std::ostringstream ss;
-					ss << f.rdbuf();
-					text = ss.str();
-				}
-			}
-			if (text.empty())
-				return;   // not reachable from this working directory: the tool-side checker covers it
+			// CF1-FIN MUST 4: the shader at <repo>\shaders, found from this file's own path; unreadable FAILS.
+			const std::string text = SettingsTestSupport::ReadFile(SettingsTestSupport::RepoRoot() + "shaders\\vp_cam16_appearance.glsl");
+			Assert::IsFalse(text.empty(), L"shaders\\vp_cam16_appearance.glsl is readable from the repository root");
 			for (const std::string& n : names)
 				Assert::IsTrue(text.find(n) != std::string::npos, std::wstring(n.begin(), n.end()).c_str());
 		}
