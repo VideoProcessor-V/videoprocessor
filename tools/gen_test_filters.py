@@ -11,6 +11,9 @@ Usage: python tools/gen_test_filters.py [--cpu] [--gpu [--categories A,B]] [--gp
   --categories  with --gpu: restrict to these excluded categories (e.g. GpuHardware,GpuOnScreen keeps the
              meter and projector tests out of a GPU run; UpstreamStale selects only the quarantined
              upstream-stale Bill tests, which the CPU run leaves out)
+  --job-env CATEGORY  print the environment of that category's dedicated job as a queue-line env= value
+             (Footage, Corpus, Bench: a missing clip, corpus or opt-in FAILS in that job). Pair it with
+             --gpu --categories CATEGORY for the filter; the categories are in no other lane (TQ-X2)
   --gpuwarp  print the selection of the GpuWarp tests (WARP-capable GPU tests), for a run with
              VP_TEST_GPU=hardware: the owner rule is that these run on WARP (CPU run) and on the real GPU
   --compare  compare the CPU filter's clauses with a canonical filter (set comparison)
@@ -84,9 +87,15 @@ def main():
     ap.add_argument('--gpuwarp', action='store_true')
     ap.add_argument('--categories')
     ap.add_argument('--compare')
+    ap.add_argument('--job-env')
     a = ap.parse_args()
     if a.categories and not a.gpu:
         ap.error('--categories needs --gpu')
+    if a.job_env:
+        if a.job_env not in lib.JOB_ENV:
+            ap.error(f'--job-env takes {sorted(lib.JOB_ENV)}, not {a.job_env}')
+        print(';'.join(f'{k}={v}' for k, v in lib.JOB_ENV[a.job_env].items()))
+        return 0
     manifest = lib.load_manifest()
     if a.compare:
         have = set(cpu_filter(manifest).split('&'))

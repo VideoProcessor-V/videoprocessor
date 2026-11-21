@@ -10,6 +10,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import sys
 import tempfile
 import unittest
 
@@ -135,6 +136,108 @@ class RepositoryFilters(unittest.TestCase):
                     G.cpu_filter(L.load_manifest())
             finally:
                 L.test_sources = real
+
+
+DEDICATED_SOURCE = r"""
+TEST_CLASS(FootageTests)
+{
+public:
+	BEGIN_TEST_METHOD_ATTRIBUTE(NeedsRealClip)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(NeedsRealClip) { }
+	BEGIN_TEST_METHOD_ATTRIBUTE(NeedsCorpus)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"Corpus")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(NeedsCorpus) { }
+	BEGIN_TEST_METHOD_ATTRIBUTE(TimesTheWalk)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"Bench")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(TimesTheWalk) { }
+	TEST_METHOD(PlainCpuTest) { }
+};
+"""
+
+
+class DedicatedJobCategories(unittest.TestCase):
+    """TQ-X2: Footage, Corpus and Bench are excluded categories that run only in a dedicated job."""
+
+    KINDS = ("Footage", "Corpus", "Bench")
+
+    def test_each_kind_is_excluded_from_the_cpu_run_and_known(self):
+        manifest = L.load_manifest()
+        cpu = G.cpu_filter(manifest).split("&")
+        for kind in self.KINDS:
+            self.assertIn(kind, L.EXCLUDED_FROM_CPU)
+            self.assertIn(kind, L.KNOWN_CATEGORIES)
+            self.assertIn("Category!=" + kind, cpu)
+
+    def test_no_kind_is_in_the_default_gpu_set_or_the_warp_set(self):
+        manifest = L.load_manifest()
+        gpu = G.gpu_filter(manifest).split("|")
+        warp = G.gpuwarp_filter(manifest).split("|")
+        for kind in self.KINDS:
+            self.assertNotIn(kind, L.GPU_DEFAULT_EXCLUDED)
+            self.assertNotIn("Category=" + kind, gpu)
+            self.assertNotIn("Category=" + kind, warp)
+
+    def test_each_kind_has_its_own_selection(self):
+        manifest = L.load_manifest()
+        for kind in self.KINDS:
+            self.assertEqual(G.gpu_filter(manifest, [kind]).split("|")[-1], "Category=" + kind)
+
+    def test_attribute_only_methods_are_listed_by_name_for_their_kind(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "FootageTests.cpp")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(DEDICATED_SOURCE)
+            real = L.test_sources
+            L.test_sources = lambda _root: iter([p])
+            try:
+                manifest = {"entries": []}
+                cpu = G.cpu_filter(manifest).split("&")
+                self.assertEqual(G.attribute_names(manifest, ["Footage"]), ["NeedsRealClip"])
+                self.assertEqual(G.attribute_names(manifest, ["Corpus"]), ["NeedsCorpus"])
+                self.assertEqual(G.attribute_names(manifest, ["Bench"]), ["TimesTheWalk"])
+                for name in ("NeedsRealClip", "NeedsCorpus", "TimesTheWalk"):
+                    self.assertIn("Name!~" + name, cpu)
+                self.assertNotIn("Name!~PlainCpuTest", cpu)
+                self.assertEqual(G.gpu_filter(manifest, ["Footage"]).split("|"), ["Name~NeedsRealClip", "Category=Footage"])
+            finally:
+                L.test_sources = real
+
+    def test_job_env_requires_the_kind_and_opts_the_bench_in(self):
+        self.assertEqual(L.JOB_ENV["Footage"], {"VP_TEST_REQUIRE_FOOTAGE": "1"})
+        self.assertEqual(L.JOB_ENV["Corpus"], {"VP_TEST_REQUIRE_CORPUS": "1"})
+        self.assertEqual(L.JOB_ENV["Bench"], {"VP_TEST_BENCH": "1", "VP_TEST_REQUIRE_BENCH": "1"})
+        self.assertEqual(sorted(L.JOB_ENV), sorted(self.KINDS))
+
+    def _run_main(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        real = sys.argv
+        sys.argv = ["gen_test_filters.py", *argv]
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    rc = G.main()
+                except SystemExit as e:
+                    rc = e.code
+        finally:
+            sys.argv = real
+        return rc, out.getvalue().strip(), err.getvalue()
+
+    def test_cli_prints_the_job_env_and_rejects_other_categories(self):
+        self.assertEqual(self._run_main("--job-env", "Footage"), (0, "VP_TEST_REQUIRE_FOOTAGE=1", ""))
+        self.assertEqual(self._run_main("--job-env", "Bench")[:2], (0, "VP_TEST_BENCH=1;VP_TEST_REQUIRE_BENCH=1"))
+        rc, _out, err = self._run_main("--job-env", "Slow")
+        self.assertEqual(rc, 2)
+        self.assertIn("--job-env takes", err)
+
+    def test_cli_selects_a_kind_with_gpu_categories(self):
+        rc, out, _err = self._run_main("--gpu", "--categories", "Corpus")
+        self.assertEqual(rc, 0)
+        self.assertIn("Category=Corpus", out.split("|"))
+        self.assertNotIn("Category=GpuHardware", out.split("|"))
 
 
 if __name__ == "__main__":
