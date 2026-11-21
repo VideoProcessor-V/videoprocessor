@@ -2374,6 +2374,50 @@ namespace SkeletonModuleTestsNs
 		}
 
 
+		// GEM-W1A S1 (skeleton MUST-3): a lane-bound memo is planned only at the lane's Configure. Its GPU need follows its window and its
+		// lazily registered GPU fills, neither in the queue shape: a need that moves after the last Configure re-plans the memo's grant
+		// (rate-limited like the declared VRAM users), so the lane's memo is granted from the same ledger instead of declining for ever.
+		TEST_METHOD(ALaneBoundMemoGrantFollowsARaisedNeed)
+		{
+			VpSkeleton::VramUsers& registry = VpSkeleton::VramUsers::Instance();
+			registry.ResetForTesting();
+			const uint64_t mb = 1024ull * 1024ull;
+			{
+				Rig rig(Lane("on"));
+				VpSkeleton::CardProfile card;
+				card.key.luid = 78;
+				card.vramBudgetBytes = 1024 * mb;
+				card.vramUsageBytes = 0;
+				rig.sk.SetCardForTesting(card);
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				int64_t s = 1;
+				for (; s <= 150; ++s)   // past every first-period and queue re-plan: the graph is steady
+					rig.Frame(s);
+				const Vpv::Skeleton::FrameMemo fm = rig.sk.MemoFor(rig.Host(), uint64_t(s));
+				Assert::IsTrue(fm.Valid() && fm.memo->LaneBound(), L"the lane's memo");
+				Assert::AreEqual(uint64_t(0), fm.memo->GpuNeedBytes(), L"no GPU fill yet: no need");
+				Assert::IsFalse(fm.memo->GpuGranted(), L"nothing to grant");
+				VpSkeleton::OwnerFill g;
+				g.reserveBytes = 1u << 20;
+				g.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					static int tex = 0;
+					out.gpu.resource = &tex;
+					out.gpu.bytes = 1u << 20;
+					return true;
+				};
+				Assert::IsTrue(rig.sk.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, "repair/grain_split", g)
+					== VpSkeleton::SkeletonMemo::Registration::Registered, L"a GPU owner fill registers lazily, after the lane's Configure");
+				const uint64_t need = fm.memo->GpuNeedBytes();
+				Assert::IsTrue(need >= (1u << 20), L"the memo's need rose");
+				for (const int64_t end = s + 2; s <= end; ++s)
+					rig.Frame(s);
+				Assert::IsTrue(fm.memo->GpuGranted(), L"re-planned: the lane-bound memo is granted");
+				Assert::IsTrue(fm.memo->GpuBudget() >= fm.memo->GpuNeedBytes(), L"the grant covers the raised need");
+			}
+			registry.ResetForTesting();
+		}
+
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
 		{
 			Rig rig(Lane("on"));
