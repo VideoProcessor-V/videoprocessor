@@ -4092,7 +4092,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			const bool ofCandidates = opticalFlowUsed && candidateMode && !seeded;
 			// The engine's trust weights stay with the seed's vectors through the refinement.
 			refineCarriesWeight = seeded && ofWeighted;
-			const bool cgE1 = cgBlocks && cg->e1Skip && twoSweeps;
+			// Camfix R4 (doc 103 s4): like the narrow pass, E1 skip only on the matcher's own sweep, never on an engine-seeded field.
+			const bool cgE1 = cgBlocks && cg->e1Skip && twoSweeps && !seeded;
 			if (cgE1 &&
 				(!CameraGuidedPass(*cg, 0, true, halfA, halfB, seeded ? ofSearch[0] : sweep[0]) ||
 				 !CameraGuidedPass(*cg, 1, true, halfB, halfA, seeded ? ofSearch[1] : sweep[1])))

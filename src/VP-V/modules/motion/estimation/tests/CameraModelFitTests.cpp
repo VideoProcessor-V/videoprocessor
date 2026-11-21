@@ -1611,5 +1611,71 @@ namespace VideoProcessorTest
 			Logger::WriteMessage(("EvaluateStaticCamera on the 120 x 68 grid: " + std::to_string(us2) + " us per call (hits " + std::to_string(hits2) + ")").c_str());
 			Require(hits2 == 200 && us2 < 20000.0, "1080p cost bound (loose; indicative only): " + std::to_string(us2) + " us");
 		}
+
+		// ---- Camfix R2 (doc 103 s4 R2): an NVOF field's precision floor is its quantum; competitors need max(3 sigma, 2 quanta). ----
+
+		// Round every forward vector to the quantum q (the NVOF output grid in source px).
+		static void QuantizeField(Field& f, double q)
+		{
+			for (size_t i = 0; i < f.Count(); ++i)
+			{
+				f.fx[i] = static_cast<float>(std::floor(f.fx[i] / q + 0.5) * q);
+				f.fy[i] = static_cast<float>(std::floor(f.fy[i] / q + 0.5) * q);
+			}
+		}
+
+		// A pan between two quanta splits the vectors into two clusters one quantum apart; with the quantum declared they are
+		// one motion, not a second layer.
+		TEST_METHOD(CamfixR2QuantizedPanIsNotAmbiguous)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12.4, -4.6));
+			f.AddNoise(0.3, 71);
+			QuantizeField(f, 1.0);
+			Fitter plain;
+			const CameraMotion r0 = plain.Fit(f.Input(kPairSeconds, 5));
+			Logger::WriteMessage(Fmt("quantized pan, no quantum declared (documentation)", r0).c_str());
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 1.0;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			Logger::WriteMessage(Fmt("quantized pan, quantum 1.0", r).c_str());
+			Require(r.valid && r.reason == Reason::Ok && r.confidence >= 0.5, Fmt("quantized pan, quantum 1.0", r));
+			const double err = ModelError(r, PanModel(12.4, -4.6), f.picture);
+			Require(err * f.Diagonal() < 0.25, Fmt("quantized pan error", r) + " corner error px=" + std::to_string(err * f.Diagonal()));
+		}
+
+		// A real second motion far beyond the separation stays flagged with the quantum declared.
+		TEST_METHOD(CamfixR2TwoMotionsStayAmbiguousWithQuantum)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12, 0));
+			const int x0 = static_cast<int>(0.4 * f.gridW);
+			f.AddObject(x0, 0, f.gridW - x0, f.gridH, -30, 8);
+			f.AddNoise(0.3, 72);
+			QuantizeField(f, 1.0);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 1.0;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			Require(r.confidence < 0.5 && r.reason == Reason::Ambiguous, Fmt("60% object over 40% pan, quantum 1.0", r));
+		}
+
+		// Noise well above the quantum floor: the threshold follows 1.4826 x MAD of the residuals, not the floor.
+		TEST_METHOD(CamfixR2RobustScaleRaisesThreshold)
+		{
+			Field f(Grid4K());
+			f.FromModel(Pan4K());
+			f.AddNoise(2.0, 73);   // uniform, sigma 2 px (MAD-scale about 2.6 px)
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 0.5;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			Require(r.valid && r.blocks != nullptr, Fmt("noisy pan, quantum 0.5", r));
+			Logger::WriteMessage((Fmt("noisy pan, quantum 0.5", r) + " absThresholdPx=" + std::to_string(r.blocks->absThresholdPx)).c_str());
+			Require(r.blocks->absThresholdPx >= 4.5, "threshold follows the measured noise: " + std::to_string(r.blocks->absThresholdPx));
+			const int cam = CountLabel(r, Label::Camera);
+			Require(cam >= static_cast<int>(0.9 * f.Count()), Fmt("noisy pan camera share", r) + " camera blocks=" + std::to_string(cam));
+		}
 	};
 }

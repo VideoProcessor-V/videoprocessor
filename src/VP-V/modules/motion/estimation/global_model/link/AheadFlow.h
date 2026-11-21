@@ -173,6 +173,7 @@ namespace CameraLink
 		out.blockSize = cs;
 		out.stamp = a.stamp;
 		out.origin = FieldOrigin::Ahead;
+		out.quantumPx = 0.25 * a.enginePxToSource;   // camfix R2: the NVOF quantum (doc 103: 1.0 source px at 4K quarter, 0.5 at 1080 half)
 		out.haveP2 = true;
 		out.p2Epoch = a.epoch;
 		out.fwdX.resize(cells);

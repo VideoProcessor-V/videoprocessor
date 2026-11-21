@@ -39,7 +39,14 @@ namespace CameraModel
 		inline bool FiniteF(float v) { return IsFiniteBits(v); }
 
 		// Expected vector precision of a pair (source px): the caller's, else a quarter px per 16 px of block size.
-		inline double PairPrecision(const PairInput& in) { return in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0; }
+		// Camfix R2: an NVOF field (quantumPx > 0) never assumes a precision finer than its own quantum (the robust residual scale may
+		// raise it further after the winner, Fitter::Run); without a quantum this is unchanged.
+		inline double PairPrecision(const PairInput& in)
+		{
+			const double base = in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0;
+			return in.quantumPx > 0 ? std::max(base, in.quantumPx) : base;
+		}
+
 
 		// The usable, stratified sample set of one pair (picture-centred positions).
 		struct Field
@@ -549,6 +556,39 @@ namespace CameraModel
 		}
 
 		// One layer's model, inlier set and the signals that depend only on them.
+		// Camfix R2: 1.4826 x the median absolute deviation of the residual components (x and y pooled, source px) of the samples around
+		// the winner: within 3 x its current threshold (9 x Threshold2, as the floor-cost gate), so a floor that is too tight cannot truncate
+		// the scale it measures, while a second motion far from the winner stays out. 0 when fewer than 8 samples. Deterministic.
+		inline double RobustResidualScale(const Field& f, const Params& model)
+		{
+			std::vector<double> r;
+			r.reserve(f.s.size() * 2);
+			const bool aff = AffineRow(model);
+			for (size_t i = 0; i < f.s.size(); ++i)
+			{
+				double r2, pm2;
+				ResidualSq(model, aff, f.s[i], &r2, &pm2);
+				if (!(r2 <= 9.0 * Threshold2(f, pm2)))
+					continue;
+				double dx, dy;
+				Disp(model, aff, f.s[i].x, f.s[i].y, &dx, &dy);
+				r.push_back(f.s[i].dx - dx);
+				r.push_back(f.s[i].dy - dy);
+			}
+			if (r.size() < 16)
+				return 0.0;
+			auto median = [](std::vector<double>& v) {
+				const size_t mid = v.size() / 2;
+				std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(mid), v.end());
+				return v[mid];
+			};
+			std::vector<double> tmp = r;
+			const double med = median(tmp);
+			for (double& v : r)
+				v = std::fabs(v - med);
+			return 1.4826 * median(r);
+		}
+
 		struct Cand
 		{
 			Params model;
@@ -1006,6 +1046,29 @@ namespace CameraModel
 			// ---- Inliers, signals ----
 			Cand cdA;
 			BuildCand(f, c, in, cellsTotal, chA.model, cdA);
+			// Camfix R2: an NVOF field's sigma is max(the quantum floor, 1.4826 x MAD of the winner's inlier residuals); when the real
+			// noise is above the floor, the threshold follows it and the winner's inliers are counted again under it.
+			if (in.quantumPx > 0)
+			{
+				bool raised = false;
+				for (int pass = 0; pass < 3; ++pass)   // the gate widens with the scale; 3 passes settle it
+				{
+					const double robust = RobustResidualScale(f, chA.model);
+					if (!(robust > f.prec * 1.05))
+						break;
+					f.prec = robust;
+					f.absThr = c.absThresholdSigmas * f.prec;
+					raised = true;
+				}
+				if (raised)
+					BuildCand(f, c, in, cellsTotal, chA.model, cdA);
+			}
+			// Camfix R2: the separation a competitor needs from the winner (source px at the corners): max(3 sigma, 2 quanta); 0 = none
+			// (not an NVOF field: unchanged).
+			const double competitorSeparationPx = in.quantumPx > 0 ? std::max(3.0 * f.prec, 2.0 * in.quantumPx) : 0.0;
+			auto separated = [&](const Params& p) {
+				return !(competitorSeparationPx > 0) || MaxCornerDifference(p, cdA.model, f.pic) * f.diag > competitorSeparationPx;
+			};
 			const std::vector<uint8_t>& inl = cdA.inl;
 			const int inlierCount = cdA.inlierCount;
 			const double inlierMass = cdA.inlierMass;
@@ -1109,7 +1172,7 @@ namespace CameraModel
 				{
 					int sup, ov;
 					evalSub(cands[k], &sup, &ov);
-					if (!(sup > 0 && ov * 2 < sup))
+					if (!(sup > 0 && ov * 2 < sup) || !separated(cands[k]))
 						continue;
 					for (int j = 0; j < keep; ++j)
 						if (topIdx[j] < 0 || sup > topSup[j])
@@ -1145,7 +1208,7 @@ namespace CameraModel
 					{
 						int sup, ov;
 						evalCand(q, &sup, &ov);
-						if (sup > 0 && ov * 2 < sup && sup > bestSup)
+						if (sup > 0 && ov * 2 < sup && sup > bestSup && separated(q))
 						{
 							bestSup = sup;
 							bestP = q;                          // the refined competitor (second layer, Config::twoLayer)
