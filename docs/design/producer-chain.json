@@ -81,11 +81,11 @@
       [
        "motion/estimation/MotionAheadProducer.cpp",
        514,
-       "if (!LumaAtTarget(job.sequence, job.luma, lumaBuffer, halfW, halfH))"
+       "if (!LumaAtTarget(job.sequence, job.luma, lumaBuffer, halfW, halfH, \"motion_ahead\"))"
       ],
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       591,
+       590,
        "bool Producer::LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, i"
       ]
      ],
