@@ -8,6 +8,7 @@
 #include <VP-V/tests/beta_gpu/D0Time.h>
 #include "CppUnitTest.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -1866,9 +1867,31 @@ namespace VideoProcessorTest
 			const CameraMotion r = fitter.Fit(in);
 			Require(r.valid && r.blocks != nullptr, Fmt("peaked noisy pan, quantum 0.5", r));
 			const double err = ModelError(r, PanModel(12.4, -4.6), f.picture) * f.Diagonal();
+			// Audit 55ec5b497 SHOULD 3: the raise is bounded from the field itself. The generated noise's robust sigma (1.4826 x MAD of
+			// the per-axis residuals from the true pan, quantisation included) is measured here; the raised gate must reach
+			// absThresholdSigmas x 0.8 x that sigma (0.8: the fitter's MAD runs on its gated inliers, a little narrower than the
+			// whole field). The floor gate (3 x 0.25 px) is far below it, so a token rise no longer passes.
+			Field truth(Grid4K());
+			truth.FromModel(PanModel(12.4, -4.6));
+			std::vector<double> res;
+			res.reserve(f.Count() * 2);
+			for (size_t i = 0; i < f.Count(); ++i)
+			{
+				res.push_back(static_cast<double>(f.fx[i]) - truth.fx[i]);
+				res.push_back(static_cast<double>(f.fy[i]) - truth.fy[i]);
+			}
+			std::sort(res.begin(), res.end());
+			const double med = res[res.size() / 2];
+			for (double& v : res) v = std::fabs(v - med);
+			std::sort(res.begin(), res.end());
+			const double noiseSigma = 1.4826 * res[res.size() / 2];
+			const double wanted = Config().absThresholdSigmas * 0.8 * noiseSigma;
 			Logger::WriteMessage((Fmt("peaked noisy pan, quantum 0.5", r) + " corner error px=" + std::to_string(err) + " absThresholdPx=" +
-				std::to_string(r.blocks->absThresholdPx)).c_str());
-			Require(r.blocks->absThresholdPx > 3.0 * 0.25 * 1.05, "the scale did not follow the noise: " + std::to_string(r.blocks->absThresholdPx));
+				std::to_string(r.blocks->absThresholdPx) + " field noise sigma px=" + std::to_string(noiseSigma) + " bound px=" +
+				std::to_string(wanted)).c_str());
+			Require(noiseSigma > 2.0 * 0.25, "the generated field is not noisier than the floor: sigma " + std::to_string(noiseSigma));
+			Require(r.blocks->absThresholdPx >= wanted, "the scale did not follow the noise: " + std::to_string(r.blocks->absThresholdPx) +
+				" < " + std::to_string(wanted));
 			Require(err < 0.25, "corner error px=" + std::to_string(err));
 		}
 	};
