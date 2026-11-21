@@ -415,6 +415,30 @@ namespace Tests
 			}
 		}
 
+		// GEM-010: the no-cut fallback timer ("armed with no cut: switch anyway after noCutFallbackMs") is measured from the
+		// arming tick; a tick or picture stamped BEFORE the arming is not "20 s later" (the unguarded subtraction wrapped and
+		// flipped to SDR at once). The fallback still fires at the real interval.
+		TEST_METHOD(NoCutFallbackWaitsAfterAnEarlierTick)
+		{
+			uint64_t now = 0;
+			HdrInferenceTracker tracker = InferredTracker(Hdr10FlagDroppedSignal(), now);
+			Shot(tracker, now, 1000, true);
+			Shot(tracker, now, 1000, true);
+			Assert::IsTrue(tracker.VetoArmed());
+			const uint64_t armed = now - 500;   // armed 0.5 s into shot 2
+			Assert::IsTrue(armed > 1000);
+			Assert::IsTrue(tracker.OnTick(100).event == HdrInferenceEvent::None, L"an earlier tick does not fire the fallback");
+			Assert::IsTrue(tracker.State() == HdrInferenceState::InferredPq);
+			Assert::IsTrue(tracker.VetoArmed());
+			Assert::IsTrue(tracker.OnPicture(Picture(true), 100).event != HdrInferenceEvent::VetoWithoutCut, L"nor does an earlier picture");
+			Assert::IsTrue(tracker.State() == HdrInferenceState::InferredPq);
+			// The interval itself is unchanged.
+			Assert::IsTrue(tracker.OnTick(armed + 19000).event == HdrInferenceEvent::None);
+			const auto update = tracker.OnTick(armed + 20100);
+			Assert::IsTrue(update.event == HdrInferenceEvent::VetoWithoutCut);
+			Assert::IsTrue(tracker.State() == HdrInferenceState::VetoedSdr);
+		}
+
 		TEST_METHOD(StaticSdrShotArmsAndSwitchesWithoutACut)
 		{
 			// A static SDR menu sent as BT.2020: one uncut shot of evidence.
