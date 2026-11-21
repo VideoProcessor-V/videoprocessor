@@ -487,11 +487,15 @@ namespace LedDrive
 		// The registration generation of demandHost at declaration: the skeleton erases the demand when that renderer goes away, so a
 		// changed host or generation means the declaration is gone and is made again (never per frame: a declaration re-graphs the lane).
 		std::atomic<uint64_t> demandGen{ 0 };
-		// GF-P3 (lead ruling): the aheadDepth of the declaration on demandHost, and the deepest walk (SetLookaheadDepth) since the stream
-		// began (ResetLookaheadLocked). Both guarded by `mutex`.
+		// GF-P3 (lead ruling): the aheadDepth of the declaration on demandHost, and the held walk depth (SetLookaheadDepth: raised at
+		// once, lowered after the hold window; reset by ResetLookaheadLocked). S-P3-1: walkLowSinceMs = since when the walks are shallower
+		// (NowMs(), -1 = not lower), walkLowMax = the deepest walk in that window (the next held depth). All guarded by `mutex`.
 		uint8_t demandAhead = 0;
 		size_t walkAheadSeen = 0;
+		double walkLowSinceMs = -1.0;
+		size_t walkLowMax = 0;
 		uint8_t AheadNeedLocked() const;
+		double LookaheadHoldMsLocked() const;
 		void DeclareSceneDemand();
 		void WithdrawSceneDemand();
 		// Its own small lock (not `mutex`): the walk thread reads it per frame while the module's thread may hold `mutex` across a measure.

@@ -269,8 +269,8 @@ namespace LedDrive
 
 	uint8_t LedDriveModule::AheadNeedLocked() const
 	{
-		// The frames past the frame on screen whose scene the walk asks for: the deepest walk seen since the stream began (ResetLookaheadLocked; a ratchet, so
-		// a queue whose fill moves by a frame does not re-declare every walk), capped by led_lookahead_ms when set; 0 when this mode
+		// The frames past the frame on screen whose scene the walk asks for: the held walk depth (SetLookaheadDepth: raised at once,
+		// lowered after the hold window), capped by led_lookahead_ms when set; 0 when this mode
 		// does not look ahead (the walk measures nothing then, WantsPredictions). Not capped at the skeleton's ceiling: the binder does.
 		if (!LookaheadWantedLocked())
 			return 0;
@@ -278,6 +278,16 @@ namespace LedDrive
 		if (led.ledLookaheadMs > 0)
 			depth = std::min(depth, LedLookaheadFramesLocked());
 		return static_cast<uint8_t>(std::min<size_t>(depth, UINT8_MAX));
+	}
+
+	double LedDriveModule::LookaheadHoldMsLocked() const
+	{
+		// How long the walks must stay shallower before the held need drops: led_lookahead_ms when set (the span the look-ahead is
+		// asked to cover), else the span of the held depth at the source rate (the time the deeper walk's frames covered).
+		if (led.ledLookaheadMs > 0)
+			return static_cast<double>(led.ledLookaheadMs);
+		const double periodMs = sourceFps > 0.0 ? 1000.0 / sourceFps : framePeriodMs;
+		return static_cast<double>(walkAheadSeen) * std::max(1.0, periodMs);
 	}
 
 	void LedDriveModule::WithdrawSceneDemand()
@@ -870,11 +880,38 @@ namespace LedDrive
 		std::lock_guard<std::mutex> guard(mutex);
 		lookaheadDepth = futureFrames;
 		lastWalkWallMs = NowMs();   // review 2026-10-17
-		// GF-P3 (lead ruling): the walk's real frame count is the look-ahead's ahead need; a deeper walk re-declares it (running only).
-		if (LookaheadWantedLocked() && futureFrames > walkAheadSeen)
+		// GF-P3 (lead ruling; owner OD 2026-11-14: derived from what the active consumer asks): the walk's real frame count is the
+		// look-ahead's ahead need. A deeper walk raises the held need at once. A shallower one lowers it only after the walks have
+		// stayed below it for a hold window (LookaheadHoldMsLocked), to the deepest walk seen in that window, so a queue whose fill
+		// moves by a frame does not flap the declaration. DeclareSceneDemand re-declares only when the held need changed (running only).
+		if (LookaheadWantedLocked())
 		{
-			walkAheadSeen = futureFrames;
-			if (started && !stopping)
+			const double now = NowMs();
+			bool moved = false;
+			if (futureFrames > walkAheadSeen)
+			{
+				walkAheadSeen = futureFrames;
+				walkLowSinceMs = -1.0;
+				moved = true;
+			}
+			else if (futureFrames == walkAheadSeen)
+				walkLowSinceMs = -1.0;
+			else if (walkLowSinceMs < 0.0)
+			{
+				walkLowSinceMs = now;
+				walkLowMax = futureFrames;
+			}
+			else
+			{
+				walkLowMax = std::max(walkLowMax, futureFrames);
+				if (now - walkLowSinceMs >= LookaheadHoldMsLocked())
+				{
+					walkAheadSeen = walkLowMax;
+					walkLowSinceMs = -1.0;
+					moved = true;
+				}
+			}
+			if (moved && started && !stopping)
 				DeclareSceneDemand();
 		}
 		// A new walk begins: the previous one is judged as a whole (release only after a complete walk with every scene known).
@@ -908,6 +945,8 @@ namespace LedDrive
 		lastFrameSequence = 0;
 		restartSequence = 0;
 		walkAheadSeen = 0;   // GF-P3: a new stream re-measures the walk depth (the next walk re-declares only if the need moved)
+		walkLowSinceMs = -1.0;
+		walkLowMax = 0;
 		lookaheadEpoch.fetch_add(1, std::memory_order_acq_rel);
 	}
 
