@@ -2638,6 +2638,13 @@ namespace Vpv
 				// ownUsage drops only when the module Withdraws (VramUsers::Take: heldBytes follows Declare / Withdraw, never the plan).
 				const VpSkeleton::VramUsers::Snapshot declared = VpSkeleton::VramUsers::Instance().Take();
 				tier.otherUsers = declared.users;
+				{
+					// GEM SK-VRAM: the memo's GPU spots are a user of the SAME ledger (as PlanNoLaneGpu / MemoGpuGrant.h): added here from its
+					// need levels, so the plan's scratch-arena grant (read below) exists. No second ledger.
+					const std::vector<uint64_t> memoLevels = b->memo->GpuNeedLevels();
+					if (!memoLevels.empty() && memoLevels.front() != 0)
+						tier.otherUsers.push_back(VpSkeleton::MakeMemoVramUser(memoLevels, "skeleton memo"));
+				}
 				tier.ownUsageBytes = declared.heldBytes;
 				tier.transientBytes = st.vramShortfall;
 				st.vramShortfallUsed = st.vramShortfall;

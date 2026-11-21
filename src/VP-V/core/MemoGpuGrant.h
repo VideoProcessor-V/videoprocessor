@@ -59,6 +59,30 @@ inline MemoGpuGrant PlanMemoGpuGrant(const CardProfile& card, bool cardKnown, ui
     return g;
 }
 
+// The memo as a VRAM-governor user over LEVELS (SkeletonMemo::GpuNeedLevels(): non-increasing, one per ahead-ladder step; 0 = off).
+// ONE builder for the no-lane plan below and for the lane's Configure (the memo user added to tier.otherUsers, GEM SK-VRAM): the
+// same ledger, never a second one. `levels` must be non-empty with a non-zero top level.
+inline VramUser MakeMemoVramUser(const std::vector<uint64_t>& levels, const char* name)
+{
+    VramUser memo;
+    memo.id = kUserScratchArena;
+    memo.name = name;
+    memo.tier = Tier::T0;
+    memo.shedOrder = 200;
+    memo.lossless = false;
+    for (uint64_t l : levels) {
+        if (!memo.levels.empty() && l >= memo.levels.back())
+            continue;
+        memo.levels.push_back(l);
+        memo.levelText.push_back(memo.levels.size() == 1 ? nullptr : "memo ahead plan stepped down");
+    }
+    if (memo.levels.empty() || memo.levels.back() != 0) {
+        memo.levels.push_back(0);
+        memo.levelText.push_back("memo GPU spots off");
+    }
+    return memo;
+}
+
 // The same plan over LEVELS (amendment A5 / audit M6): `levels` = SkeletonMemo::GpuNeedLevels() (one per ahead-ladder step,
 // non-increasing). The governor sheds the memo user level by level, so a card that cannot hold the full window grants the largest
 // level that fits (never 0 while a level fits). `need` in the result is the top level, `bytes` the granted level.
@@ -69,22 +93,7 @@ inline MemoGpuGrant PlanMemoGpuGrantLevels(const CardProfile& card, bool cardKno
     g.cardKnown = cardKnown;
     if (!cardKnown || g.need == 0)
         return g;
-    VramUser memo;
-    memo.id = kUserScratchArena;
-    memo.name = "skeleton memo (no lane)";
-    memo.tier = Tier::T0;
-    memo.shedOrder = 200;
-    memo.lossless = false;
-    for (uint64_t l : levels) {
-        if (!memo.levels.empty() && l >= memo.levels.back())
-            continue;
-        memo.levels.push_back(l);
-        memo.levelText.push_back(memo.levels.size() == 1 ? nullptr : "memo ahead plan stepped down");
-    }
-    if (memo.levels.back() != 0) {
-        memo.levels.push_back(0);
-        memo.levelText.push_back("memo GPU spots off");
-    }
+    VramUser memo = MakeMemoVramUser(levels, "skeleton memo (no lane)");
     GovernorInput in;
     in.card = card;
     in.ownUsageBytes = othersHeld;
