@@ -243,6 +243,34 @@ namespace VideoProcessorTest
 			Assert::IsTrue(CameraLink::CopyAhead(v, 7, 2.0f, a) == CameraLink::AheadRefusal::Layout);
 		}
 
+		// R3 wiring (0dc594f86, audit4 D): the copy takes the pair's engine-size luma only when both planes are exactly engineW x engineH,
+		// and shares them (no copy of the planes); otherwise the copy carries no luma (the fit then counts it as no luma).
+		TEST_METHOD(TheCopyTakesTheLumaPairOnlyAtTheEngineSize)
+		{
+			Pair p(960, 540, 2.0);
+			p.Uniform(3.0, -1.0);
+			VpMotion::FlowView v = p.View(7);
+			Assert::IsTrue(v.engineW > 0 && v.engineH > 0, L"premise: the view names its engine size");
+			const size_t cells = static_cast<size_t>(v.engineW) * static_cast<size_t>(v.engineH);
+			auto from = std::make_shared<const std::vector<uint8_t>>(cells, uint8_t(10));
+			auto to = std::make_shared<const std::vector<uint8_t>>(cells, uint8_t(20));
+			v.lumaFrom = from;
+			v.lumaTo = to;
+			CameraLink::AheadCopy a;
+			Assert::IsTrue(CameraLink::CopyAhead(v, 7, 2.0f, a) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(a.lumaFrom == from && a.lumaTo == to, L"the exact-size pair is taken, shared");
+			auto shortPlane = std::make_shared<const std::vector<uint8_t>>(cells - 1, uint8_t(20));
+			v.lumaTo = shortPlane;
+			CameraLink::AheadCopy b;
+			Assert::IsTrue(CameraLink::CopyAhead(v, 7, 2.0f, b) == CameraLink::AheadRefusal::None, L"the vectors are still copied");
+			Assert::IsTrue(b.lumaFrom == nullptr && b.lumaTo == nullptr, L"a plane of another size: no luma at all");
+			v.lumaTo = to;
+			v.lumaFrom = nullptr;
+			CameraLink::AheadCopy c;
+			Assert::IsTrue(CameraLink::CopyAhead(v, 7, 2.0f, c) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(c.lumaFrom == nullptr && c.lumaTo == nullptr, L"one plane missing: no luma");
+		}
+
 		TEST_METHOD(AHalfSizePairIsTheNativeCellGridAtFullSubPelDeterministically)
 		{
 			// 1080p: half-size 960 x 540 engine luma, 8-px cells: each 16-px block holds 2 x 2 cell centres.
