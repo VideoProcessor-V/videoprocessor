@@ -5,8 +5,10 @@
 // (UpdateRenderAheadGate's log part, UpdateRenderAheadBudget's
 // decision and log, CheckRenderAheadChainDepthLocked's settle and log). See RenderAheadHostSteps.h.
 
-// RenderAheadPolicy.h first: the headers below include <windows.h> (min / max macros) and the policy's inline bodies use
-// the plain std::min / std::max forms (as PresenterExtension.cpp).
+// <pch.h> first (as the other VP-V renderer .cpp files): it defines NOMINMAX before <windows.h>, which DebugLog.h ->
+// DebugLogRetention.h includes and then uses std::numeric_limits<>::max(); the policy's inline bodies use the plain
+// std::min / std::max forms too.
+#include <pch.h>
 #include "RenderAheadHostSteps.h"
 
 #include <DebugLog.h>
