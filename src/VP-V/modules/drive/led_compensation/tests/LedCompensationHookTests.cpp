@@ -699,7 +699,8 @@ namespace VideoProcessorTest
 			{
 				pl_gpu gpu = fixture.Gpu();
 				pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
-				pl_fmt targetFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE);
+				pl_fmt targetFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+					static_cast<pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
 				Assert::IsNotNull(sourceFormat);
 				Assert::IsNotNull(targetFormat, L"No host-readable RGBA32F target format for the hook-input capture");
 				std::vector<float> texels(2 * 2 * 4);
