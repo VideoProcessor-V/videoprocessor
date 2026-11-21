@@ -690,7 +690,7 @@ namespace VideoProcessorTest
 
 
 		// GEM-015 ([C]:166): the headroom-only short-circuit (strength 0: one factor, (1 - headroom)^(1/eotf), in the signal) equals the
-		// full form within an ulp-scale 1e-6. "The full form" is the pre-change shader (tests/fixtures, the fixture copy: the same
+		// full form within one half-float ulp (the FBO is rgba16f: derivation at the check). "The full form" is the pre-change shader (tests/fixtures, the fixture copy: the same
 		// maths through the linear-light round trip); both run on the same float source through the same libplacebo pipeline and
 		// are read back as 32-bit floats, so what differs is only the algebra. The result also matches the CPU reference
 		// SdrToneShape::Map within the fp16 intermediate's precision (the shader acted: it is not an identity). Below-black and
@@ -706,8 +706,8 @@ namespace VideoProcessorTest
 			const int width = 64, height = 64;
 			const std::vector<float> source = TexturedField(width, height, 20261121u, -0.05f, 1.1f);
 			const std::vector<float> baseline = RenderFloatField(fixture, nullptr, width, height, source);
-			size_t compared = 0, rgb = 0, moved = 0;
-			double worst = 0.0;
+			size_t compared = 0, rgb = 0, moved = 0, differing = 0;
+			double worst = 0.0;   // in half-float ulps
 			for (const double headroom : { 0.05, 0.15, 0.3 })
 				for (const double eotf : { 2.2, 2.4 })
 					for (const double recovery : { 0.0, 1.5 })   // recovery is ignored without a knee: both forms
@@ -719,11 +719,23 @@ namespace VideoProcessorTest
 						Assert::AreEqual(b.size(), a.size());
 						for (size_t i = 0; i < a.size(); ++i)
 						{
-							const double tolerance = 1e-6 * (std::max)(1.0, std::fabs(static_cast<double>(b[i])));
-							const double error = std::fabs(static_cast<double>(a[i]) - static_cast<double>(b[i]));
-							worst = (std::max)(worst, error / (std::max)(1.0, std::fabs(static_cast<double>(b[i]))));
-							Assert::IsTrue(error <= tolerance, (L"headroom " + std::to_wstring(headroom) + L" eotf " + std::to_wstring(eotf) +
-								L" sample " + std::to_wstring(i) + L": " + std::to_wstring(a[i]) + L" vs the full form " + std::to_wstring(b[i])).c_str());
+							// Tolerance, derived (gate G1 MUST-3): a PRE_OUTPUT hook renders into libplacebo's FBO, which is FLOAT 16 first
+							// (an rgba16f intermediate, 11-bit significand), so each output is rounded to a half float. The two shaders differ
+							// algebraically by a few float32 ulps (about 1e-7 relative) BEFORE that rounding; after it they either agree or
+							// land on neighbouring half floats. The error is therefore at most ONE half-float ulp of the value:
+							// ulp16(x) = 2^(floor(log2 |x|) - 10), with the subnormal floor 2^-24 below |x| = 2^-14. The 1e-6 of Gemini's
+							// float32 reading cannot survive that rounding, and one half ulp (about 1e-3 relative) is what "within an ulp"
+							// means in the precision this pipeline really has. The share of samples that differ AT ALL is bounded below.
+							const double reference = static_cast<double>(b[i]);
+							const double magnitude = (std::max)(std::fabs(reference), std::fabs(static_cast<double>(a[i])));
+							const int exponent = magnitude > 0.0 ? (std::max)(std::ilogb(magnitude), -14) : -14;
+							const double halfUlp = std::ldexp(1.0, exponent - 10);
+							const double error = std::fabs(static_cast<double>(a[i]) - reference);
+							worst = (std::max)(worst, error / halfUlp);
+							Assert::IsTrue(error <= halfUlp * 1.0001, (L"headroom " + std::to_wstring(headroom) + L" eotf " + std::to_wstring(eotf) +
+								L" sample " + std::to_wstring(i) + L": " + std::to_wstring(a[i]) + L" vs the full form " + std::to_wstring(b[i]) +
+								L" (one half-float ulp here is " + std::to_wstring(halfUlp) + L")").c_str());
+							differing += error > 0.0 ? 1 : 0;
 							++compared;
 							if (i % 4 != 3)
 							{
@@ -738,8 +750,17 @@ namespace VideoProcessorTest
 					}
 			Assert::IsTrue(compared > 100000, L"the sweep compared real samples");
 			Assert::IsTrue(moved * 2 > rgb, L"the shader changed most of the picture (not an identity on both sides)");
-			Logger::WriteMessage(("SDR tone shape headroom-only vs the full form: worst relative error " + std::to_string(worst) + " over " +
-				std::to_string(compared) + " samples\n").c_str());
+			// The short-circuit and the full form agree except where the float32 difference flips a half-float rounding: rare.
+			Assert::IsTrue(differing * 100 <= compared, (L"at most 1 percent of the samples differ at all (" + std::to_wstring(differing) + L" of " +
+				std::to_wstring(compared) + L")").c_str());
+			// Non-vacuity: the shader under test IS the short-circuit form, and the reference is the form without it, so a revert of
+			// the fix (current == the pre-change shader) cannot pass this test.
+			Assert::IsTrue(LoadBundledShader("SDR tone shape.glsl").find("if (strength <= 0.0) { color.rgb *= pow(1.0 - headroom, 1.0 / eotf); return color; }") != std::string::npos,
+				L"the bundled shader carries the headroom-only short-circuit");
+			Assert::IsTrue(LoadToneShapeFixture("pre-GEM-015 SDR tone shape.glsl").find("if (strength <= 0.0) { color.rgb *=") == std::string::npos,
+				L"the reference shader is the form without it");
+			Logger::WriteMessage(("SDR tone shape headroom-only vs the full form: worst error " + std::to_string(worst) + " half-float ulps; " +
+				std::to_string(differing) + " of " + std::to_string(compared) + " samples differ at all\n").c_str());
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
 		}
