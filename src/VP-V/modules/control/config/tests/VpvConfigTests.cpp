@@ -1671,6 +1671,85 @@ namespace
 		}
 	}
 
+	// GEM-032 / GEM-049 (Gemini's tests): on the Original pathway the By frames / By time choice is off with Target
+	// delay, and a click on it writes nothing to target_latency_ms; on the VP-V pathway it stays live.
+	void testQueueTargetModeOffInOriginal()
+	{
+		const char* text = "[general]\nrenderer: VP Renderer\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 4\n";
+		const auto modeButtons = [](ConfigEditorWindow& window) {
+			return std::make_pair(control<QRadioButton>(window, QStringLiteral("config.queue.target_mode.frames")),
+				control<QRadioButton>(window, QStringLiteral("config.queue.target_mode.time")));
+		};
+		{
+			// Opened on the Original pathway.
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir, (std::string(text) + "[vpv]\npipeline_original_pathway: on\n").c_str());
+			ConfigEditorWindow window(path, 0, true);
+			QCoreApplication::processEvents();
+			auto* latency = control<QSpinBox>(window, QStringLiteral("config.queue.target_latency_ms"));
+			const auto buttons = modeButtons(window);
+			require(!control<QWidget>(window, QStringLiteral("config.queue.target_mode"))->isEnabled() &&
+				!buttons.first->isEnabled() && !buttons.second->isEnabled(), "By frames / By time is live on the Original pathway");
+			require(!latency->isEnabled(), "Target delay is live on the Original pathway");
+			const int before = latency->value();
+			buttons.second->click();
+			QCoreApplication::processEvents();
+			require(latency->value() == before, "a By time click on the Original pathway changed target_latency_ms");
+		}
+		{
+			// Opened on the VP-V pathway, then switched to the Original pathway on the page.
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir, text);
+			ConfigEditorWindow window(path, 0, true);
+			QCoreApplication::processEvents();
+			const auto buttons = modeButtons(window);
+			require(buttons.first->isEnabled() && buttons.second->isEnabled(), "By frames / By time is not live on the VP-V pathway");
+			control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
+			QCoreApplication::processEvents();
+			require(!buttons.first->isEnabled() && !buttons.second->isEnabled(), "switching to the Original pathway leaves By frames / By time live");
+			auto* latency = control<QSpinBox>(window, QStringLiteral("config.queue.target_latency_ms"));
+			const int before = latency->value();
+			buttons.second->click();
+			QCoreApplication::processEvents();
+			require(latency->value() == before, "a By time click after switching to the Original pathway changed target_latency_ms");
+		}
+	}
+
+	// GEM-031 (VpvSetBy.h): on the Original pathway chroma_upscaler reads "Set by the Original pathway" only when the
+	// override applies (unset or a VP-only value); a saved one of Bill's five filters is the profile's own value.
+	void testSetByChromaOnOriginal()
+	{
+		Vpv::SetByQuery q;
+		q.originalPathway = true;
+		q.key = "chroma_upscaler";
+		q.builtInDefault = "auto";
+		Vpv::SetByResult r = Vpv::SetBy(q);
+		require(r.source == Vpv::ValueSource::OriginalPathway && r.text.find(": Bicubic") != std::string::npos, ("unset chroma: " + r.text).c_str());
+		for (const char* vp : { "catmull_rom", "upscaler", "auto" })
+		{
+			q.ownValue = vp;
+			r = Vpv::SetBy(q);
+			require(r.source == Vpv::ValueSource::OriginalPathway, (std::string("VP-only chroma ") + vp + ": " + r.text).c_str());
+		}
+		for (const char* bill : { "ewa_lanczossharp", "ewa_lanczos", "lanczos", "bicubic", "bilinear" })
+		{
+			q.ownValue = bill;
+			r = Vpv::SetBy(q);
+			require(r.source == Vpv::ValueSource::ThisProfile, (std::string("Bill's chroma ") + bill + ": " + r.text).c_str());
+		}
+		q.ownValue.clear();
+		q.defaultProfileOnScreen = false;
+		q.inheritedValue = "lanczos";
+		r = Vpv::SetBy(q);
+		require(r.source == Vpv::ValueSource::DefaultProfile, ("inherited Bill chroma: " + r.text).c_str());
+		q.originalPathway = false;
+		q.inheritedValue.clear();
+		q.ownValue = "catmull_rom";
+		q.defaultProfileOnScreen = true;
+		r = Vpv::SetBy(q);
+		require(r.source == Vpv::ValueSource::ThisProfile, ("VP-V pathway chroma: " + r.text).c_str());
+	}
+
 	void testQueueRowsOnTheVpvCard()
 	{
 		const auto readFile = [](const QString& path) { QFile file(path); return file.open(QIODevice::ReadOnly) ? file.readAll().replace("\r\n", "\n") : QByteArray(); };
@@ -1694,8 +1773,11 @@ namespace
 			const QString path = WriteFixture(dir, text);
 			ConfigEditorWindow window(path, 0, true);
 			auto* section = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section")));
-			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("both.card.queue_target")));
+			// GEM-049: the card is on the Input unit (off on the Original pathway), not "On both pathways".
+			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("input.card.queue_target")));
 			require(section->isAncestorOf(card), "the queue target card is not on the VP-V page");
+			require(window.findChildren<QWidget*>(Vpv::ObjectName(QStringLiteral("both.card.queue_target"))).isEmpty(),
+				"the queue target card is still under On both pathways");
 			for (const char* name : { "config.queue.low_latency_path", "config.queue.target_latency_ms", "config.queue.target_latency_note",
 					"config.queue.target_mode", "config.queue.target_lookahead_note", "config.queue.active_picture_lookahead_frames.vpv",
 					"config.queue.active_picture_lookahead_notice" })
@@ -1732,7 +1814,7 @@ namespace
 		const QString path = WriteFixture(dir, text);
 		{
 			ConfigEditorWindow window(path, 0, true);
-			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("both.card.queue_target")));
+			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("input.card.queue_target")));
 			auto* queues = control<QListWidget>(window, QStringLiteral("config.queue.profiles"));
 			auto* vpv = control<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames.vpv"));
 			auto* notice = control<QLabel>(window, QStringLiteral("config.queue.active_picture_lookahead_notice"));
@@ -1895,6 +1977,8 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: Profile use card and the sync directions", testProfileUseAndSyncDirections);
 	failures += run("VP-V: source_geometry_detect row on the Re-base card", testSourceGeometryDetectRowOnRebaseCard);
 	failures += run("VP-V: queue rows on the VP-V card, look-ahead Auto kept", testQueueRowsOnTheVpvCard);
+	failures += run("VP-V: By frames / By time is off on the Original pathway (GEM-032/049)", testQueueTargetModeOffInOriginal);
+	failures += run("VP-V: Set by for chroma_upscaler on the Original pathway (GEM-031)", testSetByChromaOnOriginal);
 	failures += run("VP-V: the moved load-time migrations still apply", testLoadMigrationsMoved);
 	failures += run("VP-V: the moved refresh-key migration rewrites the NTSC band keys", testRefreshKeyMigrationMoved);
 	failures += run("VP-V: motion engine off greys the de-judder amount and hiccup repair (batch B)", testMotionEngineOffGreysDejudderAndHiccup);
