@@ -7,7 +7,7 @@
   "src/VideoProcessor-Config/ConfigEditorWindow.h": 5,
   "src/VideoProcessor-GUI/VideoProcessorApp.cpp": 1,
   "src/VideoProcessor-GUI/VideoProcessorDlg.cpp": 3,
-  "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 3,
+  "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 2,
   "src/VideoProcessor-Lib/AnalysisLumaSource.h": 1,
   "src/VideoProcessor-Lib/ConfigSchema.h": 2,
   "src/VideoProcessor-Lib/DebugLog.h": 4,
