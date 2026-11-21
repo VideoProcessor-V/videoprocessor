@@ -27,6 +27,71 @@ class SelftestCases(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(T.selftest(), 0)
 
+    def test_every_fork_only_case(self):
+        for name, flt, fx, want_rc, want_sub, want_note in T.fork_only_cases():
+            with self.subTest(case=name):
+                rc, rep = T.run_case(flt, fx)
+                self.assertEqual(rc, want_rc, (rep["problems"], rep["notes"]))
+                if want_sub:
+                    self.assertTrue(any(want_sub in p for p in rep["problems"]), rep["problems"])
+                if want_note:
+                    self.assertTrue(any(want_note in n for n in rep["notes"]), rep["notes"])
+
+
+class ForkOnlyCli(unittest.TestCase):
+    FQ = "VideoProcessorTest::SigmaDeltaHookTests::DitherNeedWarpX"
+
+    def _write(self, d, name, text):
+        p = os.path.join(d, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def test_credit_listing_and_build_lines(self):
+        with tempfile.TemporaryDirectory() as d:
+            nat = self._write(d, "n.trx", T._fixture([("VideoProcessorTest.SigmaDeltaHookTests", "DitherNeedWarpX", "Passed",
+                                                       "SKIP-FORK-ONLY-PL0004: x BETA-RAN " + self.FQ)]))
+            beta = self._write(d, "b.trx", T._fixture([("BetaSuite", "RunBetaSuite", "Passed",
+                                                        "VP-BUILD-ID:" + "ab" * 16 + "\nBETA-RAN " + self.FQ +
+                                                        "\nBeta suite exit code 0; whole chain passed")],
+                                                      codebase=T.BETA_DLL_FIXTURE))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = T.main(["--filter", "FullyQualifiedName~SigmaDeltaHookTests", "--trx", nat, "--beta-trx", beta])
+            text = buf.getvalue()
+            self.assertEqual(rc, 0, text)
+            self.assertIn("EXECUTED ON THE BETA HOST (credited by BETA-RAN):", text)
+            self.assertIn("%s [native fork-only] <- %s" % (self.FQ, beta), text)
+            self.assertIn("BETA TRX: %s VALID" % beta, text)
+            self.assertIn("build: VP-BUILD-ID:" + "ab" * 16, text)
+            self.assertIn("build: (no build line in this TRX)", text)
+
+    def test_same_trx_without_beta_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            nat = self._write(d, "n.trx", T._fixture([("VideoProcessorTest.SigmaDeltaHookTests", "DitherNeedWarpX", "Passed",
+                                                       "SKIP-FORK-ONLY-PL0004: x BETA-RAN " + self.FQ)]))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(T.main(["--filter", "FullyQualifiedName~SigmaDeltaHookTests", "--trx", nat]), 1)
+
+    def test_transport_rule_is_printed(self):
+        with tempfile.TemporaryDirectory() as d:
+            beta = self._write(d, "b.trx", T._fixture([("BetaSuite", "RunBetaSuite", "Passed",
+                                                        "BETA-RAN BetaStage::K::T1\nBeta suite exit code 0; whole chain passed")],
+                                                      codebase=T.BETA_DLL_FIXTURE))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = T.main(["--filter", "FullyQualifiedName~BetaStage::K", "--beta-trx", beta])
+            self.assertEqual(rc, 0, buf.getvalue())
+            self.assertIn("Logger::WriteMessage", buf.getvalue())
+
+    def test_allow_list_is_closed(self):
+        self.assertEqual(sorted(T.FORK_ONLY_TAGS), ["PL0004"])
+
+    def test_beta_trx_refuses_a_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(T.main(["--filter", "Name=M", "--beta-trx", d]), 2)
+
 
 class FilterParsing(unittest.TestCase):
     def test_queue_line_semicolons_become_or(self):
