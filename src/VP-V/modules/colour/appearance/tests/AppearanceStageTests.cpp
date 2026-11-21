@@ -50,7 +50,10 @@ namespace Tests
 			in.l11ReferenceMode = true;
 			in.honourL11 = true;
 			AppearanceStage::Decision d = AppearanceStage::Decide(in, s);
-			Assert::IsFalse(d.active);
+			// FIX1 MUST 4: the room is replaced by the reference room (no veil); the screen-white step still runs.
+			Assert::IsTrue(d.active);
+			Assert::IsTrue(d.l11Ignored);
+			Assert::AreEqual(0.0, d.room.veilNits, 0.0);
 			Assert::IsTrue(d.status.find("reference mode") != std::string::npos);
 			in.honourL11 = false;
 			d = AppearanceStage::Decide(in, s);
