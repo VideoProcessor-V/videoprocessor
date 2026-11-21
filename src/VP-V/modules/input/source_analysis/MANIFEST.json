@@ -67,6 +67,7 @@
     "src/VP-V/modules/input/source_analysis/regions/MeasureDomain.h",
     "src/VP-V/modules/input/source_analysis/regions/MeasureDomainGlsl.h",
     "src/VP-V/modules/input/source_analysis/regions/tests/EdgeMapStageTests.cpp",
+    "src/VP-V/modules/input/source_analysis/regions/tests/EdgeMapStageGpuParityTests.cpp",
     "src/VP-V/modules/input/source_analysis/regions/README.md",
     "src/VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h",
     "src/VP-V/modules/input/source_analysis/lane/LaneGpuJobs.h",

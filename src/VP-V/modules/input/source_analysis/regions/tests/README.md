@@ -19,4 +19,9 @@
   linear and PQ / HLG measure domains; taps clamp to the whole picture, not a crop; the fill's axes, defaults, stage key and
   reserve (8 B/px); RG32F at the stage picture's own size and ordinal; the worded declines (code unit, no size, not offered
   with P13's cause, size without a stage, above the reserve, crop undeclared).
+- `EdgeMapStageGpuParityTests.cpp` (Category GpuWarp: WARP in the CPU tier; on hardware with `VP_TEST_GPU=hardware`, GPU-QUIET;
+  102b EDGEMAP-GPU-PARITY-TEST): the kEdgeMap owner fill on a libplacebo device, inputs through the memo's P13 views, against the
+  CPU law: the stage variant's R = `SobelMagnitude` of `MeasureLumaCode` and G = that luma for SDR, linear, PQ and HLG (and R = the
+  Sobel of the fill's own G), the default variant's R = `SobelMagnitude` of the 10-bit source luma; odd sizes (partial tiles).
+  Written in CB slice 18 before any GPU run (code-only window): its first run is owed with the C5+A build.
 - `RegionEvidenceSynthetic.h`: deterministic synthetic frames.

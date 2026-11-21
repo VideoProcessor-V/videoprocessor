@@ -141,7 +141,8 @@ copied; a private pass is deleted in the same commit as its consumer's switch.
 Status: BusyEdge.h (CPU reference and tolerance oracle) and BusyEdgeGlsl.h (shader mirrors, one tap form kSourceTapCodesPerUnit) exist
 with BusyEdgeTests. The kEdgeMap owner fill (EdgeMapFill.h, on L-CORE's OwnerFillRequest::gpu) is built; its MODULE is
 registered at start-up (HubBootstrap) and the FILL at the first observed Entrance size (reserve derived from the source luma size, rule 6) with EdgeMapFillTests (registration, reserve, CPU declines; the GPU
-parity test is owed before the first reader row, 102b KEDGEMAP-RULE3). It has NO reader yet, so it never runs; no consumer is switched and
+parity test, tests/EdgeMapStageGpuParityTests.cpp, is written for both variants and its first run is owed before the first reader row,
+102b KEDGEMAP-RULE3). It has NO reader yet, so it never runs; no consumer is switched and
 every private pass (debander guard, AdaptiveDownscale measure) is still present. Decisions: R14-66 (lead 14, 2026-11-14 20:54Z,
 lead14-state.md:102) registers kEdgeMap under rule 3, first reader L-FOCUS; R14-64 (lead 14, 2026-11-14 ~21:10Z, lead14-state.md:89)
 kept X5 private, superseded by the owner's ruling of 2026-11-14 ~17:00 EST (design-EDGEMAP-DOMAIN-AXIS rev 2, 102b X5-EDGEMAP-CJ3): X5
@@ -170,4 +171,4 @@ absent), so G has a reader; WHOLE picture, no crop axis (the design's kAxisCrop 
 src_rect border reads luma beyond the crop, which a crop-clamped map would change; code unit 8 only on the stage variant (the
 default stays 10); the fill's reserve is twice the declared default size (EdgeMapFillReserveBytes, 8 B/px of the source luma: an
 RG32F picture of the luma size fits; 265 MB at 8K, 66 MB at 4K), the declared product size and ledger term stay the default's; a
-larger stage picture declines visibly. Tests: tests/EdgeMapStageTests.cpp. Reader: X5 (S3). Settings: none.
+larger stage picture declines visibly. Tests: tests/EdgeMapStageTests.cpp (CPU law and fill), tests/EdgeMapStageGpuParityTests.cpp (GPU parity, first run owed). Reader: X5 (S3). Settings: none.
