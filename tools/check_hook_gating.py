@@ -54,6 +54,16 @@ called `tip`), declarations picked up from inline bodies in headers; list-and-ju
 a VP-V name Bill's baseline also uses (it is then Bill's own), enumerators, a new #include of a VP-V header,
 names declared only in .inl / .cpp files of src/VP-V, and symbols reached only through `auto` / a pointer member.
 
+HOOK LINES = THE HONEST H2 (CC-audit-1, WAIVER-CC-H2-METRIC; rule 19): per Bill-owned file under src/ (documentation
+files reported, not gated), H1 = non-blank added or changed lines vs --base-ref (tagged or not) and H2 = H1 + the
+non-blank lines, recursively, of every VP-authored file (src/VP-V/**, or absent from Bill's tree) that an added #include
+pulls into a class or function scope (vp_footprint.scope_map). Gated against docs/audit/hook-lines-baseline.json (v2:
+per-file ceilings + production / tests / project totals; a v1 baseline is refused, exit 2) and the `h2_ceiling` of
+hook-budget.json. Such fragments must be registered in docs/audit/host-fragments.json and included once (exit 1), are
+checked EXPANDED (their statements pass the Original guard like Bill lines), and a VP-V function-like macro invoked at
+class or function scope is a `macro-in-bill-scope` hit. An unresolved class / function-scope include: exit 2. The old
+narrow tagged-line count is reported as `tagged`, information only. Selftests: --selftest.
+
 Summary line: `hook gating: <hooks> hook statements, <unguarded> unguarded, <unverified> unverified markers,
 <allowed> allowed, <untagged> untagged; exit <n>` (machine-readable like the other cheap checks).
 
@@ -1154,12 +1164,38 @@ def non_pathway(rel):
     return rel.startswith(NON_PATHWAY_PREFIXES) or rel in NON_PATHWAY_FILES
 
 
-def check_file(tree, rel, vp_slots, gated, allow_used, base_ref=None, no_git=False, added=None):
+def check_file(tree, rel, vp_slots, gated, allow_used, base_ref=None, no_git=False, added=None, fragments=None):
     text = tree.read(rel)
-    hook_lines = hook_line_set(text)
     if text.splitlines() and text.splitlines()[0].strip().startswith("// VPV-HOOK-FILE"):
         return {"file": rel, "hook_file": True, "statements": [], "untagged": [], "sites": []}
-    added = set(added or ())
+    if fragments:
+        # CC-audit-1 spec 2: check the includer with its class / function-scope VP fragments expanded in place. Every
+        # expanded line is a hook line (a VP line in a Bill scope), so a statement inside a function-scope fragment must
+        # pass the Original guard like any Bill line; results map back to the includer line (`via` = fragment:line).
+        text, linemap, frag_lines = expand_fragments(rel, text, fragments, tree_reader(tree))
+        was_added = set(added or ())
+        res = _check_text(rel, text, vp_slots, gated, allow_used,
+                          {k for k, (f, ln, top) in enumerate(linemap, 1) if top in was_added}, frag_lines)
+
+        def back(k):
+            f, ln, top = linemap[k - 1] if 0 < k <= len(linemap) else (rel, k, k)
+            return top, (None if f == rel else "%s:%d" % (f, ln))
+        for key in ("statements", "untagged"):
+            for s in res[key]:
+                s["line"], via = back(s["line"])
+                if via:
+                    s["via"] = via
+        for s in res["sites"]:
+            s["start"], via = back(s["start"])
+            s["end"] = back(s["end"])[0]
+            if via:
+                s["via"] = via
+        return res
+    return _check_text(rel, text, vp_slots, gated, allow_used, set(added or ()), set())
+
+
+def _check_text(rel, text, vp_slots, gated, allow_used, added, extra_hook_lines):
+    hook_lines = hook_line_set(text) | extra_hook_lines
     tree = parse_statements(strip_code(text))
     tree_parse_cache = [tree]
     results = []
@@ -1355,33 +1391,261 @@ def untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_us
     return out
 
 
-def hook_lines_metric(tree, per_file, added_by_file, no_git, root):
-    """Bill hook LINES: added lines (vs Bill's baseline) carrying a hook, per production Bill file (the vp_footprint
-    definition). Under --no-git the whole file's hook lines. Blocks above docs/audit/hook-lines-baseline.json."""
-    files = {}
+# ---------------------------------------------------------------- the honest H2 metric (CC-audit-1, WAIVER-CC-H2-METRIC)
+# H2 per Bill-owned file (present at --base-ref, under src/, outside src/VP-V/, not a documentation file) = H1 (non-blank
+# added or changed lines, tagged or not) + the non-blank lines, recursively, of every VP-authored file an ADDED #include
+# pulls into a class or function scope (vp_footprint.h2_row). Production AND tests are gated (tests hold Bill text too,
+# rule 29); project files are counted. The old narrow count (vp_footprint.hook_line_set on added production lines) is
+# kept as `tagged`, for information only. Rule 19: no move of lines between a Bill scope and a fragment lowers H2.
+H2_METRIC_VERSION = 2
+DOC_EXT = (".md", ".txt", ".html", ".htm", ".rst")
+H2_BUCKETS = ("production", "tests", "project")
+RENDERER_FILES = ("src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+                  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h",
+                  "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp",
+                  "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.h",
+                  "src/VideoProcessor-VPRenderer/LibplaceboPluginExports.cpp")
+FRAGMENTS_PATH = "docs/audit/host-fragments.json"
+VP_MACRO_RE = re.compile(r"^\s*#\s*define\s+([A-Za-z_]\w*)\(", re.M)
+
+
+def tree_reader(tree):
+    """read(rel) -> text or None over a Tree (for include resolution)."""
+    def read(rel):
+        try:
+            return tree.read(rel)
+        except (OSError, RuntimeError):
+            return None
+    return read
+
+
+def h2_rows(tree, root, base_ref, diff, no_git, only):
+    """{file: {bucket, h1, inc, h2, fragments, errors}} for every Bill-owned file with H2 > 0 (doc files: bucket "docs",
+    information only). Under --no-git there is no Bill baseline: every non-blank line of each --files file counts as
+    added (fail closed) and only src/VP-V/ files are VP-authored."""
+    read = tree_reader(tree)
+    rows = {}
+    if no_git:
+        for rel in only or []:
+            text = read(rel)
+            if text is None:
+                continue
+            nb = [i for i, ln in enumerate(text.splitlines(), 1) if ln.strip()]
+            inc = [i for i in nb if vp_footprint.INCLUDE_RE.match(text.splitlines()[i - 1])]
+            rows[rel] = vp_footprint.h2_row(rel, nb, inc, read, None, text)
+            rows[rel]["bucket"] = vp_footprint.bucket_of(rel)
+        return rows
+    bill_tree = set(git(["ls-tree", "-r", "--name-only", base_ref], root).splitlines())
+    want = [p for p, d in diff.items() if p in bill_tree and p.startswith("src/") and not p.startswith(VPV_PREFIX)
+            and d["nonblank_added_lines"]]
+    if only:
+        pats = {p.replace("\\", "/") for p in only}
+        want = [p for p in want if p in pats]
+    tree.prefetch([p for p in want if diff[p]["include_lines"]])
+    for p in want:
+        d = diff[p]
+        if not tree.rev and not tree.exists(p):
+            continue
+        r = vp_footprint.h2_row(p, d["nonblank_added_lines"], d["include_lines"], read, bill_tree)
+        r["bucket"] = "docs" if p.lower().endswith(DOC_EXT) else vp_footprint.bucket_of(p)
+        if r["h2"]:
+            rows[p] = r
+    return rows
+
+
+def expand_fragments(rel, text, fragments, read):
+    """`text` with every class / function-scope VP fragment (vp_footprint.vp_included_lines records) expanded in place,
+    recursively (nested VP-authored includes too). Returns (expanded text, linemap, fragment line set): linemap[k - 1] =
+    (file, line, includer line) for expanded line k."""
+    at = {f["line"]: f["fragment"] for f in fragments}
+    out, linemap, frag_lines = [], [], set()
+
+    def emit_file(path, body, top, seen):
+        for j, ln in enumerate(body.splitlines(), 1):
+            m = vp_footprint.INCLUDE_RE.match(ln)
+            if m:
+                p, t = vp_footprint.resolve_include(m.group(1), path, read)
+                if p is not None and p.startswith(VPV_PREFIX) and p not in seen:
+                    emit_file(p, t, top, seen | {p})
+                    continue
+            out.append(ln)
+            linemap.append((path, j, top))
+            frag_lines.add(len(out))
+
+    for i, ln in enumerate(text.splitlines(), 1):
+        if i in at:
+            body = read(at[i])
+            if body is not None:
+                emit_file(at[i], body, i, {at[i]})
+                continue
+        out.append(ln)
+        linemap.append((rel, i, i))
+    return "\n".join(out) + "\n", linemap, frag_lines
+
+
+def fragment_check(tree, h2):
+    """Every VP file included at class or function scope must be registered in docs/audit/host-fragments.json
+    ({fragment, includer, anchor_text}) and included exactly once; a registry entry nothing includes is stale.
+    Returns the hits (exit 1)."""
+    reg = load_json(tree, FRAGMENTS_PATH) or {"fragments": []}
+    entries = reg.get("fragments", [])
+    uses = {}
+    for rel, r in sorted(h2.items()):
+        for f in r["fragments"]:
+            uses.setdefault(f["fragment"], []).append((rel, f["line"], f["scope"]))
+    hits = []
+    for frag, us in sorted(uses.items()):
+        where = ", ".join("%s:%d (%s scope)" % u for u in us)
+        if len(us) > 1:
+            hits.append("fragment %s included %d times at class/function scope (%s): a fragment is included exactly once" % (frag, len(us), where))
+        mine = [e for e in entries if e.get("fragment") == frag]
+        if not mine:
+            hits.append("UNREGISTERED fragment %s included at %s: list it in %s ({fragment, includer, anchor_text}); its lines "
+                        "count toward the includer's H2 either way" % (frag, where, FRAGMENTS_PATH))
+            continue
+        for e in mine:
+            if e.get("includer") not in [u[0] for u in us]:
+                hits.append("fragment %s is registered for includer %s but included by %s" % (frag, e.get("includer"), where))
+                continue
+            try:
+                itext = tree.read(e["includer"])
+            except (OSError, RuntimeError):
+                itext = ""
+            if not e.get("anchor_text") or _key(e["anchor_text"]) not in _key(itext):
+                hits.append("fragment %s: anchor_text of its registry entry is not in %s" % (frag, e.get("includer")))
+    for e in entries:
+        if e.get("fragment") not in uses:
+            hits.append("stale %s entry: %s is not included at class/function scope by any Bill file (remove the entry)" % (
+                FRAGMENTS_PATH, e.get("fragment")))
+    return hits
+
+
+def vp_macros(tree):
+    """Function-like macros #defined under src/VP-V/ (any code file)."""
+    rels = [f for f in tree.code_files() if f.startswith(VPV_PREFIX)]
+    tree.prefetch(rels)
+    names = set()
+    for rel in rels:
+        try:
+            names.update(VP_MACRO_RE.findall(tree.read(rel)))
+        except (OSError, RuntimeError):
+            continue
+    return names
+
+
+def macro_check(tree, diff, h2, no_git, only):
+    """`macro-in-bill-scope`: an added line of a Bill-owned file that invokes, at class or function scope, a function-like
+    macro defined under src/VP-V/ (its body would be VP lines the H2 count cannot see). A name the same file also uses on
+    a line that is not added is Bill's own spelling and is skipped. Returns the hits (exit 1)."""
+    cands = {}
+    if no_git:
+        for rel in only or []:
+            try:
+                text = tree.read(rel)
+            except (OSError, RuntimeError):
+                continue
+            cands[rel] = {i: ln for i, ln in enumerate(text.splitlines(), 1)}
+    else:
+        for p, r in h2.items():
+            if r["bucket"] != "docs" and p in diff:
+                cands[p] = diff[p]["added_text"]
+    if not cands:
+        return []
+    names = vp_macros(tree)
+    if not names:
+        return []
+    mre = re.compile(r"\b(" + "|".join(sorted(map(re.escape, names), key=len, reverse=True)) + r")\s*\(")
+    hits = []
+    for rel, added in sorted(cands.items()):
+        if not any(mre.search(t) for t in added.values()):
+            continue
+        try:
+            text = tree.read(rel)
+        except (OSError, RuntimeError):
+            continue
+        scopes = vp_footprint.scope_map(text)
+        code = strip_code(text).splitlines()
+        own = set()
+        for i, ln in enumerate(code, 1):
+            if i not in added:
+                own.update(m.group(1) for m in mre.finditer(ln))
+        for i in sorted(added):
+            if i > len(code) or scopes[i - 1] == "file":
+                continue
+            used = [m.group(1) for m in mre.finditer(code[i - 1]) if m.group(1) not in own]
+            if used:
+                hits.append("macro-in-bill-scope %s:%d %s scope invokes VP-V macro %s: %s" % (
+                    rel, i, scopes[i - 1], ", ".join(sorted(set(used))), text.splitlines()[i - 1].strip()[:100]))
+    return hits
+
+
+def load_h2_baseline(root):
+    """(baseline dict or None, error or None). A baseline that is not version 2 (the retired narrow hook-line count)
+    is refused: exit 2, re-baseline under a WAIVER commit."""
+    path = os.path.join(root, *HOOK_LINES_PATH.split("/"))
+    try:
+        base = vp_footprint.read_json(path)
+    except OSError:
+        return None, None
+    except ValueError as e:
+        return None, "%s is not valid JSON (%s): no verdict" % (HOOK_LINES_PATH, e)
+    if base.get("version") != H2_METRIC_VERSION or base.get("metric") != "H2":
+        return base, ("%s is a v1 (narrow tagged-line) baseline: the metric is now the honest H2 (CC-audit-1, rule 19); "
+                      "re-baseline under a WAIVER commit (--write-hook-lines-baseline)" % HOOK_LINES_PATH)
+    return base, None
+
+
+def hook_lines_metric(tree, per_file, h2, added_by_file, no_git, root):
+    """The gated Bill-line metric = honest H2 per Bill-owned file (h2_rows), production + tests + project, with the
+    per-file ceilings and bucket totals of docs/audit/hook-lines-baseline.json (v2) and the optional `h2_ceiling` of
+    docs/audit/hook-budget.json. `tagged` = the retired narrow count (information)."""
+    tagged = {}
     for r in per_file:
         if r.get("bucket") != "production":
             continue
         try:
             hs = vp_footprint.hook_line_set(tree.read(r["file"]))
-        except (OSError, KeyError):
+        except (OSError, RuntimeError, KeyError):
             continue
         n = len(hs) if no_git else len(hs & added_by_file.get(r["file"], set()))
         if n:
-            files[r["file"]] = n
-    base = None
-    try:
-        base = json.load(open(os.path.join(root, *HOOK_LINES_PATH.split("/")), encoding="utf-8"))
-    except (OSError, ValueError):
-        base = None
-    total = sum(files.values())
-    ceil = (base or {}).get("files", {})
-    over = []
-    if base is not None:
-        over = ["%s %d > ceiling %d" % (f, n, ceil.get(f, 0)) for f, n in sorted(files.items()) if n > ceil.get(f, 0)]
+            tagged[r["file"]] = n
+    gated = {f: r for f, r in h2.items() if r["bucket"] in H2_BUCKETS}
+    files = {f: r["h2"] for f, r in sorted(gated.items())}
+    totals = {b: sum(r["h2"] for r in gated.values() if r["bucket"] == b) for b in H2_BUCKETS}
+    total = sum(totals.values())
+    renderer = sum(files.get(f, 0) for f in RENDERER_FILES)
+    docs = {f: r["h2"] for f, r in sorted(h2.items()) if r["bucket"] == "docs"}
+    errors = [e for r in h2.values() for e in r["errors"]]
+    base, base_error = load_h2_baseline(root)
+    budget = load_json(tree, BUDGET_PATH) or {}
+    over, ratchet = [], []
+    if base is not None and base_error is None:
+        ceil = base.get("files", {})
+        extra = budget.get("h2_ceiling") or {}
+        for f in sorted(set(files) | set(ceil)):
+            n = files.get(f, 0)
+            lim = ceil.get(f, 0)
+            if f in extra:
+                lim = min(lim, int(extra[f]))
+            if n > lim:
+                over.append("%s h2 %d > ceiling %d" % (f, n, lim))
+            elif n < lim:
+                ratchet.append("%s h2 %d < ceiling %d (ratchet down)" % (f, n, lim))
+        for b in H2_BUCKETS:
+            lim = (base.get("totals") or {}).get(b, 0)
+            if totals[b] > lim:
+                over.append("%s TOTAL h2 %d > baseline %d" % (b, totals[b], lim))
         if total > base.get("total", 0):
-            over.append("TOTAL %d > baseline %d" % (total, base.get("total", 0)))
-    return {"files": files, "total": total, "baseline": None if base is None else base.get("total", 0), "over": over}
+            over.append("TOTAL h2 %d > baseline %d" % (total, base.get("total", 0)))
+    return {"metric": "H2", "files": files, "total": total, "totals": dict(totals, renderer=renderer),
+            "h1": {f: r["h1"] for f, r in sorted(gated.items())},
+            "included": {f: r["inc"] for f, r in sorted(gated.items()) if r["inc"]},
+            "fragments": [dict(f, includer=rel) for rel, r in sorted(gated.items()) for f in r["fragments"]],
+            "docs": docs, "tagged": tagged, "tagged_total": sum(tagged.values()),
+            "baseline": None if base is None or base_error else base.get("total", 0),
+            "baseline_totals": None if base is None or base_error else base.get("totals"),
+            "baseline_error": base_error, "errors": errors, "over": over, "ratchet": ratchet}
 
 
 def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, since=None):
@@ -1395,17 +1659,22 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
     allow_used = {}
     files = bill_files(tree, base_ref, only, no_git)
     added_by_file = {}
-    if not no_git and files:
+    diff = {}
+    diff_error = None
+    if not no_git:
         try:
             diff = vp_footprint.parse_diff(git(["diff"] + vp_footprint.DIFF_ARGS + ["-U0", base_ref] + ([rev] if rev else []) +
                                                ["--", "src", ":(exclude)src/VP-V"], root))
             added_by_file = {k: set(v["added_lines"]) for k, v in diff.items()}
-        except RuntimeError:
-            added_by_file = {}
+        except RuntimeError as e:
+            # fail CLOSED: without the diff the H2 metric would read 0
+            diff_error = "git diff %s cannot be read (%s): no H2 verdict" % (base_ref, " ".join(str(e).split())[:160])
+    h2 = h2_rows(tree, root, base_ref, diff, no_git, only) if diff_error is None else {}
     per_file = []
     tree.prefetch([rel for rel, _ in files])
     for rel, bucket in files:
-        r = check_file(tree, rel, vp_slots, gated, allow_used, base_ref, no_git, added_by_file.get(rel))
+        r = check_file(tree, rel, vp_slots, gated, allow_used, base_ref, no_git, added_by_file.get(rel),
+                       h2[rel]["fragments"] if rel in h2 else None)
         r["bucket"] = bucket
         per_file.append(r)
     hits, unverified, untagged, allowed, counts = [], [], [], [], {}
@@ -1460,10 +1729,17 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
         stale = [x for x in stale if x not in allow_used]
         sc["new"] = [x for x in sc["new"] if _new_site(x)]
         sc["approved"] = [x for x in sc["approved"] if _new_site(x)]
-    hl = hook_lines_metric(tree, per_file, added_by_file, no_git, root)
+    hl = hook_lines_metric(tree, per_file, h2, added_by_file, no_git, root)
+    if diff_error:
+        hl["errors"].append(diff_error)
+    hl["fragment_hits"] = fragment_check(tree, h2)
+    hl["macro_hits"] = macro_check(tree, diff, h2, no_git, only)
     sc["hook_lines"] = hl
-    rc = 1 if (hl["over"] or hits or unverified or (fail_untagged and untagged) or sc["new"] or sc["over"] or sc["expired"] or sc["unknown"] or
-                 sc["trigger_errors"] or sc["approval_missing"] or sc["budget_errors"] or untagged_vpv) else 0
+    rc = 1 if (hl["over"] or hl["fragment_hits"] or hl["macro_hits"] or hits or unverified or (fail_untagged and untagged) or sc["new"] or
+               sc["over"] or sc["expired"] or sc["unknown"] or sc["trigger_errors"] or sc["approval_missing"] or sc["budget_errors"] or
+               untagged_vpv) else 0
+    if hl["errors"] or hl["baseline_error"]:
+        rc = 2   # fail closed: an unresolved class / function-scope include or a retired (v1) baseline gives no verdict
     return {"base_ref": base_ref, "rev": rev, "since": since, "vp_slots": sorted(vp_slots), "site_checks": sc, "gated": {k: [list(d) for d in v] for k, v in gated.items()},
             "files": per_file, "counts": counts, "hits": hits, "unverified": unverified, "untagged": untagged, "untagged_vpv": untagged_vpv,
             "allowed": allowed, "allow_used": {"%s:%d" % k: v for k, v in allow_used.items()}, "stale_allow": stale, "rc": rc}
@@ -1530,17 +1806,45 @@ def render(res):
         sc["sites"], len(sc["new"]) + len(sc["approved"]), len(sc["approved"]), len(sc["removed"]), len(sc["over"]), sc["manifest"], sc["budget"],
         len(sc["expired"]), len(sc["unknown"]), len(sc["trigger_errors"]), len(sc["approval_missing"]), len(sc["budget_errors"]), temp,
         sc.get("trigger_source", "json only")))
-    hl = sc.get("hook_lines", {"files": {}, "total": 0, "baseline": None, "over": []})
-    if hl["baseline"] is None:
-        out.append("hook LINES: %d (no baseline at %s; run --write-hook-lines-baseline)" % (hl["total"], HOOK_LINES_PATH))
+    hl = sc.get("hook_lines", {"files": {}, "total": 0, "totals": {}, "baseline": None, "over": [], "ratchet": [], "errors": [],
+                                "baseline_error": None, "fragment_hits": [], "macro_hits": [], "fragments": [], "docs": {},
+                                "tagged_total": 0, "h1": {}, "included": {}})
+    t = hl.get("totals", {})
+    split = "production %d, tests %d, project %d; renderer %d; tagged (old narrow count, information) %d" % (
+        t.get("production", 0), t.get("tests", 0), t.get("project", 0), t.get("renderer", 0), hl.get("tagged_total", 0))
+    if hl.get("baseline_error"):
+        out.append("hook LINES (honest H2): %d (%s); %s" % (hl["total"], split, hl["baseline_error"]))
+    elif hl["baseline"] is None:
+        out.append("hook LINES (honest H2): %d (no baseline at %s; run --write-hook-lines-baseline); %s" % (hl["total"], HOOK_LINES_PATH, split))
     else:
-        out.append("hook LINES: %d (baseline %d, trend %+d)" % (hl["total"], hl["baseline"], hl["total"] - hl["baseline"]))
+        out.append("hook LINES (honest H2): %d (baseline %d, trend %+d); %s" % (hl["total"], hl["baseline"], hl["total"] - hl["baseline"], split))
     for f, n in sorted(hl["files"].items(), key=lambda x: -x[1])[:12]:
-        out.append("  hook lines %s %d" % (f, n))
+        inc = hl.get("included", {}).get(f, 0)
+        out.append("  h2 %s %d%s" % (f, n, (" (h1 %d + %d included at class/function scope)" % (hl["h1"].get(f, 0), inc)) if inc else ""))
+    for x in hl.get("fragments", []):
+        out.append("  VP fragment at %s scope %s:%d <- %s (%d lines counted)" % (x["scope"], x["includer"], x["line"], x["fragment"], x["lines"]))
+    if hl.get("docs"):
+        out.append("  Bill documentation lines (information, not gated): " + ", ".join("%s %d" % kv for kv in sorted(hl["docs"].items())))
+    for line in hl.get("ratchet", [])[:12]:
+        out.append("  " + line)
     for line in hl["over"]:
         out.append("  OVER HOOK-LINES BASELINE " + line)
+    for line in hl.get("fragment_hits", []):
+        out.append("  FRAGMENT " + line)
+    for line in hl.get("macro_hits", []):
+        out.append("  " + line)
+    for line in hl.get("errors", []):
+        out.append("  UNRESOLVED (fail closed) " + line)
     if hl["over"]:
-        out.append("FAIL (hook lines): Bill hook lines grew past the baseline; collapse lines into a seam. The baseline only shrinks.")
+        out.append("FAIL (hook lines): the honest H2 of a Bill file or bucket grew past the baseline. Every VP line in a Bill file "
+                   "counts, tagged or not, and so does every VP line included at class or function scope: move logic into VP-V "
+                   "compiled files behind a one-line call. The baseline only shrinks.")
+    if hl.get("fragment_hits") or hl.get("macro_hits"):
+        out.append("FAIL (fragments): a VP file included at class or function scope must be registered in %s and included "
+                   "exactly once; a VP-V function-like macro must not be invoked in a Bill class or function scope." % FRAGMENTS_PATH)
+    if hl.get("errors") or hl.get("baseline_error"):
+        out.append("NO VERDICT (exit 2): an unresolved include at class or function scope, an unreadable diff, or a retired v1 "
+                   "hook-lines baseline.")
     out.append("hook gating: %d hook statements, %d unguarded, %d unverified markers, %d allowed, %d untagged; exit %d" % (
         hook_stmts, len(res["hits"]), len(res["unverified"]), len(res["allowed"]), len(res["untagged"]), res["rc"]))
     if sc["expired"] or sc["unknown"]:
@@ -1554,7 +1858,8 @@ def render(res):
                    "existing seam (refs/107-host-seams-plan.md s1), or get a HOOK-APPROVAL id from the coordinator "
                    "(docs/audit/hook-approvals.json); ceilings only go down.")
     if res["rc"] and not (sc["new"] or sc["over"] or sc["expired"] or sc["unknown"] or sc["trigger_errors"] or sc["approval_missing"] or
-                          sc["budget_errors"] or res.get("untagged_vpv")) or res["hits"] or res["unverified"]:
+                          sc["budget_errors"] or res.get("untagged_vpv") or hl["over"] or hl.get("fragment_hits") or
+                          hl.get("macro_hits") or hl.get("errors") or hl.get("baseline_error")) or res["hits"] or res["unverified"]:
         out.append("FAIL: a VP-V hook in a Bill file runs in the Original pathway. Wrap the call site in the canonical guard "
                    "(`if (!pipelineSlots.OriginalPathway())`), or move the logic into its VP-V module behind a `// VPV-GATED` "
                    "function with `if (originalPathway) return;`, or ask the lead for an allow-list entry with a reason.")
@@ -1570,8 +1875,90 @@ def render(res):
     return "\n".join(out)
 
 
+def selftest():
+    """The checker's H2 selftests (CC-audit-1 T3, T9, T11, T12; vp_footprint --selftest runs T1, T2, T4-T8, T10, T13)."""
+    import contextlib
+    import io
+    import tempfile
+    vp_footprint.h2_selftest()
+    bill = "src/VideoProcessor-Lib/vprenderer/Renderer.cpp"
+    slots = "{ Id::MotionEstimation, \"m\", Side::Input, 50, HookPoint::Prepass, Status::Built, Origin::Vp },\n"
+
+    def w(root, rel, text):
+        p = os.path.join(root, *rel.split("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def cli(root, *extra):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(["--root", root, "--no-git", "--files", bill] + list(extra))
+        return rc, buf.getvalue()
+
+    def bill_fn(body):
+        return "struct Impl\n{\n\tPipelineSlots::Registry pipelineSlots;\n\tvoid Render()\n\t{\n" + body + "\t}\n};\n"
+
+    reg = {"fragments": [{"fragment": "src/VP-V/host/Frag.inl", "includer": bill, "anchor_text": "void Render()"}]}
+    with tempfile.TemporaryDirectory() as root:
+        w(root, SLOTS_HEADER, slots)
+        # T3: a fragment included inside a function body: counted, and its unguarded VP call is a hit at the include line
+        w(root, "src/VP-V/host/Frag.inl", "\tVpMotion::Run(pipelineSlots);\n")
+        w(root, bill, bill_fn("\t\tdoBill();\n#include <VP-V/host/Frag.inl>   // VPV-HOOK\n"))
+        w(root, FRAGMENTS_PATH, json.dumps(reg))
+        res = run(root, DEFAULT_BASE, [bill], no_git=True)
+        hl = res["site_checks"]["hook_lines"]
+        assert hl["files"][bill] == 9 + 1, hl["files"]
+        assert hl["fragments"] and hl["fragments"][0]["scope"] == "function", hl["fragments"]
+        assert [(h["line"], h.get("via")) for h in res["hits"]] == [(7, "src/VP-V/host/Frag.inl:1")], res["hits"]
+        assert not hl["fragment_hits"], hl["fragment_hits"]
+        # ... and the same call guarded inside the fragment passes
+        w(root, "src/VP-V/host/Frag.inl", "\tif (!pipelineSlots.OriginalPathway())\n\t\tVpMotion::Run(pipelineSlots);\n")
+        assert run(root, DEFAULT_BASE, [bill], no_git=True)["hits"] == []
+        # T12: an unregistered fragment, a second include, a stale entry: hits (exit 1)
+        os.remove(os.path.join(root, *FRAGMENTS_PATH.split("/")))
+        rc, out = cli(root)
+        assert rc == 1 and "UNREGISTERED fragment src/VP-V/host/Frag.inl" in out, out
+        w(root, FRAGMENTS_PATH, json.dumps(reg))
+        w(root, bill, bill_fn("#include <VP-V/host/Frag.inl>   // VPV-HOOK\n#include <VP-V/host/Frag.inl>   // VPV-HOOK\n"))
+        rc, out = cli(root)
+        assert rc == 1 and "included 2 times" in out, out
+        w(root, bill, bill_fn("\t\tdoBill();\n"))
+        rc, out = cli(root)
+        assert rc == 1 and "stale" in out, out
+        os.remove(os.path.join(root, *FRAGMENTS_PATH.split("/")))
+        # T9: a VP-V function-like macro invoked at class or function scope is a hit; at file scope it is not
+        w(root, "src/VP-V/core/Macros.h", "#define VPV_STAMP(x) do { Vpv::Stamp(x); } while (0)\n")
+        w(root, bill, bill_fn("\t\tVPV_STAMP(1);   // VPV-HOOK\n"))
+        rc, out = cli(root)
+        assert rc == 1 and "macro-in-bill-scope" in out and "VPV_STAMP" in out, out
+        w(root, bill, "VPV_STAMP(0)\n" + bill_fn("\t\tdoBill();\n"))
+        assert "macro-in-bill-scope" not in cli(root)[1]
+        # an unresolved include at class / function scope: no verdict (exit 2)
+        w(root, bill, bill_fn("#include <VP-V/host/Missing.inl>   // VPV-HOOK\n"))
+        rc, out = cli(root)
+        assert rc == 2 and "UNRESOLVED" in out, out
+        # T11: a v1 baseline -> exit 2; --write-hook-lines-baseline migrates it to v2; growth then fails (exit 1)
+        w(root, bill, bill_fn("\t\tdoBill();\n"))
+        w(root, HOOK_LINES_PATH, json.dumps({"base_ref": DEFAULT_BASE, "total": 1, "files": {bill: 1}}))
+        rc, out = cli(root)
+        assert rc == 2 and "v1" in out, out
+        rc, out = cli(root, "--write-hook-lines-baseline")
+        assert rc == 0 and "migrating" in out, out
+        base = vp_footprint.read_json(os.path.join(root, *HOOK_LINES_PATH.split("/")))
+        assert (base["version"], base["metric"], base["files"][bill]) == (2, "H2", 8), base
+        assert cli(root)[0] == 0
+        w(root, bill, bill_fn("\t\tdoBill();\n\t\tmore();\n"))
+        rc, out = cli(root)
+        assert rc == 1 and "OVER HOOK-LINES BASELINE" in out, out
+        assert cli(root, "--write-hook-lines-baseline")[0] == 1, "the baseline only shrinks"
+    print("selftest OK")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Fail on a VP-V hook in a Bill file that is not gated off in the Original pathway.")
+    ap.add_argument("--selftest", action="store_true", help="run the H2 metric selftests (T1-T13) and exit")
     ap.add_argument("--root", default=os.path.dirname(HERE))
     ap.add_argument("--base-ref", default=DEFAULT_BASE)
     ap.add_argument("--files", nargs="*")
@@ -1587,18 +1974,50 @@ def main(argv=None):
     ap.add_argument("--write-budget", action="store_true", help="(re)seed docs/audit/hook-budget.json from the tree (ceilings = current counts)")
     ap.add_argument("--write-hook-lines-baseline", action="store_true", help="write docs/audit/hook-lines-baseline.json; refused if it would grow")
     args = ap.parse_args(argv)
+    if args.selftest:
+        return selftest()
     res = run(args.root, args.base_ref, args.files, args.no_git, args.fail_untagged, args.rev, args.since)
     if args.write_hook_lines_baseline:
         hl = res["site_checks"]["hook_lines"]
+        if hl["errors"]:
+            print("refusing to write a hook-lines baseline without a verdict: " + "; ".join(hl["errors"]))
+            return 2
         if hl["over"]:
             print("refusing to write a hook-lines baseline that grew: " + "; ".join(hl["over"]))
             return 1
+        if hl["baseline_error"]:
+            print("migrating %s from the retired v1 metric to the honest H2 (needs a WAIVER commit, rule 19/28)" % HOOK_LINES_PATH)
+        totals = {b: hl["totals"][b] for b in H2_BUCKETS}
+        sha = args.rev or "working tree"
+        if args.rev and not args.no_git:
+            try:
+                sha = git(["rev-parse", "--short=9", args.rev], args.root).strip()
+            except RuntimeError:
+                pass
         os.makedirs(os.path.join(args.root, "docs", "audit"), exist_ok=True)
         with open(os.path.join(args.root, *HOOK_LINES_PATH.split("/")), "w", encoding="utf-8", newline="\n") as fh:
-            json.dump({"_note": "Bill hook LINES (added vs Bill baseline, hook-tagged, production) per file; ratchet, only shrinks (tools/check_hook_gating.py).",
-                       "base_ref": args.base_ref, "total": hl["total"], "files": dict(sorted(hl["files"].items()))}, fh, indent=1)
+            json.dump({"_note": "Honest H2 per Bill-owned file (tools/check_hook_gating.py, CC-audit-1): non-blank added or changed lines vs "
+                                "the Bill baseline, tagged or not, plus the non-blank lines of every VP-authored file included at class "
+                                "or function scope; production, tests and project files (documentation files are reported, not gated). "
+                                "Ratchet: per-file ceilings and bucket totals only shrink. Written with --write-hook-lines-baseline.",
+                       "version": H2_METRIC_VERSION, "metric": "H2", "base_ref": args.base_ref, "measured_at": sha,
+                       "total": sum(totals.values()), "totals": dict(totals, renderer_information=hl["totals"]["renderer"]),
+                       "files": dict(sorted(hl["files"].items()))}, fh, indent=1)
             fh.write("\n")
-        print("wrote %s (%d files, %d lines)" % (HOOK_LINES_PATH, len(hl["files"]), hl["total"]))
+        # hook-budget.json carries the same per-file ceilings as `h2_ceiling` next to the site ceilings (the checker
+        # enforces the lower of the two)
+        bpath = os.path.join(args.root, *BUDGET_PATH.split("/"))
+        try:
+            bdoc = vp_footprint.read_json(bpath)
+        except (OSError, ValueError):
+            bdoc = None
+        if bdoc is not None:
+            bdoc["h2_ceiling"] = dict(sorted(hl["files"].items()))
+            with open(bpath, "w", encoding="utf-8") as fh:
+                json.dump(bdoc, fh, indent=1)
+                fh.write("\n")
+        print("wrote %s (%d files, H2 %d at %s: %s)" % (HOOK_LINES_PATH, len(hl["files"]), sum(totals.values()), sha,
+                                                       ", ".join("%s %d" % kv for kv in sorted(totals.items()))))
         return 0
     if args.write_manifest or args.write_budget:
         if args.rev:

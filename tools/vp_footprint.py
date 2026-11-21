@@ -12,12 +12,25 @@ Bill ref with a head ref.  Pure git + Python stdlib.
 Hook lines: an added line that ends with `// VPV-HOOK`, or lies between a line
 that is exactly `// VPV-HOOK` and a following `// VPV-HOOK-END`, or any line of
 a file whose first line is `// VPV-HOOK-FILE`.  Stray = adds - hook adds.
+Hook / stray are INFORMATION only.
+
+THE METRIC is the honest H2 (CC-audit-1, rule 19; WAIVER-CC-H2-METRIC):
+  H1 = non-blank added or changed lines vs the Bill ref (git diff -w --histogram
+       --no-renames -U0), tagged or not, in every Bill-owned file (present at the
+       Bill ref, outside src/VP-V/);
+  H2 = H1 + the non-blank lines, recursively, of every VP-authored file
+       (src/VP-V/**, or a file absent from Bill's tree) that an ADDED #include
+       pulls into a class or function scope of that Bill file (scope_map).
+An unresolved #include at class or function scope fails closed.  Moving lines
+of a Bill class body into a fragment included at the same place can never lower
+H2 (it rises by the include line).  --budget ceilings compare h2.
 """
 import argparse
 import csv
 import datetime
 import fnmatch
 import json
+import posixpath
 import re
 import subprocess
 import sys
@@ -25,7 +38,16 @@ import sys
 VPV_PREFIX = "src/VP-V/"
 PROJECT_EXT = (".vcxproj", ".filters", ".sln", ".props", ".targets")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-DIFF_ARGS = ["-w", "--diff-algorithm=histogram", "--no-color", "--no-ext-diff"]
+DIFF_ARGS = ["-w", "--diff-algorithm=histogram", "--no-renames", "--no-color", "--no-ext-diff"]
+INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]')
+# Include roots tried after the includer's own folder (the projects' AdditionalIncludeDirectories that VP-V uses).
+INCLUDE_ROOTS = ("src", "src/VideoProcessor-Lib", "src/VideoProcessor-ConfigCore")
+BUDGET_METRIC = "H2"
+
+
+def read_json(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 def git(args, repo=None, text=True):
@@ -48,34 +70,45 @@ def bucket_of(path):
 
 
 def parse_diff(text):
-    """Return {path: {'adds': n, 'dels': n, 'hunks': n, 'added_lines': [lineno,...]}}."""
+    """Return {path: {'adds': n, 'dels': n, 'hunks': n, 'added_lines': [lineno,...], 'nonblank_added_lines': [lineno,...],
+    'include_lines': [lineno,...] (added #include lines), 'added_text': {lineno: text}}}."""
     files = {}
     cur = None
     new_line = 0
+    in_header = False   # between `diff --git` and the first hunk: only there are `---` / `+++` file headers
     for raw in text.splitlines():
         if raw.startswith("diff --git "):
             cur = None
+            in_header = True
             continue
-        if raw.startswith("+++ "):
+        if in_header and raw.startswith("+++ "):
             p = raw[4:]
             if p == "/dev/null":
                 cur = None
             else:
                 p = p[2:] if p.startswith("b/") else p
-                cur = files.setdefault(p.strip('"'), {"adds": 0, "dels": 0, "hunks": 0, "added_lines": []})
+                cur = files.setdefault(p.strip('"'), {"adds": 0, "dels": 0, "hunks": 0, "added_lines": [],
+                                                      "nonblank_added_lines": [], "include_lines": [], "added_text": {}})
             continue
-        if raw.startswith("--- "):
+        if in_header and raw.startswith("--- "):
             continue
         if cur is None:
             continue
         m = HUNK_RE.match(raw)
         if m:
+            in_header = False
             cur["hunks"] += 1
             new_line = int(m.group(3))
             continue
         if raw.startswith("+"):
             cur["adds"] += 1
             cur["added_lines"].append(new_line)
+            body = raw[1:]
+            if body.strip():
+                cur["nonblank_added_lines"].append(new_line)
+                cur["added_text"][new_line] = body
+                if INCLUDE_RE.match(body):
+                    cur["include_lines"].append(new_line)
             new_line += 1
         elif raw.startswith("-"):
             cur["dels"] += 1
@@ -102,6 +135,304 @@ def hook_line_set(content):
     return out
 
 
+# ---------------------------------------------------------------- scopes and VP includes (H2)
+
+_FUNC_END_RE = re.compile(r"\)\s*(?:const\b|noexcept\b(?:\s*\([^()]*\))?|override\b|final\b|volatile\b|mutable\b|&&|&|"
+                          r"throw\s*\(\s*\)|->\s*[^{};]+?)*\s*$")
+_LAMBDA_END_RE = re.compile(r"\]\s*(?:mutable\s*)?$")
+_CTOR_INIT_RE = re.compile(r"\)\s*(?:noexcept\b\s*)?:(?!:)")
+_NAMESPACE_RE = re.compile(r"(?:^|\s)(?:inline\s+)?namespace\b[^=]*$")
+_EXTERN_C_RE = re.compile(r"(?:^|\s)extern\s*\"\"\s*$")
+_CLASS_RE = re.compile(r"\b(?:class|struct|union|enum)\b")
+_TRY_RE = re.compile(r"(?:^|\s)try\s*$")
+
+
+def _classify_brace(header, parent):
+    """The kind of the block a `{` opens: 'namespace' (file scope), 'class' (class / struct / union / enum body),
+    'function' (a function, lambda or function-try body; every block inside a function), 'init' (a brace
+    initializer or another data brace outside a function)."""
+    if parent == "function":
+        return "function"
+    h = " ".join(header.split())
+    if _NAMESPACE_RE.search(h) or _EXTERN_C_RE.search(h):
+        return "namespace"
+    if _FUNC_END_RE.search(h) or _LAMBDA_END_RE.search(h) or _TRY_RE.search(h):
+        return "function"
+    if _CTOR_INIT_RE.search(h) and (h.endswith(")") or h.endswith("}")):
+        return "function"
+    if re.search(r"=\s*$", h) or h.endswith(","):
+        return "init"
+    if _CLASS_RE.search(h):
+        return "class"
+    return "init"
+
+
+def _scope_name(stack):
+    top = stack[-1]
+    if top == "function":
+        return "function"
+    if top in ("class", "init"):
+        return "class"
+    return "file"
+
+
+def scope_map(text):
+    """The scope at the START of every line (1-based line n -> result[n - 1]): 'file' (namespace or global scope),
+    'class' (inside a class / struct / union / enum body or a data initializer outside functions) or 'function'
+    (inside a function or lambda body). A brace-stack lexer that ignores comments, string / char literals (raw
+    strings included), digit separators and preprocessor lines (with continuations). Line numbering = splitlines()."""
+    out = []
+    stack = ["namespace"]
+    headers = []
+    header = []
+    in_block = False
+    raw_end = None
+    pp_cont = False
+    for line in text.splitlines():
+        out.append(_scope_name(stack))
+        if pp_cont:
+            pp_cont = line.rstrip().endswith("\\")
+            continue
+        if not in_block and raw_end is None and line.lstrip().startswith("#"):
+            pp_cont = line.rstrip().endswith("\\")
+            continue
+        i, n = 0, len(line)
+        while i < n:
+            if in_block:
+                j = line.find("*/", i)
+                if j < 0:
+                    i = n
+                    break
+                in_block = False
+                i = j + 2
+                continue
+            if raw_end is not None:
+                j = line.find(raw_end, i)
+                if j < 0:
+                    i = n
+                    break
+                i = j + len(raw_end)
+                raw_end = None
+                header.append('""')
+                continue
+            c = line[i]
+            if c == "/" and line.startswith("//", i):
+                break
+            if c == "/" and line.startswith("/*", i):
+                in_block = True
+                i += 2
+                continue
+            if c == '"':
+                t = i
+                while t > 0 and (line[t - 1].isalnum() or line[t - 1] == "_"):
+                    t -= 1
+                prefix = line[t:i]
+                if prefix in ("R", "u8R", "uR", "UR", "LR"):
+                    p = line.find("(", i + 1)
+                    if p >= 0:
+                        raw_end = ")" + line[i + 1:p] + '"'
+                        i = p + 1
+                        continue
+                j = i + 1
+                while j < n and line[j] != '"':
+                    j += 2 if line[j] == "\\" else 1
+                header.append('""')
+                i = j + 1
+                continue
+            if c == "'":
+                t = i
+                while t > 0 and (line[t - 1].isalnum() or line[t - 1] in "_."):
+                    t -= 1
+                if t < i and line[t].isdigit():   # a digit separator (1'000'000)
+                    i += 1
+                    continue
+                j = i + 1
+                while j < n and line[j] != "'":
+                    j += 2 if line[j] == "\\" else 1
+                header.append("''")
+                i = j + 1
+                continue
+            if c == "{":
+                kind = _classify_brace("".join(header), stack[-1])
+                headers.append(header)
+                header = []
+                stack.append(kind)
+            elif c == "}":
+                if len(stack) > 1:
+                    kind = stack.pop()
+                    header = headers.pop()
+                    if kind == "init":
+                        header.append("{}")
+                    else:
+                        header = []
+                else:
+                    header = []
+            elif c == ";":
+                header = []
+            else:
+                header.append(c)
+            i += 1
+        header.append(" ")
+    return out
+
+
+def _norm_include(name):
+    return name.replace("\\", "/")
+
+
+def resolve_include(name, from_rel, read):
+    """(path, text) of the repo file an #include names, tried against the includer's folder and INCLUDE_ROOTS;
+    (None, None) when none exists. `read(rel)` returns the text or None."""
+    name = _norm_include(name)
+    bases = []
+    d = posixpath.dirname(from_rel)
+    if d:
+        bases.append(d)
+    bases.extend(INCLUDE_ROOTS)
+    for b in bases:
+        cand = posixpath.normpath(posixpath.join(b, name))
+        if cand.startswith("../"):
+            continue
+        text = read(cand)
+        if text is not None:
+            return cand, text
+    return None, None
+
+
+def is_vp_authored(path, bill_tree):
+    """VP-authored = under src/VP-V/, or (with a Bill tree to compare) a file Bill's tree does not have."""
+    return path.startswith(VPV_PREFIX) or (bill_tree is not None and path not in bill_tree)
+
+
+def _nonblank(text):
+    return sum(1 for ln in text.splitlines() if ln.strip())
+
+
+def _fragment_lines(path, text, read, bill_tree, seen, errors):
+    """Non-blank lines of a VP file pulled into a Bill scope plus, recursively, those of every VP-authored file
+    it includes (each file once per expansion: `seen` is the cycle / repeat guard). An include in it that
+    resolves to nothing is an error (fail closed)."""
+    total = _nonblank(text)
+    nested = []
+    for i, ln in enumerate(text.splitlines(), 1):
+        m = INCLUDE_RE.match(ln)
+        if not m:
+            continue
+        p, t = resolve_include(m.group(1), path, read)
+        if p is None:
+            errors.append("%s:%d unresolved #include <%s> inside a VP file pulled into a class or function scope" % (path, i, m.group(1)))
+            continue
+        if not is_vp_authored(p, bill_tree) or p in seen:
+            continue
+        seen.add(p)
+        n, sub = _fragment_lines(p, t, read, bill_tree, seen, errors)
+        total += n
+        nested.append({"fragment": p, "lines": n, "nested": sub})
+    return total, nested
+
+
+def vp_included_lines(includer, text, read, bill_tree, consider=None, scopes=None):
+    """The VP-authored files that #include lines of `text` (the Bill file `includer`) pull into a CLASS or
+    FUNCTION scope. `consider`: the line numbers to look at (the added lines; None = every line). Returns
+    (found, errors): found = [{line, scope, fragment, lines (non-blank, recursive), nested}], errors = unresolved
+    includes at class / function scope (fail closed). A file-scope include is never counted (refs/112 S8)."""
+    lines = text.splitlines()
+    cand = [i for i, ln in enumerate(lines, 1) if (consider is None or i in consider) and INCLUDE_RE.match(ln)]
+    if not cand:
+        return [], []
+    scopes = scopes or scope_map(text)
+    found, errors = [], []
+    for i in cand:
+        if scopes[i - 1] == "file":
+            continue
+        name = INCLUDE_RE.match(lines[i - 1]).group(1)
+        p, t = resolve_include(name, includer, read)
+        if p is None:
+            errors.append("%s:%d unresolved #include <%s> at %s scope (fail closed: cannot tell whose lines it pulls in)" % (
+                includer, i, name, scopes[i - 1]))
+            continue
+        if not is_vp_authored(p, bill_tree):
+            continue
+        n, nested = _fragment_lines(p, t, read, bill_tree, {p}, errors)
+        found.append({"line": i, "scope": scopes[i - 1], "fragment": p, "lines": n, "nested": nested})
+    return found, errors
+
+
+def h2_row(path, nonblank_added, include_lines, read, bill_tree, text=None):
+    """{h1, inc, h2, fragments, errors} for one Bill file. `include_lines` = the added #include line numbers (only
+    these can pull VP lines in; Bill's own includes are not added lines). `text` = the head text (read when needed)."""
+    h1 = len(nonblank_added)
+    found, errors = [], []
+    if include_lines:
+        if text is None:
+            text = read(path)
+        if text is not None:
+            found, errors = vp_included_lines(path, text, read, bill_tree, consider=set(include_lines))
+    inc = sum(f["lines"] for f in found)
+    return {"h1": h1, "inc": inc, "h2": h1 + inc, "fragments": found, "errors": errors}
+
+
+def file_scope_inl_lines(bill, head, repo=None):
+    """INFORMATION number reported in every CC commit (A20-CC order 3), not part of H2: the non-blank lines of every
+    VP-authored .inl reached from an ADDED file-scope #include in a Bill-owned src/ file (refs/112 S8 route), following
+    nested .inl includes only, each .inl counted once. Returns (total, {includer: lines}, {inl: lines})."""
+    bill_files = set(git(["ls-tree", "-r", "--name-only", bill], repo).splitlines())
+    diff = parse_diff(git(["diff"] + DIFF_ARGS + ["-U0", bill, head, "--", "src", ":(exclude)src/VP-V"], repo))
+    read = GitReader(head, repo)
+    seen = {}
+
+    def walk(q, t):
+        if q in seen:
+            return
+        seen[q] = _nonblank(t)
+        for ln in t.splitlines():
+            m = INCLUDE_RE.match(ln)
+            if m and m.group(1).endswith(".inl"):
+                r, u = resolve_include(m.group(1), q, read)
+                if r is not None and is_vp_authored(r, bill_files):
+                    walk(r, u)
+
+    per = {}
+    for p, d in sorted(diff.items()):
+        if p not in bill_files or not d["include_lines"]:
+            continue
+        text = read(p)
+        if text is None:
+            continue
+        scopes = scope_map(text)
+        lines = text.splitlines()
+        for i in d["include_lines"]:
+            name = INCLUDE_RE.match(lines[i - 1]).group(1)
+            if not name.endswith(".inl") or scopes[i - 1] != "file":
+                continue
+            q, t = resolve_include(name, p, read)
+            if q is None or not is_vp_authored(q, bill_files):
+                continue
+            before = set(seen)
+            walk(q, t)
+            per[p] = per.get(p, 0) + sum(n for k, n in seen.items() if k not in before)
+    return sum(seen.values()), per, seen
+
+
+class GitReader(object):
+    """read(rel) -> text or None for one revision (cached; existence from one ls-tree)."""
+
+    def __init__(self, rev, repo=None, files=None):
+        self.rev, self.repo = rev, repo
+        self.files = files if files is not None else set(git(["ls-tree", "-r", "--name-only", rev], repo).splitlines())
+        self.cache = {}
+
+    def __call__(self, rel):
+        if rel not in self.files:
+            return None
+        if rel not in self.cache:
+            try:
+                self.cache[rel] = git(["show", "%s:%s" % (self.rev, rel)], self.repo)
+            except RuntimeError:
+                self.cache[rel] = None
+        return self.cache[rel]
+
+
 def measure(bill, head, only_files=None, repo=None):
     bill_files = set(git(["ls-tree", "-r", "--name-only", bill], repo).splitlines())
     head_files = set(git(["ls-tree", "-r", "--name-only", head], repo).splitlines())
@@ -113,15 +444,22 @@ def measure(bill, head, only_files=None, repo=None):
     except RuntimeError:
         pass
     rows = []
+    read = GitReader(head, repo, head_files)
+    errors = []
     for path, d in diff.items():
         if path not in bill_prod or path not in head_files:
             continue
         hook = 0
         if path in marked and d["added_lines"]:
-            hs = hook_line_set(git(["show", "%s:%s" % (head, path)], repo))
+            hs = hook_line_set(read(path) or "")
             hook = sum(1 for n in d["added_lines"] if n in hs)
+        h = h2_row(path, d["nonblank_added_lines"], d["include_lines"], read, bill_files)
+        errors.extend(h["errors"])
         rows.append({"path": path, "bucket": bucket_of(path), "adds": d["adds"], "dels": d["dels"],
-                     "hunks": d["hunks"], "hook": hook, "stray": d["adds"] - hook})
+                     "hunks": d["hunks"], "hook": hook, "stray": d["adds"] - hook,
+                     "h1": h["h1"], "inc": h["inc"], "h2": h["h2"],
+                     "fragments": [{"line": f["line"], "scope": f["scope"], "fragment": f["fragment"], "lines": f["lines"]}
+                                   for f in h["fragments"]]})
     # misplaced files
     bill_dirs = {"/".join(f.split("/")[:2]) for f in bill_files if f.startswith("src/") and f.count("/") >= 2}
     misplaced, hookfiles = [], []
@@ -139,61 +477,97 @@ def measure(bill, head, only_files=None, repo=None):
     for f in cand:
         n = counts.get(f, 0)
         (hookfiles if f in hookset else misplaced).append({"path": f, "lines": n})
-    rows.sort(key=lambda r: (-r["stray"], r["path"]))
+    rows.sort(key=lambda r: (-r["h2"], r["path"]))
     if only_files:
         pats = [p.replace("\\", "/") for p in only_files]
         shown = [r for r in rows if any(r["path"] == p or fnmatch.fnmatch(r["path"], p) for p in pats)]
         have = {r["path"] for r in shown}
         for p in pats:
             if p not in have and p in bill_prod:
-                shown.append({"path": p, "bucket": bucket_of(p), "adds": 0, "dels": 0, "hunks": 0, "hook": 0, "stray": 0})
+                shown.append({"path": p, "bucket": bucket_of(p), "adds": 0, "dels": 0, "hunks": 0, "hook": 0, "stray": 0,
+                              "h1": 0, "inc": 0, "h2": 0, "fragments": []})
     else:
         shown = rows
     totals = {}
     for b in ("production", "tests", "project"):
         sel = [r for r in rows if r["bucket"] == b]
-        totals[b] = {k: sum(r[k] for r in sel) for k in ("adds", "dels", "hunks", "hook", "stray")}
+        totals[b] = {k: sum(r[k] for r in sel) for k in ("adds", "dels", "hunks", "hook", "stray", "h1", "inc", "h2")}
         totals[b]["files"] = len(sel)
-    return {"bill": bill, "head": head, "files": shown, "totals": totals,
+    return {"bill": bill, "head": head, "files": shown, "totals": totals, "errors": errors,
             "misplaced": {"count": len(misplaced), "lines": sum(m["lines"] for m in misplaced), "files": misplaced},
             "hook_files": {"count": len(hookfiles), "lines": sum(m["lines"] for m in hookfiles), "files": hookfiles}}
 
 
 def check_budget(rows, budget):
-    """Return (bad, notes). `upstream_candidates` (path -> {lines, ids, waiver}) annotates stray lines that are
-    owner-approved updates of Bill's own code/tests (PR candidates). They still count as stray (the ceiling holds
-    them, by waiver); the annotation is checked so it cannot go stale: the file must still carry at least that
-    many stray lines and its ceiling must cover them."""
+    """Return (bad, notes). The ceilings compare the honest H2 (`metric` must be "H2": a budget without it holds the
+    retired stray ceilings and is refused, re-baseline with --write-budget under a WAIVER commit). `upstream_candidates`
+    (path -> {lines, ids, waiver}) annotates H2 lines that are owner-approved updates of Bill's own code/tests (PR
+    candidates). They still count (the ceiling holds them, by waiver); the annotation is checked so it cannot go
+    stale: the file must still carry at least that many H2 lines and its ceiling must cover them."""
+    bad, notes = [], []
+    if budget.get("metric") != BUDGET_METRIC:
+        return (["budget metric %r is not %r: the stray ceilings are retired (CC-audit-1, rule 19); re-baseline with "
+                 "--write-budget under a WAIVER commit" % (budget.get("metric"), BUDGET_METRIC)], notes)
     default = budget.get("default")
     limits = budget.get("files", {})
-    bad, notes = [], []
     by_path = {r["path"]: r for r in rows}
     for r in rows:
         lim = limits.get(r["path"], default)
-        if lim is not None and r["stray"] > lim:
-            bad.append("%s stray %d > budget %d" % (r["path"], r["stray"], lim))
+        if lim is not None and r["h2"] > lim:
+            bad.append("%s h2 %d > budget %d" % (r["path"], r["h2"], lim))
     for path, up in sorted(budget.get("upstream_candidates", {}).items()):
         n = int(up.get("lines", 0))
         lim = limits.get(path, default)
-        stray = by_path[path]["stray"] if path in by_path else 0
-        notes.append("Upstream candidates: %s %d of %d stray lines (%s, %s)" % (path, n, stray, up.get("ids", "?"),
-                                                                                 up.get("waiver", "no waiver id")))
+        h2 = by_path[path]["h2"] if path in by_path else 0
+        notes.append("Upstream candidates: %s %d of %d H2 lines (%s, %s)" % (path, n, h2, up.get("ids", "?"),
+                                                                              up.get("waiver", "no waiver id")))
         if lim is None or n > lim:
             bad.append("%s upstream candidates %d exceed budget %s" % (path, n, lim))
-        if n > stray:
-            bad.append("%s upstream candidates %d > stray %d: lines upstreamed or removed, ratchet the annotation "
-                       "and the ceiling down" % (path, n, stray))
+        if n > h2:
+            bad.append("%s upstream candidates %d > h2 %d: lines upstreamed or removed, ratchet the annotation "
+                       "and the ceiling down" % (path, n, h2))
     return bad, notes
 
 
+def write_budget(path, res, migrate_note=None):
+    """Rewrite the budget's `files` ceilings to the measured h2 (keeps every other key). Refused (returns the
+    reasons) when a ceiling would grow, unless the budget is still on the retired stray metric (migration)."""
+    try:
+        budget = read_json(path)
+    except (OSError, ValueError):
+        budget = {"default": 0}
+    rows = res["files"]
+    migrating = budget.get("metric") != BUDGET_METRIC
+    if not migrating:
+        bad = [b for b in check_budget(rows, budget)[0] if " h2 " in b]
+        if bad:
+            return bad
+    budget["metric"] = BUDGET_METRIC
+    budget["base_ref"] = res["bill"]
+    budget["measured_at"] = res["head"]
+    budget["files"] = dict(sorted((r["path"], r["h2"]) for r in rows if r["h2"] > 0))
+    if migrate_note and migrating:
+        budget.setdefault("_updates", []).insert(0, migrate_note)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(budget, fh, indent=1, ensure_ascii=False)
+        fh.write("\n")
+    return []
+
+
 def render(res, top):
-    out = ["Footprint: bill=%s head=%s" % (res["bill"], res["head"]),
-           "%-6s %-5s %-5s %-6s %-5s  %s" % ("stray", "adds", "dels", "hunks", "hook", "file (bucket)")]
+    out = ["Footprint: bill=%s head=%s (the metric is h2 = h1 + inc; stray / hook are information)" % (res["bill"], res["head"]),
+           "%-6s %-6s %-5s %-6s %-5s %-5s %-6s %-5s  %s" % ("h2", "h1", "inc", "stray", "adds", "dels", "hunks", "hook", "file (bucket)")]
     for r in res["files"][:top]:
-        out.append("%-6d %-5d %-5d %-6d %-5d  %s (%s)" % (r["stray"], r["adds"], r["dels"], r["hunks"], r["hook"], r["path"], r["bucket"]))
+        out.append("%-6d %-6d %-5d %-6d %-5d %-5d %-6d %-5d  %s (%s)" % (r["h2"], r["h1"], r["inc"], r["stray"], r["adds"], r["dels"],
+                                                                       r["hunks"], r["hook"], r["path"], r["bucket"]))
+        for f in r.get("fragments", []):
+            out.append("       + %s scope include at line %d: %s (%d lines)" % (f["scope"], f["line"], f["fragment"], f["lines"]))
     out.append("Totals per bucket:")
     for b, t in res["totals"].items():
-        out.append("  %-10s files=%d adds=%d dels=%d hunks=%d hook=%d stray=%d" % (b, t["files"], t["adds"], t["dels"], t["hunks"], t["hook"], t["stray"]))
+        out.append("  %-10s files=%d h2=%d h1=%d inc=%d adds=%d dels=%d hunks=%d hook=%d stray=%d" % (
+            b, t["files"], t["h2"], t["h1"], t["inc"], t["adds"], t["dels"], t["hunks"], t["hook"], t["stray"]))
+    for e in res.get("errors", []):
+        out.append("UNRESOLVED (fail closed): " + e)
     m, h = res["misplaced"], res["hook_files"]
     out.append("Misplaced VP files in Bill folders: %d files, %d lines" % (m["count"], m["lines"]))
     for f in m["files"][:top]:
@@ -214,13 +588,93 @@ def selftest():
     assert hook_line_set("// VPV-HOOK-FILE\nx\n") == {1, 2}
     assert bucket_of("src/X/Foo.vcxproj") == "project" and bucket_of("src/VideoProcessor-Test/a.cpp") == "tests"
     assert bucket_of("src/VideoProcessor-Lib/Foo.cpp") == "production"
-    rows = [{"path": "t.cpp", "stray": 10}]
-    b = {"default": 0, "files": {"t.cpp": 10}, "upstream_candidates": {"t.cpp": {"lines": 4}}}
+    rows = [{"path": "t.cpp", "stray": 0, "h2": 10}]
+    b = {"metric": "H2", "default": 0, "files": {"t.cpp": 10}, "upstream_candidates": {"t.cpp": {"lines": 4}}}
     assert check_budget(rows, b)[0] == [], check_budget(rows, b)
     b["upstream_candidates"]["t.cpp"]["lines"] = 11
     assert len(check_budget(rows, b)[0]) == 2, check_budget(rows, b)
-    assert check_budget([{"path": "t.cpp", "stray": 11}], {"default": 0, "files": {"t.cpp": 10}})[0]
+    assert check_budget([{"path": "t.cpp", "stray": 0, "h2": 11}], {"metric": "H2", "default": 0, "files": {"t.cpp": 10}})[0]
+    assert check_budget(rows, {"default": 0, "files": {"t.cpp": 99}})[0], "a stray-metric budget is refused"
+    h2_selftest()
     print("selftest OK")
+
+
+def _reader(files):
+    return lambda rel: files.get(rel)
+
+
+def h2_selftest():
+    """The H2 selftests of CC-audit-1 that need no git (T1, T2, T4-T8, T10, T13; the checker runs T3, T9, T11, T12)."""
+    frag20 = "".join("\tint m%d;\n" % i for i in range(20))
+    files = {"src/VP-V/host/F.h": frag20}
+    bill_tree = {"src/A.cpp"}
+    read = _reader(files)
+
+    def h2_of(text, added=None):
+        lines = text.splitlines()
+        nb = [i for i, ln in enumerate(lines, 1) if ln.strip() and (added is None or i in added)]
+        inc = [i for i in nb if INCLUDE_RE.match(lines[i - 1])]
+        return h2_row("src/A.cpp", nb, inc, read, bill_tree, text)
+
+    # T1: a 20-line VP fragment inside `struct Impl { };` -> 1 + 20
+    t1 = "struct Impl\n{\n#include <VP-V/host/F.h>\n};\n"
+    r = h2_of(t1, {3})
+    assert (r["h1"], r["inc"], r["h2"]) == (1, 20, 21), r
+    assert r["fragments"][0]["scope"] == "class", r
+    # T2: the same include after `};` (file scope) -> 1
+    r = h2_of("struct Impl\n{\n};\n#include <VP-V/host/F.h>\n", {4})
+    assert (r["h2"], r["fragments"]) == (1, []), r
+    # function scope is counted too (the guard part of T3 is the checker's)
+    r = h2_of("void f()\n{\n\tif (x)\n\t{\n#include <VP-V/host/F.h>\n\t}\n}\n", {5})
+    assert r["h2"] == 21 and r["fragments"][0]["scope"] == "function", r
+    # T4: a fragment that includes another VP .inl -> recursive count
+    files["src/VP-V/host/G.h"] = "// outer\n#include <VP-V/host/F.h>\n\n"
+    r = h2_of("struct Impl\n{\n#include <VP-V/host/G.h>\n};\n", {3})
+    assert r["inc"] == 2 + 20 and r["h2"] == 23, r
+    files["src/VP-V/host/C1.h"] = "#include \"C2.h\"\n"
+    files["src/VP-V/host/C2.h"] = "#include \"C1.h\"\nx\n"
+    r = h2_of("struct S {\n#include <VP-V/host/C1.h>\n};\n", {2})
+    assert r["inc"] == 1 + 2, r   # cycle guard
+    # T5 / T6 / T7 on the diff parser: a `// VPV-HOOK note` line and an untagged line count; blank lines do not
+    d = parse_diff("diff --git a/src/A.cpp b/src/A.cpp\n--- a/src/A.cpp\n+++ b/src/A.cpp\n@@ -1,0 +2,4 @@\n"
+                   "+\tx(); // VPV-HOOK note\n+\ty();\n+\n+   \t\n")["src/A.cpp"]
+    assert d["nonblank_added_lines"] == [2, 3] and d["added_lines"] == [2, 3, 4, 5], d
+    # a `+++ `-looking content line inside a hunk is an added line, not a file header
+    d = parse_diff("diff --git a/src/A.cpp b/src/A.cpp\n--- a/src/A.cpp\n+++ b/src/A.cpp\n@@ -1,0 +1,2 @@\n+++ x;\n+-- y;\n")
+    assert list(d) == ["src/A.cpp"] and d["src/A.cpp"]["nonblank_added_lines"] == [1, 2], d
+    # T8 (anti-gaming): 10 added lines of a class body moved into a fragment at the same place -> h2 never decreases
+    body10 = "".join("\tint v%d = 0;   // VPV-HOOK\n" % i for i in range(10))
+    before = "struct Impl\n{\n\tint bill;\n" + body10 + "};\n"
+    r0 = h2_of(before, set(range(4, 14)))
+    files["src/VP-V/host/Moved.h"] = body10
+    after = "struct Impl\n{\n\tint bill;\n#include <VP-V/host/Moved.h>   // VPV-HOOK\n};\n"
+    r1 = h2_of(after, {4})
+    assert (r0["h2"], r1["h2"]) == (10, 11), (r0, r1)
+    # T10: a Bill-baseline include at class scope (not an added line, the pch <vld.h> form) -> 0
+    r = h2_of("struct S\n{\n\t#include <vld.h>\n};\n", set())
+    assert r["h2"] == 0 and r["errors"] == [], r
+    # an ADDED unresolved include at class scope fails closed
+    r = h2_of("struct S\n{\n#include <nowhere.h>\n};\n", {3})
+    assert r["errors"] and "fail closed" in r["errors"][0], r
+    # a Bill (non-VP) header at class scope is Bill's text, not counted
+    files["src/A.h"] = "a\nb\n"
+    bill_tree.add("src/A.h")
+    r = h2_of("struct S\n{\n#include \"A.h\"\n};\n", {3})
+    assert r["h2"] == 1 and r["errors"] == [], r
+    # T13: a `// VPV-HOOK M2 ...` opener with `// VPV-HOOK-END`: every non-blank added line counts regardless
+    t13 = "void f()\n{\n\t// VPV-HOOK M2 P5b-2: note\n\ta();\n\tb();\n\t// VPV-HOOK-END\n}\n"
+    r = h2_of(t13, {3, 4, 5, 6})
+    assert r["h2"] == 4, r
+    # the lexer: comments, strings, raw strings, char literals and digit separators never move a brace
+    tricky = ('namespace n {\nconst char* s = "{";\nconst char* r = R"x(}{)x";\nchar c = \'{\';\nint big = 1\'000;\n'
+              '/* { */ // {\nstruct T {\n#define M() {\n#include <VP-V/host/F.h>\n};\n}\n#include <VP-V/host/F.h>\n')
+    sc = scope_map(tricky)
+    assert sc[8] == "class" and sc[11] == "file", sc
+    assert scope_map("extern \"C\" {\nint x;\n}\n")[1] == "file"
+    assert scope_map("Foo::Foo() : a(1), b{2}\n{\n\tx();\n}\n")[2] == "function"
+    assert scope_map("auto l = [](int v)\n{\n\treturn v;\n};\n")[2] == "function"
+    assert scope_map("static const int t[] = {\n1,\n};\n")[1] == "class"
+    assert scope_map("enum class E : int\n{\nA,\n};\n")[2] == "class"
 
 
 def main():
@@ -231,6 +685,11 @@ def main():
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--append")
     ap.add_argument("--budget")
+    ap.add_argument("--write-budget", metavar="JSON",
+                    help="rewrite the budget's ceilings to the measured h2 (refused if one would grow; the one-time stray -> H2 "
+                         "migration needs a WAIVER commit)")
+    ap.add_argument("--inl", action="store_true", help="print the file-scope .inl lines compiled in Bill TUs (information) and exit")
+    ap.add_argument("--note", help="with --write-budget: the _updates entry recorded on the stray -> H2 migration")
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--repo")
@@ -238,7 +697,27 @@ def main():
     if a.selftest:
         selftest()
         return 0
+    if a.inl:
+        total, per, files = file_scope_inl_lines(a.bill, a.head, a.repo)
+        for p, n in sorted(per.items()):
+            print("  %s %d" % (p, n))
+        print("file-scope .inl lines compiled in Bill TU at %s: %d (%d .inl files; information, not part of H2)" % (
+            a.head, total, len(files)))
+        return 0
     res = measure(a.bill, a.head, a.files, a.repo)
+    if a.write_budget:
+        if a.files:
+            print("--write-budget needs every file (no --files)", file=sys.stderr)
+            return 2
+        if res["errors"]:
+            print("refusing to write a budget: unresolved includes:\n" + "\n".join(res["errors"]), file=sys.stderr)
+            return 2
+        bad = write_budget(a.write_budget, res, a.note)
+        if bad:
+            print("refusing to write a budget that grew:\n" + "\n".join(bad), file=sys.stderr)
+            return 1
+        print("wrote %s (h2 ceilings at %s)" % (a.write_budget, a.head))
+        return 0
     if a.json:
         print(json.dumps(res, indent=1))
     else:
@@ -261,8 +740,11 @@ def main():
                         t["production"]["stray"], t["production"]["hunks"], t["tests"]["adds"], t["tests"]["stray"],
                         t["project"]["adds"], t["project"]["hook"], t["project"]["stray"],
                         res["misplaced"]["count"], res["misplaced"]["lines"], res["hook_files"]["lines"]])
+    if res["errors"]:
+        print("UNRESOLVED include at class or function scope (fail closed, no verdict):\n" + "\n".join(res["errors"]), file=sys.stderr)
+        return 2
     if a.budget:
-        budget = json.load(open(a.budget))
+        budget = read_json(a.budget)
         bad, notes = check_budget(res["files"], budget)
         for n in notes:
             print(n)

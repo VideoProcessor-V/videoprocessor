@@ -893,26 +893,79 @@ class UntaggedVpReferenceTest(unittest.TestCase):
 
 class HookLinesTest(unittest.TestCase):
     def test_hook_lines_metric_blocks_above_baseline(self):
+        # The gated metric is the honest H2 (WAIVER-CC-H2-METRIC): under --no-git there is no Bill baseline, so every
+        # non-blank line of the file counts (fail closed), tagged or not. _bill("") has 8 non-blank lines.
         NL = chr(10)
         body = chr(9) * 2 + "if (!pipelineSlots.OriginalPathway()) { pipelineSlots.Prepass(); } // VPV-HOOK" + NL
+        untagged = chr(9) * 2 + "doBill();" + NL
         with tempfile.TemporaryDirectory() as root:
             _w(root, BILL, _bill(body))
             _w(root, "src/VP-V/core/PipelineSlots.h", SLOTS)
             rc, out = _run(root)
-            self.assertIn("hook LINES: 1 (no baseline", out)
+            self.assertIn("hook LINES (honest H2): 9 (no baseline", out)
             rc, out = _run(root, extra=["--write-hook-lines-baseline"])
             self.assertEqual(rc, 0, out)
             rc, out = _run(root)
-            self.assertIn("hook LINES: 1 (baseline 1, trend +0)", out)
-            _w(root, BILL, _bill(body + body))
+            self.assertIn("hook LINES (honest H2): 9 (baseline 9, trend +0)", out)
+            _w(root, BILL, _bill(body + untagged))
             rc, out = _run(root)
             self.assertEqual(rc, 1, out)
-            self.assertIn("OVER HOOK-LINES BASELINE", out)
+            self.assertIn("OVER HOOK-LINES BASELINE", out, "an UNTAGGED added line counts too")
             rc, out = _run(root, extra=["--write-hook-lines-baseline"])
             self.assertEqual(rc, 1)
             _w(root, BILL, _bill(""))
             rc, out = _run(root)
-            self.assertIn("hook LINES: 0 (baseline 1, trend -1)", out)
+            self.assertIn("hook LINES (honest H2): 8 (baseline 9, trend -1)", out)
+
+
+class HonestH2MetricTest(unittest.TestCase):
+    """CC-audit-1 CHECKER-TIGHTENING SPEC (WAIVER-CC-H2-METRIC): T1-T13 and the dbbef8c07 -> a68b5e7f7 regression fixture."""
+
+    def test_selftests_t1_to_t13(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(chg.selftest(), 0)
+            chg.vp_footprint.selftest()
+        self.assertEqual(buf.getvalue().count("selftest OK"), 2)
+
+    def test_v2_baseline_and_budget_agree(self):
+        base = chg.vp_footprint.read_json(os.path.join(ROOT, *chg.HOOK_LINES_PATH.split("/")))
+        self.assertEqual((base["version"], base["metric"], base["base_ref"]), (2, "H2", chg.DEFAULT_BASE))
+        self.assertEqual(base["total"], sum(base["totals"][b] for b in chg.H2_BUCKETS))
+        self.assertEqual(base["total"], sum(base["files"].values()))
+        budget = chg.vp_footprint.read_json(os.path.join(ROOT, *chg.BUDGET_PATH.split("/")))
+        for f, n in budget.get("h2_ceiling", {}).items():
+            self.assertLessEqual(base["files"].get(f, 0), n, f)
+        self.assertNotEqual(base["total"], 393, "never a baseline at the fragment-gamed 393")
+
+    @staticmethod
+    def _have(sha):
+        return subprocess.run(["git", "-C", ROOT, "cat-file", "-e", sha + "^{commit}"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
+
+    def test_regression_fixture_fragment_moves_raise_renderer_h2(self):
+        """r2/cc-hooks 12.1-12.4 moved Bill-file lines into fragments included in class bodies: the narrow count fell
+        451 -> 393, the honest H2 must RISE: renderer 5523 -> 5583 (CC-audit-1 HONEST COUNT)."""
+        for sha in ("dbbef8c07", "a68b5e7f7"):
+            if not self._have(sha):
+                self.skipTest("fixture commit %s not in this clone" % sha)
+        got = {}
+        for sha in ("dbbef8c07", "a68b5e7f7"):
+            res = chg.run(ROOT, chg.DEFAULT_BASE, rev=sha)
+            got[sha] = res["site_checks"]["hook_lines"]
+        self.assertEqual(got["dbbef8c07"]["totals"]["renderer"], 5523)
+        self.assertEqual(got["a68b5e7f7"]["totals"]["renderer"], 5583)
+        self.assertEqual((got["dbbef8c07"]["totals"]["production"], got["dbbef8c07"]["total"]), (18645, 23279))
+        self.assertEqual((got["a68b5e7f7"]["totals"]["production"], got["a68b5e7f7"]["total"]), (18705, 23339))
+        self.assertEqual((got["dbbef8c07"]["tagged_total"], got["a68b5e7f7"]["tagged_total"]), (451, 393))
+        frags = sorted((x["includer"].rsplit("/", 1)[-1], x["fragment"].rsplit("/", 1)[-1], x["lines"]) for x in got["a68b5e7f7"]["fragments"])
+        self.assertEqual(frags, [("LibplaceboVideoRenderer.cpp", "LvrImplDejudderState.h", 33),
+                                 ("LibplaceboVideoRenderer.cpp", "LvrImplMembers.h", 140),
+                                 ("LibplaceboVideoRenderer.cpp", "LvrImplRenderAheadState.h", 24),
+                                 ("LibplaceboVideoRenderer.cpp", "LvrImplVectorEngineState.h", 36),
+                                 ("LibplaceboVideoRenderer.h", "LvrClassMembers.h", 20)])
+        self.assertEqual(got["dbbef8c07"]["fragments"], [])
+        self.assertEqual(len(got["a68b5e7f7"]["fragment_hits"]), 5, "five unregistered class-scope fragments")
 
 
 class SinceKeepsUnverifiedMarkersTest(unittest.TestCase):
