@@ -678,16 +678,30 @@ namespace VideoProcessorTest
 			// Ruling (b) (GEM-Q15d): near white (luma > 0.99) the in-range part itself moves with the input
 			// (model, 980/1000/200: 9 codes per input code at gain > 1; 0.6-0.8 with the boost at gain <= 1).
 			// The WARP input quantisation (up to 1 code, see idle) cannot be referenced away there. The 1.5-code
-			// budget is 2 x 0.5 code of rounding plus 0.5 x 1 code of input error. So the residual is not asserted
-			// where that sensitivity exceeds 0.5 code per code. Those cases stay covered by the pulse, hue, C(1),
-			// range and near-white noise checks. Every other case keeps the 1.5-code residual.
+			// budget is 2 x 0.5 code of rounding plus 0.5 x 1 code of input error. So where that sensitivity
+			// exceeds 0.5 code per code, a fixed 1.5 codes does not fit.
 			// (15fdbd39c / ed0e6021f TRX, 2.0 threshold: 980/1000/200 R in the boosted sweep at gain < 1 was off by
 			// 1.84 codes from its input code and 1.72 from its idle code, depending on the gain.)
-			auto residualCheckable = [&luma, &partSensitivity](const Rgb& in, double gain, double b, double domain)
+			// Coordinator ruling on 6972991f7 (WAIVER-GEM-W1-LED-T3): no case is exempt. Those near-white cases are
+			// asserted against their own derived budget, 1 code (rounding) + 0.5 x the in-range part's per-code
+			// slope x 1 code (input error); every other case keeps 1.5 codes, unchanged.
+			auto residualBudget = [&luma, &partSensitivity](const Rgb& in, double gain, double b, double domain, bool& derived)
 			{
-				return !(luma(in) > 0.99 && partSensitivity(in, gain, b, domain) > 0.5);
+				const double slope = luma(in) > 0.99 ? partSensitivity(in, gain, b, domain) : 0.0;
+				derived = slope > 0.5;
+				return derived ? 1.0 + 0.5 * slope * 1.0 : 1.5;
 			};
-			int residualChecked = 0, residualNearWhite = 0;
+			int residualChecked = 0, residualNearWhite = 0, residualExempt = 0;
+			double worstDerivedResidual = 0.0, worstDerivedBudget = 0.0, worstDerivedRatio = 0.0;
+			auto noteDerived = [&](double residual, double budget)
+			{
+				if (residual / budget > worstDerivedRatio)
+				{
+					worstDerivedRatio = residual / budget;
+					worstDerivedResidual = residual;
+					worstDerivedBudget = budget;
+				}
+			};
 
 			std::wstring problems;
 			double worstHueOff = 0.0, worstHueExcess = 0.0;
@@ -706,19 +720,22 @@ namespace VideoProcessorTest
 					const Split sp = split(in, s.gain, s.boost, s.domain);
 					// The in-range part, rendered as an in-range colour: its neighbour's compensation.
 					const Codes part = render(sp.p);
-					if (residualCheckable(in, s.gain, s.boost, s.domain))
 					{
-						++residualChecked;
+						bool derived = false;
+						const double budget = residualBudget(in, s.gain, s.boost, s.domain, derived);
+						++(derived ? residualNearWhite : residualChecked);
 						for (int k = 0; k < 3; ++k)
 						{
 							const double expected = part[k] + excursionCodes(c, sp, k);
-							if (std::abs(out[k] - expected) > 1.5)
+							const double residual = std::abs(out[k] - expected);
+							if (derived)
+								noteDerived(residual, budget);
+							if (residual > budget)
 								problems += L"channel " + std::to_wstring(k) + L" of " + text(c) + L": " + std::to_wstring(out[k]) +
-									L" for in-range part " + std::to_wstring(part[k]) + L" + k f e = " + std::to_wstring(expected) + where;
+									L" for in-range part " + std::to_wstring(part[k]) + L" + k f e = " + std::to_wstring(expected) +
+									L", residual " + std::to_wstring(residual) + L" > budget " + std::to_wstring(budget) + where;
 						}
 					}
-					else
-						++residualNearWhite;
 					if (sp.f < 1.0)
 					{
 						++scaledExcursions;   // headroom follows the compensated white (the GPU's own C(1))
@@ -950,16 +967,18 @@ namespace VideoProcessorTest
 						set(g, boost, domain);
 						const Split sp = split(in, g, boost, domain);
 						const Codes out = render(in), part = render(sp.p);
-						const bool checkable = residualCheckable(in, g, boost, domain);
-						if (checkable)
-							++residualChecked;
-						else
-							++residualNearWhite;
+						bool derived = false;
+						const double budget = residualBudget(in, g, boost, domain, derived);
+						++(derived ? residualNearWhite : residualChecked);
 						for (int k = 0; k < 3; ++k)
 						{
-							if (checkable && std::abs(out[k] - (part[k] + excursionCodes(c, sp, k))) > 1.5)
+							const double residual = std::abs(out[k] - (part[k] + excursionCodes(c, sp, k)));
+							if (derived)
+								noteDerived(residual, budget);
+							if (residual > budget)
 								problems += L"sweep " + text(c) + L" channel " + std::to_wstring(k) + L": " + std::to_wstring(out[k]) +
-									L" vs in-range part " + std::to_wstring(part[k]) + L" at gain " + std::to_wstring(g) + L", domain " +
+									L" vs in-range part " + std::to_wstring(part[k]) + L", residual " + std::to_wstring(residual) +
+									L" > budget " + std::to_wstring(budget) + L" at gain " + std::to_wstring(g) + L", domain " +
 									std::to_wstring(static_cast<int>(domain)) + L"; ";
 							if (i > 0)
 							{
@@ -1005,14 +1024,19 @@ namespace VideoProcessorTest
 				L" deg (boost off), worst excess over the in-range part's boost tilt " + std::to_wstring(worstHueExcess) +
 				L" deg; edge pairs worst in-range / all-channel step " + std::to_wstring(worstEdgeIn) + L" / " +
 				std::to_wstring(worstEdgeAll) + L" codes; sweep worst step against the in-range part " +
-				std::to_wstring(worstStep) + L" codes; residual asserted " + std::to_wstring(residualChecked) +
-				L", near-white (bounded by the noise check) " + std::to_wstring(residualNearWhite) + L"\n").c_str());
-			// Non-vacuous, and the near-white exemption is exactly the model's: 980/1000/200 in 12 of the 17
-			// settings (gains 1.3 / 2.5, and gain <= 1 with the boost; boost off at gain < 1 stays asserted) and
-			// in all 130 boosted sweep steps. 480 cases stay asserted.
-			if (residualChecked != 480 || residualNearWhite != 142)
-				problems += L"residual coverage: asserted " + std::to_wstring(residualChecked) + L" (expected 480), near-white " +
-					std::to_wstring(residualNearWhite) + L" (expected 142); ";
+				std::to_wstring(worstStep) + L" codes; residual asserted " + std::to_wstring(residualChecked + residualNearWhite) +
+				L" (1.5-code budget " + std::to_wstring(residualChecked) + L", derived near-white budget " +
+				std::to_wstring(residualNearWhite) + L"), exempt " + std::to_wstring(residualExempt) +
+				L"; worst derived-budget case: residual " + std::to_wstring(worstDerivedResidual) + L" of budget " +
+				std::to_wstring(worstDerivedBudget) + L"\n").c_str());
+			// Every case asserted (622, none exempt). The derived budget applies exactly where the model says:
+			// 980/1000/200 in 12 of the 17 settings and in all 130 boosted sweep steps (142); 480 at 1.5 codes.
+			if (residualChecked + residualNearWhite != 622 || residualExempt != 0 || residualChecked != 480 ||
+				residualNearWhite != 142)
+				problems += L"residual coverage: asserted " + std::to_wstring(residualChecked + residualNearWhite) +
+					L" (expected 622: " + std::to_wstring(residualChecked) + L" at 1.5 codes, expected 480; " +
+					std::to_wstring(residualNearWhite) + L" derived, expected 142), exempt " + std::to_wstring(residualExempt) +
+					L" (expected 0); ";
 			fixture.CaptureLog(nullptr);
 			Assert::IsTrue(problems.empty(), (problems + L"log: " + std::wstring(log.begin(), log.end())).c_str());
 			AssertCleanLibplaceboLogExceptPreOutputBug(log);
