@@ -59,9 +59,11 @@ $cpuFilter = Get-VpTestFilter -Kind cpu
 $gpuClauses = @((Get-VpTestFilter -Kind gpu) -split '\|' | Where-Object { $_ -notlike 'Category=*' })
 function GeneratorExcludes([string]$test) {
     $method = $test.Substring($test.LastIndexOf('::') + 2)
+    # vstest's ~ is a case-INSENSITIVE substring match: the planner matches the same way, so it and the filter agree.
+    $ic = [System.StringComparison]::OrdinalIgnoreCase
     foreach ($c in $gpuClauses) {
-        if ($c.StartsWith('FullyQualifiedName~')) { if ($test.Contains($c.Substring(19))) { return $true } }
-        elseif ($c.StartsWith('Name~')) { if ($method.Contains($c.Substring(5))) { return $true } }
+        if ($c.StartsWith('FullyQualifiedName~')) { if ($test.IndexOf($c.Substring(19), $ic) -ge 0) { return $true } }
+        elseif ($c.StartsWith('Name~')) { if ($method.IndexOf($c.Substring(5), $ic) -ge 0) { return $true } }
         else { throw "unrecognised clause in the generated GPU filter: $c" }
     }
     $false
