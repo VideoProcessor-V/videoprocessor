@@ -51,6 +51,7 @@ namespace VectorEngineHookTest
 				bool modelGlobal = false, staticFromModel = false, matcherSkipped = false, narrowPass = false, e1Pass = false,
 					fadeNormalised = false;
 				bool narrowDroppedEngine = false;
+				bool e1DroppedEngine = false;
 				const char* rejected = "";
 				const char* gpuNotApplied = "";
 			};
