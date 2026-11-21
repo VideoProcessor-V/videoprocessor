@@ -913,8 +913,34 @@ namespace VpMotion
 			++counter;
 			// Not fed (no board): today's single lease, nothing valid holds nothing. Fed: the window keeps the other pairs' leases (an
 			// absent read of one pair never drops a pair still inside the window; an epoch move does, below).
-			if (queueBoard_.load(std::memory_order_acquire) == nullptr)
+			const VpSkeleton::QueueWindowBoard* const absentBoard = queueBoard_.load(std::memory_order_acquire);
+			if (absentBoard == nullptr)
+			{
 				leaseCounters_.droppedSingle += flowLeases_.size(), flowLeases_.clear();
+				return false;
+			}
+			// GF-P4 S8: fed, an absent read still drops EVERY lease when the producer has stopped or a validity / board epoch moved
+			// (the old-epoch payloads are never held until a later valid read); a plain miss keeps the window's leases.
+			if (flowLeases_.empty())
+				return false;
+			bool drop = !LoopProducer();
+			if (!drop)
+			{
+				VpSkeleton::QueueWindow absentWin;
+				const uint64_t absentBoardEpoch = absentBoard->Read(&absentWin) ? absentWin.epoch : 0;
+				const uint64_t absentValidityEpoch = motionValidity.Epoch();
+				for (const auto& kv : flowLeases_)
+					if (kv.second->validityEpoch != absentValidityEpoch || kv.second->boardEpoch != absentBoardEpoch)
+					{
+						drop = true;
+						break;
+					}
+			}
+			if (drop)
+			{
+				leaseCounters_.droppedEpoch += flowLeases_.size();
+				flowLeases_.clear();
+			}
 			return false;
 		};
 		if (!LoopProducer() || motionLowLatencyNoVectors)
