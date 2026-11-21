@@ -3159,6 +3159,93 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual(uint64_t(1), demand->ExternalErasures(rig.Host()), L"nothing left to erase: the count does not move");
 		}
 
+		static bool HasAheadDemand(VpSkeleton::SkeletonMemo* memo, uint16_t depth, const char* by)
+		{
+			for (const VpSkeleton::SkeletonMemo::AheadDemand& d : memo->ActiveAheadDemands())
+				if (d.id == uint16_t(VpSkeleton::kP4SourceStats) && d.form == 0 && d.depth == depth && d.by != nullptr && std::string(d.by) == by)
+					return true;
+			return false;
+		}
+
+		static void DeclareT11Reader(Rig& rig, uint8_t aheadDepth, int* owner)
+		{
+			VpSkeleton::ConsumerDecl c;
+			c.id = 0x0613;
+			c.name = "t11 reader";
+			VpSkeleton::AddConsume(c, VpSkeleton::kP4SourceStats, 0);
+			c.aheadDepth = aheadDepth;
+			rig.sk.SetExternalDemand(rig.Host(), owner, std::vector<VpSkeleton::ConsumerDecl>(1, c), std::vector<VpSkeleton::ProductId>());
+		}
+
+		// GF-P2b AHEAD-DECL call sites (gate G6 C2): a consumer's declared ahead depth reaches the lane fills (the lane is re-bound, once per
+		// change), the requester is named, and a depth-only change neither rebuilds the lane state nor re-binds again when repeated. UNION
+		// test: ConsumerDecl::aheadDepth is GF-P1's. The window is read after the NEXT Begin in (b) / (c): it is derived at the start of
+		// a Begin, before that Begin's re-bind.
+		TEST_METHOD(ADeclaredAheadDepthReachesTheLaneFillsAndTheWindowNamesTheRequester)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			FeedQueueTerms(rig);
+			rig.Life(RE::Lifecycle::GpuCreated);
+			int64_t s = 1;
+			for (; s <= 4; ++s)
+			{
+				rig.Frame(s);
+				PresentFacts(rig, s);
+			}
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			int owner = 0;
+			// (a)
+			const uint64_t binds0 = memo->LaneBinds();
+			DeclareT11Reader(rig, 3, &owner);
+			rig.Frame(s);
+			PresentFacts(rig, s++);
+			Assert::IsTrue(HasAheadDemand(memo, 3, "t11 reader"), L"(a) P4's lane fill declares depth 3 by the reader");
+			Assert::AreEqual(binds0 + 1, memo->LaneBinds(), L"(a) one re-bind");
+			// (b) only the depth changes
+			const VpSkeleton::LaneState* stateBefore = rig.sk.LaneOf(rig.Host())->State().get();
+			const uint64_t binds1 = memo->LaneBinds();
+			DeclareT11Reader(rig, 9, &owner);
+			rig.Frame(s);
+			PresentFacts(rig, s++);
+			Assert::IsTrue(rig.sk.LaneOf(rig.Host())->State().get() == stateBefore, L"(b) the lane state is the same");
+			Assert::AreEqual(binds1 + 1, memo->LaneBinds(), L"(b) one re-bind");
+			Assert::IsTrue(HasAheadDemand(memo, 9, "t11 reader"), L"(b) the uncapped request is the demand");
+			// (c) the same declaration again
+			const uint64_t binds2 = memo->LaneBinds();
+			DeclareT11Reader(rig, 9, &owner);
+			rig.Frame(s);
+			PresentFacts(rig, s++);
+			Assert::AreEqual(binds2, memo->LaneBinds(), L"(c) nothing changed: no re-bind");
+			Assert::IsTrue(rig.sk.Active(rig.Host()), L"(c) the lane is still active");
+			const VpSkeleton::QueueWindow w = memo->Window();   // derived at the Begin after the depth-9 re-bind
+			Assert::IsTrue(w.aheadBinding == VpSkeleton::AheadBinding::Ceiling, L"(b) the ceiling binds");
+			Assert::IsTrue(w.aheadBy != nullptr && std::string(w.aheadBy) == "t11 reader", L"(b) the window names the requester");
+			const std::string text = VpSkeleton::AheadComputeText(w);
+			Assert::IsTrue(text.find("by t11 reader") != std::string::npos && text.find("ceiling") != std::string::npos,
+				std::wstring(text.begin(), text.end()).c_str());
+			rig.sk.ClearExternalDemand(rig.Host(), &owner);
+		}
+
+		// (d) an owner fill that declares an aheadDepth but names no requester reads "owner fill (CPU)" in the window.
+		TEST_METHOD(AnUnnamedAheadRequestKeepsTheFormWordingInTheWindow)
+		{
+			Rig rig(Lane("on"));
+			FeedAheadWindow(rig, 8);   // a P10 CPU owner fill with an aheadDepth and no aheadBy
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 5; ++s)
+			{
+				rig.Frame(s);
+				PresentFacts(rig, s);
+			}
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			const VpSkeleton::QueueWindow w = memo->Window();
+			Assert::IsTrue(w.aheadBy != nullptr && std::string(w.aheadBy) == "owner fill (CPU)");
+		}
+
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
 		{
 			Rig rig(Lane("on"));
