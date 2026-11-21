@@ -203,6 +203,46 @@ namespace VideoProcessorTest
 			Assert::IsTrue(p13b.Ok() && p13b.gpu.resource == &rig.lumaB, L"and of B");
 		}
 
+		// (a2) The real order over two render frames (RunDejudderEstimate offers B only; the render frame's own seq A is never offered,
+		// gate note R19): frame 1 serves B from the product and leaves the render frame's P13 to its Entrance image; frame 2 serves the
+		// same frame as A from the product made in frame 1 (keepFrames 1: filled once, USED twice, no refill), again without touching
+		// that frame's P13, which stays the Entrance image (here a different texture, as with subtitle composition).
+		TEST_METHOD(TheLastPairsBIsTheNextPairsAWithoutAnOfferOfTheRenderFrame)
+		{
+			Rig rig;
+			VpMotion::VectorEngine engine(rig.Host());
+			const VpMotion::MatcherPyramid::Source src = engine.MatcherPyramidSource();
+			// Frame 1: render seq 10, pair (10, 11).
+			rig.memo->OnSeal(10);
+			Vpv::Capture::SourcePlanes::BeginFrame(rig.Host());
+			Assert::IsTrue(engine.OfferMatcherPlanes(11, &rig.lumaB, &rig.chromaB, false), L"B offered");
+			for (int lv : { 1, 3, 5 })
+				Assert::IsTrue(Ask(src, 11, lv, &rig.lumaB).state == Level::State::Product, L"frame 1: B from the product");
+			Assert::AreEqual(3, rig.p1Calls, L"B's three levels filled once");
+			const Level a1 = Ask(src, 10, 1, &rig.lumaA);
+			Assert::IsTrue(a1.state == Level::State::Unavailable && a1.cause == "no shared source luma for this frame",
+				L"the first pair's A has no product (visible own build)");
+			Assert::IsTrue(Vpv::Capture::SourcePlanes::OfferFrame(rig.Host(), 10, 1, rig.Image(&rig.other, &rig.chromaA, false)), L"Entrance of 10");
+			const AcquireResult e1 = rig.memo->Acquire(VpSkeleton::kP13SourceRing, 10, AcquireForm::Gpu);
+			Assert::IsTrue(e1.Ok() && e1.gpu.resource == &rig.other, L"frame 1's P13 is its Entrance image, as at base");
+
+			// Frame 2: render seq 11, pair (11, 12); 11 is not offered again.
+			rig.memo->OnSeal(11);
+			Vpv::Capture::SourcePlanes::BeginFrame(rig.Host());
+			Assert::IsTrue(engine.OfferMatcherPlanes(12, &rig.lumaA, &rig.chromaA, false), L"the new B offered");
+			for (int lv : { 1, 3, 5 })
+			{
+				const Level r = Ask(src, 11, lv, &rig.lumaA);   // A's luma is a new upload (another texture), the same frame
+				Assert::IsTrue(r.state == Level::State::Product && r.tex == &rig.level,
+					(L"frame 2: A from frame 1's product, level " + std::to_wstring(lv) + L": " + std::wstring(r.cause.begin(), r.cause.end())).c_str());
+			}
+			Assert::AreEqual(3, rig.p1Calls, L"A's levels were not filled again: one computation per frame");
+			Assert::IsTrue(Ask(src, 11, 1, &rig.lumaA, true).cause == "range differs from the shared plane", L"A's range is checked against B's offer");
+			Assert::IsTrue(Vpv::Capture::SourcePlanes::OfferFrame(rig.Host(), 11, 2, rig.Image(&rig.other, &rig.chromaB, false)), L"Entrance of 11");
+			const AcquireResult e2 = rig.memo->Acquire(VpSkeleton::kP13SourceRing, 11, AcquireForm::Gpu);
+			Assert::IsTrue(e2.Ok() && e2.gpu.resource == &rig.other, L"frame 2's P13 is its Entrance image, not the matcher's upload");
+		}
+
 		// (b) MED-2: a seq that was not offered is declined from the offer table, before any P13 Acquire: no decline is cached,
 		// so the frame's later offer and P13 readers are served.
 		TEST_METHOD(ASeqNotOfferedIsDeclinedWithoutCachingADecline)
