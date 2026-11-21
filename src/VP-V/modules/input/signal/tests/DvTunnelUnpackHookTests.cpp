@@ -367,19 +367,13 @@ namespace VideoProcessorTest
 				}
 				else
 				{
-					// No trusted DM: the renderer hands on zero planes (never the packed bytes).
-					out.intensity.assign(planePixels, 0);
-					out.chroma.assign(planePixels, 0);
+					// No trusted DM: AnalyzeFrame returned BLACK; verify the CPU formatter also produces all zeros.
+					Assert::IsTrue(out.result == CRGBDolbyVisionTunnelFormatter::FrameResult::BLACK,
+						(std::wstring(name) + L": expected FrameResult::BLACK").c_str());
 					for (size_t i = 0; i < 2 * planePixels; ++i)
 						Assert::AreEqual(0, static_cast<int>(want[i]), (std::wstring(name) + L": the CPU formatter is not black").c_str());
 				}
 				return out;
-			};
-			auto black = [](const Routed& r)
-			{
-				for (uint16_t v : r.intensity) if (v != 0) return false;
-				for (uint16_t v : r.chroma) if (v != 0) return false;
-				return true;
 			};
 			// The packed pixels of the damaged frame, unpacked anyway: not black (what the route
 			// must never show).
@@ -407,18 +401,16 @@ namespace VideoProcessorTest
 			{
 				const Routed r = route(analyzed, cpu, damaged.input, counter++, L"DM lost");
 				if (r.result == CRGBDolbyVisionTunnelFormatter::FrameResult::BLACK)
-				{
-					Assert::IsTrue(black(r), L"DM lost: black planes");
 					blackAt = lost;
-				}
 			}
 			Logger::WriteMessage(("DM loss: black after " + std::to_string(blackAt + 1) + " damaged frame(s)\n").c_str());
 			Assert::IsTrue(blackAt >= 0, L"a lasting DM loss reaches black within the loss limit");
 			Assert::IsFalse(analyzed.GetDolbyVisionTunnelMetadata().valid || analyzed.GetDolbyVisionTunnelMetadata().allowSdrFallback,
 				L"after DV lock a lost DM is neither trusted nor allowed the SDR passthrough (the packed pixels)");
-			// Still lost: stays black.
+			// Still lost: stays BLACK.
 			for (int more = 0; more < 5; ++more)
-				Assert::IsTrue(black(route(analyzed, cpu, damaged.input, counter++, L"still lost")), L"stays black while the DM is lost");
+				Assert::IsTrue(route(analyzed, cpu, damaged.input, counter++, L"still lost").result ==
+					CRGBDolbyVisionTunnelFormatter::FrameResult::BLACK, L"stays BLACK while the DM is lost");
 			// A fresh, complete DM (a new metadata ID, as a sender restarts): the GPU picture again.
 			Tests::DvSender::SenderPicture fresh = picture;
 			fresh.Embed(Tests::DvSender::Packetize(Tests::DvSender::DmBody(2048)));
@@ -427,7 +419,7 @@ namespace VideoProcessorTest
 				restored = route(analyzed, cpu, fresh.input, counter++, L"fresh DM").result ==
 					CRGBDolbyVisionTunnelFormatter::FrameResult::PICTURE;
 			Assert::IsTrue(restored, L"a fresh DM brings the GPU picture back");
-			// A stream whose first frame already has a damaged DM: zero DV planes from the start (before
+			// A stream whose first frame already has a damaged DM: BLACK from the start (before
 			// any lock the renderer may still choose the SDR passthrough - allowSdrFallback, reported).
 			{
 				CRGBDolbyVisionTunnelFormatter coldAnalyzed, coldCpu;
@@ -436,8 +428,8 @@ namespace VideoProcessorTest
 				for (uint64_t n = 1; n <= 3; ++n)
 				{
 					const Routed r = route(coldAnalyzed, coldCpu, damaged.input, n, L"never locked");
-					Assert::IsTrue(r.result == CRGBDolbyVisionTunnelFormatter::FrameResult::BLACK && black(r),
-						L"never locked with a damaged DM: zero planes, not the packed pixels");
+					Assert::IsTrue(r.result == CRGBDolbyVisionTunnelFormatter::FrameResult::BLACK,
+						L"never locked with a damaged DM: BLACK, not the packed pixels");
 				}
 				Logger::WriteMessage(coldAnalyzed.GetDolbyVisionTunnelMetadata().allowSdrFallback ?
 					"never locked: SDR passthrough allowed (no DV lock yet)\n" : "never locked: SDR passthrough not allowed\n");
