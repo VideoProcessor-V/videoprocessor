@@ -396,6 +396,30 @@ namespace SourceFrameTapTestsNs
 			host.Worker().Stop();
 		}
 
+		// GF-P2b S3 (2), test first (GV): with frame_analysis_store OFF by configuration and the store raised by a consumer's demand (the LED
+		// drive, through the skeleton), the frames that arrive after the raise get frame-analysis records and reach the tap's sink. If this is
+		// RED the follow-up is in VpFrameAnalysis::Host (the configured-off shared-plane flag), not here.
+		TEST_METHOD(ARaisedStoreWithTheConfigurationOffProducesRecordsForTheFramesAfterTheRaise)
+		{
+			VpFrameAnalysis::Host host;
+			std::vector<SourceFrameView> got;
+			Tap::Register(&host, [&got](const SourceFrameView& v) { got.push_back(v); });
+			host.Owner(&host).Configure(false);
+			Tap::SetStoreDemand(&host, true, "LED drive");
+			Assert::IsTrue(host.Enabled(), L"the demand turns the store on");
+			Assert::IsTrue(host.RaisedByDemand());
+			host.Worker().Stop();   // the raise started the worker; stopped so the arrival below is drained by the test
+			Frame frame = Make(Kind::Uyvy, 1);
+			VpFrameAnalysis::Host::AttachIfEnabled(frame.source);
+			host.OnArrival(5, frame.source, FrameAnalysis::Rect{}, 0, false);
+			host.Worker().Drain();
+			Assert::IsTrue(host.Store().HasRecord(5), L"a record exists for the frame that arrived after the raise");
+			Assert::AreEqual<size_t>(1, got.size(), L"and the tap's sink got the frame");
+			Tap::SetStoreDemand(&host, false, std::string());
+			Tap::Unregister(&host);
+			host.Worker().Stop();
+		}
+
 		TEST_METHOD(ADemandMadeBeforeTheHostRegisteredIsAppliedAtRegistrationAndAGoneHostIsNeverCalled)
 		{
 			int key = 0;
