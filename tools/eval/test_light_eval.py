@@ -76,8 +76,8 @@ class LightMetrics(unittest.TestCase):
         self.assertTrue(r["dark"]["value_ok"])
         self.assertGreater(r["dark"]["band_mse"], 0.0)
         self.assertEqual(ident["dark"]["band_mse"], 0.0)
-        if r["mid"]["value_ok"]:
-            self.assertLess(r["mid"]["band_mse"], r["dark"]["band_mse"] * 1e-3 + 1e-12)
+        self.assertTrue(r["mid"]["value_ok"])
+        self.assertLess(r["mid"]["band_mse"], r["dark"]["band_mse"] * 1e-3 + 1e-12)
 
     def test_banding_na_when_empty(self):
         flat = np.full((64, 64), 900.0)
