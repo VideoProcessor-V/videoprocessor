@@ -313,6 +313,19 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1ull, rig.engine.FlowReads().noPair);
 		}
 
+		TEST_METHOD(OnePruneKeepsThreePairsBehindTheRenderFrame)   // GEM VE-P2-LIFE
+		{
+			Rig rig;
+			VpMotion::FlowView view;
+			rig.engine.PruneBehindRender(11);   // rendering 11: its own pair (10, 11) stays
+			Assert::IsTrue(rig.engine.FlowOf(11, view));
+			rig.engine.PruneBehindRender(13);   // 13 renders: pairs ending at 11, 12, 13 are kept (3 behind)
+			Assert::IsTrue(rig.engine.FlowOf(11, view));
+			rig.engine.PruneBehindRender(14);   // the pair ending at 11 is now 4 behind
+			VpMotion::FlowView after;
+			Assert::IsFalse(rig.engine.FlowOf(11, after));
+		}
+
 		TEST_METHOD(NoProducerNoSizeNoPairAndLowLatencyEachAnswerFalseByReason)
 		{
 			VpMotion::FlowView view;

@@ -202,6 +202,44 @@ namespace LaneAheadClaimTestsNs
 			Assert::IsTrue(r.SlotBytes(kP4SourceStats, 1) == r.ExpectedStats(1), L"sealed bytes bit-identical");
 		}
 
+		// GEM-W1A S2 (skeleton MUST-1): an AHEAD run reads its lag-0 input in the Published state (made by a worker, not yet Sealed: the
+		// seal of that frame has not run). P4 of frame 1 is made now through the worker's published P1, which is not computed again.
+		TEST_METHOD(AnAheadRunReadsAPublishedInput)
+		{
+			LaneRig r;
+			Assert::IsTrue(r.Configure(), L"built");
+			for (uint64_t s = 0; s < 3; ++s)
+				r.lane.OnSourceFrame(r.View(s));
+			r.lane.OnRenderStart(0, 4000);   // the render state exists; frame 1 is not sealed
+			const std::shared_ptr<LaneState> st = r.lane.State();
+			Assert::IsTrue(st != nullptr && st->IndexOf(kP1HalfLuma) >= 0, L"state");
+			const size_t p1 = size_t(st->IndexOf(kP1HalfLuma));
+			SlotSet& set = st->table->At(p1);
+			LaneTicket t;
+			Assert::IsTrue(set.Claim(1, Provenance::AheadLane, ~uint64_t(0), &t) == ClaimResult::Claimed, L"a worker owns P1 of frame 1");
+			Assert::IsTrue(set.Writable(t), L"writable");
+			const std::vector<uint8_t> half = r.ExpectedHalf(1);
+			Assert::IsTrue(st->bufs[p1] && st->bufs[p1]->Bytes() == half.size(), L"P1 buffer");
+			set.LaneHeader(t).honoured = r.ind.StampOf(1);   // as a worker stamps it
+			std::memcpy(st->bufs[p1]->Ring(size_t(t.slot)), half.data(), half.size());
+			Assert::IsTrue(set.Publish(t) == PublishResult::Published, L"the worker published P1 of frame 1");
+			Assert::IsTrue(set.StateOf(1) == SlotState::Published, L"Published, not Sealed");
+			const AnalysisLane::AheadRunResult p4 = r.lane.RunAheadNow(kP4SourceStats, 1);
+			Assert::IsTrue(p4.kind == AnalysisLane::AheadRun::Ran, L"P4 of frame 1 made now through the Published P1");
+			// P4 of frame 1 is itself Published (frame 1 is not sealed): read from its ring slot with allowPublished. ReadOf is the render
+			// read of a SEALED frame and answers None here.
+			Assert::IsTrue(st->IndexOf(kP4SourceStats) >= 0, L"P4 node");
+			const size_t p4i = size_t(st->IndexOf(kP4SourceStats));
+			SlotSet& set4 = st->table->At(p4i);
+			Assert::IsTrue(set4.StateOf(1) == SlotState::Published, L"P4 of frame 1 Published by the ahead run");
+			const ReadInfo ri4 = set4.Read(1, true);
+			Assert::IsTrue(ri4.kind == ReadInfo::Ring && st->bufs[p4i], L"P4 in its ring slot");
+			const uint8_t* p4bytes = st->bufs[p4i]->Ring(size_t(ri4.index));
+			const std::vector<uint8_t> made(p4bytes, p4bytes + st->bufs[p4i]->Bytes());
+			Assert::IsTrue(made == r.ExpectedStats(1), L"P4 = the one-shot law over the published input");
+			Assert::IsTrue(r.lane.AheadMadeByRender() == 1u, L"only P4 was made: the published P1 was read, not recomputed");
+		}
+
 		// LANE-T2: a frame a worker is writing is Claimed (the caller reports LanePending: visible, no wait, no second compute); the claim is
 		// a compare-exchange on the slot word, so a racing worker and render thread never both own a frame.
 		TEST_METHOD(WorkerRunningGivesLanePending)

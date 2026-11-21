@@ -221,8 +221,9 @@ namespace DitherVectors
 		Discontinuity,   // the motion epoch moved (resync, queue reset, seek, format / settings / source change): cause named
 		Drop,            // a hole in the kept frames (a dropped / missed frame)
 		StampsRefuse,    // the resync stamps refuse the span (SpanStatus Invalid)
+		ConfirmedCut,    // the scene product confirmed this frame as a cut (the PairValidAt veto, owner Q5): never a plain discontinuity
 	};
-	constexpr int kCompensationWhys = 7;
+	constexpr int kCompensationWhys = 8;
 	inline const char* CompensationWhyName(CompensationWhy w)
 	{
 		switch (w)
@@ -234,6 +235,7 @@ namespace DitherVectors
 		case CompensationWhy::Discontinuity: return "discontinuity";
 		case CompensationWhy::Drop: return "a dropped frame";
 		case CompensationWhy::StampsRefuse: return "the resync stamps refuse the pair";
+		case CompensationWhy::ConfirmedCut: return "a confirmed scene cut";
 		}
 		return "?";
 	}
@@ -246,6 +248,7 @@ namespace DitherVectors
 		MotionValidity::State::SpanState span = MotionValidity::State::SpanState::Unknown;   // SpanStatus(seq - 1, seq)
 		uint64_t invalidations = 0;        // MotionValidity Total() (0 = nothing invalidated yet: the stream's start)
 		MotionValidity::Cause lastCause = MotionValidity::Cause::Gap;
+		bool confirmedCut = false;         // the call site's !PairValidAt(seq - 1, seq) on an otherwise valid contiguous pair (counted there)
 	};
 	struct Compensation
 	{
@@ -273,6 +276,9 @@ namespace DitherVectors
 		if (!f.configured) { c.why = CompensationWhy::NotConfigured; return c; }
 		if (f.engineOff) { c.why = CompensationWhy::EngineOff; return c; }
 		if (f.continuity == C::Break) { c.why = CompensationWhy::Drop; return c; }
+		// A cadence repeat keeps compensation on (the motion is known to be zero, exact; nothing is invalid): decided BEFORE the
+		// pair test, whose pair (seq - 1, seq) is not the one a repeat draws (GEM W1A VE MUST-8 / sigma-delta MUST-7).
+		if (f.continuity == C::Repeat) { c.on = true; c.why = CompensationWhy::None; return c; }
 		if (f.continuity == C::First || !f.keptPairValid)
 		{
 			c.why = f.invalidations == 0 ? CompensationWhy::FirstFrame : CompensationWhy::Discontinuity;
@@ -280,6 +286,7 @@ namespace DitherVectors
 			return c;
 		}
 		if (f.span == MotionValidity::State::SpanState::Invalid) { c.why = CompensationWhy::StampsRefuse; return c; }
+		if (f.confirmedCut) { c.why = CompensationWhy::ConfirmedCut; return c; }
 		c.on = true;
 		c.why = CompensationWhy::None;
 		return c;
@@ -382,12 +389,12 @@ namespace DitherVectors
 			if (!haveCompensation_)
 				return std::string();
 			const std::string state = lastCompensation_.on ? std::string("on") : "off (" + CompensationText(lastCompensation_) + ")";
-			char counts[240];
-			std::snprintf(counts, sizeof(counts), "; on %llu, off: engine %llu, discontinuity %llu, drop %llu, refused %llu, first %llu, rule %llu",
+			char counts[300];
+			std::snprintf(counts, sizeof(counts), "; on %llu, off: engine %llu, discontinuity %llu, drop %llu, refused %llu, first %llu, rule %llu, cut %llu",
 				CompensationCount(CompensationWhy::None), CompensationCount(CompensationWhy::EngineOff),
 				CompensationCount(CompensationWhy::Discontinuity), CompensationCount(CompensationWhy::Drop),
 				CompensationCount(CompensationWhy::StampsRefuse), CompensationCount(CompensationWhy::FirstFrame),
-				CompensationCount(CompensationWhy::NotConfigured));
+				CompensationCount(CompensationWhy::NotConfigured), CompensationCount(CompensationWhy::ConfirmedCut));
 			return "dither motion compensation: " + state + counts;
 		}
 		std::string VectorsSegment() const
@@ -438,7 +445,7 @@ namespace DitherVectors
 			if (c.why != Why::OnDemandMissed)
 				return std::string();
 			const std::string note = FallbackCatalog::NoPairNote(c.onDemandCause);
-			return note.empty() ? std::string() : ": " + note + ")";
+			return note.empty() ? std::string() : ": " + note + ")";   // NoPairNote leaves its "(" open (as FallbackCatalog::Motion closes it); the caller closes its own
 		}
 		unsigned long long Total() const
 		{

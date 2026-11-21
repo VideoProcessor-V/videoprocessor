@@ -89,7 +89,14 @@ namespace Vpv
 					return nullptr;
 				for (const Slot& s : slots_)
 					if (s.key.load(std::memory_order_acquire) == host)
-						return s.aux.load(std::memory_order_acquire);
+					{
+						void* aux = s.aux.load(std::memory_order_acquire);
+						// GEM SK-LIFECYCLE: a release and another host's claim may land between the key load and the aux load; the key
+						// is read again and a changed slot returns null (never another host's aux).
+						if (s.key.load(std::memory_order_acquire) != host)
+							return nullptr;
+						return aux;
+					}
 				return nullptr;
 			}
 

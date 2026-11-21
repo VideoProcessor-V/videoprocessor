@@ -18,6 +18,7 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/hub/HostSlots.h>
 #include <VP-V/core/hub/HostState.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/FramesInFlight.h>
@@ -2373,6 +2374,29 @@ namespace SkeletonModuleTestsNs
 			registry.ResetForTesting();
 		}
 
+
+		// GEM-W1A S2 (skeleton MUST-6): the module's host tables (gpuSlots_, memoHosts_) are HostSlots. A released host's slot claimed by
+		// another host never answers the first host's Aux with the second's; a re-claim of the first starts with no aux of its own.
+		TEST_METHOD(HostSlotsAuxOfAReleasedAndReclaimedHostIsNeverAnotherHostsAux)
+		{
+			struct Entry { const void* host = nullptr; };
+			Vpv::Hub::HostSlots<Entry, 2> slots;
+			int a = 0, b = 0, auxA = 0, auxB = 0;
+			Assert::IsTrue(slots.Claim(&a), L"A claimed");
+			slots.SetAux(&a, &auxA);
+			Assert::IsTrue(slots.Aux(&a) == &auxA, L"A's aux");
+			slots.Remove(&a, true);   // A released: slot and aux cleared
+			Assert::IsTrue(slots.Aux(&a) == nullptr, L"a released host has no aux");
+			Assert::IsTrue(slots.Claim(&b), L"B claims (the freed slot first)");
+			slots.SetAux(&b, &auxB);
+			Assert::IsTrue(slots.Aux(&a) == nullptr, L"A never reads B's aux");
+			Assert::IsTrue(slots.Aux(&b) == &auxB, L"B's own aux");
+			Assert::IsTrue(slots.Claim(&a), L"A re-claims (another slot)");
+			Assert::IsTrue(slots.Aux(&a) == nullptr, L"the re-claim has no aux before its own SetAux");
+			Assert::IsTrue(slots.Aux(&b) == &auxB, L"B is untouched");
+			slots.SetAux(&a, &auxA);
+			Assert::IsTrue(slots.Aux(&a) == &auxA && slots.Aux(&b) == &auxB && slots.Used() == 2u, L"each host its own aux");
+		}
 
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
 		{

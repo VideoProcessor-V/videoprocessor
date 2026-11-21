@@ -175,6 +175,13 @@ namespace VectorEngineTest
 	TEST_CLASS(VectorEngineTests)
 	{
 	public:
+		TEST_METHOD(AGlobalIsUsableOnlyWithWeightAndConfidence)   // GEM VE-GLOBAL MUST-10
+		{
+			Assert::IsTrue(VectorDemand::SampleGlobal(10.0, 0.5f, 1.0f, 1080).usable);
+			Assert::IsFalse(VectorDemand::SampleGlobal(10.0, 0.5f, 0.0f, 1080).usable, L"an unset global (w = 0) is not usable");
+			Assert::IsFalse(VectorDemand::SampleGlobal(10.0, 1.0f, 1.0f, 1080).usable, L"a failed FlowGlobal (z = 1) is not usable");
+		}
+
 		TEST_METHOD(DemandOffTouchesNothingAndNeverPublishes)
 		{
 			VectorEngine engine;
@@ -562,7 +569,7 @@ namespace VectorEngineTest
 		// byte-identical SetMotion / intent call sequence of the old feed, for every gate and intent combination.
 		TEST_METHOD(OneFeedMatchesTheStatisticsFeedCallSequence)
 		{
-			size_t cases = 0, calls = 0;
+			size_t cases = 0, monitorCalls = 0, intentCalls = 0;
 			ForEachPairInput([&](uint64_t from, uint64_t to, const float* global, int halvings, int pictureHeight)
 			{
 				for (int gates = 0; gates < 4; ++gates)
@@ -576,10 +583,15 @@ namespace VectorEngineTest
 							servesIntent, after);
 						Assert::IsTrue(before.calls == after.calls, L"estimate off: the call sequence is unchanged");
 						++cases;
-						calls += after.calls.size();
+						for (const std::string& c : after.calls)
+						{
+							if (c.compare(0, 8, "monitor ") == 0) ++monitorCalls;
+							if (c.compare(0, 7, "intent ") == 0) ++intentCalls;
+						}
 					}
 			});
-			Assert::IsTrue(cases > 0 && calls > cases, L"the grid made calls (monitor and intent both seen)");
+			// GEM VE-GLOBAL MUST-10: usable needs w > 0.5 too, so a count of calls against cases is no coverage measure; each consumer is counted.
+			Assert::IsTrue(cases > 0 && monitorCalls > 0 && intentCalls > 0, L"the grid made calls (monitor and intent both seen)");
 		}
 
 		// W1-C4: estimate ON (the render-time estimate feed): the one sample + Feed with gates true / true makes the

@@ -144,6 +144,40 @@ namespace VideoProcessorTest
 			Assert::IsFalse(DV::SigmaDeltaWantsVectors(false, true));
 		}
 
+		TEST_METHOD(AnOnDemandMissNoteClosesItsParenthesisOnce)   // GEM-SD-VECTORS SHOULD-3
+		{
+			DV::Facts f = AllPresent();
+			f.engineField = false;
+			f.matcherLive = false;
+			f.onDemandCause = Cause::OnDemandLate;
+			DV::Tracker t;
+			t.Note(DV::Choose(f), true, 7);
+			// NoPairNote leaves its own "(" open; OnDemandNote closes it and each caller closes its own, so both texts balance.
+			const auto balanced = [](const std::string& text) {
+				int depth = 0;
+				for (const char ch : text)
+				{
+					depth += ch == '(' ? 1 : ch == ')' ? -1 : 0;
+					if (depth < 0)
+						return false;
+				}
+				return depth == 0;
+			};
+			const std::string seg = t.VectorsSegment();
+			Assert::IsTrue(Contains(seg, "on-demand"), W(seg).c_str());
+			Assert::IsTrue(balanced(seg), W(seg).c_str());
+			bool sawOwn = false;
+			for (const auto& d : t.Decisions(7))
+			{
+				if (d.id != "dither vectors own search")
+					continue;
+				sawOwn = true;
+				Assert::IsTrue(d.engaged, W(d.reason).c_str());
+				Assert::IsTrue(balanced(d.reason), W(d.reason).c_str());
+			}
+			Assert::IsTrue(sawOwn, L"the own-search decision is listed");
+		}
+
 		TEST_METHOD(OwnSearchNamesEveryMissingInput)
 		{
 			struct Row { void (*knock)(DV::Facts&); DV::Why why; };
@@ -417,6 +451,17 @@ namespace VideoProcessorTest
 			f = ValidFrame();
 			f.configured = false;
 			ExpectOff(f, DV::CompensationWhy::NotConfigured, "motion_compensation 0 in the rule", false);
+		}
+
+		TEST_METHOD(ARepeatKeepsCompensationOnAndAConfirmedCutHasItsOwnVisibleReason)   // GEM W1A VE MUST-8 / sigma-delta MUST-7
+		{
+			DV::CompensationFacts repeat = ValidFrame();
+			repeat.continuity = MotionValidity::Continuity::Repeat;
+			repeat.keptPairValid = false;   // the pair (seq - 1, seq) is not the one a repeat draws
+			Assert::IsTrue(DV::DecideCompensation(repeat).on, L"a repeat is on even when the pair test fails");
+			DV::CompensationFacts f = ValidFrame();
+			f.confirmedCut = true;
+			ExpectOff(f, DV::CompensationWhy::ConfirmedCut, "a confirmed scene cut", true);
 		}
 
 		// The real MotionValidity state drives the facts: a resync and a drop make the pair ending at the next frame invalid.

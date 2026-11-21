@@ -310,7 +310,17 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		// source_resolution auto's fast-pan switch. Bug hunt 3 F1: one cell is 8 source px
 		// per halving of the search input (4K 16, 8K 32), not 8 at every size.
 		const int searchHalvings = dejudder->SearchHalvings();
-		vectorEngine.NoteGlobalPair(flow != nullptr);   // VPV-HOOK
+		// W2-C5b: a pair not computed ahead is filled from the request the dequeue issued (OnDemandIssue.h), within the frame
+		// budget; adjacent pairs only where the vectors-valid state accepts them, gap pairs only across a plain gap.
+		// GEM VE-GLOBAL (MUST-4): BEFORE the global and the record sample below, so a pair filled on demand feeds them too (one sample per pair).
+		{
+			const bool onDemandAllowed = bSequence > aSequence + 1 ? motionValidity.LastCause() == MotionValidity::Cause::Gap :
+				motionValidity.PairValid(aSequence, bSequence, motionValidity.EpochOfLastKept(), motionValidity.Epoch()) &&
+				motionValidity.PairValidAt(aSequence, bSequence);
+			FallbackCatalog::NoPairCause onDemandCause = FallbackCatalog::NoPairCause::None;
+			flow = vectorEngine.OnDemandFill(std::move(flow), aSequence, bSequence, onDemandAllowed, onDemandCause);
+		}
+		vectorEngine.NoteGlobalPair(flow != nullptr && bSequence == aSequence + 1);   // VPV-HOOK; GEM-W1A S3: adjacent pairs only, as the sample below (a gap pair feeds no global)
 		// W1-C4: the pair's ONE sample (MotionRecord::EstimatePair, audit MUST 1) is read by the engine's CPU record (K4:
 		// IVectorEngine::EngineGlobal) and feeds the source monitor's fast-pan motion and the motion intent (the same whole-frame
 		// motion for this valid pair, in picture heights per frame; read-only) through the one feed (MotionRecord::Feed). This path
@@ -320,17 +330,8 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			const int pictureHeight = dejudderPicture.available && dejudderPicture.rasterHeight == height &&
 				dejudderPicture.bottom > dejudderPicture.top ? dejudderPicture.bottom - dejudderPicture.top : height;
 			auto statisticsHost = VpMotion::MakeVectorEngineHost(*this);
-			VpMotion::MotionRecord::EstimatePair(vectorEngine, vectorDemand, aSequence, bSequence, flow ? flow->global[0] : nullptr,
+			VpMotion::MotionRecord::EstimatePair(vectorEngine, vectorDemand, aSequence, bSequence, (flow && bSequence == aSequence + 1) ? flow->global[0] : nullptr,
 				searchHalvings, pictureHeight, statisticsHost);
-		}
-		// W2-C5b: a pair not computed ahead is filled from the request the dequeue issued (OnDemandIssue.h), within the frame
-		// budget; adjacent pairs only where the vectors-valid state accepts them, gap pairs only across a plain gap.
-		{
-			const bool onDemandAllowed = bSequence > aSequence + 1 ? motionValidity.LastCause() == MotionValidity::Cause::Gap :
-				motionValidity.PairValid(aSequence, bSequence, motionValidity.EpochOfLastKept(), motionValidity.Epoch()) &&
-				motionValidity.PairValidAt(aSequence, bSequence);
-			FallbackCatalog::NoPairCause onDemandCause = FallbackCatalog::NoPairCause::None;
-			flow = vectorEngine.OnDemandFill(std::move(flow), aSequence, bSequence, onDemandAllowed, onDemandCause);
 		}
 		if (flow)
 		{
@@ -342,7 +343,8 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			vectorEngine.motionLastSharedEpoch = motionShadowEpoch;
 		}
 		dejudder->SetExternalFlow(std::move(flow));
-		vectorEngine.P2().Prune(aSequence);
+		if (!ahead)   // GEM VE-P2-LIFE: an ahead estimate's frame is past the render frame: it never prunes (the render path does)
+			vectorEngine.PruneBehindRender(aSequence);
 	}
 	bool gapSeedHanded = false;   // a valid seed was given to the matcher: counted "seeded" only if its D1 actually started from it (SearchSeedUsed)
 	if (!vectorEstimate.motionEngineWarming && bSequence > aSequence + 1 && vectorEngine.OnDemandServed(aSequence, bSequence))
@@ -604,7 +606,7 @@ bool LibplaceboVideoRenderer::Impl::EstimateAhead(uint64_t sourceSequence, uint6
 	};
 	steps.uploadAfter = [this]() { return UploadDejudderPlanes(dejudderAheadPayload, dejudderAheadTextures, &dejudderAheadUpload,
 		dejudderAheadPayloadSequence); };
-	steps.estimate = [this, timing](uint64_t bSequence, uint64_t cSequence)
+	steps.estimate = [this, timing, sourceSequence](uint64_t bSequence, uint64_t cSequence)
 	{
 		Dejudder::Planes b, c;
 		b.luma = dejudderNextTextures[0];
@@ -618,6 +620,10 @@ bool LibplaceboVideoRenderer::Impl::EstimateAhead(uint64_t sourceSequence, uint6
 		if (timing) timing->BeginStage(AlphaD3D11FrameGpuTimer::Stage::CoreRender);
 		const bool done = RunDejudderEstimate(b, c, bSequence, cSequence, true);   // ahead: EstimateContext::ahead for the K4 hook
 		if (timing) timing->EndStage();
+		// GEM-W1A N1: doc 91's 3-behind rule in estimate-ahead mode too (the regular estimate, which prunes, is skipped for a pair
+		// estimated ahead). Pruned at the RENDER frame (c.source), never at b: that would drop the render frame's pair.
+		if (vectorEngine.motionProducer && vectorEngine.motionProducer->Running())
+			vectorEngine.PruneBehindRender(sourceSequence);
 		return done;
 	};
 	return dejudderAhead.TryAhead(c, steps);

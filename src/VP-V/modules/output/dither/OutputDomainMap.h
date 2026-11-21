@@ -255,6 +255,13 @@ namespace OutputDomainMap
 		Result r;
 		r.valid = s.valid;
 		r.rebaseFading = s.rebaseFading;
+		if (!std::isfinite(vx) || !std::isfinite(vy))   // GEM-SD-VECTORS MUST-6: a non-finite vector is invalid and zero, never NaN downstream
+		{
+			r.valid = false;
+			r.x = 0.0;
+			r.y = 0.0;
+			return r;
+		}
 		if (!s.valid)
 		{
 			r.x = vx;

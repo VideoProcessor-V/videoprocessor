@@ -353,7 +353,7 @@ namespace VectorDemand
 	// the engine's global (usable below 0.9, valid above 0.5).
 	struct GlobalSample
 	{
-		bool usable = false;          // z < 0.9: the source monitor's fast-pan switch may use it
+		bool usable = false;          // w > 0.5 && z < 0.9: the source monitor's fast-pan switch may use it
 		bool intentValid = false;     // the intent interpreter may use it
 		double sourcePixels = 0.0;
 		double heightsPerFrame = 0.0; // picture heights per frame
@@ -361,7 +361,7 @@ namespace VectorDemand
 	inline GlobalSample SampleGlobal(double sourcePixels, float z, float w, int pictureHeight)
 	{
 		GlobalSample g;
-		g.usable = z < 0.9f;
+		g.usable = w > 0.5f && z < 0.9f;   // GEM VE-GLOBAL: the weight test too (a failed FlowGlobal has z = 1; an unset one has w = 0)
 		g.sourcePixels = sourcePixels;
 		g.intentValid = w > 0.5f && z < 0.9f && pictureHeight > 0;
 		g.heightsPerFrame = pictureHeight > 0 ? sourcePixels / pictureHeight : 0.0;

@@ -719,8 +719,8 @@ namespace Vpv
 				std::shared_ptr<Bundle> old = std::atomic_exchange(&st.bundle, std::shared_ptr<Bundle>());
 				if (old)
 				{
-					VpSkeleton::UnbindLaneFromMemo(old->lane, *old->memo);   // L-CORE: on the render thread, before anything else
-					old->threads.Stop();   // joined here, before anything the threads read goes away
+					old->threads.Stop();   // joined here first: the workers call the lane's ahead sinks, so nothing may reassign them yet
+					VpSkeleton::UnbindLaneFromMemo(old->lane, *old->memo);   // L-CORE: on the render thread, after the join
 				}
 			}
 
@@ -1296,7 +1296,10 @@ namespace Vpv
 				// the old state's seal hooks, tap and lane belong to the dead one.
 				Teardown(st, false, false);   // the dead renderer's device objects are not ours to destroy
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
+				{
+					std::lock_guard<std::mutex> memoLock(ownerFillsMutex_);   // GEM SK-LIFECYCLE: as the other two sites (the MemoHost is kept)
 					DetachMemoGpu(*mh, false);   // R2: nor are its owner textures (forgotten, counted)
+				}
 				hosts_.Remove(host, false);
 				EraseExternal(host);          // nor is its external demand (declared for the dead renderer)
 				st.reset();
@@ -2571,6 +2574,8 @@ namespace Vpv
 					return VpSkeleton::LaneLease();
 				};
 				if (current)
+					current->threads.Stop();   // GEM SK-LIFECYCLE: the current bundle's workers are joined before the replacement is built
+				if (current)
 					hostMemo->Clear();   // G0 S4: a graph rebuild is a discontinuity: every memo spot of the old graph is released
 				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring, hostMemo, std::move(leaseOf),
 					qualityP15_.load(std::memory_order_acquire), qualityP15c_.load(std::memory_order_acquire));
@@ -2637,6 +2642,13 @@ namespace Vpv
 				// ownUsage drops only when the module Withdraws (VramUsers::Take: heldBytes follows Declare / Withdraw, never the plan).
 				const VpSkeleton::VramUsers::Snapshot declared = VpSkeleton::VramUsers::Instance().Take();
 				tier.otherUsers = declared.users;
+				{
+					// GEM SK-VRAM: the memo's GPU spots are a user of the SAME ledger (as PlanNoLaneGpu / MemoGpuGrant.h): added here from its
+					// need levels, so the plan's scratch-arena grant (read below) exists. No second ledger.
+					const std::vector<uint64_t> memoLevels = b->memo->GpuNeedLevels();
+					if (!memoLevels.empty() && memoLevels.front() != 0)
+						tier.otherUsers.push_back(VpSkeleton::MakeMemoVramUser(memoLevels, "skeleton memo"));
+				}
 				tier.ownUsageBytes = declared.heldBytes;
 				tier.transientBytes = st.vramShortfall;
 				st.vramShortfallUsed = st.vramShortfall;

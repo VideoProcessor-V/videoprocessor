@@ -115,6 +115,14 @@ namespace VpMotion
 		// stop and restart; a started producer clears it.
 		std::shared_ptr<VpMotion::P2Slot> p2Slot = std::make_shared<VpMotion::P2Slot>(MotionAhead::kP2RingPairs);
 		VpMotion::P2View P2() const { return VpMotion::P2View(p2Slot); }
+		// GEM VE-P2-LIFE: the ONE prune. Keeps kPairsKeptBehind pairs for the frame at the render (the pair (N-1, N) FlowOf(N) reads and
+		// the two before it): pairs ending before renderSeq - (kPairsKeptBehind - 1) go. The AHEAD estimate never calls this with its own
+		// (later) frame: it would drop the render frame's pair.
+		void PruneBehindRender(uint64_t renderSeq)
+		{
+			const uint64_t behind = uint64_t(MotionAhead::kPairsKeptBehind - 1);
+			P2().Prune(renderSeq > behind ? renderSeq - behind : 0u);
+		}
 		// C2a-F 2 (every P2 reader of the engine): the stored pair (from, to) only when it was published under the current stream
 		// generation (MotionValidity::State::PairGenerationCurrent). The slot keeps a pair computed before a resync / seek / queue
 		// reset / format change until the producer's asynchronous SetGeneration re-keys it, and once a frame is kept in the new epoch
