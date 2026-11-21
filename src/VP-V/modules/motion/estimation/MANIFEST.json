@@ -95,6 +95,7 @@
     "src/VP-V/modules/motion/estimation/ProducerJobs.h",
     "src/VP-V/modules/motion/estimation/EngineLumaRing.h",
     "src/VP-V/modules/motion/estimation/tests/ProducerJobSchedulerTests.cpp",
+    "src/VP-V/modules/motion/estimation/tests/ProducerStageTimerTests.cpp",
     "src/VP-V/modules/motion/estimation/tests/EngineLumaRingTests.cpp",
     "src/VP-V/modules/motion/estimation/tests/OnDemandEstimateTests.cpp",
     "src/VP-V/modules/motion/estimation/VectorEngineState.h",
