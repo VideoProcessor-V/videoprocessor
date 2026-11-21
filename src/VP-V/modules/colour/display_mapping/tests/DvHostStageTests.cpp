@@ -573,6 +573,34 @@ namespace Tests
 			}
 		}
 
+		// GEM-012 (AMEND): the per-pixel constants the shader used to recompute for every pixel are host parameters, from the
+		// CPU reference's own maths: dv_peak_pq = PQ(display peak) and dv_near_black_nits = NitsFromPq(64 / 4095) (the CPU
+		// reference's near-black threshold, NOT a truncated literal). Before the fix neither parameter was pushed.
+		TEST_METHOD(TrimsParametersCarryThePeakPqAndNearBlackNits)
+		{
+			using namespace DvHost;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			pl_color_map_params params = pl_color_map_default_params;
+			for (const float peak : { 100.0f, 120.0f })
+			{
+				Registry reg;
+				DvHostStage stage(DummyShaders(), reg.Engage(), reg.Release());
+				Run run;
+				std::vector<const pl_hook*> hooks;
+				run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, peak), &dm, params, hooks);
+				Assert::IsTrue(run.lastTrimsWanted, L"the trims act");
+				const double* peakPq = Param(run.lastParams, "dv_peak_pq");
+				const double* nearBlack = Param(run.lastParams, "dv_near_black_nits");
+				Assert::IsNotNull(peakPq, L"dv_peak_pq is pushed");
+				Assert::IsNotNull(nearBlack, L"dv_near_black_nits is pushed");
+				Assert::AreEqual(DvMath::PqFromNits(peak), *peakPq, 0.0, L"the PQ code of the display peak");
+				Assert::AreEqual(static_cast<double>(peak), ParamOr(run.lastParams, "dv_peak_nits", -1.0), 0.0, L"dv_peak_nits is the display peak");
+				Assert::AreEqual(DvMath::NitsFromPq(64.0 / 4095.0), *nearBlack, 0.0, L"the CPU reference's near-black threshold, exactly");
+				Assert::AreEqual(DvMath::NitsFromPq(DolbyVisionTrims::kNearBlackPq), *nearBlack, 0.0);
+			}
+		}
+
 		TEST_METHOD(GpuUnpackSessionLogsOnceAndSwitchesTheSessionToTheCpuOnce)
 		{
 			DvGpuUnpackSession session;
