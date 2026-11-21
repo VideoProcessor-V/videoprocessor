@@ -422,6 +422,10 @@ namespace AdaptiveDownscaleStage
 		// The APL (diagnostic mean luma) was not read from the P4 record: shown, not a cut fault.
 		if (!module.AplCause().empty())
 			lines.push_back("Adaptive downscale: APL not read (" + module.AplCause() + ")");
+		// CB-18 S3 (plan line 69): the measure's edge map not served by the memo (unavailable: the measure did not run; or
+		// computed in the module without a skeleton memo). The last measured frame's, while the blend is asked for.
+		if (requested && !module.EdgeMapStatus().empty())
+			lines.push_back(module.EdgeMapStatus());
 		const std::string td = TdProducts::StatusLine(TdProducts::Consumer::AdaptiveScaler, tdRead);
 		if (!td.empty())
 			lines.push_back(td);

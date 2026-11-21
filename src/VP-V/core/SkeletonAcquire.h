@@ -658,6 +658,7 @@ public:
             if (kv.second->state == Entry::Ready && kv.second->epoch == epoch_)
                 invalidatedKeys_.insert(kv.first);
         ++epoch_;
+        fillsPerFrame_.clear();         // the new epoch measures its own occupancy (r2 MUST-1)
         haveReleased_ = false;          // the numbering may restart after a discontinuity: nothing older is refused
         releasedThrough_ = 0;
         numberingMayRestart_ = true;    // the next seal may go back without releasing this epoch's fills
@@ -674,7 +675,8 @@ public:
         return epoch_;
     }
     // The S3 admission link (design s2.7). What the memo's ahead work costs for `w`: one AheadCost per registered GPU fill that
-    // allocates (its declared reserve, or the measured bytes of its last result when larger) and per CPU fill that has run (its
+    // allocates (its declared reserve, or the measured bytes of its largest result when larger, times the measured fills one render
+    // frame holds: a per-picture keyed product holds several at once) and per CPU fill that has run (its
     // measured bytes; CPU bytes are not in the VRAM grant, listed for the cost ledger with bytesPerFrame 0 for the VRAM plan).
     // `budget`: the delay budget the scheduler plans the queue with (null = not fed: the ladder offers no S-C step and says so).
     AheadNeed MakeAheadNeed(const QueueWindow& w, QueueMode mode = QueueMode::Normal, const DelayBudget::Inputs* budget = nullptr) const
@@ -709,7 +711,14 @@ public:
             const auto m = measuredBytes_.find(kv.first);
             const uint64_t measured = m != measuredBytes_.end() ? m->second : 0u;
             if (gpu) {
-                c.bytesPerFrame = measured > f.reserveBytes ? measured : f.reserveBytes;
+                // One frame's spot holds EVERY GPU result of this product held at once: a product keyed per picture (the edge
+                // map's stage ordinals, CB-18 SHOULD-2) holds several in one render frame, each against its own reserve. The count
+                // is MEASURED (the most fills one render frame has held at once in this epoch, 1 before any), never a fixed
+                // constant; a cadence repeat re-renders after a seal released the earlier results, so it does not add (r2 MUST-1).
+                const uint64_t perFill = measured > f.reserveBytes ? measured : f.reserveBytes;
+                const auto fp = fillsPerFrame_.find(kv.first);
+                const uint64_t fills = fp != fillsPerFrame_.end() && fp->second > 1u ? uint64_t(fp->second) : 1u;
+                c.bytesPerFrame = perFill * fills;
                 c.measured = measured != 0;
                 if (f.DeclaredHistory() > back)
                     back = f.DeclaredHistory();
@@ -1100,6 +1109,21 @@ public:
             const uint64_t got = form == AcquireForm::Gpu ? out.gpu.bytes : uint64_t(out.bytes.size());
             if (got > mb)
                 mb = got;
+            if (form == AcquireForm::Gpu && !e->orphaned) {
+                // The measured fills one render frame HOLDS (AheadNeed's multiplier): the live results of this (product, form)
+                // for `seq` in this epoch at this moment, this fill included (still Filling here). Results a seal released
+                // (frame-scoped spots: a cadence repeat's earlier render of the seq) are no longer in the memo, so a repeat
+                // render never adds to the count (r2 MUST-1).
+                uint32_t held = 0;
+                for (const auto& kv : memo_) {
+                    const Entry& x = *kv.second;
+                    if (x.id == id && x.seq == seq && x.gpuForm && !x.orphaned && x.epoch == epoch_ && x.state != Entry::Declined)
+                        ++held;
+                }
+                uint32_t& most = fillsPerFrame_[OwnerKey(id, form)];
+                if (held > most)
+                    most = held;
+            }
         }
         if (out.scope != OwnerFillOutput::Scope::FillDefault)
             e->frameScoped = out.scope == OwnerFillOutput::Scope::Frame;   // per-result lifetime (design s2.3)
@@ -1216,6 +1240,7 @@ public:
             std::lock_guard<std::mutex> g(mutex_);
             ReleaseIfLocked([](const Entry&) { return true; }, drop);
             RetireCompletedLocked(drop);
+            fillsPerFrame_.clear();   // a new graph measures its own occupancy (r2 MUST-1)
             haveReleased_ = false;
             releasedThrough_ = 0;
             haveSealed_ = false;
@@ -1574,6 +1599,9 @@ private:
     uint64_t invalidations_[size_t(InvalidateCause::Count)] = {};
     std::set<Key> invalidatedKeys_;
     std::map<uint32_t, uint64_t> measuredBytes_;   // the largest result size per (product, form)
+    // Per (product, form): the most GPU results of one seq held in the memo at once (counted at each fill from the live entries),
+    // i.e. the fills one render frame holds. Reset at Clear() and BumpEpoch: a new graph / epoch measures its own occupancy.
+    std::map<uint32_t, uint32_t> fillsPerFrame_;
     AheadPlan plan_;
     bool planSet_ = false;
     const void* host_ = nullptr;

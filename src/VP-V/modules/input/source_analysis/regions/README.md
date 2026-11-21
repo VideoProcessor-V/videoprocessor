@@ -141,10 +141,42 @@ copied; a private pass is deleted in the same commit as its consumer's switch.
 Status: BusyEdge.h (CPU reference and tolerance oracle) and BusyEdgeGlsl.h (shader mirrors, one tap form kSourceTapCodesPerUnit) exist
 with BusyEdgeTests. The kEdgeMap owner fill (EdgeMapFill.h, on L-CORE's OwnerFillRequest::gpu) is built; its MODULE is
 registered at start-up (HubBootstrap) and the FILL at the first observed Entrance size (reserve derived from the source luma size, rule 6) with EdgeMapFillTests (registration, reserve, CPU declines; the GPU
-parity test is owed before the first reader row, 102b KEDGEMAP-RULE3). It has NO reader yet, so it never runs. The busy-share TEXT has one consumer:
+parity test, tests/EdgeMapStageGpuParityTests.cpp, is written for both variants and its first run is owed, 102b KEDGEMAP-RULE3).
+Its reader is the AdaptiveDownscale measure (CB-18 S3: the stage variant through Acquire; X5's private Sobel is removed). The busy-share TEXT has one consumer:
 VpDebander's guard (C7-6 U5 G1) builds its pass from BusyShareHeaderGlsl/BodyGlsl on its own input planes (bz_scale 1, thresholds in the
-plane's normalised units; its private GUARD_BODY is deleted). The AdaptiveDownscale measure is still private. Decisions: R14-66 (lead 14, 2026-11-14 20:54Z,
+plane's normalised units; its private GUARD_BODY is deleted). Decisions: R14-66 (lead 14, 2026-11-14 20:54Z,
 lead14-state.md:102) registers kEdgeMap under rule 3, first reader L-FOCUS; R14-64 (lead 14, 2026-11-14 ~21:10Z, lead14-state.md:89)
 kept X5 private, superseded by the owner's ruling of 2026-11-14 ~17:00 EST (design-EDGEMAP-DOMAIN-AXIS rev 2, 102b X5-EDGEMAP-CJ3): X5
 acquires a kEdgeMap stage variant in CJ-3.
 Settings: none added (no new keys); thresholds are the debander's existing lap_min / ext_min.
+
+## MeasureDomain (CB slice 18 S2a): the edge / grain measure domain
+
+Design goal: the kEdgeMap stage variant (S2b) computes its luma in the same domain X5's measure pass uses, so the law lives with
+the product's owner. MeasureDomain.h (namespace VpMeasure: GuardTransfer, GuardLinear, MeasureDomain, MeasureDomainFor,
+LumaWeightsGlsl, MeasureLumaCode) and MeasureDomainGlsl.h (the ad_lin / ad_luma GLSL text) are a PURE MOVE out of
+scaling/output/AdaptiveDownscale.h/.cpp: unchanged arithmetic and byte-identical shader text. Decisions: X5 keeps its names through
+using-declarations and keeps GuardCode / GuardSlope (its residual guard); MeasureDomainFor reads the weights from core/LumaWeights.h
+(LumaCoeff::ForSystem) directly, the table DetailPulse::LumaWeights forwarded to (identical values). Settings: none.
+
+## kEdgeMap stage variant (CB slice 18 S2b)
+
+Design goal (design-EDGEMAP-DOMAIN-AXIS rev 2 s2a): X5's measure pass and L-FOCUS read ONE edge map of the picture X5 measures,
+not a private Sobel. The fill serves VariantKey{stage, width x height, codeUnit 8, param1 = picture ordinal} (EdgeMapStageKey) on
+the P13 stage picture of the same key (SourcePlanes::OfferStage), as RG32F at the picture size: R = Sobel |G| in 8-bit measure
+codes, G = the measure luma (MeasureDomainFor of the picture's own colour facts). Philosophy: one body and one law for both
+variants (BusyEdgeGlsl.h: em_tap / em_store per variant, |G| = length(gx, gy), the expression order of X5's former Sobel, so
+X5's grad = R x 0.25 exactly); the default variant (R32F, source luma, 10-bit codes) is unchanged in value.
+Decisions: RG32F, not R32F, because X5's grain sums (Laplacian, energy) still read the luma at the base (slice 9 / X5-GRAIN-P10
+absent), so G has a reader; WHOLE picture, no crop axis (the design's kAxisCrop is not declared): X5's 3 x 3 neighbourhood at its
+src_rect border reads luma beyond the crop, which a crop-clamped map would change; code unit 8 only on the stage variant (the
+default stays 10); the declared product size (the ledger term) and the fill's reserve are ONE figure, the largest variant
+(EdgeMapFillReserveBytes == EdgeMapReserveBytes, 8 B/px of the source luma: an RG32F picture of the luma size fits; 265 MB at
+8K, 66 MB at 4K; the default R32F uses half), and the ahead budget counts it once per fill one render frame holds (SkeletonMemo's
+measured occupancy: one per stage ordinal held at once, a cadence repeat does not add; CB-18 SHOULD-2, r2 MUST-1); a larger stage picture declines visibly. Tests: tests/EdgeMapStageTests.cpp (CPU law and fill), tests/EdgeMapStageGpuParityTests.cpp (GPU parity, first run owed). Reader: X5 (S3). Settings: none.
+
+S3 (the X5 reader): the stage dispatch is `DispatchEdgeMapStage(dispatch, picture, colour, system, primaries, dst, why)` in
+EdgeMapFill.h, one function shared by the owner's fill (FillEdgeMapStage delegates to it) and X5's visible no-memo fallback
+(a host without a skeleton memo, e.g. the hook tests), so the fallback cannot drift from the product. X5 asks for the map under
+StageAfter(scaling.geometry), the measured base's size and a per-seq picture ordinal (scaling/output/EdgeMapStageOrdinal.h).
+The catalog's X5 row (row 3) does not yet declare the kEdgeMap read (left to the C5+A test run, see the CB-18 lane report).

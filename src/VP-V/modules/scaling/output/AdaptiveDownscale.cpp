@@ -9,6 +9,13 @@
 
 #include <VP-V/core/LumaWeights.h>
 #include <VP-V/core/OnePole.h>
+#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
+#include <VP-V/core/PipelineSlots.h>
+#include <VP-V/core/VariantKey.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
+#include <VP-V/modules/input/capture/SourcePlanes.h>
+#include <VP-V/modules/input/source_analysis/regions/EdgeMapFill.h>
+#include <VP-V/modules/scaling/output/MeasureEdgeMap.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/scaling/shared/HybridBlend.h>
@@ -25,42 +32,15 @@ namespace AdaptiveDownscale
 {
 	namespace
 	{
-		// Luma in 8-bit codes of the encoded picture (a linear PREKERNEL is
-		// re-encoded with 1/2.2 so the code thresholds mean the same in both
-		// light domains), edges, and per-workgroup sums for the grain term. That 1/2.2
-		// is a fixed reference domain for the edge / grain thresholds (they were tuned in
-		// it), not a claim about the source; the residual guard's noise limit, which is in
+		// Edges and per-workgroup sums for the grain term, from the edge map (CB slice 18 S3: P1 kEdgeMap, the stage variant;
+		// design-EDGEMAP-DOMAIN-AXIS rev 2): em (RG32F, the WHOLE base picture) R = Sobel |G| and G = the measure luma in 8-bit
+		// codes of the encoded picture, both in the measure domain of the picture's colour facts. X5's crop is applied HERE, where
+		// the map is read (origin + q over region), not where it is made: the whole-picture map's taps are clamped to the whole
+		// texture exactly as the former private Sobel's were, so every value read inside the crop equals the former one, and the
+		// neighbours' luma (b, d, f, h) are the map's G at the clamped neighbour. The residual guard's noise limit, which is in
 		// the source's own codes, uses the source transfer (GuardTransfer).
-		// Bug hunt 33 F3 / F4: AD_KW = the source's luma weights; AD_HDR = a PQ / HLG picture
-		// decoded to relative linear first (MeasureDomain; CPU mirror MeasureLumaCode).
 		const char* const MEASURE_HEADER = R"GLSL(
 shared vec4 ad_sum[256];
-#ifdef AD_HDR
-float ad_lin(float c)
-{
-    c = max(c, 0.0);
-    if (ad_trc < 1.5) {
-        float e = pow(c, 1.0 / 78.84375);
-        float n = max(e - 0.8359375, 0.0) / (18.8515625 - 18.6875 * e);
-        return pow(n, 1.0 / 0.1593017578125) * (10000.0 / 203.0);
-    }
-    float x = (1.0 - ad_b) * c + ad_b;
-    float s = (x <= 0.5 ? 4.0 * x * x : exp((x - 0.55991073) / 0.17883277) + 0.28466892) / 12.0;
-    return ad_a * pow(max(s, 0.0), ad_g);
-}
-#endif
-float ad_luma(ivec2 p)
-{
-    ivec2 sz = textureSize(src, 0);
-    vec3 c = texelFetch(src, clamp(p, ivec2(0), sz - ivec2(1)), 0).rgb;
-#ifdef AD_HDR
-    c = vec3(ad_lin(c.r), ad_lin(c.g), ad_lin(c.b));
-#endif
-    float y = dot(c, AD_KW);
-    if (linear_in > 0.5)
-        y = sign(y) * pow(abs(y), 1.0 / 2.2);
-    return y * 255.0;
-}
 )GLSL";
 
 		const char* const MEASURE_BODY = R"GLSL(
@@ -69,12 +49,14 @@ uint li = gl_LocalInvocationIndex;
 vec4 v = vec4(0.0);
 if (q.x < int(region.x) && q.y < int(region.y)) {
     ivec2 p = ivec2(origin) + q;
-    float a = ad_luma(p + ivec2(-1, -1)), b = ad_luma(p + ivec2(0, -1)), c = ad_luma(p + ivec2(1, -1));
-    float d = ad_luma(p + ivec2(-1, 0)), e = ad_luma(p), f = ad_luma(p + ivec2(1, 0));
-    float g = ad_luma(p + ivec2(-1, 1)), h = ad_luma(p + ivec2(0, 1)), k = ad_luma(p + ivec2(1, 1));
-    float gx = (c + 2.0 * f + k) - (a + 2.0 * d + g);
-    float gy = (g + 2.0 * h + k) - (a + 2.0 * b + c);
-    float grad = length(vec2(gx, gy)) * 0.25;
+    ivec2 lim = textureSize(em, 0) - ivec2(1);
+    vec2 m = texelFetch(em, clamp(p, ivec2(0), lim), 0).xy;
+    float e = m.y;
+    float b = texelFetch(em, clamp(p + ivec2(0, -1), ivec2(0), lim), 0).y;
+    float d = texelFetch(em, clamp(p + ivec2(-1, 0), ivec2(0), lim), 0).y;
+    float f = texelFetch(em, clamp(p + ivec2(1, 0), ivec2(0), lim), 0).y;
+    float h = texelFetch(em, clamp(p + ivec2(0, 1), ivec2(0), lim), 0).y;
+    float grad = 0.25 * m.x;
     float ed = smoothstep(edge_lo, edge_hi, grad);
     imageStore(edge_out, q, vec4(ed));
     float lap = abs(4.0 * e - b - d - f - h);
@@ -546,7 +528,7 @@ float rs_slope(float y)
 			// The residual pair too (found 2026-10-31: it outlived Release and a new GPU recreated
 			// it through the old one's texture).
 			for (pl_tex* tex : { &lowres, &edge, &partial, &state, &map[0], &map[1], &motionMap[0], &motionMap[1],
-				&residual[0], &residual[1] })
+				&residual[0], &residual[1], &edgeLocal })
 				if (*tex)
 					pl_tex_destroy(gpu, tex);
 			if (readback)
@@ -560,6 +542,8 @@ float rs_slope(float y)
 		faithfulScaler.Release(gpu);
 		faithful = lowres = edge = partial = state = map[0] = map[1] = motionMap[0] = motionMap[1] = nullptr;
 		residual[0] = residual[1] = nullptr;
+		edgeLocal = nullptr;
+		edgeOrdinal.Reset();
 		residualIndex = 0;
 		residualPrevValid = false;
 		residualSequence = 0;
@@ -633,85 +617,6 @@ float rs_slope(float y)
 			seconds : 1.0f / 24.0f;
 	}
 
-	GuardTransferParams GuardTransfer(const pl_color_space& source)
-	{
-		GuardTransferParams t;
-		float cspMin = 0.0f, cspMax = 1.0f;
-		pl_nominal_luma_params luma{};
-		luma.color = &source;
-		luma.metadata = PL_HDR_METADATA_HDR10;
-		luma.scaling = PL_HDR_NORM;
-		luma.out_min = &cspMin;
-		luma.out_max = &cspMax;
-		pl_color_space_nominal_luma_ex(&luma);
-		if (!(cspMax > 0.0f)) cspMax = 1.0f;
-		switch (source.transfer)
-		{
-		case PL_COLOR_TRC_LINEAR:
-			t.g = 1.0f;
-			break;
-		case PL_COLOR_TRC_BT_1886:
-		{
-			const float lb = std::pow((std::max)(cspMin, 0.0f), 1.0f / 2.4f);
-			const float lw = std::pow(cspMax, 1.0f / 2.4f);
-			t.a = std::pow((std::max)(lw - lb, 1e-6f), 2.4f);
-			t.b = lb / (std::max)(lw - lb, 1e-6f);
-			t.g = 2.4f;
-			break;
-		}
-		case PL_COLOR_TRC_GAMMA18: t.g = 1.8f; t.a = cspMax - cspMin; break;
-		case PL_COLOR_TRC_GAMMA20: t.g = 2.0f; t.a = cspMax - cspMin; break;
-		case PL_COLOR_TRC_GAMMA24: t.g = 2.4f; t.a = cspMax - cspMin; break;
-		case PL_COLOR_TRC_GAMMA26: t.g = 2.6f; t.a = cspMax - cspMin; break;
-		case PL_COLOR_TRC_GAMMA28: t.g = 2.8f; t.a = cspMax - cspMin; break;
-		case PL_COLOR_TRC_PQ:
-			t.mode = 1.0f;
-			break;
-		case PL_COLOR_TRC_HLG:
-		{
-			const float hlgRef = 1000.0f / PL_COLOR_SDR_WHITE;
-			t.mode = 2.0f;
-			t.a = cspMax;
-			t.g = 1.2f * std::pow(1.111f, std::log2(cspMax / hlgRef));
-			t.b = std::sqrt(3.0f * std::pow((std::max)(cspMin, 0.0f) / cspMax, 1.0f / t.g));
-			break;
-		}
-		default:   // unknown, gamma 2.2, sRGB, the log curves: gamma 2.2
-			t.g = 2.2f;
-			t.a = (std::max)(cspMax - cspMin, 1e-6f);
-			break;
-		}
-		if (!(t.a > 0.0f)) t.a = 1.0f;
-		return t;
-	}
-
-	MeasureDomain MeasureDomainFor(const pl_color_space& hooked, enum pl_color_system system,
-		enum pl_color_primaries primaries)
-	{
-		MeasureDomain d;
-		double k[3];
-		DetailPulse::LumaWeights(system, primaries, k);
-		for (int i = 0; i < 3; ++i) d.w[i] = static_cast<float>(k[i]);
-		d.bt709 = k[0] == LumaCoeff::kBt709Kr && k[2] == LumaCoeff::kBt709Kb;
-		if (hooked.transfer == PL_COLOR_TRC_LINEAR)
-			d.mode = 1.0f;
-		else if (hooked.transfer == PL_COLOR_TRC_PQ || hooked.transfer == PL_COLOR_TRC_HLG)
-		{
-			d.mode = 2.0f;
-			d.transfer = GuardTransfer(hooked);
-		}
-		return d;
-	}
-
-	std::string LumaWeightsGlsl(const MeasureDomain& d)
-	{
-		if (d.bt709)
-			return VP_LUMA_BT709_VEC3_TEXT;
-		char text[96];
-		snprintf(text, sizeof(text), "vec3(%.9g, %.9g, %.9g)", d.w[0], d.w[1], d.w[2]);
-		return text;
-	}
-
 	pl_hook_res Module::RunMeasure(void* priv, const pl_hook_params* params)
 	{
 		return static_cast<Module*>(priv)->Measuring(params);
@@ -774,6 +679,7 @@ float rs_slope(float y)
 		motionState = MotionState::Off;   // set again by UpdateMotionMap when the measure runs
 		motionFloorUsed = false;           // FIX1: set again by the blend (a frame it skips leaves no stale floor)
 		motionFloorCause.clear();
+		edgeMapStatus.clear();            // set again when the measure reads its edge map (CB-18 S3)
 		if (!p->tex)
 			return unchanged;
 		float sx0 = std::fmin(p->src_rect.x0, p->src_rect.x1), sx1 = std::fmax(p->src_rect.x0, p->src_rect.x1);
@@ -899,31 +805,44 @@ float rs_slope(float y)
 
 		// 2. Edges and the per-workgroup grain sums (bug hunt 33 F3 / F4: the source's luma
 		// weights; HDR decoded to relative linear, then the 2.2 reference as a linear picture).
+		// The domain stays here: the blend's weights use it, and it is the domain the edge map is made in (the same colour
+		// facts are offered with the stage picture below).
 		const pl_color_system lumaSystem = p->orig_repr ? p->orig_repr->sys : p->repr.sys;
 		const pl_color_primaries lumaPrimaries = p->orig_color ? p->orig_color->primaries : p->color.primaries;
 		domain = MeasureDomainFor(p->color, lumaSystem, lumaPrimaries);
-		const float linearIn = domain.mode > 0.5f ? 1.0f : 0.0f;
-		const bool hdrDecode = domain.mode > 1.5f;
-		const std::string measureHeader = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" +
-			(hdrDecode ? "#define AD_HDR 1\n" : "") + MEASURE_HEADER;
+		// CB slice 18 S3: the edge map of the WHOLE base picture is P1's kEdgeMap stage variant (design-EDGEMAP-DOMAIN-AXIS
+		// rev 2): this picture is offered to P13 as the stage after scaling.geometry and its edge map asked for under
+		// (seq, stage, size, ordinal); EdgeMapStageOrdinal keeps two pictures of one seq (the de-judder extras, a repeat)
+		// apart. The crop is applied where the map is read (MEASURE_BODY), so no crop axis is needed in the key.
+		// The memo path, its visible Unavailable and the no-memo dispatch live in MeasureEdgeMap.h (CPU-tested seam,
+		// tests/MeasureEdgeMapTests.cpp); the no-memo branch dispatches THE shared fill into the module's own texture.
+		const pl_tex em = AcquireMeasureEdgeMap(Vpv::Skeleton::CurrentFrameMemo(), edgeOrdinal, base, p->color, lumaSystem,
+			lumaPrimaries,
+			[&](std::string& why) -> pl_tex {
+				if (!Ensure(gpu, edgeLocal, base->params.w, base->params.h, 2, 32, false, false) ||
+					!Vpv::Regions::DispatchEdgeMapStage(p->dispatch, base, p->color, lumaSystem, lumaPrimaries, edgeLocal, why))
+					return nullptr;
+				return edgeLocal;
+			},
+			edgeMapStatus);
+		if (em == nullptr)
+		{
+			++failures;
+			return unchanged;
+		}
 		const float origin[2] = { static_cast<float>(ox), static_cast<float>(oy) };
 		const float region[2] = { static_cast<float>(w), static_cast<float>(h) };
 		{
-			const pl_shader_desc d[3] = { Sampled("src", base, false), Storage("edge_out", edge),
+			const pl_shader_desc d[3] = { Sampled("em", em, false), Storage("edge_out", edge),
 				Storage("partial_out", partial) };
-			const pl_shader_var v[10] = {
-				{ pl_var_float("linear_in"), &linearIn, true },
+			const pl_shader_var v[5] = {
 				{ pl_var_vec2("origin"), origin, true },
 				{ pl_var_vec2("region"), region, true },
 				{ pl_var_float("edge_lo"), &settings.edgeLo, true },
 				{ pl_var_float("edge_hi"), &settings.edgeHi, true },
-				{ pl_var_float("shadow_bias"), &settings.shadowBias, true },
-				{ pl_var_float("ad_trc"), &domain.transfer.mode, true },
-				{ pl_var_float("ad_a"), &domain.transfer.a, true },
-				{ pl_var_float("ad_b"), &domain.transfer.b, true },
-				{ pl_var_float("ad_g"), &domain.transfer.g, true } };
-			if (!Compute(p->dispatch, "VideoProcessor adaptive downscale: measure", measureHeader.c_str(), MEASURE_BODY,
-				d, 3, v, hdrDecode ? 10 : 6, gx, gy))
+				{ pl_var_float("shadow_bias"), &settings.shadowBias, true } };
+			if (!Compute(p->dispatch, "VideoProcessor adaptive downscale: measure", MEASURE_HEADER, MEASURE_BODY,
+				d, 3, v, 5, gx, gy))
 			{
 				++failures;
 				return unchanged;

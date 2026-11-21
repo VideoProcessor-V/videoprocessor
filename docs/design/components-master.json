@@ -264,6 +264,10 @@
         "src/VP-V/modules/input/source_analysis/regions/CodingEvidence.cpp",
         "src/VP-V/modules/input/source_analysis/regions/RegionEvidence.h",
         "src/VP-V/modules/input/source_analysis/regions/RegionEvidenceGlsl.h",
+        "src/VP-V/modules/input/source_analysis/regions/MeasureDomain.h",
+        "src/VP-V/modules/input/source_analysis/regions/MeasureDomainGlsl.h",
+        "src/VP-V/modules/input/source_analysis/regions/tests/EdgeMapStageTests.cpp",
+        "src/VP-V/modules/input/source_analysis/regions/tests/EdgeMapStageGpuParityTests.cpp",
         "src/VP-V/modules/input/source_analysis/regions/README.md",
         "src/VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h",
         "src/VP-V/modules/input/source_analysis/lane/LaneGpuJobs.h",
@@ -1100,7 +1104,9 @@
         "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.h",
         "src/VP-V/modules/scaling/output/PicturePrecision.h",
         "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp",
-        "src/VP-V/modules/scaling/output/NlsMaskMapping.h"
+        "src/VP-V/modules/scaling/output/NlsMaskMapping.h",
+        "src/VP-V/modules/scaling/output/EdgeMapStageOrdinal.h",
+        "src/VP-V/modules/scaling/output/MeasureEdgeMap.h"
       ],
       "components": {
         "files": {

@@ -46,7 +46,7 @@ Counts: R 11, X 7, N 12, NP 33.
 |  |  |  | td.memory lag1 | NP | no production producer |
 | **P14** p14_source_identity | - | SourceIdPipeline.h | P5 | R | SourceIdPipeline.h:126; SourceIdPipeline.h:214 / type-token match only: FrameInput.classical is a monitor snapshot copied by the call site, not an Acquire |
 | **P14g** source_geometry | - | SourceGeometryProduct.h | P5 | N | flag ViewIsActual: C9b |
-| **edge_map** edge_map | L-B5 | EdgeMapFill.h | P13 | R | EdgeMapFill.h:65 |
+| **edge_map** edge_map | L-B5 | EdgeMapFill.h | P13 | R | EdgeMapFill.h:169; EdgeMapFill.h:219 |
 | **P10g** grain.level | L-B2 | GrainLevelGpu.h | P10 | R | GrainLevelGpu.h:203 |
 |  |  |  | P13 | R | GrainLevelGpu.h:191 |
 | **P7g** p7g_camera_guide | L-B6 | GuideLaneJob.cpp | P7 | N |  |
