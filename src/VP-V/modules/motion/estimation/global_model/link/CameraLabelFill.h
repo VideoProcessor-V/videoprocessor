@@ -52,6 +52,7 @@ namespace CameraLink
 		std::atomic<uint64_t> served{ 0 };         // LabelsFor answered with a texture
 		std::atomic<uint64_t> absent{ 0 };         // LabelsFor answered "unavailable"
 		std::atomic<uint64_t> staleLane{ 0 };      // lane productions REFUSED: the lane graph was rebuilt between the claim and the publish
+		std::atomic<uint64_t> epochResets{ 0 };    // GEM-127: the numbering restarted without a lane rebuild: floor and cursor reset
 		std::atomic<uint64_t> rebound{ 0 };        // times the fill took a new lane lease (a rebuild was noticed)
 		std::atomic<uint64_t> fieldMissing{ 0 };        // P7 published but the fit field product is not (node absent or no published slot for the frame): no labels
 		std::atomic<uint64_t> fieldStampMismatch{ 0 };  // both published but the field's stamp differs from P7's: no labels
@@ -61,12 +62,12 @@ namespace CameraLink
 	// "camera labels: lane 12, late 0, blocked 0, live 3, declined 1, served 15, absent 2, stale lane 0 (refused after a graph rebuild), lane rebinds 0, fit field missing 0 (no labels), fit field stamp mismatch 0 (no labels), fit field unreadable 0 (no labels)"
 	inline std::string LabelFillStatusLine(const LabelFillCounters& c)
 	{
-		char b[640];
-		std::snprintf(b, sizeof(b), "camera labels: %llu lane, %llu late, %llu blocked, %llu live, %llu declined, %llu served, %llu absent, %llu stale lane (refused after a graph rebuild), %llu lane rebinds, %llu fit field missing (no labels), %llu fit field stamp mismatch (no labels), %llu fit field unreadable (no labels)",
+		char b[720];
+		std::snprintf(b, sizeof(b), "camera labels: %llu lane, %llu late, %llu blocked, %llu live, %llu declined, %llu served, %llu absent, %llu stale lane (refused after a graph rebuild), %llu lane rebinds, %llu fit field missing (no labels), %llu fit field stamp mismatch (no labels), %llu fit field unreadable (no labels), %llu numbering restarts (gap floor reset)",
 			(unsigned long long)c.lane.load(), (unsigned long long)c.laneLate.load(), (unsigned long long)c.laneBlocked.load(),
 			(unsigned long long)c.live.load(), (unsigned long long)c.declined.load(), (unsigned long long)c.served.load(),
 			(unsigned long long)c.absent.load(), (unsigned long long)c.staleLane.load(), (unsigned long long)c.rebound.load(),
-			(unsigned long long)c.fieldMissing.load(), (unsigned long long)c.fieldStampMismatch.load(), (unsigned long long)c.fieldUnreadable.load());
+			(unsigned long long)c.fieldMissing.load(), (unsigned long long)c.fieldStampMismatch.load(), (unsigned long long)c.fieldUnreadable.load(), (unsigned long long)c.epochResets.load());
 		return b;
 	}
 
@@ -92,7 +93,23 @@ namespace CameraLink
 		// Consumers (render thread, after the seal).
 		bool LabelsFor(uint64_t seq, CameraConsumer c, CameraLabelsView& out);
 		// The frame about to be rendered: gap work below it is pointless.
-		void OnFrameStart(uint64_t seq) { if (seq > m_floor) m_floor = seq; }
+		// `epoch` (optional, 0 = not supplied): the vectors-valid epoch (IVectorEngine::FieldEra). A change means the source numbering
+		// restarted: the floor and cursor of the old numbering are void even when the lane was not rebuilt (GEM-127), counted.
+		void OnFrameStart(uint64_t seq, uint64_t epoch = 0)
+		{
+			if (epoch != 0 && epoch != m_epoch)
+			{
+				if (m_epoch != 0)
+				{
+					m_floor = 0;
+					m_cursor = 0;
+					m_fieldMissNext = 0;
+					m_counters.epochResets.fetch_add(1, std::memory_order_relaxed);
+				}
+				m_epoch = epoch;
+			}
+			if (seq > m_floor) m_floor = seq;
+		}
 
 		VpSkeleton::IGapWork* GapWork() { return &m_gap; }
 		const LabelFillCounters& Counters() const { return m_counters; }
@@ -132,6 +149,7 @@ namespace CameraLink
 		ILabelDevice& m_device;
 		Gap m_gap;
 		uint64_t m_floor = 0;
+		uint64_t m_epoch = 0;                     // the last vectors-valid epoch seen by OnFrameStart
 		uint64_t m_cursor = 0;
 		LabelFillCounters m_counters;
 	};

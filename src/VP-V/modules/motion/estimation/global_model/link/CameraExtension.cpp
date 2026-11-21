@@ -662,7 +662,7 @@ namespace Vpv
 					st.adapter->OnFrame();
 				}
 				if (st.labelFill)
-					st.labelFill->OnFrameStart(st.lane.NextFloor());
+					st.labelFill->OnFrameStart(st.lane.NextFloor(), engine->FieldEra());
 				return;
 			}
 			if (st.fitWanted && st.engineProblem.empty() && st.graphProblem.empty() && st.seedProblem.empty())

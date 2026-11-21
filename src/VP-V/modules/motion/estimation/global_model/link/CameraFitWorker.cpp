@@ -196,6 +196,17 @@ namespace CameraLink
 		m_cv.notify_one();
 	}
 
+	void CameraFitWorker::ResetRenderPosition(uint64_t renderSeq)
+	{
+		m_renderSeq.store(renderSeq, std::memory_order_release);
+		m_resetGen.fetch_add(1, std::memory_order_acq_rel);
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_tick = true;   // wake the fitting thread: parked results of the old numbering end now
+		}
+		m_cv.notify_one();
+	}
+
 	size_t CameraFitWorker::Parked() const
 	{
 		return m_parkedCount.load(std::memory_order_acquire);
@@ -254,6 +265,21 @@ namespace CameraLink
 	{
 		const uint64_t renderSeq = m_renderSeq.load(std::memory_order_acquire);
 		size_t ended = 0;
+		const uint64_t resetGen = m_resetGen.load(std::memory_order_acquire);
+		if (resetGen != m_resetSeen)
+		{
+			// GEM-127: the numbering restarted; a parked fit of the old numbering is judged against nothing. Each ends as NoProduct
+			// (counted by Finish as an ahead fit published nowhere: visible, never silent).
+			m_resetSeen = resetGen;
+			while (!m_parked.empty())
+			{
+				const ParkedResult done = std::move(m_parked.front());
+				m_parked.pop_front();
+				m_parkedCount.store(m_parked.size(), std::memory_order_release);
+				Finish(done.job, done.fit, PublishOutcome::NoProduct);
+				++ended;
+			}
+		}
 		for (auto it = m_parked.begin(); it != m_parked.end();)
 		{
 			PublishOutcome o = PublishOutcome::NoProduct;
