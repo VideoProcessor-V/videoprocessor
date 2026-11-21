@@ -375,7 +375,7 @@ namespace Vpv
 	void QueuePresetApplied(bool originalPathway, const Fields& fields, const QString& section, const QString& presetId)   // VPV-GATED
 	{
 		if (originalPathway) return;
-		if (auto* look = qobject_cast<QSpinBox*>(QueueRowsDetail::FieldWidget(fields, QStringLiteral("active_picture_lookahead_frames"))))
+		if (auto* look = qobject_cast<QSpinBox*>(QueueRowsDetail::FieldWidget(fields, QueueRowsDetail::VpvLookaheadName())))
 		{
 			QSignalBlocker blocker(look);
 			look->setValue(-1);
