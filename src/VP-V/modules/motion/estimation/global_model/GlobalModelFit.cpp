@@ -1480,6 +1480,12 @@ namespace CameraModel
 			uint32_t fullCells = 0;
 			if (in.fullFinalRefine)
 				fullCells = FullFinalRefine(in, f, cam->model, irls);   // the chosen model over every native cell (owner)
+			if (fullCells > 0)
+			{
+				// The refine moved the model: the inliers, the share and every signal Finish publishes are rebuilt on the refined model.
+				const Params refined = cam->model;
+				BuildCand(f, c, in, cellsTotal, refined, *cam);
+			}
 			Finish(F, in, c, f, temporalRead, *cam, ambiguity, rec);
 			rec.finalRefineCells = fullCells;
 			if (c.twoLayer)
