@@ -47,6 +47,13 @@ class RunComplianceTests(unittest.TestCase):
     def test_selftest(self):
         self.assertEqual(RC.main(["--selftest"]), 0)
 
+    def test_all_registered_tools_exist(self):
+        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        self.assertTrue(RC.TOOLS)
+        for name, script, _, _ in RC.TOOLS:
+            path = os.path.join(tools_dir, script)
+            self.assertTrue(os.path.isfile(path), f"registered compliance tool '{name}' missing: {path}")
+
 
 if __name__ == "__main__":
     unittest.main()

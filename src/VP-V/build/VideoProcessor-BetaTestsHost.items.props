@@ -8,6 +8,7 @@
 -->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\beta_gpu\BetaTestHost.cpp"/>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelGeometry.cpp"/>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelTemporal.cpp"/>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\DynamicTexture.cpp"/>

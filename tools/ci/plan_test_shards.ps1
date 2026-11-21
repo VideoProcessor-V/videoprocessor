@@ -56,7 +56,9 @@ function ClassOf([string]$test) {
 
 . (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) '..\test_filters.ps1')
 $cpuFilter = Get-VpTestFilter -Kind cpu
-$gpuClauses = @((Get-VpTestFilter -Kind gpu) -split '\|' | Where-Object { $_ -notlike 'Category=*' })
+# Derive excluded clauses directly from the CPU filter so every EXCLUDED_FROM_CPU category (including LoopRig,
+# Footage, Corpus, Bench, ParkedNets, Slow, UpstreamStale) is reflected in $genExcluded, matching vstest.
+$gpuClauses = @($cpuFilter -split '&' | Where-Object { $_ -notlike 'Category!=*' } | ForEach-Object { $_ -replace '!~', '~' })
 function GeneratorExcludes([string]$test) {
     $method = $test.Substring($test.LastIndexOf('::') + 2)
     # vstest's ~ is a case-INSENSITIVE substring match: the planner matches the same way, so it and the filter agree.

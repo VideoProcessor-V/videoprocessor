@@ -39,6 +39,8 @@ def main():
     for i, e in enumerate(manifest['entries']):
         if e['category'] not in lib.KNOWN_CATEGORIES:
             problems.append(f'manifest entry {e["value"]}: unknown category {e["category"]}')
+        if e.get('file') and not os.path.isfile(os.path.join(root, e['file'])):
+            problems.append(f'manifest entry {e["value"]}: missing file {e["file"]}')
         if i not in used:
             problems.append(f'manifest entry {e["kind"]} {e["value"]} matches no test')
     print(f'{total} tests scanned, {gpu} use the GPU, {len(manifest["entries"])} manifest entries')
