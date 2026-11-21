@@ -103,7 +103,10 @@ namespace GrainSplit
 				return ContextShapesOf(static_cast<int>(v.width), static_cast<int>(v.height), BlockFor(ScaleOfAxis(v.scale)), DefaultParams()).Bytes();
 			}
 
-			VpSkeleton::SkeletonMemo::Registration Register(VpSkeleton::SkeletonMemo& memo)
+			// The owner fill as registered: Register() on a memo directly, or a module through the skeleton's external demand
+			// (Skeleton::IExternalDemand::RegisterOwnerFill, GrainLevelGpu.h GrainLevelModule). This owner must outlive the
+			// registration.
+			VpSkeleton::OwnerFill MakeOwnerFill()
 			{
 				VpSkeleton::OwnerFill f;
 				f.variantAxes = ServedAxes();
@@ -111,7 +114,12 @@ namespace GrainSplit
 				f.fill = [this](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo& m, VpSkeleton::OwnerFillOutput& out) {
 					return Fill(req, m, out);
 				};
-				return memo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, std::move(f));
+				return f;
+			}
+
+			VpSkeleton::SkeletonMemo::Registration Register(VpSkeleton::SkeletonMemo& memo)
+			{
+				return memo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, MakeOwnerFill());
 			}
 
 			// Fills run so far (one per (frame, variant): the compute-once counter of this owner).
