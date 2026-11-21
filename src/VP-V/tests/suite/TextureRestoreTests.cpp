@@ -1095,6 +1095,59 @@ namespace TextureRestoreTestsNs
 			pl_tex_destroy(gpu, &coarseTex);
 		}
 
+		// GF-P5 S5: a stage that starts over (Forget) has no scene verdict yet: the "no scene record" state of the last frame and
+		// its history keep are cleared, not left on the status line.
+		TEST_METHOD(TextureRestoreForgetClearsTheSceneJudgeState)
+		{
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			std::mt19937 rng(77u);
+			const Image scene = Scene(kW, kH, rng);
+			pl_tex tex = UploadLuma(gpu, Quantised(Dctq(scene, 4.0)));
+			TextureRestore::Module module;
+			for (uint64_t sequence = 1; sequence <= 2; ++sequence)
+			{
+				TextureRestore::Params p = Frame(sequence);
+				p.sceneReader = &MissingReader;   // no scene record
+				pl_frame out{};
+				Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), p, out), Wide(module.LastError()).c_str());
+			}
+			Assert::IsTrue(module.SceneJudgeUnavailable(), L"precondition: the last frame had no scene record");
+			module.Forget();
+			Assert::IsFalse(module.SceneJudgeUnavailable(), L"Forget clears the scene-judge fallback");
+			Assert::AreEqual(1.0f, module.LastHistoryKeep(), 1e-6f, L"and the history keep");
+			module.Release(gpu);
+			pl_tex_destroy(gpu, &tex);
+		}
+
+		// GF-P5 S5: a self-restart frame (a sequence gap: restartAll) asks no scene verdict, so the previous frame's "no scene record"
+		// state is not carried over: not unavailable, keep 0.
+		TEST_METHOD(TextureRestoreSelfRestartFrameClearsTheSceneJudgeState)
+		{
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			std::mt19937 rng(77u);
+			const Image scene = Scene(kW, kH, rng);
+			pl_tex tex = UploadLuma(gpu, Quantised(Dctq(scene, 4.0)));
+			TextureRestore::Module module;
+			const uint64_t sequences[3] = { 1, 2, 9 };   // the last one is not the next frame: it restarts on its own
+			for (int k = 0; k < 3; ++k)
+			{
+				TextureRestore::Params p = Frame(sequences[k]);
+				p.sceneReader = &MissingReader;   // no scene record
+				pl_frame out{};
+				Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), p, out), Wide(module.LastError()).c_str());
+				if (k == 1)
+					Assert::IsTrue(module.SceneJudgeUnavailable(), L"precondition: a consecutive frame without a record is unavailable");
+			}
+			Assert::IsFalse(module.SceneJudgeUnavailable(), L"the self-restart frame is not unavailable");
+			Assert::AreEqual(0.0f, module.LastHistoryKeep(), 1e-6f, L"its history keep is 0");
+			module.Release(gpu);
+			pl_tex_destroy(gpu, &tex);
+		}
+
 		TEST_METHOD(TextureRestoreGpuRepeatOfAnotherPictureKeepsTheReferences)
 		{
 			// Hunt 3 F7: a repeat whose picture is another one (a Stage B phase picture, an extra:

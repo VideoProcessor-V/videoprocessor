@@ -797,6 +797,63 @@ namespace DetailPulseTestsNs
 			for (pl_tex& t : textures) pl_tex_destroy(g.gpu, &t);
 		}
 
+		// GF-P5 S5: a stage that starts over (Forget) has no scene verdict yet: the "no scene record" state of the last frame and
+		// its history keep are cleared, not left on the status line. GPU (WARP unless VP_TEST_GPU=hardware), as its neighbours.
+		TEST_METHOD(DetailPulseForgetClearsTheSceneJudgeState)
+		{
+			PulseGpu g;
+			const int w = 256, h = 192;
+			const Coded c = MakeCoded(w, h, 4, 23.976, 4.0, false, 404u);
+			std::vector<pl_tex> textures;
+			for (const Image& f : c.frames) textures.push_back(g.Upload(f));
+			{
+				DetailPulse::Module module;
+				for (int k = 0; k < 3; ++k)
+				{
+					DetailPulse::Params p;
+					p.sequence = static_cast<uint64_t>(k) + 1;
+					p.sceneReader = &MissingReader;   // no scene record
+					pl_frame out{};
+					Assert::IsTrue(module.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(textures[k]), p, out), W(module.LastError().c_str()).c_str());
+				}
+				Assert::IsTrue(module.SceneJudgeUnavailable(), L"precondition: the last frame had no scene record");
+				module.Forget();
+				Assert::IsFalse(module.SceneJudgeUnavailable(), L"Forget clears the scene-judge fallback");
+				Assert::AreEqual(1.0f, module.LastHistoryKeep(), 1e-6f, L"and the history keep");
+				module.Release(g.gpu);
+			}
+			for (pl_tex& t : textures) pl_tex_destroy(g.gpu, &t);
+		}
+
+		// GF-P5 S5: a self-restart frame (no valid history: a sequence gap) asks no scene verdict, so the previous frame's "no scene
+		// record" state is not carried over: not unavailable, keep 0.
+		TEST_METHOD(DetailPulseSelfRestartFrameClearsTheSceneJudgeState)
+		{
+			PulseGpu g;
+			const int w = 256, h = 192;
+			const Coded c = MakeCoded(w, h, 4, 23.976, 4.0, false, 404u);
+			std::vector<pl_tex> textures;
+			for (const Image& f : c.frames) textures.push_back(g.Upload(f));
+			{
+				DetailPulse::Module module;
+				const uint64_t sequences[4] = { 1, 2, 3, 10 };   // the last one is not the next frame: it restarts on its own
+				for (int k = 0; k < 4; ++k)
+				{
+					DetailPulse::Params p;
+					p.sequence = sequences[k];
+					p.sceneReader = &MissingReader;   // no scene record
+					pl_frame out{};
+					Assert::IsTrue(module.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(textures[k]), p, out), W(module.LastError().c_str()).c_str());
+					if (k == 2)
+						Assert::IsTrue(module.SceneJudgeUnavailable(), L"precondition: a consecutive frame without a record is unavailable");
+				}
+				Assert::IsFalse(module.SceneJudgeUnavailable(), L"the self-restart frame is not unavailable");
+				Assert::AreEqual(0.0f, module.LastHistoryKeep(), 1e-6f, L"its history keep is 0");
+				module.Release(g.gpu);
+			}
+			for (pl_tex& t : textures) pl_tex_destroy(g.gpu, &t);
+		}
+
 		TEST_METHOD(DetailPulseGpuLetterboxMatchesModel)
 		{
 			// Bug hunt 33 F1 (GPU vs model; WARP unless VP_TEST_GPU=hardware): letterbox and
