@@ -310,6 +310,16 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		// source_resolution auto's fast-pan switch. Bug hunt 3 F1: one cell is 8 source px
 		// per halving of the search input (4K 16, 8K 32), not 8 at every size.
 		const int searchHalvings = dejudder->SearchHalvings();
+		// W2-C5b: a pair not computed ahead is filled from the request the dequeue issued (OnDemandIssue.h), within the frame
+		// budget; adjacent pairs only where the vectors-valid state accepts them, gap pairs only across a plain gap.
+		// GEM VE-GLOBAL (MUST-4): BEFORE the global and the record sample below, so a pair filled on demand feeds them too (one sample per pair).
+		{
+			const bool onDemandAllowed = bSequence > aSequence + 1 ? motionValidity.LastCause() == MotionValidity::Cause::Gap :
+				motionValidity.PairValid(aSequence, bSequence, motionValidity.EpochOfLastKept(), motionValidity.Epoch()) &&
+				motionValidity.PairValidAt(aSequence, bSequence);
+			FallbackCatalog::NoPairCause onDemandCause = FallbackCatalog::NoPairCause::None;
+			flow = vectorEngine.OnDemandFill(std::move(flow), aSequence, bSequence, onDemandAllowed, onDemandCause);
+		}
 		vectorEngine.NoteGlobalPair(flow != nullptr);   // VPV-HOOK
 		// W1-C4: the pair's ONE sample (MotionRecord::EstimatePair, audit MUST 1) is read by the engine's CPU record (K4:
 		// IVectorEngine::EngineGlobal) and feeds the source monitor's fast-pan motion and the motion intent (the same whole-frame
@@ -320,17 +330,8 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			const int pictureHeight = dejudderPicture.available && dejudderPicture.rasterHeight == height &&
 				dejudderPicture.bottom > dejudderPicture.top ? dejudderPicture.bottom - dejudderPicture.top : height;
 			auto statisticsHost = VpMotion::MakeVectorEngineHost(*this);
-			VpMotion::MotionRecord::EstimatePair(vectorEngine, vectorDemand, aSequence, bSequence, flow ? flow->global[0] : nullptr,
+			VpMotion::MotionRecord::EstimatePair(vectorEngine, vectorDemand, aSequence, bSequence, (flow && bSequence == aSequence + 1) ? flow->global[0] : nullptr,
 				searchHalvings, pictureHeight, statisticsHost);
-		}
-		// W2-C5b: a pair not computed ahead is filled from the request the dequeue issued (OnDemandIssue.h), within the frame
-		// budget; adjacent pairs only where the vectors-valid state accepts them, gap pairs only across a plain gap.
-		{
-			const bool onDemandAllowed = bSequence > aSequence + 1 ? motionValidity.LastCause() == MotionValidity::Cause::Gap :
-				motionValidity.PairValid(aSequence, bSequence, motionValidity.EpochOfLastKept(), motionValidity.Epoch()) &&
-				motionValidity.PairValidAt(aSequence, bSequence);
-			FallbackCatalog::NoPairCause onDemandCause = FallbackCatalog::NoPairCause::None;
-			flow = vectorEngine.OnDemandFill(std::move(flow), aSequence, bSequence, onDemandAllowed, onDemandCause);
 		}
 		if (flow)
 		{

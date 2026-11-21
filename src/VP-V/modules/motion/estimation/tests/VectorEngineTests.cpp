@@ -175,6 +175,13 @@ namespace VectorEngineTest
 	TEST_CLASS(VectorEngineTests)
 	{
 	public:
+		TEST_METHOD(AGlobalIsUsableOnlyWithWeightAndConfidence)   // GEM VE-GLOBAL MUST-10
+		{
+			Assert::IsTrue(VectorDemand::SampleGlobal(10.0, 0.5f, 1.0f, 1080).usable);
+			Assert::IsFalse(VectorDemand::SampleGlobal(10.0, 0.5f, 0.0f, 1080).usable, L"an unset global (w = 0) is not usable");
+			Assert::IsFalse(VectorDemand::SampleGlobal(10.0, 1.0f, 1.0f, 1080).usable, L"a failed FlowGlobal (z = 1) is not usable");
+		}
+
 		TEST_METHOD(DemandOffTouchesNothingAndNeverPublishes)
 		{
 			VectorEngine engine;
