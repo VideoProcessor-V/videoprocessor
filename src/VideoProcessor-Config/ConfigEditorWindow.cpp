@@ -5409,62 +5409,7 @@ QWidget* ConfigEditorWindow::createStartupPage()
         markDirty();
     });
     hardwareForm->addRow(QStringLiteral("Input connection"), captureConnection);
-    auto* vpvForm = Vpv::AddNestedVpvForm(hardwareForm);   // VPV-HOOK
-    // Hunt 2 (2026-10-17, every setting has a control): [decklink] RGB packing,
-    // [directshow.conversion] and [directshow.ppm]. The first entry of each choice
-    // leaves the key unset (the runtime default).
-    const auto deckLinkPacking = [this, vpvForm](const QString& key, const QString& label,
-        const QStringList& packings, const QString& defaults)
-    {
-        QStringList values{ QString(), QStringLiteral("AUTO") };
-        QStringList labels{ QStringLiteral("Not set (AUTO: %1)").arg(defaults), QStringLiteral("AUTO (%1)").arg(defaults) };
-        for (const QString& packing : packings) { values << packing; labels << packing; }
-        auto* combo = bindChoiceField(QStringLiteral("decklink"), key, values, labels);
-        combo->setToolTip(QStringLiteral(
-            "DeckLink only: host-memory packing requested for detected RGB input at this depth. AUTO keeps the "
-            "established ARGB / r210 / R12B. The device and mode are checked; an unsupported packing falls "
-            "back safely and is logged."));
-        vpvForm->addRow(label, combo);
-    };
-    deckLinkPacking(QStringLiteral("rgb_8bit_packing"), QStringLiteral("8-bit RGB packing (DeckLink)"),
-        { QStringLiteral("ARGB"), QStringLiteral("BGRA") }, QStringLiteral("ARGB"));
-    deckLinkPacking(QStringLiteral("rgb_10bit_packing"), QStringLiteral("10-bit RGB packing (DeckLink)"),
-        { QStringLiteral("R210"), QStringLiteral("R10B"), QStringLiteral("R10L") }, QStringLiteral("r210"));
-    deckLinkPacking(QStringLiteral("rgb_12bit_packing"), QStringLiteral("12-bit RGB packing (DeckLink)"),
-        { QStringLiteral("R12B"), QStringLiteral("R12L") }, QStringLiteral("R12B"));
-    auto* conversionMethod = bindChoiceField(QStringLiteral("directshow.conversion"), QStringLiteral("conversion_method"),
-        { QString(), QStringLiteral("auto"), QStringLiteral("simd"), QStringLiteral("optimized"), QStringLiteral("standard") },
-        { QStringLiteral("Not set (Auto)"), QStringLiteral("Auto"), QStringLiteral("SIMD"), QStringLiteral("Optimized"),
-          QStringLiteral("Standard") });
-    conversionMethod->setToolTip(QStringLiteral(
-        "DirectShow path: the CPU method that converts v210 capture to P010. Auto picks the fastest available."));
-    vpvForm->addRow(QStringLiteral("P010 conversion method (DirectShow)"), conversionMethod);
-    auto* chromaDownsampling = bindChoiceField(QStringLiteral("directshow.conversion"), QStringLiteral("chroma_downsampling"),
-        { QString(), QStringLiteral("AVERAGE"), QStringLiteral("LEGACY"), QStringLiteral("ADVANCED") },
-        { QStringLiteral("Not set (Average)"), QStringLiteral("Average adjacent rows"),
-          QStringLiteral("Legacy: even rows, no averaging"), QStringLiteral("Advanced: Lanczos-3 (more CPU)") });
-    chromaDownsampling->setToolTip(QStringLiteral(
-        "DirectShow path: 4:2:2 to 4:2:0 chroma for P010. Average (default) averages adjacent chroma rows; "
-        "Legacy takes the even rows; Advanced uses 12-tap Lanczos-3 vertical filtering (more CPU, possible ringing)."));
-    vpvForm->addRow(QStringLiteral("P010 chroma downsampling (DirectShow)"), chromaDownsampling);
-    for (const auto& cores : { std::make_pair(QStringLiteral("min_core_count"), QStringLiteral("P010 conversion helpers, minimum")),
-        std::make_pair(QStringLiteral("max_core_count"), QStringLiteral("P010 conversion helpers, maximum")) })
-    {
-        auto* count = bindTextField(QStringLiteral("directshow.conversion"), cores.first);
-        count->setValidator(new QIntValidator(1, INT_MAX, count));
-        count->setPlaceholderText(QStringLiteral("1 (default)"));
-        count->setToolTip(QStringLiteral(
-            "DirectShow path: helper threads for the P010 conversion, not counting the calling thread. Empty = 1."));
-        vpvForm->addRow(cores.second, count);
-    }
-    auto* ppm = bindTextField(QStringLiteral("directshow.ppm"), QStringLiteral("ppm"));
-    ppm->setValidator(new QRegularExpressionValidator(QRegularExpression(
-        QStringLiteral("^(|[Aa][Uu][Tt][Oo]|-?(1000000|[0-9]{1,6}))$")), ppm));
-    ppm->setPlaceholderText(QStringLiteral("Not set (no correction)"));
-    ppm->setToolTip(QStringLiteral(
-        "DirectShow path: clock correction in parts per million for every source rate. AUTO measures it; a number "
-        "from -1000000 to 1000000 applies it; empty applies none."));
-    vpvForm->addRow(QStringLiteral("Clock PPM correction (DirectShow)"), ppm);
+    Vpv::AddStartupHardwareRows(hardwareForm, formApi_.kit);   // VPV-HOOK
     auto* behavior = new QWidget;
     auto* behaviorLayout = new QVBoxLayout(behavior);
     behaviorLayout->setContentsMargins(0, 0, 0, 0);
