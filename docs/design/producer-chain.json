@@ -1172,7 +1172,7 @@
     "input/source_analysis/regions/CodingEvidence.cpp",
     "control/skeleton/SkeletonModule.cpp"
    ],
-   "producer_text": "reserved (fused with the region block statistics pass)",
+   "producer_text": "CPU per-tile owner fill (CodingEvidence.cpp); GPU fused pass reserved",
    "reserved": false,
    "no_producer": false,
    "no_producer_owner": "",
