@@ -22,5 +22,6 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\beta_gpu\AnalysisLumaSourceTestStub.cpp"/>
     <!-- refs/105 phase 0 (PT-A): the producer throughput bench (VP_PT_BENCH=1; drives the real producer only). -->
     <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\beta_gpu\ProducerThroughputBench.cpp"/>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\beta_gpu\BetaParametersVpvHooks.cpp"/>
   </ItemGroup>
 </Project>
