@@ -559,12 +559,12 @@ namespace VideoProcessorTest
 					if (o[k] < 0.0)
 						t = std::min(t, y / std::max(-d, 1e-6));
 				}
-				t = std::clamp(t, 0.0, 1.0);
+				t = std::min(std::max(t, 0.0), 1.0);   // the test project is C++14: no std::clamp
 				s.f = anyAbove && gain < 1.0 ? curve(1.0, gain, b, domain) : 1.0;
 				Rgb c{};
 				for (int k = 0; k < 3; ++k)
 				{
-					s.p[k] = std::clamp(y + t * (o[k] - y), 0.0, 1.0);
+					s.p[k] = std::min(std::max(y + t * (o[k] - y), 0.0), 1.0);
 					c[k] = curve(s.p[k], gain, b, domain);
 					s.e[k] = (o[k] - s.p[k]) * s.f;
 				}
@@ -576,7 +576,7 @@ namespace VideoProcessorTest
 					if (s.e[k] < -1e-6)
 						s.k = std::min(s.k, (c[k] - lowest) / -s.e[k]);
 				}
-				s.k = std::clamp(s.k, 0.0, 1.0);
+				s.k = std::min(std::max(s.k, 0.0), 1.0);
 				return s;
 			};
 			// In range, white and black included (the per-channel path).
