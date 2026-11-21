@@ -534,9 +534,14 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 	// from the module's evidence texture (Gpu::Module::LastEvidenceTexture(0), texel (k x bw + bx, by)); slots = K is returned.
 	// channel (gate cb-u1 r3 MUST 2): the block texture component planted, 0 = N (.x), 1 = e3 (.y, which feeds F = e2 / (e2 +
 	// e3 + floor)). evA / evB: when set, every frame appends all four components of ev_a / ev_b at block (bx, by), slot-major.
+	// radius (cb-u1 U1 red, WAIVER-U1-BLEED): the plant covers every block within `radius` of (bx, by) (clamped to the grid);
+	// 0 = the one block, as before. guard: Gpu::Params::guard (default on, as before). The transfer blends the four nearest
+	// blocks' terms bilinearly (kTransferBody: g = (p + 0.5) / B - 0.5), so every pixel of block b also takes 34-50 % of its
+	// change from blocks b +- 1; radius 1 closes the whole support of block b's pixels. The guard's add-back pools tile sums
+	// over 3 x 3 blocks and interpolates them bilinearly (a wider support again), so the exact claim runs with it off.
 	std::vector<Plane> RunTdPlantedN(GpuDevice& dev, const std::vector<Plane>& frames, bool tamper, float value, int bx, int by,
 		std::vector<float>* hardAtBlock = nullptr, int* slots = nullptr, int channel = 0, std::vector<float>* evAAtBlock = nullptr,
-		std::vector<float>* evBAtBlock = nullptr)
+		std::vector<float>* evBAtBlock = nullptr, int radius = 0, bool guard = true)
 	{
 		pl_gpu gpu = dev.Gpu();
 		pl_tex bwdTex = UploadPair(gpu, MotionPair::Uniform(kW, kH, 16.0, -0.3, 0.0));
@@ -554,7 +559,9 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 			{
 				std::vector<float> blocks = DownloadFloat(gpu, dev.dispatch, product.blocks);
 				Assert::IsTrue(blocks.size() == static_cast<size_t>(product.bw) * static_cast<size_t>(product.bh) * 4, L"the block texture was read back");
-				blocks[(static_cast<size_t>(by) * product.bw + bx) * 4 + static_cast<size_t>(channel)] = value;
+				for (int j = (std::max)(0, by - radius); j <= (std::min)(product.bh - 1, by + radius); ++j)
+					for (int i = (std::max)(0, bx - radius); i <= (std::min)(product.bw - 1, bx + radius); ++i)
+						blocks[(static_cast<size_t>(j) * product.bw + i) * 4 + static_cast<size_t>(channel)] = value;
 				pl_tex_params tp{};
 				tp.w = product.bw; tp.h = product.bh; tp.format = pl_find_named_fmt(gpu, "rgba32f"); tp.sampleable = true; tp.initial_data = blocks.data();
 				planted = pl_tex_create(gpu, &tp);
@@ -568,6 +575,7 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 			gp.seq = t;
 			gp.planeLines = 1080.0;
 			gp.backward.tex = bwdTex;
+			gp.guard = guard;
 			gp.grain = RegionEvidence::GrainView(&shared);
 			pl_frame o{};
 			Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o), Wide(module.LastError()).c_str());
@@ -608,15 +616,15 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 		return out;
 	}
 
-	// The largest |a - b| inside a block's core (2 px inset) over all frames; whole = the whole picture instead.
-	double WorstInBlock(const std::vector<Plane>& a, const std::vector<Plane>& b, int bx, int by, bool whole = false)
+	// The largest |a - b| inside a block's core (`inset` px inset, default 2) over all frames; whole = the whole picture instead.
+	double WorstInBlock(const std::vector<Plane>& a, const std::vector<Plane>& b, int bx, int by, bool whole = false, int inset = 2)
 	{
 		double worst = 0.0;
 		for (size_t t = 0; t < a.size(); ++t)
 			for (int y = 0; y < kH; ++y)
 				for (int x = 0; x < kW; ++x)
 				{
-					if (!whole && (x < bx * 16 + 2 || x >= bx * 16 + 14 || y < by * 16 + 2 || y >= by * 16 + 14)) continue;
+					if (!whole && (x < bx * 16 + inset || x >= bx * 16 + 16 - inset || y < by * 16 + inset || y >= by * 16 + 16 - inset)) continue;
 					worst = (std::max)(worst, std::fabs(a[t].at(x, y) - b[t].at(x, y)));
 				}
 		return worst;
@@ -1405,6 +1413,12 @@ namespace VideoProcessorTest
 			LogF("control: %.0f slots, largest hard at the block %.4f", static_cast<double>(slots), static_cast<double>(controlHardMax));
 			Assert::IsTrue(controlHardMax > 0.0f, L"control: with a finite N some slot's hard (ev_a.x) at the block is > 0");
 			const double controlWorstAll = WorstInBlock(control, frames, 0, 0, true);
+			// WAIVER-U1-BLEED control: the exact claim below runs with the guard off; nothing planted, the block still changes there
+			// (so "output = input" over the closed support is not vacuous).
+			const std::vector<Plane> controlNoGuard = RunTdPlantedN(dev, frames, false, 0.0f, bestX, bestY, nullptr, nullptr, 0, nullptr, nullptr, 0, false);
+			const double controlNoGuardBlock = WorstInBlock(controlNoGuard, frames, bestX, bestY, false, 0);
+			LogF("control, guard off: the block changes by up to %.4f codes", controlNoGuardBlock);
+			Assert::IsTrue(controlNoGuardBlock > 0.25, L"control, guard off: the transfer changes the block (the support claim is not vacuous)");
 			const float values[3] = { std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity() };
 			const char* const names[3] = { "NaN", "+inf", "-inf" };
 			for (int k = 0; k < 3; ++k)
@@ -1419,7 +1433,13 @@ namespace VideoProcessorTest
 				bool closed = true;
 				for (float h : hard) closed = closed && h == 0.0f;
 				Assert::IsTrue(closed, Wide(std::string("N = ") + names[k] + ": hard (ev_a.x) at the planted block is 0 in every slot on every frame").c_str());
-				Assert::IsTrue(inBlock <= 0.05, Wide(std::string("N = ") + names[k] + ": the planted block transfers nothing (output = input)").c_str());
+				// WAIVER-U1-BLEED: a pixel of the planted block also takes its neighbours' (open) terms through the bilinear block field,
+				// so the one-block plant leaves the block's core changed (the block change logged above). The exact claim plants the
+				// block's whole support (3 x 3 blocks), guard off: no term reaches the block, every pixel is the input bit-exact.
+				const std::vector<Plane> support = RunTdPlantedN(dev, frames, true, values[k], bestX, bestY, nullptr, nullptr, 0, nullptr, nullptr, 1, false);
+				const double supportBlock = WorstInBlock(support, frames, bestX, bestY, false, 0);
+				LogF((std::string("N = ") + names[k] + " over the 3 x 3 support, guard off: block change %.4f codes").c_str(), supportBlock);
+				Assert::IsTrue(supportBlock == 0.0, Wide(std::string("N = ") + names[k] + ": over the block's whole support the block transfers nothing (output = input, bit-exact, all 16 x 16 px)").c_str());
 				Assert::IsTrue(all <= controlWorstAll + 1.0, Wide(std::string("N = ") + names[k] + ": no pixel anywhere goes wrong").c_str());
 			}
 		}
@@ -1479,7 +1499,17 @@ namespace VideoProcessorTest
 			worst = WorstInBlock(planted, frames, bestX, bestY);
 			LogF("e3 = NaN: block change %.4f codes", worst);
 			Assert::IsTrue(finite, L"e3 = NaN: the output is finite");
-			Assert::IsTrue(worst <= 0.05, L"e3 = NaN: the planted block transfers nothing (output = input)");
+			// WAIVER-U1-BLEED: as in the GrainLevel test, the one-block plant leaves the core changed by the neighbours' open terms
+			// (the bilinear block field). The exact claim plants e3 over the block's whole support (3 x 3 blocks), guard off; the
+			// control is the same guard-off run with nothing planted.
+			const std::vector<Plane> controlNoGuard = RunTdPlantedN(dev, frames, false, 0.0f, bestX, bestY, nullptr, nullptr, 1, nullptr, nullptr, 0, false);
+			const double controlNoGuardBlock = WorstInBlock(controlNoGuard, frames, bestX, bestY, false, 0);
+			const std::vector<Plane> support = RunTdPlantedN(dev, frames, true, std::numeric_limits<float>::quiet_NaN(), bestX, bestY,
+				nullptr, nullptr, 1, nullptr, nullptr, 1, false);
+			const double supportBlock = WorstInBlock(support, frames, bestX, bestY, false, 0);
+			LogF("guard off: control block change %.4f codes, e3 = NaN over the 3 x 3 support %.4f", controlNoGuardBlock, supportBlock);
+			Assert::IsTrue(controlNoGuardBlock > 0.25, L"control, guard off: the transfer changes the block (the support claim is not vacuous)");
+			Assert::IsTrue(supportBlock == 0.0, L"e3 = NaN over the block's whole support: the block transfers nothing (output = input, bit-exact, all 16 x 16 px)");
 		}
 
 		TEST_METHOD(TemporalDetailGpuNonFiniteBlockGateTexelIsNeutral)
