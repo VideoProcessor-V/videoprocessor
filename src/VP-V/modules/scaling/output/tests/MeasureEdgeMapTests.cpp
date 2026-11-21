@@ -249,6 +249,60 @@ namespace MeasureEdgeMapTestsNs
 			SourcePlanes::Forget(&host);
 		}
 
+		// r2 MUST-1 / SHOULD-1: the multiplier is what one render frame HOLDS. A cadence repeat seals the same source seq again,
+		// which releases the earlier render's frame-scoped edge map; its re-measure (ordinal 1) is then the only one held, so the
+		// ahead cost stays at one reserve. A discontinuity (Clear, BumpEpoch) measures the occupancy again.
+		TEST_METHOD(CadenceRepeatSealDoesNotMultiplyTheAheadCost)
+		{
+			int host = 0;
+			pl_tex_t base{};
+			base.params.w = 1920;
+			base.params.h = 1080;
+			const uint64_t reserve = Vpv::Regions::EdgeMapFillReserveBytes(DimsOf(1920, 1080));
+			std::shared_ptr<SkeletonMemo> m = RenderMemo(&host);
+			FakeEdgeMap fake;
+			fake.bytes = reserve;
+			m->RegisterOwnerFill(kEdgeMap, AcquireForm::Gpu, Vpv::Regions::kEdgeMapUnit, FakeEdgeMapFill(fake, reserve));
+			AdaptiveDownscale::EdgeMapStageOrdinal ordinals;
+			const QueueWindow w = DeriveWindow(QueueWindowTerms(), 7, 0);
+			const auto edgeCost = [&]() -> uint64_t {
+				const AheadNeed n = m->MakeAheadNeed(w, QueueMode::Normal);
+				for (const AheadCost& c : n.costs)
+					if (c.id == kEdgeMap && c.form == 1)
+						return c.bytesPerFrame;
+				Assert::Fail(L"kEdgeMap is costed in the ahead budget");
+				return 0;
+			};
+			const auto measure = [&]() -> pl_tex {
+				std::string status;
+				return AdaptiveDownscale::AcquireMeasureEdgeMap(Frame(m, &host, 7), ordinals, &base, Bt709(), PL_COLOR_SYSTEM_BT_709,
+					PL_COLOR_PRIM_BT_709, NeverLocal, status);
+			};
+
+			m->OnSeal(7);   // the render of source frame 7
+			Assert::IsTrue(measure() == &fake.tex, L"the first render's picture");
+			Assert::AreEqual(reserve, edgeCost(), L"one fill held: one reserve");
+
+			m->OnSeal(7);   // a cadence repeat: the same source seq rendered again (the earlier frame-scoped map is released)
+			Assert::IsTrue(measure() == &fake.tex, L"the repeat's picture");
+			Assert::AreEqual(size_t(2), fake.asked.size(), L"the repeat is its own compute");
+			Assert::IsTrue(fake.asked[1].param1 == 1, L"under the next ordinal");
+			Assert::AreEqual(reserve, edgeCost(), L"MUST-1: still one fill held at once: reserve x 1, not x 2");
+
+			// Within one render interval, two pictures are held together: x 2 (the other side of the pin).
+			Assert::IsTrue(measure() == &fake.tex, L"an extras picture in the same render");
+			Assert::AreEqual(2u * reserve, edgeCost(), L"two fills held at once: reserve x 2");
+
+			m->BumpEpoch(SkeletonMemo::InvalidateCause::Discontinuity);
+			Assert::AreEqual(reserve, edgeCost(), L"a new epoch measures its occupancy again");
+			m->OnSeal(7);
+			Assert::IsTrue(measure() == &fake.tex && measure() == &fake.tex, L"two pictures again");
+			Assert::AreEqual(2u * reserve, edgeCost(), L"measured again in the new epoch");
+			m->Clear();
+			Assert::AreEqual(reserve, edgeCost(), L"Clear(): a new graph measures its occupancy again");
+			SourcePlanes::Forget(&host);
+		}
+
 		TEST_METHOD(NoMemoComputesInTheModuleVisibly)
 		{
 			pl_tex_t base{};
