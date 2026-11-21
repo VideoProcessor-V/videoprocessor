@@ -2961,6 +2961,88 @@ namespace SkeletonModuleTestsNs
 			registry.ResetForTesting();
 		}
 
+		// A non-view GPU owner fill (P10) registered after the lane bound, and the cause an Acquire of it gives at frame seq (render thread).
+		static void RegisterGpuOwnerFill(Rig& rig)
+		{
+			VpSkeleton::OwnerFill g;
+			g.reserveBytes = 1u << 20;
+			g.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				static int tex = 0;
+				out.gpu.resource = &tex;
+				out.gpu.bytes = 1u << 20;
+				return true;
+			};
+			Assert::IsTrue(rig.sk.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, "repair/grain_split", g)
+				== VpSkeleton::SkeletonMemo::Registration::Registered);
+		}
+
+		static VpSkeleton::AcquireCause GpuOwnerFillCause(Rig& rig, int64_t seq)
+		{
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			return memo->Acquire(VpSkeleton::kP10GrainSplit, uint64_t(seq), VpSkeleton::AcquireForm::Gpu).cause;
+		}
+
+		// GF-P2b MUST-3 (attach side), shadow lane: the lane has no GPU dispatcher, yet the attached device serves a non-view GPU owner fill.
+		TEST_METHOD(AShadowLaneBoundMemoWithADeviceIsNotWithoutADispatcher)
+		{
+			Rig rig(Lane("shadow"));
+			int fakeGpu = 0;
+			rig.ResyncApply("on");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(rig.sk.MemoOf(rig.Host()) != nullptr && rig.sk.MemoOf(rig.Host())->LaneBound(), L"the shadow lane is bound");
+			RegisterGpuOwnerFill(rig);   // after the lane bound
+			Assert::IsTrue(GpuOwnerFillCause(rig, 4) != VpSkeleton::AcquireCause::NoGpuDispatcher);
+		}
+
+		// The same with the lane switched off by configuration and RAISED by an external demand.
+		TEST_METHOD(ARaisedLaneBoundMemoWithADeviceIsNotWithoutADispatcher)
+		{
+			Rig rig(Lane("off"));
+			int fakeGpu = 0;
+			rig.ResyncApply("on");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			VpSkeleton::ConsumerDecl c;
+			c.id = 0x0611;
+			c.name = "raise test";
+			VpSkeleton::AddConsume(c, VpSkeleton::kP4SourceStats, 0);
+			int owner = 0;
+			rig.sk.SetRaisingExternalDemand(rig.Host(), &owner, std::vector<VpSkeleton::ConsumerDecl>(1, c), std::vector<VpSkeleton::ProductId>(), "test");
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(rig.sk.MemoOf(rig.Host()) != nullptr && rig.sk.MemoOf(rig.Host())->LaneBound(), L"the raised lane is bound");
+			RegisterGpuOwnerFill(rig);
+			Assert::IsTrue(GpuOwnerFillCause(rig, 4) != VpSkeleton::AcquireCause::NoGpuDispatcher);
+			rig.sk.ClearExternalDemand(rig.Host(), &owner);
+		}
+
+		// GF-P2b MUST-3 (detach / attach after bind): a second GpuCreated without a device detaches it (no dispatcher left: the visible
+		// cause NoGpuDispatcher); a GpuCreated with a device attaches it again.
+		TEST_METHOD(ADeviceDetachedAfterTheBindLeavesNoDispatcherAndAReattachRestoresIt)
+		{
+			Rig rig(Lane("on"));
+			int fakeGpu = 0;
+			rig.ResyncApply("on");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(rig.sk.MemoOf(rig.Host()) != nullptr && rig.sk.MemoOf(rig.Host())->LaneBound(), L"the lane is bound");
+			RegisterGpuOwnerFill(rig);
+			Assert::IsTrue(GpuOwnerFillCause(rig, 4) != VpSkeleton::AcquireCause::NoGpuDispatcher, L"attached: not without a dispatcher");
+			RE::LifecycleFacts none;
+			none.host = rig.Host();
+			none.kind = RE::Lifecycle::GpuCreated;
+			none.gpu = nullptr;   // the device goes, none comes
+			rig.sk.OnLifecycle(none);
+			rig.Frame(5);
+			Assert::IsTrue(GpuOwnerFillCause(rig, 5) == VpSkeleton::AcquireCause::NoGpuDispatcher, L"detached: the visible cause");
+			GpuCreatedWithDevice(rig, &fakeGpu);
+			rig.Frame(6);
+			Assert::IsTrue(GpuOwnerFillCause(rig, 6) != VpSkeleton::AcquireCause::NoGpuDispatcher, L"attached again");
+		}
+
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
 		{
 			Rig rig(Lane("on"));
