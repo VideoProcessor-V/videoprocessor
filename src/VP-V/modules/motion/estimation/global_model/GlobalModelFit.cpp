@@ -1068,11 +1068,12 @@ namespace CameraModel
 					// the scale measured another motion or its own gate (real set sol, nvof: 0.5 -> 2.0 -> 5.9 -> 9.0 px, never
 					// settling; 11 pairs confident 2.9-11.6 px off): the floor stays and the winner is counted under it again.
 					Params refined = chA.model;
-					Refine(f, f.s, refined, std::max(1, irls));
+					// A refine that fails proves nothing about the winner under the raised gate: treated as moved (the floor stays).
+					const bool refinedOk = Refine(f, f.s, refined, std::max(1, irls));
 					const double movedPx = MaxCornerDifference(refined, chA.model, f.pic) * f.diag;
 					const double fitPrecPx = c.absThresholdSigmas * f.prec *
 						std::sqrt(static_cast<double>(ParamCount(chA.model.type)) / std::max(1, cdA.inlierCount));
-					if (!(movedPx <= fitPrecPx))
+					if (!refinedOk || !(movedPx <= fitPrecPx))
 					{
 						f.prec = floorPrec;
 						f.absThr = floorAbsThr;

@@ -320,19 +320,19 @@ namespace VpMotion
 		// failed start waits for its back-off, the matcher alone would give it nothing, so its want is not registered (its own
 		// "camera fit needs the optical-flow seed" status shows; the "motion engine" entry names it).
 		const bool cameraWanted = cameraFitWanted_.load(std::memory_order_acquire) || input.wants[cameraFit];
-		// Camfix R1: the producer resolves the hints per consumer class (camera fit: off; every other consumer: on); the camera fit's
-		// want selects the class, and a non-default state is never silent (synced on change only).
+		// Camfix R1 + audit MUST 1: one shared pair stream, so one hints state for ALL consumers: while the camera fit wants the
+		// stream its setting (default off) governs every pair, otherwise the everyday setting (default on). The entry is built from
+		// the producer's HintsInForce (the state HintsApply uses), so Ctrl+I shows the real state and why; synced on change only.
 		{
 			const std::shared_ptr<MotionAhead::Producer> producer = LoopProducer();
 			if (producer)
 				producer->SetCameraConsumes(cameraWanted);
-			const bool cameraOn = producer && producer->TemporalHints(MotionAhead::Producer::HintConsumer::Camera);
-			const bool otherOn = !producer || producer->TemporalHints(MotionAhead::Producer::HintConsumer::Other);
-			const int shown = (cameraOn ? 1 : 0) | (otherOn ? 2 : 0);
+			const MotionAhead::Producer::HintsState hs = producer ? producer->HintsShown() : MotionAhead::Producer::HintsState();
+			const int shown = (hs.cameraOn ? 1 : 0) | (hs.otherOn ? 2 : 0) | (hs.cameraActive ? 4 : 0) | (hs.inForce ? 8 : 0);
 			if (shown != motionHintsShown)
 			{
 				motionHintsShown = shown;
-				host.SyncFallback(FallbackCatalog::NvofTemporalHints(cameraOn, otherOn));
+				host.SyncFallback(FallbackCatalog::NvofTemporalHints(hs.cameraActive, hs.inForce, hs.cameraOn, hs.otherOn));
 			}
 		}
 		motionOpticalFlow = facts.opticalFlow;   // this frame's setting (PlanProducer refreshes it too)

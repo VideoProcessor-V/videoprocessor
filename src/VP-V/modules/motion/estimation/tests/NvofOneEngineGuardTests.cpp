@@ -279,7 +279,7 @@ namespace VideoProcessorTest
 			using HC = MotionAhead::Producer::HintConsumer;
 			MotionAhead::Producer producer;
 			Assert::AreEqual(envOn, producer.TemporalHints(HC::Camera), L"camera class: default off (on only with VP_NVOF_TEMPORAL_HINTS=1)");
-			Assert::IsTrue(producer.TemporalHints(HC::Other), L"every other consumer class: default ON (interim narrow reading)");
+			Assert::IsTrue(producer.TemporalHints(HC::Other), L"everyday setting: default ON (governs the shared stream while the camera fit is inactive)");
 			producer.SetTemporalHints(HC::Camera, true);
 			Assert::IsTrue(producer.TemporalHints(HC::Camera));
 			producer.SetTemporalHints(HC::Camera, false);
@@ -324,15 +324,22 @@ namespace VideoProcessorTest
 			Assert::IsTrue(producer.TemporalHints(HC::Camera), L"the classes are independent");
 		}
 
-		// The Ctrl+I entry names both classes and is released only at the defaults (camera off, others ON).
+		// The Ctrl+I entry (args: cameraActive, inForce, cameraOn, otherOn) is released only in today's everyday state (camera fit
+		// inactive, both settings at their defaults, hints ON); every other state is engaged and names the stream state and both settings.
 		TEST_METHOD(HintsFallbackEntryShowsEachConsumerClass)
 		{
-			Assert::IsFalse(FallbackCatalog::NvofTemporalHints(false, true).engaged, L"defaults: released");
-			const FallbackCatalog::Decision camera = FallbackCatalog::NvofTemporalHints(true, true);
+			Assert::IsFalse(FallbackCatalog::NvofTemporalHints(false, true, false, true).engaged, L"everyday defaults: released");
+			const FallbackCatalog::Decision camera = FallbackCatalog::NvofTemporalHints(true, true, true, true);
 			Assert::IsTrue(camera.engaged, L"camera opt-in shown");
-			Assert::IsTrue(camera.reason.find("camera fit ON") != std::string::npos && camera.reason.find("other consumers ON") != std::string::npos);
-			const FallbackCatalog::Decision other = FallbackCatalog::NvofTemporalHints(false, false);
-			Assert::IsTrue(other.engaged && other.reason.find("other consumers off") != std::string::npos, L"others off shown");
+			Assert::IsTrue(camera.reason.find("hints ON for the whole shared pair stream") != std::string::npos &&
+				camera.reason.find("camera fit active") != std::string::npos &&
+				camera.reason.find("camera fit ON") != std::string::npos && camera.reason.find("everyday ON") != std::string::npos);
+			const FallbackCatalog::Decision other = FallbackCatalog::NvofTemporalHints(false, false, false, false);
+			Assert::IsTrue(other.engaged && other.reason.find("hints OFF for the whole shared pair stream") != std::string::npos &&
+				other.reason.find("camera fit inactive") != std::string::npos && other.reason.find("everyday off") != std::string::npos,
+				L"everyday off shown");
+			const FallbackCatalog::Decision optInIdle = FallbackCatalog::NvofTemporalHints(false, true, true, true);
+			Assert::IsTrue(optInIdle.engaged, L"a non-default camera setting is shown even while the camera fit is inactive");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(ExactlyOneEngineAcrossProducerDejudderAndLongPair)

@@ -256,18 +256,19 @@ namespace MotionAhead
 		size_t PendingCapacity() const { return maxPendingJobs.load(std::memory_order_acquire); }
 		// general_rate_fixes for the engine's global vote range (FlowVoteRange).
 		void SetGeneralRates(bool on) { generalRates.store(on, std::memory_order_release); }
-		// Camfix R1 (doc 103 s2: NVOF temporal-hint drift): the engine's temporal hints between consecutive pairs. On by
-		// default OFF (owner 2026-11-12 04:52, doc 91 A/H, register 115 #40: camera hints off until R3); on = a continuous pair runs
+		// Camfix R1 (doc 103 s2: NVOF temporal-hint drift): the engine's temporal hints between consecutive pairs. Camera
+		// setting default OFF (owner 2026-11-12 04:52, doc 91 A/H, register 115 #40: camera hints off until R3); on = a continuous pair runs
 		// with the temporal hints, off = every pair runs with disableTemporalHints (NvOpticalFlow::Engine::Run continuous = false).
 		// A diagnostic switch for tests and A/B runs; the environment variable VP_NVOF_TEMPORAL_HINTS=1 turns it on at
 		// construction (no configuration key); Ctrl+I shows the opt-in. Both the scheduled and the on-demand path decide through
 		// HintsApply, so the shown state is the real one.
-		// Interim ruling (coordinator, delegated; owner confirms): "camera hints OFF" (register 115 #40) is read NARROWLY. The
-		// setting is per consumer class: Camera (the camera-model fit, default OFF) and Other (de-judder, everyday viewing and every
-		// other NVOF consumer, default ON: hints off everywhere worsened slow pans, R1 120 px/s 59.94p bias +0.036 -> +0.464 px).
-		// The pair stream is computed once and shared (rule 21), so the rule is one resolution: while the camera fit consumes the
-		// stream (SetCameraConsumes, set by VectorEngine each update) the Camera setting governs the pair, otherwise the Other
-		// setting does. VP_NVOF_TEMPORAL_HINTS=1 turns the Camera setting on (the diagnostic opt-in); the Other setting has no env.
+		// Interim ruling (coordinator, delegated; owner confirms): "camera hints OFF" (register 115 #40). There are two settings:
+		// Camera (the camera-model fit, default OFF) and Other = everyday (default ON: hints off everywhere worsened slow pans, R1
+		// 120 px/s 59.94p bias +0.036 -> +0.464 px). The pair stream is computed ONCE and shared (rule 21), so the hint state is per
+		// STREAM, not per consumer: while the camera fit consumes the stream (SetCameraConsumes, set by VectorEngine each update) the
+		// Camera setting governs ALL pairs, de-judder, interpolation and every reuse consumer included; otherwise the Other setting
+		// does (audit 55ec5b497 MUST 1; Ctrl+I "nvof temporal hints" names the state in force and why). With the camera default OFF
+		// everyday viewing keeps hints ON. VP_NVOF_TEMPORAL_HINTS=1 turns the Camera setting on (the diagnostic opt-in); Other has no env.
 		enum class HintConsumer { Camera, Other };
 		void SetTemporalHints(HintConsumer who, bool on) { (who == HintConsumer::Camera ? hintsCamera : hintsOther).store(on, std::memory_order_release); }
 		bool TemporalHints(HintConsumer who) const { return (who == HintConsumer::Camera ? hintsCamera : hintsOther).load(std::memory_order_acquire); }
@@ -275,6 +276,17 @@ namespace MotionAhead
 		bool CameraConsumes() const { return cameraConsumes.load(std::memory_order_acquire); }
 		// The hints state in force for the pairs now being made (what Ctrl+I shows and HintsApply uses).
 		bool HintsInForce() const { return TemporalHints(CameraConsumes() ? HintConsumer::Camera : HintConsumer::Other); }
+		// The one snapshot Ctrl+I's "nvof temporal hints" entry is built from (VectorEngine; FallbackCatalog::NvofTemporalHints).
+		struct HintsState { bool cameraActive = false, inForce = true, cameraOn = false, otherOn = true; };
+		HintsState HintsShown() const
+		{
+			HintsState s;
+			s.cameraActive = CameraConsumes();
+			s.inForce = HintsInForce();
+			s.cameraOn = TemporalHints(HintConsumer::Camera);
+			s.otherOn = TemporalHints(HintConsumer::Other);
+			return s;
+		}
 		// The one decision both RunPair call sites use: hints only while in force AND the engine's last pair ended at this pair's first frame.
 		bool HintsApply(bool chainContinuous) const { return chainContinuous && HintsInForce(); }
 
@@ -396,7 +408,7 @@ namespace MotionAhead
 		}
 		std::atomic<bool> generalRates{ true };
 		std::atomic<bool> hintsCamera{ false };   // camfix R1 (SetTemporalHints, Camera): owner 04:52, default OFF
-		std::atomic<bool> hintsOther{ true };     // camfix R1 (SetTemporalHints, Other): every other NVOF consumer keeps hints ON
+		std::atomic<bool> hintsOther{ true };     // camfix R1 (SetTemporalHints, Other): the everyday setting (default ON); governs the shared stream while the camera fit is inactive
 		std::atomic<bool> cameraConsumes{ false };   // the camera fit consumes the pair stream (VectorEngine, each update)
 		std::atomic<int> targetW{ 0 }, targetH{ 0 };
 		std::mutex p1Mutex;                                 // guards p1Source (set from the render thread, read by the worker)
