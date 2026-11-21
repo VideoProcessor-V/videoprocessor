@@ -7,6 +7,7 @@
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 #include <VP-V/tests/support/SubtitleTextTestPattern.h>
 
 #include <algorithm>
@@ -1192,6 +1193,9 @@ namespace VideoProcessorTest
 			char line[160];
 			snprintf(line, sizeof(line), "analysed frame: %.1f ms (8 tiles), %.1f ms (16 tiles); worker reports %.1f ms\n", eight, sixteen, m.Read().analyseMs);
 			Logger::WriteMessage(line);
+			// Both loops ran 4 frames each through the worker, which timed them.
+			Assert::IsTrue(m.Read().frames == 8, L"the monitor analysed all 8 frames (4 x 8 tiles, 4 x 16 tiles)");
+			Assert::IsTrue(m.Read().analyseMs > 0.0, L"the worker reports a positive analysis time for the last frame");
 		}
 
 		// Native 4K on both axes (SVT clips): clean, heavy grain, low bitrate (coded at 4K), defocused
@@ -1983,14 +1987,25 @@ namespace VideoProcessorTest
 			const int pillar = AddUpscale(st, c.bosphorus, 60, 0.5, kLanczos3, 2.0, 0.0, " 4:3, player bars");
 			st.contents[static_cast<size_t>(pillar)].overlay = Overlay::PlayerPillarbox;
 			const int plain = AddUpscale(st, c.bosphorus, 60, 0.5, kLanczos3, 2.0);
-			Diagnose(st, plain, 0, 1.0, "1080 full frame");
-			Diagnose(st, pillar, 0, 1.0, "1080 4:3 player bars");
-			Diagnose(st, pillar, 1, 1.0, "1080 4:3 player bars (next)");
+			// The printed ratio is read against the content's truth (0.5), by the gate RealFootageReadings uses
+			// for coded upscales: its height or native, never a wrong height. A reading needs informative tiles.
+			const auto readsHeightOrNative = [](const SourceResolution::FrameReading& f) { return f.ratio >= 1.0 || std::fabs(f.ratio - 0.5) <= 0.01; };
+			const SourceResolution::FrameReading plainReading = Diagnose(st, plain, 0, 1.0, "1080 full frame");
+			const SourceResolution::FrameReading pillarReading = Diagnose(st, pillar, 0, 1.0, "1080 4:3 player bars");
+			const SourceResolution::FrameReading pillarNext = Diagnose(st, pillar, 1, 1.0, "1080 4:3 player bars (next)");
+			Assert::IsTrue(plainReading.informativeTiles > 0 && readsHeightOrNative(plainReading), L"the plain 1080 frame reads 0.5 or native");
+			Assert::IsTrue(pillarReading.informativeTiles > 0 && readsHeightOrNative(pillarReading), L"the 4:3 1080 picture with player bars reads 0.5 or native");
+			Assert::IsTrue(pillarNext.informativeTiles > 0 && readsHeightOrNative(pillarNext), L"the next 4:3 1080 frame with player bars reads 0.5 or native");
 			// 2. A dark 1080 scene and its fade-in (one native reading unlatched in FadeThroughBlack...).
 			Content dark = st.contents[static_cast<size_t>(AddUpscale(st, c.bosphorus, 300, 0.5, kCatmull, 2.0))];
 			dark.gain = 0.12;
 			const int darkId = st.Add(dark);
-			for (const double g : { 1.0, 0.8, 0.6, 0.4, 0.2 }) Diagnose(st, darkId, 1, g, "1080 dark scene (x0.12) fading in");
+			for (const double g : { 1.0, 0.8, 0.6, 0.4, 0.2 })
+			{
+				// A 1080 upscale, dark: it may read native (too dark to tell) but never a wrong, lower height.
+				const SourceResolution::FrameReading f = Diagnose(st, darkId, 1, g, "1080 dark scene (x0.12) fading in");
+				Assert::IsTrue(readsHeightOrNative(f), L"the dark 1080 scene fading in reads 0.5 or native, never a wrong height");
+			}
 			// 3. The ladder: the same crowd pictures as the 1080 and the 4K rendition (F12's detail drop).
 			const int lo = AddUpscale(st, c.crowd, 60, 0.5, kCatmull, 4.0);
 			Content hiC = st.contents[static_cast<size_t>(lo)];
@@ -2003,6 +2018,8 @@ namespace VideoProcessorTest
 				char line[160];
 				snprintf(line, sizeof(line), "DIAG ladder detail drop %.3f decades (F12 needs %.2f)\n", dHi - dLo, SourceResolution::Tracker::Settings{}.renditionDetailDrop);
 				Logger::WriteMessage(line);
+				Assert::IsTrue(!std::isinf(dHi) && !std::isinf(dLo), L"both ladder renditions have a measurable detail above 1080");
+				Assert::IsTrue(dHi - dLo >= SourceResolution::Tracker::Settings{}.renditionDetailDrop, L"the 1080 rendition's detail drop reaches what F12 needs");
 			}
 			// 4. Kernel fits on a 1080 Catmull-Rom upscale coded q3 (not identified in the scenario).
 			const int cat = AddUpscale(st, c.yacht, 80, 0.5, kCatmull, 3.0);
@@ -2024,6 +2041,13 @@ namespace VideoProcessorTest
 						st.contents[static_cast<size_t>(id)].name.c_str(), p, fit.best >= 0 ? KernelInverse::Candidates()[static_cast<size_t>(fit.best)].name.c_str() : "none",
 						fit.bestResidual, fit.secondResidual, KernelInverse::Accept(fit, KernelInverse::FloorCodes(10, 10)) ? 1 : 0, KernelInverse::FloorCodes(10, 10), res.c_str());
 					Logger::WriteMessage(line);
+					Assert::IsTrue(fit.best >= 0 && fit.bestResidual <= fit.secondResidual, L"a kernel fit names a best candidate no worse than the runner-up");
+					if (id == cat0)
+					{
+						// The uncoded Catmull-Rom upscale is the one the fit must identify (the coded one is the logged question).
+						Assert::AreEqual(KernelInverse::Find("bicubic C0.5 (Catmull-Rom)"), fit.best, L"the uncoded Catmull-Rom upscale fits Catmull-Rom best");
+						Assert::IsTrue(KernelInverse::Accept(fit, KernelInverse::FloorCodes(10, 10)), L"the uncoded Catmull-Rom fit is accepted");
+					}
 				}
 			}
 		}
@@ -2428,7 +2452,9 @@ namespace VideoProcessorTest
 		{
 			using namespace SrcLatch;
 			const std::string films = Env("VP_TEST_CUT_FILMS");
-			if (films.empty()) { Logger::WriteMessage("RealFilmCutDecisions: VP_TEST_CUT_FILMS not set: skipped\n"); return; }
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionLatchTests::RealFilmCutDecisions",
+				!films.empty(), "VP_TEST_CUT_FILMS not set"))
+				return;
 			size_t from = 0;
 			while (from < films.size())
 			{
@@ -2487,6 +2513,11 @@ namespace VideoProcessorTest
 				char line[300];
 				snprintf(line, sizeof(line), "RESULT %s: %d analysed frames; cuts with latch fixes %llu, without %llu\n", path.c_str(), frames, cutsOn, cutsOff);
 				Logger::WriteMessage(line);
+				// The decisions themselves: a real film has cuts, and no tracker can count more cuts than steps.
+				Assert::IsTrue(frames >= 2, L"the film holds at least two analysed frames");
+				Assert::IsTrue(cutsOn > 0, L"the shape test (latch fixes on) finds cuts in a real film");
+				Assert::IsTrue(cutsOn < static_cast<unsigned long long>(frames), L"the shape test finds fewer cuts than analysed steps");
+				Assert::IsTrue(cutsOff < static_cast<unsigned long long>(frames), L"the old tile-mean jump finds fewer cuts than analysed steps");
 			}
 		}
 
