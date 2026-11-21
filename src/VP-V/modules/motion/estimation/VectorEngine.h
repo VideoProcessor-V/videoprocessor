@@ -453,15 +453,26 @@ namespace VpMotion
 		// product.motion_warp). `namedException` (non-null: RGB structure luma, DV unpack output) = every level is Unavailable with
 		// "named exception: <it>" (plan (b): those lumas are not the shared source plane).
 		MatcherPyramid::Source MatcherPyramidSource(const char* namedException = nullptr) const;
-		// L-B4 (BBP-B HIGH-1): the matcher's A / B / ahead-C uploads ARE the unpacked planes of those queued frames on the render
-		// device: offered as P13 views (SourcePlanes::Offer, VP-V code, no host line) for this render frame BEFORE the estimate, so
-		// the P1 owner fill finds its source and the read seam its identity. Render thread. `luma` / `chroma` are pl_tex (chroma may
-		// be null). The generation is below every render frame's, so the Entrance offer of the same seq wins later Find calls; the
-		// memo keeps what the frame's first P13 Acquire saw. False = not offered (Original pathway, no host, table full).
+		// L-B4 (BBP-B HIGH-1): the matcher's B upload (and the ahead pair's B / C) ARE the unpacked planes of those queued frames on
+		// the render device: offered as P13 views (SourcePlanes::Offer, VP-V code, no host line) for this render frame BEFORE the
+		// estimate, so the P1 owner fill finds its source and the read seam its identity. The render frame's own seq (the pair's A)
+		// is NEVER offered (its P13 stays the Entrance image, as at base): A's levels are the product made when it was the last
+		// pair's B (keepFrames 1), recognised through the log of these offers. Render thread. `luma` / `chroma` are pl_tex (chroma
+		// may be null). The generation is below every render frame's. False = not offered (Original pathway, no host, table full).
 		bool OfferMatcherPlanes(uint64_t seq, const void* luma, const void* chroma, bool fullRange) const;
 		static constexpr int64_t kMatcherOfferGeneration = -1;
+		// The last matcher offers (seq, range), shared with the read seam.
+		struct MatcherOfferLog
+		{
+			static constexpr size_t kEntries = 4;   // B, the ahead B / C, and the previous frame's B (the next A)
+			struct Entry { uint64_t seq = 0; bool fullRange = false; };
+			std::mutex m;
+			Entry entries[kEntries];
+			size_t next = 0;
+		};
 
 	private:
+		std::shared_ptr<MatcherOfferLog> matcherOffers_ = std::make_shared<MatcherOfferLog>();
 		void NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence, uint64_t epochAtChoice);
 		FallbackCatalog::Decision NoteHookOutcome(bool failed, const std::string& what);   // counts and logs a failure
 		FallbackCatalog::Decision ReleaseHookFailures();

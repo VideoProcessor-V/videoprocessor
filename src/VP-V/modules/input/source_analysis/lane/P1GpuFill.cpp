@@ -187,6 +187,13 @@ namespace P1Gpu
 				}
 				// The source luma (P13): its size is `full` for every level (levels count halvings of the source), its plane set
 				// carries the range for the range codes.
+				// The offer table first (no memo entry): an Acquire of a seq not offered yet would cache its decline for the whole
+				// render frame and refuse the later Entrance offer of that seq to every P13 reader of the frame.
+				if (!Vpv::Capture::SourcePlanes::Find(req.host, req.seq))
+				{
+					out.declineReason = "p1_gpu: source luma not offered this frame";
+					return false;
+				}
 				const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireForm::Gpu);
 				if (!src.Ok() || !src.gpu.Valid() || src.gpu.resource == nullptr)
 				{

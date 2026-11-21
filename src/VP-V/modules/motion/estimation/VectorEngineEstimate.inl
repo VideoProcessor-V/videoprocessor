@@ -363,14 +363,17 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			++vectorEngine.motionGapUnseeded;
 	}
 	SyncFallback(vectorEstimate.SnapshotLeaseDecision(GetTickCount64()));   // SK-MV: a lost snapshot lease is shown while recent
-	// L-B4 (BBP-B B3 + HIGH-1): the shared luma pyramid read seam. A's and B's planes (B's and C's ahead) are the unpacked planes of
-	// those queued frames: offered as P13 views before the estimate (VP-V code; no host line), so the P1 owner fill finds its source
-	// and the seam its identity. The named exceptions of plan (b) are not offered and are shown as such.
+	// L-B4 (BBP-B B3 + HIGH-1): the shared luma pyramid read seam. B's planes (B's and C's ahead) are the unpacked planes of those
+	// queued frames: offered as P13 views before the estimate (VP-V code; no host line), so the P1 owner fill finds its source and
+	// the seam its identity. A of a render-time pair is the render frame itself: never offered (its P13 stays the Entrance image);
+	// its levels are the product made when it was B. The ahead pair's A is the next frame's B, offered. The named exceptions of
+	// plan (b) are not offered and are shown as such.
 	const char* const pyramidException = dejudderLayout.rgb ? "RGB source: the matcher's luma comes from the RGB unpack" :
 		dejudderLayout.dvTunnelRaw ? "Dolby Vision tunnel: the matcher's luma is the DV unpack output" : nullptr;
 	if (pyramidException == nullptr)
 	{
-		vectorEngine.OfferMatcherPlanes(aSequence, a.luma, a.chroma, a.fullRange);
+		if (ahead)
+			vectorEngine.OfferMatcherPlanes(aSequence, a.luma, a.chroma, a.fullRange);
 		vectorEngine.OfferMatcherPlanes(bSequence, b.luma, b.chroma, b.fullRange);
 	}
 	dejudder->SetPyramidSource(vectorEngine.MatcherPyramidSource(pyramidException));

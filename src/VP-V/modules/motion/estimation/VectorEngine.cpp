@@ -1282,6 +1282,21 @@ namespace VpMotion
 		s.origin = "matcher upload";
 		if (!Vpv::Capture::SourcePlanes::Offer(host_, s))
 			return false;
+		{
+			// Remembered for the next render frame, where this frame is A and its product (keepFrames 1) is read without a new offer.
+			std::lock_guard<std::mutex> lock(matcherOffers_->m);
+			MatcherOfferLog::Entry* e = nullptr;
+			for (MatcherOfferLog::Entry& known : matcherOffers_->entries)
+				if (known.seq == seq)
+					e = &known;   // a second offer of one frame (B again as the ahead pair's B) refreshes its entry
+			if (e == nullptr)
+			{
+				e = &matcherOffers_->entries[matcherOffers_->next];
+				matcherOffers_->next = (matcherOffers_->next + 1) % MatcherOfferLog::kEntries;
+			}
+			e->seq = seq;
+			e->fullRange = fullRange;
+		}
 		// The P1 owner fill is registered from the largest source luma size: told here too, so the first estimate (before the first
 		// Entrance) finds the owner instead of a transient NoOwnerFill.
 		Vpv::FrameAnalysis::NoteP1GpuSourceLuma(host_, uint32_t(s.tex[0]->params.w), uint32_t(s.tex[0]->params.h));
@@ -1292,7 +1307,8 @@ namespace VpMotion
 	{
 		const void* memoHost = host_;
 		const std::string exception = namedException != nullptr ? std::string(namedException) : std::string();
-		return [memoHost, exception](const MatcherPyramid::Request& q) -> MatcherPyramid::Level
+		const std::shared_ptr<MatcherOfferLog> offers = matcherOffers_;
+		return [memoHost, exception, offers](const MatcherPyramid::Request& q) -> MatcherPyramid::Level
 		{
 			MatcherPyramid::Level out;   // NotConfigured
 			const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(memoHost, q.seq);
@@ -1309,28 +1325,53 @@ namespace VpMotion
 			// MED-2: the offer table first (no memo entry): an Acquire of a seq not yet offered would cache its decline for the
 			// whole render frame and refuse every later P13 reader of that frame.
 			const std::shared_ptr<const Vpv::Capture::SourcePlaneSet> offered = Vpv::Capture::SourcePlanes::Find(memoHost, q.seq);
-			if (!offered)
+			if (offered && offered->generation == kMatcherOfferGeneration)
 			{
-				out.cause = "no shared source luma for this frame";
-				return out;
+				// B (or the ahead pair's B / C): the matcher offered its own upload of this frame in this render frame.
+				const VpSkeleton::AcquireResult plane = fm.memo->Acquire(VpSkeleton::kP13SourceRing, q.seq, VpSkeleton::AcquireForm::Gpu);
+				if (!plane.Ok() || !plane.gpu.Valid())
+				{
+					const std::string why = fm.memo->LastCause(VpSkeleton::kP13SourceRing);
+					out.cause = why.empty() ? std::string("no shared source luma for this frame") : why;
+					return out;
+				}
+				if (plane.gpu.resource != q.lumaTex)
+				{
+					out.cause = "named exception: the matcher's luma is not the shared source plane";
+					return out;
+				}
+				const Vpv::Capture::SourcePlaneSet* facts = Vpv::Capture::SourcePlanes::FactsOf(plane);
+				if (facts == nullptr || facts->fullRange != q.fullRange)
+				{
+					out.cause = "range differs from the shared plane";   // MED-3: the product's level-1 codes would differ from the matcher's
+					return out;
+				}
 			}
-			const VpSkeleton::AcquireResult plane = fm.memo->Acquire(VpSkeleton::kP13SourceRing, q.seq, VpSkeleton::AcquireForm::Gpu);
-			if (!plane.Ok() || !plane.gpu.Valid())
+			else
 			{
-				const std::string why = fm.memo->LastCause(VpSkeleton::kP13SourceRing);
-				out.cause = why.empty() ? std::string("no shared source luma for this frame") : why;
-				return out;
-			}
-			if (plane.gpu.resource != q.lumaTex)
-			{
-				out.cause = "named exception: the matcher's luma is not the shared source plane";
-				return out;
-			}
-			const Vpv::Capture::SourcePlaneSet* facts = Vpv::Capture::SourcePlanes::FactsOf(plane);
-			if (facts == nullptr || facts->fullRange != q.fullRange)
-			{
-				out.cause = "range differs from the shared plane";   // MED-3: the product's level-1 codes would differ from the matcher's
-				return out;
+				// A: the render frame's own seq is never offered by the matcher (the frame's P13 stays the Entrance image for every
+				// later reader, as at base); its levels are the product made when it was the last pair's B (keepFrames 1), identified
+				// by the matcher's earlier offer of the same seq and range.
+				bool known = false, range = false;
+				{
+					std::lock_guard<std::mutex> lock(offers->m);
+					for (const MatcherOfferLog::Entry& e : offers->entries)
+						if (e.seq == q.seq)
+						{
+							known = true;
+							range = e.fullRange;
+						}
+				}
+				if (!known)
+				{
+					out.cause = "no shared source luma for this frame";
+					return out;
+				}
+				if (range != q.fullRange)
+				{
+					out.cause = "range differs from the shared plane";
+					return out;
+				}
 			}
 			const VpSkeleton::AcquireResult r = fm.memo->Acquire(VpSkeleton::kP1HalfLuma, q.seq, VpSkeleton::AcquireForm::Gpu,
 				VpFrameAnalysis::P1Gpu::MatcherPyramidKey(static_cast<uint8_t>(q.level)));
