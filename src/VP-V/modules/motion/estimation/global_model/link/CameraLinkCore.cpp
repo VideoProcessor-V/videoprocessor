@@ -723,6 +723,8 @@ namespace CameraLink
 			usable = m_onTimeUsable;
 		}
 		std::vector<FallbackCatalog::Decision> d = BuildDecisions(f);
+		for (const FallbackCatalog::Decision& p : PhotometricDecisions(m_counters, f.graphHasP7))
+			d.push_back(p);
 		if (m_settings.aheadFit && !m_settings.deterministic && f.graphHasP7)
 		{
 			// AHEAD FIT (only when it is on): no usable on-time target = every frame bridged, a visible downgrade. A late frame with a target
@@ -738,6 +740,7 @@ namespace CameraLink
 		if (!m_active)
 			return;
 		lines.push_back(StatusLine(m_counters));
+		lines.push_back(PhotometricStatusLine(m_counters));
 		if (m_settings.aheadFit)
 		{
 			lines.push_back(m_settings.deterministic ? std::string(kAheadDeterministicText)

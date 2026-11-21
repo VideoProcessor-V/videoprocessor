@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace VpMotion
 {
@@ -151,6 +152,10 @@ namespace VpMotion
 		// The engine's per-cell trust (OpticalFlowTrust::CellTrust), computed by the lease once per direction and tolerance, for as long as the pair is the engine's current lease (another pair's FlowOf drops the memo); null when
 		// the view has no memo or the pair has no backward vectors / forward costs.
 		const IFlowTrustMemo* trustMemo = nullptr;
+		// R3 (direct photometric refinement): the pair's engine-size 8-bit luma (engineW x engineH, tightly packed) for frame from and frame to, shared
+		// with the P2 slot's flow (the shared_ptrs keep the planes alive past the lease). Null when the producer kept none (the camera fit was not
+		// consuming the stream); enginePxToSource is then the luma step in source px.
+		std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo;
 		const float* CellTrust(float toleranceEnginePx) const { return trustMemo ? trustMemo->CellTrust(toleranceEnginePx) : nullptr; }
 		const float* CellTrustBackward(float toleranceEnginePx) const { return trustMemo ? trustMemo->CellTrustBackward(toleranceEnginePx) : nullptr; }
 	};

@@ -290,6 +290,11 @@ namespace CameraLink
 				return PublishOutcome::NoProduct;
 			}
 			job.field = field;
+			job.lumaFrom = copy.lumaFrom;
+			job.lumaTo = copy.lumaTo;
+			job.lumaW = copy.engineW;
+			job.lumaH = copy.engineH;
+			job.lumaStep = copy.enginePxToSource;
 			if (copy.globalValid && !job.facts.haveEngineGlobal)
 			{
 				job.facts.haveEngineGlobal = true;   // the ahead pair's own whole-frame motion (the render-time EngineGlobal does not exist yet)

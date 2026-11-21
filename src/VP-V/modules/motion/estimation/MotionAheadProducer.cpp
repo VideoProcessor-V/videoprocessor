@@ -561,6 +561,11 @@ namespace MotionAhead
 			return false;
 		}
 		context->UpdateSubresource(lumaTex[texIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(halfW), 0);
+		// R3: this frame's engine luma is kept (one shared copy) only while the camera fit consumes the pair stream; the next pair takes it as
+		// its `from`. No copy otherwise.
+		std::shared_ptr<const std::vector<uint8_t>> currentLuma;
+		if (CameraConsumes())
+			currentLuma = std::make_shared<const std::vector<uint8_t>>(lumaBuffer);
 		bool ok = true;
 		if (prevSlot != EngineLumaRing::kNoSlot)
 		{
@@ -581,6 +586,11 @@ namespace MotionAhead
 			}
 			if (ok && flow)
 			{
+				if (previousLuma && currentLuma && previousLuma->size() == currentLuma->size() && currentLuma->size() == static_cast<size_t>(halfW) * static_cast<size_t>(halfH))
+				{
+					flow->lumaFrom = previousLuma;
+					flow->lumaTo = currentLuma;
+				}
 				slot->Publish(previousSequence, job.sequence, job.generation, flow);   // P2: the pair, for the readers' P2View
 				engineReady = true;
 				std::lock_guard<std::mutex> lock(mutex);
@@ -600,6 +610,7 @@ namespace MotionAhead
 		havePrevious = true;
 		previousSequence = job.sequence;
 		previousGeneration = job.generation;
+		previousLuma = currentLuma;
 		return ok;
 	}
 	bool Producer::LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& halfW, int& halfH)

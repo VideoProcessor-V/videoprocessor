@@ -86,6 +86,9 @@ namespace CameraLink
 		// the tolerance it was asked for (the matcher's consistency limit, engine px). The only trust the fit reads.
 		float trustToleranceEnginePx = 0.0f;
 		std::vector<float> trust;
+		// R3 (photometric refinement): the pair's engine-size 8-bit luma (engineW x engineH) for frames pairFrom / pairTo, shared with the producer's
+		// flow (copying the shared_ptrs is the whole cost; the planes are immutable). Null = the producer kept none: the refine is skipped and counted.
+		std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo;
 		size_t Cells() const { return static_cast<size_t>(gridW > 0 ? gridW : 0) * static_cast<size_t>(gridH > 0 ? gridH : 0); }
 		double CellSourcePx() const { return cellEnginePx * enginePxToSource; }
 	};
@@ -130,6 +133,12 @@ namespace CameraLink
 		}
 		out.trustToleranceEnginePx = trustToleranceEnginePx;
 		out.trust.assign(engineTrust, engineTrust + cells);
+		const size_t lumaCells = static_cast<size_t>(v.engineW) * static_cast<size_t>(v.engineH);
+		if (v.lumaFrom && v.lumaTo && v.lumaFrom->size() == lumaCells && v.lumaTo->size() == lumaCells)
+		{
+			out.lumaFrom = v.lumaFrom;
+			out.lumaTo = v.lumaTo;
+		}
 		return AheadRefusal::None;
 	}
 

@@ -11,6 +11,7 @@
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraMotion.h>
+#include <VP-V/modules/motion/estimation/global_model/PhotometricWiring.h>
 
 #include <atomic>
 #include <cstdint>
@@ -28,6 +29,10 @@ namespace CameraLink
 	constexpr const char* kIdNoModelSlip = "camera.no_model.slip";
 	constexpr const char* kIdNoModelDepth0 = "camera.no_model.depth0";
 	constexpr const char* kIdNoModelQueue = "camera.no_model.queue";
+	// R3 (photometric refinement): engaged while it never ran on a fitted pair (no luma / resolution rule / degenerate input), and while any
+	// PhotometricRefineGpu failure counter is non-zero. Both reach the Ctrl+I lines, the one-time notice, Config status and Ctrl+Alt+D.
+	constexpr const char* kIdPhotometricNotRunning = "camera.photometric.not_running";
+	constexpr const char* kIdPhotometricGpuFailed = "camera.photometric.gpu_failed";
 
 	constexpr double kAmbiguousEngageSeconds = 0.5;
 
@@ -75,6 +80,24 @@ namespace CameraLink
 		std::atomic<uint64_t> p2RefusedSeal{ 0 };    // ... rejected at the on-time seal
 		std::atomic<uint64_t> p2RefusedUse{ 0 };     // ... refused at a consumer read
 		std::atomic<uint64_t> aheadEpochRace{ 0 };   // G-A3: FlowOf answered while the vectors-valid epoch moved (refused at the copy)
+		// R3 (photometric refinement of the chosen model; CPU reference). One counter per outcome: nothing is skipped silently.
+		std::atomic<uint64_t> photoRefined{ 0 }, photoFellBack{ 0 }, photoSkippedNoLuma{ 0 }, photoSkippedResolution{ 0 }, photoSkippedOther{ 0 };
+		// PhotometricRefineGpu failure counters (Unavailable / Limit / Ensure / Readback). The GPU form is not driven by the camera worker
+		// (it owns no device), so they read 0 and the status says "cpu reference"; a device-owning driver adds into them.
+		std::atomic<uint64_t> photoGpuUnavailable{ 0 }, photoGpuLimit{ 0 }, photoGpuEnsure{ 0 }, photoGpuReadback{ 0 };
+		void NotePhotometric(CameraModel::PhotometricOutcome o)
+		{
+			using O = CameraModel::PhotometricOutcome;
+			switch (o)
+			{
+			case O::Refined: photoRefined.fetch_add(1, std::memory_order_relaxed); break;
+			case O::FellBack: photoFellBack.fetch_add(1, std::memory_order_relaxed); break;
+			case O::SkippedNoLuma: photoSkippedNoLuma.fetch_add(1, std::memory_order_relaxed); break;
+			case O::SkippedResolution: photoSkippedResolution.fetch_add(1, std::memory_order_relaxed); break;
+			case O::SkippedOther: photoSkippedOther.fetch_add(1, std::memory_order_relaxed); break;
+			default: break;
+			}
+		}
 	};
 
 	// AHEAD FIT: the visible state (Ctrl+I line, Config status, Ctrl+Alt+D). `target` says where an on-time result can go ("" = none).
@@ -163,6 +186,40 @@ namespace CameraLink
 		add(kIdNoModelQueue, f.queueFullNow, "camera: no model (queue): the fit queue was full and a pair was dropped; the next fit restarts its history");
 		add(kIdNoModelDepth0, f.laneDepthZero, "camera: no model (no look-ahead depth): the fit cannot run ahead");
 		return d;
+	}
+
+	inline unsigned long long PhotometricGpuFailures(const FitCounters& c)
+	{
+		return c.photoGpuUnavailable.load() + c.photoGpuLimit.load() + c.photoGpuEnsure.load() + c.photoGpuReadback.load();
+	}
+	// R3 decisions from the counters (cumulative: "never ran" = pairs fitted, none refined or verified-and-fallen-back).
+	inline std::vector<FallbackCatalog::Decision> PhotometricDecisions(const FitCounters& c, bool graphHasP7)
+	{
+		using namespace FallbackCatalog;
+		std::vector<Decision> d;
+		const unsigned long long ran = c.photoRefined.load() + c.photoFellBack.load();
+		const unsigned long long skipped = c.photoSkippedNoLuma.load() + c.photoSkippedResolution.load() + c.photoSkippedOther.load();
+		const bool notRunning = graphHasP7 && ran == 0 && skipped > 0;
+		d.push_back(notRunning ? Engaged(kIdPhotometricNotRunning,
+			"camera: photometric refine not running (no luma pair, the resolution rule, or a degenerate input): the vector model is used unrefined")
+			: Released(kIdPhotometricNotRunning));
+		char b[200];
+		std::snprintf(b, sizeof(b), "camera: photometric refine GPU failures: %llu unavailable, %llu limit, %llu ensure, %llu readback",
+			(unsigned long long)c.photoGpuUnavailable.load(), (unsigned long long)c.photoGpuLimit.load(),
+			(unsigned long long)c.photoGpuEnsure.load(), (unsigned long long)c.photoGpuReadback.load());
+		d.push_back(graphHasP7 && PhotometricGpuFailures(c) > 0 ? Engaged(kIdPhotometricGpuFailed, b) : Released(kIdPhotometricGpuFailed));
+		return d;
+	}
+	// The R3 status line (always shown while the camera link is active): outcomes and the GPU failure counters; the path is the CPU reference.
+	inline std::string PhotometricStatusLine(const FitCounters& c)
+	{
+		char b[400];
+		std::snprintf(b, sizeof(b), "camera photometric refine (cpu reference): %llu refined, %llu fell back, %llu no luma, %llu resolution rule, %llu other; gpu failures %llu unavailable, %llu limit, %llu ensure, %llu readback",
+			(unsigned long long)c.photoRefined.load(), (unsigned long long)c.photoFellBack.load(), (unsigned long long)c.photoSkippedNoLuma.load(),
+			(unsigned long long)c.photoSkippedResolution.load(), (unsigned long long)c.photoSkippedOther.load(),
+			(unsigned long long)c.photoGpuUnavailable.load(), (unsigned long long)c.photoGpuLimit.load(),
+			(unsigned long long)c.photoGpuEnsure.load(), (unsigned long long)c.photoGpuReadback.load());
+		return b;
 	}
 
 	// "camera: fits 120, published 118, late 2, unusable 3, slip 0, queue full 0"

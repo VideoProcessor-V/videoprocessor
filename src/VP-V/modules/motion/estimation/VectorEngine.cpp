@@ -1023,6 +1023,8 @@ namespace VpMotion
 		out.extrasBlockPx = MotionAhead::Flow::kBlockPx;
 		out.extrasCellPx = NvOpticalFlow::Engine::Grid;
 		out.extrasUnitsPerEnginePx = 32.0;   // FbError reads S10.5
+		out.lumaFrom = flow->lumaFrom;   // R3: shared planes, null when the camera fit was not consuming
+		out.lumaTo = flow->lumaTo;
 		out.trustMemo = flowLease_.get();   // valid for the view's life: the pair stays leased until it leaves the window or an invalidation
 		++flowReads_.served;
 		return true;

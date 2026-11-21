@@ -81,6 +81,10 @@ namespace MotionAhead
 		int blocksX = 0, blocksY = 0;
 		std::vector<float> costWeight;
 		std::vector<float> fbError;
+		// R3 (direct photometric refinement of the camera fit): the pair's engine-size 8-bit luma (halfW x halfH, tightly packed), frame
+		// N-1 and N, shared with the neighbouring pairs (one copy per frame). Filled only while the camera fit consumes the stream
+		// (Producer::CameraConsumes); null otherwise, and then every reader behaves exactly as before.
+		std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo;
 	};
 	// FlowPtr (std::shared_ptr<const Flow>) is declared in VectorProducts.h.
 
@@ -437,6 +441,7 @@ namespace MotionAhead
 		uint64_t previousSequence = 0, previousGeneration = 0;
 		uint64_t hintSequence = UINT64_MAX, hintGeneration = 0;   // the "to" frame of the engine's last pair
 		std::vector<uint8_t> lumaBuffer;
+		std::shared_ptr<const std::vector<uint8_t>> previousLuma;   // R3: frame previousSequence's engine luma (a copy, only while the camera consumes the stream)
 		std::vector<uint8_t> requestLumaBuffer;   // W2-C5b: a request's `from` frame (Adopt / OffChain)
 		CComPtr<ID3D11Texture2D> requestTex[2];   // W2-C5b: the off-chain pair (from, to); empty until an OffChain request
 		int requestTexW = 0, requestTexH = 0;

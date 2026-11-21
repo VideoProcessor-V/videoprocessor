@@ -51,6 +51,11 @@ namespace CameraLink
 		// AHEAD FIT (audit F3): the ahead pair as copied on the render thread; the camera WORKER converts it (AheadToSourceGrid: the native
 		// field and the engine cell trust) and works out its whole-frame motion before the fit. `field` is then null until that conversion.
 		std::shared_ptr<const AheadCopy> aheadCopy;
+		// R3 (photometric refinement): the engine-size luma pair of the ahead pair (set by the worker from the AheadCopy; kept alive by the
+		// job for the whole Fit). Empty = no luma arrived: the fit counts SkippedNoLuma and keeps the vector model.
+		std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo;
+		int lumaW = 0, lumaH = 0;
+		double lumaStep = 0;             // source px per luma px (AheadCopy::enginePxToSource)
 	};
 
 	struct CameraFitResult
