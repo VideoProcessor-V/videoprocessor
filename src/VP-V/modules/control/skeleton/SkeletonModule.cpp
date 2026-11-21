@@ -1324,7 +1324,13 @@ namespace Vpv
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
 				{
 					std::lock_guard<std::mutex> memoLock(ownerFillsMutex_);   // GEM SK-LIFECYCLE: as the other two sites (the MemoHost is kept)
-					DetachMemoGpu(*mh, false);   // R2: nor are its owner textures (forgotten, counted)
+					// GF-P2b E2: only the DEAD renderer's device goes. A device on the host's current pl_gpu was attached by this renderer's
+					// GpuCreated (which abandons any older device first, audit S3): the store registering at the first SettingsApplied after it
+					// moves the tap generation and lands here, and detaching that device would leave the new renderer without one (never
+					// re-attached: every GPU owner fill would decline). A later GpuCreated still abandons a device it finds.
+					const void* currentGpu = gpuSlots_.Aux(host);
+					if (!(mh->gpuDevice && currentGpu != nullptr && mh->gpuDevice->OwnerGpu() == currentGpu))
+						DetachMemoGpu(*mh, false);   // R2: nor are its owner textures (forgotten, counted)
 				}
 				hosts_.Remove(host, false);
 				EraseExternal(host);          // nor is its external demand (declared for the dead renderer)
