@@ -40,6 +40,8 @@ PROJECT_EXT = (".vcxproj", ".filters", ".sln", ".props", ".targets")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 DIFF_ARGS = ["-w", "--diff-algorithm=histogram", "--no-renames", "--no-color", "--no-ext-diff"]
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]')
+# Any #include directive, parsable or not (a computed `#include MACRO` form): G-CC1 MUST-1.
+INCLUDE_ANY_RE = re.compile(r'^\s*#\s*include\b')
 # Include roots tried after the includer's own folder (the projects' AdditionalIncludeDirectories that VP-V uses).
 INCLUDE_ROOTS = ("src", "src/VideoProcessor-Lib", "src/VideoProcessor-ConfigCore")
 BUDGET_METRIC = "H2"
@@ -107,7 +109,7 @@ def parse_diff(text):
             if body.strip():
                 cur["nonblank_added_lines"].append(new_line)
                 cur["added_text"][new_line] = body
-                if INCLUDE_RE.match(body):
+                if INCLUDE_ANY_RE.match(body):
                     cur["include_lines"].append(new_line)
             new_line += 1
         elif raw.startswith("-"):
@@ -315,8 +317,12 @@ def _fragment_lines(path, text, read, bill_tree, seen, errors):
     total = _nonblank(text)
     nested = []
     for i, ln in enumerate(text.splitlines(), 1):
+        if not INCLUDE_ANY_RE.match(ln):
+            continue
         m = INCLUDE_RE.match(ln)
         if not m:
+            errors.append("%s:%d computed or unparsable #include inside a VP file pulled into a class or function scope "
+                          "(fail closed): %s" % (path, i, ln.strip()[:100]))
             continue
         p, t = resolve_include(m.group(1), path, read)
         if p is None:
@@ -335,41 +341,150 @@ def vp_included_lines(includer, text, read, bill_tree, consider=None, scopes=Non
     """The VP-authored files that #include lines of `text` (the Bill file `includer`) pull into a CLASS or
     FUNCTION scope. `consider`: the line numbers to look at (the added lines; None = every line). Returns
     (found, errors): found = [{line, scope, fragment, lines (non-blank, recursive), nested}], errors = unresolved
-    includes at class / function scope (fail closed). A file-scope include is never counted (refs/112 S8)."""
+    includes at class / function scope (fail closed). A file-scope include is never counted (refs/112 S8).
+    A computed / unparsable #include at class or function scope is an error too (G-CC1 MUST-1). `scoped` (third
+    value) = EVERY considered #include at class or function scope, whatever it resolves to ({line, scope, target}):
+    the checker's fragment registry gates them all (G-CC1 MUST-2: a Bill header included there can carry VP lines)."""
     lines = text.splitlines()
-    cand = [i for i, ln in enumerate(lines, 1) if (consider is None or i in consider) and INCLUDE_RE.match(ln)]
+    cand = [i for i, ln in enumerate(lines, 1) if (consider is None or i in consider) and INCLUDE_ANY_RE.match(ln)]
     if not cand:
-        return [], []
+        return [], [], []
     scopes = scopes or scope_map(text)
-    found, errors = [], []
+    found, errors, scoped = [], [], []
     for i in cand:
         if scopes[i - 1] == "file":
             continue
-        name = INCLUDE_RE.match(lines[i - 1]).group(1)
+        m = INCLUDE_RE.match(lines[i - 1])
+        if not m:
+            errors.append("%s:%d computed or unparsable #include at %s scope (fail closed: cannot tell whose lines it pulls "
+                          "in): %s" % (includer, i, scopes[i - 1], lines[i - 1].strip()[:100]))
+            continue
+        name = m.group(1)
         p, t = resolve_include(name, includer, read)
         if p is None:
             errors.append("%s:%d unresolved #include <%s> at %s scope (fail closed: cannot tell whose lines it pulls in)" % (
                 includer, i, name, scopes[i - 1]))
             continue
+        scoped.append({"line": i, "scope": scopes[i - 1], "target": p, "vp": is_vp_authored(p, bill_tree)})
         if not is_vp_authored(p, bill_tree):
             continue
         n, nested = _fragment_lines(p, t, read, bill_tree, {p}, errors)
         found.append({"line": i, "scope": scopes[i - 1], "fragment": p, "lines": n, "nested": nested})
-    return found, errors
+    return found, errors, scoped
 
 
 def h2_row(path, nonblank_added, include_lines, read, bill_tree, text=None):
     """{h1, inc, h2, fragments, errors} for one Bill file. `include_lines` = the added #include line numbers (only
     these can pull VP lines in; Bill's own includes are not added lines). `text` = the head text (read when needed)."""
     h1 = len(nonblank_added)
-    found, errors = [], []
+    found, errors, scoped = [], [], []
     if include_lines:
         if text is None:
             text = read(path)
         if text is not None:
-            found, errors = vp_included_lines(path, text, read, bill_tree, consider=set(include_lines))
+            found, errors, scoped = vp_included_lines(path, text, read, bill_tree, consider=set(include_lines))
+        else:
+            # G-CC1 SHOULD-5: an includer that cannot be read gives no verdict (fail closed)
+            errors = ["%s cannot be read: its %d added #include line(s) give no verdict (fail closed)" % (path, len(include_lines))]
     inc = sum(f["lines"] for f in found)
-    return {"h1": h1, "inc": inc, "h2": h1 + inc, "fragments": found, "errors": errors}
+    return {"h1": h1, "inc": inc, "h2": h1 + inc, "fragments": found, "errors": errors, "scoped": scoped}
+
+
+def is_compiled_vp_source(path, bill_tree):
+    """A VP-authored production translation unit (.cpp / .cc / .cxx outside test folders)."""
+    return path.lower().endswith((".cpp", ".cc", ".cxx")) and is_vp_authored(path, bill_tree) and bucket_of(path) == "production"
+
+
+def shared_vp_headers(sources, read, bill_tree):
+    """Every VP-authored file a VP-authored production .cpp reaches through its #includes (recursively): these compile
+    in VP-V's own translation units too (shared interface headers), so the `tu` measure does not count them."""
+    seen = set()
+    stack = []
+    for s in sources:
+        t = read(s)
+        if t is not None:
+            stack.append((s, t))
+    while stack:
+        q, t = stack.pop()
+        for ln in t.splitlines():
+            m = INCLUDE_RE.match(ln)
+            if not m:
+                continue
+            r, u = resolve_include(m.group(1), q, read)
+            if r is None or r in seen or not is_vp_authored(r, bill_tree):
+                continue
+            seen.add(r)
+            stack.append((r, u))
+    return seen
+
+
+BUILD_DEFINE_RE = re.compile(r'\b([A-Za-z_]\w*)=(?:&quot;|")([^&"<>;]+)(?:&quot;|")')
+COMPUTED_INCLUDE_RE = re.compile(r'^\s*#\s*include\s+([A-Za-z_]\w*)\s*(?://.*)?$')
+
+
+def build_include_macros(texts):
+    """{MACRO: {header name}} from the build files' PreprocessorDefinitions (`NAME=&quot;path&quot;` in .props /
+    .targets): the computed `#include MACRO` extension points VP-V's builds define. Every value a build gives is kept
+    (each is compiled in some configuration)."""
+    out = {}
+    for t in texts:
+        for m in BUILD_DEFINE_RE.finditer(t):
+            if m.group(2).lower().endswith((".h", ".hpp", ".inl", ".ipp")):
+                out.setdefault(m.group(1), set()).add(m.group(2))
+    return out
+
+
+def tu_row(path, include_lines, read, bill_tree, shared, text=None, macros=None):
+    """G-CC1 (7) `tu`: the non-blank lines of every VP-authored file (any extension) reached from an ADDED FILE-scope
+    #include of the Bill file `path`, recursively, each file once per includer, minus the shared headers (a VP-V
+    production .cpp compiles them too; the walk stops there). These lines compile in Bill's translation unit while H2
+    does not see them: a body moved from a Bill class into a file-scope VP file is a RELOCATION (h2 -n, tu +n), never a
+    reduction. Returns (tu, {vp file: lines}, errors): a computed / unparsable added include at file scope is an error
+    (fail closed); an unresolved one (a system or SDK header) is not VP code and is skipped. Inside a VP file, a
+    computed `#include MACRO` is followed through `macros` (build_include_macros: the build's own definitions); one
+    no build defines is an error."""
+    if not include_lines:
+        return 0, {}, []
+    if text is None:
+        text = read(path)
+    if text is None:
+        return 0, {}, ["%s cannot be read: no tu verdict (fail closed)" % path]
+    lines = text.splitlines()
+    scopes = scope_map(text)
+    seen, errors = {}, []
+    macros = macros or {}
+
+    def walk(q, t):
+        seen[q] = _nonblank(t)
+        for j, ln in enumerate(t.splitlines(), 1):
+            if not INCLUDE_ANY_RE.match(ln):
+                continue
+            m = INCLUDE_RE.match(ln)
+            names = [m.group(1)] if m else None
+            if not m:
+                c = COMPUTED_INCLUDE_RE.match(ln)
+                names = sorted(macros.get(c.group(1), ())) if c else []
+                if not names:
+                    errors.append("%s:%d computed or unparsable #include in a VP file compiled in %s that no build defines "
+                                  "(fail closed): %s" % (q, j, path, ln.strip()[:100]))
+                    continue
+            for name in names:
+                r, u = resolve_include(name, q, read)
+                if r is not None and r not in seen and r not in shared and is_vp_authored(r, bill_tree):
+                    walk(r, u)
+
+    for i in include_lines:
+        if i > len(lines) or scopes[i - 1] != "file":
+            continue
+        m = INCLUDE_RE.match(lines[i - 1])
+        if not m:
+            errors.append("%s:%d computed or unparsable #include at file scope (fail closed): %s" % (path, i, lines[i - 1].strip()[:100]))
+            continue
+        q, t = resolve_include(m.group(1), path, read)
+        if q is None or q in seen or q in shared or not is_vp_authored(q, bill_tree):
+            continue
+        walk(q, t)
+    return sum(seen.values()), seen, errors
 
 
 def file_scope_inl_lines(bill, head, repo=None):
@@ -402,7 +517,10 @@ def file_scope_inl_lines(bill, head, repo=None):
         scopes = scope_map(text)
         lines = text.splitlines()
         for i in d["include_lines"]:
-            name = INCLUDE_RE.match(lines[i - 1]).group(1)
+            m = INCLUDE_RE.match(lines[i - 1])
+            if not m:
+                continue   # a computed include: the H2 / tu measures fail closed on it; this report is information
+            name = m.group(1)
             if not name.endswith(".inl") or scopes[i - 1] != "file":
                 continue
             q, t = resolve_include(name, p, read)
@@ -515,6 +633,16 @@ def check_budget(rows, budget):
         lim = limits.get(r["path"], default)
         if lim is not None and r["h2"] > lim:
             bad.append("%s h2 %d > budget %d" % (r["path"], r["h2"], lim))
+    # G-CC1 SHOULD-3: stray (added lines without a hook tag) is a second, non-increasing ceiling, so N tagged lines
+    # turned into N untagged ones never pass silently. Required once the budget is on H2.
+    stray = budget.get("stray_ceiling")
+    if not isinstance(stray, dict):
+        bad.append("budget has no stray_ceiling: seed it with --write-budget --migrate WAIVER-<ID> (G-CC1 SHOULD-3)")
+    else:
+        for r in rows:
+            lim = stray.get(r["path"], 0)
+            if r.get("stray", 0) > lim:
+                bad.append("%s stray %d > stray ceiling %d" % (r["path"], r["stray"], lim))
     for path, up in sorted(budget.get("upstream_candidates", {}).items()):
         n = int(up.get("lines", 0))
         lim = limits.get(path, default)
@@ -529,25 +657,34 @@ def check_budget(rows, budget):
     return bad, notes
 
 
-def write_budget(path, res, migrate_note=None):
-    """Rewrite the budget's `files` ceilings to the measured h2 (keeps every other key). Refused (returns the
-    reasons) when a ceiling would grow, unless the budget is still on the retired stray metric (migration)."""
+def write_budget(path, res, migrate_note=None, migrate=None):
+    """Rewrite the budget's `files` (h2) and `stray_ceiling` ceilings to the measured values (keeps every other key).
+    Refused (returns the reasons) when a ceiling would grow. A migration (a budget missing, not on H2, or without
+    stray_ceiling) is refused unless `migrate` names the WAIVER id, which is recorded in `_updates` (G-CC1 SHOULD-2)."""
     try:
         budget = read_json(path)
     except (OSError, ValueError):
-        budget = {"default": 0}
+        budget = None
     rows = res["files"]
-    migrating = budget.get("metric") != BUDGET_METRIC
-    if not migrating:
-        bad = [b for b in check_budget(rows, budget)[0] if " h2 " in b]
+    migrating = budget is None or budget.get("metric") != BUDGET_METRIC or not isinstance(budget.get("stray_ceiling"), dict)
+    if migrating and not (migrate and re.match(r"^WAIVER-[A-Za-z0-9_.\-]+$", migrate)):
+        return ["the budget needs a migration (missing, not on metric H2, or no stray_ceiling): refused without "
+                "--migrate WAIVER-<ID> (G-CC1 SHOULD-2)"]
+    if budget is None:
+        budget = {"default": 0}
+    if budget.get("metric") == BUDGET_METRIC:
+        # h2 ceilings never grow, also when the migration only seeds stray_ceiling
+        bad = [b for b in check_budget(rows, budget)[0] if " h2 " in b or (" stray " in b and not migrating)]
         if bad:
             return bad
     budget["metric"] = BUDGET_METRIC
     budget["base_ref"] = res["bill"]
     budget["measured_at"] = res["head"]
     budget["files"] = dict(sorted((r["path"], r["h2"]) for r in rows if r["h2"] > 0))
-    if migrate_note and migrating:
-        budget.setdefault("_updates", []).insert(0, migrate_note)
+    budget["stray_ceiling"] = dict(sorted((r["path"], r["stray"]) for r in rows if r.get("stray", 0) > 0))
+    if migrating:
+        budget.setdefault("_updates", []).insert(0, "%s %s: migration at %s%s" % (
+            datetime.date.today().isoformat(), migrate, res["head"], (" (" + migrate_note + ")") if migrate_note else ""))
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(budget, fh, indent=1, ensure_ascii=False)
         fh.write("\n")
@@ -589,12 +726,31 @@ def selftest():
     assert bucket_of("src/X/Foo.vcxproj") == "project" and bucket_of("src/VideoProcessor-Test/a.cpp") == "tests"
     assert bucket_of("src/VideoProcessor-Lib/Foo.cpp") == "production"
     rows = [{"path": "t.cpp", "stray": 0, "h2": 10}]
-    b = {"metric": "H2", "default": 0, "files": {"t.cpp": 10}, "upstream_candidates": {"t.cpp": {"lines": 4}}}
+    b = {"metric": "H2", "default": 0, "files": {"t.cpp": 10}, "stray_ceiling": {}, "upstream_candidates": {"t.cpp": {"lines": 4}}}
     assert check_budget(rows, b)[0] == [], check_budget(rows, b)
     b["upstream_candidates"]["t.cpp"]["lines"] = 11
     assert len(check_budget(rows, b)[0]) == 2, check_budget(rows, b)
-    assert check_budget([{"path": "t.cpp", "stray": 0, "h2": 11}], {"metric": "H2", "default": 0, "files": {"t.cpp": 10}})[0]
+    assert check_budget([{"path": "t.cpp", "stray": 0, "h2": 11}], {"metric": "H2", "default": 0, "files": {"t.cpp": 10},
+                                                                    "stray_ceiling": {}})[0]
     assert check_budget(rows, {"default": 0, "files": {"t.cpp": 99}})[0], "a stray-metric budget is refused"
+    # G-CC1 SHOULD-3: stray is a second non-increasing ceiling; a budget without it is refused
+    sb = {"metric": "H2", "default": 0, "files": {"t.cpp": 10}, "stray_ceiling": {"t.cpp": 3}}
+    assert check_budget([{"path": "t.cpp", "stray": 3, "h2": 10}], sb)[0] == []
+    assert check_budget([{"path": "t.cpp", "stray": 4, "h2": 10}], sb)[0], "tagged lines turned untagged: stray grows"
+    assert check_budget(rows, {"metric": "H2", "default": 0, "files": {"t.cpp": 10}})[0], "no stray_ceiling is refused"
+    # G-CC1 SHOULD-2: a migration needs --migrate WAIVER-<ID>, recorded in _updates
+    import os as _os
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as td:
+        bp = _os.path.join(td, "b.json")
+        res = {"bill": "a", "head": "h", "files": [{"path": "t.cpp", "stray": 2, "h2": 5}]}
+        assert write_budget(bp, res), "a missing budget is a migration: refused without --migrate"
+        assert write_budget(bp, res, migrate="not-a-waiver"), "the id must be a WAIVER-<ID>"
+        assert write_budget(bp, res, migrate="WAIVER-T-MIG") == []
+        wb = read_json(bp)
+        assert wb["files"] == {"t.cpp": 5} and wb["stray_ceiling"] == {"t.cpp": 2} and "WAIVER-T-MIG" in wb["_updates"][0], wb
+        assert write_budget(bp, {"bill": "a", "head": "h", "files": [{"path": "t.cpp", "stray": 3, "h2": 5}]}), "stray grew"
+        assert write_budget(bp, {"bill": "a", "head": "h", "files": [{"path": "t.cpp", "stray": 1, "h2": 4}]}) == []
     h2_selftest()
     print("selftest OK")
 
@@ -613,7 +769,7 @@ def h2_selftest():
     def h2_of(text, added=None):
         lines = text.splitlines()
         nb = [i for i, ln in enumerate(lines, 1) if ln.strip() and (added is None or i in added)]
-        inc = [i for i in nb if INCLUDE_RE.match(lines[i - 1])]
+        inc = [i for i in nb if INCLUDE_ANY_RE.match(lines[i - 1])]
         return h2_row("src/A.cpp", nb, inc, read, bill_tree, text)
 
     # T1: a 20-line VP fragment inside `struct Impl { };` -> 1 + 20
@@ -653,6 +809,26 @@ def h2_selftest():
     # T10: a Bill-baseline include at class scope (not an added line, the pch <vld.h> form) -> 0
     r = h2_of("struct S\n{\n\t#include <vld.h>\n};\n", set())
     assert r["h2"] == 0 and r["errors"] == [], r
+    # ... and the same system-header form as an ADDED line at class scope fails closed (G-CC1 SHOULD-4)
+    r = h2_of("struct S\n{\n\t#include <vld.h>\n};\n", {3})
+    assert r["errors"] and "unresolved #include <vld.h>" in r["errors"][0], r
+    # G-CC1 MUST-1: a computed include at class or function scope fails closed (it can name any fragment)
+    files["src/VP-V/host/Defs.h"] = "#define VPV_FRAG <VP-V/host/F.h>\n"
+    r = h2_of("#include <VP-V/host/Defs.h>\nstruct Impl\n{\n#include VPV_FRAG\n};\n", {1, 4})
+    assert r["errors"] and "computed or unparsable" in r["errors"][0] and r["h2"] == 2, r
+    r = h2_of("void f()\n{\n  #  include   VPV_FRAG // x\n}\n", {3})
+    assert r["errors"] and "function scope" in r["errors"][0], r
+    # ... also nested inside a fragment
+    files["src/VP-V/host/H.h"] = "#include VPV_FRAG\n"
+    r = h2_of("struct Impl\n{\n#include <VP-V/host/H.h>\n};\n", {3})
+    assert r["errors"] and "computed or unparsable" in r["errors"][0], r
+    # G-CC1 MUST-2: every class / function-scope include is reported in `scoped`, a Bill header too (the checker's
+    # registry gates them all)
+    r = h2_of("struct Impl\n{\n#include <VP-V/host/F.h>\n};\n", {3})
+    assert [(s["target"], s["vp"]) for s in r["scoped"]] == [("src/VP-V/host/F.h", True)], r
+    # G-CC1 SHOULD-5: an includer that cannot be read fails closed
+    r = h2_row("src/Gone.cpp", [1], [1], read, bill_tree)
+    assert r["errors"] and "cannot be read" in r["errors"][0], r
     # an ADDED unresolved include at class scope fails closed
     r = h2_of("struct S\n{\n#include <nowhere.h>\n};\n", {3})
     assert r["errors"] and "fail closed" in r["errors"][0], r
@@ -661,10 +837,40 @@ def h2_selftest():
     bill_tree.add("src/A.h")
     r = h2_of("struct S\n{\n#include \"A.h\"\n};\n", {3})
     assert r["h2"] == 1 and r["errors"] == [], r
+    assert [(s["target"], s["vp"]) for s in r["scoped"]] == [("src/A.h", False)], r   # MUST-2: still reported
     # T13: a `// VPV-HOOK M2 ...` opener with `// VPV-HOOK-END`: every non-blank added line counts regardless
     t13 = "void f()\n{\n\t// VPV-HOOK M2 P5b-2: note\n\ta();\n\tb();\n\t// VPV-HOOK-END\n}\n"
     r = h2_of(t13, {3, 4, 5, 6})
     assert r["h2"] == 4, r
+    # ... while the retired narrow count saw only the -END line (the hole H2 closes; G-CC1 SHOULD-4)
+    assert len(hook_line_set(t13) & {3, 4, 5, 6}) == 1, hook_line_set(t13)
+    # G-CC1 (7) tu, the T8 analogue: 10 class-body lines moved to a FILE-scope VP header still compile in Bill's
+    # TU: h2 falls by 10, tu rises by 10, the combined h2 + tu never decreases
+    files["src/VP-V/host/Body.h"] = "".join("void Impl::f%d() {}\n" % i for i in range(10))
+    r0 = h2_of(before, set(range(4, 14)))
+    t0 = tu_row("src/A.cpp", [], read, bill_tree, set(), before)[0]
+    moved = "struct Impl\n{\n\tint bill;\n};\n#include <VP-V/host/Body.h>   // VPV-HOOK\n"
+    r1 = h2_of(moved, {5})
+    t1 = tu_row("src/A.cpp", [5], read, bill_tree, set(), moved)
+    assert (r0["h2"], t0, r1["h2"], t1[0]) == (10, 0, 1, 10) and r1["h2"] + t1[0] >= r0["h2"] + t0, (r0, r1, t1)
+    # a shared header (a VP-V .cpp compiles it too) is not counted, nor anything only it reaches
+    files["src/VP-V/host/Api.h"] = "struct Api;\n#include <VP-V/host/F.h>\n"
+    files["src/VP-V/host/Api.cpp"] = "#include \"Api.h\"\n"
+    shared = shared_vp_headers(["src/VP-V/host/Api.cpp"], read, bill_tree)
+    assert shared == {"src/VP-V/host/Api.h", "src/VP-V/host/F.h"}, shared
+    assert tu_row("src/A.cpp", [1], read, bill_tree, shared, "#include <VP-V/host/Api.h>\n")[0] == 0
+    # a nested VP include is counted once; a system header is skipped; a computed one fails closed
+    files["src/VP-V/host/Outer.inl"] = "a\n#include <VP-V/host/Body.h>\n#include <windows.h>\n"
+    t = tu_row("src/A.cpp", [1, 2], read, bill_tree, set(), "#include <VP-V/host/Outer.inl>\n#include <VP-V/host/Body.h>\n")
+    assert t[0] == 3 + 10 and t[2] == [], t
+    assert tu_row("src/A.cpp", [1], read, bill_tree, set(), "#include VPV_FRAG\n")[2], "computed file-scope include"
+    # a computed include INSIDE a VP file follows the build's own definition; one no build defines fails closed
+    files["src/VP-V/host/Ext.h"] = "#ifdef EXT_HEADER\n#include EXT_HEADER\n#endif\n"
+    mac = build_include_macros(['<PreprocessorDefinitions>EXT_HEADER=&quot;VP-V/host/Body.h&quot;;X=1</PreprocessorDefinitions>'])
+    assert mac == {"EXT_HEADER": {"VP-V/host/Body.h"}}, mac
+    t = tu_row("src/A.cpp", [1], read, bill_tree, set(), "#include <VP-V/host/Ext.h>\n", mac)
+    assert t[0] == 3 + 10 and t[2] == [], t
+    assert tu_row("src/A.cpp", [1], read, bill_tree, set(), "#include <VP-V/host/Ext.h>\n")[2], "undefined computed include"
     # the lexer: comments, strings, raw strings, char literals and digit separators never move a brace
     tricky = ('namespace n {\nconst char* s = "{";\nconst char* r = R"x(}{)x";\nchar c = \'{\';\nint big = 1\'000;\n'
               '/* { */ // {\nstruct T {\n#define M() {\n#include <VP-V/host/F.h>\n};\n}\n#include <VP-V/host/F.h>\n')
@@ -689,7 +895,9 @@ def main():
                     help="rewrite the budget's ceilings to the measured h2 (refused if one would grow; the one-time stray -> H2 "
                          "migration needs a WAIVER commit)")
     ap.add_argument("--inl", action="store_true", help="print the file-scope .inl lines compiled in Bill TUs (information) and exit")
-    ap.add_argument("--note", help="with --write-budget: the _updates entry recorded on the stray -> H2 migration")
+    ap.add_argument("--note", help="with --write-budget: extra text for the _updates entry recorded on a migration")
+    ap.add_argument("--migrate", metavar="WAIVER-ID", help="with --write-budget: allow a migration (budget missing, not on H2, or "
+                                                          "without stray_ceiling); the id is recorded in _updates (G-CC1 SHOULD-2)")
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--repo")
@@ -712,7 +920,7 @@ def main():
         if res["errors"]:
             print("refusing to write a budget: unresolved includes:\n" + "\n".join(res["errors"]), file=sys.stderr)
             return 2
-        bad = write_budget(a.write_budget, res, a.note)
+        bad = write_budget(a.write_budget, res, a.note, a.migrate)
         if bad:
             print("refusing to write a budget that grew:\n" + "\n".join(bad), file=sys.stderr)
             return 1

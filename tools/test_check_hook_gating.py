@@ -37,6 +37,18 @@ def _run(root, files=(BILL,), extra=()):
     return rc, buf.getvalue()
 
 
+_REAL_LOAD_H2_BASELINE = chg.load_h2_baseline
+
+
+def _fixture_baseline_patch(case):
+    """The temp-repo fixtures below test other gates (sites, triggers, guards, untagged references) and carry no
+    hook-lines baseline. G-CC1 SHOULD-1 makes a missing baseline exit 2 in git mode; for these fixtures only, a missing
+    baseline keeps its --no-git meaning (no verdict text, h2_ceiling alone). A present baseline (the real repo) is read
+    unchanged. HonestH2MetricTest tests the real function, unpatched."""
+    chg.load_h2_baseline = lambda tree, no_git=False: _REAL_LOAD_H2_BASELINE(tree, True)
+    case.addCleanup(setattr, chg, "load_h2_baseline", _REAL_LOAD_H2_BASELINE)
+
+
 def _bill(body):
     """A Bill file with one function whose body is `body` (the hook lines are tagged by the caller)."""
     return "#include <x.h>\nstruct Impl\n{\n\tPipelineSlots::Registry pipelineSlots;\n\tvoid Render()\n\t{\n" + body + "\t}\n};\n"
@@ -44,6 +56,7 @@ def _bill(body):
 
 class CheckHookGatingTest(unittest.TestCase):
     def setUp(self):
+        _fixture_baseline_patch(self)
         self.td = tempfile.TemporaryDirectory()
         self.root = self.td.name
         _w(self.root, chg.SLOTS_HEADER, SLOTS)
@@ -708,6 +721,7 @@ class UntaggedVpReferenceTest(unittest.TestCase):
     BASE = ("struct Impl\n{\n\tFeatureMonitor mon;\n\tvoid Render(int frame)\n\t{\n\t\tdoBill(frame);\n\t\tint n = list.size();\n\t}\n};\n")
 
     def setUp(self):
+        _fixture_baseline_patch(self)
         self.td = tempfile.TemporaryDirectory()
         self.root = self.td.name
         _w(self.root, BILL, self.BASE)
@@ -904,6 +918,8 @@ class HookLinesTest(unittest.TestCase):
             rc, out = _run(root)
             self.assertIn("hook LINES (honest H2): 9 (no baseline", out)
             rc, out = _run(root, extra=["--write-hook-lines-baseline"])
+            self.assertEqual(rc, 1, "seeding a missing baseline is a migration: --migrate WAIVER-<ID> (G-CC1 SHOULD-2)")
+            rc, out = _run(root, extra=["--write-hook-lines-baseline", "--migrate", "WAIVER-T-HL"])
             self.assertEqual(rc, 0, out)
             rc, out = _run(root)
             self.assertIn("hook LINES (honest H2): 9 (baseline 9, trend +0)", out)
@@ -916,6 +932,7 @@ class HookLinesTest(unittest.TestCase):
             _w(root, BILL, _bill(""))
             rc, out = _run(root)
             self.assertIn("hook LINES (honest H2): 8 (baseline 9, trend -1)", out)
+            self.assertEqual(rc, 1, "a value below its ceiling fails until the ratchet commit (G-CC1 SHOULD-7)")
 
 
 class HonestH2MetricTest(unittest.TestCase):
@@ -937,6 +954,28 @@ class HonestH2MetricTest(unittest.TestCase):
         for f, n in budget.get("h2_ceiling", {}).items():
             self.assertLessEqual(base["files"].get(f, 0), n, f)
         self.assertNotEqual(base["total"], 393, "never a baseline at the fragment-gamed 393")
+
+    def test_missing_baseline_in_git_mode_gives_no_verdict_and_h2_ceiling_holds_alone(self):
+        """G-CC1 SHOULD-1: deleting the baseline never switches the H2 gate off."""
+        with tempfile.TemporaryDirectory() as root:
+            tree = chg.Tree(root)
+            base, err = chg.load_h2_baseline(tree, no_git=False)
+            self.assertIsNone(base)
+            self.assertIn("missing", err)
+            self.assertEqual(chg.load_h2_baseline(tree, no_git=True), (None, None))
+            _w(root, chg.BUDGET_PATH, json.dumps({"files": {}, "h2_ceiling": {BILL: 3}}))
+            h2 = {BILL: {"bucket": "production", "h1": 4, "inc": 0, "h2": 4, "tu": 0, "fragments": [], "errors": []}}
+            hl = chg.hook_lines_metric(tree, [], h2, {}, False, root)
+            self.assertTrue(hl["baseline_error"])
+            self.assertEqual(hl["over"], ["%s h2 4 > ceiling 3" % BILL])
+            _w(root, chg.HOOK_LINES_PATH, json.dumps({"version": 2, "metric": "H2", "files": {}}))
+            self.assertIn("tu / combined", chg.load_h2_baseline(tree)[1], "a v2 baseline without tu ceilings is refused")
+
+    def test_real_baseline_carries_tu_and_combined(self):
+        base = chg.vp_footprint.read_json(os.path.join(ROOT, *chg.HOOK_LINES_PATH.split("/")))
+        self.assertTrue(base["tu"] and base["combined"])
+        for f, t in base["tu"].items():
+            self.assertEqual(base["combined"][f], base["files"].get(f, 0) + t, f)
 
     @staticmethod
     def _have(sha):
@@ -978,6 +1017,7 @@ class SinceKeepsUnverifiedMarkersTest(unittest.TestCase):
                    "\t\tif (originalPathway) return false;\n\t\tReset();\n\t\treturn true;\n\t}\n};\n")
 
     def setUp(self):
+        _fixture_baseline_patch(self)
         self.td = tempfile.TemporaryDirectory()
         self.root = self.td.name
         _w(self.root, BILL, _bill("\t\tdoBill();\n"))
