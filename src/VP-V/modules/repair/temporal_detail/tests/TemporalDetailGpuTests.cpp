@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -526,6 +527,69 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 		pl_tex_destroy(gpu, &bwdTex);
 		return r;
 	}
+	// --- TD-NONFINITE: a shared Full grain product whose block texture carries a planted grain level N (NaN or an infinity) ---
+	// One module over frames of a panning grainy scene reading the shared Full product of each frame; when `tamper` is set the
+	// product's per-block texture (N, e3, 0, 0) is replaced by a copy with block (bx, by)'s N set to `value`. Returns the outputs.
+	std::vector<Plane> RunTdPlantedN(GpuDevice& dev, const std::vector<Plane>& frames, bool tamper, float value, int bx, int by)
+	{
+		pl_gpu gpu = dev.Gpu();
+		pl_tex bwdTex = UploadPair(gpu, MotionPair::Uniform(kW, kH, 16.0, -0.3, 0.0));
+		Gpu::Module module;
+		GrainSplit::Gpu::Splitter full;
+		const double cu = 64.0 / 65535.0;
+		std::vector<Plane> out;
+		for (size_t t = 0; t < frames.size(); ++t)
+		{
+			pl_tex tex = UploadLuma(gpu, frames[t]);
+			Assert::IsTrue(full.Compute(gpu, dev.dispatch, tex, 0, cu, 1.0, 16), Wide(full.LastError()).c_str());
+			GrainSplit::Gpu::Frame product = full.Out();
+			pl_tex planted = nullptr;
+			if (tamper)
+			{
+				std::vector<float> blocks = DownloadFloat(gpu, dev.dispatch, product.blocks);
+				Assert::IsTrue(blocks.size() == static_cast<size_t>(product.bw) * static_cast<size_t>(product.bh) * 4, L"the block texture was read back");
+				blocks[(static_cast<size_t>(by) * product.bw + bx) * 4] = value;
+				pl_tex_params tp{};
+				tp.w = product.bw; tp.h = product.bh; tp.format = pl_find_named_fmt(gpu, "rgba32f"); tp.sampleable = true; tp.initial_data = blocks.data();
+				planted = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(planted);
+				product.blocks = planted;
+			}
+			RegionEvidence::GrainProduct shared;
+			shared.gpu[0] = &product;
+			Gpu::Params gp;
+			gp.settings = Steady();
+			gp.seq = t;
+			gp.planeLines = 1080.0;
+			gp.backward.tex = bwdTex;
+			gp.grain = RegionEvidence::GrainView(&shared);
+			pl_frame o{};
+			Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o), Wide(module.LastError()).c_str());
+			Assert::IsTrue(module.LastGrainStatus() == GrainSplit::GrainStatus::Ring, L"the (planted) shared product was read");
+			out.push_back(DownloadLuma(gpu, o.planes[0].texture));
+			if (planted) pl_tex_destroy(gpu, &planted);
+			pl_tex_destroy(gpu, &tex);
+		}
+		module.Release(gpu);
+		full.Release(gpu);
+		pl_tex_destroy(gpu, &bwdTex);
+		return out;
+	}
+
+	// The largest |a - b| inside a block's core (2 px inset) over all frames; whole = the whole picture instead.
+	double WorstInBlock(const std::vector<Plane>& a, const std::vector<Plane>& b, int bx, int by, bool whole = false)
+	{
+		double worst = 0.0;
+		for (size_t t = 0; t < a.size(); ++t)
+			for (int y = 0; y < kH; ++y)
+				for (int x = 0; x < kW; ++x)
+				{
+					if (!whole && (x < bx * 16 + 2 || x >= bx * 16 + 14 || y < by * 16 + 2 || y >= by * 16 + 14)) continue;
+					worst = (std::max)(worst, std::fabs(a[t].at(x, y) - b[t].at(x, y)));
+				}
+		return worst;
+	}
+
 }
 
 namespace VideoProcessorTest
@@ -1273,6 +1337,92 @@ namespace VideoProcessorTest
 			const uint64_t priv = Gpu::Module::TextureBytes(3840, 2160, 2160), inArena = Gpu::Module::TextureBytes(3840, 2160, 2160, kSlots, true);
 			Assert::IsTrue(priv == Gpu::Module::TextureBytes(3840, 2160, 2160, kSlots, false), L"the default is the private form");
 			Assert::IsTrue(priv - inArena == uint64_t(40) * 3840 * 2160, L"40 bytes per pixel move to the arena");
+		}
+
+		// --- TD-NONFINITE on the GPU (gate cb-u1 r1 MUST 2 / MUST 4): the shaders close the gates the way the CPU model does ---
+
+		TEST_METHOD(TemporalDetailGpuNonFiniteGrainLevelClosesTheBlock)
+		{
+			// A block whose grain level N (the shared product's per-block texture) is NaN or +-inf: N feeds the significance
+			// edge, the base-match allowance and the stronger gate, so a non-finite N used to give NaN (or open) gates and a
+			// non-zero `hard`. The block must instead transfer nothing (output = input there), and no pixel may go wrong
+			// anywhere (a NaN weight turns into a black pixel through the unorm conversion).
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Plane> frames = Stream(12, "IBBBPBBB", 0.3, 0.0, 29u, 1.2);
+			const std::vector<Plane> control = RunTdPlantedN(dev, frames, false, 0.0f, 0, 0);
+			const int bw = (kW + 15) / 16, bh = (kH + 15) / 16;
+			int bestX = 1, bestY = 1;
+			double best = -1.0;
+			for (int by = 1; by < bh - 1; ++by)
+				for (int bx = 1; bx < bw - 1; ++bx)
+				{
+					const double c = WorstInBlock(control, frames, bx, by);
+					if (c > best) { best = c; bestX = bx; bestY = by; }
+				}
+			LogF("control: the block (%.0f, %.0f) changes by up to %.3f codes", bestX, bestY, best);
+			Assert::IsTrue(best > 0.25, L"control: the transfer changes the picture inside the block that is planted below (the test is not vacuous)");
+			const double controlWorstAll = WorstInBlock(control, frames, 0, 0, true);
+			const float values[3] = { std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity() };
+			const char* const names[3] = { "NaN", "+inf", "-inf" };
+			for (int k = 0; k < 3; ++k)
+			{
+				const std::vector<Plane> planted = RunTdPlantedN(dev, frames, true, values[k], bestX, bestY);
+				const double inBlock = WorstInBlock(planted, frames, bestX, bestY);
+				const double all = WorstInBlock(planted, frames, 0, 0, true);
+				LogF("N = %.0f: block change %.4f codes, worst anywhere %.4f (control %.4f)", static_cast<double>(k), inBlock, all, controlWorstAll);
+				Assert::IsTrue(inBlock <= 0.05, Wide(std::string("N = ") + names[k] + ": the planted block transfers nothing (output = input)").c_str());
+				Assert::IsTrue(all <= controlWorstAll + 1.0, Wide(std::string("N = ") + names[k] + ": no pixel anywhere goes wrong").c_str());
+			}
+		}
+
+		TEST_METHOD(TemporalDetailGpuNonFiniteBlockGateTexelIsNeutral)
+		{
+			// The per-block gate factors are sanitised on the GPU (td_bgate: non-finite -> 1) as on the CPU (SanitizeBlockGate),
+			// so a NaN or infinite texel in the bgates texture behaves as the neutral factor: the model gives the neutral
+			// result exactly, the GPU follows it, and the GPU result equals the neutral GPU result.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			const std::vector<Plane> frames = Stream(12, "IBBBPBBB", 0.37, 0.0, 19u, 1.2);
+			const int bw = (kW + 15) / 16, bh = (kH + 15) / 16;
+			Gpu::Params p;
+			p.settings = Steady();
+			const MatchResult neutral = RunMatch(dev, frames, 0.37, 0.0, p, Model::Tuning());
+			Assert::IsTrue(neutral.changedShare > 0.001, L"control: the transfer runs on this scene");
+			const float values[3] = { std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity() };
+			for (int k = 0; k < 3; ++k)
+			{
+				std::vector<float> gates(static_cast<size_t>(bw) * bh * 4, 1.0f);
+				for (int c = 0; c < 4; ++c)
+				{
+					gates[(static_cast<size_t>(2) * bw + 2) * 4 + static_cast<size_t>(c)] = values[k];   // block (2, 2): all four factors
+					gates[(static_cast<size_t>(3) * bw + 4) * 4 + static_cast<size_t>(c)] = values[(k + 1) % 3];   // block (4, 3): another kind
+				}
+				pl_tex_params tp{};
+				tp.w = bw; tp.h = bh; tp.format = pl_find_named_fmt(gpu, "rgba32f"); tp.sampleable = true; tp.initial_data = gates.data();
+				pl_tex gtex = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(gtex);
+				const MatchResult r = RunMatch(dev, frames, 0.37, 0.0, p, Model::Tuning(), [&](int, Gpu::Params& gp, Model::FrameIn& in) {
+					gp.blockGates = gtex;
+					in.blockGates = gates;
+				});
+				double modelDiff = 0.0;
+				bool finite = true;
+				for (size_t t = 0; t < frames.size(); ++t)
+					for (size_t i = 0; i < r.model[t].v.size(); ++i)
+					{
+						modelDiff = (std::max)(modelDiff, std::fabs(r.model[t].v[i] - neutral.model[t].v[i]));
+						finite = finite && std::isfinite(r.model[t].v[i]) && std::isfinite(r.gpu[t].v[i]);
+					}
+				const double gpuDiff = WorstDiff(r.gpu, neutral.gpu);
+				LogF("non-finite gate texels: model vs neutral %.6f codes, GPU vs neutral GPU %.4f, GPU vs model worst %.4f", modelDiff, gpuDiff, r.worst);
+				Assert::IsTrue(finite, L"the model and the GPU outputs are finite");
+				Assert::IsTrue(modelDiff == 0.0, L"the model treats a non-finite factor as neutral (identical result)");
+				Assert::IsTrue(r.worst <= 0.125 && r.worstMean <= 0.005 && r.maxOverShare <= 0.0, L"the GPU follows the model with non-finite gate texels");
+				Assert::IsTrue(gpuDiff <= 0.125, L"the GPU treats a non-finite factor as neutral");
+				pl_tex_destroy(gpu, &gtex);
+			}
 		}
 	};
 }
