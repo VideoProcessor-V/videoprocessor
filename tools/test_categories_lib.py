@@ -35,8 +35,9 @@ QUARANTINED = ['UpstreamStale']
 # Categories that must not run in the CPU CI (a real device, a screen, a meter, a projector).
 # LoopRig: needs the DeckLink loop rig; run by tools/looprig/run_loop_tier.ps1 only. Excluded from the CPU
 # run AND from the default --gpu set (GPU_DEFAULT_EXCLUDED); select it with --gpu --categories LoopRig.
-EXCLUDED_FROM_CPU = ['GpuHardware', 'GpuOnScreen', 'MeterHardware', 'ProjectorHardware', 'Slow', 'LoopRig'] + QUARANTINED
-GPU_DEFAULT_EXCLUDED = [c for c in EXCLUDED_FROM_CPU if c != 'LoopRig']
+EXCLUDED_FROM_CPU = ['GpuHardware', 'GpuOnScreen', 'MeterHardware', 'ProjectorHardware', 'Slow', 'LoopRig', 'Footage', 'Corpus', 'Bench', 'ParkedNets'] + QUARANTINED
+DEDICATED_ONLY = ('LoopRig', 'Footage', 'Corpus', 'Bench', 'ParkedNets')
+GPU_DEFAULT_EXCLUDED = [c for c in EXCLUDED_FROM_CPU if c not in DEDICATED_ONLY]
 KNOWN_CATEGORIES = EXCLUDED_FROM_CPU + ['GpuWarp', 'Cpu']
 
 
