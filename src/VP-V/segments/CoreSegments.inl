@@ -425,6 +425,11 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     colourFrame.userPreOutput = &userFrameHooks;
     colourFrame.calibrationLut = calibrationHost.HookForFrame() != nullptr;   // S2 pushes it (WP-12: the adapter never does)
     dvStage.SyncCalibrationLut(activeSettings.calibrationLutStageConfigured, activeSettings.calibrationLutStage, colourFrame.calibrationLut);   // FIX1 MUST 3
+    // CF1-FIN SHOULD A: auto keeps the VP stage only while a step that must follow the LUT wants to act (appearance on with a
+    // strength, or a DV picture for VP's display mapping); the next frame's TakeLut reads it (AutoKeepsVpStage).
+    calibrationHost.SetAutoNeed(activeSettings.calibrationLutStageConfigured == "auto",
+        (activeSettings.appearance && activeSettings.appearanceStrength > 0.0 && pipelineSlots.Runs(PipelineSlots::Id::ColourAppearance) &&
+            !pipelineSlots.OriginalPathway()) || dvStage.DisplayMappingWantsLutAfter());
     const OutputSegments::ColourCounts colourCounts = outputColour.Collect(colourFrame, pipelineSlots, frameHooks,
         [this](size_t start, PipelineSlots::Id slot) { TagSlotHooks(start, slot); });
     logSdrToneShape(sdrToneShapeState == 1 && colourCounts.toneShape == 0 ? 3 : sdrToneShapeState);

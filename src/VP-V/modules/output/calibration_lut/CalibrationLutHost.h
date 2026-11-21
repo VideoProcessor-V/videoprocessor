@@ -130,6 +130,9 @@ namespace CalibrationLutHost
 		// (null: none this frame). True = the VP stage applies the LUT this frame; the host then leaves
 		// target.lut empty and returns. Updates `status` (the renderer's LUT status) for the VP stage.
 		TakeResult TakeLut(const pl_custom_lut* lut, const StageFacts& facts, const std::string& path, std::string& status);
+		// CF1-FIN SHOULD A: the colour segment, per frame, after its decisions: calibration_lut_stage is auto and whether a
+		// step that must follow the LUT wants to act (AutoKeepsVpStage). Read by the next TakeLut.
+		void SetAutoNeed(bool configuredAuto, bool stepWants) { autoConfigured = configuredAuto; autoStepWants = stepWants; }
 
 		// The render path: the hook to push after the user PRE_OUTPUT shaders, or null.
 		const pl_hook* HookForFrame();
@@ -202,6 +205,8 @@ namespace CalibrationLutHost
 		CalibrationLutStage::Hook stage;
 		bool stageLogged = false;
 		bool stageFailed = false;   // the VP stage failed once: libplacebo's target LUT for the instance
+		bool autoConfigured = true;    // CF1-FIN SHOULD A (SetAutoNeed): until the first colour frame, auto with no step -> libplacebo LUT
+		bool autoStepWants = false;
 		ReloadPolicy reload;
 
 		// Patterns

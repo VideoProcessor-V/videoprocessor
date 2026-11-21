@@ -32,6 +32,18 @@ namespace CalibrationLutHost
 		return facts.vpStageWanted && !facts.originalPathway && facts.slotRuns && !stageFailed;
 	}
 
+	// CF1-FIN SHOULD A: calibration_lut_stage auto resolves to vp in PostLoad when a step that must follow the LUT is
+	// CONFIGURED (ResolveStage / DisplayMappingStepsRun). Per frame it keeps the VP stage only while such a step WANTS to
+	// act on the picture: appearance on with a strength above 0, or a Dolby Vision picture with DM for VP's display
+	// mapping (the trims or the Dolby-style curve). Otherwise libplacebo's target LUT, so a default profile (dv_trims on)
+	// on an HDR10 or SDR picture stays byte-identical. An explicit vp passes through. The LUT is configured before the
+	// frame's colour decisions, so stepWants is the previous frame's (a change lands one frame later, shown by the
+	// steps' own "calibration LUT" states for that frame, never silent).
+	inline bool AutoKeepsVpStage(bool configuredAuto, bool stepWants)
+	{
+		return !configuredAuto || stepWants;
+	}
+
 	// CF-1 P3: calibration_lut_stage = auto. VP's colour steps that shape the picture (dm_trims, and
 	// colour.appearance when it exists) must come AFTER the LUT never before it: a LUT applied by
 	// libplacebo runs before PRE_OUTPUT, so those steps would act on projector codes. Auto therefore

@@ -221,6 +221,8 @@ public:
 		return m_appearanceShown;
 	}
 	const AppearanceStage::Decision& AppearanceDecision() const { return m_appearanceDecision; }
+	// CF1-FIN SHOULD A: this frame's DV picture wants VP's display mapping (trims or the Dolby-style curve) after the LUT.
+	bool DisplayMappingWantsLutAfter() const { return m_dmWantsLutAfter; }
 	// displayedCuts: the intent interpreter's running count of displayed cuts (a change = the room change may land now).
 	const AppearanceStage::Decision& PrepareAppearance(AppearanceStage::Inputs in, const CustomHookChain::TemplateValues& hookTemplates,
 		uint64_t displayedCuts)
@@ -311,6 +313,9 @@ public:
 		const std::string dvToneFallback = DvDolbyStyle::CannotRun(dvToneDolby && dvTonePicture, target.lut != nullptr,
 			target.color.transfer, f.colourStageRuns, f.trims && m_trimsShaderMissing);
 		m_toneDolbyRunning = dvToneDolby && dvTonePicture && dvToneFallback.empty();
+		// CF1-FIN SHOULD A: a DV picture whose VP display mapping (the trims or the Dolby-style curve) wants to run: both stop
+		// with libplacebo's LUT before them, so calibration_lut_stage auto takes the VP stage for them (from the next frame).
+		m_dmWantsLutAfter = dvTonePicture && ((f.trims && f.trimsStageRuns) || dvToneDolby);
 		m_toneSwitch.Apply(colorMapParams, m_toneDolbyRunning ? &DvDolbyStyle::Function() : !dvToneFallback.empty() ? &pl_tone_map_bt2390 : nullptr);
 		// CF-1 P4 (DmCurve.h): the tone LUT size from the interpolation measurement and the contrast recovery from the P14 need,
 		// Dolby-style DV pictures only; everything else gets the configured values back (Original = Bill).
@@ -520,6 +525,7 @@ private:
 	std::string m_appearanceShown = "appearance: off";   // FIX1 SHOULD 5: read by the status thread
 	bool m_appearanceConfigured = false;
 	bool m_appearanceWanted = false;
+	bool m_dmWantsLutAfter = false;    // CF1-FIN SHOULD A (PrepareToneAndTrims)
 	std::string m_appearanceLogged;     // CAM-4: the status last logged (on change)
 	uint64_t m_cutsSeen = 0;
 	Engage m_engage;

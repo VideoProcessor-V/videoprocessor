@@ -98,7 +98,9 @@ namespace CalibrationLutHost
 		// R1 (calibration_lut_stage = vp): VP applies the LUT as its last colour hook, after the
 		// LED compensation, instead of libplacebo's target LUT (which runs before VP's hooks).
 		// The Original pathway keeps libplacebo's target LUT, as upstream did.
-		if (UseVpStage(facts, stageFailed))
+		StageFacts effective = facts;   // CF1-FIN SHOULD A: auto keeps the VP stage only while a step wants it
+		effective.vpStageWanted = facts.vpStageWanted && AutoKeepsVpStage(autoConfigured, autoStepWants);
+		if (UseVpStage(effective, stageFailed))
 		{
 			stage.SetLut(lut);
 			result.vpStage = true;
