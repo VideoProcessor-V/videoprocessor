@@ -4,7 +4,7 @@
 
 Machine-checked (refs/129 L-PROD). R = read shape found (a regex hit on the owner fill, NOT proven Acquire); X = it recomputes it privately or reads it outside Acquire; N = declared but never read; NP = the product has no production producer. Fix owners are the lanes of refs/129. Counts count declared (product, input) pairs.
 
-Counts: R 9, X 7, N 12, NP 33.
+Counts: R 11, X 7, N 12, NP 33.
 
 | Product | Lane | Producer files | Input (lag/lead) | St | Evidence / note |
 |---|---|---|---|---|---|
@@ -22,8 +22,8 @@ Counts: R 9, X 7, N 12, NP 33.
 |  |  |  | P2 (undeclared) | X | outside-acquire: CameraExtension.cpp:239; CameraExtension.cpp:480; CameraExtension.cpp:629 / undeclared external view: P2 via FlowOf (decision G-A3, ProductFlags ExternalView) |
 | **P8** p8_camera_labels | L-B6 | CameraLabelFill.cpp | P7 | X | partial: CameraLabelFill.cpp:50; CameraLabelFill.cpp:163 |
 | **P9** p9_camera_smoothed (variants, short-queue P7) | L-B4 | CameraLinkCore.cpp | P7 lead2 | X | outside-acquire: CameraLinkCore.cpp:357; CameraLinkCore.cpp:456; CameraLinkCore.cpp:764 |
-| **P10** grain.split | L-B2 | SkeletonGpuDispatcher.cpp<br>LaneGpuProducts.cpp<br>GrainSplitVariantOwner.h | P4 | R | SkeletonGpuDispatcher.cpp:499; SkeletonGpuDispatcher.cpp:574 / shared dispatcher read; its picture feeds the ownsTap (P10) tap build |
-|  |  |  | P13 | R | GrainSplitVariantOwner.h:147 / INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)); flag ViewIsActual: C9b |
+| **P10** grain.split | L-B2 | SkeletonGpuDispatcher.cpp<br>LaneGpuProducts.cpp<br>GrainLevelGpu.h<br>GrainSplitVariantOwner.h | P4 | R | SkeletonGpuDispatcher.cpp:499; SkeletonGpuDispatcher.cpp:574 / shared dispatcher read; its picture feeds the ownsTap (P10) tap build |
+|  |  |  | P13 | R | GrainLevelGpu.h:160; GrainSplitVariantOwner.h:155 / INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)); flag ViewIsActual: C9b |
 | **P10c** grain.split.chroma | L-B2 | - | P4 | NP | no production producer |
 |  |  |  | P13 | NP | no production producer |
 | **P11** region_block_stats | L-B5 | SkeletonGpuDispatcher.cpp<br>LaneGpuRegionKernel.cpp<br>LaneGpuJobs.h | P10 | R | LaneGpuRegionKernel.cpp:122 |
@@ -47,6 +47,8 @@ Counts: R 9, X 7, N 12, NP 33.
 | **P14** p14_source_identity | - | SourceIdPipeline.h | P5 | R | SourceIdPipeline.h:126; SourceIdPipeline.h:214 / type-token match only: FrameInput.classical is a monitor snapshot copied by the call site, not an Acquire |
 | **P14g** source_geometry | - | SourceGeometryProduct.h | P5 | N | flag ViewIsActual: C9b |
 | **edge_map** edge_map | L-B5 | EdgeMapFill.h | P13 | R | EdgeMapFill.h:65 |
+| **P10g** grain.level | L-B2 | GrainLevelGpu.h | P10 | R | GrainLevelGpu.h:172 |
+|  |  |  | P13 | R | GrainLevelGpu.h:160 |
 | **P7g** p7g_camera_guide | L-B6 | GuideLaneJob.cpp | P7 | N |  |
 |  |  |  | P4 | N |  |
 | **P16** coding_evidence | L-B5 | CodingEvidence.cpp<br>SkeletonModule.cpp | P10 | N |  |
@@ -109,5 +111,5 @@ Declared in Products.h but the producer does not read them yet. They still order
 
 Ordering edges are lag 0, lead 0, non-self (Registry::Validate's Kahn); lag > 0, lead and own-previous-frame edges are temporal. Acyclic: **yes**.
 
-Order: P0(L0) , P13(L0) , edge_map(L1) , P1(L0) , P2(L1) , P2m(L1) , P3(L2) , P4(L1) , P10(L2) , P10c(L2) , P11(L3) , P16(L4) , P12(L4) , P5(L0) , P6(L3) , P7(L2) , P7g(L3) , P8(L3) , P9(L3) , P15(L5) , P15c(L5) , P3r(L4) , P14g(L1) , P14(L1) , td.anchor_pass(L4) , td.anchor_refs(L6) , td.blocks(L4) , td.delta(L5) , td.maps(L5) , td.memory(L5) , td.trail_summary(L5)
+Order: P0(L0) , P13(L0) , edge_map(L1) , P1(L0) , P2(L1) , P2m(L1) , P3(L2) , P4(L1) , P10(L2) , P10c(L2) , P10g(L3) , P11(L3) , P16(L4) , P12(L4) , P5(L0) , P6(L3) , P7(L2) , P7g(L3) , P8(L3) , P9(L3) , P15(L5) , P15c(L5) , P3r(L4) , P14g(L1) , P14(L1) , td.anchor_pass(L4) , td.anchor_refs(L6) , td.blocks(L4) , td.delta(L5) , td.maps(L5) , td.memory(L5) , td.trail_summary(L5)
 

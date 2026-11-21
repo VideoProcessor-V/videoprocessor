@@ -1,7 +1,7 @@
 {
  "schema": 1,
  "counts": {
-  "R": 9,
+  "R": 11,
   "X": 7,
   "N": 12,
   "NP": 33
@@ -501,6 +501,7 @@
    "producer_files": [
     "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
     "input/source_analysis/lane/LaneGpuProducts.cpp",
+    "repair/grain_split/GrainLevelGpu.h",
     "repair/grain_split/GrainSplitVariantOwner.h"
    ],
    "producer_text": "grain split pass",
@@ -542,8 +543,13 @@
      "status": "R",
      "evidence": [
       [
+       "repair/grain_split/GrainLevelGpu.h",
+       160,
+       "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
+      ],
+      [
        "repair/grain_split/GrainSplitVariantOwner.h",
-       147,
+       155,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -1077,6 +1083,64 @@
       [
        "input/source_analysis/regions/EdgeMapFill.h",
        65,
+       "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP10gGrainLevel",
+   "label": "P10g",
+   "token": "grain.level",
+   "name": "grain level (P10g)",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B2",
+   "producer_files": [
+    "repair/grain_split/GrainLevelGpu.h"
+   ],
+   "producer_text": "grain level pass (per-frame memo, owner fill; single-frame law until the temporal passes are costed); first reader: hybrid upscaler",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP10GrainSplit",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "repair/grain_split/GrainLevelGpu.h",
+       172,
+       "const VpSkeleton::AcquireResult split = memo.Acquire(VpSkeleton::kP10GrainSplit, req.seq, VpSkeleton::AcquireF"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP13SourceRing",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "repair/grain_split/GrainLevelGpu.h",
+       160,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -1633,6 +1697,10 @@
    ],
    [
     "kP10GrainSplit",
+    "kP10gGrainLevel"
+   ],
+   [
+    "kP10GrainSplit",
     "kP11RegionBlockStats"
    ],
    [
@@ -1682,6 +1750,10 @@
    [
     "kP13SourceRing",
     "kP10cGrainSplitChroma"
+   ],
+   [
+    "kP13SourceRing",
+    "kP10gGrainLevel"
    ],
    [
     "kP13SourceRing",
@@ -1927,6 +1999,7 @@
    "kP4SourceStats",
    "kP10GrainSplit",
    "kP10cGrainSplitChroma",
+   "kP10gGrainLevel",
    "kP11RegionBlockStats",
    "kCodingEvidence",
    "kP12LightLevel",
@@ -1960,6 +2033,7 @@
    "kP4SourceStats": 1,
    "kP10GrainSplit": 2,
    "kP10cGrainSplitChroma": 2,
+   "kP10gGrainLevel": 3,
    "kP11RegionBlockStats": 3,
    "kCodingEvidence": 4,
    "kP12LightLevel": 4,
