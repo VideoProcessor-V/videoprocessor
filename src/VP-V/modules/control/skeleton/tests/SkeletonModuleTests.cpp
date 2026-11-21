@@ -2008,6 +2008,23 @@ namespace SkeletonModuleTestsNs
 			rig.After(6);
 		}
 
+		// A static picture, then a 50-frame slow fade (every frame of the rig's store). Call before any frame is delivered.
+		// (Moved unchanged out of ASlowFadeThroughTheSceneProductEqualsTheStreamFold, which now calls it; GF-P2a T4R.)
+		static void ShapeASlowFade(Rig& rig)
+		{
+			for (int s = 0; s < int(rig.count); ++s)
+			{
+				const double g = s <= 4 ? 1.0 : (std::max)(0.25, 1.0 - 0.75 * (s - 4) / 50.0);   // static, then a 50-frame fade
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const uint32_t h = (x * 73856093u) ^ (y * 19349663u) ^ (uint32_t(s) * 83492791u);
+						const double v = 64.0 + g * (double(128 + 12 * x) - 64.0) + double(int(h % 17u) - 8);
+						rig.store[size_t(s) * kW * kH + y * kW + x] = uint16_t((std::min)(1023.0, (std::max)(0.0, std::floor(v + 0.5))));
+					}
+			}
+		}
+
 		// GF-P2a: the queue window the ahead asks need. The window's ahead depth is lane lead + look-ahead walk; the computed ahead depth
 		// needs an ACTIVE ahead consumer (an owner fill declaring aheadDepth). The lane lead stays 1 (the default the older tests ran
 		// with) so the lane publishes nothing ahead by itself: only a reader's ask makes an ahead record.
@@ -2019,7 +2036,7 @@ namespace SkeletonModuleTestsNs
 			q.lookAheadWalk = walk;
 			rig.sk.SetQueueForTesting(q);
 			VpSkeleton::OwnerFill fill;
-			fill.aheadDepth = 6;   // the ceiling (kAheadCeiling): an ahead consumer is active
+			fill.aheadDepth = VpSkeleton::kAheadCeiling;   // an ahead consumer is active (the ceiling: the most the window computes ahead)
 			fill.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput&) { return false; };
 			rig.sk.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu, "repair/grain_split", fill);
 		}
@@ -2153,53 +2170,84 @@ namespace SkeletonModuleTestsNs
 			rig.After(4);
 		}
 
-		// GF-P2a S2b (measurement): the look-ahead walk asks the scene of the next frames between two renders. The fade runs of ahead frames
-		// are not kept in the 8-entry run ring, so the render frames' runs are never rebuilt with reduced evidence (sceneRunReduced).
-		// Before the change the walk's asks (8 deep: every ring slot) overwrote the render frames' entries and each render frame's run was
-		// rebuilt reduced; after it the delta over the render Begins is 0.
+		// GF-P2a S2b (T4 corrected after eec4406dd): the look-ahead walk keeps ONE new call at the front of the window, N + kAheadCeiling,
+		// each render frame; the store holds a record for every arrived frame, so the front's group is published ahead and the seal of
+		// every frame finds it (alreadyPresent). The ahead fills never keep their fade run in the 8-entry run ring and the render frames'
+		// runs are never rebuilt with reduced evidence: the whole-run sceneRunReduced delta is 0 once the walk is primed. (The front is
+		// the window's computed ahead depth: a first fill beyond it is NotPlannedAhead.) The published fadeKeep of a late fade frame
+		// equals a store-off, render-order reference run's.
 		TEST_METHOD(ALookAheadWalkNeverForcesTheRenderFramesFadeRunsToBeRebuiltReduced)
 		{
+			constexpr uint64_t kC = VpSkeleton::kAheadCeiling;
+			constexpr int64_t kLast = 40;
+			constexpr int64_t kLate = kLast - 2;   // a late fade frame (> 8 + kAheadCeiling)
 			Rig rig(Lane("on"));
+			ShapeASlowFade(rig);
 			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
 			Tap::SetStore(rig.Host(), &store);
 			SceneStoreGuard guard(rig.Host());
-			FeedAheadWindow(rig, 12);
-			SkeletonModule::QueueShape deep;   // the queue is fed deep enough for the walk: the lane lead reaches past the ring depth
-			deep.renderAhead = 1;
-			deep.laneLead = 12;
-			deep.lookAheadWalk = 12;
-			rig.sk.SetQueueForTesting(deep);
+			FeedAheadWindow(rig, uint16_t(kC));
 			rig.ResyncApply("on");
 			rig.Life(RE::Lifecycle::GpuCreated);
-			constexpr uint64_t kSpan = 8;          // the ring depth: an ahead frame this far out lands on the seal frame's own entry
-			constexpr int64_t kWarm = 10, kLast = 30;
 			uint64_t delivered = 0;
-			uint64_t reducedAtWarm = 0, asked = 0, known = 0, knownDeep = 0;
+			uint64_t reducedAfterPrime = 0;
+			FrameAnalysis::Scene lateGroup;
+			bool haveLate = false;
 			for (int64_t s = 1; s <= kLast; ++s)
 			{
 				rig.Ingress(s);
-				while (delivered < uint64_t(s) + kSpan + 1)
-					rig.Deliver(++delivered);
-				store.Begin(SceneTestId(uint64_t(s)), FrameAnalysis::kScene);
-				rig.Begin(s);
-				if (s == kWarm)
-					reducedAtWarm = rig.sk.SceneCountersOf(rig.Host()).fadeRunReduced;
-				for (uint64_t k = 1; k <= kSpan; ++k)
+				while (delivered < uint64_t(s) + kC + 1)
 				{
-					const Vpv::Skeleton::SceneAnswer a = rig.sk.SceneOf(rig.Host(), uint64_t(s) + k);
-					++asked;
-					if (a.known)
-					{
-						++known;
-						if (k == kSpan)
-							++knownDeep;
-					}
+					++delivered;
+					rig.Deliver(delivered);
+					store.Begin(SceneTestId(delivered), FrameAnalysis::kScene);   // the record opens at ARRIVAL, ahead frames included
 				}
+				const Vpv::Skeleton::SceneCounters before = rig.sk.SceneCountersOf(rig.Host());
+				rig.Begin(s);
+				const Vpv::Skeleton::SceneCounters afterSeal = rig.sk.SceneCountersOf(rig.Host());
+				PresentFacts(rig, s);
+				if (s == 1)
+				{
+					for (uint64_t f = 2; f <= kC; ++f)   // prime the walk in order: frames 2 .. kC (the front of frame 1 is 1 + kC, below)
+						Assert::IsTrue(rig.sk.SceneOf(rig.Host(), f).known, (L"priming frame " + std::to_wstring(f)).c_str());
+				}
+				else
+				{
+					Assert::AreEqual(before.alreadyPresent + 1, afterSeal.alreadyPresent, (L"the seal of frame " + std::to_wstring(s) + L" found the ahead group").c_str());
+					Assert::AreEqual(before.liveFills, afterSeal.liveFills, L"the seal classified nothing itself");
+				}
+				const Vpv::Skeleton::SceneAnswer front = rig.sk.SceneOf(rig.Host(), uint64_t(s) + kC);
+				Assert::IsTrue(front.known, (L"the walk front N + kAheadCeiling is answered; " + WhyOf(front)).c_str());
+				if (s == 1)
+					reducedAfterPrime = rig.sk.SceneCountersOf(rig.Host()).fadeRunReduced;
+				if (s == kLate)
+					haveLate = store.PeekScene(uint64_t(s), lateGroup);
 				rig.After(s);
 			}
-			Assert::IsTrue(known > 0 && knownDeep > 0, L"the walk really reached the ring depth (else this measures nothing)");
-			const uint64_t reducedAtEnd = rig.sk.SceneCountersOf(rig.Host()).fadeRunReduced;
-			Assert::AreEqual(reducedAtWarm, reducedAtEnd, L"no render frame's fade run was rebuilt with reduced evidence");
+			Assert::AreEqual(reducedAfterPrime, rig.sk.SceneCountersOf(rig.Host()).fadeRunReduced, L"no fade run was rebuilt with reduced evidence");
+			Assert::IsTrue(haveLate, L"the late fade frame's group is in the store");
+
+			// The reference: store off, render order (Begin(s), then SceneOf(s)); the same picture shape.
+			Rig ref(Lane("on"));
+			ShapeASlowFade(ref);
+			ref.ResyncApply("on");
+			ref.Life(RE::Lifecycle::GpuCreated);
+			Vpv::Skeleton::SceneAnswer refLate;
+			for (int64_t s = 1; s <= kLate; ++s)
+			{
+				ref.Ingress(s);
+				if (s == 1)
+					ref.Deliver(1);
+				ref.Deliver(uint64_t(s) + 1);
+				ref.Begin(s);
+				const Vpv::Skeleton::SceneAnswer a = ref.sk.SceneOf(ref.Host(), uint64_t(s));
+				if (s == kLate)
+					refLate = a;
+				ref.After(s);
+			}
+			Assert::IsTrue(refLate.known, (L"the reference answers the late frame; " + WhyOf(refLate)).c_str());
+			Assert::AreEqual(refLate.fade, lateGroup.fade, L"the walked run's fade equals the render-order reference");
+			Assert::AreEqual(double(refLate.fadeKeep), double(lateGroup.fadeKeep), 1e-6, L"and so does the published fadeKeep");
 		}
 
 		// GF-P2a MUST-8 (order): one thread fills frame s (provisional: s + 1 not judged yet) while the render thread fills s + 1, which
@@ -2406,17 +2454,7 @@ namespace SkeletonModuleTestsNs
 		{
 			const int frames = 60, gap = 40;
 			Rig rig(Lane("on"), size_t(frames) + 4);
-			for (int s = 0; s < frames + 4; ++s)
-			{
-				const double g = s <= 4 ? 1.0 : (std::max)(0.25, 1.0 - 0.75 * (s - 4) / 50.0);   // static, then a 50-frame fade
-				for (uint32_t y = 0; y < kH; ++y)
-					for (uint32_t x = 0; x < kW; ++x)
-					{
-						const uint32_t h = (x * 73856093u) ^ (y * 19349663u) ^ (uint32_t(s) * 83492791u);
-						const double v = 64.0 + g * (double(128 + 12 * x) - 64.0) + double(int(h % 17u) - 8);
-						rig.store[size_t(s) * kW * kH + y * kW + x] = uint16_t((std::min)(1023.0, (std::max)(0.0, std::floor(v + 0.5))));
-					}
-			}
+			ShapeASlowFade(rig);
 			rig.ResyncApply("on");
 			rig.Life(RE::Lifecycle::GpuCreated);
 			VpUnit::CutFadeJudge::FadeRun stream;
