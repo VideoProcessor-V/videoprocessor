@@ -95,6 +95,8 @@ namespace AdaptiveDownscaleStage
 		pl_rect2df sourceCrop{};       // renderImage.crop
 		pl_rect2df targetCrop{};       // target.crop
 		bool slotRuns = true;          // scaling.output's slot switch: off = libplacebo's linear light
+		double rebaseFactor = 1.0;     // Stage 12: the vertical re-base factor (libplacebo samples crop x factor)
+		double rebaseFactorX = 1.0;    // ... and the horizontal one
 	};
 
 	// fbo_float32 no longer lives here: PicturePrecision.h decides it from the setting alone (S-12BIT).
