@@ -613,6 +613,77 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("adaptive upscale: no vectors, alias-safe weight (no motion map)"), d.reason);
 			Assert::IsFalse(OutputScalingUpscale(true, false, "", false, "").engaged);
 		}
+
+		// CF-2 FIX1 (gate M1): the module's own motion floor (no usable factor map while the stage found the vectors usable)
+		// engages the "output scaling" entry with its cause. Before FIX1 the entry read only the stage's cause, so this case
+		// was Released (a floor shown on Ctrl+I only). N2: every precedence pair at once. S2: the edge/grain interim is last.
+		TEST_METHOD(HybridModuleMotionFloorReachesTheCatalog)
+		{
+			using AdaptiveDownscale::MotionFloorCause;
+			using AdaptiveDownscale::MotionState;
+			Assert::AreEqual("vectors invalid", MotionFloorCause(true, MotionState::Used, true, true, true));
+			Assert::AreEqual("motion map not built on this frame", MotionFloorCause(false, MotionState::Off, true, true, true));
+			Assert::AreEqual("no motion map for this source frame", MotionFloorCause(false, MotionState::NoVectors, true, true, true));
+			Assert::AreEqual("motion map not ready", MotionFloorCause(false, MotionState::Used, false, true, true));
+			Assert::AreEqual("motion map from another source frame", MotionFloorCause(false, MotionState::Used, true, false, true));
+			Assert::AreEqual("motion map texture missing", MotionFloorCause(false, MotionState::Used, true, true, false));
+			Assert::IsNull(MotionFloorCause(false, MotionState::Used, true, true, true), L"the map is used: no floor");
+
+			using AdaptiveDownscaleStage::UpscaleFallbackInputs;
+			using AdaptiveDownscaleStage::UpscaleScalingFallback;
+			UpscaleFallbackInputs in;
+			in.requested = true;
+			in.motionAdaptiveOn = true;
+			in.moduleFloorUsed = true;
+			in.moduleFloorCause = "motion map not ready";
+			FallbackCatalog::Decision d = UpscaleScalingFallback(in);
+			Assert::IsTrue(d.engaged && d.id == "output scaling", L"M1: the stage cause is empty, the module floor still engages");
+			Assert::AreEqual(std::string("adaptive upscale: no vectors, alias-safe weight (motion map not ready)"), d.reason);
+			in.stageMotionCause = "resync";
+			Assert::AreEqual(std::string("adaptive upscale: no vectors, alias-safe weight (resync)"), UpscaleScalingFallback(in).reason,
+				L"the stage's verdict names the cause when both are set");
+
+			// N2: failure + floor + no cut + interim: the failure first; then the floor; then the cut; then the interim.
+			in.failureHeld = true;
+			in.scalerError = "shader compile";
+			in.cutAvailable = false;
+			in.cutCause = "no scene group";
+			in.interim = "edge/grain: private interim (grain: x)";
+			Assert::AreEqual(std::string("libplacebo main scaler alone (adaptive upscale failed on the GPU: alias-safe ScalerPass: shader compile)"),
+				UpscaleScalingFallback(in).reason);
+			in.failureHeld = false;
+			Assert::AreEqual(std::string("adaptive upscale: no vectors, alias-safe weight (resync)"), UpscaleScalingFallback(in).reason);
+			in.stageMotionCause.clear();
+			in.moduleFloorUsed = false;
+			Assert::AreEqual(std::string("adaptive downscale: no cut verdict this frame (no scene group)"), UpscaleScalingFallback(in).reason);
+			in.cutAvailable = true;
+			d = UpscaleScalingFallback(in);
+			Assert::IsTrue(d.engaged && d.id == "output scaling");
+			Assert::AreEqual(std::string("adaptive upscale: edge/grain: private interim (grain: x)"), d.reason, L"S2: the interim on Config status");
+			in.interim.clear();
+			Assert::IsFalse(UpscaleScalingFallback(in).engaged, L"nothing stands in: released");
+			// A stage cause on one axis is faithful only already (no floor); the module floor flag is never set there.
+			in.stageMotionCause = "resync";
+			in.oneAxis = true;
+			Assert::IsFalse(UpscaleScalingFallback(in).engaged);
+			in.oneAxis = false;
+			in.motionAdaptiveOn = false;
+			Assert::IsFalse(UpscaleScalingFallback(in).engaged, L"adaptive_motion off: the stage cause is no floor");
+			in.requested = false;
+			in.moduleFloorUsed = true;
+			in.failureHeld = true;
+			in.interim = "x";
+			Assert::IsFalse(UpscaleScalingFallback(in).engaged, L"not requested: released");
+
+			// The stage, CPU fixture: the upscale form's entry carries the interim (the grain seam is private at this tip).
+			OneAxisStageFixture x;
+			std::vector<const pl_hook*> hooks;
+			AdaptiveDownscaleStage::Frame f = x.Frame(1920, 1080, 2560, 1440);
+			f.adaptiveUpscale = true;
+			x.Run(f, hooks);
+			d = x.stage.Fallback();
+			Assert::IsTrue(d.engaged && d.reason.find("private interim") != std::string::npos);
+		}
 	};
 
 	TEST_CLASS(AdaptiveScalingMotionHookTests)
