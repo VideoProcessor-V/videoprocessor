@@ -150,4 +150,33 @@ namespace Tests
 			Assert::IsFalse(reg.Has("calibration LUT: display mapping"));
 		}
 	};
+
+	// MUST 4: L11 reference mode replaces the ROOM with the reference room; the screen-white step still runs.
+	TEST_CLASS(AppearanceL11Fix1Tests)
+	{
+	public:
+		TEST_METHOD(ReferenceModeKeepsTheScreenWhiteStep)
+		{
+			RoomLight::Smoother s;
+			AppearanceStage::Inputs in;
+			in.on = true;
+			in.screenWhiteNits = 48.0;           // a projector: the screen white differs from the 100-nit reference
+			in.room.room = RoomLight::Room::Auto;
+			in.recordAvailable = true;
+			in.record.valid = true;
+			in.record.smoothedLux = 200.0;       // a lit room that reference mode must ignore
+			in.l11ReferenceMode = true;
+			in.honourL11 = true;
+			const AppearanceStage::Decision d = AppearanceStage::Decide(in, s);
+			Assert::IsTrue(d.active, L"the Stevens/Hunt step from Lw_ref to Lw_screen stays on");
+			Assert::IsTrue(d.l11Ignored, L"the room was held back (listed)");
+			Assert::AreEqual(Cam16::kSurroundDim.F, d.room.surround.F, 0.0);
+			Assert::AreEqual(Cam16::kSurroundDim.Nc, d.room.surround.Nc, 0.0);
+			Assert::AreEqual(0.0, d.room.veilNits, 0.0);
+			Assert::AreEqual(0.0f, d.uniforms.veil, 0.0f);
+			Assert::IsTrue(d.uniforms.screen.fl != d.uniforms.reference.fl, L"the two whites differ: the model adapts");
+			Assert::IsFalse(d.parameters.empty());
+			Assert::IsTrue(Fix1Has(d.status, "reference mode"));
+		}
+	};
 }

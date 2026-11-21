@@ -629,7 +629,7 @@ namespace FallbackCatalog
 	}
 	inline Decision AppearanceL11Reference(bool ignored)
 	{
-		return ignored ? Engaged("appearance: L11 reference mode", "room light ignored") : Released("appearance: L11 reference mode");
+		return ignored ? Engaged("appearance: L11 reference mode", "room light ignored: reference room (dim, no veil)") : Released("appearance: L11 reference mode");
 	}
 	inline Decision AmbientAdaptReplaced(bool replaced)
 	{

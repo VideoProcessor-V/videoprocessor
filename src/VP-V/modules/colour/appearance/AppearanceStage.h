@@ -10,7 +10,7 @@
 // Reference white (refs/125 s2): the DV trim target's peak when a trim was applied (the picture is graded for it),
 // else the configured SDR target nits, else 100 nits (SDR). An LLDV picture is treated as HDR10 (no DV reference).
 // Reference mode (L11): when the picture says it is a reference-mode picture and appearance_honour_l11 is on, the room
-// is ignored and the pass stays out (said in the status, never silent).
+// is replaced by the reference room (dim, no veil) and the screen-white step still runs (said in the status, never silent).
 //
 // General, not fixed: every number comes from the inputs; nothing here names a display, a rate or a resolution.
 
@@ -152,13 +152,17 @@ namespace AppearanceStage
 		}
 		if (in.l11ReferenceMode && in.honourL11)
 		{
-			// The picture asks for reference viewing conditions: the room is not applied (and its slow adaptation restarts).
+			// FIX1 MUST 4 (refs/125 s4, plan CAM-3): the picture asks for reference viewing conditions, so the ROOM becomes
+			// the reference room (dim surround, no veil; its slow adaptation restarts). The pass stays on: the screen white
+			// still differs from the reference white, and that Stevens/Hunt step is kept.
 			smoother.Reset();
 			d.l11Ignored = true;
-			d.status = "appearance on: L11 reference mode: room light ignored";
-			return d;
+			d.room.surround = Cam16::kSurroundDim;
+			d.room.veilNits = 0.0;
+			d.room.status = "room: L11 reference mode (dim, no veil; room light ignored)";
 		}
-		d.room = RoomLight::Resolve(in.room, in.record, smoother, in.atCut, in.now);
+		else
+			d.room = RoomLight::Resolve(in.room, in.record, smoother, in.atCut, in.now);
 		Cam16::UniformInputs ui;
 		ui.referenceWhiteNits = d.referenceWhiteNits;
 		ui.screenWhiteNits = in.screenWhiteNits > 0.0 ? in.screenWhiteNits : d.referenceWhiteNits;
