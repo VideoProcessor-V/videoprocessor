@@ -266,9 +266,9 @@ namespace Tests
 		TEST_METHOD(BothAreWiredInProduction)
 		{
 			const std::string settings = Fix1ReadUp(std::string(kFix1ConfigDir) + "VpvRendererSettings.cpp");
-			const std::string frame = Fix1ReadUp("src\VP-V\modules\drive\led_compensation\DynamicDriveFrame.cpp");
-			const std::string lookahead = Fix1ReadUp("src\VP-V\modules\drive\led_measure\LedLookahead.cpp");
-			const std::string core = Fix1ReadUp("src\VP-V\segments\CoreSegments.inl");
+			const std::string frame = Fix1ReadUp("src\\VP-V\\modules\\drive\\led_compensation\\DynamicDriveFrame.cpp");
+			const std::string lookahead = Fix1ReadUp("src\\VP-V\\modules\\drive\\led_measure\\LedLookahead.cpp");
+			const std::string core = Fix1ReadUp("src\\VP-V\\segments\\CoreSegments.inl");
 			if (settings.empty() || frame.empty() || lookahead.empty() || core.empty())
 				return;   // not reachable from this working directory
 			Assert::IsTrue(Fix1Has(settings, "settings.saturationReplaced = appearanceRuns && settings.saturation != 0;"));
