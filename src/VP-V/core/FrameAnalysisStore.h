@@ -112,6 +112,11 @@ namespace FrameAnalysis
 		double mean = 0.0;              // mean studio code
 		double apl = 0.0;               // average picture level: (mean - 64) / 876, BTB/WTW not clipped
 		uint16_t minimum = 0, p1 = 0, p50 = 0, p99 = 0, maximum = 0;
+		// W21-2: Q6 companions (axis code x 64, the 16-bit lane scale). The uint16 fields above stay the whole-axis-code (histogram bin)
+		// readings; these carry the sub-code part a 12-bit source has. Integer-code sources: exactly code * 64. A 12-bit tap:
+		// minQ6/maxQ6/meanQ6 are exact, the percentiles are the bin centre (BinCenterQ6) of the bin the percentile falls in.
+		uint32_t minQ6 = 0, p1Q6 = 0, p50Q6 = 0, p99Q6 = 0, maxQ6 = 0;
+		double meanQ6 = 0.0;
 	};
 
 	struct RangeOccupancy

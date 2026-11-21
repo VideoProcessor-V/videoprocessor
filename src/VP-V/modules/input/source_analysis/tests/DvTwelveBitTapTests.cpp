@@ -176,5 +176,122 @@ namespace DvTwelveBitTapTestsNs
 			Assert::AreEqual<uint32_t>(1, row->maxPerFrame, L"one 12-bit decode per frame");
 			Assert::AreEqual<uint64_t>(0, row->dupFrames);
 		}
+
+		// Tap AND measure wanted: the frame's one 12-bit decode feeds both (rule 1, counted under analysis.tap12); the measured stats
+		// carry the 12-bit sub-code part (maxQ6 = 4095 << 4); the retained 10-bit decode is its own counted unit.
+		TEST_METHOD(MeasureAndTapShareOneTwelveBitDecode)
+		{
+			ComputeOnce::SetEnabled(true);
+			ComputeOnce::Global().Reset();
+			VpFrameAnalysis::ResetDvTapRefusals();
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			static int ownerKey = 0;
+			std::vector<SourceFrameView> got;
+			Tap::Register(&ownerKey, [&got](const SourceFrameView& v) { got.push_back(v); });
+			Ramp ramp(false);
+			for (uint64_t seq = 1; seq <= 4; ++seq)
+			{
+				VpFrameAnalysis::Job job;
+				job.identity.seq = seq;
+				job.identity.picture = { 0, 0, 64, 64 };
+				job.source = ramp.source;
+				job.owner = &ownerKey;
+				job.measure = true;
+				VpFrameAnalysis::Process(store, job);
+			}
+			const auto rows = ComputeOnce::Global().Rows();
+			const ComputeOnce::UnitRow* tap12 = nullptr;
+			for (const ComputeOnce::UnitRow& r : rows)
+				if (r.unit == "analysis.tap12") tap12 = &r;
+			Tap::Unregister(&ownerKey);
+			ComputeOnce::Global().Reset();
+			ComputeOnce::SetEnabled(false);
+			Assert::IsNotNull(tap12);
+			Assert::AreEqual<uint64_t>(4, tap12->frames);
+			Assert::AreEqual<uint64_t>(4, tap12->calls);
+			Assert::AreEqual<uint32_t>(1, tap12->maxPerFrame, L"measure and tap share ONE 12-bit decode per frame");
+			Assert::AreEqual<uint64_t>(0, tap12->dupFrames);
+			Assert::AreEqual<size_t>(4, got.size());
+			Assert::AreEqual<uint64_t>(0, VpFrameAnalysis::DvTapRefusals(), L"a served frame is no refusal");
+			FrameAnalysis::Record record;
+			Assert::IsTrue(store.Read(4, FrameAnalysis::Use::Temporal, FrameAnalysis::kMeasuredGroups, record) == FrameAnalysis::ReadStatus::Ok);
+			Assert::AreEqual<uint32_t>(4095u << 4, record.luma.maxQ6, L"the measure read the 12-bit tap");
+			Assert::AreEqual<uint32_t>(0, record.luma.minQ6);
+		}
+
+		// A law refusal in the MEASURE path (alignment the 12-bit tap does not cover) keeps the 10-bit stats, counts one refusal per frame
+		// on the Ctrl+I counter, and the look-ahead's NoteDvTapRefusal feeds the same counter. No analysis.tap12 decode is counted.
+		TEST_METHOD(MeasureRefusalIsCountedAndStaysTenBit)
+		{
+			ComputeOnce::SetEnabled(true);
+			ComputeOnce::Global().Reset();
+			VpFrameAnalysis::ResetDvTapRefusals();
+			Frame frame = Make(Kind::PackedDvR210, 1);
+			frame.source.sharedLuma = std::make_shared<AnalysisLumaPlane>();
+			Assert::IsTrue(VpFrameAnalysis::DecodeSharedLuma(frame.source));
+			AnalysisLumaSource refused = frame.source;
+			refused.rgbBitAlignment = 3;
+			Assert::IsFalse(DvTunnelTapLaw::Supports(refused.encoding, refused.rgbBitAlignment, refused.width));
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			for (uint64_t seq = 1; seq <= 2; ++seq)
+			{
+				VpFrameAnalysis::Job job;
+				job.identity.seq = seq;
+				job.identity.picture = { 0, 0, refused.width, refused.height };
+				job.source = refused;
+				job.decodePlane = false;
+				job.measure = true;
+				VpFrameAnalysis::Process(store, job);
+			}
+			Assert::AreEqual<uint64_t>(2, VpFrameAnalysis::DvTapRefusals(), L"one counted refusal per frame (Ctrl+I line)");
+			FrameAnalysis::Record record;
+			Assert::IsTrue(store.Read(2, FrameAnalysis::Use::Temporal, FrameAnalysis::kMeasuredGroups, record) == FrameAnalysis::ReadStatus::Ok);
+			Assert::AreEqual<uint32_t>(0, record.luma.minQ6 % 64u, L"10-bit stats: integer axis codes");
+			Assert::AreEqual<uint32_t>(0, record.luma.maxQ6 % 64u);
+			Assert::IsTrue(record.luma.meanQ6 == record.luma.mean * 64.0);
+			bool anyTap12 = false;
+			for (const ComputeOnce::UnitRow& r : ComputeOnce::Global().Rows())
+				if (r.unit == "analysis.tap12") anyTap12 = true;
+			ComputeOnce::Global().Reset();
+			ComputeOnce::SetEnabled(false);
+			Assert::IsFalse(anyTap12, L"no 12-bit decode ran");
+			VpFrameAnalysis::NoteDvTapRefusal();   // the look-ahead walk's refusal
+			Assert::AreEqual<uint64_t>(3, VpFrameAnalysis::DvTapRefusals(), L"look-ahead refusals share the counter");
+			VpFrameAnalysis::ResetDvTapRefusals();
+		}
+
+		// An INVALID DV source is not a 12-bit tap refusal (nothing to tap); only a valid source the law refuses is counted.
+		TEST_METHOD(InvalidDvSourceIsNotCountedAsRefusal)
+		{
+			VpFrameAnalysis::ResetDvTapRefusals();
+			AnalysisLumaSource empty;
+			empty.format = AnalysisLumaFormat::PackedDolbyVision422;
+			SourceFrameView view;
+			bool refused = true;
+			VpFrameAnalysis::TapViewOf(empty, view, &refused);
+			Assert::IsFalse(refused);
+			Assert::AreEqual<uint64_t>(0, VpFrameAnalysis::DvTapRefusals());
+		}
+
+		// The pooled plane is bounded (12) but a full pool allocates an unpooled plane: a consumer holding many views cannot push
+		// frames into the 10-bit fallback (so no silent downgrade hides behind pool exhaustion).
+		TEST_METHOD(PoolExhaustionNeverForcesTenBitFallback)
+		{
+			VpFrameAnalysis::ReleasePlanePool();
+			VpFrameAnalysis::ResetDvTapRefusals();
+			Ramp ramp(false);
+			std::vector<SourceFrameView> held;
+			for (int i = 0; i < 40; ++i)
+			{
+				SourceFrameView view;
+				Assert::IsTrue(VpFrameAnalysis::SourceViewOf12(ramp.source, view), L"a view is always obtainable");
+				Assert::AreEqual<int>(4, view.msbShift);
+				held.push_back(view);
+			}
+			Assert::IsTrue(VpFrameAnalysis::PlanePoolSize() <= 12u);
+			Assert::AreEqual<uint64_t>(0, VpFrameAnalysis::DvTapRefusals());
+			held.clear();
+			VpFrameAnalysis::ReleasePlanePool();
+		}
 	};
 }

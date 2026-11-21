@@ -957,6 +957,9 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\DvTwelveBitTapTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\AnalysisWideningConsumerTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\DecodeOwnerIdentityTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

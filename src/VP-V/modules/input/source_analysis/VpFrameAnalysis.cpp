@@ -64,10 +64,41 @@ namespace VpFrameAnalysis
 				Pool().push_back(plane);
 			return plane;
 		}
+
+		// W21 FIN (rule 1): the frame's one 12-bit decode, kept for the frame's other reader (the source-resolution look-ahead walk
+		// reads a queued frame some frames after its arrival). Keyed by sequence AND the frame's bytes and layout, so a recycled buffer
+		// or a restarted sequence is never mistaken for the frame. Half the plane pool at most, so it cannot pin every pooled plane; a
+		// reader that misses reads its own samples (counted).
+		constexpr size_t kSharedViewDepth = kPlanePoolSize / 2;
+		struct SharedView12
+		{
+			uint64_t seq = 0;
+			const uint8_t* data = nullptr;
+			size_t rowBytes = 0;
+			int width = 0, height = 0, alignment = 0;
+			VideoFrameEncoding encoding{};
+			bool mapsToLimited = false;
+			VpSkeleton::SourceFrameView view;
+		};
+		std::mutex& SharedViewMutex() { static std::mutex mutex; return mutex; }
+		std::vector<SharedView12>& SharedViews()
+		{
+			static std::vector<SharedView12> views;
+			return views;
+		}
+		bool SameFrame(const SharedView12& e, uint64_t seq, const AnalysisLumaSource& s)
+		{
+			return e.seq == seq && e.data == s.data && e.rowBytes == s.rowBytes && e.width == s.width && e.height == s.height &&
+				e.alignment == s.rgbBitAlignment && e.encoding == s.encoding && e.mapsToLimited == s.MapsToLimitedDomain();
+		}
 	}
 
 	void ReleasePlanePool()
 	{
+		{
+			std::lock_guard<std::mutex> lock(SharedViewMutex());
+			SharedViews().clear();   // the kept 12-bit views hold pooled planes
+		}
 		std::lock_guard<std::mutex> lock(PoolMutex());
 		Pool().clear();
 	}
@@ -129,6 +160,23 @@ namespace VpFrameAnalysis
 		m_samples += static_cast<uint64_t>(width);
 	}
 
+	void Reducer::AddRowWide(int y, const uint16_t* codes, const VpSkeleton::SourceFrameView& lane)
+	{
+		if (!codes || y < m_picture.top || y >= m_picture.bottom || m_picture.Empty())
+			return;
+		m_wide = true;
+		const int width = m_picture.Width();
+		for (int i = 0; i < width; ++i)
+		{
+			const uint32_t q6 = lane.MsbAlign(codes[i]);   // the one MSB-align law: the lane value is the Q6 axis value
+			++m_histogram[Vpv::AnalysisDomain::HistBinFromQ6(q6)];
+			m_sumQ6 += q6;
+			if (q6 < m_minQ6) m_minQ6 = q6;
+			if (q6 > m_maxQ6) m_maxQ6 = q6;
+		}
+		m_samples += static_cast<uint64_t>(width);
+	}
+
 	Measured Reducer::Finish()
 	{
 		Measured out;
@@ -137,7 +185,9 @@ namespace VpFrameAnalysis
 		luma.samples = m_samples;
 		if (m_samples > 0)
 		{
-			luma.mean = static_cast<double>(m_sum) / static_cast<double>(m_samples);
+			luma.mean = m_wide ?
+				static_cast<double>(m_sumQ6) / static_cast<double>(1u << Vpv::AnalysisDomain::kAxisFractionBits) / static_cast<double>(m_samples) :
+				static_cast<double>(m_sum) / static_cast<double>(m_samples);
 			luma.apl = (luma.mean - FrameAnalysis::kStudioBlack) /
 				(FrameAnalysis::kStudioWhite - FrameAnalysis::kStudioBlack);
 			int first = 0, last = FrameAnalysis::kHistogramBins - 1;
@@ -148,6 +198,24 @@ namespace VpFrameAnalysis
 			luma.p1 = Percentile(m_histogram, m_samples, 0.01);
 			luma.p50 = Percentile(m_histogram, m_samples, 0.50);
 			luma.p99 = Percentile(m_histogram, m_samples, 0.99);
+			// Q6 companions: integer-code sources are exactly code * 64; the wide tap keeps its sub-code min / max / mean.
+			luma.meanQ6 = luma.mean * static_cast<double>(1u << Vpv::AnalysisDomain::kAxisFractionBits);
+			if (m_wide)
+			{
+				luma.minQ6 = m_minQ6;
+				luma.maxQ6 = m_maxQ6;
+				luma.p1Q6 = Vpv::AnalysisDomain::BinCenterQ6(luma.p1);
+				luma.p50Q6 = Vpv::AnalysisDomain::BinCenterQ6(luma.p50);
+				luma.p99Q6 = Vpv::AnalysisDomain::BinCenterQ6(luma.p99);
+			}
+			else
+			{
+				luma.minQ6 = static_cast<uint32_t>(luma.minimum) << Vpv::AnalysisDomain::kAxisFractionBits;
+				luma.maxQ6 = static_cast<uint32_t>(luma.maximum) << Vpv::AnalysisDomain::kAxisFractionBits;
+				luma.p1Q6 = static_cast<uint32_t>(luma.p1) << Vpv::AnalysisDomain::kAxisFractionBits;
+				luma.p50Q6 = static_cast<uint32_t>(luma.p50) << Vpv::AnalysisDomain::kAxisFractionBits;
+				luma.p99Q6 = static_cast<uint32_t>(luma.p99) << Vpv::AnalysisDomain::kAxisFractionBits;
+			}
 			uint64_t btb = 0, wtw = 0, nearBlack = 0, clipped = 0;
 			for (int code = 0; code < FrameAnalysis::kHistogramBins; ++code)
 			{
@@ -166,27 +234,98 @@ namespace VpFrameAnalysis
 		return out;
 	}
 
-	bool Reduce(const AnalysisLumaSource& source, const FrameAnalysis::Rect& pictureIn, Measured& out)
+	namespace
 	{
-		out = Measured{};
-		if (!source.IsValid()) return false;
-		FrameAnalysis::Rect picture = pictureIn;
-		if (picture.Empty()) picture = { 0, 0, source.width, source.height };
-		picture.left = (std::max)(0, picture.left);
-		picture.top = (std::max)(0, picture.top);
-		picture.right = (std::min)(source.width, picture.right);
-		picture.bottom = (std::min)(source.height, picture.bottom);
-		if (picture.Empty()) return false;
-		Reducer reducer(picture, StudioLumaMap(source));
-		LumaRowReader reader(source);
-		for (int y = picture.top; y < picture.bottom; ++y)
+		bool StudioMapIsIdentity(const std::array<uint16_t, 1024>& studio)
 		{
-			const uint16_t* row = reader.Row(y, picture.left, picture.Width());
-			if (!row) return false;
-			reducer.AddRow(y, row);
+			for (size_t code = 0; code < studio.size(); ++code)
+				if (studio[code] != static_cast<uint16_t>(code))
+					return false;
+			return true;
 		}
-		out = reducer.Finish();
-		return true;
+
+		// The full -> limited law at 12 bits (DvTunnelTapLaw::FullLumaToLimited12, the GPU's range table), built once.
+		const uint16_t* FullToLimited12()
+		{
+			struct Table
+			{
+				uint16_t codes[DvTunnelTapLaw::kLevels];
+				Table() { DvTunnelTapLaw::BuildRangeTable(codes); }
+			};
+			static const Table table;
+			return table.codes;
+		}
+
+		bool Is12BitViewOf(const VpSkeleton::SourceFrameView* view, const AnalysisLumaSource& source)
+		{
+			return view && view->luma && view->msbShift == DvTunnelTapLaw::kLaneShift &&
+				static_cast<int>(view->width) == source.width && static_cast<int>(view->height) == source.height;
+		}
+
+		// `decodeOwn` false (Process): no 12-bit view means the frame's one decode was refused (counted in SourceViewOf12), so no
+		// second attempt is made and the 10-bit read is the visible fallback. True (direct callers): decode here when not given.
+		bool ReduceWith(const AnalysisLumaSource& source, const FrameAnalysis::Rect& pictureIn, Measured& out,
+			const VpSkeleton::SourceFrameView* tap12, bool decodeOwn)
+		{
+			out = Measured{};
+			if (!source.IsValid()) return false;
+			FrameAnalysis::Rect picture = pictureIn;
+			if (picture.Empty()) picture = { 0, 0, source.width, source.height };
+			picture.left = (std::max)(0, picture.left);
+			picture.top = (std::max)(0, picture.top);
+			picture.right = (std::min)(source.width, picture.right);
+			picture.bottom = (std::min)(source.height, picture.bottom);
+			if (picture.Empty()) return false;
+			const std::array<uint16_t, 1024> studio = StudioLumaMap(source);
+			Reducer reducer(picture, studio);
+			// W21-2: a valid packed DV tunnel source reads its 12-bit tap (the lane's TapRow12 law; IsValid() implies it, DvTunnelTapLaw.h),
+			// so the percentiles / mean / min / max carry the sub-code part; the histogram stays on the 1024-code axis (HistBinFromQ6).
+			if (source.format == AnalysisLumaFormat::PackedDolbyVision422)
+			{
+				VpSkeleton::SourceFrameView own;
+				const VpSkeleton::SourceFrameView* view = Is12BitViewOf(tap12, source) ? tap12 : nullptr;
+				assert((!tap12 || view) && "Reduce: the shared 12-bit view is not this frame's");
+				if (!view && decodeOwn && SourceViewOf12(source, own))
+					view = &own;
+				if (view)
+				{
+					// The studio map at 12 bits: the tap is already limited for a frame flagged full range (TapRow12 converts it), so the
+					// map is the identity; a frame whose codes are full range by its range tag alone gets the same full -> limited law
+					// the 10-bit read applies, at 12 bits.
+					const uint16_t* map12 = StudioMapIsIdentity(studio) ? nullptr : FullToLimited12();
+					std::vector<uint16_t> mapped(map12 ? static_cast<size_t>(picture.Width()) : 0u);
+					for (int y = picture.top; y < picture.bottom; ++y)
+					{
+						const uint16_t* row = view->luma + static_cast<size_t>(y) * view->strideSamples + picture.left;
+						if (map12)
+						{
+							for (size_t i = 0; i < mapped.size(); ++i)
+								mapped[i] = map12[row[i] & (DvTunnelTapLaw::kLevels - 1)];
+							row = mapped.data();
+						}
+						reducer.AddRowWide(y, row, *view);
+					}
+					out = reducer.Finish();
+					return true;
+				}
+				// Only a refused 12-bit decode reaches here (counted in SourceViewOf12, Ctrl+I line): the 10-bit read below.
+			}
+			LumaRowReader reader(source);
+			for (int y = picture.top; y < picture.bottom; ++y)
+			{
+				const uint16_t* row = reader.Row(y, picture.left, picture.Width());
+				if (!row) return false;
+				reducer.AddRow(y, row);
+			}
+			out = reducer.Finish();
+			return true;
+		}
+	}
+
+	bool Reduce(const AnalysisLumaSource& source, const FrameAnalysis::Rect& picture, Measured& out,
+		const VpSkeleton::SourceFrameView* tap12)
+	{
+		return ReduceWith(source, picture, out, tap12, true);
 	}
 
 	bool SourceViewOf(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view)
@@ -263,6 +402,46 @@ namespace VpFrameAnalysis
 		view.msbShift = static_cast<uint8_t>(DvTunnelTapLaw::kLaneShift);   // MsbAlign(code12) is the Q6 axis value
 		view.keepAlive = std::shared_ptr<const void>(plane);
 		return true;
+	}
+
+	bool ShareViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view)
+	{
+		if (!SourceViewOf12(source, view))
+			return false;
+		if (seq == 0)
+			return true;   // no frame identity to key it by: not kept
+		SharedView12 kept;
+		kept.seq = seq;
+		kept.data = source.data;
+		kept.rowBytes = source.rowBytes;
+		kept.width = source.width;
+		kept.height = source.height;
+		kept.alignment = source.rgbBitAlignment;
+		kept.encoding = source.encoding;
+		kept.mapsToLimited = source.MapsToLimitedDomain();
+		kept.view = view;
+		std::lock_guard<std::mutex> lock(SharedViewMutex());
+		std::vector<SharedView12>& views = SharedViews();
+		if (!views.empty() && seq <= views.back().seq)
+			views.clear();   // the sequence did not advance (a new session or a repeated frame): start again
+		if (views.size() >= kSharedViewDepth)
+			views.erase(views.begin());
+		views.push_back(std::move(kept));
+		return true;
+	}
+
+	bool FindSharedViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view)
+	{
+		if (seq == 0 || source.format != AnalysisLumaFormat::PackedDolbyVision422)
+			return false;
+		std::lock_guard<std::mutex> lock(SharedViewMutex());
+		for (const SharedView12& kept : SharedViews())
+			if (SameFrame(kept, seq, source))
+			{
+				view = kept.view;
+				return true;
+			}
+		return false;
 	}
 
 	bool TapViewOf(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view, bool* refused)
@@ -365,23 +544,25 @@ namespace VpFrameAnalysis
 
 	void Process(FrameAnalysis::Store& store, const Job& job)
 	{
-		// Every compute-once note inside (SourceViewOf12's "analysis.tap12") is on this job's frame.
+		// Every compute-once note below and inside (SourceViewOf12's "analysis.tap12") is on this job's frame.
 		::ComputeOnce::FrameScope frame(static_cast<int64_t>(job.identity.seq), "frame-analysis", 0);
-		if (job.decodePlane)
-			DecodeSharedLuma(job.source);
-		if (job.owner && SourceFrameTap::Wants(job.owner))
-		{
-			// The frame's 12-bit decode for the tap (a valid packed DV source). IsValid() implies the 12-bit law, so the only refusal is an
-			// unallocatable plane, counted in SourceViewOf12; the 10-bit view is then its visible fallback.
-			VpSkeleton::SourceFrameView view12;
-			const bool have12 = job.source.format == AnalysisLumaFormat::PackedDolbyVision422 && job.source.IsValid() &&
-				SourceViewOf12(job.source, view12);
+		const bool dvSource = job.source.format == AnalysisLumaFormat::PackedDolbyVision422;
+		// The retained 10-bit DV decode (the shared plane Bill's readers use), its own counted unit; counted only when it really ran.
+		if (job.decodePlane && DecodeSharedLuma(job.source) && dvSource)
+			VPV_COMPUTE_ONCE_AT("analysis.luma10", job.identity.seq, Vpv::AnalysisDomain::kAxisBits);
+		const bool wantTap = job.owner && SourceFrameTap::Wants(job.owner);
+		VpSkeleton::SourceFrameView view12;
+		bool have12 = false;
+		// ONE 12-bit decode per frame (rule 1), shared by the tap, the measure and the look-ahead walk (ShareViewOf12). IsValid() implies
+		// the 12-bit law, so the only refusal is an unallocatable plane, counted in SourceViewOf12; the 10-bit read is then its fallback.
+		if (dvSource && job.source.IsValid() && (wantTap || job.measure))
+			have12 = ShareViewOf12(job.identity.seq, job.source, view12);
+		if (wantTap)
 			DeliverToTap(job, have12 ? &view12 : nullptr);
-		}
 		if (!job.measure)
 			return;
 		Measured measured;
-		if (Reduce(job.source, job.identity.picture, measured))
+		if (ReduceWith(job.source, job.identity.picture, measured, have12 ? &view12 : nullptr, false))
 			store.PublishMeasured(job.identity.seq, FrameAnalysis::kMeasuredGroups, measured.luma, measured.range);
 	}
 

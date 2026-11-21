@@ -161,6 +161,11 @@ namespace VpFrameAnalysis
 		Reducer(const FrameAnalysis::Rect& picture, const std::array<uint16_t, 1024>& studio);
 		// Row y's sampler codes for [picture.left, picture.right). Rows outside are ignored.
 		void AddRow(int y, const uint16_t* codes);
+		// W21-2: row y of a wide tap for [picture.left, picture.right): `codes` are raw tap codes of `lane`'s law, and the Q6 axis value
+		// of each is lane.MsbAlign(code) (the ONE MSB-align law, LaneInterfaces.h; 12-bit DV: msbShift 4). Already studio-range (Reduce
+		// maps a full-range-tagged frame first); the histogram bin is HistBinFromQ6, the sums keep the sub-code part. Do not mix with
+		// AddRow on one Reducer.
+		void AddRowWide(int y, const uint16_t* codes, const VpSkeleton::SourceFrameView& lane);
 		Measured Finish();
 
 	private:
@@ -169,10 +174,25 @@ namespace VpFrameAnalysis
 		std::array<uint32_t, FrameAnalysis::kHistogramBins> m_histogram{};
 		uint64_t m_samples = 0;
 		uint64_t m_sum = 0;
+		bool m_wide = false;
+		uint64_t m_sumQ6 = 0;
+		uint32_t m_minQ6 = 0xffffffffu, m_maxQ6 = 0;
 	};
 
 	// The whole picture in one call (tests, CPU fallback). False when the source cannot be read.
-	bool Reduce(const AnalysisLumaSource& source, const FrameAnalysis::Rect& picture, Measured& out);
+	// A valid packed DV source is read through its 12-bit tap. `tap12`: the frame's already-decoded 12-bit view (Process passes its one
+	// shared decode); null (or a view of another frame size / law) decodes it here through SourceViewOf12 (counted there). Only when that
+	// decode is refused (counted, Ctrl+I) does the DV frame fall back to the 10-bit read.
+	bool Reduce(const AnalysisLumaSource& source, const FrameAnalysis::Rect& picture, Measured& out,
+		const VpSkeleton::SourceFrameView* tap12 = nullptr);
+
+	// W21 FIN (rule 1): the frame's 12-bit decode SHARED with its other readers. ShareViewOf12 decodes through SourceViewOf12 (counted
+	// there) and keeps the view for FindSharedViewOf12, keyed by the source sequence and the frame's bytes / layout (seq 0: not kept).
+	// Bounded (half the plane pool); a sequence that does not advance starts the set again; ReleasePlanePool empties it.
+	// FindSharedViewOf12 (the source-resolution look-ahead walk, SourceAheadWalk.h) only reads: false when the frame's view is no longer
+	// held (the walk then reads its own samples and counts them as a private site).
+	bool ShareViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view);
+	bool FindSharedViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view);
 
 	// ---- The producer ----
 	struct Job
