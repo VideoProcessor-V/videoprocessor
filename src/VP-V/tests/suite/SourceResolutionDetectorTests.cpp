@@ -828,9 +828,7 @@ namespace VideoProcessorTest
 				return;
 			FILE* manifest = nullptr;
 			const bool manifestOpened = fopen_s(&manifest, (folder + "\\manifest.csv").c_str(), "r") == 0 && manifest;
-			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Corpus, "SourceResolutionDetectorTests::RealCodecReadings",
-				manifestOpened, "no manifest.csv in VP_TEST_CODEC_CORPUS"))
-				return;
+			Assert::IsTrue(manifestOpened, L"VP_TEST_CODEC_CORPUS is set but has no readable manifest.csv");
 			const int W = 3840, H = 2160, codeMax = 1023;
 			struct Tally { int frames = 0, height = 0, native = 0, wrong = 0; };
 			std::map<std::string, Tally> tallies;
