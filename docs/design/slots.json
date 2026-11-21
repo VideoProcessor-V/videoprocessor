@@ -315,6 +315,7 @@
           "source_resolution_latch_fixes": "off",
           "source_resolution_cut_fixes": "off",
           "source_resolution_frame_bound": "off",
+          "source_geometry_detect": "all",
           "active_picture_startup_hold": "off",
           "frame_analysis_store": "off"
         }

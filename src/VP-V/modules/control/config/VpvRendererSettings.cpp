@@ -1045,6 +1045,7 @@ namespace VpvRendererSettings
 		settings.sourceResolutionLatchFixes = false;       // key=source_resolution_latch_fixes
 		settings.sourceResolutionCutFixes = false;         // key=source_resolution_cut_fixes
 		settings.sourceResolutionFrameBound = false;       // key=source_resolution_frame_bound
+		settings.sourceGeometryDetect = "all";             // key=source_geometry_detect
 		settings.debandVp = "off";                         // key=deband_vp
 		settings.debandVpExclusive = false;                // key=deband_vp_exclusive
 		settings.debandGrain = true;                       // key=deband_grain
