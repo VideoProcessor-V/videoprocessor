@@ -559,6 +559,60 @@ namespace VideoProcessorTest
 			g.fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
 		}
+
+		TEST_METHOD(ResidualResizeThenRepeatHasNoPreviousResidual)
+		{
+			// GEM-W1B V3 MUST-2: a new output size recreates both residual textures. Neither the present that resizes nor a
+			// later repeat of the same source frame may read the "previous" residual (undefined memory); the next new frame
+			// reads the residual the resize present wrote. Both orders: resize on a repeat, then a second repeat (the third
+			// present of a 3:2 cadence); resize on a new frame, then a repeat.
+			Gpu g;
+			Assert::IsTrue(g.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			g.fixture.CaptureLog(&log);
+			const int w = 128, h = 64, bw = w / 16, bh = h / 16;
+			const int smallW = w / 2, smallH = h / 2, largeW = w * 2 / 3, largeH = h * 2 / 3;
+			pl_tex src = g.Picture(w, h);
+			pl_tex trust = g.Trust(1.0f);
+			pl_tex still = g.Field(bw, bh, [](int, int, float* c) { c[0] = 0.0f; c[1] = 0.0f; c[2] = 1.0f; c[3] = 0.0f; });
+			AdaptiveDownscale::Settings st;
+			st.ssimResidualStabilise = true;
+			st.residualGrainGuard = false;
+			st.grainMap = false;
+			st.grainSmoothMs = 0.0f;
+			AdaptiveDownscale::Module module;
+			auto present = [&](uint64_t seq, int ow, int oh)
+			{
+				module.SetFrame(st, seq, 1.0f / 24.0f);
+				AdaptiveDownscale::Motion m;
+				m.field = still;
+				m.frameTrust = trust;
+				m.minTrustedShare = 0.25f;
+				m.sourceCrop = { 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
+				module.SetMotion(m);
+				g.Render(module, src, ow, oh, false);
+				Assert::IsTrue(module.Active(), L"the blend did not run");
+				return module.StabilisedFrames();
+			};
+			Assert::AreEqual(0ull, present(1, smallW, smallH), L"first frame: nothing previous");
+			Assert::AreEqual(1ull, present(2, smallW, smallH), L"consecutive frame: held");
+			Assert::AreEqual(2ull, present(2, smallW, smallH), L"repeat at the same size: held against the same previous");
+			Assert::AreEqual(3ull, present(3, smallW, smallH), L"consecutive frame: held");
+			// Order 1: the resize lands on a repeat, then a second repeat.
+			Assert::AreEqual(3ull, present(3, largeW, largeH), L"resize on a repeat: the recreated previous is not read");
+			Assert::AreEqual(3ull, present(3, largeW, largeH), L"second repeat after the resize: still nothing previous");
+			Assert::AreEqual(4ull, present(4, largeW, largeH), L"next frame: the residual the resize present wrote is read");
+			// Order 2: the resize lands on a new frame, then a repeat.
+			Assert::AreEqual(4ull, present(5, smallW, smallH), L"resize on a new frame: nothing previous");
+			Assert::AreEqual(4ull, present(5, smallW, smallH), L"repeat after the resize: nothing previous");
+			Assert::AreEqual(5ull, present(6, smallW, smallH), L"next frame: held again");
+			Assert::AreEqual(6ull, present(6, smallW, smallH), L"repeat at the same size: held");
+			Assert::IsTrue(module.Failures() == 0, L"GPU failures");
+			module.Release();
+			for (pl_tex* tex : { &src, &trust, &still }) pl_tex_destroy(g.gpu, tex);
+			g.fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
 	};
 
 	// FIX-X5-CUT-P4 / C5 (CPU; audit x5dup MUST 1, WAIVER-X5DUP-SCENE-READ): the grain term's cut event is the skeleton's published

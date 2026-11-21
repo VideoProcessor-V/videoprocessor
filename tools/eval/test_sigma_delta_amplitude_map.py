@@ -59,9 +59,14 @@ class AmplitudeMap(unittest.TestCase):
 
     def test_quantise_step_array_bound(self):
         lim = s.limits(8, False)
-        k, r = s.quantise_step(np.array([0.0, 0.0]), np.zeros(2), np.zeros(2), lim, np.array([0.0, 0.5]))
+        # A fractional level below the lowest kept code (x = 0.0 is an exact code: since GEM-W1B V1 sigma-delta MUST-1
+        # it carries no residual, asserted below), so the per-element bound clamps the residual.
+        k, r = s.quantise_step(np.array([0.2, 0.2]), np.full(2, -0.5), np.zeros(2), lim, np.array([0.0, 0.5]))
         self.assertEqual(k.tolist(), [1.0, 1.0])
         self.assertEqual(r.tolist(), [-0.5, -1.0])
+        k, r = s.quantise_step(np.array([0.0, 0.0]), np.zeros(2), np.zeros(2), lim, np.array([0.0, 0.5]))
+        self.assertEqual(k.tolist(), [1.0, 1.0])
+        self.assertEqual(r.tolist(), [0.0, 0.0])
 
 
 if __name__ == "__main__":

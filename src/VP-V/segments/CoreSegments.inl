@@ -770,7 +770,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     // 8b: both branches in one light domain (AdaptiveDownscaleStage::ApplyLight; WP-13).
     adaptiveStage.ApplyLight(frameParams, { activeSettings.downscaleLight == "gamma",
         activeSettings.upscaleLight == "gamma", renderImage.crop, target.crop,
-        pipelineSlots.Runs(PipelineSlots::Id::ScalingOutput) });
+        pipelineSlots.Runs(PipelineSlots::Id::ScalingOutput), rebaseFactor, rebaseFactorX });
     OrderFrameSlotHooks();   // the registry's order for slot hooks (unchanged for the designed order)
     frameParams.hooks = frameHooks.empty() ? nullptr : frameHooks.data();
     frameParams.num_hooks = static_cast<int>(frameHooks.size());

@@ -883,7 +883,7 @@ namespace HalfLumaUnitTestsNs
 		// U3 one copy (owner 2026-11-15, 102b U3-BOX4-VARIANT): the 4x4 variant takes over the three private 4x4 copies
 		// (output-domain search LUMAQ tile + LUMAC, matcher PYRAMID_BODY). Each emitted text must be byte-identical to the
 		// body it replaced (frozen here from e95832a0c), so the compiled shaders are unchanged. The sigma-delta passes are
-		// also pinned whole by OutputDomainSearchTests' b5ae6eda5 golden.
+		// also pinned whole by OutputDomainSearchTests' b5ae6eda5 + GEM-W1B MUST-1 golden.
 		TEST_METHOD(Box4x4VariantIsByteIdenticalToTheFormerPrivateCopies)
 		{
 			using namespace VpUnit::HalfLuma;

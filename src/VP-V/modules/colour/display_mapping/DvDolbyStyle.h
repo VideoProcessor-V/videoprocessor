@@ -274,18 +274,39 @@ namespace DvDolbyStyle
 			const double v[3] = { I2, ct * k, cp * k };
 			FromIctcp(v, is.fromLms, out);
 		}
-		for (int iter = 0; iter < 12; ++iter)
+		// GEM-W1B V1 colour-dv-hdr MUST-1 / MUST-2: bisection on the chroma scale k in [0, gain] (10 steps), keeping the
+		// last in-gamut result; the grey of the same intensity is the in-gamut floor. Halving dropped chroma 50% at the
+		// first step. A non-finite round trip counts as out of gamut (negated comparison). Mirrored in DV trims.glsl.
+		// Rounding of the round trip is not a gamut excursion: a relative tolerance.
+		const double tolerance = -kBelowTolerance * (pos[0] + pos[1] + pos[2]);
+		auto outOfGamut = [tolerance](const double* o)
 		{
-			// Rounding of the round trip is not a gamut excursion: a relative tolerance.
-			const double tolerance = -kBelowTolerance * (pos[0] + pos[1] + pos[2]);
 			bool below = false;
 			for (int c = 0; c < 3; ++c)
-				below = below || out[c] < tolerance;
-			if (!below)
-				break;
-			k *= 0.5;   // halve the chroma toward the grey of the same intensity; the grey last
-			const double v[3] = { I2, iter == 11 ? 0.0 : ct * k, iter == 11 ? 0.0 : cp * k };
-			FromIctcp(v, is.fromLms, out);
+				below = below || !(o[c] >= tolerance);
+			return below;
+		};
+		if (outOfGamut(out))
+		{
+			double lo = 0.0, hi = k, best[3], cand[3];
+			{
+				const double g[3] = { I2, 0.0, 0.0 };
+				FromIctcp(g, is.fromLms, best);
+			}
+			for (int iter = 0; iter < 10; ++iter)
+			{
+				const double mid = 0.5 * (lo + hi);
+				const double v[3] = { I2, ct * mid, cp * mid };
+				FromIctcp(v, is.fromLms, cand);
+				if (!outOfGamut(cand))
+				{
+					lo = mid;
+					for (int c = 0; c < 3; ++c) best[c] = cand[c];
+				}
+				else
+					hi = mid;
+			}
+			for (int c = 0; c < 3; ++c) out[c] = best[c];
 		}
 		for (int c = 0; c < 3; ++c)
 			rgb[c] = DolbyVisionTrims::FromNits((out[c] > 0.0 ? out[c] : 0.0) + carry[c], s);   // in-range part >= black

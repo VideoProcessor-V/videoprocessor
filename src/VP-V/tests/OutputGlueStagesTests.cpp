@@ -317,6 +317,19 @@ namespace VideoProcessorTest
 			Assert::IsTrue(p.sigmoid_params == pl_render_default_params.sigmoid_params);
 		}
 
+		TEST_METHOD(DownscaleLightUsesTheRebasedSampledSize)   // GEM-W1B V3 MUST-1
+		{
+			AdaptiveFixture x;
+			// 4K -> 1440p with a 0.5 re-base samples 1080 rows: an upscale, so linear light stays.
+			pl_render_params p = pl_render_default_params;
+			x.stage.ApplyLight(p, { true, false, Rect(0, 0, 3840, 2160), Rect(0, 0, 2560, 1440), true, 0.5, 0.5 });
+			Assert::IsFalse(p.disable_linear_scaling);
+			// Factor 1: the same frame is a downscale: gamma.
+			p = pl_render_default_params;
+			x.stage.ApplyLight(p, { true, false, Rect(0, 0, 3840, 2160), Rect(0, 0, 2560, 1440), true, 1.0, 1.0 });
+			Assert::IsTrue(p.disable_linear_scaling);
+		}
+
 		// ---- motion.consumers: the de-judder rendered-picture cache ----------------------------
 
 		TEST_METHOD(DejudderCacheArmsOnlyWhenExtrasMayFollow)

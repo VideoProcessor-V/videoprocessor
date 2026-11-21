@@ -181,7 +181,7 @@ namespace AdaptiveDownscaleStage
 			module.SetUpscale(AdaptiveDownscale::Upscale());
 			if (host.ssimInChain())
 			{
-				module.SetFrame(frame.ssimBitrateAware ? adaptiveNow : adaptive, frame.sourceSequence,
+				module.SetFrame(adaptiveNow, frame.sourceSequence,   // GEM-W1B V3 MUST-3: float32Picture + coding-noise guard survive ssim_bitrate_aware off
 					FramePeriod(frame, host));
 				// SSIM's `//!WHEN NATIVE_CROPPED.h POSTKERNEL.h >`: the source crop against the
 				// destination, not the (prescaled) PRE_KERNEL picture (audit stage8-rs232 item 3).
@@ -288,6 +288,10 @@ namespace AdaptiveDownscaleStage
 		// FIX-X5-CUT-P4 / C5: never a silent downgrade. No scene group for this frame: no cut verdict this frame.
 		if (!module.CutAvailable())
 			lines.push_back("Adaptive downscale: no cut verdict this frame (" + module.CutCause() + ")");
+		// GEM-W1B V3 MUST-6: fbo_float32 asked, the GPU gave 16-bit float for the faithful picture: shown, never silent.
+		// Gated on `requested`: the flag is reset only when the module measures again, so a switch to off must not leave it on screen.
+		if (requested && module.HalfFloatPictureFallback())
+			lines.push_back("Adaptive scaler: 16-bit float picture (32-bit float not available)");
 		// The APL (diagnostic mean luma) was not read from the P4 record: shown, not a cut fault.
 		if (!module.AplCause().empty())
 			lines.push_back("Adaptive downscale: APL not read (" + module.AplCause() + ")");
@@ -302,7 +306,15 @@ namespace AdaptiveDownscaleStage
 		// Stage 8-1: a downscaling frame in gamma light when chosen (the de-judder extras reuse
 		// these parameters).
 		const bool downscaleGamma = light.slotRuns && light.downscaleGamma;   // slot off: linear (libplacebo's)
-		const bool gamma = downscaleGamma && DownscaleLight::Downscales(light.sourceCrop, light.targetCrop);
+		// GEM-W1B V3 MUST-1: the size libplacebo will sample is the crop x the re-base factor
+		// (as Register measures it), so a re-based frame that upscales is not taken as a downscale.
+		pl_rect2df sampled = light.sourceCrop;
+		{
+			const float fx = static_cast<float>(light.rebaseFactorX), fy = static_cast<float>(light.rebaseFactor);
+			sampled.x1 = sampled.x0 + (light.sourceCrop.x1 - light.sourceCrop.x0) * fx;
+			sampled.y1 = sampled.y0 + (light.sourceCrop.y1 - light.sourceCrop.y0) * fy;
+		}
+		const bool gamma = downscaleGamma && DownscaleLight::Downscales(sampled, light.targetCrop);
 		if (gamma)
 			params.disable_linear_scaling = true;
 		// 8b: both branches in one light domain: linear (no sigmoid) or gamma.

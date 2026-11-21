@@ -3619,8 +3619,8 @@ namespace Tests
 		{
 			const HarnessScope harnessScope;
 			// W2-C8 step 1, GPU form: dither_vectors own (the moved output-domain search) renders the same codes from the split
-			// shader (this build's shaders folder: `// VP_INCLUDE motion.output_domain_search`) and from the b5ae6eda5 file (a
-			// folder VP_C8_ORIG_SHADER_DIR holding shaders\ with the unsplit file). With the sigma-delta on the capture is
+			// shader (this build's shaders folder: `// VP_INCLUDE motion.output_domain_search`) and from the b5ae6eda5 file + the
+			// GEM-W1B MUST-1 quantiser hunk (a folder VP_C8_ORIG_SHADER_DIR holding shaders\ with that unsplit file). With the sigma-delta on the capture is
 			// temporal, so the two folders are compared at the same captured source frame (see the loop: FAIL, never REPORT,
 			// when no shared frame is reached or one folder is not repeatable at a fixed frame).
 			if (!RequireHardwareOrSkip("C8OwnSearchSplitShaderMatchesTheOriginalFile")) return;
@@ -3636,8 +3636,11 @@ namespace Tests
 			const ScratchCaptureFolder shots(L"vp-c8-own");
 			// Lead 19 fix-D: the comparison is void unless both folders really load their sigma-delta. The renderer reads
 			// <VP_TEST_SHADER_DIR>\shaders\<glsl_file> (MadVRShaderLoader::ResolveShaderFilename), so VP_C8_ORIG_SHADER_DIR must
-			// name a folder HOLDING shaders\Temporal sigma-delta.glsl, the b5ae6eda5 file (LF text 46000 bytes, FNV-1a 64
-			// d631910eb881f914, the OutputDomainSearchTests pin). A copy beside shaders\ is never read: the original run then
+			// name a folder HOLDING shaders\Temporal sigma-delta.glsl, the b5ae6eda5 file with the GEM-W1B V1 sigma-delta MUST-1
+			// quantiser hunk applied (9db725b55; LF text 46429 bytes, FNV-1a 64 0d641f7c4ab28cb3, the OutputDomainSearchTests pin;
+			// re-pinned under the A20-GEM rule-28 WAIVER, the plain b5ae6eda5 file was 46000 / d631910eb881f914). Build it with
+			// `git show b5ae6eda5:"shaders/Temporal sigma-delta.glsl"` + `git diff dbbef8c07 9db725b55 -- "shaders/Temporal
+			// sigma-delta.glsl"`. A copy beside shaders\ is never read: the original run then
 			// renders with no sigma-delta ("Custom hooks: ... not loaded: cannot open shader file") and differs from the split.
 			{
 				std::ifstream originalFile(original + "\\shaders\\Temporal sigma-delta.glsl", std::ios::binary);
@@ -3654,8 +3657,8 @@ namespace Tests
 					originalFnv ^= ch;
 					originalFnv *= 0x100000001b3ull;
 				}
-				Assert::IsTrue(originalLf.size() == 46000 && originalFnv == 0xd631910eb881f914ull,
-					WideOf("VP_C8_ORIG_SHADER_DIR=" + original + ": shaders\\Temporal sigma-delta.glsl is not the b5ae6eda5 file").c_str());
+				Assert::IsTrue(originalLf.size() == 46429 && originalFnv == 0x0d641f7c4ab28cb3ull,
+					WideOf("VP_C8_ORIG_SHADER_DIR=" + original + ": shaders\\Temporal sigma-delta.glsl is not the b5ae6eda5 + MUST-1 file").c_str());
 				const std::string splitFolder = here.substr(0, here.size() - 1);
 				for (const std::string& folder : { splitFolder, original })
 				{

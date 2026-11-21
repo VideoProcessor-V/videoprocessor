@@ -639,6 +639,97 @@ namespace VideoProcessorTest
 			Assert::AreEqual(255.0, SigmaDeltaDomain::QuantiseStep(255.0, rf, 0.0, full, 0.15));
 		}
 
+		// GEM-W1B V1 sigma-delta MUST-1 (CPU model, audit-W1B SHOULD-2): an exact code with a carried residual is emitted
+		// unchanged and carries nothing on, so black 16 stays 16 and white 235 stays 235 (the old step dithered them into
+		// 15/17 and 234/236). Residual preloaded as a carry from a neighbouring fractional level would leave it.
+		TEST_METHOD(SigmaDeltaExactCodeTakesNoCarriedResidual)
+		{
+			const auto limits = SigmaDeltaDomain::Limits(8, false);
+			for (const double x : { 16.0, 235.0 })
+				for (const double amplitude : { 0.15, 0.5 })
+					for (const double preload : { 0.3, -0.7 })
+					{
+						double r = preload;
+						for (int frame = 0; frame < 64; ++frame)
+						{
+							const double d = (static_cast<double>(SigmaDeltaDomain::Ign(37.0f, 11.0f, frame)) - 0.5) * 2.0 * amplitude;
+							const double k = SigmaDeltaDomain::QuantiseStep(x, r, d, limits, amplitude);
+							Assert::AreEqual(x, k, 0.0, L"an exact code is never moved by a carried residual");
+							Assert::AreEqual(0.0, r, 0.0, L"an exact code carries no residual on");
+							if (frame % 2 == 1) r = preload;   // a fresh carry arrives again (a neighbour's residual)
+						}
+					}
+			// A fractional level still carries (the guard is for exact codes only).
+			double r = 0.3;
+			const double k = SigmaDeltaDomain::QuantiseStep(16.4, r, 0.0, limits, 0.15);
+			Assert::AreEqual(17.0, k, 0.0);
+			Assert::AreEqual(16.4 + 0.3 - 17.0, r, 1e-12);
+		}
+
+		// GEM-W1B V1 sigma-delta MUST-1 (WARP, audit-W1B SHOULD-2): the shader itself. A flat field at 16.4 builds a carried
+		// residual, then the level steps to exactly 16 (inside the motion threshold, so the gate carries); with noise 0.15
+		// every code of every later refresh is 16 (the old shader gave 15/17). Plain gate and motion compensation.
+		TEST_METHOD(SigmaDeltaBlackSixteenStaysSixteenAfterACarry)
+		{
+			for (const bool motionCompensation : { false, true })
+			{
+				TargetLutGpuFixture fixture;
+				Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+				CustomHookChain::Chain chain({
+					[](const std::string& file, std::string& source, std::string& reason)
+					{
+						source = LoadBundledShader(file.c_str());
+						reason = "bundled shader not found";
+						return !source.empty();
+					},
+					[&fixture](const std::string& source) -> const pl_hook*
+					{
+						return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+					},
+					[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+				ConfiguredShaderRule sigma;
+				sigma.name = "sigma_delta";
+				sigma.filename = "Temporal sigma-delta.glsl";
+				sigma.stageOrder = 90;
+				sigma.parameters = { { "enabled", "1" }, { "levels_full", "1" }, { "swapchain_bits", "8" },
+					{ "noise_amplitude", "0.15" }, { "motion_threshold", "1" },
+					{ "motion_compensation", motionCompensation ? "1" : "0" } };
+				chain.Configure({ sigma });
+				const int width = 128, height = 64;
+				CustomHookChain::TemplateValues values;
+				values.outputWidth = width;
+				values.outputHeight = height;
+				values.sourceWidth = width;
+				values.sourceHeight = height;
+				values.refreshHz = 60.0;
+				values.sourceFps = 60.0;
+				std::string log;
+				fixture.CaptureLog(&log);
+				chain.Ensure(values);
+				fixture.CaptureLog(nullptr);
+				std::vector<const pl_hook*> hooks;
+				chain.Collect(false, hooks);
+				Assert::AreEqual(size_t{ 1 }, hooks.size(), (L"libplacebo rejected the sigma-delta shader: " +
+					std::wstring(log.begin(), log.end())).c_str());
+				AssertCleanLibplaceboLog(log);
+				const int build = 4, frames = build + 16;
+				fixture.CaptureLog(&log);
+				const std::vector<std::vector<int>> out = fixture.RenderSequence(hooks[0], width, height, frames,
+					[build](int frame, int, int) { return frame < build ? 16.4 : 16.0; });
+				fixture.CaptureLog(nullptr);
+				AssertCleanLibplaceboLog(log);
+				bool carried = false;
+				for (int f = 0; f < build; ++f)
+					for (int v : out[f]) carried = carried || v == 17;
+				Assert::IsTrue(carried, L"16.4 must reach 17 on some refresh (a residual was built and carried)");
+				for (int f = build; f < frames; ++f)
+					for (size_t i = 0; i < out[f].size(); ++i)
+						if (out[f][i] != 16)
+							Assert::Fail((L"black 16 moved to " + std::to_wstring(out[f][i]) + L" at refresh " + std::to_wstring(f) +
+								L" pixel " + std::to_wstring(i) + (motionCompensation ? L" (motion compensation)" : L" (plain gate)")).c_str());
+			}
+		}
+
 		// Gate verify 2026-10-17: the sigma-delta on the GPU is unbiased. Flat patches at every
 		// 10-bit level and at off-grid levels (every 1/32 code around chosen codes, exactly
 		// representable in the rgba16f OUTPUT texture) go through the shader for 192 static
@@ -1650,6 +1741,21 @@ namespace VideoProcessorTest
 	{
 	public:
 		// The text of dn_extra in the DitherNeedGlsl.h string (run by the probe test below) is the text in the shader.
+		// GEM-W1B V1 sigma-delta MUST-1: the carried residual neither enters nor leaves an exact code (text guard: the
+		// quantiser must see r = 0 there, and write r_next = 0, so black 16 cannot dither into 15/17).
+		TEST_METHOD(ExactCodesAreNeverMovedByTheCarryTextInTheShader)
+		{
+			const std::string shader = DwLf(LoadBundledShader("Temporal sigma-delta.glsl"));
+			Assert::IsFalse(shader.empty(), L"bundled shader not found");
+			const size_t mask = shader.find("vec3 exact_code = vec3(equal(x, floor(x + 0.5)));");
+			const size_t cleared = shader.find("r = mix(r, vec3(0.0), exact_code);");
+			const size_t quantise = shader.find("k = clamp(floor(x + r + d + 0.5), code_min, code_max);");
+			const size_t next = shader.find("r_next = mix(r_next, vec3(0.0), exact_code);");
+			Assert::IsTrue(mask != std::string::npos && cleared != std::string::npos && quantise != std::string::npos &&
+				next != std::string::npos, L"the exact-code carry guard is missing");
+			Assert::IsTrue(mask < cleared && cleared < quantise && quantise < next, L"the guard must clear r before the quantiser and r_next after it");
+		}
+
 		TEST_METHOD(DitherNeedWarpAccessorTextIsInTheShader)
 		{
 			const std::string shader = DwLf(LoadBundledShader("Temporal sigma-delta.glsl"));
