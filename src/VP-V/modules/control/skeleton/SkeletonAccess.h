@@ -66,7 +66,7 @@ namespace Vpv
 
 		// The same answer in the store's scene-group form (FrameAnalysis::Scene), for consumers whose rule is written on it. `origin`
 		// is not carried by the answer and stays None. False = not answered; `why` (optional) gets the visible cause.
-		inline bool SceneGroupOf(const void* host, uint64_t seq, FrameAnalysis::Scene& out, const char** why = nullptr)
+		inline bool SceneGroupOf(const void* host, uint64_t seq, ::FrameAnalysis::Scene& out, const char** why = nullptr)   // global ::FrameAnalysis (the store), not Vpv::FrameAnalysis (P1GpuFill.h)
 		{
 			IExternalDemand* d = host != nullptr ? Demand() : nullptr;
 			if (d == nullptr)
@@ -82,7 +82,7 @@ namespace Vpv
 					*why = "the skeleton could not classify the frame (no sealed pair of P4 records: analysis lane off, unknown renderer or not primed yet)";
 				return false;
 			}
-			out = FrameAnalysis::Scene();
+			out = ::FrameAnalysis::Scene();
 			out.cut = a.cut;
 			out.fade = a.fade;
 			out.cutLate = a.cutLate;
