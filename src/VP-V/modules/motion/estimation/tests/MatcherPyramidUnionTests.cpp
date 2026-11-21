@@ -1,15 +1,21 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// GF-P1 MUST-1 (union proof): the matcher pyramid (kP1HalfLuma, Gpu, MatcherPyramidKey(L)) is served THROUGH THE SKELETON MODULE,
-// not through a hand-built memo. The module is the production SkeletonModule (its memo, its seal at Begin, its window derived at
-// Begin, its owner GPU device attached at GpuCreated, its ledger grant), with the production P1 owner fill and the real P13 source
-// plane owner registered module-wide as the bootstrap does. Over 10 render frames N the matcher's reads are the render pair B =
-// N + 1 (levels 1..6: the outer matcher's 1 / 3 / 5 and the lowRes inner's 2 / 4 / 6) and the EstimateAhead pair C = N + 2 (1 / 3 / 5),
-// with A = N the product kept from the frame before. Every one is served (an Ok Acquire), and the matcher's visible fallback
-// (row product.motion_warp) has no reason to appear: 0 Unavailable on the P1 key and no Fallbacks line for it. Two legs: the LED raise
-// off (no lane: the memo only) and on (the LED drive's raising demand turns the analysis lane on without a lane GPU dispatcher; the
-// memo's owner device must still serve the non-view GPU fill).
+// GF-P1 MUST-1 (union proof): the matcher pyramid (kP1HalfLuma, Gpu, MatcherPyramidKey(L)) is served THROUGH THE SKELETON MODULE to
+// the REAL matcher. The hub holds the production SkeletonModule (its memo, its seal at Begin, its window derived at Begin, its
+// owner GPU device attached at GpuCreated, its ledger grant) and the production P1 module (RegisterP1GpuModule), which registers the
+// (kP1HalfLuma, Gpu) owner fill itself from the matcher's offers (VectorEngine::OfferMatcherPlanes -> NoteP1GpuSourceLuma, generation
+// -1, as in production), so the gating of the declared structural ahead (1a72644bb) is in the path. The real matcher
+// (Dejudder::MotionWarp, the engine's pyramid seam) then runs 10 render frames N:
+//   - the render estimate (A = N, B = N + 1; levels 1 / 3 / 5): every estimate after the first pair reads the product
+//     (PyramidFromProduct) and its fallback reason is EMPTY, which is exactly what releases the row product.motion_warp
+//     (VectorEngineEstimate.inl: pyramidWhy.empty() -> FallbackCatalog::Released("product.motion_warp"));
+//   - the EstimateAhead pair (B = N + 1, C = N + 2, both offered): every estimate reads the product with an empty reason;
+//   - then the pyramid levels themselves: B levels 1..6 (the outer matcher's 1 / 3 / 5 and the lowRes inner's 2 / 4 / 6), C 1 / 3 / 5
+//     and A 1 / 3 / 5 are Acquired from the memo: served, 0 refusals for budget / grant / dispatcher / window, and no no-dispatcher
+//     line on the skeleton's Fallbacks status.
+// Two legs: the LED raise off (no lane: the memo only) and on (the LED drive's raising demand turns the analysis lane on without a
+// lane GPU dispatcher; the memo's owner device must still serve the non-view GPU fill).
 //
 // It goes green ONLY with P2b: the SkeletonModule's attach line (the memo keeps GPU presence while a lane is bound, MUST-3) and the
 // ledger grant that covers the declared ahead (MUST-4). FINAL UNION CHECK: this test green, plus the live check that
@@ -25,6 +31,8 @@
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/core/VariantShape.h>
+#include <VP-V/core/hub/CurrentFrame.h>
+#include <VP-V/core/hub/ExtensionHub.h>
 
 #include <atomic>
 #include <memory>
@@ -40,8 +48,8 @@ namespace VideoProcessorTest
 		namespace Tap = VpFrameAnalysis::SourceFrameTap;
 		using VpSkeleton::AcquireForm;
 
-		constexpr int kSrcW = 256;   // the GPU source luma the matcher reads
-		constexpr int kSrcH = 144;
+		constexpr int kSrcW = 512;   // the GPU source luma the matcher reads (as MatcherPyramidGpuIdentityTests' normal arm)
+		constexpr int kSrcH = 256;
 		constexpr uint32_t kLaneW = 64;   // the lane's own CPU source frames (the LED look-ahead reads P4 of these)
 		constexpr uint32_t kLaneH = 48;
 		constexpr int kFrames = 10;
@@ -53,12 +61,22 @@ namespace VideoProcessorTest
 			Vpv::Resync::HostBinding binding{ this, resync, resyncDrive };
 		};
 
-		// One renderer driven through the resync extension (the seal) and the production skeleton module.
+		// One renderer driven through the resync extension (the seal) and the production skeleton module, which the HUB owns (the
+		// engine and the P1 module find the skeleton through the hub's query slot, as in production).
 		struct ModuleRig
 		{
-			ModuleRig()
-				: sk([](ConfigFile&) { return false; }, [this]() { return base.load() + calls.fetch_add(1); })
-				, store(size_t(64) * kLaneW * kLaneH)
+			static Vpv::Skeleton::SkeletonModule& Install(ModuleRig* self)
+			{
+				Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+				std::unique_ptr<Vpv::Skeleton::SkeletonModule> module(new Vpv::Skeleton::SkeletonModule(
+					[](ConfigFile&) { return false; }, [self]() { return self->base.load() + self->calls.fetch_add(1); }));
+				Vpv::Skeleton::SkeletonModule& ref = *module;
+				Vpv::Hub::ExtensionHub::Instance().AddModule(std::move(module));
+				Vpv::FrameAnalysis::RegisterP1GpuModule();   // after the skeleton, as HubBootstrap does
+				return ref;
+			}
+
+			ModuleRig() : sk(Install(this)), store(size_t(64) * kLaneW * kLaneH)
 			{
 				uint32_t x = 777u;
 				for (size_t i = 0; i < store.size(); ++i)
@@ -71,13 +89,15 @@ namespace VideoProcessorTest
 			{
 				Life(RE::Lifecycle::GpuReleased);
 				Vpv::Capture::SourcePlanes::Forget(Host());
+				Vpv::Hub::ForgetCurrentFrame(Host());
+				Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();   // destroys the skeleton module `sk` refers to
 			}
 			ModuleRig(const ModuleRig&) = delete;
 			ModuleRig& operator=(const ModuleRig&) = delete;
 
 			std::atomic<uint64_t> base{ 1000 };
 			std::atomic<uint64_t> calls{ 0 };
-			Vpv::Skeleton::SkeletonModule sk;
+			Vpv::Skeleton::SkeletonModule& sk;
 			Vpv::Resync::ResyncExtension resync;
 			FakeRenderer r;
 			std::vector<uint16_t> store;
@@ -171,30 +191,26 @@ namespace VideoProcessorTest
 				~DispatchHolder() { pl_dispatch_destroy(&d); }
 			} dispatch{ pl_dispatch_create(gpu->log, gpu) };
 
-			// The source frames (real textures; the P13 offers of the matcher's uploads): frames 1 .. kFrames + 2.
+			// The source frames (real textures): frame i has sequence i + 1; render frame N reads A = frames[N - 1], B = frames[N] and
+			// the ahead pair's C = frames[N + 1].
 			std::vector<std::unique_ptr<DejudderGpuPlanes>> frames;
-			for (int i = 0; i <= kFrames + 2; ++i)
+			for (int i = 0; i <= kFrames + 1; ++i)
 			{
 				const int dx = 12 * i, dy = 6 * i;
 				const DejudderFrame f = MakeDejudderFrame(kSrcW, kSrcH, [dx, dy](int x, int y) { return DejudderTexture(x - dx, y - dy); },
 					[dx, dy](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y - dy, 7 + c); });
 				frames.emplace_back(new DejudderGpuPlanes());
 				UploadDejudderFrame(gpu, f, *frames.back());
-				frames.back()->planes.sequence = uint64_t(i);
-				frames.back()->planes.fullRange = false;
+				frames.back()->planes.sequence = uint64_t(i + 1);
+				frames.back()->planes.fullRange = false;   // YUV limited
 			}
 
 			ModuleRig rig;
-			// The bootstrap's module-wide registrations: the P13 source-plane owner and the production P1 GPU owner fill (the structural
-			// ahead of 2 declared, as the P1 module does while the matcher is active).
-			VpSkeleton::Dims luma;
-			luma.width = uint32_t(kSrcW);
-			luma.height = uint32_t(kSrcH);
 			Vpv::Skeleton::IExternalDemand* demand = rig.Demand();
+			// The bootstrap's module-wide P13 source-plane owner. The P1 owner fill is NOT registered here: the production P1 module
+			// registers it from the matcher's offers (declared structural ahead while the matcher is active).
 			Assert::IsTrue(demand->RegisterOwnerFill(VpSkeleton::kP13SourceRing, AcquireForm::Gpu, Vpv::Capture::SourcePlanes::kUnit,
 				Vpv::Capture::SourcePlanes::MakeOwnerFill()) == VpSkeleton::SkeletonMemo::Registration::Registered, (leg + L"P13 owner").c_str());
-			Assert::IsTrue(demand->RegisterOwnerFill(VpSkeleton::kP1HalfLuma, AcquireForm::Gpu, "input/source_analysis/lane",
-				P1Gpu::MatcherPyramidOwnerFill(luma)) == VpSkeleton::SkeletonMemo::Registration::Registered, (leg + L"the production P1 GPU owner fill").c_str());
 
 			// The renderer's lifecycle: the pathway (VP-V), the device (its pl_gpu), the motion look-ahead walk of 2 frames (the queue
 			// ahead the window needs: L + W), and the memo made by the first MemoFor.
@@ -212,64 +228,98 @@ namespace VideoProcessorTest
 				demand->SetRaisingExternalDemand(rig.Host(), &owner, std::vector<VpSkeleton::ConsumerDecl>(1, led), {}, "LED drive");
 			}
 
+			// The real matcher, as MatcherPyramidGpuIdentityTests' RunArm builds it: the engine's pyramid seam, a host-unreadable matcher
+			// (the product path), a global prior. A second MotionWarp makes the EstimateAhead pair (B, C).
+			VpMotion::VectorEngine engine(rig.Host());
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.hostReadable = false;
+			settings.globalPrior = true;
+			settings.lowRes = false;
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+			Dejudder::MotionWarp aheadWarp(fixture.Log(), gpu, settings);
+			const VpMotion::MatcherPyramid::Source seam = engine.MatcherPyramidSource();
+			warp.SetPyramidSource(seam);
+			aheadWarp.SetPyramidSource(seam);
+
 			uint64_t served = 0;
 			for (int n = 1; n <= kFrames; ++n)
 			{
 				rig.Begin(n);
-				// The render frame's offers: B = N + 1 and C = N + 2 (and A = N as the frame whose levels were made as B).
 				Vpv::Capture::SourcePlanes::BeginFrame(rig.Host());
-				for (int offered : { n + 1, n + 2 })
+				const Dejudder::Planes& a = frames[size_t(n - 1)]->planes;
+				const Dejudder::Planes& b = frames[size_t(n)]->planes;
+				const Dejudder::Planes& c = frames[size_t(n + 1)]->planes;
+				const std::wstring at = leg + L"frame " + std::to_wstring(n) + L": ";
+				if (n >= 2)
 				{
-					const Dejudder::Planes& p = frames[size_t(offered)]->planes;
+					const VpSkeleton::QueueWindow w = rig.sk.MemoFor(rig.Host(), uint64_t(n)).memo->Window();
+					Assert::IsTrue(w.wired != 0 && w.ahead >= 2 && w.aheadCompute >= 2,
+						(at + L"the window is active with the queue ahead the matcher declared (SetWindow at Begin)").c_str());
+				}
+				// RunDejudderEstimate's order: the epoch, the offers (B only: the render pair), the seam, the estimate; the render
+				// frame's own Entrance image is offered only AFTER the estimate.
+				engine.NoteMatcherEpoch(1);
+				Assert::IsTrue(engine.OfferMatcherPlanes(b.sequence, b.luma, b.chroma, b.fullRange), (at + L"B offered").c_str());
+				Assert::IsTrue(warp.Estimate(a, b), (at + L"render estimate").c_str());
+				{
 					pl_frame image{};
 					image.num_planes = 2;
-					image.planes[0].texture = p.luma;
+					image.planes[0].texture = a.luma;
 					image.planes[0].components = 1;
-					image.planes[1].texture = p.chroma;
+					image.planes[1].texture = a.chroma;
 					image.planes[1].components = 2;
 					image.repr.sys = PL_COLOR_SYSTEM_BT_709;
 					image.repr.levels = PL_COLOR_LEVELS_LIMITED;
-					Assert::IsTrue(Vpv::Capture::SourcePlanes::OfferFrame(rig.Host(), uint64_t(offered), int64_t(1), image),
-						(leg + L"the matcher's offer of frame " + std::to_wstring(offered)).c_str());
+					Assert::IsTrue(Vpv::Capture::SourcePlanes::OfferFrame(rig.Host(), a.sequence, int64_t(n), image), (at + L"Entrance offer after the estimate").c_str());
 				}
-				const Vpv::Skeleton::FrameMemo fm = rig.sk.MemoFor(rig.Host(), uint64_t(n));
-				Assert::IsTrue(fm.memo != nullptr, (leg + L"the memo at frame " + std::to_wstring(n)).c_str());
-				VpSkeleton::SkeletonMemo& memo = *fm.memo;
-				Assert::IsTrue(memo.Window().wired != 0 && memo.Window().ahead >= 2 && memo.Window().aheadCompute >= 2,
-					(leg + L"the window is active with the queue ahead the matcher needs (SetWindow at Begin)").c_str());
+				if (n >= 2)
+				{
+					Assert::IsTrue(warp.PyramidFromProduct(), (at + L"the render estimate read the product; fallback: " + Wide(warp.PyramidFallbackWhy())).c_str());
+					Assert::IsTrue(warp.PyramidFallbackWhy().empty(), (at + L"0 product.motion_warp: the fallback reason is empty, so the row is released").c_str());
+				}
+				// The EstimateAhead pair: A' = B and B' = C both offered.
+				Assert::IsTrue(engine.OfferMatcherPlanes(b.sequence, b.luma, b.chroma, b.fullRange), (at + L"ahead pair: B offered").c_str());
+				Assert::IsTrue(engine.OfferMatcherPlanes(c.sequence, c.luma, c.chroma, c.fullRange), (at + L"ahead pair: C offered").c_str());
+				Assert::IsTrue(aheadWarp.Estimate(b, c), (at + L"ahead estimate").c_str());
+				Assert::IsTrue(aheadWarp.PyramidFromProduct(), (at + L"the ahead estimate read the product (B and C served); fallback: " + Wide(aheadWarp.PyramidFallbackWhy())).c_str());
+				Assert::IsTrue(aheadWarp.PyramidFallbackWhy().empty(), (at + L"0 product.motion_warp on the ahead estimate").c_str());
+
+				// The levels themselves, asked of the memo as the matcher's seam asks (lowRes inner's 2 / 4 / 6 included).
+				VpSkeleton::SkeletonMemo& memo = *rig.sk.MemoFor(rig.Host(), uint64_t(n)).memo;
 				struct Read { uint64_t seq; uint8_t level; const wchar_t* who; };
 				std::vector<Read> reads;
 				for (uint8_t lv = 1; lv <= 6; ++lv)
-					reads.push_back(Read{ uint64_t(n) + 1u, lv, L"B (render pair, outer 1/3/5 + lowRes inner 2/4/6)" });
+					reads.push_back(Read{ b.sequence, lv, L"B (render pair, outer 1/3/5 + lowRes inner 2/4/6)" });
 				for (uint8_t lv : { uint8_t(1), uint8_t(3), uint8_t(5) })
-					reads.push_back(Read{ uint64_t(n) + 2u, lv, L"C (EstimateAhead pair)" });
+					reads.push_back(Read{ c.sequence, lv, L"C (EstimateAhead pair)" });
 				if (n >= 2)
 					for (uint8_t lv : { uint8_t(1), uint8_t(3), uint8_t(5) })
-						reads.push_back(Read{ uint64_t(n), lv, L"A (the kept product of the frame before)" });
+						reads.push_back(Read{ a.sequence, lv, L"A (the kept product of the frame before)" });
 				for (const Read& rd : reads)
 				{
-					const VpSkeleton::AcquireResult a = memo.Acquire(VpSkeleton::kP1HalfLuma, rd.seq, AcquireForm::Gpu, P1Gpu::MatcherPyramidKey(rd.level));
-					const std::wstring at = leg + L"frame " + std::to_wstring(n) + L", " + rd.who + L", level " + std::to_wstring(int(rd.level)) + L": ";
-					Assert::IsTrue(a.Ok() && a.gpu.Valid(), (at + L"served; cause " + Wide(memo.LastCause(VpSkeleton::kP1HalfLuma))).c_str());
+					const VpSkeleton::AcquireResult r = memo.Acquire(VpSkeleton::kP1HalfLuma, rd.seq, AcquireForm::Gpu, P1Gpu::MatcherPyramidKey(rd.level));
+					Assert::IsTrue(r.Ok() && r.gpu.Valid(), (at + rd.who + L", level " + std::to_wstring(int(rd.level)) + L": served; cause " +
+						Wide(memo.LastCause(VpSkeleton::kP1HalfLuma))).c_str());
 					++served;
 				}
 			}
-			const Vpv::Skeleton::FrameMemo last = rig.sk.MemoFor(rig.Host(), uint64_t(kFrames));
-			Assert::IsTrue(last.memo != nullptr, (leg + L"the memo at the end").c_str());
-			const VpSkeleton::AcquireCounters c = last.memo->CountersOf(VpSkeleton::kP1HalfLuma);
+			const VpSkeleton::AcquireCounters cnt = rig.sk.MemoFor(rig.Host(), uint64_t(kFrames)).memo->CountersOf(VpSkeleton::kP1HalfLuma);
 			Assert::IsTrue(served > 0, (leg + L"non-vacuous: pyramid levels were read").c_str());
-			Assert::AreEqual(uint64_t(0), c.Unavailable(), (leg + L"0 Unavailable on the pyramid: the matcher has no reason to fall back").c_str());
-			Assert::IsTrue(c.gpuAllocMade > 0, (leg + L"the levels were made through the owner GPU context").c_str());
+			Assert::IsTrue(cnt.gpuAllocMade > 0, (leg + L"the levels were made through the owner GPU context").c_str());
+			Assert::AreEqual(uint64_t(0), cnt.unavailable[size_t(VpSkeleton::AcquireCause::OverBudget)] +
+				cnt.unavailable[size_t(VpSkeleton::AcquireCause::NoLedgerGrant)] + cnt.unavailable[size_t(VpSkeleton::AcquireCause::NoGpuDispatcher)] +
+				cnt.unavailable[size_t(VpSkeleton::AcquireCause::NotPlannedAhead)] + cnt.unavailable[size_t(VpSkeleton::AcquireCause::NotQueued)],
+				(leg + L"no budget, grant, dispatcher or window refusal on the pyramid").c_str());
 			const std::vector<std::string> fb = rig.Fallbacks();
-			Assert::IsFalse(AnyLineHas(fb, "product.motion_warp"), (leg + L"0 product.motion_warp").c_str());
-			Assert::IsFalse(AnyLineHas(fb, "no GPU dispatcher"), (leg + L"no GPU-dispatcher refusal on the Fallbacks status").c_str());
+			Assert::IsFalse(AnyLineHas(fb, "no GPU dispatcher"), (leg + L"no GPU-dispatcher refusal on the skeleton's Fallbacks status").c_str());
+			Assert::IsFalse(AnyLineHas(fb, "product.motion_warp"), (leg + L"no product.motion_warp on the Fallbacks status").c_str());
 		}
 	}
 
 	TEST_CLASS(MatcherPyramidUnionTests)
 	{
 	public:
-		// 10 frames, the LED raise off and on: B and C served, 0 product.motion_warp.
+		// 10 frames, the LED raise off and on: the real matcher reads B and C through the skeleton, 0 product.motion_warp.
 		BEGIN_TEST_METHOD_ATTRIBUTE(MatcherPyramidIsServedThroughTheSkeleton)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
