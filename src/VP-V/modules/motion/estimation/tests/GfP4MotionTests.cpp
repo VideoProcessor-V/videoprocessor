@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -128,6 +129,41 @@ namespace GfP4MotionTest
 			const bool served = state.PairServes(9, 10, state.EpochOfLastKept(), state.Epoch());
 			Assert::IsFalse(served, L"the pair ending on a confirmed cut is not served");
 			Assert::AreEqual(1ull, static_cast<unsigned long long>(state.ConfirmedCutRefusals()), L"one ask, one counted refusal");
+		}
+
+		// GF-P4 MUST-12 (source pin): the U3 private-copy count is made in ONE place, inside Producer::LumaAtTarget after the
+		// producer's own HalfLuma8 decode (a shared P1 read is not a private copy), and every LumaAtTarget caller names its site.
+		// The behavioural U3 count is covered by the compute-once detectors in the union / real-clip run.
+		TEST_METHOD(U3PrivateCountOnlyInsideTheHalfLuma8Branch)
+		{
+			const std::string text = ReadSource("src\\VP-V\\modules\\motion\\estimation\\MotionAheadProducer.cpp");
+			Assert::IsFalse(text.empty(), L"MotionAheadProducer.cpp found from __FILE__");
+			Assert::AreEqual<size_t>(1, CountOf(text, "VPV_COMPUTE_ONCE_PRIVATE_AT(\"U3\","), L"one U3 private count in the file");
+
+			const std::string body = BodyBetween(text, "bool Producer::LumaAtTarget(", "\t}");
+			Assert::IsFalse(body.empty(), L"the body of Producer::LumaAtTarget was found");
+			const size_t count = body.find("VPV_COMPUTE_ONCE_PRIVATE_AT(\"U3\",");
+			Assert::IsTrue(count != std::string::npos, L"the one U3 count lies inside LumaAtTarget");
+			const size_t decode = body.find("HalfLuma8(luma, buffer");
+			Assert::IsTrue(decode != std::string::npos, L"the producer's own decode is in LumaAtTarget");
+			Assert::IsTrue(decode < count, L"the count comes after the HalfLuma8 decode");
+
+			// The calls (not the definition): in the file's order the job, then the two request calls.
+			std::vector<std::string> calls;
+			size_t at = 0;
+			while ((at = text.find("LumaAtTarget(", at)) != std::string::npos)
+			{
+				const size_t lineBegin = text.rfind('\n', at) == std::string::npos ? 0 : text.rfind('\n', at) + 1;
+				const size_t lineEnd = text.find('\n', at);
+				const std::string line = text.substr(lineBegin, lineEnd == std::string::npos ? std::string::npos : lineEnd - lineBegin);
+				if (line.find("Producer::LumaAtTarget(") == std::string::npos)
+					calls.push_back(line);
+				at += 13;
+			}
+			Assert::AreEqual<size_t>(3, calls.size(), L"three LumaAtTarget calls");
+			Assert::IsTrue(calls[0].find("\"motion_ahead\")") != std::string::npos, L"the job path names motion_ahead");
+			Assert::IsTrue(calls[1].find("\"motion_ahead_request\")") != std::string::npos, L"the request's to-frame names motion_ahead_request");
+			Assert::IsTrue(calls[2].find("\"motion_ahead_request\")") != std::string::npos, L"the request's from-frame names motion_ahead_request");
 		}
 	};
 }
