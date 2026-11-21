@@ -210,6 +210,7 @@ VP files (in this folder):
 - `src/VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h`
 - `src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.h`
 - `src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.cpp`
+- `src/VP-V/modules/input/signal/DvTunnelGlsl.h`
 - `src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h`
 - `src/VP-V/modules/input/signal/DvSignalLevels.h`
 - `src/VP-V/modules/input/signal/DvMetadataHold.h`
@@ -261,6 +262,10 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - `Indicator::AnyCauseOtherThanIn` backs the pulldown rule: absorb only when EVERY FULL in the interval was a LiveQueueReset (an interval older than the ring resets).
 - Tests: `ResyncAuditTests.cpp` (Indicator query, pulldown mixed interval, cursor reset, storm on source time, motion readers re-arming on a new era), plus the lane/FrameSeal/stress classes in `src/VP-V/tests/AnalysisLaneTests.cpp` (`AnalysisLaneAuditTests`, `ResyncStressTests`).
 - `VP_RESYNC_SCHEDULE=<path>` (read only when `VP_RESYNC_INJECT=1`): the loop test tier hands the stress schedule (`tools/soak/resync_schedule.py` output) to `ResyncInject`, which loads it at construction (`LoadScheduleFile`); a missing or invalid file is shown in `StatusText` ("NOT loaded"), never silent. Unarmed: the variable is not read.
+
+## DvTunnelGlsl.h (D5-QK K1, rules 1 and 20)
+
+`DvTunnelGlsl::kHeader` is the one copy of the DV tunnel GLSL (`dv_word`, `dv_intensity`, `dv_chroma`, `dv_u16`; HDMI 1.4a 6.5.4), moved verbatim out of `GpuDolbyVisionTunnelUnpack.cpp`. Both the DV kernel and the P13 luma kernel (`SourceUnpackGpu`, capture module) set it as `custom.header`; the texture is `raw`, the uniform `big_endian`.
 
 ## DvTunnelTapLaw.h (refs/116b)
 

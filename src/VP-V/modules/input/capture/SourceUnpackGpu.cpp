@@ -4,34 +4,29 @@
 #include <VP-V/modules/input/capture/SourceUnpackGpu.h>
 #include <VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h>
 #include <VP-V/modules/input/signal/DvTunnelTapLaw.h>
+#include <VP-V/modules/input/signal/DvTunnelGlsl.h>
+#include <VP-V/modules/input/capture/CaptureUnpackGlsl.h>
 
 #include <libplacebo/shaders/custom.h>
 
 namespace
 {
 	// The raw frame is an rgba8 texture: one texel per four source bytes (a little-endian 32-bit word in x, y, z, w).
-	// unorm8 is exact for 0..255, so the bytes come back exactly.
-	const char* const UNPACK_HEADER = R"GLSL(
-uvec4 su_bytes(int i, int y) { return uvec4(round(texelFetch(raw, ivec2(i, y), 0) * 255.0)); }
-uint su_word(int i, int y) { uvec4 b = su_bytes(i, y); return b.x | (b.y << 8) | (b.z << 16) | (b.w << 24); }
-// The DV tunnel word: big endian for r210 / R10b, little for R10l (the same as GpuDolbyVisionTunnelUnpack).
-uint su_dv_word(int i, int y)
-{
-    uvec4 b = su_bytes(i, y);
-    return big_endian != 0 ? (b.x << 24) | (b.y << 16) | (b.z << 8) | b.w : (b.w << 24) | (b.z << 16) | (b.y << 8) | b.x;
-}
-// HDMI 1.4a 6.5.4 (DV_BODY of GpuDolbyVisionTunnelUnpack.cpp, keep in lockstep): I in the high 12 bits of 16.
-uint su_dv_intensity(uint p, uint s) { return ((p >> (2u + s)) & 0xFF00u) | ((p << (4u - s)) & 0xF0u); }
-float su_u16(uint v) { return float(v) / 65535.0; }
-)GLSL";
+	// The helpers are the shared texts: DvTunnelGlsl::kHeader (dv_word / dv_intensity / dv_u16, one copy with the DV
+	// kernel) and CaptureUnpackGlsl::kHeader (cu_bytes / cu_word, one copy with GpuCaptureUnpack).
+	const std::string& UnpackHeader()
+	{
+		static const std::string header = std::string(DvTunnelGlsl::kHeader) + CaptureUnpackGlsl::kHeader;
+		return header;
+	}
 
 	// P010 / P210 luma: word16 >> 6 (the ten-bit code), back to the high bits.
 	const char* const PLANAR16_BODY = R"GLSL(
 ivec2 g = ivec2(gl_GlobalInvocationID.xy);
 if (g.x < frame_width && g.y < frame_height) {
-    uint w = su_word(g.x >> 1, g.y);
+    uint w = cu_word(g.x >> 1, g.y);
     uint s16 = (g.x & 1) != 0 ? (w >> 16) : (w & 0xFFFFu);
-    imageStore(dst, g, vec4(su_u16((s16 >> 6) << 6), 0.0, 0.0, 1.0));
+    imageStore(dst, g, vec4(dv_u16((s16 >> 6) << 6), 0.0, 0.0, 1.0));
 }
 )GLSL";
 
@@ -44,8 +39,8 @@ if (g.x < frame_width && g.y < frame_height) {
     int wi = (k * 2 + 1) / 3;
     int ph = k % 3;
     uint sh = ph == 0 ? 10u : (ph == 1 ? 0u : 20u);
-    uint code = (su_word(group * 4 + wi, g.y) >> sh) & 1023u;
-    imageStore(dst, g, vec4(su_u16(code << 6), 0.0, 0.0, 1.0));
+    uint code = (cu_word(group * 4 + wi, g.y) >> sh) & 1023u;
+    imageStore(dst, g, vec4(dv_u16(code << 6), 0.0, 0.0, 1.0));
 }
 )GLSL";
 
@@ -53,9 +48,9 @@ if (g.x < frame_width && g.y < frame_height) {
 	const char* const UYVY_BODY = R"GLSL(
 ivec2 g = ivec2(gl_GlobalInvocationID.xy);
 if (g.x < frame_width && g.y < frame_height) {
-    uvec4 b = su_bytes(g.x >> 1, g.y);
+    uvec4 b = cu_bytes(g.x >> 1, g.y);
     uint y8 = (g.x & 1) != 0 ? b.w : b.y;
-    imageStore(dst, g, vec4(su_u16(y8 << 8), 0.0, 0.0, 1.0));
+    imageStore(dst, g, vec4(dv_u16(y8 << 8), 0.0, 0.0, 1.0));
 }
 )GLSL";
 
@@ -63,8 +58,8 @@ if (g.x < frame_width && g.y < frame_height) {
 	const char* const DV_LIMITED_BODY = R"GLSL(
 ivec2 g = ivec2(gl_GlobalInvocationID.xy);
 if (g.x < frame_width && g.y < frame_height) {
-    uint i16 = su_dv_intensity(su_dv_word(g.x, g.y), uint(shift)) & 0xFFF0u;
-    imageStore(dst, g, vec4(su_u16(i16), 0.0, 0.0, 1.0));
+    uint i16 = dv_intensity(dv_word(g.x, g.y), uint(shift)) & 0xFFF0u;
+    imageStore(dst, g, vec4(dv_u16(i16), 0.0, 0.0, 1.0));
 }
 )GLSL";
 
@@ -72,9 +67,9 @@ if (g.x < frame_width && g.y < frame_height) {
 	const char* const DV_FULL_BODY = R"GLSL(
 ivec2 g = ivec2(gl_GlobalInvocationID.xy);
 if (g.x < frame_width && g.y < frame_height) {
-    uint code12 = su_dv_intensity(su_dv_word(g.x, g.y), uint(shift)) >> 4;
+    uint code12 = dv_intensity(dv_word(g.x, g.y), uint(shift)) >> 4;
     uint t16 = uint(round(texelFetch(range_tab, ivec2(int(code12), 0), 0).r * 65535.0));
-    imageStore(dst, g, vec4(su_u16(t16), 0.0, 0.0, 1.0));
+    imageStore(dst, g, vec4(dv_u16(t16), 0.0, 0.0, 1.0));
 }
 )GLSL";
 
@@ -271,7 +266,7 @@ namespace SourceUnpack
 			{ pl_var_int("big_endian"), &bigEndian, false } };
 		pl_custom_shader custom{};
 		custom.description = "VideoProcessor capture: P13 luma plane unpack (GPU)";
-		custom.header = UNPACK_HEADER;
+		custom.header = UnpackHeader().c_str();
 		custom.body = body;
 		custom.input = PL_SHADER_SIG_NONE;
 		custom.output = PL_SHADER_SIG_NONE;
