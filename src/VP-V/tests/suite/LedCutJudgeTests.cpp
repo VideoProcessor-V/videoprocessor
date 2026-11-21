@@ -144,6 +144,7 @@ namespace
 			uint8_t reads = 0;
 			VpSkeleton::ProductId firstProduct{};
 			uint8_t firstLag = 0, secondLag = 0;
+			uint8_t aheadDepth = 0;   // GF-P3: ConsumerDecl::aheadDepth (GF-P1), the walk's ahead need
 		};
 
 		void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
@@ -161,6 +162,7 @@ namespace
 				d.firstProduct = consumers[0].consumes[0].product;
 				d.firstLag = consumers[0].consumes[0].lag;
 				d.secondLag = consumers[0].consumes[1].lag;
+				d.aheadDepth = consumers[0].aheadDepth;
 			}
 			declared.push_back(d);
 		}
@@ -597,6 +599,90 @@ namespace VideoProcessorTest
 			Assert::AreEqual<size_t>(1, withdrawn.size(), L"the destructor withdrew the declaration");
 			Assert::IsTrue(withdrawn[0].first == &rendererA, L"from the renderer it was declared on");
 			Assert::IsTrue(withdrawn[0].second == moduleAddress, L"for this module");
+		}
+
+		// GF-P3 AHEAD-DECL (lead ruling): the declaration carries the walk's frame count as ConsumerDecl::aheadDepth (0 until a walk
+		// ran, 0 always without a look-ahead, capped by led_lookahead_ms when set); a DEEPER walk declares again (a ratchet, never per
+		// walk), the LED does not cap at the skeleton's ceiling (the binder does), and a stream reset re-measures. Compiles only with
+		// GF-P1 (ConsumerDecl::aheadDepth): union only.
+		TEST_METHOD(TheDeclarationCarriesTheWalkDepthAndNothingWithoutLookahead)
+		{
+			Assert::IsTrue(VpFrameAnalysis::SourceFrameTap::StoreOwners().empty(),
+				L"precondition: no store registered by an earlier test");
+			RecordingDemand demand;
+			DemandHubScope hub(&demand);
+			int rendererA = 0;
+			FrameAnalysis::Store storeA(FrameAnalysis::RingDepth(4, 4));
+			StoreRegistration registration;
+			registration.Set(&rendererA, &storeA);
+			auto projector = std::make_shared<FakeProjector>();
+			projector->openFails = true;   // a dry run: no port
+			auto makeModule = [&projector](const LedDriveConfig& config) {
+				return std::unique_ptr<LedDriveModule>(new LedDriveModule(ProjectorConfig(), config,
+					[projector] { return std::make_unique<FakePort>(projector); }));
+			};
+
+			{
+				LedDriveConfig config = CutCompensate();
+				config.lookahead = true;
+				config.ledLookaheadMs = 0;
+				std::unique_ptr<LedDriveModule> module = makeModule(config);
+				module->SetSceneReaderForTesting(NoSceneCuts());
+				module->Start();
+				std::vector<RecordingDemand::Declared> declared = demand.Declarations();
+				Assert::AreEqual<size_t>(1, declared.size());
+				Assert::AreEqual<int>(0, declared[0].aheadDepth, L"no walk yet: no ahead need");
+				module->SetLookaheadDepth(4);
+				declared = demand.Declarations();
+				Assert::AreEqual<size_t>(2, declared.size(), L"the first walk declares its depth");
+				Assert::AreEqual<int>(4, declared[1].aheadDepth);
+				module->SetLookaheadDepth(3);
+				module->SetLookaheadDepth(4);
+				Assert::AreEqual<size_t>(2, demand.Declarations().size(), L"a shallower or equal walk declares nothing (ratchet)");
+				module->SetLookaheadDepth(9);
+				declared = demand.Declarations();
+				Assert::AreEqual<size_t>(3, declared.size(), L"a deeper walk declares again");
+				Assert::AreEqual<int>(9, declared[2].aheadDepth, L"not capped by the LED (the binder caps at its ceiling)");
+				module->ResetLookahead();
+				module->SetLookaheadDepth(5);
+				declared = demand.Declarations();
+				Assert::AreEqual<size_t>(4, declared.size(), L"a stream reset re-measures the depth");
+				Assert::AreEqual<int>(5, declared[3].aheadDepth);
+				module->Stop();
+			}
+
+			// Without a look-ahead the walk measures nothing: no ahead need, no new declaration.
+			const size_t before = demand.Declarations().size();
+			{
+				LedDriveConfig config = CutCompensate();
+				config.lookahead = false;
+				std::unique_ptr<LedDriveModule> module = makeModule(config);
+				module->SetSceneReaderForTesting(NoSceneCuts());
+				module->Start();
+				Assert::AreEqual<size_t>(before + 1, demand.Declarations().size());
+				module->SetLookaheadDepth(6);
+				const std::vector<RecordingDemand::Declared> declared = demand.Declarations();
+				Assert::AreEqual<size_t>(before + 1, declared.size(), L"no look-ahead: a walk makes no declaration");
+				Assert::AreEqual<int>(0, declared.back().aheadDepth);
+				module->Stop();
+			}
+
+			// led_lookahead_ms caps the need at its frames (33 ms at the module's 60 Hz period is 2 frames).
+			const size_t beforeCapped = demand.Declarations().size();
+			{
+				LedDriveConfig config = CutCompensate();
+				config.lookahead = true;
+				config.ledLookaheadMs = 33;
+				std::unique_ptr<LedDriveModule> module = makeModule(config);
+				module->SetSceneReaderForTesting(NoSceneCuts());
+				module->Start();
+				Assert::AreEqual<size_t>(beforeCapped + 1, demand.Declarations().size());
+				module->SetLookaheadDepth(6);
+				const std::vector<RecordingDemand::Declared> declared = demand.Declarations();
+				Assert::AreEqual<size_t>(beforeCapped + 2, declared.size(), L"the walk's depth is declared");
+				Assert::AreEqual<int>(2, declared.back().aheadDepth, L"capped at led_lookahead_ms's frames");
+				module->Stop();
+			}
 		}
 	};
 }
