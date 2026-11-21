@@ -333,6 +333,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             appearance.signalPq = target.color.transfer == PL_COLOR_TRC_PQ;
             appearance.outputGamma = LedDisplayGamma(target.color.transfer);
             appearance.honourL11 = activeSettings.appearanceHonourL11;
+            appearance.calibrationLutBefore = target.lut != nullptr;   // FIX1 MUST 2 (null when VP's stage took the LUT)
             const DolbyVisionTunnelFrameMetadata* dolbyMetadata = convertedPayload ? &convertedPayload->dolby : nullptr;
             appearance.l11ReferenceMode = dolbyMetadata && dolbyMetadata->valid && dolbyMetadata->hasL11 && dolbyMetadata->l11ReferenceMode;
             pl_color_space display = target.color;

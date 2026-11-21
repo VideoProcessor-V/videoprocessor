@@ -941,7 +941,7 @@ namespace VpvRendererSettings
 		{
 			const std::string value = ConfigFile::NormalizeName(raw);
 			if (value == "libplacebo" || value == "vp" || value == "auto")
-				settings.calibrationLutStage = value;
+				settings.calibrationLutStageConfigured = value;
 			else
 				settings.pipelineSettingsProblems += "calibration_lut_stage '" + raw + "' (libplacebo|vp|auto); ";
 		}
@@ -1014,15 +1014,13 @@ namespace VpvRendererSettings
 			ApplyOriginal(settings);
 			overrides.chromaUpscaler = "bicubic";                 // key=chroma_upscaler (a host field, so returned)
 		}
-		// CF-1 P3: calibration_lut_stage auto -> vp while a VP colour step that must follow the LUT runs (dm_trims: the
-		// setting dv_trims on, dv_display_mapping vp, the slot not in pipeline_slots_off; never on the Original pathway).
-		// The renderer reads this field as vp | libplacebo, so the resolved text is stored; the config file keeps "auto".
-		{
-			const bool trimsSlotOff = settings.pipelineSlotsOff.find("colour.dm_trims") != std::string::npos;
-			const bool dmStepsRun = !settings.pipelineOriginalPathway && settings.dvDisplayMapping != "original" &&
-				settings.dvTrims && !trimsSlotOff;
-			settings.calibrationLutStage = CalibrationLutHost::ResolveStage(settings.calibrationLutStage, dmStepsRun);
-		}
+		// CF-1 P3 / FIX1 MUST 1-2: calibration_lut_stage auto (the default) -> vp while a VP colour step that must follow
+		// the LUT runs: dm_trims (dv_trims on, dv_display_mapping vp, the slot not in pipeline_slots_off) or appearance
+		// (appearance on, the slot not off); never on the Original pathway. The renderer reads calibrationLutStage as
+		// vp | libplacebo, so the resolution goes there; calibrationLutStageConfigured keeps the user's value (SHOULD 7).
+		settings.calibrationLutStage = CalibrationLutHost::ResolveStage(settings.calibrationLutStageConfigured,
+			CalibrationLutHost::DisplayMappingStepsRun(settings.pipelineOriginalPathway, settings.dvDisplayMapping,
+				settings.dvTrims, settings.appearance, settings.pipelineSlotsOff));
 		// CF-1 CAM-4: colour.appearance owns the room-light correction (doc 115 A2): while it runs (appearance on, the slot not in
 		// pipeline_slots_off, never on the Original pathway) ambient_adapt is forced off, and the Fallbacks line says so.
 		{
@@ -1111,6 +1109,7 @@ namespace VpvRendererSettings
 		settings.outputSegmentsMerged = false;             // key=output_segments_merged
 		settings.renderAhead = false;                      // key=render_ahead
 		settings.calibrationLutStage = "libplacebo";       // key=calibration_lut_stage
+		settings.calibrationLutStageConfigured = "libplacebo";   // the user's value under the Original pathway (FIX1 MUST 1)
 		settings.hdrInference = "original";                // key=hdr_inference
 		// Settings audit 2026-10-24: VP additions the first table missed (absent from Bill's v1.4.02-beta).
 		settings.activePictureStartupHold = false;         // key=active_picture_startup_hold
@@ -1424,7 +1423,8 @@ namespace VpvRendererSettings
 		changed(current.pipelineOriginalPathway != next.pipelineOriginalPathway, "pipeline_original_pathway");
 		changed(current.pipelineOrder != next.pipelineOrder, "pipeline_order");
 		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
-		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
+		changed(current.calibrationLutStage != next.calibrationLutStage ||
+			current.calibrationLutStageConfigured != next.calibrationLutStageConfigured, "calibration_lut_stage");
 		changed(current.hdrInference != next.hdrInference, "hdr_inference");
 		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
 		changed(current.outputSegmentsMerged != next.outputSegmentsMerged, "output_segments_merged");

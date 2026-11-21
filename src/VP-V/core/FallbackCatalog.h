@@ -636,6 +636,12 @@ namespace FallbackCatalog
 		return replaced ? Engaged("ambient_adapt: replaced by appearance", "ambient_adapt is off while appearance is on (one owner of the room-light correction)")
 		                : Released("ambient_adapt: replaced by appearance");
 	}
+	// CF-1 FIX1 MUST 2: appearance on, but libplacebo applies the calibration LUT before it (calibration_lut_stage libplacebo): off.
+	inline Decision AppearanceCalibrationLut(bool conflict)
+	{
+		return conflict ? Engaged("appearance: calibration LUT", "off: the calibration LUT runs before it (set calibration_lut_stage to auto or vp)")
+		                : Released("appearance: calibration LUT");
+	}
 	// Adaptive downscale: GPU failures leave plain SSIM (w = 1); a missing SSimDownscaler leaves
 	// libplacebo's downscaler.
 	inline Decision OutputScaling(bool adaptiveRequested, unsigned long long newFailures, bool ssimShaderMissing)

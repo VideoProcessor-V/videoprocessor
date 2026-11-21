@@ -45,12 +45,14 @@ namespace AppearanceStage
 		bool l11ReferenceMode = false;         // the picture carries the L11 reference-mode flag
 		bool honourL11 = true;                 // appearance_honour_l11
 		double rgbToXyz[9] = { 0.4124, 0.3576, 0.1805, 0.2126, 0.7152, 0.0722, 0.0193, 0.1192, 0.9505 };   // output primaries, white Y = 1
+		bool calibrationLutBefore = false;     // FIX1 MUST 2: libplacebo applies a calibration LUT before this pass (target.lut)
 	};
 
 	struct Decision
 	{
 		bool active = false;                   // the hook runs this frame
 		bool l11Ignored = false;               // CAM-4: the L11 reference-mode flag held the room back this frame
+		bool lutConflict = false;              // FIX1 MUST 2: off because a calibration LUT runs before it (listed, never silent)
 		double referenceWhiteNits = 100.0;
 		Cam16::Cam16Uniforms uniforms = {};
 		RoomLight::Resolved room;
@@ -139,6 +141,15 @@ namespace AppearanceStage
 			return d;
 		}
 		d.referenceWhiteNits = ReferenceWhite(in);
+		if (in.calibrationLutBefore)
+		{
+			// FIX1 MUST 2: the model would act on projector device codes after the LUT (wrong colour). calibration_lut_stage
+			// auto moves the LUT to VP's last step; with libplacebo chosen explicitly the pass stays out, visibly.
+			smoother.Reset();
+			d.lutConflict = true;
+			d.status = "appearance: off with a calibration LUT (it would act after the LUT)";
+			return d;
+		}
 		if (in.l11ReferenceMode && in.honourL11)
 		{
 			// The picture asks for reference viewing conditions: the room is not applied (and its slow adaptation restarts).

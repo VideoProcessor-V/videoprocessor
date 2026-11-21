@@ -45,6 +45,20 @@ namespace CalibrationLutHost
 		return configured == "vp" ? "vp" : "libplacebo";
 	}
 
+	// CF-1 FIX1 MUST 2: does a VP colour step that must follow the LUT run? dm_trims (dv_trims on, dv_display_mapping
+	// not original, colour.dm_trims not in pipeline_slots_off) or colour.appearance (appearance on, the slot not off).
+	// Never on the Original pathway. The ResolveStage input for auto.
+	inline bool DisplayMappingStepsRun(bool originalPathway, const std::string& dvDisplayMapping, bool dvTrims,
+		bool appearance, const std::string& slotsOff)
+	{
+		if (originalPathway)
+			return false;
+		const bool trimsRun = dvDisplayMapping != "original" && dvTrims &&
+			slotsOff.find("colour.dm_trims") == std::string::npos;
+		const bool appearanceRuns = appearance && slotsOff.find("colour.appearance") == std::string::npos;
+		return trimsRun || appearanceRuns;
+	}
+
 	constexpr const char* kVpStagePrefix = "Active (VP stage): ";
 	// The renderer's LoadDisplayLut writes this when a changed file fails to reload and the last good
 	// LUT stays (Bill's text; his ConfigureDisplayLutForTarget keeps it on the libplacebo stage).

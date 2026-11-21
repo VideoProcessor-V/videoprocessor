@@ -408,7 +408,7 @@ Owner decisions of 2026-10-25, built on the pages above:
   - `pipeline_order`: the expert page. The order is checked with `PipelineSlots::Registry`, and
     a rejected order shows its plain-language reason and is not saved (ADR-0021).
   - `pipeline_slots_off`: the expert page; unknown slot names are not saved.
-  - `calibration_lut_stage` libplacebo|vp: the expert page (R1).
+  - `calibration_lut_stage` libplacebo|vp|auto (default auto, CF-1 FIX1): the expert page (R1).
 
   A default is written as an absent key, so untouched configs stay byte-identical.
 - **Managed controls.** While the VP-V pathway is on, upstream controls for the keys VP-V

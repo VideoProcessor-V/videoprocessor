@@ -27,8 +27,8 @@
 // A LUT that cannot be carried (ExtendedRange::LutCarryable: shaper matrices, a side over 256) or
 // a GPU without that texture keeps the excess unchanged (slope 1), counted in SlopeFallbacks().
 //
-// The default stays calibration_lut_stage = libplacebo (byte-identical to before) until the
-// owner switches it after measurement.
+// The default is calibration_lut_stage = auto (CF-1 FIX1 MUST 1): vp while the Dolby Vision trims or appearance
+// run (they must act before the LUT), else libplacebo (byte-identical to before).
 namespace CalibrationLutStage
 {
 	class Hook

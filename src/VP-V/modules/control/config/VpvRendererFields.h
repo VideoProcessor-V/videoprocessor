@@ -276,7 +276,11 @@ namespace VpvRenderer
 		bool pipelineOriginalPathway = false;
 		std::string pipelineOrder;
 		std::string pipelineSlotsOff;
+		// CF-1 FIX1 MUST 1 / SHOULD 7: calibrationLutStage is the RESOLVED stage (vp | libplacebo, PostLoad), which the
+		// renderer reads; calibrationLutStageConfigured is the user's calibration_lut_stage (libplacebo | vp | auto,
+		// default auto: the LUT moves to VP's last step while a VP colour step that must follow it runs).
 		std::string calibrationLutStage = "libplacebo";
+		std::string calibrationLutStageConfigured = "auto";
 		std::string hdrInference = "vp";   // [vpv] hdr_inference (F-8): the GUI's choice; dumped and fingerprinted here
 		// pipeline_entrance_once (B3, ADR-0024): the motion consumers (interpolated pictures, hiccup
 		// gap pairs, source-warp extras) warp or blend the PROCESSED A and B - the entrance stages

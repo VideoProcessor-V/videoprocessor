@@ -232,6 +232,8 @@ public:
 		sync(FallbackCatalog::RoomLightSensor(live && room.sensorHeld, live && room.sensorDecaying, live && room.sensorMissing));
 		// VPV-FALLBACK appearance: L11 reference mode
 		sync(FallbackCatalog::AppearanceL11Reference(m_appearanceWanted && m_appearanceDecision.l11Ignored));
+		// VPV-FALLBACK appearance: calibration LUT
+		sync(FallbackCatalog::AppearanceCalibrationLut(m_appearanceWanted && m_appearanceDecision.lutConflict));
 		if (shaderMissing)
 			m_appearanceStatus = "appearance: shader missing (shaders\\vp_cam16_appearance.glsl did not load)";
 		else

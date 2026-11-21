@@ -1499,12 +1499,13 @@ namespace Vpv
 				"and the Original pathway switch cover it.")));
 			auto* form = new QFormLayout;
 
-			// Where the projector calibration LUT runs (R1): libplacebo today, VP's last output hook later.
+			// Where the projector calibration LUT runs (R1). CF-1 FIX1 MUST 1: the default is auto (the LUT moves to VP's
+			// last step while Dolby Vision trims or appearance run, which must act before it); the item order is kept.
 			auto* lutStage = new QComboBox;
 			lutStage->setObjectName(ObjectName(QStringLiteral("expert.calibration_lut_stage")));
-			lutStage->addItem(QStringLiteral("libplacebo (default; before VP's output steps)"), QString());
+			lutStage->addItem(QStringLiteral("libplacebo (before VP's output steps)"), QStringLiteral("libplacebo"));
 			lutStage->addItem(QStringLiteral("VP (the last colour step, after LED compensation)"), QStringLiteral("vp"));
-			lutStage->addItem(QStringLiteral("Auto (VP's step while Dolby Vision trims run, else libplacebo)"), QStringLiteral("auto"));
+			lutStage->addItem(QStringLiteral("Auto (default; VP's step while Dolby Vision trims or appearance run, else libplacebo)"), QStringLiteral("auto"));
 			lutStage->setToolTip(QStringLiteral("Key calibration_lut_stage. VP applies the LUT after Dynamic Drive, so the LED "
 				"measurement sees target light instead of projector codes (design R1)."));
 			form->addRow(QStringLiteral("Calibration LUT runs in"), lutStage);
@@ -1679,7 +1680,7 @@ namespace Vpv
 				{
 					const QSignalBlocker blocker(lutStage);
 					lutStage->setCurrentIndex(get("calibration_lut_stage").compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 :
-						get("calibration_lut_stage").compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0 ? 2 : 0);
+						get("calibration_lut_stage").compare(QStringLiteral("libplacebo"), Qt::CaseInsensitive) == 0 ? 0 : 2);
 					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
 					lutStage->setEnabled(!original);
 					SetGreyReason(lutStage, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());

@@ -254,6 +254,7 @@ inline void VpvDumpRendererSettings(const RendererSettings& s, std::ostream& o)
 	Put(o, "pipelineOrder", s.pipelineOrder);
 	Put(o, "pipelineSlotsOff", s.pipelineSlotsOff);
 	Put(o, "calibrationLutStage", s.calibrationLutStage);
+	Put(o, "calibrationLutStageConfigured", s.calibrationLutStageConfigured);
 	Put(o, "hdrInference", s.hdrInference);
 	Put(o, "pipelineEntranceOnce", s.pipelineEntranceOnce);
 	Put(o, "frameAnalysisStore", s.frameAnalysisStore);

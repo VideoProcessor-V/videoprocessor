@@ -16,6 +16,7 @@
     <ClCompile Include="..\VP-V\modules\colour\appearance\tests\RoomLightTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\appearance\tests\AppearanceStageTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\appearance\tests\AppearanceStatusTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\appearance\tests\CamFix1Tests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\FileSideDataTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SceneDescriptorTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\ContentIntentTests.cpp" />
