@@ -49,8 +49,38 @@ namespace Vpv
 			return label;
 		}
 
-		// Input: the two capture fixes under test (were in General > General behavior).
+		// Input: the capture / display fix under test (was in General > General behavior). On the Input tab, so the Original
+		// pathway greys it; its runtime is off there too (CaptureDisplayFixes::Enabled, GEM-221 / MUST-8).
 		UnitCard CaptureFixesCard(EditorKit& kit)
+		{
+			auto* body = new QWidget;
+			auto* layout = new QVBoxLayout(body);
+			layout->setContentsMargins(0, 0, 0, 0);
+			layout->setSpacing(8);
+			// Restore switch (post-merge audit 2026-10-17): [general] capture_display_fixes.
+			if (QCheckBox* captureDisplayFixes = kit.bindCheckField(QStringLiteral("Capture / display fixes in Bill's code (fix under test)"),
+				QStringLiteral("general"), QStringLiteral("capture_display_fixes"), true))
+			{
+				captureDisplayFixes->setToolTip(QStringLiteral(
+					"On (default): the target-only full-screen session picks the monitor's largest mode first (then the "
+					"highest refresh) and never an interlaced one; a DeckLink Rec.601 source is recognised by its active "
+					"lines (486 / 480 NTSC, 576 PAL). Off: Bill's earlier behaviour - highest refresh first, interlaced "
+					"allowed, 486 lines left without a colour space and 576 on the analog PAL entry."));
+				layout->addWidget(captureDisplayFixes);
+			}
+			auto* note = Note(kit, QStringLiteral(
+				"On the Original pathway this is off: Bill's own capture and display behaviour, from the moment VideoProcessor "
+				"has read its profiles at start-up (a target-only full-screen session opened before that still follows this "
+				"switch). Read when VideoProcessor starts."));
+			note->setObjectName(QStringLiteral("vpv.input.capture_fixes.note"));
+			layout->addWidget(note);
+			return { QStringLiteral("input"), QStringLiteral("capture_fixes"), QStringLiteral("Capture fixes (under test)"),
+				QStringLiteral("VP's fix in Bill's capture and display code (was on Bill's General page)."), body };
+		}
+
+		// Both pathways (MUST-C): Magewell fault recovery under test (was in General > General behavior). Its runtime is
+		// inside Bill's Magewell code and is NOT tied to the Original pathway yet (owner item), so it is not greyed there.
+		UnitCard MagewellRecoveryCard(EditorKit& kit)
 		{
 			auto* body = new QWidget;
 			auto* layout = new QVBoxLayout(body);
@@ -66,21 +96,13 @@ namespace Vpv
 					"earlier behaviour - capture stops and needs a manual Restart."));
 				layout->addWidget(magewellRecover);
 			}
-			// Restore switch (post-merge audit 2026-10-17): [general] capture_display_fixes.
-			if (QCheckBox* captureDisplayFixes = kit.bindCheckField(QStringLiteral("Capture / display fixes in Bill's code (fix under test)"),
-				QStringLiteral("general"), QStringLiteral("capture_display_fixes"), true))
-			{
-				captureDisplayFixes->setToolTip(QStringLiteral(
-					"On (default): the target-only full-screen session picks the monitor's largest mode first (then the "
-					"highest refresh) and never an interlaced one; a DeckLink Rec.601 source is recognised by its active "
-					"lines (486 / 480 NTSC, 576 PAL). Off: Bill's earlier behaviour - highest refresh first, interlaced "
-					"allowed, 486 lines left without a colour space and 576 on the analog PAL entry."));
-				layout->addWidget(captureDisplayFixes);
-			}
-			layout->addWidget(Note(kit, QStringLiteral(
-				"On the Original pathway both are off: Bill's own capture and display behaviour. Read when VideoProcessor starts.")));
-			return { QStringLiteral("input"), QStringLiteral("capture_fixes"), QStringLiteral("Capture fixes (under test)"),
-				QStringLiteral("VP's fixes in Bill's capture and display code (were on Bill's General page)."), body };
+			auto* note = Note(kit, QStringLiteral(
+				"Applies on both pathways for now: this fix sits inside Bill's Magewell capture code and the Original pathway "
+				"does not switch it off yet (a known difference from Bill, waiting on the owner). Read when VideoProcessor starts."));
+			note->setObjectName(QStringLiteral("vpv.both.magewell_recovery.note"));
+			layout->addWidget(note);
+			return { QStringLiteral("both"), QStringLiteral("magewell_recovery"), QStringLiteral("Magewell fault recovery (under test)"),
+				QStringLiteral("VP's fault recovery in Bill's Magewell capture code (was on Bill's General page)."), body };
 		}
 
 		// Both pathways: room lights, the profile rules' `ambient` variable (Stage 9; was General > Room lights).
@@ -231,6 +253,7 @@ namespace Vpv
 		{
 			taken.push_back(RoomLightsCard(kit));
 			taken.push_back(FilePlaybackCard(kit));
+			taken.push_back(MagewellRecoveryCard(kit));
 		}
 		return taken;
 	}

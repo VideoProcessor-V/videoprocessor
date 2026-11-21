@@ -7,13 +7,16 @@
 // same object names, keys, defaults and save / load round trip as on the General page; labels and
 // tooltips unchanged. The VP-V page shows them as unit cards (Host::unitCards):
 //
-//   unit "input"   Capture fixes under test: [general] magewell_recover_faults, capture_display_fixes
-//                  (were in General > General behavior). On the Input tab, so the Original pathway greys
-//                  them (their runtime is off on Original).
+//   unit "input"   Capture fixes under test: [general] capture_display_fixes (was in General > General
+//                  behavior). On the Input tab, so the Original pathway greys it (its runtime is off on
+//                  Original: CaptureDisplayFixes::Enabled).
 //   "both"         Room lights: [ambient] mode, room, lux_lit, lux_dark, hold_s, port, baud (were the
 //                  General > Room lights card); room lights still steer the profile rules on Original.
 //                  File playback (VP Renderer filter): [general] file_av_offset_ms, file_led_holdover_ms
 //                  (were the General > File playback card).
+//                  Magewell fault recovery under test: [general] magewell_recover_faults (was in General >
+//                  General behavior); both pathways, because its runtime (Bill's Magewell code) is not tied
+//                  to the Original pathway yet (owner item; MUST-C).
 //
 // Compiled in VpvGeneralPageCards.cpp. UI thread only.
 

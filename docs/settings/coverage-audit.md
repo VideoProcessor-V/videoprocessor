@@ -695,7 +695,7 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `hold_s` | ambient | VP-V > On both pathways > Room lights | - | - | 5 | - | ORPHAN? |
 | `lux_dark` | ambient | VP-V > On both pathways > Room lights | - | - | 8 | - | ORPHAN? |
 | `lux_lit` | ambient | VP-V > On both pathways > Room lights | - | - | 20 | - | ORPHAN? |
-| `magewell_recover_faults` | general | VP-V > Input > Capture fixes (under test) | - | - | checked | - | retire A |
+| `magewell_recover_faults` | general | VP-V > On both pathways > Magewell fault recovery (under test) | - | - | checked | - | retire A |
 | `max_core_count` | directshow.conversion | General > Hardware | - | - | 1 | - |  |
 | `min_core_count` | directshow.conversion | General > Hardware | - | - | 1 | - |  |
 | `mode` | ambient | VP-V > On both pathways > Room lights | - | - | Off | - |  |
