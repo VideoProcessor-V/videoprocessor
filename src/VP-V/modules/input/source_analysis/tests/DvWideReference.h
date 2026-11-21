@@ -8,6 +8,8 @@
 // (q6 = code12 << 4; one histogram bin per whole axis code = q6 >> 6 = code12 >> 2, clamped to 1023). Mean, min and max are exact in Q6;
 // a percentile is the first bin whose cumulative count reaches max(1, q * samples). Tests only. CPU only.
 
+#include "CppUnitTest.h"
+
 #include <AnalysisLumaSource.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/modules/input/signal/DvTunnelTapLaw.h>
@@ -15,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <string>
 
 namespace DvWideReference
 {
@@ -52,8 +55,9 @@ namespace DvWideReference
 			for (int x = picture.left; x < picture.right; ++x)
 			{
 				uint16_t tap12 = 0;
-				if (!DvTunnelTapLaw::SourceTap12(source, x, y, tap12))
-					return false;
+				// One assert per pixel (as the ten-bit reference asserted source.Sample() per pixel): the first unreadable pixel is named.
+				Microsoft::VisualStudio::CppUnitTestFramework::Assert::IsTrue(DvTunnelTapLaw::SourceTap12(source, x, y, tap12),
+					(L"packed DV 12-bit tap unreadable at " + std::to_wstring(x) + L"," + std::to_wstring(y)).c_str());
 				const uint32_t code12 = mapFull ? DvTunnelTapLaw::FullLumaToLimited12(tap12) : tap12;
 				const uint32_t q6 = code12 << 4;
 				const uint32_t bin = (std::min)(q6 >> 6, static_cast<uint32_t>(FrameAnalysis::kHistogramBins - 1));

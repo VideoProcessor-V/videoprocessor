@@ -293,6 +293,11 @@ namespace FrameAnalysisProducerTestsNs
 						KindName(kind));
 					Assert::AreEqual(reference.range.btb, measured.range.btb, 1e-12);
 					Assert::AreEqual(reference.range.wtw, measured.range.wtw, 1e-12);
+					// WAIVER-S21-O3: the packed DV 12-bit read keeps its sub-code part exactly (Q6 mean / min / max): a tap-code error of a
+					// few codes inside one histogram bin is caught here, not by the whole-code histogram.
+					if (frame.source.format == AnalysisLumaFormat::PackedDolbyVision422)
+						Assert::IsTrue(reference.luma.meanQ6 == measured.luma.meanQ6 && reference.luma.minQ6 == measured.luma.minQ6 &&
+							reference.luma.maxQ6 == measured.luma.maxQ6, KindName(kind));
 					Assert::IsTrue(measured.luma.minimum <= measured.luma.p1 && measured.luma.p1 <= measured.luma.p50 &&
 						measured.luma.p50 <= measured.luma.p99 && measured.luma.p99 <= measured.luma.maximum);
 				}

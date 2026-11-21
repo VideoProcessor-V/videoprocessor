@@ -13,6 +13,7 @@
     "src/VP-V/modules/input/source_analysis/tests/DvTwelveBitTapTests.cpp",
     "src/VP-V/modules/input/source_analysis/tests/AnalysisWideningConsumerTests.cpp",
     "src/VP-V/modules/input/source_analysis/tests/DecodeOwnerIdentityTests.cpp",
+    "src/VP-V/modules/input/source_analysis/tests/DvWideReference.h",
     "src/VP-V/modules/input/source_analysis/tests/AnalysisAxisConsumerTests.cpp",
     "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp",
     "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h",
