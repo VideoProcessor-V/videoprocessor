@@ -308,8 +308,8 @@ namespace VideoProcessorTest
 				Assert::AreEqual(codes.size(), entry.second.size(),
 					ExtendedRangeGpuProbe::ToWide(std::string(entry.first) + " column count\n" + report).c_str());
 				for (size_t i = 0; i < codes.size(); ++i)
-					Assert::IsTrue(std::abs(entry.second[i] - codes[i]) <= 1,
-						ExtendedRangeGpuProbe::ToWide(std::string(entry.first) + " code[" + std::to_string(i) + "] expected " +
+					Assert::IsTrue(std::abs(entry.second[i] - codes[i]) <= (i < 8 ? 0 : 1),
+						ExtendedRangeGpuProbe::ToWide(std::string(entry.first) + " code[" + std::to_string(i) + (i < 8 ? "] exactly " : "] within 1 of ") +
 							std::to_string(codes[i]) + " got " + std::to_string(entry.second[i]) + "\n" + report).c_str());
 			}
 		}
