@@ -57,6 +57,8 @@ namespace
 		if (!result) throw std::runtime_error("Beta GPU: " + message);
 	}
 
+	struct Pixel { int r, g, b; };
+
 	// The Beta entry points are plain functions (also built into the console exe, which has no CppUnitTest), so these mirror
 	// HardwarePrerequisites::Required(Kind::Gpu / Kind::Footage) instead of including it: VP_TEST_REQUIRE_ALL=1 makes every kind of
 	// missing precondition fail (TQ-MC-S15a/S15b).
@@ -80,8 +82,6 @@ namespace
 		std::cout << "SKIP-NO-FOOTAGE " << report << ": " << why << "\n";
 		Check(!BetaRequireFootage(), report + ": " + why + " (VP_TEST_REQUIRE_FOOTAGE=1 or VP_TEST_REQUIRE_ALL=1: a missing clip fails)");
 	}
-
-	struct Pixel { int r, g, b; };
 
 	class Gpu
 	{
