@@ -6,6 +6,7 @@
 // lane B, which fills it: R3's own rule, then a photometric-disagreement demotion). Pure C++14, no Windows headers.
 #pragma once
 
+#include "CameraTestSeams.h"
 #include "PhotometricRefine.h"
 
 namespace CameraModel
@@ -14,6 +15,7 @@ namespace CameraModel
 	// precision (source px). Returns the result the fit must apply (status Refined = use result.model).
 	inline RefineResult PhotometricVerdict(const Params& vectorModel, const RefineResult& refined, double precisionPx)
 	{
+		CameraTestSeams::NotePhotometricVerdictCall();   // test-only seam: unarmed = one relaxed load, zero behaviour change
 		(void)vectorModel;
 		(void)precisionPx;
 		return refined;

@@ -94,5 +94,48 @@ namespace CameraModel
 		private:
 			size_t m_prev = 0;
 		};
+
+		// ---- Seam 4: PhotometricVerdict call counter ---------------------------------------------------------------------
+		// Unarmed in production: one relaxed atomic load reading false (zero atomic RMW, zero behaviour change).
+		// Armed by ScopedVerdictCallCounter: counts every invocation of CameraModel::PhotometricVerdict().
+		struct VerdictCounterState
+		{
+			std::atomic<bool> armed{ false };
+			std::atomic<uint64_t> calls{ 0 };
+		};
+
+		inline VerdictCounterState& VerdictCounter()
+		{
+			static VerdictCounterState s;
+			return s;
+		}
+
+		inline void NotePhotometricVerdictCall()
+		{
+			VerdictCounterState& s = VerdictCounter();
+			if (s.armed.load(std::memory_order_relaxed))
+				s.calls.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		class ScopedVerdictCallCounter
+		{
+		public:
+			ScopedVerdictCallCounter()
+			{
+				VerdictCounterState& s = VerdictCounter();
+				s.calls.store(0, std::memory_order_relaxed);
+				s.armed.store(true, std::memory_order_release);
+			}
+			~ScopedVerdictCallCounter()
+			{
+				VerdictCounter().armed.store(false, std::memory_order_release);
+			}
+			uint64_t Calls() const
+			{
+				return VerdictCounter().calls.load(std::memory_order_acquire);
+			}
+			ScopedVerdictCallCounter(const ScopedVerdictCallCounter&) = delete;
+			ScopedVerdictCallCounter& operator=(const ScopedVerdictCallCounter&) = delete;
+		};
 	}
 }

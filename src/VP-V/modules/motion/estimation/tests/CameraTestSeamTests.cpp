@@ -7,7 +7,11 @@
 
 // Package D: Camera Test Seams (CPU-only deterministic tests using production-inert atomic seams in CameraTestSeams.h).
 #include "CameraLinkTestSupport.h"
+#include "PhotometricRefineScenes.h"
 #include <VP-V/modules/motion/estimation/global_model/CameraTestSeams.h>
+#include <VP-V/modules/motion/estimation/global_model/GlobalModelFit.h>
+#include <VP-V/modules/motion/estimation/global_model/PhotometricVerdict.h>
+#include <VP-V/modules/motion/estimation/global_model/PhotometricWiring.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraFitFieldPod.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraLabelFill.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraLane.h>
@@ -15,6 +19,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -230,6 +235,129 @@ namespace VideoProcessorTest
 			const VpSkeleton::LaneLease fl = lane.Lease(VpSkeleton::kCameraFitField);
 			Assert::IsNotNull(fl.bytes);
 			Assert::IsTrue(fl.bytes->Bytes() >= worst, L"declared slot size must cover worst-case fit-field pod");
+		}
+	};
+
+	TEST_CLASS(CameraVerdictCounterSeamTests)
+	{
+	private:
+		static CameraSynth::Field MakePanField640x320(double tx, double ty, bool withBackward = false)
+		{
+			CameraSynth::GridSpec g;
+			g.w = 40;
+			g.h = 20;
+			g.blockSize = 16;
+			CameraSynth::Field f(g, R3Scenes::Pic(640, 320));
+			f.FromModel(CameraSynth::PanModel(tx, ty), withBackward);
+			return f;
+		}
+
+		static CameraModel::PairInput MakePairInput(const CameraSynth::Field& f, uint64_t seq)
+		{
+			return f.Input(1.0 / 24.0, seq);
+		}
+
+	public:
+		// Seam 4: PhotometricVerdict is invoked exactly once when R3 photometric refinement actually runs (both on
+		// Refined and on FellBack), and zero times when photometric input is absent, skipped (no luma / resolution), or cut.
+		TEST_METHOD(PhotometricVerdictCalledOnceWhenRefineRunsAndZeroWhenSkipped)
+		{
+			using namespace CameraModel;
+			const int w = 640, h = 320;
+			const double s = 1.0;
+			Assert::IsTrue(PhotometricFormPasses(s, static_cast<double>(h)), L"premise: s=1 passes resolution rule at 320 rows");
+			Assert::IsFalse(PhotometricFormPasses(2.0, static_cast<double>(h)), L"premise: s=2 fails resolution rule at 320 rows");
+
+			const std::vector<R3Scenes::Wave> waves = R3Scenes::MakeWaves(42, s, 45.0);
+			const std::vector<uint8_t> imgA = R3Scenes::To8(R3Scenes::RenderD(w, h, s, { R3Scenes::Shifted(waves, 0.0, 0.0) }, 1.0, 0.0, 101, 0.0));
+			const std::vector<uint8_t> imgB = R3Scenes::To8(R3Scenes::RenderD(w, h, s, { R3Scenes::Shifted(waves, 8.0, 0.0) }, 1.0, 0.0, 102, 0.0));
+			const std::vector<uint8_t> imgOpposite = R3Scenes::To8(R3Scenes::RenderD(w, h, s, { R3Scenes::Shifted(waves, -8.0, 0.0) }, 1.0, 0.0, 103, 0.0));
+
+			const CameraSynth::Field biasedField = MakePanField640x320(8.4, 0.0);
+
+			CameraTestSeams::ScopedVerdictCallCounter counter;
+			Fitter fitter;
+
+			// (A) No PhotometricInput -> 0 verdict calls.
+			{
+				PairInput in = MakePairInput(biasedField, 1);
+				const CameraMotion r = fitter.Fit(in);
+				Assert::IsTrue(r.valid && r.reason == Reason::Ok);
+				Assert::AreEqual<uint64_t>(0, counter.Calls(), L"no photometric input: 0 verdict calls");
+			}
+
+			// (B) Empty LumaPairView -> SkippedNoLuma, 0 verdict calls.
+			{
+				PairInput in = MakePairInput(biasedField, 2);
+				PhotometricInput pi;
+				in.photometric = &pi;
+				fitter.Fit(in);
+				Assert::IsTrue(pi.outcome == PhotometricOutcome::SkippedNoLuma);
+				Assert::AreEqual<uint64_t>(0, counter.Calls(), L"SkippedNoLuma: 0 verdict calls");
+			}
+
+			// (C) Coarse luma (s = 2 at 320 rows) -> SkippedResolution, 0 verdict calls.
+			{
+				PairInput in = MakePairInput(biasedField, 3);
+				PhotometricInput pi;
+				pi.luma = R3Scenes::View8(imgA, imgB, w, h, 2.0);
+				in.photometric = &pi;
+				fitter.Fit(in);
+				Assert::IsTrue(pi.outcome == PhotometricOutcome::SkippedResolution);
+				Assert::AreEqual<uint64_t>(0, counter.Calls(), L"SkippedResolution: 0 verdict calls");
+			}
+
+			// (D) Valid luma pair matching true pan (8.0, 0.0) vs biased vectors (8.4, 0.0) -> Refined, +1 verdict call.
+			{
+				PairInput in = MakePairInput(biasedField, 4);
+				PhotometricInput pi;
+				pi.luma = R3Scenes::View8(imgA, imgB, w, h, s);
+				in.photometric = &pi;
+				const CameraMotion r = fitter.Fit(in);
+				Assert::IsTrue(r.valid && pi.outcome == PhotometricOutcome::Refined, L"biased vectors must be refined by true luma pair");
+				Assert::AreEqual<uint64_t>(1, counter.Calls(), L"Refined path must invoke PhotometricVerdict exactly once");
+			}
+
+			// (E) Opposite-pan luma pair -> FellBack, +1 verdict call (total = 2).
+			{
+				PairInput in = MakePairInput(biasedField, 5);
+				PhotometricInput pi;
+				pi.luma = R3Scenes::View8(imgA, imgOpposite, w, h, s);
+				in.photometric = &pi;
+				const CameraMotion r = fitter.Fit(in);
+				Assert::IsTrue(r.valid && pi.outcome == PhotometricOutcome::FellBack, L"opposite luma must fall back");
+				Assert::AreEqual<uint64_t>(2, counter.Calls(), L"FellBack path must still invoke PhotometricVerdict exactly once");
+			}
+
+			// (F) Cut frame without next pair -> NotAttempted, +0 verdict calls (total stays 2).
+			{
+				PairInput in = MakePairInput(biasedField, 6);
+				in.cut = true;
+				PhotometricInput pi;
+				pi.luma = R3Scenes::View8(imgA, imgB, w, h, s);
+				in.photometric = &pi;
+				const CameraMotion r = fitter.Fit(in);
+				Assert::IsTrue(r.reason == Reason::Cut && pi.outcome == PhotometricOutcome::NotAttempted);
+				Assert::AreEqual<uint64_t>(2, counter.Calls(), L"cut frame must not invoke PhotometricVerdict");
+			}
+		}
+
+		// Seam 4: when ScopedVerdictCallCounter is not armed (production), PhotometricVerdict does not touch the counter
+		// and returns the refine result unchanged.
+		TEST_METHOD(PhotometricVerdictCounterIsInertWhenDisarmed)
+		{
+			using namespace CameraModel;
+			Assert::IsFalse(CameraTestSeams::VerdictCounter().armed.load(std::memory_order_acquire), L"must start disarmed");
+			const uint64_t before = CameraTestSeams::VerdictCounter().calls.load(std::memory_order_acquire);
+			RefineResult in;
+			in.status = RefineStatus::Refined;
+			in.model = R3Scenes::Translation(3.25, -1.5);
+			const RefineResult out = PhotometricVerdict(R3Scenes::Translation(3.0, -1.0), in, 0.25);
+			Assert::IsTrue(out.status == RefineStatus::Refined);
+			Assert::AreEqual(3.25, out.model.h[2]);
+			Assert::AreEqual(-1.5, out.model.h[5]);
+			Assert::AreEqual(before, CameraTestSeams::VerdictCounter().calls.load(std::memory_order_acquire),
+				L"disarmed PhotometricVerdict must not increment counter");
 		}
 	};
 }
