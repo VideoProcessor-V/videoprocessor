@@ -384,8 +384,8 @@ def generate_pairwise_cells(axes, defaults):
             for va in domains[a]:
                 for vb in domains[b]:
                     if a == 0 and b == 1:
-                        # Skip extreme down-conversion where display_hz < source_hz * 0.5
-                        if float(disp_list[vb][0] / src_list[va]) < 0.5:
+                        # Skip down-conversion where display_hz < source_hz (lossless no-drop cadence requires disp >= src)
+                        if float(disp_list[vb][0] / src_list[va]) < 1.0 - 1e-6:
                             continue
                     all_pairs.add((a, va, b, vb))
 
@@ -406,9 +406,9 @@ def generate_pairwise_cells(axes, defaults):
             best_v = None
             best_c = -1
             for v in domains[col]:
-                if col == 0 and row[1] is not None and float(disp_list[row[1]][0] / src_list[v]) < 0.5:
+                if col == 0 and row[1] is not None and float(disp_list[row[1]][0] / src_list[v]) < 1.0 - 1e-6:
                     continue
-                if col == 1 and row[0] is not None and float(disp_list[v][0] / src_list[row[0]]) < 0.5:
+                if col == 1 and row[0] is not None and float(disp_list[v][0] / src_list[row[0]]) < 1.0 - 1e-6:
                     continue
                 gain = 0
                 for prev_c in range(len(domains)):
