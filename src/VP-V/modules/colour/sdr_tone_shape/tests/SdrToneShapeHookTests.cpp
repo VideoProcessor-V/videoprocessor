@@ -744,5 +744,53 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
 		}
 
+
+		// GEM-015 (AMEND): the recovery blur reuses the centre tap (`(i == 0 && j == 0) ? L : to_linear(fetch)`) and keeps the SUM
+		// ORDER (the centre stays the fifth addend; Gemini's `vec3 blur = L` seed moved it to the first and changed the low bits).
+		// The output must be bit-identical to the pre-change shader that re-fetches the centre (tests/fixtures: the fixture copy,
+		// an opus-reviewed WAIVER), on a textured float field with plenty of values over the knee, for several recovery strengths.
+		// The recovery path must actually run (recovery on differs from recovery off), or the identity would be vacuous.
+		TEST_METHOD(SdrToneShapeRecoveryIsBitIdenticalToTheRefetch)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
+			ShaderHook current(fixture, "SDR tone shape.glsl", "sdr_tone_shape");
+			ShaderHook refetch(fixture, "pre-GEM-015 SDR tone shape.glsl", "sdr_tone_shape");
+			const int width = 64, height = 64;
+			const std::vector<float> source = TexturedField(width, height, 7777u, 0.2f, 1.1f);   // a non-flat 3x3 everywhere, most values over the knee
+			size_t compared = 0;
+			for (const double headroom : { 0.0, 0.05, 0.15 })
+				for (const double recovery : { 0.5, 1.0, 2.0 })
+				{
+					SetToneShape(current.hook, headroom, 0.5, 0.7, 2.2, recovery);
+					SetToneShape(refetch.hook, headroom, 0.5, 0.7, 2.2, recovery);
+					const std::vector<float> a = RenderFloatField(fixture, current.hook, width, height, source);
+					const std::vector<float> b = RenderFloatField(fixture, refetch.hook, width, height, source);
+					Assert::AreEqual(b.size(), a.size());
+					for (size_t i = 0; i < a.size(); ++i)
+					{
+						Assert::IsTrue(a[i] == b[i], (L"headroom " + std::to_wstring(headroom) + L" recovery " + std::to_wstring(recovery) +
+							L" sample " + std::to_wstring(i) + L": " + std::to_wstring(a[i]) + L" vs the re-fetch " + std::to_wstring(b[i])).c_str());
+						++compared;
+					}
+				}
+			Assert::IsTrue(compared >= 9 * 64 * 64 * 4);
+			// Non-vacuity: with recovery on, the picture differs from recovery off on many samples (the blur path ran).
+			SetToneShape(current.hook, 0.05, 0.5, 0.7, 2.2, 0.0);
+			const std::vector<float> off = RenderFloatField(fixture, current.hook, width, height, source);
+			SetToneShape(current.hook, 0.05, 0.5, 0.7, 2.2, 1.0);
+			const std::vector<float> on = RenderFloatField(fixture, current.hook, width, height, source);
+			size_t differing = 0;
+			for (size_t i = 0; i < on.size(); ++i)
+				differing += i % 4 != 3 && std::fabs(on[i] - off[i]) > 1e-4f ? 1 : 0;
+			Assert::IsTrue(differing * 10 > on.size() * 3 / 4, L"contrast recovery acted on at least 10 percent of the samples");
+			Logger::WriteMessage(("SDR tone shape recovery: " + std::to_string(compared) + " samples bit-identical to the re-fetch; " +
+				std::to_string(differing) + " samples moved by recovery\n").c_str());
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
+		}
+
 	};
 }
