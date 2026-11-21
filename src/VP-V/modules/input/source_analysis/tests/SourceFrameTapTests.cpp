@@ -399,6 +399,9 @@ namespace SourceFrameTapTestsNs
 		// GF-P2b S3 (2), test first (GV): with frame_analysis_store OFF by configuration and the store raised by a consumer's demand (the LED
 		// drive, through the skeleton), the frames that arrive after the raise get frame-analysis records and reach the tap's sink. If this is
 		// RED the follow-up is in VpFrameAnalysis::Host (the configured-off shared-plane flag), not here.
+		// The registered tap sink makes Tap::AnyWants true, as in production (the skeleton registers it), so AttachIfEnabled attaches the
+		// plane through the sink and the Host's SharedFlag (configured on AND full-luma readers) is NOT exercised here: the next test is
+		// the case without a sink.
 		TEST_METHOD(ARaisedStoreWithTheConfigurationOffProducesRecordsForTheFramesAfterTheRaise)
 		{
 			VpFrameAnalysis::Host host;
@@ -417,6 +420,26 @@ namespace SourceFrameTapTestsNs
 			Assert::AreEqual<size_t>(1, got.size(), L"and the tap's sink got the frame");
 			Tap::SetStoreDemand(&host, false, std::string());
 			Tap::Unregister(&host);
+			host.Worker().Stop();
+		}
+
+		// The same without a tap sink and with a full-luma reader configured (Configure(false, true, true)): the shared plane is attached by
+		// the Host's own flag. If this is RED (the flag is enabled AND readers, so a raised-only store attaches no plane), report it to
+		// GF-P2b / A20-C5; no code is changed here.
+		TEST_METHOD(ARaisedStoreWithTheConfigurationOffAttachesThePlaneForAConfiguredFullLumaReader)
+		{
+			VpFrameAnalysis::Host host;
+			host.Owner(&host).Configure(false, true, true);
+			Tap::SetStoreDemand(&host, true, "LED drive");
+			Assert::IsTrue(host.Enabled(), L"the demand turns the store on");
+			host.Worker().Stop();
+			Frame frame = Make(Kind::Uyvy, 1);
+			VpFrameAnalysis::Host::AttachIfEnabled(frame.source);
+			Assert::IsTrue(frame.source.sharedLuma != nullptr, L"the shared plane is attached for the reader");
+			host.OnArrival(5, frame.source, FrameAnalysis::Rect{}, 0, false);
+			host.Worker().Drain();
+			Assert::IsTrue(host.Store().HasRecord(5), L"a record exists for the frame that arrived after the raise");
+			Tap::SetStoreDemand(&host, false, std::string());
 			host.Worker().Stop();
 		}
 
