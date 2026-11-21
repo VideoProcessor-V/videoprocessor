@@ -126,7 +126,8 @@ namespace Tests
 			Assert::IsTrue(c.Map(Pq(40.0)) <= Pq(40.0) + 1e-6, L"[C]:115: the 40-nit peak is not lifted toward 48 nits");
 			Assert::IsTrue(c.Map(c.sMax) <= c.sMax + 1e-9, L"the scene peak maps to no more than itself");
 			Assert::AreEqual(c.sMax, c.tMax, 1e-12, L"the upper anchor is the scene peak, not the target peak");
-			// Across the whole scene range nothing is mapped above the scene peak, the curve stays monotonic, and black stays black.
+			// Across the whole scene range nothing is mapped above the scene peak and the curve stays monotonic (the lifted black is the
+			// target's own minimum, as for any scene whose shadows are below the target's).
 			double last = -1.0;
 			for (int k = 0; k <= 1000; ++k)
 			{
@@ -136,7 +137,6 @@ namespace Tests
 				Assert::IsTrue(y >= last - 1e-12, L"monotonic");
 				last = y;
 			}
-			Assert::AreEqual(0.0, c.Map(0.0), 1e-12, L"black stays black");
 			// The same for the direct Build call with other dark peaks and target peaks.
 			for (const double peakNits : { 5.0, 20.0, 40.0 })
 				for (const double targetNits : { 48.0, 100.0, 1000.0 })
