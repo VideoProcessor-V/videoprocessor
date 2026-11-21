@@ -226,7 +226,17 @@ namespace LaneAheadClaimTestsNs
 			Assert::IsTrue(set.StateOf(1) == SlotState::Published, L"Published, not Sealed");
 			const AnalysisLane::AheadRunResult p4 = r.lane.RunAheadNow(kP4SourceStats, 1);
 			Assert::IsTrue(p4.kind == AnalysisLane::AheadRun::Ran, L"P4 of frame 1 made now through the Published P1");
-			Assert::IsTrue(r.SlotBytes(kP4SourceStats, 1) == r.ExpectedStats(1), L"P4 = the one-shot law over the published input");
+			// P4 of frame 1 is itself Published (frame 1 is not sealed): read from its ring slot with allowPublished. ReadOf is the render
+			// read of a SEALED frame and answers None here.
+			Assert::IsTrue(st->IndexOf(kP4SourceStats) >= 0, L"P4 node");
+			const size_t p4i = size_t(st->IndexOf(kP4SourceStats));
+			SlotSet& set4 = st->table->At(p4i);
+			Assert::IsTrue(set4.StateOf(1) == SlotState::Published, L"P4 of frame 1 Published by the ahead run");
+			const ReadInfo ri4 = set4.Read(1, true);
+			Assert::IsTrue(ri4.kind == ReadInfo::Ring && st->bufs[p4i], L"P4 in its ring slot");
+			const uint8_t* p4bytes = st->bufs[p4i]->Ring(size_t(ri4.index));
+			const std::vector<uint8_t> made(p4bytes, p4bytes + st->bufs[p4i]->Bytes());
+			Assert::IsTrue(made == r.ExpectedStats(1), L"P4 = the one-shot law over the published input");
 			Assert::IsTrue(r.lane.AheadMadeByRender() == 1u, L"only P4 was made: the published P1 was read, not recomputed");
 		}
 
