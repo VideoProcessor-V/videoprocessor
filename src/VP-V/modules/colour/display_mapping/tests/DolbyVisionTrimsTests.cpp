@@ -421,5 +421,51 @@ namespace Tests
 			}
 		}
 
+		// GEM-008: an sRGB output uses the piecewise sRGB curve (the linear toe and the 2.4 power above 0.04045), matching both
+		// the closed form and libplacebo's own linearize, odd-symmetric; a power-law Signal (the default transfer) keeps the dv_gamma
+		// arithmetic bit-identically. Before the fix sRGB was the pure power law of dv_gamma.
+		TEST_METHOD(SrgbSignalUsesThePiecewiseCurve)
+		{
+			pl_color_space colour{};
+			colour.primaries = PL_COLOR_PRIM_BT_709;
+			colour.transfer = PL_COLOR_TRC_SRGB;
+			colour.hdr.max_luma = 100.0f;
+			pl_color_space_infer(&colour);
+			DolbyVisionTrims::Signal signal;
+			signal.pq = false;
+			signal.gamma = 2.2;   // what LedDisplayGamma gives sRGB: the pure power the curve replaces
+			signal.peakNits = 100.0;
+			Assert::IsTrue(ExtendedRange::DescribeTransfer(colour, true, signal.transfer));
+			Assert::IsTrue(signal.transfer.kind == ExtendedRange::TransferKind::Srgb);
+			for (int k = 0; k <= 40; ++k)
+			{
+				const double v = k / 40.0;
+				const double closed = v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
+				const double nits = DolbyVisionTrims::ToNits(v, signal);
+				Assert::AreEqual(closed, nits / signal.peakNits, 1e-12, L"ToNits is the piecewise sRGB EOTF");
+				float rgb[3] = { static_cast<float>(v), static_cast<float>(v), static_cast<float>(v) };
+				pl_color_linearize(&colour, rgb);
+				Assert::AreEqual(static_cast<double>(rgb[0]), nits / signal.peakNits, 1e-5, L"and matches pl_color_linearize");
+				Assert::AreEqual(v, DolbyVisionTrims::FromNits(nits, signal), 1e-9, L"FromNits inverts it");
+				Assert::AreEqual(-nits, DolbyVisionTrims::ToNits(-v, signal), 0.0, L"below black is odd-symmetric");
+			}
+			// The toe: the pure 2.2 power would give 0.02^2.2 = 1.8e-4; sRGB's linear toe gives 0.02 / 12.92 = 1.5e-3.
+			Assert::AreEqual(0.02 / 12.92 * 100.0, DolbyVisionTrims::ToNits(0.02, signal), 1e-12);
+			Assert::IsTrue(DolbyVisionTrims::ToNits(0.02, signal) > 5.0 * std::pow(0.02, 2.2) * 100.0, L"not the pure power in the toe");
+			// The default (power) transfer is untouched: bit-identical to the dv_gamma arithmetic, both signs.
+			DolbyVisionTrims::Signal power;
+			power.pq = false;
+			power.gamma = 2.4;
+			power.peakNits = 100.0;
+			for (const double v : { -0.1, 0.02, 0.3, 0.9, 1.05 })
+			{
+				const double a = std::pow(std::fabs(v), 2.4) * 100.0;
+				Assert::AreEqual(v < 0.0 ? -a : a, DolbyVisionTrims::ToNits(v, power), 0.0, L"power: dv_gamma arithmetic");
+				const double nits = DolbyVisionTrims::ToNits(v, power);
+				const double inverse = std::pow(std::fabs(nits) / 100.0, 1.0 / 2.4);
+				Assert::AreEqual(nits < 0.0 ? -inverse : inverse, DolbyVisionTrims::FromNits(nits, power), 0.0, L"power: inverse");
+			}
+		}
+
 	};
 }
