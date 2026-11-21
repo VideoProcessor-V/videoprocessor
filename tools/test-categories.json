@@ -419,9 +419,9 @@
   {
    "kind": "methodPrefix",
    "value": "RealClipCadenceAndFilmClock",
-   "category": "Slow",
+   "category": "Footage",
    "file": "src/VP-V/tests/suite/RealFootageSuiteTests.cpp",
-   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+   "note": "Real-footage clip run; runs only in the dedicated Footage job (TQ-X2)."
   },
   {
    "kind": "methodPrefix",
@@ -447,16 +447,16 @@
   {
    "kind": "methodPrefix",
    "value": "RealClipPlayerPulldown",
-   "category": "Slow",
+   "category": "Footage",
    "file": "src/VP-V/tests/suite/RealFootageSuiteTests.cpp",
-   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+   "note": "Real-footage clip run; runs only in the dedicated Footage job (TQ-X2)."
   },
   {
    "kind": "methodPrefix",
    "value": "RealClipSourceResolutionCutsAndLatch",
-   "category": "Slow",
+   "category": "Footage",
    "file": "src/VP-V/tests/suite/RealFootageSuiteTests.cpp",
-   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+   "note": "Real-footage clip run; runs only in the dedicated Footage job (TQ-X2)."
   },
   {
    "kind": "methodPrefix",
@@ -482,9 +482,9 @@
   {
    "kind": "methodPrefix",
    "value": "RealClipDiscontinuities",
-   "category": "Slow",
+   "category": "Footage",
    "file": "src/VP-V/tests/suite/RealFootageSuiteTests.cpp",
-   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+   "note": "Real-footage clip run; runs only in the dedicated Footage job (TQ-X2)."
   },
   {
    "kind": "methodPrefix",
