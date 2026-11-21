@@ -18,12 +18,14 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/core/hub/HostSlots.h>
 #include <VP-V/core/hub/HostState.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/FramesInFlight.h>
 #include <VP-V/core/PostPresentSpare.h>
 #include <VP-V/core/VramUsers.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
@@ -37,6 +39,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -267,6 +270,25 @@ namespace SkeletonModuleTestsNs
 		c.host = rig.Host(); c.phase = RE::FramePhase::CollectAhead; c.phaseData = &view;
 		Assert::IsFalse(rig.sk.OnFrame(c), L"the skeleton never takes a phase over");
 	}
+
+	// A skeleton module in the hub whose scene product misses with a scripted `why` (what SceneGroupOf reads through the hub's query).
+	struct MissingSceneDemand : Vpv::Hub::ISkeletonModule, Vpv::Skeleton::IExternalDemand
+	{
+		const char* Name() const override { return "test skeleton (scene miss)"; }
+		void* Query(const char* iid) override
+		{
+			return iid != nullptr && std::strcmp(iid, Vpv::Skeleton::kExternalDemandQueryId) == 0 ? static_cast<Vpv::Skeleton::IExternalDemand*>(this) : nullptr;
+		}
+		void SetExternalDemand(const void*, const void*, const std::vector<VpSkeleton::ConsumerDecl>&, const std::vector<VpSkeleton::ProductId>&) override {}
+		void ClearExternalDemand(const void*, const void*) override {}
+		Vpv::Skeleton::SceneAnswer SceneOf(const void*, uint64_t) const override
+		{
+			Vpv::Skeleton::SceneAnswer a;   // known = false
+			a.why = why;
+			return a;
+		}
+		const char* why = "";
+	};
 
 	// A scripted vector engine (P5a's IVectorEngine): what the feed reads.
 	struct FakeEngine : VpMotion::IVectorEngine
@@ -2165,6 +2187,35 @@ namespace SkeletonModuleTestsNs
 				Assert::IsTrue(group.confirmed, (L"iteration " + std::to_wstring(i) + L": frame " + std::to_wstring(s) + L" ends confirmed").c_str());
 			}
 			Assert::IsTrue(misses < kIter / 2, L"the other thread's fill really wrote groups (else this tests nothing)");
+		}
+
+		// GF-P2a S12: a scene miss shows the skeleton's own reason (SceneAnswer::why, an AcquireCause token or the like); only when it
+		// gives none does SceneGroupOf fall back to the generic text.
+		TEST_METHOD(ASceneGroupMissNamesTheSkeletonsOwnReasonAndFallsBackToTheGenericText)
+		{
+			MissingSceneDemand* fake = new MissingSceneDemand();
+			Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+			Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(fake));
+			struct HubReset
+			{
+				~HubReset() { Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); }
+			} hubReset;
+			int host = 0;
+			FrameAnalysis::Scene scene;
+			const char* why = nullptr;
+			fake->why = "not_planned_ahead";
+			Assert::IsFalse(Vpv::Skeleton::SceneGroupOf(&host, 7, scene, &why));
+			Assert::IsNotNull(why);
+			Assert::AreEqual(std::string("not_planned_ahead"), std::string(why), L"the skeleton's own token is the reason");
+			fake->why = "";
+			why = nullptr;
+			Assert::IsFalse(Vpv::Skeleton::SceneGroupOf(&host, 7, scene, &why));
+			Assert::IsNotNull(why);
+			Assert::IsTrue(std::string(why).find("the skeleton could not classify the frame") == 0, L"no reason given: the generic text");
+			fake->why = nullptr;   // a null reason is no reason either
+			why = nullptr;
+			Assert::IsFalse(Vpv::Skeleton::SceneGroupOf(&host, 7, scene, &why));
+			Assert::IsTrue(why != nullptr && std::string(why).find("the skeleton could not classify the frame") == 0);
 		}
 
 		TEST_METHOD(ARegisteredButDisabledStoreCostsNothingAtTheSeal)
