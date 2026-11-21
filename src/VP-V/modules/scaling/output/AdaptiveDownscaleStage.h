@@ -151,8 +151,12 @@ namespace AdaptiveDownscaleStage
 		FallbackCatalog::Decision TemporalDetailFallback() const { return tdRead.fallback; }
 
 		// X5-GRAIN-P10 (gate cb-u1 r1 SHOULD 6): the host offers the shared grain products (Host::grainSource) but the scaler
-		// did not use them on the last read-back frame. That engages "product.adaptive_downscale" with the reason, as the
-		// temporal-detail read path does; not offered (no callback) is no downgrade (the private estimate is then the design).
+		// did not use them on the last read-back frame. That engages "product.adaptive_downscale" with the reason; not offered
+		// (no callback) is no downgrade (the private estimate is then the design).
+		// Two entries by design (gate cb-u1 r3 MUST 1): the grain decision is a CLASSICAL cause and owns the bare id (host:
+		// FallbackCatalog::Sync(registry, GrainSourceFallback())); the temporal-detail read is keyed by cause,
+		// "product.adaptive_downscale [td: ...]" (TdProducts::FallbackKey; host: TdProducts::SyncRead on TemporalDetailRead()),
+		// never Sync() under the bare id. Neither stands for, overwrites or releases the other (TdProductReads.h).
 		FallbackCatalog::Decision GrainSourceFallback() const
 		{
 			const char* id = "product.adaptive_downscale";
@@ -168,23 +172,6 @@ namespace AdaptiveDownscaleStage
 			case AdaptiveDownscale::GrainSourceUse::NotSupplied: break;
 			}
 			return FallbackCatalog::Engaged(id, "grain: the offered shared products are invalid (missing or grid mismatch)");
-		}
-
-		// Gate cb-u1 r2 NIT (one id): TemporalDetailFallback() and GrainSourceFallback() are two reasons of ONE catalog entry.
-		// "product.adaptive_downscale" is the id the product catalog rows of this consumer name (ProductCatalog.h) and its
-		// FallbackCatalog::ProductEntries text already covers "its own edge, grain and cut terms", so a second id would be a
-		// second notice for the same consumer. Because a registry keyed by id keeps one decision per id, a host must Sync THIS
-		// merged decision, never the two parts one after the other (the second would overwrite the first): engaged when
-		// either part is, with both reasons joined by "; ".
-		FallbackCatalog::Decision ProductFallback() const
-		{
-			const FallbackCatalog::Decision td = TemporalDetailFallback(), grain = GrainSourceFallback();
-			if (!td.engaged && !grain.engaged)
-				return FallbackCatalog::Released("product.adaptive_downscale");
-			std::string reason = td.engaged ? td.reason : std::string();
-			if (grain.engaged)
-				reason += (reason.empty() ? "" : "; ") + grain.reason;
-			return FallbackCatalog::Engaged("product.adaptive_downscale", reason);
 		}
 
 	private:

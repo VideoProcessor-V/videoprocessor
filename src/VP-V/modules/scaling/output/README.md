@@ -225,8 +225,10 @@ reason (gate cb-u1 r1, 2026-11-21):
   are never a transient "no usable block".
 
 When the host offers the products but they are not used, `Stage::GrainSourceFallback()` engages FallbackCatalog
-"product.adaptive_downscale" with the reason (SHOULD 6); pending engages nothing. The temporal-detail read path uses the same id
-(the consumer's one catalog entry), so a host syncs `Stage::ProductFallback()`, which merges both reasons into one decision. The per-block non-finite test uses the IEEE bit pattern (SHOULD 2).
+"product.adaptive_downscale" with the reason (SHOULD 6); pending engages nothing. The grain decision is a classical cause and owns the bare
+id: the host syncs it with `FallbackCatalog::Sync(registry, GrainSourceFallback())`. The temporal-detail read path is keyed by cause
+("product.adaptive_downscale [td: ...]", `TdProducts::FallbackKey`) and the host syncs it with `TdProducts::SyncRead`. They are two
+entries by design (gate cb-u1 r3 MUST 1). The per-block non-finite test uses the IEEE bit pattern (SHOULD 2).
 `kEdgeEnergyPerSigma` is 3.5682482 (SHOULD 1). The white-noise mapping still needs the registered GPU calibration
 (FIX-X5-GRAIN-P10) before a host wires the source. Once the host
 supplies the source on every frame the private partial terms (`MEASURE_BODY` lap / flat_px, the `AD_P10`-less branch) are deleted.
