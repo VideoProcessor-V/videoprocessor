@@ -47,6 +47,7 @@ param(
     [string]$Dll = (Join-Path $PSScriptRoot "..\x64\Release\VideoProcessor-Test.dll"),
     [string]$Names = "ExtendedRange|SigmaDelta|Interpolator|DolbyVision|DelayGate|CombinationRunner|PipelineSkeletonTests",
     [switch]$NoSettingsChecks,   # skip the VP-V data checks (settings agent 2026-10-24)
+    [switch]$NoPySuites,         # skip the PY lane (every Python unittest suite under tools/, TQ-RG-P1; needs the Release build at the Dll folder)
     [switch]$AllowBattery,       # GPU runs need mains power (owner rule); this overrides the check
     [switch]$Footage,            # also run the Footage category with VP_TEST_REQUIRE_FOOTAGE=1 (a missing clip fails)
     [switch]$Corpus,             # also run the Corpus category with VP_TEST_REQUIRE_CORPUS=1 (a missing corpus fails)
@@ -99,6 +100,15 @@ if (-not $NoSettingsChecks) {
 }
 if ($Fullscreen -and $Fullscreen -notin @("0", "1", "both")) { throw "-Fullscreen takes 0, 1 or both" }
 $Dll = (Resolve-Path $Dll).Path
+# The PY lane (TQ-RG-P1): every Python unittest suite under tools/ runs after the Release build (VP_BUILD_ROOT = the folder of
+# the Test DLL; tools/test_libplacebo_variants.py loads the packaged renderers there and FAILS when they are missing). Any failing,
+# empty or timed-out suite directory fails the gate; the per-directory counts are printed.
+if (-not $NoPySuites) {
+    $savedBuildRoot = $env:VP_BUILD_ROOT
+    $env:VP_BUILD_ROOT = Split-Path -Parent $Dll
+    try { & python -I (Join-Path $PSScriptRoot "run_py_suites.py") | ForEach-Object { "$_" } } finally { $env:VP_BUILD_ROOT = $savedBuildRoot }
+    if ($LASTEXITCODE -ne 0) { throw "PY lane failed (tools/run_py_suites.py exit $LASTEXITCODE)" }
+}
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $vstest = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter vstest.console.exe -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -like "*TestPlatform*" } | Select-Object -First 1

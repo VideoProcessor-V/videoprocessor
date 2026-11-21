@@ -229,8 +229,18 @@ def scan_file(path):
 
     A #define body is not scanned as code (its TEST_METHOD(NAME) names a parameter, not a test); each invocation of
     a test-method wrapper macro is a test named by its argument. Raises ScanError on an ALL-CAPS placeholder name."""
-    with open(path, encoding='utf-8', errors='replace') as f:
-        return scan_text(f.read(), path)
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_mtime_ns, st.st_size)
+    cached = _SCAN_CACHE.get(key)
+    if cached is None:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            cached = _SCAN_CACHE[key] = scan_text(f.read(), path)
+    return [dict(t) for t in cached]   # a caller may edit its copy; a ScanError is never cached (it propagates first)
+
+
+# One process scans the same ~500 test sources many times (the generator, the checkers, their tests): keyed by path,
+# mtime and size, so a changed file is read again.
+_SCAN_CACHE = {}
 
 
 def entry_matches(entry, cls, method):

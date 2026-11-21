@@ -61,6 +61,19 @@ class DedicatedJobSwitches(unittest.TestCase):
             self.assertIn('"%s"' % marker, text)
         self.assertIn("$noDedicated.Count -gt 0", text)
 
+    def test_the_py_lane_runs_by_default_after_the_build_and_fails_the_gate(self):
+        # TQ-RG-P1: the lane is a default step (-NoPySuites skips it), runs with VP_BUILD_ROOT at the Test DLL's folder,
+        # and a non-zero exit throws.
+        with open(GATE, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("[switch]$NoPySuites", text)
+        self.assertIn("if (-not $NoPySuites)", text)
+        self.assertIn('"run_py_suites.py"', text)
+        self.assertIn("$env:VP_BUILD_ROOT = Split-Path -Parent $Dll", text)
+        self.assertIn('throw "PY lane failed', text)
+        self.assertLess(text.index("if (-not $NoPySuites)"), text.index("vstest.console.exe"))
+        self.assertGreater(text.index("if (-not $NoPySuites)"), text.index("$Dll = (Resolve-Path $Dll).Path"))
+
 
 if __name__ == "__main__":
     unittest.main()

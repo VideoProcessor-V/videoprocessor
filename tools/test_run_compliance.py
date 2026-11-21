@@ -47,6 +47,33 @@ class RunComplianceTests(unittest.TestCase):
     def test_selftest(self):
         self.assertEqual(RC.main(["--selftest"]), 0)
 
+    def test_py_lane_is_opt_in_and_registered(self):
+        # TQ-RG-P1: the PY lane (every Python suite) is not in the default checker list; --py-lane adds it.
+        self.assertNotIn("py_suites", [t[0] for t in RC.TOOLS])
+        self.assertEqual(RC.PY_LANE[:2], ("py_suites", "run_py_suites.py"))
+        self.assertTrue(os.path.isfile(os.path.join(os.path.dirname(_p), RC.PY_LANE[1])))
+        import contextlib
+        import io
+        for flag, expected in (([], False), (["--py-lane"], True)):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(RC.main(["--list"] + flag), 0)
+            self.assertEqual("py_suites" in out.getvalue(), expected, flag)
+
+    def test_py_lane_has_a_longer_limit_than_a_checker(self):
+        import subprocess
+        seen = []
+        real = subprocess.run
+        subprocess.run = lambda *a, **k: (seen.append(k.get("timeout")), real(*a, **k))[1]
+        try:
+            with tempfile.TemporaryDirectory() as r:
+                _tool(r, "run_py_suites.py", 0)
+                _tool(r, "a.py", 0)
+                RC.run_all(r, [RC.PY_LANE, ("a", "a.py", [], False)])
+        finally:
+            subprocess.run = real
+        self.assertEqual(seen, [3600, 600])
+
 
 if __name__ == "__main__":
     unittest.main()
