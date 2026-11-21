@@ -34,6 +34,7 @@ namespace StatusExtension
 		if (isAlphaRenderer)
 			lines.dejudder = snapshot.vp.dejudder.text;
 		lines.resync = snapshot.vp.resync.text;
+		lines.appearance = snapshot.vp.appearance.text;   // CF-1 FIX1 SHOULD 5
 		lines.fallbacks = snapshot.vp.fallbacks.text;
 		return VpStatusText::BuildCtrlIRows(lines);
 	}

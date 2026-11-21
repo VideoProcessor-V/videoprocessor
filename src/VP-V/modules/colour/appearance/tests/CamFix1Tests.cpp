@@ -5,6 +5,7 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/FallbackPlainText.h>
 #include <VP-V/core/ProductCatalog.h>
+#include <VP-V/core/StatusText.h>
 #include <VP-V/modules/colour/appearance/AppearanceStage.h>
 #include <VP-V/modules/colour/display_mapping/DvHostStage.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
@@ -452,6 +453,41 @@ namespace Tests
 			Assert::IsNull(LiveFillOwner(kRoomLight), L"held state: nothing fills it live");
 			Assert::AreEqual(std::string("product.room_light"), std::string(row.fallbackId));
 			Assert::IsNotNull(FallbackCatalog::FindProductEntry("product.room_light"), L"the fallback id exists");
+		}
+	};
+
+	// SHOULD 5 (gate CF1-347e0546f): appearance OFF (and every other appearance state) is a Ctrl+I row through the VP-V status
+	// seam (VpStatusText "appearance" key -> StatusExtension::CtrlIRows "Appearance:"), not only the Config card.
+	TEST_CLASS(AppearanceCtrlIFix1Tests)
+	{
+	public:
+		TEST_METHOD(AppearanceOffReachesTheCtrlIRows)
+		{
+			VpStatusText::RendererLines<char> lines;
+			lines.appearance.Set(true, "appearance: off");
+			const std::string text = VpStatusText::ComposeRendererModule(lines);
+			Assert::IsTrue(text.find("appearance=appearance: off") != std::string::npos, L"the renderer module carries the line");
+			const VpStatusText::RendererLines<char> back = VpStatusText::ReadRendererModule(text);
+			Assert::IsTrue(back.appearance.Shown());
+			Assert::AreEqual(std::string("appearance: off"), back.appearance.text);
+
+			VpStatusText::CtrlILines<char> ctrlI;
+			ctrlI.appearance = back.appearance.text;
+			const VpStatusText::CtrlIRows<char> rows = VpStatusText::BuildCtrlIRows(ctrlI);
+			bool shown = false;
+			for (const auto& row : rows.afterShaders)
+				shown = shown || (row.label == "Appearance:" && row.value == "appearance: off");
+			Assert::IsTrue(shown, L"Ctrl+I shows Appearance: appearance: off");
+
+			const std::string ext = Fix1ReadUp("src\\VP-V\\modules\\control\\diagnostics\\StatusExtension.cpp");
+			const std::string methods = Fix1ReadUp("src\\VP-V\\modules\\control\\diagnostics\\StatusMethods.inl");
+			const std::string stage = Fix1ReadUp("src\\VP-V\\modules\\colour\\display_mapping\\DvHostStage.h");
+			if (ext.empty() || methods.empty() || stage.empty())
+				return;   // not reachable from this working directory
+			Assert::IsTrue(Fix1Has(ext, "lines.appearance = snapshot.vp.appearance.text;"), L"the GUI side passes it to the rows");
+			Assert::IsTrue(Fix1Has(methods, "lines.appearance.Set(true, CString(m_impl->dvStage.AppearanceStatusShown().c_str()).GetString());"),
+				L"the renderer fills it from the stage");
+			Assert::IsTrue(Fix1Has(stage, "m_appearanceShown = m_appearanceStatus;"), L"the stage publishes its status line");
 		}
 	};
 }

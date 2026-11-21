@@ -58,6 +58,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -212,7 +213,13 @@ public:
 	//   PrepareAppearance (phase 1, with PrepareToneAndTrims): decide, configure and ensure the hook when it will run;
 	//   FinishAppearance  (phase 2, with FinishTrims): the shader-missing fallback and the status line.
 	CustomHookChain::Chain& AppearanceHook() { return m_appearanceHook; }
-	const std::string& AppearanceStatus() const { return m_appearanceStatus; }
+	const std::string& AppearanceStatus() const { return m_appearanceStatus; }   // render thread
+	// CF-1 FIX1 SHOULD 5: the same line for the status thread (Ctrl+I "Appearance:"), copied under its own lock.
+	std::string AppearanceStatusShown() const
+	{
+		std::lock_guard<std::mutex> guard(m_appearanceShownMutex);
+		return m_appearanceShown;
+	}
 	const AppearanceStage::Decision& AppearanceDecision() const { return m_appearanceDecision; }
 	// displayedCuts: the intent interpreter's running count of displayed cuts (a change = the room change may land now).
 	const AppearanceStage::Decision& PrepareAppearance(AppearanceStage::Inputs in, const CustomHookChain::TemplateValues& hookTemplates,
@@ -262,6 +269,10 @@ public:
 			m_appearanceStatus = m_appearanceWanted ? m_appearanceDecision.status : std::string("appearance: off");
 		if (m_appearanceStatus != m_appearanceLogged)   // on change only
 		{
+			{
+				std::lock_guard<std::mutex> guard(m_appearanceShownMutex);
+				m_appearanceShown = m_appearanceStatus;
+			}
 			m_appearanceLogged = m_appearanceStatus;
 			DebugLog::Log("%s%s", m_appearanceStatus.c_str(), m_appearanceWanted ? " (replaces the gamma boost and saturation steps)" : "");
 		}
@@ -505,6 +516,8 @@ private:
 	RoomLight::Smoother m_roomSmoother;      // CAM-3: the appearance path's own minutes-scale room adaptation
 	AppearanceStage::Decision m_appearanceDecision;
 	std::string m_appearanceStatus = "appearance: off";
+	mutable std::mutex m_appearanceShownMutex;
+	std::string m_appearanceShown = "appearance: off";   // FIX1 SHOULD 5: read by the status thread
 	bool m_appearanceConfigured = false;
 	bool m_appearanceWanted = false;
 	std::string m_appearanceLogged;     // CAM-4: the status last logged (on change)
