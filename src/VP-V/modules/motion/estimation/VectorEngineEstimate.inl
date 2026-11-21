@@ -370,6 +370,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	// plan (b) are not offered and are shown as such.
 	const char* const pyramidException = dejudderLayout.rgb ? "RGB source: the matcher's luma comes from the RGB unpack" :
 		dejudderLayout.dvTunnelRaw ? "Dolby Vision tunnel: the matcher's luma is the DV unpack output" : nullptr;
+	vectorEngine.NoteMatcherEpoch(motionValidity.Epoch());   // an epoch change forgets the offers: no A across a discontinuity
 	if (pyramidException == nullptr)
 	{
 		if (ahead)

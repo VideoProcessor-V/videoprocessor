@@ -469,7 +469,12 @@ namespace VpMotion
 			std::mutex m;
 			Entry entries[kEntries];
 			size_t next = 0;
+			uint64_t epoch = 0;
+			bool epochKnown = false;
 		};
+		// Render thread, before the offers of an estimate: a motion-validity epoch change (resync, seek, discontinuity) forgets every
+		// earlier offer, so a frame of an older epoch is never recognised as A (its kept product is not reused across the change).
+		void NoteMatcherEpoch(uint64_t epoch) const;
 
 	private:
 		std::shared_ptr<MatcherOfferLog> matcherOffers_ = std::make_shared<MatcherOfferLog>();

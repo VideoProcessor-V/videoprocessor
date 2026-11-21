@@ -1303,6 +1303,18 @@ namespace VpMotion
 		return true;
 	}
 
+	void VectorEngine::NoteMatcherEpoch(uint64_t epoch) const
+	{
+		std::lock_guard<std::mutex> lock(matcherOffers_->m);
+		if (matcherOffers_->epochKnown && matcherOffers_->epoch == epoch)
+			return;
+		for (MatcherOfferLog::Entry& e : matcherOffers_->entries)
+			e = MatcherOfferLog::Entry();
+		matcherOffers_->next = 0;
+		matcherOffers_->epoch = epoch;
+		matcherOffers_->epochKnown = true;
+	}
+
 	MatcherPyramid::Source VectorEngine::MatcherPyramidSource(const char* namedException) const
 	{
 		const void* memoHost = host_;
@@ -1364,7 +1376,8 @@ namespace VpMotion
 				}
 				if (!known)
 				{
-					out.cause = "no shared source luma for this frame";
+					// The first pair after a start, a seek, a gap or a resync (its A was never a B), or an offer the table refused.
+					out.cause = "first pair after a start or a gap: A has no kept product yet";
 					return out;
 				}
 				if (range != q.fullRange)

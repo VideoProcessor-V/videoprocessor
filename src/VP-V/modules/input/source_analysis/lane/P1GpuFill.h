@@ -31,6 +31,7 @@
 
 // libplacebo's texture handle, forward-declared (pl_tex = const pl_tex_t*, libplacebo gpu.h).
 struct pl_tex_t;
+namespace VpSkeleton { struct OwnerFill; }
 
 namespace VpFrameAnalysis
 {
@@ -226,6 +227,9 @@ if (p.x < size.x && p.y < size.y) {
 	// for the lowRes inner (luma = the outer half, codes 1) levels 2 / 4 / 6. False = a pass failed (the runner's error).
 	bool BuildPyramidInto(const PyramidPassRunner& run, const pl_tex_t* luma, float codes, const pl_tex_t* half, const pl_tex_t* l1,
 		const pl_tex_t* l2, int from, int levels);
+	// THE (kP1HalfLuma, Gpu) owner fill of the matcher pyramid variant, as the P1 module registers it (defined in P1GpuFill.cpp);
+	// public so a GPU test registers the production fill itself, never a copy.
+	VpSkeleton::OwnerFill MatcherPyramidOwnerFill(uint64_t reserveBytes);
 }
 }
 

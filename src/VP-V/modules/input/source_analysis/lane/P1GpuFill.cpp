@@ -270,6 +270,8 @@ namespace P1Gpu
 			return f;
 		}
 	}
+
+	VpSkeleton::OwnerFill MatcherPyramidOwnerFill(uint64_t reserveBytes) { return MakeP1GpuOwnerFill(reserveBytes); }
 }
 }
 
@@ -319,7 +321,9 @@ namespace Vpv
 				Observe(c.host, luma);
 				return false;
 			}
-			bool Observe(const void* host, VpSkeleton::Dims luma, Skeleton::IExternalDemand* demand = nullptr)
+			// onlyIfUnknown: the matcher's offers (NoteP1GpuSourceLuma) only seed a host's size before its first Entrance; the
+			// Entrance stays the one source of a host's size afterwards, so two notifiers can never alternate registrations.
+			bool Observe(const void* host, VpSkeleton::Dims luma, Skeleton::IExternalDemand* demand = nullptr, bool onlyIfUnknown = false)
 			{
 				std::lock_guard<std::mutex> g(mutex_);
 				bool found = false;
@@ -327,7 +331,7 @@ namespace Vpv
 				{
 					if (h.host == host)
 					{
-						if (h.luma.width != luma.width || h.luma.height != luma.height)
+						if (!onlyIfUnknown && (h.luma.width != luma.width || h.luma.height != luma.height))
 						{
 							h.luma = luma;
 							h.bytes = ReserveFor(luma);
@@ -426,7 +430,7 @@ namespace Vpv
 			VpSkeleton::Dims luma;
 			luma.width = width;
 			luma.height = height;
-			module->Observe(host, luma);
+			module->Observe(host, luma, nullptr, true);
 		}
 	}
 }
