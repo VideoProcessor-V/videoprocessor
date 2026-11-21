@@ -146,6 +146,32 @@ namespace Tests
 				}
 		}
 
+		// GEM-006: a scene that COMPRESSES (its peak above the target's) is untouched by the dark-scene clamp: min(tMax, sMax) is
+		// tMax there, so sMid / tMid / c1 / c2 / c3 are exactly what the pre-fix code (d0fc40841) produced. The pins are the
+		// pre-fix arithmetic evaluated in IEEE double (a line-for-line port of the pre-fix Build and Solve over the DvMath PQ).
+		TEST_METHOD(CompressingSceneCurveIsUnchanged)
+		{
+			using namespace DvDolby;
+			struct Pin { double sMin, sAvg, sMax, tMin, tMax, sMid, tMid, c1, c2, c3; };
+			const Pin pins[] = {
+				{ 0.001, 40.0, 1000.0, 0.005, 48.0, 0.419284117712411, 0.3732082723629364, -0.001680468765265592, 2.733106298397453, 4.927516856072622 },
+				{ 0.001, 150.0, 4000.0, 0.005, 100.0, 0.5493020361319259, 0.4341281181461443, 0.0020497482891898224, 2.113006050792937, 3.055344148528117 },
+				{ 0.01, 10.0, 600.0, 0.0001, 300.0, 0.29969909242098597, 0.29969909242098597, -0.024641217446563564, 1.2252274367773122, 0.47717053640945967 },
+			};
+			for (const Pin& p : pins)
+			{
+				const DvDolbyStyle::Curve c = DvDolbyStyle::Build(Pq(p.sMin), Pq(p.sAvg), Pq(p.sMax), Pq(p.tMin), Pq(p.tMax));
+				Assert::IsFalse(c.identity);
+				Assert::AreEqual(Pq(p.tMax), c.tMax, 0.0, L"the upper anchor is the target peak (the scene is brighter)");
+				Assert::AreEqual(p.sMid, c.sMid, 1e-12, L"sMid");
+				Assert::AreEqual(p.tMid, c.tMid, 1e-12, L"tMid");
+				Assert::AreEqual(p.c1, c.c1, 1e-12, L"c1");
+				Assert::AreEqual(p.c2, c.c2, 1e-12, L"c2");
+				Assert::AreEqual(p.c3, c.c3, 1e-12, L"c3");
+				Assert::AreEqual(Pq(p.tMax), c.Map(c.sMax), 1e-9, L"scene max -> target max, as before");
+			}
+		}
+
 		TEST_METHOD(IctcpRoundTripsAndGreyIntensityIsPqOfLuminance)
 		{
 			const DvDolbyStyle::IctcpSignal s = DvDolby::Sdr(100.0);
