@@ -1,21 +1,35 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// G1 (GEM-DV-PERF) before / after timing of the two colour shaders the DV-PERF fixes change: DV trims.glsl (GEM-012, the L8
-// and ICtCp paths) and SDR tone shape.glsl (GEM-015, the headroom-only short-circuit). Category GpuHardware: they run on a
-// gpu=yes line (VP_TEST_GPU=hardware, VP_TEST_ADAPTER=NVIDIA) and are quoted from the TRX StdOut by the gate, once BEFORE
-// and once AFTER the fix commit, on the same laptop on mains with the GPU otherwise idle. Method (plan 3, the speed-up
-// method): median of 40 frames with pl_gpu_finish around each, one 3840x2160 hook pass at a time, plus the same render
-// without the hook so the pass's own cost is the difference. The timing is logged, never asserted against a bound; what IS
-// asserted is that the hook rendered (the log is clean) and changed the picture, so a pass that silently did nothing cannot be
-// timed. A missing GPU precondition FAILS under VP_TEST_REQUIRE_GPU=1 (RequireOrSkip), never passes by skipping.
+// G1 (GEM-DV-PERF) measured before / after speed-up of the two colour shaders the DV-PERF fixes change: DV trims.glsl (GEM-012,
+// the L8 and ICtCp paths) and SDR tone shape.glsl (GEM-015, the headroom-only short-circuit). Category GpuHardware: they run on a
+// gpu=yes line (VP_TEST_GPU=hardware, VP_TEST_ADAPTER=NVIDIA), same laptop, on mains, GPU otherwise idle. Method (plan 3): median
+// of 40 frames with pl_gpu_finish around each, one 3840x2160 hook pass at a time, plus the same render without the hook; the
+// pass cost is the difference.
+//
+// BEFORE / AFTER procedure (gate G1 MUST-6, coordinator condition: a speed-up claim needs a measured before and after, and the test
+// fails if the speed-up is not there):
+//   1. BEFORE: build a SCRATCH (not landed) tree of the commit before the fix (012: c32d00b2e; 015: e41eab639^) with THIS test file
+//      copied in, and run the class on a gpu=yes line with VP_TEST_SPEEDUP_RECORD=1. The test is parameter-tolerant (it sets
+//      dv_peak_pq / dv_near_black_nits only when the shader declares them and logs which form ran) and logs lines
+//        SPEEDUP-RECORD dvtrims_l8_pass_ms=<ms> / dvtrims_ictcp_pass_ms=<ms> / toneshape_headroom_pass_ms=<ms>
+//      without asserting anything about speed.
+//   2. AFTER: on the fixed tip run the class without VP_TEST_SPEEDUP_RECORD, supplying the recorded numbers as environment variables
+//      VP_TEST_BEFORE_DVTRIMS_L8_PASS_MS, VP_TEST_BEFORE_DVTRIMS_ICTCP_PASS_MS, VP_TEST_BEFORE_TONESHAPE_HEADROOM_PASS_MS (or one file
+//      named by VP_TEST_SPEEDUP_BEFORE_FILE with key=value lines, same keys lower case). The test ASSERTS the measured pass cost is at
+//      least VP_TEST_SPEEDUP_MIN_PCT percent (default 3, the plan's threshold) below the BEFORE number and FAILS otherwise.
+//   3. A missing BEFORE number FAILS under VP_TEST_REQUIRE_GPU=1 (RequireOrSkip) and otherwise logs SKIP-NO-GPU. Never a silent pass.
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -94,6 +108,76 @@ namespace VideoProcessorTest
 			return timing;
 		}
 
+		// ---- the measured speed-up check (BEFORE supplied by environment / file, see the header) ----
+		inline bool EnvText(const char* name, std::string& out)
+		{
+			char* value = nullptr;
+			size_t length = 0;
+			const bool have = _dupenv_s(&value, &length, name) == 0 && value && *value;
+			if (have) out = value;
+			std::free(value);
+			return have;
+		}
+
+		inline bool BeforeNumber(const std::string& key, double& out)
+		{
+			std::string upper = key;
+			std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+			std::string text;
+			if (EnvText(("VP_TEST_BEFORE_" + upper).c_str(), text))
+			{
+				out = std::atof(text.c_str());
+				return true;
+			}
+			std::string path;
+			if (EnvText("VP_TEST_SPEEDUP_BEFORE_FILE", path))
+			{
+				std::ifstream file(path);
+				std::string line;
+				while (std::getline(file, line))
+					if (line.compare(0, key.size() + 1, key + "=") == 0)
+					{
+						out = std::atof(line.c_str() + key.size() + 1);
+						return true;
+					}
+			}
+			return false;
+		}
+
+		// Record mode logs the number for the BEFORE run; otherwise the measured pass cost must be at least the minimum percent below
+		// the recorded BEFORE number (a missing number FAILS under VP_TEST_REQUIRE_GPU=1).
+		inline void CheckSpeedup(const char* test, const std::string& key, double afterPassMs)
+		{
+			char line[200];
+			if (HardwarePrerequisites::EnvIsOne("VP_TEST_SPEEDUP_RECORD"))
+			{
+				std::snprintf(line, sizeof line, "SPEEDUP-RECORD %s=%.4f\n", key.c_str(), afterPassMs);
+				Logger::WriteMessage(line);
+				return;
+			}
+			double before = 0.0;
+			const bool have = BeforeNumber(key, before);
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, test, have,
+				"no BEFORE number for " + key + " (record it from the pre-fix scratch build: VP_TEST_BEFORE_<KEY> or VP_TEST_SPEEDUP_BEFORE_FILE)"))
+				return;
+			Assert::IsTrue(before > 0.0, (std::wstring(L"the BEFORE number is positive: ") + std::wstring(key.begin(), key.end())).c_str());
+			std::string minimum;
+			const double minPercent = EnvText("VP_TEST_SPEEDUP_MIN_PCT", minimum) ? std::atof(minimum.c_str()) : 3.0;
+			const double gain = (before - afterPassMs) / before * 100.0;
+			std::snprintf(line, sizeof line, "SPEEDUP %s: before %.4f ms, after %.4f ms, gain %.2f %% (required %.2f %%)\n", key.c_str(), before, afterPassMs, gain, minPercent);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(gain >= minPercent, (std::wstring(L"the measured speed-up is there: ") + std::wstring(key.begin(), key.end()) + L" gained " +
+				std::to_wstring(gain) + L" % against the required " + std::to_wstring(minPercent) + L" %").c_str());
+		}
+
+		inline bool Declares(const pl_hook* hook, const char* name)
+		{
+			for (int i = 0; i < hook->num_parameters; ++i)
+				if (hook->parameters[i].name && std::strcmp(hook->parameters[i].name, name) == 0)
+					return true;
+			return false;
+		}
+
 		inline void LogTiming(const char* test, const char* variant, const Timing& withHook, const Timing& without)
 		{
 			char line[320];
@@ -155,7 +239,7 @@ namespace VideoProcessorTest
 	public:
 		// GEM-012: DV trims.glsl on a PQ 600-nit BT.2020 output, the L8 path (dv_ext = 1) and the ICtCp path (dv_space = 1, the
 		// Dolby-style mode): the per-pixel constants now come from the host (dv_peak_pq, dv_near_black_nits) and unrotated pixels
-		// skip cos / sin. Quote BEFORE (the commit before e87f34151) and AFTER from the TRX StdOut.
+		// skip cos / sin. Both pass costs are checked against the BEFORE numbers recorded from the c32d00b2e scratch build (see the header).
 		BEGIN_TEST_METHOD_ATTRIBUTE(DvTrimsIctcpAndL8GpuTiming)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
@@ -191,20 +275,30 @@ namespace VideoProcessorTest
 					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, kv.first, kv.second));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_signal_pq", 1.0));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_peak_nits", signal.peakNits));
-				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_peak_pq", DolbyVisionTrims::PqFromNits(signal.peakNits)));
-				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_near_black_nits", DolbyVisionTrims::NitsFromPq(DolbyVisionTrims::kNearBlackPq)));
+				// Parameter-tolerant: the pre-GEM-012 shader does not declare these two (it recomputes them per pixel), and this test must be
+				// able to time that BEFORE shader. They are set when declared (the host does) and the form that ran is logged.
+				const bool hostConstants = Declares(hook, "dv_peak_pq") && Declares(hook, "dv_near_black_nits");
+				if (hostConstants)
+				{
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_peak_pq", DolbyVisionTrims::PqFromNits(signal.peakNits)));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_near_black_nits", DolbyVisionTrims::NitsFromPq(DolbyVisionTrims::kNearBlackPq)));
+				}
+				Logger::WriteMessage(hostConstants ? "DvTrimsIctcpAndL8GpuTiming: shader form: host constants (dv_peak_pq, dv_near_black_nits)\n" :
+					"DvTrimsIctcpAndL8GpuTiming: shader form: pre-GEM-012 (per-pixel constants)\n");
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kr", signal.kr));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kb", signal.kb));
 				AssertHookActs(fixture, hook, ictcp ? L"ICtCp" : L"L8");
-				LogTiming("DvTrimsIctcpAndL8GpuTiming", ictcp ? "ICtCp (Dolby-style)" : "L8 (dv_ext)", TimeRender(fixture, hook), without);
+				const Timing withHook = TimeRender(fixture, hook);
+				LogTiming("DvTrimsIctcpAndL8GpuTiming", ictcp ? "ICtCp (Dolby-style)" : "L8 (dv_ext)", withHook, without);
+				CheckSpeedup("DvTrimsIctcpAndL8GpuTiming", ictcp ? "dvtrims_ictcp_pass_ms" : "dvtrims_l8_pass_ms", withHook.median - without.median);
 			}
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
 		}
 
 		// GEM-015: SDR tone shape.glsl, the headroom-only short-circuit (strength 0) next to the knee-only and knee + recovery
-		// forms for context (those two paths change only by the centre-tap reuse). Quote BEFORE (the commit before e41eab639)
-		// and AFTER from the TRX StdOut.
+		// forms for context (those two paths change only by the centre-tap reuse). The headroom-only pass cost is checked against the
+		// BEFORE number recorded from the e41eab639^ scratch build (see the header).
 		BEGIN_TEST_METHOD_ATTRIBUTE(SdrToneShapeHeadroomOnlyGpuTiming)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
@@ -235,7 +329,10 @@ namespace VideoProcessorTest
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "recovery", v.recovery));
 				const std::string name = v.name;
 				AssertHookActs(fixture, hook, std::wstring(name.begin(), name.end()).c_str());
-				LogTiming("SdrToneShapeHeadroomOnlyGpuTiming", v.name, TimeRender(fixture, hook), without);
+				const Timing withHook = TimeRender(fixture, hook);
+				LogTiming("SdrToneShapeHeadroomOnlyGpuTiming", v.name, withHook, without);
+				if (v.strength == 0.0)   // the headroom-only short-circuit is the speed-up claim; the other two rows are context
+					CheckSpeedup("SdrToneShapeHeadroomOnlyGpuTiming", "toneshape_headroom_pass_ms", withHook.median - without.median);
 			}
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
