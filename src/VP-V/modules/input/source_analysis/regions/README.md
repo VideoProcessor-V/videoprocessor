@@ -172,3 +172,9 @@ src_rect border reads luma beyond the crop, which a crop-clamped map would chang
 default stays 10); the fill's reserve is twice the declared default size (EdgeMapFillReserveBytes, 8 B/px of the source luma: an
 RG32F picture of the luma size fits; 265 MB at 8K, 66 MB at 4K), the declared product size and ledger term stay the default's; a
 larger stage picture declines visibly. Tests: tests/EdgeMapStageTests.cpp (CPU law and fill), tests/EdgeMapStageGpuParityTests.cpp (GPU parity, first run owed). Reader: X5 (S3). Settings: none.
+
+S3 (the X5 reader): the stage dispatch is `DispatchEdgeMapStage(dispatch, picture, colour, system, primaries, dst, why)` in
+EdgeMapFill.h, one function shared by the owner's fill (FillEdgeMapStage delegates to it) and X5's visible no-memo fallback
+(a host without a skeleton memo, e.g. the hook tests), so the fallback cannot drift from the product. X5 asks for the map under
+StageAfter(scaling.geometry), the measured base's size and a per-seq picture ordinal (scaling/output/EdgeMapStageOrdinal.h).
+The catalog's X5 row (row 3) does not yet declare the kEdgeMap read (left to the C5+A test run, see the CB-18 lane report).

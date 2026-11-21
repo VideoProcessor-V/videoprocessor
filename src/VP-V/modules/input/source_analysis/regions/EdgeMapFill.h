@@ -88,7 +88,7 @@ namespace Vpv
 
 		// One dispatch of the edge-map law (BusyEdgeGlsl.h body) over a w x h output: both variants share it.
 		inline bool DispatchEdgeMap(pl_dispatch dispatch, const std::string& header, const pl_shader_desc* desc, int numDesc,
-			const pl_shader_var* vars, int numVars, int w, int h, VpSkeleton::OwnerFillOutput& out)
+			const pl_shader_var* vars, int numVars, int w, int h, std::string& why)
 		{
 			const std::string body = RegionEvidence::EdgeMapBodyGlsl();
 			pl_custom_shader custom{};
@@ -108,7 +108,7 @@ namespace Vpv
 			if (!pl_shader_custom(sh, &custom))
 			{
 				pl_dispatch_abort(dispatch, &sh);
-				out.declineReason = "edge_map: shader rejected";
+				why = "edge_map: shader rejected";
 				return false;
 			}
 			pl_dispatch_compute_params compute{};
@@ -118,10 +118,47 @@ namespace Vpv
 			compute.dispatch_size[2] = 1;
 			if (!pl_dispatch_compute(dispatch, &compute))
 			{
-				out.declineReason = "edge_map: dispatch failed";
+				why = "edge_map: dispatch failed";
 				return false;
 			}
 			return true;
+		}
+
+		// The STAGE variant's law on one picture (CB slice 18 S3): RG32F `dst` at the picture's size, R = Sobel |G| and G = the
+		// measure luma of `picture` in the measure domain of its colour facts (VpMeasure::MeasureDomainFor), taps clamped to the
+		// whole texture. The owner fill (FillEdgeMapStage) and X5's visible no-memo fallback (AdaptiveDownscale.cpp: no skeleton
+		// memo on this thread, i.e. the Original pathway or a test host) both dispatch THIS function: one header, one body, one law
+		// (rule 20), never a second copy. False = `why` names the failure.
+		inline bool DispatchEdgeMapStage(pl_dispatch dispatch, pl_tex picture, const pl_color_space& color, pl_color_system system,
+			pl_color_primaries primaries, pl_tex dst, std::string& why)
+		{
+			if (dispatch == nullptr || picture == nullptr || dst == nullptr)
+			{
+				why = "edge_map: no dispatch, picture or output texture";
+				return false;
+			}
+			const VpMeasure::MeasureDomain domain = VpMeasure::MeasureDomainFor(color, system, primaries);
+			pl_shader_desc desc[2]{};
+			desc[0].desc.name = "src";
+			desc[0].desc.type = PL_DESC_SAMPLED_TEX;
+			desc[0].binding.object = picture;
+			desc[0].binding.address_mode = PL_TEX_ADDRESS_CLAMP;
+			desc[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+			desc[1].desc.name = "em_out";
+			desc[1].desc.type = PL_DESC_STORAGE_IMG;
+			desc[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
+			desc[1].binding.object = dst;
+			const float linearIn = domain.mode > 0.5f ? 1.0f : 0.0f;
+			const bool hdrDecode = domain.mode > 1.5f;
+			const pl_shader_var vars[5] = {
+				{ pl_var_float("linear_in"), &linearIn, true },
+				{ pl_var_float("ad_trc"), &domain.transfer.mode, true },
+				{ pl_var_float("ad_a"), &domain.transfer.a, true },
+				{ pl_var_float("ad_b"), &domain.transfer.b, true },
+				{ pl_var_float("ad_g"), &domain.transfer.g, true } };
+			const std::string header = "#define AD_KW " + VpMeasure::LumaWeightsGlsl(domain) + "\n" + (hdrDecode ? "#define AD_HDR 1\n" : "")
+				+ VpMeasure::MeasureLumaGlsl() + RegionEvidence::EdgeMapStageHeaderGlsl();
+			return DispatchEdgeMap(dispatch, header, desc, 2, vars, hdrDecode ? 5 : 1, picture->params.w, picture->params.h, why);
 		}
 
 		// The DEFAULT variant: Sobel |G| of the source luma (P13 ring view), R32F at the luma size, 10-bit codes.
@@ -158,7 +195,7 @@ namespace Vpv
 			const float scale = RegionEvidence::kSourceTapCodesPerUnit;   // normalised sample -> 10-bit codes (the one tap form)
 			const pl_shader_var vars[1] = { { pl_var_float("em_scale"), &scale, true } };
 			return DispatchEdgeMap(static_cast<pl_dispatch>(req.gpu->Dispatch()), RegionEvidence::EdgeMapHeaderGlsl(), desc, 2, vars,
-				1, in->params.w, in->params.h, out);
+				1, in->params.w, in->params.h, out.declineReason);
 		}
 
 		// The STAGE variant: Sobel |G| of the measure luma of stage picture {stage, size, ordinal} (P13 stage view), RG32F at the
@@ -187,7 +224,6 @@ namespace Vpv
 				out.declineReason = "edge_map: no stage picture (" + (cause.empty() ? std::string("not served") : cause) + ")";
 				return false;
 			}
-			const VpMeasure::MeasureDomain domain = VpMeasure::MeasureDomainFor(pic->color, pic->system, pic->primaries);
 			VpSkeleton::TexShape shape;
 			shape.w = uint32_t(pic->tex->params.w);
 			shape.h = uint32_t(pic->tex->params.h);
@@ -198,28 +234,8 @@ namespace Vpv
 				out.declineReason = "edge_map: " + why;
 				return false;
 			}
-			pl_shader_desc desc[2]{};
-			desc[0].desc.name = "src";
-			desc[0].desc.type = PL_DESC_SAMPLED_TEX;
-			desc[0].binding.object = pic->tex;
-			desc[0].binding.address_mode = PL_TEX_ADDRESS_CLAMP;
-			desc[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
-			desc[1].desc.name = "em_out";
-			desc[1].desc.type = PL_DESC_STORAGE_IMG;
-			desc[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
-			desc[1].binding.object = static_cast<pl_tex>(out.gpu.resource);
-			const float linearIn = domain.mode > 0.5f ? 1.0f : 0.0f;
-			const bool hdrDecode = domain.mode > 1.5f;
-			const pl_shader_var vars[5] = {
-				{ pl_var_float("linear_in"), &linearIn, true },
-				{ pl_var_float("ad_trc"), &domain.transfer.mode, true },
-				{ pl_var_float("ad_a"), &domain.transfer.a, true },
-				{ pl_var_float("ad_b"), &domain.transfer.b, true },
-				{ pl_var_float("ad_g"), &domain.transfer.g, true } };
-			const std::string header = "#define AD_KW " + VpMeasure::LumaWeightsGlsl(domain) + "\n" + (hdrDecode ? "#define AD_HDR 1\n" : "")
-				+ VpMeasure::MeasureLumaGlsl() + RegionEvidence::EdgeMapStageHeaderGlsl();
-			return DispatchEdgeMap(static_cast<pl_dispatch>(req.gpu->Dispatch()), header, desc, 2, vars, hdrDecode ? 5 : 1,
-				pic->tex->params.w, pic->tex->params.h, out);
+			return DispatchEdgeMapStage(static_cast<pl_dispatch>(req.gpu->Dispatch()), pic->tex, pic->color, pic->system, pic->primaries,
+				static_cast<pl_tex>(out.gpu.resource), out.declineReason);
 		}
 
 		inline VpSkeleton::OwnerFill MakeEdgeMapOwnerFill(uint64_t reserveBytes)

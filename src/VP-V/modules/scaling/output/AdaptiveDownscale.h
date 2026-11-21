@@ -6,6 +6,7 @@
 #include <VP-V/modules/scaling/output/NlsMaskMapping.h>
 #include <VP-V/modules/drive/led_measure/ReadbackRing.h>
 #include <VP-V/modules/input/source_analysis/regions/MeasureDomain.h>
+#include <VP-V/modules/scaling/output/EdgeMapStageOrdinal.h>
 
 #include <algorithm>
 #include <cmath>
@@ -353,6 +354,9 @@ namespace AdaptiveDownscale
 		bool NativeStatsReadback() const;
 		uint64_t StatsDropped() const { return statsSchedule.Dropped(); }
 		unsigned long long Failures() const { return failures; }
+		// CB-18 S3: where the last measure's edge map came from, when it was not the skeleton memo (a visible status line):
+		// "edge map unavailable (<cause>)" or "edge map computed in the module (no skeleton memo)"; empty when the memo served it.
+		const std::string& EdgeMapStatus() const { return edgeMapStatus; }
 		// Frees every texture and shader object while the device exists.
 		void Release();
 
@@ -418,5 +422,9 @@ namespace AdaptiveDownscale
 		Stats stats{};
 		MeasureDomain domain{};   // the last measure's (the blend uses its weights)
 		unsigned long long failures = 0;
+		// CB-18 S3: the measure reads the edge map (P1 kEdgeMap, stage variant) instead of its own Sobel taps.
+		EdgeMapStageOrdinal edgeOrdinal{};   // the picture ordinal of this frame's measures (EDGEMAP-EXTRAS-KEY)
+		pl_tex edgeLocal = nullptr;          // no skeleton memo (Original pathway, test hosts): the module dispatches the shared fill
+		std::string edgeMapStatus;           // the status line of the edge map's source (empty: served by the memo)
 	};
 }

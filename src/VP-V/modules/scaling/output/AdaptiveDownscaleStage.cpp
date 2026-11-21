@@ -278,6 +278,10 @@ namespace AdaptiveDownscaleStage
 				m == AdaptiveDownscale::MotionState::NoVectors ? "Motion-adapted blend: no vectors on this frame (plain blend)" :
 				"Motion-adapted blend: idle (the blend did not run on the last frame)");
 		}
+		// CB-18 S3 (plan line 69): the measure's edge map not served by the memo (unavailable: the measure did not run; or
+		// computed in the module without a skeleton memo). The last measured frame's, while the blend is asked for.
+		if (requested && !module.EdgeMapStatus().empty())
+			lines.push_back(module.EdgeMapStatus());
 		const std::string td = TdProducts::StatusLine(TdProducts::Consumer::AdaptiveScaler, tdRead);
 		if (!td.empty())
 			lines.push_back(td);

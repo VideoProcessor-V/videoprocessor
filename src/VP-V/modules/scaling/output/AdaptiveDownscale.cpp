@@ -8,7 +8,11 @@
 #include <libplacebo/shaders/sampling.h>
 
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
-#include <VP-V/modules/input/source_analysis/regions/MeasureDomainGlsl.h>
+#include <VP-V/core/PipelineSlots.h>
+#include <VP-V/core/VariantKey.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
+#include <VP-V/modules/input/capture/SourcePlanes.h>
+#include <VP-V/modules/input/source_analysis/regions/EdgeMapFill.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
@@ -23,9 +27,12 @@ namespace AdaptiveDownscale
 {
 	namespace
 	{
-		// Luma in 8-bit codes of the encoded picture (ad_luma: VpMeasure::MeasureLumaGlsl,
-		// regions/MeasureDomainGlsl.h, CB slice 18 S2a, moved unchanged), edges, and
-		// per-workgroup sums for the grain term; the residual guard's noise limit, which is in
+		// Edges and per-workgroup sums for the grain term, from the edge map (CB slice 18 S3: P1 kEdgeMap, the stage variant;
+		// design-EDGEMAP-DOMAIN-AXIS rev 2): em (RG32F, the WHOLE base picture) R = Sobel |G| and G = the measure luma in 8-bit
+		// codes of the encoded picture, both in the measure domain of the picture's colour facts. X5's crop is applied HERE, where
+		// the map is read (origin + q over region), not where it is made: the whole-picture map's taps are clamped to the whole
+		// texture exactly as the former private Sobel's were, so every value read inside the crop equals the former one, and the
+		// neighbours' luma (b, d, f, h) are the map's G at the clamped neighbour. The residual guard's noise limit, which is in
 		// the source's own codes, uses the source transfer (GuardTransfer).
 		const char* const MEASURE_HEADER = R"GLSL(
 shared vec4 ad_sum[256];
@@ -37,12 +44,14 @@ uint li = gl_LocalInvocationIndex;
 vec4 v = vec4(0.0);
 if (q.x < int(region.x) && q.y < int(region.y)) {
     ivec2 p = ivec2(origin) + q;
-    float a = ad_luma(p + ivec2(-1, -1)), b = ad_luma(p + ivec2(0, -1)), c = ad_luma(p + ivec2(1, -1));
-    float d = ad_luma(p + ivec2(-1, 0)), e = ad_luma(p), f = ad_luma(p + ivec2(1, 0));
-    float g = ad_luma(p + ivec2(-1, 1)), h = ad_luma(p + ivec2(0, 1)), k = ad_luma(p + ivec2(1, 1));
-    float gx = (c + 2.0 * f + k) - (a + 2.0 * d + g);
-    float gy = (g + 2.0 * h + k) - (a + 2.0 * b + c);
-    float grad = length(vec2(gx, gy)) * 0.25;
+    ivec2 lim = textureSize(em, 0) - ivec2(1);
+    vec2 m = texelFetch(em, clamp(p, ivec2(0), lim), 0).xy;
+    float e = m.y;
+    float b = texelFetch(em, clamp(p + ivec2(0, -1), ivec2(0), lim), 0).y;
+    float d = texelFetch(em, clamp(p + ivec2(-1, 0), ivec2(0), lim), 0).y;
+    float f = texelFetch(em, clamp(p + ivec2(1, 0), ivec2(0), lim), 0).y;
+    float h = texelFetch(em, clamp(p + ivec2(0, 1), ivec2(0), lim), 0).y;
+    float grad = m.x * 0.25;
     float ed = smoothstep(edge_lo, edge_hi, grad);
     imageStore(edge_out, q, vec4(ed));
     float lap = abs(4.0 * e - b - d - f - h);
@@ -503,7 +512,7 @@ float rs_slope(float y)
 			// The residual pair too (found 2026-10-31: it outlived Release and a new GPU recreated
 			// it through the old one's texture).
 			for (pl_tex* tex : { &faithful, &faithfulMid, &lowres, &edge, &partial, &state, &map[0], &map[1], &motionMap[0], &motionMap[1],
-				&residual[0], &residual[1] })
+				&residual[0], &residual[1], &edgeLocal })
 				if (*tex)
 					pl_tex_destroy(gpu, tex);
 			if (readback)
@@ -521,6 +530,8 @@ float rs_slope(float y)
 				pl_shader_obj_destroy(&lut);
 		faithful = faithfulMid = lowres = edge = partial = state = map[0] = map[1] = motionMap[0] = motionMap[1] = nullptr;
 		residual[0] = residual[1] = nullptr;
+		edgeLocal = nullptr;
+		edgeOrdinal.Reset();
 		residualIndex = 0;
 		residualPrevValid = false;
 		residualSequence = 0;
@@ -612,6 +623,7 @@ float rs_slope(float y)
 		active = false;
 		upscaleRatio = 0;
 		motionState = MotionState::Off;   // set again by UpdateMotionMap when the measure runs
+		edgeMapStatus.clear();            // set again when the measure reads its edge map (CB-18 S3)
 		if (!p->tex)
 			return unchanged;
 		float sx0 = std::fmin(p->src_rect.x0, p->src_rect.x1), sx1 = std::fmax(p->src_rect.x0, p->src_rect.x1);
@@ -777,31 +789,74 @@ float rs_slope(float y)
 
 		// 2. Edges and the per-workgroup grain sums (bug hunt 33 F3 / F4: the source's luma
 		// weights; HDR decoded to relative linear, then the 2.2 reference as a linear picture).
+		// The domain stays here: the blend's weights use it, and it is the domain the edge map is made in (the same colour
+		// facts are offered with the stage picture below).
 		const pl_color_system lumaSystem = p->orig_repr ? p->orig_repr->sys : p->repr.sys;
 		const pl_color_primaries lumaPrimaries = p->orig_color ? p->orig_color->primaries : p->color.primaries;
 		domain = MeasureDomainFor(p->color, lumaSystem, lumaPrimaries);
-		const float linearIn = domain.mode > 0.5f ? 1.0f : 0.0f;
-		const bool hdrDecode = domain.mode > 1.5f;
-		const std::string measureHeader = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" +
-			(hdrDecode ? "#define AD_HDR 1\n" : "") + MEASURE_HEADER + VpMeasure::MeasureLumaGlsl();
+		// CB slice 18 S3: the edge map of the WHOLE base picture is P1's kEdgeMap stage variant (design-EDGEMAP-DOMAIN-AXIS
+		// rev 2): this picture is offered to P13 as the stage after scaling.geometry and its edge map asked for under
+		// (seq, stage, size, ordinal); EdgeMapStageOrdinal keeps two pictures of one seq (the de-judder extras, a repeat)
+		// apart. The crop is applied where the map is read (MEASURE_BODY), so no crop axis is needed in the key.
+		pl_tex em = nullptr;
+		const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::CurrentFrameMemo();
+		if (fm.Valid())
+		{
+			const uint16_t ordinal = edgeOrdinal.Next(fm.seq);
+			const uint8_t stage = VpSkeleton::VariantKey::StageAfter(static_cast<uint8_t>(PipelineSlots::Id::ScalingGeometry));
+			Vpv::Capture::StagePicture pic;
+			pic.seq = fm.seq;
+			pic.stage = stage;
+			pic.ordinal = ordinal;
+			pic.tex = base;
+			pic.color = p->color;
+			pic.system = lumaSystem;
+			pic.primaries = lumaPrimaries;
+			pic.origin = "scaling.output (X5)";
+			const bool offered = Vpv::Capture::SourcePlanes::OfferStage(fm.host, pic);
+			const VpSkeleton::AcquireResult r = fm.memo->Acquire(VpSkeleton::kEdgeMap, fm.seq, VpSkeleton::AcquireForm::Gpu,
+				Vpv::Regions::EdgeMapStageKey(stage, static_cast<uint32_t>(base->params.w), static_cast<uint32_t>(base->params.h), ordinal));
+			if (!r.Ok() || !r.gpu.Valid() || r.gpu.resource == nullptr)
+			{
+				// Plan line 69: a genuine Unavailable is visible (the status line) and takes the measure-failure path.
+				const std::string cause = fm.memo->LastCause(VpSkeleton::kEdgeMap);
+				edgeMapStatus = "Adaptive downscale: edge map unavailable (" +
+					(cause.empty() ? std::string(offered ? "not served" : "stage picture not offered") : cause) + ")";
+				++failures;
+				return unchanged;
+			}
+			em = static_cast<pl_tex>(r.gpu.resource);
+			edgeMapStatus.clear();
+		}
+		else
+		{
+			// No skeleton memo on this thread (the Original pathway, a test host): visible, and the module dispatches THE shared
+			// fill (Regions::DispatchEdgeMapStage, the owner fill's own function: one law, rule 20) into its own texture.
+			edgeMapStatus = "Adaptive downscale: edge map computed in the module (no skeleton memo)";
+			std::string why;
+			if (!Ensure(gpu, edgeLocal, base->params.w, base->params.h, 2, 32, false, false) ||
+				!Vpv::Regions::DispatchEdgeMapStage(p->dispatch, base, p->color, lumaSystem, lumaPrimaries, edgeLocal, why))
+			{
+				if (!why.empty())
+					edgeMapStatus += " - " + why;
+				++failures;
+				return unchanged;
+			}
+			em = edgeLocal;
+		}
 		const float origin[2] = { static_cast<float>(ox), static_cast<float>(oy) };
 		const float region[2] = { static_cast<float>(w), static_cast<float>(h) };
 		{
-			const pl_shader_desc d[3] = { Sampled("src", base, false), Storage("edge_out", edge),
+			const pl_shader_desc d[3] = { Sampled("em", em, false), Storage("edge_out", edge),
 				Storage("partial_out", partial) };
-			const pl_shader_var v[10] = {
-				{ pl_var_float("linear_in"), &linearIn, true },
+			const pl_shader_var v[5] = {
 				{ pl_var_vec2("origin"), origin, true },
 				{ pl_var_vec2("region"), region, true },
 				{ pl_var_float("edge_lo"), &settings.edgeLo, true },
 				{ pl_var_float("edge_hi"), &settings.edgeHi, true },
-				{ pl_var_float("shadow_bias"), &settings.shadowBias, true },
-				{ pl_var_float("ad_trc"), &domain.transfer.mode, true },
-				{ pl_var_float("ad_a"), &domain.transfer.a, true },
-				{ pl_var_float("ad_b"), &domain.transfer.b, true },
-				{ pl_var_float("ad_g"), &domain.transfer.g, true } };
-			if (!Compute(p->dispatch, "VideoProcessor adaptive downscale: measure", measureHeader.c_str(), MEASURE_BODY,
-				d, 3, v, hdrDecode ? 10 : 6, gx, gy))
+				{ pl_var_float("shadow_bias"), &settings.shadowBias, true } };
+			if (!Compute(p->dispatch, "VideoProcessor adaptive downscale: measure", MEASURE_HEADER, MEASURE_BODY,
+				d, 3, v, 5, gx, gy))
 			{
 				++failures;
 				return unchanged;

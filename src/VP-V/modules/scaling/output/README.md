@@ -56,6 +56,9 @@ Scale to the output active size inside libplacebo: hybrid SSIM downscale (adapti
 ## Design goal, philosophy and decisions
 
 - The measure domain (GuardTransfer, GuardLinear, MeasureDomain, MeasureDomainFor, LumaWeightsGlsl, MeasureLumaCode and the ad_lin / ad_luma shader text) moved to input/source_analysis/regions/MeasureDomain.h / MeasureDomainGlsl.h (CB slice 18 S2a, pure move, unchanged behaviour), next to the kEdgeMap owner that computes its stage variant in the same domain. AdaptiveDownscale keeps the names through using-declarations; GuardCode / GuardSlope stay here (the residual guard).
+- The measure pass reads the shared kEdgeMap product, not a private Sobel (CB slice 18 S3; design-EDGEMAP-DOMAIN-AXIS rev 2). X5 offers the picture it measures to P13 (`SourcePlanes::OfferStage`, stage = StageAfter(scaling.geometry)) and Acquires kEdgeMap (GPU form) under `EdgeMapStageKey(stage, base size, ordinal)`: R = Sobel |G| (grad = R x 0.25, exactly the former private value), G = the measure luma, from which the Laplacian and energy are taken as before. The map covers the WHOLE picture with taps clamped to the texture, as the private Sobel's were; X5's crop (src_rect) is applied where the map is read (the measure reads only texels inside the crop and their 3 x 3 neighbours), so the values inside the crop are unchanged.
+- The ordinal (`EdgeMapStageOrdinal.h`) counts the measures of one seq: 0 for the main render, 1, 2, ... for de-judder extras re-renders and cadence repeats; a new seq starts at 0. Two pictures of one seq therefore never share a key (test: `tests/EdgeMapStageOrdinalTests.cpp`).
+- Visible, never silent: if the memo cannot serve the map, that frame's measure is skipped like any other measure failure (the failure counter rises) and the status line says "Adaptive downscale: edge map unavailable (<cause>)". A host without a skeleton memo (the hook tests, a lifted module) computes the map in the module with the owner's own dispatch (`Vpv::Regions::DispatchEdgeMapStage`) and says "Adaptive downscale: edge map computed in the module (no skeleton memo)".
 
 - Intermediate pictures are float32 for every profile: `fbo_float32` is decided by the setting alone (auto = on), never by whether this slot runs (`PicturePrecision.h`). A profile with the slot off used to fall silently to float16, up to one 12-bit code of error near white. (S-12BIT, refs/119 #29/#30/#48/#49/#51; owner decision 2026-11-12 15:07 EST = 20:07 UTC, via lead 8 brief 2026-11-14 05:18 EST = 10:18 UTC; written 2026-11-14 10:40 UTC)
 - float16 is never silent: the `picture precision` entry (Ctrl+I, Config live status, Ctrl+Alt+D, one-time notice) shows when the intermediates are float16 in a VP pathway, with the reason (Stable 7.360 lane, or the setting off by hand). Original pathway: Bill's own table, not labelled. (S-12BIT, refs/119 #29/#30/#48/#49/#51; owner decision 2026-11-12 15:07 EST = 20:07 UTC, via lead 8 brief 2026-11-14 05:18 EST = 10:18 UTC; written 2026-11-14 10:40 UTC)
@@ -126,6 +129,7 @@ Per renderer profile (display-rule overrides): `adaptive_downscale`, `adaptive_w
 - `picture precision` under "Fallbacks engaged": the libplacebo intermediates are float16 (Stable 7.360 lane, or `fbo_float32` off). Synced every frame from `CollectFrameHooks` (VP-V/segments/CoreSegments.inl; ReportRenderErrors stays a pure move), and released in the Original pathway. The Config process cannot know which libplacebo lane the renderer loaded, so the Stable-lane label is shown only through the live fallbacks line (`config.live.fallbacks`), never as a static Config note.
 - `output scaling` under "Fallbacks engaged" (`FallbackCatalog::OutputScaling`): adaptive downscale on but SSimDownscaler not in the shader list (libplacebo's downscaler), or the blend failed on the GPU on the last frame (plain SSIM). Engaged through `AdaptiveDownscaleStage::Stage::Fallback` (the fix after the WP-13 move; findings 2026-10-25).
 - The custom-shader status line also says "Adaptive downscale: needs SSimDownscaler" / "idle" / "measuring".
+- "Adaptive downscale: edge map unavailable (<cause>)": the shared kEdgeMap product was not served for the measured picture (that frame's measure skipped); "Adaptive downscale: edge map computed in the module (no skeleton memo)": no memo in this host.
 - The grain map not used with an unknown NLS shader: per-frame grain (logged once). A designed path, not a downgrade.
 
 ### What it needs to be lifted
@@ -134,7 +138,7 @@ libplacebo (hooks, dispatch, filters), `pch.h`, `VP-V/modules/scaling/output/Nls
 
 ### Test it standalone
 
-- CPU: `OutputGlueStagesTests` methods `Adaptive*` and `DownscaleLight*`; `PostMergeAudit20261017Tests`.
+- CPU: `OutputGlueStagesTests` methods `Adaptive*` and `DownscaleLight*`; `PostMergeAudit20261017Tests`; `EdgeMapStageOrdinalTests` (tests/EdgeMapStageOrdinalTests.cpp).
 - GPU (WARP unless `VP_TEST_GPU=hardware`; only when allowed): `LibplaceboLutParserTests` Stage 8 methods, `OutputGlueStagesGpuTests.AdaptiveUpscaleStageRendersTodaysCodes` (Category GpuHardware).
 
 `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~OutputGlueStagesTests|FullyQualifiedName~PostMergeAudit20261017Tests" /Logger:"trx;LogFileName=scaling_output.trx"`
@@ -150,6 +154,7 @@ Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST
 - `shaders/SSimSuperRes.glsl`
 - `src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.h`
 - `src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp`
+- `src/VP-V/modules/scaling/output/EdgeMapStageOrdinal.h` (the kEdgeMap stage key's picture ordinal, CB slice 18 S3)
 
 Forwarding headers (legacy path; removed in M2 step 0): `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h`, `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h`.
 
