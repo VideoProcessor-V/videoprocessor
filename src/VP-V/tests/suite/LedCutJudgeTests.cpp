@@ -317,7 +317,11 @@ namespace VideoProcessorTest
 			{
 				module.SubmitPrediction(sequence, builder.Build(CutFrame(40.0), sequence * CUT_FRAME_MS, 0.0, sequence));
 			};
-			auto aheadEntry = [&] { return EntryOf(module.FallbackEntries(), LedDriveModule::kCutJudgeAheadFallbackId); };
+			std::vector<FallbackStatus::Entry> hold;
+			auto aheadEntry = [&] {
+				hold = module.FallbackEntries();
+				return EntryOf(hold, LedDriveModule::kCutJudgeAheadFallbackId);
+			};
 
 			module.SetLookaheadDepth(6);   // walk 1
 			predict(1);
@@ -330,7 +334,8 @@ namespace VideoProcessorTest
 			const FallbackStatus::Entry* engaged = aheadEntry();
 			Assert::IsNotNull(engaged, L"a known frame later in the walk does not release it");
 			Assert::IsTrue(engaged->reason.find("(first cause)") != std::string::npos, L"the first cause of the walk is kept");
-			Assert::IsNull(EntryOf(module.FallbackEntries(), LedDriveModule::kCutJudgeFallbackId), L"the measured entry is its own");
+			const auto measuredEntries = module.FallbackEntries();
+			Assert::IsNull(EntryOf(measuredEntries, LedDriveModule::kCutJudgeFallbackId), L"the measured entry is its own");
 
 			module.SetLookaheadDepth(6);   // walk 2: walk 1 failed, nothing released
 			Assert::IsNotNull(aheadEntry());
