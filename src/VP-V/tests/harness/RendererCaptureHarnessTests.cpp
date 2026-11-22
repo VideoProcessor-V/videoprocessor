@@ -3687,6 +3687,10 @@ namespace Tests
 			const Case cases[] = { { "v210 gpu 23.976 still", VideoFrameEncoding::V210, "gpu", true, false },
 				{ "v210 standard 59.94 still", VideoFrameEncoding::V210, "standard", false, false },
 				{ "v210 gpu 23.976 moving", VideoFrameEncoding::V210, "gpu", true, true } };
+			// Capacity 32 (533 ms at 59.94 fps; restored by HarnessScope) prevents startup shader-compile stalls on
+			// standard 59.94 from overflowing the default 8-frame queue and offsetting sigma-delta's rendered-frame IGN phase
+			// (frame / 5) relative to enqueue source=.
+			g_harnessQueueCapacity = 32;
 			std::string failures, report;
 			for (const Case& c : cases)
 			{
@@ -3722,6 +3726,8 @@ namespace Tests
 					}
 					std::vector<Sample> out;
 					const std::string runTag = std::string(c.name) + " " + role + " try " + std::to_string(tryIndex);
+					if (r.Logged("Alpha queue hard overflow:") || r.Logged("Alpha backlog recovery:"))
+						droppedFailures += runTag + ": queue drop occurred (breaks 1:1 source= to sigma-delta frame/5 phase lock); ";
 					if (completionLines.empty() || completionLines.size() != r.captureMetadataList.size())
 					{
 						droppedFailures += runTag + ": capture count mismatch (completionLines=" +
