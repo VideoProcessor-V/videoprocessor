@@ -134,6 +134,7 @@ namespace VpDebander
 		static constexpr int kSlots = 4;
 		pl_tex out[kSlots][PL_MAX_PLANES] = {};
 		pl_tex weight[2][PL_MAX_PLANES] = {};   // blur weights (slot 0): this source frame's and the previous one's
+		pl_tex weightDummy = nullptr;           // 1x1 r32f sink bound on non-main slots (reuses the compiled shader, no cold compile)
 		pl_tex guard[kSlots][PL_MAX_PLANES] = {};   // grainGuard: the spatial grain share per 16x16 block
 		// grainSplit: the half-resolution low band (box, across, down) and the structure
 		// tensor per block of it.

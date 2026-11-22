@@ -113,9 +113,8 @@ if (p.x < sz.x && p.y < sz.y) {
 #else
     imageStore(dst, p, mix(c, avg, w));
 #endif
-#ifdef WRITE_W
-    imageStore(w_out, p, vec4(w, 0.0, 0.0, 1.0));
-#endif
+    if (write_w != 0)
+        imageStore(w_out, p, vec4(w, 0.0, 0.0, 1.0));
 }
 )GLSL";
 
@@ -316,6 +315,8 @@ if (b.x < size.x && b.y < size.y) {
 				if (weight[i][p] && gpu) pl_tex_destroy(gpu, &weight[i][p]);
 				weight[i][p] = nullptr;
 			}
+		if (weightDummy && gpu) pl_tex_destroy(gpu, &weightDummy);
+		weightDummy = nullptr;
 		for (int s = 0; s < kSlots; ++s)
 			for (int p = 0; p < PL_MAX_PLANES; ++p)
 			{
@@ -458,6 +459,20 @@ if (b.x < size.x && b.y < size.y) {
 				if (hold && weight[readIndex][plane] && weightW[plane] == w && weightH[plane] == h)
 					weightIn = weight[readIndex][plane];
 			}
+			else if (!weightDummy)
+			{
+				pl_tex_params dp{};
+				dp.w = 1;
+				dp.h = 1;
+				dp.format = StorableLike(gpu, pl_find_named_fmt(gpu, "r32f"));
+				dp.storable = true;
+				if (!dp.format || !pl_tex_recreate(gpu, &weightDummy, &dp))
+				{
+					error = "no dummy weight texture";
+					++failures;
+					return false;
+				}
+			}
 			const bool useHold = weightIn != nullptr;
 			anyHeld = anyHeld || useHold;
 			// deband_vp_grain_guard split: grain passes by construction, so neither veto runs
@@ -555,7 +570,7 @@ if (b.x < size.x && b.y < size.y) {
 			int nd = 0;
 			d[nd++] = Sampled("src", in, true);
 			d[nd++] = Storage("dst", out[slot][plane]);
-			if (weightOut) d[nd++] = Storage("w_out", weightOut);
+			d[nd++] = Storage("w_out", weightOut ? weightOut : weightDummy);
 			if (useHold || useGrain) d[nd++] = Sampled("field", params.field, false);
 			if (useHold) d[nd++] = Sampled("prev_w", weightIn, true);
 			if (useGrain) d[nd++] = Sampled("grain", params.grainError, false);
@@ -565,10 +580,12 @@ if (b.x < size.x && b.y < size.y) {
 				d[nd++] = Sampled("split_low", splitLow[slot][plane], true);
 				d[nd++] = Sampled("split_tensor", splitTensor[slot][plane], true);
 			}
+			const int writeW = weightOut ? 1 : 0;
 			pl_shader_var v[20];
 			int nv = 0;
 			v[nv++] = { pl_var_float("thr"), &thr, true };
 			v[nv++] = { pl_var_float("radius"), &radius, true };
+			v[nv++] = { pl_var_int("write_w"), &writeW, true };
 			if (useHold || useGrain) v[nv++] = { pl_var_vec2("to_field"), toField, true };
 			if (useHold) v[nv++] = { pl_var_float("hold_alpha"), &alpha, true };
 			if (useGrain) v[nv++] = { pl_var_float("grain_codes"), &grainCodes, true };
@@ -592,7 +609,6 @@ if (b.x < size.x && b.y < size.y) {
 			std::string header = "#define NCOMP " + std::to_string(ncomp) + "\n";
 			if (useHold) header += "#define HOLD 1\n";
 			if (useGrain) header += "#define GRAIN 1\n";
-			if (weightOut) header += "#define WRITE_W 1\n";
 			if (useGuard) header += "#define SPATIAL_GUARD 1\n";
 			if (useSplit) header += "#define SPLIT 1\n" + AlongWeightsGlsl();
 			pl_custom_shader custom{};
