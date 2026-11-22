@@ -713,5 +713,215 @@ namespace VideoProcessorTest
 				Assert::IsTrue(best >= 0, L"R3 accuracy: no form within the source-px limit at this resolution");
 			}
 		}
+
+		// MC-PHOTO MUST 4(b) (verify-gemini-mc-81ee082cf.md:87-92): test-first WARP SameBytes digest pin across
+		// every photometric GPU scenario (pan 1080/4K/diagonal, fade gain/offset, masked/unmasked mover with excluded row,
+		// similarity/affine/homography/bilinear, flat fallback, too-far fallback, 1080-H/4K-Q/4K-H R16, odd 333x197 R16).
+		// Captured on untouched PhotometricRefineGpu BEFORE MC-PHOTO optimizations; MUST hold bit-for-bit unchanged after
+		// uPtGeom double cache, 16-bit uBin, 6-pass 11/10-bit median, 18x18 shared tile, verified swap, and colTab/rowTab cache.
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuMcPhotoBaselineSameBytesDigestPin)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(GpuMcPhotoBaselineSameBytesDigestPin)
+		{
+			Rig& g = RequireRig();
+			auto mixBytes = [](uint64_t& h, const void* data, size_t n)
+			{
+				const uint8_t* p = static_cast<const uint8_t*>(data);
+				for (size_t i = 0; i < n; ++i)
+				{
+					h ^= static_cast<uint64_t>(p[i]);
+					h *= 1099511628211ull;
+				}
+			};
+			auto hashResult = [&](uint64_t& h, const RefineResult& r)
+			{
+				const uint32_t st = static_cast<uint32_t>(r.status);
+				const uint32_t mt = static_cast<uint32_t>(r.model.type);
+				const uint8_t mu = r.maskUsed ? 1 : 0;
+				mixBytes(h, &st, sizeof(st));
+				mixBytes(h, &mt, sizeof(mt));
+				mixBytes(h, &mu, sizeof(mu));
+				mixBytes(h, &r.candidates, sizeof(r.candidates));
+				mixBytes(h, &r.pixels, sizeof(r.pixels));
+				mixBytes(h, &r.iterations, sizeof(r.iterations));
+				mixBytes(h, r.model.h, sizeof(r.model.h));
+				mixBytes(h, &r.gain, sizeof(double));
+				mixBytes(h, &r.offset, sizeof(double));
+				mixBytes(h, &r.residualBefore, sizeof(double));
+				mixBytes(h, &r.residualAfter, sizeof(double));
+				mixBytes(h, &r.robustSigma, sizeof(double));
+				mixBytes(h, &r.correctionPx, sizeof(double));
+				mixBytes(h, &r.lastStepPx, sizeof(double));
+			};
+
+			uint64_t digest = 14695981039346656037ull;
+			int totalCases = 0;
+			double maxModel = 0.0, maxGain = 0.0, maxOffset = 0.0;
+			auto runCase = [&](const char* tag, const Params& model, const LumaPairView& view, const Rect& pic,
+				const InlierMask& mask, const RefineOptions& o)
+			{
+				PhotometricRefinerGpu gpu(o);
+				std::string why;
+				Assert::IsTrue(gpu.Init(g.device.Get(), &why), L"GPU refiner init failed");
+				RefineGpuLuma gl;
+				g.input.Set(view);
+				Assert::IsTrue(g.input.Prepare(g.context.Get(), &gl, &why), L"input prepare failed");
+				const RefineResult r1 = gpu.Refine(g.context.Get(), model, gl, pic, mask);
+				const RefineResult r2 = gpu.Refine(g.context.Get(), model, gl, pic, mask);
+				Assert::IsTrue(SameBytes(r1, r2), L"GPU repeat not byte-equal");
+				hashResult(digest, r1);
+				// Also verify tight CPU-vs-GPU parity (MUST 4a alongside MUST 4b).
+				const RefineResult rc = PhotometricRefine(model, view, pic, mask, o);
+				Assert::IsTrue(r1.status == rc.status, L"status differs from CPU");
+				Assert::AreEqual(rc.candidates, r1.candidates, L"candidates differ from CPU");
+				Assert::AreEqual(rc.pixels, r1.pixels, L"pixels differ from CPU");
+				Assert::AreEqual(rc.iterations, r1.iterations, L"iterations differ from CPU");
+				Assert::IsTrue(r1.maskUsed == rc.maskUsed, L"maskUsed differs from CPU");
+				Assert::IsTrue(r1.model.type == rc.model.type, L"model type differs from CPU");
+				const double s = view.sourcePxPerPixel > 0 ? view.sourcePxPerPixel : 1.0;
+				const double diag = std::sqrt(static_cast<double>(pic.Width()) * pic.Width() + static_cast<double>(pic.Height()) * pic.Height());
+				const double dM = pic.Empty() ? 0.0 : MaxCornerDifference(r1.model, rc.model, pic) * diag / s;
+				const double dG = std::fabs(r1.gain - rc.gain), dO = std::fabs(r1.offset - rc.offset);
+				maxModel = (std::max)(maxModel, dM);
+				maxGain = (std::max)(maxGain, dG);
+				maxOffset = (std::max)(maxOffset, dO);
+				if (dM > 1e-9 || dG > 1e-9 || dO > 1e-9)
+				{
+					char msg[256];
+					std::snprintf(msg, sizeof(msg), "TIGHT PARITY FAIL %s: dM=%.3g dG=%.3g dO=%.3g\n", tag, dM, dG, dO);
+					GLog(msg);
+				}
+				Assert::IsTrue(dM <= 1e-9, L"MUST 4a: GPU model differs from CPU by > 1e-9 engine px");
+				Assert::IsTrue(dG <= 1e-9 && dO <= 1e-9, L"MUST 4a: GPU gain/offset differs from CPU by > 1e-9");
+				++totalCases;
+			};
+
+			// 1-3. Pan 1080 H, Pan 4K Q, Diagonal pan.
+			auto runPan = [&](const char* tag, int frameW, int frameH, double s, double tx, double ty, double ex, double ey, int pairs, uint64_t seed)
+			{
+				const int w = (frameW + static_cast<int>(s) - 1) / static_cast<int>(s), h = (frameH + static_cast<int>(s) - 1) / static_cast<int>(s);
+				const std::vector<Wave> waves = MakeWaves(seed, s, 90.0);
+				for (int k = 0; k < pairs; ++k)
+				{
+					const std::vector<uint8_t> A = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, k * tx, k * ty)), 1.0, 0.0, seed * 31 + 2 * k, 1.0));
+					const std::vector<uint8_t> B = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, (k + 1) * tx, (k + 1) * ty)), 1.0, 0.0, seed * 31 + 2 * k + 1, 1.0));
+					runCase(tag, Translation(tx + ex, ty + ey), View8(A, B, w, h, s), Pic(frameW, frameH), InlierMask(), RefineOptions());
+				}
+			};
+			runPan("1080 pan", 1920, 1080, 2.0, 2.5, 0.0, 0.8, -0.5, 2, 11);
+			runPan("4K pan", 3840, 2160, 4.0, 5.0, 0.0, 1.7, 0.6, 2, 12);
+			runPan("diag pan", 1920, 1080, 2.0, 2.5, 1.5, -0.7, 0.6, 2, 13);
+
+			// 4. Fade pan (gain + offset).
+			{
+				const int w = 960, h = 540;
+				const double s = 2.0, tx = 2.5;
+				const std::vector<Wave> waves = MakeWaves(21, s, 90.0);
+				const std::vector<uint8_t> A = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, 0, 0)), 1.0, 0.0, 1, 1.0));
+				const std::vector<uint8_t> B = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, tx, 0)), 0.8, 10.0, 2, 1.0));
+				runCase("fade", Translation(tx + 0.8, -0.4), View8(A, B, w, h, s), Pic(1920, 1080), InlierMask(), RefineOptions());
+			}
+
+			// 5. Mover masked (with excluded row) + unmasked.
+			{
+				const int frameW = 1920, frameH = 1080, w = 960, h = 540;
+				const double s = 2.0, tx = 2.5;
+				const std::vector<Wave> bg = MakeWaves(31, s, 90.0), fg = MakeWaves(32, s, 100.0);
+				const double l = 700, t = 300, rw = 640, rh = 380, mx = 14, my = -9;
+				std::vector<Layer> la(1, Shifted(bg, 0, 0)), lb(1, Shifted(bg, tx, 0));
+				Layer ma = Shifted(fg, 0, 0); ma.clip = true; ma.l = l; ma.t = t; ma.r = l + rw; ma.b = t + rh;
+				Layer mb = Shifted(fg, mx, my); mb.clip = true; mb.l = l + mx; mb.t = t + my; mb.r = l + rw + mx; mb.b = t + rh + my;
+				la.push_back(ma); lb.push_back(mb);
+				const std::vector<uint8_t> A = To8(RenderD(w, h, s, la, 1.0, 0.0, 3, 1.0));
+				const std::vector<uint8_t> B = To8(RenderD(w, h, s, lb, 1.0, 0.0, 4, 1.0));
+				BlockData blocks;
+				blocks.blockSize = 32; blocks.gridW = (frameW + 31) / 32; blocks.gridH = (frameH + 31) / 32;
+				blocks.label.assign(static_cast<size_t>(blocks.gridW) * blocks.gridH, static_cast<uint8_t>(Label::Camera));
+				blocks.excluded.assign(blocks.label.size(), 0);
+				const double ul = (std::min)(l, l + mx) - 4, ut = (std::min)(t, t + my) - 4, ur = (std::max)(l + rw, l + rw + mx) + 4, ub = (std::max)(t + rh, t + rh + my) + 4;
+				for (int by = 0; by < blocks.gridH; ++by)
+					for (int bx = 0; bx < blocks.gridW; ++bx)
+						if (bx * 32.0 + 32 > ul && bx * 32.0 < ur && by * 32.0 + 32 > ut && by * 32.0 < ub)
+							blocks.label[static_cast<size_t>(by) * blocks.gridW + bx] = static_cast<uint8_t>(Label::Object);
+				for (int bx = 0; bx < blocks.gridW; ++bx)
+					blocks.excluded[static_cast<size_t>(2) * blocks.gridW + bx] = 1;
+				runCase("mover masked", Translation(tx + 0.8, 0.5), View8(A, B, w, h, s), Pic(frameW, frameH), MaskOf(blocks), RefineOptions());
+				runCase("mover unmasked", Translation(tx + 0.8, 0.5), View8(A, B, w, h, s), Pic(frameW, frameH), InlierMask(), RefineOptions());
+			}
+
+			// 6. Similarity, Affine, Homography, Bilinear.
+			{
+				const int frameW = 1920, frameH = 1080, w = 960, h = 540;
+				const double s = 2.0;
+				const Rect pic = Pic(frameW, frameH);
+				Params truth; truth.type = ModelType::Similarity;
+				const double zc = 1.002 * std::cos(0.001), zs = 1.002 * std::sin(0.001);
+				truth.h[0] = zc; truth.h[1] = -zs; truth.h[2] = 2.5;
+				truth.h[3] = zs; truth.h[4] = zc; truth.h[5] = -1.0;
+				bool ok = false;
+				const Params inv = Invert(truth, &ok);
+				Assert::IsTrue(ok);
+				const std::vector<Wave> waves = MakeWaves(41, s, 90.0);
+				const double C[2] = { pic.CentreX(), pic.CentreY() };
+				Layer lb; lb.waves = &waves;
+				lb.m[0] = inv.h[0]; lb.m[1] = inv.h[1]; lb.m[2] = inv.h[3]; lb.m[3] = inv.h[4];
+				lb.c[0] = inv.h[2] + C[0] - (inv.h[0] * C[0] + inv.h[1] * C[1]);
+				lb.c[1] = inv.h[5] + C[1] - (inv.h[3] * C[0] + inv.h[4] * C[1]);
+				const std::vector<uint8_t> A = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, 0, 0)), 1.0, 0.0, 5, 1.0));
+				const std::vector<uint8_t> B = To8(RenderD(w, h, s, std::vector<Layer>(1, lb), 1.0, 0.0, 6, 1.0));
+				Params start = truth; start.h[2] += 0.7; start.h[5] -= 0.4; start.h[0] -= 0.0002; start.h[4] -= 0.0002;
+				Params startAff = start; startAff.type = ModelType::Affine;
+				Params startHom = start; startHom.type = ModelType::Homography; startHom.h[6] = 1e-7;
+				runCase("similarity", start, View8(A, B, w, h, s), pic, InlierMask(), RefineOptions());
+				runCase("affine", startAff, View8(A, B, w, h, s), pic, InlierMask(), RefineOptions());
+				runCase("homography", startHom, View8(A, B, w, h, s), pic, InlierMask(), RefineOptions());
+				RefineOptions bil; bil.interp = RefineInterp::Bilinear;
+				runCase("bilinear", start, View8(A, B, w, h, s), pic, InlierMask(), bil);
+			}
+
+			// 7-8. Flat fallback + too-far fallback.
+			{
+				const int w = 960, h = 540;
+				const double s = 2.0, tx = 2.5;
+				const std::vector<Wave> waves = MakeWaves(51, s, 90.0);
+				const std::vector<uint8_t> A = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, 0, 0)), 1.0, 0.0, 7, 1.0));
+				const std::vector<uint8_t> B = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, tx, 0)), 1.0, 0.0, 8, 1.0));
+				const std::vector<uint8_t> flat(static_cast<size_t>(w) * h, 128);
+				RefineOptions oFlat; oFlat.fadeTerms = false; oFlat.translationOnly = true; oFlat.maxCorrectionLumaPx = 1000.0;
+				runCase("flat no-improv", Translation(2.9, -0.3), View8(A, flat, w, h, s), Pic(1920, 1080), InlierMask(), oFlat);
+				runCase("flat template", Translation(2.9, -0.3), View8(flat, A, w, h, s), Pic(1920, 1080), InlierMask(), RefineOptions());
+				RefineOptions tight; tight.maxCorrectionLumaPx = 0.05;
+				runCase("too far", Translation(tx + 0.8, 0.0), View8(A, B, w, h, s), Pic(1920, 1080), InlierMask(), tight);
+			}
+
+			// 9-10. Cost-line R16 (4K half R16) + odd non-16-aligned dimensions (333x197 R16).
+			{
+				struct R16Case { const char* name; int fw, fh; double s; uint64_t seed; };
+				const R16Case rcs[2] = {
+					{ "4K half R16", 3840, 2160, 2.0, 83 },
+					{ "odd 333x197 R16", 666, 394, 2.0, 219 }
+				};
+				for (const R16Case& cs : rcs)
+				{
+					const int w = cs.fw / static_cast<int>(cs.s), h = cs.fh / static_cast<int>(cs.s);
+					const double tx = 1.25 * cs.s;
+					const std::vector<Wave> waves = MakeWaves(cs.seed, cs.s, 90.0);
+					const std::vector<uint16_t> A16 = To16(RenderD(w, h, cs.s, std::vector<Layer>(1, Shifted(waves, 0, 0)), 1.0, 0.0, 12, 1.0));
+					const std::vector<uint16_t> B16 = To16(RenderD(w, h, cs.s, std::vector<Layer>(1, Shifted(waves, tx, 0)), 1.0, 0.0, 13, 1.0));
+					runCase(cs.name, Translation(tx + 0.4 * cs.s, 0.0), View16(A16, B16, w, h, cs.s, 255.0 / 65535.0), Pic(cs.fw, cs.fh), InlierMask(), RefineOptions());
+				}
+			}
+
+			char msg[320];
+			std::snprintf(msg, sizeof(msg),
+				"MC-PHOTO SameBytes digest [%s]: %d cases, digest=0x%016llx, maxCpuDiff(model=%.3g px, gain=%.3g, offset=%.3g)\n",
+				g.adapter.c_str(), totalCases, static_cast<unsigned long long>(digest), maxModel, maxGain, maxOffset);
+			GLog(msg);
+			// Exact WARP SameBytes digest captured on untouched PhotometricRefineGpu BEFORE MC-PHOTO optimizations.
+			const uint64_t kExpectedWarpDigest = 0x01b1c2b49196d302ull;
+			if (g.adapter == "WARP")
+				Assert::AreEqual(kExpectedWarpDigest, digest, L"MUST 4(b): MC-PHOTO GPU output bytes diverged from pre-optimization WARP baseline");
+		}
 	};
 }
