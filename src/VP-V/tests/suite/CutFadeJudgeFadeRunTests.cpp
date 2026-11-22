@@ -66,6 +66,22 @@ namespace CutFadeJudgeFadeRunTestsNs
 		return r;
 	}
 
+	inline Record Black(uint32_t k, bool noisy = false)
+	{
+		std::vector<uint16_t> half(size_t(kW) * kH);
+		for (uint32_t y = 0; y < kH; ++y)
+			for (uint32_t x = 0; x < kW; ++x)
+			{
+				const double v = kBlack + (noisy ? double(Noise(x, y, k)) / 4.0 : 0.0);
+				half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+			}
+		std::vector<uint8_t> buf(VpUnit::SourceStats::kRecordBytes);
+		Record r;
+		Assert::IsTrue(VpUnit::SourceStats::ComputeRecord(half.data(), kW, kH, buf.data(), buf.size()));
+		Assert::IsTrue(VpUnit::SourceStats::ReadRecord(buf.data(), buf.size(), &r));
+		return r;
+	}
+
 	// `pre` static frames, a fade over `n` frames from gain 1 to `g1`, then `post` static frames at g1.
 	inline std::vector<Record> FadeSequence(int n, int pre, int post, double g1)
 	{
@@ -222,6 +238,142 @@ namespace CutFadeJudgeFadeRunTestsNs
 			const bool skipped = VpUnit::CutFadeJudge::FoldFadeRun(recs[31], recs[32], VpUnit::CutFadeJudge::ClassifyEvents(recs[31], recs[32], false, false), run);
 			Assert::IsFalse(skipped, L"one pair of a new run is no fade yet");
 			Assert::AreEqual(1u, run.pairs, L"a new run started at the pair");
+		}
+
+		// A hard cut from a static dim shot directly into black stays a cut (never reclassified as a fade).
+		TEST_METHOD(AHardCutFromDimShotIntoBlackStaysACut)
+		{
+			const double gains[] = { 0.15, 0.015 };
+			const bool noisyFlags[] = { false, true };
+			for (double gain : gains)
+			{
+				for (bool noisy : noisyFlags)
+				{
+					std::vector<Record> recs;
+					uint32_t k = 0;
+					for (int i = 0; i < 10; ++i)
+						recs.push_back(Picture(gain, k++));
+					for (int i = 0; i < 10; ++i)
+						recs.push_back(Black(k++, noisy));
+
+					FadeRun run;
+					for (size_t i = 1; i < recs.size(); ++i)
+					{
+						const Events e = VpUnit::CutFadeJudge::ClassifyEvents(recs[i - 1], recs[i], false, false);
+						const bool runFade = VpUnit::CutFadeJudge::FoldFadeRun(recs[i - 1], recs[i], e, run);
+						if (i == 10)
+						{
+							Assert::IsTrue(e.cut, L"hard cut from dim shot into black must be a cut");
+							Assert::IsTrue(e.cutPossible, L"hard cut into black sets cutPossible");
+							Assert::IsFalse(e.fade, L"hard cut into black must not be a pair fade");
+							Assert::IsFalse(runFade, L"hard cut into black must not be a run fade");
+							Assert::AreEqual(0, run.direction, L"cut into black without active fade leaves no run");
+							Assert::AreEqual(0u, run.pairs, L"cut into black without active fade resets run pairs");
+						}
+						else
+						{
+							Assert::IsFalse(e.fade || runFade, L"static dim or static black frames must not fade");
+						}
+					}
+				}
+			}
+		}
+
+		// A hard cut from black directly into a static dim shot stays a cut (never reclassified as a fade).
+		TEST_METHOD(AHardCutFromBlackIntoDimShotStaysACut)
+		{
+			const double gains[] = { 0.15, 0.015 };
+			for (double gain : gains)
+			{
+				std::vector<Record> recs;
+				uint32_t k = 0;
+				for (int i = 0; i < 10; ++i)
+					recs.push_back(Black(k++));
+				for (int i = 0; i < 10; ++i)
+					recs.push_back(Picture(gain, k++));
+
+				FadeRun run;
+				for (size_t i = 1; i < recs.size(); ++i)
+				{
+					const Events e = VpUnit::CutFadeJudge::ClassifyEvents(recs[i - 1], recs[i], false, false);
+					const bool runFade = VpUnit::CutFadeJudge::FoldFadeRun(recs[i - 1], recs[i], e, run);
+					if (i == 10)
+					{
+						Assert::IsTrue(e.cut, L"hard cut from black into dim shot must be a cut");
+						Assert::IsTrue(e.cutPossible, L"hard cut from black sets cutPossible");
+						Assert::IsFalse(e.fade, L"hard cut from black must not be a pair fade");
+						Assert::IsFalse(runFade, L"hard cut from black must not be a run fade");
+						if (gain >= 0.1)
+						{
+							Assert::AreEqual(0, run.direction, L"large jump from black does not seed a fade run");
+							Assert::AreEqual(0u, run.pairs, L"large jump from black resets run pairs");
+						}
+					}
+					else
+					{
+						Assert::IsFalse(e.fade || runFade, L"static black or static dim frames must not fade");
+					}
+				}
+			}
+		}
+
+		// A genuine multi-frame fade-out to black and fade-in back from black is still detected across the black boundaries.
+		TEST_METHOD(AGenuineMultiFrameFadeToBlackAndBackFromBlackIsStillAFade)
+		{
+			const int pre = 10, nOut = 48, holdBlack = 12, nIn = 48, post = 10;
+			std::vector<Record> recs;
+			uint32_t k = 0;
+			for (int i = 0; i < pre; ++i)
+				recs.push_back(Picture(1.0, k++));
+			for (int i = 1; i <= nOut; ++i)
+				recs.push_back(i == nOut ? Black(k++) : Picture(1.0 - double(i) / double(nOut), k++));
+			for (int i = 0; i < holdBlack; ++i)
+				recs.push_back(Black(k++));
+			for (int i = 1; i <= nIn; ++i)
+				recs.push_back(Picture(double(i) / double(nIn), k++));
+			for (int i = 0; i < post; ++i)
+				recs.push_back(Picture(1.0, k++));
+
+			const size_t outBegin = size_t(pre);
+			const size_t outEnd = outBegin + size_t(nOut);
+			const size_t blackEnd = outEnd + size_t(holdBlack);
+			const size_t inEnd = blackEnd + size_t(nIn);
+
+			FadeRun run;
+			int staticPreFades = 0, fadeOutFades = 0, staticBlackFades = 0, fadeInFades = 0, staticPostFades = 0;
+			bool hitBlackIsFade = false;
+			double fadeOutKeepProd = 1.0;
+
+			for (size_t i = 1; i < recs.size(); ++i)
+			{
+				const Events e = VpUnit::CutFadeJudge::ClassifyEvents(recs[i - 1], recs[i], false, false);
+				double runKeep = 1.0;
+				const bool runFade = VpUnit::CutFadeJudge::FoldFadeRun(recs[i - 1], recs[i], e, run, &runKeep);
+				const bool isFade = e.fade || runFade;
+				if (i < outBegin)
+					staticPreFades += isFade ? 1 : 0;
+				else if (i < outEnd)
+				{
+					fadeOutFades += isFade ? 1 : 0;
+					if (i == outEnd - 1)
+						hitBlackIsFade = isFade;
+					fadeOutKeepProd *= VpUnit::CutFadeJudge::FrameFadeKeep(recs[i - 1], recs[i], e.fade, runFade, runKeep);
+				}
+				else if (i < blackEnd)
+					staticBlackFades += isFade ? 1 : 0;
+				else if (i < inEnd)
+					fadeInFades += isFade ? 1 : 0;
+				else
+					staticPostFades += isFade ? 1 : 0;
+			}
+
+			Assert::AreEqual(0, staticPreFades, L"no fade on static pre-fade frames");
+			Assert::AreEqual(0, staticBlackFades, L"no fade on static black hold frames");
+			Assert::AreEqual(0, staticPostFades, L"no fade on static post-fade frames");
+			Assert::IsTrue(fadeOutFades >= 46, L"genuine 48-frame fade-out to black must fire on >= 46/48 frames");
+			Assert::IsTrue(hitBlackIsFade, L"final fade-out frame hitting black must stay a fade");
+			Assert::IsTrue(fadeInFades >= 46, L"genuine 48-frame fade-in from black must fire on >= 46/48 frames");
+			Assert::IsTrue(fadeOutKeepProd < 0.5, L"fade-out to black must decay history keep well below 0.5");
 		}
 	};
 }
