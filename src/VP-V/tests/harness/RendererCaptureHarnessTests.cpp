@@ -7791,7 +7791,11 @@ namespace Tests
 				const bool repeatServed = videoClass || std::fabs(ratio - std::floor(ratio + 0.5)) < 0.02 * ratio || ratio < 1.25;
 				if (repeatServed)
 				{
-					Assert::IsFalse(VectorsDelivered(s), (name + L": a repeat-served source delivers no vectors\n" + s.Tail()).c_str());
+					// B1 (OD:813-814): starter gate retired; deband_vp: on delivers vectors at every rate while de-judder stays inactive on repeat-served sources.
+					Assert::IsTrue(s.Logged("Vector engine: on"), (name + L": repeat-served source with deband_vp still runs vector engine\n" + s.Tail()).c_str());
+					Assert::IsTrue(VectorsDelivered(s), (name + L": repeat-served source with deband_vp still delivers vectors\n" + s.Tail()).c_str());
+					Assert::IsFalse(s.Logged("De-judder extras:"), (name + L": repeat-served source runs no de-judder extras\n" + s.Tail()).c_str());
+					Assert::IsFalse(s.Logged("De-judder: active"), (name + L": repeat-served source keeps de-judder inactive\n" + s.Tail()).c_str());
 					continue;
 				}
 				++positiveLegs;
