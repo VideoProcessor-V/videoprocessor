@@ -504,7 +504,7 @@ namespace SoftResetTestsNs
 					const GrainModel::Image g = Textured(w, h, uint32_t(k));
 					TextureRestoreModel::Image im(w, h);
 					for (size_t i = 0; i < im.v.size(); ++i)
-						im.v[i] = (k % 2) ? (400.0 + 0.6 * (g.v[i] - 400.0)) : g.v[i];
+						im.v[i] = (k % 2) ? (400.0 + 0.72 * (g.v[i] - 400.0)) : g.v[i];
 					TextureRestore::Params p;
 					p.colorDepth = 10; p.sourceHz = 23.976; p.bitrateQuality = 1.0; p.sequence = uint64_t(k) + 1;
 					p.sceneReader = &PlanReader;
