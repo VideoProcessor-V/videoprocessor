@@ -6079,7 +6079,10 @@ namespace Tests
 			VpTest::CpuSampleProfiler cpu("VideoProcessorVPRenderer.dll");
 			if (cpuSample)
 				cpu.Start();
-			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.0, false, std::string(), false, &plan);
+			// Enable [vpv] resync_event + frame_analysis_store and [vpv.skeleton] analysis_lane + GPU gap (default off since dc73490f1)
+			// so U4, U6, U7, and U9 run and P1 is published ahead for MotionAhead::Producer.
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.0, false,
+				"[vpv]\nresync_event: on\nframe_analysis_store: on\n[vpv.skeleton]\nanalysis_lane: on\nskeleton_gpu_gap: after_render\nanalysis_lane_chunk_us: 4000\n", false, &plan);
 			cpu.Stop();
 			SetEnvironmentVariableA("VP_DEBUG_COMPUTE_ONCE", nullptr);
 			if (cpuSample)
