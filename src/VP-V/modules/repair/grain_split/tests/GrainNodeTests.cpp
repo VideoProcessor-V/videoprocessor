@@ -443,8 +443,8 @@ namespace GrainNodeTestsNs
 				h ^= c;
 				h *= 1099511628211ull;
 			}
-			Assert::AreEqual(size_t(48008), text.size(), L"the reversed text has the accessor-free (K0) size");
-			Assert::AreEqual(uint64_t(0xb77b206dff1cdaf2ull), h, L"the reversed text hashes to the accessor-free (K0) shader text");
+			Assert::AreEqual(size_t(48629), text.size(), L"the reversed text has the accessor-free (K0 + U7 v3) size");
+			Assert::AreEqual(uint64_t(0x3eccef9f5c28285dull), h, L"the reversed text hashes to the accessor-free (K0 + U7 v3) shader text");
 		}
 
 		// Finisher MUST 2: the node's declaration is built from the GRANTED storage (NodeLayout::decl = GrainDecl(choice.storage)),
