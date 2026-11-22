@@ -328,6 +328,7 @@ namespace EntranceSegment
 		entranceCache.Invalidate();         // the cached entrance result pointed at those textures
 		ReleaseRing(gpu);                   // B3: the processed pictures' own copies
 		++entranceGeneration;
+		debandFailLogged.clear();
 	}
 
 	void Segment::OnceSwitchedOff()
@@ -768,6 +769,15 @@ namespace EntranceSegment
 		const VpDebander::Params& vpDebandParams = *b.vpDebandParams;
 		const pl_dispatch dispatch = host.Dispatch();
 		const pl_gpu gpu = host.Gpu();
+		auto logDebandFailure = [&]()
+		{
+			if (debander.LastError() != debandFailLogged)
+			{
+				DebugLog::Log("VP deband failed (%s; %llu failures so far); the frame is rendered without it",
+					debander.LastError().c_str(), debander.Failures());
+				debandFailLogged = debander.LastError();
+			}
+		};
 		if (run.path == Path::Main)
 		{
 			// (6) The hold (slot 0) advances once per source frame on A itself, even when every
@@ -779,6 +789,8 @@ namespace EntranceSegment
 				pl_frame heldA{};
 				if (debander.Apply(gpu, dispatch, run.aFrame, vpDebandParams, heldA, 0))
 					run.aFrame = heldA;
+				else
+					logDebandFailure();
 			}
 			// A picture between frames decides per picture (slot 1, no hold along A's field).
 			VpDebander::Params phaseParams = vpDebandParams;
@@ -787,8 +799,8 @@ namespace EntranceSegment
 			if (debander.Apply(gpu, dispatch, frame, run.phasePicture ? phaseParams : vpDebandParams, debanded,
 				run.phasePicture ? 1 : 0))
 				frame = debanded;
-			else if (debander.Failures() == 1)
-				DebugLog::Log("VP deband failed (%s); the frame is rendered without it", debander.LastError().c_str());
+			else
+				logDebandFailure();
 			return;
 		}
 		VpDebander::Params p = vpDebandParams;
@@ -800,6 +812,8 @@ namespace EntranceSegment
 			// The same debander per frame on an extra.
 			if (debander.Apply(gpu, dispatch, frame, p, debanded, 1))
 				frame = debanded;
+			else
+				logDebandFailure();
 			return;
 		}
 		// Hunt 3 (crossfade lead): the path being left keeps VP's debander (its crossfade slot),
@@ -808,6 +822,8 @@ namespace EntranceSegment
 		p.radiusScale = vpDebandParams.radiusScale * ratio;
 		if (debander.Apply(gpu, dispatch, frame, p, debanded, VpDebander::Module::kSlotCrossfade))
 			frame = debanded;
+		else
+			logDebandFailure();
 	}
 
 	// repair.texture_restore: detail_pulse_stabilise, then texture_restore (docs/VP-detail-restore.md).
@@ -970,8 +986,15 @@ namespace EntranceSegment
 			pl_frame nextFrame = *run.image;
 			nextFrame.planes[0].texture = next.luma;
 			nextFrame.planes[1].texture = next.chroma;
-			(void)b.detailPulse->MeasureAhead(host.Gpu(), dispatch, nextFrame, next.sequence, *b.detailPulseParams,
-				debandThreshold() > 0.0 && slots().Runs(Id::RepairDeband) ? b.debander : nullptr, b.vpDebandParams);
+			VpDebander::Module* lookAheadDebander = debandThreshold() > 0.0 && slots().Runs(Id::RepairDeband) ? b.debander : nullptr;
+			if (!b.detailPulse->MeasureAhead(host.Gpu(), dispatch, nextFrame, next.sequence, *b.detailPulseParams,
+				lookAheadDebander, b.vpDebandParams) &&
+				lookAheadDebander && lookAheadDebander->Failures() > 0 && lookAheadDebander->LastFailureError() != debandFailLogged)
+			{
+				DebugLog::Log("VP deband failed (%s; %llu failures so far); the frame is rendered without it",
+					lookAheadDebander->LastFailureError().c_str(), lookAheadDebander->Failures());
+				debandFailLogged = lookAheadDebander->LastFailureError();
+			}
 		}
 	}
 }

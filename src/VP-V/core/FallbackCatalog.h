@@ -263,6 +263,18 @@ namespace FallbackCatalog
 		return plan;
 	}
 
+	// Visible reporting when VP deband itself runs (without libplacebo yielding to it) and fails
+	// (e.g. "no dummy weight texture" on a non-main slot): keeps "deband" for libplacebo yield
+	// substitution while ensuring a VP debander failure is never silent under any deband_vp setting.
+	inline Decision VpDeband(bool vpActive, bool libplaceboYieldsToVp, bool slotRuns, bool vpFailed,
+		bool dvTunnelPicture, const std::string& error = std::string())
+	{
+		if (vpActive && !libplaceboYieldsToVp && slotRuns && vpFailed && !dvTunnelPicture)
+			return Engaged("vp deband", "rendered without VP deband (VP debander failed" +
+				(error.empty() ? std::string() : ": " + error) + ")");
+		return Released("vp deband");
+	}
+
 	// ---- motion.estimation ----------------------------------------------------------------------
 	// SK-MV (doc 83): why an estimate had no pair from the one NVOF source (the look-ahead producer), so the block searches (the P2m
 	// path) ran. Deliberate is a CHOICE (motion_ahead_frames 0, the low-latency path): informational, never an engaged fallback.

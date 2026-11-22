@@ -289,6 +289,6 @@ namespace EntranceSegment
 		unsigned entranceOnceForcedEvery = 0, entranceOnceForcedCount = 0;
 		bool entranceOnceForcedRead = false;
 		std::string rebaseFormatNoteLogged;
-		std::string detailPulseFailLogged, textureRestoreFailLogged;   // each reason logged once
+		std::string debandFailLogged, detailPulseFailLogged, textureRestoreFailLogged;   // each reason logged once
 	};
 }
