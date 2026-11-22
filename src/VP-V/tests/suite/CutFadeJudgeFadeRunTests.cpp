@@ -375,5 +375,87 @@ namespace CutFadeJudgeFadeRunTestsNs
 			Assert::IsTrue(fadeInFades >= 46, L"genuine 48-frame fade-in from black must fire on >= 46/48 frames");
 			Assert::IsTrue(fadeOutKeepProd < 0.5, L"fade-out to black must decay history keep well below 0.5");
 		}
+
+		// Local foreground darkening (30% of the picture darkens smoothly while 70% stays constant) must NOT be called a global fade.
+		TEST_METHOD(ALocalDarkeningBoxIsNotAFade)
+		{
+			std::vector<Record> recs;
+			for (int i = 0; i < 30; ++i)
+			{
+				const double boxGain = i < 5 ? 1.0 : (i < 25 ? 1.0 - double(i - 4) / 20.0 : 0.0);
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const double base = 0.25 + 0.65 * double(x) / double(kW) + 0.10 * ((y * 7u + x * 3u) % 11u) / 10.0;
+						const bool inBox = (x < kW * 3u / 10u);
+						const double g = inBox ? boxGain : 1.0;
+						const double v = kBlack + g * base * 48000.0 + Noise(x, y, uint32_t(i));
+						half[size_t(y) * kW + x] = static_cast<uint16_t>(v < 0.0 ? 0.0 : (v > 65535.0 ? 65535.0 : v));
+					}
+				std::vector<uint8_t> buf(VpUnit::SourceStats::kRecordBytes);
+				Record r;
+				Assert::IsTrue(VpUnit::SourceStats::ComputeRecord(half.data(), kW, kH, buf.data(), buf.size()));
+				Assert::IsTrue(VpUnit::SourceStats::ReadRecord(buf.data(), buf.size(), &r));
+				recs.push_back(r);
+			}
+			const auto res = Play(recs);
+			Assert::AreEqual(0, Count(res, 1, recs.size()), L"30% local darkening box must emit 0 fades");
+		}
+
+		// Vertical camera tilt across a bright-to-dark scene gradient must NOT be called a fade.
+		TEST_METHOD(ACameraTiltAcrossAGradientIsNotAFade)
+		{
+			std::vector<Record> recs;
+			for (int i = 0; i < 30; ++i)
+			{
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const double sy = double(y) + double(i) * 1.5;
+						const double grad = 1.0 / (1.0 + std::exp((sy - double(kH) * 0.65) / 14.0));
+						const double tex = 0.08 * std::sin(double(x) * 0.25) * std::cos(sy * 0.20);
+						const double v = kBlack + (grad + tex + 0.10) * 44000.0 + Noise(x, y, uint32_t(i));
+						half[size_t(y) * kW + x] = static_cast<uint16_t>(v < 0.0 ? 0.0 : (v > 65535.0 ? 65535.0 : v));
+					}
+				std::vector<uint8_t> buf(VpUnit::SourceStats::kRecordBytes);
+				Record r;
+				Assert::IsTrue(VpUnit::SourceStats::ComputeRecord(half.data(), kW, kH, buf.data(), buf.size()));
+				Assert::IsTrue(VpUnit::SourceStats::ReadRecord(buf.data(), buf.size(), &r));
+				recs.push_back(r);
+			}
+			const auto res = Play(recs);
+			Assert::AreEqual(0, Count(res, 1, recs.size()), L"vertical camera tilt across a gradient must emit 0 fades");
+		}
+
+		// A simultaneous horizontal camera pan and linear fade to black is detected cleanly with zero pre/post false fades.
+		TEST_METHOD(APanWithSimultaneousFadeIsDetected)
+		{
+			const int pre = 8, nFade = 48, post = 8;
+			std::vector<Record> recs;
+			for (int i = 0; i < pre + nFade + post; ++i)
+			{
+				const double gain = i < pre ? 1.0 : (i < pre + nFade ? 1.0 - double(i - pre + 1) / double(nFade) : 0.0);
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const double sx = double(x) + double(i) * 3.0;
+						const double pat = 0.45 + 0.30 * std::sin(sx * 0.09) + 0.20 * std::cos(double(y) * 0.13 + sx * 0.05);
+						const double v = kBlack + gain * pat * 48000.0 + Noise(x, y, uint32_t(i));
+						half[size_t(y) * kW + x] = static_cast<uint16_t>(v < 0.0 ? 0.0 : (v > 65535.0 ? 65535.0 : v));
+					}
+				std::vector<uint8_t> buf(VpUnit::SourceStats::kRecordBytes);
+				Record r;
+				Assert::IsTrue(VpUnit::SourceStats::ComputeRecord(half.data(), kW, kH, buf.data(), buf.size()));
+				Assert::IsTrue(VpUnit::SourceStats::ReadRecord(buf.data(), buf.size(), &r));
+				recs.push_back(r);
+			}
+			const auto res = Play(recs);
+			Assert::AreEqual(0, Count(res, 1, size_t(pre)), L"no fade during pre-fade pure pan");
+			Assert::IsTrue(Count(res, size_t(pre), size_t(pre + nFade)) >= 44, L"pan + 48-frame fade-out must fire on >= 44/48 frames");
+			Assert::AreEqual(0, Count(res, size_t(pre + nFade), recs.size()), L"no fade during post-fade black hold");
+		}
 	};
 }
