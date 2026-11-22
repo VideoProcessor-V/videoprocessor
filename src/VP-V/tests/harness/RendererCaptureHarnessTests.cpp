@@ -3683,73 +3683,102 @@ namespace Tests
 			for (const Case& c : cases)
 			{
 				FramePlan plan;
-				plan.captureAtSeconds = 2.5;
-				plan.retryRefusedCapture = true;
+				// On still cases (including 59.94 still), a 15-capture burst across 2.0..3.4 s guarantees shared frames without
+				// perturbing content; on moving cases, a single capture at 2.5 s avoids mid-run readback stalls disturbing temporal carry.
+				if (!c.moving)
+				{
+					for (int ci = 0; ci < 15; ++ci)
+						plan.captureTimes.push_back(2.0 + 0.10 * ci);
+				}
+				else
+				{
+					plan.captureAtSeconds = 2.5;
+					plan.retryRefusedCapture = true;
+				}
 				const bool moving = c.moving;
 				plan.step = [moving](int n) { FrameStep f; f.content = moving ? n : 0; return f; };
-				// Lead 19 fix-D (rule 28: no pass without repeatability). The sigma-delta's noise and carried error follow the
-				// refresh count (`frame / 5`, Temporal sigma-delta.glsl:602-612) and captureAtSeconds is wall-clock, so a capture's
-				// hash is a function of the source frame it lands on (tipC8e c8e.log: standard still split 114 / 114 = 838956e1,
-				// original 115 = 2775cdc6; gpu moving 45 / 45 / 45, all equal). Captures are therefore compared at the SAME
-				// captured source frame: up to kTries runs per folder, alternating, until both folders share a frame, and there
-				// every hash of both must be one. Two hashes from one folder at one frame = not repeatable even at a fixed phase:
-				// FAIL. No shared frame after kTries runs each: FAIL (the phase could not be pinned), never REPORT-only.
+				// Lead 19 fix-D (rule 28: no pass without repeatability). Captures are compared at the SAME captured source frame:
+				// up to kTries runs per folder, alternating, until both folders share at least one frame, and EVERY shared frame
+				// must match bit-for-bit; two hashes from one folder at one frame = FAIL; no shared frame = FAIL.
 				struct Sample { int source; std::string hash; };
 				auto sampleWith = [&](const std::string& dir) {
 					SetEnvironmentVariableA("VP_TEST_SHADER_DIR", dir.c_str());
 					const RunResult r = Run(c.encoding, c.path, 4.0, c.film, C8SigmaRule("own"), false, &plan);
-					Sample s{ -1, CaptureHash(r) };
+					std::vector<int> sources;
 					static const std::string kDone = "Rendered-output capture complete: source=";
 					for (const std::string& line : r.log)
 					{
 						const size_t at = line.find(kDone);
 						if (at != std::string::npos)
-							s.source = std::atoi(line.c_str() + at + kDone.size());
+							sources.push_back(std::atoi(line.c_str() + at + kDone.size()));
 					}
-					return s;
-				};
-				const std::string split = here.substr(0, here.size() - 1);
-				constexpr int kTries = 4;
-				std::vector<Sample> splitRuns, originalRuns;
-				int common = -1;
-				for (int t = 0; t < kTries && common < 0; ++t)
-				{
-					splitRuns.push_back(sampleWith(split));
-					originalRuns.push_back(sampleWith(original));
-					for (const Sample& s : splitRuns)
-						for (const Sample& o : originalRuns)
-							if (common < 0 && s.source >= 0 && s.source == o.source && !s.hash.empty() && !o.hash.empty())
-								common = s.source;
-				}
-				std::string line = std::string("== ") + c.name + ":";
-				bool missing = false, unrepeatable = false;
-				std::string commonHash, mismatch;
-				auto scan = [&](const std::vector<Sample>& runs, const char* role) {
-					for (size_t i = 0; i < runs.size(); ++i)
+					std::vector<Sample> out;
+					if (!c.moving)
 					{
-						line += std::string(" ") + role + "@" + std::to_string(runs[i].source) + " " + runs[i].hash + ";";
-						if (runs[i].hash.empty() || runs[i].source < 0)
-							missing = true;
-						for (size_t j = 0; j < i; ++j)
-							if (runs[j].source == runs[i].source && runs[j].hash != runs[i].hash)
-								unrepeatable = true;
-						if (common >= 0 && runs[i].source == common)
+						const size_t n = (std::min)(sources.size(), r.captureMetadataList.size());
+						for (size_t i = 0; i < n; ++i)
 						{
-							if (commonHash.empty())
-								commonHash = runs[i].hash;
-							else if (runs[i].hash != commonHash)
-								mismatch = std::string(role) + "@" + std::to_string(common);
+							RunResult one;
+							one.captureMetadata = r.captureMetadataList[i];
+							const std::string h = CaptureHash(one);
+							if (sources[i] >= 0 && !h.empty())
+								out.push_back(Sample{ sources[i], h });
 						}
 					}
+					else
+					{
+						const std::string h = CaptureHash(r);
+						if (!sources.empty() && sources.back() >= 0 && !h.empty())
+							out.push_back(Sample{ sources.back(), h });
+					}
+					return out;
 				};
-				scan(splitRuns, "split");
-				scan(originalRuns, "original");
-				report += line + (common >= 0 ? " compared at source " + std::to_string(common) : std::string(" no shared frame")) + "\n";
+				const std::string split = here.substr(0, here.size() - 1);
+				const int kTries = c.moving ? 8 : 4;
+				std::vector<Sample> splitRuns, originalRuns;
+				std::set<int> sharedSources;
+				for (int t = 0; t < kTries && sharedSources.empty(); ++t)
+				{
+					const auto sr = sampleWith(split);
+					const auto orun = sampleWith(original);
+					splitRuns.insert(splitRuns.end(), sr.begin(), sr.end());
+					originalRuns.insert(originalRuns.end(), orun.begin(), orun.end());
+					for (const Sample& s : splitRuns)
+						for (const Sample& o : originalRuns)
+							if (s.source >= 0 && s.source == o.source && !s.hash.empty() && !o.hash.empty())
+								sharedSources.insert(s.source);
+				}
+				std::string line = std::string("== ") + c.name + ":";
+				const bool missing = splitRuns.empty() || originalRuns.empty();
+				bool unrepeatable = false;
+				std::map<int, std::string> splitBySource, origBySource;
+				auto scan = [&](const std::vector<Sample>& runs, std::map<int, std::string>& bySource, const char* role) {
+					for (const Sample& s : runs)
+					{
+						auto it = bySource.find(s.source);
+						if (it == bySource.end())
+							bySource[s.source] = s.hash;
+						else if (it->second != s.hash)
+							unrepeatable = true;
+					}
+					line += std::string(" ") + role + "(" + std::to_string(runs.size()) + " caps);";
+				};
+				scan(splitRuns, splitBySource, "split");
+				scan(originalRuns, origBySource, "original");
+				std::string mismatch;
+				for (int src : sharedSources)
+				{
+					if (splitBySource[src] != origBySource[src])
+						mismatch += "source@" + std::to_string(src) + " ";
+				}
+				report += line + (!sharedSources.empty()
+					? " compared " + std::to_string(sharedSources.size()) + " shared frame(s) (first source " + std::to_string(*sharedSources.begin()) + ")"
+					: std::string(" no shared frame")) + "\n";
 				if (missing)
 					failures += std::string(c.name) + ": a capture (or its source frame) is missing; ";
 				if (unrepeatable)
 					failures += std::string(c.name) + ": one folder gave two hashes at the same captured frame (not repeatable at a fixed phase); ";
-				if (common < 0)
+				if (sharedSources.empty())
 					failures += std::string(c.name) + ": no captured frame shared by split and original in " + std::to_string(kTries) +
 						" runs each (phase not pinned: no comparison is not a pass); ";
 				else if (!mismatch.empty())
