@@ -63,7 +63,7 @@ constexpr double kBlackMinP4 = double(kFadeMinBlack) * kP4CodesPerEightBit;     
 constexpr double kBlackMaxP4 = double(kFadeMaxBlack) * kP4CodesPerEightBit;          // 12288: 48 codes
 
 // Elementary textbook ratios for the 576-cell spatial affine fade law.
-constexpr double kFadeResidualReduction = 0.5;                // global affine model explains > 50% of lit-cell L2 variance (V_fade < 0.5 * V_id)
+constexpr double kFadeResidualReduction = 0.5;                // 50% reduction bar: lit-cell L2 variance explained > 50% (V_fade < 0.5 * V_id) & AlignGrid shift-improvement check
 constexpr double kFadeSpatialConsensus = 0.75;                // >= 3/4 of changing lit cells move in the fade direction
 constexpr double kFadeSpatialCoverage = 0.5;                  // >= 1/2 of lit cells participate in the fade direction
 constexpr double kFadeCellStepEps = 0.5 * double(kFadeMinSpread); // 0.5 8-bit code = half-LSB quantization floor
@@ -338,10 +338,11 @@ inline void AlignGrid(const double ref[kGridH][kGridW], const double cur[kGridH]
 
     // Step 1b: sub-cell Gauss-Newton / Lucas-Kanade refinement clamped to [-0.5, +0.5]^2 around (bestSx, bestSy).
     // Uses exact 1-cell centered bilinear differences (+-0.5) so sharp edges do not suffer 2x central-difference overshoot.
-    for (int iter = 0; iter < 4; ++iter) {
+    constexpr int kAlignMaxIters = 4;
+    for (int iter = 0; iter < kAlignMaxIters; ++iter) {
         double a = 0.0, c = 0.0, sxx = 0.0, corr = 0.0, ef = 0.0;
         EvalInteriorAffine(refAligned, curAligned, &a, &c, &sxx, &corr, &ef);
-        if (sxx <= 1e-6 || a <= 0.1)
+        if (sxx <= 1e-6 || !(a > 1e-6))
             break;
 
         const double hfy = 0.5 * fy;
@@ -483,7 +484,7 @@ inline GridFadeFit FitGridFade(const RefT* refCells, const CurT* curCells, int s
     // (invariant to letterbox bars and black backgrounds).
     // Floor lit-cell classification by the frame's own minimum interior code so tiny OLS black-level noise
     // below a constant black background (e.g. b=14 vs black=16) never pulls pure-black cells into litCells.
-    double minCell = 1e9;
+    double minCell = double(kFadeNoBlack);
     for (int y = R; y < kGridH - R; ++y)
         for (int x = R; x < kGridW - R; ++x) {
             const double m = (std::min)(refAligned[y][x], curAligned[y][x]);
@@ -1096,25 +1097,43 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
             double(sameSign) >= kFadeSpatialCoverage * double(litCells);
     };
 
-    // Helper: check that prev -> cur has no darkening reversal (for blackOrigin fade-in continuation).
-    auto StepNoDarkReversal = [&](const double prevA[kGridH][kGridW], const double curA[kGridH][kGridW]) -> bool {
+    // Helper: check that prev -> cur is genuinely brightening across lit cells (rejects static 50/50 noise on dim shots
+    // after a black->dim hard cut while still accepting sub-0.5-code fade-in steps from black).
+    auto StepBrightening = [&](const double prevA[kGridH][kGridW], const double curA[kGridH][kGridW]) -> bool {
         constexpr int R = kLocalRadius;
-        int bright = 0, dark = 0;
+        double minC = double(kFadeNoBlack);
         for (int y = R; y < kGridH - R; ++y)
             for (int x = R; x < kGridW - R; ++x) {
-                const double delta = curA[y][x] - prevA[y][x];
-                if (delta > kFadeCellStepEps)
-                    ++bright;
-                else if (delta < -kFadeCellStepEps)
-                    ++dark;
+                const double m = (std::min)(prevA[y][x], curA[y][x]);
+                if (m < minC)
+                    minC = m;
             }
-        return dark == 0 || double(bright) >= kFadeSpatialConsensus * double(bright + dark);
+        const double floor = (std::max)(double(run.blackBaseMean) * kGridScale, minC);
+        int brightEps = 0, darkEps = 0, brightZero = 0, darkZero = 0;
+        for (int y = R; y < kGridH - R; ++y)
+            for (int x = R; x < kGridW - R; ++x) {
+                if ((std::max)(prevA[y][x], curA[y][x]) > floor + double(kFadeMinSpread)) {
+                    const double delta = curA[y][x] - prevA[y][x];
+                    if (delta > kFadeCellStepEps)
+                        ++brightEps;
+                    else if (delta < -kFadeCellStepEps)
+                        ++darkEps;
+                    if (delta > 0.0)
+                        ++brightZero;
+                    else if (delta < 0.0)
+                        ++darkZero;
+                }
+            }
+        if (brightEps + darkEps > 0)
+            return darkEps == 0 || double(brightEps) >= kFadeSpatialConsensus * double(brightEps + darkEps);
+        return brightZero > 0 && double(brightZero) >= kFadeSpatialConsensus * double(brightZero + darkZero);
     };
 
     // Helper: check that lit cells of prev are darkening toward flat/near-flat black cur with zero brightening.
+    // Requires litPrev > 0 so two consecutive flat-black frames (black hold) never trigger a collapse fade.
     auto CollapseToBlackOk = [&]() -> bool {
         if (!hasGrid)
-            return true;
+            return spreadPrev > kBlackSpreadP4;
         constexpr int R = kLocalRadius;
         const double bCur = double(cur.mean) * kGridScale;
         int litPrev = 0, darkZero = 0, brightEps = 0;
@@ -1131,7 +1150,7 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
                         ++darkZero;
                 }
             }
-        return brightEps == 0 && (litPrev > 0 ? darkZero > 0 : dMean < 0);
+        return brightEps == 0 && litPrev > 0 && darkZero > 0;
     };
 
     if (e.cut) {
@@ -1139,8 +1158,14 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
         if (hasGrid)
             CountCellStepSigns(prev.cells, cur.cells, &brightened, &darkened);
 
-        // (1) Active fade-out collapsing into black.
-        const bool activeFadeOutToBlack = run.direction < 0 && activeFade && dMean < 0 &&
+        // (1) Active fade-out collapsing into flat/near-flat black (never triggers on a hard cut to a textured dark shot).
+        bool curFlatBlack = spreadCur <= kBlackSpreadP4;
+        if (!curFlatBlack && hasGrid) {
+            Grid gc;
+            GridOf(cur, &gc);
+            curFlatBlack = Flatness(gc) < kFlatF;
+        }
+        const bool activeFadeOutToBlack = run.direction < 0 && activeFade && dMean < 0 && curFlatBlack &&
             cur.mean < kBlackMeanMaxP4 && aMean < kMaxFadeStepP4 && aMean * kFadeMaxDiv < contRef &&
             CollapseToBlackOk();
         if (activeFadeOutToBlack) {
@@ -1167,7 +1192,7 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
                 LoadGridCodes(cur.cells, curG);
                 double svx = 0.0, svy = 0.0;
                 AlignGrid(prevG, curG, kShiftRadius, prevA, curA, &svx, &svy);
-                const bool noRev = StepNoDarkReversal(prevA, curA);
+                const bool stepUp = StepBrightening(prevA, curA);
                 if (!run.baseGridValid && spreadPrev > kBlackSpreadP4) {
                     CopyCellsTo16(prev.cells, run.baseCells);
                     run.baseGridValid = true;
@@ -1184,9 +1209,9 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
                 Grid gp;
                 GridOf(prev, &gp);
                 const bool prevNearBlack = spreadPrev <= kBlackSpreadP4 || Flatness(gp) < kFlatF;
-                if (blackFit.valid && blackFit.dir > 0 && noRev) {
+                if (blackFit.valid && blackFit.dir > 0 && stepUp) {
                     blackOriginContinue = true;
-                } else if (prevNearBlack && noRev && cur.mean > prev.mean && prev.mean >= run.blackBaseMean &&
+                } else if (prevNearBlack && stepUp && cur.mean > prev.mean && prev.mean >= run.blackBaseMean &&
                            cur.p99 > run.blackBaseP99 && BlackOriginBrightening()) {
                     blackOriginContinue = true;
                 }
@@ -1304,6 +1329,7 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
         }
 
         // Integrate per-frame camera displacement so baseCells stays inside the +-kLocalRadius alignment window during pans.
+        bool midCapturedThisFrame = false;
         if (run.baseGridValid) {
             run.cumVx += stepVx;
             run.cumVy += stepVy;
@@ -1332,6 +1358,7 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
                 run.midAnchorKeep = run.keep;
                 run.midCumVx = 0.0;
                 run.midCumVy = 0.0;
+                midCapturedThisFrame = true;
             }
         }
 
@@ -1356,11 +1383,19 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
                 if (stepMean * double(run.direction) <= 0.0)
                     return false;
             }
+            double minC = double(kFadeNoBlack);
+            for (int y = R; y < kGridH - R; ++y)
+                for (int x = R; x < kGridW - R; ++x) {
+                    const double m = (std::min)(prevAligned[y][x], curAligned[y][x]);
+                    if (m < minC)
+                        minC = m;
+                }
+            const double floor = (std::max)(black, minC);
             int sSameEps = 0, sOppEps = 0;
             int sSameZero = 0, sOppZero = 0;
             for (int y = R; y < kGridH - R; ++y)
                 for (int x = R; x < kGridW - R; ++x) {
-                    if ((std::max)(prevAligned[y][x], curAligned[y][x]) > black + double(kFadeMinSpread)) {
+                    if ((std::max)(prevAligned[y][x], curAligned[y][x]) > floor + double(kFadeMinSpread)) {
                         const double delta = curAligned[y][x] - prevAligned[y][x];
                         if (double(run.direction) * delta > kFadeCellStepEps)
                             ++sSameEps;
@@ -1388,7 +1423,7 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
                     run.keep = k;
                 }
                 ++run.fadePairs;
-                if (run.midGridValid && run.midCumVx == 0.0 && run.midCumVy == 0.0)
+                if (midCapturedThisFrame)
                     run.midAnchorKeep = run.keep;
                 return true;
             }
@@ -1421,7 +1456,7 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
             GridOf(prev, &gp);
             if ((spreadPrev <= kBlackSpreadP4 || Flatness(gp) < kFlatF) &&
                 cur.mean > prev.mean && prev.mean >= run.blackBaseMean && cur.p99 > run.blackBaseP99 &&
-                StepNoDarkReversal(prevAligned, curAligned) && BlackOriginBrightening()) {
+                StepBrightening(prevAligned, curAligned) && BlackOriginBrightening()) {
                 const double fk = PairFadeKeep(prev, cur);
                 if (frameKeep)
                     *frameKeep = fk;
