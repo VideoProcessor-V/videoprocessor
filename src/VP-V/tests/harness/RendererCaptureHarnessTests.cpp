@@ -8008,13 +8008,14 @@ namespace Tests
 		TEST_METHOD(VectorEngineGamesDepthOneEngagesAtOneAhead)
 		{
 			const HarnessScope harnessScope;
-			// NOTE: the name is historical (it predates the low-latency rule): legs A and B now assert the look-ahead does NOT engage on a games queue.
-			// A games queue (queue_size 4, target_frames 2) is LOW LATENCY: no starter runs the vector engine there and the look-ahead
-			// gets no depth ("Motion ahead: ... off in low latency"). WAIVER-C1-10 (coordinator 2026-11-12 18:42, owner confirmed 18:47;
-			// lead 9 ruling 2026-11-14): the former premise (look-ahead engages at one ahead on a games queue, fed by the debander) is
-			// obsolete; legs A and B assert the NoStarter contract on that queue (deband_vp alone, then even with the de-judder demand),
-			// and leg C (new, positive) asserts a mode WITH a real starter - the de-judder standing demand on a Normal queue at a
-			// cadence-eligible 24p source - engages the look-ahead.
+			// B1 + ForwardShallow (owner 2026-11-01, 4ff748899, VectorDemand.h:211-228; B1 retired the starter gate,
+			// superseding WAIVER-C1-10): vectors never ADD queue depth, and a games queue (queue_size 4, target_frames 2,
+			// queueAheadCapacity == 1) runs forward look-ahead on its already-queued frames (ForwardShallow).
+			// Legs A (deband_vp alone) and B (deband_vp + dejudder_strength 0.25 at 24p) must:
+			//   1. engage forward shallow look-ahead and deliver real NVOF vectors (VectorsDelivered);
+			//   2. never add queue depth (policy target=2, prefill target=2, queue depth summary desired=2 healthy=1..2,
+			//      and runtime median queue depth <= 2.0).
+			// Leg C (Normal queue at 24p) remains the positive control on a full Normal queue.
 			if (!RequireHardwareOrSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			if (VectorTestSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			g_harnessApplySnapshot = true;
@@ -8029,12 +8030,34 @@ namespace Tests
 			const RunResult normal = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
 				"deband_vp: on\ndejudder_strength: 0.25\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n", false, &starterPlan);
 			g_harnessApplySnapshot = false;
-			Logger::WriteMessage(("A deband_vp only (no starter):\n" + VectorTestLines(none)).c_str());
-			Logger::WriteMessage(("B low latency with the de-judder demand:\n" + VectorTestLines(lowStarter)).c_str());
-			Logger::WriteMessage(("C Normal queue with a real starter:\n" + VectorTestLines(normal)).c_str());
+			Logger::WriteMessage(("A deband_vp only (games shallow queue):\n" + VectorTestLines(none)).c_str());
+			Logger::WriteMessage(("B low latency with the de-judder demand (games shallow queue):\n" + VectorTestLines(lowStarter)).c_str());
+			Logger::WriteMessage(("C Normal queue:\n" + VectorTestLines(normal)).c_str());
+			auto assertNoAddedQueueDepth = [](const RunResult& r, const wchar_t* leg) {
+				Assert::IsTrue(r.Logged("Alpha queue policy: target_frames=2 target=2"),
+					(std::wstring(leg) + L": queue policy keeps target_frames=2 target=2\n" + r.Tail()).c_str());
+				bool prefillTarget2 = false;
+				int summaryCount = 0;
+				bool allSummaryDesired2 = true;
+				for (const std::string& line : r.log)
+				{
+					if (line.find("Alpha queue startup prefill released:") != std::string::npos &&
+						line.find("target=2") != std::string::npos)
+						prefillTarget2 = true;
+					if (line.find("Alpha queue depth summary:") != std::string::npos)
+					{
+						++summaryCount;
+						if (line.find("desired=2 healthy=1..2") == std::string::npos)
+							allSummaryDesired2 = false;
+					}
+				}
+				Assert::IsTrue(prefillTarget2, (std::wstring(leg) + L": startup prefill stayed at target=2\n" + r.Tail()).c_str());
+				Assert::IsTrue(summaryCount > 0, (std::wstring(leg) + L": queue depth summary was logged\n" + r.Tail()).c_str());
+				Assert::IsTrue(allSummaryDesired2, (std::wstring(leg) + L": queue depth summary kept desired=2 healthy=1..2 (no added queue depth)\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.queueDepths.size() > 10 && Median(r.queueDepths) <= 2.0,
+					(std::wstring(leg) + L": runtime median queue depth stayed <= 2.0 (median=" + std::to_wstring(Median(r.queueDepths)) + L")\n" + r.Tail()).c_str());
+			};
 			Assert::IsTrue(none.presented, (L"A: frames presented\n" + none.Tail()).c_str());
-			// B1 + ForwardShallow (VectorDemand.h:211-228): starter gate retired; a games queue (target_frames 2, queueAheadCapacity >= 1)
-			// runs forward look-ahead on the already-queued frames (shallow queue) without adding queue depth.
 			Assert::IsFalse(StarterWordingLogged(none), (L"A: the starter wording is retired\n" + none.Tail()).c_str());
 			bool debandNamed = false;
 			for (const std::string& line : none.log)
@@ -8042,11 +8065,15 @@ namespace Tests
 			Assert::IsTrue(debandNamed, (L"A: the vector engine is on (forward) and names the deband hold\n" + none.Tail()).c_str());
 			Assert::IsTrue(MotionAheadDepthLines(none) > 0, (L"A: games shallow queue gets look-ahead depth\n" + none.Tail()).c_str());
 			Assert::IsTrue(none.Logged("Motion ahead: engaged") && none.Logged("vector engine: shallow queue"),
-				(L"A: games queue engages shallow look-ahead without adding queue depth\n" + none.Tail()).c_str());
+				(L"A: games queue engages shallow look-ahead\n" + none.Tail()).c_str());
+			Assert::IsTrue(VectorsDelivered(none), (L"A: games shallow queue delivers real vectors\n" + none.Tail()).c_str());
+			assertNoAddedQueueDepth(none, L"A");
 			Assert::IsTrue(lowStarter.presented, (L"B: frames presented\n" + lowStarter.Tail()).c_str());
 			Assert::IsTrue(MotionAheadDepthLines(lowStarter) > 0, (L"B: games shallow queue with de-judder demand gets look-ahead depth\n" + lowStarter.Tail()).c_str());
 			Assert::IsTrue(lowStarter.Logged("Motion ahead: engaged") && lowStarter.Logged("vector engine: shallow queue"),
 				(L"B: games queue with de-judder demand engages shallow look-ahead\n" + lowStarter.Tail()).c_str());
+			Assert::IsTrue(VectorsDelivered(lowStarter), (L"B: games shallow queue with de-judder demand delivers real vectors\n" + lowStarter.Tail()).c_str());
+			assertNoAddedQueueDepth(lowStarter, L"B");
 			Assert::IsTrue(normal.presented, (L"C: frames presented\n" + normal.Tail()).c_str());
 			Assert::IsTrue(normal.Logged("Motion ahead: engaged"), (L"C: a Normal queue engages the look-ahead\n" + normal.Tail()).c_str());
 			Assert::IsTrue(VectorsDelivered(normal), (L"C: Normal queue delivers vectors\n" + normal.Tail()).c_str());
