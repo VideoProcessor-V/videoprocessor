@@ -5,6 +5,12 @@
 
 #include <libplacebo/shaders/custom.h>
 
+#include <cstring>
+#if defined(_M_X64) || defined(_M_IX86)
+#include <immintrin.h>
+#include <intrin.h>
+#endif
+
 namespace CameraLink
 {
 	namespace
@@ -36,15 +42,76 @@ if (p.x < d.x && p.y < d.y) {
 			d.binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
 			return d;
 		}
+
+#if defined(_M_X64) || defined(_M_IX86)
+		bool HasF16C()
+		{
+			static const bool supported = []() -> bool
+			{
+				int regs[4] = {};
+				__cpuid(regs, 1);
+				// Bit 27 = OSXSAVE, bit 28 = AVX, bit 29 = F16C.
+				if ((regs[2] & ((1 << 27) | (1 << 28) | (1 << 29))) != ((1 << 27) | (1 << 28) | (1 << 29)))
+					return false;
+				return (_xgetbv(0) & 0x6ull) == 0x6ull;
+			}();
+			return supported;
+		}
+
+		__declspec(noinline) void UnpackHalfRowF16C(const uint16_t* rowSrc, float* rowDst, size_t rowElems)
+		{
+			size_t c = 0;
+			for (; c + 8 <= rowElems; c += 8)
+			{
+				const __m128i h8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(rowSrc + c));
+				const __m256 f8 = _mm256_cvtph_ps(h8);
+				_mm256_storeu_ps(rowDst + c, f8);
+			}
+			for (; c < rowElems; ++c)
+				rowDst[c] = NativeCopyReadback::HalfToFloat(rowSrc[c]);
+		}
+#endif
 	}
 
-	bool NativeCopyReadback::Create(pl_log log, pl_gpu gpu, int slots, int w, int h, int planes)
+	float NativeCopyReadback::HalfToFloat(uint16_t h)
+	{
+		const uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
+		const uint32_t exp = static_cast<uint32_t>(h >> 10) & 0x1Fu;
+		uint32_t mant = static_cast<uint32_t>(h & 0x03FFu);
+		uint32_t bits = 0;
+		if (exp == 0)
+		{
+			if (mant == 0)
+				bits = sign;
+			else
+			{
+				int e = -14;
+				while ((mant & 0x0400u) == 0)
+				{
+					mant <<= 1;
+					--e;
+				}
+				mant &= 0x03FFu;
+				bits = sign | (static_cast<uint32_t>(e + 127) << 23) | (mant << 13);
+			}
+		}
+		else if (exp == 31u)
+			bits = sign | 0x7F800000u | (mant ? (0x00400000u | (mant << 13)) : 0u);
+		else
+			bits = sign | ((exp + 112u) << 23) | (mant << 13);
+		float out = 0.0f;
+		std::memcpy(&out, &bits, sizeof(out));
+		return out;
+	}
+
+	bool NativeCopyReadback::Create(pl_log log, pl_gpu gpu, int slots, int w, int h, int planes, bool fp16)
 	{
 		Release();
 		if (!gpu || w <= 0 || h <= 0 || (planes != 1 && planes != 2))
 			return false;
+		const DXGI_FORMAT fmt = fp16 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT;
 		std::unique_ptr<LedDrive::NativeTexReadback> n(new LedDrive::NativeTexReadback());
-		if (!n->Create(gpu, slots, w, h * planes, DXGI_FORMAT_R32G32B32A32_FLOAT))
+		if (!n->Create(gpu, slots, w, h * planes, fmt))
 			return false;
 		m_dispatch = pl_dispatch_create(log, gpu);
 		GpuAttribution::Watch(m_dispatch, "camera_native_readback");
@@ -58,6 +125,7 @@ if (p.x < d.x && p.y < d.y) {
 		m_w = w;
 		m_h = h;
 		m_planes = planes;
+		m_fp16 = fp16;
 		return true;
 	}
 
@@ -110,7 +178,32 @@ if (p.x < d.x && p.y < d.y) {
 
 	bool NativeCopyReadback::Read(int slot, float* dst)
 	{
-		return Active() && m_native->Read(slot, dst, static_cast<size_t>(m_w) * 16u, m_h * m_planes);
+		if (!Active() || !dst)
+			return false;
+		const int rows = m_h * m_planes;
+		if (!m_fp16)
+			return m_native->Read(slot, dst, static_cast<size_t>(m_w) * 16u, rows);
+		const size_t rowElems = static_cast<size_t>(m_w) * 4u;
+		return m_native->ReadRows(slot, rows, [dst, rowElems](const unsigned char* src, size_t pitch, int nRows)
+		{
+#if defined(_M_X64) || defined(_M_IX86)
+			const bool f16c = HasF16C();
+#endif
+			for (int r = 0; r < nRows; ++r)
+			{
+				const uint16_t* rowSrc = reinterpret_cast<const uint16_t*>(src + static_cast<size_t>(r) * pitch);
+				float* rowDst = dst + static_cast<size_t>(r) * rowElems;
+#if defined(_M_X64) || defined(_M_IX86)
+				if (f16c)
+				{
+					UnpackHalfRowF16C(rowSrc, rowDst, rowElems);
+					continue;
+				}
+#endif
+				for (size_t c = 0; c < rowElems; ++c)
+					rowDst[c] = HalfToFloat(rowSrc[c]);
+			}
+		});
 	}
 
 	void NativeCopyReadback::Release()
@@ -124,5 +217,6 @@ if (p.x < d.x && p.y < d.y) {
 			pl_dispatch_destroy(&m_dispatch);
 		m_gpu = nullptr;
 		m_w = m_h = 0;
+		m_fp16 = false;
 	}
 }

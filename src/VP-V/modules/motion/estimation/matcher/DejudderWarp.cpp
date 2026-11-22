@@ -2431,26 +2431,44 @@ if (q.x < size.x && q.y < size.y) {
 		// output it swaps with the field.
 		if (settings.holdHysteresis > 1)
 		{
-			const bool fresh = holdResetPending || !holdState[0] || holdState[0]->params.w != blocksX || holdState[0]->params.h != blocksY;
+			// GEM-143 (MC-READBACK / P1-1): reuse holdState / subHoldState on holdResetPending via
+			// pl_tex_clear_ex instead of destroying/recreating textures + allocating a multi-MB zero vector.
+			const bool resized = !holdState[0] || holdState[0]->params.w != blocksX || holdState[0]->params.h != blocksY;
+			const bool reset = holdResetPending;
 			holdResetPending = false;
+			const bool canClear = (vec4f->caps & PL_FMT_CAP_BLITTABLE) != 0;
+			const bool recreate = resized || (reset && !canClear);
 			for (int i = 0; i < 2; ++i)
-				if (fresh)
+				if (recreate)
 				{
 					pl_tex_destroy(gpu, &holdState[i]);
 					pl_tex_destroy(gpu, &subHoldState[i]);
 				}
+			const union pl_clear_color zeroColor = { { 0.0f, 0.0f, 0.0f, 0.0f } };
 			auto state = [&](pl_tex* tex, int w, int h) -> bool
 			{
 				if (*tex)
+				{
+					if (reset)
+						pl_tex_clear_ex(gpu, *tex, zeroColor);
 					return true;
-				std::vector<uint16_t> zero(static_cast<size_t>(w) * h * 4, 0);
+				}
 				pl_tex_params tp{};
 				tp.w = w;
 				tp.h = h;
 				tp.format = vec4f;
 				tp.sampleable = true;
 				tp.storable = true;
+				tp.blit_dst = canClear;
 				tp.host_readable = readable && (vec4f->caps & PL_FMT_CAP_HOST_READABLE);
+				if (canClear)
+				{
+					*tex = pl_tex_create(gpu, &tp);
+					if (*tex)
+						pl_tex_clear_ex(gpu, *tex, zeroColor);
+					return *tex != nullptr;
+				}
+				std::vector<uint16_t> zero(static_cast<size_t>(w) * h * 4, 0);
 				tp.initial_data = zero.data();
 				*tex = pl_tex_create(gpu, &tp);
 				return *tex != nullptr;

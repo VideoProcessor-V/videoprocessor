@@ -344,13 +344,24 @@ namespace LedDrive
 		// (LastError / Poll report Failed). The slot is unmapped either way once it was read.
 		bool Read(int i, void* dst, size_t rowBytes, int rows)
 		{
-			if (!Valid(i) || !immediate || !dst) return false;
+			if (!dst) return false;
+			return ReadRows(i, rows, [dst, rowBytes](const unsigned char* from, size_t pitch, int nRows)
+			{
+				unsigned char* to = static_cast<unsigned char*>(dst);
+				for (int r = 0; r < nRows; ++r)
+					std::memcpy(to + static_cast<size_t>(r) * rowBytes, from + static_cast<size_t>(r) * pitch, rowBytes);
+			});
+		}
+
+		// GEM-143 (MC-READBACK): zero-copy row reader over the mapped staging surface (e.g. direct FP16 -> FP32
+		// unpack without an intermediate staging copy). Always unmaps the slot before returning.
+		template <typename Fn>
+		bool ReadRows(int i, int rows, Fn&& fn)
+		{
+			if (!Valid(i) || !immediate) return false;
 			Slot& s = slot[static_cast<size_t>(i)];
 			if (Poll(i) != ReadState::Ready) return false;
-			const unsigned char* from = static_cast<const unsigned char*>(s.map.pData);
-			unsigned char* to = static_cast<unsigned char*>(dst);
-			for (int r = 0; r < rows; ++r)
-				std::memcpy(to + static_cast<size_t>(r) * rowBytes, from + static_cast<size_t>(r) * s.map.RowPitch, rowBytes);
+			fn(static_cast<const unsigned char*>(s.map.pData), static_cast<size_t>(s.map.RowPitch), rows);
 			Unmap(s);
 			return true;
 		}

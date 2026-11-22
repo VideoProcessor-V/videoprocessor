@@ -22,6 +22,7 @@
 #include <libplacebo/log.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 
 namespace CameraLink
@@ -34,13 +35,19 @@ namespace CameraLink
 		NativeCopyReadback& operator=(const NativeCopyReadback&) = delete;
 		~NativeCopyReadback() { Release(); }
 
-		// `slots` slots of w x (h * planes) rgba32f. False: not D3D11 / no storable format (use the buffer path).
-		bool Create(pl_log log, pl_gpu gpu, int slots, int w, int h, int planes);
+		// `slots` slots of w x (h * planes). When `fp16` is true (GEM-143: ONLY when source planes are 16-bit float),
+		// staging uses DXGI_FORMAT_R16G16B16A16_FLOAT and Read() unpacks IEEE-754 half -> float losslessly; default
+		// false keeps DXGI_FORMAT_R32G32B32A32_FLOAT (used by GuidanceCountsRing and rgba32f sources). False: not D3D11 / no storable format.
+		bool Create(pl_log log, pl_gpu gpu, int slots, int w, int h, int planes, bool fp16 = false);
 		bool Active() const { return m_native && m_native->Active(); }
 		int Width() const { return m_w; }
 		int Height() const { return m_h; }
 		int Planes() const { return m_planes; }
+		bool IsFp16() const { return m_fp16; }
 		int Slots() const { return m_native ? m_native->Slots() : 0; }
+
+		// Exact IEEE-754 binary16 -> binary32 conversion (handles normals, subnormals, +/-0, +/-Inf, NaN).
+		static float HalfToFloat(uint16_t h);
 
 		// Dispatches the copy of a (and b when planes == 2) into slot i and queues the native copy. False: dispatch failed.
 		bool Start(int slot, pl_tex a, pl_tex b);
@@ -58,5 +65,6 @@ namespace CameraLink
 		pl_gpu m_gpu = nullptr;
 		pl_dispatch m_dispatch = nullptr;
 		int m_w = 0, m_h = 0, m_planes = 1;
+		bool m_fp16 = false;
 	};
 }
