@@ -540,10 +540,26 @@ namespace VpMotion
 		NoteFlowSourceWidth(width);
 		motionProducer->SetTargetSize(engineW, engineH);
 		MotionAhead::FlowPtr flow;
-		const uint64_t from = sequence, to = nextSequence;
+		uint64_t from = sequence, to = nextSequence;
 		if (nextSequence == sequence + 1 &&
 			motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))   // W1-C2a A1 / S2
 			flow = FindCurrent(from, to);   // C2a-F 2: never a pair of another stream generation
+		// ForwardShallow (games low-latency queue, target_frames = 2 / queueAheadCapacity = 1):
+		// frame N+1 is submitted by RunQueueWalk milliseconds before ServeStatistics(N, N+1), so
+		// async NVOF cannot finish (N, N+1) in the same dequeue tick without adding queue depth.
+		// Fall back to the already-completed incoming pair (N-1, N) (same pair FlowOf(N) serves)
+		// under the exact same motionValidity.PairServes epoch guard, so SourceMonitorPan / MotionIntent
+		// receive real NVOF statistics with zero added queue latency.
+		if (!flow && vectorDemand.reason == VectorDemand::Reason::ForwardShallow && sequence > 1 &&
+			motionValidity.PairServes(sequence - 1, sequence, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
+		{
+			flow = FindCurrent(sequence - 1, sequence);
+			if (flow)
+			{
+				from = sequence - 1;
+				to = sequence;
+			}
+		}
 		NoteGlobalPair(flow != nullptr);
 		// SK-MV row 24: the frame-analysis record carries the shared engine's global, or "absent" (never a stale value). The store is
 		// null while frame_analysis_store is off / the Original pathway runs.
