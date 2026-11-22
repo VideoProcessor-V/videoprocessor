@@ -967,7 +967,8 @@ namespace
 			resources.Started();
 			// A ring of frames that outlives anything the queue holds.
 			const size_t rowBytes = static_cast<size_t>(state->BytesPerRow());
-			std::vector<std::vector<BYTE>> ring(24, std::vector<BYTE>(static_cast<size_t>(state->BytesPerFrame())));
+			const size_t ringCount = (std::max)(size_t(24), g_harnessQueueCapacity + 4);
+			std::vector<std::vector<BYTE>> ring(ringCount, std::vector<BYTE>(static_cast<size_t>(state->BytesPerFrame())));
 			std::vector<SourceBuffer> buffers(ring.size());
 			const auto start = std::chrono::steady_clock::now();
 			const auto period = std::chrono::microseconds(static_cast<int64_t>(
