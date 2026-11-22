@@ -320,9 +320,12 @@ struct LaneSlotSource {
     // (LanePending, visible, no wait); NotNode = not a lane product: the memo's own owner fill path; Declined = visible, `why`
     // names it. Mirrors AnalysisLane::AheadRun (the binder maps it); the memo never includes the lane header.
     enum class AheadNow : uint8_t { Ran, Claimed, NotNode, Declined };
+    // `ownerMayFill` (Declined only, C5-SKREDS): the lane cannot make the frame in its slots now (beyond its slots / an input not
+    // made), but the product's owner fill may make it in the memo's own spot: the memo runs the owner fill instead of declining.
     struct AheadNowResult {
         AheadNow kind = AheadNow::NotNode;
         const char* why = "";
+        bool ownerMayFill = false;
     };
     std::function<AheadNowResult(ProductId, uint64_t)> aheadNow;   // render thread; null = the lane has no ahead claim
     const void* token = nullptr;   // the bound lane (BindLane / UnbindLane by token)
@@ -342,6 +345,7 @@ struct AcquireCounters {
     // aheadNow = Ran and the slot readable: made on this request. (A worker publishing between the slot read and the ask also
     // answers Ran: that frame is then counted here though it was made by the worker; rare, and it is never counted twice.)
     uint64_t laneAheadMade = 0;
+    uint64_t workerAdopted = 0;   // C5-SKREDS MUST-1: lane frames a WORKER copied from an owner-fill publication (not recomputed)
     uint64_t sealComputedReduced = 0;  // seal live fills COMPUTED in the reduced (missing-input) form: a compute, not a reuse
     uint64_t workerReused = 0;         // the lane's worker skipped a frame the render thread had made first (nothing recomputed)
     // Frames COMPUTED for this product (any variant): owner fills that published + seal computes. The compute-once ledger.
@@ -977,6 +981,16 @@ public:
             lk.lock();
             if (ar.kind == LaneSlotSource::AheadNow::Claimed)
                 return Fail(c, id, seq, AcquireCause::LanePending);
+            if (ar.kind == LaneSlotSource::AheadNow::Declined && ar.ownerMayFill) {
+                // C5-SKREDS (get-or-compute, OD 11-12 17:26 / 11-13 13:34): the lane cannot make it in its slots now, the owner fill may
+                // (its inputs got-or-computed through this Acquire chain). As NotNode below: the lock was released, so start over with
+                // the lane not asked again; with no owner fill of the key the lane's decline stands (visible, named).
+                const OwnerFill* owNow = OwnerLocked(OwnerKey(id, form));
+                if (owNow != nullptr && owNow->fill) {
+                    lk.unlock();
+                    return Acquire(id, seq, form, vIn, true);
+                }
+            }
             if (ar.kind == LaneSlotSource::AheadNow::Declined) {
                 AcquireResult r = Fail(c, id, seq, AcquireCause::OwnerDeclined);
                 if (ar.why != nullptr && ar.why[0] != '\0')
@@ -1178,6 +1192,12 @@ public:
     {
         std::lock_guard<std::mutex> g(mutex_);
         ++counters_[id].workerReused;
+    }
+    // C5-SKREDS MUST-1: a lane worker adopted an owner-fill publication (BindLaneToMemo's SetWorkerAdopt). Lane threads.
+    void NoteWorkerAdopted(ProductId id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        ++counters_[id].workerAdopted;
     }
     // The seal's question (SkeletonAcquireLane.h): did a reader publish the default CPU form of (id, seq)? Copies it.
     bool CopyPublished(ProductId id, uint64_t seq, uint8_t* dst, size_t n) const

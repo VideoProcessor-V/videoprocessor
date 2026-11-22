@@ -104,12 +104,13 @@ namespace VideoProcessorTest
 
 			const void* Host() const { return &r; }
 
-			void Life(RE::Lifecycle kind, pl_gpu gpu = nullptr, int code = 0, double value = 0.0)
+			void Life(RE::Lifecycle kind, pl_gpu gpu = nullptr, int code = 0, double value = 0.0, ID3D11Device* device = nullptr)
 			{
 				RE::LifecycleFacts f;
 				f.host = &r;
 				f.kind = kind;
 				f.gpu = gpu;
+				f.device = device;   // the renderer's D3D11 device, as GpuCreated carries it in production (the card's video memory query)
 				f.code = code;
 				f.value = value;
 				sk.OnLifecycle(f);
@@ -215,7 +216,7 @@ namespace VideoProcessorTest
 			// The renderer's lifecycle: the pathway (VP-V), the device (its pl_gpu), the motion look-ahead walk of 2 frames (the queue
 			// ahead the window needs: L + W), and the memo made by the first MemoFor.
 			rig.Life(RE::Lifecycle::SettingsApplied, nullptr, 0, 2.0);
-			rig.Life(RE::Lifecycle::GpuCreated, gpu);
+			rig.Life(RE::Lifecycle::GpuCreated, gpu, 0, 0.0, fixture.Device());
 			Assert::IsTrue(rig.sk.MemoFor(rig.Host(), 1).memo != nullptr, (leg + L"the renderer's memo").c_str());
 			if (ledRaise)
 			{

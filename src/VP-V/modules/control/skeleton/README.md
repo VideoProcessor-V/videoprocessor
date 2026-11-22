@@ -269,7 +269,11 @@ Contract: `D:/codex/vp-handover/lead8/iface-L-CORE.md` (frozen v1). Zero Bill li
 - **Lane ahead seam + declared-demand accessors** (QKP, R14-61 / R14-73): `LaneSlotSource::aheadNow` lets the memo ask the bound lane to
   make a frame AHEAD of the sealed one (default CPU form only, after the NotQueued / NotPlannedAhead / plan / stall / dropped admission,
   lock released for the ask): `Ran` serves the lane slot (`laneAheadMade`), `Claimed` = `LanePending`, `Declined` = `OwnerDeclined` with the
-  lane's reason in the cause text, `NotNode` = the normal path (re-entered once, the lane is not asked twice). `NoteSealComputedReduced` /
+  lane's reason in the cause text, `NotNode` = the normal path (re-entered once, the lane is not asked twice). C5-SKREDS: the lane first
+  makes a missing ahead CPU input of the frame by its own claim (P1 before P4, one copy each); a decline marked `ownerMayFill` (beyond the
+  lane's slots, or an input still not made) re-enters the normal path too, so the owner fill makes the frame in the memo's own spot with
+  its inputs got-or-computed through the same Acquire chain (the scene judge's render-thread P4 read peeks that spot: `CopyPublished`).
+  A live switch to the Original pathway makes no memo while this module's own record (`NotePathway`) or the hub's says Original. `NoteSealComputedReduced` /
   `NoteWorkerReused` count lane frames per product (status line `lane frames: ...`). `DeclaredFillHistory()` (largest declared reader
   lag, frames) and `ActiveAheadDemands()` (fills declaring an ahead depth) are read-only. Counting bases never mix: lane frames, history
   frames, and the VRAM bytes of `AheadNeed(gpuOnly)`. `UnbindLane` / `BindLane` are render thread only.

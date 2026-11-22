@@ -586,7 +586,16 @@ namespace Vpv
 					return pr == VpSkeleton::PublishedRead::Copied && decoded;
 				}
 				const AnalysisLane::ProductRead r = b.lane.ReadOf(VpSkeleton::kP4SourceStats, seq);
-				return r.cpu != nullptr && VpLaneProducts::ReadSourceStats(r.cpu, r.cpuBytes, out);
+				if (r.cpu != nullptr)
+					return VpLaneProducts::ReadSourceStats(r.cpu, r.cpuBytes, out);
+				// C5-SKREDS: an ahead frame the lane could not make in its slots was made by P4's owner fill in the memo's own spot (the
+				// SceneFactsFor Acquire): a PEEK of that publication (SkeletonMemo::CopyPublished: no compute, no cause, nothing counted).
+				if (!b.memo)
+					return false;
+				const size_t statsBytes = VpLaneProducts::kStatsBytes;   // the P4 stats record (not a pixel buffer)
+				std::vector<uint8_t> record(statsBytes);
+				return b.memo->CopyPublished(VpSkeleton::kP4SourceStats, seq, record.data(), record.size())
+					&& VpLaneProducts::ReadSourceStats(record.data(), record.size(), out);
 			}
 
 			// FNV-1a over the record's histogram, cells and counts: a frame number reused for another picture (a seek) is seen.
@@ -1106,8 +1115,11 @@ namespace Vpv
 				return m->memo;
 			if (!create)
 				return nullptr;
-			// Never in the Original pathway (no VP-V state: Original == Bill, zero cost).
-			if (Hub::ExtensionHub::Instance().OriginalPathway(host))
+			// Never in the Original pathway (no VP-V state: Original == Bill, zero cost). GF-P2b S1 / C5-SKREDS: the renderer's own word as
+			// this module recorded it at SettingsApplied (NotePathway) counts too. The hub records the pathway only AFTER its SettingsApplied
+			// fan-out, so between this module's Reconcile (which removed the memo host) and that record, a MemoFor (a later module's
+			// SettingsApplied handler, another thread) would otherwise make a new memo for an Original renderer.
+			if (Hub::ExtensionHub::Instance().OriginalPathway(host) || RecordedPathway(host) == 1)
 				return nullptr;
 			// L-CORE M3: made and published UNDER the registration lock, so a RegisterOwnerFill running at the same time either sees this
 			// memo in the table (and installs into it) or ran before the copy below (and is in it): never neither. A second thread making the
@@ -1898,6 +1910,18 @@ namespace Vpv
 				// A sealed / live slot is served through the lane binder exactly as ReadOf did; a frame AHEAD of the seal makes P4 in the lane's own
 				// slot now (or reuses the published one, never twice); off the render thread the lane's published bytes are copied. Both results
 				// stay alive (their pins) until both records are decoded.
+				// C5-SKREDS: the sequence judge below reads P4 of every frame from its tracker's newest up to `seq` (ReadP4, a peek); a frame
+				// between the seal and seq - 1 that nobody asked for yet would be unreadable and END the judge's part there (its rule), so an
+				// ahead frame would be judged without its context (a real cut two frames ahead of the seal judged no cut). On the render
+				// thread those frames are got-or-computed too, in order, through the same memo (made once: the seal later accepts them).
+				if (ahead && seq >= 3 && bundle.memo->OnRenderThread())
+				{
+					uint64_t first = seq - 1;
+					while (first > 1 && seq - first < kScenePrimeFrames && bundle.memo->AheadOfSeal(first - 1))
+						--first;
+					for (uint64_t s = first; s + 1 < seq; ++s)
+						(void)bundle.memo->Acquire(VpSkeleton::kP4SourceStats, s, VpSkeleton::AcquireForm::Cpu);   // the record stays in its slot / spot
+				}
 				const VpSkeleton::AcquireResult cur = bundle.memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
 				const VpSkeleton::AcquireResult prev = bundle.memo->Acquire(VpSkeleton::kP4SourceStats, seq - 1, VpSkeleton::AcquireForm::Cpu);
 				VpLaneProducts::SourceStatsRecord a, c;
@@ -2078,6 +2102,14 @@ namespace Vpv
 							// arrival, so seq - 1 was dropped or evicted: it never gets a group of its own).
 							FrameAnalysis::Scene g;
 							claim = (deliveryStore->PeekScene(d, g) && g.origin == FrameAnalysis::SceneOrigin::Vp) || !deliveryStore->HasRecord(d);
+						}
+						else if (!claim)
+						{
+							// C5-SKREDS (owner: the store on / off judge alike, no silent difference): with the store off seq - 1 has no group
+							// that could ever carry its cut, and its natural successor (this frame) is the one that delivers it in render order
+							// anyway (the late search below). The ahead fill delivers it now, kept in this frame's slot (gate N1 below:
+							// carriesLate, so the render-order re-fill of this frame carries the same cut, exactly once).
+							claim = true;
 						}
 						// Gate N1: the claim must be kept somewhere: this frame's slot (carriesLate, so a re-fill carries it) or its store
 						// record (the published group). Without either (JudgeSceneApart far past the tracker, no record yet) the render-order

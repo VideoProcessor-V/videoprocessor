@@ -17,6 +17,7 @@
 #include <windows.h>
 #include "CppUnitTest.h"
 
+#include <VP-V/core/ComputeOnce.h>
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/core/hub/HostSlots.h>
@@ -1953,6 +1954,10 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(store.PeekScene(6, written), L"published into the ahead frame's record");
 			Assert::AreEqual(ahead.cut, written.cut);
 			Assert::IsTrue(written.origin == FrameAnalysis::SceneOrigin::Vp);
+			// U7 v2: frame 7 has not arrived, so frame 6 is judged without its successor: its group is PROVISIONAL (the cut it answers is
+			// frame 5's confirmed cut, carried late by its natural successor).
+			Assert::IsFalse(written.confirmed, L"judged ahead of its successor: a provisional group");
+			Assert::IsTrue(written.cutLate, L"the cut answered ahead is frame 5's, delivered late by frame 6");
 			const Vpv::Skeleton::SceneCounters got = rig.sk.SceneCountersOf(rig.Host());
 			Assert::AreEqual(before.liveFills + 1, got.liveFills, L"classified once, now");
 			Assert::AreEqual(before.published, got.published, L"not a seal write");
@@ -1965,11 +1970,18 @@ namespace SkeletonModuleTestsNs
 			const Vpv::Skeleton::SceneCounters atSealBefore = rig.sk.SceneCountersOf(rig.Host());
 			rig.Begin(6);
 			const Vpv::Skeleton::SceneCounters atSeal = rig.sk.SceneCountersOf(rig.Host());
-			Assert::AreEqual(atSealBefore.alreadyPresent + 1, atSeal.alreadyPresent, L"the seal found the ahead verdict");
-			Assert::AreEqual(atSealBefore.published, atSeal.published, L"computed once: no second write at the seal");
+			// U7 v2 (the seal, SkeletonModule.cpp "a provisional group of this module's own ... is judged again"): the seal finds the ahead
+			// group PROVISIONAL, so it is not "already present": the seal judges it once more and that is its one write; a confirmed ahead
+			// group would have been found (alreadyPresent), never rewritten.
+			Assert::AreEqual(atSealBefore.alreadyPresent, atSeal.alreadyPresent, L"a provisional ahead group is not taken as the seal's verdict");
+			Assert::AreEqual(atSealBefore.published + 1, atSeal.published, L"the seal's one write: the provisional group judged again");
+			FrameAnalysis::Scene sealedGroup;
+			Assert::IsTrue(store.PeekScene(6, sealedGroup) && sealedGroup.origin == FrameAnalysis::SceneOrigin::Vp, L"the frame's group, written by the seal");
+			Assert::AreEqual(written.cut, sealedGroup.cut, L"the delivered cut is not delivered twice nor lost (frame 5's, carried by 6)");
+			Assert::AreEqual(written.cutLate, sealedGroup.cutLate);
 			Vpv::Skeleton::SceneFacts f;
 			Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), 6, f));
-			Assert::AreEqual(f.cut, ahead.cut, L"the ahead verdict is the seal-time classification of the same pair");
+			Assert::AreEqual(f.cut, ahead.cutHere, L"the ahead verdict is the seal-time classification of the same pair");
 			Assert::AreEqual(f.fade, ahead.fade);
 			rig.After(6);
 		}
@@ -2248,6 +2260,84 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(refLate.known, (L"the reference answers the late frame; " + WhyOf(refLate)).c_str());
 			Assert::AreEqual(refLate.fade, lateGroup.fade, L"the walked run's fade equals the render-order reference");
 			Assert::AreEqual(double(refLate.fadeKeep), double(lateGroup.fadeKeep), 1e-6, L"and so does the published fadeKeep");
+		}
+
+		// C5-SKREDS MUST-1 (gate R4 on a23f8c3b3; one computation per frame, consolidation rule): a walk front N + kAheadCeiling is beyond
+		// the lane's slots, so P4 and (through the Acquire chain) P1 of that frame are made by the owner fill in the memo's spot. When the
+		// frame later fits the lane, the lane WORKER claims it: it must ADOPT that publication (copy, counted workerAdopted), never compute
+		// P1 / P4 of the frame a second time. The worker law is the real one, stepped on this thread (threads off: deterministic, no seal
+		// can cancel a running job, so the compute-once detector's per-frame count is exact). Every lane compute path notes "lane:<id>"
+		// (worker, seal live, ahead claim, owner form) and the kernels note U3 (P1) / U6 (P4): a duplicate frame in any of those rows is a
+		// second computation. Not vacuous: the worker made frames itself, the memo made walk fronts, and the worker met and adopted them.
+		TEST_METHOD(AWalkFrontTheMemoMadeIsAdoptedByTheLaneWorkerNotComputedTwice)
+		{
+			constexpr uint64_t kC = VpSkeleton::kAheadCeiling;
+			constexpr int64_t kLast = 24;
+			ComputeOnce::SetEnabled(true);
+			ComputeOnce::Global().Reset();
+			struct DetectorOff
+			{
+				~DetectorOff()
+				{
+					ComputeOnce::Global().Reset();
+					ComputeOnce::SetEnabled(false);
+				}
+			} detectorOff;
+			Rig rig(Lane("on"));
+			VpSkeleton::CardProfile card;   // no render device in a unit test: a card with room for the lane (the CPU products are laned)
+			card.vramBudgetBytes = 1ull << 30;
+			card.systemRamFreeBytes = 1ull << 30;
+			card.uploadGBps = 10.0;
+			rig.sk.SetCardForTesting(card);
+			rig.sk.SetWorkerThreadsForTesting(false);   // the worker law is stepped below
+			FeedAheadWindow(rig, uint16_t(kC));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			uint64_t delivered = 0;
+			for (int64_t s = 1; s <= kLast; ++s)
+			{
+				rig.Ingress(s);
+				while (delivered < uint64_t(s) + kC + 1)
+					rig.Deliver(++delivered);
+				rig.Begin(s);
+				PresentFacts(rig, s);
+				VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+				Assert::IsNotNull(lane);
+				int steps = 0;
+				while (lane->StepWorker(VpSkeleton::Backend::Cpu, 0) && ++steps < 10000)
+				{
+				}
+				Assert::IsTrue(steps < 10000, L"the lane worker went idle");
+				WalkP4(rig, uint64_t(s) + kC);   // the walk front: the memo's owner fill when the lane cannot hold it
+				rig.After(s);
+			}
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			Assert::IsNotNull(lane);
+			const std::shared_ptr<VpSkeleton::LaneState> st = lane->State();
+			Assert::IsTrue(st != nullptr && st->runner != nullptr, L"the lane state");
+			const VpSkeleton::LaneProductCounters& c1 = st->runner->Counters(VpSkeleton::kP1HalfLuma);
+			const VpSkeleton::LaneProductCounters& c4 = st->runner->Counters(VpSkeleton::kP4SourceStats);
+			Assert::IsTrue(c1.published.load() > c1.workerAdopted.load() && c4.published.load() > c4.workerAdopted.load(),
+				L"the lane worker computed frames itself (not vacuous)");
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			Assert::IsTrue(memo->CountersOf(VpSkeleton::kP4SourceStats).filledAtRead > 0 && memo->CountersOf(VpSkeleton::kP1HalfLuma).filledAtRead > 0,
+				L"the owner fill made walk fronts the lane could not hold (not vacuous)");
+			Assert::IsTrue(c1.workerAdopted.load() > 0 && c4.workerAdopted.load() > 0, L"the worker met frames the owner fill had made, and adopted them");
+			Assert::IsTrue(memo->CountersOf(VpSkeleton::kP1HalfLuma).workerAdopted > 0 && memo->CountersOf(VpSkeleton::kP4SourceStats).workerAdopted > 0,
+				L"counted in the memo's ledger too");
+			const std::string units[] = { "lane:" + std::to_string(int(VpSkeleton::kP1HalfLuma)), "lane:" + std::to_string(int(VpSkeleton::kP4SourceStats)),
+				"U3", "U6" };
+			int seen = 0;
+			for (const ComputeOnce::UnitRow& r : ComputeOnce::Global().Rows())
+				for (const std::string& u : units)
+					if (r.unit == u)
+					{
+						++seen;
+						Assert::IsTrue(r.frames > 0, L"the detector saw the unit's frames");
+						Assert::AreEqual(uint64_t(0), r.dupFrames, (L"one computation per frame: " + std::wstring(u.begin(), u.end())).c_str());
+					}
+			Assert::IsTrue(seen >= 4, L"every lane compute row of P1 and P4 was seen");
 		}
 
 		// GF-P2a MUST-8 (order): one thread fills frame s (provisional: s + 1 not judged yet) while the render thread fills s + 1, which
@@ -2927,13 +3017,14 @@ namespace SkeletonModuleTestsNs
 			registry.ResetForTesting();
 		}
 
-		// A GpuCreated with a fake render device (presence only: it is never dereferenced), as SkeletonCoreContextTests does.
-		static void GpuCreatedWithDevice(Rig& rig, int* fakeGpu)
+		// A GpuCreated with a fake render device: a zero-filled pl_gpu_t (log null), never used for a texture or a pass. With the lane on,
+		// Reconcile constructs a SkeletonGpuDispatcher on it, whose pl_dispatch_create(gpu->log, gpu) only stores the two pointers.
+		static void GpuCreatedWithDevice(Rig& rig, pl_gpu_t* fakeGpu)
 		{
 			RE::LifecycleFacts f;
 			f.host = rig.Host();
 			f.kind = RE::Lifecycle::GpuCreated;
-			f.gpu = reinterpret_cast<pl_gpu>(fakeGpu);
+			f.gpu = fakeGpu;
 			rig.sk.OnLifecycle(f);
 		}
 
@@ -2947,7 +3038,7 @@ namespace SkeletonModuleTestsNs
 			const uint64_t mb = 1024ull * 1024ull;
 			{
 				Rig rig(Lane("off"));
-				int fakeGpu = 0;
+				pl_gpu_t fakeGpu{};
 				VpSkeleton::CardProfile tight;
 				tight.key.luid = 80;
 				tight.vramBudgetBytes = 8 * mb;
@@ -2955,6 +3046,9 @@ namespace SkeletonModuleTestsNs
 				rig.sk.SetCardForTesting(tight);
 				rig.ResyncApply("on");
 				GpuCreatedWithDevice(rig, &fakeGpu);
+				// A no-lane memo exists only once a consumer asks for one (MemoFor makes it; a lane-off Begin never does): the ask a
+				// consumer's frame hook makes in production.
+				Assert::IsTrue(rig.sk.MemoFor(rig.Host(), 1).Valid(), L"a consumer's ask makes the no-lane memo");
 				VpSkeleton::OwnerFill g;
 				g.reserveBytes = 1u << 20;
 				g.aheadDepth = 2;   // an ahead consumer is active: the window computes ahead
@@ -3026,7 +3120,7 @@ namespace SkeletonModuleTestsNs
 		TEST_METHOD(AShadowLaneBoundMemoWithADeviceIsNotWithoutADispatcher)
 		{
 			Rig rig(Lane("shadow"));
-			int fakeGpu = 0;
+			pl_gpu_t fakeGpu{};
 			rig.ResyncApply("on");
 			GpuCreatedWithDevice(rig, &fakeGpu);
 			for (int64_t s = 1; s <= 4; ++s)
@@ -3040,7 +3134,7 @@ namespace SkeletonModuleTestsNs
 		TEST_METHOD(ARaisedLaneBoundMemoWithADeviceIsNotWithoutADispatcher)
 		{
 			Rig rig(Lane("off"));
-			int fakeGpu = 0;
+			pl_gpu_t fakeGpu{};
 			rig.ResyncApply("on");
 			GpuCreatedWithDevice(rig, &fakeGpu);
 			VpSkeleton::ConsumerDecl c;
@@ -3062,7 +3156,7 @@ namespace SkeletonModuleTestsNs
 		TEST_METHOD(ADeviceDetachedAfterTheBindLeavesNoDispatcherAndAReattachRestoresIt)
 		{
 			Rig rig(Lane("on"));
-			int fakeGpu = 0;
+			pl_gpu_t fakeGpu{};
 			rig.ResyncApply("on");
 			GpuCreatedWithDevice(rig, &fakeGpu);
 			for (int64_t s = 1; s <= 4; ++s)
@@ -3087,8 +3181,12 @@ namespace SkeletonModuleTestsNs
 		TEST_METHOD(AStoreRegisteringAfterGpuCreatedDoesNotDetachTheNewRenderersDevice)
 		{
 			Rig rig(Lane("on"));
-			int fakeGpu = 0;
+			pl_gpu_t fakeGpu{};
 			rig.ResyncApply("on");
+			// The renderer's memo exists before its device is known (a consumer's MemoFor makes it; neither GpuCreated nor Reconcile
+			// does), so GpuCreated's own attach is what gives it the device.
+			Assert::IsTrue(rig.sk.MemoFor(rig.Host(), 1).Valid(), L"a consumer's ask makes the memo");
+			Assert::IsFalse(rig.sk.MemoOf(rig.Host())->HasGpuDevice(), L"no device before GpuCreated");
 			GpuCreatedWithDevice(rig, &fakeGpu);
 			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
 			Assert::IsNotNull(memo);
@@ -3113,7 +3211,7 @@ namespace SkeletonModuleTestsNs
 		TEST_METHOD(AStoreRegisteringAfterGpuReleasedDoesNotResurrectADevice)
 		{
 			Rig rig(Lane("on"));
-			int fakeGpu = 0;
+			pl_gpu_t fakeGpu{};
 			rig.ResyncApply("on");
 			GpuCreatedWithDevice(rig, &fakeGpu);
 			rig.Frame(1);
@@ -3138,7 +3236,7 @@ namespace SkeletonModuleTestsNs
 		TEST_METHOD(ADeadRenderersStaleDeviceIsKeptUntilTheNextGpuCreated)
 		{
 			Rig rig(Lane("on"));
-			int staleGpu = 0, newGpu = 0;
+			pl_gpu_t staleGpu{}, newGpu{};
 			rig.ResyncApply("on");
 			GpuCreatedWithDevice(rig, &staleGpu);
 			rig.Frame(1);
