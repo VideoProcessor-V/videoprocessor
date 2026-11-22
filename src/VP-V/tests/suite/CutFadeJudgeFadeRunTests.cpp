@@ -388,7 +388,9 @@ namespace CutFadeJudgeFadeRunTestsNs
 					for (uint32_t x = 0; x < kW; ++x)
 					{
 						const double base = 0.25 + 0.65 * double(x) / double(kW) + 0.10 * ((y * 7u + x * 3u) % 11u) / 10.0;
-						const bool inBox = (x < kW * 3u / 10u);
+						// Place the darkening box on the bright side (right 30%) so both mean and p99 drop together,
+						// ensuring the test defeats 2-scalar (mean, p99) laws and validates the 576-cell spatial law.
+						const bool inBox = (x >= kW * 7u / 10u);
 						const double g = inBox ? boxGain : 1.0;
 						const double v = kBlack + g * base * 48000.0 + Noise(x, y, uint32_t(i));
 						half[size_t(y) * kW + x] = static_cast<uint16_t>(v < 0.0 ? 0.0 : (v > 65535.0 ? 65535.0 : v));
