@@ -1954,6 +1954,10 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(store.PeekScene(6, written), L"published into the ahead frame's record");
 			Assert::AreEqual(ahead.cut, written.cut);
 			Assert::IsTrue(written.origin == FrameAnalysis::SceneOrigin::Vp);
+			// U7 v2: frame 7 has not arrived, so frame 6 is judged without its successor: its group is PROVISIONAL (the cut it answers is
+			// frame 5's confirmed cut, carried late by its natural successor).
+			Assert::IsFalse(written.confirmed, L"judged ahead of its successor: a provisional group");
+			Assert::IsTrue(written.cutLate, L"the cut answered ahead is frame 5's, delivered late by frame 6");
 			const Vpv::Skeleton::SceneCounters got = rig.sk.SceneCountersOf(rig.Host());
 			Assert::AreEqual(before.liveFills + 1, got.liveFills, L"classified once, now");
 			Assert::AreEqual(before.published, got.published, L"not a seal write");
@@ -1966,11 +1970,18 @@ namespace SkeletonModuleTestsNs
 			const Vpv::Skeleton::SceneCounters atSealBefore = rig.sk.SceneCountersOf(rig.Host());
 			rig.Begin(6);
 			const Vpv::Skeleton::SceneCounters atSeal = rig.sk.SceneCountersOf(rig.Host());
-			Assert::AreEqual(atSealBefore.alreadyPresent + 1, atSeal.alreadyPresent, L"the seal found the ahead verdict");
-			Assert::AreEqual(atSealBefore.published, atSeal.published, L"computed once: no second write at the seal");
+			// U7 v2 (the seal, SkeletonModule.cpp "a provisional group of this module's own ... is judged again"): the seal finds the ahead
+			// group PROVISIONAL, so it is not "already present": the seal judges it once more and that is its one write; a confirmed ahead
+			// group would have been found (alreadyPresent), never rewritten.
+			Assert::AreEqual(atSealBefore.alreadyPresent, atSeal.alreadyPresent, L"a provisional ahead group is not taken as the seal's verdict");
+			Assert::AreEqual(atSealBefore.published + 1, atSeal.published, L"the seal's one write: the provisional group judged again");
+			FrameAnalysis::Scene sealedGroup;
+			Assert::IsTrue(store.PeekScene(6, sealedGroup) && sealedGroup.origin == FrameAnalysis::SceneOrigin::Vp, L"the frame's group, written by the seal");
+			Assert::AreEqual(written.cut, sealedGroup.cut, L"the delivered cut is not delivered twice nor lost (frame 5's, carried by 6)");
+			Assert::AreEqual(written.cutLate, sealedGroup.cutLate);
 			Vpv::Skeleton::SceneFacts f;
 			Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), 6, f));
-			Assert::AreEqual(f.cut, ahead.cut, L"the ahead verdict is the seal-time classification of the same pair");
+			Assert::AreEqual(f.cut, ahead.cutHere, L"the ahead verdict is the seal-time classification of the same pair");
 			Assert::AreEqual(f.fade, ahead.fade);
 			rig.After(6);
 		}
