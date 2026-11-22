@@ -14,7 +14,7 @@ cbuffer RefineCB : register(b0)
 	uint gW, gH, gUseMask, gGridW;
 	uint gBicubic, gNGeo, gNPar, gFade;
 	uint gTarget, gMinPixels, gMaxIter, gUnit;
-	uint gNumGroups, gPad0, gPad1, gPad2;
+	uint gNumGroups, gCandUntiled, gPad1, gPad2;
 	double gS, gInvS;
 	double gInv2S, gK;
 	double gCx, gCy;
@@ -25,19 +25,28 @@ cbuffer RefineCB : register(b0)
 	double gHw, gHh;
 };
 
+struct PtGeom
+{
+	uint2 X, Y, T, GX, GY;
+};
+
 Texture2D<uint> tA : register(t0);
 Texture2D<uint> tB : register(t1);
 StructuredBuffer<int> sColBx : register(t2);
 StructuredBuffer<int> sRowBy : register(t3);
 StructuredBuffer<uint> sCell : register(t4);
+// GEM-142: 16-bit R16_UINT candidate bin buffer is written via uBin (u0) in CSCand and read via tBin (t5) in
+// CSRowCount / CSCompact (D3D11 FL 11.0 safe: no TypedUAVLoadAdditionalFormats required).
+Buffer<uint> tBin : register(t5);
 
-RWStructuredBuffer<uint> uBin : register(u0);
+RWBuffer<uint> uBin : register(u0);
 RWStructuredBuffer<uint> uHist : register(u1);
 RWStructuredBuffer<uint4> uRow : register(u2);
 RWStructuredBuffer<uint> uPts : register(u3);
 RWStructuredBuffer<uint4> uRes : register(u4);
 RWStructuredBuffer<uint2> uPart : register(u5);
 RWStructuredBuffer<uint2> uState : register(u6);
+RWStructuredBuffer<PtGeom> uPtGeom : register(u7);
 
 // State slots (uint2 each; doubles as lo / hi bits).
 #define S_STOP 0
@@ -180,41 +189,92 @@ void CSClear(uint3 dt : SV_DispatchThreadID)
 }
 
 // 1. Candidates: inlier-block pixels inside the picture margin with |dx| + |dy| >= minGradient; quarter-code bins.
+// GEM-219 (MISS-motion-4): cooperative 18x18 shared tile per (xa, ya) sub-iteration; all 256 threads reach every barrier.
 groupshared uint gsCandHist[4096];
+groupshared uint gsTile[18][18];
 [numthreads(16, 16, 1)]
 void CSCand(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_GroupIndex)
 {
 	for (uint b0 = gi; b0 < 4096; b0 += 256) gsCandHist[b0] = 0;
 	GroupMemoryBarrierWithGroupSync();
-	for (uint ya = 0; ya < 4; ++ya)
-		for (uint xa = 0; xa < 4; ++xa)
-		{
-			uint i = gid.x * 64 + tid.x + 16 * xa, j = gid.y * 64 + tid.y + 16 * ya;
-			if (i >= gW || j >= gH) continue;
-			uint bin = 0xFFFFu;
-			if (i >= 1 && j >= 1 && i + 1 < gW && j + 1 < gH)
+	if (gCandUntiled == 0)
+	{
+		for (uint ya = 0; ya < 4; ++ya)
+			for (uint xa = 0; xa < 4; ++xa)
 			{
-				int bx = sColBx[i], by = sRowBy[j];
-				if (bx >= 0 && by >= 0 && (gUseMask == 0 || sCell[(uint)by * gGridW + (uint)bx] != 0))
+				int ox = (int)(gid.x * 64u + 16u * xa) - 1;
+				int oy = (int)(gid.y * 64u + 16u * ya) - 1;
+				for (uint idx = gi; idx < 324u; idx += 256u)
 				{
-					uint l = tA.Load(int3(i - 1, j, 0)), r = tA.Load(int3(i + 1, j, 0));
-					uint t = tA.Load(int3(i, j - 1, 0)), d = tA.Load(int3(i, j + 1, 0));
-					if (gUnit != 0)
-					{
-						uint mag = (r > l ? r - l : l - r) + (d > t ? d - t : t - d);
-						if (ToD(mag) >= gMinGrad) bin = min(4095u, mag * 4u);
-					}
-					else
-					{
-						precise double mag = ToD((r > l ? r - l : l - r) + (d > t ? d - t : t - d)) * gK;   // integer sum, one multiply (= CandidateGradientCodes)
-						if (mag >= gMinGrad) bin = (uint)FloorD(min(4095.0L, mag * 4.0L));
-					}
-					if (bin != 0xFFFFu) InterlockedAdd(gsCandHist[bin], 1u);
+					uint tx = idx % 18u;
+					uint ty = idx / 18u;
+					int sx = ox + (int)tx;
+					int sy = oy + (int)ty;
+					gsTile[ty][tx] = (sx >= 0 && sy >= 0 && sx < (int)gW && sy < (int)gH)
+						? tA.Load(int3(sx, sy, 0)) : 0u;
 				}
+				GroupMemoryBarrierWithGroupSync();
+				uint i = gid.x * 64u + tid.x + 16u * xa, j = gid.y * 64u + tid.y + 16u * ya;
+				if (i < gW && j < gH)
+				{
+					uint bin = 0xFFFFu;
+					if (i >= 1 && j >= 1 && i + 1 < gW && j + 1 < gH)
+					{
+						int bx = sColBx[i], by = sRowBy[j];
+						if (bx >= 0 && by >= 0 && (gUseMask == 0 || sCell[(uint)by * gGridW + (uint)bx] != 0))
+						{
+							uint l = gsTile[tid.y + 1u][tid.x], r = gsTile[tid.y + 1u][tid.x + 2u];
+							uint t = gsTile[tid.y][tid.x + 1u], d = gsTile[tid.y + 2u][tid.x + 1u];
+							if (gUnit != 0)
+							{
+								uint mag = (r > l ? r - l : l - r) + (d > t ? d - t : t - d);
+								if (ToD(mag) >= gMinGrad) bin = min(4095u, mag * 4u);
+							}
+							else
+							{
+								precise double mag = ToD((r > l ? r - l : l - r) + (d > t ? d - t : t - d)) * gK;   // integer sum, one multiply (= CandidateGradientCodes)
+								if (mag >= gMinGrad) bin = (uint)FloorD(min(4095.0L, mag * 4.0L));
+							}
+							if (bin != 0xFFFFu) InterlockedAdd(gsCandHist[bin], 1u);
+						}
+					}
+					uBin[j * gW + i] = bin;
+				}
+				GroupMemoryBarrierWithGroupSync();
 			}
-			uBin[j * gW + i] = bin;
-		}
-	GroupMemoryBarrierWithGroupSync();
+	}
+	else
+	{
+		for (uint ya2 = 0; ya2 < 4; ++ya2)
+			for (uint xa2 = 0; xa2 < 4; ++xa2)
+			{
+				uint i2 = gid.x * 64u + tid.x + 16u * xa2, j2 = gid.y * 64u + tid.y + 16u * ya2;
+				if (i2 >= gW || j2 >= gH) continue;
+				uint bin2 = 0xFFFFu;
+				if (i2 >= 1 && j2 >= 1 && i2 + 1 < gW && j2 + 1 < gH)
+				{
+					int bx2 = sColBx[i2], by2 = sRowBy[j2];
+					if (bx2 >= 0 && by2 >= 0 && (gUseMask == 0 || sCell[(uint)by2 * gGridW + (uint)bx2] != 0))
+					{
+						uint l2 = tA.Load(int3(i2 - 1, j2, 0)), r2 = tA.Load(int3(i2 + 1, j2, 0));
+						uint t2 = tA.Load(int3(i2, j2 - 1, 0)), d2 = tA.Load(int3(i2, j2 + 1, 0));
+						if (gUnit != 0)
+						{
+							uint mag2 = (r2 > l2 ? r2 - l2 : l2 - r2) + (d2 > t2 ? d2 - t2 : t2 - d2);
+							if (ToD(mag2) >= gMinGrad) bin2 = min(4095u, mag2 * 4u);
+						}
+						else
+						{
+							precise double mag2 = ToD((r2 > l2 ? r2 - l2 : l2 - r2) + (d2 > t2 ? d2 - t2 : t2 - d2)) * gK;
+							if (mag2 >= gMinGrad) bin2 = (uint)FloorD(min(4095.0L, mag2 * 4.0L));
+						}
+						if (bin2 != 0xFFFFu) InterlockedAdd(gsCandHist[bin2], 1u);
+					}
+				}
+				uBin[j2 * gW + i2] = bin2;
+			}
+		GroupMemoryBarrierWithGroupSync();
+	}
 	for (uint b1 = gi; b1 < 4096; b1 += 256)
 		if (gsCandHist[b1] != 0) InterlockedAdd(uHist[b1], gsCandHist[b1]);
 }
@@ -261,7 +321,7 @@ void CSRowCount(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 	if (live)
 		for (uint i = gi; i < gW; i += 256)
 		{
-			uint b = uBin[j * gW + i];
+			uint b = tBin[j * gW + i];
 			if (b == 0xFFFFu) continue;
 			if (b > thr) ++a;
 			else if (b == thr) ++t;
@@ -324,7 +384,7 @@ void CSCompact(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 	if (live)
 		for (uint i = i0; i < i1; ++i)
 		{
-			uint b = uBin[j * gW + i];
+			uint b = tBin[j * gW + i];
 			if (b == 0xFFFFu) continue;
 			if (b > thr) ++a;
 			else if (b == thr) ++t;
@@ -352,7 +412,7 @@ void CSCompact(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 	int used = 0;
 	for (uint i2 = i0; i2 < i1; ++i2)
 	{
-		uint b2 = uBin[j * gW + i2];
+		uint b2 = tBin[j * gW + i2];
 		if (b2 == 0xFFFFu || b2 < thr) continue;
 		if (b2 == thr)
 		{
@@ -364,7 +424,7 @@ void CSCompact(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 	}
 }
 
-// 6. Residuals r = gain * T + offset - I(W(x; p)) per selected point (pass 0 also keeps r0 / ok0).
+// 6. Residuals r = gain * T + offset - I(W(x; p)) per selected point (pass 0 also caches PtGeom & keeps r0 / ok0).
 [numthreads(64, 1, 1)]
 void CSResid(uint3 dt : SV_DispatchThreadID)
 {
@@ -377,8 +437,20 @@ void CSResid(uint3 dt : SV_DispatchThreadID)
 	double gain = GetD(S_GAIN), offset = GetD(S_OFFSET);
 	uint passIx = uState[S_PASS].x;
 	uint packed = uPts[k];
-	double X, Y, T, GX, GY;
-	PointOf(packed, X, Y, T, GX, GY);
+	double X, Y, T;
+	if (passIx == 0)
+	{
+		double GX, GY;
+		PointOf(packed, X, Y, T, GX, GY);
+		PtGeom pg;
+		pg.X = SD(X); pg.Y = SD(Y); pg.T = SD(T); pg.GX = SD(GX); pg.GY = SD(GY);
+		uPtGeom[k] = pg;
+	}
+	else
+	{
+		PtGeom pg = uPtGeom[k];
+		X = LD(pg.X); Y = LD(pg.Y); T = LD(pg.T);
+	}
 	double qx, qy;
 	ApplyP(h, X, Y, qx, qy);
 	precise double u = (qx + gCx) * gInvS - 0.5L, v = (qy + gCy) * gInvS - 0.5L;
@@ -402,11 +474,12 @@ void CSResid(uint3 dt : SV_DispatchThreadID)
 }
 )HLSL",
 R"HLSL(
-// 7. Robust sigma: exact median (element count / 2 of the sorted |r|, the CPU's nth_element) by a 64-bit radix
-// select of the double bits (8 digits of 8 bits, high word first; |r| >= 0, so the bit order is the value order), one group.
-// Every digit pass is a separate unrolled block with constant shifts; the selection state lives in groupshared memory.
-groupshared uint gsMedHist[256];
-groupshared uint gsMedScan[256];
+// 7. Robust sigma: exact median (element count / 2 of the sorted |r|, the CPU's nth_element) by a 63-bit radix
+// select of the non-negative double bits (GEM-142: 6 passes of 10-11 bit digits: hi 11+10+10, lo 11+11+10;
+// exact 64-bit IEEE double result, 16 KB LDS, 6 passes instead of 8).
+groupshared uint gsMedHist[2048];
+groupshared uint gsMedScanA[1024];
+groupshared uint gsMedScanB[1024];
 groupshared uint gsMedSel[8];   // 0 prefix hi, 1 prefix lo, 2 rank, 3 count, 4 mask hi, 5 mask lo, 6 digits found
 [numthreads(1024, 1, 1)]
 void CSMedian(uint gi : SV_GroupIndex)
@@ -425,11 +498,16 @@ void CSMedian(uint gi : SV_GroupIndex)
 	bool enough = count >= gMinPixels;
 	if (gi == 0) gsMedSel[2] = count / 2;
 	GroupMemoryBarrierWithGroupSync();
-	[unroll] for (uint d = 0; d < 8; ++d)
+	static const uint kMedShift[6] = { 20u, 10u, 0u, 21u, 10u, 0u };
+	static const uint kMedMask[6] = { 0x7FFu, 0x3FFu, 0x3FFu, 0x7FFu, 0x7FFu, 0x3FFu };
+	[unroll] for (uint d = 0; d < 6; ++d)
 	{
-		const bool inHi = d < 4;
-		const uint shift = 24u - 8u * (d & 3u);
-		if (gi < 256) gsMedHist[gi] = 0;
+		const bool inHi = d < 3;
+		const uint shift = kMedShift[d];
+		const uint mask = kMedMask[d];
+		const bool wide = mask > 0x3FFu;
+		gsMedHist[gi] = 0;
+		if (wide) gsMedHist[gi + 1024u] = 0;
 		GroupMemoryBarrierWithGroupSync();
 		uint pHi = gsMedSel[0], pLo = gsMedSel[1], mHi = gsMedSel[4], mLo = gsMedSel[5];
 		if (live && enough)
@@ -440,35 +518,57 @@ void CSMedian(uint gi : SV_GroupIndex)
 				uint hi = rr.y & 0x7FFFFFFFu, lo = rr.x;
 				if ((hi & mHi) != pHi || (lo & mLo) != pLo) continue;
 				uint word = inHi ? hi : lo;
-				InterlockedAdd(gsMedHist[(word >> shift) & 0xFFu], 1u);
+				InterlockedAdd(gsMedHist[(word >> shift) & mask], 1u);
 			}
 		GroupMemoryBarrierWithGroupSync();
-		uint h = gi < 256 ? gsMedHist[gi] : 0u;
-		if (gi < 256) gsMedScan[gi] = h;
+		uint h0 = wide ? gsMedHist[2u * gi] : gsMedHist[gi];
+		uint h1 = wide ? gsMedHist[2u * gi + 1u] : 0u;
+		uint pairSum = h0 + h1;
+		gsMedScanA[gi] = pairSum;
 		GroupMemoryBarrierWithGroupSync();
-		[unroll] for (uint off = 1; off < 256; off <<= 1)
+		[unroll] for (uint s = 0; s < 10; ++s)
 		{
-			uint sv = 0;
-			if (gi < 256) { sv = gsMedScan[gi]; if (gi >= off) sv += gsMedScan[gi - off]; }
-			GroupMemoryBarrierWithGroupSync();
-			if (gi < 256) gsMedScan[gi] = sv;
+			const uint off = 1u << s;
+			if ((s & 1u) == 0u)
+				gsMedScanB[gi] = gsMedScanA[gi] + (gi >= off ? gsMedScanA[gi - off] : 0u);
+			else
+				gsMedScanA[gi] = gsMedScanB[gi] + (gi >= off ? gsMedScanB[gi - off] : 0u);
 			GroupMemoryBarrierWithGroupSync();
 		}
-		uint incl = gi < 256 ? gsMedScan[gi] : 0u;
-		uint excl = incl - h;
+		uint incl = gsMedScanA[gi];
+		uint excl = incl - pairSum;
 		uint rank = gsMedSel[2];
 		GroupMemoryBarrierWithGroupSync();
-		if (gi < 256 && h != 0 && excl <= rank && rank < incl)
+		if (wide)
 		{
-			if (inHi) { gsMedSel[0] = pHi | (gi << shift); gsMedSel[4] = mHi | (0xFFu << shift); }
-			else { gsMedSel[1] = pLo | (gi << shift); gsMedSel[5] = mLo | (0xFFu << shift); }
+			if (h0 != 0 && excl <= rank && rank < excl + h0)
+			{
+				uint dig = 2u * gi;
+				if (inHi) { gsMedSel[0] = pHi | (dig << shift); gsMedSel[4] = mHi | (mask << shift); }
+				else { gsMedSel[1] = pLo | (dig << shift); gsMedSel[5] = mLo | (mask << shift); }
+				gsMedSel[2] = rank - excl;
+				gsMedSel[6] = gsMedSel[6] + 1u;
+			}
+			else if (h1 != 0 && excl + h0 <= rank && rank < incl)
+			{
+				uint dig = 2u * gi + 1u;
+				if (inHi) { gsMedSel[0] = pHi | (dig << shift); gsMedSel[4] = mHi | (mask << shift); }
+				else { gsMedSel[1] = pLo | (dig << shift); gsMedSel[5] = mLo | (mask << shift); }
+				gsMedSel[2] = rank - (excl + h0);
+				gsMedSel[6] = gsMedSel[6] + 1u;
+			}
+		}
+		else if (h0 != 0 && excl <= rank && rank < incl)
+		{
+			if (inHi) { gsMedSel[0] = pHi | (gi << shift); gsMedSel[4] = mHi | (mask << shift); }
+			else { gsMedSel[1] = pLo | (gi << shift); gsMedSel[5] = mLo | (mask << shift); }
 			gsMedSel[2] = rank - excl;
 			gsMedSel[6] = gsMedSel[6] + 1u;
 		}
 		GroupMemoryBarrierWithGroupSync();
 	}
 	if (gi != 0 || !live) return;
-	if (!enough || gsMedSel[6] != 8u)
+	if (!enough || gsMedSel[6] != 6u)
 	{
 		uState[S_FLAGS] = uint2(uState[S_FLAGS].x, 1);
 		uState[S_STOP] = uint2(1, uState[S_STOP].y);
@@ -501,8 +601,8 @@ void CSNormal(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 			if (k >= n) break;
 			uint packed = uPts[k];
 			if ((packed & OK_BIT) == 0) continue;
-			double X, Y, T, GX, GY;
-			PointOf(packed, X, Y, T, GX, GY);
+			PtGeom pg = uPtGeom[k];
+			double X = LD(pg.X), Y = LD(pg.Y), T = LD(pg.T), GX = LD(pg.GX), GY = LD(pg.GY);
 			double r = LD(uRes[k].xy);
 			double a = abs(r);
 			double wt = a <= c ? 1.0L : c * RcpD(a);

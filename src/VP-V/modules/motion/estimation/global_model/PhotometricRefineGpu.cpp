@@ -52,7 +52,7 @@ namespace CameraModel
 			uint32_t w, h, useMask, gridW;
 			uint32_t bicubic, nGeo, nPar, fade;
 			uint32_t target, minPixels, maxIter, unit;
-			uint32_t numGroups, pad0, pad1, pad2;
+			uint32_t numGroups, candUntiled, pad1, pad2;
 			double s, invS;
 			double inv2S, k;
 			double cx, cy;
@@ -169,12 +169,19 @@ namespace CameraModel
 		ComPtr<ID3D11Device> device;
 		ComPtr<ID3D11Texture2D> tex[2];
 		ComPtr<ID3D11ShaderResourceView> srv[2];
+		uint64_t id[2] = { 0, 0 };
 		int w = 0, h = 0;
 		bool r16 = false;
 	};
 
 	RefineUploadInput::RefineUploadInput() : m_tex(new Tex()) {}
 	RefineUploadInput::~RefineUploadInput() { delete m_tex; }
+
+	void RefineUploadInput::InvalidateCache()
+	{
+		m_tex->id[0] = 0;
+		m_tex->id[1] = 0;
+	}
 
 	bool RefineUploadInput::Init(ID3D11Device* device, std::string* why)
 	{
@@ -184,12 +191,14 @@ namespace CameraModel
 			return false;
 		}
 		m_tex->device = device;
+		InvalidateCache();
 		return true;
 	}
 
 	bool RefineUploadInput::Prepare(ID3D11DeviceContext* context, RefineGpuLuma* out, std::string* why)
 	{
 		m_uploadMs = 0;
+		m_lastUploadedPlanes = 0;
 		const LumaPlane& a = m_view.from;
 		const LumaPlane& b = m_view.to;
 		if (!m_tex->device || !context || !out || !a.Valid() || !b.Valid() || (a.data8 != nullptr) != (b.data8 != nullptr)
@@ -205,6 +214,7 @@ namespace CameraModel
 			{
 				m_tex->srv[i].Reset();
 				m_tex->tex[i].Reset();
+				m_tex->id[i] = 0;
 			}
 			D3D11_TEXTURE2D_DESC td = {};
 			td.Width = static_cast<UINT>(a.width);
@@ -231,10 +241,33 @@ namespace CameraModel
 		}
 		const auto t0 = std::chrono::steady_clock::now();
 		const UINT elem = r16 ? 2u : 1u;
-		context->UpdateSubresource(m_tex->tex[0].Get(), 0, nullptr, r16 ? static_cast<const void*>(a.data16) : a.data8,
-			static_cast<UINT>(a.stride) * elem, 0);
-		context->UpdateSubresource(m_tex->tex[1].Get(), 0, nullptr, r16 ? static_cast<const void*>(b.data16) : b.data8,
-			static_cast<UINT>(b.stride) * elem, 0);
+		// GEM-142 (MC-PHOTO / P0-5): swap tex[0] <-> tex[1] ONLY on a verified consecutive frame-id pair
+		// (m_fromId != 0 && m_toId != 0 && m_fromId != m_toId); unverified calls always upload both planes.
+		const bool verified = m_fromId != 0 && m_toId != 0 && m_fromId != m_toId;
+		if (verified && m_tex->id[0] == m_fromId && m_tex->id[1] == m_toId)
+		{
+			m_lastUploadedPlanes = 0;
+		}
+		else if (verified && m_tex->id[1] == m_fromId)
+		{
+			std::swap(m_tex->tex[0], m_tex->tex[1]);
+			std::swap(m_tex->srv[0], m_tex->srv[1]);
+			std::swap(m_tex->id[0], m_tex->id[1]);
+			context->UpdateSubresource(m_tex->tex[1].Get(), 0, nullptr, r16 ? static_cast<const void*>(b.data16) : b.data8,
+				static_cast<UINT>(b.stride) * elem, 0);
+			m_tex->id[1] = m_toId;
+			m_lastUploadedPlanes = 1;
+		}
+		else
+		{
+			context->UpdateSubresource(m_tex->tex[0].Get(), 0, nullptr, r16 ? static_cast<const void*>(a.data16) : a.data8,
+				static_cast<UINT>(a.stride) * elem, 0);
+			context->UpdateSubresource(m_tex->tex[1].Get(), 0, nullptr, r16 ? static_cast<const void*>(b.data16) : b.data8,
+				static_cast<UINT>(b.stride) * elem, 0);
+			m_tex->id[0] = verified ? m_fromId : 0;
+			m_tex->id[1] = verified ? m_toId : 0;
+			m_lastUploadedPlanes = 2;
+		}
 		m_uploadMs = MsSince(t0);
 		out->from = m_tex->srv[0].Get();
 		out->to = m_tex->srv[1].Get();
@@ -261,11 +294,32 @@ namespace CameraModel
 			ComPtr<ID3D11ShaderResourceView> srv;
 			UINT count = 0, stride = 0;
 		};
-		Buf bin, hist, row, pts, res, part, state;   // u0..u6
-		Buf colBx, rowBy, cell;                      // t2..t4
+		Buf bin, hist, row, pts, res, part, state, ptGeom;   // u0..u7 (bin also t5 SRV)
+		Buf colBx, rowBy, cell;                              // t2..t4
 		ComPtr<ID3D11Buffer> staging;
 		ComPtr<ID3D11Query> done;
 		ComPtr<ID3D11Query> disjoint, tsBegin, tsEnd;
+
+		// GEM-220 (MISS-motion-5): colTab/rowTab cache key covering EVERY input that determines them.
+		struct TabKey
+		{
+			bool valid = false;
+			int w = 0, h = 0;
+			double s = 0, left = 0, top = 0, right = 0, bottom = 0, margin = 0;
+			bool useMask = false;
+			double blockSize = 0;
+			int gridW = 0, gridH = 0;
+			ID3D11Buffer* colBuf = nullptr;
+			ID3D11Buffer* rowBuf = nullptr;
+			bool operator==(const TabKey& o) const
+			{
+				return valid && o.valid && w == o.w && h == o.h && s == o.s
+					&& left == o.left && top == o.top && right == o.right && bottom == o.bottom
+					&& margin == o.margin && useMask == o.useMask
+					&& (!useMask || (blockSize == o.blockSize && gridW == o.gridW && gridH == o.gridH))
+					&& colBuf == o.colBuf && rowBuf == o.rowBuf;
+			}
+		} tabKey;
 
 		// The pending call.
 		bool pending = false;       // a submission is in flight
@@ -279,6 +333,47 @@ namespace CameraModel
 		std::vector<int32_t> colTab, rowTab;
 		std::vector<uint32_t> cellTab;
 		std::vector<uint32_t> stateInit;
+
+		// GEM-142: 16-bit typed R16_UINT buffer with both UAV (CSCand write) and SRV (CSRowCount/CSCompact read).
+		bool EnsureTypedR16(Buf& b, UINT count, std::string* why)
+		{
+			if (count == 0)
+				count = 1;
+			if (b.buf && b.count >= count && b.stride == 2u)
+				return true;
+			b.buf.Reset();
+			b.uav.Reset();
+			b.srv.Reset();
+			D3D11_BUFFER_DESC bd = {};
+			bd.ByteWidth = count * 2u;
+			bd.Usage = D3D11_USAGE_DEFAULT;
+			bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+			if (FAILED(device->CreateBuffer(&bd, nullptr, &b.buf)))
+			{
+				if (why) *why = "bin buffer creation failed";
+				return false;
+			}
+			D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {};
+			ud.Format = DXGI_FORMAT_R16_UINT;
+			ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+			ud.Buffer.NumElements = count;
+			D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+			sd.Format = DXGI_FORMAT_R16_UINT;
+			sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+			sd.Buffer.NumElements = count;
+			if (FAILED(device->CreateUnorderedAccessView(b.buf.Get(), &ud, &b.uav))
+				|| FAILED(device->CreateShaderResourceView(b.buf.Get(), &sd, &b.srv)))
+			{
+				b.buf.Reset();
+				b.uav.Reset();
+				b.srv.Reset();
+				if (why) *why = "bin view creation failed";
+				return false;
+			}
+			b.count = count;
+			b.stride = 2u;
+			return true;
+		}
 
 		bool Ensure(Buf& b, UINT count, UINT stride, bool uav, std::string* why)
 		{
@@ -447,37 +542,6 @@ namespace CameraModel
 		const bool useMask = mask.label != nullptr && mask.gridW > 0 && mask.gridH > 0 && mask.blockSize > 0;
 		res.maskUsed = useMask;
 
-		// Column / row tables: -1 = outside the picture margin (or the block grid), else the block column / row.
-		im.colTab.assign(static_cast<size_t>(w), -1);
-		im.rowTab.assign(static_cast<size_t>(h), -1);
-		for (int i = 1; i < w - 1; ++i)
-		{
-			const double fx = s * (i + 0.5);
-			if (fx < picture.left + margin || fx > picture.right - margin)
-				continue;
-			int bx = 0;
-			if (useMask)
-			{
-				bx = static_cast<int>(fx / mask.blockSize);
-				if (bx >= mask.gridW)
-					continue;
-			}
-			im.colTab[static_cast<size_t>(i)] = bx;
-		}
-		for (int j = 1; j < h - 1; ++j)
-		{
-			const double fy = s * (j + 0.5);
-			if (fy < picture.top + margin || fy > picture.bottom - margin)
-				continue;
-			int by = 0;
-			if (useMask)
-			{
-				by = static_cast<int>(fy / mask.blockSize);
-				if (by >= mask.gridH)
-					continue;
-			}
-			im.rowTab[static_cast<size_t>(j)] = by;
-		}
 		const size_t cells = useMask ? static_cast<size_t>(mask.gridW) * static_cast<size_t>(mask.gridH) : 1u;
 		im.cellTab.assign(cells, 1u);
 		if (useMask)
@@ -496,8 +560,9 @@ namespace CameraModel
 		im.fade = o.fadeTerms;
 
 		std::string e;
-		if (!im.Ensure(im.bin, static_cast<UINT>(w) * static_cast<UINT>(h), 4, true, &e) || !im.Ensure(im.row, static_cast<UINT>(h), 16, true, &e)
+		if (!im.EnsureTypedR16(im.bin, static_cast<UINT>(w) * static_cast<UINT>(h), &e) || !im.Ensure(im.row, static_cast<UINT>(h), 16, true, &e)
 			|| !im.Ensure(im.pts, target, 4, true, &e) || !im.Ensure(im.res, target, 16, true, &e) || !im.Ensure(im.part, numGroups * 32u, 8, true, &e)
+			|| !im.Ensure(im.ptGeom, target, 40, true, &e)
 			|| !im.Ensure(im.colBx, static_cast<UINT>(w), 4, false, &e) || !im.Ensure(im.rowBy, static_cast<UINT>(h), 4, false, &e)
 			|| !im.Ensure(im.cell, static_cast<UINT>(cells), 4, false, &e))
 		{
@@ -505,6 +570,58 @@ namespace CameraModel
 			Fail(RefineGpuFailure::Ensure);
 			m_lastError = e;
 			return false;
+		}
+
+		// GEM-220 (MISS-motion-5): rebuild and upload colTab/rowTab only when any input in TabKey changed.
+		Impl::TabKey wantKey;
+		wantKey.valid = true;
+		wantKey.w = w;
+		wantKey.h = h;
+		wantKey.s = s;
+		wantKey.left = picture.left;
+		wantKey.top = picture.top;
+		wantKey.right = picture.right;
+		wantKey.bottom = picture.bottom;
+		wantKey.margin = margin;
+		wantKey.useMask = useMask;
+		wantKey.blockSize = useMask ? mask.blockSize : 0.0;
+		wantKey.gridW = useMask ? mask.gridW : 0;
+		wantKey.gridH = useMask ? mask.gridH : 0;
+		wantKey.colBuf = im.colBx.buf.Get();
+		wantKey.rowBuf = im.rowBy.buf.Get();
+		const bool uploadTabs = !(im.tabKey == wantKey);
+		if (uploadTabs)
+		{
+			im.colTab.assign(static_cast<size_t>(w), -1);
+			im.rowTab.assign(static_cast<size_t>(h), -1);
+			for (int i = 1; i < w - 1; ++i)
+			{
+				const double fx = s * (i + 0.5);
+				if (fx < picture.left + margin || fx > picture.right - margin)
+					continue;
+				int bx = 0;
+				if (useMask)
+				{
+					bx = static_cast<int>(fx / mask.blockSize);
+					if (bx >= mask.gridW)
+						continue;
+				}
+				im.colTab[static_cast<size_t>(i)] = bx;
+			}
+			for (int j = 1; j < h - 1; ++j)
+			{
+				const double fy = s * (j + 0.5);
+				if (fy < picture.top + margin || fy > picture.bottom - margin)
+					continue;
+				int by = 0;
+				if (useMask)
+				{
+					by = static_cast<int>(fy / mask.blockSize);
+					if (by >= mask.gridH)
+						continue;
+				}
+				im.rowTab[static_cast<size_t>(j)] = by;
+			}
 		}
 
 		CB cb = {};
@@ -521,6 +638,7 @@ namespace CameraModel
 		cb.maxIter = maxIter;
 		cb.unit = luma.codeScale == 1.0 ? 1u : 0u;
 		cb.numGroups = numGroups;
+		cb.candUntiled = m_candTiled ? 0u : 1u;
 		cb.s = s;
 		cb.invS = 1.0 / s;
 		cb.inv2S = 1.0 / (2.0 * s);
@@ -551,10 +669,15 @@ namespace CameraModel
 		D3D11_BOX box = {};
 		box.bottom = 1;
 		box.back = 1;
-		box.right = static_cast<UINT>(w) * 4u;
-		ctx->UpdateSubresource(im.colBx.buf.Get(), 0, &box, im.colTab.data(), 0, 0);
-		box.right = static_cast<UINT>(h) * 4u;
-		ctx->UpdateSubresource(im.rowBy.buf.Get(), 0, &box, im.rowTab.data(), 0, 0);
+		if (uploadTabs)
+		{
+			box.right = static_cast<UINT>(w) * 4u;
+			ctx->UpdateSubresource(im.colBx.buf.Get(), 0, &box, im.colTab.data(), 0, 0);
+			box.right = static_cast<UINT>(h) * 4u;
+			ctx->UpdateSubresource(im.rowBy.buf.Get(), 0, &box, im.rowTab.data(), 0, 0);
+			im.tabKey = wantKey;
+			++m_tabUploads;
+		}
 		box.right = static_cast<UINT>(cells) * 4u;
 		ctx->UpdateSubresource(im.cell.buf.Get(), 0, &box, im.cellTab.data(), 0, 0);
 
@@ -565,12 +688,12 @@ namespace CameraModel
 			im.timed = true;
 		}
 		ID3D11Buffer* cbs[1] = { im.cb.Get() };
-		ID3D11ShaderResourceView* srvs[5] = { luma.from, luma.to, im.colBx.srv.Get(), im.rowBy.srv.Get(), im.cell.srv.Get() };
-		ID3D11UnorderedAccessView* uavs[7] = { im.bin.uav.Get(), im.hist.uav.Get(), im.row.uav.Get(), im.pts.uav.Get(), im.res.uav.Get(),
-			im.part.uav.Get(), im.state.uav.Get() };
+		ID3D11ShaderResourceView* srvs[6] = { luma.from, luma.to, im.colBx.srv.Get(), im.rowBy.srv.Get(), im.cell.srv.Get(), nullptr };
+		ID3D11UnorderedAccessView* uavs[8] = { im.bin.uav.Get(), im.hist.uav.Get(), im.row.uav.Get(), im.pts.uav.Get(), im.res.uav.Get(),
+			im.part.uav.Get(), im.state.uav.Get(), im.ptGeom.uav.Get() };
 		ctx->CSSetConstantBuffers(0, 1, cbs);
-		ctx->CSSetShaderResources(0, 5, srvs);
-		ctx->CSSetUnorderedAccessViews(0, 7, uavs, nullptr);
+		ctx->CSSetShaderResources(0, 6, srvs);
+		ctx->CSSetUnorderedAccessViews(0, 8, uavs, nullptr);
 		auto run = [&](Kernel k, UINT x, UINT y) {
 			ctx->CSSetShader(im.cs[k].Get(), nullptr, 0);
 			ctx->Dispatch(x, y, 1);
@@ -579,6 +702,11 @@ namespace CameraModel
 		run(kClear, 64, 1);
 		run(kCand, static_cast<UINT>((w + 63) / 64), static_cast<UINT>((h + 63) / 64));
 		run(kThr, 1, 1);
+		// Transition im.bin from UAV u0 (write-only in CSCand) to SRV t5 (read-only in CSRowCount/CSCompact).
+		ID3D11UnorderedAccessView* nullBinUav = nullptr;
+		ID3D11ShaderResourceView* binSrv = im.bin.srv.Get();
+		ctx->CSSetUnorderedAccessViews(0, 1, &nullBinUav, nullptr);
+		ctx->CSSetShaderResources(5, 1, &binSrv);
 		run(kRowCount, static_cast<UINT>(h), 1);
 		run(kRowPrefix, 1, 1);
 		run(kCompact, static_cast<UINT>(h), 1);
@@ -594,10 +722,10 @@ namespace CameraModel
 		}
 		run(kVerify, numGroups, 1);
 		run(kFinal, 1, 1);
-		ID3D11UnorderedAccessView* nullUav[7] = {};
-		ID3D11ShaderResourceView* nullSrv[5] = {};
-		ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
-		ctx->CSSetShaderResources(0, 5, nullSrv);
+		ID3D11UnorderedAccessView* nullUav[8] = {};
+		ID3D11ShaderResourceView* nullSrv[6] = {};
+		ctx->CSSetUnorderedAccessViews(0, 8, nullUav, nullptr);
+		ctx->CSSetShaderResources(0, 6, nullSrv);
 		ctx->CSSetShader(nullptr, nullptr, 0);
 		if (im.timed)
 		{
