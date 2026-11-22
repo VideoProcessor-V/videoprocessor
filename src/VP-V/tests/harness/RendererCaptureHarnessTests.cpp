@@ -1105,6 +1105,7 @@ namespace
 				{
 					MSG msg;
 					while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
+					std::vector<std::string> found;
 					{
 						std::lock_guard<std::mutex> guard(g_logMutex);
 						for (const std::string& line : g_log)
@@ -1114,9 +1115,16 @@ namespace
 							if (at != std::string::npos && m != std::string::npos)
 							{
 								const size_t end = line.find(" raw_bytes=", m);
-								result.captureMetadata = line.substr(m + 9, end == std::string::npos ? std::string::npos : end - m - 9);
+								found.push_back(line.substr(m + 9, end == std::string::npos ? std::string::npos : end - m - 9));
 							}
 						}
+					}
+					if (!found.empty())
+					{
+						result.captureMetadata = found.back();
+						if (capturesRequested == 0)
+							result.captureMetadataList = found;
+						break;
 					}
 					std::this_thread::sleep_for(std::chrono::milliseconds(20));
 				}
@@ -3701,35 +3709,68 @@ namespace Tests
 				// up to kTries runs per folder, alternating, until both folders share at least one frame, and EVERY shared frame
 				// must match bit-for-bit; two hashes from one folder at one frame = FAIL; no shared frame = FAIL.
 				struct Sample { int source; std::string hash; };
-				auto sampleWith = [&](const std::string& dir) {
+				std::string droppedFailures;
+				auto sampleWith = [&](const std::string& dir, const char* role, int tryIndex) {
 					SetEnvironmentVariableA("VP_TEST_SHADER_DIR", dir.c_str());
 					const RunResult r = Run(c.encoding, c.path, 4.0, c.film, C8SigmaRule("own"), false, &plan);
-					std::vector<int> sources;
-					static const std::string kDone = "Rendered-output capture complete: source=";
-					for (const std::string& line : r.log)
+					static const std::string kDonePrefix = "Rendered-output capture complete";
+					std::vector<std::string> completionLines;
+					for (const std::string& logLine : r.log)
 					{
-						const size_t at = line.find(kDone);
-						if (at != std::string::npos)
-							sources.push_back(std::atoi(line.c_str() + at + kDone.size()));
+						if (logLine.find(kDonePrefix) != std::string::npos)
+							completionLines.push_back(logLine);
 					}
 					std::vector<Sample> out;
-					if (!c.moving)
+					const std::string runTag = std::string(c.name) + " " + role + " try " + std::to_string(tryIndex);
+					if (completionLines.empty() || completionLines.size() != r.captureMetadataList.size())
 					{
-						const size_t n = (std::min)(sources.size(), r.captureMetadataList.size());
-						for (size_t i = 0; i < n; ++i)
+						droppedFailures += runTag + ": capture count mismatch (completionLines=" +
+							std::to_string(completionLines.size()) + ", captureMetadataList=" +
+							std::to_string(r.captureMetadataList.size()) + "); ";
+						if (!c.moving && completionLines.size() != plan.captureTimes.size())
 						{
-							RunResult one;
-							one.captureMetadata = r.captureMetadataList[i];
-							const std::string h = CaptureHash(one);
-							if (sources[i] >= 0 && !h.empty())
-								out.push_back(Sample{ sources[i], h });
+							droppedFailures += runTag + ": still burst expected " +
+								std::to_string(plan.captureTimes.size()) + " captures, got completionLines=" +
+								std::to_string(completionLines.size()) + "; ";
 						}
+						return out;
 					}
-					else
+					if (!c.moving && completionLines.size() != plan.captureTimes.size())
 					{
-						const std::string h = CaptureHash(r);
-						if (!sources.empty() && sources.back() >= 0 && !h.empty())
-							out.push_back(Sample{ sources.back(), h });
+						droppedFailures += runTag + ": still burst expected " +
+							std::to_string(plan.captureTimes.size()) + " captures, got completionLines=" +
+							std::to_string(completionLines.size()) + " (captureMetadataList=" +
+							std::to_string(r.captureMetadataList.size()) + "); ";
+					}
+					for (size_t i = 0; i < completionLines.size(); ++i)
+					{
+						int src = -1;
+						bool validSource = false;
+						const size_t srcAt = completionLines[i].find("source=");
+						if (srcAt != std::string::npos)
+						{
+							const char* start = completionLines[i].c_str() + srcAt + 7;
+							if (*start != '\0' && std::isdigit(static_cast<unsigned char>(*start)))
+							{
+								char* end = nullptr;
+								const long parsed = std::strtol(start, &end, 10);
+								if (end != start && parsed >= 0 && parsed <= 0x7fffffffL)
+								{
+									src = static_cast<int>(parsed);
+									validSource = true;
+								}
+							}
+						}
+						RunResult one;
+						one.captureMetadata = r.captureMetadataList[i];
+						const std::string h = CaptureHash(one);
+						if (!validSource)
+							droppedFailures += runTag + " cap[" + std::to_string(i) + "]: missing or invalid source= in completion log; ";
+						if (h.empty())
+							droppedFailures += runTag + " cap[" + std::to_string(i) + "]: empty capture hash for metadata=" +
+								r.captureMetadataList[i] + "; ";
+						if (validSource && !h.empty())
+							out.push_back(Sample{ src, h });
 					}
 					return out;
 				};
@@ -3739,8 +3780,8 @@ namespace Tests
 				std::set<int> sharedSources;
 				for (int t = 0; t < kTries && sharedSources.empty(); ++t)
 				{
-					const auto sr = sampleWith(split);
-					const auto orun = sampleWith(original);
+					const auto sr = sampleWith(split, "split", t);
+					const auto orun = sampleWith(original, "original", t);
 					splitRuns.insert(splitRuns.end(), sr.begin(), sr.end());
 					originalRuns.insert(originalRuns.end(), orun.begin(), orun.end());
 					for (const Sample& s : splitRuns)
@@ -3753,15 +3794,17 @@ namespace Tests
 				bool unrepeatable = false;
 				std::map<int, std::string> splitBySource, origBySource;
 				auto scan = [&](const std::vector<Sample>& runs, std::map<int, std::string>& bySource, const char* role) {
+					line += std::string(" ") + role + "(" + std::to_string(runs.size()) + " caps):";
 					for (const Sample& s : runs)
 					{
+						line += " " + std::to_string(s.source) + "@" + s.hash;
 						auto it = bySource.find(s.source);
 						if (it == bySource.end())
 							bySource[s.source] = s.hash;
 						else if (it->second != s.hash)
 							unrepeatable = true;
 					}
-					line += std::string(" ") + role + "(" + std::to_string(runs.size()) + " caps);";
+					line += ";";
 				};
 				scan(splitRuns, splitBySource, "split");
 				scan(originalRuns, origBySource, "original");
@@ -3774,6 +3817,8 @@ namespace Tests
 				report += line + (!sharedSources.empty()
 					? " compared " + std::to_string(sharedSources.size()) + " shared frame(s) (first source " + std::to_string(*sharedSources.begin()) + ")"
 					: std::string(" no shared frame")) + "\n";
+				if (!droppedFailures.empty())
+					failures += droppedFailures;
 				if (missing)
 					failures += std::string(c.name) + ": a capture (or its source frame) is missing; ";
 				if (unrepeatable)
