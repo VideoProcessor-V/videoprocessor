@@ -9,12 +9,6 @@
 
 namespace CameraModel
 {
-	namespace
-	{
-		// sqrt of the sum of squares: std::hypot is several times slower and the range here is far from overflow.
-		inline double Len(double x, double y) { return std::sqrt(x * x + y * y); }
-	}
-
 	DynTextureResult DetectDynamicTexture(const DynTextureConfig& cfg, const PairInput& in, const Params& model, DynTextureState& state,
 		double resolvedPrecPx)
 	{
@@ -27,6 +21,9 @@ namespace CameraModel
 		// SHOULD-1: the fitter's FINAL precision (quantum floor, raised noise scale) when it passes one; 0 = the pair's nominal precision.
 		const double prec = resolvedPrecPx > 0 ? resolvedPrecPx : (in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0);
 		const double absThr = cfg.absSigmas * prec;
+		const double absThr2 = absThr * absThr;
+		const double absThrSafeLo2 = absThr2 * (1.0 - 1e-9);
+		const double rel2 = cfg.rel * cfg.rel;
 		const bool prevOk = state.have && state.gridW == gw && state.gridH == gh && state.picture == in.picture && state.seconds > 0;
 		const double k = prevOk ? in.pairSeconds / state.seconds : 1.0;
 
@@ -66,8 +63,14 @@ namespace CameraModel
 				Displacement(model, x, y, &mx, &my);
 				if (!IsFiniteBits(mx) || !IsFiniteBits(my))
 					continue;
-				const double rxv = in.fwdX[b] - mx, ryv = in.fwdY[b] - my;
-				const double t = std::max(absThr, cfg.rel * Len(mx, my));
+				const double fx = static_cast<double>(in.fwdX[b]), fy = static_cast<double>(in.fwdY[b]);
+				const double rxv = fx - mx, ryv = fy - my;
+				const double m2 = mx * mx + my * my;
+				// GEM-149 (P2-3 AMEND): skip sqrt when strictly below absThr; keep exact sqrt whenever near or above it.
+				const double t = (cfg.rel <= 0.0 || rel2 * m2 < absThrSafeLo2) ? absThr : std::max(absThr, cfg.rel * std::sqrt(m2));
+				const double t2 = t * t;
+				const double tSafeLo2 = t2 * (1.0 - 1e-9);
+				const double tSafeHi2 = t2 * (1.0 + 1e-9);
 				rx[b] = static_cast<float>(rxv);
 				ry[b] = static_cast<float>(ryv);
 				vx[b] = in.fwdX[b];
@@ -75,8 +78,8 @@ namespace CameraModel
 				thr[b] = static_cast<float>(t);
 				valid[b] = 1;
 				++trusted;
-				const double rm = Len(rxv, ryv);
-				const bool d = rm > t;
+				const double r2 = rxv * rxv + ryv * ryv;
+				const bool d = r2 > tSafeHi2 ? true : (r2 < tSafeLo2 ? false : (std::sqrt(r2) > t));
 				dis[b] = d ? 1 : 0;
 				disagree += d ? 1 : 0;
 				// SHOULD-4: the previous pair's residual is read where this block's content WAS (advected by this block's own vector over the
@@ -101,19 +104,31 @@ namespace CameraModel
 				{
 					{
 						const double qx = state.prev.vx[pb] * k, qy = state.prev.vy[pb] * k;
-						const double vm = Len(static_cast<double>(in.fwdX[b]), static_cast<double>(in.fwdY[b]));
+						const double dfx = fx - qx, dfy = fy - qy;
+						const double df2 = dfx * dfx + dfy * dfy;
 						++fCompared;
-						if (Len(in.fwdX[b] - qx, in.fwdY[b] - qy) > std::max(absThr, cfg.agreeRatio * std::max(vm, Len(qx, qy))))
-							++fIncoh;
+						// Keep exact sqrt for max(absThr, agreeRatio * Len) per CE AMEND; skip sqrt when strictly below absThr.
+						if (df2 >= absThrSafeLo2)
+						{
+							const double v2 = fx * fx + fy * fy;
+							const double q2 = qx * qx + qy * qy;
+							if (std::sqrt(df2) > std::max(absThr, cfg.agreeRatio * std::sqrt(std::max(v2, q2))))
+								++fIncoh;
+						}
 					}
 					const double px = state.prev.rx[pb] * k, py = state.prev.ry[pb] * k;
-					const double pm = Len(px, py);
-					if (d || pm > t)
+					const double p2 = px * px + py * py;
+					const bool pDis = d || (p2 > tSafeHi2 ? true : (p2 < tSafeLo2 ? false : (std::sqrt(p2) > t)));
+					if (pDis)
 					{
 						++tCompared;
-						const double diff = Len(rxv - px, ryv - py);
-						if (diff > std::max(t, cfg.agreeRatio * std::max(rm, pm)))
-							++tIncoh;
+						const double dx = rxv - px, dy = ryv - py;
+						const double td2 = dx * dx + dy * dy;
+						if (td2 >= tSafeLo2)
+						{
+							if (std::sqrt(td2) > std::max(t, cfg.agreeRatio * std::sqrt(std::max(r2, p2))))
+								++tIncoh;
+						}
 					}
 				}
 			}
@@ -128,6 +143,8 @@ namespace CameraModel
 					const size_t a = static_cast<size_t>(by) * gw + bx;
 					if (!dis[a])
 						continue;
+					const double rxa = static_cast<double>(rx[a]), rya = static_cast<double>(ry[a]);
+					const double ma2 = rxa * rxa + rya * rya;
 					for (int n = 0; n < 2; ++n)
 					{
 						const int nx = bx + (n == 0 ? 1 : 0), ny = by + (n == 1 ? 1 : 0);
@@ -137,11 +154,16 @@ namespace CameraModel
 						if (!dis[c])
 							continue;
 						++sCompared;
-						const double diff = Len(static_cast<double>(rx[a]) - rx[c], static_cast<double>(ry[a]) - ry[c]);
-						const double ma = Len(static_cast<double>(rx[a]), static_cast<double>(ry[a]));
-						const double mc = Len(static_cast<double>(rx[c]), static_cast<double>(ry[c]));
-						if (diff > std::max(static_cast<double>(std::max(thr[a], thr[c])), cfg.agreeRatio * std::max(ma, mc)))
-							++sIncoh;
+						const double rxc = static_cast<double>(rx[c]), ryc = static_cast<double>(ry[c]);
+						const double ddx = rxa - rxc, ddy = rya - ryc;
+						const double sd2 = ddx * ddx + ddy * ddy;
+						const double sthr = static_cast<double>(std::max(thr[a], thr[c]));
+						if (sd2 >= sthr * sthr * (1.0 - 1e-9))
+						{
+							const double mc2 = rxc * rxc + ryc * ryc;
+							if (std::sqrt(sd2) > std::max(sthr, cfg.agreeRatio * std::sqrt(std::max(ma2, mc2))))
+								++sIncoh;
+						}
 					}
 				}
 		}

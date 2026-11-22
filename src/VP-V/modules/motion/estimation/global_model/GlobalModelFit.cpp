@@ -182,13 +182,28 @@ namespace CameraModel
 			}
 		}
 
+		uint32_t CountWeighted(const Field& f, const std::vector<Sample>& samples, const Params& p)
+		{
+			uint32_t count = 0;
+			const bool aff = AffineRow(p);
+			for (size_t i = 0; i < samples.size(); ++i)
+			{
+				double r2, pm2;
+				ResidualSq(p, aff, samples[i], &r2, &pm2);
+				if (samples[i].w * MagW2(r2, Threshold2(f, pm2)) > 0.0)
+					++count;
+			}
+			return count;
+		}
+
 		// IRLS refinement of p (its own type). True when at least one iteration was accepted.
-		bool Refine(const Field& f, const std::vector<Sample>& samples, Params& p, int iterations)
+		bool Refine(const Field& f, const std::vector<Sample>& samples, Params& p, int iterations, std::vector<Sample>* scratchBuf = nullptr)
 		{
 			if (p.type == ModelType::None)
 				return false;
 			bool any = false;
-			std::vector<Sample> buf;
+			std::vector<Sample> localBuf;
+			std::vector<Sample>& buf = scratchBuf ? *scratchBuf : localBuf;
 			buf.reserve(samples.size());
 			for (int it = 0; it < iterations; ++it)
 			{
@@ -693,9 +708,10 @@ namespace CameraModel
 		// excluded (bars / text guard), with trust > 0 and finite values, is a sample; the chosen model is refined over them with the same
 		// IRLS (sigma-marginalised inlier weights, its own type, the same convergence rule). Returns the cells that carried a weight > 0 in the
 		// last weighting (the inliers the final estimate saw). The model is left unchanged when the refine finds no accepted step.
-		static uint32_t FullFinalRefine(const PairInput& in, const Field& f, Params& model, int irls)
+		static uint32_t FullFinalRefine(const PairInput& in, const Field& f, Params& model, int irls,
+			std::vector<Sample>& all, std::vector<Sample>& refineBuf)
 		{
-			std::vector<Sample> all;
+			all.clear();
 			all.reserve(static_cast<size_t>(std::max(0, f.bx1 - f.bx0)) * static_cast<size_t>(std::max(0, f.by1 - f.by0)));
 			for (int by = f.by0; by < f.by1; ++by)
 				for (int bx = f.bx0; bx < f.bx1; ++bx)
@@ -714,11 +730,10 @@ namespace CameraModel
 					all.push_back(s);
 				}
 			Params p = model;
-			if (Refine(f, all, p, std::max(1, irls)))
+			if (Refine(f, all, p, std::max(1, irls), &refineBuf))
 				model = p;
-			std::vector<Sample> used;
-			BuildWeighted(f, all, model, used);
-			return static_cast<uint32_t>(used.size());
+			// GEM-149 (P2-3): counter loop instead of allocating a 5 MB `used` vector solely for its size.
+			return CountWeighted(f, all, model);
 		}
 
 		// DIRECT PHOTOMETRIC REFINEMENT (R3). Runs only when the pair carries a PhotometricInput. The measured resolution rule first (a luma
@@ -1549,7 +1564,7 @@ namespace CameraModel
 			}
 			uint32_t fullCells = 0;
 			if (in.fullFinalRefine)
-				fullCells = FullFinalRefine(in, f, cam->model, irls);   // the chosen model over every native cell (owner)
+				fullCells = FullFinalRefine(in, f, cam->model, irls, F.m_scratchFullAll, F.m_scratchRefineBuf);   // the chosen model over every native cell (owner)
 			const bool photoMoved = ApplyPhotometric(F, in, f, cam->model);   // R3: after the full-resolution refine, before the signals are built
 			if (fullCells > 0 || photoMoved)
 			{
