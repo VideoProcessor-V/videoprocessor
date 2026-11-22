@@ -221,6 +221,29 @@ namespace D8SceneJudgeAgreementNs
 		double SoftNonCutMeanStrength() const { return softNonCut > 0 ? softNonCutStrengthSum / softNonCut : 0.0; }
 	};
 
+	// Owner-approved cut frame numbers for a clip: tos_24p_3min uses TosTruth() (U7CutTruthGateTests.cpp:90-103, owner Q1:
+	// manifest cuts_s is missing 1315 and lists bogus cuts in part 3); all other clips use manifest cuts_s.
+	inline std::vector<int> ClipCutFrames(const RealClip::Clip& clip, double hz)
+	{
+		if (clip.id == "tos_24p_3min")
+			return { 24, 178, 269, 425, 461, 556, 788, 884, 1063, 1315, 1632, 2325, 2419 };
+		std::vector<int> out;
+		for (double c : clip.cuts)
+			out.push_back(static_cast<int>(std::floor(c * hz + 0.5)));
+		return out;
+	}
+
+	// Owner-approved active fade frame ranges for tos_24p_3min, derived from TosTruth() (U7CutTruthGateTests.cpp:97-100:
+	// {186,200}, {236,268}, {1655,1660}, {2034,2039}, {2040,2045}, {2171,2178}, {2318,2323}, {2411,2417}, {2550,2625}) and
+	// lead17/d8-tos-classification.md, restricted to the actual moving fade-to/from-black ramp frames (excluding static tails).
+	inline std::vector<std::pair<int, int>> ClipFadeRanges(const RealClip::Clip& clip)
+	{
+		if (clip.id == "tos_24p_3min")
+			return { { 197, 200 }, { 236, 257 }, { 1655, 1659 }, { 2037, 2038 }, { 2040, 2040 }, { 2042, 2045 },
+				{ 2172, 2172 }, { 2321, 2324 }, { 2412, 2413 }, { 2418, 2418 }, { 2562, 2587 }, { 2592, 2609 } };
+		return {};
+	}
+
 	// Truth restart per frame of the part [begin, end) (index k - begin): see the file comment. Index 0 (the part's first frame)
 	// stays 0 and is NOT scored: it has no prior frame, so no detector decision exists there.
 	// WAIVER-U7FADE-PARTIAL: `fades` gets the fade frames (index k - begin), which are NOT restarts since U7 v3 (partial reset).
@@ -245,13 +268,16 @@ namespace D8SceneJudgeAgreementNs
 		Assert::IsTrue(clip.hasCuts || clip.cutFree,
 			Wide("D8 truth: clip " + clip.id + " has neither cuts_s nor cut_free in the manifest; truth is not invented").c_str());
 		Assert::IsTrue(hz > 0.0, Wide("D8 truth: clip " + clip.id + " has no rate").c_str());
-		labels = clip.hasCuts ? "manifest cuts_s" : "manifest cut_free";
-		for (double c : clip.cuts)
-		{
-			const int f = static_cast<int>(std::floor(c * hz + 0.5));
+		labels = clip.id == "tos_24p_3min" ? "owner TosTruth" : (clip.hasCuts ? "manifest cuts_s" : "manifest cut_free");
+		for (int f : ClipCutFrames(clip, hz))
 			if (f > begin && f < end) truth[static_cast<size_t>(f - begin)] = 1;
-		}
 		int fadeEvents = 0;
+		for (const auto& r : ClipFadeRanges(clip))
+		{
+			++fadeEvents;
+			for (int k = (std::max)(begin + 1, r.first); k <= r.second && k < end; ++k)
+				fades[static_cast<size_t>(k - begin)] = 1;
+		}
 		for (const RealClip::Event& e : clip.events)
 		{
 			if (e.type != "fade_in" && e.type != "fade_out") continue;
@@ -264,7 +290,7 @@ namespace D8SceneJudgeAgreementNs
 		}
 		for (size_t i = 0; i < truth.size(); ++i)
 			if (truth[i]) fades[i] = 0;   // a cut frame is a cut, never a fade frame
-		labels += fadeEvents > 0 ? " + manifest fade events (" + std::to_string(fadeEvents) + ", partial reset)" : " (cut labels only)";
+		labels += fadeEvents > 0 ? " + fade ranges (" + std::to_string(fadeEvents) + ", partial reset)" : " (cut labels only)";
 		return truth;
 	}
 
@@ -469,27 +495,23 @@ namespace D8SceneJudgeAgreementNs
 		for (char t : truth) facts.truthRestarts += t ? 1 : 0;
 		FrameDump dump;   // WAIVER-D8-FRAME-DUMP: diagnostic only
 		dump.Open(rowName, part, parts);
+		const std::vector<int> clipCuts = (synthetic == Synthetic::None && hz > 0.0) ? ClipCutFrames(*clip, hz) : std::vector<int>();
 		std::vector<char> truthCut(truth.size(), 0);   // which truth restarts are manifest cuts (the rest are fade frames)
-		if (dump.on && synthetic == Synthetic::None && hz > 0.0)
-			for (double c : clip->cuts)
-			{
-				const int f = static_cast<int>(std::floor(c * hz + 0.5));
+		if (dump.on)
+			for (int f : clipCuts)
 				if (f > begin && f < end) truthCut[static_cast<size_t>(f - begin)] = 1;
-			}
 
 		// WAIVER-U7ACC-D8-DELIVERY: the U7 v2 sequence law delivers a confirmed cut at seq + 1 (owner ruling Q3, one frame late is
 		// allowed), as the skeleton's seal does: frame seq + 1 is not sealed when frame seq is. The scored truth therefore expects a
 		// manifest cut at f + 1 (a cut on the part's last frame is delivered after the part and is expected nowhere in it). Fade
 		// truth is unchanged: the fade stays the v1 pair law at the frame itself.
 		std::vector<char> expected = truth;
-		if (synthetic == Synthetic::None && hz > 0.0)
-			for (double c : clip->cuts)
-			{
-				const int f = static_cast<int>(std::floor(c * hz + 0.5));
-				if (f <= begin || f >= end) continue;
-				expected[static_cast<size_t>(f - begin)] = 0;
-				if (f + 1 < end) expected[static_cast<size_t>(f + 1 - begin)] = 1;
-			}
+		for (int f : clipCuts)
+		{
+			if (f <= begin || f >= end) continue;
+			expected[static_cast<size_t>(f - begin)] = 0;
+			if (f + 1 < end) expected[static_cast<size_t>(f + 1 - begin)] = 1;
+		}
 		for (size_t i = 0; i < fadeTruth.size(); ++i)
 			if (expected[i]) fadeTruth[i] = 0;   // WAIVER-U7FADE-PARTIAL: a cut's delivery frame is a restart, not a fade frame
 		for (char f : fadeTruth) facts.truthFades += f ? 1 : 0;
