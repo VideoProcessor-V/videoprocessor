@@ -458,7 +458,8 @@ namespace Dejudder
 			searchSeedValid = true;
 		}
 		void ClearSearchSeed() { searchSeedValid = false; if (inner) inner->searchSeedValid = false; }   // the host clears it after the estimate (an early return must not leak it into the next one)
-		// Idle warm-up (A -> A): motion is identically zero, so D1 writes zero directly instead of running a private U10 global search.
+		// Idle warm-up (A -> A, EngineKeeper.inl:4, doc 52 s3.1e): runs real GlobalBoth/Global to pre-compile D1 shaders
+		// and allocate textures while GpuAttribution::SuppressPrivateCopyScope("U10") suppresses only the U10 private-copy tally.
 		void SetWarmUp(bool on) { warmUpEstimate = on; if (inner) inner->warmUpEstimate = on; }
 		bool SearchSeedUsed() const { return searchSeedUsed; }
 		bool SearchSeedRejected() const { return searchSeedRejected; }   // the last Estimate dropped the gap seed (SAD vs zero: it did not beat "nothing moved")
