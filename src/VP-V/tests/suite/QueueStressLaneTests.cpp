@@ -509,7 +509,12 @@ namespace QueueStressTest
 				unsigned long long discontinuitiesSeen = 0;
 				int frameStep = 0;
 				auto pixel = [&](int x, int y, int s, int panX, int panY) -> double {
-					// Bilinear 2x upscale of a deterministic noise field (half resolution), with per-shot brightness so cuts are visible.
+					// Bilinear 2x upscale of a deterministic noise field (half resolution).
+					// Moving pan + per-shot brightness are required because still shots give 0 engaged frames:
+					// - SourceResolutionDetector.cpp:1219-1223 (Tracker::Update skips bit-identical repeated
+					//   frames, so still shots stall evidence accumulation);
+					// - SourceResolutionMonitor.cpp:2465-2490 (EngageTrigger requires a cut moment with
+					//   distribution/mean jump, real black, fast pan, blank, or max-wait to engage).
 					const double shotBase = 0.24 + 0.16 * (s % 4);
 					auto noise = [&](int xi, int yi) {
 						uint64_t h = static_cast<uint64_t>(xi + panX) * 73856093ull ^ static_cast<uint64_t>(yi + panY) * 19349663ull ^
@@ -525,26 +530,23 @@ namespace QueueStressTest
 				const double end = t + 180.0;
 				while (t < end)
 				{
-					// Faults after an initial 25 s multi-shot acquisition window: starvation (clock jump), burst (same time),
-					// clock backwards, restart, or format change (discontinuity).
+					// Faults: a starvation (the clock jumps), a burst (same time), the clock backwards,
+					// a restart or a format change (discontinuity).
 					const double u = r.U();
 					double step = 1.0 / fps;
-					if (t >= 35.0)
+					if (u < 0.002) step = r.U(1.0, 8.0);
+					else if (u < 0.004) step = 0.0;
+					else if (u < 0.0045) step = -r.U(0.05, 2.0);
+					if (u > 0.9985)
 					{
-						if (u < 0.002) step = r.U(1.0, 8.0);
-						else if (u < 0.004) step = 0.0;
-						else if (u < 0.0045) step = -r.U(0.05, 2.0);
-						if (u > 0.9985)
-						{
-							discontinuitiesSeen = m.Read().discontinuities;
-							if (r.P(0.5)) { W = W == 1920 ? 1280 : 1920; H = W == 1920 ? 1080 : 720; m.Discontinuity("source format change"); }
-							else m.Discontinuity("resync");
-							resetAt = t;
-							++resets;
-							// The worker resets the evidence: wait for it (it runs on its own thread).
-							for (int w = 0; w < 2000 && m.Read().discontinuities <= discontinuitiesSeen; ++w)
-								std::this_thread::sleep_for(std::chrono::milliseconds(1));
-						}
+						discontinuitiesSeen = m.Read().discontinuities;
+						if (r.P(0.5)) { W = W == 1920 ? 1280 : 1920; H = W == 1920 ? 1080 : 720; m.Discontinuity("source format change"); }
+						else m.Discontinuity("resync");
+						resetAt = t;
+						++resets;
+						// The worker resets the evidence: wait for it (it runs on its own thread).
+						for (int w = 0; w < 2000 && m.Read().discontinuities <= discontinuitiesSeen; ++w)
+							std::this_thread::sleep_for(std::chrono::milliseconds(1));
 					}
 					t += step;
 					++sequence;
