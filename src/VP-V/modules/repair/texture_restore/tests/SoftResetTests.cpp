@@ -249,10 +249,40 @@ namespace SoftResetTestsNs
 		unsigned long long softResets = 0, waiting = 0, missing = 0;   // the SharedSceneSource's counters (plan runs only)
 	};
 
+	// Textured scene with 32 px quiet windows (period 64, matching TemporalDetailModelTests::Master/Code) so GrainSplit
+	// estimates true grain N rather than the sinusoid's own energy, and fine-band-only attenuation keeps the base band intact.
+	inline TemporalDetail::Plane TdMaster(int w, int h)
+	{
+		auto pulse = [](double t) {
+			const double m = t - 64.0 * std::floor(t / 64.0);
+			const double u = (std::max)(0.0, (std::min)(1.0, (std::fabs(m - 32.0) - 13.0) / 3.0));
+			return 1.0 - u * u * (3.0 - 2.0 * u);
+		};
+		constexpr double kPi = 3.14159265358979323846;
+		struct S { double fx, fy, ph, a; };
+		static const S fine[] = { { 1.0 / 4.5, 0.05, 0.3, 10.0 }, { 0.04, 1.0 / 5.3, 1.1, 9.0 }, { 0.7 / 6.1, 0.7 / 6.1, 2.0, 8.0 } };
+		static const S mid[] = { { 1.0 / 11.0, 0.02, 0.7, 14.0 }, { 0.03, 1.0 / 14.0, 2.5, 12.0 }, { 0.7 / 18.0, -0.7 / 18.0, 1.3, 10.0 } };
+		TemporalDetail::Plane p(w, h);
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+			{
+				const double env = 1.0 - pulse(x) * pulse(y);
+				double t = 0.0;
+				for (const S& s : fine) t += s.a * std::sin(2.0 * kPi * (s.fx * x + s.fy * y) + s.ph);
+				for (const S& s : mid) t += s.a * std::sin(2.0 * kPi * (s.fx * x + s.fy * y) + s.ph);
+				const double level = 110.0 + 25.0 * std::sin(2.0 * kPi * x / 97.0 + 0.5) * std::cos(2.0 * kPi * y / 131.0);
+				const double edges = 14.0 * std::tanh((x * 0.8 + y * 0.6 - 40.0) / 1.0) + 10.0 * std::tanh((x - y * 0.7 - 140.0) / 1.3);
+				p.at(x, y) = level + env * t + edges;
+			}
+		return p;
+	}
+
 	template <typename SceneOf>
 	TdRun RunTemporalDetail(int frames, SceneOf sceneOf)
 	{
 		const int w = 128, h = 96;
+		const TemporalDetail::Plane master = TdMaster(w, h);
+		const TemporalDetail::Plane masterG1 = TemporalDetail::Detail::Gauss(master, 1.0);
 		TemporalDetail::FieldMotionSource motion;
 		for (int k = 0; k < frames; ++k)
 		{
@@ -267,9 +297,13 @@ namespace SoftResetTestsNs
 		{
 			TemporalDetail::Model::FrameIn in;
 			in.luma = TemporalDetail::Plane(w, h);
-			const GrainModel::Image g = Textured(w, h, uint32_t(k));
-			for (size_t i = 0; i < in.luma.v.size(); ++i)
-				in.luma.v[i] = (k % 3 ? 0.7 : 1.0) * (g.v[i] - 400.0) + 400.0;
+			const double q = (k % 3) ? 0.35 : 1.0;
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+				{
+					const double v = master.at(x, y) - (1.0 - q) * (master.at(x, y) - masterG1.at(x, y));
+					in.luma.at(x, y) = v + 1.2 * (Noise(uint32_t(x), uint32_t(y), uint32_t(k)) / 256.0);
+				}
 			in.seq = uint64_t(k) + 1;
 			in.contentHz = 23.976;
 			in.planeLines = 1080.0;
