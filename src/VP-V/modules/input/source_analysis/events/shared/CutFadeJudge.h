@@ -67,6 +67,43 @@ constexpr int64_t kFadeMinDiv = 64;            // fade: |mean step| >= spread / 
 constexpr int64_t kFadeMaxDiv = 4;             // ... and < spread / 4 (more is a jump, not a ramp)
 constexpr int64_t kFlashMeanDiv = 4;           // flash: |mean step| >= spread / 4 with the spread kept within spread / 4
 
+// The fade law's numbers, one set for the CPU twin and the kernel text (FadeKernelBody carries the same literals; the pinned
+// kernel hash and FadeKernelCarriesTheLawsNumbers in SharedUnitsW1Tests tie the two).
+constexpr float kFadeMinStepCodes = 0.75f;   // |mean step| window per frame at the reference rate (the caller scales it to the source rate)
+constexpr float kFadeMaxStepCodes = 24.0f;
+constexpr float kFadeMinBlack = -12.0f;      // plausible implied black level (codes)
+constexpr float kFadeMaxBlack = 48.0f;
+constexpr float kFadeScaleEps = 0.01f;       // |1 - g| at or below this: the spread did not scale (a pan), no implied black
+constexpr float kFadeGainMin = 0.5f;         // gain = clamp(sa / sb, min, max)
+constexpr float kFadeGainMax = 2.0f;
+constexpr float kFadeMinSpread = 1.0f;       // both frames' spread (codes) must exceed this
+constexpr float kFadeDivGuard = 1e-3f;       // floor of a spread used as a divisor
+constexpr float kFadeNoBlack = 1e9f;         // the implied black when the spread did not scale
+
+constexpr double kFadeRunMinGain = 0.02;      // |1 - gain| of the run (first record -> this one) above this: the picture was scaled
+constexpr double kP4CodesPerEightBit = 256.0; // P4 records hold 16-bit half-plane codes: one 8-bit-like code = 256 P4 codes
+constexpr uint32_t kFadeRunMinPairs = 2;      // a run needs two pairs (as FadeFit needs the previous pair's step): one pair is not a ramp
+
+// Derived P4-scale constants (16-bit half-plane codes).
+constexpr uint32_t kP4HistBinWidth = 65536u / SourceStats::kHistBins;                // 64: 1 10-bit P4 histogram bin
+constexpr uint32_t kBlackSpreadP4 = uint32_t(kFadeMinSpread * kP4CodesPerEightBit);  // 256: 1 8-bit code
+constexpr uint32_t kBlackMeanMaxP4 = uint32_t(kFadeMaxBlack * kP4CodesPerEightBit);  // 12288: 48 codes
+constexpr int64_t kMaxFadeStepP4 = int64_t(kFadeMaxStepCodes * kP4CodesPerEightBit); // 6144: 24 codes
+constexpr int64_t kMinFadeStepP4 = int64_t(kFadeMinStepCodes * kP4CodesPerEightBit); // 192: 0.75 codes
+constexpr double kBlackMinP4 = double(kFadeMinBlack) * kP4CodesPerEightBit;          // -3072: -12 codes
+constexpr double kBlackMaxP4 = double(kFadeMaxBlack) * kP4CodesPerEightBit;          // 12288: 48 codes
+
+// Minimal named fitted guards for pair and multi-frame fade detection.
+constexpr uint32_t kFadeNearBlackSpreadP4 = 10u * kBlackSpreadP4;    // 2560: 10 codes, discrete histogram bin-quantization regime near black
+constexpr int64_t kFadeNearBlackStepP4 = 4 * int64_t(kBlackSpreadP4); // 1024: 4 codes, max single-pair near-black step
+constexpr uint32_t kFadeSmallSpreadP4 = 32u * kBlackSpreadP4;        // 8192: 32 codes, low-contrast spread floor
+constexpr int64_t kFadeMaxSpreadJumpDiv = 10;                        // unifies spread-jump guards into one named divisor
+constexpr int64_t kFadePanP99JitterP4 = 2 * int64_t(kBlackSpreadP4); // 512: 2 codes, pan-edge p99 jitter inside active fade
+constexpr int64_t kFadeMaxStepRatio = 4;                             // 4x step-rate continuity cap; matches kFadeMaxDiv
+constexpr uint32_t kFadePlateauMinPairs = 4u;                        // post-fade plateau guard: minimum pairs
+constexpr int64_t kFadePlateauMeanDiv = 4;                           // post-fade plateau guard: mean step divisor
+constexpr int64_t kFadePlateauP99Div = 8;                            // post-fade plateau guard: p99 step divisor
+
 struct EventSignals {
     bool cut = false;
     bool cutPossible = false;
@@ -110,17 +147,6 @@ inline EventSignals ClassifyEvents(const SourceStats::Record& prev, const Source
     const int64_t aSpread = dSpread < 0 ? -dSpread : dSpread;
     const bool sameSign = (dMean > 0 && dSpread > 0) || (dMean < 0 && dSpread < 0);
 
-    // Near-black gentle ramp or entering black: when pixels occupy only 1-3 histogram bins
-    // (mean <= 18 codes, spread <= 10 codes) or collapse directly to black (spreadCur <= 2 codes, cur.mean < 24 codes),
-    // a gentle fade step moves >50% of mass across one bin edge; judge it as a fade before the histogram-distance
-    // cut/flash branch so fade-in from / fade-out to black is never cut/flashed.
-    const bool nearBlackRamp = (std::max)(prev.mean, cur.mean) <= 4608u && spread <= 2560 && sameSign && aMean >= 64 && aMean < 1024;
-    const bool toBlack = spreadCur <= 512u && cur.mean < 6144u && dMean < 0 && dSpread < 0 && aMean < 6144;
-    if (nearBlackRamp || toBlack) {
-        e.fade = true;
-        return e;
-    }
-
     if (frac > kCutHistFrac) {
         // A shifted histogram of unchanged spread is a flash (or a cut between look-alike
         // scenes: reported as a flash with cutPossible); any other jump is a cut.
@@ -133,28 +159,20 @@ inline EventSignals ClassifyEvents(const SourceStats::Record& prev, const Source
         }
         return e;
     }
-    // Gradual ramp: emerging from black, collapsing into black, or mid-scene proportional contrast scaling about a plausible black
-    // (excludes additive lighting shifts whose spread barely changes and single-frame strobe jumps > spread / 14).
-    const bool fromBlack = spreadPrev <= 256u && prev.mean < 12288u && dMean > 0 && dSpread > 0 && aMean < 6144;
-    bool scaledFade = false;
-    if (sameSign && spreadPrev > 0u && spreadCur > 0u && aMean * kFadeMaxDiv < spread) {
+    // Proportional non-black contrast scaling about a plausible black (excludes additive lighting shifts
+    // whose spread barely changes and single-frame jumps > spread / kFadeMaxSpreadJumpDiv).
+    if (sameSign && spreadPrev > kBlackSpreadP4 && spreadCur > kBlackSpreadP4 &&
+        aMean * kFadeMaxDiv < spread && aSpread * kFadeMaxDiv < spread) {
         const double g = double(spreadCur) / double(spreadPrev);
-        if (std::fabs(1.0 - g) > 1e-4) {
+        if (std::fabs(1.0 - g) > kFadeRunMinGain) {
             const double black = (double(cur.mean) - g * double(prev.mean)) / (1.0 - g);
-            if (black > -12.0 * 256.0 && black < 48.0 * 256.0) {
-                const bool nearBlackCollapse = cur.mean <= 6144u && dMean < 0 && dSpread < 0 && aSpread * kFadeMinDiv >= spread;
-                const bool darkFadeOut = dMean < 0 && dSpread < 0 && prev.mean <= 10240u &&
-                    aMean * 16 >= int64_t(prev.mean) && aSpread * 16 >= spread && aSpread * 6 < spread &&
-                    black > -4.0 * 256.0 && black < 24.0 * 256.0;
-                const int64_t midMeanDiv = spread > 16384 ? 24 : kFadeMinDiv;
-                const bool midSceneRamp = aMean * midMeanDiv >= spread && aSpread * kFadeMinDiv >= spread &&
-                    (aSpread * 10 < spread || spread <= 8192);
-                scaledFade = nearBlackCollapse || darkFadeOut || midSceneRamp;
+            if (black > kBlackMinP4 && black < kBlackMaxP4 &&
+                aMean >= kMinFadeStepP4 && aSpread * kFadeMinDiv >= spread &&
+                (aSpread * kFadeMaxSpreadJumpDiv < spread || spread <= int64_t(kFadeSmallSpreadP4))) {
+                e.fade = true;
             }
         }
     }
-    if (fromBlack || scaledFade)
-        e.fade = true;
     return e;
 }
 
@@ -660,19 +678,7 @@ inline bool GridHistCut(float grid, float histogram, const GridHistThresholds& t
 }
 
 // ---- the fade fit (M4) -------------------------------------------------------------------------------------------------
-
-// The fade law's numbers, one set for the CPU twin and the kernel text (FadeKernelBody carries the same literals; the pinned
-// kernel hash and FadeKernelCarriesTheLawsNumbers in SharedUnitsW1Tests tie the two).
-constexpr float kFadeMinStepCodes = 0.75f;   // |mean step| window per frame at the reference rate (the caller scales it to the source rate)
-constexpr float kFadeMaxStepCodes = 24.0f;
-constexpr float kFadeMinBlack = -12.0f;      // plausible implied black level (codes)
-constexpr float kFadeMaxBlack = 48.0f;
-constexpr float kFadeScaleEps = 0.01f;       // |1 - g| at or below this: the spread did not scale (a pan), no implied black
-constexpr float kFadeGainMin = 0.5f;         // gain = clamp(sa / sb, min, max)
-constexpr float kFadeGainMax = 2.0f;
-constexpr float kFadeMinSpread = 1.0f;       // both frames' spread (codes) must exceed this
-constexpr float kFadeDivGuard = 1e-3f;       // floor of a spread used as a divisor
-constexpr float kFadeNoBlack = 1e9f;         // the implied black when the spread did not scale
+// The fade law's numbers (kFade*) are hoisted above ClassifyEvents so the pair, multi-frame and M4 laws share one set.
 
 struct FadeParams {
     bool enabled = true;                         // the matcher's fade_match switch
@@ -715,10 +721,6 @@ inline FadeOut FadeFit(const FadeIn& in, const FadeParams& p = FadeParams())
 
 // ---- the multi-frame fade law (unit version 3) ---------------------------------------------------------------------------
 
-constexpr double kFadeRunMinGain = 0.02;      // |1 - gain| of the run (first record -> this one) above this: the picture was scaled
-constexpr double kP4CodesPerEightBit = 256.0; // P4 records hold 16-bit half-plane codes: one 8-bit-like code = 256 P4 codes
-constexpr uint32_t kFadeRunMinPairs = 2;      // a run needs two pairs (as FadeFit needs the previous pair's step): one pair is not a ramp
-
 // The run that ends at one record (the caller keeps one per stream, starting empty). end* name that record, so a run is only
 // continued by the pair that starts there (a restarted frame numbering or a skipped frame starts a new run).
 struct FadeRun {
@@ -753,6 +755,8 @@ inline void FadeRunEndAt(FadeRun& run, const SourceStats::Record& r)
     run.endP99 = r.p99;
 }
 
+inline double PairFadeKeep(const SourceStats::Record& prev, const SourceStats::Record& cur);
+
 // Fold the pair (prev, cur), whose pair verdict is `e` (ClassifyEvents on the same two records), into `run` (the run ending at
 // prev; any other run is dropped first). Returns the multi-frame fade verdict of the pair; the frame's fade is this OR e.fade.
 // `frameKeep` (v3, may be null) gets the run's partial-reset factor of this frame: 1 unless the pair is a run fade, else
@@ -764,17 +768,8 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
         *frameKeep = 1.0;
     if (!FadeRunEndsAt(run, prev))
         run = FadeRun();
-    if (e.cut || e.flash) {
-        run = FadeRun();
-        FadeRunEndAt(run, cur);
-        return false;
-    }
     const int64_t dMean = int64_t(cur.mean) - int64_t(prev.mean);
     const int64_t dP99 = int64_t(cur.p99) - int64_t(prev.p99);
-    if (dMean == 0 && dP99 == 0 && e.histDistance == 0) {
-        FadeRunEndAt(run, cur);   // a repeated record: nothing changed, the run stays as it is
-        return false;
-    }
     const uint32_t spreadPrev = prev.p99 > prev.p01 ? prev.p99 - prev.p01 : 0u;
     const uint32_t spreadCur = cur.p99 > cur.p01 ? cur.p99 - cur.p01 : 0u;
     const uint32_t spread = (std::max)(1u, (std::max)(spreadPrev, spreadCur));
@@ -782,28 +777,72 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
     const int64_t aSpread = dSpread < 0 ? -dSpread : dSpread;
     const int32_t dir = dP99 > 0 ? 1 : dP99 < 0 ? -1 : 0;
     const int64_t aMean = dMean < 0 ? -dMean : dMean;
-    const uint32_t blackSpreadMax = uint32_t(kFadeMinSpread * kP4CodesPerEightBit);
-    const uint32_t blackMeanMax = uint32_t(kFadeMaxBlack * kP4CodesPerEightBit);
-    const int64_t maxBlackStep = int64_t(kFadeMaxStepCodes * kP4CodesPerEightBit);
-    const bool fromBlack = spreadPrev <= blackSpreadMax && prev.mean < blackMeanMax && dir > 0 && dMean > 0 && aMean < maxBlackStep;
-    const bool blackOrigin = run.direction > 0 && run.baseP99 <= run.baseMean + blackSpreadMax && run.baseMean < blackMeanMax;
+    const bool blackOrigin = run.direction > 0 && run.baseP99 <= run.baseMean + kBlackSpreadP4 && run.baseMean < kBlackMeanMaxP4;
+    const bool activeFade = run.keep < 1.0 || run.fadePairs >= kFadeRunMinPairs;
+    const int64_t contRef = int64_t((std::max)(run.refSpread, spread));
+
+    if (e.flash) {
+        run = FadeRun();
+        FadeRunEndAt(run, cur);
+        return false;
+    }
+    if (e.cut) {
+        const bool activeFadeOutToBlack = run.direction < 0 && activeFade && dMean < 0 && dSpread < 0 &&
+            cur.mean < kBlackMeanMaxP4 && (spreadCur <= 2u * kBlackSpreadP4 || spread <= kFadeNearBlackSpreadP4) &&
+            aMean < kMaxFadeStepP4 && aMean * kFadeMaxDiv < contRef &&
+            (run.prevMeanStep == 0u || aMean <= kFadeMaxStepRatio * int64_t(run.prevMeanStep));
+        if (activeFadeOutToBlack) {
+            run.prevMeanStep = uint32_t(aMean);
+            ++run.pairs;
+            run.refSpread = (std::max)(run.refSpread, spread);
+            FadeRunEndAt(run, cur);
+            const double fk = PairFadeKeep(prev, cur);
+            if (frameKeep)
+                *frameKeep = fk;
+            run.keep *= fk;
+            ++run.fadePairs;
+            return true;
+        }
+        const bool blackOriginContinue = blackOrigin && run.pairs >= 1u && dir > 0 && dMean > 0 && dSpread > 0 &&
+            spread <= kFadeNearBlackSpreadP4 && aMean < kFadeNearBlackStepP4 &&
+            (run.prevMeanStep == 0u || aMean <= kFadeMaxStepRatio * int64_t(run.prevMeanStep));
+        if (!blackOriginContinue) {
+            run = FadeRun();
+            if (spreadPrev <= kBlackSpreadP4 && prev.mean < kBlackMeanMaxP4 && dir > 0 && dMean > 0 && dSpread > 0 &&
+                spreadCur <= kFadeNearBlackSpreadP4 && aMean < kFadeNearBlackStepP4) {
+                run.direction = 1;
+                run.pairs = 1u;
+                run.firstSpreadStep = uint32_t(aSpread);
+                run.firstMeanStep = uint32_t(aMean);
+                run.prevMeanStep = uint32_t(aMean);
+                run.baseMean = prev.mean;
+                run.baseP99 = prev.p99;
+                run.refSpread = spread;
+            }
+            FadeRunEndAt(run, cur);
+            return false;
+        }
+    }
+    if (dMean == 0 && dP99 == 0 && e.histDistance == 0) {
+        FadeRunEndAt(run, cur);   // a repeated record: nothing changed, the run stays as it is
+        return false;
+    }
+    const bool fromBlack = spreadPrev <= kBlackSpreadP4 && prev.mean < kBlackMeanMaxP4 && dir > 0 && dMean > 0 && aMean < kMaxFadeStepP4;
     // Once a run has established itself, a mean reversal ends it (prevents a stale fade run surviving through a post-fade pan).
     // Inside an already-active fade (run.keep < 1.0 or >= 2 confirmed fade pairs), tolerate pan-induced p99 holds or <=2-code p99 jitter while mean keeps fading >= 1 code/frame.
-    const bool activeFade = run.keep < 1.0 || run.fadePairs >= kFadeRunMinPairs;
     const bool meanReversed = run.direction != 0 && run.pairs >= kFadeRunMinPairs && dMean * run.direction < 0;
-    const bool panP99Jitter = run.direction != 0 && activeFade && dMean * run.direction > 0 && aMean >= int64_t(kP4CodesPerEightBit)
-        && dP99 * int64_t(run.direction) >= -2 * int64_t(kP4CodesPerEightBit);
-    const int64_t contRef = int64_t((std::max)(run.refSpread, spread));
-    const bool contNotJump = blackOrigin || activeFade || e.fade || (run.fadePairs >= 1 && aSpread * 6 < contRef) ||
-        contRef <= 8192 || aSpread * 14 < contRef;
+    const bool panP99Jitter = run.direction != 0 && activeFade && dMean * run.direction > 0 && aMean >= int64_t(kBlackSpreadP4)
+        && dP99 * int64_t(run.direction) >= -kFadePanP99JitterP4;
+    const bool contNotJump = blackOrigin || activeFade || e.fade || (run.fadePairs >= 1u && aSpread * kFadeMaxDiv < contRef) ||
+        contRef <= int64_t(kFadeSmallSpreadP4) || aSpread * kFadeMaxSpreadJumpDiv < contRef;
     const bool continues = run.direction != 0 && !meanReversed && contNotJump && (dir == run.direction || dir == 0 || panP99Jitter) &&
-        (aMean * kFadeMaxDiv < contRef || (blackOrigin && dMean > 0 && aMean < maxBlackStep));
+        (aMean * kFadeMaxDiv < contRef || (blackOrigin && dMean > 0 && aMean < kMaxFadeStepP4));
     if (!continues) {
         run = FadeRun();
         const int32_t startDir = dir != 0 ? dir : (e.fade && dMean != 0 ? (dMean > 0 ? 1 : -1) : 0);
-        const bool startConsistent = dMean * int64_t(startDir) >= -64 &&
+        const bool startConsistent = dMean * int64_t(startDir) >= -int64_t(kP4HistBinWidth) &&
             (dMean * int64_t(startDir) > 0 || aSpread * kFadeMinDiv >= int64_t(spread));
-        const bool startNotJump = fromBlack || e.fade || spread <= 8192u || aSpread * 14 < int64_t(spread);
+        const bool startNotJump = fromBlack || e.fade || spread <= kFadeSmallSpreadP4 || aSpread * kFadeMaxSpreadJumpDiv < int64_t(spread);
         if (startDir == 0 || !startConsistent || !startNotJump || (!fromBlack && aMean * kFadeMaxDiv >= int64_t(spread))) {
             FadeRunEndAt(run, cur);
             return false;
@@ -832,11 +871,12 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
     const int64_t runP99Span = int64_t(cur.p99) > int64_t(run.baseP99)
         ? int64_t(cur.p99) - int64_t(run.baseP99) : int64_t(run.baseP99) - int64_t(cur.p99);
     const int64_t aP99 = dP99 < 0 ? -dP99 : dP99;
-    if (run.pairs >= 4 && aMean * 4 < runMeanSpan / int64_t(run.pairs) && aP99 * 8 < runP99Span / int64_t(run.pairs))
+    if (run.pairs >= kFadePlateauMinPairs && aMean * kFadePlateauMeanDiv < runMeanSpan / int64_t(run.pairs) &&
+        aP99 * kFadePlateauP99Div < runP99Span / int64_t(run.pairs))
         return false;   // both mean and p99 steps collapsed to noise after the ramp plateaued
-    if (run.direction > 0 && run.baseP99 <= run.baseMean + blackSpreadMax && run.baseMean < blackMeanMax) {
-        const bool stillScaling = spreadCur <= 8192u || (dSpread > 0 && aSpread * kFadeMinDiv >= int64_t(spreadCur)) ||
-            (panP99Jitter && aMean * 80 >= int64_t(spreadCur));
+    if (blackOrigin) {
+        const bool stillScaling = spreadCur <= kFadeSmallSpreadP4 || (dSpread > 0 && aSpread * kFadeMinDiv >= int64_t(spreadCur)) ||
+            (panP99Jitter && aMean * kFadeMinDiv >= int64_t(spreadCur));
         if (!(cur.mean > run.baseMean && cur.p99 > run.baseP99 && (cur.p99 - run.baseMean) > (cur.mean - run.baseMean) && spreadCur > 0u && stillScaling)) {
             if (e.fade)
                 ++run.fadePairs;
@@ -852,37 +892,35 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
         return true;
     }
     // A gain about a black b: (cur - b) = g * (base - b) for both the mean and the p99.
-    // Require meaningful cumulative mean shift (>= 1 code), or a strong smooth fade-out in p99 (>= 3.5 codes/frame) on dark scenes,
-    // and >= 3% cumulative gain (kFadeRunMinGain + 0.01) to reject live-action highlight jitter.
-    const bool spanOk = (runMeanSpan >= int64_t(kP4CodesPerEightBit) && runMeanSpan >= 40 * int64_t(run.pairs)) ||
-        (run.direction < 0 && runP99Span >= 900 * int64_t(run.pairs) && runMeanSpan >= 20);
+    // Rate-independent cumulative span: >= 1 code mean shift, or >= 8 codes p99 drop with >= half-bin mean drop on dark fade-outs.
+    const bool spanOk = runMeanSpan >= int64_t(kBlackSpreadP4) ||
+        (run.direction < 0 && runP99Span >= 8 * int64_t(kBlackSpreadP4) && runMeanSpan >= int64_t(kP4HistBinWidth) / 2);
     const double m0 = double(run.baseMean), p0 = double(run.baseP99), m1 = double(cur.mean), p1 = double(cur.p99);
     const double den = (p0 - p1) - (m0 - m1);
     bool baseFitOk = false;
     double black = 0.0, gain = 1.0;
-    const bool stepMoving = run.pairs >= 6 || aSpread * 128 >= int64_t(spread) || panP99Jitter;
+    const bool stepMoving = run.pairs >= 6 || aSpread * (2 * kFadeMinDiv) >= int64_t(spread) || panP99Jitter;
     if (spanOk && stepMoving && den != 0.0) {
         black = (m1 * p0 - m0 * p1) / den;
-        if (black > double(kFadeMinBlack) * kP4CodesPerEightBit && black < double(kFadeMaxBlack) * kP4CodesPerEightBit &&
-            p0 > black && m0 > black) {
+        if (black > kBlackMinP4 && black < kBlackMaxP4 && p0 > black && m0 > black) {
             gain = (p1 - black) / (p0 - black);
-            const double minGainDiff = run.pairs >= 3 ? (kFadeRunMinGain + 0.005) : (kFadeRunMinGain + 0.01);
-            baseFitOk = std::fabs(1.0 - gain) > minGainDiff && (gain - 1.0) * double(run.direction) > 0.0 &&
+            baseFitOk = std::fabs(1.0 - gain) > kFadeRunMinGain && (gain - 1.0) * double(run.direction) > 0.0 &&
                 (m1 - m0) * double(run.direction) > 0.0;
         }
     }
     if (baseFitOk) {
         ++run.fitPairs;
-        // Require 2 consecutive fitting pairs before emitting a fade when the fit only appeared after >= 3 pairs
-        // (slow run or wandering live-action drift) or when a bright 2nd pair jumped > 4x the 1st pair's mean and spread steps
+        // Require kFadeRunMinPairs consecutive fitting pairs before emitting a fade when the fit only appeared after >= 3 pairs
+        // (slow run or wandering live-action drift) or when a bright 2nd pair jumped > kFadeMaxStepRatio x the 1st pair's mean and spread steps
         // (1-frame spike sitting on top of 1 frame of noise). A prior confirmed e.fade pair (run.fadePairs >= 1), or a strong
-        // proportional step (|dMean| and |dSpread| both >= spread/64) continuing a steady mean ramp (<= 4x previous pair's |dMean|),
+        // proportional step (|dMean| and |dSpread| both >= spread/kFadeMinDiv) continuing a steady mean ramp (<= kFadeMaxStepRatio x previous pair's |dMean|),
         // already confirms the run.
         const bool strongPairStep = aMean * kFadeMinDiv >= int64_t(spread) && aSpread * kFadeMinDiv >= int64_t(spread) &&
-            lastMeanStep > 0u && aMean <= 4 * int64_t(lastMeanStep);
+            lastMeanStep > 0u && aMean <= kFadeMaxStepRatio * int64_t(lastMeanStep);
         const bool needsConfirm = !activeFade && run.fadePairs == 0 && !strongPairStep &&
-            (run.pairs >= 3 || (spread > 16384u && aSpread > 4 * int64_t(run.firstSpreadStep) && aMean > 4 * int64_t(run.firstMeanStep)));
-        if (needsConfirm && run.fitPairs < 2) {
+            (run.pairs >= 3 || (spread > 2u * kFadeSmallSpreadP4 && aSpread > kFadeMaxStepRatio * int64_t(run.firstSpreadStep) &&
+                                aMean > kFadeMaxStepRatio * int64_t(run.firstMeanStep)));
+        if (needsConfirm && run.fitPairs < kFadeRunMinPairs) {
             if (e.fade)
                 ++run.fadePairs;
             return false;
@@ -906,14 +944,14 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
     if (!activeFade && stepMoving)
         run.fitPairs = 0;
     // Active-fade continuation during motion/pan: when pan-driven content drift shifts the cumulative (base -> cur) black fit,
-    // keep the active fade continuous on frames that still scale contrast about a plausible black (spread step >= spread / 64)
+    // keep the active fade continuous on frames that still scale contrast about a plausible black (spread step >= spread / kFadeMinDiv)
     // or continue the same-rate mean ramp across a 1-frame pan p99 jitter.
     if (activeFade) {
         if (dSpread * int64_t(run.direction) > 0 && aSpread * kFadeMinDiv >= int64_t(spread) && spreadPrev > 0u && spreadCur > 0u) {
             const double g = double(spreadCur) / double(spreadPrev);
-            if (std::fabs(1.0 - g) > 1e-4) {
+            if (std::fabs(1.0 - g) > double(kFadeScaleEps)) {
                 const double bp = (double(cur.mean) - g * double(prev.mean)) / (1.0 - g);
-                if (bp > double(kFadeMinBlack) * kP4CodesPerEightBit && bp < double(kFadeMaxBlack) * kP4CodesPerEightBit) {
+                if (bp > kBlackMinP4 && bp < kBlackMaxP4) {
                     const double fk = (std::min)(g, 1.0 / g);
                     if (frameKeep)
                         *frameKeep = fk;
