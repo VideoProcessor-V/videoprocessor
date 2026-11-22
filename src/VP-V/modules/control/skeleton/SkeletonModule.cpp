@@ -2990,7 +2990,8 @@ namespace Vpv
 				// either way built with the measured source period and the queue frames: the record histories
 				// (quality_pattern, td.trail_summary) are max(floor seconds, queue x period).
 				b->registry = Bundle::MakeRegistry(b->wiring, st.periodMs, VpSkeleton::QueueFrames(gs));
-				b->lane.Configure(st.settings.lane, b->registry, consumers, gs, card, tier, seq, false);
+				b->lane.Configure(st.settings.lane, b->registry, consumers, gs, card, tier, seq, false,
+					startWorkers_ ? (seq + 1u) : seq);
 				b->lane.SetExternalProducts(outside);
 				// GF-P2b (gate G6 C2): the lane fills take the configured consumers' declared ahead depths (rebound when they move: also after
 				// an extMoved Configure whose only change is a depth, which keeps the graph).

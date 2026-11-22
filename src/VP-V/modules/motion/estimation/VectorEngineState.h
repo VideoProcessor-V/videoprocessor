@@ -201,6 +201,10 @@ namespace VpMotion
 		bool motionProducerStopLogged = false;
 		MotionAhead::ProducerRecovery motionProducerStartRetry;
 		unsigned long long motionAheadHits = 0, motionAheadMisses = 0;
+		std::atomic<unsigned long long> motionAheadP1Deferred{ 0 };
+		std::atomic<uint64_t> motionAheadP1LastDeferredSeq{ 0 };
+		std::atomic<unsigned long long> motionAheadP1DeferStreak{ 0 };
+		std::atomic<unsigned long long> motionAheadP1DeferMaxStreak{ 0 };
 		// The render loop's hand-off of frames to the producer (render loop thread writes).
 		std::atomic<double> motionHandoffMaxMs{ 0.0 }, motionHandoffTotalMs{ 0.0 };
 		std::atomic<unsigned long long> motionHandoffCount{ 0 };

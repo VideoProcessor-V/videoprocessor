@@ -40,7 +40,13 @@ namespace Vpv
 
 			void OnLifecycle(RendererExtension::LifecycleFacts& f) override
 			{
-				if (f.kind == RendererExtension::Lifecycle::GpuReleased || f.kind == RendererExtension::Lifecycle::Shutdown)
+				if (f.kind == RendererExtension::Lifecycle::GpuCreated && ComputeOnce::Enabled())
+				{
+					ComputeOnce::Global().Reset();
+					GpuAttribution::Global().Reset();
+					started_ = false;
+				}
+				else if (f.kind == RendererExtension::Lifecycle::GpuReleased || f.kind == RendererExtension::Lifecycle::Shutdown)
 					LogReport("teardown");
 			}
 

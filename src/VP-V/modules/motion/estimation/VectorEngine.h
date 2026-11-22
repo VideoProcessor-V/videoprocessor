@@ -587,6 +587,7 @@ namespace VpMotion
 		mutable std::string p2CpuFormLastWhy_;       // the last decline's reason (under p2CpuFormWhyMutex_)
 		unsigned long long p2CpuFormRecorded_ = 0;   // declines at the last DiagnosticHistory record (render thread)
 		bool p2CpuFormRecordedAny_ = false;          // the first read has been recorded (render thread)
+		unsigned long long motionAheadP1DeferredRecorded_ = 0;   // P1 deferrals at the last DiagnosticHistory record (render thread)
 		std::atomic<int> flowSourceWidth_{ 0 };   // the source width the engine size was last made for (ServeStatistics)
 		InvalidateSink invalidateSink_ = nullptr;
 		const IMatcherView* matcher_ = nullptr;

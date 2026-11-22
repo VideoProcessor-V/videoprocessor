@@ -189,10 +189,10 @@ public:
     {
         if (job.source == nullptr || !job.source->Valid() || job.out == nullptr)
             return false;
-        VPV_COMPUTE_ONCE_AT("U3", job.seq, ::ComputeOnce::Variant(job.source->width, job.source->height));
         dims_ = Dims{ job.source->width, job.source->height };
         if (job.outBytes < HalfLumaBytes(dims_))
             return false;
+        VPV_COMPUTE_ONCE_AT("U3", job.seq, ::ComputeOnce::Variant(job.source->width, job.source->height));
         halfRows_ = HalfDim(dims_.height);
         quarterRows_ = QuarterDim(dims_.height);
         phase_ = 0;

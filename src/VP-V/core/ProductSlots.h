@@ -502,7 +502,7 @@ public:
 
     // Seal frame N. `check(const Header&)` validates a published lane header (SlotTable).
     template <class Check>
-    SealResult Seal(uint64_t seq, Check check, const std::function<bool()>& waitWriting = std::function<bool()>())
+    SealResult Seal(uint64_t seq, Check check)
     {
         SealResult res;
         if (seq > kSlotSeqMask - ring_) {
@@ -524,8 +524,6 @@ public:
             if (w.seq == mine) {
                 switch (w.state) {
                 case SlotState::Writing:
-                    if (waitWriting && waitWriting())
-                        continue;
                     next.state = SlotState::RejectedLaneOwned;
                     reason = SealReason::LaneLate;
                     break;
@@ -1045,9 +1043,6 @@ public:
     // never changes the class). No effect on products with sealLag 0.
     void SetDeterministicSeal(bool on) { deterministic_ = on; }
     bool DeterministicSeal() const { return deterministic_; }
-    // Optional bounded wait step invoked during SealNode when a CPU worker is mid-compute on `seq` (SlotState::Writing):
-    // returning true sleeps/yields and retries the seal instead of preempting the worker into LaneLate + a duplicate live fill.
-    void SetWaitCpuWriting(std::function<bool()> step) { waitCpuWriting_ = std::move(step); }
     // The deepest Node::sealLag of this table (0 = no lagged-seal product: Resolve is today's, ResolveLagged does nothing).
     uint8_t MaxSealLag() const { return maxSealLag_; }
     bool Valid() const { return valid_; }
@@ -1305,17 +1300,7 @@ private:
         SlotSet& set = *sets_[i];
         pendingLead_.clear();
         pendingChain_ = false;
-        int waitCount = 0;
-        std::function<bool()> waitWriting;
-        if (n.backend == Backend::Cpu && waitCpuWriting_) {
-            waitWriting = [&]() {
-                if (waitCount >= 50)
-                    return false;
-                ++waitCount;
-                return waitCpuWriting_();
-            };
-        }
-        out.seal = set.Seal(seq, [&](const Header& h) { return Check(n, seq, stampN, h); }, waitWriting);
+        out.seal = set.Seal(seq, [&](const Header& h) { return Check(n, seq, stampN, h); });
         if (out.seal.outcome == SealOutcome::Sealed && out.seal.reason == SealReason::Accepted) {
             // Counted once, after the seal took effect (not per input, not on a CAS retry).
             for (ProductId p : pendingLead_)
@@ -1575,7 +1560,6 @@ private:
     std::vector<std::vector<uint64_t>> pendingMark_;   // per node, per slot: frame + 1 left Pending at its on-time seal
     uint64_t liveFills_ = 0;
     uint64_t fillDeclines_ = 0;
-    std::function<bool()> waitCpuWriting_;
 };
 
 // Preallocated CPU storage for a CPU product: one buffer per ring slot and per live buffer.

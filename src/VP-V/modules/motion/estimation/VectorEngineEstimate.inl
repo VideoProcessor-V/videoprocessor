@@ -553,9 +553,15 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		DebugLog::Log("Motion ahead: frames queued ahead when taken (count:frames) %s", counts.c_str());
 		const auto ps = vectorEngine.motionProducer->GetStats();
 		const unsigned long long handoffs = motionHandoffCount.load(std::memory_order_relaxed);
-		DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms, on the worker), %llu dropped; pairs taken %llu, missed %llu; render-loop hand-off mean %.3f ms, max %.3f ms",
-			ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, vectorEngine.motionAheadHits, vectorEngine.motionAheadMisses,
-			handoffs ? motionHandoffTotalMs.load(std::memory_order_relaxed) / handoffs : 0.0, motionHandoffMaxMs.load(std::memory_order_relaxed));
+		const unsigned long long p1Deferred = vectorEngine.motionAheadP1Deferred.load(std::memory_order_relaxed);
+		if (p1Deferred > 0)
+			DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms, on the worker), %llu dropped; pairs taken %llu, missed %llu, P1 deferred %llu; render-loop hand-off mean %.3f ms, max %.3f ms",
+				ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, vectorEngine.motionAheadHits, vectorEngine.motionAheadMisses, p1Deferred,
+				handoffs ? motionHandoffTotalMs.load(std::memory_order_relaxed) / handoffs : 0.0, motionHandoffMaxMs.load(std::memory_order_relaxed));
+		else
+			DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms, on the worker), %llu dropped; pairs taken %llu, missed %llu; render-loop hand-off mean %.3f ms, max %.3f ms",
+				ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, vectorEngine.motionAheadHits, vectorEngine.motionAheadMisses,
+				handoffs ? motionHandoffTotalMs.load(std::memory_order_relaxed) / handoffs : 0.0, motionHandoffMaxMs.load(std::memory_order_relaxed));
 		DebugLog::Log("Motion ahead extras: %.2f ms per pair on the worker; engine trust weights %s; camera from the search when unclear %llu times",
 			ps.extrasMs, dejudder->EngineWeightsUsed() ? "applied" : "not applied", dejudder->GlobalFallbacks());
 	}

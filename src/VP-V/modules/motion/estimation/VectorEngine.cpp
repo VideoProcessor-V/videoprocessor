@@ -9,6 +9,7 @@
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <libplacebo/d3d11.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/OnDemandIssue.h>
 #include <VP-V/modules/motion/estimation/MotionRecordPublish.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/P1AcquireSource.h>
@@ -236,21 +237,12 @@ namespace VpMotion
 		if (act.disengage)
 			motionAheadEngaged = false;
 		if (motionProducer && motionProducer->Running())
-		{
 			motionProducerStopLogged = false;   // W2-C1: running again (its own restart): a later stop is logged again
-			// Declare the configured ahead depth (stable across startup queue fill; QueueWindow::DeriveWindow clamps aheadCompute by live L).
-			const int cap = (std::max)(1, (std::min)(6, in.motionAheadFrames > 0 ? in.motionAheadFrames : 4));
-			SyncP1AheadDemand(static_cast<uint8_t>(cap));
-		}
-		else
+		else if (motionProducer && !motionProducerStopLogged)
 		{
-			ClearP1AheadDemand();
-			if (motionProducer && !motionProducerStopLogged)
-			{
-				motionProducerStopLogged = true;
-				DebugLog::Log("Motion ahead: the producer stopped (%s); the de-judder estimates at render time",
-					motionProducer->Error().c_str());
-			}
+			motionProducerStopLogged = true;
+			DebugLog::Log("Motion ahead: the producer stopped (%s); the de-judder estimates at render time",
+				motionProducer->Error().c_str());
 		}
 		// SK-MV: the runtime one-engine guard (NvOpticalFlow.h Sessions): a second Engine session on a GPU is logged (a bug, never silent).
 		const unsigned long long nvofViolations = NvOpticalFlow::Sessions::Violations();
@@ -321,6 +313,20 @@ namespace VpMotion
 		depth.producerRunning = motionProducer && motionProducer->Running();
 		depth.queuedFutureFrames = in.queuedFutureFrames->load(std::memory_order_acquire);
 		const ProducerPlan::DepthOutput plan = ProducerPlan::Depth(depth);
+		if (motionProducer && motionProducer->Running())
+		{
+			const int rawDemand = plan.ahead.configured > 0
+				? plan.ahead.configured
+				: (life.onDemandWanted ? VpMotion::kOnDemandMaxLookAhead : 0);
+			if (rawDemand > 0)
+				SyncP1AheadDemand(static_cast<uint8_t>((std::min)(MotionAhead::kMaxLead, rawDemand)));
+			else
+				ClearP1AheadDemand();
+		}
+		else
+		{
+			ClearP1AheadDemand();
+		}
 		const MotionAhead::Decision& ahead = plan.ahead;
 		motionAheadDepth.store(plan.storedDepth, std::memory_order_release);
 		motionAheadConfigured.store(plan.storedConfigured, std::memory_order_release);
@@ -447,8 +453,13 @@ namespace VpMotion
 		if (vectorDemand.mode != VectorDemand::Mode::Off && (vectorStatsTick == 0 || now - vectorStatsTick >= 5000))
 		{
 			vectorStatsTick = now;
-			DebugLog::Log("Vector engine: %llu pairs (ahead hits %llu, misses %llu)", vectorPairs,
-				static_cast<unsigned long long>(motionAheadHits), static_cast<unsigned long long>(motionAheadMisses));
+			const unsigned long long p1Deferred = motionAheadP1Deferred.load(std::memory_order_relaxed);
+			if (p1Deferred > 0)
+				DebugLog::Log("Vector engine: %llu pairs (ahead hits %llu, misses %llu, P1 deferred %llu)", vectorPairs,
+					static_cast<unsigned long long>(motionAheadHits), static_cast<unsigned long long>(motionAheadMisses), p1Deferred);
+			else
+				DebugLog::Log("Vector engine: %llu pairs (ahead hits %llu, misses %llu)", vectorPairs,
+					static_cast<unsigned long long>(motionAheadHits), static_cast<unsigned long long>(motionAheadMisses));
 			const FlowReadCounters fr = FlowReads();   // a CPU flow reader exists (FlowOf): its absences are visible, by reason
 			if (fr.requests)
 				DebugLog::Log("Vector engine: flow reads %llu, served %llu, absent %llu (no producer %llu, no pair %llu, invalidated %llu, size unknown %llu)",
@@ -470,6 +481,16 @@ namespace VpMotion
 					p2Detail += " (last: " + P2CpuFormLastDecline() + ")";
 				DiagnosticHistory::Global().RecordDecision("vector-p2-cpu-form", p2Detail.c_str(),
 					static_cast<int64_t>(p2Served), static_cast<int64_t>(p2Declined), 0.0, 0.0);
+			}
+			if (p1Deferred > motionAheadP1DeferredRecorded_)
+			{
+				motionAheadP1DeferredRecorded_ = p1Deferred;
+				const uint64_t lastSeq = motionAheadP1LastDeferredSeq.load(std::memory_order_relaxed);
+				const unsigned long long maxStreak = motionAheadP1DeferMaxStreak.load(std::memory_order_relaxed);
+				const std::string detail = "NVOF ahead deferred (waiting for P1) " + std::to_string(p1Deferred) +
+					" (last seq " + std::to_string(lastSeq) + ", max streak " + std::to_string(maxStreak) + ")";
+				DiagnosticHistory::Global().RecordDecision("motion-p1-defer", detail.c_str(),
+					static_cast<int64_t>(p1Deferred), static_cast<int64_t>(maxStreak), static_cast<double>(lastSeq), 0.0);
 			}
 		}
 	}
@@ -1645,17 +1666,30 @@ namespace VpMotion
 
 	std::string VectorEngine::ProducerStatusSegment() const
 	{
-		std::string ring;
+		std::string out;
+		auto append = [&out](const std::string& seg) {
+			if (seg.empty())
+				return;
+			if (!out.empty())
+				out += "; ";
+			out += seg;
+		};
 		if (motionProducer)
 		{
 			const MotionAhead::Producer::RequestStats s = motionProducer->GetRequestStats();
 			if (s.ringMisses != 0)
-				ring = "engine-luma ring misses " + std::to_string(s.ringMisses) + " (last: " + s.lastRingMiss + ")";
+				append("engine-luma ring misses " + std::to_string(s.ringMisses) + " (last: " + s.lastRingMiss + ")");
 		}
 		// BBP-A-COUNTS-CTRLALTD: the P2 CPU form's declines (Config status / Ctrl+Alt+D), shown with or without a producer.
-		const std::string p2 = P2CpuFormStatusSegment();
-		if (p2.empty())
-			return ring;
-		return ring.empty() ? p2 : ring + "; " + p2;
+		append(P2CpuFormStatusSegment());
+		const unsigned long long deferred = motionAheadP1Deferred.load(std::memory_order_relaxed);
+		if (deferred > 0)
+		{
+			const uint64_t lastSeq = motionAheadP1LastDeferredSeq.load(std::memory_order_relaxed);
+			const unsigned long long maxStreak = motionAheadP1DeferMaxStreak.load(std::memory_order_relaxed);
+			append("NVOF ahead deferred (waiting for P1) " + std::to_string(deferred) +
+				" (last seq " + std::to_string(lastSeq) + ", max streak " + std::to_string(maxStreak) + ")");
+		}
+		return out;
 	}
 }

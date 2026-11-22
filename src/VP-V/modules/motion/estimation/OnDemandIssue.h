@@ -130,6 +130,10 @@ namespace MotionAhead
 		engine.IssueOnDemand(std::move(request));
 	}
 
+	// Deepest queue slot StageOnDemandAtWalk reads for on-demand pairing: queue[1] normally, queue[2] across a pulldown
+	// film update (matches VpFrameAnalysis::P1Gpu::kMatcherStructuralAhead in P1GpuFill.h:238).
+	constexpr int kOnDemandMaxLookAhead = 2;
+
 	// Rule 32: the walk's stage (from CollectQueueAhead, the caller holding the queue mutex). Predicts the dequeue's pair with
 	// its own selection and filters (A: not a cadence repeat, has a state, not a file frame shown without motion; B: the next
 	// entry, or the one after a pulldown film update while interpolating; not a repeat, not an update, same generation, a
@@ -148,7 +152,7 @@ namespace MotionAhead
 			return;
 		size_t bIndex = 1;
 		if (impl->interpolating && queue[1].filmUpdate && queue.size() >= 3 && !queue[1].gapBefore && !queue[2].filmUpdate)
-			bIndex = 2;
+			bIndex = kOnDemandMaxLookAhead;
 		const auto& b = queue[bIndex];
 		if (b.cadenceRepeat || b.filmUpdate || !b.state || b.fileMotionOff || b.generation != a.generation ||
 			b.sourceSequence == a.sourceSequence)
@@ -178,4 +182,9 @@ namespace MotionAhead
 	void StageOnDemandIfHosted(Impl* impl, const Queue& queue) { detail::StageAtWalk(impl, queue, detail::HostsOnDemand<Impl>()); }
 	template <class Impl>
 	void PostOnDemandIfHosted(Impl* impl) { detail::PostAt(impl, detail::HostsOnDemand<Impl>()); }
+}
+
+namespace VpMotion
+{
+	constexpr int kOnDemandMaxLookAhead = MotionAhead::kOnDemandMaxLookAhead;
 }

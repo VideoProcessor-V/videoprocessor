@@ -900,7 +900,7 @@ public:
     // the rebuild reasons (0 = graph kept). Mode Off clears everything and returns 0.
     uint32_t Configure(const LaneSettings& s, const Registry& reg, const std::vector<ConsumerDecl>& consumers,
                        const GraphSettings& gsIn, const CardProfile& card, const TierInput& tier, uint64_t fromSeq,
-                       bool hostDeterministic)
+                       bool hostDeterministic, uint64_t workerSkipBefore = 0)
     {
         // Budget-governed history: the depths the governor granted (a previous plan) ride with the graph settings so a
         // repeated Configure by a host that knows nothing of them keeps the same graph (no rebuild flapping).
@@ -999,7 +999,7 @@ public:
             return 0;
         }
 
-        std::shared_ptr<LaneState> st = BuildState(reg, consumers, gs, card, tier, fromSeq);
+        std::shared_ptr<LaneState> st = BuildState(reg, consumers, gs, card, tier, fromSeq, workerSkipBefore);
         if (!st->capsMismatch.empty()) {
             // The graph was sized for the trial's history grant but the real plan grants otherwise: the memory plan
             // does not describe the rings. Fail closed and visibly (Analysis lane unavailable + the Fallbacks entry).
@@ -1021,22 +1021,16 @@ public:
         const uint32_t kCarryReasons = kRebuildQueue | kRebuildCard | kRebuildConsumers | kRebuildHistory;
         const bool mayCarryCpu = cur && (reasons & ~kCarryReasons) == 0u;
         if (mayCarryCpu)
-            CarryCpuFrom(*cur, *st, fromSeq, true);
+            CarryCpuFrom(*cur, *st, fromSeq);
         NotifyNewest(*st);
         std::atomic_store(&state_, st);
         if (cur) {   // frames stored in the old ring while the swap happened
             if (mayCarryCpu)
-                CarryCpuFrom(*cur, *st, fromSeq, false);
+                CarryCpuFrom(*cur, *st, fromSeq);
             st->ring->CopyFrom(*cur->ring);
             NotifyNewest(*st);
             cur->ring->Clear();   // the new ring carries the frames: the host pool is not held twice
         }
-        st->table->SetWaitCpuWriting([this]() {
-            if (workersRunning_.load(std::memory_order_acquire) == 0)
-                return false;
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
-            return true;
-        });
         renderState_ = st;
         ApplyRegulator(*st);
         waitValid_ = false;
@@ -1460,7 +1454,7 @@ public:
         const uint32_t budget = budgetUs != 0 ? budgetUs : chunkCapUs_.load(std::memory_order_relaxed);
         bool progress = false;
         for (ProductId id : st->workerOrder[size_t(b)])
-            progress = LaneStepProgressed(st->runner->Step(id, budget)) || progress;
+            progress = LaneStepProgressed(st->runner->Step(id, budget, true)) || progress;
         return progress;
     }
 
@@ -1754,45 +1748,65 @@ private:
         }
     }
 
-    // Carry already-published ahead CPU products across a non-discontinuity reconfigure (queue / consumer / VRAM plan)
-    // so the replacement lane state reuses them instead of recomputing the same frame a second time.
-    void CarryCpuFrom(const LaneState& oldSt, const LaneState& newSt, uint64_t fromSeq, bool waitWriting)
+    // Pure causal lane-owned CPU products whose law inputs are invariant across non-discontinuity reconfigures
+    // (kRebuildQueue | kRebuildCard | kRebuildConsumers | kRebuildHistory). Admits strictly P1 and P4 today;
+    // never ordered chains, held state, singleton stores, look-ahead readers, or non-cpuLive products.
+    bool CanCarryCpuNode(const Graph& oldG, const Graph& newG, ProductId id, unsigned depth = 0) const
+    {
+        if (depth > kMaxInputs)
+            return false;
+        const Node* cn = oldG.Find(id);
+        const Node* nn = newG.Find(id);
+        if (cn == nullptr || nn == nullptr)
+            return false;
+        if (cn->backend != Backend::Cpu || nn->backend != Backend::Cpu)
+            return false;
+        if (cn->bufferBytes != nn->bufferBytes)
+            return false;
+        if (cn->orderedChain || nn->orderedChain || cn->heldState || nn->heldState
+            || cn->singletonStore || nn->singletonStore || cn->lead != 0 || nn->lead != 0)
+            return false;
+        if (cpuLive_.find(id) == cpuLive_.end())
+            return false;
+        if (cn->reads != nn->reads || cn->inputCount != nn->inputCount)
+            return false;
+        for (size_t i = 0; i < cn->inputCount; ++i) {
+            if (cn->inputs[i].product != nn->inputs[i].product
+                || cn->inputs[i].lag != nn->inputs[i].lag
+                || cn->inputs[i].lead != 0 || nn->inputs[i].lead != 0)
+                return false;
+            if (!CanCarryCpuNode(oldG, newG, cn->inputs[i].product, depth + 1u))
+                return false;
+        }
+        return true;
+    }
+
+    // Wait-free carry of already-published pure causal CPU products across a non-discontinuity reconfigure
+    // (queue / card / consumer / history / VRAM plan) so the replacement lane state reuses them instead of
+    // recomputing the same frame a second time.
+    void CarryCpuFrom(const LaneState& oldSt, const LaneState& newSt, uint64_t fromSeq)
     {
         if (!oldSt.table || !newSt.table)
             return;
-        if (waitWriting && workersRunning_.load(std::memory_order_acquire) != 0) {
-            for (int spin = 0; spin < 30; ++spin) {
-                bool anyWriting = false;
-                for (size_t ci = 0; ci < oldSt.table->Count() && !anyWriting; ++ci) {
-                    const Node& cn = oldSt.table->NodeAt(ci);
-                    if (cn.backend != Backend::Cpu)
-                        continue;
-                    const SlotSet& cset = oldSt.table->At(ci);
-                    for (uint16_t k = 0; k < cset.Ring(); ++k) {
-                        const VpAncestry::SlotView v = cset.ViewAt(k);
-                        if (v.present && v.seq >= fromSeq && cset.StateOf(v.seq) == SlotState::Writing) {
-                            anyWriting = true;
-                            break;
-                        }
-                    }
-                }
-                if (!anyWriting)
-                    break;
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
-            }
-        }
         std::vector<uint8_t> tmp;
         for (size_t ci = 0; ci < oldSt.table->Count(); ++ci) {
             const Node& cn = oldSt.table->NodeAt(ci);
-            if (cn.backend != Backend::Cpu || !oldSt.bufs[ci])
+            if (!CanCarryCpuNode(oldSt.graph, newSt.graph, cn.id) || !oldSt.bufs[ci])
                 continue;
             const int ni = newSt.IndexOf(cn.id);
             if (ni < 0 || !newSt.bufs[size_t(ni)] || newSt.bufs[size_t(ni)]->Bytes() != oldSt.bufs[ci]->Bytes())
                 continue;
+            // kGraph was just advanced by GraphOwner::Update for this non-discontinuity rebuild; check every other
+            // honoured counter (kFull, kContinuity, kSettings*, era, ancient) so a discontinuity never leaks stale bytes.
+            const VpIndicator::CounterMask carryMask = cn.reads & ~VpIndicator::Bit(VpIndicator::kGraph);
             const SlotSet& cset = oldSt.table->At(ci);
             for (uint16_t k = 0; k < cset.Ring(); ++k) {
                 const VpAncestry::SlotView v = cset.ViewAt(k);
                 if (!v.present || !(v.lanePublished || v.valid) || v.seq < fromSeq)
+                    continue;
+                const ReadInfo ri = cset.Read(v.seq, true);
+                if (ri.header == nullptr
+                    || (ind_ != nullptr && !VpIndicator::SameFor(ri.header->honoured, ind_->StampOf(v.seq), carryMask)))
                     continue;
                 tmp.clear();
                 const PublishedRead pr = ReadPublishedBytes(cset, *oldSt.bufs[ci], v.seq, [&tmp](const uint8_t* p, size_t n) {
@@ -1838,7 +1852,7 @@ private:
 
     std::shared_ptr<LaneState> BuildState(const Registry& reg, const std::vector<ConsumerDecl>& consumers,
                                           const GraphSettings& gs, const CardProfile& card, const TierInput& tier,
-                                          uint64_t fromSeq)
+                                          uint64_t fromSeq, uint64_t workerSkipBefore)
     {
         (void)consumers;
         std::shared_ptr<LaneState> st = std::make_shared<LaneState>();
@@ -1919,7 +1933,7 @@ private:
             st->runner->SetLaned(n.id, laned);
             st->table->At(i).SetLaneGranted(laned);
         }
-        st->runner->SetSkipBefore(fromSeq);
+        st->runner->SetSkipBefore(workerSkipBefore != 0 ? workerSkipBefore : fromSeq);
 
         // Worker order: tier, then topological, per backend.
         const Tier tiers[3] = { Tier::T0, Tier::T1, Tier::T2 };

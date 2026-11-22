@@ -164,7 +164,7 @@ public:
 
     // ---- the product's lane thread only ----
 
-    StepOutcome Step(ProductId id, uint32_t budgetUs)
+    StepOutcome Step(ProductId id, uint32_t budgetUs, bool completeOnDone = false)
     {
         State* sp = StateOf(id);
         if (!sp || !sp->producer || !sp->node)
@@ -195,7 +195,7 @@ public:
                     return o;
                 break;   // Running (or Abandoning): carry on in this Step
             case Phase::Running:
-                return RunJob(st, budgetUs);
+                return RunJob(st, budgetUs, completeOnDone);
             case Phase::Completing:
                 return CompleteJob(st);
             case Phase::Abandoning:
@@ -390,7 +390,7 @@ private:
         return true;
     }
 
-    StepOutcome RunJob(State& st, uint32_t budgetUs)
+    StepOutcome RunJob(State& st, uint32_t budgetUs, bool completeOnDone)
     {
         if (!st.set->LaneContinue(st.ticket)) {
             st.producer->Cancel(st.job);
@@ -409,7 +409,7 @@ private:
             return StepOutcome::Ran;
         if (r == ChunkResult::Done) {
             st.phase = Phase::Completing;
-            return StepOutcome::Ran;
+            return completeOnDone ? CompleteJob(st) : StepOutcome::Ran;
         }
         st.counters.chunkFailures.fetch_add(1, std::memory_order_relaxed);
         st.phase = Phase::Abandoning;
