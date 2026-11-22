@@ -16,6 +16,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 
 namespace Vpv
@@ -72,6 +73,7 @@ namespace Vpv
 						{
 							s.aux.store(nullptr, std::memory_order_release);
 							s.key.store(nullptr, std::memory_order_release);
+							s.tenancy.fetch_add(1, std::memory_order_acq_rel);   // C5-SKREDS: a key change (Aux's ABA check)
 						}
 						break;
 					}
@@ -88,15 +90,21 @@ namespace Vpv
 				if (!host)
 					return nullptr;
 				for (const Slot& s : slots_)
+				{
+					// C5-SKREDS (ABA): the tenancy count moves at every claim and release of the slot. Re-reading only the key missed a
+					// release, another host's claim + SetAux, its release and this host's claim again between the two key loads: the aux
+					// read in between was the OTHER host's (SkeletonModuleTests HostSlotsAuxOfAHost... caught it, intermittently).
+					const uint64_t tenancy = s.tenancy.load(std::memory_order_acquire);
 					if (s.key.load(std::memory_order_acquire) == host)
 					{
 						void* aux = s.aux.load(std::memory_order_acquire);
 						// GEM SK-LIFECYCLE: a release and another host's claim may land between the key load and the aux load; the key
-						// is read again and a changed slot returns null (never another host's aux).
-						if (s.key.load(std::memory_order_acquire) != host)
+						// is read again and a changed slot (key or tenancy) returns null (never another host's aux).
+						if (s.key.load(std::memory_order_acquire) != host || s.tenancy.load(std::memory_order_acquire) != tenancy)
 							return nullptr;
 						return aux;
 					}
+				}
 				return nullptr;
 			}
 
@@ -138,6 +146,7 @@ namespace Vpv
 			{
 				std::atomic<const void*> key{ nullptr };
 				std::atomic<void*> aux{ nullptr };
+				std::atomic<uint64_t> tenancy{ 0 };   // C5-SKREDS: claims + releases of this slot (Aux's ABA check)
 				mutable std::shared_ptr<T> state;   // accessed with std::atomic_load / atomic_store only
 			};
 
@@ -150,7 +159,10 @@ namespace Vpv
 				{
 					const void* expected = nullptr;
 					if (s.key.compare_exchange_strong(expected, host, std::memory_order_acq_rel))
+					{
+						s.tenancy.fetch_add(1, std::memory_order_acq_rel);   // before the claimer's SetAux (Aux's ABA check)
 						return &s;
+					}
 				}
 				return nullptr;
 			}
