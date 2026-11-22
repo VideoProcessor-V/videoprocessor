@@ -35,6 +35,8 @@
 #include <VP-V/modules/motion/estimation/OnDemandEstimate.h>   // OnDemandIssue.h: the on-demand stage (rule 32)
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
+#include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
 #include <vprenderer/RendererExtension.h>
 
 namespace MotionAhead
@@ -192,6 +194,25 @@ namespace MotionAhead
 				const bool breakBefore = DejudderPolicy::MotionAheadBreakBefore(ahead.gapBefore, ahead.filmUpdate,
 					impl.activeSettings.timingContinuityFixes, aheadRateHz, aheadState.dolbyVisionTunnel,
 					havePrev, impl.vectorEngine.motionAheadPrev, aheadFrame, impl.activeSettings.motionHistoryFixes);
+				// When the skeleton analysis lane is active and holds shared P1 for this format, wait until P1 for
+				// this frame is published in the lane ring before submitting to the off-thread NVOF producer (like
+				// the conversion-ready check above), so LumaAtTarget reuses shared P1 instead of decoding privately.
+				if (!VpFrameAnalysis::P1EngineViewDiffersFromProducer(prepared.source))
+				{
+					if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
+					{
+						const VpSkeleton::LaneLease lease = demand->LeaseFor(&impl, VpSkeleton::kP1HalfLuma);
+						if (lease.Valid() && lease.table != nullptr)
+						{
+							if (const VpSkeleton::SlotSet* set = lease.table->Find(VpSkeleton::kP1HalfLuma))
+							{
+								const VpSkeleton::ReadInfo ri = set->Read(ahead.sourceSequence, true);
+								if (ri.kind != VpSkeleton::ReadInfo::Ring)
+									break;
+							}
+						}
+					}
+				}
 				producer->Submit(ahead.sourceSequence, generation, prepared.source, breakBefore);
 				impl.vectorEngine.motionAheadPrevKnown = true;
 				impl.vectorEngine.motionAheadPrevGeneration = generation;

@@ -52,6 +52,13 @@ namespace GpuAttribution
 			r.owner = "pathway:libplacebo_render";
 			rules.push_back(r);
 		}
+		// VP render-pass hooks inside pl_render_image (PassTimerHook has no per-hook defaultOwner).
+		{
+			Rule r;
+			r.pattern = "VP extended range:";
+			r.owner = "extended_range";
+			rules.insert(rules.begin(), r);
+		}
 		// VP passes that recompute a shared unit privately (hidden copies, tools/check_shared_units.py ids).
 		static const char* const kPrivate[][3] = {
 			{ "motion (D1", "dejudder", "U10" },

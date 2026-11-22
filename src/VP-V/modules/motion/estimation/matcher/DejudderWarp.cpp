@@ -3746,6 +3746,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			inner->SetSearchSeed(searchSeed);
 			searchSeedValid = false;
 		}
+		inner->SetWarmUp(warmUpEstimate);
 		if (!inner->Estimate(la, lb, -1, false))
 		{
 			error = "lowRes: " + inner->LastError();
@@ -4255,6 +4256,30 @@ if (b.x < blocks.x && b.y < blocks.y) {
 					}
 				}
 				searchSeedUsed = true;
+			}
+			else if (warmUpEstimate && settings.globalPrior)
+			{
+				// Idle warm-up (A -> A): zero global motion is known; skip the private D1 global search (U10).
+				for (int d = 0; d < 2; ++d)
+				{
+					const float zero[4] = { 0.0f, 0.0f, 0.5f, 1.0f };
+					const pl_shader_desc out[1] = { Storage("dst", globalVector[d]) };
+					const pl_shader_var var[1] = { { pl_var_vec4("gvec"), zero, true } };
+					if (!Dispatch("VideoProcessor de-judder: zero prior (warm-up)", nullptr,
+							"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
+							out, 1, var, 1, 1, 1, 1))
+						return false;
+					if (two && globalSecond[d])
+					{
+						const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+						const pl_shader_desc out2[1] = { Storage("dst", globalSecond[d]) };
+						const pl_shader_var var2[1] = { { pl_var_vec4("gvec"), none, true } };
+						if (!Dispatch("VideoProcessor de-judder: zero prior second (warm-up)", nullptr,
+								"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
+								out2, 1, var2, 1, 1, 1, 1))
+							return false;
+					}
+				}
 			}
 			else if (settings.globalPrior && (serialSearchForTest ?
 					(!Global(l1A, l1B, l2A, l2B, globalVector[0], two ? globalSecond[0] : nullptr) ||

@@ -2555,18 +2555,21 @@ namespace Vpv
 		// lead window of presented lag; H = the owner fills' declared history, plus the lane graph's lag edges once the lane reports them),
 		// handed to the memo BEFORE its seal and published to the board. Render thread, with or without the lane. A term nobody fed stays
 		// unwired (named by Ctrl+Alt+D), never a default.
-		void SkeletonModule::DeriveMemoWindow(const void* host, const std::shared_ptr<VpSkeleton::SkeletonMemo>& memo, uint64_t seq, const std::shared_ptr<HostState>& st)
+		void SkeletonModule::DeriveMemoWindow(const void* host, const std::shared_ptr<VpSkeleton::SkeletonMemo>& memo, uint64_t seq, const std::shared_ptr<HostState>& st, bool sampleTiming)
 		{
 			const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host);
 			if (!mh)
 				return;
 			const uint64_t now = nowUs_();
 			// The period for the stale test of the render-ahead term: the Begin interval of this host (memo-only hosts have no lane period).
-			const uint64_t lastBegin = mh->lastBeginUs.exchange(now, std::memory_order_relaxed);
-			if (lastBegin != 0 && now > lastBegin && now - lastBegin <= 1000000u)
+			if (sampleTiming)
 			{
-				const uint64_t prev = mh->periodUs.load(std::memory_order_relaxed);
-				mh->periodUs.store(prev != 0 ? (prev * 9u + (now - lastBegin)) / 10u : now - lastBegin, std::memory_order_relaxed);
+				const uint64_t lastBegin = mh->lastBeginUs.exchange(now, std::memory_order_relaxed);
+				if (lastBegin != 0 && now > lastBegin && now - lastBegin <= 1000000u)
+				{
+					const uint64_t prev = mh->periodUs.load(std::memory_order_relaxed);
+					mh->periodUs.store(prev != 0 ? (prev * 9u + (now - lastBegin)) / 10u : now - lastBegin, std::memory_order_relaxed);
+				}
 			}
 			if (!(st && st->active.load(std::memory_order_acquire)) && (CurrentQueue().wired & QueueShape::kRenderAhead) != 0)
 			{
@@ -2610,9 +2613,27 @@ namespace Vpv
 				demands.push_back(ad);
 			}
 			VpSkeleton::SetAheadConsumers(t, demands);
+			const uint16_t prevAhead = memo->Window().aheadCompute;
 			const VpSkeleton::QueueWindow w = VpSkeleton::DeriveWindow(t, seq, memo->Epoch());
 			memo->SetWindow(w);
 			mh->board.Publish(w);
+			if (sampleTiming && st && w.aheadCompute != prevAhead)
+			{
+				if (const std::shared_ptr<Bundle> b = std::atomic_load(&st->bundle))
+				{
+					bool memoGranted = false;
+					uint64_t memoBudget = 0;
+					if (const std::shared_ptr<const VpSkeleton::GovernorPlan> gp = b->lane.CurrentGovernorPlan())
+						if (const VpSkeleton::UserGrant* g = gp->Find(uint16_t(VpSkeleton::kUserSkeletonMemo)))
+						{
+							memoGranted = g->bytes > 0;
+							memoBudget = g->bytes;
+						}
+					VpSkeleton::AheadNeed an = memo->MakeAheadNeed(w);
+					an.grantBytes = memoGranted ? memoBudget : 0u;
+					memo->SetAheadPlan(VpSkeleton::PlanAheadLadder(an));
+				}
+			}
 		}
 
 		const VpSkeleton::QueueWindowBoard* SkeletonModule::WindowBoardOf(const void* host) const
@@ -2974,6 +2995,9 @@ namespace Vpv
 				// GF-P2b (gate G6 C2): the lane fills take the configured consumers' declared ahead depths (rebound when they move: also after
 				// an extMoved Configure whose only change is a depth, which keeps the graph).
 				b->BindConsumers(consumers);
+				// Refresh the memo window immediately after BindConsumers so MakeAheadNeed sees the newly bound ahead depths (not the
+				// pre-bind aheadCompute=0 snapshot from OnFrame before Begin).
+				DeriveMemoWindow(st.host, b->memo, seq, hosts_.Find(st.host), false);
 				{
 					// B1: the memo's GPU spots are budgeted against the VRAM ledger: the memo user's grant of this plan (GF-P2b S10: its own
 					// id kUserSkeletonMemo, MakeMemoVramUser above; the scratch arena's kUserScratchArena / Extra grants are the arena's).

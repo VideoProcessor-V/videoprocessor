@@ -458,6 +458,8 @@ namespace Dejudder
 			searchSeedValid = true;
 		}
 		void ClearSearchSeed() { searchSeedValid = false; if (inner) inner->searchSeedValid = false; }   // the host clears it after the estimate (an early return must not leak it into the next one)
+		// Idle warm-up (A -> A): motion is identically zero, so D1 writes zero directly instead of running a private U10 global search.
+		void SetWarmUp(bool on) { warmUpEstimate = on; if (inner) inner->warmUpEstimate = on; }
 		bool SearchSeedUsed() const { return searchSeedUsed; }
 		bool SearchSeedRejected() const { return searchSeedRejected; }   // the last Estimate dropped the gap seed (SAD vs zero: it did not beat "nothing moved")
 		const IFieldSource* FieldSource() const { return fieldSource; }
@@ -981,5 +983,6 @@ namespace Dejudder
 		bool CameraGuidedPass(const CameraModel::GuidanceFrame& g, int dir, bool e1, pl_tex fromHalf, pl_tex toHalf, pl_tex sweepIn);
 		bool CameraSkipSearches();
 		bool externalFlowUsed = false;
+		bool warmUpEstimate = false;
 	};
 }

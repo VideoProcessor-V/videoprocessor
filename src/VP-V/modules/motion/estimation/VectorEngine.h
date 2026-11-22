@@ -535,6 +535,12 @@ namespace VpMotion
 		FallbackCatalog::Decision ReleaseHookFailures();
 
 		const void* host_ = nullptr;
+		void SyncP1AheadDemand(uint8_t aheadDepth);
+		void ClearP1AheadDemand();
+		bool p1AheadDeclared_ = false;
+		uint8_t p1AheadDepth_ = 0;
+		uint64_t p1AheadErasures_ = 0;
+		int p1AheadDemandOwner_ = 0;
 		// QKP slice E (design s9.3): FlowOf's leases are a MAP keyed (from, to, scale), bounded by the SAME derived queue window as the
 		// frame memo (core/QueueWindow.h; the board is the host's one snapshot, fed by SetQueueWindowBoard). A lease is dropped when its
 		// frame is older than current - back, when its pair is no longer in the P2 slot (a lease never extends P2 retention), or when

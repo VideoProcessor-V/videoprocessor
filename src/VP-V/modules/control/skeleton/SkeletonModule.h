@@ -346,7 +346,7 @@ namespace Vpv
 			// at Begin). Re-planned when the need, the declared VRAM users or the binding changed, else every kNoLaneReplanFrames.
 			void PlanNoLaneGpu(const void* host);
 			// QKP B: the queue window of this Begin (derived before the memo seal, published to the board); the board is read by any thread.
-			void DeriveMemoWindow(const void* host, const std::shared_ptr<VpSkeleton::SkeletonMemo>& memo, uint64_t seq, const std::shared_ptr<HostState>& st);
+			void DeriveMemoWindow(const void* host, const std::shared_ptr<VpSkeleton::SkeletonMemo>& memo, uint64_t seq, const std::shared_ptr<HostState>& st, bool sampleTiming = true);
 		public:
 			const VpSkeleton::QueueWindowBoard* WindowBoardOf(const void* host) const;
 		private:

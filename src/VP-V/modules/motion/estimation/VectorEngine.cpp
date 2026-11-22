@@ -236,12 +236,21 @@ namespace VpMotion
 		if (act.disengage)
 			motionAheadEngaged = false;
 		if (motionProducer && motionProducer->Running())
-			motionProducerStopLogged = false;   // W2-C1: running again (its own restart): a later stop is logged again
-		else if (motionProducer && !motionProducerStopLogged)
 		{
-			motionProducerStopLogged = true;
-			DebugLog::Log("Motion ahead: the producer stopped (%s); the de-judder estimates at render time",
-				motionProducer->Error().c_str());
+			motionProducerStopLogged = false;   // W2-C1: running again (its own restart): a later stop is logged again
+			// Declare the configured ahead depth (stable across startup queue fill; QueueWindow::DeriveWindow clamps aheadCompute by live L).
+			const int cap = (std::max)(1, (std::min)(6, in.motionAheadFrames > 0 ? in.motionAheadFrames : 4));
+			SyncP1AheadDemand(static_cast<uint8_t>(cap));
+		}
+		else
+		{
+			ClearP1AheadDemand();
+			if (motionProducer && !motionProducerStopLogged)
+			{
+				motionProducerStopLogged = true;
+				DebugLog::Log("Motion ahead: the producer stopped (%s); the de-judder estimates at render time",
+					motionProducer->Error().c_str());
+			}
 		}
 		// SK-MV: the runtime one-engine guard (NvOpticalFlow.h Sessions): a second Engine session on a GPU is logged (a bug, never silent).
 		const unsigned long long nvofViolations = NvOpticalFlow::Sessions::Violations();
@@ -672,8 +681,44 @@ namespace VpMotion
 			Engines().Add(host_, this);
 	}
 
+	void VectorEngine::SyncP1AheadDemand(uint8_t aheadDepth)
+	{
+		if (host_ == nullptr || aheadDepth == 0 || Vpv::Hub::ExtensionHub::Instance().OriginalPathway(host_))
+		{
+			ClearP1AheadDemand();
+			return;
+		}
+		Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand();
+		if (demand == nullptr)
+			return;
+		const uint64_t erasures = demand->ExternalErasures(host_);
+		if (p1AheadDeclared_ && p1AheadDepth_ == aheadDepth && p1AheadErasures_ == erasures)
+			return;
+		VpSkeleton::ConsumerDecl d;
+		d.id = 0x0610;   // distinct from VectorDemand (0x0100), Camera (0x0200), Catalog (0x0300), LedDrive (0x0600)
+		d.name = "motion ahead";
+		VpSkeleton::AddConsume(d, VpSkeleton::kP1HalfLuma, 0);
+		d.aheadDepth = aheadDepth;
+		demand->SetExternalDemand(host_, &p1AheadDemandOwner_, std::vector<VpSkeleton::ConsumerDecl>(1, d), std::vector<VpSkeleton::ProductId>());
+		p1AheadDeclared_ = true;
+		p1AheadDepth_ = aheadDepth;
+		p1AheadErasures_ = erasures;
+	}
+
+	void VectorEngine::ClearP1AheadDemand()
+	{
+		if (!p1AheadDeclared_)
+			return;
+		if (host_ != nullptr)
+			if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
+				demand->ClearExternalDemand(host_, &p1AheadDemandOwner_);
+		p1AheadDeclared_ = false;
+		p1AheadDepth_ = 0;
+	}
+
 	VectorEngine::~VectorEngine()
 	{
+		ClearP1AheadDemand();
 		// Contract (SetPreEstimateHook): the consumer clears its hook before the engine goes; say so if it did not.
 		if (preEstimateHook_.load(std::memory_order_acquire) != nullptr)
 			DebugLog::Log("Vector engine: destroyed with the pre-estimate hook still registered (the consumer must clear it first)");

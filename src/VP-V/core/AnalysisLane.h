@@ -732,7 +732,7 @@ public:
         if (cr == ClaimResult::TooEarly || cr == ClaimResult::ReleasePending || cr == ClaimResult::OutOfRange) {
             pins.Unpin();
             out.why = "beyond the lane's slots";   // design s9.4 a: not LanePending (no worker will ever have it)
-            out.ownerMayFill = cr != ClaimResult::OutOfRange;   // inside the window the memo's own spot may hold it
+            out.ownerMayFill = cr != ClaimResult::OutOfRange && (n.inputCount != 0 || st->ring->Find(seq, nullptr));   // inside the window the memo's own spot may hold it once its source is held
             ++aheadBeyondSlots_;
             return out;
         }
@@ -772,7 +772,6 @@ public:
         const size_t bytes = st->bufs[size_t(idx)]->Bytes();
         const uint64_t t0 = nowUs_ ? nowUs_() : 0u;
         const ::ComputeOnce::FrameScope frameScope(static_cast<int64_t>(seq), "lane", static_cast<int64_t>(id));   // compute-once: the ahead job's frame
-        VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(id))).c_str(), seq, ::ComputeOnce::Variant(0));   // compute-once: the ahead live compute
         const bool ok = RunCpuLive(*st, n, seq, 0u, dst, bytes, InputResolver(), true);
         const uint64_t t1 = nowUs_ ? nowUs_() : t0;
         if (!ok) {
@@ -783,6 +782,7 @@ public:
             out.why = held ? "the fill refused" : "the frame's source is not held";
             return out;
         }
+        VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(id))).c_str(), seq, ::ComputeOnce::Variant(0));   // compute-once: the ahead live compute (recorded only when computed)
         if (set.LaneContinue(t))
             set.LaneHeader(t).costUs = t1 > t0 ? uint32_t(t1 - t0) : 0u;
         set.MarkRenderMade(seq);   // before the Publish: a worker that sees the slot taken finds the mark
@@ -859,8 +859,10 @@ public:
         if (idx < 0 || !st->bufs[size_t(idx)] || n != st->bufs[size_t(idx)]->Bytes())
             return false;
         const ::ComputeOnce::FrameScope frameScope(static_cast<int64_t>(seq), "lane", static_cast<int64_t>(id));   // compute-once: the owner form's frame (req.seq)
-        VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(id))).c_str(), seq, ::ComputeOnce::Variant(0));   // compute-once: the Acquire CPU owner form
-        return RunCpuLive(*st, st->graph.nodes[size_t(idx)], seq, 0u, dst, n, inputOf);
+        const bool ok = RunCpuLive(*st, st->graph.nodes[size_t(idx)], seq, 0u, dst, n, inputOf);
+        if (ok)
+            VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(id))).c_str(), seq, ::ComputeOnce::Variant(0));   // compute-once: the Acquire CPU owner form (recorded only when computed)
+        return ok;
     }
     // SK-W stage D: products whose frames are PUBLISHED by a producer outside the lane (the vector engine feed for P2m / P3, the camera
     // fit worker for P7 ...): the lane never makes them, so the seal's live fill declines them (counted, shown) instead of recording a GPU
@@ -1016,13 +1018,25 @@ public:
 
         if (cur)
             st->ring->CopyFrom(*cur->ring);
+        const uint32_t kCarryReasons = kRebuildQueue | kRebuildCard | kRebuildConsumers | kRebuildHistory;
+        const bool mayCarryCpu = cur && (reasons & ~kCarryReasons) == 0u;
+        if (mayCarryCpu)
+            CarryCpuFrom(*cur, *st, fromSeq, true);
         NotifyNewest(*st);
         std::atomic_store(&state_, st);
         if (cur) {   // frames stored in the old ring while the swap happened
+            if (mayCarryCpu)
+                CarryCpuFrom(*cur, *st, fromSeq, false);
             st->ring->CopyFrom(*cur->ring);
             NotifyNewest(*st);
             cur->ring->Clear();   // the new ring carries the frames: the host pool is not held twice
         }
+        st->table->SetWaitCpuWriting([this]() {
+            if (workersRunning_.load(std::memory_order_acquire) == 0)
+                return false;
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+            return true;
+        });
         renderState_ = st;
         ApplyRegulator(*st);
         waitValid_ = false;
@@ -1122,6 +1136,7 @@ public:
         totalAhead_ += lastAhead_;
         totalInRender_ += lastInRender_;
         totalDeclined_ += lastDeclined_;
+        PruneCarriedCpu(seq);
         return res;
     }
 
@@ -1733,6 +1748,85 @@ private:
         lateRingPos_ = 0;
         lateRingSum_ = 0;
         lead_ = LeadState::Ok;
+        {
+            std::lock_guard<std::mutex> lock(carriedMutex_);
+            carriedCpu_.clear();
+        }
+    }
+
+    // Carry already-published ahead CPU products across a non-discontinuity reconfigure (queue / consumer / VRAM plan)
+    // so the replacement lane state reuses them instead of recomputing the same frame a second time.
+    void CarryCpuFrom(const LaneState& oldSt, const LaneState& newSt, uint64_t fromSeq, bool waitWriting)
+    {
+        if (!oldSt.table || !newSt.table)
+            return;
+        if (waitWriting && workersRunning_.load(std::memory_order_acquire) != 0) {
+            for (int spin = 0; spin < 30; ++spin) {
+                bool anyWriting = false;
+                for (size_t ci = 0; ci < oldSt.table->Count() && !anyWriting; ++ci) {
+                    const Node& cn = oldSt.table->NodeAt(ci);
+                    if (cn.backend != Backend::Cpu)
+                        continue;
+                    const SlotSet& cset = oldSt.table->At(ci);
+                    for (uint16_t k = 0; k < cset.Ring(); ++k) {
+                        const VpAncestry::SlotView v = cset.ViewAt(k);
+                        if (v.present && v.seq >= fromSeq && cset.StateOf(v.seq) == SlotState::Writing) {
+                            anyWriting = true;
+                            break;
+                        }
+                    }
+                }
+                if (!anyWriting)
+                    break;
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+        }
+        std::vector<uint8_t> tmp;
+        for (size_t ci = 0; ci < oldSt.table->Count(); ++ci) {
+            const Node& cn = oldSt.table->NodeAt(ci);
+            if (cn.backend != Backend::Cpu || !oldSt.bufs[ci])
+                continue;
+            const int ni = newSt.IndexOf(cn.id);
+            if (ni < 0 || !newSt.bufs[size_t(ni)] || newSt.bufs[size_t(ni)]->Bytes() != oldSt.bufs[ci]->Bytes())
+                continue;
+            const SlotSet& cset = oldSt.table->At(ci);
+            for (uint16_t k = 0; k < cset.Ring(); ++k) {
+                const VpAncestry::SlotView v = cset.ViewAt(k);
+                if (!v.present || !(v.lanePublished || v.valid) || v.seq < fromSeq)
+                    continue;
+                tmp.clear();
+                const PublishedRead pr = ReadPublishedBytes(cset, *oldSt.bufs[ci], v.seq, [&tmp](const uint8_t* p, size_t n) {
+                    tmp.assign(p, p + n);
+                });
+                if (pr == PublishedRead::Copied && tmp.size() == oldSt.bufs[ci]->Bytes()) {
+                    std::lock_guard<std::mutex> lock(carriedMutex_);
+                    carriedCpu_[std::make_pair(cn.id, v.seq)] = tmp;
+                }
+            }
+        }
+    }
+
+    bool CopyCarriedCpu(ProductId id, uint64_t seq, uint8_t* dst, size_t n)
+    {
+        if (dst == nullptr || n == 0)
+            return false;
+        std::lock_guard<std::mutex> lock(carriedMutex_);
+        const auto it = carriedCpu_.find(std::make_pair(id, seq));
+        if (it == carriedCpu_.end() || it->second.size() != n)
+            return false;
+        std::copy_n(it->second.data(), n, dst);
+        return true;
+    }
+
+    void PruneCarriedCpu(uint64_t sealedSeq)
+    {
+        std::lock_guard<std::mutex> lock(carriedMutex_);
+        for (auto it = carriedCpu_.begin(); it != carriedCpu_.end();) {
+            if (it->first.second <= sealedSeq)
+                it = carriedCpu_.erase(it);
+            else
+                ++it;
+        }
     }
 
     void NotifyNewest(LaneState& st)
@@ -1811,6 +1905,8 @@ private:
                 workerReusedSink_(id);
         });
         st->runner->SetAdopt([this](ProductId id, uint64_t seq, uint8_t* dst, size_t n) {
+            if (CopyCarriedCpu(id, seq, dst, n))
+                return true;
             return workerAdopt_ ? workerAdopt_(id, seq, dst, n) : false;
         });
         for (ILaneProducer* p : producers_)
@@ -2012,12 +2108,13 @@ private:
             const size_t bytes = st.bufs[size_t(idx)]->Bytes();
             // B1: an Acquire reader published it already (the same law, all inputs): reused, not recomputed. Only when no input is
             // missing at the seal: a missing-input form is a different result and is computed by the law itself.
-            if (missing == 0 && publishedLookup_ && publishedLookup_(n.id, seq, dst, bytes)) {
+            if (missing == 0 && (CopyCarriedCpu(n.id, seq, dst, bytes) || (publishedLookup_ && publishedLookup_(n.id, seq, dst, bytes)))) {
                 ++sealReusedPublished_;
                 ok = true;
             } else {
-                VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(n.id))).c_str(), seq, ::ComputeOnce::Variant(0));   // compute-once: the seal live compute
                 ok = RunCpuLive(st, n, seq, missing, dst, bytes, InputResolver());
+                if (ok)
+                    VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(n.id))).c_str(), seq, ::ComputeOnce::Variant(0));   // compute-once: the seal live compute (recorded only when computed)
                 if (ok && missing != 0) {
                     ++sealComputedReduced_;
                     if (sealReducedSink_)
@@ -2201,6 +2298,8 @@ private:
     std::atomic<uint64_t> wake_{ 0 };
     std::mutex wakeMutex_;
     std::condition_variable wakeCv_;
+    std::mutex carriedMutex_;
+    std::map<std::pair<ProductId, uint64_t>, std::vector<uint8_t>> carriedCpu_;
 };
 
 // ---------------------------------------------------------------------------------------------

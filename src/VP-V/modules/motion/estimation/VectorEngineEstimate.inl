@@ -389,9 +389,11 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	// K4 (camera-guided matching): the pre-estimate hook binds the camera guidance right before the matcher's Estimate
 	// and reads what it did right after. No hook registered (camera guidance off) = the matcher's Estimate only, as
 	// before: nothing bound, no extra GPU work. Never for the warm-up's dummy A -> A estimate.
+	dejudder->SetWarmUp(vectorEstimate.motionEngineWarming);
 	const bool motionEstimated = vectorEngine.Estimate(aSequence, bSequence, ahead, dejudderSourceHz, motionShadowEpoch,
 		!vectorEstimate.motionEngineWarming, *dejudder, [&]() { return dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted); },
 		[this](const FallbackCatalog::Decision& decision) { SyncFallback(decision); });
+	dejudder->SetWarmUp(false);
 	if (motionEstimated && !vectorEstimate.motionEngineWarming)
 		++vectorEngine.WorkCounters().matcherEstimates;   // W2-C1 (B9): the warm-up's dummy estimate is counted as a warm-up
 	dejudder->ClearSearchSeed();

@@ -1055,8 +1055,8 @@ public:
         gpuBytes_ += reserve;
         memo_[key] = e;
         ++c.ownerFillCalls;
-        if (ComputeOnce::Enabled())   // compute-once detector 2 (B1 fold-in): one owner fill per (product, form, variant, frame)
-            ComputeOnce::Note(("acquire:" + NameOfLocked(id)).c_str(), int64_t(seq), ComputeOnce::Variant(int64_t(form) + 1, int64_t(v.plane) | (int64_t(v.scale) << 8) | (int64_t(v.codeUnit) << 16) | (int64_t(v.precision) << 24), (int64_t(v.width) << 32) | v.height, v.sigmaMilli), nullptr, _ReturnAddress());
+        void* const acquireCaller = _ReturnAddress();
+        const std::string acquireUnitName = ComputeOnce::Enabled() ? ("acquire:" + NameOfLocked(id)) : std::string();
         const OwnerFill fill = *ow;   // a copy: a replacement / an unbind during the fill does not invalidate it
         IOwnerGpuDevice* const gpuDevice = gpuDevice_;
         lk.unlock();
@@ -1147,6 +1147,8 @@ public:
             cpuBytes_ += e->bytes.size();
         }
         e->state = Entry::Ready;
+        if (!acquireUnitName.empty())   // compute-once detector 2 (B1 fold-in): one owner fill per (product, form, variant, frame), recorded only when filled
+            ComputeOnce::Note(acquireUnitName.c_str(), int64_t(seq), ComputeOnce::Variant(int64_t(form) + 1, int64_t(v.plane) | (int64_t(v.scale) << 8) | (int64_t(v.codeUnit) << 16) | (int64_t(v.precision) << 24), (int64_t(v.width) << 32) | v.height, v.sigmaMilli), nullptr, acquireCaller);
         ++c2.filledAtRead;
         if (e->ahead)
             ++c2.aheadFilled;
