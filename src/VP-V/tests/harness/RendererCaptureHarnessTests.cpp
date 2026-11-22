@@ -6096,7 +6096,7 @@ namespace Tests
 			// by the renderer DLL's own copy of ComputeOnce.h when it first checks the flag: run this test in its own
 			// vstest process):
 			//   Leg 1 (default-chain, skipped in baseline mode): zero config overrides (true defaults: analysis_lane,
-			//     frame_analysis_store, and skeleton_gpu_gap are off per SkeletonSettings.h:8, VpFrameAnalysisHost.h:88);
+			//     frame_analysis_store, and skeleton_gpu_gap are off per SkeletonSettings.h:8,13, VpFrameAnalysisHost.h:88);
 			//     verifies U8,U10 counted, zero duplicates/gaps/unattributed/gpu-hidden-copies, and zero unexpected CPU
 			//     hidden copies outside MotionAhead::Producer::LumaAtTarget's U3 fallback.
 			//   Leg 2 (lane-on): enables analysis_lane/frame_analysis_store/resync_event/skeleton_gpu_gap to exercise the
@@ -6247,18 +6247,18 @@ namespace Tests
 			};
 
 			// Leg 1 - True Default-Config Chain (zero overrides; skipped in baseline mode).
-			// analysis_lane, skeleton_gpu_gap (SkeletonSettings.h:8), and frame_analysis_store (VpFrameAnalysisHost.h:88)
+			// analysis_lane, skeleton_gpu_gap (SkeletonSettings.h:8,13), and frame_analysis_store (VpFrameAnalysisHost.h:88)
 			// remain at their true defaults (off), so only U8 and U10 run from {U3,U4,U6,U7,U8,U9,U10}.
 			if (!baseline)
 			{
 				const RunResult rDefault = Run(VideoFrameEncoding::V210, "gpu", 8.0, false, "", false, &plan);
 				parseAndAssertLeg(rDefault, "default-chain", "U8,U10",
-					"== compute-once [default-chain] expected units: U8,U10 (true defaults: analysis_lane/frame_analysis_store/skeleton_gpu_gap off per SkeletonSettings.h:8, VpFrameAnalysisHost.h:88)\n",
+					"== compute-once [default-chain] expected units: U8,U10 (true defaults: analysis_lane/frame_analysis_store/skeleton_gpu_gap off per SkeletonSettings.h:8,13, VpFrameAnalysisHost.h:88)\n",
 					true, false);
 			}
 
 			// Leg 2 - Lane-On Chain.
-			// SkeletonSettings.h:8 (analysis_lane: off, skeleton_gpu_gap: off) and VpFrameAnalysisHost.h:88
+			// SkeletonSettings.h:8,13 (analysis_lane: off, skeleton_gpu_gap: off) and VpFrameAnalysisHost.h:88
 			// (frame_analysis_store: off) are default-off; enabling them exercises the full shared lane
 			// (U3,U4,U6,U7,U8,U9,U10) and publishes P1 ahead for MotionAhead::Producer.
 			// The CPU side (tools/compute_once/run_cpu_sample.ps1 sets VP_TEST_CPU_SAMPLE=1): reported, not asserted.
