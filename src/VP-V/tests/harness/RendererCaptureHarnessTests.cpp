@@ -7915,21 +7915,23 @@ namespace Tests
 			Logger::WriteMessage(("B low latency with the de-judder demand:\n" + VectorTestLines(lowStarter)).c_str());
 			Logger::WriteMessage(("C Normal queue with a real starter:\n" + VectorTestLines(normal)).c_str());
 			Assert::IsTrue(none.presented, (L"A: frames presented\n" + none.Tail()).c_str());
-			// WAIVER-B1-ENGINE-04: was NoStarterStatusLogged(none) (the starter wording is retired with the gate, plan (b)). The deband
-			// hold is now a registered want the ON engine names in its status; the look-ahead checks below are unchanged.
+			// B1 + ForwardShallow (VectorDemand.h:211-228): starter gate retired; a games queue (target_frames 2, queueAheadCapacity >= 1)
+			// runs forward look-ahead on the already-queued frames (shallow queue) without adding queue depth.
 			Assert::IsFalse(StarterWordingLogged(none), (L"A: the starter wording is retired\n" + none.Tail()).c_str());
 			bool debandNamed = false;
 			for (const std::string& line : none.log)
-				debandNamed = debandNamed || (line.find("Vector engine: ") != std::string::npos && line.find("deband hold") != std::string::npos);
-			Assert::IsTrue(debandNamed, (L"A: the vector engine status names the deband hold\n" + none.Tail()).c_str());
-			Assert::AreEqual(0, MotionAheadDepthLines(none), (L"A: no look-ahead depth\n" + none.Tail()).c_str());
-			Assert::IsFalse(none.Logged("Motion ahead: engaged"), (L"A: no look-ahead\n" + none.Tail()).c_str());
+				debandNamed = debandNamed || (line.find("Vector engine: on (forward)") != std::string::npos && line.find("deband hold") != std::string::npos);
+			Assert::IsTrue(debandNamed, (L"A: the vector engine is on (forward) and names the deband hold\n" + none.Tail()).c_str());
+			Assert::IsTrue(MotionAheadDepthLines(none) > 0, (L"A: games shallow queue gets look-ahead depth\n" + none.Tail()).c_str());
+			Assert::IsTrue(none.Logged("Motion ahead: engaged") && none.Logged("vector engine: shallow queue"),
+				(L"A: games queue engages shallow look-ahead without adding queue depth\n" + none.Tail()).c_str());
 			Assert::IsTrue(lowStarter.presented, (L"B: frames presented\n" + lowStarter.Tail()).c_str());
-			Assert::AreEqual(0, MotionAheadDepthLines(lowStarter), (L"B: low latency gives the look-ahead no depth\n" + lowStarter.Tail()).c_str());
-			Assert::IsFalse(lowStarter.Logged("Motion ahead: engaged"), (L"B: no look-ahead in low latency\n" + lowStarter.Tail()).c_str());
+			Assert::IsTrue(MotionAheadDepthLines(lowStarter) > 0, (L"B: games shallow queue with de-judder demand gets look-ahead depth\n" + lowStarter.Tail()).c_str());
+			Assert::IsTrue(lowStarter.Logged("Motion ahead: engaged") && lowStarter.Logged("vector engine: shallow queue"),
+				(L"B: games queue with de-judder demand engages shallow look-ahead\n" + lowStarter.Tail()).c_str());
 			Assert::IsTrue(normal.presented, (L"C: frames presented\n" + normal.Tail()).c_str());
-			Assert::IsTrue(normal.Logged("Motion ahead: engaged"), (L"C: a real starter engages the look-ahead on a Normal queue\n" + normal.Tail()).c_str());
-			Assert::IsTrue(VectorsDelivered(normal), (L"C: with a real starter vectors are delivered\n" + normal.Tail()).c_str());
+			Assert::IsTrue(normal.Logged("Motion ahead: engaged"), (L"C: a Normal queue engages the look-ahead\n" + normal.Tail()).c_str());
+			Assert::IsTrue(VectorsDelivered(normal), (L"C: Normal queue delivers vectors\n" + normal.Tail()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroStaysMotionFree)
