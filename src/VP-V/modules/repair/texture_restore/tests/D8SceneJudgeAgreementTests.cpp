@@ -19,7 +19,7 @@
 //     synthetic fade: FadeGain(k) != FadeGain(k-1) (fade frames, no restart); synthetic flash: no restart (a flash is not a
 //     restart). A frame that is a truth cut (or its delivery frame) is never a fade frame. Labels are never invented: a real clip
 //     needs cuts_s or cut_free.
-//     tos_24p_3min carries cut labels only, so its rows measure cut truth only;
+//     tos_24p_3min uses owner-approved TosTruth cut labels and approved rule-based fade ranges (2026-11-22_fade-truth-APPROVED.READY.md);
 //   - the CPU models twice: the retired TileJudgeReference law (sceneReader null) and the shared verdict (ReadSceneFromStore);
 //     the shared decision is compared with the truth (truth agree / miss / extra); the retired-law agreement, restarts and the
 //     picture difference on the frames where the two decisions differ are information columns only;
@@ -233,14 +233,40 @@ namespace D8SceneJudgeAgreementNs
 		return out;
 	}
 
-	// Owner-approved active fade frame ranges for tos_24p_3min, derived from TosTruth() (U7CutTruthGateTests.cpp:97-100:
-	// {186,200}, {236,268}, {1655,1660}, {2034,2039}, {2040,2045}, {2171,2178}, {2318,2323}, {2411,2417}, {2550,2625}) and
-	// lead17/d8-tos-classification.md, restricted to the actual moving fade-to/from-black ramp frames (excluding static tails).
+	// Approved rule-based fade ground truth for tos_24p_3min (9 ranges, 203 frames; Parts 2, 5, 6 have 0 fade ranges).
+	// Trace: 2026-11-22_fade-truth-APPROVED.READY.md (approving reviews\2026-11-22_fade-truth-proposal.md; WAIVER commit).
+	// Derived 100% from decoded source video frames via the Joint Luma + Contrast-Span Fade Ramp Rule.
+	// TosTruth cut events (24, 178, 269, 425, 461, 556, 788, 884, 1063, 1315, 1632, {2324, 2325}, {2418, 2419}) remain 100%
+	// unchanged: 2324, 2325, 2418, 2419 are cuts, NEVER fades ({2311, 2323} ends strictly before {2324, 2325}; {2358, 2413}
+	// ends strictly before {2418, 2419}).
+	//
+	// Other D8 clips match the approved table via TruthRestarts() / manifest events:
+	//   - pan_480pxs_fade_23976p: [1..72] (fade-in), [648..718] (fade-out) (143 frames, manifest fade_in/fade_out)
+	//   - pan_480pxs_23976p, rate_24, pan_1440pxs_5994p, flash_synthetic: none (0)
+	//   - fade_synthetic: [40..87], [112..159] (96 frames, analytical FadeGain generator truth)
+	//
+	// VERIFIED NON-FADE ranges on tos_24p_3min (2026-11-22_fade-truth-APPROVED.READY.md -- motion or animation, NOT fades;
+	// a detector "fade" on any of these counts against the judge):
+	//   - 31..62:     foreground creature moving through the frame (occlusion)
+	//   - 154..178:   camera move and smoke inside one shot; TosTruth cut at 178 stays
+	//   - 1225..1240: camera tilt up from room to ceiling cables
+	//   - 1866..1872: animated credits graphic (zoom and darkening of robot art)
+	//   - 1945..1962: animated credits graphic (bright shards sweeping in)
+	//   - 2419..2430: animated graphic build-up after cut out of black; cut 2418/2419 stays
 	inline std::vector<std::pair<int, int>> ClipFadeRanges(const RealClip::Clip& clip)
 	{
 		if (clip.id == "tos_24p_3min")
-			return { { 197, 200 }, { 236, 257 }, { 1655, 1659 }, { 2037, 2038 }, { 2040, 2040 }, { 2042, 2045 },
-				{ 2172, 2172 }, { 2321, 2324 }, { 2412, 2413 }, { 2418, 2418 }, { 2562, 2587 }, { 2592, 2609 } };
+			return {
+				{ 190, 200 },   // Part 1, fade-out (11 frames)
+				{ 236, 257 },   // Part 1, fade-in  (22 frames)
+				{ 1655, 1659 }, // Part 3, fade-in  (5 frames)
+				{ 2034, 2038 }, // Part 3, fade-out (5 frames)
+				{ 2040, 2049 }, // Part 3, fade-in  (10 frames)
+				{ 2177, 2181 }, // Part 4, fade-in  (5 frames)
+				{ 2311, 2323 }, // Part 4, fade-out (13 frames; ends strictly before cut {2324, 2325})
+				{ 2358, 2413 }, // Part 4, fade-out (56 frames; ends strictly before cut {2418, 2419})
+				{ 2543, 2618 }  // Part 4, fade-out (76 frames)
+			};
 		return {};
 	}
 
