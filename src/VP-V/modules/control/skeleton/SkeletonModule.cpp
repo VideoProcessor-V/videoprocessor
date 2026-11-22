@@ -2103,6 +2103,14 @@ namespace Vpv
 							FrameAnalysis::Scene g;
 							claim = (deliveryStore->PeekScene(d, g) && g.origin == FrameAnalysis::SceneOrigin::Vp) || !deliveryStore->HasRecord(d);
 						}
+						else if (!claim)
+						{
+							// C5-SKREDS (owner: the store on / off judge alike, no silent difference): with the store off seq - 1 has no group
+							// that could ever carry its cut, and its natural successor (this frame) is the one that delivers it in render order
+							// anyway (the late search below). The ahead fill delivers it now, kept in this frame's slot (gate N1 below:
+							// carriesLate, so the render-order re-fill of this frame carries the same cut, exactly once).
+							claim = true;
+						}
 						// Gate N1: the claim must be kept somewhere: this frame's slot (carriesLate, so a re-fill carries it) or its store
 						// record (the published group). Without either (JudgeSceneApart far past the tracker, no record yet) the render-order
 						// fill delivers it instead.
