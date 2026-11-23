@@ -2257,6 +2257,11 @@ namespace SourceIdentity
 					run[a].up = EvidenceUpdate();
 					run[a].vr.candidates.clear();
 					run[a].vr.reason = 0;
+					run[a].vr.costMs = 0.0;
+					run[a].vr.cold = false;
+					run[a].vr.operatorBuilds = 0;
+					run[a].vr.solves = 0;
+					run[a].vr.solvesReused = 0;
 					if (ToLineSet(s, a, run[a].ls))
 						run[a].have = true;
 				}
@@ -2386,7 +2391,8 @@ namespace SourceIdentity
 								extraCands, extraCnt, false, cands, kMaxCandidates);
 						}
 						opt.exactOnly = true;       // P3: exact-verify prioritized conventional candidates directly
-						opt.p3TwoPass = true;       // SID-OPT: Pass 1 screen at halfWidth=0, Pass 2 full on top/protected/dipping
+						// SID-OPT: two-pass P3 screen only when whole-line stat is the active estimator (not diluted sparse 8-bit edgeStats)
+						opt.p3TwoPass = !cfg.evidence.edgeStats.enabled && !cfg.eightBitPromotion;
 						opt.p3ProtectedN[0] = classicalN;
 						opt.p3ProtectedN[1] = latchedN;
 						cP3ConvProposals.fetch_add(1, std::memory_order_relaxed);

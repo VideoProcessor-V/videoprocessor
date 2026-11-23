@@ -153,12 +153,12 @@ def classify_bit_depth_from_step(step_codes, output_bits=0):
     """Exact port of NullTables.h::ClassifyBitDepthFromStep."""
     if step_codes >= 4:
         return "N8"
+    if output_bits == 8:
+        return "N8"
     if output_bits >= 12:
         return "N12"
     if step_codes == 1 or output_bits == 10:
         return "N10"
-    if output_bits == 8:
-        return "N8"
     return "unknown"
 
 
@@ -468,8 +468,8 @@ def _load_dump_v4_pair(evals_path, sizes_path, tag, manifest):
             }
             segs_by_depth[depth] = seg
         seg["evals"].append((seq, {
-            "x": (em["time_s"], em["shot_id"], em["hold_x"]),
-            "y": (em["time_s"], em["shot_id"], em["hold_y"]),
+            "x": (em["time_s"], em["shot_id"], em["hold_x"], em["inf_x"]),
+            "y": (em["time_s"], em["shot_id"], em["hold_y"], em["inf_y"]),
         }))
         for axis, tn, tn1 in (("x", truth_nx, truth_nx1), ("y", truth_ny, truth_ny1)):
             rows = per_eval_axis.get((axis, seq))
@@ -566,7 +566,8 @@ def _load_dump_v3_csv(csv_path):
             for a, v in e.items():
                 hf = hold_map.get((reel, depth, seq, a))
                 is_hold = bool(hf and hf[0] and not hf[1])
-                per_ax[a] = (v[0], v[1], is_hold)
+                is_inf = bool(hf and hf[1])
+                per_ax[a] = (v[0], v[1], is_hold, is_inf)
             cur["evals"].append((seq, per_ax))
     return items, segs
 
@@ -750,8 +751,20 @@ def _track_shot(ax, shot, tm, cap):
         _flush_pending(ax, cap)
 
 
+def _axis_informative_non_hold(v):
+    hold = bool(v[2])
+    inf = True if len(v) < 4 else bool(v[3])
+    return inf and not hold
+
+
 def segment_hours(seg):
-    ts = [min(v[0] for v in e.values()) for _, e in seg["evals"] if e]
+    ts = []
+    for _, e in seg["evals"]:
+        if not e:
+            continue
+        inf_ts = [v[0] for v in e.values() if _axis_informative_non_hold(v)]
+        if inf_ts:
+            ts.append(min(inf_ts))
     if len(ts) < 2:
         return 0.0
     gaps = sorted(b - a for a, b in zip(ts, ts[1:]) if b > a)
@@ -780,7 +793,7 @@ def simulate_native_segment(seg, items_idx, tables, c1):
         for a in axes:
             if a not in per_axis:
                 continue
-            tm, shot, hold = per_axis[a]
+            tm, shot, hold = per_axis[a][0], per_axis[a][1], per_axis[a][2]
             its = items_idx.get((seg["reel"], seg["depth"], a, seq), ())
             s = st[a]
             if its and s.N and s.N != its[0].N:
@@ -873,7 +886,8 @@ def fit_depth_stratum(depth, items, segs, min_native_shots, min_null_per_class, 
         sample_hours += segment_hours(sg)
         for _, per_ax in sg["evals"]:
             for _, v in per_ax.items():
-                native_shot_keys.add((sg["reel"], v[1]))
+                if _axis_informative_non_hold(v):
+                    native_shot_keys.add((sg["reel"], v[1]))
     # Also include any native items whose shot wasn't captured via empty segs
     for it in depth_items:
         if it.truth_n <= 0:
@@ -1045,7 +1059,7 @@ def calibrate_all_depths(items, segs, min_native_shots=DEFAULT_MIN_NATIVE_SHOTS,
     elif n8["auc_hd"] < G8BIT_MIN_HD_AUC:
         g8_reasons.append("N8 HD AUC %.4f < %.2f" % (n8["auc_hd"], G8BIT_MIN_HD_AUC))
     for d in DEPTHS:
-        if results[d]["calibrated"] and results[d]["confident_wrong_count"] > 0:
+        if results[d]["confident_wrong_count"] > 0:
             g8_reasons.append("%s native FPs %d > 0" % (d, results[d]["confident_wrong_count"]))
     g8_passed = len(g8_reasons) == 0
     g8_reason = "ok" if g8_passed else "; ".join(g8_reasons)
@@ -1284,6 +1298,11 @@ def _write_synthetic_v3_csv(directory, filename, bit_depth, num_shots, truth_n, 
 
 
 def run_selftest():
+    # HIGH-1: 8-bit HDMI-loop streams (step_codes == 1, output_bits == 8) MUST classify as N8, never N10.
+    assert classify_bit_depth_from_step(1, 8) == "N8", "expected (1, 8) -> N8"
+    assert classify_bit_depth_from_step(4, 0) == "N8"
+    assert classify_bit_depth_from_step(1, 10) == "N10"
+    assert classify_bit_depth_from_step(1, 12) == "N12"
     rng = random.Random(20261123)
     with tempfile.TemporaryDirectory() as tmp:
         v4_dir = os.path.join(tmp, "v4")
@@ -1388,13 +1407,16 @@ def run_selftest():
         assert v3_report["G-PhaseA"]["N8"]["calibrated"] is False
         assert v3_report["G-PhaseA"]["N8"]["native_shots"] == 0
 
-        # Negative control 3 (HIGH-1): uninformative v4 rows (informative_x=0 / informative_y=0) MUST be excluded
+        # Negative control 3 (HIGH-1 & MEDIUM-1): uninformative v4 rows MUST be excluded AND contribute 0 shots / 0 hours
         uninf_dir = os.path.join(tmp, "uninf")
         os.makedirs(uninf_dir)
         _write_synthetic_v4_pair(uninf_dir, "n8_uninf_both", step_codes=4, output_bits=8, num_shots=5, evals_per_shot=2,
                                  truth_nx=0, truth_ny=0, rng=rng, inf_x=0, inf_y=0)
-        uninf_items, _, _ = load_all_dumps([uninf_dir])
+        uninf_items, uninf_segs, _ = load_all_dumps([uninf_dir])
         assert len(uninf_items) == 0, "uninformative v4 rows leaked into calibration: %d" % len(uninf_items)
+        uninf_rep = calibrate_all_depths(uninf_items, uninf_segs, min_native_shots=1)
+        assert uninf_rep["G-PhaseA"]["N8"]["native_shots"] == 0, "uninformative-only reel inflated native_shots"
+        assert uninf_rep["G-PhaseA"]["N8"]["sample_hours"] == 0.0, "uninformative-only reel inflated sample_hours"
         uninf_half_dir = os.path.join(tmp, "uninf_half")
         os.makedirs(uninf_half_dir)
         _write_synthetic_v4_pair(uninf_half_dir, "n8_uninf_y", step_codes=4, output_bits=8, num_shots=3, evals_per_shot=2,
@@ -1433,6 +1455,29 @@ def run_selftest():
         assert no_hd_report["G-8bit"]["n8_hd_pos_samples"] == 0
         assert no_hd_report["G-8bit"]["passed"] is False, "G-8bit must NOT pass without N8 HD samples"
         assert "missing N8 HD" in no_hd_report["G-8bit"]["g8_reason"]
+
+        # Negative control 6 (HIGH-2): clean calibrated N8 + FP-failing N10 MUST fail G-8bit (cross-depth FP check active!)
+        cross_dir = os.path.join(tmp, "cross_fp")
+        os.makedirs(cross_dir)
+        _write_synthetic_v4_pair(cross_dir, "n10_fp_nat", step_codes=1, output_bits=10, num_shots=402, evals_per_shot=3,
+                                 truth_nx=0, truth_ny=0, rng=rng, fp_burst_shots=2)
+        _write_synthetic_v4_pair(cross_dir, "n10_fp_up", step_codes=1, output_bits=10, num_shots=30, evals_per_shot=2,
+                                 truth_nx=960, truth_ny=540, rng=rng)
+        cross_manifest_path = os.path.join(tmp, "cross_manifest.json")
+        with open(cross_manifest_path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "n10_fp_nat": {"truth_nx": 0, "truth_ny": 0, "master": "m_n10_fp_nat"},
+                "n10_fp_up": {"truth_nx": 960, "truth_ny": 540, "master": "m_n10_fp_up"},
+            }, fh)
+        n10_fp_items, n10_fp_segs, _ = load_all_dumps([cross_dir], cross_manifest_path)
+        n8_only_items = [it for it in items if it.depth == "N8"]
+        n8_only_segs = [sg for sg in segs if sg["depth"] == "N8"]
+        cross_report = calibrate_all_depths(n8_only_items + n10_fp_items, n8_only_segs + n10_fp_segs, min_native_shots=300)
+        assert cross_report["G-PhaseA"]["N8"]["calibrated"] is True
+        assert cross_report["G-PhaseA"]["N10"]["confident_wrong_count"] >= 1
+        assert cross_report["G-PhaseA"]["N10"]["calibrated"] is False
+        assert cross_report["G-8bit"]["passed"] is False, "G-8bit MUST fail when N10 has native FPs"
+        assert "N10 native FPs" in cross_report["G-8bit"]["g8_reason"]
 
     print("generate_null_tables.py --selftest: PASS (v4+v3 stratification, gate enforcement, G-PhaseA, G-8bit verified)")
     return 0

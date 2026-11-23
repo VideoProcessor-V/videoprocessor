@@ -924,7 +924,7 @@ namespace SourceResolution
 		const int half = static_cast<int>(bins) - 1;
 		const int n = 2 * half;
 		const double cut = ratio * static_cast<double>(half);
-		// Exact same bands as DetailAboveSpectra (lines 829-831).
+		// Exact same bands as DetailAboveSpectra.
 		const int b0 = static_cast<int>(std::ceil(0.55 * cut));
 		const int b1 = static_cast<int>(std::floor(0.9 * cut));
 		const int a0 = static_cast<int>(std::ceil(1.15 * cut));

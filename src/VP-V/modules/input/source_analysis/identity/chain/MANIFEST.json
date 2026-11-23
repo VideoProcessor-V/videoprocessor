@@ -40,7 +40,8 @@
     "src/VP-V/modules/input/source_analysis/identity/tests/ChainStepMarkTests.cpp",
     "src/VP-V/modules/input/source_analysis/identity/tests/ChainJointLatchTests.cpp",
     "src/VP-V/modules/input/source_analysis/identity/tests/ChainEdgeStatsTests.cpp",
-    "src/VP-V/modules/input/source_analysis/identity/tests/SourceIdStageS2Tests.cpp"
+    "src/VP-V/modules/input/source_analysis/identity/tests/SourceIdStageS2Tests.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/tests/SourceIdStageS3Tests.cpp"
   ],
   "forwarding_headers": [],
   "components": {

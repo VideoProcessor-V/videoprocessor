@@ -20,7 +20,7 @@
 // The two median rules give different values on even n by design of their callers (a registered
 // difference, not merged away: merging them would change picture-independent decisions and needs its own
 // FIX with a before/after table). Every function copies its input (the caller's vector is untouched), except
-// MedianInPlace, which reorders its argument;
+// MedianInPlace, MadInPlace, and QuantileInPlace, which reorder/overwrite their argument in place;
 // an empty input returns `ifEmpty` (default 0); `NthSmallest` of an empty input returns T(). Callers whose
 // input can never be empty (the private copies were undefined there) assert(!empty) at the call, with no
 // fallback (C6-2 U24 plan (d)).
@@ -172,11 +172,11 @@ namespace RobustStats
 	// The q-quantile of n doubles IN PLACE (reorders `data`, O(n), zero heap allocations). Same values as Quantile().
 	inline double QuantileInPlace(double* data, int n, double q, RankRule rule = RankRule::Interpolated, double ifEmpty = 0.0)
 	{
-		if (!data || n <= 0) return ifEmpty;
+		if (!data || n <= 0 || !std::isfinite(q)) return ifEmpty;
 		const size_t cnt = static_cast<size_t>(n);
+		const double cq = q < 0.0 ? 0.0 : (q > 1.0 ? 1.0 : q);
 		if (rule == RankRule::Interpolated)
 		{
-			const double cq = q < 0.0 ? 0.0 : (q > 1.0 ? 1.0 : q);
 			const double pos = cq * static_cast<double>(cnt - 1);
 			const size_t lo = static_cast<size_t>(std::floor(pos));
 			const size_t hi = lo + 1 < cnt ? lo + 1 : lo;
@@ -190,10 +190,10 @@ namespace RobustStats
 		}
 		size_t k = 0;
 		if (rule == RankRule::FloorIndex)
-			k = static_cast<size_t>(q * static_cast<double>(cnt - 1));
+			k = static_cast<size_t>(cq * static_cast<double>(cnt - 1));
 		else
 		{
-			const size_t c = static_cast<size_t>(std::ceil(q * static_cast<double>(cnt)));
+			const size_t c = static_cast<size_t>(std::ceil(cq * static_cast<double>(cnt)));
 			k = c > 0 ? c - 1 : 0;
 		}
 		if (k >= cnt) k = cnt - 1;

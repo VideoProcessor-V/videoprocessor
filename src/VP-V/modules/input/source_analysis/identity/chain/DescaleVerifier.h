@@ -114,7 +114,7 @@ namespace SourceIdentity
 			bool p3TwoPass = false;
 			int p3ProtectedN[2] = { 0, 0 };
 			int p3ScreenKeepTop = Narrowing::kMaxExactCandidates;
-			// Derived: ln(0.98) ~= -0.02, strictly milder than EvidenceSettings::majorityDip (-0.03), so any dipping candidate is expanded in Pass 2.
+			// Derived: (2.0 / 3.0) * EvidenceSettings::majorityDip (-0.03) = -0.02, strictly milder than majorityDip so any dipping candidate is expanded in Pass 2.
 			double p3ScreenDipThreshold = -0.02;
 		};
 
@@ -302,8 +302,10 @@ namespace SourceIdentity
 					for (size_t i = 0; i < screenOrder.size(); ++i)
 					{
 						CandidateResult& cr = out.candidates[static_cast<size_t>(screenOrder[i])];
+						const bool oddCandidate = (cr.nProposed & 1) != 0;   // cropped scope rasters (e.g. 1600 * 2/3 = 1067) may sit 1 px off an even coded size
 						const bool promoteFull = static_cast<int>(i) < keepTop
 							|| nearProtected(cr.nProposed)
+							|| oddCandidate
 							|| cr.stat < opt.p3ScreenDipThreshold;
 						if (!promoteFull)
 							continue;

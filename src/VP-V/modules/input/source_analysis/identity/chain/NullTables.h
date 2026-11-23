@@ -64,16 +64,17 @@ namespace SourceIdentity
 		}
 
 		// Classifies effective bit depth from measured 10-bit code step (2^(10 - 8) = 4 for 8-bit) and optional output bit depth.
+		// Explicit 8-bit outputBits takes precedence over stepCodes == 1 so 8-bit HDMI-loop streams never misclassify as N10.
 		inline BitDepthClass ClassifyBitDepthFromStep(int stepCodes, int outputBits = 0)
 		{
 			if (stepCodes >= 4)
+				return BitDepthClass::N8;
+			if (outputBits == 8)
 				return BitDepthClass::N8;
 			if (outputBits >= 12)
 				return BitDepthClass::N12;
 			if (stepCodes == 1 || outputBits == 10)
 				return BitDepthClass::N10;
-			if (outputBits == 8)
-				return BitDepthClass::N8;
 			return BitDepthClass::Unknown;
 		}
 
