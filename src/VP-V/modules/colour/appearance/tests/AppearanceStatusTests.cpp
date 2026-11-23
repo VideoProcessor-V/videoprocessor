@@ -257,7 +257,7 @@ namespace Tests
 			Assert::IsTrue(Has(org, "{ K::Toggle, \"appearance\" }"));
 			Assert::IsTrue(Has(org, "{ K::Text, \"appearance_room\" }"));
 			Assert::IsTrue(Has(org, "@appearance_status"));
-			const std::string intent = ReadUp("src\\VP-V\\modules\\drive\\led_compensation\\LedIntentMethods.inl");
+			const std::string intent = ReadUp("src\\VP-V\\modules\\drive\\led_compensation\\LedIntentMethods.cpp");
 			Assert::IsTrue(Has(intent, "roomLightFeed = s.appearance && !s.pipelineOriginalPathway"));
 			const std::string core = ReadUp("src\\VP-V\\segments\\CoreSegments.inl");
 			Assert::IsTrue(Has(core, "FallbackCatalog::AmbientAdaptReplaced(settings.ambientAdaptReplaced)"));

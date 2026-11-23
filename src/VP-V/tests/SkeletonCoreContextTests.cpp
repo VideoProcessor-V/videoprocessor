@@ -1455,7 +1455,7 @@ namespace SkeletonCoreContextTestsNs
 			const std::vector<std::string> lines = m.StatusLines();
 			bool listed = false;
 			for (const std::string& l : lines)
-				listed = listed || (l.find("reserved product ids") != std::string::npos && l.find("band_memo") != std::string::npos
+				listed = listed || (l.find("reserved product ids") != std::string::npos && l.find("focus_map") != std::string::npos
 					&& l.find("composed_vectors") != std::string::npos);
 			Assert::IsTrue(listed, L"the Ctrl+Alt+D status lists the reserved ids and names");
 		}
