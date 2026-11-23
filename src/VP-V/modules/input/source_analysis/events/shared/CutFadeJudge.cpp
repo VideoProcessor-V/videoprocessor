@@ -1114,7 +1114,7 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             }
             if (!stepSlopeChecked) {
                 stepSlopeChecked = true;
-                constexpr int kIntN = (kGridH - 2 * R) * (kGridW - 2 * R);
+                constexpr int kIntN = (kGridH - 2 * kLocalRadius) * (kGridW - 2 * kLocalRadius);
                 double pSorted[kIntN], cSorted[kIntN];
                 int sIdx = 0;
                 for (int y = R; y < kGridH - R; ++y)
