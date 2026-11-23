@@ -26,3 +26,5 @@ the renderer reads it, the overrides above are applied in the renderer, never wr
 user's values in the file.
 
 Bill v1.4.02 merge (2026-10-31): rows added after re-checking against Bill a591ad3b (settings bug hunt 32 items 1, 2, 4): `deband_grain: on` (Bill keeps libplacebo's deband grain), `chroma_upscaler: bicubic` (Bill's default), `source_range: auto` and `upscale_light: linear` (VP-only overrides neutral). Still open for the post-merge batch: `target_latency_ms` in the GUI queue decision, `saturation`, `blank_*` (owner question).
+
+source_geometry_detect (SK-ORIGINAL, GEM-173, 2026-11-21): absent in bill-v1.4.02 (9ff095fab); `all` = the built-in default, recognises nothing with source_resolution native, engages no line (entering the Original pathway releases a line engaged in VP-V).

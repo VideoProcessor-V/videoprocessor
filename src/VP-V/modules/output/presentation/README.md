@@ -163,7 +163,7 @@ Placeholder tests:
 - (none yet)
 
 Isolation tests (classes; see "Test it standalone"):
-- RenderAheadPlannerTests, RenderAheadScheduleTests, RenderAheadGateTests, RenderAheadOpenLoopRateTests, RenderAheadGateFixTests and the other RenderAhead* classes
+- PresentVsyncHistogramTests (CG-PVH), RenderAheadPlannerTests, RenderAheadScheduleTests, RenderAheadGateTests, RenderAheadOpenLoopRateTests, RenderAheadGateFixTests and the other RenderAhead* classes
 - AlphaPresentationTelemetryTests
 
 Contract tests:
@@ -184,6 +184,7 @@ Checked before the API is frozen; the API stays unfrozen until the TD design lea
 - Spare GPU work for TD (the precompute / anchor-pass slot): `spareSlotMs` adds the declared spare-slot ms per source frame to the gate's average check only (extras are not shed first for it); no correction slot in v1.
 - TD without render_ahead: `On` / `Active` / `ActivatesOn` / `SetTemporalDetailOn` run the Presenter and restart its epoch when render_ahead OR TD switches on (retro gate F2); TD off is today's rule.
 - Verify-and-correct rounds and held-out next-frame checks: they run in the lane and the render, not in the Presenter. The Presenter neither renders nor presents (it decides and supplies the SyncInterval), so render and submit stay separable and a check of frame N+1 before its present is not foreclosed.
+- Present-vs-vsync histogram (CG-PVH, built, 20 tests; the instrument that comes before release timing): `PresentVsyncHistogram.h`, fed from `PresenterExtension::OnAfterPresent` with the statistics `PresenterAfterPresent` already read (no second GetFrameStatistics; the one extra DXGI call is `GetLastPresentCount`, the id of the present just made). It logs `Presenter present-vs-vsync: ...` once per 10 s: hold bins k0/k1/k2/k3+ with k = the PresentRefreshCount delta between consecutive presents (exact, no T; a PresentCount jump books max(0, dP-dR) never shown in k0 and the rest as unresolved), the lead of the display time over the swap end in display periods (bins [0,1) [1,2) [2,3) [3,4) 4+, p1/p50/p99; a negative lead is counted and printed, in no bin) and the measured T (fd). T is derived from SyncQPCTime / SyncRefreshCount, never fixed. The feed needs `PresentContext::native`, filled by one tagged line in the existing R12 block (CG-PVH M1, droppable); without it the line says `no stats (... N without a swapchain ...)` and `not a pass`. With no statistics for another reason it says `no stats (hr=0x........)` and `not a pass`; on an Optimus laptop with VP on the discrete adapter this is expected. Log-only: nothing reaches a present. No setting. Tests: `PresentVsyncHistogramTests`.
 - Release timing (matched rates, retro gate F1 / P6 rest S4): NOT YET BUILT. At 24/24, 50/50 and 60/60 the plain path breaks the chain each frame, so there is no planned vsync. The planned change is a maxExtras-0 plan with the release of N+1 at the planned first vsync minus one display period plus a margin; it defines the B3-Z post-present slot size. It comes after the present-vs-vsync histogram. Nothing in the API forecloses it: `Schedule` holds the anchor and the planned refreshes.
 
 ## Known issues / open items
@@ -199,6 +200,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 
 - `src/VP-V/modules/output/presentation/RenderAheadPolicy.h`
 - `src/VP-V/modules/output/presentation/PresenterAfterPresent.h` (the R12 step body)
+- `src/VP-V/modules/output/presentation/PresentVsyncHistogram.h` (the present-vs-vsync histogram: hold bins and lead from the R12 statistics; log-only)
 - `src/VP-V/modules/output/presentation/PresenterExtension.h` / `.cpp` (the hub module: R11 / R12 / R14 handlers, Phase 3)
 - `src/VideoProcessor-Lib/vprenderer/AlphaPresentationTelemetry.cpp`
 - `src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h`
