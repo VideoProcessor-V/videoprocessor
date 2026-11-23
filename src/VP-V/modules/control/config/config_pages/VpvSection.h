@@ -101,6 +101,9 @@ namespace Vpv
 	// The pathway stored in [vpv] (default VP-V when absent).
 	bool PathwayIsVpv(const Host& host);
 
+	// Diagnostic count of currently alive Vpv::State instances (for deterministic leak verification).
+	int LiveSectionStateCount();
+
 	// Object names (tests and automation).
 	inline QString ObjectName(const QString& part) { return QStringLiteral("vpv.") + part; }
 }
