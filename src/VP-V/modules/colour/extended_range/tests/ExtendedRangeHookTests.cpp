@@ -1059,5 +1059,187 @@ namespace VideoProcessorTest
 							std::to_wstring(ramp[i]) + L" got " + std::to_wstring(got[i])).c_str());
 			}
 		}
+
+		// GEM-ER (GEM-011 / 013 / 014): mandatory BTB/WTW ramp gate, non-linear 3D LUT corner/edge/face
+		// extrapolation exactness vs CPU ExtendedRange::LutExtrapolate, and GPU timing harness.
+		TEST_METHOD(GemErSpeedupAndBtbWtwRampGate)
+		{
+			using namespace ExtendedRangeGpuProbe;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log, report;
+			fixture.CaptureLog(&log);
+
+			// 1. Mandatory BTB/WTW ramp gate: 1:1 aligned, 1.5x upscale, 0.5x downscale across pure-power, BT.1886, and sRGB.
+			const std::vector<int> ramp = { 4, 16, 32, 48, 64, 128, 300, 502, 750, 940, 960, 980, 1000, 1019 };
+			const Planes greys = Greys(ramp, 32, 16);
+			auto checkTransferRamp = [&](const char* name, enum pl_color_transfer srcT, enum pl_color_transfer outT, double scale)
+			{
+				Case c;
+				c.sourcePrimaries = PL_COLOR_PRIM_BT_709;
+				c.outputPrimaries = PL_COLOR_PRIM_DISPLAY_P3;
+				c.sourceTransfer = srcT;
+				c.outputTransfer = outT;
+				c.scale = scale;
+				const Result r = Render(gpu, fixture.Renderer(), greys, c);
+				Assert::IsTrue(r.ok && r.decision.Active() && r.restores > 0, ToWide(std::string(name) + ": " + r.error).c_str());
+				const auto got = Columns(r, static_cast<int>(ramp.size()), scale);
+				int maxDelta = 0;
+				for (size_t i = 0; i < ramp.size(); ++i)
+				{
+					const double v = (ramp[i] - 64) / 876.0;
+					const double outV = ExtendedRange::FromLinear(r.decision.output, ExtendedRange::ToLinear(r.decision.source, v));
+					const int ideal = static_cast<int>(std::lround(64.0 + 876.0 * outV));
+					const int clampedIdeal = (std::min)(1023, (std::max)(0, ideal));
+					const int d = std::abs(got[i] - clampedIdeal);
+					if (ideal >= 4 && ideal <= 1019)
+						maxDelta = (std::max)(maxDelta, d);
+					Assert::IsTrue(ideal < 4 ? got[i] <= 4 : d <= 1,
+						ToWide(std::string(name) + " code " + std::to_string(ramp[i]) + " got " + std::to_string(got[i]) +
+							" expected " + std::to_string(clampedIdeal)).c_str());
+				}
+				report += std::string(name) + " maxDelta=" + std::to_string(maxDelta) + "\n";
+			};
+			checkTransferRamp("1:1 2.2->2.4 709->P3", PL_COLOR_TRC_GAMMA22, PL_COLOR_TRC_GAMMA24, 1.0);
+			checkTransferRamp("1:1 BT1886->2.4 709->P3", PL_COLOR_TRC_BT_1886, PL_COLOR_TRC_GAMMA24, 1.0);
+			checkTransferRamp("1:1 sRGB->BT1886 709->P3", PL_COLOR_TRC_SRGB, PL_COLOR_TRC_BT_1886, 1.0);
+			checkTransferRamp("up1.5 2.2->2.4 709->P3", PL_COLOR_TRC_GAMMA22, PL_COLOR_TRC_GAMMA24, 1.5);
+			checkTransferRamp("down0.5 2.2->2.4 709->P3", PL_COLOR_TRC_GAMMA22, PL_COLOR_TRC_GAMMA24, 0.5);
+
+			// 2. Non-linear 3D LUT BTB/WTW face, edge, and corner exactness pin vs CPU ExtendedRange::LutExtrapolate
+			//    on both power-of-2 (17^3) and non-power-of-2 (11^3) LUTs.
+			for (int lutN : { 17, 11 })
+			{
+				std::vector<float> lutData(static_cast<size_t>(lutN) * lutN * lutN * 3);
+				for (int b = 0; b < lutN; ++b)
+					for (int g = 0; g < lutN; ++g)
+						for (int r = 0; r < lutN; ++r)
+						{
+							const float fr = static_cast<float>(r) / (lutN - 1);
+							const float fg = static_cast<float>(g) / (lutN - 1);
+							const float fb = static_cast<float>(b) / (lutN - 1);
+							const size_t idx = (static_cast<size_t>(b) * lutN + g) * lutN + r;
+							// Smooth non-linear LUT with cross-channel terms so 2D face/edge/corner slopes are non-trivial.
+							lutData[idx * 3 + 0] = 0.03f + 0.84f * fr + 0.05f * fr * fr + 0.04f * fg + 0.02f * fb;
+							lutData[idx * 3 + 1] = 0.02f + 0.03f * fr + 0.85f * fg + 0.04f * fg * fg + 0.03f * fb;
+							lutData[idx * 3 + 2] = 0.04f + 0.02f * fr + 0.04f * fg + 0.82f * fb + 0.05f * fb * fb;
+						}
+				pl_custom_lut customLut{};
+				customLut.signature = 0x45524E4C00000000ull + static_cast<uint64_t>(lutN);
+				customLut.size[0] = customLut.size[1] = customLut.size[2] = lutN;
+				customLut.data = lutData.data();
+				ExtendedRange::LutView view{};
+				view.size[0] = view.size[1] = view.size[2] = lutN;
+				view.data = lutData.data();
+
+				// Face (1 axis OOB), edge (2 axes OOB), and corner (3 axes OOB) BTB & WTW test colours.
+				const double kr = 0.2126, kb = 0.0722;
+				const float rgbProbes[][3] = {
+					{ -0.05f, 0.50f, 0.50f },   // face: R BTB
+					{ 1.06f, 0.45f, 0.55f },    // face: R WTW
+					{ -0.04f, -0.05f, 0.40f },  // edge: R,G BTB
+					{ 1.05f, 1.04f, 0.60f },    // edge: R,G WTW
+					{ -0.05f, -0.05f, -0.05f }, // corner: all BTB
+					{ 1.06f, 1.06f, 1.06f },    // corner: all WTW
+				};
+				std::vector<Patch> patches;
+				for (const auto& p : rgbProbes)
+					patches.push_back(ErPatch(p[0], p[1], p[2], kr, kb));
+				const Planes pFrame = Patches(patches, 32, 16);
+				ErMoreCase mc;
+				mc.c.outputPrimaries = PL_COLOR_PRIM_BT_709;
+				mc.c.scale = 1.0;
+				mc.lut = &customLut;
+				const ErMoreResult res = ErRender(gpu, fixture.Renderer(), pFrame, mc);
+				Assert::IsTrue(res.r.ok && res.r.restores >= 2, L"non-linear LUT late restore failed");
+				int worstLut = 0;
+				const int y = res.r.height / 2;
+				for (size_t i = 0; i < patches.size(); ++i)
+				{
+					// Reconstruct the exact YCbCr->RGB value libplacebo sees for this patch.
+					const double yv = (patches[i].y - 64) / 876.0;
+					const double cb = (patches[i].cb - 512) / 896.0;
+					const double cr = (patches[i].cr - 512) / 896.0;
+					const float inRgb[3] = {
+						static_cast<float>(yv + 2.0 * (1.0 - kr) * cr),
+						static_cast<float>(yv - 2.0 * kb * (1.0 - kb) / (1.0 - kr - kb) * cb - 2.0 * kr * (1.0 - kr) / (1.0 - kr - kb) * cr),
+						static_cast<float>(yv + 2.0 * (1.0 - kb) * cb)
+					};
+					float expectedRgb[3]{};
+					ExtendedRange::LutExtrapolate(view, inRgb, expectedRgb);
+					const int x = static_cast<int>(i * 32 + 16);
+					for (int ch = 0; ch < 3; ++ch)
+					{
+						const int expCode = static_cast<int>(std::lround(64.0 + 876.0 * expectedRgb[ch]));
+						const int gotCode = res.r.Channel(x, y, ch);
+						const int diff = std::abs(gotCode - expCode);
+						worstLut = (std::max)(worstLut, diff);
+						Assert::IsTrue(diff <= 1,
+							ToWide("LUT " + std::to_string(lutN) + "^3 probe " + std::to_string(i) + " ch " + std::to_string(ch) +
+								" got " + std::to_string(gotCode) + " exp " + std::to_string(expCode)).c_str());
+					}
+				}
+				report += "LUT " + std::to_string(lutN) + "^3 BTB/WTW face+edge+corner maxDelta=" + std::to_string(worstLut) + "\n";
+			}
+
+			// 3. GPU Timing Harness: 960x540 (half-4K) carry+restore (1:1 BT1886->2.4, 1.5x upscale) and 100% BTB/WTW LUT late restore.
+			const int bw = 960, bh = 540;
+			Planes benchPlanes;
+			benchPlanes.width = bw; benchPlanes.height = bh;
+			benchPlanes.luma.assign(static_cast<size_t>(bw) * bh, Code(990));   // WTW corner to stress all 3 axes in LUT & restore
+			benchPlanes.chroma.assign(static_cast<size_t>(bw / 2) * bh * 2, Code(512));
+			ErLut benchLut;
+			benchLut.Build(17, 0x4552424E43480001ull);
+
+			auto timeCase = [&](const char* label, const ErMoreCase& mc)
+			{
+				// Warm-up (shader compile & texture allocation).
+				Assert::IsTrue(ErRender(gpu, fixture.Renderer(), benchPlanes, mc).r.ok);
+				pl_gpu_finish(gpu);
+				const int kRuns = 7;
+				std::vector<double> ms(kRuns);
+				for (int i = 0; i < kRuns; ++i)
+				{
+					const auto t0 = std::chrono::steady_clock::now();
+					const ErMoreResult rr = ErRender(gpu, fixture.Renderer(), benchPlanes, mc);
+					pl_gpu_finish(gpu);
+					ms[i] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+					Assert::IsTrue(rr.r.ok);
+				}
+				std::sort(ms.begin(), ms.end());
+				char buf[160];
+				std::snprintf(buf, sizeof(buf), "GEM-ER timing %s (960x540): median %.3f ms (min %.3f max %.3f)\n",
+					label, ms[kRuns / 2], ms.front(), ms.back());
+				report += buf;
+			};
+			{
+				ErMoreCase m1;
+				m1.c.sourceTransfer = PL_COLOR_TRC_BT_1886;
+				m1.c.outputTransfer = PL_COLOR_TRC_GAMMA24;
+				m1.c.outputPrimaries = PL_COLOR_PRIM_DISPLAY_P3;
+				m1.c.scale = 1.0;
+				timeCase("1:1 BT1886->2.4 709->P3", m1);
+			}
+			{
+				ErMoreCase m2;
+				m2.c.sourceTransfer = PL_COLOR_TRC_GAMMA22;
+				m2.c.outputTransfer = PL_COLOR_TRC_GAMMA24;
+				m2.c.outputPrimaries = PL_COLOR_PRIM_DISPLAY_P3;
+				m2.c.scale = 1.5;
+				timeCase("up1.5 2.2->2.4 709->P3", m2);
+			}
+			{
+				ErMoreCase m3;
+				m3.c.outputPrimaries = PL_COLOR_PRIM_BT_709;
+				m3.c.scale = 1.0;
+				m3.lut = &benchLut.lut;
+				timeCase("1:1 WTW-corner 17^3 LUT", m3);
+			}
+
+			fixture.CaptureLog(nullptr);
+			Logger::WriteMessage(report.c_str());
+			AssertCleanLibplaceboLogExceptPreOutputBug(log);
+		}
 	};
 }
