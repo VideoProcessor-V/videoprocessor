@@ -790,5 +790,76 @@ namespace SegmentRunnerTestsNs
 			Assert::AreEqual<size_t>(0, d.unhandled);
 			Assert::IsTrue(hooks == plain, L"no hook added for it");
 		}
+
+		// GEM-025(a) (G-T3): NoteDisabledHooks handles null/0, unrelated signatures, matching mask signature, and one-shot latch.
+		TEST_METHOD(OutputFinishNoteDisabledHooksLatchesOcclusionMask)
+		{
+			OutputEncodingRepair::Hook repair;
+			OcclusionMask::Hook mask;
+			OutputSegments::OutputFinishSegment s3(repair, mask);
+			Assert::IsFalse(s3.OcclusionMaskDisabled());
+			const uint64_t maskSig = mask.Get()->signature;
+			const uint64_t other = maskSig ^ 0x55aa55aaULL;
+			Assert::IsFalse(s3.NoteDisabledHooks(nullptr, 1), L"null signatures pointer");
+			Assert::IsFalse(s3.NoteDisabledHooks(&maskSig, 0), L"zero count");
+			Assert::IsFalse(s3.NoteDisabledHooks(&other, 1), L"unrelated signature");
+			Assert::IsFalse(s3.OcclusionMaskDisabled());
+			const uint64_t list[2] = { other, maskSig };
+			Assert::IsTrue(s3.NoteDisabledHooks(list, 2), L"matching mask signature latches and returns true once");
+			Assert::IsTrue(s3.OcclusionMaskDisabled());
+			Assert::IsFalse(s3.NoteDisabledHooks(list, 2), L"one-shot latch: repeat call returns false");
+			Assert::IsTrue(s3.OcclusionMaskDisabled());
+		}
+
+		// GEM-025(b) (G-T3): BeginFrameDraws / OnDraw (1st/2nd/3rd) / EndFrameDraws / empty-cb Original no-op.
+		TEST_METHOD(OutputFinishNlsRetryOnDrawReleasesVectorsOnce)
+		{
+			OutputEncodingRepair::Hook repair;
+			OcclusionMask::Hook mask;
+			OutputSegments::OutputFinishSegment s3(repair, mask);
+			pl_hook_par par{};
+			pl_hook_par::pl_hook_par_data pdata{};
+			par.name = "occlusion_mask";
+			par.type = PL_VAR_FLOAT;
+			par.minimum.f = 0.0f;
+			par.maximum.f = 1.0f;
+			par.data = &pdata;
+			pdata.f = 1.0f;
+			pl_hook fakeHook{};
+			fakeHook.parameters = &par;
+			fakeHook.num_parameters = 1;
+			const pl_hook* hooks[1] = { &fakeHook };
+			pl_render_params params{};
+			params.hooks = hooks;
+			params.num_hooks = 1;
+
+			// Empty callback (Original pathway): OnDraw is a no-op on every call.
+			bool maskParamSet = true;
+			s3.BeginFrameDraws(std::function<void()>());
+			Assert::IsFalse(s3.OnDraw(params, maskParamSet));
+			Assert::IsFalse(s3.OnDraw(params, maskParamSet));
+			Assert::AreEqual(1.0f, pdata.f);
+			Assert::IsTrue(maskParamSet);
+			Assert::AreEqual(0ull, s3.NlsRetryReleases());
+			s3.EndFrameDraws();
+
+			// Active callback: 1st draw no-op, 2nd draw (NLS retry) releases vectors + zeroes occlusion_mask + clears flag, 3rd draw no-op.
+			int released = 0;
+			s3.BeginFrameDraws([&released] { ++released; });
+			Assert::IsFalse(s3.OnDraw(params, maskParamSet), L"1st draw must not release");
+			Assert::AreEqual(0, released);
+			Assert::AreEqual(1.0f, pdata.f);
+			Assert::IsTrue(s3.OnDraw(params, maskParamSet), L"2nd draw (NLS retry) must release");
+			Assert::AreEqual(1, released);
+			Assert::AreEqual(0.0f, pdata.f);
+			Assert::IsFalse(maskParamSet);
+			Assert::AreEqual(1ull, s3.NlsRetryReleases());
+			Assert::IsFalse(s3.OnDraw(params, maskParamSet), L"3rd draw must not re-release");
+			Assert::AreEqual(1, released);
+			s3.EndFrameDraws();
+			// After EndFrameDraws, callback is dropped.
+			Assert::IsFalse(s3.OnDraw(params, maskParamSet));
+			Assert::AreEqual(1, released);
+		}
 	};
 }

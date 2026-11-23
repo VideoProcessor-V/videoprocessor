@@ -9,6 +9,7 @@
 // otherwise, keeps its stable id, and Sync() changes the heading only on a real change.
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/FallbackPlainText.h>
 #include <VP-V/modules/motion/estimation/ProducerRecovery.h>
 #include <VP-V/modules/control/diagnostics/DiagnosticOverrides.h>
 
@@ -602,6 +603,21 @@ namespace FallbackCatalogTest
 				Assert::AreEqual(std::string(ids[i]), released[i].id);
 				Assert::IsFalse(released[i].engaged);
 			}
+		}
+
+		// GEM-025(a) (G-T3): OcclusionMaskDisabled catalog decision and FallbackPlainText sentence.
+		TEST_METHOD(OcclusionMaskDisabledCatalogAndPlainText)
+		{
+			const Decision on = OcclusionMaskDisabled(true);
+			Assert::IsTrue(on.engaged);
+			Assert::AreEqual(std::string("occlusion mask"), on.id);
+			Assert::IsTrue(Has(on, "disabled by libplacebo"));
+			const Decision off = OcclusionMaskDisabled(false);
+			Assert::IsFalse(off.engaged);
+			Assert::AreEqual(std::string("occlusion mask"), off.id);
+			const std::string plain = FallbackPlainText::Sentence("occlusion mask");
+			Assert::IsFalse(plain.empty(), L"FallbackPlainText must define a plain sentence for occlusion mask");
+			Assert::IsTrue(plain.find("occlusion mask") != std::string::npos);
 		}
 	};
 }

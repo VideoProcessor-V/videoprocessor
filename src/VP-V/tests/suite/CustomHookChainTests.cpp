@@ -587,5 +587,46 @@ namespace VideoProcessorTest
 			Assert::IsFalse(CustomHookChain::SetHookParameter(&unnamed.hook, "f", 1.0));
 			Assert::IsFalse(CustomHookChain::SetHookParameter(nullptr, "f", 1.0));
 		}
+
+		// GEM-029 + GEM-225 (G-T3 + verdict-V7.md:32): null name/hook/non-finite return false before any text path,
+		// finite non-integral & clamped PL_VAR_FLOAT match "%.9g" + strtod + Bounded bit-for-bit, and int/uint keep text path.
+		TEST_METHOD(SetHookParameterNullNonFiniteAndFloatDirectPath)
+		{
+			pl_hook_par par[3]{};
+			pl_hook_par::pl_hook_par_data data[3]{};
+			par[0].name = "f"; par[0].type = PL_VAR_FLOAT; par[0].minimum.f = -2.0f; par[0].maximum.f = 5.0f; par[0].data = &data[0]; data[0].f = 1.0f;
+			par[1].name = "s"; par[1].type = PL_VAR_SINT;  par[1].minimum.i = -4;    par[1].maximum.i = 4;    par[1].data = &data[1]; data[1].i = 1;
+			par[2].name = "u"; par[2].type = PL_VAR_UINT;  par[2].minimum.u = 0;     par[2].maximum.u = 8;    par[2].data = &data[2]; data[2].u = 1;
+			pl_hook hook{};
+			hook.parameters = par;
+			hook.num_parameters = 3;
+
+			// Null name, null hook, and non-finite (including with null name) must return false without crashing or modifying data.
+			const double nan = std::nan("");
+			Assert::IsFalse(CustomHookChain::SetHookParameter(nullptr, nullptr, 1.5));
+			Assert::IsFalse(CustomHookChain::SetHookParameter(&hook, nullptr, 1.5));
+			Assert::IsFalse(CustomHookChain::SetHookParameter(&hook, nullptr, nan));
+			Assert::IsFalse(CustomHookChain::SetHookParameter(nullptr, "f", nan));
+			Assert::IsFalse(CustomHookChain::SetHookParameter(&hook, "f", nan));
+			Assert::IsFalse(CustomHookChain::SetHookParameter(&hook, "f", INFINITY));
+			Assert::IsFalse(CustomHookChain::SetHookParameter(&hook, "f", -INFINITY));
+			Assert::AreEqual(1.0f, data[0].f);
+
+			// Finite non-integral & clamped PL_VAR_FLOAT
+			Assert::IsTrue(CustomHookChain::SetHookParameter(&hook, "f", 1.23456789123));
+			char text[64];
+			std::snprintf(text, sizeof(text), "%.9g", 1.23456789123);
+			Assert::AreEqual(static_cast<float>(std::strtod(text, nullptr)), data[0].f);
+			Assert::IsTrue(CustomHookChain::SetHookParameter(&hook, "f", 1e12));
+			Assert::AreEqual(5.0f, data[0].f);
+			Assert::IsTrue(CustomHookChain::SetHookParameter(&hook, "f", -1e12));
+			Assert::AreEqual(-2.0f, data[0].f);
+
+			// Non-integral int/uint keep text path (rounded and clamped)
+			Assert::IsTrue(CustomHookChain::SetHookParameter(&hook, "s", -2.6));
+			Assert::AreEqual(-3, data[1].i);
+			Assert::IsTrue(CustomHookChain::SetHookParameter(&hook, "u", 3.6));
+			Assert::AreEqual(4u, data[2].u);
+		}
 	};
 }

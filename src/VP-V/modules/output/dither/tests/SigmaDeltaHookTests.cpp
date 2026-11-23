@@ -2321,4 +2321,30 @@ if (g.y == 0 && g.x < DN_N) {
 			Assert::IsTrue(bound != base, L"a bound non-zero map must change the codes (the test would be vacuous)");
 		}
 	};
+
+	// GEM-029 (G-T3): pure CPU check that SigmaDeltaDomain supports only 8/10-bit sample and colour depths (no 9-bit).
+	TEST_CLASS(SigmaDeltaDomainGem029Tests)
+	{
+	public:
+		TEST_METHOD(SigmaDeltaDomainRejectsNineBitAndAcceptsEightTen)
+		{
+			auto eval = [](int sampleDepth, int colorDepth)
+			{
+				pl_color_repr repr{};
+				repr.sys = PL_COLOR_SYSTEM_RGB;
+				repr.levels = PL_COLOR_LEVELS_FULL;
+				repr.bits.sample_depth = sampleDepth;
+				repr.bits.color_depth = colorDepth;
+				return SigmaDeltaDomain::FromRepr(repr);
+			};
+			// Unsupported: 9-bit combinations and 12-bit sample depth
+			const int bad[4][2] = { { 9, 8 }, { 8, 9 }, { 9, 9 }, { 12, 10 } };
+			for (const auto& p : bad)
+				Assert::IsFalse(eval(p[0], p[1]).supported, L"9-bit and 12-bit domains must be rejected");
+			// Supported: 8/8, 10/8, 10/10
+			const int good[3][2] = { { 8, 8 }, { 10, 8 }, { 10, 10 } };
+			for (const auto& p : good)
+				Assert::IsTrue(eval(p[0], p[1]).supported, L"8-bit and 10-bit domains (color <= sample) must be supported");
+		}
+	};
 }
