@@ -400,3 +400,31 @@ This module still creates its own GPU textures through the `Ensure` wrapper (its
   cropped plane (the source-plane stand-in serves whole planes); crop variants are an open item of the P13 source ring.
 - Today's memo wiring is VP-V side only: the source-plane stand-in behind the P13 signature (deleted at the rebase onto
   r2/job1-core); the renderer has no call site of this module yet, so production registration is a later integration step.
+
+## Non-finite evidence (TD-NONFINITE)
+
+Every gate over a measured value (correlation, stronger / harm, high band, focus, uncertainty, base, evidence, referee,
+boost high-band / pull / no-reference / referee, coherence) closes explicitly when that value is NaN or infinite: the gate is
+0 and the block gets weight 0. The CPU model uses `Finite` (TemporalDetail.h) with `GateS` / `GateInv`, which now live in
+`core/Ramp.h` (RampMath, the U25 owner). `EvaluateBlock` closes all gates when any evidence or gate value is non-finite (also with
+a diagnostic gate switch on). The shaders mirror this with `td_fin` / `td_gs` / `td_gi` (TemporalDetailShaders.h). The 1 - S
+gates (uncertainty, base, no-reference) would otherwise OPEN on NaN.
+
+Gate r1 follow-up (2026-11-21, review-cb-u1-r1.md):
+- MUST 2: the evidence shader closes every gate on non-finite N, energies, correlation, u, base difference or any gate (also
+  the ones built from the per-block factors), exactly as `EvaluateBlock`.
+- MUST 3: the boost closes on a non-finite q or a NaN ramp, on the CPU and in the shader. A finite q = 0 under a positive peak keeps
+  its old meaning (raw = +inf, bn 1). The CPU referee `refB` closes (0) on a NaN future energy.
+- SHOULD 2: `td_fin` / `td_nan` test the IEEE bit pattern (`floatBitsToUint`), not `isnan` / `isinf`, so a compile without IEEE
+  strictness cannot fold them; `td_bgate` uses them too.
+- SHOULD 4: the gate forms are in core/Ramp. The U25 duplicate count drop from wrapping is structure, not consolidation, and is not
+  claimed.
+- Tests owed (paired sonnet writer + opus reviewer): see the lane's inbox / report.
+
+Gate r2 follow-up (2026-11-21, review-cb-u1-r2.md):
+- MUST 1: the decayed boost peak (qPeak, with e2Peak / fPeak) ignores a frame whose q, e2 or F is non-finite, at the first frame
+  (peak 0) and on update; one +inf q would otherwise hold the peak at +inf for good and open the boost. The boost ramp also needs a
+  finite peak. CPU and shader alike.
+- MUST 2: the shader closure tests the focus input itself (the current F and the F ratio): `td_gs` maps a non-finite ratio to a
+  finite 0, so the gate checks alone could not see it, while the model closes on `Finite(A.F)` and a NaN focus gate.
+- MUST 3: `Gpu::Module::LastEvidenceTexture(which)` exposes the last Apply's ev_a / ev_b (diagnostics and tests, read-only).

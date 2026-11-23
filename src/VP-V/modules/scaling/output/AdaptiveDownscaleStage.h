@@ -74,6 +74,9 @@ namespace AdaptiveDownscaleStage
 		std::function<NlsMaskMapping::Mapping()> nlsMapping;     // KnownNlsMapping()
 		std::function<bool()> ssimInChain;                       // customHooks.SubmitsFile("SSimDownscaler.glsl", lowLatency)
 		std::function<MotionSource()> motion;
+		// X5-GRAIN-P10: this source frame's shared grain products (P10 N blocks, P11 meanY / coverage); null or an invalid
+		// source = none, and the scaler keeps its own Laplacian estimate (a status line says so).
+		std::function<AdaptiveDownscale::GrainSource()> grainSource;
 		std::function<void()> publishStatus;                     // PublishCustomShaderStatus()
 		// Stage 8b one-axis: true for a LUMA prescaler hook (customHooks.IsPrescalerHook); null =
 		// none known (a doubler then stays in the list; the blend is still faithful-only).
@@ -161,6 +164,30 @@ namespace AdaptiveDownscaleStage
 		const TdProducts::ReadResult& TemporalDetailRead() const { return tdRead; }
 		FallbackCatalog::Decision TemporalDetailFallback() const { return tdRead.fallback; }
 
+		// X5-GRAIN-P10 (gate cb-u1 r1 SHOULD 6): the host offers the shared grain products (Host::grainSource) but the scaler
+		// did not use them on the last read-back frame. That engages "product.adaptive_downscale" with the reason; not offered
+		// (no callback) is no downgrade (the private estimate is then the design).
+		// Two entries by design (gate cb-u1 r3 MUST 1): the grain decision is a CLASSICAL cause and owns the bare id (host:
+		// FallbackCatalog::Sync(registry, GrainSourceFallback())); the temporal-detail read is keyed by cause,
+		// "product.adaptive_downscale [td: ...]" (TdProducts::FallbackKey; host: TdProducts::SyncRead on TemporalDetailRead()),
+		// never Sync() under the bare id. Neither stands for, overwrites or releases the other (TdProductReads.h).
+		FallbackCatalog::Decision GrainSourceFallback() const
+		{
+			const char* id = "product.adaptive_downscale";
+			if (!grainOffered || !module.Active())
+				return FallbackCatalog::Released(id);
+			switch (module.LastGrainSourceUse())
+			{
+			case AdaptiveDownscale::GrainSourceUse::Shared: return FallbackCatalog::Released(id);
+			case AdaptiveDownscale::GrainSourceUse::NoUsableBlock: return FallbackCatalog::Engaged(id, "grain: no usable shared block");
+			case AdaptiveDownscale::GrainSourceUse::MeasureDomain: return FallbackCatalog::Engaged(id, "grain: measure domain is linear / HDR");
+			// r2 NIT: bound, outcome not read back yet; nothing has been dropped, so no downgrade is claimed (the status line says pending).
+			case AdaptiveDownscale::GrainSourceUse::Pending: return FallbackCatalog::Released(id);
+			case AdaptiveDownscale::GrainSourceUse::NotSupplied: break;
+			}
+			return FallbackCatalog::Engaged(id, "grain: the offered shared products are invalid (missing or grid mismatch)");
+		}
+
 	private:
 		AdaptiveDownscale::Module& module;
 		bool upscaleThisFrame = false;   // Stage 8b on the frame being built
@@ -180,5 +207,6 @@ namespace AdaptiveDownscaleStage
 		unsigned long long lastFailureTick = 0;   // GetTickCount64() of the last frame with new failures
 		bool failureHeld = false;          // a failure within kFailureHoldMs
 		TdProducts::ReadResult tdRead;     // the temporal-detail read path of the frame just registered (nothing used in reset 1)
+		bool grainOffered = false;         // X5-GRAIN-P10: the host offered the shared grain products on the frame just registered
 	};
 }

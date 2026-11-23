@@ -801,12 +801,12 @@
      "evidence": [
       [
        "repair/temporal_detail/TemporalDetailGpu.cpp",
-       393,
+       398,
        "const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(sharedSplit, w, h, g.B, g.scale, cu, 0, param"
       ],
       [
        "repair/temporal_detail/TemporalDetailGpu.cpp",
-       424,
+       429,
        "if (GrainSplit::Gpu::CheckFit(split, w, h, g.B, g.scale, cu, 0, params.seq) != GrainSplit::Gpu::FitResult::Fit"
       ]
      ],

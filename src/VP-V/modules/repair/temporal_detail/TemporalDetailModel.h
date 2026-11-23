@@ -765,6 +765,12 @@ namespace TemporalDetail
 			if (off & Tuning::kGateUnc) e.uncGate = 1.0;
 			if ((off & Tuning::kGateAge) && e.ageSeconds < m_set.maxAgeSeconds * 4.0) e.ageGate = 1.0;
 		}
+		// TD-NONFINITE: non-finite evidence (or a non-finite gate from a source-side value) closes every gate (weight 0),
+		// regardless of the diagnostic gate switches.
+		if (!(Finite(e.e1c) && Finite(e.e1w) && Finite(e2c) && Finite(e2w) && Finite(e.corr) && Finite(e.u) && Finite(e.baseDiff) &&
+			Finite(A.N[bi]) && Finite(A.F[bi]) && Finite(e.corrGate) && Finite(e.strongerGate) && Finite(e.harmGate) &&
+			Finite(e.hbGate) && Finite(e.focusGate) && Finite(e.uncGate) && Finite(e.baseGate)))
+			e.corrGate = e.strongerGate = e.harmGate = e.hbGate = e.focusGate = e.uncGate = e.baseGate = 0.0;
 		e.hard = e.uncGate * e.baseGate * e.corrGate * e.harmGate * e.hbGate * e.focusGate;
 		e.valid = true;
 		return e;
@@ -1033,11 +1039,15 @@ namespace TemporalDetail
 				BlockState& st = m_blocks[i];
 				Work& wk = work[i];
 				const double q = A.q[i], e2 = A.e2[i], F = A.F[i];
+				// TD-NONFINITE (gate cb-u1 r2 MUST 1): the decayed peak ignores a non-finite observation. One q = +inf would
+				// otherwise hold qPeak at +inf for good (inf x decay stays inf) and open the boost (raw = +inf) on every later
+				// frame; a NaN at the first frame would close the block's boost for good.
+				const bool peakObs = Finite(q) && Finite(e2) && Finite(F);
 				// trackers (rebound counter, softening run, decayed peak)
 				if (!st.have)
 				{
 					st.have = true; st.qPrev = q; st.e2Prev = e2; st.qHigh = q; st.qLow = q; st.rstate = 0;
-					st.qPeak = q; st.e2Peak = e2; st.fPeak = F;
+					st.qPeak = peakObs ? q : 0.0; st.e2Peak = peakObs ? e2 : 0.0; st.fPeak = peakObs ? F : 0.0;
 				}
 				else
 				{
@@ -1055,7 +1065,7 @@ namespace TemporalDetail
 					const bool falling = q < st.qPrev * (1.0 - kSoftStep) && e2 < st.e2Prev * (1.0 - kSoftStep) && st.qPrev >= kRetireMinEnergy;
 					st.softRun = falling ? (std::min)(st.softRun + 1, kRunSaturate) : 0;
 					st.qPeak *= peakDecay;
-					if (q >= st.qPeak) { st.qPeak = q; st.e2Peak = e2; st.fPeak = F; }
+					if (peakObs && q >= st.qPeak) { st.qPeak = q; st.e2Peak = e2; st.fPeak = F; }
 					st.qPrev = q; st.e2Prev = e2;
 				}
 				// crossfade progress
@@ -1065,7 +1075,7 @@ namespace TemporalDetail
 					if (st.xf >= 1.0) st.prevSlot = -1;
 				}
 				const double hint = (i < in.quality.size()) ? Clamp(in.quality[i], 0.0, 1.0) : 1.0;
-				wk.evidence = (std::max)(RampMath::Smoothstep<double>(kEvidenceLo, kEvidenceHi, st.rebounds, RampMath::SmoothRule::Unguarded), 1.0 - hint);
+				wk.evidence = (std::max)(GateS(kEvidenceLo, kEvidenceHi, st.rebounds), 1.0 - hint);
 				if (m_tune.gatesOff & Tuning::kGateEvidence) wk.evidence = 1.0;
 				const bool cam = camBlock[i] != 0;
 				Source* ps = st.slot >= 0 ? FindSlot(st.slot) : nullptr;
@@ -1094,7 +1104,7 @@ namespace TemporalDetail
 						if (wk.pastId >= 0)
 						{
 							const double ratio = bestQ / (wk.pe.e1w + kEnergyFloor);
-							wk.referee = (m_tune.gatesOff & Tuning::kGateEvidence) ? 1.0 : RampMath::Smoothstep<double>(0.8 * kSoftFuture, 1.2 * kSoftFuture, ratio, RampMath::SmoothRule::Unguarded);
+							wk.referee = (m_tune.gatesOff & Tuning::kGateEvidence) ? 1.0 : GateS(0.8 * kSoftFuture, 1.2 * kSoftFuture, ratio);
 						}
 					}
 				}
@@ -1277,11 +1287,16 @@ namespace TemporalDetail
 				const double q = A.q[u];
 				const double raw = std::sqrt((std::max)(st.qPeak, q) / q) - 1.0;
 				const double boostMax = m_set.boost ? m_set.boostMax : 0.0;   // the boost switch (off by default)
-				double bn = boostMax > 0.0 ? Clamp(raw / boostMax, 0.0, 1.0) : 0.0;
-				const double hbP = RampMath::Smoothstep<double>(kRho2Lo, kRho2Hi, (A.e2[u] + kEnergyFloor) / (st.e2Peak + kEnergyFloor), RampMath::SmoothRule::Unguarded);
-				const double fP = RampMath::Smoothstep<double>(kPullLo, kPullHi, A.F[u] / (st.fPeak + 1e-6), RampMath::SmoothRule::Unguarded);
-				const double noRef = 1.0 - RampMath::Smoothstep<double>(0.0, 0.5, weight, RampMath::SmoothRule::Unguarded);
-				const double refB = wk.futQ >= 0.0 ? RampMath::Smoothstep<double>(0.8 * kSoftFuture, 1.2 * kSoftFuture, wk.futQ / (st.qPeak + kEnergyFloor), RampMath::SmoothRule::Unguarded) : 1.0;
+				// TD-NONFINITE (gate cb-u1 r1 MUST 3): non-finite evidence q, or a NaN ramp (0 / 0), closes the boost; Clamp
+				// passes NaN, which would poison the hysteresis state bLim for good. A finite q = 0 under a positive peak keeps
+				// its old meaning (raw = +inf: fully soft, bn 1), so the finite path is unchanged. A non-finite peak (r2 MUST 1;
+				// the tracker no longer stores one, this is the second guard) also closes it: +inf / q is not evidence.
+				double bn = (boostMax > 0.0 && Finite(q) && Finite(st.qPeak) && !std::isnan(raw)) ? Clamp(raw / boostMax, 0.0, 1.0) : 0.0;
+				const double hbP = GateS(kRho2Lo, kRho2Hi, (A.e2[u] + kEnergyFloor) / (st.e2Peak + kEnergyFloor));
+				const double fP = GateS(kPullLo, kPullHi, A.F[u] / (st.fPeak + 1e-6));
+				const double noRef = GateInv(0.0, 0.5, weight);
+				// A NaN future energy closes the referee (the `>= 0` test is false on NaN and would OPEN it at 1).
+				const double refB = !Finite(wk.futQ) ? 0.0 : wk.futQ >= 0.0 ? GateS(0.8 * kSoftFuture, 1.2 * kSoftFuture, wk.futQ / (st.qPeak + kEnergyFloor)) : 1.0;
 				bn *= hbP * fP * wk.evidence * noRef * refB * m_set.strength * Bg(u, 3);
 				bn = (st.retired ? 0.0 : bn);
 				if (!st.bOn && bn >= kEnterWeight) st.bOn = true;
@@ -1365,7 +1380,7 @@ namespace TemporalDetail
 					lambda = txt > 1e-9 ? Clamp(sxt / txt, 0.0, 1.0) : 1.0;
 					if (!(txt > 1e-9)) return 0.0;
 					const double rho = sxt / std::sqrt(txt * sxs + 1e-12);
-					return (1.0 - lambda) * (cohOff ? 1.0 : RampMath::Smoothstep<double>(kCoherenceLo, kCoherenceHi, rho, RampMath::SmoothRule::Unguarded));
+					return (1.0 - lambda) * (cohOff ? 1.0 : GateS(kCoherenceLo, kCoherenceHi, rho));
 				};
 				c.tau1 = share(st1, tt1, ss1, c.lam1);
 				c.tau2 = share(st2, tt2, ss2, c.lam2);

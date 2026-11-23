@@ -19,6 +19,8 @@
 // (C6-1 U25 ruling 5b: NaN-safe, DetailPulse output unchanged; NaN never propagates toward pixels).
 // The GLSL built-in smoothstep is untouched.
 
+#include <cmath>
+
 namespace RampMath
 {
 	template <class T> inline T Clamp01(T v) { return v < T(0) ? T(0) : (v > T(1) ? T(1) : v); }
@@ -46,4 +48,11 @@ namespace RampMath
 	}
 
 	template <class T> inline T Mix(T a, T b, T t) { return a + (b - a) * t; }
+
+	// Gate forms that CLOSE on non-finite evidence (weight 0 in both the S and the 1 - S form). The comparison-based
+	// Smoothstep would pass NaN through the S form and open the 1 - S form on it. Moved here from temporal detail
+	// (TD-NONFINITE; gate cb-u1 r1 SHOULD 4: one owner, U25). For ascending edges (every caller) this is the same
+	// arithmetic as the unguarded temporal-detail Smoothstep, so the finite path is unchanged.
+	template <class T> inline T GateS(T e0, T e1, T x) { return std::isfinite(x) ? Smoothstep(e0, e1, x) : T(0); }
+	template <class T> inline T GateInv(T e0, T e1, T x) { return std::isfinite(x) ? T(1) - Smoothstep(e0, e1, x) : T(0); }
 }

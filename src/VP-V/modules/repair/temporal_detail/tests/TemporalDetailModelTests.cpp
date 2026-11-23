@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <map>
 #include <random>
 #include <string>
@@ -355,6 +356,57 @@ namespace
 		m.SetTuning(tune);
 		return Go(m, frames, motion);
 	}
+	// --- TD-NONFINITE tests: access to Model's private members by explicit instantiation (the language's sanctioned way past
+	// `private`: no macro, no production change). EvaluateBlock, the stored sources, the per-block state, the per-block gate
+	// factors and the plane size are the seams the non-finite tests plant values through. ---
+	template <class Tag, typename Tag::type M> struct Rob { friend typename Tag::type Grab(Tag) { return M; } };
+	struct EvalTag
+	{
+		using type = Detail::Eval (Model::*)(int, int, const Detail::Analysis&, const Detail::Source&, bool, double) const;
+		friend type Grab(EvalTag);
+	};
+	struct SlotsTag { using type = std::vector<Detail::Source> Model::*; friend type Grab(SlotsTag); };
+	struct BlocksTag { using type = std::vector<Detail::BlockState> Model::*; friend type Grab(BlocksTag); };
+	struct GatesTag { using type = std::vector<float> Model::*; friend type Grab(GatesTag); };
+	struct WidthTag { using type = int Model::*; friend type Grab(WidthTag); };
+	struct HeightTag { using type = int Model::*; friend type Grab(HeightTag); };
+	template struct Rob<EvalTag, &Model::EvaluateBlock>;
+	template struct Rob<SlotsTag, &Model::m_slots>;
+	template struct Rob<BlocksTag, &Model::m_blocks>;
+	template struct Rob<GatesTag, &Model::m_blockGates>;
+	template struct Rob<WidthTag, &Model::m_w>;
+	template struct Rob<HeightTag, &Model::m_h>;
+
+	// One block's validation: a real analysis of the synthetic master, the same frame as the stored source (identity motion),
+	// with clean block maps (N = 1, F = 0.5). Every gate of block (0, 0) is then open except the soft "stronger" gate, so a
+	// planted value that closes a gate is the planted value's doing.
+	struct EvalFixture
+	{
+		Model model;
+		Detail::Analysis A;
+		Detail::Source src;
+		EvalFixture() : model(Steady())
+		{
+			(model.*Grab(WidthTag{})) = kW;
+			(model.*Grab(HeightTag{})) = kH;
+			A = Detail::Analyse(Sample(0, 0), 1.0, 16);
+			const size_t nb = static_cast<size_t>(A.bw) * static_cast<size_t>(A.bh);
+			for (size_t i = 0; i < nb; ++i) { A.N[i] = 1.0; A.F[i] = 0.5; }
+			src.id = 0; src.seq = 0; src.future = false;
+			src.s1 = A.s1; src.s2 = A.s2; src.s = A.s; src.base = A.base; src.grain = A.grain;
+			src.N = A.N; src.F = A.F; src.q = A.q;
+			src.cx.assign(nb, 0.0); src.cy.assign(nb, 0.0); src.u.assign(nb, 0.0);
+		}
+		Detail::Eval Eval() const { return (model.*Grab(EvalTag{}))(0, 0, A, src, false, kHz); }
+	};
+
+	std::wstring WideOf(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+	bool AllFinite(const std::vector<double>& v)
+	{
+		for (double x : v) if (!std::isfinite(x)) return false;
+		return true;
+	}
+
 }
 
 namespace VideoProcessorTest
@@ -1711,6 +1763,275 @@ namespace VideoProcessorTest
 			Assert::IsTrue(src.Backward(9999, out) && src.Forward(9999, out), L"newest pair found");
 			Assert::IsTrue(src.Backward(9991, out) && src.Forward(9991, out), L"oldest needed pair found");
 			Assert::IsFalse(src.Backward(9990, out), L"older pair pruned");
+		}
+
+		// --- TD-NONFINITE (gate cb-u1 r1 MUST 3 / MUST 4; README "Non-finite evidence") -----------------------------------------
+		// NaN and an infinity are evidence that cannot be compared: the unguarded comparison-based Smoothstep passes NaN
+		// through the S form and OPENS the 1 - S form (and +inf opens the S form). Every gate must close instead.
+
+		TEST_METHOD(TemporalDetailNonFiniteEvidenceClosesEveryGate)
+		{
+			const double values[3] = { std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity() };
+			const char* const valueNames[3] = { "NaN", "+inf", "-inf" };
+			{
+				EvalFixture control;
+				const Detail::Eval e = control.Eval();
+				Assert::IsTrue(e.hard > 0.1, L"control: a clean, identical, aligned source passes the hard gates");
+				Assert::IsTrue(e.corrGate > 0.9 && e.harmGate > 0.9 && e.hbGate > 0.9 && e.focusGate > 0.9 && e.uncGate > 0.9 && e.baseGate > 0.9,
+					L"control: every hard gate is open, so a closed gate below is the planted value's doing");
+			}
+			struct Site { const char* name; std::function<void(EvalFixture&, double)> plant; };
+			const std::vector<Site> sites = {
+				{ "A.N", [](EvalFixture& f, double v) { f.A.N[0] = v; } },
+				{ "A.F", [](EvalFixture& f, double v) { f.A.F[0] = v; } },
+				{ "source s1 energy", [](EvalFixture& f, double v) { f.src.s1.at(5, 5) = v; } },
+				{ "source s2 energy", [](EvalFixture& f, double v) { f.src.s2.at(5, 5) = v; } },
+				{ "source base", [](EvalFixture& f, double v) { f.src.base.at(5, 5) = v; } },
+				{ "source u", [](EvalFixture& f, double v) { f.src.u[0] = v; } },
+			};
+			for (const Site& site : sites)
+				for (int k = 0; k < 3; ++k)
+				{
+					EvalFixture f;
+					site.plant(f, values[k]);
+					const Detail::Eval e = f.Eval();
+					const std::string what = std::string(site.name) + " = " + valueNames[k];
+					Assert::IsTrue(e.hard == 0.0, WideOf(what + ": hard is 0").c_str());
+					Assert::IsTrue(e.corrGate == 0.0, WideOf(what + ": corr gate is 0").c_str());
+					Assert::IsTrue(e.strongerGate == 0.0, WideOf(what + ": stronger gate is 0").c_str());
+					Assert::IsTrue(e.harmGate == 0.0, WideOf(what + ": harm gate is 0").c_str());
+					Assert::IsTrue(e.hbGate == 0.0, WideOf(what + ": high-band gate is 0").c_str());
+					Assert::IsTrue(e.focusGate == 0.0, WideOf(what + ": focus gate is 0").c_str());
+					Assert::IsTrue(e.uncGate == 0.0, WideOf(what + ": uncertainty gate is 0").c_str());
+					Assert::IsTrue(e.baseGate == 0.0, WideOf(what + ": base gate is 0").c_str());
+				}
+		}
+
+		TEST_METHOD(TemporalDetailNonFiniteBlockGateFactorsAreNeutral)
+		{
+			// The regionally adaptive factors are sanitised (non-finite -> 1) before they scale any threshold, so a non-finite
+			// factor behaves as the neutral one: the same result as no factors at all, never a poisoned or open gate. A pin of
+			// the pre-existing sanitiser contract (SanitizeBlockGate), not a failing-before test.
+			// Gate cb-u1 r2 SHOULD 3: at an operating point where each factor CHANGES its gate (a finite control proves it), so
+			// "equals neutral" is told apart from "equals a clamp bound": the reference is weaker than the current block
+			// (s1 x sqrt(0.8): ratio 0.8, inside the harm ramp of the margin, factor 0), the motion uncertainty is 0.6 x uMax
+			// (factor 2) and the base differs by 1.5 x the allowance (factor 1). The strength factor (3) is not read by
+			// EvaluateBlock; the GPU texel test covers it end to end.
+			const double values[3] = { std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity() };
+			const double uMax = kUncertaintyPx * 1.0, allow = kBaseNoiseCodes + kBaseGrainSigmas * std::sqrt(1.0) / 4.0;   // scale 1, N = 1
+			auto sensitive = [&](EvalFixture& f)
+			{
+				for (double& v : f.src.s1.v) v *= std::sqrt(0.8);
+				std::fill(f.src.u.begin(), f.src.u.end(), 0.6 * uMax);
+				for (double& v : f.src.base.v) v += 1.5 * allow;
+			};
+			auto withFactor = [&](int k, double v)
+			{
+				EvalFixture f;
+				sensitive(f);
+				const size_t nb = static_cast<size_t>(f.A.bw) * static_cast<size_t>(f.A.bh);
+				std::vector<float>& g = f.model.*Grab(GatesTag{});
+				g.assign(nb * 4, 1.0f);
+				g[static_cast<size_t>(k)] = static_cast<float>(v);
+				return f.Eval();
+			};
+			EvalFixture control;
+			sensitive(control);
+			const Detail::Eval c = control.Eval();
+			LogF("sensitive point: harm %.4f, base %.4f, unc %.4f, hard %.4f", c.harmGate, c.baseGate, c.uncGate, c.hard);
+			Assert::IsTrue(c.hard > 0.0, L"control: the gates are open");
+			Assert::IsTrue(c.harmGate > 0.0 && c.harmGate < 1.0, L"control: the harm gate is inside its ramp");
+			Assert::IsTrue(c.baseGate > 0.0 && c.baseGate < 1.0, L"control: the base gate is inside its ramp");
+			Assert::IsTrue(c.uncGate > 0.0 && c.uncGate < 1.0, L"control: the uncertainty gate is inside its ramp");
+			// Finite control: a factor of 0.5 moves the gate it scales, so a factor that leaked would show.
+			Assert::IsTrue(withFactor(0, 0.5).harmGate != c.harmGate, L"control: margin factor 0.5 changes the harm gate");
+			Assert::IsTrue(withFactor(1, 0.5).baseGate != c.baseGate, L"control: base allowance factor 0.5 changes the base gate");
+			Assert::IsTrue(withFactor(2, 0.5).uncGate != c.uncGate, L"control: uncertainty factor 0.5 changes the uncertainty gate");
+			for (int k = 0; k < 3; ++k)
+				for (double v : values)
+				{
+					const Detail::Eval e = withFactor(k, v);
+					Assert::IsTrue(std::isfinite(e.hard) && e.hard == c.hard && e.baseGate == c.baseGate && e.uncGate == c.uncGate &&
+						e.strongerGate == c.strongerGate && e.harmGate == c.harmGate, L"a non-finite block gate factor equals the neutral factor");
+				}
+		}
+
+		TEST_METHOD(TemporalDetailNonFiniteStoredSourceKeepsWeightsAndOutputFinite)
+		{
+			// End to end: a stored reference whose structure, base, motion uncertainty or focus map goes non-finite after the
+			// transfer is running (a corrupted upload, an overflow upstream). The block weights, the boost and the picture must
+			// stay finite from the next frame on: the gates close instead of passing NaN into the weight limiter.
+			const int n = 20, plantAt = 17;
+			const Stream s = BuildPan(Pattern("IBBBPBBB", n), 0.0);
+			FieldMotionSource motion;
+			SetPan(motion, n, 0.0, 0.0);
+			const double values[3] = { std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity() };
+			const char* const valueNames[3] = { "NaN", "+inf", "-inf" };
+			struct Site { const char* name; std::function<void(Detail::Source&, double)> plant; };
+			const std::vector<Site> sites = {
+				{ "s1", [](Detail::Source& sl, double v) { std::fill(sl.s1.v.begin(), sl.s1.v.end(), v); } },
+				{ "s2", [](Detail::Source& sl, double v) { std::fill(sl.s2.v.begin(), sl.s2.v.end(), v); } },
+				{ "base", [](Detail::Source& sl, double v) { std::fill(sl.base.v.begin(), sl.base.v.end(), v); } },
+				{ "u", [](Detail::Source& sl, double v) { std::fill(sl.u.begin(), sl.u.end(), v); } },
+				{ "F", [](Detail::Source& sl, double v) { std::fill(sl.F.begin(), sl.F.end(), v); } },
+			};
+			for (const Site& site : sites)
+				for (int k = 0; k < 3; ++k)
+				{
+					const std::string what = std::string("stored ") + site.name + " = " + valueNames[k];
+					Model m(Steady());
+					double warmWeight = 0.0;
+					for (int t = 0; t < n; ++t)
+					{
+						if (t == plantAt)
+						{
+							std::vector<Detail::Source>& slots = m.*Grab(SlotsTag{});
+							Assert::IsTrue(!slots.empty(), WideOf(what + ": the store holds references").c_str());
+							for (Detail::Source& sl : slots) site.plant(sl, values[k]);
+						}
+						Model::FrameIn in;
+						in.luma = s.frames[static_cast<size_t>(t)];
+						in.seq = static_cast<uint64_t>(t);
+						in.contentHz = kHz;
+						in.motion = &motion;
+						const Plane out = m.Process(in);
+						if (t < plantAt)
+						{
+							for (double w : m.Diag().weight) warmWeight = (std::max)(warmWeight, w);
+							continue;
+						}
+						Assert::IsTrue(AllFinite(m.Diag().weight), WideOf(what + ": every block weight is finite").c_str());
+						Assert::IsTrue(AllFinite(m.Diag().boost), WideOf(what + ": every block boost is finite").c_str());
+						Assert::IsTrue(AllFinite(out.v), WideOf(what + ": the output picture is finite").c_str());
+					}
+					Assert::IsTrue(warmWeight > 0.05, WideOf(what + ": the transfer was running before the plant (the test is not vacuous)").c_str());
+				}
+		}
+
+		TEST_METHOD(TemporalDetailNonFinitePeakKeepsTheBoostStateFinite)
+		{
+			// MUST 3: a NaN ramp (a NaN peak makes sqrt(max(peak, q) / q) - 1 NaN) passed through Clamp into the boost target,
+			// and with the boost already on the hysteresis state bLim became NaN and stayed NaN for good. The boost must close
+			// instead, and the state must decay as it would for a zero target.
+			const int n = 52, plantAt = 40;
+			const Stream s = BuildPan(Pattern("IBBBPBBB", n), 0.0);
+			Model m(Steady());   // boost on, no motion source: only the structure-only boost can act
+			for (int t = 0; t < n; ++t)
+			{
+				if (t == plantAt)
+				{
+					std::vector<Detail::BlockState>& blocks = m.*Grab(BlocksTag{});
+					Assert::IsTrue(!blocks.empty(), L"the block states exist");
+					for (Detail::BlockState& st : blocks)
+					{
+						st.bOn = true;
+						st.bLim = 0.3;
+						st.qPeak = std::numeric_limits<double>::quiet_NaN();
+					}
+				}
+				Model::FrameIn in;
+				in.luma = s.frames[static_cast<size_t>(t)];
+				in.seq = static_cast<uint64_t>(t);
+				in.contentHz = kHz;
+				const Plane out = m.Process(in);
+				if (t < plantAt) continue;
+				bool stateFinite = true;
+				for (const Detail::BlockState& st : m.*Grab(BlocksTag{})) stateFinite = stateFinite && std::isfinite(st.bLim) && st.bLim >= 0.0 && st.bLim <= 1.0;
+				Assert::IsTrue(stateFinite, L"the boost limiter state bLim stays finite and in [0, 1] under a NaN peak");
+				Assert::IsTrue(AllFinite(m.Diag().boost), L"every block boost is finite under a NaN peak");
+				Assert::IsTrue(AllFinite(out.v), L"the output picture is finite under a NaN peak");
+			}
+		}
+
+		TEST_METHOD(TemporalDetailNonFiniteInfinitePeakNeverOpensTheBoost)
+		{
+			// Gate cb-u1 r2 MUST 1: a +inf decayed peak (one q = +inf frame) stays +inf for good (inf x decay = inf, no finite q
+			// replaces it), and raw = sqrt(inf / q) - 1 = +inf passed the old `Finite(q) && !isnan(raw)` test, so bn = 1: the
+			// boost OPENED on every later frame. It must stay closed. The stream is TemporalDetailBoostFallbackBounded's (no
+			// motion: only the structure-only boost can act), where the boost gates downstream of raw are open.
+			const int n = 56, plantAt = 32;
+			const Stream s = BuildPan(Pattern("IBBBPBBB", n), 0.0);
+			// infinite = false is the control: a FINITE huge peak (1e6 x the last q) on the same stream. raw is then large and
+			// finite, so the boost must act in at least one block (the downstream gates are open: the test is not vacuous).
+			auto runPlanted = [&](bool infinite, double& maxBoost, int& plantedKept, bool& closedWhilePlanted)
+			{
+				Model m(Steady());
+				maxBoost = 0.0; plantedKept = 0; closedWhilePlanted = true;
+				for (int t = 0; t < n; ++t)
+				{
+					if (t == plantAt)
+					{
+						std::vector<Detail::BlockState>& blocks = m.*Grab(BlocksTag{});
+						Assert::IsTrue(!blocks.empty(), L"the block states exist");
+						for (Detail::BlockState& st : blocks)
+						{
+							st.bOn = false;
+							st.bLim = 0.0;
+							st.qPeak = infinite ? std::numeric_limits<double>::infinity() : 1e6 * st.qPrev;
+						}
+					}
+					Model::FrameIn in;
+					in.luma = s.frames[static_cast<size_t>(t)];
+					in.seq = static_cast<uint64_t>(t);
+					in.contentHz = kHz;
+					const Plane out = m.Process(in);
+					if (t < plantAt) continue;
+					const std::vector<Detail::BlockState>& blocks = m.*Grab(BlocksTag{});
+					const std::vector<double>& boost = m.Diag().boost;
+					Assert::IsTrue(AllFinite(boost) && AllFinite(out.v), L"the boost and the picture stay finite");
+					plantedKept = 0;
+					for (size_t i = 0; i < blocks.size() && i < boost.size(); ++i)
+					{
+						maxBoost = (std::max)(maxBoost, boost[i]);
+						if (!std::isinf(blocks[i].qPeak)) continue;   // a re-initialised block state is no longer planted
+						++plantedKept;
+						if (boost[i] != 0.0 || blocks[i].bLim != 0.0 || blocks[i].bOn) closedWhilePlanted = false;
+					}
+				}
+			};
+			double controlBoost = 0.0, infBoost = 0.0;
+			int controlKept = 0, infKept = 0;
+			bool controlClosed = true, infClosed = true;
+			runPlanted(false, controlBoost, controlKept, controlClosed);
+			runPlanted(true, infBoost, infKept, infClosed);
+			LogF("finite huge peak: largest boost %.4f; +inf peak: largest boost %.4f, blocks still planted at the end %.0f", controlBoost, infBoost, infKept);
+			Assert::IsTrue(controlBoost > 0.0, L"control: a finite huge peak opens the boost in at least one block (the downstream gates are open)");
+			Assert::IsTrue(infKept > 0, L"the +inf peak is still held at the last frame (the planted path was exercised)");
+			Assert::IsTrue(infClosed, L"while a block holds a +inf peak its boost, bLim and bOn stay 0 on every frame");
+			Assert::IsTrue(infBoost == 0.0, L"the +inf peak run never boosts any block");
+		}
+
+		TEST_METHOD(TemporalDetailGateRampsCloseOnNonFiniteAndEqualSmoothstepWhenFinite)
+		{
+			// RampMath::GateS / GateInv (core/Ramp.h, the U25 owner): non-finite x gives 0 in both forms (the S form does not
+			// pass NaN, the 1 - S form does not open on it), and for a finite x with ascending edges both are the temporal-
+			// detail Smoothstep bit for bit (same arithmetic), so no finite behaviour moved with the TD-NONFINITE change.
+			const double nan = std::numeric_limits<double>::quiet_NaN(), inf = std::numeric_limits<double>::infinity();
+			for (double x : { nan, inf, -inf })
+			{
+				Assert::IsTrue(RampMath::GateS(0.3, 0.5, x) == 0.0, L"GateS(double) closes on a non-finite x");
+				Assert::IsTrue(RampMath::GateInv(0.3, 0.5, x) == 0.0, L"GateInv(double) closes on a non-finite x");
+				Assert::IsTrue(RampMath::GateS(0.3f, 0.5f, static_cast<float>(x)) == 0.0f, L"GateS(float) closes on a non-finite x");
+				Assert::IsTrue(RampMath::GateInv(0.3f, 0.5f, static_cast<float>(x)) == 0.0f, L"GateInv(float) closes on a non-finite x");
+				Assert::IsTrue(TemporalDetail::GateS(0.3, 0.5, x) == 0.0 && TemporalDetail::GateInv(0.3, 0.5, x) == 0.0, L"the temporal-detail names are the same gates");
+			}
+			const double edges[][2] = { { 0.0, 1.0 }, { 0.3, 0.5 }, { 0.45, 0.65 }, { 0.5 * kCorrMin, kCorrMin }, { 1.2, 3.6 }, { -2.0, 5.0 }, { 0.0, 0.5 }, { kRho2Lo, kRho2Hi } };
+			int compared = 0;
+			for (const auto& e : edges)
+			{
+				std::vector<double> xs = { e[0], e[1], 0.5 * (e[0] + e[1]), -1e9, 1e9 };
+				for (double x = -3.0; x <= 6.0; x += 0.0137) xs.push_back(x);
+				for (double x : xs)
+				{
+					const double ref = TemporalDetail::Smoothstep(e[0], e[1], x);
+					const double inv = 1.0 - ref;
+					const double s = RampMath::GateS(e[0], e[1], x), g = RampMath::GateInv(e[0], e[1], x);
+					Assert::IsTrue(std::memcmp(&ref, &s, sizeof ref) == 0, L"GateS is bit-identical to the temporal-detail Smoothstep on finite input");
+					Assert::IsTrue(std::memcmp(&inv, &g, sizeof inv) == 0, L"GateInv is bit-identical to 1 - Smoothstep on finite input");
+					++compared;
+				}
+			}
+			Assert::IsTrue(compared > 1000, L"a dense grid of finite inputs was compared");
 		}
 	};
 }

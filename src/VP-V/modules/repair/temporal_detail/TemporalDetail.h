@@ -17,6 +17,7 @@
 #include <vector>
 
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
+#include <VP-V/core/Ramp.h>
 
 namespace TemporalDetail
 {
@@ -92,7 +93,14 @@ namespace TemporalDetail
 	constexpr double kGuardTemplateShare = 0.25;         // the guard ignores the template's structure transfer where T^2 > this x the grain level N
 	constexpr double kCameraMinConfidence = 0.5;         // the model ignores a camera view below this
 
+	// TD-NONFINITE: evidence that is NaN or infinite closes its gates (weight 0) explicitly; the comparison-based
+	// Smoothstep would otherwise pass NaN through (S-form gates) or open on it (1 - S gates).
+	inline bool Finite(double v) { return std::isfinite(v); }
 	inline double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+	// Gate forms with explicit non-finite closing (TD-NONFINITE): non-finite evidence x gives weight 0 in both forms.
+	// They live in core/Ramp.h (U25 owner; gate cb-u1 r1 SHOULD 4); every caller passes ascending double edges.
+	using RampMath::GateS;
+	using RampMath::GateInv;
 
 	// Frames of a duration at the measured content rate (round, minimum 1). hz <= 0: the reference rate.
 	inline int Frames(double seconds, double hz)

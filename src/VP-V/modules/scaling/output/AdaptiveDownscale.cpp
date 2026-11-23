@@ -90,8 +90,17 @@ if (q.x < size.x && q.y < size.y)
 		// The cut is the shared cut event (cut_in: the skeleton scene product's delivered cut, AdaptiveDownscaleCut.h).
 		const char* const FINAL_HEADER = R"GLSL(
 shared vec4 ad_total[256];
+#ifdef AD_P10
+shared vec2 ad_p10[256];
+// Non-finite by the IEEE bit pattern (exponent all ones), not isnan / isinf, which a non-strict compile may fold.
+bool ad_nonfinite(float x) { return (floatBitsToUint(x) & 0x7fffffffu) >= 0x7f800000u; }
+#endif
 )GLSL";
 
+		// X5-GRAIN-P10 (AD_P10: the shared products are bound): the grain energy is derived from P10's per-block grain
+		// level N (a variance, codes^2) as the mean sigma weighted by the shadow law of P11's block mean luma over P11's
+		// flat coverage (picture share x off-edge share), in the Laplacian-per-sigma units the ramp uses. Without the
+		// products (no AD_P10) the private Laplacian partial sums (MEASURE_BODY x / y) give the energy: the visible fallback.
 		const char* const FINAL_BODY_A = R"GLSL(
 uint li = gl_LocalInvocationIndex;
 ivec2 n = textureSize(partial_in, 0);
@@ -99,15 +108,47 @@ vec4 acc = vec4(0.0);
 for (int idx = int(li); idx < n.x * n.y; idx += 256)
     acc += texelFetch(partial_in, ivec2(idx % n.x, idx / n.x), 0);
 ad_total[li] = acc;
+#ifdef AD_P10
+vec2 pacc = vec2(0.0);
+ivec2 nb = textureSize(p11_s4, 0);
+for (int idx = int(li); idx < nb.x * nb.y; idx += 256) {
+    ivec2 bk = ivec2(idx % nb.x, idx / nb.x);
+    vec2 ctr = (vec2(bk) + vec2(0.5)) * block_px;
+    if (ctr.x < crop_lo.x || ctr.y < crop_lo.y || ctr.x >= crop_hi.x || ctr.y >= crop_hi.y)
+        continue;
+    float lvl = texelFetch(p10_blocks, clamp(bk, ivec2(0), textureSize(p10_blocks, 0) - ivec2(1)), 0).x;
+    vec4 s4 = texelFetch(p11_s4, bk, 0);
+    float cov = s4.x * s4.y;
+    float my = texelFetch(p11_s0, clamp(bk, ivec2(0), textureSize(p11_s0, 0) - ivec2(1)), 0).x;
+    if (ad_nonfinite(lvl) || lvl < 0.0 || ad_nonfinite(cov) || cov <= 0.0 || ad_nonfinite(my))
+        continue;
+    float wgt = max(mix(1.0, 2.0 * (1.0 - clamp(my * p10_scale / 255.0, 0.0, 1.0)), shadow_bias), 0.0);
+    pacc += vec2(sqrt(lvl) * p10_scale * wgt * cov, cov);
+}
+ad_p10[li] = pacc;
+#endif
 barrier();
 for (uint s = 128u; s > 0u; s >>= 1u) {
-    if (li < s)
+    if (li < s) {
         ad_total[li] += ad_total[li + s];
+#ifdef AD_P10
+        ad_p10[li] += ad_p10[li + s];
+#endif
+    }
     barrier();
 }
 if (li == 0u && advance > 0.5) {
     vec4 t = ad_total[0];
+#ifdef AD_P10
+    // No usable block (all vetoed or outside the crop): the private estimate stands in for this frame, and the stats tag
+    // says so (1 = own estimate, 2 = the shared products), so the stage status is never "shared" on such a frame.
+    bool p10_used = ad_p10[0].y > 1e-6;
+    float energy = p10_used ? ENERGY_PER_SIGMA * ad_p10[0].x / ad_p10[0].y : t.x / max(t.y, 1.0);
+    float stats_tag = p10_used ? 2.0 : 1.0;
+#else
     float energy = t.x / max(t.y, 1.0);
+    float stats_tag = 1.0;
+#endif
     float free_mean = t.z / max(total_pixels, 1.0);
     float target = mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, energy));
     vec4 prev = imageLoad(state_io, ivec2(0));
@@ -120,9 +161,9 @@ if (li == 0u && advance > 0.5) {
     imageStore(state_io, ivec2(0), vec4(scale, free_mean, 0.0, cut ? 2.0 : 1.0));
     if (write_stats > 0.5) {
 #ifdef AD_STATS_IMG
-        imageStore(ad_stats_img, ivec2(0), vec4(scale, free_mean, 0.0, 1.0));
+        imageStore(ad_stats_img, ivec2(0), vec4(scale, free_mean, 0.0, stats_tag));
 #else
-        ad_out = vec4(scale, free_mean, 0.0, 1.0);
+        ad_out = vec4(scale, free_mean, 0.0, stats_tag);
 #endif
     }
 }
@@ -552,8 +593,14 @@ float rs_slope(float y)
 		mapSequence = 0;
 		mapState = MapState::Off;
 		grainField = GrainField();
+		grainSource = GrainSource();
+		grainFromShared = false;
+		grainDomainRefused = false;
 		readback = nullptr;
 		readbackPending = false;
+		readbackBound = false;
+		for (bool& b : statsSlotBound)
+			b = false;
 		gpu = nullptr;
 		active = false;
 		advancedSequence = 0;
@@ -628,12 +675,14 @@ float rs_slope(float y)
 
 	void Module::PollStats()
 	{
-		auto take = [this](const float values[4])
+		auto take = [this](const float values[4], bool bound)
 		{
 			stats.valid = true;
+			stats.grainBound = bound;   // r2 NIT: the read-back frame's pass bound the shared products (else Pending)
 			stats.grainScale = values[0];
 			stats.meanW = upscale.on ? upscale.wBase * values[0] : settings.wBase * values[1] * values[0];
 			stats.meanLuma = lastApl > 0.0f ? lastApl : 0.0f;   // the P4 APL of the newest advanced frame (not a private mean)
+			stats.grainFromShared = values[3] > 1.5f;   // X5-GRAIN-P10 stats tag: 2 = energy from P10 / P11, 1 = own estimate
 		};
 		if (NativeStatsReadback())
 		{
@@ -652,7 +701,7 @@ float rs_slope(float y)
 					statsSchedule.Release(slot);
 					continue;
 				}
-				take(values);
+				take(values, slot >= 0 && slot < kStatsSlots && statsSlotBound[slot]);
 				statsSchedule.Release(slot);
 			}
 			return;
@@ -661,7 +710,7 @@ float rs_slope(float y)
 			return;
 		float values[4] = {};
 		if (pl_buf_read(gpu, readback, 0, values, sizeof(values)))
-			take(values);
+			take(values, readbackBound);
 		readbackPending = false;
 	}
 
@@ -908,7 +957,7 @@ float rs_slope(float y)
 			pl_buffer_var outVar{};
 			outVar.var = pl_var_vec4("ad_out");
 			outVar.layout = pl_std430_layout(0, &outVar.var);
-			pl_shader_desc d[3] = { Sampled("partial_in", partial, false),
+			pl_shader_desc d[6] = { Sampled("partial_in", partial, false),
 				Storage("state_io", state, PL_DESC_ACCESS_READWRITE), pl_shader_desc{} };
 			int numDescriptors = 2;
 			if (native)
@@ -929,7 +978,26 @@ float rs_slope(float y)
 				d[2].memory = PL_MEMORY_COHERENT;
 				numDescriptors = 3;
 			}
-			const pl_shader_var v[8] = {
+			// X5-GRAIN-P10: the shared products (P10 N, P11 meanY and flat coverage) when supplied; else the
+			// private Laplacian estimate (visible: LastGrainFromSharedProducts() false, the stage status line).
+			// Gate cb-u1 r1 MUST 6: P10 N is in the source code domain, so it maps onto the ramp's Laplacian units only when
+			// the measure domain is the gamma code domain (mode 0). A linear or HDR measure keeps the private estimate, visibly.
+			const bool supplied = grainSource.Valid();
+			const bool shared = supplied && domain.mode < 0.5f;
+			grainDomainRefused = supplied && !shared;
+			const float blockPx = static_cast<float>(grainSource.blockPx);
+			const float codeScale = grainSource.codeToEightBit;
+			const float cropLo[2] = { (std::min)(grainSource.sourceCrop.x0, grainSource.sourceCrop.x1),
+				(std::min)(grainSource.sourceCrop.y0, grainSource.sourceCrop.y1) };
+			const float cropHi[2] = { (std::max)(grainSource.sourceCrop.x0, grainSource.sourceCrop.x1),
+				(std::max)(grainSource.sourceCrop.y0, grainSource.sourceCrop.y1) };
+			if (shared)
+			{
+				d[3] = Sampled("p10_blocks", grainSource.p10Blocks, false);
+				d[4] = Sampled("p11_s0", grainSource.p11Stats0, false);
+				d[5] = Sampled("p11_s4", grainSource.p11Stats4, false);
+			}
+			const pl_shader_var v[13] = {
 				{ pl_var_float("write_stats"), &writeStatsF, true },
 				{ pl_var_float("advance"), &advance, true },
 				{ pl_var_float("cut_in"), &cutIn, true },
@@ -937,16 +1005,30 @@ float rs_slope(float y)
 				{ pl_var_float("grain_lo"), &settings.grainLo, true },
 				{ pl_var_float("grain_hi"), &settings.grainHi, true },
 				{ pl_var_float("grain_floor"), &settings.grainFloor, true },
-				{ pl_var_float("smooth_alpha"), &alpha, true } };
+				{ pl_var_float("smooth_alpha"), &alpha, true },
+				{ pl_var_float("shadow_bias"), &settings.shadowBias, true },
+				{ pl_var_float("block_px"), &blockPx, true },
+				{ pl_var_float("p10_scale"), &codeScale, true },
+				{ pl_var_vec2("crop_lo"), cropLo, true },
+				{ pl_var_vec2("crop_hi"), cropHi, true } };
+			static const std::string p10Define = std::string("#define AD_P10 1\n#define ENERGY_PER_SIGMA ") +
+				std::to_string(kEdgeEnergyPerSigma) + "\n";
 			static const std::string finalImgHeader = std::string("#define AD_STATS_IMG 1\n") + FINAL_HEADER;
+			static const std::string finalP10Header = p10Define + FINAL_HEADER;
+			static const std::string finalImgP10Header = p10Define + finalImgHeader;
+			const char* finalHeader = shared ? (native ? finalImgP10Header.c_str() : finalP10Header.c_str()) :
+				(native ? finalImgHeader.c_str() : FINAL_HEADER);
 			if (numDescriptors != 3 || !Compute(p->dispatch, "VideoProcessor adaptive downscale: grain",
-				native ? finalImgHeader.c_str() : FINAL_HEADER, FinalBody().c_str(), d, numDescriptors, v, 8, 1, 1))
+				finalHeader, FinalBody().c_str(), d, shared ? 6 : 3, v, shared ? 13 : 8, 1, 1))
 			{
 				if (statsSlot >= 0)
 					statsSchedule.Release(statsSlot);
 				++failures;
 				return unchanged;
 			}
+			grainFromShared = shared;
+			if (statsSlot >= 0 && statsSlot < kStatsSlots)
+				statsSlotBound[statsSlot] = shared;
 			if (statsSlot >= 0)
 				statsNative->QueueDeferred(statsSlot);   // this pass runs inside libplacebo's frame: the native copy follows the frame (NativeReadback.h)
 			if (advance > 0.5f)
@@ -954,7 +1036,10 @@ float rs_slope(float y)
 				advancedSequence = sequence;
 				cutContinuous = true;   // C5: the next ask covers the frames since this one
 				if (writeStats && !native)
+				{
 					readbackPending = true;
+					readbackBound = shared;
+				}
 			}
 			// 4. 8-3: the map, after the scalar (it reads the cut flag).
 			if (!UpdateMap(p->dispatch, advance > 0.5f))

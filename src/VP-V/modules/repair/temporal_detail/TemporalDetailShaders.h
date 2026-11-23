@@ -35,14 +35,21 @@ namespace TemporalDetail
 	{
 		// Smoothstep, Catmull-Rom, slot-major block index; needs only the #defines.
 		constexpr const char* kCore = R"GLSL(
+// TD-NONFINITE: finite / NaN by the IEEE bit pattern (exponent all ones), not isnan / isinf, which a compile without IEEE
+// strictness may fold away (gate cb-u1 r1 SHOULD 2).
+bool td_fin(float x) { return (floatBitsToUint(x) & 0x7fffffffu) < 0x7f800000u; }
+bool td_nan(float x) { return (floatBitsToUint(x) & 0x7fffffffu) > 0x7f800000u; }
 // TemporalDetail::SanitizeBlockGate on the GPU: non-finite -> 1, thresholds to [TD_BGATE_MIN, TD_BGATE_MAX], strength to [0, 1].
 vec4 td_bgate(vec4 v)
 {
-    bvec4 bad = bvec4(isnan(v.x) || isinf(v.x), isnan(v.y) || isinf(v.y), isnan(v.z) || isinf(v.z), isnan(v.w) || isinf(v.w));
+    bvec4 bad = bvec4(!td_fin(v.x), !td_fin(v.y), !td_fin(v.z), !td_fin(v.w));
     v = mix(v, vec4(1.0), bvec4(bad));
     return vec4(clamp(v.xyz, vec3(TD_BGATE_MIN), vec3(TD_BGATE_MAX)), clamp(v.w, 0.0, 1.0));
 }
 float td_ss(float e0, float e1, float x) { float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
+// TD-NONFINITE (RampMath::GateS / GateInv): non-finite evidence closes the gate (weight 0) in both the S and 1 - S forms.
+float td_gs(float e0, float e1, float x) { return td_fin(x) ? td_ss(e0, e1, x) : 0.0; }
+float td_gi(float e0, float e1, float x) { return td_fin(x) ? 1.0 - td_ss(e0, e1, x) : 0.0; }
 vec4 td_cr(float t)
 {
     float t2 = t * t, t3 = t2 * t;
@@ -312,23 +319,32 @@ if (gl_LocalInvocationIndex == 0u) {
 #endif
         float margin = TD_STRONGER_MARGIN * bgv.x;
         float corr = a1.z / sqrt(a1.x * a1.y + 1e-12);
-        float corrGate = td_ss(0.5 * TD_CORR_MIN, TD_CORR_MIN, corr);
+        float corrGate = td_gs(0.5 * TD_CORR_MIN, TD_CORR_MIN, corr);
         float ratio = (e1w + fl) / (e1c + fl);
-        float stronger = td_ss(1.0 + margin, 1.0 + 3.0 * margin, ratio) * td_ss(TD_SIG_LO, TD_SIG_HI, e1w / (N + fl));
-        float harm = td_ss(1.0 - 3.0 * margin, 1.0 - margin, ratio);
-        float hb = td_ss(TD_RHO2_LO, TD_RHO2_HI, (e2c + fl) / (e2w + fl));
+        float stronger = td_gs(1.0 + margin, 1.0 + 3.0 * margin, ratio) * td_gs(TD_SIG_LO, TD_SIG_HI, e1w / (N + fl));
+        float harm = td_gs(1.0 - 3.0 * margin, 1.0 - margin, ratio);
+        float hb = td_gs(TD_RHO2_LO, TD_RHO2_HI, (e2c + fl) / (e2w + fl));
         float cx = (float(b.x) + 0.5) * float(TD_B) - 0.5, cy = (float(b.y) + 0.5) * float(TD_B) - 0.5;
         vec2 sp = td_position(k, int(cx), int(cy));
         int sbx = clamp(int(floor((sp.x + 0.5) / float(TD_B))), 0, TD_BW - 1), sby = clamp(int(floor((sp.y + 0.5) / float(TD_B))), 0, TD_BH - 1);
         float Fw = texelFetch(slot_blk, ivec2(k * TD_BW + sbx, sby), 0).x;
-        float focus = td_ss(TD_PULL_LO, TD_PULL_HI, texelFetch(meas, b, 0).z / (Fw + 1e-6));
+        float fcur = texelFetch(meas, b, 0).z, fx = fcur / (Fw + 1e-6);
+        float focus = td_gs(TD_PULL_LO, TD_PULL_HI, fx);
         float u = td_mot_grid(k, vec2(cx, cy)).z;
         float umax = TD_UMAX * bgv.z;
-        float unc = 1.0 - td_ss(0.3 * umax, umax, u);
+        float unc = td_gi(0.3 * umax, umax, u);
         float allow = (TD_BASE_NOISE + TD_BASE_GRAIN_SIGMAS * sqrt(max(0.0, N)) / 4.0) * bgv.y;
-        float bgate = 1.0 - td_ss(allow, 2.0 * allow, a1.w / n);
+        float bgate = td_gi(allow, 2.0 * allow, a1.w / n);
         float ageSec = (tab.z + 1.0) / hz;
         float ageGate = clamp((max_age - ageSec) / (max_age * TD_AGE_FADE), 0.0, 1.0);
+        // TD-NONFINITE (gate cb-u1 r1 MUST 2; the CPU EvaluateBlock closing): non-finite evidence, or a non-finite gate
+        // from N or the per-block factors, closes every gate. The focus input is tested directly (r2 MUST 2): td_gs maps a
+        // non-finite ratio to a finite 0, so only the model's Finite(A.F) and NaN focus-gate checks mirror it.
+        if (!(td_fin(N) && td_fin(e1c) && td_fin(e1w) && td_fin(e2c) && td_fin(e2w) && td_fin(corr) && td_fin(u) &&
+              td_fin(a1.w / n) && td_fin(corrGate) && td_fin(stronger) && td_fin(harm) && td_fin(hb) && td_fin(focus) &&
+              td_fin(unc) && td_fin(bgate) && td_fin(fcur) && !td_nan(fx))) {
+            corrGate = 0.0; stronger = 0.0; harm = 0.0; hb = 0.0; focus = 0.0; unc = 0.0; bgate = 0.0;
+        }
         float hard = unc * bgate * corrGate * harm * hb * focus;
         ea = vec4(hard, ageGate, stronger, e1w);
         eb = vec4(hb, focus, unc * bgate * corrGate, ageSec);
@@ -346,9 +362,11 @@ if (b.x < TD_BW && b.y < TD_BH) {
     if (motion_lost > 0.5) { st.slot = -1.0; st.prevSlot = -1.0; st.xf = 1.0; st.qref = 0.0; }
     vec4 m = texelFetch(meas, b, 0);
     float q = m.w, e2 = m.y, F = m.z;
+    // TD-NONFINITE (gate cb-u1 r2 MUST 1): the decayed peak ignores a non-finite observation (as the model).
+    bool peakObs = td_fin(q) && td_fin(e2) && td_fin(F);
     if (st.have < 0.5) {
         st.have = 1.0; st.qPrev = q; st.e2Prev = e2; st.qHigh = q; st.qLow = q; st.rstate = 0.0;
-        st.qPeak = q; st.e2Peak = e2; st.fPeak = F;
+        st.qPeak = peakObs ? q : 0.0; st.e2Peak = peakObs ? e2 : 0.0; st.fPeak = peakObs ? F : 0.0;
     } else {
         st.rebounds *= rebound_decay;
         if (st.rstate < 0.5) {
@@ -361,7 +379,7 @@ if (b.x < TD_BW && b.y < TD_BH) {
         bool falling = q < st.qPrev * (1.0 - TD_SOFT_STEP) && e2 < st.e2Prev * (1.0 - TD_SOFT_STEP) && st.qPrev >= TD_RETIRE_MIN;
         st.softRun = falling ? min(st.softRun + 1.0, 1048576.0) : 0.0;   // saturates at TemporalDetail::kRunSaturate = 1 << 20 (as the model)
         st.qPeak *= peak_decay;
-        if (q >= st.qPeak) { st.qPeak = q; st.e2Peak = e2; st.fPeak = F; }
+        if (peakObs && q >= st.qPeak) { st.qPeak = q; st.e2Peak = e2; st.fPeak = F; }
         st.qPrev = q; st.e2Prev = e2;
     }
     if (st.prevSlot >= 0.0) {
@@ -373,7 +391,7 @@ if (b.x < TD_BW && b.y < TD_BH) {
 #else
     float hint = 1.0;
 #endif
-    float evidence = max(td_ss(TD_EV_LO, TD_EV_HI, st.rebounds), 1.0 - hint);
+    float evidence = max(td_gs(TD_EV_LO, TD_EV_HI, st.rebounds), 1.0 - hint);
     int slot = int(st.slot);
     bool live = slot >= 0 && slot < TD_K && slots_valid > 0.5 && texelFetch(tab_old, ivec2(slot, 0), 0).x > 0.5;
     if (slot >= 0 && !live) { st.slot = -1.0; st.prevSlot = -1.0; st.xf = 1.0; st.qref = 0.0; }
@@ -678,10 +696,12 @@ if (b.x < TD_BW && b.y < TD_BH) {
     // fallback boost (structure only)
     float q = m.w;
     float raw = sqrt(max(st.qPeak, q) / q) - 1.0;
-    float bn = boost_max > 0.0 ? clamp(raw / boost_max, 0.0, 1.0) : 0.0;
-    float hbP = td_ss(TD_RHO2_LO, TD_RHO2_HI, (m.y + TD_FLOOR) / (st.e2Peak + TD_FLOOR));
-    float fP = td_ss(TD_PULL_LO, TD_PULL_HI, m.z / (st.fPeak + 1e-6));
-    float noRef = 1.0 - td_ss(0.0, 0.5, weight);
+    // TD-NONFINITE (gate cb-u1 r1 MUST 3, r2 MUST 1): non-finite q, a non-finite peak or a NaN ramp closes the boost
+    // (GLSL clamp is undefined on NaN).
+    float bn = (boost_max > 0.0 && td_fin(q) && td_fin(st.qPeak) && !td_nan(raw)) ? clamp(raw / boost_max, 0.0, 1.0) : 0.0;
+    float hbP = td_gs(TD_RHO2_LO, TD_RHO2_HI, (m.y + TD_FLOOR) / (st.e2Peak + TD_FLOOR));
+    float fP = td_gs(TD_PULL_LO, TD_PULL_HI, m.z / (st.fPeak + 1e-6));
+    float noRef = td_gi(0.0, 0.5, weight);
     bn *= hbP * fP * evidence * noRef * bstrength;
     bn = st.retired > 0.5 ? 0.0 : bn;
     if (st.bOn < 0.5 && bn >= TD_ENTER) st.bOn = 1.0;
@@ -801,8 +821,8 @@ if (gl_LocalInvocationIndex == 0u) {
         float st1 = a0.x, tt1 = a0.y, ss1 = a0.z, st2 = a0.w, tt2 = a1.x, ss2 = a1.y;
         float lam1 = tt1 > 1e-9 ? clamp(st1 / tt1, 0.0, 1.0) : 1.0;
         float lam2 = tt2 > 1e-9 ? clamp(st2 / tt2, 0.0, 1.0) : 1.0;
-        float tau1 = tt1 > 1e-9 ? (1.0 - lam1) * td_ss(TD_COHERENCE_LO, TD_COHERENCE_HI, st1 / sqrt(tt1 * ss1 + 1e-12)) : 0.0;
-        float tau2 = tt2 > 1e-9 ? (1.0 - lam2) * td_ss(TD_COHERENCE_LO, TD_COHERENCE_HI, st2 / sqrt(tt2 * ss2 + 1e-12)) : 0.0;
+        float tau1 = tt1 > 1e-9 ? (1.0 - lam1) * td_gs(TD_COHERENCE_LO, TD_COHERENCE_HI, st1 / sqrt(tt1 * ss1 + 1e-12)) : 0.0;
+        float tau2 = tt2 > 1e-9 ? (1.0 - lam2) * td_gs(TD_COHERENCE_LO, TD_COHERENCE_HI, st2 / sqrt(tt2 * ss2 + 1e-12)) : 0.0;
         tl = vec4(tau1, tau2, lam1, lam2);
         w = (tau1 <= 0.0 && tau2 <= 0.0) ? 0.0 : c.x;
     }

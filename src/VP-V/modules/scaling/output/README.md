@@ -208,3 +208,42 @@ This module still creates its own GPU textures (see the static test src/VP-V/tes
 | Slot-off bandwidth (FBO read/write) | f16 | f32, about 2x intermediate bandwidth for those profiles | GPU frame-time rise only for slot-off profiles, to be timed on the laptop RTX 3050 Ti | pending TRAIN-1 |
 | Stable 7.360 lane | f16 (no flag) | f16, now labelled "picture precision ... below 12-bit" | label shown, no pixel change | pending TRAIN-1 |
 | `SyncFallback` cost per frame | none | two compares plus a registry sync, no string work when unchanged | below measurement noise | pending TRAIN-1 |
+
+## Grain energy from the shared products (X5-GRAIN-P10)
+
+The scalar grain term (`grain_scale`, the ramp over `grain_lo` / `grain_hi`) derives its energy from the one shared grain
+estimate instead of a private Laplacian: P10's per-block grain level N (a variance), mapped to the Laplacian-per-sigma units the
+ramp is defined in (`kEdgeEnergyPerSigma` = sqrt(20) * sqrt(2/pi) = 3.568, the mean |discrete Laplacian| of unit white noise; a
+derivation, not a fitted figure), weighted per block by the shadow law (`shadow_bias`, unchanged) of P11's block mean luma, over
+P11's flat coverage (picture share x off-edge share). `grain_lo` / `grain_hi` keep their meaning. The per-block `GrainError`
+map (`MAP_BODY`) is the motion product's and is unchanged.
+
+The host supplies `AdaptiveDownscale::GrainSource` (P10 blocks, P11 S0 and S4, the block size, the code-unit scale to 8-bit codes and
+the source crop) through `AdaptiveDownscaleStage::Host::grainSource`. The private Laplacian partial sums (`MEASURE_BODY`,
+`FINAL_BODY_A`) give the energy instead, nothing latched, in four cases. `LastGrainSourceUse()` and the status line name the
+reason (gate cb-u1 r1, 2026-11-21):
+- not supplied: the callback is null, a texture is missing, or the three grids differ (`GrainSource::SameGrid`, SHOULD 5);
+- measure domain: the measure domain is linear or HDR (`domain.mode` > 0). P10 N is in source codes there, not the ramp's gamma
+  units, so the shared products are not bound (MUST 6);
+- no usable block: the products were bound, but the read-back frame had no usable block. The final pass writes a stats tag
+  (w = 2: energy from P10 / P11, w = 1: own estimate), so the status is never "shared" on such a frame (MUST 5);
+- shared: the read-back frame's energy came from P10 / P11;
+- pending (gate cb-u1 r2): the products are bound, but the statistics read back so far are of frames that did not bind them (the
+  read-back lags a few frames). Each stats slot remembers whether its pass bound the products, so the first frames after binding
+  are never a transient "no usable block".
+
+When the host offers the products but they are not used, `Stage::GrainSourceFallback()` engages FallbackCatalog
+"product.adaptive_downscale" with the reason (SHOULD 6); pending engages nothing. The grain decision is a classical cause and owns the bare
+id: the host syncs it with `FallbackCatalog::Sync(registry, GrainSourceFallback())`. The temporal-detail read path is keyed by cause
+("product.adaptive_downscale [td: ...]", `TdProducts::FallbackKey`) and the host syncs it with `TdProducts::SyncRead`. They are two
+entries by design (gate cb-u1 r3 MUST 1). The per-block non-finite test uses the IEEE bit pattern (SHOULD 2).
+`kEdgeEnergyPerSigma` is 3.5682482 (SHOULD 1). The white-noise mapping still needs the registered GPU calibration
+(FIX-X5-GRAIN-P10) before a host wires the source. Once the host
+supplies the source on every frame the private partial terms (`MEASURE_BODY` lap / flat_px, the `AD_P10`-less branch) are deleted.
+The catalog row 3 path is `VP-V/modules/scaling/output/AdaptiveDownscale`. Row 3 declares only what this module reads today
+(check_private_copies X8, 2026-11-21 A20-CB fix): it has no skeleton `Acquire` of P4, P10 or P11, P4 is not read at all, and P10 /
+P11 arrive only through `Host::grainSource`, which no host supplies yet. So the row declares none of the three. Its lag-1 reads
+(P14 source identity, P14g source geometry) are unchanged. P10 and P11 are declared again when the module acquires them itself
+(REBASE-ON-CA, with C5+A). The design decision is that a declaration follows the code, so the product graph never orders or
+keeps a product for a read that does not happen. Registered change: FIX-X5-GRAIN-P10 (before / after
+grain_scale trace and X5AbCapture CSV on the D8 clip set and two grainy clips; the calibration check is a GPU measurement).

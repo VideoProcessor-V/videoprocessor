@@ -142,6 +142,43 @@ namespace AdaptiveDownscale
 		NlsMaskMapping::Mapping nls{};
 	};
 
+	// X5-GRAIN-P10: the frame's grain energy derived from the shared products instead of the private Laplacian
+	// partial sums: P10's grain level N per block (p10Blocks, .x), P11's block mean luma (p11Stats0, .x) and flat
+	// coverage (p11Stats4: .x picture share x .y off-edge share), all on one block grid of blockPx source pixels.
+	// No source (any null texture): the private Laplacian estimate stays as the VISIBLE fallback (Stage status line).
+	struct GrainSource
+	{
+		pl_tex p10Blocks = nullptr;    // GrainSplit::Gpu view: gs_blocks(b).x = N (codes^2 in the product's code unit)
+		pl_tex p11Stats0 = nullptr;    // RegionEvidence S0: meanY in codes (the product's code unit)
+		pl_tex p11Stats4 = nullptr;    // RegionEvidence S4: coverage, offShare
+		int blockPx = 16;              // source pixels per block edge
+		float codeToEightBit = 1.0f;   // 255 / the code unit's white: N and meanY to the 8-bit codes the thresholds use
+		pl_rect2df sourceCrop{};       // the source crop libplacebo scales, in the blocks' source pixels (blocks centred in it count)
+		// Gate cb-u1 r1 SHOULD 5: the three textures must share ONE block grid, or the per-block reads would misalign.
+		// Null-safe (r2 NIT): any missing texture is no shared grid.
+		bool SameGrid() const
+		{
+			return p10Blocks && p11Stats0 && p11Stats4 &&
+				p10Blocks->params.w == p11Stats0->params.w && p10Blocks->params.h == p11Stats0->params.h &&
+				p10Blocks->params.w == p11Stats4->params.w && p10Blocks->params.h == p11Stats4->params.h;
+		}
+		bool Valid() const { return p10Blocks && p11Stats0 && p11Stats4 && blockPx > 0 && codeToEightBit > 0.0f && SameGrid(); }
+	};
+
+	// Which grain estimate the last scalar pass used (no silent fallbacks; gate cb-u1 r1 MUST 5 / 6).
+	enum class GrainSourceUse : uint8_t
+	{
+		NotSupplied,     // no valid GrainSource this frame: the private estimate
+		MeasureDomain,   // supplied, but the measure domain is linear / HDR, so P10 N (source codes) is not in the ramp's units
+		NoUsableBlock,   // bound, but the last read-back frame had no usable block (all vetoed or outside the crop)
+		Shared,          // the last read-back frame's energy came from P10 / P11
+		Pending,         // bound now, but no read-back yet of a frame that bound them (r2 NIT): the outcome is not known yet
+	};
+
+	// One Gaussian-noise sigma in the mean-|Laplacian| energy units the grain ramp is defined in: the discrete
+	// Laplacian 4e - (b + d + f + h) of white noise has std sqrt(20) sigma, and E|x| = sqrt(2/pi) std for a Gaussian.
+	constexpr float kEdgeEnergyPerSigma = 3.5682482f;   // sqrt(20) * sqrt(2 / pi) = 4.4721360 * 0.7978846
+
 	// Stage 12 §2c / S8-1: the de-judder's motion for the source frame being
 	// rendered (from the last estimate; null = none: this frame's residual).
 	struct Motion
@@ -249,6 +286,8 @@ namespace AdaptiveDownscale
 		float meanLuma = 0.0f;  // the newest advanced frame's APL (8-bit codes) from the P4 record; 0 when P4 was unavailable
 		// Audit x5dup S2: the field above is taken when the statistics are collected, so it can be a frame newer than grainScale and
 		// meanW (those are read back a few frames late).
+		bool grainFromShared = false;   // X5-GRAIN-P10: the frame's grain energy came from P10 / P11 (stats tag 2)
+		bool grainBound = false;        // ... and that frame's scalar pass bound the shared products (r2 NIT: Pending until then)
 	};
 
 	// Stage 8b (docs/VP-stage8b-upscale-blend.md): the same module upscaling a
@@ -343,6 +382,24 @@ namespace AdaptiveDownscale
 		// scalar). Call every frame; the textures are the matcher's.
 		void SetGrainField(const GrainField& field) { grainField = field; }
 		void ClearGrainField() { grainField = GrainField(); }
+		// X5-GRAIN-P10: after SetFrame, the shared grain products for this source frame (call every frame;
+		// ClearGrainSource = none: the private Laplacian estimate runs, shown in the stage status).
+		void SetGrainSource(const GrainSource& value) { grainSource = value; }
+		void ClearGrainSource() { grainSource = GrainSource(); }
+		// Which estimate the grain energy came from (status, tests; gate cb-u1 r1 MUST 5). The per-frame "no usable block"
+		// fallback runs inside the shader, so Shared needs the read-back stats tag, not only the binding. Gate cb-u1 r2 NIT:
+		// the read-back lags the binding by a few frames, so until a read-back of a frame that BOUND the products arrives
+		// (stats.grainBound) the outcome is Pending, never a transient NoUsableBlock.
+		GrainSourceUse LastGrainSourceUse() const
+		{
+			if (!grainFromShared)
+				return grainDomainRefused ? GrainSourceUse::MeasureDomain : GrainSourceUse::NotSupplied;
+			if (!stats.valid || !stats.grainBound)
+				return GrainSourceUse::Pending;
+			return stats.grainFromShared ? GrainSourceUse::Shared : GrainSourceUse::NoUsableBlock;
+		}
+		// True when the last read-back grain energy came from the shared products (false: the private estimate).
+		bool LastGrainFromSharedProducts() const { return LastGrainSourceUse() == GrainSourceUse::Shared; }
 		// Stage 12 §2c / S8-1: after SetFrame, the motion for this source frame
 		// (call every frame; ClearMotion when there is none or NLS is active).
 		void SetMotion(const Motion& value) { motion = value; }
@@ -430,6 +487,9 @@ namespace AdaptiveDownscale
 		uint64_t mapSequence = 0;
 		MapState mapState = MapState::Off;
 		GrainField grainField{};
+		GrainSource grainSource{};
+		bool grainFromShared = false;      // the last scalar pass bound the shared products (AD_P10)
+		bool grainDomainRefused = false;   // ... a valid source was refused: the measure domain is not the gamma code domain
 		Motion motion{};
 		pl_tex residual[2] = { nullptr, nullptr };   // luma residual: this source frame's and the previous one's
 		int residualIndex = 0;                        // residual[residualIndex] = residualSequence's
@@ -452,6 +512,10 @@ namespace AdaptiveDownscale
 		bool statsNativeTried = false;
 		LedDrive::ReadbackRing statsSchedule{ kStatsSlots, 8 };
 		uint64_t statsFrames = 0;
+		// Whether the scalar pass whose statistics a slot (native ring) / the buffer holds bound the shared grain products
+		// (gate cb-u1 r2 NIT: LastGrainSourceUse Pending until such a frame is read back).
+		bool statsSlotBound[kStatsSlots] = {};
+		bool readbackBound = false;
 		pl_shader_obj polarLut = nullptr;
 		pl_shader_obj orthoLut[2] = { nullptr, nullptr };
 		bool active = false;
