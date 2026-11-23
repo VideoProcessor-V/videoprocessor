@@ -33,12 +33,16 @@ namespace VpMotion
 	inline bool TakeDejudderHistoryAction(bool resyncOn, bool epochMoved, MotionValidity::Pending& pending,
 		VpMotionResync::Readers& readers)
 	{
-		if (!HistoryReaderDrives(resyncOn, readers))
-			return epochMoved;
-		const VpMotionResync::HistoryPending h = readers.TakeHistory();
-		if (h.release)
-			pending.release = true;
-		return epochMoved || h.changed || h.forgetRebaseHolders;
+		bool acted = epochMoved;
+		if (HistoryReaderDrives(resyncOn, readers))
+		{
+			const VpMotionResync::HistoryPending h = readers.TakeHistory();
+			if (h.release)
+				pending.release = true;
+			acted = epochMoved || h.changed || h.forgetRebaseHolders;
+		}
+		readers.NoteLastHistoryAction(acted && pending.release);
+		return acted;
 	}
 
 	// R21: whether THIS frame's live per-frame C (`dejudderAheadPayload`, loaded at RenderLocked entry)

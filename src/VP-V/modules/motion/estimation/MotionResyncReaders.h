@@ -105,6 +105,9 @@ public:
         return p;
     }
     const HistoryPending& PeekHistory() const { return m_history; }
+    // FIX3-D1: exact release outcome recorded atomically on the render thread by TakeDejudderHistoryAction.
+    void NoteLastHistoryAction(bool released) noexcept { m_lastHistoryActionReleased = released; }
+    bool LastHistoryActionReleased() const noexcept { return m_lastHistoryActionReleased; }
 
     // vector-producer
     ProducerNote TakeProducerNote()
@@ -230,6 +233,7 @@ private:
     bool m_historyHave = false;
     bool m_historyLatched = false;
     bool m_producerLatched = false;
+    bool m_lastHistoryActionReleased = false;
     uint64_t m_latchBaseline = 0;
 };
 

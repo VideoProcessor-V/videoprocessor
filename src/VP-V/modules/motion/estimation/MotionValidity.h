@@ -591,7 +591,6 @@ namespace MotionValidity
 			seenEpoch = p.epoch;
 			return p;
 		}
-		bool ReleasePending() const noexcept { return releasePending.load(std::memory_order_acquire); }
 
 	private:
 		// The unconditional epoch move (today's Invalidate).

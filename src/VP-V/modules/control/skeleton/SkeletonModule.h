@@ -345,9 +345,11 @@ namespace Vpv
 			mutable std::mutex ownerFillsMutex_;
 			std::map<std::pair<VpSkeleton::ProductId, VpSkeleton::AcquireForm>, std::pair<std::string, VpSkeleton::OwnerFill>> ownerFills_;
 			std::shared_ptr<VpSkeleton::SkeletonMemo> MemoHostOf(const void* host, bool create) const;
-			// L-CORE (102b P13-NO-LANE-GPU-ALLOC): the VRAM ledger grant and GPU presence of a memo no lane is bound to (render thread,
-			// at Begin). Re-planned when the need, the declared VRAM users or the binding changed, else every kNoLaneReplanFrames.
+			// L-CORE (102b P13-NO-LANE-GPU-ALLOC) / FIX3-D7: the VRAM ledger grant and GPU presence of a memo no lane is bound to
+			// (strictly render-thread-only: guarded by renderTid_ recorded on render-thread entry points). Re-planned when the need,
+			// the declared VRAM users, the GPU presence or the binding changed, else every kNoLaneReplanFrames.
 			void PlanNoLaneGpu(const void* host);
+			std::atomic<uint32_t> renderTid_{ 0 };   // FIX3-D7: Win32 thread ID of render-thread entry points (0 = not yet observed)
 			// QKP B: the queue window of this Begin (derived before the memo seal, published to the board); the board is read by any thread.
 			void DeriveMemoWindow(const void* host, const std::shared_ptr<VpSkeleton::SkeletonMemo>& memo, uint64_t seq, const std::shared_ptr<HostState>& st, bool sampleTiming = true);
 		public:

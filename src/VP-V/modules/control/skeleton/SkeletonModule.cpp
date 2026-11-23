@@ -1018,6 +1018,7 @@ namespace Vpv
 			std::shared_ptr<VpSkeleton::SkeletonMemo> memo;
 			// Render thread (PlanNoLaneGpu): what the last no-lane grant was planned for.
 			bool planned = false;
+			bool plannedGpuPresent = false;
 			uint64_t plannedNeed = 0, plannedVramVersion = 0, plannedBinds = 0;
 			uint32_t framesSincePlan = 0;
 			VpSkeleton::MemoGpuGrant grant;
@@ -1095,25 +1096,40 @@ namespace Vpv
 
 		void SkeletonModule::PlanNoLaneGpu(const void* host)
 		{
+			// FIX3-D7: strictly render-thread-only (never calls QueryCard or mutates MemoHost planning fields off-thread).
+			const uint32_t rtid = renderTid_.load(std::memory_order_acquire);
+			if (rtid == 0u || static_cast<uint32_t>(GetCurrentThreadId()) != rtid)
+				return;
 			const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host);
 			if (!mh || mh->memo->LaneBound())
 				return;   // a bound lane plans the memo (its scratch-arena grant, Configure)
 			VpSkeleton::SkeletonMemo& memo = *mh->memo;
+			const void* const gpu = gpuSlots_.Aux(host);
+			const bool gpuPresent = gpu != nullptr;
 			const std::vector<uint64_t> levels = memo.GpuNeedLevels();   // QKP B (amendment M6): one level per ahead-ladder step
 			const uint64_t need = levels.empty() ? 0u : levels.front();
 			const uint64_t vramVersion = VpSkeleton::VramUsers::Instance().Version();
 			const uint64_t binds = memo.LaneBinds();
 			++mh->framesSincePlan;
-			if (mh->planned && mh->plannedNeed == need && mh->plannedVramVersion == vramVersion && mh->plannedBinds == binds
+			if (mh->planned && mh->plannedGpuPresent == gpuPresent && mh->plannedNeed == need
+				&& mh->plannedVramVersion == vramVersion && mh->plannedBinds == binds
 				&& mh->framesSincePlan < kNoLaneReplanFrames)
 				return;
 			mh->planned = true;
+			mh->plannedGpuPresent = gpuPresent;
 			mh->plannedNeed = need;
 			mh->plannedVramVersion = vramVersion;
 			mh->plannedBinds = binds;
 			mh->framesSincePlan = 0;
+			// FIX3-D7: AttachMemoGpu strictly BEFORE SetGpuDispatcherPresent(true), and release ownerFillsMutex_
+			// BEFORE QueryCard (zero mutex held across DXGI calls).
+			if (gpuPresent && !memo.HasGpuDevice())
+			{
+				std::lock_guard<std::mutex> lock(ownerFillsMutex_);
+				AttachMemoGpu(*mh, gpu);
+			}
 			// The render GPU is the "dispatcher" of a no-lane GPU fill (FrameMemo::gpu): present while the renderer's pl_gpu is known.
-			memo.SetGpuDispatcherPresent(gpuSlots_.Aux(host) != nullptr);
+			memo.SetGpuDispatcherPresent(gpuPresent);
 			CardProfile card;
 			std::string why;
 			if (cardOverride_)
@@ -1194,6 +1210,11 @@ namespace Vpv
 				fm.haveNext = true;
 			}
 			fm.gpu = gpuSlots_.Aux(host);
+			// FIX3-D7: lazily created no-lane memo on frame 1 plans GPU presence/grant strictly on the render thread
+			// (never off-thread on producer/worker threads, and zero mutex held across QueryCard inside PlanNoLaneGpu).
+			const uint32_t rtid = renderTid_.load(std::memory_order_acquire);
+			if (!fm.memo->LaneBound() && rtid != 0u && static_cast<uint32_t>(GetCurrentThreadId()) == rtid)
+				PlanNoLaneGpu(host);
 			return fm;
 		}
 
@@ -1334,6 +1355,7 @@ namespace Vpv
 			switch (f.kind)
 			{
 			case RE::Lifecycle::GpuCreated:
+				renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
 				// Audit S3: a memo device still attached at GpuCreated belongs to a renderer that never sent GpuReleased (a dead device,
 				// whatever the new pl_gpu's address): abandoned before the new one is known, so a same-address pl_gpu is never mistaken
 				// for it (its pl_dispatch is forgotten, not reused). Covers a memo-only host too (no lane state).
@@ -1386,18 +1408,19 @@ namespace Vpv
 			case RE::Lifecycle::GpuReleased:
 			case RE::Lifecycle::Shutdown:
 			{
+				renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
 				const std::shared_ptr<HostState> st = hosts_.Find(f.host);
 				if (st)
-					Teardown(st, true);
-				else
-					hosts_.Remove(f.host, true);
-				gpuSlots_.Remove(f.host, true);   // the pl_gpu is going away: the dispatcher was released by Teardown above
+					Teardown(st, false);   // join lane workers & release dispatcher first while hosts_ still holds aux
+				// FIX3-D7 teardown order: gpuSlots_.Remove -> DetachMemoGpu -> memoHosts_.Remove -> hosts_.Remove.
+				gpuSlots_.Remove(f.host, true);   // clear pl_gpu first so no off-thread MemoHostOf can attach the dying device
 				{
 					std::lock_guard<std::mutex> lock(ownerFillsMutex_);   // as at GpuCreated (C2 gate SHOULD 2): one lock context for the memo's device   // SHOULD 1: the lock BEFORE the Find, so a MemoHostOf registration cannot slip between them
 					if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
 						DetachMemoGpu(*mh, true);     // R2: the memo's GPU spots and the owner textures go while the device lives
 				}
 				memoHosts_.Remove(f.host, true);  // L-CORE: the renderer's memo (a reader's pin keeps its spots until released)
+				hosts_.Remove(f.host, true);      // remove D3D11 device aux LAST (after memo GPU detach)
 				EraseExternal(f.host);   // a renderer recreated at this address never inherits the old one's external demand
 				// 15c-c8: with the demand goes its raise of the store; version 0 = the next Begin looks again (a later declaration raises anew).
 				VpFrameAnalysis::SourceFrameTap::SetStoreDemand(f.host, false, std::string());
@@ -2887,6 +2910,7 @@ namespace Vpv
 			}
 			if (c.phase == RE::FramePhase::Entrance)
 			{
+				renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
 				if (const std::shared_ptr<HostState> e = hosts_.Find(c.host))
 				{
 					e->budgetFeed.NoteCaptureRate(c.captureRateHz);   // S0: measured rate for the slot budget
@@ -2918,6 +2942,7 @@ namespace Vpv
 			}
 			if (c.phase != RE::FramePhase::Begin && c.phase != RE::FramePhase::AfterRender)
 				return false;
+			renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
 			if (c.phase == RE::FramePhase::AfterRender)
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(c.host))
 					if (mh->gpuDevice)
@@ -2980,6 +3005,7 @@ namespace Vpv
 		// to the outcome) without an active lane for this host or with no sequence. Render thread.
 		void SkeletonModule::OnAfterPresent(RE::FrameContext& c, RE::PresentContext& p)
 		{
+			renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
 			// fx/dv-frame-quiet (refs/121): the frame's native GPU work VP deferred (the monitor's tile pass + copy, the hooks' copies)
 			// is issued here, after the submit and outside libplacebo's frame, for every host and before any early return below.
 			FrameQuiet::Deferred::EndThisFrame();
