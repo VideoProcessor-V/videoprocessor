@@ -18,6 +18,7 @@ namespace Vpv
 {
 	void ConfigEditorAccess::BindFormApi(ConfigEditorWindow& window)
 	{
+		EnsureSectionStyleSheet();   // install VP-V's property-scoped rules on qApp once before any widget exists
 		ConfigEditorWindow* const self = &window;
 		FunctionFormApi& formApi = self->formApi_;
 		formApi.valueFn = [self](const QString& section, const QString& key) { return self->value(section, key); };
@@ -102,9 +103,11 @@ namespace Vpv
 		vpvHost.openPage = [self](const QString& pageName) { self->selectPage(pageName); };
 		vpvHost.bothPathwayCards = [self] { return BothPathwayCards(self->formApi_.kit); };
 		vpvHost.unitCards = [self](const QString& unitId) { return WithGeneralPageCards(self->formApi_.kit, unitId, self->vpvPages_.takeUnitCards(unitId)); };
+		auto* vpvRoot = new QWidget;
 		self->vpvPages_.append(self->pages_, QStringLiteral("VP-V"), self->createPage(QStringLiteral("VP-V"),
 			QStringLiteral("Everything VP-V adds, by unit: one tier per unit plus a global tier, each unit's settings, and the fallbacks engaged."),
-			CreateSection(vpvHost)));
+			vpvRoot));
+		PopulateSection(vpvRoot, vpvHost);
 	}
 
 	void ApplyMotionAheadText(QComboBox* motionAhead)
