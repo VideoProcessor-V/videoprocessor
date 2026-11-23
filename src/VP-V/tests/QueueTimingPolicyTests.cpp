@@ -443,5 +443,195 @@ namespace VpvTests
 					QueueLookaheadWalk::ActivePictureView(pw));
 			}
 		}
+
+		// R30: ShouldShedLowLatencyExcess unit boundary (derived 0.5 s sustained window, min 8 frames).
+		TEST_METHOD(ShouldShedLowLatencyExcessBoundariesAndRateScaling)
+		{
+			// 60p -> derived window = max(8, lround(0.5 * 60)) = 30 frames.
+			{
+				unsigned run = 0;
+				for (unsigned f = 1; f < 30; ++f)
+				{
+					Assert::IsFalse(VpQueueRules::ShouldShedLowLatencyExcess(3, 2, 60.0, run));
+					Assert::AreEqual(f, run);
+				}
+				Assert::IsTrue(VpQueueRules::ShouldShedLowLatencyExcess(3, 2, 60.0, run),
+					L"60p triggers at frame 30 (0.5 s sustained excess)");
+				Assert::AreEqual(0u, run, L"run resets to 0 after triggering");
+			}
+
+			// 24p -> derived window = max(8, lround(0.5 * 24)) = 12 frames.
+			{
+				unsigned run = 0;
+				for (unsigned f = 1; f < 12; ++f)
+				{
+					Assert::IsFalse(VpQueueRules::ShouldShedLowLatencyExcess(3, 2, 24.0, run));
+					Assert::AreEqual(f, run);
+				}
+				Assert::IsTrue(VpQueueRules::ShouldShedLowLatencyExcess(3, 2, 24.0, run),
+					L"24p triggers at frame 12 (0.5 s sustained excess)");
+				Assert::AreEqual(0u, run);
+			}
+
+			// Low rate (12p -> 0.5 * 12 = 6 -> clamped to 8-frame floor).
+			{
+				unsigned run = 0;
+				for (unsigned f = 1; f < 8; ++f)
+					Assert::IsFalse(VpQueueRules::ShouldShedLowLatencyExcess(3, 2, 12.0, run));
+				Assert::IsTrue(VpQueueRules::ShouldShedLowLatencyExcess(3, 2, 12.0, run),
+					L"12p clamps to derived 8-frame minimum window");
+				Assert::AreEqual(0u, run);
+			}
+
+			// Transient 1-frame excursions at 24p and 60p NEVER trigger (dip resets run to 0).
+			for (double hz : { 24.0, 60.0 })
+			{
+				unsigned run = 0;
+				for (int i = 0; i < 100; ++i)
+				{
+					Assert::IsFalse(VpQueueRules::ShouldShedLowLatencyExcess(3, 2, hz, run));
+					Assert::AreEqual(1u, run);
+					Assert::IsFalse(VpQueueRules::ShouldShedLowLatencyExcess(2, 2, hz, run));
+					Assert::AreEqual(0u, run);
+				}
+			}
+
+			// 29 frames excess at 60p interrupted by 1 on-target frame resets run and does NOT trigger on the next 29.
+			{
+				unsigned run = 0;
+				for (int i = 0; i < 29; ++i)
+					Assert::IsFalse(VpQueueRules::ShouldShedLowLatencyExcess(3, 2, 60.0, run));
+				Assert::AreEqual(29u, run);
+				Assert::IsFalse(VpQueueRules::ShouldShedLowLatencyExcess(2, 2, 60.0, run));
+				Assert::AreEqual(0u, run);
+				for (int i = 0; i < 29; ++i)
+					Assert::IsFalse(VpQueueRules::ShouldShedLowLatencyExcess(3, 2, 60.0, run));
+				Assert::AreEqual(29u, run);
+			}
+		}
+
+		// R30: VpFixedBudgetPolicy::EvaluateBacklog deterministic low-latency shed on 60p target=2 queue_size=4
+		// latched at depth 3 (50 ms age, 16.67 ms render cycle), with mandatory in-test negative control proving
+		// lowLatency=false latches permanently at depth 3 across 120 frames, plus Original pathway protection.
+		TEST_METHOD(LowLatencySustainedExcessShedsCleanlyWithNegativeControlAndOriginalPathwayProtection)
+		{
+			auto makeLatchedContext = [](size_t depth) {
+				BacklogContext c;
+				c.queueBefore = depth;
+				c.target = 2;
+				c.oldestQueuedAgeMs = 50.0;      // 3 * 16.67 ms (excess beyond target = 16.67 ms << 100 ms stale threshold)
+				c.renderCycleMs = 16.67;         // well below 50 ms MINIMUM_RENDER_STALL_MS
+				c.captureRateHz = 60.0;
+				c.measuredSignalRateHz = 60.0;
+				c.hold.active = false;           // PlanHold disables delay hold in low-latency mode
+				c.fileSource = false;
+				return c;
+			};
+
+			const BacklogContext latched3 = makeLatchedContext(3);
+
+			// 1. In-Test Negative Control (unprotected baseline: lowLatency = false):
+			//    On the exact same latched depth-3 input, recovery NEVER triggers across 120 frames.
+			{
+				VpQueueTiming::Options opt;
+				opt.originalPathway = false;
+				opt.queueTimingFixes = true;
+				opt.lowLatency = false;
+				VpQueueTiming::VpFixedBudgetPolicy unprotected(opt);
+				BacklogRunState run;
+				for (int f = 1; f <= 120; ++f)
+				{
+					const BacklogDecision d = unprotected.EvaluateBacklog(latched3, run);
+					Assert::IsFalse(d.recover,
+						L"negative control: without lowLatency shed, 60p depth 3 latches permanently across 120 frames");
+				}
+				Assert::AreEqual(0u, run.heldExcessRun);
+			}
+
+			// 2. Protected Path (lowLatency = true): triggers HeldBacklog (maxDrop=1, restartsTiming=false)
+			//    at frame 30 (0.5 s), returning cleanly to target=2 without restarting timing.
+			{
+				VpQueueTiming::Options opt;
+				opt.originalPathway = false;
+				opt.queueTimingFixes = true;
+				opt.lowLatency = true;
+				VpQueueTiming::VpFixedBudgetPolicy policy(opt);
+				BacklogRunState run;
+				for (unsigned f = 1; f < 30; ++f)
+				{
+					const BacklogDecision d = policy.EvaluateBacklog(latched3, run);
+					Assert::IsFalse(d.recover, L"must not trigger before 0.5 s (30 frames) at 60p");
+					Assert::AreEqual(f, run.heldExcessRun);
+				}
+				const BacklogDecision shed = policy.EvaluateBacklog(latched3, run);
+				Assert::IsTrue(shed.recover, L"low-latency sustained excess sheds at frame 30");
+				Assert::IsTrue(shed.trigger == Trigger::HeldBacklog, L"shed reports Trigger::HeldBacklog");
+				Assert::AreEqual(size_t{ 1 }, shed.maxDrop, L"drops exact excess (queueBefore 3 - desired 2 == 1)");
+				Assert::IsFalse(shed.restartsTiming, L"shed preserves timing lock (restartsTiming == false)");
+				Assert::AreEqual(0u, run.heldExcessRun, L"run resets to 0 after shed");
+
+				// After dropping 1 frame back to target=2, queue stays calm with 0 further recoveries.
+				const BacklogContext onTarget = makeLatchedContext(2);
+				for (int f = 0; f < 60; ++f)
+				{
+					const BacklogDecision d = policy.EvaluateBacklog(onTarget, run);
+					Assert::IsFalse(d.recover);
+					Assert::AreEqual(0u, run.heldExcessRun);
+				}
+
+				// Multi-frame excess (depth 4, target 2): drops exact excess (2) at frame 30 without timing restart.
+				const BacklogContext latched4 = makeLatchedContext(4);
+				for (int f = 1; f < 30; ++f)
+					Assert::IsFalse(policy.EvaluateBacklog(latched4, run).recover);
+				const BacklogDecision shed2 = policy.EvaluateBacklog(latched4, run);
+				Assert::IsTrue(shed2.recover && shed2.trigger == Trigger::HeldBacklog && !shed2.restartsTiming);
+				Assert::AreEqual(size_t{ 2 }, shed2.maxDrop);
+			}
+
+			// 3. Original Pathway Protection (originalPathway = true, lowLatency = true): stays completely untouched.
+			{
+				VpQueueTiming::Options origOpt;
+				origOpt.originalPathway = true;
+				origOpt.queueTimingFixes = true;
+				origOpt.lowLatency = true;
+				VpQueueTiming::VpFixedBudgetPolicy original(origOpt);
+				BacklogRunState run;
+				for (int f = 1; f <= 120; ++f)
+				{
+					const BacklogDecision d = original.EvaluateBacklog(latched3, run);
+					Assert::IsFalse(d.recover, L"Original pathway must stay untouched by low-latency shed");
+				}
+				Assert::AreEqual(0u, run.heldExcessRun);
+			}
+
+			// 4. Edge cases: fileSource=true and queueTimingFixes=false never trigger; transient 1-frame dips never trigger.
+			{
+				VpQueueTiming::Options opt;
+				opt.originalPathway = false;
+				opt.queueTimingFixes = true;
+				opt.lowLatency = true;
+				VpQueueTiming::VpFixedBudgetPolicy policy(opt);
+				BacklogRunState run;
+				BacklogContext fileCtx = latched3;
+				fileCtx.fileSource = true;
+				for (int f = 1; f <= 60; ++f)
+					Assert::IsFalse(policy.EvaluateBacklog(fileCtx, run).recover);
+				Assert::AreEqual(0u, run.heldExcessRun);
+
+				VpQueueTiming::Options noFixOpt{ false, false, true };
+				VpQueueTiming::VpFixedBudgetPolicy noFixes(noFixOpt);
+				for (int f = 1; f <= 60; ++f)
+					Assert::IsFalse(noFixes.EvaluateBacklog(latched3, run).recover);
+				Assert::AreEqual(0u, run.heldExcessRun);
+
+				const BacklogContext onTarget = makeLatchedContext(2);
+				for (int f = 0; f < 60; ++f)
+				{
+					Assert::IsFalse(policy.EvaluateBacklog(latched3, run).recover);
+					Assert::IsFalse(policy.EvaluateBacklog(onTarget, run).recover);
+				}
+				Assert::AreEqual(0u, run.heldExcessRun);
+			}
+		}
 	};
 }
