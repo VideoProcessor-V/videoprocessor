@@ -1146,10 +1146,13 @@ namespace Tests
 
 			TEST_METHOD(TransformIdentified8x8OnNonMultipleOf8ActiveFrameAndMultiIterPocs)
 			{
-				// Non-multiple-of-8 active rect: 68x68 inside 72x72 ({2, 2, 70, 70}) => 8x8 blocks cover [2, 66) x [2, 66),
-				// leaving 4-px right & bottom remainder strips ([66, 70) and [66, 70))!
+				// Non-8-aligned active rect: {2, 2, 70, 70} inside 72x72 =>
+				//   - Letterbox/pillarbox bars: [0, 2) and [70, 72) (must remain bit-exact)
+				//   - Leading partial strips: [2, 8) (bounded by TransformUnknownBound)
+				//   - Codec-frame-grid-aligned interior 8x8 DCT blocks: [8, 64) x [8, 64)
+				//   - Trailing partial strips: [64, 70) (bounded by TransformUnknownBound)
 				const int w = 72, h = 72;
-				const ActiveRect active{ 2, 2, 70, 70 }; // 68x68 active -> bxEnd = 66, byEnd = 66
+				const ActiveRect active{ 2, 2, 70, 70 }; // bxStart = 8, byStart = 8, bxEnd = 64, byEnd = 64
 				const int cw = (w + 15) / 16, ch = (h + 15) / 16;
 				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 
@@ -1157,7 +1160,7 @@ namespace Tests
 				const double phi = kDeadZonePhiInter; // 1/6 -> theta = 10.0
 				const double theta = (1.0 - phi) * stepDelta;
 
-				// ---- Part A & B: Real 8x8 DCT STRICT vs CELL on coded residual + bounded remainder strips ----
+				// ---- Part A & B: Real codec-grid-aligned 8x8 DCT STRICT vs CELL + bounded leading/trailing strips + bit-exact bars ----
 				TdV2Plane pred(w, h, 350.0);
 				TdV2Plane cur(w, h, 350.0);
 				TdV2Plane nextPeak(w, h, 350.0);
@@ -1170,9 +1173,9 @@ namespace Tests
 				InverseDct8x8(sentDct, sentSpat);
 				InverseDct8x8(targetDct, targetSpat);
 
-				for (int by = active.y0; by < 66; by += 8)
+				for (int by = 8; by < 64; by += 8)
 				{
-					for (int bx = active.x0; bx < 66; bx += 8)
+					for (int bx = 8; bx < 64; bx += 8)
 					{
 						for (int j = 0; j < 8; ++j)
 						{
@@ -1185,16 +1188,27 @@ namespace Tests
 					}
 				}
 
-				// Plant a huge +200.0 difference in the 4-px right & bottom remainder strips (outside 8x8 DCT blocks!).
-				for (int y = active.y0; y < active.y1; ++y)
+				// Plant distinctive bar sentinels outside ActiveRect ([0, 2) and [70, 72)) and a huge +200.0 difference
+				// in BOTH leading ([2, 8)) AND trailing ([64, 70)) non-8-aligned remainder strips!
+				for (int y = 0; y < h; ++y)
 				{
-					for (int x = active.x0; x < active.x1; ++x)
+					for (int x = 0; x < w; ++x)
 					{
-						if (x >= 66 || y >= 66)
+						if (!active.Contains(x, y))
 						{
-							cur.at(x, y) = 600.0;
-							pred.at(x, y) = 400.0;
-							nextPeak.at(x, y) = 400.0;
+							const double barVal = (x < active.x0 || y < active.y0) ? 16.0 : 988.0;
+							cur.at(x, y) = barVal;
+							pred.at(x, y) = barVal;
+							nextPeak.at(x, y) = barVal;
+						}
+						else if (x < 8 || x >= 64 || y < 8 || y >= 64)
+						{
+							// Keep cur continuous with interior (353) while planting a huge +200.0 diff vs pred/nextPeak (153)
+							// so BOTH leading [2,8) and trailing [64,70) strips test TransformUnknownBound without creating a fake
+							// 18-px G(6.0) D3 cliff tail into interior focus cells.
+							cur.at(x, y) = 353.0;
+							pred.at(x, y) = 153.0;
+							nextPeak.at(x, y) = 153.0;
 						}
 					}
 				}
@@ -1204,6 +1218,7 @@ namespace Tests
 					Config cfg = MakePreset(Preset::Reference, Mode::On);
 					cfg.estimator = VarianceEstimator::A2_RoundingCells;
 					cfg.residualMode = rm;
+					cfg.momentPoolRadiusCells = 0; // 1x1 cell pooling so +200 remainder-strip spikes stay isolated to strip cells
 					cfg.cellProjIterations = 1;
 					TdV2ReferenceEngine eng(cfg);
 
@@ -1227,14 +1242,14 @@ namespace Tests
 				const auto resStrict = run8x8(ResidualMode::Strict, regStrict);
 				const auto resCell = run8x8(ResidualMode::Cell, regCell);
 
-				// Check an interior 8x8 block (bx = 26, by = 26) in DCT domain of coded residual r = output - pred.
+				// Check interior codec-aligned 8x8 block (bx = 24, by = 24) in DCT domain of coded residual r = output - pred.
 				double rStrictSpat[64] = {}, rCellSpat[64] = {}, rStrictDct[64] = {}, rCellDct[64] = {};
 				for (int j = 0; j < 8; ++j)
 				{
 					for (int i = 0; i < 8; ++i)
 					{
-						rStrictSpat[j * 8 + i] = resStrict.outputClean.at(26 + i, 26 + j) - pred.at(26 + i, 26 + j);
-						rCellSpat[j * 8 + i] = resCell.outputClean.at(26 + i, 26 + j) - pred.at(26 + i, 26 + j);
+						rStrictSpat[j * 8 + i] = resStrict.outputClean.at(24 + i, 24 + j) - pred.at(24 + i, 24 + j);
+						rCellSpat[j * 8 + i] = resCell.outputClean.at(24 + i, 24 + j) - pred.at(24 + i, 24 + j);
 					}
 				}
 				ForwardDct8x8(rStrictSpat, rStrictDct);
@@ -1248,25 +1263,37 @@ namespace Tests
 					L"CELL 8x8 DCT must actually utilize rounding-cell room unlike STRICT");
 				Assert::IsTrue(std::fabs(rCellDct[1]) <= theta + 1e-6, L"CELL 8x8 DCT must clip zeroed AC to [-theta,+theta]");
 
-				// Verify remainder strips (x >= 66 or y >= 66) are STRICTLY BOUNDED (NOT unbounded ~200!)
-				// and engaged TransformUnknownBound visibly!
+				// Verify BOTH leading ([2, 8)) AND trailing ([64, 70)) remainder strips are STRICTLY BOUNDED (NOT unbounded ~200!)
+				// and engaged TransformUnknownBound visibly, while bars ([0, 2) and [70, 72)) stay bit-exact!
 				const RoundingCellStats st = ComputeRoundingCellStats(stepDelta, phi, 0.0);
 				const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
 				const double maxPixelBound = kPixelBoundSigma * (
 					std::sqrt(st.totalVar * gains.low) +
 					std::sqrt(st.totalVar * gains.mid) +
 					std::sqrt(st.totalVar * gains.fine));
+				Assert::IsTrue(regStrict.IsActive(StandInKind::TransformUnknownBound),
+					L"STRICT leading/trailing partial strips outside codec 8x8 grid must engage TransformUnknownBound visibly");
 				Assert::IsTrue(regCell.IsActive(StandInKind::TransformUnknownBound),
-					L"Remainder strips outside 8x8 grid must engage TransformUnknownBound visibly");
-				for (int y = active.y0; y < active.y1; ++y)
+					L"CELL leading/trailing partial strips outside codec 8x8 grid must engage TransformUnknownBound visibly");
+				for (int y = 0; y < h; ++y)
 				{
-					for (int x = active.x0; x < active.x1; ++x)
+					for (int x = 0; x < w; ++x)
 					{
-						if (x >= 66 || y >= 66)
+						if (!active.Contains(x, y))
 						{
-							const double absDelta = std::fabs(resCell.outputY.at(x, y) - cur.at(x, y));
-							Assert::IsTrue(absDelta <= maxPixelBound + 1e-6,
-								L"Non-multiple-of-8 remainder border strip MUST be bounded by derived pixel-domain bound!");
+							Assert::AreEqual(cur.at(x, y), resStrict.outputY.at(x, y), 0.0,
+								L"Bars outside ActiveRect ([0,2) and [70,72)) must remain bit-exact in STRICT mode");
+							Assert::AreEqual(cur.at(x, y), resCell.outputY.at(x, y), 0.0,
+								L"Bars outside ActiveRect ([0,2) and [70,72)) must remain bit-exact in CELL mode");
+						}
+						else if (x < 8 || x >= 64 || y < 8 || y >= 64)
+						{
+							const double absDeltaStrict = std::fabs(resStrict.outputY.at(x, y) - cur.at(x, y));
+							const double absDeltaCell = std::fabs(resCell.outputY.at(x, y) - cur.at(x, y));
+							Assert::IsTrue(absDeltaStrict <= maxPixelBound + 1e-6,
+								L"Leading/trailing non-8-aligned remainder strip MUST be bounded in STRICT mode!");
+							Assert::IsTrue(absDeltaCell <= maxPixelBound + 1e-6,
+								L"Leading/trailing non-8-aligned remainder strip MUST be bounded in CELL mode!");
 						}
 					}
 				}
