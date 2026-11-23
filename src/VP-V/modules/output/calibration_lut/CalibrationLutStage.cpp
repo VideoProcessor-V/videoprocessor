@@ -152,14 +152,7 @@ namespace CalibrationLutStage
 			restore.variables = slopeVars;
 			restore.num_variables = 1;
 			restore.body =
-				"vec3 vp_d = vp_calibration_excess;\n"
-				"vec3 vp_c = vp_calibration_clamped;\n"
-				"if (vp_d.r != 0.0)\n"
-				"    color.rgb += vp_d.r * er_lut_slope(vp_c, vec3(1.0, 0.0, 0.0), vp_d.r);\n"
-				"if (vp_d.g != 0.0)\n"
-				"    color.rgb += vp_d.g * er_lut_slope(vp_c, vec3(0.0, 1.0, 0.0), vp_d.g);\n"
-				"if (vp_d.b != 0.0)\n"
-				"    color.rgb += vp_d.b * er_lut_slope(vp_c, vec3(0.0, 0.0, 1.0), vp_d.b);";
+				"color.rgb += er_lut_extrapolate_delta(vp_calibration_clamped, vp_calibration_excess);";
 		}
 		else
 			restore.body = "color.rgb += vp_calibration_excess;";

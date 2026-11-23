@@ -15,46 +15,47 @@ namespace ExtendedRange
 {
 	namespace
 	{
-		// Audit 2026-10-16: the transfers in relative linear light, odd below
-		// 0, analytic above 1 (ExtendedRange.h, 1.). kind: TransferKind as a
-		// float (0 power, 1 BT.1886, 2 sRGB, 3 identity). Mirrors ToLinear /
-		// FromLinear below.
+		// Audit 2026-10-16 + GEM-013 (PERF-3): vectorized vec3 transfers in relative linear light,
+		// odd below 0, analytic above 1, with CPU-precomputed BT.1886 constants (bt.x = k = p^2.4,
+		// bt.y = span = (1+p)^2.4 - k, bt.z = 1/span). Mirrors ToLinear / FromLinear below.
 		const char* const TRANSFER_GLSL = R"GLSL(
-float er_lin1(float v, float kind, float p)
+vec3 er_to_linear_bt(vec3 v, float kind, float p, vec2 bt)
 {
-    float a = abs(v);
-    float r = a;
+    vec3 a = abs(v);
+    vec3 r = a;
     if (kind < 0.5) {
-        r = pow(a, p);
+        r = pow(a, vec3(p));
     } else if (kind < 1.5) {
-        float k = pow(p, 2.4);
-        r = (pow(a + p, 2.4) - k) / (pow(1.0 + p, 2.4) - k);
+        r = (pow(a + vec3(p), vec3(2.4)) - vec3(bt.x)) * bt.y;
     } else if (kind < 2.5) {
-        r = a <= 0.04045 ? a * (1.0 / 12.92) : pow((a + 0.055) * (1.0 / 1.055), 2.4);
+        vec3 lo = a * (1.0 / 12.92);
+        vec3 hi = pow((a + vec3(0.055)) * (1.0 / 1.055), vec3(2.4));
+        r = mix(hi, lo, lessThanEqual(a, vec3(0.04045)));
     }
-    return v < 0.0 ? -r : r;
+    return mix(r, -r, lessThan(v, vec3(0.0)));
 }
-float er_enc1(float l, float kind, float p)
+vec3 er_from_linear_bt(vec3 l, float kind, float p, vec2 bt)
 {
-    float a = abs(l);
-    float r = a;
+    vec3 a = abs(l);
+    vec3 r = a;
     if (kind < 0.5) {
-        r = pow(a, 1.0 / p);
+        r = pow(a, vec3(1.0 / p));
     } else if (kind < 1.5) {
-        float k = pow(p, 2.4);
-        r = pow(a * (pow(1.0 + p, 2.4) - k) + k, 1.0 / 2.4) - p;
+        r = pow(a * bt.y + vec3(bt.x), vec3(1.0 / 2.4)) - vec3(p);
     } else if (kind < 2.5) {
-        r = a <= 0.0031308 ? a * 12.92 : 1.055 * pow(a, 1.0 / 2.4) - 0.055;
+        vec3 lo = a * 12.92;
+        vec3 hi = vec3(1.055) * pow(a, vec3(1.0 / 2.4)) - vec3(0.055);
+        r = mix(hi, lo, lessThanEqual(a, vec3(0.0031308)));
     }
-    return l < 0.0 ? -r : r;
+    return mix(r, -r, lessThan(l, vec3(0.0)));
 }
 vec3 er_to_linear(vec3 v, float kind, float p)
 {
-    return vec3(er_lin1(v.r, kind, p), er_lin1(v.g, kind, p), er_lin1(v.b, kind, p));
+    return er_to_linear_bt(v, kind, p, vec2(er_out_bt.x, er_out_bt.z));
 }
 vec3 er_from_linear(vec3 l, float kind, float p)
 {
-    return vec3(er_enc1(l.r, kind, p), er_enc1(l.g, kind, p), er_enc1(l.b, kind, p));
+    return er_from_linear_bt(l, kind, p, er_out_bt.xy);
 }
 )GLSL";
 
@@ -64,22 +65,21 @@ vec3 er_from_linear(vec3 l, float kind, float p)
 		// same values; converting after scaling differed by up to 40 codes on
 		// saturated colours, measured); then either the picture clipped to
 		// 0..1 or the remainder value - clipped (ER_REMAINDER), per channel.
-		// Audit 2026-10-16: two pure powers keep the original 10b arithmetic;
-		// any other pair goes through relative linear light. With
-		// er_linear_remainder the remainder is E(v) - E(clipped) in linear
-		// light (wide source gamut: the late restore applies the matrix).
+		// Audit 2026-10-16 + GEM-013: two pure powers fuse gamma+primaries into
+		// a single linearisation (6 pow instead of 9); any other pair goes
+		// through relative linear light with CPU-precomputed BT.1886 constants.
 		const char* const CARRY_BODY = R"GLSL(
 if (er_convert_gamma > 0.5 || er_convert_primaries > 0.5) {
     if (er_src_kind < 0.5 && er_out_kind < 0.5) {
-        if (er_convert_gamma > 0.5)
-            color.rgb = sign(color.rgb) * pow(abs(color.rgb), vec3(er_src_param / er_out_param));
         if (er_convert_primaries > 0.5) {
-            vec3 er_l = sign(color.rgb) * pow(abs(color.rgb), vec3(er_out_param));
+            vec3 er_l = sign(color.rgb) * pow(abs(color.rgb), vec3(er_src_param));
             er_l = er_matrix * er_l;
             color.rgb = sign(er_l) * pow(abs(er_l), vec3(1.0 / er_out_param));
+        } else if (er_convert_gamma > 0.5) {
+            color.rgb = sign(color.rgb) * pow(abs(color.rgb), vec3(er_src_param / er_out_param));
         }
     } else {
-        vec3 er_l = er_to_linear(color.rgb, er_src_kind, er_src_param);
+        vec3 er_l = er_to_linear_bt(color.rgb, er_src_kind, er_src_param, vec2(er_src_bt.x, er_src_bt.z));
         if (er_convert_primaries > 0.5)
             er_l = er_matrix * er_l;
         color.rgb = er_from_linear(er_l, er_out_kind, er_out_param);
@@ -120,9 +120,34 @@ color.rgb = er_clipped;
 )GLSL";
 
 		// The restore: the remainder at the output pixel's position in the
-		// carry's rectangle, averaged over the pixel's footprint (4x4 bilinear
-		// taps, at least one source pixel wide), added back.
-		const char* const RESTORE_HEADER = R"GLSL(
+		// carry's rectangle, added back. GEM-011 (PERF-1 AMEND): exact 1:1
+		// aligned rects compile ER_RESTORE_1TO1 (1 texelFetch, 16x fewer);
+		// upscale compiles ER_RESTORE_2X2 (2x2 textureLod, 4x fewer);
+		// downscale keeps 4x4 textureLod. Compile-time selection avoids
+		// FXC flattening dynamic-branch texture() calls.
+		const char* const RESTORE_HEADER_1TO1 = R"GLSL(
+vec3 er_remainder_at(vec2 q)
+{
+    vec2 u = (q - er_out_rect.xy) / er_out_rect.zw;
+    vec2 s = er_carry_rect.xy + u * er_carry_rect.zw;
+    ivec2 isize = textureSize(er_remainder, 0);
+    return texelFetch(er_remainder, clamp(ivec2(floor(s)), ivec2(0), isize - 1), 0).rgb;
+}
+)GLSL";
+		const char* const RESTORE_HEADER_2X2 = R"GLSL(
+vec3 er_remainder_at(vec2 q)
+{
+    vec2 u = (q - er_out_rect.xy) / er_out_rect.zw;
+    vec2 s = er_carry_rect.xy + u * er_carry_rect.zw;
+    vec2 size = vec2(textureSize(er_remainder, 0));
+    vec3 sum = vec3(0.0);
+    for (int j = 0; j < 2; j++)
+        for (int i = 0; i < 2; i++)
+            sum += textureLod(er_remainder, (s + ((vec2(i, j) + 0.5) / 2.0 - 0.5)) / size, 0.0).rgb;
+    return sum * 0.25;
+}
+)GLSL";
+		const char* const RESTORE_HEADER_4X4 = R"GLSL(
 vec3 er_remainder_at(vec2 q)
 {
     vec2 u = (q - er_out_rect.xy) / er_out_rect.zw;
@@ -132,23 +157,38 @@ vec3 er_remainder_at(vec2 q)
     vec3 sum = vec3(0.0);
     for (int j = 0; j < 4; j++)
         for (int i = 0; i < 4; i++)
-            sum += texture(er_remainder, (s + ((vec2(i, j) + 0.5) / 4.0 - 0.5) * fp) / size).rgb;
+            sum += textureLod(er_remainder, (s + ((vec2(i, j) + 0.5) / 4.0 - 0.5) * fp) / size, 0.0).rgb;
     return sum / 16.0;
 }
 )GLSL";
+
+		const char* RestoreHeaderForRects(const pl_rect2df& carryRect, const pl_rect2df& outRect)
+		{
+			const float cw = carryRect.x1 - carryRect.x0, ch = carryRect.y1 - carryRect.y0;
+			const float ow = outRect.x1 - outRect.x0, oh = outRect.y1 - outRect.y0;
+			if (ow > 0.0f && oh > 0.0f)
+			{
+				const float sx = carryRect.x0 - outRect.x0;
+				const float sy = carryRect.y0 - outRect.y0;
+				if (std::fabs(cw - ow) < 1e-4f && std::fabs(ch - oh) < 1e-4f &&
+					std::fabs(sx - std::floor(sx + 0.5f)) < 1e-4f &&
+					std::fabs(sy - std::floor(sy + 0.5f)) < 1e-4f)
+					return RESTORE_HEADER_1TO1;
+				if (cw / ow <= 1.0001f && ch / oh <= 1.0001f)
+					return RESTORE_HEADER_2X2;
+			}
+			return RESTORE_HEADER_4X4;
+		}
 
 		const char* const RESTORE_BODY = R"GLSL(
 color.rgb += er_remainder_at(gl_FragCoord.xy);
 color.a = 1.0;
 )GLSL";
 
-		// Audit 2026-10-16: the late restore after a calibration LUT. v (the
-		// SCALED restore's whole value, which libplacebo's LUT clamped) is
-		// read back at the same output pixel; the cut part d = v - clip(v) is
-		// added through the LUT's edge slope at clip(v) (LutExtrapolate).
-		// er_lut_max = size - 1 per axis.
-		// The LUT's trilinear sample and edge slope (er_lut, er_lut_max); shared with the VP-stage
-		// calibration LUT (CalibrationLutStage, LutSlopeGlsl()).
+		// Audit 2026-10-16 + GEM-014 (PERF-4 AMEND): the LUT's edge slope (er_lut, er_lut_max);
+		// shared with CalibrationLutStage (LutSlopeGlsl()). On BTB/WTW pixels c[axis] lies on
+		// integer slice 0 or er_lut_max[axis], so hoisting base and sampling each axis as a
+		// 4-tap 2D slice cuts 3D texelFetches from up to 48 to 16 (3x fewer, exact on faces/edges/corners).
 		const char* const LUT_SLOPE_GLSL = R"GLSL(
 vec3 er_lut_at(vec3 i)
 {
@@ -165,6 +205,30 @@ vec3 er_lut_sample(vec3 p)
     vec3 c11 = mix(er_lut_at(i0 + vec3(0.0, 1.0, 1.0)), er_lut_at(i0 + vec3(1.0, 1.0, 1.0)), f.x);
     return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
 }
+vec3 er_lut_slice_x(float sx, vec2 gyz)
+{
+    vec2 i0 = min(floor(gyz), er_lut_max.yz - 1.0);
+    vec2 f = gyz - i0;
+    vec3 c0 = mix(er_lut_at(vec3(sx, i0.x, i0.y)), er_lut_at(vec3(sx, i0.x + 1.0, i0.y)), f.x);
+    vec3 c1 = mix(er_lut_at(vec3(sx, i0.x, i0.y + 1.0)), er_lut_at(vec3(sx, i0.x + 1.0, i0.y + 1.0)), f.x);
+    return mix(c0, c1, f.y);
+}
+vec3 er_lut_slice_y(float sy, vec2 gxz)
+{
+    vec2 i0 = min(floor(gxz), er_lut_max.xz - 1.0);
+    vec2 f = gxz - i0;
+    vec3 c0 = mix(er_lut_at(vec3(i0.x, sy, i0.y)), er_lut_at(vec3(i0.x + 1.0, sy, i0.y)), f.x);
+    vec3 c1 = mix(er_lut_at(vec3(i0.x, sy, i0.y + 1.0)), er_lut_at(vec3(i0.x + 1.0, sy, i0.y + 1.0)), f.x);
+    return mix(c0, c1, f.y);
+}
+vec3 er_lut_slice_z(float sz, vec2 gxy)
+{
+    vec2 i0 = min(floor(gxy), er_lut_max.xy - 1.0);
+    vec2 f = gxy - i0;
+    vec3 c0 = mix(er_lut_at(vec3(i0.x, i0.y, sz)), er_lut_at(vec3(i0.x + 1.0, i0.y, sz)), f.x);
+    vec3 c1 = mix(er_lut_at(vec3(i0.x, i0.y + 1.0, sz)), er_lut_at(vec3(i0.x + 1.0, i0.y + 1.0, sz)), f.x);
+    return mix(c0, c1, f.y);
+}
 vec3 er_lut_slope(vec3 c, vec3 axis, float d)
 {
     float n = dot(axis, er_lut_max);
@@ -172,6 +236,33 @@ vec3 er_lut_slope(vec3 c, vec3 axis, float d)
     vec3 s = d > 0.0 ? er_lut_sample(c) - er_lut_sample(c - e)
                      : er_lut_sample(c + e) - er_lut_sample(c);
     return s * n;
+}
+vec3 er_lut_extrapolate_delta(vec3 c, vec3 d)
+{
+    if (all(equal(d, vec3(0.0))))
+        return vec3(0.0);
+    vec3 g = clamp(c, 0.0, 1.0) * er_lut_max;
+    vec3 base;
+    if (d.r != 0.0)
+        base = er_lut_slice_x(d.r > 0.0 ? er_lut_max.x : 0.0, g.yz);
+    else if (d.g != 0.0)
+        base = er_lut_slice_y(d.g > 0.0 ? er_lut_max.y : 0.0, g.xz);
+    else
+        base = er_lut_slice_z(d.b > 0.0 ? er_lut_max.z : 0.0, g.xy);
+    vec3 delta = vec3(0.0);
+    if (d.r != 0.0) {
+        vec3 stepS = er_lut_slice_x(d.r > 0.0 ? er_lut_max.x - 1.0 : 1.0, g.yz);
+        delta += d.r * ((d.r > 0.0 ? base - stepS : stepS - base) * er_lut_max.x);
+    }
+    if (d.g != 0.0) {
+        vec3 stepS = er_lut_slice_y(d.g > 0.0 ? er_lut_max.y - 1.0 : 1.0, g.xz);
+        delta += d.g * ((d.g > 0.0 ? base - stepS : stepS - base) * er_lut_max.y);
+    }
+    if (d.b != 0.0) {
+        vec3 stepS = er_lut_slice_z(d.b > 0.0 ? er_lut_max.z - 1.0 : 1.0, g.xy);
+        delta += d.b * ((d.b > 0.0 ? base - stepS : stepS - base) * er_lut_max.z);
+    }
+    return delta;
 }
 )GLSL";
 		const char* const SCALED_AT_GLSL = R"GLSL(
@@ -188,12 +279,7 @@ vec3 er_scaled_at(vec2 q)
 vec3 er_v = er_scaled_at(gl_FragCoord.xy);
 vec3 er_c = clamp(er_v, 0.0, 1.0);
 vec3 er_d = er_v - er_c;
-if (er_d.r != 0.0)
-    color.rgb += er_d.r * er_lut_slope(er_c, vec3(1.0, 0.0, 0.0), er_d.r);
-if (er_d.g != 0.0)
-    color.rgb += er_d.g * er_lut_slope(er_c, vec3(0.0, 1.0, 0.0), er_d.g);
-if (er_d.b != 0.0)
-    color.rgb += er_d.b * er_lut_slope(er_c, vec3(0.0, 0.0, 1.0), er_d.b);
+color.rgb += er_lut_extrapolate_delta(er_c, er_d);
 color.a = 1.0;
 )GLSL";
 
@@ -239,6 +325,26 @@ color.a = 1.0;
 		}
 
 		float TransferKindValue(const Transfer& t) { return static_cast<float>(static_cast<int>(t.kind)); }
+
+		// GEM-013: CPU-precomputed BT.1886 constants (k = b^2.4, span = (1+b)^2.4 - k, inv_span = 1/span).
+		void Bt1886Constants(const Transfer& t, float out[3])
+		{
+			if (t.kind == TransferKind::Bt1886)
+			{
+				const double b = static_cast<double>(t.param);
+				const double k = std::pow(b, 2.4);
+				const double span = std::pow(1.0 + b, 2.4) - k;
+				out[0] = static_cast<float>(k);
+				out[1] = static_cast<float>(span);
+				out[2] = static_cast<float>(span > 0.0 ? 1.0 / span : 1.0);
+			}
+			else
+			{
+				out[0] = 0.0f;
+				out[1] = 1.0f;
+				out[2] = 1.0f;
+			}
+		}
 	}
 
 	const char* ToString(Reason reason)
@@ -684,13 +790,16 @@ color.a = 1.0;
 		}
 		++self->carryTwoPassFrames;
 		const std::string remainderHeader = std::string("#define ER_REMAINDER 1\n") + TRANSFER_GLSL;
+		float srcBt[3], outBt[3];
+		Bt1886Constants(self->decision.source, srcBt);
+		Bt1886Constants(self->decision.output, outBt);
 		for (int pass = 0; pass < 2; ++pass)
 		{
 			pl_shader sh = pl_dispatch_begin(params->dispatch);
 			pl_sample_src src{};
 			src.tex = params->tex;
 			src.components = 4;
-			const pl_shader_var variables[8] = {
+			const pl_shader_var variables[10] = {
 				{ pl_var_float("er_convert_gamma"), &convertGamma, true },
 				{ pl_var_float("er_convert_primaries"), &convertPrimaries, true },
 				{ pl_var_float("er_src_kind"), &sourceKind, true },
@@ -698,14 +807,16 @@ color.a = 1.0;
 				{ pl_var_float("er_out_kind"), &outputKind, true },
 				{ pl_var_float("er_out_param"), &self->decision.output.param, true },
 				{ pl_var_float("er_linear_remainder"), &linearRemainder, true },
-				{ pl_var_mat3("er_matrix"), self->decision.matrix, true } };
+				{ pl_var_mat3("er_matrix"), self->decision.matrix, true },
+				{ pl_var_vec3("er_src_bt"), srcBt, true },
+				{ pl_var_vec3("er_out_bt"), outBt, true } };
 			pl_custom_shader custom{};
 			custom.description = pass == 0 ? "VP extended range: remainder" : "VP extended range: clipped picture";
 			custom.header = pass == 0 ? remainderHeader.c_str() : TRANSFER_GLSL;
 			custom.input = PL_SHADER_SIG_COLOR;
 			custom.output = PL_SHADER_SIG_COLOR;
 			custom.variables = variables;
-			custom.num_variables = 8;
+			custom.num_variables = 10;
 			custom.body = CARRY_BODY;
 			if (!pl_shader_sample_direct(sh, &src) || !pl_shader_custom(sh, &custom))
 			{
@@ -737,7 +848,10 @@ color.a = 1.0;
 		pl_sample_src src{};
 		src.tex = params->tex;
 		src.components = 4;
-		const pl_shader_var variables[8] = {
+		float srcBt[3], outBt[3];
+		Bt1886Constants(decision.source, srcBt);
+		Bt1886Constants(decision.output, outBt);
+		const pl_shader_var variables[10] = {
 			{ pl_var_float("er_convert_gamma"), &convertGamma, true },
 			{ pl_var_float("er_convert_primaries"), &convertPrimaries, true },
 			{ pl_var_float("er_src_kind"), &sourceKind, true },
@@ -745,7 +859,9 @@ color.a = 1.0;
 			{ pl_var_float("er_out_kind"), &outputKind, true },
 			{ pl_var_float("er_out_param"), &decision.output.param, true },
 			{ pl_var_float("er_linear_remainder"), &linearRemainder, true },
-			{ pl_var_mat3("er_matrix"), decision.matrix, true } };
+			{ pl_var_mat3("er_matrix"), decision.matrix, true },
+			{ pl_var_vec3("er_src_bt"), srcBt, true },
+			{ pl_var_vec3("er_out_bt"), outBt, true } };
 		pl_shader_desc out{};
 		out.desc.name = "er_remainder_out";
 		out.desc.type = PL_DESC_STORAGE_IMG;
@@ -758,7 +874,7 @@ color.a = 1.0;
 		custom.input = PL_SHADER_SIG_COLOR;
 		custom.output = PL_SHADER_SIG_COLOR;
 		custom.variables = variables;
-		custom.num_variables = 8;
+		custom.num_variables = 10;
 		custom.descriptors = &out;
 		custom.num_descriptors = 1;
 		custom.body = body.c_str();
@@ -833,7 +949,7 @@ color.a = 1.0;
 		remainderDesc.binding.sample_mode = PL_TEX_SAMPLE_LINEAR;
 		pl_custom_shader custom{};
 		custom.description = "VP extended range: restore";
-		custom.header = RESTORE_HEADER;
+		custom.header = RestoreHeaderForRects(carryRect, rect);
 		custom.input = PL_SHADER_SIG_COLOR;
 		custom.output = PL_SHADER_SIG_COLOR;
 		custom.descriptors = &remainderDesc;
@@ -988,8 +1104,10 @@ color.a = 1.0;
 		const float lutMax[3] = { static_cast<float>(lutSize[0] - 1), static_cast<float>(lutSize[1] - 1),
 			static_cast<float>(lutSize[2] - 1) };
 		const float outputKind = TransferKindValue(decision.output);
+		float outBt[3];
+		Bt1886Constants(decision.output, outBt);
 		std::string header;
-		pl_shader_var variables[5];
+		pl_shader_var variables[6];
 		pl_shader_desc descriptors[2]{};
 		int numVariables = 0, numDescriptors = 0;
 		variables[numVariables++] = { pl_var_vec4("er_out_rect"), outRect, true };
@@ -1013,11 +1131,12 @@ color.a = 1.0;
 		}
 		else
 		{
-			header = std::string(TRANSFER_GLSL) + RESTORE_HEADER;
+			header = std::string(TRANSFER_GLSL) + RestoreHeaderForRects(carryRect, rect);
 			variables[numVariables++] = { pl_var_vec4("er_carry_rect"), carry, true };
 			variables[numVariables++] = { pl_var_float("er_out_kind"), &outputKind, true };
 			variables[numVariables++] = { pl_var_float("er_out_param"), &decision.output.param, true };
 			variables[numVariables++] = { pl_var_mat3("er_matrix"), decision.matrix, true };
+			variables[numVariables++] = { pl_var_vec3("er_out_bt"), outBt, true };
 			pl_shader_desc& rem = descriptors[numDescriptors++];
 			rem.desc.name = "er_remainder";
 			rem.desc.type = PL_DESC_SAMPLED_TEX;
