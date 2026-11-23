@@ -389,21 +389,50 @@ namespace SourceIdentity
 				else
 					FlushPending(st, cap);   // no time on this evaluation: whatever was held counts now
 				// Stage S2 (EXP-8BIT Pitfall #1, opt-in): locate optional odd k/8 comb probes (3/8, 5/8, 7/8) from this
-				// evaluation's exact candidates so isolated 1/2 notches can be distinguished from 8x8 codec grids.
+				// evaluation's exact candidates using the SAME segment-gated estimator as Judge uses for 1/2 (falling back
+				// to cr.stat only when ComputeSegmentGatedStat is not valid), so 80%-flat 8-bit 8x8 codec grids are not
+				// misclassified as isolated 1/2 notches.
 				bool haveComb3 = false, haveComb5 = false, haveComb7 = false;
 				double comb3 = 0.0, comb5 = 0.0, comb7 = 0.0;
 				if (s_.edgeStats.enabled)
 				{
 					const double tol = s_.edgeStats.halfPixelTol;
 					const double dN = static_cast<double>(obs.axisLen);
+					auto combProbeStat = [&](const CandidateResult& cr, double& outStat) -> bool {
+						const double dofRatio = obs.axisLen > 0
+							? ClampD(static_cast<double>(cr.n) / static_cast<double>(obs.axisLen), 0.0, 0.999)
+							: 0.0;
+						const SegmentGatedResult seg = ComputeSegmentGatedStat(cr, dofRatio, floorC, s_.edgeStats);
+						if (seg.valid)
+						{
+							outStat = seg.stat;
+							return true;
+						}
+						if (std::isfinite(cr.stat))
+						{
+							outStat = cr.stat;
+							return true;
+						}
+						return false;
+					};
 					for (size_t i = 0; i < vr.candidates.size(); ++i)
 					{
 						const CandidateResult& cr = vr.candidates[i];
-						if (!cr.valid || !cr.exactDone || cr.lineCount < 1 || !std::isfinite(cr.stat))
+						if (!cr.valid || !cr.exactDone || cr.lineCount < 1)
 							continue;
-						if (std::fabs(static_cast<double>(cr.n) - dN * 3.0 / 8.0) <= tol) { haveComb3 = true; comb3 = cr.stat; }
-						else if (std::fabs(static_cast<double>(cr.n) - dN * 5.0 / 8.0) <= tol) { haveComb5 = true; comb5 = cr.stat; }
-						else if (std::fabs(static_cast<double>(cr.n) - dN * 7.0 / 8.0) <= tol) { haveComb7 = true; comb7 = cr.stat; }
+						double probeStat = 0.0;
+						if (std::fabs(static_cast<double>(cr.n) - dN * 3.0 / 8.0) <= tol)
+						{
+							if (combProbeStat(cr, probeStat)) { haveComb3 = true; comb3 = probeStat; }
+						}
+						else if (std::fabs(static_cast<double>(cr.n) - dN * 5.0 / 8.0) <= tol)
+						{
+							if (combProbeStat(cr, probeStat)) { haveComb5 = true; comb5 = probeStat; }
+						}
+						else if (std::fabs(static_cast<double>(cr.n) - dN * 7.0 / 8.0) <= tol)
+						{
+							if (combProbeStat(cr, probeStat)) { haveComb7 = true; comb7 = probeStat; }
+						}
 					}
 				}
 				const bool haveAllCombProbes = haveComb3 && haveComb5 && haveComb7;
@@ -959,14 +988,61 @@ namespace SourceIdentity
 					if (s_.edgeStats.enabled)
 					{
 						const double dofRatio = axisLen > 0 ? ClampD(static_cast<double>(cr.n) / static_cast<double>(axisLen), 0.0, 0.999) : 0.0;
-						const SegmentGatedResult segRes = ComputeSegmentGatedStat(cr, dofRatio, floorC, s_.edgeStats);
+						std::vector<double> segDips;
+						const SegmentGatedResult segRes = ComputeSegmentGatedStat(cr, dofRatio, floorC, s_.edgeStats, &segDips);
 						ce.edgeStatsReason = segRes.reason;
 						if (segRes.valid)
 						{
 							ce.gatedOk = true;
-							ce.median = segRes.stat;
-							ce.stat = segRes.stat;
 							ce.edgeStatsUsed = true;
+							double statUse = segRes.stat;
+							double medSeg = segRes.stat;
+							// Spatial-agreement contradiction check across informative segments (same MAD/tau contract
+							// as the whole-line/segment-column check below): prevents PiP / UI overlays on sparse 8-bit
+							// frames from bypassing kReasonMixed / HOLD.
+							if (segDips.size() >= 2)
+							{
+								medSeg = RobustStats::MedianOf(segDips.data(), static_cast<int>(segDips.size()));
+								const double madSeg = RobustStats::MadAboutOf(segDips.data(), static_cast<int>(segDips.size()), medSeg);
+								const double tauSeg = (std::max)(s_.contradictionMin, 3.0 * RobustStats::kMadToSigma * madSeg);
+								const bool dipMaj = medSeg < s_.majorityDip;
+								std::vector<double> keptSeg;
+								keptSeg.reserve(segDips.size());
+								int badSeg = 0;
+								for (size_t i = 0; i < segDips.size(); ++i)
+								{
+									const bool contra = dipMaj ? (segDips[i] - medSeg >= tauSeg) : (medSeg - segDips[i] >= tauSeg);
+									if (contra)
+										++badSeg;
+									else
+										keptSeg.push_back(segDips[i]);
+								}
+								ce.median = medSeg;
+								if (static_cast<double>(badSeg) / static_cast<double>(segDips.size()) > s_.maskLimit)
+								{
+									ce.mixed = true;
+									ce.reason |= kReasonMixed;
+									return;
+								}
+								if (badSeg > 0)
+								{
+									ce.reason |= kReasonMasked;
+									const int minSegs = s_.edgeStats.minInformativeSegments > 1 ? s_.edgeStats.minInformativeSegments : 1;
+									if (static_cast<int>(keptSeg.size()) < minSegs)
+									{
+										ce.reason |= kReasonLowDetail;
+										return;
+									}
+									const double trimSafe = std::isfinite(s_.edgeStats.trimFraction)
+										? ClampD(s_.edgeStats.trimFraction, 0.0, 0.5) : 0.2;
+									statUse = RobustStats::TrimmedMeanOf(keptSeg.data(), static_cast<int>(keptSeg.size()), trimSafe);
+								}
+							}
+							else
+							{
+								ce.median = medSeg;
+							}
+							ce.stat = statUse;
 							const HalfCombCheckResult comb = ClassifyHalfNotchWithCombCheck(
 								cr.n, axisLen, ce.stat, haveCombProbes, comb3, comb5, comb7, s_.edgeStats);
 							ce.cls = comb.resolvedNullClass;

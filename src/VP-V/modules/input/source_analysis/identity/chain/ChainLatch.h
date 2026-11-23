@@ -121,6 +121,7 @@ namespace SourceIdentity
 			bool informative = false;     // some axis earned evidence this evaluation (an uninformative one slows the release clock)
 			bool menuHold = false;        // HOLD evaluation on an axis, or a menu / overlay episode event: R7
 			bool abrStep = false;         // an ABR step event (used only with abrStepTrigger)
+			bool abrStepImmediateRelease = false; // Stage S2 ChainStepMark: confirmed step-up / expired challenge immediate release
 			bool nativeBoth = false;      // both axis readers are confident NATIVE
 			bool shotBoundary = false;    // N1: a cut, black or fade was consumed with this evaluation (a deferred release's moment)
 			// The confident UPSCALED pair of this evaluation (both axes), with each axis' evidence incl. the two-axis prior.
@@ -178,6 +179,8 @@ namespace SourceIdentity
 			bool Latched() const { return latched_; }
 			int LatchedNx() const { return lnx_; }
 			int LatchedNy() const { return lny_; }
+			int LatchedNxDenom() const { return lNx_; }
+			int LatchedNyDenom() const { return lNy_; }
 			double ReleaseClockSec() const { return clock_; }
 			bool Deferred() const { return deferred_; }
 			bool Dwelling() const { return deferred_ && dwelling_; }   // N1: the new shot's re-confirm dwell is open
@@ -256,7 +259,7 @@ namespace SourceIdentity
 					Fill(o);
 					return o;
 				}
-				if (latched_ && s_.abrStepTrigger && in.abrStep)
+				if (latched_ && (in.abrStepImmediateRelease || (s_.abrStepTrigger && in.abrStep)))
 				{
 					o.event = Release(LatchEvent::ReleasedAbr);
 					o.reasonBits |= kReasonAbrStep | kReasonLatchRelease;

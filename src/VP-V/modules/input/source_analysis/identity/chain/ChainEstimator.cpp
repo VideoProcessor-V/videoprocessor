@@ -1776,8 +1776,20 @@ namespace SourceIdentity
 							// to both chain pair (when chain-alone eligible) and joint target.
 							if (jIn.haveChainPair)
 							{
+								const bool overridesChain =
+									(jIn.chainNx > hRes.nx ? jIn.chainNx - hRes.nx : hRes.nx - jIn.chainNx) > 1 ||
+									(jIn.chainNy > hRes.ny ? jIn.chainNy - hRes.ny : hRes.ny - jIn.chainNy) > 1;
 								jIn.chainNx = hRes.nx; jIn.chainNxDenom = hRes.Nx;
 								jIn.chainNy = hRes.ny; jIn.chainNyDenom = hRes.Ny;
+								if (overridesChain)
+								{
+									// Refresh per-axis LLR for the R1-selected candidate so an under-c1 candidate can
+									// never inherit the rejected/alias candidate's >= c1 LLR for EnteredChainAlone.
+									jIn.chainLlrX = evidence.LlrAtN(0, hRes.nx);
+									jIn.chainLlrY = evidence.LlrAtN(1, hRes.ny);
+									if (jIn.chainLlrX <= -1e8 || jIn.chainLlrY <= -1e8)
+										jIn.haveChainPair = false;
+								}
 							}
 							if (jIn.classicalValid)
 							{
@@ -1902,9 +1914,11 @@ namespace SourceIdentity
 				in.informative = (run[0].have && run[0].up.informative) || (run[1].have && run[1].up.informative);
 				in.menuHold = (flags & (kEvMenuHold | kEvClearWindow)) != 0u || (run[0].have && run[0].up.hold) || (run[1].have && run[1].up.hold);
 				in.abrStep = (flags & kEvAbrStep) != 0u;
+				in.abrStepImmediateRelease = stepMarkImmediateReleasePending;
+				stepMarkImmediateReleasePending = false;
 				in.nativeBoth = nat[0] && nat[1];
 				in.shotBoundary = shotStartedNow;   // N1 / N2: a new evidence shot (a cut, or a rate-limited black / fade, F1) starts the dwell
-				in.havePair = conf[0] && conf[1] && !(nat[0] && nat[1]);
+				in.havePair = !(stepMarkOn && stepMark.BlocksEntryOrMove()) && conf[0] && conf[1] && !(nat[0] && nat[1]);
 				if (in.havePair)
 				{
 					in.nx = out[0].applied.n;
@@ -2047,8 +2061,8 @@ namespace SourceIdentity
 					else if (!jointLatchOn && safetyOn && latch.Latched())
 					{
 						ctx.latched = true;
-						ctx.nx = latch.LatchedNx(); ctx.Nx = lastAxisLen[0] > 0 ? lastAxisLen[0] : rasterW;
-						ctx.ny = latch.LatchedNy(); ctx.Ny = lastAxisLen[1] > 0 ? lastAxisLen[1] : rasterH;
+						ctx.nx = latch.LatchedNx(); ctx.Nx = latch.LatchedNxDenom() > 0 ? latch.LatchedNxDenom() : (lastAxisLen[0] > 0 ? lastAxisLen[0] : rasterW);
+						ctx.ny = latch.LatchedNy(); ctx.Ny = latch.LatchedNyDenom() > 0 ? latch.LatchedNyDenom() : (lastAxisLen[1] > 0 ? lastAxisLen[1] : rasterH);
 					}
 					return ctx;
 				};
@@ -2069,18 +2083,21 @@ namespace SourceIdentity
 					{
 						StepMarkClassicalFrame cfr;
 						cfr.timeUs = s.timeUs;
-						cfr.informative = true;
+						const bool cfRatiosFinite = std::isfinite(cf.ratioH) && std::isfinite(cf.ratioV) && cf.ratioH > 0.0 && cf.ratioV > 0.0;
+						cfr.informative = cfRatiosFinite;
 						cfr.voided = cf.mixed || cf.subtitle || cf.inFade || ((flags & kEvMenuHold) != 0u);
-						cfr.nativeReading = !(cf.ratioH < 1.0 && cf.ratioV < 1.0);
+						cfr.nativeReading = cfRatiosFinite && !(cf.ratioH < 1.0 && cf.ratioV < 1.0);
 						cfr.rasterW = rasterW;
 						cfr.rasterH = rasterH;
-						if (!cfr.nativeReading && rasterW > 0 && rasterH > 0)
+						const int activeW = s.active.w > 0 ? s.active.w : (lastAxisLen[0] > 0 ? lastAxisLen[0] : rasterW);
+						const int activeH = s.active.h > 0 ? s.active.h : (lastAxisLen[1] > 0 ? lastAxisLen[1] : rasterH);
+						if (cfRatiosFinite && !cfr.nativeReading && activeW > 0 && activeH > 0)
 						{
 							cfr.hasPair = true;
-							cfr.nx = RoundToInt(static_cast<double>(rasterW) * cf.ratioH);
-							cfr.Nx = rasterW;
-							cfr.ny = RoundToInt(static_cast<double>(rasterH) * cf.ratioV);
-							cfr.Ny = rasterH;
+							cfr.nx = RoundToInt(static_cast<double>(activeW) * cf.ratioH);
+							cfr.Nx = activeW;
+							cfr.ny = RoundToInt(static_cast<double>(activeH) * cf.ratioV);
+							cfr.Ny = activeH;
 						}
 						const StepMarkOutput smo = stepMark.OnClassicalFrame(cfr, currentLatchCtx());
 						if (smo.action == StepMarkAction::ConfirmVoidOnly ||
@@ -2144,6 +2161,10 @@ namespace SourceIdentity
 							if (ef.usedTheoreticalFallback)
 								anyFallback = true;
 						}
+						else
+						{
+							anyFallback = true;
+						}
 					}
 					if (anyValid)
 					{
@@ -2151,6 +2172,12 @@ namespace SourceIdentity
 						cEmpiricalFloorEvals.fetch_add(1, std::memory_order_relaxed);
 						if (anyFallback)
 							cEmpiricalFloorFallbacks.fetch_add(1, std::memory_order_relaxed);
+					}
+					else if (run[0].have || run[1].have)
+					{
+						// Rule 4: record fallback visibly whenever empirical floor was requested on active lines
+						// but failed to produce a valid estimate on all axes.
+						cEmpiricalFloorFallbacks.fetch_add(1, std::memory_order_relaxed);
 					}
 				}
 
@@ -2234,26 +2261,140 @@ namespace SourceIdentity
 					obs.rasterH = rasterH;
 					evidence.Submit(a, obs, run[a].up);
 				}
-				// Stage S2: feed chain evaluation into ChainStepMark while Pending or Challenging (inert unless stepMarkOn).
+				// Stage S2: feed current-eval chain evidence into ChainStepMark while Pending or Challenging (inert unless stepMarkOn).
 				if (stepMarkOn && (stepMark.IsPending() || stepMark.IsChallenging()))
 				{
 					const StepMarkLatchContext lctx = currentLatchCtx();
-					const AxisSummary sx = evidence.Summary(0);
-					const AxisSummary sy = evidence.Summary(1);
 					TentativeEvalRecord rec;
 					rec.timeUs = s.timeUs;
 					rec.evalSeq = ++stepMarkEvalSeq;
 					rec.rasterW = rasterW;
 					rec.rasterH = rasterH;
-					if (sx.hasBest && sy.hasBest && run[0].have && run[1].have)
+
+					// Build TentativeEvalRecord from THIS evaluation's fresh run[a].up (never stale pre-step Summary).
+					bool nativePos[2] = { false, false };
+					bool latchedPos[2] = { false, false };
+					bool latchedNeg[2] = { false, false };
+					double latchedInc[2] = { 0.0, 0.0 };
+					for (int a = 0; a < 2; ++a)
 					{
-						rec.hasChainPair = true;
-						rec.nx = sx.n; rec.Nx = run[0].ls.axisLen;
-						rec.ny = sy.n; rec.Ny = run[1].ls.axisLen;
-						rec.creditX = sx.llr;
-						rec.creditY = sy.llr;
+						if (!run[a].have || run[a].up.hold)
+							continue;
+						const EvidenceUpdate& up = run[a].up;
+						nativePos[a] = up.nativeCounted && up.nativeIncrement > 0.0;
+						const int lTarget = a == 0 ? lctx.nx : lctx.ny;
+						if (lctx.latched && lTarget > 0)
+						{
+							for (int i = 0; i < up.candidateCount; ++i)
+							{
+								const CandidateEvidence& ce = up.cand[i];
+								if (!ce.informative)
+									continue;
+								const int d = ce.n > lTarget ? ce.n - lTarget : lTarget - ce.n;
+								if (d <= 1)
+								{
+									if (ce.increment > 0.0)
+									{
+										latchedPos[a] = true;
+										if (ce.increment > latchedInc[a])
+											latchedInc[a] = ce.increment;
+									}
+									else if (ce.increment < 0.0)
+									{
+										latchedNeg[a] = true;
+									}
+								}
+							}
+						}
 					}
-					rec.chainSeesNative = sx.nativeLlr >= thr.c1 && sy.nativeLlr >= thr.c1;
+
+					// Select best positive informative candidate pair on THIS evaluation.
+					if (run[0].have && run[1].have && !run[0].up.hold && !run[1].up.hold)
+					{
+						const int Nx = run[0].ls.axisLen;
+						const int Ny = run[1].ls.axisLen;
+						bool foundPair = false;
+						int bestNx = 0, bestNy = 0;
+						double bestMinInc = 0.0, bestSumInc = 0.0, bestIncX = 0.0, bestIncY = 0.0;
+						for (int ix = 0; ix < run[0].up.candidateCount; ++ix)
+						{
+							const CandidateEvidence& cx = run[0].up.cand[ix];
+							if (!cx.informative || !(cx.increment > 0.0) || cx.n <= 0)
+								continue;
+							for (int iy = 0; iy < run[1].up.candidateCount; ++iy)
+							{
+								const CandidateEvidence& cy = run[1].up.cand[iy];
+								if (!cy.informative || !(cy.increment > 0.0) || cy.n <= 0)
+									continue;
+								if (rulesActive && !Scaling::GeometrySet::AgreeingPair(cx.n, Nx, cy.n, Ny, rasterW, rasterH))
+									continue;
+								const double minInc = (std::min)(cx.increment, cy.increment);
+								const double sumInc = cx.increment + cy.increment;
+								if (!foundPair ||
+									minInc > bestMinInc + 1e-12 ||
+									(std::fabs(minInc - bestMinInc) <= 1e-12 &&
+										(sumInc > bestSumInc + 1e-12 ||
+											(std::fabs(sumInc - bestSumInc) <= 1e-12 &&
+												static_cast<int64_t>(cx.n) * cy.n < static_cast<int64_t>(bestNx) * bestNy))))
+								{
+									foundPair = true;
+									bestNx = cx.n;
+									bestNy = cy.n;
+									bestMinInc = minInc;
+									bestSumInc = sumInc;
+									bestIncX = cx.increment;
+									bestIncY = cy.increment;
+								}
+							}
+						}
+						if (foundPair)
+						{
+							// R1 harmonic guard: when the latched pair itself earned positive credit on BOTH axes
+							// this eval, a super-harmonic alias (e.g. 2/3 on a static 1/3 stream) must not falsely
+							// contradict the latched fundamental on a spurious ABR mark.
+							bool suppressSuperHarmonicAlias = false;
+							if (lctx.latched && latchedPos[0] && latchedPos[1] && lctx.Nx > 0 && lctx.Ny > 0 && Nx > 0 && Ny > 0)
+							{
+								const double lrx = static_cast<double>(lctx.nx) / static_cast<double>(lctx.Nx);
+								const double lry = static_cast<double>(lctx.ny) / static_cast<double>(lctx.Ny);
+								const double rx = static_cast<double>(bestNx) / static_cast<double>(Nx);
+								const double ry = static_cast<double>(bestNy) / static_cast<double>(Ny);
+								if (IsIntegerHarmonicOf(lrx, rx) && IsIntegerHarmonicOf(lry, ry))
+									suppressSuperHarmonicAlias = true;
+							}
+							rec.hasChainPair = true;
+							if (suppressSuperHarmonicAlias)
+							{
+								rec.nx = lctx.nx; rec.Nx = lctx.Nx;
+								rec.ny = lctx.ny; rec.Ny = lctx.Ny;
+								rec.creditX = latchedInc[0];
+								rec.creditY = latchedInc[1];
+							}
+							else
+							{
+								rec.nx = bestNx; rec.Nx = Nx;
+								rec.ny = bestNy; rec.Ny = Ny;
+								rec.creditX = bestIncX;
+								rec.creditY = bestIncY;
+							}
+						}
+					}
+
+					// Current-eval native support (both axes counted positive native increment on THIS eval).
+					rec.chainSeesNative = nativePos[0] && nativePos[1];
+					// Direct chain contradiction against active latch on THIS eval: neither axis supported the
+					// latched size, and both axes actively contradicted it (negative credit at latched size or
+					// paired with positive native evidence on the other axis).
+					if (lctx.latched && !latchedPos[0] && !latchedPos[1])
+					{
+						if ((latchedNeg[0] && latchedNeg[1]) ||
+							(latchedNeg[0] && nativePos[1]) ||
+							(nativePos[0] && latchedNeg[1]))
+						{
+							rec.chainContradicts = true;
+						}
+					}
+
 					const bool reconfirmedNow = lctx.latched &&
 						evidence.CreditAtN(0, lctx.nx) > 0.0 && evidence.CreditAtN(1, lctx.ny) > 0.0;
 					const StepMarkOutput smo = stepMark.OnChainEvaluation(rec, lctx, reconfirmedNow);
@@ -2380,6 +2521,10 @@ namespace SourceIdentity
 						heldApplied[1] = Geometry::AxisGeom();
 					}
 					ApplyLatch(out, run, flags, s.timeUs, rasterW, rasterH);
+				}
+				else
+				{
+					stepMarkImmediateReleasePending = false;
 				}
 				if (out[0].measuredChanged || out[1].measuredChanged)
 					++geometryGen;

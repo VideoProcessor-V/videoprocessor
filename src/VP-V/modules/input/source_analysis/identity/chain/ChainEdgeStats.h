@@ -365,9 +365,12 @@ namespace SourceIdentity
 			const CandidateResult& cand,
 			double dofRatio,
 			double floorCodes,
-			const EdgeStatsSettings& s = EdgeStatsSettings())
+			const EdgeStatsSettings& s = EdgeStatsSettings(),
+			std::vector<double>* outSegmentDips = nullptr)
 		{
 			SegmentGatedResult res;
+			if (outSegmentDips != nullptr)
+				outSegmentDips->clear();
 			if (!s.enabled)
 			{
 				res.reason = EdgeStatsReason::Disabled;
@@ -442,6 +445,8 @@ namespace SourceIdentity
 			const double trimSafe = std::isfinite(s.trimFraction) ? ClampD(s.trimFraction, 0.0, 0.5) : 0.2;
 			res.stat = RobustStats::TrimmedMeanOf(dips.data(), res.informativeSegments, trimSafe);
 			res.valid = std::isfinite(res.stat);
+			if (res.valid && outSegmentDips != nullptr)
+				*outSegmentDips = dips;
 			res.reason = res.valid ? EdgeStatsReason::Ok : EdgeStatsReason::InvalidInput;
 			return res;
 		}
