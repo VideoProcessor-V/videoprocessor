@@ -324,16 +324,35 @@ namespace Tests
 			latch.Step(ChainOnly1080(0, kC1 + 1.0, 2));
 			Assert::IsTrue(latch.Latched());
 
-			// Single-frame detail_above at t = 5 s: ignored (debounced), latch stays held.
-			// In-test negative control (Rule 3): a naive 1-frame detail_above veto immediately reverts on the exact same input!
+			// Brief transient detail_above glitch at t = 5.0 s..5.5 s (< 3.0 s dwell): ignored (debounced), latch stays held.
+			// In-test negative control (Rule 3): a real ChainJointLatch configured with zero debounce
+			// (detailAboveDebounceSec = 0.0), latched identically and stepped on the EXACT SAME transient spike
+			// sequence, prematurely releases while the debounced (3.0 s) latch holds!
 			{
-				JointLatchInput in = BaseInput(5);
-				in.classicalDetailAbove = true;
-				const bool naive1FrameReleased = in.classicalDetailAbove;
-				Assert::IsTrue(naive1FrameReleased, L"negative control: naive 1-frame detail_above immediately reverts on a transient glitch");
-				const auto o = latch.Step(in);
-				Assert::IsTrue(o.latched);
-				Assert::IsTrue(o.reason == JointLatchReason::DetailAboveTransient);
+				JointLatchSettings noDebounceCfg = Enabled();
+				noDebounceCfg.detailAboveDebounceSec = 0.0;
+				ChainJointLatch naiveNoDebounce(noDebounceCfg);
+				Assert::IsTrue(naiveNoDebounce.Step(ChainOnly1080(0, kC1 + 1.0, 2)).latched);
+
+				JointLatchInput in1 = BaseInput(5);
+				in1.classicalDetailAbove = true;
+				JointLatchInput in2 = BaseInput(5);
+				in2.timeUs = 5500000; // 0.5 s transient spike (<< 3.0 s shot-dwell debounce)
+				in2.classicalDetailAbove = true;
+
+				const auto oNaive1 = naiveNoDebounce.Step(in1);
+				const auto oNaive2 = naiveNoDebounce.Step(in2);
+				Assert::IsTrue(oNaive1.latched, L"first sample anchors detailAboveSinceUs_");
+				Assert::IsFalse(oNaive2.latched, L"negative control: real zero-debounce ChainJointLatch prematurely releases on a 0.5 s transient glitch");
+				Assert::IsTrue(oNaive2.event == JointLatchEvent::ReleasedDetailAbove);
+				Assert::AreEqual(uint64_t(1), naiveNoDebounce.Counters().releasesDetailAbove);
+
+				const auto o1 = latch.Step(in1);
+				Assert::IsTrue(o1.latched);
+				Assert::IsTrue(o1.reason == JointLatchReason::DetailAboveTransient);
+				const auto o2 = latch.Step(in2);
+				Assert::IsTrue(o2.latched, L"debounced ChainJointLatch holds across 0.5 s transient glitch");
+				Assert::IsTrue(o2.reason == JointLatchReason::DetailAboveTransient);
 			}
 			// Clears at t = 6 s.
 			latch.Step(BaseInput(6));
