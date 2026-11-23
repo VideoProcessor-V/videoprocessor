@@ -524,21 +524,19 @@ namespace DejudderDecisionTableTest
 			auto makeConditions = [](uint64_t a, uint64_t b, uint64_t c) {
 				Dejudder::AheadSchedule::Conditions cond;
 				cond.enabled = true;
+				cond.renderedWarp = true;
 				cond.active = true;
-				cond.hasNext = b != 0;
-				cond.nextSeq = b;
-				cond.hasAfter = c != 0;
-				cond.afterSeq = c;
-				cond.afterIsNew = c != 0 && c > b;
-				cond.sourceWarp = false;
-				cond.estimated = true;
-				cond.estimatedSeq = a;
+				cond.source = a;
+				cond.next = b;
+				cond.after = c;
+				cond.afterGap = false;
+				cond.estimated = a;
+				cond.layoutMatches = true;
 				return cond;
 			};
 			auto makeSteps = [](int& calls, uint64_t& estA, uint64_t& estB) {
 				Dejudder::AheadSchedule::Steps steps;
-				steps.layoutMatches = []() { return true; };
-				steps.snapshotNext = []() { return true; };
+				steps.snapshot = []() { return true; };
 				steps.uploadAfter = []() { return true; };
 				steps.estimate = [&calls, &estA, &estB](uint64_t a, uint64_t b) {
 					++calls;
@@ -573,13 +571,17 @@ namespace DejudderDecisionTableTest
 					int seedCalls = 0;
 					uint64_t sa = 0, sb = 0;
 					Dejudder::AheadSchedule::Conditions c;
-					c.enabled = c.active = c.hasNext = c.hasAfter = c.afterIsNew = c.estimated = true;
-					c.estimatedSeq = 18;
-					c.nextSeq = 19;
-					c.afterSeq = 20;
+					c.enabled = true;
+					c.renderedWarp = true;
+					c.active = true;
+					c.source = 18;
+					c.next = 19;
+					c.after = 20;
+					c.afterGap = false;
+					c.estimated = 18;
+					c.layoutMatches = true;
 					Dejudder::AheadSchedule::Steps st;
-					st.layoutMatches = []() { return true; };
-					st.snapshotNext = []() { return true; };
+					st.snapshot = []() { return true; };
 					st.uploadAfter = []() { return true; };
 					st.estimate = [&seedCalls, &sa, &sb](uint64_t a, uint64_t b) { ++seedCalls; sa = a; sb = b; return true; };
 					Assert::IsTrue(dejudderAhead.TryAhead(c, st), L"seeded stale ahead entry (19, 20)");
