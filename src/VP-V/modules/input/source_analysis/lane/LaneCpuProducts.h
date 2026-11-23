@@ -350,9 +350,10 @@ inline uint32_t HistDistance(const SourceStatsRecord& a, const SourceStatsRecord
 }
 
 inline EventSignals ClassifyEvents(const SourceStatsRecord& prev, const SourceStatsRecord& cur, bool fullBetween,
-                                   bool continuityBetween)
+                                   bool continuityBetween,
+                                   VpUnit::CutFadeJudge::AlignedPairCache* outCache = nullptr)
 {
-    return VpUnit::CutFadeJudge::ClassifyEvents(prev, cur, fullBetween, continuityBetween);
+    return VpUnit::CutFadeJudge::ClassifyEvents(prev, cur, fullBetween, continuityBetween, outCache);
 }
 
 // ---------------------------------------------------------------------------------------------

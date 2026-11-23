@@ -470,6 +470,7 @@ namespace Vpv
 			bool shownBundle = false;
 			std::string shownVetoOff;   // the cut veto state the cached status text was built for ("" = on)
 			bool shownNoGrid = false;   // the no-grid fallback state the cached status text was built for
+			uint64_t shownSceneRunMisses = 0;   // sceneRunRebuilt + sceneRunReduced the cached status text was built for
 			uint8_t shownQueueWired = 0xFF;   // the queue-delivery state the cached status text was built for
 			Vpv::Skeleton::SlotBudgetFeed budgetFeed;   // S0: feeds spare.SetBudget once per source frame + Presenter::spareSlotMs (SlotBudgetFeed.h)
 			VpSkeleton::SpareHost spare;       // B3-Z Z2: the post-present spare slot, driven by R12 AfterPresent (OnAfterPresent)
@@ -554,6 +555,9 @@ namespace Vpv
 			// overwrite a render frame's entry; SceneRunBefore checks it after sceneRuns (FadeRunEndsAt checks the record, so mixing is safe).
 			SceneRunEntry sceneRunsAhead[kSceneRunRing];
 			std::atomic<uint64_t> sceneRunRebuilt{ 0 }, sceneRunReduced{ 0 };   // ring misses rebuilt exactly / with reduced evidence (SceneRunBefore)
+			std::atomic<uint64_t> sceneRunRebuildUsTotal{ 0 };
+			std::atomic<uint64_t> sceneRunRebuildUsMax{ 0 };
+			std::atomic<uint64_t> sceneRunRebuildUsLast{ 0 };
 			uint64_t feedEra = 0;
 			bool feedHadEra = false;
 			uint64_t feedLastEngineSeq = 0;      // the last field seq handled (published, slipped or given up)
@@ -2064,11 +2068,14 @@ namespace Vpv
 			// (the seal classifies every frame in order, so this is the normal case); else rebuilt forward from the older P4 records the lane
 			// still holds (at most kSceneRunRing - 1 pairs back, inside the P4 read lag kScenePrimeFrames, starting from a ring entry that
 			// ends at the oldest of them, or from an empty run); nothing older readable: an empty run, i.e. the pair law alone for this pair.
-			// Caller holds st.sceneRunMutex.
+			// Thread ownership: called exclusively by SceneFactsFor under st.sceneRunMutex — primarily synchronously on the Renderer render
+			// thread via SkeletonModule::Begin -> FillScene -> SceneFactsFor (at each frame's seal, before st.renderBeginUs starts), plus
+			// render-thread SceneOf consumers (DetailPulse / TextureRestore, AdaptiveDownscale, LedMeasurement) and possible off-render-thread
+			// SceneOf / SceneFactsOf queries (e.g. LED look-ahead walk).
 			// The rebuild is NOT always equivalent to the ring path: unless it joins a ring entry or reaches the first frame (P4(1)), its run
 			// starts at most kSceneRunRing - 1 pairs back, so less gain has built up and a slow fade can be found later. That reduced-evidence
 			// path is counted (sceneRunReduced, SceneCounters::fadeRunReduced, the "Skeleton scene" status line, rule 5); an exact rebuild
-			// is counted as sceneRunRebuilt.
+			// is counted as sceneRunRebuilt. Rebuild latency is measured only on the ring-miss rebuild path (zero clock overhead on ring hits).
 			VpUnit::CutFadeJudge::FadeRun SceneRunBefore(HostState& st, Bundle& b, uint64_t seq, const VpLaneProducts::SourceStatsRecord& prev)
 			{
 				using VpUnit::CutFadeJudge::FadeRun;
@@ -2089,6 +2096,9 @@ namespace Vpv
 				FadeRun run;
 				if (entryEndingAt(seq - 1, prev, run))
 					return run;
+				if (seq <= 2)
+					return run;
+				const auto rebuildT0 = std::chrono::steady_clock::now();
 				// recs[i] = P4(seq - 1 - i); the oldest one is P4(oldest).
 				std::vector<VpLaneProducts::SourceStatsRecord> recs(1, prev);
 				uint64_t oldest = seq - 1;
@@ -2109,17 +2119,25 @@ namespace Vpv
 				}
 				// Exact when the walk joined a ring entry or reached the stream's first frame (nothing earlier to know); else reduced evidence.
 				if (joined || oldest <= 1)
-				{
-					if (seq > 2)
-						st.sceneRunRebuilt.fetch_add(1, std::memory_order_relaxed);
-				}
+					st.sceneRunRebuilt.fetch_add(1, std::memory_order_relaxed);
 				else
 					st.sceneRunReduced.fetch_add(1, std::memory_order_relaxed);
 				run = start;
+				VpUnit::CutFadeJudge::AlignedPairCache cache;
 				for (size_t i = recs.size() - 1; i > 0; --i)
 				{
-					const VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(recs[i], recs[i - 1], false, false);
-					VpUnit::CutFadeJudge::FoldFadeRun(recs[i], recs[i - 1], e, run);
+					const VpLaneProducts::EventSignals e = VpUnit::CutFadeJudge::ClassifyEvents(recs[i], recs[i - 1], false, false, &cache);
+					VpUnit::CutFadeJudge::FoldFadeRun(recs[i], recs[i - 1], e, run, nullptr, &cache);
+				}
+				const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+					std::chrono::steady_clock::now() - rebuildT0).count();
+				const uint64_t us = elapsedUs > 0 ? static_cast<uint64_t>(elapsedUs) : 0u;
+				st.sceneRunRebuildUsTotal.fetch_add(us, std::memory_order_relaxed);
+				st.sceneRunRebuildUsLast.store(us, std::memory_order_relaxed);
+				uint64_t prevMax = st.sceneRunRebuildUsMax.load(std::memory_order_relaxed);
+				while (us > prevMax && !st.sceneRunRebuildUsMax.compare_exchange_weak(
+					prevMax, us, std::memory_order_relaxed, std::memory_order_relaxed))
+				{
 				}
 				return run;
 			}
@@ -2544,6 +2562,9 @@ namespace Vpv
 				c.cacheHits = st->sceneCacheHits.load(std::memory_order_relaxed);
 				c.fadeRunRebuilt = st->sceneRunRebuilt.load(std::memory_order_relaxed);
 				c.fadeRunReduced = st->sceneRunReduced.load(std::memory_order_relaxed);
+				c.fadeRunRebuildUsTotal = st->sceneRunRebuildUsTotal.load(std::memory_order_relaxed);
+				c.fadeRunRebuildUsMax = st->sceneRunRebuildUsMax.load(std::memory_order_relaxed);
+				c.fadeRunRebuildUsLast = st->sceneRunRebuildUsLast.load(std::memory_order_relaxed);
 				c.fadePartial = st->sceneFadePartial.load(std::memory_order_relaxed);
 				c.unknown = st->sceneUnknown.load(std::memory_order_relaxed);
 				c.confirmed = st->sceneConfirmed.load(std::memory_order_relaxed);
@@ -3477,14 +3498,16 @@ namespace Vpv
 			// U7-accuracy Q5: the cut veto's reach (a store toggle, a second renderer) refreshes the text at once.
 			const std::string vetoOff = SceneVetoOff(st.host);
 			const bool noGrid = st.sceneNoGrid.load(std::memory_order_relaxed) != 0;   // the no-grid decision engages at once too
+			const uint64_t sceneRunMisses = st.sceneRunRebuilt.load(std::memory_order_relaxed) + st.sceneRunReduced.load(std::memory_order_relaxed);
 			const bool liveDriven = st.entranceLiveDriven.load(std::memory_order_acquire);
 			const bool due = st.frames <= kEarlyRefreshFrames || st.frames % kRefreshEvery == 1 || st.waiting != st.shownWaiting ||
 				hasBundle != st.shownBundle || queueWired != st.shownQueueWired || queueKey != st.shownQueueKey || vetoOff != st.shownVetoOff ||
-				noGrid != st.shownNoGrid || liveDriven != st.shownEntranceLiveDriven;
+				noGrid != st.shownNoGrid || sceneRunMisses != st.shownSceneRunMisses || liveDriven != st.shownEntranceLiveDriven;
 			if (!due)
 				return;
 			st.shownVetoOff = vetoOff;
 			st.shownNoGrid = noGrid;
+			st.shownSceneRunMisses = sceneRunMisses;
 			st.shownEntranceLiveDriven = liveDriven;
 			st.shownQueueKey = queueKey;
 			st.shownQueueWired = queueWired;
@@ -3727,9 +3750,19 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				const uint64_t rebuilt = st.sceneRunRebuilt.load(std::memory_order_relaxed);
 				const uint64_t reduced = st.sceneRunReduced.load(std::memory_order_relaxed);
 				if (rebuilt != 0 || reduced != 0)
-					full.push_back("Skeleton scene: U7 fade run missing for " + std::to_string(rebuilt + reduced) + " frame(s): " +
+				{
+					const uint64_t count = rebuilt + reduced;
+					const uint64_t totalUs = st.sceneRunRebuildUsTotal.load(std::memory_order_relaxed);
+					const uint64_t maxUs = st.sceneRunRebuildUsMax.load(std::memory_order_relaxed);
+					const uint64_t lastUs = st.sceneRunRebuildUsLast.load(std::memory_order_relaxed);
+					const double meanMs = static_cast<double>(totalUs) / (1000.0 * static_cast<double>(count));
+					char timing[128] = {};
+					std::snprintf(timing, sizeof(timing), "; rebuild time mean %.2f ms, max %.2f ms, last %.2f ms",
+						meanMs, static_cast<double>(maxUs) / 1000.0, static_cast<double>(lastUs) / 1000.0);
+					full.push_back("Skeleton scene: U7 fade run missing for " + std::to_string(count) + " frame(s): " +
 						std::to_string(rebuilt) + " rebuilt exactly from older P4 records, " + std::to_string(reduced) +
-						" with REDUCED evidence (the older records had left the lane ring; a slow fade there is found later)");
+						" with REDUCED evidence (the older records had left the lane ring; a slow fade there is found later)" + timing);
+				}
 			}
 			if (st.settings.LaneWanted() || st.tapCounters.Fallbacks() != 0)
 			{

@@ -102,6 +102,9 @@ namespace Vpv
 			// stream start), or with REDUCED evidence (the run starts only a few pairs back; a slow fade may be found later). Rule 5.
 			uint64_t fadeRunRebuilt = 0;
 			uint64_t fadeRunReduced = 0;
+			uint64_t fadeRunRebuildUsTotal = 0;   // cumulative microseconds spent rebuilding missed fade runs in SceneRunBefore
+			uint64_t fadeRunRebuildUsMax = 0;     // worst single fade-run rebuild in microseconds
+			uint64_t fadeRunRebuildUsLast = 0;    // most recent fade-run rebuild in microseconds
 			// U7 v3 partial reset: frames classified as a fade with a history keep below 1 (no restart: the history is reduced).
 			uint64_t fadePartial = 0;
 		};

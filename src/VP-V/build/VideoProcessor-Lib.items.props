@@ -148,6 +148,9 @@
     <ClCompile Include="..\VP-V\core\ProductSlots.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\events\shared\CutFadeJudge.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\capture\CaptureDisplayFixes.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\QueueLookahead.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\VpFixedBudgetPolicy.cpp" />
