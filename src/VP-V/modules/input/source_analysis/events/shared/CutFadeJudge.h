@@ -28,7 +28,7 @@ namespace VpUnit
 namespace CutFadeJudge
 {
 // Bump on ANY change of a threshold, a rule above or the meaning of an output.
-constexpr uint32_t kUnitVersion = 3;
+constexpr uint32_t kUnitVersion = 4;
 
 constexpr double kCutHistFrac = 0.50;          // normalised L1 distance / 2 above this: a different picture
 constexpr double kCutPossibleHistFrac = 0.25;  // above this (or a continuity slip): a cut is possible
@@ -435,18 +435,13 @@ inline void AlignGrid(const double ref[kGridH][kGridW], const double cur[kGridH]
         *outVy = double(bestSy) + fy;
 }
 
-template <typename RefT, typename CurT>
-inline GridFadeFit FitGridFade(const RefT* refCells, const CurT* curCells, int searchRadius)
+inline GridFadeFit FitGridFadeGrid(const double ref[kGridH][kGridW], const double cur[kGridH][kGridW], int searchRadius)
 {
     constexpr int R = kLocalRadius;
     constexpr double kN = double((kGridH - 2 * R) * (kGridW - 2 * R));
     GridFadeFit fit;
 
-    double ref[kGridH][kGridW], cur[kGridH][kGridW];
     double refAligned[kGridH][kGridW], curAligned[kGridH][kGridW];
-    LoadGridCodes(refCells, ref);
-    LoadGridCodes(curCells, cur);
-
     AlignGrid(ref, cur, searchRadius, refAligned, curAligned, &fit.vx, &fit.vy);
 
     // Step 2: Global OLS affine fit curAligned ~= A * refAligned + c over interior cells.
@@ -529,6 +524,15 @@ inline GridFadeFit FitGridFade(const RefT* refCells, const CurT* curCells, int s
 
     fit.valid = true;
     return fit;
+}
+
+template <typename RefT, typename CurT>
+inline GridFadeFit FitGridFade(const RefT* refCells, const CurT* curCells, int searchRadius)
+{
+    double ref[kGridH][kGridW], cur[kGridH][kGridW];
+    LoadGridCodes(refCells, ref);
+    LoadGridCodes(curCells, cur);
+    return FitGridFadeGrid(ref, cur, searchRadius);
 }
 
 // Count interior cells brightening / darkening beyond half-LSB between two grids (for black-boundary monotonicity checks).
@@ -872,6 +876,33 @@ private:
             k->verdict = v;
             return v;
         }
+        // Emergence of a genuine brightening fade-in from flat dark/black: prev is flat dark (< kFadeMaxBlack),
+        // prev -> k brightens monotonically with zero interior cells darkening > kFadeCellStepEps, and k -> ahead
+        // is a verified 576-cell affine brightening fade (FitGridFadeGrid valid && dir > 0).
+        if (prev->flat && ahead != nullptr && ahead->grid.valid) {
+            double prevMean = 0.0, kMean = 0.0;
+            for (int y = 0; y < kGridH; ++y)
+                for (int x = 0; x < kGridW; ++x) {
+                    prevMean += prev->grid.g[y][x];
+                    kMean += k->grid.g[y][x];
+                }
+            prevMean /= double(kGridH * kGridW);
+            kMean /= double(kGridH * kGridW);
+            if (prevMean < double(kFadeMaxBlack) && kMean > prevMean) {
+                int darkened = 0;
+                for (int y = kLocalRadius; y < kGridH - kLocalRadius; ++y)
+                    for (int x = kLocalRadius; x < kGridW - kLocalRadius; ++x)
+                        if (k->grid.g[y][x] - prev->grid.g[y][x] < -kFadeCellStepEps)
+                            ++darkened;
+                if (darkened == 0) {
+                    const GridFadeFit aheadFit = FitGridFadeGrid(k->grid.g, ahead->grid.g, kShiftRadius);
+                    if (aheadFit.valid && aheadFit.dir > 0) {
+                        k->verdict = v;
+                        return v;
+                    }
+                }
+            }
+        }
         v.candidate = true;
         int refIndex = 1;
         while (refIndex < kRefFrames) {
@@ -996,7 +1027,7 @@ inline FadeOut FadeFit(const FadeIn& in, const FadeParams& p = FadeParams())
     return o;
 }
 
-// ---- the multi-frame fade law (unit version 3) ---------------------------------------------------------------------------
+// ---- the multi-frame fade law (unit version 4) ---------------------------------------------------------------------------
 
 struct FadeRun {
     int32_t direction = 0;      // +1 the picture brightens, -1 it darkens, 0 no run
@@ -1206,13 +1237,16 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
                 if (!blackFit.valid && spreadPrev > kBlackSpreadP4)
                     blackFit = FitGridFade(prev.cells, cur.cells, kShiftRadius);
 
-                Grid gp;
+                Grid gp, gc;
                 GridOf(prev, &gp);
+                GridOf(cur, &gc);
                 const bool prevNearBlack = spreadPrev <= kBlackSpreadP4 || Flatness(gp) < kFlatF;
+                const bool curNearBlack = spreadCur <= kBlackSpreadP4 && Flatness(gc) < kFlatF;
                 if (blackFit.valid && blackFit.dir > 0 && stepUp) {
                     blackOriginContinue = true;
-                } else if (prevNearBlack && stepUp && cur.mean > prev.mean && prev.mean >= run.blackBaseMean &&
-                           cur.p99 > run.blackBaseP99 && BlackOriginBrightening()) {
+                } else if (prevNearBlack && curNearBlack && stepUp && cur.mean > prev.mean &&
+                           prev.mean >= run.blackBaseMean && cur.p99 > run.blackBaseP99 &&
+                           BlackOriginBrightening()) {
                     blackOriginContinue = true;
                 }
             } else {
@@ -1242,8 +1276,9 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
         }
 
         // Any other cut resets the run; optionally seed black-origin fade-in pair 1 (ALWAYS returns false on pair 1).
+        const bool failedBlackOrigin = run.blackOrigin && run.direction > 0;
         run = FadeRun();
-        if (spreadPrev <= kBlackSpreadP4 && prev.mean < kBlackMeanMaxP4 && dMean > 0 && dP99 > 0 &&
+        if (!failedBlackOrigin && spreadPrev <= kBlackSpreadP4 && prev.mean < kBlackMeanMaxP4 && dMean > 0 && dP99 > 0 &&
             aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4 && (!hasGrid || darkened == 0)) {
             run.direction = 1;
             run.pairs = 1u;
@@ -1407,8 +1442,11 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
                             ++sOppZero;
                     }
                 }
+            // Cumulative FitGridFade(base -> cur) already enforces strict kFadeSpatialConsensus (0.75) over all lit cells.
+            // On a single-frame step of a slow fade most cells step < kFadeCellStepEps (0.5 code), so require simple
+            // majority (kFadeSpatialCoverage = 0.5) on the sparse above-LSB subset to tolerate local subject motion.
             if (sSameEps + sOppEps > 0)
-                return sOppEps <= sSameEps;
+                return double(sSameEps) >= kFadeSpatialCoverage * double(sSameEps + sOppEps);
             return sSameZero > 0 && double(sSameZero) >= kFadeSpatialConsensus * double(sSameZero + sOppZero);
         };
 
@@ -1450,11 +1488,13 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
             }
         }
 
-        // 3. Black-origin near-black fade-in continuation while prev is still near-flat (< kFlatF or spread <= 1 code).
+        // 3. Black-origin near-black fade-in continuation while prev is near-flat and cur is still flat black (<= 1 code & < kFlatF).
         if (run.blackOrigin && run.direction > 0 && dMean > 0 && aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4) {
-            Grid gp;
+            Grid gp, gc;
             GridOf(prev, &gp);
+            GridOf(cur, &gc);
             if ((spreadPrev <= kBlackSpreadP4 || Flatness(gp) < kFlatF) &&
+                (spreadCur <= kBlackSpreadP4 && Flatness(gc) < kFlatF) &&
                 cur.mean > prev.mean && prev.mean >= run.blackBaseMean && cur.p99 > run.blackBaseP99 &&
                 StepBrightening(prevAligned, curAligned) && BlackOriginBrightening()) {
                 const double fk = PairFadeKeep(prev, cur);
@@ -1527,7 +1567,7 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
     return fade;
 }
 
-// ---- the partial reset on fades (unit version 3) -------------------------------------------------------------------------
+// ---- the partial reset on fades (unit version 4) -------------------------------------------------------------------------
 inline double PairFadeKeep(const SourceStats::Record& prev, const SourceStats::Record& cur)
 {
     const uint32_t sp = prev.p99 > prev.p01 ? prev.p99 - prev.p01 : 0u;
