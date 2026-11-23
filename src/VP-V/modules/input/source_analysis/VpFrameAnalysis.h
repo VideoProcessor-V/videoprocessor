@@ -61,7 +61,7 @@ namespace VpFrameAnalysis
 	// claimed, a format that cannot be read).
 	using Vpv::AnalysisDomain::DecodeSharedLuma;
 	// Planes are recycled from a small pool once nothing holds them; the store's switch-off empties it.
-	void ReleasePlanePool();
+	void ReleasePlanePool(const void* host = nullptr);   // host given: only that host's kept 12-bit views are dropped; nullptr: all
 	size_t PlanePoolSize();
 
 	// ---- C9 commit A: the frame's luma view and the P1 engine reader (doc 93 C9P s2b) ----
@@ -73,9 +73,28 @@ namespace VpFrameAnalysis
 	// P10 N fix (refs/116b, owner 2026-11-12: 12-bit end to end): the SAME frame's luma at TWELVE bits (msbShift 4: the
 	// DvTunnelTapLaw 12-bit tap code, limited domain), for a packed DV tunnel source only (false for every other format: those
 	// carry no more than their own ten-bit codes). A VP-V side product of Bill's untouched AnalysisLumaSource (Sample().luma stays
-	// the ten-bit code); the lane's other readers keep SourceViewOf (msbShift 6). A consumer of this view states its source depth
-	// (GrainSplit::Params::sourceBits = 12, codeUnit 16 / 65535).
+	// the ten-bit code); the lane's other readers keep SourceViewOf (msbShift 6). The tap is the Q6 analysis axis (AnalysisAxis10.h): a
+	// 12-bit sample is code12 << 4 = Q6 (msbShift 4), so a consumer keeps the axis law (GrainSplit sourceBits 10, codeUnit 64 / 65535,
+	// the same for every tap; W21-3 proves it equal to the native 12-bit law sourceBits 12, codeUnit 16 / 65535).
+	// THE 12-bit decode (rule 1): every call that decodes is counted here, as ComputeOnce unit "analysis.tap12" (variant 12) on the
+	// calling thread's frame scope (Process sets it to the job's seq; a call outside any scope is a counted coverage gap).
+	// False, with nothing counted, for a non-DV or an invalid source (nothing to tap). For a VALID packed DV source IsValid() implies the
+	// 12-bit law (DvTunnelTapLaw::Supports invariant, asserted), so the one reachable refusal is a 12-bit plane that cannot be allocated
+	// (the pool is full and an unpooled plane cannot be had either): false, counted in DvTapRefusals.
 	bool SourceViewOf12(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view);
+
+	// W21-1: the view the source frame tap delivers (12-bit end to end), the same law Process applies to its shared decode. A valid
+	// packed DV tunnel source delivers SourceViewOf12 (the Q6 axis at 12 bits, msbShift 4, pooled plane); every other source, and an
+	// invalid DV source (not a refusal: nothing to tap), delivers exactly SourceViewOf. When SourceViewOf12 refuses a valid DV frame
+	// (its 12-bit plane could not be allocated; counted there and shown on Ctrl+I, skeleton_lane line "analysis tap: 10-bit (DV 12-bit
+	// tap refused: N frame(s), no memory for the 12-bit plane)") the 10-bit SourceViewOf is delivered instead: never silent.
+	// `refused` (optional) is set when this call fell back. False when no view could be made at all.
+	bool TapViewOf(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view, bool* refused = nullptr);
+	// Valid DV frames whose 12-bit tap was refused (see SourceViewOf12) and whose readers fell back to the 10-bit view (process total;
+	// one count per refused decode, i.e. per frame: Process decodes each frame at most once; shown, never log-only).
+	uint64_t DvTapRefusals();
+	void NoteDvTapRefusal();   // counts one refused frame; called by SourceViewOf12 only (tests may call it to drive the Ctrl+I line)
+	void ResetDvTapRefusals();
 
 	// The P1 engine half of a frame through its shared decode (the live fill): DecodeSharedLuma when nobody has (a no-op when
 	// published or claimed), SourceViewOf, the P1 half law (HalfLumaRows), then Engine8Half - the lane's law, one recipe.
@@ -146,9 +165,14 @@ namespace VpFrameAnalysis
 		// interpolated between whole codes (exact at every whole code).
 		Reducer(const FrameAnalysis::Rect& picture, const std::array<uint16_t, 1024>& studio);
 		// Row y's sampler values as Q6 (LumaRowReader::RowQ6) for [picture.left, picture.right). Rows outside are ignored.
-		// Mean / APL, BTB / WTW / near-black / clipped shares and the grain variance use the exact Q6 value; the record's
+		// Mean / APL, BTB / WTW / near-black / clipped shares use the exact Q6 value; the record's
 		// histogram and its integer minimum / percentiles / maximum are whole studio codes (the Store contract).
 		void AddRowQ6(int y, const uint16_t* q6);
+		// W21-2: row y of a wide tap for [picture.left, picture.right): `codes` are raw tap codes of `lane`'s law, and the Q6 axis value
+		// of each is lane.MsbAlign(code) (the ONE MSB-align law, LaneInterfaces.h; 12-bit DV: msbShift 4). Already studio-range (Reduce
+		// maps a full-range-tagged frame first); accumulated directly on the exact Q6 histogram (4d + 4h). Do not mix with
+		// AddRowQ6 on one Reducer.
+		void AddRowWide(int y, const uint16_t* codes, const VpSkeleton::SourceFrameView& lane);
 		Measured Finish();
 
 	private:
@@ -156,11 +180,27 @@ namespace VpFrameAnalysis
 		std::vector<uint16_t> m_studioQ6;     // sampler Q6 -> studio Q6 (65536 entries)
 		std::vector<uint32_t> m_q6Histogram;  // studio Q6 counts (65536 entries)
 		uint64_t m_samples = 0;
+		bool m_wide = false;
 		uint64_t m_sumQ6 = 0;
+		uint32_t m_minQ6 = 0xffffffffu, m_maxQ6 = 0;
 	};
 
 	// The whole picture in one call (tests, CPU fallback). False when the source cannot be read.
-	bool Reduce(const AnalysisLumaSource& source, const FrameAnalysis::Rect& picture, Measured& out);
+	// A valid packed DV source is read through its 12-bit tap. `tap12`: the frame's already-decoded 12-bit view (Process passes its one
+	// shared decode); null (or a view of another frame size / law) decodes it here through SourceViewOf12 (counted there). Only when that
+	// decode is refused (counted, Ctrl+I) does the DV frame fall back to the 10-bit read.
+	bool Reduce(const AnalysisLumaSource& source, const FrameAnalysis::Rect& picture, Measured& out,
+		const VpSkeleton::SourceFrameView* tap12 = nullptr);
+
+	// W21 FIN (rule 1): the frame's 12-bit decode SHARED with its other readers. ShareViewOf12 decodes through SourceViewOf12 (counted
+	// there) and keeps the view for FindSharedViewOf12, keyed by the source sequence and the frame's bytes / layout (seq 0: not kept).
+	// Bounded (half the plane pool); a sequence that does not advance starts the set again; ReleasePlanePool empties it.
+	// FindSharedViewOf12 (the source-resolution look-ahead walk, SourceAheadWalk.h) only reads: false when the frame's view is no longer
+	// held (the walk then reads its own samples and counts them as a private site).
+	// `host` = the renderer key of Host::Owner (Job::host; the look-ahead walk passes its Impl): each host keeps its OWN bounded set, so
+	// two hosts never read or clear each other's views. nullptr = the unowned set (tests, ownerless callers).
+	bool ShareViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view, const void* host = nullptr);
+	bool FindSharedViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view, const void* host = nullptr);
 
 	// ---- The producer ----
 	struct Job
@@ -170,6 +210,7 @@ namespace VpFrameAnalysis
 		bool decodePlane = true;            // fill the shared luma plane (some reader wants full luma)
 		bool measure = true;                // compute the measured groups
 		const void* owner = nullptr;        // set when a SourceFrameTap sink of this renderer wants the decoded plane
+		const void* host = nullptr;         // the renderer key of Host::Owner (always set when owned): keys the kept 12-bit views
 	};
 
 	// Decode + reduce + publish, on the calling thread (the worker; tests call it directly).

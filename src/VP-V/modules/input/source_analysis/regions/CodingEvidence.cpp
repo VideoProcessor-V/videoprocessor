@@ -12,6 +12,7 @@
 #include <cstring>
 #include <utility>
 #include <VP-V/core/RobustStats.h>
+#include <VP-V/modules/input/source_analysis/AnalysisAxis10.h>
 
 namespace VpUnit
 {
@@ -23,6 +24,11 @@ namespace CodingEvidence
 		// Spec 1b / 2d on the tile's own codes (the tile sits on the frame's
 		// 16-pixel grid, so block boundaries fall at 7 mod 8 / 15 mod 16).
 		const int codes = (std::max)(1, codeMaximum);
+		// W21-2 (R1/R2): the step-derived constants below are written in axis (10-bit) codes; a deeper signal has `axisScale` native codes per
+		// axis code (4 at 12 bits), so a quarter-code floor, a 2-code minimum band step and an 8-code maximum band step keep their axis meaning.
+		// Exactly 1 at 10 bits and below: 10-bit and 8-bit results are unchanged by construction.
+		const int axisScale = codes >= static_cast<int>(Vpv::AnalysisDomain::kAxisMax)
+			? (std::max)(1, static_cast<int>(Vpv::AnalysisDomain::NativeCodesPerAxisCode(static_cast<uint32_t>(codes)))) : 1;
 		std::vector<int> c(static_cast<size_t>(n) * n);
 		for (int y = 0; y < n; ++y)
 			for (int x = 0; x < n; ++x)
@@ -48,7 +54,7 @@ namespace CodingEvidence
 		for (int p = 0; p < 15; ++p) if (p != 7) inner16 += g16[p] / (std::max)(1.0, count16[p]);
 		inner16 /= 14.0;
 		const double edge8 = g8[7] / (std::max)(1.0, count8[7]), edge16 = g16[15] / (std::max)(1.0, count16[15]);
-		const double floor = 0.25;   // a quarter code: a near-flat tile is not 'blocked' by one stray step
+		const double floor = 0.25 * axisScale;   // a quarter axis code: a near-flat tile is not 'blocked' by one stray step
 		out.blockiness = (std::max)((edge8 + floor) / (inner8 + floor), (edge16 + floor) / (inner16 + floor));
 		out.gradient = inner8;
 
@@ -78,9 +84,10 @@ namespace CodingEvidence
 				// One step (up to 8 codes: 7-bit in 10). Planner G17 (2026-10-16): in a 10-bit (or
 				// deeper) signal a one-code step is a gentle gradient, invisible - not a band; a
 				// band is at least two codes (8-bit content shows four, coarse coding more).
-				const int minimumStep = codes >= 1023 ? 2 : 1;
-				if (twoLevels && hi - lo <= 8 && hi - lo >= minimumStep) { ++flat; ++bandEdges; }
-				else if (twoLevels && hi - lo <= 8) ++flat;
+				const int minimumStep = codes >= static_cast<int>(Vpv::AnalysisDomain::kAxisMax) ? 2 * axisScale : 1;
+				const int maximumStep = 8 * axisScale;
+				if (twoLevels && hi - lo <= maximumStep && hi - lo >= minimumStep) { ++flat; ++bandEdges; }
+				else if (twoLevels && hi - lo <= maximumStep) ++flat;
 			}
 		out.blocks = blocks;
 		out.bandEdges = bandEdges;
@@ -89,8 +96,10 @@ namespace CodingEvidence
 		// Hunt 2 M2/M3: the robust readings, beside the earlier ones (source_coding_fixes).
 		const int signalBits = (std::max)(1, static_cast<int>(std::lround(std::log2(codes + 1.0))));
 		const int flatRange = 1 << (std::max)(0, signalBits - 5);              // 32 codes at 10 bits, 8 at 8
-		const int bandMaximum = (std::max)(2, 1 << (std::max)(0, signalBits - 7));   // one 7-bit step
-		const int bandMinimum = signalBits >= 10 ? (1 << (signalBits - 9)) : 1;      // G17: a 1-code step at 10 bits is no band
+		// One depth law with MeasureTile's axisScale: at >= 10 bits a band is 2..8 AXIS codes (axisScale native codes each); below, the 7-bit step.
+		const bool axisDepth = signalBits >= Vpv::AnalysisDomain::kAxisBits;
+		const int bandMaximum = axisDepth ? 8 * axisScale : (std::max)(2, 1 << (std::max)(0, signalBits - 7));   // one 7-bit step
+		const int bandMinimum = axisDepth ? 2 * axisScale : 1;                       // G17: a 1-code step at 10 bits is no band
 		out.flatHistogram.assign(static_cast<size_t>(codes) + 1, 0u);
 		int robustEdges = 0;
 		int block[64];

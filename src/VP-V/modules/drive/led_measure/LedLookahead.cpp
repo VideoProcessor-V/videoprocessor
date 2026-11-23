@@ -72,6 +72,18 @@ namespace LedDrive
 		return table;
 	}
 
+	std::vector<float> WideValueTable(const LumaValueTable& table, uint32_t codeMaximum, int msbShift)
+	{
+		std::vector<float> wide(static_cast<size_t>(codeMaximum) + 1u);
+		// The lane value is the code MSB-aligned on the 16-bit lane scale: a code of BitsOf(codeMaximum) bits shifts by at most
+		// 16 - bits (the 10-bit axis: 6, the 12-bit DV tap: 4), derived from the declared range, not a literal.
+		constexpr int kLaneBits = 16;
+		const int shift = std::max(0, std::min(msbShift, kLaneBits - Vpv::AnalysisDomain::BitsOf(codeMaximum)));
+		for (uint32_t code = 0; code <= codeMaximum; ++code)
+			wide[code] = TableValueQ6(table, code << shift);
+		return wide;
+	}
+
 	double FullCoveragePeak(const AnalysisLumaSource& luma, int left, int top, int right, int bottom,
 		const LumaValueTable& table, double screenW, double screenH, const PixelRect* masks, int maskCount)
 	{

@@ -10,7 +10,8 @@
 //
 // What the view carries. The luma codes are the 10-bit sampler codes of AnalysisLumaSource (studio codes
 // when the VP-V limited domain is on, which is always the case outside the Original pathway); a sample
-// scaled to the full 16-bit range is (code << 6), so msbShift is 6. strideSamples == width (the plane is
+// scaled to the full 16-bit range is (code << 6), so msbShift is 6. A DV tunnel source may deliver the 12-bit tap instead
+// (code12 << 4, msbShift 4): both are the same Q6 analysis axis (AnalysisAxis10.h), codeUnit 64 / 65535 for every tap. strideSamples == width (the plane is
 // tightly packed). keepAlive owns the shared plane: while any copy of the view lives, VpFrameAnalysis's
 // plane pool cannot recycle the plane (it recycles only a plane nobody else holds, use_count == 1).
 //

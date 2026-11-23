@@ -36,11 +36,17 @@ namespace DvTunnelTapLaw
 	constexpr int kLevels = 1 << kBits;           // 4096
 	constexpr int kLegacyBits = 10;               // today's CPU tap
 	constexpr int kLegacyShift = kBits - kLegacyBits;
+	// W21-1: the lane shift of the 12-bit tap (SourceFrameView::msbShift): the code in the high bits of the 16-bit lane sample, so
+	// MsbAlign(code12) = code12 << 4 is the Q6 analysis axis value (AnalysisAxis10.h), the same axis as a 10-bit tap at shift 6.
+	constexpr int kLaneShift = 16 - kBits;
 
 	// rgbBitAlignment as AnalysisLumaSource carries it: 1 high, 2 low eight bits.
 	inline bool SupportsAlignment(int alignment) { return alignment == 1 || alignment == 2; }
 
 	// The tap covers a (container, alignment, width) the CPU tap accepts (AnalysisLumaSource::IsValid).
+	// INVARIANT (W21 FIN): for format PackedDolbyVision422, AnalysisLumaSource::IsValid() requires SupportsContainer(encoding),
+	// width >= 1 and even, and alignment 1 or 2 - a superset of this test - so IsValid() implies Supports(): a valid packed DV frame is
+	// never refused by this law. VpFrameAnalysis::SourceViewOf12 asserts it; callers that gate on IsValid() do not test it again.
 	inline bool Supports(VideoFrameEncoding container, int alignment, int width)
 	{
 		return DolbyVisionTunnelUnpackReference::SupportsContainer(container) && SupportsAlignment(alignment) &&
@@ -102,6 +108,32 @@ namespace DvTunnelTapLaw
 		for (int code = 0; code < kLevels; ++code)
 			table[code] = FullLumaToLimited12(code);
 	}
+	// W21-1: one row of the 12-bit tap (width pixels of 4 bytes at `row`) with the container shift and endianness hoisted out of the
+	// per-pixel loop. Same law and same numbers as TapCode per pixel (pinned by the tests); the caller checks the frame (a valid packed DV
+	// frame always satisfies Supports, see the invariant above).
+	inline void TapRow12(const uint8_t* row, int width, VideoFrameEncoding container, int alignment, bool fullRange, uint16_t* dst)
+	{
+		namespace R = DolbyVisionTunnelUnpackReference;
+		const uint32_t shift = R::ContainerShift(container, alignment == 1);
+		const bool bigEndian = R::ContainerBigEndian(container);
+		for (int x = 0; x < width; ++x)
+		{
+			const size_t at = static_cast<size_t>(x) * 4;   // one 32-bit container word per pixel
+			const uint32_t word = R::Word(row + at, bigEndian);   // the reference's own word assembly (rule 1: no private copy)
+			// The lane word (I in the high 12 of 16) back to the whole 12-bit code: the axis header's owned inverse (Code12FromLane16).
+			dst[x] = ToLimited(static_cast<uint16_t>(Vpv::AnalysisDomain::Code12FromLane16(R::Intensity(word, shift))), fullRange);
+		}
+	}
+
+	// W21 FIN: row y (the whole width) of a packed DV tunnel analysis source through TapRow12, with the source's own container,
+	// alignment and range flag. SourceT as SourceTap12 below (duck-typed). The caller checks the frame (IsValid) and 0 <= y < height.
+	template <typename SourceT>
+	inline void SourceTapRow12(const SourceT& source, int y, uint16_t* dst)
+	{
+		TapRow12(source.data + static_cast<size_t>(y) * source.rowBytes, source.width, source.encoding, source.rgbBitAlignment,
+			source.fullRangeYuv, dst);
+	}
+
 	// The 12-bit tap of one pixel of a packed DV tunnel analysis source (the side read of the CPU tap: Bill's
 	// AnalysisLumaSource::Sample() keeps its ten-bit luma byte-identical and is NOT edited; P10 reads the same frame
 	// bytes here). SourceT = AnalysisLumaSource (duck-typed so this header does not include it): needs data, rowBytes,

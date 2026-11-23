@@ -9,6 +9,7 @@
 #include <VP-V/modules/scaling/geometry/SourceGeometrySet.h>
 #include <VP-V/modules/input/source_analysis/identity/shared/SourceQuality.h>
 #include <VP-V/core/ComputeOnce.h>
+#include <VP-V/modules/input/source_analysis/AnalysisAxis10.h>
 
 #include <DebugLog.h>
 #include <GeneralRateLog.h>
@@ -187,7 +188,20 @@ if (tile < int(tiles) && g.y < ts) {
 	void Monitor::LookAheadFrame(uint64_t sequence, int width, int height, const LumaSampler& luma,
 		int left, int top, int right, int bottom)
 	{
-		if (!luma || sequence <= aheadLastSequence) return;
+		LookAheadFrameCoded(sequence, width, height, luma, Vpv::AnalysisDomain::kAxisMax, left, top, right, bottom);
+	}
+
+	void Monitor::LookAheadFrame(uint64_t sequence, int width, int height, const CodedLumaSampler& luma,
+		int left, int top, int right, int bottom)
+	{
+		LookAheadFrameCoded(sequence, width, height, luma.read, luma.codeMaximum, left, top, right, bottom);
+	}
+
+	void Monitor::LookAheadFrameCoded(uint64_t sequence, int width, int height, const LumaSampler& luma, uint32_t codeMaximum,
+		int left, int top, int right, int bottom)
+	{
+		if (!luma || sequence <= aheadLastSequence || codeMaximum == 0) return;
+		const double axisRange = static_cast<double>(Vpv::AnalysisDomain::kAxisMax);   // axis-level thresholds (spread, noise) keep their meaning
 		aheadLastSequence = sequence;
 		left = (std::max)(0, left); top = (std::max)(0, top);
 		right = (std::min)(width, right); bottom = (std::min)(height, bottom);
@@ -220,7 +234,7 @@ if (tile < int(tiles) && g.y < ts) {
 			for (int y = 0; y < tileSize; y += step)
 				for (int x = 0; x < tileSize; x += step)
 				{
-					const double v = luma(x0 + x, y0 + y) / 1023.0;
+					const double v = NormalisedLuma(luma(x0 + x, y0 + y), codeMaximum);
 					ts += v; ts2 += v * v;
 					q[(y >= half ? 2 : 0) + (x >= half ? 1 : 0)] += v;
 					samples += 1.0;
@@ -240,7 +254,7 @@ if (tile < int(tiles) && g.y < ts) {
 			const SourceResolution::Tracker::Settings ts;
 			const SourceResolution::Thresholds th;
 			const std::vector<char> none(pattern.size(), 0);
-			const double noise = th.flatSpreadCodes / 1023.0;
+			const double noise = th.flatSpreadCodes / axisRange;
 			double decorrelation = 0.0, share = 0.0, jump = 0.0;
 			if (CutFixes())
 			{
@@ -259,12 +273,12 @@ if (tile < int(tiles) && g.y < ts) {
 			}
 			else if (SourceResolution::PatternChange(pattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share))
 				aheadLastPattern = pattern;
-			blank = spread < 3.0 / 1023.0 && mean <= blackLevelSeen + th.nearBlackShare * (1.0 - blackLevelSeen);
+			blank = spread < 3.0 / axisRange && mean <= blackLevelSeen + th.nearBlackShare * (1.0 - blackLevelSeen);
 		}
 		else
 		{
 			cut = aheadLastMean >= 0.0 && std::fabs(mean - aheadLastMean) > SourceResolution::Tracker::Settings{}.cutLevel;
-			blank = spread < 3.0 / 1023.0;   // no texture anywhere (black, a fade's end, flat)
+			blank = spread < 3.0 / axisRange;   // no texture anywhere (black, a fade's end, flat)
 		}
 		aheadLastMean = mean;
 		const bool pending = disengagePending || std::fabs(autoPending - autoApplied) > 0.01;
@@ -298,6 +312,7 @@ if (tile < int(tiles) && g.y < ts) {
 				ahead.targetSequence = sequence;
 				aheadTileCount = tilesX * tilesY;
 				aheadTileSize = tileSize;
+				aheadCodeMaximum = static_cast<int>(codeMaximum);
 				aheadTiles.resize(static_cast<size_t>(aheadTileCount) * tileSize * tileSize);
 				for (int i = 0; i < aheadTileCount; ++i)
 				{
@@ -305,7 +320,7 @@ if (tile < int(tiles) && g.y < ts) {
 					tileOrigin(i, x0, y0);
 					float* t = &aheadTiles[static_cast<size_t>(i) * tileSize * tileSize];
 					for (int y = 0; y < tileSize; ++y)
-						for (int x = 0; x < tileSize; ++x) t[y * tileSize + x] = luma(x0 + x, y0 + y) / 1023.0f;
+						for (int x = 0; x < tileSize; ++x) t[y * tileSize + x] = static_cast<float>(luma(x0 + x, y0 + y)) / static_cast<float>(codeMaximum);   // float division as before (1023.0f)
 				}
 				aheadHaveJob = true;
 			}
@@ -318,7 +333,7 @@ if (tile < int(tiles) && g.y < ts) {
 		for (;;)
 		{
 			std::vector<float> tiles;
-			int count = 0, size = kTile;
+			int count = 0, size = kTile, codeMaximum = static_cast<int>(Vpv::AnalysisDomain::kAxisMax);
 			uint64_t target = 0;
 			{
 				std::unique_lock<std::mutex> lock(aheadMutex);
@@ -327,11 +342,12 @@ if (tile < int(tiles) && g.y < ts) {
 				tiles.swap(aheadTiles);
 				count = aheadTileCount;
 				size = aheadTileSize;
+				codeMaximum = aheadCodeMaximum;
 				target = ahead.targetSequence;
 			}
 			std::vector<SourceResolution::Spectrum> spectra(static_cast<size_t>(count));
 			for (int i = 0; i < count; ++i)
-				SourceResolution::Analyse(&tiles[static_cast<size_t>(i) * size * size], size, size, spectra[static_cast<size_t>(i)], 1023);
+				SourceResolution::Analyse(&tiles[static_cast<size_t>(i) * size * size], size, size, spectra[static_cast<size_t>(i)], codeMaximum);
 			SourceResolution::Thresholds thresholds;
 			thresholds.latchFixes = LatchFixes();
 			thresholds.codingUnavailable = true;   // the look-ahead reads the ratio only: no P16 acquire, coding neutral, no distribution

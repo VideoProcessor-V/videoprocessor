@@ -21,6 +21,7 @@
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
 #include <VP-V/tests/SyntheticAnalysisFrames.h>
+#include <VP-V/modules/input/source_analysis/tests/DvWideReference.h>
 
 #include <algorithm>
 #include <array>
@@ -239,7 +240,13 @@ namespace DecodeOwnerIdentityTestsNs
 							for (const FrameAnalysis::Rect& picture : pictures)
 							{
 								VpFrameAnalysis::Measured want, got;
-								Assert::IsTrue(Oracle::Reduce(oracle, picture, want), Name(kind, limited, bt2020, frame, L"oracle reduce").c_str());
+								// WAIVER-S21-O3: the packed DV tunnel is measured on its 12-bit tap (DvTunnelTapLaw code12 = Intensity >> 4,
+								// tap16 = tap12 << 4, a 12-bit sample is Q6 on the 10-bit axis); the frozen ten-bit oracle does not apply to it.
+								if (kind == Kind::PackedDvR210)
+									Assert::IsTrue(DvWideReference::Reduce12(oracle, picture, !DvWideReference::MapIsIdentity(oracleMap), want.luma, want.range),
+										Name(kind, limited, bt2020, frame, L"oracle reduce").c_str());
+								else
+									Assert::IsTrue(Oracle::Reduce(oracle, picture, want), Name(kind, limited, bt2020, frame, L"oracle reduce").c_str());
 								Assert::IsTrue(VpFrameAnalysis::Reduce(owner, picture, got), Name(kind, limited, bt2020, frame, L"reduce").c_str());
 								SameMeasured(want, got, Name(kind, limited, bt2020, frame, L"measured"));
 							}

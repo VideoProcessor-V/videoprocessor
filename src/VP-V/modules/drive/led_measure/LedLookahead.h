@@ -2,6 +2,7 @@
 
 #include <QueuedFrameStatistics.h>
 #include "LedMeasurement.h"
+#include <VP-V/modules/input/source_analysis/AnalysisAxis10.h>
 
 #include <array>
 #include <cstdint>
@@ -90,6 +91,22 @@ namespace LedDrive
 	// Every 10-bit code Sample() can return.
 	constexpr int LUMA_CODES = 1024;
 	using LumaValueTable = std::array<float, LUMA_CODES>;
+	// W21-2: the value table read at a Q6 axis value (axis code x 64, the 16-bit lane scale): linear between the two whole-code
+	// entries, so an integer code (fraction 0) returns its entry exactly and a 12-bit tap code lands between them. The last entry is
+	// held past it. Monotonic whenever the table is.
+	inline float TableValueQ6(const LumaValueTable& table, uint32_t q6)
+	{
+		const uint32_t whole = q6 >> Vpv::AnalysisDomain::kAxisFractionBits;
+		if (whole >= static_cast<uint32_t>(LUMA_CODES - 1)) return table[LUMA_CODES - 1];
+		const uint32_t part = q6 & ((1u << Vpv::AnalysisDomain::kAxisFractionBits) - 1u);
+		if (part == 0) return table[whole];
+		return table[whole] + (table[whole + 1] - table[whole]) *
+			(static_cast<float>(part) / static_cast<float>(1u << Vpv::AnalysisDomain::kAxisFractionBits));
+	}
+	// The table for the codes 0..codeMaximum of a wide tap whose Q6 value is code << msbShift (the 12-bit DV tap: 4095, shift 4):
+	// entry c = TableValueQ6(table, c << msbShift). Shift 6 reproduces `table` exactly (the 10-bit lane). Held for the DV wiring
+	// (W21-5, with the waiver of the Sample()-oracle test); no production reader uses it yet.
+	std::vector<float> WideValueTable(const LumaValueTable& table, uint32_t codeMaximum, int msbShift);
 	// The raw measurement's per-pixel mapping as a table: a Sample() luma
 	// code to its boosted signal (normally 0..1) through `transfer` (RAW_TRANSFER_SIZE
 	// entries) under `range` (as MeasureRawFrame).

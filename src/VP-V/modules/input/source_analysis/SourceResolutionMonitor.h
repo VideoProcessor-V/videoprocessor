@@ -1,5 +1,7 @@
 #pragma once
 
+#include <VP-V/modules/input/source_analysis/AnalysisAxis10.h>
+#include <VP-V/modules/input/source_analysis/CodedLumaSampler.h>
 #include <VP-V/modules/input/source_analysis/SourceHistoryLog.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/ChainWindowPolicy.h>
@@ -506,6 +508,14 @@ namespace SourceResolutionMonitor
 		using LumaSampler = std::function<int(int x, int y)>;
 		void LookAheadFrame(uint64_t sequence, int width, int height, const LumaSampler& luma,
 			int left, int top, int right, int bottom);
+		// W21-2: the same with the sampler's declared code range (a 12-bit source: 4095), CodedLumaSampler.h. The look-ahead normalises by
+		// `codeMaximum`; the axis-level thresholds keep their meaning (a fraction of the range).
+		void LookAheadFrame(uint64_t sequence, int width, int height, const CodedLumaSampler& luma,
+			int left, int top, int right, int bottom);
+	private:
+		void LookAheadFrameCoded(uint64_t sequence, int width, int height, const LumaSampler& luma, uint32_t codeMaximum,
+			int left, int top, int right, int bottom);
+	public:
 		struct AheadState
 		{
 			uint64_t eventSequence = 0;    // the cut / black frame ahead (0 = none)
@@ -752,6 +762,7 @@ namespace SourceResolutionMonitor
 		std::vector<float> aheadTiles;   // the target frame's tiles, normalised
 		int aheadTileCount = 0;
 		int aheadTileSize = kTile;
+		int aheadCodeMaximum = static_cast<int>(Vpv::AnalysisDomain::kAxisMax);   // W21-2: the queued tiles' declared code range (their spectra's step law)
 		AheadState ahead;
 		uint64_t aheadLastSequence = 0;
 		double aheadLastMean = -1.0;

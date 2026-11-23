@@ -24,6 +24,7 @@
 #include <VP-V/modules/input/source_analysis/lane/shared/TapSource.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
 #include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
 #include <VP-V/modules/input/source_analysis/FrameQuiet.h>
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
@@ -3263,6 +3264,12 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				fb.push_back("skeleton_lane: switched on after the first frame; the lane binds the shared seal at the next source era");
 			if (!st.cardNote.empty())
 				fb.push_back("skeleton_lane: " + st.cardNote + "; the tier plan assumes none");
+			// W21-1: a valid DV frame whose 12-bit plane could not be allocated used the 10-bit tap (the one reachable refusal; IsValid()
+			// implies the 12-bit law, DvTunnelTapLaw.h). Never silent.
+			const uint64_t dvRefused = VpFrameAnalysis::DvTapRefusals();
+			if (dvRefused != 0)
+				fb.push_back("skeleton_lane: analysis tap: 10-bit (DV 12-bit tap refused: " + std::to_string(dvRefused) +
+					" frame(s), no memory for the 12-bit plane)");
 			const uint64_t evicted = st.pendingEvicted.load(std::memory_order_relaxed);
 			const uint64_t lost = st.dropsLost.load(std::memory_order_relaxed);
 			if (evicted != 0)

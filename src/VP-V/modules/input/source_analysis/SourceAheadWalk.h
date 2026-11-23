@@ -15,6 +15,10 @@
 
 #include <AnalysisFrame.h>
 #include <AnalysisLumaSource.h>
+#include <VP-V/modules/input/signal/DvTunnelTapLaw.h>
+#include <VP-V/modules/input/source_analysis/CodedLumaSampler.h>
+#include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
+#include <VP-V/core/ComputeOnce.h>
 #include <DebugLog.h>
 #include <VP-V/core/FallbackCatalog.h>
 #include <vprenderer/RendererExtension.h>
@@ -43,6 +47,37 @@ namespace SourceResolution
 					aheadState.dolbyVisionTunnel);
 				const AnalysisLumaSource& luma = prepared.source;
 				if (!luma.IsValid()) continue;
+				// W21-2: a packed DV tunnel frame is looked at through its 12-bit tap (4095); every other source keeps the 10-bit read.
+				// IsValid() (checked above) implies the 12-bit law (DvTunnelTapLaw.h invariant), so a DV frame is never refused here.
+				if (luma.format == AnalysisLumaFormat::PackedDolbyVision422)
+				{
+					// Rule 1: the frame's ONE 12-bit decode (VpFrameAnalysis::Process at arrival, kept by ShareViewOf12) is read when it is
+					// still held. Otherwise the walk reads its own sparse samples through the same law (SourceTap12): that read is counted
+					// as a private site of the tap12 unit (ComputeOnce report), never uncounted. Resolved on the first sample only, so a
+					// frame the monitor skips (already looked at) is neither looked up nor counted.
+					const uint64_t sequence = ahead.sourceSequence;
+					VpSkeleton::SourceFrameView shared;
+					int how = 0;   // 0 = no sample read yet, 1 = the shared 12-bit decode, 2 = own samples (counted)
+					SourceResolutionMonitor::CodedLumaSampler tap;
+					tap.codeMaximum = static_cast<uint32_t>(DvTunnelTapLaw::kLevels - 1);
+					const void* const host = &impl;   // the key Host::Owner(this) registered: this host's kept views only
+					tap.read = [&luma, &shared, &how, sequence, host](int x, int y) {
+						if (how == 0)
+						{
+							how = VpFrameAnalysis::FindSharedViewOf12(sequence, luma, shared, host) ? 1 : 2;
+							if (how == 2)
+								VPV_COMPUTE_ONCE_PRIVATE_AT("analysis.tap12", sequence, "source-look-ahead samples");
+						}
+						if (how == 1)
+							return x >= 0 && y >= 0 && x < static_cast<int>(shared.width) && y < static_cast<int>(shared.height) ?
+								static_cast<int>(shared.luma[static_cast<size_t>(y) * shared.strideSamples + static_cast<size_t>(x)]) : 0;
+						uint16_t code12 = 0;
+						return DvTunnelTapLaw::SourceTap12(luma, x, y, code12) ? static_cast<int>(code12) : 0;
+					};
+					impl.vpv.sourceAnalysis.sourceMonitor.LookAheadFrame(sequence, luma.width, luma.height, tap,
+						0, 0, luma.width, luma.height);
+					continue;
+				}
 				impl.vpv.sourceAnalysis.sourceMonitor.LookAheadFrame(ahead.sourceSequence, luma.width, luma.height,
 					[&luma](int x, int y) {
 						uint16_t code = 0;   // WP-23: the shared decode when ready

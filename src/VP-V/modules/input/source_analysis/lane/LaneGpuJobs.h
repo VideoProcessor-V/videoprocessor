@@ -106,8 +106,9 @@ inline uint32_t StepsFor(ProductId id, Dims d)
 // lane's analysis luma), not from the queued source planes: the registry the lane is built on drops their P13 input.
 // The tap form has its own unit version and provenance tag (kTapFormUnitVersion, kTapProvenance); at the migration to
 // P13 both change and consumers CheckFit and fall back visibly (WrongSize / Stale). Every other declaration is kept.
+// The tap is the Q6 analysis axis for every source depth: codeUnit 64 / 65535 (a 10-bit code << 6; a 12-bit DV code << 4, msbShift 4).
 constexpr uint32_t kTapFormUnitVersion = 1;
-constexpr const char* kTapProvenance = "tap: analysis luma (10-bit studio codes << 6, R16 unorm)";
+constexpr const char* kTapProvenance = "tap: analysis luma (studio codes, MsbAlign to the Q6 axis, R16 unorm: 10-bit at msbShift 6, packed DV 12-bit at msbShift 4)";
 
 inline VpSkeleton::Registry TapFormProducts(const VpSkeleton::Registry& reg)
 {

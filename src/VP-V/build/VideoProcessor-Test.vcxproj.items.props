@@ -901,6 +901,13 @@
     <ClCompile Include="..\VP-V\modules\input\source_analysis\lane\tests\LaneGpuGrainKernelWarpTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\lane\tests\LaneMsbShift4WarpTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\tests\LookAheadAt4095Tests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\lane\LaneGpuRegionKernel.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -990,6 +997,10 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\skeleton\tests\SkeletonDvTapLineTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\skeleton\tests\SkeletonModuleTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -1011,6 +1022,16 @@
     </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\AnalysisLumaDomainTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\AnalysisStepAxisTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\DvTwelveBitTapTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\AnalysisWideningConsumerTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\DecodeOwnerIdentityTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -1107,6 +1128,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\repair\grain_split\tests\GrainSplitV3GpuTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\repair\grain_split\tests\GrainSplitAxisLawTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\repair\grain_split\tests\GrainSplitV3CostBench.cpp">

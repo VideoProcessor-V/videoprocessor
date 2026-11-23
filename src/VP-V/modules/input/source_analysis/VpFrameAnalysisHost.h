@@ -208,6 +208,7 @@ namespace VpFrameAnalysis
 			job.decodePlane = decodePlane;
 			job.measure = measure;
 			job.owner = tapWants ? owner : nullptr;
+			job.host = owner;
 			m_producer.Submit(std::move(job));
 			if (cadence)
 				m_store.PublishCadence(seq, *cadence);   // Submit began the record (false only when the store went off meanwhile)
@@ -283,7 +284,7 @@ namespace VpFrameAnalysis
 			else
 			{
 				m_producer.Stop();
-				ReleasePlanePool();
+				ReleasePlanePool(m_owner.load(std::memory_order_acquire));
 			}
 			m_lastUnique = 0;
 			m_haveUnique = false;
