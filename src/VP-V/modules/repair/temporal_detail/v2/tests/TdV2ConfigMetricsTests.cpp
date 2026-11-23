@@ -2,10 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Temporal Detail v2 — Stage TD-S0 tests (2026-11-23_TD-consolidated-plan.md s3.2):
-// Verifies default-OFF config & Original pathway override, Reference vs RealTime preset shortcut ledger,
-// non-silent StandInRegistry & TdGuardPort, W1-W4 worst-area masks (never hiding W2 regression in global mean),
-// camera-relative speed-bin sharpness (camera pan separate from moving objects), authoritative grain-transfer
-// detection, and non-finite fail-closed behavior. CPU only.
+// Adversarial verification of:
+//   - Default-OFF config, Original pathway override, DepthScale / PeakCodeForBits / MapCellToGrainGrid bounds
+//   - Reference vs RealTime preset shortcut ledger (SC-01..SC-04)
+//   - Exhaustive non-silent StandInRegistry (every StandInKind token unique, formatted, hit-counted) & TdGuardPort
+//   - W1-W4 worst-area masks (proving global mean hides W2 regression & worst-5% worsened fraction)
+//   - Camera-relative speed-bin sharpness with exact derived physical bin edges (0.25, 1.0, 3.0, 8.0 px)
+//   - Authoritative synthetic grain-transfer detection (foreign averaging, RMS drift, lag-1 rise)
+//   - Non-finite fail-closed behavior across all evaluators. CPU only.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -19,6 +23,7 @@
 #include <cstdint>
 #include <limits>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -43,17 +48,25 @@ namespace Tests
 				Assert::IsTrue(cfg.estimator == VarianceEstimator::A3_ConservativeMin, L"Default estimator must be A3");
 				Assert::IsTrue(cfg.bokehMode == BokehMode::Untouched, L"Default bokeh mode must be Untouched (Q4)");
 
-				// Dynamic P10-D6 block-grid mapping: 16-px TD cell to 32-px 4K grain cell.
+				// Dynamic P10-D6 block-grid mapping: 16-px TD cell to 32-px 4K grain cell + invalid-arg guards.
 				Assert::AreEqual(0, MapCellToGrainGrid(0, 16, 32));
 				Assert::AreEqual(0, MapCellToGrainGrid(1, 16, 32));
 				Assert::AreEqual(1, MapCellToGrainGrid(2, 16, 32));
 				Assert::AreEqual(3, MapCellToGrainGrid(3, 16, 16));
+				Assert::AreEqual(0, MapCellToGrainGrid(-1, 16, 32));
+				Assert::AreEqual(0, MapCellToGrainGrid(2, 0, 32));
+				Assert::AreEqual(0, MapCellToGrainGrid(2, 16, 0));
+				Assert::AreEqual(0, MapCellToGrainGrid(2, 16, -8));
 
-				// DepthScale: 10-bit = 1.0, 12-bit = 4.0, 8-bit = 0.25.
+				// DepthScale: 8-bit = 0.25, 10-bit = 1.0, 12-bit = 4.0; invalid PeakCodeForBits fails closed to 0.
+				Assert::AreEqual(0.25, DepthScale(8), 1e-12);
 				Assert::AreEqual(1.0, DepthScale(10), 1e-12);
 				Assert::AreEqual(4.0, DepthScale(12), 1e-12);
 				Assert::AreEqual(1023.0, PeakCodeForBits(10), 1e-12);
 				Assert::AreEqual(4095.0, PeakCodeForBits(12), 1e-12);
+				Assert::AreEqual(0.0, PeakCodeForBits(0), 1e-12);
+				Assert::AreEqual(0.0, PeakCodeForBits(-10), 1e-12);
+				Assert::AreEqual(0.0, PeakCodeForBits(25), 1e-12);
 
 				// Shadow mode enables processing without modifying pixels; Original pathway forces Off.
 				cfg.mode = Mode::Shadow;
@@ -87,7 +100,7 @@ namespace Tests
 				Assert::AreEqual(1, rt.cellProjIterations);
 			}
 
-			TEST_METHOD(StandInRegistryIsNeverSilentAndTracksEveryHit)
+			TEST_METHOD(StandInRegistryIsNeverSilentAndTracksEveryHitAndToken)
 			{
 				StandInRegistry reg;
 				Assert::IsFalse(reg.AnyActive());
@@ -107,6 +120,41 @@ namespace Tests
 				Assert::IsTrue(summary.find("P16 grid: TD stand-in") != std::string::npos, L"P16 stand-in must be visible");
 				Assert::IsTrue(summary.find("focus_map: TD E2/E3 stand-in") != std::string::npos, L"Focus stand-in must be visible");
 				Assert::IsTrue(summary.find("CPU tile P16") != std::string::npos, L"Detail token must be preserved");
+
+				// Verify ALL StandInKind enum tokens (including runtime fallbacks StepPriorDefault,
+				// SingleRefA1ToA2Fallback, MotionFieldStandIn, SingularSolveClosure, BorderBilinearFallback)
+				// have unique non-empty catalog keys, non-empty status text, and visible summaries.
+				const size_t totalKinds = static_cast<size_t>(StandInKind::Count);
+				Assert::IsTrue(totalKinds >= 21, L"All D1-D12 and runtime fallback stand-in tokens must be enumerated");
+				std::set<std::string> seenKeys;
+				StandInRegistry allReg;
+				for (size_t i = 0; i < totalKinds; ++i)
+				{
+					const auto kind = static_cast<StandInKind>(i);
+					const StandInMeta& meta = MetaOf(kind);
+					Assert::IsTrue(meta.kind == kind, L"StandInMeta table order must match StandInKind enum");
+					Assert::IsTrue(meta.catalogKey != nullptr && meta.catalogKey[0] != '\0');
+					Assert::IsTrue(meta.statusText != nullptr && meta.statusText[0] != '\0');
+					Assert::IsTrue(meta.swapTarget != nullptr && meta.swapTarget[0] != '\0');
+					Assert::IsTrue(seenKeys.insert(meta.catalogKey).second, L"Every StandInKind catalogKey must be unique");
+					allReg.Engage(kind);
+					Assert::IsTrue(allReg.IsActive(kind));
+					Assert::AreEqual(static_cast<uint64_t>(1), allReg.HitCount(kind));
+				}
+				Assert::AreEqual(totalKinds, allReg.ActiveCount());
+				const std::string allSummary = allReg.FormatStatusSummary();
+				Assert::IsTrue(allSummary.find("step prior:") != std::string::npos);
+				Assert::IsTrue(allSummary.find("A1 single-ref fallback") != std::string::npos);
+				Assert::IsTrue(allSummary.find("motion field:") != std::string::npos);
+				Assert::IsTrue(allSummary.find("covariance solve singular") != std::string::npos);
+				Assert::IsTrue(allSummary.find("border bilinear warp fallback") != std::string::npos);
+
+				allReg.Clear(StandInKind::StepPriorDefault);
+				Assert::IsFalse(allReg.IsActive(StandInKind::StepPriorDefault));
+				Assert::AreEqual(static_cast<uint64_t>(1), allReg.HitCount(StandInKind::StepPriorDefault));
+				allReg.Reset();
+				Assert::IsFalse(allReg.AnyActive());
+				Assert::AreEqual(static_cast<uint64_t>(0), allReg.HitCount(StandInKind::StepPriorDefault));
 
 				// Verify TdGuardPort triggers visibly when output fine variance drops > 2% in RMS.
 				const auto okDec = TdGuardPort::Evaluate(100.0, 99.0, &reg);
@@ -182,10 +230,45 @@ namespace Tests
 				Assert::IsTrue(rep.w4ChromaEdges.deltaDb > 6.0, L"W4 improves");
 				Assert::IsTrue(rep.trackableCellCount == 16);
 				Assert::IsTrue(rep.worst5PctCellCount >= 1);
+				Assert::IsTrue(rep.worst5PctMeanDeltaDb > 10.0, L"Worst 5% cells (W3) improved strongly");
+
+				// Verify worst-5% worsened-over-0.1dB detector fires when the highest-error cell regresses!
+				std::vector<double> worstRegOut = output;
+				for (int y = 48; y < 64; ++y)
+				{
+					for (int x = 0; x < 16; ++x)
+					{
+						const size_t i = static_cast<size_t>(y) * w + x;
+						received[i] = master[i] + 20.0; // guaranteed top-5% received error cell
+						worstRegOut[i] = master[i] + 25.0; // worsened by ~-1.94 dB
+					}
+				}
+				const WorstAreaReport repWorse = EvaluateWorstAreaMasks(
+					master.data(), received.data(), worstRegOut.data(), masks.data(), w, h, 16, 1023.0);
+				Assert::IsTrue(repWorse.valid);
+				Assert::IsTrue(repWorse.worst5PctMeanDeltaDb < -1.0, L"Worst-5% mean must expose regression in worst cell");
+				Assert::IsTrue(repWorse.worst5PctWorsenedOver01DbFrac > 0.5, L"Worsened-over-0.1dB fraction must fire");
 			}
 
-			TEST_METHOD(SpeedBinTableSeparatesCameraPanFromFastObjects)
+			TEST_METHOD(SpeedBinTableSeparatesCameraPanFromFastObjectsAndUsesDerivedEdges)
 			{
+				// Verify exact Rule-1 derived speed-bin edges:
+				//   Still:    [0.0,  0.25)               (quarter-pel P3r ceiling)
+				//   Slow:     [0.25, kSigmaFine = 1.0)
+				//   Medium:   [1.0,  BandRadius(1.0) = 3.0)
+				//   Fast:     [3.0,  0.5 * kCanonicalBlockPx = 8.0)
+				//   VeryFast: [8.0,  inf)
+				Assert::IsTrue(ClassifyObjectSpeed(0.0)   == ObjectSpeedBinId::Still);
+				Assert::IsTrue(ClassifyObjectSpeed(0.249) == ObjectSpeedBinId::Still);
+				Assert::IsTrue(ClassifyObjectSpeed(0.25)  == ObjectSpeedBinId::Slow);
+				Assert::IsTrue(ClassifyObjectSpeed(0.999) == ObjectSpeedBinId::Slow);
+				Assert::IsTrue(ClassifyObjectSpeed(1.0)   == ObjectSpeedBinId::Medium);
+				Assert::IsTrue(ClassifyObjectSpeed(2.999) == ObjectSpeedBinId::Medium);
+				Assert::IsTrue(ClassifyObjectSpeed(3.0)   == ObjectSpeedBinId::Fast);
+				Assert::IsTrue(ClassifyObjectSpeed(7.999) == ObjectSpeedBinId::Fast);
+				Assert::IsTrue(ClassifyObjectSpeed(8.0)   == ObjectSpeedBinId::VeryFast);
+				Assert::IsTrue(ClassifyObjectSpeed(20.0)  == ObjectSpeedBinId::VeryFast);
+
 				const int w = 64, h = 32;
 				const size_t n = static_cast<size_t>(w) * h;
 				std::vector<double> master(n), received(n), output(n);
@@ -209,7 +292,7 @@ namespace Tests
 						}
 						else
 						{
-							// Fast moving foreground object: v_obj = 5.0 px; intentionally smeared in output.
+							// Fast moving foreground object: v_obj = 5.0 px (inside [3.0, 8.0) Fast bin); intentionally smeared.
 							isCamBg[i] = 0;
 							objSpeed[i] = 5.0;
 							output[i] = 500.0 + 0.4 * tex; // 60% sharpness loss
@@ -224,6 +307,8 @@ namespace Tests
 				Assert::IsTrue(rep.cameraPan.valid);
 				Assert::IsTrue(rep.cameraPan.sharpnessRetention > 0.95, L"Camera pan retains full sharpness");
 				Assert::IsTrue(rep.cameraPan.deltaDb > 6.0, L"Camera pan shows positive dB gain");
+				Assert::IsFalse(rep.objectBins[static_cast<size_t>(ObjectSpeedBinId::Still)].valid,
+					L"Camera pan pixels must NOT leak into Still object bin");
 
 				const auto& fastBin = rep.objectBins[static_cast<size_t>(ObjectSpeedBinId::Fast)];
 				Assert::IsTrue(fastBin.valid);
@@ -232,7 +317,7 @@ namespace Tests
 				Assert::IsTrue(rep.worstObjectRetention < 0.55);
 			}
 
-			TEST_METHOD(SyntheticGrainTransferDetectsForeignAveraging)
+			TEST_METHOD(SyntheticGrainTransferDetectsForeignAveragingAndTemporalFreeze)
 			{
 				const size_t n = 16384;
 				std::mt19937 rng(42);
@@ -240,7 +325,7 @@ namespace Tests
 
 				std::vector<double> clean(n, 400.0);
 				std::vector<double> ownG(n), foreignG(n), prevG(n);
-				std::vector<double> intactOut(n), blendedOut(n), prevResIntact(n), prevResBlended(n);
+				std::vector<double> intactOut(n), blendedOut(n), prevResIntact(n), prevResBlended(n), prevResFrozen(n);
 				for (size_t i = 0; i < n; ++i)
 				{
 					ownG[i] = dist(rng);
@@ -252,6 +337,8 @@ namespace Tests
 					// Case 2: 10% blend with foreign grain (90% own + 10% foreign) — MUST FAIL authoritative bar!
 					blendedOut[i] = clean[i] + 0.90 * ownG[i] + 0.10 * foreignG[i];
 					prevResBlended[i] = 0.90 * prevG[i] + 0.10 * ownG[i];
+					// Case 3: frozen lag-1 correlation (prev residual leaks 20% of current grain) — MUST FAIL lag1 bar!
+					prevResFrozen[i] = 0.80 * prevG[i] + 0.20 * ownG[i];
 				}
 
 				const auto intactRep = EvaluateGrainTransfer(
@@ -270,6 +357,13 @@ namespace Tests
 				Assert::IsFalse(blendedRep.passesAuthoritativeBar, L"10% foreign grain averaging MUST fail authoritative bar");
 				Assert::AreEqual(0.90, blendedRep.betaOwn, 2e-2);
 				Assert::AreEqual(0.10, blendedRep.betaForeign, 2e-2);
+
+				const auto frozenRep = EvaluateGrainTransfer(
+					clean.data(), ownG.data(), foreignG.data(), intactOut.data(), n,
+					prevResFrozen.data(), prevG.data());
+				Assert::IsTrue(frozenRep.valid);
+				Assert::IsTrue(frozenRep.lag1Rise > kGrainBarMaxLag1Rise, L"Temporal grain correlation rise must be detected");
+				Assert::IsFalse(frozenRep.passesAuthoritativeBar, L"Frozen lag-1 grain correlation MUST fail authoritative bar");
 			}
 
 			TEST_METHOD(NonFiniteInputsAndMetricsFailClosedWithVisibleCount)
@@ -281,6 +375,7 @@ namespace Tests
 				Assert::IsFalse(ComputePsnrDb(qnan, 1023.0, db));
 				Assert::IsFalse(ComputePsnrDb(inf, 1023.0, db));
 				Assert::IsFalse(ComputePsnrDb(-1.0, 1023.0, db));
+				Assert::IsFalse(ComputePsnrDb(1.0, 0.0, db));
 
 				std::vector<double> m(16, 100.0), r(16, 101.0), o(16, 100.0);
 				std::vector<uint8_t> mask(16, kMaskTrackable);
@@ -289,6 +384,24 @@ namespace Tests
 				const auto rep = EvaluateWorstAreaMasks(m.data(), r.data(), o.data(), mask.data(), 4, 4);
 				Assert::IsFalse(rep.valid, L"Non-finite pixel must fail closed");
 				Assert::AreEqual(static_cast<size_t>(2), rep.nonFiniteCount);
+
+				// EvaluateSpeedBins must fail closed on non-finite or negative speeds.
+				std::vector<double> vo(16, 1.0), vc(16, 1.0);
+				std::vector<uint8_t> isCam(16, 0u);
+				o[5] = 100.0;
+				r[9] = 101.0;
+				vo[0] = -0.5;
+				vc[1] = qnan;
+				const auto sbBad = EvaluateSpeedBins(m.data(), r.data(), o.data(), vo.data(), vc.data(), isCam.data(), 4, 4);
+				Assert::IsFalse(sbBad.valid);
+				Assert::IsTrue(sbBad.nonFiniteCount >= 2);
+
+				// EvaluateGrainTransfer must fail closed on non-finite input.
+				std::vector<double> g0(16, 1.0), gf(16, -1.0);
+				g0[3] = inf;
+				const auto gtBad = EvaluateGrainTransfer(m.data(), g0.data(), gf.data(), o.data(), 16);
+				Assert::IsFalse(gtBad.valid);
+				Assert::AreEqual(static_cast<size_t>(1), gtBad.nonFiniteCount);
 
 				StandInRegistry reg;
 				const auto gDec = TdGuardPort::Evaluate(qnan, 10.0, &reg);
