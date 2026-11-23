@@ -33,6 +33,9 @@ namespace VpFrameAnalysis
 	public:
 		// Acquire(kP1HalfLuma, seq, Cpu) on the frame's memo; an empty result (status Unavailable) when there is none.
 		using AcquireFn = std::function<VpSkeleton::AcquireResult(uint64_t seq)>;
+		// Optional source offer hook invoked right before Acquire(seq) so the no-lane P1 CPU owner fill can compute
+		// from the producer's frame without waiting on the render thread (default empty: backwards-compatible).
+		using OfferFn = std::function<void(uint64_t seq, const AnalysisLumaSource&)>;
 
 		// The one P1 tap shift Engine8Half is exact for: the lane's 10-bit tap views (SourceViewOf, codes << 6).
 		static constexpr uint8_t kExactP1TapMsbShift = 6;
@@ -40,8 +43,9 @@ namespace VpFrameAnalysis
 		// `p1TapMsbShift`: the msbShift of the tap view the P1 behind `acquire` is built from. The P1 bytes carry no shift, so
 		// the owner states it; any shift other than 6 (e.g. SourceViewOf12's 4 for a 12-bit lane) gives other P1 codes and
 		// Engine8Half is then not the producer's law: such a reader refuses every read (counted OwnDecode, no Acquire made).
-		explicit P1AcquireSource(AcquireFn acquire = AcquireFn(), uint8_t p1TapMsbShift = kExactP1TapMsbShift)
-			: m_acquire(std::move(acquire)), m_p1TapMsbShift(p1TapMsbShift) {}
+		explicit P1AcquireSource(AcquireFn acquire = AcquireFn(), uint8_t p1TapMsbShift = kExactP1TapMsbShift,
+			OfferFn offer = OfferFn())
+			: m_acquire(std::move(acquire)), m_p1TapMsbShift(p1TapMsbShift), m_offer(std::move(offer)) {}
 		P1AcquireSource(const P1AcquireSource&) = delete;
 		P1AcquireSource& operator=(const P1AcquireSource&) = delete;
 
@@ -61,6 +65,8 @@ namespace VpFrameAnalysis
 			const VpSkeleton::Dims dims{ static_cast<uint32_t>(source.width), static_cast<uint32_t>(source.height) };
 			const uint32_t w = VpLaneProducts::HalfDim(dims.width), h = VpLaneProducts::HalfDim(dims.height);
 			const size_t halfBytes = VpLaneProducts::HalfLumaHalfBytes(dims);
+			if (m_offer)
+				m_offer(seq, source);
 			const VpSkeleton::AcquireResult r = m_acquire(seq);
 			// Exact size: the P1 product of THIS source's dims is half + quarter (HalfLumaBytes), as the lane's own published
 			// read requires (AnalysisLane.h ReadPublishedBytes); any other size is another frame geometry, never reinterpreted.
@@ -102,6 +108,7 @@ namespace VpFrameAnalysis
 	private:
 		AcquireFn m_acquire;
 		uint8_t m_p1TapMsbShift = kExactP1TapMsbShift;
+		OfferFn m_offer;
 		std::atomic<uint64_t> m_acquired{ 0 }, m_unread{ 0 }, m_ownDecode{ 0 }, m_filledAtRead{ 0 }, m_memoReused{ 0 };
 	};
 }

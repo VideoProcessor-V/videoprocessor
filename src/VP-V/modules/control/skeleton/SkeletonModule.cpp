@@ -1229,17 +1229,25 @@ namespace Vpv
 				return Reg::NotOwner;
 			if (fill.defaults.stage != 0)
 				return Reg::BadDefaults;
-			std::vector<std::shared_ptr<VpSkeleton::SkeletonMemo>> memos;
+			std::vector<std::pair<const void*, std::shared_ptr<VpSkeleton::SkeletonMemo>>> memos;
 			{
 				std::lock_guard<std::mutex> lock(ownerFillsMutex_);
 				const auto key = std::make_pair(id, form);
 				if (ownerFills_.count(key) != 0)
 					return Reg::AlreadyRegistered;
 				ownerFills_[key] = std::make_pair(unit, fill);
-				memoHosts_.ForEach([&memos](const void*, const std::shared_ptr<MemoHost>& m) { memos.push_back(m->memo); });
+				memoHosts_.ForEach([&memos](const void* h, const std::shared_ptr<MemoHost>& m) { memos.emplace_back(h, m->memo); });
 			}
-			for (const std::shared_ptr<VpSkeleton::SkeletonMemo>& m : memos)
-				m->RegisterOwnerFill(id, form, unit, fill);
+			const uint32_t rtid = renderTid_.load(std::memory_order_acquire);
+			const bool onRender = rtid != 0u && static_cast<uint32_t>(GetCurrentThreadId()) == rtid;
+			for (const auto& hm : memos)
+			{
+				hm.second->RegisterOwnerFill(id, form, unit, fill);
+				// D3 / FIX3-D6: refresh window_.aheadCompute immediately on frame 1 when a new ahead-demanding owner fill
+				// registers on the render thread after Begin sealed frame 1, before ahead Acquire calls arrive.
+				if (fill.aheadDepth > 0 && onRender && hm.second->Seals() > 0)
+					DeriveMemoWindow(hm.first, hm.second, hm.second->Window().current, hosts_.Find(hm.first), false);
+			}
 			return Reg::Registered;
 		}
 

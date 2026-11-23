@@ -13,6 +13,7 @@
 #include <VP-V/modules/motion/estimation/MotionRecordPublish.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/P1AcquireSource.h>
+#include <VP-V/modules/input/source_analysis/lane/P1CpuFill.h>
 #include <VP-V/modules/input/source_analysis/lane/P1GpuFill.h>
 #include <VP-V/modules/input/capture/SourcePlanes.h>
 #include <VP-V/core/hub/ExtensionHub.h>
@@ -186,13 +187,23 @@ namespace VpMotion
 			// render-time fallback keeps the matcher's preset (medium).
 			const NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Slow;
 			producer->SetSlot(p2Slot);   // SK-MV: the producer publishes P2 into the engine's slot (it owns no store)
-			// L-B4 (a): the producer reads its engine luma from the skeleton's P1 (Acquire CPU form from its thread), never recomputes it.
+			// L-B4 (a) + D3 / FIX3-D6: the producer reads its engine luma from the skeleton's P1 (Acquire CPU form from its thread),
+			// never recomputes it. When analysis_lane is OFF, NoteP1CpuDemand + OfferP1CpuSource serve P1 through the no-lane
+			// CPU owner fill on the producer's own thread (zero render-thread wait; skipped when LaneBound()).
+			Vpv::FrameAnalysis::NoteP1CpuDemand(host_, true);
 			{
 				const void* memoHost = host_;
-				producer->SetP1Source(std::make_shared<VpFrameAnalysis::P1AcquireSource>([memoHost](uint64_t seq) {
-					const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(memoHost, seq);
-					return fm.Valid() ? fm.memo->Acquire(VpSkeleton::kP1HalfLuma, seq, VpSkeleton::AcquireForm::Cpu) : VpSkeleton::AcquireResult();
-				}));
+				producer->SetP1Source(std::make_shared<VpFrameAnalysis::P1AcquireSource>(
+					[memoHost](uint64_t seq) {
+						const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(memoHost, seq);
+						return fm.Valid() ? fm.memo->Acquire(VpSkeleton::kP1HalfLuma, seq, VpSkeleton::AcquireForm::Cpu) : VpSkeleton::AcquireResult();
+					},
+					VpFrameAnalysis::P1AcquireSource::kExactP1TapMsbShift,
+					[memoHost](uint64_t seq, const AnalysisLumaSource& src) {
+						const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(memoHost, seq);
+						if (fm.Valid() && !fm.memo->LaneBound())
+							Vpv::FrameAnalysis::OfferP1CpuSource(memoHost, seq, src);
+					}));
 			}
 			if (!startFailureInjected && d3d && d3d->device && producer->Start(d3d->device, preset))
 			{
@@ -206,6 +217,7 @@ namespace VpMotion
 			}
 			else
 			{
+				Vpv::FrameAnalysis::NoteP1CpuDemand(host_, false);
 				const std::string startError = startFailureInjected ? producerStartFailureForTesting_ :
 					producer->Error().empty() ? std::string("no render device") : producer->Error();
 				// W2-C1 (lead 2026-11-11): logged once per failure episode (and when the reason changes), not at every retry.
@@ -225,6 +237,7 @@ namespace VpMotion
 			motionEnginePairsBase += motionProducer->GetStats().pairs;   // W2-C1: Work().producerPairs keeps them
 			motionProducer->Stop();
 			PublishProducer(nullptr);   // hardening: a loop copy keeps the stopped producer alive until its use ends
+			Vpv::FrameAnalysis::NoteP1CpuDemand(host_, false);
 		}
 		// Audit 2026-10-16: a failure is retried once the producer is wanted again (optical flow off and on,
 		// low latency and back), and the look-ahead re-engages only after the refill - never on a stale
@@ -889,6 +902,8 @@ namespace VpMotion
 				if (producer)
 					engine.motionEnginePairsBase += producer->GetStats().pairs;
 			});
+		if (host)
+			Vpv::FrameAnalysis::NoteP1CpuDemand(host, false);
 		if (!producer)
 			return false;
 		producer->Stop();   // joins its worker; a render-loop copy still held only sees a stopped producer

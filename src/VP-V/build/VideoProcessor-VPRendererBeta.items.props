@@ -78,6 +78,9 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\lane\LaneGpuProducts.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\lane\P1CpuFill.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\lane\P1GpuFill.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

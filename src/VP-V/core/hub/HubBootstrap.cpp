@@ -12,6 +12,7 @@
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/capture/CaptureExtension.h>
 #include <VP-V/modules/input/capture/SourcePlanes.h>
+#include <VP-V/modules/input/source_analysis/lane/P1CpuFill.h>
 #include <VP-V/modules/input/source_analysis/lane/P1GpuFill.h>
 #include <VP-V/modules/input/source_analysis/regions/EdgeMapFill.h>
 #include <VP-V/modules/input/queue_timing/IngressPolicy.h>
@@ -56,6 +57,7 @@ namespace
 		GrainSplit::LevelGpu::RegisterGrainLevelModule();   // P10g T3: kP10gGrainLevel + kP10GrainSplit variant owner fills (needs the skeleton + P13 views)
 		VpMotion::RegisterP2CpuFormModule();   // B-prereq (a): kP2VectorPair CPU form (pair + global); needs the skeleton + the vector engine
 		Vpv::FrameAnalysis::RegisterP1GpuModule();   // L-B4 (BBP-B B2): kP1HalfLuma GPU owner fill, the matcher pyramid variant
+		Vpv::FrameAnalysis::RegisterP1CpuModule();   // D3 / FIX3-D6: zero-wait no-lane kP1HalfLuma CPU owner fill (shadowed when analysis_lane is ON)
 		Vpv::Camera::RegisterCameraExtension();
 		// The de-judder / per-refresh timeline (M2 P5b): after the vector engine and the camera link, before the
 		// entrance and core segments (doc 59 2.2 list order); its views, PlanOutputs and the QueueFlush steering reset.
