@@ -852,9 +852,22 @@ namespace CameraModel
 						Params B = inv;
 						if (Refine(f, bs, B, 1))
 						{
-							const double dev = MaxCornerDifference(Compose(B, model), IdentityParams(model.type), f.pic);
-							const double tol = 4.0 * f.prec / f.diag;
-							devTerm = 1.0 - RampMath::Clamp01<double>(dev / tol);
+							// GEM-136 AMEND-2: a composition that cannot be normalised fails the inverse check (devTerm stays 0, so
+							// sg.inverse is 0 and the record's reason is InverseMismatch: counted and shown like any refusal).
+							bool composeOk = true;
+							Params BM = Compose(B, model, &composeOk);
+							// Test-only seam (CameraTestSeams.h, GEM-136): unarmed = one relaxed load reading 0, zero behaviour change.
+							if (CameraTestSeams::TakeComposeFail(CameraTestSeams::ComposeFailSite::GlobalModelFitInverse))
+							{
+								BM.h[8] = 0.0;
+								composeOk = false;
+							}
+							if (composeOk)
+							{
+								const double dev = MaxCornerDifference(BM, IdentityParams(model.type), f.pic);
+								const double tol = 4.0 * f.prec / f.diag;
+								devTerm = 1.0 - RampMath::Clamp01<double>(dev / tol);
+							}
 						}
 						const double shareTerm = std::min(1.0, bShare / (0.7 * rawShare + 1e-9));
 						sg.inverse = RampMath::Clamp01<double>(devTerm * shareTerm);
@@ -1925,7 +1938,7 @@ namespace CameraModel
 				{
 					double seedPrec = 0;
 					CameraMotion seed = Impl::Run(*this, *in.next, nullptr, false, m_config.objects, false, nullptr, false, &seedPrec);
-					if (seed.valid)
+					if (seed.valid && ReasonUsable(seed.reason))   // GEM-131: a seed fit that is itself unusable (Ambiguous, ...) seeds nothing
 					{
 						rec.valid = true;
 						rec.seededFromNext = true;
@@ -1940,6 +1953,7 @@ namespace CameraModel
 						rec.hypotheses = seed.hypotheses;
 						rec.objects = seed.objects;
 						rec.blocks = seed.blocks;
+						rec.labelsOnGpu = seed.labelsOnGpu;   // GEM-131: the labels' home follows the blocks that are carried over
 						m_previous = rec;
 						m_havePrevious = true;
 						m_temporal.Update(in.next->pairSeconds, seed.rates, updateFloor(*in.next, seedPrec));
@@ -1961,7 +1975,7 @@ namespace CameraModel
 					const Params pre = TimeScale(m_previous.params, in.pairSeconds / m_previous.pairSeconds, in.picture);
 					const Params preForNext = TimeScale(m_previous.params, in.next->pairSeconds / m_previous.pairSeconds, in.next->picture);
 					CameraMotion nx = Impl::Run(*this, *in.next, &preForNext, false, false, false, nullptr);
-					if (nx.valid)
+					if (nx.valid && ReasonUsable(nx.reason))   // GEM-131: the same verdict gate for the flash bridge
 					{
 						const Params nextP = TimeScale(nx.params, in.pairSeconds / in.next->pairSeconds, in.picture);
 						const double hw = 0.5 * in.picture.Width(), hh = 0.5 * in.picture.Height();

@@ -75,6 +75,7 @@ namespace CameraLink
 		// seed because no ahead pair existed.
 		std::atomic<uint64_t> aheadSubmitted{ 0 };   // fits submitted from the ahead pair (FlowOf)
 		std::atomic<uint64_t> aheadOnTime{ 0 };      // ahead fits published into the on-time target before their frame's seal
+		std::atomic<uint64_t> epochResets{ 0 };      // GEM-127: the vectors-valid epoch changed (renumbered sequence): marks, render position and parked fits reset
 		std::atomic<uint64_t> aheadBridged{ 0 };     // ahead fits published into the lag bridge (missed the on-time seal, or no target)
 		std::atomic<uint64_t> aheadLate{ 0 };        // ahead fits published nowhere (late even for the bridge, or the park overflowed)
 		std::atomic<uint64_t> aheadSeedFallback{ 0 };   // frames fitted from the seed while the ahead fit is on (no ahead pair)
@@ -233,15 +234,15 @@ namespace CameraLink
 	// "camera: fits 120, published 118, late 2, unusable 3, slip 0, queue full 0"
 	inline std::string StatusLine(const FitCounters& c)
 	{
-		char b[1024];
-		std::snprintf(b, sizeof(b), "camera fit: %llu fitted, %llu published, %llu late, %llu not used, %llu slip, %llu timing unknown, %llu queue full, %llu readback dropped, %llu stale lane (refused after a graph rebuild), %llu lane rebinds, %llu fit field too big for its product (no labels for those frames; last need %llu B, slot %llu B), %llu fit field encode failed, %llu fit field without storage, %llu fit field claim refused, %llu fits without a field, %llu refused after stop",
+		char b[1200];
+		std::snprintf(b, sizeof(b), "camera fit: %llu fitted, %llu published, %llu late, %llu not used, %llu slip, %llu timing unknown, %llu queue full, %llu readback dropped, %llu stale lane (refused after a graph rebuild), %llu lane rebinds, %llu fit field too big for its product (no labels for those frames; last need %llu B, slot %llu B), %llu fit field encode failed, %llu fit field without storage, %llu fit field claim refused, %llu fits without a field, %llu refused after stop, %llu epoch resets (numbering restarted: ahead marks and render position reset)",
 			(unsigned long long)c.fitted.load(), (unsigned long long)c.published.load(), (unsigned long long)c.late.load(),
 			(unsigned long long)c.unusable.load(), (unsigned long long)c.notFittedSlip.load(),
 			(unsigned long long)c.timingUnknown.load(), (unsigned long long)c.queueFull.load(),
 			(unsigned long long)c.readbackDropped.load(), (unsigned long long)c.staleLane.load(), (unsigned long long)c.rebound.load(),
 			(unsigned long long)c.fieldUndersized.load(), (unsigned long long)c.fieldNeedBytes.load(), (unsigned long long)c.fieldSlotBytes.load(),
 			(unsigned long long)c.fieldEncodeFailed.load(), (unsigned long long)c.fieldNoStorage.load(), (unsigned long long)c.fieldClaimRefused.load(),
-			(unsigned long long)c.fieldNoField.load(), (unsigned long long)c.refusedAfterStop.load());
+			(unsigned long long)c.fieldNoField.load(), (unsigned long long)c.refusedAfterStop.load(), (unsigned long long)c.epochResets.load());
 		return b;
 	}
 }

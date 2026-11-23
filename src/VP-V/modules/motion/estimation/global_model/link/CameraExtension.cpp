@@ -662,7 +662,7 @@ namespace Vpv
 					st.adapter->OnFrame();
 				}
 				if (st.labelFill)
-					st.labelFill->OnFrameStart(st.lane.NextFloor());
+					st.labelFill->OnFrameStart(st.lane.NextFloor(), engine->FieldEra());
 				return;
 			}
 			if (st.fitWanted && st.engineProblem.empty() && st.graphProblem.empty() && st.seedProblem.empty())
@@ -736,7 +736,7 @@ namespace Vpv
 			// Camera live: what the keys ask for. The switches and consumers are inert unless camera_model is on (CameraSettings).
 			const bool fitWanted = linkWanted && cam.ModelWanted();
 			const bool guideRequested = fitWanted && cam.Measurement().Any();
-			const bool guideWanted = guideRequested && !guidanceLocked_;   // GUIDANCE LOCK: off this reset (a late camera never guides)
+			const bool guideWanted = guideRequested && !guidanceLocked_;   // unlocked: the d = 0 rule and the governor apply (the lock is a test seam)
 			st->guideLocked = guideRequested && guidanceLocked_;
 			const bool labelsWanted = fitWanted && (cam.Overlay() != OverlayMode::Off || cam.Use().Any() || cam.LabelsGpu());
 			// Audit F2: a deterministic run takes ONE path, the seed fit through the lag bridge. The flag is the lane's
@@ -914,9 +914,15 @@ namespace Vpv
 			// Camera live: what cannot attach is shown, never silent (Fallbacks); guidance state through the skeleton's status path.
 			if (st.fitWanted)
 			{
+				// The camera follows vector_demand (CP-C3): with the motion engine switched off it has no vectors to fit. Read from the engine's own
+				// state (no Config key, no host hook). A status line, like every engine-off notice (a setting, not a fault).
+				VpMotion::IVectorEngine* stateEngine = st.engineProblem.empty() ? FindEngine(st.host) : nullptr;
+				const bool engineOffByDemand = stateEngine && stateEngine->State().Has(VectorDemand::MotionEngineReason::VectorDemandOff);
+				if (engineOffByDemand)
+					lines.push_back(kEngineOffText);
 				if (!st.engineProblem.empty())
 					fb.push_back("camera_engine: " + st.engineProblem);
-				else if (!st.liveWait.empty())
+				else if (!engineOffByDemand && !st.liveWait.empty())   // engine off by setting: the wait would be misleading (kEngineOffText says why)
 				{
 					// With every camera default off, a camera that is on was turned on explicitly: a missing resync_event is a visible
 					// fallback entry (Fallbacks, Ctrl+I, Config status, Ctrl+Alt+D), not a plain status line. "Waiting for the first field" is a state.
@@ -951,7 +957,7 @@ namespace Vpv
 					if (!st.aheadWanted)
 						lines.push_back(std::string("camera: ") + kGuidanceNeedsAheadText);
 				}
-				if (st.guideWanted)
+				if (st.guideWanted && !engineOffByDemand)   // engine off by setting: a status line only (register row 3), never a fallback entry
 				{
 					// d = 0 (refs 93-prep-cam-d0): guidance needs camera(N) ON TIME. Where that can never happen it is structural, named once
 					// here, not per pair: no ahead fit (off, or a deterministic run's bridge path), or no on-time target (no skeleton lane).

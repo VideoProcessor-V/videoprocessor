@@ -5,6 +5,7 @@
 #include "CameraFitFieldPod.h"
 
 #include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
+#include <VP-V/modules/motion/estimation/global_model/CameraTestSeams.h>
 
 #include <string>
 
@@ -47,7 +48,15 @@ namespace CameraLink
 		st->p7Bytes.reset(new VpSkeleton::CpuBuffers(*p7));
 		if (const VpSkeleton::Node* pf = st->table->NodeOf(VpSkeleton::kCameraFitField))
 		{
-			st->fieldBytes.reset(new VpSkeleton::CpuBuffers(*pf));
+			// Test-only seam (CameraTestSeams.h): unarmed = one relaxed load reading 0, zero behaviour change.
+			if (const size_t overrideBytes = CameraModel::CameraTestSeams::TakeFitFieldSlotBytesOverride())
+			{
+				VpSkeleton::Node pfNode = *pf;
+				pfNode.bufferBytes = static_cast<uint64_t>(overrideBytes);
+				st->fieldBytes.reset(new VpSkeleton::CpuBuffers(pfNode));
+			}
+			else
+				st->fieldBytes.reset(new VpSkeleton::CpuBuffers(*pf));
 			// Startup check (visible failure): the product slot must hold the largest pod a fit can produce at this source size.
 			const size_t worst = WorstCaseFitFieldPodBytes(width, height);
 			if (st->fieldBytes->Bytes() < worst)

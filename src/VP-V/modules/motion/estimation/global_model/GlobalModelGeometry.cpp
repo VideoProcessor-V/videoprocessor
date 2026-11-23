@@ -548,15 +548,20 @@ namespace CameraModel
 		return o;
 	}
 
-	Params Compose(const Params& a, const Params& b)
+	Params Compose(const Params& a, const Params& b, bool* ok)
 	{
+		if (ok) *ok = true;
 		static const double kIdentity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
 		const double* ha = (a.type == ModelType::None) ? kIdentity : a.h;
 		const double* hb = (b.type == ModelType::None) ? kIdentity : b.h;
 		Params o;
 		o.type = (static_cast<int>(a.type) >= static_cast<int>(b.type)) ? a.type : b.type;
 		Mul3(ha, hb, o.h);
-		NormaliseH8(o.h);
+		if (!NormaliseH8(o.h))   // GEM-136 AMEND-2: reported through `ok` (callers refuse it); never an identity returned as a result
+		{
+			if (ok) *ok = false;
+			return o;
+		}
 		return o;
 	}
 

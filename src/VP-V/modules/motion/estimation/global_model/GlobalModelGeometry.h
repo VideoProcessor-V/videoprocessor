@@ -36,8 +36,10 @@ namespace CameraModel
 	// Inverse (3x3). `ok` (optional) false when singular (then identity of the same type returned).
 	Params Invert(const Params& p, bool* ok = nullptr);
 
-	// a o b : apply b first, then a. Result type = the higher of the two types.
-	Params Compose(const Params& a, const Params& b);
+	// a o b : apply b first, then a. Result type = the higher of the two types. `ok` (optional) false when the product cannot be
+	// normalised (GEM-136; same pattern as Invert): the returned value is then the unnormalised product, NOT a model, and a caller
+	// that passes `ok` must refuse it (count it, never score it as a result).
+	Params Compose(const Params& a, const Params& b, bool* ok = nullptr);
 
 	// Decompose into similarity rates per SECOND for a pair lasting pairSeconds (> 0):
 	// rates.logScale = ln(s)/pairSeconds, angle/pairSeconds, tx/ty = the translation of the

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "CameraLabelFill.h"
 #include "CameraFitFieldPod.h"
+#include <VP-V/modules/motion/estimation/global_model/CameraTestSeams.h>
 
 namespace CameraLink
 {
@@ -27,6 +28,8 @@ namespace CameraLink
 			return false;
 		m_lease = std::move(cur);   // the old state dies with its last holder
 		m_cursor = 0;               // the old graph's sequences
+		m_floor = 0;                // GEM-127: the old graph's render floor must not hide the new generation's frames
+		m_fieldMissNext = 0;       // the per-frame missing-field dedup follows the graph's sequences too
 		m_counters.rebound.fetch_add(1, std::memory_order_relaxed);
 		return true;
 	}
@@ -71,6 +74,8 @@ namespace CameraLink
 		const uint8_t* bytes = fl.bytes->Ring(static_cast<size_t>(a.index));
 		if (!bytes || !DecodeFitFieldPod(bytes, fl.bytes->Bytes(), out))
 			return unreadable();
+		// Test-only seam (CameraTestSeams.h): unarmed = one relaxed load reading null, zero behaviour change.
+		CameraModel::CameraTestSeams::OnReadFitFieldBeforeReread(seq);
 		// The ring may have been recycled while it was copied: the slot must still be the same published ring.
 		const VpSkeleton::ReadInfo b = pf->Read(seq, true);
 		if (b.kind == VpSkeleton::ReadInfo::Ring && b.index == a.index && FitFieldMatchesP7(lease, seq))

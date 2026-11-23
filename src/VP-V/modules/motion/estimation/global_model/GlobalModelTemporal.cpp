@@ -189,7 +189,8 @@ namespace CameraModel
 				const CameraMotion* r = find(seq - static_cast<uint64_t>(k));
 				if (!r) continue;
 				if (BreaksWindow(*r) || r->resyncGeneration != prev->resyncGeneration
-					|| r->rebaseGeneration != prev->rebaseGeneration) break;
+					|| r->rebaseGeneration != prev->rebaseGeneration || !(r->picture == centre->picture)) break;   // GEM-130: a picture change ends the window
+				if (!ReasonUsable(r->reason)) continue;   // GEM-130 (amended): an unusable member is left OUT, it does not cut the window
 				past.push_back({ r, static_cast<double>(lag + 1 - k) });
 				prev = r;
 			}
@@ -206,7 +207,8 @@ namespace CameraModel
 					continue;
 				}
 				if (BreaksWindow(*r) || r->resyncGeneration != prev->resyncGeneration
-					|| r->rebaseGeneration != prev->rebaseGeneration) break;
+					|| r->rebaseGeneration != prev->rebaseGeneration || !(r->picture == centre->picture)) break;   // GEM-130: a picture change ends the window
+				if (!ReasonUsable(r->reason)) continue;   // GEM-130 (amended): an unusable member is left OUT, it does not cut the window
 				future.push_back({ r, static_cast<double>(lag + 1 - k) });
 				prev = r;
 			}

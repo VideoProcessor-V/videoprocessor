@@ -119,6 +119,9 @@ namespace CameraLink
 		void Tick(uint64_t renderSeq);
 		size_t RetryParked();          // fitting thread (or the only thread): returns the parked results that ended
 		size_t Parked() const;
+		// GEM-127: the source numbering restarted (the vectors-valid epoch changed): the render position becomes renderSeq (not only
+		// raised, as Tick does) and the results parked under the old numbering are ended at the next RetryParked (counted late).
+		void ResetRenderPosition(uint64_t renderSeq = 0);
 		uint64_t RenderPosition() const { return m_renderSeq.load(std::memory_order_acquire); }
 		// Test hook: blocks until the queue is empty and the worker is idle (never used on the render thread).
 		void WaitIdle();
@@ -160,6 +163,8 @@ namespace CameraLink
 		std::atomic<uint64_t> m_renderSeq{ 0 };
 		std::deque<ParkedResult> m_parked;    // the fitting thread only (or the one calling thread without a thread)
 		std::atomic<size_t> m_parkedCount{ 0 };
+		std::atomic<uint64_t> m_resetGen{ 0 };   // bumped by ResetRenderPosition (render thread)
+		uint64_t m_resetSeen = 0;                // the fitting thread's copy: a difference drops the parked results
 		std::thread m_thread;
 	};
 }

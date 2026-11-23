@@ -534,5 +534,116 @@ namespace VideoProcessorTest
 			producer.Stop();
 			Assert::AreEqual(0, Sessions::Open(SessionKind::Engine, gpu), L"the session closes with the producer");
 		}
+
+		// Seam-3 replacement (verify-gemini-ce-seams-1bde9f30e.md:43-51): real NVOF MotionAhead::Producer::Process()
+		// attaches engine-size 8-bit luma pairs ONLY while SetCameraConsumes(true), sharing one immutable buffer across
+		// consecutive pairs (1,2).lumaTo == (2,3).lumaFrom, and attaches nullptr when SetCameraConsumes(false).
+		BEGIN_TEST_METHOD_ATTRIBUTE(TheFlowCarriesTheLumaPairOnlyWhileTheCameraConsumes)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(TheFlowCarriesTheLumaPairOnlyWhileTheCameraConsumes)
+		{
+			using NvOpticalFlow::Sessions;
+			CComPtr<IDXGIFactory1> factory;
+			CComPtr<IDXGIAdapter1> nvidia;
+			if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
+				for (UINT i = 0;; ++i)
+				{
+					CComPtr<IDXGIAdapter1> adapter;
+					if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+					DXGI_ADAPTER_DESC1 desc{};
+					adapter->GetDesc1(&desc);
+					if (desc.VendorId == 0x10DE) nvidia = adapter;
+				}
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "TheFlowCarriesTheLumaPairOnlyWhileTheCameraConsumes",
+					nvidia != nullptr, "no NVIDIA adapter"))
+				return;
+			CComPtr<ID3D11Device> device;
+			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nvidia, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr)));
+			Sessions::ResetForTest();
+			VpSkeleton::VramUsers::Instance().ResetForTesting();
+
+			const int W = 1920, H = 1080, dx = 8, dy = 4, BW = W + 64, BH = H + 64;
+			std::vector<uint8_t> base(static_cast<size_t>(BW) * BH);
+			uint32_t seed = 919u;
+			for (uint8_t& v : base) { seed = seed * 1664525u + 1013904223u; v = static_cast<uint8_t>(seed >> 24); }
+			auto clampi = [](int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; };
+			auto lumaAt = [&](int index, int x, int y) {
+				return base[static_cast<size_t>(clampi(y - index * dy + 32, 0, BH - 1)) * BW + clampi(x - index * dx + 32, 0, BW - 1)];
+			};
+			auto source = [&](int index) {
+				auto buffer = std::make_shared<std::vector<uint16_t>>(static_cast<size_t>(W) * H * 3 / 2, static_cast<uint16_t>(512 << 6));
+				for (int y = 0; y < H; ++y)
+					for (int x = 0; x < W; ++x)
+						(*buffer)[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>((64 + lumaAt(index, x, y) * 3) << 6);
+				AnalysisLumaSource s;
+				s.data = reinterpret_cast<const uint8_t*>(buffer->data());
+				s.dataBytes = buffer->size() * 2;
+				s.width = W;
+				s.height = H;
+				s.rowBytes = static_cast<size_t>(W) * 2;
+				s.chromaRowBytes = static_cast<size_t>(W) * 2;
+				s.format = AnalysisLumaFormat::P010;
+				s.backingOwner = buffer;
+				return s;
+			};
+			auto waitPair = [](MotionAhead::Producer& p, uint64_t from, uint64_t to) {
+				MotionAhead::FlowPtr f;
+				for (int k = 0; k < 600 && !f; ++k)
+				{
+					f = p.Take(from, to);
+					if (!f && !p.Running()) break;
+					if (!f) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				}
+				return f;
+			};
+
+			// Camera consuming: pairs (1,2) and (2,3) carry non-null engine-size luma buffers, distinct within a pair,
+			// and sharing frame 2's immutable buffer across consecutive pairs.
+			{
+				MotionAhead::Producer producer;
+				producer.SetCameraConsumes(true);
+				Assert::IsTrue(producer.Start(device, NvOpticalFlow::Preset::Slow), L"producer started (camera consuming)");
+				producer.Submit(1, 1, source(0));
+				producer.Submit(2, 1, source(1));
+				producer.Submit(3, 1, source(2));
+				MotionAhead::FlowPtr flow23 = waitPair(producer, 2, 3);
+				if (!flow23)
+				{
+					const std::string err = producer.Error();
+					producer.Stop();
+					HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "TheFlowCarriesTheLumaPairOnlyWhileTheCameraConsumes",
+						false, "the optical flow engine is not available: " + err);
+					return;
+				}
+				MotionAhead::FlowPtr flow12 = waitPair(producer, 1, 2);
+				Assert::IsTrue(flow12 != nullptr, L"pair (1,2) must be present alongside (2,3)");
+				Assert::IsTrue(flow23->halfW > 0 && flow23->halfH > 0, L"flow carries positive engine dimensions");
+				const size_t expectedBytes = static_cast<size_t>(flow23->halfW) * static_cast<size_t>(flow23->halfH);
+				Assert::IsTrue(flow23->lumaFrom != nullptr && flow23->lumaTo != nullptr, L"camera consuming: lumaFrom and lumaTo must be non-null");
+				Assert::AreEqual<size_t>(expectedBytes, flow23->lumaFrom->size(), L"lumaFrom must hold halfW * halfH bytes");
+				Assert::AreEqual<size_t>(expectedBytes, flow23->lumaTo->size(), L"lumaTo must hold halfW * halfH bytes");
+				Assert::IsTrue(flow23->lumaFrom.get() != flow23->lumaTo.get(), L"lumaFrom and lumaTo must be distinct buffers");
+				Assert::IsTrue(flow12->lumaFrom != nullptr && flow12->lumaTo != nullptr, L"pair (1,2) must also carry luma");
+				Assert::IsTrue(flow12->lumaTo.get() == flow23->lumaFrom.get(),
+					L"consecutive pairs (1,2) and (2,3) must share frame 2's immutable luma buffer");
+				producer.Stop();
+			}
+
+			// Control: a fresh producer with SetCameraConsumes(false) attaches no luma buffers.
+			{
+				MotionAhead::Producer control;
+				control.SetCameraConsumes(false);
+				Assert::IsTrue(control.Start(device, NvOpticalFlow::Preset::Slow), L"control producer started (camera off)");
+				control.Submit(1, 1, source(0));
+				control.Submit(2, 1, source(1));
+				control.Submit(3, 1, source(2));
+				MotionAhead::FlowPtr off23 = waitPair(control, 2, 3);
+				Assert::IsTrue(off23 != nullptr, L"control pair (2,3) must be produced");
+				Assert::IsTrue(off23->lumaFrom == nullptr && off23->lumaTo == nullptr,
+					L"control: camera off must leave lumaFrom == nullptr && lumaTo == nullptr");
+				control.Stop();
+			}
+		}
 	};
 }

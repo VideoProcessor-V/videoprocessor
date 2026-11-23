@@ -436,6 +436,29 @@ namespace CameraLink
 			return;
 		if (m_worker && m_worker->Rebind())   // the lane was rebuilt: take the new lease (and size the seal marks)
 			OnLaneRebound();
+		// GEM-127 AMEND-2: the vectors-valid epoch (IVectorEngine::FieldEra: a seek / resync / gap restarted the numbering) is judged FIRST,
+		// before any seal, so the old era's on-time / retired marks never judge the first frame of the new numbering.
+		if (m_engine)
+		{
+			const uint64_t era = m_engine->FieldEra();
+			if (era != m_lastEra)
+			{
+				const bool renumber = m_lastEra != 0;   // the first era seen is the start, not a reset
+				m_lastEra = era;
+				m_lastRequestedField = 0;
+				m_requestedAt.clear();
+				m_aheadNext = 0;          // AHEAD FIT: restarts after the new numbering's newest field
+				m_seedPending.clear();
+				// The numbering restarted: nothing was asked, published on time or sealed in it yet. A reused seq must not read the old
+				// era's marks (a stale "rejected" verdict would count a new pair as Stale / R; a stale on-time mark would pass cause b),
+				// the bridge's retired marks included, and the worker's render position and parked results belong to the old numbering.
+				ClearAheadMarks();
+				if (m_worker)
+					m_worker->ResetRenderPosition(0);
+				if (renumber)
+					m_counters.epochResets.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
 		const bool ahead = AheadActive();
 		m_renderSeq = f.renderSeq != 0 ? f.renderSeq : f.seq;
 		// (0) AHEAD FIT: the on-time seal of the frame starting now (its P7 was published into the on-time target before the seal).
@@ -455,7 +478,7 @@ namespace CameraLink
 			if (f.p7SealedPublished)
 			{
 				PoolEntry e;
-				if (m_pool->Get(f.seq, e))
+				if (m_pool->Get(f.seq, e, /*includeUncommitted=*/true))   // GEM-128: the seal accepted a Published slot; the worker may not have Committed yet
 					rec = e.record;
 			}
 			const bool accepted = m_sealToStore.OnSealed(f.seq, rec);
@@ -477,27 +500,6 @@ namespace CameraLink
 		m_haveFrameAt = true;
 		// (2) poll the ring, (3) request the copy of each new verified field
 		OnPostSubmitGap();
-		if (m_engine)
-		{
-			// A new field era (a seek / resync restarted the numbering of the engine): the last-requested bookkeeping is void.
-			const uint64_t era = m_engine->FieldEra();
-			if (era != m_lastEra)
-			{
-				m_lastEra = era;
-				m_lastRequestedField = 0;
-				m_requestedAt.clear();
-				m_aheadNext = 0;          // AHEAD FIT: restarts after the new numbering's newest field
-				m_seedPending.clear();
-				// The numbering restarted: nothing was asked, published on time or sealed in it yet. A reused seq must not read the old
-				// era's marks (a stale "rejected" verdict would count a new pair as Stale / R; a stale on-time mark would pass cause b).
-				for (size_t i = 0; i < kAheadMarks; ++i)
-				{
-					m_aheadAsked[i].store(0, std::memory_order_relaxed);
-					m_onTimeMark[i].store(0, std::memory_order_relaxed);
-					m_sealVerdict[i].store(0, std::memory_order_relaxed);
-				}
-			}
-		}
 		if (m_ring && m_engine)
 		{
 			const uint64_t latest = m_engine->LatestVerifiedFieldSeq();
@@ -859,7 +861,9 @@ namespace CameraLink
 	{
 		rec.reset();
 		PoolEntry e;
-		if (!m_pool || !m_pool->Get(seq, e))
+		// GEM-128: the callers (the P8 fill, live and lane) ask only for a frame whose P7 slot is Published or Sealed, i.e. after the worker's
+		// Publish; its Commit follows a moment later, so the uncommitted entry is read too (the same rule as the seal observer).
+		if (!m_pool || !m_pool->Get(seq, e, /*includeUncommitted=*/true))
 			return false;
 		rec = e.record;
 		return true;

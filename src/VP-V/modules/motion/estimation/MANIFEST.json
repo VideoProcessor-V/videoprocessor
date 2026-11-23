@@ -57,6 +57,7 @@
     "src/VP-V/modules/motion/estimation/global_model/PhotometricRefineGpuShaders.inl",
     "src/VP-V/modules/motion/estimation/global_model/PhotometricWiring.h",
     "src/VP-V/modules/motion/estimation/global_model/PhotometricVerdict.h",
+    "src/VP-V/modules/motion/estimation/global_model/CameraTestSeams.h",
     "src/VP-V/modules/motion/estimation/global_model/CameraAccessor.h",
     "src/VP-V/modules/motion/estimation/tests/CameraRecordPodTests.cpp",
     "src/VP-V/modules/motion/estimation/global_model/CameraAccessorGlsl.h",
@@ -212,7 +213,8 @@
     "src/VP-V/modules/motion/estimation/DitherVectorSource.h",
     "src/VP-V/modules/motion/estimation/DitherVectorSourceHost.inl",
     "src/VP-V/modules/motion/estimation/tests/OutputDomainSearchTests.cpp",
-    "src/VP-V/modules/motion/estimation/tests/DitherVectorSourceTests.cpp"
+    "src/VP-V/modules/motion/estimation/tests/DitherVectorSourceTests.cpp",
+    "src/VP-V/modules/motion/estimation/tests/CameraTestSeamTests.cpp"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/MotionAhead.h",
