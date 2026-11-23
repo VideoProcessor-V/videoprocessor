@@ -195,6 +195,15 @@ namespace TdV2
 			double& outR, double& outG, double& outB,
 			StandInRegistry* standIns = nullptr) const
 		{
+			if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b))
+			{
+				outR = std::isfinite(r) ? r : 0.0;
+				outG = std::isfinite(g) ? g : 0.0;
+				outB = std::isfinite(b) ? b : 0.0;
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::NonFiniteClosure, "ApplySignedChromaDeltaToRgb non-finite input RGB");
+				return false;
+			}
 			if (dCb == 0.0 && dCr == 0.0)
 			{
 				outR = r;

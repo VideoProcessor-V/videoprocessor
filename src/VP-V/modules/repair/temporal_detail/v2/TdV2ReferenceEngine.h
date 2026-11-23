@@ -663,6 +663,65 @@ namespace TdV2
 		bool carryReset = false;
 	};
 
+	// ---- Corner-Tapered Spatial-Only Bilinear Weight Interpolation (Zero New Constants) ----
+	// Applies the 3-sigma Huber pixel taper psi(d^2 / max(C_q, eps_num)) per bilinear corner q in {00, 10, 01, 11}
+	// BEFORE bilinearly combining the 4 corner weights:
+	//   w_eff(p) = sum_q alpha_q(p) * w_q * HuberPixelTaper(diff, C_q).
+	// On uniform regions (C_00 == C_10 == C_01 == C_11) this is algebraically identical to SpatialBilinearWeight * HuberPixelTaper;
+	// across a micro-motion cell boundary (e.g. poolR == 0 in Preset::RealTime), a low-variance neighbor's weight w_nbr is
+	// tapered by its OWN variance C_nbr so shifted pixels (d^2 >> 9 * C_nbr) immediately reject w_nbr without blocky seams.
+	inline double SpatialBilinearHuberWeight(
+		const double* cellWeights,
+		const double* cellDiagC,
+		int cellsW,
+		int cellsH,
+		double pxX,
+		double pxY,
+		int cellPx,
+		double diff)
+	{
+		if (cellWeights == nullptr || cellDiagC == nullptr || cellsW <= 0 || cellsH <= 0 || cellPx <= 0 ||
+		    !std::isfinite(pxX) || !std::isfinite(pxY) || !std::isfinite(diff))
+		{
+			return 0.0;
+		}
+		const double gx = (pxX + 0.5) / static_cast<double>(cellPx) - 0.5;
+		const double gy = (pxY + 0.5) / static_cast<double>(cellPx) - 0.5;
+		const int x0 = (std::max)(0, (std::min)(cellsW - 1, static_cast<int>(std::floor(gx))));
+		const int y0 = (std::max)(0, (std::min)(cellsH - 1, static_cast<int>(std::floor(gy))));
+		const int x1 = (std::min)(cellsW - 1, x0 + 1);
+		const int y1 = (std::min)(cellsH - 1, y0 + 1);
+		const double tx = RampMath::Clamp01(gx - static_cast<double>(x0));
+		const double ty = RampMath::Clamp01(gy - static_cast<double>(y0));
+
+		const size_t i00 = static_cast<size_t>(y0) * cellsW + x0;
+		const size_t i10 = static_cast<size_t>(y0) * cellsW + x1;
+		const size_t i01 = static_cast<size_t>(y1) * cellsW + x0;
+		const size_t i11 = static_cast<size_t>(y1) * cellsW + x1;
+
+		const double w00 = cellWeights[i00];
+		const double w10 = cellWeights[i10];
+		const double w01 = cellWeights[i01];
+		const double w11 = cellWeights[i11];
+		const double d00 = cellDiagC[i00];
+		const double d10 = cellDiagC[i10];
+		const double d01 = cellDiagC[i01];
+		const double d11 = cellDiagC[i11];
+		if (!std::isfinite(w00) || !std::isfinite(w10) || !std::isfinite(w01) || !std::isfinite(w11) ||
+		    !std::isfinite(d00) || !std::isfinite(d10) || !std::isfinite(d01) || !std::isfinite(d11))
+		{
+			return 0.0;
+		}
+
+		const double t00 = w00 * HuberPixelTaper(diff, d00);
+		const double t10 = w10 * HuberPixelTaper(diff, d10);
+		const double t01 = w01 * HuberPixelTaper(diff, d01);
+		const double t11 = w11 * HuberPixelTaper(diff, d11);
+		const double top = t00 + (t10 - t00) * tx;
+		const double bot = t01 + (t11 - t01) * tx;
+		return top + (bot - top) * ty;
+	}
+
 	// ---- Full CPU Reference Fusion Engine (Stage TD-S3) ----
 	class TdV2ReferenceEngine
 	{
@@ -962,7 +1021,11 @@ namespace TdV2
 					for (int b = 0; b < 3; ++b)
 					{
 						const TdV2Plane& curB = bandPlaneOf(curBands, b);
-						MomentAccumulatorFp32 acc(K);
+						// Exact Welford online mean-centered second-moment accumulator (zero first-pixel-anchor
+						// catastrophic cancellation; matches GPU Chan-Pebay parallel merge to FP32 precision).
+						double muWelford[kMaxBlendRefs] = {};
+						double scatterWelford[kMaxBlendRefs][kMaxBlendRefs] = {};
+						size_t sampleCount = 0;
 
 						const int py0 = (std::max)(active.y0, (cy - poolR) * cellPx);
 						const int py1 = (std::min)(active.y1, (cy + poolR + 1) * cellPx);
@@ -984,7 +1047,7 @@ namespace TdV2
 
 								const size_t pIdx = static_cast<size_t>(y) * w + x;
 								bool allValid = true;
-								float diffs[kMaxBlendRefs] = {};
+								double diffs[kMaxBlendRefs] = {};
 								const double curV = curB.at(x, y);
 								for (int k = 0; k < K; ++k)
 								{
@@ -994,18 +1057,48 @@ namespace TdV2
 										allValid = false;
 										break;
 									}
-									diffs[k] = static_cast<float>(curV - bandPlaneOf(refs[k].bands, b).at(x, y));
+									const double dVal = curV - bandPlaneOf(refs[k].bands, b).at(x, y);
+									if (!std::isfinite(dVal))
+									{
+										allValid = false;
+										break;
+									}
+									diffs[k] = dVal;
 								}
 								if (allValid)
-									acc.AddSample(diffs);
+								{
+									++sampleCount;
+									const double invN = 1.0 / static_cast<double>(sampleCount);
+									double deltaPrev[kMaxBlendRefs] = {};
+									for (int i = 0; i < K; ++i)
+									{
+										deltaPrev[i] = diffs[i] - muWelford[i];
+										muWelford[i] += deltaPrev[i] * invN;
+									}
+									for (int i = 0; i < K; ++i)
+									{
+										for (int j = i; j < K; ++j)
+											scatterWelford[i][j] += deltaPrev[i] * (diffs[j] - muWelford[j]);
+									}
+								}
 							}
 						}
 
-						if (acc.sampleCount == 0)
+						if (sampleCount == 0)
 							continue;
 
 						double C[kMaxBlendRefs][kMaxBlendRefs] = {};
-						acc.SecondMoment(C);
+						const double invSampleN = 1.0 / static_cast<double>(sampleCount);
+						for (int i = 0; i < K; ++i)
+						{
+							for (int j = i; j < K; ++j)
+							{
+								const double m2 = scatterWelford[i][j] * invSampleN + muWelford[i] * muWelford[j];
+								const double val = (i == j && m2 < 0.0) ? 0.0 : m2;
+								C[i][j] = val;
+								C[j][i] = val;
+							}
+						}
 						for (int k = 0; k < K; ++k)
 							cellDiagC[b][k][cIdx] = C[k][k];
 
@@ -1140,16 +1233,16 @@ namespace TdV2
 							if (cellW[b][k][cIdx] <= 0.0)
 								continue;
 
-							// Spatial-only interpolation (ZERO temporal weight ramps).
-							const double wSpat = SpatialBilinearWeight(
-								cellW[b][k].data(), res.cellsW, res.cellsH,
-								static_cast<double>(x), static_cast<double>(y), cellPx);
-							if (wSpat <= 0.0)
-								continue;
+							// Corner-tapered spatial-only interpolation (ZERO temporal weight ramps):
+							// applies 3-sigma Huber pixel taper per bilinear corner q using that corner's OWN variance C_q
+							// before combining, protecting sub-block micro-motion boundaries even when poolR == 0.
 							const double diff = curV - bandPlaneOf(refs[k].bands, b).at(x, y);
-							// 3-sigma Huber pixel taper protects sharp corners & sub-block disocclusions.
-							const double taper = HuberPixelTaper(diff, cellDiagC[b][k][cIdx]);
-							bandDelta -= (wSpat * taper) * diff;
+							const double wEff = SpatialBilinearHuberWeight(
+								cellW[b][k].data(), cellDiagC[b][k].data(), res.cellsW, res.cellsH,
+								static_cast<double>(x), static_cast<double>(y), cellPx, diff);
+							if (wEff <= 0.0)
+								continue;
+							bandDelta -= wEff * diff;
 						}
 						// Apply derived per-band quantization-cell bound when transform is unknown OR in remainder strip.
 						if (!inFull8x8Block)
