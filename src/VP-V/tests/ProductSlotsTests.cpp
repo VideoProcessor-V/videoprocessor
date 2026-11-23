@@ -484,6 +484,9 @@ namespace ProductSlotsTestsNs
 			SlotSet& s = h.Set(kA);
 			LaneTicket t;
 			Assert::IsTrue(s.Claim(0, Provenance::AheadOfa, kNoFence, &t) == ClaimResult::Claimed);
+			Assert::IsTrue(s.StateOf(0) == SlotState::Claimed);
+			Assert::IsTrue(s.StartWriting(t));
+			Assert::IsTrue(s.StateOf(0) == SlotState::Writing);
 			s.LaneHeader(t).honoured = h.ind.StampOf(0);
 			s.LaneHeader(t).reads = h.graph.nodes[0].reads;
 			std::memset(h.Buf(kA).Ring(t.slot), Pattern(0, kA, false), 64);
@@ -1274,7 +1277,9 @@ namespace ProductSlotsTestsNs
 
 			SlotSet edges(kA, 8, 4);
 			LaneTicket t0, t2;
-			Assert::IsTrue(edges.Claim(0, Provenance::AheadLane, kNoFence, &t0) == ClaimResult::Claimed); // Writing
+			Assert::IsTrue(edges.Claim(0, Provenance::AheadLane, kNoFence, &t0) == ClaimResult::Claimed); // Claimed
+			Assert::IsTrue(edges.StateOf(0) == SlotState::Claimed, L"Claim enters Claimed before StartWriting");
+			Assert::IsTrue(edges.StartWriting(t0), L"StartWriting transitions Claimed -> Writing");
 			publishFrame(edges, 1);                                                                      // Published
 			Assert::IsTrue(edges.Claim(2, Provenance::AheadLane, kNoFence, &t2) == ClaimResult::Claimed);
 			Assert::IsTrue(edges.Abandon(t2));                                                           // Abandoned
@@ -1306,6 +1311,240 @@ namespace ProductSlotsTestsNs
 			Assert::IsTrue(edges.Abandon(t0));
 			Assert::AreEqual(uint64_t(0), edges.Counters().orderErrors.load());
 			Assert::AreEqual(uint64_t(0), edges.Counters().overruns.load());
+		}
+
+		// R22: two-phase Claim() -> SlotState::Claimed -> StartWriting() -> SlotState::Writing contract,
+		// Seal()/Discard() preemption on Claimed causing StartWriting() to return false, plus negative control
+		// proving that skipping the StartWriting gate permits duplicate Begin + Live computes on the same frame.
+		TEST_METHOD(TwoPhaseClaimStartWritingAndSealPreemption)
+		{
+			const auto acceptAll = [](const Header&) { return SealReason::Accepted; };
+
+			// 1. Normal two-phase flow: Claim -> Claimed -> StartWriting -> Writing -> Publish.
+			SlotSet s(kA, 8, 4);
+			LaneTicket t0;
+			Assert::IsTrue(s.Claim(0, Provenance::AheadLane, kNoFence, &t0) == ClaimResult::Claimed);
+			Assert::IsTrue(s.StateOf(0) == SlotState::Claimed, L"Claim enters phase-1 Claimed");
+			Assert::IsTrue(s.LaneContinue(t0), L"LaneContinue recognizes Claimed");
+			Assert::IsTrue(s.StartWriting(t0), L"StartWriting transitions Claimed -> Writing");
+			Assert::IsTrue(s.StateOf(0) == SlotState::Writing, L"StartWriting enters phase-2 Writing");
+			Assert::IsFalse(s.StartWriting(t0), L"StartWriting CAS requires Claimed (idempotent failure on Writing)");
+			Assert::IsTrue(s.Publish(t0) == PublishResult::Published);
+			Assert::IsTrue(s.StateOf(0) == SlotState::Published);
+
+			// 2. Pre-Begin Seal preemption: Seal on Claimed -> RejectedLaneOwned (never invokes onWriting); StartWriting returns false.
+			LaneTicket t1;
+			Assert::IsTrue(s.Claim(1, Provenance::AheadLane, kNoFence, &t1) == ClaimResult::Claimed);
+			Assert::IsTrue(s.StateOf(1) == SlotState::Claimed);
+			int onWritingCalls = 0;
+			const SealResult sr = s.Seal(1, acceptAll, [&]() {
+				++onWritingCalls;
+				return false;
+			});
+			Assert::IsTrue(sr.outcome == SealOutcome::NeedsLive && sr.reason == SealReason::LaneLate,
+				L"Seal preempts Claimed as LaneLate");
+			Assert::AreEqual(0, onWritingCalls, L"Claimed preemption never triggers onWriting cooperative handoff");
+			Assert::IsTrue(s.StateOf(1) == SlotState::RejectedLaneOwned);
+			Assert::IsFalse(s.StartWriting(t1), L"StartWriting returns false after Seal preempted Claimed");
+			Assert::IsFalse(s.LaneContinue(t1));
+			Assert::IsTrue(s.BeginLive(1) >= 0 && s.CommitLive(1, Header()));
+			Assert::IsTrue(s.StateOf(1) == SlotState::LiveLaneOwned);
+			Assert::IsTrue(s.Abandon(t1));
+			Assert::IsTrue(s.StateOf(1) == SlotState::Live, L"Abandon acknowledges Rejected/LiveLaneOwned buffer");
+
+			// 3. In-test negative control: on the exact same pre-Begin Seal preemption race, a naive lane that
+			// ignores StartWriting() enters Begin after render already live-filled frame 1 -> 2 computes (duplicate!).
+			{
+				SlotSet neg(kA, 8, 4);
+				LaneTicket tn;
+				Assert::IsTrue(neg.Claim(1, Provenance::AheadLane, kNoFence, &tn) == ClaimResult::Claimed);
+				Assert::IsTrue(neg.Seal(1, acceptAll).outcome == SealOutcome::NeedsLive);
+				Assert::IsTrue(neg.BeginLive(1) >= 0 && neg.CommitLive(1, Header()));
+				int renderComputes = 1;
+				int naiveLaneBegins = 0;
+				int protectedLaneBegins = 0;
+				const bool startOk = neg.StartWriting(tn);
+				Assert::IsFalse(startOk, L"StartWriting rejects preempted Claimed slot");
+				// Unprotected naive lane ignores startOk and runs Begin anyway:
+				++naiveLaneBegins;
+				Assert::IsTrue(renderComputes + naiveLaneBegins > 1,
+					L"negative control: ignoring StartWriting allows duplicate Begin + Live compute on the same frame");
+				// Protected two-phase lane gates Begin on StartWriting(ticket):
+				if (startOk)
+					++protectedLaneBegins;
+				Assert::AreEqual(1, renderComputes + protectedLaneBegins,
+					L"two-phase StartWriting gate yields exactly 1 compute on the preempted frame");
+				Assert::IsTrue(neg.Abandon(tn));
+			}
+
+			// 4. ReleaseThrough preserves Claimed; Discard preempts Claimed -> ReleasedLaneOwned so StartWriting fails.
+			SlotSet d(kA, 8, 4);
+			LaneTicket tc0, tc1, tc2;
+			Assert::IsTrue(d.Claim(0, Provenance::AheadLane, kNoFence, &tc0) == ClaimResult::Claimed);
+			Assert::IsTrue(d.Claim(1, Provenance::AheadLane, kNoFence, &tc1) == ClaimResult::Claimed);
+			Assert::IsTrue(d.StartWriting(tc1));
+			Assert::IsTrue(d.Publish(tc1) == PublishResult::Published);
+			Assert::IsTrue(d.Seal(1, acceptAll).outcome == SealOutcome::Sealed);
+			Assert::AreEqual(1u, d.ReleaseThrough(1, 0u));
+			Assert::IsTrue(d.StateOf(0) == SlotState::Claimed, L"ReleaseThrough leaves Claimed untouched");
+			Assert::IsTrue(d.StateOf(1) == SlotState::Released);
+			Assert::IsTrue(d.Claim(2, Provenance::AheadLane, kNoFence, &tc2) == ClaimResult::Claimed);
+			Assert::IsTrue(d.Discard(2));
+			Assert::IsTrue(d.StateOf(2) == SlotState::ReleasedLaneOwned);
+			Assert::IsFalse(d.StartWriting(tc2), L"Discard preempts Claimed so StartWriting returns false");
+			Assert::IsTrue(d.Abandon(tc2));
+			Assert::IsTrue(d.StateOf(2) == SlotState::Empty);
+			Assert::IsTrue(d.Abandon(tc0));
+		}
+
+		// FIX3-D2: ReleaseThrough exact-slot fault injection increments releaseThroughExactOrderErrors > 0
+		// while keeping orderErrors == 0; negative control proves valid Seal->ReleaseThrough and
+		// Discard->ReleaseThrough record 0 exact-order errors (including Biased(seq) wrap-around check).
+		TEST_METHOD(ReleaseThroughExactOrderFaultInjectionAndNegativeControl)
+		{
+			const auto acceptAll = [](const Header&) { return SealReason::Accepted; };
+			auto publishAndSeal = [&](SlotSet& set, uint64_t seq) {
+				LaneTicket t;
+				Assert::IsTrue(set.Claim(seq, Provenance::AheadLane, kNoFence, &t) == ClaimResult::Claimed);
+				Assert::IsTrue(set.StartWriting(t));
+				Assert::IsTrue(set.Publish(t) == PublishResult::Published);
+				Assert::IsTrue(set.Seal(seq, acceptAll).outcome == SealOutcome::Sealed);
+			};
+
+			// 1. Negative control (valid sequences): normal Seal->ReleaseThrough, Discard->ReleaseThrough,
+			//    and Live->ReleaseThrough MUST record 0 releaseThroughExactOrderErrors.
+			SlotSet ok(kA, 8, 4);
+			for (uint64_t f = 0; f < 4; ++f) {
+				publishAndSeal(ok, f);
+				Assert::AreEqual(1u, ok.ReleaseThrough(f, 0u));
+			}
+			Assert::IsTrue(ok.Discard(4));
+			Assert::AreEqual(0u, ok.ReleaseThrough(4, 0u));
+			Assert::IsTrue(ok.Seal(5, acceptAll).outcome == SealOutcome::NeedsLive);
+			Assert::IsTrue(ok.BeginLive(5) >= 0 && ok.CommitLive(5, Header()));
+			Assert::AreEqual(1u, ok.ReleaseThrough(5, 0u));
+			Assert::AreEqual(uint64_t(0), ok.Counters().releaseThroughExactOrderErrors.load(),
+				L"negative control: normal Seal/Live/Discard -> ReleaseThrough records 0 exact-order errors");
+			Assert::AreEqual(uint64_t(0), ok.Counters().orderErrors.load());
+
+			// 2. Fault injection: every invalid ReleaseThrough pattern increments releaseThroughExactOrderErrors.
+			SlotSet bad(kA, 8, 4);
+			publishAndSeal(bad, 0);
+			Assert::AreEqual(1u, bad.ReleaseThrough(0, 0u));
+			Assert::AreEqual(uint64_t(0), bad.Counters().releaseThroughExactOrderErrors.load());
+
+			// Fault A: duplicate upToSeq == releasedThrough_.
+			Assert::AreEqual(0u, bad.ReleaseThrough(0, 0u));
+			Assert::AreEqual(uint64_t(1), bad.Counters().releaseThroughExactOrderErrors.load(),
+				L"duplicate upToSeq == releasedThrough_ increments releaseThroughExactOrderErrors");
+
+			// Advance cleanly through frames 1..2, then inject out-of-order upToSeq < releasedThrough_.
+			publishAndSeal(bad, 1);
+			publishAndSeal(bad, 2);
+			Assert::AreEqual(2u, bad.ReleaseThrough(2, 0u));
+			Assert::AreEqual(uint64_t(1), bad.Counters().releaseThroughExactOrderErrors.load());
+
+			// Fault B: out-of-order upToSeq < releasedThrough_.
+			Assert::AreEqual(0u, bad.ReleaseThrough(1, 0u));
+			Assert::AreEqual(uint64_t(2), bad.Counters().releaseThroughExactOrderErrors.load(),
+				L"out-of-order upToSeq < releasedThrough_ increments releaseThroughExactOrderErrors");
+
+			// Fault C: exact slot 3 is Empty (neither render-held nor discarded).
+			Assert::AreEqual(0u, bad.ReleaseThrough(3, 0u));
+			Assert::AreEqual(uint64_t(3), bad.Counters().releaseThroughExactOrderErrors.load(),
+				L"Empty exact slot increments releaseThroughExactOrderErrors");
+
+			// Fault D: exact slot 4 is Published (never sealed or discarded).
+			{
+				LaneTicket t4;
+				Assert::IsTrue(bad.Claim(4, Provenance::AheadLane, kNoFence, &t4) == ClaimResult::Claimed);
+				Assert::IsTrue(bad.StartWriting(t4));
+				Assert::IsTrue(bad.Publish(t4) == PublishResult::Published);
+			}
+			Assert::AreEqual(0u, bad.ReleaseThrough(4, 0u));
+			Assert::AreEqual(uint64_t(4), bad.Counters().releaseThroughExactOrderErrors.load(),
+				L"Published exact slot increments releaseThroughExactOrderErrors");
+			Assert::IsTrue(bad.StateOf(4) == SlotState::Published);
+
+			// Fault E: exact slot 5 is Claimed.
+			LaneTicket t5;
+			Assert::IsTrue(bad.Claim(5, Provenance::AheadLane, kNoFence, &t5) == ClaimResult::Claimed);
+			Assert::AreEqual(0u, bad.ReleaseThrough(5, 0u));
+			Assert::AreEqual(uint64_t(5), bad.Counters().releaseThroughExactOrderErrors.load(),
+				L"Claimed exact slot increments releaseThroughExactOrderErrors");
+			Assert::IsTrue(bad.StateOf(5) == SlotState::Claimed);
+			Assert::IsTrue(bad.Abandon(t5));
+
+			// Fault F: wrap-around stale discardedSeq check (frame 6 discarded, frame 6 + ring = 14 NOT discarded).
+			Assert::IsTrue(bad.Discard(6));
+			Assert::AreEqual(0u, bad.ReleaseThrough(6, 0u));
+			Assert::AreEqual(uint64_t(5), bad.Counters().releaseThroughExactOrderErrors.load(),
+				L"exact-match Discard(6) -> ReleaseThrough(6) records 0 additional errors");
+			Assert::AreEqual(0u, bad.ReleaseThrough(14, 0u));
+			Assert::AreEqual(uint64_t(6), bad.Counters().releaseThroughExactOrderErrors.load(),
+				L"wrapped-around frame 14 on same slot MUST NOT falsely match frame 6 discardedSeq");
+			Assert::AreEqual(uint64_t(0), bad.Counters().orderErrors.load(),
+				L"ReleaseThrough exact-order faults stay on releaseThroughExactOrderErrors without polluting orderErrors");
+		}
+
+		// FIX3-D5: verify O(1) steady-state releasedThrough_ cursor across consecutive frames, small gaps (< ring),
+		// large gaps (>= ring full-scan fallback), and post-gap resumption + regression negative control.
+		TEST_METHOD(ReleaseThroughCursorSteadyStateAndLargeGaps)
+		{
+			const auto acceptAll = [](const Header&) { return SealReason::Accepted; };
+			auto publishAndSeal = [&](SlotSet& set, uint64_t seq, uint64_t completedFence) {
+				LaneTicket t;
+				Assert::IsTrue(set.Claim(seq, Provenance::AheadLane, completedFence, &t) == ClaimResult::Claimed);
+				Assert::IsTrue(set.StartWriting(t));
+				Assert::IsTrue(set.Publish(t) == PublishResult::Published);
+				Assert::IsTrue(set.Seal(seq, acceptAll).outcome == SealOutcome::Sealed);
+			};
+
+			constexpr uint16_t kRing = 8;
+			SlotSet s(kA, kRing, 4);
+
+			// 1. Steady-state consecutive frames 0..199 (O(1) 1-slot cursor advance per frame).
+			for (uint64_t f = 0; f < 200; ++f) {
+				publishAndSeal(s, f, f);
+				Assert::AreEqual(1u, s.ReleaseThrough(f, f + 1u));
+				Assert::IsTrue(s.StateOf(f) == SlotState::Released);
+			}
+			Assert::AreEqual(uint64_t(0), s.Counters().releaseThroughExactOrderErrors.load());
+			Assert::AreEqual(uint64_t(0), s.Counters().orderErrors.load());
+			Assert::AreEqual(uint64_t(0), s.Counters().overruns.load());
+
+			// 2. Small multi-frame gap (< ring): incremental cursor lo..upToSeq releases 200..203 and preserves 204.
+			for (uint64_t f = 200; f <= 204; ++f)
+				publishAndSeal(s, f, 250u);
+			Assert::AreEqual(4u, s.ReleaseThrough(203, 300u));
+			Assert::IsTrue(s.StateOf(200) == SlotState::Released && s.StateOf(203) == SlotState::Released);
+			Assert::IsTrue(s.StateOf(204) == SlotState::Sealed, L"frame beyond upToSeq preserved");
+			Assert::AreEqual(uint64_t(0), s.Counters().releaseThroughExactOrderErrors.load());
+
+			// 3. Large gap (>= ring): upToSeq - releasedThrough_ == 8 >= kRing triggers full-scan fallback and drains 204..206.
+			publishAndSeal(s, 205, 300u);
+			publishAndSeal(s, 206, 300u);
+			const uint64_t jumpSeq = 203u + uint64_t(kRing);   // 211 (slot 3, which held Released frame 203)
+			Assert::IsTrue(s.Discard(jumpSeq));
+			Assert::AreEqual(3u, s.ReleaseThrough(jumpSeq, 400u),
+				L"large gap >= ring falls back to full scan and releases all 3 held frames 204..206");
+			Assert::IsTrue(s.StateOf(204) == SlotState::Released && s.StateOf(205) == SlotState::Released
+				&& s.StateOf(206) == SlotState::Released && s.StateOf(jumpSeq) == SlotState::Released);
+			Assert::AreEqual(uint64_t(0), s.Counters().releaseThroughExactOrderErrors.load());
+
+			// 4. Resume O(1) steady-state after large gap: slot (212 % 8 == 4) held Released frame 204 with fence 400.
+			Assert::IsTrue(s.Claim(212, Provenance::AheadLane, 399u, nullptr) == ClaimResult::ReleasePending,
+				L"fence 400 propagated by large-gap ReleaseThrough still gates reuse");
+			publishAndSeal(s, 212, 400u);
+			Assert::AreEqual(1u, s.ReleaseThrough(212, 401u));
+			Assert::AreEqual(uint64_t(0), s.Counters().releaseThroughExactOrderErrors.load());
+
+			// 5. Negative control: cursor regression (upToSeq < releasedThrough_) is caught as 0-release fault.
+			Assert::AreEqual(0u, s.ReleaseThrough(211, 401u));
+			Assert::AreEqual(uint64_t(1), s.Counters().releaseThroughExactOrderErrors.load(),
+				L"negative control: regression below releasedThrough_ cursor is detected visibly");
+			Assert::AreEqual(uint64_t(0), s.Counters().orderErrors.load());
+			Assert::AreEqual(uint64_t(0), s.Counters().overruns.load());
 		}
 	};
 }

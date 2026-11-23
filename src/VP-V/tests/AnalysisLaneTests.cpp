@@ -1750,7 +1750,8 @@ namespace AnalysisLaneTestsNs
 			ComputeOnceScope co;
 			const std::string laneP4Unit = "lane:" + std::to_string(int(kP4SourceStats));
 
-			// ---- 1. In-Test Negative Control: prove Writing -> RejectedLaneOwned -> RunCpuLive causes real duplicates ----
+			// ---- 1. In-Test Negative Control: prove unprotected Seal (without onCpuWriting / TakeOverCpuInFlight)
+			//         against a mid-chunk Writing CPU worker causes real U6 and lane:* ComputeOnce duplicates ----
 			{
 				Rig neg(32);
 				neg.consumers.clear();
@@ -1760,7 +1761,6 @@ namespace AnalysisLaneTestsNs
 				neg.gs.queueDepth = 2;
 				neg.Configure(LaneSettings::Mode::On, false, 1);
 				const std::shared_ptr<LaneState> st = neg.lane.State();
-				Assert::IsFalse(st->runner->AsyncCpuWorkers(), L"negative control runs with asyncCpuWorkers=false");
 
 				// Seal & retire frame 1 so LastSealed() == 1.
 				neg.lane.OnSourceFrame(neg.View(1));
@@ -1771,28 +1771,50 @@ namespace AnalysisLaneTestsNs
 				neg.lane.OnFrameRetired(1, 0);
 				ComputeOnce::Global().Reset();
 
-				// Frame 2 arrives (= LastSealed() + 1): without asyncMargin=1, worker claims & enters Writing on frame 2.
+				// Frame 2 arrives (= LastSealed() + 1): worker finishes P1(2), then runs 1 chunk of P4(2) -> Writing.
 				neg.lane.OnSourceFrame(neg.View(2));
-				for (int i = 0; i < 2000 && st->table->At(size_t(st->IndexOf(kP1HalfLuma))).StateOf(2) != SlotState::Published; ++i)
+				const size_t p1Idx = size_t(st->IndexOf(kP1HalfLuma));
+				const size_t p4Idx = size_t(st->IndexOf(kP4SourceStats));
+				for (int i = 0; i < 2000 && st->table->At(p1Idx).StateOf(2) != SlotState::Published; ++i)
 					st->runner->Step(kP1HalfLuma, 1000, true);
-				const StepOutcome mid = st->runner->Step(kP4SourceStats, 1, false);   // 1 row -> Begin + Writing (mid-job)
+				Assert::IsTrue(st->table->At(p1Idx).StateOf(2) == SlotState::Published);
+				const StepOutcome mid = st->runner->Step(kP4SourceStats, 1, false);   // 1 row -> StartWriting + Begin + Writing
 				Assert::IsTrue(mid == StepOutcome::Ran, L"negative control: worker entered Writing on LastSealed()+1");
-				Assert::IsTrue(st->table->At(size_t(st->IndexOf(kP4SourceStats))).StateOf(2) == SlotState::Writing);
+				Assert::IsTrue(st->table->At(p4Idx).StateOf(2) == SlotState::Writing);
 
-				// Render thread seals frame 2 -> Writing -> RejectedLaneOwned -> RunCpuLive -> ComputeOnce duplicate!
+				// Unprotected baseline: call 3-arg SlotTable::Resolve WITHOUT onCpuWriting handoff.
+				// Seal preempts Writing -> RejectedLaneOwned (LaneLate) and runs live CPU compute -> duplicate!
+				neg.ind.SealAndObserve(2);
+				const VpIndicator::Stamp stamp2 = neg.ind.StampOf(2);
+				auto unprotectedLiveFill = [&](const Node& n, uint64_t s, int live, Header&, uint32_t) -> bool {
+					if (n.id != kP4SourceStats)
+						return false;
+					const ReadInfo p1Read = st->table->At(p1Idx).Read(s);
+					if (p1Read.kind == ReadInfo::None)
+						return false;
+					const uint8_t* p1Ptr = p1Read.kind == ReadInfo::Ring
+						? st->bufs[p1Idx]->Ring(size_t(p1Read.index))
+						: st->bufs[p1Idx]->Live(size_t(p1Read.index));
+					uint8_t* dst = st->bufs[p4Idx]->Live(size_t(live));
+					const bool ok = VpLaneProducts::ComputeSourceStats(p1Ptr, Dims{ kW, kH }, dst, st->bufs[p4Idx]->Bytes());
+					if (ok)
+						VPV_COMPUTE_ONCE_AT(laneP4Unit.c_str(), s, ::ComputeOnce::Variant(0));
+					return ok;
+				};
 				{
 					ComputeOnce::FrameScope rs(2, "render", 0);
-					const std::vector<ProductFrameResult> res = neg.lane.OnRenderStart(2, 4000);
+					const std::vector<ProductFrameResult>& res = st->table->Resolve(2, stamp2, unprotectedLiveFill);
 					Assert::IsTrue(Rig::Res(res, kP4SourceStats).seal.reason == SealReason::LaneLate);
 					Assert::IsTrue(Rig::Res(res, kP4SourceStats).liveFilled);
 				}
 				Assert::IsTrue(dupCountFor("U6", nullptr) > 0,
-					L"negative control: without asyncMargin=1 + PrepareJob guard, U6 records duplicates > 0");
+					L"negative control: without onCpuWriting handoff, mid-chunk Writing Seal causes U6 duplicates > 0");
 				Assert::IsTrue(dupCountFor(laneP4Unit.c_str(), nullptr) > 0,
-					L"negative control: lane:<P4> also records duplicates > 0");
+					L"negative control: without onCpuWriting handoff, lane:<P4> also records duplicates > 0");
 			}
 
-			// ---- 2. Protected path (i): deterministic asyncMargin=1 AND PrepareJob pre-Begin re-check ----
+			// ---- 2. Protected path (i): asyncMargin == 0, cooperative TakeOverCpuInFlight (renderAssisted > 0),
+			//         two-phase Claimed -> Writing, pre-Begin Seal preemption, and PrepareJob LastSealed re-check ----
 			{
 				ComputeOnce::Global().Reset();
 				Rig det(32);
@@ -1804,6 +1826,8 @@ namespace AnalysisLaneTestsNs
 				det.Configure(LaneSettings::Mode::On, false, 1);
 				det.lane.SetWorkersRunning(true);
 				const std::shared_ptr<LaneState> st = det.lane.State();
+				const size_t p1Idx = size_t(st->IndexOf(kP1HalfLuma));
+				const size_t p4Idx = size_t(st->IndexOf(kP4SourceStats));
 				Assert::IsTrue(st->runner->AsyncCpuWorkers(), L"SetWorkersRunning(true) enables asyncCpuWorkers");
 
 				// Seal & retire frame 1 -> LastSealed() == 1.
@@ -1814,45 +1838,90 @@ namespace AnalysisLaneTestsNs
 				}
 				det.lane.OnFrameRetired(1, 0);
 
-				// Slim queue arrival of LastSealed() + 1 (= 2): asyncMargin=1 keeps worker in WaitingSource.
+				// (A) asyncMargin == 0 + cooperative TakeOverCpuInFlight on mid-chunk Writing:
+				//     LastSealed()+1 (= 2) IS claimed and run immediately (no depth 1-2 starvation).
 				det.lane.OnSourceFrame(det.View(2));
-				Assert::IsTrue(st->runner->Step(kP1HalfLuma, 1000, true) == StepOutcome::WaitingSource,
-					L"asyncMargin=1 refuses to claim LastSealed()+1 for P1");
-				Assert::IsTrue(st->runner->Step(kP4SourceStats, 1000, true) == StepOutcome::WaitingSource,
-					L"asyncMargin=1 refuses to claim LastSealed()+1 for P4");
+				for (int i = 0; i < 2000 && st->table->At(p1Idx).StateOf(2) != SlotState::Published; ++i) {
+					const StepOutcome o = st->runner->Step(kP1HalfLuma, 1000, true);
+					Assert::IsTrue(LaneStepProgressed(o), L"asyncMargin==0 allows P1 to claim LastSealed()+1");
+				}
+				Assert::IsTrue(st->table->At(p1Idx).StateOf(2) == SlotState::Published);
+				const StepOutcome mid2 = st->runner->Step(kP4SourceStats, 1, false);   // 1 row -> Claimed -> Writing (mid-chunk)
+				Assert::IsTrue(mid2 == StepOutcome::Ran, L"asyncMargin==0 allows P4 to claim and begin LastSealed()+1");
+				Assert::IsTrue(st->table->At(p4Idx).StateOf(2) == SlotState::Writing);
+
+				// Render thread seals frame 2 while P4(2) is Writing -> TakeOverCpuInFlight completes remaining
+				// chunks cooperatively and publishes -> Seal accepts Published with 0 duplicates and renderAssisted == 1.
 				{
 					ComputeOnce::FrameScope rs(2, "render", 0);
-					det.lane.OnRenderStart(2, 4000);
+					const std::vector<ProductFrameResult> res = det.lane.OnRenderStart(2, 4000);
+					Assert::IsTrue(Rig::Res(res, kP4SourceStats).seal.reason == SealReason::Accepted,
+						L"TakeOverCpuInFlight publishes in-flight CPU job so Seal accepts Published");
+					Assert::IsFalse(Rig::Res(res, kP4SourceStats).liveFilled,
+						L"no duplicate live fill after cooperative handoff");
+				}
+				Assert::AreEqual(uint64_t(1), st->runner->Counters(kP4SourceStats).renderAssisted.load(),
+					L"cooperative handoff increments visible renderAssisted counter");
+				Assert::IsTrue(AnyLine(det.lane.StatusLines(), "cooperatively on the render thread"),
+					L"renderAssisted is visibly reported in AnalysisLane::StatusLines()");
+				Assert::AreEqual(uint64_t(0), dupCountFor("U6", nullptr), L"0 U6 duplicates after TakeOverCpuInFlight");
+				Assert::AreEqual(uint64_t(0), dupCountFor(nullptr, "lane:"), L"0 lane:* duplicates after TakeOverCpuInFlight");
+
+				// Verify cooperative output bytes against independent ground truth (ComputeOnce paused for reference).
+				{
+					ComputeOnce::SetEnabled(false);
+					std::vector<uint8_t> refP1(VpLaneProducts::HalfLumaBytes(Dims{ kW, kH }), 0);
+					std::vector<uint8_t> refP4(st->bufs[p4Idx]->Bytes(), 0);
+					Assert::IsTrue(VpLaneProducts::ComputeHalfLuma(det.View(2), refP1.data(), refP1.size()));
+					Assert::IsTrue(VpLaneProducts::ComputeSourceStats(refP1.data(), Dims{ kW, kH }, refP4.data(), refP4.size()));
+					ComputeOnce::SetEnabled(true);
+					const AnalysisLane::ProductRead got = det.lane.ReadOf(kP4SourceStats, 2);
+					Assert::IsTrue(got.state == AnalysisLane::ProductRead::Ring && got.cpu != nullptr);
+					Assert::AreEqual(refP4.size(), got.cpuBytes);
+					Assert::AreEqual(0, std::memcmp(refP4.data(), got.cpu, refP4.size()),
+						L"cooperatively completed P4 bytes match independent ground truth bit-for-bit");
 				}
 				det.lane.OnFrameRetired(2, 0);
 
-				// Deterministic PrepareJob race: LastSealed() == 2, arrive 3 & 4 (do NOT publish P1(4) yet).
-				// P4 claims frame 4 (= LastSealed() + 2) and pauses in Phase::Claimed (WaitingInputs) right before Begin.
+				// (B) Two-phase Claimed -> Writing: Seal preempts Claimed before StartWriting/Begin -> 0 duplicates.
 				det.lane.OnSourceFrame(det.View(3));
-				det.lane.OnSourceFrame(det.View(4));
 				Assert::IsTrue(st->runner->Step(kP4SourceStats, 1000, true) == StepOutcome::WaitingInputs,
-					L"P4 claimed frame 4 and paused in PrepareJob before Begin");
-				Assert::IsTrue(st->table->At(size_t(st->IndexOf(kP4SourceStats))).StateOf(4) == SlotState::Writing);
+					L"P4 claimed frame 3 and paused in PrepareJob before StartWriting");
+				Assert::IsTrue(st->table->At(p4Idx).StateOf(3) == SlotState::Claimed,
+					L"before StartWriting, slot state is phase-1 Claimed (NOT Writing)");
+				{
+					ComputeOnce::FrameScope rs(3, "render", 0);
+					const std::vector<ProductFrameResult> res = det.lane.OnRenderStart(3, 4000);
+					Assert::IsTrue(Rig::Res(res, kP4SourceStats).seal.reason == SealReason::LaneLate);
+					Assert::IsTrue(Rig::Res(res, kP4SourceStats).liveFilled);
+				}
+				Assert::AreEqual(uint64_t(1), st->runner->Counters(kP4SourceStats).renderAssisted.load(),
+					L"preempted Claimed slot does NOT increment renderAssisted");
+				const uint64_t u6Before3 = callCountFor("U6");
+				const uint64_t lane4Before3 = callCountFor(laneP4Unit.c_str());
+				Assert::IsTrue(st->runner->Step(kP4SourceStats, 1000, true) == StepOutcome::Abandoned,
+					L"preempted Claimed job abandons cleanly without entering Begin");
+				Assert::AreEqual(u6Before3, callCountFor("U6"), L"0 extra U6 calls for preempted Claimed frame 3");
+				Assert::AreEqual(lane4Before3, callCountFor(laneP4Unit.c_str()), L"0 extra lane:<P4> calls for frame 3");
+				det.lane.OnFrameRetired(3, 0);
 
-				// Publish P1(4) so LaneAncestors(P4, 4) succeeds on the next Step, then advance LastSealed() to 4
-				// BEFORE P4's slot is sealed (LaneContinue is still true -> tests the exact LastSealed re-check in PrepareJob!).
-				while (st->table->At(size_t(st->IndexOf(kP1HalfLuma))).StateOf(4) != SlotState::Published) {
+				// (C) PrepareJob LastSealed re-check before StartWriting/Begin:
+				det.lane.OnSourceFrame(det.View(4));
+				Assert::IsTrue(st->runner->Step(kP4SourceStats, 1000, true) == StepOutcome::WaitingInputs);
+				Assert::IsTrue(st->table->At(p4Idx).StateOf(4) == SlotState::Claimed,
+					L"frame 4 pauses in phase-1 Claimed before StartWriting");
+				while (st->table->At(p1Idx).StateOf(4) != SlotState::Published) {
 					const StepOutcome o = st->runner->Step(kP1HalfLuma, 1000, true);
 					Assert::IsTrue(LaneStepProgressed(o));
 				}
-				const uint64_t u6Before = callCountFor("U6");
-				const uint64_t lane4Before = callCountFor(laneP4Unit.c_str());
-				det.ind.Seal(3);
+				const uint64_t u6Before4 = callCountFor("U6");
+				const uint64_t lane4Before4 = callCountFor(laneP4Unit.c_str());
 				det.ind.Seal(4);
 				Assert::AreEqual(uint64_t(4), det.ind.LastSealed());
-
-				// PrepareJob MUST see st.seq (4) <= LastSealed() (4) and transition to Abandoning BEFORE calling Begin!
-				const StepOutcome ab = st->runner->Step(kP4SourceStats, 1000, true);
-				Assert::IsTrue(ab == StepOutcome::Abandoned, L"PrepareJob abandoned frame 4 before Begin");
-				Assert::AreEqual(u6Before, callCountFor("U6"), L"Begin was NEVER called: 0 U6 calls for abandoned frame 4");
-				Assert::AreEqual(lane4Before, callCountFor(laneP4Unit.c_str()), L"0 lane:<P4> calls for abandoned frame 4");
-
-				// Render seals frame 4 (external seal since ind already sealed 4) -> runs live ONCE -> 0 duplicates.
+				Assert::IsTrue(st->runner->Step(kP4SourceStats, 1000, true) == StepOutcome::Abandoned,
+					L"PrepareJob abandons frame 4 when st.seq <= LastSealed before StartWriting/Begin");
+				Assert::AreEqual(u6Before4, callCountFor("U6"), L"0 U6 calls for abandoned frame 4");
+				Assert::AreEqual(lane4Before4, callCountFor(laneP4Unit.c_str()), L"0 lane:<P4> calls for abandoned frame 4");
 				det.lane.SetExternalSeal(true);
 				det.lane.OnSealed(4, 0);
 				{
@@ -1865,17 +1934,20 @@ namespace AnalysisLaneTestsNs
 				det.lane.SetWorkersRunning(false);
 			}
 
-			// ---- 3. Protected path (ii): 60-frame concurrent slim-queue stress with live LaneWorkerThreads ----
-			// Zero render-thread waits, random arrival jitter & backlog drops: assert 0 duplicates across U6 AND lane:*.
+			// ---- 3. Protected path (ii): 80-frame two-thread concurrent stress with live LaneWorkerThreads ----
+			// Small chunk cap + varied pre-Begin and mid-RunChunk jitter + backlog drops: assert published > 0
+			// and 0 duplicates across U6, U3, and lane:*, plus 0 slot/exact-order errors.
 			{
 				ComputeOnce::Global().Reset();
-				Rig stress(160);
+				Rig stress(200);
 				stress.consumers.clear();
 				stress.consumers.push_back(Consumer(1, { kP4SourceStats }));
 				stress.gs.renderAhead = 0;
 				stress.gs.laneLead = 1;
 				stress.gs.queueDepth = 2;
-				stress.Configure(LaneSettings::Mode::On, false, 1);
+				LaneSettings ls = stress.Settings(LaneSettings::Mode::On);
+				ls.chunkUs = 1;   // force multi-chunk CPU steps so render thread races both pre-Begin AND mid-RunChunk
+				stress.Configure(ls, false, 1);
 
 				// Establish initial sealed frame 1 before opening the slim-queue stream with live background workers.
 				stress.lane.OnSourceFrame(stress.View(1));
@@ -1891,11 +1963,9 @@ namespace AnalysisLaneTestsNs
 				std::mt19937 rng(0x523232u);
 				uint64_t rendered = 0;
 				uint64_t dropped = 0;
-				for (uint64_t seq = 2; rendered < 60 && seq < 140; ) {
-					// Random slim-queue arrival jitter: deliver current frame (LastSealed()+1), optionally drop a small backlog burst.
+				for (uint64_t seq = 2; rendered < 80 && seq < 180; ) {
 					const uint32_t roll = rng() % 10u;
-					if (roll == 0 && seq + 3 < 140) {
-						// Backlog drop of 2 consecutive frames.
+					if (roll == 0 && seq + 3 < 180) {
 						stress.lane.OnSourceFrame(stress.View(seq));
 						stress.lane.OnSourceFrame(stress.View(seq + 1));
 						stress.lane.OnFrameDropped(seq);
@@ -1905,8 +1975,10 @@ namespace AnalysisLaneTestsNs
 						continue;
 					}
 					stress.lane.OnSourceFrame(stress.View(seq));
-					if ((roll & 1u) != 0u)
-						std::this_thread::yield();   // jitter: let the background CPU worker race freely with zero render wait
+					if (roll <= 3u)
+						std::this_thread::yield();   // pre-Begin / mid-RunChunk jitter
+					else if (roll >= 8u)
+						std::this_thread::sleep_for(std::chrono::microseconds(250));   // let worker advance into mid-chunk / publish
 					{
 						ComputeOnce::FrameScope rs(static_cast<int64_t>(seq), "render", 0);
 						const std::vector<ProductFrameResult> res = stress.lane.OnRenderStart(seq, 4000);
@@ -1919,20 +1991,259 @@ namespace AnalysisLaneTestsNs
 				}
 				workers.Stop();
 
-				Assert::AreEqual(uint64_t(60), rendered, L"rendered all 60 post-bootstrap frames");
+				Assert::AreEqual(uint64_t(80), rendered, L"rendered all 80 post-bootstrap frames");
 				Assert::IsTrue(dropped > 0, L"backlog drops exercised during concurrent stress");
-				Assert::IsTrue(callCountFor("U6") >= 60, L"U6 actually executed across the 60-frame stress run");
+				Assert::IsTrue(callCountFor("U6") >= 80, L"U6 actually executed across the 80-frame stress run");
+				const std::shared_ptr<LaneState> st = stress.lane.State();
+				const uint64_t workerPublished =
+					st->runner->Counters(kP1HalfLuma).published.load()
+					+ st->runner->Counters(kP4SourceStats).published.load();
+				Assert::IsTrue(workerPublished > 0,
+					L"asyncMargin==0 allows CPU worker to actually publish frames on slim queue (published > 0)");
 				Assert::AreEqual(uint64_t(0), dupCountFor("U6", nullptr),
 					L"0 U6 ComputeOnce duplicates across live-worker slim-queue stress");
 				Assert::AreEqual(uint64_t(0), dupCountFor("U3", nullptr),
 					L"0 U3 ComputeOnce duplicates across live-worker slim-queue stress");
 				Assert::AreEqual(uint64_t(0), dupCountFor(nullptr, "lane:"),
 					L"0 lane:* ComputeOnce duplicates across live-worker slim-queue stress");
-				const std::shared_ptr<LaneState> st = stress.lane.State();
 				for (size_t i = 0; i < st->table->Count(); ++i) {
 					Assert::AreEqual(uint64_t(0), st->table->At(i).Counters().orderErrors.load());
 					Assert::AreEqual(uint64_t(0), st->table->At(i).Counters().overruns.load());
+					Assert::AreEqual(uint64_t(0), st->table->At(i).Counters().releaseThroughExactOrderErrors.load());
 				}
+			}
+		}
+
+		// FIX3-D3: Backend::Cpu orderedChain = true (P15-like) publishes consecutive frames under asyncCpuWorkers
+		// (asyncMargin == 0) with 0 AncestryIncomplete and 0 chainCarryForward; negative control proves skipping
+		// LastSealed()+1 (the old asyncMargin == 1 behavior) forces chainCarryForward > 0.
+		TEST_METHOD(OrderedChainCpuPublishesConsecutivelyWithZeroCarryForward)
+		{
+			class ChainCpuProducer : public ILaneProducer {
+			public:
+				ProductId Product() const override { return kP5MonitorTiles; }
+				bool Begin(const LaneJobContext& job) override
+				{
+					if (job.out == nullptr || job.outBytes < 16 || job.inputData[0] == nullptr)
+						return false;
+					uint64_t prevSum = 0;
+					if (!job.chainReduced && job.inputData[1] != nullptr)
+						std::memcpy(&prevSum, job.inputData[1], sizeof(prevSum));
+					const uint64_t nextSum = prevSum + uint64_t(job.inputData[0][0]) + 1u;
+					const uint64_t reducedFlag = job.chainReduced ? 1ull : 0ull;
+					std::memcpy(job.out, &nextSum, sizeof(nextSum));
+					std::memcpy(job.out + 8, &reducedFlag, sizeof(reducedFlag));
+					return true;
+				}
+				ChunkResult RunChunk(const LaneJobContext&, uint32_t) override { return ChunkResult::Done; }
+			};
+
+			auto makeChainRegistry = []() {
+				std::vector<ProductDecl> d = FirstProducts().All();
+				ProductDecl ch = detail::Make(
+					kP5MonitorTiles, "p15_chain", "ordered chain cpu", Backend::Cpu, 1, Tier::T0,
+					VpIndicator::Bit(VpIndicator::kFull) | VpIndicator::Bit(VpIndicator::kContinuity), 0);
+				detail::AddInput(ch, kP1HalfLuma, 0);
+				detail::AddInput(ch, kP5MonitorTiles, 1);
+				ch.orderedChain = true;
+				ch.missingInputForm = true;
+				ch.size.fixedBytes = 16;
+				d[kP5MonitorTiles] = ch;
+				return Registry(std::move(d));
+			};
+
+			auto chainLiveCompute = [](const Node&, const SourceFrameView*,
+				const std::array<const uint8_t*, kMaxInputs>& in, uint8_t* dst, size_t n) -> bool {
+				if (dst == nullptr || n < 16 || in[0] == nullptr)
+					return false;
+				uint64_t prevSum = 0;
+				const bool reduced = (in[1] == nullptr);
+				if (!reduced)
+					std::memcpy(&prevSum, in[1], sizeof(prevSum));
+				const uint64_t nextSum = prevSum + uint64_t(in[0][0]) + 1u;
+				const uint64_t reducedFlag = reduced ? 1ull : 0ull;
+				std::memcpy(dst, &nextSum, sizeof(nextSum));
+				std::memcpy(dst + 8, &reducedFlag, sizeof(reducedFlag));
+				return true;
+			};
+
+			// ---- 1. In-Test Negative Control: skipping LastSealed()+1 (old asyncMargin == 1) forces chainCarryForward > 0 ----
+			{
+				Rig neg(32);
+				ChainCpuProducer chainProd;
+				neg.reg = makeChainRegistry();
+				neg.consumers.clear();
+				neg.consumers.push_back(Consumer(1, { kP5MonitorTiles }));
+				neg.gs.renderAhead = 0;
+				neg.gs.laneLead = 1;
+				neg.gs.queueDepth = 2;
+				neg.lane.RegisterProducer(&neg.p1);
+				neg.lane.RegisterProducer(&chainProd);
+				neg.lane.RegisterCpuLiveCompute(kP1HalfLuma,
+					[](const Node&, const SourceFrameView* v, const std::array<const uint8_t*, kMaxInputs>&, uint8_t* dst, size_t n) {
+						return v != nullptr && VpLaneProducts::ComputeHalfLuma(*v, dst, n);
+					});
+				neg.lane.RegisterCpuLiveCompute(kP5MonitorTiles, chainLiveCompute);
+				neg.registered = true;
+				neg.Configure(LaneSettings::Mode::On, false, 0);
+				neg.lane.SetWorkersRunning(true);
+				const std::shared_ptr<LaneState> st = neg.lane.State();
+
+				// Frame 0 live-sealed as chain start.
+				neg.lane.OnSourceFrame(neg.View(0));
+				neg.lane.OnRenderStart(0, 4000);
+				neg.lane.OnFrameRetired(0, 0);
+
+				// Simulate old asyncMargin == 1: force runner to skip frame 1 (LastSealed()+1) and start at frame 2.
+				st->runner->SetSkipBefore(2);
+				neg.lane.OnSourceFrame(neg.View(1));
+				neg.lane.OnSourceFrame(neg.View(2));
+				for (int i = 0; i < 2000 && neg.lane.StepWorker(Backend::Cpu, 1000); ++i) {}
+				Assert::IsTrue(st->runner->Counters(kP5MonitorTiles).chainCarryForward.load() > 0,
+					L"negative control: skipping LastSealed()+1 breaks orderedChain and forces chainCarryForward > 0");
+				neg.lane.SetWorkersRunning(false);
+			}
+
+			// ---- 2. Protected Path: asyncMargin == 0 publishes consecutive frames 1..20 with 0 AncestryIncomplete & 0 chainCarryForward ----
+			{
+				Rig prot(32);
+				ChainCpuProducer chainProd;
+				prot.reg = makeChainRegistry();
+				prot.consumers.clear();
+				prot.consumers.push_back(Consumer(1, { kP5MonitorTiles }));
+				prot.gs.renderAhead = 0;
+				prot.gs.laneLead = 1;
+				prot.gs.queueDepth = 2;
+				prot.lane.RegisterProducer(&prot.p1);
+				prot.lane.RegisterProducer(&chainProd);
+				prot.lane.RegisterCpuLiveCompute(kP1HalfLuma,
+					[](const Node&, const SourceFrameView* v, const std::array<const uint8_t*, kMaxInputs>&, uint8_t* dst, size_t n) {
+						return v != nullptr && VpLaneProducts::ComputeHalfLuma(*v, dst, n);
+					});
+				prot.lane.RegisterCpuLiveCompute(kP5MonitorTiles, chainLiveCompute);
+				prot.registered = true;
+				prot.Configure(LaneSettings::Mode::On, false, 0);
+				prot.lane.SetWorkersRunning(true);
+				const std::shared_ptr<LaneState> st = prot.lane.State();
+				const size_t chIdx = size_t(st->IndexOf(kP5MonitorTiles));
+				Assert::IsTrue(st->table->NodeAt(chIdx).orderedChain, L"product node is orderedChain");
+
+				// Independent ground-truth accumulator across frames 0..20.
+				uint64_t expectedSum = 0;
+				std::vector<uint8_t> refP1(VpLaneProducts::HalfLumaBytes(Dims{ kW, kH }), 0);
+				auto accumulateRef = [&](uint64_t seq) {
+					Assert::IsTrue(VpLaneProducts::ComputeHalfLuma(prot.View(seq), refP1.data(), refP1.size()));
+					expectedSum += uint64_t(refP1[0]) + 1u;
+				};
+
+				// Bootstrap frame 0 via render live fill (no predecessor -1).
+				prot.lane.OnSourceFrame(prot.View(0));
+				prot.lane.OnRenderStart(0, 4000);
+				prot.lane.OnFrameRetired(0, 0);
+				accumulateRef(0);
+
+				// Consecutive frames 1..20: worker publishes every frame with render-valid lag-1 predecessor.
+				for (uint64_t s = 1; s <= 20; ++s) {
+					prot.lane.OnSourceFrame(prot.View(s));
+					for (int i = 0; i < 2000 && prot.lane.StepWorker(Backend::Cpu, 1000); ++i) {}
+					const std::vector<ProductFrameResult>& res = prot.lane.OnRenderStart(s, 4000);
+					const ProductFrameResult& cr = Rig::Res(res, kP5MonitorTiles);
+					Assert::IsTrue(cr.seal.outcome == SealOutcome::Sealed && cr.seal.reason == SealReason::Accepted,
+						L"consecutive orderedChain frame accepted without AncestryIncomplete or live fallback");
+					Assert::IsFalse(cr.liveFilled);
+					accumulateRef(s);
+					const AnalysisLane::ProductRead got = prot.lane.ReadOf(kP5MonitorTiles, s);
+					Assert::IsTrue(got.state == AnalysisLane::ProductRead::Ring && got.cpu != nullptr);
+					uint64_t gotSum = 0, gotReduced = 1;
+					std::memcpy(&gotSum, got.cpu, sizeof(gotSum));
+					std::memcpy(&gotReduced, got.cpu + 8, sizeof(gotReduced));
+					Assert::AreEqual(expectedSum, gotSum, L"chain accumulator matches independent ground truth");
+					Assert::AreEqual(uint64_t(0), gotReduced, L"no reduced carry-forward on consecutive frame");
+					prot.lane.OnFrameRetired(s, 0);
+				}
+
+				const SlotCounters& sc = st->table->At(chIdx).Counters();
+				Assert::AreEqual(uint64_t(20), st->runner->Counters(kP5MonitorTiles).published.load());
+				Assert::AreEqual(uint64_t(20), sc.sealed.load());
+				Assert::AreEqual(uint64_t(0), sc.invalid.load(), L"0 AncestryIncomplete / validation rejections");
+				Assert::AreEqual(uint64_t(0), sc.chainCarryForward.load(), L"0 SlotSet chainCarryForward");
+				Assert::AreEqual(uint64_t(0), st->runner->Counters(kP5MonitorTiles).chainCarryForward.load(),
+					L"0 LaneRunner chainCarryForward");
+				Assert::AreEqual(uint64_t(0), st->runner->Counters(kP5MonitorTiles).chainRefused.load());
+				prot.lane.SetWorkersRunning(false);
+			}
+		}
+
+		// FIX3-D2: OnFrameRetired(seq, fence) updates monotonic lastReleaseFence, and subsequent OnFrameDropped
+		// passes lastReleaseFence (never 0) into ReleaseThrough; negative control proves passing 0 leaks reuse
+		// before the GPU release fence completes.
+		TEST_METHOD(OnFrameDroppedPassesMonotonicLastReleaseFence)
+		{
+			Rig r(32);
+			r.consumers.clear();
+			ConsumerDecl lag1;
+			lag1.id = 1;
+			AddConsume(lag1, kP1HalfLuma, 1);   // history == 1: dropping frame N releases render-held frame N - 1
+			r.consumers.push_back(lag1);
+			r.gs.renderAhead = 0;
+			r.gs.laneLead = 1;
+			r.gs.queueDepth = 4;
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			const std::shared_ptr<LaneState> st = r.lane.State();
+			const size_t p1Idx = size_t(st->IndexOf(kP1HalfLuma));
+			Assert::AreEqual(1u, static_cast<unsigned>(st->table->NodeAt(p1Idx).history), L"lag-1 consumer gives P1 history == 1");
+			SlotSet& p1Set = st->table->At(p1Idx);
+			const uint64_t ring = p1Set.Ring();
+
+			// Render & retire frames 1 and 2 with releaseFenceValue = 77 -> lastReleaseFence = 77, frame 2 held.
+			r.lane.OnSourceFrame(r.View(1));
+			r.lane.OnRenderStart(1, 4000);
+			r.lane.OnFrameRetired(1, 77u);
+			r.lane.OnSourceFrame(r.View(2));
+			r.lane.OnRenderStart(2, 4000);
+			r.lane.OnFrameRetired(2, 77u);
+			Assert::IsTrue(ValidForRender(p1Set.StateOf(2)), L"frame 2 stays render-held for lag-1 history");
+
+			// Drop frame 3 (= nextExpectedRetire): releases frame 2 with lastReleaseFence (77, NOT 0).
+			r.lane.OnSourceFrame(r.View(3));
+			r.lane.OnFrameDropped(3);
+			Assert::IsTrue(p1Set.StateOf(2) == SlotState::Released, L"drop of frame 3 released history frame 2");
+			Assert::IsTrue(p1Set.Claim(2 + ring, Provenance::AheadLane, 76u, nullptr) == ClaimResult::ReleasePending,
+				L"frame 2 slot is gated by lastReleaseFence 77 (completed 76 -> ReleasePending)");
+
+			// Render & retire frame 4 with a LOWER fence (50 < 77) -> monotonic lastReleaseFence MUST stay 77.
+			r.lane.OnSourceFrame(r.View(4));
+			r.lane.OnRenderStart(4, 4000);
+			r.lane.OnFrameRetired(4, 50u);
+			r.lane.OnSourceFrame(r.View(5));
+			r.lane.OnFrameDropped(5);
+			Assert::IsTrue(p1Set.StateOf(4) == SlotState::Released, L"drop of frame 5 released history frame 4");
+			Assert::IsTrue(p1Set.Claim(4 + ring, Provenance::AheadLane, 76u, nullptr) == ClaimResult::ReleasePending,
+				L"monotonic lastReleaseFence stays 77 despite lower retire fence 50");
+			LaneTicket t2, t4;
+			Assert::IsTrue(p1Set.Claim(2 + ring, Provenance::AheadLane, 77u, &t2) == ClaimResult::Claimed,
+				L"once fence 77 completes, slot 2 is claimable");
+			Assert::IsTrue(p1Set.Claim(4 + ring, Provenance::AheadLane, 77u, &t4) == ClaimResult::Claimed,
+				L"once fence 77 completes, slot 4 is claimable");
+			Assert::IsTrue(p1Set.Abandon(t2) && p1Set.Abandon(t4));
+			Assert::AreEqual(uint64_t(0), p1Set.Counters().releaseThroughExactOrderErrors.load());
+			Assert::AreEqual(uint64_t(0), p1Set.Counters().orderErrors.load());
+
+			// In-test Negative Control: passing 0 instead of lastReleaseFence to ReleaseThrough allows immediate
+			// reuse BEFORE fence 77 completes (proving a 0-fence drop breaks release-fence safety).
+			{
+				SlotSet neg(kP1HalfLuma, uint16_t(ring), 4);
+				const auto acceptAll = [](const Header&) { return SealReason::Accepted; };
+				LaneTicket nt;
+				Assert::IsTrue(neg.Claim(2, Provenance::AheadLane, ~uint64_t(0), &nt) == ClaimResult::Claimed);
+				Assert::IsTrue(neg.StartWriting(nt));
+				Assert::IsTrue(neg.Publish(nt) == PublishResult::Published);
+				Assert::IsTrue(neg.Seal(2, acceptAll).outcome == SealOutcome::Sealed);
+				Assert::AreEqual(1u, neg.ReleaseThrough(2, 0u));   // unprotected naive 0-fence drop
+				LaneTicket premature;
+				Assert::IsTrue(neg.Claim(2 + ring, Provenance::AheadLane, 0u, &premature) == ClaimResult::Claimed,
+					L"negative control: naive 0-fence ReleaseThrough permits reuse at fence 0 before GPU fence 77 completes");
+				Assert::IsTrue(neg.Abandon(premature));
 			}
 		}
 	};
