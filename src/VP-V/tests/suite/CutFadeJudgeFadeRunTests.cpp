@@ -3,9 +3,9 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-// U7 unit version 3 (102b U7-MULTIFRAME-FADE-LAW; version 2 is U7-ACCURACY's cut law): the multi-frame fade law (CutFadeJudge::FadeRun / FoldFadeRun). Real P4 records
+// U7 unit version 4 (576-cell spatial affine fade law; version 3 is 102b U7-MULTIFRAME-FADE-LAW; version 2 is U7-ACCURACY's cut law): the multi-frame fade law (CutFadeJudge::FadeRun / FoldFadeRun). Real P4 records
 // (SourceStats::ComputeRecord) of a synthetic half plane: a horizontal ramp with a deterministic per-frame noise, scaled about black
-// (4096, 8-bit 16) by the fade gain. The pair law (ClassifyEvents) is unchanged and checked alongside. CPU only.
+// (4096, 8-bit 16) by the fade gain. The pair law (ClassifyEvents) is checked alongside. CPU only.
 
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
@@ -129,9 +129,9 @@ namespace CutFadeJudgeFadeRunTestsNs
 	TEST_CLASS(CutFadeJudgeFadeRunTests)
 	{
 	public:
-		TEST_METHOD(UnitVersionIsThree)
+		TEST_METHOD(UnitVersionIsFour)
 		{
-			Assert::AreEqual(3u, VpUnit::CutFadeJudge::kUnitVersion, L"the multi-frame fade law is a registered law change (3, after U7-ACCURACY's 2)");
+			Assert::AreEqual(4u, VpUnit::CutFadeJudge::kUnitVersion, L"the 576-cell spatial affine fade law is a registered law change (4, after v3 multi-frame fade and v2 T2 sequence law)");
 		}
 
 		// A 300-frame fade (0.25 % of gain per frame): the pair law finds none of it; the run finds it once the gain moved 2 %.
@@ -458,6 +458,167 @@ namespace CutFadeJudgeFadeRunTestsNs
 			Assert::AreEqual(0, Count(res, 1, size_t(pre)), L"no fade during pre-fade pure pan");
 			Assert::IsTrue(Count(res, size_t(pre), size_t(pre + nFade)) >= 44, L"pan + 48-frame fade-out must fire on >= 44/48 frames");
 			Assert::AreEqual(0, Count(res, size_t(pre + nFade), recs.size()), L"no fade during post-fade black hold");
+		}
+
+		// Item 2 (2417->2418->2419 shape): black hold -> 1-frame +3 code flat lift -> hard cut into bright or dim/moderate
+		// textured shot (including aMean < 24 codes) must stay a cut, never co-label as fade, and reset the run.
+		TEST_METHOD(AHardCutAfterOneFrameLiftFromBlackStaysACutAndResetsRun)
+		{
+			auto FlatLift = [](uint32_t k, double noiseScale) -> Record {
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const double v = kBlack + 3.0 * 256.0 + double(Noise(x, y, k)) * noiseScale;
+						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+					}
+				std::vector<uint8_t> buf(VpUnit::SourceStats::kRecordBytes);
+				Record r;
+				Assert::IsTrue(VpUnit::SourceStats::ComputeRecord(half.data(), kW, kH, buf.data(), buf.size()));
+				Assert::IsTrue(VpUnit::SourceStats::ReadRecord(buf.data(), buf.size(), &r));
+				return r;
+			};
+
+			// Test bright (0.8), dim (0.15: aMean ~13.5 < 24 codes), and moderate-dim (0.10: aMean ~8 < 24 & aSpread ~18 < 24 codes)
+			// across both spread <= 1 code (noiseScale 0.5) and spread ~1.5 codes with Flatness < kFlatF (noiseScale 1.0).
+			const double gains[] = { 0.8, 0.15, 0.10 };
+			const double liftNoiseScales[] = { 0.5, 1.0 };
+			for (double gain : gains)
+			{
+				for (double liftNoise : liftNoiseScales)
+				{
+					std::vector<Record> recs;
+					uint32_t k = 0;
+					for (int i = 0; i < 8; ++i)
+						recs.push_back(Black(k++));
+					recs.push_back(FlatLift(k++, liftNoise));   // index 8: 1-frame +3 code flat lift from black
+					for (int i = 0; i < 8; ++i)
+						recs.push_back(Picture(gain, k++));     // index 9: hard cut into textured shot
+
+					FadeRun run;
+					for (size_t i = 1; i < recs.size(); ++i)
+					{
+						const Events e = VpUnit::CutFadeJudge::ClassifyEvents(recs[i - 1], recs[i], false, false);
+						const bool runFade = VpUnit::CutFadeJudge::FoldFadeRun(recs[i - 1], recs[i], e, run);
+						if (i == 9)
+						{
+							Assert::IsTrue(e.cut, L"hard cut after 1-frame flat lift from black must be a cut");
+							Assert::IsFalse(e.fade, L"hard cut after 1-frame flat lift must not be a pair fade");
+							Assert::IsFalse(runFade, L"hard cut after 1-frame flat lift must not be co-labelled as a run fade");
+							Assert::AreEqual(0, run.direction, L"hard cut after 1-frame flat lift must reset run direction");
+							Assert::AreEqual(0u, run.pairs, L"hard cut after 1-frame flat lift must reset run pairs");
+						}
+						else
+						{
+							Assert::IsFalse(e.fade || runFade, L"static black, single flat lift, or static post-cut shot must not fade");
+						}
+					}
+				}
+			}
+		}
+
+		// Item 2 (2323->2324->2325 shape): genuine fade-out to black -> black hold -> hard cut into bright or dim shot
+		// must emit 0 fades during the black hold and stay a clean cut with reset run at the cut frame.
+		TEST_METHOD(AFadeOutThenBlackHoldThenHardCutIntoBrightShotStaysACut)
+		{
+			const int pre = 8, nOut = 48, holdBlack = 12, post = 8;
+			const double postGains[] = { 0.8, 0.15 };
+			const bool noisyBlackFlags[] = { false, true };
+			for (double postGain : postGains)
+			{
+				for (bool noisyBlack : noisyBlackFlags)
+				{
+					std::vector<Record> recs;
+					uint32_t k = 0;
+					for (int i = 0; i < pre; ++i)
+						recs.push_back(Picture(1.0, k++));
+					for (int i = 1; i <= nOut; ++i)
+						recs.push_back(i == nOut ? Black(k++, noisyBlack) : Picture(1.0 - double(i) / double(nOut), k++));
+					for (int i = 0; i < holdBlack; ++i)
+						recs.push_back(Black(k++, noisyBlack));
+					for (int i = 0; i < post; ++i)
+						recs.push_back(Picture(postGain, k++));
+
+					const size_t outBegin = size_t(pre);
+					const size_t outEnd = outBegin + size_t(nOut);
+					const size_t blackEnd = outEnd + size_t(holdBlack);
+
+					FadeRun run;
+					int fadeOutFades = 0, blackHoldFades = 0, postCutFades = 0;
+					for (size_t i = 1; i < recs.size(); ++i)
+					{
+						const Events e = VpUnit::CutFadeJudge::ClassifyEvents(recs[i - 1], recs[i], false, false);
+						const bool runFade = VpUnit::CutFadeJudge::FoldFadeRun(recs[i - 1], recs[i], e, run);
+						const bool isFade = e.fade || runFade;
+						if (i >= outBegin && i < outEnd)
+							fadeOutFades += isFade ? 1 : 0;
+						else if (i >= outEnd && i < blackEnd)
+							blackHoldFades += isFade ? 1 : 0;
+						else if (i == blackEnd)
+						{
+							Assert::IsTrue(e.cut, L"hard cut out of black hold after fade-out must be a cut");
+							Assert::IsFalse(e.fade, L"hard cut out of black hold must not be a pair fade");
+							Assert::IsFalse(runFade, L"hard cut out of black hold must not be a run fade");
+							Assert::AreEqual(0, run.direction, L"hard cut out of black hold must reset run direction");
+							Assert::AreEqual(0u, run.pairs, L"hard cut out of black hold must reset run pairs");
+						}
+						else if (i > blackEnd)
+							postCutFades += isFade ? 1 : 0;
+					}
+					Assert::IsTrue(fadeOutFades >= 45, L"genuine fade-out before black hold must be detected");
+					Assert::AreEqual(0, blackHoldFades, L"black hold after fade-out must emit 0 fades");
+					Assert::AreEqual(0, postCutFades, L"static post-cut shot must emit 0 fades");
+				}
+			}
+		}
+
+		// Item 1 (CutTracker fade-in-from-black veto): a genuine fast fade-in from flat black emits 0 T2 cuts,
+		// while a hard cut from flat black into a static shot still emits a T2 cut at the cut frame.
+		TEST_METHOD(CutTrackerVetoesFadeInFromBlackWhileKeepingHardCutFromBlack)
+		{
+			// 1. Fast 10-frame fade-in from flat black (frame 1 jumps past L >= kSpikeL and H > kHardH).
+			{
+				std::vector<Record> recs;
+				uint32_t k = 0;
+				for (int i = 0; i < 8; ++i)
+					recs.push_back(Black(k++));
+				for (int i = 1; i <= 10; ++i)
+					recs.push_back(Picture(double(i) / 10.0, k++));
+				for (int i = 0; i < 6; ++i)
+					recs.push_back(Picture(1.0, k++));
+
+				VpUnit::CutFadeJudge::CutTracker tracker;
+				int cuts = 0;
+				for (size_t i = 0; i < recs.size(); ++i)
+				{
+					const VpUnit::CutFadeJudge::CutVerdict v = tracker.Push(static_cast<uint64_t>(i) + 1, recs[i]);
+					if (v.known && v.cut)
+						++cuts;
+				}
+				Assert::AreEqual(0, cuts, L"genuine fast fade-in from flat black must emit 0 T2 cuts");
+			}
+
+			// 2. Hard cut from flat black into a static shot (both full brightness and dim) stays a T2 cut.
+			for (double gain : { 1.0, 0.25 })
+			{
+				std::vector<Record> recs;
+				uint32_t k = 0;
+				for (int i = 0; i < 8; ++i)
+					recs.push_back(Black(k++));
+				for (int i = 0; i < 8; ++i)
+					recs.push_back(Picture(gain, k++));
+
+				VpUnit::CutFadeJudge::CutTracker tracker;
+				std::vector<int> cutFrames;
+				for (size_t i = 0; i < recs.size(); ++i)
+				{
+					const VpUnit::CutFadeJudge::CutVerdict v = tracker.Push(static_cast<uint64_t>(i) + 1, recs[i]);
+					if (v.known && v.cut)
+						cutFrames.push_back(static_cast<int>(v.seq) - 1);
+				}
+				Assert::AreEqual(size_t(1), cutFrames.size(), L"hard cut from flat black into a static shot must emit exactly 1 T2 cut");
+				Assert::AreEqual(8, cutFrames[0], L"T2 cut must fire at the exact cut frame");
+			}
 		}
 	};
 }
