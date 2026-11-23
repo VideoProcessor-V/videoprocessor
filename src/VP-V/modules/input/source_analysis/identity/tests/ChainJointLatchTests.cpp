@@ -544,5 +544,220 @@ namespace Tests
 			Assert::IsTrue(oRel.event == JointLatchEvent::ReleasedAbr);
 			Assert::AreEqual(uint64_t(1), latch.Counters().releasesAbr);
 		}
+
+		TEST_METHOD(NanInputsAndNonPositiveC1RejectedVisiblyWithoutPoisoningState)
+		{
+			using namespace JointLatchFx;
+			const double nan = std::numeric_limits<double>::quiet_NaN();
+			ChainJointLatch latch(Enabled());
+
+			// HIGH-3: c1 <= 0 or NaN rejected visibly.
+			for (double badC1 : { 0.0, -5.0, nan })
+			{
+				JointLatchInput in = Joint1080(1, 5.0, 20.0);
+				in.c1 = badC1;
+				const auto o = latch.Step(in);
+				Assert::IsFalse(o.latched);
+				Assert::IsTrue(o.reason == JointLatchReason::InvalidInput);
+			}
+			Assert::AreEqual(uint64_t(3), latch.Counters().invalidInputs);
+
+			// HIGH-3: NaN in chainLlrY or currentShotCreditY must NEVER bypass std::min bar check!
+			{
+				JointLatchInput in = ChainOnly1080(5, 100.0, 3);
+				in.chainLlrY = nan;
+				Assert::IsFalse(latch.Step(in).latched);
+			}
+			{
+				JointLatchInput in = Joint1080(6, 5.0, 100.0);
+				in.currentShotCreditY = nan;
+				Assert::IsFalse(latch.Step(in).latched);
+			}
+
+			// HIGH-3: NaN in HarmonicCandidate creditY excluded from SelectFundamentalHarmonic.
+			{
+				std::vector<HarmonicCandidate> cands;
+				HarmonicCandidate bad;
+				bad.nx = 1920; bad.Nx = kRasterW; bad.ny = 1080; bad.Ny = kRasterH;
+				bad.creditX = 100.0; bad.creditY = nan;
+				cands.push_back(bad);
+				Assert::IsFalse(SelectFundamentalHarmonic(cands, kRasterW, kRasterH, 5.0).found);
+			}
+
+			// HIGH-3: NaN gainX while latched must NOT poison or reset accX_ to -need.
+			Assert::IsTrue(latch.Step(ChainOnly1080(10, kC1 + 1.0, 2)).latched);
+			{
+				JointLatchInput halfGain = BaseInput(11);
+				halfGain.gainX = 0.2 * kC1; halfGain.gainY = 0.2 * kC1;
+				halfGain.gainTimeX = 11 * 1000000; halfGain.gainTimeY = 11 * 1000000;
+				latch.Step(halfGain);
+
+				JointLatchInput nanGain = BaseInput(12);
+				nanGain.gainX = nan; nanGain.gainY = 0.0;
+				latch.Step(nanGain);
+				Assert::IsTrue(latch.Counters().invalidInputs >= 4);
+
+				// Another 0.1 * c1 brings total to 0.3 * c1 >= 0.25 * c1 => confirms cleanly (accX_ was preserved!).
+				JointLatchInput finish = BaseInput(13);
+				finish.gainX = 0.1 * kC1; finish.gainY = 0.1 * kC1;
+				finish.gainTimeX = 13 * 1000000; finish.gainTimeY = 13 * 1000000;
+				const auto oConf = latch.Step(finish);
+				Assert::IsTrue(oConf.confirmed);
+			}
+		}
+
+		TEST_METHOD(H3HardBoundEnforces180sUnder5sLatchedCadenceAndEvalGap)
+		{
+			using namespace JointLatchFx;
+
+			// HIGH-5a: 5 s latched cadence offset so bound triggers at t = 123 s -> MUST still release at t = 180 s (not 183 s!).
+			{
+				ChainJointLatch latch(Enabled());
+				Assert::IsTrue(latch.Step(ChainOnly1080(0, kC1 + 1.0, 2)).latched);
+				int64_t releasedAtSec = -1;
+				for (int s = 3; s <= 185; s += 5)
+				{
+					// Include t = 180 explicitly in the cadence schedule (e.g. next eval at 180 s).
+					const int tSec = (s == 183) ? 180 : s;
+					JointLatchInput in = BaseInput(tSec);
+					in.classicalValid = true;
+					in.classicalNx = 1920; in.classicalNxDenom = kRasterW;
+					in.classicalNy = 1080; in.classicalNyDenom = kRasterH;
+					const auto o = latch.Step(in);
+					if (!o.latched)
+					{
+						releasedAtSec = tSec;
+						Assert::IsTrue(o.event == JointLatchEvent::ReleasedCeiling);
+						break;
+					}
+				}
+				Assert::AreEqual(int64_t(180), releasedAtSec);
+			}
+
+			// HIGH-5b: Eval gap from 118 s -> 185 s releases IMMEDIATELY on the 185 s eval (not deferred to 245 s!).
+			{
+				ChainJointLatch latch(Enabled());
+				Assert::IsTrue(latch.Step(ChainOnly1080(0, kC1 + 1.0, 2)).latched);
+				Assert::IsTrue(latch.Step(BaseInput(118)).latched);
+				const auto oGap = latch.Step(BaseInput(185));
+				Assert::IsFalse(oGap.latched);
+				Assert::IsTrue(oGap.event == JointLatchEvent::ReleasedCeiling);
+			}
+		}
+
+		TEST_METHOD(R1DetailAboveSubHarmonicWithHigherCreditNeverBeatsCleanSuperHarmonic)
+		{
+			using namespace JointLatchFx;
+			// MEDIUM-3: 540p has HIGHER credit (20.0) than 1080p (12.0), but 540p has detailAbove == true!
+			// 540p MUST NOT beat clean 1080p.
+			std::vector<HarmonicCandidate> cands;
+			HarmonicCandidate c540;
+			c540.nx = 960; c540.Nx = kRasterW; c540.ny = 540; c540.Ny = kRasterH;
+			c540.creditX = 20.0; c540.creditY = 20.0;
+			c540.classicalRollOffConfirmed = true;
+			c540.detailAbove = true;
+
+			HarmonicCandidate c1080;
+			c1080.nx = 1920; c1080.Nx = kRasterW; c1080.ny = 1080; c1080.Ny = kRasterH;
+			c1080.creditX = 12.0; c1080.creditY = 12.0;
+			c1080.classicalRollOffConfirmed = true;
+			c1080.detailAbove = false;
+
+			cands.push_back(c540);
+			cands.push_back(c1080);
+
+			const auto res = SelectFundamentalHarmonic(cands, kRasterW, kRasterH, 7.5);
+			Assert::IsTrue(res.found);
+			Assert::AreEqual(1920, res.nx);
+			Assert::AreEqual(1080, res.ny);
+			Assert::IsTrue(res.reason == HarmonicSelectionReason::RejectedSubHarmonicDetailAbove);
+
+			// When ALL candidates have detailAbove == true, none is selected.
+			cands[1].detailAbove = true;
+			const auto allDirty = SelectFundamentalHarmonic(cands, kRasterW, kRasterH, 7.5);
+			Assert::IsFalse(allDirty.found);
+			Assert::IsTrue(allDirty.reason == HarmonicSelectionReason::RejectedSubHarmonicDetailAbove);
+		}
+
+		TEST_METHOD(G2RejectsStaleAndFutureCreditAtHardBound)
+		{
+			using namespace JointLatchFx;
+			// MEDIUM-4: stale credit from t = 1 s (119 s old) or future credit (t = 130 s) must NOT renew G2 at t = 120 s!
+			for (int64_t badCreditSec : { int64_t(1), int64_t(60), int64_t(130) })
+			{
+				ChainJointLatch g2(Enabled(JointHoldPolicy::G2_JointOncePerBound));
+				g2.Step(ChainOnly1080(0, kC1 + 1.0, 2));
+				for (int s = 1; s < 120; ++s)
+				{
+					JointLatchInput in = BaseInput(s);
+					in.classicalValid = true;
+					in.classicalNx = 1920; in.classicalNxDenom = kRasterW;
+					in.classicalNy = 1080; in.classicalNyDenom = kRasterH;
+					g2.Step(in);
+				}
+				const auto o = g2.Step(Joint1080(120, 4.0, kC1, badCreditSec));
+				Assert::IsFalse(o.g2Renewed);
+				Assert::IsTrue(o.deferredNow);
+				Assert::AreEqual(uint64_t(0), g2.Counters().g2JointRenewals);
+			}
+		}
+
+		TEST_METHOD(PendingStepMarkBlocksMoveWhileLatchedAndDetailAboveNeverPausesClock)
+		{
+			using namespace JointLatchFx;
+			ChainJointLatch latch(Enabled());
+
+			// LOW-5: unlatched menuHold with no classical reading reports MenuHoldActive (not ClassicalVoided).
+			{
+				JointLatchInput m = BaseInput(0);
+				m.menuHold = true;
+				const auto om = latch.Step(m);
+				Assert::IsTrue(om.reason == JointLatchReason::MenuHoldActive);
+				Assert::IsFalse(om.classicalVoided);
+			}
+
+			// Enter at 1920x1080.
+			Assert::IsTrue(latch.Step(ChainOnly1080(1, kC1 + 1.0, 2)).latched);
+
+			// LOW-5: frame with BOTH classicalValid agreeing AND classicalDetailAbove must NOT pause starvation clock!
+			{
+				JointLatchInput contradiction = BaseInput(2);
+				contradiction.classicalValid = true;
+				contradiction.classicalNx = 1920; contradiction.classicalNxDenom = kRasterW;
+				contradiction.classicalNy = 1080; contradiction.classicalNyDenom = kRasterH;
+				contradiction.classicalDetailAbove = true;
+				latch.Step(contradiction);
+				Assert::AreEqual(uint64_t(0), latch.Counters().classicalHoldPauses);
+				Assert::IsTrue(latch.ReleaseClockSec() > 0.0);
+			}
+
+			// LOW-6: while latched at 1920x1080, stepMarkPending == true blocks MOVE to 1280x720!
+			{
+				JointLatchInput mv = BaseInput(5);
+				mv.stepMarkPending = true;
+				mv.haveChainPair = true;
+				mv.chainNx = 1280; mv.chainNxDenom = kRasterW;
+				mv.chainNy = 720; mv.chainNyDenom = kRasterH;
+				mv.chainLlrX = 2.0 * kC1; mv.chainLlrY = 2.0 * kC1;
+				mv.chainShots = 3;
+				const auto oBlk = latch.Step(mv);
+				Assert::IsTrue(oBlk.latched);
+				Assert::AreEqual(1920, oBlk.nx);
+				Assert::IsTrue(oBlk.heldBack);
+				Assert::IsTrue(oBlk.reason == JointLatchReason::BlockedByStepMark);
+				Assert::AreEqual(uint64_t(0), latch.Counters().moves);
+				Assert::AreEqual(uint64_t(1), latch.Counters().blockedByStepMark);
+
+				// Once pending mark clears, MOVE succeeds!
+				mv.timeUs = 6 * 1000000;
+				mv.stepMarkPending = false;
+				const auto oMv = latch.Step(mv);
+				Assert::IsTrue(oMv.latched);
+				Assert::IsTrue(oMv.event == JointLatchEvent::Moved);
+				Assert::AreEqual(1280, oMv.nx);
+				Assert::AreEqual(720, oMv.ny);
+				Assert::AreEqual(uint64_t(1), latch.Counters().moves);
+			}
+		}
 	};
 }

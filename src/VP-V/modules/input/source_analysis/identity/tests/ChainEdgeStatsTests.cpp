@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // Proving synthetic-physics unit tests for ChainEdgeStats (SID Stage S1, EXP-8BIT MUST-1/2, SHOULD-1/2/3, Pitfall #1).
-// CPU only, synthetic only, deterministic (fixed xorshift64* PRNG, zero randomness).
+// CPU only, synthetic only, deterministic (fixed SplitMix64 PRNG, zero randomness).
 #include "pch.h"
 #include "CppUnitTest.h"
 
@@ -450,6 +450,91 @@ namespace Tests
 			const auto r2 = EstimateEmpiricalFloor(ls, 4.0, s);
 			Assert::AreEqual(r1.floorCodes, r2.floorCodes);
 			Assert::AreEqual(r1.empiricalRawCodes, r2.empiricalRawCodes);
+		}
+
+		TEST_METHOD(AuditRegressionsBoundsNanCombFlatNativeAndZeroPhaseEnergy)
+		{
+			using namespace EdgeStatsFx;
+			const EdgeStatsSettings s = Enabled();
+			const double nan = std::numeric_limits<double>::quiet_NaN();
+
+			// HIGH-4 + LOW-8: NaN ratio / refDetailDecades / detailMarginDecades cleanly rejected (no UB).
+			{
+				std::vector<double> bins(129, 2.0);
+				Assert::IsFalse(ComputeDitherAwareDetailAboveSpectrum(bins, nan, 1.0, s).valid);
+				Assert::IsTrue(ComputeDitherAwareDetailAboveSpectrum(bins, nan, 1.0, s).reason == EdgeStatsReason::InvalidInput);
+				Assert::IsFalse(ComputeDitherAwareDetailAbove(10.0, 5.0, 1.0, s, nan, 0.07).valid);
+				Assert::IsFalse(ComputeDitherAwareDetailAbove(10.0, 5.0, 1.0, s, 0.0, nan).valid);
+			}
+
+			// MEDIUM-1: undersized lines.data rejected cleanly without OOB read.
+			{
+				LineSet bad;
+				bad.count = 4;
+				bad.length = 512;
+				bad.data.assign(10, 500.0); // intentionally undersized!
+				const auto res = EstimateEmpiricalFloor(bad, 4.0, s);
+				Assert::IsFalse(res.valid);
+				Assert::IsTrue(res.reason == EdgeStatsReason::InvalidInput);
+			}
+
+			// MEDIUM-5: flat native 4K (no 1/2 dip, no odd k/8 comb) => NoHalfNotch (NEVER CombGridDetected!).
+			{
+				const auto flatNat = ClassifyHalfNotchWithCombCheck(1920, 3840, -0.005, true, 0.0, -0.004, 0.002, s);
+				Assert::AreEqual(kClassK8, flatNat.resolvedNullClass);
+				Assert::IsFalse(flatNat.isCodecGridComb);
+				Assert::IsFalse(flatNat.isIsolatedHalfNotch);
+				Assert::IsTrue(flatNat.reason == EdgeStatsReason::NoHalfNotch);
+
+				// Undominated single odd comb dip (3/8 active, 1/2 weak) => isCodecGridComb == true, CombGridDetected.
+				const auto weakOdd = ClassifyHalfNotchWithCombCheck(1920, 3840, -0.05, true, -0.06, 0.0, 0.0, s);
+				Assert::AreEqual(kClassK8, weakOdd.resolvedNullClass);
+				Assert::IsTrue(weakOdd.isCodecGridComb);
+				Assert::IsTrue(weakOdd.reason == EdgeStatsReason::CombGridDetected);
+			}
+
+			// LOW-1: 1/16 block harmonic + +-1 Hann side-lobes excluded in ComputeDitherAwareDetailAboveSpectrum.
+			{
+				// n = 256 (bins = 129), period = n / 16 = 16; above band for ratio=0.5 is [74..98].
+				// Bin 80 (5/16) and side-lobes 79, 81 plus bin 96 (6/16) and 95, 97 are block harmonics!
+				std::vector<double> bins(129, 1.2);
+				for (int k = 1; k <= 64; ++k) bins[static_cast<size_t>(k)] = 8.0;
+				bins[79] = 1e6; bins[80] = 1e6; bins[81] = 1e6;
+				bins[95] = 1e6; bins[96] = 1e6; bins[97] = 1e6;
+				const auto r = ComputeDitherAwareDetailAboveSpectrum(bins, 0.5, 1.0, s);
+				Assert::IsTrue(r.valid);
+				Assert::IsTrue(r.aboveIsNoiseFloor);
+				Assert::IsFalse(r.hasRealDetailAbove);
+			}
+
+			// LOW-2: overflow in ComputeExcessVarianceDip returns InvalidInput (never Ok).
+			{
+				const auto ov = ComputeExcessVarianceDip(1e200, 1e200, 1.0, s);
+				Assert::IsFalse(ov.valid);
+				Assert::IsTrue(ov.reason == EdgeStatsReason::InvalidInput);
+			}
+
+			// LOW-3: NaN in line[i+1] is NOT masked by std::max in BuildEdgeGateMask / ComputeGradientMaskedHuberRms.
+			{
+				std::vector<double> line(16, 500.0);
+				std::vector<double> res(16, 1.0);
+				line[5] = 600.0; // sharp step at 5
+				line[6] = nan;   // poisons gR at i=5 and gL at i=6!
+				std::vector<uint8_t> mask;
+				const auto gate = BuildEdgeGateMask(line.data(), 16, 1.0, mask, s);
+				Assert::AreEqual(uint8_t(0), mask[5]);
+				Assert::AreEqual(uint8_t(0), mask[6]);
+				(void)gate;
+			}
+
+			// LOW-4: constant zero-curvature line returns ZeroPhaseEnergy with valid == false and ratio == 1.0.
+			{
+				std::vector<double> flat(32, 512.0);
+				const auto pc = ComputePhaseSecondDiffContrast(flat.data(), 32, 2, nullptr, s);
+				Assert::IsFalse(pc.valid);
+				Assert::AreEqual(1.0, pc.phaseContrastRatio);
+				Assert::IsTrue(pc.reason == EdgeStatsReason::ZeroPhaseEnergy);
+			}
 		}
 	};
 }

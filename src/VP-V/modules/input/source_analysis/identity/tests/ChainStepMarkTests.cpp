@@ -383,5 +383,93 @@ namespace Tests
 			Assert::IsFalse(sm.IsPending());
 			Assert::AreEqual(uint64_t(1), sm.Counters().resetsBackwardTime);
 		}
+
+		TEST_METHOD(SteadyNativeStreamWithChainSeesNativeNeverFalselyConfirmsAbrMark)
+		{
+			using namespace StepMarkFx;
+			// HIGH-1 regression: steady native stream (!ctx.latched) with chainSeesNative == true MUST cancel
+			// unconfirmed after confirmWindowEvals rather than falsely confirming every ABR mark.
+			ChainStepMark sm(Enabled());
+			StepMarkLatchContext unlatched;
+
+			sm.OnAbrStep(10 * 1000000, -0.20);
+			const auto o1 = sm.OnChainEvaluation(EvalRec(11, 1, 0, 0, 0.0, false, true), unlatched);
+			Assert::IsTrue(sm.IsPending());
+			Assert::IsTrue(o1.action == StepMarkAction::None);
+
+			const auto o2 = sm.OnChainEvaluation(EvalRec(12, 2, 0, 0, 0.0, false, true), unlatched);
+			Assert::IsTrue(o2.action == StepMarkAction::CancelAndMergeBucket);
+			Assert::IsTrue(o2.reason == StepMarkReason::UnconfirmedTimeout);
+			Assert::AreEqual(uint64_t(0), sm.Counters().confirmedByChain);
+			Assert::AreEqual(uint64_t(1), sm.Counters().unconfirmedTimeouts);
+		}
+
+		TEST_METHOD(SpuriousAbrMarkDuringActiveChallengePreservesAndResumesChallenge)
+		{
+			using namespace StepMarkFx;
+			// HIGH-2 regression: spurious OnAbrStep during Challenging must NOT wipe or reset the active challenge;
+			// when the spurious mark times out unconfirmed, the original challenge resumes with its original deadline.
+			ChainStepMark sm(Enabled());
+			const StepMarkLatchContext ctx = Latched1080();
+
+			sm.OnAbrStep(10 * 1000000, -0.25);
+			const auto oConf = sm.OnChainEvaluation(EvalRec(11, 1, 960, 540, 2.0, true), ctx);
+			Assert::IsTrue(oConf.action == StepMarkAction::ConfirmVoidAndChallenge);
+			Assert::IsTrue(sm.IsChallenging());
+
+			// Spurious ABR mark interrupts at t = 12 s.
+			const auto oSpur = sm.OnAbrStep(12 * 1000000, 0.15);
+			Assert::IsTrue(oSpur.action == StepMarkAction::MarkPending);
+			Assert::IsTrue(sm.IsPending());
+
+			// Two non-contradicting evals at t = 13 s, 14 s -> cancels spurious mark & resumes original challenge!
+			sm.OnChainEvaluation(EvalRec(13, 2, 1920, 1080, 1.0, false), ctx);
+			const auto oResume = sm.OnChainEvaluation(EvalRec(14, 3, 1920, 1080, 1.0, false), ctx);
+			Assert::IsTrue(oResume.action == StepMarkAction::CancelAndMergeBucket);
+			Assert::IsTrue(oResume.state == StepMarkState::Challenging);
+			Assert::IsTrue(sm.IsChallenging());
+			Assert::AreEqual(uint64_t(1), sm.Counters().challengesResumedAfterUnconfirmed);
+
+			// Because original challengeStartUs_ (11 s) was preserved, at t = 15 s (elapsed 4 s >= 3 s) it consumes
+			// its 1 extra eval and releases on t = 16 s!
+			const auto oExtra = sm.OnChainEvaluation(EvalRec(15, 4, 960, 540, 1.0, false), ctx);
+			Assert::IsTrue(oExtra.action == StepMarkAction::None);
+			Assert::IsTrue(sm.IsChallenging());
+			const auto oRel = sm.OnChainEvaluation(EvalRec(16, 5, 960, 540, 1.0, false), ctx);
+			Assert::IsTrue(oRel.action == StepMarkAction::ChallengeExpiredRelease);
+			Assert::AreEqual(uint64_t(1), sm.Counters().challengeReleases);
+		}
+
+		TEST_METHOD(VoidedFrameResetsClassicalStreakAndUnlatchedSteady1080pDoesNotSelfVoid)
+		{
+			using namespace StepMarkFx;
+			// MEDIUM-2a: a voided classical frame between two valid frames resets the consecutive streak.
+			{
+				ChainStepMark sm(Enabled());
+				const StepMarkLatchContext ctx = Latched540();
+				sm.OnAbrStep(10 * 1000000, 0.25);
+
+				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(11, 1920, 1080), ctx).action == StepMarkAction::None);
+				// Voided frame breaks streak!
+				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(12, 1920, 1080, true, true), ctx).action == StepMarkAction::None);
+				// Next single valid frame must be streak == 1 (NOT confirm yet).
+				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(13, 1920, 1080), ctx).action == StepMarkAction::None);
+				Assert::IsTrue(sm.IsPending());
+				// Second consecutive valid frame confirms!
+				const auto oConf = sm.OnClassicalFrame(ClassicalFrame(14, 1920, 1080), ctx);
+				Assert::IsTrue(oConf.action == StepMarkAction::ConfirmVoidAndRelease);
+			}
+
+			// MEDIUM-2b: unlatched acquiring steady 1080p stream does NOT self-void on false ABR mark.
+			{
+				ChainStepMark sm(Enabled());
+				StepMarkLatchContext unlatched; // no latched pair
+				sm.OnAbrStep(20 * 1000000, 0.20);
+				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(21, 1920, 1080), unlatched).action == StepMarkAction::None);
+				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(22, 1920, 1080), unlatched).action == StepMarkAction::None);
+				Assert::IsTrue(sm.IsPending());
+				Assert::AreEqual(uint64_t(0), sm.Counters().confirmedByClassical);
+			}
+		}
 	};
 }
