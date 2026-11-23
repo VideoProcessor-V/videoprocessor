@@ -1,6 +1,7 @@
 #pragma once
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscale.h>
 #include <VP-V/modules/scaling/output/PicturePrecision.h>
@@ -27,6 +28,9 @@ namespace AdaptiveDownscaleStage
 {
 	// The de-judder outputs for this source frame (host: DejudderLiveFieldFor(sequence) &&
 	// !VpPhaseDrawn(renderImage); the textures only when live).
+	// CF-2 switch-over: motion stays on this read (the ExternalView of P3) until P3 has a GPU Acquire publication: at this tip
+	// kP3AnalysisField has no dispatcher texture set and no owner fill (SkeletonModule::gpuHandleOf answers NoGpuHandle), and
+	// frameTrust / grainError are in no product. The switch is an Acquire in Register when that lands.
 	struct MotionSource
 	{
 		bool live = false;
@@ -81,7 +85,45 @@ namespace AdaptiveDownscaleStage
 		// Stage 8b one-axis: true for a LUMA prescaler hook (customHooks.IsPrescalerHook); null =
 		// none known (a doubler then stays in the list; the blend is still faithful-only).
 		std::function<bool(const pl_hook*)> isPrescaler;
+		// CF-2 B1 ruling (a): the skeleton Acquire of a published product for this frame (id, sequence, variant; GPU form). Null =
+		// the production path (the current frame's skeleton memo, Vpv::Skeleton::CurrentFrameMemo); tests count the asks.
+		std::function<VpSkeleton::AcquireResult(VpSkeleton::ProductId, uint64_t, const VpSkeleton::VariantKey&)> acquire;
 	};
+
+	// CF-2 switch-over: the grain term's seam (kP10gGrainLevel, one Acquire per upscale frame). Published = the module reads it;
+	// anything else = grain_floor (the alias-safe lean) with the cause, on the status and the catalog. The edge term is the
+	// module's own kEdgeMap reader (CB-18 S18: the measure acquires the stage variant; EdgeMapStatus). Pure data (tests).
+	struct TermSource
+	{
+		bool published = false;
+		std::string cause;   // why the product was not read (empty when published)
+	};
+
+	// CF-2 B1 (N1.4): why the vectors of this source frame are not usable by the upscale form's motion term (nullptr = usable):
+	// motion off, NLS, no live estimate, a drop (a sequence gap) or a resync (the sequence went back). A repeat of the last
+	// sequence keeps the first presentation's verdict (the caller). Pure (tests).
+	const char* MotionDiscontinuity(bool vectorsRun, bool nls, bool live, bool haveLast, uint64_t lastSequence, uint64_t sequence);
+
+	// CF-2 FIX1 (gate M1, S2): the inputs of the upscale form's "output scaling" entry for one frame.
+	struct UpscaleFallbackInputs
+	{
+		bool requested = false;
+		bool failureHeld = false;
+		std::string scalerError;
+		bool motionAdaptiveOn = false;
+		bool oneAxis = false;
+		std::string stageMotionCause;    // the stage's discontinuity verdict (empty: the vectors are usable)
+		bool moduleFloorUsed = false;    // the module leaned on the motion floor on its own (no usable factor map)
+		std::string moduleFloorCause;
+		bool cutAvailable = true;
+		std::string cutCause;
+		std::string grainCause;          // kP10gGrainLevel not read this frame (grain_floor); empty when read or one-axis
+	};
+
+	// The upscale form's one "output scaling" decision (the host engages one per frame, CoreSegments): a GPU failure first,
+	// then the motion floor (the stage's verdict, or the module's own floor with its cause: gate M1), then no cut verdict,
+	// then the grain floor (kP10gGrainLevel not read: Config status and the notice, not only Ctrl+I). Pure (Fallback(), tests).
+	FallbackCatalog::Decision UpscaleScalingFallback(const UpscaleFallbackInputs& in);
 
 	// Host members other host code still reads (status line, the de-judder's grain-map request).
 	struct SharedState
@@ -146,6 +188,24 @@ namespace AdaptiveDownscaleStage
 		static constexpr unsigned long long kFailureHoldMs = 5000;
 		FallbackCatalog::Decision Fallback() const
 		{
+			// CF-2 B1 / FIX1: the upscale form's own entry (the alias-safe ScalerPass failed: the main scaler alone; no vectors,
+			// by the stage's verdict or the module's own floor: the floor; no cut verdict; no grain level: the grain floor).
+			if (upscaleThisFrame)
+			{
+				UpscaleFallbackInputs in;
+				in.requested = requested;
+				in.failureHeld = failureHeld;
+				in.scalerError = module.ScalerError();
+				in.motionAdaptiveOn = motionAdaptiveOn;
+				in.oneAxis = oneAxisThisFrame;
+				in.stageMotionCause = upscaleMotionCause;
+				in.moduleFloorUsed = module.MotionFloorUsed();
+				in.moduleFloorCause = module.MotionFloorCauseText();
+				in.cutAvailable = module.CutAvailable();
+				in.cutCause = in.cutAvailable ? std::string() : module.CutCause();
+				in.grainCause = oneAxisThisFrame || grainTerm.published ? std::string() : grainTerm.cause;
+				return UpscaleScalingFallback(in);
+			}
 			const FallbackCatalog::Decision base = FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
 			// FIX-X5-CUT-P4 / C5: no scene group (the skeleton's scene product) for this frame: no cut verdict this frame (also on StatusLines()).
 			if (!base.engaged && requested && !module.CutAvailable())
@@ -162,6 +222,9 @@ namespace AdaptiveDownscaleStage
 		// (classical weights, byte-identical, no status line). Once the engine is requested and a product is absent, the classical
 		// bitrate-quality weights stand in VISIBLY: the "product.adaptive_downscale" decision is engaged and StatusLines() carries its line.
 		const TdProducts::ReadResult& TemporalDetailRead() const { return tdRead; }
+		// CF-2 B1: this frame's grain seam and the upscale motion verdict (status, tests).
+		const TermSource& GrainTerm() const { return grainTerm; }
+		const std::string& UpscaleMotionCause() const { return upscaleMotionCause; }
 		FallbackCatalog::Decision TemporalDetailFallback() const { return tdRead.fallback; }
 
 		// X5-GRAIN-P10 (gate cb-u1 r1 SHOULD 6): the host offers the shared grain products (Host::grainSource) but the scaler
@@ -208,5 +271,9 @@ namespace AdaptiveDownscaleStage
 		bool failureHeld = false;          // a failure within kFailureHoldMs
 		TdProducts::ReadResult tdRead;     // the temporal-detail read path of the frame just registered (nothing used in reset 1)
 		bool grainOffered = false;         // X5-GRAIN-P10: the host offered the shared grain products on the frame just registered
+		TermSource grainTerm;              // CF-2 B1: this frame's grain seam (kP10gGrainLevel)
+		std::string upscaleMotionCause;    // ... why the upscale motion term is floored (empty: vectors usable)
+		bool haveMotionSequence = false;   // the last upscale frame's sequence (drop / resync / repeat)
+		uint64_t motionSequenceSeen = 0;
 	};
 }

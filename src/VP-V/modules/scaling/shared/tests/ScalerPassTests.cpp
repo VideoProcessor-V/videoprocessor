@@ -12,9 +12,11 @@
 
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
 #include <VP-V/modules/scaling/rebase/SourceRebase.h>
+#include <VP-V/modules/scaling/chroma_upscale/ChromaCfl.h>
 #include <VP-V/modules/scaling/shared/KernelTable.h>
 #include <VP-V/modules/scaling/shared/ScalerGeometry.h>
 #include <VP-V/modules/scaling/shared/ScalerPass.h>
+#include <VP-V/modules/scaling/shared/ScalerPassFixed.h>
 #include <VP-V/modules/scaling/shared/ScalerReference.h>
 
 #include <libplacebo/d3d11.h>
@@ -102,6 +104,26 @@ namespace ScalerPassTestsNs
 			Assert::IsTrue(ScalerKernels::Find("hermite") >= 0);
 			Assert::IsTrue(ScalerKernels::IsPolar(t[static_cast<size_t>(ScalerKernels::Find("ewa_lanczossharp"))].spec.kind));
 			Assert::AreEqual(-1, ScalerKernels::Find("no such kernel"));
+		}
+
+		TEST_METHOD(ScalerCatmullRomTapWeightsSharedWithChromaCfl)
+		{
+			for (int i = 0; i <= 16; ++i)
+			{
+				const double t = i / 16.0;
+				double a[4], b[4];
+				ScalerKernels::CatmullRomTapWeights(t, a);
+				ChromaUpscale::CatmullRomWeights(t, b);
+				double sum = 0.0;
+				for (int k = 0; k < 4; ++k)
+				{
+					Assert::IsTrue(a[k] == b[k], L"chroma CfL weights are the shared table weights (bit for bit)");
+					sum += a[k];
+					const double viaKernel = ScalerKernels::Cubic(0.0, 0.5, std::fabs(t - (k - 1)));
+					Assert::IsTrue(std::fabs(a[k] - viaKernel) < 1e-12, L"tap weight equals Cubic(0,0.5) at its distance");
+				}
+				Assert::IsTrue(std::fabs(sum - 1.0) < 1e-12, L"Catmull-Rom taps sum to one");
+			}
 		}
 
 		TEST_METHOD(ScalerGeometryDerivesRatiosPerAxis)
@@ -192,6 +214,181 @@ namespace ScalerPassTestsNs
 			const Image a = ScalerReference::Resample(im, 70, 50, Lanczos(4));
 			const Image b = ScalerReference::Resample(im, 70, 50, Lanczos(4));
 			Assert::IsTrue(a.v == b.v);
+		}
+
+		// ---- CF-2 B5a-2 step 2: the Q14 fixed-point mode (ScalerPassFixed.h) --------------------------------------------------
+		// GPU rows the W4 build must prove: BasicChromaGpuTests' CPU == GPU byte comparison (unchanged) now runs the GLSL this
+		// mode generates ("BC" prefix); the text equality to the pre-step-2 GLSL was checked by emulation at authoring time.
+
+		// The pre-step-2 BasicChroma loops, written out independently (6 taps a = 3, int32 horizontal intermediate unclamped, the
+		// container clamp at the end), as the reference the shared mode must reproduce exactly.
+		// Gate CF2 S3: the phase tables here come from F::BuildPhaseTable, so this reference is independent for the integer
+		// loops only. The tables' independence rests on BasicChromaTests PhaseTablesFromTheSharedKernelTableEqualTheLegacyQ14Tables
+		// (the kept private Lanczos(d) against the shared KernelTable).
+		static std::vector<uint16_t> LegacyQ14(const std::vector<uint16_t>& c, const ScalerPass::FixedQ14::Axis& ax,
+			const ScalerPass::FixedQ14::Axis& ay)
+		{
+			namespace F = ScalerPass::FixedQ14;
+			const F::PhaseTable tx = F::BuildPhaseTable(Lanczos(3), ax.factor), ty = F::BuildPhaseTable(Lanczos(3), ay.factor);
+			const int W = ax.out, H = ay.out, cw = ax.in, ch = ay.in;
+			std::vector<int> hrow(static_cast<size_t>(W) * ch);
+			for (int x = 0; x < W; ++x)
+			{
+				const int n = 4 * x + 2 - ax.s4 - 2 * ax.factor, den = 4 * ax.factor;
+				const int i0 = static_cast<int>(std::floor(static_cast<double>(n) / den)), ph = n - i0 * den;
+				int lo, hi;
+				if (x >= ax.L && x < ax.R) { lo = ax.cL; hi = ax.cR - 1; }
+				else if (x < ax.L) { lo = 0; hi = (std::max)(ax.cL - 1, 0); }
+				else { lo = (std::min)(ax.cR, cw - 1); hi = cw - 1; }
+				for (int y = 0; y < ch; ++y)
+				{
+					int acc = 0;
+					for (int k = 0; k < 6; ++k)
+						acc += static_cast<int>(c[static_cast<size_t>(y) * cw + (std::min)((std::max)(i0 - 2 + k, lo), hi)]) * tx.w[ph][k];
+					hrow[static_cast<size_t>(y) * W + x] = (acc + 8192) >> 14;
+				}
+			}
+			std::vector<uint16_t> out(static_cast<size_t>(W) * H);
+			for (int y = 0; y < H; ++y)
+			{
+				const int n = 4 * y + 2 - ay.s4 - 2 * ay.factor, den = 4 * ay.factor;
+				const int j0 = static_cast<int>(std::floor(static_cast<double>(n) / den)), ph = n - j0 * den;
+				int lo, hi;
+				if (y >= ay.L && y < ay.R) { lo = ay.cL; hi = ay.cR - 1; }
+				else if (y < ay.L) { lo = 0; hi = (std::max)(ay.cL - 1, 0); }
+				else { lo = (std::min)(ay.cR, ch - 1); hi = ch - 1; }
+				for (int x = 0; x < W; ++x)
+				{
+					int acc = 0;
+					for (int k = 0; k < 6; ++k)
+						acc += hrow[static_cast<size_t>((std::min)((std::max)(j0 - 2 + k, lo), hi)) * W + x] * ty.w[ph][k];
+					out[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>((std::min)((std::max)((acc + 8192) >> 14, 0), 65535));
+				}
+			}
+			return out;
+		}
+
+		static ScalerPass::FixedQ14::Axis FixedAxis(int out, int factor, int s4, int L, int R)
+		{
+			ScalerPass::FixedQ14::Axis a;
+			a.out = out; a.factor = factor; a.in = (out + factor - 1) / factor; a.s4 = s4;
+			a.L = L; a.R = R;
+			a.cL = (std::max)(0, (std::min)(a.in, L / factor));
+			a.cR = (std::max)(0, (std::min)(a.in, (R + factor - 1) / factor));
+			return a;
+		}
+
+		// A hard-edged plane with BTB / WTW codes and the container extremes (overshoot reaches both container ends).
+		static std::vector<uint16_t> FixedPlane(int w, int h)
+		{
+			std::vector<uint16_t> v(static_cast<size_t>(w) * h);
+			const uint16_t codes[6] = { 0, 1000, 4096, 40000, 63000, 65535 };   // 0, BTB, 10-bit black << 6, mid, WTW, container top
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+					v[static_cast<size_t>(y) * w + x] = codes[((x / 2) * 7 + (y / 3) * 5 + x * y) % 6];
+			return v;
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(FixedQ14ReproducesTheBasicChromaIntegerLoops)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(FixedQ14ReproducesTheBasicChromaIntegerLoops)
+		{
+			// Factors 1 / 2 / 4 incl. unequal axes, co-sited / centred / bottom shifts, bars on both axes and none.
+			struct Case { int W, H, fx, fy, s4x, s4y, ax0, ax1, ay0, ay1; };
+			const Case cases[] = {
+				{ 37, 23, 2, 2, -2, -2, 0, 37, 0, 23 },
+				{ 37, 23, 2, 2, 0, 0, 5, 31, 3, 20 },
+				{ 40, 24, 2, 1, -2, 0, 4, 36, 0, 24 },
+				{ 41, 18, 4, 1, -6, 0, 6, 35, 2, 16 },
+				{ 33, 29, 4, 2, 0, 2, 0, 33, 4, 25 },
+				{ 19, 34, 1, 4, 0, -6, 0, 19, 0, 34 },
+			};
+			bool hitFloor = false, hitTop = false;
+			for (const Case& k : cases)
+			{
+				const ScalerPass::FixedQ14::Axis ax = FixedAxis(k.W, k.fx, k.s4x, k.ax0, k.ax1);
+				const ScalerPass::FixedQ14::Axis ay = FixedAxis(k.H, k.fy, k.s4y, k.ay0, k.ay1);
+				const std::vector<uint16_t> src = FixedPlane(ax.in, ay.in);
+				std::vector<uint16_t> got;
+				Assert::IsTrue(ScalerPass::FixedQ14::Upsample(src.data(), src.size(), ax, ay, Lanczos(3), got));
+				Assert::IsTrue(got == LegacyQ14(src, ax, ay), Wide("fixed mode == legacy loops, " + std::to_string(k.W) + "x" +
+					std::to_string(k.H) + " f " + std::to_string(k.fx) + "," + std::to_string(k.fy)).c_str());
+				hitFloor = hitFloor || std::find(got.begin(), got.end(), uint16_t(0)) != got.end();
+				hitTop = hitTop || std::find(got.begin(), got.end(), uint16_t(65535)) != got.end();
+			}
+			Assert::IsTrue(hitFloor && hitTop, L"overshoot is clamped to the 16-bit container only");
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(FixedQ14FlatBtbWtwCodesPassExactly)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(FixedQ14FlatBtbWtwCodesPassExactly)
+		{
+			// Every phase sums to exactly 16384: a flat plane at any code (BTB, WTW, 12-bit << 4) comes back unchanged, no
+			// video-range clamp, for each separable kernel the mode takes.
+			const Spec kernels[4] = { Lanczos(3), Lanczos(2), Plain(Kind::CatmullRom), Plain(Kind::Bilinear) };
+			const uint16_t codes[5] = { 0, 1000, 3 << 4, 63000, 65535 };
+			for (const Spec& sp : kernels)
+				for (int f = 1; f <= 4; f *= 2)
+				{
+					const ScalerPass::FixedQ14::PhaseTable t = ScalerPass::FixedQ14::BuildPhaseTable(sp, f);
+					Assert::AreEqual(ScalerPass::FixedQ14::TapsOf(sp), t.taps);
+					for (int p = 0; p < t.phases; ++p)
+					{
+						int sum = 0;
+						for (int k = 0; k < t.taps; ++k) sum += t.w[p][k];
+						Assert::AreEqual(16384, sum, L"each phase sums to exactly 16384");
+					}
+					for (uint16_t code : codes)
+					{
+						const ScalerPass::FixedQ14::Axis ax = FixedAxis(21, f, 0, 0, 21), ay = FixedAxis(13, 2, -2, 0, 13);
+						const std::vector<uint16_t> src(static_cast<size_t>(ax.in) * ay.in, code);
+						std::vector<uint16_t> got;
+						Assert::IsTrue(ScalerPass::FixedQ14::Upsample(src.data(), src.size(), ax, ay, sp, got));
+						for (uint16_t v : got) Assert::AreEqual(static_cast<int>(code), static_cast<int>(v), L"flat stays flat at every code");
+					}
+				}
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(FixedQ14RefusesWhatItCannotRunVisibly)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(FixedQ14RefusesWhatItCannotRunVisibly)
+		{
+			namespace F = ScalerPass::FixedQ14;
+			const F::Axis ok = FixedAxis(20, 2, 0, 0, 20);
+			const std::vector<uint16_t> src(10 * 10, 500);
+			std::vector<uint16_t> got(3, 1);
+			Assert::IsFalse(F::Upsample(src.data(), src.size(), ok, ok, Plain(Kind::EwaLanczosSharp), got), L"polar refused");
+			Assert::IsTrue(got.empty());
+			Assert::IsFalse(F::Upsample(src.data(), src.size(), ok, ok, Lanczos(4), got), L"8 taps refused (max 6)");
+			Assert::IsFalse(F::Upsample(src.data(), src.size(), FixedAxis(20, 3, 0, 0, 20), ok, Lanczos(3), got), L"factor 3 refused");
+			Assert::IsFalse(F::Upsample(src.data(), 99, ok, ok, Lanczos(3), got), L"short source refused");
+			Assert::IsTrue(F::GlslHeader("VP", "vp", ok, ok, Plain(Kind::EwaLanczosSharp)).empty());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(FixedQ14GlslIsIntegerOnlyForEveryTapCount)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(FixedQ14GlslIsIntegerOnlyForEveryTapCount)
+		{
+			namespace F = ScalerPass::FixedQ14;
+			const F::Axis ax = FixedAxis(64, 2, -2, 0, 64), ay = FixedAxis(48, 2, 0, 0, 48);
+			const std::string h3 = F::GlslHeader("VP", "vp", ax, ay, Lanczos(3)), b3 = F::GlslBody("VP", "vp", Lanczos(3));
+			const std::string h2 = F::GlslHeader("VP", "vp", ax, ay, Lanczos(2)), b2 = F::GlslBody("VP", "vp", Lanczos(2));
+			Assert::IsTrue(h3.find("const int VPX_W[96]") != std::string::npos && h3.find("const int VPY_W[96]") != std::string::npos);
+			Assert::IsTrue(h2.find("const int VPX_W[64]") != std::string::npos);
+			Assert::IsTrue(h3.find("#define VP_S4X -2\n") != std::string::npos && h3.find("void vp_range(") != std::string::npos);
+			for (const std::string* s : { &h3, &b3, &h2, &b2 })
+			{
+				Assert::IsTrue(s->find("const float") == std::string::npos, L"no float constant in the arithmetic");
+				Assert::IsTrue(s->find('@') == std::string::npos, L"every template token filled");
+			}
+			Assert::IsTrue(b3.find("VPX_W[phx * 6 + tx]") != std::string::npos && b3.find("iy0 - 2 + ty") != std::string::npos);
+			Assert::IsTrue(b2.find("VPX_W[phx * 4 + tx]") != std::string::npos && b2.find("iy0 - 1 + ty") != std::string::npos);
+			Assert::IsTrue(b3.find(">> 14") != std::string::npos && b3.find("floor(t * 65535.0 + 0.5)") != std::string::npos &&
+				b3.find("texelFetch(vp_src") != std::string::npos && b3.find("imageStore(vp_dst") != std::string::npos);
 		}
 	};
 
@@ -617,8 +814,9 @@ namespace ScalerPassTestsNs
 		{
 			// Hardware only (VP_TEST_GPU=hardware): 1920x1080 -> 3840x2160 luma, one ScalerPass call, median over 40
 			// frames with pl_gpu_finish per frame. Logged, not asserted (the brief expects ~1.5 ms on the laptop).
-			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu,
-				"ScalerGpuTiming", ExtendedRangeGpuProbe::OnHardwareGpu(), "needs VP_TEST_GPU=hardware"))
+			// Not on hardware: the SKIP-NO-GPU marker, or a failure under VP_TEST_REQUIRE_GPU=1 (rule 11(d): a skip is never a pass).
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "ScalerGpuTiming",
+				ExtendedRangeGpuProbe::OnHardwareGpu(), "VP_TEST_GPU=hardware only; not run"))
 				return;
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");

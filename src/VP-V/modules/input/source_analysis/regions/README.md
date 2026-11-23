@@ -143,10 +143,10 @@ copied; a private pass is deleted in the same commit as its consumer's switch.
 Status: BusyEdge.h (CPU reference and tolerance oracle) and BusyEdgeGlsl.h (shader mirrors, one tap form kSourceTapCodesPerUnit) exist
 with BusyEdgeTests. The kEdgeMap owner fill (EdgeMapFill.h, on L-CORE's OwnerFillRequest::gpu) is built; its MODULE is
 registered at start-up (HubBootstrap) and the FILL at the first observed Entrance size (reserve derived from the source luma size, rule 6) with EdgeMapFillTests (registration, reserve, CPU declines; the GPU
-parity test, tests/EdgeMapStageGpuParityTests.cpp, is written for both variants and its first run is owed before the first reader row,
-102b KEDGEMAP-RULE3). The busy-share TEXT has one consumer:
+parity test, tests/EdgeMapStageGpuParityTests.cpp, is written for both variants and its first run is owed, 102b KEDGEMAP-RULE3).
+Its reader is the AdaptiveDownscale measure (CB-18 S3: the stage variant through Acquire; X5's private Sobel is removed). The busy-share TEXT has one consumer:
 VpDebander's guard (C7-6 U5 G1) builds its pass from BusyShareHeaderGlsl/BodyGlsl on its own input planes (bz_scale 1, thresholds in the
-plane's normalised units; its private GUARD_BODY is deleted). X5 AdaptiveDownscale acquires the kEdgeMap stage variant (CB-18 S3). Decisions: R14-66 (lead 14, 2026-11-14 20:54Z,
+plane's normalised units; its private GUARD_BODY is deleted). Decisions: R14-66 (lead 14, 2026-11-14 20:54Z,
 lead14-state.md:102) registers kEdgeMap under rule 3, first reader L-FOCUS; R14-64 (lead 14, 2026-11-14 ~21:10Z, lead14-state.md:89)
 kept X5 private, superseded by the owner's ruling of 2026-11-14 ~17:00 EST (design-EDGEMAP-DOMAIN-AXIS rev 2, 102b X5-EDGEMAP-CJ3): X5
 acquires a kEdgeMap stage variant in CJ-3.

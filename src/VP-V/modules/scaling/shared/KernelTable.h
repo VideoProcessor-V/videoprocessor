@@ -4,8 +4,9 @@
 // scaling.shared: the ONE kernel table of the hybrid upscaler rebuild (refs/123 N1 / N4 B0).
 // Header-only, no libplacebo, C++14. The 1-D weight expressions are the SAME expressions as
 // KernelInverse::Candidates() (scaling/rebase/KernelInverse.cpp), so a table entry's phase taps equal that
-// candidate's taps bit for bit (ScalerKernelTableMatchesKernelInverseTaps). No existing user is switched to
-// this table yet (migration is B5).
+// candidate's taps bit for bit (ScalerKernelTableMatchesKernelInverseTaps). B5a: KernelInverse now DRAWS its
+// candidates from this table (one expression, one place), and the chroma CfL model's Catmull-Rom tap weights
+// (ChromaCfl.h) are CatmullRomTapWeights below.
 #pragma once
 
 #include <algorithm>
@@ -68,6 +69,18 @@ namespace ScalerKernels
 		case Kind::Bilinear: return (std::max)(0.0, 1.0 - std::fabs(x));
 		default: return 0.0;
 		}
+	}
+
+	// The four Catmull-Rom tap weights for the taps floor(u) - 1 .. floor(u) + 2 at fraction t
+	// (the Cubic(0, 0.5) kernel in polynomial form). The expression is the one the chroma CfL CPU model has always
+	// used (ChromaCfl.h, now calling this), kept in this exact polynomial form so its sums are bit-identical.
+	inline void CatmullRomTapWeights(double t, double w[4])
+	{
+		const double t2 = t * t, t3 = t2 * t;
+		w[0] = -0.5 * t3 + t2 - 0.5 * t;
+		w[1] = 1.5 * t3 - 2.5 * t2 + 1.0;
+		w[2] = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
+		w[3] = 0.5 * t3 - 0.5 * t2;
 	}
 
 	struct Entry

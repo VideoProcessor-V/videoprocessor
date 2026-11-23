@@ -7,6 +7,7 @@
 #include <VP-V/modules/scaling/output/NlsMaskMapping.h>
 #include <VP-V/modules/drive/led_measure/ReadbackRing.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleCut.h>
+#include <VP-V/modules/scaling/shared/ScalerPass.h>
 #include <VP-V/modules/input/source_analysis/regions/MeasureDomain.h>
 #include <VP-V/modules/scaling/output/EdgeMapStageOrdinal.h>
 
@@ -290,12 +291,17 @@ namespace AdaptiveDownscale
 		bool grainBound = false;        // ... and that frame's scalar pass bound the shared products (r2 NIT: Pending until then)
 	};
 
-	// Stage 8b (docs/VP-stage8b-upscale-blend.md): the same module upscaling a
-	// shorter source (1080p -> 1600p). Luma only, grain only (no edge term):
-	//     w = up_w_base x grain_scale;  out = cnn + (1 - w)(Y_faithful - Y_cnn)
-	// so a clean picture is the CNN branch exactly and chroma stays the CNN
-	// branch's (CfL). The faithful branch is libplacebo's ewa_lanczossharp
-	// (anti-ringing) from the source-resolution picture: PRE_KERNEL itself,
+	// Stage 8b (docs/VP-stage8b-upscale-blend.md), CF-2 B1 (refs/123 v2 N1.2: the hybrid law, scaling/shared/HybridBlend.h):
+	// the same module upscaling a shorter source (1080p -> 1600p), any output ratio. Luma only:
+	//     w = clamp(up_w_base x (1 - e) x grain_scale) x motion;  out = sharp + (1 - w)(Y_alias_safe - Y_sharp)
+	// sharp = the POST_KERNEL picture (libplacebo's main scaler; a LUMA prescaler before it = the CNN evaluation arm),
+	// alias_safe = the faithful ScalerPass from the PRE_KERNEL source-resolution picture. e = the edge ramp: kEdgeMap's stage variant
+	// (CB-18: the measure pass offers its base picture and acquires EdgeMapStageKey; EdgeMapStatus names any other source).
+	// grain_scale on this form = kP10gGrainLevel (SetGrainLevel, the stage's one ask per frame); not published = grain_floor
+	// (the alias-safe lean, visible: PublishedGrainUsed false, the stage's status line and catalog entry). No private grain term.
+	// Motion: the map's factor; motion_floor when the vectors are absent or invalid (vectorsInvalid; N1.4 alias-safe lean).
+	// A clean flat picture is the sharp branch exactly and chroma stays the sharp
+	// branch's (CfL). The faithful branch (anti-ringing) is from the source-resolution picture: PRE_KERNEL itself,
 	// or, when a luma doubler (FSRCNNX / ArtCNN) made it exactly 2x the source
 	// crop, its 2x2 box average (the doubler's own consistency, which
 	// SSimSuperRes relies on too). Other prescale ratios: not applied (the
@@ -315,10 +321,58 @@ namespace AdaptiveDownscale
 		// with superresAlpha the grain term handed to SSimSuperRes is 0, so it adds nothing).
 		float nativeWidth = 0.0f;
 		bool oneAxis = false;
+		// CF-2 B1 (N1.4): the vectors of this frame are absent or invalid (no live estimate, a resync, a drop, NLS, motion off):
+		// with adaptive_motion on, the motion term is motion_floor (the alias-safe lean), never the plain factor 1.
+		bool vectorsInvalid = false;
 	};
+
+	// CF-2 switch-over: kP10gGrainLevel (id 35, "grain.level") for the upscale form's grain term, acquired by the stage once per
+	// frame through the skeleton; the pin keeps it alive until the next frame. level null = not published (grain_floor).
+	struct GrainLevelSource
+	{
+		pl_tex level = nullptr;                // RGBA32F per 16 x 16 source-luma block: x = N_b, y = gate, z = f'^2 N_b, w = lag-1
+		std::shared_ptr<const void> pin;
+		pl_rect2df sourceCrop{};               // the source crop in the level's source-luma pixels
+	};
+
+	// sqrt(N_b) (codes of D) -> the grain ramp's energy unit (grain_lo / grain_hi). FIX-UPS-grain: 1.0 is a named placeholder,
+	// to be measured at W4 against the P10 split's code scale; it is not a derived constant.
+	inline float GrainLevelEnergyScale() { return 1.0f; }
+
+	// The prescale ratio of PRE_KERNEL to the source crop the measure accepts: 1 (the source), 2 (a doubler's exact 2x), 0 (not
+	// applied: another ratio, or nothing upscaled). Independent of the output ratio (any destination size). Pure (tests).
+	inline int UpscaleBaseRatioOf(float nativeW, float nativeH, float preW, float preH, int dw, int dh)
+	{
+		const float rh = nativeH > 0.0f ? preH / nativeH : 0.0f;
+		const float rw = nativeW > 0.0f ? preW / nativeW : rh;
+		const int ratio = std::fabs(rh - 1.0f) < 0.01f && std::fabs(rw - 1.0f) < 0.01f ? 1 :
+			(std::fabs(rh - 2.0f) < 0.01f && std::fabs(rw - 2.0f) < 0.01f ? 2 : 0);
+		const bool upscales = nativeH + 0.5f < static_cast<float>(dh) ||
+			(nativeW > 0.0f && nativeW + 0.5f < static_cast<float>(dw));
+		return upscales ? ratio : 0;
+	}
 
 	// The motion-adapted blend on the last blended frame (status, tests).
 	enum class MotionState { Off, NoVectors, Used };
+
+	// CF-2 FIX1 (gate M1): why the upscale form leans on the motion floor on a blended frame (nullptr = the factor map is
+	// used). The stage's own verdict comes first (vectorsInvalid); the rest are the module's: the map did not run, is not
+	// ready, belongs to another source frame, or has no texture. Pure (the module and the tests); the stage feeds the cause
+	// into its "output scaling" entry, so a floor taken here is never only a status line.
+	inline const char* MotionFloorCause(bool vectorsInvalid, MotionState state, bool mapReady, bool sameSequence, bool haveTexture)
+	{
+		if (vectorsInvalid)
+			return "vectors invalid";
+		if (state != MotionState::Used)
+			return state == MotionState::Off ? "motion map not built on this frame" : "no motion map for this source frame";
+		if (!mapReady)
+			return "motion map not ready";
+		if (!sameSequence)
+			return "motion map from another source frame";
+		if (!haveTexture)
+			return "motion map texture missing";
+		return nullptr;
+	}
 
 	// Stage 8b's gate and its one-axis form, from the re-based source crop and the destination
 	// (half a pixel tolerance). The upscale form: the height upscaled (today's gate, whatever the
@@ -378,6 +432,16 @@ namespace AdaptiveDownscale
 		// The last measured frame's source-resolution base: 1 (PRE_KERNEL),
 		// 2 (a doubler's output averaged), 0 not applied; tests and the log.
 		int LastUpscaleRatio() const { return upscaleRatio; }
+		// CF-2 switch-over: per frame (the stage): the published grain level, or none (grain_floor on the upscale form).
+		void SetGrainLevel(const GrainLevelSource& value) { grainLevel = value; }
+		void ClearGrainLevel() { grainLevel = GrainLevelSource(); }
+		// The last blended frame read the published grain level / used the motion floor (status, tests).
+		bool PublishedGrainUsed() const { return publishedGrainUsed; }
+		bool MotionFloorUsed() const { return motionFloorUsed; }
+		// CF-2 FIX1 (gate M1): the cause of that floor (empty when it was not used).
+		const std::string& MotionFloorCauseText() const { return motionFloorCause; }
+		// Why the alias-safe ScalerPass failed last (empty: never); for the fallback line.
+		const std::string& ScalerError() const { return faithfulScaler.LastError(); }
 		// 8-3: after SetFrame, the field for this source frame (none: the
 		// scalar). Call every frame; the textures are the matcher's.
 		void SetGrainField(const GrainField& field) { grainField = field; }
@@ -473,11 +537,17 @@ namespace AdaptiveDownscale
 		float frameSeconds = 1.0f / 24.0f;
 		bool sourceDownscales = true;
 		pl_gpu gpu = nullptr;
+		// The faithful branch is a ScalerPass (B5a, refs/123 N1): `faithful` aliases that unit's slot-0 texture (owned and
+		// released by faithfulScaler, never destroyed here); its LUT objects live in the unit too.
 		pl_tex faithful = nullptr;
-		pl_tex faithfulMid = nullptr;   // the ortho branch's vertical pass
+		ScalerPass::Module faithfulScaler;
 		pl_tex lowres = nullptr;          // 8b: a doubler's output at source resolution
 		Upscale upscale{};
 		int upscaleRatio = 0;
+		GrainLevelSource grainLevel{};
+		bool publishedGrainUsed = false;
+		bool motionFloorUsed = false;
+		std::string motionFloorCause;
 		pl_tex edge = nullptr;
 		pl_tex partial = nullptr;
 		pl_tex state = nullptr;
@@ -516,8 +586,6 @@ namespace AdaptiveDownscale
 		// (gate cb-u1 r2 NIT: LastGrainSourceUse Pending until such a frame is read back).
 		bool statsSlotBound[kStatsSlots] = {};
 		bool readbackBound = false;
-		pl_shader_obj polarLut = nullptr;
-		pl_shader_obj orthoLut[2] = { nullptr, nullptr };
 		bool active = false;
 		pl_rect2df srcRect{};
 		pl_rect2d dstRect{};

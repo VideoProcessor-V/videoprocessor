@@ -19,6 +19,7 @@ kernel table.
 - `ScalerGeometry.h`: `Span` (source span + destination size; the ratio is derived from them), `IntegerWindow`, `Unequal`.
 - `ScalerReference.h`: the CPU reference sampler (exact taps in double, clamp-to-edge, support stretched by the ratio on a
   downscale, siting phase as a span shift). Anti-ringing and the polar filter are not modelled.
+- `ScalerPassFixed.h` (header-only, no libplacebo): the Q14 fixed-point mode (CPU model + GLSL generator), see B5a-2 below.
 - `ScalerPass.h/.cpp`: the GPU pass, `ScalerPass::Module::Apply(gpu, dispatch, Source, dstW, dstH, Settings, out, slot)`.
 
 ## ScalerPass axes
@@ -85,6 +86,12 @@ model. Each decision cites the owner lines of refs/123 N0.
 - `ScalerGpuMigrationIdentityFaithfulOrtho` (tests/ScalerPassAdaptiveIdentityTests.cpp, class `ScalerPassAdaptiveIdentityTests`), ADDITIONAL: ScalerPass(lanczos3,
   both, down first) equals what the REAL `AdaptiveDownscale::Module` (faithful_ortho, w_base 0) renders through libplacebo, within one 8-bit
   code (the pipeline writes an 8-bit target). AdaptiveDownscale is only driven, never edited. It does not replace the bit-exact test.
+
+## Users migrated in B5a (CF-2)
+
+- `AdaptiveDownscale`'s faithful branch (ortho and polar) now calls `ScalerPass::Module::Apply` (slot 0); `faithful` aliases the unit's texture. A failed Apply is the existing counted pass-through (no silent 32-to-16-bit fallback: `float32Picture` off asks for F16 explicitly).
+- `KernelInverse::Candidates()` is built from `ScalerKernels::Table()` (`inKernelInverse` entries); `ChromaUpscale::CatmullRomWeights` calls `ScalerKernels::CatmullRomTapWeights`.
+- B5a-2 step 2: `BasicChroma`'s integer Q14 model and its byte-identical GPU pass now run ScalerPass's Q14 fixed-point mode (`ScalerPassFixed.h`, `ScalerPass::FixedQ14`): the phase tables, phase location, per-column / per-row picture-or-bar tap clamps, unclamped int32 horizontal intermediate and 16-bit container clamp, CPU and generated GLSL (`GlslHeader` / `GlslBody`, prefix "BC"; the text equals the pre-step-2 GLSL). Separable kernels of integer radius <= 3 at factors 1 / 2 / 4; anything else is refused (false / empty header), the caller keeps its own path. CPU tests in `ScalerModelTests` (`FixedQ14*`); the BasicChroma CPU == GPU byte test is unchanged and is the W4 GPU proof.
 
 ## Open / not verified in B0
 

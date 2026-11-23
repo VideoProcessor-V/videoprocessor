@@ -18,6 +18,8 @@
 #include <VP-V/modules/scaling/output/MeasureEdgeMap.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
+#include <VP-V/modules/scaling/shared/HybridBlend.h>
+#include <VP-V/modules/scaling/shared/ScalerPass.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <VP-V/modules/drive/led_measure/NativeReadback.h>
 
@@ -288,14 +290,41 @@ if (q.x < size.x && q.y < size.y) {
     }
 #endif
 #ifdef AD_UPSCALE
-    // 8b: grain only; the CNN branch is the base (its chroma stays), luma
-    // pulled toward the faithful branch by 1 - w.
-    float w = clamp(w_base * g, 0.0, 1.0);
-    float ga = g;   // the strength handed to SSimSuperRes
-#ifdef AD_MOTION
-    w *= mf;
-    ga *= mf;
+    // CF-2 B1 (refs/123 N1.2, HybridBlend.h): the sharp branch (POST_KERNEL) is the base (its chroma stays), luma
+    // pulled toward the alias-safe branch by 1 - w; w = clamp(w_base (1 - e) g) x motion.
+    // The grain term on this form is kP10gGrainLevel only (no private scalar or map): the block's N_b at this pixel's source
+    // position, bilinear between block centres, through the grain ramp (energy -> target). FIX-UPS-grain: grain_level_scale
+    // (GrainLevelEnergyScale) takes sqrt(N_b) to the ramp's unit and is measured at W4. A block without a level (N_b < 0) and a
+    // frame without the product take grain_floor: the alias-safe lean, shown by the stage (never silent).
+#ifdef AD_GRAIN_PUBLISHED
+    {
+        vec2 gu = (s - src_origin) / max(src_size, vec2(1e-6));
+        vec2 gsp = grain_crop.xy + gu * grain_crop.zw;
+        ivec2 lsize = textureSize(grain_level, 0);
+        vec2 lpos = gsp / 16.0 - vec2(0.5);
+        ivec2 l0 = ivec2(floor(lpos));
+        vec2 lt = lpos - vec2(l0);
+        float gacc = 0.0;
+        for (int y = 0; y <= 1; y++)
+            for (int x = 0; x <= 1; x++) {
+                float nb = texelFetch(grain_level, clamp(l0 + ivec2(x, y), ivec2(0), lsize - ivec2(1)), 0).x;
+                float gtarget = mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb, 0.0)) * grain_level_scale));
+                gacc += (x == 1 ? lt.x : 1.0 - lt.x) * (y == 1 ? lt.y : 1.0 - lt.y) * (nb >= 0.0 ? gtarget : grain_floor);
+            }
+        g = gacc;
+    }
+#else
+    g = grain_floor;
 #endif
+    float mt = 1.0;
+#ifdef AD_MOTION
+    mt = mf;
+#endif
+#ifdef AD_MOTION_FLOOR
+    mt = motion_floor;   // no / invalid vectors: the alias-safe lean (N1.4)
+#endif
+    float w = hb_weight(w_base, e, g, mt);
+    float ga = g * clamp(mt, 0.0, 1.0);   // the strength handed to SSimSuperRes
 #ifdef AD_FAITHFUL_ONLY
     // 8b one-axis: faithful branch only, and no SuperRes correction.
     w = 0.0;
@@ -558,7 +587,7 @@ float rs_slope(float y)
 		{
 			// The residual pair too (found 2026-10-31: it outlived Release and a new GPU recreated
 			// it through the old one's texture).
-			for (pl_tex* tex : { &faithful, &faithfulMid, &lowres, &edge, &partial, &state, &map[0], &map[1], &motionMap[0], &motionMap[1],
+			for (pl_tex* tex : { &lowres, &edge, &partial, &state, &map[0], &map[1], &motionMap[0], &motionMap[1],
 				&residual[0], &residual[1], &edgeLocal })
 				if (*tex)
 					pl_tex_destroy(gpu, tex);
@@ -570,12 +599,8 @@ float rs_slope(float y)
 		statsNative.reset();
 		statsNativeTried = false;
 		statsSchedule.Reset();
-		if (polarLut)
-			pl_shader_obj_destroy(&polarLut);
-		for (pl_shader_obj& lut : orthoLut)
-			if (lut)
-				pl_shader_obj_destroy(&lut);
-		faithful = faithfulMid = lowres = edge = partial = state = map[0] = map[1] = motionMap[0] = motionMap[1] = nullptr;
+		faithfulScaler.Release(gpu);
+		faithful = lowres = edge = partial = state = map[0] = map[1] = motionMap[0] = motionMap[1] = nullptr;
 		residual[0] = residual[1] = nullptr;
 		edgeLocal = nullptr;
 		edgeOrdinal.Reset();
@@ -720,6 +745,8 @@ float rs_slope(float y)
 		active = false;
 		upscaleRatio = 0;
 		motionState = MotionState::Off;   // set again by UpdateMotionMap when the measure runs
+		motionFloorUsed = false;           // FIX1: set again by the blend (a frame it skips leaves no stale floor)
+		motionFloorCause.clear();
 		edgeMapStatus.clear();            // set again when the measure reads its edge map (CB-18 S3)
 		if (!p->tex)
 			return unchanged;
@@ -735,15 +762,9 @@ float rs_slope(float y)
 			// gate); the base is PRE_KERNEL or a doubler's exact 2x.
 			// One-axis (N9-P12): with the width given, either axis upscaled opens the gate and
 			// the prescale ratio must hold on both axes.
-			const float nativeH = upscale.nativeHeight;
-			const float nativeW = upscale.nativeWidth;
-			const float rh = nativeH > 0.0f ? (sy1 - sy0) / nativeH : 0.0f;
-			const float rw = nativeW > 0.0f ? (sx1 - sx0) / nativeW : rh;
-			ratio = std::fabs(rh - 1.0f) < 0.01f && std::fabs(rw - 1.0f) < 0.01f ? 1 :
-				(std::fabs(rh - 2.0f) < 0.01f && std::fabs(rw - 2.0f) < 0.01f ? 2 : 0);
-			const bool upscales = nativeH + 0.5f < static_cast<float>(dh) ||
-				(nativeW > 0.0f && nativeW + 0.5f < static_cast<float>(dw));
-			if (ratio == 0 || !upscales)
+			// CF-2 B1: the same test as a pure function (UpscaleBaseRatioOf, tests); any output ratio.
+			ratio = UpscaleBaseRatioOf(upscale.nativeWidth, upscale.nativeHeight, sx1 - sx0, sy1 - sy0, dw, dh);
+			if (ratio == 0)
 				return unchanged;
 		}
 		// The SSIM shader's own condition: the source is made shorter (the
@@ -794,16 +815,8 @@ float rs_slope(float y)
 		const int w = std::max(1, static_cast<int>(std::ceil(sx1)) - ox);
 		const int h = std::max(1, static_cast<int>(std::ceil(sy1)) - oy);
 		const int gx = (w + 15) / 16, gy = (h + 15) / 16;
-		// GEM-W1B V3 MUST-6: fbo_float32 switched off: the 32-bit textures are kept by Ensure's ">= depth"
-		// rule, so recreate them once on the toggle (not every frame: the per-frame state rationale above).
-		if (pictureWas32 && !settings.float32Picture)
-		{
-			if (faithful) pl_tex_destroy(gpu, &faithful);
-			if (faithfulMid) pl_tex_destroy(gpu, &faithfulMid);
-		}
-		pictureWas32 = settings.float32Picture;
 		halfFloatPicture = false;
-		if (!EnsurePicture(gpu, faithful, dw, dh, settings.float32Picture, &halfFloatPicture) || !Ensure(gpu, edge, w, h, 1, 16, false, true) ||
+		if (!Ensure(gpu, edge, w, h, 1, 16, false, true) ||
 			!Ensure(gpu, partial, gx, gy, 4, 32, false, false) || !Ensure(gpu, state, 1, 1, 4, 32, false, false))
 		{
 			++failures;
@@ -825,72 +838,41 @@ float rs_slope(float y)
 		// axes' ratios differ by more than 10 %.
 		const double ratioX = (sx1 - sx0) / std::max(1, dw), ratioY = (sy1 - sy0) / std::max(1, dh);
 		const bool unequal = std::max(ratioX, ratioY) > 1.1 * std::max(1e-6, std::min(ratioX, ratioY));
-		if (settings.faithfulOrtho || (settings.faithfulAuto && unequal))
+		// ScalerPass (refs/123 N1): ortho = Lanczos r3 down-first (vertical over whole source columns, then across),
+		// polar = ewa_lanczossharp; the call sequence is the one this branch always made. 32-bit float unless
+		// float32Picture is off (an explicit setting, announced by the unit's Note).
 		{
-			if (!EnsurePicture(gpu, faithfulMid, w, dh, settings.float32Picture, &halfFloatPicture))
+			ScalerPass::Settings fs;
+			fs.axis = ScalerPass::Axis::Both;
+			fs.order = ScalerPass::Order::DownFirst;
+			fs.antiring = settings.antiring;
+			fs.precision = settings.float32Picture ? ScalerPass::Precision::F32 : ScalerPass::Precision::F16;
+			if (settings.faithfulOrtho || (settings.faithfulAuto && unequal))
 			{
+				fs.filter.kind = ScalerKernels::Kind::Lanczos;
+				fs.filter.radius = 3;
+			}
+			else
+			{
+				fs.filter.kind = ScalerKernels::Kind::EwaLanczosSharp;
+			}
+			ScalerPass::Source fsrc;
+			fsrc.tex = base;
+			fsrc.x0 = sx0;
+			fsrc.y0 = sy0;
+			fsrc.x1 = sx1;
+			fsrc.y1 = sy1;
+			pl_tex out = nullptr;
+			if (!faithfulScaler.Apply(gpu, p->dispatch, fsrc, dw, dh, fs, out, 0))
+			{
+				// Visible, not silent: the frame is passed through unchanged and counted.
 				++failures;
 				return unchanged;
 			}
-			for (int pass = 0; pass < 2; ++pass)
-			{
-				pl_shader sh = pl_dispatch_begin(p->dispatch);
-				pl_sample_src src{};
-				src.components = 4;
-				if (pass == 0)
-				{
-					// Vertical: whole source columns ox..ox+w, rows to dh.
-					src.tex = base;
-					src.rect = { static_cast<float>(ox), sy0, static_cast<float>(ox + w), sy1 };
-					src.new_w = w;
-					src.new_h = dh;
-				}
-				else
-				{
-					src.tex = faithfulMid;
-					src.rect = { sx0 - ox, 0.0f, sx1 - ox, static_cast<float>(dh) };
-					src.new_w = dw;
-					src.new_h = dh;
-				}
-				pl_sample_filter_params filter{};
-				filter.filter = pl_filter_lanczos;
-				filter.antiring = settings.antiring;
-				filter.lut = &orthoLut[pass];
-				pl_dispatch_params dp{};
-				dp.shader = &sh;
-				dp.target = pass == 0 ? faithfulMid : faithful;
-				if (!pl_shader_sample_ortho2(sh, &src, &filter) || !pl_dispatch_finish(p->dispatch, &dp))
-				{
-					if (sh)
-						pl_dispatch_abort(p->dispatch, &sh);
-					++failures;
-					return unchanged;
-				}
-			}
-		}
-		else
-		{
-			pl_shader sh = pl_dispatch_begin(p->dispatch);
-			pl_sample_src src{};
-			src.tex = base;
-			src.rect = { sx0, sy0, sx1, sy1 };
-			src.new_w = dw;
-			src.new_h = dh;
-			src.components = 4;
-			pl_sample_filter_params filter{};
-			filter.filter = pl_filter_ewa_lanczossharp;
-			filter.antiring = settings.antiring;
-			filter.lut = &polarLut;
-			pl_dispatch_params dp{};
-			dp.shader = &sh;
-			dp.target = faithful;
-			if (!pl_shader_sample_polar(sh, &src, &filter) || !pl_dispatch_finish(p->dispatch, &dp))
-			{
-				if (sh)
-					pl_dispatch_abort(p->dispatch, &sh);
-				++failures;
-				return unchanged;
-			}
+			faithful = out;
+			// GEM-W1B V3 MUST-6: report visibly when 32-bit float was asked for and ScalerPass fell back to 16-bit float.
+			halfFloatPicture = settings.float32Picture && faithful && faithful->params.format &&
+				faithful->params.format->component_depth[0] < 32;
 		}
 
 		// 2. Edges and the per-workgroup grain sums (bug hunt 33 F3 / F4: the source's luma
@@ -1218,7 +1200,8 @@ float rs_slope(float y)
 		const float chroma = settings.chromaSsim ? 1.0f : 0.0f;
 		// 8-3: the map for this source frame (else the scalar; the binding
 		// then repeats the state texture, never read).
-		const bool useMap = mapState == MapState::Used && mapReady && mapSequence == sequence;
+		// The upscale form's grain term is kP10gGrainLevel only (below): the private map is the downscale form's.
+		const bool useMap = !upscale.on && mapState == MapState::Used && mapReady && mapSequence == sequence;
 		const float srcSize[2] = { srcRect.x1 - srcRect.x0, srcRect.y1 - srcRect.y0 };
 		const pl_rect2df& sc = grainField.sourceCrop;
 		const float crop[4] = { sc.x0, sc.y0, sc.x1 - sc.x0, sc.y1 - sc.y0 };
@@ -1265,9 +1248,23 @@ float rs_slope(float y)
 			Sampled("edge", edge, true), Sampled("state", state, false), Storage("dst", out) };
 		if (useMap) d.push_back(Sampled("grain_map", map[mapIndex], false));
 		// Motion-adapted blend: the factor map for this source frame (else no binding, no code).
-		const bool useMotion = settings.motionAdaptive && motionState == MotionState::Used && motionReady &&
+		// CF-2 B1 (N1.4): the stage's discontinuity verdict (resync, a drop, no live estimate) also takes the map out.
+		const bool vectorsInvalid = upscale.on && upscale.vectorsInvalid;
+		const bool useMotion = settings.motionAdaptive && !vectorsInvalid && motionState == MotionState::Used && motionReady &&
 			motionSequence == sequence && motionMap[motionIndex];
 		if (useMotion) d.push_back(Sampled("motion_map", motionMap[motionIndex], false));
+		// The upscale form with adaptive_motion on and no usable map: the motion floor (the alias-safe lean), visibly
+		// (MotionFloorUsed; the stage's status line). One-axis is faithful only already. The downscale form is unchanged.
+		const bool motionFloor = upscale.on && settings.motionAdaptive && !useMotion && !upscale.oneAxis;
+		motionFloorUsed = motionFloor;
+		// CF-2 FIX1 (gate M1): the floor's cause, for the stage's catalog entry (Stage::Fallback) and status line.
+		const char* floorCause = motionFloor ? MotionFloorCause(vectorsInvalid, motionState, motionReady,
+			motionSequence == sequence, motionMap[motionIndex] != nullptr) : nullptr;
+		motionFloorCause = motionFloor ? std::string(floorCause ? floorCause : "no motion map") : std::string();
+		// Switch-over: kP10gGrainLevel when the stage acquired it; else grain_floor (no private grain term on this form).
+		const bool grainPublished = upscale.on && grainLevel.level != nullptr;
+		publishedGrainUsed = grainPublished;
+		if (grainPublished) d.push_back(Sampled("grain_level", grainLevel.level, false));   // RGBA32F: texelFetch only
 		if (stabilise)
 		{
 			d.push_back(Sampled("rs_field", motion.field, false));
@@ -1278,9 +1275,11 @@ float rs_slope(float y)
 		}
 		static const std::string mapHeader = std::string("#define AD_USE_MAP 1\n") + OcclusionMask::NlsMapGlsl();
 		// 8b: the upscale form (and alpha for SSimSuperRes) as defines.
-		const std::string upHeader = upscale.on ? std::string("#define AD_UPSCALE 1\n") +
+		const std::string upHeader = upscale.on ? std::string("#define AD_UPSCALE 1\n") + HybridBlend::WeightGlsl() +
 			(upscale.superresAlpha ? "#define AD_SUPERRES_ALPHA 1\n" : "") +
-			(upscale.oneAxis ? "#define AD_FAITHFUL_ONLY 1\n" : "") : std::string();
+			(upscale.oneAxis ? "#define AD_FAITHFUL_ONLY 1\n" : "") +
+			(motionFloor ? "#define AD_MOTION_FLOOR 1\n" : "") +
+			(grainPublished ? "#define AD_GRAIN_PUBLISHED 1\n" : "") : std::string();
 		const bool guard = stabilise && settings.residualGrainGuard;
 		const std::string header = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" + upHeader +
 			(useMotion ? std::string("#define AD_MOTION 1\n") : std::string()) +
@@ -1331,6 +1330,23 @@ float rs_slope(float y)
 		{
 			v.push_back({ pl_var_vec2("mw_src_size"), srcSize, true });
 			v.push_back({ pl_var_vec4("mw_crop"), mwCrop, true });
+		}
+		const float motionFloorValue = RampMath::Clamp01(settings.motionFloor);
+		if (motionFloor)
+			v.push_back({ pl_var_float("motion_floor"), &motionFloorValue, true });
+		const pl_rect2df& gc = grainLevel.sourceCrop;
+		const float grainCrop[4] = { gc.x0, gc.y0, gc.x1 - gc.x0, gc.y1 - gc.y0 };
+		const float grainLevelScale = GrainLevelEnergyScale();
+		if (upscale.on)
+			v.push_back({ pl_var_float("grain_floor"), &settings.grainFloor, true });   // published or not (the floor)
+		if (grainPublished)
+		{
+			if (!stabilise)
+				v.push_back({ pl_var_vec2("src_size"), srcSize, true });   // useMap is off on this form; stabilise already has it
+			v.push_back({ pl_var_vec4("grain_crop"), grainCrop, true });
+			v.push_back({ pl_var_float("grain_lo"), &settings.grainLo, true });
+			v.push_back({ pl_var_float("grain_hi"), &settings.grainHi, true });
+			v.push_back({ pl_var_float("grain_level_scale"), &grainLevelScale, true });
 		}
 		if (!Compute(p->dispatch, upscale.on ? "VideoProcessor adaptive upscale: blend" : "VideoProcessor adaptive downscale: blend",
 			header.c_str(), BLEND_BODY, d.data(), static_cast<int>(d.size()), v.data(), static_cast<int>(v.size()),

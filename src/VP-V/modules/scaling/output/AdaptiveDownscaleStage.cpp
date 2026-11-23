@@ -2,6 +2,8 @@
 #include "AdaptiveDownscaleStage.h"
 
 #include <DebugLog.h>
+#include <VP-V/core/Products.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/DownscaleLight.h>
 #include <vprenderer/GrainPreserve.h>
@@ -66,6 +68,65 @@ namespace AdaptiveDownscaleStage
 				module.SetMotion(motion);
 			}
 		}
+
+		// CF-2 switch-over: the grain term's single seam. kP10gGrainLevel (id 35, "grain.level", the repair.grain_split owner
+		// fill; RGBA32F, one texel per 16 x 16 source-luma block, x = N_b) through the skeleton: published = the module reads it;
+		// anything else = grain_floor (no private grain term), with the cause. One ask per upscale frame.
+		TermSource ReadGrain(const Frame& frame, const Host& host, AdaptiveDownscale::Module& module)
+		{
+			module.ClearGrainLevel();
+			TermSource t;
+			VpSkeleton::AcquireResult r;
+			if (host.acquire)
+				r = host.acquire(VpSkeleton::kP10gGrainLevel, frame.sourceSequence, VpSkeleton::VariantKey());
+			else
+			{
+				const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::CurrentFrameMemo();
+				if (!fm.Valid())
+				{
+					t.cause = "no skeleton memo for this renderer";
+					return t;
+				}
+				r = fm.memo->Acquire(VpSkeleton::kP10gGrainLevel, fm.seq, VpSkeleton::AcquireForm::Gpu);
+			}
+			if (!r.Ok() || !r.gpu.Valid() || r.gpu.resource == nullptr)
+			{
+				t.cause = std::string("kP10gGrainLevel ") + (r.Ok() ? "has no GPU texture" : VpSkeleton::Token(r.cause));
+				return t;
+			}
+			AdaptiveDownscale::GrainLevelSource gs;
+			gs.level = static_cast<pl_tex>(r.gpu.resource);
+			gs.pin = r.pin;
+			gs.sourceCrop = frame.sourceCrop;
+			module.SetGrainLevel(gs);
+			t.published = true;
+			return t;
+		}
+	}
+
+	FallbackCatalog::Decision UpscaleScalingFallback(const UpscaleFallbackInputs& in)
+	{
+		const bool stageFloor = in.motionAdaptiveOn && !in.oneAxis && !in.stageMotionCause.empty();
+		const bool floor = stageFloor || in.moduleFloorUsed;
+		const FallbackCatalog::Decision base = FallbackCatalog::OutputScalingUpscale(in.requested, in.failureHeld, in.scalerError,
+			floor, stageFloor ? in.stageMotionCause : in.moduleFloorCause);
+		if (base.engaged || !in.requested)
+			return base;
+		if (!in.cutAvailable)
+			return FallbackCatalog::Engaged("output scaling", "adaptive downscale: no cut verdict this frame (" + in.cutCause + ")");
+		if (!in.oneAxis && !in.grainCause.empty())
+			return FallbackCatalog::Engaged("output scaling", "adaptive upscale: no grain level, alias-safe grain weight (" + in.grainCause + ")");
+		return base;
+	}
+
+	const char* MotionDiscontinuity(bool vectorsRun, bool nls, bool live, bool haveLast, uint64_t lastSequence, uint64_t sequence)
+	{
+		if (!vectorsRun) return "motion vectors off";
+		if (nls) return "NLS active";
+		if (haveLast && sequence < lastSequence) return "resync";
+		if (haveLast && sequence > lastSequence + 1) return "dropped source frames";
+		if (!live) return "no live estimate";
+		return nullptr;
 	}
 
 	void Stage::Register(const Frame& frame, const Host& host, SharedState state, std::vector<const pl_hook*>& hooks)
@@ -91,6 +152,13 @@ namespace AdaptiveDownscaleStage
 			(upscaleBlend || frame.adaptiveDownscale);
 		const bool downscaleOn = frame.slotRuns && frame.adaptiveDownscale;   // slot off: as adaptive_downscale off
 		upscaleThisFrame = upscaleBlend;
+		if (!upscaleBlend)
+		{
+			module.ClearGrainLevel();   // the pin is not held past the upscale form
+			grainTerm = TermSource();
+			upscaleMotionCause.clear();
+			haveMotionSequence = false;   // the next upscale run starts a new motion history
+		}
 		// Findings 2026-10-25 #1: what Fallback() reports (no effect on the picture).
 		NoteFailures(module.Failures() - failuresSeen, GetTickCount64());
 		failuresSeen = module.Failures();
@@ -162,36 +230,34 @@ namespace AdaptiveDownscaleStage
 			up.nativeHeight = sourceCropH;
 			up.nativeWidth = sourceCropW;
 			up.oneAxis = oneAxis;
+			// CF-2 B1: the motion read (the ExternalView of P3, the live estimate: once per frame) and its verdict (N1.4). A
+			// repeat of the last sequence keeps the first presentation's verdict (no flicker on a repeated frame). Not an Acquire:
+			// P3 has no GPU Acquire publication at this tip (MotionSource).
+			const MotionSource m = host.motion();
+			if (!(haveMotionSequence && frame.sourceSequence == motionSequenceSeen))
+			{
+				const char* why = MotionDiscontinuity(frame.vectorsRun, frame.nlsSubmitted, m.live && m.field && m.frameTrust,
+					haveMotionSequence, motionSequenceSeen, frame.sourceSequence);
+				upscaleMotionCause = why ? why : "";
+				haveMotionSequence = true;
+				motionSequenceSeen = frame.sourceSequence;
+			}
+			up.vectorsInvalid = !upscaleMotionCause.empty();
+			grainTerm = ReadGrain(frame, host, module);
 			if (oneAxis != oneAxisLogged)
 			{
 				oneAxisLogged = oneAxis;
 				DebugLog::Log("Adaptive upscale: %s", oneAxis ?
-					"faithful only (one-axis upscale; CNN doubler skipped)" : "both axes (CNN + faithful blend)");
+					"faithful only (one-axis upscale; CNN doubler skipped)" : "both axes (hybrid: sharp + alias-safe blend)");
 			}
 			module.SetUpscale(up);
 			vectorUser = frame.vectorsRun;   // batch B Q1: the hybrid upscaler reads the motion (residual hold, grain map, motion-adapted blend)
+			// Switch-over: the upscale form's grain term is kP10gGrainLevel (ReadGrain), so no private grain map here; the
+			// estimate is still wanted for the residual hold and the motion-adapted blend.
 			module.ClearGrainField();
 			grainOffered = SetSharedGrain(module, host);
-			const MotionSource m = host.motion();
 			SetResidualMotion(module, frame, m);
-			if (adaptive.grainMap && m.live && m.grainError)
-			{
-				AdaptiveDownscale::GrainField field;
-				field.error = m.grainError;
-				field.field = m.field;
-				field.frameTrust = m.frameTrust;
-				field.minTrustedShare = m.minTrustedShare;
-				field.sourceCrop = frame.sourceCrop;
-				bool known = true;
-				if (frame.nlsSubmitted)
-				{
-					field.nls = host.nlsMapping();
-					known = field.nls.valid;
-				}
-				if (known)
-					module.SetGrainField(field);
-			}
-			state.grainMapWanted = (adaptive.grainMap || adaptive.motionAdaptive) && module.Active() && frame.vectorsRun;
+			state.grainMapWanted = adaptive.motionAdaptive && module.Active() && frame.vectorsRun;
 			hooks.insert(hooks.begin(), module.Measure());
 			// The blend before SSimSuperRes (both POST_KERNEL): SuperRes refines the blended picture
 			// with its strength scaled by the grain term.
@@ -308,12 +374,25 @@ namespace AdaptiveDownscaleStage
 				lines.push_back(oneAxisThisFrame ?
 					(droppedPrescalers > 0 ? "Adaptive upscale: faithful only (one-axis upscale; CNN doubler skipped)" :
 						"Adaptive upscale: faithful only (one-axis upscale)") :
-					"Adaptive upscale: CNN + faithful blend");
+					module.LastUpscaleRatio() == 2 ?
+					"Adaptive upscale: hybrid (sharp = CNN prescaler + main scaler: the CNN evaluation arm; alias-safe = ScalerPass)" :
+					"Adaptive upscale: hybrid (sharp = main scaler, alias-safe = ScalerPass)");
+			// CF-2 switch-over: kP10gGrainLevel not read on this frame: the grain floor (the alias-safe lean), with the cause.
+			if (!oneAxisThisFrame && !grainTerm.published)
+				lines.push_back("Adaptive upscale grain: no grain level (alias-safe weight; " + grainTerm.cause + ")");
+			// N1.4: no / invalid vectors with adaptive_motion on: the motion floor, with the cause (one-axis: faithful only already).
+			if (motionAdaptiveOn && !oneAxisThisFrame && !upscaleMotionCause.empty())
+				lines.push_back("Adaptive upscale motion: no vectors (alias-safe weight; " + upscaleMotionCause + ")");
+			// FIX1 (gate M1): the module's own floor (no usable factor map) while the stage found the vectors usable.
+			else if (module.MotionFloorUsed())
+				lines.push_back("Adaptive upscale motion: no vectors (alias-safe weight; " + module.MotionFloorCauseText() + ")");
 		}
 		if (motionAdaptiveOn)
 		{
 			const AdaptiveDownscale::MotionState m = module.LastMotionState();
-			lines.push_back(m == AdaptiveDownscale::MotionState::Used ?
+			lines.push_back(upscaleThisFrame && module.MotionFloorUsed() ?
+				"Motion-adapted blend: no vectors on this frame (upscale: the motion floor, alias-safe lean)" :
+				m == AdaptiveDownscale::MotionState::Used ?
 				"Motion-adapted blend: on (vectors; untracked or fast motion uses the faithful scaler)" :
 				m == AdaptiveDownscale::MotionState::NoVectors ? "Motion-adapted blend: no vectors on this frame (plain blend)" :
 				"Motion-adapted blend: idle (the blend did not run on the last frame)");

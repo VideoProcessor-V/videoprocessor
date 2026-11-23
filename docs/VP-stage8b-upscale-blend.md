@@ -71,7 +71,9 @@ The grain keys are shared with Stage 8 (`adaptive_grain_*`); the
 - Synthetic grain field: the output approaches the faithful branch by
   `grain_floor`; a clean textured field equals the CNN branch; a cut
   snaps.
-- Edge: with the blend on, an edge equals the CNN branch (no edge term).
+- Edge: the edge term is in the law (CF-2 B1): w = clamp(w_base (1 - e) g) x m,
+  so a strong edge (e = 1) equals the alias-safe branch and e = 0 leaves the
+  grain and motion weight unchanged (GPU test AdaptiveUpscaleBlendsCnnAndFaithfulByGrain).
 - SuperRes: strength tracks `grain_scale`.
 - Gate: no effect on native or 4K sources; applies at 1080p; both light
   domains give the same `w` map.

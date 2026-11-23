@@ -32,7 +32,7 @@ libplacebo's chroma upscaler skipped)** -> grain re-add -> scaling -> tone mappi
   co-sited = `-(f-1)/2`, centred 0). `ShiftOf(Siting, fx, fy)` maps a stated siting (left, centre, top-left, top, bottom-left, bottom) to the shift.
   With `n = 4x + 2 - s4 - 2f` (`s4 = 4 shift`: shifts are multiples of a quarter luma pixel, which covers the common shifts and a shift scaled by a
   re-base factor that is a multiple of 0.5, `ChromaSiting::ShiftAfterResample`): `i0 = floor(n / 4f)`, `phase = n - 4f i0`.
-- Kernel: Lanczos a = 3, 6 taps `i0-2 .. i0+3`, 4f phases, Q14 weights, normalised before rounding, summing exactly to 16384 (the largest tap takes the few-unit rounding remainder).
+- Kernel (CF-2 B5a-2: the double weights come from `ScalerKernels` (shared/KernelTable.h, the Lanczos a = 3 entry); the Q14 rounding is unchanged and a test proves the tables equal the former private kernel's): Lanczos a = 3, 6 taps `i0-2 .. i0+3`, 4f phases, Q14 weights, normalised before rounding, summing exactly to 16384 (the largest tap takes the few-unit rounding remainder).
 - Passes: horizontal then vertical, `(sum + 8192) >> 14` in int32 each; the horizontal result stays an integer. The int32 bound
   (65535 x (P^2 + N^2) / 16384, P / N the positive / negative weight sums, 1.82e9 < 2^31) is asserted by a test.
 - Range: only the 16-bit container is clamped (`[0, 65535]`); overshoot beyond the video range is signal (BTB / WTW preserved).
@@ -51,7 +51,7 @@ P and T (4:2:2, horizontally co-sited = `Siting::Left`), codes in the PQ-IPT cod
 
 ## Tests
 
-`BasicChromaTests.cpp` (`VideoProcessor-Test`): `BasicChromaModelTests` (CPU): phase tables sum exactly and respect the int32 bound; position logic against double math for every
+`BasicChromaTests.cpp` (`VideoProcessor-Test`): `BasicChromaModelTests` (CPU): phase tables sum exactly and respect the int32 bound; the Q14 tables equal the legacy private-kernel tables for every factor and phase; position logic against double math for every
 factor and siting; co-sited outputs equal the input exactly; siting on a ramp; mirror symmetry; the kernel against a double-precision reference (worst error logged, <= 4 codes);
 flat exact, BTB / WTW overshoot kept; bars flat and no read across the boundary; composed 12-bit IPT 4:2:2; refused geometries; the engine read path.
 `BasicChromaGpuTests` (GpuWarp): the GLSL pass is BYTE-identical to the CPU model for 9 geometries, refuses what the CPU refuses, GLSL arithmetic is integer only.

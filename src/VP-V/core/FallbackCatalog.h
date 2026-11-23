@@ -715,6 +715,22 @@ namespace FallbackCatalog
 			"libplacebo downscaler (SSimDownscaler not in the shader list)" :
 			"plain SSIM (adaptive downscale failed on the GPU)");
 	}
+	// CF-2 B1 (refs/123 N1.4): the adaptive upscale (hybrid) form. A GPU failure (the alias-safe ScalerPass or the blend) leaves
+	// libplacebo's main scaler alone (the hooks hand the picture back); no usable vectors with adaptive_motion on leaves the motion
+	// floor (the alias-safe lean). Both are named with the cause; the failure first.
+	inline Decision OutputScalingUpscale(bool requested, bool failureHeld, const std::string& scalerError, bool motionFloor,
+		const std::string& motionCause)
+	{
+		if (!requested)
+			return Released("output scaling");
+		if (failureHeld)
+			return Engaged("output scaling", "libplacebo main scaler alone (adaptive upscale failed on the GPU" +
+				(scalerError.empty() ? std::string() : ": alias-safe ScalerPass: " + scalerError) + ")");
+		if (motionFloor)
+			return Engaged("output scaling", "adaptive upscale: no vectors, alias-safe weight (" +
+				(motionCause.empty() ? std::string("no motion map") : motionCause) + ")");
+		return Released("output scaling");
+	}
 	// Native GPU readbacks (drive/led_measure/NativeReadback.h, fx/dv-frame-quiet): a device without a D3D11
 	// fence polls the staging copy with a non-waiting map instead (the readiness is less exact), and a copy
 	// issued by a LATER frame's flush than its own (the host's post-frame flush did not run) arrives a frame
