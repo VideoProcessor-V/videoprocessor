@@ -704,6 +704,17 @@ namespace TdV2
 			if (!cfg_.IsEnabled())
 				return res;
 
+			// Upfront sourceBits validation (Rule 4: invalid bit depth closes cleanly and visibly).
+			if (!(PeakCodeForBits(cfg_.sourceBits) > 0.0))
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ReferenceEngine invalid sourceBits");
+				ResetCarry();
+				res.carryReset = true;
+				res.nonFiniteCells = numCells;
+				return res;
+			}
+
 			// Visible telemetry when long-reach I-anchor is enabled in config without a long-pair producer.
 			if (cfg_.enableLongAnchor && standIns != nullptr)
 				standIns->Engage(StandInKind::LongPairDrift, "enableLongAnchor requested; 1-session long pair pending");
@@ -1092,9 +1103,13 @@ namespace TdV2
 
 			// Per-pixel spatial-only interpolation (ZERO bleed across vetoed cell boundaries — HIGH-5),
 			// 3-sigma Huber taper, and pixel-domain bound when transform is unknown.
+			// Codec-frame-grid-aligned interior full 8x8 bounds so non-8-aligned letterbox/pillarbox bars
+			// never misalign the codec's 8x8 grid and leading/trailing partial strips receive ApplyTransformUnknownBound.
 			TdV2Plane deltaPlane(w, h, 0.0);
-			const int bxEnd = active.x0 + ((active.Width() / 8) * 8);
-			const int byEnd = active.y0 + ((active.Height() / 8) * 8);
+			const int bxStart = ((active.x0 + 7) / 8) * 8;
+			const int byStart = ((active.y0 + 7) / 8) * 8;
+			const int bxEnd = (active.x1 / 8) * 8;
+			const int byEnd = (active.y1 / 8) * 8;
 
 			for (int y = active.y0; y < active.y1; ++y)
 			{
@@ -1105,9 +1120,10 @@ namespace TdV2
 					const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
 					const size_t pIdx = static_cast<size_t>(y) * w + x;
 
-					// Pixels in non-multiple-of-8 remainder strips cannot enter an 8x8 DCT block,
+					// Pixels in leading/trailing non-8-aligned partial strips cannot enter an interior 8x8 DCT block,
 					// so they ALWAYS receive the derived pixel-domain band bound (HIGH-6).
-					const bool inFull8x8Block = in.transformIdentified8x8 && (x < bxEnd) && (y < byEnd);
+					const bool inFull8x8Block = in.transformIdentified8x8 && (bxStart < bxEnd) && (byStart < byEnd) &&
+					                            (x >= bxStart) && (x < bxEnd) && (y >= byStart) && (y < byEnd);
 
 					double totalDelta = 0.0;
 					for (int b = 0; b < 3; ++b)
@@ -1149,8 +1165,9 @@ namespace TdV2
 			}
 
 			// Identified 8x8 DCT transform-domain STRICT/CELL projection strictly on the coded residual r = X - P_B (HIGH-6),
+			// over codec-frame-grid-aligned interior blocks [bxStart, bxEnd) x [byStart, byEnd),
 			// alternating with the pixel-domain code range [0, PeakCodeForBits] for genuine 2-set POCS!
-			if (in.transformIdentified8x8 && effStepDelta > 0.0)
+			if (in.transformIdentified8x8 && effStepDelta > 0.0 && (bxStart < bxEnd) && (byStart < byEnd))
 			{
 				const double peakCode = PeakCodeForBits(cfg_.sourceBits);
 				const TdV2Plane& predClean = refs[0].clean; // P_B primary reference prediction
@@ -1158,9 +1175,9 @@ namespace TdV2
 				for (int it = 0; it < iters; ++it)
 				{
 					// Set 1: Transform-domain quantization-cell projection on residual r = X - P_B.
-					for (int by = active.y0; by < byEnd; by += 8)
+					for (int by = byStart; by < byEnd; by += 8)
 					{
-						for (int bx = active.x0; bx < bxEnd; bx += 8)
+						for (int bx = bxStart; bx < bxEnd; bx += 8)
 						{
 							double sentRes[64] = {}, blendRes[64] = {}, projRes[64] = {};
 							for (int j = 0; j < 8; ++j)
@@ -1189,9 +1206,9 @@ namespace TdV2
 					// Set 2: Pixel-domain valid code-range projection [0, peakCode] (makes 2nd POCS iteration genuine).
 					if (peakCode > 0.0)
 					{
-						for (int y = active.y0; y < byEnd; ++y)
+						for (int y = byStart; y < byEnd; ++y)
 						{
-							for (int x = active.x0; x < bxEnd; ++x)
+							for (int x = bxStart; x < bxEnd; ++x)
 							{
 								const double cVal = curClean.at(x, y);
 								const double clamped = (std::max)(0.0, (std::min)(peakCode, cVal + deltaPlane.at(x, y)));

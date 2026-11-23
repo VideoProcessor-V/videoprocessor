@@ -104,6 +104,12 @@ namespace TdV2
 			CodingGridSummary out;
 			if (curY == nullptr || w <= 0 || h <= 0)
 				return out;
+			if (!(PeakCodeForBits(sourceBits) > 0.0))
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2CodingGridStandIn invalid sourceBits");
+				return out;
+			}
 
 			const int cellEdge = static_cast<int>(QualityPattern::kBlockGridCellEdge);
 			out.cellsW = static_cast<int>(QualityPattern::BlockGridCellsX(static_cast<uint32_t>(w)));
@@ -139,7 +145,7 @@ namespace TdV2
 					double boundYSum = 0.0, interYSum = 0.0;
 					size_t boundYCnt = 0, interYCnt = 0;
 
-					double sad1 = 0.0, sad2 = 0.0;
+					double copyDiffPrev1 = 0.0, copyDiffPrev2 = 0.0;
 					size_t pxCnt = 0;
 					bool cellNonFinite = false;
 
@@ -159,7 +165,7 @@ namespace TdV2
 							{
 								const double p1 = prev1Y[idx];
 								if (std::isfinite(p1))
-									sad1 += std::fabs(v - p1);
+									copyDiffPrev1 += std::fabs(v - p1);
 								else
 									cellNonFinite = true;
 							}
@@ -167,7 +173,7 @@ namespace TdV2
 							{
 								const double p2 = prev2Y[idx];
 								if (std::isfinite(p2))
-									sad2 += std::fabs(v - p2);
+									copyDiffPrev2 += std::fabs(v - p2);
 								else
 									cellNonFinite = true;
 							}
@@ -246,12 +252,12 @@ namespace TdV2
 
 					if (pxCnt > 0)
 					{
-						if (prev1Y != nullptr && (sad1 / static_cast<double>(pxCnt)) <= copyTol)
+						if (prev1Y != nullptr && (copyDiffPrev1 / static_cast<double>(pxCnt)) <= copyTol)
 						{
 							cell.copyPrev1 = true;
 							++copy1Count;
 						}
-						if (prev2Y != nullptr && (sad2 / static_cast<double>(pxCnt)) <= copyTol)
+						if (prev2Y != nullptr && (copyDiffPrev2 / static_cast<double>(pxCnt)) <= copyTol)
 						{
 							cell.copyPrev2 = true;
 							++copy2Count;

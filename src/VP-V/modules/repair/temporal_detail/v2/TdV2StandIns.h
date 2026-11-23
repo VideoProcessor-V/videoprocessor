@@ -32,6 +32,7 @@ namespace TdV2
 		P16BlockGrid,
 		FocusMapK32,
 		TdCgChromaGrid,
+		ChromaGridDetector = TdCgChromaGrid,
 		TransformUnknownBound,
 		LowConfidenceL3,
 		NonFiniteClosure,
@@ -40,6 +41,8 @@ namespace TdV2
 		MotionFieldStandIn,
 		SingularSolveClosure,
 		BorderBilinearFallback,
+		ChromaCflFallback,
+		ZeroEnergyDarkBlockExcluded,
 		Count
 	};
 
@@ -95,7 +98,11 @@ namespace TdV2
 			{ StandInKind::SingularSolveClosure, "td.fallback.singular_solve",
 			  "covariance solve singular (closed to zero)", "Well-conditioned covariance C" },
 			{ StandInKind::BorderBilinearFallback, "td.fallback.border_bilinear",
-			  "active-rect 1-2px border bilinear warp fallback", "Interior bicubic 4x4 footprint" }
+			  "active-rect 1-2px border bilinear warp fallback", "Interior bicubic 4x4 footprint" },
+			{ StandInKind::ChromaCflFallback, "td.fallback.chroma_cfl",
+			  "chroma: CfL fallback (chroma residual disagreed with luma)", "Carried anchor CfL H5" },
+			{ StandInKind::ZeroEnergyDarkBlockExcluded, "td.q5.zero_energy_excluded",
+			  "grain NLF: zero-energy flat blocks excluded by energy", "Q5(b) dark NLF energy filter" }
 		};
 		const size_t idx = static_cast<size_t>(kind);
 		if (idx < static_cast<size_t>(StandInKind::Count))
