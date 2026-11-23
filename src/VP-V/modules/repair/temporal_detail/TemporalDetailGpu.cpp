@@ -15,6 +15,7 @@
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailShaders.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitVariantOwner.h>
+#include <VP-V/modules/repair/grain_split/GrainGuardGlsl.h>
 
 #include <algorithm>
 #include <initializer_list>
@@ -473,9 +474,8 @@ namespace TemporalDetail
 			law += Define("TD_CLEAN_MEMBER_MIN", kCleanMemberMin) + Define("TD_GAIN_LO", kGainLo) + Define("TD_GAIN_HI", kGainHi);
 			law += Define("TD_ENTER", kEnterWeight) + Define("TD_LEAVE", kLeaveWeight) + Define("TD_TEMPLATE_MIN_HARD", kTemplateMinHard);
 			law += Define("TD_COHERENCE_LO", kCoherenceLo) + Define("TD_COHERENCE_HI", kCoherenceHi) + Define("TD_PIXEL_CAP", kPixelCap);
-			law += Define("TD_BOOST_GRAIN_SHARE", kBoostGrainShare) + Define("TD_GUARD_MAX_SHARE", kGuardMaxShare) + Define("TD_ADDBACK_MIN", kGuardAddBackMin);
-			law += Define("TD_GUARD_DROP_TRIP", kGuardDropTrip) + Define("TD_GUARD_RISE_TRIP", kGuardRiseTrip) + Define("TD_GUARD_FREEZE_TRIP", kGuardFreezeTrip);
-			law += Define("TD_GUARD_RELEASE", kGuardRelease);
+			law += Define("TD_BOOST_GRAIN_SHARE", kBoostGrainShare);
+			law += GrainSplit::Guard::Defines();   // the shared guard unit's constants (GS_GUARD_*, GrainGuardGlsl.h, 15b A4)
 			if (params.guard) law += "#define TD_GUARD 1\n";
 			if (haveFwd) law += "#define TD_FWD 1\n";
 			if (params.quality) law += "#define TD_QUALITY 1\n";
@@ -501,8 +501,9 @@ namespace TemporalDetail
 			const float vInvXf = static_cast<float>(1.0 / fXf), vRun = static_cast<float>(fRun);
 			const float vRise = static_cast<float>(1.0 / fRise), vFall = static_cast<float>(1.0 / fFall);
 			const float vStrength = static_cast<float>(set.strength), vBoost = static_cast<float>(set.boost ? set.boostMax : 0.0);
-			const float vAlpha = static_cast<float>(1.0 - 1.0 / Frames(kGuardStatsSeconds, hz));
-			const float vGFall = static_cast<float>(1.0 / Frames(kGuardFallSeconds, hz)), vGRise = static_cast<float>(1.0 / Frames(kGuardRiseSeconds, hz));
+			const float vAlpha = static_cast<float>(1.0 - 1.0 / Frames(GrainSplit::Guard::kStatsSeconds, hz));
+			const float vGFall = static_cast<float>(1.0 / Frames(GrainSplit::Guard::kFallSeconds, hz));
+			const float vGRise = static_cast<float>(1.0 / Frames(GrainSplit::Guard::kRiseSeconds, hz));
 			const float vBwdBpx = static_cast<float>(params.backward.blockPx > 0.0 ? params.backward.blockPx : 16.0);
 			const float vFwdBpx = static_cast<float>(params.forward.blockPx > 0.0 ? params.forward.blockPx : 16.0);
 			const float vBudget = static_cast<float>(params.grainBudget), vShare = static_cast<float>(params.guardTemplateShare);
@@ -636,10 +637,11 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 				baseG + (lagOk ? std::string(Shaders::kPairBwd) + Shaders::kPrevG : std::string()) + Shaders::kReduce, Shaders::kGuardSumsBody, g.bw, g.bh, redShmem))
 				return fail("guard sums pass failed");
 			d = { Sampled("st_in", m.state[0]), Storage("st_out", m.state[1]), Sampled("gsum", m.gsum), Storage("kback_out", m.kback) };
-			if (!run("VideoProcessor temporal detail: grain guard add-back", base + Shaders::kStateLoad + Shaders::kStateStore, Shaders::kGuardEmaBody, bgx, bgy, 0))
+			const std::string guardBase = base + Shaders::kStateLoad + Shaders::kStateStore + GrainSplit::Guard::Functions();   // the shared guard law
+			if (!run("VideoProcessor temporal detail: grain guard add-back", guardBase, Shaders::kGuardEmaBody, bgx, bgy, 0))
 				return fail("guard add-back pass failed");
 			d = { Sampled("st_in", m.state[1]), Storage("st_out", m.state[0]), Sampled("kback", m.kback), Storage("gflag_out", m.gflag) };
-			if (!run("VideoProcessor temporal detail: grain guard", base + Shaders::kStateLoad + Shaders::kStateStore, Shaders::kGuardPoolBody, bgx, bgy, 0))
+			if (!run("VideoProcessor temporal detail: grain guard", guardBase, Shaders::kGuardPoolBody, bgx, bgy, 0))
 				return fail("guard pass failed");
 			d = { Sampled("gflag", m.gflag), Sampled("tab_new", m.tab[tabNew]), Sampled("counters_old", m.counters[m.cntCur]),
 				Storage("counters_out", m.counters[1 - m.cntCur]) };

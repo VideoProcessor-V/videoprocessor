@@ -272,10 +272,11 @@ namespace TemporalDetail
 			bool retired = false;
 			double qPeak = 0.0, e2Peak = 0.0, fPeak = 0.0;
 			// output-vs-input grain guard: factor, hysteresis flag, EMA of the tile sums
-			// (Ein, Eout, cross, Lin, Lout, Pin, Pout: see Model::Process step 10)
+			// (Ein, Eout, cross, Lin, Lout, Pin, Pout: see Model::Process step 10); the per-block state of the shared
+			// guard unit GrainSplit::Guard (its law and constants live there, 15b A4)
 			double guard = 1.0;
 			bool guardOn = false;
-			double ema[7] = { 0, 0, 0, 0, 0, 0, 0 };
+			double ema[GrainSplit::Guard::kSums] = { 0, 0, 0, 0, 0, 0, 0 };
 		};
 
 		struct Eval
@@ -408,7 +409,7 @@ namespace TemporalDetail
 			double grainBudget = kGrainBudget;   // <= 0: no budget (the transfer at its designed strength)
 			bool templateClean = true;           // the multi-frame template cleaner (false: the single-frame split's bands, for measurement)
 			double cleanKappa = kCleanKappa;
-			double guardTemplateShare = kGuardTemplateShare;   // <= 0: the guard reads every low-f pixel (no structure mask)
+			double guardTemplateShare = GrainSplit::Guard::kTemplateShare;   // <= 0: the guard reads every low-f pixel (no structure mask)
 			bool guard = true;
 			// > 0: every block with a selected reference transfers at this weight, gates and limiter bypassed (the transfer's
 			// ceiling, for measurement only - test/temporal-detail-real; the projection, coherence, budget and guard still apply)
@@ -1488,15 +1489,16 @@ namespace TemporalDetail
 		// the previous frame's G_in / G_out warped one hop along the backward vectors (measurement only, never output).
 		{
 			const bool lagOk = m_havePrevG && haveBwd && !reason && m_prevGin.w == w && m_prevGin.h == h;
-			std::vector<double> sums(static_cast<size_t>(nb) * 7, 0.0);
+			constexpr int kGs = GrainSplit::Guard::kSums;   // the guard unit's seven tile sums (GrainGuard.h)
+			std::vector<double> sums(static_cast<size_t>(nb) * kGs, 0.0);
 			for (int y = 0; y < h; ++y)
 				for (int x = 0; x < w; ++x)
 				{
 					const size_t pi = static_cast<size_t>(y) * w + x;
-					// grain-dominated pixels of the map only (f < kGuardMaxShare): structure the transfer adds legitimately lives where f is high
-					if (A.f.v[pi] >= kGuardMaxShare) continue;
+					// grain-dominated pixels of the map only (f < Guard::kMaxShare): structure the transfer adds legitimately lives where f is high
+					if (A.f.v[pi] >= GrainSplit::Guard::kMaxShare) continue;
 					const double gin = A.grain.v[pi], dd = (1.0 - A.f.v[pi]) * gdel[pi], gout = gin + dd;
-					double* sb = &sums[(static_cast<size_t>(y / B) * bw + (x / B)) * 7];
+					double* sb = &sums[(static_cast<size_t>(y / B) * bw + (x / B)) * kGs];
 					sb[0] += gin * gin; sb[1] += gout * gout; sb[2] += dd * gin;
 					if (lagOk)
 					{
@@ -1508,13 +1510,13 @@ namespace TemporalDetail
 				}
 			auto pooled = [&](const std::vector<double>& v, int bx, int by, double* o)
 			{
-				for (int q = 0; q < 7; ++q) o[q] = 0.0;
+				for (int q = 0; q < kGs; ++q) o[q] = 0.0;
 				for (int j = -1; j <= 1; ++j)
 					for (int ii = -1; ii <= 1; ++ii)
 					{
 						const int xx = (std::max)(0, (std::min)(bw - 1, bx + ii)), yy = (std::max)(0, (std::min)(bh - 1, by + j));
-						const double* sb = &v[(static_cast<size_t>(yy) * bw + xx) * 7];
-						for (int q = 0; q < 7; ++q) o[q] += sb[q];
+						const double* sb = &v[(static_cast<size_t>(yy) * bw + xx) * kGs];
+						for (int q = 0; q < kGs; ++q) o[q] += sb[q];
 					}
 			};
 			// (a) immediate: add back the measured missing current-frame grain (this frame's pooled projection)
@@ -1523,11 +1525,11 @@ namespace TemporalDetail
 			for (int by = 0; by < bh; ++by)
 				for (int bx = 0; bx < bw; ++bx)
 				{
-					double o[7];
+					double o[kGs];
 					pooled(sums, bx, by, o);
-					const double k = o[0] > 1e-9 ? -o[2] / o[0] : 0.0;
+					const double add = m_tune.guard ? GrainSplit::Guard::AddBack(o) : 0.0;
 					const size_t u = static_cast<size_t>(by) * bw + bx;
-					if (m_tune.guard && k > kGuardAddBackMin) { kBack[u] = (std::min)(1.0, k); anyBack = true; ++d.addBackBlocks; }
+					if (add > 0.0) { kBack[u] = add; anyBack = true; ++d.addBackBlocks; }
 					d.addBack[u] = kBack[u];
 				}
 			if (anyBack)
@@ -1542,42 +1544,29 @@ namespace TemporalDetail
 						d.grainOut.v[pi] = A.grain.v[pi] + k * A.grain.v[pi];
 					}
 			// (b) the weight: EMA of the sums, pooled; trip / release with hysteresis; fast fall, slow rise
-			const double alpha = 1.0 - 1.0 / Frames(kGuardStatsSeconds, hz);
-			const double gFall = 1.0 / Frames(kGuardFallSeconds, hz), gRise = 1.0 / Frames(kGuardRiseSeconds, hz);
+			const double alpha = 1.0 - 1.0 / Frames(GrainSplit::Guard::kStatsSeconds, hz);
+			const double gFall = 1.0 / Frames(GrainSplit::Guard::kFallSeconds, hz), gRise = 1.0 / Frames(GrainSplit::Guard::kRiseSeconds, hz);
 			for (int u = 0; u < nb; ++u)
 			{
 				BlockState& st = m_blocks[static_cast<size_t>(u)];
-				const double* sb = &sums[static_cast<size_t>(u) * 7];
-				for (int q = 0; q < 7; ++q) st.ema[q] = alpha * st.ema[q] + sb[q];
+				const double* sb = &sums[static_cast<size_t>(u) * kGs];
+				for (int q = 0; q < kGs; ++q) st.ema[q] = alpha * st.ema[q] + sb[q];
 			}
-			std::vector<double> emaAll(static_cast<size_t>(nb) * 7);
+			std::vector<double> emaAll(static_cast<size_t>(nb) * kGs);
 			for (int u = 0; u < nb; ++u)
-				for (int q = 0; q < 7; ++q) emaAll[static_cast<size_t>(u) * 7 + q] = m_blocks[static_cast<size_t>(u)].ema[q];
+				for (int q = 0; q < kGs; ++q) emaAll[static_cast<size_t>(u) * kGs + q] = m_blocks[static_cast<size_t>(u)].ema[q];
 			for (int by = 0; by < bh; ++by)
 				for (int bx = 0; bx < bw; ++bx)
 				{
 					const size_t u = static_cast<size_t>(by) * bw + bx;
 					BlockState& st = m_blocks[u];
-					double o[7];
+					double o[kGs];
 					pooled(emaAll, bx, by, o);
-					double v = 0.0;
-					if (o[0] > 1e-9)
-					{
-						const double L = std::sqrt(o[1] / o[0]);
-						const double drop = (std::max)(1.0 - L, -o[2] / o[0]);
-						v = (std::max)(drop / kGuardDropTrip, (L - 1.0) / kGuardRiseTrip);
-						if (o[5] > 1e-9 && o[6] > 1e-9 && o[1] > 1e-9)
-						{
-							const double freeze = o[4] / std::sqrt(o[1] * o[6]) - o[3] / std::sqrt(o[0] * o[5]);
-							v = (std::max)(v, freeze / kGuardFreezeTrip);
-						}
-					}
+					// the shared guard unit's law (repair/grain_split/GrainGuard.h, 15b A4): violation, trip / release, weight step
+					const double v = GrainSplit::Guard::Violation(o);
 					d.guardViolation[u] = v;
 					if (!m_tune.guard) continue;
-					if (!st.guardOn && v > 1.0) { st.guardOn = true; ++d.guardTrips; }
-					else if (st.guardOn && v < kGuardRelease) st.guardOn = false;
-					const double target = st.guardOn ? (v > 1.0 ? st.guard / v : st.guard) : 1.0;
-					st.guard += Clamp(target - st.guard, -gFall, gRise);
+					if (GrainSplit::Guard::Step(v, gFall, gRise, st.guardOn, st.guard)) ++d.guardTrips;
 					d.guardOn[u] = st.guardOn ? 1 : 0;
 					if (st.guardOn) ++d.guardActive;
 				}

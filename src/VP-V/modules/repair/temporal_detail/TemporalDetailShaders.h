@@ -937,7 +937,7 @@ for (int j = 0; j < TD_B; j += 16)
         ivec2 p = b * TD_B + l;
         if (l.x < TD_B && l.y < TD_B && p.x < TD_W && p.y < TD_H) {
             vec4 sp = gs_fetch(p);
-            if (sp.z < TD_GUARD_MAX_SHARE) {
+            if (sp.z < GS_GUARD_MAX_SHARE) {
                 float y = texelFetch(src, p, 0).x * TD_INV_CU;
                 float gin = y - (sp.w + sp.x + sp.y);
                 float dd = (1.0 - sp.z) * texelFetch(delta, p, 0).y;
@@ -971,10 +971,9 @@ if (b.x < TD_BW && b.y < TD_BH) {
             o0 += s.x;
             o2 += s.z;
         }
-    float kk = o0 > 1e-9 ? -o2 / o0 : 0.0;
     float kb = 0.0;
 #ifdef TD_GUARD
-    if (kk > TD_ADDBACK_MIN) kb = min(1.0, kk);
+    kb = gs_guard_addback(o0, o2);
 #endif
     vec4 s0 = texelFetch(gsum, ivec2(2 * b.x, b.y), 0), s1 = texelFetch(gsum, ivec2(2 * b.x + 1, b.y), 0);
     st.ema0 = alpha * st.ema0 + s0.x; st.ema1 = alpha * st.ema1 + s0.y; st.ema2 = alpha * st.ema2 + s0.z;
@@ -985,7 +984,8 @@ if (b.x < TD_BW && b.y < TD_BH) {
 }
 )GLSL";
 
-		// (b) the pooled EMA: trip / release with hysteresis, the guard factor (fast fall, slow rise).
+		// (b) the pooled EMA: trip / release with hysteresis, the guard factor (fast fall, slow rise). The law is the shared
+		// guard unit's GLSL (GrainSplit::Guard::Functions(), repair/grain_split/GrainGuardGlsl.h, 15b A4), as is (a)'s add-back.
 		constexpr const char* kGuardPoolBody = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 if (b.x < TD_BW && b.y < TD_BH) {
@@ -998,22 +998,10 @@ if (b.x < TD_BW && b.y < TD_BH) {
             vec4 e6 = texelFetch(st_in, ivec2(nq.x * 8 + 6, nq.y), 0), e7 = texelFetch(st_in, ivec2(nq.x * 8 + 7, nq.y), 0);
             o[0] += e6.y; o[1] += e6.z; o[2] += e6.w; o[3] += e7.x; o[4] += e7.y; o[5] += e7.z; o[6] += e7.w;
         }
-    float v = 0.0;
-    if (o[0] > 1e-9) {
-        float L = sqrt(o[1] / o[0]);
-        float drop = max(1.0 - L, -o[2] / o[0]);
-        v = max(drop / TD_GUARD_DROP_TRIP, (L - 1.0) / TD_GUARD_RISE_TRIP);
-        if (o[5] > 1e-9 && o[6] > 1e-9 && o[1] > 1e-9) {
-            float freeze = o[4] / sqrt(o[1] * o[6]) - o[3] / sqrt(o[0] * o[5]);
-            v = max(v, freeze / TD_GUARD_FREEZE_TRIP);
-        }
-    }
+    float v = gs_guard_violation(o);
     float tripped = 0.0;
 #ifdef TD_GUARD
-    if (st.guardOn < 0.5 && v > 1.0) { st.guardOn = 1.0; tripped = 1.0; }
-    else if (st.guardOn > 0.5 && v < TD_GUARD_RELEASE) st.guardOn = 0.0;
-    float target = st.guardOn > 0.5 ? (v > 1.0 ? st.guard / v : st.guard) : 1.0;
-    st.guard += clamp(target - st.guard, -g_fall, g_rise);
+    if (gs_guard_step(v, g_fall, g_rise, st.guardOn, st.guard)) tripped = 1.0;
 #endif
     td_store(b, st);
     imageStore(gflag_out, b, vec4(st.guardOn, tripped, texelFetch(kback, b, 0).x > 0.0 ? 1.0 : 0.0, v));

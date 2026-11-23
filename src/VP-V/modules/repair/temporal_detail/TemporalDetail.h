@@ -7,6 +7,8 @@
 // (TemporalDetailShaders.h).
 #pragma once
 
+#include <VP-V/modules/repair/grain_split/GrainGuard.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -69,12 +71,9 @@ namespace TemporalDetail
 	constexpr double kCleanKappa = 4.0;                  // Wiener gain P / (P + kappa V) (2 .. 8 within 0.2 dB; 4 best at the strict bounds)
 	constexpr double kCleanMemberMin = 0.5;              // a slot joins the evidence where its alignment gates (motion, base match, correlation) reach this
 	constexpr double kBoostGrainShare = 0.04;            // fallback boost: the current grain is scaled by at most 1 + this
-	// Output-vs-input grain guard (step 10): tile statistics on the shared grain map, pooled over 3 x 3 blocks
-	constexpr double kGuardStatsSeconds = 0.25;          // EMA time constant of the tile sums
-	constexpr double kGuardDropTrip = 0.04;              // current-grain loss (projection or level) that trips
-	constexpr double kGuardRiseTrip = 0.05;              // output grain level above the input's that trips
-	constexpr double kGuardFreezeTrip = 0.03;            // lag-1 grain correlation increase that trips (0.05 before the structure-transfer exclusion)
-	constexpr double kGuardRelease = 0.5;                // hysteresis: released below this share of the trip level
+	// Output-vs-input grain guard (step 10): tile statistics on the shared grain map, pooled over 3 x 3 blocks. Its constants
+	// and law are the shared unit GrainSplit::Guard (repair/grain_split/GrainGuard.h, 15b A4; kFreezeTrip 0.03 was 0.05
+	// before the structure-transfer exclusion).
 	// Per-block gate factors (FrameIn::blockGates / Gpu::Params::blockGates), sanitised identically on the CPU model and the
 	// GPU (merge audit 2026-11-01): a non-finite factor is 1; the three threshold factors are bounded to
 	// [kBlockGateMin, kBlockGateMax] (a 0 would make a smoothstep edge pair equal); the strength factor to [0, 1] (never above
@@ -87,10 +86,6 @@ namespace TemporalDetail
 		const double lo = k == 3 ? 0.0 : kBlockGateMin, hi = k == 3 ? 1.0 : kBlockGateMax;
 		return v < lo ? lo : (v > hi ? hi : v);
 	}
-	constexpr double kGuardFallSeconds = 0.1, kGuardRiseSeconds = 2.0;   // guard factor rate limits (slow recovery: no trip/release cycling under damage)
-	constexpr double kGuardAddBackMin = 0.01;            // measured current-grain loss below this is not added back
-	constexpr double kGuardMaxShare = 0.2;               // guard statistics use grain-dominated pixels only (Wiener share f below this)
-	constexpr double kGuardTemplateShare = 0.25;         // the guard ignores the template's structure transfer where T^2 > this x the grain level N
 	constexpr double kCameraMinConfidence = 0.5;         // the model ignores a camera view below this
 
 	// TD-NONFINITE: evidence that is NaN or infinite closes its gates (weight 0) explicitly; the comparison-based

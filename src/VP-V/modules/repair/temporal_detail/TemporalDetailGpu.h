@@ -93,7 +93,7 @@ namespace TemporalDetail
 			double grainBudget = kGrainBudget;
 			bool templateClean = true;
 			double cleanKappa = kCleanKappa;
-			double guardTemplateShare = kGuardTemplateShare;
+			double guardTemplateShare = GrainSplit::Guard::kTemplateShare;
 			bool guard = true;
 			// Reference-store tier: past slots kept (1 .. kSlots). Small cards keep fewer (SlotsForBudget); the status says
 			// "store N of 5 slots (memory tier)" whenever it is below kSlots. The CPU model's Tuning::slots matches it.

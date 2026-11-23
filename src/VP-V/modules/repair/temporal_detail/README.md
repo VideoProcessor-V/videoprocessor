@@ -6,6 +6,15 @@ Unit **repair** | replaces `repair.texture_restore` (order 90) | status **draft*
 - Goal: temporal detail from the engine's shared motion and trust, never a private estimate of either.
 - Decision (L-B6, WAIVER-B6-TD-TRUST; source: lead 8 brief and lane L-B6 commits 1eb3e66ce..; 2026-11-14T13:25Z): `SharedMotionSource` reads BOTH directions of the cell trust from the engine memo (`FlowView::CellTrust` / `CellTrustBackward`) through a `FlowOf` seam; its own recompute (CostWeights + FbError + CellTrust) is deleted. The old arithmetic remains only as the test-side reference of the migration identity test (both directions, bit-equal). The adapter has no production host wiring yet (tests only); the host passes the engine `FlowOf` when it is wired.
 - Decision (C5 batch B, `cut_soft_reset`; review D:\codex\vp-handover\batchB\review-softreset-r1.md L1, plan lead19\c5-softreset.md item 2 "(and TD model)"; owner 2026-11-15 08:35 EST U7 Q4 "need the bar fairly high here. Mid scene firing is a major problem", 09:20 fades: no full restart, history gently reduced): temporal detail reads the SAME soft-reset product as detail pulse and texture restore. `SharedSceneSource` (SharedSceneSource.h) calls `VpDetailRestore::SceneRestartOf(seq, reader, cut_soft_reset)` once per new frame and copies the answer field for field into `SceneRestartInput` (TemporalDetail.h: restart, fromRecord, fadeWithoutKeep, fadePartial, softPartial, historyKeep, strength, the consumers' status note) for `Model::FrameIn::sceneRestart` / `Gpu::Params::sceneRestart`. The rule, the bar `kSoftResetBar` and the depth `kSoftResetDepth` stay U7's (CutFadeJudge.h); nothing here re-decides them. A soft reset is no reset: every stored slot's keep is multiplied by `historyKeep` (`SoftResetKeep`, 0.5 at strength 1) through the fade keep's multiply (GPU: the same `fade_keep`, no shader change). The adapter is a separate header so the model stays free of the renderer hub (tools/td-cli). Like `SharedMotionSource`, it has no production host wiring yet (tests only).
+- Decision (15b A4; source: lead18 coreplan-C10-15b-PC-grain.md (c) A4 / (d), refs/129 L-B2 (d); 2026-11-15): the
+  output-vs-input grain guard (step 10) is the shared unit `GrainSplit::Guard` (repair/grain_split/GrainGuard.h, CPU law +
+  constants; GrainGuardGlsl.h, the same law as GLSL with `GS_GUARD_*` defines). This module's own `kGuard*` constants and
+  its private copies of the violation / add-back / trip-release-step arithmetic are deleted; the model calls
+  `Guard::Violation / AddBack / Step` and the GPU passes call `gs_guard_violation / gs_guard_addback / gs_guard_step`.
+  IDENTICAL by construction (same expressions; `std::max/min` vs ternary differ only for NaN). The per-block state (EMA of
+  the seven sums, the weight, the trip flag) and the previous-frame grain stay this reader's. Open: the guard's `P_in`
+  is still the module's own previous `G_in` (CPU `m_prevGin`, GPU `prevg`), not `Acquire(kP10GrainSplit, seq - 1)`
+  (needs the post-C5 acquire path; listed in the 15b hand-back).
 
 
 ## Purpose
@@ -131,7 +140,7 @@ frame count follows the measured content rate (`Frames(seconds, hz)`); no GOP, c
    below half), its weight factor falls to `guard / v` (rate `1 / Frames(0.1 s)`) and recovers over `Frames(2 s)` (no
    trip/release cycling under damage, which the two-seed isolate reads as a low-band rise). Counted (`guardTrips`, `addBackBlocks`) and visible in the status
    (`; grain guard: N blocks, add-back M`). The guard cannot see grain hidden in dense texture (no spatial map can); the
-   template budget covers that.
+   template budget covers that. The constants and law are the shared unit `GrainSplit::Guard` (grain_split/GrainGuard.h).
 
 Two-sided: in queued modes the future slot is the best frame in the queue window, warped once by composed
 forward vectors; it serves as referee (step 3) and as a reference for the last B-frames of a group and for
