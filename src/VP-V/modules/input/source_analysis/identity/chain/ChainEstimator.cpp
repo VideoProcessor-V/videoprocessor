@@ -1768,10 +1768,12 @@ namespace SourceIdentity
 					if (!harmCands.empty())
 					{
 						const HarmonicSelectionResult hRes = SelectFundamentalHarmonic(harmCands, rasterW, rasterH, jNeed);
-						if (hRes.found && hRes.reason == HarmonicSelectionReason::SelectedFundamentalConfirmed)
+						if (hRes.found && (hRes.reason == HarmonicSelectionReason::SelectedFundamentalConfirmed ||
+							hRes.reason == HarmonicSelectionReason::RejectedSubHarmonicDetailAbove))
 						{
 							cR1HarmonicSelections.fetch_add(1, std::memory_order_relaxed);
-							// Apply confirmed fundamental to both chain pair (when chain-alone eligible) and joint target.
+							// Apply R1-selected fundamental (or clean super-harmonic after rejecting detailAbove sub-harmonic)
+							// to both chain pair (when chain-alone eligible) and joint target.
 							if (jIn.haveChainPair)
 							{
 								jIn.chainNx = hRes.nx; jIn.chainNxDenom = hRes.Nx;
@@ -1782,6 +1784,12 @@ namespace SourceIdentity
 								jIn.classicalNx = hRes.nx; jIn.classicalNxDenom = hRes.Nx;
 								jIn.classicalNy = hRes.ny; jIn.classicalNyDenom = hRes.Ny;
 							}
+						}
+						else if (!hRes.found && hRes.reason == HarmonicSelectionReason::RejectedSubHarmonicDetailAbove)
+						{
+							// All candidate pairs were invalidated by detail_above: clear chain pair so a false sub-harmonic
+							// cannot enter via chain-alone.
+							jIn.haveChainPair = false;
 						}
 					}
 				}
