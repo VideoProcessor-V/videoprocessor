@@ -21,6 +21,7 @@
 
 #include "SettingsTestSupport.h"
 
+#include <MainConfigSchema.h>
 #include <RendererProfileConfig.h>
 #include <VP-V/modules/control/config/config_pages/VpvTierTable.generated.h>
 #include <VP-V/core/OriginalPathway.h>
@@ -488,6 +489,56 @@ namespace SlotOverrideLayoutTest
 			const Evaluation originalOff = with("pipeline_original_pathway: on\n");
 			const Evaluation originalAuto = with("pipeline_original_pathway: on\ndither_need: auto\n");
 			Assert::IsTrue(originalAuto.fingerprint == originalOff.fingerprint, L"on the Original pathway auto is forced off");
+		}
+
+		// CB W4-4 (settings-plumbing-cleanup: GEM-035, GEM-046):
+		// - uppercase 'X' accepted in source_resolution
+		// - mixed-case accepted in pipeline_order and pipeline_slots_off
+		// - upscale_light accepted in legacy [display]
+		// - AppendDelta includes frame_analysis_store and resync_event, and VpvSettingsDump includes engineOffForced.
+		TEST_METHOD(PlumbingCleanupCaseNormalisationLegacyUpscaleLightAndDeltaDumpTerms)
+		{
+			// GEM-046: uppercase 'X' in source_resolution and mixed-case pipeline_order / pipeline_slots_off.
+			Assert::IsTrue(RendererProfileConfig::ValidateBaseSetting("source_resolution", "1920X1080"),
+				L"uppercase X in source_resolution must be accepted");
+			Assert::IsTrue(RendererProfileConfig::ValidateBaseSetting("source_resolution", "1920x1080"),
+				L"lowercase x in source_resolution stays accepted");
+			Assert::IsFalse(RendererProfileConfig::ValidateBaseSetting("source_resolution", "1920Z1080"),
+				L"invalid separator in source_resolution rejected");
+			Assert::IsTrue(RendererProfileConfig::ValidateBaseSetting("pipeline_order", "Repair.Deband, Scaling.Rebase"),
+				L"mixed-case pipeline_order accepted");
+			Assert::IsTrue(RendererProfileConfig::ValidateBaseSetting("pipeline_slots_off", "Repair.Deband"),
+				L"mixed-case pipeline_slots_off accepted");
+
+			// GEM-046: legacy [display] section accepts upscale_light.
+			{
+				ConfigFile cfg;
+				char base[MAX_PATH] = {};
+				GetTempPathA(MAX_PATH, base);
+				const std::string path = std::string(base) + "vp_w4_4_legacy_display.cfg";
+				{
+					std::ofstream f(path, std::ios::binary | std::ios::trunc);
+					f << "[display]\nupscale_light: gamma\ndownscale_light: linear\n";
+				}
+				Assert::IsTrue(cfg.Load(path, ConfigFile::ReadPolicy::Fresh), L"legacy display cfg loads");
+				std::string err;
+				Assert::IsTrue(MainConfigSchema::Validate(cfg, err),
+					std::wstring(err.begin(), err.end()).c_str());
+			}
+
+			// GEM-035: AppendDelta covers frame_analysis_store and resync_event; VpvSettingsDump covers engineOffForced.
+			const std::string settingsCpp = ReadFile(RepoRoot() + "src\\VP-V\\modules\\control\\config\\VpvRendererSettings.cpp");
+			const size_t deltaPos = settingsCpp.find("void AppendDelta(");
+			Assert::IsTrue(deltaPos != std::string::npos, L"AppendDelta found");
+			const size_t describePos = settingsCpp.find("std::string Describe(", deltaPos);
+			const std::string deltaBody = settingsCpp.substr(deltaPos, describePos - deltaPos);
+			Assert::IsTrue(deltaBody.find("\"frame_analysis_store\"") != std::string::npos,
+				L"AppendDelta reports frame_analysis_store");
+			Assert::IsTrue(deltaBody.find("\"resync_event\"") != std::string::npos,
+				L"AppendDelta reports resync_event");
+			const std::string dumpH = ReadFile(RepoRoot() + "src\\VP-V\\modules\\control\\config\\VpvSettingsDump.h");
+			Assert::IsTrue(dumpH.find("\"engineOffForced\"") != std::string::npos,
+				L"VpvSettingsDump.h dumps engineOffForced");
 		}
 	};
 }

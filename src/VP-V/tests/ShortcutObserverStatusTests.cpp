@@ -378,5 +378,45 @@ namespace ShortcutObserverStatusTest
 			Assert::IsFalse(ShortcutObserverStatus::FromConfig(LoadText("[shortcuts]\nshow_profiles: Ctrl+P\n"), true).defaultApplies);
 			Assert::IsFalse(ShortcutObserverStatus::FromConfig(LoadText("[vpv]\npipeline_original_pathway: on\n")).defaultApplies);
 		}
+
+		// GEM-041: a bare press of the plan's key (e.g. 'D' without Ctrl+Alt) must never latch keyDown,
+		// while a matched chord dispatches once and ignores auto-repeat until key-up.
+		TEST_METHOD(BareKeyDoesNotLatchAndMatchedChordAutoRepeatsOnce)
+		{
+			const ShortcutObserverStatus::Plan plan = ShortcutObserverStatus::Decide(DefaultWanted());   // Ctrl+Alt+D
+			bool keyDown = false;
+			// Bare 'D' key-down: must not dispatch and must not latch keyDown.
+			Assert::IsFalse(ShortcutObserverStatus::HandleKeyEvent(plan, keyDown, 'D', true, false, false, false, false, false));
+			Assert::IsFalse(keyDown, L"bare 'D' must not latch keyDown");
+			// Ctrl+Alt+D while 'D' was never released (or right after): dispatches and latches keyDown.
+			Assert::IsTrue(ShortcutObserverStatus::HandleKeyEvent(plan, keyDown, 'D', true, false, true, true, false, false));
+			Assert::IsTrue(keyDown, L"matched chord latches keyDown");
+			// Auto-repeat while held: suppressed.
+			Assert::IsFalse(ShortcutObserverStatus::HandleKeyEvent(plan, keyDown, 'D', true, false, true, true, false, false));
+			// Key-up clears the latch; next matched press dispatches again.
+			Assert::IsFalse(ShortcutObserverStatus::HandleKeyEvent(plan, keyDown, 'D', false, true, true, true, false, false));
+			Assert::IsFalse(keyDown);
+			Assert::IsTrue(ShortcutObserverStatus::HandleKeyEvent(plan, keyDown, 'D', true, false, true, true, false, false));
+		}
+
+		// GEM-041: when the hook is wanted but failed to start, OnTimer retries with a back-off
+		// every kRetryIntervalTicks ticks and clears the fallback note once Start succeeds.
+		TEST_METHOD(FailedStartRetriesWithBackOffAndClearsNote)
+		{
+			Registered r(DefaultWanted());   // startWorks = false initially
+			DialogExtension::OnTimer();      // tick 0: initial Start attempt fails
+			Assert::AreEqual(1, r.observer.starts);
+			Assert::AreEqual(std::string(ShortcutObserverStatus::kNote), r.note);
+			for (int i = 1; i < ShortcutObserverStatus::Extension::kRetryIntervalTicks; ++i)
+			{
+				DialogExtension::OnTimer();
+				Assert::AreEqual(1, r.observer.starts, L"no retry before back-off interval elapses");
+			}
+			r.observer.startWorks = true;
+			DialogExtension::OnTimer();      // back-off tick: retries and succeeds
+			Assert::AreEqual(2, r.observer.starts);
+			Assert::IsTrue(r.observer.running);
+			Assert::IsTrue(r.note.empty(), L"fallback note clears once retry succeeds");
+		}
 	};
 }

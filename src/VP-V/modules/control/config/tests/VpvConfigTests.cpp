@@ -1,11 +1,18 @@
 // VP-V section tests (settings agent, 2026-10-24): the tier data table and model, the delay
 // budget display, and the VP-V page inside the editor (off screen like the rest of the suite).
 // Registered from ConfigEditorWindowTests.cpp's main with one line: RunVpvConfigTests().
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <VP-V/modules/control/config/VpvRendererFields.h>
 
 #include "ConfigEditorWindow.h"
+#include <VP-V/modules/control/config/config_pages/VpvConfigProviders.h>
 #include <VP-V/modules/control/config/config_pages/VpvSection.h>
 #include <VP-V/modules/control/config/config_pages/VpvTierTable.generated.h>
 #include <VP-V/modules/control/config/config_pages/VpvOrganisation.h>
+#define VPV_RENDERING_DEFAULTS_PURE
+#include <VP-V/modules/control/config/config_pages/VpvRenderingDefaults.h>
 #include <VP-V/modules/control/config/config_pages/VpvSetBy.h>
 
 #include <ConfigFile.h>
@@ -55,6 +62,7 @@ namespace
 #include <QListWidget>
 #include <QToolButton>
 #include <QSlider>
+#include <QSpinBox>
 #include <QSpinBox>
 #include <QTemporaryDir>
 #include <QWidget>
@@ -696,7 +704,8 @@ namespace
 		QCoreApplication::processEvents();
 		require(picker->currentIndex() == 0, "the VP-V picker follows the Rendering list");
 		// A tier write reloads the upstream rows (no stale values next to the tier).
-		control<QSlider>(window, Vpv::ObjectName("repair.tier"))->setValue(3);
+		// Repair Upper is planned (owner Q6 / GEM-057); Mid (2) switches VP deband on.
+		control<QSlider>(window, Vpv::ObjectName("repair.tier"))->setValue(2);
 		QCoreApplication::processEvents();
 		require(control<QComboBox>(window, QStringLiteral("config.vprenderer.deband_vp"))->currentData().toString() == QStringLiteral("on"),
 			"the Rendering control shows the value the tier wrote");
@@ -1504,30 +1513,45 @@ namespace
 		require(file.open(QIODevice::ReadOnly) && file.readAll().contains("global_actions: config_editor"), "global_actions not saved");
 	}
 
-	// GF-P5 S13: the global_actions default the Config shows for an ABSENT key follows the file's pathway as the player reads it:
-	// none in the Original pathway, state_report otherwise; an explicit key is always shown as written; the pathway key is found
-	// in [vpv] and in [vprenderer], its value matched case-insensitively (NormalizeName).
+	// GF-P5 S13 + GEM-037: for an ABSENT key, global_actions stays empty (so untouched saves never write it)
+	// and its placeholder follows the file's pathway as the player reads it: none in the Original pathway,
+	// state_report otherwise; an explicit key is always shown as written; the pathway key is found in [vpv]
+	// and in [vprenderer], its value matched case-insensitively (NormalizeName).
 	void testGlobalActionsDefaultFollowsThePathway()
 	{
-		auto globalActionsText = [](const char* fixture) {
+		auto globalActionsState = [](const char* fixture) {
 			QTemporaryDir dir;
 			const QString path = WriteFixture(dir, fixture);
 			ConfigEditorWindow window(path, 0, true);
-			return control<QLineEdit>(window, QStringLiteral("config.shortcuts.global_actions"))->text();
+			auto* edit = control<QLineEdit>(window, QStringLiteral("config.shortcuts.global_actions"));
+			return std::pair<QString, QString>{ edit->text(), edit->placeholderText() };
 		};
-		// A: the Original pathway, no [shortcuts]: no default.
-		require(globalActionsText("[general]\nrenderer: VP Renderer\n[vpv]\npipeline_original_pathway: on\n").isEmpty(),
-			"Original pathway, key absent: global_actions shows a default");
-		// B: no pathway key: the player's default.
-		require(globalActionsText("[general]\nrenderer: VP Renderer\n") == QStringLiteral("state_report"),
-			"no pathway key, key absent: global_actions does not show state_report");
+		// A: the Original pathway, no [shortcuts]: empty text, placeholder "none".
+		{
+			const auto [text, placeholder] = globalActionsState("[general]\nrenderer: VP Renderer\n[vpv]\npipeline_original_pathway: on\n");
+			require(text.isEmpty(), "Original pathway, key absent: global_actions text is not empty");
+			require(placeholder.contains(QStringLiteral("Default: none")), "Original pathway, key absent: placeholder does not show none");
+		}
+		// B: no pathway key: empty text, placeholder "state_report".
+		{
+			const auto [text, placeholder] = globalActionsState("[general]\nrenderer: VP Renderer\n");
+			require(text.isEmpty(), "no pathway key, key absent: global_actions text is not empty");
+			require(placeholder.contains(QStringLiteral("Default: state_report")), "no pathway key, key absent: placeholder does not show state_report");
+		}
 		// C: the pathway key in [vprenderer], value spelt On.
-		require(globalActionsText("[general]\nrenderer: VP Renderer\n[vprenderer]\npipeline_original_pathway: On\n").isEmpty(),
-			"Original pathway in [vprenderer] (On): global_actions shows a default");
+		{
+			const auto [text, placeholder] = globalActionsState("[general]\nrenderer: VP Renderer\n[vprenderer]\npipeline_original_pathway: On\n");
+			require(text.isEmpty(), "Original pathway in [vprenderer] (On), key absent: global_actions text is not empty");
+			require(placeholder.contains(QStringLiteral("Default: none")), "Original pathway in [vprenderer] (On): placeholder does not show none");
+		}
 		// D: an explicit key wins in the Original pathway.
-		require(globalActionsText("[general]\nrenderer: VP Renderer\n[vpv]\npipeline_original_pathway: on\n"
-				"[shortcuts]\nglobal_actions: config_editor\n") == QStringLiteral("config_editor"),
-			"Original pathway, key present: global_actions is not shown as written");
+		{
+			const auto [text, placeholder] = globalActionsState("[general]\nrenderer: VP Renderer\n[vpv]\npipeline_original_pathway: on\n"
+				"[shortcuts]\nglobal_actions: config_editor\n");
+			(void)placeholder;
+			require(text == QStringLiteral("config_editor"),
+				"Original pathway, key present: global_actions is not shown as written");
+		}
 	}
 
 	// D3: Bill's tests find Bill's own Chroma upscaler (his five filters); VP-V's list is its own control of the
@@ -1738,7 +1762,7 @@ namespace
 			const QString path = WriteFixture(dir, text);
 			ConfigEditorWindow window(path, 0, true);
 			auto* section = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section")));
-			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("both.card.queue_target")));
+			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("input.card.queue_target")));
 			require(section->isAncestorOf(card), "the queue target card is not on the VP-V page");
 			for (const char* name : { "config.queue.low_latency_path", "config.queue.target_latency_ms", "config.queue.target_latency_note",
 					"config.queue.target_mode", "config.queue.target_lookahead_note", "config.queue.active_picture_lookahead_frames.vpv",
@@ -1776,7 +1800,7 @@ namespace
 		const QString path = WriteFixture(dir, text);
 		{
 			ConfigEditorWindow window(path, 0, true);
-			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("both.card.queue_target")));
+			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("input.card.queue_target")));
 			auto* queues = control<QListWidget>(window, QStringLiteral("config.queue.profiles"));
 			auto* vpv = control<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames.vpv"));
 			auto* notice = control<QLabel>(window, QStringLiteral("config.queue.active_picture_lookahead_notice"));
@@ -1906,6 +1930,380 @@ namespace
 		QCoreApplication::processEvents();
 		require(amount->isEnabled() && hiccup->isEnabled(), "engine on again frees both");
 	}
+
+	// W4 profile-defaults-parity (GEM-033, 042, 043): automated parity across VpvRenderer::Fields{},
+	// VpvSchemaKeys.h, VpvRenderingDefaults.h, and VpvTierTable.generated.h, plus intent_black unset button.
+	void testProfileDefaultsParity()
+	{
+		// 1. Key membership in IsVpvOnlyKey / IsVpvChoiceKey (sorted binary search).
+		require(Vpv::IsVpvOnlyKey(QStringLiteral("chroma_upscale_vp")), "chroma_upscale_vp in IsVpvOnlyKey");
+		for (const char* k : { "ambient_adapt", "chroma_upscale_vp", "intent_black", "intent_display",
+			"intent_motion", "sdr_contrast_recovery", "source_resolution_frame_bound" })
+			require(Vpv::IsVpvChoiceKey(QString::fromLatin1(k)),
+				(std::string("missing from IsVpvChoiceKey: ") + k).c_str());
+
+		// 2. Choice defaults match VpvRenderer::Fields{} and pass VpvSchemaKeys validation.
+		const VpvRenderer::Fields fields{};
+		const std::vector<std::pair<const char*, std::string>> expected = {
+			{ "adaptive_motion", fields.adaptive.motionAdaptive ? "on" : "off" },
+			{ "chroma_upscale_vp", "off" },
+			{ "fbo_float32", fields.fboFloat32 < 0 ? "auto" : (fields.fboFloat32 ? "on" : "off") },
+			{ "repeat_render_reuse", fields.repeatRenderReuse ? "on" : "off" },
+			{ "source_resolution_frame_bound", fields.sourceResolutionFrameBound ? "on" : "off" },
+			{ "temporal_dither", fields.temporalDither },
+			{ "optical_flow", fields.opticalFlow ? "on" : "off" },
+			{ "optical_flow_on_demand", fields.opticalFlowOnDemand },
+			{ "deband_vp", fields.debandVp },
+			{ "source_resolution", fields.sourceResolution },
+			{ "preserve_extended_range", fields.preserveExtendedRange ? "on" : "off" },
+			{ "downscale_light", fields.downscaleLight },
+			{ "upscale_light", fields.upscaleLight },
+		};
+		for (const auto& pair : expected)
+		{
+			QString def;
+			require(Vpv::VpvRenderingDefault(QString::fromLatin1(pair.first), def),
+				(std::string("VpvRenderingDefault missing key: ") + pair.first).c_str());
+			require(def.toStdString() == pair.second,
+				(std::string("VpvRenderingDefault mismatch for ") + pair.first + ": got " + def.toStdString() + ", expected " + pair.second).c_str());
+			require(RendererProfileConfig::ValidateBaseSetting(pair.first, pair.second),
+				(std::string("RendererProfileConfig rejected default for ") + pair.first + "=" + pair.second).c_str());
+		}
+
+		// 3. Tier table defaults agree with VpvRenderingDefault where both define a default.
+		const Vpv::Table& table = Vpv::TierTable();
+		for (const auto& unit : table.units)
+			for (const auto& toggle : unit.toggles)
+			{
+				const std::string tdef = table.Default(toggle.key);
+				if (tdef.empty())
+					continue;
+				QString rd;
+				if (Vpv::VpvRenderingDefault(QString::fromLatin1(toggle.key), rd) && !rd.isEmpty())
+				{
+					require(rd.toStdString() == tdef,
+						(std::string("Tier table default disagrees with VpvRenderingDefault for ") + toggle.key +
+							": tier=" + tdef + " rendering=" + rd.toStdString()).c_str());
+				}
+			}
+
+		// 4. intent_black keeps its "Not set" button (was stripped when absent from IsVpvChoiceKey) and clears overrides.
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[general]\nfullscreen: false\n[vprenderer]\nquality: high\n"
+			"[vprenderer.Movie]\nwhen: source_fps <= 30\nintent_black: report\n");
+		ConfigEditorWindow window(path, 0, true);
+		auto* unsetBtn = window.findChild<QToolButton*>(QStringLiteral("config.vprenderer.intent_black.unset"));
+		require(unsetBtn != nullptr, "config.vprenderer.intent_black.unset exists (IsVpvChoiceKey keeps item 0)");
+		auto* combo = window.findChild<QComboBox*>(QStringLiteral("config.vprenderer.intent_black"));
+		require(combo != nullptr && combo->findData(QString()) == 0, "intent_black keeps empty inherited item at index 0");
+	}
+
+	// CB W4-2 (config-placement-fixes: GEM-038, 039, 047, 048, 051, 052, 053, 055, 056, 057, 061, 223).
+	void testConfigPlacementFixes()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[general]\nfullscreen: false\n"
+			"[vprenderer]\nsdr_target_nits: 100\n"
+			"[vprenderer.Cinema]\nquality: high\n"
+			"[queue.Cinema]\ntarget_latency_ms: 150\n"
+			"[queue]\ntarget_latency_ms: 250\n");
+		ConfigEditorWindow window(path, 0, true);
+		window.show();
+		QCoreApplication::processEvents();
+
+		// GEM-047 & GEM-051: toneCurves is NOT in allRaw; allRawGroup auto-hides once repeat_render_reuse is placed.
+		auto* allRawContent = window.findChild<QWidget*>(QStringLiteral("rendererSection.allRaw.content"));
+		auto* toneCurves = window.findChild<QWidget*>(QStringLiteral("rendererSection.toneCurves"));
+		require(toneCurves != nullptr, "Bill's toneCurves section exists");
+		require(!allRawContent || !allRawContent->isAncestorOf(toneCurves),
+			"toneCurves is NOT swept into All raw settings (expert)");
+		auto* allRawGroup = window.findChild<QWidget*>(QStringLiteral("rendererSection.allRawGroup"));
+		require(allRawGroup && allRawGroup->isHidden(),
+			"allRawGroup auto-hides once repeat_render_reuse is placed");
+		auto* draftBody = control<QWidget>(window, Vpv::ObjectName("output.card.draft.body"));
+		auto* reuse = control<QComboBox>(window, QStringLiteral("config.vprenderer.repeat_render_reuse"));
+		require(draftBody->isAncestorOf(reuse) && !draftBody->isEnabled() &&
+			draftBody->toolTip().contains(QStringLiteral("Draft, no effect yet")),
+			"repeat_render_reuse is placed under Output > Advanced > Draft (disabled, not a live control)");
+
+		// GEM-048 + 223: click every <a href> link in vpv.<unit>.more and verify target page/tab.
+		const QRegularExpression hrefRe(QStringLiteral("href=\"([^\"]+)\""));
+		int linkClicks = 0;
+		for (const char* unit : { "input", "motion", "repair", "scaling", "colour", "output" })
+		{
+			auto* more = window.findChild<QLabel*>(Vpv::ObjectName(QString::fromLatin1(unit) + QStringLiteral(".more")));
+			if (!more) continue;
+			auto it = hrefRe.globalMatch(more->text());
+			while (it.hasNext())
+			{
+				const QString target = it.next().captured(1);
+				const QString wantNav = target.section(QLatin1Char('|'), 0, 0);
+				const QString wantTab = target.section(QLatin1Char('|'), 1, 1);
+				QMetaObject::invokeMethod(more, "linkActivated", Qt::DirectConnection, Q_ARG(QString, target));
+				QCoreApplication::processEvents();
+				if (!wantTab.isEmpty())
+				{
+					auto* tabs = window.findChild<QTabBar*>(QStringLiteral("settingsSectionTabs"));
+					require(tabs != nullptr && tabs->currentIndex() >= 0 &&
+						tabs->tabText(tabs->currentIndex()) == wantTab,
+						("more link did not open tab " + wantTab.toStdString() + " for unit " + unit).c_str());
+				}
+				else
+				{
+					auto* sidebar = window.findChild<QWidget*>(QStringLiteral("sidebar"));
+					bool checked = false;
+					if (sidebar)
+						for (QAbstractButton* b : sidebar->findChildren<QAbstractButton*>())
+							if (b->text() == wantNav && b->isChecked()) { checked = true; break; }
+					require(checked, ("more link did not select sidebar page " + wantNav.toStdString()).c_str());
+				}
+				++linkClicks;
+			}
+		}
+		require(linkClicks >= 9, "all cross-page more links exercised");
+
+		// GEM-052: optical_flow_on_demand is a live QComboBox under Motion > Advanced > De-judder shaping.
+		auto* shapingBody = control<QWidget>(window, Vpv::ObjectName("motion.card.shaping.body"));
+		auto* ofod = control<QComboBox>(window, Vpv::ObjectName("motion.optical_flow_on_demand"));
+		require(shapingBody->isAncestorOf(ofod) && ofod->isEnabled(),
+			"optical_flow_on_demand is a live QComboBox under Motion > Advanced > De-judder shaping");
+		require(ofod->findData(QStringLiteral("auto")) >= 0 &&
+			ofod->findData(QStringLiteral("on")) >= 0 &&
+			ofod->findData(QStringLiteral("off")) >= 0,
+			"optical_flow_on_demand exposes auto/on/off");
+
+		// GEM-053: source_resolution_frame_bound is a QComboBox under Scaling > Advanced > Re-base timing.
+		auto* rebaseTimingBody = control<QWidget>(window, Vpv::ObjectName("scaling.card.rebase_timing.body"));
+		auto* frameBound = control<QComboBox>(window, Vpv::ObjectName("scaling.source_resolution_frame_bound"));
+		require(rebaseTimingBody->isAncestorOf(frameBound) &&
+			frameBound->findData(QStringLiteral("on")) >= 0 &&
+			frameBound->findData(QStringLiteral("off")) >= 0,
+			"source_resolution_frame_bound is a QComboBox (on/off) under Scaling > Advanced > Re-base timing");
+		require(!window.findChild<QLineEdit*>(Vpv::ObjectName("input.source_resolution_frame_bound")),
+			"source_resolution_frame_bound is no longer a QLineEdit under Input");
+
+		// GEM-039 + 055: chroma_upscale_vp is disabled under Scaling > Advanced (planned).
+		auto* scalingAdv = control<QWidget>(window, Vpv::ObjectName("scaling.advanced"));
+		auto* chromaPlanned = control<QWidget>(window, Vpv::ObjectName("scaling.card.chroma_planned.body"));
+		auto* chromaVp = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.chroma_upscale_vp"));
+		require(scalingAdv->isAncestorOf(chromaPlanned) && chromaPlanned->isAncestorOf(chromaVp) && !chromaVp->isEnabled(),
+			"chroma_upscale_vp is disabled under Scaling > Advanced (planned)");
+
+		// GEM-056: intent_black lives under Dynamic Drive, not Input > Readouts.
+		auto* driveBlack = control<QWidget>(window, Vpv::ObjectName("drive.card.black_protection.body"));
+		auto* intentBlack = control<QComboBox>(window, QStringLiteral("config.vprenderer.intent_black"));
+		require(driveBlack->isAncestorOf(intentBlack),
+			"intent_black moved to Dynamic Drive > Advanced > Black protection");
+
+		// GEM-038: stale wording removed and DelaySummary prefers exact [queue] (250 ms) over [queue.Cinema] (150 ms).
+		auto* lookaheadNote = control<QLabel>(window, QStringLiteral("config.queue.target_lookahead_note"));
+		require(!lookaheadNote->text().contains(QStringLiteral("at least 5 frames")),
+			"stale 'at least 5 frames' wording removed");
+		auto* delayLabel = control<QLabel>(window, Vpv::ObjectName("input.delay"));
+		require(!delayLabel->text().contains(QStringLiteral("Until the total-delay budget lands")),
+			"stale 'Until the total-delay budget lands' wording removed");
+		require(delayLabel->text().contains(QStringLiteral("250 ms")),
+			"DelaySummary prefers exact [queue] (250 ms) over [queue.Cinema] (150 ms)");
+
+		// GEM-061: upscale_light reunited with downscale_light on Scaling > Chroma, duplicate hidden,
+		// downscale_light tooltip fixed, and cut_soft_reset locked on detail_pulse_stabilise|texture_restore.
+		auto* chromaCard = control<QWidget>(window, Vpv::ObjectName("scaling.card.chroma.body"));
+		auto* downLight = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.downscale_light"));
+		auto* upLight = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.upscale_light"));
+		require(chromaCard->isAncestorOf(downLight) && chromaCard->isAncestorOf(upLight),
+			"upscale_light sits beside downscale_light in Scaling > Chroma and scaling light");
+		require(!downLight->toolTip().contains(QStringLiteral("Upscaled frames always use linear light")),
+			"downscale_light tooltip no longer falsely claims upscaled frames always use linear light");
+		auto* dupUpLight = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.upscale_light"));
+		require(!dupUpLight || !RowShown(dupUpLight),
+			"Bill-section duplicate upscale_light row is hidden in VP-V pathway");
+
+		auto* softReset = control<QComboBox>(window, Vpv::ObjectName("repair.cut_soft_reset"));
+		auto* detailPulse = control<QComboBox>(window, QStringLiteral("config.vprenderer.detail_pulse_stabilise"));
+		auto* textureRestore = control<QComboBox>(window, QStringLiteral("config.vprenderer.texture_restore"));
+		require(!softReset->isEnabled(),
+			"cut_soft_reset is disabled while both detail_pulse_stabilise and texture_restore are off");
+		control<QCheckBox>(window, Vpv::ObjectName("repair.card.tier_keys.custom"))->setChecked(true);
+		QCoreApplication::processEvents();
+		detailPulse->setCurrentIndex(detailPulse->findData(QStringLiteral("on")));
+		QCoreApplication::processEvents();
+		require(softReset->isEnabled(),
+			"cut_soft_reset unlocks when detail_pulse_stabilise is turned on");
+		detailPulse->setCurrentIndex(detailPulse->findData(QStringLiteral("off")));
+		QCoreApplication::processEvents();
+		require(!softReset->isEnabled(),
+			"cut_soft_reset greys again when both are off");
+		textureRestore->setCurrentIndex(textureRestore->findData(QStringLiteral("statistical")));
+		QCoreApplication::processEvents();
+		require(softReset->isEnabled(),
+			"cut_soft_reset unlocks when texture_restore is turned on");
+		textureRestore->setCurrentIndex(textureRestore->findData(QStringLiteral("off")));
+		QCoreApplication::processEvents();
+
+		// GEM-057: non-planned distinct tier steps stick without bouncing (and Repair Upper is planned).
+		for (const Vpv::Unit& u : Vpv::TierTable().units)
+		{
+			if (!u.Tiered()) continue;
+			auto* slider = control<QSlider>(window, Vpv::ObjectName(QString::fromLatin1(u.id) + QStringLiteral(".tier")));
+			for (int step = 0; step < static_cast<int>(u.presets.size()); ++step)
+			{
+				// Skip steps intentionally identical to an earlier step (Repair Low == Classic until Low differs, owner Q6).
+				bool dupOfEarlier = false;
+				for (int prev = 0; prev < step; ++prev)
+					if (Vpv::SamePresetValues(u.presets[static_cast<size_t>(prev)], u.presets[static_cast<size_t>(step)]))
+						dupOfEarlier = true;
+				if (dupOfEarlier) continue;
+				slider->setValue(step);
+				QCoreApplication::processEvents();
+				require(slider->value() == step,
+					(std::string("non-planned tier step did not stick: ") + u.id + " step " + std::to_string(step)).c_str());
+			}
+		}
+	}
+
+	// CB W4-3 (editor-state-fixes: GEM-036, 037, 040, 050 Calibration).
+	void testEditorStateFixes()
+	{
+		Vpv::RegisterConfigProviders();
+
+		// GEM-036: named default queue [queue.Main] with target_latency_ms greys Target frames on first open,
+		// and a child queue setting its own target_frames ungreys it (QueueDelayShowsOff).
+		{
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir,
+				"[general]\nfullscreen: false\n"
+				"[vprenderer]\nsdr_target_nits: 100\n"
+				"[queue.Main]\ntarget_latency_ms: 250\n"
+				"[queue.Override]\ntarget_frames: 6\n");
+			ConfigEditorWindow window(path, 0, true);
+			auto* targetFrames = control<QSpinBox>(window, QStringLiteral("config.queue.target_frames"));
+			require(!targetFrames->isEnabled(),
+				"GEM-036: named default queue with target_latency_ms greys Target frames on first open");
+			auto* qList = control<QListWidget>(window, QStringLiteral("config.queue.profiles"));
+			require(qList->count() >= 2, "two queue profiles loaded");
+			qList->setCurrentRow(1);
+			QCoreApplication::processEvents();
+			require(targetFrames->isEnabled(),
+				"GEM-036: child queue with own target_frames honors QueueDelayShowsOff and keeps Target frames enabled");
+		}
+
+		// GEM-037: absent [shortcuts] global_actions shows empty text + pathway placeholder and is never written on save.
+		{
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir,
+				"[general]\nfullscreen: false\n"
+				"[vprenderer]\nsdr_target_nits: 100\n"
+				"[vprenderer.Cinema]\nquality: high\n");
+			{
+				ConfigEditorWindow window(path, 0, true);
+				auto* globalActions = control<QLineEdit>(window, QStringLiteral("config.shortcuts.global_actions"));
+				require(globalActions->text().isEmpty(),
+					"GEM-037: absent global_actions stays empty instead of pre-filling 'state_report'");
+				require(globalActions->placeholderText().contains(QStringLiteral("state_report")),
+					"GEM-037: VP-V pathway placeholder shows state_report");
+				auto* pathway = control<QComboBox>(window, Vpv::ObjectName("pathway"));
+				pathway->setCurrentIndex(1);   // Original
+				QCoreApplication::processEvents();
+				require(globalActions->text().isEmpty() &&
+					globalActions->placeholderText().contains(QStringLiteral("none")),
+					"GEM-037: Original pathway refreshes placeholder to none without setting text");
+				// GEM-050 (Calibration): Calibration inline note shows on Original and Open Calibration stays reachable.
+				auto* calNote = control<QLabel>(window, QStringLiteral("calibration.original_note"));
+				require(!calNote->isHidden(),
+					"GEM-050: Calibration shows inline Original-pathway note");
+				auto* openCal = control<QPushButton>(window, Vpv::ObjectName("original.open_calibration"));
+				require(!openCal->isHidden() && openCal->isEnabled(),
+					"GEM-050: Open Calibration stays enabled when Original pathway disables content");
+				pathway->setCurrentIndex(0);   // back to VP-V
+				QCoreApplication::processEvents();
+				require(calNote->isHidden(),
+					"GEM-050: Calibration Original-pathway note hides back on VP-V");
+
+				// GEM-040: switching Rendering profiles keeps managed controls greyed via OnBillField without derivedSetting.
+				auto* rList = control<QListWidget>(window, QStringLiteral("config.vprenderer.profiles"));
+				require(rList->count() >= 2, "two rendering profiles loaded");
+				rList->setCurrentRow(1);
+				QCoreApplication::processEvents();
+				auto* upstream = control<QWidget>(window, QStringLiteral("config.vprenderer.adaptive_upscale"));
+				require(!upstream->isEnabled() &&
+					upstream->toolTip().startsWith(QStringLiteral("Managed by VP-V")),
+					"GEM-040: Rendering profile switch preserves Managed by VP-V greying");
+				require(!upstream->property("derivedSetting").toBool(),
+					"GEM-040: managed greying does not set derivedSetting (preserves save-time freeze)");
+
+				save(window);
+			}
+			ConfigFile saved;
+			require(saved.Load(path.toStdString()), "saved config reloads");
+			std::string ga;
+			require(!saved.TryGetString("shortcuts", "global_actions", ga),
+				"GEM-037: saving without editing never writes absent global_actions");
+		}
+	}
+
+	// CB W4-5 (OPT-BOTH-PATHWAYS-TAB: GEM-058 owner Q7 + GEM-049 queue_target move to Input).
+	void testBothPathwaysTabAndQueueTargetInInput()
+	{
+		Vpv::RegisterConfigProviders();
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[general]\nrenderer: VP Renderer\n"
+			"[vprenderer]\nsdr_target_nits: 100\n"
+			"[queue]\ntarget_latency_ms: 250\n");
+		ConfigEditorWindow window(path, 0, true);
+		auto* units = control<QTabWidget>(window, Vpv::ObjectName("units"));
+		auto* bothTab = control<QWidget>(window, Vpv::ObjectName("both"));
+		int bothIdx = -1;
+		for (int i = 0; i < units->count(); ++i)
+			if (units->widget(i) == bothTab) { bothIdx = i; break; }
+		require(bothIdx >= 0 && units->tabText(bothIdx) == QStringLiteral("Both pathways"),
+			"GEM-058: 'On both pathways' cards have their own tab on vpv.units");
+
+		// Both-pathway cards appear once inside Both pathways tab and never under any unit tab.
+		for (const char* id : { "input", "reports", "keyboard", "bill" })
+		{
+			const QString name = QStringLiteral("vpv.both.card.") + QString::fromLatin1(id);
+			const QList<QWidget*> found = window.findChildren<QWidget*>(name);
+			require(found.size() == 1 && bothTab->isAncestorOf(found.front()),
+				(std::string("GEM-058: both-pathway card not solely on Both pathways tab: ") + id).c_str());
+			for (const char* u : { "input", "motion", "repair", "scaling", "colour", "drive", "output" })
+			{
+				auto* unitPage = control<QWidget>(window, Vpv::ObjectName(QString::fromLatin1(u)));
+				require(!unitPage->isAncestorOf(found.front()),
+					(std::string("GEM-058: both-pathway card leaked under unit tab ") + u).c_str());
+			}
+		}
+
+		// GEM-049: queue_target moved from Both pathways to Input > Main.
+		auto* inputTab = control<QWidget>(window, Vpv::ObjectName("input"));
+		auto* queueCard = control<QWidget>(window, Vpv::ObjectName("input.card.queue_target"));
+		require(inputTab->isAncestorOf(queueCard) && !bothTab->isAncestorOf(queueCard),
+			"GEM-049: queue_target lives under Input, not Both pathways");
+
+		// Proposed retirement decision cards stay intact (REPLACE collapse per owner Q7).
+		auto* overviewMore = control<QTabWidget>(window, Vpv::ObjectName("overview.more"));
+		require(overviewMore->count() >= 2 && overviewMore->tabText(0) == QStringLiteral("Proposed retirement"),
+			"GEM-058: Proposed retirement tab stays intact");
+
+		// Original pathway disables Input + queue_target radios while keeping Both pathways tab unlocked.
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
+		QCoreApplication::processEvents();
+		auto* byFrames = control<QRadioButton>(window, QStringLiteral("config.queue.target_mode.frames"));
+		auto* byTime = control<QRadioButton>(window, QStringLiteral("config.queue.target_mode.time"));
+		auto* delaySpin = control<QSpinBox>(window, QStringLiteral("config.queue.target_latency_ms"));
+		require(!inputTab->isEnabled() && !byFrames->isEnabled() && !byTime->isEnabled(),
+			"GEM-049: Original pathway disables Input tab and queue target_mode radios");
+		const int beforeMs = delaySpin->value();
+		byFrames->click();
+		QCoreApplication::processEvents();
+		require(delaySpin->value() == beforeMs,
+			"GEM-049: clicking disabled By frames radio in Original leaves target_latency_ms unchanged");
+		require(bothTab->isEnabled() &&
+			control<QWidget>(window, QStringLiteral("config.shortcuts.global_actions"))->isEnabled(),
+			"GEM-058: Both pathways tab stays unlocked and editable in Original pathway");
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -1943,5 +2341,9 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: the moved load-time migrations still apply", testLoadMigrationsMoved);
 	failures += run("VP-V: the moved refresh-key migration rewrites the NTSC band keys", testRefreshKeyMigrationMoved);
 	failures += run("VP-V: motion engine off greys the de-judder amount and hiccup repair (batch B)", testMotionEngineOffGreysDejudderAndHiccup);
+	failures += run("VP-V: profile defaults parity across Fields, SchemaKeys, RenderingDefaults and TierTable", testProfileDefaultsParity);
+	failures += run("VP-V: config placement, links, planned tiers and feature locks (CB W4-2)", testConfigPlacementFixes);
+	failures += run("VP-V: editor state fixes (queue grey, global_actions placeholder, managed grey, calibration note)", testEditorStateFixes);
+	failures += run("VP-V: Both pathways tab unlocked and queue_target under Input (CB W4-5)", testBothPathwaysTabAndQueueTargetInInput);
 	return failures;
 }

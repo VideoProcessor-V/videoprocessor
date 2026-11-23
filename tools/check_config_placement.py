@@ -69,10 +69,10 @@ CROSS_UNIT_OWNER = {
     "source_resolution_mixed_guard": "input.source_analysis",
     "source_resolution_release_fade_s": "input.source_analysis",
     "source_resolution_text_guard": "input.source_analysis",
+    "source_resolution_frame_bound": "input.source_analysis",
     "source_geometry_detect": "input.source_analysis",   # SID r2 text row on the Scaling > Re-base card; read and owned by source_analysis
     "fbo_float32": "scaling.output",               # card: Colour > Range and precision (named there; control on Bill's Processing page)
     "intent_display": "control.diagnostics",        # card: Input > Source intent; the display-intent report
-    "intent_black": "drive.led_compensation",      # card: Input > Source intent; read by the LED compensation
 }
 # A second row for a cross-unit key, documented where the control is presented (the card's own unit), is accepted
 # (P8-5: occlusion_mask, owned by motion.consumers, is presented on the Output > Temporal dither card).

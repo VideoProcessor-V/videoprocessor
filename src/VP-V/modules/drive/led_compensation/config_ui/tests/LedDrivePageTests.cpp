@@ -244,6 +244,35 @@ namespace
 		}
 		require(provider->StateCountForTesting() == before, "the provider kept state after its editor closed");
 	}
+
+	// GEM-050: unchecking Dynamic Drive disables all visible drive controls while leaving gamma_boost + toe enabled.
+	void testOnOffGreysVisibleDriveControlsExceptGammaBoost()
+	{
+		Vpv::RegisterConfigProviders();
+		QTemporaryDir dir;
+		ConfigEditorWindow window(writeFixture(dir), 0, true);
+		auto* enabled = window.findChild<QCheckBox*>(QStringLiteral("config.led_drive.default.enabled"));
+		require(enabled != nullptr && enabled->isChecked(), "Dynamic Drive starts enabled in fixture");
+		enabled->setChecked(false);
+		QCoreApplication::processEvents();
+		for (const char* name : {
+			"config.led_drive.default.command_source.buttons",
+			"config.led_drive.default.led_floor",
+			"config.led_drive.default.led_floor_reactive",
+			"config.led_drive.default.led_floor_black",
+			"config.led_drive.default.highlight_tolerance_stops",
+			"config.led_drive.default.compensation_eotf",
+			"config.led_drive.default.led_idle_restore_s" })
+		{
+			auto* w = window.findChild<QWidget*>(QString::fromLatin1(name));
+			require(w != nullptr && !w->isEnabled(),
+				(std::string("GEM-050: Dynamic Drive off must disable ") + name).c_str());
+		}
+		// led_compensation/README.md: gamma_boost applies even when Dynamic Drive is off.
+		auto* gammaBoost = window.findChild<QComboBox*>(QStringLiteral("config.led_drive.default.gamma_boost"));
+		require(gammaBoost != nullptr && gammaBoost->isEnabled(),
+			"GEM-050: gamma_boost remains enabled when Dynamic Drive is off");
+	}
 }
 
 int RunLedDrivePageTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -260,5 +289,6 @@ int RunLedDrivePageTests(const std::function<int(const char*, const std::functio
 	failures += run("LedDrivePageTests: a source pick writes the mode too", testSourcePickWritesTheModeToo);
 	failures += run("LedDrivePageTests: an RS-232 test survives a rebuild and is joined on close", testRs232TestSurvivesARebuildAndIsJoinedOnClose);
 	failures += run("LedDrivePageTests: state goes with the editor", testStateGoesWithTheEditor);
+	failures += run("LedDrivePageTests: Dynamic Drive off greys visible drive controls except gamma_boost", testOnOffGreysVisibleDriveControlsExceptGammaBoost);
 	return failures;
 }
