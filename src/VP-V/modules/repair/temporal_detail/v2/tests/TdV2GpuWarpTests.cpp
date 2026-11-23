@@ -634,6 +634,19 @@ namespace TdV2GpuWarpNs
 
 				AssertCpuGpuFrameParity(cpu1, gpu1, f1.curClean, f1.receivedY, f1.active, "Frame1-CellUnknown");
 
+				// Exact StandInRegistry parity between CPU and GPU on Frame 1 (M3 / L4).
+				for (size_t sk = 0; sk < static_cast<size_t>(StandInKind::Count); ++sk)
+				{
+					const auto kind = static_cast<StandInKind>(sk);
+					Assert::AreEqual(cpuSi.IsActive(kind), gpuSi.IsActive(kind),
+						FormatTagMsg(MetaOf(kind).catalogKey, "Frame 1 StandInRegistry CPU vs GPU mismatch").c_str());
+				}
+				Assert::IsTrue(gpuSi.IsActive(StandInKind::BandMemoW2), L"Frame 1 must engage BandMemoW2");
+				Assert::IsTrue(gpuSi.IsActive(StandInKind::FocusMapK32), L"Frame 1 must engage FocusMapK32");
+				Assert::IsTrue(gpuSi.IsActive(StandInKind::GrainGuardW4c), L"Frame 1 must engage GrainGuardW4c");
+				Assert::IsTrue(gpuSi.IsActive(StandInKind::TransformUnknownBound), L"Frame 1 must engage TransformUnknownBound");
+				Assert::IsTrue(gpuSi.IsActive(StandInKind::BorderBilinearFallback), L"Frame 1 must engage BorderBilinearFallback");
+
 				// Non-vacuity checks: every feature genuinely exercised!
 				Assert::IsTrue(gpu1.carryUsed, L"Frame 1 must use recurrent carry-forward");
 				Assert::AreEqual(static_cast<size_t>(3), gpu1.activeRefCount, L"Frame 1 must fuse 3 refs (prev+next+carry)");
@@ -828,9 +841,14 @@ namespace TdV2GpuWarpNs
 				gIn.codedDeltaCb = codedDeltaCb;
 				gIn.codedDeltaCr = codedDeltaCr;
 
-				const ChromaGpuApplyResult gRes = gpuGuard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, gIn, nullptr);
+				StandInRegistry ch422Si;
+				const ChromaGpuApplyResult gRes = gpuGuard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, gIn, &ch422Si);
 				Assert::IsTrue(gRes.succeeded, L"ApplyChromaDeltaGpu YUV 4:2:2 failed");
 				Assert::AreEqual(1, gRes.dispatchCount, L"ApplyChromaDeltaGpu YUV must issue exactly 1 dispatch");
+				Assert::AreEqual(static_cast<size_t>(0u), gRes.nonFinitePixels, L"Clean 4:2:2 apply must have 0 nonFinitePixels");
+				Assert::IsTrue(gRes.borderBilinearPixels > 0u, L"4:2:0->4:2:2 active border must report borderBilinearPixels > 0");
+				Assert::IsTrue(ch422Si.IsActive(StandInKind::BorderBilinearFallback),
+					L"4:2:0->4:2:2 active border must engage StandInKind::BorderBilinearFallback");
 
 				const TdV2Plane cpuDeltaCb = UpsampleDeltaToDelivered(
 					codedDeltaCb, lumaW, lumaH, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Yuv422, siting, active);
@@ -925,9 +943,14 @@ namespace TdV2GpuWarpNs
 				gIn.codedDeltaCb = codedDeltaCb;
 				gIn.codedDeltaCr = codedDeltaCr;
 
-				const ChromaGpuApplyResult gRes = gpuGuard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, gIn, nullptr);
+				StandInRegistry chRgbSi;
+				const ChromaGpuApplyResult gRes = gpuGuard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, gIn, &chRgbSi);
 				Assert::IsTrue(gRes.succeeded, L"ApplyChromaDeltaGpu RGB 4:4:4 failed");
 				Assert::AreEqual(1, gRes.dispatchCount, L"ApplyChromaDeltaGpu RGB must issue exactly 1 dispatch");
+				Assert::AreEqual(static_cast<size_t>(0u), gRes.nonFinitePixels, L"Clean RGB apply must have 0 nonFinitePixels");
+				Assert::IsTrue(gRes.borderBilinearPixels > 0u, L"4:2:0->RGB 4:4:4 active border must report borderBilinearPixels > 0");
+				Assert::IsTrue(chRgbSi.IsActive(StandInKind::BorderBilinearFallback),
+					L"4:2:0->RGB 4:4:4 active border must engage StandInKind::BorderBilinearFallback");
 
 				const TdV2Plane cpuDeltaCb = UpsampleDeltaToDelivered(
 					codedDeltaCb, lumaW, lumaH, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Rgb444, rc.siting, active);
@@ -989,6 +1012,316 @@ namespace TdV2GpuWarpNs
 				}
 				Assert::IsTrue(maxClampCorrupt > 25.0,
 					FormatMsg("Negative control failed: studio clamp corruption=%.2f <= 25.0 codes", maxClampCorrupt).c_str());
+			}
+
+			// ---- Part C (M2): TD_IDENTITY_GRID == 1 Branch Coverage (4:2:0->4:2:0 YUV & 4:4:4->RGB 4:4:4) ----
+			{
+				// C1: 4:2:0 -> 4:2:0 YUV identity grid
+				TdV2Plane delivCb420(cW, cH, 512.0);
+				TdV2Plane delivCr420(cW, cH, 512.0);
+				for (int y = 0; y < cH; ++y)
+				{
+					for (int x = 0; x < cW; ++x)
+					{
+						delivCb420.at(x, y) = static_cast<double>(static_cast<float>(500.0 + 30.0 * std::sin(2.0 * kPi * x / 13.0)));
+						delivCr420.at(x, y) = static_cast<double>(static_cast<float>(520.0 - 25.0 * std::cos(2.0 * kPi * y / 11.0)));
+					}
+				}
+				ChromaGpuApplyInput idYuvIn;
+				idYuvIn.lumaW = lumaW;
+				idYuvIn.lumaH = lumaH;
+				idYuvIn.deliveredFormat = DeliveredChromaFormat::Yuv420;
+				idYuvIn.codedSubsampling = ChromaSubsampling::Yuv420;
+				idYuvIn.siting = SitingSpec::Left();
+				idYuvIn.activeRect = active;
+				idYuvIn.deliveredCb = delivCb420;
+				idYuvIn.deliveredCr = delivCr420;
+				idYuvIn.codedDeltaCb = codedDeltaCb;
+				idYuvIn.codedDeltaCr = codedDeltaCr;
+
+				StandInRegistry idYuvSi;
+				const ChromaGpuApplyResult idYuvRes = gpuGuard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, idYuvIn, &idYuvSi);
+				Assert::IsTrue(idYuvRes.succeeded, L"Identity 4:2:0->4:2:0 GPU apply failed");
+				Assert::AreEqual(1, idYuvRes.dispatchCount, L"Identity 4:2:0 must issue 1 dispatch");
+				Assert::AreEqual(static_cast<size_t>(0u), idYuvRes.borderBilinearPixels, L"Identity grid must have 0 borderBilinearPixels");
+				Assert::IsFalse(idYuvSi.IsActive(StandInKind::BorderBilinearFallback), L"Identity grid must NOT engage BorderBilinearFallback");
+
+				TdV2Plane cpuOutCb420 = delivCb420;
+				TdV2Plane cpuOutCr420 = delivCr420;
+				for (int cy = 2; cy < 30; ++cy)
+				{
+					for (int cx = 0; cx < cW; ++cx)
+					{
+						if (codedDeltaCb.at(cx, cy) != 0.0) cpuOutCb420.at(cx, cy) += codedDeltaCb.at(cx, cy);
+						if (codedDeltaCr.at(cx, cy) != 0.0) cpuOutCr420.at(cx, cy) += codedDeltaCr.at(cx, cy);
+					}
+				}
+				Assert::IsTrue(MaxAbsDiffFull(idYuvRes.outCb, cpuOutCb420) <= kGpuCpuParityTol, L"Identity 4:2:0 outCb |GPU-CPU| > 1e-3");
+				Assert::IsTrue(MaxAbsDiffFull(idYuvRes.outCr, cpuOutCr420) <= kGpuCpuParityTol, L"Identity 4:2:0 outCr |GPU-CPU| > 1e-3");
+				Assert::AreEqual(0.0, MaxAbsDiffRect(idYuvRes.outCb, delivCb420, ActiveRect{ 16, 2, cW, 30 }), L"Identity 4:2:0 zero-delta not bit-exact");
+				Assert::AreEqual(0.0, MaxAbsDiffRect(idYuvRes.outCb, delivCb420, ActiveRect{ 0, 0, cW, 2 }), L"Identity 4:2:0 top bar corrupted");
+				Assert::AreEqual(0.0, MaxAbsDiffRect(idYuvRes.outCb, delivCb420, ActiveRect{ 0, 30, cW, 32 }), L"Identity 4:2:0 bottom bar corrupted");
+				Assert::IsTrue(MaxAbsDiffRect(idYuvRes.outCb, delivCb420, ActiveRect{ 0, 2, 12, 30 }) > 5.0, L"Identity 4:2:0 active delta vacuous");
+
+				// C2: 4:4:4 -> RGB 4:4:4 identity grid with BTB/WTW
+				TdV2Plane codedDeltaCb444(lumaW, lumaH, 0.0);
+				TdV2Plane codedDeltaCr444(lumaW, lumaH, 0.0);
+				for (int y = active.y0; y < active.y1; ++y)
+				{
+					for (int x = 0; x < 24; ++x)
+					{
+						codedDeltaCb444.at(x, y) = (y < 32) ? -10.0 : +12.0;
+						codedDeltaCr444.at(x, y) = (y < 32) ? +9.0 : -11.0;
+					}
+				}
+				ChromaGpuApplyInput idRgbIn;
+				idRgbIn.lumaW = lumaW;
+				idRgbIn.lumaH = lumaH;
+				idRgbIn.deliveredFormat = DeliveredChromaFormat::Rgb444;
+				idRgbIn.codedSubsampling = ChromaSubsampling::Yuv444;
+				idRgbIn.siting = SitingSpec::Center();
+				idRgbIn.activeRect = active;
+				idRgbIn.matrix = YCbCrMatrixSpec::Bt709();
+				idRgbIn.deliveredR = delivR;
+				idRgbIn.deliveredG = delivG;
+				idRgbIn.deliveredB = delivB;
+				idRgbIn.codedDeltaCb = codedDeltaCb444;
+				idRgbIn.codedDeltaCr = codedDeltaCr444;
+
+				StandInRegistry idRgbSi;
+				const ChromaGpuApplyResult idRgbRes = gpuGuard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, idRgbIn, &idRgbSi);
+				Assert::IsTrue(idRgbRes.succeeded, L"Identity 4:4:4->RGB GPU apply failed");
+				Assert::AreEqual(1, idRgbRes.dispatchCount, L"Identity RGB must issue 1 dispatch");
+				Assert::AreEqual(static_cast<size_t>(0u), idRgbRes.borderBilinearPixels, L"Identity RGB must have 0 borderBilinearPixels");
+				Assert::IsFalse(idRgbSi.IsActive(StandInKind::BorderBilinearFallback), L"Identity RGB must NOT engage BorderBilinearFallback");
+
+				TdV2Plane cpuIdR = delivR, cpuIdG = delivG, cpuIdB = delivB;
+				for (int y = active.y0; y < active.y1; ++y)
+				{
+					for (int x = active.x0; x < active.x1; ++x)
+					{
+						Assert::IsTrue(idRgbIn.matrix.ApplySignedChromaDeltaToRgb(
+							delivR.at(x, y), delivG.at(x, y), delivB.at(x, y),
+							codedDeltaCb444.at(x, y), codedDeltaCr444.at(x, y),
+							cpuIdR.at(x, y), cpuIdG.at(x, y), cpuIdB.at(x, y), nullptr));
+					}
+				}
+				Assert::IsTrue(MaxAbsDiffFull(idRgbRes.outR, cpuIdR) <= kGpuCpuParityTol, L"Identity RGB outR |GPU-CPU| > 1e-3");
+				Assert::IsTrue(MaxAbsDiffFull(idRgbRes.outG, cpuIdG) <= kGpuCpuParityTol, L"Identity RGB outG |GPU-CPU| > 1e-3");
+				Assert::IsTrue(MaxAbsDiffFull(idRgbRes.outB, cpuIdB) <= kGpuCpuParityTol, L"Identity RGB outB |GPU-CPU| > 1e-3");
+				Assert::AreEqual(0.0, MaxAbsDiffRect(idRgbRes.outR, delivR, ActiveRect{ 28, 4, lumaW, 60 }), L"Identity RGB zero-delta not bit-exact");
+				Assert::AreEqual(0.0, MaxAbsDiffRect(idRgbRes.outR, delivR, ActiveRect{ 0, 0, lumaW, 4 }), L"Identity RGB top bar corrupted");
+				Assert::IsTrue(idRgbRes.outB.at(8, 10) < 55.0 && idRgbRes.outB.at(8, 48) > 955.0, L"Identity RGB must preserve BTB/WTW");
+			}
+
+			// ---- Part D (H2): ApplyChromaDeltaGpu NaN/Inf, FP32 Overflow, Invalid Siting & Degenerate Matrix ----
+			{
+				const double kNaN = std::numeric_limits<double>::quiet_NaN();
+				const double kPInf = std::numeric_limits<double>::infinity();
+
+				// D1: NaN/+Inf in codedDeltaCb/Cr on BOTH YUV 4:2:0->4:2:2 AND RGB 4:2:0->4:4:4
+				{
+					TdV2Plane badCb = codedDeltaCb;
+					TdV2Plane badCr = codedDeltaCr;
+					badCb.at(4, 10) = kNaN;
+					badCr.at(6, 12) = kPInf;
+
+					ChromaGpuApplyInput yuvBad;
+					yuvBad.lumaW = lumaW;
+					yuvBad.lumaH = lumaH;
+					yuvBad.deliveredFormat = DeliveredChromaFormat::Yuv422;
+					yuvBad.codedSubsampling = ChromaSubsampling::Yuv420;
+					yuvBad.siting = SitingSpec::Left();
+					yuvBad.activeRect = active;
+					yuvBad.deliveredCb = delivCb422;
+					yuvBad.deliveredCr = delivCr422;
+					yuvBad.codedDeltaCb = badCb;
+					yuvBad.codedDeltaCr = badCr;
+
+					StandInRegistry siY;
+					const ChromaGpuApplyResult rY = gpuGuard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, yuvBad, &siY);
+					Assert::IsTrue(rY.succeeded, L"H2 YUV codedDelta NaN/Inf must complete cleanly");
+					AssertAllFinitePlane(rY.outCb, L"H2 YUV outCb must be 100% finite");
+					AssertAllFinitePlane(rY.outCr, L"H2 YUV outCr must be 100% finite");
+					AssertAllFinitePlane(rY.deliveredDeltaCb, L"H2 YUV deliveredDeltaCb must be 100% finite");
+					AssertAllFinitePlane(rY.deliveredDeltaCr, L"H2 YUV deliveredDeltaCr must be 100% finite");
+					Assert::IsTrue(rY.nonFinitePixels > 0u, L"H2 YUV codedDelta NaN/Inf must report nonFinitePixels > 0");
+					Assert::IsTrue(siY.IsActive(StandInKind::NonFiniteClosure), L"H2 YUV codedDelta NaN/Inf must engage NonFiniteClosure");
+
+					ChromaGpuApplyInput rgbBad;
+					rgbBad.lumaW = lumaW;
+					rgbBad.lumaH = lumaH;
+					rgbBad.deliveredFormat = DeliveredChromaFormat::Rgb444;
+					rgbBad.codedSubsampling = ChromaSubsampling::Yuv420;
+					rgbBad.siting = SitingSpec::Left();
+					rgbBad.activeRect = active;
+					rgbBad.matrix = YCbCrMatrixSpec::Bt709();
+					rgbBad.deliveredR = delivR;
+					rgbBad.deliveredG = delivG;
+					rgbBad.deliveredB = delivB;
+					rgbBad.codedDeltaCb = badCb;
+					rgbBad.codedDeltaCr = badCr;
+
+					StandInRegistry siR;
+					const ChromaGpuApplyResult rR = gpuGuard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, rgbBad, &siR);
+					Assert::IsTrue(rR.succeeded, L"H2 RGB codedDelta NaN/Inf must complete cleanly");
+					AssertAllFinitePlane(rR.outR, L"H2 RGB outR must be 100% finite");
+					AssertAllFinitePlane(rR.outG, L"H2 RGB outG must be 100% finite");
+					AssertAllFinitePlane(rR.outB, L"H2 RGB outB must be 100% finite");
+					Assert::IsTrue(rR.nonFinitePixels > 0u, L"H2 RGB codedDelta NaN/Inf must report nonFinitePixels > 0");
+					Assert::IsTrue(siR.IsActive(StandInKind::NonFiniteClosure), L"H2 RGB codedDelta NaN/Inf must engage NonFiniteClosure");
+				}
+
+				// D2: RGB FP32 overflow (r = 3.4e38, large +dCr -> kR * dCr + r overflows FP32 max to +Inf)
+				{
+					const float kNearMaxF = 3.4e38f;
+					const float kBigDeltaF = 1.0e38f;
+					// Negative control: verify un-guarded FP32 overflows to +Inf!
+					const float kR709 = static_cast<float>(2.0 * (1.0 - YCbCrMatrixSpec::Bt709().kr));
+					volatile float vOverflow = kNearMaxF + kR709 * kBigDeltaF;
+					Assert::IsFalse(std::isfinite(static_cast<float>(vOverflow)),
+						L"Negative control: un-guarded FP32 RGB add must overflow to +Inf");
+
+					TdV2Plane ovfR = delivR;
+					TdV2Plane ovfG = delivG;
+					TdV2Plane ovfB = delivB;
+					ovfR.at(10, 12) = static_cast<double>(kNearMaxF);
+					TdV2Plane ovfDcb(lumaW, lumaH, 0.0);
+					TdV2Plane ovfDcr(lumaW, lumaH, 0.0);
+					ovfDcr.at(10, 12) = static_cast<double>(kBigDeltaF);
+
+					ChromaGpuApplyInput rgbOvf;
+					rgbOvf.lumaW = lumaW;
+					rgbOvf.lumaH = lumaH;
+					rgbOvf.deliveredFormat = DeliveredChromaFormat::Rgb444;
+					rgbOvf.codedSubsampling = ChromaSubsampling::Yuv444;
+					rgbOvf.siting = SitingSpec::Center();
+					rgbOvf.activeRect = active;
+					rgbOvf.matrix = YCbCrMatrixSpec::Bt709();
+					rgbOvf.deliveredR = ovfR;
+					rgbOvf.deliveredG = ovfG;
+					rgbOvf.deliveredB = ovfB;
+					rgbOvf.codedDeltaCb = ovfDcb;
+					rgbOvf.codedDeltaCr = ovfDcr;
+
+					StandInRegistry siOvf;
+					const ChromaGpuApplyResult rOvf = gpuGuard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, rgbOvf, &siOvf);
+					Assert::IsTrue(rOvf.succeeded, L"H2 RGB FP32 overflow must complete cleanly");
+					AssertAllFinitePlane(rOvf.outR, L"H2 RGB overflow outR must be 100% finite");
+					AssertAllFinitePlane(rOvf.outG, L"H2 RGB overflow outG must be 100% finite");
+					AssertAllFinitePlane(rOvf.outB, L"H2 RGB overflow outB must be 100% finite");
+					Assert::AreEqual(static_cast<double>(kNearMaxF), rOvf.outR.at(10, 12),
+						L"H2 RGB overflow must restore original finite R");
+					Assert::AreEqual(ovfG.at(10, 12), rOvf.outG.at(10, 12),
+						L"H2 RGB overflow must restore original finite G");
+					Assert::AreEqual(ovfB.at(10, 12), rOvf.outB.at(10, 12),
+						L"H2 RGB overflow must restore original finite B");
+					Assert::AreEqual(0.0, rOvf.deliveredDeltaCr.at(10, 12), L"H2 RGB overflow must zero deltaCr");
+					Assert::IsTrue(rOvf.nonFinitePixels > 0u, L"H2 RGB overflow must report nonFinitePixels > 0");
+					Assert::IsTrue(siOvf.IsActive(StandInKind::NonFiniteClosure), L"H2 RGB overflow must engage NonFiniteClosure");
+				}
+
+				// D3: YUV FP32 overflow AND YUV non-finite deliveredCb
+				{
+					const float kNearMaxF = 3.4e38f;
+					const float kBigDeltaF = 1.0e38f;
+					TdV2Plane ovfCb(cW, cH, 512.0);
+					TdV2Plane ovfCr(cW, cH, 512.0);
+					ovfCb.at(6, 10) = static_cast<double>(kNearMaxF);
+					TdV2Plane ovfDcb(cW, cH, 0.0);
+					TdV2Plane ovfDcr(cW, cH, 0.0);
+					ovfDcb.at(6, 10) = static_cast<double>(kBigDeltaF);
+
+					ChromaGpuApplyInput yuvOvf;
+					yuvOvf.lumaW = lumaW;
+					yuvOvf.lumaH = lumaH;
+					yuvOvf.deliveredFormat = DeliveredChromaFormat::Yuv420;
+					yuvOvf.codedSubsampling = ChromaSubsampling::Yuv420;
+					yuvOvf.siting = SitingSpec::Left();
+					yuvOvf.activeRect = active;
+					yuvOvf.deliveredCb = ovfCb;
+					yuvOvf.deliveredCr = ovfCr;
+					yuvOvf.codedDeltaCb = ovfDcb;
+					yuvOvf.codedDeltaCr = ovfDcr;
+
+					StandInRegistry siYOvf;
+					const ChromaGpuApplyResult rYOvf = gpuGuard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, yuvOvf, &siYOvf);
+					Assert::IsTrue(rYOvf.succeeded, L"H2 YUV FP32 overflow must complete cleanly");
+					AssertAllFinitePlane(rYOvf.outCb, L"H2 YUV overflow outCb must be 100% finite");
+					AssertAllFinitePlane(rYOvf.outCr, L"H2 YUV overflow outCr must be 100% finite");
+					Assert::AreEqual(static_cast<double>(kNearMaxF), rYOvf.outCb.at(6, 10),
+						L"H2 YUV overflow must restore finite deliveredCb");
+					Assert::IsTrue(rYOvf.nonFinitePixels > 0u, L"H2 YUV overflow must report nonFinitePixels > 0");
+					Assert::IsTrue(siYOvf.IsActive(StandInKind::NonFiniteClosure), L"H2 YUV overflow must engage NonFiniteClosure");
+
+					// Non-finite deliveredCb (NaN) -> closed cleanly without propagating NaN/Inf!
+					TdV2Plane nanDelivCb(cW, cH, 512.0);
+					nanDelivCb.at(8, 12) = kNaN;
+					ChromaGpuApplyInput yuvNanDeliv = yuvOvf;
+					yuvNanDeliv.deliveredCb = nanDelivCb;
+					yuvNanDeliv.codedDeltaCb = codedDeltaCb;
+					yuvNanDeliv.codedDeltaCr = codedDeltaCr;
+					StandInRegistry siYNan;
+					const ChromaGpuApplyResult rYNan = gpuGuard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, yuvNanDeliv, &siYNan);
+					Assert::IsTrue(rYNan.succeeded, L"H2 YUV non-finite deliveredCb must complete cleanly");
+					AssertAllFinitePlane(rYNan.outCb, L"H2 YUV non-finite deliveredCb must not propagate NaN into outCb");
+					AssertAllFinitePlane(rYNan.outCr, L"H2 YUV non-finite deliveredCb must not propagate NaN into outCr");
+					Assert::AreEqual(0.0, rYNan.outCb.at(8, 12), L"H2 YUV non-finite deliveredCb pixel must close to 0.0");
+					Assert::AreEqual(0.0, rYNan.deliveredDeltaCb.at(8, 12), L"H2 YUV non-finite deliveredCb delta must be 0.0");
+					Assert::IsTrue(rYNan.nonFinitePixels > 0u, L"H2 YUV non-finite deliveredCb must count nonFinitePixels > 0");
+					Assert::IsTrue(siYNan.IsActive(StandInKind::NonFiniteClosure),
+						L"H2 YUV non-finite deliveredCb must engage NonFiniteClosure");
+				}
+
+				// D4: Non-finite siting.shiftX / shiftY -> fails closed visibly with NonFiniteClosure!
+				{
+					ChromaGpuApplyInput badSiting;
+					badSiting.lumaW = lumaW;
+					badSiting.lumaH = lumaH;
+					badSiting.deliveredFormat = DeliveredChromaFormat::Yuv422;
+					badSiting.codedSubsampling = ChromaSubsampling::Yuv420;
+					badSiting.siting = { static_cast<float>(kNaN), 0.0f };
+					badSiting.activeRect = active;
+					badSiting.deliveredCb = delivCb422;
+					badSiting.deliveredCr = delivCr422;
+					badSiting.codedDeltaCb = codedDeltaCb;
+					badSiting.codedDeltaCr = codedDeltaCr;
+
+					StandInRegistry siSit;
+					const uint64_t failsBefore = gpuGuard.engine.Failures();
+					const ChromaGpuApplyResult rSit = gpuGuard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, badSiting, &siSit);
+					Assert::IsFalse(rSit.succeeded, L"H2 non-finite siting.shiftX must fail closed");
+					Assert::IsFalse(rSit.lastError.empty(), L"H2 non-finite siting.shiftX must set lastError");
+					Assert::AreEqual(failsBefore + 1u, gpuGuard.engine.Failures(), L"H2 invalid siting must increment Failures()");
+					Assert::IsTrue(siSit.IsActive(StandInKind::NonFiniteClosure), L"H2 invalid siting must engage NonFiniteClosure");
+				}
+
+				// D5: Degenerate matrix.kg <= 0 -> fails closed visibly with NonFiniteClosure!
+				for (double badKg : { 0.0, -0.25 })
+				{
+					ChromaGpuApplyInput badMat;
+					badMat.lumaW = lumaW;
+					badMat.lumaH = lumaH;
+					badMat.deliveredFormat = DeliveredChromaFormat::Rgb444;
+					badMat.codedSubsampling = ChromaSubsampling::Yuv420;
+					badMat.siting = SitingSpec::Left();
+					badMat.activeRect = active;
+					badMat.matrix = YCbCrMatrixSpec::Bt709();
+					badMat.matrix.kg = badKg;
+					badMat.deliveredR = delivR;
+					badMat.deliveredG = delivG;
+					badMat.deliveredB = delivB;
+					badMat.codedDeltaCb = codedDeltaCb;
+					badMat.codedDeltaCr = codedDeltaCr;
+
+					StandInRegistry siMat;
+					const uint64_t failsBefore = gpuGuard.engine.Failures();
+					const ChromaGpuApplyResult rMat = gpuGuard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, badMat, &siMat);
+					Assert::IsFalse(rMat.succeeded, L"H2 degenerate matrix.kg<=0 must fail closed");
+					Assert::IsFalse(rMat.lastError.empty(), L"H2 degenerate matrix.kg<=0 must set lastError");
+					Assert::AreEqual(failsBefore + 1u, gpuGuard.engine.Failures(), L"H2 degenerate matrix must increment Failures()");
+					Assert::IsTrue(siMat.IsActive(StandInKind::NonFiniteClosure), L"H2 degenerate matrix must engage NonFiniteClosure");
+				}
 			}
 		}
 
@@ -1083,6 +1416,43 @@ namespace TdV2GpuWarpNs
 			Assert::AreEqual(0, shortRes.dispatchCount, L"Zero GPU dispatches allowed on scratch shortage");
 			Assert::AreEqual(0.0, MaxAbsDiffFull(shortRes.outputY, f1.receivedY),
 				L"outputY must stay unmodified on scratch shortage (ZERO silent fallback to private textures!)");
+			Assert::AreEqual(static_cast<uint64_t>(0u), arena.NestedScopes(),
+				L"ArenaScopeGuard must cleanly close scope on T0 shortage (NestedScopes == 0)");
+
+			// ---- M3: Seed & Cut frames (refSpecs.empty()) MUST succeed WITHOUT tripping GpuScratchShortage
+			//      even under a tight Tier::T0 arena (0 scratch textures reserved for TD)! ----
+			{
+				FrameProcessInput seedIn = MakeFrameInput(f1, 10, /*withPeaks=*/false, /*transformIdentified8x8=*/false);
+				StandInRegistry seedSi;
+				arena.BeginFrame();
+				const GpuProcessResult seedRes = arenaGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, seedIn, &arena, &seedSi);
+				Assert::IsTrue(seedRes.succeeded, L"M3: Seed frame (no refs) must succeed under tight Tier::T0 arena");
+				Assert::IsFalse(seedRes.scratchShort, L"M3: Seed frame must NOT trip scratchShort under tight arena");
+				Assert::IsFalse(seedSi.IsActive(StandInKind::GpuScratchShortage), L"M3: Seed frame must NOT engage GpuScratchShortage");
+				Assert::IsTrue(arenaGuard.engine.HasCarry(), L"M3: Seed frame under tight arena must establish carry");
+				Assert::AreEqual(0, seedRes.dispatchCount, L"M3: Seed frame must issue 0 compute dispatches");
+				Assert::AreEqual(static_cast<uint64_t>(0u), arena.NestedScopes(), L"M3: Seed frame NestedScopes must be 0");
+
+				FrameProcessInput cutIn = MakeFrameInput(f1, 11, /*withPeaks=*/true, /*transformIdentified8x8=*/false, /*isCut=*/true);
+				StandInRegistry cutSi;
+				arena.BeginFrame();
+				const GpuProcessResult cutRes = arenaGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, cutIn, &arena, &cutSi);
+				Assert::IsTrue(cutRes.succeeded, L"M3: Cut frame (refSpecs empty) must succeed under tight Tier::T0 arena");
+				Assert::IsFalse(cutRes.scratchShort, L"M3: Cut frame must NOT trip scratchShort under tight arena");
+				Assert::IsFalse(cutSi.IsActive(StandInKind::GpuScratchShortage), L"M3: Cut frame must NOT engage GpuScratchShortage");
+				Assert::IsTrue(cutRes.carryReset && arenaGuard.engine.HasCarry(), L"M3: Cut frame must reset and re-seed carry");
+				Assert::AreEqual(static_cast<uint64_t>(0u), arena.NestedScopes(), L"M3: Cut frame NestedScopes must be 0");
+
+				// Negative control: immediately following the successful seed/cut on the EXACT SAME Tier::T0 arena,
+				// a frame WITH active peaks MUST fail visibly with GpuScratchShortage!
+				StandInRegistry negShortSi;
+				arena.BeginFrame();
+				const GpuProcessResult negShortRes = arenaGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in1, &arena, &negShortSi);
+				Assert::IsFalse(negShortRes.succeeded, L"M3 neg-ctrl: active frame on T0 arena must fail visibly");
+				Assert::IsTrue(negShortRes.scratchShort, L"M3 neg-ctrl: active frame on T0 arena must set scratchShort");
+				Assert::IsTrue(negShortSi.IsActive(StandInKind::GpuScratchShortage), L"M3 neg-ctrl: must engage GpuScratchShortage");
+				Assert::AreEqual(static_cast<uint64_t>(0u), arena.NestedScopes(), L"M3 neg-ctrl: NestedScopes must stay 0");
+			}
 
 			// ---- Force arena shortage #2 (1-texture undersized budget): missing just 1 RGBA32F texture ----
 			std::vector<VpSkeleton::ArenaRequest> partialReqs = reqs;
@@ -1105,6 +1475,8 @@ namespace TdV2GpuWarpNs
 			Assert::IsTrue(partialRes.scratchShort, L"1-texture undersized arena must set scratchShort == true");
 			Assert::IsTrue(partialSi.IsActive(StandInKind::GpuScratchShortage), L"GpuScratchShortage must be active on partial shortage");
 			Assert::AreEqual(0.0, MaxAbsDiffFull(partialRes.outputY, f1.receivedY), L"Partial shortage must leave outputY unmodified");
+			Assert::AreEqual(static_cast<uint64_t>(0u), arena.NestedScopes(),
+				L"ArenaScopeGuard must cleanly close scope on partial shortage (NestedScopes == 0)");
 
 			// ---- Automatic recovery when Tier::T1 is restored ----
 			Assert::IsTrue(arena.Reserve(planT1), L"Re-reserve T1 failed");
@@ -1113,6 +1485,8 @@ namespace TdV2GpuWarpNs
 			const GpuProcessResult recovRes = arenaGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in1, &arena, &recovSi);
 			Assert::IsTrue(recovRes.succeeded && !recovRes.scratchShort, L"Recovery on restored T1 failed");
 			Assert::IsTrue(MaxAbsDiffRect(recovRes.outputY, f1.receivedY, f1.active) > 2.0, L"Recovered T1 frame must resume real repair");
+			Assert::AreEqual(static_cast<uint64_t>(0u), arena.NestedScopes(),
+				L"ArenaScopeGuard must maintain NestedScopes == 0 through recovery");
 
 			// ---- Absent / Invalid Inputs: null pl_gpu, null pl_dispatch, empty frame, invalid sourceBits (0, 25) ----
 			{
@@ -1361,6 +1735,97 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				AssertCpuGpuFrameParity(cpuRes, gpuRes, b.curClean, b.receivedY, b.active, "CaseF-CombinedNaN");
 				Assert::IsTrue(gpuRes.nonFiniteCells >= 5u, L"Combined NaN/Inf must count all closures");
 				Assert::IsTrue(gpuSi.IsActive(StandInKind::NonFiniteClosure), L"Combined NaN/Inf must engage NonFiniteClosure");
+			}
+
+			// ---- Case G (M1): Simultaneous NaN/+Inf in BOTH prevPeak AND nextPeak -> exact +2 nonFiniteCells parity! ----
+			{
+				ComplexSceneBundle b = BuildComplexFrame(1, 1.0, 0.5, false);
+				b.prevClean.at(10, 12) = kNaN;
+				b.nextClean.at(36, 38) = kPInf;
+				FrameProcessInput in = MakeFrameInput(b, 7, true, false);
+
+				TdV2ReferenceEngine cpuEng(cfg);
+				GpuEngineGuard gpuGuard(ctx.gpu, cfg);
+				StandInRegistry cpuSi, gpuSi;
+
+				const FrameProcessResult cpuRes = cpuEng.ProcessFrame(in, &cpuSi);
+				const GpuProcessResult gpuRes = gpuGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in, nullptr, &gpuSi);
+
+				AssertCpuGpuFrameParity(cpuRes, gpuRes, b.curClean, b.receivedY, b.active, "CaseG-MultiRefNaN");
+				Assert::AreEqual(static_cast<size_t>(2u), cpuRes.nonFiniteCells,
+					L"M1 CPU baseline: simultaneous NaN in prevPeak + nextPeak must yield 2 nonFiniteCells");
+				Assert::AreEqual(cpuRes.nonFiniteCells, gpuRes.nonFiniteCells,
+					L"M1 GPU parity: simultaneous NaN in prevPeak + nextPeak must report +2 (NOT +1)!");
+				Assert::IsTrue(gpuSi.IsActive(StandInKind::NonFiniteClosure), L"M1 multi-ref NaN must engage NonFiniteClosure");
+			}
+
+			// ---- Case H (H3): NaN deadZonePhi & NaN step/zeroFrac must NOT crash GLSL compile & must match CPU <= 1e-3 ----
+			for (bool xform8x8 : { false, true })
+			{
+				ComplexSceneBundle b = BuildComplexFrame(1, 1.0, 0.5, false);
+				FrameProcessInput in = MakeFrameInput(b, xform8x8 ? 8 : 9, true, xform8x8);
+				in.deadZonePhi = kNaN;
+
+				TdV2ReferenceEngine cpuEng(cfg);
+				GpuEngineGuard gpuGuard(ctx.gpu, cfg);
+				StandInRegistry cpuSi, gpuSi;
+
+				const FrameProcessResult cpuRes = cpuEng.ProcessFrame(in, &cpuSi);
+				const GpuProcessResult gpuRes = gpuGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in, nullptr, &gpuSi);
+
+				Assert::IsTrue(gpuRes.succeeded, L"H3: NaN deadZonePhi must NOT crash GLSL compilation or dispatch");
+				AssertCpuGpuFrameParity(cpuRes, gpuRes, b.curClean, b.receivedY, b.active,
+					xform8x8 ? "CaseH-NaNPhi-8x8" : "CaseH-NaNPhi-Unknown");
+			}
+			{
+				ComplexSceneBundle b = BuildComplexFrame(1, 1.0, 0.5, false);
+				FrameProcessInput in = MakeFrameInput(b, 10, true, false);
+				in.estimatedStepDelta = kNaN;
+				in.zeroCoeffFraction = kNaN;
+
+				TdV2ReferenceEngine cpuEng(cfg);
+				GpuEngineGuard gpuGuard(ctx.gpu, cfg);
+				StandInRegistry cpuSi, gpuSi;
+
+				const FrameProcessResult cpuRes = cpuEng.ProcessFrame(in, &cpuSi);
+				const GpuProcessResult gpuRes = gpuGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in, nullptr, &gpuSi);
+
+				Assert::IsTrue(gpuRes.succeeded, L"H3: NaN stepDelta/zeroFrac must fall back cleanly without GLSL error");
+				Assert::IsTrue(cpuSi.IsActive(StandInKind::StepPriorDefault) && gpuSi.IsActive(StandInKind::StepPriorDefault),
+					L"H3: NaN stepDelta/zeroFrac must engage StepPriorDefault on CPU & GPU");
+				AssertCpuGpuFrameParity(cpuRes, gpuRes, b.curClean, b.receivedY, b.active, "CaseH-NaNStepPrior");
+			}
+
+			// ---- Case I (H3): Dynamic UBO per-frame P16 stepDelta & zeroCoeffFraction across consecutive frames ----
+			{
+				ComplexSceneBundle b = BuildComplexFrame(1, 1.0, 0.5, false);
+				TdV2ReferenceEngine cpuEng(cfg);
+				GpuEngineGuard gpuGuard(ctx.gpu, cfg);
+
+				struct StepSpec { double delta; double zf; const char* tag; };
+				const StepSpec specs[3] = {
+					{ 4.0,  0.05, "CaseI-Step4" },
+					{ 28.0, 0.55, "CaseI-Step28" },
+					{ 12.0, 0.25, "CaseI-Step12" }
+				};
+
+				TdV2Plane gpuOutStep4, gpuOutStep28;
+				for (int idx = 0; idx < 3; ++idx)
+				{
+					FrameProcessInput in = MakeFrameInput(b, 20 + static_cast<uint64_t>(idx), true, false);
+					in.estimatedStepDelta = specs[idx].delta;
+					in.zeroCoeffFraction = specs[idx].zf;
+
+					const FrameProcessResult cpuRes = cpuEng.ProcessFrame(in, nullptr);
+					const GpuProcessResult gpuRes = gpuGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in, nullptr, nullptr);
+					AssertCpuGpuFrameParity(cpuRes, gpuRes, b.curClean, b.receivedY, b.active, specs[idx].tag);
+					if (idx == 0) gpuOutStep4 = gpuRes.outputY;
+					if (idx == 1) gpuOutStep28 = gpuRes.outputY;
+				}
+				// Negative control: changing stepDelta/zeroFrac on the same engine MUST materially alter GPU output!
+				const double stepDiff = MaxAbsDiffRect(gpuOutStep4, gpuOutStep28, b.active);
+				Assert::IsTrue(stepDiff > 1.0,
+					FormatMsg("H3 negative control failed: stepDelta 4 vs 28 GPU diff=%.4f <= 1.0 (UBO stale?)", stepDiff).c_str());
 			}
 		}
 
@@ -1699,6 +2164,28 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 					L"Negative control: valid 2nd AccumulateAnchorFrame must succeed");
 				Assert::AreEqual(static_cast<size_t>(2u), canvas.AccumulatedFrames(),
 					L"Negative control: valid 2nd AccumulateAnchorFrame must increment AccumulatedFrames to 2");
+
+				// L4: Null splatMotion on frame 0 does NOT engage MotionFieldStandIn,
+				//     while null splatMotion on frame 1+ DOES engage MotionFieldStandIn!
+				TdV2ChromaAnchorCanvas nullMotCanvas;
+				StandInRegistry nullMotSi;
+				Assert::IsTrue(nullMotCanvas.AccumulateAnchorFrame(
+					codedCb, codedCr, &cleanY, lumaW, lumaH, ChromaSubsampling::Yuv420,
+					SitingSpec::Left(), active, nullptr, cellPx, 10, &nullMotSi),
+					L"L4: Null splatMotion on frame 0 must succeed");
+				Assert::AreEqual(static_cast<size_t>(1u), nullMotCanvas.AccumulatedFrames(),
+					L"L4: Null splatMotion on frame 0 must set AccumulatedFrames == 1");
+				Assert::IsFalse(nullMotSi.IsActive(StandInKind::MotionFieldStandIn),
+					L"L4: Null splatMotion on frame 0 must NOT engage MotionFieldStandIn");
+
+				Assert::IsTrue(nullMotCanvas.AccumulateAnchorFrame(
+					codedCb, codedCr, &cleanY, lumaW, lumaH, ChromaSubsampling::Yuv420,
+					SitingSpec::Left(), active, nullptr, cellPx, 10, &nullMotSi),
+					L"L4: Null splatMotion on frame 1 must succeed");
+				Assert::AreEqual(static_cast<size_t>(2u), nullMotCanvas.AccumulatedFrames(),
+					L"L4: Null splatMotion on frame 1 must increment AccumulatedFrames == 2");
+				Assert::IsTrue(nullMotSi.IsActive(StandInKind::MotionFieldStandIn),
+					L"L4: Null splatMotion on frame 1+ MUST engage MotionFieldStandIn");
 			}
 
 			// =====================================================================
