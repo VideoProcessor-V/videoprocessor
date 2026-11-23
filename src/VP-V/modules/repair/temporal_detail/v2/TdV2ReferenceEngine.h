@@ -516,16 +516,19 @@ namespace TdV2
 		const size_t numCells = static_cast<size_t>(cellsW) * static_cast<size_t>(cellsH);
 		std::vector<FocusCellInfo> info(numCells);
 		const double depthScale = DepthScale(sourceBits);
-		// Genuine defocused scene structure must exceed 4x quantization-step variance (> 2 sigma above codec step)
-		// and at least 1 LSB^2, so smooth W1 banded skies are NEVER falsely classified as optical bokeh!
-		const double structureFloor = (std::max)(depthScale * depthScale, 4.0 * (std::max)(0.0, stepTotalVar));
+		// Map full-spectrum stepTotalVar into the exact (M + D3) band-energy domain via BandFromBase's
+		// 2D white-noise transfer gain gainMD3 = ||M||_2^2 + ||D3||_2^2 (~= 0.05589), so genuine defocused
+		// bokeh structure is never drowned out by an unscaled full-spectrum floor while W1 banded sky stays unvetoed!
+		const BandWhiteNoiseGains focusGains = ComputeBandWhiteNoiseGains();
+		const double gainMD3 = focusGains.mid + focusGains.d3;
+		const double structureFloor = (std::max)(depthScale * depthScale, 4.0 * gainMD3 * (std::max)(0.0, stepTotalVar));
 		const double fSharp = AnalyticalEdgeFocusRatio(0.0);
 		const double fDefocus = AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase);
 		const double fShiftDelta = fSharp - fDefocus;
 
 		const ActiveRect ar = active.ClampedTo(curBands.M.w, curBands.M.h);
 
-		auto cellFocusRatio = [&](const ThreeBandPlanes& b, int cx, int cy, double& outTotalEnergy) -> double
+		auto cellFocusRatio = [&](const ThreeBandPlanes& b, int cx, int cy, double& outTotalEnergy, double& outM2) -> double
 		{
 			const int x0 = (std::max)(ar.x0, cx * cellPx);
 			const int y0 = (std::max)(ar.y0, cy * cellPx);
@@ -547,11 +550,13 @@ namespace TdV2
 			if (cnt == 0)
 			{
 				outTotalEnergy = 0.0;
+				outM2 = 0.0;
 				return 1.0;
 			}
 			const double invC = 1.0 / static_cast<double>(cnt);
 			const double m2 = e2 * invC;
 			const double m3 = e3 * invC;
+			outM2 = m2;
 			outTotalEnergy = m2 + m3;
 			return outTotalEnergy > kEngineNumFloor ? (m2 / (outTotalEnergy + kEngineNumFloor)) : 1.0;
 		};
@@ -561,8 +566,8 @@ namespace TdV2
 			for (int cx = 0; cx < cellsW; ++cx)
 			{
 				const size_t idx = static_cast<size_t>(cy) * cellsW + cx;
-				double curEnergy = 0.0;
-				const double curF = cellFocusRatio(curBands, cx, cy, curEnergy);
+				double curEnergy = 0.0, curM2 = 0.0;
+				const double curF = cellFocusRatio(curBands, cx, cy, curEnergy, curM2);
 				info[idx].focusRatio = curF;
 
 				if (curEnergy > structureFloor && curF <= fDefocus)
@@ -574,13 +579,15 @@ namespace TdV2
 				}
 				else
 				{
-					// Detect focal-plane shift (rack focus): if any reference is significantly sharper than current cell
-					// by more than the analytical sharp->defocus ratio drop while structure exists, hard-veto.
+					// Detect focal-plane shift (rack focus) respecting Parseval's theorem:
+					// Optical defocus (|H(w)| <= 1) strictly reduces mid-band energy (curM2 < refM2) and pulls
+					// curF < fSharp, so bright adjacent overlays / appearance changes (where curM2 >= refM2)
+					// never trigger false focusChange vetoes on normal neighbor cells.
 					for (const auto& rb : refBands)
 					{
-						double refEnergy = 0.0;
-						const double refF = cellFocusRatio(rb, cx, cy, refEnergy);
-						if (refEnergy > structureFloor && (refF - curF) > fShiftDelta)
+						double refEnergy = 0.0, refM2 = 0.0;
+						const double refF = cellFocusRatio(rb, cx, cy, refEnergy, refM2);
+						if (refEnergy > structureFloor && curM2 < refM2 && curF < fSharp && (refF - curF) > fShiftDelta)
 						{
 							info[idx].focusChange = true;
 							break;
@@ -942,15 +949,25 @@ namespace TdV2
 
 						for (int y = py0; y < py1; ++y)
 						{
+							const int pcy = (std::min)(res.cellsH - 1, y / cellPx);
 							for (int x = px0; x < px1; ++x)
 							{
+								const int pcx = (std::min)(res.cellsW - 1, x / cellPx);
+								const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
+								// Exclude pixels owned by hard-vetoed cells (focusChange, Overlay, DynamicTexture,
+								// fast Object, invalid motion) from 3x3 covariance pooling so vetoed regions never
+								// poison neighboring normal cells' second moments (eliminates 48x48 dead-zone halo).
+								if (focusCells[pCell].focusChange)
+									continue;
+
 								const size_t pIdx = static_cast<size_t>(y) * w + x;
 								bool allValid = true;
 								float diffs[kMaxBlendRefs] = {};
 								const double curV = curB.at(x, y);
 								for (int k = 0; k < K; ++k)
 								{
-									if (refs[k].validPx[pIdx] == 0u)
+									const double pGate = (b == 0) ? refs[k].motionGate.gateL[pCell] : refs[k].motionGate.gateMH[pCell];
+									if (refs[k].validPx[pIdx] == 0u || pGate <= 0.0)
 									{
 										allValid = false;
 										break;

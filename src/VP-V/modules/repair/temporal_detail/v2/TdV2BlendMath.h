@@ -45,43 +45,57 @@ namespace TdV2
 	constexpr double kTemporalWeightRamp = 0.0;
 
 	// Exact 2D separable white-noise variance transfer gains ||H_j||_2^2 of U2 BandFromBase filters:
-	//   L = G(kSigmaBase), M = G(kSigmaFine) - G(kSigmaBase), H = I - G(kSigmaFine).
+	//   L  = G(kSigmaBase), M = G(kSigmaFine) - G(kSigmaBase), H = I - G(kSigmaFine),
+	//   D3 = G(kSigmaBase) - G(kSigmaLow) (low-mid focus band).
 	// For unit-variance uncorrelated white pixel noise (grain or white quantization error), the exact
 	// per-band variance is sigma^2 * gain_j (NO re-normalization by 0.809, because D1+D2+L=I has nonzero
 	// cross-covariance terms between overlapping filter bands; re-normalizing would over-subtract by +23.6%).
 	struct BandWhiteNoiseGains
 	{
 		double low = 0.0;   // ||G(2.5)||_2^2 ~= 0.0127
-		double mid = 0.0;   // ||G(1.0) - G(2.5)||_2^2 ~= 0.0480
+		double mid = 0.0;   // ||G(1.0) - G(2.5)||_2^2 ~= 0.0485
 		double fine = 0.0;  // ||I - G(1.0)||_2^2 ~= 0.7613
+		double d3 = 0.0;    // ||G(2.5) - G(6.0)||_2^2 ~= 0.0074
 	};
 
 	inline BandWhiteNoiseGains ComputeBandWhiteNoiseGains()
 	{
 		const auto g1 = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaFine, 3.0, true, 0.0);
 		const auto g2 = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaBase, 3.0, true, 0.0);
+		const auto g3 = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaLow,  3.0, true, 0.0);
 		const int r1 = static_cast<int>(g1.size() / 2);
 		const int r2 = static_cast<int>(g2.size() / 2);
+		const int r3 = static_cast<int>(g3.size() / 2);
 
 		double sum1Sq = 0.0;
 		for (double t : g1) sum1Sq += t * t;
 		double sum2Sq = 0.0;
 		for (double t : g2) sum2Sq += t * t;
+		double sum3Sq = 0.0;
+		for (double t : g3) sum3Sq += t * t;
 
-		const int rMin = (std::min)(r1, r2);
+		const int rMin12 = (std::min)(r1, r2);
 		double dot12 = 0.0;
-		for (int k = -rMin; k <= rMin; ++k)
+		for (int k = -rMin12; k <= rMin12; ++k)
 			dot12 += g1[static_cast<size_t>(k + r1)] * g2[static_cast<size_t>(k + r2)];
+
+		const int rMin23 = (std::min)(r2, r3);
+		double dot23 = 0.0;
+		for (int k = -rMin23; k <= rMin23; ++k)
+			dot23 += g2[static_cast<size_t>(k + r2)] * g3[static_cast<size_t>(k + r3)];
 
 		const double g1_0 = g1[static_cast<size_t>(r1)];
 		const double normG1Sq = sum1Sq * sum1Sq;
 		const double normG2Sq = sum2Sq * sum2Sq;
+		const double normG3Sq = sum3Sq * sum3Sq;
 		const double cross12Sq = dot12 * dot12;
+		const double cross23Sq = dot23 * dot23;
 
 		BandWhiteNoiseGains out;
 		out.low = normG2Sq;
 		out.mid = normG1Sq - 2.0 * cross12Sq + normG2Sq;
 		out.fine = 1.0 - 2.0 * (g1_0 * g1_0) + normG1Sq;
+		out.d3 = normG2Sq - 2.0 * cross23Sq + normG3Sq;
 		return out;
 	}
 
