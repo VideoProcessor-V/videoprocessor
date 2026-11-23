@@ -6219,10 +6219,14 @@ namespace Tests
 				}
 				Assert::AreEqual(0LL, duplicates, (wTagPrefix + L"shared units computed more than once per (variant, source frame): see the DUPLICATE lines").c_str());
 				Assert::AreEqual(0LL, unattributed, (wTagPrefix + L"GPU passes without an owner: see the gpu UNATTRIBUTED lines").c_str());
+				// 102b deferred-register row CO-DEFAULT-MOTIONAHEAD-U3 + WAIVER-W1R-FIX-5-U3:
+				// Under true defaults (analysis_lane: off, frame_analysis_store: off), P1AcquireSource receives
+				// NoOwnerFill on (kP1HalfLuma, Cpu), so MotionAhead::Producer::LumaAtTarget (MotionAheadProducer.cpp:601-607)
+				// decodes half-luma privately and emits VPV_COMPUTE_ONCE_PRIVATE_AT("U3", seq, "motion_ahead" /
+				// "motion_ahead_request") - pinned by GfP4MotionTests:175-207. Leg 1 (default-chain) permits ONLY
+				// those MotionAhead U3 rows while rejecting every other CPU hidden copy; Leg 2 (lane-on) enforces strict hidden == 0.
 				if (allowMotionAheadU3Hidden)
 				{
-					// With analysis_lane: off (true defaults), MotionAhead::Producer::LumaAtTarget falls back to
-					// VPV_COMPUTE_ONCE_PRIVATE_AT("U3", seq, "motion_ahead" / "motion_ahead_request").
 					// Assert zero unexpected CPU hidden-copy lines (any CPU HIDDEN-COPY must be strictly unit U3 / motion_ahead*).
 					std::string unexpectedHidden;
 					int expectedHiddenRows = 0;
@@ -8040,6 +8044,31 @@ namespace Tests
 			Logger::WriteMessage(("A deband_vp only (games shallow queue):\n" + VectorTestLines(none)).c_str());
 			Logger::WriteMessage(("B low latency with the de-judder demand (games shallow queue):\n" + VectorTestLines(lowStarter)).c_str());
 			Logger::WriteMessage(("C Normal queue:\n" + VectorTestLines(normal)).c_str());
+			auto logShallowTelemetry = [](const char* leg, const RunResult& r) {
+				std::string out = std::string(leg) + " shallow-queue stats:\n";
+				bool anyStats = false;
+				for (const std::string& line : r.log)
+				{
+					if (line.find("Vector engine: ") != std::string::npos && line.find(" pairs (ahead hits ") != std::string::npos)
+					{
+						out += "  [stats] " + line + "\n";
+						anyStats = true;
+					}
+					else if (line.find("ForwardShallow backward pairs served") != std::string::npos)
+					{
+						out += "  [log-status] " + line + "\n";
+					}
+				}
+				if (!anyStats)
+					out += "  [stats] (no periodic Vector engine pairs line logged)\n";
+				if (r.dejudderStatus.find("ForwardShallow backward pairs served") != std::string::npos)
+					out += "  [status] " + r.dejudderStatus + "\n";
+				else
+					out += "  [status] (no ForwardShallow backward pairs served in dejudderStatus)\n";
+				Logger::WriteMessage(out.c_str());
+			};
+			logShallowTelemetry("A", none);
+			logShallowTelemetry("B", lowStarter);
 			auto assertNoAddedQueueDepth = [](const RunResult& r, const wchar_t* leg) {
 				Assert::IsTrue(r.Logged("Alpha queue policy: target_frames=2 target=2"),
 					(std::wstring(leg) + L": queue policy keeps target_frames=2 target=2\n" + r.Tail()).c_str());
