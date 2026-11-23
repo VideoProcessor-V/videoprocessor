@@ -187,24 +187,28 @@ namespace TdV2
 
 		// Apply signed chroma deltas (dCb, dCr) directly to (r, g, b) with dY = 0 and STRICTLY NO CLIPPING
 		// so BTB (< 64) and WTW (> 940) are preserved and (dCb == 0 && dCr == 0) is bit-exact!
-		void ApplySignedChromaDeltaToRgb(
+		// Returns false and visibly engages NonFiniteClosure if delta is non-finite or matrix kg is degenerate.
+		bool ApplySignedChromaDeltaToRgb(
 			double r, double g, double b,
 			double dCb, double dCr,
-			double& outR, double& outG, double& outB) const
+			double& outR, double& outG, double& outB,
+			StandInRegistry* standIns = nullptr) const
 		{
 			if (dCb == 0.0 && dCr == 0.0)
 			{
 				outR = r;
 				outG = g;
 				outB = b;
-				return;
+				return true;
 			}
 			if (!std::isfinite(dCb) || !std::isfinite(dCr) || !(kg > kEngineNumFloor))
 			{
 				outR = r;
 				outG = g;
 				outB = b;
-				return;
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::NonFiniteClosure, "ApplySignedChromaDeltaToRgb invalid delta or matrix");
+				return false;
 			}
 			const double kR = 2.0 * (1.0 - kr);
 			const double kB = 2.0 * (1.0 - kb);
@@ -214,6 +218,7 @@ namespace TdV2
 			outR = r + dR;
 			outG = g + dG;
 			outB = b + dB;
+			return std::isfinite(outR) && std::isfinite(outG) && std::isfinite(outB);
 		}
 	};
 
@@ -649,6 +654,8 @@ namespace TdV2
 			cellsH_ = 0;
 			cellPx_ = kCanonicalBlockPx;
 			active_ = {};
+			originOffX_ = 0.0;
+			originOffY_ = 0.0;
 			sumCb_ = TdV2Plane();
 			sumCr_ = TdV2Plane();
 			weight_ = TdV2Plane();
@@ -666,6 +673,7 @@ namespace TdV2
 		int Height() const { return h_; }
 		int CellsW() const { return cellsW_; }
 		int CellsH() const { return cellsH_; }
+		const ActiveRect& Active() const { return active_; }
 		size_t AccumulatedFrames() const { return accumulatedFrames_; }
 		const TdV2Plane& AnchorCleanY() const { return anchorCleanY_; }
 		const TdV2Plane& WeightPlane() const { return weight_; }
@@ -714,8 +722,18 @@ namespace TdV2
 			const int ch = (lumaH + cellPx - 1) / cellPx;
 			const size_t numCells = static_cast<size_t>(cw) * static_cast<size_t>(ch);
 
-			// Re-initialize canvas if dimensions or cell grid changed.
-			if (!hasData_ || w_ != lumaW || h_ != lumaH || cellsW_ != cw || cellsH_ != ch || cellPx_ != cellPx)
+			// Fractional siting origin offset so coded samples align to exact integer canvas lattice sites
+			// for TopLeftType2 (0, 0), Left (0, 0.5), and Center (0.5, 0.5), eliminating half-pixel box blur
+			// on static/shifted anchors and preventing odd-dimension edge row/column drops.
+			const double baseX = siting.CodedToLumaX(0.0, cSubX);
+			const double baseY = siting.CodedToLumaY(0.0, cSubY);
+			const double offX = baseX - std::floor(baseX);
+			const double offY = baseY - std::floor(baseY);
+
+			// Re-initialize canvas if dimensions, cell grid, ActiveRect, or siting origin changed.
+			if (!hasData_ || w_ != lumaW || h_ != lumaH || cellsW_ != cw || cellsH_ != ch || cellPx_ != cellPx ||
+			    active_.x0 != ar.x0 || active_.y0 != ar.y0 || active_.x1 != ar.x1 || active_.y1 != ar.y1 ||
+			    std::fabs(originOffX_ - offX) > kEngineNumFloor || std::fabs(originOffY_ - offY) > kEngineNumFloor)
 			{
 				Reset();
 				w_ = lumaW;
@@ -724,6 +742,8 @@ namespace TdV2
 				cellsH_ = ch;
 				cellPx_ = cellPx;
 				active_ = ar;
+				originOffX_ = offX;
+				originOffY_ = offY;
 				sumCb_ = TdV2Plane(w_, h_, 0.0);
 				sumCr_ = TdV2Plane(w_, h_, 0.0);
 				weight_ = TdV2Plane(w_, h_, 0.0);
@@ -734,6 +754,8 @@ namespace TdV2
 			const bool useMotion = (splatMotion != nullptr && splatMotion->IsWellFormed(cw, ch));
 			if (splatMotion != nullptr && !useMotion && standIns != nullptr)
 				standIns->Engage(StandInKind::MotionFieldStandIn, "TdV2ChromaAnchorCanvas malformed splatMotion");
+			else if (splatMotion == nullptr && accumulatedFrames_ > 0 && standIns != nullptr)
+				standIns->Engage(StandInKind::MotionFieldStandIn, "anchor splatMotion null; assuming Still");
 
 			const ActiveRect cActive = ChromaDetail::ToSubsampledActiveRect(ar, lumaW, lumaH, cSubX, cSubY, cW, cH);
 			const bool hasValidAnchorY = (anchorCleanY != nullptr && !anchorCleanY->Empty() &&
@@ -794,18 +816,22 @@ namespace TdV2
 						}
 					}
 
-					// Splat strictly inside active luma canvas at exact motion-compensated sited coordinate (x_luma - vx, y_luma - vy).
+					// Splat strictly inside active luma canvas at siting-aligned motion-compensated coordinate
+					// (ax - originOffX_, ay - originOffY_), and gate CfL accumulation under the exact same
+					// in-bounds active guard so out-of-ActiveRect panning pixels never pollute border CfL cells.
 					const double ax = lx - vx;
 					const double ay = ly - vy;
-					if (ax >= static_cast<double>(ar.x0) && ax <= static_cast<double>(ar.x1 - 1) &&
-					    ay >= static_cast<double>(ar.y0) && ay <= static_cast<double>(ar.y1 - 1))
+					const double axAligned = ax - originOffX_;
+					const double ayAligned = ay - originOffY_;
+					if (axAligned >= static_cast<double>(ar.x0) && axAligned <= static_cast<double>(ar.x1 - 1) &&
+					    ayAligned >= static_cast<double>(ar.y0) && ayAligned <= static_cast<double>(ar.y1 - 1))
 					{
-						const int ix0 = static_cast<int>(std::floor(ax));
-						const int iy0 = static_cast<int>(std::floor(ay));
+						const int ix0 = static_cast<int>(std::floor(axAligned));
+						const int iy0 = static_cast<int>(std::floor(ayAligned));
 						const int ix1 = (std::min)(ar.x1 - 1, ix0 + 1);
 						const int iy1 = (std::min)(ar.y1 - 1, iy0 + 1);
-						const double fx = ax - static_cast<double>(ix0);
-						const double fy = ay - static_cast<double>(iy0);
+						const double fx = axAligned - static_cast<double>(ix0);
+						const double fy = ayAligned - static_cast<double>(iy0);
 
 						const double w00 = (1.0 - fx) * (1.0 - fy);
 						const double w10 = fx * (1.0 - fy);
@@ -824,30 +850,30 @@ namespace TdV2
 						splat(ix0, iy1, w01);
 						splat(ix1, iy1, w11);
 						++splattedSamples;
-					}
 
-					// Fit per-cell anchor CfL (a, b) from anchor clean luma sampled at exact sited coded coords
-					// and anchor clean chroma (strictly on the anchor cell corresponding to canvas coordinate (ax, ay)).
-					if (anchorYCleanFinite)
-					{
-						double ySample = 0.0;
-						bool borderBilin = false;
-						const double yLocalX = lx - static_cast<double>(ar.x0);
-						const double yLocalY = ly - static_cast<double>(ar.y0);
-						if (ChromaDetail::SampleSitedActive(yView, yLocalX, yLocalY, ySample, borderBilin, /*allowEdgeClampOutside=*/true))
+						// Fit per-cell anchor CfL (a, b) from anchor clean luma sampled at exact sited coded coords
+						// and anchor clean chroma (strictly on the in-bounds anchor cell corresponding to (axAligned, ayAligned)).
+						if (anchorYCleanFinite)
 						{
-							if (borderBilin)
-								anyBorderBilinear = true;
-							const int acx = (std::max)(0, (std::min)(cw - 1, static_cast<int>(std::floor(ax)) / cellPx));
-							const int acy = (std::max)(0, (std::min)(ch - 1, static_cast<int>(std::floor(ay)) / cellPx));
-							CflAccum& acc = cflStats_[static_cast<size_t>(acy) * cw + acx];
-							acc.sumY += ySample;
-							acc.sumYY += ySample * ySample;
-							acc.sumCb += cbVal;
-							acc.sumYCb += ySample * cbVal;
-							acc.sumCr += crVal;
-							acc.sumYCr += ySample * crVal;
-							++acc.count;
+							double ySample = 0.0;
+							bool borderBilin = false;
+							const double yLocalX = lx - static_cast<double>(ar.x0);
+							const double yLocalY = ly - static_cast<double>(ar.y0);
+							if (ChromaDetail::SampleSitedActive(yView, yLocalX, yLocalY, ySample, borderBilin, /*allowEdgeClampOutside=*/true))
+							{
+								if (borderBilin)
+									anyBorderBilinear = true;
+								const int acx = (std::max)(0, (std::min)(cw - 1, static_cast<int>(std::floor(axAligned)) / cellPx));
+								const int acy = (std::max)(0, (std::min)(ch - 1, static_cast<int>(std::floor(ayAligned)) / cellPx));
+								CflAccum& acc = cflStats_[static_cast<size_t>(acy) * cw + acx];
+								acc.sumY += ySample;
+								acc.sumYY += ySample * ySample;
+								acc.sumCb += cbVal;
+								acc.sumYCb += ySample * cbVal;
+								acc.sumCr += crVal;
+								acc.sumYCr += ySample * crVal;
+								++acc.count;
+							}
 						}
 					}
 				}
@@ -1101,8 +1127,8 @@ namespace TdV2
 						}
 					}
 
-					const double sxLocal = (lx + vx) - static_cast<double>(ar.x0);
-					const double syLocal = (ly + vy) - static_cast<double>(ar.y0);
+					const double sxLocal = ((lx + vx) - originOffX_) - static_cast<double>(ar.x0);
+					const double syLocal = ((ly + vy) - originOffY_) - static_cast<double>(ar.y0);
 					double cbVal = 0.0, crVal = 0.0;
 					bool bCb = false, bCr = false;
 					if (ChromaDetail::SampleSitedActive(cbView, sxLocal, syLocal, cbVal, bCb, /*allowEdgeClampOutside=*/false) &&
@@ -1198,16 +1224,32 @@ namespace TdV2
 					const double sxLocal = ax - static_cast<double>(ar.x0);
 					const double syLocal = ay - static_cast<double>(ar.y0);
 
-					// Carry (a, b) from the anchor cell at (ax, ay).
-					const int acx = (std::max)(0, (std::min)(cellsW_ - 1, static_cast<int>(std::floor(ax)) / cellPx_));
-					const int acy = (std::max)(0, (std::min)(cellsH_ - 1, static_cast<int>(std::floor(ay)) / cellPx_));
+					// Carry (a, b) from the anchor cell at siting-aligned (ax - originOffX_, ay - originOffY_).
+					const int acx = (std::max)(0, (std::min)(cellsW_ - 1, static_cast<int>(std::floor(ax - originOffX_)) / cellPx_));
+					const int acy = (std::max)(0, (std::min)(cellsH_ - 1, static_cast<int>(std::floor(ay - originOffY_)) / cellPx_));
 					const AnchorCflCell& cfl = cflCells_[static_cast<size_t>(acy) * cellsW_ + acx];
 					if (!cfl.valid)
 						continue;
 
+					// Allow exact <= 0.5 px siting margin on subsampled axes at active edges (clamped strictly inside ar,
+					// never crossing bar boundaries) so odd-dimension last coded chroma row/col is preserved.
+					const double maxLocalX = static_cast<double>(ar.Width() - 1);
+					const double maxLocalY = static_cast<double>(ar.Height() - 1);
+					const double marginX = (cSubX > 1) ? 0.5 : 0.0;
+					const double marginY = (cSubY > 1) ? 0.5 : 0.0;
+
 					double pyVal = 0.0;
 					bool borderBilin = false;
-					if (ChromaDetail::SampleSitedActive(yView, sxLocal, syLocal, pyVal, borderBilin, /*allowEdgeClampOutside=*/false))
+					bool sampledOk = ChromaDetail::SampleSitedActive(yView, sxLocal, syLocal, pyVal, borderBilin, /*allowEdgeClampOutside=*/false);
+					if (!sampledOk &&
+					    sxLocal >= -marginX && sxLocal <= maxLocalX + marginX &&
+					    syLocal >= -marginY && syLocal <= maxLocalY + marginY)
+					{
+						const double sxClamped = (std::max)(0.0, (std::min)(maxLocalX, sxLocal));
+						const double syClamped = (std::max)(0.0, (std::min)(maxLocalY, syLocal));
+						sampledOk = ChromaDetail::SampleSitedActive(yView, sxClamped, syClamped, pyVal, borderBilin, /*allowEdgeClampOutside=*/true);
+					}
+					if (sampledOk)
 					{
 						const double predCb = cfl.aCb * pyVal + cfl.bCb;
 						const double predCr = cfl.aCr * pyVal + cfl.bCr;
@@ -1258,6 +1300,8 @@ namespace TdV2
 		int cellsH_ = 0;
 		int cellPx_ = kCanonicalBlockPx;
 		ActiveRect active_{};
+		double originOffX_ = 0.0;
+		double originOffY_ = 0.0;
 		TdV2Plane sumCb_;
 		TdV2Plane sumCr_;
 		TdV2Plane weight_;
@@ -1469,8 +1513,16 @@ namespace TdV2
 				return res;
 			}
 
-			// Cut / invalid span or resolution change resets 4:4:4 anchor canvas cleanly.
-			if (in.isCutOrSpanInvalid || (anchorCanvas_.HasData() && (anchorCanvas_.Width() != lumaW || anchorCanvas_.Height() != lumaH)))
+			const ActiveRect lumaActive = in.activeRect.Empty()
+				? ActiveRect::Full(lumaW, lumaH)
+				: in.activeRect.ClampedTo(lumaW, lumaH);
+
+			// Cut / invalid span, resolution change, or ActiveRect change (e.g., aspect-ratio switch) resets 4:4:4 anchor canvas cleanly.
+			const ActiveRect& prevActive = anchorCanvas_.Active();
+			const bool activeChanged = (prevActive.x0 != lumaActive.x0 || prevActive.y0 != lumaActive.y0 ||
+			                            prevActive.x1 != lumaActive.x1 || prevActive.y1 != lumaActive.y1);
+			if (in.isCutOrSpanInvalid ||
+			    (anchorCanvas_.HasData() && (anchorCanvas_.Width() != lumaW || anchorCanvas_.Height() != lumaH || activeChanged)))
 			{
 				ResetAnchor();
 				res.anchorReset = true;
@@ -1508,9 +1560,6 @@ namespace TdV2
 				}
 			}
 
-			const ActiveRect lumaActive = in.activeRect.Empty()
-				? ActiveRect::Full(lumaW, lumaH)
-				: in.activeRect.ClampedTo(lumaW, lumaH);
 			if (lumaActive.Empty())
 				return res;
 
@@ -1578,9 +1627,15 @@ namespace TdV2
 				TdV2Plane curCleanCr = delivCr;
 				TdV2Plane ownGrainCb(dW, dH, 0.0);
 				TdV2Plane ownGrainCr(dW, dH, 0.0);
-				if (in.hasCleanSplit && !in.cleanCb.Empty() && !in.cleanCr.Empty() &&
-				    in.cleanCb.w == dW && in.cleanCb.h == dH && in.cleanCr.w == dW && in.cleanCr.h == dH)
+				if (in.hasCleanSplit && !in.cleanCb.Empty() && !in.cleanCr.Empty())
 				{
+					if (in.cleanCb.w != dW || in.cleanCb.h != dH || in.cleanCr.w != dW || in.cleanCr.h != dH)
+					{
+						if (standIns != nullptr)
+							standIns->Engage(StandInKind::NonFiniteClosure, "chroma coarse cleanCb/Cr dimension mismatch");
+						res.nonFiniteCells = numCells;
+						return res;
+					}
 					if (!planeAllFinite(in.cleanCb) || !planeAllFinite(in.cleanCr))
 					{
 						if (standIns != nullptr)
@@ -1702,8 +1757,18 @@ namespace TdV2
 								const int gcx = MapCellToGrainGrid(cx, cellPx, grainCellPx);
 								const int gcy = MapCellToGrainGrid(cy, cellPx, grainCellPx);
 								const size_t gIdx = static_cast<size_t>(gcy) * static_cast<size_t>(gW) + static_cast<size_t>(gcx);
-								if (gIdx < retainedGrainVar.size() && std::isfinite(retainedGrainVar[gIdx]) && retainedGrainVar[gIdx] >= 0.0)
-									cellGrainVar = retainedGrainVar[gIdx];
+								if (gIdx < retainedGrainVar.size())
+								{
+									const double gv = retainedGrainVar[gIdx];
+									if (std::isfinite(gv) && gv >= 0.0)
+										cellGrainVar = gv;
+									else
+									{
+										++res.nonFiniteCells;
+										if (standIns != nullptr)
+											standIns->Engage(StandInKind::NonFiniteClosure, "chroma coarse non-finite retainedGrainVar");
+									}
+								}
 							}
 
 							MomentAccumulatorFp32 acc(K);
@@ -1823,7 +1888,7 @@ namespace TdV2
 				res.codedDeltaCr = res.deliveredDeltaCr;
 
 				if (cfg_.ModifiesPixels())
-					ApplyDeliveredDelta(in, delivActive, res.deliveredDeltaCb, res.deliveredDeltaCr, res);
+					ApplyDeliveredDelta(in, delivActive, res.deliveredDeltaCb, res.deliveredDeltaCr, res, standIns);
 				return res;
 			}
 
@@ -1944,6 +2009,7 @@ namespace TdV2
 				MotionGateResult motionGate;
 				bool isExactCopy = false;
 				bool isCfl = false;
+				bool isAnchorDerived = false;
 			};
 			std::vector<WarpedChromaRef> refs;
 			refs.reserve(kMaxBlendRefs);
@@ -2034,6 +2100,9 @@ namespace TdV2
 			}
 			else if (anchorCanvas_.HasData() && (in.enableAnchorCanvasRef || in.enableCarriedCfl))
 			{
+				++res.motionStandInRefs;
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::MotionFieldStandIn, "chroma anchorReadMotion missing; assuming Still");
 				anchorReadFallback = CellMotionField::Uniform(res.cellsW, res.cellsH, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 				anchorReadMf = &anchorReadFallback;
 			}
@@ -2043,6 +2112,7 @@ namespace TdV2
 			    refs.size() < static_cast<size_t>(kMaxBlendRefs))
 			{
 				WarpedChromaRef wr;
+				wr.isAnchorDerived = true;
 				if (anchorCanvas_.SampleAtCodedGrid(
 						in.codedSubsampling, in.siting, lumaActive, anchorReadMf, cellPx,
 						wr.cleanCb, wr.cleanCr, wr.validPx, standIns))
@@ -2063,6 +2133,7 @@ namespace TdV2
 			{
 				WarpedChromaRef wr;
 				wr.isCfl = true;
+				wr.isAnchorDerived = true;
 				if (anchorCanvas_.PredictCarriedCflAtCodedGrid(
 						in.codedSubsampling, in.siting, lumaActive, anchorReadMf, cellPx,
 						wr.cleanCb, wr.cleanCr, wr.validPx, standIns))
@@ -2311,7 +2382,23 @@ namespace TdV2
 								double cA1 = cA2;
 								if (activeK >= 2)
 								{
-									const int partner = (ai == 0) ? 1 : ((ai == 1) ? 0 : 1);
+									// Prefer an independent partner ref: non-anchor peak ref (reverse scan prefers future peak),
+									// or opposite isAnchorDerived class so anchor canvas & carried CfL never pair with each other
+									// when an independent peak reference is available.
+									int partner = (ai == 0) ? 1 : 0;
+									const bool selfAnchor = refs[static_cast<size_t>(k)].isAnchorDerived;
+									for (int cand = activeK - 1; cand >= 0; --cand)
+									{
+										if (cand == ai) continue;
+										const bool candAnchor = refs[static_cast<size_t>(activeIdx[cand])].isAnchorDerived;
+										if (!candAnchor)
+										{
+											partner = cand;
+											break;
+										}
+										if (selfAnchor != candAnchor)
+											partner = cand;
+									}
 									cA1 = EstimateC_A1(C[ai][partner], C[ai][ai], C[partner][partner],
 									                   cellGrainVar, bandTransfer[b]);
 								}
@@ -2401,6 +2488,14 @@ namespace TdV2
 						{
 							for (int bx = bxStart; bx < bxEnd; bx += 8)
 							{
+								// Skip untouched / vetoed zero-delta 8x8 blocks so FP64 DCT round-trip stays bit-exact.
+								bool anyNonZeroDelta = false;
+								for (int j = 0; j < 8 && !anyNonZeroDelta; ++j)
+									for (int i = 0; i < 8; ++i)
+										if (outCodedDelta.at(bx + i, by + j) != 0.0) { anyNonZeroDelta = true; break; }
+								if (!anyNonZeroDelta)
+									continue;
+
 								double sentRes[64] = {}, blendRes[64] = {}, projRes[64] = {};
 								for (int j = 0; j < 8; ++j)
 								{
@@ -2428,8 +2523,11 @@ namespace TdV2
 						{
 							for (int x = bxStart; x < bxEnd; ++x)
 							{
+								const double dVal = outCodedDelta.at(x, y);
+								if (dVal == 0.0)
+									continue;
 								const double cVal = codedClean.at(x, y);
-								const double clamped = (std::max)(0.0, (std::min)(peakCode, cVal + outCodedDelta.at(x, y)));
+								const double clamped = (std::max)(0.0, (std::min)(peakCode, cVal + dVal));
 								outCodedDelta.at(x, y) = clamped - cVal;
 							}
 						}
@@ -2464,8 +2562,12 @@ namespace TdV2
 						size_t cnt = 0;
 						for (int y = y0; y < y1; ++y)
 						{
+							if ((std::min)(res.cellsH - 1, (y * cSubY) / cellPx) != cy)
+								continue;
 							for (int x = x0; x < x1; ++x)
 							{
+								if ((std::min)(res.cellsW - 1, (x * cSubX) / cellPx) != cx)
+									continue;
 								const double og = ownGrain.at(x, y);
 								const double inf = inFullBands.H.at(x, y);
 								const double outf = outFullBands.H.at(x, y);
@@ -2496,8 +2598,12 @@ namespace TdV2
 							++res.guardViolationCells;
 							for (int y = y0; y < y1; ++y)
 							{
+								if ((std::min)(res.cellsH - 1, (y * cSubY) / cellPx) != cy)
+									continue;
 								for (int x = x0; x < x1; ++x)
 								{
+									if ((std::min)(res.cellsW - 1, (x * cSubX) / cellPx) != cx)
+										continue;
 									const double addBack = gDec.addBackFraction * (inFullBands.H.at(x, y) - outFullBands.H.at(x, y));
 									outCodedDelta.at(x, y) += addBack;
 								}
@@ -2520,7 +2626,7 @@ namespace TdV2
 
 			// B8: Apply delivered signed delta strictly inside ActiveRect (Mode::On only; Shadow stays passthrough).
 			if (cfg_.ModifiesPixels())
-				ApplyDeliveredDelta(in, delivActive, res.deliveredDeltaCb, res.deliveredDeltaCr, res);
+				ApplyDeliveredDelta(in, delivActive, res.deliveredDeltaCb, res.deliveredDeltaCr, res, standIns);
 
 			// B9: If this frame is an anchor frame, accumulate its grain-free coded chroma + clean luma into
 			// the 4:4:4 anchor memory canvas (strictly grain-free, NEVER contaminated by Layer-4 output add-back!).
@@ -2542,20 +2648,28 @@ namespace TdV2
 			const ActiveRect& delivActive,
 			const TdV2Plane& dCbPlane,
 			const TdV2Plane& dCrPlane,
-			ChromaProcessResult& res)
+			ChromaProcessResult& res,
+			StandInRegistry* standIns)
 		{
 			if (in.deliveredFormat == DeliveredChromaFormat::Rgb444)
 			{
+				bool anyRgbApplyFailed = false;
 				for (int y = delivActive.y0; y < delivActive.y1; ++y)
 				{
 					for (int x = delivActive.x0; x < delivActive.x1; ++x)
 					{
-						in.matrix.ApplySignedChromaDeltaToRgb(
-							in.receivedR.at(x, y), in.receivedG.at(x, y), in.receivedB.at(x, y),
-							dCbPlane.at(x, y), dCrPlane.at(x, y),
-							res.outputR.at(x, y), res.outputG.at(x, y), res.outputB.at(x, y));
+						if (!in.matrix.ApplySignedChromaDeltaToRgb(
+								in.receivedR.at(x, y), in.receivedG.at(x, y), in.receivedB.at(x, y),
+								dCbPlane.at(x, y), dCrPlane.at(x, y),
+								res.outputR.at(x, y), res.outputG.at(x, y), res.outputB.at(x, y),
+								standIns))
+						{
+							anyRgbApplyFailed = true;
+						}
 					}
 				}
+				if (anyRgbApplyFailed)
+					++res.nonFiniteCells;
 			}
 			else
 			{

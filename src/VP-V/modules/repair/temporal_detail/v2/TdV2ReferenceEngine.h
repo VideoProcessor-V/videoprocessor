@@ -1179,6 +1179,14 @@ namespace TdV2
 					{
 						for (int bx = bxStart; bx < bxEnd; bx += 8)
 						{
+							// Skip untouched / vetoed zero-delta 8x8 blocks so FP64 DCT round-trip stays bit-exact.
+							bool anyNonZeroDelta = false;
+							for (int j = 0; j < 8 && !anyNonZeroDelta; ++j)
+								for (int i = 0; i < 8; ++i)
+									if (deltaPlane.at(bx + i, by + j) != 0.0) { anyNonZeroDelta = true; break; }
+							if (!anyNonZeroDelta)
+								continue;
+
 							double sentRes[64] = {}, blendRes[64] = {}, projRes[64] = {};
 							for (int j = 0; j < 8; ++j)
 							{
@@ -1204,14 +1212,18 @@ namespace TdV2
 					}
 
 					// Set 2: Pixel-domain valid code-range projection [0, peakCode] (makes 2nd POCS iteration genuine).
+					// Untouched zero-delta pixels stay bit-exact (preserving out-of-range BTB/WTW untouched pixels).
 					if (peakCode > 0.0)
 					{
 						for (int y = byStart; y < byEnd; ++y)
 						{
 							for (int x = bxStart; x < bxEnd; ++x)
 							{
+								const double dVal = deltaPlane.at(x, y);
+								if (dVal == 0.0)
+									continue;
 								const double cVal = curClean.at(x, y);
-								const double clamped = (std::max)(0.0, (std::min)(peakCode, cVal + deltaPlane.at(x, y)));
+								const double clamped = (std::max)(0.0, (std::min)(peakCode, cVal + dVal));
 								deltaPlane.at(x, y) = clamped - cVal;
 							}
 						}
