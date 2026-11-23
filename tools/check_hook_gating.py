@@ -216,6 +216,9 @@ _P3_WAIVER = ("WAIVER-P3-ALIAS-REPOINT (coordinator 2026-11-12 11:30 ruling 2, c
               "Expires at the re-graft. Proof: UntaggedVpReferenceTest, r2-phase3-opus-gate.md.")
 _P11_WAIVER = ("WAIVER-P11-REQUALIFY (coordinator-delegated; the P11 opus gate r2-p11-opus-gate.md confirmed 11/11 lines). "
                "Expires at the re-graft. Proof: UntaggedVpReferenceTest, r2-p11-opus-gate.md.")
+_A1C_WAIVER = ("WAIVER-CC-RELOC2-BASELINE (CC series A1 73fc28716 / series C ccbeb5618 re-qualified 15 pre-existing Impl "
+               "field accesses onto dejudderExtras.* / renderAheadPresenter.*; no new hook site, verified by lead20/CC-gemini-verify-2.md). "
+               "Expires at the re-graft. Proof: test_check_hook_gating.py, lead20/CC-gemini-verify-2.md.")
 _LVR = "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
 ALLOW_UNTAGGED_REFS = [
     {"file": _LVR, "text": '\t\t\trenderAheadPresenter.creditFrames.load(std::memory_order_relaxed), ratio,', "reason": _P3_WAIVER},
@@ -237,6 +240,21 @@ ALLOW_UNTAGGED_REFS = [
     {"file": _LVR, "text": '        m_impl ? m_impl->vpv.motion.intent.intentInterpreter : std::shared_ptr<IntentInterpreter::Observer>();', "reason": _P11_WAIVER},
     {"file": _LVR, "text": '\t\tconst bool intentWalkActive = m_impl && m_impl->vpv.motion.intent.intentInterpreter->Active();', "reason": _P11_WAIVER},
     {"file": _LVR, "text": '\t\t\t\tm_impl->vpv.sourceAnalysis.sourceMonitor.Discontinuity("file discontinuity (seek, step or rate change)");', "reason": _P11_WAIVER},
+    {"file": _LVR, "text": '\tDejudderCacheStage::Stage dejudderCacheStage{ dejudderExtras.dejudderCache, dejudderExtras.dejudderGeometry, dejudderExtras.dejudderGeometryValid };', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '\t\t\t\tdejudderExtras.dejudderOutput.Release();', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '\t\t\t\tdejudderExtras.dejudderOutputSwapchain = nullptr;', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '\t\t\t\tdejudderExtras.dejudderExtraIds.clear();', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '\t\t\t\tdejudderExtras.dejudderMainRefresh.clear();', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '\t\t\t\tdejudderExtras.dejudderIdsSwapchain = nullptr;', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '\t\t\tif (RenderAheadActive() || dejudderExtras.renderAheadSwapchainLogged)', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '\t\t\t\tdejudderExtras.renderAheadSwapchainLogged = true;', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '                dejudderExtras.dejudderCache.Invalidate();', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '                dejudderExtras.dejudderGeometryValid = false;', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '                dejudderExtras.dejudderGeometry.numHolds = 0;', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '                dejudderExtras.dejudderNlsRetrySequence = sourceSequence;', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '\t\t\t\tdiag.openLoop = renderAheadPresenter.displayRate.openLoop;', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '\t\t\t\tdiag.holds = dejudderExtras.dejudderExtraStats.holds;', "reason": _A1C_WAIVER},
+    {"file": _LVR, "text": '\t\t\t\t\t\t\t\t\t\tm_impl->dejudderExtras.renderAheadFlushReanchor.store(true, std::memory_order_release);', "reason": _A1C_WAIVER},
 ]
 
 
