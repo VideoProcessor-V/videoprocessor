@@ -701,6 +701,35 @@ namespace VideoProcessorTest
 			d = x.stage.Fallback();
 			Assert::IsTrue(d.engaged && d.reason.find("no grain level") != std::string::npos);
 		}
+
+		// CF-2 G-T3 M2/M4/S2/S4: CPU lock on derived GrainLevelEnergyScale (kEdgeEnergyPerSigma * codeToEightBit, no 1.0f
+		// placeholder), S4 edgeMapStatus in UpscaleScalingFallback, and M4 host.motion ExternalView visibility.
+		TEST_METHOD(GrainLevelEnergyScaleAndFallbacksLock)
+		{
+			const float expectedDefault = AdaptiveDownscale::kEdgeEnergyPerSigma * (255.0f / 1023.0f);
+			Assert::IsTrue(std::fabs(AdaptiveDownscale::GrainLevelEnergyScale() - expectedDefault) < 1e-6f,
+				L"M2/S2: default GrainLevelEnergyScale must equal kEdgeEnergyPerSigma * (255/1023)");
+			const float scale12 = 255.0f / 4095.0f;
+			Assert::IsTrue(std::fabs(AdaptiveDownscale::GrainLevelEnergyScale(scale12) - AdaptiveDownscale::kEdgeEnergyPerSigma * scale12) < 1e-6f,
+				L"M2/S2: custom codeToEightBit scales kEdgeEnergyPerSigma linearly");
+
+			using AdaptiveDownscaleStage::UpscaleFallbackInputs;
+			using AdaptiveDownscaleStage::UpscaleScalingFallback;
+			UpscaleFallbackInputs in;
+			in.requested = true;
+			in.edgeMapStatus = "edge map computed in the module (no skeleton memo)";
+			FallbackCatalog::Decision d = UpscaleScalingFallback(in);
+			Assert::IsTrue(d.engaged && d.id == "output scaling", L"S4: edgeMapStatus engages output scaling");
+			Assert::AreEqual(std::string("adaptive upscale: edge map computed in the module (no skeleton memo)"), d.reason);
+
+			in.edgeMapStatus.clear();
+			in.motionExternalView = true;
+			d = UpscaleScalingFallback(in);
+			Assert::IsTrue(d.engaged && d.id == "output scaling", L"M4: ExternalView motion engages output scaling");
+			Assert::AreEqual(std::string("motion: P3 read through the ExternalView (P3 has no GPU publication)"), d.reason);
+			in.oneAxis = true;
+			Assert::IsFalse(UpscaleScalingFallback(in).engaged, L"one-axis is faithful only: no ExternalView motion fallback");
+		}
 	};
 
 	TEST_CLASS(AdaptiveScalingMotionHookTests)
@@ -1130,6 +1159,79 @@ namespace VideoProcessorTest
 				module.Release();
 			}
 			for (pl_tex* tex : { &src, &trust, &steady }) pl_tex_destroy(g.gpu, tex);
+			g.fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		// CF-2 G-T3 S2: non-uniform N_b (clean left half vs noisy right half) and N_b < 0 sentinel (takes grain_floor).
+		TEST_METHOD(GrainLevelNonUniformAndNegativeSentinel)
+		{
+			Gpu g;
+			Assert::IsTrue(g.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			g.fixture.CaptureLog(&log);
+			const int w = 128, h = 64, bw = w / 16, bh = h / 16, ow = w * 3 / 2, oh = h * 3 / 2;
+			pl_tex src = g.Picture(w, h);
+			auto makeLevel = [&](auto fill)
+			{
+				return g.Field(bw, bh, fill);
+			};
+			// Non-uniform: left half N_b = 0 (clean -> g = 1, sharp), right half N_b = 10000 (noisy -> g = grain_floor = 0, alias-safe).
+			pl_tex nonUniform = makeLevel([bw](int x, int, float* c) {
+				c[0] = (x < bw / 2) ? 0.0f : 10000.0f;
+				c[1] = c[2] = c[3] = 0.0f;
+			});
+			// Negative sentinel: N_b = -1 everywhere -> must take grain_floor (0, alias-safe).
+			pl_tex negSentinel = makeLevel([](int, int, float* c) {
+				c[0] = -1.0f;
+				c[1] = c[2] = c[3] = 0.0f;
+			});
+			auto runWith = [&](pl_tex level, float wBase)
+			{
+				AdaptiveDownscale::Module module;
+				AdaptiveDownscale::Settings settings;
+				settings.cnnResidualStabilise = false;
+				settings.ssimResidualStabilise = false;
+				settings.grainMap = false;
+				settings.motionAdaptive = false;
+				settings.grainFloor = 0.0f;
+				settings.grainLo = 2.0f;
+				settings.grainHi = 8.0f;
+				module.SetFrame(settings, 1, 1.0f / 24.0f);
+				AdaptiveDownscale::Upscale up;
+				up.on = true;
+				up.wBase = wBase;
+				up.nativeWidth = static_cast<float>(w);
+				up.nativeHeight = static_cast<float>(h);
+				module.SetUpscale(up);
+				if (level)
+				{
+					AdaptiveDownscale::GrainLevelSource gs;
+					gs.level = level;
+					gs.sourceCrop = { 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
+					module.SetGrainLevel(gs);
+				}
+				std::vector<RgbaPixel> px = g.Render(module, src, ow, oh, true);
+				Assert::IsTrue(module.Active() && module.Failures() == 0, L"upscale blend must succeed");
+				module.Release();
+				return px;
+			};
+			const std::vector<RgbaPixel> aliasSafe = runWith(nullptr, 0.0f);
+			const std::vector<RgbaPixel> nonUni = runWith(nonUniform, 1.0f);
+			const std::vector<RgbaPixel> neg = runWith(negSentinel, 1.0f);
+			// Interior of left half (well away from the block boundary): clean -> differs from alias-safe.
+			int leftDiff = 0, rightDiff = 0;
+			for (int y = 8; y < oh - 8; ++y)
+			{
+				for (int x = 8; x < ow / 4; ++x)
+					leftDiff = (std::max)(leftDiff, std::abs(int(nonUni[y * ow + x].r) - int(aliasSafe[y * ow + x].r)));
+				for (int x = ow * 3 / 4; x < ow - 8; ++x)
+					rightDiff = (std::max)(rightDiff, std::abs(int(nonUni[y * ow + x].r) - int(aliasSafe[y * ow + x].r)));
+			}
+			Assert::IsTrue(leftDiff > 0, L"S2: clean left half (N_b=0) must differ from alias-safe");
+			Assert::AreEqual(0, rightDiff, L"S2: noisy right half (N_b=10000) must fall to grain_floor=0 (alias-safe)");
+			Assert::AreEqual(0, MaxDiff(neg, aliasSafe), L"S2: N_b < 0 sentinel must fall to grain_floor=0 (alias-safe)");
+			for (pl_tex* tex : { &src, &nonUniform, &negSentinel }) pl_tex_destroy(g.gpu, tex);
 			g.fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
 		}
