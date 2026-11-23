@@ -162,6 +162,9 @@ inline const std::vector<ProductRow>& ProductRows()
         // content and stamp; the pool keeps provenance only); its one reader is P8 (a declared input of P8, no consumer row).
         { kCameraFitField, "motion/estimation/global_model", kExpectedCameraUnit, "camera fit field (storage of P7's fit field, camera worker, published before P7)" },
         { kEdgeMap, "input/source_analysis/regions", kExpectedRegionUnit, "edge map pass (per-frame memo); readers: focus map, busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3))" },
+        // P10g (T3): an owner fill from the acquired P10 variant; no lane job. Single-frame law (= the unit-4 law) until the temporal passes
+        // are costed (GrainLevel.h), shown as the Fallbacks line "grain_level_temporal".
+        { kP10gGrainLevel, "repair/grain_split", kExpectedGrainSplitUnit, "grain level pass (per-frame memo, owner fill; single-frame law until the temporal passes are costed); first reader: hybrid upscaler" },
     };
     return rows;
 }

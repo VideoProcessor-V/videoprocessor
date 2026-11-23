@@ -245,7 +245,7 @@ namespace SchedulerS2Test
 				case kRefinedField:
 					want = JobClass::Derived;
 					break;
-				case kP12LightLevel:
+				case kP12LightLevel: case kP10gGrainLevel:
 					want = JobClass::Derived;
 					jobbed = false;
 					break;
@@ -254,7 +254,7 @@ namespace SchedulerS2Test
 					break;
 				case kP0RebaseDecision: case kP5MonitorTiles: case kP6EntranceAhead: case kP7gCameraGuide: case kP9CameraSmoothed:
 				case kP10GrainSplit: case kP10cGrainSplitChroma: case kP13SourceRing: case kSourceIdentity: case kSourceGeometry:
-				case kQualityPatternCausal: case kBandMemo: case kEdgeMap: case kFocusMap: case kRoomLight: case kComposedVectors: case kP10gGrainLevel:
+				case kQualityPatternCausal: case kBandMemo: case kEdgeMap: case kFocusMap: case kRoomLight: case kComposedVectors:
 					want = JobClass::Fill;
 					break;
 				default:

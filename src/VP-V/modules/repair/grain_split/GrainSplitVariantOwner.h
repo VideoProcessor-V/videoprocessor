@@ -103,10 +103,11 @@ namespace GrainSplit
 				return ContextShapesOf(static_cast<int>(v.width), static_cast<int>(v.height), BlockFor(ScaleOfAxis(v.scale)), DefaultParams()).Bytes();
 			}
 
+			// The owner fill as registered: Register() on a memo directly, or RegisterThrough() a module's skeleton external demand
+			// (GrainLevelGpu.h GrainLevelModule). This owner must outlive the registration.
 			// GF-P1 MUST-5 (GV AMEND): `maxWidth` x `maxHeight` = the largest observed source luma. reserveBytes is the ahead
-			// planner's figure before a fill is measured (AheadNeedLocked): left 0, the memo's need was 0, the grant was never
-			// made and every Acquire failed NoLedgerGrant before a fill could run. reserveFor stays the exact per-variant reserve.
-			VpSkeleton::SkeletonMemo::Registration Register(VpSkeleton::SkeletonMemo& memo, int maxWidth, int maxHeight)
+			// planner's figure before a fill is measured (AheadNeedLocked); reserveFor stays the exact per-variant reserve.
+			VpSkeleton::OwnerFill MakeOwnerFill(int maxWidth = 0, int maxHeight = 0)
 			{
 				VpSkeleton::OwnerFill f;
 				f.variantAxes = ServedAxes();
@@ -115,7 +116,20 @@ namespace GrainSplit
 				f.fill = [this](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo& m, VpSkeleton::OwnerFillOutput& out) {
 					return Fill(req, m, out);
 				};
-				return memo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, std::move(f));
+				return f;
+			}
+
+			VpSkeleton::SkeletonMemo::Registration Register(VpSkeleton::SkeletonMemo& memo, int maxWidth = 0, int maxHeight = 0)
+			{
+				return memo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, MakeOwnerFill(maxWidth, maxHeight));
+			}
+			// The same registration through the skeleton's external demand (Skeleton::IExternalDemand, or any type with its
+			// RegisterOwnerFill): the production path (GrainLevelGpu.h GrainLevelModule). A template so this header needs no
+			// skeleton-module include; the call stays here, in the P10 owner's file (producer_chain.py attributes P10 by it).
+			template <class Demand>
+			VpSkeleton::SkeletonMemo::Registration RegisterThrough(Demand& demand, int maxWidth = 0, int maxHeight = 0)
+			{
+				return demand.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, MakeOwnerFill(maxWidth, maxHeight));
 			}
 
 			// Fills run so far (one per (frame, variant): the compute-once counter of this owner).

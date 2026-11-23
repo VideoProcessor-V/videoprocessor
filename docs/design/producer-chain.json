@@ -1,7 +1,7 @@
 {
  "schema": 1,
  "counts": {
-  "R": 9,
+  "R": 12,
   "X": 7,
   "N": 12,
   "NP": 33
@@ -80,12 +80,12 @@
       ],
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       963,
+       1001,
        "if (!LumaAtTarget(job.sequence, job.luma, lumaBuffer, halfW, halfH, \"motion_ahead\"))"
       ],
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       1069,
+       1126,
        "bool Producer::LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, i"
       ]
      ],
@@ -125,17 +125,17 @@
      "evidence": [
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2673,
+       2691,
        "bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int l"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2691,
+       2709,
        "Pyramid(half, l1, l2, 0, levels);"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2694,
+       2712,
        "bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)"
       ]
      ],
@@ -175,17 +175,17 @@
      "evidence": [
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2673,
+       2691,
        "bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int l"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2691,
+       2709,
        "Pyramid(half, l1, l2, 0, levels);"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2694,
+       2712,
        "bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)"
       ]
      ],
@@ -379,12 +379,12 @@
       ],
       [
        "motion/estimation/global_model/link/CameraExtension.cpp",
-       480,
+       475,
        "if (!engine->SeedFieldOf(latest, sf) || sf.sourceGridW <= 0 || sf.sourceGridH <= 0)"
       ],
       [
        "motion/estimation/global_model/link/CameraExtension.cpp",
-       629,
+       628,
        "if (engine->SeedFieldOf(s, sf))"
       ]
      ],
@@ -423,16 +423,40 @@
      "evidence": [
       [
        "motion/estimation/global_model/link/CameraLabelFill.cpp",
-       50,
+       106,
        "if (!m_link.CausalRecord(s))"
       ],
       [
        "motion/estimation/global_model/link/CameraLabelFill.cpp",
-       163,
+       236,
        "const std::shared_ptr<const CameraModel::CameraMotion> rec = m_link.CausalRecord(seq);"
       ]
      ],
      "kind": "partial",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kCameraFitField",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "motion/estimation/global_model/link/CameraLabelFill.cpp",
+       42,
+       "VpSkeleton::SlotSet* pf = lease.table->Find(VpSkeleton::kCameraFitField);"
+      ],
+      [
+       "motion/estimation/global_model/link/CameraLabelFill.cpp",
+       68,
+       "VpSkeleton::SlotSet* pf = fl.table->Find(VpSkeleton::kCameraFitField);"
+      ]
+     ],
+     "kind": "",
      "note": "",
      "interim": ""
     }
@@ -469,17 +493,17 @@
      "evidence": [
       [
        "motion/estimation/global_model/link/CameraLinkCore.cpp",
-       357,
+       362,
        "const bool have = m_pool->Get(seq, e, true);"
       ],
       [
        "motion/estimation/global_model/link/CameraLinkCore.cpp",
-       456,
-       "if (m_pool->Get(f.seq, e))"
+       484,
+       "if (m_pool->Get(f.seq, e, true))"
       ],
       [
        "motion/estimation/global_model/link/CameraLinkCore.cpp",
-       764,
+       780,
        "if (!m_pool->Get(seq, e))"
       ]
      ],
@@ -544,7 +568,7 @@
      "evidence": [
       [
        "repair/grain_split/GrainSplitVariantOwner.h",
-       151,
+       165,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -1049,6 +1073,23 @@
    ]
   },
   {
+   "id": "kCameraFitField",
+   "label": "p7f_camera_fit_field",
+   "token": "p7f_camera_fit_field",
+   "name": "camera fit field",
+   "backend": "Cpu",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "-",
+   "producer_files": [],
+   "producer_text": "camera fit field (storage of P7's fit field, camera worker, published before P7)",
+   "reserved": false,
+   "no_producer": true,
+   "no_producer_owner": "",
+   "edges": []
+  },
+  {
    "id": "kEdgeMap",
    "label": "edge_map",
    "token": "edge_map",
@@ -1078,6 +1119,64 @@
       [
        "input/source_analysis/regions/EdgeMapFill.h",
        65,
+       "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    }
+   ]
+  },
+  {
+   "id": "kP10gGrainLevel",
+   "label": "P10g",
+   "token": "grain.level",
+   "name": "grain level (P10g)",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B2",
+   "producer_files": [
+    "repair/grain_split/GrainLevelGpu.h"
+   ],
+   "producer_text": "grain level pass (per-frame memo, owner fill; single-frame law until the temporal passes are costed); first reader: hybrid upscaler",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP10GrainSplit",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "repair/grain_split/GrainLevelGpu.h",
+       205,
+       "const VpSkeleton::AcquireResult split = memo.Acquire(VpSkeleton::kP10GrainSplit, req.seq, VpSkeleton::AcquireF"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP13SourceRing",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "repair/grain_split/GrainLevelGpu.h",
+       194,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -1613,6 +1712,10 @@
  "scheduler": {
   "ordering_edges": [
    [
+    "kCameraFitField",
+    "kP8CameraLabels"
+   ],
+   [
     "kCodingEvidence",
     "kQualityPattern"
    ],
@@ -1631,6 +1734,10 @@
    [
     "kP10GrainSplit",
     "kCodingEvidence"
+   ],
+   [
+    "kP10GrainSplit",
+    "kP10gGrainLevel"
    ],
    [
     "kP10GrainSplit",
@@ -1683,6 +1790,10 @@
    [
     "kP13SourceRing",
     "kP10cGrainSplitChroma"
+   ],
+   [
+    "kP13SourceRing",
+    "kP10gGrainLevel"
    ],
    [
     "kP13SourceRing",
@@ -1918,6 +2029,7 @@
    }
   ],
   "topological_order": [
+   "kCameraFitField",
    "kP0RebaseDecision",
    "kP13SourceRing",
    "kEdgeMap",
@@ -1928,6 +2040,7 @@
    "kP4SourceStats",
    "kP10GrainSplit",
    "kP10cGrainSplitChroma",
+   "kP10gGrainLevel",
    "kP11RegionBlockStats",
    "kCodingEvidence",
    "kP12LightLevel",
@@ -1951,6 +2064,7 @@
    "kTdTrailSummary"
   ],
   "levels": {
+   "kCameraFitField": 0,
    "kP0RebaseDecision": 0,
    "kP13SourceRing": 0,
    "kEdgeMap": 1,
@@ -1961,6 +2075,7 @@
    "kP4SourceStats": 1,
    "kP10GrainSplit": 2,
    "kP10cGrainSplitChroma": 2,
+   "kP10gGrainLevel": 3,
    "kP11RegionBlockStats": 3,
    "kCodingEvidence": 4,
    "kP12LightLevel": 4,
@@ -1986,7 +2101,9 @@
   "cycle_members": [],
   "acyclic": true
  },
- "unowned_no_producer": [],
+ "unowned_no_producer": [
+  "kCameraFitField"
+ ],
  "test_only_references": [
   {
    "where": "modules/input/source_analysis/regions/RegionEvidence.h:570 ComputeGrain, :719 ComputeFrame",

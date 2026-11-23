@@ -99,20 +99,20 @@ enum : ProductId {
     kFocusMap = 32,       // 32 focus_map (L-FOCUS; RESERVED until it lands)
     kRoomLight = 33,      // 33 room_light (DV block; RESERVED until it lands)
     kComposedVectors = 34,// 34 composed_vectors (ECV: VpComposed::Product, modules/motion/estimation/composed; the code has landed, the id stays RESERVED until its registry decl + reader row land, lead ruling SHOULD S3)
-    // Id 35 (lead20/compose-CE-p7f-renumber.md, coordinator-confirmed): CB's P10g grain_level keeps 35 (RESERVED here until 4a lands).
-    kP10gGrainLevel = 35, // 35 grain_level (P10g; RESERVED until member 4a lands)
+    kP10gGrainLevel = 35, // 35 grain.level (P10g, refs/120 T3; coreplan-C10-15b-PC-grain.md:19): per-16-px-block grain level from P10, owner fill
+                          // (grain_split/GrainLevelGpu.h); first reader the CF hybrid upscaler (replaces its interim ReadGrain seam)
     // Id 36 (CP-A1-D4-CAMLABEL-FIELDCOPY, renumbered 35 -> 36 per lead20/compose-CE-p7f-renumber.md): the P7 fit field, published WITH P7 by the camera worker and read by P8.
     kCameraFitField = 36, // 36 p7f_camera_fit_field (CPU, declared lane product; the field the P7 record was fitted from)
     kSkeletonProductEnd = 37
 };
 static_assert(kSourceGeometry == 29 && kBandMemo == kSourceGeometry + 1 && kP10gGrainLevel == kComposedVectors + 1 && kCameraFitField == kP10gGrainLevel + 1 && kSkeletonProductEnd == kCameraFitField + 1,
-              "the fixed product-id table: 29 source_geometry, 30..35 as listed (35 reserved for CB P10g), 36 camera fit field, End 37");
+              "the fixed product-id table: 29 source_geometry, 30..34 as listed, 35 grain.level, 36 camera fit field, End 37");
 
 // Ids of the fixed table whose product has not landed: the registry has an ABSENT slot there (a default ProductDecl with id kNoProduct: no
 // token, no inputs, no reader row, no catalog row), so ids stay indexes and Size() == kSkeletonProductEnd. Registry::Validate accepts an
 // absent slot ONLY at a listed id and rejects a real declaration at a listed id; Has() is false for an absent slot, so any input naming one
 // fails closed ("unknown input product"). The lane that lands a product declares it under its fixed number and deletes the number here.
-constexpr ProductId kReservedProductIds[] = { kBandMemo, kFocusMap, kRoomLight, kComposedVectors, kP10gGrainLevel };
+constexpr ProductId kReservedProductIds[] = { kBandMemo, kFocusMap, kRoomLight, kComposedVectors };
 constexpr size_t kReservedProductCount = sizeof(kReservedProductIds) / sizeof(kReservedProductIds[0]);
 constexpr bool IsReservedProduct(ProductId id)
 {
@@ -1084,8 +1084,9 @@ inline void AppendCameraFitFieldProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p);
 }
 
-// Pads the reserved ids before (30) and after (32..35) edge_map, then appends the camera fit field (id 36), so EVERY caller that completes the
-// skeleton set (SkeletonProducts, RegionEvidence) gets the same id-indexed registry of Size() == kSkeletonProductEnd.
+// Pads the reserved ids before (30) and after (32..34) edge_map; AppendGrainLevelProduct then appends grain.level (35) and
+// camera fit field (36), so EVERY caller that completes the skeleton set (SkeletonProducts, RegionEvidence) calls both in
+// that order and gets the same id-indexed registry of Size() == kSkeletonProductEnd (37).
 inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
 {
     using detail::AddInput;
@@ -1100,8 +1101,35 @@ inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
     p.refRenderMs = 0.05f;
     PadReservedUntil(decls, kEdgeMap);
     decls.push_back(p);
+    PadReservedUntil(decls, kP10gGrainLevel);
+}
+
+// grain.level (P10g, fixed id 35; refs/120 T3, coreplan-C10-15b-PC-grain.md:19): the per-block grain level of the source luma, one
+// RGBA32F texel per 16-px block (shift 4) = {N_b noise variance in codes^2, temporal gate g, retained share f'^2 * N_b, lag-1 correlation}.
+// A per-frame GPU memo filled by the owner fill (grain_split/GrainLevelGpu.h) from the P10 grain split it acquires (variant form); the
+// producer is the owner fill, there is no lane job (class Derived, like P12). Until the temporal passes are costed (GrainLevel.h: no GPU
+// kernel without a measured 4K cost) the fill publishes the SINGLE-FRAME law, which equals the unit-4 law exactly (g = 0, lag-1 = -1
+// "not measured"), and says so visibly (Fallbacks "grain_level_temporal"; declines and missing registrations have their own Fallbacks
+// lines, GrainLevelGpu.h). T5 gates (GrainLevelGpu.h header): not compiled yet, GPU parity, 4K cost, this refRenderMs. RGBA32F rather than refs/120's rgba16f: N_b in
+// codes^2 of a 12-bit source exceeds what fp16 holds exactly (precision rule 7).
+inline void AppendGrainLevelProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    ProductDecl p = Make(kP10gGrainLevel, "grain.level", "grain level (P10g)", Backend::GpuCompute, 1, Tier::T1,
+                         Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
+    p.sourceFrame = true;
+    AddInput(p, kP10GrainSplit, 0);
+    AddInput(p, kP13SourceRing, 0);   // the frame's luma facts (size, bit encoding) that key the P10 variant it acquires
+    AddTerm(p, 4, 16);   // one RGBA32F texel per 16-px block
+    p.refRenderMs = 0.05f; // PLACEHOLDER (T5 gate 4): replaced by the T5 measured cost of the single-frame pass (T5 gate 3)
+    PadReservedUntil(decls, kP10gGrainLevel);
+    decls.push_back(p);
     PadReservedUntil(decls, kCameraFitField);
     AppendCameraFitFieldProduct(decls);
+    PadReservedUntil(decls, kSkeletonProductEnd);
 }
 
 // p7g_camera_guide (doc 56, K4-1; claimed as id 20 by CameraGuideProduct.h, registered here): the measurement plan for pair N is a
@@ -1376,7 +1404,8 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double s
     AppendCameraGuideProduct(d);
     AppendTemporalDetailEngineProducts(d, sourcePeriodMs, queueFrames);
     AppendSourceGeometryProduct(d);   // wave S2: P14g, appended after the doc 72 list
-    AppendEdgeMapProduct(d);          // L-B5 / rule 3: fixed id 31, after source_geometry; pads reserved ids 30 and 32..34 (Size() == kSkeletonProductEnd)
+    AppendEdgeMapProduct(d);          // L-B5 / rule 3: fixed id 31, after source_geometry; pads reserved ids 30 and 32..34
+    AppendGrainLevelProduct(d);       // P10g T3: fixed id 35 (Size() == kSkeletonProductEnd)
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }

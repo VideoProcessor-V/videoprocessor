@@ -56,7 +56,9 @@ inline StaticClass StaticClassOf(ProductId id)
     case kRefinedField:
         return StaticClass{ JobClass::Derived, true };
     // derived-live: filled at first read through Acquire, never a job
-    case kP12LightLevel:
+    // P10g grain level (T3): an owner fill at first read, like P12; it runs only when a reader acquires it (reader-driven, so it stops
+    // with its readers) and P10 under it stays optional fill
+    case kP12LightLevel: case kP10gGrainLevel:
         return StaticClass{ JobClass::Derived, false };
     // TD's own products: the jobs of the TD reserved slice (OD:391 (2)/(3); 115 #47 "regulator can never shed TD"). Admitted inside the
     // slice (AdmissionTable.h Admit), never optional fill, never in the arbiter's FillOff list: TD steps down only its own ladder (OD:612 (3)).
@@ -71,9 +73,9 @@ inline StaticClass StaticClassOf(ProductId id)
     // held-state records, P15c causal quality pattern
     case kP0RebaseDecision: case kP7gCameraGuide: case kP13SourceRing: case kSourceIdentity: case kSourceGeometry: case kQualityPatternCausal:
         return StaticClass{ JobClass::Fill, true };
-    // the C3 fixed-table ids 30..35 (R14-95 + CB 4a P10g reservation): optional fill under OD:391 (1) until each lands with its owner fill; the landing lane
+    // the C3 fixed-table ids 30..34 (R14-95): optional fill under OD:391 (1) until each lands with its owner fill; the landing lane
     // re-classes its id here if the owner rules it core
-    case kBandMemo: case kEdgeMap: case kFocusMap: case kRoomLight: case kComposedVectors: case kP10gGrainLevel:
+    case kBandMemo: case kEdgeMap: case kFocusMap: case kRoomLight: case kComposedVectors:
         return StaticClass{ JobClass::Fill, true };
     }
     return StaticClass{ JobClass::Fill, false, false };   // not an id of the table: no job (never admitted) and visibly unclassed

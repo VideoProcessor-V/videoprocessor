@@ -891,7 +891,8 @@ namespace RegionEvidence
 			AppendCameraGuideProduct(decls);
 			AppendTemporalDetailEngineProducts(decls);   // R1-W1-RES (doc 72): p7g and the engine products complete the skeleton set
 			AppendSourceGeometryProduct(decls);          // wave S2: P14g source_geometry (id 29) precedes edge_map and skeleton set
-			AppendEdgeMapProduct(decls);                 // L-B5 / rule 3: edge_map (fixed id 31; pads the reserved ids) closes the skeleton set
+			AppendEdgeMapProduct(decls);                 // L-B5 / rule 3: edge_map (fixed id 31; pads the reserved ids 30, 32..34)
+			AppendGrainLevelProduct(decls);              // P10g T3: grain.level (fixed id 35) closes the skeleton set
 		}
 		ProductIds ids;
 		ids.grainSplit = kP10GrainSplit;
