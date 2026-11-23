@@ -1787,16 +1787,21 @@ namespace SourceIdentity
 						}
 						else if (!hRes.found && hRes.reason == HarmonicSelectionReason::RejectedSubHarmonicDetailAbove)
 						{
-							// All candidate pairs were invalidated by detail_above: clear chain pair so a false sub-harmonic
-							// cannot enter via chain-alone.
+							// All candidate pairs were invalidated by detail_above: clear BOTH chain pair and classical
+							// proposal so a detail_above-contradicted sub-harmonic cannot enter via chain-alone OR joint
+							// (jIn.classicalDetailAbove remains intact for M1 debounced release while latched).
 							jIn.haveChainPair = false;
+							jIn.classicalValid = false;
 						}
 					}
 				}
 
-				// Witness B current-shot dwell & credit for the joint / G2 target pair.
-				const int targetNx = jointLatch.Latched() ? jointLatch.LatchedNx() : (jIn.classicalValid ? jIn.classicalNx : jIn.chainNx);
-				const int targetNy = jointLatch.Latched() ? jointLatch.LatchedNy() : (jIn.classicalValid ? jIn.classicalNy : jIn.chainNy);
+				// Witness B current-shot dwell & credit for the joint / G2 target pair:
+				// Prefer the proposed classical pair FIRST so canMoveJoint queries Witness B's real credit for the
+				// proposed new size rather than hijacking the previously latched pair's credit (when classical agrees
+				// with Latched for G2 freshJointReproof, classicalNx/Ny == LatchedNx/Ny).
+				const int targetNx = jIn.classicalValid ? jIn.classicalNx : (jointLatch.Latched() ? jointLatch.LatchedNx() : jIn.chainNx);
+				const int targetNy = jIn.classicalValid ? jIn.classicalNy : (jointLatch.Latched() ? jointLatch.LatchedNy() : jIn.chainNy);
 				jIn.currentShotDwellSec = (std::min)(evidence.CurrentShotDwellSec(0, timeUs), evidence.CurrentShotDwellSec(1, timeUs));
 				if (targetNx > 0 && targetNy > 0)
 				{

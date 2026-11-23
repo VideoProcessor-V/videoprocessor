@@ -690,6 +690,7 @@ namespace SourceIdentity
 					(std::min)(in.chainLlrX, in.chainLlrY) >= bar;
 
 				const bool jointEligible = classicalConv &&
+					!in.classicalDetailAbove &&
 					shotCreditFinite &&
 					in.currentShotDwellSec >= s_.minShotDwellSec &&
 					(std::min)(in.currentShotCreditX, in.currentShotCreditY) >= jNeed;
