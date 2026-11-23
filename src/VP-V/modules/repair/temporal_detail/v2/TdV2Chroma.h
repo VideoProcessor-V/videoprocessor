@@ -38,6 +38,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace TdV2
@@ -201,7 +202,8 @@ namespace TdV2
 				outB = b;
 				return true;
 			}
-			if (!std::isfinite(dCb) || !std::isfinite(dCr) || !(kg > kEngineNumFloor))
+			if (!std::isfinite(dCb) || !std::isfinite(dCr) ||
+			    !std::isfinite(kr) || !std::isfinite(kb) || !std::isfinite(kg) || !(kg > kEngineNumFloor))
 			{
 				outR = r;
 				outG = g;
@@ -215,10 +217,22 @@ namespace TdV2
 			const double dR = kR * dCr;
 			const double dB = kB * dCb;
 			const double dG = -(kr * kR / kg) * dCr - (kb * kB / kg) * dCb;
-			outR = r + dR;
-			outG = g + dG;
-			outB = b + dB;
-			return std::isfinite(outR) && std::isfinite(outG) && std::isfinite(outB);
+			const double nr = r + dR;
+			const double ng = g + dG;
+			const double nb = b + dB;
+			if (!std::isfinite(nr) || !std::isfinite(ng) || !std::isfinite(nb))
+			{
+				outR = r;
+				outG = g;
+				outB = b;
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::NonFiniteClosure, "ApplySignedChromaDeltaToRgb non-finite output");
+				return false;
+			}
+			outR = nr;
+			outG = ng;
+			outB = nb;
+			return true;
 		}
 	};
 
@@ -285,8 +299,8 @@ namespace TdV2
 			usedBorderBilinear = false;
 			if (view.src == nullptr || view.w <= 0 || view.h <= 0 || !std::isfinite(sxLocal) || !std::isfinite(syLocal))
 				return false;
-			if (VpComposed::SampleBicubic(view, sxLocal, syLocal, outVal) && std::isfinite(outVal))
-				return true;
+			if (VpComposed::SampleBicubic(view, sxLocal, syLocal, outVal))
+				return std::isfinite(outVal);
 			const bool inActiveBounds = (sxLocal >= 0.0 && syLocal >= 0.0 &&
 			                             sxLocal <= static_cast<double>(view.w - 1) &&
 			                             syLocal <= static_cast<double>(view.h - 1));
@@ -543,6 +557,8 @@ namespace TdV2
 				}
 				else
 				{
+					// Preserve non-finite flag on coded plane so downstream warpers sanitize visibly with validPx = 0.
+					out.at(cx, cy) = std::numeric_limits<double>::quiet_NaN();
 					anyNonFinite = true;
 				}
 			}
@@ -722,6 +738,14 @@ namespace TdV2
 			const int ch = (lumaH + cellPx - 1) / cellPx;
 			const size_t numCells = static_cast<size_t>(cw) * static_cast<size_t>(ch);
 
+			// Reject malformed splatMotion before mutating canvas state (consistent with tryAddPeakRef and anchorReadMotion).
+			if (splatMotion != nullptr && !splatMotion->IsWellFormed(cw, ch))
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::MotionFieldStandIn, "TdV2ChromaAnchorCanvas malformed splatMotion");
+				return false;
+			}
+
 			// Fractional siting origin offset so coded samples align to exact integer canvas lattice sites
 			// for TopLeftType2 (0, 0), Left (0, 0.5), and Center (0.5, 0.5), eliminating half-pixel box blur
 			// on static/shifted anchors and preventing odd-dimension edge row/column drops.
@@ -751,10 +775,8 @@ namespace TdV2
 				cflCells_.assign(numCells, AnchorCflCell{});
 			}
 
-			const bool useMotion = (splatMotion != nullptr && splatMotion->IsWellFormed(cw, ch));
-			if (splatMotion != nullptr && !useMotion && standIns != nullptr)
-				standIns->Engage(StandInKind::MotionFieldStandIn, "TdV2ChromaAnchorCanvas malformed splatMotion");
-			else if (splatMotion == nullptr && accumulatedFrames_ > 0 && standIns != nullptr)
+			const bool useMotion = (splatMotion != nullptr);
+			if (!useMotion && accumulatedFrames_ > 0 && standIns != nullptr)
 				standIns->Engage(StandInKind::MotionFieldStandIn, "anchor splatMotion null; assuming Still");
 
 			const ActiveRect cActive = ChromaDetail::ToSubsampledActiveRect(ar, lumaW, lumaH, cSubX, cSubY, cW, cH);
@@ -2098,7 +2120,7 @@ namespace TdV2
 						standIns->Engage(StandInKind::MotionFieldStandIn, "chroma anchorReadMotion malformed; anchor ref skipped");
 				}
 			}
-			else if (anchorCanvas_.HasData() && (in.enableAnchorCanvasRef || in.enableCarriedCfl))
+			else if ((in.enableAnchorCanvasRef && anchorCanvas_.HasData()) || (in.enableCarriedCfl && anchorCanvas_.HasCfl()))
 			{
 				++res.motionStandInRefs;
 				if (standIns != nullptr)

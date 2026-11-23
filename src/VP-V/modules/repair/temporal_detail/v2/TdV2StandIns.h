@@ -43,6 +43,8 @@ namespace TdV2
 		BorderBilinearFallback,
 		ChromaCflFallback,
 		ZeroEnergyDarkBlockExcluded,
+		GpuScratchShortage,
+		GpuDispatchFailed,
 		Count
 	};
 
@@ -102,7 +104,11 @@ namespace TdV2
 			{ StandInKind::ChromaCflFallback, "td.fallback.chroma_cfl",
 			  "chroma: CfL fallback (chroma residual disagreed with luma)", "Carried anchor CfL H5" },
 			{ StandInKind::ZeroEnergyDarkBlockExcluded, "td.q5.zero_energy_excluded",
-			  "grain NLF: zero-energy flat blocks excluded by energy", "Q5(b) dark NLF energy filter" }
+			  "grain NLF: zero-energy flat blocks excluded by energy", "Q5(b) dark NLF energy filter" },
+			{ StandInKind::GpuScratchShortage, "td.gpu.scratch_shortage",
+			  "GPU scratch arena shortage (frame skipped visibly)", "ScratchArena kUserTemporalDetail reserve" },
+			{ StandInKind::GpuDispatchFailed, "td.gpu.dispatch_failed",
+			  "GPU compute dispatch or input absent (frame skipped visibly)", "Valid pl_gpu / pl_dispatch / textures" }
 		};
 		const size_t idx = static_cast<size_t>(kind);
 		if (idx < static_cast<size_t>(StandInKind::Count))
