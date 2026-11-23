@@ -114,7 +114,7 @@ The one-row context tolerance has paired tests for stable geometry and rejection
 of missing bars or larger boundary changes. Config tests cover named-profile
 validation and saving/reopening the diagnostic.
 
-`tools/eval_subtitle_bbox_corpus.py` checks the spatial detector using labelled
+`tools/test_subtitle_bbox_corpus.py` checks the spatial detector using labelled
 antialiased captions over real movie backgrounds at HD and UHD. It draws bars
 and text at the target resolution so their coordinates match the supplied
 boundary. It does not exercise the renderer queue or establish live acceptance.

@@ -85,7 +85,7 @@ def main():
               'note': 'Original decoded crops are unmodified. Independent short slices cannot prove continuous cue tracking, onset handling or live GPU output. One-sample slices cannot establish temporal consistency.'}
     for lookahead in (3, 0):
         run_directory = args.output / ('lookahead-' + str(lookahead))
-        subprocess.run([sys.executable, str(directory / 'eval_subtitle_recording.py'),
+        subprocess.run([sys.executable, str(directory / 'test_subtitle_recording.py'),
                         '--video', str(args.video.resolve()), '--probe', str(pinned_probe.resolve()),
                         '--manifest', str(manifest_path), '--output', str(run_directory.resolve()),
                         '--sample-fps', '24000/1001', '--lookahead', str(lookahead), '--report-only'], check=True)

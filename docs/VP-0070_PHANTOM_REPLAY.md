@@ -30,7 +30,7 @@ read annotation coordinates. An explicit `--diagnostic-bars` option exists
 only to isolate spatial failures; it cannot establish acceptance.
 
 ```powershell
-python tools/eval_subtitle_recording.py `
+python tools/test_subtitle_recording.py `
   --video 'C:\Users\bslac\Videos\2026-10-02 21-25-45.mp4' `
   --probe x64/Release/SubtitleClipProbe.exe `
   --output artifacts/phantom-replay --lookahead 3
