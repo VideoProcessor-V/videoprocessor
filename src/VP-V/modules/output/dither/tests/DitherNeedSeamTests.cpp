@@ -398,6 +398,9 @@ namespace DitherNeedSeamTestsNs
 
 		// Live feed staleness across every product age field (grain, evidence, lut), exact boundary, unknown age,
 		// automatic reset on recovery, and RecordGpuFailure rollback of On/ClassicalQuality counters.
+		BEGIN_TEST_METHOD_ATTRIBUTE(LiveFeedStaleAgesBoundaryAndRecordGpuFailureRollback)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(LiveFeedStaleAgesBoundaryAndRecordGpuFailureRollback)
 		{
 			Products p;

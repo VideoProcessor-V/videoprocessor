@@ -3914,6 +3914,9 @@ namespace SkeletonModuleTestsNs
 		// W23-4p (G-T1): a raising consumer that needs GPU products (P10/P11/P12, e.g. dither_need) demands GPU
 		// dispatch even when analysis_lane=off (visibly reporting skeleton_gpu_device without a pl_gpu and adding
 		// P10/P11/P12 to the graph), while LED-only P4 raising demand keeps zero GPU demand (in-test negative control).
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuRaisingConsumerDemandsGpuWhileLedOnlyDoesNot)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GpuRaisingConsumerDemandsGpuWhileLedOnlyDoesNot)
 		{
 			auto gpuConsumers = []()
@@ -3977,6 +3980,9 @@ namespace SkeletonModuleTestsNs
 		}
 
 		// W23-4p: ReadDitherNeedGpuInputs without a live GPU dispatcher / Entrance fill returns a clean empty snapshot.
+		BEGIN_TEST_METHOD_ATTRIBUTE(ReadDitherNeedGpuInputsWithoutDeviceReturnsEmptyCleanly)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(ReadDitherNeedGpuInputsWithoutDeviceReturnsEmptyCleanly)
 		{
 			Rig rig(Lane("on"));
