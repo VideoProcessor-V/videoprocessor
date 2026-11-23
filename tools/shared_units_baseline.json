@@ -426,6 +426,12 @@
      "reason": "diagnostic accessor forwarding the detector value"
     },
     {
+     "file": "src/VP-V/gui/VpvHdrInference.cpp",
+     "pattern": "float histogramDistance = 0\\.0f;|message->histogramDistance = m_hdrVetoGate\\.LastHistogramDistance\\(\\);|newlldv SDR veto: cut grid=%.1f histogram=%.3f measure_us=%u|message->gridDifference, message->histogramDistance,",
+     "kind": "false_positive",
+     "reason": "UI telemetry message field and DebugLog format relocated verbatim from Bill's VideoProcessorDlg.cpp (fbad40f5d); forwards HdrVetoCaptureGate::LastHistogramDistance() with zero histogram computation"
+    },
+    {
      "file": "src/VP-V/modules/input/signal/SettingsStamp.h",
      "pattern": "dejudder_cut_histogram",
      "kind": "false_positive",
