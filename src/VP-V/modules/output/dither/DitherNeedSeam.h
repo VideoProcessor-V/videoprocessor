@@ -173,31 +173,20 @@ namespace DitherNeedSeam
 			return o;
 		}
 
-		// Converts an Evaluate() == On outcome to Unavailable when the subsequent GPU block pass or HookGuard bind fails:
-		// rolls back framesOn / framesClassicalQuality, counts framesUnavailable, invalidates tracker, and engages fallback.
+		// Converts an Evaluate() == On outcome to Unavailable when the subsequent GPU pass/bind fails.
 		void RecordGpuFailure(Outcome& o, unsigned gpuMissing)
 		{
-			if (gpuMissing == 0) gpuMissing = DitherNeed::kPassFailed;
-			if (o.result == DitherNeed::Result::On)
-			{
-				if (counters_.framesOn > 0) --counters_.framesOn;
-				if (o.classicalQuality && counters_.framesClassicalQuality > 0) --counters_.framesClassicalQuality;
-			}
-			o.classicalQuality = false;
-			o.missing |= gpuMissing;
-			o.result = DitherNeed::Result::Unavailable;
-			o.extraAllowed = false;
-			o.decision.result = DitherNeed::Result::Unavailable;
-			o.decision.off = true;
-			o.decision.reset = false;
-			o.decision.missing = o.missing;
-			o.decision.status = DitherNeed::StatusOf(true, o.missing, true);
-			o.status = o.decision.status;
+			const unsigned m = gpuMissing ? gpuMissing : DitherNeed::kPassFailed;
+			if (o.result == DitherNeed::Result::On && counters_.framesOn > 0) --counters_.framesOn;
+			if (o.result == DitherNeed::Result::On && o.classicalQuality && counters_.framesClassicalQuality > 0) --counters_.framesClassicalQuality;
+			o.classicalQuality = false; o.missing |= m; o.result = DitherNeed::Result::Unavailable; o.extraAllowed = false;
+			o.decision.result = o.result; o.decision.off = true; o.decision.reset = false; o.decision.missing = o.missing;
+			o.status = o.decision.status = DitherNeed::StatusOf(true, o.missing, true);
 			o.fallback = FallbackCatalog::DitherNeed(true, DitherNeed::MissingText(o.missing));
 			tracker_.Invalidate();
 			++counters_.framesUnavailable;
-			if (gpuMissing & DitherNeed::kStaleProduct) ++counters_.framesStale;
-			if (gpuMissing & DitherNeed::kNonLinearStretch) ++counters_.framesNlsDeclined;
+			if (m & DitherNeed::kStaleProduct) ++counters_.framesStale;
+			if (m & DitherNeed::kNonLinearStretch) ++counters_.framesNlsDeclined;
 		}
 
 		const Counters& Count() const { return counters_; }

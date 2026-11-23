@@ -131,36 +131,23 @@ namespace OutputSegments
 	};
 
 	// ---- S3 -------------------------------------------------------------------------------
-	// W23-4p (G-T1): per-frame inputs to OutputFinishSegment::RunDitherNeedGpu (render thread).
+	// W23-4p (G-T1): per-frame GPU dither_need request (compiled implementation in OutputSegments.cpp).
 	struct DitherNeedGpuRequest
 	{
-		bool requested = false;                // activeSettings.ditherNeed == "auto"
-		bool originalPathway = false;          // pipelineSlots.OriginalPathway()
-		bool sigmaDeltaActive = false;         // sigma-delta hook present and output.dither slot on
-		bool slotOff = false;                  // output.dither switched off in pipeline_slots_off
-		bool domainSupported = true;           // SigmaDeltaDomain::Domain::supported
-		int colorBits = 8;                     // SigmaDeltaDomain::Domain::color
-		bool nlsActive = false;                // GEM-224: submittedNls != nullptr (affine placement invalid)
-		pl_gpu gpu = nullptr;                  // renderer pl_gpu (render thread)
-		const void* host = nullptr;            // renderer host pointer (for IExternalDemand)
-		uint64_t sourceSequence = 0;           // current source frame sequence
-		double dtSeconds = 0.0;                // measured frame interval (<= 0 = unknown)
-		bool discontinuity = false;            // cut / resync / re-base / generation change
-		double aBase = 0.15;                   // quantiser's configured noise_amplitude
-		pl_rect2df sourceCrop{};               // renderImage.crop
-		pl_rect2df targetCrop{};               // target.crop
-		LightLevel::Settings lightSettings;    // resolved light-level settings
-		LightLevel::Context lightContext;      // resolved light-level context
-		int regionTransfer = 0;                // 0 = SDR gamma, 1 = PQ, 2 = HLG
-		const SourceIdentity::QualityView* quality = nullptr;   // P14 quality view (null = classical fallback)
-		// Optional direct GPU product override (used by tests without a live skeleton hub).
-		bool overrideInputs = false;
+		bool requested = false, originalPathway = false, sigmaDeltaActive = false, slotOff = false;
+		bool domainSupported = true, nlsActive = false, discontinuity = false, overrideInputs = false, requireBind = true;
+		int colorBits = 8, regionTransfer = 0;
+		pl_gpu gpu = nullptr;
+		const void* host = nullptr;
+		uint64_t sourceSequence = 0;
+		double dtSeconds = 0.0, aBase = 0.15, overrideGrainAgeSeconds = 0.0, overrideEvidenceAgeSeconds = 0.0;
+		pl_rect2df sourceCrop{}, targetCrop{};
+		LightLevel::Settings lightSettings;
+		LightLevel::Context lightContext;
+		const SourceIdentity::QualityView* quality = nullptr;
 		pl_tex overrideGsBlocks = nullptr;
 		pl_tex overridePrecursors[RegionEvidence::kPrecursorTextures] = {};
 		RegionEvidence::Grid overrideGrid;
-		double overrideGrainAgeSeconds = 0.0;
-		double overrideEvidenceAgeSeconds = 0.0;
-		bool requireBind = true;               // true in production (7.360 reports kNoSetTexture)
 	};
 
 	// The OUTPUT end. In the separate form it is four steps at today's four places, because
@@ -178,18 +165,22 @@ namespace OutputSegments
 		//    output.dither off in the registry removes it the same way.
 		DitherPrep PrepareDither(std::vector<const pl_hook*>& hooks, const SigmaDeltaDomain::Domain& domain, bool outputFloat32,
 			const PipelineSlots::Registry& registry);
-		// 1b. dither_need (default off): CPU host seam decision (DitherNeedSeam.h). Off and Original return at once.
+		static std::string DescribeDitherDomainChange(const SigmaDeltaDomain::Domain& domain, bool active, int& lastSignature);
+		static FallbackCatalog::Decision DitherFallback(const DitherPrep& prep, const SigmaDeltaDomain::Domain& domain,
+			const std::string& quantiserProblem);
+		// 1b. dither_need (default off): CPU host seam decision and live GPU block-pass/HookGuard execution.
 		DitherNeedSeam::Outcome EvaluateDitherNeed(bool requested, bool originalPathway,
 			const DitherNeedSeam::Feed& feed = DitherNeedSeam::Feed(),
 			const RegionEvidence::Grid& grid = RegionEvidence::Grid(),
-			const DitherNeed::Params& base = DitherNeed::Params())
-		{
-			return ditherNeed.Evaluate(requested, originalPathway, feed, grid, base);
-		}
-		// 1c. W23-4p (G-T1): live GPU dither_need execution: manages raising skeleton GPU demand for P10/P11/P12,
-		//     uploads/caches the P12 light-level LUT, evaluates DitherNeedSeam with live P10/P11/P12/P14 + NLS guard,
-		//     runs DitherNeed::Gpu::BlockPass::Step, binds VPDN via DitherNeed::Gpu::HookGuard::Apply, registers
-		//     post-render unbind through `attachRelease`, and declares VRAM to VramUsers (kUserDitherNeed).
+			const DitherNeed::Params& base = DitherNeed::Params());
+		static void PopulateDitherNeedRequest(pl_gpu gpu, const void* host, uint64_t sourceSequence,
+			bool sigmaDeltaActive, bool slotOff, bool domainSupported, int colorBits, bool nlsActive,
+			const SourceIdentity::QualityView* quality, double sdrTargetNits, double sdrBlackNits, const char* hdrTargetGamma,
+			const char* toneMapping, const char* qualitySetting, const ToneMappingTuning::Overrides& toneTuning,
+			const SdrToneShape::Settings& sdrTone, const char* sdrInputTransfer, const char* outputGamma,
+			bool hasContrastRecovery, double contrastRecovery, const pl_frame& sourceFrame, const pl_frame& targetFrame,
+			double captureRateHz, double nominalSourceRateHz, const CustomHookChain::Chain& customHooks, DitherNeedGpuRequest& req);
+		std::string FormatDitherNeedLog(const std::string& status) const;
 		DitherNeedSeam::Outcome RunDitherNeedGpu(const DitherNeedGpuRequest& req, const pl_hook* const* hooks, int numHooks,
 			const std::function<void(std::function<void()>)>& attachRelease = nullptr);
 		void ReleaseDitherNeedBind();
@@ -198,14 +189,8 @@ namespace OutputSegments
 		size_t DitherNeedVramBytes() const;
 		std::string DitherNeedLastError() const;
 		bool DitherNeedDemandActive() const;
-		const DitherNeedSeam::Counters& DitherNeedCounters() const { return ditherNeed.Count(); }
-		// True when the dither-need status line differs from the last one logged (log on change only).
-		bool DitherNeedStatusChanged(const std::string& status)
-		{
-			if (status == ditherNeedLogged) return false;
-			ditherNeedLogged = status;
-			return true;
-		}
+		const DitherNeedSeam::Counters& DitherNeedCounters() const;
+		bool DitherNeedStatusChanged(const std::string& status);
 		// 2. The dither runs last at OUTPUT (24572-24593). Returns true when it was moved.
 		bool KeepDitherLast(std::vector<const pl_hook*>& hooks, bool levelsFull);
 		// 3. The mask parameters (24637-24644): returns the dither's index (hooks.size() = none).

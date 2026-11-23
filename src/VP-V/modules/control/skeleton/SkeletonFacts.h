@@ -140,48 +140,24 @@ namespace Vpv
 			bool Valid() const { return memo && host; }
 		};
 
-		// W23-4p (G-T1): render-thread snapshot of the skeleton's GPU P10 (grain split blocks) and P11 (region precursors)
-		// for dither_need. Texture pointers are opaque const void* (pl_tex) so SkeletonFacts.h stays free of libplacebo headers.
+		// W23-4p (G-T1): render-thread snapshot of P10/P11 GPU products (opaque pl_tex) and display facts for live dither_need.
 		struct DitherNeedGpuInputs
 		{
 			static constexpr size_t kPrecursors = 6;
 			const void* gsBlocks = nullptr;
 			const void* precursors[kPrecursors] = {};
-			int srcW = 0, srcH = 0;
-			int gridW = 0, gridH = 0;
-			int blockPx = 0;
-			uint64_t grainSeq = 0;
-			uint64_t evidenceSeq = 0;
-			bool haveGrain = false;
-			bool haveEvidence = false;
+			int srcW = 0, srcH = 0, gridW = 0, gridH = 0, blockPx = 0;
+			uint64_t grainSeq = 0, evidenceSeq = 0;
+			bool haveGrain = false, haveEvidence = false;
 		};
-
-		// W23-4p (G-T1): header-light POD display facts synced from the renderer's active frame to P11 (RegionStatsKernel)
-		// and P12 (LightLevelKernel) so live GPU fills use the real display context instead of static SDR defaults.
 		struct DitherNeedDisplayFacts
 		{
-			int regionTransfer = 0;            // 0 = SDR gamma, 1 = PQ, 2 = HLG
-			double sdrWhiteNits = 203.0;
-			double displayPeakNits = 203.0;
-			double displayBlackNits = 0.0;
-			double ambientNits = 0.0;
-			double weber = 0.02;
-			double sdrGamma = 2.4;
-			int llContextKind = 0;             // 0 = Sdr, 1 = HdrPassthrough, 2 = HdrToSdr
-			bool llFullRange = false;
-			double llSourcePeakNits = 0.0;
-			double llSourceMinNits = 0.0;
-			double llDynamicPeakNits = 0.0;
-			double llSdrTargetNits = 203.0;
-			double llSdrBlackNits = 0.0;
-			int llTransfer = 0;                // 0 = Bt1886, 1 = Srgb, 2 = Power
-			double llGammaPower = 2.4;
-			std::string llToneMapping = "auto";
-			std::string llQuality = "high";
-			bool llSdrToneKnee = false;
-			double llSdrToneHeadroom = 0.0;
-			double llSdrToneKneeStart = 0.75;
-			double llSdrToneKneeStrength = 0.5;
+			int regionTransfer = 0, llContextKind = 0, llTransfer = 0;
+			bool llFullRange = false, llSdrToneKnee = false;
+			double sdrWhiteNits = 203.0, displayPeakNits = 203.0, displayBlackNits = 0.0, ambientNits = 0.0, weber = 0.02, sdrGamma = 2.4;
+			double llSourcePeakNits = 0.0, llSourceMinNits = 0.0, llDynamicPeakNits = 0.0, llSdrTargetNits = 203.0, llSdrBlackNits = 0.0, llGammaPower = 2.4;
+			double llSdrToneHeadroom = 0.0, llSdrToneKneeStart = 0.75, llSdrToneKneeStrength = 0.5;
+			std::string llToneMapping = "auto", llQuality = "high";
 		};
 
 		struct IExternalDemand

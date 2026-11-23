@@ -92,26 +92,15 @@ namespace
 		// The engine read of the last Apply (its fallback decision is engaged only when requested and a product is absent).
 		const TdProducts::ReadResult& TemporalDetailRead() const { return td; }
 
-		// W23-4p: attaches a post-render release callback (e.g. DitherNeed::Gpu::HookGuard::Release) invoked
-		// unconditionally inside Release() and ~NextVectorGuard() (including NLS retry draws via OutputFinishSegment::OnDraw).
-		void AttachRelease(std::function<void()> fn)
-		{
-			if (fn)
-				extraReleases.push_back(std::move(fn));
-		}
+		// W23-4p: post-render release callback (e.g. DitherNeed::Gpu::HookGuard::Release), invoked on Release() / ~NextVectorGuard().
+		void AttachRelease(std::function<void()> fn) { if (fn) extraReleases.push_back(std::move(fn)); }
 
 		void Release()
 		{
-			for (const pl_hook* hook : applied)
-			{
-				CustomHookChain::SetHookParameter(hook, "vector_source", 0.0);
-				Set(hook, nullptr);
-			}
+			for (const pl_hook* hook : applied) { CustomHookChain::SetHookParameter(hook, "vector_source", 0.0); Set(hook, nullptr); }
 			applied.clear();
-			std::vector<std::function<void()>> fns;
-			fns.swap(extraReleases);
-			for (auto& fn : fns)
-				if (fn) fn();
+			std::vector<std::function<void()>> fns; fns.swap(extraReleases);
+			for (auto& fn : fns) if (fn) fn();
 		}
 
 	private:

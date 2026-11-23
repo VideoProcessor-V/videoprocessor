@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <iterator>
 
 namespace OutputSegments
@@ -417,6 +418,102 @@ namespace OutputSegments
 		return ditherNeedGpu && ditherNeedGpu->demandActive;
 	}
 
+	DitherNeedSeam::Outcome OutputFinishSegment::EvaluateDitherNeed(bool requested, bool originalPathway,
+		const DitherNeedSeam::Feed& feed, const RegionEvidence::Grid& grid, const DitherNeed::Params& base)
+	{
+		return ditherNeed.Evaluate(requested, originalPathway, feed, grid, base);
+	}
+
+	const DitherNeedSeam::Counters& OutputFinishSegment::DitherNeedCounters() const { return ditherNeed.Count(); }
+
+	bool OutputFinishSegment::DitherNeedStatusChanged(const std::string& status)
+	{
+		if (status == ditherNeedLogged) return false;
+		ditherNeedLogged = status;
+		return true;
+	}
+
+	void OutputFinishSegment::PopulateDitherNeedRequest(pl_gpu gpu, const void* host, uint64_t sourceSequence,
+		bool sigmaDeltaActive, bool slotOff, bool domainSupported, int colorBits, bool nlsActive,
+		const SourceIdentity::QualityView* qualityView, double sdrTargetNits, double sdrBlackNits, const char* hdrTargetGamma,
+		const char* toneMapping, const char* qualitySetting, const ToneMappingTuning::Overrides& toneTuning,
+		const SdrToneShape::Settings& sdrTone, const char* sdrInputTransfer, const char* outputGamma,
+		bool hasContrastRecovery, double contrastRecovery, const pl_frame& sourceFrame, const pl_frame& targetFrame,
+		double captureRateHz, double nominalSourceRateHz, const CustomHookChain::Chain& customHooks, DitherNeedGpuRequest& req)
+	{
+		req.requested = true;
+		req.originalPathway = false;
+		req.gpu = gpu;
+		req.host = host;
+		req.sourceSequence = sourceSequence;
+		req.sigmaDeltaActive = sigmaDeltaActive;
+		req.slotOff = slotOff;
+		req.domainSupported = domainSupported;
+		req.colorBits = colorBits;
+		req.nlsActive = nlsActive;
+		req.quality = qualityView;
+		req.dtSeconds = captureRateHz > 0.0 ? (1.0 / captureRateHz)
+			: (nominalSourceRateHz > 0.0 ? (1.0 / nominalSourceRateHz) : 0.0);
+		if (req.host != nullptr)
+			if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
+			{
+				const Vpv::Skeleton::SceneAnswer scene = demand->SceneOf(req.host, req.sourceSequence);
+				if (scene.known && scene.cut)
+					req.discontinuity = true;
+			}
+		double qBase = 0.15;
+		if (customHooks.QuantizerConfigured("noise_amplitude", qBase))
+			req.aBase = qBase;
+		req.lightSettings.sdrTargetNits = sdrTargetNits;
+		req.lightSettings.sdrBlackNits = sdrBlackNits;
+		req.lightSettings.displayWhiteNits = sdrTargetNits;
+		req.lightSettings.displayBlackNits = sdrBlackNits;
+		if (toneMapping) req.lightSettings.toneMapping = toneMapping;
+		if (qualitySetting) req.lightSettings.quality = qualitySetting;
+		req.lightSettings.tuning = toneTuning;
+		req.lightSettings.shape = sdrTone;
+		if (sdrInputTransfer) req.lightSettings.sdrInputTransfer = sdrInputTransfer;
+		if (outputGamma) req.lightSettings.outputGamma = outputGamma;
+		if (hasContrastRecovery) req.lightSettings.contrastRecovery = contrastRecovery;
+		{
+			const std::string t = LightLevel::detail::Normalize(hdrTargetGamma ? hdrTargetGamma : "");
+			double gp = 2.4;
+			if (t == "srgb") req.lightSettings.transfer = LightLevel::Transfer::Srgb;
+			else if (LightLevel::detail::ParseNumber(t, gp) && gp >= 1.8 && gp <= 2.8)
+			{
+				req.lightSettings.transfer = LightLevel::Transfer::Power;
+				req.lightSettings.gammaPower = gp;
+			}
+			else req.lightSettings.transfer = LightLevel::Transfer::Bt1886;
+		}
+		req.sourceCrop = sourceFrame.crop;
+		req.targetCrop = targetFrame.crop;
+		req.lightContext.fullRange = pl_color_levels_guess(&sourceFrame.repr) == PL_COLOR_LEVELS_FULL;
+		req.lightContext.sourcePeakNits = sourceFrame.color.hdr.max_luma > 0.0f ? static_cast<double>(sourceFrame.color.hdr.max_luma) : 0.0;
+		req.lightContext.sourceMinNits = sourceFrame.color.hdr.min_luma > 0.0f ? static_cast<double>(sourceFrame.color.hdr.min_luma) : 0.0;
+		req.lightContext.displayPeakNits = targetFrame.color.hdr.max_luma > 0.0f ? static_cast<double>(targetFrame.color.hdr.max_luma) : 0.0;
+		req.regionTransfer = sourceFrame.color.transfer == PL_COLOR_TRC_PQ ? 1
+			: (sourceFrame.color.transfer == PL_COLOR_TRC_HLG ? 2 : 0);
+		const bool srcHdr = pl_color_transfer_is_hdr(sourceFrame.color.transfer);
+		const bool dstHdr = pl_color_transfer_is_hdr(targetFrame.color.transfer);
+		req.lightContext.kind = !srcHdr ? LightLevel::Context::Sdr
+			: (dstHdr ? LightLevel::Context::HdrPassthrough : LightLevel::Context::HdrToSdr);
+	}
+
+	std::string OutputFinishSegment::FormatDitherNeedLog(const std::string& status) const
+	{
+		const DitherNeedSeam::Counters& n = ditherNeed.Count();
+		const std::string err = DitherNeedLastError();
+		char buf[384];
+		std::snprintf(buf, sizeof(buf),
+			"%s%s (frames so far: on %llu, not needed %llu, unavailable %llu, stale %llu, nls declined %llu, classical quality %llu)",
+			status.c_str(), err.empty() ? "" : (" [" + err + "]").c_str(),
+			static_cast<unsigned long long>(n.framesOn), static_cast<unsigned long long>(n.framesNotNeeded),
+			static_cast<unsigned long long>(n.framesUnavailable), static_cast<unsigned long long>(n.framesStale),
+			static_cast<unsigned long long>(n.framesNlsDeclined), static_cast<unsigned long long>(n.framesClassicalQuality));
+		return std::string(buf);
+	}
+
 	DitherNeedSeam::Outcome OutputFinishSegment::RunDitherNeedGpu(const DitherNeedGpuRequest& req,
 		const pl_hook* const* hooks, int numHooks,
 		const std::function<void(std::function<void()>)>& attachRelease)
@@ -672,6 +769,34 @@ namespace OutputSegments
 			++i;
 		}
 		return prep;
+	}
+
+	std::string OutputFinishSegment::DescribeDitherDomainChange(const SigmaDeltaDomain::Domain& domain, bool active, int& lastSignature)
+	{
+		const int signature = (domain.full ? 1 : 0) | (domain.sample << 1) | (domain.color << 8);
+		if (!active || signature == lastSignature)
+			return std::string();
+		lastSignature = signature;
+		char buf[256];
+		if (domain.supported)
+			std::snprintf(buf, sizeof(buf), "Sigma-delta code domain from the target: %s range, %d-bit swapchain, %d-bit codes",
+				domain.full ? "full" : "limited", domain.sample, domain.color);
+		else
+			std::snprintf(buf, sizeof(buf),
+				"Sigma-delta: off for this output (%s range, %d-bit swapchain, colour depth %d: not an 8- or 10-bit code domain)",
+				domain.full ? "full" : "limited", domain.sample, domain.color);
+		return std::string(buf);
+	}
+
+	FallbackCatalog::Decision OutputFinishSegment::DitherFallback(const DitherPrep& prep, const SigmaDeltaDomain::Domain& domain,
+		const std::string& quantiserProblem)
+	{
+		return FallbackCatalog::Dither(DitherFallbackRequested(prep, !quantiserProblem.empty()),
+			prep.domainDropped ? FallbackCatalog::DitherDrop::UnsupportedDomain :
+			quantiserProblem == CustomHookChain::Chain::kQuantizerNotLoaded ? FallbackCatalog::DitherDrop::ShaderNotLoaded :
+			!quantiserProblem.empty() ? FallbackCatalog::DitherDrop::DisabledByLibplacebo : FallbackCatalog::DitherDrop::None,
+			prep.domainDropped ? std::string(domain.full ? "full" : "limited") + " range, " +
+				std::to_string(domain.sample) + "-bit swapchain, colour depth " + std::to_string(domain.color) : std::string());
 	}
 
 	bool OutputFinishSegment::KeepDitherLast(std::vector<const pl_hook*>& hooks, bool levelsFull)
