@@ -236,5 +236,72 @@ namespace VideoProcessorTest
 			}   // destroyed with a record still waiting
 			Assert::AreEqual<size_t>(0, deferred.Flush(), L"the record of a destroyed readback is skipped");
 		}
+
+		// DD-PERF (GEM-198 / PERF-1): DeferredCopies::Flush() stays marked Flushing() across its
+		// deferred callbacks so a trailing Poll() (slot = -1) sees Armed()||Flushing()==true and does
+		// not fire a redundant immediate->Flush() right before FrameQuiet::EndFrame()'s pl_gpu_flush.
+		BEGIN_TEST_METHOD_ATTRIBUTE(FlushStaysMarkedFlushingAcrossTrailingPollCallback)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(FlushStaysMarkedFlushingAcrossTrailingPollCallback)
+		{
+			// Pure CPU state check on DeferredCopies::Flushing().
+			{
+				DeferredCopies d;
+				struct Probe
+				{
+					DeferredCopies* d = nullptr;
+					std::shared_ptr<int> alive = std::make_shared<int>(0);
+					bool sawArmed = true;
+					bool sawFlushing = false;
+					bool pollWouldFlush = true;
+					static void Run(void* self, int)
+					{
+						Probe* p = static_cast<Probe*>(self);
+						p->sawArmed = p->d->Armed();
+						p->sawFlushing = p->d->Flushing();
+						p->pollWouldFlush = ReadyGate::PollFlushes(ReadyGate::Step::FenceWaiting, false,
+							p->d->Armed() || p->d->Flushing(), p->d->PollFlushHeld());
+					}
+				} probe{ &d };
+				Assert::IsFalse(d.Flushing());
+				d.Arm();
+				Assert::IsTrue(d.Defer(probe.alive, &probe, -1, &Probe::Run));
+				Assert::AreEqual<size_t>(0, d.Flush(), L"slot = -1 task is not counted as a copy");
+				Assert::IsFalse(probe.sawArmed, L"Flush disarms before running callbacks");
+				Assert::IsTrue(probe.sawFlushing, L"Flushing stays true across callbacks");
+				Assert::IsFalse(probe.pollWouldFlush, L"trailing Poll must not flush during Flush()");
+				Assert::IsFalse(d.Flushing(), L"Flushing clears once Flush() returns");
+			}
+			// End-to-end WARP device check: defer a copy (slot 0) + trailing Poll callback (slot -1),
+			// run Flush(), and verify s.flushed stayed false on slot 0.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			LedDrive::NativeTexReadback rb;
+			Assert::IsTrue(rb.Create(gpu, 1, 8, 4, DXGI_FORMAT_R32_FLOAT), L"Create");
+			DeferredCopies& deferred = DeferredCopies::ForThisThread();
+			DisarmGuard guard;
+			struct Trail
+			{
+				LedDrive::NativeTexReadback* rb = nullptr;
+				std::shared_ptr<int> alive = std::make_shared<int>(0);
+				bool called = false;
+				static void PollZero(void* self, int)
+				{
+					Trail* t = static_cast<Trail*>(self);
+					t->called = true;
+					(void)t->rb->Poll(0);
+				}
+			} trail{ &rb };
+			deferred.Arm();
+			rb.QueueDeferred(0);
+			Assert::IsTrue(deferred.Defer(trail.alive, &trail, -1, &Trail::PollZero));
+			Assert::AreEqual<size_t>(1, deferred.Flush());
+			Assert::IsTrue(trail.called, L"trailing Poll callback executed inside Flush()");
+			Assert::IsFalse(rb.SlotFlushedForTest(0), L"GEM-198: Poll inside Flush() must not issue redundant immediate->Flush()");
+			Assert::IsFalse(deferred.Flushing());
+			rb.Release(gpu);
+		}
 	};
 }

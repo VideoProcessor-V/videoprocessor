@@ -184,11 +184,9 @@ namespace VideoProcessorTest
 				}
 			expected /= blocks * blocks;
 			Assert::AreEqual(static_cast<uint32_t>(blocks * blocks), raw.blocks);
-			uint32_t histogramTotal = 0, cellTotal = 0;
+			uint32_t histogramTotal = 0;
 			for (uint32_t count : raw.histogram) histogramTotal += count;
-			for (uint32_t count : raw.cellCount) cellTotal += count;
 			Assert::AreEqual(raw.blocks, histogramTotal);
-			Assert::AreEqual(raw.blocks, cellTotal);
 			const double apl = static_cast<double>(raw.sum) / LedDrive::SUM_SCALE / raw.blocks;
 			Assert::AreEqual(expected, apl, 0.75);
 			// Bug hunt 2 (led_peak_full_coverage, the default): the peak over every
@@ -233,6 +231,93 @@ namespace VideoProcessorTest
 			hook.Release();
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
+		}
+
+		// DD-PERF (GEM-199 / PERF-2): golden bit-exact equality pin for histogram/sum/blocks/maximum across
+		// boost=1.0, boost=0.9167, GRAIN, and FULL_PEAK + GPU timing harness.
+		TEST_METHOD(DdPerfMeasurementHookGoldenAndTiming)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int w = 384, h = 216;
+			auto pattern = [](int, int x, int y)
+			{
+				const unsigned hh = (static_cast<unsigned>(x) * 73856093u) ^ (static_cast<unsigned>(y) * 19349663u);
+				const int g = static_cast<int>((hh * 2654435761u >> 24) % 41u) - 20;
+				const bool hl = x >= 120 && x < 180 && y >= 70 && y < 130;
+				return static_cast<double>((std::min)(255, (std::max)(0, (hl ? 220 : 90) + g)));
+			};
+			const float texel[4] = { 0.4f, 1.0f, 0.0f, 1.0f };
+			pl_tex_params mp{};
+			mp.w = mp.h = 1;
+			mp.format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			mp.sampleable = true;
+			mp.initial_data = texel;
+			pl_tex map = mp.format ? pl_tex_create(gpu, &mp) : nullptr;
+			Assert::IsNotNull(map);
+			const double weights[3] = { 0.299, 0.587, 0.114 };
+			const pl_rect2df crop{ 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
+			const LedDrive::MeasurementRect mask{ 0.2, 0.75, 0.8, 0.9 };
+
+			auto hashRaw = [](uint64_t& h, const LedDrive::RawMeasurement& r)
+			{
+				auto mix = [&](uint32_t v) { h ^= v; h *= 1099511628211ull; };
+				for (uint32_t c : r.histogram) mix(c);
+				mix(r.sum); mix(r.blocks); mix(r.maximum);
+			};
+
+			uint64_t digest = 14695981039346656037ull;
+			std::string report;
+			struct Mode { const char* name; double boost; bool grain; bool fullPeak; };
+			const Mode modes[4] = {
+				{ "plain boost=1.0", 1.0, false, false },
+				{ "plain boost=0.9167", 2.2 / 2.4, false, false },
+				{ "grain+mask boost=1.0", 1.0, true, false },
+				{ "fullPeak boost=1.0", 1.0, false, true }
+			};
+			for (const Mode& m : modes)
+			{
+				LedDrive::MeasurementHook hook;
+				hook.SetFrame({}, weights, m.boost);
+				hook.SetPeak(m.fullPeak, static_cast<double>(w), static_cast<double>(h));
+				hook.SetMask(&mask, 1);
+				hook.SetGrain(m.grain ? map : nullptr, 0.4f, crop);
+				// Warm-up + golden capture.
+				fixture.RenderSequence(std::vector<const pl_hook*>{ hook.Hook() }, w, h, 1, pattern);
+				std::vector<LedDrive::RawMeasurement> measured;
+				Assert::AreEqual(1, hook.Collect(measured, 5000));
+				hashRaw(digest, measured.front());
+				// Timing over 7 iterations.
+				const int kRuns = 7;
+				std::vector<double> ms(kRuns);
+				for (int i = 0; i < kRuns; ++i)
+				{
+					measured.clear();
+					const auto t0 = std::chrono::steady_clock::now();
+					fixture.RenderSequence(std::vector<const pl_hook*>{ hook.Hook() }, w, h, 1, pattern);
+					Assert::AreEqual(1, hook.Collect(measured, 5000));
+					ms[i] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+				}
+				std::sort(ms.begin(), ms.end());
+				char line[256];
+				std::snprintf(line, sizeof(line), "DD-PERF LedMeasurementHook [%s] (384x216): median %.3f ms (blocks=%u sum=%u max=%u)\n",
+					m.name, ms[kRuns / 2], measured.front().blocks, measured.front().sum, measured.front().maximum);
+				report += line;
+				hook.Release();
+			}
+			pl_tex_destroy(gpu, &map);
+			char summary[128];
+			std::snprintf(summary, sizeof(summary), "DD-PERF LedMeasurementHook sizeof(RawMeasurement)=%zu goldenDigest=0x%016llx\n",
+				sizeof(LedDrive::RawMeasurement), static_cast<unsigned long long>(digest));
+			report += summary;
+			Logger::WriteMessage(report.c_str());
+			Assert::AreEqual<size_t>(1036, sizeof(LedDrive::RawMeasurement), L"GEM-199: dead cellSum/cellCount removed (5644 -> 1036 B)");
+			Assert::AreEqual<uint64_t>(0x6fe339a231a79bc2ull, digest, L"GEM-199: bit-exact golden digest across boost/grain/fullPeak");
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(log);
 		}
 	};
 }

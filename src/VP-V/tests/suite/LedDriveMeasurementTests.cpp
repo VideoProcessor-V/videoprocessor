@@ -32,11 +32,6 @@ namespace
 		raw.blocks = blocks;
 		raw.sum = static_cast<uint32_t>(code * SUM_SCALE * plain + bright * SUM_SCALE * brightBlocks);
 		raw.maximum = static_cast<uint32_t>((brightBlocks > 0 ? bright : code) * SUM_SCALE);
-		for (int i = 0; i < GRID_W * GRID_H; ++i)
-		{
-			raw.cellCount[i] = 2;
-			raw.cellSum[i] = static_cast<uint32_t>(2 * code * SUM_SCALE);
-		}
 		return raw;
 	}
 
@@ -800,11 +795,14 @@ namespace VideoProcessorTest
 			Assert::AreEqual(40.0, Peak(picture), 0.1, L"The masked subtitle is not the peak");
 			Assert::AreEqual(40.0, Apl(picture), 0.1, L"nor in the APL");
 			Assert::IsTrue(picture.blocks < open.blocks, L"Its blocks are left out");
-			uint32_t bright = 0, cells = 0;
-			for (int code = 200; code < HISTOGRAM_BINS; ++code) bright += picture.histogram[code];
-			for (uint32_t count : picture.cellCount) cells += count;
+			uint32_t bright = 0, histTotal = 0;
+			for (int code = 0; code < HISTOGRAM_BINS; ++code)
+			{
+				histTotal += picture.histogram[code];
+				if (code >= 200) bright += picture.histogram[code];
+			}
 			Assert::AreEqual(0u, bright, L"nor in the histogram (compensate's highlight)");
-			Assert::AreEqual(picture.blocks, cells, L"The cut cells count the same blocks");
+			Assert::AreEqual(picture.blocks, histTotal, L"The histogram counts the same blocks");
 			// The sparse peak (led_peak_full_coverage off) is masked as well.
 			RawMeasureOptions sparseMasked = masked;
 			sparseMasked.peakFullCoverage = false;

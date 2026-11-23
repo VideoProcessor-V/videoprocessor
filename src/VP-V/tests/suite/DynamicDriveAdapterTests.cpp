@@ -119,7 +119,7 @@ namespace
 		frame.DecideFrame(in, colour);
 		colour.calibrationLut = rig.lut.Lut() != nullptr;
 		const OutputSegments::ColourCounts counts = s2.Collect(colour, rig.registry, hooks, tag);
-		frame.AfterCollect(in, counts.ledCompensation);
+		frame.AfterCollect(in, counts.ledCompensation, counts.ledCompensationLoaded);
 		return counts;
 	}
 
@@ -329,6 +329,9 @@ namespace VideoProcessorTest
 			auto module = std::make_shared<LedDrive::LedDriveModule>(port, config,
 				[projector] { return std::make_unique<FakePort>(projector); });
 			frame.PublishModule(module);
+			LedDrive::DynamicDriveParams nonIdentity;
+			nonIdentity.gammaBoost = 2.4;
+			frame.PublishParams(nonIdentity);
 			FrameFacts facts;
 			facts.in.measureSlotRuns = false;
 			std::vector<const pl_hook*> hooks;
@@ -379,6 +382,9 @@ namespace VideoProcessorTest
 			port.protocol = "barco_ascii";
 			frame.PublishModule(std::make_shared<LedDrive::LedDriveModule>(port, config,
 				[projector] { return std::make_unique<FakePort>(projector); }));
+			LedDrive::DynamicDriveParams nonIdentity;
+			nonIdentity.gammaBoost = 2.4;
+			frame.PublishParams(nonIdentity);
 			pl_custom_lut lutData{};
 			for (const bool merged : { false, true })
 				for (int off = 0; off < 4; ++off)   // 0 none, 1 measure, 2 compensation, 3 LUT
@@ -404,7 +410,7 @@ namespace VideoProcessorTest
 						frame.DecideFrame(again.in, colour);
 						colour.calibrationLut = rig.lut.Lut() != nullptr;
 						const auto counts = seg.Collect(colour, rig.registry, segHooks, NoTag);
-						frame.AfterCollect(again.in, counts.ledCompensation);
+						frame.AfterCollect(again.in, counts.ledCompensation, counts.ledCompensationLoaded);
 						Assert::IsTrue(segHooks == hooks, L"the same S2 list each frame");
 						OutputEncodingRepair::Hook repair;
 						OcclusionMask::Hook mask;
@@ -549,6 +555,84 @@ namespace VideoProcessorTest
 			Assert::IsFalse(static_cast<bool>(std::atomic_load(&f.observer)));
 			f.frame.Clear();
 			Assert::IsFalse(static_cast<bool>(f.frame.Module()));
+		}
+
+		// DD-PERF (GEM-200 / PERF-3): identity frames (gain == 1 && boost == 1 && !(shadowLift * veil > 0))
+		// skip pushing LED compensation.glsl without engaging HoldingFullForCompensation, while non-identity
+		// frames push the hook and a genuinely missing shader STILL engages HoldingFullForCompensation.
+		TEST_METHOD(IdentityFrameSkipsCompensationHookWithoutHoldingFull)
+		{
+			static pl_hook dummy{};
+			dummy.stages = PL_HOOK_PRE_OUTPUT;
+			CustomHookChain::Loader loadedLoader{
+				[](const std::string&, std::string& source, std::string&) { source = "//!HOOK PREOUTPUT\n"; return true; },
+				[](const std::string&) -> const pl_hook* { return &dummy; },
+				[](const pl_hook*& hook) { hook = nullptr; } };
+			auto makeModule = []()
+			{
+				auto projector = std::make_shared<FakeProjector>();
+				LedDrive::LedDriveConfig config;
+				config.enabled = true;
+				config.mode = LedDrive::Mode::Compensate;
+				LedDrive::ProjectorConfig port;
+				port.protocol = "barco_ascii";
+				return std::make_shared<LedDrive::LedDriveModule>(port, config,
+					[projector] { return std::make_unique<FakePort>(projector); });
+			};
+
+			// 1) Loaded shader + identity frame: hook skipped, not held at full.
+			{
+				std::shared_ptr<QueuedFrameStatistics::IObserver> observer;
+				FallbackStatus::Registry fallbacks;
+				LedDrive::DynamicDriveFrame frame(observer, fallbacks, loadedLoader);
+				auto module = makeModule();
+				frame.PublishModule(module);
+				FrameFacts facts;
+				facts.in.measureSlotRuns = true;
+				std::vector<const pl_hook*> hooks;
+				const auto counts = RunS2(frame, facts.in, hooks, NoTag);
+				Assert::AreEqual<size_t>(0, counts.ledCompensation, L"identity frame skips compensation hook pass");
+				Assert::AreEqual<size_t>(1, counts.ledCompensationLoaded, L"loaded shader count reported separately");
+				Assert::IsTrue(std::find(hooks.begin(), hooks.end(), &dummy) == hooks.end());
+				Assert::IsFalse(module->HoldingFullForCompensation(), L"identity skip must NOT hold full drive");
+				Assert::IsFalse(fallbacks.Engaged(LedDrive::LedDriveModule::kHoldFallbackId));
+
+				// shadowLift > 0 with veil == 0 -> lift == 0 -> still identity (matches LED compensation.glsl:181-183).
+				LedDrive::DynamicDriveParams liftZeroVeil;
+				liftZeroVeil.shadowLift = 0.25;
+				frame.PublishParams(liftZeroVeil);
+				hooks.clear();
+				const auto c2 = RunS2(frame, facts.in, hooks, NoTag);
+				Assert::AreEqual<size_t>(0, c2.ledCompensation, L"shadowLift * 0 is still identity");
+				Assert::AreEqual<size_t>(1, c2.ledCompensationLoaded);
+				Assert::IsFalse(module->HoldingFullForCompensation());
+
+				// Non-identity (gammaBoost != displayGamma): hook IS pushed.
+				LedDrive::DynamicDriveParams boosted;
+				boosted.gammaBoost = 2.4;
+				frame.PublishParams(boosted);
+				hooks.clear();
+				const auto c3 = RunS2(frame, facts.in, hooks, NoTag);
+				Assert::AreEqual<size_t>(1, c3.ledCompensation, L"non-identity frame pushes compensation hook");
+				Assert::AreEqual<size_t>(1, c3.ledCompensationLoaded);
+				Assert::IsTrue(std::find(hooks.begin(), hooks.end(), &dummy) != hooks.end());
+				Assert::IsFalse(module->HoldingFullForCompensation());
+			}
+
+			// 2) Missing shader + identity frame: STILL holds full drive visibly (no silent fallback!).
+			{
+				FrameFixture f;   // empty loader: LED compensation.glsl cannot load
+				auto module = makeModule();
+				f.frame.PublishModule(module);
+				FrameFacts facts;
+				facts.in.measureSlotRuns = true;
+				std::vector<const pl_hook*> hooks;
+				const auto counts = RunS2(f.frame, facts.in, hooks, NoTag);
+				Assert::AreEqual<size_t>(0, counts.ledCompensation);
+				Assert::AreEqual<size_t>(0, counts.ledCompensationLoaded);
+				Assert::IsTrue(module->HoldingFullForCompensation(), L"missing shader must still hold full drive on identity frames");
+				Assert::IsTrue(ReasonOf(f.fallbacks, LedDrive::LedDriveModule::kHoldFallbackId).find("did not load") != std::string::npos);
+			}
 		}
 	};
 }

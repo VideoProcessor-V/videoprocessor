@@ -29,11 +29,6 @@ namespace
 		raw.histogram[highlight] += bright;
 		raw.blocks = blocks;
 		raw.sum = static_cast<uint32_t>((code * (blocks - bright) + highlight * bright) * SUM_SCALE);
-		for (int i = 0; i < GRID_W * GRID_H; ++i)
-		{
-			raw.cellCount[i] = 4;
-			raw.cellSum[i] = static_cast<uint32_t>(4 * code * SUM_SCALE);
-		}
 		return raw;
 	}
 
@@ -1698,6 +1693,144 @@ namespace VideoProcessorTest
 			const ControllerOutput after = controller.Tick(Play(scene, now, 1000.0 / 60.0, Frame(30.0)), 16.7,
 				&look, true, true);
 			Assert::IsFalse(after.cutLeadHold);
+		}
+
+		// DD-PERF (GEM-201 / 206): CPU per-frame hot-path timing harness (BeginFrameAt + MeasurementConfig +
+		// CompensateController::Tick + FillLedLandingsLocked) + deterministic bit-exact parity pins.
+		TEST_METHOD(DdPerfCpuFrameHotPathGoldenAndTiming)
+		{
+			auto runDeterministic = [](int frames, LedDriveConfig config, ProjectorConfig proj)
+			{
+				auto projector = std::make_shared<FakeProjector>();
+				projector->contrast = 50;
+				TestClock clock;
+				LedDriveModule module(proj, config, [projector] { return std::make_unique<FakePort>(projector); }, clock);
+				Bind(clock, module, projector);
+				module.SetSceneReaderForTesting(SceneCutsAt({}));
+				module.Start();
+				Assert::IsTrue(clock.RunUntil([&] { return module.DrivingProjector(); }, 5000));
+				const RawMeasurement dim = Frame(35.0, 200, 180);
+				const RawMeasurement mid = Frame(95.0, 400, 210);
+				module.SubmitMeasurement(dim, 1);
+				uint64_t digest = 14695981039346656037ull;
+				auto mix64 = [&](uint64_t v) { digest ^= v; digest *= 1099511628211ull; };
+				auto mixD = [&](double d) { uint64_t b = 0; std::memcpy(&b, &d, sizeof(b)); mix64(b); };
+				const double tStart = clock.Ms();
+				for (int f = 0; f < frames; ++f)
+				{
+					const double nowMs = tStart + (f + 1) * (1000.0 / 60.0);
+					if (f % 80 == 40)
+						module.SubmitMeasurement(mid, static_cast<uint64_t>(f + 2));
+					else if (f % 80 == 0 && f > 0)
+						module.SubmitMeasurement(dim, static_cast<uint64_t>(f + 2));
+					const CompensationGain g = BeginFrameOn(clock, module, static_cast<uint64_t>(f + 2), nowMs, 60.0);
+					clock.Settle();
+					const LedDriveModule::MeasurementSettings mc = module.MeasurementConfig();
+					mixD(g.gain);
+					mixD(g.knee);
+					mixD(g.veil);
+					mix64(static_cast<uint64_t>(module.AssistContrast()));
+					mix64(static_cast<uint64_t>(mc.peakFullCoverage ? 1 : 0));
+				}
+				module.Stop();
+				return digest;
+			};
+
+			LedDriveConfig config = Assisted();
+			config.cntrPairPredict = true;
+			ProjectorConfig proj;
+			proj.protocol = "barco_ascii";
+			proj.terminator = Terminator::Cr;
+			proj.ledLatencyMs = 80;
+			proj.cntrLatencyMs = 80;
+			proj.minCommandGapMs = 30;
+			proj.readBack = false;
+
+			// 1) Deterministic lockstep parity (zero thread-race): two independent runs match bit-for-bit.
+			const uint64_t detA = runDeterministic(240, config, proj);
+			const uint64_t detB = runDeterministic(240, config, proj);
+			Assert::AreEqual(detA, detB, L"GEM-201/206: deterministic lockstep digest must repeat bit-for-bit");
+
+			// 2) GEM-201 lazy log parity across 240 frames: Tick(..., wantLog=false) + FormatLastLog() == Tick(..., wantLog=true).
+			{
+				const RawMeasurement dim = Frame(35.0, 200, 180);
+				const RawMeasurement mid = Frame(95.0, 400, 210);
+				StatsBuilder sb(config);
+				CompensateController eager(config), lazy(config);
+				double nowMs = 0.0;
+				for (int f = 0; f < 240; ++f)
+				{
+					nowMs += 1000.0 / 60.0;
+					const FrameStats st = sb.Build((f % 80) >= 40 ? mid : dim, nowMs);
+					const ControllerOutput eOut = eager.Tick(st, 1000.0 / 60.0, nullptr, true, true, true);
+					const ControllerOutput lOut = lazy.Tick(st, 1000.0 / 60.0, nullptr, true, true, false);
+					if (lOut.lightCommand < 0)
+						Assert::IsTrue(lOut.log.empty(), L"lazy Tick skips eager ostringstream when no light command fired");
+					Assert::AreEqual(eOut.light, lOut.light);
+					Assert::AreEqual(eOut.lightTarget, lOut.lightTarget);
+					Assert::AreEqual(eOut.lightCommand, lOut.lightCommand);
+					Assert::AreEqual(eOut.gain, lOut.gain, 0.0);
+					Assert::AreEqual(eOut.log, lOut.log.empty() ? lazy.FormatLastLog(lOut) : lOut.log,
+						L"FormatLastLog reproduces eager log verbatim");
+				}
+			}
+
+			// 3) Steady-state 4000-frame hot-path timing harness + MeasurementConfig() parity across Reconfigure().
+			auto projector = std::make_shared<FakeProjector>();
+			projector->contrast = 50;
+			TestClock clock;
+			LedDriveModule module(proj, config, [projector] { return std::make_unique<FakePort>(projector); }, clock);
+			Bind(clock, module, projector);
+			module.SetSceneReaderForTesting(SceneCutsAt({}));
+			module.Start();
+			Assert::IsTrue(clock.RunUntil([&] { return module.DrivingProjector(); }, 5000));
+
+			const RawMeasurement dim = Frame(35.0, 200, 180);
+			const RawMeasurement mid = Frame(95.0, 400, 210);
+			module.SubmitMeasurement(dim, 1);
+			const int kFrames = 4000;
+			double sink = 0.0;
+			const double tStart = clock.Ms();
+			const auto t0 = std::chrono::steady_clock::now();
+			for (int f = 0; f < kFrames; ++f)
+			{
+				const double nowMs = tStart + (f + 1) * (1000.0 / 60.0);
+				clock.To(nowMs);
+				if (f % 300 == 150)
+					module.SubmitMeasurement(mid, static_cast<uint64_t>(f + 2));
+				else if (f % 300 == 0 && f > 0)
+					module.SubmitMeasurement(dim, static_cast<uint64_t>(f + 2));
+				const CompensationGain g = module.BeginFrameAt(static_cast<uint64_t>(f + 2), nowMs, 60.0);
+				const LedDriveModule::MeasurementSettings mc = module.MeasurementConfig();
+				sink += g.gain + g.veil + (mc.peakFullCoverage ? 1.0 : 0.0);
+			}
+			const double totalUs = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+			Assert::IsTrue(sink > 0.0);
+
+			auto assertMeasMatches = [&]()
+			{
+				const LedDriveConfig full = module.Config();
+				const LedDriveModule::MeasurementSettings pod = module.MeasurementConfig();
+				for (int i = 0; i < 3; ++i)
+					Assert::AreEqual(full.aplWeights[i], pod.aplWeights[i], 0.0);
+				Assert::AreEqual(full.peakFullCoverage, pod.peakFullCoverage);
+				Assert::AreEqual(full.pictureOnly, pod.pictureOnly);
+				Assert::AreEqual(full.highlightGrainSuppress, pod.highlightGrainSuppress);
+			};
+			assertMeasMatches();
+			LedDriveConfig updated = config;
+			updated.peakFullCoverage = !config.peakFullCoverage;
+			updated.pictureOnly = !config.pictureOnly;
+			updated.highlightGrainSuppress = !config.highlightGrainSuppress;
+			updated.aplWeights[0] = 0.2126; updated.aplWeights[1] = 0.7152; updated.aplWeights[2] = 0.0722;
+			Assert::IsTrue(module.Reconfigure(proj, updated));
+			assertMeasMatches();
+			module.Stop();
+			char report[256];
+			std::snprintf(report, sizeof(report),
+				"DD-PERF CPU hot-path (%d frames): %.3f us/frame (total %.2f ms) | lockstepDigest=0x%016llx\n",
+				kFrames, totalUs / kFrames, totalUs / 1000.0, static_cast<unsigned long long>(detA));
+			Logger::WriteMessage(report);
 		}
 	};
 }

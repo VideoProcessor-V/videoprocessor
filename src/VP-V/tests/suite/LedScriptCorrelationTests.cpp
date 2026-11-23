@@ -251,8 +251,6 @@ namespace
 		};
 		out.sum = scale(raw.sum, raw.blocks);
 		out.maximum = raw.maximum ? scale(raw.maximum, 1) : 0;
-		for (int i = 0; i < GRID_W * GRID_H; ++i)
-			out.cellSum[i] = scale(raw.cellSum[i], raw.cellCount[i]);
 		std::fill(std::begin(out.histogram), std::end(out.histogram), 0u);
 		for (int bin = 0; bin < HISTOGRAM_BINS; ++bin)
 		{

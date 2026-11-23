@@ -39,11 +39,6 @@ namespace
 		raw.histogram[highlight] += bright;
 		raw.blocks = blocks;
 		raw.sum = static_cast<uint32_t>((code * (blocks - bright) + highlight * bright) * SUM_SCALE);
-		for (int i = 0; i < GRID_W * GRID_H; ++i)
-		{
-			raw.cellCount[i] = 4;
-			raw.cellSum[i] = static_cast<uint32_t>(4 * code * SUM_SCALE);
-		}
 		return raw;
 	}
 
