@@ -95,9 +95,11 @@ namespace VideoProcessorTest
 				TexShape s;
 				s.w = d.width;
 				s.h = d.height;
+				s.fmt = TexFormat::RG32F;
+				Assert::AreEqual(uint64_t(d.width) * d.height * 8u, Vpv::Regions::EdgeMapReserveBytes(d), L"8 B per source pixel: the largest variant (RG32F)");
+				Assert::AreEqual(ShapeBytes(s), Vpv::Regions::EdgeMapReserveBytes(d), L"the reserve equals the largest texture the fill makes");
 				s.fmt = TexFormat::R32F;
-				Assert::AreEqual(uint64_t(d.width) * d.height * 4u, Vpv::Regions::EdgeMapReserveBytes(d), L"one R32F sample per source pixel");
-				Assert::AreEqual(ShapeBytes(s), Vpv::Regions::EdgeMapReserveBytes(d), L"the reserve equals the texture the fill makes");
+				Assert::AreEqual(2u * ShapeBytes(s), Vpv::Regions::EdgeMapReserveBytes(d), L"the default R32F texture uses half");
 			}
 			Assert::AreEqual(uint64_t(0), Vpv::Regions::EdgeMapReserveBytes(DimsOf(0, 0)), L"no size known: no reserve");
 			Assert::AreEqual(uint64_t(0), Vpv::Regions::EdgeMapReserveBytes(DimsOf(1920, 0)), L"an empty plane: no reserve");
@@ -108,9 +110,9 @@ namespace VideoProcessorTest
 			using namespace VpSkeleton;
 			SkeletonMemo m;
 			const OwnerFill f = Vpv::Regions::MakeEdgeMapOwnerFill(Vpv::Regions::EdgeMapReserveBytes(DimsOf(1920, 1080)));
-			Assert::AreEqual(uint32_t(0), f.variantAxes, L"default variant only");
+			Assert::AreEqual(uint32_t(Vpv::Regions::kEdgeMapAxes), f.variantAxes, L"the default variant plus the stage variant's axes (CB-18 S2b)");
 			Assert::IsTrue(f.frameScoped, L"a per-frame memo");
-			Assert::AreEqual(uint64_t(1920) * 1080u * 4u, f.reserveBytes, L"the reserve given");
+			Assert::AreEqual(uint64_t(1920) * 1080u * 8u, f.reserveBytes, L"the reserve given");
 			Assert::AreEqual(std::string(Vpv::Regions::kEdgeMapUnit), SkeletonMemo::OwnerUnitOf(kEdgeMap), L"the catalog's owner unit");
 			Assert::IsTrue(m.RegisterOwnerFill(kEdgeMap, AcquireForm::Gpu, Vpv::Regions::kEdgeMapUnit, f) == SkeletonMemo::Registration::Registered,
 				L"registered by its unit");
@@ -133,8 +135,8 @@ namespace VideoProcessorTest
 
 			Assert::IsTrue(module.Observe(&hostA, DimsOf(1920, 1080), &demand), L"registered on the first size");
 			Assert::AreEqual(1, demand.registers);
-			Assert::AreEqual(uint64_t(1920) * 1080u * 4u, demand.lastReserve, L"1080p reserve");
-			Assert::AreEqual(uint64_t(1920) * 1080u * 4u, module.RegisteredReserveBytes());
+			Assert::AreEqual(uint64_t(1920) * 1080u * 8u, demand.lastReserve, L"1080p reserve (the declared size, 8 B/px, CB-18 SHOULD-2)");
+			Assert::AreEqual(uint64_t(1920) * 1080u * 8u, module.RegisteredReserveBytes());
 			Assert::IsTrue(m.HasOwnerFill(kEdgeMap, AcquireForm::Gpu), L"the memo holds the fill");
 
 			Assert::IsTrue(module.Observe(&hostA, DimsOf(1920, 1080), &demand), L"same size");
@@ -143,14 +145,14 @@ namespace VideoProcessorTest
 			Assert::IsTrue(module.Observe(&hostB, DimsOf(3840, 2160), &demand), L"a larger host");
 			Assert::AreEqual(1, demand.unregisters, L"the old fill removed");
 			Assert::AreEqual(2, demand.registers, L"re-registered once");
-			Assert::AreEqual(uint64_t(3840) * 2160u * 4u, module.RegisteredReserveBytes(), L"the largest live size");
+			Assert::AreEqual(uint64_t(3840) * 2160u * 8u, module.RegisteredReserveBytes(), L"the largest live size");
 
 			Assert::IsTrue(module.Observe(&hostA, DimsOf(1280, 720), &demand), L"a smaller host below the largest");
 			Assert::AreEqual(2, demand.registers, L"the largest is unchanged: no re-registration");
 
 			module.Forget(&hostB, &demand);
 			Assert::AreEqual(3, demand.registers, L"the largest host left: re-registered");
-			Assert::AreEqual(uint64_t(1280) * 720u * 4u, module.RegisteredReserveBytes(), L"the remaining host's size");
+			Assert::AreEqual(uint64_t(1280) * 720u * 8u, module.RegisteredReserveBytes(), L"the remaining host's size");
 			Assert::IsTrue(m.HasOwnerFill(kEdgeMap, AcquireForm::Gpu), L"still held");
 
 			module.Forget(&hostA, &demand);
@@ -250,8 +252,10 @@ namespace VideoProcessorTest
 				== SkeletonMemo::Registration::Registered, L"P13 owner");
 			Assert::IsTrue(SourcePlanes::OfferFrame(&host, 7, 1, image), L"the Entrance image offered");
 
-			const uint64_t need = Vpv::Regions::EdgeMapReserveBytes(DimsOf(64, 48));
-			const OwnerFill f = Vpv::Regions::MakeEdgeMapOwnerFill(need);
+			// The default variant's texture: one R32F plane of the luma size (half the declared reserve since CB-18 SHOULD-2).
+			const uint64_t need = uint64_t(64) * 48u * 4u;
+			Assert::AreEqual(2u * need, Vpv::Regions::EdgeMapReserveBytes(DimsOf(64, 48)), L"the declared reserve holds it");
+			const OwnerFill f = Vpv::Regions::MakeEdgeMapOwnerFill(Vpv::Regions::EdgeMapReserveBytes(DimsOf(64, 48)));
 			OwnerFillRequest req;
 			req.host = &host;
 			req.id = kEdgeMap;
@@ -269,7 +273,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0, smallDev.asked, L"the device is never asked");
 			Assert::AreEqual(uint64_t(1), under.Refused(), L"counted as refused");
 
-			// The derived reserve fits exactly: the device is asked for one R32F plane of the luma size.
+			// A grant of exactly the default texture fits: the device is asked for one R32F plane of the luma size.
 			RefusingDevice dev;
 			OwnerGpuContext ctx(&dev, need);
 			req.gpu = &ctx;

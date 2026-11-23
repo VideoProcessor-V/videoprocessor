@@ -803,7 +803,10 @@ namespace SkeletonCoreContextTestsNs
 			Assert::IsTrue(m.Acquire(kP13SourceRing, 7, AcquireForm::Gpu).status == AcquireStatus::Reused && m.GpuBytes() == 0, L"reused, 0 bytes");
 			VariantKey staged;
 			staged.stage = 2;
-			Assert::IsTrue(m.Acquire(kP13SourceRing, 7, AcquireForm::Gpu, staged).cause == AcquireCause::VariantUndeclared, L"source planes only");
+			// WAIVER-P13-STAGE-AXIS (CB-18 S1): P13 now declares the stage axis for stage pictures; a stage nobody offered is
+			// declined by the owner, visibly, instead of refused as undeclared.
+			Assert::IsTrue(m.Acquire(kP13SourceRing, 7, AcquireForm::Gpu, staged).cause == AcquireCause::OwnerDeclined
+				&& Has(m.LastCause(kP13SourceRing), "stage not offered this frame"), L"a stage nobody offered: declined, said so");
 			const AcquireResult absent = m.Acquire(kP13SourceRing, 8, AcquireForm::Gpu);
 			Assert::IsTrue(absent.cause == AcquireCause::OwnerDeclined && Has(m.LastCause(kP13SourceRing), "seq not offered"), L"a frame not offered: says why");
 

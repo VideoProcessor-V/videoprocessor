@@ -15,6 +15,7 @@
 // 2. EdgeMapHeaderGlsl() + EdgeMapBodyGlsl(): the edge map, a 16 x 16 group reads its 18 x 18 tile once.
 //    Descriptors: em_src (sampled, plane size, luma in .x), em_out (storage r32f, plane size, write-only).
 //    Uniforms:    float em_scale (codes per texel unit: kSourceTapCodesPerUnit).
+//    EdgeMapStageHeaderGlsl() + the same body: the stage variant (RG32F, measure luma taps; see there).
 #pragma once
 
 #include <string>
@@ -82,33 +83,53 @@ if (bz_li == 0u)
 )GLSL";
 	}
 
+	// The DEFAULT variant's tap and store (source luma, R32F): the sampled value in codes (em_scale), taps clamped to the plane.
 	inline std::string EdgeMapHeaderGlsl()
 	{
 		return R"GLSL(
 shared float em_tile[324];
+ivec2 em_size() { return textureSize(em_src, 0); }
+float em_tap(ivec2 p) { return texelFetch(em_src, clamp(p, ivec2(0), em_size() - ivec2(1)), 0).x * em_scale; }
+void em_store(ivec2 p, float r, float e) { imageStore(em_out, p, vec4(r, 0.0, 0.0, 1.0)); }
 )GLSL";
 	}
 
+	// The STAGE variant's tap and store (CB slice 18 S2b; design-EDGEMAP-DOMAIN-AXIS rev 2 s2a): the tap is the measure luma
+	// ad_luma (VpMeasure::MeasureLumaGlsl, regions/MeasureDomainGlsl.h: 8-bit reference codes, clamped to the WHOLE stage texture),
+	// prepended by the caller after its AD_KW / AD_HDR defines; RG32F: R = |G|, G = the tap of the pixel itself (the measure luma
+	// the X5 grain sums read). Descriptors: src (sampled, the stage picture), em_out (storage rg32f, picture size); uniforms
+	// linear_in (+ ad_trc, ad_a, ad_b, ad_g with AD_HDR).
+	inline std::string EdgeMapStageHeaderGlsl()
+	{
+		return R"GLSL(
+shared float em_tile[324];
+ivec2 em_size() { return textureSize(src, 0); }
+float em_tap(ivec2 p) { return ad_luma(p); }
+void em_store(ivec2 p, float r, float e) { imageStore(em_out, p, vec4(r, e, 0.0, 1.0)); }
+)GLSL";
+	}
+
+	// ONE body and ONE law for both variants (rule 20): |G| = length(vec2(gx, gy)), un-normalised, the expression order of X5's
+	// former private Sobel (AdaptiveDownscale MEASURE_BODY), so X5's grad = R * 0.25 (a power of two, exact in fp32).
 	inline std::string EdgeMapBodyGlsl()
 	{
 		return R"GLSL(
 ivec2 em_p = ivec2(gl_GlobalInvocationID.xy);
 uint em_li = gl_LocalInvocationIndex;
-ivec2 em_sz = textureSize(em_src, 0);
-ivec2 em_hi = em_sz - ivec2(1);
+ivec2 em_sz = em_size();
 ivec2 em_org = ivec2(gl_WorkGroupID.xy) * 16 - ivec2(1);
 for (uint i = em_li; i < 324u; i += 256u)
-    em_tile[i] = texelFetch(em_src, clamp(em_org + ivec2(int(i % 18u), int(i / 18u)), ivec2(0), em_hi), 0).x * em_scale;
+    em_tile[i] = em_tap(em_org + ivec2(int(i % 18u), int(i / 18u)));
 barrier();
 if (em_p.x < em_sz.x && em_p.y < em_sz.y)
 {
     int t = (int(gl_LocalInvocationID.y) + 1) * 18 + int(gl_LocalInvocationID.x) + 1;
     float a = em_tile[t - 19], b = em_tile[t - 18], c = em_tile[t - 17];
-    float d = em_tile[t - 1], f = em_tile[t + 1];
+    float d = em_tile[t - 1], e = em_tile[t], f = em_tile[t + 1];
     float i0 = em_tile[t + 17], j = em_tile[t + 18], k = em_tile[t + 19];
     float gx = (c + 2.0 * f + k) - (a + 2.0 * d + i0);
     float gy = (i0 + 2.0 * j + k) - (a + 2.0 * b + c);
-    imageStore(em_out, em_p, vec4(sqrt(gx * gx + gy * gy), 0.0, 0.0, 1.0));
+    em_store(em_p, length(vec2(gx, gy)), e);
 }
 )GLSL";
 	}

@@ -1118,7 +1118,12 @@
      "evidence": [
       [
        "input/source_analysis/regions/EdgeMapFill.h",
-       65,
+       98,
+       "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
+      ],
+      [
+       "input/source_analysis/regions/EdgeMapFill.h",
+       148,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],

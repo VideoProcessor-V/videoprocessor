@@ -58,6 +58,10 @@
     <ClCompile Include="..\VP-V\modules\input\capture\tests\EarlyUploadSecondReaderTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\capture\tests\SourcePlanesStageTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\lane\tests\EngineLumaGpuTwinTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
@@ -305,6 +309,14 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\scaling\output\tests\AdaptiveScalingHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\scaling\output\tests\EdgeMapStageOrdinalTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\scaling\output\tests\MeasureEdgeMapTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\scaling\rebase\tests\RebaseWarmupGateTests.cpp">
@@ -758,6 +770,13 @@
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\regions\tests\EdgeMapFillTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\regions\tests\EdgeMapStageTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\regions\tests\EdgeMapStageGpuParityTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\regions\tests\RegionEvidenceWarpTests.cpp">
