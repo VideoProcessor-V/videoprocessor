@@ -186,6 +186,7 @@ namespace ProductCatalogTestsNs
 				{ kTdDelta, "temporal detail" },
 				{ kTdMaps, "temporal detail" },
 				{ kTdTrailSummary, "temporal detail" },
+				{ kBandMemo, "interpolator / hiccup repair" },
 			};
 			const Registry reg = SkeletonProducts();
 			Assert::AreEqual(size_t(kSkeletonProductEnd) - kReservedProductCount - 7u, sizeof(expected) / sizeof(expected[0]),

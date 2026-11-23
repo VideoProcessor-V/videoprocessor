@@ -1401,7 +1401,7 @@ namespace SkeletonCoreContextTestsNs
 			const char* why = "";
 			Assert::IsTrue(reg.Validate(&why), L"valid with absent slots");
 			Assert::IsTrue(reg.Size() == size_t(kSkeletonProductEnd), L"Size() is the id span");
-			Assert::IsTrue(reg.ReservedAbsent() == 4u && kReservedProductCount == 4u, L"four reserved slots");
+			Assert::IsTrue(reg.ReservedAbsent() == 3u && kReservedProductCount == 3u, L"three reserved slots (kBandMemo unreserved by C8 slice 8)");
 			for (ProductId id : kReservedProductIds)
 			{
 				Assert::IsTrue(IsReservedProduct(id) && !reg.Has(id), L"absent: Has() is false");
@@ -1414,7 +1414,7 @@ namespace SkeletonCoreContextTestsNs
 		TEST_METHOD(ARealDeclarationAtAReservedIdIsRejected)
 		{
 			std::vector<ProductDecl> d = SkeletonProducts().All();
-			d[kBandMemo] = detail::Make(kBandMemo, "band_memo", "band memo", Backend::Cpu, 1, Tier::T1, 0, 0);
+			d[kFocusMap] = detail::Make(kFocusMap, "focus_map", "focus map", Backend::Cpu, 1, Tier::T1, 0, 0);
 			const char* why = "";
 			Assert::IsFalse(Registry(d).Validate(&why), L"a declaration at a reserved id is refused");
 			Assert::IsTrue(std::string(why).find("reserved") != std::string::npos, L"with the reason");
