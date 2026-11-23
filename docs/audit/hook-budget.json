@@ -3,6 +3,7 @@
  "base_ref": "a591ad3b5",
  "generated_at": "2026-11-23",
  "files": {
+  "src/VideoProcessor-BetaTests/BetaParametersTests.cpp": 5,
   "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 31,
   "src/VideoProcessor-Config/ConfigEditorWindow.h": 5,
   "src/VideoProcessor-GUI/VideoProcessorApp.cpp": 1,
@@ -32,7 +33,7 @@
   }
  },
  "h2_ceiling": {
-  "src/VideoProcessor-BetaTests/BetaParametersTests.cpp": 5,
+  "src/VideoProcessor-BetaTests/BetaParametersTests.cpp": 7,
   "src/VideoProcessor-BetaTests/VideoProcessor-BetaTests.vcxproj": 2,
   "src/VideoProcessor-Config/AppMain.cpp": 48,
   "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 1384,
