@@ -5,6 +5,8 @@
 
 #include <DebugLog.h>
 #include <GeneralRateLog.h>
+#include <VP-V/core/hub/ExtensionHub.h>
+#include <VP-V/modules/input/queue_timing/PulldownDetector.h>
 #include <VP-V/modules/input/signal/ResyncCallSites.h>
 #include <VP-V/modules/motion/consumers/DejudderHistory.h>
 #include <VP-V/modules/motion/estimation/DitherVectorSource.h>
@@ -12,6 +14,7 @@
 #include <VP-V/modules/output/dither/SigmaDeltaVectors.h>
 
 #include <cmath>
+#include <cstdio>
 
 namespace Vpv
 {
@@ -223,6 +226,43 @@ namespace Vpv
 					h.syncFallback(decision);
 			if (tracker.TakeChanged())
 				DebugLog::Log("Sigma-delta vectors on the new frame's present: %s", tracker.StatusSegment().c_str());
+		}
+
+		void PrepareDejudderCamera(Dejudder::CameraBindings& bindings, const void* host, uint64_t sourceSequence, float phaseT)
+		{
+			// K9-3 (B4, default OFF): when camera_use_dejudder is enabled, evaluate P9 camera availability / phase weight
+			// (strictest policy) for visible status and late fallback; off = zero work, byte-identical.
+			if (!bindings.config.enabled)
+				return;
+			const auto* dir = static_cast<const CameraLink::ICameraLinkDirectory*>(
+				Vpv::Hub::ExtensionHub::Instance().Query(CameraLink::kCameraDirectoryQueryId));
+			const CameraLink::ICameraLink* camLink = dir ? dir->LinkFor(host) : nullptr;
+			bindings.Prepare(camLink, sourceSequence, static_cast<double>(phaseT));
+		}
+
+		void AppendDejudderStatusExtras(std::string& text, bool pulldown, uint32_t pulldownCadence, double pulldownFilmHz,
+			unsigned long long pulldownSkipped, bool occlusionMask, uint64_t maskUsedTick, uint64_t now,
+			const std::string& maskState, const Dejudder::CameraBindings& cameraBindings)
+		{
+			if (pulldown)
+			{
+				char buf[128];
+				const int cycle = static_cast<int>(pulldownCadence >> 16), unique = static_cast<int>(pulldownCadence & 0xffffu);
+				if (pulldownCadence != 0 && unique > 0 && pulldownFilmHz > 0.0)
+					std::snprintf(buf, sizeof(buf), ", pulldown %s, %llu repeats skipped",
+						Pulldown::Describe(pulldownFilmHz, pulldownFilmHz * cycle / unique, unique, cycle).c_str(),
+						pulldownSkipped);
+				else
+					std::snprintf(buf, sizeof(buf), ", pulldown: none found");
+				text += buf;
+			}
+			// "mask on" only when the mask was used within the last second.
+			if (occlusionMask)
+				text += maskUsedTick != 0 && now - maskUsedTick < 1000 ? std::string(", mask on") :
+					", " + (maskState.empty() ? std::string("mask waiting") : maskState);
+			// K9-3 (B4, default OFF): visible camera P9 weight / causal / late fallback suffix (empty when off).
+			if (cameraBindings.config.enabled)
+				text += cameraBindings.StatusSuffix();
 		}
 	}
 }

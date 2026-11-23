@@ -10,7 +10,6 @@
 // Render thread (RenderLocked, renderMutex held); ReleaseDejudder also from RetireOutput (stop path, renderMutex).
 #pragma once
 
-#include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/modules/motion/consumers/TimelinePlanner.h>
 #include <VP-V/modules/motion/estimation/DitherVectorSource.h>
 
@@ -182,15 +181,7 @@ void LibplaceboVideoRenderer::Impl::PrepareVpPhasePicture(uint64_t sourceSequenc
 	vpPhaseB = b;
 	vpPhaseMotion = motion;
 	vpPhaseT = static_cast<float>(vpOutputPhase) * (vpGapFillStandalone ? dejudderPolicy.vpGapPhaseScale : 1.0f);
-	// K9-3 (B4, default OFF): when camera_use_dejudder is enabled, evaluate P9 camera availability / phase weight
-	// (strictest policy) for visible status and late fallback; off = zero work, byte-identical.
-	if (dejudderPolicy.cameraBindings.config.enabled)
-	{
-		const auto* dir = static_cast<const CameraLink::ICameraLinkDirectory*>(
-			Vpv::Hub::ExtensionHub::Instance().Query(CameraLink::kCameraDirectoryQueryId));
-		const CameraLink::ICameraLink* camLink = dir ? dir->LinkFor(this) : nullptr;
-		dejudderPolicy.cameraBindings.Prepare(camLink, sourceSequence, static_cast<double>(vpPhaseT));
-	}
+	Vpv::MotionHost::PrepareDejudderCamera(dejudderPolicy.cameraBindings, this, sourceSequence, vpPhaseT);
 	// B3: made in the draw from the processed planes (the same inputs).
 	vpPhaseDeferred = EntranceOnce();
 	if (!vpPhaseDeferred && !RunVpPhaseInterpolation())
@@ -290,25 +281,9 @@ void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
 				static_cast<unsigned long long>(dejudderExtras.ditherVectorsNextUsed));
 			text += next;
 		}
-		if (activeSettings.dejudderPulldown)
-		{
-			char pulldown[128];
-			const int cycle = pulldownCadence >> 16, unique = pulldownCadence & 0xffff;
-			if (pulldownCadence != 0 && unique > 0 && pulldownFilmHz > 0.0)
-				std::snprintf(pulldown, sizeof(pulldown), ", pulldown %s, %llu repeats skipped",
-					Pulldown::Describe(pulldownFilmHz, pulldownFilmHz * cycle / unique, unique, cycle).c_str(),
-					static_cast<unsigned long long>(pulldownSkipped));
-			else
-				std::snprintf(pulldown, sizeof(pulldown), ", pulldown: none found");
-			text += pulldown;
-		}
-		// "mask on" only when the mask was used within the last second.
-		if (activeSettings.occlusionMask)
-			text += dejudderMaskUsedTick != 0 && now - dejudderMaskUsedTick < 1000 ? std::string(", mask on") :
-				", " + (dejudderMaskState.empty() ? std::string("mask waiting") : dejudderMaskState);
-		// K9-3 (B4, default OFF): visible camera P9 weight / causal / late fallback suffix (empty when off).
-		if (dejudderPolicy.cameraBindings.config.enabled)
-			text += dejudderPolicy.cameraBindings.StatusSuffix();
+		Vpv::MotionHost::AppendDejudderStatusExtras(text, activeSettings.dejudderPulldown, static_cast<uint32_t>(pulldownCadence),
+			pulldownFilmHz, static_cast<unsigned long long>(pulldownSkipped), activeSettings.occlusionMask,
+			static_cast<uint64_t>(dejudderMaskUsedTick), static_cast<uint64_t>(now), dejudderMaskState, dejudderPolicy.cameraBindings);
 		// Planner 2026-10-16: the motion source on the stats line (NVIDIA optical-flow engine,
 		// Turing or later, driver 528+; without it the block searches, as before).
 		if (!motionSourceLogged.empty())

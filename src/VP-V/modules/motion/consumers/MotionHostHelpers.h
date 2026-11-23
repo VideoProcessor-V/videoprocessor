@@ -11,6 +11,7 @@
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>
 #include <VP-V/modules/motion/consumers/DejudderAhead.h>
+#include <VP-V/modules/motion/consumers/DejudderCameraBindings.h>
 #include <VP-V/modules/motion/consumers/DejudderExtrasPresent.h>
 #include <VP-V/modules/motion/consumers/IntentMotionState.h>
 #include <VP-V/modules/motion/consumers/RenderedWarp.h>
@@ -116,5 +117,11 @@ namespace Vpv
 		};
 
 		void BuildSigmaDeltaVectorsWithoutExtras(DitherVectorsHost& h, uint64_t sourceSequence, uint64_t nextSourceSequence);
+
+		void PrepareDejudderCamera(Dejudder::CameraBindings& bindings, const void* host, uint64_t sourceSequence, float phaseT);
+
+		void AppendDejudderStatusExtras(std::string& text, bool pulldown, uint32_t pulldownCadence, double pulldownFilmHz,
+			unsigned long long pulldownSkipped, bool occlusionMask, uint64_t maskUsedTick, uint64_t now,
+			const std::string& maskState, const Dejudder::CameraBindings& cameraBindings);
 	}
 }
