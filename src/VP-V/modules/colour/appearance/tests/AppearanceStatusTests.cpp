@@ -134,11 +134,15 @@ namespace Tests
 				Assert::IsTrue(AppearanceStage::AmbientAdaptOn(true, false, active), L"the user's ambient_adapt is untouched");
 			}
 
-			// The wiring: both per-render-cycle consumers and the fallback row use the per-frame appearance decision.
-			const std::string intent = ReadUp("src/VP-V/modules/drive/led_compensation/LedIntentMethods.inl");
-			Assert::IsTrue(Has(intent, "ambient.enabled = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, dvStage.AppearanceDecision().active);"));
-			const std::string motion = ReadUp("src/VP-V/modules/motion/consumers/IntentMotionMethods.inl");
-			Assert::IsTrue(Has(motion, "switches.ambient = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, dvStage.AppearanceDecision().active);"));
+			// The wiring: both per-render-cycle consumers and the fallback row use the per-frame appearance decision
+			// (3c relocated the bodies out of LedIntentMethods.inl / IntentMotionMethods.inl into compiled .cpp + LvrHostAccess.inl).
+			const std::string hostAccess = ReadUp("src/VP-V/host/LvrHostAccess.inl");
+			Assert::IsTrue(Has(hostAccess, "Vpv::LedIntent::ConfigureAmbient(vpv.led.intent, activeSettings, dvStage.AppearanceDecision().active);"));
+			Assert::IsTrue(Has(hostAccess, "Vpv::IntentMotion::Configure(vpv.motion.intent, activeSettings, contentIntent.get(), dvStage.AppearanceDecision().active);"));
+			const std::string intent = ReadUp("src/VP-V/modules/drive/led_compensation/LedIntentMethods.cpp");
+			Assert::IsTrue(Has(intent, "ambient.enabled = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, appearanceActive);"));
+			const std::string motion = ReadUp("src/VP-V/modules/motion/consumers/IntentMotionMethods.cpp");
+			Assert::IsTrue(Has(motion, "switches.ambient = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, appearanceActive);"));
 			const std::string core = ReadUp("src/VP-V/segments/CoreSegments.inl");
 			Assert::IsTrue(Has(core, "AppearanceStage::AmbientAdaptGivenBack(activeSettings.ambientAdaptReplaced, dvStage.AppearanceDecision().active)"),
 				L"the AmbientAdaptReplaced fallback is synced per frame");
@@ -151,11 +155,11 @@ namespace Tests
 		// function body (a stray copy elsewhere does not satisfy it), and the sources are read line-ending-proof. A missing file FAILS.
 		TEST_METHOD(AmbientAdaptReturnsWhenAppearanceStopsActing)
 		{
-			auto body = [](const std::string& text, const char* signature)
+			auto body = [](const std::string& text, const char* signature, const char* closeToken = "\n}\n")
 			{
 				const size_t begin = text.find(signature);
 				Assert::IsTrue(begin != std::string::npos, (std::wstring(L"function found: ") + std::wstring(signature, signature + std::strlen(signature))).c_str());
-				const size_t end = text.find("\n}\n", begin);
+				const size_t end = text.find(closeToken, begin);
 				Assert::IsTrue(end != std::string::npos, L"function end found");
 				return text.substr(begin, end - begin);
 			};
@@ -167,12 +171,17 @@ namespace Tests
 				L"from this frame's appearance decision");
 			const std::string seam = body(core, "LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(");
 			Assert::IsFalse(Has(seam, "AmbientAdaptGivenBack"), L"the settings seam only states the configured replacement");
-			const std::string intent = ReadUp("src/VP-V/modules/drive/led_compensation/LedIntentMethods.inl");
-			Assert::IsTrue(Has(body(intent, "LibplaceboVideoRenderer::Impl::ConfigureIntentAmbient()"),
-				"ambient.enabled = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, dvStage.AppearanceDecision().active);"));
-			const std::string motion = ReadUp("src/VP-V/modules/motion/consumers/IntentMotionMethods.inl");
-			Assert::IsTrue(Has(body(motion, "LibplaceboVideoRenderer::Impl::ConfigureIntentMotion()"),
-				"switches.ambient = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, dvStage.AppearanceDecision().active);"));
+			const std::string hostAccess = ReadUp("src/VP-V/host/LvrHostAccess.inl");
+			Assert::IsTrue(Has(body(hostAccess, "LibplaceboVideoRenderer::Impl::ConfigureIntentAmbient()", "\n"),
+				"Vpv::LedIntent::ConfigureAmbient(vpv.led.intent, activeSettings, dvStage.AppearanceDecision().active);"));
+			Assert::IsTrue(Has(body(hostAccess, "LibplaceboVideoRenderer::Impl::ConfigureIntentMotion()"),
+				"Vpv::IntentMotion::Configure(vpv.motion.intent, activeSettings, contentIntent.get(), dvStage.AppearanceDecision().active);"));
+			const std::string intent = ReadUp("src/VP-V/modules/drive/led_compensation/LedIntentMethods.cpp");
+			Assert::IsTrue(Has(body(intent, "void ConfigureAmbient(", "\n\t\t}\n"),
+				"ambient.enabled = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, appearanceActive);"));
+			const std::string motion = ReadUp("src/VP-V/modules/motion/consumers/IntentMotionMethods.cpp");
+			Assert::IsTrue(Has(body(motion, "void Configure(", "\n\t\t}\n"),
+				"switches.ambient = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, appearanceActive);"));
 		}
 
 		// CF1-G7b residual (gate G1 MUST-5): the host's LED intent evaluation is gated on the SAVED ambient_adapt (or intent_black,
