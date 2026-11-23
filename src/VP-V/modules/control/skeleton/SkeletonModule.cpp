@@ -1011,7 +1011,9 @@ namespace Vpv
 
 		namespace
 		{
-			// R2: the memo's GPU device follows the renderer's pl_gpu. Render thread (GpuCreated) or under ownerFillsMutex_ at the memo's
+			// R2: the memo's GPU device follows the renderer's pl_gpu. EVERY caller holds ownerFillsMutex_, taken BEFORE the memo lookup
+			// (GpuCreated, GpuReleased / Shutdown, the Reconcile dead-renderer rebuild; T-AR3 / C2-GATE-SHOULD-ADV: one lock context,
+			// MemoHostOf runs on any thread) - at the memo's
 			// creation. Another pl_gpu at the same address = the old device died (its objects are forgotten, never destroyed).
 			void DetachMemoGpu(MemoHost& mh, bool gpuAlive, bool laneGpuDispatcher = false);
 			void AttachMemoGpu(MemoHost& mh, const void* gpu)
@@ -1305,22 +1307,22 @@ namespace Vpv
 				// Audit S3: a memo device still attached at GpuCreated belongs to a renderer that never sent GpuReleased (a dead device,
 				// whatever the new pl_gpu's address): abandoned before the new one is known, so a same-address pl_gpu is never mistaken
 				// for it (its pl_dispatch is forgotten, not reused). Covers a memo-only host too (no lane state).
-				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
 				{
 					bool laneGpuDispatcher = false;   // GF-P2b MUST-3: the presence a bound lane keeps once the device is gone
 					if (const std::shared_ptr<HostState> hs = hosts_.Find(f.host))
 						if (const std::shared_ptr<Bundle> hb = std::atomic_load(&hs->bundle))
 							laneGpuDispatcher = hb->lane.HasGpuDispatcher();
-					std::lock_guard<std::mutex> lock(ownerFillsMutex_);
-					DetachMemoGpu(*mh, false, laneGpuDispatcher);
+					std::lock_guard<std::mutex> lock(ownerFillsMutex_);   // SHOULD 1: the lock BEFORE the Find, so a MemoHostOf registration cannot slip between them
+					if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
+						DetachMemoGpu(*mh, false, laneGpuDispatcher);
 				}
 				hosts_.SetAux(f.host, f.device);   // the raw device, for the video memory query only
 				gpuSlots_.SetAux(f.host, const_cast<void*>(static_cast<const void*>(f.gpu)));   // 70b G5: the renderer's pl_gpu (null in a unit test: no GPU products)
 				Reconcile(f.host, -1);
-				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
 				{
-					std::lock_guard<std::mutex> lock(ownerFillsMutex_);
-					AttachMemoGpu(*mh, f.gpu);   // R2: a memo made before the device was known gets its GPU context device now
+					std::lock_guard<std::mutex> lock(ownerFillsMutex_);   // SHOULD 1: the lock BEFORE the Find, so a MemoHostOf registration cannot slip between them
+					if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
+						AttachMemoGpu(*mh, f.gpu);   // R2: a memo made before the device was known gets its GPU context device now
 				}
 				break;
 			case RE::Lifecycle::SettingsApplied:
@@ -1360,10 +1362,10 @@ namespace Vpv
 				else
 					hosts_.Remove(f.host, true);
 				gpuSlots_.Remove(f.host, true);   // the pl_gpu is going away: the dispatcher was released by Teardown above
-				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
 				{
-					std::lock_guard<std::mutex> lock(ownerFillsMutex_);   // as at GpuCreated (C2 gate SHOULD 2): one lock context for the memo's device
-					DetachMemoGpu(*mh, true);     // R2: the memo's GPU spots and the owner textures go while the device lives
+					std::lock_guard<std::mutex> lock(ownerFillsMutex_);   // as at GpuCreated (C2 gate SHOULD 2): one lock context for the memo's device   // SHOULD 1: the lock BEFORE the Find, so a MemoHostOf registration cannot slip between them
+					if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(f.host))
+						DetachMemoGpu(*mh, true);     // R2: the memo's GPU spots and the owner textures go while the device lives
 				}
 				memoHosts_.Remove(f.host, true);  // L-CORE: the renderer's memo (a reader's pin keeps its spots until released)
 				EraseExternal(f.host);   // a renderer recreated at this address never inherits the old one's external demand
@@ -1389,16 +1391,18 @@ namespace Vpv
 				// A new renderer at the address of one that died without GpuReleased (a failed device create):
 				// the old state's seal hooks, tap and lane belong to the dead one.
 				Teardown(st, false, false);   // the dead renderer's device objects are not ours to destroy
-				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
 				{
-					std::lock_guard<std::mutex> memoLock(ownerFillsMutex_);   // GEM SK-LIFECYCLE: as the other two sites (the MemoHost is kept)
-					// GF-P2b E2: only the DEAD renderer's device goes. A device on the host's current pl_gpu was attached by this renderer's
-					// GpuCreated (which abandons any older device first, audit S3): the store registering at the first SettingsApplied after it
-					// moves the tap generation and lands here, and detaching that device would leave the new renderer without one (never
-					// re-attached: every GPU owner fill would decline). A later GpuCreated still abandons a device it finds.
-					const void* currentGpu = gpuSlots_.Aux(host);
-					if (!(mh->gpuDevice && currentGpu != nullptr && mh->gpuDevice->OwnerGpu() == currentGpu))
-						DetachMemoGpu(*mh, false);   // R2: nor are its owner textures (forgotten, counted)
+					std::lock_guard<std::mutex> lock(ownerFillsMutex_);   // T-AR3 / C2-GATE-SHOULD-ADV: lock BEFORE Find so MemoHostOf cannot slip between them
+					if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
+					{
+						// GF-P2b E2: only the DEAD renderer's device goes. A device on the host's current pl_gpu was attached by this renderer's
+						// GpuCreated (which abandons any older device first, audit S3): the store registering at the first SettingsApplied after it
+						// moves the tap generation and lands here, and detaching that device would leave the new renderer without one (never
+						// re-attached: every GPU owner fill would decline). A later GpuCreated still abandons a device it finds.
+						const void* currentGpu = gpuSlots_.Aux(host);
+						if (!(mh->gpuDevice && currentGpu != nullptr && mh->gpuDevice->OwnerGpu() == currentGpu))
+							DetachMemoGpu(*mh, false);   // R2: nor are its owner textures (forgotten, counted)
+					}
 				}
 				hosts_.Remove(host, false);
 				EraseExternal(host);          // nor is its external demand (declared for the dead renderer)
