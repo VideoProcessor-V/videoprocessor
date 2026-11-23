@@ -222,17 +222,27 @@ def scan_text(text, path='<text>'):
             body = text[pos:end]
             category = spec[1] if spec is not None and spec[1] else attrs.get(name)
             gpu = bool(GPU_PATTERNS.search(body)) or name_says_gpu(name) or bool(spec is not None and spec[2])
-            out.append({'cls': cls, 'method': name, 'category': category, 'gpu': gpu})
+            out.append({'cls': cls, 'method': name, 'category': category, 'gpu': gpu, 'pos': pos})
     return out
 
 
 def scan_file(path):
-    """Return a list of dicts: cls, method, category (attribute or None), gpu (bool).
+    """Return a list of dicts: cls, method, category (attribute or None), gpu (bool), pos (character offset of the macro).
 
     A #define body is not scanned as code (its TEST_METHOD(NAME) names a parameter, not a test); each invocation of
     a test-method wrapper macro is a test named by its argument. Raises ScanError on an ALL-CAPS placeholder name."""
-    with open(path, encoding='utf-8', errors='replace') as f:
-        return scan_text(f.read(), path)
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_mtime_ns, st.st_size)
+    cached = _SCAN_CACHE.get(key)
+    if cached is None:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            cached = _SCAN_CACHE[key] = scan_text(f.read(), path)
+    return [dict(t) for t in cached]   # a caller may edit its copy; a ScanError is never cached (it propagates first)
+
+
+# One process scans the same ~500 test sources many times (the generator, the checkers, their tests): keyed by path,
+# mtime and size, so a changed file is read again.
+_SCAN_CACHE = {}
 
 
 def entry_matches(entry, cls, method):
@@ -248,8 +258,40 @@ def entry_matches(entry, cls, method):
     raise ValueError(f'unknown entry kind {kind}')
 
 
+# How specific an entry kind is: a method entry beats a method prefix, which beats a class, which beats a class prefix
+# (TQ-RG-C4: a Slow methodPrefix inside a GpuWarp class must win over the class entry, whatever the manifest order).
+ENTRY_SPECIFICITY = {'method': 4, 'methodPrefix': 3, 'class': 2, 'classPrefix': 1}
+
+
+def entry_rank(entry):
+    """Sort key of an entry's specificity: its kind, then the length of its value (a longer prefix is more specific)."""
+    return (ENTRY_SPECIFICITY[entry['kind']], len(entry['value']))
+
+
+def best_entry(entries, cls, method):
+    """The most specific manifest entry matching the test, or None. Ties keep the first entry in manifest order."""
+    best = None
+    for e in entries:
+        if entry_matches(e, cls, method) and (best is None or entry_rank(e) > entry_rank(best)):
+            best = e
+    return best
+
+
+TEST_CLASS_TEXT = re.compile(r'\bTEST_CLASS\s*\(')
+
+
 def test_sources(root):
+    """Every .cpp under src that declares a TEST_CLASS: the *Tests.cpp files and the ones that do not follow the
+    name (LongPairBenchDump.cpp, GrainSplitV3CostBench.cpp, GrainLevelShiftBench.cpp, ProducerThroughputBench.cpp:
+    TQ-RG-C2 / MISS-1). A file whose only TEST_CLASS is in a comment is read and yields no test."""
     for base, _dirs, files in os.walk(os.path.join(root, 'src')):
-        for name in files:
+        for name in sorted(files):
+            if not name.endswith('.cpp'):
+                continue
+            path = os.path.join(base, name)
             if name.endswith('Tests.cpp'):
-                yield os.path.join(base, name)
+                yield path
+                continue
+            with open(path, encoding='utf-8', errors='replace') as f:
+                if TEST_CLASS_TEXT.search(f.read()):
+                    yield path

@@ -11,6 +11,9 @@ Usage: python tools/gen_test_filters.py [--cpu] [--gpu [--categories A,B]] [--gp
   --categories  with --gpu: restrict to these excluded categories (e.g. GpuHardware,GpuOnScreen keeps the
              meter and projector tests out of a GPU run; UpstreamStale selects only the quarantined
              upstream-stale Bill tests, which the CPU run leaves out)
+  --names-only  drop the Category= / Category!= clauses and keep only the name clauses: the text for a build-queue line, because
+             tools/check_trx_coverage.py cannot match a trait (a Category term is a usage error there) and the native adapter does not
+             select by trait anyway. Fails (exit 2) when no name clause is left (no test carries the category)
   --job-env CATEGORY  print the environment of that category's dedicated job as a queue-line env= value
              (Footage, Corpus, Bench: a missing clip, corpus or opt-in FAILS in that job). Pair it with
              --gpu --categories CATEGORY for the filter; the categories are in no other lane (TQ-X2)
@@ -23,7 +26,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_categories_lib as lib  # noqa: E402
+import categories_lib as lib  # noqa: E402
 
 
 def clause(entry, negate):
@@ -76,11 +79,46 @@ def gpu_filter(manifest, cats=None):
     return '|'.join(parts)
 
 
+def names_only(filter_text, sep):
+    """filter_text without its Category=/Category!= terms (terms are separated by sep: '|' for a selection, '&' for the CPU run)."""
+    return sep.join(t for t in filter_text.split(sep) if not t.startswith(('Category=', 'Category!=')))
+
+
+def shadowed_in_warp_classes(manifest):
+    """(class, method, entry) for each test inside a class that a GpuWarp class entry selects but whose most specific
+    classification is another excluded category (a Slow methodPrefix, a GpuHardware attribute): it must leave the GpuWarp run
+    (TQ-RG-C4: WholeHookChainCombinationMatrix is Slow inside the GpuWarp class WholeHookChainHookTests)."""
+    entries = manifest['entries']
+    warp_classes = [e for e in entries if e['category'] == 'GpuWarp' and e['kind'] in ('class', 'classPrefix')]
+    out = []
+    for path in lib.test_sources(lib.repo_root()):
+        for t in lib.scan_file(path):
+            cls, method = t['cls'], t['method']
+            if not any(lib.entry_matches(e, cls, method) for e in warp_classes):
+                continue
+            best = lib.best_entry(entries, cls, method)
+            effective = best['category'] if best and best['kind'] in ('method', 'methodPrefix') else t['category']
+            if effective in lib.EXCLUDED_FROM_CPU and (cls, method) not in [(c, m) for c, m, _ in out]:
+                out.append((cls, method, best))
+    return out
+
+
 def gpuwarp_filter(manifest):
-    # A GpuWarp class entry selects every method of the class, including one that an earlier entry or a Category
-    # attribute puts in a dedicated-job category (TQ-X2): take those out again, so they run only in their own job.
-    away = clauses(manifest, True, lib.DEDICATED_JOB_ONLY) + [f'Category!={c}' for c in lib.DEDICATED_JOB_ONLY]
-    return '(' + gpu_filter(manifest, ['GpuWarp']) + ')&' + '&'.join(away)
+    """The GpuWarp selection: the class entries stay, each ANDed with FullyQualifiedName!~Class::method for every test of the
+    class that is classified in another excluded category (the AND binds tighter than the OR of the clauses)."""
+    shadow = {}
+    for cls, method, _entry in shadowed_in_warp_classes(manifest):
+        shadow.setdefault(cls, []).append(method)
+    parts = []
+    for c in clauses(manifest, False, ['GpuWarp']):
+        value = c.split('~', 1)[-1]
+        if c.startswith('FullyQualifiedName~'):
+            exclusions = [f'FullyQualifiedName!~{cls}::{m}' for cls, methods in shadow.items()
+                          if cls == value or cls.startswith(value) for m in methods]
+            c = '&'.join([c] + sorted(set(exclusions)))
+        parts.append(c)
+    parts.append('Category=GpuWarp')
+    return '|'.join(parts)
 
 
 def main():
@@ -91,6 +129,7 @@ def main():
     ap.add_argument('--categories')
     ap.add_argument('--compare')
     ap.add_argument('--job-env')
+    ap.add_argument('--names-only', action='store_true')
     a = ap.parse_args()
     if a.categories and not a.gpu:
         ap.error('--categories needs --gpu')
@@ -106,8 +145,17 @@ def main():
         print('missing from generated:', sorted(want - have) or 'none')
         print('extra in generated:', sorted(have - want) or 'none')
         return 1 if want - have else 0
+    def emit(text, sep):
+        if a.names_only:
+            text = names_only(text, sep)
+            if not text:
+                print('gen_test_filters: error: --names-only left no name clause (no test or manifest entry carries the category)',
+                      file=sys.stderr)
+                return 2
+        print(text)
+        return 0
     if a.gpuwarp:
-        print(gpuwarp_filter(manifest))
+        return emit(gpuwarp_filter(manifest), '|')
     elif a.gpu:
         cats = None
         if a.categories:
@@ -115,10 +163,9 @@ def main():
             bad = [c for c in cats if c not in lib.EXCLUDED_FROM_CPU]
             if bad:
                 ap.error(f'--categories takes excluded categories {lib.EXCLUDED_FROM_CPU}, not {bad}')
-        print(gpu_filter(manifest, cats))
+        return emit(gpu_filter(manifest, cats), '|')
     else:
-        print(cpu_filter(manifest))
-    return 0
+        return emit(cpu_filter(manifest), '&')
 
 
 if __name__ == '__main__':

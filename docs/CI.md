@@ -58,6 +58,16 @@ missing condition themselves (`SKIP-NO-HARDWARE <test>: <reason>`, `SKIP-NO-GPU`
 `tools/run_chain_gate.ps1` and the release skill) turns a missing hardware precondition
 into a failure.
 
+Footage, Corpus and Bench tests (TQ-X2) carry an excluded category of that name: they are
+in no CPU, WARP or default GPU selection, so a skip cannot pass there. Each runs in a
+dedicated job: filter `tools/gen_test_filters.py --gpu --categories <Kind>`, environment from
+`--job-env <Kind>` (`VP_TEST_REQUIRE_FOOTAGE=1`, `VP_TEST_REQUIRE_CORPUS=1`, `VP_TEST_BENCH=1`
+with `VP_TEST_REQUIRE_BENCH=1`), as a queue line `env=` field or the chain gate switches
+`-Footage -Corpus -Bench`. For a queue line add `--names-only` (no `Category=` term: `check_trx_coverage.py`
+cannot match a trait; it exits 2 when no name clause is left). A missing clip, corpus or opt-in fails the test; the
+`SKIP-NO-FOOTAGE` / `SKIP-NO-CORPUS` / `SKIP-OPT-IN` markers count as not executed in
+`tools/check_trx_coverage.py`.
+
 ## Caching
 
 | What | How | Key |

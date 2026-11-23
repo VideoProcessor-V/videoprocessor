@@ -14,7 +14,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_categories_lib as lib  # noqa: E402
+import categories_lib as lib  # noqa: E402
 
 
 def main():
@@ -28,11 +28,11 @@ def main():
         for t in lib.scan_file(path):
             total += 1
             cls, method = t['cls'], t['method']
-            mapped = None
             for i, e in enumerate(manifest['entries']):
                 if lib.entry_matches(e, cls, method):
                     used.add(i)
-                    mapped = mapped or e['category']
+            best = lib.best_entry(manifest['entries'], cls, method)   # the most specific entry wins, not the first (TQ-RG-C4)
+            mapped = best['category'] if best else None
             if t['category'] and t['category'] not in lib.KNOWN_CATEGORIES:
                 problems.append(f'{rel}: {cls}::{method} has an unknown Category attribute {t["category"]}')
             if t['gpu']:

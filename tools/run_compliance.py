@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """One-shot compliance run (doc 124 s2.2): runs every compliance checker present in tools/ and writes ONE summary file.
 
-Usage: python -I tools/run_compliance.py [--root P] [--out FILE] [--since REF] [--only NAME[,NAME]] [--list]
+Usage: python -I tools/run_compliance.py [--root P] [--out FILE] [--since REF] [--only NAME[,NAME]] [--py-lane] [--list]
 
 Each checker runs as its own process (python -I, cwd = root, 600 s limit). A checker whose file is absent in this
 tree is reported SKIP (absent), never a pass, and does not change the exit code; the summary lists it so a missing
@@ -10,6 +10,10 @@ checker is visible. --since REF is passed to the checkers that take it (N2, N3, 
 file (default tools/../compliance.txt under the root's scratch: --out) holds one line per checker plus the last
 lines of each non-zero one. Exit: 0 all present checkers clean, 1 at least one violation, 2 a checker error or
 timeout (the worst code wins).
+
+--py-lane adds the PY lane (tools/run_py_suites.py: every Python unittest suite under tools/, TQ-RG-P1). It is opt-in here
+because tools/test_libplacebo_variants.py needs the x64 Release build (a missing build FAILS, it is not skipped) and the lane
+takes minutes; run_chain_gate.ps1 runs it by default, after the build.
 """
 import argparse
 import os
@@ -27,6 +31,7 @@ TOOLS = [
     ("config_placement", "check_config_placement.py", [], False),
     ("module_manifests", "check_module_manifests.py", [], False),
     ("test_categories", "check_test_categories.py", [], False),
+    ("bespoke_skips", "check_bespoke_skips.py", [], False),
     ("private_copies", "check_private_copies.py", ["--strict"], False),
     ("test_tamper", "check_test_tamper.py", ["--strict"], False),
     ("N2_precision", "check_precision.py", ["--strict"], True),
@@ -37,7 +42,13 @@ TOOLS = [
 ]
 
 
-def run_one(root, tools_dir, name, script, args, since_ok, since, timeout=600):
+# The PY lane (opt-in, see the module docstring): the whole lane is one entry with a 3600 s limit (the checkers have 600 s).
+PY_LANE = ("py_suites", "run_py_suites.py", [], False)
+
+
+def run_one(root, tools_dir, name, script, args, since_ok, since, timeout=None):
+    if timeout is None:
+        timeout = 3600 if script == PY_LANE[1] else 600
     path = os.path.join(tools_dir, script)
     if not os.path.isfile(path):
         return {"name": name, "status": "SKIP", "rc": None, "note": "absent in this tree", "tail": []}
@@ -159,6 +170,7 @@ def main(argv=None):
     ap.add_argument("--out", help="summary file (default: print only)")
     ap.add_argument("--since")
     ap.add_argument("--only", help="comma-separated checker names")
+    ap.add_argument("--py-lane", action="store_true", help="also run the PY lane (needs the x64 Release build)")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
@@ -169,10 +181,10 @@ def main(argv=None):
         print("selftest run_compliance %s" % ("ok" if not failed else "FAIL"))
         return 0 if not failed else 2
     if a.list:
-        for t in TOOLS:
+        for t in TOOLS + ([PY_LANE] if a.py_lane else []):
             print("%-17s %s" % (t[0], t[1]))
         return 0
-    worst, text = run_all(a.root, None, a.since, set(a.only.split(",")) if a.only else None, a.out)
+    worst, text = run_all(a.root, TOOLS + [PY_LANE] if a.py_lane else None, a.since, set(a.only.split(",")) if a.only else None, a.out)
     sys.stdout.write(text)
     return worst
 

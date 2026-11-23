@@ -239,6 +239,142 @@ class DedicatedJobCategories(unittest.TestCase):
         self.assertIn("Category=Corpus", out.split("|"))
         self.assertNotIn("Category=GpuHardware", out.split("|"))
 
+    def test_names_only_drops_every_category_term_for_a_queue_line(self):
+        self.assertEqual(G.names_only("Name~A|Category=X|FullyQualifiedName~B", "|"), "Name~A|FullyQualifiedName~B")
+        self.assertEqual(G.names_only("Name!~A&Category!=X&FullyQualifiedName!~B", "&"), "Name!~A&FullyQualifiedName!~B")
+        self.assertEqual(G.names_only("Category=Footage", "|"), "")
+
+    def test_cli_names_only_has_no_category_term_in_any_selection(self):
+        for argv, sep in ((("--cpu",), "&"), (("--gpu",), "|"), (("--gpuwarp",), "|"), (("--gpu", "--categories", "Bench"), "|")):
+            with self.subTest(argv=argv):
+                rc, out, _err = self._run_main(*argv, "--names-only")
+                self.assertEqual(rc, 0)
+                self.assertTrue(out)
+                self.assertFalse([t for t in out.split(sep) if t.startswith("Category")], out)
+        # the Bench class entry keeps its name clause, so a Bench queue line can be coverage-checked
+        self.assertIn("FullyQualifiedName~ProducerThroughputBench", self._run_main("--gpu", "--categories", "Bench", "--names-only")[1])
+
+    def test_cli_names_only_fails_when_the_category_leaves_no_name_clause(self):
+        real_sources, real_manifest = L.test_sources, L.load_manifest
+        L.test_sources = lambda _root: iter([])
+        L.load_manifest = lambda path=None: {"entries": []}
+        try:
+            rc, out, err = self._run_main("--gpu", "--categories", "Footage", "--names-only")
+            self.assertEqual((rc, out), (2, ""))
+            self.assertIn("no name clause", err)
+            rc, out, _err = self._run_main("--gpu", "--categories", "Footage")   # without the flag the Category term remains
+            self.assertEqual((rc, out), (0, "Category=Footage"))
+        finally:
+            L.test_sources, L.load_manifest = real_sources, real_manifest
+
+
+WARP_SOURCE = r"""
+TEST_CLASS(WarpTests)
+{
+public:
+	TEST_METHOD(RendersOnWarp) { }
+	TEST_METHOD(SlowMatrixCombos) { }
+	BEGIN_TEST_METHOD_ATTRIBUTE(TimesOnTheAdapter)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(TimesOnTheAdapter) { }
+};
+"""
+
+
+class WarpSelectionExcludesOtherCategories(unittest.TestCase):
+    """TQ-RG-C4: a test of a GpuWarp class that is Slow or GpuHardware leaves the GpuWarp selection."""
+
+    def _manifest(self, order):
+        entries = {"class": {"kind": "class", "value": "WarpTests", "category": "GpuWarp"},
+                   "slow": {"kind": "methodPrefix", "value": "SlowMatrix", "category": "Slow"}}
+        return {"entries": [entries[k] for k in order]}
+
+    def _warp(self, manifest):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "WarpTests.cpp")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(WARP_SOURCE)
+            real = L.test_sources
+            L.test_sources = lambda _root: iter([p])
+            try:
+                return G.gpuwarp_filter(manifest), G.gpu_filter(manifest, ["Slow"]), G.cpu_filter(manifest)
+            finally:
+                L.test_sources = real
+
+    def test_slow_and_gpu_hardware_methods_leave_the_warp_selection_in_either_order(self):
+        for order in (["class", "slow"], ["slow", "class"]):
+            with self.subTest(order=order):
+                warp, slow, _cpu = self._warp(self._manifest(order))
+                clauses = warp.split("|")
+                self.assertIn("FullyQualifiedName~WarpTests&FullyQualifiedName!~WarpTests::SlowMatrixCombos"
+                              "&FullyQualifiedName!~WarpTests::TimesOnTheAdapter", clauses)
+                self.assertNotIn("FullyQualifiedName~WarpTests", clauses)
+                self.assertNotIn("FullyQualifiedName!~WarpTests::RendersOnWarp", warp)
+
+    def test_the_slow_tier_still_selects_the_slow_method_and_the_cpu_run_keeps_the_warp_class(self):
+        _warp, slow, cpu = self._warp(self._manifest(["class", "slow"]))
+        self.assertIn("Name~SlowMatrix", slow.split("|"))
+        self.assertIn("Name!~SlowMatrix", cpu.split("&"))
+        self.assertNotIn("FullyQualifiedName!~WarpTests", cpu.split("&"))
+
+    def test_a_class_with_nothing_shadowed_keeps_the_plain_clause(self):
+        warp, _slow, _cpu = self._warp({"entries": [{"kind": "class", "value": "OtherTests", "category": "GpuWarp"}]})
+        self.assertIn("FullyQualifiedName~OtherTests", warp.split("|"))
+
+    def test_repository_matrix_leaves_the_warp_run_but_stays_in_the_slow_tier(self):
+        manifest = L.load_manifest()
+        warp = G.gpuwarp_filter(manifest).split("|")
+        self.assertIn("FullyQualifiedName~WholeHookChainHookTests&"
+                      "FullyQualifiedName!~WholeHookChainHookTests::EfficiencyStageCostsOnThisGpu&"
+                      "FullyQualifiedName!~WholeHookChainHookTests::WholeHookChainCombinationMatrix", warp)
+        self.assertNotIn("FullyQualifiedName~WholeHookChainHookTests", warp)
+        self.assertIn("Name~WholeHookChainCombinationMatrix", G.gpu_filter(manifest, ["Slow"]).split("|"))
+
+
+class ScanEveryTestClassFile(unittest.TestCase):
+    """TQ-RG-C2 / MISS-1: the scan reads every .cpp that declares a TEST_CLASS, not only *Tests.cpp."""
+
+    def _tree(self, files):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        for rel, text in files.items():
+            path = os.path.join(d.name, "src", *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        return d.name
+
+    def test_a_cpp_without_the_tests_suffix_is_scanned_when_it_has_a_test_class(self):
+        root = self._tree({
+            "a/FooBench.cpp": "TEST_CLASS(FooBench)\n{\n\tTEST_METHOD(Runs) { }\n};\n",
+            "a/NotATest.cpp": "int main() { return 0; }\n",
+            "a/CommentOnly.cpp": "// TEST_CLASS(Phantom) lives in another file\nint x;\n",
+            "a/FooTests.cpp": "TEST_CLASS(FooTests)\n{\n\tTEST_METHOD(Also) { }\n};\n",
+            "a/header.h": "TEST_CLASS(InAHeader)\n",
+        })
+        names = sorted(os.path.basename(p) for p in L.test_sources(root))
+        self.assertEqual(names, ["CommentOnly.cpp", "FooBench.cpp", "FooTests.cpp"])
+        scanned = [t["method"] for p in L.test_sources(root) for t in L.scan_file(p)]
+        self.assertEqual(sorted(scanned), ["Also", "Runs"])   # the comment-only file adds no test
+
+    def test_the_repository_bench_classes_are_scanned_and_registered(self):
+        by_class = {}
+        for path in L.test_sources(L.repo_root()):
+            for t in L.scan_file(path):
+                by_class.setdefault(t["cls"], []).append(t)
+        for cls in ("LongPairBenchDumpTests", "GrainSplitV3CostBench", "GrainLevelShiftBench", "ProducerThroughputBench"):
+            self.assertIn(cls, by_class)
+        self.assertEqual(len(by_class["GrainLevelShiftBench"]), 2)
+        self.assertEqual(by_class["ProducerThroughputBench"][0]["category"], "Bench")
+        cpu = G.cpu_filter(L.load_manifest()).split("&")
+        for clause in ("FullyQualifiedName!~LongPairBenchDumpTests", "FullyQualifiedName!~GrainSplitV3CostBench",
+                       "FullyQualifiedName!~ProducerThroughputBench"):
+            self.assertIn(clause, cpu)
+        # the two CPU methods of GrainLevelShiftBench stay in the CPU run
+        self.assertNotIn("FullyQualifiedName!~GrainLevelShiftBench", cpu)
+        self.assertIn("FullyQualifiedName~GrainSplitV3CostBench", G.gpu_filter(L.load_manifest()).split("|"))
+        self.assertIn("FullyQualifiedName~ProducerThroughputBench", G.gpu_filter(L.load_manifest(), ["Bench"]).split("|"))
 
 if __name__ == "__main__":
     unittest.main()

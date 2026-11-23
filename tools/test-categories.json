@@ -1,7 +1,7 @@
 {
  "schema": 1,
  "about": "Category of tests that use the GPU and carry no Category attribute (or whose file must stay untouched). Categories: GpuHardware, GpuOnScreen, MeterHardware, ProjectorHardware, Slow, LoopRig are excluded from the CPU run; UpstreamStale (Bill tests made stale by a later Bill commit, Bill code unchanged on both pathways) is excluded from the CPU run (select only it with gen_test_filters --gpu --categories UpstreamStale); Footage (real clips), Corpus (a generated or recorded corpus) and Bench (an opt-in timing benchmark) are excluded from the CPU run and from the default --gpu set: each runs only in its own job (gen_test_filters --gpu --categories Footage, env from --job-env Footage: VP_TEST_REQUIRE_FOOTAGE=1 / VP_TEST_REQUIRE_CORPUS=1 / VP_TEST_BENCH=1 and VP_TEST_REQUIRE_BENCH=1) so a missing clip, corpus or opt-in FAILS instead of logging SKIP-NO-FOOTAGE / SKIP-NO-CORPUS / SKIP-OPT-IN and passing; GpuWarp renders on WARP and stays in it; Cpu marks a reviewed false positive of the name heuristic. First matching entry wins. Checked by tools/check_test_categories.py; the CPU filter comes from tools/gen_test_filters.py. Copyright(C) 2026 VP-V contributors; SPDX-License-Identifier: GPL-3.0-only",
- "scope": "Native-test sources named *Tests.cpp under src. Not covered: the Beta host tests (VideoProcessor-BetaTests/BetaGpuTests.cpp, BetaTestHost.cpp) use no TEST_METHOD macros, so the scanner cannot see them; the checker also does not follow helper calls, so a test that reaches the GPU only through a helper needs a Gpu in its name or a manifest entry.",
+ "scope": "Native-test sources under src. Every .cpp under src that declares a TEST_CLASS is scanned, not only *Tests.cpp (TQ-RG-C2). Not covered: the Beta host tests (VideoProcessor-BetaTests/BetaGpuTests.cpp) use no TEST_METHOD macros, so the scanner cannot see them; the checker also does not follow helper calls, so a test that reaches the GPU only through a helper needs a Gpu in its name or a manifest entry.",
  "entries": [
   {
    "kind": "class",
@@ -800,6 +800,27 @@
    "category": "GpuWarp",
    "file": "src/VP-V/modules/input/source_analysis/lane/tests/EngineLumaGpuTwinTests.cpp",
    "note": "TargetLutGpuFixture: WARP unless VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "class",
+   "value": "LongPairBenchDumpTests",
+   "category": "GpuHardware",
+   "file": "src/VP-V/modules/motion/estimation/tests/LongPairBenchDump.cpp",
+   "note": "TQ-RG-C2: the file does not end in Tests.cpp (the scan now reads every .cpp with a TEST_CLASS). Opt-in long-pair bench dump on the adapter; its attribute is GpuHardware. The Bench category and the SKIP-OPT-IN marker come with TQ-MC-S11 (CB)."
+  },
+  {
+   "kind": "class",
+   "value": "GrainSplitV3CostBench",
+   "category": "GpuHardware",
+   "file": "src/VP-V/modules/repair/grain_split/tests/GrainSplitV3CostBench.cpp",
+   "note": "TQ-RG-C2: the file does not end in Tests.cpp. V3PassCosts times the grain-split passes on the adapter (returns at once without VP_TEST_GPU=hardware); its attribute is GpuHardware."
+  },
+  {
+   "kind": "class",
+   "value": "ProducerThroughputBench",
+   "category": "Bench",
+   "file": "src/VP-V/tests/beta_gpu/ProducerThroughputBench.cpp",
+   "note": "TQ-RG-MISS-1: opt-in producer throughput bench in the Beta test host (VP_PT_BENCH=1 or VP_TEST_BENCH=1). Without the opt-in it logs SKIP-OPT-IN (not executed) and fails under VP_TEST_REQUIRE_BENCH=1 / VP_TEST_REQUIRE_ALL=1; runs only in the Bench job."
   }
  ]
 }

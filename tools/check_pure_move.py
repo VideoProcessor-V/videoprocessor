@@ -58,4 +58,5 @@ def main():
     print('TOTAL mismatches', total)
     return 1 if total else 0
 
-sys.exit(main())
+if __name__ == '__main__':
+    sys.exit(main())
