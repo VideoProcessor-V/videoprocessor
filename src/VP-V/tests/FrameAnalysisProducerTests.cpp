@@ -355,8 +355,8 @@ namespace FrameAnalysisProducerTestsNs
 		{
 			Frame frame = TwelveBitPlane();
 			Assert::IsTrue(frame.source.IsValid(), L"decoded DV plane (precondition)");
-			Assert::IsFalse(VpFrameAnalysis::SamplerCodesAreFullRange(frame.source), L"identity studio map (precondition)");
-			Assert::IsFalse(VpFrameAnalysis::NeedsDecode(frame.source), L"limited plane: lanes read in place (precondition)");
+			Assert::IsFalse(frame.source.CodesFullRange(), L"identity studio map (precondition)");
+			Assert::IsFalse(Vpv::AnalysisDomain::NeedsLumaPlane(frame.source), L"limited plane: lanes read in place (precondition)");
 			const uint64_t n = static_cast<uint64_t>(kWidth) * kHeight;
 			const Rect all{ 0, 0, kWidth, kHeight };
 			VpFrameAnalysis::Measured m;
