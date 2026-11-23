@@ -1013,6 +1013,18 @@
      "reason": "ad_luma is the GLSL consumer dot(c, AD_KW); AD_KW comes from LumaCoeff::ForSystem via DetailPulse::LumaWeights (transfer handling, no weights copy) (C6-3 K6: per line)"
     },
     {
+     "file": "src/VP-V/modules/input/source_analysis/regions/BusyEdgeGlsl.h",
+     "pattern": "^float em_tap\\(ivec2 p\\) \\{ return ad_luma\\(p\\); \\}\\s*$",
+     "kind": "false_positive",
+     "reason": "S18 stage tap delegates to ad_luma (AD_KW comes from LumaCoeff::ForSystem via VpMeasure::LumaWeightsGlsl, no weights copy; CF2 M3)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/regions/MeasureDomainGlsl.h",
+     "pattern": "^float ad_luma\\(ivec2 p\\)\\s*$",
+     "kind": "false_positive",
+     "reason": "ad_luma moved verbatim from AdaptiveDownscale.cpp (C6-3 K6): GLSL consumer dot(c, AD_KW) where AD_KW comes from LumaCoeff::ForSystem (CF2 M3)"
+    },
+    {
      "file": "src/VP-V/nets/PlNetRunner.cpp",
      "pattern": "\\{ \\\"vp_kr\\\", opt\\.kr \\}",
      "kind": "false_positive",
