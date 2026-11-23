@@ -10,6 +10,7 @@
 // Render thread (RenderLocked, renderMutex held); ReleaseDejudder also from RetireOutput (stop path, renderMutex).
 #pragma once
 
+#include <VP-V/modules/motion/consumers/MotionHostHelpers.h>
 #include <VP-V/modules/motion/consumers/TimelinePlanner.h>
 #include <VP-V/modules/motion/estimation/DitherVectorSource.h>
 
@@ -281,9 +282,7 @@ void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
 				static_cast<unsigned long long>(dejudderExtras.ditherVectorsNextUsed));
 			text += next;
 		}
-		Vpv::MotionHost::AppendDejudderStatusExtras(text, activeSettings.dejudderPulldown, static_cast<uint32_t>(pulldownCadence),
-			pulldownFilmHz, static_cast<unsigned long long>(pulldownSkipped), activeSettings.occlusionMask,
-			static_cast<uint64_t>(dejudderMaskUsedTick), static_cast<uint64_t>(now), dejudderMaskState, dejudderPolicy.cameraBindings);
+		Vpv::MotionHost::AppendDejudderStatusExtras(text, activeSettings.dejudderPulldown, static_cast<uint32_t>(pulldownCadence), pulldownFilmHz, static_cast<unsigned long long>(pulldownSkipped), activeSettings.occlusionMask, static_cast<uint64_t>(dejudderMaskUsedTick), static_cast<uint64_t>(now), dejudderMaskState, dejudderPolicy.cameraBindings);
 		// Planner 2026-10-16: the motion source on the stats line (NVIDIA optical-flow engine,
 		// Turing or later, driver 528+; without it the block searches, as before).
 		if (!motionSourceLogged.empty())

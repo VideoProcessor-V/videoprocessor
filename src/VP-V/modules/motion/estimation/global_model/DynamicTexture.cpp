@@ -9,6 +9,11 @@
 
 namespace CameraModel
 {
+	namespace
+	{
+		inline double Len(double x, double y) { return std::sqrt(x * x + y * y); }
+	}
+
 	DynTextureResult DetectDynamicTexture(const DynTextureConfig& cfg, const PairInput& in, const Params& model, DynTextureState& state,
 		double resolvedPrecPx)
 	{

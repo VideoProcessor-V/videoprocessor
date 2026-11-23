@@ -228,7 +228,7 @@ namespace Vpv
 				DebugLog::Log("Sigma-delta vectors on the new frame's present: %s", tracker.StatusSegment().c_str());
 		}
 
-		void PrepareDejudderCamera(Dejudder::CameraBindings& bindings, const void* host, uint64_t sourceSequence, float phaseT)
+		void PrepareDejudderCamera(VpMotion::DejudderCameraState& bindings, const void* host, uint64_t sourceSequence, float phaseT)
 		{
 			// K9-3 (B4, default OFF): when camera_use_dejudder is enabled, evaluate P9 camera availability / phase weight
 			// (strictest policy) for visible status and late fallback; off = zero work, byte-identical.
@@ -242,7 +242,7 @@ namespace Vpv
 
 		void AppendDejudderStatusExtras(std::string& text, bool pulldown, uint32_t pulldownCadence, double pulldownFilmHz,
 			unsigned long long pulldownSkipped, bool occlusionMask, uint64_t maskUsedTick, uint64_t now,
-			const std::string& maskState, const Dejudder::CameraBindings& cameraBindings)
+			const std::string& maskState, const VpMotion::DejudderCameraState& cameraBindings)
 		{
 			if (pulldown)
 			{

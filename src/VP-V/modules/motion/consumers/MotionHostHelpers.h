@@ -118,10 +118,10 @@ namespace Vpv
 
 		void BuildSigmaDeltaVectorsWithoutExtras(DitherVectorsHost& h, uint64_t sourceSequence, uint64_t nextSourceSequence);
 
-		void PrepareDejudderCamera(Dejudder::CameraBindings& bindings, const void* host, uint64_t sourceSequence, float phaseT);
+		void PrepareDejudderCamera(VpMotion::DejudderCameraState& bindings, const void* host, uint64_t sourceSequence, float phaseT);
 
 		void AppendDejudderStatusExtras(std::string& text, bool pulldown, uint32_t pulldownCadence, double pulldownFilmHz,
 			unsigned long long pulldownSkipped, bool occlusionMask, uint64_t maskUsedTick, uint64_t now,
-			const std::string& maskState, const Dejudder::CameraBindings& cameraBindings);
+			const std::string& maskState, const VpMotion::DejudderCameraState& cameraBindings);
 	}
 }
