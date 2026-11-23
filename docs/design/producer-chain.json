@@ -3,7 +3,7 @@
  "counts": {
   "R": 12,
   "X": 7,
-  "N": 13,
+  "N": 12,
   "NP": 33
  },
  "products": [
@@ -801,12 +801,12 @@
      "evidence": [
       [
        "repair/temporal_detail/TemporalDetailGpu.cpp",
-       398,
+       399,
        "const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(sharedSplit, w, h, g.B, g.scale, cu, 0, param"
       ],
       [
        "repair/temporal_detail/TemporalDetailGpu.cpp",
-       429,
+       430,
        "if (GrainSplit::Gpu::CheckFit(split, w, h, g.B, g.scale, cu, 0, params.seq) != GrainSplit::Gpu::FitResult::Fit"
       ]
      ],
@@ -1284,7 +1284,7 @@
     "input/source_analysis/regions/CodingEvidence.cpp",
     "control/skeleton/SkeletonModule.cpp"
    ],
-   "producer_text": "reserved (fused with the region block statistics pass)",
+   "producer_text": "CPU per-tile owner fill (CodingEvidence.cpp); GPU fused pass reserved",
    "reserved": false,
    "no_producer": false,
    "no_producer_owner": "",
@@ -1326,19 +1326,6 @@
      "evidence": [],
      "kind": "",
      "note": "",
-     "interim": ""
-    },
-    {
-     "input": "kCodingEvidence",
-     "lags": [
-      1
-     ],
-     "leads": [],
-     "declared": true,
-     "status": "N",
-     "evidence": [],
-     "kind": "",
-     "note": "read shape scoped to the owner fill asking for its own previous frame (req.seq - 1, through its SkeletonMemo parameter); Hub::AcquireTiles is the consumer-side Acquire the monitor uses, not the fill's lag-1 read; MakeOwnerFill ignores its memo today, so the declared lag-1 edge is N",
      "interim": ""
     }
    ]
@@ -2012,12 +1999,6 @@
    {
     "from": "kTdMemory",
     "to": "kTdAnchorPass",
-    "kind": "lag",
-    "n": 1
-   },
-   {
-    "from": "kCodingEvidence",
-    "to": "kCodingEvidence",
     "kind": "lag",
     "n": 1
    },

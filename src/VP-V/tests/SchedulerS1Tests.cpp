@@ -229,6 +229,80 @@ namespace SchedulerS1Test
 			Assert::IsTrue(reg.StatusLine().find("refused") != std::string::npos);
 		}
 
+		// 15d J3 (i) (lead18/coreplan-C10-15d-PC-jprod.md J3; dispatcher/audit-jprod-bfb7fcc21.md SHOULD 1): the P10/P11 <- P13 edges are
+		// "interim" (P13 is RenderOnly: no lane, its views are read in the render) and need no scheduler code. Proof on the real registry:
+		// the LANED products (every node that is not RenderOnly, i.e. what the lane runner and the slot jobs order by) come in the same order
+		// with and without those two edges. Only P13's own place moves (it is placed after P10/P11 once they no longer wait for it, so
+		// their absolute GraphOrderOf can shift by one); the order every laned job sees, and each lag-0 input before its laned reader, are kept.
+		TEST_METHOD(GraphOrderIgnoresInterimEdges)
+		{
+			GraphSettings gs;
+			gs.dims.width = 64;
+			gs.dims.height = 48;
+			gs.queueDepth = 6;
+			gs.laneLead = 1;
+			ConsumerDecl c;
+			c.id = 1;
+			c.name = "interim edge test";
+			AddConsume(c, kP10GrainSplit);
+			AddConsume(c, kP11RegionBlockStats);
+			AddConsume(c, kP12LightLevel);
+			AddConsume(c, kCodingEvidence);
+
+			const Registry with = SkeletonProducts();
+			std::vector<ProductDecl> decls = with.All();
+			int removed = 0;
+			for (ProductDecl& d : decls)
+			{
+				if (d.id != kP10GrainSplit && d.id != kP11RegionBlockStats) continue;
+				uint8_t k = 0;
+				for (uint8_t i = 0; i < d.inputCount; ++i)
+				{
+					if (d.inputs[i].product == kP13SourceRing) { ++removed; continue; }
+					d.inputs[k++] = d.inputs[i];
+				}
+				for (uint8_t i = k; i < d.inputCount; ++i) d.inputs[i] = InputRef();
+				d.inputCount = k;
+			}
+			Assert::AreEqual(2, removed, L"P10 and P11 each declare one P13 edge");
+			const Registry without(decls);
+
+			const Graph a = BuildGraph(with, { c }, gs);
+			const Graph b = BuildGraph(without, { c }, gs);
+			const std::string ea(a.error), eb(b.error);
+			Assert::IsTrue(a.valid, std::wstring(ea.begin(), ea.end()).c_str());
+			Assert::IsTrue(b.valid, std::wstring(eb.begin(), eb.end()).c_str());
+
+			auto laned = [](const Graph& g) {
+				std::vector<ProductId> out;
+				for (const Node& n : g.nodes)
+					if (n.backend != Backend::RenderOnly) out.push_back(n.id);
+				return out;
+			};
+			const std::vector<ProductId> la = laned(a);
+			const std::vector<ProductId> lb = laned(b);
+			Assert::IsTrue(la.size() >= 3, L"P10, P11, P12 are laned in the test graph");
+			Assert::AreEqual(la.size(), lb.size());
+			for (size_t i = 0; i < la.size(); ++i)
+				Assert::AreEqual(unsigned(la[i]), unsigned(lb[i]), L"laned order differs without the interim P13 edges");
+
+			// Each laned product still sits after every lag-0 input in both graphs (what JobRegistry's Derived check reads).
+			const Graph* graphs[] = { &a, &b };
+			for (const Graph* g : graphs)
+				for (const Node& n : g->nodes)
+				{
+					if (n.backend == Backend::RenderOnly) continue;
+					const uint32_t o = Jobs::GraphOrderOf(*g, n.id);
+					for (uint8_t i = 0; i < n.inputCount; ++i)
+					{
+						const InputRef& in = n.inputs[i];
+						if (in.lag != 0 || in.lead != 0 || in.product == kNoProduct) continue;
+						const uint32_t io = Jobs::GraphOrderOf(*g, in.product);
+						if (io != Jobs::kNoGraphOrder) Assert::IsTrue(io < o, L"a laned product precedes its lag-0 input");
+					}
+				}
+		}
+
 		// Q1: the Unpack class path works with a fake product; P13 itself is refused as an Unpack job and the status line names the absence.
 		TEST_METHOD(UnpackClassPathWithAFakeAndNoProductionUnpack)
 		{

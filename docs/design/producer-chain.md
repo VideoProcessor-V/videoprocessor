@@ -4,7 +4,7 @@
 
 Machine-checked (refs/129 L-PROD). R = read shape found (a regex hit on the owner fill, NOT proven Acquire); X = it recomputes it privately or reads it outside Acquire; N = declared but never read; NP = the product has no production producer. Fix owners are the lanes of refs/129. Counts count declared (product, input) pairs.
 
-Counts: R 12, X 7, N 13, NP 33.
+Counts: R 12, X 7, N 12, NP 33.
 
 | Product | Lane | Producer files | Input (lag/lead) | St | Evidence / note |
 |---|---|---|---|---|---|
@@ -33,7 +33,7 @@ Counts: R 12, X 7, N 13, NP 33.
 | **P12** p12_light_level | L-B5 | LaneGpuLightKernel.cpp | P11 | R | LaneGpuLightKernel.cpp:176 |
 |  |  |  | P4 | R | LaneGpuLightKernel.cpp:194 |
 | **P13** p13_source_ring | - | SourcePlanes.h | (no inputs) | - | |
-| **td.blocks** td.blocks | L-B2 | TemporalDetailGpu.cpp | P10 | X | recompute: TemporalDetailGpu.cpp:398; TemporalDetailGpu.cpp:429 |
+| **td.blocks** td.blocks | L-B2 | TemporalDetailGpu.cpp | P10 | X | recompute: TemporalDetailGpu.cpp:399; TemporalDetailGpu.cpp:430 |
 |  |  |  | P11 | N |  |
 |  |  |  | P13 | N |  |
 |  |  |  | td.blocks lag1 | N |  |
@@ -57,7 +57,6 @@ Counts: R 12, X 7, N 13, NP 33.
 | **P16** coding_evidence | L-B5 | CodingEvidence.cpp<br>SkeletonModule.cpp | P10 | N |  |
 |  |  |  | P11 | N |  |
 |  |  |  | P13 | N |  |
-|  |  |  | P16 lag1 | N | read shape scoped to the owner fill asking for its own previous frame (req.seq - 1, through its SkeletonMemo parameter); Hub::AcquireTiles is the consumer-side Acquire the monitor uses, not the fill's lag-1 read; MakeOwnerFill ignores its memo today, so the declared lag-1 edge is N |
 | **P15** quality_pattern (variants, short-queue P15c) | L-B5 | - | P16 lead1,lead2 | NP | no production producer |
 |  |  |  | P15 lag1 | NP | no production producer |
 |  |  |  | P5 | NP | no production producer; flag ViewIsActual: C9b |

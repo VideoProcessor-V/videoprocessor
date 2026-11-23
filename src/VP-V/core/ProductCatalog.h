@@ -147,7 +147,7 @@ inline const std::vector<ProductRow>& ProductRows()
         // Doc 72: p7g (registered, lane producer = the camera worker) and the engine products. No producer for the engine ones in reset 1
         // (a placeholder publishes "absent"), so every consumer's read path finds them absent and takes its classical form visibly.
         { kP7gCameraGuide, "motion/estimation/global_model", kExpectedCameraUnit, "camera guide (camera worker)" },
-        { kCodingEvidence, "input/source_analysis/regions", kExpectedCodingEvidenceUnit, "reserved (fused with the region block statistics pass)" },
+        { kCodingEvidence, "input/source_analysis/regions", kExpectedCodingEvidenceUnit, "CPU per-tile owner fill (CodingEvidence.cpp); GPU fused pass reserved" },
         { kQualityPattern, "input/source_analysis/identity/quality_pattern", kExpectedQualityPatternUnit, "reserved (lane CPU job)" },
         { kQualityPatternCausal, "input/source_analysis/identity/quality_pattern", kExpectedQualityPatternUnit, "reserved (lane CPU job)" },
         { kRefinedField, "motion/estimation/refine", kExpectedFieldRefineUnit, "reserved (field refine pass after P3)" },
@@ -633,6 +633,10 @@ inline const std::vector<ConsumerFlag>& ConsumerFlags()
         // The debander declares P3 and reads the live matcher field at render through its Params (a view of P3's data).
         { uint16_t(kCatalogConsumerIdBase + 2), kP3AnalysisField, FlagKind::ViewIsActual, "C9b",
           "live matcher field read at render (repair/deband/VpDebander.cpp Params.field / grainError, filled by segments/EntrancePlanner.inl LiveFieldInto)" },
+        // 15d J5: P16 now has a producer (the CPU per-tile owner fill), so without this flag the debander's temporal-detail read path (row 23)
+        // would print its coding_evidence read as actual. modules/repair/deband has no Acquire / product read today; the TD read path makes it true.
+        { uint16_t(kCatalogConsumerIdBase + 23), kCodingEvidence, FlagKind::NotRead, "TD",
+          "the debander reads no coding evidence today (modules/repair/deband: no product read); the temporal-detail read path" },
         // B3-Z Z-DECL (lead 2026-11-11, no declaration change): the render-time readers of the matcher field. The synthesis consumers and the
         // detail pulse / texture restore / adaptive downscale rows read the LIVE matcher field (dejudder->Field()) at render and do not
         // declare P3; the lane P3 declarations land with the matcher-ahead ring (B3-Z Z1-Z3) and lane-time refinement (C9b).

@@ -35,12 +35,11 @@
     "kP10gGrainLevel": {"files": ["repair/grain_split/GrainLevelGpu.h"], "note": "P10g T3 owner fill (GrainLevelModule): reads P10 through the memo's variant Acquire; single-frame law until the temporal passes are costed"},
     "kSourceIdentity": {"files": ["input/source_analysis/identity/SourceIdPipeline.h"]},
     "kSourceGeometry": {"files": ["input/source_analysis/identity/SourceGeometryProduct.h"]},
-    "kCodingEvidence": {"files": ["input/source_analysis/regions/CodingEvidence.cpp"], "ignore_reserved": true, "note": "P16 is a real producer since L-P16 (r2/job1-p16): CPU per-tile owner fill registered in SkeletonModule.cpp, measure in regions/CodingEvidence.cpp; the ProductCatalog.h / product-graph.md row text still says reserved (stale, catalog owner)"},
+    "kCodingEvidence": {"files": ["input/source_analysis/regions/CodingEvidence.cpp"], "note": "P16 is a real producer since L-P16 (r2/job1-p16): CPU per-tile owner fill registered in SkeletonModule.cpp, measure in regions/CodingEvidence.cpp; no self read since 15d J5 (the fill reads no history; the GPU fused pass re-declares lag 1)"},
     "kTdBlocks": {"files": ["repair/temporal_detail/TemporalDetailGpu.cpp"], "ignore_reserved": true, "note": "catalog says reserved; the legacy TemporalDetailGpu pass is the only code that computes td.blocks today, so it is scanned"}
   },
   "edges": {
     "kP4SourceStats<-kP1HalfLuma": {"read": ["\\binputData\\[0\\]"]},
-    "kCodingEvidence<-kCodingEvidence": {"read": ["\\bAcquire\\(\\s*(VpSkeleton::)?kCodingEvidence\\s*,\\s*req\\.seq\\s*-\\s*1\\b"], "note": "read shape scoped to the owner fill asking for its own previous frame (req.seq - 1, through its SkeletonMemo parameter); Hub::AcquireTiles is the consumer-side Acquire the monitor uses, not the fill's lag-1 read; MakeOwnerFill ignores its memo today, so the declared lag-1 edge is N"},
     "kP12LightLevel<-kP12LightLevel": {"files": ["control/skeleton/SkeletonModule.cpp"], "read": ["\\bReadOf\\(\\s*VpSkeleton::kP12LightLevel"]},
     "kSourceIdentity<-kP5MonitorTiles": {"read": ["\\bClassicalReading\\b"], "note": "type-token match only: FrameInput.classical is a monitor snapshot copied by the call site, not an Acquire"},
     "kSourceGeometry<-kP5MonitorTiles": {"read": ["\\bSnapshot\\b"]},

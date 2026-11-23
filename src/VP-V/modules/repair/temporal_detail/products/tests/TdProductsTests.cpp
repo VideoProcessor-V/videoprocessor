@@ -62,7 +62,12 @@ namespace Tests
 		constexpr size_t kDeclaredInputsToday = 4;   // the registry's declared input prefix (the contract table has the full lists)
 		// P15-DECL (WAIVER-P15DECL-01): quality_pattern declares SIX inputs (the four it had + the P5 monitor tiles at lag 0 + P14 source_identity at lag 1,
 		// i.e. the first six of its seven intended reads; source_geometry stays the recorded seventh). Every other product keeps the prefix of 4.
-		inline size_t DeclaredInputsOf(VpSkeleton::ProductId id) { return id == VpSkeleton::kQualityPattern ? 6u : kDeclaredInputsToday; }
+		// WAIVER-15D-P16: coding_evidence declares the first THREE (P10, P11, P13): its fourth, the self lag-1 hash history, is withdrawn
+		// (15d J5: the CPU fill reads no history; the GPU fused pass re-declares it). The contract table keeps the full list.
+		inline size_t DeclaredInputsOf(VpSkeleton::ProductId id)
+		{
+			return id == VpSkeleton::kQualityPattern ? 6u : id == VpSkeleton::kCodingEvidence ? 3u : kDeclaredInputsToday;
+		}
 
 		const Consumer kAllConsumers[] = { Consumer::AdaptiveScaler, Consumer::DitherNeed, Consumer::SigmaDelta, Consumer::ChromaStage, Consumer::Deband };
 

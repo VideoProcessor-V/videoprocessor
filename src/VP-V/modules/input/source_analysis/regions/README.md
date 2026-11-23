@@ -121,8 +121,10 @@ installation (a newer module's provider is kept).
 
 **Decisions.**
 - Form: CPU, per monitor frame seq, the default variant; bytes = Header + one record per tile (`Serialise` / `Deserialise`, magic PCE1).
-  The per-8x8 GPU declaration of P16 (Products.h) is untouched; a GPU per-8x8 form later is a FORM/size variant of this same product
-  for temporal detail (one unit, rule 20), not a second estimator.
+  The per-8x8 GPU declaration of P16 (Products.h) is kept, except that 15d J5 (2026-11-15) withdrew its self lag-1 input and
+  `orderedChain`: this fill reads no history (its memo is unused), so the hash-history read was untrue. A GPU per-8x8 form later is a
+  FORM/size variant of this same product for temporal detail (one unit, rule 20), not a second estimator; the GPU fused pass that builds
+  hash32 / copy flags re-declares lag 1 with a real `Acquire(kCodingEvidence, seq - 1)` in its fill.
 - Fill input: the monitor stages its tile pack for the seq (`Hub::Stage`); the owner fill measures it. The hub is a module-level seam
   whose memo provider is set from this unit's own block in SkeletonModule.cpp (no Bill hook line). L-CORE's MemoFor replaces only the provider.
 - Seq: the monitor's frame sequence. The fill declares keepFrames = the monitor's worker latency; a lagging monitor frame inside

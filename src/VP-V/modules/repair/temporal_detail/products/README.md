@@ -48,7 +48,7 @@ last and sheds them in reverse order, each step visible. Declared totals at 4K: 
 
 **Inputs beyond what the registry declares.** The framework limit is now 16 inputs per product (`kMaxInputs`) and 10 consumed products per consumer
 (`kMaxConsumes`; W1-SKG landed lead edges, the raised limits, ordered-chain lane jobs and history declarations). The registry still declares only the
-first four inputs of each intended input list (never silently dropping one: `kDeclaredInputsToday` in the tests) and the contract table records the full
+first four inputs of each intended input list (never silently dropping one: `kDeclaredInputsToday` in the tests; quality_pattern declares six, P15-DECL; coding_evidence declares three since 15d J5, 2026-11-15: its fourth, the self lag-1 hash history, is withdrawn because the CPU per-tile fill reads no history, and the GPU fused pass that builds the hashes re-declares it) and the contract table records the full
 lists (`td.blocks` 17, `coding_evidence` 6, `quality_pattern` 5, `td.anchor_pass` 5; coding_evidence and quality_pattern also record the provisional lag-1 held read of `source_geometry` (P14g, wave S2), the temporal-detail catalog row reads it for td.blocks; the td.blocks list is above `kMaxInputs` = 16 and needs trimming before reset 2 declares it); a test compares prefix and order. **Reset-2 open item:** the declarations catch up to the
 table (short-queue substitutes for the lead edges).
 
