@@ -6,6 +6,7 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders/custom.h>
 
+#include <functional>
 #include <vector>
 
 // WP-13 (integration batch 1): the sigma-delta's motion-vector inputs, moved out of the renderer
@@ -91,6 +92,14 @@ namespace
 		// The engine read of the last Apply (its fallback decision is engaged only when requested and a product is absent).
 		const TdProducts::ReadResult& TemporalDetailRead() const { return td; }
 
+		// W23-4p: attaches a post-render release callback (e.g. DitherNeed::Gpu::HookGuard::Release) invoked
+		// unconditionally inside Release() and ~NextVectorGuard() (including NLS retry draws via OutputFinishSegment::OnDraw).
+		void AttachRelease(std::function<void()> fn)
+		{
+			if (fn)
+				extraReleases.push_back(std::move(fn));
+		}
+
 		void Release()
 		{
 			for (const pl_hook* hook : applied)
@@ -99,10 +108,15 @@ namespace
 				Set(hook, nullptr);
 			}
 			applied.clear();
+			std::vector<std::function<void()>> fns;
+			fns.swap(extraReleases);
+			for (auto& fn : fns)
+				if (fn) fn();
 		}
 
 	private:
 		std::vector<const pl_hook*> applied;
+		std::vector<std::function<void()>> extraReleases;
 		TdProducts::ReadResult td;
 	};
 }

@@ -55,6 +55,7 @@ enum VramUserId : uint16_t {
     kUserLongPair,             // SK-MV MV4: the long-pair service's NVOF rings (T2, sheddable: optional, goes first; NOT the producer's protected user)
     kUserMotionMatcher,        // W2-C1 C1-3: the motion engine's matcher (the de-judder's block searches and pair flow textures; T1, stepped)
     kUserSkeletonMemo,         // GF-P2b S10: the skeleton memo's GPU owner-fill spots (MemoGpuGrant.h); its own id, never the arena's
+    kUserDitherNeed,           // W23-4p: dither_need GPU block-pass ping-pong + LUT textures (OutputFinishSegment)
     kUserProductBase = 0x100,  // + ProductId: skeleton lane products
 };
 

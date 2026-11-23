@@ -140,6 +140,50 @@ namespace Vpv
 			bool Valid() const { return memo && host; }
 		};
 
+		// W23-4p (G-T1): render-thread snapshot of the skeleton's GPU P10 (grain split blocks) and P11 (region precursors)
+		// for dither_need. Texture pointers are opaque const void* (pl_tex) so SkeletonFacts.h stays free of libplacebo headers.
+		struct DitherNeedGpuInputs
+		{
+			static constexpr size_t kPrecursors = 6;
+			const void* gsBlocks = nullptr;
+			const void* precursors[kPrecursors] = {};
+			int srcW = 0, srcH = 0;
+			int gridW = 0, gridH = 0;
+			int blockPx = 0;
+			uint64_t grainSeq = 0;
+			uint64_t evidenceSeq = 0;
+			bool haveGrain = false;
+			bool haveEvidence = false;
+		};
+
+		// W23-4p (G-T1): header-light POD display facts synced from the renderer's active frame to P11 (RegionStatsKernel)
+		// and P12 (LightLevelKernel) so live GPU fills use the real display context instead of static SDR defaults.
+		struct DitherNeedDisplayFacts
+		{
+			int regionTransfer = 0;            // 0 = SDR gamma, 1 = PQ, 2 = HLG
+			double sdrWhiteNits = 203.0;
+			double displayPeakNits = 203.0;
+			double displayBlackNits = 0.0;
+			double ambientNits = 0.0;
+			double weber = 0.02;
+			double sdrGamma = 2.4;
+			int llContextKind = 0;             // 0 = Sdr, 1 = HdrPassthrough, 2 = HdrToSdr
+			bool llFullRange = false;
+			double llSourcePeakNits = 0.0;
+			double llSourceMinNits = 0.0;
+			double llDynamicPeakNits = 0.0;
+			double llSdrTargetNits = 203.0;
+			double llSdrBlackNits = 0.0;
+			int llTransfer = 0;                // 0 = Bt1886, 1 = Srgb, 2 = Power
+			double llGammaPower = 2.4;
+			std::string llToneMapping = "auto";
+			std::string llQuality = "high";
+			bool llSdrToneKnee = false;
+			double llSdrToneHeadroom = 0.0;
+			double llSdrToneKneeStart = 0.75;
+			double llSdrToneKneeStrength = 0.5;
+		};
+
 		struct IExternalDemand
 		{
 			virtual void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
@@ -182,6 +226,11 @@ namespace Vpv
 			// renderer at the address). A declaring component folds it into its "already declared" key, so a GPU-only reset of the same
 			// renderer (the tap generation unchanged) still re-declares. Only ever grows. Any thread. Default 0 (nothing is ever erased).
 			virtual uint64_t ExternalErasures(const void* /*host*/) const { return 0; }
+			// W23-4p (G-T1): render-thread reader of the skeleton's GPU P10 (grain split blocks) and P11 (region precursors) for frame `seq`.
+			// Default returns empty (implementer without GPU products).
+			virtual DitherNeedGpuInputs ReadDitherNeedGpuInputs(const void* /*host*/, uint64_t /*seq*/) const { return DitherNeedGpuInputs(); }
+			// W23-4p (G-T1): render-thread sync of resolved display facts to P11 (RegionStatsKernel) and P12 (LightLevelKernel). Change-only.
+			virtual void SyncDitherNeedDisplayFacts(const void* /*host*/, const DitherNeedDisplayFacts& /*facts*/) {}
 		protected:
 			~IExternalDemand() {}
 		};

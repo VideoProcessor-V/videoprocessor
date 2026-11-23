@@ -124,6 +124,18 @@ namespace Vpv
 				return false;
 			}
 
+			// W23-4p (G-T1): a consumer that reads any skeleton GPU product (P10 grain split, P11 region block stats, P12 light level).
+			bool ReadsGpuProduct(const VpSkeleton::ConsumerDecl& c)
+			{
+				for (size_t i = 0; i < c.count; ++i)
+				{
+					const VpSkeleton::ProductId p = c.consumes[i].product;
+					if (p == VpSkeleton::kP10GrainSplit || p == VpSkeleton::kP11RegionBlockStats || p == VpSkeleton::kP12LightLevel)
+						return true;
+				}
+				return false;
+			}
+
 			std::atomic<unsigned long long>& DispatchersCreated()
 			{
 				static std::atomic<unsigned long long> n{ 0 };
@@ -202,7 +214,8 @@ namespace Vpv
 		{
 			Bundle(Dims d, uint64_t seq, const std::function<uint64_t()>& clock, const GpuWiring& gpuWiring,
 				std::shared_ptr<VpSkeleton::SkeletonMemo> hostMemo, VpSkeleton::LaneLeaseOf leaseOf,
-				VpSkeleton::ILaneProducer* qualityP15 = nullptr, VpSkeleton::ILaneProducer* qualityP15c = nullptr)
+				VpSkeleton::ILaneProducer* qualityP15 = nullptr, VpSkeleton::ILaneProducer* qualityP15c = nullptr,
+				const std::atomic<bool>* entranceDriven = nullptr)
 				: dims(d), createdSeq(seq), wiring(gpuWiring), memo(std::move(hostMemo)),
 				  // Without a GPU the registry is exactly the one the lane always used; with one, the tap form (P10 / P11 read
 				  // the tap plane, not the P13 ring that is RenderOnly and never filled: without this P10 is InputMissing).
@@ -237,13 +250,14 @@ namespace Vpv
 							const AnalysisLane* l = &lane;
 							SkeletonGpuDispatcher* disp = wiring.dispatcher;
 							std::atomic<uint64_t>* pendingAsNone = &lightPendingAsNone;   // a Bundle member: it outlives the job
-							job12->SetBeginGate([l, disp, pendingAsNone](const VpSkeleton::LaneJobContext& job) {
+							job12->SetBeginGate([l, disp, pendingAsNone, entranceDriven](const VpSkeleton::LaneJobContext& job) {
 								if (!disp->Available(VpSkeleton::kP12LightLevel))
 									return false;   // refused / not allocated yet: declined, shown by the dispatcher's own entry
-								return VpLaneProducts::LightLevelBeginGate(job.seq, [l, pendingAsNone](uint64_t s) {
-									// LightPrevStateOf: Pending reads as None until G6 (a pending live fill is run by nothing before it).
-									// Counted and shown (skeleton_gpu_light_pending), never silent.
-									return VpLaneProducts::LightPrevStateOf(l->ReadOf(VpSkeleton::kP12LightLevel, s).state, *pendingAsNone);
+								const bool g6Driven = entranceDriven != nullptr && entranceDriven->load(std::memory_order_acquire);
+								return VpLaneProducts::LightLevelBeginGate(job.seq, [l, pendingAsNone, g6Driven](uint64_t s) {
+									// LightPrevStateOf: Pending reads as Pending once G6 Entrance drives RunDeferredLive;
+									// before Entrance runs, reads as None and counts into skeleton_gpu_light_pending.
+									return VpLaneProducts::LightPrevStateOf(l->ReadOf(VpSkeleton::kP12LightLevel, s).state, *pendingAsNone, g6Driven);
 								});
 							});
 						}
@@ -477,9 +491,15 @@ namespace Vpv
 			bool feedNeeded = false;             // an external consumer reads P2 / P2m / P3 or a camera product: the engine feed runs
 			bool fitWantedPushed = false;        // IVectorEngine::SetCameraFitWanted(true) was sent
 			// 15c-c8 (render thread, Reconcile): the raising consumers that turned this lane on (empty = the lane runs as configured) and
-			// the configured mode beside it. A raised lane is On with no GPU dispatcher, and its report reads only P1 / P4.
+			// the configured mode beside it. A CPU-only raised lane has no GPU dispatcher; W23-4p: raisedWantsGpu is true when a raising
+			// external consumer requests P10/P11/P12, constructing the GPU dispatcher on demand.
 			std::string laneRaise;
+			bool raisedWantsGpu = false;
 			VpSkeleton::LaneSettings::Mode configuredLaneMode = VpSkeleton::LaneSettings::Mode::Off;
+			// W23-4p (G6): true once FramePhase::Entrance has driven AnalysisLane::RunDeferredLive on this host's dispatcher.
+			std::atomic<bool> entranceLiveDriven{ false };
+			bool shownEntranceLiveDriven = false;
+			std::string lastDisplayFactsKey;
 			VpMotion::IVectorEngine* engine = nullptr;   // this renderer's engine; dropped at Teardown (valid until the renderer goes)
 			FeedCounters feed;
 			// The scene product's counters (W1-C7): written by the render thread (seal) and by any SceneOf caller, so atomic and relaxed.
@@ -807,6 +827,8 @@ namespace Vpv
 					st.dispatcher->Abandon();   // the renderer's device died without GpuReleased: no libplacebo call may touch it
 				st.dispatcher.reset();
 				st.dispatcherGpu = nullptr;
+				st.entranceLiveDriven.store(false, std::memory_order_release);
+				st.lastDisplayFactsKey.clear();
 			}
 
 			// 70b G5: the dispatcher exists only while the lane is wanted AND mode == on AND a pl_gpu was given. Shadow, Off,
@@ -814,8 +836,10 @@ namespace Vpv
 			// storage choice rebuilds it (kernels carry the storage) and drops the lane bundle that points at the old one.
 			void UpdateDispatcher(HostState& st)
 			{
-				// 15c-c8: a lane raised by consumer demand makes no GPU products (no consumer of them): no dispatcher.
-				const bool want = st.settings.lane.mode == LaneSettings::Mode::On && st.gpu != nullptr && st.laneRaise.empty();
+				// 15c-c8 + W23-4p: a CPU-only raised lane (e.g. LED drive) creates no GPU dispatcher; a raising consumer that
+				// requests GPU products (P10/P11/P12, e.g. dither_need = auto) raises the dispatcher on demand.
+				const bool want = st.settings.lane.mode == LaneSettings::Mode::On && st.gpu != nullptr &&
+					(st.laneRaise.empty() || st.raisedWantsGpu);
 				const GrainSplit::Storage storage = RequestedStorage(st.settings);
 				if (!want)
 				{
@@ -1375,7 +1399,7 @@ namespace Vpv
 				EraseExternal(f.host);   // a renderer recreated at this address never inherits the old one's external demand
 				// 15c-c8: with the demand goes its raise of the store; version 0 = the next Begin looks again (a later declaration raises anew).
 				VpFrameAnalysis::SourceFrameTap::SetStoreDemand(f.host, false, std::string());
-				NoteRaiseApplied(f.host, 0, std::string());
+				NoteRaiseApplied(f.host, 0, std::string(), false);
 				break;
 			}
 			default:
@@ -1436,8 +1460,9 @@ namespace Vpv
 			const uint64_t raiseVer = raiseVersion_.load(std::memory_order_acquire);
 			const bool raiseBlocked = s.originalPathway || RecordedPathway(host) == 1;
 			const std::string raise = raiseBlocked ? std::string() : RaiseReasonOf(host);
+			const bool raisedWantsGpu = !raiseBlocked && RaisingWantsGpuOf(host);
 			VpFrameAnalysis::SourceFrameTap::SetStoreDemand(host, !raise.empty(), raise);
-			NoteRaiseApplied(host, raiseVer, raise);
+			NoteRaiseApplied(host, raiseVer, raise, raisedWantsGpu);
 			std::string laneRaise;
 			const LaneSettings::Mode configuredMode = s.lane.mode;
 			if (!raise.empty() && s.lane.mode != LaneSettings::Mode::On)
@@ -1482,7 +1507,8 @@ namespace Vpv
 				}
 			}
 			st->settings = s;
-			st->laneRaise = laneRaise;               // 15c-c8: before UpdateDispatcher (a raised lane has no GPU dispatcher)
+			st->laneRaise = laneRaise;               // 15c-c8 + W23-4p: before UpdateDispatcher
+			st->raisedWantsGpu = raisedWantsGpu;
 			st->configuredLaneMode = configuredMode;
 			// P10 D5: the source ring is fed only while the lane runs with lane_tap_source = auto (Original: cpu, never fed).
 			if (const std::shared_ptr<Vpv::Capture::HostEntry> capture = Vpv::Capture::Find(host))
@@ -1556,6 +1582,10 @@ namespace Vpv
 			st->feedNeeded = false;
 			st->wantsCameraFit = false;
 			st->laneRaise.clear();   // 15c-c8 (the store demand is Reconcile's / GpuReleased's: a torn-down lane may still be raised again)
+			st->raisedWantsGpu = false;
+			st->entranceLiveDriven.store(false, std::memory_order_release);
+			st->shownEntranceLiveDriven = false;
+			st->lastDisplayFactsKey.clear();
 			st->feedPendingSeq = 0;
 			StopBundle(*st);
 			ReleaseDispatcher(*st, gpuAlive);   // 70b G5: the GPU textures go with the lane (GpuReleased / switched off)
@@ -1607,11 +1637,14 @@ namespace Vpv
 			}
 			const bool wasRaising = RaisingLocked(*entry);
 			const std::string wasReason = entry->raise;
+			const bool wasWantsGpu = wasRaising && std::any_of(entry->consumers.begin(), entry->consumers.end(), ReadsGpuProduct);
 			entry->consumers = consumers;
 			entry->products = publishedOutside;
 			entry->raise = reason;
+			const bool nowRaising = RaisingLocked(*entry);
+			const bool nowWantsGpu = nowRaising && std::any_of(entry->consumers.begin(), entry->consumers.end(), ReadsGpuProduct);
 			externalVersion_.fetch_add(1, std::memory_order_release);
-			if (wasRaising != RaisingLocked(*entry) || (wasRaising && wasReason != reason))
+			if (wasRaising != nowRaising || (wasRaising && wasReason != reason) || wasWantsGpu != nowWantsGpu)
 				raiseVersion_.fetch_add(1, std::memory_order_release);
 		}
 
@@ -1624,13 +1657,29 @@ namespace Vpv
 			return why;
 		}
 
+		bool SkeletonModule::RaisingWantsGpuLocked(const void* host) const
+		{
+			for (const ExternalEntry& e : external_)
+				if (e.host == host && RaisingLocked(e))
+					for (const VpSkeleton::ConsumerDecl& c : e.consumers)
+						if (ReadsGpuProduct(c))
+							return true;
+			return false;
+		}
+
+		bool SkeletonModule::RaisingWantsGpuOf(const void* host) const
+		{
+			std::lock_guard<std::mutex> lock(externalMutex_);
+			return RaisingWantsGpuLocked(host);
+		}
+
 		std::string SkeletonModule::RaiseReasonOf(const void* host) const
 		{
 			std::lock_guard<std::mutex> lock(externalMutex_);
 			return RaiseReasonLocked(host);
 		}
 
-		void SkeletonModule::NoteRaiseApplied(const void* host, uint64_t version, const std::string& applied)
+		void SkeletonModule::NoteRaiseApplied(const void* host, uint64_t version, const std::string& applied, bool wantsGpu)
 		{
 			std::lock_guard<std::mutex> lock(externalMutex_);
 			for (RaiseSeen& r : raiseSeen_)
@@ -1638,12 +1687,14 @@ namespace Vpv
 				{
 					r.version = version;
 					r.applied = applied;
+					r.appliedWantsGpu = wantsGpu;
 					return;
 				}
 			RaiseSeen r;
 			r.host = host;
 			r.version = version;
 			r.applied = applied;
+			r.appliedWantsGpu = wantsGpu;
 			raiseSeen_.push_back(r);
 		}
 
@@ -1689,6 +1740,7 @@ namespace Vpv
 				if (seen != nullptr && seen->version == version)
 					return;
 				const std::string now = RaiseReasonLocked(host);
+				const bool nowWantsGpu = RaisingWantsGpuLocked(host);
 				if (seen == nullptr)
 				{
 					RaiseSeen r;
@@ -1696,7 +1748,7 @@ namespace Vpv
 					raiseSeen_.push_back(r);
 					seen = &raiseSeen_.back();
 				}
-				if (now == seen->applied)
+				if (now == seen->applied && nowWantsGpu == seen->appliedWantsGpu)
 				{
 					seen->version = version;   // nothing to change for this host: the configured state (or the raise in force) stays
 					return;
@@ -1749,6 +1801,139 @@ namespace Vpv
 				if (e.first == host)
 					return e.second;
 			return 0;
+		}
+
+		DitherNeedGpuInputs SkeletonModule::ReadDitherNeedGpuInputs(const void* host, uint64_t seq) const
+		{
+			DitherNeedGpuInputs out;
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			if (!st || !st->active.load(std::memory_order_acquire) || seq == 0)
+				return out;
+			const std::shared_ptr<Bundle> b = std::atomic_load(&st->bundle);
+			if (!b || !b->wiring.dispatcher)
+				return out;
+			const SkeletonGpuDispatcher* disp = b->wiring.dispatcher;
+			const int w = static_cast<int>(b->dims.width);
+			const int h = static_cast<int>(b->dims.height);
+			if (w <= 0 || h <= 0)
+				return out;
+			const int B = RegionEvidence::BlockSizeFor(h);
+			const RegionEvidence::Grid g = RegionEvidence::MakeGrid(w, h, B);
+			out.srcW = w;
+			out.srcH = h;
+			out.gridW = g.gw;
+			out.gridH = g.gh;
+			out.blockPx = B;
+
+			const AnalysisLane::ProductRead r10 = b->lane.ReadOf(VpSkeleton::kP10GrainSplit, seq);
+			if (r10.state == AnalysisLane::ProductRead::Ring || r10.state == AnalysisLane::ProductRead::Live)
+			{
+				if (const VpLaneProducts::GpuProductTextures* set10 = disp->TexturesOf(VpSkeleton::kP10GrainSplit))
+				{
+					// Compact layout: [splitA, splitB, blocks] (term 2); Full layout: [split, blocks] (term 1).
+					const size_t blocksTerm = b->wiring.compactGrain ? 2u : 1u;
+					if (r10.info.index >= 0)
+					{
+						const pl_tex tex = r10.state == AnalysisLane::ProductRead::Ring
+							? set10->Ring(static_cast<size_t>(r10.info.index), blocksTerm)
+							: set10->Live(static_cast<size_t>(r10.info.index), blocksTerm);
+						if (tex != nullptr)
+						{
+							out.gsBlocks = tex;
+							out.grainSeq = seq;
+							out.haveGrain = true;
+						}
+					}
+				}
+			}
+
+			const AnalysisLane::ProductRead r11 = b->lane.ReadOf(VpSkeleton::kP11RegionBlockStats, seq);
+			if (r11.state == AnalysisLane::ProductRead::Ring || r11.state == AnalysisLane::ProductRead::Live)
+			{
+				if (const VpLaneProducts::GpuProductTextures* set11 = disp->TexturesOf(VpSkeleton::kP11RegionBlockStats))
+				{
+					if (r11.info.index >= 0)
+					{
+						bool allOk = true;
+						for (size_t t = 0; t < DitherNeedGpuInputs::kPrecursors; ++t)
+						{
+							const pl_tex tex = r11.state == AnalysisLane::ProductRead::Ring
+								? set11->Ring(static_cast<size_t>(r11.info.index), t)
+								: set11->Live(static_cast<size_t>(r11.info.index), t);
+							out.precursors[t] = tex;
+							if (tex == nullptr)
+								allOk = false;
+						}
+						if (allOk)
+						{
+							out.evidenceSeq = seq;
+							out.haveEvidence = true;
+						}
+					}
+				}
+			}
+			return out;
+		}
+
+		void SkeletonModule::SyncDitherNeedDisplayFacts(const void* host, const DitherNeedDisplayFacts& facts)
+		{
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			if (!st || !st->dispatcher)
+				return;
+			// Change-only key so LightLevelKernel's LUT generation only bumps when display facts actually change.
+			char keyBuf[256];
+			std::snprintf(keyBuf, sizeof(keyBuf), "%d|%.3f|%.3f|%.4f|%.4f|%.4f|%.3f|%d|%d|%.2f|%.3f|%.2f|%.2f|%.4f|%d|%.3f|%d|%.3f|%.3f|%.3f|",
+				facts.regionTransfer, facts.sdrWhiteNits, facts.displayPeakNits, facts.displayBlackNits, facts.ambientNits,
+				facts.weber, facts.sdrGamma, facts.llContextKind, facts.llFullRange ? 1 : 0, facts.llSourcePeakNits,
+				facts.llSourceMinNits, facts.llDynamicPeakNits, facts.llSdrTargetNits, facts.llSdrBlackNits, facts.llTransfer,
+				facts.llGammaPower, facts.llSdrToneKnee ? 1 : 0, facts.llSdrToneHeadroom, facts.llSdrToneKneeStart,
+				facts.llSdrToneKneeStrength);
+			const std::string key = std::string(keyBuf) + facts.llToneMapping + "|" + facts.llQuality;
+			if (key == st->lastDisplayFactsKey)
+				return;
+			st->lastDisplayFactsKey = key;
+
+			if (VpLaneProducts::IProductKernel* k11 = st->dispatcher->KernelOf(VpSkeleton::kP11RegionBlockStats))
+			{
+				auto* region = static_cast<VpLaneProducts::RegionStatsKernel*>(k11);
+				RegionEvidence::VisibilityParams vis;
+				vis.displayPeakNits = facts.displayPeakNits;
+				vis.weber = facts.weber;
+				const double darkFloor = facts.displayBlackNits + facts.ambientNits;
+				if (darkFloor > 0.0)
+					vis.darkNits = darkFloor;
+				region->SetDisplayFacts(facts.regionTransfer, facts.sdrWhiteNits, vis);
+			}
+			if (VpLaneProducts::IProductKernel* k12 = st->dispatcher->KernelOf(VpSkeleton::kP12LightLevel))
+			{
+				auto* light = static_cast<VpLaneProducts::LightLevelKernel*>(k12);
+				LightLevel::Settings ls;
+				ls.weber = facts.weber;
+				ls.ambientNits = facts.ambientNits;
+				ls.sdrTargetNits = facts.llSdrTargetNits;
+				ls.sdrBlackNits = facts.llSdrBlackNits;
+				ls.displayWhiteNits = facts.sdrWhiteNits;
+				ls.displayBlackNits = facts.displayBlackNits;
+				ls.transfer = facts.llTransfer == 1 ? LightLevel::Transfer::Srgb
+					: facts.llTransfer == 2 ? LightLevel::Transfer::Power : LightLevel::Transfer::Bt1886;
+				ls.gammaPower = facts.llGammaPower;
+				ls.toneMapping = facts.llToneMapping;
+				ls.quality = facts.llQuality;
+				ls.shape.knee = facts.llSdrToneKnee;
+				ls.shape.headroom = facts.llSdrToneHeadroom;
+				ls.shape.kneeStart = facts.llSdrToneKneeStart;
+				ls.shape.kneeStrength = facts.llSdrToneKneeStrength;
+
+				LightLevel::Context lc;
+				lc.kind = facts.llContextKind == 1 ? LightLevel::Context::HdrPassthrough
+					: facts.llContextKind == 2 ? LightLevel::Context::HdrToSdr : LightLevel::Context::Sdr;
+				lc.fullRange = facts.llFullRange;
+				lc.sourcePeakNits = facts.llSourcePeakNits;
+				lc.sourceMinNits = facts.llSourceMinNits;
+				lc.displayPeakNits = facts.displayPeakNits;
+				lc.dynamicPeakNits = facts.llDynamicPeakNits;
+				light->SetSettings(ls, lc);
+			}
 		}
 
 		size_t SkeletonModule::ExternalEntriesOf(const void* host) const
@@ -2690,7 +2875,37 @@ namespace Vpv
 				}
 				return false;
 			}
-			if (c.phase == RE::FramePhase::Entrance) { if (const std::shared_ptr<HostState> e = hosts_.Find(c.host)) e->budgetFeed.NoteCaptureRate(c.captureRateHz); return false; }   // S0: measured rate for the slot budget
+			if (c.phase == RE::FramePhase::Entrance)
+			{
+				if (const std::shared_ptr<HostState> e = hosts_.Find(c.host))
+				{
+					e->budgetFeed.NoteCaptureRate(c.captureRateHz);   // S0: measured rate for the slot budget
+					// W23-4p (G6): Entrance is the GPU-legal render-thread point before CollectFrameHooks;
+					// ensure product textures are allocated for the active graph/dims (no-op when unchanged) and
+					// dispatch any pending live GPU fills (P10/P11/P12) in topological order.
+					if (e->active.load(std::memory_order_acquire) && c.seq > 0)
+					{
+						if (const std::shared_ptr<Bundle> b = std::atomic_load(&e->bundle))
+						{
+							if (b->wiring.dispatcher != nullptr)
+							{
+								if (e->dispatcher && b->wiring.dispatcher == e->dispatcher.get() && e->gpuMemoryNote.empty())
+								{
+									e->dispatcher->FlushReleases();
+									if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
+										if (ls->graph.valid)
+											e->dispatcher->Configure(ls->graph, b->registry, ls->plan, b->dims, b->configuredGen);
+								}
+								const AnalysisLane::DeferredReport rep = b->lane.RunDeferredLive(static_cast<uint64_t>(c.seq));
+								const bool prevDriven = e->entranceLiveDriven.exchange(true, std::memory_order_acq_rel);
+								if (!prevDriven || rep.run > 0 || rep.failed > 0 || rep.stale > 0)
+									Refresh(*e);
+							}
+						}
+					}
+				}
+				return false;
+			}
 			if (c.phase != RE::FramePhase::Begin && c.phase != RE::FramePhase::AfterRender)
 				return false;
 			if (c.phase == RE::FramePhase::AfterRender)
@@ -2867,7 +3082,8 @@ namespace Vpv
 				if (current)
 					hostMemo->Clear();   // G0 S4: a graph rebuild is a discontinuity: every memo spot of the old graph is released
 				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring, hostMemo, std::move(leaseOf),
-					qualityP15_.load(std::memory_order_acquire), qualityP15c_.load(std::memory_order_acquire));
+					qualityP15_.load(std::memory_order_acquire), qualityP15c_.load(std::memory_order_acquire),
+					&st.entranceLiveDriven);
 				st.leadPeak = 0;   // a new lane: the best lead is measured again
 				st.leadPeakAtUs = now;
 				st.lastUsedLead = 0;
@@ -3209,13 +3425,15 @@ namespace Vpv
 			// U7-accuracy Q5: the cut veto's reach (a store toggle, a second renderer) refreshes the text at once.
 			const std::string vetoOff = SceneVetoOff(st.host);
 			const bool noGrid = st.sceneNoGrid.load(std::memory_order_relaxed) != 0;   // the no-grid decision engages at once too
+			const bool liveDriven = st.entranceLiveDriven.load(std::memory_order_acquire);
 			const bool due = st.frames <= kEarlyRefreshFrames || st.frames % kRefreshEvery == 1 || st.waiting != st.shownWaiting ||
 				hasBundle != st.shownBundle || queueWired != st.shownQueueWired || queueKey != st.shownQueueKey || vetoOff != st.shownVetoOff ||
-				noGrid != st.shownNoGrid;
+				noGrid != st.shownNoGrid || liveDriven != st.shownEntranceLiveDriven;
 			if (!due)
 				return;
 			st.shownVetoOff = vetoOff;
 			st.shownNoGrid = noGrid;
+			st.shownEntranceLiveDriven = liveDriven;
 			st.shownQueueKey = queueKey;
 			st.shownQueueWired = queueWired;
 			st.shownWaiting = st.waiting;
@@ -3259,7 +3477,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 			const SkeletonGpuDispatcher* gd = st.dispatcher.get();
 			const bool shadow = st.settings.lane.mode == LaneSettings::Mode::Shadow;
 			addDecision(FallbackCatalog::SkeletonGpuShadow(shadow));
-			addDecision(FallbackCatalog::SkeletonGpuDevice(!shadow && gd == nullptr && st.laneRaise.empty()));   // 15c-c8: raised = no GPU products by design
+			addDecision(FallbackCatalog::SkeletonGpuDevice(!shadow && gd == nullptr && (st.laneRaise.empty() || st.raisedWantsGpu)));   // 15c-c8 + W23-4p: CPU-only raise has no GPU products by design; GPU raise requires a render device
 			if (st.sealLateHook)
 				fb.push_back("skeleton_lane: switched on after the first frame; the lane binds the shared seal at the next source era");
 			if (!st.cardNote.empty())
@@ -3301,7 +3519,11 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				if (gd != nullptr && st.gpuMemoryNote.empty())
 				{
 					const bool gap = st.settings.gpuGap == GpuGapMode::AfterRender;
-					addDecision(FallbackCatalog::SkeletonGpuLive(true));   // RunDeferredLive is not called before the Entrance phase
+					addDecision(FallbackCatalog::SkeletonGpuLive(!liveDriven));   // W23-4p (G6): released once Entrance drives RunDeferredLive
+					const AnalysisLane::DeferredReport defTotals = lane.DeferredTotals();
+					if (defTotals.failed > 0 || defTotals.stale > 0)
+						fb.push_back("skeleton_gpu_live: Entrance deferred live fill had " + std::to_string(defTotals.failed) +
+							" failure(s) and " + std::to_string(defTotals.stale) + " stale drop(s)");
 					addDecision(FallbackCatalog::SkeletonGpuGapAhead(gap));
 					addDecision(FallbackCatalog::SkeletonGpuGapOff(!gap));
 					addDecision(FallbackCatalog::SkeletonTapSource(Vpv::TapSource::Status(st.tapCounters, TapRingStats(st.host))));

@@ -523,11 +523,16 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         outputFloat32 = f && f->component_depth[0] >= 32 && renderParams.output_fbo_float32;
     }
 #endif
+    SigmaDeltaDomain::Domain ditherDomain;
+    OutputSegments::DitherPrep ditherPrep;
+    bool ditherAny = false;
     {
-        const SigmaDeltaDomain::Domain domain = SigmaDeltaDomain::FromTarget(target.repr);
+        ditherDomain = SigmaDeltaDomain::FromTarget(target.repr);
         outputFinish.BeginFrame();   // S3 (output finish), step 1: the dither's code domain
-        const OutputSegments::DitherPrep ditherPrep = outputFinish.PrepareDither(frameHooks, domain, outputFloat32, pipelineSlots);
-        const bool any = ditherPrep.found && !ditherPrep.slotOff;
+        ditherPrep = outputFinish.PrepareDither(frameHooks, ditherDomain, outputFloat32, pipelineSlots);
+        ditherAny = ditherPrep.found && !ditherPrep.slotOff;
+        const bool any = ditherAny;
+        const SigmaDeltaDomain::Domain& domain = ditherDomain;
         const bool sigmaDomainDropped = ditherPrep.domainDropped;
         sigmaDeltaRanLast = any && domain.supported && !sigmaDomainDropped;   // vector engine: the output consumer's want
         const int signature = (domain.full ? 1 : 0) | (domain.sample << 1) | (domain.color << 8);
@@ -549,32 +554,6 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             !quantiserProblem.empty() ? FallbackCatalog::DitherDrop::DisabledByLibplacebo : FallbackCatalog::DitherDrop::None,
             sigmaDomainDropped ? std::string(domain.full ? "full" : "limited") + " range, " +
                 std::to_string(domain.sample) + "-bit swapchain, colour depth " + std::to_string(domain.color) : std::string()));
-        // dither_need (output.dither, default off; VP-V-owned segment, no Bill hook): the decision runs only on "auto" and never
-        // on the Original pathway; the feed is empty until the live fill (G6), so "auto" is the named, counted fallback today.
-        {
-            const DitherNeedSeam::Outcome need = outputFinish.EvaluateDitherNeed(
-                activeSettings.ditherNeed == "auto" && any, pipelineSlots.OriginalPathway());
-            // auto asked for but the sigma-delta is not running by choice: the visible fallback stays engaged while the
-            // condition holds (ONE decision per frame, one SyncFallback), and the reason is logged once on change (a dropped
-            // sigma-delta is already the "dither" fallback).
-            const bool inactive = activeSettings.ditherNeed == "auto" && !any && !pipelineSlots.OriginalPathway();
-            const std::string why = !inactive ? std::string() : ditherPrep.slotOff ? "output.dither is switched off in pipeline_slots_off" :
-                "the sigma-delta dither is not selected (temporal_dither)";
-            SyncFallback(inactive ? FallbackCatalog::DitherNeedInactive(true, why) : need.fallback);
-            if (inactive)
-            {
-                if (outputFinish.DitherNeedStatusChanged("dither need: inactive (" + why + ")"))
-                    DebugLog::Log("dither need: inactive (%s)", why.c_str());
-            }
-            else if (outputFinish.DitherNeedStatusChanged(need.status) && !need.status.empty())
-            {
-                const DitherNeedSeam::Counters& n = outputFinish.DitherNeedCounters();
-                DebugLog::Log("%s (frames so far: on %llu, not needed %llu, unavailable %llu, stale %llu, classical quality %llu)",
-                    need.status.c_str(), static_cast<unsigned long long>(n.framesOn), static_cast<unsigned long long>(n.framesNotNeeded),
-                    static_cast<unsigned long long>(n.framesUnavailable), static_cast<unsigned long long>(n.framesStale),
-                    static_cast<unsigned long long>(n.framesClassicalQuality));
-            }
-        }
     }
     // The dither is the last processing of every picture: if a configured
     // shader would run after the sigma-delta at the OUTPUT stage, the
@@ -822,6 +801,90 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     dejudderExtras.dejudderNextVectorsFrom = 0;
     VpResync::TakeIfDriving(resync, resyncDrive, VpResync::Reader::SigmaDelta);   // R3: checked by stamps above
     dejudderExtras.ditherNextGate.Clear();
+    // W23-4p (G-T1): live dither_need GPU block pass + HookGuard bind (default off; never on Original pathway).
+    // Runs after frameParams.hooks is finalized so HookGuard binds to the final sigma-delta hook, and attaches its
+    // release to nextVectorGuard (restored immediately after RenderOwned and on any NLS retry draw).
+    {
+        OutputSegments::DitherNeedGpuRequest dnReq;
+        dnReq.requested = activeSettings.ditherNeed == "auto";
+        dnReq.originalPathway = pipelineSlots.OriginalPathway();
+        dnReq.sigmaDeltaActive = ditherAny;
+        dnReq.slotOff = ditherPrep.slotOff;
+        dnReq.domainSupported = ditherDomain.supported;
+        dnReq.colorBits = ditherDomain.color;
+        dnReq.nlsActive = submittedNls != nullptr;   // GEM-224: decline visibly under NLS
+        SourceIdentity::QualityView dnQuality;
+        if (dnReq.requested && !dnReq.originalPathway)
+        {
+            dnReq.gpu = d3d11 ? d3d11->gpu : nullptr;
+            dnReq.host = this;
+            dnReq.sourceSequence = sourceSequence;
+            dnReq.dtSeconds = captureRateHz > 0.0 ? (1.0 / captureRateHz)
+                : (nominalSourceRateHz > 0.0 ? (1.0 / nominalSourceRateHz) : 0.0);
+            if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
+            {
+                const Vpv::Skeleton::SceneAnswer scene = demand->SceneOf(this, sourceSequence);
+                if (scene.known && scene.cut)
+                    dnReq.discontinuity = true;
+            }
+            double qBase = 0.15;
+            if (customHooks.QuantizerConfigured("noise_amplitude", qBase))
+                dnReq.aBase = qBase;
+            dnReq.sourceCrop = renderImage.crop;
+            dnReq.targetCrop = target.crop;
+            dnReq.lightSettings.sdrTargetNits = activeSettings.sdrTargetNits;
+            dnReq.lightSettings.sdrBlackNits = activeSettings.sdrBlackNits;
+            dnReq.lightSettings.displayWhiteNits = activeSettings.sdrTargetNits;
+            dnReq.lightSettings.displayBlackNits = activeSettings.sdrBlackNits;
+            dnReq.lightSettings.toneMapping = activeSettings.toneMapping;
+            dnReq.lightSettings.quality = activeSettings.quality;
+            dnReq.lightSettings.tuning = activeSettings.toneTuning;
+            dnReq.lightSettings.shape = activeSettings.sdrTone;
+            dnReq.lightSettings.sdrInputTransfer = activeSettings.sdrInputTransfer;
+            dnReq.lightSettings.outputGamma = activeSettings.outputGamma;
+            if (activeSettings.hasContrastRecovery)
+                dnReq.lightSettings.contrastRecovery = static_cast<double>(activeSettings.contrastRecovery);
+            {
+                const std::string t = LightLevel::detail::Normalize(activeSettings.hdrToneMapTargetGamma);
+                double gp = 2.4;
+                if (t == "srgb")
+                    dnReq.lightSettings.transfer = LightLevel::Transfer::Srgb;
+                else if (LightLevel::detail::ParseNumber(t, gp) && gp >= 1.8 && gp <= 2.8)
+                {
+                    dnReq.lightSettings.transfer = LightLevel::Transfer::Power;
+                    dnReq.lightSettings.gammaPower = gp;
+                }
+                else
+                    dnReq.lightSettings.transfer = LightLevel::Transfer::Bt1886;
+            }
+            const bool srcHdr = pl_color_transfer_is_hdr(renderImage.color.transfer);
+            const bool dstHdr = pl_color_transfer_is_hdr(target.color.transfer);
+            dnReq.lightContext.kind = !srcHdr ? LightLevel::Context::Sdr
+                : (dstHdr ? LightLevel::Context::HdrPassthrough : LightLevel::Context::HdrToSdr);
+            dnReq.lightContext.fullRange = pl_color_levels_guess(&renderImage.repr) == PL_COLOR_LEVELS_FULL;
+            dnReq.lightContext.sourcePeakNits = renderImage.color.hdr.max_luma > 0.0f ? static_cast<double>(renderImage.color.hdr.max_luma) : 0.0;
+            dnReq.lightContext.sourceMinNits = renderImage.color.hdr.min_luma > 0.0f ? static_cast<double>(renderImage.color.hdr.min_luma) : 0.0;
+            dnReq.lightContext.displayPeakNits = target.color.hdr.max_luma > 0.0f ? static_cast<double>(target.color.hdr.max_luma) : 0.0;
+            dnReq.regionTransfer = renderImage.color.transfer == PL_COLOR_TRC_PQ ? 1
+                : (renderImage.color.transfer == PL_COLOR_TRC_HLG ? 2 : 0);
+            dnQuality = vpv.sourceAnalysis.sourceMonitor.QualityView();
+            dnReq.quality = &dnQuality;
+        }
+        const DitherNeedSeam::Outcome need = outputFinish.RunDitherNeedGpu(dnReq, frameParams.hooks, frameParams.num_hooks,
+            [&nextVectorGuard](std::function<void()> fn) { nextVectorGuard.AttachRelease(std::move(fn)); });
+        SyncFallback(need.fallback);
+        if (outputFinish.DitherNeedStatusChanged(need.status) && !need.status.empty())
+        {
+            const DitherNeedSeam::Counters& n = outputFinish.DitherNeedCounters();
+            const std::string err = outputFinish.DitherNeedLastError();
+            DebugLog::Log("%s%s (frames so far: on %llu, not needed %llu, unavailable %llu, stale %llu, nls declined %llu, classical quality %llu)",
+                need.status.c_str(), err.empty() ? "" : (" [" + err + "]").c_str(),
+                static_cast<unsigned long long>(n.framesOn), static_cast<unsigned long long>(n.framesNotNeeded),
+                static_cast<unsigned long long>(n.framesUnavailable), static_cast<unsigned long long>(n.framesStale),
+                static_cast<unsigned long long>(n.framesNlsDeclined),
+                static_cast<unsigned long long>(n.framesClassicalQuality));
+        }
+    }
     // S-12BIT (refs/119 #51, #30): libplacebo's latched error flags (FBO, sampling, debanding, ...) and the float16 picture precision
     // are visible, and released in the Original pathway (a stale entry is a silent state in reverse). Here, not in ReportRenderErrors:
     // that body is a pure move that never runs in Original. The flags are renderErrors (read above from the renderer: the previous frame's latch).

@@ -64,11 +64,15 @@ namespace DitherNeedSeam
 		bool domainSupported = true;                                 // the sigma-delta can serve this output domain
 		double dtSeconds = 0.0;                                      // measured frame interval; <= 0 = unknown
 		bool discontinuity = false;                                  // cut, resync, re-base, context change
+		bool gpuGrainValid = false;                                  // live GPU P10 blocks texture present
+		bool gpuEvidenceValid = false;                               // live GPU P11 precursor textures present
+		bool nlsActive = false;                                      // GEM-224: non-linear stretch active (affine placement invalid)
+		unsigned extraMissing = 0;                                   // additional DitherNeed::Missing bits (GPU validation / bind)
 	};
 
 	struct Counters
 	{
-		uint64_t framesOn = 0, framesNotNeeded = 0, framesUnavailable = 0, framesStale = 0, framesClassicalQuality = 0;
+		uint64_t framesOn = 0, framesNotNeeded = 0, framesUnavailable = 0, framesStale = 0, framesClassicalQuality = 0, framesNlsDeclined = 0;
 	};
 
 	struct Outcome
@@ -77,6 +81,7 @@ namespace DitherNeedSeam
 		bool active = false;                  // the setting was on and the Original pathway was not
 		unsigned missing = 0;                 // DitherNeed::Missing bits
 		bool extraAllowed = false;            // result == On: the GPU block pass may run and be bound
+		bool classicalQuality = false;        // true when P14 QualityView fell back to classical while On
 		double qualityNeed = 1.0;             // 0..1: scales the wanted amplitude
 		int tier = -1;
 		DitherNeed::Params params;            // the law's parameters of this frame (aNeed scaled by qualityNeed)
@@ -102,14 +107,15 @@ namespace DitherNeedSeam
 				return o;
 			}
 			o.active = true;
-			unsigned missing = 0;
+			unsigned missing = f.extraMissing;
 			const bool stale =
 				(f.lutAgeSeconds > kMaxProductAgeSeconds) || (f.evidenceAgeSeconds > kMaxProductAgeSeconds) ||
 				(f.grainAgeSeconds > kMaxProductAgeSeconds);
 			if (!f.lut) missing |= DitherNeed::kNoLut;
-			if (!f.grain || !f.grain->CpuValid()) missing |= DitherNeed::kNoGrain;
-			if (!f.evidence || !f.evidence->Valid()) missing |= DitherNeed::kNoPrecursors;
+			if (!f.gpuGrainValid && (!f.grain || !f.grain->CpuValid())) missing |= DitherNeed::kNoGrain;
+			if (!f.gpuEvidenceValid && (!f.evidence || !f.evidence->Valid())) missing |= DitherNeed::kNoPrecursors;
 			if (!f.domainSupported) missing |= DitherNeed::kUnsupportedDomain;
+			if (f.nlsActive) missing |= DitherNeed::kNonLinearStretch;
 			if (stale) missing |= DitherNeed::kStaleProduct;
 
 			// Source quality decides how much of the wanted amplitude a source needs: a clean source needs none.
@@ -148,6 +154,7 @@ namespace DitherNeedSeam
 			o.status = o.decision.status;
 			if (classical && o.result == DitherNeed::Result::On)
 			{
+				o.classicalQuality = true;
 				o.status += " [" + std::string(SourceIdentity::ConsumerStatusText(SourceIdentity::QualityConsumer::DitherNeed)) + "]";
 				++counters_.framesClassicalQuality;
 			}
@@ -158,11 +165,39 @@ namespace DitherNeedSeam
 			case DitherNeed::Result::NotNeeded: ++counters_.framesNotNeeded; break;
 			case DitherNeed::Result::Unavailable:
 				++counters_.framesUnavailable;
-				if (missing & DitherNeed::kStaleProduct) ++counters_.framesStale;
+				if (o.missing & DitherNeed::kStaleProduct) ++counters_.framesStale;
+				if (o.missing & DitherNeed::kNonLinearStretch) ++counters_.framesNlsDeclined;
 				break;
 			case DitherNeed::Result::Off: break;
 			}
 			return o;
+		}
+
+		// Converts an Evaluate() == On outcome to Unavailable when the subsequent GPU block pass or HookGuard bind fails:
+		// rolls back framesOn / framesClassicalQuality, counts framesUnavailable, invalidates tracker, and engages fallback.
+		void RecordGpuFailure(Outcome& o, unsigned gpuMissing)
+		{
+			if (gpuMissing == 0) gpuMissing = DitherNeed::kPassFailed;
+			if (o.result == DitherNeed::Result::On)
+			{
+				if (counters_.framesOn > 0) --counters_.framesOn;
+				if (o.classicalQuality && counters_.framesClassicalQuality > 0) --counters_.framesClassicalQuality;
+			}
+			o.classicalQuality = false;
+			o.missing |= gpuMissing;
+			o.result = DitherNeed::Result::Unavailable;
+			o.extraAllowed = false;
+			o.decision.result = DitherNeed::Result::Unavailable;
+			o.decision.off = true;
+			o.decision.reset = false;
+			o.decision.missing = o.missing;
+			o.decision.status = DitherNeed::StatusOf(true, o.missing, true);
+			o.status = o.decision.status;
+			o.fallback = FallbackCatalog::DitherNeed(true, DitherNeed::MissingText(o.missing));
+			tracker_.Invalidate();
+			++counters_.framesUnavailable;
+			if (gpuMissing & DitherNeed::kStaleProduct) ++counters_.framesStale;
+			if (gpuMissing & DitherNeed::kNonLinearStretch) ++counters_.framesNlsDeclined;
 		}
 
 		const Counters& Count() const { return counters_; }

@@ -169,7 +169,8 @@ namespace DitherNeed
 		kLutSizeMismatch = 1u << 6,         // a light-level table that is not 1024 texels wide
 		kNoSetTexture = 1u << 7,            // libplacebo without pl_mpv_user_shader_set_texture: the map cannot be bound
 		kPassFailed = 1u << 8,              // the GPU block pass (or the texture bind) failed this frame
-		kStaleProduct = 1u << 9             // a shared product (P11, P12 or the grain split) is older than DitherNeedSeam's age limit
+		kStaleProduct = 1u << 9,            // a shared product (P11, P12 or the grain split) is older than DitherNeedSeam's age limit
+		kNonLinearStretch = 1u << 10        // GEM-224: non-linear stretch active; affine VPDN placement would misalign
 	};
 
 	inline std::string MissingText(unsigned mask)
@@ -184,6 +185,7 @@ namespace DitherNeed
 			{ kNoSetTexture, "libplacebo without set_texture" },
 			{ kPassFailed, "GPU pass failed" },
 			{ kStaleProduct, "a shared product is stale" },
+			{ kNonLinearStretch, "non-linear stretch active" },
 			{ kUnsupportedDomain, "output domain not supported" } };
 		std::string s;
 		for (const auto& n : kNames)

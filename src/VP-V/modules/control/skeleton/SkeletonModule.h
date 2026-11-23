@@ -205,6 +205,9 @@ namespace Vpv
 			SceneCounters SceneCountersOf(const void* host) const;
 			// GF-P2b S3: IExternalDemand::ExternalErasures (bumped by EraseExternal when it erased an entry of `host`). Any thread.
 			uint64_t ExternalErasures(const void* host) const override;
+			// W23-4p (G-T1): render-thread GPU P10/P11 product reader and display-facts sync for live dither_need.
+			DitherNeedGpuInputs ReadDitherNeedGpuInputs(const void* host, uint64_t seq) const override;
+			void SyncDitherNeedDisplayFacts(const void* host, const DitherNeedDisplayFacts& facts) override;
 
 			// The queue the lane graph is sized for: the terms the record histories are derived from (render-ahead R, lane lead L,
 			// look-ahead walk frames; VpSkeleton::QueueFramesFor). `wired` says which of the three a feed has delivered (kRenderAhead |
@@ -373,12 +376,15 @@ namespace Vpv
 				uint64_t version = 0;
 				int originalFlag = -1;   // -1 = no SettingsApplied seen yet
 				std::string applied;     // the raise reason the last Reconcile applied (empty = none)
+				bool appliedWantsGpu = false;   // W23-4p: whether the last applied raise included a GPU product consumer
 			};
 			std::atomic<uint64_t> raiseVersion_{ 1 };
 			std::vector<RaiseSeen> raiseSeen_;   // under externalMutex_
 			std::string RaiseReasonLocked(const void* host) const;
+			bool RaisingWantsGpuLocked(const void* host) const;
+			bool RaisingWantsGpuOf(const void* host) const;
 			bool RaisingLocked(const ExternalEntry& e) const { return !e.raise.empty() && !e.consumers.empty(); }
-			void NoteRaiseApplied(const void* host, uint64_t version, const std::string& applied);
+			void NoteRaiseApplied(const void* host, uint64_t version, const std::string& applied, bool wantsGpu);
 			void NotePathway(const void* host, int originalFlag);
 			int RecordedPathway(const void* host) const;
 			void ReconcileIfRaiseMoved(const void* host);

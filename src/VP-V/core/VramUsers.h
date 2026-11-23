@@ -44,6 +44,7 @@ inline const char* VramUserName(uint16_t id)
     case kUserBasicChroma: return "basic chroma upscale output";
     case kUserLongPair: return "long-pair optical flow";
     case kUserMotionMatcher: return "motion engine matcher";
+    case kUserDitherNeed: return "dither need map";
     default: break;
     }
     return "";

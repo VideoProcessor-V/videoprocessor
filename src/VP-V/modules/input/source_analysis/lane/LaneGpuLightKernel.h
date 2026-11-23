@@ -44,27 +44,30 @@ namespace VpLaneProducts
 
 	// The mapping the skeleton's P12 begin gate uses (AnalysisLane::ProductRead::State -> LightPrevState). Pending (a live fill
 	// recorded for the Entrance phase) reads as None until G6 drives RunDeferredLive: nothing runs it before, so waiting for
-	// it would hold P12(N) forever; P12(N) starts without a previous frame and the one-pole resets (shown). At G6, map
-	// Pending to LightPrevState::Pending here.
-	inline LightPrevState LightPrevStateOf(VpSkeleton::AnalysisLane::ProductRead::State s)
+	// it would hold P12(N) forever; P12(N) starts without a previous frame and the one-pole resets (shown). Once G6 Entrance
+	// drives RunDeferredLive (`g6LiveDriven == true`), Pending maps to LightPrevState::Pending so P12(N) waits properly.
+	inline LightPrevState LightPrevStateOf(VpSkeleton::AnalysisLane::ProductRead::State s, bool g6LiveDriven = false)
 	{
 		switch (s)
 		{
 		case VpSkeleton::AnalysisLane::ProductRead::Ring: return LightPrevState::Ring;
 		case VpSkeleton::AnalysisLane::ProductRead::Live: return LightPrevState::Live;
 		case VpSkeleton::AnalysisLane::ProductRead::Failed: return LightPrevState::Failed;
-		case VpSkeleton::AnalysisLane::ProductRead::Pending: return LightPrevState::None;
+		case VpSkeleton::AnalysisLane::ProductRead::Pending:
+			return g6LiveDriven ? LightPrevState::Pending : LightPrevState::None;
 		default: return LightPrevState::None;
 		}
 	}
 
-	// The same mapping, counting each Pending read as None in `pendingReadAsNone` (the skeleton shows it as skeleton_gpu_light_pending:
-	// the mapping is a visible downgrade, never silent).
-	inline LightPrevState LightPrevStateOf(VpSkeleton::AnalysisLane::ProductRead::State s, std::atomic<uint64_t>& pendingReadAsNone)
+	// The same mapping, counting each Pending read downgraded to None in `pendingReadAsNone` (the skeleton shows it as
+	// skeleton_gpu_light_pending: the mapping is a visible downgrade, never silent). When `g6LiveDriven` is true, Pending is
+	// preserved as LightPrevState::Pending and is not counted as downgraded.
+	inline LightPrevState LightPrevStateOf(VpSkeleton::AnalysisLane::ProductRead::State s, std::atomic<uint64_t>& pendingReadAsNone,
+		bool g6LiveDriven = false)
 	{
-		if (s == VpSkeleton::AnalysisLane::ProductRead::Pending)
+		if (s == VpSkeleton::AnalysisLane::ProductRead::Pending && !g6LiveDriven)
 			pendingReadAsNone.fetch_add(1, std::memory_order_relaxed);
-		return LightPrevStateOf(s);
+		return LightPrevStateOf(s, g6LiveDriven);
 	}
 
 	inline bool LightPrevReadable(LightPrevState s) { return s == LightPrevState::Ring || s == LightPrevState::Live; }

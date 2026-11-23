@@ -77,7 +77,7 @@ namespace OutputSegments
 		const SlotTiming::Accumulator& S3Timing() const { return s3.Segment().Timing().Accumulated(); }
 		uint64_t LastNs(const pl_hook* hook) const { return runner.LastNs(hook); }
 		HookSegment::Runner& Runner() { return runner; }   // tests and diagnostics
-		void Release() { runner.Release(); }
+		void Release();
 
 	private:
 		bool Member(const pl_hook* hook) const;
@@ -86,6 +86,7 @@ namespace OutputSegments
 		SegmentRunner::Segment& Owner(const pl_hook* hook);
 		void Downgrade(SegmentRunner::Segment& segment, const std::string& reason);
 
+		pl_gpu gpu = nullptr;
 		OutputColourSegment& s2;
 		OutputFinishSegment& s3;
 		HookSegment::Runner runner;

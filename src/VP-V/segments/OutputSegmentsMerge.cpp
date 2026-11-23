@@ -20,9 +20,15 @@ namespace OutputSegments
 		}
 	}
 
-	Merger::Merger(pl_gpu gpu, OutputColourSegment& s2In, OutputFinishSegment& s3In)
-		: s2(s2In), s3(s3In), runner(gpu)
+	Merger::Merger(pl_gpu gpuIn, OutputColourSegment& s2In, OutputFinishSegment& s3In)
+		: gpu(gpuIn), s2(s2In), s3(s3In), runner(gpuIn)
 	{
+	}
+
+	void Merger::Release()
+	{
+		s3.ReleaseGpu(gpu);
+		runner.Release();
 	}
 
 	bool Merger::Configure(const PipelineSlots::Registry& registry, bool mergedWanted, uint32_t sampleEvery,

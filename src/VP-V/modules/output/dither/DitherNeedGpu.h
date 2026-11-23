@@ -224,8 +224,14 @@ namespace DitherNeed
 			pl_tex Current() const { return m_valid ? m_tex[m_cur] : nullptr; }
 			int GridW() const { return m_w; }
 			int GridH() const { return m_h; }
-			// 2 x blocks x 16 bytes.
-			size_t VramBytes() const { return m_valid ? static_cast<size_t>(2) * m_w * m_h * 16 : 0; }
+			// Actual allocated VRAM of both rgba32f ping-pong textures (16 bytes/texel), including while invalidated.
+			size_t VramBytes() const
+			{
+				size_t bytes = 0;
+				for (pl_tex t : m_tex)
+					if (t) bytes += static_cast<size_t>(t->params.w) * static_cast<size_t>(t->params.h) * 16u;
+				return bytes;
+			}
 			const std::string& LastError() const { return m_error; }
 			const StateTracker& Tracker() const { return m_tracker; }
 
@@ -268,6 +274,29 @@ namespace DitherNeed
 			float scaleX = 1.0f, scaleY = 1.0f, offX = 0.0f, offY = 0.0f;
 			int blockPx = 16;
 		};
+
+		// Exact affine output-pixel -> source-pixel placement derived from source and target crops:
+		//   src = (pos + 0.5) * scale + off,  scale = (src1 - src0) / (dst1 - dst0),  off = src0 - dst0 * scale.
+		// Rejects degenerate target crops (dstW <= 0 || dstH <= 0), non-positive blockPx, or non-finite values.
+		inline bool PlacementFromCrops(float srcX0, float srcY0, float srcX1, float srcY1,
+			float dstX0, float dstY0, float dstX1, float dstY1, int blockPx, Placement& out)
+		{
+			const float dstW = dstX1 - dstX0;
+			const float dstH = dstY1 - dstY0;
+			const float srcW = srcX1 - srcX0;
+			const float srcH = srcY1 - srcY0;
+			if (!(dstW > 0.0f) || !(dstH > 0.0f) || blockPx <= 0 ||
+				!std::isfinite(dstW) || !std::isfinite(dstH) || !std::isfinite(srcW) || !std::isfinite(srcH) ||
+				!std::isfinite(srcX0) || !std::isfinite(srcY0) || !std::isfinite(dstX0) || !std::isfinite(dstY0))
+				return false;
+			out.scaleX = srcW / dstW;
+			out.scaleY = srcH / dstH;
+			out.offX = srcX0 - dstX0 * out.scaleX;
+			out.offY = srcY0 - dstY0 * out.scaleY;
+			out.blockPx = blockPx;
+			return std::isfinite(out.scaleX) && std::isfinite(out.scaleY) &&
+				std::isfinite(out.offX) && std::isfinite(out.offY);
+		}
 
 		// Internal linkage, as SigmaDeltaVectors: the bodies depend on which libplacebo the translation unit sees.
 		namespace
