@@ -521,7 +521,8 @@ namespace TdV2
 		// bokeh structure is never drowned out by an unscaled full-spectrum floor while W1 banded sky stays unvetoed!
 		const BandWhiteNoiseGains focusGains = ComputeBandWhiteNoiseGains();
 		const double gainMD3 = focusGains.mid + focusGains.d3;
-		const double structureFloor = (std::max)(depthScale * depthScale, 4.0 * gainMD3 * (std::max)(0.0, stepTotalVar));
+		const double stepNoiseVar = (std::max)(0.0, stepTotalVar);
+		const double structureFloor = (std::max)(depthScale * depthScale, 4.0 * gainMD3 * stepNoiseVar);
 		const double fSharp = AnalyticalEdgeFocusRatio(0.0);
 		const double fDefocus = AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase);
 		const double fShiftDelta = fSharp - fDefocus;
@@ -570,7 +571,16 @@ namespace TdV2
 				const double curF = cellFocusRatio(curBands, cx, cy, curEnergy, curM2);
 				info[idx].focusRatio = curF;
 
-				if (curEnergy > structureFloor && curF <= fDefocus)
+				// Noise-debiased focus ratio for optical bokeh detection:
+				// White coding noise passes ~6.5x more variance into M (gains.mid) than D3 (gains.d3),
+				// biasing raw curF upward on noisy valley bokeh; subtracting the exact BandFromBase
+				// white-noise variance restores the true optical defocus ratio (zero new constants).
+				const double curM3 = (std::max)(0.0, curEnergy - curM2);
+				const double cleanM2 = (std::max)(0.0, curM2 - stepNoiseVar * focusGains.mid);
+				const double cleanM3 = (std::max)(0.0, curM3 - stepNoiseVar * focusGains.d3);
+				const double curFDebiased = cleanM2 / (cleanM2 + cleanM3 + kEngineNumFloor);
+
+				if (curEnergy > structureFloor && curFDebiased <= fDefocus)
 					info[idx].isDefocused = true;
 
 				if (explicitFocusChangeCells != nullptr && idx < explicitFocusChangeCells->size() && (*explicitFocusChangeCells)[idx] != 0)
