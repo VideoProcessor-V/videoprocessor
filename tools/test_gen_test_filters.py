@@ -112,8 +112,8 @@ class RepositoryFilters(unittest.TestCase):
         cpu = G.cpu_filter(manifest).split("&")
         gpu = G.gpu_filter(manifest).split("|")
         for clause in cpu + gpu:
-            value = clause.split("~", 1)[-1]
-            self.assertFalse(clause.startswith(("Name~", "Name!~")) and L.PLACEHOLDER_RE.match(value), clause)
+            value = clause.split("~", 1)[-1].split("=", 1)[-1]
+            self.assertFalse(clause.startswith(("Name~", "Name!~", "Name=", "Name!=")) and L.PLACEHOLDER_RE.match(value), clause)
         self.assertIn("FullyQualifiedName!~D8SceneJudgeAgreementTests", cpu)
         self.assertIn("FullyQualifiedName~D8SceneJudgeAgreementTests", gpu)
 
@@ -200,9 +200,9 @@ class DedicatedJobCategories(unittest.TestCase):
                 self.assertEqual(G.attribute_names(manifest, ["Corpus"]), ["NeedsCorpus"])
                 self.assertEqual(G.attribute_names(manifest, ["Bench"]), ["TimesTheWalk"])
                 for name in ("NeedsRealClip", "NeedsCorpus", "TimesTheWalk"):
-                    self.assertIn("Name!~" + name, cpu)
-                self.assertNotIn("Name!~PlainCpuTest", cpu)
-                self.assertEqual(G.gpu_filter(manifest, ["Footage"]).split("|"), ["Name~NeedsRealClip", "Category=Footage"])
+                    self.assertIn("Name!=" + name, cpu)
+                self.assertNotIn("Name!=PlainCpuTest", cpu)
+                self.assertEqual(G.gpu_filter(manifest, ["Footage"]).split("|"), ["Name=NeedsRealClip", "Category=Footage"])
             finally:
                 L.test_sources = real
 
@@ -375,6 +375,113 @@ class ScanEveryTestClassFile(unittest.TestCase):
         self.assertNotIn("FullyQualifiedName!~GrainLevelShiftBench", cpu)
         self.assertIn("FullyQualifiedName~GrainSplitV3CostBench", G.gpu_filter(L.load_manifest()).split("|"))
         self.assertIn("FullyQualifiedName~ProducerThroughputBench", G.gpu_filter(L.load_manifest(), ["Bench"]).split("|"))
+
+
+class ExactMatchAndFix2AdversarialTests(unittest.TestCase):
+    """W23-4u (TQ-GENFILTER-EXACT & FIX-2): exact Name=/Name!= boundary and gpuwarp exclusion of Bench/Footage/Corpus."""
+
+    @staticmethod
+    def _matches_vstest_clause(clause, method_name):
+        if clause.startswith("Name!="):
+            return method_name.lower() != clause[len("Name!="):].lower()
+        if clause.startswith("Name="):
+            return method_name.lower() == clause[len("Name="):].lower()
+        if clause.startswith("Name!~"):
+            return clause[len("Name!~"):].lower() not in method_name.lower()
+        if clause.startswith("Name~"):
+            return clause[len("Name~"):].lower() in method_name.lower()
+        return True
+
+    def test_exact_name_exclusion_does_not_drop_prefix_sibling_with_substring_negative_control(self):
+        src = r"""
+TEST_CLASS(CostTests)
+{
+public:
+	BEGIN_TEST_METHOD_ATTRIBUTE(GpuCostLine)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"Bench")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(GpuCostLine) { }
+	TEST_METHOD(GpuCostLineCases) { }
+};
+"""
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "CostTests.cpp")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(src)
+            real = L.test_sources
+            L.test_sources = lambda _root: iter([p])
+            try:
+                manifest = {"entries": []}
+                cpu = G.cpu_filter(manifest).split("&")
+                bench = G.gpu_filter(manifest, ["Bench"]).split("|")
+                self.assertIn("Name!=GpuCostLine", cpu)
+                self.assertNotIn("Name!~GpuCostLine", cpu)
+                self.assertIn("Name=GpuCostLine", bench)
+                self.assertNotIn("Name~GpuCostLine", bench)
+
+                # In-test negative control: naive substring Name!~GpuCostLine falsely drops sibling GpuCostLineCases!
+                self.assertFalse(self._matches_vstest_clause("Name!~GpuCostLine", "GpuCostLineCases"),
+                                 "Negative control failed: substring Name!~ must falsely drop prefix-matching sibling")
+                self.assertTrue(self._matches_vstest_clause("Name~GpuCostLine", "GpuCostLineCases"),
+                                "Negative control failed: substring Name~ must falsely select prefix-matching sibling")
+
+                # Exact-match clause excludes GpuCostLine while keeping GpuCostLineCases in CPU run.
+                cpu_name_clauses = [c for c in cpu if c.startswith("Name")]
+                self.assertFalse(all(self._matches_vstest_clause(c, "GpuCostLine") for c in cpu_name_clauses))
+                self.assertTrue(all(self._matches_vstest_clause(c, "GpuCostLineCases") for c in cpu_name_clauses))
+            finally:
+                L.test_sources = real
+
+    def test_gpuwarp_filter_excludes_bench_footage_and_corpus_methods_in_warp_class(self):
+        src = r"""
+TEST_CLASS(WarpMixedTests)
+{
+public:
+	TEST_METHOD(WarpPlain) { }
+	BEGIN_TEST_METHOD_ATTRIBUTE(WarpBench)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"Bench")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(WarpBench) { }
+	BEGIN_TEST_METHOD_ATTRIBUTE(WarpFootage)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(WarpFootage) { }
+	BEGIN_TEST_METHOD_ATTRIBUTE(WarpCorpus)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"Corpus")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(WarpCorpus) { }
+};
+"""
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "WarpMixedTests.cpp")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(src)
+            real = L.test_sources
+            L.test_sources = lambda _root: iter([p])
+            try:
+                manifest = {"entries": [{"kind": "class", "value": "WarpMixedTests", "category": "GpuWarp"}]}
+                warp_clauses = G.gpuwarp_filter(manifest).split("|")
+                expected = ("FullyQualifiedName~WarpMixedTests"
+                            "&FullyQualifiedName!~WarpMixedTests::WarpBench"
+                            "&FullyQualifiedName!~WarpMixedTests::WarpCorpus"
+                            "&FullyQualifiedName!~WarpMixedTests::WarpFootage")
+                self.assertIn(expected, warp_clauses)
+                self.assertNotIn("FullyQualifiedName~WarpMixedTests", warp_clauses)
+                self.assertNotIn("WarpPlain", expected)
+            finally:
+                L.test_sources = real
+
+    def test_repository_dedicated_lanes_and_fix2_corpus_exclusion(self):
+        manifest = L.load_manifest()
+        warp = G.gpuwarp_filter(manifest)
+        self.assertIn("GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus", warp)
+        self.assertIn("!~", warp)
+        # Verify Bench, Footage, Corpus each have non-empty --names-only filters with zero Category terms.
+        for kind in ("Bench", "Footage", "Corpus"):
+            text = G.names_only(G.gpu_filter(manifest, [kind]), "|")
+            self.assertTrue(text, kind)
+            self.assertNotIn("Category=", text)
+
 
 if __name__ == "__main__":
     unittest.main()

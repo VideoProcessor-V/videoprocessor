@@ -104,9 +104,11 @@ class CategoryTests(unittest.TestCase):
                               capture_output=True, text=True).stdout.strip()
 
     def test_looprig_excluded_from_cpu_and_default_gpu_only_selectable(self):
-        self.assertIn("Category!=LoopRig", self.run_gen("--cpu").split("&"))
+        cpu = self.run_gen("--cpu").split("&")
+        self.assertIn("Category!=LoopRig", cpu)
+        self.assertIn("Name!=HardwareLoopbackRecordingAnalyses", cpu)
         self.assertNotIn("Category=LoopRig", self.run_gen("--gpu").split("|"))
-        self.assertEqual(self.run_gen("--gpu", "--categories", "LoopRig"), "Name~HardwareLoopbackRecordingAnalyses|Category=LoopRig")
+        self.assertEqual(self.run_gen("--gpu", "--categories", "LoopRig"), "Name=HardwareLoopbackRecordingAnalyses|Category=LoopRig")
 
 
 @unittest.skipUnless(POWERSHELL, "PowerShell not available")

@@ -110,6 +110,37 @@ class JudgeTests(unittest.TestCase):
         # Non-assert edits in non-checker tools/**/*.py remain unflagged.
         self.assertEqual(T.judge([F("tools/eval/source_id/score_identity.py", add=["x = 2"], rem=["x = 1"])], "m")[0], [])
 
+    def test_bill_file_modification_flags_even_add_only_and_vpv_file_passes(self):
+        # GATE-BILLFILE-CHECK: an unwaived edit to a Bill-owned file (at a591ad3b5 outside src/VP-V/) is flagged
+        # as bill_file even when add-only (closing the W1 #16 escape on tools/test_libplacebo_variants.py).
+        bill_set = {
+            "tools/test_libplacebo_variants.py",
+            "src/VideoProcessor-BetaTests/BetaParametersTests.cpp",
+            "src/VideoProcessor-Lib/Foo.cpp",
+        }
+        add_only_bill = [F("tools/test_libplacebo_variants.py", add=["# additive line"])]
+        # In-test negative control: without bill_files (old unguarded behaviour), add-only Bill tool test passed silently!
+        v_old, notes_old, _ = T.judge(add_only_bill, "unwaived bill edit", bill_files=None)
+        self.assertEqual(v_old, [], "Negative control: without bill_files, add-only Bill test passed as test-adding only")
+        self.assertTrue(any("test-adding only" in n for n in notes_old))
+
+        # With bill_files active: flagged as bill_file, NEVER exempted by test-adding only!
+        v_bill, notes_bill, _ = T.judge(add_only_bill, "unwaived bill edit", bill_files=bill_set)
+        self.assertEqual([x[0] for x in v_bill], ["bill_file"])
+        self.assertFalse(any("test-adding only" in n for n in notes_bill))
+
+        # Bill BetaTests add-only & Bill src deletion also flag as bill_file.
+        v_beta, _, _ = T.judge([F("src/VideoProcessor-BetaTests/BetaParametersTests.cpp", add=["// x"])], "m", bill_files=bill_set)
+        self.assertEqual([x[0] for x in v_beta], ["bill_file"])
+        v_del, _, _ = T.judge([F("src/VideoProcessor-Lib/Foo.cpp", status="D", rem=["x"])], "m", bill_files=bill_set)
+        self.assertEqual([x[0] for x in v_del], ["bill_file"])
+
+        # VP-V files (absent from bill_set) and WAIVER-carrying commits pass cleanly.
+        self.assertEqual(T.judge([F("tools/test_vpv_libplacebo_variants.py", add=["# hi"])], "m", bill_files=bill_set)[0], [])
+        self.assertEqual(T.judge([F("src/VP-V/tests/NewTests.cpp", add=["// hi"])], "m", bill_files=bill_set)[0], [])
+        vw, _, waived = T.judge(add_only_bill, "m\n\nWAIVER-BILLFILE-1: approved", bill_files=bill_set)
+        self.assertEqual((vw, waived), ([], True))
+
 
 class GitTests(unittest.TestCase):
     def _g(self, root, *a):
@@ -334,6 +365,42 @@ class GitTests(unittest.TestCase):
 
     def test_selftest(self):
         self.assertEqual(T.main(["--selftest"]), 0)
+
+    def test_bill_ref_flags_unwaived_bill_tool_edit_lists_inventory_and_waiver_passes(self):
+        with tempfile.TemporaryDirectory() as r:
+            self._g(r, "init", "-q")
+            os.makedirs(os.path.join(r, "tools"))
+            os.makedirs(os.path.join(r, "src", "VP-V", "tests"))
+            bill_tool = os.path.join(r, "tools", "test_libplacebo_variants.py")
+            vpv_test = os.path.join(r, "src", "VP-V", "tests", "VpvTests.cpp")
+            open(bill_tool, "w").write("x = 1\n")
+            open(vpv_test, "w").write("// base\n")
+            self._g(r, "add", "-A")
+            self._g(r, "commit", "-qm", "bill baseline")
+            bill_ref = subprocess.run(["git", "-C", r, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+            # 1. Additive VP-V test edit: NOT in bill_tree (src/VP-V/ excluded) -> passes with 0 bill-files.
+            open(vpv_test, "a").write("// extra test\n")
+            self._g(r, "commit", "-qam", "add vpv test")
+            rc0, out0 = self._run(["--root", r, "--range", bill_ref + "..HEAD", "--strict", "--bill-ref", bill_ref])
+            self.assertEqual(rc0, 0, out0)
+            self.assertIn("bill-files in range: 0", out0)
+
+            # 2. Unwaived add-only edit to Bill's tools/test_libplacebo_variants.py -> flagged as bill_file + listed in inventory.
+            open(bill_tool, "a").write("# additive edit on Bill file\n")
+            self._g(r, "commit", "-qam", "touch bill test tool")
+            bad_sha = subprocess.run(["git", "-C", r, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+            rc1, out1 = self._run(["--root", r, "--range", bill_ref + "..HEAD", "--strict", "--bill-ref", bill_ref])
+            self.assertEqual(rc1, 1, out1)
+            self.assertIn("[bill_file] tools/test_libplacebo_variants.py", out1)
+            self.assertIn("bill-files in range: 1", out1)
+            self.assertIn("bill-file %s M tools/test_libplacebo_variants.py" % bad_sha[:9], out1)
+
+            # 3. Late WAIVER trailer waives the strict failure while preserving the bill-files inventory listing.
+            self._g(r, "commit", "--allow-empty", "-qm", "waive bill edit\n\nWAIVER-BILLFILE-TEST: approved\nWaives: " + bad_sha[:9])
+            rc2, out2 = self._run(["--root", r, "--range", bill_ref + "..HEAD", "--strict", "--bill-ref", bill_ref])
+            self.assertEqual(rc2, 0, out2)
+            self.assertIn("bill-files in range: 1", out2)
 
 
 if __name__ == "__main__":

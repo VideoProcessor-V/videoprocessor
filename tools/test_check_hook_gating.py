@@ -1684,5 +1684,83 @@ class HeaderEditDoesNotExemptTest(unittest.TestCase):
         self.assertIn("UNGUARDED %s:" % BILL, out)
 
 
+class BetaTestsHookGatingTest(unittest.TestCase):
+    """W23-4u (CC-HOOKGATING-BETATESTS): Bill's src/VideoProcessor-BetaTests/ is scanned in site_checks and
+    untagged_vp_references (not silently skipped as a plain test bucket)."""
+
+    BETA = "src/VideoProcessor-BetaTests/BetaParametersTests.cpp"
+    GIT_ENV = CheckHookGatingTest.GIT_ENV
+
+    def setUp(self):
+        _fixture_baseline_patch(self)
+        self.td = tempfile.TemporaryDirectory()
+        self.root = self.td.name
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", self.root] + list(args), check=True, env=self.GIT_ENV,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode("utf-8", "replace").strip()
+
+    def test_red_untagged_vp_ref_in_betatests_fails_and_tagged_control_passes(self):
+        # Seed a Bill baseline commit of BetaParametersTests.cpp (before src/VP-V/ exists, matching Bill's tree).
+        base_src = "#include <x.h>\nvoid BetaTest()\n{\n\tdoBill();\n}\n"
+        _w(self.root, self.BETA, base_src)
+        self._git("init", "-q")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "bill")
+        bill_sha = self._git("rev-parse", "HEAD")
+        _w(self.root, chg.SLOTS_HEADER, SLOTS)
+        _w(self.root, "src/VP-V/modules/control/skeleton/SkeletonFacts.h",
+           "namespace Vpv { namespace Skeleton { void Demand(); } }\n")
+
+        # 1. Untagged VP-V reference added in src/VideoProcessor-BetaTests/ MUST fail under --since.
+        untagged_src = "#include <x.h>\nvoid BetaTest()\n{\n\tdoBill();\n\tVpv::Skeleton::Demand();\n}\n"
+        _w(self.root, self.BETA, untagged_src)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "untagged beta ref")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = chg.main(["--root", self.root, "--base-ref", bill_sha, "--files", self.BETA, "--rev", "HEAD", "--since", bill_sha])
+        out = buf.getvalue()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("untagged VP-V reference %s:" % self.BETA, out)
+        self.assertIn("1 new untagged VP-V references", out)
+
+        # 2. Control: properly tagged `// VPV-HOOK` with manifest & budget passes cleanly (0 new untagged, rc 0).
+        tagged_src = "#include <x.h>\nvoid BetaTest()\n{\n\tdoBill();\n\tVpv::Skeleton::Demand();   // VPV-HOOK\n}\n"
+        _w(self.root, self.BETA, tagged_src)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(chg.main(["--root", self.root, "--no-git", "--files", self.BETA, "--write-manifest", "--write-budget"]), 0)
+        _w(self.root, chg.BUDGET_PATH, json.dumps({"files": {self.BETA: 1}}))
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "tagged beta ref")
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            rc2 = chg.main(["--root", self.root, "--base-ref", bill_sha, "--files", self.BETA, "--rev", "HEAD", "--since", bill_sha])
+        out2 = buf2.getvalue()
+        self.assertEqual(rc2, 0, out2)
+        self.assertIn("0 new untagged VP-V references", out2)
+
+    def test_red_unapproved_new_site_in_betatests_fails_and_manifest_matched_passes(self):
+        _w(self.root, chg.SLOTS_HEADER, SLOTS)
+        one_site = "#include <x.h>\nvoid BetaTest()\n{\n\tint k = 0;   // VPV-HOOK\n\tdoBill();\n}\n"
+        _w(self.root, self.BETA, one_site)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(chg.main(["--root", self.root, "--no-git", "--files", self.BETA, "--write-manifest", "--write-budget"]), 0)
+        # Clean control: --write-manifest --write-budget on BetaParametersTests.cpp MUST self-consistently pass!
+        rc0, out0 = _run(self.root, files=(self.BETA,))
+        self.assertEqual(rc0, 0, out0)
+        self.assertIn("1 sites, 0 new (0 approved), 0 removed, 0 over budget", out0)
+        # Mutation: adding an unapproved new // VPV-HOOK site in BetaParametersTests.cpp MUST fail.
+        two_sites = "#include <x.h>\nvoid BetaTest()\n{\n\tint k = 0;   // VPV-HOOK\n\tdoBill();\n\tVpv::Skeleton::Demand();   // VPV-HOOK\n}\n"
+        _w(self.root, self.BETA, two_sites)
+        rc1, out1 = _run(self.root, files=(self.BETA,))
+        self.assertEqual(rc1, 1, out1)
+        self.assertIn("NEW SITE", out1)
+        self.assertIn("OVER BUDGET %s 2 sites > budget 1" % self.BETA, out1)
+
+
 if __name__ == "__main__":
     unittest.main()
