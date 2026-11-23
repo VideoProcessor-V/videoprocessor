@@ -244,6 +244,9 @@ public:
 	}
 
 	// The GPU kernel: the same texels, codeUnit 64 / 65535 + sourceBits 10 against codeUnit 16 / 65535 + sourceBits 12.
+	BEGIN_TEST_METHOD_ATTRIBUTE(GpuAxisEqualsNative)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+	END_TEST_METHOD_ATTRIBUTE()
 	TEST_METHOD(GpuAxisEqualsNative)
 	{
 		using namespace GrainSplitAxisLawTestsNs;
