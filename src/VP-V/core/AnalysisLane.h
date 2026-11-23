@@ -1394,6 +1394,10 @@ public:
         const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
         if (!st || seq < st->firstSeq)
             return;
+        // Discard before ReleaseThrough so an h == 0, K == 0 head-of-frontier drop marks exact.discardedSeq
+        // before ReleaseThrough(seq, lastReleaseFence) inspects SlotOf(seq) (FIX3-D2).
+        for (size_t i = 0; i < st->table->Count(); ++i)
+            st->table->At(i).Discard(seq);
         if (seq == st->nextExpectedRetire) {
             st->nextExpectedRetire = seq + 1u;
             const uint64_t K = st->graph.maxSealLag;
@@ -1403,8 +1407,6 @@ public:
                     st->table->At(i).ReleaseThrough(seq - h, st->lastReleaseFence);
             }
         }
-        for (size_t i = 0; i < st->table->Count(); ++i)
-            st->table->At(i).Discard(seq);
         st->ring->Drop(seq);
         NotifyWake();
     }

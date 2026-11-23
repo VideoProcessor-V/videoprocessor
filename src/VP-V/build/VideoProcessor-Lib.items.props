@@ -145,6 +145,9 @@
   <ItemGroup>
     <ClCompile Include="..\VP-V\modules\control\config\VpvProfileQueueAdvice.cpp" />
     <ClCompile Include="..\VP-V\core\RunningPathway.cpp" />
+    <ClCompile Include="..\VP-V\core\ProductSlots.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\capture\CaptureDisplayFixes.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\QueueLookahead.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\VpFixedBudgetPolicy.cpp" />
