@@ -3177,6 +3177,10 @@ namespace Vpv
 				// The memory refusal took effect after the frame that already allocated: give it all back now (GPU-legal).
 				st.dispatcher->Release();
 			}
+			// R22: retire this completed frame before the post-submit gap so reclaimed ring slots are
+			// available to GPU-compute gap work for seq + 1. Every lag-k input declares history >= k
+			// (ProductGraph.h), so ReleaseThrough(seq - (h + K)) never frees any input needed by seq + 1.
+			b->lane.OnFrameRetired(seq, 0);
 			if (st.periodMs > 0.0)
 			{
 				b->lane.OnPostSubmitGap(nowUs_() + static_cast<uint64_t>(st.periodMs * 500.0));   // half the measured period
@@ -3184,7 +3188,6 @@ namespace Vpv
 			}
 			else
 				++st.gapsSkipped;   // the frame period is not measured yet: no gap is promised
-			b->lane.OnFrameRetired(seq, 0);
 		}
 
 		// ---- status -----------------------------------------------------------------------------------

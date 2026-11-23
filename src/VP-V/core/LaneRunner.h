@@ -143,6 +143,8 @@ public:
     // B3 X1: a late lane skips to the frame after the late seal. A lagged-seal product's frames stay open until N + sealLag, so
     // its skip is lowered by its lag, as the sealed floor in StartJob is (sealLag 0 = SetSkipBefore, today).
     void SetLateSkipBefore(uint64_t seq) { lateSkipBefore_.store(seq, std::memory_order_release); }
+    void SetAsyncCpuWorkers(bool active) { asyncCpuWorkers_.store(active, std::memory_order_release); }
+    bool AsyncCpuWorkers() const { return asyncCpuWorkers_.load(std::memory_order_acquire); }
 
     const LaneProductCounters& Counters(ProductId id) const
     {
@@ -254,7 +256,14 @@ private:
         if (indicator_ && indicator_->HasSealed()) {
             // B3 X1: a lagged-seal product's frame stays open until its final seal (N + sealLag): its lane job may still publish
             // it (LATE). sealLag 0 = today (the frames after the last sealed one). A frame accepted on time claims Stale (skipped).
-            const uint64_t sealedNext = indicator_->LastSealed() + 1u;
+            // With live async CPU workers, keep a structural 1-frame pipeline lead ahead of LastSealed so a background CPU worker
+            // does not claim LastSealed + 1 concurrently with the render thread entering OnRenderStart(LastSealed + 1).
+            const uint64_t asyncMargin =
+                (asyncCpuWorkers_.load(std::memory_order_acquire) && st.node->backend == Backend::Cpu
+                 && st.node->sealLag == 0)
+                    ? 1u
+                    : 0u;
+            const uint64_t sealedNext = indicator_->LastSealed() + 1u + asyncMargin;
             const uint64_t lag = st.node->sealLag;
             const uint64_t floorSeq = sealedNext > lag ? sealedNext - lag : 0u;
             if (floorSeq > seq)
@@ -376,6 +385,11 @@ private:
             st.phase = Phase::Completing;   // began stays false: nothing was submitted (the default fence values apply)
             return true;
         }
+        if (!st.set->LaneContinue(st.ticket)
+            || (indicator_ && indicator_->HasSealed() && st.seq + st.node->sealLag <= indicator_->LastSealed())) {
+            st.phase = Phase::Abandoning;
+            return true;
+        }
         const ComputeOnce::FrameScope frameScope(static_cast<int64_t>(job.seq), "lane", static_cast<int64_t>(st.node->id));
         if (!st.producer->Begin(job)) {
             st.counters.beginFailures.fetch_add(1, std::memory_order_relaxed);
@@ -468,6 +482,7 @@ private:
     std::atomic<uint64_t> arrived_{ 0 };
     std::atomic<uint64_t> skipBefore_{ 0 };
     std::atomic<uint64_t> lateSkipBefore_{ 0 };   // B3 X1: SetLateSkipBefore (lowered by each node's sealLag)
+    std::atomic<bool> asyncCpuWorkers_{ false };
     uint64_t ignoredProducers_ = 0;
     LaneProductCounters none_;
 };
