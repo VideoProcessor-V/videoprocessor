@@ -225,6 +225,18 @@
      "reason": "CB-16 P2 persistent row-parallel worker thread pool (dispatches lambdas over row ranges, contains no downsample)"
     },
     {
+     "file": "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
+     "pattern": "FusedPlanar16HalfLuma8Row",
+     "kind": "false_positive",
+     "reason": "call site to R6LumaPass.h::FusedPlanar16HalfLuma8Row which delegates directly to VpUnit::HalfLuma::Box4/FinishEngine8"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/R6LumaPass.h",
+     "pattern": "FusedPlanar16HalfLuma8Row|sum >> 4u|\\+ 2u\\) >> 2u|kR6HalfLumaHlsl",
+     "kind": "false_positive",
+     "reason": "R6 (0a) FusedPlanar16HalfLuma8Row delegates to VpUnit::HalfLuma::Box4/FinishEngine8; HlslHalfTexelMirror/HlslQuarterTexelMirror and kR6HalfLumaHlsl/kR6QuarterLumaHlsl are opt-in CS 5.0 HLSL shader constants and exact bit-identity CPU test mirrors"
+    },
+    {
      "file": "src/VP-V/modules/motion/estimation/MotionAheadProducer.h",
      "pattern": "HalfLuma8\\(",
      "kind": "false_positive",
