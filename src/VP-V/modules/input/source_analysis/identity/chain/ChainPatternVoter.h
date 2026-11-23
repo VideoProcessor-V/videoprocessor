@@ -9,7 +9,9 @@
 // Spec & Rule 1 derivations:
 //   - Hard LLR cap (doc 78 D15 / OD-7): kMaxBlockGridVoteNats = 2.0 nats. Even if a caller passes a
 //     larger maxVoteNats, every vote is hard-clamped internally to [-2.0, +2.0] nats and visibly
-//     flagged via wasCapped / ClampedToMaxNats / gridVotesCappedAt2Nats (Rule 4).
+//     flagged via wasCapped and gridVotesCappedAt2Nats (Rule 4): Case 3 (positive scaled support)
+//     reports reason = ClampedToMaxNats when capped, while Case 1 (negative fine-grid veto) preserves
+//     reason = NativeFineGridContradictsUpscale alongside wasCapped = true and gridVotesCappedAt2Nats.
 //   - Boundary contrast gate: lineGateFactor = 1.5 (ChainEvidence.h contract): boundary step mean must
 //     exceed 1.5x interior step mean (and 1.5 * floorCodes) to count as a real block grid.
 //   - Period match tolerance: Scaling::GeometrySet::kConventionTolerance (0.006 relative) with a 0.5-px
@@ -27,7 +29,6 @@
 #include "../quality_pattern/QualityPatternRecord.h"
 
 #include <VP-V/modules/scaling/geometry/SourceGeometrySet.h>
-#include <VP-V/core/RobustStats.h>
 
 #include <algorithm>
 #include <cmath>

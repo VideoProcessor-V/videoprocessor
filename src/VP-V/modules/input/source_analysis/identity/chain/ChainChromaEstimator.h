@@ -24,6 +24,11 @@
 //     Fused with exact symmetric-kernel parity asymmetry (second-difference even/odd excess energy
 //     ratio peaks for Cosited; first-difference odd-to-even/even-to-odd excess energy ratio peaks
 //     for Centered, optionally edge-weighted by co-located luma gradients when provided).
+//   - Separation margins (Rule 1):
+//       * kernelMarginMin = 0.05 (1/20 elementary dimensionless relative residual separation between
+//         winning and runner-up kernel family before naming a classical kernel).
+//       * sitingMarginMin = 0.03 (matches |ChainEvidence::majorityDip| = 0.03 contract separation
+//         between Cosited and Centered grid siting).
 //   - 1/4-res corroboration: evaluated whenever raw demeaned chroma std > lineGateFactor * floorCodes
 //     (even if N/2 baseline is quiet, as on 1080p-in-4K 4:2:0 where chroma is 960x540 = N/4).
 //

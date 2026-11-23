@@ -38,8 +38,6 @@
 #include "KernelBank.h"
 #include "../SourceGeometryProduct.h"
 
-#include <VP-V/core/RobustStats.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -450,10 +448,13 @@ namespace SourceIdentity
 			}
 
 			// Strict Rule 4 validation of a caller-supplied shared PSD against its target LineSet.
+			// Enforces exact FFT size and line count match so cropped windows or mismatched inputs never alias.
 			inline bool ValidateSharedPsd(const PrecomputedLinePsd& shared, const LineSet& ls)
 			{
 				if (!shared.valid ||
 					!IsValidFftLength(shared.fftN) ||
+					shared.fftN != ChooseFftLength(ls.length) ||
+					shared.lineCount != ls.count ||
 					shared.axisLen != ls.axisLen ||
 					static_cast<int>(shared.power.size()) != shared.fftN / 2 + 1)
 				{
@@ -895,10 +896,11 @@ namespace SourceIdentity
 				return res;
 			}
 
-			// 3. UsmSharpened: band-shaped transition halo peaking sharply above both low band and far stopband.
+			// 3. UsmSharpened: band-shaped transition halo peaking sharply above both low band and far stopband
+			//    by the dimensionally consistent power gate gateMult = lineGateFactor^2 (2.25x in power).
 			if (resHalo > gateP &&
 				resHalo >= gateMult * (std::max)(resLow, epsP) &&
-				resHalo >= s.lineGateFactor * (std::max)(resFar, epsP))
+				resHalo >= gateMult * (std::max)(resFar, epsP))
 			{
 				res.valid = true;
 				res.classification = ResidualClass::UsmSharpened;
@@ -938,10 +940,15 @@ namespace SourceIdentity
 				if (transFreq.size() >= 2)
 				{
 					const double twoPiSq = 2.0 * kPi * kPi;
+					// Singularity guard derived from existing floorGuardDivisor (1 / 4^2 = 1/16) and finite gain bound (2 * 4 = 8x).
+					const double invDenomFloor = 1.0 / (s.floorGuardDivisor * s.floorGuardDivisor);
+					const double maxUsmGain = 2.0 * s.floorGuardDivisor;
 					double bestSse = 1e300;
 					double bestSigma = 1.0;
 					double bestAmount = 0.0;
-					// Deterministic physical sigma grid in [0.4, 3.0] px at 0.1-px step.
+					// Deterministic physical sigma grid in [0.4, 3.0] px (0.1-px step):
+					// lower bound 0.4 px = discrete Nyquist-resolvable Gaussian half-width;
+					// upper bound 3.0 px = default kernel half-support (kernelFitHalfSupport = 3).
 					for (int si = 4; si <= 30; ++si)
 					{
 						const double sigma = 0.1 * static_cast<double>(si);
@@ -967,9 +974,9 @@ namespace SourceIdentity
 							continue;
 						const double aEff = num / den;
 						const double gBar = gBarNum / wSum;
-						const double denomInv = 1.0 - (std::min)(0.85, aEff * (1.0 - gBar));
-						const double aCand = denomInv > 0.0 ? ClampD(aEff / denomInv, 0.0, 10.0) : 0.0;
-						if (!(aCand > 0.0))
+						const double denomInv = (std::max)(1.0 - aEff * (1.0 - gBar), invDenomFloor);
+						const double aCand = ClampD(aEff / denomInv, 0.0, maxUsmGain);
+						if (!(aCand > 0.0) || !std::isfinite(aCand))
 							continue;
 						double sse = 0.0;
 						for (size_t ti = 0; ti < transFreq.size(); ++ti)
@@ -1039,7 +1046,7 @@ namespace SourceIdentity
 				}
 
 				const double lowDom = resHalo / (gateMult * (std::max)(resLow, epsP));
-				const double farDom = resHalo / (s.lineGateFactor * (std::max)(resFar, epsP));
+				const double farDom = resHalo / (gateMult * (std::max)(resFar, epsP));
 				const double snrScore = 1.0 - gateP / (resHalo + gateP);
 				const double shapeScore = 1.0 - 1.0 / (1.0 + (std::min)(lowDom, farDom));
 				res.usmConfidence = ClampD(snrScore * shapeScore, 0.0, 1.0);
