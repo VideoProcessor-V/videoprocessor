@@ -55,6 +55,15 @@ public:
 				output.append(buffer, got);
 		}
 		std::fseek(stdout, 0, SEEK_END);
+		// Evidence lines of the fork-only stages (BetaRan in BetaGpuTests.cpp): echoed so they reach the TRX.
+		for (size_t pos = 0; pos < output.size();)
+		{
+			size_t end = output.find('\n', pos);
+			if (end == std::string::npos) end = output.size();
+			const std::string line = output.substr(pos, end - pos);
+			if (line.rfind("BETA-RAN ", 0) == 0) Logger::WriteMessage((line + "\n").c_str());
+			pos = end + 1;
+		}
 		const bool wholeChain = output.find("PASS Beta whole chain") != std::string::npos;
 		Logger::WriteMessage(("Beta suite exit code " + std::to_string(result) + (wholeChain ? "; whole chain passed" :
 			"; whole chain NOT reached") + (reportMode ? " (VP_TEST_REPORT_MODE=1)" : "") + "\n").c_str());
