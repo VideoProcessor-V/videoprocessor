@@ -10,7 +10,8 @@
 
 namespace CameraModel
 {
-	StaticCameraResult EvaluateStaticCamera(const StaticCameraConfig& cfg, const PairInput& in, const Params& model)
+	StaticCameraResult EvaluateStaticCamera(const StaticCameraConfig& cfg, const PairInput& in, const Params& model,
+		double resolvedPrecPx)
 	{
 		StaticCameraResult out;
 		const int gw = in.gridW, gh = in.gridH;
@@ -34,7 +35,8 @@ namespace CameraModel
 		const int pw = bx1 - bx0 + 1, ph = by1 - by0 + 1;
 		const int ringX = std::max(1, static_cast<int>(std::lround(cfg.ringFraction * pw)));
 		const int ringY = std::max(1, static_cast<int>(std::lround(cfg.ringFraction * ph)));
-		const double prec = in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0;
+		// SHOULD-1: the fitter's FINAL precision when it passes one; 0 = the pair's nominal precision.
+		const double prec = resolvedPrecPx > 0 ? resolvedPrecPx : (in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0);
 		const double absThr = cfg.absSigmas * prec;
 		int ring = 0, staticOk = 0, fitOk = 0, moving = 0;
 		for (int by = by0; by <= by1; ++by)

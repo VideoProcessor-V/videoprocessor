@@ -53,6 +53,11 @@ namespace CameraLink
 		// `lease` is the first one. Standalone / tests without a lane: lease = LaneLease::Borrow(...) and no source (never stale).
 		VpSkeleton::LaneLease lease;
 		VpSkeleton::LaneLeaseSource leaseSource;
+		// CP-A1-D4-CAMLABEL-FIELDCOPY: the leases whose bytes ring is the declared product p7f_camera_fit_field (the product's storage), one
+		// per publish target: `fieldLeaseSource` for the lag bridge (the worker's own lane), `fieldOnTimeSource` for the on-time target.
+		// Empty = no field storage there: the product is not published and P8 produces no labels for that frame (visibly).
+		VpSkeleton::LaneLeaseSource fieldLeaseSource;
+		VpSkeleton::LaneLeaseSource fieldOnTimeSource;
 		CameraRecordPool* pool = nullptr;
 		FitCounters* counters = nullptr;
 		// Optional overrides; unset, the lease's bytes ring (>= kRecordPodMaxBytes per slot) and Indicator::StampOf are used.
@@ -93,7 +98,8 @@ namespace CameraLink
 		bool Running() const { return m_running; }
 		static int ThreadsEverStarted();   // test hook: the CameraOff test asserts it stays at its starting value
 
-		// Render thread. True: queued (a thread, or ProcessQueued, runs it). False: the queue is full (counted, fitter reset requested).
+		// Render thread. True: queued (a thread, or ProcessQueued, runs it). False: the queue is full (counted, fitter reset requested),
+		// or the worker was stopped (Stop() after Start(), no Start() since: FitCounters::refusedAfterStop, fitter reset requested).
 		// Rebinds first (a changed lane generation is noticed here), then stamps the job with the lease's generation.
 		bool Submit(const CameraFitJob& job);
 
@@ -123,6 +129,10 @@ namespace CameraLink
 		void Loop();
 		// The publish into one lease (Claim -> pins -> stamp -> bytes -> pool -> Publish). countLate: count a refusal as late (the bridge).
 		PublishOutcome PublishInto(const VpSkeleton::LaneLease& lease, const CameraFitJob& job, const CameraFitResult& fit, bool countLate);
+		// The P7 fit field product (kCameraFitField): the fit's field is encoded into the product slot's own buffer and published with P7's
+		// stamp, BEFORE P7 is published. `p7Lease` is the lease P7 goes into (the field lease must be of the same generation). False =
+		// not published (no slot / no storage / no fit / another generation): P8 then has no field for that frame.
+		bool PublishFitField(const VpSkeleton::LaneLease& p7Lease, bool bridgeTarget, const CameraFitJob& job, const VpIndicator::Stamp& honoured);
 		struct ParkedResult
 		{
 			CameraFitJob job;
@@ -142,6 +152,9 @@ namespace CameraLink
 		std::deque<CameraFitJob> m_queue;
 		bool m_stop = false;
 		bool m_running = false;
+		// CE-SUBMIT-AFTER-STOP (under m_mutex): Stop() ran on a started worker and no Start() since. Distinct from !m_running, which is
+		// also the deterministic mode (never started: ProcessQueued drains the queue on the calling thread, Submit must still queue).
+		bool m_stopped = false;
 		bool m_busy = false;
 		bool m_tick = false;                  // AHEAD FIT: a Tick arrived (under m_mutex)
 		std::atomic<uint64_t> m_renderSeq{ 0 };

@@ -371,6 +371,23 @@ namespace VpMotion
 		motionOpticalFlow = facts.opticalFlow;   // this frame's setting (PlanProducer refreshes it too)
 		motionCameraGated = cameraWanted && (!motionOpticalFlow ||
 			(motionProducerStartRetry.Recovering() && now < motionProducerStartRetry.RetryAtMs()));
+		// Audit-2 NIT 3: a gated camera fit (no optical flow / producer recovering) does not consume the stream, so the hints state
+		// shown as "camera fit active" is cameraWanted && !motionCameraGated, exactly what the stream now serves.
+		// Camfix R1 + audit MUST 1: one shared pair stream, so one hints state for ALL consumers: while the camera fit wants the
+		// stream its setting (default off) governs every pair, otherwise the everyday setting (default on). The entry is built from
+		// the producer's HintsInForce (the state HintsApply uses), so Ctrl+I shows the real state and why; synced on change only.
+		{
+			const std::shared_ptr<MotionAhead::Producer> producer = LoopProducer();
+			if (producer)
+				producer->SetCameraConsumes(cameraWanted && !motionCameraGated);
+			const MotionAhead::Producer::HintsState hs = producer ? producer->HintsShown() : MotionAhead::Producer::HintsState();
+			const int shown = (hs.cameraOn ? 1 : 0) | (hs.otherOn ? 2 : 0) | (hs.cameraActive ? 4 : 0) | (hs.inForce ? 8 : 0);
+			if (shown != motionHintsShown)
+			{
+				motionHintsShown = shown;
+				host.SyncFallback(FallbackCatalog::NvofTemporalHints(hs.cameraActive, hs.inForce, hs.cameraOn, hs.otherOn));
+			}
+		}
 		// Batch B (plan-motion-engine-switch.md (b)): optical-flow pairs are EXPECTED when the optical-flow producer is configured and
 		// has not failed to start (previous-frame facts: the planner's motion_ahead_frames, -1 = not planned yet = expected). With none
 		// expected the field consumers use the matcher fallback and the statistics consumers are named unserved (VectorDemand::DecideForHost).
@@ -976,6 +993,7 @@ namespace VpMotion
 		out.gridH = s.gridH;
 		out.blockSize = SeedField::kSourceBlockSize * per;
 		out.scaleToSourcePx = 2.0f * static_cast<float>(per);   // half-size px of the searching instance -> source px
+		out.quantumSourcePx = 0.25f * out.scaleToSourcePx;      // camfix R2: the seed is the NVOF engine's own field in those px (its quantum is 0.25 of one)
 		out.sourceGridW = s.liveGridW;
 		out.sourceGridH = s.liveGridH;
 		out.sadTrustMax = s.tolerance;
@@ -1176,6 +1194,8 @@ namespace VpMotion
 		out.extrasBlockPx = MotionAhead::Flow::kBlockPx;
 		out.extrasCellPx = NvOpticalFlow::Engine::Grid;
 		out.extrasUnitsPerEnginePx = 32.0;   // FbError reads S10.5
+		out.lumaFrom = flow->lumaFrom;   // R3: shared planes, null when the camera fit was not consuming
+		out.lumaTo = flow->lumaTo;
 		out.trustMemo = flowLease_.get();   // valid for the view's life: the pair stays leased until it leaves the window or an invalidation
 		++flowReads_.served;
 		return true;

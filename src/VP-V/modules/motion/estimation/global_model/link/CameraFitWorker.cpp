@@ -3,6 +3,7 @@
 #include "CameraFitWorker.h"
 
 #include "AheadFlow.h"
+#include "CameraFitFieldPod.h"
 #include "CameraUsable.h"
 
 #include <atomic>
@@ -73,6 +74,7 @@ namespace CameraLink
 		if (m_running)
 			return false;
 		m_stop = false;
+		m_stopped = false;
 		m_running = true;
 		g_threadsStarted.fetch_add(1);
 		m_thread = std::thread([this]() { Loop(); });
@@ -86,6 +88,7 @@ namespace CameraLink
 			if (!m_running)
 				return;
 			m_stop = true;
+			m_stopped = true;   // CE-SUBMIT-AFTER-STOP: set under the queue mutex, so every Submit that locks after this refuses
 		}
 		m_cv.notify_all();
 		if (m_thread.joinable())
@@ -102,6 +105,17 @@ namespace CameraLink
 		job.laneGen = LaneGeneration();
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
+			if (m_stopped)
+			{
+				// CE-SUBMIT-AFTER-STOP: no thread will drain the queue (Stop has cleared it or is about to), so the job is refused, never
+				// queued: the caller still owns the job (its field copy dies with the caller's copy). Read under m_mutex, the same lock Stop
+				// sets it under and the push below takes, so no job can be queued after Stop's first block. Counted and shown in the
+				// camera fit status line; the pair chain has a hole if the worker is started again, so the next fit restarts its history.
+				if (m_env.counters)
+					m_env.counters->refusedAfterStop.fetch_add(1, std::memory_order_relaxed);
+				m_producer.NoteReset();
+				return false;
+			}
 			if (m_queue.size() >= m_env.queueCapacity)
 			{
 				if (m_env.counters)
@@ -290,6 +304,11 @@ namespace CameraLink
 				return PublishOutcome::NoProduct;
 			}
 			job.field = field;
+			job.lumaFrom = copy.lumaFrom;
+			job.lumaTo = copy.lumaTo;
+			job.lumaW = copy.engineW;
+			job.lumaH = copy.engineH;
+			job.lumaStep = copy.enginePxToSource;
 			if (copy.globalValid && !job.facts.haveEngineGlobal)
 			{
 				job.facts.haveEngineGlobal = true;   // the ahead pair's own whole-frame motion (the render-time EngineGlobal does not exist yet)
@@ -352,6 +371,64 @@ namespace CameraLink
 		return PublishInto(lease, job, fit, true);
 	}
 
+	bool CameraFitWorker::PublishFitField(const VpSkeleton::LaneLease& p7Lease, bool bridgeTarget, const CameraFitJob& job,
+		const VpIndicator::Stamp& honoured)
+	{
+		FitCounters* fc = m_env.counters;
+		auto count = [&](std::atomic<uint64_t> FitCounters::* cause) {   // every miss is counted by cause and named in the status line
+			if (fc)
+				(fc->*cause).fetch_add(1, std::memory_order_relaxed);
+			return false;
+		};
+		const VpSkeleton::LaneLeaseSource& source = bridgeTarget ? m_env.fieldLeaseSource : m_env.fieldOnTimeSource;
+		if (!job.field)
+			return count(&FitCounters::fieldNoField);
+		if (!source)
+			return count(&FitCounters::fieldNoStorage);
+		const VpSkeleton::LaneLease fl = source();
+		if (!fl.table || !fl.bytes || fl.generation != p7Lease.generation)
+			return count(&FitCounters::fieldNoStorage);   // no storage, or a rebuild between the two reads: the field is missing for this frame
+		VpSkeleton::SlotSet* fs = fl.table->Find(VpSkeleton::kCameraFitField);
+		if (!fs)
+			return count(&FitCounters::fieldNoStorage);
+		VpSkeleton::LaneTicket ticket;
+		if (fs->Claim(job.seq, VpAncestry::Provenance::AheadLane, ~uint64_t(0), &ticket) != VpSkeleton::ClaimResult::Claimed)
+			return count(&FitCounters::fieldClaimRefused);
+		if (!fs->Writable(ticket))
+		{
+			fs->Abandon(ticket);
+			return count(&FitCounters::fieldClaimRefused);
+		}
+		VpAncestry::Header& hdr = fs->LaneHeader(ticket);
+		VpSkeleton::LaneInputs pins;
+		if (!fl.table->LaneAncestors(VpSkeleton::kCameraFitField, job.seq, hdr, pins))
+		{
+			fs->Abandon(ticket);
+			return count(&FitCounters::fieldClaimRefused);
+		}
+		// The content goes into the slot's own buffer, once; the product owns it from here on (nothing else keeps a copy).
+		if (EncodeFitFieldPod(*job.field, fl.bytes->Ring(static_cast<size_t>(ticket.slot)), fl.bytes->Bytes()) == 0)
+		{
+			pins.Unpin();
+			fs->Abandon(ticket);
+			const size_t need = FitFieldPodBytes(job.field->Blocks(), job.field->fwdTrust.size() == job.field->Blocks());
+			if (job.field->Valid() && need > fl.bytes->Bytes())
+			{
+				if (fc)
+				{
+					fc->fieldNeedBytes.store(need, std::memory_order_relaxed);
+					fc->fieldSlotBytes.store(fl.bytes->Bytes(), std::memory_order_relaxed);
+				}
+				return count(&FitCounters::fieldUndersized);   // the product is smaller than the field: not published, named in the status line
+			}
+			return count(&FitCounters::fieldEncodeFailed);
+		}
+		hdr.honoured = honoured;   // the SAME stamp P7(seq) is published under: the pair is one record
+		fs->Publish(ticket);
+		pins.Unpin();
+		return true;
+	}
+
 	PublishOutcome CameraFitWorker::PublishInto(const VpSkeleton::LaneLease& lease, const CameraFitJob& job, const CameraFitResult& fit,
 		bool countLate)
 	{
@@ -406,7 +483,11 @@ namespace CameraLink
 			EncodeRecordPod(*fit.record, bytes, kRecordPodMaxBytes);
 		// The pool entry is written BEFORE the publish (the seal can accept the instant it is Published) and erased if the
 		// publish turns out late, so a late record is never served.
-		m_env.pool->Put(job.seq, fit.record, job.field, m_env.aheadMode ? &hdr.honoured : nullptr, !countLate);
+		m_env.pool->Put(job.seq, fit.record, ProvenanceOf(job.field.get()), m_env.aheadMode ? &hdr.honoured : nullptr, !countLate);
+		// CP-A1-D4-CAMLABEL-FIELDCOPY: the fit field goes into its declared product BEFORE P7 is published (P8 needs the pair and compares the
+		// two stamps). A field that could not be published leaves that product missing for the frame: P8 produces no labels (its blocked /
+		// declined counts); P7 itself stays valid for its own readers. A P7 publish that then turns out late leaves an unused field slot.
+		PublishFitField(lease, countLate, job, hdr.honoured);
 		const VpSkeleton::PublishResult pr = set->Publish(ticket);
 		pins.Unpin();
 		if (pr != VpSkeleton::PublishResult::Published)

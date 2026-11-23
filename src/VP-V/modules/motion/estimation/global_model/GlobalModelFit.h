@@ -14,6 +14,7 @@
 #include "GlobalModelGeometry.h"
 #include "GlobalModelObjects.h"
 #include "GlobalModelTemporal.h"
+#include "PhotometricWiring.h"
 #include "StaticHypothesis.h"
 
 namespace CameraModel
@@ -43,6 +44,11 @@ namespace CameraModel
 		double pairSeconds = 0;                     // <= 0 -> NoInput
 		uint64_t resyncGeneration = 0, rebaseGeneration = 0;
 		double precisionPx = 0;                     // <= 0 -> 0.25 * blockSize / 16
+		// Camfix R2 (doc 103 s4 R2): one vector quantum of an NVOF field in source px (0.25 engine px x enginePxToSource); 0 = not an
+		// NVOF field (unchanged). With it the pair's precision is max(the above, quantumPx / sqrt(12) (the rounding error's sigma, R2F),
+		// 1.4826 x MAD of the winner's inlier residuals - kept only when the winner refined under it stays within its fit precision, R2F),
+		// and a competitor counts only when its MaxCornerDifference from the winner exceeds max(3 sigma, 2 quanta).
+		double quantumPx = 0;
 		int64_t deadlineMicros = 0;                 // absolute, in Clock microseconds; 0 = none
 		const PairInput* next = nullptr;            // queued next pair (or null)
 		// FULL-RESOLUTION FINAL REFINE (owner: what informs the matcher uses full resolution). Hypothesis scoring and the model ladder keep
@@ -50,6 +56,11 @@ namespace CameraModel
 		// inlier weights) over EVERY cell of the field inside the picture that is not excluded and has trust > 0. Set for the ahead fit's
 		// native field (CameraLink::AssemblePair); off = byte-identical to before (the seed / live path).
 		bool fullFinalRefine = false;
+		// DIRECT PHOTOMETRIC REFINEMENT (R3, PhotometricWiring.h). Non-null = the chosen model is polished on this pair's luma pair after the
+		// full-resolution refine, verified against the record (a refine that does not fall returns the vector fit's model), and the outcome is
+		// written back into the pointed-to struct. null = byte-identical to before (the seed / look-ahead / test path). The struct and its planes
+		// belong to the caller and must outlive the Fit() call; the fit writes only outcome and result.
+		PhotometricInput* photometric = nullptr;
 	};
 
 	struct Config
@@ -160,6 +171,8 @@ namespace CameraModel
 		void Reset();
 		const CameraMotion* Previous() const { return m_havePrevious ? &m_previous : nullptr; }
 		const Config& GetConfig() const { return m_config; }
+		// The refiner's own counters (refined / fell back / skipped), for the fit worker's status.
+		const RefineCounters& PhotometricCounters() const { return m_photometric.Counters(); }
 
 	private:
 		struct Impl;
@@ -172,6 +185,8 @@ namespace CameraModel
 		bool m_haveGenerations = false;
 		bool m_seedPending = false;                 // previous call published a post-cut seed
 		TwoLayerState m_tl;
+		PhotometricRefiner m_photometric;           // scratch + counters of the R3 refine (PairInput::photometric)
+		std::vector<uint8_t> m_photoLabel;          // per-block camera label handed to the refine as its inlier mask (scratch)
 		DynTextureState m_dyn;                      // previous pair's residual field (Config::dynTexture)
 		// Reused buffers (cost only; never part of the output). Fresh multi-100 KB allocations every pair
 		// cost hundreds of first-touch page faults, so the per-block record and the per-pair scratch are

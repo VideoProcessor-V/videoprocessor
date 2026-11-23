@@ -334,5 +334,25 @@ namespace VideoProcessorTest
 			const VpSkeleton::SlotSet* p8 = rig.lane.Table()->Find(VpSkeleton::kP8CameraLabels);
 			Assert::IsTrue(p8->StateOf(1) == VpSkeleton::SlotState::Empty, L"P8 is the label fill's, never a marker");
 		}
+
+		// CP-A1-D4-CAMLABEL-FIELDCOPY: PublishMarkers skips P7's fit field. A marker there would take the slot before the camera worker's
+		// claim (claim refused, so P8 never gets labels): the field slot stays the worker's, and the worker's publish into it succeeds.
+		TEST_METHOD(TheFitFieldIsNeverAMarkerAndTheWorkersClaimOfItSucceeds)
+		{
+			LaneRig rig(true);
+			const VpSkeleton::SlotSet* field = rig.lane.Table()->Find(VpSkeleton::kCameraFitField);
+			Assert::IsNotNull(field, L"premise: the labelled bridge graph holds P8's declared fit field");
+			// The production wiring (CameraExtension): the bridge's field storage goes to the core before the lane is attached.
+			rig.core.SetFieldSources(rig.lane.Source(VpSkeleton::kCameraFitField), VpSkeleton::LaneLeaseSource());
+			rig.core.AttachLane(rig.lane.Source(VpSkeleton::kP7CameraFit));
+			CameraLink::CameraLane::Sealed sealed;
+			Assert::IsTrue(rig.Frame(1, sealed));
+			Assert::IsTrue(rig.lane.MarkersPublished() > 0, L"premise: the markers of the input nodes were published");
+			Assert::IsTrue(field->StateOf(1) == VpSkeleton::SlotState::Empty, L"the fit field is the worker's, never a marker");
+			rig.Fit(1);
+			Assert::IsTrue(field->StateOf(1) == VpSkeleton::SlotState::Published, L"the worker's claim of the field slot succeeded");
+			Assert::AreEqual(uint64_t(0), rig.core.Counters().fieldClaimRefused.load(), L"no claim refused");
+			Assert::AreEqual(uint64_t(0), rig.core.Counters().fieldNoStorage.load(), L"the field storage reached the worker");
+		}
 	};
 }

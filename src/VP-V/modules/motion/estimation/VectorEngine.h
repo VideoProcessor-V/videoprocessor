@@ -313,6 +313,7 @@ namespace VpMotion
 				EstimateOutcome outcome;
 				outcome.guidanceUsed = used;
 				outcome.narrowIdle = use.narrowDroppedEngine;
+				outcome.e1Idle = use.e1DroppedEngine;
 				outcome.rejection = use.rejected && use.rejected[0] ? use.rejected : nullptr;
 				outcome.countsTex = used && (use.narrowPass || use.e1Pass) ? matcher.CameraGuidanceCounts() : nullptr;
 				try { hook->AfterEstimate(ctx.pairSeq, outcome); }

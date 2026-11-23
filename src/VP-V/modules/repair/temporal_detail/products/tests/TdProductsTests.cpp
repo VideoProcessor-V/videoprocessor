@@ -8,6 +8,8 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/core/ProductCatalog.h>
+#include <VP-V/core/ProductGraph.h>
 #include <VP-V/core/Products.h>
 #include <VP-V/modules/output/dither/DitherNeed.h>
 #include <VP-V/modules/output/dither/SigmaDeltaVectors.h>
@@ -88,7 +90,8 @@ namespace Tests
 				Assert::AreEqual(27, int(kTdMaps));
 				Assert::AreEqual(28, int(kTdTrailSummary));
 				Assert::AreEqual(29, int(kSourceGeometry), L"wave S2: P14g source_geometry is appended after the doc 72 list");
-				Assert::AreEqual(35, int(kSkeletonProductEnd));
+				Assert::AreEqual(35, int(kCameraFitField), L"CP-A1-D4-CAMLABEL-FIELDCOPY: the camera fit field is id 35");
+				Assert::AreEqual(36, int(kSkeletonProductEnd));
 				Assert::AreEqual(size_t(kSkeletonProductEnd), reg.Size());
 				// The v1 names are aliases of the v2 ids.
 				Assert::AreEqual(int(kTdBlocks), int(kTdAnalysis));
@@ -133,6 +136,35 @@ namespace Tests
 				// td.anchor_pass is Transient (the arena); td.memory is the whole store with no history.
 				Assert::IsTrue(reg.Get(kTdAnchorPass).residency == Residency::Transient);
 				Assert::AreEqual(0, int(reg.Get(kTdMemory).history));
+			}
+
+			// audit4 SHOULD 4 (TD-lane graph risk): refined_field (P3r) declares P8, and P8 now declares P7's fit field. A graph that holds
+			// P3r is valid and pulls in the fit field before P8 before P3r; the field has no declared input and no live-fill owner, so in a
+			// TD lane without the camera's external publish it is simply absent at the seal (P8 then has no labels), never lane-made.
+			TEST_METHOD(ARefinedFieldGraphHoldsP8AndItsFitFieldWhichHasNoLaneProducer)
+			{
+				using namespace VpSkeleton;
+				ConsumerDecl reader;
+				reader.id = 0xF35;
+				reader.name = "P3r reader (test)";
+				AddConsume(reader, kRefinedField, 0);
+				GraphSettings gs;
+				gs.dims.width = 1920;
+				gs.dims.height = 1080;
+				gs.laneLead = 2;
+				gs.queueDepth = 6;
+				gs.lookAheadWalk = 2;
+				gs.ofaPresent = true;
+				const Graph g = BuildGraph(SkeletonProducts(), { reader }, gs);
+				Assert::IsTrue(g.valid, L"the P3r -> P8 -> fit field graph builds");
+				Assert::IsTrue(g.Has(kRefinedField) && g.Has(kP8CameraLabels) && g.Has(kCameraFitField) && g.Has(kP7CameraFit),
+					L"P3r pulls in P8, its fit field and P7");
+				Assert::IsTrue(g.IndexOf(kCameraFitField) < g.IndexOf(kP8CameraLabels) && g.IndexOf(kP8CameraLabels) < g.IndexOf(kRefinedField),
+					L"the fit field before P8 before P3r");
+				const Node* field = g.Find(kCameraFitField);
+				Assert::IsNotNull(field);
+				Assert::AreEqual(0, int(field->inputCount), L"no declared input: nothing in the lane graph produces it");
+				Assert::IsNull(VpSkeleton::Catalog::LiveFillOwner(kCameraFitField), L"no consumer can fill it live: absent unless the camera publishes it");
 			}
 
 			TEST_METHOD(RecordHistoriesAreSecondsOfTheMeasuredSourceRate)

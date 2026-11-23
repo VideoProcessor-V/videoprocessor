@@ -11,6 +11,7 @@
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraMotion.h>
+#include <VP-V/modules/motion/estimation/global_model/PhotometricWiring.h>
 
 #include <atomic>
 #include <cstdint>
@@ -28,6 +29,10 @@ namespace CameraLink
 	constexpr const char* kIdNoModelSlip = "camera.no_model.slip";
 	constexpr const char* kIdNoModelDepth0 = "camera.no_model.depth0";
 	constexpr const char* kIdNoModelQueue = "camera.no_model.queue";
+	// R3 (photometric refinement): engaged while it never ran on a fitted pair (no luma / resolution rule / degenerate input), and while any
+	// PhotometricRefineGpu failure counter is non-zero. Both reach the Ctrl+I lines, the one-time notice, Config status and Ctrl+Alt+D.
+	constexpr const char* kIdPhotometricNotRunning = "camera.photometric.not_running";
+	constexpr const char* kIdPhotometricGpuFailed = "camera.photometric.gpu_failed";
 
 	constexpr double kAmbiguousEngageSeconds = 0.5;
 
@@ -41,6 +46,7 @@ namespace CameraLink
 	{
 		std::atomic<uint64_t> submitted{ 0 };        // jobs accepted by the worker queue
 		std::atomic<uint64_t> queueFull{ 0 };        // jobs dropped: the bounded queue was full (visible)
+		std::atomic<uint64_t> refusedAfterStop{ 0 }; // CE-SUBMIT-AFTER-STOP: Submit refused because the worker thread was stopped (never queued, never fitted)
 		std::atomic<uint64_t> fitted{ 0 };
 		std::atomic<uint64_t> published{ 0 };
 		std::atomic<uint64_t> late{ 0 };             // fitted, not published (seal first / claim stale / not writable / no inputs)
@@ -55,6 +61,13 @@ namespace CameraLink
 		std::atomic<uint64_t> relatches{ 0 };
 		std::atomic<uint64_t> staleLane{ 0 };        // posts REFUSED: the job's lane generation is not the worker's (the lane graph was rebuilt)
 		std::atomic<uint64_t> rebound{ 0 };          // times the worker took a new lane lease (a rebuild was noticed)
+		std::atomic<uint64_t> fieldUndersized{ 0 };  // fit field larger than its product's size (gs.dims): NOT published, P8 gets no labels for that frame
+		std::atomic<uint64_t> fieldEncodeFailed{ 0 };// fit field invalid / not encodable although the slot is large enough: not published
+		std::atomic<uint64_t> fieldNoStorage{ 0 };   // fit field product has no source / storage / node, or another generation than P7: not published
+		std::atomic<uint64_t> fieldClaimRefused{ 0 };// fit field slot claim refused / not writable / inputs not pinned: not published
+		std::atomic<uint64_t> fieldNoField{ 0 };     // the fit had no field to store (pair without a field): P8 has no labels for it
+		std::atomic<uint64_t> fieldNeedBytes{ 0 };   // last undersized miss: bytes the field needed
+		std::atomic<uint64_t> fieldSlotBytes{ 0 };   // last undersized miss: bytes the slot holds
 		std::atomic<uint64_t> guidedRefused{ 0 };    // F2: copies of the guided live field refused by SubmitField (never fitted)
 		std::atomic<uint64_t> seedAbsent{ 0 };       // F2: engine pairs without an optical-flow seed (no fit; camera_fit fallback)
 		// AHEAD FIT (camera_ahead_fit; all stay 0 when it is off). On time = P7 sealed with the frame in the on-time target;
@@ -75,6 +88,24 @@ namespace CameraLink
 		std::atomic<uint64_t> p2RefusedSeal{ 0 };    // ... rejected at the on-time seal
 		std::atomic<uint64_t> p2RefusedUse{ 0 };     // ... refused at a consumer read
 		std::atomic<uint64_t> aheadEpochRace{ 0 };   // G-A3: FlowOf answered while the vectors-valid epoch moved (refused at the copy)
+		// R3 (photometric refinement of the chosen model; CPU reference). One counter per outcome: nothing is skipped silently.
+		std::atomic<uint64_t> photoRefined{ 0 }, photoFellBack{ 0 }, photoSkippedNoLuma{ 0 }, photoSkippedResolution{ 0 }, photoSkippedOther{ 0 };
+		// PhotometricRefineGpu failure counters (Unavailable / Limit / Ensure / Readback). The GPU form is not driven by the camera worker
+		// (it owns no device), so they read 0 and the status says "cpu reference"; a device-owning driver adds into them.
+		std::atomic<uint64_t> photoGpuUnavailable{ 0 }, photoGpuLimit{ 0 }, photoGpuEnsure{ 0 }, photoGpuReadback{ 0 };
+		void NotePhotometric(CameraModel::PhotometricOutcome o)
+		{
+			using O = CameraModel::PhotometricOutcome;
+			switch (o)
+			{
+			case O::Refined: photoRefined.fetch_add(1, std::memory_order_relaxed); break;
+			case O::FellBack: photoFellBack.fetch_add(1, std::memory_order_relaxed); break;
+			case O::SkippedNoLuma: photoSkippedNoLuma.fetch_add(1, std::memory_order_relaxed); break;
+			case O::SkippedResolution: photoSkippedResolution.fetch_add(1, std::memory_order_relaxed); break;
+			case O::SkippedOther: photoSkippedOther.fetch_add(1, std::memory_order_relaxed); break;
+			default: break;
+			}
+		}
 	};
 
 	// AHEAD FIT: the visible state (Ctrl+I line, Config status, Ctrl+Alt+D). `target` says where an on-time result can go ("" = none).
@@ -165,15 +196,52 @@ namespace CameraLink
 		return d;
 	}
 
+	inline unsigned long long PhotometricGpuFailures(const FitCounters& c)
+	{
+		return c.photoGpuUnavailable.load() + c.photoGpuLimit.load() + c.photoGpuEnsure.load() + c.photoGpuReadback.load();
+	}
+	// R3 decisions from the counters (cumulative: "never ran" = pairs fitted, none refined or verified-and-fallen-back).
+	inline std::vector<FallbackCatalog::Decision> PhotometricDecisions(const FitCounters& c, bool graphHasP7)
+	{
+		using namespace FallbackCatalog;
+		std::vector<Decision> d;
+		const unsigned long long ran = c.photoRefined.load() + c.photoFellBack.load();
+		const unsigned long long skipped = c.photoSkippedNoLuma.load() + c.photoSkippedResolution.load() + c.photoSkippedOther.load();
+		const bool notRunning = graphHasP7 && ran == 0 && skipped > 0;
+		d.push_back(notRunning ? Engaged(kIdPhotometricNotRunning,
+			"camera: photometric refine not running (no luma pair, the resolution rule, or a degenerate input): the vector model is used unrefined")
+			: Released(kIdPhotometricNotRunning));
+		char b[200];
+		std::snprintf(b, sizeof(b), "camera: photometric refine GPU failures: %llu unavailable, %llu limit, %llu ensure, %llu readback",
+			(unsigned long long)c.photoGpuUnavailable.load(), (unsigned long long)c.photoGpuLimit.load(),
+			(unsigned long long)c.photoGpuEnsure.load(), (unsigned long long)c.photoGpuReadback.load());
+		d.push_back(graphHasP7 && PhotometricGpuFailures(c) > 0 ? Engaged(kIdPhotometricGpuFailed, b) : Released(kIdPhotometricGpuFailed));
+		return d;
+	}
+	// The R3 status line (always shown while the camera link is active): outcomes and the GPU failure counters; the path is the CPU reference.
+	inline std::string PhotometricStatusLine(const FitCounters& c)
+	{
+		char b[400];
+		std::snprintf(b, sizeof(b), "camera photometric refine (cpu reference): %llu refined, %llu fell back, %llu no luma, %llu resolution rule, %llu other; gpu failures %llu unavailable, %llu limit, %llu ensure, %llu readback",
+			(unsigned long long)c.photoRefined.load(), (unsigned long long)c.photoFellBack.load(), (unsigned long long)c.photoSkippedNoLuma.load(),
+			(unsigned long long)c.photoSkippedResolution.load(), (unsigned long long)c.photoSkippedOther.load(),
+			(unsigned long long)c.photoGpuUnavailable.load(), (unsigned long long)c.photoGpuLimit.load(),
+			(unsigned long long)c.photoGpuEnsure.load(), (unsigned long long)c.photoGpuReadback.load());
+		return b;
+	}
+
 	// "camera: fits 120, published 118, late 2, unusable 3, slip 0, queue full 0"
 	inline std::string StatusLine(const FitCounters& c)
 	{
-		char b[512];
-		std::snprintf(b, sizeof(b), "camera fit: %llu fitted, %llu published, %llu late, %llu not used, %llu slip, %llu timing unknown, %llu queue full, %llu readback dropped, %llu stale lane (refused after a graph rebuild), %llu lane rebinds",
+		char b[1024];
+		std::snprintf(b, sizeof(b), "camera fit: %llu fitted, %llu published, %llu late, %llu not used, %llu slip, %llu timing unknown, %llu queue full, %llu readback dropped, %llu stale lane (refused after a graph rebuild), %llu lane rebinds, %llu fit field too big for its product (no labels for those frames; last need %llu B, slot %llu B), %llu fit field encode failed, %llu fit field without storage, %llu fit field claim refused, %llu fits without a field, %llu refused after stop",
 			(unsigned long long)c.fitted.load(), (unsigned long long)c.published.load(), (unsigned long long)c.late.load(),
 			(unsigned long long)c.unusable.load(), (unsigned long long)c.notFittedSlip.load(),
 			(unsigned long long)c.timingUnknown.load(), (unsigned long long)c.queueFull.load(),
-			(unsigned long long)c.readbackDropped.load(), (unsigned long long)c.staleLane.load(), (unsigned long long)c.rebound.load());
+			(unsigned long long)c.readbackDropped.load(), (unsigned long long)c.staleLane.load(), (unsigned long long)c.rebound.load(),
+			(unsigned long long)c.fieldUndersized.load(), (unsigned long long)c.fieldNeedBytes.load(), (unsigned long long)c.fieldSlotBytes.load(),
+			(unsigned long long)c.fieldEncodeFailed.load(), (unsigned long long)c.fieldNoStorage.load(), (unsigned long long)c.fieldClaimRefused.load(),
+			(unsigned long long)c.fieldNoField.load(), (unsigned long long)c.refusedAfterStop.load());
 		return b;
 	}
 }

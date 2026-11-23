@@ -42,6 +42,17 @@ namespace CameraLink
 		Refused,    // a stale epoch (discontinuity), an invalid group, the store off: the film lock is dropped
 	};
 
+	// Camfix R8: the frame-analysis store's read outcome as a cadence read (CameraExtension UpdateTiming): Ok decides; Missing / Late
+	// (not written yet / evicted) = NotYet; any other outcome (stale epoch, invalid group, store off) = Refused. A template so this
+	// header keeps no store include (Status = FrameAnalysis::ReadStatus).
+	template <typename Status>
+	inline CadenceRead CadenceReadOf(Status status)
+	{
+		if (status == Status::Ok)
+			return CadenceRead::Ok;
+		return status == Status::Missing || status == Status::Late ? CadenceRead::NotYet : CadenceRead::Refused;
+	}
+
 	// C7b: the cadence part of the facts for this frame. Only an Ok read decides locked / unlocked; a NotYet read holds the latched
 	// film timing (a single missed read would otherwise relatch for one frame and reset the fit's timing basis). Every other outcome
 	// unlocks. The measured source rate in t is never touched.

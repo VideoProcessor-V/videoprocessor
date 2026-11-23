@@ -15,7 +15,8 @@ namespace CameraModel
 		inline double Len(double x, double y) { return std::sqrt(x * x + y * y); }
 	}
 
-	DynTextureResult DetectDynamicTexture(const DynTextureConfig& cfg, const PairInput& in, const Params& model, DynTextureState& state)
+	DynTextureResult DetectDynamicTexture(const DynTextureConfig& cfg, const PairInput& in, const Params& model, DynTextureState& state,
+		double resolvedPrecPx)
 	{
 		DynTextureResult out;
 		const int gw = in.gridW, gh = in.gridH;
@@ -23,7 +24,8 @@ namespace CameraModel
 			|| in.fwdY == nullptr || in.fwdTrust == nullptr || model.type == ModelType::None)
 			return out;
 		const size_t nb = static_cast<size_t>(gw) * static_cast<size_t>(gh);
-		const double prec = in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0;
+		// SHOULD-1: the fitter's FINAL precision (quantum floor, raised noise scale) when it passes one; 0 = the pair's nominal precision.
+		const double prec = resolvedPrecPx > 0 ? resolvedPrecPx : (in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0);
 		const double absThr = cfg.absSigmas * prec;
 		const bool prevOk = state.have && state.gridW == gw && state.gridH == gh && state.picture == in.picture && state.seconds > 0;
 		const double k = prevOk ? in.pairSeconds / state.seconds : 1.0;
@@ -57,7 +59,7 @@ namespace CameraModel
 				if (in.textGuard != nullptr && in.textGuard[b] == 1)
 					continue;
 				const float tr = in.fwdTrust[b];
-				if (!(tr > 0.0f) || !IsFiniteBits(in.fwdX[b]) || !IsFiniteBits(in.fwdY[b]))
+				if (!(tr > 0.0f) || !IsFiniteBits(tr) || !IsFiniteBits(in.fwdX[b]) || !IsFiniteBits(in.fwdY[b]))
 					continue;
 				double x, y, mx, my;
 				BlockCentre(bx, by, in.blockSize, in.picture, &x, &y);
@@ -77,16 +79,34 @@ namespace CameraModel
 				const bool d = rm > t;
 				dis[b] = d ? 1 : 0;
 				disagree += d ? 1 : 0;
-				if (prevOk && state.prev.valid[b])
+				// SHOULD-4: the previous pair's residual is read where this block's content WAS (advected by this block's own vector over the
+				// previous pair's duration), not at the same block index: a moving scene would otherwise compare different content. The index is
+				// bounds-checked; a block that came from outside the grid has no previous value.
+				size_t pb = b;
+				bool havePrev = false;
+				if (prevOk)
+				{
+					const double sx = (cx - in.fwdX[b] / k) / in.blockSize - 0.5, sy = (cy - in.fwdY[b] / k) / in.blockSize - 0.5;
+					if (IsFiniteBits(sx) && IsFiniteBits(sy) && sx > -0.5 && sy > -0.5 && sx < gw - 0.5 && sy < gh - 0.5)
+					{
+						const int px0 = static_cast<int>(std::floor(sx + 0.5)), py0 = static_cast<int>(std::floor(sy + 0.5));
+						if (px0 >= 0 && px0 < gw && py0 >= 0 && py0 < gh)
+						{
+							pb = static_cast<size_t>(py0) * gw + px0;
+							havePrev = pb < state.prev.valid.size() && state.prev.valid[pb] != 0;
+						}
+					}
+				}
+				if (havePrev)
 				{
 					{
-						const double qx = state.prev.vx[b] * k, qy = state.prev.vy[b] * k;
+						const double qx = state.prev.vx[pb] * k, qy = state.prev.vy[pb] * k;
 						const double vm = Len(static_cast<double>(in.fwdX[b]), static_cast<double>(in.fwdY[b]));
 						++fCompared;
 						if (Len(in.fwdX[b] - qx, in.fwdY[b] - qy) > std::max(absThr, cfg.agreeRatio * std::max(vm, Len(qx, qy))))
 							++fIncoh;
 					}
-					const double px = state.prev.rx[b] * k, py = state.prev.ry[b] * k;
+					const double px = state.prev.rx[pb] * k, py = state.prev.ry[pb] * k;
 					const double pm = Len(px, py);
 					if (d || pm > t)
 					{

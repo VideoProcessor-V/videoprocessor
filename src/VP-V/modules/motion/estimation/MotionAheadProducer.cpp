@@ -178,7 +178,18 @@ namespace MotionAhead
 		return true;
 	}
 
-	Producer::Producer() = default;
+	Producer::Producer()
+	{
+		// Camfix R1: the temporal hints are OFF by default (owner 2026-11-12 04:52, doc 91 A/H, register 115 #40); the diagnostic
+		// opt-in VP_NVOF_TEMPORAL_HINTS=1 (exactly "1") turns them on, and Ctrl+I shows it while it is in force.
+		char value[8] = {};
+		const DWORD n = GetEnvironmentVariableA("VP_NVOF_TEMPORAL_HINTS", value, static_cast<DWORD>(sizeof(value)));
+		if (n == 1 && value[0] == '1')
+		{
+			hintsCamera.store(true, std::memory_order_release);
+			DebugLog::Log("Motion ahead: NVOF temporal hints ON for the camera fit (VP_NVOF_TEMPORAL_HINTS=1, diagnostic opt-in)");
+		}
+	}
 
 	Producer::~Producer()
 	{
@@ -549,13 +560,19 @@ namespace MotionAhead
 			return false;
 		}
 		context->UpdateSubresource(lumaTex[texIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(halfW), 0);
+		// R3: this frame's engine luma is kept (one shared copy) only while the camera fit consumes the pair stream; the next pair takes it as
+		// its `from`. No copy otherwise.
+		std::shared_ptr<const std::vector<uint8_t>> currentLuma;
+		if (CameraConsumes())
+			currentLuma = std::make_shared<const std::vector<uint8_t>>(lumaBuffer);
 		bool ok = true;
 		if (prevSlot != EngineLumaRing::kNoSlot)
 		{
 			const int prev = prevSlot;
 			// The temporal hints only when the engine's last pair ended at this pair's first frame
 			// (audit 2026-10-16: they carried across seeks, dropped jobs and size skips).
-			const bool continuous = hintSequence == previousSequence && hintGeneration == job.generation;
+			// Camfix R1: and only while the temporal hints are on (SetTemporalHints; default off).
+			const bool continuous = HintsApply(hintSequence == previousSequence && hintGeneration == job.generation);
 			hintSequence = UINT64_MAX;
 			bool ran = false;
 			std::shared_ptr<Flow> flow;
@@ -568,6 +585,11 @@ namespace MotionAhead
 			}
 			if (ok && flow)
 			{
+				if (previousLuma && currentLuma && previousLuma->size() == currentLuma->size() && currentLuma->size() == static_cast<size_t>(halfW) * static_cast<size_t>(halfH))
+				{
+					flow->lumaFrom = previousLuma;
+					flow->lumaTo = currentLuma;
+				}
 				slot->Publish(previousSequence, job.sequence, job.generation, flow);   // P2: the pair, for the readers' P2View
 				engineReady = true;
 				std::lock_guard<std::mutex> lock(mutex);
@@ -575,6 +597,8 @@ namespace MotionAhead
 				stats.extrasMs = extrasMs;
 				stats.lastPairMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 				stats.pairMsSum += stats.lastPairMs;
+				if (continuous)
+					++stats.hintedPairs;
 			}
 		}
 		{
@@ -585,6 +609,7 @@ namespace MotionAhead
 		havePrevious = true;
 		previousSequence = job.sequence;
 		previousGeneration = job.generation;
+		previousLuma = currentLuma;
 		return ok;
 	}
 	bool Producer::LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& halfW, int& halfH,
@@ -871,6 +896,7 @@ namespace MotionAhead
 		std::shared_ptr<Flow> flow;
 		double extrasMs = 0.0;
 		bool ran = false;
+		bool hinted = false;   // the on-demand pair ran with temporal hints (counted in stats.hintedPairs)
 		if (testEngine)
 		{
 			flow = std::make_shared<Flow>();
@@ -937,7 +963,9 @@ namespace MotionAhead
 				texTo = requestTex[1];
 			}
 			// The temporal hints only for an adjacent Chain pair right after the engine's last pair ended at `from`.
-			const bool continuous = mode == Mode::Chain && rq.Adjacent() && hintSequence == rq.from && hintGeneration == rq.generation;
+			// Camfix R1: through HintsApply like the scheduled path, so the displayed hints state is the real one.
+			const bool continuous = HintsApply(mode == Mode::Chain && rq.Adjacent() && hintSequence == rq.from && hintGeneration == rq.generation);
+			hinted = continuous;
 			hintSequence = UINT64_MAX;   // any run here moves the engine's internal hint state
 			requestResetHints = true;    // a walk pair that would have used them runs without (counted in NoteWalkJob)
 			ok = RunPair(texFrom, texTo, w, h, continuous, rq.to, ran, flow, extrasMs);
@@ -956,6 +984,7 @@ namespace MotionAhead
 		}
 		{
 			std::lock_guard<std::mutex> lock(mutex);
+			if (hinted && ok && flow) ++stats.hintedPairs;
 			if (mode == Mode::Chain) ++requestStats.chainRuns;
 			else if (mode == Mode::Adopt) ++requestStats.adoptRuns;
 			else ++requestStats.offChainRuns;

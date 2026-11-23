@@ -98,7 +98,24 @@ namespace CameraLink
 		if (m_counters && res.timingUnknown)
 			m_counters->timingUnknown.fetch_add(1, std::memory_order_relaxed);
 		VPV_COMPUTE_ONCE_AT("U11", job.seq, 0);
+		// R3: the luma pair rides the pair input; the outcome comes back in the same struct and is counted (one counter per outcome).
+		CameraModel::PhotometricInput photo;
+		const size_t lumaCells = size_t(job.lumaW > 0 ? job.lumaW : 0) * size_t(job.lumaH > 0 ? job.lumaH : 0);
+		if (job.lumaFrom && job.lumaTo && lumaCells > 0 && job.lumaFrom->size() == lumaCells && job.lumaTo->size() == lumaCells && job.lumaStep > 0)
+		{
+			photo.luma.from.data8 = job.lumaFrom->data();
+			photo.luma.to.data8 = job.lumaTo->data();
+			photo.luma.from.width = photo.luma.to.width = job.lumaW;
+			photo.luma.from.height = photo.luma.to.height = job.lumaH;
+			photo.luma.from.stride = photo.luma.to.stride = job.lumaW;
+			photo.luma.sourcePxPerPixel = job.lumaStep;
+			photo.luma.codeScale = 1.0;
+		}
+		in.photometric = &photo;
 		auto rec = std::make_shared<CameraModel::CameraMotion>(m_fitter.Fit(in));
+		in.photometric = nullptr;
+		if (m_counters)
+			m_counters->NotePhotometric(photo.outcome);
 		if (m_counters)
 			m_counters->fitted.fetch_add(1, std::memory_order_relaxed);
 		// EWMA of the measured cost (1/4 weight): the producer's chunk prediction.

@@ -133,6 +133,13 @@ namespace CameraLink
 		// The on-time target: the lane that seals P7(N) at N (the skeleton lane's AnalysisLane::Lease(kP7CameraFit)). Empty = none.
 		// `name` is what the status line calls it.
 		void AttachOnTime(VpSkeleton::LaneLeaseSource source, const std::string& name) { m_onTimeSource = std::move(source); m_onTimeName = name; }
+		// CP-A1-D4-CAMLABEL-FIELDCOPY (before AttachLane): the leases whose bytes ring is the fit field product p7f_camera_fit_field, for the
+		// lag bridge and for the on-time target. Without them the field product is never published (P8 has no labels, visibly).
+		void SetFieldSources(VpSkeleton::LaneLeaseSource bridge, VpSkeleton::LaneLeaseSource onTime)
+		{
+			m_fieldBridgeSource = std::move(bridge);
+			m_fieldOnTimeSource = std::move(onTime);
+		}
 		// The 16-px source grid the ahead pair is converted onto (the live field's grid that sized the camera graph).
 		void SetAheadGrid(int sourceGridW, int sourceGridH) { m_aheadGridW = sourceGridW; m_aheadGridH = sourceGridH; }
 		// G-A3: the engine's current vectors-valid epoch (IVectorEngine::FieldEra, any thread): an Ahead record whose P2 epoch differs is
@@ -191,8 +198,7 @@ namespace CameraLink
 		std::shared_ptr<const CameraModel::CameraMotion> CausalRecord(uint64_t seq) const override;
 		std::shared_ptr<const CameraModel::CameraMotion> OnTimeRecord(uint64_t seq, OnTimeCheck check, OnTimeMiss& why) const override;
 		SealVerdict OnTimeSealVerdict(uint64_t seq) const override;
-		bool FitEntryOf(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion>& rec,
-			std::shared_ptr<const FieldCopy>& field) const override;
+		bool FitEntryOf(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion>& rec) const override;
 		bool LabelsFor(uint64_t seq, CameraConsumer c, CameraLabelsView& out) override;
 		std::shared_ptr<const CameraModel::GuidanceFrame> GuideFor(uint64_t seq) override;
 
@@ -268,12 +274,14 @@ namespace CameraLink
 		AheadSource m_aheadSource;
 		PairFactsProvider m_aheadFacts;
 		VpSkeleton::LaneLeaseSource m_onTimeSource;
+		VpSkeleton::LaneLeaseSource m_fieldBridgeSource;   // the fit field product's bytes lease, lag bridge
+		VpSkeleton::LaneLeaseSource m_fieldOnTimeSource;   // the same, on-time target
 		std::string m_onTimeName;
 		std::function<uint64_t()> m_p2Epoch;
 		std::function<void(AheadCopy&)> m_aheadGlobal;
 		bool P2Stale(const PoolEntry& e) const
 		{
-			return e.field && e.field->haveP2 && m_p2Epoch && m_p2Epoch() != e.field->p2Epoch;
+			return e.field.have && e.field.haveP2 && m_p2Epoch && m_p2Epoch() != e.field.p2Epoch;
 		}
 		int m_aheadGridW = 0, m_aheadGridH = 0;
 		float m_aheadConsistency = 2.0f;

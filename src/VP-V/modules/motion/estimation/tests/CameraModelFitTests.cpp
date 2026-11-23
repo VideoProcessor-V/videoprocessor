@@ -5,11 +5,14 @@
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h>
 #include <VP-V/modules/motion/estimation/global_model/StaticHypothesis.h>
 #include "SyntheticCameraFields.h"
+#include <VP-V/tests/support/D0Time.h>
 #include "CppUnitTest.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -841,6 +844,50 @@ namespace VideoProcessorTest
 				Require(Snapshot(r) == first[static_cast<size_t>(i)], "refit differs at pair " + std::to_string(i));
 			}
 		}
+
+		// Gemini SHOULD-3 (69d48423c): with the full-resolution final refine the signals Finish publishes are rebuilt on the REFINED model.
+		// Sampling keeps the highest-trust block of every 5 x 5 cell, here the lattice blocks (bx and by multiples of 4, trust 1, vector
+		// M_a: one lies in every cell). Every other block (trust 0.3) is 0.5 px away from M_a. The sampled fit is M_a exactly (zero
+		// residual, precision 1); the refine over every cell, weighted by trust, moves toward the bulk. Before the fix the published
+		// precision/inlier signals were still those of M_a on the sampled blocks (rms 0, precision 1.0); after it they are measured
+		// against the published, moved model, so the sampled blocks show the shift as a residual and the precision falls.
+		TEST_METHOD(FullFinalRefineRefreshesSignalsForPublishedModel)
+		{
+			const double ax = 6.0, ay = -2.0;
+			Field f(Grid4K());
+			f.FromModel(PanModel(ax, ay));
+			for (int y = 0; y < f.gridH; ++y)
+				for (int x = 0; x < f.gridW; ++x)
+				{
+					const size_t i = f.Index(x, y);
+					if (x % 4 == 0 && y % 4 == 0)
+						f.trust[i] = 1.0f;
+					else
+					{
+						f.fx[i] = static_cast<float>(ax + 0.5);
+						f.trust[i] = 0.3f;
+					}
+				}
+			PairInput in = f.Input(kPairSeconds, 5);
+			Fitter plain;
+			const CameraMotion s = plain.Fit(in);
+			Require(s.valid && s.finalRefineCells == 0, "premise: the sampled fit has no full refine: " + Describe(s));
+			Require(s.signals.precision > 0.97, "premise: the sampled fit is M_a on its own samples, precision " + std::to_string(s.signals.precision));
+			in.fullFinalRefine = true;
+			Fitter full;
+			const CameraMotion r = full.Fit(in);
+			Require(r.valid && r.finalRefineCells > 0, "premise: the full final refine ran: " + Describe(r));
+			double dx = 0, dy = 0;
+			Displacement(r.params, 0.0, 0.0, &dx, &dy);
+			const double shift = std::sqrt((dx - ax) * (dx - ax) + (dy - ay) * (dy - ay));
+			Require(shift >= 0.25 && shift <= 0.55, "premise: the refine moved the model toward the bulk by " + std::to_string(shift) + " px: " + Describe(r));
+			// The signal must be the one measured on the sampled blocks against the PUBLISHED model: rms = shift for every sampled block.
+			const double expected = 1.0 / (1.0 + (shift / (2.0 * 0.25)) * (shift / (2.0 * 0.25)));
+			Require(r.signals.precision < 0.9, "stale signal: precision still " + std::to_string(r.signals.precision) + " after a refine of " + std::to_string(shift) + " px");
+			Require(std::fabs(r.signals.precision - expected) < 0.1, "precision " + std::to_string(r.signals.precision) + " vs the published-model value "
+				+ std::to_string(expected));
+			Require(r.signals.precision < s.signals.precision, "the full refine reports the shift the sampled fit cannot see");
+		}
 	};
 
 	// Two-layer foreground fix (K10a, Config::twoLayer). Every test states its Config explicitly.
@@ -1398,6 +1445,187 @@ namespace VideoProcessorTest
 			const CameraMotion r = fitter.Fit(w2.Input(kPairSeconds, 7));
 			Require(r.reason == Reason::Ambiguous && r.signals.dynTemporal == 0.0, "after a cut: " + Describe(r) + " temporal=" + std::to_string(r.signals.dynTemporal));
 		}
+
+		// Gemini SHOULD-2 (5bf62a248): the detector verdict is applied BEFORE Labels, so a demoted pair (confidence x 0.495) stamps no
+		// Overlay (which needs a confident record) and does not run the object tracker. Before the fix Labels ran on the confident
+		// pre-verdict record: a zero-motion logo over the water became Overlay and the objects were tracked, then the demotion followed.
+		TEST_METHOD(DemotedDynTextureAndStaticDoNotStampOverlayOrPolluteObjects)
+		{
+			auto make = [](uint64_t seed)
+			{
+				Field f = AnchoredWater(seed, 3.0);
+				f.AddLogo(100, 60, 6, 4, false);          // a static logo: zero vectors, trust 1
+				f.AddObject(30, 20, 48, 32, -25, 14);     // a coherent mover for the object tracker (1536 blocks: above its 1 % support floor with margin)
+				return f;
+			};
+			// Control: detector off, the confident pair stamps the logo as Overlay and tracks the object.
+			Config offCfg; offCfg.objects = true;
+			Fitter off(offCfg);
+			Field f0 = make(1000);
+			const CameraMotion a = off.Fit(f0.Input(kPairSeconds, 5));
+			Require(a.valid && a.confidence >= 0.5 && ReasonUsable(a.reason), "premise (detector off): the pair is confident: " + Describe(a));
+			Require(CountLabelInRect(a, f0, 100, 60, 6, 4, Label::Overlay) > 0, "premise (detector off): the logo is stamped Overlay: " + Describe(a));
+			Require(!a.objects.empty(), "premise (detector off): the object tracker ran: " + Describe(a));
+			// Detector on: the pair is demoted, and none of the above happens.
+			Config onCfg = DT(); onCfg.objects = true;
+			Fitter on(onCfg);
+			for (int i = 0; i < 2; ++i)
+			{
+				Field f = make(1000 + i);
+				const CameraMotion r = on.Fit(f.Input(kPairSeconds, 5 + i));
+				Require(r.valid && r.reason == Reason::Ambiguous && (r.verdictFlags & kVerdictDynamicTexture) != 0, "demoted, pair " + std::to_string(i) + ": " + Describe(r));
+				Require(CountLabel(r, Label::Overlay) == 0, "a demoted pair stamps no Overlay, pair " + std::to_string(i) + ": " + Describe(r) + " overlay="
+					+ std::to_string(CountLabel(r, Label::Overlay)));
+				Require(r.objects.empty(), "a demoted pair does not run the object tracker, pair " + std::to_string(i) + ": " + Describe(r));
+			}
+		}
+
+		// Gemini NIT-1 (840f28a02): a record that carries a verdict flag seeds no h0 and so triggers no early exit on the next pair.
+		// rec.hypotheses counts the candidates tried: an h0 that explains the field exits early after one (the refined h0), no h0 runs the
+		// full search (more than one). Control: after a clean pan the next clean pan exits early; after a demoted water pair it does not.
+		TEST_METHOD(DemotedPreviousDoesNotTriggerEarlyExit)
+		{
+			Fitter ctl(DT());
+			Field c1(Grid4K()); c1.FromModel(Pan4K()); c1.AddNoise(0.05, 3000);
+			const CameraMotion p1 = ctl.Fit(c1.Input(kPairSeconds, 5));
+			Require(p1.valid && p1.verdictFlags == 0, "premise: a clean pan carries no verdict: " + Describe(p1));
+			Field c2(Grid4K()); c2.FromModel(Pan4K()); c2.AddNoise(0.05, 3001);
+			const CameraMotion p2 = ctl.Fit(c2.Input(kPairSeconds, 6));
+			Require(p2.valid && p2.hypotheses == 1, "premise (control): a clean previous seeds h0 and the pair exits early, hypotheses=" + std::to_string(p2.hypotheses));
+			Fitter on(DT());
+			Field w = AnchoredWater(3002, 3.0);
+			const CameraMotion d = on.Fit(w.Input(kPairSeconds, 5));
+			Require(d.valid && d.reason == Reason::Ambiguous && (d.verdictFlags & kVerdictDynamicTexture) != 0, "premise: the first pair is demoted: " + Describe(d));
+			double mx = 0, my = 0;
+			Displacement(d.params, 0.0, 0.0, &mx, &my);
+			Require(std::fabs(mx - 12.3) < 0.5 && std::fabs(my + 4.7) < 0.5, "premise: the demoted record's model would explain the pan, model=(" + std::to_string(mx) + ", " + std::to_string(my) + ")");
+			Field c3(Grid4K()); c3.FromModel(Pan4K()); c3.AddNoise(0.05, 3001);
+			const CameraMotion n = on.Fit(c3.Input(kPairSeconds, 6));
+			Require(n.valid && n.reason == Reason::Ok && n.verdictFlags == 0, "the pair after the demotion is a clean fit: " + Describe(n));
+			Require(n.hypotheses > 1, "a demoted previous seeds no h0 and no early exit, hypotheses=" + std::to_string(n.hypotheses));
+		}
+
+		// Audit4 (2de379b5b, SHOULD-4): the previous pair's residual is read where this block's content WAS (centre minus its own vector /
+		// k), not at the same index. The detector is run directly, one state, on the exact model.
+		static std::vector<DynTextureResult> RunDetector(const std::vector<Field>& fields, const Params& model)
+		{
+			DynTextureState state;
+			std::vector<DynTextureResult> out;
+			for (size_t i = 0; i < fields.size(); ++i)
+				out.push_back(DetectDynamicTexture(DynTextureConfig(), fields[i].Input(kPairSeconds, 5 + i), model, state));
+			return out;
+		}
+
+		// (a) a uniform pan: nothing disagrees, the advected raw-vector comparison is coherent everywhere (field == 0), no verdict.
+		TEST_METHOD(DynTextureRejectsInfTrustAndAdvectsTemporalResidualsUnderPan)
+		{
+			std::vector<Field> fields;
+			for (int i = 0; i < 3; ++i) { Field f(Grid4K()); f.FromModel(Pan4K()); fields.push_back(f); }
+			const std::vector<DynTextureResult> r = RunDetector(fields, Pan4K());
+			for (size_t i = 0; i < r.size(); ++i)
+				Require(r[i].computed && r[i].share == 0.0 && r[i].field == 0.0 && r[i].temporal == 0.0 && !r[i].detected,
+					"uniform pan, pair " + std::to_string(i) + ": share=" + std::to_string(r[i].share) + " field=" + std::to_string(r[i].field)
+					+ " temporal=" + std::to_string(r[i].temporal));
+			// An infinite trust is not a trusted block: one block in seven carries trust +inf and a vector 50 px off the pan. They are
+			// skipped (share stays 0); counted, they would be 14 % disagreeing blocks.
+			std::vector<Field> bad;
+			for (int i = 0; i < 3; ++i)
+			{
+				Field f(Grid4K());
+				f.FromModel(Pan4K());
+				for (size_t b = 0; b < f.Count(); b += 7) { f.trust[b] = std::numeric_limits<float>::infinity(); f.fx[b] += 50.0f; f.fy[b] -= 50.0f; }
+				bad.push_back(f);
+			}
+			const std::vector<DynTextureResult> rb = RunDetector(bad, Pan4K());
+			for (size_t i = 0; i < rb.size(); ++i)
+				Require(rb[i].computed && rb[i].share == 0.0 && !rb[i].detected, "infinite-trust blocks are skipped, pair " + std::to_string(i) + " share=" + std::to_string(rb[i].share));
+		}
+
+		// (b) a coherent mover (25 % patch, about 6 px per pair relative to the camera) over a panned background. The mover is TEXTURED: each
+		// block carries a content-attached residual offset (+-3 px, a fixed pattern indexed by its position inside the patch) that moves with
+		// the object, one block per pair. Only the advected lookup (this block's centre minus its own vector) finds the same content in the
+		// previous pair; the same-index lookup of the earlier code compares different content. Sensitivity control: the same mover with the
+		// pattern re-drawn at random every pair must read as incoherent.
+		static Field TexturedMover(int pair, bool randomPattern)
+		{
+			Field f(Grid4K());
+			f.FromModel(Pan4K());
+			SplitMix64 rng(3300 + pair);
+			const int x0 = 40 + pair, y0 = 50, w = 120, h = 68;
+			for (int v = 0; v < h; ++v)
+				for (int u = 0; u < w; ++u)
+				{
+					const size_t i = f.Index(x0 + u, y0 + v);
+					double ox = ((u * 7 + v * 13) % 5 - 2) * 1.5, oy = ((u * 3 + v * 7) % 5 - 2) * 1.5;
+					if (randomPattern) { ox = (rng.Unit() - 0.5) * 12.0; oy = (rng.Unit() - 0.5) * 12.0; }
+					f.fx[i] = static_cast<float>(18.3 + ox);
+					f.fy[i] = static_cast<float>(-4.7 + oy);
+					f.trust[i] = 1.0f;
+				}
+			return f;
+		}
+
+		TEST_METHOD(CamfixR2FDynTextureCoherentMoverIsNotIncoherent)
+		{
+			std::vector<Field> fields, shuffled;
+			for (int i = 0; i < 4; ++i) { fields.push_back(TexturedMover(i, false)); shuffled.push_back(TexturedMover(i, true)); }
+			// Premise: a same-index lookup would call this textured mover incoherent (the old comparison), so the advected one earns the pass.
+			{
+				const Field& a = fields[0];
+				const Field& b = fields[1];
+				int compared = 0, incoh = 0;
+				for (int v = 0; v < 68; ++v)
+					for (int u = 0; u < 120; ++u)
+					{
+						const size_t i = b.Index(41 + u, 50 + v);
+						const double rx = b.fx[i] - 12.3, ry = b.fy[i] + 4.7, px = a.fx[i] - 12.3, py = a.fy[i] + 4.7;
+						const double rm = std::sqrt(rx * rx + ry * ry), pm = std::sqrt(px * px + py * py);
+						++compared;
+						if (std::sqrt((rx - px) * (rx - px) + (ry - py) * (ry - py)) > std::max(0.75, 0.5 * std::max(rm, pm))) ++incoh;
+					}
+				Require(static_cast<double>(incoh) / compared >= 0.4, "premise: a same-index lookup sees this mover as incoherent, share=" + std::to_string(static_cast<double>(incoh) / compared));
+			}
+			const std::vector<DynTextureResult> r = RunDetector(fields, Pan4K());
+			const std::vector<DynTextureResult> s = RunDetector(shuffled, Pan4K());
+			for (size_t i = 1; i < r.size(); ++i)
+			{
+				Require(r[i].computed && r[i].share > 0.15 && r[i].share < 0.4, "premise: the mover is about a quarter of the blocks, pair " + std::to_string(i)
+					+ " share=" + std::to_string(r[i].share));
+				Require(r[i].haveTemporal, "premise: the mover blocks are compared with the previous pair, pair " + std::to_string(i));
+				Require(r[i].temporal < 0.2 && !r[i].detected, "a coherent textured mover must stay coherent, pair " + std::to_string(i) + " temporal=" + std::to_string(r[i].temporal));
+				Require(s[i].haveTemporal && s[i].temporal >= 0.6, "sensitivity control: a re-drawn pattern is incoherent, pair " + std::to_string(i) + " temporal=" + std::to_string(s[i].temporal));
+			}
+		}
+
+		// (c) water over the same pan: random residuals, no coherence across pairs or neighbours.
+		TEST_METHOD(CamfixR2FDynTextureWaterIsDetectedUnderPan)
+		{
+			std::vector<Field> fields;
+			for (int i = 0; i < 3; ++i) fields.push_back(AnchoredWater(3100 + i, 3.0));
+			const std::vector<DynTextureResult> r = RunDetector(fields, Pan4K());
+			for (size_t i = 1; i < r.size(); ++i)
+				Require(r[i].computed && r[i].haveTemporal && r[i].share >= 0.5 && r[i].temporal >= 0.6 && r[i].spatial >= 0.5 && r[i].detected,
+					"water, pair " + std::to_string(i) + " share=" + std::to_string(r[i].share) + " temporal=" + std::to_string(r[i].temporal)
+					+ " spatial=" + std::to_string(r[i].spatial));
+		}
+
+		// Gemini SHOULD-1 (e34f08a3e): with resolvedPrecPx > 0 the detector uses the fit's final precision for its threshold (3 x it); 0 keeps
+		// the nominal precision. Water of +-1.2 px: against the nominal 0.25 px (threshold 0.75) it disagrees; against a final precision
+		// of 1.0 px (threshold 3) every residual agrees.
+		TEST_METHOD(CamfixR2FDynTextureAndStaticUseFitPrecision)
+		{
+			Field f = AnchoredWater(3200, 1.2);
+			auto run = [&](double resolved)
+			{
+				DynTextureState s;
+				const PairInput in = f.Input(kPairSeconds, 5);
+				return DetectDynamicTexture(DynTextureConfig(), in, Pan4K(), s, resolved);
+			};
+			const DynTextureResult nominal = run(0.0), same = run(0.25), widened = run(1.0);
+			Require(nominal.computed && nominal.share >= 0.5, "premise: against the nominal precision the water disagrees, share=" + std::to_string(nominal.share));
+			Require(same.share == nominal.share, "premise: an explicit 0.25 is the nominal value");
+			Require(widened.computed && widened.share == 0.0 && !widened.detected, "the fit's final precision sets the threshold, share=" + std::to_string(widened.share));
+		}
 	};
 
 	// Static-camera hypothesis (R1-STATIC, Config::staticCamera). Every test states its Config explicitly.
@@ -1614,6 +1842,328 @@ namespace VideoProcessorTest
 			const double us2 = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t1).count() / 200;
 			Logger::WriteMessage(("EvaluateStaticCamera on the 120 x 68 grid: " + std::to_string(us2) + " us per call (hits " + std::to_string(hits2) + ")").c_str());
 			Require(hits2 == 200 && us2 < 20000.0, "1080p cost bound (loose; indicative only): " + std::to_string(us2) + " us");
+		}
+
+		// ---- Camfix R2 (doc 103 s4 R2): an NVOF field's precision floor is its quantum; competitors need max(3 sigma, 2 quanta). ----
+
+		// Round every forward vector to the quantum q (the NVOF output grid in source px).
+		static void QuantizeField(Field& f, double q)
+		{
+			for (size_t i = 0; i < f.Count(); ++i)
+			{
+				f.fx[i] = static_cast<float>(std::floor(f.fx[i] / q + 0.5) * q);
+				f.fy[i] = static_cast<float>(std::floor(f.fy[i] / q + 0.5) * q);
+			}
+		}
+
+		// A pan between two quanta splits the vectors into two clusters one quantum apart; with the quantum declared they are
+		// one motion, not a second layer.
+		TEST_METHOD(CamfixR2QuantizedPanIsNotAmbiguous)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12.4, -4.6));
+			f.AddNoise(0.3, 71);
+			QuantizeField(f, 1.0);
+			Fitter plain;
+			const CameraMotion r0 = plain.Fit(f.Input(kPairSeconds, 5));
+			Logger::WriteMessage(Fmt("quantized pan, no quantum declared (documentation)", r0).c_str());
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 1.0;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			Logger::WriteMessage(Fmt("quantized pan, quantum 1.0", r).c_str());
+			Require(r.valid && r.reason == Reason::Ok && r.confidence >= 0.5, Fmt("quantized pan, quantum 1.0", r));
+			const double err = ModelError(r, PanModel(12.4, -4.6), f.picture);
+			Require(err * f.Diagonal() < 0.25, Fmt("quantized pan error", r) + " corner error px=" + std::to_string(err * f.Diagonal()));
+		}
+
+		// A real second motion far beyond the separation stays flagged with the quantum declared.
+		TEST_METHOD(CamfixR2TwoMotionsStayAmbiguousWithQuantum)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12, 0));
+			const int x0 = static_cast<int>(0.4 * f.gridW);
+			f.AddObject(x0, 0, f.gridW - x0, f.gridH, -30, 8);
+			f.AddNoise(0.3, 72);
+			QuantizeField(f, 1.0);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 1.0;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			Require(r.confidence < 0.5 && r.reason == Reason::Ambiguous, Fmt("60% object over 40% pan, quantum 1.0", r));
+		}
+
+		// Camfix audit SHOULD 4: the 1080p-half quantum (0.5 px) with two layers far beyond the separation stays flagged.
+		TEST_METHOD(CamfixR2TwoLayersStayAmbiguousWithHalfPixelQuantum)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12, 0));
+			const int x0 = static_cast<int>(0.4 * f.gridW);
+			f.AddObject(x0, 0, f.gridW - x0, f.gridH, -30, 8);
+			f.AddNoise(0.3, 76);
+			QuantizeField(f, 0.5);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 0.5;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			Require(r.confidence < 0.5 && r.reason == Reason::Ambiguous, Fmt("60% object over 40% pan, quantum 0.5", r));
+		}
+
+		// Camfix audit SHOULD 4: at noise sigma about 2 px (separation max(3 sigma, 2 quanta) about 8 px) a real second motion 42 px away
+		// is still a second layer: the widened separation must not hide it.
+		TEST_METHOD(CamfixR2WidenedSeparationDoesNotHideARealSecondLayer)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12, 0));
+			const int x0 = static_cast<int>(0.4 * f.gridW);
+			f.AddObject(x0, 0, f.gridW - x0, f.gridH, -30, 8);
+			f.AddNoise(2.0, 77);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 0.5;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			Require(r.confidence < 0.5 && r.reason == Reason::Ambiguous, Fmt("noisy two motions, quantum 0.5", r));
+		}
+
+		// Noise well above the quantum floor: the threshold follows 1.4826 x MAD of the residuals, not the floor.
+		// Camfix R8D: the d = 0 GPU-time tolerance grows with the A/A spread but is capped at max(5% of off, 0.25 ms); a spread above
+		// the cap is a noisy run (INCONCLUSIVE in the harness), never a widened limit.
+		TEST_METHOD(CamfixR8DTimeToleranceIsCappedAndNoisyIsFlagged)
+		{
+			using CameraAccuracy::GpuTimeToleranceFor;
+			const auto quiet = GpuTimeToleranceFor(10.0, 0.05);
+			Assert::AreEqual(0.2, quiet.tolerance, 1e-9, L"2% of 10 ms");
+			Assert::IsFalse(quiet.noisy);
+			const auto floorTol = GpuTimeToleranceFor(1.0, 0.0);
+			Assert::AreEqual(0.1, floorTol.tolerance, 1e-9, L"0.1 ms floor");
+			const auto spread = GpuTimeToleranceFor(10.0, 0.4);
+			Assert::AreEqual(0.4, spread.tolerance, 1e-9, L"A/A spread within the cap (0.5 ms)");
+			Assert::IsFalse(spread.noisy);
+			const auto noisy = GpuTimeToleranceFor(10.0, 2.0);
+			Assert::AreEqual(0.5, noisy.tolerance, 1e-9, L"capped at 5% of off");
+			Assert::IsTrue(noisy.noisy, L"a 2 ms A/A spread is noisy: INCONCLUSIVE, never PASS");
+			const auto smallOff = GpuTimeToleranceFor(1.0, 0.3);
+			Assert::AreEqual(0.25, smallOff.tolerance, 1e-9, L"0.25 ms absolute cap");
+			Assert::IsTrue(smallOff.noisy);
+		}
+
+		TEST_METHOD(CamfixR2RobustScaleRaisesThreshold)
+		{
+			Field f(Grid4K());
+			f.FromModel(Pan4K());
+			f.AddNoise(2.0, 73);   // uniform, sigma 2 px (MAD-scale about 2.6 px)
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 0.5;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			Require(r.valid && r.blocks != nullptr, Fmt("noisy pan, quantum 0.5", r));
+			Logger::WriteMessage((Fmt("noisy pan, quantum 0.5", r) + " absThresholdPx=" + std::to_string(r.blocks->absThresholdPx)).c_str());
+			// Camfix R2F: uniform noise has no mode, so the floor winner sits anywhere on the plateau (about 2.8 px off here) and
+			// moves when refined under the raised gate; the scale is then kept at the floor and the pair is not confident. Either
+			// outcome is allowed - the raised scale with the camera's share and model, or no confident fit - never a confident
+			// wrong one. The raise itself on a stable winner is CamfixR2FStableWinnerStillRaisesTheScale.
+			const double err = ModelError(r, Pan4K(), f.picture) * f.Diagonal();
+			if (r.blocks->absThresholdPx >= 4.5)
+			{
+				const int cam = CountLabel(r, Label::Camera);
+				Require(cam >= static_cast<int>(0.9 * f.Count()), Fmt("noisy pan camera share", r) + " camera blocks=" + std::to_string(cam));
+				Require(err < 0.5, Fmt("noisy pan, raised scale", r) + " corner error px=" + std::to_string(err));
+			}
+			else
+				Require(r.confidence < 0.5, Fmt("noisy pan at the floor must not be confident", r) + " corner error px=" + std::to_string(err));
+		}
+
+		// Camfix R2 audit (sigma ratchet, GlobalModelFit.cpp Fitter::Run): a slow mover a few quanta off the camera (a quarter of the
+		// picture, 2.5 px and 4.5 px at a 1.0 px quantum) must not raise the robust scale until it is absorbed: the camera model stays
+		// on the pan, the threshold stays near the quantum floor, and the 4.5 px mover stays an object.
+		static void SlowMover(double offsetPx, unsigned seed, CameraMotion* out, Field* field)
+		{
+			Field& f = *field;
+			f.FromModel(PanModel(12.4, -4.6));
+			const int x0 = static_cast<int>(0.6 * f.gridW), w = f.gridW / 4;
+			f.AddObject(x0, 0, w, f.gridH, 12.4 + offsetPx, -4.6);
+			f.AddNoise(0.3, seed);
+			QuantizeField(f, 1.0);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 1.0;
+			Fitter fitter;
+			*out = fitter.Fit(in);
+		}
+
+		TEST_METHOD(CamfixR2SlowMoverDoesNotRatchetTheScale)
+		{
+			for (const double offset : { 2.5, 4.5 })
+			{
+				Field f(Grid4K());
+				CameraMotion r;
+				SlowMover(offset, 74, &r, &f);
+				const std::string tag = "slow mover " + std::to_string(offset) + " px, quantum 1.0";
+				Require(r.valid && r.blocks != nullptr, Fmt(tag.c_str(), r));
+				Logger::WriteMessage((Fmt(tag.c_str(), r) + " absThresholdPx=" + std::to_string(r.blocks->absThresholdPx)).c_str());
+				const double err = ModelError(r, PanModel(12.4, -4.6), f.picture) * f.Diagonal();
+				Require(err < 0.25, tag + ": camera model corner error px=" + std::to_string(err));
+				Require(r.blocks->absThresholdPx <= 3.0 * 1.5, tag + ": threshold ratcheted by the mover: " + std::to_string(r.blocks->absThresholdPx));
+			}
+			Field f(Grid4K());
+			CameraMotion r;
+			SlowMover(4.5, 75, &r, &f);
+			const int x0 = static_cast<int>(0.6 * f.gridW), w = f.gridW / 4;
+			const int moverBlocks = w * f.gridH;
+			const int notCamera = moverBlocks - CountLabelInRect(r, f, x0, 0, w, f.gridH, Label::Camera);
+			Require(notCamera >= static_cast<int>(0.9 * moverBlocks), Fmt("4.5 px mover", r) + " not-camera blocks=" + std::to_string(notCamera) +
+				" of " + std::to_string(moverBlocks));
+		}
+
+		// ---- Camfix R2F (CE-FIX-R2, regression of R2 on the real sets "sol" and "crowd") ----
+
+		// sol: a winner that only a minority of the field supports at the floor (8-19 % on sol_1080p_vlow nvof) must not become
+		// confident because the robust scale measured its own gate. R2 raised sigma 0.5 -> 1.96 -> 5.9 -> 9.0 px there (never settling),
+		// the gate then admitted 85-98 % of the blocks and 11 pairs became confident 2.9-11.6 px away from the true camera. Here a
+		// 15 % strip moves exactly with pan A and the dominant 85 % moves 4 px away with uniform noise (sigma 2 px): reporting A as the
+		// camera with the whole field as its inliers is a confident-wrong fit.
+		TEST_METHOD(CamfixR2FRobustScaleDoesNotAdoptADifferentMotion)
+		{
+			Field f(Grid4K());
+			const Params a = PanModel(12.4, -4.6), bulk = PanModel(16.4, -4.6);
+			f.FromModel(bulk);
+			SplitMix64 rng(81);
+			const double amp = 2.0 * std::sqrt(12.0);
+			const int strip = static_cast<int>(0.15 * f.gridW);
+			for (int y = 0; y < f.gridH; ++y)
+				for (int x = 0; x < f.gridW; ++x)
+				{
+					const size_t i = static_cast<size_t>(y) * f.gridW + x;
+					if (x < strip) { f.fx[i] = 12.4f; f.fy[i] = -4.6f; }
+					else { f.fx[i] += static_cast<float>((rng.Unit() - 0.5) * amp); f.fy[i] += static_cast<float>((rng.Unit() - 0.5) * amp); }
+				}
+			f.AddNoise(0.1, 82);
+			QuantizeField(f, 0.5);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 0.5;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			const double errBulk = ModelError(r, bulk, f.picture) * f.Diagonal();
+			Logger::WriteMessage((Fmt("minority winner over a 4 px-offset noisy bulk, quantum 0.5", r) + " bulk corner error px=" + std::to_string(errBulk) +
+				(r.blocks ? " absThresholdPx=" + std::to_string(r.blocks->absThresholdPx) : std::string())).c_str());
+			Require(!(r.confidence >= 0.5 && errBulk > 1.5), Fmt("confident-wrong: the robust scale adopted the bulk as the winner's noise", r) +
+				" bulk corner error px=" + std::to_string(errBulk));
+			if (r.blocks != nullptr)
+				Require(r.blocks->absThresholdPx < 4.0, "the gate opened over a different motion: " + std::to_string(r.blocks->absThresholdPx));
+		}
+
+		// crowd: movers about one quantum off the camera over 40 % of the picture. R2 used the quantum itself as sigma (gate 3 x 0.5 =
+		// 1.5 px at the 1080 half quantum), so the movers joined the camera's inliers and pulled the winner about 0.5 px (crowd_1080p_vlow
+		// nvof: 12 confident pairs 1.0-1.2 px off, 0.4 % -> 2.6 %). A rounding error is uniform over one quantum: sigma = q / sqrt(12).
+		TEST_METHOD(CamfixR2FQuantumFloorIsTheRoundingSigma)
+		{
+			Field f(Grid4K());
+			const Params cam = PanModel(12.4, -4.6);
+			f.FromModel(cam);
+			SplitMix64 rng(83);
+			for (size_t i = 0; i < f.Count(); ++i)   // scattered movers (people in a crowd), 40 % of the blocks, one 1080-half quantum x 2 off
+				if (rng.Unit() < 0.4)
+					f.fx[i] += 1.0f;
+			f.AddNoise(0.1, 85);
+			QuantizeField(f, 0.5);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 0.5;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			const double err = ModelError(r, cam, f.picture) * f.Diagonal();
+			Logger::WriteMessage((Fmt("pan with 1 px movers over 40 %, quantum 0.5", r) + " corner error px=" + std::to_string(err) +
+				(r.blocks ? " absThresholdPx=" + std::to_string(r.blocks->absThresholdPx) : std::string())).c_str());
+			Require(r.valid && r.blocks != nullptr, Fmt("pan with 1 px movers", r));
+			Require(!(r.confidence >= 0.5 && err >= 0.25), Fmt("confident-wrong: the movers pulled the camera", r) + " corner error px=" + std::to_string(err));
+			Require(r.blocks->absThresholdPx < 3.0 * 0.5, "gate at the quantum itself: " + std::to_string(r.blocks->absThresholdPx));
+		}
+
+		// R2's intent is kept: noise above the floor around a winner that the widened inlier set does not move still raises the
+		// threshold (a peaked field: most vectors within a quantum, a wide noisy share around the same camera).
+		TEST_METHOD(CamfixR2FStableWinnerStillRaisesTheScale)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12.4, -4.6));
+			SplitMix64 rng(84);
+			for (size_t i = 0; i < f.Count(); ++i)
+			{
+				const double amp = (rng.Unit() < 0.5 ? 0.6 : 3.0) * std::sqrt(12.0);
+				f.fx[i] += static_cast<float>((rng.Unit() - 0.5) * amp);
+				f.fy[i] += static_cast<float>((rng.Unit() - 0.5) * amp);
+			}
+			QuantizeField(f, 0.5);
+			PairInput in = f.Input(kPairSeconds, 5);
+			in.quantumPx = 0.5;
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(in);
+			Require(r.valid && r.blocks != nullptr, Fmt("peaked noisy pan, quantum 0.5", r));
+			const double err = ModelError(r, PanModel(12.4, -4.6), f.picture) * f.Diagonal();
+			// Audit 55ec5b497 SHOULD 3: the raise is bounded from the field itself. The generated noise's robust sigma (1.4826 x MAD of
+			// the per-axis residuals from the true pan, quantisation included) is measured here; the raised gate must reach
+			// absThresholdSigmas x 0.8 x that sigma (0.8: the fitter's MAD runs on its gated inliers, a little narrower than the
+			// whole field). The floor gate (3 x 0.25 px) is far below it, so a token rise no longer passes.
+			Field truth(Grid4K());
+			truth.FromModel(PanModel(12.4, -4.6));
+			std::vector<double> res;
+			res.reserve(f.Count() * 2);
+			for (size_t i = 0; i < f.Count(); ++i)
+			{
+				res.push_back(static_cast<double>(f.fx[i]) - truth.fx[i]);
+				res.push_back(static_cast<double>(f.fy[i]) - truth.fy[i]);
+			}
+			std::sort(res.begin(), res.end());
+			const double med = res[res.size() / 2];
+			for (double& v : res) v = std::fabs(v - med);
+			std::sort(res.begin(), res.end());
+			const double noiseSigma = 1.4826 * res[res.size() / 2];
+			const double wanted = Config().absThresholdSigmas * 0.8 * noiseSigma;
+			Logger::WriteMessage((Fmt("peaked noisy pan, quantum 0.5", r) + " corner error px=" + std::to_string(err) + " absThresholdPx=" +
+				std::to_string(r.blocks->absThresholdPx) + " field noise sigma px=" + std::to_string(noiseSigma) + " bound px=" +
+				std::to_string(wanted)).c_str());
+			Require(noiseSigma > 2.0 * 0.25, "the generated field is not noisier than the floor: sigma " + std::to_string(noiseSigma));
+			Require(r.blocks->absThresholdPx >= wanted, "the scale did not follow the noise: " + std::to_string(r.blocks->absThresholdPx) +
+				" < " + std::to_string(wanted));
+			Require(err < 0.25, "corner error px=" + std::to_string(err));
+		}
+
+		// Gemini SHOULD-2 (5bf62a248), static-camera side: the verdict is applied before Labels, so the demoted boat-like pair stamps no
+		// Overlay and runs no object tracker (before the fix the confident pre-verdict record did, then was demoted).
+		TEST_METHOD(DemotedDynTextureAndStaticDoNotStampOverlayOrPolluteObjects)
+		{
+			auto make = [](uint64_t seed)
+			{
+				Field f = BoatLike(seed);
+				f.AddLogo(5, 5, 6, 4, false);   // a zero-motion logo in the static water margin, outside the object
+				f.AddObject(2, 30, 32, 48, -25, 14);   // a coherent mover in the free left margin (the boat spans blocks 36-203), for the object tracker (1536 blocks)
+				return f;
+			};
+			Config offCfg; offCfg.objects = true;
+			Fitter off(offCfg);
+			Field f0 = make(40);
+			const CameraMotion a = off.Fit(f0.Input(kPairSeconds, 5));
+			Require(Usable(a), "premise (off): the boat is taken as the camera, confidently: " + Flags(a));
+			Require(CountLabelInRect(a, f0, 5, 5, 6, 4, Label::Overlay) > 0, "premise (off): the logo is stamped Overlay: " + Flags(a));
+			Require(!a.objects.empty(), "premise (off): the object tracker ran: " + Flags(a));
+			Config onCfg = SC(); onCfg.objects = true;
+			Fitter on(onCfg);
+			const CameraMotion r = on.Fit(f0.Input(kPairSeconds, 5));
+			Require(r.valid && r.reason == Reason::Ambiguous && (r.verdictFlags & kVerdictStaticCamera) != 0, "demoted: " + Flags(r));
+			Require(CountLabel(r, Label::Overlay) == 0, "a demoted pair stamps no Overlay: " + Flags(r) + " overlay=" + std::to_string(CountLabel(r, Label::Overlay)));
+			Require(r.objects.empty(), "a demoted pair does not run the object tracker: " + Flags(r));
+		}
+
+		// Gemini SHOULD-1 (e34f08a3e), static-camera side: resolvedPrecPx > 0 sets the ring threshold (3 x it); 0 keeps the nominal 0.25 px.
+		TEST_METHOD(CamfixR2FDynTextureAndStaticUseFitPrecision)
+		{
+			Field f = BoatLike(40);
+			const PairInput in = f.Input(kPairSeconds, 5);
+			const Params model = PanModel(1.2, -0.36);
+			const StaticCameraConfig cfg;
+			const StaticCameraResult nominal = EvaluateStaticCamera(cfg, in, model);
+			const StaticCameraResult same = EvaluateStaticCamera(cfg, in, model, 0.25);
+			const StaticCameraResult widened = EvaluateStaticCamera(cfg, in, model, 3.0);
+			Require(nominal.computed && nominal.staticShare < 0.6, "premise: against the nominal precision the water margin is not static, staticShare=" + std::to_string(nominal.staticShare));
+			Require(same.staticShare == nominal.staticShare, "premise: an explicit 0.25 is the nominal value");
+			Require(widened.computed && widened.staticShare > 0.99, "the fit's final precision sets the threshold, staticShare=" + std::to_string(widened.staticShare));
 		}
 	};
 }

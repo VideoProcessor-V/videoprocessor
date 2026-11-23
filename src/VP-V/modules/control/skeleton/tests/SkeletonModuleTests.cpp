@@ -1239,8 +1239,11 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(g.Has(VpSkeleton::kP7CameraFit) && g.Has(VpSkeleton::kP8CameraLabels));
 			Assert::IsTrue(g.Has(VpSkeleton::kP4SourceStats) && g.Has(VpSkeleton::kP1HalfLuma),
 				L"the inputs of P7 / P8 are in the graph (P8 -> P7 -> P4 -> P1)");
-			// C10 15a K2 (F2): P8 declares P7 only, so neither P3 nor a motion pair is pulled into a camera-only graph.
-			Assert::IsFalse(g.Has(VpSkeleton::kP3AnalysisField), L"P8 declares P7 only (C10 15a K2, F2)");
+			// C10 15a K2 (F2) + CP-A1-D4-CAMLABEL-FIELDCOPY: P8 declares P7 + its fit field (p7f_camera_fit_field) only, so the field node is
+			// in the camera graph (before P8) and neither P3 nor a motion pair is pulled into a camera-only graph.
+			Assert::IsTrue(g.Has(VpSkeleton::kCameraFitField), L"P8's declared fit field is in the camera graph");
+			Assert::IsTrue(g.IndexOf(VpSkeleton::kCameraFitField) < g.IndexOf(VpSkeleton::kP8CameraLabels), L"the fit field before P8");
+			Assert::IsFalse(g.Has(VpSkeleton::kP3AnalysisField), L"P8 declares P7 + its fit field only (C10 15a K2, F2)");
 			Assert::IsFalse(g.Has(VpSkeleton::kP2mMatcherPair) || g.Has(VpSkeleton::kP2VectorPair), L"no motion pair without a P3 reader");
 			Assert::IsTrue(eng.fitWanted, L"the camera fit asked the engine to run");
 			const std::string text = rig.Command();
@@ -1257,6 +1260,7 @@ namespace SkeletonModuleTestsNs
 			rig.sk.ClearExternalDemand(rig.Host(), &owner);
 			rig.Frame(6);
 			Assert::IsFalse(rig.sk.LaneOf(rig.Host())->State()->graph.Has(VpSkeleton::kP7CameraFit), L"withdrawn: the graph is rebuilt without it");
+			Assert::IsFalse(rig.sk.LaneOf(rig.Host())->State()->graph.Has(VpSkeleton::kCameraFitField), L"and without the fit field");
 			Assert::IsFalse(eng.fitWanted, L"and the engine is told");
 		}
 

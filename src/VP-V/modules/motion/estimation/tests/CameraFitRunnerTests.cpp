@@ -79,7 +79,7 @@ namespace VideoProcessorTest
 					: VpSkeleton::SealReason::AncestryIncomplete; });
 			Assert::IsTrue(sr.outcome == VpSkeleton::SealOutcome::Sealed, L"ancestors recorded for the seal");
 			CameraLink::PoolEntry e;
-			Assert::IsTrue(pool.Get(1, e) && e.record && e.field);
+			Assert::IsTrue(pool.Get(1, e) && e.record && e.field.have, L"the pool keeps the record and the provenance of its fit field (CP-A1-D4: provenance only)");
 			Assert::IsTrue(e.record->valid && e.record->reason == CameraModel::Reason::Ok);
 			// The POD in the slot bytes decodes to the same record.
 			CameraModel::CameraMotion d;
@@ -209,13 +209,13 @@ namespace VideoProcessorTest
 			CameraLink::CameraRecordPool pool(4);
 			auto rec = std::make_shared<CameraModel::CameraMotion>();
 			rec->seq = 9;
-			pool.Put(9, rec, nullptr);
+			pool.Put(9, rec, CameraLink::FieldProvenance());
 			CameraLink::PoolEntry e;
 			Assert::IsFalse(pool.Get(9, e), L"before the slot publish succeeded: not served");
 			Assert::IsTrue(pool.Get(9, e, true), L"the seal observer accepts a Published slot");
 			pool.Commit(9);
 			Assert::IsTrue(pool.Get(9, e));
-			pool.Put(9, rec, nullptr);   // a refill of the slot starts uncommitted again
+			pool.Put(9, rec, CameraLink::FieldProvenance());   // a refill of the slot starts uncommitted again
 			Assert::IsFalse(pool.Get(9, e));
 			pool.Erase(9);
 			Assert::IsFalse(pool.Get(9, e, true));

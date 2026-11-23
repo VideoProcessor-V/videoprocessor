@@ -379,6 +379,8 @@ under a frozen shader-mirror spec; measures, never refines: extended would distu
 (P7/P8/P9 consumers). No existing photometric / direct alignment code in the estimation module; the matcher's sub-pixel
 refine works per block on vectors, not on the global model.
 
+**Detector precision (SHOULD-1).** The dynamic-texture and static-camera detectors take the fit's final precision (`resolvedPrecPx`, `f.prec` from the fit); 0 = the nominal precision (`in.precisionPx`, else 0.25 x block / 16), used only by direct callers (tests), so their results stay byte-identical. Every production call passes `f.prec` > 0.
+
 ## Settings
 
 The fitter's own options are `Config` fields set by the tests and `tools/camera_eval`. Camera K3 added the `[vpv.camera]` keys (switches only, all off; table in `../README.md` Settings, parser `link/CameraSettings.h`). Config placement for the keys that exist (`camera_link`, `analysis_lane`): see `control/skeleton/README.md`. "Original (Bill)" = the Original pathway builds no camera link (`camera_link` off).
@@ -402,3 +404,65 @@ The fitter's own options are `Config` fields set by the tests and `tools/camera_
 Tiers: the fit is cheap CPU work and is not tiered (cost lines `CAMERA_COST`).
 
 **Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.
+
+## Camfix R1 / R2 / R4 / R8 (branch r2/camfix-r, 2026-11-11; doc 103)
+
+All numbers in this section were measured on the old tip f0322d84a; the re-seated branch (r2/camfix-r on the union tip) has not been re-measured yet (re-measure in the harness slot before quoting them).
+
+**R1 result (NVOF temporal hints): MIXED.** Hints OFF fix the fast pans (1080 480 px/s fit bias 59.94p -0.595 -> -0.004 px,
+24p +0.07 -> +0.03) but make the slow pans worse (120 px/s 59.94p +0.036 -> +0.464, 24p -0.475 -> -0.609). The quantised NVOF flow
+(0.25 engine px) is biased at slow speeds either way; the hints change the bias at fast speeds. The hints are OFF by default
+for the CAMERA fit only (owner 2026-11-12 04:52: "camera hints OFF by default until R3 lands and is re-tested"; doc 91 A/H; register 115 #40).
+Interim ruling (coordinator, delegated, 2026-11-21; the owner confirms): there are two settings, `HintConsumer::Camera` (default off)
+and `HintConsumer::Other` = everyday (default on, because off everywhere worsened the slow pans). The NVOF pair stream is computed once
+and SHARED by every consumer (rule 21), so the hint state is per STREAM, not per consumer: while the camera fit is active (consumes the
+stream) the camera setting governs ALL pairs, de-judder, interpolation and every reuse consumer included (they get hints-off pairs
+too); while it is inactive the everyday setting governs. With the camera default OFF, everyday viewing keeps hints ON (as before
+camfix); turning the camera on moves the whole stream to hints off (audit 55ec5b497 MUST 1; owner choice pending before the camera
+default flip: (i) stream hints-off while the camera is on, as built, (ii) hints kept on, (iii) a second camera-only NVOF session).
+The diagnostic opt-in `VP_NVOF_TEMPORAL_HINTS=1` turns the camera setting on. Ctrl+I's "nvof temporal hints" entry names the state
+in force on the stream (`Producer::HintsInForce`) and why ("ON/OFF for the whole shared pair stream: camera fit active / inactive")
+whenever it is not today's everyday state. Both the scheduled and the on-demand pair decide through `Producer::HintsApply`, so the
+shown state is the real one. R3 (pixel-domain refinement) is the fix for all rows; its acceptance table measures hints ON and OFF
+on every speed row (120 / 480 px/s, 24p / 59.94p, 1080 / 4K, >= 3 ABAB repeats) and the hint default is picked from that table.
+- Cost line (NVOF engine ms per pair, hints on -> off, one run each, noisy): 1080 24p 9.78 -> 5.98; 1080 59.94p 5.58 -> 5.39;
+  4K 24p 6.10 -> 10.47; 4K 59.94p 5.67 -> 7.15. No consistent cost either way.
+
+**R2 (quantum floor, robust scale, competitor separation; GlobalModelFit.cpp).** An NVOF field declares `PairInput::quantumPx`
+(0.25 engine px in source px: 1.0 at 4K quarter size, 0.5 at 1080 half size). The pair precision is never finer than the
+rounding error's sigma, quantum / sqrt(12) (R2F; R2 used the quantum itself, a 3.5 x wider gate that let movers one quantum off
+bias the winner: crowd nvof 0.4 % -> 2.6 % confident-wrong). The robust residual scale is 1.4826 x MAD of the winner's inliers
+(three passes); R2F keeps it only when the winner, refined under the raised gate, moves no more than its fit precision
+(absThresholdSigmas x sigma x sqrt(params / inliers) at the corners), else the floor stays (sol nvof: the scale had grown
+0.5 -> 9 px around a winner with 8 % support and 11 pairs became confident 2.9-11.6 px off). A competitor counts only when it is separated
+from the winner by more than max(3 sigma, 2 quanta) at the corners.
+- **Visible camera-fit change on the live seed path:** `link/FieldCopy.h` (`SeedToSourceGrid`) now sets `quantumPx` from
+  `SeedLayout::quantumSourcePx` (stated by the seed's owner, `VectorEngine::SeedFieldOf`: 0.25 x scaleToSourcePx; 0 = none), so the render-path fit from the F2 seed uses the same floor and separation as the ahead fit. Fewer records are
+  `Ambiguous` (4K 480 px/s: 115 of 117 -> 0 at 24p, 6 -> 0 at 59.94p), so more pairs are usable for guidance. That result was
+  measured with R2's floor = the quantum; R2F has since changed the floor (quantum / sqrt 12) and the raise check, so it is likely no
+  longer valid and must be re-measured in the GPU R1/R2 harness before it is quoted.
+- **R2F withdraws boat's R2 usable gain:** boat nvof usable 0.59 -> 0.80 (confident-wrong 4.3 -> 2.5 %) under R2 came from the same
+  wide gate that made crowd confident-wrong; with R2F boat is back to pre-R2 (usable 0.80 -> 0.60, confident-wrong 4.3 %, still above
+  static's 2.8 %). boat needs its own fix (102b row); R2's surviving effect is the competitor separation plus rare raises (tos).
+- Cost line (ahead fit on the camera worker, 4K 480 px/s, median / p95 ms, before R2 = the R1 hints-on run, after = r2r8, one run
+  each): 24p 12.44 / 26.94 -> 7.49 / 9.88; 59.94p 7.66 / 11.37 -> 7.58 / 9.84. The extra nth_element (MAD) and the second
+  BuildCand pass cost less than the second-layer searches the ambiguous records used to trigger.
+
+**R4 (E1 skip).** E1 never runs on a seeded field. When it was planned but the engine's field seeded the refinement, that is
+counted (`GuidanceCounters::e1IdleEngine`) and shown with the narrow-idle line ("camera guidance: engine field used, E1 skip idle,
+N pairs").
+
+**R8 (d = 0 acceptance in BetaGpuTests `RunBetaCameraAccuracy`).** Verdicts: PASS (headroom row superior: dEPE <= -max(0.01, A/A
+EPE spread) or +2 pts <0.25 px share), PASS-FLOOR (no headroom, non-inferior), NO-GAIN (headroom row not superior: fails), DEFECT
+(a limit broken), INCONCLUSIVE (no limit broken but fewer than 3 runs of off or d0: never a pass). The low-contrast row is named
+`pan_480pxs_dark` (every level at 15% above black: low contrast, full texture).
+
+**Knobs (test / diagnostic only; none is a setting, none is in Config):**
+
+| Knob | Kind | Values | Default | Effect | Visible |
+|---|---|---|---|---|---|
+| `VP_NVOF_TEMPORAL_HINTS` (R1) | process env, read by `MotionAhead::Producer` | 1 / unset | unset (camera setting: hints off; everyday setting: on. One shared stream: while the camera fit is active its setting governs ALL pairs) | 1 (exactly) turns the camera setting on, so the shared stream runs hinted while the camera fit is active, a diagnostic opt-in | Ctrl+I fallback entry "nvof temporal hints" (the state in force on the stream and why, plus both settings) in every state but today's everyday one (`FallbackCatalog::NvofTemporalHints`) |
+| `PairInput::quantumPx` (R2) | internal field | >= 0 source px | 0 (no NVOF field); set by `AheadFlow` and `FieldCopy` | quantum floor + competitor separation | the record's ambiguity / precision in the camera status |
+| `VP_TEST_CAMERA_ACCURACY_D0` (R8) | test env | 0 / 1 | unset | adds the d = 0 variants, the extra 480 px/s rows (29.97p too) and the acceptance table | report only |
+| `VP_TEST_CAMERA_ACCURACY_REPEATS` (R8) | test env | >= 1 | 1 | interleaved ABAB runs of off / d0; 3 or more are needed for a verdict (fewer = INCONCLUSIVE) | report only |
+| `VP_TEST_CAMERA_ACCURACY_LEAD` (R8) | test env | >= 1 | 2 | the live lead L for the on-time column | report only |

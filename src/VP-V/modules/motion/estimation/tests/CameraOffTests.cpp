@@ -47,10 +47,10 @@ namespace VideoProcessorTest
 			Assert::AreEqual(size_t(0), lines.size(), L"no status noise when off");
 			Assert::AreEqual(uint64_t(0), core.Counters().sealedOk.load() + core.Counters().sealedLate.load());
 			std::shared_ptr<const CameraModel::CameraMotion> fitRec;
-			std::shared_ptr<const CameraLink::FieldCopy> fitField;
 			Assert::IsTrue(core.SealedRecord(3) == nullptr && core.CausalRecord(3) == nullptr);
-			Assert::IsFalse(core.FitEntryOf(3, fitRec, fitField), L"no pool entry when off");
-			Assert::IsTrue(fitRec == nullptr && fitField == nullptr, L"FitEntryOf clears both outputs when off");
+			fitRec = std::make_shared<CameraModel::CameraMotion>();   // a stale value the call must clear
+			Assert::IsFalse(core.FitEntryOf(3, fitRec), L"no pool entry when off");
+			Assert::IsTrue(fitRec == nullptr, L"FitEntryOf clears its output when off");
 			CameraLink::CameraLabelsView v;
 			Assert::IsFalse(core.LabelsFor(3, CameraLink::CameraConsumer::GrainMap, v) || v.available);
 			Assert::IsTrue(core.GuideFor(3) == nullptr);

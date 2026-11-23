@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace VpMotion
 {
@@ -73,6 +74,7 @@ namespace VpMotion
 		int gridW = 0, gridH = 0;        // seed texels
 		int blockSize = 0;               // source px per seed texel
 		float scaleToSourcePx = 0.0f;    // seed px -> source px
+		float quantumSourcePx = 0.0f;    // camfix R2: one NVOF vector quantum (0.25 engine px) in source px, set by the engine that owns the seed; 0 = unknown (no floor)
 		int sourceGridW = 0, sourceGridH = 0;
 		enum { kSourceBlockSize = 16 };   // source px per block of the fit's grid (the live field's)
 		float sadTrustMax = 0.0f;        // the live SAD limit (taper_sad with block_taper, else match_tolerance)
@@ -150,6 +152,10 @@ namespace VpMotion
 		// The engine's per-cell trust (OpticalFlowTrust::CellTrust), computed by the lease once per direction and tolerance, for as long as the pair is the engine's current lease (another pair's FlowOf drops the memo); null when
 		// the view has no memo or the pair has no backward vectors / forward costs.
 		const IFlowTrustMemo* trustMemo = nullptr;
+		// R3 (direct photometric refinement): the pair's engine-size 8-bit luma (engineW x engineH, tightly packed) for frame from and frame to, shared
+		// with the P2 slot's flow (the shared_ptrs keep the planes alive past the lease). Null when the producer kept none (the camera fit was not
+		// consuming the stream); enginePxToSource is then the luma step in source px.
+		std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo;
 		const float* CellTrust(float toleranceEnginePx) const { return trustMemo ? trustMemo->CellTrust(toleranceEnginePx) : nullptr; }
 		const float* CellTrustBackward(float toleranceEnginePx) const { return trustMemo ? trustMemo->CellTrustBackward(toleranceEnginePx) : nullptr; }
 	};
@@ -326,6 +332,9 @@ namespace VpMotion
 		// CameraGuidanceUsed().narrowDroppedEngine (MotionWarp's "narrowDroppedEngine"): the narrow pass was planned but
 		// the optical-flow engine seeded or replaced the searches, so the narrow pass stayed idle. Absent: false.
 		bool narrowIdle = false;
+		// CameraGuidanceUsed().e1DroppedEngine (camfix R4): the E1 skip was planned but the optical-flow engine's field seeded the
+		// refinement, so E1 did not run (it never runs on a seeded field). Absent: false.
+		bool e1Idle = false;
 		// CameraGuidanceUsed().rejected: the reason the matcher did not use the per-block guidance (for example "camera
 		// guidance: texture upload failed"). A static-lifetime string (the matcher's literals): the hook may keep the
 		// pointer, never frees it. Absent: nullptr (the matcher's empty string is reported as nullptr).

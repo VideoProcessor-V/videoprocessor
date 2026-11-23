@@ -99,10 +99,12 @@ enum : ProductId {
     kFocusMap = 32,       // 32 focus_map (L-FOCUS; RESERVED until it lands)
     kRoomLight = 33,      // 33 room_light (DV block; RESERVED until it lands)
     kComposedVectors = 34,// 34 composed_vectors (ECV: VpComposed::Product, modules/motion/estimation/composed; the code has landed, the id stays RESERVED until its registry decl + reader row land, lead ruling SHOULD S3)
-    kSkeletonProductEnd = 35
+    // Id 35 (CP-A1-D4-CAMLABEL-FIELDCOPY, lead ruling): the P7 fit field, published WITH P7 by the camera worker and read by P8.
+    kCameraFitField = 35, // 35 p7f_camera_fit_field (CPU, declared lane product; the field the P7 record was fitted from)
+    kSkeletonProductEnd = 36
 };
-static_assert(kSourceGeometry == 29 && kBandMemo == kSourceGeometry + 1 && kSkeletonProductEnd == kComposedVectors + 1,
-              "the fixed product-id table: 29 source_geometry, 30..34 as listed, End 35");
+static_assert(kSourceGeometry == 29 && kBandMemo == kSourceGeometry + 1 && kCameraFitField == kComposedVectors + 1 && kSkeletonProductEnd == kCameraFitField + 1,
+              "the fixed product-id table: 29 source_geometry, 30..34 as listed, 35 camera fit field, End 36");
 
 // Ids of the fixed table whose product has not landed: the registry has an ABSENT slot there (a default ProductDecl with id kNoProduct: no
 // token, no inputs, no reader row, no catalog row), so ids stay indexes and Size() == kSkeletonProductEnd. Registry::Validate accepts an
@@ -800,8 +802,12 @@ inline void AppendCameraProducts(std::vector<ProductDecl>& decls)
                           content, 0);
     AddInput(p8, kP7CameraFit, 0);
     // C10 15a K2: P3 is NOT an input of P8. P8 is computed from the P7 record and that record's own fit field (the P2 optical-flow seed
-    // copy the fit used, one pool entry, CameraLink::FitEntryOf). F2: the fit reads only the optical-flow seed and the labels are
-    // residuals against that fit, so a P3 (matcher) field would mix two motion sources. The P2 read is catalogued as an ExternalView flag.
+    // copy the fit used). F2: the fit reads only the optical-flow seed and the labels are residuals against that fit, so a P3 (matcher)
+    // field would mix two motion sources. CP-A1-D4-CAMLABEL-FIELDCOPY: that field is a DECLARED shared lane product (p7f_camera_fit_field,
+    // published with P7 under P7's own stamp), and the product slot IS its storage: P8 declares it as an input and reads the content and the
+    // stamp from the slot (stamp checked against P7's; a missing or mismatched product gives no labels, visibly). There is no pool copy of
+    // the field any more. The P2 read behind the field is still catalogued as an ExternalView flag.
+    AddInput(p8, kCameraFitField, 0);
     AddTerm(p8, 4, 16);
     p8.size.fixedBytes = 256;
     p8.refRenderMs = 0.1f;
@@ -1051,8 +1057,33 @@ inline void PadReservedUntil(std::vector<ProductDecl>& decls, ProductId upTo)
     }
 }
 
-// Pads the reserved ids before (30) and after (32..34) edge_map, so EVERY caller that completes the skeleton set (SkeletonProducts, RegionEvidence)
-// gets the same id-indexed registry of Size() == kSkeletonProductEnd.
+// p7f_camera_fit_field (CP-A1-D4-CAMLABEL-FIELDCOPY): the P7 fit's own field, a declared CPU lane product published by the camera worker in
+// the same publish as P7(N) with P7's stamp (hdr.honoured copied from P7's claim). The slot's CPU buffer IS the storage of the field the labels
+// read (grid, block size, forward vector and trust planes; link/CameraFitFieldPod.h): written once by the camera worker BEFORE it publishes P7,
+// read only by P8 through the product, with no pool copy. Its one reader is P8. No declared input: it is written before P7's publish and P8
+// compares its stamp with P7's, so a field without a sealed P7 is never used. Size: 12 B per 16x16 block (the three float planes) plus a
+// margin for a grid one block row / column larger than ceil(dims / 16); a field that does not fit is not published (P8 then has no labels).
+inline void AppendCameraFitFieldProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    const CounterMask content = Bit(kFull) | Bit(kContinuity);
+    ProductDecl p = Make(kCameraFitField, "p7f_camera_fit_field", "camera fit field", Backend::Cpu, 1, Tier::T0, content, Bit(kSettingsMotion));
+    p.residency = Residency::SystemRam;
+    p.spanMask = content;
+    p.size.fixedBytes = 16384;   // pod header + the grid-rounding margin (see above)
+    // The ahead fit's field is the engine's NATIVE cell grid, not the 16 px grid: a cell is 4 x 4 engine px of the engine's luma, which is
+    // at most HALF the source size (VectorEngine: half-size luma, quarter on lowRes 4K), so a cell is >= 8 source px per axis and the cell
+    // count is ceil(w/8) x ceil(h/8) (exactly CellsAt(d, 3)). Three float planes per cell. The 16 px seed/bridge field is 4 x smaller and fits.
+    // CameraLane::Build checks this against the worst-case pod (CameraFitFieldPod.h WorstCaseFitFieldPodBytes) and fails visibly.
+    AddTerm(p, 3, 12);
+    p.refRenderMs = 0.01f;
+    decls.push_back(p);
+}
+
+// Pads the reserved ids before (30) and after (32..34) edge_map, then appends the camera fit field (id 35), so EVERY caller that completes the
+// skeleton set (SkeletonProducts, RegionEvidence) gets the same id-indexed registry of Size() == kSkeletonProductEnd.
 inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
 {
     using detail::AddInput;
@@ -1067,7 +1098,8 @@ inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
     p.refRenderMs = 0.05f;
     PadReservedUntil(decls, kEdgeMap);
     decls.push_back(p);
-    PadReservedUntil(decls, kSkeletonProductEnd);
+    PadReservedUntil(decls, kCameraFitField);
+    AppendCameraFitFieldProduct(decls);
 }
 
 // p7g_camera_guide (doc 56, K4-1; claimed as id 20 by CameraGuideProduct.h, registered here): the measurement plan for pair N is a

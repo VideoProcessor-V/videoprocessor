@@ -23,20 +23,17 @@ namespace VideoProcessorTest
 		struct FakeLink : CameraLink::ICameraLink
 		{
 			std::map<uint64_t, std::shared_ptr<const CameraModel::CameraMotion>> records;
-			std::map<uint64_t, std::shared_ptr<const CameraLink::FieldCopy>> fields;
 			std::shared_ptr<const CameraModel::CameraMotion> SealedRecord(uint64_t s) const override { return CausalRecord(s); }
 			std::shared_ptr<const CameraModel::CameraMotion> CausalRecord(uint64_t s) const override
 			{
 				auto it = records.find(s);
 				return it == records.end() ? nullptr : it->second;
 			}
-			bool FitEntryOf(uint64_t s, std::shared_ptr<const CameraModel::CameraMotion>& outRec,
-				std::shared_ptr<const CameraLink::FieldCopy>& outField) const override
+			// CP-A1-D4-CAMLABEL-FIELDCOPY: the pool entry gives the record only (the fit field is the p7f_camera_fit_field product).
+			bool FitEntryOf(uint64_t s, std::shared_ptr<const CameraModel::CameraMotion>& outRec) const override
 			{
 				outRec = CausalRecord(s);
-				auto it = fields.find(s);
-				outField = it == fields.end() ? nullptr : it->second;
-				return outRec != nullptr || outField != nullptr;
+				return outRec != nullptr;
 			}
 			bool LabelsFor(uint64_t, CameraLink::CameraConsumer, CameraLink::CameraLabelsView&) override { return false; }
 			std::shared_ptr<const CameraModel::GuidanceFrame> GuideFor(uint64_t) override { return nullptr; }
@@ -47,11 +44,9 @@ namespace VideoProcessorTest
 				CameraSynth::Field f(CameraSynth::Grid4K());
 				f.FromModel(CameraSynth::PanModel(tx, 0));
 				f.AddNoise(0.05, 7 + seq);
-				auto copy = CameraLinkTest::CopyOf(f, seq);
 				CameraModel::PairInput in = f.Input(1.0 / 24, seq);
 				CameraModel::Fitter fitter;
 				records[seq] = std::make_shared<const CameraModel::CameraMotion>(fitter.Fit(in));
-				fields[seq] = copy;
 			}
 
 			// The camera measured pair `seq` over `seconds` (the same pair the matcher is asked about: SameCameraPair).

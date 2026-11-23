@@ -1,6 +1,7 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 #include "CameraLabelFill.h"
+#include "CameraFitFieldPod.h"
 
 namespace CameraLink
 {
@@ -30,7 +31,54 @@ namespace CameraLink
 		return true;
 	}
 
-	// The next frame the lane can produce: P7 published (its record is in the pool), P8 slot not yet used, not below the floor.
+	CameraLabelFill::FieldGate CameraLabelFill::FitFieldGate(const VpSkeleton::LaneLease& lease, uint64_t seq)
+	{
+		if (!lease.table)
+			return FieldGate::Missing;
+		VpSkeleton::SlotSet* p7 = lease.table->Find(VpSkeleton::kP7CameraFit);
+		VpSkeleton::SlotSet* pf = lease.table->Find(VpSkeleton::kCameraFitField);
+		if (!p7 || !pf)
+			return FieldGate::Missing;   // the product is not in this graph: nothing to read
+		const VpSkeleton::ReadInfo a = p7->Read(seq, true);
+		const VpSkeleton::ReadInfo b = pf->Read(seq, true);
+		if (a.kind != VpSkeleton::ReadInfo::Ring || b.kind != VpSkeleton::ReadInfo::Ring || !a.header || !b.header)
+			return FieldGate::Missing;
+		const VpIndicator::Stamp sa = a.header->honoured;
+		const VpIndicator::Stamp sb = b.header->honoured;
+		return VpIndicator::SameFor(sa, sb, ~VpIndicator::CounterMask(0)) ? FieldGate::Ok : FieldGate::StampMismatch;
+	}
+
+	bool CameraLabelFill::ReadFitField(const VpSkeleton::LaneLease& lease, uint64_t seq, FieldCopy& out)
+	{
+		auto unreadable = [&]() { m_counters.fieldUnreadable.fetch_add(1, std::memory_order_relaxed); return false; };
+		const FieldGate gate = FitFieldGate(lease, seq);
+		if (gate != FieldGate::Ok)
+		{
+			(gate == FieldGate::Missing ? m_counters.fieldMissing : m_counters.fieldStampMismatch).fetch_add(1, std::memory_order_relaxed);
+			return false;
+		}
+		if (!m_fieldSource)
+			return unreadable();
+		const VpSkeleton::LaneLease fl = m_fieldSource();
+		if (!fl.table || !fl.bytes || fl.generation != lease.generation)
+			return unreadable();
+		VpSkeleton::SlotSet* pf = fl.table->Find(VpSkeleton::kCameraFitField);
+		if (!pf)
+			return unreadable();
+		const VpSkeleton::ReadInfo a = pf->Read(seq, true);
+		if (a.kind != VpSkeleton::ReadInfo::Ring || a.index < 0)
+			return unreadable();
+		const uint8_t* bytes = fl.bytes->Ring(static_cast<size_t>(a.index));
+		if (!bytes || !DecodeFitFieldPod(bytes, fl.bytes->Bytes(), out))
+			return unreadable();
+		// The ring may have been recycled while it was copied: the slot must still be the same published ring.
+		const VpSkeleton::ReadInfo b = pf->Read(seq, true);
+		if (b.kind == VpSkeleton::ReadInfo::Ring && b.index == a.index && FitFieldMatchesP7(lease, seq))
+			return true;
+		return unreadable();
+	}
+
+	// The next frame the lane can produce: P7 and its fit field product published (the record is in the pool), P8 slot not yet used, not below the floor.
 	bool CameraLabelFill::NextSeq(uint64_t* out)
 	{
 		Rebind();
@@ -38,8 +86,11 @@ namespace CameraLink
 			return false;
 		VpSkeleton::SlotSet* p8 = m_lease.table->Find(VpSkeleton::kP8CameraLabels);
 		VpSkeleton::SlotSet* p7 = m_lease.table->Find(VpSkeleton::kP7CameraFit);
+		VpSkeleton::SlotSet* pf = m_lease.table->Find(VpSkeleton::kCameraFitField);
 		if (!p8 || !p7)
 			return false;
+		if (!pf)
+			return false;   // no field node in this graph (the camera-off / TD graph): P8 is not produced here
 		const uint64_t start = m_cursor > m_floor ? m_cursor : m_floor;
 		for (uint64_t s = start; s < start + p8->Ring(); ++s)
 		{
@@ -49,6 +100,16 @@ namespace CameraLink
 				continue;
 			if (!m_link.CausalRecord(s))
 				continue;
+			if (pf->StateOf(s) != VpSkeleton::SlotState::Published && pf->StateOf(s) != VpSkeleton::SlotState::Sealed)
+			{
+				// P7 is ready for this frame but its fit field product is not: P8 gets no labels for it. Counted once per frame, by cause.
+				if (s >= m_fieldMissNext)
+				{
+					m_fieldMissNext = s + 1;
+					m_counters.fieldMissing.fetch_add(1, std::memory_order_relaxed);
+				}
+				continue;
+			}
 			if (out)
 				*out = s;
 			return true;
@@ -80,12 +141,14 @@ namespace CameraLink
 		}
 		hdr.honoured = lease.indicator ? lease.indicator->StampOf(seq) : VpIndicator::Stamp();
 		std::shared_ptr<const CameraModel::CameraMotion> rec;
-		std::shared_ptr<const FieldCopy> field;
-		m_link.FitEntryOf(seq, rec, field);   // ONE pool read: the record and its fit field are the same entry
+		FieldCopy& field = m_field;                            // reused decode target (render thread)
+		bool haveField = false;
+		m_link.FitEntryOf(seq, rec);                           // the record only; the field comes from the product slot
+		haveField = rec && ReadFitField(lease, seq, field);    // stamp-gated; a miss is counted by cause (status line)
 		LabelTarget target;
 		target.live = false;
 		target.index = ticket.slot;
-		if (!rec || !m_device.Produce(*rec, field.get(), target))
+		if (!rec || !haveField || !m_device.Produce(*rec, &field, target))
 		{
 			pins.Unpin();
 			p8->Abandon(ticket);
@@ -115,10 +178,15 @@ namespace CameraLink
 		VpSkeleton::SlotSet* p7 = m_lease.table ? m_lease.table->Find(VpSkeleton::kP7CameraFit) : nullptr;
 		const bool p7Sealed = p7 && p7->Read(seq).kind == VpSkeleton::ReadInfo::Ring;
 		std::shared_ptr<const CameraModel::CameraMotion> rec;
-		std::shared_ptr<const FieldCopy> field;
+		FieldCopy& field = m_field;   // reused decode target (render thread)
+		bool haveField = false;
+		// The fit field product must be sealed too and carry P7's stamp (it is resolved before P8, like P7): else P8 stays absent (declined, counted).
 		if (p7Sealed)
-			m_link.FitEntryOf(seq, rec, field);   // ONE pool read: the record and its fit field are the same entry
-		if (!rec)
+		{
+			m_link.FitEntryOf(seq, rec);
+			haveField = rec && ReadFitField(m_lease, seq, field);   // content from the product slot, stamp-gated; a miss is counted by cause
+		}
+		if (!rec || !haveField)
 		{
 			m_counters.declined.fetch_add(1, std::memory_order_relaxed);
 			return false;
@@ -126,7 +194,7 @@ namespace CameraLink
 		LabelTarget target;
 		target.live = true;
 		target.index = liveIndex;
-		if (!m_device.Produce(*rec, field.get(), target))
+		if (!m_device.Produce(*rec, &field, target))
 		{
 			m_counters.declined.fetch_add(1, std::memory_order_relaxed);
 			return false;

@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // LAG BRIDGE UNTIL SK-W2: the lagged seal of P7 / P8 only (the skeleton lane seals at N; P7(N) exists at N + lag). See CameraLane.h.
 #include "CameraLane.h"
+#include "CameraFitFieldPod.h"
 
 #include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
+
+#include <string>
 
 namespace CameraLink
 {
@@ -42,6 +45,18 @@ namespace CameraLink
 			return false;
 		}
 		st->p7Bytes.reset(new VpSkeleton::CpuBuffers(*p7));
+		if (const VpSkeleton::Node* pf = st->table->NodeOf(VpSkeleton::kCameraFitField))
+		{
+			st->fieldBytes.reset(new VpSkeleton::CpuBuffers(*pf));
+			// Startup check (visible failure): the product slot must hold the largest pod a fit can produce at this source size.
+			const size_t worst = WorstCaseFitFieldPodBytes(width, height);
+			if (st->fieldBytes->Bytes() < worst)
+			{
+				m_error = "camera fit field product too small: slot " + std::to_string(st->fieldBytes->Bytes()) + " B < worst-case field "
+					+ std::to_string(worst) + " B at " + std::to_string(width) + "x" + std::to_string(height) + " (labels would be missing)";
+				return false;
+			}
+		}
 		st->indicator = std::move(indicator);
 		st->generation = m_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
 		m_labels = labels && st->table->NodeOf(VpSkeleton::kP8CameraLabels) != nullptr;
@@ -86,7 +101,8 @@ namespace CameraLink
 		}
 		l.hold = st;
 		l.table = st->table.get();
-		l.bytes = bytesProduct == VpSkeleton::kP7CameraFit ? st->p7Bytes.get() : nullptr;
+		l.bytes = bytesProduct == VpSkeleton::kP7CameraFit ? st->p7Bytes.get()
+			: (bytesProduct == VpSkeleton::kCameraFitField ? st->fieldBytes.get() : nullptr);
 		l.indicator = st->indicator.get();
 		l.generation = st->generation;
 		return l;
@@ -146,7 +162,7 @@ namespace CameraLink
 		return true;
 	}
 
-	// Every node but P7..P9, in topological order, as a lane producer would publish it: the ancestors recorded, the honoured stamp
+	// Every node but P7..P9 and the P7 fit field, in topological order, as a lane producer would publish it: the ancestors recorded, the honoured stamp
 	// read AFTER the pins. The slot content is empty (see the header): what it carries is the ancestry the lagged seal checks.
 	void CameraLane::PublishMarkers(uint64_t seq, VpIndicator::Indicator& indicator, bool warmUp)
 	{
@@ -154,7 +170,7 @@ namespace CameraLink
 		for (size_t i = 0; i < table.Count(); ++i)
 		{
 			const VpSkeleton::Node& n = table.NodeAt(i);
-			if (n.id == VpSkeleton::kP7CameraFit || n.id == VpSkeleton::kP8CameraLabels || n.id == VpSkeleton::kP9CameraSmoothed)
+			if (n.id == VpSkeleton::kP7CameraFit || n.id == VpSkeleton::kCameraFitField || n.id == VpSkeleton::kP8CameraLabels || n.id == VpSkeleton::kP9CameraSmoothed)
 				continue;
 			VpSkeleton::SlotSet& set = table.At(i);
 			VpSkeleton::LaneTicket ticket;

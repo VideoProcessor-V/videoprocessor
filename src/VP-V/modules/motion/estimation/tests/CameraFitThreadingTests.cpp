@@ -95,14 +95,65 @@ namespace VideoProcessorTest
 			CameraLink::CameraFitProducer producer(CameraModel::Config(), &counters);
 			{
 				CameraLink::CameraFitWorker worker(producer, rig.Env(&pool, &counters, 8));
-				worker.Start();
+				Assert::IsTrue(worker.Start(), L"the worker thread started");
+				Assert::IsTrue(worker.Running(), L"Running() is true after Start()");
 				for (int i = 1; i <= 4; ++i)
 				{
 					rig.PublishInputs(static_cast<uint64_t>(i));
-					worker.Submit(CameraLinkTest::PanJob(static_cast<uint64_t>(i), 5.0));
+					Assert::IsTrue(worker.Submit(CameraLinkTest::PanJob(static_cast<uint64_t>(i), 5.0)), L"a job was queued");
 				}
-			}   // the destructor stops and joins: no crash, no hang
-			Assert::IsTrue(true);
+				Assert::AreEqual(static_cast<uint64_t>(4), static_cast<uint64_t>(counters.submitted.load()), L"all four jobs counted as submitted");
+				worker.Stop();   // stops and joins with jobs possibly still queued: no crash, no hang
+				Assert::IsFalse(worker.Running(), L"Running() is false after Stop()");
+				// CE-SUBMIT-AFTER-STOP: no thread drains the queue after Stop, so a Submit is refused (never queued), counted and shown.
+				const uint64_t fittedAtStop = counters.fitted.load(), publishedAtStop = counters.published.load();
+				const uint64_t submittedAtStop = counters.submitted.load();
+				const uint64_t resetGenAtStop = producer.ResetGen();
+				for (int i = 5; i <= 7; ++i)
+					Assert::IsFalse(worker.Submit(CameraLinkTest::PanJob(static_cast<uint64_t>(i), 5.0)), L"Submit after Stop is refused");
+				Assert::IsTrue(producer.ResetGen() != resetGenAtStop, L"a refusal requests a fitter reset: a restarted worker never seeds across the hole");
+				Assert::AreEqual(uint64_t(3), counters.refusedAfterStop.load(), L"every refused submit is counted");
+				Assert::AreEqual(submittedAtStop, static_cast<uint64_t>(counters.submitted.load()), L"a refused submit is not counted as submitted");
+				Assert::AreEqual(uint64_t(0), counters.queueFull.load(), L"refused after stop, not called queue full");
+				Assert::AreEqual(size_t(0), worker.Pending(), L"nothing was queued after Stop");
+				Assert::IsFalse(worker.Running(), L"a Submit does not restart the thread");
+				Assert::AreEqual(fittedAtStop, static_cast<uint64_t>(counters.fitted.load()), L"no job is fitted after Stop");
+				Assert::AreEqual(publishedAtStop, static_cast<uint64_t>(counters.published.load()), L"no job is published after Stop");
+				Assert::IsTrue(CameraLink::StatusLine(counters).find("3 refused after stop") != std::string::npos,
+					L"the refusals are visible in the camera fit status line");
+			}   // the destructor after an explicit Stop() is a no-op
+		}
+		// CE-SUBMIT-AFTER-STOP control: a Submit before Stop is queued and fitted; Start after Stop runs a new thread (Start resets the
+		// stop state) and Submit is accepted and fitted again. A never-started worker (deterministic mode) still queues: QueuedHistory.
+		TEST_METHOD(SubmitBeforeStopIsFittedAndStartAfterStopAcceptsAgain)
+		{
+			CameraLinkTest::Rig rig(2);
+			CameraLink::CameraRecordPool pool(rig.Ring());
+			CameraLink::FitCounters counters;
+			CameraLink::CameraFitProducer producer(CameraModel::Config(), &counters);
+			CameraLink::CameraFitWorker worker(producer, rig.Env(&pool, &counters, 8));
+			Assert::IsTrue(worker.Start());
+			rig.PublishInputs(1);
+			Assert::IsTrue(worker.Submit(CameraLinkTest::PanJob(1, 5.0)), L"a Submit before Stop is queued");
+			worker.WaitIdle();
+			rig.Retire(0);
+			Assert::AreEqual(uint64_t(1), counters.fitted.load(), L"the job before Stop was fitted");
+			Assert::AreEqual(uint64_t(1), counters.published.load(), L"and published");
+			worker.Stop();
+			Assert::IsFalse(worker.Submit(CameraLinkTest::PanJob(2, 5.0)), L"refused while stopped");
+			Assert::AreEqual(uint64_t(1), counters.refusedAfterStop.load());
+			Assert::IsTrue(worker.Start(), L"the worker restarts after Stop");
+			Assert::IsTrue(worker.Running());
+			rig.PublishInputs(2);
+			Assert::IsTrue(worker.Submit(CameraLinkTest::PanJob(2, 5.0)), L"Start after Stop accepts again");
+			worker.WaitIdle();
+			rig.Retire(1);
+			worker.Stop();
+			Assert::AreEqual(uint64_t(2), counters.submitted.load(), L"the two accepted jobs");
+			Assert::AreEqual(uint64_t(2), counters.fitted.load(), L"the job after the restart was fitted");
+			Assert::AreEqual(uint64_t(2), counters.published.load(), L"and published");
+			Assert::AreEqual(uint64_t(1), counters.refusedAfterStop.load(), L"only the stopped-time submit was refused");
+			Assert::IsTrue(CameraLink::StatusLine(counters).find("1 refused after stop") != std::string::npos);
 		}
 		// Resets and relatches are stamped into the job at SUBMIT: a reset requested between two queued jobs applies before the
 		// second job's Fit, whenever the worker gets to the queue. Fill the queue first (no WaitIdle per submit), then run it by

@@ -41,7 +41,6 @@ namespace VideoProcessorTest
 		struct WireLink : CameraLink::ICameraLink
 		{
 			std::map<uint64_t, std::shared_ptr<const CameraModel::CameraMotion>> records;
-			std::map<uint64_t, std::shared_ptr<const CameraLink::FieldCopy>> fields;
 			std::map<uint64_t, CameraLink::OnTimeMiss> late;       // camera(seq) published but NOT on time, with this cause
 			std::map<uint64_t, CameraLink::SealVerdict> seals;     // the on-time seal's verdict (absent: Pending)
 			std::shared_ptr<const CameraModel::CameraMotion> OnTimeRecord(uint64_t s, CameraLink::OnTimeCheck check, CameraLink::OnTimeMiss& why) const override
@@ -65,13 +64,11 @@ namespace VideoProcessorTest
 				auto it = records.find(s);
 				return it == records.end() ? nullptr : it->second;
 			}
-			bool FitEntryOf(uint64_t s, std::shared_ptr<const CameraModel::CameraMotion>& outRec,
-				std::shared_ptr<const CameraLink::FieldCopy>& outField) const override
+			// CP-A1-D4-CAMLABEL-FIELDCOPY: the pool entry gives the record only (the fit field is the p7f_camera_fit_field product).
+			bool FitEntryOf(uint64_t s, std::shared_ptr<const CameraModel::CameraMotion>& outRec) const override
 			{
 				outRec = CausalRecord(s);
-				auto it = fields.find(s);
-				outField = it == fields.end() ? nullptr : it->second;
-				return outRec != nullptr || outField != nullptr;
+				return outRec != nullptr;
 			}
 			bool LabelsFor(uint64_t, CameraLink::CameraConsumer, CameraLink::CameraLabelsView&) override { return false; }
 			std::shared_ptr<const CameraModel::GuidanceFrame> GuideFor(uint64_t) override { return nullptr; }
@@ -81,11 +78,9 @@ namespace VideoProcessorTest
 				CameraSynth::Field f(CameraSynth::Grid4K());
 				f.FromModel(CameraSynth::PanModel(tx, 0));
 				f.AddNoise(0.05, 7 + seq);
-				auto copy = CameraLinkTest::CopyOf(f, seq);
 				CameraModel::PairInput in = f.Input(1.0 / 24, seq);
 				CameraModel::Fitter fitter;
 				records[seq] = std::make_shared<const CameraModel::CameraMotion>(fitter.Fit(in));
-				fields[seq] = copy;
 			}
 
 			// camera(seq) measured its pair over `seconds` (SameCameraPair compares it with the matcher's pair duration).
@@ -333,6 +328,19 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("no on-time target (analysis_lane off)"), std::string(GuidanceStructuralCause(true, false, true, false)));
 			Assert::IsNull(GuidanceStructuralCause(true, false, true, true), L"ahead fit + on-time target: nothing structural");
 			Assert::IsNull(GuidanceStructuralCause(true, false, false, false), L"live parts not built yet: not claimed structural");
+		}
+
+		// Camfix R8 (SHOULD): the exact Fallbacks line Refresh prints for each structural cause.
+		TEST_METHOD(TheUnguidedRefreshLineNamesTheCause)
+		{
+			using CameraLink::GuidanceStructuralCause;
+			using CameraLink::GuidanceUnguidedLine;
+			Assert::AreEqual(std::string("camera_guidance: unguided - camera_ahead_fit is off"),
+				GuidanceUnguidedLine(GuidanceStructuralCause(false, false, true, true)));
+			Assert::AreEqual(std::string("camera_guidance: unguided - deterministic run"),
+				GuidanceUnguidedLine(GuidanceStructuralCause(false, true, true, true)));
+			Assert::AreEqual(std::string("camera_guidance: unguided - no on-time target (analysis_lane off)"),
+				GuidanceUnguidedLine(GuidanceStructuralCause(true, false, true, false)));
 		}
 
 		TEST_METHOD(WithGapsInTheNumberingPairNStillReadsCameraNOnlyAndLaneEqualsLive)
@@ -1019,6 +1027,30 @@ namespace VideoProcessorTest
 			o.e1Pass = true;
 			hook.AfterEstimateEx(3, o);
 			Assert::AreEqual(1, counts.requested);
+		}
+
+		// Camfix R4 audit: E1 never runs on a seeded field; when it was planned, that is counted and shown with the narrow-idle line.
+		TEST_METHOD(E1IdleUnderTheEngineIsCountedAndShown)
+		{
+			WireLink link;
+			link.AddPan(3);
+			link.Retime(3, 1.0 / 50);
+			CameraLink::GuidanceScheduler sched(link, GuideOn());
+			CameraLink::CameraGuidanceHook hook(sched, nullptr, link);
+			WireSink sink;
+			VpMotion::EstimateContext c;
+			c.pairSeq = 3;
+			c.nextPairSeconds = 1.0 / 50;
+			hook.BeforeEstimate(c, sink);
+			VpMotion::EstimateOutcome o;
+			o.guidanceUsed = true;
+			o.e1Idle = true;
+			hook.AfterEstimate(3, o);
+			Assert::AreEqual<uint64_t>(1, sched.Counters().e1IdleEngine, L"the engine-plain outcome reaches the counter");
+			bool line = false;
+			for (const std::string& l : sched.StatusLines())
+				line = line || l.find("E1 skip idle, 1 pairs") != std::string::npos;
+			Assert::IsTrue(line, L"E1 idle under the engine has a status line");
 		}
 
 		TEST_METHOD(NarrowIdleUnderTheEngineIsShownForHalfAMeasuredSecondAndNoSeedIsDropped)

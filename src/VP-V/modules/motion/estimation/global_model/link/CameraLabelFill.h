@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Camera link (K2-2): the P8 fill rule (TEAM-RULES "How a shared item gets filled"). One implementation, three entrances:
-//   * LANE   an IGapWork (LaneCompute) produces P8(N) in an idle gap once P7(N) is PUBLISHED: claim -> pins -> write ->
+//   * LANE   an IGapWork (LaneCompute) produces P8(N) in an idle gap once P7(N) and its fit field product (p7f_camera_fit_field,
+//            published with P7 under P7's stamp) are PUBLISHED: claim -> pins -> write ->
 //            stamp -> publish, before the seal. A publish after the seal is Late: the SlotSet discards it (never merged).
 //   * LIVE   if P8(N) was not published by the seal, the seal's live fill (SlotTable::Resolve calls FillLive) is the ONE
 //            producer for the frame, and only when P7(N) was SEALED; every later consumer reuses the result.
@@ -52,16 +53,20 @@ namespace CameraLink
 		std::atomic<uint64_t> absent{ 0 };         // LabelsFor answered "unavailable"
 		std::atomic<uint64_t> staleLane{ 0 };      // lane productions REFUSED: the lane graph was rebuilt between the claim and the publish
 		std::atomic<uint64_t> rebound{ 0 };        // times the fill took a new lane lease (a rebuild was noticed)
+		std::atomic<uint64_t> fieldMissing{ 0 };        // P7 published but the fit field product is not (node absent or no published slot for the frame): no labels
+		std::atomic<uint64_t> fieldStampMismatch{ 0 };  // both published but the field's stamp differs from P7's: no labels
+		std::atomic<uint64_t> fieldUnreadable{ 0 };     // fit field product has no storage, bad content, or was recycled during the read: no labels
 	};
 
 	// "camera labels: lane 12, late 0, blocked 0, live 3, declined 1, served 15, absent 2, stale lane 0 (refused after a graph rebuild), lane rebinds 0"
 	inline std::string LabelFillStatusLine(const LabelFillCounters& c)
 	{
-		char b[384];
-		std::snprintf(b, sizeof(b), "camera labels: %llu lane, %llu late, %llu blocked, %llu live, %llu declined, %llu served, %llu absent, %llu stale lane (refused after a graph rebuild), %llu lane rebinds",
+		char b[640];
+		std::snprintf(b, sizeof(b), "camera labels: %llu lane, %llu late, %llu blocked, %llu live, %llu declined, %llu served, %llu absent, %llu stale lane (refused after a graph rebuild), %llu lane rebinds, %llu fit field missing (no labels), %llu fit field stamp mismatch (no labels), %llu fit field unreadable (no labels)",
 			(unsigned long long)c.lane.load(), (unsigned long long)c.laneLate.load(), (unsigned long long)c.laneBlocked.load(),
 			(unsigned long long)c.live.load(), (unsigned long long)c.declined.load(), (unsigned long long)c.served.load(),
-			(unsigned long long)c.absent.load(), (unsigned long long)c.staleLane.load(), (unsigned long long)c.rebound.load());
+			(unsigned long long)c.absent.load(), (unsigned long long)c.staleLane.load(), (unsigned long long)c.rebound.load(),
+			(unsigned long long)c.fieldMissing.load(), (unsigned long long)c.fieldStampMismatch.load(), (unsigned long long)c.fieldUnreadable.load());
 		return b;
 	}
 
@@ -77,6 +82,9 @@ namespace CameraLink
 		CameraLabelFill(VpSkeleton::LaneLeaseSource source, ICameraLink& link, ILabelDevice& device);
 		// Takes the lane's current lease when it is newer; true when it changed (the lane cursor restarts: its sequences belong to the old graph).
 		bool Rebind();
+		// The fit field product's bytes (AnalysisLane/CameraLane Lease(kCameraFitField)): the product slot IS the field's storage, P8's only
+		// read of it. Not set (or a generation that differs from P8's): no field, so no labels.
+		void SetFieldSource(VpSkeleton::LaneLeaseSource source) { m_fieldSource = std::move(source); }
 		uint64_t LaneGeneration() const { return m_lease.generation; }
 
 		// Render thread, at the seal: the SlotTable::Resolve fill callback target for P8.
@@ -105,9 +113,21 @@ namespace CameraLink
 
 		bool NextSeq(uint64_t* out);
 		void RunLane();
+		// CP-A1-D4-CAMLABEL-FIELDCOPY: the fit field is read ONLY through the declared product p7f_camera_fit_field. True when its slot for
+		// `seq` is published (or sealed) and its stamp is EXACTLY P7(seq)'s. Missing product or a mismatch: false (no labels, counted by the
+		// caller as blocked / declined); never a fall-back to the pool's copy.
+		enum class FieldGate { Ok, Missing, StampMismatch };
+		static FieldGate FitFieldGate(const VpSkeleton::LaneLease& lease, uint64_t seq);
+		static bool FitFieldMatchesP7(const VpSkeleton::LaneLease& lease, uint64_t seq) { return FitFieldGate(lease, seq) == FieldGate::Ok; }
+		// Reads the field's CONTENT from the product slot (stamp gate first, then the slot's ring bytes, then a re-read of the slot so a
+		// recycled ring is never used). False: no field (no labels). No other source exists.
+		bool ReadFitField(const VpSkeleton::LaneLease& lease, uint64_t seq, FieldCopy& out);
 
 		VpSkeleton::LaneLease m_lease;            // render thread only
 		VpSkeleton::LaneLeaseSource m_source;
+		VpSkeleton::LaneLeaseSource m_fieldSource;
+		FieldCopy m_field;                        // render thread only: the decode target, reused (no allocation at steady state)
+		uint64_t m_fieldMissNext = 0;             // NextSeq counts each frame's missing field once
 		ICameraLink& m_link;
 		ILabelDevice& m_device;
 		Gap m_gap;

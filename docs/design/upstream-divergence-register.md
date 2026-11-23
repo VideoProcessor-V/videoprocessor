@@ -242,6 +242,14 @@ UI (relayed 2026-11-07). Each row: the test, what his UI does now, and the failu
 | SID-R2-SINGLE-AXIS | `SourceResolutionMonitor::AutoFactors` (consensus per-axis path only) | Exactly one axis re-based below native is detected and logged ("source_id: single-axis re-base held"), not applied, unless `SetSingleAxisRebase(true)` (re-base only two-axis-confirmed conventional pairs). The classical path is untouched. | `SetSingleAxisRebase(true)` | default change (VP-V consensus path, not Bill's) |
 | U12-SQ-CONSENSUS | `source_quality` readers (r2/u12-sq 83f9dfeea) | With the non-default diagnostic env `VP_SOURCE_ID_CONSENSUS=on`, deband / detail pulse / adaptive scaling read min(classical, consensus record level) through the one P14 view (identity/README.md:127/:185). | Env unset: bit-identical to before | VP-V internal, no Bill behaviour change (registered as a fix by the coordinator) |
 
+## Camfix (branch r2/camfix, 2026-11-11; VP-V camera module, not Bill's pathway)
+
+| Id | Area | Divergence | Original / off | Kind |
+|---|---|---|---|---|
+| CAMFIX-R1-HINTS | `MotionAhead::Producer` NVOF temporal hints | The NVOF temporal hints have two settings, camera (default OFF, owner 2026-11-12 04:52, interim reading pending owner confirmation) and everyday (default ON, as before camfix). The pair stream is shared (rule 21), so the hint state is per STREAM: while the camera fit is active its setting governs ALL consumers (de-judder, interpolation included), otherwise the everyday one does; camera default off = everyday viewing unchanged. `VP_NVOF_TEMPORAL_HINTS=1` (diagnostic env, never a setting) turns the camera setting on; the "nvof temporal hints" fallback entry names the state in force and why in every state but today's everyday one. | before camfix: hints always on | diagnostic switch |
+| CAMFIX-R2-QUANTUM | `GlobalModelFit.cpp` (pair precision, robust scale, competitor filter); `link/FieldCopy.h` `SeedToSourceGrid`; `link/AheadFlow.h` | NVOF fields declare `quantumPx` (0.25 engine px); precision >= the quantum, robust scale = 1.4826 x MAD, a competitor must be separated by max(3 sigma, 2 quanta). Applies to the LIVE seed-path fit as well as the ahead fit: fewer `Ambiguous` records (4K 480 px/s 115/117 -> 0). Fit cost, 4K 480 ahead median / p95 ms: 24p 12.44 / 26.94 -> 7.49 / 9.88, 59.94p 7.66 / 11.37 -> 7.58 / 9.84 (one run each). | `quantumPx = 0` (no NVOF field) keeps the previous fit exactly | camera-fit behaviour change (VP-V) |
+| CAMFIX-R4-E1 | `matcher/DejudderWarp.cpp` camera-guided E1 | E1 never runs on a seeded field; when planned it is counted and shown ("E1 skip idle"), as the narrow-idle line. | camera guidance off: no E1 pass | visible skip |
+
 ## Open (not yet a row)
 
 (e2) and (e3) items are in the sweep note, section 5: `D:\codex\videoprocessor\skeleton-notes\divergence-sweep-firstpass.md`. They become rows only after the owner decides revert, gate, or register.

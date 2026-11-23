@@ -24,6 +24,9 @@
 #include <VP-V/modules/motion/estimation/global_model/link/CameraLane.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraLinkCore.h>
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceAdapter.h>
+#include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
+#include <libplacebo/d3d11.h>
+#include <libplacebo/log.h>
 
 #include <atomic>
 #include <cstdio>
@@ -171,10 +174,13 @@ namespace CameraLiveWiringTestsNs
 		FakeRenderer r;
 
 		const void* Host() const { return &r; }
+		pl_gpu gpu = nullptr;   // the render device the GpuCreated lifecycle hands over (null: a CPU rig, the camera has no labels)
 		void Life(RE::Lifecycle kind, int code = 0)
 		{
 			RE::LifecycleFacts f;
 			f.host = &r; f.kind = kind; f.code = code;
+			if (kind == RE::Lifecycle::GpuCreated)
+				f.gpu = gpu;
 			ext.OnLifecycle(f);
 		}
 		void ResyncApply(const char* mode)
@@ -213,6 +219,33 @@ namespace CameraLiveWiringTestsNs
 	};
 
 	const char* const kLinkOn = "[vpv.skeleton]\ncamera_link=report\n";
+	// A libplacebo test device (WARP unless VP_TEST_GPU=hardware, ExtendedRangeGpuProbe::TestDeviceParams) for the GPU-category tests.
+	struct TestDevice
+	{
+		pl_log log = nullptr;
+		pl_d3d11 d3d11 = nullptr;
+		~TestDevice()
+		{
+			if (d3d11)
+				pl_d3d11_destroy(&d3d11);
+			if (log)
+				pl_log_destroy(&log);
+		}
+		bool Create()
+		{
+			pl_log_params lp{};
+			lp.log_level = PL_LOG_NONE;
+			log = pl_log_create(PL_API_VER, &lp);
+			const pl_d3d11_params dp = ExtendedRangeGpuProbe::TestDeviceParams();
+			d3d11 = log ? pl_d3d11_create(log, &dp) : nullptr;
+			return d3d11 != nullptr;
+		}
+		pl_gpu Gpu() const { return d3d11 ? d3d11->gpu : nullptr; }
+	};
+
+	// The camera-labels line (CameraLink::LabelFillStatusLine) and its three fit-field read-miss causes.
+	const char* const kLabelsLineParts[] = { "camera labels", "fit field missing (no labels)", "fit field stamp mismatch (no labels)",
+		"fit field unreadable (no labels)" };
 }
 
 namespace VideoProcessorTest
@@ -524,6 +557,37 @@ namespace VideoProcessorTest
 			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), "lag bridge"));
 		}
 
+		// audit5 MUST 1 (7028ff4f2): the camera-labels line, with P8's fit-field read-miss counters, is on the camera status surface while
+		// the camera is live, and absent while the camera is off or only reporting (camera-off status unchanged).
+		// audit5 MUST 1 (7028ff4f2), CPU half: P8's fill (and so the camera-labels line) exists only with a render device. Camera off,
+		// reporting only, and live WITHOUT a GPU: no camera-labels line; the live rig names the missing device instead (camera_gpu).
+		// The live line with a device: CameraLiveWiringGpuTests::TheCameraLabelsLineIsShownWhileLiveWithADeviceAndGoesWhenOff.
+		TEST_METHOD(TheCameraLabelsLineIsAbsentOffReportingAndWithoutARenderDevice)
+		{
+			{
+				Rig off("[general]\nx=1\n");
+				off.Start(6);
+				for (const char* p : kLabelsLineParts)
+					Assert::IsFalse(Has(off.Lines(RE::StatusKind::Lines), p), L"camera off: no labels line");
+				Assert::IsFalse(Has(off.Lines(RE::StatusKind::Fallbacks), "camera_gpu:"), L"camera off: nothing about a device");
+			}
+			{
+				Rig report(kLinkOn);
+				report.Start(6);
+				Assert::IsFalse(report.ext.LiveBuilt(report.Host()), L"premise: reporting only, nothing live");
+				for (const char* p : kLabelsLineParts)
+					Assert::IsFalse(Has(report.Lines(RE::StatusKind::Lines), p), L"not live: no labels line");
+			}
+			// Labels are wanted (camera_model_overlay=labels: CameraExtension labelsWanted), so the only thing missing for P8's fill is the
+			// render device; without the overlay the line would be absent for want of a labels consumer, not for the device.
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\ncamera_model_overlay=labels\n");
+			rig.Start(6);
+			Assert::IsTrue(rig.ext.LiveBuilt(rig.Host()), L"premise: the camera is live");
+			for (const char* p : kLabelsLineParts)
+				Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), p), L"live without a render device: no P8 fill, so no labels line");
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "camera_gpu: no render device"), L"the missing device is named instead");
+		}
+
 		TEST_METHOD(TheCameraRunsOnTheLagBridgeWithoutTheSkeletonLane)
 		{
 			// No skeleton module and no analysis lane: until SK-W2 the camera declares nothing to the skeleton and does not depend on its lane;
@@ -562,6 +626,39 @@ namespace VideoProcessorTest
 			lf.kind = RE::Lifecycle::GpuReleased;
 			ext.OnLifecycle(lf);
 			Tap::SetStore(&r, nullptr);
+		}
+	};
+
+	// audit5 MUST 1 (7028ff4f2), GPU half: with a render device (WARP) the live camera has its P8 fill, and the camera-labels line with
+	// the three fit-field read-miss causes is on the status surface; switching the camera off takes it away again.
+	TEST_CLASS(CameraLiveWiringGpuTests)
+	{
+	public:
+		BEGIN_TEST_METHOD_ATTRIBUTE(TheCameraLabelsLineIsShownWhileLiveWithADeviceAndGoesWhenOff)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(TheCameraLabelsLineIsShownWhileLiveWithADeviceAndGoesWhenOff)
+		{
+			TestDevice device;
+			Assert::IsTrue(device.Create(), L"Could not create the libplacebo test device (WARP unless VP_TEST_GPU=hardware)");
+			// P8 exists only when labels are wanted (CameraExtension labelsWanted: overlay, a use switch or camera_labels_gpu); the overlay is
+			// the consumer that changes nothing else in the camera's wiring. ce-train1 (69c96794a) ran this without it: no P8, no line.
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\ncamera_model_overlay=labels\n");
+			rig.gpu = device.Gpu();
+			rig.Start(6);
+			Assert::IsTrue(rig.ext.LiveBuilt(rig.Host()), L"premise: the camera is live");
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Fallbacks), "camera_gpu: no render device"), L"premise: the device reached the camera");
+			for (const char* p : kLabelsLineParts)
+				Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), p), L"live with a device: the camera-labels line names every fit-field miss cause");
+			{
+				std::ofstream out(rig.cfg.path, std::ios::binary | std::ios::trunc);
+				out << "[general]\nx=1\n";
+			}
+			rig.Life(RE::Lifecycle::SettingsApplied);
+			for (int64_t s = 7; s <= 8; ++s)
+				rig.Frame(s);
+			for (const char* p : kLabelsLineParts)
+				Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), p), L"camera switched off: the labels line goes");
 		}
 	};
 }

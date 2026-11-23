@@ -43,14 +43,14 @@ struct StaticClass {
 
 // Every id of the fixed table is classed EXPLICITLY: there is no default class (C4 s3a; owner OD:391, 2026-11-11 07:45: the regulator
 // switches off optional extras only, "never core, never TD"; 115 #47 / #59). A new id fails this assert and the per-id test until classed.
-static_assert(kSkeletonProductEnd == 35, "a new product id: class it explicitly in StaticClassOf (no default class)");
+static_assert(kSkeletonProductEnd == 36, "a new product id: class it explicitly in StaticClassOf (no default class)");
 
 inline StaticClass StaticClassOf(ProductId id)
 {
     switch (id) {
     // fixed core set, never shed for time (doc 91 C :79; OD:391 (1)): P1 + P2 (P2m), P7 / P8, P3, P15 / P16, P4 + P11
     case kP1HalfLuma: case kP2VectorPair: case kP2mMatcherPair: case kP3AnalysisField: case kP4SourceStats:
-    case kP7CameraFit: case kP8CameraLabels: case kP11RegionBlockStats: case kQualityPattern: case kCodingEvidence:
+    case kP7CameraFit: case kCameraFitField: case kP8CameraLabels: case kP11RegionBlockStats: case kQualityPattern: case kCodingEvidence:
         return StaticClass{ JobClass::Core, true };
     // derived-ahead (run right after their inputs)
     case kRefinedField:

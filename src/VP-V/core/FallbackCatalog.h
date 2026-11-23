@@ -337,6 +337,29 @@ namespace FallbackCatalog
 		return Engaged("composed vectors", text.empty() ? std::string("composed vectors reach fewer frames than asked") : text);
 	}
 
+	// Camfix R1 + audit 55ec5b497 MUST 1: the NVOF pair stream is computed ONCE and shared by every consumer (rule 21), so the
+	// temporal-hint state is per STREAM, not per consumer. Two settings (MotionAhead::Producer::HintConsumer): Camera (default OFF,
+	// owner 2026-11-12 04:52; VP_NVOF_TEMPORAL_HINTS=1 is the diagnostic opt-in) and Other = everyday (default ON). While the camera
+	// fit is active (consumes the stream) the Camera setting governs ALL pairs, de-judder, interpolation and every reuse consumer
+	// included; otherwise the everyday setting does. `inForce` is MotionAhead::Producer::HintsInForce(), the state HintsApply uses.
+	// Released only in today's everyday state (camera fit inactive, both settings at their defaults: hints ON for all consumers);
+	// every other state is engaged and names the state in force and why, never log-only.
+	inline std::string NvofTemporalHintsText(bool cameraActive, bool inForce, bool cameraOn, bool otherOn)
+	{
+		std::string s = std::string("NVOF temporal hints ") + (inForce ? "ON" : "OFF") + " for the whole shared pair stream (all consumers): ";
+		s += cameraActive ? "camera fit active, its setting governs every pair, de-judder and interpolation included"
+			: "camera fit inactive, the everyday setting governs";
+		s += std::string(" (settings: camera fit ") + (cameraOn ? "ON" : "off") + ", everyday " + (otherOn ? "ON" : "off") +
+			"; defaults camera off, everyday ON; VP_NVOF_TEMPORAL_HINTS=1 is the camera diagnostic opt-in)";
+		return s;
+	}
+	inline Decision NvofTemporalHints(bool cameraActive, bool inForce, bool cameraOn, bool otherOn)
+	{
+		if (!cameraActive && inForce && !cameraOn && otherOn)
+			return Released("nvof temporal hints");
+		return Engaged("nvof temporal hints", "motion engine: " + NvofTemporalHintsText(cameraActive, inForce, cameraOn, otherOn));
+	}
+
 	// SK-MV warm engine (protected tier): MotionEngineIdle released the matcher under video-memory pressure, which drops the de-judder's
 	// standing optical-flow demand until the pressure eases. Never silent.
 	inline Decision MotionEnginePressure(bool pressured)

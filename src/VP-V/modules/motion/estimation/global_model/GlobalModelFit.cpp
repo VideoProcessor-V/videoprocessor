@@ -5,7 +5,9 @@
 // Pure C++14, deterministic: fixed loop orders, double sums, splitmix64, no clocks except the
 // injected Config::clock, no unordered containers, no threads.
 #include "GlobalModelFit.h"
+#include "PhotometricVerdict.h"
 #include <VP-V/core/Ramp.h>
+#include <VP-V/core/RobustStats.h>
 
 #include <algorithm>
 #include <atomic>
@@ -39,7 +41,19 @@ namespace CameraModel
 		inline bool FiniteF(float v) { return IsFiniteBits(v); }
 
 		// Expected vector precision of a pair (source px): the caller's, else a quarter px per 16 px of block size.
-		inline double PairPrecision(const PairInput& in) { return in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0; }
+		// Camfix R2: an NVOF field (quantumPx > 0) never assumes a precision finer than its own rounding (the robust residual scale may
+		// raise it further after the winner, Fitter::Run); without a quantum this is unchanged.
+		// Camfix R2F: a vector rounded to a quantum q carries an error uniform over one quantum, whose standard deviation is
+		// q / sqrt(12). R2 used q itself as the sigma: a gate 3.5 x too wide, so movers one quantum off the camera joined its inliers and
+		// biased the winner (real set crowd, nvof: 0.4 % -> 2.6 % confident-wrong).
+		inline double QuantumSigma(double quantumPx) { return quantumPx / std::sqrt(12.0); }
+
+		inline double PairPrecision(const PairInput& in)
+		{
+			const double base = in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0;
+			return in.quantumPx > 0 ? std::max(base, QuantumSigma(in.quantumPx)) : base;
+		}
+
 
 		// The usable, stratified sample set of one pair (picture-centred positions).
 		struct Field
@@ -549,6 +563,31 @@ namespace CameraModel
 		}
 
 		// One layer's model, inlier set and the signals that depend only on them.
+		// Camfix R2: 1.4826 x the median absolute deviation of the residual components (x and y pooled, source px) of the samples around
+		// the winner: within 3 x its current threshold (9 x Threshold2, as the floor-cost gate), so a floor that is too tight cannot truncate
+		// the scale it measures, while a second motion far from the winner stays out. 0 when fewer than 8 samples. Deterministic.
+		inline double RobustResidualScale(const Field& f, const Params& model)
+		{
+			std::vector<double> r;
+			r.reserve(f.s.size() * 2);
+			const bool aff = AffineRow(model);
+			for (size_t i = 0; i < f.s.size(); ++i)
+			{
+				double r2, pm2;
+				ResidualSq(model, aff, f.s[i], &r2, &pm2);
+				if (!(r2 <= 9.0 * Threshold2(f, pm2)))
+					continue;
+				double dx, dy;
+				Disp(model, aff, f.s[i].x, f.s[i].y, &dx, &dy);
+				r.push_back(f.s[i].dx - dx);
+				r.push_back(f.s[i].dy - dy);
+			}
+			if (r.size() < 16)
+				return 0.0;
+			const double med = RobustStats::Median(r, RobustStats::MedianRule::Upper);
+			return RobustStats::MadSigma(RobustStats::MadAbout(r, med, RobustStats::MedianRule::Upper));
+		}
+
 		struct Cand
 		{
 			Params model;
@@ -682,6 +721,75 @@ namespace CameraModel
 			return static_cast<uint32_t>(used.size());
 		}
 
+		// DIRECT PHOTOMETRIC REFINEMENT (R3). Runs only when the pair carries a PhotometricInput. The measured resolution rule first (a luma
+		// form too coarse for the accuracy target at this frame size is a counted skip, never a refine), then the refine over the camera-
+		// inlier blocks (every native cell the model explains within the fit's own threshold; bars / text guard excluded), then the verdict
+		// stub. Returns true when the model was replaced (the caller rebuilds the candidate on it). The outcome is always written back.
+		static bool ApplyPhotometric(Fitter& F, const PairInput& in, const Field& f, Params& model)
+		{
+			PhotometricInput* pi = in.photometric;
+			if (pi == nullptr)
+				return false;
+			pi->result = RefineResult();
+			pi->outcome = PhotometricOutcome::SkippedNoLuma;
+			const LumaPairView& lv = pi->luma;
+			if (!lv.from.Valid() || !lv.to.Valid() || lv.from.width != lv.to.width || lv.from.height != lv.to.height || !(lv.sourcePxPerPixel > 0))
+				return false;
+			// The frame's source rows: the field grid covers the whole frame (blocks anchored at its top-left).
+			if (!PhotometricFormPasses(lv.sourcePxPerPixel, static_cast<double>(in.gridH) * in.blockSize))
+			{
+				pi->outcome = PhotometricOutcome::SkippedResolution;
+				return false;
+			}
+			const size_t cells = static_cast<size_t>(in.gridW) * static_cast<size_t>(in.gridH);
+			if (cells == 0 || f.excluded.size() != cells)
+			{
+				pi->outcome = PhotometricOutcome::SkippedOther;
+				return false;
+			}
+			std::vector<uint8_t>& label = F.m_photoLabel;
+			label.assign(cells, static_cast<uint8_t>(Label::Unknown));
+			const bool aff = AffineRow(model);
+			for (int by = f.by0; by < f.by1; ++by)
+				for (int bx = f.bx0; bx < f.bx1; ++bx)
+				{
+					const int b = by * in.gridW + bx;
+					if (f.excluded[static_cast<size_t>(b)] != 0)
+						continue;
+					const float tr = in.fwdTrust[b];
+					if (!(tr > 0.0f) || !FiniteF(tr) || !FiniteF(in.fwdX[b]) || !FiniteF(in.fwdY[b]))
+						continue;
+					Sample s;
+					BlockCentre(bx, by, in.blockSize, in.picture, &s.x, &s.y);
+					s.dx = in.fwdX[b];
+					s.dy = in.fwdY[b];
+					s.w = tr;
+					double r2, pm2;
+					ResidualSq(model, aff, s, &r2, &pm2);
+					if (r2 <= Threshold2(f, pm2))
+						label[static_cast<size_t>(b)] = static_cast<uint8_t>(Label::Camera);
+				}
+			InlierMask mask;
+			mask.label = label.data();
+			mask.excluded = f.excluded.data();
+			mask.gridW = in.gridW;
+			mask.gridH = in.gridH;
+			mask.blockSize = in.blockSize;
+			const RefineResult raw = F.m_photometric.Refine(model, lv, in.picture, mask);
+			// The one call site of the verdict unit (plan lead20 W3): today it returns the R3 result unchanged.
+			const RefineResult r = PhotometricVerdict(model, raw, f.prec);
+			pi->result = r;
+			if (r.status == RefineStatus::Refined)
+			{
+				pi->outcome = PhotometricOutcome::Refined;
+				model = r.model;
+				return true;
+			}
+			pi->outcome = RefineFellBack(r.status) ? PhotometricOutcome::FellBack
+				: (r.status == RefineStatus::SkippedNoLuma ? PhotometricOutcome::SkippedNoLuma : PhotometricOutcome::SkippedOther);
+			return false;
+		}
+
 		static void Finish(Fitter& F, const PairInput& in, const Config& c, const Field& f, bool temporalRead, Cand& cd, double ambiguity, CameraMotion& rec)
 		{
 			Signals sg = cd.sg;
@@ -812,7 +920,7 @@ namespace CameraModel
 		}
 
 		// Fits one pair. Reads (never writes) the Fitter's history; objects are updated only when asked.
-		static CameraMotion Run(Fitter& F, const PairInput& in, const Params* h0, bool temporalRead, bool runObjects, bool genReset, TlNext* tlOut)
+		static CameraMotion Run(Fitter& F, const PairInput& in, const Params* h0, bool temporalRead, bool runObjects, bool genReset, TlNext* tlOut, bool detect = false, double* precOut = nullptr)
 		{
 			const Config& c = F.m_config;
 			CameraMotion rec;
@@ -1006,6 +1114,49 @@ namespace CameraModel
 			// ---- Inliers, signals ----
 			Cand cdA;
 			BuildCand(f, c, in, cellsTotal, chA.model, cdA);
+			// Camfix R2: an NVOF field's sigma is max(the quantum floor, 1.4826 x MAD of the winner's inlier residuals); when the real
+			// noise is above the floor, the threshold follows it and the winner's inliers are counted again under it.
+			if (in.quantumPx > 0)
+			{
+				const double floorPrec = f.prec, floorAbsThr = f.absThr;
+				bool raised = false;
+				for (int pass = 0; pass < 3; ++pass)   // the gate widens with the scale; 3 passes settle it
+				{
+					const double robust = RobustResidualScale(f, chA.model);
+					if (!(robust > f.prec * 1.05))
+						break;
+					f.prec = robust;
+					f.absThr = c.absThresholdSigmas * f.prec;
+					raised = true;
+				}
+				if (raised)
+				{
+					BuildCand(f, c, in, cellsTotal, chA.model, cdA);
+					// Camfix R2F: the raised scale is the winner's noise only if the samples it admits are the winner's motion. Refined
+					// under the raised gate, the winner must stay within the precision a fit of its parameter count has over those n
+					// inliers at that noise (absThresholdSigmas x sigma x sqrt(params / n), at the picture corners). If it moves further,
+					// the scale measured another motion or its own gate (real set sol, nvof: 0.5 -> 2.0 -> 5.9 -> 9.0 px, never
+					// settling; 11 pairs confident 2.9-11.6 px off): the floor stays and the winner is counted under it again.
+					Params refined = chA.model;
+					// A refine that fails proves nothing about the winner under the raised gate: treated as moved (the floor stays).
+					const bool refinedOk = Refine(f, f.s, refined, std::max(1, irls));
+					const double movedPx = MaxCornerDifference(refined, chA.model, f.pic) * f.diag;
+					const double fitPrecPx = c.absThresholdSigmas * f.prec *
+						std::sqrt(static_cast<double>(ParamCount(chA.model.type)) / std::max(1, cdA.inlierCount));
+					if (!refinedOk || !(movedPx <= fitPrecPx))
+					{
+						f.prec = floorPrec;
+						f.absThr = floorAbsThr;
+						BuildCand(f, c, in, cellsTotal, chA.model, cdA);
+					}
+				}
+			}
+			// Camfix R2: the separation a competitor needs from the winner (source px at the corners): max(3 sigma, 2 quanta); 0 = none
+			// (not an NVOF field: unchanged).
+			const double competitorSeparationPx = in.quantumPx > 0 ? std::max(3.0 * f.prec, 2.0 * in.quantumPx) : 0.0;
+			auto separated = [&](const Params& p) {
+				return !(competitorSeparationPx > 0) || MaxCornerDifference(p, cdA.model, f.pic) * f.diag > competitorSeparationPx;
+			};
 			const std::vector<uint8_t>& inl = cdA.inl;
 			const int inlierCount = cdA.inlierCount;
 			const double inlierMass = cdA.inlierMass;
@@ -1109,7 +1260,7 @@ namespace CameraModel
 				{
 					int sup, ov;
 					evalSub(cands[k], &sup, &ov);
-					if (!(sup > 0 && ov * 2 < sup))
+					if (!(sup > 0 && ov * 2 < sup) || !separated(cands[k]))
 						continue;
 					for (int j = 0; j < keep; ++j)
 						if (topIdx[j] < 0 || sup > topSup[j])
@@ -1145,7 +1296,7 @@ namespace CameraModel
 					{
 						int sup, ov;
 						evalCand(q, &sup, &ov);
-						if (sup > 0 && ov * 2 < sup && sup > bestSup)
+						if (sup > 0 && ov * 2 < sup && sup > bestSup && separated(q))
 						{
 							bestSup = sup;
 							bestP = q;                          // the refined competitor (second layer, Config::twoLayer)
@@ -1399,6 +1550,13 @@ namespace CameraModel
 			uint32_t fullCells = 0;
 			if (in.fullFinalRefine)
 				fullCells = FullFinalRefine(in, f, cam->model, irls);   // the chosen model over every native cell (owner)
+			const bool photoMoved = ApplyPhotometric(F, in, f, cam->model);   // R3: after the full-resolution refine, before the signals are built
+			if (fullCells > 0 || photoMoved)
+			{
+				// The refine moved the model: the inliers, the share and every signal Finish publishes are rebuilt on the refined model.
+				const Params refined = cam->model;
+				BuildCand(f, c, in, cellsTotal, refined, *cam);
+			}
 			Finish(F, in, c, f, temporalRead, *cam, ambiguity, rec);
 			rec.finalRefineCells = fullCells;
 			if (c.twoLayer)
@@ -1417,9 +1575,55 @@ namespace CameraModel
 			}
 
 			CM_PROF_MARK(6);
-			Labels(F, in, f, rec, seed, runObjects);
+			// SHOULD-2 (Gemini audit): the dynamic-texture / static-camera verdicts are known BEFORE the object tracker runs, so a record that is
+			// demoted to Ambiguous does not update the tracker's history (it would otherwise learn from a water / static-ring pair). Both
+			// detectors off: nothing here runs and the record is the one it always was.
+			if (precOut != nullptr)
+				*precOut = f.prec;   // the FINAL precision (quantum floor, raised noise scale): the detectors and the temporal floor use it
+			const bool demoted = detect && ApplyDetectors(F, in, rec, f.prec);
+			Labels(F, in, f, rec, seed, runObjects && !demoted);
 			CM_PROF_MARK(7);
 			return rec;
+		}
+
+		// The dynamic-texture and static-camera detectors on the finished record (moved ahead of Labels). Returns true when either demoted the
+		// record. Not evaluated for an invalid record or once the deadline passed (Fitter::Fit then drops the record and resets the history).
+		static bool ApplyDetectors(Fitter& F, const PairInput& in, CameraMotion& fit, double resolvedPrecPx)
+		{
+			const Config& c = F.m_config;
+			bool demoted = false;
+			if (!fit.valid || DeadlinePassed(c, in))
+				return false;
+			if (c.dynTexture)
+			{
+				const DynTextureResult dt = DetectDynamicTexture(c.dynTextureCfg, in, fit.params, F.m_dyn, resolvedPrecPx);
+				fit.signals.dynShare = dt.share;
+				fit.signals.dynTemporal = dt.temporal;
+				fit.signals.dynSpatial = dt.spatial;
+				fit.signals.dynField = dt.field;
+				if (dt.detected && (fit.reason == Reason::Ok || fit.reason == Reason::LowConfidence))
+				{
+					fit.reason = Reason::Ambiguous;
+					fit.verdictFlags |= kVerdictDynamicTexture;
+					fit.confidence *= 0.495;   // below 0.5 for any logistic confidence <= 1
+					demoted = true;
+				}
+			}
+			if (c.staticCamera)
+			{
+				const StaticCameraResult sc = EvaluateStaticCamera(c.staticCfg, in, fit.params, resolvedPrecPx);
+				fit.signals.staticRing = sc.staticShare;
+				fit.signals.staticFit = sc.fitShare;
+				// Only a record a consumer could use is judged: demote, never promote.
+				if (sc.detected && (fit.reason == Reason::Ok || fit.reason == Reason::LowConfidence))
+				{
+					fit.reason = Reason::Ambiguous;
+					fit.verdictFlags |= kVerdictStaticCamera;
+					fit.confidence *= 0.495;
+					demoted = true;
+				}
+			}
+			return demoted;
 		}
 
 		static void Labels(Fitter& F, const PairInput& in, const Field& f, CameraMotion& rec, uint64_t seed, bool runObjects)
@@ -1670,11 +1874,11 @@ namespace CameraModel
 			}
 
 			double floorBuf[4];
-			auto updateFloor = [&](const PairInput& p) -> const double*
+			auto updateFloor = [&](const PairInput& p, double resolvedPrecPx) -> const double*
 			{
 				if (!m_config.temporalNoiseFloor)
 					return nullptr;
-				const double prec = PairPrecision(p);
+				const double prec = resolvedPrecPx > 0 ? resolvedPrecPx : PairPrecision(p);   // SHOULD-1: the final f.prec of the fit
 				TemporalFloor(prec, p.picture, p.pairSeconds, floorBuf);
 				return floorBuf;
 			};
@@ -1704,7 +1908,8 @@ namespace CameraModel
 				rec.confidence = 0;
 				if (in.next != nullptr)
 				{
-					CameraMotion seed = Impl::Run(*this, *in.next, nullptr, false, m_config.objects, false, nullptr);
+					double seedPrec = 0;
+					CameraMotion seed = Impl::Run(*this, *in.next, nullptr, false, m_config.objects, false, nullptr, false, &seedPrec);
 					if (seed.valid)
 					{
 						rec.valid = true;
@@ -1722,7 +1927,7 @@ namespace CameraModel
 						rec.blocks = seed.blocks;
 						m_previous = rec;
 						m_havePrevious = true;
-						m_temporal.Update(in.next->pairSeconds, seed.rates, updateFloor(*in.next));
+						m_temporal.Update(in.next->pairSeconds, seed.rates, updateFloor(*in.next, seedPrec));
 						m_seedPending = true;
 					}
 				}
@@ -1785,57 +1990,33 @@ namespace CameraModel
 			Params h0;
 			const Params* h0p = nullptr;
 			if (m_havePrevious && m_previous.valid && m_previous.pairSeconds > 0 && m_previous.picture == in.picture
-				&& m_previous.params.type != ModelType::None)
+				&& m_previous.params.type != ModelType::None
+				&& (m_previous.verdictFlags & (kVerdictDynamicTexture | kVerdictStaticCamera)) == 0)   // NIT-1: a demoted record seeds nothing (no h0, no early exit)
 			{
 				h0 = TimeScale(m_previous.params, in.pairSeconds / m_previous.pairSeconds, in.picture);
 				h0.type = m_previous.params.type;
 				h0p = &h0;
 			}
 			TlNext tlNext;
-			CameraMotion fit = Impl::Run(*this, in, h0p, true, m_config.objects, genReset, &tlNext);
+			double fitPrec = 0;
+			CameraMotion fit = Impl::Run(*this, in, h0p, true, m_config.objects, genReset, &tlNext, m_config.dynTexture || m_config.staticCamera, &fitPrec);
 			if (fit.valid && Impl::DeadlinePassed(m_config, in))
 			{
 				// The consumers' slot has passed: no model for this frame (visible fallback); state is not updated.
 				fit.valid = false;
 				fit.confidence = 0;
 				fit.reason = Reason::DeadlineMissed;
+				fit.verdictFlags &= static_cast<uint8_t>(~(kVerdictDynamicTexture | kVerdictStaticCamera));   // a verdict reached before the clock ran out
 			}
 			if (m_config.dynTexture && !fit.valid)
 				m_dyn.Reset();   // an invalid pair breaks the sequence: the next pair has no previous residual field to compare against
-			if (m_config.dynTexture && fit.valid)
-			{
-				const DynTextureResult dt = DetectDynamicTexture(m_config.dynTextureCfg, in, fit.params, m_dyn);
-				fit.signals.dynShare = dt.share;
-				fit.signals.dynTemporal = dt.temporal;
-				fit.signals.dynSpatial = dt.spatial;
-				fit.signals.dynField = dt.field;
-				if (dt.detected && (fit.reason == Reason::Ok || fit.reason == Reason::LowConfidence))
-				{
-					fit.reason = Reason::Ambiguous;
-					fit.verdictFlags |= kVerdictDynamicTexture;
-					fit.confidence *= 0.495;   // below 0.5 for any logistic confidence <= 1
-				}
-			}
-			if (m_config.staticCamera && fit.valid)
-			{
-				const StaticCameraResult sc = EvaluateStaticCamera(m_config.staticCfg, in, fit.params);
-				fit.signals.staticRing = sc.staticShare;
-				fit.signals.staticFit = sc.fitShare;
-				// Only a record a consumer could use is judged: demote, never promote.
-				if (sc.detected && (fit.reason == Reason::Ok || fit.reason == Reason::LowConfidence))
-				{
-					fit.reason = Reason::Ambiguous;
-					fit.verdictFlags |= kVerdictStaticCamera;
-					fit.confidence *= 0.495;
-				}
-			}
 			if (fit.valid)
 			{
 				m_previous = fit;
 				m_havePrevious = true;
 				m_seedPending = false;
 				if ((fit.verdictFlags & (kVerdictDynamicTexture | kVerdictStaticCamera)) == 0)
-					m_temporal.Update(in.pairSeconds, fit.rates, updateFloor(in));   // a water-locked fit never feeds the camera prediction
+					m_temporal.Update(in.pairSeconds, fit.rates, updateFloor(in, fitPrec));   // a water-locked fit never feeds the camera prediction
 			}
 			if (m_config.twoLayer)
 				Impl::ApplyTl(*this, in, fit, tlNext);

@@ -279,14 +279,9 @@ namespace Vpv
 				{
 					FrameAnalysis::Record rec;
 					const FrameAnalysis::ReadStatus rs = store->Read(seq - 1, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kCadence, rec);
-					if (rs == FrameAnalysis::ReadStatus::Ok)
-					{
-						read = CameraLink::CadenceRead::Ok;
+					read = CameraLink::CadenceReadOf(rs);
+					if (read == CameraLink::CadenceRead::Ok)
 						filmHz = rec.cadence.filmHz;
-					}
-					else
-						read = rs == FrameAnalysis::ReadStatus::Missing || rs == FrameAnalysis::ReadStatus::Late ? CameraLink::CadenceRead::NotYet :
-							CameraLink::CadenceRead::Refused;
 				}
 				CameraLink::ApplyCadenceRead(t, read, filmHz, st.haveTiming, st.timing);
 				auto moved = [](double a, double b) { return (a > 0.0) != (b > 0.0) || (a > 0.0 && std::fabs(a - b) > 0.01 * b); };
@@ -496,6 +491,7 @@ namespace Vpv
 			CameraHostState* sp = &st;
 			FrameAnalysis::Store* store = st.builtStore;
 			VpIndicator::Indicator* ind = indicator.get();
+			VpSkeleton::LaneLeaseSource fieldOnTime;   // the fit field product's bytes lease in the skeleton lane (set with the on-time target)
 			st.core->SetEngine(engine);
 			st.core->SetFactsProvider([sp, engine, store](const CameraLink::FieldCopy& f, CameraLink::PairDescription& d) {
 				return DescribePair(*sp, *engine, store, f, d);
@@ -521,9 +517,10 @@ namespace Vpv
 				{
 					std::vector<VpSkeleton::ConsumerDecl> consumers;
 					CameraLink::DeclareCameraConsumers(CameraLink::LiveCameraDemand(false), consumers);
-					demand->SetExternalDemand(host, &st, consumers, { VpSkeleton::kP7CameraFit });
+					demand->SetExternalDemand(host, &st, consumers, { VpSkeleton::kP7CameraFit, VpSkeleton::kCameraFitField });
 					st.demand = demand;
 					st.core->AttachOnTime([demand, host]() { return demand->LeaseFor(host, VpSkeleton::kP7CameraFit); }, "skeleton lane");
+					fieldOnTime = [demand, host]() { return demand->LeaseFor(host, VpSkeleton::kCameraFitField); };
 				}
 			}
 			else
@@ -535,6 +532,7 @@ namespace Vpv
 				st.labelProducer.reset(new CameraLink::CameraLabelProducer(nullptr, st.gpu, mode, st.lane.LabelRing(), st.lane.LabelLive()));
 				// The fill holds the table through a lease (rebinds on a new generation), as it will hold the skeleton lane's after SK-W2.
 				st.labelFill.reset(new CameraLink::CameraLabelFill(st.lane.Source(VpSkeleton::kP8CameraLabels), *st.core->Link(), *st.labelProducer));
+				st.labelFill->SetFieldSource(st.lane.Source(VpSkeleton::kCameraFitField));   // the field product's storage: P8's only field read
 				st.lane.SetLabelFill(st.labelFill.get());
 				CameraLink::CameraLabelFill* fill = st.labelFill.get();
 				st.core->labelsProvider = [fill](uint64_t seq, CameraLink::CameraConsumer c, CameraLink::CameraLabelsView& out) {
@@ -570,6 +568,7 @@ namespace Vpv
 			// LEASE path (SK-W): the fit worker holds the table, the P7 bytes and the Indicator through an owned lease and rebinds when the
 			// generation changes (a job stamped with an older one is refused: PublishOutcome::StaleLane). Until SK-W2 the source is the lag
 			// bridge; then it becomes the skeleton lane's AnalysisLane::Lease(kP7CameraFit).
+			st.core->SetFieldSources(st.lane.Source(VpSkeleton::kCameraFitField), fieldOnTime);   // the field product's storage (before AttachLane)
 			st.core->AttachLane(st.lane.Source(VpSkeleton::kP7CameraFit));
 			if (!st.core->Allocated())
 			{
@@ -958,8 +957,12 @@ namespace Vpv
 					// here, not per pair: no ahead fit (off, or a deterministic run's bridge path), or no on-time target (no skeleton lane).
 					const char* cause = CameraLink::GuidanceStructuralCause(st.aheadWanted, st.aheadDeterministic, st.liveBuilt, st.demand != nullptr);
 					if (cause)
-						fb.push_back(std::string("camera_guidance: unguided - ") + cause);
+						fb.push_back(CameraLink::GuidanceUnguidedLine(cause));
 				}
+				// P8's fill counters, including the fit-field read misses (missing / stamp mismatch / unreadable): on every surface the
+				// camera-fit counters reach (Ctrl+I, status, Ctrl+Alt+D), never counted silently. Atomics; read on the status path only.
+				if (st.labelFill && st.liveBuilt)
+					lines.push_back(CameraLink::LabelFillStatusLine(st.labelFill->Counters()));
 				if (st.adapter)
 				{
 					st.adapter->CollectStatus(lines);

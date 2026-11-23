@@ -118,6 +118,7 @@ namespace CameraLink
 			out.precisionPx = 0.25;
 			out.fullFinalRefine = true;   // owner: the final estimate over every native cell, not the sampled ones
 		}
+		out.quantumPx = field.quantumPx;   // camfix R2: the NVOF noise floor and the competitor separation (0 = unchanged)
 		out.resyncGeneration = GenerationsOf(stamp);
 		out.rebaseGeneration = 0;   // re-base is Ignore (F3)
 		out.deadlineMicros = facts.deadlineMicros;

@@ -25,12 +25,11 @@ namespace VideoProcessorTest
 			std::shared_ptr<const CameraLink::FieldCopy> field;
 			std::shared_ptr<const CameraModel::CameraMotion> SealedRecord(uint64_t) const override { return rec; }
 			std::shared_ptr<const CameraModel::CameraMotion> CausalRecord(uint64_t s) const override { return s >= 1 ? rec : nullptr; }
-			bool FitEntryOf(uint64_t s, std::shared_ptr<const CameraModel::CameraMotion>& outRec,
-				std::shared_ptr<const CameraLink::FieldCopy>& outField) const override
+			// CP-A1-D4-CAMLABEL-FIELDCOPY: the pool entry gives the record only (the fit field is the p7f_camera_fit_field product).
+			bool FitEntryOf(uint64_t s, std::shared_ptr<const CameraModel::CameraMotion>& outRec) const override
 			{
 				outRec = CausalRecord(s);
-				outField = s >= 1 ? field : nullptr;
-				return outRec != nullptr || outField != nullptr;
+				return outRec != nullptr;
 			}
 			bool LabelsFor(uint64_t, CameraLink::CameraConsumer, CameraLink::CameraLabelsView&) override { return false; }
 			std::shared_ptr<const CameraModel::GuidanceFrame> GuideFor(uint64_t) override { return nullptr; }

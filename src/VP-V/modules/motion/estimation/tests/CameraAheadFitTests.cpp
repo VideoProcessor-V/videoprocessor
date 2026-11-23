@@ -243,6 +243,34 @@ namespace VideoProcessorTest
 			Assert::IsTrue(CameraLink::CopyAhead(v, 7, 2.0f, a) == CameraLink::AheadRefusal::Layout);
 		}
 
+		// R3 wiring (0dc594f86, audit4 D): the copy takes the pair's engine-size luma only when both planes are exactly engineW x engineH,
+		// and shares them (no copy of the planes); otherwise the copy carries no luma (the fit then counts it as no luma).
+		TEST_METHOD(TheCopyTakesTheLumaPairOnlyAtTheEngineSize)
+		{
+			Pair p(960, 540, 2.0);
+			p.Uniform(3.0, -1.0);
+			VpMotion::FlowView v = p.View(7);
+			Assert::IsTrue(v.engineW > 0 && v.engineH > 0, L"premise: the view names its engine size");
+			const size_t cells = static_cast<size_t>(v.engineW) * static_cast<size_t>(v.engineH);
+			auto from = std::make_shared<const std::vector<uint8_t>>(cells, uint8_t(10));
+			auto to = std::make_shared<const std::vector<uint8_t>>(cells, uint8_t(20));
+			v.lumaFrom = from;
+			v.lumaTo = to;
+			CameraLink::AheadCopy a;
+			Assert::IsTrue(CameraLink::CopyAhead(v, 7, 2.0f, a) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(a.lumaFrom == from && a.lumaTo == to, L"the exact-size pair is taken, shared");
+			auto shortPlane = std::make_shared<const std::vector<uint8_t>>(cells - 1, uint8_t(20));
+			v.lumaTo = shortPlane;
+			CameraLink::AheadCopy b;
+			Assert::IsTrue(CameraLink::CopyAhead(v, 7, 2.0f, b) == CameraLink::AheadRefusal::None, L"the vectors are still copied");
+			Assert::IsTrue(b.lumaFrom == nullptr && b.lumaTo == nullptr, L"a plane of another size: no luma at all");
+			v.lumaTo = to;
+			v.lumaFrom = nullptr;
+			CameraLink::AheadCopy c;
+			Assert::IsTrue(CameraLink::CopyAhead(v, 7, 2.0f, c) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(c.lumaFrom == nullptr && c.lumaTo == nullptr, L"one plane missing: no luma");
+		}
+
 		TEST_METHOD(AHalfSizePairIsTheNativeCellGridAtFullSubPelDeterministically)
 		{
 			// 1080p: half-size 960 x 540 engine luma, 8-px cells: each 16-px block holds 2 x 2 cell centres.
@@ -418,22 +446,30 @@ namespace VideoProcessorTest
 				const MotionAhead::Flow f = FlowOfPair(p, true);
 				const VpMotion::FlowView plainView = p.View(3), extrasView = ViewWithExtras(p, f, 3);
 				const int reps = 20;
-				float g[4] = {}, second[4] = {};
+				float g[4] = {}, second[4] = {}, gBefore[4] = {}, gAfter[4] = {};
+				bool beforeHadGlobal = false, afterHadGlobal = true, trustPresent = true;
+				bool taken = true;
 				double sink = 0;
 				const auto t0 = std::chrono::steady_clock::now();
 				for (int r = 0; r < reps; ++r)
 				{
 					CameraLink::AheadCopy a;
-					CameraLink::CopyAhead(plainView, 3, 1.5f, a);
+					taken = taken && CameraLink::CopyAhead(plainView, 3, 1.5f, a) == CameraLink::AheadRefusal::None;
+					trustPresent = trustPresent && !a.trust.empty();
+					beforeHadGlobal = beforeHadGlobal || a.haveProducerGlobal;
 					MotionAhead::FlowGlobal(a.forward, a.forwardCost, a.gridW, a.gridH, g, second);
+					for (int k = 0; k < 4; ++k) gBefore[k] = g[k];
 					sink += a.trust.empty() ? 0.0 : a.trust[0] + g[0];
 				}
 				const auto t1 = std::chrono::steady_clock::now();
 				for (int r = 0; r < reps; ++r)
 				{
 					CameraLink::AheadCopy a;
-					CameraLink::CopyAhead(extrasView, 3, 1.5f, a);
+					taken = taken && CameraLink::CopyAhead(extrasView, 3, 1.5f, a) == CameraLink::AheadRefusal::None;
+					trustPresent = trustPresent && !a.trust.empty();
+					afterHadGlobal = afterHadGlobal && a.haveProducerGlobal;
 					for (int k = 0; k < 4; ++k) g[k] = a.producerGlobal[k];
+					for (int k = 0; k < 4; ++k) gAfter[k] = g[k];
 					sink += a.trust.empty() ? 0.0 : a.trust[0] + g[0];
 				}
 				const auto t2 = std::chrono::steady_clock::now();
@@ -444,6 +480,12 @@ namespace VideoProcessorTest
 					p.gridW, p.gridH, before, after, sink);
 				Logger::WriteMessage(line);
 				Assert::IsTrue(before > 0.0 && after > 0.0);
+				Assert::IsTrue(taken, L"every CopyAhead of the cost line returned AheadRefusal::None");
+				Assert::IsTrue(trustPresent, L"every copy carries the engine's cell trust");
+				Assert::IsFalse(beforeHadGlobal, L"the plain view has no producer vote: the vote is recomputed (before)");
+				Assert::IsTrue(afterHadGlobal, L"the extras view carries the producer vote (after)");
+				for (int k = 0; k < 4; ++k)
+					Assert::AreEqual(gBefore[k], gAfter[k], 1e-6f, L"the recomputed vote equals the producer's");
 			}
 		}
 
@@ -1006,7 +1048,18 @@ namespace VideoProcessorTest
 				core.OnPostSubmitGap();
 			}
 			Assert::AreEqual(0, calls);
-			Assert::AreEqual(size_t(7), core.CollectDecisions().size(), L"the decisions are exactly the camera's seven");
+			// The camera's seven plus the two R3 photometric decisions (0dc594f86: camera.photometric.not_running / .gpu_failed), both released
+			// here: nothing was fitted, so nothing was skipped or failed.
+			const std::vector<FallbackCatalog::Decision> decisions = core.CollectDecisions();
+			Assert::AreEqual(size_t(9), decisions.size(), L"the decisions are exactly the camera's seven and the two photometric ones");
+			int photometric = 0;
+			for (const FallbackCatalog::Decision& d : decisions)
+				if (d.id == CameraLink::kIdPhotometricNotRunning || d.id == CameraLink::kIdPhotometricGpuFailed)
+				{
+					++photometric;
+					Assert::IsFalse(d.engaged, L"a photometric decision is released while nothing ran");
+				}
+			Assert::AreEqual(2, photometric, L"both photometric decisions are collected");
 			std::vector<std::string> lines;
 			core.CollectStatus(lines);
 			Assert::IsFalse(Has(lines, "ahead"));

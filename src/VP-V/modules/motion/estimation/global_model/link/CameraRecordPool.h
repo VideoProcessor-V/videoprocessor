@@ -127,12 +127,34 @@ namespace CameraLink
 		return true;
 	}
 
-	// One pool entry: the record (with its BlockData) and the CPU field copy it was fitted from.
+	// What the pool keeps of the field a record was fitted from: its PROVENANCE only (origin and the P2 epoch the staleness checks read).
+	// The field's content is NOT kept here: it lives in the declared product p7f_camera_fit_field (CameraFitFieldPod.h).
+	struct FieldProvenance
+	{
+		bool have = false;
+		FieldOrigin origin = FieldOrigin::Synthetic;
+		bool haveP2 = false;
+		uint64_t p2Epoch = 0;
+	};
+	inline FieldProvenance ProvenanceOf(const FieldCopy* f)
+	{
+		FieldProvenance p;
+		if (f)
+		{
+			p.have = true;
+			p.origin = f->origin;
+			p.haveP2 = f->haveP2;
+			p.p2Epoch = f->p2Epoch;
+		}
+		return p;
+	}
+
+	// One pool entry: the record (with its BlockData) and the provenance of the field it was fitted from.
 	struct PoolEntry
 	{
 		uint64_t seq = ~uint64_t(0);
 		std::shared_ptr<const CameraModel::CameraMotion> record;
-		std::shared_ptr<const FieldCopy> field;
+		FieldProvenance field;
 		bool committed = false;   // set only AFTER the slot publish succeeded: a late / unpublished record is never served
 		// AHEAD FIT: the Indicator stamp honoured at the publish (read after the pins, AheadLane provenance). The consumers re-check it
 		// against the frame's current stamp (CameraLinkCore::SealedRecord): a resync after the publish rejects the record there too.
@@ -149,14 +171,14 @@ namespace CameraLink
 		size_t Ring() const { return m_entries.size(); }
 
 		// Producer (holding the claim for `seq`). Replaces the previous tenant of the slot.
-		void Put(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion> record, std::shared_ptr<const FieldCopy> field,
+		void Put(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion> record, const FieldProvenance& field,
 			const VpIndicator::Stamp* honoured = nullptr, bool onTime = false)
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			PoolEntry& e = m_entries[seq % m_entries.size()];
 			e.seq = seq;
 			e.record = std::move(record);
-			e.field = std::move(field);
+			e.field = field;
 			e.committed = false;
 			e.haveHonoured = honoured != nullptr;
 			e.honoured = honoured ? *honoured : VpIndicator::Stamp();
