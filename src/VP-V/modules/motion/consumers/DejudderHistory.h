@@ -40,4 +40,14 @@ namespace VpMotion
 			pending.release = true;
 		return epochMoved || h.changed || h.forgetRebaseHolders;
 	}
+
+	// R21: whether THIS frame's live per-frame C (`dejudderAheadPayload`, loaded at RenderLocked entry)
+	// should be restored after a non-release ApplyMotionInvalidate(). Stale history (dejudderAhead,
+	// matcher history, snapshot lease, mask/segment slots) stays cleared; only a live C strictly after
+	// this frame's B survives a forget-only invalidation (never a resource-releasing resync/format change).
+	inline bool ShouldPreserveLiveAheadAfterInvalidate(bool released, bool hadLiveAhead, uint64_t liveAheadSeq,
+		bool hasNext, uint64_t nextSeq) noexcept
+	{
+		return !released && hadLiveAhead && liveAheadSeq != 0 && hasNext && nextSeq != 0 && liveAheadSeq > nextSeq;
+	}
 }

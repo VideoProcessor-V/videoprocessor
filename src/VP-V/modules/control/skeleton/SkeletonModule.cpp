@@ -986,9 +986,12 @@ namespace Vpv
 			}
 			const void* host;
 			std::shared_ptr<VpSkeleton::SkeletonMemo> memo;
-			// Render thread (PlanNoLaneGpu): what the last no-lane grant was planned for.
+			// PlanNoLaneGpu (render thread at Begin, or any thread on MemoFor): serialized by planMutex.
+			std::mutex planMutex;
 			bool planned = false;
+			bool plannedGpuPresent = false;
 			uint64_t plannedNeed = 0, plannedVramVersion = 0, plannedBinds = 0;
+			uint64_t lastPlanSeal = ~uint64_t(0);
 			uint32_t framesSincePlan = 0;
 			VpSkeleton::MemoGpuGrant grant;
 			std::string cardWhy;
@@ -1066,22 +1069,33 @@ namespace Vpv
 			const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host);
 			if (!mh || mh->memo->LaneBound())
 				return;   // a bound lane plans the memo (its scratch-arena grant, Configure)
+			std::lock_guard<std::mutex> planLock(mh->planMutex);
+			if (mh->memo->LaneBound())
+				return;
 			VpSkeleton::SkeletonMemo& memo = *mh->memo;
 			const std::vector<uint64_t> levels = memo.GpuNeedLevels();   // QKP B (amendment M6): one level per ahead-ladder step
 			const uint64_t need = levels.empty() ? 0u : levels.front();
 			const uint64_t vramVersion = VpSkeleton::VramUsers::Instance().Version();
 			const uint64_t binds = memo.LaneBinds();
-			++mh->framesSincePlan;
-			if (mh->planned && mh->plannedNeed == need && mh->plannedVramVersion == vramVersion && mh->plannedBinds == binds
-				&& mh->framesSincePlan < kNoLaneReplanFrames)
+			const bool gpuPresent = gpuSlots_.Aux(host) != nullptr;
+			const uint64_t seals = memo.Seals();
+			if (mh->lastPlanSeal != seals)
+			{
+				mh->lastPlanSeal = seals;
+				++mh->framesSincePlan;
+			}
+			if (mh->planned && mh->plannedGpuPresent == gpuPresent && mh->plannedNeed == need &&
+				mh->plannedVramVersion == vramVersion && mh->plannedBinds == binds &&
+				mh->framesSincePlan < kNoLaneReplanFrames)
 				return;
 			mh->planned = true;
+			mh->plannedGpuPresent = gpuPresent;
 			mh->plannedNeed = need;
 			mh->plannedVramVersion = vramVersion;
 			mh->plannedBinds = binds;
 			mh->framesSincePlan = 0;
 			// The render GPU is the "dispatcher" of a no-lane GPU fill (FrameMemo::gpu): present while the renderer's pl_gpu is known.
-			memo.SetGpuDispatcherPresent(gpuSlots_.Aux(host) != nullptr);
+			memo.SetGpuDispatcherPresent(gpuPresent);
 			CardProfile card;
 			std::string why;
 			if (cardOverride_)
@@ -1153,6 +1167,10 @@ namespace Vpv
 			fm.memo = MemoHostOf(host, true);
 			if (!fm.memo)
 				return FrameMemo();
+			// R21: plan a lazily-created (or GPU-updated) no-lane memo immediately so frame 1 gets
+			// SetGpuDispatcherPresent(gpu != nullptr) and its ledger grant without waiting for frame 2's Begin.
+			if (!fm.memo->LaneBound())
+				PlanNoLaneGpu(host);
 			fm.host = host;
 			fm.seq = seq;
 			const Hub::CurrentFrame cur = Hub::CurrentFrameOf(host);
