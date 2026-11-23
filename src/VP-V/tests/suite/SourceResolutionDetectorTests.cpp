@@ -2,6 +2,7 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 #include <VP-V/tests/support/SubtitleTextTestPattern.h>
 
 #include <algorithm>
@@ -639,7 +640,9 @@ namespace VideoProcessorTest
 		TEST_METHOD(RealFootageReadings)
 		{
 			const std::string folder = EnvValue("VP_TEST_REAL_FOOTAGE");
-			if (folder.empty()) { Logger::WriteMessage("VP_TEST_REAL_FOOTAGE not set: skipped\n"); return; }
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "SourceResolutionDetectorTests::RealFootageReadings",
+				!folder.empty(), "VP_TEST_REAL_FOOTAGE not set"))
+				return;
 			struct Clip { std::string file; bool y4m; long long frames; };
 			const Clip clips[] = {
 				{ "Bosphorus_3840x2160_120fps_420_10bit_YUV.yuv", false, 600 }, { "Jockey_3840x2160_120fps_420_10bit_YUV.yuv", false, 600 },
@@ -805,12 +808,11 @@ namespace VideoProcessorTest
 				snprintf(pk, sizeof(pk), "Peakiness (largest): native %.1f, upscales %.1f\n", peakNative, peakUpscale);
 				Logger::WriteMessage(pk);
 			}
+			// A configured folder that yields no clip proves nothing: the gates below would pass on zero clips.
+			Assert::IsTrue(clipsRead > 0, L"VP_TEST_REAL_FOOTAGE is set but none of the listed clips could be opened");
 			Assert::AreEqual(0, failures, L"real-footage gates (see the log)");
-			if (clipsRead > 0)
-			{
-				// Every real 4K frame stands above its own 1080 upscales by more than the margin.
-				Assert::IsTrue(detailGap > SourceResolution::Tracker::Settings{}.detailMarginDecades, L"real 4K holds more detail above than its upscales");
-			}
+			// Every real 4K frame stands above its own 1080 upscales by more than the margin.
+			Assert::IsTrue(detailGap > SourceResolution::Tracker::Settings{}.detailMarginDecades, L"real 4K holds more detail above than its upscales");
 		}
 
 		// Planner G18 (2026-10-16): real codecs. tools/make_codec_corpus.py makes x265 /
@@ -821,9 +823,12 @@ namespace VideoProcessorTest
 		TEST_METHOD(RealCodecReadings)
 		{
 			const std::string folder = EnvValue("VP_TEST_CODEC_CORPUS");
-			if (folder.empty()) { Logger::WriteMessage("VP_TEST_CODEC_CORPUS not set: skipped\n"); return; }
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Corpus, "SourceResolutionDetectorTests::RealCodecReadings",
+				!folder.empty(), "VP_TEST_CODEC_CORPUS not set"))
+				return;
 			FILE* manifest = nullptr;
-			if (fopen_s(&manifest, (folder + "\\manifest.csv").c_str(), "r") != 0 || !manifest) { Logger::WriteMessage("no manifest: skipped\n"); return; }
+			const bool manifestOpened = fopen_s(&manifest, (folder + "\\manifest.csv").c_str(), "r") == 0 && manifest;
+			Assert::IsTrue(manifestOpened, L"VP_TEST_CODEC_CORPUS is set but has no readable manifest.csv");
 			const int W = 3840, H = 2160, codeMax = 1023;
 			struct Tally { int frames = 0, height = 0, native = 0, wrong = 0; };
 			std::map<std::string, Tally> tallies;
@@ -983,6 +988,7 @@ namespace VideoProcessorTest
 			snprintf(summary, sizeof(summary), "Real codecs: %d cases; native frames read lower %d; upscales read a wrong height %d\n", cases, nativeLower, wrongHeight);
 			Logger::WriteMessage(summary);
 			if (!failures.empty()) Logger::WriteMessage(("Wrong: " + failures + "\n").c_str());
+			Assert::IsTrue(cases > 0, L"VP_TEST_CODEC_CORPUS has a manifest but none of its cases could be opened");
 			Assert::AreEqual(0, nativeLower, L"no native frame reads lower (the invariant)");
 			Assert::AreEqual(0, wrongHeight, L"an upscale reads its height or native, never a wrong height");
 		}
