@@ -634,5 +634,93 @@ namespace VideoProcessorTest
 				Assert::IsTrue(ReasonOf(f.fallbacks, LedDrive::LedDriveModule::kHoldFallbackId).find("did not load") != std::string::npos);
 			}
 		}
+
+		// GEM-LED-EXTRANGE-HOST: DynamicDriveFrame::DecideFrame sets exact limited-range [-60/876, 955/876]
+		// vs full-range [0.0, 1.0] bounds from target.repr, and OutputColourSegment::Collect forwards BOTH
+		// "extended_floor" and "extended_ceiling" into the LED compensation hook parameters.
+		TEST_METHOD(ExtendedRangeBoundsFollowTargetRangeAndForwardToHook)
+		{
+			pl_var_data floorData{}; floorData.f = -0.25f;
+			pl_var_data ceilData{}; ceilData.f = 1.50f;
+			pl_hook_par pars[2]{};
+			pars[0].name = "extended_floor";
+			pars[0].type = PL_VAR_FLOAT;
+			pars[0].data = &floorData;
+			pars[0].minimum.f = -0.5f;
+			pars[0].maximum.f = 0.0f;
+			pars[1].name = "extended_ceiling";
+			pars[1].type = PL_VAR_FLOAT;
+			pars[1].data = &ceilData;
+			pars[1].minimum.f = 1.0f;
+			pars[1].maximum.f = 2.0f;
+			pl_hook dummy{};
+			dummy.stages = PL_HOOK_PRE_OUTPUT;
+			dummy.parameters = pars;
+			dummy.num_parameters = 2;
+
+			CustomHookChain::Loader loader{
+				[](const std::string&, std::string& source, std::string&) { source = "//!HOOK PREOUTPUT\n"; return true; },
+				[&dummy](const std::string&) -> const pl_hook* { return &dummy; },
+				[](const pl_hook*& hook) { hook = nullptr; } };
+			std::shared_ptr<QueuedFrameStatistics::IObserver> observer;
+			FallbackStatus::Registry fallbacks;
+			LedDrive::DynamicDriveFrame frame(observer, fallbacks, loader);
+			// Non-identity boost so OutputColourSegment::Collect emits the compensation hook and forwards parameters.
+			LedDrive::DynamicDriveParams boosted;
+			boosted.gammaBoost = 2.4;
+			frame.PublishParams(boosted);
+
+			const double limitedFloor = -60.0 / 876.0;
+			const double limitedCeil = 955.0 / 876.0;
+
+			// 1. Limited-range targets (explicit RGB LIMITED, and YCbCr BT.709 UNKNOWN which guesses LIMITED): exact [-60/876, 955/876].
+			const std::pair<enum pl_color_system, enum pl_color_levels> limitedCases[] = {
+				{ PL_COLOR_SYSTEM_RGB, PL_COLOR_LEVELS_LIMITED },
+				{ PL_COLOR_SYSTEM_BT_709, PL_COLOR_LEVELS_UNKNOWN }
+			};
+			for (const auto& lc : limitedCases)
+			{
+				FrameFacts facts;
+				facts.target.repr.sys = lc.first;
+				facts.target.repr.levels = lc.second;
+				OutputSegments::ColourFrame colour;
+				frame.DecideFrame(facts.in, colour);
+				Assert::AreEqual(limitedFloor, colour.compensation.extendedFloor, 1e-12, L"limited extendedFloor");
+				Assert::AreEqual(limitedCeil, colour.compensation.extendedCeiling, 1e-12, L"limited extendedCeiling");
+
+				floorData.f = 0.0f;
+				ceilData.f = 1.0f;
+				std::vector<const pl_hook*> hooks;
+				const auto counts = RunS2(frame, facts.in, hooks, NoTag);
+				Assert::AreEqual(size_t{ 1 }, counts.ledCompensation, L"compensation hook emitted");
+				Assert::AreEqual(limitedFloor, static_cast<double>(floorData.f), 1e-6, L"extended_floor forwarded for limited");
+				Assert::AreEqual(limitedCeil, static_cast<double>(ceilData.f), 1e-6, L"extended_ceiling forwarded for limited");
+			}
+
+			// 2. Full-range targets (explicit RGB FULL, and RGB UNKNOWN which guesses FULL): exact [0.0, 1.0].
+			const std::pair<enum pl_color_system, enum pl_color_levels> fullCases[] = {
+				{ PL_COLOR_SYSTEM_RGB, PL_COLOR_LEVELS_FULL },
+				{ PL_COLOR_SYSTEM_RGB, PL_COLOR_LEVELS_UNKNOWN }
+			};
+			for (const auto& fc : fullCases)
+			{
+				FrameFacts facts;
+				facts.target.repr.sys = fc.first;
+				facts.target.repr.levels = fc.second;
+				OutputSegments::ColourFrame colour;
+				frame.DecideFrame(facts.in, colour);
+				Assert::AreEqual(0.0, colour.compensation.extendedFloor, 1e-12, L"full-range extendedFloor must be 0.0");
+				Assert::AreEqual(1.0, colour.compensation.extendedCeiling, 1e-12, L"full-range extendedCeiling must be 1.0");
+
+				// Seed hook params with limited defaults to prove OutputColourSegment::Collect actively overwrites them.
+				floorData.f = static_cast<float>(limitedFloor);
+				ceilData.f = static_cast<float>(limitedCeil);
+				std::vector<const pl_hook*> hooks;
+				const auto counts = RunS2(frame, facts.in, hooks, NoTag);
+				Assert::AreEqual(size_t{ 1 }, counts.ledCompensation, L"compensation hook emitted");
+				Assert::AreEqual(0.0, static_cast<double>(floorData.f), 1e-7, L"extended_floor forwarded as 0.0 for full-range");
+				Assert::AreEqual(1.0, static_cast<double>(ceilData.f), 1e-7, L"extended_ceiling forwarded as 1.0 for full-range");
+			}
+		}
 	};
 }

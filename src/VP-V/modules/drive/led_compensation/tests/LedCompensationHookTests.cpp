@@ -567,31 +567,40 @@ namespace VideoProcessorTest
 			const Codes extended[] = { { 1019, 1019, 1019 }, { 941, 941, 941 }, { 63, 63, 63 }, { 8, 8, 8 },
 				{ 100, 30, 64 } };
 			auto aboveWhite = [](const Codes& c) { return c[0] > 940 || c[1] > 940 || c[2] > 940; };
-			// CPU mirror of the split (preserve_extended, both passthroughs on) for a colour with luma in (0, 1]:
-			// p = the in-range part, e = the excursion already scaled by f, k = the encode-range factor.
-			struct Split { Rgb p{}, e{}; double k = 1.0, f = 1.0; };
+			// CPU mirror of the split (preserve_extended, both passthroughs on, incl. GEM-LED-UP-SMOOTH C1 Hermite
+			// effGain blend over u = 1 - tAbove for anyAbove && gain < 1): p = the in-range part, e = the excursion
+			// already scaled by f, k = the encode-range factor, effGain = blended gain.
+			struct Split { Rgb p{}, e{}; double k = 1.0, f = 1.0, effGain = 1.0; };
 			auto split = [&curve, &luma](const Rgb& o, double gain, double b, double domain)
 			{
 				Split s;
 				const double y = luma(o);
 				bool anyAbove = false;
-				double t = 1.0;
+				double t = 1.0, tAbove = 1.0;
 				for (int k = 0; k < 3; ++k)
 				{
 					const double d = o[k] - y;
 					anyAbove = anyAbove || o[k] > 1.0;
 					if (o[k] > 1.0)
-						t = std::min(t, (1.0 - y) / std::max(d, 1e-6));
+					{
+						const double ta = (1.0 - y) / std::max(d, 1e-6);
+						tAbove = std::min(tAbove, ta);
+						t = std::min(t, ta);
+					}
 					if (o[k] < 0.0)
 						t = std::min(t, y / std::max(-d, 1e-6));
 				}
 				t = std::min(std::max(t, 0.0), 1.0);   // the test project is C++14: no std::clamp
-				s.f = anyAbove && gain < 1.0 ? curve(1.0, gain, b, domain) : 1.0;
+				tAbove = std::min(std::max(tAbove, 0.0), 1.0);
+				const double u = 1.0 - tAbove;
+				const double hermite = u * u * (3.0 - 2.0 * u);
+				s.effGain = (anyAbove && gain < 1.0) ? gain + (1.0 - gain) * hermite : gain;
+				s.f = (anyAbove && s.effGain < 1.0) ? curve(1.0, s.effGain, b, domain) : 1.0;
 				Rgb c{};
 				for (int k = 0; k < 3; ++k)
 				{
 					s.p[k] = std::min(std::max(y + t * (o[k] - y), 0.0), 1.0);
-					c[k] = curve(s.p[k], gain, b, domain);
+					c[k] = curve(s.p[k], s.effGain, b, domain);
 					s.e[k] = (o[k] - s.p[k]) * s.f;
 				}
 				const double lowest = -60.0 / 876.0, highest = 955.0 / 876.0;   // codes 4 and 1019
@@ -629,7 +638,7 @@ namespace VideoProcessorTest
 					return o;
 				const Split sp = split(o, gain, b, domain);
 				for (int k = 0; k < 3; ++k)
-					r[k] = curve(sp.p[k], gain, b, domain) + sp.k * sp.e[k];
+					r[k] = curve(sp.p[k], sp.effGain, b, domain) + sp.k * sp.e[k];
 				return r;
 			};
 			// Largest channel difference in codes between two model outputs.
@@ -654,8 +663,8 @@ namespace VideoProcessorTest
 						moved[k] += sign / 876.0;
 						const Split nudged = split(moved, gain, b, domain);   // not "near": a Windows macro
 						for (int j = 0; j < 3; ++j)
-							worst = std::max(worst, 876.0 * std::abs(curve(nudged.p[j], gain, b, domain) -
-								curve(base.p[j], gain, b, domain) - base.k * base.f * (nudged.p[j] - base.p[j])));
+							worst = std::max(worst, 876.0 * std::abs(curve(nudged.p[j], nudged.effGain, b, domain) -
+								curve(base.p[j], base.effGain, b, domain) - base.k * base.f * (nudged.p[j] - base.p[j])));
 					}
 				return worst;
 			};
@@ -835,8 +844,18 @@ namespace VideoProcessorTest
 					const Rgb in = toSignal(c);
 					const Codes out = render(in);
 					const Split sp = split(in, s.gain, s.boost, s.domain);
-					// The in-range part, rendered as an in-range colour: its neighbour's compensation.
-					const Codes part = render(sp.p);
+					// The in-range part, rendered as an in-range colour at the split's effective gain (GEM-LED-UP-SMOOTH).
+					Codes part{};
+					double effWhiteGpu = whiteGpu;
+					if (sp.effGain != s.gain)
+					{
+						set(sp.effGain, s.boost, s.domain);
+						part = render(sp.p);
+						effWhiteGpu = signal(render(Rgb{ 1.0, 1.0, 1.0 })[0]);
+						set(s.gain, s.boost, s.domain);
+					}
+					else
+						part = render(sp.p);
 					{
 						const double slope = nearWhiteSlope(in, s.gain, s.boost, s.domain);
 						if (slope > 0.5)
@@ -858,9 +877,9 @@ namespace VideoProcessorTest
 					}
 					if (sp.f < 1.0)
 					{
-						++scaledExcursions;   // headroom follows the compensated white (the GPU's own C(1))
-						if (std::abs(sp.f - whiteGpu) > 1.0 / 876.0)
-							problems += L"C(1) " + std::to_wstring(sp.f) + L" vs rendered white " + std::to_wstring(whiteGpu) + where;
+						++scaledExcursions;   // headroom follows the compensated white at effGain (the GPU's own C(1, effGain))
+						if (std::abs(sp.f - effWhiteGpu) > 1.0 / 876.0)
+							problems += L"C(1) " + std::to_wstring(sp.f) + L" vs rendered white " + std::to_wstring(effWhiteGpu) + where;
 					}
 					if (sp.k < 1.0)
 					{
@@ -1079,55 +1098,108 @@ namespace VideoProcessorTest
 					problems += L"near-white proven minimum GPU " + std::to_wstring(minimumGpu) + L" vs model " +
 						std::to_wstring(minimumModel) + where;
 			}
-			// Gains below 1 on the same paths (gate ad68a54d6 MUST-3), boost off, gains 0.6 / 0.8 / 0.95 in both
-			// domains. (i) Every 1-code step except the one that crosses luma 1 (the white edge included): <= 1.0
-			// code in the model (achieved 0.60-0.98) and <= 3 codes on the GPU, so the split side stays smooth.
-			// (ii) The luma-1 crossing step, from the split to luma > 1 (kept as it came in), is the true-WTW
-			// boundary: <= 1.09 x the same setting's grey 940 -> 941 step, plus 0.5 code (model) or plus 2 codes
-			// (GPU). Achieved model ratio 1.080-1.084 (381.0 / 351.4 at encoded 0.6).
-			std::wstring belowOneText;
-			for (const double domain : { 0.0, 1.0 })
-				for (const double g : { 0.6, 0.8, 0.95 })
+			// Gains below 1 on the same paths (gate ad68a54d6 MUST-3, tightened for GEM-LED-UP-SMOOTH), boost off,
+			// gains 0.6 / 0.8 / 0.95 in both domains. With C1 Hermite eff_gain blending:
+			// (i) Total worst 1-code step across the ENTIRE path (including the luma-1 crossing!) is bounded by the
+			//     exact achieved multiple of the path's proven minimum (1.48x..1.76x model, <= 2.3x + 2 codes GPU,
+			//     down from the old 13.7x cliff!).
+			// (ii) The luma-1 crossing step itself drops from ~1.09 * grey (~381 codes) to <= 0.08 * grey + 0.5
+			//      (model, achieved 0.010..0.058 * grey) and <= 0.10 * grey + 2.0 (GPU) — >10x tighter!
+			// (iii) In-test negative control: the old unsmoothed flat-C(1) formula on the EXACT SAME paths suffers
+			//       a > 350-code cliff (> 12x proven minimum) at encoded gain 0.6, proving the hazard is real.
+			struct BelowOne { double domain, gain, factorModel; };
+			const BelowOne belowOneSettings[] = {
+				{ 0.0, 0.6, 1.71 }, { 0.0, 0.8, 1.69 }, { 0.0, 0.95, 1.59 },
+				{ 1.0, 0.6, 1.76 }, { 1.0, 0.8, 1.67 }, { 1.0, 0.95, 1.48 }
+			};
+			// Unsmoothed legacy baseline for in-test negative control (flat gain/C(1) up to y <= 1, then jump to o).
+			auto oldUnsmoothedModelOut = [&curve, &luma](const Rgb& o, double g, double domain) -> Rgb
+			{
+				bool above = false, below = false, allAbove = true, allBelow = true;
+				for (int k = 0; k < 3; ++k)
 				{
-					set(g, 1.0, domain);
-					const std::wstring where = L" at gain " + std::to_wstring(g) + L", domain " +
-						std::to_wstring(static_cast<int>(domain)) + L"; ";
-					const Codes greyIn{ 940, 940, 940 }, greyOut{ 941, 941, 941 };
-					const double greyModel = modelStep(modelOut(toSignal(greyIn), g, 1.0, domain),
-						modelOut(toSignal(greyOut), g, 1.0, domain));
-					const int greyGpu = codeStep(render(toSignal(greyIn)), render(toSignal(greyOut)));
-					double smoothModel = 0.0, crossModel = 0.0;
-					int smoothGpu = 0, crossGpu = 0;
-					for (const auto& path : nearWhitePaths)
-					{
-						std::vector<Codes> gpu;
-						std::vector<Rgb> model;
-						for (const Codes& c : path)
-						{
-							gpu.push_back(render(toSignal(c)));
-							model.push_back(modelOut(toSignal(c), g, 1.0, domain));
-						}
-						const size_t last = path.size() - 1;   // path[last] is the first colour with luma > 1
-						for (size_t i = 1; i < last; ++i)
-						{
-							smoothModel = std::max(smoothModel, modelStep(model[i], model[i - 1]));
-							smoothGpu = std::max(smoothGpu, codeStep(gpu[i], gpu[i - 1]));
-						}
-						crossModel = std::max(crossModel, modelStep(model[last], model[last - 1]));
-						crossGpu = std::max(crossGpu, codeStep(gpu[last], gpu[last - 1]));
-					}
-					belowOneText += L"gain " + std::to_wstring(g) + L" domain " + std::to_wstring(static_cast<int>(domain)) +
-						L": split-side step model " + std::to_wstring(smoothModel) + L" / GPU " + std::to_wstring(smoothGpu) +
-						L", luma-1 crossing model " + std::to_wstring(crossModel) + L" / GPU " + std::to_wstring(crossGpu) +
-						L", grey 940->941 model " + std::to_wstring(greyModel) + L" / GPU " + std::to_wstring(greyGpu) + L"; ";
-					if (smoothModel > 1.0 || smoothGpu > 3)
-						problems += L"gain < 1 split-side step: model " + std::to_wstring(smoothModel) + L" (<= 1.0), GPU " +
-							std::to_wstring(smoothGpu) + L" (<= 3)" + where;
-					if (crossModel > 1.09 * greyModel + 0.5 || crossGpu > 1.09 * greyGpu + 2.0)
-						problems += L"gain < 1 luma-1 crossing: model " + std::to_wstring(crossModel) + L" vs grey " +
-							std::to_wstring(greyModel) + L", GPU " + std::to_wstring(crossGpu) + L" vs grey " +
-							std::to_wstring(greyGpu) + L" (<= 1.09 x grey + 0.5 / + 2)" + where;
+					above = above || o[k] > 1.0; below = below || o[k] < 0.0;
+					allAbove = allAbove && o[k] > 1.0; allBelow = allBelow && o[k] < 0.0;
 				}
+				const double y = luma(o);
+				if (!above && !below) return { curve(o[0], g, 1.0, domain), curve(o[1], g, 1.0, domain), curve(o[2], g, 1.0, domain) };
+				if (y > 1.0 || allAbove || !(y > 0.0) || allBelow) return o;
+				double t = 1.0;
+				for (int k = 0; k < 3; ++k)
+				{
+					const double d = o[k] - y;
+					if (o[k] > 1.0) t = std::min(t, (1.0 - y) / std::max(d, 1e-6));
+					if (o[k] < 0.0) t = std::min(t, y / std::max(-d, 1e-6));
+				}
+				t = std::min(std::max(t, 0.0), 1.0);
+				const double f = (above && g < 1.0) ? curve(1.0, g, 1.0, domain) : 1.0;
+				Rgb r{};
+				for (int k = 0; k < 3; ++k)
+				{
+					const double pk = std::min(std::max(y + t * (o[k] - y), 0.0), 1.0);
+					r[k] = curve(pk, g, 1.0, domain) + (o[k] - pk) * f;
+				}
+				return r;
+			};
+			std::wstring belowOneText;
+			for (const BelowOne& bs : belowOneSettings)
+			{
+				const double domain = bs.domain, g = bs.gain;
+				set(g, 1.0, domain);
+				const std::wstring where = L" at gain " + std::to_wstring(g) + L", domain " +
+					std::to_wstring(static_cast<int>(domain)) + L"; ";
+				const Codes greyIn{ 940, 940, 940 }, greyOut{ 941, 941, 941 };
+				const double greyModel = modelStep(modelOut(toSignal(greyIn), g, 1.0, domain),
+					modelOut(toSignal(greyOut), g, 1.0, domain));
+				const int greyGpu = codeStep(render(toSignal(greyIn)), render(toSignal(greyOut)));
+				double minimumModel = 0.0, minimumGpu = 0.0, maxModel = 0.0, crossModel = 0.0, oldCrossModel = 0.0;
+				int maxGpu = 0, crossGpu = 0;
+				for (const auto& path : nearWhitePaths)
+				{
+					std::vector<Codes> gpu;
+					std::vector<Rgb> model, oldModel;
+					for (const Codes& c : path)
+					{
+						gpu.push_back(render(toSignal(c)));
+						model.push_back(modelOut(toSignal(c), g, 1.0, domain));
+						oldModel.push_back(oldUnsmoothedModelOut(toSignal(c), g, domain));
+					}
+					const size_t last = path.size() - 1;   // path[last] is the first colour with luma > 1
+					const double steps = static_cast<double>(last);
+					minimumModel = std::max(minimumModel, modelStep(model.front(), model.back()) / steps);
+					minimumGpu = std::max(minimumGpu, codeStep(gpu.front(), gpu.back()) / steps);
+					for (size_t i = 1; i <= last; ++i)
+					{
+						maxModel = std::max(maxModel, modelStep(model[i], model[i - 1]));
+						maxGpu = std::max(maxGpu, codeStep(gpu[i], gpu[i - 1]));
+					}
+					crossModel = std::max(crossModel, modelStep(model[last], model[last - 1]));
+					crossGpu = std::max(crossGpu, codeStep(gpu[last], gpu[last - 1]));
+					oldCrossModel = std::max(oldCrossModel, modelStep(oldModel[last], oldModel[last - 1]));
+				}
+				// In-test negative control: naive unsmoothed formula MUST suffer a massive cliff at y = 1.0.
+				if (domain == 0.0 && g == 0.6)
+					Assert::IsTrue(oldCrossModel > 350.0 && oldCrossModel > 12.0 * minimumModel,
+						L"Negative control failed: legacy unsmoothed LED-up formula must suffer >350-code (>12x proven min) cliff at y=1");
+				belowOneText += L"gain " + std::to_wstring(g) + L" domain " + std::to_wstring(static_cast<int>(domain)) +
+					L": proven min " + std::to_wstring(minimumModel) + L" (GPU " + std::to_wstring(minimumGpu) +
+					L"), max step model " + std::to_wstring(maxModel) + L" / GPU " + std::to_wstring(maxGpu) +
+					L", luma-1 crossing model " + std::to_wstring(crossModel) + L" / GPU " + std::to_wstring(crossGpu) +
+					L" (old cliff " + std::to_wstring(oldCrossModel) + L"), grey 940->941 model " +
+					std::to_wstring(greyModel) + L" / GPU " + std::to_wstring(greyGpu) + L"; ";
+				if (maxModel + 1e-9 < minimumModel || maxGpu + 1e-9 < minimumGpu)
+					problems += L"gain < 1 achieved below proven minimum" + where;
+				if (maxModel > bs.factorModel * minimumModel)
+					problems += L"gain < 1 path max model step " + std::to_wstring(maxModel) + L" beyond " +
+						std::to_wstring(bs.factorModel) + L"x proven minimum " + std::to_wstring(minimumModel) + where;
+				if (maxGpu > 2.3 * minimumGpu + 2.0)
+					problems += L"gain < 1 path max GPU step " + std::to_wstring(maxGpu) + L" beyond 2.3x GPU proven minimum + 2 (" +
+						std::to_wstring(minimumGpu) + L")" + where;
+				if (crossModel > 0.08 * greyModel + 0.5 || crossGpu > 0.10 * greyGpu + 2.0)
+					problems += L"gain < 1 luma-1 crossing: model " + std::to_wstring(crossModel) + L" vs grey " +
+						std::to_wstring(greyModel) + L", GPU " + std::to_wstring(crossGpu) + L" vs grey " +
+						std::to_wstring(greyGpu) + L" (<= 0.08 x grey + 0.5 / 0.10 x grey + 2)" + where;
+			}
 			Logger::WriteMessage((L"GEM-W1-LED gain < 1 near-white paths: " + belowOneText + L"\n").c_str());
 			Logger::WriteMessage((L"GEM-W1-LED near-white noise: " + nearWhiteText + L"edge pairs worst " +
 				std::to_wstring(worstNearWhiteEdge) + L" codes (model " + std::to_wstring(worstNearWhiteEdgeModel) + L")\n").c_str());
@@ -1148,7 +1220,16 @@ namespace VideoProcessorTest
 						const double g = static_cast<float>(0.85 + 0.0025 * i);   // the value the shader sees
 						set(g, boost, domain);
 						const Split sp = split(in, g, boost, domain);
-						const Codes out = render(in), part = render(sp.p);
+						const Codes out = render(in);
+						Codes part{};
+						if (sp.effGain != g)
+						{
+							set(sp.effGain, boost, domain);
+							part = render(sp.p);
+							set(g, boost, domain);
+						}
+						else
+							part = render(sp.p);
 						const double slope = nearWhiteSlope(in, g, boost, domain);
 						const bool nearWhite = slope > 0.5;
 						if (nearWhite)
@@ -1221,6 +1302,482 @@ namespace VideoProcessorTest
 					std::to_wstring(residualNearWhite) + L" at the exact hook input, expected 142); ";
 			fixture.CaptureLog(nullptr);
 			Assert::IsTrue(problems.empty(), (problems + L"log: " + std::wstring(log.begin(), log.end())).c_str());
+			AssertCleanLibplaceboLogExceptPreOutputBug(log);
+		}
+
+		// GEM-LED-EXTRANGE-HOST adversarial test on full-range target (PL_COLOR_LEVELS_FULL, 10-bit 0..1023):
+		// In-test negative control: running LED compensation.glsl with the naive limited-range defaults
+		// (extended_floor = -60/876, extended_ceiling = 955/876) on saturated bright & below-black pixels
+		// produces outputs outside [0, 1] which libplacebo's full-range encode clips per channel, tilting
+		// hue by > 2 degrees! Setting [0.0, 1.0] (what DynamicDriveFrame sets on full-range targets) keeps
+		// all outputs inside [0, 1] and preserves hue <= 0.5 deg!
+		TEST_METHOD(LedCompensationFullRangeHostSetsUnitBoundsAndKeepsHue)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			std::string log;
+			fixture.CaptureLog(&log);
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule rule;
+			rule.name = "led_compensation";
+			rule.filename = "LED compensation.glsl";
+			chain.Configure({ rule });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.outputHeight = 2;
+			chain.Ensure(values);
+			std::vector<const pl_hook*> comp;
+			chain.Collect(false, comp);
+			Assert::AreEqual(size_t{ 1 }, comp.size(), L"libplacebo rejected LED compensation.glsl");
+			const pl_hook* hook = comp[0];
+
+			OutputEncodingRepair::Hook repair;
+			pl_color_repr fullRepr{};
+			fullRepr.sys = PL_COLOR_SYSTEM_RGB;
+			fullRepr.levels = PL_COLOR_LEVELS_FULL;
+			fullRepr.bits.sample_depth = 10;
+			fullRepr.bits.color_depth = 10;
+			repair.SetTarget(fullRepr);
+			const std::vector<const pl_hook*> hooks = { repair.Get(), hook };
+
+			using Rgb = std::array<double, 3>;
+			auto luma = [](const Rgb& c) { return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+			auto hueDegrees = [&luma](const Rgb& c)
+			{
+				const double y = luma(c);
+				return std::atan2((c[0] - y) / 1.5748, (c[2] - y) / 1.8556) * 180.0 / 3.14159265358979323846;
+			};
+			auto hueError = [&hueDegrees](const Rgb& a, const Rgb& b)
+			{
+				const double d = std::fmod(std::abs(hueDegrees(a) - hueDegrees(b)), 360.0);
+				return std::min(d, 360.0 - d);
+			};
+
+			auto renderFullFloat = [&](const Rgb& in) -> Rgb
+			{
+				pl_gpu gpu = fixture.Gpu();
+				pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+					static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+				Assert::IsNotNull(fmt);
+				float texels[16]{};
+				for (int i = 0; i < 4; ++i)
+				{
+					texels[i * 4 + 0] = static_cast<float>(in[0]);
+					texels[i * 4 + 1] = static_cast<float>(in[1]);
+					texels[i * 4 + 2] = static_cast<float>(in[2]);
+					texels[i * 4 + 3] = 1.0f;
+				}
+				pl_tex_params sp{}; sp.w = sp.h = 2; sp.format = fmt; sp.sampleable = true; sp.initial_data = texels;
+				pl_tex_params tp{}; tp.w = tp.h = 2; tp.format = fmt; tp.renderable = true; tp.host_readable = true;
+				pl_tex src = pl_tex_create(gpu, &sp), dst = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(src); Assert::IsNotNull(dst);
+				pl_frame img = TargetLutGpuFixture::MakeRgbFrame(src);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(dst);
+				out.repr = fullRepr;
+				pl_render_params p = pl_render_fast_params;
+				p.dither_params = nullptr; p.error_diffusion = nullptr;
+				p.hooks = hooks.data(); p.num_hooks = static_cast<int>(hooks.size());
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &img, &out, &p));
+				pl_gpu_finish(gpu);
+				float px[16]{};
+				pl_tex_transfer_params dl{}; dl.tex = dst; dl.ptr = px;
+				Assert::IsTrue(pl_tex_download(gpu, &dl));
+				pl_tex_destroy(gpu, &src); pl_tex_destroy(gpu, &dst);
+				return { px[0], px[1], px[2] };
+			};
+			auto renderFull10 = [&](const Rgb& in) -> Rgb
+			{
+				pl_gpu gpu = fixture.Gpu();
+				pl_fmt srcFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+				pl_fmt dstFmt = nullptr;
+				const auto caps = PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE;
+				for (int i = 0; i < gpu->num_formats; ++i)
+				{
+					pl_fmt f = gpu->formats[i];
+					if (f->type == PL_FMT_UNORM && f->num_components == 4 && f->component_depth[0] == 10 &&
+						f->texel_size == 4 && (f->caps & caps) == caps && f->host_bits[0] == 10)
+					{ dstFmt = f; break; }
+				}
+				Assert::IsNotNull(srcFmt); Assert::IsNotNull(dstFmt);
+				float texels[16]{};
+				for (int i = 0; i < 4; ++i)
+				{
+					texels[i * 4 + 0] = static_cast<float>(in[0]);
+					texels[i * 4 + 1] = static_cast<float>(in[1]);
+					texels[i * 4 + 2] = static_cast<float>(in[2]);
+					texels[i * 4 + 3] = 1.0f;
+				}
+				pl_tex_params sp{}; sp.w = sp.h = 2; sp.format = srcFmt; sp.sampleable = true; sp.initial_data = texels;
+				pl_tex_params tp{}; tp.w = tp.h = 2; tp.format = dstFmt; tp.renderable = true; tp.host_readable = true;
+				pl_tex src = pl_tex_create(gpu, &sp), dst = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(src); Assert::IsNotNull(dst);
+				pl_frame img = TargetLutGpuFixture::MakeRgbFrame(src);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(dst);
+				out.repr = fullRepr;
+				pl_render_params p = pl_render_fast_params;
+				p.dither_params = nullptr; p.error_diffusion = nullptr;
+				p.hooks = hooks.data(); p.num_hooks = static_cast<int>(hooks.size());
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &img, &out, &p));
+				pl_gpu_finish(gpu);
+				uint32_t px[4]{};
+				pl_tex_transfer_params dl{}; dl.tex = dst; dl.ptr = px;
+				Assert::IsTrue(pl_tex_download(gpu, &dl));
+				pl_tex_destroy(gpu, &src); pl_tex_destroy(gpu, &dst);
+				return { static_cast<double>(px[0] & 1023u) / 1023.0,
+					static_cast<double>((px[0] >> 10) & 1023u) / 1023.0,
+					static_cast<double>((px[0] >> 20) & 1023u) / 1023.0 };
+			};
+
+			// Test saturated bright above-white AND below-black pixels (luma strictly in (0, 1)) at gain 0.8 & 0.95.
+			const Rgb pixels[] = { { 1.08, 0.99, 0.55 }, { 1.08, 0.98, 0.45 }, { -0.05, 0.40, 0.70 } };
+			double worstNaiveHue = 0.0, worstFullHue = 0.0;
+			int naiveViolations = 0;
+			for (const double domain : { 0.0, 1.0 })
+				for (const double g : { 0.8, 0.95 })
+				{
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "boost", 1.0));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain", g));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain_domain", domain));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee", 0.08));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "compensation_eotf", 2.2));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "wtw_passthrough", 1.0));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "btb_passthrough", 1.0));
+
+					for (const Rgb& px : pixels)
+					{
+						// 1) In-test negative control: naive limited defaults [-60/876, 955/876] on full-range target.
+						Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "extended_floor", -60.0 / 876.0));
+						Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "extended_ceiling", 955.0 / 876.0));
+						const Rgb naivePreClip = renderFullFloat(px);
+						const Rgb naiveEncoded10 = renderFull10(px);
+						const bool exceededUnit = naivePreClip[0] < -1e-3 || naivePreClip[1] < -1e-3 || naivePreClip[2] < -1e-3 ||
+							naivePreClip[0] > 1.0 + 1e-3 || naivePreClip[1] > 1.0 + 1e-3 || naivePreClip[2] > 1.0 + 1e-3;
+						const double naiveErr = hueError(px, naiveEncoded10);
+						worstNaiveHue = std::max(worstNaiveHue, naiveErr);
+						if (exceededUnit && naiveErr > 2.0)
+							++naiveViolations;
+
+						// 2) Full-range host bounds [0.0, 1.0]: output stays strictly inside [0, 1] and keeps hue <= 0.5 deg.
+						Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "extended_floor", 0.0));
+						Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "extended_ceiling", 1.0));
+						const Rgb fullPreClip = renderFullFloat(px);
+						const Rgb fullEncoded10 = renderFull10(px);
+						for (int k = 0; k < 3; ++k)
+							Assert::IsTrue(fullPreClip[k] >= -1e-4 && fullPreClip[k] <= 1.0 + 1e-4,
+								L"full-range [0, 1] bounds must keep shader output inside [0, 1]");
+						const double fullErr = hueError(px, fullEncoded10);
+						worstFullHue = std::max(worstFullHue, fullErr);
+						Assert::IsTrue(fullErr <= 0.5,
+							(L"full-range [0, 1] hue error " + std::to_wstring(fullErr) + L" deg > 0.5 deg").c_str());
+					}
+				}
+			Assert::IsTrue(naiveViolations == 12 && worstNaiveHue > 5.0,
+				(L"Negative control failed: naive limited defaults on full-range target must exceed [0, 1] and tilt hue > 2 deg on all 12 cases (got violations=" +
+					std::to_wstring(naiveViolations) + L", worstNaiveHue=" + std::to_wstring(worstNaiveHue) + L" deg)").c_str());
+			Logger::WriteMessage((L"GEM-LED-EXTRANGE-HOST: naive limited worst hue tilt = " + std::to_wstring(worstNaiveHue) +
+				L" deg (12/12 violated [0,1]); full-range [0,1] worst hue error = " + std::to_wstring(worstFullHue) + L" deg\n").c_str());
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(log);
+		}
+
+		// GEM-LED-UP-SMOOTH adversarial 42,875-colour (35^3) synthetic lattice + 3,600-pair fine contour test
+		// evaluated DIRECTLY through the real compiled LED compensation.glsl shader on GPU (RGBA32F), verifying
+		// all 5 invariants + in-test negative control proving the old unsmoothed y<=1 formula suffers a >350-code cliff.
+		TEST_METHOD(LedCompensationUpSmooth41kSyntheticLattice)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			std::string log;
+			fixture.CaptureLog(&log);
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule rule;
+			rule.name = "led_compensation";
+			rule.filename = "LED compensation.glsl";
+			chain.Configure({ rule });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = 215; values.outputHeight = 200;
+			chain.Ensure(values);
+			std::vector<const pl_hook*> comp;
+			chain.Collect(false, comp);
+			Assert::AreEqual(size_t{ 1 }, comp.size(), L"libplacebo rejected LED compensation.glsl");
+			const pl_hook* hook = comp[0];
+
+			OutputEncodingRepair::Hook repair;
+			pl_color_repr fullRepr{};
+			fullRepr.sys = PL_COLOR_SYSTEM_RGB;
+			fullRepr.levels = PL_COLOR_LEVELS_FULL;
+			repair.SetTarget(fullRepr);
+			const std::vector<const pl_hook*> hooks = { repair.Get(), hook };
+
+			using Rgb = std::array<double, 3>;
+			const double eotf = 2.2, knee = 0.08;
+			auto spow = [](double v, double e) { return (v < 0.0 ? -1.0 : 1.0) * std::pow(std::abs(v), e); };
+			auto curve = [&](double v, double g, double b, double domain)
+			{
+				v = spow(v, b);
+				if (g == 1.0) return v;
+				double x = domain > 0.5 ? spow(v, eotf) : v;
+				x *= g;
+				if (g > 1.0 && x >= 1.0 - knee)
+					x = 1.0 - knee + knee * (1.0 - std::exp(-(x - (1.0 - knee)) / knee));
+				return domain > 0.5 ? spow(x, 1.0 / eotf) : x;
+			};
+			auto luma = [](const Rgb& c) { return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+			auto hueDegrees = [&luma](const Rgb& c)
+			{
+				const double y = luma(c);
+				return std::atan2((c[0] - y) / 1.5748, (c[2] - y) / 1.8556) * 180.0 / 3.14159265358979323846;
+			};
+			auto hueError = [&hueDegrees](const Rgb& a, const Rgb& b)
+			{
+				const double d = std::fmod(std::abs(hueDegrees(a) - hueDegrees(b)), 360.0);
+				return std::min(d, 360.0 - d);
+			};
+			auto setParams = [&](double g, double b, double domain)
+			{
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "boost", b));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain", g));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "gain_domain", domain));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee", knee));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "compensation_eotf", eotf));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "wtw_passthrough", 1.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "btb_passthrough", 1.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "extended_floor", -60.0 / 876.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "extended_ceiling", 955.0 / 876.0));
+			};
+			auto renderBatch = [&](int w, int h, const std::vector<float>& inRgba) -> std::vector<float>
+			{
+				pl_gpu gpu = fixture.Gpu();
+				pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+					static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+				Assert::IsNotNull(fmt);
+				pl_tex_params sp{}; sp.w = w; sp.h = h; sp.format = fmt; sp.sampleable = true; sp.initial_data = inRgba.data();
+				pl_tex_params tp{}; tp.w = w; tp.h = h; tp.format = fmt; tp.renderable = true; tp.host_readable = true;
+				pl_tex src = pl_tex_create(gpu, &sp), dst = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(src); Assert::IsNotNull(dst);
+				pl_frame img = TargetLutGpuFixture::MakeRgbFrame(src);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(dst);
+				out.repr = fullRepr;
+				pl_render_params p = pl_render_fast_params;
+				p.dither_params = nullptr; p.error_diffusion = nullptr;
+				p.hooks = hooks.data(); p.num_hooks = static_cast<int>(hooks.size());
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &img, &out, &p));
+				pl_gpu_finish(gpu);
+				std::vector<float> outRgba(static_cast<size_t>(w) * h * 4, 0.0f);
+				pl_tex_transfer_params dl{}; dl.tex = dst; dl.ptr = outRgba.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl));
+				pl_tex_destroy(gpu, &src); pl_tex_destroy(gpu, &dst);
+				return outRgba;
+			};
+
+			// Build 35 x 35 x 35 = 42,875-colour 3D RGB lattice spanning [-0.06, 1.09] packed into 215 x 200 RGBA32F.
+			constexpr int kN = 35;
+			constexpr int kTotal = kN * kN * kN;   // 42,875 colours
+			constexpr int kTexW = 215, kTexH = 200; // 43,000 texels >= 42,875
+			std::vector<float> latticeRgba(static_cast<size_t>(kTexW) * kTexH * 4, 0.0f);
+			std::vector<Rgb> latticeRgb(kTotal);
+			{
+				int idx = 0;
+				for (int r = 0; r < kN; ++r)
+					for (int g = 0; g < kN; ++g)
+						for (int b = 0; b < kN; ++b)
+						{
+							const double rv = -0.06 + (1.15 * r) / (kN - 1);
+							const double gv = -0.06 + (1.15 * g) / (kN - 1);
+							const double bv = -0.06 + (1.15 * b) / (kN - 1);
+							latticeRgb[idx] = { rv, gv, bv };
+							latticeRgba[static_cast<size_t>(idx) * 4 + 0] = static_cast<float>(rv);
+							latticeRgba[static_cast<size_t>(idx) * 4 + 1] = static_cast<float>(gv);
+							latticeRgba[static_cast<size_t>(idx) * 4 + 2] = static_cast<float>(bv);
+							latticeRgba[static_cast<size_t>(idx) * 4 + 3] = 1.0f;
+							++idx;
+						}
+			}
+
+			// Invariants 1, 2, 5 across the full 42,875-colour lattice at gain < 1, gain == 1, gain > 1 (both domains).
+			double worstInRange = 0.0, worstWtwBtb = 0.0, worstHue = 0.0;
+			int inRangeCount = 0, wtwBtbCount = 0, hueCheckedCount = 0;
+			for (const double domain : { 0.0, 1.0 })
+				for (const double g : { 0.6, 0.8, 1.0, 1.3 })
+				{
+					setParams(g, 1.0, domain);
+					const std::vector<float> out = renderBatch(kTexW, kTexH, latticeRgba);
+					for (int i = 0; i < kTotal; ++i)
+					{
+						const Rgb o = { latticeRgba[static_cast<size_t>(i) * 4 + 0],
+							latticeRgba[static_cast<size_t>(i) * 4 + 1], latticeRgba[static_cast<size_t>(i) * 4 + 2] };
+						const Rgb got = { out[static_cast<size_t>(i) * 4 + 0],
+							out[static_cast<size_t>(i) * 4 + 1], out[static_cast<size_t>(i) * 4 + 2] };
+						const bool anyAbove = o[0] > 1.0 || o[1] > 1.0 || o[2] > 1.0;
+						const bool anyBelow = o[0] < 0.0 || o[1] < 0.0 || o[2] < 0.0;
+						const bool allAbove = o[0] > 1.0 && o[1] > 1.0 && o[2] > 1.0;
+						const bool allBelow = o[0] < 0.0 && o[1] < 0.0 && o[2] < 0.0;
+						const double y = luma(o);
+						if (!anyAbove && !anyBelow)
+						{
+							++inRangeCount;
+							for (int k = 0; k < 3; ++k)
+								worstInRange = std::max(worstInRange, std::abs(got[k] - curve(o[k], g, 1.0, domain)));
+						}
+						else if (y > 1.0 || allAbove || !(y > 0.0) || allBelow)
+						{
+							++wtwBtbCount;
+							for (int k = 0; k < 3; ++k)
+								worstWtwBtb = std::max(worstWtwBtb, std::abs(got[k] - o[k]));
+						}
+						else if (g <= 1.0)
+						{
+							// Invariant 5: boost off, gain <= 1 (no knee), hue angle error <= 0.5 deg everywhere chromatic.
+							const double chroma = std::max({ std::abs(o[0] - y), std::abs(o[1] - y), std::abs(o[2] - y) });
+							if (chroma >= 0.02)
+							{
+								++hueCheckedCount;
+								worstHue = std::max(worstHue, hueError(o, got));
+							}
+						}
+					}
+				}
+			Assert::IsTrue(inRangeCount > 100000 && wtwBtbCount > 20000 && hueCheckedCount > 5000, L"41k lattice coverage non-vacuous");
+			Assert::IsTrue(worstInRange <= 2e-5, (L"Invariant 1 failed: in-range diff " + std::to_wstring(worstInRange)).c_str());
+			Assert::IsTrue(worstWtwBtb <= 1e-5, (L"Invariant 2 failed: true WTW/BTB diff " + std::to_wstring(worstWtwBtb)).c_str());
+			Assert::IsTrue(worstHue <= 0.5, (L"Invariant 5 failed: worst hue error " + std::to_wstring(worstHue) + L" deg > 0.5 deg").c_str());
+
+			// Invariant 4: temporal continuity across gain = 1.0 - eps to 1.0 + eps across ALL 42,875 colours
+			// (both boost off and boost on, both domains).
+			double worstGainJump = 0.0;
+			for (const double b : { 1.0, 2.2 / 2.4 })
+				for (const double domain : { 0.0, 1.0 })
+				{
+					setParams(1.0 - 1e-4, b, domain);
+					const std::vector<float> below = renderBatch(kTexW, kTexH, latticeRgba);
+					setParams(1.0 + 1e-4, b, domain);
+					const std::vector<float> above = renderBatch(kTexW, kTexH, latticeRgba);
+					for (int i = 0; i < kTotal; ++i)
+						for (int k = 0; k < 3; ++k)
+							worstGainJump = std::max(worstGainJump,
+								std::abs(static_cast<double>(above[static_cast<size_t>(i) * 4 + k]) -
+									static_cast<double>(below[static_cast<size_t>(i) * 4 + k])));
+				}
+			Assert::IsTrue(worstGainJump <= 5e-4,
+				(L"Invariant 4 failed: gain 1-eps -> 1+eps pulse " + std::to_wstring(worstGainJump) + L" > 5e-4").c_str());
+
+			// Invariant 3 + In-Test Negative Control: fine +-1 code (1/876) contour crossings across BOTH y = 1.0
+			// and max(o) = 1.0 for 3,600 saturated hues rendered directly through the real GPU shader at gain = 0.6!
+			constexpr int kGrid = 60;
+			constexpr double kEps = 1.0 / 876.0;
+			std::vector<Rgb> y1Below, y1Above, m1Below, m1Above;
+			for (int ri = 0; ri < kGrid; ++ri)
+				for (int bi = 0; bi < kGrid; ++bi)
+				{
+					const double R = 1.01 + ri * (0.08 / (kGrid - 1));
+					const double B = 0.05 + bi * (0.80 / (kGrid - 1));
+					const double Gc = (1.0 - 0.2126 * R - 0.0722 * B) / 0.7152;
+					if (Gc <= 0.05 || Gc >= 1.05) continue;
+					y1Below.push_back({ R, Gc - kEps, B });
+					y1Above.push_back({ R, Gc + kEps, B });
+					const double G2 = std::min(Gc - 0.05, 0.95);
+					if (G2 > 0.05)
+					{
+						m1Below.push_back({ 1.0 - kEps, G2, B });
+						m1Above.push_back({ 1.0 + kEps, G2, B });
+					}
+				}
+			Assert::IsTrue(y1Below.size() > 2500 && m1Below.size() > 2500, L"contour test set must be non-vacuous");
+			auto evalContourMaxJump = [&](const std::vector<Rgb>& a, const std::vector<Rgb>& b) -> double
+			{
+				const int n = static_cast<int>(a.size());
+				const int w = 128, h = ((2 * n) + w - 1) / w;
+				std::vector<float> rgba(static_cast<size_t>(w) * h * 4, 0.0f);
+				for (int i = 0; i < n; ++i)
+				{
+					for (int k = 0; k < 3; ++k)
+					{
+						rgba[static_cast<size_t>(2 * i) * 4 + k] = static_cast<float>(a[i][k]);
+						rgba[static_cast<size_t>(2 * i + 1) * 4 + k] = static_cast<float>(b[i][k]);
+					}
+					rgba[static_cast<size_t>(2 * i) * 4 + 3] = 1.0f;
+					rgba[static_cast<size_t>(2 * i + 1) * 4 + 3] = 1.0f;
+				}
+				const std::vector<float> out = renderBatch(w, h, rgba);
+				double worst = 0.0;
+				for (int i = 0; i < n; ++i)
+					for (int k = 0; k < 3; ++k)
+						worst = std::max(worst, std::abs(static_cast<double>(out[static_cast<size_t>(2 * i + 1) * 4 + k]) -
+							static_cast<double>(out[static_cast<size_t>(2 * i) * 4 + k])));
+				return worst;
+			};
+
+			// Unsmoothed legacy baseline evaluated on the EXACT SAME y = 1.0 contour pairs (negative control!).
+			auto oldUnsmoothed = [&](const Rgb& o, double g, double domain) -> Rgb
+			{
+				const bool above = o[0] > 1.0 || o[1] > 1.0 || o[2] > 1.0;
+				const bool allAbove = o[0] > 1.0 && o[1] > 1.0 && o[2] > 1.0;
+				const double y = luma(o);
+				if (!above) return { curve(o[0], g, 1.0, domain), curve(o[1], g, 1.0, domain), curve(o[2], g, 1.0, domain) };
+				if (y > 1.0 || allAbove) return o;
+				double t = 1.0;
+				for (int k = 0; k < 3; ++k)
+					if (o[k] > 1.0) t = std::min(t, (1.0 - y) / std::max(o[k] - y, 1e-6));
+				t = std::min(std::max(t, 0.0), 1.0);
+				const double f = curve(1.0, g, 1.0, domain);
+				Rgb r{};
+				for (int k = 0; k < 3; ++k)
+				{
+					const double pk = std::min(std::max(y + t * (o[k] - y), 0.0), 1.0);
+					r[k] = curve(pk, g, 1.0, domain) + (o[k] - pk) * f;
+				}
+				return r;
+			};
+
+			for (const double domain : { 0.0, 1.0 })
+			{
+				setParams(0.6, 1.0, domain);
+				const double gpuY1Jump = evalContourMaxJump(y1Below, y1Above);
+				const double gpuM1Jump = evalContourMaxJump(m1Below, m1Above);
+				double naiveY1Jump = 0.0;
+				for (size_t i = 0; i < y1Below.size(); ++i)
+				{
+					const Rgb u0 = oldUnsmoothed(y1Below[i], 0.6, domain);
+					const Rgb u1 = oldUnsmoothed(y1Above[i], 0.6, domain);
+					for (int k = 0; k < 3; ++k)
+						naiveY1Jump = std::max(naiveY1Jump, std::abs(u1[k] - u0[k]));
+				}
+				// In-test negative control: legacy unsmoothed baseline MUST violate continuity with >0.20 normalized (>175-code) cliff!
+				Assert::IsTrue(naiveY1Jump > 0.20,
+					(L"Negative control failed: unsmoothed y=1 cliff must exceed 0.20 normalized (got " + std::to_wstring(naiveY1Jump) + L")").c_str());
+				// Guarded smooth GPU shader MUST be continuous across both y=1.0 and max(o)=1.0!
+				Assert::IsTrue(gpuY1Jump <= 0.015,
+					(L"Invariant 3 failed at y=1 contour (domain=" + std::to_wstring(static_cast<int>(domain)) +
+						L"): GPU jump " + std::to_wstring(gpuY1Jump) + L" > 0.015 (unsmoothed cliff=" + std::to_wstring(naiveY1Jump) + L")").c_str());
+				Assert::IsTrue(gpuM1Jump <= 0.005,
+					(L"Invariant 3 failed at max(o)=1 contour (domain=" + std::to_wstring(static_cast<int>(domain)) +
+						L"): GPU jump " + std::to_wstring(gpuM1Jump) + L" > 0.005").c_str());
+			}
+			Logger::WriteMessage((L"GEM-LED-UP-SMOOTH 42875-colour lattice: inRange=" + std::to_wstring(worstInRange) +
+				L", wtwBtb=" + std::to_wstring(worstWtwBtb) + L", gain1Jump=" + std::to_wstring(worstGainJump) +
+				L", worstHue=" + std::to_wstring(worstHue) + L" deg\n").c_str());
+			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(log);
 		}
 	};
