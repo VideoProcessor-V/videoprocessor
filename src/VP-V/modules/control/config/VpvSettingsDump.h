@@ -271,6 +271,7 @@ inline void VpvDumpRendererSettings(const RendererSettings& s, std::ostream& o)
 	Put(o, "cadenceClassFixes", s.cadenceClassFixes);
 	Put(o, "motionHistoryFixes", s.motionHistoryFixes);
 	Put(o, "vectorDemand", s.vectorDemand);
+	Put(o, "engineOffForced", s.engineOffForced);
 	Put(o, "queueTimingFixes", s.queueTimingFixes);
 	Put(o, "generalRateFixes", s.generalRateFixes);
 	Put(o, "efficiencyFixes", s.efficiencyFixes);

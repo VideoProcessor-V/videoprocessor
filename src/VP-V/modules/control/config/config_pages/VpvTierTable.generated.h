@@ -64,6 +64,8 @@ namespace Vpv
             t.defaults.push_back({ "fbo_float32", "auto" });
             t.defaults.push_back({ "ambient_adapt", "off" });
             t.defaults.push_back({ "occlusion_mask", "off" });
+            t.defaults.push_back({ "optical_flow_on_demand", "auto" });
+            t.defaults.push_back({ "source_resolution_frame_bound", "on" });
             t.slotList.push_back({ "input.capture", "Capture", "input", "built", 10, "capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: the render upload (<error>)" });
             t.slotList.push_back({ "input.signal", "Signal", "input", "built", 20, "Dolby Vision GPU unpack: CPU unpack for the session: <error> | DV metadata: <held | static>" });
             t.slotList.push_back({ "input.queue_timing", "Queue + timing", "input", "built", 30, "look-ahead: <n> of 4 queued frames (delay budget <ms>); delay budget: <why the total is not exact>" });
@@ -165,6 +167,7 @@ namespace Vpv
                 u.toggles.push_back({ "render_ahead", "De-judder: render ahead (under test)", { "off", "on" }, "output.presentation" });
                 u.toggles.push_back({ "interpolation_fallback", "Where motion is not trusted: hold or blend", { "hold", "blend" }, "motion.consumers" });
                 u.toggles.push_back({ "intent_motion", "Ease the de-judder per shot (only ever lower)", { "on", "off" }, "motion.consumers" });
+                u.toggles.push_back({ "optical_flow_on_demand", "Optical flow on demand (when look-ahead misses)", { "auto", "on", "off" }, "motion.estimation" });
                 u.planned.push_back({ "motion_ahead_ms", "Motion look-ahead in milliseconds (time-based)", "motion.estimation" });
                 t.units.push_back(u);
             }
@@ -172,19 +175,19 @@ namespace Vpv
                 Unit u;
                 u.id = "repair"; u.name = "Repair"; u.summary = "Cleans streaming damage at the picture's real size: encoding repair (planned), deband, breathing and texture restore.";
                 u.untieredReason = nullptr;
-                u.more = "libplacebo's own debander (Deband strength): VP Renderer > Rendering > Processing.";
+                u.more = "libplacebo's own debander (Deband strength): VP Renderer > Scaling / Quality.";
                 u.slotIds.push_back("repair.encoding");
                 u.slotIds.push_back("repair.deband");
                 u.slotIds.push_back("repair.texture_restore");
                 {
-                    Preset p; p.tier = "Classic"; p.description = "No VP repair: libplacebo's own deband only, no breathing reduction, no texture restore."; p.cost = "none";
+                    Preset p; p.tier = "Classic"; p.description = "No VP repair: libplacebo's own deband only, no breathing reduction, no texture restore. Shipped default."; p.cost = "none";
                     p.set.push_back({ "deband_vp", "off" });
                     p.set.push_back({ "detail_pulse_stabilise", "off" });
                     p.set.push_back({ "texture_restore", "off" });
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Low"; p.description = "libplacebo deband only: today's defaults (detail pulse stabilise and texture restore are temporal-detail precursors, off in every tier unless chosen explicitly)."; p.cost = "low";
+                    Preset p; p.tier = "Low"; p.description = "libplacebo deband only (currently matches Classic until Low differs; detail pulse stabilise and texture restore stay off unless chosen explicitly)."; p.cost = "low";
                     p.set.push_back({ "deband_vp", "off" });
                     p.set.push_back({ "detail_pulse_stabilise", "off" });
                     p.set.push_back({ "texture_restore", "off" });
@@ -197,13 +200,7 @@ namespace Vpv
                     p.set.push_back({ "texture_restore", "off" });
                     u.presets.push_back(p);
                 }
-                {
-                    Preset p; p.tier = "Upper"; p.description = "As Mid (same Repair keys): detail pulse stabilise and texture restore stay off in every tier (explicit choice only)."; p.cost = "high";
-                    p.set.push_back({ "deband_vp", "on" });
-                    p.set.push_back({ "detail_pulse_stabilise", "off" });
-                    p.set.push_back({ "texture_restore", "off" });
-                    u.presets.push_back(p);
-                }
+                u.plannedTiers.push_back({ "Upper", "temporal detail restore is not built yet" });
                 u.toggles.push_back({ "deband_vp_grain_guard", "VP deband leaves grain alone", { "on", "veto", "off" }, "repair.deband" });
                 u.toggles.push_back({ "deband_vp_exclusive", "VP deband replaces libplacebo's", { "on", "off" }, "repair.deband" });
                 u.toggles.push_back({ "detail_pulse_fast", "Detail pulse: fast path", { "on", "off" }, "repair.texture_restore" });
@@ -216,7 +213,7 @@ namespace Vpv
                 Unit u;
                 u.id = "scaling"; u.name = "Scaling"; u.summary = "Undoes the player's upscale (re-base), brings the picture to 4K and scales it to the projector.";
                 u.untieredReason = nullptr;
-                u.more = "The upscaler, downscaler and chroma filters (libplacebo): VP Renderer > Scaling.";
+                u.more = "The upscaler, downscaler and chroma filters (libplacebo): VP Renderer > Scaling / Quality.";
                 u.slotIds.push_back("scaling.rebase");
                 u.slotIds.push_back("scaling.route_4k");
                 u.slotIds.push_back("scaling.refine");
@@ -253,6 +250,7 @@ namespace Vpv
                 u.toggles.push_back({ "ssim_residual_stabilise", "Steady the downscaler's added detail along motion", { "on", "off" }, "scaling.output" });
                 u.toggles.push_back({ "cnn_residual_stabilise", "Steady the upscaler's added detail along motion", { "on", "off" }, "scaling.output" });
                 u.toggles.push_back({ "adaptive_upscale", "Grain-aware upscale for small sources", { "on", "off" }, "scaling.output" });
+                u.toggles.push_back({ "source_resolution_frame_bound", "Re-base: decide on a fixed frame delay", { "on", "off" }, "input.source_analysis" });
                 u.planned.push_back({ "entrance_route_4k", "4K route (fixed 1-D steps to 4K)", "scaling.route_4k" });
                 u.planned.push_back({ "refine_net", "4K refine net", "scaling.refine" });
                 u.planned.push_back({ "hybrid_refine_d", "Extra detail-recovery step under the hybrid scaler", "scaling.output" });
@@ -262,7 +260,7 @@ namespace Vpv
                 Unit u;
                 u.id = "colour"; u.name = "Colour"; u.summary = "libplacebo tone and gamut mapping, below-black/above-white kept, SDR tone shape, Stage 13 appearance (planned).";
                 u.untieredReason = "libplacebo does the colour in every tier; the cheaper combined HDR->SDR LUT for Classic/Low is not yet implemented.";
-                u.more = "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Rendering and Color / Output. The calibration LUT file: Color / Output.";
+                u.more = "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Tone Mapping and Color / Output. The calibration LUT file: Color / Output.";
                 u.slotIds.push_back("colour.tone_gamut");
                 u.slotIds.push_back("colour.extended_range");
                 u.slotIds.push_back("colour.sdr_tone_shape");
@@ -295,7 +293,7 @@ namespace Vpv
                 Unit u;
                 u.id = "output"; u.name = "Output"; u.summary = "The calibration LUT, the dither for the 8-bit link and the presentation.";
                 u.untieredReason = nullptr;
-                u.more = "Display bit depth and libplacebo's dithering: VP Renderer > Rendering > Processing. Where the calibration LUT runs: the Pipeline (expert) tab.";
+                u.more = "Display bit depth: VP Renderer > Color / Output. libplacebo's dithering: VP Renderer > Scaling / Quality. Where the calibration LUT runs: the Pipeline (expert) tab.";
                 u.slotIds.push_back("output.calibration_lut");
                 u.slotIds.push_back("output.dither");
                 u.slotIds.push_back("output.presentation");

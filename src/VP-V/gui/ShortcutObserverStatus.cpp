@@ -54,28 +54,29 @@ namespace
 			const unsigned short virtualKey = static_cast<unsigned short>(keyEvent->vkCode);
 			if (virtualKey == g_hook.plan.key)
 			{
-				if (message == WM_KEYUP || message == WM_SYSKEYUP)
-					g_hook.keyDown = false;
-				else if ((message == WM_KEYDOWN || message == WM_SYSKEYDOWN) && !g_hook.keyDown)
+				const bool isKeyUp = (message == WM_KEYUP || message == WM_SYSKEYUP);
+				const bool isKeyDown = (message == WM_KEYDOWN || message == WM_SYSKEYDOWN);
+				bool control = false, leftAlt = false, rightAlt = false, shift = false;
+				if (isKeyDown && !g_hook.keyDown)
 				{
-					g_hook.keyDown = true;
-					const bool control = (::GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-					const bool leftAlt = (::GetAsyncKeyState(VK_LMENU) & 0x8000) != 0;
-					const bool rightAlt = (::GetAsyncKeyState(VK_RMENU) & 0x8000) != 0;
-					const bool alt = leftAlt || rightAlt || (::GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-					const bool shift = (::GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-					if (ShortcutObserverStatus::Matches(g_hook.plan, virtualKey, control,
-						leftAlt || (alt && !rightAlt), rightAlt, shift))
-					{
-						const HWND foreground = ::GetForegroundWindow();
-						DWORD foregroundProcessId = 0;
-						if (foreground)
-							::GetWindowThreadProcessId(foreground, &foregroundProcessId);
-						const bool vpForeground = foregroundProcessId == ::GetCurrentProcessId();
-						if (ShortcutObserverStatus::Dispatches(vpForeground,
-							!vpForeground && ConfigurationEditorInFront(foreground)))
-							::PostMessageW(g_hook.target, WM_COMMAND, MAKEWPARAM(ID_COMMAND_STATE_REPORT, 0), 0);
-					}
+					control = (::GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+					const bool lAlt = (::GetAsyncKeyState(VK_LMENU) & 0x8000) != 0;
+					rightAlt = (::GetAsyncKeyState(VK_RMENU) & 0x8000) != 0;
+					const bool alt = lAlt || rightAlt || (::GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+					leftAlt = lAlt || (alt && !rightAlt);
+					shift = (::GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+				}
+				if (ShortcutObserverStatus::HandleKeyEvent(g_hook.plan, g_hook.keyDown, virtualKey,
+					isKeyDown, isKeyUp, control, leftAlt, rightAlt, shift))
+				{
+					const HWND foreground = ::GetForegroundWindow();
+					DWORD foregroundProcessId = 0;
+					if (foreground)
+						::GetWindowThreadProcessId(foreground, &foregroundProcessId);
+					const bool vpForeground = foregroundProcessId == ::GetCurrentProcessId();
+					if (ShortcutObserverStatus::Dispatches(vpForeground,
+						!vpForeground && ConfigurationEditorInFront(foreground)))
+						::PostMessageW(g_hook.target, WM_COMMAND, MAKEWPARAM(ID_COMMAND_STATE_REPORT, 0), 0);
 				}
 			}
 		}
@@ -109,14 +110,21 @@ namespace
 
 		bool Start(const ShortcutObserverStatus::Plan& plan) override
 		{
-			Stop();
+			const bool wasRunning = Running();
+			Join();
+			if (wasRunning)
+				DebugLog::Log("Default report key: background hook stopped");
 			if (!plan.wanted)
 				return false;
 			CWnd* dialog = AfxGetMainWnd();
 			const HWND target = dialog ? dialog->GetSafeHwnd() : nullptr;
 			if (!target)
 			{
-				DebugLog::Log("Default report key: background hook not started (no dialog window)");
+				if (!m_loggedUnavailable)
+				{
+					m_loggedUnavailable = true;
+					DebugLog::Log("Default report key: background hook not started (no dialog window)");
+				}
 				return false;
 			}
 			g_hook.target = target;
@@ -131,9 +139,20 @@ namespace
 			if (ready)
 				::CloseHandle(ready);
 			// VPV-FALLBACK global shortcuts: an unavailable hook is the Extension's "global shortcuts" Fallbacks entry (ShortcutObserverStatus::Note)
-			DebugLog::Log("Default report key: background hook %s (modifiers=0x%02x key=0x%02x; "
-				"[shortcuts] global_actions absent, VP-V pathway)", running ? "started" : "unavailable",
-				static_cast<unsigned>(plan.modifiers), static_cast<unsigned>(plan.key));
+			if (running)
+			{
+				m_loggedUnavailable = false;
+				DebugLog::Log("Default report key: background hook started (modifiers=0x%02x key=0x%02x; "
+					"[shortcuts] global_actions absent, VP-V pathway)",
+					static_cast<unsigned>(plan.modifiers), static_cast<unsigned>(plan.key));
+			}
+			else if (!m_loggedUnavailable)
+			{
+				m_loggedUnavailable = true;
+				DebugLog::Log("Default report key: background hook unavailable (modifiers=0x%02x key=0x%02x; "
+					"[shortcuts] global_actions absent, VP-V pathway)",
+					static_cast<unsigned>(plan.modifiers), static_cast<unsigned>(plan.key));
+			}
 			return running;
 		}
 
@@ -141,6 +160,7 @@ namespace
 		{
 			const bool wasRunning = Running();
 			Join();
+			m_loggedUnavailable = false;
 			if (wasRunning)
 				DebugLog::Log("Default report key: background hook stopped");
 		}
@@ -171,6 +191,7 @@ namespace
 
 		HANDLE m_thread = nullptr;
 		DWORD m_threadId = 0;
+		bool m_loggedUnavailable = false;
 	};
 
 	// Every tick: the configuration file the dialog reads (ConfigFile returns an unchanged file from its

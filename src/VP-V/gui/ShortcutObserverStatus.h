@@ -185,6 +185,28 @@ namespace ShortcutObserverStatus
 				(plan.modifiers & FALT) != 0, (plan.modifiers & FSHIFT) != 0, control, leftAlt, rightAlt, shift);
 	}
 
+	// GEM-041: pure state transition for the low-level keyboard hook. Only latches `keyDown = true`
+	// when Matches(...) is true, so a bare press of the key (e.g. typing 'D' without Ctrl+Alt) never
+	// latches keyDown and never blocks a subsequent Ctrl+Alt+D press. Returns true when a new matched
+	// chord press should be dispatched (auto-repeat while held returns false until key-up).
+	inline bool HandleKeyEvent(const Plan& plan, bool& keyDown, unsigned short virtualKey,
+		bool isKeyDown, bool isKeyUp, bool control, bool leftAlt, bool rightAlt, bool shift)
+	{
+		if (!plan.wanted || virtualKey != plan.key)
+			return false;
+		if (isKeyUp)
+		{
+			keyDown = false;
+			return false;
+		}
+		if (isKeyDown && !keyDown && Matches(plan, virtualKey, control, leftAlt, rightAlt, shift))
+		{
+			keyDown = true;
+			return true;
+		}
+		return false;
+	}
+
 	// A matched key: post the report command? VP's own window or fullscreen output in front: the dialog or
 	// the fullscreen host handles the key itself. VP's Config in front: the key is Config's. The key is
 	// never taken (the report command does not own its key).
@@ -231,6 +253,8 @@ namespace ShortcutObserverStatus
 	class Extension : public DialogExtension::IDialogExtension
 	{
 	public:
+		static constexpr int kRetryIntervalTicks = 5;   // GEM-041: back-off between Start() retries when wanted && !Running()
+
 		// Fills the facts; false = the configuration is not readable this tick (the plan in force stays).
 		using FactsReader = std::function<bool(Facts&)>;
 
@@ -241,6 +265,7 @@ namespace ShortcutObserverStatus
 		void OnTimer() override
 		{
 			Facts facts;
+			bool planChanged = false;
 			if (m_read && m_read(facts))
 			{
 				const Plan plan = Decide(facts);
@@ -251,6 +276,20 @@ namespace ShortcutObserverStatus
 						m_observer.Start(plan);
 					m_plan = plan;
 					m_planKnown = true;
+					m_retryTicks = 0;
+					planChanged = true;
+				}
+			}
+			// GEM-041: if the hook is wanted but failed to start (e.g. no dialog HWND yet on first tick),
+			// retry with a back-off every kRetryIntervalTicks ticks until it runs or the plan changes.
+			if (!planChanged && m_planKnown && m_plan.wanted)
+			{
+				if (m_observer.Running())
+					m_retryTicks = 0;
+				else if (++m_retryTicks >= kRetryIntervalTicks)
+				{
+					m_retryTicks = 0;
+					m_observer.Start(m_plan);
 				}
 			}
 			m_note = Note(m_plan.wanted, m_observer.Running());
@@ -264,5 +303,6 @@ namespace ShortcutObserverStatus
 		std::string& m_note;
 		Plan m_plan;
 		bool m_planKnown = false;
+		int m_retryTicks = 0;
 	};
 }

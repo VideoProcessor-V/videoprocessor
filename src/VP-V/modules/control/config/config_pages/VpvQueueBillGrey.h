@@ -19,6 +19,7 @@
 // The grey uses the "derivedSetting" property so the editor's profile reload keeps it. UI thread only; C++17.
 
 #include <VP-V/modules/control/config/config_pages/VpvDitherChoiceSet.h>
+#include <VP-V/modules/control/config/config_pages/VpvQueueRows.h>
 #include <VideoProcessor-Config/ConfigPageHost.h>
 
 #include <QSpinBox>
@@ -29,7 +30,7 @@ namespace Vpv
 {
 	namespace QueueGreyDetail
 	{
-		inline QString PointerText() { return QStringLiteral("Set on the VP-V page > Queue target and low latency"); }
+		inline QString PointerText() { return QStringLiteral("Set on the VP-V page > Input > Queue target and low latency"); }
 		inline QString OriginalOffText() { return QStringLiteral("Not used in the Original pathway (Bill's queue is in use)."); }
 		inline QString BillLookaheadName() { return QStringLiteral("config.queue.active_picture_lookahead_frames"); }
 		inline QString VpvLookaheadName() { return QStringLiteral("config.queue.active_picture_lookahead_frames.vpv"); }
@@ -73,6 +74,15 @@ namespace Vpv
 			QWidget* top = from ? from->window() : nullptr;
 			return top ? top->findChild<QWidget*>(name) : nullptr;
 		}
+
+		// Baseline queue section: prefer exact "queue" (case-insensitive), else first profile section, else "queue".
+		inline QString BaselineQueueSection(const ConfigPageHost::ConfigFormApi& api)
+		{
+			const QStringList sections = api.profileSections(QStringLiteral("queue"));
+			for (const QString& s : sections)
+				if (s.compare(QStringLiteral("queue"), Qt::CaseInsensitive) == 0) return s;
+			return sections.isEmpty() ? QStringLiteral("queue") : sections.front();
+		}
 	}
 
 	class QueueBillGrey final : public ConfigPageHost::IConfigPageProvider
@@ -110,12 +120,22 @@ namespace Vpv
 			}
 			else if (name == TargetFramesName())
 			{
-				auto* delay = qobject_cast<QSpinBox*>(FindQueueWidget(widget, TargetDelayName()));
 				const QString section = widget->property("profileSection").toString();
+				const QString baseline = BaselineQueueSection(api);
+				const bool defaultProfile = section.isEmpty() || section.compare(baseline, Qt::CaseInsensitive) == 0;
 				QString raw = section.isEmpty() ? QString()
 					: api.value(section, QStringLiteral("target_latency_ms")).trimmed();
-				if (raw.isEmpty()) raw = api.value(QStringLiteral("queue"), QStringLiteral("target_latency_ms")).trimmed();
-				GreyBills(widget, !original && (delay ? delay->value() : raw.toInt()) > 0);
+				auto ownFrames = [&]()
+				{
+					return !section.isEmpty() &&
+						(!api.value(section, QStringLiteral("target_frames")).trimmed().isEmpty() ||
+						 !api.value(section, QStringLiteral("steady_reserve_frames")).trimmed().isEmpty());
+				};
+				if (Vpv::QueueDelayShowsOff(original, sectionPrefix, defaultProfile, raw, QStringLiteral("target_latency_ms"), ownFrames))
+					raw = QStringLiteral("0");
+				else if (raw.isEmpty() && !defaultProfile)
+					raw = api.value(baseline, QStringLiteral("target_latency_ms")).trimmed();
+				GreyBills(widget, !original && raw.toInt() > 0);
 			}
 		}
 	};

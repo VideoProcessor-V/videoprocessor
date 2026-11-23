@@ -11,9 +11,13 @@
 
 // The editor's other CEW-only helpers (P9: sandbox switch, clamp/snap, GLSL //!PARAM reader, ...) ride on this
 // header, the one VP-V helper include of ConfigEditorWindow.cpp, so that file gains no include line.
+// Non-CEW translation units (VpvSection.cpp, VpvConfigTests.cpp) define VPV_RENDERING_DEFAULTS_PURE to read
+// only the inline default/key tables without pulling non-inline ConfigEditorWindow member definitions.
+#ifndef VPV_RENDERING_DEFAULTS_PURE
 #include <VP-V/modules/control/config/editor/Helpers.h>
 #include <VP-V/modules/control/config/editor/Migrations.h>   // the VP-only load-time migrations (P9 row a)
 #include <VP-V/modules/control/config/editor/ApplyEffects.h>   // the VP-only apply/save effects (P9 row d)
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -93,6 +97,7 @@ inline bool IsVpvOnlyKey(const QString& key)
         "capture_upload",
         "catmull",
         "chroma_downsampling",
+        "chroma_upscale_vp",
         "closing",
         "cnn_residual_stabilise",
         "cntr_assist",
@@ -578,9 +583,11 @@ inline bool IsVpvChoiceKey(const QString& key)
         "adaptive_motion",
         "adaptive_upscale",
         "adaptive_upscale_superres_scale",
+        "ambient_adapt",
         "cadence_class_fixes",
         "capture_path",
         "capture_upload",
+        "chroma_upscale_vp",
         "cnn_residual_stabilise",
         "cut_soft_reset",
         "deband_grain",
@@ -622,7 +629,10 @@ inline bool IsVpvChoiceKey(const QString& key)
         "extended_range_more_cases",
         "fbo_float32",
         "general_rate_fixes",
+        "intent_black",
         "intent_content",
+        "intent_display",
+        "intent_motion",
         "intent_motion_policy",
         "interpolation",
         "interpolation_fallback",
@@ -650,12 +660,14 @@ inline bool IsVpvChoiceKey(const QString& key)
         "render_ahead_queue_credit",
         "repeat_render_reuse",
         "residual_stabilise_grain_guard",
+        "sdr_contrast_recovery",
         "sdr_tone_shape",
         "source_class",
         "source_coding_fixes",
         "source_range",
         "source_resolution",
         "source_resolution_cut_fixes",
+        "source_resolution_frame_bound",
         "source_resolution_latch_fixes",
         "source_resolution_mixed_guard",
         "source_resolution_text_guard",
@@ -718,7 +730,10 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
             { "cut_soft_reset", "on" },   // C5 batch B (owner 2026-11-15 08:35 U7 Q4): default on, high bar
             // Intent remainder (2026-10-17): all experimental, default off.
             { "intent_motion", "off" }, { "intent_motion_policy", "display" }, { "ambient_adapt", "off" },
-            { "intent_black", "off" }, { "intent_display", "off" } };
+            { "intent_black", "off" }, { "intent_display", "off" },
+            // W4 profile-defaults-parity (GEM-033, defaults verified against VpvRendererFields.h / AdaptiveDownscale.h):
+            { "adaptive_motion", "off" }, { "chroma_upscale_vp", "off" }, { "fbo_float32", "auto" },
+            { "repeat_render_reuse", "off" }, { "source_resolution_frame_bound", "on" }, { "temporal_dither", "auto" } };
         for (const auto& entry : choiceDefaults)
             if (key == QLatin1String(entry.first)) { out = QString::fromLatin1(entry.second); return true; }
         // Numbers with a placeholder showing their default: empty, so

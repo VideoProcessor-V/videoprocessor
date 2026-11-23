@@ -49,6 +49,7 @@ namespace Vpv
 		QString title;
 		QString help;
 		QWidget* body = nullptr;   // ownership passes to the VP-V page
+		bool advanced = false;     // true: place on the unit's Advanced sub-page instead of Main
 	};
 	struct Host
 	{

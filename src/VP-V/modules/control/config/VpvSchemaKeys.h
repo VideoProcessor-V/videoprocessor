@@ -112,8 +112,8 @@ namespace ProfileSchemaHooks
 				if (IsChoice(value, { "native", "auto" })) return Verdict::Valid;
 				auto lines = [](const std::string& v, double hi) {
 					return !v.empty() && v.find_first_not_of("0123456789") == std::string::npos && IsNumberInRange(v, 144, hi); };
-				// A height, or WIDTHxHEIGHT (per axis: a source upscaled in one direction).
-				const size_t x = value.find('x');
+				// A height, or WIDTHxHEIGHT / WIDTHXHEIGHT (per axis: a source upscaled in one direction).
+				const size_t x = value.find_first_of("xX");
 				return V(x == std::string::npos ? lines(value, 8640) : lines(value.substr(0, x), 17280) && lines(value.substr(x + 1), 8640));
 			}
 			if (key == "source_resolution_auto_min_confidence") return V(IsNumberInRange(value, 0.0, 1.0));
@@ -308,7 +308,7 @@ namespace ProfileSchemaHooks
 			if (key == "retirement_a" || key == "retirement_b" || key == "retirement_c" || key == "retirement_d")
 				return V(IsChoice(value, { "approve", "keep" }));
 			if (key == "pipeline_order" || key == "pipeline_slots_off")
-				return V(value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_.,;> ") == std::string::npos);
+				return V(ConfigFile::NormalizeName(value).find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_.,;> ") == std::string::npos);
 			if (key == "calibration_lut_stage") return V(IsChoice(value, { "libplacebo", "vp" }));
 			if (key == "output_segments_merged") return V(IsChoice(value, { "on", "off" }));   // output segments S2/S3 (draft)
 			if (key == "hdr_inference") return V(IsChoice(value, { "vp", "original" }));   // F-8 (HdrInferenceChoice.h)
@@ -343,7 +343,7 @@ namespace ProfileSchemaHooks
 	// the same key anywhere else (accepted unchecked in a host-only pass).
 	inline void AppendLegacyDisplayRules(std::vector<ConfigSchema::KeyRule>& rules)
 	{
-		for (const char* key : { "chroma_upscaler", "deband_grain", "downscale_light" })
+		for (const char* key : { "chroma_upscaler", "deband_grain", "downscale_light", "upscale_light" })
 		{
 			const std::string name = key;
 			ConfigSchema::KeyRule rule;

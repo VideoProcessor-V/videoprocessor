@@ -36,6 +36,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <VP-V/modules/control/config/config_pages/VpvDitherChoiceSet.h>
 #include <VideoProcessor-Config/ConfigPageHost.h>
 #include <ShortcutDefaults.h>
 #include <string>
@@ -43,6 +44,19 @@
 
 namespace Vpv
 {
+	// Updates the placeholder of [shortcuts] global_actions to reflect the active pathway's default
+	// ("state_report" in VP-V, none in Original), keeping the text empty when the key is absent so
+	// an absent key is never written (GEM-037).
+	inline void RefreshGlobalActionsPlaceholder(QWidget* root, bool vpvOn)
+	{
+		if (!root) return;
+		if (auto* edit = root->findChild<QLineEdit*>(QStringLiteral("config.shortcuts.global_actions")))
+		{
+			edit->setPlaceholderText(vpvOn ?
+				QStringLiteral("Default: state_report (for example: state_report, config_editor, toggle_noui)") :
+				QStringLiteral("Default: none (Original pathway; for example: config_editor, toggle_noui)"));
+		}
+	}
 	namespace BothPathwayDetail
 	{
 		inline QVBoxLayout* Column(QWidget* body)
@@ -218,10 +232,10 @@ namespace Vpv
 				auto* globalActionsLayout = new QHBoxLayout(globalActionsRow);
 				globalActionsLayout->setContentsMargins(0, 0, 0, 0);
 				auto* globalActionsLabel = new QLabel(QStringLiteral("Global actions"));
-				// GF-P5 S13: the default shown for an absent key follows the file's pathway, as the player reads it
-				// (ShortcutDefaults.h OriginalPathwayForConfig through the kit's value lookup): none in the Original pathway.
+				// GEM-037 + GF-P5 S13: absent key stays empty so saving never writes it, while the placeholder
+				// follows the file's pathway via ShortcutDefaults.h OriginalPathwayForConfig (same rule as the player).
 				const QString absent = QStringLiteral("\x01");   // not a value a key can hold: "the key is absent"
-				const bool originalPathway = ::OriginalPathwayForConfig(
+				const bool originalOn = ::OriginalPathwayForConfig(
 					[&kit, &absent](const char* section, const char* key, std::string& out)
 					{
 						const QString v = kit.value(QString::fromLatin1(section), QString::fromLatin1(key), absent);
@@ -230,11 +244,14 @@ namespace Vpv
 						out = v.toStdString();
 						return true;
 					});
-				auto* globalActions = new QLineEdit(kit.value(QStringLiteral("shortcuts"),
-					QStringLiteral("global_actions"), originalPathway ? QString() : QStringLiteral("state_report")));
+				const QString storedActions = kit.value(QStringLiteral("shortcuts"),
+					QStringLiteral("global_actions"), QString());
+				auto* globalActions = new QLineEdit(storedActions);
 				globalActions->setObjectName(kit.controlName(QStringLiteral("shortcuts"), QStringLiteral("global_actions")));
 				globalActions->setAccessibleName(QStringLiteral("Global actions"));
-				globalActions->setPlaceholderText(QStringLiteral("none (for example: state_report, config_editor, toggle_noui)"));
+				globalActions->setPlaceholderText(!originalOn ?
+					QStringLiteral("Default: state_report (for example: state_report, config_editor, toggle_noui)") :
+					QStringLiteral("Default: none (Original pathway; for example: config_editor, toggle_noui)"));
 				globalActions->setToolTip(QStringLiteral(
 					"Comma-separated [shortcuts] actions that act while another application has focus, such as "
 					"config_editor or toggle_noui. Default: state_report (Ctrl+Alt+D, report a problem) in the VP-V pathways, none in the "

@@ -10,6 +10,7 @@
 #include "CalibrationPage.h"
 
 #include <ConfigurationRpcClient.h>
+#include <VP-V/modules/control/config/config_pages/VpvDitherChoiceSet.h>
 #include <VP-V/modules/control/config/config_pages/VpvFormLayout.h>
 #include <VideoProcessor-Config/FlowLayout.h>
 
@@ -405,6 +406,16 @@ QWidget* CalibrationPage::Build(State& st)
     auto* wizardLayout = new QVBoxLayout(wizard);
     wizardLayout->setContentsMargins(0, 0, 0, 0);
     wizardLayout->setSpacing(8);
+    // GEM-050 (owner Q5 option 1): Calibration stays usable on both pathways, with an inline note
+    // when Original pathway is on explaining that Dynamic Drive and room-light runs do nothing there.
+    auto* originalNote = helpLabel(QStringLiteral(
+        "Original pathway is on: Display calibration (3D LUTs) and HDR verify remain usable on both pathways, "
+        "while Dynamic Drive and room-light runs do nothing in the Original pathway."));
+    originalNote->setObjectName(QStringLiteral("calibration.original_note"));
+    originalNote->setStyleSheet(QStringLiteral("background: #3a2a10; color: #ffd58a; padding: 6px; border-radius: 4px;"));
+    originalNote->setVisible(Vpv::ConfigOriginalPathwayOn(
+        [k](const QString& s, const QString& key) { return k->value(s, key, QString()); }));
+    wizardLayout->addWidget(originalNote);
     auto* step = new QLabel(QStringLiteral("Ready"));
     step->setObjectName(QStringLiteral("calibration.wizard.step"));
     step->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: 600;"));

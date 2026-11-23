@@ -4,6 +4,8 @@
 #include "VpvSection.h"
 
 #include "VpvOrganisation.h"
+#define VPV_RENDERING_DEFAULTS_PURE
+#include "VpvRenderingDefaults.h"
 #include "VpvSetBy.h"
 #include "VpvTierTable.generated.h"
 
@@ -328,6 +330,7 @@ namespace Vpv
 			QWidget* root = nullptr;
 			QPointer<QListWidget> upstreamList;          // the Rendering page's profile list (the picker follows it)
 			std::vector<QPointer<QWidget>> own;          // VP-V's own controls: disabled in the Original pathway
+			std::vector<QPointer<QWidget>> vpvOnlyTabs;  // VP-V-only tab pages: disabled in Original (Both pathways tab stays unlocked)
 			QStringList missing;                         // organisation items the editor does not have (tests)
 			QStringList hidden;                          // upstream rows hidden while the VP-V pathway is on (Hide items)
 			bool vpvOn = true;                           // the pathway (locks to a tier apply only on VP-V)
@@ -457,10 +460,17 @@ namespace Vpv
 				"<b>Recommended: %1 ms</b> (4 queued frames at 23.976p, the slowest rate, on a %2 Hz display; VP plans with "
 				"the display refresh it measures, so a faster display needs less). Shorter settings still work: the "
 				"look-ahead features fall back to 3 or 2 frames.").arg(recommended, 0, 'f', 0).arg(DelayBudget::kReferenceRefreshHz, 0, 'f', 0);
-			// The default queue profile's delay (the first [queue.*] profile; a literal [queue] in old files).
-			QStringList queues = host.profileSections ? host.profileSections(Q(table.delaySection)) : QStringList();
-			if (queues.isEmpty()) queues << Q(table.delaySection);
-			const QString stored = host.value ? host.value(queues.front(), Q(table.delayKey)).trimmed() : QString();
+			// The default queue profile's delay (prefer exact [queue] if present, else the first [queue.*] profile).
+			const QString delayRoot = Q(table.delaySection);
+			QStringList queues = host.profileSections ? host.profileSections(delayRoot) : QStringList();
+			QString baselineQueue = delayRoot;
+			if (!queues.isEmpty())
+			{
+				baselineQueue = queues.front();
+				for (const QString& q : queues)
+					if (q.compare(delayRoot, Qt::CaseInsensitive) == 0) { baselineQueue = q; break; }
+			}
+			const QString stored = host.value ? host.value(baselineQueue, Q(table.delayKey)).trimmed() : QString();
 			bool ok = false;
 			const double budget = stored.toDouble(&ok);
 			if (!ok || budget <= 0.0)
@@ -476,8 +486,7 @@ namespace Vpv
 					.arg(QString::fromLatin1(DelayBudget::LevelName(p)));
 			}
 			text += QStringLiteral("</table>Assumes a 60 Hz display, 2 swapchain frames, one frame of capture transfer and "
-				"8 ms processing. Until the total-delay budget lands in the renderer, VP still treats this value as "
-				"queue time.");
+				"8 ms processing.");
 			return text;
 		}
 
@@ -548,13 +557,6 @@ namespace Vpv
 					"and 960x720) that are recognised and named in the hold note and log but never re-based. conventional: only the "
 					"sizes re-base may apply. Or a list of ids (hdv_1440x1080, dvcprohd_1280x1080, dvcprohd_960x720, 1920x1080, ...). "
 					"This changes what is named, never what is applied; unknown ids are ignored and shown as a status line." },
-				// fx/dv-frame-quiet (refs/121 decision (i)): decisions on source time, a fixed frame delay behind the picture.
-				{ "source_resolution_frame_bound", "Source resolution: decide on a fixed frame delay (on | off)", "on",
-					"Default on (VP-V path only; the Original pathway never runs the source-resolution monitor). The source "
-					"resolution reading is decided a fixed 8 frames behind the picture (about a third of a second at 24p) and "
-					"its GPU work runs after the frame is submitted, so the same clip gives the same picture every time and "
-					"the work cannot disturb the frame in flight. The switch lands on the next cut, read ahead. Off: the earlier "
-					"mode, where the decision arrives whenever the GPU finishes." },
 			};
 			for (const TextRowSpec& r : kRows)
 				if (std::string(r.key) == key) return &r;
@@ -630,15 +632,24 @@ namespace Vpv
 
 		bool EffectiveOff(const std::shared_ptr<State>& state, const Lock& lock)
 		{
-			std::string v = state->Get(lock.masterKey ? lock.masterKey : "");
-			if (v.empty()) v = lock.fallback ? lock.fallback : "";
-			if (v.empty()) v = TierTable().Default(lock.masterKey ? lock.masterKey : "");
 			const QString offValues = Q(lock.offValues);
-			if (offValues.startsWith(QLatin1Char('!')))   // "!auto": usable only at that value
-				return !SameValue(v, offValues.mid(1).trimmed().toStdString());
-			for (const QString& off : offValues.split(QLatin1Char(','), Qt::SkipEmptyParts))
-				if (SameValue(v, off.trimmed().toStdString())) return true;
-			return false;
+			auto keyIsOff = [&](const std::string& key)
+			{
+				std::string v = state->Get(key);
+				if (v.empty()) v = lock.fallback ? lock.fallback : "";
+				if (v.empty()) v = TierTable().Default(key);
+				if (offValues.startsWith(QLatin1Char('!')))   // "!auto": usable only at that value
+					return !SameValue(v, offValues.mid(1).trimmed().toStdString());
+				for (const QString& off : offValues.split(QLatin1Char(','), Qt::SkipEmptyParts))
+					if (SameValue(v, off.trimmed().toStdString())) return true;
+				return false;
+			};
+			// Pipe-separated keys ("a|b"): off only when EVERY listed master is off (usable when any one is on).
+			const QStringList masters = Q(lock.masterKey).split(QLatin1Char('|'), Qt::SkipEmptyParts);
+			if (masters.isEmpty()) return keyIsOff("");
+			for (const QString& m : masters)
+				if (!keyIsOff(m.trimmed().toStdString())) return false;
+			return true;
 		}
 
 		QList<QWidget*> KeyControls(QWidget* root, const QString& key)
@@ -893,6 +904,12 @@ namespace Vpv
 				q.profileName = PlainProfileName(state).toStdString();
 				q.profileRule = rule.toStdString();
 				q.builtInDefault = table.Default(key);
+				if (q.builtInDefault.empty())
+				{
+					QString def;
+					if (Vpv::VpvRenderingDefault(note.key, def) && !def.isEmpty())
+						q.builtInDefault = def.toStdString();
+				}
 				q.effectiveValue = state->Get(key);
 				if (const auto lock = note.lock.lock())
 					if (lock->locked)
@@ -912,7 +929,7 @@ namespace Vpv
 		// Fills one card from the organisation table: toggles of `unit` (null on the retirement tab),
 		// upstream rows and sections moved here, rows hidden, notes; then its lock.
 		void FillCard(const std::shared_ptr<State>& state, const Unit* unit, const QString& unitId, const Card& spec,
-			CardBox& card, std::set<std::string>& placedToggles)
+			CardBox& card, std::set<std::string>& placedToggles, QWidget* scope = nullptr)
 		{
 			const Table& table = TierTable();
 			auto lock = std::make_shared<LockState>();
@@ -995,6 +1012,12 @@ namespace Vpv
 				}
 				}
 			}
+			// Draft card (e.g. repeat_render_reuse): reserved, not wired in renderer, not a live control.
+			if (spec.id && std::string(spec.id) == "draft")
+			{
+				card.body->setEnabled(false);
+				card.body->setToolTip(QStringLiteral("Draft, no effect yet: reserved switch, not yet wired in the renderer."));
+			}
 			// Tier keys: their rows here are the one control of the key (no managed greying or hiding).
 			if (spec.lock.kind == LockKind::Tier) card.body->setProperty("vpvKeyHome", true);
 			if (spec.lock.kind == LockKind::None) return;
@@ -1008,12 +1031,16 @@ namespace Vpv
 				});
 			// A feature's tuning follows its switch as soon as it changes (also through its upstream control).
 			if (spec.lock.kind == LockKind::Feature)
-				for (QWidget* root : { state->host.upstreamRoot, state->root, static_cast<QWidget*>(card.frame) })   // the card is not placed yet
-					if (auto* master = root ? root->findChild<QComboBox*>(QStringLiteral("config.vprenderer.") + Q(spec.lock.masterKey)) : nullptr)
-						QObject::connect(master, qOverload<int>(&QComboBox::currentIndexChanged), card.body, [state, lock](int)
+				for (const QString& masterKey : Q(spec.lock.masterKey).split(QLatin1Char('|'), Qt::SkipEmptyParts))
+					for (QWidget* root : { state->host.upstreamRoot, state->root, scope, static_cast<QWidget*>(card.frame) })   // scope: unit page not in tabs yet
+						if (auto* master = root ? root->findChild<QComboBox*>(QStringLiteral("config.vprenderer.") + masterKey.trimmed()) : nullptr)
 						{
-							ApplyLock(state, lock);
-						});
+							QObject::connect(master, qOverload<int>(&QComboBox::currentIndexChanged), card.body, [state, lock](int)
+							{
+								ApplyLock(state, lock);
+							});
+							break;
+						}
 			state->refreshers.push_back([state, lock, unit]()
 			{
 				// Custom follows the values: on a profile (re)load both ways (ticked when they differ from the
@@ -1322,7 +1349,7 @@ namespace Vpv
 			{
 				if (unitId != Q(spec.unit)) continue;
 				CardBox card = MakeCard(ObjectName(unitId + QStringLiteral(".card.") + Q(spec.id)), Q(spec.title), Q(spec.help), spec.collapsed);
-				FillCard(state, &unit, unitId, spec, card, placed);
+				FillCard(state, &unit, unitId, spec, card, placed, page);
 				(spec.advanced ? advanced : layout)->addWidget(card.frame);
 			}
 			// A toggle the table does not place (nothing is lost) - unless it is a retirement candidate.
@@ -1351,11 +1378,12 @@ namespace Vpv
 					{ "input", "Queue page (total delay)", "Queue", nullptr },
 					{ "input", "DV page", "DV", nullptr },
 					{ "motion", "VP Renderer > Motion", "VP Renderer", "Motion" },
-					{ "repair", "VP Renderer > Rendering", "VP Renderer", "Rendering" },
-					{ "scaling", "VP Renderer > Scaling (scaler filters and sharpness)", "VP Renderer", "Scaling" },
-					{ "colour", "VP Renderer > Rendering (tone mapping)", "VP Renderer", "Rendering" },
+					{ "repair", "VP Renderer > Scaling / Quality (Debanding)", "VP Renderer", "Scaling / Quality" },
+					{ "scaling", "VP Renderer > Scaling / Quality (scaler filters and sharpness)", "VP Renderer", "Scaling / Quality" },
+					{ "colour", "VP Renderer > Tone Mapping", "VP Renderer", "Tone Mapping" },
 					{ "colour", "VP Renderer > Color / Output", "VP Renderer", "Color / Output" },
-					{ "output", "VP Renderer > Rendering (bit depth, libplacebo dither)", "VP Renderer", "Rendering" },
+					{ "output", "VP Renderer > Scaling / Quality (libplacebo dither)", "VP Renderer", "Scaling / Quality" },
+					{ "output", "VP Renderer > Color / Output (display bit depth)", "VP Renderer", "Color / Output" },
 				};
 				QStringList links;
 				for (const Link& l : kLinks)
@@ -1385,9 +1413,9 @@ namespace Vpv
 				for (const UnitCard& extra : state->host.unitCards(unitId))
 				{
 					if (!extra.body) continue;
-					CardBox card = MakeCard(ObjectName(unitId + QStringLiteral(".card.") + extra.id), extra.title, extra.help, false);
+					CardBox card = MakeCard(ObjectName(unitId + QStringLiteral(".card.") + extra.id), extra.title, extra.help, extra.advanced);
 					card.Add(extra.body);
-					layout->addWidget(card.frame);
+					(extra.advanced ? advanced : layout)->addWidget(card.frame);
 				}
 			// Pages of their own that the Config page host registered under this unit (e.g. Calibration
 			// under Output): one button each opens the page.
@@ -2719,7 +2747,6 @@ namespace Vpv
 		root->setStyleSheet(ReadableButtons());
 
 		// Pathway: VP-V (our units) or Original (upstream exactly as upstream).
-		auto* pathwayRow = new QFormLayout;
 		auto* pathway = new QComboBox;
 		pathway->setObjectName(ObjectName(QStringLiteral("pathway")));
 		pathway->setAccessibleName(QStringLiteral("Pathway"));
@@ -2738,51 +2765,38 @@ namespace Vpv
 		strip->addWidget(pathway, 1);
 		strip->addSpacing(14);
 		layout->addLayout(strip);
-		delete pathwayRow;
 
-		auto* content = new QWidget;
-		content->setObjectName(ObjectName(QStringLiteral("content")));
-		auto* contentLayout = new QVBoxLayout(content);
-		contentLayout->setContentsMargins(0, 0, 0, 0);
 		auto* originalNote = Help(QStringLiteral("<b>Original pathway: every VP-V addition is OFF.</b> The values below are "
 			"kept for when you switch back, but none of them is used now. Bill's own settings are on his pages (VP "
-			"Renderer, DirectShow, General)."));
+			"Renderer, DirectShow, General). Settings on the <b>Both pathways</b> tab and Display calibration remain usable."));
 		originalNote->setTextFormat(Qt::RichText);
 		originalNote->setStyleSheet(QStringLiteral("background: #3a2a10; color: #ffd58a; padding: 8px; border-radius: 5px;"));
 		originalNote->setObjectName(ObjectName(QStringLiteral("original_note")));
 		originalNote->setVisible(false);
 		layout->addWidget(originalNote);
-		layout->addWidget(content);
-		// VP-V settings that act on both pathways (they used to sit on Bill's pages, P8 step 2): below
-		// the unit tabs and outside `content`, so the Original pathway does not grey them.
-		if (host.bothPathwayCards)
+		QPushButton* originalOpenCal = nullptr;
+		if (host.openPage)
 		{
-			auto* both = new QWidget;
-			both->setObjectName(ObjectName(QStringLiteral("both")));
-			auto* bothLayout = new QVBoxLayout(both);
-			bothLayout->setContentsMargins(0, 12, 0, 0);
-			bothLayout->setSpacing(8);
-			auto* bothTitle = Help(QStringLiteral("<b>On both pathways</b> - these VP-V settings are not switched off by the Original pathway."));
-			bothTitle->setTextFormat(Qt::RichText);
-			bothTitle->setObjectName(ObjectName(QStringLiteral("both.title")));
-			bothLayout->addWidget(bothTitle);
-			for (QWidget* card : host.bothPathwayCards())
-				if (card) bothLayout->addWidget(card);
-			// Cards Bill's pages built for this block (VpvProfileUseRows.h).
-			if (host.unitCards)
-				for (const UnitCard& extra : host.unitCards(QStringLiteral("both")))
-				{
-					if (!extra.body) continue;
-					CardBox card = MakeCard(ObjectName(QStringLiteral("both.card.") + extra.id), extra.title, extra.help, false);
-					card.Add(extra.body);
-					bothLayout->addWidget(card.frame);
-				}
-			layout->addWidget(both);
+			// GEM-050 (owner Q5 option 1): Calibration stays reachable from VP-V even when Original pathway
+			// disables VP-V-only tabs (aligning Open Calibration with the Calibration sidebar leaf).
+			originalOpenCal = new QPushButton(QStringLiteral("Open Calibration"));
+			originalOpenCal->setObjectName(ObjectName(QStringLiteral("original.open_calibration")));
+			originalOpenCal->setMaximumWidth(220);
+			originalOpenCal->setToolTip(QStringLiteral("Display calibration (3D LUTs) works on both pathways; Dynamic Drive and room-light runs do nothing on Original."));
+			originalOpenCal->setVisible(false);
+			QObject::connect(originalOpenCal, &QPushButton::clicked, originalOpenCal, [state]() { state->host.openPage(QStringLiteral("Calibration")); });
+			layout->addWidget(originalOpenCal);
 		}
+		// Keep a named vpv.content wrapper inside Overview so VP-V-only content disables on Original while the
+		// top-level QTabWidget (vpv.units) stays enabled so the user can open the unlocked "Both pathways" tab (GEM-058).
+		auto* content = new QWidget;
+		content->setObjectName(ObjectName(QStringLiteral("content")));
+		auto* contentLayout = new QVBoxLayout(content);
+		contentLayout->setContentsMargins(0, 0, 0, 0);
+		state->vpvOnlyTabs.push_back(content);
 
 		// The renderer profile. It follows the Rendering page's profile list, whose selected profile
 		// the moved upstream rows edit (one current renderer profile on both pages).
-		auto* profileRow = new QFormLayout;
 		auto* profile = new QComboBox;
 		profile->setObjectName(ObjectName(QStringLiteral("profile")));
 		profile->setAccessibleName(QStringLiteral("Renderer profile"));
@@ -2824,20 +2838,24 @@ namespace Vpv
 		profileLabel->setToolTip(QStringLiteral("One renderer profile for both pages: choosing it here selects it in VP Renderer > Rendering, and the other way round."));
 		strip->addWidget(profileLabel);
 		strip->addWidget(profile, 1);
-		delete profileRow;
 
 		// The unit tabs; the first, Overview, holds the global tier, full precision, fallbacks, and the
 		// Proposed retirement and Pipeline (expert) pages (kept out of the unit tab row).
 		auto* tabs = new QTabWidget;
 		tabs->setObjectName(ObjectName(QStringLiteral("units")));
+		tabs->setUsesScrollButtons(true);
 		tabs->setStyleSheet(QStringLiteral("QTabWidget::pane { border: 0; background: transparent; } "
 			"QTabBar::tab { min-width: 0px; padding: 6px 10px; }"));
-		contentLayout->addWidget(tabs);   // first, so a card can find what an earlier card moved under root
+		layout->addWidget(tabs);   // directly in layout so the Both pathways tab stays clickable on Original
 		QWidget* overview = NewTabPage(QStringLiteral("Overview"));
 		overview->setObjectName(ObjectName(QStringLiteral("overview")));
-		auto* overviewLayout = new QVBoxLayout(overview);
+		auto* overviewOuter = new QVBoxLayout(overview);
+		overviewOuter->setContentsMargins(0, 0, 0, 0);
+		overviewOuter->addWidget(content);
+		auto* overviewLayout = contentLayout;
 		overviewLayout->setSpacing(8);
 		tabs->addTab(overview, QStringLiteral("Overview"));
+		state->vpvOnlyTabs.push_back(overview);
 		tabs->setTabToolTip(0, QStringLiteral("Every unit at once (the global tier), full precision, fallbacks engaged, the proposed retirements and the expert pipeline settings."));
 
 		// The global tier.
@@ -2980,8 +2998,38 @@ namespace Vpv
 
 		for (const Unit& u : table.units)
 		{
-			tabs->addTab(MakeUnitPage(state, u), Q(u.name));
+			QWidget* unitPage = MakeUnitPage(state, u);
+			state->vpvOnlyTabs.push_back(unitPage);
+			tabs->addTab(unitPage, Q(u.name));
 			tabs->setTabToolTip(tabs->count() - 1, Q(u.summary));
+		}
+		// GEM-058 (owner Q7): "On both pathways" cards get their own unlocked tab instead of repeating
+		// beneath every unit tab. Not added to state->vpvOnlyTabs so it remains enabled on Original.
+		if (host.bothPathwayCards)
+		{
+			QWidget* both = NewTabPage(QStringLiteral("Both pathways"));
+			both->setObjectName(ObjectName(QStringLiteral("both")));
+			auto* bothLayout = new QVBoxLayout(both);
+			bothLayout->setContentsMargins(4, 8, 4, 4);
+			bothLayout->setSpacing(8);
+			auto* bothTitle = Help(QStringLiteral("<b>On both pathways</b> - these VP-V settings are not switched off by the Original pathway."));
+			bothTitle->setTextFormat(Qt::RichText);
+			bothTitle->setObjectName(ObjectName(QStringLiteral("both.title")));
+			bothLayout->addWidget(bothTitle);
+			for (QWidget* card : host.bothPathwayCards())
+				if (card) bothLayout->addWidget(card);
+			// Cards Bill's pages built for this block (VpvProfileUseRows.h).
+			if (host.unitCards)
+				for (const UnitCard& extra : host.unitCards(QStringLiteral("both")))
+				{
+					if (!extra.body) continue;
+					CardBox card = MakeCard(ObjectName(QStringLiteral("both.card.") + extra.id), extra.title, extra.help, false);
+					card.Add(extra.body);
+					bothLayout->addWidget(card.frame);
+				}
+			bothLayout->addStretch();
+			tabs->addTab(both, QStringLiteral("Both pathways"));
+			tabs->setTabToolTip(tabs->count() - 1, QStringLiteral("VP-V settings that act on both pathways (usable on Original too)."));
 		}
 		{
 			auto* more = new QTabWidget;
@@ -3081,13 +3129,24 @@ namespace Vpv
 			// pages and none of them is on this page (organisation pass 2).
 			for (const QPointer<QWidget>& w : state->own)
 				if (w) w->setEnabled(vpvOn);
-			if (QWidget* content = state->root->findChild<QWidget*>(ObjectName(QStringLiteral("content")))) content->setEnabled(vpvOn);
+			for (const QPointer<QWidget>& tab : state->vpvOnlyTabs)
+				if (tab) tab->setEnabled(vpvOn);
 			if (QWidget* note = state->root->findChild<QWidget*>(ObjectName(QStringLiteral("original_note")))) note->setVisible(!vpvOn);
+			if (QWidget* openCal = state->root->findChild<QWidget*>(ObjectName(QStringLiteral("original.open_calibration")))) openCal->setVisible(!vpvOn);
+			// GEM-037: refresh [shortcuts] global_actions placeholder on pathway toggle without writing absent keys.
+			if (auto* globalActions = state->root->findChild<QLineEdit*>(QStringLiteral("config.shortcuts.global_actions")))
+			{
+				globalActions->setPlaceholderText(vpvOn ?
+					QStringLiteral("Default: state_report (for example: state_report, config_editor, toggle_noui)") :
+					QStringLiteral("Default: none (Original pathway; for example: config_editor, toggle_noui)"));
+			}
 			// Dynamic Drive is a VP addition: off (and its page disabled) in the Original pathway.
+			// Calibration stays usable on both pathways with an inline note on Original (GEM-050, owner Q5).
 			if (QWidget* root = state->host.upstreamRoot)
 			{
 				if (QWidget* drive = root->findChild<QWidget*>(ObjectName(QStringLiteral("drivepage.pages")))) drive->setEnabled(vpvOn);
 				if (QWidget* note = root->findChild<QWidget*>(ObjectName(QStringLiteral("drivepage.original_note")))) note->setVisible(!vpvOn);
+				if (QWidget* calNote = root->findChild<QWidget*>(QStringLiteral("calibration.original_note"))) calNote->setVisible(!vpvOn);
 			}
 			ApplyManagedState(state->host, vpvOn);
 			ApplyManagedIn(state->host, state->root, vpvOn);   // the managed rows moved onto this page

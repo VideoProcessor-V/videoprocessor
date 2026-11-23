@@ -185,6 +185,7 @@ repeat or resync all of them fall back together.*
 | `optical_flow_global`, `optical_flow_global_fallback` | Camera pan/tilt is read from the engine's vectors; the search is used when the engine is unclear. | It saves about 0.4 ms. | on / on | saves time |
 | `optical_flow_cost_trust` | The engine's own match cost lowers trust. | An idea that made no measurable difference. | off | none |
 | `optical_flow_fb_check` | The engine's forward and backward vectors must agree. | About 6% less damage for 1-2% less judder removed. | off | low |
+| `optical_flow_on_demand` | When the look-ahead producer misses a pair, run an on-demand optical-flow request (`auto`, `on`, `off`). | Keeps optical-flow vectors available on rare misses without adding latency on steady playback. | auto | low (miss only) |
 
 **Measured internals: leave them alone.** `dejudder_match_tolerance`, `dejudder_frame_trust`,
 `dejudder_global_prior`, `dejudder_global_two`, `dejudder_est_gate`, `dejudder_vector_smooth`,
@@ -288,6 +289,7 @@ projector with the hybrid SSIM scaler.*
 | `rebase_kernel_match` | Identifies the player's upscale filter and undoes it exactly, rather than with a generic downscale. | +8 to +15 dB closer to the decoded picture on real Apple TV output. | off |
 | `source_resolution_auto_min_confidence`, `_evidence_seconds`, `_evidence_shots` | How sure Auto must be (score, seconds, separate shots) before it re-bases. | One soft shot of real 4K must never decide alone. | 0.8 / 10 s / 3 |
 | `source_resolution_engage_max_wait_s`, `_crossfade_s`, `_release_fade_s` | When Auto is sure, it switches at the next cut or dark moment, else crossfades; the return to native is quick. | The change must never be visible. | 20 s / 1.5 s / 0.25 s |
+| `source_resolution_frame_bound` | Decides source resolution at a fixed 8-frame source-time delay (`on` / `off`), with GPU work after frame submit. | Makes re-base decisions deterministic per clip and keeps analysis work off the in-flight frame. | on |
 | `source_resolution_text_guard` | Ignores the player's own sharp 4K subtitles when judging. | Text would block or fake the detection. | on |
 | `source_resolution_mixed_guard` | Never re-bases a mixed screen (a menu with a small video, picture-in-picture). | The re-base is one size for the whole picture. | on |
 | `source_resolution_latch_fixes`, `_cut_fixes`, `active_picture_startup_hold` | Latch and cut-judge fixes, and holding the start-up picture until it is cropped. | Under test, default on. | on |

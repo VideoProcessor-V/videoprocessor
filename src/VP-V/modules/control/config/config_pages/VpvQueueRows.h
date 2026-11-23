@@ -201,8 +201,8 @@ namespace Vpv
 			// Rows so far: low-latency path, Target delay, its note; the choice goes above Target delay.
 			queueForm->insertRow(queueForm->rowCount() - 2, QStringLiteral("Queue target"), modeButtons);
 			auto* lookAheadNote = help(QStringLiteral(
-				"With the optical-flow look-ahead on (de-judder profiles), the queue holds at least 5 frames either way "
-				"(4 ahead); the low-latency queue is exempt."));
+				"With the optical-flow look-ahead on (de-judder profiles), look-ahead follows the queue depth (up to 4 "
+				"frames ahead); the low-latency queue uses 0."));
 			lookAheadNote->setObjectName(QStringLiteral("config.queue.target_lookahead_note"));
 			queueForm->addRow(QString(), lookAheadNote);
 			// addInteger puts the spin box in a row widget with its unit: that row widget is the form's field.
@@ -269,9 +269,9 @@ namespace Vpv
 		if (billsRoot)
 			FollowLookahead(lookahead, billsRoot->findChild<QSpinBox*>(QStringLiteral("config.queue.active_picture_lookahead_frames")));
 		form = bills;
-		cards.push_back({ QStringLiteral("both"), QStringLiteral("queue_target"), QStringLiteral("Queue target and low latency"),
+		cards.push_back({ QStringLiteral("input"), QStringLiteral("queue_target"), QStringLiteral("Queue target and low latency"),
 			QStringLiteral("VP-V's queue settings: the low-latency path, the target as a delay, and the automatic look-ahead. "
-				"Bill's queue values (depth, lead, pre-roll, Target frames, look-ahead, reset) are on the Queue page."), body });
+				"Bill's queue values (depth, lead, pre-roll, Target frames, look-ahead, reset) are on the Queue page."), body, false });
 	}
 
 	// ---- Loader and preset hooks (createProfilePage) ----

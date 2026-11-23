@@ -80,12 +80,12 @@ namespace Vpv
 			{ "input", "signal", "Signal and content", "What kind of signal it is, and labels the profile rules can use.", false, false, {
 				{ K::Toggle, "source_range" }, { K::Toggle, "intent_content" } } },
 			{ "input", "plumbing", "Capture plumbing (expert)", "When each captured frame is copied to the GPU. Normal viewing never needs it.", true, false, {
-				{ K::Toggle, "capture_upload" }, { K::Text, "source_resolution_frame_bound" } } },
+				{ K::Toggle, "capture_upload" } } },
 			{ "input", "content_tuning", "Content labels: tuning", "How long a label (film, video, sports) is held before it may change.", true, false, {
 				{ K::Row, "intent_content_hold_seconds" } },
 				{ L::Feature, "Content labels", "intent_content", nullptr, "off", "off" } },
 			{ "input", "diagnostics", "Readouts (diagnostics)", "Shown in the stats overlay; they change nothing in the picture.", true, true, {
-				{ K::Row, "intent_black" }, { K::Row, "intent_display" }, { K::Row, "dv_compare_capture_folder" } } },
+				{ K::Row, "intent_display" }, { K::Row, "dv_compare_capture_folder" } } },
 
 			// ---- Motion ----
 			{ "motion", "engine", "Motion engine",
@@ -119,7 +119,7 @@ namespace Vpv
 				{ L::Slider, "the de-judder amount", "motion_preset_name", "motion_preset_reset" } },
 			{ "motion", "shaping", "De-judder shaping (yours; the slider does not set these)",
 				"Fade matching, pulldown handling and the motion-vector options: independent of the amount.", true, false, {
-				{ K::Section, "dejudder" } } },
+				{ K::Section, "dejudder" }, { K::Toggle, "optical_flow_on_demand" } } },
 			{ "motion", "render_ahead_tuning", "Render ahead: tuning", "How render ahead budgets its early frames. Used only while render ahead is on.", true, false, {
 				{ K::Row, "dejudder_gate" }, { K::Row, "render_ahead_utilisation" }, { K::Row, "render_ahead_queue_credit" } },
 				{ L::Feature, "Render ahead", "render_ahead", nullptr, "off", "off" } },
@@ -135,7 +135,7 @@ namespace Vpv
 			{ "repair", "deband", "Deband",
 				"VP's debander: removes banding from compressed sources and leaves film grain alone.", false, false, {
 				{ K::Toggle, "deband_vp_grain_guard" }, { K::Toggle, "deband_vp_exclusive" }, { K::Toggle, "low_bitrate_handling" },
-				{ K::Note, "libplacebo's own debander (Deband strength) is Bill's: VP Renderer > Rendering > Processing. "
+				{ K::Note, "libplacebo's own debander (Deband strength) is Bill's: VP Renderer > Scaling / Quality. "
 					"With VP's debander on it is replaced (the switch above)." } },
 				{ L::Feature, "VP's debander (the Repair tier, Mid or above)", "deband_vp", nullptr, "off", "off" } },
 			{ "repair", "tier_keys", "Set by the Repair tier", "The repair stages the Repair tier switches on: VP's debander, the detail-pulse steadier and texture restore.", true, false, {
@@ -150,7 +150,8 @@ namespace Vpv
 				"At a confirmed cut detail pulse and texture restore start over; on a fade they shrink their history. With the soft "
 				"reset on, a near-cut the judge is very sure of (a high bar) shrinks it too; below the bar nothing happens. Used only "
 				"while detail pulse or texture restore is on.", true, false, {
-				{ K::Toggle, "cut_soft_reset" } } },
+				{ K::Toggle, "cut_soft_reset" } },
+				{ L::Feature, "detail pulse or texture restore", "detail_pulse_stabilise|texture_restore", nullptr, "off", "off" } },
 
 			// ---- Scaling ----
 			{ "scaling", "rebase", "Re-base (your picture slider)",
@@ -164,7 +165,7 @@ namespace Vpv
 				{ L::Feature, "the grain-aware downscale (the Scaling tier, Mid)", "adaptive_downscale", nullptr, "off", "off" } },
 			{ "scaling", "upscale", "Grain-aware upscale", "For sources smaller than the projector.", false, false, {
 				{ K::Toggle, "adaptive_upscale" },
-				{ K::Note, "The scaler filters themselves (upscaler, downscaler, chroma) are Bill's: VP Renderer > Scaling." } } },
+				{ K::Note, "The scaler filters themselves (upscaler, downscaler, chroma) are Bill's: VP Renderer > Scaling / Quality." } } },
 			{ "scaling", "tier_keys", "Set by the Scaling tier", "What the Scaling tier switches on: re-base (working from the real source size) and the grain-aware downscale.", true, false, {
 				{ K::Row, "source_resolution" }, { K::Row, "adaptive_downscale" }, { K::Row, "adaptive_w_base" } },
 				{ L::Tier, "the Scaling tier" } },
@@ -174,14 +175,14 @@ namespace Vpv
 				{ L::Slider, "the picture slider", "picture_preset_name", "picture_preset_reset" } },
 			{ "scaling", "rebase_timing", "Re-base timing", "How quickly re-base engages and fades.", true, false, {
 				{ K::Row, "source_resolution_engage_max_wait_s" }, { K::Row, "source_resolution_crossfade_s" },
-				{ K::Row, "source_resolution_release_fade_s" } },
+				{ K::Row, "source_resolution_release_fade_s" }, { K::Toggle, "source_resolution_frame_bound" } },
 				{ L::Feature, "re-base (the Scaling tier, Low or above)", "source_resolution", nullptr, "!auto", "auto" } },
 			{ "scaling", "steadiness", "Scaler steadiness (expert)",
 				"Keeps the SSIM and CNN scalers' added detail steady along motion. Normal viewing never needs these.", true, false, {
 				{ K::Toggle, "ssim_residual_stabilise" }, { K::Toggle, "cnn_residual_stabilise" } } },
 			{ "scaling", "internals", "Grain-aware scaler thresholds (measured, leave alone)",
 				"Measured thresholds and weights. Normal viewing never needs these.", true, true, {
-				{ K::Section, "adaptiveDownscale" }, { K::Section, "adaptiveUpscale" } } },
+				{ K::Section, "adaptiveDownscale" }, { K::Section, "adaptiveUpscale" }, { K::Hide, "upscale_light" } } },
 
 			// ---- Colour ----
 			{ "colour", "dv", "Dolby Vision", "How Dolby Vision pictures are mapped to your display.", false, false, {
@@ -195,7 +196,7 @@ namespace Vpv
 				"Adjusts black and contrast to the room light the sensor measures.", false, false, {
 				{ K::Toggle, "ambient_adapt" } } },
 			{ "colour", "upstream", "Tone mapping and display (Bill's pages)", "Where the colour settings that are not VP-V's live.", false, false, {
-				{ K::Note, "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Rendering (Tone mapping cards) and "
+				{ K::Note, "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Tone Mapping and "
 					"VP Renderer > Color / Output. The calibration LUT file: Color / Output; where it runs: the Pipeline (expert) tab." },
 				{ K::Note, "Colour space, HDR luminance and video conversion of the INPUT are set once on General > Input "
 					"processing. The VP Renderer and DirectShow pages can override them for one renderer; they say "
@@ -214,14 +215,16 @@ namespace Vpv
 					"(your script, VP's compensate, or none): each card appears only when that source uses it. The "
 					"Advanced LED card has two more masters: \"Advanced LED values\" (your script's values, or Custom) "
 					"and \"LED fixes under test\" (all on, or Custom); their settings are greyed until Custom." } } },
+			{ "drive", "black_protection", "Black protection", "Protects near-black detail (report or LED shadow cap).", true, false, {
+				{ K::Row, "intent_black" } } },
 
 			// ---- Output ----
 			{ "output", "dither", "Temporal dither", "The Output tier above is the dither choice: Classic = libplacebo's, Low = as shipped, Mid = always VP's motion-aware dither. This switch refines VP's.", false, false, {
 				{ K::Toggle, "occlusion_mask" } },
 				{ L::Feature, "VP's sigma-delta dither (the Output tier)", "temporal_dither", nullptr, "off,libplacebo", "auto" } },
 			{ "output", "presentation", "Presentation and delay", "Where the final output depth and the total delay are set.", false, false, {
-				{ K::Note, "Display bit depth and libplacebo's dithering (used when VP's is off) are Bill's: VP Renderer > "
-					"Rendering > Processing. The total delay: Input tab (Total delay) and the Queue page." } } },
+				{ K::Note, "libplacebo's dithering (used when VP's is off) is on VP Renderer > Scaling / Quality; "
+					"display bit depth is on VP Renderer > Color / Output. The total delay: Input tab (Total delay) and the Queue page." } } },
 			{ "output", "tier_keys", "Set by the Output tier", "The dither the Output tier chooses: libplacebo's, or VP's motion-aware dither.", true, false, {
 				{ K::Row, "temporal_dither" } },
 				{ L::Tier, "the Output tier" } },
@@ -229,6 +232,8 @@ namespace Vpv
 				{ K::Row, "dither_grain_tolerance_scale" },
 				{ K::Note, "It also follows the grain map (Scaling > Grain-aware downscale)." } },
 				{ L::Feature, "VP's sigma-delta dither (the Output tier)", "temporal_dither", nullptr, "off,libplacebo", "auto" } },
+			{ "output", "draft", "Draft (no effect yet)", "Reserved draft switch; not yet wired in the renderer.", true, true, {
+				{ K::Row, "repeat_render_reuse" } } },
 
 			// ---- Proposed retirement: the candidates' controls (they still work until approved) ----
 			{ "retirement", "fixes", "Proven fixes (all on by default)",
@@ -252,7 +257,7 @@ namespace Vpv
 	inline const std::vector<const char*>& UpstreamRenderingSections()
 	{
 		static const std::vector<const char*> ids = {
-			"toneMapping", "toneSpline", "toneOther", "tonePeak", "toneHighlightBeta", "processing" };
+			"toneMapping", "toneCurves", "tonePeak" };
 		return ids;
 	}
 

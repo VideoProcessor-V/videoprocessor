@@ -261,8 +261,8 @@ namespace VpvRendererSettings
 			if (ParseInteger(raw, -100, 100, parsedSaturation))
 				settings.saturation = parsedSaturation;
 			else
-				DebugLog::Log("profile '%s': invalid saturation '%s'; using 0",
-					rule.section.c_str(), raw.c_str());
+				DebugLog::Log("profile '%s': invalid saturation '%s'; keeping %d",
+					rule.section.c_str(), raw.c_str(), settings.saturation);
 		}
 		if (tryChoice("dejudder_even_rates", raw))
 		{
@@ -1391,6 +1391,8 @@ namespace VpvRendererSettings
 		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
 		changed(current.hdrInference != next.hdrInference, "hdr_inference");
 		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
+		changed(current.frameAnalysisStore != next.frameAnalysisStore, "frame_analysis_store");
+		changed(current.resyncEvent != next.resyncEvent, "resync_event");
 		changed(current.outputSegmentsMerged != next.outputSegmentsMerged, "output_segments_merged");
 		changed(current.entranceGpuDrain != next.entranceGpuDrain, "entrance_gpu_drain");
 		changed(current.ditherNeed != next.ditherNeed, "dither_need");

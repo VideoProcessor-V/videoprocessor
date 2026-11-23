@@ -196,9 +196,9 @@ namespace Vpv
 		QWidget* billsRoot = bills ? bills->parentWidget() : nullptr;
 		while (billsRoot && billsRoot->parentWidget()) billsRoot = billsRoot->parentWidget();
 		const QString scalingNote = QStringLiteral(
-			"These rows edit the Scaling profile selected on VP Renderer > Scaling.");
+			"These rows edit the Scaling profile selected on VP Renderer > Scaling / Quality.");
 
-		// ---- Scaling unit: chroma ----
+		// ---- Scaling unit: chroma and scaling light ----
 		{
 			auto* body = new QWidget;
 			form = NewForm(body);
@@ -214,27 +214,25 @@ namespace Vpv
 				"main scaling. Auto = Catmull-Rom: on real footage it looked identical to the polar EWA Lanczos "
 				"filter at about a seventh of its GPU time. 'Same as the "
 				"upscaler' is the previous behaviour (EWA Lanczos sharp with High quality, the costliest). "
-				"The same key as Bill's Chroma upscaler (VP Renderer > Scaling), which offers his five filters."));
+				"The same key as Bill's Chroma upscaler (VP Renderer > Scaling / Quality), which offers his five filters."));
 			markGpuCost(form, chromaUpscaler, 2);
 			RenameVpv(chromaUpscaler);
-			auto* chromaUpscaleVp = addChoice(QStringLiteral("VP chroma upscale (candidate)"),
-				QStringLiteral("chroma_upscale_vp"), { QStringLiteral("off"), QStringLiteral("cfl") });
-			chromaUpscaleVp->setToolTip(QStringLiteral(
-				"CfL predicts colour detail from the grain-free luma inside the active picture; chroma grain is "
-				"kept exactly as the normal upscaler passes it. Off = libplacebo's chroma upscaler (above). "
-				"Candidate: not yet active in the renderer."));
-			markGpuCost(form, chromaUpscaleVp, 1);
 			auto* downscaleLight = addChoice(QStringLiteral("Downscale light"),
 				QStringLiteral("downscale_light"), { QStringLiteral("linear"), QStringLiteral("gamma") });
 			downscaleLight->setToolTip(QStringLiteral(
 				"Light domain for frames that are downscaled. Linear is libplacebo's "
-				"default; gamma matches madVR's SSIM look. Upscaled frames always use linear light."));
+				"default; gamma matches madVR's SSIM look."));
+			auto* upscaleLight = addChoice(QStringLiteral("Upscale light"),
+				QStringLiteral("upscale_light"), { QStringLiteral("linear"), QStringLiteral("gamma") });
+			upscaleLight->setToolTip(QStringLiteral(
+				"Light domain for frames that are upscaled. Linear is libplacebo's "
+				"default; gamma reduces dark-edge haloing on sharp sources."));
 			auto* note = new QLabel(scalingNote);
 			note->setWordWrap(true);
 			form->addRow(note);
 			// VP-V's text about Bill's Debanding (his control on his page keeps his own text).
 			auto* deband = new QLabel(QStringLiteral(
-				"Bill's Debanding (VP Renderer > Scaling) is libplacebo's debander (smooths steps in skies and shadows); Auto "
+				"Bill's Debanding (VP Renderer > Scaling / Quality) is libplacebo's debander (smooths steps in skies and shadows); Auto "
 				"lets libplacebo decide. While VP's own grain-safe debander runs ('VP deband' Auto or On, with 'VP deband "
 				"replaces libplacebo's'), libplacebo's automatic deband is switched off because it thins fine grain; an "
 				"explicit Standard or Light is kept."));
@@ -243,8 +241,28 @@ namespace Vpv
 			form->addRow(deband);
 			if (billsRoot)
 				Follow(chromaUpscaler, billsRoot->findChild<QComboBox*>(QStringLiteral("config.vprenderer.scaling.chroma_upscaler")), false);
-			cards.push_back({ QStringLiteral("scaling"), QStringLiteral("chroma"), QStringLiteral("Chroma and downscale light"),
-				QStringLiteral("VP-V's chroma choices. Original pathway: Bill's Chroma upscaler on VP Renderer > Scaling."), body });
+			cards.push_back({ QStringLiteral("scaling"), QStringLiteral("chroma"), QStringLiteral("Chroma and scaling light"),
+				QStringLiteral("VP-V's chroma and scaling light choices. Original pathway: Bill's Chroma upscaler on VP Renderer > Scaling / Quality."), body, false });
+		}
+
+		// ---- Scaling unit (Advanced): planned VP chroma upscale ----
+		{
+			auto* body = new QWidget;
+			form = NewForm(body);
+			auto* chromaUpscaleVp = addChoice(QStringLiteral("VP chroma upscale (planned)"),
+				QStringLiteral("chroma_upscale_vp"), { QStringLiteral("off"), QStringLiteral("cfl") });
+			chromaUpscaleVp->setToolTip(QStringLiteral(
+				"CfL predicts colour detail from the grain-free luma inside the active picture; chroma grain is "
+				"kept exactly as the normal upscaler passes it. Off = libplacebo's chroma upscaler (above). "
+				"Planned: not yet active in the renderer."));
+			markGpuCost(form, chromaUpscaleVp, 1);
+			chromaUpscaleVp->setEnabled(false);
+			body->setEnabled(false);
+			auto* plannedNote = new QLabel(QStringLiteral("Planned: not yet active in the renderer."));
+			plannedNote->setWordWrap(true);
+			form->addRow(plannedNote);
+			cards.push_back({ QStringLiteral("scaling"), QStringLiteral("chroma_planned"), QStringLiteral("VP chroma upscale (planned)"),
+				QStringLiteral("Reserved for VP-V's chroma upscaler; disabled until wired in the renderer."), body, true });
 		}
 
 		// ---- Output unit: dither ----
@@ -268,7 +286,7 @@ namespace Vpv
 			if (billsRoot)
 				Follow(dithering, billsRoot->findChild<QComboBox*>(QStringLiteral("config.vprenderer.scaling.dithering")), true);
 			cards.push_back({ QStringLiteral("output"), QStringLiteral("dither_choice"), QStringLiteral("Dithering (VP-V list)"),
-				QStringLiteral("VP-V's dithering modes. Original pathway: Bill's Dithering on VP Renderer > Scaling."), body });
+				QStringLiteral("VP-V's dithering modes. Original pathway: Bill's Dithering on VP Renderer > Scaling / Quality."), body, false });
 		}
 		form = bills;
 	}

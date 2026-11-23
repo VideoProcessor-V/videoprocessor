@@ -112,6 +112,7 @@ QWidget* LedDriveBuilder::createLedDrivePage()
     // configurations name only `mode`; the source shown is read from it, and
     // choosing a source writes command_source (and the matching mode).
     QComboBox* ledSource = nullptr;
+    QWidget* sourceButtons = nullptr;
     QCheckBox* ledAdaptive = nullptr;
     QLabel* compensateWarning = nullptr;
     QWidget* aheadRow = nullptr;
@@ -144,7 +145,7 @@ QWidget* LedDriveBuilder::createLedDrivePage()
         {
             // Owner 2026-10-16: the source as mutually exclusive buttons; the drop-down stays as the
             // value holder (hidden), so writing and older files behave as before.
-            auto* sourceButtons = new QWidget;
+            sourceButtons = new QWidget;
             sourceButtons->setObjectName(controlName(led, QStringLiteral("command_source.buttons")));
             auto* sourceLayout = new QHBoxLayout(sourceButtons);
             sourceLayout->setContentsMargins(0, 0, 0, 0);
@@ -1122,12 +1123,19 @@ QWidget* LedDriveBuilder::createLedDrivePage()
             if (chosen != QStringLiteral("none") && protocolChoice->currentData().toString() == QStringLiteral("none"))
                 protocolChoice->setCurrentIndex(protocolChoice->findData(QStringLiteral("barco_ascii")));
         };
-        auto onOff = [enabled, source, adaptive, connectionBox, responseBox, profileBox, assistBox,
-            speedsBox, advancedBox, experimentBox, aheadRow, pacingRows]()
+        // GEM-050: disabling Dynamic Drive greys all visible drive controls (source radios, floors,
+        // compensate rows, projector gamma, idle restore) while keeping gamma_boost + toe enabled
+        // (led_compensation/README.md: gamma_boost applies even when Dynamic Drive is off).
+        auto onOff = [enabled, source, sourceButtons, adaptive, connectionBox, responseBox, profileBox, assistBox,
+            speedsBox, advancedBox, experimentBox, aheadRow, pacingRows, floorRows, compensateRows,
+            projectorGamma, idleRestore]()
         {
             const bool on = enabled->isChecked();
             for (QWidget* row : pacingRows) row->setEnabled(on);
-            for (QWidget* w : { static_cast<QWidget*>(source), static_cast<QWidget*>(adaptive), aheadRow,
+            for (QWidget* row : floorRows) row->setEnabled(on);
+            for (QWidget* row : compensateRows) row->setEnabled(on);
+            for (QWidget* w : { static_cast<QWidget*>(source), sourceButtons, static_cast<QWidget*>(adaptive),
+                aheadRow, static_cast<QWidget*>(projectorGamma), static_cast<QWidget*>(idleRestore),
                 connectionBox, responseBox, profileBox, assistBox, speedsBox, advancedBox, experimentBox })
                 if (w) w->setEnabled(on);
         };
