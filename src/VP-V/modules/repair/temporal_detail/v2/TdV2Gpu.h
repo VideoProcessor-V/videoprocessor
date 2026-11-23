@@ -109,6 +109,8 @@ namespace Gpu
 		TdV2Plane outB;
 		TdV2Plane deliveredDeltaCb;
 		TdV2Plane deliveredDeltaCr;
+		size_t nonFinitePixels = 0;
+		size_t borderBilinearPixels = 0;
 		int dispatchCount = 0;
 		bool succeeded = false;
 		std::string lastError;
@@ -196,6 +198,32 @@ namespace Gpu
 			for (size_t i = 0; i < buf.size(); ++i)
 				outPlane.v[i] = static_cast<double>(buf[i]);
 			return true;
+		}
+
+		inline bool DownloadDeltaRG32F(pl_gpu gpu, pl_tex tex, int w, int h, TdV2Plane& outDelta, bool& outAnyBoundEngaged)
+		{
+			outAnyBoundEngaged = false;
+			if (w <= 0 || h <= 0)
+				return false;
+			const size_t pxCount = static_cast<size_t>(w) * static_cast<size_t>(h);
+			std::vector<float> buf(pxCount * 2u, 0.0f);
+			if (!DownloadFloats(gpu, tex, buf.data()))
+				return false;
+			outDelta = TdV2Plane(w, h, 0.0);
+			for (size_t i = 0; i < pxCount; ++i)
+			{
+				outDelta.v[i] = static_cast<double>(buf[i * 2u + 0u]);
+				if (buf[i * 2u + 1u] > 0.5f)
+					outAnyBoundEngaged = true;
+			}
+			return true;
+		}
+
+		inline size_t NonNegRoundToSize(float v)
+		{
+			if (!std::isfinite(v) || v <= 0.0f)
+				return 0u;
+			return static_cast<size_t>((std::max)(0LL, std::llround(static_cast<double>(v))));
 		}
 
 		inline int GroupsFor(int dim, int groupSize)
@@ -317,8 +345,8 @@ namespace Gpu
 			};
 
 			pushReq(uw, uh, VpSkeleton::TexFormat::RGBA32F, 5);      // curBands, refBands[0..2], bandTmpH
-			pushReq(uw, uh, VpSkeleton::TexFormat::RG32F, 3);        // warpedRef[0..2]
-			pushReq(uw, uh, VpSkeleton::TexFormat::R32F, 2);         // deltaScratch, candOutScratch
+			pushReq(uw, uh, VpSkeleton::TexFormat::RG32F, 4);        // warpedRef[0..2], deltaScratch
+			pushReq(uw, uh, VpSkeleton::TexFormat::R32F, 1);         // candOutScratch
 			pushReq(3u * cw, ch, VpSkeleton::TexFormat::RGBA32F, 3); // motionGate, cellWeights, cellDiagC
 			pushReq(cw, ch, VpSkeleton::TexFormat::RG32F, 1);        // cellFocus
 			return reqs;
@@ -344,12 +372,12 @@ namespace Gpu
 			total += 1u * px * bR32;
 			// Scratch set (matching ArenaRequests)
 			total += 5u * px * bRGBA32;
-			total += 3u * px * bRG32;
-			total += 2u * px * bR32;
+			total += 4u * px * bRG32;
+			total += 1u * px * bR32;
 			total += 3u * (3u * cells) * bRGBA32;
 			total += 1u * cells * bRG32;
-			// IO & readback textures (7 full-res R32F + motion/prior/tdMaps/diag/guard/warpDiag cell grids)
-			total += 7u * px * bR32;
+			// IO & readback textures (6 full-res R32F + 1 full-res RG32F outDelta + cell grids)
+			total += 6u * px * bR32 + 1u * px * bRG32;
 			total += (3u * cells) * (bRGBA32 + bRG32);
 			total += (3u * cells) * bRGBA32; // tdMaps (cw x 3*ch RGBA32F)
 			total += cells * bRGBA32;        // diagFlags
@@ -502,86 +530,24 @@ namespace Gpu
 			}
 			res.outputClean = curClean;
 
+			auto resetCarryIfActive = [&]()
+			{
+				const bool hadCarry = hasCarry_;
+				ResetCarry(gpu);
+				res.carryReset = res.carryReset || hadCarry;
+			};
+
 			const pl_fmt fmtR32 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::R32F);
 			const pl_fmt fmtRG32 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG32F);
 			const pl_fmt fmtRGBA32 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RGBA32F);
 			if (!fmtR32 || !fmtRG32 || !fmtRGBA32)
+			{
+				resetCarryIfActive();
 				return failVisible("TdV2GpuEngine required FP32 texture formats unsupported on pl_gpu", StandInKind::GpuDispatchFailed);
-
-			// Acquire per-frame scratch textures via RAII ArenaScopeGuard (or private fallback ONLY when arena == nullptr).
-			Detail::ArenaScopeGuard scopeGuard(arena, kArenaScope);
-			ScratchSet sc{};
-			if (arena != nullptr)
-			{
-				// Never hold redundant private scratch when running on a shared ScratchArena.
-				DestroyPrivateScratch(gpu);
-
-				const uint32_t uw = static_cast<uint32_t>(w);
-				const uint32_t uh = static_cast<uint32_t>(h);
-				const uint32_t ucw = static_cast<uint32_t>(res.cellsW);
-				const uint32_t uch = static_cast<uint32_t>(res.cellsH);
-
-				const VpSkeleton::TexShape shFullRGBA{ uw, uh, VpSkeleton::TexFormat::RGBA32F };
-				const VpSkeleton::TexShape shFullRG{ uw, uh, VpSkeleton::TexFormat::RG32F };
-				const VpSkeleton::TexShape shFullR{ uw, uh, VpSkeleton::TexFormat::R32F };
-				const VpSkeleton::TexShape shCell3RGBA{ 3u * ucw, uch, VpSkeleton::TexFormat::RGBA32F };
-				const VpSkeleton::TexShape shCellRG{ ucw, uch, VpSkeleton::TexFormat::RG32F };
-
-				bool ok = scopeGuard.opened;
-				if (ok)
-				{
-					sc.curBands = arena->Acquire(kArenaOwner, shFullRGBA);
-					for (int i = 0; i < kMaxGpuRefs; ++i)
-						sc.refBands[i] = arena->Acquire(kArenaOwner, shFullRGBA);
-					sc.bandTmpH = arena->Acquire(kArenaOwner, shFullRGBA);
-					for (int i = 0; i < kMaxGpuRefs; ++i)
-						sc.warped[i] = arena->Acquire(kArenaOwner, shFullRG);
-					sc.deltaScratch = arena->Acquire(kArenaOwner, shFullR);
-					sc.candOutScratch = arena->Acquire(kArenaOwner, shFullR);
-					sc.motionGate = arena->Acquire(kArenaOwner, shCell3RGBA);
-					sc.cellWeights = arena->Acquire(kArenaOwner, shCell3RGBA);
-					sc.cellDiagC = arena->Acquire(kArenaOwner, shCell3RGBA);
-					sc.cellFocus = arena->Acquire(kArenaOwner, shCellRG);
-					ok = sc.AllNonNull();
-				}
-				if (!ok)
-				{
-					const bool hadCarry = hasCarry_;
-					ResetCarry(gpu);
-					res.carryReset = hadCarry;
-					scratchShort_ = true;
-					res.scratchShort = true;
-					return failVisible("GPU scratch arena shortage (frame skipped visibly)", StandInKind::GpuScratchShortage);
-				}
-			}
-			else
-			{
-				if (!EnsurePrivateScratch(gpu, w, h, res.cellsW, res.cellsH, fmtR32, fmtRG32, fmtRGBA32, sc))
-					return failVisible("TdV2GpuEngine private scratch texture allocation failed", StandInKind::GpuDispatchFailed);
 			}
 
-			// Ensure persistent carryCleanTex_ and IO/output staging textures.
-			if (!Detail::EnsureTex(gpu, carryCleanTex_, w, h, fmtR32, true, true, true, false) ||
-			    !Detail::EnsureTex(gpu, inRecYTex_, w, h, fmtR32, true, false, true, false) ||
-			    !Detail::EnsureTex(gpu, inCleanYTex_, w, h, fmtR32, true, false, true, false) ||
-			    !Detail::EnsureTex(gpu, inOwnGrainTex_, w, h, fmtR32, true, false, true, false) ||
-			    !Detail::EnsureTex(gpu, inRefCleanTex_, w, h, fmtR32, true, false, true, false) ||
-			    !Detail::EnsureTex(gpu, inMotionVecTex_, 3 * res.cellsW, res.cellsH, fmtRGBA32, true, false, true, false) ||
-			    !Detail::EnsureTex(gpu, inMotionMetaTex_, 3 * res.cellsW, res.cellsH, fmtRG32, true, false, true, false) ||
-			    !Detail::EnsureTex(gpu, inCellPriorTex_, res.cellsW, res.cellsH, fmtRG32, true, false, true, false) ||
-			    !Detail::EnsureTex(gpu, outYTex_, w, h, fmtR32, true, true, false, true) ||
-			    !Detail::EnsureTex(gpu, outCleanTex_, w, h, fmtR32, true, true, false, true) ||
-			    !Detail::EnsureTex(gpu, outDeltaTex_, w, h, fmtR32, true, true, false, true) ||
-			    !Detail::EnsureTex(gpu, outTdMapsTex_, res.cellsW, 3 * res.cellsH, fmtRGBA32, true, true, false, true) ||
-			    !Detail::EnsureTex(gpu, outDiagFlagsTex_, res.cellsW, res.cellsH, fmtRGBA32, true, true, false, true) ||
-			    !Detail::EnsureTex(gpu, outGuardCellTex_, res.cellsW, res.cellsH, fmtRG32, true, true, false, true) ||
-			    !Detail::EnsureTex(gpu, outWarpDiagTex_, res.cellsW, res.cellsH, fmtRG32, true, true, false, true))
-			{
-				ResetCarry(gpu);
-				return failVisible("TdV2GpuEngine IO/output texture allocation failed", StandInKind::GpuDispatchFailed);
-			}
-
-			// Assemble active references (up to 3: prevPeak, nextPeak, persistent GPU carryCleanTex_).
+			// Assemble active references BEFORE acquiring ScratchArena or full IO textures so seed/cut frames
+			// (refSpecs.empty(), 0 dispatches) never needlessly allocate scratch or trip GpuScratchShortage (M3).
 			struct ActiveRefSpec
 			{
 				const TdV2Plane* cpuClean = nullptr; // null when using persistent GPU carryCleanTex_
@@ -646,12 +612,13 @@ namespace Gpu
 
 			res.activeRefCount = refSpecs.size();
 
-			// First frame / cut frame with no references: seed persistent GPU carryCleanTex_ directly.
+			// First frame / cut frame with no references: seed ONLY carryCleanTex_ directly (0 dispatches, 0 scratch).
 			if (refSpecs.empty())
 			{
-				if (!Detail::UploadPlaneR32F(gpu, carryCleanTex_, curClean))
+				if (!Detail::EnsureTex(gpu, carryCleanTex_, w, h, fmtR32, true, true, true, false) ||
+				    !Detail::UploadPlaneR32F(gpu, carryCleanTex_, curClean))
 				{
-					ResetCarry(gpu);
+					resetCarryIfActive();
 					return failVisible("TdV2GpuEngine carry seed upload failed", StandInKind::GpuDispatchFailed);
 				}
 				hasCarry_ = true;
@@ -661,12 +628,86 @@ namespace Gpu
 				return res;
 			}
 
+			// Acquire per-frame scratch textures via RAII ArenaScopeGuard (or private fallback ONLY when arena == nullptr).
+			Detail::ArenaScopeGuard scopeGuard(arena, kArenaScope);
+			ScratchSet sc{};
+			if (arena != nullptr)
+			{
+				// Never hold redundant private scratch when running on a shared ScratchArena.
+				DestroyPrivateScratch(gpu);
+
+				const uint32_t uw = static_cast<uint32_t>(w);
+				const uint32_t uh = static_cast<uint32_t>(h);
+				const uint32_t ucw = static_cast<uint32_t>(res.cellsW);
+				const uint32_t uch = static_cast<uint32_t>(res.cellsH);
+
+				const VpSkeleton::TexShape shFullRGBA{ uw, uh, VpSkeleton::TexFormat::RGBA32F };
+				const VpSkeleton::TexShape shFullRG{ uw, uh, VpSkeleton::TexFormat::RG32F };
+				const VpSkeleton::TexShape shFullR{ uw, uh, VpSkeleton::TexFormat::R32F };
+				const VpSkeleton::TexShape shCell3RGBA{ 3u * ucw, uch, VpSkeleton::TexFormat::RGBA32F };
+				const VpSkeleton::TexShape shCellRG{ ucw, uch, VpSkeleton::TexFormat::RG32F };
+
+				bool ok = scopeGuard.opened;
+				if (ok)
+				{
+					sc.curBands = arena->Acquire(kArenaOwner, shFullRGBA);
+					for (int i = 0; i < kMaxGpuRefs; ++i)
+						sc.refBands[i] = arena->Acquire(kArenaOwner, shFullRGBA);
+					sc.bandTmpH = arena->Acquire(kArenaOwner, shFullRGBA);
+					for (int i = 0; i < kMaxGpuRefs; ++i)
+						sc.warped[i] = arena->Acquire(kArenaOwner, shFullRG);
+					sc.deltaScratch = arena->Acquire(kArenaOwner, shFullRG);
+					sc.candOutScratch = arena->Acquire(kArenaOwner, shFullR);
+					sc.motionGate = arena->Acquire(kArenaOwner, shCell3RGBA);
+					sc.cellWeights = arena->Acquire(kArenaOwner, shCell3RGBA);
+					sc.cellDiagC = arena->Acquire(kArenaOwner, shCell3RGBA);
+					sc.cellFocus = arena->Acquire(kArenaOwner, shCellRG);
+					ok = sc.AllNonNull();
+				}
+				if (!ok)
+				{
+					resetCarryIfActive();
+					scratchShort_ = true;
+					res.scratchShort = true;
+					return failVisible("GPU scratch arena shortage (frame skipped visibly)", StandInKind::GpuScratchShortage);
+				}
+			}
+			else
+			{
+				if (!EnsurePrivateScratch(gpu, w, h, res.cellsW, res.cellsH, fmtR32, fmtRG32, fmtRGBA32, sc))
+				{
+					resetCarryIfActive();
+					return failVisible("TdV2GpuEngine private scratch texture allocation failed", StandInKind::GpuDispatchFailed);
+				}
+			}
+
+			// Ensure persistent carryCleanTex_ and IO/output staging textures.
+			if (!Detail::EnsureTex(gpu, carryCleanTex_, w, h, fmtR32, true, true, true, false) ||
+			    !Detail::EnsureTex(gpu, inRecYTex_, w, h, fmtR32, true, false, true, false) ||
+			    !Detail::EnsureTex(gpu, inCleanYTex_, w, h, fmtR32, true, false, true, false) ||
+			    !Detail::EnsureTex(gpu, inOwnGrainTex_, w, h, fmtR32, true, false, true, false) ||
+			    !Detail::EnsureTex(gpu, inRefCleanTex_, w, h, fmtR32, true, false, true, false) ||
+			    !Detail::EnsureTex(gpu, inMotionVecTex_, 3 * res.cellsW, res.cellsH, fmtRGBA32, true, false, true, false) ||
+			    !Detail::EnsureTex(gpu, inMotionMetaTex_, 3 * res.cellsW, res.cellsH, fmtRG32, true, false, true, false) ||
+			    !Detail::EnsureTex(gpu, inCellPriorTex_, res.cellsW, res.cellsH, fmtRG32, true, false, true, false) ||
+			    !Detail::EnsureTex(gpu, outYTex_, w, h, fmtR32, true, true, false, true) ||
+			    !Detail::EnsureTex(gpu, outCleanTex_, w, h, fmtR32, true, true, false, true) ||
+			    !Detail::EnsureTex(gpu, outDeltaTex_, w, h, fmtRG32, true, true, false, true) ||
+			    !Detail::EnsureTex(gpu, outTdMapsTex_, res.cellsW, 3 * res.cellsH, fmtRGBA32, true, true, false, true) ||
+			    !Detail::EnsureTex(gpu, outDiagFlagsTex_, res.cellsW, res.cellsH, fmtRGBA32, true, true, false, true) ||
+			    !Detail::EnsureTex(gpu, outGuardCellTex_, res.cellsW, res.cellsH, fmtRG32, true, true, false, true) ||
+			    !Detail::EnsureTex(gpu, outWarpDiagTex_, res.cellsW, res.cellsH, fmtRG32, true, true, false, true))
+			{
+				resetCarryIfActive();
+				return failVisible("TdV2GpuEngine IO/output texture allocation failed", StandInKind::GpuDispatchFailed);
+			}
+
 			// Upload current frame inputs (receivedY, curClean, ownGrain).
 			if (!Detail::UploadPlaneR32F(gpu, inRecYTex_, in.receivedY) ||
 			    !Detail::UploadPlaneR32F(gpu, inCleanYTex_, curClean) ||
 			    !Detail::UploadPlaneR32F(gpu, inOwnGrainTex_, ownGrain))
 			{
-				ResetCarry(gpu);
+				resetCarryIfActive();
 				return failVisible("TdV2GpuEngine current frame upload failed", StandInKind::GpuDispatchFailed);
 			}
 
@@ -695,7 +736,7 @@ namespace Gpu
 			if (!Detail::UploadFloats(gpu, inMotionVecTex_, motVecBuf.data()) ||
 			    !Detail::UploadFloats(gpu, inMotionMetaTex_, motMetaBuf.data()))
 			{
-				ResetCarry(gpu);
+				resetCarryIfActive();
 				return failVisible("TdV2GpuEngine motion upload failed", StandInKind::GpuDispatchFailed);
 			}
 
@@ -728,11 +769,11 @@ namespace Gpu
 			}
 			if (!Detail::UploadFloats(gpu, inCellPriorTex_, cellPriorBuf.data()))
 			{
-				ResetCarry(gpu);
+				resetCarryIfActive();
 				return failVisible("TdV2GpuEngine cell prior upload failed", StandInKind::GpuDispatchFailed);
 			}
 
-			// Derived physics & coding step prior (exact CPU Rule-1 derivations passed to GLSL via #define).
+			// Derived physics & coding step prior (per-frame continuous values passed via VpvGpu::Var UBOs, never #define).
 			double effStepDelta = in.estimatedStepDelta;
 			double effZeroFrac = in.zeroCoeffFraction;
 			if (!in.hasStepPrior || !std::isfinite(effStepDelta) || effStepDelta <= 0.0 || !std::isfinite(effZeroFrac))
@@ -742,6 +783,7 @@ namespace Gpu
 				if (standIns != nullptr)
 					standIns->Engage(StandInKind::StepPriorDefault);
 			}
+			const bool validPhi = std::isfinite(in.deadZonePhi) && in.deadZonePhi >= 0.0 && in.deadZonePhi < 1.0;
 			const RoundingCellStats a2Stats = ComputeRoundingCellStats(effStepDelta, in.deadZonePhi, effZeroFrac);
 			const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
 			const double depthScale = DepthScale(cfg_.sourceBits);
@@ -752,15 +794,27 @@ namespace Gpu
 			const double fDefocus = AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase);
 			const double fShiftDelta = fSharp - fDefocus;
 
+			// Per-frame UBO scalar backing storage (stable addresses across compute dispatches).
+			const float uStepNoiseVar = static_cast<float>(stepNoiseVar);
+			const float uStructureFloor = static_cast<float>(structureFloor);
+			const float uA2Valid = a2Stats.valid ? 1.0f : 0.0f;
+			const float uA2SigmaSent = a2Stats.valid ? static_cast<float>(a2Stats.sigmaSentSq) : 0.0f;
+			const float uA2SigmaZero = a2Stats.valid ? static_cast<float>(a2Stats.sigmaZeroSq) : 0.0f;
+			const float uA2TotalVar = a2Stats.valid ? static_cast<float>(a2Stats.totalVar) : 0.0f;
+			const float uStepDelta = static_cast<float>(effStepDelta);
+			const float uDeadZonePhi = validPhi ? static_cast<float>(in.deadZonePhi) : -1.0f;
+			const float uPeakCode = static_cast<float>(PeakCodeForBits(cfg_.sourceBits));
+
 			const std::string geomDefs = Detail::CommonGeomDefines(w, h, res.cellsW, res.cellsH, cellPx, active);
 			const std::string bandTapsHdr = Shaders::BuildBandTapsHeader();
 
 			int dispatches = 0;
 			auto runPass = [&](const char* desc, const std::string& hdr, const char* body,
 			                   const pl_shader_desc* descs, int nDescs,
+			                   const pl_shader_var* vars, int nVars,
 			                   int gx, int gy, int gw = 16, int gh = 16, size_t shmem = 0) -> bool
 			{
-				if (!VpvGpu::Pass(dispatch, desc, hdr, body, descs, nDescs, nullptr, 0, gx, gy, shmem, gw, gh))
+				if (!VpvGpu::Pass(dispatch, desc, hdr, body, descs, nDescs, vars, nVars, gx, gy, shmem, gw, gh))
 					return false;
 				++dispatches;
 				return true;
@@ -775,6 +829,9 @@ namespace Gpu
 			{
 				std::string hdr = geomDefs;
 				hdr += VpvGpu::DefineInt("TD_K", K);
+				hdr += VpvGpu::DefineInt("TD_CLS_OBJECT", static_cast<int>(RegionMotionClass::Object));
+				hdr += VpvGpu::DefineInt("TD_CLS_OVERLAY", static_cast<int>(RegionMotionClass::Overlay));
+				hdr += VpvGpu::DefineInt("TD_CLS_DYN_TEX", static_cast<int>(RegionMotionClass::DynamicTexture));
 				hdr += VpvGpu::Define("TD_STILL_SPEED", kStillObjectSpeedPx);
 				hdr += VpvGpu::Define("TD_FAST_CUTOFF", kFastObjectCutoffPx);
 				hdr += Shaders::kCoreHelpers;
@@ -784,10 +841,10 @@ namespace Gpu
 					VpvGpu::Sampled("motion_meta", inMotionMetaTex_),
 					VpvGpu::Storage("motion_gate", sc.motionGate)
 				};
-				if (!runPass("td_v2_p1_motion_gate", hdr, Shaders::kPass1MotionGate, d, 3,
+				if (!runPass("td_v2_p1_motion_gate", hdr, Shaders::kPass1MotionGate, d, 3, nullptr, 0,
 				             Detail::GroupsFor(K * res.cellsW, 16), Detail::GroupsFor(res.cellsH, 16), 16, 16))
 				{
-					ResetCarry(gpu);
+					resetCarryIfActive();
 					return failVisible("td_v2_p1_motion_gate dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 			}
@@ -802,19 +859,19 @@ namespace Gpu
 					VpvGpu::Sampled("src_tex", srcTex),
 					VpvGpu::Storage("band_tmp_h", sc.bandTmpH)
 				};
-				if (!runPass("td_v2_p1_band_h", hdr, Shaders::kPass1BandH, dh, 2, fullGx, fullGy))
+				if (!runPass("td_v2_p1_band_h", hdr, Shaders::kPass1BandH, dh, 2, nullptr, 0, fullGx, fullGy))
 					return false;
 				pl_shader_desc dv[2] = {
 					VpvGpu::Sampled("band_tmp_h", sc.bandTmpH),
 					VpvGpu::Storage("bands_out", dstBands)
 				};
-				return runPass("td_v2_p1_band_v", hdr, Shaders::kPass1BandV, dv, 2, fullGx, fullGy);
+				return runPass("td_v2_p1_band_v", hdr, Shaders::kPass1BandV, dv, 2, nullptr, 0, fullGx, fullGy);
 			};
 
 			// Decompose current frame grain-free clean into curBands (L, M, H, D3).
 			if (!runBandDecomp(inCleanYTex_, sc.curBands))
 			{
-				ResetCarry(gpu);
+				resetCarryIfActive();
 				return failVisible("td_v2_p1_band current clean dispatch failed", StandInKind::GpuDispatchFailed);
 			}
 
@@ -827,7 +884,7 @@ namespace Gpu
 				{
 					if (!Detail::UploadPlaneR32F(gpu, inRefCleanTex_, *rSpec.cpuClean))
 					{
-						ResetCarry(gpu);
+						resetCarryIfActive();
 						return failVisible("TdV2GpuEngine ref clean upload failed", StandInKind::GpuDispatchFailed);
 					}
 					refSrcTex = inRefCleanTex_;
@@ -843,15 +900,15 @@ namespace Gpu
 					VpvGpu::Sampled("motion_vec", inMotionVecTex_),
 					VpvGpu::Storage("warped_out", sc.warped[k])
 				};
-				if (!runPass("td_v2_p1_warp", wHdr, Shaders::kPass1WarpAndGate, dw, 4, fullGx, fullGy))
+				if (!runPass("td_v2_p1_warp", wHdr, Shaders::kPass1WarpAndGate, dw, 4, nullptr, 0, fullGx, fullGy))
 				{
-					ResetCarry(gpu);
+					resetCarryIfActive();
 					return failVisible("td_v2_p1_warp dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 
 				if (!runBandDecomp(sc.warped[k], sc.refBands[k]))
 				{
-					ResetCarry(gpu);
+					resetCarryIfActive();
 					return failVisible("td_v2_p1_band ref dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 			}
@@ -864,8 +921,6 @@ namespace Gpu
 				fHdr += VpvGpu::DefineInt("TD_K", K);
 				fHdr += VpvGpu::Define("TD_GAIN_MID", gains.mid);
 				fHdr += VpvGpu::Define("TD_GAIN_D3", gains.d3);
-				fHdr += VpvGpu::Define("TD_STEP_NOISE_VAR", stepNoiseVar);
-				fHdr += VpvGpu::Define("TD_STRUCTURE_FLOOR", structureFloor);
 				fHdr += VpvGpu::Define("TD_F_SHARP", fSharp);
 				fHdr += VpvGpu::Define("TD_F_DEFOCUS", fDefocus);
 				fHdr += VpvGpu::Define("TD_F_SHIFT_DELTA", fShiftDelta);
@@ -882,9 +937,13 @@ namespace Gpu
 					VpvGpu::Storage("cell_focus", sc.cellFocus),
 					VpvGpu::Storage("warp_diag", outWarpDiagTex_)
 				};
-				if (!runPass("td_v2_p2_focus", fHdr, Shaders::kPass2Focus, df, 10, cellGx, cellGy, 8, 8))
+				pl_shader_var fv[2] = {
+					VpvGpu::Var("u_step_noise_var", &uStepNoiseVar),
+					VpvGpu::Var("u_structure_floor", &uStructureFloor)
+				};
+				if (!runPass("td_v2_p2_focus", fHdr, Shaders::kPass2Focus, df, 10, fv, 2, cellGx, cellGy, 8, 8))
 				{
-					ResetCarry(gpu);
+					resetCarryIfActive();
 					return failVisible("td_v2_p2_focus dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 			}
@@ -900,10 +959,6 @@ namespace Gpu
 				sHdr += VpvGpu::DefineInt("TD_EXACT_COPY_0", (K > 0 && refSpecs[0].isExactCopy) ? 1 : 0);
 				sHdr += VpvGpu::DefineInt("TD_EXACT_COPY_1", (K > 1 && refSpecs[1].isExactCopy) ? 1 : 0);
 				sHdr += VpvGpu::DefineInt("TD_EXACT_COPY_2", (K > 2 && refSpecs[2].isExactCopy) ? 1 : 0);
-				sHdr += VpvGpu::DefineInt("TD_A2_VALID", a2Stats.valid ? 1 : 0);
-				sHdr += VpvGpu::Define("TD_A2_SIGMA_SENT", a2Stats.valid ? a2Stats.sigmaSentSq : 0.0);
-				sHdr += VpvGpu::Define("TD_A2_SIGMA_ZERO", a2Stats.valid ? a2Stats.sigmaZeroSq : 0.0);
-				sHdr += VpvGpu::Define("TD_A2_TOTAL_VAR", a2Stats.valid ? a2Stats.totalVar : 0.0);
 				sHdr += VpvGpu::Define("TD_GAIN_LOW", gains.low);
 				sHdr += VpvGpu::Define("TD_GAIN_MID", gains.mid);
 				sHdr += VpvGpu::Define("TD_GAIN_FINE", gains.fine);
@@ -926,9 +981,15 @@ namespace Gpu
 					VpvGpu::Storage("td_maps", outTdMapsTex_),
 					VpvGpu::Storage("cell_diag_flags", outDiagFlagsTex_)
 				};
-				if (!runPass("td_v2_p2_moments_solve", sHdr, Shaders::kPass2MomentsAndSolve, ds, 14, cellGx, cellGy, 8, 8))
+				pl_shader_var sv[4] = {
+					VpvGpu::Var("u_a2_valid", &uA2Valid),
+					VpvGpu::Var("u_a2_sigma_sent", &uA2SigmaSent),
+					VpvGpu::Var("u_a2_sigma_zero", &uA2SigmaZero),
+					VpvGpu::Var("u_a2_total_var", &uA2TotalVar)
+				};
+				if (!runPass("td_v2_p2_moments_solve", sHdr, Shaders::kPass2MomentsAndSolve, ds, 14, sv, 4, cellGx, cellGy, 8, 8))
 				{
-					ResetCarry(gpu);
+					resetCarryIfActive();
 					return failVisible("td_v2_p2_moments_solve dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 			}
@@ -948,8 +1009,6 @@ namespace Gpu
 				bHdr += VpvGpu::DefineInt("TD_BY0", byStart);
 				bHdr += VpvGpu::DefineInt("TD_BX1", bxEnd);
 				bHdr += VpvGpu::DefineInt("TD_BY1", byEnd);
-				bHdr += VpvGpu::DefineInt("TD_A2_VALID", a2Stats.valid ? 1 : 0);
-				bHdr += VpvGpu::Define("TD_A2_TOTAL_VAR", a2Stats.valid ? a2Stats.totalVar : 0.0);
 				bHdr += VpvGpu::Define("TD_GAIN_LOW", gains.low);
 				bHdr += VpvGpu::Define("TD_GAIN_MID", gains.mid);
 				bHdr += VpvGpu::Define("TD_GAIN_FINE", gains.fine);
@@ -969,9 +1028,13 @@ namespace Gpu
 					VpvGpu::Sampled("cell_diag_c", sc.cellDiagC),
 					VpvGpu::Storage("delta_out", runDctPocs ? sc.deltaScratch : outDeltaTex_)
 				};
-				if (!runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 10, fullGx, fullGy))
+				pl_shader_var bv[2] = {
+					VpvGpu::Var("u_a2_valid", &uA2Valid),
+					VpvGpu::Var("u_a2_total_var", &uA2TotalVar)
+				};
+				if (!runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 10, bv, 2, fullGx, fullGy))
 				{
-					ResetCarry(gpu);
+					resetCarryIfActive();
 					return failVisible("td_v2_p3_blend_bound dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 			}
@@ -979,7 +1042,6 @@ namespace Gpu
 			// ---- PASS 3B: Optional Codec-Grid-Aligned 8x8 DCT-II STRICT/CELL POCS ----
 			if (runDctPocs)
 			{
-				const double peakCode = PeakCodeForBits(cfg_.sourceBits);
 				const int iters = (std::max)(1, (std::min)(2, cfg_.cellProjIterations));
 				std::string pHdr = geomDefs;
 				pHdr += VpvGpu::DefineInt("TD_BX0", bxStart);
@@ -988,9 +1050,6 @@ namespace Gpu
 				pHdr += VpvGpu::DefineInt("TD_BY1", byEnd);
 				pHdr += VpvGpu::DefineInt("TD_POCS_ITERS", iters);
 				pHdr += VpvGpu::DefineInt("TD_RESIDUAL_MODE", cfg_.residualMode == ResidualMode::Strict ? 1 : 0);
-				pHdr += VpvGpu::Define("TD_STEP_DELTA", effStepDelta);
-				pHdr += VpvGpu::Define("TD_DEADZONE_PHI", in.deadZonePhi);
-				pHdr += VpvGpu::Define("TD_PEAK_CODE", peakCode);
 				pHdr += Shaders::BuildDctBasisHeader();
 				pHdr += Shaders::kCoreHelpers;
 				pHdr += Shaders::kPass3bDctHeader;
@@ -1000,11 +1059,16 @@ namespace Gpu
 					VpvGpu::Sampled("pred_clean", sc.warped[0]),
 					VpvGpu::Storage("delta_out", outDeltaTex_)
 				};
+				pl_shader_var pv[3] = {
+					VpvGpu::Var("u_step_delta", &uStepDelta),
+					VpvGpu::Var("u_deadzone_phi", &uDeadZonePhi),
+					VpvGpu::Var("u_peak_code", &uPeakCode)
+				};
 				const size_t shmemBytes = (5u * 64u) * sizeof(float);
-				if (!runPass("td_v2_p3_dct_pocs", pHdr, Shaders::kPass3bDctPocs, dp, 4,
+				if (!runPass("td_v2_p3_dct_pocs", pHdr, Shaders::kPass3bDctPocs, dp, 4, pv, 3,
 				             Detail::GroupsFor(w, 8), Detail::GroupsFor(h, 8), 8, 8, shmemBytes))
 				{
-					ResetCarry(gpu);
+					resetCarryIfActive();
 					return failVisible("td_v2_p3_dct_pocs dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 			}
@@ -1020,9 +1084,9 @@ namespace Gpu
 					VpvGpu::Storage("carry_clean", carryCleanTex_),
 					VpvGpu::Storage("cand_out", sc.candOutScratch)
 				};
-				if (!runPass("td_v2_p4_recompose", geomDefs, Shaders::kPass4Recompose, dr, 7, fullGx, fullGy))
+				if (!runPass("td_v2_p4_recompose", geomDefs, Shaders::kPass4Recompose, dr, 7, nullptr, 0, fullGx, fullGy))
 				{
-					ResetCarry(gpu);
+					resetCarryIfActive();
 					return failVisible("td_v2_p4_recompose dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 			}
@@ -1036,9 +1100,9 @@ namespace Gpu
 					VpvGpu::Sampled("own_grain", inOwnGrainTex_),
 					VpvGpu::Storage("band_tmp_h", sc.bandTmpH)
 				};
-				if (!runPass("td_v2_p4_guard_h", gFineHdr, Shaders::kPass4GuardFineH, dgh, 4, fullGx, fullGy))
+				if (!runPass("td_v2_p4_guard_h", gFineHdr, Shaders::kPass4GuardFineH, dgh, 4, nullptr, 0, fullGx, fullGy))
 				{
-					ResetCarry(gpu);
+					resetCarryIfActive();
 					return failVisible("td_v2_p4_guard_h dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 				pl_shader_desc dgv[5] = {
@@ -1048,9 +1112,9 @@ namespace Gpu
 					VpvGpu::Sampled("own_grain", inOwnGrainTex_),
 					VpvGpu::Storage("guard_bands", sc.refBands[0])
 				};
-				if (!runPass("td_v2_p4_guard_v", gFineHdr, Shaders::kPass4GuardFineV, dgv, 5, fullGx, fullGy))
+				if (!runPass("td_v2_p4_guard_v", gFineHdr, Shaders::kPass4GuardFineV, dgv, 5, nullptr, 0, fullGx, fullGy))
 				{
-					ResetCarry(gpu);
+					resetCarryIfActive();
 					return failVisible("td_v2_p4_guard_v dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 			}
@@ -1067,9 +1131,9 @@ namespace Gpu
 					VpvGpu::Sampled("cell_prior", inCellPriorTex_),
 					VpvGpu::Storage("guard_cell", outGuardCellTex_)
 				};
-				if (!runPass("td_v2_p4_guard_cell", gcHdr, Shaders::kPass4GuardCell, dgc, 3, cellGx, cellGy, 8, 8))
+				if (!runPass("td_v2_p4_guard_cell", gcHdr, Shaders::kPass4GuardCell, dgc, 3, nullptr, 0, cellGx, cellGy, 8, 8))
 				{
-					ResetCarry(gpu);
+					resetCarryIfActive();
 					return failVisible("td_v2_p4_guard_cell dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 			}
@@ -1085,9 +1149,9 @@ namespace Gpu
 					VpvGpu::Sampled("guard_cell", outGuardCellTex_),
 					VpvGpu::Storage("out_y", outYTex_)
 				};
-				if (!runPass("td_v2_p4_apply_guard", aHdr, Shaders::kPass4ApplyAndGuard, da, 5, fullGx, fullGy))
+				if (!runPass("td_v2_p4_apply_guard", aHdr, Shaders::kPass4ApplyAndGuard, da, 5, nullptr, 0, fullGx, fullGy))
 				{
-					ResetCarry(gpu);
+					resetCarryIfActive();
 					return failVisible("td_v2_p4_apply_guard dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 			}
@@ -1101,11 +1165,12 @@ namespace Gpu
 
 			// Read back outputs and cell diagnostics.
 			TdV2Plane gpuOutY;
+			bool anyBoundEngaged = false;
 			if (!Detail::DownloadPlaneR32F(gpu, outYTex_, w, h, gpuOutY) ||
 			    !Detail::DownloadPlaneR32F(gpu, outCleanTex_, w, h, res.outputClean) ||
-			    !Detail::DownloadPlaneR32F(gpu, outDeltaTex_, w, h, res.tdDelta))
+			    !Detail::DownloadDeltaRG32F(gpu, outDeltaTex_, w, h, res.tdDelta, anyBoundEngaged))
 			{
-				ResetCarry(gpu);
+				resetCarryIfActive();
 				return failVisible("TdV2GpuEngine output plane download failed", StandInKind::GpuDispatchFailed);
 			}
 			// Shadow mode preserves receivedY bit-exact (while GPU pass also wrote exact rec_y).
@@ -1122,12 +1187,12 @@ namespace Gpu
 			    !Detail::DownloadFloats(gpu, outGuardCellTex_, guardBuf.data()) ||
 			    !Detail::DownloadFloats(gpu, outWarpDiagTex_, warpDiagBuf.data()))
 			{
-				ResetCarry(gpu);
+				resetCarryIfActive();
 				return failVisible("TdV2GpuEngine diagnostic download failed", StandInKind::GpuDispatchFailed);
 			}
 
 			bool anyGuardEvaluated = false;
-			size_t totalWarpNonFinite = 0;
+			unsigned warpBadRefMask = 0u;
 			for (int cy = 0; cy < res.cellsH; ++cy)
 			{
 				for (int cx = 0; cx < res.cellsW; ++cx)
@@ -1145,22 +1210,26 @@ namespace Gpu
 
 					if (diagBuf[cIdx * 4u + 0u] > 0.5f)
 						++res.focusVetoCells;
-					res.nonFiniteCells += static_cast<size_t>(std::llround(static_cast<double>(diagBuf[cIdx * 4u + 1u])));
-					res.singularCells += static_cast<size_t>(std::llround(static_cast<double>(diagBuf[cIdx * 4u + 2u])));
-					res.singleRefA2Cells += static_cast<size_t>(std::llround(static_cast<double>(diagBuf[cIdx * 4u + 3u])));
+					res.nonFiniteCells += Detail::NonNegRoundToSize(diagBuf[cIdx * 4u + 1u]);
+					res.singularCells += Detail::NonNegRoundToSize(diagBuf[cIdx * 4u + 2u]);
+					res.singleRefA2Cells += Detail::NonNegRoundToSize(diagBuf[cIdx * 4u + 3u]);
 
-					const int gFlags = static_cast<int>(std::llround(static_cast<double>(guardBuf[cIdx * 2u + 1u])));
-					if ((gFlags & 2) != 0)
+					const unsigned gFlags = static_cast<unsigned>(Detail::NonNegRoundToSize(guardBuf[cIdx * 2u + 1u]));
+					if ((gFlags & 2u) != 0u)
 						anyGuardEvaluated = true;
-					if ((gFlags & 1) != 0)
+					if ((gFlags & 1u) != 0u)
 						++res.guardViolationCells;
 
-					res.borderBilinearPixels += static_cast<size_t>(std::llround(static_cast<double>(warpDiagBuf[cIdx * 2u + 0u])));
-					totalWarpNonFinite += static_cast<size_t>(std::llround(static_cast<double>(warpDiagBuf[cIdx * 2u + 1u])));
+					res.borderBilinearPixels += Detail::NonNegRoundToSize(warpDiagBuf[cIdx * 2u + 0u]);
+					warpBadRefMask |= static_cast<unsigned>(Detail::NonNegRoundToSize(warpDiagBuf[cIdx * 2u + 1u]));
 				}
 			}
-			if (totalWarpNonFinite > 0)
-				++res.nonFiniteCells;
+			// Match CPU TdV2ReferenceEngine per-ref non-finite counting (M1): increment once per reference k with any bad pixel.
+			for (int k = 0; k < K; ++k)
+			{
+				if ((warpBadRefMask & (1u << static_cast<unsigned>(k))) != 0u)
+					++res.nonFiniteCells;
+			}
 
 			// Mirror all visible StandInRegistry engagements identically to TdV2ReferenceEngine.
 			if (standIns != nullptr)
@@ -1175,22 +1244,7 @@ namespace Gpu
 					standIns->Engage(StandInKind::SingleRefA1ToA2Fallback);
 				if (anyGuardEvaluated)
 					standIns->Engage(StandInKind::GrainGuardW4c);
-
-				// Engage TransformUnknownBound whenever any pixel outside an interior 8x8 DCT block had non-zero delta.
-				bool anyBoundApplied = false;
-				for (int y = active.y0; y < active.y1 && !anyBoundApplied; ++y)
-				{
-					for (int x = active.x0; x < active.x1; ++x)
-					{
-						const bool inFull = runDctPocs && (x >= bxStart && x < bxEnd && y >= byStart && y < byEnd);
-						if (!inFull && std::fabs(res.tdDelta.at(x, y)) > 0.0)
-						{
-							anyBoundApplied = true;
-							break;
-						}
-					}
-				}
-				if (anyBoundApplied)
+				if (anyBoundEngaged)
 					standIns->Engage(StandInKind::TransformUnknownBound);
 			}
 
@@ -1221,6 +1275,8 @@ namespace Gpu
 				return failChroma("ApplyChromaDeltaGpu null pl_gpu or pl_dispatch", StandInKind::GpuDispatchFailed);
 			if (in.lumaW <= 0 || in.lumaH <= 0)
 				return failChroma("ApplyChromaDeltaGpu invalid luma dimensions", StandInKind::GpuDispatchFailed);
+			if (!std::isfinite(in.siting.shiftX) || !std::isfinite(in.siting.shiftY))
+				return failChroma("ApplyChromaDeltaGpu non-finite siting shift", StandInKind::NonFiniteClosure);
 
 			const bool isRgb = (in.deliveredFormat == DeliveredChromaFormat::Rgb444);
 			const ChromaSubsampling delivSub = DeliveredSubsampling(in.deliveredFormat);
@@ -1280,16 +1336,38 @@ namespace Gpu
 				return failChroma("ApplyChromaDeltaGpu codedDelta texture alloc failed", StandInKind::GpuDispatchFailed);
 
 			std::vector<float> codedBuf(static_cast<size_t>(cW) * static_cast<size_t>(cH) * 2u, 0.0f);
-			for (size_t i = 0; i < in.codedDeltaCb.v.size(); ++i)
+			bool allZeroDelta = true;
+			for (int cy = 0; cy < cH; ++cy)
 			{
-				codedBuf[i * 2u + 0u] = static_cast<float>(in.codedDeltaCb.v[i]);
-				codedBuf[i * 2u + 1u] = static_cast<float>(in.codedDeltaCr.v[i]);
+				for (int cx = 0; cx < cW; ++cx)
+				{
+					const size_t i = static_cast<size_t>(cy) * static_cast<size_t>(cW) + static_cast<size_t>(cx);
+					const double vCb = in.codedDeltaCb.v[i];
+					const double vCr = in.codedDeltaCr.v[i];
+					codedBuf[i * 2u + 0u] = static_cast<float>(vCb);
+					codedBuf[i * 2u + 1u] = static_cast<float>(vCr);
+					if (cx >= cActive.x0 && cx < cActive.x1 && cy >= cActive.y0 && cy < cActive.y1)
+					{
+						if (!(vCb == 0.0) || !(vCr == 0.0))
+							allZeroDelta = false;
+					}
+				}
 			}
 			if (!Detail::UploadFloats(gpu, codedDeltaTex, codedBuf.data()))
 			{
 				pl_tex_destroy(gpu, &codedDeltaTex);
 				return failChroma("ApplyChromaDeltaGpu codedDelta upload failed", StandInKind::GpuDispatchFailed);
 			}
+
+			// Per-frame continuous chroma siting & matrix scalars passed via VpvGpu::Var UBOs (never #define).
+			const float uDShiftX = dSubX > 1 ? in.siting.shiftX : 0.0f;
+			const float uDShiftY = dSubY > 1 ? in.siting.shiftY : 0.0f;
+			const float uCShiftX = cSubX > 1 ? in.siting.shiftX : 0.0f;
+			const float uCShiftY = cSubY > 1 ? in.siting.shiftY : 0.0f;
+			const float uAllZeroDelta = allZeroDelta ? 1.0f : 0.0f;
+			const float uKr = static_cast<float>(in.matrix.kr);
+			const float uKg = static_cast<float>(in.matrix.kg);
+			const float uKb = static_cast<float>(in.matrix.kb);
 
 			std::string hdr;
 			hdr += VpvGpu::DefineInt("TD_DW", dW);
@@ -1298,10 +1376,6 @@ namespace Gpu
 			hdr += VpvGpu::DefineInt("TD_DSUB_Y", dSubY);
 			hdr += VpvGpu::DefineInt("TD_CSUB_X", cSubX);
 			hdr += VpvGpu::DefineInt("TD_CSUB_Y", cSubY);
-			hdr += VpvGpu::Define("TD_DSHIFT_X", dSubX > 1 ? static_cast<double>(in.siting.shiftX) : 0.0);
-			hdr += VpvGpu::Define("TD_DSHIFT_Y", dSubY > 1 ? static_cast<double>(in.siting.shiftY) : 0.0);
-			hdr += VpvGpu::Define("TD_CSHIFT_X", cSubX > 1 ? static_cast<double>(in.siting.shiftX) : 0.0);
-			hdr += VpvGpu::Define("TD_CSHIFT_Y", cSubY > 1 ? static_cast<double>(in.siting.shiftY) : 0.0);
 			hdr += VpvGpu::DefineInt("TD_CAX0", cActive.x0);
 			hdr += VpvGpu::DefineInt("TD_CAY0", cActive.y0);
 			hdr += VpvGpu::DefineInt("TD_CAX1", cActive.x1);
@@ -1312,21 +1386,30 @@ namespace Gpu
 			hdr += VpvGpu::DefineInt("TD_DAY1", dActive.y1);
 			hdr += VpvGpu::DefineInt("TD_IDENTITY_GRID", identityGrid ? 1 : 0);
 			hdr += VpvGpu::Define("TD_NUM_FLOOR", kEngineNumFloor);
-			hdr += VpvGpu::Define("TD_MAT_KR", in.matrix.kr);
-			hdr += VpvGpu::Define("TD_MAT_KG", in.matrix.kg);
-			hdr += VpvGpu::Define("TD_MAT_KB", in.matrix.kb);
 			hdr += Shaders::kCoreHelpers;
 			hdr += Shaders::kPassChromaDeltaHeader;
 
 			const int gx = Detail::GroupsFor(dW, 16);
 			const int gy = Detail::GroupsFor(dH, 16);
 
+			auto recordChromaStandIns = [&]()
+			{
+				if (standIns == nullptr)
+					return;
+				if (res.nonFinitePixels > 0)
+					standIns->Engage(StandInKind::NonFiniteClosure, "ApplyChromaDeltaGpu GPU non-finite closure");
+				if (res.borderBilinearPixels > 0)
+					standIns->Engage(StandInKind::BorderBilinearFallback, "ApplyChromaDeltaGpu active border");
+			};
+
 			if (!isRgb)
 			{
 				pl_tex delivUvTex = nullptr;
-				pl_tex outUvDeltaTex = nullptr;
+				pl_tex outUvTex = nullptr;
+				pl_tex outDeltaTex = nullptr;
 				bool ok = Detail::EnsureTex(gpu, delivUvTex, dW, dH, fmtRG32, true, false, true, false) &&
-				          Detail::EnsureTex(gpu, outUvDeltaTex, dW, dH, fmtRGBA32, true, true, false, true);
+				          Detail::EnsureTex(gpu, outUvTex, dW, dH, fmtRGBA32, true, true, false, true) &&
+				          Detail::EnsureTex(gpu, outDeltaTex, dW, dH, fmtRG32, true, true, false, true);
 				if (ok)
 				{
 					std::vector<float> uvBuf(static_cast<size_t>(dW) * static_cast<size_t>(dH) * 2u, 0.0f);
@@ -1339,20 +1422,30 @@ namespace Gpu
 				}
 				if (ok)
 				{
-					pl_shader_desc d[3] = {
+					pl_shader_desc d[4] = {
 						VpvGpu::Sampled("deliv_uv", delivUvTex),
 						VpvGpu::Sampled("coded_delta", codedDeltaTex),
-						VpvGpu::Storage("out_uv_delta", outUvDeltaTex)
+						VpvGpu::Storage("out_uv", outUvTex),
+						VpvGpu::Storage("out_delta", outDeltaTex)
+					};
+					pl_shader_var cv[5] = {
+						VpvGpu::Var("u_dshift_x", &uDShiftX),
+						VpvGpu::Var("u_dshift_y", &uDShiftY),
+						VpvGpu::Var("u_cshift_x", &uCShiftX),
+						VpvGpu::Var("u_cshift_y", &uCShiftY),
+						VpvGpu::Var("u_all_zero_delta", &uAllZeroDelta)
 					};
 					ok = VpvGpu::Pass(dispatch, "td_v2_chroma_apply_yuv", hdr, Shaders::kPassChromaApplyYuv,
-					                  d, 3, nullptr, 0, gx, gy, 0, 16, 16);
+					                  d, 4, cv, 5, gx, gy, 0, 16, 16);
 					if (ok)
 						res.dispatchCount = 1;
 				}
 				if (ok)
 				{
 					std::vector<float> outBuf(static_cast<size_t>(dW) * static_cast<size_t>(dH) * 4u, 0.0f);
-					ok = Detail::DownloadFloats(gpu, outUvDeltaTex, outBuf.data());
+					std::vector<float> delOutBuf(static_cast<size_t>(dW) * static_cast<size_t>(dH) * 2u, 0.0f);
+					ok = Detail::DownloadFloats(gpu, outUvTex, outBuf.data()) &&
+					     Detail::DownloadFloats(gpu, outDeltaTex, delOutBuf.data());
 					if (ok)
 					{
 						res.outCb = TdV2Plane(dW, dH, 0.0);
@@ -1363,16 +1456,21 @@ namespace Gpu
 						{
 							res.outCb.v[i] = static_cast<double>(outBuf[i * 4u + 0u]);
 							res.outCr.v[i] = static_cast<double>(outBuf[i * 4u + 1u]);
-							res.deliveredDeltaCb.v[i] = static_cast<double>(outBuf[i * 4u + 2u]);
-							res.deliveredDeltaCr.v[i] = static_cast<double>(outBuf[i * 4u + 3u]);
+							const unsigned fl = static_cast<unsigned>(Detail::NonNegRoundToSize(outBuf[i * 4u + 2u]));
+							if ((fl & 1u) != 0u) ++res.nonFinitePixels;
+							if ((fl & 2u) != 0u) ++res.borderBilinearPixels;
+							res.deliveredDeltaCb.v[i] = static_cast<double>(delOutBuf[i * 2u + 0u]);
+							res.deliveredDeltaCr.v[i] = static_cast<double>(delOutBuf[i * 2u + 1u]);
 						}
 					}
 				}
 				if (delivUvTex) pl_tex_destroy(gpu, &delivUvTex);
-				if (outUvDeltaTex) pl_tex_destroy(gpu, &outUvDeltaTex);
+				if (outUvTex) pl_tex_destroy(gpu, &outUvTex);
+				if (outDeltaTex) pl_tex_destroy(gpu, &outDeltaTex);
 				pl_tex_destroy(gpu, &codedDeltaTex);
 				if (!ok)
 					return failChroma("td_v2_chroma_apply_yuv dispatch or transfer failed", StandInKind::GpuDispatchFailed);
+				recordChromaStandIns();
 				res.succeeded = true;
 				return res;
 			}
@@ -1404,8 +1502,18 @@ namespace Gpu
 					VpvGpu::Storage("out_rgb", outRgbTex),
 					VpvGpu::Storage("out_delta", outDeltaTex)
 				};
+				pl_shader_var rv[8] = {
+					VpvGpu::Var("u_dshift_x", &uDShiftX),
+					VpvGpu::Var("u_dshift_y", &uDShiftY),
+					VpvGpu::Var("u_cshift_x", &uCShiftX),
+					VpvGpu::Var("u_cshift_y", &uCShiftY),
+					VpvGpu::Var("u_all_zero_delta", &uAllZeroDelta),
+					VpvGpu::Var("u_kr", &uKr),
+					VpvGpu::Var("u_kg", &uKg),
+					VpvGpu::Var("u_kb", &uKb)
+				};
 				ok = VpvGpu::Pass(dispatch, "td_v2_chroma_apply_rgb", hdr, Shaders::kPassChromaApplyRgb,
-				                  d, 4, nullptr, 0, gx, gy, 0, 16, 16);
+				                  d, 4, rv, 8, gx, gy, 0, 16, 16);
 				if (ok)
 					res.dispatchCount = 1;
 			}
@@ -1427,6 +1535,9 @@ namespace Gpu
 						res.outR.v[i] = static_cast<double>(rgbOutBuf[i * 4u + 0u]);
 						res.outG.v[i] = static_cast<double>(rgbOutBuf[i * 4u + 1u]);
 						res.outB.v[i] = static_cast<double>(rgbOutBuf[i * 4u + 2u]);
+						const unsigned fl = static_cast<unsigned>(Detail::NonNegRoundToSize(rgbOutBuf[i * 4u + 3u]));
+						if ((fl & 1u) != 0u) ++res.nonFinitePixels;
+						if ((fl & 2u) != 0u) ++res.borderBilinearPixels;
 						res.deliveredDeltaCb.v[i] = static_cast<double>(delOutBuf[i * 2u + 0u]);
 						res.deliveredDeltaCr.v[i] = static_cast<double>(delOutBuf[i * 2u + 1u]);
 					}
@@ -1438,6 +1549,7 @@ namespace Gpu
 			pl_tex_destroy(gpu, &codedDeltaTex);
 			if (!ok)
 				return failChroma("td_v2_chroma_apply_rgb dispatch or transfer failed", StandInKind::GpuDispatchFailed);
+			recordChromaStandIns();
 			res.succeeded = true;
 			return res;
 		}
@@ -1477,7 +1589,7 @@ namespace Gpu
 		{
 			bool ok = Detail::EnsureTex(gpu, privCurBands_, w, h, fmtRGBA32, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privBandTmpH_, w, h, fmtRGBA32, true, true, false, false) &&
-			          Detail::EnsureTex(gpu, privDeltaScratch_, w, h, fmtR32, true, true, false, false) &&
+			          Detail::EnsureTex(gpu, privDeltaScratch_, w, h, fmtRG32, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privCandOutScratch_, w, h, fmtR32, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privMotionGate_, 3 * cw, ch, fmtRGBA32, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privCellWeights_, 3 * cw, ch, fmtRGBA32, true, true, false, false) &&

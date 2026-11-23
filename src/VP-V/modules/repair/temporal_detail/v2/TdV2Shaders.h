@@ -167,7 +167,7 @@ if (!selfOk)
     return;
 }
 
-if (selfCls == 3)
+if (selfCls == TD_CLS_OVERLAY)
 {
     imageStore(motion_gate, gid, vec4(0.0, 0.0, 0.0, 0.0));
     return;
@@ -185,7 +185,7 @@ for (int dy = -1; dy <= 1; ++dy)
         float nSpd = 0.0;
         int nCls = 0;
         bool nBad = false;
-        if (td_cell_rel_speed(rk, nx, ny, nSpd, nCls, nBad) && nCls != 3)
+        if (td_cell_rel_speed(rk, nx, ny, nSpd, nCls, nBad) && nCls != TD_CLS_OVERLAY)
         {
             dilatedSpd = max(dilatedSpd, nSpd);
         }
@@ -193,8 +193,8 @@ for (int dy = -1; dy <= 1; ++dy)
 }
 
 float speedGate = 1.0 - td_hermite_ramp(TD_STILL_SPEED, TD_FAST_CUTOFF, dilatedSpd);
-float gateL = (selfCls == 2) ? speedGate : 1.0;
-float gateMH = (selfCls == 4) ? 0.0 : speedGate;
+float gateL = (selfCls == TD_CLS_OBJECT) ? speedGate : 1.0;
+float gateMH = (selfCls == TD_CLS_DYN_TEX) ? 0.0 : speedGate;
 imageStore(motion_gate, gid, vec4(gateL, gateMH, 0.0, 0.0));
 )GLSL";
 
@@ -422,7 +422,7 @@ imageStore(bands_out, p, vec4(bL, bM, bH, bD3));
 	// Dispatch: ceil(TD_CW / 8) x ceil(TD_CH / 8), group 8x8.
 	// Inputs: cur_bands, ref_bands_0/1/2, cell_prior (.y = explicitFocusChange), warped_0/1/2.
 	// Outputs: cell_focus (cw x ch RG32F: .x = focusChange, .y = isDefocused),
-	//          warp_diag (cw x ch RG32F: .x = borderBilinCount, .y = warpNonFiniteCount).
+	//          warp_diag (cw x ch RG32F: .x = borderBilinCount, .y = per-ref nonFinite bitmask 1<<k).
 	constexpr const char* kPass2FocusHeader = R"GLSL(
 vec4 td_fetch_ref_band(int k, ivec2 p)
 {
@@ -459,7 +459,7 @@ refE2[0] = 0.0; refE2[1] = 0.0; refE2[2] = 0.0;
 refE3[0] = 0.0; refE3[1] = 0.0; refE3[2] = 0.0;
 int cnt = 0;
 float borderBilinCnt = 0.0;
-float warpBadCnt = 0.0;
+int warpBadMask = 0;
 
 for (int y = y0; y < y1; ++y)
 {
@@ -476,7 +476,7 @@ for (int y = y0; y < y1; ++y)
             refE3[k] += rb.w * rb.w;
             int fl = td_fetch_ref_flags(k, p);
             if ((fl & 2) != 0) borderBilinCnt += 1.0;
-            if ((fl & 4) != 0) warpBadCnt += 1.0;
+            if ((fl & 4) != 0) warpBadMask |= (1 << k);
         }
         ++cnt;
     }
@@ -495,11 +495,11 @@ if (cnt > 0)
 }
 
 float curM3Val = max(0.0, curEnergy - curM2);
-float cleanM2 = max(0.0, curM2 - TD_STEP_NOISE_VAR * TD_GAIN_MID);
-float cleanM3 = max(0.0, curM3Val - TD_STEP_NOISE_VAR * TD_GAIN_D3);
+float cleanM2 = max(0.0, curM2 - u_step_noise_var * TD_GAIN_MID);
+float cleanM3 = max(0.0, curM3Val - u_step_noise_var * TD_GAIN_D3);
 float curFDebiased = cleanM2 / (cleanM2 + cleanM3 + TD_NUM_FLOOR);
 
-bool isDefocused = (curEnergy > TD_STRUCTURE_FLOOR && curFDebiased <= TD_F_DEFOCUS);
+bool isDefocused = (curEnergy > u_structure_floor && curFDebiased <= TD_F_DEFOCUS);
 bool focusChange = false;
 
 float explicitFc = texelFetch(cell_prior, cell, 0).y;
@@ -516,7 +516,7 @@ else if (cnt > 0)
         float rM3 = refE3[k] * invC;
         float rEnergy = rM2 + rM3;
         float rF = (rEnergy > TD_NUM_FLOOR) ? (rM2 / (rEnergy + TD_NUM_FLOOR)) : 1.0;
-        if (rEnergy > TD_STRUCTURE_FLOOR && curM2 < rM2 && curF < TD_F_SHARP && (rF - curF) > TD_F_SHIFT_DELTA)
+        if (rEnergy > u_structure_floor && curM2 < rM2 && curF < TD_F_SHARP && (rF - curF) > TD_F_SHIFT_DELTA)
         {
             focusChange = true;
             break;
@@ -525,7 +525,7 @@ else if (cnt > 0)
 }
 
 imageStore(cell_focus, cell, vec4(focusChange ? 1.0 : 0.0, isDefocused ? 1.0 : 0.0, 0.0, 0.0));
-imageStore(warp_diag, cell, vec4(borderBilinCnt, warpBadCnt, 0.0, 0.0));
+imageStore(warp_diag, cell, vec4(borderBilinCnt, float(warpBadMask), 0.0, 0.0));
 )GLSL";
 
 	// ---- PASS 2B: FP32 Shifted-Origin Covariance Moments + Blind A1/A2/A3 + KxK Solve + TdMaps ----
@@ -854,8 +854,8 @@ for (int b = 0; b < 3; ++b)
         for (int k = 0; k < TD_K; ++k)
         {
             bool exactCopy = td_is_exact_copy(k);
-            float cA2 = (TD_A2_VALID != 0)
-                ? ((TD_A2_SIGMA_SENT + (exactCopy ? 0.0 : TD_A2_SIGMA_ZERO)) * bGain)
+            float cA2 = (u_a2_valid > 0.5)
+                ? ((u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * bGain)
                 : 0.0;
             float cA1 = cA2;
             if (TD_K >= 2)
@@ -922,7 +922,7 @@ vec4 slice1 = vec4(
     spatialDetailRms,
     clamp(cellWeightSumAll / 3.0, 0.0, 1.0),
     sqrt(max(0.0, cellRetGVar)),
-    sqrt(max(0.0, TD_A2_TOTAL_VAR)));
+    sqrt(max(0.0, u_a2_total_var)));
 vec4 slice2 = vec4(1.0, 0.0, 0.0, float(activeBandBits));
 
 imageStore(td_maps, ivec2(cell.x, cell.y), slice0);
@@ -934,7 +934,7 @@ imageStore(cell_diag_flags, cell, vec4(focusChange ? 1.0 : 0.0, diagNonFinite, d
 	// ---- PASS 3A: Spatial-Only Weight Interpolation + 3-Sigma Huber Taper + Pixel-Domain Bound ----
 	// Dispatch: ceil(TD_W / 16) x ceil(TD_H / 16), group 16x16.
 	// Inputs: cur_bands, ref_bands_0/1/2, warped_0/1/2, cell_weights, cell_diag_c.
-	// Output: delta_out (w x h R32F).
+	// Output: delta_out (w x h RG32F: .x = delta, .y = 1.0 when pixel-domain bound engaged).
 	constexpr const char* kPass3BlendHeader = R"GLSL(
 vec4 td_fetch_ref_band(int k, ivec2 p)
 {
@@ -1010,6 +1010,7 @@ for (int k = 0; k < TD_K; ++k)
 }
 
 float totalDelta = 0.0;
+float boundEngaged = 0.0;
 for (int b = 0; b < 3; ++b)
 {
     float curV = td_band_comp(curB, b);
@@ -1053,9 +1054,10 @@ for (int b = 0; b < 3; ++b)
 
     if (!inFull8x8)
     {
-        float bandVar = (TD_A2_VALID != 0) ? (TD_A2_TOTAL_VAR * td_band_gain(b)) : 0.0;
+        float bandVar = (u_a2_valid > 0.5) ? (u_a2_total_var * td_band_gain(b)) : 0.0;
         if (abs(bandDelta) > 0.0)
         {
+            boundEngaged = 1.0;
             float bound = TD_PIXEL_BOUND_SIGMA * sqrt(max(0.0, bandVar));
             bandDelta = clamp(bandDelta, -bound, bound);
         }
@@ -1063,13 +1065,13 @@ for (int b = 0; b < 3; ++b)
     totalDelta += bandDelta;
 }
 
-imageStore(delta_out, p, vec4(td_is_bad(totalDelta) ? 0.0 : totalDelta, 0.0, 0.0, 0.0));
+imageStore(delta_out, p, vec4(td_is_bad(totalDelta) ? 0.0 : totalDelta, boundEngaged, 0.0, 0.0));
 )GLSL";
 
 	// ---- PASS 3B: Optional Codec-Grid-Aligned 8x8 DCT-II STRICT/CELL POCS ----
 	// Dispatch: ceil(TD_W / 8) x ceil(TD_H / 8), group 8x8 (1 workgroup per codec-aligned 8x8 block).
-	// Inputs: delta_in (w x h R32F), cur_clean (w x h R32F), pred_clean (w x h RG32F, .x = refs[0].clean).
-	// Output: delta_out (w x h R32F).
+	// Inputs: delta_in (w x h RG32F), cur_clean (w x h R32F), pred_clean (w x h RG32F, .x = refs[0].clean).
+	// Output: delta_out (w x h RG32F: .x = delta, .y = 1.0 when pixel-domain bound engaged).
 	constexpr const char* kPass3bDctHeader = R"GLSL(
 shared float td_s_sent[64];
 shared float td_s_blend[64];
@@ -1079,34 +1081,35 @@ shared uint td_s_nz[64];
 
 float td_project_coeff(float sentCoeff, float blendCoeff)
 {
-    if (td_is_bad(sentCoeff) || td_is_bad(blendCoeff) || TD_STEP_DELTA <= 0.0 || TD_DEADZONE_PHI < 0.0 || TD_DEADZONE_PHI >= 1.0)
+    if (td_is_bad(sentCoeff) || td_is_bad(blendCoeff) || td_is_bad(u_step_delta) || td_is_bad(u_deadzone_phi) ||
+        u_step_delta <= 0.0 || u_deadzone_phi < 0.0 || u_deadzone_phi >= 1.0)
         return td_is_bad(sentCoeff) ? 0.0 : sentCoeff;
 
-    float theta = (1.0 - TD_DEADZONE_PHI) * TD_STEP_DELTA;
+    float theta = (1.0 - u_deadzone_phi) * u_step_delta;
     float absSent = abs(sentCoeff);
-    int level = 0;
+    // Keep quantization level in float (avoids 32-bit int overflow on very small u_step_delta).
+    float level = 0.0;
     if (absSent >= theta)
     {
-        int mag = int(floor(absSent / TD_STEP_DELTA + TD_DEADZONE_PHI));
+        float mag = floor(absSent / u_step_delta + u_deadzone_phi);
         level = (sentCoeff >= 0.0) ? mag : -mag;
     }
-    if (level == 0)
+    if (level == 0.0)
         return clamp(blendCoeff, -theta, theta);
     if (TD_RESIDUAL_MODE == 1)
         return sentCoeff;
 
-    float kf = float(level);
     float lo = 0.0;
     float hi = 0.0;
-    if (level > 0)
+    if (level > 0.0)
     {
-        lo = (kf - TD_DEADZONE_PHI) * TD_STEP_DELTA;
-        hi = (kf + 1.0 - TD_DEADZONE_PHI) * TD_STEP_DELTA;
+        lo = (level - u_deadzone_phi) * u_step_delta;
+        hi = (level + 1.0 - u_deadzone_phi) * u_step_delta;
     }
     else
     {
-        lo = (kf - 1.0 + TD_DEADZONE_PHI) * TD_STEP_DELTA;
-        hi = (kf + TD_DEADZONE_PHI) * TD_STEP_DELTA;
+        lo = (level - 1.0 + u_deadzone_phi) * u_step_delta;
+        hi = (level + u_deadzone_phi) * u_step_delta;
     }
     return clamp(blendCoeff, lo, hi);
 }
@@ -1128,8 +1131,8 @@ if (!blockInInterior)
 {
     if (p.x < TD_W && p.y < TD_H)
     {
-        float d = texelFetch(delta_in, p, 0).x;
-        imageStore(delta_out, p, vec4(d, 0.0, 0.0, 0.0));
+        vec2 d = texelFetch(delta_in, p, 0).xy;
+        imageStore(delta_out, p, vec4(d, 0.0, 0.0));
     }
     return;
 }
@@ -1138,11 +1141,13 @@ float dVal = texelFetch(delta_in, p, 0).x;
 float cVal = texelFetch(cur_clean, p, 0).x;
 float pVal = texelFetch(pred_clean, p, 0).x;
 td_s_nz[tid] = (dVal != 0.0) ? 1u : 0u;
+memoryBarrierShared();
 barrier();
 for (int stride = 32; stride > 0; stride >>= 1)
 {
     if (tid < stride)
         td_s_nz[tid] = td_s_nz[tid] | td_s_nz[tid + stride];
+    memoryBarrierShared();
     barrier();
 }
 
@@ -1155,6 +1160,7 @@ if (td_s_nz[0] == 0u)
 
 td_s_sent[tid] = cVal - pVal;
 td_s_blend[tid] = (cVal + dVal) - pVal;
+memoryBarrierShared();
 barrier();
 
 // Forward DCT-II of sent residual once (invariant across POCS iterations).
@@ -1163,12 +1169,14 @@ barrier();
     for (int x = 0; x < 8; ++x)
         rowSum += td_s_sent[loc.y * 8 + x] * TD_DCT8_BASIS[loc.x * 8 + x];
     td_s_tmp[tid] = rowSum;
+    memoryBarrierShared();
     barrier();
 
     float colSum = 0.0;
     for (int y = 0; y < 8; ++y)
         colSum += td_s_tmp[y * 8 + loc.x] * TD_DCT8_BASIS[loc.y * 8 + y];
     td_s_sent_dct[tid] = colSum;
+    memoryBarrierShared();
     barrier();
 }
 
@@ -1179,6 +1187,7 @@ for (int it = 0; it < TD_POCS_ITERS; ++it)
     for (int x = 0; x < 8; ++x)
         rowSum += td_s_blend[loc.y * 8 + x] * TD_DCT8_BASIS[loc.x * 8 + x];
     td_s_tmp[tid] = rowSum;
+    memoryBarrierShared();
     barrier();
 
     float blendCoeff = 0.0;
@@ -1188,6 +1197,7 @@ for (int it = 0; it < TD_POCS_ITERS; ++it)
     // Set 1: Quantization-cell coefficient projection (STRICT / CELL).
     float projCoeff = td_project_coeff(td_s_sent_dct[tid], blendCoeff);
     td_s_blend[tid] = projCoeff;
+    memoryBarrierShared();
     barrier();
 
     // Inverse DCT-II of projected residual (transpose of orthonormal basis).
@@ -1195,6 +1205,7 @@ for (int it = 0; it < TD_POCS_ITERS; ++it)
     for (int u = 0; u < 8; ++u)
         invRow += td_s_blend[loc.y * 8 + u] * TD_DCT8_BASIS[u * 8 + loc.x];
     td_s_tmp[tid] = invRow;
+    memoryBarrierShared();
     barrier();
 
     float projRes = 0.0;
@@ -1203,14 +1214,15 @@ for (int it = 0; it < TD_POCS_ITERS; ++it)
 
     dVal = (pVal + projRes) - cVal;
 
-    // Set 2: Pixel-domain valid code-range projection [0, TD_PEAK_CODE].
-    if (TD_PEAK_CODE > 0.0 && dVal != 0.0)
+    // Set 2: Pixel-domain valid code-range projection [0, u_peak_code].
+    if (u_peak_code > 0.0 && dVal != 0.0)
     {
-        float cl = clamp(cVal + dVal, 0.0, TD_PEAK_CODE);
+        float cl = clamp(cVal + dVal, 0.0, u_peak_code);
         dVal = cl - cVal;
     }
 
     td_s_blend[tid] = (cVal + dVal) - pVal;
+    memoryBarrierShared();
     barrier();
 }
 
@@ -1369,7 +1381,7 @@ else if (targetFineE > TD_NUM_FLOOR)
     if (ratio < TD_MIN_VAR_RETENTION)
     {
         flags |= 1;
-        float targetStd = 0.98 * sqrt(targetFineE);
+        float targetStd = sqrt(TD_MIN_VAR_RETENTION) * sqrt(targetFineE);
         float curStd = (curOutFineE > 0.0) ? sqrt(curOutFineE) : 0.0;
         float denom = sqrt(targetFineE) - curStd;
         addBack = (denom > TD_NUM_FLOOR) ? clamp((targetStd - curStd) / denom, 0.0, 1.0) : 1.0;
@@ -1410,27 +1422,23 @@ if ((gFlags & 1) != 0 && g.x > 0.0)
 imageStore(out_y, p, vec4(val, 0.0, 0.0, 0.0));
 )GLSL";
 
-	// ---- Utility: Copy R32F texture (used to seed carryCleanTex_ cleanly on first/cut frame) ----
-	constexpr const char* kPassCopyR32F = R"GLSL(
-ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-if (p.x >= TD_W || p.y >= TD_H)
-    return;
-float v = texelFetch(src_tex, p, 0).x;
-imageStore(dst_tex, p, vec4(v, 0.0, 0.0, 0.0));
-)GLSL";
-
 	// ---- CHROMA GPU APPLY PASSES (TD-S4 GPU Twins: YUV sited upsample & unclipped RGB matrix) ----
+	// diagFlags bitmask: bit 0 (1) = non-finite/overflow closed, bit 1 (2) = border-bilinear fallback.
 	constexpr const char* kPassChromaDeltaHeader = R"GLSL(
-vec2 td_sample_coded_delta_sited(ivec2 dp)
+vec2 td_sample_coded_delta_sited(ivec2 dp, out int diagFlags)
 {
+    diagFlags = 0;
     if (dp.x < TD_DAX0 || dp.x >= TD_DAX1 || dp.y < TD_DAY0 || dp.y >= TD_DAY1)
+        return vec2(0.0);
+
+    if (u_all_zero_delta > 0.5)
         return vec2(0.0);
 
     if (TD_IDENTITY_GRID != 0)
     {
         vec2 d = texelFetch(coded_delta, dp, 0).xy;
-        if (td_is_bad(d.x)) d.x = 0.0;
-        if (td_is_bad(d.y)) d.y = 0.0;
+        if (td_is_bad(d.x)) { d.x = 0.0; diagFlags |= 1; }
+        if (td_is_bad(d.y)) { d.y = 0.0; diagFlags |= 1; }
         return d;
     }
 
@@ -1439,10 +1447,10 @@ vec2 td_sample_coded_delta_sited(ivec2 dp)
     if (cAw <= 0 || cAh <= 0)
         return vec2(0.0);
 
-    float lx = (float(dp.x) + 0.5) * float(TD_DSUB_X) - 0.5 + TD_DSHIFT_X;
-    float ly = (float(dp.y) + 0.5) * float(TD_DSUB_Y) - 0.5 + TD_DSHIFT_Y;
-    float cxLocal = (lx + 0.5 - TD_CSHIFT_X) / float(TD_CSUB_X) - 0.5 - float(TD_CAX0);
-    float cyLocal = (ly + 0.5 - TD_CSHIFT_Y) / float(TD_CSUB_Y) - 0.5 - float(TD_CAY0);
+    float lx = (float(dp.x) + 0.5) * float(TD_DSUB_X) - 0.5 + u_dshift_x;
+    float ly = (float(dp.y) + 0.5) * float(TD_DSUB_Y) - 0.5 + u_dshift_y;
+    float cxLocal = (lx + 0.5 - u_cshift_x) / float(TD_CSUB_X) - 0.5 - float(TD_CAX0);
+    float cyLocal = (ly + 0.5 - u_cshift_y) / float(TD_CSUB_Y) - 0.5 - float(TD_CAY0);
 
     vec2 outD = vec2(0.0);
     if (cxLocal >= 1.0 && cyLocal >= 1.0 && cxLocal < float(cAw) - 2.0 && cyLocal < float(cAh) - 2.0)
@@ -1465,6 +1473,7 @@ vec2 td_sample_coded_delta_sited(ivec2 dp)
     }
     else
     {
+        diagFlags |= 2;
         vec2 cl = clamp(vec2(cxLocal, cyLocal), vec2(0.0), vec2(float(cAw - 1), float(cAh - 1)));
         ivec2 i0 = ivec2(floor(cl));
         ivec2 i1 = min(ivec2(cAw - 1, cAh - 1), i0 + ivec2(1));
@@ -1478,65 +1487,123 @@ vec2 td_sample_coded_delta_sited(ivec2 dp)
         outD = top * (1.0 - f.y) + bot * f.y;
     }
 
-    if (td_is_bad(outD.x)) outD.x = 0.0;
-    if (td_is_bad(outD.y)) outD.y = 0.0;
+    if (td_is_bad(outD.x)) { outD.x = 0.0; diagFlags |= 1; }
+    if (td_is_bad(outD.y)) { outD.y = 0.0; diagFlags |= 1; }
     return outD;
 }
 )GLSL";
 
 	// Inputs: deliv_uv (dW x dH RG32F), coded_delta (cW x cH RG32F).
-	// Output: out_uv_delta (dW x dH RGBA32F: .xy = outCb/outCr, .zw = delivDeltaCb/delivDeltaCr).
+	// Outputs: out_uv (dW x dH RGBA32F: .xy = outCb/outCr, .z = diagFlags, .w = 0),
+	//          out_delta (dW x dH RG32F: .xy = delivDeltaCb/delivDeltaCr).
 	constexpr const char* kPassChromaApplyYuv = R"GLSL(
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 if (p.x >= TD_DW || p.y >= TD_DH)
     return;
 
 vec2 deliv = texelFetch(deliv_uv, p, 0).xy;
-vec2 delta = td_sample_coded_delta_sited(p);
-float outCb = (delta.x == 0.0) ? deliv.x : (deliv.x + delta.x);
-float outCr = (delta.y == 0.0) ? deliv.y : (deliv.y + delta.y);
-imageStore(out_uv_delta, p, vec4(outCb, outCr, delta.x, delta.y));
+int diagFlags = 0;
+vec2 delta = td_sample_coded_delta_sited(p, diagFlags);
+
+float outCb = 0.0;
+if (td_is_bad(deliv.x))
+{
+    outCb = 0.0;
+    delta.x = 0.0;
+    diagFlags |= 1;
+}
+else if (delta.x != 0.0)
+{
+    float cand = deliv.x + delta.x;
+    if (td_is_bad(cand))
+    {
+        outCb = deliv.x;
+        delta.x = 0.0;
+        diagFlags |= 1;
+    }
+    else
+    {
+        outCb = cand;
+    }
+}
+else
+{
+    outCb = deliv.x;
+}
+
+float outCr = 0.0;
+if (td_is_bad(deliv.y))
+{
+    outCr = 0.0;
+    delta.y = 0.0;
+    diagFlags |= 1;
+}
+else if (delta.y != 0.0)
+{
+    float cand = deliv.y + delta.y;
+    if (td_is_bad(cand))
+    {
+        outCr = deliv.y;
+        delta.y = 0.0;
+        diagFlags |= 1;
+    }
+    else
+    {
+        outCr = cand;
+    }
+}
+else
+{
+    outCr = deliv.y;
+}
+
+imageStore(out_uv, p, vec4(outCb, outCr, float(diagFlags), 0.0));
+imageStore(out_delta, p, vec4(delta, 0.0, 0.0));
 )GLSL";
 
 	// Inputs: deliv_rgb (dW x dH RGBA32F), coded_delta (cW x cH RG32F).
-	// Outputs: out_rgb (dW x dH RGBA32F, unclipped BTB/WTW preserved), out_delta (dW x dH RG32F).
+	// Outputs: out_rgb (dW x dH RGBA32F: .xyz = unclipped RGB preserving BTB/WTW, .w = diagFlags),
+	//          out_delta (dW x dH RG32F).
 	constexpr const char* kPassChromaApplyRgb = R"GLSL(
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 if (p.x >= TD_DW || p.y >= TD_DH)
     return;
 
 vec3 rgb = texelFetch(deliv_rgb, p, 0).xyz;
-vec2 delta = td_sample_coded_delta_sited(p);
+int diagFlags = 0;
+vec2 delta = td_sample_coded_delta_sited(p, diagFlags);
 
 if (delta.x == 0.0 && delta.y == 0.0)
 {
-    imageStore(out_rgb, p, vec4(rgb, 0.0));
+    imageStore(out_rgb, p, vec4(rgb, float(diagFlags)));
     imageStore(out_delta, p, vec4(0.0));
     return;
 }
 
-if (td_is_bad(delta.x) || td_is_bad(delta.y) || !(TD_MAT_KG > TD_NUM_FLOOR))
+if (td_is_bad(delta.x) || td_is_bad(delta.y) || td_is_bad(u_kr) || td_is_bad(u_kb) || td_is_bad(u_kg) || !(u_kg > TD_NUM_FLOOR))
 {
-    imageStore(out_rgb, p, vec4(rgb, 0.0));
+    diagFlags |= 1;
+    imageStore(out_rgb, p, vec4(rgb, float(diagFlags)));
     imageStore(out_delta, p, vec4(0.0));
     return;
 }
 
-float kR = 2.0 * (1.0 - TD_MAT_KR);
-float kB = 2.0 * (1.0 - TD_MAT_KB);
+float kR = 2.0 * (1.0 - u_kr);
+float kB = 2.0 * (1.0 - u_kb);
 float dR = kR * delta.y;
 float dB = kB * delta.x;
-float dG = -(TD_MAT_KR * kR / TD_MAT_KG) * delta.y - (TD_MAT_KB * kB / TD_MAT_KG) * delta.x;
+float dG = -(u_kr * kR / u_kg) * delta.y - (u_kb * kB / u_kg) * delta.x;
 vec3 nrgb = rgb + vec3(dR, dG, dB);
 
 if (td_is_bad(nrgb.x) || td_is_bad(nrgb.y) || td_is_bad(nrgb.z))
 {
-    imageStore(out_rgb, p, vec4(rgb, 0.0));
+    diagFlags |= 1;
+    imageStore(out_rgb, p, vec4(rgb, float(diagFlags)));
     imageStore(out_delta, p, vec4(0.0));
     return;
 }
 
-imageStore(out_rgb, p, vec4(nrgb, 0.0));
+imageStore(out_rgb, p, vec4(nrgb, float(diagFlags)));
 imageStore(out_delta, p, vec4(delta, 0.0, 0.0));
 )GLSL";
 
