@@ -23,7 +23,10 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
+
+class GpuSpanTimers;
 
 // The lane source's frame view (AnalysisLumaSource.h). Declared, not included: that header pulls windows.h and
 // std::min / std::max code, which a TU without NOMINMAX (this unit has no pch) cannot take.
@@ -127,8 +130,8 @@ namespace EngineLumaGpu
 	class Kernel
 	{
 	public:
-		Kernel() = default;
-		~Kernel() { Close(); }
+		Kernel();
+		~Kernel();
 		Kernel(const Kernel&) = delete;
 		Kernel& operator=(const Kernel&) = delete;
 
@@ -162,6 +165,7 @@ namespace EngineLumaGpu
 		CComPtr<ID3D11Device> device;
 		CComPtr<ID3D11ComputeShader> shader;
 		CComPtr<ID3D11Buffer> params;
+		std::unique_ptr<GpuSpanTimers> gpuTimers;
 		SrvEntry srvs[kViewCache];
 		UavEntry uavs[kViewCache];
 		int nextSrv = 0, nextUav = 0;

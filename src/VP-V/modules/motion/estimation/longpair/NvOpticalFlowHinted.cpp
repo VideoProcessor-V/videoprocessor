@@ -23,8 +23,35 @@ namespace NvOpticalFlow
 		delete List(functions);
 	}
 
+	void HintedEngine::PollPendingTiming(bool wait)
+	{
+		if (!timingPending || !context || !eventQuery)
+			return;
+		const UINT flags = wait ? 0u : D3D11_ASYNC_GETDATA_DONOTFLUSH;
+		for (;;)
+		{
+			const HRESULT hr = context->GetData(eventQuery, nullptr, 0, flags);
+			if (hr == S_OK)
+			{
+				const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+					std::chrono::steady_clock::now() - timingSubmitAt).count();
+				if (ns > 0)
+					GpuAttribution::NoteExternalTimed("nvof hinted execute (wall)", "longpair_nvof", static_cast<uint64_t>(ns));
+				timingPending = false;
+				return;
+			}
+			if (hr != S_FALSE || !wait)
+				return;
+			SwitchToThread();
+		}
+	}
+
 	void HintedEngine::Close()
 	{
+		PollPendingTiming(false);
+		timingPending = false;
+		eventQuery.Release();
+		context.Release();
 		NV_OF_D3D11_API_FUNCTION_LIST* f = List(functions);
 		if (f)
 			for (auto& entry : registered)
@@ -107,6 +134,11 @@ namespace NvOpticalFlow
 			Close();
 			return false;
 		}
+		this->context = context;
+		D3D11_QUERY_DESC qd{};
+		qd.Query = D3D11_QUERY_EVENT;
+		eventQuery.Release();
+		device->CreateQuery(&qd, &eventQuery);
 		return true;
 	}
 
@@ -152,6 +184,9 @@ namespace NvOpticalFlow
 		output.bwdOutputBuffer = static_cast<NvOFGPUBufferHandle>(bwd);
 		output.outputCostBuffer = static_cast<NvOFGPUBufferHandle>(cost);
 		output.bwdOutputCostBuffer = static_cast<NvOFGPUBufferHandle>(bwdCost);
+		PollPendingTiming(false);
+		const bool wantTiming = ComputeOnce::Enabled() && context && eventQuery && !timingPending;
+		const auto submitAt = wantTiming ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 		const NV_OF_STATUS status = List(functions)->nvOFExecute(static_cast<NvOFHandle>(handle), &input, &output);
 		GpuAttribution::NoteExternal("nvof hinted execute", "longpair_nvof");   // compute-once detector 3: NVOF pass
 		if (status != NV_OF_SUCCESS)
@@ -161,6 +196,12 @@ namespace NvOpticalFlow
 			List(functions)->nvOFGetLastError(static_cast<NvOFHandle>(handle), text, &size);
 			error = std::string("optical flow (hinted) failed: ") + text;
 			return false;
+		}
+		if (wantTiming)
+		{
+			timingSubmitAt = submitAt;
+			context->End(eventQuery);
+			timingPending = true;
 		}
 		return true;
 	}

@@ -12,6 +12,7 @@
 #include <wrl/client.h>
 
 #include <VP-V/core/GpuAttribution.h>
+#include <vprenderer/GpuSpanTimers.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -298,7 +299,8 @@ namespace CameraModel
 		Buf colBx, rowBy, cell;                              // t2..t4
 		ComPtr<ID3D11Buffer> staging;
 		ComPtr<ID3D11Query> done;
-		ComPtr<ID3D11Query> disjoint, tsBegin, tsEnd;
+		GpuSpanTimers gpuTimers;
+		int timingToken = -1;
 
 		// GEM-220 (MISS-motion-5): colTab/rowTab cache key covering EVERY input that determines them.
 		struct TabKey
@@ -464,13 +466,8 @@ namespace CameraModel
 			sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
 			D3D11_QUERY_DESC qd = {};
 			qd.Query = D3D11_QUERY_EVENT;
-			D3D11_QUERY_DESC qj = {};
-			qj.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
-			D3D11_QUERY_DESC qt = {};
-			qt.Query = D3D11_QUERY_TIMESTAMP;
 			if (FAILED(device->CreateBuffer(&bd, nullptr, &im.cb)) || FAILED(device->CreateBuffer(&sd, nullptr, &im.staging))
-				|| FAILED(device->CreateQuery(&qd, &im.done)) || FAILED(device->CreateQuery(&qj, &im.disjoint))
-				|| FAILED(device->CreateQuery(&qt, &im.tsBegin)) || FAILED(device->CreateQuery(&qt, &im.tsEnd)))
+				|| FAILED(device->CreateQuery(&qd, &im.done)))
 				m_why = "buffer / query creation failed";
 		}
 		if (m_why.empty())
@@ -481,7 +478,10 @@ namespace CameraModel
 		}
 		m_ready = m_why.empty();
 		if (!m_ready)
+		{
+			im.gpuTimers.Release();
 			im.device.Reset();
+		}
 		if (why)
 			*why = m_why;
 		return m_ready;
@@ -494,6 +494,12 @@ namespace CameraModel
 		const RefineOptions& o = m_options;
 		if (im.pending)
 			++m_failures.droppedPending;
+		if (im.timingToken >= 0)
+		{
+			double droppedMs = 0.0;
+			im.gpuTimers.PollOne(im.timingToken, false, droppedMs);
+			im.timingToken = -1;
+		}
 		m_lastFailure = RefineGpuFailure::None;
 		im.pending = false;
 		im.isFinal = true;
@@ -681,11 +687,10 @@ namespace CameraModel
 		box.right = static_cast<UINT>(cells) * 4u;
 		ctx->UpdateSubresource(im.cell.buf.Get(), 0, &box, im.cellTab.data(), 0, 0);
 
-		if (m_timing)
+		if (m_timing || ComputeOnce::Enabled())
 		{
-			ctx->Begin(im.disjoint.Get());
-			ctx->End(im.tsBegin.Get());
-			im.timed = true;
+			im.timingToken = im.gpuTimers.Begin(im.device.Get(), "photometric_refine");
+			im.timed = im.timingToken >= 0;
 		}
 		ID3D11Buffer* cbs[1] = { im.cb.Get() };
 		ID3D11ShaderResourceView* srvs[6] = { luma.from, luma.to, im.colBx.srv.Get(), im.rowBy.srv.Get(), im.cell.srv.Get(), nullptr };
@@ -728,10 +733,7 @@ namespace CameraModel
 		ctx->CSSetShaderResources(0, 6, nullSrv);
 		ctx->CSSetShader(nullptr, nullptr, 0);
 		if (im.timed)
-		{
-			ctx->End(im.tsEnd.Get());
-			ctx->End(im.disjoint.Get());
-		}
+			im.gpuTimers.End(im.timingToken);
 		ctx->CopyResource(im.staging.Get(), im.state.buf.Get());
 		ctx->End(im.done.Get());
 		ctx->Flush();
@@ -788,16 +790,19 @@ namespace CameraModel
 		}
 		if (im.timed)
 		{
-			D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj = {};
-			UINT64 t0 = 0, t1 = 0;
-			while (context->GetData(im.disjoint.Get(), &dj, sizeof(dj), 0) == S_FALSE)
-				std::this_thread::yield();
-			if (context->GetData(im.tsBegin.Get(), &t0, sizeof(t0), 0) == S_OK && context->GetData(im.tsEnd.Get(), &t1, sizeof(t1), 0) == S_OK
-				&& !dj.Disjoint && dj.Frequency > 0)
+			double gpuMs = 0.0;
+			if (im.gpuTimers.PollOne(im.timingToken, true, gpuMs))
 			{
-				m_lastTiming.valid = true;
-				m_lastTiming.gpuMs = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency);
+				if (m_timing)
+				{
+					m_lastTiming.valid = true;
+					m_lastTiming.gpuMs = gpuMs;
+				}
+				GpuAttribution::NoteExternalTimed("photometric_refine", "photometric_refine",
+					static_cast<uint64_t>(gpuMs * 1e6 + 0.5));
 			}
+			im.timingToken = -1;
+			im.timed = false;
 		}
 
 		const Params& model = im.model;

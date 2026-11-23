@@ -260,6 +260,43 @@ namespace ComputeOnceTestsNs
 			Assert::IsTrue(AnyLineStarts(lines, "Compute-once gpu owner camera_model passes 1 "));
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(ExternalPassesRecordSubmitCountAndResolvedTime)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")   // registry only: no GPU device
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ExternalPassesRecordSubmitCountAndResolvedTime)
+		{
+			EnabledScope on;
+			GpuAttribution::NoteExternal("engine luma", "source_analysis_luma");
+			GpuAttribution::NoteExternal("engine luma", "source_analysis_luma");
+			GpuAttribution::NoteExternalTimed("engine luma", "source_analysis_luma", 1500000);   // 1.5 ms resolved later
+			GpuAttribution::NoteExternalTimed("engine luma", "source_analysis_luma", 2500000);   // 2.5 ms resolved later
+			GpuAttribution::NoteExternal("nvof execute", "motion_engine_nvof");
+			GpuAttribution::NoteExternalTimed("nvof execute (wall)", "motion_engine_nvof", 3200000);
+
+			const auto owners = GpuAttribution::Global().Owners();
+			bool foundLuma = false, foundNvof = false;
+			for (const auto& o : owners)
+			{
+				if (o.owner == "source_analysis_luma")
+				{
+					foundLuma = true;
+					Assert::AreEqual<uint64_t>(2, o.passes, L"NoteExternalTimed does not double-count passes");
+					Assert::AreEqual<uint64_t>(4000000, o.ns, L"resolved ns accumulated");
+				}
+				else if (o.owner == "motion_engine_nvof")
+				{
+					foundNvof = true;
+					Assert::AreEqual<uint64_t>(1, o.passes);
+					Assert::AreEqual<uint64_t>(3200000, o.ns);
+				}
+			}
+			Assert::IsTrue(foundLuma);
+			Assert::IsTrue(foundNvof);
+			const std::vector<std::string> lines = ComputeOnceReport::Lines();
+			Assert::IsTrue(AnyLineStarts(lines, "Compute-once gpu owner source_analysis_luma passes 2 ms 2.000"));
+			Assert::IsTrue(AnyLineStarts(lines, "Compute-once gpu owner motion_engine_nvof passes 1 ms 3.200"));
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(GpuRulesFirstVpOwnerWinsAndPrivateCopiesAreListed)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")   // registry only: no GPU device
 		END_TEST_METHOD_ATTRIBUTE()

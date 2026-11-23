@@ -283,6 +283,9 @@ namespace NvOpticalFlow
 			QueryPerformanceCounter(&t1);
 			result->gpuMs = frequency.QuadPart > 0 ?
 				static_cast<double>(t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(frequency.QuadPart) : 0.0;
+			if (result->gpuMs > 0.0)
+				GpuAttribution::NoteExternalTimed("nvof execute (wall)", "motion_engine_nvof",
+					static_cast<uint64_t>(result->gpuMs * 1e6 + 0.5));
 		}
 		return true;
 	}

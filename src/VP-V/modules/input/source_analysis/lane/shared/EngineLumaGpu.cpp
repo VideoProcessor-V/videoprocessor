@@ -11,6 +11,7 @@
 #include <d3dcompiler.h>
 
 #include <VP-V/core/GpuAttribution.h>
+#include <vprenderer/GpuSpanTimers.h>
 #include <cstring>
 
 #pragma comment(lib, "d3d11.lib")
@@ -101,6 +102,10 @@ namespace EngineLumaGpu
 		}
 	}
 
+	Kernel::Kernel() = default;
+
+	Kernel::~Kernel() { Close(); }
+
 	bool Kernel::Fail(Cause c, const char* message)
 	{
 		cause = c;
@@ -137,6 +142,7 @@ namespace EngineLumaGpu
 			return Fail(Cause::KernelOpenFailed, "cannot create the engine luma constants");
 		}
 		device = deviceIn;
+		gpuTimers = std::make_unique<GpuSpanTimers>();
 		return true;
 	}
 
@@ -180,6 +186,14 @@ namespace EngineLumaGpu
 
 	void Kernel::Close()
 	{
+		if (gpuTimers)
+		{
+			gpuTimers->PollEach([](const std::string& step, double, uint64_t ns) {
+				GpuAttribution::NoteExternalTimed(step.c_str(), "source_analysis_luma", ns);
+			});
+			gpuTimers->Release();
+			gpuTimers.reset();
+		}
 		ReleaseViews();
 		params.Release();
 		shader.Release();
@@ -223,11 +237,21 @@ namespace EngineLumaGpu
 		ID3D11ShaderResourceView* srvs[1] = { srv };
 		ID3D11UnorderedAccessView* uavs[1] = { uav };
 		ID3D11Buffer* buffers[1] = { params };
+		int spanToken = -1;
+		if (gpuTimers && ComputeOnce::Enabled())
+		{
+			gpuTimers->PollEach([](const std::string& step, double, uint64_t ns) {
+				GpuAttribution::NoteExternalTimed(step.c_str(), "source_analysis_luma", ns);
+			});
+			spanToken = gpuTimers->Begin(device, "engine luma");
+		}
 		context->CSSetShader(shader, nullptr, 0);
 		context->CSSetConstantBuffers(0, 1, buffers);
 		context->CSSetShaderResources(0, 1, srvs);
 		context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
 		context->Dispatch((outW + 7u) / 8u, (outH + 7u) / 8u, 1u);
+		if (gpuTimers && spanToken >= 0)
+			gpuTimers->End(spanToken);
 		GpuAttribution::NoteExternal("engine luma", "source_analysis_luma");   // compute-once detector 3: raw D3D11 pass
 		ID3D11ShaderResourceView* noSrv[1] = { nullptr };
 		ID3D11UnorderedAccessView* noUav[1] = { nullptr };

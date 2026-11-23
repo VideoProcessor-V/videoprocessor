@@ -25,6 +25,7 @@
 #include <VP-V/core/RobustStats.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/estimation/ProducerJobs.h>
+#include <VP-V/modules/motion/estimation/ProducerStages.h>
 #include <VP-V/modules/motion/estimation/EngineLumaRing.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/estimation/VectorProducts.h>
@@ -35,14 +36,15 @@
 #include <d3d11.h>
 #include <atlbase.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
-#include <algorithm>
-#include <cmath>
-#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -205,10 +207,37 @@ namespace MotionAhead
 			flow.fbError.clear();
 	}
 
+	// Persistent small row-parallel helper (slice 16 P2: avoids per-frame std::thread spawns in HalfLuma8).
+	class HalfLumaPool
+	{
+	public:
+		HalfLumaPool() = default;
+		~HalfLumaPool() { Stop(); }
+		HalfLumaPool(const HalfLumaPool&) = delete;
+		HalfLumaPool& operator=(const HalfLumaPool&) = delete;
+
+		void Start(int workers = 2);
+		void Stop();
+		void Run(int totalRows, const std::function<void(int, int)>& fn);
+		bool Active() const { return !threads_.empty(); }
+
+	private:
+		std::mutex mutex_;
+		std::condition_variable workCv_;
+		std::condition_variable doneCv_;
+		std::vector<std::thread> threads_;
+		const std::function<void(int, int)>* fn_ = nullptr;
+		int totalRows_ = 0;
+		int totalWorkers_ = 1;
+		uint64_t generation_ = 0;
+		int remaining_ = 0;
+		bool stop_ = false;
+	};
+
 	// The half-size 8-bit luma of a frame ((w + 1) / 2 x (h + 1) / 2, 2 x 2
 	// averaged; 10-bit codes / 4): P010 / P210 planes read directly, other
 	// formats through the source's sampler. False when the source is not valid.
-	bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH);
+	bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH, HalfLumaPool* pool = nullptr);
 
 	class Producer
 	{
@@ -257,6 +286,12 @@ namespace MotionAhead
 		// before RunQueueWalk (renderer :31352) submits that pass's frames: the capacity always covers the frames handed over.
 		void SetDepth(int depth) { pendingDepth.store(depth, std::memory_order_release); UpdatePendingCapacity(); }
 		void SetLead(int lead) { pendingLead.store(lead, std::memory_order_release); UpdatePendingCapacity(); }
+		// Slice 16 D1 (refs/105 s3.4): measured source frame period in ms (0 = unknown -> no deadline, never skip).
+		void SetSourcePeriodMs(double periodMs) { sourcePeriodMs.store(periodMs > 0.0 && std::isfinite(periodMs) ? periodMs : 0.0, std::memory_order_release); }
+		double SourcePeriodMs() const { return sourcePeriodMs.load(std::memory_order_acquire); }
+		// Owner item 1 guard (105 O5): while any reader declares P2 history behind the render, do not skip late core pairs.
+		void SetHistoryBehindRender(bool needed) { historyBehindRender.store(needed, std::memory_order_release); }
+		bool HistoryBehindRender() const { return historyBehindRender.load(std::memory_order_acquire); }
 		size_t PendingCapacity() const { return maxPendingJobs.load(std::memory_order_acquire); }
 		// general_rate_fixes for the engine's global vote range (FlowVoteRange).
 		void SetGeneralRates(bool on) { generalRates.store(on, std::memory_order_release); }
@@ -279,7 +314,11 @@ namespace MotionAhead
 		void SetCameraConsumes(bool on) { cameraConsumes.store(on, std::memory_order_release); }
 		bool CameraConsumes() const { return cameraConsumes.load(std::memory_order_acquire); }
 		// The hints state in force for the pairs now being made (what Ctrl+I shows and HintsApply uses).
-		bool HintsInForce() const { return TemporalHints(CameraConsumes() ? HintConsumer::Camera : HintConsumer::Other); }
+		bool HintsInForce() const
+		{
+			return temporalHintsForTest.load(std::memory_order_acquire) &&
+				TemporalHints(CameraConsumes() ? HintConsumer::Camera : HintConsumer::Other);
+		}
 		// The one snapshot Ctrl+I's "nvof temporal hints" entry is built from (VectorEngine; FallbackCatalog::NvofTemporalHints).
 		struct HintsState { bool cameraActive = false, inForce = true, cameraOn = false, otherOn = true; };
 		HintsState HintsShown() const
@@ -335,6 +374,7 @@ namespace MotionAhead
 			std::function<bool(uint64_t sequence, uint64_t generation)> job;
 			std::function<bool(const OnDemand::PairRequest& request, OnDemand::Mode mode, Flow& flow)> request;
 			std::function<bool(uint64_t sequence, uint64_t generation)> lostPairStart;
+			std::function<void(uint64_t sequence, bool continuous)> onPairContinuous;
 		};
 		bool StartForTest(std::shared_ptr<TestEngine> engine);
 
@@ -344,8 +384,58 @@ namespace MotionAhead
 		void Prune(uint64_t oldestNeeded) { slot->Prune(oldestNeeded); }
 		VpMotion::P2Slot::Stats StoreStats() const { return slot->GetStats(); }
 
+		// Slice 16 T0 (refs/105 s3.6 / s4 row 0): per-pair stage timings (ms) recorded into a 32-sample ring in Stats.
+		// engineMs is wall time (submit -> completion event: the OFA runs beside the graphics queue, NvOpticalFlow.cpp).
+		struct StageSample
+		{
+			double queueWaitMs = 0.0;
+			double lumaMs = 0.0;
+			double engineMs = 0.0;
+			double mapMs = 0.0;
+			double voteMs = 0.0;
+			double extrasMs = 0.0;
+			double submitToPublishMs = 0.0;
+			double serviceMs = 0.0;
+		};
+		static constexpr size_t kStageRingSize = 32;
+
 		// extrasMs: the trust extras of the last pair (global, cost, consistency) on the worker.
-		struct Stats { unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0; double lastPairMs = 0.0, lumaMs = 0.0, extrasMs = 0.0; double pairMsSum = 0.0; /* SK-MV: the sum of all pair times, for the standing-cost line */ unsigned long long hintedPairs = 0; /* camfix R1: pairs run with temporal hints */ };
+		struct Stats
+		{
+			unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0, late = 0;
+			double lastPairMs = 0.0, lumaMs = 0.0, extrasMs = 0.0;
+			double pairMsSum = 0.0; /* SK-MV: the sum of all pair times, for the standing-cost line */
+			unsigned long long hintedPairs = 0; /* camfix R1: pairs run with temporal hints */
+			double serviceEmaMs = 0.0;   // Slice 16 D1: EMA of pair service time (ms)
+			double periodMs = 0.0;       // Slice 16 D1: last measured source period (ms; 0 = unknown)
+			bool behind = false;         // Slice 16 D1: sustained late > 0 with serviceEmaMs > periodMs
+			StageSample lastStage;
+			std::array<StageSample, kStageRingSize> stageRing{};
+			size_t stageCount = 0;
+			size_t stageNext = 0;
+
+			void RecordStage(const StageSample& sample)
+			{
+				lastStage = sample;
+				stageRing[stageNext] = sample;
+				stageNext = (stageNext + 1) % kStageRingSize;
+				if (stageCount < kStageRingSize)
+					++stageCount;
+			}
+
+			double StagePercentile(double StageSample::*field, double pct) const
+			{
+				if (stageCount == 0)
+					return 0.0;
+				std::array<double, kStageRingSize> sorted{};
+				for (size_t i = 0; i < stageCount; ++i)
+					sorted[i] = stageRing[i].*field;
+				std::sort(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(stageCount));
+				const double clamped = pct < 0.0 ? 0.0 : (pct > 1.0 ? 1.0 : pct);
+				const size_t idx = static_cast<size_t>(clamped * static_cast<double>(stageCount - 1) + 0.5);
+				return sorted[(std::min)(idx, stageCount - 1)];
+			}
+		};
 		Stats GetStats() const;
 
 		// Bug hunt 35 #1: the stop/restart state (FallbackCatalog::VectorProducer builds the entry).
@@ -359,9 +449,18 @@ namespace MotionAhead
 		Health GetHealth() const;
 		// Test seam: the back-off waits (ms) are scaled by this divisor (1 = real time).
 		void SetRecoveryTimeDivisorForTest(unsigned divisor) { recoveryDivisor.store(divisor < 1 ? 1 : divisor, std::memory_order_release); }
+		// Test seam (slice 16 P3, 105 s3.7): allow disabling temporal hints to prove serial == pipelined identity with hints off.
+		void SetTemporalHintsForTest(bool enabled) { temporalHintsForTest.store(enabled, std::memory_order_release); }
 
 	private:
-		struct Job { uint64_t sequence = 0, generation = 0; AnalysisLumaSource luma; bool breakBefore = false; };
+		struct Job
+		{
+			uint64_t sequence = 0, generation = 0;
+			AnalysisLumaSource luma;
+			bool breakBefore = false;
+			std::chrono::steady_clock::time_point submitTime{};
+			std::chrono::steady_clock::time_point deadline{};
+		};
 		void Worker();
 		bool Process(const Job& job);
 		bool ProcessJobForTest(const Job& job);
@@ -378,10 +477,85 @@ namespace MotionAhead
 		// GF-P4 MUST-12: privateSite names the U3 private-copy count, recorded only when the private HalfLuma8 ran.
 		bool LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& w, int& h,
 			const char* privateSite);
-		// One engine run on (a, b) at w x h, read back into a new Flow with its global motion and trust extras. ran = the
-		// engine itself succeeded (the readback may still fail). False = failed (error set).
-		bool RunPair(ID3D11Texture2D* a, ID3D11Texture2D* b, int w, int h, bool continuous, uint64_t timedSequence, bool& ran,
-			std::shared_ptr<Flow>& flow, double& extrasMs);
+		// Slice 16 P2 (refs/105 s3.2): ENGINE submits NVOF + CopyResource + End(event) into one of kStagingSets
+		// sets; Map/Unmap run on ENGINE only once GetData(DONOTFLUSH) == S_OK, then the copied flow buffers ride
+		// BackQueue to BACK (parallel 2-wide FlowGlobal vote + FlowExtras + ordered P2 Publish / Request Answer).
+		enum : int { kStagingSets = 3 };
+		struct StagingSet
+		{
+			CComPtr<ID3D11Texture2D> flowRead[2];
+			CComPtr<ID3D11Texture2D> costRead[2];
+			CComPtr<ID3D11Query> eventQuery;
+			int halfW = 0, halfH = 0;
+			int lumaSlotA = EngineLumaRing::kNoSlot;
+			int lumaSlotB = EngineLumaRing::kNoSlot;
+			bool usesRequestTex = false;
+			uint64_t fromSeq = 0, toSeq = 0, generation = 0, epoch = 0;
+			bool isRequest = false;
+			bool publishToSlot = false;
+			bool forceOffChain = false;
+			bool generalRates = true;
+			bool hinted = false;
+			std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo;
+			std::chrono::steady_clock::time_point submitTime{};
+			std::chrono::steady_clock::time_point workStartTime{};
+			double queueWaitMs = 0.0;
+			double lumaMs = 0.0;
+			OnDemand::Pending pendingRequest;
+			OnDemand::Clock::time_point requestTaken{};
+			double requestQueuedMs = 0.0;
+		};
+		struct BackItem
+		{
+			std::shared_ptr<Flow> flow;
+			uint64_t fromSeq = 0, toSeq = 0, generation = 0, epoch = 0;
+			bool isRequest = false;
+			bool publishToSlot = false;
+			bool forceOffChain = false;
+			bool generalRates = true;
+			bool hinted = false;
+			std::chrono::steady_clock::time_point submitTime{};
+			std::chrono::steady_clock::time_point workStartTime{};
+			StageSample stage;
+			OnDemand::Pending pendingRequest;
+			OnDemand::Clock::time_point requestTaken{};
+			double requestQueuedMs = 0.0;
+
+			BackItem() = default;
+			BackItem(BackItem&& other) noexcept = default;
+			BackItem& operator=(BackItem&& other) noexcept = default;
+			BackItem(const BackItem&) = delete;
+			BackItem& operator=(const BackItem&) = delete;
+			~BackItem()
+			{
+				if (isRequest && pendingRequest.state && !pendingRequest.state->fulfilled.load(std::memory_order_acquire))
+				{
+					OnDemand::PairResult dropped;
+					dropped.status = OnDemand::Status::Unavailable;
+					dropped.queuedMs = requestQueuedMs;
+					OnDemand::Fulfil(*pendingRequest.state, std::move(dropped));
+				}
+			}
+		};
+
+		void StartPipelineThreads();
+		void StopPipelineThreads();
+		void BackWorker();
+		void VoteWorker();
+		void RunFlowGlobalsParallel(Flow& flow, bool general);
+		// Non-blocking poll of oldest Submitted staging sets; maps any whose event signalled S_OK and pushes to BACK.
+		// Returns false on a D3D11 map/query failure.
+		bool PollReadyStagingSets(bool& anyCompleted);
+		// Wait until a specific staging slot (or all in-flight slots when targetSlot == -1) completes.
+		// If discard is true, completed sets are discarded rather than mapped/forwarded (Stop/recovery).
+		bool DrainStagingSets(bool discard, int targetSlot = -1);
+		bool WaitForLumaSlotFree(int lumaSlot);
+		bool WaitForRequestTexFree();
+		bool SubmitPairAsync(ID3D11Texture2D* a, ID3D11Texture2D* b, int halfW, int halfH, bool continuous, uint64_t timedSequence,
+			bool& ran, int& outSetIndex);
+		bool MapAndForwardStagingSet(int setIndex, double engineMs);
+		void ReleaseStagingSetMeta(int setIndex);
+		void FailStagingSetRequest(int setIndex, OnDemand::Status status);
 		bool EnsureRequestTextures(int w, int h);   // W2-C5b: the off-chain pair (made on first use; its own VRAM declaration)
 		void ReleaseRequestTextures();
 		bool EnsureSize(int halfW, int halfH);
@@ -407,6 +581,10 @@ namespace MotionAhead
 		std::atomic<uint64_t> lastSubmitted{ 0 };
 		std::atomic<size_t> maxPendingJobs{ 6 };
 		std::atomic<int> pendingDepth{ 0 }, pendingLead{ 0 };   // B1: the inputs of maxPendingJobs
+		std::atomic<double> sourcePeriodMs{ 0.0 };              // D1: measured source frame period in ms (0 = unknown)
+		std::atomic<bool> historyBehindRender{ false };         // D1 owner guard: keep computing late pairs for backward P2 readers
+		unsigned onTimeRecoveryRun = 0;                         // under mutex: consecutive on-time pairs to clear `stats.behind`
+		void UpdateBehindLocked(bool wasLate, double serviceMs);
 		void UpdatePendingCapacity()
 		{
 			const int d = pendingDepth.load(std::memory_order_acquire), l = pendingLead.load(std::memory_order_acquire);
@@ -425,6 +603,7 @@ namespace MotionAhead
 		ProducerRecovery recovery;          // under mutex
 		std::string stopError;              // under mutex: the error that caused the last stop
 		std::atomic<unsigned> recoveryDivisor{ 1 };
+		std::atomic<bool> temporalHintsForTest{ true };
 		CComPtr<IDXGIAdapter> renderAdapter;   // the render GPU (set in Start, read by the worker)
 
 		// Worker side.
@@ -438,7 +617,22 @@ namespace MotionAhead
 		enum : int { kLumaRingSlots = 3 };
 		CComPtr<ID3D11Texture2D> lumaTex[kLumaRingSlots];
 		EngineLumaRing lumaRing{ kLumaRingSlots, 0 };
-		CComPtr<ID3D11Texture2D> flowTex[2], costTex[2], flowRead[2], costRead[2];
+		CComPtr<ID3D11Texture2D> flowTex[2], costTex[2];
+		StagingSet stagingSets[kStagingSets];
+		Pipeline::StagingRing<kStagingSets> stagingRing;
+		Pipeline::BackQueue<BackItem> backQueue{ 8 };
+		Pipeline::OrderedPublishGate publishGate;
+		std::thread backThread;
+		// Persistent 2nd vote thread: BACK runs forward FlowGlobal while voteThread runs backward FlowGlobal in parallel.
+		std::mutex voteMutex;
+		std::condition_variable voteWorkCv;
+		std::condition_variable voteDoneCv;
+		std::thread voteThread;
+		Flow* voteFlow = nullptr;
+		bool voteGeneral = true;
+		bool votePending = false;
+		bool voteStop = false;
+		HalfLumaPool frontPool;
 		bool havePrevious = false;
 		uint64_t previousSequence = 0, previousGeneration = 0;
 		uint64_t hintSequence = UINT64_MAX, hintGeneration = 0;   // the "to" frame of the engine's last pair

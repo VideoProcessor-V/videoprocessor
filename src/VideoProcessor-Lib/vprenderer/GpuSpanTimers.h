@@ -57,8 +57,9 @@ public:
 		context->End(s.disjoint);
 		s.state = State::Pending;
 	}
-	// Once per refresh: finished spans into the accumulator as Kind::GpuGroup samples.
-	void Poll(PassTimers::Accumulator& acc)
+	// Once per refresh: resolve finished spans (DONOTFLUSH, never waits) and invoke onResolved(name, ms, ns).
+	template<class Fn>
+	void PollEach(Fn&& onResolved)
 	{
 		if (!context)
 			return;
@@ -73,7 +74,11 @@ public:
 				context->GetData(s.end, &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK)
 			{
 				if (!dj.Disjoint && dj.Frequency > 0 && t1 >= t0)
-					acc.Add(PassTimers::Kind::GpuGroup, s.name, static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency));
+				{
+					const double ms = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency);
+					const uint64_t ns = static_cast<uint64_t>(ms * 1e6 + 0.5);
+					onResolved(s.name, ms, ns);
+				}
 				s.state = State::Free;
 			}
 			else if (++s.age > kMaxAgeFrames)
@@ -82,6 +87,51 @@ public:
 				s.state = State::Free;
 			}
 		}
+	}
+	// Resolve a specific Pending span by token (non-blocking if wait == false; yields until ready if wait == true).
+	// Frees the slot once resolved (or on disjoint/error). Returns true with msOut set when a valid duration resolved.
+	bool PollOne(int token, bool wait, double& msOut)
+	{
+		msOut = 0.0;
+		if (token < 0 || static_cast<size_t>(token) >= kSpans || !context)
+			return false;
+		Span& s = spans[static_cast<size_t>(token)];
+		if (s.state != State::Pending)
+			return false;
+		D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+		UINT64 t0 = 0, t1 = 0;
+		const UINT flags = wait ? 0u : D3D11_ASYNC_GETDATA_DONOTFLUSH;
+		for (;;)
+		{
+			const HRESULT hrD = context->GetData(s.disjoint, &dj, sizeof(dj), flags);
+			if (hrD == S_FALSE)
+			{
+				if (!wait)
+					return false;
+				SwitchToThread();
+				continue;
+			}
+			if (FAILED(hrD))
+			{
+				s.state = State::Free;
+				return false;
+			}
+			break;
+		}
+		const bool got = context->GetData(s.begin, &t0, sizeof(t0), flags) == S_OK &&
+			context->GetData(s.end, &t1, sizeof(t1), flags) == S_OK && !dj.Disjoint && dj.Frequency > 0 && t1 >= t0;
+		s.state = State::Free;
+		if (!got)
+			return false;
+		msOut = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency);
+		return true;
+	}
+	// Once per refresh: finished spans into the accumulator as Kind::GpuGroup samples.
+	void Poll(PassTimers::Accumulator& acc)
+	{
+		PollEach([&acc](const std::string& name, double ms, uint64_t) {
+			acc.Add(PassTimers::Kind::GpuGroup, name, ms);
+		});
 	}
 	// Before the device goes.
 	void Release()
