@@ -43,7 +43,7 @@ struct StaticClass {
 
 // Every id of the fixed table is classed EXPLICITLY: there is no default class (C4 s3a; owner OD:391, 2026-11-11 07:45: the regulator
 // switches off optional extras only, "never core, never TD"; 115 #47 / #59). A new id fails this assert and the per-id test until classed.
-static_assert(kSkeletonProductEnd == 36, "a new product id: class it explicitly in StaticClassOf (no default class)");
+static_assert(kSkeletonProductEnd == 37, "a new product id: class it explicitly in StaticClassOf (no default class)");
 
 inline StaticClass StaticClassOf(ProductId id)
 {
@@ -71,9 +71,9 @@ inline StaticClass StaticClassOf(ProductId id)
     // held-state records, P15c causal quality pattern
     case kP0RebaseDecision: case kP7gCameraGuide: case kP13SourceRing: case kSourceIdentity: case kSourceGeometry: case kQualityPatternCausal:
         return StaticClass{ JobClass::Fill, true };
-    // the C3 fixed-table ids 30..34 (R14-95): optional fill under OD:391 (1) until each lands with its owner fill; the landing lane
+    // the C3 fixed-table ids 30..35 (R14-95 + CB 4a P10g reservation): optional fill under OD:391 (1) until each lands with its owner fill; the landing lane
     // re-classes its id here if the owner rules it core
-    case kBandMemo: case kEdgeMap: case kFocusMap: case kRoomLight: case kComposedVectors:
+    case kBandMemo: case kEdgeMap: case kFocusMap: case kRoomLight: case kComposedVectors: case kP10gGrainLevel:
         return StaticClass{ JobClass::Fill, true };
     }
     return StaticClass{ JobClass::Fill, false, false };   // not an id of the table: no job (never admitted) and visibly unclassed

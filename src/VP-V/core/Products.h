@@ -99,18 +99,20 @@ enum : ProductId {
     kFocusMap = 32,       // 32 focus_map (L-FOCUS; RESERVED until it lands)
     kRoomLight = 33,      // 33 room_light (DV block; RESERVED until it lands)
     kComposedVectors = 34,// 34 composed_vectors (ECV: VpComposed::Product, modules/motion/estimation/composed; the code has landed, the id stays RESERVED until its registry decl + reader row land, lead ruling SHOULD S3)
-    // Id 35 (CP-A1-D4-CAMLABEL-FIELDCOPY, lead ruling): the P7 fit field, published WITH P7 by the camera worker and read by P8.
-    kCameraFitField = 35, // 35 p7f_camera_fit_field (CPU, declared lane product; the field the P7 record was fitted from)
-    kSkeletonProductEnd = 36
+    // Id 35 (lead20/compose-CE-p7f-renumber.md, coordinator-confirmed): CB's P10g grain_level keeps 35 (RESERVED here until 4a lands).
+    kP10gGrainLevel = 35, // 35 grain_level (P10g; RESERVED until member 4a lands)
+    // Id 36 (CP-A1-D4-CAMLABEL-FIELDCOPY, renumbered 35 -> 36 per lead20/compose-CE-p7f-renumber.md): the P7 fit field, published WITH P7 by the camera worker and read by P8.
+    kCameraFitField = 36, // 36 p7f_camera_fit_field (CPU, declared lane product; the field the P7 record was fitted from)
+    kSkeletonProductEnd = 37
 };
-static_assert(kSourceGeometry == 29 && kBandMemo == kSourceGeometry + 1 && kCameraFitField == kComposedVectors + 1 && kSkeletonProductEnd == kCameraFitField + 1,
-              "the fixed product-id table: 29 source_geometry, 30..34 as listed, 35 camera fit field, End 36");
+static_assert(kSourceGeometry == 29 && kBandMemo == kSourceGeometry + 1 && kP10gGrainLevel == kComposedVectors + 1 && kCameraFitField == kP10gGrainLevel + 1 && kSkeletonProductEnd == kCameraFitField + 1,
+              "the fixed product-id table: 29 source_geometry, 30..35 as listed (35 reserved for CB P10g), 36 camera fit field, End 37");
 
 // Ids of the fixed table whose product has not landed: the registry has an ABSENT slot there (a default ProductDecl with id kNoProduct: no
 // token, no inputs, no reader row, no catalog row), so ids stay indexes and Size() == kSkeletonProductEnd. Registry::Validate accepts an
 // absent slot ONLY at a listed id and rejects a real declaration at a listed id; Has() is false for an absent slot, so any input naming one
 // fails closed ("unknown input product"). The lane that lands a product declares it under its fixed number and deletes the number here.
-constexpr ProductId kReservedProductIds[] = { kBandMemo, kFocusMap, kRoomLight, kComposedVectors };
+constexpr ProductId kReservedProductIds[] = { kBandMemo, kFocusMap, kRoomLight, kComposedVectors, kP10gGrainLevel };
 constexpr size_t kReservedProductCount = sizeof(kReservedProductIds) / sizeof(kReservedProductIds[0]);
 constexpr bool IsReservedProduct(ProductId id)
 {
@@ -123,7 +125,7 @@ constexpr bool IsReservedProduct(ProductId id)
 constexpr const char* ReservedProductName(ProductId id)
 {
     return id == kBandMemo ? "band_memo" : id == kFocusMap ? "focus_map" : id == kRoomLight ? "room_light"
-         : id == kComposedVectors ? "composed_vectors" : "";
+         : id == kComposedVectors ? "composed_vectors" : id == kP10gGrainLevel ? "grain_level" : "";
 }
 
 // v1 names of ids 16-18 (kept so existing readers compile; the tokens and contracts are the v2 ones above).
@@ -1082,7 +1084,7 @@ inline void AppendCameraFitFieldProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p);
 }
 
-// Pads the reserved ids before (30) and after (32..34) edge_map, then appends the camera fit field (id 35), so EVERY caller that completes the
+// Pads the reserved ids before (30) and after (32..35) edge_map, then appends the camera fit field (id 36), so EVERY caller that completes the
 // skeleton set (SkeletonProducts, RegionEvidence) gets the same id-indexed registry of Size() == kSkeletonProductEnd.
 inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
 {
