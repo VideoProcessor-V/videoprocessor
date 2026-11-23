@@ -238,6 +238,8 @@ namespace VideoProcessorTest
 			module.SetSourceDownscales(true);
 
 			// 4. Both light domains, the same weight map (edges from the source).
+			// State the brighter -> scene cut for P4 (FIX-X5-CUT-P4: matches Step 2's injected cut verdicts).
+			cutSequences.insert(sequence + 1);
 			render(scene, 256, 160, true, noGrain, false, true);
 			const auto linearStats = grainNow(scene, noGrain);
 			// Bug hunt 34 item 1: on D3D11 the statistics come through the non-blocking staging
