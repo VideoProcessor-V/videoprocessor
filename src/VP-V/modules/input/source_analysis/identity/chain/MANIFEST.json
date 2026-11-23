@@ -28,6 +28,9 @@
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainEvidenceLog.cpp",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainResidualSpectrum.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainChromaEstimator.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainPatternVoter.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/README.md",
     "src/VP-V/modules/input/source_analysis/identity/tests/ChainUnitTests.cpp",
     "src/VP-V/modules/input/source_analysis/identity/tests/ChainSafetyRulesTests.cpp",
@@ -41,7 +44,10 @@
     "src/VP-V/modules/input/source_analysis/identity/tests/ChainJointLatchTests.cpp",
     "src/VP-V/modules/input/source_analysis/identity/tests/ChainEdgeStatsTests.cpp",
     "src/VP-V/modules/input/source_analysis/identity/tests/SourceIdStageS2Tests.cpp",
-    "src/VP-V/modules/input/source_analysis/identity/tests/SourceIdStageS3Tests.cpp"
+    "src/VP-V/modules/input/source_analysis/identity/tests/SourceIdStageS3Tests.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainResidualSpectrumTests.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainChromaEstimatorTests.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainPatternVoterTests.cpp"
   ],
   "forwarding_headers": [],
   "components": {
