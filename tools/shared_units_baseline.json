@@ -301,6 +301,12 @@
      "pattern": "length\\(vec2\\(gx, gy\\)\\) \\* 0\\.25",
      "kind": "false_positive",
      "reason": "Sobel gradient normalisation, not a downsample (gate-C1-batch2 row 0a9e66738: verified FP)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/grain_split/BandMemoFill.h",
+     "pattern": "out\\.declineReason = half \\? \"band_memo: no GPU half luma plane",
+     "kind": "false_positive",
+     "reason": "diagnostic decline string naming P1 Acquire failure, not a 2x2 downsample (C8 slice 8 BandMemoFill.h:126)"
     }
    ]
   },
