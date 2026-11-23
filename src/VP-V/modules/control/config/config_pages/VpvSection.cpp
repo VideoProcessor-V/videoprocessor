@@ -481,6 +481,24 @@ namespace Vpv
 			return text;
 		}
 
+		// Schema-coverage alias for VP-V-only renderer-profile controls (Rule 32):
+		// these live solely on the VP-V master page ("vpv.<unit>.<key>") with no duplicate
+		// Bill-page widget. Attach a non-widget QObject alias named "config.vprenderer.<key>"
+		// to the live control so schema coverage (findChildren<QObject*>) sees it while all
+		// QWidget* UI/layout/inventory scans ignore it and lifetime stays bound to the control.
+		void AttachCoverageAlias(const std::shared_ptr<State>& state, QWidget* control, const QString& key)
+		{
+			if (!control) return;
+			const QString aliasName = state->host.upstreamControlName
+				? state->host.upstreamControlName(key)
+				: (QStringLiteral("config.vprenderer.") + key);
+			if (aliasName.isEmpty()) return;
+			if (state->host.upstreamRoot && state->host.upstreamRoot->findChild<QWidget*>(aliasName)) return;
+			if (state->root && state->root->findChild<QWidget*>(aliasName)) return;
+			auto* alias = new QObject(control);
+			alias->setObjectName(aliasName);
+		}
+
 		// A VP-V toggle: a choice with "Not set (default: ...)" first; it writes the key in the profile.
 		void AddToggleRow(const std::shared_ptr<State>& state, const QString& unitId, const Toggle& toggle, QFormLayout* form)
 		{
@@ -488,6 +506,7 @@ namespace Vpv
 			auto* combo = new QComboBox;
 			const QString key = Q(toggle.key);
 			combo->setObjectName(ObjectName(unitId + QLatin1Char('.') + key));
+			AttachCoverageAlias(state, combo, key);
 			const Retirement* retiring = table.FindRetirement(toggle.key, "vprenderer");
 			const QString label = retiring ? QStringLiteral("%1 (%2)").arg(Q(toggle.label), RetirementCaption(*retiring)) : Q(toggle.label);
 			combo->setAccessibleName(label);
@@ -568,6 +587,7 @@ namespace Vpv
 			auto* edit = new QLineEdit;
 			const QString key = Q(spec.key);
 			edit->setObjectName(ObjectName(unitId + QLatin1Char('.') + key));
+			AttachCoverageAlias(state, edit, key);
 			edit->setAccessibleName(Q(spec.label));
 			edit->setPlaceholderText(QStringLiteral("Default: %1").arg(Q(spec.shownDefault)));
 			edit->setToolTip(Q(spec.tip) + QStringLiteral("\n\nKey %1 (renderer profile).").arg(key));
