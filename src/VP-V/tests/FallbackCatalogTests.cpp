@@ -134,6 +134,52 @@ namespace FallbackCatalogTest
 			Assert::IsFalse(plan.fallback.engaged);
 		}
 
+		TEST_METHOD(VpDebandEngagesOnlyWhenActiveWithoutYieldAndFailed)
+		{
+			// Engaged when VP deband runs without libplacebo yielding and fails (empty error).
+			const Decision emptyErr = VpDeband(true, false, true, true, false);
+			Assert::IsTrue(emptyErr.engaged);
+			Assert::AreEqual(std::string("vp deband"), emptyErr.id);
+			Assert::IsTrue(Has(emptyErr, "rendered without VP deband"));
+			Assert::AreEqual(std::string("rendered without VP deband (VP debander failed)"), emptyErr.reason);
+
+			// Engaged with a non-empty error string: carries both the fallback wording and the error text.
+			const Decision withErr = VpDeband(true, false, true, true, false, "no dummy weight texture");
+			Assert::IsTrue(withErr.engaged);
+			Assert::AreEqual(std::string("vp deband"), withErr.id);
+			Assert::IsTrue(Has(withErr, "rendered without VP deband") && Has(withErr, "no dummy weight texture"));
+
+			// Released when each guard flips individually.
+			const Decision notActive = VpDeband(false, false, true, true, false, "err");
+			Assert::IsFalse(notActive.engaged, L"vpActive=false releases");
+			Assert::AreEqual(std::string("vp deband"), notActive.id);
+
+			const Decision yields = VpDeband(true, true, true, true, false, "err");
+			Assert::IsFalse(yields.engaged, L"libplaceboYieldsToVp=true releases (handled by 'deband')");
+			Assert::AreEqual(std::string("vp deband"), yields.id);
+
+			const Decision slotOff = VpDeband(true, false, false, true, false, "err");
+			Assert::IsFalse(slotOff.engaged, L"slotRuns=false releases");
+			Assert::AreEqual(std::string("vp deband"), slotOff.id);
+
+			const Decision notFailed = VpDeband(true, false, true, false, false, "err");
+			Assert::IsFalse(notFailed.engaged, L"vpFailed=false releases");
+			Assert::AreEqual(std::string("vp deband"), notFailed.id);
+
+			const Decision dvTunnel = VpDeband(true, false, true, true, true, "err");
+			Assert::IsFalse(dvTunnel.engaged, L"dvTunnelPicture=true releases");
+			Assert::AreEqual(std::string("vp deband"), dvTunnel.id);
+
+			// Sync engage + release round-trip.
+			FallbackStatus::Registry registry;
+			Assert::IsTrue(Sync(registry, withErr));
+			Assert::IsTrue(registry.Engaged("vp deband"));
+			Assert::IsFalse(Sync(registry, withErr), L"same decision again changes nothing");
+			Assert::IsTrue(Sync(registry, notFailed));
+			Assert::IsFalse(registry.Engaged("vp deband"));
+			Assert::IsFalse(Sync(registry, notFailed), L"releasing twice changes nothing");
+		}
+
 		TEST_METHOD(MotionPresentationAndRefresh)
 		{
 			Assert::IsFalse(Motion(true, false, false).engaged);
