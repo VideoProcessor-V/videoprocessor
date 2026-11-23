@@ -21,7 +21,7 @@
 // GetHealth() and FallbackCatalog::VectorProducer show the state.
 
 #include <AnalysisLumaSource.h>
-#include <VP-V/core/LaneInterfaces.h>
+#include <VP-V/core/P1SourceInterface.h>
 #include <VP-V/core/RobustStats.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/estimation/ProducerJobs.h>

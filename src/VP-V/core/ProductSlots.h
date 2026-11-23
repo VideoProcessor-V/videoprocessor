@@ -62,7 +62,7 @@ using VpAncestry::Provenance;
 
 enum class SlotState : uint8_t {
     Empty = 0,          // free; seq = the last frame that used it
-    Writing,            // the lane owns the ring buffer and laneHdr
+    Writing,            // the lane entered Begin and owns the ring buffer and laneHdr
     Published,          // lane result complete (stamp last), not sealed yet
     Sealed,             // the render accepted the lane result (ring buffer, laneHdr)
     Abandoned,          // the lane stopped without a result; ring buffer free
@@ -72,6 +72,7 @@ enum class SlotState : uint8_t {
     LiveLaneOwned,      // as Live, the lane still holds the ring buffer
     Released,           // render done; the lane reuses it after the release fence passes
     ReleasedLaneOwned,  // render done; the lane still holds the ring buffer (its ack frees it)
+    Claimed = 11,       // phase-1 claim: lane reserved the slot, has not called StartWriting/Begin yet
 };
 
 inline const char* Token(SlotState s)
@@ -88,6 +89,7 @@ inline const char* Token(SlotState s)
     case SlotState::LiveLaneOwned: return "live_lane_owned";
     case SlotState::Released: return "released";
     case SlotState::ReleasedLaneOwned: return "released_lane_owned";
+    case SlotState::Claimed: return "claimed";
     }
     return "?";
 }
@@ -261,6 +263,7 @@ struct SlotCounters {
                                                   // when the slot is reused, so pending = live-filled + late + absent + unfinalised + in flight
     std::atomic<uint64_t> lateResyncRejected{ 0 };// of sealAbsent: the stamp moved between N and the final seal (a resync after N)
     std::atomic<uint64_t> onTimeAbsent{ 0 };      // reader frames (at their own seal) that found this lagged product's frame absent
+    std::atomic<uint64_t> releaseThroughExactOrderErrors{ 0 };   // FIX3-D2: ReleaseThrough(upToSeq) found SlotOf(upToSeq) neither render-held nor discarded (or duplicate/out-of-order)
 };
 
 class SlotSet {
@@ -349,7 +352,7 @@ public:
         SlotWord next;
         next.seq = mine;
         next.gen = uint16_t(w.gen + 1u);
-        next.state = SlotState::Writing;
+        next.state = SlotState::Claimed;
         next.prov = prov;
         // seq_cst: pairs with PinRef's fetch_add + load (Dekker) so a pinned reader is seen.
         if (!s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_seq_cst, std::memory_order_acquire)) {
@@ -367,6 +370,24 @@ public:
         return ClaimResult::Claimed;
     }
 
+    // Lane: phase-2 atomic transition Claimed -> Writing immediately before Begin(job) or writing the ring buffer.
+    // Fails cleanly if Seal or Discard preempted the slot first (eliminates pre-Begin duplicate race by 1 CAS).
+    bool StartWriting(const LaneTicket& t)
+    {
+        if (!t.valid)
+            return false;
+        Slot& s = slots_[t.slot];
+        SlotWord expect;
+        expect.seq = Biased(t.seq);
+        expect.gen = t.gen;
+        expect.state = SlotState::Claimed;
+        expect.prov = t.prov;
+        SlotWord next = expect;
+        next.state = SlotState::Writing;
+        uint64_t raw = Pack(expect);
+        return s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_acq_rel, std::memory_order_acquire);
+    }
+
     // Lane: a reader of the previous tenant may still hold a pin; write only once this is true.
     bool Writable(const LaneTicket& t) const
     {
@@ -382,7 +403,8 @@ public:
         if (!t.valid)
             return false;
         const SlotWord w = Unpack(slots_[t.slot].word.load(std::memory_order_acquire));
-        return w.seq == Biased(t.seq) && w.gen == t.gen && w.state == SlotState::Writing;
+        return w.seq == Biased(t.seq) && w.gen == t.gen
+               && (w.state == SlotState::Claimed || w.state == SlotState::Writing);
     }
 
     // Lane: publish after the write AND the producer fence (stamp last). producerSignal = the
@@ -395,7 +417,10 @@ public:
         if (producerCompleted < producerSignal)
             return PublishResult::NotComplete;
         Slot& s = slots_[t.slot];
-        if (!LaneContinue(t)) {
+        uint64_t raw = s.word.load(std::memory_order_acquire);
+        const SlotWord w = Unpack(raw);
+        if (w.seq != Biased(t.seq) || w.gen != t.gen
+            || (w.state != SlotState::Writing && w.state != SlotState::Claimed)) {
             // Rejected (or a stale/copied ticket): never touch the header of the slot's current
             // tenant. The render only reads laneHdr in Published/Sealed, which this ticket cannot be.
             counters_.lateDiscards.fetch_add(1, std::memory_order_relaxed);
@@ -408,14 +433,10 @@ public:
         s.laneHdr.cgen = cgen;
         s.laneCgen.store(cgen, std::memory_order_relaxed);
         s.producerValue.store(producerSignal, std::memory_order_relaxed);
-        SlotWord expect;
-        expect.seq = Biased(t.seq);
-        expect.gen = t.gen;
-        expect.state = SlotState::Writing;
-        expect.prov = t.prov;
+        SlotWord expect = w;
         SlotWord next = expect;
         next.state = SlotState::Published;
-        uint64_t raw = Pack(expect);
+        raw = Pack(expect);
         if (s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_acq_rel, std::memory_order_acquire)) {
             counters_.published.fetch_add(1, std::memory_order_relaxed);
             t.valid = false;
@@ -504,6 +525,15 @@ public:
     template <class Check>
     SealResult Seal(uint64_t seq, Check check)
     {
+        return Seal(seq, check, []() { return false; });
+    }
+
+    // Seal frame N with an optional cooperative handoff callback `onWriting()` invoked once if
+    // the slot holds frame N in SlotState::Writing (used strictly for Backend::Cpu to finish an
+    // in-flight pure-CPU job on the render thread and avoid duplicate Begin/ComputeOnce).
+    template <class Check, class OnWriting>
+    SealResult Seal(uint64_t seq, Check check, OnWriting onWriting)
+    {
         SealResult res;
         if (seq > kSlotSeqMask - ring_) {
             counters_.orderErrors.fetch_add(1, std::memory_order_relaxed);
@@ -511,6 +541,7 @@ public:
         }
         Slot& s = slots_[SlotOf(seq)];
         const uint64_t mine = Biased(seq);
+        bool assisted = false;
         for (;;) {
             uint64_t raw = s.word.load(std::memory_order_acquire);
             const SlotWord w = Unpack(raw);
@@ -523,7 +554,17 @@ public:
             }
             if (w.seq == mine) {
                 switch (w.state) {
+                case SlotState::Claimed:
+                    // Lane reserved the slot but has not entered Writing (Begin) yet: preempt so
+                    // StartWriting fails atomically (0 duplicate Begin) while keeping laneHdr protected until Ack.
+                    next.state = SlotState::RejectedLaneOwned;
+                    reason = SealReason::LaneLate;
+                    break;
                 case SlotState::Writing:
+                    if (!assisted && onWriting()) {
+                        assisted = true;
+                        continue;   // cooperative handoff updated the slot (e.g. Published); re-read
+                    }
                     next.state = SlotState::RejectedLaneOwned;
                     reason = SealReason::LaneLate;
                     break;
@@ -555,6 +596,7 @@ public:
                 }
             } else {
                 switch (w.state) {
+                case SlotState::Claimed:
                 case SlotState::Writing:   // stale lane work on an older frame (N3: lane-owned)
                     next.state = SlotState::RejectedLaneOwned;
                     reason = SealReason::LaneLate;
@@ -578,7 +620,8 @@ public:
                 next.prov = Provenance::None;
             if (!s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_acq_rel,
                                                 std::memory_order_acquire))
-                continue;   // the lane published / acknowledged meanwhile: decide again
+                continue;   // the lane published / acknowledged / started writing meanwhile: decide again
+            s.discarded = false;
             if (next.state == SlotState::Sealed) {
                 counters_.sealed.fetch_add(1, std::memory_order_relaxed);
                 res.outcome = SealOutcome::Sealed;
@@ -623,6 +666,7 @@ public:
             next.state = SlotState::Sealed;
             if (!s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_acq_rel, std::memory_order_acquire))
                 continue;
+            s.discarded = false;
             counters_.sealed.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
@@ -764,50 +808,47 @@ public:
     // Render: release every render-held slot with frame seq <= upToSeq (backlog-flush / skipped-retire recovery).
     // Preserves Release()'s exact state transitions, releaseValue monotonicity, liveOwner_ cleanup, and memory
     // ordering without counting orderErrors on already-free or newer slots. Returns the count of slots released.
+    // FIX3-D2: checks exact SlotOf(upToSeq) before releasing and counts unexpected exact-slot states in
+    // releaseThroughExactOrderErrors (distinct from orderErrors so backlog recovery stays noise-free while
+    // double-retire / out-of-order retire bugs stay visible).
+    // FIX3-D5: tracks releasedThrough_ / hasReleasedThrough_ so steady-state calls iterate only lo..upToSeq (O(1) per node).
     uint32_t ReleaseThrough(uint64_t upToSeq, uint64_t releaseValue = 0)
     {
+        if (hasReleasedThrough_ && upToSeq <= releasedThrough_) {
+            counters_.releaseThroughExactOrderErrors.fetch_add(1, std::memory_order_relaxed);
+            return 0u;
+        }
+        if (upToSeq > kSlotSeqMask - ring_) {
+            counters_.releaseThroughExactOrderErrors.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            Slot& exact = slots_[SlotOf(upToSeq)];
+            const uint64_t exactBiased = Biased(upToSeq);
+            const SlotWord ew = Unpack(exact.word.load(std::memory_order_acquire));
+            const bool exactRenderHeld =
+                ew.seq == exactBiased
+                && (ew.state == SlotState::Sealed || ew.state == SlotState::Live || ew.state == SlotState::Rejected
+                    || ew.state == SlotState::LiveLaneOwned || ew.state == SlotState::RejectedLaneOwned);
+            const bool exactDiscarded = exact.discarded && ew.seq >= exactBiased;
+            if (!exactRenderHeld && !exactDiscarded)
+                counters_.releaseThroughExactOrderErrors.fetch_add(1, std::memory_order_relaxed);
+            if (exactDiscarded && ew.seq == exactBiased)
+                exact.discarded = false;
+        }
         const uint64_t limit = upToSeq > kSlotSeqMask - ring_ ? kSlotSeqMask : Biased(upToSeq);
         uint32_t released = 0;
-        for (size_t i = 0; i < ring_; ++i) {
-            Slot& s = slots_[i];
-            for (;;) {
-                uint64_t raw = s.word.load(std::memory_order_acquire);
-                const SlotWord w = Unpack(raw);
-                if (w.seq < ring_ || w.seq > limit)
-                    break;
-                SlotWord next = w;
-                bool renderHeld = true;
-                switch (w.state) {
-                case SlotState::Sealed:
-                case SlotState::Live:
-                case SlotState::Rejected:
-                    if (releaseValue > s.releaseValue.load(std::memory_order_relaxed))
-                        s.releaseValue.store(releaseValue, std::memory_order_relaxed);
-                    next.state = SlotState::Released;
-                    break;
-                case SlotState::LiveLaneOwned:
-                case SlotState::RejectedLaneOwned:
-                    next.state = SlotState::ReleasedLaneOwned;
-                    break;
-                default:
-                    renderHeld = false;
-                    break;
-                }
-                if (!renderHeld)
-                    break;
-                next.prov = Provenance::None;
-                // seq_cst: a lane PinRef either sees this release (and fails) or BeginLive sees its pin.
-                if (!s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_seq_cst,
-                                                    std::memory_order_acquire))
-                    continue;
-                if (s.liveIndex >= 0 && liveOwner_[size_t(s.liveIndex)] == w.seq) {
-                    liveOwner_[size_t(s.liveIndex)] = 0;
-                    s.liveIndex = -1;
-                }
-                ++released;
-                break;
-            }
+        const bool fullScan = !hasReleasedThrough_ || (upToSeq - releasedThrough_) >= uint64_t(ring_);
+        if (fullScan) {
+            for (size_t i = 0; i < ring_; ++i)
+                if (ReleaseSlotIfThrough(slots_[i], limit, releaseValue))
+                    ++released;
+        } else {
+            const uint64_t lo = releasedThrough_ + 1u;
+            for (uint64_t s = lo; s <= upToSeq; ++s)
+                if (ReleaseSlotIfThrough(slots_[SlotOf(s)], limit, releaseValue))
+                    ++released;
         }
+        releasedThrough_ = upToSeq;
+        hasReleasedThrough_ = true;
         return released;
     }
 
@@ -827,6 +868,7 @@ public:
                 return false;
             }
             switch (w.state) {
+            case SlotState::Claimed:
             case SlotState::Writing:
             case SlotState::ReleasedLaneOwned:
                 next.state = SlotState::ReleasedLaneOwned;
@@ -850,8 +892,10 @@ public:
                     counters_.overruns.fetch_add(1, std::memory_order_relaxed);
                 return false;
             }
-            if (s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_acq_rel, std::memory_order_acquire))
+            if (s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_acq_rel, std::memory_order_acquire)) {
+                s.discarded = true;
                 return true;
+            }
         }
     }
 
@@ -958,8 +1002,49 @@ private:
         Header laneHdr;          // lane-written while it owns the slot
         Header liveHdr;          // render-only
         int16_t liveIndex = -1;  // render-only
+        bool discarded = false;  // render-only (FIX3-D2): true after Discard(seq) until Seal/AcceptOnTime or exact ReleaseThrough
         std::atomic<int16_t> liveIndexPub{ -1 };   // liveIndex for lane readers (set before the Live CAS)
     };
+
+    bool ReleaseSlotIfThrough(Slot& s, uint64_t limit, uint64_t releaseValue)
+    {
+        for (;;) {
+            uint64_t raw = s.word.load(std::memory_order_acquire);
+            const SlotWord w = Unpack(raw);
+            if (w.seq < ring_ || w.seq > limit)
+                return false;
+            SlotWord next = w;
+            bool renderHeld = true;
+            switch (w.state) {
+            case SlotState::Sealed:
+            case SlotState::Live:
+            case SlotState::Rejected:
+                if (releaseValue > s.releaseValue.load(std::memory_order_relaxed))
+                    s.releaseValue.store(releaseValue, std::memory_order_relaxed);
+                next.state = SlotState::Released;
+                break;
+            case SlotState::LiveLaneOwned:
+            case SlotState::RejectedLaneOwned:
+                next.state = SlotState::ReleasedLaneOwned;
+                break;
+            default:
+                renderHeld = false;
+                break;
+            }
+            if (!renderHeld)
+                return false;
+            next.prov = Provenance::None;
+            // seq_cst: a lane PinRef either sees this release (and fails) or BeginLive sees its pin.
+            if (!s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_seq_cst,
+                                                std::memory_order_acquire))
+                continue;
+            if (s.liveIndex >= 0 && liveOwner_[size_t(s.liveIndex)] == w.seq) {
+                liveOwner_[size_t(s.liveIndex)] = 0;
+                s.liveIndex = -1;
+            }
+            return true;
+        }
+    }
 
     uint64_t Biased(uint64_t seq) const { return seq + ring_; }
 
@@ -981,7 +1066,7 @@ private:
             if (w.gen != t.gen)
                 break;
             SlotWord next = w;
-            if (w.state == SlotState::Writing && w.seq == Biased(t.seq))
+            if ((w.state == SlotState::Claimed || w.state == SlotState::Writing) && w.seq == Biased(t.seq))
                 next.state = SlotState::Abandoned;
             else if (w.state == SlotState::RejectedLaneOwned)
                 next.state = SlotState::Rejected;
@@ -1006,6 +1091,8 @@ private:
     SlotCounters counters_;
     std::atomic<bool> laneGranted_{ true };
     std::array<std::atomic<uint64_t>, kRenderMadeMarks> renderMade_;
+    uint64_t releasedThrough_ = 0;      // render-only (FIX3-D5): high-water mark for O(1) steady-state ReleaseThrough
+    bool hasReleasedThrough_ = false;   // render-only (FIX3-D5)
 };
 
 // A lane job's pinned inputs (one per declared input), released by Unpin.
@@ -1242,8 +1329,14 @@ public:
     // here. With an input missing, fill runs only for a product that declares a missing-input form,
     // and the result is marked LiveFallback (counted); otherwise it is unavailable (InputMissing).
     // Returns one result per node.
+    // Optional cooperative handoff callback invoked on the render thread when Seal sees
+    // SlotState::Writing for a Backend::Cpu node (never invoked for Backend::Ofa / Backend::GpuCompute).
+    // Returns true if the slot state may have changed (e.g. completed and published).
+    using CpuWritingHook = std::function<bool(ProductId, uint64_t)>;
+
     template <class Fill>
-    const std::vector<ProductFrameResult>& Resolve(uint64_t seq, const VpIndicator::Stamp& stampN, Fill fill)
+    const std::vector<ProductFrameResult>& Resolve(uint64_t seq, const VpIndicator::Stamp& stampN, Fill fill,
+                                                   CpuWritingHook onCpuWriting = CpuWritingHook())
     {
         SealedRecord& rec = sealed_[size_t(seq % sealed_.size())];
         rec.set = true;
@@ -1290,7 +1383,7 @@ public:
                 out.finalReason = SealReason::AwaitingFinalSeal;
                 continue;
             }
-            SealNode(i, seq, stampN, fill, out);
+            SealNode(i, seq, stampN, fill, out, onCpuWriting);
         }
         return results_;
     }
@@ -1302,7 +1395,8 @@ public:
     // accepted now), LIVE-FILLED or ABSENT. One result per node (a node with nothing to finalise keeps sealLag 0 and final
     // Unavailable); an empty vector when no node has a seal lag.
     template <class Fill>
-    const std::vector<ProductFrameResult>& ResolveLagged(uint64_t seq, const VpIndicator::Stamp& stampNow, Fill fill)
+    const std::vector<ProductFrameResult>& ResolveLagged(uint64_t seq, const VpIndicator::Stamp& stampNow, Fill fill,
+                                                         CpuWritingHook onCpuWriting = CpuWritingHook())
     {
         for (size_t i = 0; i < lagResults_.size(); ++i) {
             const Node& n = nodes_[i];
@@ -1328,7 +1422,7 @@ public:
                 set.MutableCounters().sealAbsent.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
-            SealNode(i, fseq, frozen, fill, out);
+            SealNode(i, fseq, frozen, fill, out, onCpuWriting);
             if (out.liveFilled) {
                 set.MutableCounters().sealLiveFilled.fetch_add(1, std::memory_order_relaxed);
             } else if (out.final == SealOutcome::Sealed && out.seal.reason == SealReason::Accepted) {
@@ -1344,13 +1438,19 @@ public:
 private:
     // The seal and live fill of node i at frame `seq`: Resolve's per-node body (unchanged), also ResolveLagged's final seal.
     template <class Fill>
-    void SealNode(size_t i, uint64_t seq, const VpIndicator::Stamp& stampN, Fill& fill, ProductFrameResult& out)
+    void SealNode(size_t i, uint64_t seq, const VpIndicator::Stamp& stampN, Fill& fill, ProductFrameResult& out,
+                  const CpuWritingHook& onCpuWriting)
     {
         const Node& n = nodes_[i];
         SlotSet& set = *sets_[i];
         pendingLead_.clear();
         pendingChain_ = false;
-        out.seal = set.Seal(seq, [&](const Header& h) { return Check(n, seq, stampN, h); });
+        if (onCpuWriting && n.backend == Backend::Cpu) {
+            out.seal = set.Seal(seq, [&](const Header& h) { return Check(n, seq, stampN, h); },
+                                [&]() { return onCpuWriting(n.id, seq); });
+        } else {
+            out.seal = set.Seal(seq, [&](const Header& h) { return Check(n, seq, stampN, h); });
+        }
         if (out.seal.outcome == SealOutcome::Sealed && out.seal.reason == SealReason::Accepted) {
             // Counted once, after the seal took effect (not per input, not on a CAS retry).
             for (ProductId p : pendingLead_)

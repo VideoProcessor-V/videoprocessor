@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <vector>
 
 // Skeleton S3: the lane runner. One state machine per product that drives an ILaneProducer through
@@ -53,6 +54,7 @@ struct LaneProductCounters {
     std::atomic<uint64_t> chainCarryForward{ 0 };// ordered chain: jobs run in the declared reduced form (no predecessor)
     std::atomic<uint64_t> chainRefused{ 0 };     // ordered chain: out-of-order work refused (never run, never published)
     std::atomic<uint64_t> workerAdopted{ 0 };    // C5-SKREDS MUST-1: frames a reader's owner fill had published (the memo's spot): copied, not recomputed
+    std::atomic<uint64_t> renderAssisted{ 0 };   // R22: in-flight pure-CPU jobs finished cooperatively on the render thread (0 duplicate computes)
 };
 
 class LaneRunner {
@@ -164,6 +166,50 @@ public:
         return st && st->producer ? st->producer->PredictChunkUs() : 0u;
     }
 
+    // ---- render thread (pure-CPU cooperative handoff; Backend::Cpu ONLY, zero driver/GPU calls) ----
+
+    // Called from SlotSet::Seal via SlotTable::Resolve's onCpuWriting hook when a Backend::Cpu slot
+    // is already in SlotState::Writing for frame `seq`. Finishes the remaining pure-CPU chunks under
+    // the product's cpuChunkMutex and publishes the slot so Seal immediately accepts Published with
+    // zero duplicate Begin/ComputeOnce work. Never touches Backend::Ofa or Backend::GpuCompute.
+    bool TakeOverCpuInFlight(ProductId id, uint64_t seq)
+    {
+        State* sp = StateOf(id);
+        if (!sp || !sp->producer || !sp->node || sp->node->backend != Backend::Cpu)
+            return false;
+        State& st = *sp;
+        SourceFrameView droppedSrc;   // declared BEFORE lock: destroyed AFTER cpuChunkMutex is unlocked (lock-order invariant)
+        std::lock_guard<std::mutex> lock(st.cpuChunkMutex);
+        const Phase p = st.phase.load(std::memory_order_acquire);
+        if ((p != Phase::Running && p != Phase::Completing) || st.seq != seq)
+            return false;
+        if (p == Phase::Running) {
+            const ComputeOnce::FrameScope frameScope(static_cast<int64_t>(st.job.seq), "lane", static_cast<int64_t>(st.node->id));
+            for (;;) {
+                const uint64_t t0 = Now();
+                const ChunkResult r = st.producer->RunChunk(st.job, ~uint32_t(0));
+                const uint64_t t1 = Now();
+                const uint64_t dt = t1 > t0 ? t1 - t0 : uint64_t(0);
+                st.costUs += dt;
+                st.counters.laneUs.fetch_add(dt, std::memory_order_relaxed);
+                if (r == ChunkResult::More)
+                    continue;
+                if (r == ChunkResult::Done) {
+                    st.phase.store(Phase::Completing, std::memory_order_release);
+                    break;
+                }
+                st.counters.chunkFailures.fetch_add(1, std::memory_order_relaxed);
+                st.phase.store(Phase::Abandoning, std::memory_order_release);
+                AbandonJobLocked(st, &droppedSrc);
+                return true;
+            }
+        }
+        const StepOutcome res = CompleteJobLocked(st, &droppedSrc);
+        if (res == StepOutcome::Published)
+            st.counters.renderAssisted.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
     // ---- the product's lane thread only ----
 
     StepOutcome Step(ProductId id, uint32_t budgetUs, bool completeOnDone = false)
@@ -173,21 +219,36 @@ public:
             return StepOutcome::NoProducer;
         State& st = *sp;
         if (!st.laned.load(std::memory_order_acquire)) {
-            if (st.phase == Phase::Idle)
-                return StepOutcome::NotLaned;
-            // A job in flight: a claimed or running one is abandoned here; one already complete is
-            // published normally (its work is done).
-            if (st.phase == Phase::Running) {
-                st.producer->Cancel(st.job);
-                st.counters.cancelled.fetch_add(1, std::memory_order_relaxed);
-                st.phase = Phase::Abandoning;
-            } else if (st.phase == Phase::Claimed) {
-                st.phase = Phase::Abandoning;
+            if (st.node->backend == Backend::Cpu) {
+                std::lock_guard<std::mutex> lock(st.cpuChunkMutex);
+                const Phase p = st.phase.load(std::memory_order_acquire);
+                if (p == Phase::Idle)
+                    return StepOutcome::NotLaned;
+                if (p == Phase::Running) {
+                    st.producer->Cancel(st.job);
+                    st.counters.cancelled.fetch_add(1, std::memory_order_relaxed);
+                    st.phase.store(Phase::Abandoning, std::memory_order_release);
+                } else if (p == Phase::Claimed) {
+                    st.phase.store(Phase::Abandoning, std::memory_order_release);
+                }
+            } else {
+                const Phase p = st.phase.load(std::memory_order_acquire);
+                if (p == Phase::Idle)
+                    return StepOutcome::NotLaned;
+                // A job in flight: a claimed or running one is abandoned here; one already complete is
+                // published normally (its work is done).
+                if (p == Phase::Running) {
+                    st.producer->Cancel(st.job);
+                    st.counters.cancelled.fetch_add(1, std::memory_order_relaxed);
+                    st.phase.store(Phase::Abandoning, std::memory_order_release);
+                } else if (p == Phase::Claimed) {
+                    st.phase.store(Phase::Abandoning, std::memory_order_release);
+                }
             }
         }
         for (;;) {
             StepOutcome o = StepOutcome::Failed;
-            switch (st.phase) {
+            switch (st.phase.load(std::memory_order_acquire)) {
             case Phase::Idle:
                 if (!StartJob(st, &o))
                     return o;
@@ -216,8 +277,11 @@ private:
         bool readsSource = false;
         std::atomic<bool> laned{ true };
         LaneProductCounters counters;
-        // lane-thread private
-        Phase phase = Phase::Idle;
+        // Per-product pure-CPU cooperative handoff lock (Backend::Cpu ONLY; never locked for Ofa or GpuCompute).
+        // Serialises StartWriting+Begin, RunChunk, CompleteJobLocked, AbandonJobLocked, and TakeOverCpuInFlight.
+        std::mutex cpuChunkMutex;
+        // lane-thread private (for Backend::Cpu, synchronized by cpuChunkMutex across Running/Completing/Abandoning)
+        std::atomic<Phase> phase{ Phase::Idle };
         uint64_t nextSeq = 0;
         uint64_t seq = 0;
         LaneTicket ticket;
@@ -234,8 +298,11 @@ private:
     const State* StateOf(ProductId id) const { return id < states_.size() ? &states_[id] : nullptr; }
 
     // The job is over: drop the view copy (and its keepAlive) so the host's planes can be recycled.
-    static void ReleaseSource(State& st)
+    // When `droppedOut` is provided, moves `st.src` there so the caller destroys it AFTER unlocking cpuChunkMutex.
+    static void ReleaseSource(State& st, SourceFrameView* droppedOut = nullptr)
     {
+        if (droppedOut)
+            *droppedOut = std::move(st.src);
         st.src = SourceFrameView();
         st.job.source = nullptr;
     }
@@ -256,13 +323,9 @@ private:
         if (indicator_ && indicator_->HasSealed()) {
             // B3 X1: a lagged-seal product's frame stays open until its final seal (N + sealLag): its lane job may still publish
             // it (LATE). sealLag 0 = today (the frames after the last sealed one). A frame accepted on time claims Stale (skipped).
-            // With live async CPU workers, keep a structural 1-frame pipeline lead ahead of LastSealed so a background CPU worker
-            // does not claim LastSealed + 1 concurrently with the render thread entering OnRenderStart(LastSealed + 1).
-            const uint64_t asyncMargin =
-                (asyncCpuWorkers_.load(std::memory_order_acquire) && st.node->backend == Backend::Cpu
-                 && st.node->sealLag == 0)
-                    ? 1u
-                    : 0u;
+            // R22 / FIX3-D3: two-phase Claimed -> Writing + TakeOverCpuInFlight eliminate pre-Begin and mid-chunk CPU duplicate
+            // races by construction, so asyncMargin is 0 (no depth 1-2 queue starvation; orderedChain nodes are never lead-skipped).
+            const uint64_t asyncMargin = 0u;
             const uint64_t sealedNext = indicator_->LastSealed() + 1u + asyncMargin;
             const uint64_t lag = st.node->sealLag;
             const uint64_t floorSeq = sealedNext > lag ? sealedNext - lag : 0u;
@@ -317,16 +380,16 @@ private:
         st.pinWaitCounted = false;
         st.costUs = 0;
         st.pins.count = 0;
-        st.phase = Phase::Claimed;
+        st.phase.store(Phase::Claimed, std::memory_order_release);
         return true;
     }
 
-    // Claimed: Writable, pins, stamp, context, Begin. True: the phase moved on (Running or
-    // Abandoning). False: the Step ends with *out.
+    // Claimed: Writable, pins, stamp, context, StartWriting + Begin. True: the phase moved on (Running,
+    // Completing, or Abandoning). False: the Step ends with *out.
     bool PrepareJob(State& st, StepOutcome* out)
     {
         if (!st.set->LaneContinue(st.ticket)) {
-            st.phase = Phase::Abandoning;
+            st.phase.store(Phase::Abandoning, std::memory_order_release);
             return true;
         }
         if (!st.set->Writable(st.ticket)) {
@@ -344,7 +407,7 @@ private:
             SourceFrameView v;
             if (!find_ || !find_(st.seq, &v)) {
                 st.counters.skippedDropped.fetch_add(1, std::memory_order_relaxed);
-                st.phase = Phase::Abandoning;
+                st.phase.store(Phase::Abandoning, std::memory_order_release);
                 return true;
             }
             st.src = std::move(v);   // kept (with its planes) until the job returns to Idle
@@ -379,38 +442,51 @@ private:
 
         // C5-SKREDS MUST-1: a publication of this frame by the product's owner fill (the same law over the same inputs) is adopted:
         // copied into the slot and published as the job's result, never computed a second time (counted workerAdopted).
+        // Runs strictly outside cpuChunkMutex (adopt_ takes SkeletonMemo's lock).
         if (adopt_ && st.node->backend == Backend::Cpu && job.out != nullptr && job.outBytes != 0
             && adopt_(st.node->id, st.seq, job.out, job.outBytes)) {
             st.counters.workerAdopted.fetch_add(1, std::memory_order_relaxed);
-            st.phase = Phase::Completing;   // began stays false: nothing was submitted (the default fence values apply)
+            st.phase.store(Phase::Completing, std::memory_order_release);   // began stays false: nothing was submitted (the default fence values apply)
             return true;
         }
-        if (!st.set->LaneContinue(st.ticket)
-            || (indicator_ && indicator_->HasSealed() && st.seq + st.node->sealLag <= indicator_->LastSealed())) {
-            st.phase = Phase::Abandoning;
+
+        auto enterWritingAndBegin = [&]() -> bool {
+            if (!st.laned.load(std::memory_order_acquire)
+                || (indicator_ && indicator_->HasSealed() && st.seq + st.node->sealLag <= indicator_->LastSealed())
+                || !st.set->StartWriting(st.ticket)) {
+                st.phase.store(Phase::Abandoning, std::memory_order_release);
+                return true;
+            }
+            const ComputeOnce::FrameScope frameScope(static_cast<int64_t>(job.seq), "lane", static_cast<int64_t>(st.node->id));
+            if (!st.producer->Begin(job)) {
+                st.counters.beginFailures.fetch_add(1, std::memory_order_relaxed);
+                st.phase.store(Phase::Abandoning, std::memory_order_release);   // nothing submitted: the default fence values apply
+                return true;
+            }
+            st.began = true;
+            VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(st.node->id))).c_str(), job.seq, ::ComputeOnce::Variant(0));   // compute-once: the lane worker compute (one per product, frame)
+            if (hdr.chainReduced)   // counted once the job really started (not on a failed Begin)
+                st.counters.chainCarryForward.fetch_add(1, std::memory_order_relaxed);
+            st.phase.store(Phase::Running, std::memory_order_release);
             return true;
+        };
+
+        if (st.node->backend == Backend::Cpu) {
+            std::lock_guard<std::mutex> lock(st.cpuChunkMutex);
+            return enterWritingAndBegin();
         }
-        const ComputeOnce::FrameScope frameScope(static_cast<int64_t>(job.seq), "lane", static_cast<int64_t>(st.node->id));
-        if (!st.producer->Begin(job)) {
-            st.counters.beginFailures.fetch_add(1, std::memory_order_relaxed);
-            st.phase = Phase::Abandoning;   // nothing submitted: the default fence values apply
-            return true;
-        }
-        st.began = true;
-        VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(st.node->id))).c_str(), job.seq, ::ComputeOnce::Variant(0));   // compute-once: the lane worker compute (one per product, frame)
-        if (hdr.chainReduced)   // counted once the job really started (not on a failed Begin)
-            st.counters.chainCarryForward.fetch_add(1, std::memory_order_relaxed);
-        st.phase = Phase::Running;
-        return true;
+        return enterWritingAndBegin();
     }
 
-    StepOutcome RunJob(State& st, uint32_t budgetUs, bool completeOnDone)
+    StepOutcome RunJobLocked(State& st, uint32_t budgetUs, bool completeOnDone, SourceFrameView* droppedOut)
     {
+        if (st.phase.load(std::memory_order_acquire) != Phase::Running)
+            return StepOutcome::Ran;   // already completed or abandoned by TakeOverCpuInFlight
         if (!st.set->LaneContinue(st.ticket)) {
             st.producer->Cancel(st.job);
             st.counters.cancelled.fetch_add(1, std::memory_order_relaxed);
-            st.phase = Phase::Abandoning;
-            return AbandonJob(st);
+            st.phase.store(Phase::Abandoning, std::memory_order_release);
+            return AbandonJobLocked(st, droppedOut);
         }
         const uint64_t t0 = Now();
         const ComputeOnce::FrameScope frameScope(static_cast<int64_t>(st.job.seq), "lane", static_cast<int64_t>(st.node->id));
@@ -422,16 +498,28 @@ private:
         if (r == ChunkResult::More)
             return StepOutcome::Ran;
         if (r == ChunkResult::Done) {
-            st.phase = Phase::Completing;
-            return completeOnDone ? CompleteJob(st) : StepOutcome::Ran;
+            st.phase.store(Phase::Completing, std::memory_order_release);
+            return completeOnDone ? CompleteJobLocked(st, droppedOut) : StepOutcome::Ran;
         }
         st.counters.chunkFailures.fetch_add(1, std::memory_order_relaxed);
-        st.phase = Phase::Abandoning;
-        return AbandonJob(st);
+        st.phase.store(Phase::Abandoning, std::memory_order_release);
+        return AbandonJobLocked(st, droppedOut);
     }
 
-    StepOutcome CompleteJob(State& st)
+    StepOutcome RunJob(State& st, uint32_t budgetUs, bool completeOnDone)
     {
+        if (st.node->backend == Backend::Cpu) {
+            SourceFrameView droppedSrc;   // destroyed AFTER cpuChunkMutex is unlocked
+            std::lock_guard<std::mutex> lock(st.cpuChunkMutex);
+            return RunJobLocked(st, budgetUs, completeOnDone, &droppedSrc);
+        }
+        return RunJobLocked(st, budgetUs, completeOnDone, nullptr);
+    }
+
+    StepOutcome CompleteJobLocked(State& st, SourceFrameView* droppedOut)
+    {
+        if (st.phase.load(std::memory_order_acquire) != Phase::Completing)
+            return StepOutcome::Ran;   // already completed by TakeOverCpuInFlight
         // The header is ours only while the slot is: after the seal it belongs to the slot's tenant.
         if (st.set->LaneContinue(st.ticket))
             st.set->LaneHeader(st.ticket).costUs = st.costUs > 0xFFFFFFFFull ? 0xFFFFFFFFu : uint32_t(st.costUs);
@@ -441,9 +529,9 @@ private:
         if (r == PublishResult::NotComplete)
             return StepOutcome::WaitingDevice;
         st.pins.Unpin();
-        ReleaseSource(st);
+        ReleaseSource(st, droppedOut);
         st.nextSeq = st.seq + 1u;
-        st.phase = Phase::Idle;
+        st.phase.store(Phase::Idle, std::memory_order_release);
         if (r == PublishResult::Published) {
             if (st.node->orderedChain)
                 st.chain.Published(st.seq);
@@ -454,18 +542,40 @@ private:
         return StepOutcome::Late;
     }
 
-    StepOutcome AbandonJob(State& st)
+    StepOutcome CompleteJob(State& st)
     {
+        if (st.node->backend == Backend::Cpu) {
+            SourceFrameView droppedSrc;   // destroyed AFTER cpuChunkMutex is unlocked
+            std::lock_guard<std::mutex> lock(st.cpuChunkMutex);
+            return CompleteJobLocked(st, &droppedSrc);
+        }
+        return CompleteJobLocked(st, nullptr);
+    }
+
+    StepOutcome AbandonJobLocked(State& st, SourceFrameView* droppedOut)
+    {
+        if (st.phase.load(std::memory_order_acquire) != Phase::Abandoning)
+            return StepOutcome::Abandoned;
         const uint64_t signal = st.began ? st.producer->ProducerSignal() : uint64_t(0);
         const uint64_t completed = st.began ? st.producer->ProducerCompleted() : ~uint64_t(0);
         if (!st.set->Abandon(st.ticket, signal, completed))
             return StepOutcome::WaitingDevice;
         st.pins.Unpin();
-        ReleaseSource(st);
+        ReleaseSource(st, droppedOut);
         st.nextSeq = st.seq + 1u;
-        st.phase = Phase::Idle;
+        st.phase.store(Phase::Idle, std::memory_order_release);
         st.counters.abandoned.fetch_add(1, std::memory_order_relaxed);
         return StepOutcome::Abandoned;
+    }
+
+    StepOutcome AbandonJob(State& st)
+    {
+        if (st.node->backend == Backend::Cpu) {
+            SourceFrameView droppedSrc;   // destroyed AFTER cpuChunkMutex is unlocked
+            std::lock_guard<std::mutex> lock(st.cpuChunkMutex);
+            return AbandonJobLocked(st, &droppedSrc);
+        }
+        return AbandonJobLocked(st, nullptr);
     }
 
     SlotTable& table_;

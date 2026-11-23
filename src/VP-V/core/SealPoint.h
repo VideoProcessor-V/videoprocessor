@@ -64,8 +64,8 @@ inline WaitDecision DecideWait(Variants variants, bool laneGranted, SlotState st
 {
     if (waitMoreUs)
         *waitMoreUs = 0;
-    const bool working = stateAtN == SlotState::Writing || stateAtN == SlotState::Empty
-                         || stateAtN == SlotState::Released;
+    const bool working = stateAtN == SlotState::Claimed || stateAtN == SlotState::Writing
+                         || stateAtN == SlotState::Empty || stateAtN == SlotState::Released;
     if (!(policy.deterministicRun && variants == Variants::NonIdentical && laneGranted && working))
         return WaitDecision::SealNow;
     const uint32_t bound = policy.explicitTestWait

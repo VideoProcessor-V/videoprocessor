@@ -396,6 +396,7 @@ struct LaneState {
     std::vector<uint64_t> missSeen;                   // per node index (render thread)
     uint64_t firstSeq = 0;                            // the first frame this graph serves
     uint64_t nextExpectedRetire = 0;                  // next frame seq expected to retire or drop in order (render thread)
+    uint64_t lastReleaseFence = 0;                    // FIX3-D2: monotonic max releaseFenceValue seen in OnFrameRetired (render thread)
     uint64_t generation = 0;                          // 1,2,3...: one per built state (LaneLease staleness check)
     std::string capsMismatch;                         // non-empty: the real plan's history caps differ from the trial's
 
@@ -746,7 +747,7 @@ public:
         if (cr == ClaimResult::Stale) {
             pins.Unpin();
             const SlotState ss = set.StateOf(seq);
-            if (ss == SlotState::Writing) {
+            if (ss == SlotState::Claimed || ss == SlotState::Writing) {
                 out.kind = AheadRun::Claimed;   // a worker owns it right now
                 out.why = "a lane worker is making it";
                 ++aheadClaimedByWorker_;
@@ -775,6 +776,13 @@ public:
         hdr.reads = scratch.reads;
         hdr.honoured = ind_->StampOf(seq);   // read AFTER the pins: a later event is seen by the seal (mismatch -> live)
         hdr.costUs = 0;
+        if (!set.StartWriting(t)) {
+            pins.Unpin();
+            LaneTicket a = t;
+            set.Abandon(a);
+            out.why = "the seal took the frame first";
+            return out;
+        }
         uint8_t* dst = st->bufs[size_t(idx)]->Ring(size_t(t.slot));
         const size_t bytes = st->bufs[size_t(idx)]->Bytes();
         const uint64_t t0 = nowUs_ ? nowUs_() : 0u;
@@ -1108,7 +1116,10 @@ public:
             return LiveFillOf(*sp, n, s, live, hdr, missing);
         };
         st->table->SetDeterministicSeal(det_);   // B3 X1: a deterministic run seals lagged-seal products at the final seal only
-        const std::vector<ProductFrameResult>& res = st->table->Resolve(seq, stamp, fill);
+        auto onCpuWriting = [sp](ProductId id, uint64_t s) -> bool {
+            return sp->runner && sp->runner->TakeOverCpuInFlight(id, s);
+        };
+        const std::vector<ProductFrameResult>& res = st->table->Resolve(seq, stamp, fill, onCpuWriting);
         lastAhead_ = lastInRender_ = lastDeclined_ = 0;
         for (const ProductFrameResult& r : res) {
             if (r.seal.outcome == SealOutcome::Sealed && r.seal.reason == SealReason::Accepted) {
@@ -1127,7 +1138,7 @@ public:
         if (st->graph.maxSealLag > 0) {
             // B3 X1: the final seal of lagged-seal frames N = seq - sealLag (after this frame's seal, so a lead ancestor is
             // sealed). Their classes are counted on the product's set (ahead / live-filled / late / absent, StatusLines).
-            const std::vector<ProductFrameResult>& lag = st->table->ResolveLagged(seq, stamp, fill);
+            const std::vector<ProductFrameResult>& lag = st->table->ResolveLagged(seq, stamp, fill, onCpuWriting);
             for (const ProductFrameResult& r : lag) {
                 if (r.liveFilled)
                     ++lastInRender_;
@@ -1359,6 +1370,8 @@ public:
         if (!st)
             return;
         st->nextExpectedRetire = (std::max)(st->nextExpectedRetire, seq + 1u);
+        if (releaseFenceValue > st->lastReleaseFence)
+            st->lastReleaseFence = releaseFenceValue;
         // B3 X1: with a lagged-seal product (graph K = maxSealLag > 0) every release and the source drop run K frames later: a
         // frame and its ancestors stay until the final seal at N + K (the rings were sized + K). K = 0: today.
         const uint64_t K = st->graph.maxSealLag;
@@ -1387,7 +1400,7 @@ public:
             for (size_t i = 0; i < st->table->Count(); ++i) {
                 const uint64_t h = uint64_t(st->table->NodeAt(i).history) + K;
                 if (seq >= h && seq - h >= st->firstSeq)
-                    st->table->At(i).ReleaseThrough(seq - h, 0);
+                    st->table->At(i).ReleaseThrough(seq - h, st->lastReleaseFence);
             }
         }
         for (size_t i = 0; i < st->table->Count(); ++i)
@@ -1620,14 +1633,17 @@ public:
         if (skipped > 0)
             out.push_back("Analysis: " + std::to_string(skipped) + " frames skipped (source gone)");
         uint64_t carried = 0, refused = 0, chainWait = 0, chainWaitSeal = 0, pinWait = 0, storeWait = 0;
+        uint64_t renderAssisted = 0, exactReleaseErrors = 0;
         for (size_t i = 0; i < st->table->Count(); ++i) {
             const LaneProductCounters& pc = st->runner->Counters(st->table->NodeAt(i).id);
             carried += pc.chainCarryForward.load(std::memory_order_relaxed);
             refused += pc.chainRefused.load(std::memory_order_relaxed);
+            renderAssisted += pc.renderAssisted.load(std::memory_order_relaxed);
             chainWait += st->table->At(i).Counters().chainWaitRejected.load(std::memory_order_relaxed);
             chainWaitSeal += st->table->At(i).Counters().chainWaitUnsealed.load(std::memory_order_relaxed);
             pinWait += st->table->At(i).Counters().writeWaitPinned.load(std::memory_order_relaxed);
             storeWait += st->table->At(i).Counters().storeWaitRejected.load(std::memory_order_relaxed);
+            exactReleaseErrors += st->table->At(i).Counters().releaseThroughExactOrderErrors.load(std::memory_order_relaxed);
         }
         uint64_t laterRejected = 0;
         for (size_t i = 0; i < st->table->Count(); ++i)
@@ -1635,6 +1651,12 @@ public:
         if (laterRejected > 0)
             out.push_back("Analysis: " + std::to_string(laterRejected)
                           + " look-ahead frames were rejected at their own seal after a reader used them");
+        if (renderAssisted > 0)
+            out.push_back("Analysis: " + std::to_string(renderAssisted)
+                          + " in-flight CPU lane jobs completed cooperatively on the render thread");
+        if (exactReleaseErrors > 0)
+            out.push_back("Analysis: " + std::to_string(exactReleaseErrors)
+                          + " slot-release exact-order errors");
         if (carried > 0)
             out.push_back("Analysis: " + std::to_string(carried)
                           + " ordered-chain frames ran in the reduced form (no predecessor result)");

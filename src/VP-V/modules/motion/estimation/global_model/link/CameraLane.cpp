@@ -197,6 +197,13 @@ namespace CameraLink
 			VpSkeleton::LaneTicket ticket;
 			if (set.Claim(seq, VpAncestry::Provenance::AheadLane, ~uint64_t(0), &ticket) != VpSkeleton::ClaimResult::Claimed)
 				continue;
+			if (!set.StartWriting(ticket))
+			{
+				set.Abandon(ticket);
+				if (!warmUp)
+					++m_markerFailures;
+				continue;
+			}
 			VpAncestry::Header& hdr = set.LaneHeader(ticket);
 			VpSkeleton::LaneInputs pins;
 			if (!table.LaneAncestors(n.id, seq, hdr, pins))

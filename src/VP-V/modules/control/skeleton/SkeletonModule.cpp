@@ -443,6 +443,9 @@ namespace Vpv
 			// Any thread.
 			std::atomic<uint32_t> srcW{ 0 }, srcH{ 0 };
 			std::atomic<uint64_t> srcFrames{ 0 };
+			// W23-4p (G6) / Gate 3 LOW-5: declared BEFORE bundle so bundle (which holds &entranceLiveDriven)
+			// is unconditionally destroyed before this atomic flag.
+			std::atomic<bool> entranceLiveDriven{ false };
 			std::shared_ptr<Bundle> bundle;   // std::atomic_load / atomic_store
 
 			std::mutex pendingMutex;
@@ -497,8 +500,6 @@ namespace Vpv
 			std::string laneRaise;
 			bool raisedWantsGpu = false;
 			VpSkeleton::LaneSettings::Mode configuredLaneMode = VpSkeleton::LaneSettings::Mode::Off;
-			// W23-4p (G6): true once FramePhase::Entrance has driven AnalysisLane::RunDeferredLive on this host's dispatcher.
-			std::atomic<bool> entranceLiveDriven{ false };
 			bool shownEntranceLiveDriven = false;
 			std::string lastDisplayFactsKey;
 			VpMotion::IVectorEngine* engine = nullptr;   // this renderer's engine; dropped at Teardown (valid until the renderer goes)
@@ -2674,6 +2675,14 @@ namespace Vpv
 					doneMask |= bit;
 					continue;
 				}
+				if (!set.StartWriting(ticket))
+				{
+					pins.Unpin();
+					set.Abandon(ticket);
+					++st.feed.claimFailed;
+					doneMask |= bit;
+					continue;
+				}
 				VpAncestry::Header& hdr = set.LaneHeader(ticket);
 				hdr.ancestors = scratch.ancestors;
 				hdr.ancestorCount = scratch.ancestorCount;
@@ -3403,9 +3412,14 @@ namespace Vpv
 				// The memory refusal took effect after the frame that already allocated: give it all back now (GPU-legal).
 				st.dispatcher->Release();
 			}
-			// R22: retire this completed frame before the post-submit gap so reclaimed ring slots are
+			// R22 / FIX3-D4: retire this completed frame before the post-submit gap so reclaimed ring slots are
 			// available to GPU-compute gap work for seq + 1. Every lag-k input declares history >= k
 			// (ProductGraph.h), so ReleaseThrough(seq - (h + K)) never frees any input needed by seq + 1.
+			// Single-queue D3D11 immediate-context FIFO assumption: all consumer reads of frame `seq` and all
+			// subsequent gap writes queued by OnPostSubmitGap execute in strict FIFO submission order on the
+			// same D3D11 immediate context, so GPU reads of a reclaimed slot complete before any newly queued
+			// gap write touches that slot, making releaseFenceValue == 0 sound on this backend. A future
+			// multi-queue or async-compute backend must pass a real monotonic render-side fence value here.
 			b->lane.OnFrameRetired(seq, 0);
 			if (st.periodMs > 0.0)
 			{
