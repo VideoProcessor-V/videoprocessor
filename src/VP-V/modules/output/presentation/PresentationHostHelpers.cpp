@@ -23,13 +23,12 @@ namespace Vpv
 		namespace
 		{
 			using SteadyClock = std::chrono::steady_clock;
+		}
 
-			int64_t PerformanceCounterNow()
-			{
-				LARGE_INTEGER counter{};
-				QueryPerformanceCounter(&counter);
-				return counter.QuadPart;
-			}
+		int64_t PerformanceCounterNow()
+		{
+			LARGE_INTEGER value{};
+			return QueryPerformanceCounter(&value) ? value.QuadPart : 0;
 		}
 
 		double RenderAheadNow()

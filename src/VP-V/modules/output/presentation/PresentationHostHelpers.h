@@ -34,6 +34,10 @@ namespace Vpv
 {
 	namespace PresentationHost
 	{
+		// One VP-V definition matching Bill's PerformanceCounterNow in LibplaceboVideoRenderer.cpp
+		// (returns 0 on QueryPerformanceCounter failure; pinned by test_reloc2_timing_helper_drift.py).
+		int64_t PerformanceCounterNow();
+
 		double RenderAheadNow();
 
 		void RenderAheadBreak(RenderAhead::Presenter& presenter);

@@ -13927,6 +13927,9 @@ struct LibplaceboVideoRenderer::Impl
 	// The last hold lines at teardown, so the last holds are never lost.
 	void FlushDejudderHolds();   // VPV-HOOK M2 P5b-3: defined in VP-V/modules/motion/consumers/DejudderPolicyRunner.inl
 
+	// The caller holds renderMutex. Queue-generation validation and rendering
+	// share that lock so a frame removed before a reset cannot cross the reset
+	// boundary while waiting to enter libplacebo.
 	bool RenderLocked(
 		const VideoFrame& videoFrame,
 		VideoStateComPtr& statePtr,

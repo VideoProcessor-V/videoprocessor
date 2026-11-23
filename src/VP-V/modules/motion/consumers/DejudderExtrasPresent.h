@@ -6,6 +6,8 @@
 // (Vpv::Dejudder::PresentExtras, moved verbatim from LibplaceboVideoRenderer.cpp::Impl::PresentDejudderExtras).
 // Impl holds ONE member `Vpv::Dejudder::ExtrasState dejudderExtras;` and forwards through
 // `Vpv::HostAccess::PresentDejudderExtras(*this, extrasFrame)` in src/VP-V/host/LvrHostAccess.inl.
+// The present-id bookkeeping (dejudderExtraIds / dejudderMainRefresh / dejudderIdsSwapchain) keeps its own
+// storage here, separate from the Presenter's extraIds / mainRefresh (held for the owner with PresentContext::native).
 //
 // Threading: the render thread only, as before, apart from renderAheadFlushReanchor (atomic: set at the render loop's
 // backlog flush, taken by the next frame's extras).

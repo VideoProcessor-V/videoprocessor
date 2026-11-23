@@ -15,6 +15,7 @@
 #include <VP-V/modules/input/signal/ResyncCallSites.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/output/dither/SigmaDeltaVectors.h>
+#include <VP-V/modules/output/presentation/PresentationHostHelpers.h>
 #include <vprenderer/RendererExtension.h>
 
 #include <algorithm>
@@ -33,18 +34,8 @@ namespace Vpv
 		namespace
 		{
 			using SteadyClock = std::chrono::steady_clock;
-
-			int64_t PerformanceCounterNow()
-			{
-				LARGE_INTEGER counter{};
-				QueryPerformanceCounter(&counter);
-				return counter.QuadPart;
-			}
-
-			double RenderAheadNow()
-			{
-				return std::chrono::duration<double>(SteadyClock::now().time_since_epoch()).count();
-			}
+			using Vpv::PresentationHost::PerformanceCounterNow;
+			using Vpv::PresentationHost::RenderAheadNow;
 
 			// Delta 8 R1 timing (planner 2026-10-13): the GPU time of an extra's
 			// sigma-delta passes (libplacebo's per-pass timers; `last` is the most recent
