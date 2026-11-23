@@ -156,11 +156,12 @@ namespace VpFrameAnalysis
 			// decoded DV plane (12-bit codes, code12 << 4) carries real fraction bits.
 			const bool tenBitLanes = m_source.format != AnalysisLumaFormat::DecodedDolbyVision422;
 			const uint16_t laneMask = tenBitLanes ? static_cast<uint16_t>(0xFFC0u) : static_cast<uint16_t>(0xFFFFu);
-			// A limited plane that needs no decode (NeedsDecode false) with real fraction bits is read in place.
-			if (!NeedsDecode(m_source) && !tenBitLanes)
+			// A limited plane that needs no decode (NeedsLumaPlane false) with real fraction bits is read in place.
+			const bool needsDecode = Vpv::AnalysisDomain::NeedsLumaPlane(m_source);
+			if (!needsDecode && !tenBitLanes)
 				return plane + x0;
 			m_buffer.resize(static_cast<size_t>(count));
-			if (!NeedsDecode(m_source))
+			if (!needsDecode)
 			{
 				for (int i = 0; i < count; ++i)
 					m_buffer[static_cast<size_t>(i)] = static_cast<uint16_t>(plane[x0 + i] & laneMask);
