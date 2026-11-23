@@ -144,7 +144,7 @@ vec3 er_remainder_at(vec2 q)
     for (int j = 0; j < 2; j++)
         for (int i = 0; i < 2; i++)
             sum += textureLod(er_remainder, (s + ((vec2(i, j) + 0.5) / 2.0 - 0.5)) / size, 0.0).rgb;
-    return sum * 0.25;
+    return sum / 4.0;
 }
 )GLSL";
 		const char* const RESTORE_HEADER_4X4 = R"GLSL(
