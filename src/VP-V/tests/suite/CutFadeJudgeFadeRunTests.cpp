@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <random>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -588,9 +589,9 @@ namespace CutFadeJudgeFadeRunTestsNs
 	TEST_CLASS(CutFadeJudgeFadeRunTests)
 	{
 	public:
-		TEST_METHOD(UnitVersionIsFour)
+		TEST_METHOD(UnitVersionIsFive)
 		{
-			Assert::AreEqual(4u, VpUnit::CutFadeJudge::kUnitVersion, L"the 576-cell spatial affine fade law is a registered law change (4, after v3 multi-frame fade and v2 T2 sequence law)");
+			Assert::AreEqual(5u, VpUnit::CutFadeJudge::kUnitVersion, L"U7 v5 derived D4/D5/D6/D8 fade and veto rules (5, after v4 576-cell spatial affine fade law, v3 multi-frame fade, and v2 T2 sequence law)");
 		}
 
 		// A 300-frame fade (0.25 % of gain per frame): the pair law finds none of it; the run finds it once the gain moved 2 %.
@@ -1598,6 +1599,1087 @@ namespace CutFadeJudgeFadeRunTestsNs
 				Assert::AreEqual(kIters, skipCuts, L"identical-repeat fast-skip candidate must confirm cut on all iterations");
 				LogRow("CutTracker::Judge veto (active cand)", ComputeBenchStats(activeSamples));
 				LogRow("CutTracker::Judge veto (fast-skip G=0)", ComputeBenchStats(skipSamples));
+			}
+		}
+
+		// ---- U7 v5 D5: Motion-tolerant fade recall & adversarial non-fade suite ---------------------------------------------
+
+		// D5 #1: Textured 160x90 scene + 2 contrasting foreground discs translating in opposite directions (+-2 px/frame),
+		// defeating global translation alignment so rigid FitGridFadeGrid fails mid-fade while FitMotionTolerantFade succeeds.
+		TEST_METHOD(SlowFadeUnderNonRigidObjectMotionIsDetected)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			auto TriangleBounce = [](double v, double lo, double hi) -> double {
+				const double span = hi - lo;
+				const double period = 2.0 * span;
+				double m = std::fmod(v - lo, period);
+				if (m < 0.0)
+					m += period;
+				return m <= span ? (lo + m) : (hi - (m - span));
+			};
+
+			auto NonRigidFrame = [&](int frameIdx, double gain, double panPx) -> Record {
+				const double cx1 = TriangleBounce(36.0 + 2.0 * double(frameIdx), 26.0, 134.0);
+				const double cx2 = TriangleBounce(124.0 - 2.0 * double(frameIdx), 26.0, 134.0);
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const double sx = double(x) + panPx;
+						double pat = 0.45 + 0.26 * std::cos(double(y) * 0.065) + 0.14 * std::sin(sx * 0.09);
+						const double d1 = (double(x) - cx1) * (double(x) - cx1) + (double(y) - 30.0) * (double(y) - 30.0);
+						const double d2 = (double(x) - cx2) * (double(x) - cx2) + (double(y) - 60.0) * (double(y) - 60.0);
+						if (d1 <= 100.0)
+							pat = 0.92;
+						if (d2 <= 100.0)
+							pat = 0.06;
+						const double v = kBlack + gain * pat * 48000.0 + double(Noise(x, y, uint32_t(frameIdx))) * 0.25;
+						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+					}
+				return MakeRecordFromHalf(half);
+			};
+
+			const int pre = 10, nOut = 60, hold = 10, nIn = 60, post = 10;
+			std::vector<Record> recs;
+			int idx = 0;
+			for (int i = 0; i < pre; ++i)
+				recs.push_back(NonRigidFrame(idx++, 1.0, 0.0));
+			for (int i = 1; i <= nOut; ++i)
+				recs.push_back(NonRigidFrame(idx++, 1.0 - 0.85 * double(i) / double(nOut), 0.0));
+			for (int i = 0; i < hold; ++i)
+				recs.push_back(NonRigidFrame(idx++, 0.15, 0.0));
+			for (int i = 1; i <= nIn; ++i)
+				recs.push_back(NonRigidFrame(idx++, 0.15 + 0.85 * double(i) / double(nIn), 0.0));
+			for (int i = 0; i < post; ++i)
+				recs.push_back(NonRigidFrame(idx++, 1.0, 0.0));
+
+			// Mandatory In-Test Negative Control (Rule 3): prove rigid FitGridFadeGrid alone FAILS mid-fade on the exact same
+			// pair (frame pre -> pre+8) due to opposite-moving foreground discs, while FitMotionTolerantFade SUCCEEDS!
+			{
+				double gBase[kGridH][kGridW], gMid[kGridH][kGridW];
+				double ra[kGridH][kGridW], ca[kGridH][kGridW];
+				double vx = 0.0, vy = 0.0;
+				LoadGridCodes(recs[size_t(pre - 1)].cells, gBase);
+				LoadGridCodes(recs[size_t(pre + 7)].cells, gMid);
+				AlignGrid(gBase, gMid, kLocalRadius, ra, ca, &vx, &vy);
+				const GridFadeFit rigidFit = FitGridFadeAligned(ra, ca, vx, vy);
+				const GridFadeFit mtFit = FitMotionTolerantFade(ra, ca, vx, vy);
+				Assert::IsFalse(rigidFit.valid, L"Negative control: rigid FitGridFadeGrid must fail mid-fade under opposite-moving discs");
+				Assert::IsTrue(mtFit.valid && mtFit.dir < 0, L"FitMotionTolerantFade must succeed on the exact same aligned grids");
+			}
+
+			const size_t outBegin = size_t(pre);
+			const size_t outEnd = outBegin + size_t(nOut);
+			const size_t holdEnd = outEnd + size_t(hold);
+			const size_t inEnd = holdEnd + size_t(nIn);
+
+			FadeRun run;
+			int preFades = 0, outFades = 0, holdFades = 0, inFades = 0, postFades = 0, cuts = 0;
+			double fadeOutKeepProd = 1.0;
+			for (size_t i = 1; i < recs.size(); ++i)
+			{
+				AlignedPairCache cache;
+				const Events e = ClassifyEvents(recs[i - 1], recs[i], false, false, &cache);
+				double rk = 1.0;
+				const bool rf = FoldFadeRun(recs[i - 1], recs[i], e, run, &rk, &cache);
+				const bool isFade = e.fade || rf;
+				if (e.cut)
+					++cuts;
+				if (i < outBegin)
+					preFades += isFade ? 1 : 0;
+				else if (i < outEnd)
+				{
+					outFades += isFade ? 1 : 0;
+					fadeOutKeepProd *= FrameFadeKeep(recs[i - 1], recs[i], e.fade, rf, rk);
+				}
+				else if (i < holdEnd)
+					holdFades += isFade ? 1 : 0;
+				else if (i < inEnd)
+					inFades += isFade ? 1 : 0;
+				else
+					postFades += isFade ? 1 : 0;
+			}
+
+			Assert::AreEqual(0, cuts, L"slow fade under non-rigid object motion must emit 0 cuts");
+			Assert::AreEqual(0, preFades, L"0 false fades during pre-fade non-rigid motion");
+			Assert::AreEqual(0, holdFades, L"0 false fades during mid-hold non-rigid motion");
+			Assert::AreEqual(0, postFades, L"0 false fades during post-fade non-rigid motion");
+			Assert::IsTrue(outFades >= 50, L"60-frame fade-out under non-rigid motion must hit >= 50/60 frames");
+			Assert::IsTrue(inFades >= 50, L"60-frame fade-in under non-rigid motion must hit >= 50/60 frames");
+			Assert::IsTrue(fadeOutKeepProd < 0.5, L"fade-out under non-rigid motion must decay history keep < 0.5");
+		}
+
+		// D5 #2: Simultaneous horizontal camera pan (2 px/frame) + opposite-moving foreground discs + 60-frame fade-out.
+		TEST_METHOD(SlowFadeUnderCameraPanAndLocalMotionIsDetected)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			auto TriangleBounce = [](double v, double lo, double hi) -> double {
+				const double span = hi - lo;
+				const double period = 2.0 * span;
+				double m = std::fmod(v - lo, period);
+				if (m < 0.0)
+					m += period;
+				return m <= span ? (lo + m) : (hi - (m - span));
+			};
+
+			auto PanMotionFrame = [&](int frameIdx, double gain) -> Record {
+				const double panPx = 2.0 * double(frameIdx);
+				const double cx1 = TriangleBounce(36.0 + 2.0 * double(frameIdx), 26.0, 134.0);
+				const double cx2 = TriangleBounce(124.0 - 2.0 * double(frameIdx), 26.0, 134.0);
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const double sx = double(x) + panPx;
+						double pat = 0.45 + 0.26 * std::cos(double(y) * 0.065) + 0.14 * std::sin(sx * 0.09);
+						const double d1 = (double(x) - cx1) * (double(x) - cx1) + (double(y) - 30.0) * (double(y) - 30.0);
+						const double d2 = (double(x) - cx2) * (double(x) - cx2) + (double(y) - 60.0) * (double(y) - 60.0);
+						if (d1 <= 100.0)
+							pat = 0.92;
+						if (d2 <= 100.0)
+							pat = 0.06;
+						const double v = kBlack + gain * pat * 48000.0 + double(Noise(x, y, uint32_t(frameIdx))) * 0.25;
+						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+					}
+				return MakeRecordFromHalf(half);
+			};
+
+			const int pre = 10, nOut = 60, post = 10;
+			std::vector<Record> recs;
+			int idx = 0;
+			for (int i = 0; i < pre; ++i)
+				recs.push_back(PanMotionFrame(idx++, 1.0));
+			for (int i = 1; i <= nOut; ++i)
+				recs.push_back(PanMotionFrame(idx++, 1.0 - 0.85 * double(i) / double(nOut)));
+			for (int i = 0; i < post; ++i)
+				recs.push_back(PanMotionFrame(idx++, 0.15));
+
+			// Mandatory In-Test Negative Control (Rule 3): rigid FitGridFadeGrid fails mid-fade on the exact aligned pan+motion pair
+			// while FitMotionTolerantFade succeeds cleanly.
+			{
+				double gBase[kGridH][kGridW], gMid[kGridH][kGridW];
+				double ra[kGridH][kGridW], ca[kGridH][kGridW];
+				double vx = 0.0, vy = 0.0;
+				LoadGridCodes(recs[size_t(pre + 5)].cells, gBase);
+				LoadGridCodes(recs[size_t(pre + 10)].cells, gMid);
+				AlignGrid(gBase, gMid, kLocalRadius, ra, ca, &vx, &vy);
+				const GridFadeFit rigidFit = FitGridFadeAligned(ra, ca, vx, vy);
+				const GridFadeFit mtFit = FitMotionTolerantFade(ra, ca, vx, vy);
+				Assert::IsFalse(rigidFit.valid, L"Negative control: rigid FitGridFadeGrid must fail mid-fade under pan + local motion");
+				Assert::IsTrue(mtFit.valid && mtFit.dir < 0, L"FitMotionTolerantFade must succeed on aligned pan + local motion pair");
+			}
+
+			const auto res = Play(recs);
+			Assert::AreEqual(0, Count(res, 1, size_t(pre)), L"0 false fades during pre-fade pure pan + local motion");
+			Assert::IsTrue(Count(res, size_t(pre), size_t(pre + nOut)) >= 48, L"60-frame fade-out under pan + local motion must hit >= 48/60");
+			Assert::AreEqual(0, Count(res, size_t(pre + nOut), recs.size()), L"0 false fades during post-fade pure pan + local motion");
+		}
+
+		// D5 #3: 60-frame slow fade-out through near-black histogram quantization (e.cut == true while spread > 1 code & non-flat)
+		// -> 12-frame black hold -> 60-frame slow fade-in, with static dim-to-near-black hard cut negative control.
+		TEST_METHOD(SlowFadeIntoAndOutOfBlackAcrossNearBlackQuantization)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			auto HighTexPicture = [](double gain) -> Record {
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const double pat = 0.50 + 0.45 * std::sin(double(x) * 0.42) * std::cos(double(y) * 0.42);
+						const double v = kBlack + gain * pat * 48000.0;
+						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+					}
+				return MakeRecordFromHalf(half);
+			};
+
+			const int pre = 8, nOut = 60, holdBlack = 12, nIn = 60, post = 8;
+			std::vector<Record> recs;
+			for (int i = 0; i < pre; ++i)
+				recs.push_back(HighTexPicture(1.0));
+			for (int i = 1; i <= nOut; ++i)
+				recs.push_back(i == nOut ? ConstantFlatPicture(16.0) : HighTexPicture(1.0 - double(i) / double(nOut)));
+			for (int i = 0; i < holdBlack; ++i)
+				recs.push_back(ConstantFlatPicture(16.0));
+			for (int i = 1; i <= nIn; ++i)
+				recs.push_back(HighTexPicture(double(i) / double(nIn)));
+			for (int i = 0; i < post; ++i)
+				recs.push_back(HighTexPicture(1.0));
+
+			const size_t outBegin = size_t(pre);
+			const size_t outEnd = outBegin + size_t(nOut);
+			const size_t blackEnd = outEnd + size_t(holdBlack);
+			const size_t inEnd = blackEnd + size_t(nIn);
+
+			FadeRun run;
+			int outFades = 0, blackHoldFades = 0, inFades = 0, prePostFades = 0;
+			int nearBlackNonFlatCutCaught = 0;
+			for (size_t i = 1; i < recs.size(); ++i)
+			{
+				const Events e = ClassifyEvents(recs[i - 1], recs[i], false, false);
+				const bool rf = FoldFadeRun(recs[i - 1], recs[i], e, run);
+				const bool isFade = e.fade || rf;
+				if (i < outBegin || i >= inEnd)
+					prePostFades += isFade ? 1 : 0;
+				else if (i < outEnd)
+				{
+					outFades += isFade ? 1 : 0;
+					const uint32_t spCur = recs[i].p99 > recs[i].p01 ? recs[i].p99 - recs[i].p01 : 0u;
+					Grid gc;
+					GridOf(recs[i], &gc);
+					if (e.cut && spCur > kBlackSpreadP4 && Flatness(gc) >= kFlatF && rf)
+						++nearBlackNonFlatCutCaught;
+				}
+				else if (i < blackEnd)
+					blackHoldFades += isFade ? 1 : 0;
+				else
+					inFades += isFade ? 1 : 0;
+			}
+
+			Assert::AreEqual(0, prePostFades, L"0 false fades on static pre/post frames");
+			Assert::AreEqual(0, blackHoldFades, L"0 false fades during black hold");
+			Assert::IsTrue(nearBlackNonFlatCutCaught >= 1,
+				L"D5 near-black fade-out e.cut symmetry must catch at least one e.cut && spread > 1 code && non-flat fade-out frame");
+			Assert::IsTrue(outFades >= 56, L"60-frame fade-out through near-black quantization must hit >= 56/60");
+			Assert::IsTrue(inFades >= 56, L"60-frame fade-in from black must hit >= 56/60");
+
+			// Mandatory In-Test Negative Control (Rule 3): a static dim shot (activeFade == false) hard-cutting to a darker
+			// near-black textured frame (exact same e.cut && spread > kBlackSpreadP4 shape!) MUST NOT produce runFade == true!
+			{
+				std::vector<Record> hardDim;
+				for (int i = 0; i < 6; ++i)
+					hardDim.push_back(HighTexPicture(2.0 / 60.0));
+				for (int i = 0; i < 6; ++i)
+					hardDim.push_back(HighTexPicture(1.0 / 60.0));
+				FadeRun negRun;
+				bool sawNearBlackCut = false;
+				for (size_t i = 1; i < hardDim.size(); ++i)
+				{
+					const Events e = ClassifyEvents(hardDim[i - 1], hardDim[i], false, false);
+					const bool rf = FoldFadeRun(hardDim[i - 1], hardDim[i], e, negRun);
+					if (i == 6)
+					{
+						const uint32_t spCur = hardDim[i].p99 > hardDim[i].p01 ? hardDim[i].p99 - hardDim[i].p01 : 0u;
+						Assert::IsTrue(e.cut && spCur > kBlackSpreadP4,
+							L"Negative control premise: static dim-to-near-black step hits e.cut with spread > kBlackSpreadP4");
+						Assert::IsFalse(rf, L"Negative control: without activeFade, near-black e.cut must NOT emit runFade");
+						sawNearBlackCut = true;
+					}
+				}
+				Assert::IsTrue(sawNearBlackCut);
+			}
+		}
+
+		// D5 #4: 200-frame near-unity-slope fade (0.35%/frame, single-pair |1 - A| <= 0.012 < 0.02):
+		// negative control proves single-pair ClassifyEvents fires 0/200 while FoldFadeRun hits >= 188/200 once cumulative gain > 2%.
+		TEST_METHOD(NearUnitySlopeFadeCrossingTwoPercentCumulativeGain)
+		{
+			const int pre = 10, n = 200, post = 10;
+			std::vector<Record> recs;
+			uint32_t k = 0;
+			for (int i = 0; i < pre; ++i)
+				recs.push_back(Picture(1.0, k++));
+			for (int i = 1; i <= n; ++i)
+				recs.push_back(Picture(1.0 - 0.0035 * double(i), k++));
+			for (int i = 0; i < post; ++i)
+				recs.push_back(Picture(1.0 - 0.0035 * double(n), k++));
+
+			const auto res = Play(recs);
+			Assert::AreEqual(0, Count(res, 1, size_t(pre)), L"0 fades on pre-fade static frames");
+			Assert::AreEqual(0, Count(res, size_t(pre + n), recs.size()), L"0 fades on post-fade static frames");
+			// Mandatory In-Test Negative Control (Rule 3): single-pair law alone misses 100% of near-unity-slope steps!
+			Assert::AreEqual(0, Count(res, size_t(pre), size_t(pre + n), true),
+				L"Negative control: single-pair ClassifyEvents (e.fade) must fire on 0/200 frames when single-pair |1-A| < 0.02");
+			Assert::IsTrue(Count(res, size_t(pre), size_t(pre + n)) >= 188,
+				L"multi-frame FoldFadeRun must detect >= 188/200 frames once cumulative gain crosses 2%");
+		}
+
+		// D5 #5: Short 5-frame fade-out (1.0 -> 0.50) and 5-frame fade-in (0.50 -> 1.0).
+		TEST_METHOD(ShortFiveFrameFadeOutAndFadeInAreDetected)
+		{
+			const int pre = 8, n = 5, post = 8;
+			// Fade-out 1.0 -> 0.50
+			{
+				const auto res = Play(FadeSequence(n, pre, post, 0.50));
+				Assert::AreEqual(0, Count(res, 1, size_t(pre)), L"0 fades before 5-frame fade-out");
+				Assert::IsTrue(Count(res, size_t(pre), size_t(pre + n)) >= 4, L"5-frame fade-out must hit >= 4/5 frames");
+				Assert::AreEqual(0, Count(res, size_t(pre + n), res.size()), L"0 fades after 5-frame fade-out");
+			}
+			// Fade-in 0.50 -> 1.0
+			{
+				std::vector<Record> recs;
+				uint32_t k = 0;
+				for (int i = 0; i < pre; ++i)
+					recs.push_back(Picture(0.50, k++));
+				for (int i = 1; i <= n; ++i)
+					recs.push_back(Picture(0.50 + 0.50 * double(i) / double(n), k++));
+				for (int i = 0; i < post; ++i)
+					recs.push_back(Picture(1.0, k++));
+				const auto res = Play(recs);
+				Assert::AreEqual(0, Count(res, 1, size_t(pre)), L"0 fades before 5-frame fade-in");
+				Assert::IsTrue(Count(res, size_t(pre), size_t(pre + n)) >= 4, L"5-frame fade-in must hit >= 4/5 frames");
+				Assert::AreEqual(0, Count(res, size_t(pre + n), res.size()), L"0 fades after 5-frame fade-in");
+			}
+		}
+
+		// D5 #6: A large dark foreground object (30% of picture) translating into a bright textured room drops mean monotonically
+		// over >= 10 frames (negative control) yet must emit 0 fades.
+		TEST_METHOD(ALargeForegroundObjectCrossingStaticSceneIsNotAFade)
+		{
+			std::vector<Record> recs;
+			for (int i = 0; i < 26; ++i)
+			{
+				// Dark occluder slides in from right edge across frames 4..20, reaching 30% width (48 px).
+				const double frac = i < 4 ? 0.0 : (i <= 20 ? double(i - 3) / 17.0 : 1.0);
+				const uint32_t occX0 = kW - static_cast<uint32_t>(std::floor(frac * double(kW) * 0.30 + 0.5));
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const double room = 0.35 + 0.45 * double(x) / double(kW) + 0.15 * std::sin(double(y) * 0.15);
+						const bool occluded = (x >= occX0);
+						const double v = occluded ? (kBlack + double(Noise(x, y, uint32_t(i))) * 0.25)
+							: (kBlack + room * 48000.0 + double(Noise(x, y, uint32_t(i))));
+						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+					}
+				recs.push_back(MakeRecordFromHalf(half));
+			}
+
+			// Mandatory In-Test Negative Control (Rule 3): verify frame mean drops monotonically over >= 10 frames
+			// (proving a naive global mean-drop detector would trigger!).
+			int monoDropSteps = 0;
+			for (size_t i = 5; i <= 20; ++i)
+				if (recs[i].mean < recs[i - 1].mean)
+					++monoDropSteps;
+			Assert::IsTrue(monoDropSteps >= 12, L"Negative control: occluder must cause >= 12 monotonic mean-drop frames");
+
+			const auto res = Play(recs);
+			Assert::AreEqual(0, Count(res, 1, recs.size()), L"30% foreground object crossing static room must emit 0 fades");
+		}
+
+		// D5 #7: Animated bright bars/shards expanding smoothly over a black background raise mean monotonically (negative control)
+		// yet must emit 0 fades.
+		TEST_METHOD(AnimatedBrightShardsSweepingIntoBlackAreNotAFade)
+		{
+			std::vector<Record> recs;
+			for (int i = 0; i < 26; ++i)
+			{
+				const double frac = i < 4 ? 0.0 : (i <= 20 ? double(i - 3) / 17.0 : 1.0);
+				const double sweepX = frac * double(kW) * 0.45;
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const bool inBar = (double(x) < sweepX) && ((y % 18u) < 9u);
+						const double v = inBar ? (50000.0 + double(Noise(x, y, uint32_t(i))) * 0.5)
+							: (kBlack + double(Noise(x, y, uint32_t(i))) * 0.125);
+						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+					}
+				recs.push_back(MakeRecordFromHalf(half));
+			}
+
+			// Mandatory In-Test Negative Control (Rule 3): verify frame mean rises monotonically over >= 10 frames.
+			int monoRiseSteps = 0;
+			for (size_t i = 5; i <= 20; ++i)
+				if (recs[i].mean > recs[i - 1].mean)
+					++monoRiseSteps;
+			Assert::IsTrue(monoRiseSteps >= 12, L"Negative control: expanding bright shards must cause >= 12 monotonic mean-rise frames");
+
+			const auto res = Play(recs);
+			Assert::AreEqual(0, Count(res, 1, recs.size()), L"animated bright shards sweeping into black must emit 0 fades");
+		}
+
+		// D5 #8: Centered graphic on black shrinking and darkening smoothly drops BOTH mean and p99 monotonically (negative control)
+		// yet must emit 0 fades (localized center graphic is not a whole-picture fade).
+		TEST_METHOD(ZoomingDarkeningCenterGraphicOnBlackIsNotAFade)
+		{
+			std::vector<Record> recs;
+			for (int i = 0; i < 24; ++i)
+			{
+				const double t = i < 4 ? 0.0 : (i <= 18 ? double(i - 3) / 15.0 : 1.0);
+				const double halfW = 24.0 * (1.0 - 0.55 * t);
+				const double halfH = 16.0 * (1.0 - 0.55 * t);
+				const double gain = 1.0 - 0.65 * t;
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const double dx = std::fabs(double(x) - 0.5 * double(kW));
+						const double dy = std::fabs(double(y) - 0.5 * double(kH));
+						double v = kBlack;
+						if (dx <= halfW && dy <= halfH)
+						{
+							const double art = 0.40 + 0.55 * (1.0 - 0.5 * (dx / (halfW + 1e-6) + dy / (halfH + 1e-6)));
+							v = kBlack + gain * art * 48000.0 + double(Noise(x, y, uint32_t(i))) * 0.25;
+						}
+						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+					}
+				recs.push_back(MakeRecordFromHalf(half));
+			}
+
+			// Mandatory In-Test Negative Control (Rule 3): verify BOTH mean and p99 drop monotonically over >= 10 frames!
+			int monoMeanAndP99Drops = 0;
+			for (size_t i = 5; i <= 18; ++i)
+				if (recs[i].mean < recs[i - 1].mean && recs[i].p99 < recs[i - 1].p99)
+					++monoMeanAndP99Drops;
+			Assert::IsTrue(monoMeanAndP99Drops >= 10,
+				L"Negative control: zooming/darkening center graphic must monotonically drop both mean and p99");
+
+			const auto res = Play(recs);
+			Assert::AreEqual(0, Count(res, 1, recs.size()), L"zooming darkening center graphic on black must emit 0 fades");
+		}
+
+		// ---- U7 v5 D4: Standalone symmetric noise-model proof (100% independent of real clips / D8) -------------------------
+
+		// D4 #9: Verifies StepStillMoving's Neyman-Pearson strict above-LSB majority (sSameEps > sOppEps) against exact
+		// Gaussian tail probability theory across drift mu in {-0.15, 0.0, +0.10, +0.15, +0.25} codes/frame (sigma = 0.5,
+		// 100 trials each), proves a 0.75 threshold fails >50% of genuine slow fades while >0.5 passes >=95%, verifies
+		// reversal rejection (100% in FoldFadeRun), and verifies exact 50/50 tie rejection (sSameEps == sOppEps == 2).
+		TEST_METHOD(StepStillMovingAboveLsbMajorityFollowsSymmetricNoiseModel)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			constexpr int R = kLocalRadius;
+			constexpr int kIntN = (kGridH - 2 * R) * (kGridW - 2 * R);
+			constexpr double kSigma = 0.5;
+			constexpr double kEps = kFadeCellStepEps;   // 0.5 code
+			constexpr int kTrials = 100;
+			const double kInvSqrt2 = 1.0 / std::sqrt(2.0);
+
+			auto TailProb = [&](double z) -> double {
+				return 0.5 * std::erfc(z * kInvSqrt2);
+			};
+
+			// Build a deterministic synthetic Record directly from a 32x18 cell grid (exact P4-code scale).
+			auto MakeGridRecord = [](const double cells[kGridH][kGridW]) -> Record {
+				Record r;
+				r.gridFound = 1;
+				r.pixelCount = kW * kH;
+				double sum = 0.0;
+				std::vector<uint32_t> vals;
+				vals.reserve(size_t(kGridW * kGridH));
+				for (int y = 0; y < kGridH; ++y)
+					for (int x = 0; x < kGridW; ++x)
+					{
+						const uint32_t p4 = static_cast<uint32_t>((std::min)(65535.0, (std::max)(0.0, std::floor(cells[y][x] * 256.0 + 0.5))));
+						r.cells[y * kGridW + x] = p4;
+						sum += double(p4);
+						vals.push_back(p4);
+						const uint32_t bin = (std::min)(VpUnit::SourceStats::kHistBins - 1u, p4 / kP4HistBinWidth);
+						r.hist[bin] += 25u;
+					}
+				std::sort(vals.begin(), vals.end());
+				r.mean = static_cast<uint32_t>(std::floor(sum / double(kGridW * kGridH) + 0.5));
+				r.p01 = vals[vals.size() / 100];
+				r.p50 = vals[vals.size() / 2];
+				r.p99 = vals[(vals.size() * 99) / 100];
+				return r;
+			};
+
+			std::mt19937 rng(20261123u);
+			std::normal_distribution<double> noiseDist(0.0, kSigma);
+
+			// 1. Empirical Gaussian tail geometry across mu in {-0.15, 0.0, +0.10, +0.15, +0.25}.
+			const double mus[] = { -0.15, 0.0, +0.10, +0.15, +0.25 };
+			for (double mu : mus)
+			{
+				const double pPlus = TailProb((kEps - mu) / kSigma);
+				const double pMinus = TailProb((kEps + mu) / kSigma);
+				const double qTheory = pPlus / (pPlus + pMinus);
+
+				double qSum = 0.0;
+				int pass75 = 0, passStrictMaj = 0;
+				for (int t = 0; t < kTrials; ++t)
+				{
+					int sSame = 0, sOpp = 0;
+					for (int i = 0; i < kIntN; ++i)
+					{
+						const double delta = mu + noiseDist(rng);
+						if (delta > kEps)
+							++sSame;
+						else if (delta < -kEps)
+							++sOpp;
+					}
+					const int m = sSame + sOpp;
+					Assert::IsTrue(m > 0, L"non-empty tail sample");
+					const double q = double(sSame) / double(m);
+					qSum += q;
+					if (double(sSame) >= kFadeSpatialConsensus * double(m))
+						++pass75;
+					if (sSame > sOpp)
+						++passStrictMaj;
+				}
+				const double qEmp = qSum / double(kTrials);
+				Assert::IsTrue(std::fabs(qEmp - qTheory) <= 0.05,
+					L"empirical above-LSB tail fraction must match normal-tail analytical prediction within +-0.05");
+
+				if (mu == +0.10 || mu == +0.15)
+				{
+					Assert::IsTrue(qEmp > 0.55 && qEmp < 0.74,
+						L"for mu in {+0.10, +0.15} with sigma=0.5, empirical tail fraction lies strictly in (0.55, 0.74)");
+					// Mandatory In-Test Negative Control (Rule 3): naive 0.75 threshold rejects > 50% of genuine slow fades,
+					// whereas Neyman-Pearson strict majority (sSame > sOpp) passes >= 95%!
+					Assert::IsTrue(pass75 < 50,
+						L"Negative control: naive 0.75 threshold must reject > 50% of genuine slow-fade trials at mu=0.10..0.15");
+					Assert::IsTrue(passStrictMaj >= 95,
+						L"Neyman-Pearson strict majority (sSame > sOpp) must pass >= 95% of genuine slow-fade trials");
+				}
+				else if (mu == -0.15)
+				{
+					Assert::IsTrue(passStrictMaj <= 5,
+						L"reversal mu=-0.15 must be rejected by strict majority (sSame > sOpp) on >= 95% of trials");
+				}
+			}
+
+			// 2. Real FoldFadeRun reversal rejection (mu = -0.15 on an active brightening run -> 100% rejected across 100 trials)
+			//    AND exact 50/50 above-LSB tie (sSameEps == sOppEps == 2) rejection!
+			double baseGrid[kGridH][kGridW], prevGrid[kGridH][kGridW];
+			for (int y = 0; y < kGridH; ++y)
+				for (int x = 0; x < kGridW; ++x)
+				{
+					const double pat = 20.0 + 100.0 * double(x) / double(kGridW - 1) + 20.0 * std::sin(double(y) * 0.5);
+					baseGrid[y][x] = 16.0 + 0.80 * pat;
+					prevGrid[y][x] = 16.0 + 0.90 * pat;   // +12.5% cumulative brightening from base
+				}
+			double midGrid[kGridH][kGridW];
+			for (int y = 0; y < kGridH; ++y)
+				for (int x = 0; x < kGridW; ++x)
+					midGrid[y][x] = 0.5 * (baseGrid[y][x] + prevGrid[y][x]);
+
+			const Record rBase = MakeGridRecord(baseGrid);
+			const Record rMid = MakeGridRecord(midGrid);
+			const Record rPrev = MakeGridRecord(prevGrid);
+
+			auto PrimeActiveBrighteningRun = [&]() -> FadeRun {
+				FadeRun r;
+				const Events e1 = ClassifyEvents(rBase, rMid, false, false);
+				FoldFadeRun(rBase, rMid, e1, r);
+				const Events e2 = ClassifyEvents(rMid, rPrev, false, false);
+				const bool active = FoldFadeRun(rMid, rPrev, e2, r);
+				Assert::IsTrue(active && r.direction > 0, L"precondition: primed active brightening fade run");
+				return r;
+			};
+
+			// 2a. Reversal trials (mu = -0.15 codes + N(0, 0.5) noise): FoldFadeRun must reject 100/100!
+			int revAccepted = 0;
+			for (int t = 0; t < kTrials; ++t)
+			{
+				double revGrid[kGridH][kGridW];
+				for (int y = 0; y < kGridH; ++y)
+					for (int x = 0; x < kGridW; ++x)
+						revGrid[y][x] = prevGrid[y][x] - 0.15 + noiseDist(rng);
+				const Record rRev = MakeGridRecord(revGrid);
+				FadeRun run = PrimeActiveBrighteningRun();
+				const Events e = ClassifyEvents(rPrev, rRev, false, false);
+				if (FoldFadeRun(rPrev, rRev, e, run))
+					++revAccepted;
+			}
+			Assert::AreEqual(0, revAccepted, L"FoldFadeRun must reject 100% of mu=-0.15 reversal trials");
+
+			// 2b. Exact 50/50 above-LSB tie (sSameEps == 2, sOppEps == 2) on a slightly expanding plateau:
+			//     Isolates strict (sSameEps > sOppEps) vs old (>= 0.5 * (sSameEps + sOppEps)):
+			//     dMean > 0, stepA_Q > 1.0, sSameZero >> sOppZero, cumulative fit still valid with k < run.keep,
+			//     yet sSameEps == sOppEps == 2 -> FoldFadeRun MUST return false!
+			{
+				double tieGrid[kGridH][kGridW];
+				for (int y = 0; y < kGridH; ++y)
+					for (int x = 0; x < kGridW; ++x)
+						tieGrid[y][x] = 16.0 + 1.003 * (prevGrid[y][x] - 16.0);   // tiny +0.3% expansion (< 0.45 code everywhere)
+				// Inject exact 2 cells > +0.5 code and 2 cells < -0.5 code inside interior [R..H-R)x[R..W-R):
+				tieGrid[R + 2][R + 4] = prevGrid[R + 2][R + 4] + 0.8;
+				tieGrid[R + 3][R + 5] = prevGrid[R + 3][R + 5] + 0.8;
+				tieGrid[R + 4][R + 6] = prevGrid[R + 4][R + 6] - 0.8;
+				tieGrid[R + 5][R + 7] = prevGrid[R + 5][R + 7] - 0.8;
+
+				const Record rTie = MakeGridRecord(tieGrid);
+				// Verify exact tie precondition directly on the encoded P4 grid:
+				int tieSame = 0, tieOpp = 0;
+				for (int y = R; y < kGridH - R; ++y)
+					for (int x = R; x < kGridW - R; ++x)
+					{
+						const double delta = (double(rTie.cells[y * kGridW + x]) - double(rPrev.cells[y * kGridW + x])) * kGridScale;
+						if (delta > kEps)
+							++tieSame;
+						else if (delta < -kEps)
+							++tieOpp;
+					}
+				Assert::AreEqual(2, tieSame, L"precondition: exact 2 above-LSB brightening cells");
+				Assert::AreEqual(2, tieOpp, L"precondition: exact 2 above-LSB darkening cells");
+				// Negative control: old >= 0.5 threshold would accept this 2/4 tie!
+				Assert::IsTrue(double(tieSame) >= kFadeSpatialCoverage * double(tieSame + tieOpp),
+					L"Negative control: old >= 0.5 threshold would have accepted exact 2-vs-2 tie");
+
+				FadeRun run = PrimeActiveBrighteningRun();
+				const Events eTie = ClassifyEvents(rPrev, rTie, false, false);
+				Assert::IsFalse(FoldFadeRun(rPrev, rTie, eTie, run),
+					L"D4 strict Bayes majority (sSameEps > sOppEps) must reject exact 50/50 above-LSB tie");
+			}
+		}
+
+		// ---- U7 v5 D8: False-fade counter-example suite ---------------------------------------------------------------------
+
+		// D8 #10: Dark interior ramp + pinned bright practical lamp (~2.5% pixels at p99 = 235 codes); midtones oscillate +-4%
+		// over 3-5 frames. Negative control proves rigid FitGridFadeGrid alone returns valid == true while HighlightScalingConsistent
+		// rejects it, emitting 0 fades across the entire sequence.
+		TEST_METHOD(AmbientFillFlickerWithPinnedHighlightsIsNotAFade)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			auto InteriorFlickerFrame = [](double midGain, uint32_t k) -> Record {
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						// Practical lamp pinned at 235 codes in border strip (10 x 36 = 360 px = 2.5% of 14400 px -> pins p99 = 235)
+						// while leaving the entire 28x14 interior grid purely midtone walls.
+						if (x < 10u && y < 36u)
+						{
+							half[size_t(y) * kW + x] = static_cast<uint16_t>(235u * 256u);
+						}
+						else
+						{
+							const double base = 8192.0 + 18000.0 * double(x) / double(kW - 1) + 4000.0 * std::sin(double(y) * 0.14);
+							const double v = kBlack + midGain * (base - kBlack) + double(Noise(x, y, k)) * 0.25;
+							half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+						}
+					}
+				return MakeRecordFromHalf(half);
+			};
+
+			// 4 static frames, then 4 frames rising +4%/frame, then 4 frames falling -4%/frame, then 4 frames rising +4%/frame.
+			const double gains[] = {
+				1.00, 1.00, 1.00, 1.00,
+				1.04, 1.08, 1.12, 1.16,
+				1.12, 1.08, 1.04, 1.00,
+				1.04, 1.08, 1.12, 1.16,
+				1.16, 1.16, 1.16, 1.16
+			};
+			std::vector<Record> recs;
+			uint32_t k = 0;
+			for (double g : gains)
+				recs.push_back(InteriorFlickerFrame(g, k++));
+
+			// Mandatory In-Test Negative Control (Rule 3): prove rigid FitGridFadeGrid alone (WITHOUT HighlightScalingConsistent)
+			// returns valid == true on the flicker ramp (index 3 -> index 7, +16% midtone rise), while HighlightScalingConsistent
+			// rejects it because p99 is pinned at 235 codes!
+			{
+				const GridFadeFit rawFit = FitGridFade(recs[3].cells, recs[7].cells, kLocalRadius);
+				Assert::IsTrue(rawFit.valid && rawFit.dir > 0,
+					L"Negative control: rigid FitGridFadeGrid alone must return valid on midtone flicker ramp");
+				Assert::IsFalse(HighlightScalingConsistent(recs[3].p99, recs[7].p99, rawFit.gain, rawFit.black, rawFit.dir),
+					L"HighlightScalingConsistent must reject midtone flicker with pinned p99 highlight");
+			}
+
+			const auto res = Play(recs);
+			Assert::AreEqual(0, Count(res, 1, recs.size()),
+				L"ambient fill flicker with pinned highlights must emit 0 fades");
+		}
+
+		// D8 #11: Textured shot drops spread by 40% in 1 frame (aMean < spread/4 while aSpread >= spread/4) -> 0 fades and run reset.
+		TEST_METHOD(AbruptFortyPercentSpreadDipIsNotAFade)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			auto MakeSpreadFrame = [](double spreadScale, double meanOffsetCodes, uint32_t k) -> Record {
+				constexpr double kCenter = 32192.0;
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const double base = 8192.0 + double(x) * 48000.0 / double(kW - 1);
+						const double v = kCenter + meanOffsetCodes * 256.0 + spreadScale * (base - kCenter)
+							+ double(Noise(x, y, k)) * 0.25;
+						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+					}
+				return MakeRecordFromHalf(half);
+			};
+
+			// Case A: abrupt 40% spread dip from static shot (0 fades, run does not seed).
+			// Case B: abrupt 40% spread dip mid-fade-out (0 fades on dip frame, active run resets to direction == 0, pairs == 0).
+			std::vector<Record> recs;
+			uint32_t k = 0;
+			for (int i = 0; i < 6; ++i)
+				recs.push_back(Picture(1.0, k++));
+			// Active fade-out for 6 frames (1.0 -> 0.85) so a real FadeRun is active before the abrupt 40% spread collapse.
+			for (int i = 1; i <= 6; ++i)
+				recs.push_back(Picture(1.0 - 0.025 * double(i), k++));
+			// Index 12: abrupt 40% spread dip (scale 0.85 -> 0.50 -> ~41% spread drop) keeping mean shift small (< spread / 4).
+			const double prevMeanCodes = double(recs.back().mean) / 256.0;
+			recs.push_back(MakeSpreadFrame(0.50, prevMeanCodes - (32192.0 / 256.0) - 2.0, k++));
+			for (int i = 0; i < 6; ++i)
+				recs.push_back(MakeSpreadFrame(0.50, prevMeanCodes - (32192.0 / 256.0) - 2.0, k++));
+
+			// Mandatory In-Test Negative Control (Rule 3): prove index 11 -> 12 satisfies aMean < spread/4 (would pass
+			// old mean-only jump check!) while tripping aSpread >= spread/4!
+			const Record& prevR = recs[11];
+			const Record& dipR = recs[12];
+			const uint32_t spPrev = prevR.p99 > prevR.p01 ? prevR.p99 - prevR.p01 : 0u;
+			const uint32_t spDip = dipR.p99 > dipR.p01 ? dipR.p99 - dipR.p01 : 0u;
+			const int64_t sp = int64_t((std::max)(spPrev, spDip));
+			const int64_t dMeanDip = int64_t(dipR.mean) - int64_t(prevR.mean);
+			const int64_t aMean = dMeanDip < 0 ? -dMeanDip : dMeanDip;
+			const int64_t dSpreadDip = int64_t(spDip) - int64_t(spPrev);
+			const int64_t aSpread = dSpreadDip < 0 ? -dSpreadDip : dSpreadDip;
+			Assert::IsTrue(aMean * kFadeMaxDiv < sp,
+				L"Negative control: abrupt spread dip keeps aMean < spread/4 (would bypass mean-only jump check)");
+			Assert::IsTrue(aSpread * kFadeMaxDiv >= sp,
+				L"Negative control: abrupt 40% spread dip trips aSpread >= spread/4");
+
+			FadeRun run;
+			bool activeBeforeDip = false;
+			for (size_t i = 1; i < recs.size(); ++i)
+			{
+				const Events e = ClassifyEvents(recs[i - 1], recs[i], false, false);
+				const bool rf = FoldFadeRun(recs[i - 1], recs[i], e, run);
+				if (i == 11)
+					activeBeforeDip = e.fade || rf;
+				if (i == 12)
+				{
+					Assert::IsFalse(e.fade, L"abrupt 40% spread dip must not be a pair fade");
+					Assert::IsFalse(rf, L"abrupt 40% spread dip must not be a run fade");
+					Assert::AreEqual(0, run.direction, L"abrupt 40% spread dip must reset run direction");
+					Assert::AreEqual(0u, run.pairs, L"abrupt 40% spread dip must reset run pairs");
+				}
+				if (i > 12)
+					Assert::IsFalse(e.fade || rf, L"post-dip static frames must emit 0 fades");
+			}
+			Assert::IsTrue(activeBeforeDip, L"precondition: fade-out run was active immediately before the abrupt spread dip");
+		}
+
+		// D8 #12: 48-frame fade-out & fade-in followed by 20 noisy static AND panning plateau frames -> 0 post-fade tail frames!
+		// Negative control proves cumulative FitGridFade(base -> firstPlateau) is STILL valid == true (would emit tail fades
+		// without strict k < run.keep + stepA_Q termination).
+		TEST_METHOD(PostFadePlateauEmitsZeroTailFades)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			const int pre = 8, n = 48, post = 20;
+
+			// 1. 48-frame fade-out -> 20 noisy static plateau frames.
+			{
+				const std::vector<Record> recs = FadeSequence(n, pre, post, 0.25);
+				// Negative control: cumulative FitGridFade from fade start (pre - 1) to first plateau frame (pre + n) is STILL valid!
+				const GridFadeFit cumFit = FitGridFade(recs[size_t(pre - 1)].cells, recs[size_t(pre + n)].cells, kLocalRadius);
+				Assert::IsTrue(cumFit.valid && cumFit.dir < 0,
+					L"Negative control: cumulative FitGridFade(base -> firstPlateau) is still valid, proving strict termination is required");
+
+				const auto res = Play(recs);
+				Assert::AreEqual(0, Count(res, 1, size_t(pre)), L"0 pre-fade fades");
+				Assert::IsTrue(Count(res, size_t(pre), size_t(pre + n)) >= 45, L"48-frame fade-out detected");
+				Assert::AreEqual(0, Count(res, size_t(pre + n), recs.size()),
+					L"D8 strict termination: static plateau after fade-out must emit 0 tail fades");
+			}
+
+			// 2. 48-frame fade-in -> 20 noisy static plateau frames.
+			{
+				std::vector<Record> recs;
+				uint32_t k = 0;
+				for (int i = 0; i < pre; ++i)
+					recs.push_back(Picture(0.25, k++));
+				for (int i = 1; i <= n; ++i)
+					recs.push_back(Picture(0.25 + 0.75 * double(i) / double(n), k++));
+				for (int i = 0; i < post; ++i)
+					recs.push_back(Picture(1.0, k++));
+
+				const GridFadeFit cumFit = FitGridFade(recs[size_t(pre - 1)].cells, recs[size_t(pre + n)].cells, kLocalRadius);
+				Assert::IsTrue(cumFit.valid && cumFit.dir > 0,
+					L"Negative control: cumulative FitGridFade(base -> firstPlateau) is still valid after fade-in");
+
+				const auto res = Play(recs);
+				Assert::AreEqual(0, Count(res, 1, size_t(pre)), L"0 pre-fade-in fades");
+				Assert::IsTrue(Count(res, size_t(pre), size_t(pre + n)) >= 45, L"48-frame fade-in detected");
+				Assert::AreEqual(0, Count(res, size_t(pre + n), recs.size()),
+					L"D8 strict termination: static plateau after fade-in must emit 0 tail fades");
+			}
+
+			// 3. 48-frame pan+fade-out -> 20 noisy panning plateau frames.
+			{
+				std::vector<Record> recs;
+				for (int i = 0; i < pre + n + post; ++i)
+				{
+					const double gain = i < pre ? 1.0 : (i < pre + n ? 1.0 - 0.75 * double(i - pre + 1) / double(n) : 0.25);
+					recs.push_back(TexturedPanFadePicture(gain, 0.4 * double(i), 0.0, uint32_t(7000 + i)));
+				}
+				const auto res = Play(recs);
+				Assert::AreEqual(0, Count(res, 1, size_t(pre)), L"0 pre-fade pan fades");
+				Assert::IsTrue(Count(res, size_t(pre), size_t(pre + n)) >= 44, L"48-frame pan+fade-out detected");
+				Assert::AreEqual(0, Count(res, size_t(pre + n), recs.size()),
+					L"D8 strict termination: panning plateau after pan+fade-out must emit 0 tail fades");
+			}
+		}
+
+		// D8 #13: Active fade-out followed by a frame where mean still drops -0.2 code while spread rebounds +3 codes
+		// -> terminates immediately (0 fades on rebound frame). Negative control proves dMean < 0 AND cumulative FitGridFade
+		// (base -> rebound) is still valid == true.
+		TEST_METHOD(FadeOutFollowedBySpreadReversalTerminatesImmediately)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			std::vector<Record> recs;
+			uint32_t k = 0;
+			for (int i = 0; i < 6; ++i)
+				recs.push_back(Picture(1.0, k++));
+			for (int i = 1; i <= 20; ++i)
+				recs.push_back(Picture(1.0 - 0.50 * double(i) / 20.0, k++));   // ends at gain = 0.50 (index 25)
+
+			// Build rebound frame: mean ticks down -0.25 code while spread rebounds +4 codes (+5% contrast expansion about mean).
+			const double endMeanP4 = double(recs.back().mean);
+			std::vector<uint16_t> reboundHalf(size_t(kW) * kH);
+			for (uint32_t y = 0; y < kH; ++y)
+				for (uint32_t x = 0; x < kW; ++x)
+				{
+					const double base = 8192.0 + double(x) * 48000.0 / double(kW - 1);
+					const double prevV = kBlack + 0.50 * (base - kBlack);
+					const double v = (endMeanP4 - 0.25 * 256.0) + 1.05 * (prevV - endMeanP4);
+					reboundHalf[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+				}
+			recs.push_back(MakeRecordFromHalf(reboundHalf));   // index 26: rebound frame
+
+			// Mandatory In-Test Negative Control (Rule 3): dMean < 0, spread rebounded >= +3 codes, AND cumulative FitGridFade
+			// from base (index 5) to rebound (index 26) is STILL valid == true!
+			const Record& endR = recs[25];
+			const Record& rebR = recs[26];
+			const uint32_t spEnd = endR.p99 - endR.p01;
+			const uint32_t spReb = rebR.p99 - rebR.p01;
+			Assert::IsTrue(rebR.mean < endR.mean, L"Negative control: rebound frame still has dMean < 0");
+			Assert::IsTrue(double(spReb) - double(spEnd) >= 3.0 * 256.0, L"Negative control: rebound frame expands spread by >= 3 codes");
+			const GridFadeFit cumFit = FitGridFade(recs[5].cells, rebR.cells, kLocalRadius);
+			Assert::IsTrue(cumFit.valid && cumFit.dir < 0,
+				L"Negative control: cumulative FitGridFade(base -> rebound) is still valid, proving stepA_Q / k < run.keep termination");
+
+			FadeRun run;
+			bool activeBeforeRebound = false;
+			for (size_t i = 1; i < recs.size(); ++i)
+			{
+				const Events e = ClassifyEvents(recs[i - 1], recs[i], false, false);
+				const bool rf = FoldFadeRun(recs[i - 1], recs[i], e, run);
+				if (i == 25)
+					activeBeforeRebound = e.fade || rf;
+				if (i == 26)
+				{
+					Assert::IsFalse(e.fade, L"rebound frame must not be a pair fade");
+					Assert::IsFalse(rf, L"fade-out followed by spread reversal must terminate immediately (runFade == false)");
+				}
+			}
+			Assert::IsTrue(activeBeforeRebound, L"precondition: fade-out run was active immediately before spread reversal");
+		}
+
+		// ---- U7 v5 D6: CutTracker fade-in-from-black emergence veto hardening & provisional-vs-confirmed tests --------------
+
+		// D6 #14: Hard cut from black into bright (0 -> 0.80 -> 0.88 -> 0.96) AND dim (0 -> 0.20 -> 0.22 -> 0.24, +10%/frame
+		// lighting rise) shot must BOTH emit exact 1 confirmed T2 cut at frame 8.
+		// Negative control proves dim case has aheadFit.valid && aheadFit.dir > 0 with gain < 1.25 (W1 v4 would falsely veto!).
+		TEST_METHOD(CutTrackerKeepsHardCutFromBlackIntoShotWithLightingRise)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			struct Case { double g0, g1, g2; bool checkDimNegControl; };
+			const Case cases[] = {
+				{ 0.80, 0.88, 0.96, false },
+				{ 0.20, 0.22, 0.24, true }
+			};
+			for (const Case& c : cases)
+			{
+				std::vector<Record> recs;
+				uint32_t k = 0;
+				for (int i = 0; i < 8; ++i)
+					recs.push_back(Black(k++));
+				recs.push_back(Picture(c.g0, k++));   // frame 8: hard cut from black
+				recs.push_back(Picture(c.g1, k++));   // frame 9: +10% lighting rise
+				recs.push_back(Picture(c.g2, k++));   // frame 10: +9% lighting rise
+				for (int i = 0; i < 4; ++i)
+					recs.push_back(Picture(c.g2, k++));
+
+				if (c.checkDimNegControl)
+				{
+					// Mandatory In-Test Negative Control (Rule 3): prove W1 v4 (without the 1 + 1/kFadeMaxDiv = 1.25 gain bar)
+					// WOULD have falsely vetoed this hard cut because aheadFit.valid && aheadFit.dir > 0 with gain ~ 1.10 < 1.25!
+					Grid g8, g9;
+					GridOf(recs[8], &g8);
+					GridOf(recs[9], &g9);
+					const GridFadeFit aheadFit = FitGridFadeGrid(g8.g, g9.g, kShiftRadius);
+					Assert::IsTrue(aheadFit.valid && aheadFit.dir > 0,
+						L"Negative control: dim lighting-rise pair satisfies W1 v4 aheadFit.valid && dir > 0");
+					Assert::IsTrue(aheadFit.gain < 1.0 + 1.0 / double(kFadeMaxDiv),
+						L"Negative control: +10%/frame lighting rise has gain < 1.25 (below duration-invariant black emergence bar)");
+				}
+
+				CutTracker tracker;
+				std::vector<int> cutFrames;
+				for (size_t i = 0; i < recs.size(); ++i)
+				{
+					const CutVerdict v = tracker.Push(static_cast<uint64_t>(i) + 1, recs[i]);
+					if (v.known && v.cut)
+						cutFrames.push_back(static_cast<int>(v.seq) - 1);
+				}
+				Assert::AreEqual(size_t(1), cutFrames.size(),
+					L"hard cut from black into shot with lighting rise must emit exact 1 confirmed T2 cut");
+				Assert::AreEqual(8, cutFrames[0], L"confirmed T2 cut must fire at exact cut frame 8");
+			}
+		}
+
+		// D6 #15: Hard cut from black into a panning shot (both bright gain=0.80 and dim gain=0.20) emits exact 1 T2 cut at frame 8.
+		TEST_METHOD(CutTrackerKeepsHardCutFromBlackIntoPan)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			for (double gain : { 0.80, 0.20 })
+			{
+				std::vector<Record> recs;
+				uint32_t k = 0;
+				for (int i = 0; i < 8; ++i)
+					recs.push_back(Black(k++));
+				for (int i = 0; i < 8; ++i)
+					recs.push_back(Picture(gain, k++, uint32_t(2 * i), true));
+
+				CutTracker tracker;
+				std::vector<int> cutFrames;
+				for (size_t i = 0; i < recs.size(); ++i)
+				{
+					const CutVerdict v = tracker.Push(static_cast<uint64_t>(i) + 1, recs[i]);
+					if (v.known && v.cut)
+						cutFrames.push_back(static_cast<int>(v.seq) - 1);
+				}
+				Assert::AreEqual(size_t(1), cutFrames.size(),
+					L"hard cut from black into panning shot must emit exact 1 confirmed T2 cut");
+				Assert::AreEqual(8, cutFrames[0], L"confirmed T2 cut must fire at exact cut frame 8");
+			}
+		}
+
+		// D6 #16: 10-frame fade-in from black WITH simultaneous pan: Provisional() at frame 8 (ahead == nullptr) reports cut == true,
+		// confirmed verdict for frame 8 after pushing frame 9 vetoes it (v.cut == false), and 0 confirmed T2 cuts fire overall.
+		TEST_METHOD(CutTrackerVetoesFadeInFromBlackUnderPanAndProvisionalDiffers)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			std::vector<Record> recs;
+			uint32_t k = 0;
+			for (int i = 0; i < 8; ++i)
+				recs.push_back(Black(k++));
+			for (int i = 1; i <= 10; ++i)
+				recs.push_back(TexturedPanFadePicture(double(i) / 10.0, 0.4 * double(i), 0.0, k++));
+			for (int i = 1; i <= 6; ++i)
+				recs.push_back(TexturedPanFadePicture(1.0, 0.4 * double(10 + i), 0.0, k++));
+
+			CutTracker tracker;
+			int confirmedCuts = 0;
+			bool checkedProvisional8 = false;
+			bool checkedConfirmed8 = false;
+			for (size_t i = 0; i < recs.size(); ++i)
+			{
+				const CutVerdict v = tracker.Push(static_cast<uint64_t>(i) + 1, recs[i]);
+				if (v.known && v.cut)
+					++confirmedCuts;
+				if (i == 8)
+				{
+					const CutVerdict prov = tracker.Provisional();
+					Assert::IsTrue(prov.known && !prov.confirmed, L"Provisional() at frame 8 has ahead == nullptr");
+					Assert::IsTrue(prov.cut, L"Provisional() at frame 8 flags cut == true before frame 9 confirms fade-in");
+					checkedProvisional8 = true;
+				}
+				if (i == 9)
+				{
+					Assert::IsTrue(v.known && v.confirmed && v.seq == 9u, L"pushing frame 9 confirms frame 8 (seq 9)");
+					Assert::IsFalse(v.cut, L"confirmed verdict for frame 8 must veto cut (v.cut == false) under pan fade-in");
+					checkedConfirmed8 = true;
+				}
+			}
+			Assert::IsTrue(checkedProvisional8 && checkedConfirmed8);
+			Assert::AreEqual(0, confirmedCuts, L"genuine fade-in from black under pan must emit 0 confirmed T2 cuts");
+		}
+
+		// ---- U7 v5 D7: failedBlackOrigin re-seed bound (at most 1 seed frame lost) ------------------------------------------
+
+		// D7 #17: Tests both N=48 and N=96 fade-ins in Baseline vs AfterFailedBlackOrigin (7x Black -> 1x FlatLift(+2 codes)
+		// -> N fade-in -> 6x Picture(1.0)). Proves failedBlackOrigin actually fires on fade-in frame 1 and loses <= 1 seed frame.
+		TEST_METHOD(GenuineFadeInRightAfterFailedBlackOriginLosesAtMostOneSeedFrame)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			for (int n : { 48, 96 })
+			{
+				// Build Baseline: 8x Black -> N fade-in frames -> 6x Picture(1.0).
+				std::vector<Record> baseRecs;
+				uint32_t kBase = 0;
+				for (int i = 0; i < 8; ++i)
+					baseRecs.push_back(Black(kBase++));
+				for (int i = 1; i <= n; ++i)
+					baseRecs.push_back(Picture(double(i) / double(n), kBase++));
+				for (int i = 0; i < 6; ++i)
+					baseRecs.push_back(Picture(1.0, kBase++));
+
+				// Build AfterFailedBlackOrigin: 7x Black -> 1x FlatLift(+2 codes) -> identical N fade-in frames -> 6x Picture(1.0).
+				std::vector<Record> afterRecs;
+				for (int i = 0; i < 7; ++i)
+					afterRecs.push_back(baseRecs[size_t(i)]);
+				afterRecs.push_back(ConstantFlatPicture(18.0));   // index 7: +2 code flat lift from black (16 -> 18)
+				for (size_t i = 8; i < baseRecs.size(); ++i)
+					afterRecs.push_back(baseRecs[i]);
+
+				// Play Baseline.
+				int baseTotalFades = 0, firstBaseFadeIdx = -1, basePrePostFades = 0;
+				{
+					FadeRun run;
+					for (size_t i = 1; i < baseRecs.size(); ++i)
+					{
+						const Events e = ClassifyEvents(baseRecs[i - 1], baseRecs[i], false, false);
+						const bool rf = FoldFadeRun(baseRecs[i - 1], baseRecs[i], e, run);
+						const bool isFade = e.fade || rf;
+						if (i < 8u || i >= size_t(8 + n))
+							basePrePostFades += isFade ? 1 : 0;
+						else if (isFade)
+						{
+							++baseTotalFades;
+							if (firstBaseFadeIdx < 0)
+								firstBaseFadeIdx = int(i);
+						}
+					}
+				}
+				Assert::AreEqual(0, basePrePostFades, L"baseline must emit 0 false fades on static pre/post frames");
+				Assert::IsTrue(firstBaseFadeIdx >= 8 && baseTotalFades >= n - 4, L"baseline detects genuine fade-in");
+
+				// Play AfterFailedBlackOrigin and verify failedBlackOrigin fires on fade-in frame 1 (index 8).
+				int postTotalFades = 0, firstPostFadeIdx = -1, postPrePostFades = 0;
+				{
+					FadeRun run;
+					for (size_t i = 1; i < afterRecs.size(); ++i)
+					{
+						const Events e = ClassifyEvents(afterRecs[i - 1], afterRecs[i], false, false);
+						const bool rf = FoldFadeRun(afterRecs[i - 1], afterRecs[i], e, run);
+						const bool isFade = e.fade || rf;
+						if (i == 7u)
+						{
+							Assert::IsTrue(e.cut, L"precondition: +2 code flat lift from black trips e.cut");
+							Assert::IsFalse(rf, L"single flat lift pair never fires runFade");
+							Assert::IsTrue(run.blackOrigin && run.direction == 1 && run.pairs == 1u,
+								L"precondition: flat lift seeds blackOrigin run (direction=1, pairs=1)");
+						}
+						else if (i == 8u)
+						{
+							Assert::IsTrue(e.cut, L"precondition: fade-in frame 1 after flat lift trips e.cut");
+							Assert::IsFalse(rf, L"failedBlackOrigin blocks pair 1 from firing runFade");
+							Assert::AreEqual(0, run.direction, L"failedBlackOrigin must reset run.direction to 0 (proving guard fired)");
+							Assert::AreEqual(0u, run.pairs, L"failedBlackOrigin must reset run.pairs to 0 (proving guard fired)");
+						}
+
+						if (i < 8u || i >= size_t(8 + n))
+							postPrePostFades += isFade ? 1 : 0;
+						else if (isFade)
+						{
+							++postTotalFades;
+							if (firstPostFadeIdx < 0)
+								firstPostFadeIdx = int(i);
+						}
+					}
+				}
+				Assert::AreEqual(0, postPrePostFades, L"AfterFailedBlackOrigin must emit 0 false fades on static pre/post frames");
+				Assert::IsTrue(firstPostFadeIdx >= 8, L"AfterFailedBlackOrigin must re-seed and detect the genuine fade-in");
+				Assert::IsTrue(postTotalFades >= baseTotalFades - 1,
+					L"D7 bound: genuine fade-in right after failedBlackOrigin loses at most 1 seed frame in total fade hits");
+				Assert::IsTrue(firstPostFadeIdx <= firstBaseFadeIdx + 1,
+					L"D7 bound: first detected fade frame after failedBlackOrigin is delayed by at most 1 frame");
 			}
 		}
 	};

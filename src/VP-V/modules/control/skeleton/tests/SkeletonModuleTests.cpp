@@ -3529,6 +3529,266 @@ namespace SkeletonModuleTestsNs
 			rig.sk.OnStatus(c, RE::StatusKind::WorkerFault, none, "resync", "exception");
 			Assert::AreEqual<unsigned long long>(before + 1, SkeletonModule::ContainedFaults());
 		}
+
+		// W23-Phase4 D10: SceneRunBefore rebuild timing telemetry (fadeRunRebuildUsTotal / Max / Last)
+		// and Ctrl+Alt+D / OnCommand("skeleton", "status") wiring.
+		// Includes in-test negative control (normal sequential ring-hit stream -> all counters 0, no rebuild-time line)
+		// followed by two real ring-miss gaps (exact rebuild + reduced-evidence rebuild) verifying cumulative/max/last
+		// accounting and exact status line formatting.
+		BEGIN_TEST_METHOD_ATTRIBUTE(D10SceneRunRebuildTimingIsCountedAndShownInStatus)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(D10SceneRunRebuildTimingIsCountedAndShownInStatus)
+		{
+			auto FindLineContaining = [](const std::string& text, const char* needle) -> std::string {
+				size_t pos = 0;
+				while (pos < text.size())
+				{
+					const size_t eol = text.find('\n', pos);
+					const std::string line = (eol == std::string::npos) ? text.substr(pos) : text.substr(pos, eol - pos);
+					if (line.find(needle) != std::string::npos)
+						return line;
+					if (eol == std::string::npos)
+						break;
+					pos = eol + 1;
+				}
+				return std::string();
+			};
+
+			Rig rig(Lane("on"), 40);
+			ShapeASlowFade(rig);
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+
+			auto StepFrame = [&](int64_t s, bool classify) {
+				rig.Ingress(s);
+				if (s == 1)
+					rig.Deliver(1);
+				rig.Deliver(uint64_t(s) + 1);
+				rig.Begin(s);
+				if (classify && s >= 2)
+				{
+					Vpv::Skeleton::SceneFacts f;
+					Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), uint64_t(s), f), L"SceneFactsOf must succeed on delivered frame");
+				}
+				rig.After(s);
+			};
+
+			RE::Context ctx;
+			ctx.host = rig.Host();
+
+			// 1. Negative control: normal sequential ring-hit stream (frames 1..15 classified in order).
+			for (int64_t s = 1; s <= 15; ++s)
+				StepFrame(s, true);
+
+			const Vpv::Skeleton::SceneCounters c0 = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(uint64_t(0), c0.fadeRunRebuilt, L"Negative control: sequential ring-hit stream has 0 exact rebuilds");
+			Assert::AreEqual(uint64_t(0), c0.fadeRunReduced, L"Negative control: sequential ring-hit stream has 0 reduced rebuilds");
+			Assert::AreEqual(uint64_t(0), c0.fadeRunRebuildUsTotal, L"Negative control: 0 rebuilds must yield 0 total rebuild us");
+			Assert::AreEqual(uint64_t(0), c0.fadeRunRebuildUsMax, L"Negative control: 0 rebuilds must yield 0 max rebuild us");
+			Assert::AreEqual(uint64_t(0), c0.fadeRunRebuildUsLast, L"Negative control: 0 rebuilds must yield 0 last rebuild us");
+			Assert::AreEqual(uint64_t(0), c0.published + c0.notReady, L"no store: only this test classified (gaps below are real)");
+
+			std::string status0;
+			Assert::IsTrue(rig.sk.OnCommand(ctx, "skeleton", "status", status0), L"skeleton status command must succeed");
+			Assert::IsTrue(status0.find("rebuild time mean ") == std::string::npos,
+				L"Negative control: sequential stream status must NOT contain 'rebuild time mean '");
+			Assert::IsTrue(status0.find("Skeleton scene: U7 fade run missing for ") == std::string::npos,
+				L"Negative control: sequential stream status must NOT contain fade-run-missing line");
+
+			// 2. Positive case 1: 3-frame gap (16..18 skipped) -> frame 19 triggers a real ring-miss rebuild.
+			for (int64_t s = 16; s <= 18; ++s)
+				StepFrame(s, false);
+			StepFrame(19, true);
+
+			const Vpv::Skeleton::SceneCounters c1 = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(uint64_t(1), c1.fadeRunRebuilt + c1.fadeRunReduced, L"first ring-miss gap must trigger exactly 1 rebuild");
+			Assert::AreEqual(c1.fadeRunRebuildUsLast, c1.fadeRunRebuildUsTotal, L"after 1 rebuild, total us must equal last us");
+			Assert::AreEqual(c1.fadeRunRebuildUsLast, c1.fadeRunRebuildUsMax, L"after 1 rebuild, max us must equal last us");
+
+			std::string status1;
+			Assert::IsTrue(rig.sk.OnCommand(ctx, "skeleton", "status", status1), L"skeleton status command must succeed after gap 1");
+			const std::string line1 = FindLineContaining(status1, "Skeleton scene: U7 fade run missing for ");
+			Assert::IsFalse(line1.empty(), L"status must include the 'Skeleton scene: U7 fade run missing for ' line after rebuild");
+			Assert::IsTrue(line1.find("Skeleton scene: U7 fade run missing for 1 frame(s): ") != std::string::npos,
+				L"status line must report 1 missing frame after gap 1");
+			Assert::IsTrue(line1.find("rebuild time mean ") != std::string::npos,
+				L"status line must report 'rebuild time mean '");
+			Assert::IsTrue(line1.find(", max ") != std::string::npos,
+				L"status line must report ', max '");
+			Assert::IsTrue(line1.find(", last ") != std::string::npos,
+				L"status line must report ', last '");
+
+			// 3. Positive case 2: 10-frame gap (20..29 skipped, > 7-pair ring depth) -> frame 30 triggers a second rebuild
+			// with reduced evidence, verifying cumulative total, monotonic max, and updated status line.
+			for (int64_t s = 20; s <= 29; ++s)
+				StepFrame(s, false);
+			StepFrame(30, true);
+
+			const Vpv::Skeleton::SceneCounters c2 = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(uint64_t(2), c2.fadeRunRebuilt + c2.fadeRunReduced, L"second ring-miss gap must increment rebuild count to 2");
+			Assert::IsTrue(c2.fadeRunReduced >= uint64_t(1), L"10-frame gap beyond 7-pair ring must record reduced-evidence rebuild");
+			Assert::AreEqual(c1.fadeRunRebuildUsTotal + c2.fadeRunRebuildUsLast, c2.fadeRunRebuildUsTotal,
+				L"cumulative rebuild total us must equal previous total + last rebuild us");
+			Assert::IsTrue(c2.fadeRunRebuildUsMax >= c2.fadeRunRebuildUsLast,
+				L"max rebuild us must be >= last rebuild us");
+			Assert::IsTrue(c2.fadeRunRebuildUsMax >= c1.fadeRunRebuildUsMax,
+				L"max rebuild us must never decrease");
+			Assert::IsTrue(c2.fadeRunRebuildUsTotal >= c2.fadeRunRebuildUsMax,
+				L"cumulative rebuild total us must be >= max single rebuild us");
+
+			std::string status2;
+			Assert::IsTrue(rig.sk.OnCommand(ctx, "skeleton", "status", status2), L"skeleton status command must succeed after gap 2");
+			const std::string line2 = FindLineContaining(status2, "Skeleton scene: U7 fade run missing for ");
+			Assert::IsTrue(line2.find("Skeleton scene: U7 fade run missing for 2 frame(s): ") != std::string::npos,
+				L"status line must report 2 missing frames after gap 2");
+			Assert::IsTrue(line2.find("rebuild time mean ") != std::string::npos &&
+				line2.find(", max ") != std::string::npos &&
+				line2.find(", last ") != std::string::npos,
+				L"status line after gap 2 must retain mean/max/last rebuild timing fields");
+		}
+
+		// W23-Phase4 D6: A provisional cut verdict withdrawn on confirmation by the fade-in-from-black veto
+		// increments SceneCounters::provisionalCutWithdrawn and appears on the Ctrl+Alt+D "Skeleton scene:" status line.
+		// Includes in-test negative control: a genuine hard cut from black into a constant-brightness panning shot
+		// stays confirmed with provisionalCutWithdrawn == 0.
+		BEGIN_TEST_METHOD_ATTRIBUTE(ProvisionalCutWithdrawnByFadeInVetoIsCountedAndShown)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ProvisionalCutWithdrawnByFadeInVetoIsCountedAndShown)
+		{
+			auto FillPanFrame = [](Rig& rig, uint64_t seq, double gain, double shiftPx) {
+				uint16_t* dst = rig.store.data() + size_t(seq % rig.count) * kW * kH;
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						if (gain <= 0.0)
+						{
+							dst[size_t(y) * kW + x] = 64u;
+						}
+						else
+						{
+							const double sx = double(x) + shiftPx;
+							const double sy = double(y);
+							const double pat = 0.50
+								+ 0.25 * std::sin(sx * 0.35 + sy * 0.15)
+								+ 0.18 * std::cos(sx * 0.19 - sy * 0.27);
+							const double v = 64.0 + gain * pat * 760.0;
+							dst[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(1023.0, (std::max)(0.0, std::floor(v + 0.5))));
+						}
+					}
+			};
+
+			// 1. Positive case: 8 black frames -> 10-frame fade-in from black with simultaneous pan -> 4 panning frames.
+			//    Deliver each frame only when it becomes current so SceneFactsOf(9) is guaranteed provisional before 10 arrives.
+			{
+				Rig rig(Lane("on"), 32);
+				for (uint64_t s = 1; s <= 8; ++s)
+					FillPanFrame(rig, s, 0.0, 0.0);
+				for (uint64_t s = 9; s <= 18; ++s)
+					FillPanFrame(rig, s, double(s - 8) / 10.0, 2.0 * double(s - 8));
+				for (uint64_t s = 19; s <= 22; ++s)
+					FillPanFrame(rig, s, 1.0, 2.0 * double(s - 8));
+
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+
+				bool frame9ProvisionalCut = false;
+				Vpv::Skeleton::SceneFacts f9After;
+				bool haveF9After = false;
+				for (int64_t s = 1; s <= 22; ++s)
+				{
+					rig.Ingress(s);
+					rig.Deliver(uint64_t(s));
+					rig.Begin(s);
+					if (s >= 2)
+					{
+						Vpv::Skeleton::SceneFacts f;
+						Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), uint64_t(s), f), L"SceneFactsOf must succeed on frame");
+						if (s == 9)
+						{
+							Assert::IsFalse(f.confirmed, L"frame 9 must be provisional before frame 10 is delivered");
+							frame9ProvisionalCut = f.cut;
+						}
+						else if (s == 10)
+						{
+							haveF9After = rig.sk.SceneFactsOf(rig.Host(), 9u, f9After);
+						}
+					}
+					rig.After(s);
+				}
+				Assert::IsTrue(frame9ProvisionalCut, L"precondition: frame 9 emergence from black is provisionally flagged as a cut");
+				Assert::IsTrue(haveF9After, L"frame 9 must still be readable right after frame 10 confirms it");
+				Assert::IsTrue(f9After.confirmed && !f9After.cut,
+					L"frame 9 confirmed verdict must be vetoed (!cut) once frame 10 confirms the brightening fade-in");
+
+				const Vpv::Skeleton::SceneCounters sc = rig.sk.SceneCountersOf(rig.Host());
+				Assert::IsTrue(sc.provisionalCutWithdrawn >= uint64_t(1),
+					L"withdrawn provisional cut on pan fade-in from black must increment provisionalCutWithdrawn");
+
+				RE::Context ctx;
+				ctx.host = rig.Host();
+				std::string status;
+				Assert::IsTrue(rig.sk.OnCommand(ctx, "skeleton", "status", status));
+				Assert::IsTrue(status.find("provisional cut(s) withdrawn on confirmation") != std::string::npos,
+					L"status line must surface 'provisional cut(s) withdrawn on confirmation'");
+				Assert::IsTrue(status.find("1 provisional cut(s) withdrawn on confirmation") != std::string::npos,
+					L"status line must show non-zero withdrawal count after fade-in veto");
+			}
+
+			// 2. Negative control: 8 black frames -> hard cut into constant-brightness panning shot (gain = 0.20).
+			//    Frame 9 is provisionally a cut AND stays confirmed as a cut -> provisionalCutWithdrawn == 0.
+			{
+				Rig rig(Lane("on"), 32);
+				for (uint64_t s = 1; s <= 8; ++s)
+					FillPanFrame(rig, s, 0.0, 0.0);
+				for (uint64_t s = 9; s <= 18; ++s)
+					FillPanFrame(rig, s, 0.20, 2.0 * double(s - 8));
+
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+
+				bool frame9ProvisionalCut = false;
+				Vpv::Skeleton::SceneFacts f9After;
+				bool haveF9After = false;
+				for (int64_t s = 1; s <= 18; ++s)
+				{
+					rig.Ingress(s);
+					rig.Deliver(uint64_t(s));
+					rig.Begin(s);
+					if (s >= 2)
+					{
+						Vpv::Skeleton::SceneFacts f;
+						Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), uint64_t(s), f));
+						if (s == 9)
+						{
+							Assert::IsFalse(f.confirmed, L"Negative control: frame 9 is provisional before frame 10 arrives");
+							frame9ProvisionalCut = f.cut;
+						}
+						else if (s == 10)
+						{
+							haveF9After = rig.sk.SceneFactsOf(rig.Host(), 9u, f9After);
+						}
+					}
+					rig.After(s);
+				}
+				Assert::IsTrue(frame9ProvisionalCut, L"Negative control: hard cut from black into pan is provisionally a cut");
+				Assert::IsTrue(haveF9After, L"Negative control: frame 9 must still be readable right after frame 10 confirms it");
+				Assert::IsTrue(f9After.confirmed && f9After.cut,
+					L"Negative control: frame 9 hard cut from black into pan must remain a confirmed cut");
+
+				const Vpv::Skeleton::SceneCounters sc = rig.sk.SceneCountersOf(rig.Host());
+				Assert::AreEqual(uint64_t(0), sc.provisionalCutWithdrawn,
+					L"Negative control: confirmed hard cut from black into pan must keep provisionalCutWithdrawn == 0");
+
+				RE::Context ctx;
+				ctx.host = rig.Host();
+				std::string status;
+				Assert::IsTrue(rig.sk.OnCommand(ctx, "skeleton", "status", status));
+				Assert::IsTrue(status.find("0 provisional cut(s) withdrawn on confirmation") != std::string::npos,
+					L"Negative control: status line must report 0 provisional cuts withdrawn");
+			}
+		}
 	};
 
 	TEST_CLASS(SkeletonGpuStatusTexts)
@@ -3995,124 +4255,6 @@ namespace SkeletonModuleTestsNs
 			Assert::IsNull(gi.gsBlocks);
 			for (size_t i = 0; i < Vpv::Skeleton::DitherNeedGpuInputs::kPrecursors; ++i)
 				Assert::IsNull(gi.precursors[i]);
-		}
-
-		// W23-Phase4 D10: SceneRunBefore rebuild timing telemetry (fadeRunRebuildUsTotal / Max / Last)
-		// and Ctrl+Alt+D / OnCommand("skeleton", "status") wiring.
-		// Includes in-test negative control (normal sequential ring-hit stream -> all counters 0, no rebuild-time line)
-		// followed by two real ring-miss gaps (exact rebuild + reduced-evidence rebuild) verifying cumulative/max/last
-		// accounting and exact status line formatting.
-		BEGIN_TEST_METHOD_ATTRIBUTE(D10SceneRunRebuildTimingIsCountedAndShownInStatus)
-			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
-		END_TEST_METHOD_ATTRIBUTE()
-		TEST_METHOD(D10SceneRunRebuildTimingIsCountedAndShownInStatus)
-		{
-			auto FindLineContaining = [](const std::string& text, const char* needle) -> std::string {
-				size_t pos = 0;
-				while (pos < text.size())
-				{
-					const size_t eol = text.find('\n', pos);
-					const std::string line = (eol == std::string::npos) ? text.substr(pos) : text.substr(pos, eol - pos);
-					if (line.find(needle) != std::string::npos)
-						return line;
-					if (eol == std::string::npos)
-						break;
-					pos = eol + 1;
-				}
-				return std::string();
-			};
-
-			Rig rig(Lane("on"), 40);
-			ShapeASlowFade(rig);
-			rig.ResyncApply("on");
-			rig.Life(RE::Lifecycle::GpuCreated);
-
-			auto StepFrame = [&](int64_t s, bool classify) {
-				rig.Ingress(s);
-				if (s == 1)
-					rig.Deliver(1);
-				rig.Deliver(uint64_t(s) + 1);
-				rig.Begin(s);
-				if (classify && s >= 2)
-				{
-					Vpv::Skeleton::SceneFacts f;
-					Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), uint64_t(s), f), L"SceneFactsOf must succeed on delivered frame");
-				}
-				rig.After(s);
-			};
-
-			RE::Context ctx;
-			ctx.host = rig.Host();
-
-			// 1. Negative control: normal sequential ring-hit stream (frames 1..15 classified in order).
-			for (int64_t s = 1; s <= 15; ++s)
-				StepFrame(s, true);
-
-			const Vpv::Skeleton::SceneCounters c0 = rig.sk.SceneCountersOf(rig.Host());
-			Assert::AreEqual(uint64_t(0), c0.fadeRunRebuilt, L"Negative control: sequential ring-hit stream has 0 exact rebuilds");
-			Assert::AreEqual(uint64_t(0), c0.fadeRunReduced, L"Negative control: sequential ring-hit stream has 0 reduced rebuilds");
-			Assert::AreEqual(uint64_t(0), c0.fadeRunRebuildUsTotal, L"Negative control: 0 rebuilds must yield 0 total rebuild us");
-			Assert::AreEqual(uint64_t(0), c0.fadeRunRebuildUsMax, L"Negative control: 0 rebuilds must yield 0 max rebuild us");
-			Assert::AreEqual(uint64_t(0), c0.fadeRunRebuildUsLast, L"Negative control: 0 rebuilds must yield 0 last rebuild us");
-			Assert::AreEqual(uint64_t(0), c0.published + c0.notReady, L"no store: only this test classified (gaps below are real)");
-
-			std::string status0;
-			Assert::IsTrue(rig.sk.OnCommand(ctx, "skeleton", "status", status0), L"skeleton status command must succeed");
-			Assert::IsTrue(status0.find("rebuild time mean ") == std::string::npos,
-				L"Negative control: sequential stream status must NOT contain 'rebuild time mean '");
-			Assert::IsTrue(status0.find("Skeleton scene: U7 fade run missing for ") == std::string::npos,
-				L"Negative control: sequential stream status must NOT contain fade-run-missing line");
-
-			// 2. Positive case 1: 3-frame gap (16..18 skipped) -> frame 19 triggers a real ring-miss rebuild.
-			for (int64_t s = 16; s <= 18; ++s)
-				StepFrame(s, false);
-			StepFrame(19, true);
-
-			const Vpv::Skeleton::SceneCounters c1 = rig.sk.SceneCountersOf(rig.Host());
-			Assert::AreEqual(uint64_t(1), c1.fadeRunRebuilt + c1.fadeRunReduced, L"first ring-miss gap must trigger exactly 1 rebuild");
-			Assert::AreEqual(c1.fadeRunRebuildUsLast, c1.fadeRunRebuildUsTotal, L"after 1 rebuild, total us must equal last us");
-			Assert::AreEqual(c1.fadeRunRebuildUsLast, c1.fadeRunRebuildUsMax, L"after 1 rebuild, max us must equal last us");
-
-			std::string status1;
-			Assert::IsTrue(rig.sk.OnCommand(ctx, "skeleton", "status", status1), L"skeleton status command must succeed after gap 1");
-			const std::string line1 = FindLineContaining(status1, "Skeleton scene: U7 fade run missing for ");
-			Assert::IsFalse(line1.empty(), L"status must include the 'Skeleton scene: U7 fade run missing for ' line after rebuild");
-			Assert::IsTrue(line1.find("Skeleton scene: U7 fade run missing for 1 frame(s): ") != std::string::npos,
-				L"status line must report 1 missing frame after gap 1");
-			Assert::IsTrue(line1.find("rebuild time mean ") != std::string::npos,
-				L"status line must report 'rebuild time mean '");
-			Assert::IsTrue(line1.find(", max ") != std::string::npos,
-				L"status line must report ', max '");
-			Assert::IsTrue(line1.find(", last ") != std::string::npos,
-				L"status line must report ', last '");
-
-			// 3. Positive case 2: 10-frame gap (20..29 skipped, > 7-pair ring depth) -> frame 30 triggers a second rebuild
-			// with reduced evidence, verifying cumulative total, monotonic max, and updated status line.
-			for (int64_t s = 20; s <= 29; ++s)
-				StepFrame(s, false);
-			StepFrame(30, true);
-
-			const Vpv::Skeleton::SceneCounters c2 = rig.sk.SceneCountersOf(rig.Host());
-			Assert::AreEqual(uint64_t(2), c2.fadeRunRebuilt + c2.fadeRunReduced, L"second ring-miss gap must increment rebuild count to 2");
-			Assert::IsTrue(c2.fadeRunReduced >= uint64_t(1), L"10-frame gap beyond 7-pair ring must record reduced-evidence rebuild");
-			Assert::AreEqual(c1.fadeRunRebuildUsTotal + c2.fadeRunRebuildUsLast, c2.fadeRunRebuildUsTotal,
-				L"cumulative rebuild total us must equal previous total + last rebuild us");
-			Assert::IsTrue(c2.fadeRunRebuildUsMax >= c2.fadeRunRebuildUsLast,
-				L"max rebuild us must be >= last rebuild us");
-			Assert::IsTrue(c2.fadeRunRebuildUsMax >= c1.fadeRunRebuildUsMax,
-				L"max rebuild us must never decrease");
-			Assert::IsTrue(c2.fadeRunRebuildUsTotal >= c2.fadeRunRebuildUsMax,
-				L"cumulative rebuild total us must be >= max single rebuild us");
-
-			std::string status2;
-			Assert::IsTrue(rig.sk.OnCommand(ctx, "skeleton", "status", status2), L"skeleton status command must succeed after gap 2");
-			const std::string line2 = FindLineContaining(status2, "Skeleton scene: U7 fade run missing for ");
-			Assert::IsTrue(line2.find("Skeleton scene: U7 fade run missing for 2 frame(s): ") != std::string::npos,
-				L"status line must report 2 missing frames after gap 2");
-			Assert::IsTrue(line2.find("rebuild time mean ") != std::string::npos &&
-				line2.find(", max ") != std::string::npos &&
-				line2.find(", last ") != std::string::npos,
-				L"status line after gap 2 must retain mean/max/last rebuild timing fields");
 		}
 	};
 }
