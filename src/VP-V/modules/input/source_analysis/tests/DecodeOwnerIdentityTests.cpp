@@ -109,9 +109,9 @@ namespace DecodeOwnerIdentityTestsNs
 			VpFrameAnalysis::LumaRowReader reader(source);
 			for (int y = picture.top; y < picture.bottom; ++y)
 			{
-				const uint16_t* row = reader.Row(y, picture.left, picture.Width());
+				const uint16_t* row = reader.RowQ6(y, picture.left, picture.Width());
 				if (!row) return false;
-				reducer.AddRow(y, row);
+				reducer.AddRowQ6(y, row);
 			}
 			out = reducer.Finish();
 			return true;

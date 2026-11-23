@@ -111,12 +111,12 @@ namespace DvTwelveBitTapTestsNs
 					uint16_t expect = static_cast<uint16_t>(code);
 					if (full) expect = DvTunnelTapLaw::FullLumaToLimited12(static_cast<int>(code));
 					Assert::AreEqual<int>(expect, tap, L"the tap is the DvTunnelTapLaw code");
-					// The axis value of the sample is Q6 = MsbAlign(raw); Floor10FromQ6 is the legacy ten-bit tap.
+					// The axis value of the sample is Q6 = MsbAlign(raw); q6 / 64 is the legacy ten-bit floor (4d removed Floor10FromQ6).
 					const uint32_t q6 = view.MsbAlign(tap);
 					Assert::AreEqual<uint32_t>(AxisQ6(tap, CodeMaximum(12)), q6);
 					AnalysisLumaSample sample;
 					Assert::IsTrue(ramp.source.Sample(static_cast<int>(code % 64), static_cast<int>(code / 64), sample));
-					const int diff = std::abs(static_cast<int>(Floor10FromQ6(q6)) - static_cast<int>(sample.luma));
+					const int diff = std::abs(static_cast<int>(q6 / 64u) - static_cast<int>(sample.luma));
 					if (diff > maxDiff) maxDiff = diff;
 				}
 				if (!full)
@@ -254,7 +254,7 @@ namespace DvTwelveBitTapTestsNs
 					Assert::AreEqual<int>(expect, tap, L"the delivered tap is the DvTunnelTapLaw code");
 					AnalysisLumaSample sample;
 					Assert::IsTrue(ramp.source.Sample(static_cast<int>(code % 64), static_cast<int>(code / 64), sample));
-					const int diff = std::abs(static_cast<int>(Floor10FromQ6(d.view.MsbAlign(tap))) - static_cast<int>(sample.luma));
+					const int diff = std::abs(static_cast<int>(d.view.MsbAlign(tap) / 64u) - static_cast<int>(sample.luma));
 					if (diff > maxDiff) maxDiff = diff;
 				}
 				if (!full)
@@ -277,7 +277,7 @@ namespace DvTwelveBitTapTestsNs
 				{
 					AnalysisLumaSample sample;
 					if (!frame.source.Sample(x, y, sample) ||
-						Floor10FromQ6(d.view.MsbAlign(d.view.luma[static_cast<size_t>(y) * d.view.strideSamples + x])) != sample.luma)
+						(d.view.MsbAlign(d.view.luma[static_cast<size_t>(y) * d.view.strideSamples + x]) / 64u) != sample.luma)
 						++mismatches;
 				}
 			Assert::AreEqual(0, mismatches, L"the ten-bit floor of every 12-bit tap is the legacy Sample()");

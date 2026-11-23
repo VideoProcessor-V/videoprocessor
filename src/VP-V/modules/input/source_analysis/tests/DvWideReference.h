@@ -49,7 +49,7 @@ namespace DvWideReference
 	{
 		luma = FrameAnalysis::LumaStats{};
 		range = FrameAnalysis::RangeOccupancy{};
-		uint64_t sumQ6 = 0, samples = 0;
+		uint64_t sumQ6 = 0, samples = 0, btb = 0, wtw = 0, nearBlack = 0, clipped = 0;
 		uint32_t minQ6 = 0xffffffffu, maxQ6 = 0;
 		for (int y = picture.top; y < picture.bottom; ++y)
 			for (int x = picture.left; x < picture.right; ++x)
@@ -63,6 +63,10 @@ namespace DvWideReference
 				const uint32_t bin = (std::min)(q6 >> 6, static_cast<uint32_t>(FrameAnalysis::kHistogramBins - 1));
 				++luma.histogram[bin];
 				sumQ6 += q6;
+				if (q6 < 64u * 64u) ++btb;
+				if (q6 > 940u * 64u) ++wtw;
+				if (q6 <= 81u * 64u) ++nearBlack;
+				if (q6 >= 1019u * 64u) ++clipped;
 				minQ6 = (std::min)(minQ6, q6);
 				maxQ6 = (std::max)(maxQ6, q6);
 				++samples;
@@ -87,15 +91,6 @@ namespace DvWideReference
 		luma.p1Q6 = (static_cast<uint32_t>(luma.p1) << 6) | 32u;
 		luma.p50Q6 = (static_cast<uint32_t>(luma.p50) << 6) | 32u;
 		luma.p99Q6 = (static_cast<uint32_t>(luma.p99) << 6) | 32u;
-		uint64_t btb = 0, wtw = 0, nearBlack = 0, clipped = 0;
-		for (int bin = 0; bin < FrameAnalysis::kHistogramBins; ++bin)
-		{
-			const uint64_t count = luma.histogram[static_cast<size_t>(bin)];
-			if (bin < 64) btb += count;
-			if (bin > 940) wtw += count;
-			if (bin <= 81) nearBlack += count;
-			if (bin >= 1019) clipped += count;
-		}
 		range.btb = btb / n;
 		range.wtw = wtw / n;
 		range.nearBlack = nearBlack / n;
