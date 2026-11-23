@@ -818,7 +818,7 @@ namespace SegmentRunnerTestsNs
 			OcclusionMask::Hook mask;
 			OutputSegments::OutputFinishSegment s3(repair, mask);
 			pl_hook_par par{};
-			pl_hook_par::pl_hook_par_data pdata{};
+			pl_var_data pdata{};
 			par.name = "occlusion_mask";
 			par.type = PL_VAR_FLOAT;
 			par.minimum.f = 0.0f;

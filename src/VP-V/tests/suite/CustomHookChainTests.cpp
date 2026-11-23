@@ -593,7 +593,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(SetHookParameterNullNonFiniteAndFloatDirectPath)
 		{
 			pl_hook_par par[3]{};
-			pl_hook_par::pl_hook_par_data data[3]{};
+			pl_var_data data[3]{};
 			par[0].name = "f"; par[0].type = PL_VAR_FLOAT; par[0].minimum.f = -2.0f; par[0].maximum.f = 5.0f; par[0].data = &data[0]; data[0].f = 1.0f;
 			par[1].name = "s"; par[1].type = PL_VAR_SINT;  par[1].minimum.i = -4;    par[1].maximum.i = 4;    par[1].data = &data[1]; data[1].i = 1;
 			par[2].name = "u"; par[2].type = PL_VAR_UINT;  par[2].minimum.u = 0;     par[2].maximum.u = 8;    par[2].data = &data[2]; data[2].u = 1;

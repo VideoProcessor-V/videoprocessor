@@ -2023,7 +2023,7 @@ namespace VideoProcessorTest
 				for (double x = -3.0; x <= 6.0; x += 0.0137) xs.push_back(x);
 				for (double x : xs)
 				{
-					const double ref = TemporalDetail::Smoothstep(e[0], e[1], x);
+					const double ref = RampMath::Smoothstep<double>(e[0], e[1], x, RampMath::SmoothRule::Unguarded);
 					const double inv = 1.0 - ref;
 					const double s = RampMath::GateS(e[0], e[1], x), g = RampMath::GateInv(e[0], e[1], x);
 					Assert::IsTrue(std::memcmp(&ref, &s, sizeof ref) == 0, L"GateS is bit-identical to the temporal-detail Smoothstep on finite input");

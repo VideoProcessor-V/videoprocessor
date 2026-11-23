@@ -2335,7 +2335,7 @@ if (g.y == 0 && g.x < DN_N) {
 				repr.levels = PL_COLOR_LEVELS_FULL;
 				repr.bits.sample_depth = sampleDepth;
 				repr.bits.color_depth = colorDepth;
-				return SigmaDeltaDomain::FromRepr(repr);
+				return SigmaDeltaDomain::FromTarget(repr);
 			};
 			// Unsupported: 9-bit combinations and 12-bit sample depth
 			const int bad[4][2] = { { 9, 8 }, { 8, 9 }, { 9, 9 }, { 12, 10 } };
