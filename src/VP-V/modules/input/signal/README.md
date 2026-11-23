@@ -210,6 +210,7 @@ VP files (in this folder):
 - `src/VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h`
 - `src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.h`
 - `src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.cpp`
+- `src/VP-V/modules/input/signal/DvTunnelGlsl.h`
 - `src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h`
 - `src/VP-V/modules/input/signal/DvSignalLevels.h`
 - `src/VP-V/modules/input/signal/DvMetadataHold.h`
@@ -262,6 +263,10 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Tests: `ResyncAuditTests.cpp` (Indicator query, pulldown mixed interval, cursor reset, storm on source time, motion readers re-arming on a new era), plus the lane/FrameSeal/stress classes in `src/VP-V/tests/AnalysisLaneTests.cpp` (`AnalysisLaneAuditTests`, `ResyncStressTests`).
 - `VP_RESYNC_SCHEDULE=<path>` (read only when `VP_RESYNC_INJECT=1`): the loop test tier hands the stress schedule (`tools/soak/resync_schedule.py` output) to `ResyncInject`, which loads it at construction (`LoadScheduleFile`); a missing or invalid file is shown in `StatusText` ("NOT loaded"), never silent. Unarmed: the variable is not read.
 
+## DvTunnelGlsl.h (D5-QK K1, rules 1 and 20)
+
+`DvTunnelGlsl::kHeader` is the one copy of the DV tunnel GLSL (`dv_word`, `dv_intensity`, `dv_chroma`, `dv_u16`; HDMI 1.4a 6.5.4), moved verbatim out of `GpuDolbyVisionTunnelUnpack.cpp`. Both the DV kernel and the P13 luma kernel (`SourceUnpackGpu`, capture module) set it as `custom.header`; the texture is `raw`, the uniform `big_endian`.
+
 ## DvTunnelTapLaw.h (refs/116b)
 
-The 12-bit analysis tap of a packed Dolby Vision tunnel frame, read through `DvTunnelTapLaw::SourceTap12` from the same frame bytes as `AnalysisLumaSource` (whose 10-bit luma is untouched: rule 32, no hook sites). `Code12` is the unpack reference's intensity >> 4; full range maps through `FullLumaToLimited12` (black 256, white 3760); `Legacy10` = tap12 >> 2 (exact when limited, within one code when full range). `BuildRangeTable` is the GPU's table. `VpFrameAnalysis::SourceViewOf12` wraps it as a `SourceFrameView` (msbShift 4). Tests: `DvTunnelTapLawTests`.
+The 12-bit analysis tap of a packed Dolby Vision tunnel frame, read through `DvTunnelTapLaw::SourceTap12` from the same frame bytes as `AnalysisLumaSource` (whose 10-bit luma is untouched: rule 32, no hook sites). `Code12` is the unpack reference's intensity >> 4; full range maps through `FullLumaToLimited12` (black 256, white 3760); `Legacy10` = tap12 >> 2 (exact when limited, within one code when full range). `BuildRangeTable` is the GPU's table. `VpFrameAnalysis::SourceViewOf12` wraps it as a `SourceFrameView` (msbShift 4). Tests: `DvTunnelTapLawTests` and `DvTunnelTapLawExhaustiveTests` (every 12-bit intensity x container x alignment x range against the unpack reference, the legacy ten-bit tap, random padded frames, the range table, Supports).

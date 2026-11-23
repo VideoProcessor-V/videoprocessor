@@ -40,6 +40,7 @@
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
 #include <vprenderer/RendererExtension.h>
+#include <VP-V/core/SourceRingFeed.h>
 
 namespace MotionAhead
 {
@@ -88,6 +89,51 @@ namespace MotionAhead
 		}
 	}
 
+	// P10 D5 phase A (refs/118 s3), carrier (a): fills one core-level AheadFrame (core/SourceRingFeed.h) from a queued frame (seq, size, the extension slot as an opaque pointer). The
+	// walk is templated over fake hosts whose queued frame may lack `converted->extension`; the C++14 detector accepts both
+	// shapes (absent: empty). Neither the ring's key epoch nor its capacity is read here: the ring takes the epoch as
+	// max(its published window's epoch, the queue-fact epoch) and derives its capacity (RingWindowFrames) from that window.
+	namespace AheadSlotDetail
+	{
+		template <class Q>
+		auto ExtensionSlot(const Q& q, int) -> decltype(static_cast<const std::shared_ptr<void>&>(q.converted->extension))
+		{
+			static const std::shared_ptr<void> none;
+			return q.converted ? static_cast<const std::shared_ptr<void>&>(q.converted->extension) : none;
+		}
+		template <class Q>
+		const std::shared_ptr<void>& ExtensionSlot(const Q&, long) { static const std::shared_ptr<void> none; return none; }
+
+		// The queued frame's width when it carries one (a fake host's frame may not): 0 = not delivered.
+		template <class Q>
+		auto WidthOf(const Q& q, int) -> decltype(static_cast<int32_t>(q.state->displayMode->FrameWidth()))
+		{
+			return (q.state && q.state->displayMode) ? static_cast<int32_t>(q.state->displayMode->FrameWidth()) : 0;
+		}
+		template <class Q>
+		int32_t WidthOf(const Q&, long) { return 0; }
+
+		// The queued frame's height when it carries one: 0 = not delivered.
+		template <class Q>
+		auto HeightOf(const Q& q, int) -> decltype(static_cast<int32_t>(q.state->displayMode->FrameHeight()))
+		{
+			return (q.state && q.state->displayMode) ? static_cast<int32_t>(q.state->displayMode->FrameHeight()) : 0;
+		}
+		template <class Q>
+		int32_t HeightOf(const Q&, long) { return 0; }
+
+		// Opaque: the extension slot is handed on as it is; input.capture's ring decodes it (motion never includes capture).
+		template <class Q>
+		void Fill(const Q& q, VpSkeleton::AheadFrame& slot)
+		{
+			slot = VpSkeleton::AheadFrame();
+			slot.seq = static_cast<uint64_t>(q.sourceSequence);
+			slot.width = WidthOf(q, 0);
+			slot.height = HeightOf(q, 0);
+			slot.extension = ExtensionSlot(q, 0);
+		}
+	}
+
 	// The references the walk needs besides the Impl: the frames the render loop selected (the walk
 	// does not release them), the timing clock (null when none) and the measured source rate.
 	template <class Impl, class Queued, class Clock>
@@ -128,6 +174,23 @@ namespace MotionAhead
 			laneContext.phaseData = &laneView;
 			RendererExtension::Frame(laneContext);
 		}
+		// P10 D5, carrier (a): the queue's frames up to the lane lead go to this host's source ring through the core interface
+		// (core/SourceRingFeed.h; found by host, one lock-free lookup, one acquire load while nobody wants a list). Not a phase,
+		// not a hook: the walk is the existing S2 call site and the ring registered itself with its host binding.
+		if (const std::shared_ptr<VpSkeleton::ISourceRingFeed> feed = VpSkeleton::SourceRingFeeds::Find(impl))
+			if (feed->Wanted())
+			{
+				VpSkeleton::AheadFrame frames[VpSkeleton::kMaxFeedFrames];
+				size_t n = 0;
+				for (size_t index = 0; index < queue.size() && n < VpSkeleton::kMaxFeedFrames && n <= queuedAhead; ++index)
+				{
+					const auto& q = queue[index];
+					if (q.cadenceRepeat || !q.state) continue;
+					AheadSlotDetail::Fill(q, frames[n]);
+					++n;
+				}
+				feed->Feed(frames, n);   // an empty list is an update too: the frames that left the queue go to the graveyard
+			}
 		const auto aheadProducer = std::atomic_load(&impl->vectorEngine.motionProducer);
 		if (!aheadProducer)
 			return;

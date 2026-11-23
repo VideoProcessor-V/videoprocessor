@@ -69,6 +69,8 @@ formatters are Bill's and are used as they are.
   by one compute pass into the planes the CPU formatters write (P210: 16-bit luma + interleaved
   CbCr at every row), bit-exact; `Supports`, `Unpack(encoding, data, rowBytes, w, h, planes,
   uploaded)`, `Error`.
+- `SourceUnpack::SourceUnpackGpu` (D5-QK K1, design-check-P13-MOVE s3; NOT wired yet, no caller): the P13 unpack kernel. One compute pass writes ONE luma plane, R16 unorm MSB-aligned, from a raw early-upload rgba8 frame (or host bytes): P010/P210 (word>>6<<6), v210 (Y field<<6), UYVY/HDYC (byte<<8), DV tunnel (12-bit intensity<<4, full range via DvTunnelTapLaw::BuildRangeTable). `Packing`, `SourceBits` (10/8/12, the plane carries it), `Request`, `Validate`, `Unpack(request, data, uploaded, &out)`, `LastCause`/`CauseName` (every refusal named, shown by the caller, never log-only). Unpack only: never extends (the P10 reflect law stays P10 reader-side), never fused (D2). Decode laws are the existing CPU decoders, pinned by `SourceUnpackGpuTests` (WARP) against `AnalysisLumaSource::Sample().luma<<6` and `DvTunnelTapLaw::Tap16`. Near-duplicate note (rule 20): the V210/UYVY field extraction mirrors `GpuCaptureUnpack`, which writes P210 luma+chroma planes; the owner fill (Track Q) decides whether `capture_path: gpu` reads P13 for luma instead (one copy).
+- V210 / UYVY twin ruling (lead, CG-1, rule 20): the V210 and UYVY luma extraction in `SourceUnpackGpu` and `GpuCaptureUnpack` is the SAME law (same byte/word assembly and the same bit math). V210: pixel k of a six-pixel group reads word (2k+1)/3 at bit 10, 0 or 20 (k%3), checked against the per-pair table of `GpuCaptureUnpack` for k = 0..5; UYVY: Y0 = byte 1, Y1 = byte 3; each code is shifted into the high bits of 16. Therefore ONE capture GLSL header, `CaptureUnpackGlsl::kHeader` (`cu_bytes`, `cu_word`, `cu_u16`), is used by both kernels, exactly as `DvTunnelGlsl::kHeader` is shared with the DV kernel. Only the invocation shape differs (per pixel luma-only vs per pair with chroma), so the per-kernel bodies stay; if a body's field math ever diverges from the other, this entry becomes a refs row stating the difference.
 - `GpuRgbUnpack` - `native_rgb_ingest`: R12B / R12L / R210 / R10b / R10l / ARGB / BGRA unpacked to
   an rgba16 picture plus the de-judder matcher's r16 luma (exactly the CPU formatter's Y);
   `Supports`, `Is8Bit`, `FullRange`, `ColorDepth`, `BitShift`, `Unpack(..., lumaOnly, uploaded)`.
@@ -261,6 +263,9 @@ VP files (in this folder):
 
 - `src/VP-V/modules/input/capture/GpuCaptureUnpack.h`
 - `src/VP-V/modules/input/capture/GpuCaptureUnpack.cpp`
+- `src/VP-V/modules/input/capture/SourceUnpackGpu.h`
+- `src/VP-V/modules/input/capture/SourceUnpackGpu.cpp`
+- `src/VP-V/modules/input/capture/CaptureUnpackGlsl.h`
 - `src/VP-V/modules/input/capture/GpuRgbUnpack.h`
 - `src/VP-V/modules/input/capture/GpuRgbUnpack.cpp`
 - `src/VP-V/modules/input/capture/UploadReuse.h`
@@ -321,3 +326,5 @@ The D5 DV tap (refs/118 section 9) follows the same rule:
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+Source ring notes (CG-1): the ring epoch is the memo/queue-fact epoch (readers key on memo->Epoch()); OnQueueFact advances it between Begins. The graveyard is released at Begin (CaptureExtension::OnFrame, a FIRST-WINS phase); if Begin ever gains a consuming handler, the release must move to a fan-out phase. Only Wanted() feeds hold hand-offs; ~HostBinding clears Wanted and releases the graveyard before Unregister. The motion walk hands over opaque extensions; the decode lives here, so motion never includes capture.

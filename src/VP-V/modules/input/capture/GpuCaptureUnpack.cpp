@@ -1,5 +1,6 @@
 #include <pch.h>
 #include <VP-V/modules/input/capture/GpuCaptureUnpack.h>
+#include <VP-V/modules/input/capture/CaptureUnpackGlsl.h>
 #include <VP-V/core/GpuAttributionPl.h>
 
 #include <libplacebo/shaders/custom.h>
@@ -8,15 +9,7 @@
 
 namespace
 {
-	// The raw frame is uploaded as rgba8: one texel per 4 source bytes
-	// (V210: one 32-bit little-endian word; UYVY: U, Y0, V, Y1). unorm8 is
-	// exact for 0..255, so the bytes come back exactly.
-	const char* const UNPACK_HEADER = R"GLSL(
-uvec4 cu_bytes(int i, int y) { return uvec4(round(texelFetch(raw, ivec2(i, y), 0) * 255.0)); }
-uint cu_word(int i, int y) { uvec4 b = cu_bytes(i, y); return b.x | (b.y << 8) | (b.z << 16) | (b.w << 24); }
-// A 16-bit sample (the value already in the high bits) for a unorm16 store.
-float cu_u16(uint v) { return float(v) / 65535.0; }
-)GLSL";
+	// The raw-frame helpers (cu_bytes / cu_word / cu_u16) are the shared CaptureUnpackGlsl::kHeader.
 
 	// One invocation per pixel pair: its two luma samples and its CbCr.
 	// V210: 6 pixels per 4 words. Pair k (0..2) of a pack takes
@@ -184,7 +177,7 @@ bool GpuCaptureUnpack::Unpack(VideoFrameEncoding encoding, const void* data, siz
 	pl_custom_shader custom{};
 	custom.description = encoding == VideoFrameEncoding::V210 ? "VideoProcessor capture: V210 to P210 (GPU)" :
 		"VideoProcessor capture: UYVY to P210 (GPU)";
-	custom.header = UNPACK_HEADER;
+	custom.header = CaptureUnpackGlsl::kHeader;
 	custom.body = encoding == VideoFrameEncoding::V210 ? V210_BODY : UYVY_BODY;
 	custom.input = PL_SHADER_SIG_NONE;
 	custom.output = PL_SHADER_SIG_NONE;
