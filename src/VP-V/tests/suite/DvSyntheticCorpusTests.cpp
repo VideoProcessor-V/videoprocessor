@@ -685,9 +685,9 @@ namespace Tests
 				double best[3] = { 1e30, 1e30, 1e30 };
 				for (int method = 0; method < 3; ++method)
 				{
-					CRGBDolbyVisionTunnelFormatter f;
+					VpvDolbyVisionTunnelFormatter f;
 					if (method == 1)
-						f.SetConversionMethod(CRGBDolbyVisionTunnelFormatter::ConversionMethod::SCALAR);
+						f.SetConversionMethod(VpvDolbyVisionTunnelFormatter::ConversionMethod::SCALAR);
 					VideoStateComPtr state = seg.MakeState(true);
 					f.OnVideoState(state);
 					std::vector<BYTE> out(static_cast<size_t>(f.GetOutFrameSize()));

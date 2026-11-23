@@ -92,9 +92,9 @@ namespace Tests
 			return bytes;
 		}
 
-		CRGBDolbyVisionTunnelFormatter::RasterView View(const std::vector<uint8_t>& bytes)
+		VpvDolbyVisionTunnelFormatter::RasterView View(const std::vector<uint8_t>& bytes)
 		{
-			CRGBDolbyVisionTunnelFormatter::RasterView v;
+			VpvDolbyVisionTunnelFormatter::RasterView v;
 			v.data = bytes.data();
 			v.width = kW;
 			v.height = kH;
@@ -131,7 +131,7 @@ namespace Tests
 	public:
 		TEST_METHOD(StaticProbesClassifyAsTheFormatterDoes)
 		{
-			using C = CRGBDolbyVisionTunnelFormatter;
+			using C = VpvDolbyVisionTunnelFormatter;
 			Assert::IsTrue(C::ClassifyRgbContent(View(TenBit(0))) == C::RgbContent::TEN_BIT);
 			Assert::IsTrue(C::ClassifyRgbContent(View(EightBit(true))) == C::RgbContent::HIGH8);
 			Assert::IsTrue(C::ClassifyRgbContent(View(EightBit(false))) == C::RgbContent::LOW8);

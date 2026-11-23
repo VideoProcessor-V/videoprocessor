@@ -12,6 +12,7 @@
 #include <CpuFeatures.h>
 #include <DolbyVisionTunnelInput.h>
 #include <video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h>
+#include <VP-V/modules/input/signal/VpvDolbyVisionTunnelFormatter.h>
 #include <VP-V/tests/support/DolbyVisionTunnelSender.h>
 #include <vprenderer/DolbyVisionTunnelUnpackReference.h>
 #include <AnalysisFrame.h>
@@ -45,7 +46,7 @@ namespace Tests
     namespace
     {
         using namespace DvSender;
-        using Formatter = CRGBDolbyVisionTunnelFormatter;
+        using Formatter = VpvDolbyVisionTunnelFormatter;
 
         DolbyVisionTunnelFrameMetadata Deliver(Formatter& formatter,
             SenderPicture& picture, uint64_t counter,
@@ -1457,6 +1458,60 @@ namespace Tests
                     std::to_string(fullMs) + " ms (threaded unpack), AnalyzeFrame alone " + std::to_string(analyzeMs) +
                     " ms (packets only)\n").c_str());
             }
+        }
+
+        // OQ1(a) DV reader move: Bill's CRGBDolbyVisionTunnelFormatter runs Bill's a591ad3b5 admission
+        // (rejecting R10b/R10l directly), while VpvDvTunnelSession hosts VpvDolbyVisionTunnelFormatter
+        // with DvTunnelMetadataExtension for both CPU FormatFrame and GPU AnalyzeFrame/UnpackPicture.
+        TEST_METHOD(VpvDvTunnelSessionSeparatesVpvReaderFromBillFormatter)
+        {
+            // 1. Bill's restored formatter rejects R10b/R10l directly (without any toggle).
+            for (const auto encoding : { VideoFrameEncoding::R10b, VideoFrameEncoding::R10l })
+            {
+                VideoStateComPtr state = new VideoState();
+                state->valid = true;
+                state->eotf = EOTF::SDR;
+                state->displayMode = std::make_shared<DisplayMode>(130, 128, false, 24, 1);
+                state->dolbyVisionTunnel = true;
+                state->videoFrameEncoding = encoding;
+                CRGBDolbyVisionTunnelFormatter bill;
+                Assert::ExpectException<std::runtime_error>([&] { bill.OnVideoState(state); });
+            }
+
+            // 2. VpvDvTunnelSession handles FormatFrame, AnalyzeFrame, UnpackPicture, ApplySettings, Reset.
+            SenderPicture picture(true, 130, 128, VideoFrameEncoding::R210);
+            picture.SetFlat(64, 2048);
+            picture.Embed(Packetize(DmBody(2500)));
+
+            std::mutex mtx;
+            VpvDvTunnelSession session;
+            session.ApplySettings(true, mtx);
+
+            std::vector<BYTE> formatted;
+            VideoFrame frame(picture.input.data(), 1, 0, nullptr);
+            const auto fmt = session.FormatFrame(mtx, picture.state, frame, formatted);
+            Assert::IsTrue(fmt.contract.IsValid());
+            Assert::IsTrue(fmt.dolby.valid && fmt.dolby.hasSceneMetadata);
+            Assert::AreEqual(2500U, static_cast<unsigned>(fmt.dolby.sceneMaxPq));
+            AssertExactSamples(picture, formatted);
+
+            // Live fixes toggle + GPU analyze + CPU unpack fallback match bit-for-bit.
+            session.ApplySettings(false, mtx);
+            session.ApplySettings(true, mtx);
+            VideoFrame frame2(picture.input.data(), 2, 0, nullptr);
+            const auto analysed = session.AnalyzeFrame(mtx, picture.state, frame2);
+            Assert::IsTrue(analysed.result == VpvDolbyVisionTunnelFormatter::FrameResult::PICTURE);
+            Assert::IsTrue(analysed.highAligned);
+            Assert::AreEqual(2500U, static_cast<unsigned>(analysed.dolby.sceneMaxPq));
+
+            std::vector<BYTE> unpacked;
+            Assert::IsTrue(session.UnpackPicture(mtx, picture.input.data(), VideoFrameEncoding::R210,
+                picture.state->BytesPerRow(), 130, 128, analysed.highAligned, unpacked));
+            Assert::IsTrue(formatted == unpacked, L"UnpackPicture must match FormatFrame bit-for-bit");
+
+            session.Reset(mtx);
+            Assert::IsFalse(session.UnpackPicture(mtx, picture.input.data(), VideoFrameEncoding::R210,
+                picture.state->BytesPerRow(), 130, 128, true, unpacked), L"Reset drops active formatter state");
         }
     };
 }

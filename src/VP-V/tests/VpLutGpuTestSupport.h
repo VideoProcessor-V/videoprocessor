@@ -26,7 +26,7 @@
 #include <vprenderer/GpuRgbUnpack.h>
 #include <vprenderer/GpuDolbyVisionTunnelUnpack.h>
 #include <vprenderer/DolbyVisionTunnelUnpackReference.h>
-#include <video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h>
+#include <VP-V/modules/input/signal/VpvDolbyVisionTunnelFormatter.h>
 #include <VP-V/tests/support/DolbyVisionTunnelSender.h>
 #include <RawCaptureCorpus.h>
 #include <vprenderer/EarlyUpload.h>
