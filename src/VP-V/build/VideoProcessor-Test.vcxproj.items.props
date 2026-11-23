@@ -578,6 +578,9 @@
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainEdgeStatsTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdStageS2Tests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdStageS3Tests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainResidualSpectrumTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainChromaEstimatorTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainPatternVoterTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainReadingTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceGeometryRecordTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceGeometryViewTests.cpp" />
