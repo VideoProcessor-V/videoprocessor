@@ -55,7 +55,7 @@ namespace Tests
 				Assert::IsTrue(reg.Validate(&why), L"dense ids, inputs known");
 				Assert::AreEqual(28, int(kTdTrailSummary), L"the doc 72 list ends at 28");
 				Assert::AreEqual(29, int(kSourceGeometry), L"the new id follows it");
-				Assert::AreEqual(36, int(kSkeletonProductEnd), L"id 35 is the camera fit field (CP-A1-D4-CAMLABEL-FIELDCOPY), End 36");
+				Assert::AreEqual(37, int(kSkeletonProductEnd), L"id 35 is reserved for CB P10g, id 36 is the camera fit field (CP-A1-D4-CAMLABEL-FIELDCOPY), End 37");
 				Assert::AreEqual(size_t(kSkeletonProductEnd), reg.Size());
 				Assert::AreEqual(std::string("source_geometry"), std::string(reg.Get(kSourceGeometry).token));
 			}

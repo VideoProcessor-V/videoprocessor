@@ -254,7 +254,7 @@ namespace SchedulerS2Test
 					break;
 				case kP0RebaseDecision: case kP5MonitorTiles: case kP6EntranceAhead: case kP7gCameraGuide: case kP9CameraSmoothed:
 				case kP10GrainSplit: case kP10cGrainSplitChroma: case kP13SourceRing: case kSourceIdentity: case kSourceGeometry:
-				case kQualityPatternCausal: case kBandMemo: case kEdgeMap: case kFocusMap: case kRoomLight: case kComposedVectors:
+				case kQualityPatternCausal: case kBandMemo: case kEdgeMap: case kFocusMap: case kRoomLight: case kComposedVectors: case kP10gGrainLevel:
 					want = JobClass::Fill;
 					break;
 				default:

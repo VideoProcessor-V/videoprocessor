@@ -165,7 +165,7 @@ namespace CameraProductsTestsNs
 			for (size_t k = 0; k < p8.inputCount; ++k)
 				Assert::IsTrue(p8.inputs[k].product != kP3AnalysisField, L"P3 is never a P8 input (F2)");
 
-			// p7f_camera_fit_field (id 35): a CPU T0 SystemRam product with NO declared input (written before P7's publish under P7's stamp;
+			// p7f_camera_fit_field (id 36): a CPU T0 SystemRam product with NO declared input (written before P7's publish under P7's stamp;
 			// P8 compares the stamps), one slot of history, the P7 content stamps.
 			const ProductDecl& pf = reg.Get(kCameraFitField);
 			Assert::AreEqual(std::string("p7f_camera_fit_field"), std::string(pf.token));
