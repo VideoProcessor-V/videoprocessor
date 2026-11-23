@@ -117,7 +117,9 @@ namespace AdaptiveDownscaleStage
 		std::string moduleFloorCause;
 		bool cutAvailable = true;
 		std::string cutCause;
-		std::string grainCause;          // kP10gGrainLevel not read this frame (grain_floor); empty when read or one-axis
+		std::string grainCause;          // kP10gGrainLevel not read / domain-refused this frame (grain_floor); empty when read or one-axis
+		std::string edgeMapStatus;       // S4: module.EdgeMapStatus() when kEdgeMap was not served by the skeleton memo
+		bool motionExternalView = false; // M4: P3 motion read via host.motion ExternalView (P3 has no GPU publication)
 	};
 
 	// The upscale form's one "output scaling" decision (the host engages one per frame, CoreSegments): a GPU failure first,
@@ -203,7 +205,11 @@ namespace AdaptiveDownscaleStage
 				in.moduleFloorCause = module.MotionFloorCauseText();
 				in.cutAvailable = module.CutAvailable();
 				in.cutCause = in.cutAvailable ? std::string() : module.CutCause();
-				in.grainCause = oneAxisThisFrame || grainTerm.published ? std::string() : grainTerm.cause;
+				in.grainCause = oneAxisThisFrame ? std::string() :
+					(!grainTerm.published ? grainTerm.cause :
+					(module.PublishedGrainDomainRefused() ? std::string("measure domain is linear / HDR") : std::string()));
+				in.edgeMapStatus = module.EdgeMapStatus();
+				in.motionExternalView = upscaleMotionExternalView;
 				return UpscaleScalingFallback(in);
 			}
 			const FallbackCatalog::Decision base = FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
@@ -273,6 +279,7 @@ namespace AdaptiveDownscaleStage
 		bool grainOffered = false;         // X5-GRAIN-P10: the host offered the shared grain products on the frame just registered
 		TermSource grainTerm;              // CF-2 B1: this frame's grain seam (kP10gGrainLevel)
 		std::string upscaleMotionCause;    // ... why the upscale motion term is floored (empty: vectors usable)
+		bool upscaleMotionExternalView = false;   // M4: P3 read via host.motion ExternalView (no GPU publication yet)
 		bool haveMotionSequence = false;   // the last upscale frame's sequence (drop / resync / repeat)
 		uint64_t motionSequenceSeen = 0;
 	};

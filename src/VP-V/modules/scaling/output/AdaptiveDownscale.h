@@ -330,14 +330,20 @@ namespace AdaptiveDownscale
 	// frame through the skeleton; the pin keeps it alive until the next frame. level null = not published (grain_floor).
 	struct GrainLevelSource
 	{
-		pl_tex level = nullptr;                // RGBA32F per 16 x 16 source-luma block: x = N_b, y = gate, z = f'^2 N_b, w = lag-1
+		pl_tex level = nullptr;                // RGBA32F per blockPx x blockPx source-luma block: x = N_b, y = gate, z = f'^2 N_b, w = lag-1
 		std::shared_ptr<const void> pin;
 		pl_rect2df sourceCrop{};               // the source crop in the level's source-luma pixels
+		float codeToEightBit = 255.0f / 1023.0f;   // M2 (grain-consumes-cb-u1): source analysis codes -> 8-bit codes
+		int blockPx = 16;                          // S1: block size of the kP10gGrainLevel grid (GrainSplit::DefaultParams().blockPx)
 	};
 
-	// sqrt(N_b) (codes of D) -> the grain ramp's energy unit (grain_lo / grain_hi). FIX-UPS-grain: 1.0 is a named placeholder,
-	// to be measured at W4 against the P10 split's code scale; it is not a derived constant.
-	inline float GrainLevelEnergyScale() { return 1.0f; }
+	// M2 (grain-consumes-cb-u1): sqrt(N_b) in source analysis codes -> the grain ramp's 8-bit mean-|Laplacian| energy units.
+	// Derived from white-noise physics (no 1.0f placeholder): kEdgeEnergyPerSigma = sqrt(20) * sqrt(2/pi) = 3.5682482f,
+	// scaled from source analysis codes to 8-bit codes (codeToEightBit, default 255 / 1023 for the 10-bit analysis axis).
+	inline float GrainLevelEnergyScale(float codeToEightBit = 255.0f / 1023.0f)
+	{
+		return kEdgeEnergyPerSigma * (codeToEightBit > 0.0f ? codeToEightBit : (255.0f / 1023.0f));
+	}
 
 	// The prescale ratio of PRE_KERNEL to the source crop the measure accepts: 1 (the source), 2 (a doubler's exact 2x), 0 (not
 	// applied: another ratio, or nothing upscaled). Independent of the output ratio (any destination size). Pure (tests).
@@ -435,8 +441,9 @@ namespace AdaptiveDownscale
 		// CF-2 switch-over: per frame (the stage): the published grain level, or none (grain_floor on the upscale form).
 		void SetGrainLevel(const GrainLevelSource& value) { grainLevel = value; }
 		void ClearGrainLevel() { grainLevel = GrainLevelSource(); }
-		// The last blended frame read the published grain level / used the motion floor (status, tests).
+		// The last blended frame read the published grain level / refused it on linear-HDR domain / used the motion floor (status, tests).
 		bool PublishedGrainUsed() const { return publishedGrainUsed; }
+		bool PublishedGrainDomainRefused() const { return publishedGrainDomainRefused; }
 		bool MotionFloorUsed() const { return motionFloorUsed; }
 		// CF-2 FIX1 (gate M1): the cause of that floor (empty when it was not used).
 		const std::string& MotionFloorCauseText() const { return motionFloorCause; }
@@ -546,6 +553,7 @@ namespace AdaptiveDownscale
 		int upscaleRatio = 0;
 		GrainLevelSource grainLevel{};
 		bool publishedGrainUsed = false;
+		bool publishedGrainDomainRefused = false;   // M2: kP10gGrainLevel refused on linear/HDR measure domain (alias-safe lean)
 		bool motionFloorUsed = false;
 		std::string motionFloorCause;
 		pl_tex edge = nullptr;

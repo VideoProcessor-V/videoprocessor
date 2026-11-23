@@ -116,6 +116,10 @@ namespace AdaptiveDownscaleStage
 			return FallbackCatalog::Engaged("output scaling", "adaptive downscale: no cut verdict this frame (" + in.cutCause + ")");
 		if (!in.oneAxis && !in.grainCause.empty())
 			return FallbackCatalog::Engaged("output scaling", "adaptive upscale: no grain level, alias-safe grain weight (" + in.grainCause + ")");
+		if (!in.edgeMapStatus.empty())
+			return FallbackCatalog::Engaged("output scaling", "adaptive upscale: " + in.edgeMapStatus);
+		if (!in.oneAxis && in.motionExternalView)
+			return FallbackCatalog::Engaged("output scaling", "motion: P3 read through the ExternalView (P3 has no GPU publication)");
 		return base;
 	}
 
@@ -157,6 +161,7 @@ namespace AdaptiveDownscaleStage
 			module.ClearGrainLevel();   // the pin is not held past the upscale form
 			grainTerm = TermSource();
 			upscaleMotionCause.clear();
+			upscaleMotionExternalView = false;
 			haveMotionSequence = false;   // the next upscale run starts a new motion history
 		}
 		// Findings 2026-10-25 #1: what Fallback() reports (no effect on the picture).
@@ -234,6 +239,7 @@ namespace AdaptiveDownscaleStage
 			// repeat of the last sequence keeps the first presentation's verdict (no flicker on a repeated frame). Not an Acquire:
 			// P3 has no GPU Acquire publication at this tip (MotionSource).
 			const MotionSource m = host.motion();
+			upscaleMotionExternalView = !oneAxis && frame.vectorsRun && !frame.nlsSubmitted && m.live && m.field && m.frameTrust;
 			if (!(haveMotionSequence && frame.sourceSequence == motionSequenceSeen))
 			{
 				const char* why = MotionDiscontinuity(frame.vectorsRun, frame.nlsSubmitted, m.live && m.field && m.frameTrust,
@@ -377,9 +383,14 @@ namespace AdaptiveDownscaleStage
 					module.LastUpscaleRatio() == 2 ?
 					"Adaptive upscale: hybrid (sharp = CNN prescaler + main scaler: the CNN evaluation arm; alias-safe = ScalerPass)" :
 					"Adaptive upscale: hybrid (sharp = main scaler, alias-safe = ScalerPass)");
-			// CF-2 switch-over: kP10gGrainLevel not read on this frame: the grain floor (the alias-safe lean), with the cause.
+			// CF-2 switch-over: kP10gGrainLevel not read or refused on linear/HDR domain: the grain floor (alias-safe lean), with cause.
 			if (!oneAxisThisFrame && !grainTerm.published)
 				lines.push_back("Adaptive upscale grain: no grain level (alias-safe weight; " + grainTerm.cause + ")");
+			else if (!oneAxisThisFrame && module.PublishedGrainDomainRefused())
+				lines.push_back("Adaptive upscale grain: kP10gGrainLevel refused (alias-safe weight; measure domain is linear / HDR)");
+			// M4 (CF-2): P3 motion read via host.motion ExternalView (no GPU Acquire publication yet) — visible, never silent.
+			if (!oneAxisThisFrame && upscaleMotionExternalView)
+				lines.push_back("Adaptive upscale motion: P3 read through the ExternalView (P3 has no GPU publication)");
 			// N1.4: no / invalid vectors with adaptive_motion on: the motion floor, with the cause (one-axis: faithful only already).
 			if (motionAdaptiveOn && !oneAxisThisFrame && !upscaleMotionCause.empty())
 				lines.push_back("Adaptive upscale motion: no vectors (alias-safe weight; " + upscaleMotionCause + ")");

@@ -43,6 +43,25 @@ namespace AdaptiveDownscale
 shared vec4 ad_sum[256];
 )GLSL";
 
+		// S9 (CF-2): on the upscale form, grain comes from kP10gGrainLevel (never the private Laplacian partial sums),
+		// so skip the 4-tap Laplacian and workgroup reduction and write edge_out alone.
+		const char* const MEASURE_EDGE_ONLY_BODY = R"GLSL(
+ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+if (q.x < int(region.x) && q.y < int(region.y)) {
+    ivec2 p = ivec2(origin) + q;
+    ivec2 lim = textureSize(em, 0) - ivec2(1);
+    float grad = 0.25 * texelFetch(em, clamp(p, ivec2(0), lim), 0).x;
+    imageStore(edge_out, q, vec4(smoothstep(edge_lo, edge_hi, grad)));
+}
+)GLSL";
+
+		// S9 (CF-2): cut-flag state update for upscale.on (UpdateMotionMap reads state.a > 1.5 for cuts; no partial sums).
+		const char* const UPSCALE_STATE_BODY = R"GLSL(
+if (gl_LocalInvocationIndex == 0u && advance > 0.5) {
+    imageStore(state_io, ivec2(0), vec4(grain_floor, 0.0, 0.0, cut_in > 0.5 ? 2.0 : 1.0));
+}
+)GLSL";
+
 		const char* const MEASURE_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 uint li = gl_LocalInvocationIndex;
@@ -293,15 +312,16 @@ if (q.x < size.x && q.y < size.y) {
     // CF-2 B1 (refs/123 N1.2, HybridBlend.h): the sharp branch (POST_KERNEL) is the base (its chroma stays), luma
     // pulled toward the alias-safe branch by 1 - w; w = clamp(w_base (1 - e) g) x motion.
     // The grain term on this form is kP10gGrainLevel only (no private scalar or map): the block's N_b at this pixel's source
-    // position, bilinear between block centres, through the grain ramp (energy -> target). FIX-UPS-grain: grain_level_scale
-    // (GrainLevelEnergyScale) takes sqrt(N_b) to the ramp's unit and is measured at W4. A block without a level (N_b < 0) and a
-    // frame without the product take grain_floor: the alias-safe lean, shown by the stage (never silent).
+    // position, bilinear between block centres, through the grain ramp (energy -> target). M2 (grain-consumes-cb-u1):
+    // grain_level_scale (GrainLevelEnergyScale = kEdgeEnergyPerSigma * codeToEightBit) takes sqrt(N_b) to the ramp's unit.
+    // A block without a level (N_b < 0) and a frame without the product (or refused on linear/HDR) take grain_floor: the
+    // alias-safe lean, shown by the stage (never silent).
 #ifdef AD_GRAIN_PUBLISHED
     {
         vec2 gu = (s - src_origin) / max(src_size, vec2(1e-6));
         vec2 gsp = grain_crop.xy + gu * grain_crop.zw;
         ivec2 lsize = textureSize(grain_level, 0);
-        vec2 lpos = gsp / 16.0 - vec2(0.5);
+        vec2 lpos = gsp / max(grain_block_px, 1.0) - vec2(0.5);
         ivec2 l0 = ivec2(floor(lpos));
         vec2 lt = lpos - vec2(l0);
         float gacc = 0.0;
@@ -817,7 +837,7 @@ float rs_slope(float y)
 		const int gx = (w + 15) / 16, gy = (h + 15) / 16;
 		halfFloatPicture = false;
 		if (!Ensure(gpu, edge, w, h, 1, 16, false, true) ||
-			!Ensure(gpu, partial, gx, gy, 4, 32, false, false) || !Ensure(gpu, state, 1, 1, 4, 32, false, false))
+			(!upscale.on && !Ensure(gpu, partial, gx, gy, 4, 32, false, false)) || !Ensure(gpu, state, 1, 1, 4, 32, false, false))
 		{
 			++failures;
 			return unchanged;
@@ -904,6 +924,23 @@ float rs_slope(float y)
 		}
 		const float origin[2] = { static_cast<float>(ox), static_cast<float>(oy) };
 		const float region[2] = { static_cast<float>(w), static_cast<float>(h) };
+		if (upscale.on)
+		{
+			// S9 (CF-2): upscale uses kP10gGrainLevel (never the private Laplacian partial sums), so run edge_out alone.
+			const pl_shader_desc d[2] = { Sampled("em", em, false), Storage("edge_out", edge) };
+			const pl_shader_var v[4] = {
+				{ pl_var_vec2("origin"), origin, true },
+				{ pl_var_vec2("region"), region, true },
+				{ pl_var_float("edge_lo"), &settings.edgeLo, true },
+				{ pl_var_float("edge_hi"), &settings.edgeHi, true } };
+			if (!Compute(p->dispatch, "VideoProcessor adaptive upscale: edge", nullptr, MEASURE_EDGE_ONLY_BODY,
+				d, 2, v, 4, gx, gy))
+			{
+				++failures;
+				return unchanged;
+			}
+		}
+		else
 		{
 			const pl_shader_desc d[3] = { Sampled("em", em, false), Storage("edge_out", edge),
 				Storage("partial_out", partial) };
@@ -921,7 +958,33 @@ float rs_slope(float y)
 			}
 		}
 
-		// 3. The frame's grain term into the state (once per source frame).
+		// 3. The frame's grain term (downscale) or cut flag (upscale, S9) into the state (once per source frame).
+		if (upscale.on)
+		{
+			const float advance = sequence != advancedSequence ? 1.0f : 0.0f;
+			float cutIn = 0.0f;
+			if (advance > 0.5f)
+				cutIn = ResolveCut() ? 1.0f : 0.0f;
+			const pl_shader_desc d[1] = { Storage("state_io", state, PL_DESC_ACCESS_READWRITE) };
+			const pl_shader_var v[3] = {
+				{ pl_var_float("advance"), &advance, true },
+				{ pl_var_float("cut_in"), &cutIn, true },
+				{ pl_var_float("grain_floor"), &settings.grainFloor, true } };
+			if (!Compute(p->dispatch, "VideoProcessor adaptive upscale: cut state", nullptr, UPSCALE_STATE_BODY,
+				d, 1, v, 3, 1, 1))
+			{
+				++failures;
+				return unchanged;
+			}
+			if (advance > 0.5f)
+			{
+				advancedSequence = sequence;
+				cutContinuous = true;
+			}
+			if (!UpdateMotionMap(p->dispatch, advance > 0.5f))
+				++failures;
+		}
+		else
 		{
 			const float advance = sequence != advancedSequence ? 1.0f : 0.0f;
 			// FIX-X5-CUT-P4 / C5: the cut event of this new source frame is the shared one (the scene product), asked once per advance.
@@ -1261,9 +1324,12 @@ float rs_slope(float y)
 		const char* floorCause = motionFloor ? MotionFloorCause(vectorsInvalid, motionState, motionReady,
 			motionSequence == sequence, motionMap[motionIndex] != nullptr) : nullptr;
 		motionFloorCause = motionFloor ? std::string(floorCause ? floorCause : "no motion map") : std::string();
-		// Switch-over: kP10gGrainLevel when the stage acquired it; else grain_floor (no private grain term on this form).
-		const bool grainPublished = upscale.on && grainLevel.level != nullptr;
+		// Switch-over + M2 (grain-consumes-cb-u1): kP10gGrainLevel is in the source gamma code domain; refuse visibly on
+		// linear/HDR measure domains (domain.mode >= 0.5f) so N_b is never silently mis-scaled, falling back to grain_floor.
+		const bool grainLevelSupplied = upscale.on && grainLevel.level != nullptr;
+		const bool grainPublished = grainLevelSupplied && domain.mode < 0.5f;
 		publishedGrainUsed = grainPublished;
+		publishedGrainDomainRefused = grainLevelSupplied && !grainPublished;
 		if (grainPublished) d.push_back(Sampled("grain_level", grainLevel.level, false));   // RGBA32F: texelFetch only
 		if (stabilise)
 		{
@@ -1336,7 +1402,8 @@ float rs_slope(float y)
 			v.push_back({ pl_var_float("motion_floor"), &motionFloorValue, true });
 		const pl_rect2df& gc = grainLevel.sourceCrop;
 		const float grainCrop[4] = { gc.x0, gc.y0, gc.x1 - gc.x0, gc.y1 - gc.y0 };
-		const float grainLevelScale = GrainLevelEnergyScale();
+		const float grainLevelScale = GrainLevelEnergyScale(grainLevel.codeToEightBit);
+		const float grainBlockPx = static_cast<float>(grainLevel.blockPx > 0 ? grainLevel.blockPx : 16);
 		if (upscale.on)
 			v.push_back({ pl_var_float("grain_floor"), &settings.grainFloor, true });   // published or not (the floor)
 		if (grainPublished)
@@ -1347,6 +1414,7 @@ float rs_slope(float y)
 			v.push_back({ pl_var_float("grain_lo"), &settings.grainLo, true });
 			v.push_back({ pl_var_float("grain_hi"), &settings.grainHi, true });
 			v.push_back({ pl_var_float("grain_level_scale"), &grainLevelScale, true });
+			v.push_back({ pl_var_float("grain_block_px"), &grainBlockPx, true });
 		}
 		if (!Compute(p->dispatch, upscale.on ? "VideoProcessor adaptive upscale: blend" : "VideoProcessor adaptive downscale: blend",
 			header.c_str(), BLEND_BODY, d.data(), static_cast<int>(d.size()), v.data(), static_cast<int>(v.size()),
