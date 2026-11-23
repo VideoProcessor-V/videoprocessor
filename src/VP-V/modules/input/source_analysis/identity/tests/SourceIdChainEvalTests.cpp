@@ -31,6 +31,7 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/tests/support/RealClipLibrary.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 #include "ChainEvalSeam.h"
@@ -284,15 +285,16 @@ namespace Tests
 	TEST_CLASS(SourceIdChainEvalTests)
 	{
 	public:
+		BEGIN_TEST_METHOD_ATTRIBUTE(ReplayTheIdentityReelsThroughTheClassicalMonitor)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(ReplayTheIdentityReelsThroughTheClassicalMonitor)
 		{
 			using namespace SidChain;
 			const std::string reelsPath = Env("VP_SOURCE_ID_REELS");
-			if (reelsPath.empty())
-			{
-				Logger::WriteMessage("SourceIdChainEvalTests: skipped (VP_SOURCE_ID_REELS not set)");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage,
+				"ReplayTheIdentityReelsThroughTheClassicalMonitor", !reelsPath.empty(), "set VP_SOURCE_ID_REELS"))
 				return;
-			}
 			ApplyRegistrations();
 			std::string error;
 			const std::vector<ReelSpec> all = ReadReels(reelsPath, error);
@@ -607,6 +609,7 @@ namespace Tests
 								  " failures" + (stopped ? ", stopped: " + stopWhy : std::string()) + "; output " + outDir).c_str());
 			if (!stopped)
 				Assert::IsTrue(ran + skipped > 0, L"no reel matched VP_SOURCE_ID_REELS_ONLY");
+			Assert::IsTrue(index.good(), L"reels_done.csv write must remain healthy");
 			Assert::AreEqual(0, failures, L"a reel did not decode all of its frames (or the drive ran low)");
 		}
 	};

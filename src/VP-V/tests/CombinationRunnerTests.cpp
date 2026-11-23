@@ -191,6 +191,7 @@ namespace CombinationRunnerTest
 					"name=builtin-2;rate=25;queue_frames=2;low_latency=off;motion.tier=Mid;repair.tier=Mid;interpolation_fill_gaps=on;dejudder_estimate_ahead=on",
 					"name=builtin-3;rate=60;queue_frames=3;low_latency=on;motion.tier=Low;repair.tier=Classic;scaling.tier=Classic;output.tier=Classic" };
 			}
+			Assert::IsFalse(lines.empty(), L"combination list must not be empty");
 			const std::string logPath = Env("VP_COMBO_LOG");
 			int failed = 0;
 			std::string first;

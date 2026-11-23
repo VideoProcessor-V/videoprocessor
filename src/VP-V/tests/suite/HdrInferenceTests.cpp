@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "CppUnitTest.h"
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 // newlldv repurposed (owner decision 2026-10-17): BT.2020 + no HDR InfoFrame
 // + 10/12-bit is treated as PQ for LLDV and HDR10, with a picture-statistics
@@ -799,6 +800,9 @@ namespace Tests
 		}
 
 		// Env-gated: VP_TEST_REAL_FOOTAGE=<folder with the D:\hfr clips>.
+		BEGIN_TEST_METHOD_ATTRIBUTE(HdrInferenceRealClipVeto)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(HdrInferenceRealClipVeto)
 		{
 			char* folderValue = nullptr;
@@ -808,11 +812,9 @@ namespace Tests
 				folderValue)
 				folder = folderValue;
 			free(folderValue);
-			if (folder.empty())
-			{
-				Logger::WriteMessage("HdrInferenceRealClipVeto: VP_TEST_REAL_FOOTAGE not set; skipped");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage,
+				"HdrInferenceRealClipVeto", !folder.empty(), "set VP_TEST_REAL_FOOTAGE"))
 				return;
-			}
 			struct Clip { std::string file; bool y4m; double fps; };
 			const std::vector<Clip> clips = {
 				{ "Bosphorus_3840x2160_120fps_420_10bit_YUV.yuv", false, 120.0 },
@@ -923,8 +925,7 @@ namespace Tests
 					evidenceFrames, tracker.ShotsWithEvidence(), ToString(tracker.State()),
 					static_cast<unsigned long long>(vetoMs));
 				Logger::WriteMessage(line);
-				if (shots == 0)
-					return;
+				Assert::IsTrue(shots > 0, L"at least one real clip shot must be analysed in VP_TEST_REAL_FOOTAGE");
 				// Within-shot motion must not register as cuts.
 				Assert::IsTrue(cuts <= shots + 1, L"false cuts inside shots");
 				if (pqProgramme)

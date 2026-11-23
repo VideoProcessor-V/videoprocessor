@@ -7,6 +7,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/ScratchArena.h>
@@ -874,9 +875,11 @@ namespace VideoProcessorTest
 				Assert::IsTrue(r[i].engaged == engaged[i], L"engaged exactly while a shared product does not fit");
 			Assert::IsTrue(r[0].grain == GrainSplit::GrainStatus::Missing && r[3].grain == GrainSplit::GrainStatus::WrongSize &&
 				r[1].grain == GrainSplit::GrainStatus::Ring && r[4].grain == GrainSplit::GrainStatus::Ring, L"statuses follow the products");
-			for (size_t i = 0; i < seq.size(); ++i)
+			for (size_t i = 1; i < seq.size(); ++i)
 				Assert::IsTrue(CflWorstDiff(r[0], r[i]) <= 1.0, L"the output does not change visibly across the switches");
-			Assert::IsTrue(CflWorstDiff(r[0], r[1]) == 0.0 && CflWorstDiff(r[0], r[3]) == 0.0 && CflWorstDiff(r[0], r[5]) == 0.0, L"Full and own are exact");
+			Assert::IsTrue(CflWorstDiff(r[0], r[4]) <= kCompactVsFullMaxCodes, L"Compact output within measured bound");
+			Assert::IsTrue(CflWorstDiff(r[0], r[1]) == 0.0 && CflWorstDiff(r[0], r[2]) == 0.0 &&
+				CflWorstDiff(r[0], r[3]) == 0.0 && CflWorstDiff(r[0], r[5]) == 0.0, L"Full and own are exact");
 		}
 
 		TEST_METHOD(ChromaCflGpu444IsNothing)
@@ -906,11 +909,9 @@ namespace VideoProcessorTest
 		{
 			// Hardware only (VP_TEST_GPU=hardware): Apply at 3840x2160 and 1920x1080 4:2:0, median wall time over 40 frames with
 			// pl_gpu_finish per frame.
-			if (!ExtendedRangeGpuProbe::OnHardwareGpu())
-			{
-				Logger::WriteMessage("ChromaCflGpuTiming: VP_TEST_GPU=hardware only; not run");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu,
+				"ChromaCflGpuTiming", ExtendedRangeGpuProbe::OnHardwareGpu(), "needs VP_TEST_GPU=hardware"))
 				return;
-			}
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			pl_gpu gpu = dev.Gpu();
@@ -946,9 +947,11 @@ namespace VideoProcessorTest
 					ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
 				}
 				std::sort(ms.begin(), ms.end());
+				const double medianMs = ms[ms.size() / 2];
+				Assert::IsTrue(std::isfinite(medianMs) && medianMs > 0.0, L"median CfL GPU timing must be finite and positive");
 				char text[200];
 				std::snprintf(text, sizeof text, "chroma upscale CfL %dx%d 4:2:0: median %.3f ms over %zu frames (first %.3f ms); textures %.0f MB", w, h,
-					ms[ms.size() / 2], ms.size(), ms.front(), ChromaUpscale::Gpu::CflModule::TextureBytes(w, h, cw, ch) / 1048576.0);
+					medianMs, ms.size(), ms.front(), ChromaUpscale::Gpu::CflModule::TextureBytes(w, h, cw, ch) / 1048576.0);
 				Logger::WriteMessage(text);
 				module.Release(gpu);
 				pl_tex_destroy(gpu, &luma);
@@ -1053,7 +1056,8 @@ namespace VideoProcessorTest
 				Assert::IsTrue(module.Failures() == before + 1, L"one failure counted");
 				const FallbackCatalog::Decision d = arena.FrameDecision();
 				Assert::IsTrue(d.engaged && d.id == "scratch_arena", L"scratch_arena engaged");
-				Assert::IsTrue(arena.Shed() > 0 || arena.Exhausted() > 0, L"counted");
+				Assert::IsTrue(tierCase == 0 ? arena.Exhausted() > 0 : arena.Shed() > 0,
+					tierCase == 0 ? L"empty plan counted as Exhausted" : L"T0 plan counted as Shed");
 				// Recovery: a proper plan, a new frame.
 				arena.BeginFrame();
 				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T2)), L"arena reserve");

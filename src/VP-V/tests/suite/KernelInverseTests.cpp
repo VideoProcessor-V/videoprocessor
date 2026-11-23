@@ -88,6 +88,7 @@ namespace KernelInverseTest
 			const int m = 96, n = 2 * m;
 			const double floor10 = KernelInverse::FloorCodes(10.0, 10);
 			const auto& list = KernelInverse::Candidates();
+			int acceptedCount = 0;
 			for (size_t k = 0; k < list.size(); ++k)
 			{
 				std::vector<float> up = Upscale(list[k], Texture(m, 11 + static_cast<unsigned>(k)), m);
@@ -99,8 +100,12 @@ namespace KernelInverseTest
 					KernelInverse::Accept(fit, floor10) ? "accepted" : "not accepted");
 				Logger::WriteMessage(line);
 				if (KernelInverse::Accept(fit, floor10))
+				{
+					++acceptedCount;
 					Assert::AreEqual(static_cast<int>(k), fit.best, L"accepted only for the right kernel");
+				}
 			}
+			Assert::IsTrue(acceptedCount >= 2, L"at least two distinguishable kernels must be accepted");
 			// Native 4K-class texture (not an upscale): never accepted.
 			const std::vector<float> native = Texture(n, 99);
 			const KernelInverse::TileFit fit = KernelInverse::FitTile(native.data(), n, n);

@@ -350,21 +350,26 @@ namespace Tests
 		TEST_METHOD(ArmBoxNeverTearsAKeyCausePair)
 		{
 			ArmBox box;
+			std::atomic<bool> readerReady(false);
 			std::atomic<bool> done(false);
 			std::thread writer([&]() {
+				while (!readerReady.load()) std::this_thread::yield();
 				for (uint64_t i = 1; i <= 100000; ++i)
 					box.ArmState(i, (i & 1) ? Cause::InPlaceSourceChange : Cause::RendererReset);
 				done.store(true);
 			});
-			int torn = 0;
+			int torn = 0, reads = 0;
+			readerReady.store(true);
 			while (!done.load()) {
 				ArmBox::Snapshot s = box.Read(ArmBox::State);
 				if (!s.ok) continue;
+				if (s.key != 0) ++reads;
 				const Cause expect = (s.key & 1) ? Cause::InPlaceSourceChange : Cause::RendererReset;
 				if (s.key != 0 && s.cause != expect) ++torn;
 			}
 			writer.join();
 			ArmBox::Snapshot last = box.Read(ArmBox::State);
+			Assert::IsTrue(reads > 0, L"reader must observe concurrent armed snapshots");
 			Assert::IsTrue(last.ok && last.key == 100000 && last.cause == Cause::RendererReset);
 			Assert::AreEqual(0, torn);
 		}

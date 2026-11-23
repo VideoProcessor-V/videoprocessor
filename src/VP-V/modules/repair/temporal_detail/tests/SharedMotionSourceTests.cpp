@@ -456,11 +456,15 @@ namespace VideoProcessorTest
 			const FallbackCatalog::Decision shown = source.CurrentDecision();
 			Assert::IsTrue(shown.engaged && shown.id == "td motion");
 			Assert::IsTrue(shown.reason.find("vectors-valid state moved") != std::string::npos, L"with the plain reason");
-			// No vector engine at all (an unbound view): absent, with its own words.
+			// No vector engine at all (an unbound view): sustained run engages fallback with its own words.
 			TemporalDetail::SharedMotionSource noEngine((VpMotion::P2View()), nullptr);
 			noEngine.SetSourceSize(192, 96);
-			Assert::IsFalse(noEngine.Backward(3, out));
-			Assert::IsTrue(noEngine.CurrentDecision().reason.empty() || !noEngine.CurrentDecision().engaged);
+			for (unsigned i = 0; i < TemporalDetail::SharedMotionSource::AbsentRun(0); ++i)
+				Assert::IsFalse(noEngine.Backward(3, out));
+			const FallbackCatalog::Decision unbound = noEngine.CurrentDecision();
+			Assert::IsTrue(unbound.engaged && unbound.id == "td motion", L"unbound view fallback must engage after AbsentRun");
+			Assert::IsTrue(unbound.reason.find("no vector engine") != std::string::npos,
+				L"unbound view fallback must name 'no vector engine'");
 			Assert::IsFalse(noEngine.Forward(0, out), L"sequence 0 has no previous frame");
 		}
 	};

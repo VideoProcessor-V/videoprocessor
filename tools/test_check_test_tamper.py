@@ -71,6 +71,36 @@ class JudgeTests(unittest.TestCase):
         self.assertFalse(T.has_waiver("fix mentions WAIVER-X inline"))
         self.assertTrue(T.has_waiver("a\nWAIVER-X"))
 
+    def test_python_tests_and_selftests_are_guarded(self):
+        # Weakening an assertion in tools/**/test_*.py flags without a WAIVER trailer.
+        for p in ("tools/test_avx2_boundary.py", "tools/looprig/test_looprig.py", "tools/eval/test_light_eval.py"):
+            self.assertEqual(T.classify(p), "test", p)
+            weaken = [F(p, add=["self.assertNotEqual(v, 'FAIL')"], rem=["self.assertEqual(v, 'PASS')"])]
+            v, _, _ = T.judge(weaken, "weaken")
+            self.assertEqual(len(v), 1, p)
+            self.assertEqual(v[0][0], "test", p)
+            vw, _, w = T.judge(weaken, "weaken\n\nWAIVER-PY-1: ok")
+            self.assertEqual((vw, w), ([], True), p)
+            # Pure addition passes with a note.
+            va, na, _ = T.judge([F(p, add=["self.assertTrue(ok)"])], "add assert")
+            self.assertEqual(va, [], p)
+            self.assertTrue(na, p)
+            # Deleting a python test file flags.
+            vd, _, _ = T.judge([F(p, "D", rem=["x"])], "del")
+            self.assertEqual(vd[0][0], "test", p)
+        # Checker tools with selftests are guarded as checker.
+        for p in ("tools/vp_footprint.py", "tools/vpv_tests/pairwise.py"):
+            self.assertEqual(T.classify(p), "checker", p)
+            self.assertEqual(T.judge([F(p, add=["x=1"])], "m")[0][0][0], "checker", p)
+        # Weakening an assert/selftest line in any other tools/**/*.py flags as selftest.
+        st = [F("tools/eval/source_id/score_identity.py", add=["pass"], rem=["assert got == want"])]
+        vs, _, _ = T.judge(st, "gut selftest")
+        self.assertEqual(vs[0][0], "selftest")
+        vsw, _, ww = T.judge(st, "gut selftest\n\nWAIVER-PY-2: ok")
+        self.assertEqual((vsw, ww), ([], True))
+        # Non-assert edits in non-checker tools/**/*.py remain unflagged.
+        self.assertEqual(T.judge([F("tools/eval/source_id/score_identity.py", add=["x = 2"], rem=["x = 1"])], "m")[0], [])
+
 
 class GitTests(unittest.TestCase):
     def _g(self, root, *a):

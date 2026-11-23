@@ -686,7 +686,7 @@
    "kind": "method",
    "value": "NvofOneEngineGuardTests::SessionTableCountsPerGpuAndFlagsASecondEngine",
    "category": "Cpu",
-   "file": "src/VideoProcessor-Test/NvofOneEngineGuardTests.cpp",
+   "file": "src/VP-V/modules/motion/estimation/tests/NvofOneEngineGuardTests.cpp",
    "note": "Reviewed false positive of the name heuristic: the name says Gpu but the body creates no device (session table with synthetic ids)."
   },
   {

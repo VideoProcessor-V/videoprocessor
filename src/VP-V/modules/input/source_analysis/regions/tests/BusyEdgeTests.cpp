@@ -35,6 +35,7 @@ namespace VideoProcessorTest
 				for (int x = 0; x < w; ++x) p[static_cast<size_t>(y) * w + x] = ((x + y) & 1) ? 10.0f : 0.0f;
 			RegionEvidence::BusyEdge::PlaneGroup g; g.w = w; g.h = h; g.n = 1; g.comp[0] = p.data();
 			const std::vector<float> s = RegionEvidence::BusyEdge::BusyShare(g, 16, 2.0f, 2.0f);
+			Assert::AreEqual(size_t(4), s.size(), L"32x32 with 16x16 blocks yields 4 blocks");
 			for (float v : s) Assert::AreEqual(1.0f, v);
 		}
 		TEST_METHOD(BusyShareTakesTheLargestComponent)

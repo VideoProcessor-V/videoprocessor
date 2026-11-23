@@ -10,6 +10,7 @@
 #include <VP-V/modules/output/calibration_lut/calibration/MeterCatalog.h>
 #include <VP-V/modules/output/calibration_lut/calibration/Spotread.h>
 #include <VP-V/modules/output/calibration_lut/calibration/Terminal.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <chrono>
 #include <cmath>
@@ -255,11 +256,9 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealMeterReadsThroughSpotread)
 		{
-			if (Env("VP_TEST_METER") != "1")
-			{
-				Logger::WriteMessage("SKIP-NO-METER RealMeterReadsThroughSpotread (set VP_TEST_METER=1)\n");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Hardware,
+				"RealMeterReadsThroughSpotread", Env("VP_TEST_METER") == "1", "set VP_TEST_METER=1"))
 				return;
-			}
 			const ArgyllProbe probe = ProbeArgyll(Wide(Env("VP_TEST_ARGYLL")));
 			Logger::WriteMessage((probe.Summary() + "\n").c_str());
 			Assert::IsTrue(probe.found, Wide(probe.Summary()).c_str());
@@ -284,6 +283,7 @@ namespace VideoProcessorTest
 				r = meter.Continue();
 			}
 			Assert::IsTrue(r.status == MeterStatus::Ok, Message(r).c_str());
+			int okReads = 0;
 			for (int i = 0; i < 3; ++i)
 			{
 				r = meter.Read();
@@ -293,10 +293,12 @@ namespace VideoProcessorTest
 				Assert::IsTrue(r.status == MeterStatus::Ok || r.status == MeterStatus::ReadFailed, Message(r).c_str());
 				if (r.status == MeterStatus::Ok)
 				{
+					++okReads;
 					Assert::IsTrue(std::isfinite(r.xyz[0]) && std::isfinite(r.xyz[1]) && std::isfinite(r.xyz[2]));
 					Assert::IsTrue(r.xyz[1] >= -0.01);
 				}
 			}
+			Assert::IsTrue(okReads >= 1, L"at least one MeterStatus::Ok reading is required");
 			meter.Close();
 			char base[MAX_PATH];
 			GetTempPathA(MAX_PATH, base);

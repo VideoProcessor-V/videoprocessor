@@ -161,6 +161,7 @@ namespace VideoProcessorTest
 			const auto blended = render(scene, 256, 160, true, noGrain, false, true);
 			Assert::IsTrue(module.Active() && module.Failures() == 0, L"The blend did not run on a downscale");
 			int ssimMax = 0, edgeMax = 0, edgeSsimVsFaithful = 0;
+			int texMax = 0, texBlendedVsFaithful = 0, texSsimVsFaithful = 0;
 			for (int y = 20; y < 140; ++y)
 				for (int x = 4; x < 252; ++x)
 				{
@@ -172,13 +173,22 @@ namespace VideoProcessorTest
 						edgeMax = std::max(edgeMax, std::abs(blended[i].g - faithfulPx[i].g));
 						edgeSsimVsFaithful = std::max(edgeSsimVsFaithful, std::abs(ssimOnly[i].g - faithfulPx[i].g));
 					}
+					if (x >= 136)   // low-contrast texture half: must follow SSIM, not faithful
+					{
+						texMax = std::max(texMax, std::abs(blended[i].g - ssimOnly[i].g));
+						texBlendedVsFaithful = std::max(texBlendedVsFaithful, std::abs(blended[i].g - faithfulPx[i].g));
+						texSsimVsFaithful = std::max(texSsimVsFaithful, std::abs(ssimOnly[i].g - faithfulPx[i].g));
+					}
 				}
-			std::snprintf(line, sizeof(line), "w=1 vs SSIM max %d; edges vs faithful max %d (SSIM vs faithful there %d)\n",
-				ssimMax, edgeMax, edgeSsimVsFaithful);
+			std::snprintf(line, sizeof(line),
+				"w=1 vs SSIM max %d; edges vs faithful max %d (SSIM vs faithful %d); texture vs SSIM max %d (blended vs faithful %d, SSIM vs faithful %d)\n",
+				ssimMax, edgeMax, edgeSsimVsFaithful, texMax, texBlendedVsFaithful, texSsimVsFaithful);
 			report += line;
 			// Edges: the edge map is interpolated between source pixels at a
 			// transition, so up to 2 codes of SSIM remain there.
-			Assert::IsTrue(ssimMax <= 1 && edgeMax <= 2 && edgeSsimVsFaithful >= 4,
+			// Texture half: blended must stay within 1 code of SSIM and closer to SSIM than faithful.
+			Assert::IsTrue(ssimMax <= 1 && edgeMax <= 2 && edgeSsimVsFaithful >= 4 &&
+				texMax <= 1 && (texSsimVsFaithful <= 1 || texMax < texBlendedVsFaithful),
 				ExtendedRangeGpuProbe::ToWide(report).c_str());
 
 			// 2. Grain: after a cut (dark -> grey noise) it snaps to the floor;

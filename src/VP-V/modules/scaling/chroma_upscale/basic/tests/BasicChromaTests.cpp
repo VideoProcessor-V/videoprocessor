@@ -289,15 +289,28 @@ namespace BasicChromaTestsNs
 			Assert::IsTrue(hi > 940 * 64, L"overshoot above the video white kept");
 			Assert::IsTrue(lo < 64 * 64, L"undershoot below the video black kept");
 			Assert::IsTrue(hi <= 65535 && lo >= 0);
-			// Full-range extremes saturate at the container, never wrap.
+			// Full-range extremes saturate at the container, never wrap; odd columns match clamped Lanczos reference.
 			Plane16 ext(16, 8);
 			for (int y = 0; y < 8; ++y)
 				for (int j = 0; j < 16; ++j) ext.at(j, y) = static_cast<uint16_t>((j & 1) ? 65535 : 0);
 			{
 				const Plane16 eo = UpsamplePlane(ext, g);
-				int sat = 0;
-				for (uint16_t v : eo.v) sat += (v == 0 || v == 65535);
+				int sat = 0, oddChecked = 0;
+				for (int y = 0; y < eo.h; ++y)
+					for (int x = 0; x < eo.w; ++x)
+					{
+						const uint16_t v = eo.at(x, y);
+						sat += (v == 0 || v == 65535);
+						if (x & 1)
+						{
+							const double ref = (std::min)(65535.0, (std::max)(0.0, RefAt(ext, g, x, y)));
+							Assert::IsTrue(std::fabs(static_cast<double>(v) - ref) <= 4.0,
+								L"odd column matches clamped double-precision Lanczos reference within 4 container codes");
+							++oddChecked;
+						}
+					}
 				Assert::IsTrue(sat > 0, L"alternating extremes overshoot and saturate at the container instead of wrapping");
+				Assert::IsTrue(oddChecked > 0);
 			}
 		}
 

@@ -18,6 +18,7 @@
 #include <RendererProfileConfig.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 #include <chrono>
 #include <cstdlib>
 #include <Windows.h>
@@ -590,14 +591,14 @@ namespace Tests
         }
 
     public:
+        BEGIN_TEST_METHOD_ATTRIBUTE(WalkCpuCostPerFrame)
+            TEST_METHOD_ATTRIBUTE(L"Category", L"Bench")
+        END_TEST_METHOD_ATTRIBUTE()
         TEST_METHOD(WalkCpuCostPerFrame)
         {
-            char flag[8] = {};
-            if (GetEnvironmentVariableA("VP_TEST_BENCH", flag, sizeof(flag)) == 0 || flag[0] != '1')
-            {
-                Logger::WriteMessage("IntentWalkBenchmark skipped (set VP_TEST_BENCH=1)");
+            if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Bench,
+                "WalkCpuCostPerFrame", HardwarePrerequisites::BenchOptedIn(), "set VP_TEST_BENCH=1"))
                 return;
-            }
             std::ostringstream report;
             const int sizes[2][2] = { { 3840, 2160 }, { 1920, 1080 } };
             constexpr int kIterations = 12;
@@ -669,19 +670,16 @@ namespace Tests
                     const PreparedAnalysisFrame prepared = PrepareAnalysisFrame(input);
                     auto t1 = std::chrono::steady_clock::now();
                     v210Valid = prepared.IsValid();
-                    if (v210Valid)
-                    {
-                        const ActivePictureEvidence e = ExtractActivePictureEvidence(prepared.source);
-                        (void)e;
-                    }
+                    Assert::IsTrue(v210Valid, L"v210 PrepareAnalysisFrame must succeed");
+                    const ActivePictureEvidence e = ExtractActivePictureEvidence(prepared.source);
+                    Assert::IsTrue(e.available, L"v210 active picture evidence must be available");
                     auto t2 = std::chrono::steady_clock::now();
                     const ActivePictureEvidence e2 = ExtractActivePictureEvidence(p010Source);
-                    (void)e2;
+                    Assert::IsTrue(e2.available, L"P010 active picture evidence must be available");
                     auto t3 = std::chrono::steady_clock::now();
                     observer.ObserveFrame(++seq, 0, p010Source, rect);
                     auto t4 = std::chrono::steady_clock::now();
-                    if (v210Valid)
-                        observer.ObserveFrame(++seq, 0, prepared.source, rect);
+                    observer.ObserveFrame(++seq, 0, prepared.source, rect);
                     auto t5 = std::chrono::steady_clock::now();
                     if (i == 0) continue;   // warm-up
                     prepareMs += Ms(t0, t1);
@@ -699,7 +697,8 @@ namespace Tests
                     << v210Frame << " ms, P010 " << p010Frame << " ms. At 24 fps: intent-only walk (each frame once) v210 "
                     << 24.0 * v210Frame << " ms/s, P010 " << 24.0 * p010Frame << " ms/s; uncached walk of current + 4 ahead "
                     << "(5 analyses per render) v210 " << 120.0 * v210Frame << " ms/s, P010 " << 120.0 * p010Frame << " ms/s\n";
-                Assert::IsTrue(observer.FramesObserved() > 0);
+                Assert::AreEqual(static_cast<uint64_t>(kIterations * 2), observer.FramesObserved(),
+                    L"both P010 and v210 iterations must be observed");
             }
             Logger::WriteMessage(report.str().c_str());
             char out[MAX_PATH] = {};

@@ -361,11 +361,7 @@ namespace VideoProcessorTest
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
 			EarlyUpload early;
-			if (!early.Open(fixture.Device(), fixture.Gpu(), 2))
-			{
-				Logger::WriteMessage(("EarlyUpload not available on this device: " + early.LastError() + "\n").c_str());
-				return;
-			}
+			Assert::IsTrue(early.Open(fixture.Device(), fixture.Gpu(), 2), Wide(early.LastError()).c_str());
 			CComPtr<ID3D11Device> device = DeviceOnAdapterOf(fixture.Device());
 			Assert::IsNotNull(device.p);
 			CComPtr<ID3D11DeviceContext> context;

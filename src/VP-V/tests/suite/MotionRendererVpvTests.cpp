@@ -172,13 +172,51 @@ TEST_CLASS(MotionRendererTestsVpv){public:
     // Extended Range the current frame's colour is relabelled after Capture, so
     // the copy must carry that label (else the ER hooks and libplacebo both convert).
     TEST_METHOD(HistoryFramesTakeThePreparedColourWhenGiven){
-        // REHEARSAL: adapted to Bill TemporalRenderer API. HistoryFrame() no longer exists
-        // (the override is applied inside ProcessSource); the behaviour is covered by the two
-        // GPU tests below, so this only checks the colour-space comparison they rely on.
-        pl_color_space prepared{};prepared.primaries=PL_COLOR_PRIM_BT_2020;prepared.transfer=PL_COLOR_TRC_GAMMA22;
-        pl_color_space srgb=pl_color_space_srgb;
-        Assert::IsTrue(pl_color_space_equal(&prepared,&prepared));
-        Assert::IsFalse(pl_color_space_equal(&srgb,&prepared));
+        GpuFixture g;
+        MotionConfig::Settings settings;
+        settings.deinterlace="force";settings.algorithm="bob";settings.cadence="frame";
+        for(uint64_t i=0;i<3;++i){
+            g.Upload(128);
+            g.temporal.Begin(settings,30,60,false,1,1,i+1,double(i)/30,false);
+            Assert::IsTrue(g.temporal.Capture(g.device->gpu,g.input,i+1));
+        }
+        Assert::IsTrue(g.temporal.Active()&&!g.temporal.Mixing());
+        auto params=pl_render_default_params;
+        params.dither_params=nullptr;params.deband_params=nullptr;params.peak_detect_params=nullptr;
+        auto read=[&]{
+            std::vector<unsigned char> pixels(64*64*4);
+            pl_tex_transfer_params r{};r.tex=g.target;r.ptr=pixels.data();
+            Assert::IsTrue(pl_tex_download(g.device->gpu,&r));
+            const size_t o=(32*64+32)*4;
+            return std::array<int,3>{pixels[o],pixels[o+1],pixels[o+2]};
+        };
+        pl_frame relabelled=g.input;
+        relabelled.color.transfer=PL_COLOR_TRC_LINEAR;
+        pl_frame alt=g.input;
+        alt.color.transfer=PL_COLOR_TRC_GAMMA28;
+        Assert::IsTrue(pl_render_image(g.renderer,&relabelled,&g.output,&params));
+        const auto directLinear=read();
+        Assert::IsTrue(pl_render_image(g.renderer,&alt,&g.output,&params));
+        const auto directGamma28=read();
+        g.temporal.outputPts=1./30;
+        // Same prepared colour override across repeated renders reuses history consistently.
+        Assert::IsTrue(g.temporal.Render(g.renderer,relabelled,g.output,params,0,&relabelled.color));
+        const auto firstOverride=read();
+        Assert::IsTrue(g.temporal.Render(g.renderer,relabelled,g.output,params,0,&relabelled.color));
+        const auto reusedOverride=read();
+        // Changing the override invalidates/re-applies the colour label to the retained history.
+        Assert::IsTrue(g.temporal.Render(g.renderer,alt,g.output,params,0,&alt.color));
+        const auto changedOverride=read();
+        // Rendering without an override falls back to the captured sRGB label (distinct by >= 20 codes).
+        Assert::IsTrue(g.temporal.Render(g.renderer,relabelled,g.output,params,0,nullptr));
+        const auto noOverride=read();
+        for(int c=0;c<3;++c){
+            Assert::IsTrue(std::abs(firstOverride[c]-directLinear[c])<=1,L"prepared colour override not applied to history");
+            Assert::AreEqual(firstOverride[c],reusedOverride[c],L"identical prepared colour override must remain consistent");
+            Assert::IsTrue(std::abs(changedOverride[c]-directGamma28[c])<=1,L"changing prepared colour override must take effect");
+            Assert::IsTrue(std::abs(changedOverride[c]-firstOverride[c])>=20,L"override change must visibly alter output");
+            Assert::IsTrue(std::abs(noOverride[c]-directLinear[c])>=20,L"nullptr override must stay distinguishable from prepared colour");
+        }
     }
     TEST_METHOD(DeinterlacedHistoryIsConvertedOnceWithThePreparedColour){
         GpuFixture g;MotionConfig::Settings settings;settings.deinterlace="force";settings.algorithm="bob";settings.cadence="frame";

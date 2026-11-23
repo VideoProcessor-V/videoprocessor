@@ -11,6 +11,7 @@
 // writes out/<mode>/l_<from>_<to>.bin (int16 fwd, int16 bwd, u8 fwd cost, u8 bwd cost; little endian, no header) and
 // out/<mode>/path.txt for mode nohint (no hint buffer) and hint (hints on). Without the env variable the test only reports.
 #include <VP-V/modules/motion/estimation/longpair/LongPairService.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -80,20 +81,19 @@ namespace VideoProcessorTest
 	{
 	public:
 		BEGIN_TEST_METHOD_ATTRIBUTE(LongPairBenchDump)
-			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Bench")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(LongPairBenchDump)
 		{
 			char* env = nullptr;
 			size_t envLen = 0;
 			_dupenv_s(&env, &envLen, "VP_LONGPAIR_BENCH_DIR");
-			if (!env || !*env)
-			{
-				Logger::WriteMessage("LONGPAIR_BENCH skipped: VP_LONGPAIR_BENCH_DIR is not set\n");
-				return;
-			}
-			const std::string dir = env;
+			const std::string dir = env ? env : "";
 			free(env);
+			const bool optedIn = HardwarePrerequisites::BenchOptedIn() && !dir.empty();
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Bench, "LongPairBenchDump",
+				optedIn, "set VP_TEST_BENCH=1 and VP_LONGPAIR_BENCH_DIR"))
+				return;
 			std::ifstream pairs(dir + "\\pairs.csv");
 			Assert::IsTrue(static_cast<bool>(pairs), L"pairs.csv not found");
 			std::string line;
@@ -105,6 +105,7 @@ namespace VideoProcessorTest
 				if (sscanf_s(line.c_str(), "%d,%d,%d", &span, &from, &to) == 3)
 					list.push_back({ from, to });
 			}
+			Assert::IsFalse(list.empty(), L"pairs.csv must contain at least one pair");
 			const int w = 640, h = 360;
 			std::map<int, std::vector<uint8_t>> frames;
 			auto frame = [&](int t) -> const std::vector<uint8_t>&

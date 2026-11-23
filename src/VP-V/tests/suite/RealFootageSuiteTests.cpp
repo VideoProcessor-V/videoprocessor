@@ -2431,6 +2431,9 @@ namespace RealFootage
 	
 		// R3-1 (bug hunt round 3, fixed by h3-latch: source_resolution_cut_fixes): a camera move inside a
 		// long take is not a cut. Needs the clip library (skipped without it).
+		BEGIN_TEST_METHOD_ATTRIBUTE(LongTakeCameraMoveIsNotACut)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(LongTakeCameraMoveIsNotACut)
 		{
 			using namespace RealFootage;

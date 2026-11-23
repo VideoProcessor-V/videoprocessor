@@ -203,16 +203,22 @@ namespace GrainSplitV3TestsNs
 
 		TEST_METHOD(GrainSplitV3ReportsOpenRows)
 		{
-			// No assertion: the rows the owner must decide (D4). Film-like flat and texture at scale 1, edges at both scales.
+			// Sanity bounds on every open D4 row (owner decides D4 thresholds separately).
+			auto checkOpenRow = [&](const Row& r) {
+				Log("D4 pending: " + RowText(r));
+				Require(std::isfinite(r.v3.keep) && std::isfinite(r.v3.leak), std::string("finite v3 keep/leak: ") + RowText(r));
+				Require(r.v3.keep >= -0.05 && r.v3.keep <= 1.05, std::string("v3 keep in [-0.05, 1.05]: ") + RowText(r));
+				Require(r.v3.leak >= 0.0, std::string("v3 leak >= 0: ") + RowText(r));
+			};
 			for (double rms : { 1.0, 3.0 })
 			{
-				Log("D4 pending: " + RowText(RunRow(Cls::Flat, Spec::Film, 0, rms)));
-				Log("D4 pending: " + RowText(RunRow(Cls::Texture, Spec::White, 0, rms)));
-				Log("D4 pending: " + RowText(RunRow(Cls::Texture, Spec::Film, 0, rms)));
+				checkOpenRow(RunRow(Cls::Flat, Spec::Film, 0, rms));
+				checkOpenRow(RunRow(Cls::Texture, Spec::White, 0, rms));
+				checkOpenRow(RunRow(Cls::Texture, Spec::Film, 0, rms));
 				for (int si = 0; si < 2; ++si)
 				{
-					Log("D4 pending: " + RowText(RunRow(Cls::Edges, Spec::White, si, rms)));
-					Log("D4 pending: " + RowText(RunRow(Cls::Edges, Spec::Film, si, rms)));
+					checkOpenRow(RunRow(Cls::Edges, Spec::White, si, rms));
+					checkOpenRow(RunRow(Cls::Edges, Spec::Film, si, rms));
 				}
 			}
 		}

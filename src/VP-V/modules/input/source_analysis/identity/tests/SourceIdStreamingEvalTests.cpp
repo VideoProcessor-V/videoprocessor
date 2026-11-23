@@ -19,6 +19,7 @@
 
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -134,22 +135,19 @@ namespace Tests
 	TEST_CLASS(SourceIdStreamingEvalTests)
 	{
 	public:
+		BEGIN_TEST_METHOD_ATTRIBUTE(ReplayTheAbrReelsThroughTheRealMonitor)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(ReplayTheAbrReelsThroughTheRealMonitor)
 		{
 			using namespace SidEval;
 			const std::string dir = Env("VP_SOURCE_ID_EVAL_DIR");
-			if (dir.empty())
-			{
-				Logger::WriteMessage("SourceIdStreamingEvalTests: skipped (VP_SOURCE_ID_EVAL_DIR not set)");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage,
+				"ReplayTheAbrReelsThroughTheRealMonitor", !dir.empty(), "set VP_SOURCE_ID_EVAL_DIR"))
 				return;
-			}
 			const std::string manifest = dir + "\\reels.tsv";
 			const std::vector<Reel> all = ReadManifest(manifest);
-			if (all.empty())
-			{
-				Logger::WriteMessage("SourceIdStreamingEvalTests: skipped (no reels.tsv)");
-				return;
-			}
+			Assert::IsFalse(all.empty(), L"VP_SOURCE_ID_EVAL_DIR is set but reels.tsv is missing or empty");
 			std::string ffmpeg = Env("VP_SOURCE_ID_EVAL_FFMPEG");
 			if (ffmpeg.empty())
 				ffmpeg = "D:\\tools\\ffmpeg-full\\bin\\ffmpeg.exe";
@@ -241,11 +239,12 @@ namespace Tests
 						++g;
 					});
 				}
+				Assert::IsTrue(g > 0, L"each evaluated ABR reel must decode at least one frame");
 				++done;
 				Logger::WriteMessage((reel.id + ": " + std::to_string(g) + " frames").c_str());
 			}
 			Logger::WriteMessage(("SourceIdStreamingEvalTests: " + std::to_string(done) + " reels").c_str());
-			Assert::IsTrue(done >= 0);
+			Assert::IsTrue(done > 0, L"at least one ABR reel must be evaluated");
 		}
 	};
 }

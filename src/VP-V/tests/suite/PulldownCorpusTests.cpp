@@ -2,6 +2,7 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/modules/input/queue_timing/PulldownDetector.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <windows.h>
 
@@ -1272,16 +1273,13 @@ namespace VideoProcessorTest
 				Assert::IsTrue(r.Pass(criteria[i]), (Wide(name) + L" (fixes on): " + text[criteria[i]]).c_str());
 		}
 
-		const Library* RequireFootage()
+		const Library* RequireFootage(const char* testName)
 		{
 			std::string folder;
 			const Library* library = LoadFootage(folder);
-			if (!library)
-			{
-				Logger::WriteMessage(("SKIP-NO-FOOTAGE: no readable clips in " + folder + " (VP_TEST_REAL_FOOTAGE)\n").c_str());
-				Assert::IsTrue(EnvValue("VP_TEST_REQUIRE_FOOTAGE") != "1", L"VP_TEST_REQUIRE_FOOTAGE=1 but no footage");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, testName,
+				library != nullptr, "no readable clips in " + folder + " (set VP_TEST_REAL_FOOTAGE)"))
 				return nullptr;
-			}
 			static bool reported = false;
 			if (!reported)
 			{
@@ -1341,10 +1339,13 @@ namespace VideoProcessorTest
 		// slots; an edit dropping and one duplicating a signal frame; a counted
 		// capture miss; a pause restarting at a random phase; +-3 ms jitter and a
 		// 15 ms spike. Fixes on: all criteria. Off: today's behaviour, reported.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealFootageFilmThroughEvents)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealFootageFilmThroughEvents)
 		{
 			const auto start = std::chrono::steady_clock::now();
-			const Library* library = RequireFootage();
+			const Library* library = RequireFootage("RealFootageFilmThroughEvents");
 			if (!library) return;
 			const Carrier carriers[] = {
 				{ { 24, 1 }, { 60, 1 }, 24.0, "3:2" }, { { 24000, 1001 }, { 60000, 1001 }, 24.0, "3:2 NTSC" },
@@ -1391,6 +1392,7 @@ namespace VideoProcessorTest
 			}
 			Logger::WriteMessage((onTally.Text("events, fixes on ") + "\n").c_str());
 			Logger::WriteMessage((offTally.Text("events, fixes off") + "\n").c_str());
+			Assert::IsTrue(onTally.streams > 0, L"at least one real-footage film stream must be evaluated");
 			char text[96];
 			std::snprintf(text, sizeof(text), "RealFootageFilmThroughEvents: %.2f s\n", Seconds(start));
 			Logger::WriteMessage(text);
@@ -1398,10 +1400,13 @@ namespace VideoProcessorTest
 
 		// D5: rate mismatches (frame-rate matching off) slip one film frame
 		// every ~40 s; 100 s each, so at least two natural slips.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealFootageRateMismatchSlips)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealFootageRateMismatchSlips)
 		{
 			const auto start = std::chrono::steady_clock::now();
-			const Library* library = RequireFootage();
+			const Library* library = RequireFootage("RealFootageRateMismatchSlips");
 			if (!library) return;
 			const Carrier carriers[] = {
 				{ { 24000, 1001 }, { 60, 1 }, 24.0, "23.976-in-60" }, { { 24, 1 }, { 60000, 1001 }, 24.0, "24-in-59.94" },
@@ -1425,6 +1430,7 @@ namespace VideoProcessorTest
 			}
 			Logger::WriteMessage((onTally.Text("slips, fixes on ") + "\n").c_str());
 			Logger::WriteMessage((offTally.Text("slips, fixes off") + "\n").c_str());
+			Assert::IsTrue(onTally.streams > 0, L"at least one rate-mismatch stream must be evaluated");
 			char text[96];
 			std::snprintf(text, sizeof(text), "RealFootageRateMismatchSlips: %.2f s\n", Seconds(start));
 			Logger::WriteMessage(text);
@@ -1434,10 +1440,13 @@ namespace VideoProcessorTest
 		// 30p segment (film-class: relocks as 30p), animation on twos, then film
 		// again at another phase. Video unlocks within a second and never locks;
 		// twos never takes a lock; each film segment locks in time and holds.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealFootageVideo30pAndTwosSegments)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealFootageVideo30pAndTwosSegments)
 		{
 			const auto start = std::chrono::steady_clock::now();
-			const Library* library = RequireFootage();
+			const Library* library = RequireFootage("RealFootageVideo30pAndTwosSegments");
 			if (!library) return;
 			Tally onTally, offTally;
 			struct Family { Rate signal, film, film30; double videoHz, filmPictures; bool has30; };
@@ -1483,6 +1492,7 @@ namespace VideoProcessorTest
 			}
 			Logger::WriteMessage((onTally.Text("segments, fixes on ") + "\n").c_str());
 			Logger::WriteMessage((offTally.Text("segments, fixes off") + "\n").c_str());
+			Assert::IsTrue(onTally.streams > 0, L"at least one video/30p/twos segment stream must be evaluated");
 			char text[96];
 			std::snprintf(text, sizeof(text), "RealFootageVideo30pAndTwosSegments: %.2f s\n", Seconds(start));
 			Logger::WriteMessage(text);
@@ -1493,10 +1503,13 @@ namespace VideoProcessorTest
 		// off. 30p drawn on twos (exactly 15 fps, the floor): Hunt 2 (06-interp
 		// H1) asserts no lock with the fixes at 60 and 59.94 (the floor is
 		// exclusive with a margin); off it is reported (inclusive at 60).
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealFootageNeverLocksOnVideoStillsTwosOrRandom)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealFootageNeverLocksOnVideoStillsTwosOrRandom)
 		{
 			const auto start = std::chrono::steady_clock::now();
-			const Library* library = RequireFootage();
+			const Library* library = RequireFootage("RealFootageNeverLocksOnVideoStillsTwosOrRandom");
 			if (!library) return;
 			struct Case { Rate signal; double videoHz; Rate film; double filmPictures; };
 			const Case cases[] = {
@@ -1632,19 +1645,19 @@ namespace VideoProcessorTest
 		// acquisition, zero false locks (the locked span's repeat share must match
 		// the cadence; with labels.csv "first,last,film|video|still" beside it, no
 		// lock in a non-film stretch), and every unlock with its cause.
+		BEGIN_TEST_METHOD_ATTRIBUTE(AppleTvRecordingsReplay)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(AppleTvRecordingsReplay)
 		{
 			const auto start = std::chrono::steady_clock::now();
 			const std::string folder = EnvValue("VP_PULLDOWN_RECORDINGS");
-			std::vector<std::string> recordings;
-			if (!folder.empty())
-				FindRecordings(folder, 4, recordings);
-			if (recordings.empty())
-			{
-				Logger::WriteMessage(("SKIP-NO-RECORDINGS: no frames.csv with exact_repeat" + (folder.empty() ? std::string(" (VP_PULLDOWN_RECORDINGS not set)") : " under " + folder) + "\n").c_str());
-				Assert::IsTrue(folder.empty(), L"VP_PULLDOWN_RECORDINGS is set but holds no recording");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage,
+				"AppleTvRecordingsReplay", !folder.empty(), "set VP_PULLDOWN_RECORDINGS"))
 				return;
-			}
+			std::vector<std::string> recordings;
+			FindRecordings(folder, 4, recordings);
+			Assert::IsFalse(recordings.empty(), L"VP_PULLDOWN_RECORDINGS is set but holds no frames.csv with exact_repeat");
 			for (const std::string& path : recordings)
 			{
 				struct Row { long long hw = 0, duration = 0; int periods = 1, noInput = 0, repeat = 0; };

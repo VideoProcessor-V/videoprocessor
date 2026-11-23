@@ -236,7 +236,8 @@ namespace DejudderDecisionTableTest
 			Assert::IsFalse(VpMotion::HistoryReaderDrives(false, readers));
 		}
 
-		// On and registered with nothing pending: as the epoch path; the reader's pending is taken once.
+		// On and registered with nothing pending: as the epoch path; with non-empty HistoryPending:
+		// action fires once (setting release when needed) and single-consumption clears it for the next call.
 		TEST_METHOD(OnRegisteredNothingPendingIsTheEpochPath)
 		{
 			VpMotionResync::Readers readers;
@@ -248,6 +249,24 @@ namespace DejudderDecisionTableTest
 				Assert::AreEqual(moved, VpMotion::TakeDejudderHistoryAction(true, moved, p, readers));
 				Assert::IsFalse(p.release);
 			}
+			// Non-empty HistoryPending via a real Indicator FULL event: fires once and is consumed.
+			VpIndicator::Indicator ind(1, 16);
+			MotionValidity::State mv;
+			ind.Advance(VpIndicator::kFull, VpResync::Cause::InPlaceSourceChange, 1);
+			VpIndicator::Indicator::Change ch{};
+			ch.seq = 1;
+			ch.changed = VpIndicator::Bit(VpIndicator::kFull);
+			ch.relevant = VpIndicator::Bit(VpIndicator::kFull);
+			readers.OnHistory(ind, mv, ch);
+			Assert::IsTrue(readers.PeekHistory().changed, L"pending history action armed");
+			MotionValidity::Pending p1;
+			Assert::IsTrue(VpMotion::TakeDejudderHistoryAction(true, false, p1, readers),
+				L"non-empty HistoryPending must trigger action even when epochMoved is false");
+			Assert::IsTrue(p1.release, L"FULL source change must set release");
+			MotionValidity::Pending p2;
+			Assert::IsFalse(VpMotion::TakeDejudderHistoryAction(true, false, p2, readers),
+				L"single-consumption: second call with no new event must not re-fire");
+			Assert::IsFalse(p2.release);
 		}
 	};
 }

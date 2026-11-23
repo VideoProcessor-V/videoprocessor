@@ -33,6 +33,24 @@
 #include <QScrollArea>
 #include <QRegularExpression>
 #include <QFormLayout>
+
+namespace
+{
+	// CS-S5: default QT_QPA_FONTDIR to %WINDIR%\Fonts before QApplication starts when unset so
+	// font-sensitive fit tests run deterministically in offscreen/CI environments without touching Bill's main().
+	struct DefaultQtFontDirInit
+	{
+		DefaultQtFontDirInit()
+		{
+			if (!qEnvironmentVariableIsSet("QT_QPA_FONTDIR"))
+			{
+				const QByteArray windir = qgetenv("WINDIR");
+				const QByteArray fonts = (windir.isEmpty() ? QByteArray("C:\\Windows") : windir) + "\\Fonts";
+				qputenv("QT_QPA_FONTDIR", fonts);
+			}
+		}
+	} g_defaultQtFontDirInit;
+}
 #include <QLineEdit>
 #include <QListWidget>
 #include <QToolButton>

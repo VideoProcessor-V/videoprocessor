@@ -123,6 +123,7 @@ namespace DelayGateTest
 			const std::vector<double> displays = configured > 0.0 ? std::vector<double>{ configured } : std::vector<double>{ 60.0, 120.0 };
 			std::ostringstream report;
 			std::string failures;
+			int evaluated = 0;
 			const bool strict = EnvDouble("VP_DELAY_GATE_STRICT", 0.0) > 0.0;
 			// The content rates, plus a pulldown lock (23.976 film in a 59.94 signal: the queue holds
 			// film frames, one SIGNAL frame is transferred; audit B2).
@@ -147,6 +148,7 @@ namespace DelayGateTest
 						if (!plan.feasible) continue;
 						for (int ra = 0; ra < 2; ++ra)
 						{
+							++evaluated;
 							Scenario s;
 							s.name = "delay-gate";
 							s.seed = 1;
@@ -213,6 +215,7 @@ namespace DelayGateTest
 				}
 			}
 			Log(report.str());
+			Assert::IsTrue(evaluated > 0, L"at least one feasible delay budget case must be evaluated");
 			Assert::IsTrue(failures.empty(), std::wstring(failures.begin(), failures.end()).c_str());
 		}
 	};

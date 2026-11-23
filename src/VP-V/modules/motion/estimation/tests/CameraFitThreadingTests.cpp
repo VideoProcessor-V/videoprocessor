@@ -66,19 +66,24 @@ namespace VideoProcessorTest
 				CameraLink::FitCounters counters;
 				CameraLink::CameraFitProducer producer(CameraModel::Config(), &counters);
 				CameraLink::CameraFitWorker worker(producer, rig.Env(&pool, &counters, 8));
-				worker.Start();
+				Assert::IsTrue(worker.Start(), L"worker failed to start");
 				for (int i = 1; i <= 12; ++i)
 				{
 					rig.PublishInputs(static_cast<uint64_t>(i));
 					if (i == 7)
 						producer.NoteReset();
-					worker.Submit(CameraLinkTest::PanJob(static_cast<uint64_t>(i), 6.0 + i * 0.1));
+					Assert::IsTrue(worker.Submit(CameraLinkTest::PanJob(static_cast<uint64_t>(i), 6.0 + i * 0.1)),
+						L"pan job submission must succeed");
 					worker.WaitIdle();
 					rig.Retire(static_cast<uint64_t>(i) - 1);
 				}
 				worker.Stop();
+				Assert::AreEqual(uint64_t(12), counters.fitted.load(), L"every submitted pair must be fitted");
+				Assert::AreEqual(uint64_t(12), counters.published.load(), L"every fitted pair must be published");
+				Assert::AreEqual(uint64_t(1), counters.resets.load(), L"one reset at i == 7");
 				hashes[run] = producer.HistoryHash();
 			}
+			Assert::AreNotEqual(uint64_t(0), hashes[0], L"non-trivial history hash");
 			Assert::AreEqual(hashes[0], hashes[1]);
 		}
 

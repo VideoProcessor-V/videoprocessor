@@ -8,6 +8,8 @@
 #include <VP-V/modules/drive/led_measure/LedMeasurementHook.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/output/dither/OutputEncodingRepair.h>
+#include <VP-V/modules/output/dither/SigmaDeltaDomain.h>
+#include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <vprenderer/HookSegment.h>
 
 #include <libplacebo/d3d11.h>
@@ -191,8 +193,7 @@ namespace OutputSegmentsGpuTestsNs
 					Assert::AreEqual(a.front(), b.front(), ToWide("BTB column changed: " + text).c_str());
 					Assert::AreEqual(a.back(), b.back(), ToWide("WTW column changed: " + text).c_str());
 				}
-				// Still missing (documented): a merged S3 case with the real sigma-delta, the mask and the
-				// repair, checking the sigma-delta statistics and "dither last".
+				// S3 merged coverage (CS-E4): see OutputSegmentsGpuMergedS3SigmaDeltaMatchesSeparate below.
 				runner.Release();
 				lut.Release();
 			}
@@ -258,6 +259,100 @@ namespace OutputSegmentsGpuTestsNs
 				for (size_t i = 0; i < b.size(); ++i)
 					Assert::IsTrue(std::abs(b[i] - expected[i]) <= 1, ToWide("column " + std::to_string(i) + ": " + text).c_str());
 				lut.Release();
+			}
+			pl_renderer_destroy(&renderer);
+			pl_d3d11_destroy(&d3d);
+			pl_log_destroy(&log);
+		}
+
+		// CS-E4: merged S3 (OutputFinishSegment: encoding repair + occlusion mask + real sigma-delta)
+		// keeps dither last, runs without disabled hooks/failures, and matches the separate S3 chain.
+		BEGIN_TEST_METHOD_ATTRIBUTE(OutputSegmentsGpuMergedS3SigmaDeltaMatchesSeparate)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(OutputSegmentsGpuMergedS3SigmaDeltaMatchesSeparate)
+		{
+			pl_log_params logParams{};
+			logParams.log_level = PL_LOG_NONE;
+			pl_log log = pl_log_create(PL_API_VER, &logParams);
+			std::string device;
+			const pl_d3d11_params deviceParams = ExtendedRangeGpuProbe::TestDeviceParams(&device);
+			Logger::WriteMessage(("GPU tests on: " + device + "\n").c_str());
+			pl_d3d11 d3d = pl_d3d11_create(log, &deviceParams);
+			Assert::IsNotNull(d3d, L"Could not create the libplacebo test device");
+			pl_gpu gpu = d3d->gpu;
+			pl_renderer renderer = pl_renderer_create(log, gpu);
+			{
+				CustomHookChain::Chain sigma(RealLoader(gpu));
+				sigma.Configure({ Rule("temporal_sigma_delta", "Temporal sigma-delta.glsl") });
+				CustomHookChain::TemplateValues values;
+				values.outputWidth = 11 * 32;
+				values.outputHeight = 16;
+				sigma.Ensure(values);
+
+				OutputEncodingRepair::Hook repair;
+				OcclusionMask::Hook mask;
+				OutputSegments::OutputFinishSegment s3(repair, mask);
+				PipelineSlots::Registry registry;
+
+				std::vector<const pl_hook*> separateHooks;
+				sigma.Collect(false, separateHooks);
+				Assert::AreEqual<size_t>(1, separateHooks.size(), L"Temporal sigma-delta.glsl must load");
+				const pl_hook* sigmaHook = separateHooks[0];
+
+				pl_color_repr targetRepr{};
+				targetRepr.sys = PL_COLOR_SYSTEM_RGB;
+				targetRepr.levels = PL_COLOR_LEVELS_LIMITED;
+				targetRepr.bits.sample_depth = 10;
+				targetRepr.bits.color_depth = 10;
+
+				SigmaDeltaDomain::Domain domain{};
+				domain.supported = true;
+				domain.full = false;
+				domain.sample = 10;
+				domain.color = 10;
+
+				s3.BeginFrame();
+				const OutputSegments::DitherPrep prep = s3.PrepareDither(separateHooks, domain, true, registry);
+				Assert::IsTrue(prep.found && !prep.domainDropped && !prep.slotOff, L"sigma-delta prepared");
+				const size_t ditherIdx = s3.MarkMask(separateHooks, true, false, 1.0);
+				Assert::IsTrue(ditherIdx < separateHooks.size(), L"sigma-delta located before mask insert");
+				s3.InsertMask(separateHooks, ditherIdx);
+				s3.KeepDitherLast(separateHooks, false);
+				Assert::IsTrue(separateHooks.back() == sigmaHook, L"dither must remain last at OUTPUT");
+				Assert::IsTrue(s3.Member(mask.Get()) && s3.Member(sigmaHook), L"mask and sigma-delta are S3 members");
+				Assert::AreEqual(std::string("occlusion_mask"), std::string(s3.StageName(mask.Get())));
+				Assert::AreEqual(std::string("sigma_delta"), std::string(s3.StageName(sigmaHook)));
+
+				const std::vector<int> codes = { 4, 16, 40, 64, 100, 300, 600, 900, 940, 980, 1019 };
+				const ExtendedRangeGpuProbe::Planes planes = ExtendedRangeGpuProbe::Greys(codes, 32, 16);
+				ExtendedRangeGpuProbe::Case c;
+				c.outputPrimaries = PL_COLOR_PRIM_BT_709;
+				c.outputFloat32 = true;
+				c.extraHooks = separateHooks;
+				const ExtendedRangeGpuProbe::Result separate = ExtendedRangeGpuProbe::Render(gpu, renderer, planes, c);
+
+				HookSegment::Runner runner(gpu);
+				runner.SetSampleEvery(1);
+				std::vector<const pl_hook*> merged;
+				runner.Fuse(separateHooks, merged, [&](const pl_hook* h) { return s3.Member(h); });
+				Assert::AreEqual<size_t>(1, merged.size(), L"S3 OUTPUT hooks must fuse into one hook");
+				c.extraHooks = merged;
+				const ExtendedRangeGpuProbe::Result one = ExtendedRangeGpuProbe::Render(gpu, renderer, planes, c);
+				Assert::IsTrue(separate.ok && one.ok, ToWide(separate.error + " / " + one.error).c_str());
+				Assert::IsTrue(runner.TakeFailures().empty(), L"an S3 inner stage failed in the merged hook");
+				const pl_render_errors errors = pl_renderer_get_errors(renderer);
+				Assert::IsTrue(runner.DisabledRuns(&errors).empty(), L"libplacebo disabled the merged S3 hook");
+				const ExtendedRangeGpuProbe::Difference d = ExtendedRangeGpuProbe::Compare(separate, one);
+				const std::vector<int> a = ExtendedRangeGpuProbe::Columns(separate, int(codes.size()), 1.0);
+				const std::vector<int> b = ExtendedRangeGpuProbe::Columns(one, int(codes.size()), 1.0);
+				const std::string text = "S3 separate " + ExtendedRangeGpuProbe::Join(a) + " | merged " +
+					ExtendedRangeGpuProbe::Join(b) + " | max " + std::to_string(d.max) + " mean " + std::to_string(d.mean);
+				Logger::WriteMessage((text + "\n").c_str());
+				Assert::IsTrue(d.max <= 2, ToWide("S3 merged vs separate within 2 codes (dither tolerance): " + text).c_str());
+				Assert::IsTrue(std::abs(a.front() - b.front()) <= 1, ToWide("S3 BTB column preserved: " + text).c_str());
+				Assert::IsTrue(std::abs(a.back() - b.back()) <= 1, ToWide("S3 WTW column preserved: " + text).c_str());
+				runner.Release();
 			}
 			pl_renderer_destroy(&renderer);
 			pl_d3d11_destroy(&d3d);
