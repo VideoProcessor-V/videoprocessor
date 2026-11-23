@@ -517,12 +517,13 @@ namespace TdV2
 		std::vector<FocusCellInfo> info(numCells);
 		const double depthScale = DepthScale(sourceBits);
 		// Map full-spectrum stepTotalVar into the exact (M + D3) band-energy domain via BandFromBase's
-		// 2D white-noise transfer gain gainMD3 = ||M||_2^2 + ||D3||_2^2 (~= 0.05589), so genuine defocused
-		// bokeh structure is never drowned out by an unscaled full-spectrum floor while W1 banded sky stays unvetoed!
+		// 2D white-noise transfer gain gainMD3 = ||M||_2^2 + ||D3||_2^2 (~= 0.05589), and apply the exact
+		// 0-dB SNR cell-energy boundary (S >= N <=> S + N >= 2 * N) so genuine defocused bokeh is detected
+		// while smooth quantization-noise-dominated W1 banded sky stays unvetoed!
 		const BandWhiteNoiseGains focusGains = ComputeBandWhiteNoiseGains();
 		const double gainMD3 = focusGains.mid + focusGains.d3;
 		const double stepNoiseVar = (std::max)(0.0, stepTotalVar);
-		const double structureFloor = (std::max)(depthScale * depthScale, 4.0 * gainMD3 * stepNoiseVar);
+		const double structureFloor = (std::max)(depthScale * depthScale, 2.0 * gainMD3 * stepNoiseVar);
 		const double fSharp = AnalyticalEdgeFocusRatio(0.0);
 		const double fDefocus = AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase);
 		const double fShiftDelta = fSharp - fDefocus;
