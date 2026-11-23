@@ -8,6 +8,7 @@
 #include <VP-V/modules/motion/estimation/global_model/PhotometricRefine.h>
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h>
 #include "PhotometricRefineScenes.h"
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 #include "CppUnitTest.h"
 #include <algorithm>
 #include <chrono>
@@ -486,6 +487,9 @@ namespace VideoProcessorTest
 			}
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(RealTextureKnownShift)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealTextureKnownShift)
 		{
 			// Audit SHOULD 5: real picture texture with exact motion. One real full-resolution luma frame (8-bit raw, path in
@@ -493,14 +497,11 @@ namespace VideoProcessorTest
 			// source px and box-downscaled to the engine scale s (2 and, for frames >= 3000 wide, 4), so the engine-scale motion
 			// has sub-pixel phase (shift / s) and exact truth; +-1 code independent noise per frame. Real clips have no camera
 			// truth finer than about 0.5 px in tools/camera_eval (DIS / NVOF agreement), so this is the finest real-content check.
-			// Without the variables the test logs that it did not run and passes (no repository test data).
 			const std::string path = EnvText("VP_R3_REAL_GRAY");
 			const int fullW = std::atoi(EnvText("VP_R3_REAL_W").c_str()), fullH = std::atoi(EnvText("VP_R3_REAL_H").c_str());
-			if (path.empty() || fullW <= 0 || fullH <= 0)
-			{
-				Log("real texture: VP_R3_REAL_GRAY / _W / _H not set, not run\n");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "RealTextureKnownShift",
+				!path.empty() && fullW > 0 && fullH > 0, "VP_R3_REAL_GRAY / _W / _H not set"))
 				return;
-			}
 			std::vector<uint8_t> full(static_cast<size_t>(fullW) * fullH);
 			{
 				std::ifstream in(path, std::ios::binary);

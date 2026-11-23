@@ -1962,7 +1962,7 @@ namespace VideoProcessorTest
 					r.kernel >= 0 ? KernelInverse::Candidates()[static_cast<size_t>(r.kernel)].name.c_str() : "none");
 				Logger::WriteMessage(line);
 				if (pass == 0 && r.engages != 0) failures += std::string("native real-codec engaged: ") + line;
-				if (pass == 1 && e && std::fabs(e->toY - 0.5) > 0.005) failures += std::string("class: ") + line;
+				if (pass == 1 && (!e || std::fabs(e->toY - 0.5) > 0.005)) failures += std::string(e ? "class: " : "1080 real-codec never engaged: ") + line;
 			}
 			if (!failures.empty()) Assert::Fail(std::wstring(failures.begin(), failures.end()).c_str());
 			Budget("RealCodecStreams", started, 45);

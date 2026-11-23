@@ -562,18 +562,16 @@ namespace VideoProcessorTest
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(GpuRealTextureKnownShift)
-			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GpuRealTextureKnownShift)
 		{
 			// The CPU test's real-texture pairs (VP_R3_REAL_GRAY / _W / _H) at s = 1, 2 and 4.
 			const std::string path = EnvText("VP_R3_REAL_GRAY");
 			const int fullW = std::atoi(EnvText("VP_R3_REAL_W").c_str()), fullH = std::atoi(EnvText("VP_R3_REAL_H").c_str());
-			if (path.empty() || fullW <= 0 || fullH <= 0)
-			{
-				GLog("gpu real texture: VP_R3_REAL_GRAY / _W / _H not set, not run\n");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "GpuRealTextureKnownShift",
+				!path.empty() && fullW > 0 && fullH > 0, "VP_R3_REAL_GRAY / _W / _H not set"))
 				return;
-			}
 			std::vector<uint8_t> full(static_cast<size_t>(fullW) * fullH);
 			{
 				std::ifstream in(path, std::ios::binary);
@@ -603,6 +601,7 @@ namespace VideoProcessorTest
 				char name[96];
 				std::snprintf(name, sizeof(name), "real texture %dx%d s %d (refined %d/6)", fullW, fullH, s, refined);
 				Report(name, eq);
+				Assert::AreEqual(6, refined, L"all 6 real-texture shifts must refine on GPU");
 			}
 		}
 
