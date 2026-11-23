@@ -511,5 +511,203 @@ namespace DejudderDecisionTableTest
 			Assert::IsTrue(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(false, true, 2, true, 1),
 				L"minimal valid positive boundary (B=1, C=2) preserves");
 		}
+
+		// FIX3-D1: host-level de-judder test driving TakeDejudderHistoryAction -> LastHistoryActionReleased()
+		// -> ShouldPreserveLiveAheadAfterInvalidate on real dejudderAheadPayload + Dejudder::AheadSchedule state.
+		// Includes mandatory in-test negative control proving an unprotected host unconditionally clearing
+		// dejudderAheadPayload on Gap loses live C.
+		TEST_METHOD(HostDejudderHistoryActionReleasedPreservesOrDropsLiveAheadPayload)
+		{
+			constexpr uint64_t kA = 20, kB = 21, kC = 22;
+			struct FakePayload { uint64_t seq = 0; };
+
+			auto makeConditions = [](uint64_t a, uint64_t b, uint64_t c) {
+				Dejudder::AheadSchedule::Conditions cond;
+				cond.enabled = true;
+				cond.active = true;
+				cond.hasNext = b != 0;
+				cond.nextSeq = b;
+				cond.hasAfter = c != 0;
+				cond.afterSeq = c;
+				cond.afterIsNew = c != 0 && c > b;
+				cond.sourceWarp = false;
+				cond.estimated = true;
+				cond.estimatedSeq = a;
+				return cond;
+			};
+			auto makeSteps = [](int& calls, uint64_t& estA, uint64_t& estB) {
+				Dejudder::AheadSchedule::Steps steps;
+				steps.layoutMatches = []() { return true; };
+				steps.snapshotNext = []() { return true; };
+				steps.uploadAfter = []() { return true; };
+				steps.estimate = [&calls, &estA, &estB](uint64_t a, uint64_t b) {
+					++calls;
+					estA = a;
+					estB = b;
+					return true;
+				};
+				return steps;
+			};
+
+			// Mirror of renderer host state touched by DejudderPolicyRunner.inl:128-137 & ApplyMotionInvalidate().
+			struct HostState {
+				std::shared_ptr<VpIndicator::Indicator> ind = std::make_shared<VpIndicator::Indicator>(3, 64);
+				MotionValidity::State mv;
+				VpMotionResync::Readers readers;
+				Dejudder::AheadSchedule dejudderAhead;
+				std::shared_ptr<FakePayload> dejudderAheadPayload;
+				uint64_t dejudderAheadPayloadSequence = 0;
+				uint64_t seenEpoch = 0;
+				bool resyncOn = true;
+
+				HostState(bool resync) : resyncOn(resync)
+				{
+					if (resyncOn)
+					{
+						VpMotionResync::RegisterOn(ind, mv, readers);
+						ind->SealAndObserve(18);
+					}
+					seenEpoch = mv.Epoch();
+					// Seed stale prior-epoch ahead estimate (19, 20) to verify ApplyMotionInvalidate resets it.
+					dejudderAhead.NoteEpoch(seenEpoch);
+					int seedCalls = 0;
+					uint64_t sa = 0, sb = 0;
+					Dejudder::AheadSchedule::Conditions c;
+					c.enabled = c.active = c.hasNext = c.hasAfter = c.afterIsNew = c.estimated = true;
+					c.estimatedSeq = 18;
+					c.nextSeq = 19;
+					c.afterSeq = 20;
+					Dejudder::AheadSchedule::Steps st;
+					st.layoutMatches = []() { return true; };
+					st.snapshotNext = []() { return true; };
+					st.uploadAfter = []() { return true; };
+					st.estimate = [&seedCalls, &sa, &sb](uint64_t a, uint64_t b) { ++seedCalls; sa = a; sb = b; return true; };
+					Assert::IsTrue(dejudderAhead.TryAhead(c, st), L"seeded stale ahead entry (19, 20)");
+				}
+
+				void LoadLiveC()
+				{
+					dejudderAheadPayload = std::make_shared<FakePayload>(FakePayload{ kC });
+					dejudderAheadPayloadSequence = kC;
+				}
+
+				// Mirrors LibplaceboVideoRenderer::Impl::ApplyMotionInvalidate + DejudderPolicyRunner.inl:128-137.
+				void RunInvalidateStep(bool unprotectedNaiveClear)
+				{
+					const std::shared_ptr<FakePayload> liveAhead = dejudderAheadPayload;
+					const uint64_t liveSeq = dejudderAheadPayloadSequence;
+
+					// ApplyMotionInvalidate():
+					MotionValidity::Pending p = mv.Consume(seenEpoch);
+					if (VpMotion::TakeDejudderHistoryAction(resyncOn, p.changed, p, readers))
+					{
+						dejudderAhead.Reset();
+						dejudderAheadPayload.reset();
+						dejudderAheadPayloadSequence = 0;
+					}
+
+					if (unprotectedNaiveClear)
+						return;   // unprotected baseline: never checks LastHistoryActionReleased / ShouldPreserveLiveAheadAfterInvalidate
+
+					const bool released = readers.LastHistoryActionReleased();
+					if (!dejudderAheadPayload && VpMotion::ShouldPreserveLiveAheadAfterInvalidate(
+							released, liveAhead != nullptr, liveSeq, /*hasNext=*/true, kB))
+					{
+						dejudderAheadPayload = liveAhead;
+						dejudderAheadPayloadSequence = liveSeq;
+					}
+				}
+			};
+
+			// ---- 1. In-Test Negative Control: unprotected baseline unconditionally clears dejudderAheadPayload on Gap ----
+			{
+				HostState neg(/*resync=*/true);
+				neg.LoadLiveC();
+				neg.ind->Advance(VpIndicator::kContinuity, VpResync::Cause::DriftDrop, kA);
+				neg.ind->SealAndObserve(kA);
+				neg.RunInvalidateStep(/*unprotectedNaiveClear=*/true);
+
+				Assert::IsFalse(neg.readers.LastHistoryActionReleased(),
+					L"negative control premise: Gap is non-release");
+				Assert::IsNull(neg.dejudderAheadPayload.get(),
+					L"negative control: unprotected unconditional clear drops live C on Gap");
+				int calls = 0;
+				uint64_t ea = 0, eb = 0;
+				Assert::IsFalse(neg.dejudderAhead.TryAhead(makeConditions(kA, kB, neg.dejudderAheadPayloadSequence), makeSteps(calls, ea, eb)),
+					L"negative control: losing live C makes TryAhead fail with NoAfter");
+				Assert::IsTrue(neg.dejudderAhead.LastReason() == Dejudder::AheadSchedule::Reason::NoAfter);
+				Assert::AreEqual(0, calls);
+			}
+
+			// ---- 2. Case (a): Gap / Continuity invalidation (both resyncOn=true and resyncOn=false) ----
+			//         LastHistoryActionReleased() == false, live C preserved in dejudderAheadPayload, stale dejudderAhead reset.
+			for (bool resyncOn : { false, true })
+			{
+				HostState h(resyncOn);
+				h.LoadLiveC();
+				const FakePayload* const livePtr = h.dejudderAheadPayload.get();
+				if (resyncOn)
+				{
+					h.ind->Advance(VpIndicator::kContinuity, VpResync::Cause::DriftDrop, kA);
+					h.ind->SealAndObserve(kA);
+				}
+				else
+				{
+					h.mv.Invalidate(MotionValidity::Cause::Gap);
+				}
+				h.RunInvalidateStep(/*unprotectedNaiveClear=*/false);
+
+				Assert::IsFalse(h.readers.LastHistoryActionReleased(),
+					L"Gap invalidation records LastHistoryActionReleased() == false");
+				Assert::IsTrue(h.dejudderAheadPayload.get() == livePtr && h.dejudderAheadPayloadSequence == kC,
+					L"live C payload preserved intact in dejudderAheadPayload after Gap");
+				Assert::IsFalse(h.dejudderAhead.Consume(19, 20, h.mv.Epoch()),
+					L"stale prior-epoch dejudderAhead entry WAS reset");
+
+				h.dejudderAhead.NoteEpoch(h.mv.Epoch());
+				int calls = 0;
+				uint64_t ea = 0, eb = 0;
+				Assert::IsTrue(h.dejudderAhead.TryAhead(makeConditions(kA, kB, h.dejudderAheadPayloadSequence), makeSteps(calls, ea, eb)),
+					L"TryAhead succeeds with preserved live C after Gap");
+				Assert::AreEqual(1, calls);
+				Assert::IsTrue(ea == kB && eb == kC);
+			}
+
+			// ---- 3. Case (b): FormatChange / reader FULL release -> LastHistoryActionReleased() == true, live C dropped ----
+			for (bool resyncOn : { false, true })
+			{
+				HostState h(resyncOn);
+				h.LoadLiveC();
+				if (resyncOn)
+				{
+					h.ind->Advance(VpIndicator::kFull, VpResync::Cause::SourceFormatChanged, kA);
+					h.ind->SealAndObserve(kA);
+				}
+				else
+				{
+					h.mv.Invalidate(MotionValidity::Cause::SourceFormatChange);
+				}
+				h.RunInvalidateStep(/*unprotectedNaiveClear=*/false);
+
+				Assert::IsTrue(h.readers.LastHistoryActionReleased(),
+					L"FormatChange / reader FULL release records LastHistoryActionReleased() == true");
+				Assert::IsNull(h.dejudderAheadPayload.get(),
+					L"live C payload MUST be dropped on resource-releasing invalidation");
+				Assert::AreEqual<uint64_t>(0, h.dejudderAheadPayloadSequence);
+				int calls = 0;
+				uint64_t ea = 0, eb = 0;
+				Assert::IsFalse(h.dejudderAhead.TryAhead(makeConditions(kA, kB, h.dejudderAheadPayloadSequence), makeSteps(calls, ea, eb)),
+					L"TryAhead refuses after release dropped C");
+				Assert::IsTrue(h.dejudderAhead.LastReason() == Dejudder::AheadSchedule::Reason::NoAfter);
+				Assert::AreEqual(0, calls);
+
+				// Next quiet frame with no invalidation resets LastHistoryActionReleased() back to false (never sticky).
+				h.LoadLiveC();
+				h.RunInvalidateStep(/*unprotectedNaiveClear=*/false);
+				Assert::IsFalse(h.readers.LastHistoryActionReleased(),
+					L"subsequent quiet frame clears LastHistoryActionReleased() back to false");
+				Assert::IsNotNull(h.dejudderAheadPayload.get());
+			}
+		}
 	};
 }

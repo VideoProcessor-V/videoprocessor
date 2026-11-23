@@ -27,6 +27,8 @@
 #include <VP-V/core/SkeletonAcquireLane.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
+#include <libplacebo/d3d11.h>
+#include <libplacebo/log.h>
 
 #include <atomic>
 #include <chrono>
@@ -613,9 +615,10 @@ namespace SkeletonAcquireTestsNs
 			Assert::AreEqual(0, gpuCalls, L"no GPU work");
 		}
 
-		// W1R-FIX4 CF-1 Option A (adversarial + in-test negative controls): MemoFor() runs on producer
-		// threads / under hub locks and MUST NOT invoke PlanNoLaneGpu() / QueryCard() off the render
-		// thread's Begin(). No-lane GPU planning stays strictly on render-thread OnFrame(Begin).
+		// FIX3-D7 (adversarial + in-test negative controls): after GpuCreated records renderTid_,
+		// render-thread MemoFor(host, 1) plans GPU on frame 1 (AttachMemoGpu before SetGpuDispatcherPresent(true),
+		// zero "no GPU dispatcher" fallback), while an off-thread MemoFor(host, 1) STILL MUST NOT run
+		// PlanNoLaneGpu / QueryCard.
 		// Category Cpu: hardware-free (fake pl_gpu pointer used for presence only, SetCardForTesting
 		// avoids DXGI QueryCard).
 		BEGIN_TEST_METHOD_ATTRIBUTE(MemoForKeepsNoLaneGpuPlanningOnRenderThreadBegin)
@@ -654,45 +657,64 @@ namespace SkeletonAcquireTestsNs
 			};
 
 			int gpuHost = 0;
+			int offThreadHost = 0;
 			int fakeGpu = 0;
 			int cpuOnlyHost = 0;
 
-			// ---- 1. Before Begin (after GpuCreated, NO OnFrame(Begin) yet): MemoFor MUST NOT run PlanNoLaneGpu ----
-			sendLifecycle(&gpuHost, RE::Lifecycle::GpuCreated, reinterpret_cast<pl_gpu>(&fakeGpu));   // never dereferenced
-			Assert::IsNull(sk.MemoOf(&gpuHost), L"memo is still lazily created on MemoFor");
+			// ---- 1. In-Test Negative Control (Off-Thread MemoFor): MUST NOT run PlanNoLaneGpu / QueryCard ----
+			sendLifecycle(&offThreadHost, RE::Lifecycle::GpuCreated, reinterpret_cast<pl_gpu>(&fakeGpu));   // records renderTid_
+			Assert::IsNull(sk.MemoOf(&offThreadHost), L"memo is lazily created on MemoFor");
+			{
+				Vpv::Skeleton::FrameMemo fmOff;
+				AcquireResult rOff;
+				std::thread worker([&]() {
+					fmOff = sk.MemoFor(&offThreadHost, 1);
+					if (fmOff.Valid())
+						rOff = fmOff.memo->Acquire(kP1HalfLuma, 1, AcquireForm::Gpu);
+				});
+				worker.join();
 
-			const Vpv::Skeleton::FrameMemo fmGpu = sk.MemoFor(&gpuHost, 2);
-			Assert::IsTrue(fmGpu.Valid() && fmGpu.gpu == &fakeGpu, L"lazy memo carries the renderer's pl_gpu");
+				Assert::IsTrue(fmOff.Valid() && fmOff.gpu == &fakeGpu, L"off-thread lazy memo carries pl_gpu");
+				Assert::IsFalse(fmOff.memo->LaneBound(), L"no-lane memo");
+				Assert::IsTrue(fmOff.memo->HasGpuDevice(), L"owner GPU device attached on lazy create");
+				Assert::AreEqual<uint64_t>(0, fmOff.memo->Seals(), L"no Begin seal yet");
+				Assert::IsFalse(fmOff.memo->GpuGranted(),
+					L"negative control: off-thread MemoFor MUST NOT run PlanNoLaneGpu / QueryCard");
+				Assert::IsTrue(rOff.status == AcquireStatus::Unavailable && rOff.cause == AcquireCause::NoGpuDispatcher,
+					L"negative control: off-thread MemoFor leaves SetGpuDispatcherPresent(false) -> NoGpuDispatcher");
+				Assert::AreEqual(0, gpuCalls, L"off-thread MemoFor must not run GPU owner fill");
+				Assert::AreEqual<uint64_t>(1, fmOff.memo->CountersOf(kP1HalfLuma).unavailable[size_t(AcquireCause::NoGpuDispatcher)]);
+				Assert::IsTrue(AnyLine(fmOff.memo->StatusLines(), "no GPU dispatcher 1"));
+			}
+
+			// ---- 2. Protected Path: Render-thread MemoFor(host, 1) plans GPU on frame 1 with ZERO NoGpuDispatcher fallback ----
+			sendLifecycle(&gpuHost, RE::Lifecycle::GpuCreated, reinterpret_cast<pl_gpu>(&fakeGpu));
+			Assert::IsNull(sk.MemoOf(&gpuHost), L"gpuHost memo lazily created on first MemoFor");
+
+			const Vpv::Skeleton::FrameMemo fmGpu = sk.MemoFor(&gpuHost, 1);
+			Assert::IsTrue(fmGpu.Valid() && fmGpu.gpu == &fakeGpu, L"render-thread lazy memo carries pl_gpu");
 			Assert::IsFalse(fmGpu.memo->LaneBound(), L"no-lane memo");
-			Assert::IsTrue(fmGpu.memo->HasGpuDevice(), L"owner GPU device attached on lazy create");
-			Assert::AreEqual<uint64_t>(0, fmGpu.memo->Seals(), L"no Begin seal yet");
-			Assert::IsFalse(fmGpu.memo->GpuGranted(), L"MemoFor must not run PlanNoLaneGpu before Begin");
+			Assert::IsTrue(fmGpu.memo->HasGpuDevice(), L"AttachMemoGpu ran before SetGpuDispatcherPresent(true)");
+			Assert::IsTrue(fmGpu.memo->GpuGranted(), L"render-thread MemoFor(1) planned no-lane GPU grant on frame 1");
 
-			const AcquireResult rBeforeBegin = fmGpu.memo->Acquire(kP1HalfLuma, 2, AcquireForm::Gpu);
-			Assert::IsTrue(rBeforeBegin.status == AcquireStatus::Unavailable && rBeforeBegin.cause == AcquireCause::NoGpuDispatcher,
-				L"before render-thread Begin, Acquire(Gpu) MUST return Unavailable/NoGpuDispatcher (proves MemoFor does not plan off-Begin)");
-			Assert::AreEqual(0, gpuCalls, L"before render-thread Begin, GPU owner fill must not run");
-			Assert::AreEqual<uint64_t>(1, fmGpu.memo->CountersOf(kP1HalfLuma).unavailable[size_t(AcquireCause::NoGpuDispatcher)],
-				L"pre-Begin NoGpuDispatcher counted");
-			Assert::IsTrue(AnyLine(fmGpu.memo->StatusLines(), "no GPU dispatcher 1"),
-				L"pre-Begin NoGpuDispatcher visible on status lines");
+			const AcquireResult rFrame1 = fmGpu.memo->Acquire(kP1HalfLuma, 1, AcquireForm::Gpu);
+			Assert::IsTrue(rFrame1.status == AcquireStatus::FilledAtRead && rFrame1.gpu.Valid(),
+				L"render-thread frame-1 Acquire(Gpu) succeeds immediately before OnFrame(Begin)");
+			Assert::AreEqual(1, gpuCalls, L"GPU owner fill ran once on frame 1");
+			Assert::AreEqual<uint64_t>(1u << 20, fmGpu.memo->GpuBytes(), L"GPU spot bytes accounted against grant");
+			Assert::AreEqual<uint64_t>(0, fmGpu.memo->CountersOf(kP1HalfLuma).unavailable[size_t(AcquireCause::NoGpuDispatcher)],
+				L"ZERO NoGpuDispatcher fallbacks on render-thread frame 1");
+			Assert::IsFalse(AnyLine(fmGpu.memo->StatusLines(), "no GPU dispatcher"),
+				L"status lines carry zero 'no GPU dispatcher' fallback on render-thread frame 1");
 
-			// ---- 2. At render-thread Begin: PlanNoLaneGpu runs on the render thread and enables Acquire(Gpu) ----
-			sendBegin(&gpuHost, 2);
-			Assert::AreEqual<uint64_t>(1, fmGpu.memo->Seals(), L"Begin sealed the no-lane memo");
-			Assert::IsTrue(fmGpu.memo->GpuGranted(), L"Begin planned the no-lane GPU grant");
-
-			const AcquireResult rAfterBegin = fmGpu.memo->Acquire(kP1HalfLuma, 2, AcquireForm::Gpu);
-			Assert::IsTrue(rAfterBegin.status == AcquireStatus::FilledAtRead && rAfterBegin.gpu.Valid(),
-				L"after render-thread Begin, Acquire(Gpu) succeeds on the GPU-attached host");
-			Assert::AreEqual(1, gpuCalls, L"GPU owner fill ran once after Begin");
-			Assert::AreEqual<uint64_t>(1u << 20, fmGpu.memo->GpuBytes(), L"GPU spot bytes accounted against the grant");
-			Assert::AreEqual<uint64_t>(1, fmGpu.memo->CountersOf(kP1HalfLuma).unavailable[size_t(AcquireCause::NoGpuDispatcher)],
-				L"no new NoGpuDispatcher after Begin");
+			// Render thread subsequently calling MemoFor(&offThreadHost, 1) plans it cleanly as well.
+			const Vpv::Skeleton::FrameMemo fmOffOnRender = sk.MemoFor(&offThreadHost, 1);
+			Assert::IsTrue(fmOffOnRender.Valid() && fmOffOnRender.memo->GpuGranted());
+			const AcquireResult rOffAfterRender = fmOffOnRender.memo->Acquire(kP1HalfLuma, 1, AcquireForm::Gpu);
+			Assert::IsTrue(rOffAfterRender.status == AcquireStatus::FilledAtRead && rOffAfterRender.gpu.Valid());
+			Assert::AreEqual(2, gpuCalls);
 
 			// ---- 3. Negative Control: CPU-only host (NO GpuCreated, WITH render-thread Begin) ----
-			// Exact same SkeletonModule, CardProfile, owner fill, MemoFor + OnFrame(Begin) sequence,
-			// omitting only GpuCreated: MUST still fail with NoGpuDispatcher even after Begin.
 			Assert::IsNull(sk.MemoOf(&cpuOnlyHost), L"no memo before lazy MemoFor on CPU-only host");
 			const Vpv::Skeleton::FrameMemo fmCpu = sk.MemoFor(&cpuOnlyHost, 2);
 			Assert::IsTrue(fmCpu.Valid() && fmCpu.gpu == nullptr, L"CPU-only lazy memo created without pl_gpu");
@@ -705,11 +727,9 @@ namespace SkeletonAcquireTestsNs
 			const AcquireResult rCpu = fmCpu.memo->Acquire(kP1HalfLuma, 2, AcquireForm::Gpu);
 			Assert::IsTrue(rCpu.status == AcquireStatus::Unavailable && rCpu.cause == AcquireCause::NoGpuDispatcher,
 				L"negative control: CPU-only host MUST still fail with NoGpuDispatcher even after Begin");
-			Assert::AreEqual(1, gpuCalls, L"negative control: GPU owner fill must not run on CPU-only host");
-			Assert::AreEqual<uint64_t>(1, fmCpu.memo->CountersOf(kP1HalfLuma).unavailable[size_t(AcquireCause::NoGpuDispatcher)],
-				L"negative control: NoGpuDispatcher counted");
-			Assert::IsTrue(AnyLine(fmCpu.memo->StatusLines(), "no GPU dispatcher 1"),
-				L"negative control: NoGpuDispatcher visible on status lines");
+			Assert::AreEqual(2, gpuCalls, L"negative control: GPU owner fill must not run on CPU-only host");
+			Assert::AreEqual<uint64_t>(1, fmCpu.memo->CountersOf(kP1HalfLuma).unavailable[size_t(AcquireCause::NoGpuDispatcher)]);
+			Assert::IsTrue(AnyLine(fmCpu.memo->StatusLines(), "no GPU dispatcher 1"));
 
 			// ---- 4. Teardown: GpuReleased drops the memo; fresh MemoFor + Begin without new GpuCreated returns NoGpuDispatcher ----
 			sendLifecycle(&gpuHost, RE::Lifecycle::GpuReleased);
@@ -722,12 +742,151 @@ namespace SkeletonAcquireTestsNs
 			const AcquireResult rAfterRel = fmAfterRel.memo->Acquire(kP1HalfLuma, 3, AcquireForm::Gpu);
 			Assert::IsTrue(rAfterRel.status == AcquireStatus::Unavailable && rAfterRel.cause == AcquireCause::NoGpuDispatcher,
 				L"post-GpuReleased MemoFor + Begin without new GpuCreated MUST return NoGpuDispatcher");
-			Assert::AreEqual(1, gpuCalls, L"no GPU work after GpuReleased");
+			Assert::AreEqual(2, gpuCalls, L"no GPU work after GpuReleased");
 
 			sendLifecycle(&gpuHost, RE::Lifecycle::Shutdown);
+			sendLifecycle(&offThreadHost, RE::Lifecycle::Shutdown);
 			sendLifecycle(&cpuOnlyHost, RE::Lifecycle::Shutdown);
 			Assert::IsNull(sk.MemoOf(&gpuHost), L"Shutdown cleaned up gpuHost");
+			Assert::IsNull(sk.MemoOf(&offThreadHost), L"Shutdown cleaned up offThreadHost");
 			Assert::IsNull(sk.MemoOf(&cpuOnlyHost), L"Shutdown cleaned up cpuOnlyHost");
+		}
+
+		// FIX3-D7: two-thread WARP stress test (real WARP D3D11 + libplacebo pl_gpu, real QueryCard without
+		// SetCardForTesting). Thread 1 (render) loops GpuCreated -> MemoFor(1) -> Acquire -> GpuReleased while
+		// Thread 2 (worker) concurrently hammers MemoFor(host, 1): zero off-thread QueryCard, zero UAF, and
+		// frame-1 GPU presence on render thread every cycle, with negative control proving off-thread caller
+		// never acquires GPU dispatcher before render thread.
+		BEGIN_TEST_METHOD_ATTRIBUTE(MemoForNoLaneGpuTwoThreadWarpStress)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(MemoForNoLaneGpuTwoThreadWarpStress)
+		{
+			namespace RE = RendererExtension;
+
+			struct WarpDevice {
+				pl_log log = nullptr;
+				pl_d3d11 d3d = nullptr;
+				~WarpDevice()
+				{
+					if (d3d)
+						pl_d3d11_destroy(&d3d);
+					if (log)
+						pl_log_destroy(&log);
+				}
+				bool Create()
+				{
+					pl_log_params lp{};
+					lp.log_level = PL_LOG_NONE;
+					log = pl_log_create(PL_API_VER, &lp);
+					if (!log)
+						return false;
+					pl_d3d11_params dp{};
+					dp.force_software = true;
+					dp.allow_software = true;
+					d3d = pl_d3d11_create(log, &dp);
+					return d3d != nullptr && d3d->gpu != nullptr && d3d->device != nullptr;
+				}
+			} warp;
+			Assert::IsTrue(warp.Create(), L"failed to create WARP D3D11 / libplacebo device");
+
+			Vpv::Skeleton::SkeletonModule sk([](ConfigFile&) { return false; });   // no-lane memo, real QueryCard path
+			int gpuCalls = 0;
+			Assert::IsTrue(
+				sk.RegisterOwnerFill(kP1HalfLuma, AcquireForm::Gpu, kLaneUnit, GpuFill(&gpuCalls, 1u << 16, 1u << 16))
+					== SkeletonMemo::Registration::Registered,
+				L"P1 GPU owner fill registered");
+
+			auto sendLifecycle = [&](const void* host, RE::Lifecycle kind, bool withGpu) {
+				RE::LifecycleFacts f;
+				f.host = host;
+				f.kind = kind;
+				if (withGpu) {
+					f.gpu = warp.d3d->gpu;
+					f.device = warp.d3d->device;
+				}
+				sk.OnLifecycle(f);
+			};
+
+			// ---- 1. In-Test Negative Control on WARP: off-thread MemoFor never acquires GPU dispatcher before render thread ----
+			int negHost = 0;
+			sendLifecycle(&negHost, RE::Lifecycle::GpuCreated, true);
+			{
+				AcquireResult offRes;
+				bool offHadDevice = false;
+				std::thread offThread([&]() {
+					const Vpv::Skeleton::FrameMemo fm = sk.MemoFor(&negHost, 1);
+					if (fm.Valid()) {
+						offHadDevice = fm.memo->HasGpuDevice();
+						offRes = fm.memo->Acquire(kP1HalfLuma, 1, AcquireForm::Gpu);
+					}
+				});
+				offThread.join();
+				Assert::IsTrue(offHadDevice, L"owner GPU device attached on lazy create");
+				Assert::IsTrue(offRes.status == AcquireStatus::Unavailable && offRes.cause == AcquireCause::NoGpuDispatcher,
+					L"negative control: off-thread worker MUST NOT acquire GPU dispatcher before render thread");
+
+				// Now render thread calls MemoFor(1) -> PlanNoLaneGpu runs real QueryCard + SetGpuDispatcherPresent(true).
+				const Vpv::Skeleton::FrameMemo fmRender = sk.MemoFor(&negHost, 1);
+				Assert::IsTrue(fmRender.Valid() && fmRender.gpu == warp.d3d->gpu && fmRender.memo->HasGpuDevice());
+				const AcquireResult renderRes = fmRender.memo->Acquire(kP1HalfLuma, 1, AcquireForm::Gpu);
+				Assert::IsTrue(renderRes.cause != AcquireCause::NoGpuDispatcher,
+					L"render-thread frame-1 MemoFor sets GPU dispatcher present on real WARP device");
+			}
+			sendLifecycle(&negHost, RE::Lifecycle::GpuReleased, false);
+
+			// ---- 2. Two-thread WARP stress: Thread 1 loops GpuCreated -> MemoFor(1) -> GpuReleased;
+			//         Thread 2 concurrently hammers MemoFor(host, 1) ----
+			int stressHost = 0;
+			std::atomic<bool> stop{ false };
+			std::atomic<uint64_t> workerCalls{ 0 };
+			std::atomic<uint64_t> workerOffThreadNoDispatcher{ 0 };
+			struct ThreadJoinGuard {
+				std::atomic<bool>& stopFlag;
+				std::thread t;
+				~ThreadJoinGuard()
+				{
+					stopFlag.store(true, std::memory_order_release);
+					if (t.joinable())
+						t.join();
+				}
+			} worker{ stop, std::thread([&]() {
+				while (!stop.load(std::memory_order_acquire)) {
+					const Vpv::Skeleton::FrameMemo fm = sk.MemoFor(&stressHost, 1);
+					workerCalls.fetch_add(1, std::memory_order_relaxed);
+					if (fm.Valid()) {
+						// Safe concurrent read on shared_ptr<SkeletonMemo> across GpuCreated/GpuReleased teardown.
+						const auto& c = fm.memo->CountersOf(kP1HalfLuma);
+						(void)c.unavailable[size_t(AcquireCause::NoGpuDispatcher)];
+						if (!fm.memo->GpuGranted())
+							workerOffThreadNoDispatcher.fetch_add(1, std::memory_order_relaxed);
+					}
+					std::this_thread::yield();
+				}
+			}) };
+
+			for (int iter = 0; iter < 24; ++iter) {
+				sendLifecycle(&stressHost, RE::Lifecycle::GpuCreated, true);
+				const Vpv::Skeleton::FrameMemo fm = sk.MemoFor(&stressHost, 1);
+				Assert::IsTrue(fm.Valid() && fm.gpu == warp.d3d->gpu,
+					L"render-thread MemoFor(1) sees live WARP pl_gpu");
+				Assert::IsTrue(fm.memo->HasGpuDevice(),
+					L"AttachMemoGpu attached real WARP pl_dispatch before SetGpuDispatcherPresent(true)");
+				const AcquireResult r = fm.memo->Acquire(kP1HalfLuma, 1, AcquireForm::Gpu);
+				Assert::IsTrue(r.cause != AcquireCause::NoGpuDispatcher,
+					L"render-thread frame-1 Acquire(Gpu) must never hit NoGpuDispatcher under concurrent worker stress");
+				sendLifecycle(&stressHost, RE::Lifecycle::GpuReleased, false);
+			}
+
+			stop.store(true, std::memory_order_release);
+			if (worker.t.joinable())
+				worker.t.join();
+
+			Assert::IsTrue(workerCalls.load() > 0, L"concurrent worker thread actively hammered MemoFor during stress");
+			sendLifecycle(&stressHost, RE::Lifecycle::Shutdown, false);
+			sendLifecycle(&negHost, RE::Lifecycle::Shutdown, false);
+			Assert::IsNull(sk.MemoOf(&stressHost), L"Shutdown cleaned up stressHost");
+			Assert::IsNull(sk.MemoOf(&negHost), L"Shutdown cleaned up negHost");
 		}
 	};
 
