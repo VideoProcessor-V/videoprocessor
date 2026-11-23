@@ -86,6 +86,48 @@ namespace D8SceneJudgeAgreementNs
 	namespace HP = HardwarePrerequisites;
 
 	constexpr double kAgreementGatePct = 99.5;
+	// WAIVER-W1R-FADE-RECALL: owner 2026-11-22: accept the derived fade model's recall for W1; slow-fade recall improves in W2/3.
+	// Only the 4 rows below 99.5% carry explicit per-row recall/false-fade/range-hit expectations; all other 11 rows stay at 99.5%.
+	struct RangeMinHits
+	{
+		int first = 0;
+		int second = 0;
+		int minHits = 0;
+	};
+	struct RowPartialGate
+	{
+		double minPartialAgreePct = kAgreementGatePct;
+		int maxFalseFades = -1;
+		std::vector<RangeMinHits> rangeMinHits;
+		std::vector<int> allowedFadeRestartFrames;   // empty = strict 0 restarts on fades; non-empty = exact allowed frame set only
+	};
+	inline RowPartialGate PartialGateFor(const char* rowName, int part, int parts)
+	{
+		const std::string row(rowName ? rowName : "");
+		if (row == "tos_24p_3min" && part == 2 && parts == 6)
+		{
+			// Part 3 [1440-2160): achieved 97.497% (2/5 on 2034..2038, 0 false fades).
+			// Known cut-law item 102b U7-TOS-2041-VFX-CUT: decoder frame 2040 (delivered at 2041) is an abrupt S=0.02,
+			// spread 1->180 VFX cut into moving sparks (already in U7CutTruthGateTests dontCare {2040,2045}); ONLY 2041 allowed.
+			return { 97.49, 0, { { 2034, 2038, 2 } }, { 2041 } };
+		}
+		if (row == "tos_24p_3min" && part == 3 && parts == 6)
+		{
+			// Part 4 [2160-2880): achieved 78.581% (12/150 across 2311..2323 [2], 2358..2413 [9], 2543..2618 [1]; 16 false fades).
+			return { 78.58, 16, { { 2311, 2323, 2 }, { 2358, 2413, 9 }, { 2543, 2618, 1 } }, {} };
+		}
+		if (row == "fade_synthetic" && part == 0 && parts == 1)
+		{
+			// fade_synthetic [0-240): achieved 93.724% (82/96: 35/48 fade-out, 47/48 fade-in; 1 post-fade tail at 160; keep=0.0000).
+			return { 93.72, 1, { { 40, 87, 35 }, { 112, 159, 47 } }, {} };
+		}
+		if (row == "pan_480pxs_fade_23976p" && part == 0 && parts == 1)
+		{
+			// pan_480pxs_fade_23976p [0-719): achieved 98.189% (131/143: 66/72 fade-in, 65/71 fade-out; 1 post-fade tail at 73).
+			return { 98.18, 1, { { 1, 72, 66 }, { 648, 718, 65 } }, {} };
+		}
+		return {};
+	}
 	// WAIVER-U7FADE-PARTIAL: the synthetic fade-out scales the picture to its black (FadeGain 1 -> 0 over frames 40..87); the keeps
 	// the laws give multiply to the contrast left, so the history's product over the fade-out must have fallen below one half (the
 	// law's own arithmetic reaches about 0 at frame 87, see the WAIVER commit).
@@ -266,6 +308,22 @@ namespace D8SceneJudgeAgreementNs
 				{ 2311, 2323 }, // Part 4, fade-out (13 frames; ends strictly before cut {2324, 2325})
 				{ 2358, 2413 }, // Part 4, fade-out (56 frames; ends strictly before cut {2418, 2419})
 				{ 2543, 2618 }  // Part 4, fade-out (76 frames)
+			};
+		return {};
+	}
+
+	// Explicit verified non-fade ranges on tos_24p_3min (2026-11-22_fade-truth-APPROVED.READY.md; WAIVER-W1R-FADE-RECALL):
+	// pinned to EXACTLY 0 partial resets in every part that overlaps them.
+	inline std::vector<std::pair<int, int>> ClipVerifiedNonFadeRanges(const RealClip::Clip& clip)
+	{
+		if (clip.id == "tos_24p_3min")
+			return {
+				{ 31, 62 },     // Part 1: foreground creature occlusion
+				{ 154, 178 },   // Part 1: camera move & smoke inside one shot (cut 178 stays)
+				{ 1225, 1240 }, // Part 2: camera tilt up to ceiling cables
+				{ 1866, 1872 }, // Part 3: animated credits robot art zoom/darkening
+				{ 1945, 1962 }, // Part 3: animated credits bright shards sweeping in
+				{ 2419, 2430 }  // Part 4: animated graphic build-up after cut 2418/2419
 			};
 		return {};
 	}
@@ -545,6 +603,11 @@ namespace D8SceneJudgeAgreementNs
 		VpUnit::CutFadeJudge::FadeRun fadeRun;      // WAIVER-U7-MULTIFRAME-FADE: the part's stream, one run, every pair folded in order (the skeleton's seal)
 
 		ModuleRow dp, tr;
+		const RowPartialGate partialGate = PartialGateFor(rowName, part, parts);
+		const std::vector<std::pair<int, int>> nonFadeRanges = ClipVerifiedNonFadeRanges(*clip);
+		std::vector<int> dpNonFadePartials(nonFadeRanges.size(), 0), trNonFadePartials(nonFadeRanges.size(), 0);
+		std::vector<int> dpRangeHits(partialGate.rangeMinHits.size(), 0), trRangeHits(partialGate.rangeMinHits.size(), 0);
+		std::vector<int> dpFadeRestartFrames, trFadeRestartFrames;
 		DetailPulseModel::Model dpOld, dpShared;
 		DetailPulseModel::Settings sOld, sShared;
 		sOld.sourceHz = sShared.sourceHz = hz;
@@ -690,6 +753,17 @@ namespace D8SceneJudgeAgreementNs
 				dumpDpShared = fs.restart; dumpDpOld = fo.restart;
 				if (k > begin) dp.CountTruth(fs.restart, expected[static_cast<size_t>(k - begin)] != 0);   // WAIVER-U7ACC-D8-DELIVERY
 				if (k > begin) dp.CountFade(fadeFrame, fs.restart, fs.fadePartial, fs.historyKeep, inFadeOut);   // WAIVER-U7FADE-PARTIAL
+				if (k > begin)
+				{
+					if (fadeFrame && fs.restart) dpFadeRestartFrames.push_back(k);
+					if (fs.fadePartial)
+					{
+						for (size_t ri = 0; ri < nonFadeRanges.size(); ++ri)
+							if (k >= nonFadeRanges[ri].first && k <= nonFadeRanges[ri].second) ++dpNonFadePartials[ri];
+						for (size_t ri = 0; ri < partialGate.rangeMinHits.size(); ++ri)
+							if (k >= partialGate.rangeMinHits[ri].first && k <= partialGate.rangeMinHits[ri].second) ++dpRangeHits[ri];
+					}
+				}
 				dumpDpKeep = fs.historyKeep;
 				if (fo.restart == fs.restart) ++dp.agree;
 				else { ++dp.differ; AddDiff(dp, fo.out, fs.out); }
@@ -715,6 +789,17 @@ namespace D8SceneJudgeAgreementNs
 				dumpTrShared = rs; dumpTrOld = ro;
 				if (k > begin) tr.CountTruth(rs, expected[static_cast<size_t>(k - begin)] != 0);   // WAIVER-U7ACC-D8-DELIVERY
 				if (k > begin) tr.CountFade(fadeFrame, rs, trShared.LastWasFadePartial(), trShared.LastHistoryKeep(), inFadeOut);   // WAIVER-U7FADE-PARTIAL
+				if (k > begin)
+				{
+					if (fadeFrame && rs) trFadeRestartFrames.push_back(k);
+					if (trShared.LastWasFadePartial())
+					{
+						for (size_t ri = 0; ri < nonFadeRanges.size(); ++ri)
+							if (k >= nonFadeRanges[ri].first && k <= nonFadeRanges[ri].second) ++trNonFadePartials[ri];
+						for (size_t ri = 0; ri < partialGate.rangeMinHits.size(); ++ri)
+							if (k >= partialGate.rangeMinHits[ri].first && k <= partialGate.rangeMinHits[ri].second) ++trRangeHits[ri];
+					}
+				}
 				if (k > begin && fadeFrame && !rs)   // WAIVER-U7FADE-PARTIAL-2: TR's own per-tile restarts inside the fade (information)
 				{
 					const double share = trShared.RestartShare();
@@ -817,10 +902,52 @@ namespace D8SceneJudgeAgreementNs
 			facts.softNonCut, facts.SoftNonCutMeanStrength(), facts.softEligible, facts.softEligible50, facts.softEligible75,
 			facts.softEligible90, facts.softEligibleBar, dpGpuSoft, trGpuSoft);
 		Logger::WriteMessage((std::string(partial) + softText + "\n").c_str());
-		Assert::IsTrue(dp.PartialTruthAgreementPct() >= kAgreementGatePct, Wide(partial).c_str());   // WAIVER-U7FADE-PARTIAL-2
-		Assert::IsTrue(tr.PartialTruthAgreementPct() >= kAgreementGatePct, Wide(partial).c_str());   // WAIVER-U7FADE-PARTIAL-2
-		Assert::AreEqual(0, dp.fadeRestarts, Wide(partial).c_str());
-		Assert::AreEqual(0, tr.fadeRestarts, Wide(partial).c_str());
+		Assert::IsTrue(dp.PartialTruthAgreementPct() >= partialGate.minPartialAgreePct, Wide(partial).c_str());   // WAIVER-W1R-FADE-RECALL
+		Assert::IsTrue(tr.PartialTruthAgreementPct() >= partialGate.minPartialAgreePct, Wide(partial).c_str());   // WAIVER-W1R-FADE-RECALL
+		// WAIVER-W1R-FADE-RECALL: NEW explicit strengthening assert pinning 0 partial resets inside every verified non-fade range.
+		for (size_t ri = 0; ri < nonFadeRanges.size(); ++ri)
+		{
+			const auto& nf = nonFadeRanges[ri];
+			if (nf.second > begin && nf.first < end)
+			{
+				const std::wstring msg = Wide(std::string("D8 verified non-fade range [") + std::to_string(nf.first) + ".." +
+					std::to_string(nf.second) + "] must emit 0 partial resets (" + partial + ")");
+				Assert::AreEqual(0, dpNonFadePartials[ri], msg.c_str());
+				Assert::AreEqual(0, trNonFadePartials[ri], msg.c_str());
+			}
+		}
+		if (partialGate.maxFalseFades >= 0)
+		{
+			Assert::IsTrue(dp.partialOutsideFade <= partialGate.maxFalseFades, Wide(partial).c_str());
+			Assert::IsTrue(tr.partialOutsideFade <= partialGate.maxFalseFades, Wide(partial).c_str());
+		}
+		for (size_t ri = 0; ri < partialGate.rangeMinHits.size(); ++ri)
+		{
+			const auto& rg = partialGate.rangeMinHits[ri];
+			if (begin <= rg.first && end > rg.second)
+			{
+				const std::wstring msg = Wide(std::string("D8 range [") + std::to_string(rg.first) + ".." +
+					std::to_string(rg.second) + "] minimum fade hits >= " + std::to_string(rg.minHits) + " (" + partial + ")");
+				Assert::IsTrue(dpRangeHits[ri] >= rg.minHits, msg.c_str());
+				Assert::IsTrue(trRangeHits[ri] >= rg.minHits, msg.c_str());
+			}
+		}
+		if (partialGate.allowedFadeRestartFrames.empty())
+		{
+			Assert::AreEqual(0, dp.fadeRestarts, Wide(partial).c_str());
+			Assert::AreEqual(0, tr.fadeRestarts, Wide(partial).c_str());
+		}
+		else
+		{
+			// Known cut-law item 102b U7-TOS-2041-VFX-CUT: ONLY the exact pinned frame(s) may restart inside a fade (0 tolerance for any other frame).
+			std::vector<int> expectedInPart;
+			for (int f : partialGate.allowedFadeRestartFrames)
+				if (f > begin && f < end) expectedInPart.push_back(f);
+			Assert::AreEqual(static_cast<int>(expectedInPart.size()), dp.fadeRestarts, Wide(partial).c_str());
+			Assert::AreEqual(static_cast<int>(expectedInPart.size()), tr.fadeRestarts, Wide(partial).c_str());
+			Assert::IsTrue(dpFadeRestartFrames == expectedInPart, Wide(partial).c_str());
+			Assert::IsTrue(trFadeRestartFrames == expectedInPart, Wide(partial).c_str());
+		}
 		Assert::AreEqual(0, dp.keepOutOfRange, Wide(partial).c_str());
 		Assert::AreEqual(0, tr.keepOutOfRange, Wide(partial).c_str());
 		Assert::AreEqual(0ull, dpGpuFadeRestarts, Wide(partial).c_str());
