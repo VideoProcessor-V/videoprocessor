@@ -36,6 +36,7 @@ namespace FallbackPlainText
 			{ "presentation", "Frames are being presented in a simpler way than requested" },
 			{ "refresh rate", "The display refresh rate could not be switched as requested" },
 			{ "calibration LUT", "The calibration table was switched off after a drawing error" },
+			{ "occlusion mask", "The de-judder occlusion mask was switched off after a drawing error" },
 			{ "calibration patch", "The calibration patch is drawn full field" },
 			{ "output range", "The automatic limited output range is not available" },
 			{ "output request", "The requested output format was rejected by the display path" },

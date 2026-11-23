@@ -180,6 +180,7 @@ void LibplaceboVideoRenderer::Impl::OrderFrameSlotHooks()
 // every name is an Impl member). Render thread, renderMutex held, immediately after the render call, as before.
 void LibplaceboVideoRenderer::Impl::ReportRenderErrors()
 {
+    outputFinish.EndFrameDraws();   // GEM-025(b): the frame's draws are over; drops the callback that references the frame's guard
     pl_render_errors hookErrors = pl_renderer_get_errors(renderer);
     // output_segments_merged (audit M4): a stage that failed inside a merged hook takes the
     // same path as a hook libplacebo disabled; a disabled merged hook falls back visibly.
@@ -199,6 +200,9 @@ void LibplaceboVideoRenderer::Impl::ReportRenderErrors()
         PublishCustomShaderStatus();
     dynamicDrive.OnHookErrors(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
     extendedRange.NoteDisabledHooks(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
+    // GEM-025(a): the occlusion mask hook disabled by libplacebo is latched (OutputFinishSegment) and reported visibly.
+    if (outputFinish.NoteDisabledHooks(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks))
+        SyncFallback(FallbackCatalog::OcclusionMaskDisabled(true));
     // output.calibration_lut (VP stage, R1): a disabled or failing hook reverts to libplacebo's
     // target LUT for the rest of the session, visibly (skeleton audit item 5).
     {
@@ -251,6 +255,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
 #if defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
     if (pipelineSlots.OriginalPathway()) renderParams.output_fbo_float32 = false;   // CC W4 MUST-6: Original = Bill's output pass (libplacebo's default FBO), not rgba32f
 #endif
+    outputFinish.BeginFrameDraws(pipelineSlots.OriginalPathway() ? std::function<void()>() : std::function<void()>([&nextVectorGuard] { nextVectorGuard.Release(); }));   // GEM-025(b)
     frameHooks.clear();
     frameSlotHooks.clear();
     // S2 (output colour + drive): the blocks below decide; outputColour.Collect adds the hooks.
@@ -626,6 +631,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
                 grainInstall = false;
             }
         }
+        if (outputFinish.OcclusionMaskDisabled()) { install = false; grainInstall = false; }   // GEM-025(a): libplacebo disabled the mask hook
         // S3 step 3: the mask's parameters and its place just before the dither.
         const size_t sigmaIndex = outputFinish.MarkMask(frameHooks, install, grainInstall,
             activeSettings.ditherGrainToleranceScale);

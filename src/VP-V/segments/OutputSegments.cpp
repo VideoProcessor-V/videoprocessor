@@ -308,6 +308,46 @@ namespace OutputSegments
 		return true;
 	}
 
+	bool OutputFinishSegment::NoteDisabledHooks(const uint64_t* signatures, int count)
+	{
+		if (maskDisabled || !signatures || count <= 0)
+			return false;
+		const uint64_t maskSignature = mask.Get()->signature;
+		for (int i = 0; i < count; ++i)
+			if (signatures[i] == maskSignature)
+			{
+				maskDisabled = true;
+				return true;
+			}
+		return false;
+	}
+
+	void OutputFinishSegment::BeginFrameDraws(std::function<void()> releaseVectorsIn)
+	{
+		releaseVectors = std::move(releaseVectorsIn);
+		draws = 0;
+	}
+
+	bool OutputFinishSegment::OnDraw(pl_render_params& parameters, bool& maskParamSet)
+	{
+		if (!releaseVectors)
+			return false;
+		if (++draws != 2)
+			return false;
+		releaseVectors();
+		for (int i = 0; i < parameters.num_hooks; ++i)
+			SetHookParameter(parameters.hooks[i], "occlusion_mask", 0.0);
+		maskParamSet = false;
+		++nlsRetryReleases;
+		return true;
+	}
+
+	void OutputFinishSegment::EndFrameDraws()
+	{
+		releaseVectors = nullptr;
+		draws = 0;
+	}
+
 	const char* OutputFinishSegment::StageName(const pl_hook* hook) const
 	{
 		return hook == repair.Get() ? "encoding_repair" : hook == mask.Get() ? "occlusion_mask" : "sigma_delta";
