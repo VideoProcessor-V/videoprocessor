@@ -195,7 +195,6 @@
 #include <video_frame_formatter/CARGBtoP010VideoFrameFormatter.h>
 #include <video_frame_formatter/CDeckLinkRGBToP010VideoFrameFormatter.h>
 #include <video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h>
-#include <VP-V/modules/input/signal/DvTunnelMetadataExtension.h>   // WP-14: VP's DM additions through the formatter hook
 #include <DolbyVisionTunnelInput.h>
 #include <DolbyVisionTunnelPresentation.h>
 #include <video_frame_formatter/CUYVYtoP010VideoFrameFormatter.h>
@@ -1050,10 +1049,7 @@ namespace
 		{
 			if (!DolbyVisionTunnelEncodingSupported(encoding))
 				throw std::runtime_error("Unsupported Dolby Vision RGB tunnel layout");
-			// WP-14: VP's DM additions (L9/L10, the bounded hold) through the formatter's hook.
-			auto dv = std::make_unique<CRGBDolbyVisionTunnelFormatter>();
-			dv->SetMetadataExtension(std::make_shared<DvTunnelMetadataExtension>());
-			return std::unique_ptr<IVideoFrameFormatter>(std::move(dv));
+			return std::unique_ptr<IVideoFrameFormatter>(new CRGBDolbyVisionTunnelFormatter());
 		}
 		switch (encoding)
 		{
@@ -9783,11 +9779,6 @@ struct LibplaceboVideoRenderer::Impl
 			std::lock_guard<std::mutex> formatterGuard(formatterMutex);
 			formatter = CreateAlphaFormatter(state->videoFrameEncoding,
 				videoConversionOverride, state->dolbyVisionTunnel);
-			if (auto* dv = dynamic_cast<CRGBDolbyVisionTunnelFormatter*>(formatter.get()))
-			{
-				dv->SetBugHuntFixes(settings.dvTunnelFixes);   // dv_tunnel_fixes
-				dv->SetAcceptR10Containers(settings.dvTunnelFixes);   // DIV-DV-08: R10b/R10l with dv_tunnel_fixes (Original: off)
-			}
 			formatter->OnVideoState(state);
 			formatterState = state;
 		}
@@ -10515,17 +10506,6 @@ struct LibplaceboVideoRenderer::Impl
         displayRepeatValid = false;
         displayVsyncClock.Reset();
         displayCadenceTransition.OutputChanged();
-		{
-			// dv_tunnel_fixes, live (restore switch 2026-10-17).
-			std::lock_guard<std::mutex> formatterGuard(formatterMutex);
-			if (auto* dv = dynamic_cast<CRGBDolbyVisionTunnelFormatter*>(formatter.get()))
-				if (dv->BugHuntFixes() != settings.dvTunnelFixes)
-				{
-					dv->SetBugHuntFixes(settings.dvTunnelFixes);
-					dv->SetAcceptR10Containers(settings.dvTunnelFixes);   // DIV-DV-08
-					DebugLog::Log("Dolby Vision RGB tunnel: bug-hunt fixes %s (dv_tunnel_fixes)", settings.dvTunnelFixes ? "on" : "off");
-				}
-		}
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
         vpv.calibration.calibrationStatusAvailable = false;
 		sdrTargetNits = settings.sdrTargetNits;

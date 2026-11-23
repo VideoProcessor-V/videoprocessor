@@ -17,7 +17,7 @@
 #include "DvMetadataModel.h"
 #include <VideoFrame.h>
 #include <VideoState.h>
-#include <video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h>
+#include <VP-V/modules/input/signal/VpvDolbyVisionTunnelFormatter.h>
 #include <VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h>
 #include <functional>
 #include <memory>
@@ -128,7 +128,7 @@ namespace DvLoopback
 		void Issue(const std::string& text);
 		AnalyzerOptions m_options;
 		VideoStateComPtr m_state;
-		std::unique_ptr<CRGBDolbyVisionTunnelFormatter> m_formatter;
+		std::unique_ptr<VpvDolbyVisionTunnelFormatter> m_formatter;
 		std::vector<uint8_t> m_output;
 		std::vector<uint16_t> m_planes;
 		std::vector<uint8_t> m_rgb;
