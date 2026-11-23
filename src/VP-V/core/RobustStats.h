@@ -66,6 +66,30 @@ namespace RobustStats
 		return MedianInPlace(v, rule, ifEmpty);
 	}
 
+	// The median of n doubles IN PLACE (reorders `data`, O(n), zero heap allocations). Same values as MedianOf().
+	inline double MedianInPlace(double* data, int n, MedianRule rule = MedianRule::MeanOfMiddle, double ifEmpty = 0.0)
+	{
+		if (!data || n <= 0) return ifEmpty;
+		const size_t cnt = static_cast<size_t>(n);
+		const size_t mid = cnt / 2;
+		std::nth_element(data, data + static_cast<std::ptrdiff_t>(mid), data + static_cast<std::ptrdiff_t>(cnt));
+		const double hi = data[mid];
+		if (rule == MedianRule::Upper || (cnt & 1u) != 0u)
+			return hi;
+		const double lo = *std::max_element(data, data + static_cast<std::ptrdiff_t>(mid));
+		return 0.5 * (lo + hi);
+	}
+
+	// The MAD of n doubles IN PLACE (overwrites `data`, O(n), zero heap allocations). Same values as Mad().
+	inline double MadInPlace(double* data, int n, MedianRule rule = MedianRule::MeanOfMiddle, double ifEmpty = 0.0)
+	{
+		if (!data || n <= 0) return ifEmpty;
+		const double med = MedianInPlace(data, n, rule, ifEmpty);
+		for (int i = 0; i < n; ++i)
+			data[i] = std::fabs(data[i] - med);
+		return MedianInPlace(data, n, rule, ifEmpty);
+	}
+
 	// The median of n doubles (n <= 0: ifEmpty).
 	inline double MedianOf(const double* v, int n, MedianRule rule = MedianRule::MeanOfMiddle, double ifEmpty = 0.0)
 	{
@@ -143,5 +167,37 @@ namespace RobustStats
 			k = c > 0 ? c - 1 : 0;
 		}
 		return static_cast<double>(NthSmallest(std::move(v), k));
+	}
+
+	// The q-quantile of n doubles IN PLACE (reorders `data`, O(n), zero heap allocations). Same values as Quantile().
+	inline double QuantileInPlace(double* data, int n, double q, RankRule rule = RankRule::Interpolated, double ifEmpty = 0.0)
+	{
+		if (!data || n <= 0) return ifEmpty;
+		const size_t cnt = static_cast<size_t>(n);
+		if (rule == RankRule::Interpolated)
+		{
+			const double cq = q < 0.0 ? 0.0 : (q > 1.0 ? 1.0 : q);
+			const double pos = cq * static_cast<double>(cnt - 1);
+			const size_t lo = static_cast<size_t>(std::floor(pos));
+			const size_t hi = lo + 1 < cnt ? lo + 1 : lo;
+			const double f = pos - static_cast<double>(lo);
+			std::nth_element(data, data + static_cast<std::ptrdiff_t>(lo), data + static_cast<std::ptrdiff_t>(cnt));
+			const double vLo = data[lo];
+			const double vHi = (hi > lo)
+				? *std::min_element(data + static_cast<std::ptrdiff_t>(lo + 1), data + static_cast<std::ptrdiff_t>(cnt))
+				: vLo;
+			return vLo + f * (vHi - vLo);
+		}
+		size_t k = 0;
+		if (rule == RankRule::FloorIndex)
+			k = static_cast<size_t>(q * static_cast<double>(cnt - 1));
+		else
+		{
+			const size_t c = static_cast<size_t>(std::ceil(q * static_cast<double>(cnt)));
+			k = c > 0 ? c - 1 : 0;
+		}
+		if (k >= cnt) k = cnt - 1;
+		std::nth_element(data, data + static_cast<std::ptrdiff_t>(k), data + static_cast<std::ptrdiff_t>(cnt));
+		return data[k];
 	}
 }

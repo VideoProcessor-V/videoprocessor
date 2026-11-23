@@ -76,8 +76,11 @@ namespace SourceIdentity
 					s_.qMax = 2;
 				if (s_.qMax > 32)
 					s_.qMax = 32;
+				// SID-OPT: accumulate only maximal periods q > qMax / 2; every non-maximal period q <= qMax / 2 divides
+				// its maximal multiple M = (qMax / q) * q > qMax / 2 and is folded exactly in Scores().
+				qMinMaximal_ = s_.qMax / 2 + 1;
 				int total = 0;
-				for (int q = 2; q <= s_.qMax; ++q)
+				for (int q = qMinMaximal_; q <= s_.qMax; ++q)
 				{
 					off_[q] = total;
 					total += q;
@@ -106,7 +109,8 @@ namespace SourceIdentity
 				axisLen_ = ls.axisLen;
 				origin_ = ls.origin;
 				const int nl = (std::min)(ls.count, (std::max)(1, s_.maxLines));
-				std::vector<double> v(static_cast<size_t>(ls.length), 0.0);
+				vScratch_.resize(static_cast<size_t>(ls.length));
+				double* v = vScratch_.data();
 				double tm[kTerms];
 				for (int li = 0; li < nl; ++li)
 				{
@@ -116,15 +120,14 @@ namespace SourceIdentity
 						mean += y[k];
 					mean /= static_cast<double>(ls.length);
 					for (int k = 0; k < ls.length; ++k)
-						v[static_cast<size_t>(k)] = y[k] - mean;
+						v[k] = y[k] - mean;
 					int ph[33];
-					for (int q = 2; q <= s_.qMax; ++q)
+					for (int q = qMinMaximal_; q <= s_.qMax; ++q)
 						ph[q] = (origin_ + 3) % q;   // phase class of sample k = 3; advanced by 1 per sample (no division in the loop)
 					for (int k = 3; k <= ls.length - 3; ++k)
 					{
-						const double f[kTaps] = { v[static_cast<size_t>(k - 3)], v[static_cast<size_t>(k - 2)], v[static_cast<size_t>(k - 1)],
-							v[static_cast<size_t>(k + 1)], v[static_cast<size_t>(k + 2)] };
-						const double t = v[static_cast<size_t>(k)];
+						const double f[kTaps] = { v[k - 3], v[k - 2], v[k - 1], v[k + 1], v[k + 2] };
+						const double t = v[k];
 						int idx = 0;
 						for (int i = 0; i < kTaps; ++i)
 							for (int j = 0; j <= i; ++j)
@@ -133,7 +136,7 @@ namespace SourceIdentity
 							tm[15 + i] = f[i] * t;
 						tm[20] = t * t;
 						tm[21] = 1.0;
-						for (int q = 2; q <= s_.qMax; ++q)
+						for (int q = qMinMaximal_; q <= s_.qMax; ++q)
 						{
 							double* dst = &stats_[(static_cast<size_t>(off_[q]) + static_cast<size_t>(ph[q])) * kTerms];
 							for (int e = 0; e < kTerms; ++e)
@@ -210,42 +213,44 @@ namespace SourceIdentity
 				}
 				PeriodScore per[kMaxCandidates];
 				const int np = Periods(per, kMaxCandidates);
-				std::vector<std::vector<int>> sizes(static_cast<size_t>(np));
-				size_t longest = 0;
+				int sizes[kMaxCandidates][32];
+				int sizeCounts[kMaxCandidates] = {};
+				int longest = 0;
 				for (int p = 0; p < np; ++p)
 				{
 					const int q = per[p].q;
-					std::vector<int>& ms = sizes[static_cast<size_t>(p)];
-					for (int m = 1; m < q; ++m)
+					int cnt = 0;
+					for (int m = 1; m < q && cnt < 32; ++m)
 					{
 						const double r = static_cast<double>(m) / static_cast<double>(q);
 						if (GcdInt(m, q) == 1 && r >= s_.minNRatio && r <= s_.maxNRatio)
-							ms.push_back(m);
+							sizes[p][cnt++] = m;
 					}
-					std::sort(ms.begin(), ms.end(), [q](int a, int b) {
+					std::sort(sizes[p], sizes[p] + cnt, [q](int a, int b) {
 						const double da = std::abs(static_cast<double>(a) / q - 0.5);
 						const double db = std::abs(static_cast<double>(b) / q - 0.5);
 						if (da != db)
 							return da < db;
 						return a < b;
 					});
-					if (ms.size() > longest)
-						longest = ms.size();
+					sizeCounts[p] = cnt;
+					if (cnt > longest)
+						longest = cnt;
 				}
-				for (size_t rank = 0; rank < longest && n < cap; ++rank)
+				for (int rank = 0; rank < longest && n < cap; ++rank)
 					for (int p = 0; p < np && n < cap; ++p)
 					{
-						const std::vector<int>& ms = sizes[static_cast<size_t>(p)];
-						if (rank >= ms.size())
+						if (rank >= sizeCounts[p])
 							continue;
 						const int q = per[p].q;
-						const int cn = RoundToInt(static_cast<double>(N) * static_cast<double>(ms[rank]) / static_cast<double>(q));
+						const int m = sizes[p][rank];
+						const int cn = RoundToInt(static_cast<double>(N) * static_cast<double>(m) / static_cast<double>(q));
 						if (cn < s_.minLatent || cn > maxN || Has(out, n, cn, 1))
 							continue;
 						ProposedCandidate c;
 						c.n = cn;
 						c.q = q;
-						c.m = ms[rank];
+						c.m = m;
 						c.source = kSourcePolyphase;
 						c.score = per[p].dBic;
 						out[n++] = c;
@@ -341,23 +346,50 @@ namespace SourceIdentity
 					return;
 				double pooled[kTerms];
 				for (int e = 0; e < kTerms; ++e)
-					pooled[e] = stats_[static_cast<size_t>(off_[2]) * kTerms + e] + stats_[(static_cast<size_t>(off_[2]) + 1) * kTerms + e];
+					pooled[e] = 0.0;
+				const int qRef = s_.qMax;
+				for (int c = 0; c < qRef; ++c)
+				{
+					const double* src = &stats_[(static_cast<size_t>(off_[qRef]) + static_cast<size_t>(c)) * kTerms];
+					for (int e = 0; e < kTerms; ++e)
+						pooled[e] += src[e];
+				}
 				double rssPooled = 0.0;
 				double total = 0.0;
 				if (!Fit(pooled, rssPooled, total) || total < static_cast<double>(s_.minSamples) || !(rssPooled > 0.0))
 					return;
 				const double lnN = std::log(total);
+				double folded[kTerms];
 				for (int q = 2; q <= s_.qMax; ++q)
 				{
 					double rssQ = 0.0;
 					bool ok = true;
 					int low = 0;
 					double lowVar = 0.0;
+					const bool direct = q >= qMinMaximal_;
+					const int multM = direct ? q : (s_.qMax / q) * q;
 					for (int c = 0; c < q; ++c)
 					{
+						const double* stPtr = nullptr;
+						if (direct)
+						{
+							stPtr = &stats_[(static_cast<size_t>(off_[q]) + static_cast<size_t>(c)) * kTerms];
+						}
+						else
+						{
+							for (int e = 0; e < kTerms; ++e)
+								folded[e] = 0.0;
+							for (int cm = c; cm < multM; cm += q)
+							{
+								const double* src = &stats_[(static_cast<size_t>(off_[multM]) + static_cast<size_t>(cm)) * kTerms];
+								for (int e = 0; e < kTerms; ++e)
+									folded[e] += src[e];
+							}
+							stPtr = folded;
+						}
 						double r = 0.0;
 						double cn = 0.0;
-						if (!Fit(&stats_[(static_cast<size_t>(off_[q]) + static_cast<size_t>(c)) * kTerms], r, cn))
+						if (!Fit(stPtr, r, cn))
 						{
 							ok = false;
 							break;
@@ -386,9 +418,11 @@ namespace SourceIdentity
 			}
 
 			ProposerSettings s_;
+			int qMinMaximal_ = 2;
 			int off_[33] = {};
 			int slots_ = 0;
 			std::vector<double> stats_;
+			std::vector<double> vScratch_;
 			int evals_ = 0;
 			int axisLen_ = 0;
 			int origin_ = 0;

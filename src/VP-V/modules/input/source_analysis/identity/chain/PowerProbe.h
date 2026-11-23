@@ -55,21 +55,71 @@ namespace SourceIdentity
 		class PowerProbe
 		{
 		public:
+			// SID-OPT: caller-owned reusable workspace caching tap weights/offsets for constant (axisLen, origin, length, ratio, kernel)
+			// plus per-call buffers (Rule 2: caller-owned only; zero static/thread_local mutable state).
+			struct Workspace
+			{
+				bool geomValid = false;
+				int keyAxisLen = 0;
+				int keyOrigin = 0;
+				int keyLength = 0;
+				double keyRatio = 0.0;
+				int keyKernel = -1;
+				int Nn = 0;
+				int jlo = -1;
+				int jhi = -1;
+				int taps = 0;
+				std::vector<double> w;
+				std::vector<int> c0;
+				LineSet syn;
+				VerifyResult vr;
+				std::vector<int> pick;
+				std::vector<double> stds;
+				std::vector<double> gated;
+
+				void Reset()
+				{
+					geomValid = false;
+					keyAxisLen = 0;
+					keyOrigin = 0;
+					keyLength = 0;
+					keyRatio = 0.0;
+					keyKernel = -1;
+					Nn = 0;
+					jlo = -1;
+					jhi = -1;
+					taps = 0;
+					w.clear();
+					c0.clear();
+					syn = LineSet();
+					vr = VerifyResult();
+					pick.clear();
+					stds.clear();
+					gated.clear();
+				}
+			};
+
 			// floorCodes: rounding/dither floor of the delivered picture (10-bit codes); roundStepCodes: the output
 			// quantisation step in 10-bit codes (4 for an 8-bit output, 1 for 10-bit, 0 = do not round).
 			static bool Run(DescaleVerifier& verifier, const LineSet& ls, double floorCodes, double roundStepCodes,
 				const ProbeSettings& ps, ProbeResult& out)
 			{
+				return Run(verifier, ls, floorCodes, roundStepCodes, ps, out, nullptr);
+			}
+
+			static bool Run(DescaleVerifier& verifier, const LineSet& ls, double floorCodes, double roundStepCodes,
+				const ProbeSettings& ps, ProbeResult& out, Workspace* ws)
+			{
 				const VerifierSettings& vs = verifier.Settings();
 				const double t0 = vs.nowMs != nullptr ? vs.nowMs(vs.clockCtx) : 0.0;
-				const bool ok = RunImpl(verifier, ls, floorCodes, roundStepCodes, ps, out);
+				const bool ok = RunImpl(verifier, ls, floorCodes, roundStepCodes, ps, out, ws);
 				out.costMs = vs.nowMs != nullptr ? vs.nowMs(vs.clockCtx) - t0 : 0.0;
 				return ok;
 			}
 
 		private:
 			static bool RunImpl(DescaleVerifier& verifier, const LineSet& ls, double floorCodes, double roundStepCodes,
-				const ProbeSettings& ps, ProbeResult& out)
+				const ProbeSettings& ps, ProbeResult& out, Workspace* ws)
 			{
 				out = ProbeResult();
 				if (ls.count < 1 || ls.length < 128 || ls.axisLen < 64 || !(ps.ratio > 0.2) || !(ps.ratio < 0.95))
@@ -77,17 +127,21 @@ namespace SourceIdentity
 					out.reason = kReasonBadInput | kReasonNoPower;
 					return false;
 				}
+				Workspace localWs;
+				if (ws == nullptr)
+					ws = &localWs;
+
 				// The lines used: maxLines of them, evenly spread.
 				const int nl = (std::min)(ls.count, (std::max)(1, ps.maxLines));
-				std::vector<int> pick(static_cast<size_t>(nl));
+				ws->pick.resize(static_cast<size_t>(nl));
 				for (int i = 0; i < nl; ++i)
-					pick[static_cast<size_t>(i)] = (i * ls.count) / nl;
+					ws->pick[static_cast<size_t>(i)] = (i * ls.count) / nl;
 				// What the real lines look like (for the reason when the probe is unseen).
 				double sumMean = 0.0;
-				std::vector<double> stds(static_cast<size_t>(nl), 0.0);
+				ws->stds.resize(static_cast<size_t>(nl));
 				for (int j = 0; j < nl; ++j)
 				{
-					const double* y = ls.Line(pick[static_cast<size_t>(j)]);
+					const double* y = ls.Line(ws->pick[static_cast<size_t>(j)]);
 					double m = 0.0;
 					for (int i = 0; i < ls.length; ++i)
 						m += y[i];
@@ -96,61 +150,88 @@ namespace SourceIdentity
 					for (int i = 0; i < ls.length; ++i)
 						v += (y[i] - m) * (y[i] - m);
 					sumMean += m;
-					stds[static_cast<size_t>(j)] = std::sqrt(v / static_cast<double>(ls.length));
+					ws->stds[static_cast<size_t>(j)] = std::sqrt(v / static_cast<double>(ls.length));
 				}
 				out.meanCode = sumMean / static_cast<double>(nl);
-				out.medianLineStd = RobustStats::MedianOf(stds.data(), nl);
+				out.medianLineStd = RobustStats::MedianOf(ws->stds.data(), nl);
 
-				// Synthetic upscale of every line: N' output pixels from the N real ones.
-				const KernelInfo& ki = Kernel(ps.kernel);
-				const int r = ki.radius;
-				const int taps = 2 * r;
-				const int Nn = RoundToInt(static_cast<double>(ls.axisLen) / ps.ratio);
-				const double step = static_cast<double>(ls.axisLen) / static_cast<double>(Nn);
-				int jlo = -1;
-				int jhi = -1;
-				for (int j = 0; j < Nn; ++j)
+				// Synthetic upscale of every line: N' output pixels from the N real ones (cached tap geometry per workspace).
+				const bool geomMatch = ws->geomValid
+					&& ws->keyAxisLen == ls.axisLen
+					&& ws->keyOrigin == ls.origin
+					&& ws->keyLength == ls.length
+					&& ws->keyRatio == ps.ratio
+					&& ws->keyKernel == ps.kernel;
+				if (!geomMatch)
 				{
-					const double p = (static_cast<double>(j) + 0.5) * step - 0.5;
-					const int c = static_cast<int>(std::floor(p)) - r + 1;
-					if (c < ls.origin)
-						continue;
-					if (c + taps - 1 > ls.origin + ls.length - 1)
-						break;
-					if (jlo < 0)
-						jlo = j;
-					jhi = j;
+					ws->geomValid = false;
+					const KernelInfo& ki = Kernel(ps.kernel);
+					const int r = ki.radius;
+					const int taps = 2 * r;
+					const int Nn = RoundToInt(static_cast<double>(ls.axisLen) / ps.ratio);
+					const double step = static_cast<double>(ls.axisLen) / static_cast<double>(Nn);
+					int jlo = -1;
+					int jhi = -1;
+					for (int j = 0; j < Nn; ++j)
+					{
+						const double p = (static_cast<double>(j) + 0.5) * step - 0.5;
+						const int c = static_cast<int>(std::floor(p)) - r + 1;
+						if (c < ls.origin)
+							continue;
+						if (c + taps - 1 > ls.origin + ls.length - 1)
+							break;
+						if (jlo < 0)
+							jlo = j;
+						jhi = j;
+					}
+					if (jlo < 0 || jhi - jlo + 1 < 128)
+					{
+						out.reason = kReasonShortLines | kReasonNoPower;
+						return false;
+					}
+					const int L2 = jhi - jlo + 1;
+					ws->w.assign(static_cast<size_t>(L2) * static_cast<size_t>(taps), 0.0);
+					ws->c0.assign(static_cast<size_t>(L2), 0);
+					for (int j = 0; j < L2; ++j)
+					{
+						const double p = (static_cast<double>(jlo + j) + 0.5) * step - 0.5;
+						const double fl = std::floor(p);
+						TapWeights(ps.kernel, p - fl, &ws->w[static_cast<size_t>(j) * static_cast<size_t>(taps)]);
+						ws->c0[static_cast<size_t>(j)] = static_cast<int>(fl) - r + 1 - ls.origin;
+					}
+					ws->keyAxisLen = ls.axisLen;
+					ws->keyOrigin = ls.origin;
+					ws->keyLength = ls.length;
+					ws->keyRatio = ps.ratio;
+					ws->keyKernel = ps.kernel;
+					ws->Nn = Nn;
+					ws->jlo = jlo;
+					ws->jhi = jhi;
+					ws->taps = taps;
+					ws->geomValid = true;
 				}
-				if (jlo < 0 || jhi - jlo + 1 < 128)
-				{
-					out.reason = kReasonShortLines | kReasonNoPower;
-					return false;
-				}
-				const int L2 = jhi - jlo + 1;
-				std::vector<double> w(static_cast<size_t>(L2) * static_cast<size_t>(taps), 0.0);
-				std::vector<int> c0(static_cast<size_t>(L2), 0);
-				for (int j = 0; j < L2; ++j)
-				{
-					const double p = (static_cast<double>(jlo + j) + 0.5) * step - 0.5;
-					const double fl = std::floor(p);
-					TapWeights(ps.kernel, p - fl, &w[static_cast<size_t>(j) * static_cast<size_t>(taps)]);
-					c0[static_cast<size_t>(j)] = static_cast<int>(fl) - r + 1 - ls.origin;
-				}
-				LineSet syn;
+				const int Nn = ws->Nn;
+				const int jlo = ws->jlo;
+				const int L2 = ws->jhi - jlo + 1;
+				const int taps = ws->taps;
+				const double* wData = ws->w.data();
+				const int* c0Data = ws->c0.data();
+				LineSet& syn = ws->syn;
 				syn.axis = ls.axis;
 				syn.axisLen = Nn;
 				syn.origin = jlo;
 				syn.Resize(nl, L2);
 				for (int l = 0; l < nl; ++l)
-					syn.cross[static_cast<size_t>(l)] = pick[static_cast<size_t>(l)] < static_cast<int>(ls.cross.size()) ? ls.cross[static_cast<size_t>(pick[static_cast<size_t>(l)])] : 0;
+					syn.cross[static_cast<size_t>(l)] = ws->pick[static_cast<size_t>(l)] < static_cast<int>(ls.cross.size())
+						? ls.cross[static_cast<size_t>(ws->pick[static_cast<size_t>(l)])] : 0;
 				for (int l = 0; l < nl; ++l)
 				{
-					const double* y = ls.Line(pick[static_cast<size_t>(l)]);
+					const double* y = ls.Line(ws->pick[static_cast<size_t>(l)]);
 					double* o = syn.Line(l);
 					for (int j = 0; j < L2; ++j)
 					{
-						const double* ww = &w[static_cast<size_t>(j) * static_cast<size_t>(taps)];
-						const double* yy = y + c0[static_cast<size_t>(j)];
+						const double* ww = wData + static_cast<size_t>(j) * static_cast<size_t>(taps);
+						const double* yy = y + c0Data[j];
 						double acc = 0.0;
 						for (int s = 0; s < taps; ++s)
 							acc += ww[s] * yy[s];
@@ -166,7 +247,7 @@ namespace SourceIdentity
 				opt.exactOnly = true;
 				opt.onlyKernel = ps.kernel;
 				opt.exactHalfWidth = 0;
-				VerifyResult vr;
+				VerifyResult& vr = ws->vr;
 				const int cand[1] = { ls.axisLen };
 				if (!verifier.Evaluate(syn, cand, 1, opt, vr) || vr.candidates.empty() || !vr.candidates[0].valid || !vr.candidates[0].exactDone)
 				{
@@ -176,16 +257,17 @@ namespace SourceIdentity
 				out.ran = true;
 				out.cold = vr.cold;
 				const CandidateResult& cr = vr.candidates[0];
-				std::vector<double> gated;
+				ws->gated.clear();
+				ws->gated.reserve(static_cast<size_t>(cr.lineCount));
 				const double floorC = floorCodes > 1e-3 ? floorCodes : 1e-3;
 				for (int j = 0; j < cr.lineCount; ++j)
 					if (cr.lineBase[static_cast<size_t>(j)] >= ps.lineGateFactor * floorC)
-						gated.push_back(cr.lineStat[static_cast<size_t>(j)]);
-				out.gatedLines = static_cast<int>(gated.size());
+						ws->gated.push_back(cr.lineStat[static_cast<size_t>(j)]);
+				out.gatedLines = static_cast<int>(ws->gated.size());
 				const int minGate = (std::max)(ps.minGateLinesFloor, static_cast<int>(std::ceil(ps.minGateFraction * static_cast<double>(cr.lineCount))));
 				if (out.gatedLines >= minGate)
 				{
-					out.stat = RobustStats::TrimmedMeanOf(gated.data(), out.gatedLines, ps.trimFraction);
+					out.stat = RobustStats::TrimmedMeanOf(ws->gated.data(), out.gatedLines, ps.trimFraction);
 					out.seen = out.stat <= ps.seenThreshold;
 				}
 				if (!out.seen)

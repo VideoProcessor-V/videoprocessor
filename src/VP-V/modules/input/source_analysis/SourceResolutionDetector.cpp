@@ -149,7 +149,12 @@ namespace SourceResolution
 		double total = 0.0;
 		std::vector<std::complex<double>> line(n);
 		const int bins = n / 2 + 1;
-		std::vector<std::complex<double>> lines(static_cast<size_t>(n) * bins);
+		// SID-OPT: store FFT bins frequency-major (contiguous in line index l) and precompute |X| once per (k, l)
+		// reusing re*re + im*im already computed for power[k], eliminating per-product std::abs(complex) calls in the coherence sweep.
+		const size_t specSize = static_cast<size_t>(bins) * static_cast<size_t>(n);
+		std::vector<double> linesRe(specSize);
+		std::vector<double> linesIm(specSize);
+		std::vector<double> linesMag(specSize);
 		// Columns (vertical frequencies) then rows (horizontal).
 		for (int pass = 0; pass < 2; ++pass)
 		{
@@ -170,8 +175,14 @@ namespace SourceResolution
 				Fft(line);
 				for (int k = 0; k <= n / 2; ++k)
 				{
-					power[k] += std::norm(line[k]) * (k == 0 || k == n / 2 ? 1.0 : 2.0);
-					lines[static_cast<size_t>(l) * bins + k] = line[k];
+					const double re = line[k].real();
+					const double im = line[k].imag();
+					const double pwr = re * re + im * im;
+					power[k] += pwr * (k == 0 || k == n / 2 ? 1.0 : 2.0);
+					const size_t idx = static_cast<size_t>(k) * static_cast<size_t>(n) + static_cast<size_t>(l);
+					linesRe[idx] = re;
+					linesIm[idx] = im;
+					linesMag[idx] = std::sqrt(pwr);
 				}
 			}
 			// White noise of variance v: sum over lines of |X|^2 = n * v * windowEnergy per bin
@@ -207,19 +218,30 @@ namespace SourceResolution
 				const bool exactOnly = kept < 3 && m < 7 * n / 8 - 2;
 				const int period = n / 16;
 				auto excluded = [&](int bin) { return exactOnly ? period >= 2 && bin % period == 0 : BlockHarmonic(bin, n); };
-				std::complex<double> sum(0.0, 0.0);
+				double sumRe = 0.0;
+				double sumIm = 0.0;
 				double magnitude = 0.0;
 				for (int k = kFrom; k <= kTo; ++k)
 				{
 					if (excluded(k) || excluded(m - k)) continue;
+					const size_t offA = static_cast<size_t>(k) * static_cast<size_t>(n);
+					const size_t offB = static_cast<size_t>(m - k) * static_cast<size_t>(n);
+					const double* aRe = &linesRe[offA];
+					const double* aIm = &linesIm[offA];
+					const double* aMag = &linesMag[offA];
+					const double* bRe = &linesRe[offB];
+					const double* bIm = &linesIm[offB];
+					const double* bMag = &linesMag[offB];
 					for (int l = 0; l < n; ++l)
 					{
-						const std::complex<double> product = lines[static_cast<size_t>(l) * bins + k] * lines[static_cast<size_t>(l) * bins + (m - k)];
-						sum += product;
-						magnitude += std::abs(product);
+						const double ar = aRe[l], ai = aIm[l];
+						const double br = bRe[l], bi = bIm[l];
+						sumRe += ar * br - ai * bi;
+						sumIm += ar * bi + ai * br;
+						magnitude += aMag[l] * bMag[l];
 					}
 				}
-				mirror[m] = magnitude > 0.0 ? std::abs(sum) / magnitude : 0.0;
+				mirror[m] = magnitude > 0.0 ? std::hypot(sumRe, sumIm) / magnitude : 0.0;
 			}
 		}
 		// Planner Q5: exact periodicity from each axis's averaged power spectrum (Wiener-
@@ -235,12 +257,18 @@ namespace SourceResolution
 				for (int i = 0; i + lag < n; ++i) s += window[i] * window[i + lag];
 				windowAuto[static_cast<size_t>(lag)] = s / windowEnergy;
 			}
+			// SID-OPT: precompute n-entry cosine table once per Analyse call (n is a power of two; zero global mutable state).
+			const int nMask = n - 1;
+			std::vector<double> cosTable(static_cast<size_t>(n));
+			for (int m = 0; m < n; ++m)
+				cosTable[static_cast<size_t>(m)] = std::cos(2.0 * kPi * static_cast<double>(m) / static_cast<double>(n));
 			auto repeat = [&](const std::vector<double>& power) {
 				std::vector<double> r(static_cast<size_t>(maxLag) + 2, 0.0);
 				for (int lag = 0; lag <= maxLag + 1; ++lag)
 				{
 					double s = 0.0;
-					for (int k = 1; k <= n / 2; ++k) s += power[static_cast<size_t>(k)] * std::cos(2.0 * kPi * k * lag / n);
+					for (int k = 1; k <= n / 2; ++k)
+						s += power[static_cast<size_t>(k)] * cosTable[static_cast<size_t>((k * lag) & nMask)];
 					r[static_cast<size_t>(lag)] = s;
 				}
 				if (r[0] <= 0.0) return 0.0;
@@ -862,6 +890,133 @@ namespace SourceResolution
 		return DetailAboveSpectra(frame.verticalPower, frame.horizontalPower, ratio, 3, level);
 	}
 
+	double DitherAwareDetailAbove(
+		const FrameReading& frame,
+		double ratio,
+		bool tpdfDither,
+		DitherDetailAboveInfo* info,
+		double measuredFloorPowerPerBin)
+	{
+		if (info != nullptr)
+			*info = DitherDetailAboveInfo();
+		const double unknown = std::numeric_limits<double>::infinity();
+		const size_t bins = frame.verticalPower.size();
+		if (!std::isfinite(ratio) || !(ratio > 0.0) || !(ratio < 1.0) ||
+			bins < 33 || frame.horizontalPower.size() != bins ||
+			!std::isfinite(frame.quantisationFloor) || !(frame.quantisationFloor > -20.0) || !(frame.quantisationFloor < 0.0) ||
+			!std::isfinite(measuredFloorPowerPerBin) || measuredFloorPowerPerBin < 0.0)
+		{
+			return unknown;
+		}
+		// Rule 1 derivations:
+		//   - Uniform rounding variance per FFT bin: baseFloorPower = 10^quantisationFloor = step^2 / 12.
+		//   - TPDF dither variance per FFT bin (sum of two independent uniform [-step/2, step/2] variates):
+		//     2.0 * baseFloorPower = 2 * step^2 / 12 = step^2 / 6.
+		//   - Power gate = kLineGateFactor^2 = 1.5^2 = 2.25 (exact existing contract EvidenceSettings::lineGateFactor = 1.5).
+		//   - Floor subtraction guard epsP = max(floorPower / 16.0, 1e-20) ((1/4)^2 from EdgeStatsSettings::floorGuardDivisor = 4.0).
+		const double baseFloorPower = std::pow(10.0, frame.quantisationFloor);
+		const double floorPower = (std::max)((tpdfDither ? 2.0 : 1.0) * baseFloorPower, measuredFloorPowerPerBin);
+		constexpr double kLineGateFactor = 1.5;
+		constexpr double kPowerGateMult = kLineGateFactor * kLineGateFactor;
+		constexpr double kFloorGuardDivisor = 4.0;
+		const double epsP = (std::max)(floorPower / (kFloorGuardDivisor * kFloorGuardDivisor), 1e-20);
+
+		const int half = static_cast<int>(bins) - 1;
+		const int n = 2 * half;
+		const double cut = ratio * static_cast<double>(half);
+		// Exact same bands as DetailAboveSpectra (lines 829-831).
+		const int b0 = static_cast<int>(std::ceil(0.55 * cut));
+		const int b1 = static_cast<int>(std::floor(0.9 * cut));
+		const int a0 = static_cast<int>(std::ceil(1.15 * cut));
+		const int a1 = (std::min)(static_cast<int>(std::floor(0.97 * static_cast<double>(half))), a0 + (std::max)(4, b1 - b0));
+		if (a1 - a0 < 3 || b1 - b0 < 3 || b0 < 1 || a1 > half)
+			return unknown;
+
+		auto meanLinearBand = [&](const std::vector<double>& power, int from, int to, double& outMean) -> bool {
+			double sum = 0.0;
+			int count = 0;
+			for (int k = from; k <= to; ++k)
+			{
+				if (BlockHarmonic(k, n))
+					continue;
+				const double p = power[static_cast<size_t>(k)];
+				if (!std::isfinite(p) || p < 0.0)
+					return false;
+				sum += p;
+				++count;
+			}
+			if (count < 1)
+				return false;
+			outMean = sum / static_cast<double>(count);
+			return true;
+		};
+
+		double belowPower[2] = { 0.0, 0.0 };
+		double abovePower[2] = { 0.0, 0.0 };
+		for (int axis = 0; axis < 2; ++axis)
+		{
+			const std::vector<double>& power = axis == 0 ? frame.verticalPower : frame.horizontalPower;
+			if (!meanLinearBand(power, b0, b1, belowPower[axis]) ||
+				!meanLinearBand(power, a0, a1, abovePower[axis]))
+			{
+				return unknown;
+			}
+		}
+
+		double rawDecades = -unknown;
+		double maxAbovePower = 0.0;
+		bool axisAtFloor[2] = { false, false };
+		for (int axis = 0; axis < 2; ++axis)
+		{
+			const double rDec = std::log10((std::max)(abovePower[axis], 1e-20) / (std::max)(belowPower[axis], 1e-20));
+			if (rDec > rawDecades)
+				rawDecades = rDec;
+			if (abovePower[axis] > maxAbovePower)
+				maxAbovePower = abovePower[axis];
+			axisAtFloor[axis] = (abovePower[axis] <= kPowerGateMult * floorPower);
+		}
+
+		const bool allAtFloor = axisAtFloor[0] && axisAtFloor[1];
+		double floorSubDecades = -unknown;
+		if (allAtFloor)
+		{
+			for (int axis = 0; axis < 2; ++axis)
+			{
+				const double exBelow = (std::max)(belowPower[axis] - floorPower, epsP);
+				const double d = std::log10(epsP / exBelow);
+				if (d > floorSubDecades)
+					floorSubDecades = d;
+			}
+		}
+		else
+		{
+			for (int axis = 0; axis < 2; ++axis)
+			{
+				if (axisAtFloor[axis])
+					continue;
+				const double exAbove = (std::max)(abovePower[axis] - floorPower, epsP);
+				const double exBelow = (std::max)(belowPower[axis] - floorPower, epsP);
+				const double d = std::log10(exAbove / exBelow);
+				if (d > floorSubDecades)
+					floorSubDecades = d;
+			}
+		}
+		if (!std::isfinite(floorSubDecades) || !std::isfinite(rawDecades))
+			return unknown;
+
+		if (info != nullptr)
+		{
+			info->valid = true;
+			info->atDitherFloor = allAtFloor;
+			info->hasRealDetailAbove = !allAtFloor;
+			info->floorPowerPerBin = floorPower;
+			info->maxAbovePower = maxAbovePower;
+			info->rawDecades = rawDecades;
+			info->floorSubtractedDecades = floorSubDecades;
+		}
+		return floorSubDecades;
+	}
+
 	double CoherenceAtRate(const FrameReading& frame, double ratio)
 	{
 		const int n = static_cast<int>(frame.verticalCurve.size());
@@ -1012,6 +1167,7 @@ namespace SourceResolution
 		Discontinuity("reset");
 		cuts = 0;
 		moments = flashes = coveredSteps = 0;
+		ditherFloorStarved = 0;
 		lastCutSeconds = -1.0;
 		lastMomentSpan = 0.0;
 		discontinuities = 0;
@@ -1310,6 +1466,18 @@ namespace SourceResolution
 				{
 					++starved;
 					++floorStarved;
+					return;
+				}
+			}
+			// Stage S3 (EXP-8BIT SHOULD-2, default OFF): white TPDF dither in the above-Nyquist band is not real detail.
+			if (settings.ditherFloorDetailAbove && inQuestion < 1.0)
+			{
+				DitherDetailAboveInfo dinfo;
+				DitherAwareDetailAbove(frame, inQuestion, true, &dinfo);
+				if (dinfo.valid && dinfo.atDitherFloor)
+				{
+					++starved;
+					++ditherFloorStarved;
 					return;
 				}
 			}

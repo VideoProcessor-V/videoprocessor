@@ -180,7 +180,9 @@ namespace SourceIdentity
 				"classical_ok,classical_h,classical_v,safety,state_x,state_y,meas_n_x,meas_n_y,app_state_x,app_state_y,app_n_x,app_n_y,N_x,N_y,"
 				"llr_x,llr_y,informative_x,informative_y,hold_x,hold_y,probe_seen_x,probe_seen_y,latched,latch_nx,latch_ny,latch_event,"
 				"latch_confirmed,latch_deferred_now,latch_defer_cancelled,latch_held_back,clock_s,deferred,dwelling,defer_cause,defer_since_s,"
-				"last_confirm_s,newest_credit_x_s,newest_credit_y_s,acc_x,acc_y,bar,c1,cost_ms";
+				"last_confirm_s,newest_credit_x_s,newest_credit_y_s,acc_x,acc_y,bar,c1,cost_ms,"
+				"step_mark_state,step_mark_t0_s,step_mark_blocks,step_mark_confirmed,step_mark_cancelled,tentative_bucket_active,tentative_bucket_evals,tentative_bucket_voided,"
+				"emp_floor_mode,floor_theoretical,emp_floor_x,emp_floor_y,emp_floor_valid_x,emp_floor_valid_y,emp_floor_fallback,null_calibrated,null_depth_class";
 		}
 		inline const char* SizesHeaderV4()
 		{

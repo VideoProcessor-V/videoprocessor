@@ -190,8 +190,14 @@ namespace SourceIdentity
 			const int segLen = s.segPx >= 8 ? s.segPx : kSegPx;
 			const double sqrt6 = std::sqrt(6.0);
 			std::vector<double> segSigmas;
-			std::vector<double> secondDiffs;
-			secondDiffs.reserve(static_cast<size_t>(segLen));
+			const size_t estSegs = static_cast<size_t>(lines.count) * static_cast<size_t>((lines.length + segLen - 1) / segLen);
+			segSigmas.reserve(estSegs);
+			// SID-OPT: O(N) in-place RobustStats::MadInPlace on stack buffer (0 per-segment heap allocs, 100% bit-identical to RobustStats::Mad).
+			double diffStack[256];
+			std::vector<double> diffHeap;
+			if (segLen > 256)
+				diffHeap.resize(static_cast<size_t>(segLen));
+			double* diffBuf = segLen <= 256 ? diffStack : diffHeap.data();
 
 			for (int li = 0; li < lines.count; ++li)
 			{
@@ -206,7 +212,7 @@ namespace SourceIdentity
 						continue;
 
 					++res.totalSegments;
-					secondDiffs.clear();
+					int cnt = 0;
 					bool finiteOk = true;
 					for (int i = start + 1; i + 1 < end; ++i)
 					{
@@ -216,12 +222,12 @@ namespace SourceIdentity
 							finiteOk = false;
 							break;
 						}
-						secondDiffs.push_back(d);
+						diffBuf[cnt++] = d;
 					}
-					if (!finiteOk || secondDiffs.size() < 3)
+					if (!finiteOk || cnt < 3)
 						continue;
 
-					const double mad = RobustStats::Mad(secondDiffs, RobustStats::MedianRule::MeanOfMiddle, 0.0);
+					const double mad = RobustStats::MadInPlace(diffBuf, cnt, RobustStats::MedianRule::MeanOfMiddle, 0.0);
 					if (!(mad > 0.0))
 					{
 						++res.zeroSegmentsSkipped;
@@ -246,7 +252,8 @@ namespace SourceIdentity
 
 			// LOW-8: guard against NaN in quietSegmentQuantile before clamping.
 			const double q = std::isfinite(s.quietSegmentQuantile) ? ClampD(s.quietSegmentQuantile, 0.0, 0.5) : (1.0 / 4.0);
-			const double quietSig = RobustStats::Quantile(segSigmas, q, RobustStats::RankRule::Interpolated, theo);
+			const double quietSig = RobustStats::QuantileInPlace(
+				segSigmas.data(), static_cast<int>(segSigmas.size()), q, RobustStats::RankRule::Interpolated, theo);
 			res.valid = true;
 			res.empiricalRawCodes = quietSig;
 			if (quietSig < theo)

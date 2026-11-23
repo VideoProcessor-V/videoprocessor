@@ -218,6 +218,7 @@ namespace SourceIdentity
 
 			const Thresholds& GetThresholds() const { return thr_; }
 			const NullTables& Nulls() const { return nulls_; }
+			void SetNullTables(const NullTables& t) { nulls_ = t; }
 
 			void Reset()
 			{

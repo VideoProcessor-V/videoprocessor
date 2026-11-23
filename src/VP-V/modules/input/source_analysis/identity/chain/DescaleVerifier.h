@@ -109,6 +109,13 @@ namespace SourceIdentity
 			int forceExactN = 0;        // > 0: the candidate asked for with exactly this size always goes to the exact stage
 			                            // (the caller's latched size), on top of the best maxExactCandidates
 			int exactLines = 0;         // > 0: the exact stage uses only this many (evenly spread) lines, e.g. 16 when latched
+			// SID-OPT (default OFF): two-pass P3 exact screening (Pass 1 screens all candidates at halfWidth = 0 with rep kernels;
+			// Pass 2 expands full halfWidth + full kernel families on top p3ScreenKeepTop, p3ProtectedN, forceExactN, and any dip < p3ScreenDipThreshold).
+			bool p3TwoPass = false;
+			int p3ProtectedN[2] = { 0, 0 };
+			int p3ScreenKeepTop = Narrowing::kMaxExactCandidates;
+			// Derived: ln(0.98) ~= -0.02, strictly milder than EvidenceSettings::majorityDip (-0.03), so any dipping candidate is expanded in Pass 2.
+			double p3ScreenDipThreshold = -0.02;
 		};
 
 		struct CandidateResult
@@ -255,26 +262,87 @@ namespace SourceIdentity
 						return na < nb;
 					return a < b;
 				});
-				int maxExact = s_.maxExactCandidates;
-				if (opt.forceExactN > 0 && s_.confidentMaxExactCandidates > 0 && s_.confidentMaxExactCandidates < maxExact)
-					maxExact = s_.confidentMaxExactCandidates;   // lever (Narrowing): a confident axis needs its own n plus fewer challengers
-				const int promote = opt.exactOnly ? static_cast<int>(order.size())
-					: (std::min<int>)(static_cast<int>(order.size()), maxExact);
-				for (int i = 0; i < static_cast<int>(order.size()); ++i)
+				if (opt.exactOnly && opt.p3TwoPass)
 				{
-					CandidateResult& cr = out.candidates[static_cast<size_t>(order[static_cast<size_t>(i)])];
-					const bool forced = opt.forceExactN > 0 && cr.nProposed == opt.forceExactN;
-					if (i < promote || forced)
+					VerifyOptions screenOpt = opt;
+					screenOpt.exactHalfWidth = 0;
+					for (size_t i = 0; i < order.size(); ++i)
 					{
-						const uint32_t why = ExactStage(ls, cr.n, opt, cr);
+						CandidateResult& cr = out.candidates[static_cast<size_t>(order[i])];
+						const uint32_t why = ExactStage(ls, cr.n, screenOpt, cr, true);
 						if (why != 0u)
 						{
 							cr.valid = false;
 							cr.reason |= why;
 						}
 					}
-					else
-						cr.reason |= kReasonCoarseOnly;
+					std::vector<int> screenOrder;
+					screenOrder.reserve(order.size());
+					for (size_t i = 0; i < order.size(); ++i)
+						if (out.candidates[static_cast<size_t>(order[i])].valid)
+							screenOrder.push_back(order[i]);
+					std::sort(screenOrder.begin(), screenOrder.end(), [&](int a, int b) {
+						const CandidateResult& ca = out.candidates[static_cast<size_t>(a)];
+						const CandidateResult& cb = out.candidates[static_cast<size_t>(b)];
+						if (ca.stat != cb.stat)
+							return ca.stat < cb.stat;
+						if (ca.n != cb.n)
+							return ca.n < cb.n;
+						return a < b;
+					});
+					const int keepTop = opt.p3ScreenKeepTop > 0 ? opt.p3ScreenKeepTop : 0;
+					auto nearProtected = [&](int nProp) -> bool {
+						if (opt.forceExactN > 0 && std::abs(nProp - opt.forceExactN) <= 1)
+							return true;
+						for (int p = 0; p < 2; ++p)
+							if (opt.p3ProtectedN[p] > 0 && std::abs(nProp - opt.p3ProtectedN[p]) <= 1)
+								return true;
+						return false;
+					};
+					for (size_t i = 0; i < screenOrder.size(); ++i)
+					{
+						CandidateResult& cr = out.candidates[static_cast<size_t>(screenOrder[i])];
+						const bool promoteFull = static_cast<int>(i) < keepTop
+							|| nearProtected(cr.nProposed)
+							|| cr.stat < opt.p3ScreenDipThreshold;
+						if (!promoteFull)
+							continue;
+						const int nProp = cr.nProposed;
+						cr = CandidateResult();
+						cr.nProposed = nProp;
+						cr.n = nProp;
+						cr.valid = true;
+						const uint32_t why = ExactStage(ls, nProp, opt, cr, false);
+						if (why != 0u)
+						{
+							cr.valid = false;
+							cr.reason |= why;
+						}
+					}
+				}
+				else
+				{
+					int maxExact = s_.maxExactCandidates;
+					if (opt.forceExactN > 0 && s_.confidentMaxExactCandidates > 0 && s_.confidentMaxExactCandidates < maxExact)
+						maxExact = s_.confidentMaxExactCandidates;   // lever (Narrowing): a confident axis needs its own n plus fewer challengers
+					const int promote = opt.exactOnly ? static_cast<int>(order.size())
+						: (std::min<int>)(static_cast<int>(order.size()), maxExact);
+					for (int i = 0; i < static_cast<int>(order.size()); ++i)
+					{
+						CandidateResult& cr = out.candidates[static_cast<size_t>(order[static_cast<size_t>(i)])];
+						const bool forced = opt.forceExactN > 0 && cr.nProposed == opt.forceExactN;
+						if (i < promote || forced)
+						{
+							const uint32_t why = ExactStage(ls, cr.n, opt, cr, false);
+							if (why != 0u)
+							{
+								cr.valid = false;
+								cr.reason |= why;
+							}
+						}
+						else
+							cr.reason |= kReasonCoarseOnly;
+					}
 				}
 				for (int c = 0; c < count; ++c)
 					out.reason |= out.candidates[static_cast<size_t>(c)].reason;
@@ -478,6 +546,49 @@ namespace SourceIdentity
 				return k;
 			}
 
+			// SID-OPT: stack-allocated small-array median / trimmed mean (100% bit-identical to RobustStats::MedianOf / TrimmedMeanOf, 0 heap allocs).
+			static double FastMedianSmall(const double* v, int n)
+			{
+				if (n <= 0)
+					return 0.0;
+				if (n == 1)
+					return v[0];
+				if (n == 2)
+					return 0.5 * (v[0] + v[1]);
+				if (n <= kMaxLines * 2)
+				{
+					double buf[kMaxLines * 2];
+					for (int i = 0; i < n; ++i)
+						buf[i] = v[i];
+					std::sort(buf, buf + n);
+					return (n & 1) != 0 ? buf[n / 2] : 0.5 * (buf[n / 2 - 1] + buf[n / 2]);
+				}
+				return RobustStats::MedianOf(v, n);
+			}
+
+			static double FastTrimmedMeanSmall(const double* v, int n, double trim)
+			{
+				if (n <= 0)
+					return 0.0;
+				if (n <= kMaxLines * 2)
+				{
+					double buf[kMaxLines * 2];
+					for (int i = 0; i < n; ++i)
+						buf[i] = v[i];
+					std::sort(buf, buf + n);
+					int k = static_cast<int>(std::floor(trim * static_cast<double>(n)));
+					if (k < 0)
+						k = 0;
+					if (n - 2 * k <= 0)
+						k = 0;
+					double s = 0.0;
+					for (int i = k; i < n - k; ++i)
+						s += buf[i];
+					return s / static_cast<double>(n - 2 * k);
+				}
+				return RobustStats::TrimmedMeanOf(v, n, trim);
+			}
+
 			// Per-line baseline of one window geometry: the median over the reference sizes of the smallest s over `reps`.
 			// refSeg (optional, nref x nl x kMaxSegs) receives the segment level of the
 			// winning kernel at every reference ((mean square per row + eps^2) / dof, as the line level), -1 where the segment has no rows
@@ -489,7 +600,7 @@ namespace SourceIdentity
 				nref = RefSizes(n0, ls.axisLen, refs);
 				if (nref < 2)
 					return false;
-				std::vector<double> perRef(static_cast<size_t>(nref) * static_cast<size_t>(nl), 0.0);
+				perRefScratch_.assign(static_cast<size_t>(nref) * static_cast<size_t>(nl), 0.0);
 				if (refSeg != nullptr)
 					refSeg->assign(static_cast<size_t>(nref) * static_cast<size_t>(nl) * static_cast<size_t>(kMaxSegs), -1.0);
 				const SolveBatch* bq[kFamilyCount];
@@ -516,7 +627,7 @@ namespace SourceIdentity
 								have = true;
 							}
 						}
-						perRef[static_cast<size_t>(r) * static_cast<size_t>(nl) + static_cast<size_t>(i)] = best;
+						perRefScratch_[static_cast<size_t>(r) * static_cast<size_t>(nl) + static_cast<size_t>(i)] = best;
 						if (refSeg != nullptr)
 						{
 							const SolveBatch& wb = *bq[bestQ];
@@ -528,12 +639,12 @@ namespace SourceIdentity
 						}
 					}
 				}
-				std::vector<double> col(static_cast<size_t>(nref));
+				double col[4];
 				for (int i = 0; i < nl; ++i)
 				{
 					for (int r = 0; r < nref; ++r)
-						col[static_cast<size_t>(r)] = perRef[static_cast<size_t>(r) * static_cast<size_t>(nl) + static_cast<size_t>(i)];
-					base[i] = RobustStats::MedianOf(col.data(), nref);
+						col[r] = perRefScratch_[static_cast<size_t>(r) * static_cast<size_t>(nl) + static_cast<size_t>(i)];
+					base[i] = FastMedianSmall(col, nref);
 				}
 				return true;
 			}
@@ -548,21 +659,21 @@ namespace SourceIdentity
 				const int nWin = (Lc >= L || s_.coarseWindows <= 1) ? 1 : 2;
 				const int winOff[2] = { 0, L - Lc };
 				const int nl = (std::min)(ls.count, (std::max)(1, s_.coarseLines));
-				std::vector<int> idx(static_cast<size_t>(nl));
+				idxScratch_.resize(static_cast<size_t>(nl));
 				for (int i = 0; i < nl; ++i)
-					idx[static_cast<size_t>(i)] = (i * ls.count) / nl;
+					idxScratch_[static_cast<size_t>(i)] = (i * ls.count) / nl;
 				int nrep = 0;
 				const int* reps = RepresentativeKernels(nrep);
-				std::vector<double> base(static_cast<size_t>(nWin) * static_cast<size_t>(nl), 0.0);
+				baseScratch_.assign(static_cast<size_t>(nWin) * static_cast<size_t>(nl), 0.0);
 				for (int w = 0; w < nWin; ++w)
 				{
 					int nref = 0;
-					if (!Baseline(ls, 0, idx.data(), nl, winOff[w], Lc, nC, reps, nrep, &base[static_cast<size_t>(w) * static_cast<size_t>(nl)], nullptr, nref))
+					if (!Baseline(ls, 0, idxScratch_.data(), nl, winOff[w], Lc, nC, reps, nrep, &baseScratch_[static_cast<size_t>(w) * static_cast<size_t>(nl)], nullptr, nref))
 						return nref < 2 ? kReasonNoReference : kReasonShortLines;
 				}
 				const int maxN = static_cast<int>(std::floor(s_.maxLatentRatio * static_cast<double>(N)));
 				const int step = s_.coarseStep < 1 ? 1 : s_.coarseStep;
-				std::vector<double> vals(static_cast<size_t>(nWin) * static_cast<size_t>(nl), 0.0);
+				valsScratch_.resize(static_cast<size_t>(nWin) * static_cast<size_t>(nl));
 				bool have = false;
 				const SolveBatch* bw[2][kFamilyCount];
 				auto visit = [&](int d) {
@@ -573,7 +684,7 @@ namespace SourceIdentity
 					for (int w = 0; w < nWin && ok; ++w)
 						for (int q = 0; q < nrep; ++q)
 						{
-							bw[w][q] = SolveWindow(ls, 0, idx.data(), nl, winOff[w], Lc, n, reps[q], 0.0);
+							bw[w][q] = SolveWindow(ls, 0, idxScratch_.data(), nl, winOff[w], Lc, n, reps[q], 0.0);
 							if (bw[w][q] == nullptr)
 							{
 								ok = false;
@@ -596,10 +707,10 @@ namespace SourceIdentity
 									h2 = true;
 								}
 							}
-							vals[static_cast<size_t>(w) * static_cast<size_t>(nl) + static_cast<size_t>(i)]
-								= std::log(best / base[static_cast<size_t>(w) * static_cast<size_t>(nl) + static_cast<size_t>(i)]);
+							valsScratch_[static_cast<size_t>(w) * static_cast<size_t>(nl) + static_cast<size_t>(i)]
+								= std::log(best / baseScratch_[static_cast<size_t>(w) * static_cast<size_t>(nl) + static_cast<size_t>(i)]);
 						}
-					const double T = RobustStats::TrimmedMeanOf(vals.data(), nWin * nl, s_.trimFraction);
+					const double T = FastTrimmedMeanSmall(valsScratch_.data(), nWin * nl, s_.trimFraction);
 					const bool better = !have || T < tBest || (T == tBest && std::abs(d) < std::abs(nBest - nC));
 					if (better)
 					{
@@ -621,62 +732,62 @@ namespace SourceIdentity
 				return have ? 0u : kReasonShortLines;
 			}
 
-			uint32_t ExactStage(const LineSet& ls, int n0, const VerifyOptions& opt, CandidateResult& cr)
+			uint32_t ExactStage(const LineSet& ls, int n0, const VerifyOptions& opt, CandidateResult& cr, bool screenOnly = false)
 			{
 				const int N = ls.axisLen;
 				const int L = ls.length;
 				const int avail = (std::min)(ls.count, kMaxLines);
 				const int nl = (opt.exactLines > 0 && opt.exactLines < avail) ? opt.exactLines : avail;
-				std::vector<int> idx(static_cast<size_t>(nl));
+				idxScratch_.resize(static_cast<size_t>(nl));
 				for (int i = 0; i < nl; ++i)
-					idx[static_cast<size_t>(i)] = (i * avail) / nl;
+					idxScratch_[static_cast<size_t>(i)] = (i * avail) / nl;
 				int repAll = 0;
 				const int* repsAll = RepresentativeKernels(repAll);
 				int repOne[1] = { opt.onlyKernel };
 				const int* reps = opt.onlyKernel >= 0 ? repOne : repsAll;
 				const int nrep = opt.onlyKernel >= 0 ? 1 : repAll;
-				std::vector<double> base(static_cast<size_t>(nl), 0.0);
-				std::vector<double> refSeg;
+				baseScratch_.assign(static_cast<size_t>(nl), 0.0);
 				int nref = 0;
-				if (!Baseline(ls, 1, idx.data(), nl, 0, L, n0, reps, nrep, base.data(), &refSeg, nref))
+				if (!Baseline(ls, 1, idxScratch_.data(), nl, 0, L, n0, reps, nrep, baseScratch_.data(), &refSegScratch_, nref))
 					return nref < 2 ? kReasonNoReference : kReasonShortLines;
 
 				// Integer scan with the representative kernels.
 				const int maxN = static_cast<int>(std::floor(s_.maxLatentRatio * static_cast<double>(N)));
-				const int hw = opt.exactHalfWidth >= 0 ? opt.exactHalfWidth : s_.exactHalfWidth;
+				const int hw = screenOnly ? 0 : (opt.exactHalfWidth >= 0 ? opt.exactHalfWidth : s_.exactHalfWidth);
 				std::vector<int> ns;
+				ns.reserve(static_cast<size_t>(2 * hw + 1));
 				for (int n = n0 - hw; n <= n0 + hw; ++n)
 					if (n >= s_.minLatent && n <= maxN)
 						ns.push_back(n);
 				if (ns.empty())
 					return kReasonBadInput;
 				const size_t stride = static_cast<size_t>(nrep) * static_cast<size_t>(nl);
-				std::vector<double> scanS(ns.size() * stride, 0.0);
-				std::vector<double> vals(static_cast<size_t>(nl), 0.0);
+				scanSScratch_.resize(ns.size() * stride);
+				valsScratch_.resize(static_cast<size_t>(nl));
 				int bestNi = -1;
 				double bestT = 0.0;
 				for (size_t ni = 0; ni < ns.size(); ++ni)
 				{
 					for (int q = 0; q < nrep; ++q)
 					{
-						const SolveBatch* sb = SolveWindow(ls, 1, idx.data(), nl, 0, L, ns[ni], reps[q], 0.0);
+						const SolveBatch* sb = SolveWindow(ls, 1, idxScratch_.data(), nl, 0, L, ns[ni], reps[q], 0.0);
 						if (sb == nullptr)
 							return kReasonShortLines;
 						for (int i = 0; i < nl; ++i)
-							scanS[ni * stride + static_cast<size_t>(q) * static_cast<size_t>(nl) + static_cast<size_t>(i)] = sb->s[static_cast<size_t>(i)];
+							scanSScratch_[ni * stride + static_cast<size_t>(q) * static_cast<size_t>(nl) + static_cast<size_t>(i)] = sb->s[static_cast<size_t>(i)];
 					}
 					for (int i = 0; i < nl; ++i)
 					{
 						double best = 0.0;
 						for (int q = 0; q < nrep; ++q)
 						{
-							const double s = scanS[ni * stride + static_cast<size_t>(q) * static_cast<size_t>(nl) + static_cast<size_t>(i)];
+							const double s = scanSScratch_[ni * stride + static_cast<size_t>(q) * static_cast<size_t>(nl) + static_cast<size_t>(i)];
 							if (q == 0 || s < best)
 								best = s;
 						}
-						vals[static_cast<size_t>(i)] = std::log(best / base[static_cast<size_t>(i)]);
+						valsScratch_[static_cast<size_t>(i)] = std::log(best / baseScratch_[static_cast<size_t>(i)]);
 					}
-					const double T = RobustStats::TrimmedMeanOf(vals.data(), nl, s_.trimFraction);
+					const double T = FastTrimmedMeanSmall(valsScratch_.data(), nl, s_.trimFraction);
 					bool better = bestNi < 0 || T < bestT;
 					if (!better && T == bestT)
 						better = std::abs(ns[ni] - n0) < std::abs(ns[static_cast<size_t>(bestNi)] - n0);
@@ -688,10 +799,18 @@ namespace SourceIdentity
 				}
 				const int nStar = ns[static_cast<size_t>(bestNi)];
 
-				// Kernels to evaluate in full at nStar: every kernel of the best families (or the one asked for).
-				std::vector<int> kernels;
+				// Kernels to evaluate in full at nStar: every kernel of the best families (or only rep kernels during Pass-1 screen).
+				int kernels[kKernelCount];
+				int kernelCount = 0;
 				if (opt.onlyKernel >= 0)
-					kernels.push_back(opt.onlyKernel);
+				{
+					kernels[kernelCount++] = opt.onlyKernel;
+				}
+				else if (screenOnly)
+				{
+					for (int q = 0; q < nrep && kernelCount < kKernelCount; ++q)
+						kernels[kernelCount++] = reps[q];
+				}
 				else
 				{
 					double famT[kFamilyCount];
@@ -699,8 +818,8 @@ namespace SourceIdentity
 					for (int q = 0; q < nrep; ++q)
 					{
 						for (int i = 0; i < nl; ++i)
-							vals[static_cast<size_t>(i)] = std::log(scanS[static_cast<size_t>(bestNi) * stride + static_cast<size_t>(q) * static_cast<size_t>(nl) + static_cast<size_t>(i)] / base[static_cast<size_t>(i)]);
-						famT[static_cast<int>(Kernel(reps[q]).family)] = RobustStats::TrimmedMeanOf(vals.data(), nl, s_.trimFraction);
+							valsScratch_[static_cast<size_t>(i)] = std::log(scanSScratch_[static_cast<size_t>(bestNi) * stride + static_cast<size_t>(q) * static_cast<size_t>(nl) + static_cast<size_t>(i)] / baseScratch_[static_cast<size_t>(i)]);
+						famT[static_cast<int>(Kernel(reps[q]).family)] = FastTrimmedMeanSmall(valsScratch_.data(), nl, s_.trimFraction);
 					}
 					for (int f = 0; f < kFamilyCount; ++f)
 						famOrder[f] = f;
@@ -714,21 +833,25 @@ namespace SourceIdentity
 						for (int f = 0; f < nf; ++f)
 							if (static_cast<int>(Kernel(k).family) == famOrder[f])
 							{
-								kernels.push_back(k);
+								kernels[kernelCount++] = k;
 								break;
 							}
 				}
 				std::vector<double> phases;
 				phases.push_back(0.0);
-				for (int q = 1; q <= (s_.phaseCount - 1) / 2; ++q)
+				if (!screenOnly)
 				{
-					phases.push_back(static_cast<double>(q) * s_.phaseStep);
-					phases.push_back(-static_cast<double>(q) * s_.phaseStep);
+					for (int q = 1; q <= (s_.phaseCount - 1) / 2; ++q)
+					{
+						phases.push_back(static_cast<double>(q) * s_.phaseStep);
+						phases.push_back(-static_cast<double>(q) * s_.phaseStep);
+					}
 				}
 
 				struct KernelScore { int kernel; double phase; double T; };
-				std::vector<KernelScore> scores;
-				for (size_t ki = 0; ki < kernels.size(); ++ki)
+				KernelScore scores[kKernelCount];
+				int scoreCount = 0;
+				for (int ki = 0; ki < kernelCount; ++ki)
 				{
 					KernelScore best;
 					best.kernel = kernels[ki];
@@ -749,18 +872,18 @@ namespace SourceIdentity
 						const SolveBatch* sb = nullptr;
 						if (reusedQ < 0)
 						{
-							sb = SolveWindow(ls, 1, idx.data(), nl, 0, L, nStar, kernels[ki], phases[pi]);
+							sb = SolveWindow(ls, 1, idxScratch_.data(), nl, 0, L, nStar, kernels[ki], phases[pi]);
 							if (sb == nullptr)
 								return kReasonShortLines;
 						}
 						for (int i = 0; i < nl; ++i)
 						{
 							const double s = reusedQ >= 0
-								? scanS[static_cast<size_t>(bestNi) * stride + static_cast<size_t>(reusedQ) * static_cast<size_t>(nl) + static_cast<size_t>(i)]
+								? scanSScratch_[static_cast<size_t>(bestNi) * stride + static_cast<size_t>(reusedQ) * static_cast<size_t>(nl) + static_cast<size_t>(i)]
 								: sb->s[static_cast<size_t>(i)];
-							vals[static_cast<size_t>(i)] = std::log(s / base[static_cast<size_t>(i)]);
+							valsScratch_[static_cast<size_t>(i)] = std::log(s / baseScratch_[static_cast<size_t>(i)]);
 						}
-						const double T = RobustStats::TrimmedMeanOf(vals.data(), nl, s_.trimFraction);
+						const double T = FastTrimmedMeanSmall(valsScratch_.data(), nl, s_.trimFraction);
 						if (!have || T < best.T)
 						{
 							have = true;
@@ -768,14 +891,14 @@ namespace SourceIdentity
 							best.phase = phases[pi];
 						}
 					}
-					scores.push_back(best);
+					scores[scoreCount++] = best;
 				}
-				size_t bi = 0;
-				for (size_t k = 1; k < scores.size(); ++k)
+				int bi = 0;
+				for (int k = 1; k < scoreCount; ++k)
 					if (scores[k].T < scores[bi].T)
 						bi = k;
 				cr.kernelMask = 0;
-				for (size_t k = 0; k < scores.size(); ++k)
+				for (int k = 0; k < scoreCount; ++k)
 				{
 					cr.kernelMask |= 1u << scores[k].kernel;
 					cr.kernelT[scores[k].kernel] = scores[k].T;
@@ -784,7 +907,7 @@ namespace SourceIdentity
 				bool haveSecond = false;
 				double otherFam = 0.0;
 				bool haveOther = false;
-				for (size_t k = 0; k < scores.size(); ++k)
+				for (int k = 0; k < scoreCount; ++k)
 				{
 					if (k == bi)
 						continue;
@@ -820,8 +943,8 @@ namespace SourceIdentity
 				cr.segStat.assign(cells, 0.0);
 				cr.segBase.assign(cells, 0.0);
 				const double e2 = s_.epsCodes * s_.epsCodes;
-				std::vector<double> refCol(static_cast<size_t>(nref));
-				const SolveBatch* fin = SolveWindow(ls, 1, idx.data(), nl, 0, L, nStar, cr.kernel, cr.phase);
+				double refCol[4];
+				const SolveBatch* fin = SolveWindow(ls, 1, idxScratch_.data(), nl, 0, L, nStar, cr.kernel, cr.phase);
 				if (fin == nullptr)
 					return kReasonShortLines;
 				const double dofv = fin->dof;
@@ -831,8 +954,8 @@ namespace SourceIdentity
 					const double ms = fin->ms[static_cast<size_t>(i)];
 					const double* segSum = &fin->segSum[static_cast<size_t>(i) * kMaxSegs];
 					const int* segRows = fin->segRows.data();
-					cr.lineStat[static_cast<size_t>(i)] = std::log(s / base[static_cast<size_t>(i)]);
-					cr.lineBase[static_cast<size_t>(i)] = base[static_cast<size_t>(i)];
+					cr.lineStat[static_cast<size_t>(i)] = std::log(s / baseScratch_[static_cast<size_t>(i)]);
+					cr.lineBase[static_cast<size_t>(i)] = baseScratch_[static_cast<size_t>(i)];
 					cr.lineRms[static_cast<size_t>(i)] = std::sqrt(ms);
 					for (int g = 0; g < segCount; ++g)
 					{
@@ -844,20 +967,20 @@ namespace SourceIdentity
 						int nv = 0;
 						for (int r = 0; r < nref; ++r)
 						{
-							const double v = refSeg[(static_cast<size_t>(r) * static_cast<size_t>(nl) + static_cast<size_t>(i)) * kMaxSegs + static_cast<size_t>(g)];
+							const double v = refSegScratch_[(static_cast<size_t>(r) * static_cast<size_t>(nl) + static_cast<size_t>(i)) * kMaxSegs + static_cast<size_t>(g)];
 							if (v >= 0.0)
-								refCol[static_cast<size_t>(nv++)] = v;
+								refCol[nv++] = v;
 						}
 						if (nv < 1)
 							continue;
-						const double baseMs = RobustStats::MedianOf(refCol.data(), nv);
+						const double baseMs = FastMedianSmall(refCol, nv);
 						const double levelMs = (segSum[g] / static_cast<double>(segRows[g]) + e2) / dofv;
 						cr.segStat[cell] = 0.5 * std::log(levelMs / baseMs);
 						cr.segBase[cell] = std::sqrt(baseMs);
 					}
 				}
-				cr.floorCodes = RobustStats::TrimmedMeanOf(cr.lineRms.data(), nl, s_.trimFraction);
-				cr.baselineMedian = RobustStats::MedianOf(cr.lineBase.data(), nl);
+				cr.floorCodes = FastTrimmedMeanSmall(cr.lineRms.data(), nl, s_.trimFraction);
+				cr.baselineMedian = FastMedianSmall(cr.lineBase.data(), nl);
 				cr.exactDone = true;
 				return 0u;
 			}
@@ -870,6 +993,13 @@ namespace SourceIdentity
 			size_t memoBytes_ = 0;               // estimated heap bytes of memo_
 			std::map<SolveKey, SolveBatch> memo_;   // the solves of the current Evaluate call
 			std::vector<double> scratch_;
+			// SID-OPT: reusable working scratch buffers (never affect CachedBytes / Evict budget).
+			std::vector<double> perRefScratch_;
+			std::vector<double> baseScratch_;
+			std::vector<double> refSegScratch_;
+			std::vector<double> scanSScratch_;
+			std::vector<double> valsScratch_;
+			std::vector<int> idxScratch_;
 			int builds_ = 0;
 			int solves_ = 0;
 			int reused_ = 0;

@@ -14,6 +14,8 @@
 #include "LineSampler.h"
 
 #include <cstdint>
+#include <cstring>
+#include <type_traits>
 #include <vector>
 
 namespace SourceIdentity
@@ -56,6 +58,62 @@ namespace SourceIdentity
 			}
 		};
 
+		namespace detail
+		{
+			template <class Pix>
+			inline void CopyLinesGeneric(const LinePlan& plan, const Pix* plane, std::ptrdiff_t stride, double scale, LineSnapshot& out)
+			{
+				auto code = [scale](Pix v) -> uint16_t {
+					const double c = std::floor(static_cast<double>(v) * scale + 0.5);
+					return static_cast<uint16_t>(c < 0.0 ? 0.0 : (c > 65535.0 ? 65535.0 : c));
+				};
+				for (int j = 0; j < plan.rowCount; ++j)
+				{
+					const Pix* src = plane + static_cast<std::ptrdiff_t>(plan.rowY[j]) * stride + plan.inner.x;
+					uint16_t* dst = &out.rows[static_cast<size_t>(j) * static_cast<size_t>(plan.inner.w)];
+					for (int i = 0; i < plan.inner.w; ++i)
+						dst[i] = code(src[i]);
+				}
+				for (int j = 0; j < plan.colCount; ++j)
+				{
+					const Pix* src = plane + static_cast<std::ptrdiff_t>(plan.inner.y) * stride + plan.colX[j];
+					uint16_t* dst = &out.cols[static_cast<size_t>(j) * static_cast<size_t>(plan.inner.h)];
+					for (int i = 0; i < plan.inner.h; ++i)
+						dst[i] = code(src[static_cast<std::ptrdiff_t>(i) * stride]);
+				}
+			}
+
+			// SID-OPT: C++14 tag-dispatched fast path for uint16_t tap planes at unity scale (100% bit-identical to floor(v * 1.0 + 0.5)).
+			inline void CopyLinesDispatch(std::true_type, const LinePlan& plan, const uint16_t* plane, std::ptrdiff_t stride, double scale, LineSnapshot& out)
+			{
+				if (scale != 1.0)
+				{
+					CopyLinesGeneric(plan, plane, stride, scale, out);
+					return;
+				}
+				const size_t rowBytes = static_cast<size_t>(plan.inner.w) * sizeof(uint16_t);
+				for (int j = 0; j < plan.rowCount; ++j)
+				{
+					const uint16_t* src = plane + static_cast<std::ptrdiff_t>(plan.rowY[j]) * stride + plan.inner.x;
+					uint16_t* dst = &out.rows[static_cast<size_t>(j) * static_cast<size_t>(plan.inner.w)];
+					std::memcpy(dst, src, rowBytes);
+				}
+				for (int j = 0; j < plan.colCount; ++j)
+				{
+					const uint16_t* src = plane + static_cast<std::ptrdiff_t>(plan.inner.y) * stride + plan.colX[j];
+					uint16_t* dst = &out.cols[static_cast<size_t>(j) * static_cast<size_t>(plan.inner.h)];
+					for (int i = 0; i < plan.inner.h; ++i)
+						dst[i] = src[static_cast<std::ptrdiff_t>(i) * stride];
+				}
+			}
+
+			template <class Pix>
+			inline void CopyLinesDispatch(std::false_type, const LinePlan& plan, const Pix* plane, std::ptrdiff_t stride, double scale, LineSnapshot& out)
+			{
+				CopyLinesGeneric(plan, plane, stride, scale, out);
+			}
+		}
+
 		// Copies the lines of `plan` out of a plane (samples of `Pix`, row stride in samples). `scale` converts a sample to 10-bit
 		// codes (1 for the tap's plane). False when the plan is invalid or the plane is null.
 		template <class Pix>
@@ -63,32 +121,15 @@ namespace SourceIdentity
 		{
 			if (!plan.valid || plane == nullptr || plan.inner.w < 1 || plan.inner.h < 1)
 				return false;
-			auto code = [scale](Pix v) -> uint16_t {
-				const double c = std::floor(static_cast<double>(v) * scale + 0.5);
-				return static_cast<uint16_t>(c < 0.0 ? 0.0 : (c > 65535.0 ? 65535.0 : c));
-			};
 			out.active = plan.active;
 			out.inner = plan.inner;
 			out.rowCount = plan.rowCount;
 			out.colCount = plan.colCount;
 			out.rowY.assign(plan.rowY, plan.rowY + plan.rowCount);
 			out.colX.assign(plan.colX, plan.colX + plan.colCount);
-			out.rows.assign(static_cast<size_t>(plan.rowCount) * static_cast<size_t>(plan.inner.w), 0);
-			out.cols.assign(static_cast<size_t>(plan.colCount) * static_cast<size_t>(plan.inner.h), 0);
-			for (int j = 0; j < plan.rowCount; ++j)
-			{
-				const Pix* src = plane + static_cast<std::ptrdiff_t>(plan.rowY[j]) * stride + plan.inner.x;
-				uint16_t* dst = &out.rows[static_cast<size_t>(j) * static_cast<size_t>(plan.inner.w)];
-				for (int i = 0; i < plan.inner.w; ++i)
-					dst[i] = code(src[i]);
-			}
-			for (int j = 0; j < plan.colCount; ++j)
-			{
-				const Pix* src = plane + static_cast<std::ptrdiff_t>(plan.inner.y) * stride + plan.colX[j];
-				uint16_t* dst = &out.cols[static_cast<size_t>(j) * static_cast<size_t>(plan.inner.h)];
-				for (int i = 0; i < plan.inner.h; ++i)
-					dst[i] = code(src[static_cast<std::ptrdiff_t>(i) * stride]);
-			}
+			out.rows.resize(static_cast<size_t>(plan.rowCount) * static_cast<size_t>(plan.inner.w));
+			out.cols.resize(static_cast<size_t>(plan.colCount) * static_cast<size_t>(plan.inner.h));
+			detail::CopyLinesDispatch(std::is_same<typename std::remove_cv<Pix>::type, uint16_t>(), plan, plane, stride, scale, out);
 			return true;
 		}
 

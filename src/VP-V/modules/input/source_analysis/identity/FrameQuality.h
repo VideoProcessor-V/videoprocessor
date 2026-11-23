@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <utility>
 #include <vector>
 
 namespace SourceIdentity
@@ -73,21 +74,78 @@ namespace SourceIdentity
 			std::vector<float> hp(n), e(n);
 			for (size_t i = 0; i < n; ++i)
 				hp[i] = u[i] - g1[i];
-			// Local energy of the residual over 7 x 7 (box, summed in a fixed order).
+			// SID-OPT: separable 1x7 H pass + 7x1 V pass in double (14 ops/px, branchless interior [3, T-4], deterministic fixed order).
+			std::vector<double> hSum(n);
 			for (int y = 0; y < T; ++y)
-				for (int x = 0; x < T; ++x)
+			{
+				const float* row = &hp[static_cast<size_t>(y) * static_cast<size_t>(T)];
+				double* dst = &hSum[static_cast<size_t>(y) * static_cast<size_t>(T)];
+				for (int x = 0; x < 3; ++x)
 				{
 					double s = 0.0;
-					for (int dy = -3; dy <= 3; ++dy)
-						for (int dx = -3; dx <= 3; ++dx)
-						{
-							const float v = hp[static_cast<size_t>(detail::Reflect(y + dy, T)) * T + detail::Reflect(x + dx, T)];
-							s += static_cast<double>(v) * v;
-						}
-					e[static_cast<size_t>(y) * T + x] = static_cast<float>(s / 49.0);
+					for (int dx = -3; dx <= 3; ++dx)
+					{
+						const double v = static_cast<double>(row[detail::Reflect(x + dx, T)]);
+						s += v * v;
+					}
+					dst[x] = s;
 				}
+				for (int x = 3; x < T - 3; ++x)
+				{
+					const double v0 = static_cast<double>(row[x - 3]);
+					const double v1 = static_cast<double>(row[x - 2]);
+					const double v2 = static_cast<double>(row[x - 1]);
+					const double v3 = static_cast<double>(row[x]);
+					const double v4 = static_cast<double>(row[x + 1]);
+					const double v5 = static_cast<double>(row[x + 2]);
+					const double v6 = static_cast<double>(row[x + 3]);
+					dst[x] = ((((((v0 * v0 + v1 * v1) + v2 * v2) + v3 * v3) + v4 * v4) + v5 * v5) + v6 * v6);
+				}
+				for (int x = T - 3; x < T; ++x)
+				{
+					double s = 0.0;
+					for (int dx = -3; dx <= 3; ++dx)
+					{
+						const double v = static_cast<double>(row[detail::Reflect(x + dx, T)]);
+						s += v * v;
+					}
+					dst[x] = s;
+				}
+			}
+			for (int y = 0; y < T; ++y)
+			{
+				float* dst = &e[static_cast<size_t>(y) * static_cast<size_t>(T)];
+				if (y >= 3 && y < T - 3)
+				{
+					const std::ptrdiff_t rowStride = static_cast<std::ptrdiff_t>(T);
+					const double* r3 = &hSum[static_cast<size_t>(y) * static_cast<size_t>(T)];
+					const double* r0 = r3 - 3 * rowStride;
+					const double* r1 = r3 - 2 * rowStride;
+					const double* r2 = r3 - rowStride;
+					const double* r4 = r3 + rowStride;
+					const double* r5 = r3 + 2 * rowStride;
+					const double* r6 = r3 + 3 * rowStride;
+					for (int x = 0; x < T; ++x)
+					{
+						const double s = ((((((r0[x] + r1[x]) + r2[x]) + r3[x]) + r4[x]) + r5[x]) + r6[x]);
+						dst[x] = static_cast<float>(s / 49.0);
+					}
+				}
+				else
+				{
+					const double* rows[7];
+					for (int dy = -3; dy <= 3; ++dy)
+						rows[dy + 3] = &hSum[static_cast<size_t>(detail::Reflect(y + dy, T)) * static_cast<size_t>(T)];
+					for (int x = 0; x < T; ++x)
+					{
+						const double s = ((((((rows[0][x] + rows[1][x]) + rows[2][x]) + rows[3][x]) + rows[4][x]) + rows[5][x]) + rows[6][x]);
+						dst[x] = static_cast<float>(s / 49.0);
+					}
+				}
+			}
 			// Gentle large-scale slope only.
 			std::vector<double> okEnergy;
+			okEnergy.reserve(n);
 			std::vector<char> ok(n, 0);
 			for (int y = 0; y < T; ++y)
 				for (int x = 0; x < T; ++x)
@@ -96,7 +154,8 @@ namespace SourceIdentity
 					const int ym = detail::Reflect(y - 1, T), yp = detail::Reflect(y + 1, T);
 					const double gx = 0.5 * (g2[static_cast<size_t>(y) * T + xp] - g2[static_cast<size_t>(y) * T + xm]);
 					const double gy = 0.5 * (g2[static_cast<size_t>(yp) * T + x] - g2[static_cast<size_t>(ym) * T + x]);
-					if (std::sqrt(gx * gx + gy * gy) < 3.0)
+					// Equivalent to sqrt(gx*gx + gy*gy) < 3.0 (3.0^2 = 9.0, exact for non-negative squared norm).
+					if (gx * gx + gy * gy < 9.0)
 					{
 						ok[static_cast<size_t>(y) * T + x] = 1;
 						okEnergy.push_back(e[static_cast<size_t>(y) * T + x]);
@@ -104,14 +163,15 @@ namespace SourceIdentity
 				}
 			if (okEnergy.size() < 64)
 				return out;
-			const double thr = RobustStats::Quantile(okEnergy, 0.3, RobustStats::RankRule::FloorIndex);   // size >= 64 here
+			const double thr = RobustStats::Quantile(std::move(okEnergy), 0.3, RobustStats::RankRule::FloorIndex);   // size >= 64 here
 			std::vector<double> residual;
+			residual.reserve(n / 3 + 64);
 			for (size_t i = 0; i < n; ++i)
 				if (ok[i] && e[i] <= thr)
 					residual.push_back(hp[i]);
 			if (residual.size() < 64)
 				return out;
-			const double med = RobustStats::Median(residual, RobustStats::MedianRule::Upper);
+			const double med = RobustStats::MedianInPlace(residual, RobustStats::MedianRule::Upper);
 			out.sigma = RobustStats::MadSigma(RobustStats::MadAbout(residual, med, RobustStats::MedianRule::Upper));
 			out.coverage = static_cast<double>(residual.size()) / static_cast<double>(n);
 			out.valid = true;

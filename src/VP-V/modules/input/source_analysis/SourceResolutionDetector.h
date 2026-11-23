@@ -327,6 +327,27 @@ namespace SourceResolution
 	double DetailAbove(const FrameReading& frame, double ratio);
 	// ... and the above band's mean log10 power on the axis that gave the result (`level`).
 	double DetailAbove(const FrameReading& frame, double ratio, double* level);
+
+	// Stage S3 (EXP-8BIT SHOULD-2): dither-floor-aware DetailAbove diagnostics and helper.
+	// Distinguishes genuine high-frequency picture detail above `ratio`'s Nyquist from white
+	// quantization / TPDF dither noise (step^2 / 12 uniform, 2 * step^2 / 12 TPDF).
+	struct DitherDetailAboveInfo
+	{
+		bool valid = false;
+		bool atDitherFloor = false;
+		bool hasRealDetailAbove = false;
+		double floorPowerPerBin = 0.0;
+		double maxAbovePower = 0.0;
+		double rawDecades = 0.0;
+		double floorSubtractedDecades = 0.0;
+	};
+
+	double DitherAwareDetailAbove(
+		const FrameReading& frame,
+		double ratio,
+		bool tpdfDither = true,
+		DitherDetailAboveInfo* info = nullptr,
+		double measuredFloorPowerPerBin = 0.0);
 	// The frame's averaged mirror coherence at `ratio`, the weaker axis (0 when unknown).
 	double CoherenceAtRate(const FrameReading& frame, double ratio);
 	// The same measure on one tile's spectra (the mixed-screen guard). `axes`: 1 vertical,
@@ -498,6 +519,9 @@ namespace SourceResolution
 			double frameAlone = 0.8;
 			double frameAloneMargin = 0.5;
 			double frameFlashSeconds = 0.25;
+			// Stage S3 (EXP-8BIT SHOULD-2, default OFF): treat native-reading frames whose above-band
+			// FFT power sits within lineGateFactor^2 (2.25x) of the TPDF dither floor as starved (no native detail).
+			bool ditherFloorDetailAbove = false;
 		};
 
 		// The rule both judges share: decorrelation against the shot's motion level.
@@ -580,6 +604,8 @@ namespace SourceResolution
 		unsigned long long DistributionUnavailableSteps() const { return distributionUnavailableSteps; }
 		// Native readings left out as within the rounding floor (latchFixes).
 		unsigned long long FloorStarved() const { return floorStarved; }
+		// Stage S3 (SHOULD-2): native readings left out because above-band power sat at the dither floor.
+		unsigned long long DitherFloorStarved() const { return ditherFloorStarved; }
 		double Candidate() const;                                // the window's evidence so far
 		// The window's median DetailAbove for frames reading `ratio`; +infinity when none.
 		double ReferenceDetail(double ratio) const;
@@ -607,7 +633,7 @@ namespace SourceResolution
 		double declared = 1.0;
 		double lastMean = -1.0, lastSignature = 0.0, lastSeconds = -1.0, evidence = 0.0;
 		bool haveLast = false;
-		unsigned long long shot = 0, cuts = 0, discontinuities = 0, starved = 0, floorStarved = 0;
+		unsigned long long shot = 0, cuts = 0, discontinuities = 0, starved = 0, floorStarved = 0, ditherFloorStarved = 0;
 		bool chainContradictsNative = false;     // N2: see SetChainContradictsNative
 		unsigned long long chainHeld = 0;
 		// latchFixes: the last frame whose shape could be judged (the cut test compares across black).

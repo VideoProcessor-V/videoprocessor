@@ -48,6 +48,7 @@
 #include "ChainReading.h"
 #include "ChainStatus.h"
 #include "DescaleVerifier.h"
+#include "NullTables.h"
 #include "PolyphaseProposer.h"
 #include "PowerProbe.h"
 
@@ -67,6 +68,8 @@ namespace SourceIdentity
 		enum class EstimatorMode : int { Off = 0, Shadow = 1, On = 2 };
 		// MenuHold / AbrStep (SID r2): ignored unless the safety rules are on, so off stays byte identical.
 		enum class EstimatorEvent : int { Cut = 0, Blank = 1, Fade = 2, ClearWindow = 3, MenuHold = 4, AbrStep = 5 };
+		// Stage S3 (PKG-SRCID-FLOOR): empirical floor evaluation policy (Off = theoretical only, Shadow = measure & log only, Live = replace floorCodes).
+		enum class EmpiricalFloorMode : int { Off = 0, Shadow = 1, Live = 2 };
 
 		// Every tunable is hidden tuning (doc 78 section 7; the README "Tuning (not in Config)" table), none is read from a config file yet.
 		struct EstimatorSettings
@@ -84,6 +87,11 @@ namespace SourceIdentity
 			StepMarkSettings stepMark;           // Fast ABR mid-stream size-step sentinel (mark -> 2-eval confirm -> backward void to t0)
 			bool conventionDrivenProposals = false; // P3: prioritize classical A -> latched -> SourceGeometrySet conventional sizes
 			bool useEmpiricalFloor = false;      // SHOULD-1 / EXP-8BIT: measure floorCodes via ChainEdgeStats::EstimateEmpiricalFloor
+			// Stage S3 opt-in controls (ALL strictly OFF by default so existing behavior is byte-identical when OFF):
+			EmpiricalFloorMode empiricalFloorMode = EmpiricalFloorMode::Off; // Shadow logs without altering decisions; Live replaces floorCodes (useEmpiricalFloor == true still activates Live)
+			bool eightBitPromotion = false;      // When true, enables edgeStats.enabled, EmpiricalFloorMode::Live, and depth null-table selection
+			bool useDepthNullTables = false;     // Selects bit-depth-stratified null tables via depthNullTables.Select(...)
+			DepthNullTableSet depthNullTables = DepthNullTableSet::PlaceholderOnly();
 			ReadingSettings reading;
 			GovernorSettings governor;
 			EvidenceLogSettings log;
@@ -192,6 +200,11 @@ namespace SourceIdentity
 			uint64_t p3ConventionProposals = 0;
 			uint64_t empiricalFloorEvals = 0;
 			uint64_t empiricalFloorFallbacks = 0;
+			// Stage S3 counters (Rule 4 explicit fallback / placeholder visibility):
+			uint64_t empiricalFloorAllAxisFallbacks = 0;
+			uint64_t empiricalFloorPartialAxisFallbacks = 0;
+			uint64_t placeholderNullTableEvals = 0;
+			uint64_t depthNullTableFallbacks = 0;
 		};
 
 		// What one evaluation tested, per axis and candidate (the calibration dump of the harness reads it; any other observer may).
@@ -231,6 +244,14 @@ namespace SourceIdentity
 			uint32_t shotId = 0;         // the estimator's own detected shot id (the cuts it consumed since the start / reset)
 			int stepCodes = 1;           // 4 = an 8-bit picture, 1 = 10-bit
 			double cachedMB = 0.0;       // operator caches (main + power probe) plus tap memos after this evaluation, MiB
+			// Stage S3 diagnostic visibility (empirical floor & depth null table status):
+			EmpiricalFloorMode empiricalFloorMode = EmpiricalFloorMode::Off;
+			double theoreticalFloorCodes = 0.0;
+			double empiricalFloorCodes[2] = { 0.0, 0.0 };
+			bool empiricalFloorValid[2] = { false, false };
+			bool empiricalFloorFallback = false;
+			bool nullTablesCalibrated = false;
+			BitDepthClass nullTableDepthClass = BitDepthClass::Unknown;
 			AxisDetail axis[2];
 		};
 		// Called on the thread that processes the evaluation (the worker; the caller in synchronous mode), after the evidence stage.
@@ -305,6 +326,10 @@ namespace SourceIdentity
 			bool ConventionDrivenProposals() const;
 			void SetEdgeStatsSettings(const EdgeStatsSettings& s, bool empiricalFloor = false);
 			EdgeStatsSettings GetEdgeStatsSettings() const;
+			// ---- Stage S3 opt-in controls (all default OFF; applied cleanly at next start / epoch bump) -------------------------
+			void SetEmpiricalFloorMode(EmpiricalFloorMode m);
+			void SetEightBitPromotion(bool on);
+			void SetDepthNullTables(const DepthNullTableSet& tables, bool enable = true);
 			// N1: the count of latch releases by the no-cut CEILING (LatchEvent::ReleasedCeiling; zero while the rules are off). The monitor shows
 			// the native switch that follows one through its engage crossfade instead of the release fade. Any thread.
 			uint64_t LatchCeilingReleases() const;
@@ -315,7 +340,8 @@ namespace SourceIdentity
 			// Dump v4 (identity/SidDiagDump.h; written only while VP_SID_DUMP_V4_DIR is set, decision neutral): the file-name tag of this
 			// estimator's b_evals / b_sizes files (a new tag re-reads the variable and reopens the files at the next evaluation), and the
 			// caller's depth hint recorded on each row (coded = the decoded stream's bit depth, output = the delivered plane's; 0 = unknown).
-			// Any thread.
+			// Note: when useDepthNullTables or eightBitPromotion is enabled, `outputBits` also informs bit-depth-stratified null-table
+			// classification (N12 vs N10 via ClassifyBitDepthFromStep). Any thread.
 			void SetDiagnosticTag(const std::string& tag);
 			void SetDiagnosticDepths(int codedBits, int outputBits);
 

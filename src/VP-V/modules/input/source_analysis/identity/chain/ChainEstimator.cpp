@@ -93,6 +93,11 @@ namespace SourceIdentity
 			bool reqConvProposals = false;
 			EdgeStatsSettings reqEdgeStats;
 			bool reqEmpiricalFloor = false;
+			// Stage S3 opt-in requested settings (ALL default OFF; taken cleanly at FreshStart):
+			EmpiricalFloorMode reqEmpiricalFloorMode = EmpiricalFloorMode::Off;
+			bool reqEightBitPromotion = false;
+			bool reqUseDepthNullTables = false;
+			DepthNullTableSet reqDepthNullTables = DepthNullTableSet::PlaceholderOnly();
 			struct ClassicalFreshState
 			{
 				bool valid = false;
@@ -152,6 +157,9 @@ namespace SourceIdentity
 			JointLatchCounters s2JointCounters;
 			StepMarkCounters s2StepCounters;
 			std::atomic<uint64_t> cR1HarmonicSelections{ 0 }, cP3ConvProposals{ 0 }, cEmpiricalFloorEvals{ 0 }, cEmpiricalFloorFallbacks{ 0 };
+			// Stage S3 counters (Rule 4 explicit fallback / placeholder visibility):
+			std::atomic<uint64_t> cEmpiricalFloorAllAxisFallbacks{ 0 }, cEmpiricalFloorPartialAxisFallbacks{ 0 },
+				cPlaceholderNullTableEvals{ 0 }, cDepthNullTableFallbacks{ 0 };
 			// fx/dv-frame-quiet: each ceiling release is stamped with the newest source frame the estimator had seen, so the frame-bound
 			// monitor counts only the releases up to the frame it is allowed to see (LatchCeilingReleasesThrough), not the live counter.
 			std::atomic<uint64_t> newestSeqA{ 0 };
@@ -182,6 +190,9 @@ namespace SourceIdentity
 			PolyphaseProposer proposer[2];
 			std::unique_ptr<DescaleVerifier> verifier;
 			std::unique_ptr<DescaleVerifier> probeVerifier;
+			// SID-OPT: hoisted per-axis run buffers & PowerProbe workspaces (under procMutex; retain capacity across evals, zero state leak).
+			AxisRun evalRun[2];
+			PowerProbe::Workspace probeWs[2];
 			Governor gov;
 			EvidenceLog log;
 			Geometry::HeldState held;
@@ -193,7 +204,6 @@ namespace SourceIdentity
 			bool jointLatchOn = false;
 			bool stepMarkOn = false;
 			bool convProposalsOn = false;
-			bool empiricalFloorOn = false;
 			JointLatchCounters jointLatchBase;
 			StepMarkCounters stepMarkBase;
 			uint64_t stepMarkEvalSeq = 0;
@@ -255,6 +265,10 @@ namespace SourceIdentity
 				reqConvProposals = cfg.conventionDrivenProposals;
 				reqEdgeStats = cfg.evidence.edgeStats;
 				reqEmpiricalFloor = cfg.useEmpiricalFloor;
+				reqEmpiricalFloorMode = cfg.empiricalFloorMode;
+				reqEightBitPromotion = cfg.eightBitPromotion;
+				reqUseDepthNullTables = cfg.useDepthNullTables;
+				reqDepthNullTables = cfg.depthNullTables;
 				safetyA.store(reqSafety || reqJointLatch.enabled, std::memory_order_release);
 				for (int a = 0; a < 2; ++a)
 				{
@@ -457,6 +471,41 @@ namespace SourceIdentity
 			{
 				std::lock_guard<std::mutex> lk(m);
 				return reqEdgeStats;
+			}
+
+			void SetEmpiricalFloorMode(EmpiricalFloorMode mode)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					reqEmpiricalFloorMode = mode;
+					reqEmpiricalFloor = false;
+					cfgDirty = true;
+					++runEpoch;
+				}
+				Wake();
+			}
+
+			void SetEightBitPromotion(bool on)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					reqEightBitPromotion = on;
+					cfgDirty = true;
+					++runEpoch;
+				}
+				Wake();
+			}
+
+			void SetDepthNullTables(const DepthNullTableSet& tables, bool enable)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					reqDepthNullTables = tables;
+					reqUseDepthNullTables = enable;
+					cfgDirty = true;
+					++runEpoch;
+				}
+				Wake();
 			}
 
 			void SetOriginal(bool original)
@@ -1067,12 +1116,17 @@ namespace SourceIdentity
 					reader[a] = AxisReader(cfg.reading, levels);
 					proposer[a].Reset();
 					lastAxisLen[a] = 0;
+					evalRun[a] = AxisRun();
+					probeWs[a].Reset();
 				}
 				{
 					bool safe = false, abr = false, convP = false, empF = false;
+					bool eightBitP = false, useDepthN = false;
+					EmpiricalFloorMode empMode = EmpiricalFloorMode::Off;
 					JointLatchSettings jCfg;
 					StepMarkSettings smCfg;
 					EdgeStatsSettings esCfg;
+					DepthNullTableSet depthN = DepthNullTableSet::PlaceholderOnly();
 					{
 						std::lock_guard<std::mutex> lk(m);
 						safe = reqSafety;
@@ -1082,6 +1136,10 @@ namespace SourceIdentity
 						convP = reqConvProposals;
 						esCfg = reqEdgeStats;
 						empF = reqEmpiricalFloor;
+						empMode = reqEmpiricalFloorMode;
+						eightBitP = reqEightBitPromotion;
+						useDepthN = reqUseDepthNullTables;
+						depthN = reqDepthNullTables;
 						abrStepEvents.clear();
 					}
 					if (jointLatchOn)
@@ -1106,7 +1164,6 @@ namespace SourceIdentity
 					jointLatchOn = jCfg.enabled;
 					stepMarkOn = smCfg.enabled;
 					convProposalsOn = convP;
-					empiricalFloorOn = empF;
 					const bool rulesActive = safe || jointLatchOn;
 					safetyLiveA.store(rulesActive, std::memory_order_release);
 					latchNxA.store(0, std::memory_order_release);
@@ -1114,13 +1171,19 @@ namespace SourceIdentity
 					latchNyA.store(0, std::memory_order_release);
 					cfg.evidence.conventionOnly = rulesActive;   // R2
 					cfg.evidence.pairPrior = rulesActive;        // R3
-					cfg.evidence.edgeStats = esCfg;              // Stage S2 EXP-8BIT (default OFF)
+					if (eightBitP)
+						esCfg.enabled = true;                    // Stage S3 eightBitPromotion enables edgeStats
+					cfg.evidence.edgeStats = esCfg;              // Stage S2/S3 EXP-8BIT (default OFF)
 					cfg.latch.enabled = safe && !jointLatchOn;   // R5 / R7 legacy latch when jointLatch is OFF
 					cfg.latch.abrStepTrigger = abr;
 					cfg.jointLatch = jCfg;
 					cfg.stepMark = smCfg;
 					cfg.conventionDrivenProposals = convP;
 					cfg.useEmpiricalFloor = empF;
+					cfg.empiricalFloorMode = empMode;
+					cfg.eightBitPromotion = eightBitP;
+					cfg.useDepthNullTables = useDepthN;
+					cfg.depthNullTables = depthN;
 					latch = UpscaleLatch(cfg.latch);
 					latchBase = LatchCounters();
 					jointLatch = ChainJointLatch(jCfg);
@@ -1229,6 +1292,11 @@ namespace SourceIdentity
 					ctx.discontinuity = true;
 					out[a] = reader[a].Step(fe, ctx);
 					proposer[a].Reset();
+					evalRun[a].have = false;
+					evalRun[a].pr = ProbeResult();
+					evalRun[a].up = EvidenceUpdate();
+					evalRun[a].vr = VerifyResult();
+					probeWs[a].Reset();
 				}
 				evidence.Reset();
 				if (stepMarkOn)
@@ -1444,11 +1512,26 @@ namespace SourceIdentity
 				}
 			}
 
+			struct DiagEvalExtra
+			{
+				bool stepMarkConfirmed = false;
+				bool stepMarkCancelled = false;
+				bool tentativeBucketVoided = false;
+				EmpiricalFloorMode empFloorMode = EmpiricalFloorMode::Off;
+				double floorTheoretical = 0.0;
+				double empFloor[2] = { 0.0, 0.0 };
+				bool empValid[2] = { false, false };
+				bool empFallback = false;
+				bool nullCalibrated = false;
+				BitDepthClass nullDepth = BitDepthClass::Unknown;
+			};
+
 			// ---- Dump v4 (doc 100 s4 P0; contract identity/README.md "Dump v4"): one b_evals row per evaluation, one b_sizes row per
 			// evaluation x axis x conventional size of the published set (scaling.geometry SourceGeometrySet.h; parked sizes too). Reads the
 			// decision state through const accessors only; the exact statistic of every size comes from a verifier of its own.
 			void DumpV4(const AxisRun run[2], const ReadingOutput out[2], uint32_t flags, bool windowCleared, uint64_t seq, int64_t timeUs,
-				int rasterW, int rasterH, int step, double floorCodes, bool classicalOk, const double classical[2], double costMs)
+				int rasterW, int rasterH, int step, double floorCodes, bool classicalOk, const double classical[2], double costMs,
+				const DiagEvalExtra& extra)
 			{
 				std::ofstream& f = diagEvals.Out();
 				const int coded = diagCodedBits.load(std::memory_order_acquire), outBits = diagOutputBits.load(std::memory_order_acquire);
@@ -1477,7 +1560,24 @@ namespace SourceIdentity
 					<< Diag::Num(static_cast<double>(latch.NewestCreditUs(0)) / 1e6) << ','
 					<< Diag::Num(static_cast<double>(latch.NewestCreditUs(1)) / 1e6) << ',' << Diag::Num(latch.AccumulatedCredit(0)) << ','
 					<< Diag::Num(latch.AccumulatedCredit(1)) << ',' << Diag::Num(latch.Bar(timeUs, thr.c1)) << ',' << Diag::Num(thr.c1) << ','
-					<< Diag::Num(costMs) << '\n';
+					<< Diag::Num(costMs)
+					<< ',' << (stepMarkOn ? static_cast<int>(stepMark.State()) : 0)
+					<< ',' << Diag::Num((stepMarkOn && stepMark.MarkTimeUs() >= 0) ? (static_cast<double>(stepMark.MarkTimeUs()) / 1e6) : -1.0)
+					<< ',' << ((stepMarkOn && stepMark.BlocksEntryOrMove()) ? 1 : 0)
+					<< ',' << (extra.stepMarkConfirmed ? 1 : 0)
+					<< ',' << (extra.stepMarkCancelled ? 1 : 0)
+					<< ',' << ((stepMarkOn && stepMark.IsPending()) ? 1 : 0)
+					<< ',' << (stepMarkOn ? static_cast<int>(stepMark.PendingBucket().size()) : 0)
+					<< ',' << (extra.tentativeBucketVoided ? 1 : 0)
+					<< ',' << static_cast<int>(extra.empFloorMode)
+					<< ',' << Diag::Num(extra.floorTheoretical)
+					<< ',' << Diag::Num(extra.empFloor[0])
+					<< ',' << Diag::Num(extra.empFloor[1])
+					<< ',' << (extra.empValid[0] ? 1 : 0)
+					<< ',' << (extra.empValid[1] ? 1 : 0)
+					<< ',' << (extra.empFallback ? 1 : 0)
+					<< ',' << (extra.nullCalibrated ? 1 : 0)
+					<< ',' << BitDepthClassName(extra.nullDepth) << '\n';
 				diagEvals.EndRow();
 				if (!diagSizes.Ready(diagTag, "b_sizes", Diag::SizesHeaderV4()))
 					return;
@@ -1791,7 +1891,11 @@ namespace SourceIdentity
 										jIn.haveChainPair = false;
 								}
 							}
-							if (jIn.classicalValid)
+							// Stage S3 fix (Stage S2 re-audit MEDIUM): only snap Classical A's target to hRes when Classical A
+							// actually agreed with hRes within convention tolerance; never forge Classical A consent when it disagreed.
+							if (jIn.classicalValid && classicalHasUpscale && hRes.Nx > 0 && hRes.Ny > 0 &&
+								Scaling::GeometrySet::Near(cf.ratioH, static_cast<double>(hRes.nx) / static_cast<double>(hRes.Nx)) &&
+								Scaling::GeometrySet::Near(cf.ratioV, static_cast<double>(hRes.ny) / static_cast<double>(hRes.Ny)))
 							{
 								jIn.classicalNx = hRes.nx; jIn.classicalNxDenom = hRes.Nx;
 								jIn.classicalNy = hRes.ny; jIn.classicalNyDenom = hRes.Ny;
@@ -2066,6 +2170,7 @@ namespace SourceIdentity
 					}
 					return ctx;
 				};
+				DiagEvalExtra diagExtra;
 				if (stepMarkOn)
 				{
 					if (areaChanged)
@@ -2105,8 +2210,14 @@ namespace SourceIdentity
 							smo.action == StepMarkAction::ConfirmVoidAndChallenge)
 						{
 							evidence.VoidBefore(smo.actionFromTimeUs);
+							diagExtra.stepMarkConfirmed = true;
+							diagExtra.tentativeBucketVoided = true;
 							if (smo.action == StepMarkAction::ConfirmVoidAndRelease)
 								stepMarkImmediateReleasePending = true;
+						}
+						else if (smo.action == StepMarkAction::CancelAndMergeBucket)
+						{
+							diagExtra.stepMarkCancelled = true;
 						}
 					}
 					FoldStepMarkCounters();
@@ -2132,54 +2243,105 @@ namespace SourceIdentity
 				}
 				const bool latchedMode = latchedPower.load(std::memory_order_acquire);
 				const int step = cfg.outputStepOverride > 0 ? cfg.outputStepOverride : DetectStepCodes(s);
-				double floorCodes = step >= 4 ? 1.155 : 0.289;   // the dof-normalised rounding / dither sigma (ChainEvidence.h)
+				const double theoreticalFloorCodes = step >= 4 ? 1.155 : 0.289;   // the dof-normalised rounding / dither sigma (ChainEvidence.h)
+				double floorCodes = theoreticalFloorCodes;
+				const EmpiricalFloorMode effFloorMode = (cfg.eightBitPromotion || cfg.useEmpiricalFloor)
+					? EmpiricalFloorMode::Live
+					: cfg.empiricalFloorMode;
 
-				AxisRun run[2];
+				AxisRun (&run)[2] = evalRun;
 				for (int a = 0; a < 2; ++a)
 				{
+					run[a].have = false;
+					run[a].pr = ProbeResult();
+					run[a].up = EvidenceUpdate();
+					run[a].vr.candidates.clear();
+					run[a].vr.reason = 0;
 					if (ToLineSet(s, a, run[a].ls))
 						run[a].have = true;
 				}
-				// Stage S2 (SHOULD-1 / EXP-8BIT, opt-in, default OFF): empirical floor measurement via ChainEdgeStats.
-				if (empiricalFloorOn)
+				// Stage S3 (PKG-SRCID-FLOOR / SHOULD-1 / EXP-8BIT, opt-in, default OFF): empirical floor policy (Off / Shadow / Live).
+				double empFloor[2] = { 0.0, 0.0 };
+				bool empValid[2] = { false, false };
+				bool empFallback = false;
+				if (effFloorMode != EmpiricalFloorMode::Off)
 				{
 					EdgeStatsSettings empCfg = cfg.evidence.edgeStats;
 					empCfg.enabled = true;
-					double measuredFloor = 0.0;
-					bool anyValid = false;
-					bool anyFallback = false;
+					double maxMeasuredFloor = 0.0;
+					int activeAxes = 0;
+					int validAxes = 0;
+					int clampedFallbackAxes = 0;
+					int invalidAxes = 0;
 					for (int a = 0; a < 2; ++a)
 					{
 						if (!run[a].have)
 							continue;
+						++activeAxes;
 						const EmpiricalFloorResult ef = EstimateEmpiricalFloor(run[a].ls, static_cast<double>(step), empCfg);
+						empFloor[a] = ef.floorCodes;
+						empValid[a] = ef.valid;
 						if (ef.valid)
 						{
-							anyValid = true;
-							if (ef.floorCodes > measuredFloor)
-								measuredFloor = ef.floorCodes;
+							++validAxes;
+							if (ef.floorCodes > maxMeasuredFloor)
+								maxMeasuredFloor = ef.floorCodes;
 							if (ef.usedTheoreticalFallback)
-								anyFallback = true;
+								++clampedFallbackAxes;
 						}
 						else
 						{
-							anyFallback = true;
+							++invalidAxes;
 						}
 					}
-					if (anyValid)
+					const int fallbackAxes = invalidAxes + clampedFallbackAxes;
+					if (validAxes > 0)
 					{
-						floorCodes = measuredFloor;
 						cEmpiricalFloorEvals.fetch_add(1, std::memory_order_relaxed);
-						if (anyFallback)
+						if (effFloorMode == EmpiricalFloorMode::Live)
+							floorCodes = maxMeasuredFloor;
+						if (fallbackAxes > 0)
+						{
+							empFallback = true;
 							cEmpiricalFloorFallbacks.fetch_add(1, std::memory_order_relaxed);
+							if (fallbackAxes >= activeAxes)
+								cEmpiricalFloorAllAxisFallbacks.fetch_add(1, std::memory_order_relaxed);
+							else
+								cEmpiricalFloorPartialAxisFallbacks.fetch_add(1, std::memory_order_relaxed);
+						}
 					}
-					else if (run[0].have || run[1].have)
+					else if (activeAxes > 0)
 					{
-						// Rule 4: record fallback visibly whenever empirical floor was requested on active lines
-						// but failed to produce a valid estimate on all axes.
+						// Rule 4: record all-axis fallback visibly whenever empirical floor failed on every active axis.
+						empFallback = true;
 						cEmpiricalFloorFallbacks.fetch_add(1, std::memory_order_relaxed);
+						cEmpiricalFloorAllAxisFallbacks.fetch_add(1, std::memory_order_relaxed);
 					}
 				}
+				// Stage S3: bit-depth-stratified null tables & placeholder visibility (strict depth isolation; default OFF).
+				const BitDepthClass reqDepth = ClassifyBitDepthFromStep(step, diagOutputBits.load(std::memory_order_acquire));
+				bool nullCalibrated = !evidence.Nulls().placeholder;
+				const BitDepthClass nullDepth = reqDepth;
+				if (cfg.useDepthNullTables || cfg.eightBitPromotion)
+				{
+					const DepthNullTableLookupResult nulRes = cfg.depthNullTables.Select(reqDepth);
+					evidence.SetNullTables(nulRes.tables);
+					nullCalibrated = nulRes.calibrated;
+					if (nulRes.usedPlaceholderFallback)
+						cDepthNullTableFallbacks.fetch_add(1, std::memory_order_relaxed);
+				}
+				if (evidence.Nulls().placeholder)
+					cPlaceholderNullTableEvals.fetch_add(1, std::memory_order_relaxed);
+
+				diagExtra.empFloorMode = effFloorMode;
+				diagExtra.floorTheoretical = theoreticalFloorCodes;
+				diagExtra.empFloor[0] = empFloor[0];
+				diagExtra.empFloor[1] = empFloor[1];
+				diagExtra.empValid[0] = empValid[0];
+				diagExtra.empValid[1] = empValid[1];
+				diagExtra.empFallback = empFallback;
+				diagExtra.nullCalibrated = nullCalibrated;
+				diagExtra.nullDepth = nullDepth;
 
 				for (int a = 0; a < 2; ++a)
 				{
@@ -2187,7 +2349,9 @@ namespace SourceIdentity
 					if (!r.have)
 						continue;
 					const int N = r.ls.axisLen;
-					proposer[a].AddEvaluation(r.ls);
+					const bool skipProposer = convProposalsOn && rulesActive;
+					if (!skipProposer)
+						proposer[a].AddEvaluation(r.ls);
 					int cands[kMaxCandidates];
 					int pc = 0;
 					VerifyOptions opt;
@@ -2204,14 +2368,27 @@ namespace SourceIdentity
 							latchedN = a == 0 ? latch.LatchedNx() : latch.LatchedNy();
 						else if (reader[a].HasConfident() && !reader[a].ConfidentNative())
 							latchedN = reader[a].ConfidentN();
-						ProposedCandidate prop[kMaxCandidates];
-						const int extraCnt = proposer[a].Propose(N, nullptr, 0, prop, kMaxCandidates);
-						int extraCands[kMaxCandidates];
-						for (int i = 0; i < extraCnt; ++i)
-							extraCands[i] = prop[i].n;
-						pc = BuildConventionCandidates(a, N, rasterW, rasterH, classicalN, latchedN,
-							extraCands, extraCnt, rulesActive, cands, kMaxCandidates);
-						opt.exactOnly = true;   // P3: exact-verify every prioritized conventional candidate directly
+						if (skipProposer)
+						{
+							// SID-OPT: when rulesActive, BuildConventionCandidates already enumerates all non-parked conventional
+							// geometries + classicalN + latchedN, so proposer extra candidates cannot add any new conventional size.
+							pc = BuildConventionCandidates(a, N, rasterW, rasterH, classicalN, latchedN,
+								nullptr, 0, true, cands, kMaxCandidates);
+						}
+						else
+						{
+							ProposedCandidate prop[kMaxCandidates];
+							const int extraCnt = proposer[a].Propose(N, nullptr, 0, prop, kMaxCandidates);
+							int extraCands[kMaxCandidates];
+							for (int i = 0; i < extraCnt; ++i)
+								extraCands[i] = prop[i].n;
+							pc = BuildConventionCandidates(a, N, rasterW, rasterH, classicalN, latchedN,
+								extraCands, extraCnt, false, cands, kMaxCandidates);
+						}
+						opt.exactOnly = true;       // P3: exact-verify prioritized conventional candidates directly
+						opt.p3TwoPass = true;       // SID-OPT: Pass 1 screen at halfWidth=0, Pass 2 full on top/protected/dipping
+						opt.p3ProtectedN[0] = classicalN;
+						opt.p3ProtectedN[1] = latchedN;
 						cP3ConvProposals.fetch_add(1, std::memory_order_relaxed);
 					}
 					else
@@ -2242,7 +2419,7 @@ namespace SourceIdentity
 					if (reader[a].HasConfident() && !reader[a].ConfidentNative())
 						opt.forceExactN = reader[a].ConfidentN();
 					verifier->Evaluate(r.ls, cands, pc, opt, r.vr);
-					PowerProbe::Run(*probeVerifier, r.ls, floorCodes, static_cast<double>(step), cfg.probe, r.pr);
+					PowerProbe::Run(*probeVerifier, r.ls, floorCodes, static_cast<double>(step), cfg.probe, r.pr, &probeWs[a]);
 				}
 				for (int a = 0; a < 2; ++a)
 				{
@@ -2403,6 +2580,12 @@ namespace SourceIdentity
 						smo.action == StepMarkAction::ConfirmVoidAndChallenge)
 					{
 						evidence.VoidBefore(smo.actionFromTimeUs);
+						diagExtra.stepMarkConfirmed = true;
+						diagExtra.tentativeBucketVoided = true;
+					}
+					else if (smo.action == StepMarkAction::CancelAndMergeBucket)
+					{
+						diagExtra.stepMarkCancelled = true;
 					}
 					if (smo.action == StepMarkAction::ConfirmVoidAndRelease ||
 						smo.action == StepMarkAction::ChallengeExpiredRelease)
@@ -2421,6 +2604,15 @@ namespace SourceIdentity
 					d.shotId = shotId;   // the estimator's own detected shot (obs.shotId above)
 					d.stepCodes = step;
 					d.cachedMB = static_cast<double>(verifier->CachedBytes() + probeVerifier->CachedBytes()) / 1048576.0;
+					d.empiricalFloorMode = effFloorMode;
+					d.theoreticalFloorCodes = theoreticalFloorCodes;
+					d.empiricalFloorCodes[0] = empFloor[0];
+					d.empiricalFloorCodes[1] = empFloor[1];
+					d.empiricalFloorValid[0] = empValid[0];
+					d.empiricalFloorValid[1] = empValid[1];
+					d.empiricalFloorFallback = empFallback;
+					d.nullTablesCalibrated = nullCalibrated;
+					d.nullTableDepthClass = nullDepth;
 					for (int a = 0; a < 2; ++a)
 					{
 						AxisDetail& ad = d.axis[a];
@@ -2597,7 +2789,7 @@ namespace SourceIdentity
 				// Dump v4 (VP_SID_DUMP_V4_DIR): LAST, after the cost, the schedule, the published record and the status (audit M2: its I/O and
 				// verifier delay nothing the decision or its timing reads); reads only (its verifier and its files are its own).
 				if (diagEvals.Ready(diagTag, "b_evals", Diag::EvalsHeaderV4()))
-					DumpV4(run, out, flags, windowCleared, s.seq, s.timeUs, rasterW, rasterH, step, floorCodes, classicalOk, classical, cost);
+					DumpV4(run, out, flags, windowCleared, s.seq, s.timeUs, rasterW, rasterH, step, floorCodes, classicalOk, classical, cost, diagExtra);
 			}
 
 			// ---- status ---------------------------------------------------------------------------------------------------
@@ -2700,6 +2892,10 @@ namespace SourceIdentity
 				c.p3ConventionProposals = cP3ConvProposals.load(std::memory_order_relaxed);
 				c.empiricalFloorEvals = cEmpiricalFloorEvals.load(std::memory_order_relaxed);
 				c.empiricalFloorFallbacks = cEmpiricalFloorFallbacks.load(std::memory_order_relaxed);
+				c.empiricalFloorAllAxisFallbacks = cEmpiricalFloorAllAxisFallbacks.load(std::memory_order_relaxed);
+				c.empiricalFloorPartialAxisFallbacks = cEmpiricalFloorPartialAxisFallbacks.load(std::memory_order_relaxed);
+				c.placeholderNullTableEvals = cPlaceholderNullTableEvals.load(std::memory_order_relaxed);
+				c.depthNullTableFallbacks = cDepthNullTableFallbacks.load(std::memory_order_relaxed);
 				return c;
 			}
 
@@ -2787,6 +2983,9 @@ namespace SourceIdentity
 		bool ChainEstimator::ConventionDrivenProposals() const { return st_->GetConvProposals(); }
 		void ChainEstimator::SetEdgeStatsSettings(const EdgeStatsSettings& s, bool empiricalFloor) { st_->SetEdgeStats(s, empiricalFloor); }
 		EdgeStatsSettings ChainEstimator::GetEdgeStatsSettings() const { return st_->GetEdgeStats(); }
+		void ChainEstimator::SetEmpiricalFloorMode(EmpiricalFloorMode m) { st_->SetEmpiricalFloorMode(m); }
+		void ChainEstimator::SetEightBitPromotion(bool on) { st_->SetEightBitPromotion(on); }
+		void ChainEstimator::SetDepthNullTables(const DepthNullTableSet& tables, bool enable) { st_->SetDepthNullTables(tables, enable); }
 		void ChainEstimator::SetDiagnosticTag(const std::string& tag) { st_->diagTag.Set(tag); }
 		void ChainEstimator::SetDiagnosticDepths(int codedBits, int outputBits)
 		{
