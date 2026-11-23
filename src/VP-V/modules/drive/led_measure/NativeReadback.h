@@ -134,6 +134,7 @@ namespace LedDrive
 		void HoldPollFlush() { pollFlushHeld = true; }
 		bool PollFlushHeld() const { return pollFlushHeld; }
 		bool Armed() const { return armed; }
+		bool Flushing() const { return flushing; }
 
 		// False when not armed (the caller issues the copy now). A slot already recorded is not recorded twice.
 		bool Defer(const std::shared_ptr<int>& alive, void* owner, int slot, IssueFn fn)
@@ -159,6 +160,10 @@ namespace LedDrive
 			std::vector<Entry> work;
 			work.swap(entries);
 			armed = false;
+			// GEM-198 (PERF-1): stay marked flushing across deferred callbacks so a trailing Poll() (slot = -1)
+			// does not fire a redundant immediate->Flush() right before FrameQuiet::EndFrame()'s own pl_gpu_flush.
+			flushing = true;
+			struct FlushGuard { bool& f; ~FlushGuard() { f = false; } } guard{ flushing };
 			size_t issued = 0;
 			for (const Entry& e : work)
 			{
@@ -183,7 +188,7 @@ namespace LedDrive
 			uint64_t epoch = 0;
 		};
 		std::vector<Entry> entries;
-		bool armed = false, pollFlushHeld = false;
+		bool armed = false, pollFlushHeld = false, flushing = false;
 		uint64_t epoch = 0;
 		unsigned long long lateIssued = 0;
 	};
@@ -301,7 +306,7 @@ namespace LedDrive
 				// (armed): no flush here. The Original pathway holds it (SHOULD-5). A host that does not flush (tests, other
 				// hosts) gets one flush per copy.
 				const DeferredCopies& deferral = DeferredCopies::ForThisThread();
-				if (ReadyGate::PollFlushes(step, s.flushed, deferral.Armed(), deferral.PollFlushHeld()))
+				if (ReadyGate::PollFlushes(step, s.flushed, deferral.Armed() || deferral.Flushing(), deferral.PollFlushHeld()))
 				{
 					immediate->Flush();
 					s.flushed = true;
@@ -322,6 +327,8 @@ namespace LedDrive
 
 		// True when the readiness comes from a D3D11 fence; false: the Map probe alone (shown by the host).
 		bool FenceAvailable() const { return fence != nullptr && context4 != nullptr; }
+		// Test inspection hook (GEM-198): true iff Poll() issued a standalone immediate->Flush() on slot i.
+		bool SlotFlushedForTest(int i) const { return Valid(i) && slot[static_cast<size_t>(i)].flushed; }
 
 		// The one rule for a DO_NOT_WAIT Map: success is Ready, DXGI_ERROR_WAS_STILL_DRAWING is the
 		// only Pending, every other HRESULT (device removed, invalid call, out of memory...) is Failed.

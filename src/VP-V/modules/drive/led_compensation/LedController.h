@@ -334,7 +334,10 @@ namespace LedDrive
 		// covered: the look-ahead reaches that far (led_floor applies, else
 		// led_floor_reactive too).
 		ControllerOutput Tick(const FrameStats& stats, double elapsedMs, const Lookahead* ahead = nullptr,
-			bool predicted = false, bool covered = false);
+			bool predicted = false, bool covered = false, bool wantLog = true);
+		// GEM-201 (PERF-4): builds the exact same log string on demand when Tick ran with wantLog = false
+		// (e.g. a CNTR command fired after Tick returned without a light command).
+		std::string FormatLastLog(const ControllerOutput& out) const;
 		int Light() const { return light; }
 		double Level() const { return level; }
 		double Protection() const { return protection; }
@@ -364,6 +367,19 @@ namespace LedDrive
 		bool ramping = false;
 		// cut_lead: window: the jump for a cut still in the window was sent.
 		bool cutLeadSent = false;
+		// Snapshot of the last Tick's scalars for lazy FormatLastLog (GEM-201).
+		struct LogSnapshot
+		{
+			int apl = 0;
+			int sustainedHighlight = 0;
+			int target = 0;
+			bool early = false;
+			bool cut = false;
+			bool fade = false;
+			bool seenCut = false;
+			bool brightDump = false;
+			bool covered = false;
+		} lastLog;
 	};
 
 	// gain_led = flux(ceiling) / flux(LED level), in linear light.

@@ -539,7 +539,7 @@ namespace LedDrive
 	}
 
 	ControllerOutput CompensateController::Tick(const FrameStats& stats, double elapsedMs, const Lookahead* ahead,
-		bool predicted, bool covered)
+		bool predicted, bool covered, bool wantLog)
 	{
 		// Without look-ahead covering the LED's response the floor is higher.
 		// 7c-2: the scene floor is also kept where a full dump would start a
@@ -769,16 +769,31 @@ namespace LedDrive
 			std::pow(2.0, allowedStops) / (highlightLinear * protection) : 1e9;
 		out.holdGain = stats.fade;
 		out.gain = CompensationGainFor(flux, ceiling, light, out);
+		lastLog.apl = apl;
+		lastLog.sustainedHighlight = static_cast<int>(stats.sustainedHighlight);
+		lastLog.target = target;
+		lastLog.early = early;
+		lastLog.cut = stats.cut;
+		lastLog.fade = stats.fade;
+		lastLog.seenCut = seenCut;
+		lastLog.brightDump = brightDump;
+		lastLog.covered = covered;
+		if (wantLog || out.lightCommand >= 0)
+			out.log = FormatLastLog(out);
+		return out;
+	}
+
+	std::string CompensateController::FormatLastLog(const ControllerOutput& out) const
+	{
 		std::ostringstream log;
-		log << "LED compensate: apl=" << apl << " sustained_highlight=" << static_cast<int>(stats.sustainedHighlight)
-			<< " light " << light << "/" << out.lightTarget << (early ? " early:" + std::to_string(target) : "")
+		log << "LED compensate: apl=" << lastLog.apl << " sustained_highlight=" << lastLog.sustainedHighlight
+			<< " light " << light << "/" << out.lightTarget << (lastLog.early ? " early:" + std::to_string(lastLog.target) : "")
 			<< (out.lightCommand >= 0 ? " sent" : "")
 			<< " protection=" << protection << " area=" << area << " gain=" << out.gain
-			<< (stats.cut ? " cut" : "") << (stats.fade ? " fade" : "")
-			<< (seenCut ? " cut-jump" : brightDump ? " bright-dump" : "") << (out.cutLeadHold ? " cut-lead" : "")
-			<< (covered ? "" : " reactive");
-		out.log = log.str();
-		return out;
+			<< (lastLog.cut ? " cut" : "") << (lastLog.fade ? " fade" : "")
+			<< (lastLog.seenCut ? " cut-jump" : lastLog.brightDump ? " bright-dump" : "") << (out.cutLeadHold ? " cut-lead" : "")
+			<< (lastLog.covered ? "" : " reactive");
+		return log.str();
 	}
 
 	void CntrPairing::Configure(double eotfIn, int maxUsableIn, bool enabledIn, bool softwareFirstIn)

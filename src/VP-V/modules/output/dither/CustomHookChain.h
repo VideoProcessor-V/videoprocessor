@@ -110,6 +110,8 @@ namespace CustomHookChain
         // Hooks to submit this frame. cinema_only entries are skipped when
         // lowLatency is true.
         void Collect(bool lowLatency, std::vector<const pl_hook*>& hooks) const;
+        // Count of hooks that Collect(lowLatency, ...) would submit, without pushing or allocating.
+        size_t SubmittedCount(bool lowLatency) const;
 
         // True when a hook submitted this frame quantises the OUTPUT stage
         // (IsOutputQuantizer, audit 2026-10-16); the renderer then clears

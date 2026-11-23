@@ -305,6 +305,15 @@ namespace CustomHookChain
                 hooks.push_back(entry.hook);
     }
 
+    size_t Chain::SubmittedCount(bool lowLatency) const
+    {
+        size_t count = 0;
+        for (const Entry& entry : entries)
+            if (Submitted(entry, lowLatency))
+                ++count;
+        return count;
+    }
+
     bool Chain::SuppressesDither(bool lowLatency) const
     {
         return std::any_of(entries.begin(), entries.end(), [&](const Entry& entry)

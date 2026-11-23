@@ -40,10 +40,6 @@ vec2 block_centre(ivec2 b)
 {
     return vec2(ivec2(rect_px.xy + vec2(b) * block_step)) + vec2(1.5);
 }
-)GLSL";
-
-		// R2 (GRAIN): the 3x3 mean of one block, and the grain amount at it.
-		const char* const GRAIN_HEADER = R"GLSL(
 float block_mean(ivec2 b, ivec2 lo, ivec2 hi)
 {
     ivec2 bb = clamp(b, ivec2(0), ivec2(blocks) - ivec2(1));
@@ -52,10 +48,35 @@ float block_mean(ivec2 b, ivec2 lo, ivec2 hi)
     for (int dy = 0; dy < 3; dy++)
         for (int dx = 0; dx < 3; dx++) {
             ivec2 p = clamp(origin + ivec2(dx, dy), lo, hi);
-            acc += dot(pow(clamp(texelFetch(src, p, 0).rgb, vec3(0.0), vec3(1.0)), vec3(boost)), weights);
+            vec3 rgb = clamp(texelFetch(src, p, 0).rgb, vec3(0.0), vec3(1.0));
+            if (boost != 1.0)
+                rgb = pow(rgb, vec3(boost));
+            acc += dot(rgb, weights);
         }
     return acc / 9.0;
 }
+shared uint s_hist[256];
+shared uint s_sum;
+shared uint s_blocks;
+shared uint s_max;
+)GLSL";
+
+		const char* const PEAK_HEADER = R"GLSL(
+bool in_rect(vec2 p, vec4 m)
+{
+    return p.x >= m.x && p.x < m.z && p.y >= m.y && p.y < m.w;
+}
+bool masked(vec2 p)
+{
+    return in_rect(p, mask0) || in_rect(p, mask1) || in_rect(p, mask2) ||
+           in_rect(p, mask3) || in_rect(p, mask4) || in_rect(p, mask5);
+}
+shared uint s_peak;
+)GLSL";
+
+		// R2 (GRAIN) + GEM-199: cooperative 18x18 shared tile of block means (9x fewer fetches/pows).
+		const char* const GRAIN_HEADER = R"GLSL(
+shared float s_mean[18][18];
 float grain_at(vec2 picture_px)
 {
     vec2 s = src_crop.xy + (picture_px - pic_rect.xy) * src_crop.zw / pic_rect.zw;
@@ -66,58 +87,84 @@ float grain_at(vec2 picture_px)
 )GLSL";
 
 		const char* const BODY = R"GLSL(
+uint li = gl_LocalInvocationIndex;
+s_hist[li] = 0u;
+if (li == 0u) {
+    s_sum = 0u;
+    s_blocks = 0u;
+    s_max = 0u;
+}
+ivec2 lo = ivec2(rect_px.xy);
+ivec2 hi = ivec2(rect_px.zw) - ivec2(1);
+#ifdef GRAIN
+ivec2 wg = ivec2(gl_WorkGroupID.xy) * 16;
+for (uint k = li; k < 324u; k += 256u) {
+    int ty = int(k / 18u);
+    int tx = int(k - uint(ty) * 18u);
+    ivec2 nb = clamp(wg + ivec2(tx - 1, ty - 1), ivec2(0), ivec2(blocks) - ivec2(1));
+    s_mean[ty][tx] = masked(block_centre(nb)) ? -1.0 : block_mean(nb, lo, hi);
+}
+#endif
+barrier();
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 if (b.x < int(blocks.x) && b.y < int(blocks.y) && !masked(block_centre(b))) {
-    ivec2 lo = ivec2(rect_px.xy);
-    ivec2 hi = ivec2(rect_px.zw) - ivec2(1);
-    ivec2 origin = ivec2(rect_px.xy + vec2(b) * block_step);
-    float acc = 0.0;
-    for (int dy = 0; dy < 3; dy++)
-        for (int dx = 0; dx < 3; dx++) {
-            ivec2 p = clamp(origin + ivec2(dx, dy), lo, hi);
-            acc += dot(pow(clamp(texelFetch(src, p, 0).rgb, vec3(0.0), vec3(1.0)), vec3(boost)), weights);
-        }
-    float code = 16.0 + 219.0 * clamp(acc / 9.0, 0.0, 1.0);
+#ifdef GRAIN
+    int lx = int(gl_LocalInvocationID.x);
+    int ly = int(gl_LocalInvocationID.y);
+    float mean = s_mean[ly + 1][lx + 1];
+#else
+    float mean = block_mean(b, lo, hi);
+#endif
+    float code = 16.0 + 219.0 * clamp(mean, 0.0, 1.0);
     uint scaled = uint(code * 16.0 + 0.5);
     float hist_code = code;
 #ifdef GRAIN
     // Grain averages out over the 3x3 blocks around; a real highlight spans
     // them. Weighted by the grain amount, not darkened by it.
+    ivec2 origin = ivec2(rect_px.xy + vec2(b) * block_step);
     float g = grain_at(vec2(origin) + vec2(1.5));
     if (g > 0.0) {
         // Masked neighbours (a subtitle) are left out (hunt 2).
         float wide = 0.0, around = 0.0;
         for (int ny = -1; ny <= 1; ny++)
             for (int nx = -1; nx <= 1; nx++) {
-                ivec2 nb = clamp(b + ivec2(nx, ny), ivec2(0), ivec2(blocks) - ivec2(1));
-                if (!masked(block_centre(nb))) {
-                    wide += block_mean(nb, lo, hi);
+                float nm = s_mean[ly + 1 + ny][lx + 1 + nx];
+                if (nm >= 0.0) {
+                    wide += nm;
                     around += 1.0;
                 }
             }
-        float wide_mean = around > 0.0 ? wide / around : acc / 9.0;
-        hist_code = 16.0 + 219.0 * clamp(mix(acc / 9.0, wide_mean, g), 0.0, 1.0);
+        float wide_mean = around > 0.0 ? wide / around : mean;
+        hist_code = 16.0 + 219.0 * clamp(mix(mean, wide_mean, g), 0.0, 1.0);
     }
 #endif
-    atomicAdd(hist[min(int(hist_code), 255)], 1u);
-    atomicAdd(total_sum, scaled);
-    atomicAdd(total_blocks, 1u);
+    atomicAdd(s_hist[min(int(hist_code), 255)], 1u);
+    atomicAdd(s_sum, scaled);
+    atomicAdd(s_blocks, 1u);
 #ifndef FULL_PEAK
-    atomicMax(max_block, scaled);
+    atomicMax(s_max, scaled);
 #endif
-    int cell = min(int(float(b.y) * 18.0 / blocks.y), 17) * 32 +
-               min(int(float(b.x) * 32.0 / blocks.x), 31);
-    atomicAdd(cell_sum[cell], scaled);
-    atomicAdd(cell_count[cell], 1u);
+}
+barrier();
+uint hc = s_hist[li];
+if (hc != 0u)
+    atomicAdd(hist[li], hc);
+if (li == 0u) {
+    if (s_sum != 0u) atomicAdd(total_sum, s_sum);
+    if (s_blocks != 0u) atomicAdd(total_blocks, s_blocks);
+#ifndef FULL_PEAK
+    if (s_max != 0u) atomicMax(max_block, s_max);
+#endif
 }
 )GLSL";
 
-		// Hunt 2 (owner 2026-10-17, led_peak_full_coverage): one invocation
-		// per box of the AreaPeakGrid tiling rect_px; the box's area mean
-		// (fractional pixels at its edges weighted by their share, as cv2
-		// INTER_AREA does) of the unmasked pixels, the brightest into
-		// max_block. A box left with under half its area is skipped.
+		// Hunt 2 (owner 2026-10-17, led_peak_full_coverage) + GEM-199: guard pow on boost != 1.0,
+		// reduce peak in shared memory per workgroup before global atomicMax.
 		const char* const PEAK_BODY = R"GLSL(
+uint li = gl_LocalInvocationIndex;
+if (li == 0u)
+    s_peak = 0u;
+barrier();
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 if (b.x < int(peak_boxes.x) && b.y < int(peak_boxes.y)) {
     vec2 lo = rect_px.xy + vec2(b) * peak_box;
@@ -136,7 +183,10 @@ if (b.x < int(peak_boxes.x) && b.y < int(peak_boxes.y)) {
             if (wx <= 0.0 || masked(vec2(float(x), float(y)) + vec2(0.5)))
                 continue;
             ivec2 p = clamp(ivec2(x, y), ivec2(rect_px.xy), last);
-            float v = dot(pow(clamp(texelFetch(src, p, 0).rgb, vec3(0.0), vec3(1.0)), vec3(boost)), weights);
+            vec3 rgb = clamp(texelFetch(src, p, 0).rgb, vec3(0.0), vec3(1.0));
+            if (boost != 1.0)
+                rgb = pow(rgb, vec3(boost));
+            float v = dot(rgb, weights);
             sum += wx * wy * v;
             area += wx * wy;
         }
@@ -144,10 +194,13 @@ if (b.x < int(peak_boxes.x) && b.y < int(peak_boxes.y)) {
     if (area > 0.0 && area >= 0.5 * peak_box.x * peak_box.y - 1e-4) {
         float code = 16.0 + 219.0 * clamp(sum / area, 0.0, 1.0);
         uint scaled = uint(code * 16.0 + 0.5);
-        if (scaled > max_block)
-            atomicMax(max_block, scaled);
+        if (scaled > s_peak)
+            atomicMax(s_peak, scaled);
     }
 }
+barrier();
+if (li == 0u && s_peak > max_block)
+    atomicMax(max_block, s_peak);
 )GLSL";
 
 		pl_var UintArray(const char* name, int count)
@@ -260,10 +313,8 @@ if (i < READBACK_WORDS) {
 			std::min<float>(MAX_BLOCKS_Y, std::floor(height / 3.0f)) };
 		const float step[2] = { width / blocks[0], height / blocks[1] };
 
-		pl_buffer_var bufferVars[6] = {
+		pl_buffer_var bufferVars[4] = {
 			{ UintArray("hist", HISTOGRAM_BINS), {} },
-			{ UintArray("cell_sum", GRID_W * GRID_H), {} },
-			{ UintArray("cell_count", GRID_W * GRID_H), {} },
 			{ pl_var_uint("total_sum"), {} },
 			{ pl_var_uint("total_blocks"), {} },
 			{ pl_var_uint("max_block"), {} } };
@@ -292,7 +343,7 @@ if (i < READBACK_WORDS) {
 		descriptors[1].desc.access = PL_DESC_ACCESS_READWRITE;
 		descriptors[1].binding.object = ring[slot];
 		descriptors[1].buffer_vars = bufferVars;
-		descriptors[1].num_buffer_vars = 6;
+		descriptors[1].num_buffer_vars = 4;
 		descriptors[1].memory = PL_MEMORY_COHERENT;
 		// R2: the grain map, when handed over and the source crop is known.
 		const bool useGrain = grain && crop.x1 > crop.x0 && crop.y1 > crop.y0 && rw > 0.0f && rh > 0.0f;
@@ -397,7 +448,7 @@ if (i < READBACK_WORDS) {
 				{ pl_var_vec2("peak_box"), peakBox, true } };
 			pl_custom_shader peak{};
 			peak.description = "VideoProcessor Dynamic Drive peak (full coverage)";
-			peak.header = MASK_HEADER;
+			peak.header = PEAK_HEADER;
 			peak.body = PEAK_BODY;
 			peak.input = PL_SHADER_SIG_NONE;
 			peak.output = PL_SHADER_SIG_NONE;

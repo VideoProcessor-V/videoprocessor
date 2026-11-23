@@ -22,12 +22,10 @@ namespace LedDrive
 	// Sums are stored in 1/16 code units so they stay integers on the GPU.
 	constexpr uint32_t SUM_SCALE = 16;
 
-	// Exactly the layout of the GPU pass's storage buffer.
+	// Exactly the layout of the GPU pass's storage buffer (GEM-199: dead cellSum/cellCount removed, 5644 -> 1036 B).
 	struct RawMeasurement
 	{
 		uint32_t histogram[HISTOGRAM_BINS];
-		uint32_t cellSum[GRID_W * GRID_H];
-		uint32_t cellCount[GRID_W * GRID_H];
 		uint32_t sum;
 		uint32_t blocks;
 		// The peak, in SUM_SCALE units; 0 = not measured: the largest area mean

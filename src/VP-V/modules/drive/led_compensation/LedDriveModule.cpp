@@ -99,9 +99,11 @@ namespace LedDrive
 		recovery.Configure(led, flux);
 	}
 
-	std::vector<std::pair<double, double>> LedDriveModule::LedLandingsLocked(int pendingLevel) const
+	void LedDriveModule::FillLedLandingsLocked(int pendingLevel, std::vector<std::pair<double, double>>& landings,
+		const DriverStatus* frameStatus) const
 	{
-		std::vector<std::pair<double, double>> landings;
+		landings.clear();
+		landings.reserve(commands.size() + 1);
 		const int latency = LatencyFramesLocked();
 		const double period = std::max(1.0, framePeriodMs);
 		for (const Command& command : commands)
@@ -116,10 +118,12 @@ namespace LedDrive
 		// frame's display time).
 		const int queued = pendingLevel >= 0 ? pendingLevel : queuedLight;
 		if (queued >= 0 && driver)
-			landings.push_back({ QueuedLightLandingMsLocked(driver->Status()), LedFractionLocked(queued) });
+		{
+			const DriverStatus status = frameStatus ? *frameStatus : driver->Status();
+			landings.push_back({ QueuedLightLandingMsLocked(status), LedFractionLocked(queued) });
+		}
 		std::stable_sort(landings.begin(), landings.end(),
 			[](const std::pair<double, double>& a, const std::pair<double, double>& b) { return a.first < b.first; });
-		return landings;
 	}
 
 	int LedDriveModule::CutLevelLocked() const
@@ -510,6 +514,17 @@ namespace LedDrive
 		LedDriveConfig effective = led;
 		effective.peakFullCoverage = led.peakFullCoverage && PeakConsumed(led.mode);
 		return effective;
+	}
+
+	LedDriveModule::MeasurementSettings LedDriveModule::MeasurementConfig() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		MeasurementSettings s;
+		for (int i = 0; i < 3; ++i) s.aplWeights[i] = led.aplWeights[i];
+		s.peakFullCoverage = led.peakFullCoverage && PeakConsumed(led.mode);
+		s.pictureOnly = led.pictureOnly;
+		s.highlightGrainSuppress = led.highlightGrainSuppress;
+		return s;
 	}
 
 	LedDriveConfig LedDriveModule::ConfiguredSettings() const
@@ -1080,10 +1095,14 @@ namespace LedDrive
 		lastFrameWallMs = NowMs();   // audit 2026-10-16
 		idleRestored = false;
 		// Levels the driver wrote since the last frame: they went out during
-		// that frame.
+		// that frame. Snapshot once and reuse across StepCompensateLocked / StepFadeToBlackLocked (GEM-201).
+		DriverStatus frameStatus;
+		bool haveFrameStatus = false;
 		if (compensating && applyGain && driver)
 		{
-			const DriverStatus status = driver->Status();
+			frameStatus = driver->Status();
+			haveFrameStatus = true;
+			const DriverStatus& status = frameStatus;
 			// led_landing_ms (review 2026-10-17): each lands its latency after
 			// the driver wrote it, in ms; off = by frames from this frame.
 			if (status.lightSends != seenSends && status.lastSentLight >= 0)
@@ -1120,8 +1139,9 @@ namespace LedDrive
 		}
 		if (compensating && haveStats && !awaitingContrastReset)
 		{
-			StepCompensateLocked(sequence, elapsed);
-			StepFadeToBlackLocked(sequence, timeMs);
+			const DriverStatus* statusPtr = haveFrameStatus ? &frameStatus : nullptr;
+			StepCompensateLocked(sequence, elapsed, statusPtr);
+			StepFadeToBlackLocked(sequence, timeMs, statusPtr);
 		}
 		// Dead time: the LED reaches a commanded level led_latency_ms (in
 		// whole frames) after the command, and the gain switches with it.
@@ -1189,7 +1209,7 @@ namespace LedDrive
 		return GainLocked();
 	}
 
-	void LedDriveModule::StepCompensateLocked(uint64_t sequence, double elapsedMs)
+	void LedDriveModule::StepCompensateLocked(uint64_t sequence, double elapsedMs, const DriverStatus* frameStatus)
 	{
 		// The frame a command sent now is for: the one shown when the LED gets
 		// there. Its predicted statistics when the walk has seen it (or the
@@ -1235,7 +1255,7 @@ namespace LedDrive
 			haveAhead = true;
 		}
 		const ControllerOutput out = compensator.Tick(target, elapsedMs, haveAhead ? &ahead : nullptr,
-			predicted, covered);
+			predicted, covered, pendingLog.empty());
 		lookaheadCovers = covered;
 		// CNTR assist (7c-1): CNTR follows the LED's modelled light for what
 		// VP's gain cannot do within the highlight tolerance, as a command
@@ -1347,9 +1367,12 @@ namespace LedDrive
 			// CNTR is never above the need at landing. Off: the LED now, as before.
 			// Bug hunt 2 (render-ahead): the CNTR lands cntr_latency_ms after now,
 			// which is the frame's display time less its lead.
-			const double pairedLed = CntrPairLedFraction(led.cntrPairPredict, ledModel,
-				led.cntrPairPredict ? LedLandingsLocked(out.lightCommand >= 0 && applyGain &&
-					fadeToBlack != FadeToBlack::Deep ? out.lightCommand : -1) : std::vector<std::pair<double, double>>(),
+			if (led.cntrPairPredict)
+				FillLedLandingsLocked(out.lightCommand >= 0 && applyGain &&
+					fadeToBlack != FadeToBlack::Deep ? out.lightCommand : -1, landingsScratch, frameStatus);
+			else
+				landingsScratch.clear();
+			const double pairedLed = CntrPairLedFraction(led.cntrPairPredict, ledModel, landingsScratch,
 				CommandLeadMs(projector.cntrLatencyMs, frameAheadMs));
 			// cntr_pair_predict, bright cut's fade-up (cntr-cut fix 2026-10-18, owner rule: CNTR
 			// never above need): VP's gain is held under the fade-up's gain ceiling (GainLocked:
@@ -1378,16 +1401,17 @@ namespace LedDrive
 		{
 			// The LED : CNTR command ratio for the owner (planner's step 7
 			// answer 1).
-			const DriverStatus status = driver->Status();
+			const DriverStatus status = frameStatus ? *frameStatus : driver->Status();
 			std::ostringstream log;
-			log << out.log << " cntr=" << pairing.Contrast() << (contrastCommand >= 0 ? " sent" : "")
+			log << (out.log.empty() ? compensator.FormatLastLog(out) : out.log)
+				<< " cntr=" << pairing.Contrast() << (contrastCommand >= 0 ? " sent" : "")
 				<< " lpw1:cntr=" << status.lightSends << ":" << status.contrastSends;
 			pendingLog = log.str();
 			pendingLogSent = out.lightCommand >= 0 || contrastCommand >= 0;
 		}
 	}
 
-	void LedDriveModule::StepFadeToBlackLocked(uint64_t sequence, double timeMs)
+	void LedDriveModule::StepFadeToBlackLocked(uint64_t sequence, double timeMs, const DriverStatus* frameStatus)
 	{
 		if ((led.ftbCustomDim == FtbCustomDim::Off && fadeToBlack == FadeToBlack::Normal) ||
 			!applyGain || !driver)
@@ -1401,7 +1425,7 @@ namespace LedDrive
 			for (auto it = predictions.upper_bound(sequence);
 				it != predictions.end() && it->first <= sequence + (led.lookahead ? lookaheadDepth : 0); ++it)
 				lightAhead = lightAhead || Corrected(it->second).apl >= 17.5;
-		const DriverStatus status = driver->Status();
+		const DriverStatus status = frameStatus ? *frameStatus : driver->Status();
 		switch (fadeToBlack)
 		{
 		case FadeToBlack::Normal:

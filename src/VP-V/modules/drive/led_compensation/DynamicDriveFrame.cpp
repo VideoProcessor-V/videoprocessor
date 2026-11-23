@@ -217,7 +217,8 @@ namespace LedDrive
 				}
 			}
 			const HdrPeakAnalysisCrop::TrustedPicture& trusted = *in.trustedPicture;
-			const LedDriveConfig config = led->Config();
+			// GEM-201 (PERF-4): POD measurement settings instead of deep-copying LedDriveConfig's vectors/strings every frame.
+			const LedDriveModule::MeasurementSettings config = led->MeasurementConfig();
 			measurement.SetFrame(ActivePictureRect(trusted.available, trusted.left, trusted.top, trusted.right,
 				trusted.bottom, image.crop.x0, image.crop.y0, image.crop.x1, image.crop.y1), config.aplWeights,
 				boostExponent, in.sourceSequence);
@@ -265,25 +266,32 @@ namespace LedDrive
 		p.veil = gain.veil;
 		p.wtwPassthrough = wtwPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0;
 		p.btbPassthrough = btbPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0;
+		frameCompensationIdentity = p.gain == 1.0 && p.boost == 1.0 && !(p.shadowLift * p.veil > 0.0);
 	}
 
-	void DynamicDriveFrame::AfterCollect(const DynamicDriveFrameInputs& in, size_t compensationHooks)
+	void DynamicDriveFrame::AfterCollect(const DynamicDriveFrameInputs& in, size_t compensationHooks, size_t compensationLoaded)
 	{
 		const std::shared_ptr<LedDriveModule> led = std::move(frameModule);
 		frameModule.reset();
 		const double boostExponent = frameBoostExponent;
+		const bool identity = frameCompensationIdentity;
+		frameCompensationIdentity = false;
 		if (!frameBlock)
 		{
 			MergeModuleFallbacks(led);
 			return;
 		}
+		// GEM-200 (PERF-3): an identity frame intentionally skips pushing the hook when loaded;
+		// preserve missing-shader detection by checking compensationLoaded (or SubmittedCount for 2-arg callers).
+		const size_t effectiveHooks = compensationHooks > 0 ? compensationHooks :
+			(identity && in.compensationSlotRuns ? (compensationLoaded > 0 ? compensationLoaded : compensation.SubmittedCount(false)) : 0);
 		// Module findings 2026-10-24 item 1: compensate dims the LED only because this hook
 		// brightens the picture by the same amount. When it does not run this frame (slot off,
 		// shader not loaded, or disabled by libplacebo) the module holds full drive and shows
 		// "Fallbacks engaged: LED drive (held at full: ...)"; cheap when unchanged. Also when the
 		// hook is skipped, not only when it is pushed.
 		const std::string unavailable = CompensationUnavailable(in.compensationSlotRuns,
-			compensationHooks, compensationRuntimeDisabled);
+			effectiveHooks, compensationRuntimeDisabled);
 		if (led)
 		{
 			led->SetCompensationAvailable(unavailable.empty(), unavailable);

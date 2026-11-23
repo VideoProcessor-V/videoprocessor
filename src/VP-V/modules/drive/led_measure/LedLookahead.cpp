@@ -199,10 +199,6 @@ namespace LedDrive
 				out.sum += scaled;
 				out.blocks += 1;
 				out.maximum = std::max(out.maximum, scaled);
-				const int cell = std::min(by * GRID_H / blocksY, GRID_H - 1) * GRID_W +
-					std::min(bx * GRID_W / blocksX, GRID_W - 1);
-				out.cellSum[cell] += scaled;
-				out.cellCount[cell] += 1;
 			}
 		if (out.blocks > 0 && options.peakFullCoverage)
 		{

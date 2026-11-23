@@ -114,10 +114,11 @@ namespace LedDrive
 		// event restarts the frame-period smoothing. A continuity slip holds (nothing). Returns
 		// whether a module received it.
 		bool OnResync(bool full, bool timing, uint64_t sourceSequence, double sourceRateHz);
-		// After S2's Collect, with the compensation hooks it pushed (ColourCounts::ledCompensation):
+		// After S2's Collect, with the compensation hooks it pushed (ColourCounts::ledCompensation)
+		// and optionally how many were loaded (ColourCounts::ledCompensationLoaded, for GEM-200 identity skip):
 		// the compensation-unavailable / measurement-off holds, the gamma-boost entry and the
 		// module's fallback entries.
-		void AfterCollect(const DynamicDriveFrameInputs& in, size_t compensationHooks);
+		void AfterCollect(const DynamicDriveFrameInputs& in, size_t compensationHooks, size_t compensationLoaded = 0);
 		// The hook objects the S2 segment holds by reference.
 		MeasurementHook& Measurement() { return measurement; }
 		CustomHookChain::Chain& Compensation() { return compensation; }
@@ -178,6 +179,7 @@ namespace LedDrive
 		// DecideFrame -> AfterCollect (render thread, one frame).
 		std::shared_ptr<LedDriveModule> frameModule;
 		double frameBoostExponent = 1.0;
+		bool frameCompensationIdentity = false;
 		bool frameBlock = false;             // the gamma boost entry is engaged (audit N1)
 		bool moduleEntriesEngaged = false;     // a module entry was engaged last frame (audit N1)
 	};

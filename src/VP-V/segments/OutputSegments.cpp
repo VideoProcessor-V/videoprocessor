@@ -85,10 +85,22 @@ namespace OutputSegments
 			if (!f.ledBlock)
 				return;
 			const size_t start = hooks.size();
-			if (f.ledCompensation)
-				compensation.Collect(false, hooks);
-			tag(start, Id::DriveLedCompensation);
 			const CompensationParams& c = f.compensation;
+			// GEM-200 (PERF-3, matching shaders/LED compensation.glsl:181-183 & W1B GEM-186):
+			// skip pushing the full-screen pass when the shader is a pure identity, while still
+			// reporting ledCompensationLoaded so genuinely missing shaders still hold full drive.
+			const bool identity = c.gain == 1.0 && c.boost == 1.0 && !(c.shadowLift * c.veil > 0.0);
+			if (f.ledCompensation)
+			{
+				if (identity)
+					counts.ledCompensationLoaded = compensation.SubmittedCount(false);
+				else
+				{
+					compensation.Collect(false, hooks);
+					counts.ledCompensationLoaded = hooks.size() - start;
+				}
+			}
+			tag(start, Id::DriveLedCompensation);
 			for (size_t i = start; i < hooks.size(); ++i)
 			{
 				SetHookParameter(hooks[i], "gain", c.gain);

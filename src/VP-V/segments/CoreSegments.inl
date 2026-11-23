@@ -354,7 +354,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     SyncFallback(colourCounts.unhandled ? FallbackCatalog::Engaged("S2 placeholder stage",
         "a placeholder slot has a component but no output-segment stage yet (not run)") :
         FallbackCatalog::Released("S2 placeholder stage"));
-    dynamicDrive.AfterCollect(led, colourCounts.ledCompensation);
+    dynamicDrive.AfterCollect(led, colourCounts.ledCompensation, colourCounts.ledCompensationLoaded);
     // A cadence repeat shows the previous picture again: the sigma-delta
     // skips its motion search (zero motion; owner 2026-10-13 efficiency).
     for (const pl_hook* hook : frameHooks)

@@ -157,6 +157,16 @@ namespace LedDrive
 		// frame plus a GPU pass in compensate). ConfiguredSettings() returns them unmodified.
 		LedDriveConfig Config() const override;
 		LedDriveConfig ConfiguredSettings() const;
+		// GEM-201 (PERF-4): POD measurement subset read every frame by DynamicDriveFrame::DecideFrame
+		// without copying LedDriveConfig's vectors/strings (peakFullCoverage matches Config()).
+		struct MeasurementSettings
+		{
+			double aplWeights[3] = { 0.299, 0.587, 0.114 };
+			bool peakFullCoverage = true;
+			bool pictureOnly = true;
+			bool highlightGrainSuppress = false;
+		};
+		MeasurementSettings MeasurementConfig() const;
 		static bool PeakConsumed(Mode mode) { return mode == Mode::Script || mode == Mode::LogOnly; }
 		// The gamma VP's output is encoded for (the renderer sets it from the
 		// frame's output transfer): the gamma boost's base (delta 4).
@@ -288,8 +298,8 @@ namespace LedDrive
 		double LedFractionLocked(double level) const;
 		int LatencyFramesForLocked(int ms) const;
 		FrameStats Corrected(const FrameStats& predicted) const;
-		void StepCompensateLocked(uint64_t sequence, double elapsedMs);
-		void StepFadeToBlackLocked(uint64_t sequence, double timeMs);
+		void StepCompensateLocked(uint64_t sequence, double elapsedMs, const DriverStatus* frameStatus);
+		void StepFadeToBlackLocked(uint64_t sequence, double timeMs, const DriverStatus* frameStatus);
 		// audit 2026-10-16: led_idle_restore_s.
 		double MsSinceLastFrameLocked() const;
 		void RestoreIdleCompensateLocked();
@@ -391,11 +401,12 @@ namespace LedDrive
 		uint64_t lastBrightCutSequence = 0;
 		int DmdClipLocked() const;
 		int CutLevelLocked() const;
-		// cntr_pair_predict (post-merge audit 2026-10-17): the LPW1s still to land, as
-		// (ms from the current frame, LED fraction) in time order - those in flight and
-		// pendingLevel (this tick's, not yet written; -1 none) or else the queued
-		// queuedLight, led_latency_ms after the driver's next send slot (bug hunt 2).
-		std::vector<std::pair<double, double>> LedLandingsLocked(int pendingLevel) const;
+		// cntr_pair_predict (post-merge audit 2026-10-17) + GEM-206 (MISS-dynamic-drive-2 AMEND):
+		// fills a reusable scratch vector (clear + reserve; commands is an unbounded deque) with the
+		// LPW1s still to land in time order, reusing the frame's DriverStatus snapshot when provided.
+		void FillLedLandingsLocked(int pendingLevel, std::vector<std::pair<double, double>>& out,
+			const DriverStatus* frameStatus = nullptr) const;
+		mutable std::vector<std::pair<double, double>> landingsScratch;
 		void HoldContrastLocked();
 		void ResetPeriodSmoothingLocked(double sourceFps);
 		// mode: script with script_smoothing: on (step 7b): VP's gain bridging
