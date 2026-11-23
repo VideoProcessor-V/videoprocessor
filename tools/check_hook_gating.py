@@ -2920,7 +2920,7 @@ def main(argv=None):
         if args.write_budget:
             counts = {}
             for r in res["files"]:
-                if r["bucket"] == "production" and r.get("sites"):
+                if _site_gated(r) and r.get("sites"):
                     counts[r["file"]] = len(r["sites"])
             doc = {"_note": "Per-file ceiling on VPV-HOOK SITES in Bill-owned files (tools/check_hook_gating.py; " + SITE_NOTE +
                             "). Ratchet: lower a value when a site is collapsed into a seam; never raise one without a HOOK-APPROVAL "

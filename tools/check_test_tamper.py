@@ -144,18 +144,64 @@ def git(root, *args):
     return r.stdout
 
 
-def commit_files(root, sha):
-    names = git(root, "diff-tree", "--no-commit-id", "--name-status", "-r", "--no-renames", sha)
-    out = []
-    for line in names.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 2:
+def _parse_raw_and_patch(text):
+    """Parse combined `git --raw -p -U0 --no-renames` output for one commit into
+    [{path, status, added:[lines], removed:[lines]}]."""
+    files = []
+    diff_map = {}
+    cur = None
+    in_hunk = False
+    for line in text.splitlines():
+        if line.startswith(":") and "\t" in line:
+            head, path = line.split("\t", 1)
+            status = head.rsplit(" ", 1)[-1]
+            rec = {"path": path, "status": status, "added": [], "removed": []}
+            files.append(rec)
+            diff_map["a/" + path + " b/" + path] = rec
+            cur = None
+            in_hunk = False
             continue
-        status, path = parts[0], parts[-1]
-        diff = git(root, "show", "--format=", "-U0", "--no-renames", sha, "--", path)
-        add = [l[1:] for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++")]
-        rem = [l[1:] for l in diff.splitlines() if l.startswith("-") and not l.startswith("---")]
-        out.append({"path": path, "status": status, "added": add, "removed": rem})
+        if line.startswith("diff --git "):
+            cur = diff_map.get(line[len("diff --git "):])
+            in_hunk = False
+            continue
+        if cur is None:
+            continue
+        if line.startswith("@@ "):
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            cur["added"].append(line[1:])
+        elif line.startswith("-") and not line.startswith("---"):
+            cur["removed"].append(line[1:])
+    return files
+
+
+def commit_files(root, sha):
+    raw = git(root, "-c", "core.quotepath=false", "diff-tree", "--no-commit-id", "--raw", "-p", "-U0",
+              "--no-renames", "--no-ext-diff", "-r", "--root", sha)
+    return _parse_raw_and_patch(raw)
+
+
+def _range_commits(root, rng):
+    """Fetch [(sha, message, files)] for every non-merge commit in `rng` in ONE git invocation."""
+    sep = "\x1e__VPV_TAMPER_COMMIT__\x1e"
+    fsep = "\x1f__VPV_TAMPER_FIELD__\x1f"
+    raw = git(root, "-c", "core.quotepath=false", "log", "--no-merges", "--reverse", "--no-renames",
+              "--no-ext-diff", "--raw", "-p", "-U0", "--format=%s%%H%s%%B%s" % (sep, fsep, fsep), rng)
+    out = []
+    for chunk in raw.split(sep):
+        if not chunk:
+            continue
+        parts = chunk.split(fsep, 2)
+        if len(parts) < 3:
+            continue
+        sha = parts[0].strip()
+        msg = parts[1]
+        body = parts[2]
+        out.append((sha, msg, _parse_raw_and_patch(body)))
     return out
 
 
@@ -294,14 +340,11 @@ def scan(root, rng, ledger=None, gate_root=None, bill_ref=DEFAULT_BILL_REF, bill
     gate_root = gate_root or os.environ.get("VP_GATE_ROOT") or DEFAULT_GATE_ROOT
     bill_tree = load_bill_tree(root, bill_ref, explicit=bill_ref_explicit)
     results = []
-    shas = git(root, "rev-list", "--no-merges", "--reverse", rng).split()
-    msgs = {sha: git(root, "show", "-s", "--format=%B", sha) for sha in shas}
-    late = late_waivers(msgs.values())
-    for sha in shas:
-        msg = msgs[sha]
+    commits = _range_commits(root, rng)
+    late = late_waivers(msg for _, msg, _ in commits)
+    for sha, msg, files in commits:
         if any(sha.startswith(w) for w in late) and not has_waiver(msg):
             msg += "\nWAIVER-LATE: waived by a later 'Waives:' commit"
-        files = commit_files(root, sha)
         bill_touched = [{"status": f["status"], "path": f["path"]} for f in files if f["path"] in bill_tree]
         viol, notes, waived = judge(files, msg, bill_files=bill_tree)
         subject = msg.strip().splitlines()[0][:80] if msg.strip() else ""
