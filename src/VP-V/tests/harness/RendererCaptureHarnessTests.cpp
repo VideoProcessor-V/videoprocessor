@@ -6155,7 +6155,7 @@ namespace Tests
 			const bool baseline = RealClip::Env("VP_COMPUTE_ONCE_BASELINE") == "1";
 
 			auto parseAndAssertLeg = [](const RunResult& r, const char* legTag, const std::string& expect,
-				const std::string& expectLogLine, bool allowMotionAheadU3Hidden, bool isBaseline) {
+				const std::string& expectLogLine, bool isBaseline) {
 				// The last report in the log (an earlier periodic one is superseded).
 				size_t from = r.log.size();
 				for (size_t i = 0; i < r.log.size(); ++i)
@@ -6227,53 +6227,20 @@ namespace Tests
 				}
 				Assert::AreEqual(0LL, duplicates, (wTagPrefix + L"shared units computed more than once per (variant, source frame): see the DUPLICATE lines").c_str());
 				Assert::AreEqual(0LL, unattributed, (wTagPrefix + L"GPU passes without an owner: see the gpu UNATTRIBUTED lines").c_str());
-				// 102b deferred-register row CO-DEFAULT-MOTIONAHEAD-U3 + WAIVER-W1R-FIX-5-U3:
-				// Under true defaults (analysis_lane: off, frame_analysis_store: off), P1AcquireSource receives
-				// NoOwnerFill on (kP1HalfLuma, Cpu), so MotionAhead::Producer::LumaAtTarget (MotionAheadProducer.cpp:601-607)
-				// decodes half-luma privately and emits VPV_COMPUTE_ONCE_PRIVATE_AT("U3", seq, "motion_ahead" /
-				// "motion_ahead_request") - pinned by GfP4MotionTests:175-207. Leg 1 (default-chain) permits ONLY
-				// those MotionAhead U3 rows while rejecting every other CPU hidden copy; Leg 2 (lane-on) enforces strict hidden == 0.
-				if (allowMotionAheadU3Hidden)
-				{
-					// Assert zero unexpected CPU hidden-copy lines (any CPU HIDDEN-COPY must be strictly unit U3 / motion_ahead*).
-					std::string unexpectedHidden;
-					int expectedHiddenRows = 0;
-					for (size_t i = from; i < r.log.size(); ++i)
-					{
-						const std::string& l = r.log[i];
-						if (l.find("Compute-once HIDDEN-COPY ") == std::string::npos)
-							continue;
-						const bool isMotionAheadU3 =
-							l.find("Compute-once HIDDEN-COPY U3 variant private:motion_ahead ") != std::string::npos
-							|| l.find("Compute-once HIDDEN-COPY U3 variant private:motion_ahead_request ") != std::string::npos;
-						if (isMotionAheadU3)
-							++expectedHiddenRows;
-						else
-							unexpectedHidden += (unexpectedHidden.empty() ? "" : "; ") + l;
-					}
-					Assert::IsTrue(unexpectedHidden.empty(),
-						(wTagPrefix + L"unexpected CPU hidden copies outside MotionAhead U3 fallback: "
-							+ std::wstring(unexpectedHidden.begin(), unexpectedHidden.end())).c_str());
-					if (hidden > 0)
-						Assert::IsTrue(expectedHiddenRows > 0,
-							(wTagPrefix + L"summary reported hidden-copies > 0 without an expected MotionAhead U3 HIDDEN-COPY row").c_str());
-				}
-				else
-				{
-					Assert::AreEqual(0LL, hidden, (wTagPrefix + L"CPU hidden copies of shared units: see the HIDDEN-COPY lines").c_str());
-				}
+				Assert::AreEqual(0LL, hidden, (wTagPrefix + L"CPU hidden copies of shared units: see the HIDDEN-COPY lines").c_str());
 				Assert::AreEqual(0LL, gpuHidden, (wTagPrefix + L"GPU hidden copies of shared units: see the gpu HIDDEN-COPY lines").c_str());
 			};
 
 			// Leg 1 - True Default-Config Chain (zero overrides; skipped in baseline mode).
 			// analysis_lane, skeleton_gpu_gap (SkeletonSettings.h:8,13), and frame_analysis_store (VpFrameAnalysisHost.h:88)
-			// remain at their true defaults (off), so only U8 and U10 run from {U3,U4,U6,U7,U8,U9,U10}.
+			// remain at their true defaults (off). U3 is served by the zero-wait no-lane (kP1HalfLuma, Cpu) owner fill
+			// (D3 / FIX3-D6: P1CpuFill), so U3, U8, and U10 all run with hidden == 0 unconditionally.
 			if (!baseline)
 			{
 				const RunResult rDefault = Run(VideoFrameEncoding::V210, "gpu", 8.0, false, "", false, &plan);
-				parseAndAssertLeg(rDefault, "default-chain", "U8,U10",
-					"== compute-once [default-chain] expected units: U8,U10 (true defaults: analysis_lane/frame_analysis_store/skeleton_gpu_gap off per SkeletonSettings.h:8,13, VpFrameAnalysisHost.h:88)\n",
-					true, false);
+				parseAndAssertLeg(rDefault, "default-chain", "U3,U8,U10",
+					"== compute-once [default-chain] expected units: U3,U8,U10 (true defaults: U3 served by no-lane P1CpuFill owner fill; analysis_lane/frame_analysis_store/skeleton_gpu_gap off)\n",
+					false);
 			}
 
 			// Leg 2 - Lane-On Chain.
@@ -6302,7 +6269,7 @@ namespace Tests
 			// WAIVER-LDET-1 condition: the run reports the expected-unit set it used (a narrowed set needs its own waiver).
 			const std::string expectLogLine = "== compute-once expected units: " + expect
 				+ (expectFromEnv ? " (from VP_COMPUTE_ONCE_EXPECT, NOT the default set)\n" : " (default set, VP_COMPUTE_ONCE_EXPECT unset)\n");
-			parseAndAssertLeg(rLaneOn, "", expect, expectLogLine, false, baseline);
+			parseAndAssertLeg(rLaneOn, "", expect, expectLogLine, baseline);
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(EntranceOnceRealClipAcceptance)
@@ -8052,7 +8019,15 @@ namespace Tests
 			Logger::WriteMessage(("A deband_vp only (games shallow queue):\n" + VectorTestLines(none)).c_str());
 			Logger::WriteMessage(("B low latency with the de-judder demand (games shallow queue):\n" + VectorTestLines(lowStarter)).c_str());
 			Logger::WriteMessage(("C Normal queue:\n" + VectorTestLines(normal)).c_str());
-			auto logShallowTelemetry = [](const char* leg, const RunResult& r) {
+			struct ShallowTelemetry { long long statusCount = 0; long long logCount = 0; };
+			auto parseAfter = [](const std::string& text, const char* marker) -> long long {
+				const size_t pos = text.find(marker);
+				if (pos == std::string::npos)
+					return 0LL;
+				return std::atoll(text.c_str() + pos + std::strlen(marker));
+			};
+			auto logShallowTelemetry = [&parseAfter](const char* leg, const RunResult& r) -> ShallowTelemetry {
+				ShallowTelemetry tel;
 				std::string out = std::string(leg) + " shallow-queue stats:\n";
 				bool anyStats = false;
 				for (const std::string& line : r.log)
@@ -8061,22 +8036,29 @@ namespace Tests
 					{
 						out += "  [stats] " + line + "\n";
 						anyStats = true;
+						tel.logCount = (std::max)(tel.logCount, parseAfter(line, ", shallow backward "));
 					}
-					else if (line.find("ForwardShallow backward pairs served") != std::string::npos)
+					else if (line.find("ForwardShallow backward pairs served ") != std::string::npos)
 					{
 						out += "  [log-status] " + line + "\n";
+						tel.statusCount = (std::max)(tel.statusCount, parseAfter(line, "ForwardShallow backward pairs served "));
 					}
 				}
 				if (!anyStats)
 					out += "  [stats] (no periodic Vector engine pairs line logged)\n";
-				if (r.dejudderStatus.find("ForwardShallow backward pairs served") != std::string::npos)
+				if (r.dejudderStatus.find("ForwardShallow backward pairs served ") != std::string::npos)
+				{
 					out += "  [status] " + r.dejudderStatus + "\n";
+					tel.statusCount = (std::max)(tel.statusCount, parseAfter(r.dejudderStatus, "ForwardShallow backward pairs served "));
+				}
 				else
 					out += "  [status] (no ForwardShallow backward pairs served in dejudderStatus)\n";
 				Logger::WriteMessage(out.c_str());
+				return tel;
 			};
-			logShallowTelemetry("A", none);
-			logShallowTelemetry("B", lowStarter);
+			const ShallowTelemetry telA = logShallowTelemetry("A", none);
+			const ShallowTelemetry telB = logShallowTelemetry("B", lowStarter);
+			const ShallowTelemetry telC = logShallowTelemetry("C", normal);
 			auto assertNoAddedQueueDepth = [](const RunResult& r, const wchar_t* leg) {
 				Assert::IsTrue(r.Logged("Alpha queue policy: target_frames=2 target=2"),
 					(std::wstring(leg) + L": queue policy keeps target_frames=2 target=2\n" + r.Tail()).c_str());
@@ -8111,16 +8093,22 @@ namespace Tests
 			Assert::IsTrue(none.Logged("Motion ahead: engaged") && none.Logged("vector engine: shallow queue"),
 				(L"A: games queue engages shallow look-ahead\n" + none.Tail()).c_str());
 			Assert::IsTrue(VectorsDelivered(none), (L"A: games shallow queue delivers real vectors\n" + none.Tail()).c_str());
+			const long long shallowA = (std::max)(telA.statusCount, telA.logCount);
+			Assert::IsTrue(shallowA > 0, (L"A: games shallow queue must serve ForwardShallow backward pairs (count > 0)\n" + none.Tail()).c_str());
 			assertNoAddedQueueDepth(none, L"A");
 			Assert::IsTrue(lowStarter.presented, (L"B: frames presented\n" + lowStarter.Tail()).c_str());
 			Assert::IsTrue(MotionAheadDepthLines(lowStarter) > 0, (L"B: games shallow queue with de-judder demand gets look-ahead depth\n" + lowStarter.Tail()).c_str());
 			Assert::IsTrue(lowStarter.Logged("Motion ahead: engaged") && lowStarter.Logged("vector engine: shallow queue"),
 				(L"B: games queue with de-judder demand engages shallow look-ahead\n" + lowStarter.Tail()).c_str());
 			Assert::IsTrue(VectorsDelivered(lowStarter), (L"B: games shallow queue with de-judder demand delivers real vectors\n" + lowStarter.Tail()).c_str());
+			Assert::AreEqual(0LL, (std::max)(telB.statusCount, telB.logCount),
+				(L"B: estimate-mode shallow queue does not run ServeStatistics substitution\n" + lowStarter.Tail()).c_str());
 			assertNoAddedQueueDepth(lowStarter, L"B");
 			Assert::IsTrue(normal.presented, (L"C: frames presented\n" + normal.Tail()).c_str());
 			Assert::IsTrue(normal.Logged("Motion ahead: engaged"), (L"C: a Normal queue engages the look-ahead\n" + normal.Tail()).c_str());
 			Assert::IsTrue(VectorsDelivered(normal), (L"C: Normal queue delivers vectors\n" + normal.Tail()).c_str());
+			Assert::AreEqual(0LL, (std::max)(telC.statusCount, telC.logCount),
+				(L"C: Normal queue must keep ForwardShallow backward pair counter at 0\n" + normal.Tail()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroStaysMotionFree)

@@ -801,5 +801,99 @@ namespace VectorEngineTest
 			Assert::AreEqual(std::string("ForwardShallow backward pairs served 5"), std::string(recs[1].detail));
 			Assert::AreEqual(int64_t(5), recs[1].a);
 		}
+
+		// FIX2-D9: drive VectorEngine::ServeStatistics end-to-end through the real (N-1, N) ForwardShallow
+		// substitution path (zero direct atomic writes), with negative controls proving:
+		//  1) Forward (N, N+1) present wins without unnecessary substitution;
+		//  2) Normal non-shallow queue (reason != ForwardShallow) NEVER substitutes (N-1, N);
+		//  3) Discontinuity / epoch invalidation blocks (N-1, N) substitution even under ForwardShallow.
+		TEST_METHOD(ServeStatisticsForwardShallowSubstitutesIncomingPair)
+		{
+			VectorEngine engine;
+			FakeHost host;
+			engine.motionProducer = std::make_shared<MotionAhead::Producer>();
+			engine.motionProducer->SetSlot(engine.p2Slot);
+			auto seam = std::make_shared<MotionAhead::Producer::TestEngine>();
+			Assert::IsTrue(engine.motionProducer->StartForTest(seam), L"CPU test producer started");
+			struct ProducerStopGuard {
+				MotionAhead::Producer& p;
+				~ProducerStopGuard() { p.Stop(); }
+			} stopGuard{ *engine.motionProducer };
+
+			const uint64_t gen = engine.motionValidity.StreamGeneration();
+			engine.p2Slot->SetGeneration(gen);
+
+			auto publishPair = [&](uint64_t from, uint64_t to, float gx, float gy) {
+				auto flow = std::make_shared<MotionAhead::Flow>();
+				flow->halfW = 960;
+				flow->halfH = 540;
+				flow->global[0][0] = gx;
+				flow->global[0][1] = gy;
+				flow->global[0][2] = 0.0f;
+				flow->global[0][3] = 1.0f;
+				flow->globalSet = true;
+				Assert::IsTrue(engine.p2Slot->Publish(from, to, engine.motionValidity.StreamGeneration(), flow));
+			};
+			auto makeDemand = [&](bool lowLatency, int aheadCap) {
+				VectorDemand::Input in = OneConsumer(VectorDemand::Consumer::SourceMonitorPan);
+				in.lowLatency = lowLatency;
+				in.queueAheadCapacity = aheadCap;
+				return VectorDemand::DecideForHost(in);
+			};
+
+			VectorEngine::ServeFacts serve;
+			serve.pictureHeight = 1080;
+
+			// 1. Protected path: ForwardShallow naturally substitutes incoming pair (9, 10) when (10, 11) is absent.
+			engine.vectorDemand = makeDemand(/*lowLatency=*/true, /*aheadCap=*/1);
+			Assert::IsTrue(engine.vectorDemand.mode == VectorDemand::Mode::Forward
+				&& engine.vectorDemand.reason == VectorDemand::Reason::ForwardShallow
+				&& !engine.vectorDemand.estimate,
+				L"premise: low-latency depth-1 queue selects ForwardShallow statistics mode");
+			engine.motionValidity.NoteKept(9, MotionValidity::Cause::DriftDrop);
+			engine.motionValidity.NoteKept(10, MotionValidity::Cause::DriftDrop);
+			publishPair(9, 10, 16.0f, -8.0f);   // do NOT publish (10, 11)
+			engine.ServeStatistics(10, 11, 1920, 1080, serve, host);
+			Assert::AreEqual(1ull, engine.ShallowBackwardPairs(), L"ServeStatistics incremented vectorShallowBackwardPairs naturally");
+			Assert::AreEqual(1ull, engine.motionAheadHits);
+			Assert::AreEqual(1ull, engine.vectorPairs);
+			Assert::AreEqual(0ull, engine.motionAheadMisses);
+			Assert::AreEqual(1, host.monitorMotions, L"SourceMonitorPan received real motion statistics from (9, 10)");
+			Assert::AreEqual(std::string("ForwardShallow backward pairs served 1"), engine.ProducerStatusSegment());
+
+			// 2. Forward (N, N+1) present wins: no unnecessary backward-pair substitution.
+			engine.motionValidity.NoteKept(11, MotionValidity::Cause::DriftDrop);
+			publishPair(10, 11, 8.0f, 0.0f);
+			publishPair(11, 12, 12.0f, 0.0f);
+			engine.ServeStatistics(11, 12, 1920, 1080, serve, host);
+			Assert::AreEqual(1ull, engine.ShallowBackwardPairs(), L"forward (11, 12) wins without incrementing shallow backward");
+			Assert::AreEqual(2ull, engine.motionAheadHits);
+			Assert::AreEqual(2, host.monitorMotions);
+
+			// 3. In-Test Negative Control: Normal non-shallow queue (reason != ForwardShallow) NEVER substitutes (N-1, N).
+			engine.vectorDemand = makeDemand(/*lowLatency=*/false, /*aheadCap=*/4);
+			Assert::IsTrue(engine.vectorDemand.mode == VectorDemand::Mode::Forward
+				&& engine.vectorDemand.reason != VectorDemand::Reason::ForwardShallow,
+				L"negative control premise: normal queue is not ForwardShallow");
+			engine.motionValidity.NoteKept(12, MotionValidity::Cause::DriftDrop);
+			engine.motionValidity.NoteKept(13, MotionValidity::Cause::DriftDrop);
+			publishPair(12, 13, 8.0f, 0.0f);   // do NOT publish (13, 14)
+			engine.ServeStatistics(13, 14, 1920, 1080, serve, host);
+			Assert::AreEqual(1ull, engine.ShallowBackwardPairs(),
+				L"negative control: normal non-shallow mode MUST NOT trigger backward-pair substitution");
+			Assert::AreEqual(1ull, engine.motionAheadMisses);
+			Assert::AreEqual(2, host.monitorMotions);
+
+			// 4. Discontinuity / epoch guard blocks (N-1, N) substitution even under ForwardShallow.
+			engine.vectorDemand = makeDemand(/*lowLatency=*/true, /*aheadCap=*/1);
+			engine.motionValidity.NoteKept(14, MotionValidity::Cause::DriftDrop);
+			publishPair(14, 15, 8.0f, 0.0f);
+			engine.motionValidity.Invalidate(MotionValidity::Cause::Gap);   // Epoch() moves past EpochOfLastKept()
+			engine.ServeStatistics(15, 16, 1920, 1080, serve, host);
+			Assert::AreEqual(1ull, engine.ShallowBackwardPairs(),
+				L"epoch invalidation MUST block ForwardShallow (14, 15) substitution");
+			Assert::AreEqual(2ull, engine.motionAheadMisses);
+			Assert::AreEqual(2, host.monitorMotions);
+		}
 	};
 }
