@@ -278,6 +278,9 @@ namespace Tests
 				Assert::IsTrue(res.valid);
 				Assert::IsFalse(res.usedTheoreticalFallback);
 				const double target = TpdfDitherFloorCodes(4.0);
+				// In-test negative control (Rule 3): hardcoded step/sqrt(12) understates TPDF dither by > 25%.
+				const double naiveFloor = QuantizationFloorCodes(4.0);
+				Assert::IsTrue(std::fabs(naiveFloor - target) / target > 0.25);
 				Assert::IsTrue(std::fabs(res.floorCodes - target) / target <= 0.10);
 			}
 			// 4. Simulated HDMI loop re-quantized 8-bit-in-10-bit: stepCodes == 1, true noise == 1.30
@@ -285,6 +288,9 @@ namespace Tests
 				const auto res = EstimateEmpiricalFloor(makeLines(404, 3, 1.30), 1.0, s);
 				Assert::IsTrue(res.valid);
 				Assert::IsFalse(res.usedTheoreticalFallback);
+				// In-test negative control (Rule 3 / FM-2): naive step-mask floor (0.289) underestimates by > 4x!
+				const double naiveStep1Floor = QuantizationFloorCodes(1.0);
+				Assert::IsTrue(naiveStep1Floor < 0.25 * 1.30, L"negative control: naive step-1 floor is > 4x too small on 8-in-10 HDMI loop");
 				Assert::IsTrue(std::fabs(res.floorCodes - 1.30) / 1.30 <= 0.10);
 			}
 			// 5. Constant clipped flat lines: explicit visible fallback to theoretical step / sqrt(12) (Rule 4).
@@ -316,6 +322,12 @@ namespace Tests
 			std::vector<double> ditheredUpscale(129, 1.2);
 			for (int k = 1; k <= 64; ++k)
 				ditheredUpscale[static_cast<size_t>(k)] = 8.0;
+
+			// In-test negative control (Rule 3 / SHOULD-2): floor-unaware check (floorP = 0.0) falsely flags dithered upscale!
+			const auto naiveNoFloor = ComputeDitherAwareDetailAboveSpectrum(ditheredUpscale, 0.5, 0.0, s);
+			Assert::IsTrue(naiveNoFloor.valid);
+			Assert::IsFalse(naiveNoFloor.aboveIsNoiseFloor);
+			Assert::IsTrue(naiveNoFloor.hasRealDetailAbove, L"negative control: floor-unaware check falsely trips on 8-bit dither");
 
 			const auto rUp = ComputeDitherAwareDetailAboveSpectrum(ditheredUpscale, 0.5, floorP, s);
 			Assert::IsTrue(rUp.valid);
@@ -388,6 +400,8 @@ namespace Tests
 			Assert::IsTrue(comb.reason == EdgeStatsReason::CombGridDetected);
 
 			// 2. Isolated 2:1 upscale (strong 1/2 dip at -0.42, flat 3/8, 5/8, 7/8 near 0.0): reclassified to kClassRational!
+			// In-test negative control (Rule 3 / Pitfall #1): naive ClassifyLatent unconditionally traps 1/2 in harsh kClassK8!
+			Assert::AreEqual(kClassK8, ClassifyLatent(1920, 3840), L"negative control: naive ClassifyLatent always puts 1/2 inside harsh K8");
 			const auto isolated = ClassifyHalfNotchWithCombCheck(1920, 3840, -0.42, true, -0.01, 0.005, -0.005, s);
 			Assert::IsTrue(isolated.isHalfCandidate);
 			Assert::IsFalse(isolated.isCodecGridComb);
@@ -522,9 +536,13 @@ namespace Tests
 				line[6] = nan;   // poisons gR at i=5 and gL at i=6!
 				std::vector<uint8_t> mask;
 				const auto gate = BuildEdgeGateMask(line.data(), 16, 1.0, mask, s);
-				Assert::AreEqual(uint8_t(0), mask[5]);
-				Assert::AreEqual(uint8_t(0), mask[6]);
-				(void)gate;
+				Assert::AreEqual(uint8_t(1), mask[4], L"clean left neighbor of step passes gradient gate");
+				Assert::AreEqual(uint8_t(0), mask[5], L"NaN right neighbor excluded");
+				Assert::AreEqual(uint8_t(0), mask[6], L"NaN center sample excluded");
+				Assert::AreEqual(uint8_t(0), mask[7], L"NaN left neighbor excluded");
+				Assert::AreEqual(1, gate.activeEdgeSamples);
+				Assert::IsFalse(gate.valid);
+				Assert::IsTrue(gate.reason == EdgeStatsReason::InsufficientEdgePixels);
 			}
 
 			// LOW-4: constant zero-curvature line returns ZeroPhaseEnergy with valid == false and ratio == 1.0.
@@ -534,6 +552,47 @@ namespace Tests
 				Assert::IsFalse(pc.valid);
 				Assert::AreEqual(1.0, pc.phaseContrastRatio);
 				Assert::IsTrue(pc.reason == EdgeStatsReason::ZeroPhaseEnergy);
+			}
+
+			// Adversarial Inf / zero-floor exact reduction / negative floor / undersized segment arrays.
+			{
+				const double inf = std::numeric_limits<double>::infinity();
+				Assert::AreEqual(0.0, QuantizationFloorCodes(inf));
+				Assert::AreEqual(0.0, TpdfDitherFloorCodes(-inf));
+				// Per ChainEdgeStats.h:294-302, floorCodes == 0.0 is valid and reduces to exact ln(residual / baseline).
+				const auto zeroFloor = ComputeExcessVarianceDip(2.0, 5.0, 0.0, s);
+				Assert::IsTrue(zeroFloor.valid);
+				Assert::IsTrue(std::fabs(zeroFloor.dip - std::log(2.0 / 5.0)) < 1e-9);
+				// Negative / non-finite floor or negative residual/baseline MUST be rejected as InvalidInput.
+				const auto negFloor = ComputeExcessVarianceDip(2.0, 5.0, -1.0, s);
+				Assert::IsFalse(negFloor.valid);
+				Assert::IsTrue(negFloor.reason == EdgeStatsReason::InvalidInput);
+				const auto infFloor = ComputeExcessVarianceDip(2.0, 5.0, inf, s);
+				Assert::IsFalse(infFloor.valid);
+				Assert::IsTrue(infFloor.reason == EdgeStatsReason::InvalidInput);
+				const auto ninfFloor = ComputeExcessVarianceDip(2.0, 5.0, -inf, s);
+				Assert::IsFalse(ninfFloor.valid);
+				Assert::IsTrue(ninfFloor.reason == EdgeStatsReason::InvalidInput);
+				const auto nanFloor = ComputeExcessVarianceDip(2.0, 5.0, nan, s);
+				Assert::IsFalse(nanFloor.valid);
+				Assert::IsTrue(nanFloor.reason == EdgeStatsReason::InvalidInput);
+				const auto negRes = ComputeExcessVarianceDip(-0.5, 5.0, 1.0, s);
+				Assert::IsFalse(negRes.valid);
+				Assert::IsTrue(negRes.reason == EdgeStatsReason::InvalidInput);
+				const auto negBase = ComputeExcessVarianceDip(2.0, -5.0, 1.0, s);
+				Assert::IsFalse(negBase.valid);
+				Assert::IsTrue(negBase.reason == EdgeStatsReason::InvalidInput);
+
+				CandidateResult shortSegs;
+				shortSegs.valid = true;
+				shortSegs.lineCount = 4;
+				shortSegs.segCount = 8;
+				shortSegs.segSum.assign(5, 10.0); // undersized (< 4 * 8 = 32)
+				shortSegs.segRows.assign(5, kSegPx);
+				shortSegs.segBase.assign(5, 5.0);
+				const auto segBad = ComputeSegmentGatedStat(shortSegs, 0.5, 1.0, s);
+				Assert::IsFalse(segBad.valid);
+				Assert::IsTrue(segBad.reason == EdgeStatsReason::InvalidInput);
 			}
 		}
 	};

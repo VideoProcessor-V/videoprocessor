@@ -170,12 +170,21 @@ namespace Tests
 			uint64_t guardedCount = 0;
 			uint64_t falseReleases = 0;
 
+			// In-test negative control (Rule 3): a naive blind ABR-reset baseline (releasing & wiping credit on
+			// every |ratioStep| >= 0.10 mark without 2-eval confirmation) on the EXACT SAME 80 steady-state marks.
+			double naiveBlindCreditX = 0.0;
+			uint64_t naiveFalseReleases = 0;
+
 			uint64_t seq = 1;
 			for (int m = 0; m < 80; ++m)
 			{
 				const int64_t tBase = static_cast<int64_t>(m) * 45;
 				const auto raised = sm.OnAbrStep(tBase * 1000000, 0.15);
 				Assert::IsTrue(raised.action == StepMarkAction::MarkPending);
+
+				// Naive blind baseline immediately drops latch & clears accumulated credit on every ABR mark!
+				++naiveFalseReleases;
+				naiveBlindCreditX = 0.0;
 
 				// Two non-contradicting post-t0 evaluations agreeing with 1920x1080.
 				for (int e = 0; e < 2; ++e)
@@ -187,6 +196,8 @@ namespace Tests
 					refCreditX += rec.creditX;
 					refCreditY += rec.creditY;
 					++refCount;
+
+					naiveBlindCreditX += rec.creditX;
 
 					// Guarded path routes through StepMark tentative bucket.
 					const auto out = sm.OnChainEvaluation(rec, ctx);
@@ -213,6 +224,10 @@ namespace Tests
 				}
 			}
 
+			// Negative-control proof: naive blind ABR reset breaks catastrophically on the exact same input!
+			Assert::AreEqual(uint64_t(80), naiveFalseReleases);
+			Assert::IsTrue(naiveBlindCreditX < 0.05 * refCreditX);
+
 			Assert::AreEqual(uint64_t(0), falseReleases);
 			Assert::AreEqual(uint64_t(80), sm.Counters().unconfirmedTimeouts);
 			Assert::AreEqual(refCount, guardedCount);
@@ -226,7 +241,7 @@ namespace Tests
 			using namespace StepMarkFx;
 			ChainStepMark sm(Enabled());
 
-			// Simulated accumulator with pre-t0 credits at t = 1..9 s.
+			// Simulated accumulator with pre-t0 credits at t = 1..9 s (total = 18.0 >= c1 = 15.0).
 			struct Entry { int64_t timeUs; double credit; };
 			std::vector<Entry> committed;
 			for (int s = 1; s <= 9; ++s)
@@ -243,6 +258,14 @@ namespace Tests
 			Assert::AreEqual(size_t(1), out.bucket.size());
 			Assert::AreEqual(int64_t(11 * 1000000), out.bucket[0].timeUs);
 
+			// In-test negative control (Rule 3): without backward voiding to t0, stale pre-step credit leaks past c1 (15.0)!
+			double naiveUnvoidedTotal = 0.0;
+			for (const auto& e : committed)
+				naiveUnvoidedTotal += e.credit;
+			for (const auto& b : out.bucket)
+				naiveUnvoidedTotal += b.creditX;
+			Assert::IsTrue(naiveUnvoidedTotal >= 15.0, L"negative control: without backward voiding, stale pre-step credit crosses c1");
+
 			// Apply backward void to t0: remove all entries < actionFromTimeUs, keep only post-t0 bucket.
 			committed.erase(
 				std::remove_if(committed.begin(), committed.end(), [&](const Entry& e) { return e.timeUs < out.actionFromTimeUs; }),
@@ -253,6 +276,7 @@ namespace Tests
 			Assert::AreEqual(size_t(1), committed.size());
 			Assert::AreEqual(int64_t(11 * 1000000), committed[0].timeUs);
 			Assert::AreEqual(3.5, committed[0].credit);
+			Assert::IsTrue(committed[0].credit < 15.0, L"post-step credit alone does not inherit stale pre-step c1");
 		}
 
 		TEST_METHOD(ConfirmedStepToLargerTruthReleasesImmediatelyByClassicalOrChain)
@@ -469,6 +493,70 @@ namespace Tests
 				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(22, 1920, 1080), unlatched).action == StepMarkAction::None);
 				Assert::IsTrue(sm.IsPending());
 				Assert::AreEqual(uint64_t(0), sm.Counters().confirmedByClassical);
+			}
+		}
+
+		TEST_METHOD(AdversarialClassicalNonConventionalMismatchInfAndBucketOverflowCap)
+		{
+			using namespace StepMarkFx;
+			const double inf = std::numeric_limits<double>::infinity();
+
+			// 1. +Inf / -Inf ratioStep rejected visibly without raising a mark.
+			{
+				ChainStepMark sm(Enabled());
+				Assert::IsTrue(sm.OnAbrStep(10 * 1000000, inf).reason == StepMarkReason::InvalidInput);
+				Assert::IsTrue(sm.OnAbrStep(10 * 1000000, -inf).reason == StepMarkReason::InvalidInput);
+				Assert::IsFalse(sm.IsPending());
+				Assert::AreEqual(uint64_t(2), sm.Counters().rejectedInvalidInput);
+			}
+
+			// 2. Non-conventional (1600x900) and parked anamorphic (1440x1080) classical frames MUST NEVER confirm.
+			{
+				ChainStepMark sm(Enabled());
+				const StepMarkLatchContext ctx = Latched540();
+				sm.OnAbrStep(10 * 1000000, 0.25);
+				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(11, 1600, 900), ctx).action == StepMarkAction::None);
+				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(12, 1600, 900), ctx).action == StepMarkAction::None);
+				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(13, 1440, 1080), ctx).action == StepMarkAction::None);
+				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(14, 1440, 1080), ctx).action == StepMarkAction::None);
+				Assert::IsTrue(sm.IsPending());
+				Assert::AreEqual(uint64_t(0), sm.Counters().confirmedByClassical);
+			}
+
+			// 3. Classical reading matching latched pair OR alternating different pairs must NOT confirm until 2 matching consecutive frames.
+			{
+				ChainStepMark sm(Enabled());
+				const StepMarkLatchContext ctx = Latched1080();
+				sm.OnAbrStep(10 * 1000000, -0.25);
+				// Same as latched (1920x1080): never confirms.
+				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(11, 1920, 1080), ctx).action == StepMarkAction::None);
+				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(12, 1920, 1080), ctx).action == StepMarkAction::None);
+				// Alternating 1280x720 then 960x540: streak resets to 1, does NOT confirm.
+				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(13, 1280, 720), ctx).action == StepMarkAction::None);
+				Assert::IsTrue(sm.OnClassicalFrame(ClassicalFrame(14, 960, 540), ctx).action == StepMarkAction::None);
+				Assert::IsTrue(sm.IsPending());
+				// Second consecutive 960x540 confirms step-down challenge!
+				const auto oConf = sm.OnClassicalFrame(ClassicalFrame(15, 960, 540), ctx);
+				Assert::IsTrue(oConf.action == StepMarkAction::ConfirmVoidAndChallenge);
+				Assert::AreEqual(uint64_t(1), sm.Counters().confirmedByClassical);
+			}
+
+			// 4. Bounded tentative bucket enforces maxBucketRecords visibly (Rule 2 + Rule 4).
+			{
+				StepMarkSettings cfg = Enabled();
+				cfg.maxBucketRecords = 4;
+				cfg.confirmWindowEvals = 6;
+				ChainStepMark sm(cfg);
+				const StepMarkLatchContext ctx = Latched1080();
+				sm.OnAbrStep(10 * 1000000, 0.20);
+				for (int e = 1; e <= 5; ++e)
+					Assert::IsTrue(sm.OnChainEvaluation(EvalRec(10 + e, static_cast<uint64_t>(e), 1920, 1080, 1.0, false), ctx).action == StepMarkAction::None);
+				const auto oEnd = sm.OnChainEvaluation(EvalRec(16, 6, 1920, 1080, 1.0, false), ctx);
+				Assert::IsTrue(oEnd.action == StepMarkAction::CancelAndMergeBucket);
+				Assert::AreEqual(size_t(4), oEnd.bucket.size());
+				Assert::AreEqual(uint64_t(3), oEnd.bucket.front().evalSeq, L"oldest 2 records evicted FIFO");
+				Assert::AreEqual(uint64_t(6), oEnd.bucket.back().evalSeq);
+				Assert::AreEqual(uint64_t(2), sm.Counters().bucketOverflowDrops);
 			}
 		}
 	};

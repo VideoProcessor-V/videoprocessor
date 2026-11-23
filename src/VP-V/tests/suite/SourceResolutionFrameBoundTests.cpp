@@ -522,13 +522,68 @@ namespace VideoProcessorTest
 		// Timing may lose analyses (a full job queue drops the oldest): never silently. Whatever the
 		// worker does, every submitted frame is either analysed or counted as dropped, and a run with
 		// a loss says it is not reproducible.
+		// TQ-S14: deterministically pause the worker via SetWorkerHoldForTest (under an RAII guard so
+		// exceptions never deadlock teardown) to guarantee queue overflow (dropped > 0 && !Reproducible())
+		// executes on every CPU speed, alongside an in-test negative control proving the hold seam alone
+		// does not mark a non-overflowing run non-reproducible.
 		TEST_METHOD(LostAnalysesAreCountedAndTheRunIsMarkedNotReproducible)
 		{
+			struct WorkerHoldGuard
+			{
+				Monitor& mon;
+				bool held = false;
+				explicit WorkerHoldGuard(Monitor& m) : mon(m), held(true) { mon.SetWorkerHoldForTest(true); }
+				void Release()
+				{
+					if (held)
+					{
+						mon.SetWorkerHoldForTest(false);
+						held = false;
+					}
+				}
+				~WorkerHoldGuard() { Release(); }
+			};
+
+			// Negative control: holding and releasing the worker with <= kJobQueueCap jobs produces
+			// zero drops and stays reproducible (proving only real queue overflow clears Reproducible()).
+			{
+				Monitor clean;
+				clean.SetFrameBound(true, 0);
+				const uint64_t fit = static_cast<uint64_t>(Monitor::kJobQueueCap);
+				{
+					WorkerHoldGuard hold(clean);
+					for (uint64_t seq = 1; seq <= fit; ++seq)
+						clean.SubmitJobForTest(NoiseTiles(seq), 8, SecondsOf(seq), kW, kH, 8, Monitor::kTile, kBlack, seq);
+					Assert::AreEqual(0ull, clean.JobsDroppedCount(), L"at most kJobQueueCap jobs never overflow");
+					hold.Release();
+				}
+				const auto cleanUntil = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+				while (!clean.ReadyFor(1000) && std::chrono::steady_clock::now() < cleanUntil)
+					std::this_thread::sleep_for(std::chrono::milliseconds(2));
+				Assert::IsTrue(clean.ReadyFor(1000));
+				double f = 1.0;
+				Decide(clean, 1000, SecondsOf(1000), false, &f);
+				Assert::AreEqual(fit, clean.Read().frames, L"all queued jobs ran once released");
+				Assert::AreEqual(0ull, clean.JobsDroppedCount());
+				Assert::IsTrue(clean.Reproducible(), L"non-overflowing run stays reproducible");
+				Assert::IsFalse(Contains(SourceResolutionMonitor::Describe(clean.Read(), 1.0, true), "not reproducible"));
+			}
+
+			// Overflow proof (TQ-S14): deterministically hold the worker while submitting 12 > kJobQueueCap (4) jobs.
 			Monitor m;
 			m.SetFrameBound(true, 0);
 			const uint64_t submitted = 12;
-			for (uint64_t seq = 1; seq <= submitted; ++seq)
-				m.SubmitJobForTest(NoiseTiles(seq), 8, SecondsOf(seq), kW, kH, 8, Monitor::kTile, kBlack, seq);
+			const uint64_t expectedMinDropped = submitted - static_cast<uint64_t>(Monitor::kJobQueueCap);
+			{
+				WorkerHoldGuard hold(m);
+				for (uint64_t seq = 1; seq <= submitted; ++seq)
+					m.SubmitJobForTest(NoiseTiles(seq), 8, SecondsOf(seq), kW, kH, 8, Monitor::kTile, kBlack, seq);
+				// Deterministic before worker even runs: oldest (submitted - kJobQueueCap) jobs were already dropped.
+				Assert::IsTrue(m.JobsDroppedCount() >= expectedMinDropped,
+					L"holding the worker deterministically forces queue overflow");
+				Assert::IsFalse(m.Reproducible(), L"already marked not reproducible upon drop");
+				hold.Release();
+			}
 			const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
 			while (!m.ReadyFor(1000) && std::chrono::steady_clock::now() < until)
 				std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -538,15 +593,14 @@ namespace VideoProcessorTest
 			const unsigned long long analysed = m.Read().frames;
 			const unsigned long long dropped = m.JobsDroppedCount();
 			Assert::AreEqual(static_cast<unsigned long long>(submitted), analysed + dropped, L"nothing disappears unaccounted");
+			Assert::IsTrue(dropped >= expectedMinDropped, L"TQ-S14: overflow drops are unconditionally exercised");
+			Assert::IsTrue(analysed > 0, L"the surviving newest jobs were analysed");
+			Assert::AreEqual(static_cast<unsigned long long>(submitted), static_cast<unsigned long long>(m.AnalysedThrough()),
+				L"newest jobs survived FIFO oldest-drop supersede");
 			const std::string text = SourceResolutionMonitor::Describe(m.Read(), 1.0, true);
 			Assert::IsTrue(Contains(text, "copies skipped 0"), L"the skipped-copy counter is shown");
-			if (dropped > 0)
-			{
-				Assert::IsFalse(m.Reproducible());
-				Assert::IsTrue(Contains(text, "not reproducible"), L"a loss is announced");
-			}
-			else
-				Assert::IsTrue(m.Reproducible());
+			Assert::IsFalse(m.Reproducible(), L"TQ-S14: a run with queue drops is unconditionally not reproducible");
+			Assert::IsTrue(Contains(text, "not reproducible"), L"a loss is announced");
 		}
 
 		// Audit 2 SHOULD: reproducibility is judged per frame-bound era.

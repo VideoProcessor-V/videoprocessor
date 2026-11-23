@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -158,6 +159,9 @@ namespace Tests
 			using namespace JointLatchFx;
 			ChainJointLatch latch(Enabled());
 
+			// In-test negative control (Rule 3): a naive OR-voting / classical-alone latch enters on the exact same input!
+			bool naiveClassicalEntered = false;
+
 			// Feed 60 seconds of strong classical 1920x1080 readings with zero chain corroboration.
 			for (int s = 0; s < 60; ++s)
 			{
@@ -168,6 +172,8 @@ namespace Tests
 				in.currentShotDwellSec = 10.0;
 				in.currentShotCreditX = 0.0;
 				in.currentShotCreditY = 0.0;
+				if (in.classicalValid && Scaling::GeometrySet::AgreeingPair(in.classicalNx, in.classicalNxDenom, in.classicalNy, in.classicalNyDenom, in.rasterW, in.rasterH))
+					naiveClassicalEntered = true;
 				const auto o = latch.Step(in);
 				Assert::IsFalse(o.latched);
 				Assert::IsTrue(o.classicalOnlyBlocked);
@@ -175,6 +181,7 @@ namespace Tests
 				Assert::AreEqual(std::string("would-be (classical only)"), std::string(JointLatchReasonText(o.reason)));
 			}
 
+			Assert::IsTrue(naiveClassicalEntered, L"negative control: naive classical-alone baseline falsely enters on the exact same stream");
 			Assert::IsFalse(latch.Latched());
 			Assert::AreEqual(uint64_t(60), latch.Counters().wouldBeClassicalOnly);
 			Assert::AreEqual(uint64_t(0), latch.Counters().entriesJoint);
@@ -246,6 +253,9 @@ namespace Tests
 				Assert::AreEqual(int64_t(0), anchorUs);
 
 				int64_t releasedAtSec = -1;
+				// In-test negative control (Rule 3): naive OD-2 Option 3 ("either alone resets hard bound") on the exact same stream.
+				int64_t naiveLastConfSec = 0;
+				bool naiveEverReleased = false;
 				for (int s = 1; s <= 200; ++s)
 				{
 					JointLatchInput in = BaseInput(s);
@@ -260,6 +270,11 @@ namespace Tests
 					// Adversarial late cut at t = 179 s must NOT push release past 180 s.
 					in.shotBoundary = (s == 179);
 
+					if (in.classicalValid && in.classicalNx == 1920 && in.classicalNy == 1080)
+						naiveLastConfSec = s; // naive Option 3: A resets hard bound every tick -> lock-without-release!
+					if (s - naiveLastConfSec >= 180)
+						naiveEverReleased = true;
+
 					const auto o = latch.Step(in);
 					// Classical A must NEVER move LastConfirmUs()!
 					Assert::AreEqual(anchorUs, latch.LastConfirmUs());
@@ -270,6 +285,7 @@ namespace Tests
 						break;
 					}
 				}
+				Assert::IsFalse(naiveEverReleased, L"negative control: naive classical-resets-bound stays locked past 180 s (Audit 100b H3 hazard)");
 				Assert::IsTrue(releasedAtSec > 0);
 				Assert::IsTrue(releasedAtSec <= 180);
 				Assert::IsTrue(latch.Counters().classicalHoldPauses > 0);
@@ -309,9 +325,12 @@ namespace Tests
 			Assert::IsTrue(latch.Latched());
 
 			// Single-frame detail_above at t = 5 s: ignored (debounced), latch stays held.
+			// In-test negative control (Rule 3): a naive 1-frame detail_above veto immediately reverts on the exact same input!
 			{
 				JointLatchInput in = BaseInput(5);
 				in.classicalDetailAbove = true;
+				const bool naive1FrameReleased = in.classicalDetailAbove;
+				Assert::IsTrue(naive1FrameReleased, L"negative control: naive 1-frame detail_above immediately reverts on a transient glitch");
 				const auto o = latch.Step(in);
 				Assert::IsTrue(o.latched);
 				Assert::IsTrue(o.reason == JointLatchReason::DetailAboveTransient);
@@ -412,6 +431,13 @@ namespace Tests
 
 				cands.push_back(c1440);
 				cands.push_back(c720);
+
+				// In-test negative control (Rule 3): naive max-credit selector picks the 2x alias 2560x1440!
+				int naiveBest = 0;
+				for (size_t i = 1; i < cands.size(); ++i)
+					if ((std::min)(cands[i].creditX, cands[i].creditY) > (std::min)(cands[naiveBest].creditX, cands[naiveBest].creditY))
+						naiveBest = static_cast<int>(i);
+				Assert::AreEqual(2560, cands[static_cast<size_t>(naiveBest)].nx, L"negative control: naive max-credit picks the 2/3 alias");
 
 				const auto res = SelectFundamentalHarmonic(cands, kRasterW, kRasterH, 7.5);
 				Assert::IsTrue(res.found);
@@ -666,6 +692,13 @@ namespace Tests
 			cands.push_back(c540);
 			cands.push_back(c1080);
 
+			// In-test negative control (Rule 3): naive max-credit selector picks the dirty 540p false sub-harmonic!
+			int naiveBest = 0;
+			for (size_t i = 1; i < cands.size(); ++i)
+				if ((std::min)(cands[i].creditX, cands[i].creditY) > (std::min)(cands[naiveBest].creditX, cands[naiveBest].creditY))
+					naiveBest = static_cast<int>(i);
+			Assert::AreEqual(960, cands[static_cast<size_t>(naiveBest)].nx, L"negative control: naive max-credit picks the detailAbove false sub-harmonic");
+
 			const auto res = SelectFundamentalHarmonic(cands, kRasterW, kRasterH, 7.5);
 			Assert::IsTrue(res.found);
 			Assert::AreEqual(1920, res.nx);
@@ -757,6 +790,91 @@ namespace Tests
 				Assert::AreEqual(1280, oMv.nx);
 				Assert::AreEqual(720, oMv.ny);
 				Assert::AreEqual(uint64_t(1), latch.Counters().moves);
+			}
+		}
+
+		TEST_METHOD(JointOnlyPolicyG2ChainResetBackwardTimeAndInfGuards)
+		{
+			using namespace JointLatchFx;
+			const double inf = std::numeric_limits<double>::infinity();
+
+			// 1. JointOnly policy blocks Chain-alone while still admitting Joint (with ChainOrJoint negative control).
+			{
+				const JointLatchInput chainIn = ChainOnly1080(5, 2.0 * kC1, 3);
+				ChainJointLatch chainOrJoint(Enabled(JointHoldPolicy::G1_ChainOnlyHardBound, JointEntryPolicy::ChainOrJoint));
+				Assert::IsTrue(chainOrJoint.Step(chainIn).latched, L"negative control: ChainOrJoint admits 3-shot Chain-alone");
+
+				ChainJointLatch jointOnly(Enabled(JointHoldPolicy::G1_ChainOnlyHardBound, JointEntryPolicy::JointOnly));
+				Assert::IsFalse(jointOnly.Step(chainIn).latched, L"JointOnly blocks Chain-alone even at 2*c1 over 3 shots");
+				Assert::AreEqual(uint64_t(0), jointOnly.Counters().entriesChainAlone);
+
+				const auto oJoint = jointOnly.Step(Joint1080(6, 4.0, 0.6 * kC1, 6));
+				Assert::IsTrue(oJoint.latched && oJoint.event == JointLatchEvent::EnteredJoint);
+				Assert::AreEqual(uint64_t(1), jointOnly.Counters().entriesJoint);
+			}
+
+			// 2. G2 renewal flag resets cleanly after a genuine Chain-alone re-confirmation, permitting 1 renewal on the NEXT bound.
+			{
+				ChainJointLatch g2(Enabled(JointHoldPolicy::G2_JointOncePerBound));
+				Assert::IsTrue(g2.Step(ChainOnly1080(0, kC1 + 1.0, 2)).latched);
+				for (int s = 1; s < 120; ++s)
+				{
+					JointLatchInput in = BaseInput(s);
+					in.classicalValid = true;
+					in.classicalNx = 1920; in.classicalNxDenom = kRasterW;
+					in.classicalNy = 1080; in.classicalNyDenom = kRasterH;
+					g2.Step(in);
+				}
+				Assert::IsTrue(g2.Step(Joint1080(120, 4.0, kC1, 120)).g2Renewed);
+				Assert::IsTrue(g2.G2RenewedThisBound());
+
+				// Genuine fresh Chain-alone confirmation at t = 130 s resets lastConfUs_ and g2RenewedThisBound_!
+				JointLatchInput chainConfirm = BaseInput(130);
+				chainConfirm.chainInformative = true;
+				chainConfirm.gainX = 0.3 * kC1; chainConfirm.gainY = 0.3 * kC1;
+				chainConfirm.rawX = 0.3 * kC1; chainConfirm.rawY = 0.3 * kC1;
+				chainConfirm.gainTimeX = 130 * 1000000; chainConfirm.gainTimeY = 130 * 1000000;
+				const auto oConf = g2.Step(chainConfirm);
+				Assert::IsTrue(oConf.confirmed && oConf.reason == JointLatchReason::ChainReconfirmed);
+				Assert::IsFalse(g2.G2RenewedThisBound());
+
+				// Advance to the NEXT 120 s bound (t = 250 s): one fresh joint renewal is permitted again.
+				for (int s = 131; s < 250; ++s)
+				{
+					JointLatchInput in = BaseInput(s);
+					in.classicalValid = true;
+					in.classicalNx = 1920; in.classicalNxDenom = kRasterW;
+					in.classicalNy = 1080; in.classicalNyDenom = kRasterH;
+					g2.Step(in);
+				}
+				const auto oRenew2 = g2.Step(Joint1080(250, 4.0, kC1, 250));
+				Assert::IsTrue(oRenew2.g2Renewed);
+				Assert::AreEqual(uint64_t(2), g2.Counters().g2JointRenewals);
+			}
+
+			// 3. Backward source time jump while latched re-anchors cleanly without negative clock or spurious release.
+			{
+				ChainJointLatch latch(Enabled());
+				Assert::IsTrue(latch.Step(ChainOnly1080(100, kC1 + 1.0, 2)).latched);
+				const auto oBack = latch.Step(BaseInput(50));
+				Assert::IsTrue(oBack.latched);
+				Assert::IsTrue(oBack.reason == JointLatchReason::BackwardTimeReanchored);
+				Assert::IsTrue(latch.ReleaseClockSec() >= 0.0);
+			}
+
+			// 4. +Inf / -Inf inputs rejected visibly without latching or poisoning.
+			{
+				ChainJointLatch latch(Enabled());
+				JointLatchInput badInfC1 = Joint1080(5, 4.0, 10.0);
+				badInfC1.c1 = inf;
+				Assert::IsTrue(latch.Step(badInfC1).reason == JointLatchReason::InvalidInput);
+
+				JointLatchInput badInfLlr = ChainOnly1080(6, inf, 2);
+				Assert::IsFalse(latch.Step(badInfLlr).latched);
+
+				JointLatchInput badInfShot = Joint1080(7, 4.0, inf);
+				Assert::IsFalse(latch.Step(badInfShot).latched);
+				Assert::IsTrue(latch.Counters().invalidInputs >= 1);
 			}
 		}
 	};
