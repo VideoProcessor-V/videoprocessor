@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Shared unit U7 "cut / fade / flash judge" (doc 62 section 1.2): the one decision of "the picture changed" derived from two
-// P4 records, and the veto detector's grid + histogram cut rule. Moved unchanged from the lane (ClassifyEvents) and from
-// HdrVetoCutDetector::Observe so both call ONE implementation. Cut/fade/flash are never stored: every consumer derives them.
+// P4 records, and the veto detector's grid + histogram cut rule. Shared by the lane (ClassifyEvents), SkeletonModule, and
+// HdrVetoCutDetector::Observe so every consumer calls ONE implementation. Cut/fade/flash are never stored: every consumer derives them.
 //
 // First-principles 576-cell spatial affine fade law (owner ruling 2026-11-22 16:53 EST; zero fitted constants):
 //   - Decoupled global translation alignment (integer + symmetric sub-cell Gauss-Newton / Lucas-Kanade) over the 32x18 P4 cell grid
@@ -65,7 +65,7 @@ constexpr double kBlackMaxP4 = double(kFadeMaxBlack) * kP4CodesPerEightBit;     
 // Elementary textbook ratios for the 576-cell spatial affine fade law.
 constexpr double kFadeResidualReduction = 0.5;                // 50% reduction bar: lit-cell L2 variance explained > 50% (V_fade < 0.5 * V_id) & AlignGrid shift-improvement check
 constexpr double kFadeSpatialConsensus = 0.75;                // >= 3/4 of changing lit cells move in the fade direction
-constexpr double kFadeSpatialCoverage = 0.5;                  // >= 1/2 of lit cells participate in the fade direction
+constexpr double kFadeSpatialCoverage = 0.5;                  // >= 1/2 of lit cells participate in the fade direction & above-LSB StepStillMoving majority
 constexpr double kFadeCellStepEps = 0.5 * double(kFadeMinSpread); // 0.5 8-bit code = half-LSB quantization floor
 
 // ---- the record-sequence cut law "T2" (U7-accuracy, v2) constants & grid helpers -----------------------------------------
@@ -877,8 +877,8 @@ private:
             return v;
         }
         // Emergence of a genuine brightening fade-in from flat dark/black: prev is flat dark (< kFadeMaxBlack),
-        // prev -> k brightens monotonically with zero interior cells darkening > kFadeCellStepEps, and k -> ahead
-        // is a verified 576-cell affine brightening fade (FitGridFadeGrid valid && dir > 0).
+        // prev -> k brightens monotonically within a single-frame fade step (< kFadeMaxStepCodes) with zero interior
+        // cells darkening > kFadeCellStepEps, and k -> ahead is a verified 576-cell affine brightening fade.
         if (prev->flat && ahead != nullptr && ahead->grid.valid) {
             double prevMean = 0.0, kMean = 0.0;
             for (int y = 0; y < kGridH; ++y)
@@ -888,7 +888,7 @@ private:
                 }
             prevMean /= double(kGridH * kGridW);
             kMean /= double(kGridH * kGridW);
-            if (prevMean < double(kFadeMaxBlack) && kMean > prevMean) {
+            if (prevMean < double(kFadeMaxBlack) && kMean > prevMean && (kMean - prevMean) < double(kFadeMaxStepCodes)) {
                 int darkened = 0;
                 for (int y = kLocalRadius; y < kGridH - kLocalRadius; ++y)
                     for (int x = kLocalRadius; x < kGridW - kLocalRadius; ++x)
