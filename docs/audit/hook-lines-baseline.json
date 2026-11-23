@@ -4,7 +4,7 @@
  "metric": "H2",
  "tu_measure": 2,
  "base_ref": "a591ad3b5",
- "measured_at": "65408a88c (working tree)",
+ "measured_at": "f251eca1b (working tree)",
  "total": 16835,
  "totals": {
   "production": 12349,
@@ -146,8 +146,8 @@
   "src/VideoProcessor-VPRenderer/VideoProcessor-VPRendererBeta.vcxproj": 4
  },
  "tu": {
-  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 1647,
-  "src/VideoProcessor-Config/ConfigEditorWindow.h": 1324,
+  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 440,
+  "src/VideoProcessor-Config/ConfigEditorWindow.h": 745,
   "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp": 31,
   "src/VideoProcessor-GUI/VideoProcessorApp.cpp": 100,
   "src/VideoProcessor-GUI/VideoProcessorDlg.cpp": 245,
@@ -166,7 +166,7 @@
   "src/VideoProcessor-Lib/microsoft_directshow/MadVRShaderLoader.cpp": 198,
   "src/VideoProcessor-Lib/microsoft_directshow/live_source_filter/CBufferedLiveSourceVideoOutputPin.cpp": 56,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRenderParameters.cpp": 65,
-  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 11197,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 11077,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 827,
   "src/VideoProcessor-Test/ConfigFileTests.cpp": 84,
   "src/VideoProcessor-Test/DolbyVisionTunnelFormatterTests.cpp": 318,
@@ -175,8 +175,8 @@
   "src/VideoProcessor-Test/WindowResizeLayoutTests.cpp": 44
  },
  "combined": {
-  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 3172,
-  "src/VideoProcessor-Config/ConfigEditorWindow.h": 1387,
+  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 1965,
+  "src/VideoProcessor-Config/ConfigEditorWindow.h": 808,
   "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp": 4129,
   "src/VideoProcessor-GUI/VideoProcessorApp.cpp": 334,
   "src/VideoProcessor-GUI/VideoProcessorDlg.cpp": 1716,
@@ -195,7 +195,7 @@
   "src/VideoProcessor-Lib/microsoft_directshow/MadVRShaderLoader.cpp": 290,
   "src/VideoProcessor-Lib/microsoft_directshow/live_source_filter/CBufferedLiveSourceVideoOutputPin.cpp": 106,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRenderParameters.cpp": 120,
-  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 14460,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 14340,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 1017,
   "src/VideoProcessor-Test/ConfigFileTests.cpp": 129,
   "src/VideoProcessor-Test/DolbyVisionTunnelFormatterTests.cpp": 400,

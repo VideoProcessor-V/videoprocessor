@@ -219,10 +219,22 @@
      "reason": "the NVOF producer entry point; its 2x2 box now calls the unit (C1)"
     },
     {
+     "file": "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
+     "pattern": "HalfLumaPool::",
+     "kind": "false_positive",
+     "reason": "CB-16 P2 persistent row-parallel worker thread pool (dispatches lambdas over row ranges, contains no downsample)"
+    },
+    {
      "file": "src/VP-V/modules/motion/estimation/MotionAheadProducer.h",
      "pattern": "HalfLuma8\\(",
      "kind": "false_positive",
      "reason": "declaration of the NVOF producer entry point"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/MotionAheadProducer.h",
+     "pattern": "HalfLumaPool",
+     "kind": "false_positive",
+     "reason": "CB-16 P2 persistent row-parallel worker thread pool class/member declaration (no downsample)"
     },
     {
      "file": "src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp",
