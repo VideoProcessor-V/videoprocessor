@@ -29,6 +29,7 @@ namespace FallbackPlainText
 			{ "texture restore", "The texture restore was skipped for this frame" },
 			{ "grain_sep.repeat_gate_off", "Paused or repeated frames are not left out of the grain separation, so their grain can be averaged away" },
 			{ "deband", "The standard debander is being used instead of VP's" },
+			{ "vp deband", "VP's debander failed, so the picture is rendered without it" },
 			{ "motion", "The motion engine is not running, so motion-based steps are off" },
 			{ "motion consumers", "Motion-based steps are showing the source frame instead" },
 			{ "timeline", "The per-refresh motion timeline is off; frames are shown at their own times" },
