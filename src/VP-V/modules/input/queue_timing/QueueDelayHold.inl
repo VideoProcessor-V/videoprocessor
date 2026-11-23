@@ -38,8 +38,9 @@ const QueueTimingPolicy::IQueueTimingPolicy& LibplaceboVideoRenderer::QueuePolic
 	const bool slotOff = m_impl && !m_impl->pipelineSlots.Runs(PipelineSlots::Id::InputQueueTiming);
 	if (VpQueueTiming::Select(slotOff, original, true) == VpQueueTiming::Selection::Upstream)
 		return m_upstreamQueuePolicy;
+	const bool lowLatency = m_impl && m_impl->lowLatencyQueueActive.load(std::memory_order_acquire);
 	const_cast<VpQueueTiming::VpFixedBudgetPolicy&>(m_vpQueuePolicy).SetOptions({
-		original, m_queueTimingFixes.load(std::memory_order_relaxed) });
+		original, m_queueTimingFixes.load(std::memory_order_relaxed), lowLatency });
 	return m_vpQueuePolicy;
 }
 

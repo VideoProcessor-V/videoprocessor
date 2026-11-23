@@ -214,6 +214,22 @@ namespace VpQueueRules
 		return (std::min)(want, room);
 	}
 
+	// R30: low-latency excess-depth shed using the exact same derived 0.5 s sustained window
+	// (minimum 8 frames) as ShouldShedHeldExcess. In low-latency mode PlanHold disables the delay
+	// hold, so a transient 17-49 ms vsync slip (< MINIMUM_RENDER_STALL_MS) at matched rate
+	// (e.g. 60p/60Hz, queue_size=4, target=2) would otherwise latch the queue permanently at
+	// depth 3 because ShouldRecoverBacklog requires 100 ms of excess age.
+	inline bool ShouldShedLowLatencyExcess(size_t queueDepth, size_t desiredDepth, double frameRateHz, unsigned& run)
+	{
+		const bool excess = queueDepth > NormalizeDesiredDepth(desiredDepth);
+		run = excess ? run + 1 : 0;
+		const unsigned needed = (std::max)(8u, static_cast<unsigned>(std::lround(0.5 * ValidFrameRateOrDefault(frameRateHz))));
+		if (run < needed)
+			return false;
+		run = 0;
+		return true;
+	}
+
 	// The VP timeline's queue steering (hunt 2 13-timing H2, L3). The refresh
 	// spacing is trimmed by the smoothed distance of the queue (after the dequeue)
 	// from its target, at most 0.3%. The target after the dequeue keeps one frame of
