@@ -769,6 +769,34 @@ namespace Tests
 			Assert::AreEqual(static_cast<size_t>(0), cache.Stats().entryCount);
 			Assert::AreEqual(static_cast<size_t>(0), cache.Stats().totalBytes);
 
+			// Rectangular frame (640x512, N_H = 640 != 512 = N_V) under ChromaOperatorCache(1):
+			// H-axis operator is evicted mid-call when V-axis builds (512, 0, 512); must still match uncached
+			// bit-exact with zero dangling references or stale operators across repeated calls!
+			ChromaSampleInput inRect;
+			inRect.floorCodes = kFloor10Bit;
+			inRect.lumaH = fullLumaH2; // N_H = 640, origin = 0, length = 640
+			inRect.cbH = fullCbH2;
+			inRect.crH = fullCrH2;
+			inRect.lumaV = in1.lumaV;  // N_V = 512, origin = 0, length = 512
+			inRect.cbV = in1.cbV;
+			inRect.crV = in1.crV;
+
+			const ChromaChainEstimate refRect = EstimateChromaChain(inRect, on, nullptr);
+			Assert::IsTrue(refRect.valid && refRect.origin == ChromaOrigin::Subsampled420);
+
+			ChromaOperatorCache rectCache(1);
+			const ChromaChainEstimate cachedRect1 = EstimateChromaChain(inRect, on, &rectCache);
+			assertEstimatesMatchExact(cachedRect1, refRect);
+			const ChromaOperatorCacheStats stRect1 = rectCache.Stats();
+			Assert::IsTrue(stRect1.misses >= 2u);
+			Assert::IsTrue(stRect1.evictions >= 1u);
+			Assert::AreEqual(static_cast<size_t>(1), rectCache.EntryCount());
+
+			const ChromaChainEstimate cachedRect2 = EstimateChromaChain(inRect, on, &rectCache);
+			assertEstimatesMatchExact(cachedRect2, refRect);
+			Assert::IsTrue(rectCache.Stats().evictions > stRect1.evictions);
+			Assert::AreEqual(static_cast<size_t>(1), rectCache.EntryCount());
+
 			// MANDATORY Rule 3 Negative Control on EXACT same in2.cbH lines (N = 640, origin = 16, length = 608):
 			// Reusing a DescaleOperator built for a mismatched origin (origin = 17 instead of 16) OR mismatched
 			// axisLen (N = 608, origin = 0) produces a massive residual explosion, proving (N, origin, length)

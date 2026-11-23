@@ -1030,30 +1030,84 @@ namespace Tests
 			Assert::IsTrue(std::fabs(dsDirect.bandDropDecades - dsShared.bandDropDecades) < 1e-12);
 			Assert::IsTrue(std::fabs(dsDirect.confidence - dsShared.confidence) < 1e-12);
 
-			// Part C — MANDATORY Rule 3 Negative Control (Mismatched & Invalid PrecomputedLinePsd Rejection):
-			// Passing a PSD with mismatched axisLen (dsPsd from N = 2160 into N = 1024, or tampered axisLen),
-			// mismatched fftN (512-px LineSet fftN == 512 vs 1024-px fftN == 1024), or valid == false MUST be
-			// visibly rejected with InvalidInput by ALL 3 functions (never silently reading misaligned bins!).
-			LineSet ls512;
-			ls512.axisLen = 512;
-			ls512.Resize(8, 512);
-			for (int li = 0; li < 8; ++li)
-			{
-				const std::vector<double> lat512 = Quantize10Bit(MakeBroadbandLatent(512, rng));
-				std::copy(lat512.begin(), lat512.end(), ls512.Line(li));
-			}
-			PrecomputedLinePsd psd512;
-			Assert::IsTrue(ComputeLineSetPsd(ls512, psd512));
-			Assert::IsTrue(psd512.valid);
+			// Part C — MANDATORY Rule 3 Negative Control (Unmasked Mismatched & Invalid PrecomputedLinePsd Rejection):
+			// Every validation predicate (valid == false, axisLen mismatch, pure fftN mismatch, pure lineCount mismatch)
+			// is tested UNMASKED across ALL 3 consumers (ClassifyResidualSpectrum, EstimateEffectiveBandwidth, EvaluateDoubleScale).
 			Assert::IsTrue(dsPsd.axisLen != sigPsd.axisLen);
-			Assert::IsTrue(psd512.fftN != sigPsd.fftN);
 
-			const ResidualSpectrumResult clsWrongFft = ClassifyResidualSpectrum(sigUsm, resUsm, kLatentN, kFloor10Bit, on, &psd512);
-			const EffectiveBandwidthResult bwWrongFft = EstimateEffectiveBandwidth(sigUsm, kFloor10Bit, on, &psd512);
-			Assert::IsFalse(clsWrongFft.valid);
-			Assert::IsTrue(clsWrongFft.reason == ResidualSpectrumReason::InvalidInput);
-			Assert::IsFalse(bwWrongFft.valid);
-			Assert::IsTrue(bwWrongFft.reason == ResidualSpectrumReason::InvalidInput);
+			// (a) Pure fftN mismatch: matching axisLen AND matching lineCount, cropped length = 512 -> fftN = 512 != 1024.
+			LineSet lsCrop512Sig;
+			lsCrop512Sig.axisLen = kN;
+			lsCrop512Sig.Resize(kLines, 512);
+			for (int li = 0; li < kLines; ++li)
+				std::copy(sigUsm.Line(li), sigUsm.Line(li) + 512, lsCrop512Sig.Line(li));
+			PrecomputedLinePsd psdPureFftSig;
+			Assert::IsTrue(ComputeLineSetPsd(lsCrop512Sig, psdPureFftSig));
+			Assert::IsTrue(psdPureFftSig.valid);
+			Assert::AreEqual(sigPsd.axisLen, psdPureFftSig.axisLen);
+			Assert::AreEqual(sigPsd.lineCount, psdPureFftSig.lineCount);
+			Assert::AreNotEqual(sigPsd.fftN, psdPureFftSig.fftN);
+
+			const ResidualSpectrumResult clsPureFft = ClassifyResidualSpectrum(sigUsm, resUsm, kLatentN, kFloor10Bit, on, &psdPureFftSig);
+			const EffectiveBandwidthResult bwPureFft = EstimateEffectiveBandwidth(sigUsm, kFloor10Bit, on, &psdPureFftSig);
+			Assert::IsFalse(clsPureFft.valid);
+			Assert::IsTrue(clsPureFft.reason == ResidualSpectrumReason::InvalidInput);
+			Assert::IsFalse(bwPureFft.valid);
+			Assert::IsTrue(bwPureFft.reason == ResidualSpectrumReason::InvalidInput);
+
+			LineSet lsCrop512Ds;
+			lsCrop512Ds.axisLen = kDsN;
+			lsCrop512Ds.Resize(kDsLines, 512);
+			for (int li = 0; li < kDsLines; ++li)
+				std::copy(lsDouble.Line(li), lsDouble.Line(li) + 512, lsCrop512Ds.Line(li));
+			PrecomputedLinePsd psdPureFftDs;
+			Assert::IsTrue(ComputeLineSetPsd(lsCrop512Ds, psdPureFftDs));
+			Assert::IsTrue(psdPureFftDs.valid);
+			Assert::AreEqual(dsPsd.axisLen, psdPureFftDs.axisLen);
+			Assert::AreEqual(dsPsd.lineCount, psdPureFftDs.lineCount);
+			Assert::AreNotEqual(dsPsd.fftN, psdPureFftDs.fftN);
+
+			const DoubleScaleResult dsPureFft = EvaluateDoubleScale(lsDouble, 1080, dsCands, kFloor10Bit, on, &psdPureFftDs);
+			Assert::IsFalse(dsPureFft.valid);
+			Assert::IsTrue(dsPureFft.reason == ResidualSpectrumReason::InvalidInput);
+
+			// (b) Pure lineCount mismatch: matching axisLen AND matching fftN, different count = kLines / 2.
+			LineSet lsHalfLinesSig;
+			lsHalfLinesSig.axisLen = kN;
+			lsHalfLinesSig.Resize(kLines / 2, kN);
+			for (int li = 0; li < kLines / 2; ++li)
+				std::copy(sigUsm.Line(li), sigUsm.Line(li) + kN, lsHalfLinesSig.Line(li));
+			PrecomputedLinePsd psdPureLinesSig;
+			Assert::IsTrue(ComputeLineSetPsd(lsHalfLinesSig, psdPureLinesSig));
+			Assert::IsTrue(psdPureLinesSig.valid);
+			Assert::AreEqual(sigPsd.axisLen, psdPureLinesSig.axisLen);
+			Assert::AreEqual(sigPsd.fftN, psdPureLinesSig.fftN);
+			Assert::AreNotEqual(sigPsd.lineCount, psdPureLinesSig.lineCount);
+
+			const ResidualSpectrumResult clsPureLines = ClassifyResidualSpectrum(sigUsm, resUsm, kLatentN, kFloor10Bit, on, &psdPureLinesSig);
+			const EffectiveBandwidthResult bwPureLines = EstimateEffectiveBandwidth(sigUsm, kFloor10Bit, on, &psdPureLinesSig);
+			Assert::IsFalse(clsPureLines.valid);
+			Assert::IsTrue(clsPureLines.reason == ResidualSpectrumReason::InvalidInput);
+			Assert::IsFalse(bwPureLines.valid);
+			Assert::IsTrue(bwPureLines.reason == ResidualSpectrumReason::InvalidInput);
+
+			LineSet lsHalfLinesDs;
+			lsHalfLinesDs.axisLen = kDsN;
+			lsHalfLinesDs.Resize(kDsLines / 2, kDsN);
+			for (int li = 0; li < kDsLines / 2; ++li)
+				std::copy(lsDouble.Line(li), lsDouble.Line(li) + kDsN, lsHalfLinesDs.Line(li));
+			PrecomputedLinePsd psdPureLinesDs;
+			Assert::IsTrue(ComputeLineSetPsd(lsHalfLinesDs, psdPureLinesDs));
+			Assert::IsTrue(psdPureLinesDs.valid);
+			Assert::AreEqual(dsPsd.axisLen, psdPureLinesDs.axisLen);
+			Assert::AreEqual(dsPsd.fftN, psdPureLinesDs.fftN);
+			Assert::AreNotEqual(dsPsd.lineCount, psdPureLinesDs.lineCount);
+
+			const DoubleScaleResult dsPureLines = EvaluateDoubleScale(lsDouble, 1080, dsCands, kFloor10Bit, on, &psdPureLinesDs);
+			Assert::IsFalse(dsPureLines.valid);
+			Assert::IsTrue(dsPureLines.reason == ResidualSpectrumReason::InvalidInput);
+
+			// (c) Pure axisLen mismatch & valid == false across all 3 consumers.
 
 			PrecomputedLinePsd badAxisSig = sigPsd;
 			badAxisSig.axisLen = sigPsd.axisLen + 128;
