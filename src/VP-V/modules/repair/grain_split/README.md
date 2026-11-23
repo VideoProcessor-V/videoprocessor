@@ -57,6 +57,12 @@ Computed once per frame; readers never recompute it.
   `Compute()` is the loop over `Step` (same dispatches, same order, byte-identical). The skeleton's lane form runs one step per gap chunk
   (`LaneGpuGrainKernel.h`, `kP10SplitterSteps` = 7) and its live form all seven at once.
 - `GpuPassUtil.h`: the compute-pass helpers its readers share.
+- `GrainGuard.h` (15b A4, `GrainSplit::Guard`, kUnitVersion 1): the shared output-vs-input grain guard unit - its constants,
+  the seven per-block sums (`kSums`), `Violation` (pooled sums -> v), `AddBack` (the immediate add-back share) and `Step`
+  (trip / release with hysteresis, fast fall / slow rise of the weight). Imported byte for byte (content; line endings
+  normalised by git) from the lead18 set-aside `c5-jb2-setaside/GrainGuard.h` (sha256 eaebc102...b29, CRLF form).
+- `GrainGuardGlsl.h` (15b A4): the same law as GLSL - `Defines()` (the constants as `GS_GUARD_*`, formatted by
+  `VpvGpu::Define`) and `Functions()` (`gs_guard_violation`, `gs_guard_addback`, `gs_guard_step`).
 - Tests: see `tests/README.md`.
 
 ## Settings
@@ -222,6 +228,16 @@ Decisions (lead A20-CB, recorded for the owner batch):
 - `GrainLevelModule` also registers the P10 variant owner's fill in production, through the skeleton's external demand (`VariantOwner::RegisterThrough`, so the P10 registration call stays in the P10 owner's file). Side effect: TD's P10 variant Acquires are now served. MERGE NOTE (review-cb-p10g-r1 SHOULD-1): 15b A1 is the SINGLE P10 owner registration. An `AlreadyRegistered` answer (A1, or anyone, first) is benign (`SplitOwnerServedElsewhere()`, no line); any other refusal is shown. When A1 lands, delete this split registration. No separate `HasOwnerFill` pre-check: the module-wide `RegisterOwnerFill` answers `AlreadyRegistered` atomically under the skeleton's owner-fill lock, while a memo check would need `MemoFor` (which creates a memo) and could race with A1.
 - Visible surface: no Config key; every line goes to `StatusKind::Fallbacks` (-> `GetFallbacksStatus`: Ctrl+I, Config status, Ctrl+Alt+D). `grain_level_temporal` (single-frame law in use, once a fill ran), `grain_level_declined: <last reason> (N declines)` (while the most recent fill declined; released when a fill publishes again, the count and last reason kept), `grain_level_unregistered: <why>` (a source size was seen but the P10g fill is not ours: no skeleton yet, or the registration's refusal; once no host is live the refused size is retried, and shown again, when it returns) and `grain_split_owner_unregistered: <why>` (the P10 owner refused, other than AlreadyRegistered). The unkeyed `StatusKind::Lines` line of round 1 is gone: `StatusText.h` routes only keyed resync lines, so nothing showed it (review MUST-1). Bill hunks: 0.
 - T5 gates (open until the T5 run; listed in the `GrainLevelGpu.h` header): (1) not compiled yet (written code only); (2) the GPU parity test (fill vs GrainSplit's CPU blocks and f^2 block mean); (3) the 4K cost of the single-frame pass; (4) `Products.h` `refRenderMs` 0.05 is a placeholder for gate 3's measured cost.
+
+## Grain guard unit (15b A4): design goal, philosophy and decisions
+
+- Grain guard as one unit (15b A4, 2026-11-15; plan D:\codex\vp-handover\lead18\coreplan-C10-15b-PC-grain.md (c) A4 and
+  (d) "A4 IDENTICAL"; refs/129 L-B2 (d)): the output-vs-input grain guard that temporal_detail kept as its own constants
+  and inline law is owned here (`GrainGuard.h` + `GrainGuardGlsl.h`), so every reader that changes a grainy picture
+  judges grain loss, rise and freeze by the same law and values (one copy; doc 91 D "one computation per shared unit").
+  The law and the constants are unchanged (kRiseTrip 0.05, kMaxShare 0.2, kTemplateShare 0.25 and the rest equal to the
+  former TD values); the CPU form is `Violation` / `AddBack` / `Step`, the GLSL form mirrors it expression for
+  expression. The EMA of the sums stays in the reader (its own block state, time constant `kStatsSeconds`).
 
 ## Band memo (job 1, L-B3; product band_memo, id 30)
 

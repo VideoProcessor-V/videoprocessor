@@ -26,6 +26,8 @@
     "src/VP-V/modules/input/source_analysis/lane/LaneGpuGrainKernel.h",
     "src/VP-V/modules/input/source_analysis/lane/LaneGpuGrainKernel.cpp",
     "src/VP-V/modules/repair/grain_split/GpuPassUtil.h",
+    "src/VP-V/modules/repair/grain_split/GrainGuard.h",
+    "src/VP-V/modules/repair/grain_split/GrainGuardGlsl.h",
     "src/VP-V/modules/repair/grain_split/shared/BandFromBase.h",
     "src/VP-V/modules/repair/grain_split/BandMemo.h",
     "src/VP-V/modules/repair/grain_split/BandMemoFill.h",
