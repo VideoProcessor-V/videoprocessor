@@ -252,9 +252,10 @@ namespace ProducerThroughput
 		Config cfg;
 		std::string tag;     // "r1".."r3", "AA-first", "AA-last"
 		int order = 0;
-		unsigned long long submitted = 0, published = 0, lost = 0, droppedStat = 0, failures = 0;
+		unsigned long long submitted = 0, published = 0, lost = 0, droppedStat = 0, failures = 0, lateSkips = 0;
 		int engineW = 0, engineH = 0;
 		Dist service, luma, extras, latency, queueWait, interval;
+		Dist stageQueueWait, stageLuma, stageEngine, stageMap, stageVote, stageExtras, stageSubmitToPublish;
 		double foreignCpu = -1.0, ownCpu = -1.0;
 		std::string error;
 	};
@@ -353,6 +354,13 @@ namespace ProducerThroughput
 				{
 					row.service.Add(st.lastPairMs);
 					row.extras.Add(st.extrasMs);
+					row.stageQueueWait.Add(st.lastStage.queueWaitMs);
+					row.stageLuma.Add(st.lastStage.lumaMs);
+					row.stageEngine.Add(st.lastStage.engineMs);
+					row.stageMap.Add(st.lastStage.mapMs);
+					row.stageVote.Add(st.lastStage.voteMs);
+					row.stageExtras.Add(st.lastStage.extrasMs);
+					row.stageSubmitToPublish.Add(st.lastStage.submitToPublishMs);
 				}
 				if (st.frames == last.frames + 1)
 					row.luma.Add(st.lumaMs);
@@ -403,6 +411,7 @@ namespace ProducerThroughput
 		const MotionAhead::Producer::Stats end = producer->GetStats();
 		row.droppedStat = end.dropped - base.dropped;
 		row.failures = end.failures - base.failures;
+		row.lateSkips = end.late - base.late;
 		// Queue wait per pair: latency less the mean service (the per-pair service sample cannot be tied to a sequence exactly).
 		const double meanService = row.service.Mean();
 		for (double lat : row.latency.v)
@@ -477,8 +486,10 @@ namespace ProducerThroughput
 
 	inline std::string CsvHeader()
 	{
-		return "tag,order,res,size,rate,depth,engine,submitted,published,lost,dropped,failures,"
-			"service_p50,service_p95,service_max,luma_p50,luma_p95,extras_p50,engine_rest_mean,latency_p50,latency_p95,latency_max,"
+		return "tag,order,res,size,rate,depth,engine,submitted,published,lost,dropped,failures,late_skips,"
+			"service_p50,service_p95,service_max,luma_p50,luma_p95,extras_p50,engine_rest_mean,"
+			"stage_qwait_p50,stage_luma_p50,stage_engine_p50,stage_map_p50,stage_vote_p50,stage_extras_p50,stage_s2p_p50,stage_s2p_p95,"
+			"latency_p50,latency_p95,latency_max,"
 			"queue_wait_p50,queue_wait_p95,interval_p50,interval_p95,foreign_cpu_pct,own_cpu_pct,contended,error";
 	}
 
@@ -489,9 +500,12 @@ namespace ProducerThroughput
 			(std::max)(0.0, r.service.Mean() - r.luma.Mean() - r.extras.Mean()) : -1.0;
 		o << r.tag << "," << r.order << "," << r.cfg.res << "," << (r.cfg.quarter ? "quarter" : "half") << "," << r.cfg.rate << ","
 		  << r.cfg.depth << "," << r.engineW << "x" << r.engineH << "," << r.submitted << "," << r.published << "," << r.lost << ","
-		  << r.droppedStat << "," << r.failures << "," << Fmt(r.service.Pct(0.5)) << "," << Fmt(r.service.Pct(0.95)) << ","
+		  << r.droppedStat << "," << r.failures << "," << r.lateSkips << "," << Fmt(r.service.Pct(0.5)) << "," << Fmt(r.service.Pct(0.95)) << ","
 		  << Fmt(r.service.Top()) << "," << Fmt(r.luma.Pct(0.5)) << "," << Fmt(r.luma.Pct(0.95)) << "," << Fmt(r.extras.Pct(0.5)) << ","
-		  << Fmt(rest) << "," << Fmt(r.latency.Pct(0.5)) << "," << Fmt(r.latency.Pct(0.95)) << "," << Fmt(r.latency.Top()) << ","
+		  << Fmt(rest) << "," << Fmt(r.stageQueueWait.Pct(0.5)) << "," << Fmt(r.stageLuma.Pct(0.5)) << "," << Fmt(r.stageEngine.Pct(0.5)) << ","
+		  << Fmt(r.stageMap.Pct(0.5)) << "," << Fmt(r.stageVote.Pct(0.5)) << "," << Fmt(r.stageExtras.Pct(0.5)) << ","
+		  << Fmt(r.stageSubmitToPublish.Pct(0.5)) << "," << Fmt(r.stageSubmitToPublish.Pct(0.95)) << ","
+		  << Fmt(r.latency.Pct(0.5)) << "," << Fmt(r.latency.Pct(0.95)) << "," << Fmt(r.latency.Top()) << ","
 		  << Fmt(r.queueWait.Pct(0.5)) << "," << Fmt(r.queueWait.Pct(0.95)) << "," << Fmt(r.interval.Pct(0.5)) << ","
 		  << Fmt(r.interval.Pct(0.95)) << "," << Fmt(r.foreignCpu) << "," << Fmt(r.ownCpu) << ","
 		  << (r.foreignCpu > 10.0 ? "CONTENDED" : "idle") << "," << r.error;
@@ -623,9 +637,11 @@ public:
 				(std::max)(0.0, r.service.Mean() - r.luma.Mean() - r.extras.Mean()) : -1.0;
 			say(r.tag + " " + item.second.Label() + " eng " + std::to_string(r.engineW) + "x" + std::to_string(r.engineH) +
 				" | service p50/p95 " + Fmt(r.service.Pct(0.5)) + "/" + Fmt(r.service.Pct(0.95)) + " (luma " + Fmt(r.luma.Pct(0.5)) +
-				", extras " + Fmt(r.extras.Pct(0.5)) + ", rest " + Fmt(rest) + ") | submit->publish p50/p95 " + Fmt(r.latency.Pct(0.5)) +
+				", eng " + Fmt(r.stageEngine.Pct(0.5)) + ", map " + Fmt(r.stageMap.Pct(0.5)) + ", vote " + Fmt(r.stageVote.Pct(0.5)) +
+				", extras " + Fmt(r.stageExtras.Pct(0.5)) + ", rest " + Fmt(rest) + ") | submit->publish p50/p95 " + Fmt(r.latency.Pct(0.5)) +
 				"/" + Fmt(r.latency.Pct(0.95)) + " | interval p50/p95 " + Fmt(r.interval.Pct(0.5)) + "/" + Fmt(r.interval.Pct(0.95)) +
 				" | pub " + std::to_string(r.published) + "/" + std::to_string(r.submitted) + " drop " + std::to_string(r.droppedStat) +
+				" late " + std::to_string(r.lateSkips) +
 				" lost " + std::to_string(r.lost) + " | cpu foreign " + Fmt(r.foreignCpu) + "% " + (r.foreignCpu > 10.0 ? "CONTENDED" : "idle") +
 				(r.error.empty() ? "" : " | ERROR " + r.error));
 		}
