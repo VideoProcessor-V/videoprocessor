@@ -132,6 +132,9 @@ namespace Vpv
 				{ K::Section, "dejudderEstimation" } } },
 
 			// ---- Repair ----
+			{ "repair", "temporal_detail", "Temporal detail",
+				"Peak-frame blending in quantization cells that cleans banding and softens keyframe pulsing while leaving film grain untouched. Off by default.", false, false, {
+				{ K::Text, "temporal_detail" }, { K::Text, "td_mode" }, { K::Text, "td_overlay" } } },
 			{ "repair", "deband", "Deband",
 				"VP's debander: removes banding from compressed sources and leaves film grain alone.", false, false, {
 				{ K::Toggle, "deband_vp_grain_guard" }, { K::Toggle, "deband_vp_exclusive" }, { K::Toggle, "low_bitrate_handling" },

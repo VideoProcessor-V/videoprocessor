@@ -45,6 +45,10 @@ namespace TdV2
 		ZeroEnergyDarkBlockExcluded,
 		GpuScratchShortage,
 		GpuDispatchFailed,
+		LateCarryActive,
+		LateCarryExpired,
+		TierSteppedDown,
+		LeadReduced,
 		Count
 	};
 
@@ -108,7 +112,15 @@ namespace TdV2
 			{ StandInKind::GpuScratchShortage, "td.gpu.scratch_shortage",
 			  "GPU scratch arena shortage (frame skipped visibly)", "ScratchArena kUserTemporalDetail reserve" },
 			{ StandInKind::GpuDispatchFailed, "td.gpu.dispatch_failed",
-			  "GPU compute dispatch or input absent (frame skipped visibly)", "Valid pl_gpu / pl_dispatch / textures" }
+			  "GPU compute dispatch or input absent (frame skipped visibly)", "Valid pl_gpu / pl_dispatch / textures" },
+			{ StandInKind::LateCarryActive, "td.sched.late_carry",
+			  "temporal detail: lane late (carried)", "On-time TD precompute slice" },
+			{ StandInKind::LateCarryExpired, "td.sched.late_expired",
+			  "temporal detail: lane late (carry expired, passthrough)", "On-time TD precompute slice" },
+			{ StandInKind::TierSteppedDown, "td.sched.tier_stepdown",
+			  "temporal detail: tier stepped down under GPU load", "Full (tier 3) TD budget" },
+			{ StandInKind::LeadReduced, "td.sched.lead_reduced",
+			  "temporal detail: reduced look-ahead lead", "Full E>=4 look-ahead lead" }
 		};
 		const size_t idx = static_cast<size_t>(kind);
 		if (idx < static_cast<size_t>(StandInKind::Count))

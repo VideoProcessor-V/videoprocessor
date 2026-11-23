@@ -196,6 +196,9 @@ namespace VpvRendererSettings
 		readChoice("source_range", settings.sourceRange, { "auto", "full", "limited" });
 		readChoice("deband_vp", settings.debandVp, { "off", "auto", "on" });
 		readChoice("low_bitrate_handling", settings.lowBitrateHandling, { "auto", "off", "on" });
+		readChoice("temporal_detail", settings.temporalDetail, { "off", "shadow", "on" });
+		readChoice("td_mode", settings.tdMode, { "cell", "strict" });
+		readChoice("td_overlay", settings.tdOverlay, { "off", "weights", "maps", "focus", "motion" });
 		{
 			// native | auto | any height in lines (general, owner's standing rule).
 			std::string value;
@@ -1098,6 +1101,9 @@ namespace VpvRendererSettings
 		settings.resyncEvent = "off";                      // key=resync_event
 		settings.entranceGpuDrain = "off";                 // key=entrance_gpu_drain
 		settings.ditherNeed = "off";                       // key=dither_need
+		settings.temporalDetail = "off";                   // TD-S7: Original == Bill bit-exact (draft module; not in slots.json)
+		settings.tdMode = "cell";                          // TD-S7: reset to default in Original pathway
+		settings.tdOverlay = "off";                        // TD-S7: overlay off in Original pathway
 	}
 
 	// deband_vp_exclusive: see LibplaceboDebandYieldsToVp in the host (settings = the host's settings struct).
@@ -1287,7 +1293,10 @@ namespace VpvRendererSettings
 			<< settings.adaptive.motionSpeedLo << '|'
 			<< settings.adaptive.motionSpeedHi << '|'
 			<< settings.adaptive.motionFloor << '|'
-			<< settings.adaptive.motionSmoothMs << '|';
+			<< settings.adaptive.motionSmoothMs << '|'
+			<< settings.temporalDetail << '|'
+			<< settings.tdMode << '|'
+			<< settings.tdOverlay << '|';
 		if (includeLive)
 		{
 			// Planner Q4: the applied profiles' raw values (structural: any key, present or
@@ -1367,6 +1376,9 @@ namespace VpvRendererSettings
 		currentTransport.adaptive = next.adaptive;
 		currentTransport.debandGrain = next.debandGrain;
 		currentTransport.debandVpExclusive = next.debandVpExclusive;
+		currentTransport.temporalDetail = next.temporalDetail;
+		currentTransport.tdMode = next.tdMode;
+		currentTransport.tdOverlay = next.tdOverlay;
 	}
 
 	// Names of the VP-V settings that differ (appended after the host's own; the order differs from the old interleaved one).
@@ -1385,6 +1397,9 @@ namespace VpvRendererSettings
 			current.sourceResolutionEvidenceShots != next.sourceResolutionEvidenceShots ||
 			current.sourceResolutionEvidenceSeconds != next.sourceResolutionEvidenceSeconds, "source_resolution");
 		changed(current.debandVp != next.debandVp || current.lowBitrateHandling != next.lowBitrateHandling, "deband_vp");
+		changed(current.temporalDetail != next.temporalDetail, "temporal_detail");
+		changed(current.tdMode != next.tdMode, "td_mode");
+		changed(current.tdOverlay != next.tdOverlay, "td_overlay");
 		changed(current.pipelineOriginalPathway != next.pipelineOriginalPathway, "pipeline_original_pathway");
 		changed(current.pipelineOrder != next.pipelineOrder, "pipeline_order");
 		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
@@ -1683,7 +1698,10 @@ namespace VpvRendererSettings
 		<< "matcher.holdFeatherPx=" << m.holdFeatherPx << "\n"
 		<< "matcher.holdHysteresis=" << m.holdHysteresis << "\n"
 		<< "matcher.blockTaper=" << m.blockTaper << "\n"
-		<< "matcher.taperSad=" << m.taperSad << "\n";
+		<< "matcher.taperSad=" << m.taperSad << "\n"
+		<< "temporal_detail=" << s.temporalDetail << "\n"
+		<< "td_mode=" << s.tdMode << "\n"
+		<< "td_overlay=" << s.tdOverlay << "\n";
 		return o.str();
 	}
 

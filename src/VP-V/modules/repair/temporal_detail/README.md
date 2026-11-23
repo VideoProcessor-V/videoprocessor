@@ -181,12 +181,13 @@ removed-energy grid) would drop the raw bands and make it ~0.
 
 ## Settings
 
-Declared, not wired (no renderer call site yet; `TemporalDetail::ParseSettings` validates them). No key was added by the
-scratch-arena work (SA6): the arena is passed by the host in `Gpu::Params::arena`, not set by a key.
+The three v2 profile keys (`temporal_detail`, `td_mode`, `td_overlay`) are wired in `VpvSchemaKeys.h`, `VpvRendererSettings.cpp`, and the VP-V master Config page (`VP-V > Repair > Main > Temporal detail`; default `off`, forced `off` on the Original pathway; validated strictly by `TdV2::ParseTdV2Settings`). The four legacy v1 keys (`temporal_detail_boost`, `temporal_detail_strength`, `temporal_detail_max_age`, `temporal_detail_boost_max`) remain declared-only (`TemporalDetail::ParseSettings`, not in Config). No key was added by the scratch-arena work (SA6): the arena is passed by the host in `Gpu::Params::arena`, not set by a key.
 
 | Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|
-| `temporal_detail` | profile | enum | off, steady, auto | off | not in Config (module not wired) | n/a (VP-only) | declared: "Temporal detail: inactive (<reason>)"; `Status()` line | budget-governed: the VRAM governor keeps fewer reference slots first (5 down to 1, `Params::slots`), then drops the scratch-arena temporaries (T1), then the module; nothing is fixed to a GPU model |
+| `temporal_detail` | profile | enum | off, shadow, on | off | VP-V > Repair > Main > Temporal detail | off (VP-only) | visible: Ctrl+I / Config status (`Temporal detail: ...`), `StandInRegistry` + `FallbackCatalog` (`product.temporal_detail`) | budget-governed: `OverloadArbiter` steps TD down before de-judder extras (`Full -> ReducedAnchor -> LocalPeaksOnly -> OffBudget`); preserves cell integrity |
+| `td_mode` | profile | enum | cell, strict | cell | VP-V > Repair > Main > Temporal detail | cell (VP-only) | shown in Ctrl+I status line (`mode=cell` / `mode=strict`); transform-unknown streams visibly show pixel-domain band bound | same as `temporal_detail` |
+| `td_overlay` | profile | enum | off, weights, maps, focus, motion | off | VP-V > Repair > Main > Temporal detail | off (VP-only) | diagnostic overlay only; off by default | same as `temporal_detail` |
 | `temporal_detail_boost` | profile | bool | on, off (the fallback boost) | off | not in Config (module not wired) | n/a (VP-only) | declared: off unless re-validated on real encodes (owner 2026-10-31) | same as `temporal_detail` |
 | `temporal_detail_strength` | profile | float | 0.0 .. 1.0 | 1.0 | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
 | `temporal_detail_max_age` | profile | float | 0.25 .. 4.0 (seconds) | 2.0 | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
@@ -209,8 +210,12 @@ the block state), vector / camera confidence (pair trust, composed uncertainty u
 (grain.split blocks), brightness (block mean of the base band) and the frame's I/B phase (the rebound evidence). Applied
 identically in the model and the GPU passes (`TemporalDetailGpuBlockGatesFollowTheModel`).
 
-`TemporalDetail::ParseSettings` validates them (an invalid value keeps the previous one). They are not in
-RendererProfileConfig, slots.json, the tier table or the Config editor yet.
+For the four legacy v1 keys (`temporal_detail_boost`, `temporal_detail_strength`, `temporal_detail_max_age`,
+`temporal_detail_boost_max`), `TemporalDetail::ParseSettings` validates them (an invalid value keeps the previous one)
+and they are not in `VpvSchemaKeys.h`, `slots.json`, the tier table, or the Config editor. The three v2 profile keys
+(`temporal_detail`, `td_mode`, `td_overlay`) are wired into `VpvSchemaKeys.h`, `VpvRendererSettings.cpp`, and the
+`VP-V > Repair > Main > Temporal detail` Config card (while `repair.temporal_detail` remains a draft module outside
+`slots.json`).
 
 ## Environment and diagnostics
 

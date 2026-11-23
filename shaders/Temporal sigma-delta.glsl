@@ -556,6 +556,8 @@ void hook()
     float code_unit = exp2(code_bits - 8.0);
     float code_min = limited ? code_unit : 0.0;
     float code_max = limited ? 255.0 * code_unit - 1.0 : exp2(code_bits) - 1.0;
+    // Owner Q9b (SD SHOULD-1): limited-range reference black (16 at 8-bit, 64 at 10-bit).
+    float code_black = limited ? 16.0 * code_unit : 0.0;
 
     vec4 src = HOOKED_mul * texelFetch(HOOKED_raw, pos, 0);
     vec3 x = src.rgb * in_scale;
@@ -611,6 +613,11 @@ void hook()
         amp = min(amp + max(dn_extra(vec2(pos)), 0.0), 0.5);
     vec3 d = vec3((ign(vec2(pos), frame / 5) - 0.5) * 2.0 * amp);
 
+    // Owner Q9b (SD SHOULD-1, mirrors SigmaDeltaDomain::QuantiseStep): on limited-range targets,
+    // pixels at or above reference black (16/64) never dither into BTB (15/63), protecting W2
+    // dark-still ANSI contrast; true BTB pixels (< 16/64) stay untouched down to code_min (1/4, ADR-0002).
+    vec3 floor_code = limited ? mix(vec3(code_min), vec3(code_black), step(vec3(code_black), x)) : vec3(code_min);
+
     if (enabled > 0.5) {
         ivec2 state_size = imageSize(RESID);
         ivec2 spos = clamp(pos, ivec2(0), state_size - ivec2(1));
@@ -654,7 +661,7 @@ void hook()
 
         // First-order sigma-delta: quantise the error-corrected value, carry
         // the new residual. The dither term is not fed back.
-        k = clamp(floor(x + r + d + 0.5), code_min, code_max);
+        k = clamp(floor(x + r + d + 0.5), floor_code, vec3(code_max));
         vec3 r_next = clamp(x + r - k, -resid_bound(amp), resid_bound(amp));
         r_next = mix(r_next, vec3(0.0), exact_code);
 
@@ -666,7 +673,7 @@ void hook()
             imageStore(PREV_NEXT, spos, vec4(x, 1.0));
         }
     } else {
-        k = clamp(floor(x + d + 0.5), code_min, code_max);
+        k = clamp(floor(x + d + 0.5), floor_code, vec3(code_max));
         // The state this refresh does not write keeps its value, as the
         // copies did (ping-pong: carried into the pair written now).
         ivec2 spos = clamp(pos, ivec2(0), imageSize(RESID) - ivec2(1));

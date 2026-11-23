@@ -41,6 +41,8 @@ namespace SigmaDeltaDomain
 	{
 		double min = 0.0;
 		double max = 255.0;
+		double black = 0.0;      // Owner Q9b (SD SHOULD-1): limited-range reference black (16 at 8-bit, 64 at 10-bit)
+		bool limited = false;    // true on limited-range targets; false on full-range targets
 	};
 
 	inline CodeLimits Limits(int colorBits, bool full)
@@ -50,6 +52,8 @@ namespace SigmaDeltaDomain
 		CodeLimits l;
 		l.min = full ? 0.0 : unit;
 		l.max = full ? std::ldexp(1.0, bits) - 1.0 : 255.0 * unit - 1.0;
+		l.limited = !full;
+		l.black = full ? 0.0 : 16.0 * unit;
 		return l;
 	}
 
@@ -70,7 +74,11 @@ namespace SigmaDeltaDomain
 	{
 		const bool exact = x == std::floor(x + 0.5);
 		if (exact) r = 0.0;
-		const double k = (std::min)((std::max)(std::floor(x + r + d + 0.5), limits.min), limits.max);
+		// Owner Q9b (SD SHOULD-1): on limited-range targets, pixels at or above reference black (16/64)
+		// never dither into BTB (15/63), protecting W2 dark-still ANSI contrast; true BTB pixels (< 16/64)
+		// remain untouched down to limits.min (1/4, ADR-0002).
+		const double floorCode = (limits.limited && x >= limits.black) ? limits.black : limits.min;
+		const double k = (std::min)((std::max)(std::floor(x + r + d + 0.5), floorCode), limits.max);
 		const double bound = ResidualBound(noiseAmplitude);
 		r = exact ? 0.0 : (std::min)((std::max)(x + r - k, -bound), bound);
 		return k;

@@ -18,7 +18,19 @@
     "src/VP-V/modules/repair/temporal_detail/TemporalDetailGpu.cpp",
     "src/VP-V/modules/repair/temporal_detail/README.md",
     "src/VP-V/modules/repair/temporal_detail/tests/TemporalDetailModelTests.cpp",
-    "src/VP-V/modules/repair/temporal_detail/tests/TemporalDetailGpuTests.cpp"
+    "src/VP-V/modules/repair/temporal_detail/tests/TemporalDetailGpuTests.cpp",
+    "src/VP-V/modules/repair/temporal_detail/v2/TdV2Config.h",
+    "src/VP-V/modules/repair/temporal_detail/v2/TdV2StandIns.h",
+    "src/VP-V/modules/repair/temporal_detail/v2/TdV2Metrics.h",
+    "src/VP-V/modules/repair/temporal_detail/v2/TdV2BlendMath.h",
+    "src/VP-V/modules/repair/temporal_detail/v2/TdV2FrameRole.h",
+    "src/VP-V/modules/repair/temporal_detail/v2/TdV2ReferenceEngine.h",
+    "src/VP-V/modules/repair/temporal_detail/v2/TdV2Chroma.h",
+    "src/VP-V/modules/repair/temporal_detail/v2/TdV2GrainQ5.h",
+    "src/VP-V/modules/repair/temporal_detail/v2/TdV2Shaders.h",
+    "src/VP-V/modules/repair/temporal_detail/v2/TdV2Gpu.h",
+    "src/VP-V/modules/repair/temporal_detail/v2/TdV2Scheduler.h",
+    "src/VP-V/modules/repair/temporal_detail/v2/TdV2Settings.h"
   ],
   "forwarding_headers": [],
   "components": {
@@ -32,6 +44,8 @@
     },
     "tools": [],
     "config_keys": [
+      "td_mode",
+      "td_overlay",
       "temporal_detail",
       "temporal_detail_boost",
       "temporal_detail_boost_max",

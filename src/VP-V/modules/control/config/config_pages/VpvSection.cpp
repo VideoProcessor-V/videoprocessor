@@ -555,6 +555,19 @@ namespace Vpv
 					"its GPU work runs after the frame is submitted, so the same clip gives the same picture every time and "
 					"the work cannot disturb the frame in flight. The switch lands on the next cut, read ahead. Off: the earlier "
 					"mode, where the decision arrives whenever the GPU finishes." },
+				// TD-S7: Temporal Detail v2 (peak-frame blending in quantization cells; off by default; Original pathway forces off).
+				{ "temporal_detail", "Temporal detail (off | shadow | on)", "off",
+					"Default off. Peak-frame blending in quantization cells that cleans banding and softens keyframe pulsing "
+					"while leaving film grain untouched. shadow: runs diagnostics and status without modifying pixels. "
+					"on: enables temporal detail repair (automatically enables the analysis lane and motion/camera group). "
+					"Original pathway forces off." },
+				{ "td_mode", "Temporal detail: residual mode (cell | strict)", "cell",
+					"Default cell. cell: allows sent codec corrections to shift within their rounding cell for stronger "
+					"banding and pulse cleanup. strict: restores every sent coefficient unchanged and repairs only zeroed "
+					"dead-zone detail." },
+				{ "td_overlay", "Temporal detail: diagnostic overlay (off | weights | maps | focus | motion)", "off",
+					"Default off. Optional diagnostic overlay showing per-block blend weights, td.maps fields, focus guard "
+					"vetoes, or camera-relative motion gates." },
 			};
 			for (const TextRowSpec& r : kRows)
 				if (std::string(r.key) == key) return &r;

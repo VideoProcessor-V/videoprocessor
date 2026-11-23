@@ -527,6 +527,9 @@ inline bool IsVpvOnlyKey(const QString& key)
         "target_mode_refresh",
         "target_transfer",
         "target_white_percent",
+        "td_mode",
+        "td_overlay",
+        "temporal_detail",
         "temporal_dither",
         "temporal_dither_refresh",
         "terminator",
@@ -680,6 +683,9 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
 {
     if (key == QStringLiteral("saturation")) { out = QStringLiteral("0"); return true; }
     if (key == QStringLiteral("source_geometry_detect")) { out = QStringLiteral("all"); return true; }   // SID r2: wide recognition
+    if (key == QStringLiteral("temporal_detail")) { out = QStringLiteral("off"); return true; }          // TD-S7: off by default
+    if (key == QStringLiteral("td_mode")) { out = QStringLiteral("cell"); return true; }                 // TD-S7: cell default
+    if (key == QStringLiteral("td_overlay")) { out = QStringLiteral("off"); return true; }               // TD-S7: overlay off
         // The renderer's own defaults (LibplaceboVideoRenderer.cpp's
         // settings, AdaptiveDownscale.h), so an unset choice says what
         // it really is (audit 2026-10-14c: these all showed "Auto").

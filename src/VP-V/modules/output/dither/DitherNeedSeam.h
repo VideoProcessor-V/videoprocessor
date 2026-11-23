@@ -29,6 +29,8 @@
 #include <VP-V/modules/input/source_analysis/identity/SourceQualityView.h>
 #include <VP-V/modules/output/dither/DitherNeed.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
 
@@ -51,6 +53,18 @@ namespace DitherNeedSeam
 	// A shared product older than this (source seconds, measured by the caller) is not trusted: it counts as missing.
 	constexpr double kMaxProductAgeSeconds = 0.5;
 
+	// Owner Q9a (SD MUST-5): exact binary sub-step quantization loss fraction when a higher-bit-depth
+	// source (e.g., 10-bit or 12-bit, including TD-cleaned streams) is delivered over a narrower link
+	// (e.g., 8-bit). A source with d = sourceBits - colorBits extra bits has 2^d sub-levels per link step,
+	// so 1 - 2^(-d) of source levels fall between exact link codes (0.75 for 10->8 bit, 0.9375 for 12->8 bit,
+	// 0.0 for sourceBits <= colorBits). Derived strictly from binary quantization physics (Rule 1).
+	inline double BitDepthFloor(int sourceBits, int colorBits)
+	{
+		if (sourceBits <= 0 || colorBits <= 0 || sourceBits <= colorBits)
+			return 0.0;
+		return 1.0 - std::ldexp(1.0, -(sourceBits - colorBits));
+	}
+
 	// What the host has this frame. Every pointer may be null (product absent). Ages are seconds since the product was
 	// filled (0 = this frame); < 0 = unknown, treated as fresh.
 	struct Feed
@@ -61,6 +75,7 @@ namespace DitherNeedSeam
 		const SourceIdentity::QualityView* quality = nullptr;        // P14 source quality (tier, quality)
 		double grainAgeSeconds = 0.0, evidenceAgeSeconds = 0.0, lutAgeSeconds = 0.0;
 		int colorBits = 8;                                           // the link's colour depth (SigmaDeltaDomain::Domain::color)
+		int sourceBits = 0;                                          // the source's colour depth (0 = unspecified / same as colorBits)
 		bool domainSupported = true;                                 // the sigma-delta can serve this output domain
 		double dtSeconds = 0.0;                                      // measured frame interval; <= 0 = unknown
 		bool discontinuity = false;                                  // cut, resync, re-base, context change
@@ -68,7 +83,8 @@ namespace DitherNeedSeam
 
 	struct Counters
 	{
-		uint64_t framesOn = 0, framesNotNeeded = 0, framesUnavailable = 0, framesStale = 0, framesClassicalQuality = 0;
+		uint64_t framesOn = 0, framesNotNeeded = 0, framesUnavailable = 0, framesStale = 0, framesClassicalQuality = 0,
+			framesBitDepthFloor = 0;
 	};
 
 	struct Outcome
@@ -78,6 +94,8 @@ namespace DitherNeedSeam
 		unsigned missing = 0;                 // DitherNeed::Missing bits
 		bool extraAllowed = false;            // result == On: the GPU block pass may run and be bound
 		double qualityNeed = 1.0;             // 0..1: scales the wanted amplitude
+		double bitDepthFloor = 0.0;           // Owner Q9a: quantization-loss floor for sourceBits > colorBits
+		bool bitDepthFloorApplied = false;    // true when bitDepthFloor raised qualityNeed above raw source-quality need
 		int tier = -1;
 		DitherNeed::Params params;            // the law's parameters of this frame (aNeed scaled by qualityNeed)
 		DitherNeed::Decision decision;        // the tracker's reset / off / status decision
@@ -112,16 +130,21 @@ namespace DitherNeedSeam
 			if (!f.domainSupported) missing |= DitherNeed::kUnsupportedDomain;
 			if (stale) missing |= DitherNeed::kStaleProduct;
 
-			// Source quality decides how much of the wanted amplitude a source needs: a clean source needs none.
+			// Source quality decides how much of the wanted amplitude a source needs: a clean source needs none
+			// on its own, except that a higher-bit-depth source on a narrower link retains its quantization-loss floor (Owner Q9a).
 			bool classical = false;
+			double rawQualityNeed = 1.0;
 			if (f.quality)
 			{
-				o.qualityNeed = SourceIdentity::DitherNeed(*f.quality);
+				rawQualityNeed = SourceIdentity::DitherNeed(*f.quality);
 				o.tier = f.quality->tier;
 				classical = f.quality->fallback.engaged;
 			}
 			else
 				classical = true;   // no view at all: the full designed amplitude, said in the status
+			o.bitDepthFloor = BitDepthFloor(f.sourceBits, f.colorBits);
+			const bool floorDominates = o.bitDepthFloor > rawQualityNeed;
+			o.qualityNeed = (std::max)(rawQualityNeed, o.bitDepthFloor);
 			o.params = base;
 			o.params.aNeed = base.aBase + (base.aNeed - base.aBase) * o.qualityNeed;
 
@@ -146,6 +169,12 @@ namespace DitherNeedSeam
 			o.missing = o.decision.missing;
 			o.extraAllowed = o.result == DitherNeed::Result::On;
 			o.status = o.decision.status;
+			if (floorDominates && o.result == DitherNeed::Result::On)
+			{
+				o.bitDepthFloorApplied = true;
+				++counters_.framesBitDepthFloor;
+				o.status += " [bit-depth floor: " + std::to_string(f.sourceBits) + "->" + std::to_string(f.colorBits) + " bit]";
+			}
 			if (classical && o.result == DitherNeed::Result::On)
 			{
 				o.status += " [" + std::string(SourceIdentity::ConsumerStatusText(SourceIdentity::QualityConsumer::DitherNeed)) + "]";
