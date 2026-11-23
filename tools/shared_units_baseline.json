@@ -71,6 +71,30 @@
      "pattern": "^\\s*AppendGrainLevelProduct\\(decls\\);",
      "kind": "false_positive",
      "reason": "the skeleton product-set assembly call that appends the P10g declaration (core/Products.h); a declaration, computes no grain estimate (P10g T3; WAIVER-P10G-U1-KFP)"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
+     "pattern": "grain_level|grainLevel|GrainLevelEnergyScale",
+     "kind": "false_positive",
+     "reason": "CF-2 M1: consumer read of published kP10gGrainLevel texture/scale in blend pass (not a private grain estimate; WAIVER-CF2-M1-U1)"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
+     "pattern": "GrainLevelSource|GrainLevelEnergyScale|SetGrainLevel|ClearGrainLevel|grainLevel|kP10gGrainLevel",
+     "kind": "false_positive",
+     "reason": "CF-2 M1: consumer API/holder for published kP10gGrainLevel product (not a private grain estimate; WAIVER-CF2-M1-U1)"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp",
+     "pattern": "kP10gGrainLevel|GrainLevelSource|SetGrainLevel|ClearGrainLevel|no grain level",
+     "kind": "false_positive",
+     "reason": "CF-2 M1: skeleton Acquire/status seam reading published kP10gGrainLevel (not a private grain estimate; WAIVER-CF2-M1-U1)"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.h",
+     "pattern": "kP10gGrainLevel",
+     "kind": "false_positive",
+     "reason": "CF-2 M1: comment/struct documenting kP10gGrainLevel consumer seam (not a private grain estimate; WAIVER-CF2-M1-U1)"
     }
    ]
   },
