@@ -454,12 +454,16 @@ namespace VpMotion
 		{
 			vectorStatsTick = now;
 			const unsigned long long p1Deferred = motionAheadP1Deferred.load(std::memory_order_relaxed);
+			const unsigned long long shallowBack = vectorShallowBackwardPairs.load(std::memory_order_relaxed);
+			std::string statsLine = "Vector engine: " + std::to_string(vectorPairs) +
+				" pairs (ahead hits " + std::to_string(static_cast<unsigned long long>(motionAheadHits)) +
+				", misses " + std::to_string(static_cast<unsigned long long>(motionAheadMisses));
 			if (p1Deferred > 0)
-				DebugLog::Log("Vector engine: %llu pairs (ahead hits %llu, misses %llu, P1 deferred %llu)", vectorPairs,
-					static_cast<unsigned long long>(motionAheadHits), static_cast<unsigned long long>(motionAheadMisses), p1Deferred);
-			else
-				DebugLog::Log("Vector engine: %llu pairs (ahead hits %llu, misses %llu)", vectorPairs,
-					static_cast<unsigned long long>(motionAheadHits), static_cast<unsigned long long>(motionAheadMisses));
+				statsLine += ", P1 deferred " + std::to_string(p1Deferred);
+			if (shallowBack > 0)
+				statsLine += ", shallow backward " + std::to_string(shallowBack);
+			statsLine += ")";
+			DebugLog::Log("%s", statsLine.c_str());
 			const FlowReadCounters fr = FlowReads();   // a CPU flow reader exists (FlowOf): its absences are visible, by reason
 			if (fr.requests)
 				DebugLog::Log("Vector engine: flow reads %llu, served %llu, absent %llu (no producer %llu, no pair %llu, invalidated %llu, size unknown %llu)",
@@ -491,6 +495,13 @@ namespace VpMotion
 					" (last seq " + std::to_string(lastSeq) + ", max streak " + std::to_string(maxStreak) + ")";
 				DiagnosticHistory::Global().RecordDecision("motion-p1-defer", detail.c_str(),
 					static_cast<int64_t>(p1Deferred), static_cast<int64_t>(maxStreak), static_cast<double>(lastSeq), 0.0);
+			}
+			if (shallowBack > vectorShallowBackwardRecorded_)
+			{
+				vectorShallowBackwardRecorded_ = shallowBack;
+				const std::string detail = "ForwardShallow backward pairs served " + std::to_string(shallowBack);
+				DiagnosticHistory::Global().RecordDecision("vector-shallow-back", detail.c_str(),
+					static_cast<int64_t>(shallowBack), static_cast<int64_t>(vectorPairs), 0.0, 0.0);
 			}
 		}
 	}
@@ -541,6 +552,7 @@ namespace VpMotion
 		motionProducer->SetTargetSize(engineW, engineH);
 		MotionAhead::FlowPtr flow;
 		uint64_t from = sequence, to = nextSequence;
+		bool usedShallowBackward = false;
 		if (nextSequence == sequence + 1 &&
 			motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))   // W1-C2a A1 / S2
 			flow = FindCurrent(from, to);   // C2a-F 2: never a pair of another stream generation
@@ -558,6 +570,7 @@ namespace VpMotion
 			{
 				from = sequence - 1;
 				to = sequence;
+				usedShallowBackward = true;
 			}
 		}
 		NoteGlobalPair(flow != nullptr);
@@ -574,6 +587,8 @@ namespace VpMotion
 		}
 		++motionAheadHits;
 		++vectorPairs;
+		if (usedShallowBackward)
+			vectorShallowBackwardPairs.fetch_add(1, std::memory_order_relaxed);
 		NoteVectorsDelivered("engine ahead");
 		// W1-C4: the pair's ONE sample, read by the record and by the one feed (MotionRecordPublish.h).
 		const MotionRecord::PairSample sample = MotionRecord::SampleOf(from, to, flow->global[0], halvings, facts.pictureHeight);
@@ -1706,6 +1721,9 @@ namespace VpMotion
 			append("NVOF ahead deferred (waiting for P1) " + std::to_string(deferred) +
 				" (last seq " + std::to_string(lastSeq) + ", max streak " + std::to_string(maxStreak) + ")");
 		}
+		const unsigned long long shallowBack = vectorShallowBackwardPairs.load(std::memory_order_relaxed);
+		if (shallowBack > 0)
+			append("ForwardShallow backward pairs served " + std::to_string(shallowBack));
 		return out;
 	}
 }
