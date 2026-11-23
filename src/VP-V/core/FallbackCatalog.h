@@ -1076,6 +1076,9 @@ namespace FallbackCatalog
 			{ "product.source_geometry", "source geometry record unavailable, stale or of another unit version: readers use the delivered raster and their classical forms" },
 			// ECV composed vectors (motion/estimation/composed): not produced or short of the asked offsets: the grain level and the neighbour warp use their single-frame / causal forms.
 			{ "product.composed_vectors", "composed vectors unavailable or short of the asked frames: readers use their single-frame forms (grain level) or their causal substitute (neighbour warp)" },
+			// Band memo (P30, repair/grain_split/BandMemoFill.h; C8 slice 8): the low band of a key could not be computed (no float format, allocation
+			// failure, or the fill declined), so the reader that asked takes its existing feature-off path for that frame.
+			{ "product.band_memo_unavailable", "grain band memo (low band) could not be computed: the readers that asked (interpolator, debander, detail pulse, texture restore, temporal detail) run their feature-off forms for the frame" },
 		};
 		if (count)
 			*count = sizeof(kEntries) / sizeof(kEntries[0]);

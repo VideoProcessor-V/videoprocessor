@@ -3,7 +3,7 @@
  "counts": {
   "R": 12,
   "X": 7,
-  "N": 12,
+  "N": 13,
   "NP": 33
  },
  "products": [
@@ -1090,6 +1090,39 @@
    "edges": []
   },
   {
+   "id": "kBandMemo",
+   "label": "band_memo",
+   "token": "band_memo",
+   "name": "grain band memo (per frame)",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-B3",
+   "producer_files": [
+    "repair/grain_split/BandMemoFill.h"
+   ],
+   "producer_text": "band memo owner fill (Acquire); readers: interpolator, debander, detail pulse, texture restore, temporal detail",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kP1HalfLuma",
+     "lags": [
+      0
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "N",
+     "evidence": [],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    }
+   ]
+  },
+  {
    "id": "kEdgeMap",
    "label": "edge_map",
    "token": "edge_map",
@@ -1826,6 +1859,10 @@
    ],
    [
     "kP1HalfLuma",
+    "kBandMemo"
+   ],
+   [
+    "kP1HalfLuma",
     "kP2VectorPair"
    ],
    [
@@ -2039,6 +2076,7 @@
    "kP13SourceRing",
    "kEdgeMap",
    "kP1HalfLuma",
+   "kBandMemo",
    "kP2VectorPair",
    "kP2mMatcherPair",
    "kP3AnalysisField",
@@ -2074,6 +2112,7 @@
    "kP13SourceRing": 0,
    "kEdgeMap": 1,
    "kP1HalfLuma": 0,
+   "kBandMemo": 1,
    "kP2VectorPair": 1,
    "kP2mMatcherPair": 1,
    "kP3AnalysisField": 2,

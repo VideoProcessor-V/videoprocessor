@@ -4,7 +4,7 @@
 
 Machine-checked (refs/129 L-PROD). R = read shape found (a regex hit on the owner fill, NOT proven Acquire); X = it recomputes it privately or reads it outside Acquire; N = declared but never read; NP = the product has no production producer. Fix owners are the lanes of refs/129. Counts count declared (product, input) pairs.
 
-Counts: R 12, X 7, N 12, NP 33.
+Counts: R 12, X 7, N 13, NP 33.
 
 | Product | Lane | Producer files | Input (lag/lead) | St | Evidence / note |
 |---|---|---|---|---|---|
@@ -48,6 +48,7 @@ Counts: R 12, X 7, N 12, NP 33.
 | **P14** p14_source_identity | - | SourceIdPipeline.h | P5 | R | SourceIdPipeline.h:126; SourceIdPipeline.h:214 / type-token match only: FrameInput.classical is a monitor snapshot copied by the call site, not an Acquire |
 | **P14g** source_geometry | - | SourceGeometryProduct.h | P5 | N | flag ViewIsActual: C9b |
 | **p7f_camera_fit_field** p7f_camera_fit_field | - | - | (no inputs) | - | |
+| **band_memo** band_memo | L-B3 | BandMemoFill.h | P1 | N |  |
 | **edge_map** edge_map | L-B5 | EdgeMapFill.h | P13 | R | EdgeMapFill.h:98; EdgeMapFill.h:148 |
 | **P10g** grain.level | L-B2 | GrainLevelGpu.h | P10 | R | GrainLevelGpu.h:205 |
 |  |  |  | P13 | R | GrainLevelGpu.h:194 |
@@ -114,5 +115,5 @@ Declared in Products.h but the producer does not read them yet. They still order
 
 Ordering edges are lag 0, lead 0, non-self (Registry::Validate's Kahn); lag > 0, lead and own-previous-frame edges are temporal. Acyclic: **yes**.
 
-Order: p7f_camera_fit_field(L0) , P0(L0) , P13(L0) , edge_map(L1) , P1(L0) , P2(L1) , P2m(L1) , P3(L2) , P4(L1) , P10(L2) , P10c(L2) , P10g(L3) , P11(L3) , P16(L4) , P12(L4) , P5(L0) , P6(L3) , P7(L2) , P7g(L3) , P8(L3) , P9(L3) , P15(L5) , P15c(L5) , P3r(L4) , P14g(L1) , P14(L1) , td.anchor_pass(L4) , td.anchor_refs(L6) , td.blocks(L4) , td.delta(L5) , td.maps(L5) , td.memory(L5) , td.trail_summary(L5)
+Order: p7f_camera_fit_field(L0) , P0(L0) , P13(L0) , edge_map(L1) , P1(L0) , band_memo(L1) , P2(L1) , P2m(L1) , P3(L2) , P4(L1) , P10(L2) , P10c(L2) , P10g(L3) , P11(L3) , P16(L4) , P12(L4) , P5(L0) , P6(L3) , P7(L2) , P7g(L3) , P8(L3) , P9(L3) , P15(L5) , P15c(L5) , P3r(L4) , P14g(L1) , P14(L1) , td.anchor_pass(L4) , td.anchor_refs(L6) , td.blocks(L4) , td.delta(L5) , td.maps(L5) , td.memory(L5) , td.trail_summary(L5)
 

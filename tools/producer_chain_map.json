@@ -13,7 +13,7 @@
     "kTdAnchorPass": "L-B2", "kTdAnchorRefs": "L-B2", "kTdDelta": "L-B2", "kTdMaps": "L-B2", "kTdTrailSummary": "L-B2",
     "kP11RegionBlockStats": "L-B5", "kP12LightLevel": "L-B5",
     "kCodingEvidence": "L-B5", "kQualityPattern": "L-B5", "kQualityPatternCausal": "L-B5",
-    "kEdgeMap": "L-B5",
+    "kBandMemo": "L-B3", "kEdgeMap": "L-B5",
     "kP10gGrainLevel": "L-B2"
   },
   "default_read": ["\\bInput\\(\\s*(VpSkeleton::)?{k}\\b", "\\bAcquire\\(\\s*(VpSkeleton::)?{k}\\b", "\\bReadOf\\(\\s*(VpSkeleton::)?{k}\\b", "\\bFind\\(\\s*(VpSkeleton::)?{k}\\b"],
@@ -29,6 +29,7 @@
     "kP9CameraSmoothed": {"files": ["motion/estimation/global_model/link/CameraLinkCore.cpp"]},
     "kP7gCameraGuide": {"files": ["motion/estimation/global_model/link/GuideLaneJob.cpp"]},
     "kP10GrainSplit": {"files": ["control/skeleton/gpu/SkeletonGpuDispatcher.cpp", "input/source_analysis/lane/LaneGpuProducts.cpp"]},
+    "kBandMemo": {"files": ["repair/grain_split/BandMemoFill.h"]},
     "kP11RegionBlockStats": {"files": ["control/skeleton/gpu/SkeletonGpuDispatcher.cpp", "input/source_analysis/lane/LaneGpuRegionKernel.cpp", "input/source_analysis/lane/LaneGpuJobs.h"]},
     "kP12LightLevel": {"files": ["input/source_analysis/lane/LaneGpuLightKernel.cpp"]},
     "kP10gGrainLevel": {"files": ["repair/grain_split/GrainLevelGpu.h"], "note": "P10g T3 owner fill (GrainLevelModule): reads P10 through the memo's variant Acquire; single-frame law until the temporal passes are costed"},
