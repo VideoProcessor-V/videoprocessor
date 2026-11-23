@@ -52,6 +52,8 @@
     "src/VP-V/tests/suite/QueueKeyedTimelineTests.cpp",
     "src/VP-V/core/hub/CurrentFrame.h",
     "src/VP-V/modules/control/skeleton/SkeletonAccess.h",
+    "src/VP-V/modules/control/skeleton/RendererHostHelpers.h",
+    "src/VP-V/modules/control/skeleton/RendererHostHelpers.cpp",
     "src/VP-V/tests/SkeletonCoreContextTests.cpp"
   ],
   "components": {

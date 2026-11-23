@@ -509,7 +509,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     {
         int maskSlot = -1;
         for (int slot = 0; slot < 2; ++slot)
-            if (dejudderMaskSequence[slot] == sourceSequence && sourceSequence != 0 && motionValidity.Current(dejudderMaskEpoch[slot]))
+            if (dejudderExtras.dejudderMaskSequence[slot] == sourceSequence && sourceSequence != 0 && motionValidity.Current(dejudderExtras.dejudderMaskEpoch[slot]))
                 maskSlot = slot;
         // Stage 12: both map through the native source crop by relative
         // position, so they hold at any re-base size (the vectors are the
@@ -569,7 +569,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         }
         if (install)
         {
-            dejudderMaskSequence[maskSlot] = 0;   // used: not again for a repeat
+            dejudderExtras.dejudderMaskSequence[maskSlot] = 0;   // used: not again for a repeat
             dejudderMaskUsedTick = GetTickCount64();
             dejudderMaskState.clear();
             static GeneralRate::LogInterval maskLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
@@ -685,25 +685,25 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     // sigma-delta's vectors made from A's field at the end of A's extras
     // (same sequence and geometry only); restored after this render
     // (SigmaDeltaVectors::NextVectorGuard, output.dither; WP-13).
-    if (dejudderNextVectorsSequence != 0 && dejudderNextVectorsSequence == sourceSequence && !cadenceRepeat &&
-        dejudderNextVectors && dejudderGeometryValid && SameGeometry(dejudderGeometry, dejudderNextVectorsGeometry) &&
-        ditherNextGate.CheckAt(motionValidity, sourceSequence) &&
-        VpResync::CarryValid(resync, dejudderNextVectorsFrom, sourceSequence))   // R3: no carry across a FULL, slip or re-base change
+    if (dejudderExtras.dejudderNextVectorsSequence != 0 && dejudderExtras.dejudderNextVectorsSequence == sourceSequence && !cadenceRepeat &&
+        dejudderExtras.dejudderNextVectors && dejudderExtras.dejudderGeometryValid && SameGeometry(dejudderExtras.dejudderGeometry, dejudderExtras.dejudderNextVectorsGeometry) &&
+        dejudderExtras.ditherNextGate.CheckAt(motionValidity, sourceSequence) &&
+        VpResync::CarryValid(resync, dejudderExtras.dejudderNextVectorsFrom, sourceSequence))   // R3: no carry across a FULL, slip or re-base change
     {
-        if (nextVectorGuard.Apply(frameParams.hooks, frameParams.num_hooks, dejudderNextVectors))
+        if (nextVectorGuard.Apply(frameParams.hooks, frameParams.num_hooks, dejudderExtras.dejudderNextVectors))
         {
-            ++ditherVectorsNextUsed;
-            if (!ditherVectorsNextLogged)
+            ++dejudderExtras.ditherVectorsNextUsed;
+            if (!dejudderExtras.ditherVectorsNextLogged)
             {
-                ditherVectorsNextLogged = true;
+                dejudderExtras.ditherVectorsNextLogged = true;
                 DebugLog::Log("Sigma-delta vectors on the new frame's present: the de-judder's (own search skipped)");
             }
         }
     }
-    dejudderNextVectorsSequence = 0;   // used (or not) once
-    dejudderNextVectorsFrom = 0;
+    dejudderExtras.dejudderNextVectorsSequence = 0;   // used (or not) once
+    dejudderExtras.dejudderNextVectorsFrom = 0;
     VpResync::TakeIfDriving(resync, resyncDrive, VpResync::Reader::SigmaDelta);   // R3: checked by stamps above
-    ditherNextGate.Clear();
+    dejudderExtras.ditherNextGate.Clear();
     // S-12BIT (refs/119 #51, #30): libplacebo's latched error flags (FBO, sampling, debanding, ...) and the float16 picture precision
     // are visible, and released in the Original pathway (a stale entry is a silent state in reverse). Here, not in ReportRenderErrors:
     // that body is a pure move that never runs in Original. The flags are renderErrors (read above from the renderer: the previous frame's latch).

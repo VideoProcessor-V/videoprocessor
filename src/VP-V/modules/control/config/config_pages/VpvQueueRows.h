@@ -373,6 +373,11 @@ namespace Vpv
 	void QueuePresetApplied(bool originalPathway, const Fields& fields, const QString& section, const QString& presetId)   // VPV-GATED
 	{
 		if (originalPathway) return;
+		if (auto* look = qobject_cast<QSpinBox*>(QueueRowsDetail::FieldWidget(fields, QStringLiteral("active_picture_lookahead_frames"))))
+		{
+			QSignalBlocker blocker(look);
+			look->setValue(-1);
+		}
 		if (auto* path = qobject_cast<QComboBox*>(QueueRowsDetail::FieldWidget(fields, QueueRowsDetail::LowLatencyPathName())))
 		{
 			const bool namedLowLatency = section.compare(QStringLiteral("queue.low_latency"), Qt::CaseInsensitive) == 0;

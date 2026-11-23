@@ -1,74 +1,17 @@
 #include "../VideoProcessor-Lib/vprenderer/LibplaceboRenderParameters.h"
+namespace Vpv::BetaTests { int RunPreParameterChecks(); int RunPostParameterChecks(); } // VPV-HOOK
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
 using namespace LibplaceboRenderParameters;
-void RunBetaGpuTests(); // BetaGpuTests.cpp
-void RunBetaOutputFloat32Tests(); // BetaGpuTests.cpp
-void RunBetaFboTiming(); // BetaGpuTests.cpp
-void RunBetaPassTiming(); // BetaGpuTests.cpp
-void RunBetaMatcherTiming(); // BetaGpuTests.cpp
-void RunBetaScenarioTiming(); // BetaGpuTests.cpp
-void RunBetaOptionQuality(); // BetaGpuTests.cpp
-void RunBetaDejudderQuality(); // BetaGpuTests.cpp
-void RunBetaDitherCompare(); // BetaGpuTests.cpp
-void RunBetaTimingGate(); // BetaGpuTests.cpp
-void RunBetaMotionCorpus(); // BetaGpuTests.cpp
-bool RunBetaCameraAccuracyIfRequested(); // BetaGpuTests.cpp (R1-CAMACC, VP_TEST_CAMERA_ACCURACY=1) // VPV-HOOK
-void RunBetaRealFootage(); // BetaGpuTests.cpp
-void RunBetaChainBiasRegression(); // BetaGpuTests.cpp
-void RunBetaSigmaBias(); // BetaGpuTests.cpp
-void RunBetaFeatureGpuTests(); // BetaGpuTests.cpp
-void RunBetaDitherVectorsTests(); // BetaGpuTests.cpp // VPV-HOOK
-void RunBetaDitherNeedWarpForkTests(); // BetaGpuTests.cpp (GEM-S10G: fork-only DitherNeedWarp cases, BETA-RAN evidence) // VPV-HOOK
-void RunBetaExtendedRangeGpuTests(); // BetaGpuTests.cpp
-void RunBetaChainGpuTest(); // BetaGpuTests.cpp
 static void check(bool result, const char* message) { if (!result) throw std::runtime_error(message); }
-// Report modes (VP_TEST_MATCHER_TIMING, _DEJUDDER_QUALITY, _DITHER_COMPARE, _TIMING_GATE, _MOTION_CORPUS,
-// _REAL_FOOTAGE, _QUALITY, _SCENARIO) run one report and stop before the gate's whole-chain tests: they
-// return this distinct code and print "MODE <name>: gate not run", so a gate run with a stray report
-// switch can never pass (the test host fails it unless VP_TEST_REPORT_MODE=1).
-const int kBetaReportModeExitCode = 3;
-static int BetaReportMode(const char* name)
-{
-    std::cout << "MODE " << name << ": gate not run\n";
-    std::cout.flush();
-    return kBetaReportModeExitCode;
-}
-// The suite's entry: the program's main, or (VP_BETA_TEST_DLL) a function the
-// native test host calls - Smart App Control on the development laptop blocks
-// new builds of this program but not test DLLs loaded by Microsoft's signed
-// test host (owner 2026-10-13).
-#ifdef VP_BETA_TEST_DLL
-int RunBetaTestMain() {
-#else
+#ifdef VP_BETA_TEST_DLL // VPV-HOOK
+int RunBetaTestMain() { // VPV-HOOK
+#else // VPV-HOOK
 int main() {
-#endif
+#endif // VPV-HOOK
     try {
-        {
-            // The live matcher's timing alone (VP_TEST_MATCHER_TIMING=1): skips the suite.
-            char* mt = nullptr;
-            size_t mtLength = 0;
-            const bool matcherOnly = _dupenv_s(&mt, &mtLength, "VP_TEST_MATCHER_TIMING") == 0 && mt && std::string(mt) == "1";
-            std::free(mt);
-            if (matcherOnly)
-            {
-                RunBetaMatcherTiming();
-                return BetaReportMode("VP_TEST_MATCHER_TIMING");
-            }
-        }
-        {
-            // Gate verify 2026-10-17: the sigma-delta bias probe alone (VP_BETA_SIGMA_BIAS=1).
-            char* sb = nullptr;
-            size_t sbLength = 0;
-            const bool sigmaOnly = _dupenv_s(&sb, &sbLength, "VP_BETA_SIGMA_BIAS") == 0 && sb && std::string(sb) == "1";
-            std::free(sb);
-            if (sigmaOnly)
-            {
-                RunBetaSigmaBias();
-                return BetaReportMode("VP_BETA_SIGMA_BIAS");
-            }
-        }
+        if (const int pre = Vpv::BetaTests::RunPreParameterChecks(); pre >= 0) return pre; // VPV-HOOK
         Settings settings; Projection p; std::string error;
         for (const char* quality : {"fast", "balanced", "high"}) {
             settings.quality = quality;
@@ -104,100 +47,7 @@ int main() {
         check(target.hdr.max_luma == 150.f, "Physical target nits invariant");
         check(MakeSwapchainColorHint(target).transfer == target.transfer, "SDR transfer hint invariant");
         std::cout << "PASS Beta defaults, residual correction/gamut independence, overrides, peak independence and luminance projection\n";
-        RunBetaGpuTests();
-        std::cout << "PASS Beta GPU: output clamp keeps footroom/headroom; encoding correct after PREOUTPUT hooks without the repair\n";
-        RunBetaOutputFloat32Tests();
-        {
-            char* value = nullptr;
-            size_t length = 0;
-            const bool timing = _dupenv_s(&value, &length, "VP_TEST_TIMING") == 0 && value && std::string(value) == "1";
-            std::free(value);
-            if (timing)
-            {
-                RunBetaFboTiming();
-                RunBetaPassTiming();
-            }
-            char* scenario = nullptr;
-            size_t scenarioLength = 0;
-            const bool runScenario = _dupenv_s(&scenario, &scenarioLength, "VP_TEST_SCENARIO") == 0 && scenario &&
-                std::string(scenario) == "1";
-            std::free(scenario);
-            char* quality = nullptr;
-            size_t qualityLength = 0;
-            const bool runQuality = _dupenv_s(&quality, &qualityLength, "VP_TEST_QUALITY") == 0 && quality &&
-                std::string(quality) == "1";
-            std::free(quality);
-            char* djq = nullptr;
-            size_t djqLength = 0;
-            const bool runDejudderQuality = _dupenv_s(&djq, &djqLength, "VP_TEST_DEJUDDER_QUALITY") == 0 && djq &&
-                std::string(djq) == "1";
-            std::free(djq);
-            if (runDejudderQuality)
-            {
-                RunBetaDejudderQuality();
-                return BetaReportMode("VP_TEST_DEJUDDER_QUALITY");
-            }
-            char* dc = nullptr;
-            size_t dcLength = 0;
-            const bool runDitherCompare = _dupenv_s(&dc, &dcLength, "VP_TEST_DITHER_COMPARE") == 0 && dc &&
-                std::string(dc) == "1";
-            std::free(dc);
-            if (runDitherCompare)
-            {
-                RunBetaDitherCompare();
-                return BetaReportMode("VP_TEST_DITHER_COMPARE");
-            }
-            char* tg = nullptr;
-            size_t tgLength = 0;
-            const bool runTimingGate = _dupenv_s(&tg, &tgLength, "VP_TEST_TIMING_GATE") == 0 && tg &&
-                std::string(tg) == "1";
-            std::free(tg);
-            if (runTimingGate)
-            {
-                RunBetaTimingGate();
-                return BetaReportMode("VP_TEST_TIMING_GATE");
-            }
-            char* mc = nullptr;
-            size_t mcLength = 0;
-            const bool runCorpus = _dupenv_s(&mc, &mcLength, "VP_TEST_MOTION_CORPUS") == 0 && mc && std::string(mc) == "1";
-            std::free(mc);
-            if (runCorpus)
-            {
-                RunBetaMotionCorpus();
-                return BetaReportMode("VP_TEST_MOTION_CORPUS");
-            }
-            if (RunBetaCameraAccuracyIfRequested()) return BetaReportMode("VP_TEST_CAMERA_ACCURACY"); // VPV-HOOK
-            char* rf = nullptr;
-            size_t rfLength = 0;
-            const bool runReal = _dupenv_s(&rf, &rfLength, "VP_TEST_REAL_FOOTAGE") == 0 && rf && *rf;
-            std::free(rf);
-            if (runReal)
-            {
-                RunBetaRealFootage();
-                return BetaReportMode("VP_TEST_REAL_FOOTAGE");
-            }
-            if (runQuality)
-            {
-                RunBetaOptionQuality();
-                return BetaReportMode("VP_TEST_QUALITY");
-            }
-            if (runScenario)
-            {
-                // Report only, then stop (the rest of the suite is the gate's).
-                RunBetaScenarioTiming();
-                return BetaReportMode("VP_TEST_SCENARIO");
-            }
-        }
-        RunBetaChainBiasRegression();
-        std::cout << "PASS Beta S2: output pass in rgba32f, highlights within 1/16 step, extended codes kept, the chain bias A/B\n";
-        RunBetaFeatureGpuTests();
-        RunBetaDitherVectorsTests(); // VPV-HOOK
-        RunBetaDitherNeedWarpForkTests(); // VPV-HOOK
-        std::cout << "PASS Beta features: sigma-delta (8-in-10, true 10-bit), LED compensation, occlusion mask, de-judder\n";
-        RunBetaExtendedRangeGpuTests();
-        std::cout << "PASS Beta extended range: BTB/WTW kept through scaling, in-range edges and colours as without the switch\n";
-        RunBetaChainGpuTest();
-        std::cout << "PASS Beta whole chain: every hook at once (still, cut, motion, de-judder extra, LED gain sequence, upscale, matrix), BTB/WTW and in-range kept, nothing disabled\n";
+        if (const int post = Vpv::BetaTests::RunPostParameterChecks(); post != 0) return post; // VPV-HOOK
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << "\n"; return 1; }
 }

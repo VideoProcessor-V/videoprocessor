@@ -39,14 +39,19 @@
     "src/VP-V/modules/motion/consumers/DejudderPolicyRunner.h",
     "src/VP-V/modules/motion/consumers/DejudderPolicyRunner.inl",
     "src/VP-V/modules/motion/consumers/IntentMotionState.h",
-    "src/VP-V/modules/motion/consumers/IntentMotionMethods.inl",
+    "src/VP-V/modules/motion/consumers/IntentMotionMethods.h",
+    "src/VP-V/modules/motion/consumers/IntentMotionMethods.cpp",
     "src/VP-V/modules/motion/consumers/DejudderEstimateCall.h",
     "src/VP-V/modules/motion/consumers/tests/DejudderDecisionRunnerHost.h",
     "src/VP-V/modules/motion/consumers/DejudderState.h",
     "src/VP-V/modules/motion/consumers/DejudderInterface.h",
     "src/VP-V/modules/motion/consumers/DejudderExtension.h",
     "src/VP-V/modules/motion/consumers/DejudderExtension.cpp",
-    "src/VP-V/modules/motion/consumers/DejudderViews.h"
+    "src/VP-V/modules/motion/consumers/DejudderViews.h",
+    "src/VP-V/modules/motion/consumers/DejudderExtrasPresent.h",
+    "src/VP-V/modules/motion/consumers/DejudderExtrasPresent.cpp",
+    "src/VP-V/modules/motion/consumers/MotionHostHelpers.h",
+    "src/VP-V/modules/motion/consumers/MotionHostHelpers.cpp"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/DejudderAhead.h",

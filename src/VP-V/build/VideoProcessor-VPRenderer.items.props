@@ -16,6 +16,8 @@
     <ClCompile Include="..\VP-V\modules\motion\estimation\VectorEngineExtension.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderExtension.cpp" />
     <ClCompile Include="..\VP-V\modules\output\presentation\PresenterExtension.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\presentation\RenderAheadHostSteps.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\presentation\PresentationHostHelpers.cpp" />
     <ClCompile Include="..\VP-V\modules\output\dither\OutputEncodingRepair.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
     <ClCompile Include="..\VP-V\abi\RendererAbiBridge.cpp" />
@@ -31,6 +33,12 @@
     <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRangeStage.cpp" />
     <ClCompile Include="..\VP-V\modules\scaling\output\AdaptiveDownscaleStage.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderCacheStage.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderExtrasPresent.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\MotionHostHelpers.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\IntentMotionMethods.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedSdrLiftMethods.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedIntentMethods.cpp" />
+    <ClCompile Include="..\VP-V\modules\control\skeleton\RendererHostHelpers.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\RenderedWarp.cpp" />
     <ClCompile Include="..\VP-V\modules\input\capture\GpuCaptureUnpack.cpp" />
     <ClCompile Include="..\VP-V\modules\input\capture\GpuRgbUnpack.cpp" />

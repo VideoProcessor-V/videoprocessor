@@ -29,6 +29,7 @@
         "src/VP-V/modules/input/capture/CapturePayload.h",
         "src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.cpp",
         "src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.h",
+        "src/VP-V/modules/input/capture/DeckLinkTranslatePolicy.cpp",
         "src/VideoProcessor-Lib/CaptureInput.h",
         "src/VideoProcessor-Lib/blackmagic_decklink",
         "src/VideoProcessor-Lib/magewell",
@@ -66,6 +67,7 @@
       "live_files": [
         "src/VP-V/modules/input/signal/HdrInference.cpp",
         "src/VP-V/modules/input/signal/HdrInference.h",
+        "src/VP-V/modules/input/signal/CaptureColorimetry.cpp",
         "src/VideoProcessor-Lib/HDRData.cpp",
         "src/VideoProcessor-Lib/ColorSpace.cpp",
         "src/VideoProcessor-Lib/EOTF.cpp",
@@ -141,6 +143,7 @@
         "src/VP-V/modules/input/queue_timing/CallbackGate.h",
         "src/VP-V/modules/input/queue_timing/CadenceFeed.h",
         "src/VP-V/modules/input/queue_timing/IngressPolicy.cpp",
+        "src/VP-V/modules/input/queue_timing/AlphaArrivalRate.cpp",
         "src/VP-V/modules/input/queue_timing/IngressPolicy.h",
         "src/VP-V/modules/input/queue_timing/IngressPolicy.inl",
         "src/VP-V/modules/input/queue_timing/IngressState.h",
@@ -206,6 +209,7 @@
       "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/modules/input/source_analysis/AnalysisLumaDomain.h",
+        "src/VP-V/modules/input/source_analysis/AnalysisLumaRowDecoder.cpp",
         "src/VP-V/modules/input/source_analysis/AnalysisAxis10.h",
         "src/VP-V/modules/input/source_analysis/tests/AnalysisLumaDomainTests.cpp",
         "src/VP-V/modules/input/source_analysis/tests/DecodeOwnerIdentityTests.cpp",
@@ -556,7 +560,6 @@
         "src/VP-V/modules/motion/estimation/tests/CameraOverlayOffTests.cpp",
         "src/VP-V/modules/motion/estimation/fallback/OutputDomainSearchGlsl.h",
         "src/VP-V/modules/motion/estimation/DitherVectorSource.h",
-        "src/VP-V/modules/motion/estimation/DitherVectorSourceHost.inl",
         "src/VP-V/modules/motion/estimation/tests/OutputDomainSearchTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/DitherVectorSourceTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/CameraTestSeamTests.cpp"
@@ -987,14 +990,19 @@
         "src/VP-V/modules/motion/consumers/DejudderPolicyRunner.h",
         "src/VP-V/modules/motion/consumers/DejudderPolicyRunner.inl",
         "src/VP-V/modules/motion/consumers/IntentMotionState.h",
-        "src/VP-V/modules/motion/consumers/IntentMotionMethods.inl",
+        "src/VP-V/modules/motion/consumers/IntentMotionMethods.h",
+        "src/VP-V/modules/motion/consumers/IntentMotionMethods.cpp",
         "src/VP-V/modules/motion/consumers/DejudderEstimateCall.h",
         "src/VP-V/modules/motion/consumers/tests/DejudderDecisionRunnerHost.h",
         "src/VP-V/modules/motion/consumers/DejudderState.h",
         "src/VP-V/modules/motion/consumers/DejudderInterface.h",
         "src/VP-V/modules/motion/consumers/DejudderExtension.h",
         "src/VP-V/modules/motion/consumers/DejudderExtension.cpp",
-        "src/VP-V/modules/motion/consumers/DejudderViews.h"
+        "src/VP-V/modules/motion/consumers/DejudderViews.h",
+        "src/VP-V/modules/motion/consumers/DejudderExtrasPresent.h",
+        "src/VP-V/modules/motion/consumers/DejudderExtrasPresent.cpp",
+        "src/VP-V/modules/motion/consumers/MotionHostHelpers.h",
+        "src/VP-V/modules/motion/consumers/MotionHostHelpers.cpp"
       ],
       "components": {
         "files": {
@@ -1418,9 +1426,11 @@
         "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.h",
         "src/VP-V/modules/drive/led_compensation/LedResyncPolicy.h",
         "src/VP-V/modules/drive/led_compensation/LedIntentState.h",
-        "src/VP-V/modules/drive/led_compensation/LedIntentMethods.inl",
+        "src/VP-V/modules/drive/led_compensation/LedIntentMethods.h",
+        "src/VP-V/modules/drive/led_compensation/LedIntentMethods.cpp",
         "src/VP-V/modules/drive/led_compensation/LedSdrLiftState.h",
-        "src/VP-V/modules/drive/led_compensation/LedSdrLiftMethods.inl",
+        "src/VP-V/modules/drive/led_compensation/LedSdrLiftMethods.h",
+        "src/VP-V/modules/drive/led_compensation/LedSdrLiftMethods.cpp",
         "src/VP-V/modules/drive/led_compensation/config_ui"
       ],
       "components": {
@@ -1484,7 +1494,6 @@
       "live_files": [
         "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.h",
         "src/VP-V/modules/output/calibration_lut/CalibrationStatusState.h",
-        "src/VP-V/modules/output/calibration_lut/CalibrationPresentMethods.inl",
         "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.cpp",
         "src/VP-V/modules/output/calibration_lut/CalibrationLutHost.h",
         "src/VP-V/modules/output/calibration_lut/CalibrationLutHost.cpp",
@@ -1586,6 +1595,10 @@
         "src/VP-V/modules/output/presentation/PresenterAfterPresent.h",
         "src/VP-V/modules/output/presentation/PresenterExtension.h",
         "src/VP-V/modules/output/presentation/PresenterExtension.cpp",
+        "src/VP-V/modules/output/presentation/RenderAheadHostSteps.h",
+        "src/VP-V/modules/output/presentation/RenderAheadHostSteps.cpp",
+        "src/VP-V/modules/output/presentation/PresentationHostHelpers.h",
+        "src/VP-V/modules/output/presentation/PresentationHostHelpers.cpp",
         "src/VideoProcessor-Lib/vprenderer/AlphaPresentationTelemetry.cpp",
         "src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h",
         "src/VideoProcessor-Lib/DisplayRefreshRatePolicy.cpp",
@@ -1813,6 +1826,8 @@
         "src/VP-V/modules/control/config/config_pages/VpvQueueBillGrey.h",
         "src/VP-V/modules/control/config/config_pages/VpvQueueRows.h",
         "src/VP-V/modules/control/config/config_pages/VpvRenderingDefaults.h",
+        "src/VP-V/modules/control/config/config_pages/VpvRenderingProfileSections.cpp",
+        "src/VP-V/modules/control/config/config_pages/VpvRenderingProfileSections.h",
         "src/VP-V/modules/control/config/config_pages/VpvScalingRows.h",
         "src/VP-V/modules/control/config/config_pages/VpvSection.cpp",
         "src/VP-V/modules/control/config/config_pages/VpvConfigProvidersStatic.cpp",

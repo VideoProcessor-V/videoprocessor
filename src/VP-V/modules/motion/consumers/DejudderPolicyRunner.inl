@@ -36,7 +36,7 @@ namespace
 		double DecisionDisplayHz() const
 		{
 			return telemetry.measuredDisplayHz > 0.0 ? telemetry.measuredDisplayHz :
-				impl.RenderAheadActive() && impl.dejudderDisplayRate.openLoop ? impl.dejudderDisplayRate.hz : impl.customHookRefreshHz;
+				impl.RenderAheadActive() && impl.renderAheadPresenter.displayRate.openLoop ? impl.renderAheadPresenter.displayRate.hz : impl.customHookRefreshHz;
 		}
 		bool NextMatches() const
 		{
@@ -70,7 +70,7 @@ namespace
 		double IntentMotionScale(uint64_t sourceSequence) const { return impl.vpv.motion.intent.intentInterpreter->AppliedMotionScale(sourceSequence); }
 		double TimelineDisplayHz() const { return impl.TimelineDisplayHz(); }
 		void LogInterpolationDecision(const InterpolationPolicy::Input& ii) { impl.LogInterpolationDecision(ii); }
-		void SetCadenceRatio(double ratio) { impl.dejudderExtraStats.cadenceRatio = ratio; }
+		void SetCadenceRatio(double ratio) { impl.dejudderExtras.dejudderExtraStats.cadenceRatio = ratio; }
 		ULONGLONG Tick() const { return GetTickCount64(); }
 		void RecordDecision(const char* kind, const char* name, int64_t a, int64_t b, double x, double y)
 		{
@@ -337,7 +337,7 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 void LibplaceboVideoRenderer::Impl::LogInterpolationDecision(const InterpolationPolicy::Input& in)
 {
 	DejudderLogHost host;
-	VpMotion::LogInterpolationDecisionFor(activeSettings, dejudderPolicy, interpolatedPresents, in, host);
+	VpMotion::LogInterpolationDecisionFor(activeSettings, dejudderPolicy, dejudderExtras.interpolatedPresents, in, host);
 }
 
 void LibplaceboVideoRenderer::Impl::LogDejudderAhead()
@@ -366,14 +366,15 @@ void LibplaceboVideoRenderer::Impl::DejudderHold(const char* why)
 	// Report-a-problem: one repeated-stage frame row per hold and a decision when the
 	// reason changes; the hold lines (VP diagnostics adapter).
 	VpDiagnostics::RecordDejudderHold({ why, diagExtrasCounter, diagExtrasSequence, RenderAheadActive(),
-		dejudderDisplayRate.openLoop, diagRendererGeneration, dejudderExtraStats.holds }, diagLastHoldCode);
-	++dejudderExtraStats.holds;
-	dejudderExtraStats.lastHold = why;
-	dejudderHoldLog.OnHold(why, dejudderExtraStats.holds);
+		renderAheadPresenter.displayRate.openLoop, diagRendererGeneration, dejudderExtras.dejudderExtraStats.holds }, diagLastHoldCode);
+	++dejudderExtras.dejudderExtraStats.holds;
+	dejudderExtras.dejudderExtraStats.lastHold = why;
+	dejudderHoldLog.OnHold(why, dejudderExtras.dejudderExtraStats.holds);
 	// Render-ahead: every hold also shows on the "Render-ahead:" line with the gate's level.
 	if (RenderAheadActive())
-		LogRenderAhead(dejudderExtraStats.cadenceRatio, renderAheadPresenter.gate.Level(), why);
+		Vpv::Dejudder::LogRenderAhead(dejudderExtras, dejudderPolicy, renderAheadPresenter, activeSettings.dejudderGate,
+			true, renderAheadTimersReady, dejudderExtras.dejudderExtraStats.cadenceRatio, renderAheadPresenter.gate.Level(), why);
 }
 
 // The last hold lines at teardown, so the last holds are never lost.
-void LibplaceboVideoRenderer::Impl::FlushDejudderHolds() { dejudderHoldLog.Flush(dejudderExtraStats.holds); }
+void LibplaceboVideoRenderer::Impl::FlushDejudderHolds() { dejudderHoldLog.Flush(dejudderExtras.dejudderExtraStats.holds); }

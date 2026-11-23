@@ -1618,3 +1618,7 @@ namespace RenderAhead
 		}
 	};
 }
+
+// CC series C: the render-ahead steps the renderer host calls (free functions, VP-V compiled code in RenderAheadHostSteps.cpp)
+// come with the policy, so the host needs no include line of its own.
+#include "RenderAheadHostSteps.h"

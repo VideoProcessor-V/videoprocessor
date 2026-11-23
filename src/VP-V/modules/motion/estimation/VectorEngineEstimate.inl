@@ -281,7 +281,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	// is rendered.
 	int maskSlot = -1;
 	if (activeSettings.occlusionMask)
-		maskSlot = dejudderMaskSequence[0] == aSequence ? 1 : 0;
+		maskSlot = dejudderExtras.dejudderMaskSequence[0] == aSequence ? 1 : 0;
 	// Black bars: the latest trusted active picture when it is this
 	// raster's (else the matcher finds the bars itself).
 	const int width = a.luma ? a.luma->params.w : 0, height = a.luma ? a.luma->params.h : 0;
@@ -437,8 +437,8 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		return true;   // r6 fix 1: warm-up only; nothing counted, logged or handed on
 	if (maskSlot >= 0)
 	{
-		dejudderMaskSequence[maskSlot] = bSequence;
-		dejudderMaskEpoch[maskSlot] = motionValidity.Epoch();
+		dejudderExtras.dejudderMaskSequence[maskSlot] = bSequence;
+		dejudderExtras.dejudderMaskEpoch[maskSlot] = motionValidity.Epoch();
 	}
 	if (vectorEngine.motionRecoveryLogPending)
 	{
@@ -587,7 +587,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 // 3050 Ti for an estimate of a few ms; render-ahead follow-up 2026-10-17).
 // forEntranceOnce: B3's B ahead (any path: its consumers read the snapshot; ProcessedB).
 bool LibplaceboVideoRenderer::Impl::EstimateAhead(uint64_t sourceSequence, uint64_t nextSourceSequence, bool renderedPath,
-	AlphaFrameGpuTimingScope* timing, bool forEntranceOnce)
+	Vpv::Dejudder::FrameGpuTimingScope* timing, bool forEntranceOnce)
 {
 	Dejudder::AheadSchedule::Conditions c;
 	c.enabled = activeSettings.dejudderEstimateAhead;
