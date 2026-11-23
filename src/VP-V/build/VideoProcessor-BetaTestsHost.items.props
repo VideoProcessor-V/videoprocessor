@@ -30,5 +30,6 @@
     <!-- P1GpuFill.cpp's module registration and source-luma note go through the hub (Instance / AddModule / OriginalPathway). -->
     <ClCompile Include="$(MSBuildThisFileDirectory)..\core\hub\ExtensionHub.cpp"/>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\beta_gpu\BetaParametersVpvHooks.cpp"/>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\support\HardwarePrerequisites.cpp"/>
   </ItemGroup>
 </Project>

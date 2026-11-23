@@ -892,6 +892,9 @@
     <ClCompile Include="..\VP-V\tests\FallbackPlainTextTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\tests\support\HardwarePrerequisites.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\VP-V\tests\VpLutGpuTestSupport.h" />

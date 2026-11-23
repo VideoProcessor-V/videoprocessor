@@ -27,8 +27,15 @@ void RunBetaChainGpuTest(); // BetaGpuTests.cpp
 
 namespace Vpv::BetaTests
 {
+// The Beta suite entry in BetaParametersTests.cpp supports both the standalone console executable and the
+// VP_BETA_TEST_DLL entry point called by the native test host (Smart App Control on the development laptop
+// blocks new builds of the standalone executable, whereas test DLLs loaded by Microsoft's signed test host run).
 namespace
 {
+// Report modes (VP_TEST_MATCHER_TIMING, _DEJUDDER_QUALITY, _DITHER_COMPARE, _TIMING_GATE, _MOTION_CORPUS,
+// _REAL_FOOTAGE, _QUALITY, _SCENARIO) run one report and stop before the gate's whole-chain tests: they
+// return this distinct code (3) and print "MODE <name>: gate not run", so a gate run with a stray report
+// switch can never pass (the test host fails it unless VP_TEST_REPORT_MODE=1).
 constexpr int kBetaReportModeExitCode = 3;
 
 int BetaReportMode(const char* name)
