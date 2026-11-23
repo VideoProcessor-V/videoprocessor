@@ -16,6 +16,7 @@
 #pragma once
 
 #include <VP-V/core/Ramp.h>
+#include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2Config.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2StandIns.h>
 
@@ -24,6 +25,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace TdV2
 {
@@ -42,15 +44,46 @@ namespace TdV2
 	// Zero temporal weight ramp invariant (99 s2.1 M2, refs/111:212): weights are interpolated spatially only.
 	constexpr double kTemporalWeightRamp = 0.0;
 
-	// Exact normalized white-noise power transfer shares of GrainSplit's three bands (refs/111:168-169):
-	//   D1 = Y - G(1.0) Y has white-noise variance transfer 0.761
-	//   D2 = G(1.0) Y - G(2.5) Y has white-noise variance transfer 0.048
-	//   L  = G(2.5) Y carries negligible white grain relative to D1+D2 (share = 0)
-	constexpr double kWhiteFilterEnergyFine = 0.761;
-	constexpr double kWhiteFilterEnergyMid = 0.048;
-	constexpr double kBandGrainShareFine = kWhiteFilterEnergyFine / (kWhiteFilterEnergyFine + kWhiteFilterEnergyMid);
-	constexpr double kBandGrainShareMid = kWhiteFilterEnergyMid / (kWhiteFilterEnergyFine + kWhiteFilterEnergyMid);
-	constexpr double kBandGrainShareLow = 0.0;
+	// Exact 2D separable white-noise variance transfer gains ||H_j||_2^2 of U2 BandFromBase filters:
+	//   L = G(kSigmaBase), M = G(kSigmaFine) - G(kSigmaBase), H = I - G(kSigmaFine).
+	// For unit-variance uncorrelated white pixel noise (grain or white quantization error), the exact
+	// per-band variance is sigma^2 * gain_j (NO re-normalization by 0.809, because D1+D2+L=I has nonzero
+	// cross-covariance terms between overlapping filter bands; re-normalizing would over-subtract by +23.6%).
+	struct BandWhiteNoiseGains
+	{
+		double low = 0.0;   // ||G(2.5)||_2^2 ~= 0.0127
+		double mid = 0.0;   // ||G(1.0) - G(2.5)||_2^2 ~= 0.0480
+		double fine = 0.0;  // ||I - G(1.0)||_2^2 ~= 0.7613
+	};
+
+	inline BandWhiteNoiseGains ComputeBandWhiteNoiseGains()
+	{
+		const auto g1 = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaFine, 3.0, true, 0.0);
+		const auto g2 = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaBase, 3.0, true, 0.0);
+		const int r1 = static_cast<int>(g1.size() / 2);
+		const int r2 = static_cast<int>(g2.size() / 2);
+
+		double sum1Sq = 0.0;
+		for (double t : g1) sum1Sq += t * t;
+		double sum2Sq = 0.0;
+		for (double t : g2) sum2Sq += t * t;
+
+		const int rMin = (std::min)(r1, r2);
+		double dot12 = 0.0;
+		for (int k = -rMin; k <= rMin; ++k)
+			dot12 += g1[static_cast<size_t>(k + r1)] * g2[static_cast<size_t>(k + r2)];
+
+		const double g1_0 = g1[static_cast<size_t>(r1)];
+		const double normG1Sq = sum1Sq * sum1Sq;
+		const double normG2Sq = sum2Sq * sum2Sq;
+		const double cross12Sq = dot12 * dot12;
+
+		BandWhiteNoiseGains out;
+		out.low = normG2Sq;
+		out.mid = normG1Sq - 2.0 * cross12Sq + normG2Sq;
+		out.fine = 1.0 - 2.0 * (g1_0 * g1_0) + normG1Sq;
+		return out;
+	}
 
 	// Nominal codec dead-zone rounding offsets phi (refs/111:180: standard x264 / HM / HEVC inter 1/6, intra 1/3).
 	constexpr double kDeadZonePhiInter = 1.0 / 6.0;
@@ -76,7 +109,6 @@ namespace TdV2
 		std::array<float, kMaxBlendRefs> anchor{};
 		std::array<float, kMaxBlendRefs> sumShifted{};
 		std::array<std::array<float, kMaxBlendRefs>, kMaxBlendRefs> sumProdShifted{};
-		std::array<std::array<float, kMaxBlendRefs>, kMaxBlendRefs> sumRawProd{};
 
 		explicit MomentAccumulatorFp32(int k = 0)
 			: refCount(k > kMaxBlendRefs ? kMaxBlendRefs : (k < 0 ? 0 : k))
@@ -94,7 +126,6 @@ namespace TdV2
 			for (int i = 0; i < kMaxBlendRefs; ++i)
 			{
 				sumProdShifted[i].fill(0.0f);
-				sumRawProd[i].fill(0.0f);
 			}
 		}
 
@@ -124,7 +155,6 @@ namespace TdV2
 				{
 					const float sj = diffs[j] - anchor[j];
 					sumProdShifted[i][j] += si * sj;
-					sumRawProd[i][j] += diffs[i] * diffs[j];
 				}
 			}
 			++sampleCount;
@@ -264,6 +294,8 @@ namespace TdV2
 			if (pivotAbs <= kSolveNumericalFloor)
 			{
 				res.singular = true;
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::SingularSolveClosure, "SolveConvexWeights singular pivot");
 				return res;
 			}
 			if (pivotRow != col)
@@ -465,8 +497,9 @@ namespace TdV2
 		}
 		else if (a > 40.0)
 		{
-			// Asymptotic limit for very steep exponential decay (exp(a) overflows or dominates):
-			// m -> 1 / lambda, v -> 1 / lambda^2.
+			// IEEE-754 FP64 asymptotic cutoff: exp(-40) ~= 4.25e-18 < DBL_EPSILON / 2 (1.11e-16),
+			// so 1/(exp(a) - 1) and exp(a)/(exp(a) - 1)^2 vanish below FP64 machine precision:
+			// m -> 1 / lambda, v -> 1 / lambda^2 exactly to 53-bit significand precision.
 			m = 1.0 / lambda;
 			v = 1.0 / (lambda * lambda);
 		}
@@ -547,7 +580,16 @@ namespace TdV2
 			return std::isfinite(sentCoeff) ? sentCoeff : 0.0;
 		}
 		const double theta = (1.0 - phi) * stepDelta;
-		const long long level = static_cast<long long>(std::llround(sentCoeff / stepDelta));
+		// Exact dead-zone quantizer cell index:
+		//   |x| < theta => k = 0;  |x| >= theta => |k| = floor(|x| / Delta + phi).
+		// Guarantees sentCoeff always lies inside its own cell I_k and maps k * Delta -> k identically.
+		const double absSent = std::fabs(sentCoeff);
+		long long level = 0;
+		if (absSent >= theta)
+		{
+			const long long mag = static_cast<long long>(std::floor(absSent / stepDelta + phi));
+			level = (sentCoeff >= 0.0) ? mag : -mag;
+		}
 		if (level == 0)
 		{
 			return (std::max)(-theta, (std::min)(theta, blendedCoeff));

@@ -382,6 +382,8 @@ namespace TdV2
 		void Reset()
 		{
 			window_.clear();
+			hasEmittedSeq_ = false;
+			lastEmittedSeq_ = 0;
 		}
 
 		uint64_t AbstainCount(AbstainReason r) const
@@ -402,22 +404,31 @@ namespace TdV2
 			dec.record.unit = QualityPattern::kUnitVersion;
 			dec.record.seq = ev.seq;
 
-			// Non-finite check (Rule 4: fail closed with visible abstain counter).
+			// Non-finite check (Rule 4: fail closed with visible abstain counter; also check invalid sourceBits).
 			if (!std::isfinite(ev.qualityScore) || !std::isfinite(ev.stepMean) ||
 			    !std::isfinite(ev.stepP90) || !std::isfinite(ev.stepMax) ||
-			    !std::isfinite(ev.exactCopyFracPrev1) || !std::isfinite(ev.exactCopyFracPrev2))
+			    !std::isfinite(ev.exactCopyFracPrev1) || !std::isfinite(ev.exactCopyFracPrev2) ||
+			    PeakCodeForBits(ev.sourceBits) <= 0.0)
 			{
 				if (standIns != nullptr)
-					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2FrameRoleDetector non-finite evidence");
-				return Abstain(dec, AbstainReason::NonFiniteEvidence, ev.seq, leadFrames_);
+					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2FrameRoleDetector non-finite or invalid sourceBits");
+				return Abstain(dec, AbstainReason::NonFiniteEvidence, ev.seq, leadFrames_, /*emitRecord=*/true);
 			}
 
 			// Cut immediately flushes temporal window so peaks are NEVER bridged across cuts.
+			// When leadFrames_ > 0, the cut frame stays buffered as the new post-cut anchor and is NOT
+			// emitted prematurely (produced = false), preventing duplicate seq emission when lead frames arrive.
 			if (ev.isCut)
 			{
 				window_.clear();
 				window_.push_back(ev);
-				return Abstain(dec, AbstainReason::CutReset, ev.seq, leadFrames_);
+				const bool emitNow = (leadFrames_ == 0);
+				if (emitNow)
+				{
+					hasEmittedSeq_ = true;
+					lastEmittedSeq_ = ev.seq;
+				}
+				return Abstain(dec, AbstainReason::CutReset, ev.seq, leadFrames_, emitNow);
 			}
 
 			window_.push_back(ev);
@@ -425,9 +436,10 @@ namespace TdV2
 				window_.pop_front();
 
 			// Need at least leadFrames_ + 1 frames in window to emit the target frame at index (size - 1 - lead).
+			// While warming up, produced = false so ev.seq is never emitted twice.
 			if (window_.size() <= static_cast<size_t>(leadFrames_))
 			{
-				return Abstain(dec, AbstainReason::InsufficientWindow, ev.seq, leadFrames_);
+				return Abstain(dec, AbstainReason::InsufficientWindow, ev.seq, leadFrames_, /*emitRecord=*/false);
 			}
 
 			const size_t targetIdx = window_.size() - 1 - static_cast<size_t>(leadFrames_);
@@ -443,8 +455,10 @@ namespace TdV2
 			FrameRoleDecision dec;
 			dec.record.unit = QualityPattern::kUnitVersion;
 			if (window_.empty())
-				return Abstain(dec, AbstainReason::InsufficientWindow, 0, 0);
+				return Abstain(dec, AbstainReason::InsufficientWindow, 0, 0, /*emitRecord=*/false);
 			const size_t idx = window_.size() - 1;
+			if (hasEmittedSeq_ && window_[idx].seq == lastEmittedSeq_)
+				return Abstain(dec, AbstainReason::InsufficientWindow, window_[idx].seq, 0, /*emitRecord=*/false);
 			return ClassifyTargetWithLead(idx, window_[idx], 0);
 		}
 
@@ -467,13 +481,13 @@ namespace TdV2
 			return outFlags != 0;
 		}
 
-		FrameRoleDecision Abstain(FrameRoleDecision& dec, AbstainReason reason, uint64_t seq, uint8_t leadUsed)
+		FrameRoleDecision Abstain(FrameRoleDecision& dec, AbstainReason reason, uint64_t seq, uint8_t leadUsed, bool emitRecord)
 		{
 			const size_t idx = static_cast<size_t>(reason);
 			if (idx < abstainCounts_.size())
 				++abstainCounts_[idx];
 			dec.abstain = reason;
-			dec.produced = true;
+			dec.produced = emitRecord;
 			dec.record.unit = QualityPattern::kUnitVersion;
 			dec.record.seq = seq;
 			dec.record.role = static_cast<uint8_t>(QualityPattern::FrameRole::Unknown);
@@ -482,6 +496,11 @@ namespace TdV2
 			dec.record.causal = (leadUsed == 0) ? 1u : 0u;
 			if (leadUsed < kMaxLeadFrames)
 				dec.record.validityBits |= QualityPattern::kProvisional;
+			if (emitRecord)
+			{
+				hasEmittedSeq_ = true;
+				lastEmittedSeq_ = seq;
+			}
 			return dec;
 		}
 
@@ -513,7 +532,7 @@ namespace TdV2
 			// Fade active -> abstain visibly rather than guessing peaks during a ramp.
 			if (target.isFade)
 			{
-				return Abstain(dec, AbstainReason::FadeActive, target.seq, leadUsed);
+				return Abstain(dec, AbstainReason::FadeActive, target.seq, leadUsed, /*emitRecord=*/true);
 			}
 
 			// Cadence repeat check (3:2 pulldown): ExactCopy MUST NEVER be promoted to Peak!
@@ -526,6 +545,8 @@ namespace TdV2
 				r.validityBits |= QualityPattern::kValidRole;
 				dec.abstain = AbstainReason::None;
 				dec.produced = true;
+				hasEmittedSeq_ = true;
+				lastEmittedSeq_ = target.seq;
 				return dec;
 			}
 
@@ -562,7 +583,7 @@ namespace TdV2
 			const size_t minUnique = (leadUsed >= kMaxLeadFrames) ? 3u : 2u;
 			if (uniqueScores.size() < minUnique)
 			{
-				return Abstain(dec, AbstainReason::InsufficientWindow, target.seq, leadUsed);
+				return Abstain(dec, AbstainReason::InsufficientWindow, target.seq, leadUsed, /*emitRecord=*/true);
 			}
 
 			// Compute rank (0 = highest score) and robust spread via U24 RobustStats.
@@ -581,19 +602,34 @@ namespace TdV2
 			r.validityBits |= QualityPattern::kValidRank;
 
 			// Quantization floor on quality score contrast: half a code step normalized by peak code.
+			// Fail closed on invalid sourceBits (zero silent fallback).
 			const double peakCode = PeakCodeForBits(target.sourceBits);
-			const double quantScoreFloor = (peakCode > 0.0) ? (0.5 / peakCode) : 1e-4;
+			if (!(peakCode > 0.0))
+			{
+				return Abstain(dec, AbstainReason::NonFiniteEvidence, target.seq, leadUsed, /*emitRecord=*/true);
+			}
+			const double quantScoreFloor = 0.5 / peakCode;
 			const double spread = maxSc - minSc;
 			if (spread < 2.0 * quantScoreFloor)
 			{
-				return Abstain(dec, AbstainReason::LowRhythmContrast, target.seq, leadUsed);
+				return Abstain(dec, AbstainReason::LowRhythmContrast, target.seq, leadUsed, /*emitRecord=*/true);
 			}
 
+			// Derive robust scale immune to bimodal/flat-bottom GOPs where MAD == 0 (e.g., I-B-B-P):
+			//   - madSigma = kMadToSigma * MAD (standard Gaussian MAD scale)
+			//   - iqrSigma = (Q75 - Q25) / (2 * Phi^-1(0.75)), 2 * Phi^-1(0.75) = 1.3489795003921634
+			//   - rangeSigma = spread / 4.0 (standard 4-sigma 95% range rule)
+			// Minimum margin = 0.25 * max(madSigma, iqrSigma, rangeSigma), floored by quantScoreFloor.
+			constexpr double kNormalIqrPerSigma = 1.3489795003921634;
 			const double medScore = RobustStats::Median(uniqueScores, RobustStats::MedianRule::MeanOfMiddle);
 			const double mad = RobustStats::MadAbout(uniqueScores, medScore, RobustStats::MedianRule::MeanOfMiddle);
 			const double madSigma = RobustStats::kMadToSigma * mad;
-			// Minimum margin to declare a distinct peak/valley: derived from robust scale (0.25 * sigma) floored by quant step.
-			const double margin = (std::max)(madSigma / 4.0, quantScoreFloor);
+			const double q25 = RobustStats::Quantile(uniqueScores, 0.25, RobustStats::RankRule::Interpolated);
+			const double q75 = RobustStats::Quantile(uniqueScores, 0.75, RobustStats::RankRule::Interpolated);
+			const double iqrSigma = (q75 - q25) / kNormalIqrPerSigma;
+			const double rangeSigma = spread / 4.0;
+			const double robustSigma = (std::max)(madSigma, (std::max)(iqrSigma, rangeSigma));
+			const double margin = (std::max)(robustSigma / 4.0, quantScoreFloor);
 
 			bool isPeak = false;
 			bool isValley = false;
@@ -602,13 +638,13 @@ namespace TdV2
 				// Two-sided P15 peak/valley test:
 				// - Peak strictly exceeds both unique neighbors by margin.
 				// - Valley is strictly below both neighbors OR sits on a flat-bottom valley (e.g. I-B-B-P)
-				//   where it is <= both neighbors (within quant floor) and strictly below at least one by margin.
+				//   where it is <= both neighbors (within margin) and strictly below at least one by margin.
 				if (tScore > prevUniqueScore + margin && tScore > nextUniqueScore + margin)
 				{
 					isPeak = true;
 				}
 				else if ((tScore + margin < prevUniqueScore && tScore + margin < nextUniqueScore) ||
-				         (tScore <= prevUniqueScore + quantScoreFloor && tScore <= nextUniqueScore + quantScoreFloor &&
+				         (tScore <= prevUniqueScore + margin && tScore <= nextUniqueScore + margin &&
 				          (tScore + margin < prevUniqueScore || tScore + margin < nextUniqueScore)))
 				{
 					isValley = true;
@@ -650,11 +686,15 @@ namespace TdV2
 			r.validityBits |= QualityPattern::kValidRole;
 			dec.abstain = AbstainReason::None;
 			dec.produced = true;
+			hasEmittedSeq_ = true;
+			lastEmittedSeq_ = target.seq;
 			return dec;
 		}
 
 		uint8_t leadFrames_ = kMaxLeadFrames;
 		std::deque<FrameRoleEvidence> window_;
 		std::array<uint64_t, static_cast<size_t>(AbstainReason::Count)> abstainCounts_{};
+		bool hasEmittedSeq_ = false;
+		uint64_t lastEmittedSeq_ = 0;
 	};
 }

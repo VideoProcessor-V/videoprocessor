@@ -35,6 +35,11 @@ namespace TdV2
 		TransformUnknownBound,
 		LowConfidenceL3,
 		NonFiniteClosure,
+		StepPriorDefault,
+		SingleRefA1ToA2Fallback,
+		MotionFieldStandIn,
+		SingularSolveClosure,
+		BorderBilinearFallback,
 		Count
 	};
 
@@ -80,7 +85,17 @@ namespace TdV2
 			{ StandInKind::LowConfidenceL3, "td.fallback.low_conf_l3",
 			  "L3 low-confidence coarse carry", "Full L2/L1 high-confidence path" },
 			{ StandInKind::NonFiniteClosure, "td.fallback.non_finite",
-			  "non-finite input closed to zero", "Finite upstream evidence" }
+			  "non-finite input closed to zero", "Finite upstream evidence" },
+			{ StandInKind::StepPriorDefault, "td.standin.step_prior",
+			  "step prior: 1-LSB default stand-in (P16 step not supplied)", "P16 measured quantization step" },
+			{ StandInKind::SingleRefA1ToA2Fallback, "td.fallback.single_ref_a2",
+			  "A1 single-ref fallback to A2 rounding prior", "Two independent references for A1" },
+			{ StandInKind::MotionFieldStandIn, "td.standin.motion_field",
+			  "motion field: null/mismatched stand-in", "Valid upstream P3/P3b motion field" },
+			{ StandInKind::SingularSolveClosure, "td.fallback.singular_solve",
+			  "covariance solve singular (closed to zero)", "Well-conditioned covariance C" },
+			{ StandInKind::BorderBilinearFallback, "td.fallback.border_bilinear",
+			  "active-rect 1-2px border bilinear warp fallback", "Interior bicubic 4x4 footprint" }
 		};
 		const size_t idx = static_cast<size_t>(kind);
 		if (idx < static_cast<size_t>(StandInKind::Count))

@@ -13,6 +13,7 @@
 #pragma once
 
 #include <VP-V/core/RobustStats.h>
+#include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2Config.h>
 
 #include <array>
@@ -280,10 +281,18 @@ namespace TdV2
 
 	inline ObjectSpeedBinId ClassifyObjectSpeed(double relSpeedPx)
 	{
-		if (relSpeedPx < 0.25) return ObjectSpeedBinId::Still;
-		if (relSpeedPx < 1.0)  return ObjectSpeedBinId::Slow;
-		if (relSpeedPx < 3.0)  return ObjectSpeedBinId::Medium;
-		if (relSpeedPx < 8.0)  return ObjectSpeedBinId::Fast;
+		// Derived physical bin edges (Rule 1):
+		//   - 0.25 px: quarter-pel P3r accuracy ceiling
+		//   - kSigmaFine (1.0 px): fine-band Gaussian sigma scale
+		//   - BandRadius(kSigmaFine) (3.0 px): full fine-band filter radius
+		//   - 0.5 * kCanonicalBlockPx (8.0 px): half canonical 16-px cell edge
+		const double slowEdge = VpUnit::BandFromBase::kSigmaFine;
+		const double medEdge = static_cast<double>(VpUnit::BandFromBase::BandRadius(VpUnit::BandFromBase::kSigmaFine));
+		const double fastEdge = 0.5 * static_cast<double>(kCanonicalBlockPx);
+		if (relSpeedPx < 0.25)     return ObjectSpeedBinId::Still;
+		if (relSpeedPx < slowEdge) return ObjectSpeedBinId::Slow;
+		if (relSpeedPx < medEdge)  return ObjectSpeedBinId::Medium;
+		if (relSpeedPx < fastEdge) return ObjectSpeedBinId::Fast;
 		return ObjectSpeedBinId::VeryFast;
 	}
 

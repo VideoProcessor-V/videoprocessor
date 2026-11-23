@@ -4,17 +4,19 @@
 // Temporal Detail v2 — Stage TD-S3 (2026-11-23_TD-consolidated-plan.md s1.1-s1.6, s3.2):
 // Full CPU Reference Fusion Engine with explicit 4-layer grain preservation:
 //   - Dual-source grain-free fusion: prev peak + next peak + recurrent carry-forward in one w* = C^-1 c solve
-//   - Shared bicubic resampling via VpComposed::SampleBicubic strictly inside ActiveRect (bar edges hard-clamped)
-//   - Shared L/M/H decomposition via U2 VpUnit::BandFromBase (zero private Gaussian copies)
+//   - Shared bicubic resampling via VpComposed::SampleBicubic strictly inside ActiveRect (hard bar clamping,
+//     edge-extended warp buffer with explicit out-of-bounds mask so zero-holes never ring across 18 px)
+//   - Shared L/M/H decomposition via U2 VpUnit::BandFromBase (exact derived 2D transfer gains)
 //   - Camera-relative fast-object motion gate (|v - v_cam| + 3x3 Karis max-velocity silhouette dilation +
-//     Overlay / DynamicTexture zero-weight masks; camera pans are NEVER gated off)
-//   - Frequency-split focus guard (protects focal-plane shifts on M/H; Q4 optional L-band bokeh mode)
+//     Overlay / DynamicTexture zero-weight masks + zero cross-boundary weight bleed)
+//   - Physics-derived frequency-split focus guard (analytical EdgeFocusRatio from BandFromBase sigmas;
+//     protects focal-plane shifts on all bands; never self-vetoes W1 banded sky; Q4 optional L-band bokeh mode)
 //   - Explicit 4-layer grain preservation (L1 separation, L2 A1 grain subtraction, L3 convex+cell bounds,
-//     L4 TdGuardPort output guard; current frame's own grain G_t is re-injected 1:1 untouched)
+//     L4 TdGuardPort output guard modifying candOut ONLY — carryClean_ stays 100% grain-free)
 //   - Populates U19 TdMapsView::Block per 16x16 cell
 //
 // Every constant is derived from signal physics or existing VP-V contracts (Rule 1).
-// Every stand-in / fallback is visibly recorded in StandInRegistry (Rule 4).
+// Every stand-in / fallback is visibly recorded in StandInRegistry and result counters (Rule 4).
 // Header-only, C++14/17, no Windows headers.
 #pragma once
 
@@ -36,7 +38,7 @@
 
 namespace TdV2
 {
-	// ---- Rule-1 Derived Motion & Focus Gate Constants ----
+	// ---- Rule-1 Derived Motion & Focus Gate Physics ----
 
 	// Quarter-pel sub-pixel tracking ceiling (P3r / CellTrust): object speed <= 0.25 px/frame receives full weight 1.0.
 	constexpr double kStillObjectSpeedPx = 0.25;
@@ -44,20 +46,32 @@ namespace TdV2
 	// Fast-object motion cutoff: 2 * kSigmaFine (= 2.0 px/frame), where 1-frame object displacement spans the fine filter support.
 	constexpr double kFastObjectCutoffPx = 2.0 * VpUnit::BandFromBase::kSigmaFine;
 
-	// Focus ratio F = E2 / (E2 + E3): a focal-plane shift where reference sharpness ratio exceeds current frame's
-	// sharpness ratio by more than 1/8 (= 0.125, one octant of the [0, 1] band-energy balance) vetoes M/H borrowing.
-	constexpr double kFocusShiftDelta = 0.125;
-
-	// Defocus detection floor: when E2 / (E2 + E3) <= 0.25 (mid-band holds <= 1/4 of mid+low structure energy)
-	// on a structured cell, the cell is classified as defocused (bokeh).
-	constexpr double kDefocusRatioCeiling = 0.25;
-
-	// Minimum mid+low cell energy (codes^2 at 10-bit, scaled by DepthScale^2) to judge focus vs flat region:
-	// equals 1.0 code^2 (unit quantization step variance floor).
-	constexpr double kFocusMinEnergy10Bit = 1.0;
-
 	// Strictly numerical denominator floor.
 	constexpr double kEngineNumFloor = 1e-9;
+
+	// Analytical 1D step-edge Fourier energy passing through difference-of-Gaussians G(a) - G(b):
+	//   integral |exp(-0.5 a^2 w^2) - exp(-0.5 b^2 w^2)|^2 / w^2 dw  proportional to  2 * sqrt((a^2 + b^2) / 2) - a - b.
+	inline double StepEdgeBandEnergy(double sigmaA, double sigmaB)
+	{
+		const double e = 2.0 * std::sqrt(0.5 * (sigmaA * sigmaA + sigmaB * sigmaB)) - sigmaA - sigmaB;
+		return e > 0.0 ? e : 0.0;
+	}
+
+	// Analytical focus ratio F(sigmaPsf) = E2(sigmaPsf) / (E2(sigmaPsf) + E3(sigmaPsf)) of an ideal step edge
+	// blurred by optical PSF sigmaPsf and measured through U2 BandFromBase's exact sigmas (1.0, 2.5, 6.0):
+	//   - Sharp edge (sigmaPsf = 0.0):       F ~= 0.3078
+	//   - Defocused (sigmaPsf = kSigmaBase): F ~= 0.1170
+	//   - Focus-shift drop (sharp -> defocus): F(0) - F(kSigmaBase) ~= 0.1908
+	inline double AnalyticalEdgeFocusRatio(double sigmaPsf)
+	{
+		const double a2 = std::hypot(VpUnit::BandFromBase::kSigmaFine, sigmaPsf);
+		const double b2 = std::hypot(VpUnit::BandFromBase::kSigmaBase, sigmaPsf);
+		const double b3 = std::hypot(VpUnit::BandFromBase::kSigmaLow,  sigmaPsf);
+		const double e2 = StepEdgeBandEnergy(a2, b2);
+		const double e3 = StepEdgeBandEnergy(b2, b3);
+		const double tot = e2 + e3;
+		return tot > kEngineNumFloor ? (e2 / tot) : 0.0;
+	}
 
 	// ---- Lightweight Deterministic Plane (compatible with VpComposed::SampleBicubic) ----
 	struct TdV2Plane
@@ -111,11 +125,20 @@ namespace TdV2
 		double at(int x, int y) const { return src->at(ox + x, oy + y); }
 	};
 
+	struct WarpDiagnostics
+	{
+		size_t borderBilinearPixels = 0;
+		size_t nonFinitePixels = 0;
+	};
+
 	// Warp `refClean` into current frame coordinates using shared VpComposed::SampleBicubic inside `active`.
-	// Motion `(vx, vy)` gives the displacement from current pixel `(x, y)` to reference pixel `(x + vx, y + vy)`.
-	// Returns a validity mask (1 = sampled strictly inside active rect, 0 = out of footprint / non-finite).
-	inline void WarpCleanReference(
+	// Out-of-bounds landings keep `outValid = 0` (zero blend/moment weight) while filling `outWarped` with the
+	// edge-clamped active-border sample (NEVER `0.0`), preventing 18-px Gaussian ringing near letterbox bars.
+	// Any non-finite pixel in `refClean` is detected visibly, excluded (`outValid = 0`), and filled from `fallbackClean`
+	// so `DecomposeActiveBands` never propagates NaN/Inf.
+	inline WarpDiagnostics WarpCleanReference(
 		const TdV2Plane& refClean,
+		const TdV2Plane& fallbackClean,
 		const ActiveRect& active,
 		const std::vector<double>& cellVx,
 		const std::vector<double>& cellVy,
@@ -123,18 +146,80 @@ namespace TdV2
 		int cellsH,
 		int cellPx,
 		TdV2Plane& outWarped,
-		std::vector<uint8_t>& outValid)
+		std::vector<uint8_t>& outValid,
+		StandInRegistry* standIns = nullptr)
 	{
+		WarpDiagnostics diag;
 		const int w = refClean.w;
 		const int h = refClean.h;
-		outWarped = TdV2Plane(w, h, 0.0);
+		outWarped = fallbackClean;
 		outValid.assign(static_cast<size_t>(w) * static_cast<size_t>(h), 0u);
 
 		const ActiveRect ar = active.ClampedTo(w, h);
-		if (ar.Empty() || cellsW <= 0 || cellsH <= 0 || cellPx <= 0)
-			return;
+		const size_t expectedCells = (cellsW > 0 && cellsH > 0)
+			? static_cast<size_t>(cellsW) * static_cast<size_t>(cellsH)
+			: 0u;
+		if (ar.Empty() || expectedCells == 0u || cellPx <= 0 ||
+		    cellVx.size() != expectedCells || cellVy.size() != expectedCells)
+		{
+			if (standIns != nullptr)
+				standIns->Engage(StandInKind::MotionFieldStandIn, "WarpCleanReference invalid motion dimensions");
+			return diag;
+		}
 
-		ActiveSubPlaneView view{ &refClean, ar.x0, ar.y0, ar.Width(), ar.Height() };
+		// Sanitize any non-finite pixels inside refClean's active rect before bicubic sampling.
+		TdV2Plane safeRef = refClean;
+		std::vector<uint8_t> refFinite(static_cast<size_t>(w) * static_cast<size_t>(h), 1u);
+		for (int y = ar.y0; y < ar.y1; ++y)
+		{
+			for (int x = ar.x0; x < ar.x1; ++x)
+			{
+				if (!std::isfinite(safeRef.at(x, y)))
+				{
+					safeRef.at(x, y) = fallbackClean.at(x, y);
+					refFinite[static_cast<size_t>(y) * w + x] = 0u;
+					++diag.nonFinitePixels;
+				}
+			}
+		}
+		if (diag.nonFinitePixels > 0 && standIns != nullptr)
+			standIns->Engage(StandInKind::NonFiniteClosure, "WarpCleanReference non-finite ref pixel");
+
+		ActiveSubPlaneView view{ &safeRef, ar.x0, ar.y0, ar.Width(), ar.Height() };
+
+		auto sampleBilinearClamped = [&](double sxLocal, double syLocal) -> double
+		{
+			const double cx = (std::max)(0.0, (std::min)(static_cast<double>(ar.Width() - 1), sxLocal));
+			const double cy = (std::max)(0.0, (std::min)(static_cast<double>(ar.Height() - 1), syLocal));
+			const int ix0 = static_cast<int>(std::floor(cx));
+			const int iy0 = static_cast<int>(std::floor(cy));
+			const int ix1 = (std::min)(ar.Width() - 1, ix0 + 1);
+			const int iy1 = (std::min)(ar.Height() - 1, iy0 + 1);
+			const double fx = cx - ix0;
+			const double fy = cy - iy0;
+			const double v00 = view.at(ix0, iy0);
+			const double v10 = view.at(ix1, iy0);
+			const double v01 = view.at(ix0, iy1);
+			const double v11 = view.at(ix1, iy1);
+			return (v00 + (v10 - v00) * fx) * (1.0 - fy) + (v01 + (v11 - v01) * fx) * fy;
+		};
+
+		auto footprintHasNonFinite = [&](int x0Local, int y0Local, int x1Local, int y1Local) -> bool
+		{
+			if (diag.nonFinitePixels == 0)
+				return false;
+			for (int yy = y0Local; yy <= y1Local; ++yy)
+			{
+				const int gy = ar.y0 + (std::max)(0, (std::min)(ar.Height() - 1, yy));
+				for (int xx = x0Local; xx <= x1Local; ++xx)
+				{
+					const int gx = ar.x0 + (std::max)(0, (std::min)(ar.Width() - 1, xx));
+					if (refFinite[static_cast<size_t>(gy) * w + gx] == 0u)
+						return true;
+				}
+			}
+			return false;
+		};
 
 		for (int y = ar.y0; y < ar.y1; ++y)
 		{
@@ -146,40 +231,50 @@ namespace TdV2
 				const double vx = cellVx[cIdx];
 				const double vy = cellVy[cIdx];
 				if (!std::isfinite(vx) || !std::isfinite(vy))
+				{
+					++diag.nonFinitePixels;
+					// Leave fallbackClean value in outWarped (no zero-hole) with outValid = 0.
 					continue;
+				}
 
 				const double sxLocal = static_cast<double>(x - ar.x0) + vx;
 				const double syLocal = static_cast<double>(y - ar.y0) + vy;
 				double val = 0.0;
 				if (VpComposed::SampleBicubic(view, sxLocal, syLocal, val) && std::isfinite(val))
 				{
+					const int ix0 = static_cast<int>(std::floor(sxLocal));
+					const int iy0 = static_cast<int>(std::floor(syLocal));
 					outWarped.at(x, y) = val;
-					outValid[static_cast<size_t>(y) * w + x] = 1u;
+					if (!footprintHasNonFinite(ix0 - 1, iy0 - 1, ix0 + 2, iy0 + 2))
+						outValid[static_cast<size_t>(y) * w + x] = 1u;
 				}
 				else if (sxLocal >= 0.0 && syLocal >= 0.0 &&
 				         sxLocal <= static_cast<double>(ar.Width() - 1) &&
 				         syLocal <= static_cast<double>(ar.Height() - 1))
 				{
-					// Active-rect 1-2 px border fallback: bilinear inside active rect (never crossing bar edges).
+					// Active-rect 1-2 px border bilinear fallback (never crossing bar edges; visibly counted).
+					const double bVal = sampleBilinearClamped(sxLocal, syLocal);
 					const int ix0 = static_cast<int>(std::floor(sxLocal));
 					const int iy0 = static_cast<int>(std::floor(syLocal));
-					const int ix1 = (std::min)(ar.Width() - 1, ix0 + 1);
-					const int iy1 = (std::min)(ar.Height() - 1, iy0 + 1);
-					const double fx = sxLocal - ix0;
-					const double fy = syLocal - iy0;
-					const double v00 = view.at(ix0, iy0);
-					const double v10 = view.at(ix1, iy0);
-					const double v01 = view.at(ix0, iy1);
-					const double v11 = view.at(ix1, iy1);
-					const double bVal = (v00 + (v10 - v00) * fx) * (1.0 - fy) + (v01 + (v11 - v01) * fx) * fy;
-					if (std::isfinite(bVal))
-					{
-						outWarped.at(x, y) = bVal;
+					outWarped.at(x, y) = bVal;
+					++diag.borderBilinearPixels;
+					if (std::isfinite(bVal) && !footprintHasNonFinite(ix0, iy0, ix0 + 1, iy0 + 1))
 						outValid[static_cast<size_t>(y) * w + x] = 1u;
-					}
+				}
+				else
+				{
+					// Out-of-bounds landing: fill with edge-clamped active border sample (ZERO 0.0-hole ringing!)
+					// while keeping outValid == 0 so this pixel never enters moments or blending.
+					outWarped.at(x, y) = sampleBilinearClamped(sxLocal, syLocal);
 				}
 			}
 		}
+
+		if (diag.borderBilinearPixels > 0 && standIns != nullptr)
+			standIns->Engage(StandInKind::BorderBilinearFallback);
+		if (diag.nonFinitePixels > 0 && standIns != nullptr)
+			standIns->Engage(StandInKind::NonFiniteClosure, "WarpCleanReference non-finite motion or ref");
+		return diag;
 	}
 
 	// ---- U2 VpUnit::BandFromBase Decomposition (L, M, H, D3 strictly inside ActiveRect) ----
@@ -262,6 +357,16 @@ namespace TdV2
 		std::vector<RegionMotionClass> cls;
 		std::vector<uint8_t> valid;
 
+		bool IsWellFormed(int expectedCW, int expectedCH) const
+		{
+			if (expectedCW <= 0 || expectedCH <= 0 || cellsW != expectedCW || cellsH != expectedCH)
+				return false;
+			const size_t n = static_cast<size_t>(expectedCW) * static_cast<size_t>(expectedCH);
+			return vx.size() == n && vy.size() == n &&
+			       camVx.size() == n && camVy.size() == n &&
+			       cls.size() == n && valid.size() == n;
+		}
+
 		static CellMotionField Uniform(int cw, int ch, double mvx, double mvy,
 		                               double cvx, double cvy, RegionMotionClass c = RegionMotionClass::Camera)
 		{
@@ -281,53 +386,61 @@ namespace TdV2
 
 	struct MotionGateResult
 	{
-		std::vector<double> gateL;    // 0 on Overlay/invalid, 1 otherwise
+		std::vector<double> gateL;    // 0 on Overlay/invalid; speed-gated on fast Object cells; 1 on Camera/Still
 		std::vector<double> gateMH;   // Camera-relative smooth speed fade + 3x3 silhouette dilation, 0 on Overlay/DynamicTexture
+		size_t nonFiniteCells = 0;
 	};
 
 	// Compute camera-relative object speed gate with Karis 3x3 max-velocity silhouette dilation.
-	inline MotionGateResult EvaluateCameraRelativeMotionGate(const CellMotionField& mf)
+	inline MotionGateResult EvaluateCameraRelativeMotionGate(const CellMotionField& mf, StandInRegistry* standIns = nullptr)
 	{
 		MotionGateResult out;
+		if (!mf.IsWellFormed(mf.cellsW, mf.cellsH))
+		{
+			if (standIns != nullptr)
+				standIns->Engage(StandInKind::MotionFieldStandIn, "EvaluateCameraRelativeMotionGate malformed field");
+			return out;
+		}
 		const size_t n = static_cast<size_t>(mf.cellsW) * static_cast<size_t>(mf.cellsH);
 		out.gateL.assign(n, 0.0);
 		out.gateMH.assign(n, 0.0);
-		if (mf.cellsW <= 0 || mf.cellsH <= 0 || mf.vx.size() != n || mf.vy.size() != n)
-			return out;
 
 		std::vector<double> relSpeed(n, 0.0);
+		std::vector<uint8_t> finiteCell(n, 0u);
 		for (size_t i = 0; i < n; ++i)
 		{
-			if (!mf.valid[i] || !std::isfinite(mf.vx[i]) || !std::isfinite(mf.vy[i]) ||
-			    !std::isfinite(mf.camVx[i]) || !std::isfinite(mf.camVy[i]))
+			if (!mf.valid[i])
 			{
 				relSpeed[i] = kFastObjectCutoffPx * 2.0;
 				continue;
 			}
+			if (!std::isfinite(mf.vx[i]) || !std::isfinite(mf.vy[i]) ||
+			    !std::isfinite(mf.camVx[i]) || !std::isfinite(mf.camVy[i]))
+			{
+				relSpeed[i] = kFastObjectCutoffPx * 2.0;
+				++out.nonFiniteCells;
+				continue;
+			}
+			finiteCell[i] = 1u;
 			const double dvx = mf.vx[i] - mf.camVx[i];
 			const double dvy = mf.vy[i] - mf.camVy[i];
 			relSpeed[i] = std::sqrt(dvx * dvx + dvy * dvy);
 		}
+		if (out.nonFiniteCells > 0 && standIns != nullptr)
+			standIns->Engage(StandInKind::NonFiniteClosure, "EvaluateCameraRelativeMotionGate non-finite vector");
 
 		for (int cy = 0; cy < mf.cellsH; ++cy)
 		{
 			for (int cx = 0; cx < mf.cellsW; ++cx)
 			{
 				const size_t idx = static_cast<size_t>(cy) * mf.cellsW + cx;
-				if (!mf.valid[idx] || !std::isfinite(mf.vx[idx]) || !std::isfinite(mf.vy[idx]))
+				if (!finiteCell[idx])
 					continue;
 				const RegionMotionClass c = mf.cls[idx];
 				if (c == RegionMotionClass::Overlay)
 				{
 					// Hard drop on overlays/subtitles across ALL bands (prevents ghost letters).
 					out.gateL[idx] = 0.0;
-					out.gateMH[idx] = 0.0;
-					continue;
-				}
-				out.gateL[idx] = 1.0;
-				if (c == RegionMotionClass::DynamicTexture)
-				{
-					// Hard drop on chaotic textures (water/rain/foliage/fire) for M/H.
 					out.gateMH[idx] = 0.0;
 					continue;
 				}
@@ -344,7 +457,7 @@ namespace TdV2
 						const int nx = cx + dx;
 						if (nx < 0 || nx >= mf.cellsW) continue;
 						const size_t nIdx = static_cast<size_t>(ny) * mf.cellsW + nx;
-						if (mf.valid[nIdx] && mf.cls[nIdx] != RegionMotionClass::Overlay)
+						if (finiteCell[nIdx] && mf.cls[nIdx] != RegionMotionClass::Overlay)
 						{
 							if (relSpeed[nIdx] > dilatedSpeed)
 								dilatedSpeed = relSpeed[nIdx];
@@ -353,7 +466,21 @@ namespace TdV2
 				}
 
 				// Smooth fade via U25 RampMath::Smoothstep: 1.0 at <= 0.25 px, 0.0 at >= 2.0 px.
-				out.gateMH[idx] = 1.0 - RampMath::Smoothstep(kStillObjectSpeedPx, kFastObjectCutoffPx, dilatedSpeed);
+				const double speedGate = 1.0 - RampMath::Smoothstep(kStillObjectSpeedPx, kFastObjectCutoffPx, dilatedSpeed);
+
+				// Gate L-band by speed on fast moving Object cells too (prevents coarse-band ghosting on fast movers),
+				// while Still / Camera / DynamicTexture keep L-band at 1.0 (camera pans are never gated off).
+				out.gateL[idx] = (c == RegionMotionClass::Object) ? speedGate : 1.0;
+
+				if (c == RegionMotionClass::DynamicTexture)
+				{
+					// Hard drop on chaotic textures (water/rain/foliage/fire) for M/H.
+					out.gateMH[idx] = 0.0;
+				}
+				else
+				{
+					out.gateMH[idx] = speedGate;
+				}
 			}
 		}
 		return out;
@@ -364,10 +491,13 @@ namespace TdV2
 	{
 		double focusRatio = 1.0;    // E2 / (E2 + E3)
 		bool isDefocused = false;
-		bool focusChange = false;   // Focal-plane shift detected -> hard veto M/H
+		bool focusChange = false;   // Focal-plane shift detected -> hard veto ALL bands (M/H always; L too per MEDIUM-2)
 	};
 
-	// Compute E2/(E2+E3) focus stand-in map and detect focal-plane shifts against warped references.
+	// Compute physics-derived E2/(E2+E3) focus stand-in map using AnalyticalEdgeFocusRatio(sigmaPsf):
+	//   - Defocused cell: curEnergy > structureFloor (above 2-sigma quantization step variance so W1 banded sky
+	//     is NEVER self-vetoed!) AND curF <= AnalyticalEdgeFocusRatio(kSigmaBase).
+	//   - Focus change (rack focus): refEnergy > structureFloor AND (refF - curF) > (F(0) - F(kSigmaBase)).
 	inline std::vector<FocusCellInfo> EvaluateFocusGuardStandIn(
 		const ThreeBandPlanes& curBands,
 		const std::vector<ThreeBandPlanes>& refBands,
@@ -376,6 +506,7 @@ namespace TdV2
 		int cellsH,
 		int cellPx,
 		int sourceBits,
+		double stepTotalVar,
 		const std::vector<uint8_t>* explicitFocusChangeCells,
 		StandInRegistry* standIns)
 	{
@@ -385,7 +516,13 @@ namespace TdV2
 		const size_t numCells = static_cast<size_t>(cellsW) * static_cast<size_t>(cellsH);
 		std::vector<FocusCellInfo> info(numCells);
 		const double depthScale = DepthScale(sourceBits);
-		const double energyFloor = kFocusMinEnergy10Bit * depthScale * depthScale;
+		// Genuine defocused scene structure must exceed 4x quantization-step variance (> 2 sigma above codec step)
+		// and at least 1 LSB^2, so smooth W1 banded skies are NEVER falsely classified as optical bokeh!
+		const double structureFloor = (std::max)(depthScale * depthScale, 4.0 * (std::max)(0.0, stepTotalVar));
+		const double fSharp = AnalyticalEdgeFocusRatio(0.0);
+		const double fDefocus = AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase);
+		const double fShiftDelta = fSharp - fDefocus;
+
 		const ActiveRect ar = active.ClampedTo(curBands.M.w, curBands.M.h);
 
 		auto cellFocusRatio = [&](const ThreeBandPlanes& b, int cx, int cy, double& outTotalEnergy) -> double
@@ -428,7 +565,7 @@ namespace TdV2
 				const double curF = cellFocusRatio(curBands, cx, cy, curEnergy);
 				info[idx].focusRatio = curF;
 
-				if (curEnergy >= energyFloor && curF <= kDefocusRatioCeiling)
+				if (curEnergy > structureFloor && curF <= fDefocus)
 					info[idx].isDefocused = true;
 
 				if (explicitFocusChangeCells != nullptr && idx < explicitFocusChangeCells->size() && (*explicitFocusChangeCells)[idx] != 0)
@@ -437,13 +574,13 @@ namespace TdV2
 				}
 				else
 				{
-					// Detect focal-plane shift (rack focus): if any reference is meaningfully sharper than current cell
-					// while current cell is defocused or low-ratio, hard-veto M/H so sharper detail is never imported.
+					// Detect focal-plane shift (rack focus): if any reference is significantly sharper than current cell
+					// by more than the analytical sharp->defocus ratio drop while structure exists, hard-veto.
 					for (const auto& rb : refBands)
 					{
 						double refEnergy = 0.0;
 						const double refF = cellFocusRatio(rb, cx, cy, refEnergy);
-						if (refEnergy >= energyFloor && (refF - curF) > kFocusShiftDelta)
+						if (refEnergy > structureFloor && (refF - curF) > fShiftDelta)
 						{
 							info[idx].focusChange = true;
 							break;
@@ -478,10 +615,11 @@ namespace TdV2
 		CellMotionField carryMotion;          // Current -> Previous finalized clean carry motion (used when carry valid)
 		bool hasCarryMotion = false;
 
-		// Coding step prior for A2 & transform-unknown bound (from P16 stand-in or upstream P16).
-		double estimatedStepDelta = 4.0;
+		// Explicit coding step prior from P16 (when hasStepPrior == false, engine derives 1-LSB default & engages StandInKind::StepPriorDefault).
+		bool hasStepPrior = false;
+		double estimatedStepDelta = 0.0;
 		double deadZonePhi = kDeadZonePhiInter;
-		double zeroCoeffFraction = 0.5;
+		double zeroCoeffFraction = 0.0;
 		bool transformIdentified8x8 = false;  // True only when codec transform (e.g. AVC 8x8) is identified
 
 		bool isCutOrSpanInvalid = false;      // Resets recurrent carry state immediately
@@ -491,14 +629,18 @@ namespace TdV2
 	struct FrameProcessResult
 	{
 		TdV2Plane outputY;                    // Final output Y_out (bit-identical to receivedY when Off/Shadow)
-		TdV2Plane outputClean;                // Reconstructed grain-free clean + delta (for diagnostics / carry)
+		TdV2Plane outputClean;                // Reconstructed grain-free clean + delta (for diagnostics / carry; NEVER carries Layer-4 grain add-back)
 		std::vector<TdMapsView::Block> tdMaps;// U19 per-16x16-cell published td.maps
 		int cellsW = 0;
 		int cellsH = 0;
 		size_t activeRefCount = 0;            // Number of references fused (peaks + carry)
 		size_t guardViolationCells = 0;       // Layer-4 TdGuardPort interventions
-		size_t focusVetoCells = 0;            // Focus-change cells vetoed on M/H
+		size_t focusVetoCells = 0;            // Focus-change cells vetoed
 		size_t nonFiniteCells = 0;            // Cells closed to zero on non-finite input
+		size_t singularCells = 0;             // Cells closed to zero on singular covariance solve
+		size_t singleRefA2Cells = 0;          // Cells where K==1 fell back from A1 to A2 visibly
+		size_t motionStandInRefs = 0;         // References using null/mismatched motion stand-in visibly
+		size_t borderBilinearPixels = 0;      // Active-rect 1-2 px border bilinear fallback pixel count
 		bool carryUsed = false;
 		bool carryReset = false;
 	};
@@ -522,6 +664,7 @@ namespace TdV2
 		}
 
 		bool HasCarry() const { return hasCarry_; }
+		const TdV2Plane& CarryClean() const { return carryClean_; }
 
 		FrameProcessResult ProcessFrame(const FrameProcessInput& in, StandInRegistry* standIns = nullptr)
 		{
@@ -533,6 +676,7 @@ namespace TdV2
 				return res;
 
 			const int cellPx = cfg_.cellPx > 0 ? cfg_.cellPx : kCanonicalBlockPx;
+			const int grainCellPx = cfg_.grainCellPx > 0 ? cfg_.grainCellPx : cellPx;
 			res.cellsW = (w + cellPx - 1) / cellPx;
 			res.cellsH = (h + cellPx - 1) / cellPx;
 			const size_t numCells = static_cast<size_t>(res.cellsW) * static_cast<size_t>(res.cellsH);
@@ -542,8 +686,12 @@ namespace TdV2
 			if (!cfg_.IsEnabled())
 				return res;
 
-			// Cut / invalid span resets recurrent carry cleanly (zero ghosting across cuts).
-			if (in.isCutOrSpanInvalid)
+			// Visible telemetry when long-reach I-anchor is enabled in config without a long-pair producer.
+			if (cfg_.enableLongAnchor && standIns != nullptr)
+				standIns->Engage(StandInKind::LongPairDrift, "enableLongAnchor requested; 1-session long pair pending");
+
+			// Cut / invalid span or resolution change resets recurrent carry cleanly (zero ghosting).
+			if (in.isCutOrSpanInvalid || (hasCarry_ && (carryClean_.w != w || carryClean_.h != h)))
 			{
 				ResetCarry();
 				res.carryReset = true;
@@ -613,24 +761,44 @@ namespace TdV2
 			std::vector<WarpedRef> refs;
 			refs.reserve(3);
 
-			auto tryAddRef = [&](const TdV2Plane* refClean, const CellMotionField* mf, bool exactCopy, bool isCarry)
+			auto tryAddRef = [&](const TdV2Plane* refClean, const CellMotionField* mf, bool exactCopy, bool isCarry) -> bool
 			{
 				if (refClean == nullptr || refClean->Empty() || refClean->w != w || refClean->h != h)
-					return;
+					return false;
 				CellMotionField fallbackMf;
 				const CellMotionField* useMf = mf;
-				if (useMf == nullptr || useMf->cellsW != res.cellsW || useMf->cellsH != res.cellsH)
+				if (useMf == nullptr)
 				{
+					// Null motion field: visibly record stand-in assuming Still scene.
+					++res.motionStandInRefs;
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::MotionFieldStandIn, "null motion field; assuming Still");
 					fallbackMf = CellMotionField::Uniform(res.cellsW, res.cellsH, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 					useMf = &fallbackMf;
 				}
+				else if (!useMf->IsWellFormed(res.cellsW, res.cellsH))
+				{
+					// Dimension-mismatched / malformed motion field: reject reference visibly (zero OOB crash!).
+					++res.motionStandInRefs;
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::MotionFieldStandIn, "dimension-mismatched motion field; ref rejected");
+					return false;
+				}
+
 				WarpedRef wr;
 				wr.isExactCopy = exactCopy;
 				wr.isCarry = isCarry;
-				WarpCleanReference(*refClean, active, useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, wr.clean, wr.validPx);
+				const WarpDiagnostics wDiag = WarpCleanReference(
+					*refClean, curClean, active, useMf->vx, useMf->vy,
+					res.cellsW, res.cellsH, cellPx, wr.clean, wr.validPx, standIns);
+				res.borderBilinearPixels += wDiag.borderBilinearPixels;
+				if (wDiag.nonFinitePixels > 0)
+					++res.nonFiniteCells;
 				wr.bands = DecomposeActiveBands(wr.clean, active, standIns);
-				wr.motionGate = EvaluateCameraRelativeMotionGate(*useMf);
+				wr.motionGate = EvaluateCameraRelativeMotionGate(*useMf, standIns);
+				res.nonFiniteCells += wr.motionGate.nonFiniteCells;
 				refs.push_back(std::move(wr));
+				return true;
 			};
 
 			if (!in.isCutOrSpanInvalid)
@@ -641,8 +809,8 @@ namespace TdV2
 					tryAddRef(in.nextPeak.cleanPlane, in.nextPeak.motion, in.nextPeak.isExactCopyOfCurrent, false);
 				if (cfg_.enableCarryForward && hasCarry_ && carryClean_.w == w && carryClean_.h == h)
 				{
-					tryAddRef(&carryClean_, in.hasCarryMotion ? &in.carryMotion : nullptr, false, true);
-					res.carryUsed = true;
+					if (tryAddRef(&carryClean_, in.hasCarryMotion ? &in.carryMotion : nullptr, false, true))
+						res.carryUsed = true;
 				}
 			}
 
@@ -655,25 +823,33 @@ namespace TdV2
 				return res;
 			}
 
-			// Evaluate frequency-split focus guard across all aligned references.
+			// Coding step prior: use caller's P16 prior when supplied, else derived 1-LSB default visibly tagged.
+			double effStepDelta = in.estimatedStepDelta;
+			double effZeroFrac = in.zeroCoeffFraction;
+			if (!in.hasStepPrior || !std::isfinite(effStepDelta) || effStepDelta <= 0.0 || !std::isfinite(effZeroFrac))
+			{
+				effStepDelta = DepthScale(cfg_.sourceBits); // Exact 1-LSB quantization step at sourceBits
+				effZeroFrac = 0.0;                          // Uniform rounding cell without invented pi0
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::StepPriorDefault);
+			}
+			const RoundingCellStats a2Stats = ComputeRoundingCellStats(effStepDelta, in.deadZonePhi, effZeroFrac);
+
+			// Exact derived 2D separable white-noise transfer gains from U2 BandFromBase kernel taps (HIGH-1: zero magic/over-subtraction).
+			const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
+			const double bandTransfer[3] = { gains.low, gains.mid, gains.fine };
+
+			// Evaluate physics-derived frequency-split focus guard across all aligned references.
 			std::vector<ThreeBandPlanes> refBandList;
 			refBandList.reserve(refs.size());
 			for (const auto& wr : refs)
 				refBandList.push_back(wr.bands);
 			const auto focusCells = EvaluateFocusGuardStandIn(
 				curBands, refBandList, active, res.cellsW, res.cellsH, cellPx, cfg_.sourceBits,
+				a2Stats.valid ? a2Stats.totalVar : 0.0,
 				in.explicitFocusChangeCells, standIns);
 
-			// Compute A2 rounding-cell stats from P16 step prior.
-			const RoundingCellStats a2Stats = ComputeRoundingCellStats(
-				in.estimatedStepDelta, in.deadZonePhi, in.zeroCoeffFraction);
-			const double bandShares[3] = { kBandGrainShareLow, kBandGrainShareMid, kBandGrainShareFine };
-			// For A2 pixel-domain variance split across L/M/H, distribute total rounding variance cleanly:
-			// low band holds quantization step DC/ramp rounding (1/3), mid+fine split remaining 2/3 by filter energy shares.
-			const double a2BandFrac[3] = { 1.0 / 3.0, (2.0 / 3.0) * kBandGrainShareMid, (2.0 / 3.0) * kBandGrainShareFine };
-
 			const int K = static_cast<int>(refs.size());
-			// Per-band, per-ref block weights and diagonal variance C_kk (for 3-sigma Huber pixel taper).
 			std::array<std::array<std::vector<double>, kMaxBlendRefs>, 3> cellW;
 			std::array<std::array<std::vector<double>, kMaxBlendRefs>, 3> cellDiagC;
 			for (int b = 0; b < 3; ++b)
@@ -691,6 +867,8 @@ namespace TdV2
 			};
 
 			const int poolR = cfg_.momentPoolRadiusCells > 0 ? cfg_.momentPoolRadiusCells : 0;
+			const int gW = (w + grainCellPx - 1) / grainCellPx;
+			std::vector<double> cellRetainedGrain(numCells, 0.0);
 
 			// Per-cell moment pooling (FP32 centered), blind c estimation (A1/A2/A3), convex w* = C^-1 c, motion & focus gates.
 			for (int cy = 0; cy < res.cellsH; ++cy)
@@ -706,17 +884,50 @@ namespace TdV2
 					double cellRetainedGrainVar = 0.0;
 					if (!in.retainedGrainVar.empty())
 					{
-						const int gcx = MapCellToGrainGrid(cx, cellPx, cfg_.grainCellPx);
-						const int gcy = MapCellToGrainGrid(cy, cellPx, cfg_.grainCellPx);
-						const int gW = (w + cfg_.grainCellPx - 1) / cfg_.grainCellPx;
-						const size_t gIdx = static_cast<size_t>(gcy) * gW + gcx;
-						if (gIdx < in.retainedGrainVar.size() && std::isfinite(in.retainedGrainVar[gIdx]))
-							cellRetainedGrainVar = (std::max)(0.0, in.retainedGrainVar[gIdx]);
+						const int gcx = MapCellToGrainGrid(cx, cellPx, grainCellPx);
+						const int gcy = MapCellToGrainGrid(cy, cellPx, grainCellPx);
+						const size_t gIdx = static_cast<size_t>(gcy) * static_cast<size_t>(gW) + static_cast<size_t>(gcx);
+						if (gIdx < in.retainedGrainVar.size())
+						{
+							const double gv = in.retainedGrainVar[gIdx];
+							if (std::isfinite(gv) && gv >= 0.0)
+							{
+								cellRetainedGrainVar = gv;
+							}
+							else
+							{
+								++res.nonFiniteCells;
+								if (standIns != nullptr)
+									standIns->Engage(StandInKind::NonFiniteClosure, "non-finite retainedGrainVar");
+							}
+						}
 					}
+					cellRetainedGrain[cIdx] = cellRetainedGrainVar;
+
+					// Compute spatial fine-band detail RMS for TdMapsView::kRealDetail (MEDIUM-3: spatial detail, NOT temporal noise).
+					double spatialFineEnergy = 0.0;
+					size_t spatialPxCnt = 0;
+					{
+						const int sy0 = (std::max)(active.y0, cy * cellPx);
+						const int sy1 = (std::min)(active.y1, (cy + 1) * cellPx);
+						const int sx0 = (std::max)(active.x0, cx * cellPx);
+						const int sx1 = (std::min)(active.x1, (cx + 1) * cellPx);
+						for (int y = sy0; y < sy1; ++y)
+						{
+							for (int x = sx0; x < sx1; ++x)
+							{
+								const double hv = curBands.H.at(x, y);
+								spatialFineEnergy += hv * hv;
+								++spatialPxCnt;
+							}
+						}
+					}
+					const double spatialDetailRms = spatialPxCnt > 0
+						? std::sqrt(spatialFineEnergy / static_cast<double>(spatialPxCnt))
+						: 0.0;
 
 					double cellWeightSumAll = 0.0;
 					double cellResEnergy = 0.0;
-					double cellRealDetail = 0.0;
 					unsigned activeBandBits = 0;
 
 					for (int b = 0; b < 3; ++b)
@@ -762,16 +973,26 @@ namespace TdV2
 						double cVec[kMaxBlendRefs] = {};
 						for (int k = 0; k < K; ++k)
 						{
-							// A2 rounding-cell prior for ref k on band b.
-							const double cA2 = EstimateC_A2(a2Stats, refs[k].isExactCopy) * a2BandFrac[b];
+							// A2 rounding-cell prior for ref k on band b using exact BandFromBase transfer gain.
+							const double cA2 = EstimateC_A2(a2Stats, refs[k].isExactCopy) * bandTransfer[b];
 
-							// A1 grain-corrected Three-Cornered Hat using the best available partner reference l != k.
-							double cA1 = cA2; // Single-reference fallback when no second instrument exists.
+							// A1 grain-corrected Three-Cornered Hat using an independent partner instrument l != k:
+							//   - k == 0 (prevPeak): partner = 1 (nextPeak)
+							//   - k == 1 (nextPeak): partner = 0 (prevPeak)
+							//   - k == 2 (carry):    partner = 1 (nextPeak, independent of past carry! — MEDIUM-1)
+							double cA1 = cA2;
 							if (K >= 2)
 							{
-								const int partner = (k == 0) ? 1 : 0;
+								const int partner = (k == 0 || k == 2) ? 1 : 0;
 								cA1 = EstimateC_A1(C[k][partner], C[k][k], C[partner][partner],
-								                   cellRetainedGrainVar, bandShares[b]);
+								                   cellRetainedGrainVar, bandTransfer[b]);
+							}
+							else if (cfg_.estimator != VarianceEstimator::A2_RoundingCells)
+							{
+								// Single-reference K == 1 fallback from A1 to A2 is recorded visibly (HIGH-7).
+								++res.singleRefA2Cells;
+								if (standIns != nullptr)
+									standIns->Engage(StandInKind::SingleRefA1ToA2Fallback);
 							}
 
 							cVec[k] = SelectBlindC(cfg_.estimator, cA1, cA2);
@@ -786,22 +1007,23 @@ namespace TdV2
 							++res.nonFiniteCells;
 							continue;
 						}
-
-						// Apply Focus Rule (plan s1.4 & Q4) and Camera-Relative Motion Gate (plan s1.3).
-						double focusGate = 1.0;
-						if (b == 0)
+						if (solved.singular)
 						{
-							// L band: untouched in bokeh unless Q4 LowBandCellOnly is enabled.
-							if (fInfo.isDefocused && !fInfo.focusChange && cfg_.bokehMode == BokehMode::Untouched)
-								focusGate = 0.0;
-							if (fInfo.focusChange && cfg_.bokehMode == BokehMode::Untouched)
-								focusGate = 0.0;
+							++res.singularCells;
+							continue;
 						}
-						else
+
+						// Apply Focus Rule (plan s1.4, Q4, MEDIUM-2):
+						// - Unmatched focal-plane shift (focusChange) ALWAYS vetoes ALL bands (L, M, H), even under LowBandCellOnly!
+						// - Matched-focus bokeh (isDefocused && !focusChange) vetoes M/H always; L allowed ONLY under LowBandCellOnly.
+						double focusGate = 1.0;
+						if (fInfo.focusChange)
 						{
-							// M and H bands: hard-veto on focal-plane shift OR defocused bokeh!
-							if (fInfo.focusChange || fInfo.isDefocused)
-								focusGate = 0.0;
+							focusGate = 0.0;
+						}
+						else if (fInfo.isDefocused)
+						{
+							focusGate = (b == 0 && cfg_.bokehMode == BokehMode::LowBandCellOnly) ? 1.0 : 0.0;
 						}
 
 						double bandWSum = 0.0;
@@ -815,18 +1037,21 @@ namespace TdV2
 						if (bandWSum > kEngineNumFloor)
 							activeBandBits |= (1u << static_cast<unsigned>(b));
 						cellWeightSumAll += bandWSum;
-						if (b == 2)
-							cellRealDetail = C[0][0];
 						cellResEnergy += C[0][0];
 					}
+
+					// Sum ALL active references (including k=2 carry) for mid-band trail confidence (MEDIUM-3).
+					double midWeightSum = 0.0;
+					for (int k = 0; k < K; ++k)
+						midWeightSum += cellW[1][k][cIdx];
 
 					// Populate U19 TdMapsView::Block (all 12 named fields).
 					TdMapsView::Block& mBlock = res.tdMaps[cIdx];
 					mBlock.f[TdMapsView::kValidity] = (activeBandBits != 0u) ? 1.0f : 0.0f;
 					mBlock.f[TdMapsView::kTrailConfidence0] = static_cast<float>(RampMath::Clamp01(cellWeightSumAll / 3.0));
-					mBlock.f[TdMapsView::kTrailConfidence1] = static_cast<float>(K >= 2 ? RampMath::Clamp01(cellW[1][0][cIdx] + cellW[1][1][cIdx]) : cellW[1][0][cIdx]);
+					mBlock.f[TdMapsView::kTrailConfidence1] = static_cast<float>(RampMath::Clamp01(midWeightSum));
 					mBlock.f[TdMapsView::kResidual] = static_cast<float>(cellResEnergy / 3.0);
-					mBlock.f[TdMapsView::kRealDetail] = static_cast<float>(std::sqrt((std::max)(0.0, cellRealDetail)));
+					mBlock.f[TdMapsView::kRealDetail] = static_cast<float>(spatialDetailRms);
 					mBlock.f[TdMapsView::kStability] = static_cast<float>(RampMath::Clamp01(cellWeightSumAll / 3.0));
 					mBlock.f[TdMapsView::kOwnGrain] = static_cast<float>(std::sqrt((std::max)(0.0, cellRetainedGrainVar)));
 					mBlock.f[TdMapsView::kCodingNoise] = static_cast<float>(std::sqrt((std::max)(0.0, a2Stats.totalVar)));
@@ -837,9 +1062,12 @@ namespace TdV2
 				}
 			}
 
-			// Per-pixel spatial-only interpolation, 3-sigma Huber taper, STRICT/CELL or pixel-domain bound, and clean delta.
-			TdV2Plane rawDeltaPlane(w, h, 0.0);
+			// Per-pixel spatial-only interpolation (ZERO bleed across vetoed cell boundaries — HIGH-5),
+			// 3-sigma Huber taper, and pixel-domain bound when transform is unknown.
 			TdV2Plane deltaPlane(w, h, 0.0);
+			const int bxEnd = active.x0 + ((active.Width() / 8) * 8);
+			const int byEnd = active.y0 + ((active.Height() / 8) * 8);
+
 			for (int y = active.y0; y < active.y1; ++y)
 			{
 				const int cy = (std::min)(res.cellsH - 1, y / cellPx);
@@ -848,6 +1076,10 @@ namespace TdV2
 					const int cx = (std::min)(res.cellsW - 1, x / cellPx);
 					const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
 					const size_t pIdx = static_cast<size_t>(y) * w + x;
+
+					// Pixels in non-multiple-of-8 remainder strips cannot enter an 8x8 DCT block,
+					// so they ALWAYS receive the derived pixel-domain band bound (HIGH-6).
+					const bool inFull8x8Block = in.transformIdentified8x8 && (x < bxEnd) && (y < byEnd);
 
 					double totalDelta = 0.0;
 					for (int b = 0; b < 3; ++b)
@@ -858,6 +1090,12 @@ namespace TdV2
 						{
 							if (refs[k].validPx[pIdx] == 0u)
 								continue;
+							// Hard veto boundary guard (HIGH-5): if the pixel's own cell has weight 0
+							// (Overlay, DynamicTexture, focusChange, defocused, exact copy, or invalid motion),
+							// force weight strictly 0.0 so adjacent active cells NEVER bleed across the boundary!
+							if (cellW[b][k][cIdx] <= 0.0)
+								continue;
+
 							// Spatial-only interpolation (ZERO temporal weight ramps).
 							const double wSpat = SpatialBilinearWeight(
 								cellW[b][k].data(), res.cellsW, res.cellsH,
@@ -869,44 +1107,68 @@ namespace TdV2
 							const double taper = HuberPixelTaper(diff, cellDiagC[b][k][cIdx]);
 							bandDelta -= (wSpat * taper) * diff;
 						}
-						// Apply per-band quantization-cell bound when codec transform is unknown.
-						if (!in.transformIdentified8x8)
+						// Apply derived per-band quantization-cell bound when transform is unknown OR in remainder strip.
+						if (!inFull8x8Block)
 						{
-							const double bandVar = a2Stats.valid ? (a2Stats.totalVar * a2BandFrac[b]) : 0.0;
+							const double bandVar = a2Stats.valid ? (a2Stats.totalVar * bandTransfer[b]) : 0.0;
 							if (std::fabs(bandDelta) > 0.0)
 								bandDelta = ApplyTransformUnknownBound(bandDelta, bandVar, standIns);
 						}
 						totalDelta += bandDelta;
 					}
-					rawDeltaPlane.at(x, y) = totalDelta;
 					deltaPlane.at(x, y) = totalDelta;
 				}
 			}
 
-			// Optional 8x8 DCT transform-domain STRICT/CELL projection when transform is identified (AVC/MPEG).
-			if (in.transformIdentified8x8 && in.estimatedStepDelta > 0.0)
+			// Identified 8x8 DCT transform-domain STRICT/CELL projection strictly on the coded residual r = X - P_B (HIGH-6),
+			// alternating with the pixel-domain code range [0, PeakCodeForBits] for genuine 2-set POCS!
+			if (in.transformIdentified8x8 && effStepDelta > 0.0)
 			{
+				const double peakCode = PeakCodeForBits(cfg_.sourceBits);
+				const TdV2Plane& predClean = refs[0].clean; // P_B primary reference prediction
 				const int iters = (std::max)(1, (std::min)(2, cfg_.cellProjIterations));
 				for (int it = 0; it < iters; ++it)
 				{
-					for (int by = active.y0; by + 8 <= active.y1; by += 8)
+					// Set 1: Transform-domain quantization-cell projection on residual r = X - P_B.
+					for (int by = active.y0; by < byEnd; by += 8)
 					{
-						for (int bx = active.x0; bx + 8 <= active.x1; bx += 8)
+						for (int bx = active.x0; bx < bxEnd; bx += 8)
 						{
 							double sentRes[64] = {}, blendRes[64] = {}, projRes[64] = {};
 							for (int j = 0; j < 8; ++j)
 							{
 								for (int i = 0; i < 8; ++i)
 								{
-									const double c = curClean.at(bx + i, by + j);
-									sentRes[j * 8 + i] = c;
-									blendRes[j * 8 + i] = c + deltaPlane.at(bx + i, by + j);
+									const double cVal = curClean.at(bx + i, by + j);
+									const double pVal = predClean.at(bx + i, by + j);
+									sentRes[j * 8 + i] = cVal - pVal;
+									blendRes[j * 8 + i] = (cVal + deltaPlane.at(bx + i, by + j)) - pVal;
 								}
 							}
-							ProjectResidual8x8Dct(sentRes, blendRes, in.estimatedStepDelta, in.deadZonePhi, cfg_.residualMode, projRes);
+							ProjectResidual8x8Dct(sentRes, blendRes, effStepDelta, in.deadZonePhi, cfg_.residualMode, projRes);
 							for (int j = 0; j < 8; ++j)
+							{
 								for (int i = 0; i < 8; ++i)
-									deltaPlane.at(bx + i, by + j) = projRes[j * 8 + i] - curClean.at(bx + i, by + j);
+								{
+									const double cVal = curClean.at(bx + i, by + j);
+									const double pVal = predClean.at(bx + i, by + j);
+									deltaPlane.at(bx + i, by + j) = (pVal + projRes[j * 8 + i]) - cVal;
+								}
+							}
+						}
+					}
+
+					// Set 2: Pixel-domain valid code-range projection [0, peakCode] (makes 2nd POCS iteration genuine).
+					if (peakCode > 0.0)
+					{
+						for (int y = active.y0; y < byEnd; ++y)
+						{
+							for (int x = active.x0; x < bxEnd; ++x)
+							{
+								const double cVal = curClean.at(x, y);
+								const double clamped = (std::max)(0.0, (std::min)(peakCode, cVal + deltaPlane.at(x, y)));
+								deltaPlane.at(x, y) = clamped - cVal;
+							}
 						}
 					}
 				}
@@ -927,10 +1189,15 @@ namespace TdV2
 			}
 
 			// Layer 4: Shared Output Grain Guard (TdGuardPort stand-in for W4c GrainSplit::Guard).
-			// Checks per-cell fine-band variance on recomposed output vs received input when own grain is present;
-			// if any cell's fine variance dropped > 2% RMS, adds back the exact missing fraction on the fine band.
+			// Guards any cell where grain is present (ownGrain OR leaked retainedGrainVar) by comparing output fine-band
+			// energy against the cell's expected grain fine-band floor (never falsely undoing clean coding-noise repair!).
+			// Adds missing fine variance strictly to `candOut` ONLY — NEVER touching `candClean` / `carryClean_`
+			// so own grain NEVER enters frame t+1's recurrent carry as foreign grain (BLOCKER-2)!
 			const ThreeBandPlanes inFullBands = DecomposeActiveBands(in.receivedY, active, nullptr);
 			const ThreeBandPlanes outFullBands = DecomposeActiveBands(candOut, active, nullptr);
+			const ThreeBandPlanes ownGrainBands = in.hasCleanSplit
+				? DecomposeActiveBands(ownGrain, active, nullptr)
+				: ThreeBandPlanes{};
 
 			for (int cy = 0; cy < res.cellsH; ++cy)
 			{
@@ -943,8 +1210,9 @@ namespace TdV2
 					const int x1 = (std::min)(active.x1, (cx + 1) * cellPx);
 					if (x1 <= x0) continue;
 
-					// Only guard cells where own grain is actually present (so pure noiseless coding repair isn't rolled back).
+					const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
 					double ownGrainEnergy = 0.0;
+					double ownGrainFineE = 0.0;
 					double inFineE = 0.0, outFineE = 0.0;
 					size_t cnt = 0;
 					for (int y = y0; y < y1; ++y)
@@ -955,6 +1223,11 @@ namespace TdV2
 							const double inf = inFullBands.H.at(x, y);
 							const double outf = outFullBands.H.at(x, y);
 							ownGrainEnergy += og * og;
+							if (in.hasCleanSplit)
+							{
+								const double ogf = ownGrainBands.H.at(x, y);
+								ownGrainFineE += ogf * ogf;
+							}
 							inFineE += inf * inf;
 							outFineE += outf * outf;
 							++cnt;
@@ -962,10 +1235,15 @@ namespace TdV2
 					}
 					if (cnt == 0) continue;
 					const double invC = 1.0 / static_cast<double>(cnt);
-					if (ownGrainEnergy * invC <= kEngineNumFloor)
+					if (ownGrainEnergy * invC <= kEngineNumFloor && cellRetainedGrain[cIdx] <= kEngineNumFloor)
 						continue;
 
-					const auto gDec = TdGuardPort::Evaluate(inFineE * invC, outFineE * invC, standIns);
+					const double leakedGrainFineE = cellRetainedGrain[cIdx] * gains.fine;
+					const double targetGrainFineE = in.hasCleanSplit
+						? (ownGrainFineE * invC + leakedGrainFineE)
+						: (leakedGrainFineE > kEngineNumFloor ? (std::min)(inFineE * invC, leakedGrainFineE) : (inFineE * invC));
+
+					const auto gDec = TdGuardPort::Evaluate(targetGrainFineE, outFineE * invC, standIns);
 					if (gDec.violated && gDec.addBackFraction > 0.0)
 					{
 						++res.guardViolationCells;
@@ -975,14 +1253,14 @@ namespace TdV2
 							{
 								const double addBack = gDec.addBackFraction * (inFullBands.H.at(x, y) - outFullBands.H.at(x, y));
 								candOut.at(x, y) += addBack;
-								candClean.at(x, y) += addBack;
+								// BLOCKER-2 invariant: candClean is NOT modified here, keeping carryClean_ 100% grain-free!
 							}
 						}
 					}
 				}
 			}
 
-			// Update recurrent carry-forward buffer with the finalized grain-free estimate.
+			// Update recurrent carry-forward buffer strictly with the grain-free estimate `candClean`.
 			carryClean_ = candClean;
 			hasCarry_ = true;
 			res.outputClean = candClean;
