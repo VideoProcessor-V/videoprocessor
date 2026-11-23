@@ -25,6 +25,25 @@ inline bool LaneStepProgressed(StepOutcome o)
            || o == StepOutcome::Abandoned;
 }
 
+namespace detail {
+
+// Prefer the 3-arg Step(id, budgetUs, /*completeOnDone*/ true) when the Runner supports it so a product publishes
+// immediately on its last chunk; fall back to 2-arg Step(id, budgetUs) for minimal test fake runners.
+template <class Runner>
+auto StepGapRunner(Runner* runner, ProductId id, uint32_t budgetUs, int)
+    -> decltype(runner->Step(id, budgetUs, true))
+{
+    return runner->Step(id, budgetUs, true);
+}
+
+template <class Runner>
+StepOutcome StepGapRunner(Runner* runner, ProductId id, uint32_t budgetUs, long)
+{
+    return runner->Step(id, budgetUs);
+}
+
+}   // namespace detail
+
 // The per-product gap state and its law. The owner keeps one and forwards its IGapWork calls here.
 struct LaneGapChunk {
     uint32_t lastUs = 0;     // the measured part of the prediction
@@ -42,7 +61,7 @@ struct LaneGapChunk {
     void RunChunk(Runner* runner, ProductId id, uint32_t budgetUs, const std::function<uint64_t()>& nowUs)
     {
         const uint64_t t0 = nowUs ? nowUs() : 0u;
-        const StepOutcome o = runner->Step(id, budgetUs);
+        const StepOutcome o = detail::StepGapRunner(runner, id, budgetUs, 0);
         const uint64_t t1 = nowUs ? nowUs() : 0u;
         ++chunks;
         if (LaneStepProgressed(o)) {

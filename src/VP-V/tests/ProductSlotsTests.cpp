@@ -1124,5 +1124,188 @@ namespace ProductSlotsTestsNs
 			}
 			Assert::IsTrue(h.Set(kB).Read(0).kind == ReadInfo::None, L"released K frames after today's release point");
 		}
+
+		// R22 Fix 1a (Rule 8 Red-Team adversarial test): SlotSet::ReleaseThrough unwinds render-held history on backlog
+		// drops without wedging the ring, preserves newer slots, respects lane-owned ack transitions, preserves release-
+		// fence monotonicity, and frees live buffers. Includes in-test negative control proving Discard-only wedges the ring.
+		TEST_METHOD(ReleaseThroughUnwedgesDroppedHistoryAndPreservesNewerSlots)
+		{
+			const auto acceptAll = [](const Header&) { return SealReason::Accepted; };
+			const auto publishFrame = [](SlotSet& s, uint64_t seq) {
+				LaneTicket t;
+				Assert::IsTrue(s.Claim(seq, Provenance::AheadLane, kNoFence, &t) == ClaimResult::Claimed, L"claim frame");
+				Assert::IsTrue(s.Publish(t) == PublishResult::Published, L"publish frame");
+			};
+
+			// ---- 1. In-Test Negative Control: prove the R22 ring-wedging hazard is real ----
+			// history = 8, ring = 10: bootstrap frame 0 (sealed & released so slot 0 advances from initial seq 0),
+			// then seal & retire frames 1..8 (retiring 1..8 leaves 1..8 held in history 8), publish 9..10 ahead,
+			// then drop d = 9..16 calling ONLY Discard(d) WITHOUT ReleaseThrough.
+			{
+				SlotSet naive(kA, 10, 10);
+				publishFrame(naive, 0);
+				Assert::IsTrue(naive.Seal(0, acceptAll).outcome == SealOutcome::Sealed);
+				Assert::IsTrue(naive.Release(0, 0u));
+				for (uint64_t s = 1; s <= 8; ++s) {
+					publishFrame(naive, s);
+					const SealResult sr = naive.Seal(s, acceptAll);
+					Assert::IsTrue(sr.outcome == SealOutcome::Sealed && sr.reason == SealReason::Accepted);
+				}
+				publishFrame(naive, 9);
+				publishFrame(naive, 10);
+				for (uint64_t d = 9; d <= 16; ++d) {
+					const bool ok = naive.Discard(d);
+					if (d <= 10)
+						Assert::IsTrue(ok, L"published ahead slots 9..10 discard cleanly");
+					else
+						Assert::IsFalse(ok, L"slots 1..6 still hold Sealed history 1..6 -> Discard hits Overrun");
+				}
+				Assert::AreEqual(uint64_t(6), naive.Counters().overruns.load(), L"6 wedged history slots caused Discard overruns");
+				Assert::IsTrue(naive.Claim(17, Provenance::AheadLane, kNoFence, nullptr) == ClaimResult::TooEarly,
+					L"negative control: Claim(17) wedges with TooEarly because slot 7 still holds Sealed frame 7");
+				const SealResult wedged = naive.Seal(17, acceptAll);
+				Assert::IsTrue(wedged.outcome == SealOutcome::Unavailable && wedged.reason == SealReason::Overrun,
+					L"negative control: Seal(17) hits Overrun on the wedged ring");
+				Assert::AreEqual(uint64_t(7), naive.Counters().overruns.load());
+			}
+
+			// ---- 2. Protected path: ReleaseThrough(d - 8, 0) before Discard(d) across ALL 5 render-held states ----
+			SlotSet prot(kA, 10, 10);
+			publishFrame(prot, 0);
+			Assert::IsTrue(prot.Seal(0, acceptAll).outcome == SealOutcome::Sealed);
+			Assert::IsTrue(prot.Release(0, 0u));
+			// Frame 1: Sealed
+			publishFrame(prot, 1);
+			Assert::IsTrue(prot.Seal(1, acceptAll).outcome == SealOutcome::Sealed);
+			// Frame 2: Live (consumes a live-pool buffer that ReleaseThrough must free)
+			Assert::IsTrue(prot.Seal(2, acceptAll).outcome == SealOutcome::NeedsLive);
+			Assert::IsTrue(prot.BeginLive(2) >= 0);
+			Assert::IsTrue(prot.CommitLive(2, Header()));
+			// Frame 3: Rejected (no live fill)
+			Assert::IsTrue(prot.Seal(3, acceptAll).outcome == SealOutcome::NeedsLive);
+			// Frame 4: LiveLaneOwned (lane holds ticket t4, seal saw Writing -> RejectedLaneOwned, render committed live)
+			LaneTicket t4;
+			Assert::IsTrue(prot.Claim(4, Provenance::AheadLane, kNoFence, &t4) == ClaimResult::Claimed);
+			Assert::IsTrue(prot.Seal(4, acceptAll).reason == SealReason::LaneLate);
+			Assert::IsTrue(prot.BeginLive(4) >= 0);
+			Assert::IsTrue(prot.CommitLive(4, Header()));
+			// Frame 5: RejectedLaneOwned (lane holds ticket t5, seal saw Writing -> RejectedLaneOwned, no live fill)
+			LaneTicket t5;
+			Assert::IsTrue(prot.Claim(5, Provenance::AheadLane, kNoFence, &t5) == ClaimResult::Claimed);
+			Assert::IsTrue(prot.Seal(5, acceptAll).reason == SealReason::LaneLate);
+			// Frames 6..8: Sealed; Frames 9..10: Published ahead by lane
+			for (uint64_t s = 6; s <= 8; ++s) {
+				publishFrame(prot, s);
+				Assert::IsTrue(prot.Seal(s, acceptAll).outcome == SealOutcome::Sealed);
+			}
+			publishFrame(prot, 9);
+			publishFrame(prot, 10);
+
+			Assert::IsTrue(prot.StateOf(1) == SlotState::Sealed);
+			Assert::IsTrue(prot.StateOf(2) == SlotState::Live);
+			Assert::IsTrue(prot.StateOf(3) == SlotState::Rejected);
+			Assert::IsTrue(prot.StateOf(4) == SlotState::LiveLaneOwned);
+			Assert::IsTrue(prot.StateOf(5) == SlotState::RejectedLaneOwned);
+			Assert::IsTrue(prot.StateOf(6) == SlotState::Sealed && prot.StateOf(8) == SlotState::Sealed);
+			Assert::IsTrue(prot.StateOf(9) == SlotState::Published && prot.StateOf(10) == SlotState::Published);
+
+			for (uint64_t d = 9; d <= 16; ++d) {
+				const uint64_t upTo = d - 8u;
+				const uint32_t rel = prot.ReleaseThrough(upTo, 0u);
+				Assert::AreEqual(1u, rel, L"each drop releases exactly one aged history frame");
+				if (upTo == 4u) {
+					Assert::IsTrue(prot.StateOf(4) == SlotState::ReleasedLaneOwned,
+						L"LiveLaneOwned must become ReleasedLaneOwned, never Released");
+					Assert::IsTrue(prot.StateOf(5) == SlotState::RejectedLaneOwned, L"newer slot 5 preserved");
+					Assert::IsTrue(prot.StateOf(6) == SlotState::Sealed && prot.StateOf(8) == SlotState::Sealed,
+						L"newer Sealed slots preserved");
+				} else if (upTo == 5u) {
+					Assert::IsTrue(prot.StateOf(5) == SlotState::ReleasedLaneOwned,
+						L"RejectedLaneOwned must become ReleasedLaneOwned, never Released");
+					Assert::IsTrue(prot.StateOf(6) == SlotState::Sealed && prot.StateOf(8) == SlotState::Sealed,
+						L"newer slots 6..8 remain intact");
+				}
+				Assert::IsTrue(prot.Discard(d), L"Discard succeeds cleanly after ReleaseThrough");
+			}
+			// Lane-owned slots 4 and 5 stayed ReleasedLaneOwned across ReleaseThrough + Discard(14/15);
+			// the worker's late Publish / Abandon must Ack cleanly to Empty with 0 orderErrors.
+			Assert::IsTrue(prot.StateOf(14) == SlotState::ReleasedLaneOwned);
+			Assert::IsTrue(prot.StateOf(15) == SlotState::ReleasedLaneOwned);
+			Assert::IsTrue(prot.Publish(t4) == PublishResult::Late);
+			Assert::IsTrue(prot.Abandon(t5));
+			Assert::IsTrue(prot.StateOf(14) == SlotState::Empty && prot.StateOf(15) == SlotState::Empty,
+				L"worker Ack returned lane-owned buffers cleanly");
+			Assert::AreEqual(uint64_t(0), prot.Counters().orderErrors.load());
+			Assert::AreEqual(uint64_t(0), prot.Counters().overruns.load());
+
+			// Subsequent Claim(17..30) + Seal(17..30) succeed 100% with normal history=8 retires.
+			for (uint64_t s = 17; s <= 30; ++s) {
+				LaneTicket t;
+				Assert::IsTrue(prot.Claim(s, Provenance::AheadLane, kNoFence, &t) == ClaimResult::Claimed,
+					L"post-flush Claim succeeds");
+				Assert::IsTrue(prot.Publish(t) == PublishResult::Published, L"post-flush Publish succeeds");
+				const SealResult sr = prot.Seal(s, acceptAll);
+				Assert::IsTrue(sr.outcome == SealOutcome::Sealed && sr.reason == SealReason::Accepted,
+					L"post-flush Seal accepted");
+				if (s >= 25)
+					Assert::AreEqual(1u, prot.ReleaseThrough(s - 8u, 0u));
+			}
+			Assert::AreEqual(uint64_t(0), prot.Counters().orderErrors.load());
+			Assert::AreEqual(uint64_t(0), prot.Counters().overruns.load());
+
+			// Drain remaining held frames 23..30 and prove repeated ReleaseThrough is idempotent + live pool had zero leaks.
+			Assert::AreEqual(8u, prot.ReleaseThrough(30, 0u), L"drains frames 23..30");
+			Assert::AreEqual(0u, prot.ReleaseThrough(30, 0u), L"repeated ReleaseThrough is a 0-release no-op");
+			Assert::AreEqual(0u, prot.ReleaseThrough(10, 0u), L"older ReleaseThrough is a 0-release no-op");
+			for (uint64_t s = 31; s <= 40; ++s) {
+				Assert::IsTrue(prot.Seal(s, acceptAll).outcome == SealOutcome::NeedsLive);
+				Assert::IsTrue(prot.BeginLive(s) >= 0, L"all 10 live buffers available: frames 2 & 4 did not leak liveOwner_");
+				Assert::IsTrue(prot.CommitLive(s, Header()));
+			}
+			Assert::AreEqual(uint64_t(0), prot.Counters().noLiveBuffer.load());
+			Assert::AreEqual(uint64_t(0), prot.Counters().orderErrors.load());
+
+			// ---- 3. Adversarial Edge Cases: empty ring, non-render-held states untouched, release-fence monotonicity ----
+			SlotSet empty(kA, 8, 4);
+			Assert::AreEqual(0u, empty.ReleaseThrough(0, 0u));
+			Assert::AreEqual(0u, empty.ReleaseThrough(100, 0u));
+			Assert::AreEqual(0u, empty.ReleaseThrough(kSlotSeqMask, 0u));
+			Assert::AreEqual(uint64_t(0), empty.Counters().orderErrors.load());
+
+			SlotSet edges(kA, 8, 4);
+			LaneTicket t0, t2;
+			Assert::IsTrue(edges.Claim(0, Provenance::AheadLane, kNoFence, &t0) == ClaimResult::Claimed); // Writing
+			publishFrame(edges, 1);                                                                      // Published
+			Assert::IsTrue(edges.Claim(2, Provenance::AheadLane, kNoFence, &t2) == ClaimResult::Claimed);
+			Assert::IsTrue(edges.Abandon(t2));                                                           // Abandoned
+			publishFrame(edges, 3);
+			Assert::IsTrue(edges.Seal(3, acceptAll).outcome == SealOutcome::Sealed);                     // Sealed (<= upToSeq)
+			publishFrame(edges, 4);
+			Assert::IsTrue(edges.Seal(4, acceptAll).outcome == SealOutcome::Sealed);                     // Sealed (> upToSeq)
+
+			Assert::AreEqual(1u, edges.ReleaseThrough(3, 50u), L"only render-held frame 3 released");
+			Assert::IsTrue(edges.StateOf(0) == SlotState::Writing, L"Writing left untouched");
+			Assert::IsTrue(edges.StateOf(1) == SlotState::Published, L"Published left untouched");
+			Assert::IsTrue(edges.StateOf(2) == SlotState::Abandoned, L"Abandoned left untouched");
+			Assert::IsTrue(edges.StateOf(3) == SlotState::Released, L"Sealed frame 3 released");
+			Assert::IsTrue(edges.StateOf(4) == SlotState::Sealed, L"newer Sealed frame 4 preserved");
+
+			// Fence gating and monotonicity on ReleaseThrough.
+			Assert::IsTrue(edges.Claim(11, Provenance::AheadLane, 49u, nullptr) == ClaimResult::ReleasePending,
+				L"releaseValue 50 gates reuse before fence 50");
+			LaneTicket t11;
+			Assert::IsTrue(edges.Claim(11, Provenance::AheadLane, 50u, &t11) == ClaimResult::Claimed);
+			Assert::IsTrue(edges.Publish(t11) == PublishResult::Published);
+			Assert::IsTrue(edges.Seal(11, acceptAll).outcome == SealOutcome::Sealed);
+			Assert::AreEqual(2u, edges.ReleaseThrough(11, 10u),
+				L"releases both previously preserved frame 4 and frame 11; lower releaseValue must not regress stored 50");
+			Assert::IsTrue(edges.StateOf(4) == SlotState::Released && edges.StateOf(11) == SlotState::Released);
+			Assert::IsTrue(edges.Claim(19, Provenance::AheadLane, 49u, nullptr) == ClaimResult::ReleasePending,
+				L"monotonicity kept releaseValue 50");
+			Assert::IsTrue(edges.Claim(19, Provenance::AheadLane, 50u, nullptr) == ClaimResult::Claimed);
+			Assert::IsTrue(edges.Abandon(t0));
+			Assert::AreEqual(uint64_t(0), edges.Counters().orderErrors.load());
+			Assert::AreEqual(uint64_t(0), edges.Counters().overruns.load());
+		}
 	};
 }

@@ -120,7 +120,31 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	// extra draws carry the same sequence (Repeat: the run continues); a hole
 	// nothing else reported (a drop) invalidates here, before this estimate.
 	const MotionValidity::Continuity keptContinuity = motionValidity.NoteKept(sourceSequence, MotionValidity::Cause::DriftDrop);
+	// R21: RenderLocked loaded THIS frame's live per-frame C (`dejudderAheadPayload`) before calling us.
+	// A non-release ApplyMotionInvalidate() forgets stale prior-epoch history (matcher, dejudderAhead,
+	// snapshot lease, mask/segment slots) and also clears dejudderAheadPayload; restore this frame's live
+	// C only when ApplyMotionInvalidate() did NOT release resources and C strictly follows this frame's B.
+	const std::shared_ptr<const QueuedFrame::ConvertedPayload> liveAheadPayload = dejudderAheadPayload;
+	const uint64_t liveAheadSequence = dejudderAheadPayloadSequence;
+	const bool hadDejudder = dejudder != nullptr;
+	const bool hadLayoutValid = dejudderLayout.valid;
+	const bool hadWarmPending = motionEngineWarmPending;
+	const uint64_t seenEpochBefore = vectorEngine.motionValiditySeen;
+	const bool validityReleasePending = motionValidity.ReleasePending();
+	const bool readerReleasePending =
+		VpMotion::HistoryReaderDrives(resync.Driving(), vectorEngine.motionResyncReaders) &&
+		vectorEngine.motionResyncReaders.PeekHistory().release;
 	ApplyMotionInvalidate();
+	const bool epochAdvanced = vectorEngine.motionValiditySeen != seenEpochBefore;
+	const bool released = (hadDejudder && !dejudder) || (hadLayoutValid && !dejudderLayout.valid) ||
+		(!hadWarmPending && motionEngineWarmPending) || readerReleasePending ||
+		(epochAdvanced && (validityReleasePending || MotionValidity::ReleasesResources(motionValidity.LastCause())));
+	if (!dejudderAheadPayload && VpMotion::ShouldPreserveLiveAheadAfterInvalidate(
+			released, liveAheadPayload != nullptr, liveAheadSequence, next != nullptr, nextSourceSequence))
+	{
+		dejudderAheadPayload = liveAheadPayload;
+		dejudderAheadPayloadSequence = liveAheadSequence;
+	}
 	// W2-C8 (owner 2026-11-11 22:39, doc 91:108): the sigma-delta's motion compensation for this frame's renders - on (the
 	// configured default) only while the pair that ends here is valid and the engine runs; else off, visibly (DitherVectorSource.h).
 	{

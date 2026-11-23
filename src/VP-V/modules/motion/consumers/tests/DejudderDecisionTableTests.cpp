@@ -12,10 +12,14 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/modules/motion/consumers/DejudderAhead.h>
 #include <VP-V/modules/motion/consumers/DejudderHistory.h>
 #include <VP-V/modules/motion/consumers/tests/DejudderDecisionRunnerHost.h>
 #include <VP-V/modules/motion/consumers/tests/DejudderDecisionSequences.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
 
+#include <limits>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -267,6 +271,245 @@ namespace DejudderDecisionTableTest
 			Assert::IsFalse(VpMotion::TakeDejudderHistoryAction(true, false, p2, readers),
 				L"single-consumption: second call with no new event must not re-fire");
 			Assert::IsFalse(p2.release);
+		}
+
+		// R21 Fix 1 (adversarial + in-test negative controls): live per-frame C (`dejudderAheadPayload`) is
+		// preserved across non-release ApplyMotionInvalidate() so estimate-ahead does not spuriously fail with
+		// Reason::NoAfter ("no frame after next (short queue)"), while stale prior-epoch ahead history is cleared,
+		// resource-releasing invalidations MUST drop C, and invalid/stale C sequence boundaries MUST drop C.
+		TEST_METHOD(LiveAheadPayloadPreservedAcrossNonReleaseInvalidateAndDroppedOnRelease)
+		{
+			constexpr uint64_t kA = 10;
+			constexpr uint64_t kB = 11;
+			constexpr uint64_t kC = 12;
+
+			auto makeConditions = [](uint64_t source, uint64_t next, uint64_t after) {
+				Dejudder::AheadSchedule::Conditions c;
+				c.enabled = true;
+				c.renderedWarp = true;
+				c.active = true;
+				c.source = source;
+				c.next = next;
+				c.after = after;
+				c.afterGap = false;
+				c.estimated = source;
+				c.layoutMatches = true;
+				return c;
+			};
+
+			auto makeSteps = [](int& estimateCalls, uint64_t& estA, uint64_t& estB) {
+				Dejudder::AheadSchedule::Steps s;
+				s.snapshot = []() { return true; };
+				s.uploadAfter = []() { return true; };
+				s.estimate = [&estimateCalls, &estA, &estB](uint64_t a, uint64_t b) {
+					++estimateCalls;
+					estA = a;
+					estB = b;
+					return true;
+				};
+				return s;
+			};
+
+			// ---- Negative Control #1 (naive wipe without preservation): prove the R21 NoAfter hazard is real ----
+			{
+				MotionValidity::State mv;
+				uint64_t seenEpoch = mv.Epoch();
+				mv.Invalidate(MotionValidity::Cause::Gap);
+				const MotionValidity::Pending p = mv.Consume(seenEpoch);
+				Assert::IsTrue(p.changed && !p.release && !MotionValidity::ReleasesResources(p.cause),
+					L"Gap before A=10 is a non-release invalidation");
+
+				Dejudder::AheadSchedule naiveAhead;
+				int seedCalls = 0;
+				uint64_t seedA = 0, seedB = 0;
+				naiveAhead.NoteEpoch(MotionValidity::State::kInitialEpoch);
+				Assert::IsTrue(naiveAhead.TryAhead(makeConditions(8, 9, 10), makeSteps(seedCalls, seedA, seedB)),
+					L"prior-epoch ahead entry seeded");
+				Assert::IsTrue(naiveAhead.Pending(), L"prior-epoch ahead entry pending before invalidate");
+
+				// Unprotected ApplyMotionInvalidate(): resets dejudderAhead AND wipes live C (after = 0).
+				naiveAhead.Reset();
+				uint64_t wipedAfter = 0;
+				naiveAhead.NoteEpoch(p.epoch);
+
+				int calls = 0;
+				uint64_t estA = 0, estB = 0;
+				Assert::IsFalse(naiveAhead.TryAhead(makeConditions(kA, kB, wipedAfter), makeSteps(calls, estA, estB)),
+					L"negative control: naive wipe without C preservation fails TryAhead");
+				Assert::IsTrue(naiveAhead.LastReason() == Dejudder::AheadSchedule::Reason::NoAfter,
+					L"negative control: naive wipe produces spurious Reason::NoAfter");
+				Assert::AreEqual<unsigned long long>(1, naiveAhead.Count(Dejudder::AheadSchedule::Reason::NoAfter),
+					L"negative control: NoAfter counted");
+				Assert::AreEqual(std::string("no frame after next (short queue)"),
+					std::string(Dejudder::AheadSchedule::Name(naiveAhead.LastReason())),
+					L"negative control: exact R21 spurious short-queue reason");
+				Assert::AreEqual(0, calls, L"negative control: estimator did not run");
+			}
+
+			// ---- Protected Path (all non-release invalidations: Gap, DriftDrop, RebaseChange, etc.) ----
+			const MotionValidity::Cause nonReleaseCauses[] = {
+				MotionValidity::Cause::Gap,
+				MotionValidity::Cause::DriftDrop,
+				MotionValidity::Cause::RebaseChange,
+				MotionValidity::Cause::QueueReset,
+				MotionValidity::Cause::Seek,
+				MotionValidity::Cause::CadenceRepeat,
+				MotionValidity::Cause::SmoothMotionMix,
+				MotionValidity::Cause::MotionSourceChange,
+				MotionValidity::Cause::SettingsChange,
+			};
+			for (const MotionValidity::Cause cause : nonReleaseCauses)
+			{
+				const std::wstring label = L"non-release cause " + Wide(MotionValidity::Name(cause));
+				Assert::IsFalse(MotionValidity::ReleasesResources(cause), (label + L": must not release resources").c_str());
+
+				MotionValidity::State mv;
+				uint64_t seenEpoch = mv.Epoch();
+				const uint64_t priorEpoch = seenEpoch;
+				mv.Invalidate(cause);
+				const MotionValidity::Pending p = mv.Consume(seenEpoch);
+				Assert::IsTrue(p.changed && !p.release && p.epoch > priorEpoch, (label + L": epoch moved, non-release").c_str());
+
+				Dejudder::AheadSchedule ahead;
+				int seedCalls = 0;
+				uint64_t seedA = 0, seedB = 0;
+				ahead.NoteEpoch(priorEpoch);
+				Assert::IsTrue(ahead.TryAhead(makeConditions(8, 9, 10), makeSteps(seedCalls, seedA, seedB)),
+					(label + L": seed stale prior-epoch ahead entry").c_str());
+				Assert::IsTrue(ahead.Pending(), (label + L": stale ahead pending before invalidate").c_str());
+
+				// ApplyMotionInvalidate() forgets prior-epoch history first.
+				ahead.Reset();
+				Assert::IsFalse(ahead.Pending(), (label + L": stale prior-epoch ahead entry genuinely cleared").c_str());
+				Assert::IsFalse(ahead.Consume(9, 10, priorEpoch), (label + L": stale prior-epoch pair cannot hit").c_str());
+
+				// R21 decision: preserve live per-frame C (seq=12) strictly after B (seq=11).
+				const bool preserve = VpMotion::ShouldPreserveLiveAheadAfterInvalidate(
+					p.release, /*hadLiveAhead=*/true, kC, /*hasNext=*/true, kB);
+				Assert::IsTrue(preserve, (label + L": live C strictly after B must be preserved").c_str());
+
+				const uint64_t afterSeq = preserve ? kC : 0;
+				ahead.NoteEpoch(p.epoch);
+				int calls = 0;
+				uint64_t estA = 0, estB = 0;
+				Assert::IsTrue(ahead.TryAhead(makeConditions(kA, kB, afterSeq), makeSteps(calls, estA, estB)),
+					(label + L": TryAhead succeeds with preserved C").c_str());
+				Assert::IsTrue(ahead.LastReason() == Dejudder::AheadSchedule::Reason::Ahead,
+					(label + L": reason is Ahead").c_str());
+				Assert::AreEqual<unsigned long long>(0, ahead.Count(Dejudder::AheadSchedule::Reason::NoAfter),
+					(label + L": zero spurious NoAfter").c_str());
+				Assert::AreEqual(1, calls, (label + L": estimated once").c_str());
+				Assert::IsTrue(estA == kB && estB == kC, (label + L": estimated live (B, C) pair").c_str());
+				Assert::IsTrue(ahead.Consume(kB, kC, p.epoch), (label + L": live (B, C) hits in new epoch").c_str());
+			}
+
+			// Reader-driven rebase-only (no epoch move, forgetRebaseHolders = true, release = false) also preserves C.
+			{
+				auto ind = std::make_shared<VpIndicator::Indicator>(1, 64);
+				MotionValidity::State mv;
+				VpMotionResync::Readers readers;
+				VpMotionResync::RegisterOn(ind, mv, readers);
+				ind->SealAndObserve(9);   // latch baseline
+				ind->Advance(VpIndicator::kRebaseH, VpResync::Cause::None, kA);
+				ind->SealAndObserve(kA);
+				MotionValidity::Pending p;
+				Assert::IsTrue(VpMotion::TakeDejudderHistoryAction(/*resyncOn=*/true, /*epochMoved=*/false, p, readers),
+					L"reader rebase-only triggers forget action");
+				Assert::IsFalse(p.release, L"reader rebase-only is non-release");
+				Assert::IsTrue(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(p.release, true, kC, true, kB),
+					L"reader rebase-only preserves live C");
+			}
+
+			// ---- Negative Control #2 (Release invalidations MUST NOT preserve C) ----
+			const MotionValidity::Cause releaseCauses[] = {
+				MotionValidity::Cause::SourceFormatChange,
+				MotionValidity::Cause::Resync,
+			};
+			for (const MotionValidity::Cause cause : releaseCauses)
+			{
+				const std::wstring label = L"release cause " + Wide(MotionValidity::Name(cause));
+				Assert::IsTrue(MotionValidity::ReleasesResources(cause), (label + L": must release resources").c_str());
+
+				MotionValidity::State mv;
+				uint64_t seenEpoch = mv.Epoch();
+				mv.Invalidate(cause);
+				const MotionValidity::Pending p = mv.Consume(seenEpoch);
+				Assert::IsTrue(p.changed && p.release, (label + L": pending.release is true").c_str());
+
+				const bool preserve = VpMotion::ShouldPreserveLiveAheadAfterInvalidate(
+					p.release, /*hadLiveAhead=*/true, kC, /*hasNext=*/true, kB);
+				Assert::IsFalse(preserve, (label + L": release invalidation MUST NOT preserve C").c_str());
+
+				Dejudder::AheadSchedule ahead;
+				ahead.NoteEpoch(p.epoch);
+				int calls = 0;
+				uint64_t estA = 0, estB = 0;
+				Assert::IsFalse(ahead.TryAhead(makeConditions(kA, kB, preserve ? kC : 0), makeSteps(calls, estA, estB)),
+					(label + L": TryAhead refuses after release dropped C").c_str());
+				Assert::IsTrue(ahead.LastReason() == Dejudder::AheadSchedule::Reason::NoAfter,
+					(label + L": Reason::NoAfter after release dropped C").c_str());
+				Assert::AreEqual(0, calls, (label + L": estimator did not run on released payload").c_str());
+			}
+
+			// Coalesced release + non-release (SourceFormatChange then Gap before Consume): release bit is sticky!
+			{
+				MotionValidity::State mv;
+				uint64_t seenEpoch = mv.Epoch();
+				mv.Invalidate(MotionValidity::Cause::SourceFormatChange);
+				mv.Invalidate(MotionValidity::Cause::Gap);
+				const MotionValidity::Pending p = mv.Consume(seenEpoch);
+				Assert::IsTrue(p.changed && p.release && p.cause == MotionValidity::Cause::Gap,
+					L"coalesced FormatChange + Gap preserves release=true even though LastCause is Gap");
+				Assert::IsFalse(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(p.release, true, kC, true, kB),
+					L"coalesced release MUST NOT preserve C");
+			}
+
+			// Reader-driven FULL release (SourceFormatChanged / RendererReset) via TakeDejudderHistoryAction: MUST NOT preserve C.
+			for (const VpResync::Cause fullCause : { VpResync::Cause::SourceFormatChanged, VpResync::Cause::RendererReset })
+			{
+				auto ind = std::make_shared<VpIndicator::Indicator>(2, 64);
+				MotionValidity::State mv;
+				VpMotionResync::Readers readers;
+				VpMotionResync::RegisterOn(ind, mv, readers);
+				ind->SealAndObserve(9);
+				ind->Advance(VpIndicator::kFull, fullCause, kA);
+				ind->SealAndObserve(kA);
+				MotionValidity::Pending p;
+				Assert::IsTrue(VpMotion::TakeDejudderHistoryAction(/*resyncOn=*/true, /*epochMoved=*/false, p, readers),
+					L"reader FULL release triggers action");
+				Assert::IsTrue(p.release, L"reader FULL release raises p.release");
+				Assert::IsFalse(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(p.release, true, kC, true, kB),
+					L"reader-driven release MUST NOT preserve C");
+			}
+
+			// Direct released = true (e.g. ReleaseDejudder() cleared dejudder / dejudderLayout): MUST NOT preserve C.
+			Assert::IsFalse(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(/*released=*/true, true, kC, true, kB),
+				L"explicit released=true MUST NOT preserve C");
+
+			// ---- Negative Control #3 (Invalid / stale C boundaries MUST NOT preserve C even when released=false) ----
+			Assert::IsFalse(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(false, /*hadLiveAhead=*/false, kC, true, kB),
+				L"null liveAhead payload must not preserve");
+			Assert::IsFalse(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(false, true, /*liveAheadSeq=*/0, true, kB),
+				L"liveAheadSeq == 0 must not preserve");
+			Assert::IsFalse(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(false, true, kC, /*hasNext=*/false, kB),
+				L"missing next payload (hasNext == false) must not preserve");
+			Assert::IsFalse(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(false, true, kC, true, /*nextSeq=*/0),
+				L"nextSeq == 0 must not preserve");
+			Assert::IsFalse(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(false, true, 0, true, 0),
+				L"both sequences 0 must not preserve");
+			Assert::IsFalse(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(false, true, /*liveAheadSeq=*/kB, true, kB),
+				L"stale C == B must not preserve");
+			Assert::IsFalse(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(false, true, /*liveAheadSeq=*/kA, true, kB),
+				L"older epoch C == A < B must not preserve");
+			Assert::IsFalse(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(false, true, /*liveAheadSeq=*/1, true, kB),
+				L"older epoch C < B must not preserve");
+			constexpr uint64_t kMaxSeq = (std::numeric_limits<uint64_t>::max)();
+			Assert::IsFalse(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(false, true, kMaxSeq, true, kMaxSeq),
+				L"max uint64 C == B must not preserve");
+			Assert::IsTrue(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(false, true, kMaxSeq, true, kMaxSeq - 1),
+				L"max uint64 C > B preserves without overflow");
+			Assert::IsTrue(VpMotion::ShouldPreserveLiveAheadAfterInvalidate(false, true, 2, true, 1),
+				L"minimal valid positive boundary (B=1, C=2) preserves");
 		}
 	};
 }
