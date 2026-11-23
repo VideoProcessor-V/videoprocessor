@@ -29,6 +29,9 @@
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <libplacebo/d3d11.h>
 #include <libplacebo/log.h>
+#ifdef small
+#undef small
+#endif
 
 #include <atomic>
 #include <chrono>

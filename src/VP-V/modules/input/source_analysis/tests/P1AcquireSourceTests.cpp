@@ -368,8 +368,8 @@ namespace P1AcquireSourceTestsNs
 				Assert::IsTrue(how == P1ReadKind::None);
 				Assert::AreEqual<uint64_t>(1u, noOfferReader.Unread());
 				Assert::AreEqual<uint64_t>(1u,
-					rig.memo.CountersOf(kP1HalfLuma).unavailable[size_t(AcquireCause::FillDeclined)],
-					L"negative control: missing source offer recorded visibly as FillDeclined");
+					rig.memo.CountersOf(kP1HalfLuma).unavailable[size_t(AcquireCause::OwnerDeclined)],
+					L"negative control: missing source offer recorded visibly as OwnerDeclined");
 			}
 
 			// ---- 2. Protected Path: OfferP1CpuSource serves Acquire on worker thread with 0 waits & 0 private U3 ----
@@ -440,7 +440,7 @@ namespace P1AcquireSourceTestsNs
 				Assert::IsTrue(weakSentinel.expired(), L"GpuReleased purged host source ring and released backingOwner");
 
 				const AcquireResult afterRel = rig.memo.Acquire(kP1HalfLuma, 8, AcquireForm::Cpu);
-				Assert::IsTrue(afterRel.status == AcquireStatus::Unavailable && afterRel.cause == AcquireCause::FillDeclined,
+				Assert::IsTrue(afterRel.status == AcquireStatus::Unavailable && afterRel.cause == AcquireCause::OwnerDeclined,
 					L"post-GpuReleased Acquire declines cleanly");
 			}
 
@@ -457,7 +457,7 @@ namespace P1AcquireSourceTestsNs
 			Vpv::FrameAnalysis::NoteP1CpuDemand(&rig.host, true);
 			const AcquireResult origRes = origMemo.Acquire(kP1HalfLuma, 9, AcquireForm::Cpu);
 			rig.demand->memo = &rig.memo;
-			Assert::IsTrue(origRes.status == AcquireStatus::Unavailable && origRes.cause == AcquireCause::FillDeclined,
+			Assert::IsTrue(origRes.status == AcquireStatus::Unavailable && origRes.cause == AcquireCause::OwnerDeclined,
 				L"Original pathway host declines P1CpuFill cleanly");
 		}
 	};
