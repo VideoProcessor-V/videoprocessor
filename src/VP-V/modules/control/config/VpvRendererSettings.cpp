@@ -1003,6 +1003,16 @@ namespace VpvRendererSettings
 			else
 				settings.pipelineSettingsProblems += "dither_need '" + raw + "' (off|auto); ";
 		}
+		// CF-1 FIX1 SHOULD 3: the room anchors are [ambient] lux_dark / lux_lit, read by their owner (Ambient::Read; an invalid
+		// value keeps that key's default and is listed with the pipeline problems, never silent).
+		{
+			Ambient::Settings ambientRoom;
+			std::string ambientError;
+			if (!Ambient::Read(config, ambientRoom, ambientError))
+				settings.pipelineSettingsProblems += ambientError + "; ";
+			settings.ambientLuxDark = ambientRoom.luxDark;
+			settings.ambientLuxLit = ambientRoom.luxLit;
+		}
 	}
 
 	// ---- PostLoad: the Original pathway overlay, the slot switches, the presentation owner ----
@@ -1025,16 +1035,6 @@ namespace VpvRendererSettings
 		settings.calibrationLutStage = CalibrationLutHost::ResolveStage(settings.calibrationLutStageConfigured,
 			CalibrationLutHost::DisplayMappingStepsRun(settings.pipelineOriginalPathway, settings.dvDisplayMapping,
 				settings.dvTrims, settings.appearance, settings.pipelineSlotsOff));
-		// CF-1 FIX1 SHOULD 3: the room anchors are [ambient] lux_dark / lux_lit, read by their owner (Ambient::Read; an invalid
-		// value keeps that key's default and is listed with the pipeline problems, never silent).
-		{
-			Ambient::Settings ambientRoom;
-			std::string ambientError;
-			if (!Ambient::Read(config, ambientRoom, ambientError))
-				settings.pipelineSettingsProblems += ambientError + "; ";
-			settings.ambientLuxDark = ambientRoom.luxDark;
-			settings.ambientLuxLit = ambientRoom.luxLit;
-		}
 		// CF-1 CAM-4: colour.appearance owns the room-light correction (doc 115 A2): while it runs (appearance on, the slot not in
 		// pipeline_slots_off, never on the Original pathway) ambient_adapt is forced off, and the Fallbacks line says so.
 		{
