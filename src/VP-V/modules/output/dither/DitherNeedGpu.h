@@ -277,7 +277,7 @@ namespace DitherNeed
 
 		// Exact affine output-pixel -> source-pixel placement derived from source and target crops:
 		//   src = (pos + 0.5) * scale + off,  scale = (src1 - src0) / (dst1 - dst0),  off = src0 - dst0 * scale.
-		// Rejects degenerate target crops (dstW <= 0 || dstH <= 0), non-positive blockPx, or non-finite values.
+		// Rejects degenerate source or target crops (srcW/srcH/dstW/dstH <= 0), non-positive blockPx, or non-finite values.
 		inline bool PlacementFromCrops(float srcX0, float srcY0, float srcX1, float srcY1,
 			float dstX0, float dstY0, float dstX1, float dstY1, int blockPx, Placement& out)
 		{
@@ -285,7 +285,7 @@ namespace DitherNeed
 			const float dstH = dstY1 - dstY0;
 			const float srcW = srcX1 - srcX0;
 			const float srcH = srcY1 - srcY0;
-			if (!(dstW > 0.0f) || !(dstH > 0.0f) || blockPx <= 0 ||
+			if (!(dstW > 0.0f) || !(dstH > 0.0f) || !(srcW > 0.0f) || !(srcH > 0.0f) || blockPx <= 0 ||
 				!std::isfinite(dstW) || !std::isfinite(dstH) || !std::isfinite(srcW) || !std::isfinite(srcH) ||
 				!std::isfinite(srcX0) || !std::isfinite(srcY0) || !std::isfinite(dstX0) || !std::isfinite(dstY0))
 				return false;

@@ -24,11 +24,13 @@ namespace VpLaneProducts
 	{
 		const int B = RegionEvidence::BlockSizeFor(int(dims.height));
 		const RegionEvidence::Grid g = RegionEvidence::MakeGrid(int(dims.width), int(dims.height), B);
+		// Shift derived from BlockSizeFor(h) in {8, 16, 32, 64}: 3 for 8 px (<=720p), 4 for 16..64 px (>=768p).
+		const uint8_t blockShift = B <= 8 ? uint8_t(3) : uint8_t(4);
 		VpSkeleton::ProductTexLayout l;
 		for (size_t t = 0; t < kTerms; ++t)
 		{
 			VpSkeleton::TexTerm term;
-			term.shift = 4;
+			term.shift = blockShift;
 			term.fmt = VpSkeleton::TexFormat::RGBA32F;
 			term.absW = uint32_t(g.gw);
 			term.absH = uint32_t(g.gh);

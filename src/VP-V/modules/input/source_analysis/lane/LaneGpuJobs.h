@@ -110,19 +110,31 @@ inline uint32_t StepsFor(ProductId id, Dims d)
 constexpr uint32_t kTapFormUnitVersion = 1;
 constexpr const char* kTapProvenance = "tap: analysis luma (studio codes, MsbAlign to the Q6 axis, R16 unorm: 10-bit at msbShift 6, packed DV 12-bit at msbShift 4)";
 
-inline VpSkeleton::Registry TapFormProducts(const VpSkeleton::Registry& reg)
+// `blockPx` is the runtime block edge RegionEvidence::BlockSizeFor(height) in {8, 16, 32, 64} (default 16 preserves
+// the static shift-4 declaration for >=768p and 1-arg callers). For <=720p content where BlockSizeFor(h) == 8 (2^3),
+// the P10/P11/P12 block-grid term shift becomes 3 so VramGovernor plans and ProductTexLayout::MatchesDecl checks the
+// exact ceil(w/8) x ceil(h/8) grid instead of refusing <=720p allocations.
+inline VpSkeleton::Registry TapFormProducts(const VpSkeleton::Registry& reg, int blockPx = 16)
 {
+    const uint8_t blockShift = (blockPx > 0 && blockPx <= 8) ? uint8_t(3) : uint8_t(4);
     std::vector<VpSkeleton::ProductDecl> d = reg.All();
     for (VpSkeleton::ProductDecl& p : d) {
-        if (p.id != VpSkeleton::kP10GrainSplit && p.id != VpSkeleton::kP11RegionBlockStats)
-            continue;
-        uint8_t w = 0;
-        for (uint8_t k = 0; k < p.inputCount; ++k)
-            if (p.inputs[k].product != VpSkeleton::kP13SourceRing)
-                p.inputs[w++] = p.inputs[k];
-        for (uint8_t k = w; k < p.inputCount; ++k)
-            p.inputs[k] = VpSkeleton::InputRef();
-        p.inputCount = w;
+        if (p.id == VpSkeleton::kP10GrainSplit || p.id == VpSkeleton::kP11RegionBlockStats) {
+            uint8_t w = 0;
+            for (uint8_t k = 0; k < p.inputCount; ++k)
+                if (p.inputs[k].product != VpSkeleton::kP13SourceRing)
+                    p.inputs[w++] = p.inputs[k];
+            for (uint8_t k = w; k < p.inputCount; ++k)
+                p.inputs[k] = VpSkeleton::InputRef();
+            p.inputCount = w;
+        }
+        if (blockShift != 4u && (p.id == VpSkeleton::kP10GrainSplit ||
+            p.id == VpSkeleton::kP11RegionBlockStats || p.id == VpSkeleton::kP12LightLevel)) {
+            const size_t n = p.size.termCount < p.size.terms.size() ? size_t(p.size.termCount) : p.size.terms.size();
+            for (size_t i = 0; i < n; ++i)
+                if (p.size.terms[i].shift == 4u)
+                    p.size.terms[i].shift = blockShift;
+        }
     }
     return VpSkeleton::Registry(std::move(d));
 }

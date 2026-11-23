@@ -219,7 +219,7 @@ namespace Vpv
 				: dims(d), createdSeq(seq), wiring(gpuWiring), memo(std::move(hostMemo)),
 				  // Without a GPU the registry is exactly the one the lane always used; with one, the tap form (P10 / P11 read
 				  // the tap plane, not the P13 ring that is RenderOnly and never filled: without this P10 is InputMissing).
-				  registry(MakeRegistry(gpuWiring, 0.0, 0)),
+				  registry(MakeRegistry(gpuWiring, 0.0, 0, d)),
 				  p1(clock), p4(d, clock), lane(std::shared_ptr<VpIndicator::Indicator>(), clock), threads(lane)
 			{
 				lane.SetExternalSeal(true);   // FrameSeal owns the one seal
@@ -351,10 +351,11 @@ namespace Vpv
 
 			// The registry for a wiring, the measured source period and the queue frames (0 = the unmeasured defaults). Re-made at each
 			// Configure so the record histories follow the period and the queue; the GPU declarations do not depend on either.
-			static VpSkeleton::Registry MakeRegistry(const GpuWiring& w, double periodMs, unsigned queueFrames)
+			static VpSkeleton::Registry MakeRegistry(const GpuWiring& w, double periodMs, unsigned queueFrames, Dims dims)
 			{
 				VpSkeleton::Registry reg = VpSkeleton::SkeletonProducts(w.compactGrain, w.compactGrain, periodMs, queueFrames);
-				return w.dispatcher != nullptr ? VpLaneProducts::TapFormProducts(reg) : reg;
+				const int blockPx = RegionEvidence::BlockSizeFor(int(dims.height));
+				return w.dispatcher != nullptr ? VpLaneProducts::TapFormProducts(reg, blockPx) : reg;
 			}
 
 			// One fixed-step GPU lane job (steps = StepsFor of the dims; cost from the dispatcher's measurement, else a
@@ -3232,7 +3233,7 @@ namespace Vpv
 				// The registry is the Bundle's: the tap form (TapFormProducts) when a GPU dispatcher is wired, else the plain one;
 				// either way built with the measured source period and the queue frames: the record histories
 				// (quality_pattern, td.trail_summary) are max(floor seconds, queue x period).
-				b->registry = Bundle::MakeRegistry(b->wiring, st.periodMs, VpSkeleton::QueueFrames(gs));
+				b->registry = Bundle::MakeRegistry(b->wiring, st.periodMs, VpSkeleton::QueueFrames(gs), b->dims);
 				b->lane.Configure(st.settings.lane, b->registry, consumers, gs, card, tier, seq, false,
 					startWorkers_ ? (seq + 1u) : seq);
 				b->lane.SetExternalProducts(outside);

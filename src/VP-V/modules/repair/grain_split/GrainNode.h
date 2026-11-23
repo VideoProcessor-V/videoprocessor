@@ -319,16 +319,20 @@ namespace GrainSplit
 		};
 		const int B = desc.B > 0 ? desc.B : 1;
 		const uint32_t bw = static_cast<uint32_t>((desc.w + B - 1) / B), bh = static_cast<uint32_t>((desc.h + B - 1) / B);
+		// Derived from RegionEvidence::BlockSizeFor(h) in {8, 16, 32, 64}: 16 px (shift 4 = log2(16)) is the
+		// declaration upper bound for >=768p (B in {16, 32, 64}); for <=720p (B = 8 = 2^3), shift 3 matches the
+		// real ceil(w/8) x ceil(h/8) block grid declared by TapFormProducts(reg, B).
+		const uint8_t blockShift = B <= 8 ? uint8_t(3) : uint8_t(4);
 		if (storage == Storage::Compact)
 		{
 			term(0, TexFormat::RG16F, 0, 0);
 			term(0, TexFormat::RG16, 0, 0);
-			term(4, TexFormat::RGBA32F, bw, bh);
+			term(blockShift, TexFormat::RGBA32F, bw, bh);
 		}
 		else
 		{
 			term(0, TexFormat::RGBA32F, 0, 0);
-			term(4, TexFormat::RGBA32F, bw, bh);
+			term(blockShift, TexFormat::RGBA32F, bw, bh);
 		}
 		return l;
 	}

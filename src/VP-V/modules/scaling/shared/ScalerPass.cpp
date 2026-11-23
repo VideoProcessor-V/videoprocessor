@@ -246,7 +246,7 @@ namespace ScalerPass
 			p.format = fmt;
 			p.sampleable = true;
 			p.renderable = true;
-			p.blit_src = true;
+			p.blit_src = (fmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
 			return pl_tex_recreate(gpu, &t, &p);
 		};
 		if (!ensure(textures[slot], outW, outH)) return fail("texture allocation failed");
