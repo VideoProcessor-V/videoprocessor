@@ -52,6 +52,13 @@ namespace GpuAttribution
 			r.owner = "pathway:libplacebo_render";
 			rules.push_back(r);
 		}
+		// VP render-pass hooks inside pl_render_image (PassTimerHook has no per-hook defaultOwner).
+		{
+			Rule r;
+			r.pattern = "VP extended range:";
+			r.owner = "extended_range";
+			rules.insert(rules.begin(), r);
+		}
 		// VP passes that recompute a shared unit privately (hidden copies, tools/check_shared_units.py ids).
 		static const char* const kPrivate[][3] = {
 			{ "motion (D1", "dejudder", "U10" },
@@ -73,6 +80,36 @@ namespace GpuAttribution
 		}
 		return rules;
 	}
+
+	namespace detail
+	{
+		inline const char*& SuppressedPrivateCopyUnit()
+		{
+			static thread_local const char* unit = nullptr;
+			return unit;
+		}
+	}
+
+	// Scoped thread-local suppression of PrivateCopy charging for a named shared unit (e.g. warm-up pre-compile
+	// of a shader whose pass stays attributed to its owner without being counted as a hidden private copy).
+	class SuppressPrivateCopyScope
+	{
+	public:
+		explicit SuppressPrivateCopyScope(const char* unit)
+			: prev_(detail::SuppressedPrivateCopyUnit())
+		{
+			if (unit != nullptr)
+				detail::SuppressedPrivateCopyUnit() = unit;
+		}
+		~SuppressPrivateCopyScope()
+		{
+			detail::SuppressedPrivateCopyUnit() = prev_;
+		}
+		SuppressPrivateCopyScope(const SuppressPrivateCopyScope&) = delete;
+		SuppressPrivateCopyScope& operator=(const SuppressPrivateCopyScope&) = delete;
+	private:
+		const char* prev_;
+	};
 
 	class Registry
 	{
@@ -178,9 +215,13 @@ namespace GpuAttribution
 		}
 		void Charge(const Rule& r, const std::string& step, const char* description, uint64_t ns, std::string& owner)
 		{
-			++r.hits;
-			if (r.kind == Kind::PrivateCopy)
-				AddStep(private_, step, r.owner, r.unit, description, ns);
+			const char* sup = detail::SuppressedPrivateCopyUnit();
+			if (!(r.kind == Kind::PrivateCopy && sup != nullptr && r.unit == sup))
+			{
+				++r.hits;
+				if (r.kind == Kind::PrivateCopy)
+					AddStep(private_, step, r.owner, r.unit, description, ns);
+			}
 			// The pass's owner: the first VP owner of its steps, else the pathway.
 			if (owner.empty() || (owner.compare(0, 8, "pathway:") == 0 && r.owner.compare(0, 8, "pathway:") != 0))
 				owner = r.owner;

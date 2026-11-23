@@ -191,6 +191,15 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	// want here (VP-V module code; the renderer's VectorDemandInput is Bill's and stays as it is). Registered under its own consumer
 	// (ResidualStabilise, the same SourceField domain as the grain map, so served identically); the grain map's want stays as Bill sets it.
 	vectorInput.wants[static_cast<int>(VectorDemand::Consumer::ResidualStabilise)] = adaptiveStage.UsesVectors();
+	// W1R-R27: EntranceSegment only reads vectors in ProcessedB when a stateful entrance stage (DebandHold / DetailPulse)
+	// and a synthesis consumer (DejudderExtras / Interpolator / HiccupRepair) are active (VP-V predicate here, not in Bill's file).
+	{
+		using C = VectorDemand::Consumer;
+		const bool statefulEntrance = vectorInput.wants[static_cast<int>(C::DebandHold)] || vectorInput.wants[static_cast<int>(C::DetailPulse)];
+		const bool synthesisConsumer = vectorInput.wants[static_cast<int>(C::DejudderExtras)] || vectorInput.wants[static_cast<int>(C::Interpolator)]
+			|| vectorInput.wants[static_cast<int>(C::HiccupRepair)];
+		vectorInput.wants[static_cast<int>(C::EntranceSegment)] = vectorInput.wants[static_cast<int>(C::EntranceSegment)] && statefulEntrance && synthesisConsumer;
+	}
 	// The governor's release is a state of this frame: a held matcher is not released (the keeper's latch alone would stay set).
 	vectorEngine.NoteVramRelease(vectorEstimate.motionEngineIdle.Pressured() && !dejudder);
 	vectorEngine.UpdateVectorEngine(vectorInput, vectorFacts, vectorHost);

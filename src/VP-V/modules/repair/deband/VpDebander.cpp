@@ -113,9 +113,8 @@ if (p.x < sz.x && p.y < sz.y) {
 #else
     imageStore(dst, p, mix(c, avg, w));
 #endif
-#ifdef WRITE_W
-    imageStore(w_out, p, vec4(w, 0.0, 0.0, 1.0));
-#endif
+    if (write_w != 0)
+        imageStore(w_out, p, vec4(w, 0.0, 0.0, 1.0));
 }
 )GLSL";
 
@@ -316,6 +315,8 @@ if (b.x < size.x && b.y < size.y) {
 				if (weight[i][p] && gpu) pl_tex_destroy(gpu, &weight[i][p]);
 				weight[i][p] = nullptr;
 			}
+		if (weightDummy && gpu) pl_tex_destroy(gpu, &weightDummy);
+		weightDummy = nullptr;
 		for (int s = 0; s < kSlots; ++s)
 			for (int p = 0; p < PL_MAX_PLANES; ++p)
 			{
@@ -331,6 +332,7 @@ if (b.x < size.x && b.y < size.y) {
 				}
 		weightSequence = 0;
 		prevValid = false;
+		lastFailureError.clear();
 	}
 
 	bool Module::SplitLowBand(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int slot, int plane, int ncomp, double scale, double codeUnit)
@@ -354,6 +356,7 @@ if (b.x < size.x && b.y < size.y) {
 			!ensure(splitTensor[slot][plane], tw, th, FloatFormat(gpu, 4, true)))
 		{
 			error = "no float texture for the grain split";
+			lastFailureError = error;
 			++failures;
 			return false;
 		}
@@ -372,6 +375,7 @@ if (b.x < size.x && b.y < size.y) {
 			!Pass(dispatch, "VideoProcessor deband: grain split (contours)", tensorHeader, SPLIT_TENSOR_BODY, dt, 2, vt, 1, (tw + 15) / 16, (th + 15) / 16))
 		{
 			error = "the grain split passes failed";
+			lastFailureError = error;
 			++failures;
 			return false;
 		}
@@ -393,6 +397,7 @@ if (b.x < size.x && b.y < size.y) {
 		if (!luma)
 		{
 			error = "no luma plane";
+			lastFailureError = error;
 			++failures;
 			return false;
 		}
@@ -422,6 +427,7 @@ if (b.x < size.x && b.y < size.y) {
 			if (!in || !in->params.sampleable)
 			{
 				error = "plane " + std::to_string(plane) + " is not sampleable";
+				lastFailureError = error;
 				++failures;
 				return false;
 			}
@@ -436,6 +442,7 @@ if (b.x < size.x && b.y < size.y) {
 			if (!tp.format || !pl_tex_recreate(gpu, &out[slot][plane], &tp))
 			{
 				error = "no storable texture for plane " + std::to_string(plane);
+				lastFailureError = error;
 				++failures;
 				return false;
 			}
@@ -451,12 +458,28 @@ if (b.x < size.x && b.y < size.y) {
 				if (!wp.format || !pl_tex_recreate(gpu, &weight[next][plane], &wp))
 				{
 					error = "no weight texture";
+					lastFailureError = error;
 					++failures;
 					return false;
 				}
 				weightOut = weight[next][plane];
 				if (hold && weight[readIndex][plane] && weightW[plane] == w && weightH[plane] == h)
 					weightIn = weight[readIndex][plane];
+			}
+			else if (!weightDummy)
+			{
+				pl_tex_params dp{};
+				dp.w = 1;
+				dp.h = 1;
+				dp.format = StorableLike(gpu, pl_find_named_fmt(gpu, "r32f"));
+				dp.storable = true;
+				if (!dp.format || !pl_tex_recreate(gpu, &weightDummy, &dp))
+				{
+					error = "no dummy weight texture";
+					lastFailureError = error;
+					++failures;
+					return false;
+				}
 			}
 			const bool useHold = weightIn != nullptr;
 			anyHeld = anyHeld || useHold;
@@ -504,6 +527,7 @@ if (b.x < size.x && b.y < size.y) {
 				if (!gp.format || !pl_tex_recreate(gpu, &guard[slot][plane], &gp))
 				{
 					error = "no grain guard texture";
+					lastFailureError = error;
 					++failures;
 					return false;
 				}
@@ -535,6 +559,7 @@ if (b.x < size.x && b.y < size.y) {
 				{
 					pl_dispatch_abort(dispatch, &gsh);
 					error = "the grain guard shader was refused";
+					lastFailureError = error;
 					++failures;
 					return false;
 				}
@@ -546,6 +571,7 @@ if (b.x < size.x && b.y < size.y) {
 				if (!pl_dispatch_compute(dispatch, &gcompute))
 				{
 					error = "the grain guard pass failed";
+					lastFailureError = error;
 					++failures;
 					return false;
 				}
@@ -555,7 +581,7 @@ if (b.x < size.x && b.y < size.y) {
 			int nd = 0;
 			d[nd++] = Sampled("src", in, true);
 			d[nd++] = Storage("dst", out[slot][plane]);
-			if (weightOut) d[nd++] = Storage("w_out", weightOut);
+			d[nd++] = Storage("w_out", weightOut ? weightOut : weightDummy);
 			if (useHold || useGrain) d[nd++] = Sampled("field", params.field, false);
 			if (useHold) d[nd++] = Sampled("prev_w", weightIn, true);
 			if (useGrain) d[nd++] = Sampled("grain", params.grainError, false);
@@ -565,10 +591,12 @@ if (b.x < size.x && b.y < size.y) {
 				d[nd++] = Sampled("split_low", splitLow[slot][plane], true);
 				d[nd++] = Sampled("split_tensor", splitTensor[slot][plane], true);
 			}
+			const int writeW = weightOut ? 1 : 0;
 			pl_shader_var v[20];
 			int nv = 0;
 			v[nv++] = { pl_var_float("thr"), &thr, true };
 			v[nv++] = { pl_var_float("radius"), &radius, true };
+			v[nv++] = { pl_var_int("write_w"), &writeW, true };
 			if (useHold || useGrain) v[nv++] = { pl_var_vec2("to_field"), toField, true };
 			if (useHold) v[nv++] = { pl_var_float("hold_alpha"), &alpha, true };
 			if (useGrain) v[nv++] = { pl_var_float("grain_codes"), &grainCodes, true };
@@ -592,7 +620,6 @@ if (b.x < size.x && b.y < size.y) {
 			std::string header = "#define NCOMP " + std::to_string(ncomp) + "\n";
 			if (useHold) header += "#define HOLD 1\n";
 			if (useGrain) header += "#define GRAIN 1\n";
-			if (weightOut) header += "#define WRITE_W 1\n";
 			if (useGuard) header += "#define SPATIAL_GUARD 1\n";
 			if (useSplit) header += "#define SPLIT 1\n" + AlongWeightsGlsl();
 			pl_custom_shader custom{};
@@ -614,6 +641,7 @@ if (b.x < size.x && b.y < size.y) {
 			{
 				pl_dispatch_abort(dispatch, &sh);
 				error = "the deband shader was refused";
+				lastFailureError = error;
 				++failures;
 				return false;
 			}
@@ -625,6 +653,7 @@ if (b.x < size.x && b.y < size.y) {
 			if (!pl_dispatch_compute(dispatch, &compute))
 			{
 				error = "the deband pass failed";
+				lastFailureError = error;
 				++failures;
 				return false;
 			}

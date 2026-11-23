@@ -115,6 +115,7 @@ namespace VpDebander
 		// The grain guard's busy-share texture of a slot's plane (grainGuard on, grainSplit off; null otherwise): the guard parity test.
 		pl_tex GuardTextureForTest(int slot, int plane) const { return (slot >= 0 && slot < kSlots && plane >= 0 && plane < PL_MAX_PLANES) ? guard[slot][plane] : nullptr; }
 		const std::string& LastError() const { return error; }
+		const std::string& LastFailureError() const { return lastFailureError; }
 		// R1-W1-RES (doc 72 item 2): the debander is the FALLBACK LAYER under temporal detail (order TD -> deband -> CR). Its read path
 		// of td.maps (validity, stability) and coding_evidence: reset 1 = not requested, the debander decides exactly as today
 		// everywhere; a requested engine with a product absent keeps today's deband everywhere and says so (engaged decision).
@@ -134,6 +135,7 @@ namespace VpDebander
 		static constexpr int kSlots = 4;
 		pl_tex out[kSlots][PL_MAX_PLANES] = {};
 		pl_tex weight[2][PL_MAX_PLANES] = {};   // blur weights (slot 0): this source frame's and the previous one's
+		pl_tex weightDummy = nullptr;           // 1x1 r32f sink bound on non-main slots (reuses the compiled shader, no cold compile)
 		pl_tex guard[kSlots][PL_MAX_PLANES] = {};   // grainGuard: the spatial grain share per 16x16 block
 		// grainSplit: the half-resolution low band (box, across, down) and the structure
 		// tensor per block of it.
@@ -145,6 +147,7 @@ namespace VpDebander
 		uint64_t weightSequence = 0;
 		int weightW[PL_MAX_PLANES] = {}, weightH[PL_MAX_PLANES] = {};
 		std::string error;
+		std::string lastFailureError;
 		TdProducts::ReadResult tdRead;
 		unsigned long long failures = 0, held = 0;
 	};

@@ -486,13 +486,14 @@ namespace VideoProcessorTest
 		TEST_METHOD(ConfigAndVpShareTheFunctionKeyGrammar)
 		{
 			std::string canonical;
-			for (const char* accepted : { "F1", "f4", "F01", "Ctrl+F24", "Shift+F12" })
+			for (const char* accepted : { "F1", "f4", "F01", "F004", "F 4", "Ctrl+F24", "Shift+F12" })
 			{
 				ParsedShortcutChord parsed;
 				Assert::IsTrue(ParseShortcutChord(accepted, parsed), Wide(accepted).c_str());
 				Assert::IsTrue(RendererProfileConfig::CanonicalizeKeyChord(accepted, canonical));
+				Assert::AreEqual(canonical, parsed.canonical, Wide(accepted).c_str());
 			}
-			for (const char* rejected : { "F0", "F25", "F004", "F 4", "F-1", "Fx" })
+			for (const char* rejected : { "F0", "F25", "F-1", "Fx" })
 			{
 				ParsedShortcutChord parsed;
 				Assert::IsFalse(ParseShortcutChord(rejected, parsed), Wide(rejected).c_str());

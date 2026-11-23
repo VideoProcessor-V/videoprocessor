@@ -1323,9 +1323,13 @@ namespace VideoProcessorTest
 			{
 				VpSkeleton::PlTexBackend backend(gpu);
 				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
-				// 0: an empty plan; 1: a plan whose tier (T0) is below the module's (T1): shed.
+				// 0: an undersized plan (1 of 3 needed textures at T2): exhausted; 1: a plan whose tier (T0) is below the module's (T1): shed.
 				if (tierCase == 0)
-					arena.Reserve(VpSkeleton::PlanArena(std::vector<VpSkeleton::ArenaRequest>(), VpSkeleton::Tier::T2));
+				{
+					auto shortReq = requests;
+					shortReq[0].count = 1;
+					arena.Reserve(VpSkeleton::PlanArena(shortReq, VpSkeleton::Tier::T2));
+				}
 				else
 					arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T0));
 				Gpu::Module module;
@@ -1351,7 +1355,7 @@ namespace VideoProcessorTest
 				const FallbackCatalog::Decision d = arena.FrameDecision();
 				Assert::IsTrue(d.engaged && d.id == "scratch_arena", L"scratch_arena engaged");
 				Assert::IsTrue(tierCase == 0 ? arena.Exhausted() > 0 : arena.Shed() > 0,
-					tierCase == 0 ? L"empty plan counted as Exhausted" : L"T0 plan counted as Shed");
+					tierCase == 0 ? L"undersized plan counted as Exhausted" : L"T0 plan counted as Shed");
 				// Recovery: a proper plan, a new frame.
 				arena.BeginFrame();
 				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T2)), L"arena reserve");
@@ -1371,7 +1375,7 @@ namespace VideoProcessorTest
 				rig.End(1);
 				Assert::IsTrue(okFresh, Wide(fresh.LastError()).c_str());
 				Assert::IsTrue(got.v == DownloadLuma(gpu, outF.planes[0].texture).v, L"the recovered frame equals a private-texture module's");
-				Logger::WriteMessage(tierCase == 0 ? "empty plan: visible, recovered" : "tier shed: visible, recovered");
+				Logger::WriteMessage(tierCase == 0 ? "undersized plan: visible, recovered" : "tier shed: visible, recovered");
 				module.Release(gpu);
 				fresh.Release(gpu);
 				arena.Release();

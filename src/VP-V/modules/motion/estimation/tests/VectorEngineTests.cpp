@@ -14,8 +14,10 @@
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/motion/estimation/MotionRecordPublish.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -736,6 +738,68 @@ namespace VectorEngineTest
 			const VectorDemand::Decision legacy = VectorDemand::DecideForHost(disabled);
 			Assert::IsTrue(MotionRecord::EstimateGate(legacy, C::SourceMonitorPan) && MotionRecord::EstimateGate(legacy, C::MotionIntent),
 				L"vector_demand off: the legacy ungated feed");
+		}
+
+		// ForwardShallow backward-pair serve counter: zero-gated in ProducerStatusSegment() and recorded in
+		// DiagnosticHistory ("vector-shallow-back") once per increase in the 5-s stats block.
+		TEST_METHOD(ForwardShallowBackwardPairsAreVisibleAndZeroGated)
+		{
+			Assert::IsTrue(std::strlen("vector-shallow-back") < sizeof(DiagnosticHistory::EventRecord().name),
+				L"the DiagnosticHistory event name fits EventRecord::name[24]");
+			auto decisionsWritten = []() -> uint64_t {
+				DiagnosticHistory::RingCounters c;
+				DiagnosticHistory::Global().decisions.Snapshot(&c, 1);
+				return c.written;
+			};
+			auto shallowBackRecordsSince = [](uint64_t from) {
+				std::vector<DiagnosticHistory::EventRecord> out;
+				for (const auto& e : DiagnosticHistory::Global().decisions.Snapshot())
+					if (e.index >= from && std::strcmp(e.record.name, "vector-shallow-back") == 0)
+						out.push_back(e.record);
+				return out;
+			};
+
+			VectorEngine engine;
+			FakeHost host;
+			VectorEngine::UpdateFacts facts;
+			facts.vectorDemandSetting = true;
+			const VectorDemand::Input in = OneConsumer(VectorDemand::Consumer::GrainMap);
+			auto update = [&]() { engine.vectorStatsTick = 0; engine.UpdateVectorEngine(in, facts, host); };
+
+			const uint64_t from = decisionsWritten();
+			Assert::AreEqual(0ull, engine.ShallowBackwardPairs());
+			Assert::AreEqual(std::string(), engine.ProducerStatusSegment(), L"zero-gated: empty when count == 0");
+
+			update();
+			Assert::IsTrue(engine.vectorDemand.mode != VectorDemand::Mode::Off, L"the 5-s block runs only while the engine is on");
+			Assert::AreEqual<size_t>(0, shallowBackRecordsSince(from).size(), L"count == 0 emits no DiagnosticHistory record");
+
+			engine.vectorShallowBackwardPairs.fetch_add(3, std::memory_order_relaxed);
+			Assert::AreEqual(3ull, engine.ShallowBackwardPairs());
+			Assert::AreEqual(std::string("ForwardShallow backward pairs served 3"), engine.ProducerStatusSegment(),
+				L"ProducerStatusSegment reports the non-zero count");
+
+			update();
+			auto recs = shallowBackRecordsSince(from);
+			Assert::AreEqual<size_t>(1, recs.size(), L"first increase records vector-shallow-back once");
+			Assert::AreEqual(std::string("vector-shallow-back"), std::string(recs[0].name));
+			Assert::AreEqual(std::string("ForwardShallow backward pairs served 3"), std::string(recs[0].detail));
+			Assert::AreEqual(int64_t(3), recs[0].a);
+
+			// Unchanged count must not emit a duplicate record.
+			update();
+			update();
+			Assert::AreEqual<size_t>(1, shallowBackRecordsSince(from).size(), L"unchanged count is not duplicated");
+
+			// A further increase emits a new record with the updated total.
+			engine.vectorShallowBackwardPairs.fetch_add(2, std::memory_order_relaxed);
+			Assert::AreEqual(5ull, engine.ShallowBackwardPairs());
+			Assert::AreEqual(std::string("ForwardShallow backward pairs served 5"), engine.ProducerStatusSegment());
+			update();
+			recs = shallowBackRecordsSince(from);
+			Assert::AreEqual<size_t>(2, recs.size(), L"second increase records vector-shallow-back once more");
+			Assert::AreEqual(std::string("ForwardShallow backward pairs served 5"), std::string(recs[1].detail));
+			Assert::AreEqual(int64_t(5), recs[1].a);
 		}
 	};
 }

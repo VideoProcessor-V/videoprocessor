@@ -212,6 +212,7 @@ namespace VpMotion
 		}
 		unsigned long long P2CpuFormServed() const { return p2CpuFormServed_.load(std::memory_order_relaxed); }
 		unsigned long long P2CpuFormDeclined() const { return p2CpuFormDeclined_.load(std::memory_order_relaxed); }
+		unsigned long long ShallowBackwardPairs() const { return vectorShallowBackwardPairs.load(std::memory_order_relaxed); }
 		// The VRAM governor's release of the motion engine (the de-judder's keeper feeds it; render thread).
 		void NoteVramRelease(bool released) { motionVramRelease = released; }
 		// The keeper's counters (warm-ups, analysis estimates, matcher creates); render thread.
@@ -496,7 +497,8 @@ namespace VpMotion
 		std::string OnDemandStatusSegment() const;
 		// The Ctrl+I segment of the look-ahead producer's ring misses (register 115 #13 / #35: never log-only):
 		// "engine-luma ring misses N (last: <words>)"; empty with no producer or no miss. Then (BBP-A-COUNTS-CTRLALTD, with or
-		// without a producer) "; " + P2CpuFormStatusSegment(): "P2 CPU form served N, declined N (last: <why>)", empty with no decline.
+		// without a producer) "; " + P2CpuFormStatusSegment(): "P2 CPU form served N, declined N (last: <why>)", empty with no decline;
+		// then zero-gated NVOF ahead P1 deferrals and "ForwardShallow backward pairs served N" when vectorShallowBackwardPairs > 0.
 		std::string ProducerStatusSegment() const;
 		std::string P2CpuFormStatusSegment() const;
 		// L-B4 (BBP-B B3): the matcher's read seam for the shared luma pyramid (kP1HalfLuma, Gpu, MatcherPyramidKey(level)) of the
@@ -535,6 +537,12 @@ namespace VpMotion
 		FallbackCatalog::Decision ReleaseHookFailures();
 
 		const void* host_ = nullptr;
+		void SyncP1AheadDemand(uint8_t aheadDepth);
+		void ClearP1AheadDemand();
+		bool p1AheadDeclared_ = false;
+		uint8_t p1AheadDepth_ = 0;
+		uint64_t p1AheadErasures_ = 0;
+		int p1AheadDemandOwner_ = 0;
 		// QKP slice E (design s9.3): FlowOf's leases are a MAP keyed (from, to, scale), bounded by the SAME derived queue window as the
 		// frame memo (core/QueueWindow.h; the board is the host's one snapshot, fed by SetQueueWindowBoard). A lease is dropped when its
 		// frame is older than current - back, when its pair is no longer in the P2 slot (a lease never extends P2 retention), or when
@@ -581,6 +589,8 @@ namespace VpMotion
 		mutable std::string p2CpuFormLastWhy_;       // the last decline's reason (under p2CpuFormWhyMutex_)
 		unsigned long long p2CpuFormRecorded_ = 0;   // declines at the last DiagnosticHistory record (render thread)
 		bool p2CpuFormRecordedAny_ = false;          // the first read has been recorded (render thread)
+		unsigned long long motionAheadP1DeferredRecorded_ = 0;   // P1 deferrals at the last DiagnosticHistory record (render thread)
+		unsigned long long vectorShallowBackwardRecorded_ = 0;   // ForwardShallow backward pairs at the last DiagnosticHistory record (render thread)
 		std::atomic<int> flowSourceWidth_{ 0 };   // the source width the engine size was last made for (ServeStatistics)
 		InvalidateSink invalidateSink_ = nullptr;
 		const IMatcherView* matcher_ = nullptr;

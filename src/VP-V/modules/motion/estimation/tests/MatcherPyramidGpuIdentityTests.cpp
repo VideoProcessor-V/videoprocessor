@@ -142,6 +142,15 @@ namespace VideoProcessorTest
 				fill = P1Gpu::MatcherPyramidOwnerFill(luma, aheadDepth);
 				Assert::IsTrue(memo->RegisterOwnerFill(VpSkeleton::kP1HalfLuma, AcquireForm::Gpu, "input/source_analysis/lane",
 					fill) == SkeletonMemo::Registration::Registered, L"the production P1 GPU owner fill");
+				// Wire the queue window (matching SkeletonModule::DeriveMemoWindow) so GpuNeedBytes() includes the fill's ahead depth.
+				VpSkeleton::QueueWindowTerms wt;
+				wt.history = fill.DeclaredHistory();
+				wt.lookAheadWalk = aheadDepth;
+				wt.aheadNeed = fill.aheadDepth;
+				wt.aheadNeedBy = "matcher";
+				wt.wired = VpSkeleton::QueueWindowTerms::kHistory | VpSkeleton::QueueWindowTerms::kLookAhead
+					| VpSkeleton::QueueWindowTerms::kAheadNeed;
+				memo->SetWindow(VpSkeleton::DeriveWindow(wt, 0, 0));
 				// The ledger grant is the memo's own planned need (what the module's grant gives the memo), not a bare 1 GiB.
 				memo->SetGpuBudget(true, memo->GpuNeedBytes());
 				demand.memo = memo;
@@ -441,10 +450,10 @@ namespace VideoProcessorTest
 			const std::vector<EstimateResult> normal = RunArm(fixture, engine, 512, 256, false, &normalLedger);
 			const std::vector<EstimateResult> lowRes = RunArm(fixture, engine, 2048, 1536, true, &lowResLedger);
 			const std::vector<EstimateResult> pair = RunArm(fixture, ahead, 512, 256, false, &aheadLedger);
-			// R1 fix 3: the same arms registered with aheadDepth 0 (no ahead slack in the memo's need: the failing case of GV's
-			// review). A MUST-2 revert (level 1 reserved for every level, reserveBytes of one level) goes over budget here.
-			const std::vector<EstimateResult> normalZero = RunArm(fixture, engine, 512, 256, false, &normalZeroLedger, 0);
-			const std::vector<EstimateResult> lowResZero = RunArm(fixture, engine, 2048, 1536, true, &lowResZeroLedger, 0);
+			// R1 fix 3: the same arms registered with aheadDepth 1 (exact 1-frame structural ahead for B = N + 1, zero extra slack
+			// in the memo's need: 3 live frames {N-1, N, N+1} fill lowRes's 3 * reserveBytes to the byte; a MUST-2 revert goes over budget).
+			const std::vector<EstimateResult> normalZero = RunArm(fixture, engine, 512, 256, false, &normalZeroLedger, 1);
+			const std::vector<EstimateResult> lowResZero = RunArm(fixture, engine, 2048, 1536, true, &lowResZeroLedger, 1);
 			CheckUsedAfterTheFirstPair(normal, false);
 			CheckUsedAfterTheFirstPair(lowRes, true);
 			CheckUsedAfterTheFirstPair(normalZero, false);
@@ -452,7 +461,7 @@ namespace VideoProcessorTest
 			for (const EstimateResult& r : pair)
 				Assert::IsTrue(r.bound && r.why.empty(), (L"ahead pair (A offered): served; fallback: " + Wide(r.why)).c_str());
 			const ArmLedger* const ledgers[5] = { &normalLedger, &lowResLedger, &aheadLedger, &normalZeroLedger, &lowResZeroLedger };
-			const wchar_t* const names[5] = { L"normal", L"lowRes", L"ahead pair", L"normal, aheadDepth 0", L"lowRes, aheadDepth 0" };
+			const wchar_t* const names[5] = { L"normal", L"lowRes", L"ahead pair", L"normal, aheadDepth 1", L"lowRes, aheadDepth 1" };
 			for (int i = 0; i < 5; ++i)
 			{
 				const std::wstring at = std::wstring(names[i]) + L": ";

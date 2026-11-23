@@ -291,11 +291,12 @@ namespace DetailRestoreConfigTestsNs
 					for (int x = 0; x < kTile; ++x)
 					{
 						const double code = std::min(1023.0, std::max(0.0, static_cast<double>(original[q][static_cast<size_t>(y) * kTile + x]) * 1023.0));
-						const uint16_t s16 = static_cast<uint16_t>(std::lround(code)) << 6;
-						sharp[static_cast<size_t>(oy + y) * W + ox + x] = s16;
-						// Soften frame 2 slightly toward mid-grey so DetailPulse boosts and TextureRestore engages.
-						const double softCode = 0.65 * code + 0.35 * 512.0;
-						softened[static_cast<size_t>(oy + y) * W + ox + x] = static_cast<uint16_t>(std::lround(softCode)) << 6;
+						// Frame 1 carries extra zero-mean fine-band (D1) detail with identical low/mid band; frame 2 is the pure
+						// upscaled picture so DetailPulse/TextureRestore keep the reference (no low-band or mid-loss restart) and lift frame 2.
+						const double fineDetail = 24.0 * std::sin(1.7 * (ox + x)) * std::cos(1.7 * (oy + y));
+						const double sharpCode = std::min(1023.0, std::max(0.0, code + fineDetail));
+						sharp[static_cast<size_t>(oy + y) * W + ox + x] = static_cast<uint16_t>(std::lround(sharpCode)) << 6;
+						softened[static_cast<size_t>(oy + y) * W + ox + x] = static_cast<uint16_t>(std::lround(code)) << 6;
 					}
 			}
 			TargetLutGpuFixture fixture;
@@ -346,12 +347,19 @@ namespace DetailRestoreConfigTestsNs
 
 			DetailPulse::Module pulse;
 			TextureRestore::Module restore;
+			const VpDetailRestore::SceneReaderFn noCut = [](uint64_t, FrameAnalysis::Scene& s) {
+				s = {};
+				s.confirmed = true;
+				return true;
+			};
 			DetailPulse::Params dp;
 			dp.cap = DetailPulse::kCapMax;
 			dp.sourceHz = 23.976;
+			dp.sceneReader = noCut;
 			TextureRestore::Params tp;
 			tp.cap = TextureRestore::kCapMax;
 			tp.sourceHz = 23.976;
+			tp.sceneReader = noCut;
 
 			// Frame 1 establishes reference detail; Frame 2 triggers real GPU DetailPulse + TextureRestore output.
 			dp.sequence = 1; tp.sequence = 1;
@@ -373,6 +381,8 @@ namespace DetailRestoreConfigTestsNs
 			const std::vector<uint16_t> afterBytes = download(frame2Tex);
 			const std::vector<uint16_t> outputBytes = download(r2.planes[0].texture);
 			Assert::IsTrue(afterBytes == beforeBytes, L"input pl_tex contents must remain bit-identical after both GPU stages");
+			Assert::AreEqual(0ull, pulse.SceneMissing(), L"DetailPulse must receive scene verdict without missing fallback");
+			Assert::AreEqual(0ull, restore.SceneMissing(), L"TextureRestore must receive scene verdict without missing fallback");
 			Assert::IsTrue(outputBytes != beforeBytes, L"real GPU stages must produce a modified output frame");
 
 			auto toTiles = [&](const std::vector<uint16_t>& buf) {

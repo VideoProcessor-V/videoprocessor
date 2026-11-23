@@ -967,7 +967,8 @@ namespace
 			resources.Started();
 			// A ring of frames that outlives anything the queue holds.
 			const size_t rowBytes = static_cast<size_t>(state->BytesPerRow());
-			std::vector<std::vector<BYTE>> ring(24, std::vector<BYTE>(static_cast<size_t>(state->BytesPerFrame())));
+			const size_t ringCount = (std::max)(size_t(24), g_harnessQueueCapacity + 4);
+			std::vector<std::vector<BYTE>> ring(ringCount, std::vector<BYTE>(static_cast<size_t>(state->BytesPerFrame())));
 			std::vector<SourceBuffer> buffers(ring.size());
 			const auto start = std::chrono::steady_clock::now();
 			const auto period = std::chrono::microseconds(static_cast<int64_t>(
@@ -1105,6 +1106,7 @@ namespace
 				{
 					MSG msg;
 					while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
+					std::vector<std::string> found;
 					{
 						std::lock_guard<std::mutex> guard(g_logMutex);
 						for (const std::string& line : g_log)
@@ -1114,9 +1116,16 @@ namespace
 							if (at != std::string::npos && m != std::string::npos)
 							{
 								const size_t end = line.find(" raw_bytes=", m);
-								result.captureMetadata = line.substr(m + 9, end == std::string::npos ? std::string::npos : end - m - 9);
+								found.push_back(line.substr(m + 9, end == std::string::npos ? std::string::npos : end - m - 9));
 							}
 						}
+					}
+					if (!found.empty())
+					{
+						result.captureMetadata = found.back();
+						if (capturesRequested == 0)
+							result.captureMetadataList = found;
+						break;
 					}
 					std::this_thread::sleep_for(std::chrono::milliseconds(20));
 				}
@@ -3679,77 +3688,149 @@ namespace Tests
 			const Case cases[] = { { "v210 gpu 23.976 still", VideoFrameEncoding::V210, "gpu", true, false },
 				{ "v210 standard 59.94 still", VideoFrameEncoding::V210, "standard", false, false },
 				{ "v210 gpu 23.976 moving", VideoFrameEncoding::V210, "gpu", true, true } };
+			// Capacity 32 (533 ms at 59.94 fps; restored by HarnessScope) prevents startup shader-compile stalls on
+			// standard 59.94 from overflowing the default 8-frame queue and offsetting sigma-delta's rendered-frame IGN phase
+			// (frame / 5) relative to enqueue source=.
+			g_harnessQueueCapacity = 32;
 			std::string failures, report;
 			for (const Case& c : cases)
 			{
 				FramePlan plan;
-				plan.captureAtSeconds = 2.5;
-				plan.retryRefusedCapture = true;
+				// On still cases (including 59.94 still), a 15-capture burst across 2.0..3.4 s guarantees shared frames without
+				// perturbing content; on moving cases, a single capture at 2.5 s avoids mid-run readback stalls disturbing temporal carry.
+				if (!c.moving)
+				{
+					for (int ci = 0; ci < 15; ++ci)
+						plan.captureTimes.push_back(2.0 + 0.10 * ci);
+				}
+				else
+				{
+					plan.captureAtSeconds = 2.5;
+					plan.retryRefusedCapture = true;
+				}
 				const bool moving = c.moving;
 				plan.step = [moving](int n) { FrameStep f; f.content = moving ? n : 0; return f; };
-				// Lead 19 fix-D (rule 28: no pass without repeatability). The sigma-delta's noise and carried error follow the
-				// refresh count (`frame / 5`, Temporal sigma-delta.glsl:602-612) and captureAtSeconds is wall-clock, so a capture's
-				// hash is a function of the source frame it lands on (tipC8e c8e.log: standard still split 114 / 114 = 838956e1,
-				// original 115 = 2775cdc6; gpu moving 45 / 45 / 45, all equal). Captures are therefore compared at the SAME
-				// captured source frame: up to kTries runs per folder, alternating, until both folders share a frame, and there
-				// every hash of both must be one. Two hashes from one folder at one frame = not repeatable even at a fixed phase:
-				// FAIL. No shared frame after kTries runs each: FAIL (the phase could not be pinned), never REPORT-only.
+				// Lead 19 fix-D (rule 28: no pass without repeatability). Captures are compared at the SAME captured source frame:
+				// up to kTries runs per folder, alternating, until both folders share at least one frame, and EVERY shared frame
+				// must match bit-for-bit; two hashes from one folder at one frame = FAIL; no shared frame = FAIL.
 				struct Sample { int source; std::string hash; };
-				auto sampleWith = [&](const std::string& dir) {
+				std::string droppedFailures;
+				auto sampleWith = [&](const std::string& dir, const char* role, int tryIndex) {
 					SetEnvironmentVariableA("VP_TEST_SHADER_DIR", dir.c_str());
 					const RunResult r = Run(c.encoding, c.path, 4.0, c.film, C8SigmaRule("own"), false, &plan);
-					Sample s{ -1, CaptureHash(r) };
-					static const std::string kDone = "Rendered-output capture complete: source=";
-					for (const std::string& line : r.log)
+					static const std::string kDonePrefix = "Rendered-output capture complete";
+					std::vector<std::string> completionLines;
+					for (const std::string& logLine : r.log)
 					{
-						const size_t at = line.find(kDone);
-						if (at != std::string::npos)
-							s.source = std::atoi(line.c_str() + at + kDone.size());
+						if (logLine.find(kDonePrefix) != std::string::npos)
+							completionLines.push_back(logLine);
 					}
-					return s;
+					std::vector<Sample> out;
+					const std::string runTag = std::string(c.name) + " " + role + " try " + std::to_string(tryIndex);
+					if (r.Logged("Alpha queue hard overflow:") || r.Logged("Alpha backlog recovery:"))
+						droppedFailures += runTag + ": queue drop occurred (breaks 1:1 source= to sigma-delta frame/5 phase lock); ";
+					if (completionLines.empty() || completionLines.size() != r.captureMetadataList.size())
+					{
+						droppedFailures += runTag + ": capture count mismatch (completionLines=" +
+							std::to_string(completionLines.size()) + ", captureMetadataList=" +
+							std::to_string(r.captureMetadataList.size()) + "); ";
+						if (!c.moving && completionLines.size() != plan.captureTimes.size())
+						{
+							droppedFailures += runTag + ": still burst expected " +
+								std::to_string(plan.captureTimes.size()) + " captures, got completionLines=" +
+								std::to_string(completionLines.size()) + "; ";
+						}
+						return out;
+					}
+					if (!c.moving && completionLines.size() != plan.captureTimes.size())
+					{
+						droppedFailures += runTag + ": still burst expected " +
+							std::to_string(plan.captureTimes.size()) + " captures, got completionLines=" +
+							std::to_string(completionLines.size()) + " (captureMetadataList=" +
+							std::to_string(r.captureMetadataList.size()) + "); ";
+					}
+					for (size_t i = 0; i < completionLines.size(); ++i)
+					{
+						int src = -1;
+						bool validSource = false;
+						const size_t srcAt = completionLines[i].find("source=");
+						if (srcAt != std::string::npos)
+						{
+							const char* start = completionLines[i].c_str() + srcAt + 7;
+							if (*start != '\0' && std::isdigit(static_cast<unsigned char>(*start)))
+							{
+								char* end = nullptr;
+								const long parsed = std::strtol(start, &end, 10);
+								if (end != start && parsed >= 0 && parsed <= 0x7fffffffL)
+								{
+									src = static_cast<int>(parsed);
+									validSource = true;
+								}
+							}
+						}
+						RunResult one;
+						one.captureMetadata = r.captureMetadataList[i];
+						const std::string h = CaptureHash(one);
+						if (!validSource)
+							droppedFailures += runTag + " cap[" + std::to_string(i) + "]: missing or invalid source= in completion log; ";
+						if (h.empty())
+							droppedFailures += runTag + " cap[" + std::to_string(i) + "]: empty capture hash for metadata=" +
+								r.captureMetadataList[i] + "; ";
+						if (validSource && !h.empty())
+							out.push_back(Sample{ src, h });
+					}
+					return out;
 				};
 				const std::string split = here.substr(0, here.size() - 1);
-				constexpr int kTries = 4;
+				const int kTries = c.moving ? 8 : 4;
 				std::vector<Sample> splitRuns, originalRuns;
-				int common = -1;
-				for (int t = 0; t < kTries && common < 0; ++t)
+				std::set<int> sharedSources;
+				for (int t = 0; t < kTries && sharedSources.empty(); ++t)
 				{
-					splitRuns.push_back(sampleWith(split));
-					originalRuns.push_back(sampleWith(original));
+					const auto sr = sampleWith(split, "split", t);
+					const auto orun = sampleWith(original, "original", t);
+					splitRuns.insert(splitRuns.end(), sr.begin(), sr.end());
+					originalRuns.insert(originalRuns.end(), orun.begin(), orun.end());
 					for (const Sample& s : splitRuns)
 						for (const Sample& o : originalRuns)
-							if (common < 0 && s.source >= 0 && s.source == o.source && !s.hash.empty() && !o.hash.empty())
-								common = s.source;
+							if (s.source >= 0 && s.source == o.source && !s.hash.empty() && !o.hash.empty())
+								sharedSources.insert(s.source);
 				}
 				std::string line = std::string("== ") + c.name + ":";
-				bool missing = false, unrepeatable = false;
-				std::string commonHash, mismatch;
-				auto scan = [&](const std::vector<Sample>& runs, const char* role) {
-					for (size_t i = 0; i < runs.size(); ++i)
+				const bool missing = splitRuns.empty() || originalRuns.empty();
+				bool unrepeatable = false;
+				std::map<int, std::string> splitBySource, origBySource;
+				auto scan = [&](const std::vector<Sample>& runs, std::map<int, std::string>& bySource, const char* role) {
+					line += std::string(" ") + role + "(" + std::to_string(runs.size()) + " caps):";
+					for (const Sample& s : runs)
 					{
-						line += std::string(" ") + role + "@" + std::to_string(runs[i].source) + " " + runs[i].hash + ";";
-						if (runs[i].hash.empty() || runs[i].source < 0)
-							missing = true;
-						for (size_t j = 0; j < i; ++j)
-							if (runs[j].source == runs[i].source && runs[j].hash != runs[i].hash)
-								unrepeatable = true;
-						if (common >= 0 && runs[i].source == common)
-						{
-							if (commonHash.empty())
-								commonHash = runs[i].hash;
-							else if (runs[i].hash != commonHash)
-								mismatch = std::string(role) + "@" + std::to_string(common);
-						}
+						line += " " + std::to_string(s.source) + "@" + s.hash;
+						auto it = bySource.find(s.source);
+						if (it == bySource.end())
+							bySource[s.source] = s.hash;
+						else if (it->second != s.hash)
+							unrepeatable = true;
 					}
+					line += ";";
 				};
-				scan(splitRuns, "split");
-				scan(originalRuns, "original");
-				report += line + (common >= 0 ? " compared at source " + std::to_string(common) : std::string(" no shared frame")) + "\n";
+				scan(splitRuns, splitBySource, "split");
+				scan(originalRuns, origBySource, "original");
+				std::string mismatch;
+				for (int src : sharedSources)
+				{
+					if (splitBySource[src] != origBySource[src])
+						mismatch += "source@" + std::to_string(src) + " ";
+				}
+				report += line + (!sharedSources.empty()
+					? " compared " + std::to_string(sharedSources.size()) + " shared frame(s) (first source " + std::to_string(*sharedSources.begin()) + ")"
+					: std::string(" no shared frame")) + "\n";
+				if (!droppedFailures.empty())
+					failures += droppedFailures;
 				if (missing)
 					failures += std::string(c.name) + ": a capture (or its source frame) is missing; ";
 				if (unrepeatable)
 					failures += std::string(c.name) + ": one folder gave two hashes at the same captured frame (not repeatable at a fixed phase); ";
-				if (common < 0)
+				if (sharedSources.empty())
 					failures += std::string(c.name) + ": no captured frame shared by split and original in " + std::to_string(kTries) +
 						" runs each (phase not pinned: no comparison is not a pass); ";
 				else if (!mismatch.empty())
@@ -6016,14 +6097,19 @@ namespace Tests
 		TEST_METHOD(ComputeOnceRealClipAcceptance)
 		{
 			const HarnessScope harnessScope;
-			// COMPUTE-ONCE acceptance (refs/129 addendum 2026-11-13, iface-L-DET section 3): a real film clip through the
-			// default chain with the detectors on (VP_DEBUG_COMPUTE_ONCE=1, read by the renderer DLL's own copy of
-			// ComputeOnce.h when it first checks the flag: run this test in its own vstest process). The teardown report
-			// is parsed from the log:
-			//   detector 2: no shared unit computed twice for one (variant, source frame) - "duplicates 0";
-			//   detector 3: every GPU pass has an owner - "gpu-unattributed 0";
-			//   no gap (seq < 0), no hidden copy on CPU or GPU, the expected units counted, a seeded GPU rule matched.
-			// VP_COMPUTE_ONCE_BASELINE=1 is the BEFORE run: the hidden copies must be non-zero (the baseline is reported).
+			// COMPUTE-ONCE acceptance (refs/129 addendum 2026-11-13, iface-L-DET section 3): a real film clip in two
+			// isolated legs (ComputeOnceModule::OnLifecycle(GpuCreated) resets ComputeOnce::Global() and
+			// GpuAttribution::Global() at the start of each Run()) with the detectors on (VP_DEBUG_COMPUTE_ONCE=1, read
+			// by the renderer DLL's own copy of ComputeOnce.h when it first checks the flag: run this test in its own
+			// vstest process):
+			//   Leg 1 (default-chain, skipped in baseline mode): zero config overrides (true defaults: analysis_lane,
+			//     frame_analysis_store, and skeleton_gpu_gap are off per SkeletonSettings.h:8,13, VpFrameAnalysisHost.h:88);
+			//     verifies U8,U10 counted, zero duplicates/gaps/unattributed/gpu-hidden-copies, and zero unexpected CPU
+			//     hidden copies outside MotionAhead::Producer::LumaAtTarget's U3 fallback.
+			//   Leg 2 (lane-on): enables analysis_lane/frame_analysis_store/resync_event/skeleton_gpu_gap to exercise the
+			//     full shared lane (U3,U4,U6,U7,U8,U9,U10) with zero duplicates, zero gpu-unattributed, zero gaps, and zero
+			//     CPU/GPU hidden copies.
+			// VP_COMPUTE_ONCE_BASELINE=1 is the BEFORE run (Leg 2 only): the hidden copies must be non-zero (reported).
 			// Every DUPLICATE / HIDDEN-COPY / gap / UNATTRIBUTED line is printed with its callers.
 			if (!RequireHardwareOrSkip("ComputeOnceRealClipAcceptance")) return;
 			std::vector<std::vector<BYTE>> clip;
@@ -6035,7 +6121,20 @@ namespace Tests
 				Assert::IsFalse(require, std::wstring(error.begin(), error.end()).c_str());
 				return;
 			}
-			SetEnvironmentVariableA("VP_DEBUG_COMPUTE_ONCE", "1");
+			struct ComputeOnceEnvGuard
+			{
+				bool active = true;
+				ComputeOnceEnvGuard() { SetEnvironmentVariableA("VP_DEBUG_COMPUTE_ONCE", "1"); }
+				void Clear()
+				{
+					if (active)
+					{
+						SetEnvironmentVariableA("VP_DEBUG_COMPUTE_ONCE", nullptr);
+						active = false;
+					}
+				}
+				~ComputeOnceEnvGuard() { Clear(); }
+			} computeOnceEnv;
 			g_harnessWindowWidth = 1920;
 			g_harnessWindowHeight = 1080;
 			g_harnessDvFrames = clip;
@@ -6045,95 +6144,157 @@ namespace Tests
 			plan.rateDenominator = 1001;
 			plan.step = [frames](int n) { FrameStep f; f.content = n % frames; return f; };
 			plan.captureTimes = { 4.0 };
+			const bool baseline = RealClip::Env("VP_COMPUTE_ONCE_BASELINE") == "1";
+
+			auto parseAndAssertLeg = [](const RunResult& r, const char* legTag, const std::string& expect,
+				const std::string& expectLogLine, bool allowMotionAheadU3Hidden, bool isBaseline) {
+				// The last report in the log (an earlier periodic one is superseded).
+				size_t from = r.log.size();
+				for (size_t i = 0; i < r.log.size(); ++i)
+					if (r.log[i].find("Compute-once report (") != std::string::npos)
+						from = i;
+				std::string summary;
+				int printed = 0;
+				for (size_t i = from; i < r.log.size(); ++i)
+				{
+					const std::string& l = r.log[i];
+					if (l.find("Compute-once summary ") != std::string::npos)
+						summary = l;
+					if (l.find("Compute-once DUPLICATE ") != std::string::npos || l.find("Compute-once HIDDEN-COPY ") != std::string::npos
+						|| l.find("Compute-once gap ") != std::string::npos || l.find("Compute-once gpu UNATTRIBUTED ") != std::string::npos
+						|| l.find("Compute-once gpu HIDDEN-COPY ") != std::string::npos || l.find("Compute-once gpu owner ") != std::string::npos
+						|| l.find("Compute-once unit ") != std::string::npos || l.find("Compute-once not-instrumented ") != std::string::npos
+						|| l.find("Compute-once gpu rule-unmatched ") != std::string::npos)
+					{
+						Logger::WriteMessage(("   " + l + (l.empty() || l.back() != '\n' ? "\n" : "")).c_str());
+						++printed;
+					}
+				}
+				const std::string tagPrefix = (legTag && *legTag) ? (std::string("[") + legTag + "] ") : std::string();
+				const std::wstring wTagPrefix(tagPrefix.begin(), tagPrefix.end());
+				Logger::WriteMessage(("== compute-once " + tagPrefix + "real clip: presented " + std::string(r.presented ? "yes" : "NO") + ", " + std::to_string(printed)
+					+ " report rows; " + (summary.empty() ? std::string("NO SUMMARY\n") : summary + (summary.back() != '\n' ? "\n" : ""))).c_str());
+				Logger::WriteMessage(("   " + r.fallbacksStatus + "\n").c_str());
+				Assert::IsTrue(r.presented, (wTagPrefix + L"the clip was presented").c_str());
+				Assert::IsFalse(summary.empty(), (wTagPrefix + L"no compute-once report in the log (was VP_DEBUG_COMPUTE_ONCE read before this test?)").c_str());
+				auto field = [&summary](const char* name) {
+					const std::string key = std::string(" ") + name + " ";
+					const size_t at = summary.find(key);
+					return at == std::string::npos ? -1LL : std::atoll(summary.c_str() + at + key.size());
+				};
+				const long long duplicates = field("duplicates"), unattributed = field("gpu-unattributed"), passes = field("gpu-passes");
+				const long long gaps = field("gaps"), hidden = field("hidden-copies"), gpuHidden = field("gpu-hidden-copies");
+				const long long rulesMatched = field("gpu-rules-matched"), privateRulesMatched = field("gpu-private-rules-matched");
+				Logger::WriteMessage(expectLogLine.c_str());
+				std::string missing;
+				for (size_t at = 0; at <= expect.size();)
+				{
+					size_t end = expect.find(',', at);
+					if (end == std::string::npos)
+						end = expect.size();
+					const std::string unit = expect.substr(at, end - at);
+					at = end + 1;
+					if (unit.empty())
+						continue;
+					bool seen = false;
+					for (size_t i = from; i < r.log.size() && !seen; ++i)
+						seen = r.log[i].find("Compute-once unit " + unit + " variant ") != std::string::npos;
+					if (!seen)
+						missing += (missing.empty() ? "" : " ") + unit;
+				}
+				Logger::WriteMessage(("== compute-once " + tagPrefix + std::string(isBaseline ? "BEFORE (baseline)" : "AFTER") + ": hidden-copies cpu "
+					+ std::to_string(hidden) + " gpu " + std::to_string(gpuHidden) + ", gaps " + std::to_string(gaps) + ", gpu rules matched "
+					+ std::to_string(rulesMatched) + " (private " + std::to_string(privateRulesMatched) + "), expected units missing: "
+					+ (missing.empty() ? std::string("none") : missing) + "\n").c_str());
+				Assert::IsTrue(passes > 0, (wTagPrefix + L"the GPU attribution saw no pass").c_str());
+				Assert::IsTrue(rulesMatched > 0, (wTagPrefix + L"no seeded GPU rule matched a pass (the attribution rules see nothing)").c_str());
+				Assert::IsTrue(missing.empty(), (wTagPrefix + L"expected units never counted (mis-keyed or not run): "
+					+ std::wstring(missing.begin(), missing.end())).c_str());
+				Assert::AreEqual(0LL, gaps, (wTagPrefix + L"units noted without a source frame (seq < 0): see the gap lines").c_str());
+				if (isBaseline)
+				{
+					// BEFORE: the known private copies must be SEEN, so the AFTER zero is not vacuous. Reported, not hidden.
+					Assert::IsTrue(hidden + gpuHidden > 0, L"BEFORE run: no hidden copy detected (the private-copy rows see nothing)");
+					return;
+				}
+				Assert::AreEqual(0LL, duplicates, (wTagPrefix + L"shared units computed more than once per (variant, source frame): see the DUPLICATE lines").c_str());
+				Assert::AreEqual(0LL, unattributed, (wTagPrefix + L"GPU passes without an owner: see the gpu UNATTRIBUTED lines").c_str());
+				// 102b deferred-register row CO-DEFAULT-MOTIONAHEAD-U3 + WAIVER-W1R-FIX-5-U3:
+				// Under true defaults (analysis_lane: off, frame_analysis_store: off), P1AcquireSource receives
+				// NoOwnerFill on (kP1HalfLuma, Cpu), so MotionAhead::Producer::LumaAtTarget (MotionAheadProducer.cpp:601-607)
+				// decodes half-luma privately and emits VPV_COMPUTE_ONCE_PRIVATE_AT("U3", seq, "motion_ahead" /
+				// "motion_ahead_request") - pinned by GfP4MotionTests:175-207. Leg 1 (default-chain) permits ONLY
+				// those MotionAhead U3 rows while rejecting every other CPU hidden copy; Leg 2 (lane-on) enforces strict hidden == 0.
+				if (allowMotionAheadU3Hidden)
+				{
+					// Assert zero unexpected CPU hidden-copy lines (any CPU HIDDEN-COPY must be strictly unit U3 / motion_ahead*).
+					std::string unexpectedHidden;
+					int expectedHiddenRows = 0;
+					for (size_t i = from; i < r.log.size(); ++i)
+					{
+						const std::string& l = r.log[i];
+						if (l.find("Compute-once HIDDEN-COPY ") == std::string::npos)
+							continue;
+						const bool isMotionAheadU3 =
+							l.find("Compute-once HIDDEN-COPY U3 variant private:motion_ahead ") != std::string::npos
+							|| l.find("Compute-once HIDDEN-COPY U3 variant private:motion_ahead_request ") != std::string::npos;
+						if (isMotionAheadU3)
+							++expectedHiddenRows;
+						else
+							unexpectedHidden += (unexpectedHidden.empty() ? "" : "; ") + l;
+					}
+					Assert::IsTrue(unexpectedHidden.empty(),
+						(wTagPrefix + L"unexpected CPU hidden copies outside MotionAhead U3 fallback: "
+							+ std::wstring(unexpectedHidden.begin(), unexpectedHidden.end())).c_str());
+					if (hidden > 0)
+						Assert::IsTrue(expectedHiddenRows > 0,
+							(wTagPrefix + L"summary reported hidden-copies > 0 without an expected MotionAhead U3 HIDDEN-COPY row").c_str());
+				}
+				else
+				{
+					Assert::AreEqual(0LL, hidden, (wTagPrefix + L"CPU hidden copies of shared units: see the HIDDEN-COPY lines").c_str());
+				}
+				Assert::AreEqual(0LL, gpuHidden, (wTagPrefix + L"GPU hidden copies of shared units: see the gpu HIDDEN-COPY lines").c_str());
+			};
+
+			// Leg 1 - True Default-Config Chain (zero overrides; skipped in baseline mode).
+			// analysis_lane, skeleton_gpu_gap (SkeletonSettings.h:8,13), and frame_analysis_store (VpFrameAnalysisHost.h:88)
+			// remain at their true defaults (off), so only U8 and U10 run from {U3,U4,U6,U7,U8,U9,U10}.
+			if (!baseline)
+			{
+				const RunResult rDefault = Run(VideoFrameEncoding::V210, "gpu", 8.0, false, "", false, &plan);
+				parseAndAssertLeg(rDefault, "default-chain", "U8,U10",
+					"== compute-once [default-chain] expected units: U8,U10 (true defaults: analysis_lane/frame_analysis_store/skeleton_gpu_gap off per SkeletonSettings.h:8,13, VpFrameAnalysisHost.h:88)\n",
+					true, false);
+			}
+
+			// Leg 2 - Lane-On Chain.
+			// SkeletonSettings.h:8,13 (analysis_lane: off, skeleton_gpu_gap: off) and VpFrameAnalysisHost.h:88
+			// (frame_analysis_store: off) are default-off; enabling them exercises the full shared lane
+			// (U3,U4,U6,U7,U8,U9,U10) and publishes P1 ahead for MotionAhead::Producer.
 			// The CPU side (tools/compute_once/run_cpu_sample.ps1 sets VP_TEST_CPU_SAMPLE=1): reported, not asserted.
 			const bool cpuSample = RealClip::Env("VP_TEST_CPU_SAMPLE") == "1";
 			VpTest::CpuSampleProfiler cpu("VideoProcessorVPRenderer.dll");
 			if (cpuSample)
 				cpu.Start();
-			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.0, false, std::string(), false, &plan);
+			const RunResult rLaneOn = Run(VideoFrameEncoding::V210, "gpu", 8.0, false,
+				"[vpv]\nresync_event: on\nframe_analysis_store: on\n[vpv.skeleton]\nanalysis_lane: on\nskeleton_gpu_gap: after_render\nanalysis_lane_chunk_us: 4000\n", false, &plan);
 			cpu.Stop();
-			SetEnvironmentVariableA("VP_DEBUG_COMPUTE_ONCE", nullptr);
+			computeOnceEnv.Clear();
 			if (cpuSample)
 				for (const std::string& l : cpu.Report())
 					Logger::WriteMessage(("   " + l + "\n").c_str());
-			// The last report in the log (an earlier periodic one is superseded).
-			size_t from = r.log.size();
-			for (size_t i = 0; i < r.log.size(); ++i)
-				if (r.log[i].find("Compute-once report (") != std::string::npos)
-					from = i;
-			std::string summary;
-			int printed = 0;
-			for (size_t i = from; i < r.log.size(); ++i)
-			{
-				const std::string& l = r.log[i];
-				if (l.find("Compute-once summary ") != std::string::npos)
-					summary = l;
-				if (l.find("Compute-once DUPLICATE ") != std::string::npos || l.find("Compute-once HIDDEN-COPY ") != std::string::npos
-					|| l.find("Compute-once gap ") != std::string::npos || l.find("Compute-once gpu UNATTRIBUTED ") != std::string::npos
-					|| l.find("Compute-once gpu HIDDEN-COPY ") != std::string::npos || l.find("Compute-once gpu owner ") != std::string::npos
-					|| l.find("Compute-once unit ") != std::string::npos || l.find("Compute-once not-instrumented ") != std::string::npos
-					|| l.find("Compute-once gpu rule-unmatched ") != std::string::npos)
-				{
-					Logger::WriteMessage(("   " + l + (l.empty() || l.back() != '\n' ? "\n" : "")).c_str());
-					++printed;
-				}
-			}
-			Logger::WriteMessage(("== compute-once real clip: presented " + std::string(r.presented ? "yes" : "NO") + ", " + std::to_string(printed)
-				+ " report rows; " + (summary.empty() ? std::string("NO SUMMARY\n") : summary + (summary.back() != '\n' ? "\n" : ""))).c_str());
-			Logger::WriteMessage(("   " + r.fallbacksStatus + "\n").c_str());
-			Assert::IsTrue(r.presented, L"the clip was presented");
-			Assert::IsFalse(summary.empty(), L"no compute-once report in the log (was VP_DEBUG_COMPUTE_ONCE read before this test?)");
-			auto field = [&summary](const char* name) {
-				const std::string key = std::string(" ") + name + " ";
-				const size_t at = summary.find(key);
-				return at == std::string::npos ? -1LL : std::atoll(summary.c_str() + at + key.size());
-			};
-			const long long duplicates = field("duplicates"), unattributed = field("gpu-unattributed"), passes = field("gpu-passes");
-			const long long gaps = field("gaps"), hidden = field("hidden-copies"), gpuHidden = field("gpu-hidden-copies");
-			const long long rulesMatched = field("gpu-rules-matched"), privateRulesMatched = field("gpu-private-rules-matched");
-			// Non-vacuity (audit L-DET MUST 2): the units the default chain runs on this clip each have a counted row. The set
-			// is VP_COMPUTE_ONCE_EXPECT (comma-separated ids) when given, else the default-on units below.
+
+			// Non-vacuity (audit L-DET MUST 2): the units the lane-on chain runs on this clip each have a counted row. The set
+			// is VP_COMPUTE_ONCE_EXPECT (comma-separated ids) when given, else the full lane-on set below.
 			std::string expect = RealClip::Env("VP_COMPUTE_ONCE_EXPECT");
 			const bool expectFromEnv = !expect.empty();
 			if (expect.empty())
 				expect = "U3,U4,U6,U7,U8,U9,U10";
 			// WAIVER-LDET-1 condition: the run reports the expected-unit set it used (a narrowed set needs its own waiver).
-			Logger::WriteMessage(("== compute-once expected units: " + expect + (expectFromEnv ? " (from VP_COMPUTE_ONCE_EXPECT, NOT the default set)\n" : " (default set, VP_COMPUTE_ONCE_EXPECT unset)\n")).c_str());
-			std::string missing;
-			for (size_t at = 0; at <= expect.size();)
-			{
-				size_t end = expect.find(',', at);
-				if (end == std::string::npos)
-					end = expect.size();
-				const std::string unit = expect.substr(at, end - at);
-				at = end + 1;
-				if (unit.empty())
-					continue;
-				bool seen = false;
-				for (size_t i = from; i < r.log.size() && !seen; ++i)
-					seen = r.log[i].find("Compute-once unit " + unit + " variant ") != std::string::npos;
-				if (!seen)
-					missing += (missing.empty() ? "" : " ") + unit;
-			}
-			const bool baseline = RealClip::Env("VP_COMPUTE_ONCE_BASELINE") == "1";
-			Logger::WriteMessage(("== compute-once " + std::string(baseline ? "BEFORE (baseline)" : "AFTER") + ": hidden-copies cpu "
-				+ std::to_string(hidden) + " gpu " + std::to_string(gpuHidden) + ", gaps " + std::to_string(gaps) + ", gpu rules matched "
-				+ std::to_string(rulesMatched) + " (private " + std::to_string(privateRulesMatched) + "), expected units missing: "
-				+ (missing.empty() ? std::string("none") : missing) + "\n").c_str());
-			Assert::IsTrue(passes > 0, L"the GPU attribution saw no pass");
-			Assert::IsTrue(rulesMatched > 0, L"no seeded GPU rule matched a pass (the attribution rules see nothing)");
-			Assert::IsTrue(missing.empty(), std::wstring(L"expected units never counted (mis-keyed or not run): ").append(missing.begin(), missing.end()).c_str());
-			Assert::AreEqual(0LL, gaps, L"units noted without a source frame (seq < 0): see the gap lines");
-			if (baseline)
-			{
-				// BEFORE: the known private copies must be SEEN, so the AFTER zero is not vacuous. Reported, not hidden.
-				Assert::IsTrue(hidden + gpuHidden > 0, L"BEFORE run: no hidden copy detected (the private-copy rows see nothing)");
-				return;
-			}
-			Assert::AreEqual(0LL, duplicates, L"shared units computed more than once per (variant, source frame): see the DUPLICATE lines");
-			Assert::AreEqual(0LL, unattributed, L"GPU passes without an owner: see the gpu UNATTRIBUTED lines");
-			Assert::AreEqual(0LL, hidden, L"CPU hidden copies of shared units: see the HIDDEN-COPY lines");
-			Assert::AreEqual(0LL, gpuHidden, L"GPU hidden copies of shared units: see the gpu HIDDEN-COPY lines");
+			const std::string expectLogLine = "== compute-once expected units: " + expect
+				+ (expectFromEnv ? " (from VP_COMPUTE_ONCE_EXPECT, NOT the default set)\n" : " (default set, VP_COMPUTE_ONCE_EXPECT unset)\n");
+			parseAndAssertLeg(rLaneOn, "", expect, expectLogLine, false, baseline);
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(EntranceOnceRealClipAcceptance)
@@ -7759,7 +7920,11 @@ namespace Tests
 				const bool repeatServed = videoClass || std::fabs(ratio - std::floor(ratio + 0.5)) < 0.02 * ratio || ratio < 1.25;
 				if (repeatServed)
 				{
-					Assert::IsFalse(VectorsDelivered(s), (name + L": a repeat-served source delivers no vectors\n" + s.Tail()).c_str());
+					// B1 (OD:813-814): starter gate retired; deband_vp: on delivers vectors at every rate while de-judder stays inactive on repeat-served sources.
+					Assert::IsTrue(s.Logged("Vector engine: on"), (name + L": repeat-served source with deband_vp still runs vector engine\n" + s.Tail()).c_str());
+					Assert::IsTrue(VectorsDelivered(s), (name + L": repeat-served source with deband_vp still delivers vectors\n" + s.Tail()).c_str());
+					Assert::IsFalse(s.Logged("De-judder extras:"), (name + L": repeat-served source runs no de-judder extras\n" + s.Tail()).c_str());
+					Assert::IsFalse(s.Logged("De-judder: active"), (name + L": repeat-served source keeps de-judder inactive\n" + s.Tail()).c_str());
 					continue;
 				}
 				++positiveLegs;
@@ -7854,13 +8019,14 @@ namespace Tests
 		TEST_METHOD(VectorEngineGamesDepthOneEngagesAtOneAhead)
 		{
 			const HarnessScope harnessScope;
-			// NOTE: the name is historical (it predates the low-latency rule): legs A and B now assert the look-ahead does NOT engage on a games queue.
-			// A games queue (queue_size 4, target_frames 2) is LOW LATENCY: no starter runs the vector engine there and the look-ahead
-			// gets no depth ("Motion ahead: ... off in low latency"). WAIVER-C1-10 (coordinator 2026-11-12 18:42, owner confirmed 18:47;
-			// lead 9 ruling 2026-11-14): the former premise (look-ahead engages at one ahead on a games queue, fed by the debander) is
-			// obsolete; legs A and B assert the NoStarter contract on that queue (deband_vp alone, then even with the de-judder demand),
-			// and leg C (new, positive) asserts a mode WITH a real starter - the de-judder standing demand on a Normal queue at a
-			// cadence-eligible 24p source - engages the look-ahead.
+			// B1 + ForwardShallow (owner 2026-11-01, 4ff748899, VectorDemand.h:211-228; B1 retired the starter gate,
+			// superseding WAIVER-C1-10): vectors never ADD queue depth, and a games queue (queue_size 4, target_frames 2,
+			// queueAheadCapacity == 1) runs forward look-ahead on its already-queued frames (ForwardShallow).
+			// Legs A (deband_vp alone) and B (deband_vp + dejudder_strength 0.25 at 24p) must:
+			//   1. engage forward shallow look-ahead and deliver real NVOF vectors (VectorsDelivered);
+			//   2. never add queue depth (policy target=2, prefill target=2, queue depth summary desired=2 healthy=1..2,
+			//      and runtime median queue depth <= 2.0).
+			// Leg C (Normal queue at 24p) remains the positive control on a full Normal queue.
 			if (!RequireHardwareOrSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			if (VectorTestSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			g_harnessApplySnapshot = true;
@@ -7875,25 +8041,78 @@ namespace Tests
 			const RunResult normal = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
 				"deband_vp: on\ndejudder_strength: 0.25\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n", false, &starterPlan);
 			g_harnessApplySnapshot = false;
-			Logger::WriteMessage(("A deband_vp only (no starter):\n" + VectorTestLines(none)).c_str());
-			Logger::WriteMessage(("B low latency with the de-judder demand:\n" + VectorTestLines(lowStarter)).c_str());
-			Logger::WriteMessage(("C Normal queue with a real starter:\n" + VectorTestLines(normal)).c_str());
+			Logger::WriteMessage(("A deband_vp only (games shallow queue):\n" + VectorTestLines(none)).c_str());
+			Logger::WriteMessage(("B low latency with the de-judder demand (games shallow queue):\n" + VectorTestLines(lowStarter)).c_str());
+			Logger::WriteMessage(("C Normal queue:\n" + VectorTestLines(normal)).c_str());
+			auto logShallowTelemetry = [](const char* leg, const RunResult& r) {
+				std::string out = std::string(leg) + " shallow-queue stats:\n";
+				bool anyStats = false;
+				for (const std::string& line : r.log)
+				{
+					if (line.find("Vector engine: ") != std::string::npos && line.find(" pairs (ahead hits ") != std::string::npos)
+					{
+						out += "  [stats] " + line + "\n";
+						anyStats = true;
+					}
+					else if (line.find("ForwardShallow backward pairs served") != std::string::npos)
+					{
+						out += "  [log-status] " + line + "\n";
+					}
+				}
+				if (!anyStats)
+					out += "  [stats] (no periodic Vector engine pairs line logged)\n";
+				if (r.dejudderStatus.find("ForwardShallow backward pairs served") != std::string::npos)
+					out += "  [status] " + r.dejudderStatus + "\n";
+				else
+					out += "  [status] (no ForwardShallow backward pairs served in dejudderStatus)\n";
+				Logger::WriteMessage(out.c_str());
+			};
+			logShallowTelemetry("A", none);
+			logShallowTelemetry("B", lowStarter);
+			auto assertNoAddedQueueDepth = [](const RunResult& r, const wchar_t* leg) {
+				Assert::IsTrue(r.Logged("Alpha queue policy: target_frames=2 target=2"),
+					(std::wstring(leg) + L": queue policy keeps target_frames=2 target=2\n" + r.Tail()).c_str());
+				bool prefillTarget2 = false;
+				int summaryCount = 0;
+				bool allSummaryDesired2 = true;
+				for (const std::string& line : r.log)
+				{
+					if (line.find("Alpha queue startup prefill released:") != std::string::npos &&
+						line.find("target=2") != std::string::npos)
+						prefillTarget2 = true;
+					if (line.find("Alpha queue depth summary:") != std::string::npos)
+					{
+						++summaryCount;
+						if (line.find("desired=2 healthy=1..2") == std::string::npos)
+							allSummaryDesired2 = false;
+					}
+				}
+				Assert::IsTrue(prefillTarget2, (std::wstring(leg) + L": startup prefill stayed at target=2\n" + r.Tail()).c_str());
+				Assert::IsTrue(summaryCount > 0, (std::wstring(leg) + L": queue depth summary was logged\n" + r.Tail()).c_str());
+				Assert::IsTrue(allSummaryDesired2, (std::wstring(leg) + L": queue depth summary kept desired=2 healthy=1..2 (no added queue depth)\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.queueDepths.size() > 10 && Median(r.queueDepths) <= 2.0,
+					(std::wstring(leg) + L": runtime median queue depth stayed <= 2.0 (median=" + std::to_wstring(Median(r.queueDepths)) + L")\n" + r.Tail()).c_str());
+			};
 			Assert::IsTrue(none.presented, (L"A: frames presented\n" + none.Tail()).c_str());
-			// WAIVER-B1-ENGINE-04: was NoStarterStatusLogged(none) (the starter wording is retired with the gate, plan (b)). The deband
-			// hold is now a registered want the ON engine names in its status; the look-ahead checks below are unchanged.
 			Assert::IsFalse(StarterWordingLogged(none), (L"A: the starter wording is retired\n" + none.Tail()).c_str());
 			bool debandNamed = false;
 			for (const std::string& line : none.log)
-				debandNamed = debandNamed || (line.find("Vector engine: ") != std::string::npos && line.find("deband hold") != std::string::npos);
-			Assert::IsTrue(debandNamed, (L"A: the vector engine status names the deband hold\n" + none.Tail()).c_str());
-			Assert::AreEqual(0, MotionAheadDepthLines(none), (L"A: no look-ahead depth\n" + none.Tail()).c_str());
-			Assert::IsFalse(none.Logged("Motion ahead: engaged"), (L"A: no look-ahead\n" + none.Tail()).c_str());
+				debandNamed = debandNamed || (line.find("Vector engine: on (forward)") != std::string::npos && line.find("deband hold") != std::string::npos);
+			Assert::IsTrue(debandNamed, (L"A: the vector engine is on (forward) and names the deband hold\n" + none.Tail()).c_str());
+			Assert::IsTrue(MotionAheadDepthLines(none) > 0, (L"A: games shallow queue gets look-ahead depth\n" + none.Tail()).c_str());
+			Assert::IsTrue(none.Logged("Motion ahead: engaged") && none.Logged("vector engine: shallow queue"),
+				(L"A: games queue engages shallow look-ahead\n" + none.Tail()).c_str());
+			Assert::IsTrue(VectorsDelivered(none), (L"A: games shallow queue delivers real vectors\n" + none.Tail()).c_str());
+			assertNoAddedQueueDepth(none, L"A");
 			Assert::IsTrue(lowStarter.presented, (L"B: frames presented\n" + lowStarter.Tail()).c_str());
-			Assert::AreEqual(0, MotionAheadDepthLines(lowStarter), (L"B: low latency gives the look-ahead no depth\n" + lowStarter.Tail()).c_str());
-			Assert::IsFalse(lowStarter.Logged("Motion ahead: engaged"), (L"B: no look-ahead in low latency\n" + lowStarter.Tail()).c_str());
+			Assert::IsTrue(MotionAheadDepthLines(lowStarter) > 0, (L"B: games shallow queue with de-judder demand gets look-ahead depth\n" + lowStarter.Tail()).c_str());
+			Assert::IsTrue(lowStarter.Logged("Motion ahead: engaged") && lowStarter.Logged("vector engine: shallow queue"),
+				(L"B: games queue with de-judder demand engages shallow look-ahead\n" + lowStarter.Tail()).c_str());
+			Assert::IsTrue(VectorsDelivered(lowStarter), (L"B: games shallow queue with de-judder demand delivers real vectors\n" + lowStarter.Tail()).c_str());
+			assertNoAddedQueueDepth(lowStarter, L"B");
 			Assert::IsTrue(normal.presented, (L"C: frames presented\n" + normal.Tail()).c_str());
-			Assert::IsTrue(normal.Logged("Motion ahead: engaged"), (L"C: a real starter engages the look-ahead on a Normal queue\n" + normal.Tail()).c_str());
-			Assert::IsTrue(VectorsDelivered(normal), (L"C: with a real starter vectors are delivered\n" + normal.Tail()).c_str());
+			Assert::IsTrue(normal.Logged("Motion ahead: engaged"), (L"C: a Normal queue engages the look-ahead\n" + normal.Tail()).c_str());
+			Assert::IsTrue(VectorsDelivered(normal), (L"C: Normal queue delivers vectors\n" + normal.Tail()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroStaysMotionFree)

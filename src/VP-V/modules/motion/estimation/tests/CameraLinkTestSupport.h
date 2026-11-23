@@ -80,8 +80,11 @@ namespace CameraLinkTest
 			bytes.reset(new VpSkeleton::CpuBuffers(*n));
 			indicator.reset(new VpIndicator::Indicator(1, 256));
 			// Frame 0 is the previous frame of the lag-1 inputs (P2 reads P1 at lag 1) and must be sealed before frame 1.
+			// P7..P9 decline frame 0 (matching dfd920d9f) so P8's single live buffer is not held across frame 1 after 004d5ddbb dropped P3 from P8.
 			PublishInputs(0);
-			table->Resolve(0, indicator->Seal(0), [](const VpSkeleton::Node&, uint64_t, int, VpAncestry::Header&, uint32_t) { return true; });
+			table->Resolve(0, indicator->Seal(0), [](const VpSkeleton::Node& n, uint64_t, int, VpAncestry::Header&, uint32_t) {
+				return n.id != VpSkeleton::kP7CameraFit && n.id != VpSkeleton::kP8CameraLabels
+					&& n.id != VpSkeleton::kP9CameraSmoothed; });
 		}
 
 		size_t Ring() { return table->Find(VpSkeleton::kP7CameraFit)->Ring(); }

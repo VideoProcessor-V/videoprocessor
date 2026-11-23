@@ -3746,6 +3746,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			inner->SetSearchSeed(searchSeed);
 			searchSeedValid = false;
 		}
+		inner->SetWarmUp(warmUpEstimate);
 		if (!inner->Estimate(la, lb, -1, false))
 		{
 			error = "lowRes: " + inner->LastError();
@@ -4256,11 +4257,15 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				}
 				searchSeedUsed = true;
 			}
-			else if (settings.globalPrior && (serialSearchForTest ?
+			else if (settings.globalPrior)
+			{
+				const GpuAttribution::SuppressPrivateCopyScope warmUpD1(warmUpEstimate ? "U10" : nullptr);
+				if (serialSearchForTest ?
 					(!Global(l1A, l1B, l2A, l2B, globalVector[0], two ? globalSecond[0] : nullptr) ||
 					 !Global(l1B, l1A, l2B, l2A, globalVector[1], two ? globalSecond[1] : nullptr)) :
-					!GlobalBoth(l1A, l1B, l2A, l2B, globalVector, two ? globalSecond : nullptr)))
-				return false;
+					!GlobalBoth(l1A, l1B, l2A, l2B, globalVector, two ? globalSecond : nullptr))
+					return false;
+			}
 			// 11a E1: the first sweep into `sweep`, the second into the searches.
 			const bool twoSweeps = settings.estCandidates && !replaced;
 			// Plan 19 phase 2: the guided passes (narrow before the search, E1 skip before the second sweep)

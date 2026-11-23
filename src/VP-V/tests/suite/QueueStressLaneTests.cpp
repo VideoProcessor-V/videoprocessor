@@ -505,17 +505,22 @@ namespace QueueStressTest
 				double t = 10.0, lastSubmit = -1e9;
 				uint64_t sequence = 0;
 				int shot = 0;
-				double nextCut = t + r.U(4.0, 12.0), resetAt = -1.0;
+				double nextCut = t + r.U(3.0, 6.0), resetAt = -1.0;
 				unsigned long long discontinuitiesSeen = 0;
-				std::map<std::tuple<int, int, int>, std::vector<float>> cache;
-				int cacheShot = -1, cacheW = 0;
-				auto pixel = [&](int x, int y, int s) -> double {
+				int frameStep = 0;
+				auto pixel = [&](int x, int y, int s, int panX, int panY) -> double {
 					// Bilinear 2x upscale of a deterministic noise field (half resolution).
+					// Moving pan + per-shot brightness are required because still shots give 0 engaged frames:
+					// - SourceResolutionDetector.cpp:1219-1223 (Tracker::Update skips bit-identical repeated
+					//   frames, so still shots stall evidence accumulation);
+					// - SourceResolutionMonitor.cpp:2465-2490 (EngageTrigger requires a cut moment with
+					//   distribution/mean jump, real black, fast pan, blank, or max-wait to engage).
+					const double shotBase = 0.24 + 0.16 * (s % 4);
 					auto noise = [&](int xi, int yi) {
-						uint64_t h = static_cast<uint64_t>(xi) * 73856093ull ^ static_cast<uint64_t>(yi) * 19349663ull ^
+						uint64_t h = static_cast<uint64_t>(xi + panX) * 73856093ull ^ static_cast<uint64_t>(yi + panY) * 19349663ull ^
 							static_cast<uint64_t>(s) * 83492791ull;
 						h ^= h >> 13; h *= 0x5bd1e995ull; h ^= h >> 15;
-						return 0.25 + 0.5 * static_cast<double>(h & 1023) / 1023.0;
+						return shotBase + 0.36 * (static_cast<double>(h & 1023) / 1023.0 - 0.5);
 					};
 					const double fx = x * 0.5, fy = y * 0.5;
 					const int x0 = static_cast<int>(fx), y0 = static_cast<int>(fy);
@@ -545,28 +550,23 @@ namespace QueueStressTest
 					}
 					t += step;
 					++sequence;
-					if (t >= nextCut) { ++shot; nextCut = t + r.U(4.0, 12.0); }
+					if (t >= nextCut) { ++shot; nextCut = t + r.U(3.0, 6.0); }
 					const int tile = m.TileFor(H);
 					if (t - lastSubmit >= 0.5 || t < lastSubmit)
 					{
 						lastSubmit = t;
+						++frameStep;
+						const int panX = frameStep * 3, panY = frameStep * 2;
 						int base = 0;
 						const std::vector<SourceResolution::TilePlace> places = SourceResolution::PlaceTiles(0, 0, W, H, tile, m.DenseGrid(), &base);
 						std::vector<float> values(places.size() * static_cast<size_t>(tile) * tile);
 						std::vector<float> tx, ty;
 						for (size_t p = 0; p < places.size(); ++p)
 						{
-							// A shot is a still picture: its tiles are made once.
-							if (cacheShot != shot || cacheW != W) { cache.clear(); cacheShot = shot; cacheW = W; }
-							std::vector<float>& c = cache[std::make_tuple(places[p].x0, places[p].y0, tile)];
-							if (c.empty())
-							{
-								c.resize(static_cast<size_t>(tile) * tile);
-								for (int y = 0; y < tile; ++y)
-									for (int x = 0; x < tile; ++x)
-										c[static_cast<size_t>(y) * tile + x] = static_cast<float>(std::round(pixel(places[p].x0 + x, places[p].y0 + y, shot) * 1023.0) / 1023.0);
-							}
-							std::copy(c.begin(), c.end(), values.begin() + static_cast<std::ptrdiff_t>(p * tile * tile));
+							float* dst = values.data() + p * static_cast<size_t>(tile) * tile;
+							for (int y = 0; y < tile; ++y)
+								for (int x = 0; x < tile; ++x)
+									dst[static_cast<size_t>(y) * tile + x] = static_cast<float>(std::round(pixel(places[p].x0 + x, places[p].y0 + y, shot, panX, panY) * 1023.0) / 1023.0);
 							tx.push_back(places[p].centreX);
 							ty.push_back(places[p].centreY);
 						}

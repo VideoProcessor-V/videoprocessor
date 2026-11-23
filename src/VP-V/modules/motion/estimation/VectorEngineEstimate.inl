@@ -389,9 +389,11 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	// K4 (camera-guided matching): the pre-estimate hook binds the camera guidance right before the matcher's Estimate
 	// and reads what it did right after. No hook registered (camera guidance off) = the matcher's Estimate only, as
 	// before: nothing bound, no extra GPU work. Never for the warm-up's dummy A -> A estimate.
+	dejudder->SetWarmUp(vectorEstimate.motionEngineWarming);
 	const bool motionEstimated = vectorEngine.Estimate(aSequence, bSequence, ahead, dejudderSourceHz, motionShadowEpoch,
 		!vectorEstimate.motionEngineWarming, *dejudder, [&]() { return dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted); },
 		[this](const FallbackCatalog::Decision& decision) { SyncFallback(decision); });
+	dejudder->SetWarmUp(false);
 	if (motionEstimated && !vectorEstimate.motionEngineWarming)
 		++vectorEngine.WorkCounters().matcherEstimates;   // W2-C1 (B9): the warm-up's dummy estimate is counted as a warm-up
 	dejudder->ClearSearchSeed();
@@ -551,9 +553,15 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		DebugLog::Log("Motion ahead: frames queued ahead when taken (count:frames) %s", counts.c_str());
 		const auto ps = vectorEngine.motionProducer->GetStats();
 		const unsigned long long handoffs = motionHandoffCount.load(std::memory_order_relaxed);
-		DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms, on the worker), %llu dropped; pairs taken %llu, missed %llu; render-loop hand-off mean %.3f ms, max %.3f ms",
-			ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, vectorEngine.motionAheadHits, vectorEngine.motionAheadMisses,
-			handoffs ? motionHandoffTotalMs.load(std::memory_order_relaxed) / handoffs : 0.0, motionHandoffMaxMs.load(std::memory_order_relaxed));
+		const unsigned long long p1Deferred = vectorEngine.motionAheadP1Deferred.load(std::memory_order_relaxed);
+		if (p1Deferred > 0)
+			DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms, on the worker), %llu dropped; pairs taken %llu, missed %llu, P1 deferred %llu; render-loop hand-off mean %.3f ms, max %.3f ms",
+				ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, vectorEngine.motionAheadHits, vectorEngine.motionAheadMisses, p1Deferred,
+				handoffs ? motionHandoffTotalMs.load(std::memory_order_relaxed) / handoffs : 0.0, motionHandoffMaxMs.load(std::memory_order_relaxed));
+		else
+			DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms, on the worker), %llu dropped; pairs taken %llu, missed %llu; render-loop hand-off mean %.3f ms, max %.3f ms",
+				ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, vectorEngine.motionAheadHits, vectorEngine.motionAheadMisses,
+				handoffs ? motionHandoffTotalMs.load(std::memory_order_relaxed) / handoffs : 0.0, motionHandoffMaxMs.load(std::memory_order_relaxed));
 		DebugLog::Log("Motion ahead extras: %.2f ms per pair on the worker; engine trust weights %s; camera from the search when unclear %llu times",
 			ps.extrasMs, dejudder->EngineWeightsUsed() ? "applied" : "not applied", dejudder->GlobalFallbacks());
 	}

@@ -26,6 +26,8 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <AnalysisFrame.h>
@@ -35,10 +37,57 @@
 #include <VP-V/modules/motion/estimation/OnDemandEstimate.h>   // OnDemandIssue.h: the on-demand stage (rule 32)
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
+#include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
 #include <vprenderer/RendererExtension.h>
 
 namespace MotionAhead
 {
+	namespace detail
+	{
+		template <class...> struct P1DeferVoid { using type = void; };
+		template <class Engine, class = void> struct HasP1DeferCounters : std::false_type {};
+		template <class Engine> struct HasP1DeferCounters<Engine, typename P1DeferVoid<
+			decltype(std::declval<Engine&>().motionAheadP1Deferred),
+			decltype(std::declval<Engine&>().motionAheadP1LastDeferredSeq),
+			decltype(std::declval<Engine&>().motionAheadP1DeferStreak),
+			decltype(std::declval<Engine&>().motionAheadP1DeferMaxStreak)>::type> : std::true_type {};
+
+		template <class Engine>
+		void NoteP1DeferredImpl(Engine& engine, uint64_t seq, std::true_type)
+		{
+			engine.motionAheadP1Deferred.fetch_add(1, std::memory_order_relaxed);
+			engine.motionAheadP1LastDeferredSeq.store(seq, std::memory_order_relaxed);
+			const unsigned long long streak = engine.motionAheadP1DeferStreak.fetch_add(1, std::memory_order_relaxed) + 1;
+			unsigned long long curMax = engine.motionAheadP1DeferMaxStreak.load(std::memory_order_relaxed);
+			while (streak > curMax && !engine.motionAheadP1DeferMaxStreak.compare_exchange_weak(
+				curMax, streak, std::memory_order_relaxed, std::memory_order_relaxed))
+			{
+			}
+		}
+		template <class Engine>
+		void NoteP1DeferredImpl(Engine&, uint64_t, std::false_type) {}
+
+		template <class Engine>
+		void ResetP1DeferStreakImpl(Engine& engine, std::true_type)
+		{
+			engine.motionAheadP1DeferStreak.store(0, std::memory_order_relaxed);
+		}
+		template <class Engine>
+		void ResetP1DeferStreakImpl(Engine&, std::false_type) {}
+
+		template <class Engine>
+		void NoteP1Deferred(Engine& engine, uint64_t seq)
+		{
+			NoteP1DeferredImpl(engine, seq, HasP1DeferCounters<Engine>());
+		}
+		template <class Engine>
+		void ResetP1DeferStreak(Engine& engine)
+		{
+			ResetP1DeferStreakImpl(engine, HasP1DeferCounters<Engine>());
+		}
+	}
+
 	// The references the walk needs besides the Impl: the frames the render loop selected (the walk
 	// does not release them), the timing clock (null when none) and the measured source rate.
 	template <class Impl, class Queued, class Clock>
@@ -192,6 +241,29 @@ namespace MotionAhead
 				const bool breakBefore = DejudderPolicy::MotionAheadBreakBefore(ahead.gapBefore, ahead.filmUpdate,
 					impl.activeSettings.timingContinuityFixes, aheadRateHz, aheadState.dolbyVisionTunnel,
 					havePrev, impl.vectorEngine.motionAheadPrev, aheadFrame, impl.activeSettings.motionHistoryFixes);
+				// When the skeleton analysis lane is active and holds shared P1 for this format, wait until P1 for
+				// this frame is published in the lane ring before submitting to the off-thread NVOF producer (like
+				// the conversion-ready check above), so LumaAtTarget reuses shared P1 instead of decoding privately.
+				if (!VpFrameAnalysis::P1EngineViewDiffersFromProducer(prepared.source))
+				{
+					if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
+					{
+						const VpSkeleton::LaneLease lease = demand->LeaseFor(&impl, VpSkeleton::kP1HalfLuma);
+						if (lease.Valid() && lease.table != nullptr)
+						{
+							if (const VpSkeleton::SlotSet* set = lease.table->Find(VpSkeleton::kP1HalfLuma))
+							{
+								const VpSkeleton::ReadInfo ri = set->Read(ahead.sourceSequence, true);
+								if (ri.kind != VpSkeleton::ReadInfo::Ring)
+								{
+									detail::NoteP1Deferred(impl.vectorEngine, ahead.sourceSequence);
+									break;
+								}
+							}
+						}
+					}
+				}
+				detail::ResetP1DeferStreak(impl.vectorEngine);
 				producer->Submit(ahead.sourceSequence, generation, prepared.source, breakBefore);
 				impl.vectorEngine.motionAheadPrevKnown = true;
 				impl.vectorEngine.motionAheadPrevGeneration = generation;

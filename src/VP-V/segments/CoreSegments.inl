@@ -654,8 +654,11 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     // slot switched off is a choice (no substitute); DV tunnel pictures are never substituted.
     const FallbackCatalog::DebandPlan debandPlan = FallbackCatalog::PlanDeband(debandYieldedToVp,
         pipelineSlots.Runs(PipelineSlots::Id::RepairDeband), debander.Failures() > 0,
-        renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION, debander.LastError());
+        renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION, debander.LastFailureError());
     SyncFallback(debandPlan.fallback);
+    SyncFallback(FallbackCatalog::VpDeband(activeSettings.debandVp != "off", debandYieldedToVp,
+        pipelineSlots.Runs(PipelineSlots::Id::RepairDeband), debander.Failures() > 0,
+        renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION, debander.LastFailureError()));
     if (debandYieldedToVp && yieldedDebandOn && (temporalRenderer.Active() || !debandPlan.libplaceboYields))
     {
         frameParams.deband_params = &yieldedDebandParams;

@@ -810,15 +810,16 @@ namespace GrainUnitGpuTestsNs
 			GpuDevice dev;
 			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 			pl_gpu gpu = dev.Gpu();
-			// Plane 1: the usual grain on a gradient. Plane 2 (the control): a quiet plane, noise of about 0.03 codes, so the
-			// depth-scaled energy floor (1e-3 x 2^(2 (bits - 10)) codes^2) decides the Wiener share.
+			// Plane 1: the usual grain on a gradient. Plane 2 (the control): a quiet plane at a low pedestal (10 codes, avoiding
+			// float32 cancellation on 300.0f) with sigma = 0.015 codes so 2*N ~ 5e-4 lies between floorE(8-bit) and floorE(10-bit) = 1e-3,
+			// making both 8-bit and 12-bit genuinely diverge from the 10-bit law.
 			std::vector<double> quiet(static_cast<size_t>(kW) * kH);
 			{
 				std::mt19937 g(5u);
-				std::normal_distribution<double> noise(0.0, 0.03);
+				std::normal_distribution<double> noise(0.0, 0.015);
 				for (int yy = 0; yy < kH; ++yy)
 					for (int xx = 0; xx < kW; ++xx)
-						quiet[static_cast<size_t>(yy) * kW + xx] = 300.0 + 0.05 * xx + noise(g);
+						quiet[static_cast<size_t>(yy) * kW + xx] = 10.0 + 0.01 * xx + noise(g);
 			}
 			const std::vector<double> planes[2] = { MakeCodes(kW, kH, 31u), quiet };
 			pl_tex tex[2] = { UploadR16(gpu, planes[0], kW, kH, 64.0), UploadR16(gpu, planes[1], kW, kH, 64.0) };

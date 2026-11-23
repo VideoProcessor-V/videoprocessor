@@ -2,43 +2,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Shared unit U7 "cut / fade / flash judge" (doc 62 section 1.2): the one decision of "the picture changed" derived from two
-// P4 records, and the veto detector's grid + histogram cut rule. Moved unchanged from the lane (ClassifyEvents) and from
-// HdrVetoCutDetector::Observe so both call ONE implementation. Cut/fade/flash are never stored: every consumer derives them.
+// P4 records, and the veto detector's grid + histogram cut rule. Shared by the lane (ClassifyEvents), SkeletonModule, and
+// HdrVetoCutDetector::Observe so every consumer calls ONE implementation. Cut/fade/flash are never stored: every consumer derives them.
 //
-// Law (all thresholds relative to the frames' own spread (p99 - p1) or to normalised histogram mass):
-//   record pair  cut when the lane saw a FULL indicator; otherwise histogram distance > 0.50 is a cut (a shifted histogram
-//                of kept spread is a flash), > 0.25 or a continuity slip is "cut possible", a small same-sign step of
-//                mean and spread is a fade                                              (ClassifyEvents)
-//   fade run     (v3, 102b U7-MULTIFRAME-FADE-LAW) a slow fade moves each pair by much less than spread / 64, so the
-//                pair law alone misses most of it. A run is the consecutive record pairs whose p99 moves one way (a pair whose
-//                p99 holds stays in it; a cut, a flash, a reversal or a mean jump >= spread / 4 ends it; a repeated record leaves
-//                it as it is). A pair inside a run of two or more pairs is a fade when its mean and p99 both moved the run's way
-//                and the run, from its first record to this one, is a gain about a plausible black: the black implied by mean
-//                and p99 lies in FadeFit's window (kFadeMinBlack .. kFadeMaxBlack, 8-bit-like codes) and the gain differs from 1
-//                by more than kFadeRunMinGain. No frame rate, fade length or window length enters: the evidence is the
-//                accumulated gain, so a fade of any length at any rate is found once it has scaled the picture by 2 %. The
-//                caller keeps one FadeRun per stream and folds every pair in order; the pair law's fade still counts on its own
-//                                                                                       (FoldFadeRun)
-//   fade keep    (v3, owner 2026-11-15: partial reset on fades) a fade is not a restart: each fade frame's history keep is the
-//                share of contrast that frame kept (the run's min(gain, 1 / gain) step, the pair's spread ratio; the smaller of
-//                the laws that fired), so over a fade the history shrinks monotonically to the contrast the pre-fade picture
-//                still explains; 1 on a frame that is no fade               (FoldFadeRun frameKeep, PairFadeKeep, FrameFadeKeep)
-//   veto grid    cut = (grid difference >= G and histogram distance >= H) or histogram distance >= H_alone;
-//                entering or leaving black is a cut                                    (GridHistCut)
-//   fade fit     the matcher's M4 law on two frames' mean / spread: gain = clamp(sa / sb, 0.5, 2), offset = ma - gain * mb,
-//                active only inside the per-frame code window; keeps its switch in Params (FadeFit, the CPU twin of the
-//                matcher's GPU fade test; FadeKernelHeader / FadeKernelBody are that kernel, moved byte-for-byte from
-//                motion/estimation/matcher/DejudderWarp.cpp)
-//   trust cut    the matcher's frame-trust cut: the share of trusted blocks below the minimum share, confirmed by the coarse
-//                luma histogram distance (SourceStats::CoarseL1) above the cut threshold, or the share below 0.05 alone
-//                (TrustCut; GLSL TrustCutRegionalLine / TrustCutPlainLine)
-//   mean step    AdaptiveDownscale's scalar pass: first frame, or the frame's mean luma (8-bit codes) moved more than 20
-//                codes from the last one (MeanStepCut; GLSL MeanStepCutLine)
-//   sequence     (v2) the cut law T2 over the P4 cell grids of frames k-4..k+1: a local-motion-tolerant residual spike
-//                against its temporal context, with structure kept (a lighting change) or a return at k+1 judged a
-//                flash; one frame late, provisional without k+1 (ScorePair / CutTracker, below)
-// The indicator mapping: Strength::Full = the Indicator's FULL (cut), Strength::Minor = "cut possible".
-// Bill's SceneDetector (LibplaceboVideoRenderer) is NOT replaced: it stays the Original pathway.
+// First-principles 576-cell spatial affine fade law (owner ruling 2026-11-22 16:53 EST; zero fitted constants):
+//   - Decoupled global translation alignment (integer + symmetric sub-cell Gauss-Newton / Lucas-Kanade) over the 32x18 P4 cell grid
+//   - Global OLS affine fit cur ~= A * ref_aligned + c with implied black b = c / (1 - A) in (kFadeMinBlack, kFadeMaxBlack)
+//   - Motion-compensated L2 variance reduction over litCells: V_fade < 0.5 * V_id (R^2_delta > 0.50, with sqrt(V_id) > 0.5 code)
+//   - Motion-compensated spatial consensus (>= 75% of changing lit cells) and whole-picture coverage (>= 50% of lit cells)
+//   - Gridless fallback preserves the M4 (mean, spread) pair/run laws for tiny planes (< 32x18) and synthetic gridless records.
 //
 // Header-only, C++14, no Windows or GPU headers.
 #pragma once
@@ -56,10 +28,7 @@ namespace VpUnit
 namespace CutFadeJudge
 {
 // Bump on ANY change of a threshold, a rule above or the meaning of an output.
-// 2 (U7-accuracy, 2026-11-15): the record-sequence cut law T2 (CutTracker) over the P4 v2 cell grid; the pair law is kept.
-// 3 (C5, 2026-11-15; 102b U7-MULTIFRAME-FADE-LAW + U7-FADE-NO-HARDRESTART): the multi-frame fade law (FadeRun / FoldFadeRun) and the
-//   partial reset on fades (FadeRun::keep, PairFadeKeep, FrameFadeKeep; a fade is no restart). The cut law of 2 is unchanged.
-constexpr uint32_t kUnitVersion = 3;
+constexpr uint32_t kUnitVersion = 4;
 
 constexpr double kCutHistFrac = 0.50;          // normalised L1 distance / 2 above this: a different picture
 constexpr double kCutPossibleHistFrac = 0.25;  // above this (or a continuity slip): a cut is possible
@@ -67,90 +36,39 @@ constexpr int64_t kFadeMinDiv = 64;            // fade: |mean step| >= spread / 
 constexpr int64_t kFadeMaxDiv = 4;             // ... and < spread / 4 (more is a jump, not a ramp)
 constexpr int64_t kFlashMeanDiv = 4;           // flash: |mean step| >= spread / 4 with the spread kept within spread / 4
 
-struct EventSignals {
-    bool cut = false;
-    bool cutPossible = false;
-    bool fade = false;
-    bool flash = false;
-    uint32_t histDistance = 0;   // normalised L1 distance, 0..65535 (65535 = disjoint histograms)
-};
+// The fade law's numbers, one set for the CPU twin and the kernel text (FadeKernelBody carries the same literals; the pinned
+// kernel hash and FadeKernelCarriesTheLawsNumbers in SharedUnitsW1Tests tie the two).
+constexpr float kFadeMinStepCodes = 0.75f;   // |mean step| window per frame at the reference rate (the caller scales it to the source rate)
+constexpr float kFadeMaxStepCodes = 24.0f;
+constexpr float kFadeMinBlack = -12.0f;      // plausible implied black level (codes)
+constexpr float kFadeMaxBlack = 48.0f;
+constexpr float kFadeScaleEps = 0.01f;       // |1 - g| at or below this: the spread did not scale (a pan), no implied black
+constexpr float kFadeGainMin = 0.5f;         // gain = clamp(sa / sb, min, max)
+constexpr float kFadeGainMax = 2.0f;
+constexpr float kFadeMinSpread = 1.0f;       // both frames' spread (codes) must exceed this
+constexpr float kFadeDivGuard = 1e-3f;       // floor of a spread used as a divisor
+constexpr float kFadeNoBlack = 1e9f;         // the implied black when the spread did not scale
 
-inline uint32_t HistDistance(const SourceStats::Record& a, const SourceStats::Record& b)
-{
-    const double na = a.pixelCount > 0 ? double(a.pixelCount) : 1.0;
-    const double nb = b.pixelCount > 0 ? double(b.pixelCount) : 1.0;
-    const double frac = SourceStats::HalfL1Distance<double>(a.hist, b.hist, SourceStats::kHistBins, na, nb);   // 0..1
-    const double v = frac * 65535.0 + 0.5;
-    return v >= 65535.0 ? 65535u : uint32_t(v);
-}
+constexpr double kFadeRunMinGain = 0.02;      // |1 - gain| of the run (first record -> this one) above this: the picture was scaled
+constexpr double kP4CodesPerEightBit = 256.0; // P4 records hold 16-bit half-plane codes: one 8-bit-like code = 256 P4 codes
+constexpr uint32_t kFadeRunMinPairs = 2;      // a run needs two pairs (as FadeFit needs the previous pair's step): one pair is not a ramp
 
-inline EventSignals ClassifyEvents(const SourceStats::Record& prev, const SourceStats::Record& cur, bool fullBetween,
-                                   bool continuityBetween)
-{
-    VPV_COMPUTE_ONCE("U7", ::ComputeOnce::Variant(fullBetween ? 1 : 0, continuityBetween ? 1 : 0));
-    EventSignals e;
-    e.histDistance = HistDistance(prev, cur);
-    const double frac = double(e.histDistance) / 65535.0;
-    if (fullBetween) {
-        e.cut = true;
-        e.cutPossible = true;
-        return e;
-    }
-    if (continuityBetween)
-        e.cutPossible = true;
-    if (frac > kCutPossibleHistFrac)
-        e.cutPossible = true;
+// Derived P4-scale constants (16-bit half-plane codes).
+constexpr uint32_t kP4HistBinWidth = 65536u / SourceStats::kHistBins;                // 64: 1 10-bit P4 histogram bin
+constexpr uint32_t kBlackSpreadP4 = uint32_t(kFadeMinSpread * kP4CodesPerEightBit);  // 256: 1 8-bit code
+constexpr uint32_t kBlackMeanMaxP4 = uint32_t(kFadeMaxBlack * kP4CodesPerEightBit);  // 12288: 48 codes
+constexpr int64_t kMaxFadeStepP4 = int64_t(kFadeMaxStepCodes * kP4CodesPerEightBit); // 6144: 24 codes
+constexpr int64_t kMinFadeStepP4 = int64_t(kFadeMinStepCodes * kP4CodesPerEightBit); // 192: 0.75 codes
+constexpr double kBlackMinP4 = double(kFadeMinBlack) * kP4CodesPerEightBit;          // -3072: -12 codes
+constexpr double kBlackMaxP4 = double(kFadeMaxBlack) * kP4CodesPerEightBit;          // 12288: 48 codes
 
-    const uint32_t spreadPrev = prev.p99 > prev.p01 ? prev.p99 - prev.p01 : 0u;
-    const uint32_t spreadCur = cur.p99 > cur.p01 ? cur.p99 - cur.p01 : 0u;
-    const int64_t spread = int64_t(std::max<uint32_t>(1u, std::max(spreadPrev, spreadCur)));
-    const int64_t dMean = int64_t(cur.mean) - int64_t(prev.mean);
-    const int64_t aMean = dMean < 0 ? -dMean : dMean;
-    const int64_t dSpread = int64_t(spreadCur) - int64_t(spreadPrev);
-    const int64_t aSpread = dSpread < 0 ? -dSpread : dSpread;
+// Elementary textbook ratios for the 576-cell spatial affine fade law.
+constexpr double kFadeResidualReduction = 0.5;                // 50% reduction bar: lit-cell L2 variance explained > 50% (V_fade < 0.5 * V_id) & AlignGrid shift-improvement check
+constexpr double kFadeSpatialConsensus = 0.75;                // >= 3/4 of changing lit cells move in the fade direction
+constexpr double kFadeSpatialCoverage = 0.5;                  // >= 1/2 of lit cells participate in the fade direction & above-LSB StepStillMoving majority
+constexpr double kFadeCellStepEps = 0.5 * double(kFadeMinSpread); // 0.5 8-bit code = half-LSB quantization floor
 
-    if (frac > kCutHistFrac) {
-        // A shifted histogram of unchanged spread is a flash (or a cut between look-alike
-        // scenes: reported as a flash with cutPossible); any other jump is a cut.
-        if (aMean * kFlashMeanDiv >= spread && aSpread * 4 <= spread) {
-            e.flash = true;
-            e.cutPossible = true;
-        } else {
-            e.cut = true;
-            e.cutPossible = true;
-        }
-        return e;
-    }
-    // Gradual ramp: mean and contrast move together by a small step.
-    const bool sameSign = (dMean > 0 && dSpread > 0) || (dMean < 0 && dSpread < 0);
-    if (aMean * kFadeMinDiv >= spread && aMean * kFadeMaxDiv < spread && sameSign)
-        e.fade = true;
-    return e;
-}
-
-
-enum class Strength { None, Minor, Full };
-
-inline Strength StrengthOf(const EventSignals& e) { return e.cut ? Strength::Full : e.cutPossible ? Strength::Minor : Strength::None; }
-
-// ---- the record-sequence cut law "T2" (U7-accuracy, v2) ------------------------------------------------------------------
-// Inputs: the P4 v2 cell grid (32 x 18 cell means / 256) and histogram of each frame. Per adjacent pair (ScorePair):
-//   L  local residual: the previous grid gain/offset-fitted to the current one (least squares), then per cell the smallest
-//      |cur - fitted prev| over a +-2-cell neighbourhood (local motion tolerance), averaged over the interior cells
-//   G  mean |cur - prev| over the cells;  H  half L1 distance of the normalised histograms
-//   S  structure correlation: Pearson correlation of the log-grid gradients (log(g + 4), horizontal and vertical
-//      differences, each centred on its own mean, then pooled), the best over +-1-cell shifts (1 = same structure; a lighting change keeps it, a new shot does not)
-//   F  flatness of one frame: RMS of its log-grid gradients (F < 0.02: a flat / black frame without structure)
-// The decision for frame k (CutTracker) needs frame k+1 (the verdict is one frame late; without k+1 it is provisional):
-//   context  ctx = the largest L of frames k-3..k-1 (not part starts, cuts, flashes or lit frames) and of frame k+1
-//            (unless lit); lit(j) = S[j] >= 0.4 with neither j nor j-1 flat
-//   candidate  spike: L >= 6 and L >= 1.8 ctx + 1; or the low tier L >= 4, L >= 1.8 ctx + 1, k and k-1 not flat and S < 0.2;
-//              or hard: H > 0.5 and G >= 6
-//   verdict  ref = the last non-flat frame before k (up to 4 back). Flat k: a flash when k+1 returns to ref's structure,
-//            else a cut unless k-1 was a flash. Otherwise a flash when ref and k share structure (lighting), or when k+1
-//            returns to k-1 (grid and histogram within a third of the step); no cut right after a non-flat flash; else a cut.
-// strength = 1 on a cut, else min(1, L / (1.8 ctx + 1)) when L >= 6 (the soft evidence; 0 otherwise).
-// A frame without a grid (gridFound = 0, a plane under 32 x 18) falls back to ClassifyEvents (cut / flash, always confirmed).
+// ---- the record-sequence cut law "T2" (U7-accuracy, v2) constants & grid helpers -----------------------------------------
 constexpr int kGridW = int(SourceStats::kGridCols);
 constexpr int kGridH = int(SourceStats::kGridRows);
 constexpr int kLocalRadius = 2;                // L: the +-cell neighbourhood
@@ -225,7 +143,6 @@ inline void LocalResidual(const Grid& prev, const Grid& cur, double* residual, d
             sxx += dx * dx;
             sxy += dx * (cur.g[y][x] - my);
         }
-    // A flat previous grid fits as the current grid's mean (the least-squares minimum-norm fit gives the same values).
     const double a = sxx > 1e-12 ? sxy / sxx : 0.0;
     const double c = my - a * mx;
     double s = 0.0;
@@ -277,12 +194,454 @@ inline double Flatness(const Grid& a)
     return std::sqrt(s / double(kGridH * (kGridW - 1) + (kGridH - 1) * kGridW));
 }
 
-// The Pearson correlation of prev's gradient field shifted by (sy, sx) against cur's over the overlap. Each component (horizontal,
-// vertical) is centred on its OWN mean before the two are pooled: pooled under one mean, a picture ramping left to right and another
-// ramping top to bottom correlate (their mean gradients differ per component), and a new shot was read as the same structure.
+// ---- 576-cell spatial affine fade helpers -------------------------------------------------------------------------------
+
+struct GridFadeFit {
+    bool valid = false;
+    int dir = 0;
+    double gain = 1.0;
+    double black = double(kFadeNoBlack);
+    double eId = 0.0;
+    double eFade = 0.0;
+    double vx = 0.0;
+    double vy = 0.0;
+    int litCells = 0;
+    int sameSign = 0;
+    int oppSign = 0;
+};
+
+template <typename CellT>
+inline void LoadGridCodes(const CellT* cells, double out[kGridH][kGridW])
+{
+    for (int y = 0; y < kGridH; ++y)
+        for (int x = 0; x < kGridW; ++x)
+            out[y][x] = double(cells[y * kGridW + x]) * kGridScale;
+}
+
+inline double BilinearGrid(const double g[kGridH][kGridW], double y, double x)
+{
+    const double cy = (std::min)(double(kGridH - 1), (std::max)(0.0, y));
+    const double cx = (std::min)(double(kGridW - 1), (std::max)(0.0, x));
+    const int y0 = int(std::floor(cy));
+    const int x0 = int(std::floor(cx));
+    const int y1 = (std::min)(y0 + 1, kGridH - 1);
+    const int x1 = (std::min)(x0 + 1, kGridW - 1);
+    const double fy = cy - double(y0);
+    const double fx = cx - double(x0);
+    const double top = g[y0][x0] * (1.0 - fx) + g[y0][x1] * fx;
+    const double bot = g[y1][x0] * (1.0 - fx) + g[y1][x1] * fx;
+    return top * (1.0 - fy) + bot * fy;
+}
+
+inline void EvalInteriorAffine(const double aligned[kGridH][kGridW], const double cur[kGridH][kGridW],
+                               double* outA, double* outC, double* outSxx, double* outCorr, double* outEFade)
+{
+    constexpr int R = kLocalRadius;
+    constexpr double kN = double((kGridH - 2 * R) * (kGridW - 2 * R));
+    double sx = 0.0, sy = 0.0;
+    for (int y = R; y < kGridH - R; ++y)
+        for (int x = R; x < kGridW - R; ++x) {
+            sx += aligned[y][x];
+            sy += cur[y][x];
+        }
+    const double mx = sx / kN;
+    const double my = sy / kN;
+    double sxx = 0.0, syy = 0.0, sxy = 0.0;
+    for (int y = R; y < kGridH - R; ++y)
+        for (int x = R; x < kGridW - R; ++x) {
+            const double dx = aligned[y][x] - mx;
+            const double dy = cur[y][x] - my;
+            sxx += dx * dx;
+            syy += dy * dy;
+            sxy += dx * dy;
+        }
+    const double a = sxx > 1e-6 ? sxy / sxx : 0.0;
+    const double c = my - a * mx;
+    const double den = std::sqrt((sxx > 0.0 ? sxx : 0.0) * (syy > 0.0 ? syy : 0.0));
+    const double corr = den > 1e-12 ? sxy / den : 0.0;
+    double ef = 0.0;
+    for (int y = R; y < kGridH - R; ++y)
+        for (int x = R; x < kGridW - R; ++x)
+            ef += std::fabs(cur[y][x] - (a * aligned[y][x] + c));
+    *outA = a;
+    *outC = c;
+    *outSxx = sxx;
+    *outCorr = corr;
+    *outEFade = ef / kN;
+}
+
+inline void SampleInteriorPairShifted(const double ref[kGridH][kGridW], const double cur[kGridH][kGridW],
+                                      int iy, int ix, double fy, double fx,
+                                      double refS[kGridH][kGridW], double curS[kGridH][kGridW])
+{
+    constexpr int R = kLocalRadius;
+    const double hfy = 0.5 * fy;
+    const double hfx = 0.5 * fx;
+    for (int y = R; y < kGridH - R; ++y)
+        for (int x = R; x < kGridW - R; ++x) {
+            refS[y][x] = BilinearGrid(ref, double(y + iy) + hfy, double(x + ix) + hfx);
+            curS[y][x] = BilinearGrid(cur, double(y) - hfy, double(x) - hfx);
+        }
+}
+
+// Decoupled global translation alignment (integer Pearson correlation + sub-cell Lucas-Kanade).
+// Uses exact integer shift (iy, ix) plus symmetric fractional half-shifts (+0.5*f on ref, -0.5*f on cur)
+// so both grids experience identical bilinear frequency response with zero smoothing at integer shifts.
+inline void AlignGrid(const double ref[kGridH][kGridW], const double cur[kGridH][kGridW], int searchRadius,
+                      double refAligned[kGridH][kGridW], double curAligned[kGridH][kGridW],
+                      double* outVx, double* outVy)
+{
+    constexpr int R = kLocalRadius;
+    constexpr double kN = double((kGridH - 2 * R) * (kGridW - 2 * R));
+    const int rad = (std::min)(searchRadius, R);
+
+    // Step 1a: evaluate (0, 0) baseline, then search integer shifts [-rad .. +rad]^2 by Pearson correlation.
+    double candRef[kGridH][kGridW], candCur[kGridH][kGridW];
+    SampleInteriorPairShifted(ref, cur, 0, 0, 0.0, 0.0, refAligned, curAligned);
+    double a0 = 0.0, c0 = 0.0, sxx0 = 0.0, corr0 = 0.0, eFade0 = 0.0;
+    EvalInteriorAffine(refAligned, curAligned, &a0, &c0, &sxx0, &corr0, &eFade0);
+
+    int bestSy = 0, bestSx = 0;
+    double bestCorr = corr0;
+    double bestEFade = eFade0;
+
+    if (sxx0 > 1e-6) {
+        for (int sy = -rad; sy <= rad; ++sy) {
+            for (int sx = -rad; sx <= rad; ++sx) {
+                if (sy == 0 && sx == 0)
+                    continue;
+                SampleInteriorPairShifted(ref, cur, sy, sx, 0.0, 0.0, candRef, candCur);
+                double a = 0.0, c = 0.0, sxx = 0.0, corr = 0.0, eFade = 0.0;
+                EvalInteriorAffine(candRef, candCur, &a, &c, &sxx, &corr, &eFade);
+                if (sxx <= 1e-6)
+                    continue;
+                // Only depart from stationary (0, 0) if the shift genuinely improves the affine fit
+                // (prevents noise from choosing an arbitrary shift along a degenerate 1D linear ramp;
+                // 1 - corr check is scale-invariant for sparse bright regions on black backgrounds).
+                if (corr > bestCorr &&
+                    (eFade < eFade0 - kFadeCellStepEps || eFade < kFadeResidualReduction * eFade0 ||
+                     (1.0 - corr) < kFadeResidualReduction * (1.0 - corr0))) {
+                    bestCorr = corr;
+                    bestSy = sy;
+                    bestSx = sx;
+                    bestEFade = eFade;
+                }
+            }
+        }
+    }
+
+    double fx = 0.0;
+    double fy = 0.0;
+    SampleInteriorPairShifted(ref, cur, bestSy, bestSx, fy, fx, refAligned, curAligned);
+    double curEFade = bestEFade;
+    double curCorr = bestCorr;
+
+    // Step 1b: sub-cell Gauss-Newton / Lucas-Kanade refinement clamped to [-0.5, +0.5]^2 around (bestSx, bestSy).
+    // Uses exact 1-cell centered bilinear differences (+-0.5) so sharp edges do not suffer 2x central-difference overshoot.
+    constexpr int kAlignMaxIters = 4;
+    for (int iter = 0; iter < kAlignMaxIters; ++iter) {
+        double a = 0.0, c = 0.0, sxx = 0.0, corr = 0.0, ef = 0.0;
+        EvalInteriorAffine(refAligned, curAligned, &a, &c, &sxx, &corr, &ef);
+        if (sxx <= 1e-6 || !(a > 1e-6))
+            break;
+
+        const double hfy = 0.5 * fy;
+        const double hfx = 0.5 * fx;
+        double jxArr[kGridH][kGridW], jyArr[kGridH][kGridW];
+        double sumJx = 0.0, sumJy = 0.0;
+        for (int y = R; y < kGridH - R; ++y) {
+            for (int x = R; x < kGridW - R; ++x) {
+                const double rgx = BilinearGrid(ref, double(y + bestSy) + hfy, double(x + bestSx) + hfx + 0.5) -
+                                   BilinearGrid(ref, double(y + bestSy) + hfy, double(x + bestSx) + hfx - 0.5);
+                const double rgy = BilinearGrid(ref, double(y + bestSy) + hfy + 0.5, double(x + bestSx) + hfx) -
+                                   BilinearGrid(ref, double(y + bestSy) + hfy - 0.5, double(x + bestSx) + hfx);
+                const double cgx = BilinearGrid(cur, double(y) - hfy, double(x) - hfx + 0.5) -
+                                   BilinearGrid(cur, double(y) - hfy, double(x) - hfx - 0.5);
+                const double cgy = BilinearGrid(cur, double(y) - hfy + 0.5, double(x) - hfx) -
+                                   BilinearGrid(cur, double(y) - hfy - 0.5, double(x) - hfx);
+                const double jx = 0.5 * (a * rgx + cgx);
+                const double jy = 0.5 * (a * rgy + cgy);
+                jxArr[y][x] = jx;
+                jyArr[y][x] = jy;
+                sumJx += jx;
+                sumJy += jy;
+            }
+        }
+        const double meanJx = sumJx / kN;
+        const double meanJy = sumJy / kN;
+
+        double h11 = 0.0, h12 = 0.0, h22 = 0.0, b1 = 0.0, b2 = 0.0;
+        for (int y = R; y < kGridH - R; ++y) {
+            for (int x = R; x < kGridW - R; ++x) {
+                const double jx = jxArr[y][x] - meanJx;
+                const double jy = jyArr[y][x] - meanJy;
+                const double res = curAligned[y][x] - (a * refAligned[y][x] + c);
+                h11 += jx * jx;
+                h12 += jx * jy;
+                h22 += jy * jy;
+                b1 += jx * res;
+                b2 += jy * res;
+            }
+        }
+
+        double du = 0.0, dv = 0.0;
+        const double trace = h11 + h22;
+        const double det = h11 * h22 - h12 * h12;
+        if (det > 1e-6 * trace * trace && trace > 1e-6) {
+            du = (h22 * b1 - h12 * b2) / det;
+            dv = (h11 * b2 - h12 * b1) / det;
+        } else if (h11 > 1e-6 && h11 >= h22) {
+            du = b1 / h11;
+        } else if (h22 > 1e-6) {
+            dv = b2 / h22;
+        } else {
+            break;
+        }
+
+        const double minFx = (std::max)(-double(R) - double(bestSx), -0.5);
+        const double maxFx = (std::min)(double(R) - double(bestSx), 0.5);
+        const double minFy = (std::max)(-double(R) - double(bestSy), -0.5);
+        const double maxFy = (std::min)(double(R) - double(bestSy), 0.5);
+        const double nfx = (std::min)(maxFx, (std::max)(minFx, fx + du));
+        const double nfy = (std::min)(maxFy, (std::max)(minFy, fy + dv));
+        if (std::fabs(nfx - fx) < 1e-4 && std::fabs(nfy - fy) < 1e-4)
+            break;
+
+        SampleInteriorPairShifted(ref, cur, bestSy, bestSx, nfy, nfx, candRef, candCur);
+        double na = 0.0, nc = 0.0, nsxx = 0.0, ncorr = 0.0, newEFade = 0.0;
+        EvalInteriorAffine(candRef, candCur, &na, &nc, &nsxx, &ncorr, &newEFade);
+
+        const bool improved = (curEFade > kFadeCellStepEps)
+            ? (newEFade < curEFade)
+            : (newEFade < kFadeResidualReduction * curEFade ||
+               (newEFade < curEFade && (1.0 - ncorr) < kFadeResidualReduction * (1.0 - curCorr)));
+        if (!improved)
+            break;
+
+        fx = nfx;
+        fy = nfy;
+        curEFade = newEFade;
+        curCorr = ncorr;
+        for (int y = R; y < kGridH - R; ++y)
+            for (int x = R; x < kGridW - R; ++x) {
+                refAligned[y][x] = candRef[y][x];
+                curAligned[y][x] = candCur[y][x];
+            }
+    }
+
+    if (outVx)
+        *outVx = double(bestSx) + fx;
+    if (outVy)
+        *outVy = double(bestSy) + fy;
+}
+
+inline GridFadeFit FitGridFadeGrid(const double ref[kGridH][kGridW], const double cur[kGridH][kGridW], int searchRadius)
+{
+    constexpr int R = kLocalRadius;
+    constexpr double kN = double((kGridH - 2 * R) * (kGridW - 2 * R));
+    GridFadeFit fit;
+
+    double refAligned[kGridH][kGridW], curAligned[kGridH][kGridW];
+    AlignGrid(ref, cur, searchRadius, refAligned, curAligned, &fit.vx, &fit.vy);
+
+    // Step 2: Global OLS affine fit curAligned ~= A * refAligned + c over interior cells.
+    double sx = 0.0, sy = 0.0;
+    for (int y = R; y < kGridH - R; ++y)
+        for (int x = R; x < kGridW - R; ++x) {
+            sx += refAligned[y][x];
+            sy += curAligned[y][x];
+        }
+    const double mx = sx / kN;
+    const double my = sy / kN;
+    double sxx = 0.0, sxy = 0.0;
+    for (int y = R; y < kGridH - R; ++y)
+        for (int x = R; x < kGridW - R; ++x) {
+            const double dx = refAligned[y][x] - mx;
+            sxx += dx * dx;
+            sxy += dx * (curAligned[y][x] - my);
+        }
+    if (sxx <= 1e-6)
+        return fit;
+
+    const double A = sxy / sxx;
+    const double c = my - A * mx;
+    fit.gain = A;
+    if (!(A > 0.0) || std::fabs(1.0 - A) <= kFadeRunMinGain)
+        return fit;
+
+    const double b = c / (1.0 - A);
+    fit.black = b;
+    if (!(b > double(kFadeMinBlack) && b < double(kFadeMaxBlack)) || !(mx > b && my > b))
+        return fit;
+
+    // Step 3 & 4: Evaluate exact OLS L2 variance explained (> 50%: V_fade < 0.5 * V_id),
+    // spatial consensus (>= 75%), and whole-picture coverage (>= 50%) over litCells
+    // (invariant to letterbox bars and black backgrounds).
+    // Floor lit-cell classification by the frame's own minimum interior code so tiny OLS black-level noise
+    // below a constant black background (e.g. b=14 vs black=16) never pulls pure-black cells into litCells.
+    double minCell = double(kFadeNoBlack);
+    for (int y = R; y < kGridH - R; ++y)
+        for (int x = R; x < kGridW - R; ++x) {
+            const double m = (std::min)(refAligned[y][x], curAligned[y][x]);
+            if (m < minCell)
+                minCell = m;
+        }
+    const double litFloor = (std::max)(b, minCell);
+    const int dir = A > 1.0 ? 1 : -1;
+    fit.dir = dir;
+    double sumIdSq = 0.0, sumFadeSq = 0.0;
+    int litCells = 0, sameSign = 0, oppSign = 0;
+    for (int y = R; y < kGridH - R; ++y)
+        for (int x = R; x < kGridW - R; ++x) {
+            if ((std::max)(refAligned[y][x], curAligned[y][x]) > litFloor + double(kFadeMinSpread)) {
+                ++litCells;
+                const double delta = curAligned[y][x] - refAligned[y][x];
+                const double res = curAligned[y][x] - (A * refAligned[y][x] + c);
+                sumIdSq += delta * delta;
+                sumFadeSq += res * res;
+                if (double(dir) * delta > kFadeCellStepEps)
+                    ++sameSign;
+                else if (-double(dir) * delta > kFadeCellStepEps)
+                    ++oppSign;
+            }
+        }
+    fit.litCells = litCells;
+    fit.sameSign = sameSign;
+    fit.oppSign = oppSign;
+    if (litCells <= 0)
+        return fit;
+
+    const double vId = sumIdSq / double(litCells);
+    const double vFade = sumFadeSq / double(litCells);
+    fit.eId = std::sqrt(vId);
+    fit.eFade = std::sqrt(vFade);
+    if (!(fit.eId > kFadeCellStepEps && vFade < kFadeResidualReduction * vId))
+        return fit;
+    if (double(sameSign) < kFadeSpatialConsensus * double(sameSign + oppSign))
+        return fit;
+    if (double(sameSign) < kFadeSpatialCoverage * double(litCells))
+        return fit;
+
+    fit.valid = true;
+    return fit;
+}
+
+template <typename RefT, typename CurT>
+inline GridFadeFit FitGridFade(const RefT* refCells, const CurT* curCells, int searchRadius)
+{
+    double ref[kGridH][kGridW], cur[kGridH][kGridW];
+    LoadGridCodes(refCells, ref);
+    LoadGridCodes(curCells, cur);
+    return FitGridFadeGrid(ref, cur, searchRadius);
+}
+
+// Count interior cells brightening / darkening beyond half-LSB between two grids (for black-boundary monotonicity checks).
+inline void CountCellStepSigns(const uint32_t* prevCells, const uint32_t* curCells, int* outBrightened, int* outDarkened)
+{
+    constexpr int R = kLocalRadius;
+    int brightened = 0, darkened = 0;
+    for (int y = R; y < kGridH - R; ++y)
+        for (int x = R; x < kGridW - R; ++x) {
+            const double delta = (double(curCells[y * kGridW + x]) - double(prevCells[y * kGridW + x])) * kGridScale;
+            if (delta > kFadeCellStepEps)
+                ++brightened;
+            else if (delta < -kFadeCellStepEps)
+                ++darkened;
+        }
+    *outBrightened = brightened;
+    *outDarkened = darkened;
+}
+
+struct EventSignals {
+    bool cut = false;
+    bool cutPossible = false;
+    bool fade = false;
+    bool flash = false;
+    uint32_t histDistance = 0;   // normalised L1 distance, 0..65535 (65535 = disjoint histograms)
+};
+
+inline uint32_t HistDistance(const SourceStats::Record& a, const SourceStats::Record& b)
+{
+    const double na = a.pixelCount > 0 ? double(a.pixelCount) : 1.0;
+    const double nb = b.pixelCount > 0 ? double(b.pixelCount) : 1.0;
+    const double frac = SourceStats::HalfL1Distance<double>(a.hist, b.hist, SourceStats::kHistBins, na, nb);   // 0..1
+    const double v = frac * 65535.0 + 0.5;
+    return v >= 65535.0 ? 65535u : uint32_t(v);
+}
+
+inline EventSignals ClassifyEvents(const SourceStats::Record& prev, const SourceStats::Record& cur, bool fullBetween,
+                                   bool continuityBetween)
+{
+    VPV_COMPUTE_ONCE("U7", ::ComputeOnce::Variant(fullBetween ? 1 : 0, continuityBetween ? 1 : 0));
+    EventSignals e;
+    e.histDistance = HistDistance(prev, cur);
+    const double frac = double(e.histDistance) / 65535.0;
+    if (fullBetween) {
+        e.cut = true;
+        e.cutPossible = true;
+        return e;
+    }
+    if (continuityBetween)
+        e.cutPossible = true;
+    if (frac > kCutPossibleHistFrac)
+        e.cutPossible = true;
+
+    const uint32_t spreadPrev = prev.p99 > prev.p01 ? prev.p99 - prev.p01 : 0u;
+    const uint32_t spreadCur = cur.p99 > cur.p01 ? cur.p99 - cur.p01 : 0u;
+    const int64_t spread = int64_t(std::max<uint32_t>(1u, std::max(spreadPrev, spreadCur)));
+    const int64_t dMean = int64_t(cur.mean) - int64_t(prev.mean);
+    const int64_t aMean = dMean < 0 ? -dMean : dMean;
+    const int64_t dSpread = int64_t(spreadCur) - int64_t(spreadPrev);
+    const int64_t aSpread = dSpread < 0 ? -dSpread : dSpread;
+    const bool sameSign = (dMean > 0 && dSpread > 0) || (dMean < 0 && dSpread < 0);
+
+    if (frac > kCutHistFrac) {
+        // A shifted histogram of unchanged spread is a flash (or a cut between look-alike
+        // scenes: reported as a flash with cutPossible); any other jump is a cut.
+        if (aMean * kFlashMeanDiv >= spread && aSpread * 4 <= spread) {
+            e.flash = true;
+            e.cutPossible = true;
+        } else {
+            e.cut = true;
+            e.cutPossible = true;
+        }
+        return e;
+    }
+
+    if (prev.gridFound && cur.gridFound) {
+        if (spreadPrev > kBlackSpreadP4 && spreadCur > kBlackSpreadP4 &&
+            aMean * kFadeMaxDiv < spread && aSpread * kFadeMaxDiv < spread) {
+            Grid gp, gc;
+            GridOf(prev, &gp);
+            GridOf(cur, &gc);
+            if (Flatness(gp) >= kFlatF && Flatness(gc) >= kFlatF) {
+                const GridFadeFit fit = FitGridFade(prev.cells, cur.cells, kShiftRadius);
+                e.fade = fit.valid && std::fabs(1.0 - fit.gain) < 1.0 / double(kFadeMaxDiv);
+            }
+        }
+        return e;
+    }
+
+    // Gridless fallback (tiny planes < 32x18 or synthetic gridless records): M4 (mean, spread) pair law.
+    if (sameSign && spreadPrev > kBlackSpreadP4 && spreadCur > kBlackSpreadP4 &&
+        aMean * kFadeMaxDiv < spread && aSpread * kFadeMaxDiv < spread && aSpread * kFadeMinDiv >= spread) {
+        const double g = double(spreadCur) / double(spreadPrev);
+        if (std::fabs(1.0 - g) > kFadeRunMinGain) {
+            const double black = (double(cur.mean) - g * double(prev.mean)) / (1.0 - g);
+            if (black > kBlackMinP4 && black < kBlackMaxP4)
+                e.fade = true;
+        }
+    }
+    return e;
+}
+
+enum class Strength { None, Minor, Full };
+
+inline Strength StrengthOf(const EventSignals& e) { return e.cut ? Strength::Full : e.cutPossible ? Strength::Minor : Strength::None; }
+
+// ---- the record-sequence cut law "T2" (U7-accuracy, v2) ------------------------------------------------------------------
 inline double ShiftedCorrelation(const Gradients& p, const Gradients& c, int sy, int sx)
 {
-    // Pairs: p at (y + sy', x + sx') with c at (y, x), where for a shift s >= 0 p starts at s and c at 0 (and the reverse).
     struct Sums {
         double sa = 0.0, sb = 0.0, saa = 0.0, sbb = 0.0, sab = 0.0, n = 0.0;
         void Add(double va, double vb)
@@ -349,22 +708,18 @@ inline PairScore ScorePair(const Grid& prev, const Grid& cur)
 
 struct CutVerdict {
     uint64_t seq = 0;
-    bool known = false;       // a verdict exists for `seq`
-    bool confirmed = false;   // judged with frame seq+1 (or the part ended at seq); false = provisional
+    bool known = false;
+    bool confirmed = false;
     bool cut = false;
     bool flash = false;
-    bool candidate = false;   // cut possible: the frame passed the candidate rule (cut, flash, or vetoed)
-    bool partStart = false;   // first frame after a discontinuity / reset: never a cut
-    bool gridLaw = false;     // T2 judged it (false: the ClassifyEvents fallback, no grid)
-    float strength = 0.0f;    // 0..1 (1 = cut)
-    float bar = 0.0f;         // the spike bar the frame was judged against (1.8 ctx + 1; 0: not judged by the grid law), for margins
+    bool candidate = false;
+    bool partStart = false;
+    bool gridLaw = false;
+    float strength = 0.0f;
+    float bar = 0.0f;
     PairScore score;
 };
 
-// The stateful judge over the record sequence. Push each frame's P4 record in order; the return value is the CONFIRMED
-// verdict of the previous frame (known = false when there is none). Provisional() judges the last pushed frame without
-// its successor. A non-contiguous seq ends the part: the pending frame is judged without a successor and the new frame
-// starts a new part.
 class CutTracker {
 public:
     void Reset()
@@ -389,7 +744,7 @@ public:
             if (contiguous)
                 ScoreAgainst(pending_, &next);
             out = Judge(&pending_, contiguous ? &next : nullptr);
-            out.confirmed = true;   // final: its successor was seen, or the part ended at it
+            out.confirmed = true;
             pending_.verdict.confirmed = true;
             Commit(pending_);
             if (!contiguous)
@@ -415,12 +770,12 @@ private:
     struct Entry {
         uint64_t seq = 0;
         Grid grid;
-        SourceStats::Record rec;   // only kept for the no-grid fallback
+        SourceStats::Record rec;
         bool fallbackRec = false;
         bool partStart = false;
         bool flat = false;
         double F = 1.0;
-        PairScore score;           // this frame against the one before it (scored at its own Push)
+        PairScore score;
         bool scored = false;
         CutVerdict verdict;
     };
@@ -435,7 +790,7 @@ private:
         return v;
     }
 
-    const Entry* Back(int i) const   // i = 1: the frame before the pending one, ... (nullptr past the part)
+    const Entry* Back(int i) const
     {
         return i >= 1 && i <= count_ ? &history_[(head_ + kHistory - i) % kHistory] : nullptr;
     }
@@ -461,7 +816,6 @@ private:
         return j.scored && j.score.S >= kSameStructure && !j.flat && before != nullptr && !before->flat;
     }
 
-    // Judge `k` (the pending frame, its score against k-1 already set) with its successor `ahead` (nullptr: none).
     CutVerdict Judge(Entry* k, const Entry* ahead) const
     {
         if (k->partStart) {
@@ -475,7 +829,6 @@ private:
         v.confirmed = ahead != nullptr;
         const Entry* prev = Back(1);
         if (!k->scored || prev == nullptr) {
-            // No grid on this pair: the pair law (ClassifyEvents) on the two records.
             if (prev != nullptr && k->fallbackRec == prev->fallbackRec && k->fallbackRec) {
                 const EventSignals e = ClassifyEvents(prev->rec, k->rec, false, false);
                 v.cut = e.cut;
@@ -490,7 +843,6 @@ private:
         v.gridLaw = true;
         v.score = k->score;
         const double L = k->score.L;
-        // Context: back frames (not starts, cuts, flashes or lit) and the ahead frame (unless lit).
         double ctx = 0.0;
         bool anyCtx = false;
         for (int i = 1; i <= kBackFrames; ++i) {
@@ -524,8 +876,34 @@ private:
             k->verdict = v;
             return v;
         }
+        // Emergence of a genuine brightening fade-in from flat dark/black: prev is flat dark (< kFadeMaxBlack),
+        // prev -> k brightens monotonically within a single-frame fade step (< kFadeMaxStepCodes) with zero interior
+        // cells darkening > kFadeCellStepEps, and k -> ahead is a verified 576-cell affine brightening fade.
+        if (prev->flat && ahead != nullptr && ahead->grid.valid) {
+            double prevMean = 0.0, kMean = 0.0;
+            for (int y = 0; y < kGridH; ++y)
+                for (int x = 0; x < kGridW; ++x) {
+                    prevMean += prev->grid.g[y][x];
+                    kMean += k->grid.g[y][x];
+                }
+            prevMean /= double(kGridH * kGridW);
+            kMean /= double(kGridH * kGridW);
+            if (prevMean < double(kFadeMaxBlack) && kMean > prevMean && (kMean - prevMean) < double(kFadeMaxStepCodes)) {
+                int darkened = 0;
+                for (int y = kLocalRadius; y < kGridH - kLocalRadius; ++y)
+                    for (int x = kLocalRadius; x < kGridW - kLocalRadius; ++x)
+                        if (k->grid.g[y][x] - prev->grid.g[y][x] < -kFadeCellStepEps)
+                            ++darkened;
+                if (darkened == 0) {
+                    const GridFadeFit aheadFit = FitGridFadeGrid(k->grid.g, ahead->grid.g, kShiftRadius);
+                    if (aheadFit.valid && aheadFit.dir > 0) {
+                        k->verdict = v;
+                        return v;
+                    }
+                }
+            }
+        }
         v.candidate = true;
-        // ref = the last non-flat frame before k (stops at a part start).
         int refIndex = 1;
         while (refIndex < kRefFrames) {
             const Entry* r = Back(refIndex);
@@ -546,11 +924,11 @@ private:
             }
         } else if (!ref->flat && ref->grid.valid
                    && (ref == prev ? k->score.S : StructureCorrelation(ref->grid, k->grid)) >= kSameStructure) {
-            v.flash = true;   // structure kept: a lighting change
+            v.flash = true;
         } else if (aheadScored && ahead->grid.valid
                    && MeanCellDifference(prev->grid, ahead->grid) * kReturnFraction < k->score.G
                    && HistHalfL1(prev->grid, ahead->grid) * kReturnFraction < k->score.H) {
-            v.flash = true;   // k+1 returns to k-1
+            v.flash = true;
         } else if (!(prevFlash && !prev->flat)) {
             v.cut = true;
         }
@@ -568,25 +946,9 @@ private:
 };
 
 // ---- the soft reset on a high-confidence non-cut candidate (cut_soft_reset; C5 batch B) --------------------------------------
-// Owner 2026-11-15 08:35 EST (question window, U7 Q4; refs\owner-decisions-2026-11-07.md): "need the bar fairly high here. Mid scene
-// firing is a major problem and the motion vectors correct themselves fairly quickly even without a reset." So a full restart
-// stays for the delivered cut only. A frame whose CONFIRMED verdict is a candidate that is neither a cut nor a flash, and that is not
-// a fade frame (the fade law owns those with its own partial reset, unconditional), gets a PARTIAL reset only when its strength
-// reaches kSoftResetBar; below the bar there is no reset at all. A provisional verdict never fires (as it never delivers a cut).
-// Additive: no output of the unit changes (the verdict, the strength and the scene product are as before), so kUnitVersion stays 3.
-// What can fire today: the T2 strength is min(1, L / bar_T2) and a candidate passed the spike bar (L >= bar_T2) or the hard rule, so
-// a spike candidate's strength is 1; the candidates that are neither cut nor flash are the ones vetoed by "no cut right after a flash".
-// PROVISIONAL BAR (pending the D8 truth run; D8PARTIAL "soft" fields): 1.0, the highest value a strength takes, i.e. only a vetoed
-// candidate whose residual fully passed the cut law's spike bar. Lower it only from D8 / U7DIAG truth, with zero soft resets off the
-// labelled cuts on the cut-free rows (pan, flash, fade, static); precision first.
-constexpr float kSoftResetBar = 1.0f;     // PROVISIONAL pending the D8 truth run (owner 08:35: "the threshold for firing should be high")
-// How much of the history a soft reset of strength s removes: keep = 1 - kSoftResetDepth * s (amplitude; energy holders square it).
-// PROVISIONAL with the bar: half the amplitude at full strength, so a soft reset is never a restart (owner 08:35: partial for
-// high-but-not-certain confidence, full restart for confirmed cuts only).
+constexpr float kSoftResetBar = 1.0f;
 constexpr float kSoftResetDepth = 0.5f;
 
-// The soft-reset strength of one frame's verdict: its strength when the rule fires, else 0. `cut` = the frame is a cut (its own
-// verdict or the delivered cut); `fade` = the frame is a fade frame.
 inline float SoftResetStrength(bool confirmed, bool candidate, bool cut, bool flash, bool fade, float strength)
 {
     if (!confirmed || !candidate || cut || flash || fade || !(strength >= kSoftResetBar))
@@ -594,17 +956,14 @@ inline float SoftResetStrength(bool confirmed, bool candidate, bool cut, bool fl
     return strength < 1.0f ? strength : 1.0f;
 }
 
-// The history keep of a soft reset of strength s (1 = no reduction): 1 - kSoftResetDepth * s, s clamped to [0, 1].
 inline float SoftResetKeep(float softStrength)
 {
     const float s = softStrength > 0.0f ? (softStrength < 1.0f ? softStrength : 1.0f) : 0.0f;
     return 1.0f - kSoftResetDepth * s;
 }
 
-// ---- the veto detector's rule (HdrVetoCutDetector)---------------------------------------------------------------------
-
-// The veto detector's thresholds, tuned on the HFR clips sampled at 10-20 Hz (the single source; HdrVetoCutDetector aliases them).
-constexpr float kGridDifference = 24.0f;          // mean absolute difference of the 16 x 9 cell means (10-bit codes)
+// ---- the veto detector's rule (HdrVetoCutDetector) ---------------------------------------------------------------------
+constexpr float kGridDifference = 24.0f;
 constexpr float kHistogramDistance = 0.15f;
 constexpr float kHistogramDistanceAlone = 0.35f;
 
@@ -614,7 +973,6 @@ struct GridHistThresholds {
     float histogramDistanceAlone = kHistogramDistanceAlone;
 };
 
-// Mean absolute difference of two equally long arrays (the grid difference), summed in index order.
 template <class T>
 inline T MeanAbsDifference(const T* a, const T* b, size_t n)
 {
@@ -630,38 +988,24 @@ inline bool GridHistCut(float grid, float histogram, const GridHistThresholds& t
 }
 
 // ---- the fade fit (M4) -------------------------------------------------------------------------------------------------
-
-// The fade law's numbers, one set for the CPU twin and the kernel text (FadeKernelBody carries the same literals; the pinned
-// kernel hash and FadeKernelCarriesTheLawsNumbers in SharedUnitsW1Tests tie the two).
-constexpr float kFadeMinStepCodes = 0.75f;   // |mean step| window per frame at the reference rate (the caller scales it to the source rate)
-constexpr float kFadeMaxStepCodes = 24.0f;
-constexpr float kFadeMinBlack = -12.0f;      // plausible implied black level (codes)
-constexpr float kFadeMaxBlack = 48.0f;
-constexpr float kFadeScaleEps = 0.01f;       // |1 - g| at or below this: the spread did not scale (a pan), no implied black
-constexpr float kFadeGainMin = 0.5f;         // gain = clamp(sa / sb, min, max)
-constexpr float kFadeGainMax = 2.0f;
-constexpr float kFadeMinSpread = 1.0f;       // both frames' spread (codes) must exceed this
-constexpr float kFadeDivGuard = 1e-3f;       // floor of a spread used as a divisor
-constexpr float kFadeNoBlack = 1e9f;         // the implied black when the spread did not scale
-
 struct FadeParams {
-    bool enabled = true;                         // the matcher's fade_match switch
-    float minStepCodes = kFadeMinStepCodes;      // |mean step| window per frame, scaled by the caller to the source rate (never a literal rate)
+    bool enabled = true;
+    float minStepCodes = kFadeMinStepCodes;
     float maxStepCodes = kFadeMaxStepCodes;
-    float minBlack = kFadeMinBlack;              // plausible implied black level (codes)
+    float minBlack = kFadeMinBlack;
     float maxBlack = kFadeMaxBlack;
 };
 
 struct FadeIn {
-    float meanA = 0, meanB = 0, spreadA = 0, spreadB = 0;   // picture mean and standard deviation of A and B (8-bit-like codes)
-    float previousStep = 0;                                  // the previous pair's mean step (sign and size must continue)
+    float meanA = 0, meanB = 0, spreadA = 0, spreadB = 0;
+    float previousStep = 0;
 };
 
 struct FadeOut {
     bool fading = false;
-    float gain = 1.0f;      // multiply B by gain ...
-    float offset = 0.0f;    // ... and add offset to match A
-    float step = 0.0f;      // mean step B - A
+    float gain = 1.0f;
+    float offset = 0.0f;
+    float step = 0.0f;
 };
 
 inline FadeOut FadeFit(const FadeIn& in, const FadeParams& p = FadeParams())
@@ -683,24 +1027,29 @@ inline FadeOut FadeFit(const FadeIn& in, const FadeParams& p = FadeParams())
     return o;
 }
 
-// ---- the multi-frame fade law (unit version 3) ---------------------------------------------------------------------------
+// ---- the multi-frame fade law (unit version 4) ---------------------------------------------------------------------------
 
-constexpr double kFadeRunMinGain = 0.02;      // |1 - gain| of the run (first record -> this one) above this: the picture was scaled
-constexpr double kP4CodesPerEightBit = 256.0; // P4 records hold 16-bit half-plane codes: one 8-bit-like code = 256 P4 codes
-constexpr uint32_t kFadeRunMinPairs = 2;      // a run needs two pairs (as FadeFit needs the previous pair's step): one pair is not a ramp
-
-// The run that ends at one record (the caller keeps one per stream, starting empty). end* name that record, so a run is only
-// continued by the pair that starts there (a restarted frame numbering or a skipped frame starts a new run).
 struct FadeRun {
-    int32_t direction = 0;      // +1 the picture brightens (p99 rises), -1 it darkens, 0 no run
+    int32_t direction = 0;      // +1 the picture brightens, -1 it darkens, 0 no run
     uint32_t pairs = 0;         // pairs in the run
-    uint32_t baseMean = 0;      // the run's first record: mean and p99 (P4 codes)
+    uint32_t fadePairs = 0;     // confirmed fade pairs inside the run
+    uint32_t baseMean = 0;      // the run's anchor record: mean and p99 (P4 codes)
     uint32_t baseP99 = 0;
-    uint32_t refSpread = 0;     // the largest p99 - p01 inside the run (the mean-jump limit's reference)
+    uint32_t blackBaseMean = 0; // original flat-black origin mean / p99 when blackOrigin is true
+    uint32_t blackBaseP99 = 0;
+    uint32_t refSpread = 0;     // the largest p99 - p01 inside the run
     uint32_t endPixels = 0;     // the record the run ends at
     uint32_t endMean = 0, endP01 = 0, endP50 = 0, endP99 = 0;
-    // The partial reset (v3): the share of the run's first picture's contrast the picture at the run's end still has, as the run's
-    // fades measured it (min(gain, 1 / gain) about the fitted black, never rising inside the run). 1 = nothing reduced yet.
+    bool baseGridValid = false;
+    bool midGridValid = false;
+    bool blackOrigin = false;
+    uint16_t baseCells[kGridW * kGridH] = {};
+    uint16_t midCells[kGridW * kGridH] = {};
+    uint16_t blackBaseCells[kGridW * kGridH] = {};
+    double cumVx = 0.0, cumVy = 0.0;
+    double midCumVx = 0.0, midCumVy = 0.0;
+    double anchorKeep = 1.0;
+    double midAnchorKeep = 1.0;
     double keep = 1.0;
 };
 
@@ -718,10 +1067,14 @@ inline void FadeRunEndAt(FadeRun& run, const SourceStats::Record& r)
     run.endP99 = r.p99;
 }
 
-// Fold the pair (prev, cur), whose pair verdict is `e` (ClassifyEvents on the same two records), into `run` (the run ending at
-// prev; any other run is dropped first). Returns the multi-frame fade verdict of the pair; the frame's fade is this OR e.fade.
-// `frameKeep` (v3, may be null) gets the run's partial-reset factor of this frame: 1 unless the pair is a run fade, else
-// keep_after / keep_before of the run (see FadeRun::keep), in (0, 1]; 0 when the run has scaled the picture to its black.
+inline void CopyCellsTo16(const uint32_t* src, uint16_t* dst)
+{
+    for (int i = 0; i < kGridW * kGridH; ++i)
+        dst[i] = uint16_t(src[i] > 65535u ? 65535u : src[i]);
+}
+
+inline double PairFadeKeep(const SourceStats::Record& prev, const SourceStats::Record& cur);
+
 inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur, const EventSignals& e, FadeRun& run,
                         double* frameKeep = nullptr)
 {
@@ -729,31 +1082,460 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
         *frameKeep = 1.0;
     if (!FadeRunEndsAt(run, prev))
         run = FadeRun();
-    if (e.cut || e.flash) {
+
+    const int64_t dMean = int64_t(cur.mean) - int64_t(prev.mean);
+    const int64_t dP99 = int64_t(cur.p99) - int64_t(prev.p99);
+    const uint32_t spreadPrev = prev.p99 > prev.p01 ? prev.p99 - prev.p01 : 0u;
+    const uint32_t spreadCur = cur.p99 > cur.p01 ? cur.p99 - cur.p01 : 0u;
+    const uint32_t spread = (std::max)(1u, (std::max)(spreadPrev, spreadCur));
+    const int64_t dSpread = int64_t(spreadCur) - int64_t(spreadPrev);
+    const int64_t aSpread = dSpread < 0 ? -dSpread : dSpread;
+    const int64_t aMean = dMean < 0 ? -dMean : dMean;
+    const int32_t dirP99 = dP99 > 0 ? 1 : dP99 < 0 ? -1 : 0;
+    const bool hasGrid = prev.gridFound != 0 && cur.gridFound != 0;
+    const bool activeFade = run.keep < 1.0 || run.fadePairs >= kFadeRunMinPairs;
+    const int64_t contRef = int64_t((std::max)(run.refSpread, spread));
+
+    // Hard-cut / flash protection: flash always resets.
+    if (e.flash) {
         run = FadeRun();
         FadeRunEndAt(run, cur);
         return false;
     }
-    const int64_t dMean = int64_t(cur.mean) - int64_t(prev.mean);
-    const int64_t dP99 = int64_t(cur.p99) - int64_t(prev.p99);
-    if (dMean == 0 && dP99 == 0 && e.histDistance == 0) {
-        FadeRunEndAt(run, cur);   // a repeated record: nothing changed, the run stays as it is
+
+    // Helper: check spatial brightening consensus from flat-black origin cells -> cur cells.
+    auto BlackOriginBrightening = [&]() -> bool {
+        if (!hasGrid)
+            return dirP99 > 0 && dSpread > 0;
+        constexpr int R = kLocalRadius;
+        const double b0 = double(run.blackBaseMean) * kGridScale;
+        int litCells = 0, sameSign = 0, oppSign = 0;
+        for (int y = R; y < kGridH - R; ++y)
+            for (int x = R; x < kGridW - R; ++x) {
+                const double r0 = double(run.blackBaseCells[y * kGridW + x]) * kGridScale;
+                const double c0 = double(cur.cells[y * kGridW + x]) * kGridScale;
+                if ((std::max)(r0, c0) > b0 + double(kFadeMinSpread)) {
+                    ++litCells;
+                    const double delta = c0 - r0;
+                    if (delta > kFadeCellStepEps)
+                        ++sameSign;
+                    else if (delta < -kFadeCellStepEps)
+                        ++oppSign;
+                }
+            }
+        return litCells > 0 &&
+            double(sameSign) >= kFadeSpatialConsensus * double(sameSign + oppSign) &&
+            double(sameSign) >= kFadeSpatialCoverage * double(litCells);
+    };
+
+    // Helper: check that prev -> cur is genuinely brightening across lit cells (rejects static 50/50 noise on dim shots
+    // after a black->dim hard cut while still accepting sub-0.5-code fade-in steps from black).
+    auto StepBrightening = [&](const double prevA[kGridH][kGridW], const double curA[kGridH][kGridW]) -> bool {
+        constexpr int R = kLocalRadius;
+        double minC = double(kFadeNoBlack);
+        for (int y = R; y < kGridH - R; ++y)
+            for (int x = R; x < kGridW - R; ++x) {
+                const double m = (std::min)(prevA[y][x], curA[y][x]);
+                if (m < minC)
+                    minC = m;
+            }
+        const double floor = (std::max)(double(run.blackBaseMean) * kGridScale, minC);
+        int brightEps = 0, darkEps = 0, brightZero = 0, darkZero = 0;
+        for (int y = R; y < kGridH - R; ++y)
+            for (int x = R; x < kGridW - R; ++x) {
+                if ((std::max)(prevA[y][x], curA[y][x]) > floor + double(kFadeMinSpread)) {
+                    const double delta = curA[y][x] - prevA[y][x];
+                    if (delta > kFadeCellStepEps)
+                        ++brightEps;
+                    else if (delta < -kFadeCellStepEps)
+                        ++darkEps;
+                    if (delta > 0.0)
+                        ++brightZero;
+                    else if (delta < 0.0)
+                        ++darkZero;
+                }
+            }
+        if (brightEps + darkEps > 0)
+            return darkEps == 0 || double(brightEps) >= kFadeSpatialConsensus * double(brightEps + darkEps);
+        return brightZero > 0 && double(brightZero) >= kFadeSpatialConsensus * double(brightZero + darkZero);
+    };
+
+    // Helper: check that lit cells of prev are darkening toward flat/near-flat black cur with zero brightening.
+    // Requires litPrev > 0 so two consecutive flat-black frames (black hold) never trigger a collapse fade.
+    auto CollapseToBlackOk = [&]() -> bool {
+        if (!hasGrid)
+            return spreadPrev > kBlackSpreadP4;
+        constexpr int R = kLocalRadius;
+        const double bCur = double(cur.mean) * kGridScale;
+        int litPrev = 0, darkZero = 0, brightEps = 0;
+        for (int y = R; y < kGridH - R; ++y)
+            for (int x = R; x < kGridW - R; ++x) {
+                const double p0 = double(prev.cells[y * kGridW + x]) * kGridScale;
+                const double c0 = double(cur.cells[y * kGridW + x]) * kGridScale;
+                const double delta = c0 - p0;
+                if (delta > kFadeCellStepEps)
+                    ++brightEps;
+                if (p0 > bCur + double(kFadeMinSpread)) {
+                    ++litPrev;
+                    if (delta < 0.0)
+                        ++darkZero;
+                }
+            }
+        return brightEps == 0 && litPrev > 0 && darkZero > 0;
+    };
+
+    if (e.cut) {
+        int brightened = 0, darkened = 0;
+        if (hasGrid)
+            CountCellStepSigns(prev.cells, cur.cells, &brightened, &darkened);
+
+        // (1) Active fade-out collapsing into flat/near-flat black (never triggers on a hard cut to a textured dark shot).
+        bool curFlatBlack = spreadCur <= kBlackSpreadP4;
+        if (!curFlatBlack && hasGrid) {
+            Grid gc;
+            GridOf(cur, &gc);
+            curFlatBlack = Flatness(gc) < kFlatF;
+        }
+        const bool activeFadeOutToBlack = run.direction < 0 && activeFade && dMean < 0 && curFlatBlack &&
+            cur.mean < kBlackMeanMaxP4 && aMean < kMaxFadeStepP4 && aMean * kFadeMaxDiv < contRef &&
+            CollapseToBlackOk();
+        if (activeFadeOutToBlack) {
+            ++run.pairs;
+            run.refSpread = (std::max)(run.refSpread, spread);
+            FadeRunEndAt(run, cur);
+            const double fk = PairFadeKeep(prev, cur);
+            if (frameKeep)
+                *frameKeep = fk;
+            run.keep *= fk;
+            ++run.fadePairs;
+            return true;
+        }
+
+        // (2) Black-origin fade-in continuation across near-black histogram bin quantization.
+        bool blackOriginContinue = false;
+        GridFadeFit blackFit;
+        if (run.blackOrigin && run.direction > 0 && run.pairs >= 1u && dMean > 0 &&
+            aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4) {
+            if (hasGrid) {
+                double prevG[kGridH][kGridW], curG[kGridH][kGridW];
+                double prevA[kGridH][kGridW], curA[kGridH][kGridW];
+                LoadGridCodes(prev.cells, prevG);
+                LoadGridCodes(cur.cells, curG);
+                double svx = 0.0, svy = 0.0;
+                AlignGrid(prevG, curG, kShiftRadius, prevA, curA, &svx, &svy);
+                const bool stepUp = StepBrightening(prevA, curA);
+                if (!run.baseGridValid && spreadPrev > kBlackSpreadP4) {
+                    CopyCellsTo16(prev.cells, run.baseCells);
+                    run.baseGridValid = true;
+                    run.midGridValid = false;
+                    run.cumVx = 0.0;
+                    run.cumVy = 0.0;
+                    run.anchorKeep = run.keep;
+                }
+                if (run.baseGridValid)
+                    blackFit = FitGridFade(run.baseCells, cur.cells, kLocalRadius);
+                if (!blackFit.valid && spreadPrev > kBlackSpreadP4)
+                    blackFit = FitGridFade(prev.cells, cur.cells, kShiftRadius);
+
+                Grid gp, gc;
+                GridOf(prev, &gp);
+                GridOf(cur, &gc);
+                const bool prevNearBlack = spreadPrev <= kBlackSpreadP4 || Flatness(gp) < kFlatF;
+                const bool curNearBlack = spreadCur <= kBlackSpreadP4 && Flatness(gc) < kFlatF;
+                if (blackFit.valid && blackFit.dir > 0 && stepUp) {
+                    blackOriginContinue = true;
+                } else if (prevNearBlack && curNearBlack && stepUp && cur.mean > prev.mean &&
+                           prev.mean >= run.blackBaseMean && cur.p99 > run.blackBaseP99 &&
+                           BlackOriginBrightening()) {
+                    blackOriginContinue = true;
+                }
+            } else {
+                blackOriginContinue = (dirP99 > 0 && dSpread > 0);
+            }
+        }
+        if (blackOriginContinue) {
+            ++run.pairs;
+            run.refSpread = (std::max)(run.refSpread, spread);
+            FadeRunEndAt(run, cur);
+            double fk = PairFadeKeep(prev, cur);
+            if (hasGrid && blackFit.valid) {
+                const double k = run.anchorKeep * (std::min)(blackFit.gain, 1.0 / blackFit.gain);
+                if (k < run.keep) {
+                    fk = run.keep > 0.0 ? k / run.keep : 0.0;
+                    run.keep = k;
+                } else {
+                    fk = 1.0;
+                }
+            } else {
+                run.keep *= fk;
+            }
+            if (frameKeep)
+                *frameKeep = fk;
+            ++run.fadePairs;
+            return true;
+        }
+
+        // Any other cut resets the run; optionally seed black-origin fade-in pair 1 (ALWAYS returns false on pair 1).
+        const bool failedBlackOrigin = run.blackOrigin && run.direction > 0;
+        run = FadeRun();
+        if (!failedBlackOrigin && spreadPrev <= kBlackSpreadP4 && prev.mean < kBlackMeanMaxP4 && dMean > 0 && dP99 > 0 &&
+            aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4 && (!hasGrid || darkened == 0)) {
+            run.direction = 1;
+            run.pairs = 1u;
+            run.blackOrigin = true;
+            run.baseMean = prev.mean;
+            run.baseP99 = prev.p99;
+            run.blackBaseMean = prev.mean;
+            run.blackBaseP99 = prev.p99;
+            run.refSpread = spread;
+            if (hasGrid) {
+                CopyCellsTo16(prev.cells, run.blackBaseCells);
+                run.baseGridValid = false;
+            }
+        }
+        FadeRunEndAt(run, cur);
         return false;
     }
-    const uint32_t spreadPrev = prev.p99 > prev.p01 ? prev.p99 - prev.p01 : 0u;
-    const uint32_t spreadCur = cur.p99 > cur.p01 ? cur.p99 - cur.p01 : 0u;
-    const uint32_t spread = (std::max)(1u, (std::max)(spreadPrev, spreadCur));
-    const int32_t dir = dP99 > 0 ? 1 : dP99 < 0 ? -1 : 0;
-    const int64_t aMean = dMean < 0 ? -dMean : dMean;
-    const bool continues = run.direction != 0 && (dir == run.direction || dir == 0) &&
-        aMean * kFadeMaxDiv < int64_t((std::max)(run.refSpread, spread));
+
+    if (dMean == 0 && dP99 == 0 && e.histDistance == 0) {
+        FadeRunEndAt(run, cur);   // repeated record: hold run unchanged
+        return false;
+    }
+
+    // ---- Grid path: 576-cell spatial affine fade law ----------------------------------------------------------------------
+    if (hasGrid) {
+        constexpr int R = kLocalRadius;
+        constexpr double kN = double((kGridH - 2 * R) * (kGridW - 2 * R));
+
+        // Motion-compensated adjacent step (prev -> cur) for run tracking and post-fade plateau detection.
+        double prevG[kGridH][kGridW], curG[kGridH][kGridW];
+        double prevAligned[kGridH][kGridW], curAligned[kGridH][kGridW];
+        LoadGridCodes(prev.cells, prevG);
+        LoadGridCodes(cur.cells, curG);
+        double stepVx = 0.0, stepVy = 0.0;
+        AlignGrid(prevG, curG, kShiftRadius, prevAligned, curAligned, &stepVx, &stepVy);
+        double stepSum = 0.0;
+        for (int y = R; y < kGridH - R; ++y)
+            for (int x = R; x < kGridW - R; ++x)
+                stepSum += curAligned[y][x] - prevAligned[y][x];
+        const double stepMean = stepSum / kN;
+        const int32_t stepDir = stepMean > 0.0 ? 1 : (stepMean < 0.0 ? -1 : (dMean > 0 ? 1 : (dMean < 0 ? -1 : 0)));
+
+        const bool fromBlack = spreadPrev <= kBlackSpreadP4 && prev.mean < kBlackMeanMaxP4 &&
+            dMean > 0 && dP99 > 0 && aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4;
+        const bool jump = aMean * kFadeMaxDiv >= contRef && !(run.blackOrigin && dMean > 0 && aMean < kMaxFadeStepP4);
+        const bool continues = run.direction != 0 && !jump && (stepDir == run.direction || stepDir == 0);
+
+        if (!continues) {
+            run = FadeRun();
+            if (stepDir == 0 || (!fromBlack && aMean * kFadeMaxDiv >= int64_t(spread))) {
+                FadeRunEndAt(run, cur);
+                return false;
+            }
+            run.direction = stepDir;
+            run.blackOrigin = fromBlack;
+            run.baseMean = prev.mean;
+            run.baseP99 = prev.p99;
+            run.refSpread = spread;
+            if (fromBlack) {
+                run.blackBaseMean = prev.mean;
+                run.blackBaseP99 = prev.p99;
+                CopyCellsTo16(prev.cells, run.blackBaseCells);
+                run.baseGridValid = false;
+            } else {
+                CopyCellsTo16(prev.cells, run.baseCells);
+                run.baseGridValid = true;
+            }
+            run.cumVx = 0.0;
+            run.cumVy = 0.0;
+            run.anchorKeep = 1.0;
+        }
+
+        // If blackOrigin has emerged to non-flat prev, snapshot the first lit spatial anchor for OLS regression.
+        if (run.blackOrigin && !run.baseGridValid && spreadPrev > kBlackSpreadP4) {
+            CopyCellsTo16(prev.cells, run.baseCells);
+            run.baseMean = prev.mean;
+            run.baseP99 = prev.p99;
+            run.baseGridValid = true;
+            run.midGridValid = false;
+            run.cumVx = 0.0;
+            run.cumVy = 0.0;
+            run.anchorKeep = run.keep;
+        }
+
+        // Integrate per-frame camera displacement so baseCells stays inside the +-kLocalRadius alignment window during pans.
+        bool midCapturedThisFrame = false;
+        if (run.baseGridValid) {
+            run.cumVx += stepVx;
+            run.cumVy += stepVy;
+            if (run.midGridValid) {
+                run.midCumVx += stepVx;
+                run.midCumVy += stepVy;
+            }
+            if ((std::max)(std::fabs(run.cumVx), std::fabs(run.cumVy)) > double(kLocalRadius)) {
+                if (run.midGridValid) {
+                    for (int i = 0; i < kGridW * kGridH; ++i)
+                        run.baseCells[i] = run.midCells[i];
+                    run.anchorKeep = run.midAnchorKeep;
+                    run.cumVx = run.midCumVx;
+                    run.cumVy = run.midCumVy;
+                    run.midGridValid = false;
+                } else {
+                    CopyCellsTo16(prev.cells, run.baseCells);
+                    run.anchorKeep = run.keep;
+                    run.cumVx = stepVx;
+                    run.cumVy = stepVy;
+                }
+            }
+            if (!run.midGridValid && (std::max)(std::fabs(run.cumVx), std::fabs(run.cumVy)) >= double(kShiftRadius)) {
+                CopyCellsTo16(cur.cells, run.midCells);
+                run.midGridValid = true;
+                run.midAnchorKeep = run.keep;
+                run.midCumVx = 0.0;
+                run.midCumVy = 0.0;
+                midCapturedThisFrame = true;
+            }
+        }
+
+        ++run.pairs;
+        run.refSpread = (std::max)(run.refSpread, spread);
+        FadeRunEndAt(run, cur);
+
+        if (run.pairs < kFadeRunMinPairs || stepDir != run.direction) {
+            if (e.fade && stepDir == run.direction)
+                ++run.fadePairs;
+            return false;
+        }
+
+        // Helper: verify that the current motion-aligned step (prev -> cur) is still moving in run.direction
+        // (supports sub-0.5-code slow fades and scrolling text while stopping immediately on static plateaus).
+        auto StepStillMoving = [&](double black) -> bool {
+            const bool stationary = (stepVx == 0.0 && stepVy == 0.0);
+            if (stationary) {
+                if (dMean * int64_t(run.direction) <= 0)
+                    return false;
+            } else {
+                if (stepMean * double(run.direction) <= 0.0)
+                    return false;
+            }
+            double minC = double(kFadeNoBlack);
+            for (int y = R; y < kGridH - R; ++y)
+                for (int x = R; x < kGridW - R; ++x) {
+                    const double m = (std::min)(prevAligned[y][x], curAligned[y][x]);
+                    if (m < minC)
+                        minC = m;
+                }
+            const double floor = (std::max)(black, minC);
+            int sSameEps = 0, sOppEps = 0;
+            int sSameZero = 0, sOppZero = 0;
+            for (int y = R; y < kGridH - R; ++y)
+                for (int x = R; x < kGridW - R; ++x) {
+                    if ((std::max)(prevAligned[y][x], curAligned[y][x]) > floor + double(kFadeMinSpread)) {
+                        const double delta = curAligned[y][x] - prevAligned[y][x];
+                        if (double(run.direction) * delta > kFadeCellStepEps)
+                            ++sSameEps;
+                        else if (-double(run.direction) * delta > kFadeCellStepEps)
+                            ++sOppEps;
+                        if (double(run.direction) * delta > 0.0)
+                            ++sSameZero;
+                        else if (-double(run.direction) * delta > 0.0)
+                            ++sOppZero;
+                    }
+                }
+            // Cumulative FitGridFade(base -> cur) already enforces strict kFadeSpatialConsensus (0.75) over all lit cells.
+            // On a single-frame step of a slow fade most cells step < kFadeCellStepEps (0.5 code), so require simple
+            // majority (kFadeSpatialCoverage = 0.5) on the sparse above-LSB subset to tolerate local subject motion.
+            if (sSameEps + sOppEps > 0)
+                return double(sSameEps) >= kFadeSpatialCoverage * double(sSameEps + sOppEps);
+            return sSameZero > 0 && double(sSameZero) >= kFadeSpatialConsensus * double(sSameZero + sOppZero);
+        };
+
+        // 1. Cumulative spatial affine fit: baseCells -> cur.cells (searchRadius = kLocalRadius = 2).
+        if (run.baseGridValid) {
+            GridFadeFit fit = FitGridFade(run.baseCells, cur.cells, kLocalRadius);
+            if (fit.valid && fit.dir == run.direction && StepStillMoving(fit.black)) {
+                const double k = run.anchorKeep * (std::min)(fit.gain, 1.0 / fit.gain);
+                if (k < run.keep) {
+                    if (frameKeep)
+                        *frameKeep = run.keep > 0.0 ? k / run.keep : 0.0;
+                    run.keep = k;
+                }
+                ++run.fadePairs;
+                if (midCapturedThisFrame)
+                    run.midAnchorKeep = run.keep;
+                return true;
+            }
+        }
+
+        // 2. Rolling adjacent re-anchor for fast pan + fade (prev.cells -> cur.cells, searchRadius = kShiftRadius = 1).
+        {
+            const GridFadeFit adjFit = FitGridFade(prev.cells, cur.cells, kShiftRadius);
+            if (adjFit.valid && adjFit.dir == run.direction && StepStillMoving(adjFit.black)) {
+                CopyCellsTo16(prev.cells, run.baseCells);
+                run.baseGridValid = true;
+                run.midGridValid = false;
+                run.cumVx = stepVx;
+                run.cumVy = stepVy;
+                run.anchorKeep = run.keep;
+                const double k = run.anchorKeep * (std::min)(adjFit.gain, 1.0 / adjFit.gain);
+                if (k < run.keep) {
+                    if (frameKeep)
+                        *frameKeep = run.keep > 0.0 ? k / run.keep : 0.0;
+                    run.keep = k;
+                }
+                ++run.fadePairs;
+                return true;
+            }
+        }
+
+        // 3. Black-origin near-black fade-in continuation while prev is near-flat and cur is still flat black (<= 1 code & < kFlatF).
+        if (run.blackOrigin && run.direction > 0 && dMean > 0 && aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4) {
+            Grid gp, gc;
+            GridOf(prev, &gp);
+            GridOf(cur, &gc);
+            if ((spreadPrev <= kBlackSpreadP4 || Flatness(gp) < kFlatF) &&
+                (spreadCur <= kBlackSpreadP4 && Flatness(gc) < kFlatF) &&
+                cur.mean > prev.mean && prev.mean >= run.blackBaseMean && cur.p99 > run.blackBaseP99 &&
+                StepBrightening(prevAligned, curAligned) && BlackOriginBrightening()) {
+                const double fk = PairFadeKeep(prev, cur);
+                if (frameKeep)
+                    *frameKeep = fk;
+                run.keep *= fk;
+                ++run.fadePairs;
+                return true;
+            }
+        }
+
+        // 4. Active fade-out collapsing into flat/near-flat black without triggering e.cut (e.g. sparse title card on black).
+        if (run.direction < 0 && activeFade && dMean < 0 && cur.mean < kBlackMeanMaxP4 &&
+            aMean < kMaxFadeStepP4 && aMean * kFadeMaxDiv < contRef) {
+            Grid gc;
+            GridOf(cur, &gc);
+            if ((spreadCur <= kBlackSpreadP4 || Flatness(gc) < kFlatF) && CollapseToBlackOk()) {
+                const double fk = PairFadeKeep(prev, cur);
+                if (frameKeep)
+                    *frameKeep = fk;
+                run.keep *= fk;
+                ++run.fadePairs;
+                return true;
+            }
+        }
+
+        if (e.fade)
+            ++run.fadePairs;
+        return false;
+    }
+
+    // ---- Gridless fallback (planes < 32x18 or synthetic gridless records): v3 M4 linear fade-run law ----------------------
+    const bool continues = run.direction != 0 && (dirP99 == run.direction || dirP99 == 0) &&
+        aMean * kFadeMaxDiv < contRef;
     if (!continues) {
         run = FadeRun();
-        if (dir == 0 || aMean * kFadeMaxDiv >= int64_t(spread)) {   // nothing to start from, or a jump: no ramp starts here
+        if (dirP99 == 0 || aMean * kFadeMaxDiv >= int64_t(spread)) {
             FadeRunEndAt(run, cur);
             return false;
         }
-        run.direction = dir;
+        run.direction = dirP99;
         run.baseMean = prev.mean;
         run.baseP99 = prev.p99;
         run.refSpread = spread;
@@ -761,42 +1543,31 @@ inline bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Reco
     ++run.pairs;
     run.refSpread = (std::max)(run.refSpread, spread);
     FadeRunEndAt(run, cur);
-    if (run.pairs < kFadeRunMinPairs || dir != run.direction || dMean * run.direction <= 0)
+    if (run.pairs < kFadeRunMinPairs || dirP99 != run.direction || dMean * run.direction <= 0)
         return false;
-    // A gain about a black b: (cur - b) = g * (base - b) for both the mean and the p99.
     const double m0 = double(run.baseMean), p0 = double(run.baseP99), m1 = double(cur.mean), p1 = double(cur.p99);
     const double den = (p0 - p1) - (m0 - m1);
     if (den == 0.0)
         return false;
     const double black = (m1 * p0 - m0 * p1) / den;
-    if (!(black > double(kFadeMinBlack) * kP4CodesPerEightBit && black < double(kFadeMaxBlack) * kP4CodesPerEightBit) || p0 <= black ||
-        m0 <= black)
+    if (!(black > kBlackMinP4 && black < kBlackMaxP4) || p0 <= black || m0 <= black)
         return false;
     const double gain = (p1 - black) / (p0 - black);
-    const bool fade = std::fabs(1.0 - gain) > kFadeRunMinGain && (gain - 1.0) * double(run.direction) > 0.0 && (m1 - m0) * double(run.direction) > 0.0;
+    const bool fade = std::fabs(1.0 - gain) > kFadeRunMinGain && (gain - 1.0) * double(run.direction) > 0.0 &&
+        (m1 - m0) * double(run.direction) > 0.0;
     if (fade) {
-        // The partial reset (v3): the contrast the run's first picture still explains, min(gain, 1 / gain) (a fade out: the gain;
-        // a fade in: its inverse). Never rising inside a run, so the history's reduction over the run is monotone.
         const double k = gain <= 0.0 ? 0.0 : (std::min)(gain, 1.0 / gain);
         if (k < run.keep) {
             if (frameKeep)
                 *frameKeep = run.keep > 0.0 ? k / run.keep : 0.0;
             run.keep = k;
         }
+        ++run.fadePairs;
     }
     return fade;
 }
 
-// ---- the partial reset on fades (unit version 3; owner 2026-11-15 09:20, 102b U7-FADE-NO-HARDRESTART) ---------------------------
-// A fade is NOT a restart: no consumer starts over mid-fade. Each fade frame reduces the history by the share of the picture's
-// contrast that changed on that frame, so the pre-fade picture's detail is not carried into what the fade leads to, and the
-// product of the factors over a fade is the contrast the pre-fade picture still explains (a fade to black: 0). A full restart
-// stays for cuts (the sequence law's delivered cut) only.
-//   keep(frame) = min(run factor (FoldFadeRun's frameKeep), pair factor (PairFadeKeep)) over the laws that called the frame a fade;
-//                 1 when it is no fade. Amplitude domain; a consumer holding energies (squared codes) applies keep^2.
-// No frame count, rate or window enters: the factor is the measured contrast change of the frame itself.
-
-// The pair law's factor for a pair it calls a fade: the smaller spread over the larger (p99 - p01, the pair law's own measure).
+// ---- the partial reset on fades (unit version 4) -------------------------------------------------------------------------
 inline double PairFadeKeep(const SourceStats::Record& prev, const SourceStats::Record& cur)
 {
     const uint32_t sp = prev.p99 > prev.p01 ? prev.p99 - prev.p01 : 0u;
@@ -805,7 +1576,6 @@ inline double PairFadeKeep(const SourceStats::Record& prev, const SourceStats::R
     return hi == 0u ? 1.0 : double(lo) / double(hi);
 }
 
-// The frame's history keep (see above): pairFade / runFade = the two laws' verdicts, runKeep = FoldFadeRun's frameKeep.
 inline double FrameFadeKeep(const SourceStats::Record& prev, const SourceStats::Record& cur, bool pairFade, bool runFade, double runKeep)
 {
     double k = 1.0;
@@ -817,29 +1587,20 @@ inline double FrameFadeKeep(const SourceStats::Record& prev, const SourceStats::
 }
 
 // ---- the matcher's trust cut (M3) and AdaptiveDownscale's mean-step cut -------------------------------------------------------
+constexpr float kTrustCutShareAlone = 0.05f;
+constexpr float kMeanStepCutCodes = 20.0f;
 
-constexpr float kTrustCutShareAlone = 0.05f;   // a trusted-block share below this is a cut without the histogram's word
-constexpr float kMeanStepCutCodes = 20.0f;     // AdaptiveDownscale: the frame's mean luma (8-bit codes) moved more than this = a cut
-
-// The matcher's frame-trust cut. `regional` = the histogram confirmation is available (dejudder_regional_hold); without it a
-// share below the minimum alone is a cut. histDistance = SourceStats::CoarseL1, cutHistogram = the dejudder_cut_histogram setting.
 inline bool TrustCut(float share, float minShare, float histDistance, float cutHistogram, bool regional)
 {
     return regional ? (share < minShare && (histDistance > cutHistogram || share < kTrustCutShareAlone)) : share < minShare;
 }
 
-// AdaptiveDownscale's cut: no state yet (previousInitialised < 0.5, the state's alpha channel) or the mean luma stepped.
 inline bool MeanStepCut(float previousInitialised, float previousMean, float mean)
 {
     return previousInitialised < 0.5f || std::fabs(mean - previousMean) > kMeanStepCutCodes;
 }
 
 // ---- GLSL -----------------------------------------------------------------------------------------------------------------
-
-// The matcher's M4 fade test, byte-for-byte what the matcher used to carry (FADE_HEADER / FADE_BODY): one work group of 256 on
-// the 1/32 pyramids (samplers l2_a, l2_b, optionally `picture` under PICTURE, state image state_io, uniforms fade_lo / fade_hi
-// = the per-frame step window kFadeMinStepCodes / kFadeMaxStepCodes scaled by the caller to the source rate). state_io holds
-// (gain, offset, active, this pair's mean step); the CPU twin is FadeFit. Both literals begin with a newline.
 inline const char* FadeKernelHeader()
 {
     return R"GLSL(
@@ -901,8 +1662,6 @@ if (i == 0u) {
 )GLSL";
 }
 
-// The trust pass's cut lines (FRAME_TRUST_BODY), spliced by the matcher under its own `#ifdef REGIONAL` / `#else`; they read
-// share, min_share, hist_d (CoarseHistBody) and the uniform cut_hist. No leading newline, one line each.
 inline const char* TrustCutRegionalLine()
 {
     return R"GLSL(    bool cut = share < min_share && (hist_d > cut_hist || share < 0.05);
@@ -915,8 +1674,6 @@ inline const char* TrustCutPlainLine()
 )GLSL";
 }
 
-// AdaptiveDownscale's FINAL_BODY cut line, spliced after `vec4 prev = imageLoad(state_io, ivec2(0));` (prev.a = initialised,
-// prev.b = the last mean luma) and before the scale smoothing. No leading newline.
 inline const char* MeanStepCutLine()
 {
     return R"GLSL(    bool cut = prev.a < 0.5 || abs(luma_mean - prev.b) > 20.0;

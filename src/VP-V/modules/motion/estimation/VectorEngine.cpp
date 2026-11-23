@@ -9,6 +9,7 @@
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <libplacebo/d3d11.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/OnDemandIssue.h>
 #include <VP-V/modules/motion/estimation/MotionRecordPublish.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/P1AcquireSource.h>
@@ -312,6 +313,20 @@ namespace VpMotion
 		depth.producerRunning = motionProducer && motionProducer->Running();
 		depth.queuedFutureFrames = in.queuedFutureFrames->load(std::memory_order_acquire);
 		const ProducerPlan::DepthOutput plan = ProducerPlan::Depth(depth);
+		if (motionProducer && motionProducer->Running())
+		{
+			const int rawDemand = plan.ahead.configured > 0
+				? plan.ahead.configured
+				: (life.onDemandWanted ? VpMotion::kOnDemandMaxLookAhead : 0);
+			if (rawDemand > 0)
+				SyncP1AheadDemand(static_cast<uint8_t>((std::min)(MotionAhead::kMaxLead, rawDemand)));
+			else
+				ClearP1AheadDemand();
+		}
+		else
+		{
+			ClearP1AheadDemand();
+		}
 		const MotionAhead::Decision& ahead = plan.ahead;
 		motionAheadDepth.store(plan.storedDepth, std::memory_order_release);
 		motionAheadConfigured.store(plan.storedConfigured, std::memory_order_release);
@@ -438,8 +453,17 @@ namespace VpMotion
 		if (vectorDemand.mode != VectorDemand::Mode::Off && (vectorStatsTick == 0 || now - vectorStatsTick >= 5000))
 		{
 			vectorStatsTick = now;
-			DebugLog::Log("Vector engine: %llu pairs (ahead hits %llu, misses %llu)", vectorPairs,
-				static_cast<unsigned long long>(motionAheadHits), static_cast<unsigned long long>(motionAheadMisses));
+			const unsigned long long p1Deferred = motionAheadP1Deferred.load(std::memory_order_relaxed);
+			const unsigned long long shallowBack = vectorShallowBackwardPairs.load(std::memory_order_relaxed);
+			std::string statsLine = "Vector engine: " + std::to_string(vectorPairs) +
+				" pairs (ahead hits " + std::to_string(static_cast<unsigned long long>(motionAheadHits)) +
+				", misses " + std::to_string(static_cast<unsigned long long>(motionAheadMisses));
+			if (p1Deferred > 0)
+				statsLine += ", P1 deferred " + std::to_string(p1Deferred);
+			if (shallowBack > 0)
+				statsLine += ", shallow backward " + std::to_string(shallowBack);
+			statsLine += ")";
+			DebugLog::Log("%s", statsLine.c_str());
 			const FlowReadCounters fr = FlowReads();   // a CPU flow reader exists (FlowOf): its absences are visible, by reason
 			if (fr.requests)
 				DebugLog::Log("Vector engine: flow reads %llu, served %llu, absent %llu (no producer %llu, no pair %llu, invalidated %llu, size unknown %llu)",
@@ -461,6 +485,23 @@ namespace VpMotion
 					p2Detail += " (last: " + P2CpuFormLastDecline() + ")";
 				DiagnosticHistory::Global().RecordDecision("vector-p2-cpu-form", p2Detail.c_str(),
 					static_cast<int64_t>(p2Served), static_cast<int64_t>(p2Declined), 0.0, 0.0);
+			}
+			if (p1Deferred > motionAheadP1DeferredRecorded_)
+			{
+				motionAheadP1DeferredRecorded_ = p1Deferred;
+				const uint64_t lastSeq = motionAheadP1LastDeferredSeq.load(std::memory_order_relaxed);
+				const unsigned long long maxStreak = motionAheadP1DeferMaxStreak.load(std::memory_order_relaxed);
+				const std::string detail = "NVOF ahead deferred (waiting for P1) " + std::to_string(p1Deferred) +
+					" (last seq " + std::to_string(lastSeq) + ", max streak " + std::to_string(maxStreak) + ")";
+				DiagnosticHistory::Global().RecordDecision("motion-p1-defer", detail.c_str(),
+					static_cast<int64_t>(p1Deferred), static_cast<int64_t>(maxStreak), static_cast<double>(lastSeq), 0.0);
+			}
+			if (shallowBack > vectorShallowBackwardRecorded_)
+			{
+				vectorShallowBackwardRecorded_ = shallowBack;
+				const std::string detail = "ForwardShallow backward pairs served " + std::to_string(shallowBack);
+				DiagnosticHistory::Global().RecordDecision("vector-shallow-back", detail.c_str(),
+					static_cast<int64_t>(shallowBack), static_cast<int64_t>(vectorPairs), 0.0, 0.0);
 			}
 		}
 	}
@@ -510,10 +551,28 @@ namespace VpMotion
 		NoteFlowSourceWidth(width);
 		motionProducer->SetTargetSize(engineW, engineH);
 		MotionAhead::FlowPtr flow;
-		const uint64_t from = sequence, to = nextSequence;
+		uint64_t from = sequence, to = nextSequence;
+		bool usedShallowBackward = false;
 		if (nextSequence == sequence + 1 &&
 			motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))   // W1-C2a A1 / S2
 			flow = FindCurrent(from, to);   // C2a-F 2: never a pair of another stream generation
+		// ForwardShallow (games low-latency queue, target_frames = 2 / queueAheadCapacity = 1):
+		// frame N+1 is submitted by RunQueueWalk milliseconds before ServeStatistics(N, N+1), so
+		// async NVOF cannot finish (N, N+1) in the same dequeue tick without adding queue depth.
+		// Fall back to the already-completed incoming pair (N-1, N) (same pair FlowOf(N) serves)
+		// under the exact same motionValidity.PairServes epoch guard, so SourceMonitorPan / MotionIntent
+		// receive real NVOF statistics with zero added queue latency.
+		if (!flow && vectorDemand.reason == VectorDemand::Reason::ForwardShallow && sequence > 1 &&
+			motionValidity.PairServes(sequence - 1, sequence, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
+		{
+			flow = FindCurrent(sequence - 1, sequence);
+			if (flow)
+			{
+				from = sequence - 1;
+				to = sequence;
+				usedShallowBackward = true;
+			}
+		}
 		NoteGlobalPair(flow != nullptr);
 		// SK-MV row 24: the frame-analysis record carries the shared engine's global, or "absent" (never a stale value). The store is
 		// null while frame_analysis_store is off / the Original pathway runs.
@@ -528,6 +587,8 @@ namespace VpMotion
 		}
 		++motionAheadHits;
 		++vectorPairs;
+		if (usedShallowBackward)
+			vectorShallowBackwardPairs.fetch_add(1, std::memory_order_relaxed);
 		NoteVectorsDelivered("engine ahead");
 		// W1-C4: the pair's ONE sample, read by the record and by the one feed (MotionRecordPublish.h).
 		const MotionRecord::PairSample sample = MotionRecord::SampleOf(from, to, flow->global[0], halvings, facts.pictureHeight);
@@ -672,8 +733,44 @@ namespace VpMotion
 			Engines().Add(host_, this);
 	}
 
+	void VectorEngine::SyncP1AheadDemand(uint8_t aheadDepth)
+	{
+		if (host_ == nullptr || aheadDepth == 0 || Vpv::Hub::ExtensionHub::Instance().OriginalPathway(host_))
+		{
+			ClearP1AheadDemand();
+			return;
+		}
+		Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand();
+		if (demand == nullptr)
+			return;
+		const uint64_t erasures = demand->ExternalErasures(host_);
+		if (p1AheadDeclared_ && p1AheadDepth_ == aheadDepth && p1AheadErasures_ == erasures)
+			return;
+		VpSkeleton::ConsumerDecl d;
+		d.id = 0x0610;   // distinct from VectorDemand (0x0100), Camera (0x0200), Catalog (0x0300), LedDrive (0x0600)
+		d.name = "motion ahead";
+		VpSkeleton::AddConsume(d, VpSkeleton::kP1HalfLuma, 0);
+		d.aheadDepth = aheadDepth;
+		demand->SetExternalDemand(host_, &p1AheadDemandOwner_, std::vector<VpSkeleton::ConsumerDecl>(1, d), std::vector<VpSkeleton::ProductId>());
+		p1AheadDeclared_ = true;
+		p1AheadDepth_ = aheadDepth;
+		p1AheadErasures_ = erasures;
+	}
+
+	void VectorEngine::ClearP1AheadDemand()
+	{
+		if (!p1AheadDeclared_)
+			return;
+		if (host_ != nullptr)
+			if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
+				demand->ClearExternalDemand(host_, &p1AheadDemandOwner_);
+		p1AheadDeclared_ = false;
+		p1AheadDepth_ = 0;
+	}
+
 	VectorEngine::~VectorEngine()
 	{
+		ClearP1AheadDemand();
 		// Contract (SetPreEstimateHook): the consumer clears its hook before the engine goes; say so if it did not.
 		if (preEstimateHook_.load(std::memory_order_acquire) != nullptr)
 			DebugLog::Log("Vector engine: destroyed with the pre-estimate hook still registered (the consumer must clear it first)");
@@ -1600,17 +1697,33 @@ namespace VpMotion
 
 	std::string VectorEngine::ProducerStatusSegment() const
 	{
-		std::string ring;
+		std::string out;
+		auto append = [&out](const std::string& seg) {
+			if (seg.empty())
+				return;
+			if (!out.empty())
+				out += "; ";
+			out += seg;
+		};
 		if (motionProducer)
 		{
 			const MotionAhead::Producer::RequestStats s = motionProducer->GetRequestStats();
 			if (s.ringMisses != 0)
-				ring = "engine-luma ring misses " + std::to_string(s.ringMisses) + " (last: " + s.lastRingMiss + ")";
+				append("engine-luma ring misses " + std::to_string(s.ringMisses) + " (last: " + s.lastRingMiss + ")");
 		}
 		// BBP-A-COUNTS-CTRLALTD: the P2 CPU form's declines (Config status / Ctrl+Alt+D), shown with or without a producer.
-		const std::string p2 = P2CpuFormStatusSegment();
-		if (p2.empty())
-			return ring;
-		return ring.empty() ? p2 : ring + "; " + p2;
+		append(P2CpuFormStatusSegment());
+		const unsigned long long deferred = motionAheadP1Deferred.load(std::memory_order_relaxed);
+		if (deferred > 0)
+		{
+			const uint64_t lastSeq = motionAheadP1LastDeferredSeq.load(std::memory_order_relaxed);
+			const unsigned long long maxStreak = motionAheadP1DeferMaxStreak.load(std::memory_order_relaxed);
+			append("NVOF ahead deferred (waiting for P1) " + std::to_string(deferred) +
+				" (last seq " + std::to_string(lastSeq) + ", max streak " + std::to_string(maxStreak) + ")");
+		}
+		const unsigned long long shallowBack = vectorShallowBackwardPairs.load(std::memory_order_relaxed);
+		if (shallowBack > 0)
+			append("ForwardShallow backward pairs served " + std::to_string(shallowBack));
+		return out;
 	}
 }

@@ -56,6 +56,10 @@ namespace VpMotion
 		int vectorDeliveredLogged = -1;                   // NoteVectorsDelivered: -1 not yet, 0 logged
 		int vectorDitherKeyLogged = -1;
 		unsigned long long vectorPairs = 0;
+		// ForwardShallow (games queue, target_frames = 2) pairs served from the completed incoming pair (N-1, N)
+		// when async NVOF has not yet finished (N, N+1) in the same dequeue tick (VectorEngine::ServeStatistics).
+		// Any thread (atomic).
+		std::atomic<unsigned long long> vectorShallowBackwardPairs{ 0 };
 		ULONGLONG vectorStatsTick = 0;
 		uint64_t vectorStatsSequence = 0;                 // the last source frame ServeStatistics served the statistics consumers for
 		bool vectorGlobalMissSustained = false;
@@ -201,6 +205,10 @@ namespace VpMotion
 		bool motionProducerStopLogged = false;
 		MotionAhead::ProducerRecovery motionProducerStartRetry;
 		unsigned long long motionAheadHits = 0, motionAheadMisses = 0;
+		std::atomic<unsigned long long> motionAheadP1Deferred{ 0 };
+		std::atomic<uint64_t> motionAheadP1LastDeferredSeq{ 0 };
+		std::atomic<unsigned long long> motionAheadP1DeferStreak{ 0 };
+		std::atomic<unsigned long long> motionAheadP1DeferMaxStreak{ 0 };
 		// The render loop's hand-off of frames to the producer (render loop thread writes).
 		std::atomic<double> motionHandoffMaxMs{ 0.0 }, motionHandoffTotalMs{ 0.0 };
 		std::atomic<unsigned long long> motionHandoffCount{ 0 };

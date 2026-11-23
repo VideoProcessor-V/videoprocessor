@@ -1044,7 +1044,12 @@ namespace VideoProcessorTest
 				const Result r = Render(gpu, fixture.Renderer(), a, c);
 				Assert::IsTrue(r.ok && r.restores > 0, (L"mode " + std::to_wstring(mode)).c_str());
 				{ const pl_render_errors e = pl_renderer_get_errors(fixture.Renderer()); Assert::AreEqual(0, e.num_disabled_hooks, (L"mode " + std::to_wstring(mode) + L" disabled " + (e.num_disabled_hooks ? std::to_wstring(e.disabled_hooks[0]) : L"")).c_str()); }
-				const std::vector<int> got = Columns(r, static_cast<int>(ramp.size()), c.scale);
+				// MovingFrame places the 10-column (64 px wide) static grey ramp in source rows 64..95 (midpoint y=80); rows 0..63 are coloured texture.
+				const int rampY = static_cast<int>(80 * c.scale);
+				std::vector<int> got;
+				got.reserve(ramp.size());
+				for (size_t i = 0; i < ramp.size(); ++i)
+					got.push_back(r.Channel(static_cast<int>((static_cast<int>(i) * 64 + 32) * c.scale), rampY, 1));
 				Assert::AreEqual(ramp.size(), got.size(), (L"mode " + std::to_wstring(mode) + L" columns").c_str());
 				Assert::IsTrue(got.front() < 64, (L"mode " + std::to_wstring(mode) + L" BTB lost: " + std::to_wstring(got.front())).c_str());
 				Assert::IsTrue(got.back() > 940, (L"mode " + std::to_wstring(mode) + L" WTW lost: " + std::to_wstring(got.back())).c_str());
