@@ -1668,8 +1668,10 @@ H2_METRIC_VERSION = 2
 # really compiles in x64 Release (imports resolved; false / undecidable conditions and ExcludedFromBuild drop an
 # item), no decoy-class exemption, macro qualifiers expanded; and (V-GEM, Gemini 2be3cebf4) a shared header is exempt
 # only for its declaration-only lines (vp_footprint.header_body_lines): its bodies count in every Bill includer's tu,
-# and the walk continues through it.
-TU_MEASURE_VERSION = 3
+# and the walk continues through it. 4 (CC-gate-5 MUST-C / SHOULD-E) = strict _brace_kind (class/ns heads, fail-closed
+# unknown -> function), lone `{` opening function bodies, all #define continuation lines, .sln Release|x64 filtering,
+# ExcludedFromBuild attribute / Remove / ItemDefinitionGroup, and header-guard pre-define dead-include detection.
+TU_MEASURE_VERSION = 4
 # The most a named RELOCATION may let one includer's combined h2 + tu grow (G-CC2 SHOULD-B; bookkeeping lines:
 # a declaration and an include per moved definition): --allowance N, 0 <= N <= this. G-CC4 SHOULD-D: 8, and a
 # relocation needs a real h2 drop in every includer whose tu rises.
@@ -1741,27 +1743,34 @@ def h2_rows(tree, root, base_ref, diff, no_git, only):
 def _shared_headers(tree, read, bill_tree, root=None, no_git=False):
     """The VP-authored files a VP-authored production .cpp reaches through live includes (vp_footprint.shared_vp_headers):
     not part of tu. G-CC2 MUST-A: only a .cpp that a build file lists as ClCompile counts as a source, and a file
-    defining members of a Bill-owned class is never shared. G-CC4 MUST-B 3: only items a .vcxproj really compiles in
-    x64 Release (its own and its resolved imports')."""
+    defining members of a Bill-owned class is never shared. G-CC4 MUST-B 3 & SHOULD-E: only items a .vcxproj listed in
+    VideoProcessor.sln (Release|x64) really compiles, with PreprocessorDefinitions checked against header guards."""
     vp = [f for f in tree.code_files() if vp_footprint.is_vp_authored(f, bill_tree)]
     tree.prefetch(vp)
     compiled = [f for f in vp if vp_footprint.is_compiled_vp_source(f, bill_tree)]
-    listed = vp_footprint.build_listed_sources(_build_texts(tree, root, no_git, (".vcxproj", ".props", ".targets")), compiled)
+    btexts = _build_texts(tree, root, no_git, (".vcxproj", ".props", ".targets", ".sln"))
+    listed = vp_footprint.build_listed_sources(btexts, compiled)
+    preproc_defs = vp_footprint.build_preprocessor_defines(btexts)
     tree.prefetch([p for p in (bill_tree or ()) if p.startswith("src/") and p.lower().endswith((".h", ".hpp"))])
     classes = vp_footprint.bill_class_names(read, bill_tree)
-    return vp_footprint.shared_vp_headers(sorted(listed), read, bill_tree, classes)
+    return vp_footprint.shared_vp_headers(sorted(listed), read, bill_tree, classes, preproc_defs=preproc_defs)
 
 
 def _build_texts(tree, root, no_git, exts):
     """{path: text} of the tree's build files with these extensions (outside x64/ and 3rdparty/). Git mode: the tracked
-    files of the checked tree; --no-git: a walk of <root>/src."""
+    files of the checked tree; --no-git: a walk of <root>/src plus root-level .sln files."""
     names = []
     if no_git:
-        base = os.path.join(root or ".", "src")
+        root_dir = root or "."
+        base = os.path.join(root_dir, "src")
         for d, _, fs in os.walk(base):
             for f in fs:
-                rel = os.path.relpath(os.path.join(d, f), root or ".").replace("\\", "/")
+                rel = os.path.relpath(os.path.join(d, f), root_dir).replace("\\", "/")
                 names.append(rel)
+        if ".sln" in exts and os.path.isdir(root_dir):
+            for f in os.listdir(root_dir):
+                if f.lower().endswith(".sln") and os.path.isfile(os.path.join(root_dir, f)):
+                    names.append(f)
     else:
         try:
             names = git(["ls-tree", "-r", "--name-only", tree.rev] if tree.rev else ["ls-files"], root).splitlines()
@@ -1773,8 +1782,11 @@ def _build_texts(tree, root, no_git, exts):
     for n in names:
         if n.lower().endswith(exts) and "/x64/" not in n and "/3rdparty/" not in n:
             try:
-                out[n] = tree.read(n) if not no_git else open(os.path.join(root or ".", *n.split("/")), encoding="utf-8",
-                                                                 errors="replace").read()
+                if not no_git:
+                    out[n] = tree.read(n)
+                else:
+                    with open(os.path.join(root or ".", *n.split("/")), encoding="utf-8", errors="replace") as fh:
+                        out[n] = fh.read()
             except (OSError, RuntimeError):
                 continue
     return out
@@ -2580,11 +2592,15 @@ def selftest():
 
 
 def _union_refs(root, extra=None):
-    """Local and remote-tracking branches that name a landed union line (UNION_REF_PATTERNS + `extra`)."""
+    """MUST-D (CC-gate-5): remote-tracking branches only (`refs/remotes/*/r2/composite*`, never local `refs/heads/`
+    which anyone can create locally to launder growth). `extra` allows an explicit pattern (`refs/...` or remote suffix)."""
     pats = list(UNION_REF_PATTERNS) + ([extra] if extra else [])
     args = ["for-each-ref", "--format=%(refname:short)"]
     for p in pats:
-        args += ["refs/heads/" + p, "refs/remotes/*/" + p]
+        if p.startswith("refs/"):
+            args.append(p)
+        else:
+            args.append("refs/remotes/*/" + p)
     try:
         return [r for r in git(args, root).splitlines() if r.strip()]
     except RuntimeError:
@@ -2599,20 +2615,29 @@ def _is_ancestor(root, a, b):
         return False
 
 
+def _is_first_parent_ancestor(root, a, b):
+    """MUST-D: true only when commit `a` lies on the `--first-parent` chain of ref `b` (a merged side-branch commit is
+    not a first-parent union tip)."""
+    try:
+        target = git(["rev-parse", "--verify", a + "^{commit}"], root).strip()
+        chain = git(["rev-list", "--first-parent", b], root).splitlines()
+        return target in chain
+    except RuntimeError:
+        return False
+
+
 def rebase_hook_lines_baseline(root, base_ref, files, head, union_tip, waiver, union_ref=None, measure=None):
-    """--write-hook-lines-baseline --rebase-to <union tip> --waiver WAIVER-<ID> (A20-CC ruling, union-base mode).
+    """--write-hook-lines-baseline --rebase-to <union tip> --waiver WAIVER-<ID> (A20-CC ruling + CC-gate-5 MUST-D).
 
-    A train merges a landed union tip U (a composite, audited and gated on its own line) into the line whose ceilings
-    the baseline holds (measured at O = its `measured_at`). The union's own growth must be accepted exactly as U has it,
-    and nothing else. The new ceilings are therefore measured at landed commits only, NEVER at HEAD:
+    A train merges a landed union tip U (a remote-tracking composite first-parent commit) into the line whose ceilings
+    the baseline holds (measured at O = its `measured_at`). Rebased ceilings are capped downward at M(HEAD) so a merge
+    that shrank never creates free slack:
 
-        ceiling = M(O) + M(U) - M(B)      B = merge-base(O, U), per file / includer / bucket, floored at 0
+        ceiling = min(M(O) + M(U) - M(B), M(HEAD))      B = merge-base(O, U), per file / includer / bucket, floored at 0
 
-    i.e. our line's measure plus exactly what the union changed since the common base. Everything the line adds on top
-    of O, and the merge itself, stays gated by the ordinary check at HEAD. Refused unless: U is an ancestor of `head`
-    and of a union branch (UNION_REF_PATTERNS / `union_ref`); O is a commit and an ancestor of `head`; U is not
-    already in O's history (then there is nothing to rebase: ratchet instead); the baseline is not itself an
-    unratcheted rebase. Returns (rc, message)."""
+    Refused unless: U is an ancestor of `head` and a first-parent ancestor of a remote union branch
+    (`refs/remotes/*/r2/composite*` / `union_ref`); O is a committed ancestor of `head` (never "(working tree)");
+    U is not in O's history; merge-base(O, U) != O; the baseline is not itself an unratcheted rebase."""
     measure = measure or (lambda rev: run(root, base_ref, files, False, False, rev, None)["site_checks"]["hook_lines"])
     if not re.match(r"^WAIVER-[A-Za-z0-9_.\-]+$", waiver or ""):
         return 1, "refusing --rebase-to without --waiver WAIVER-<ID>"
@@ -2623,9 +2648,9 @@ def rebase_hook_lines_baseline(root, base_ref, files, head, union_tip, waiver, u
         return 2, "refusing --rebase-to: %s" % e
     if not _is_ancestor(root, u, h):
         return 1, "refusing --rebase-to %s: not an ancestor of %s" % (u, h)
-    landed = [r for r in _union_refs(root, union_ref) if _is_ancestor(root, u, r)]
+    landed = [r for r in _union_refs(root, union_ref) if _is_first_parent_ancestor(root, u, r)]
     if not landed:
-        return 1, ("refusing --rebase-to %s: not a landed union tip (no branch matching %s contains it)" %
+        return 1, ("refusing --rebase-to %s: not a landed union tip (no remote union branch matching %s has it on first-parent history)" %
                    (u, ", ".join(list(UNION_REF_PATTERNS) + ([union_ref] if union_ref else []))))
     bl_path = os.path.join(root, *HOOK_LINES_PATH.split("/"))
     try:
@@ -2636,6 +2661,8 @@ def rebase_hook_lines_baseline(root, base_ref, files, head, union_tip, waiver, u
     if old.get("rebase"):
         return 1, ("refusing --rebase-to: the baseline is an unratcheted rebase (%s); ratchet it at a commit first "
                    "(--write-hook-lines-baseline)" % at)
+    if at.strip().startswith("("):
+        return 1, "refusing --rebase-to: the baseline's measured_at (%r) is working tree, not a commit" % at
     try:
         o = git(["rev-parse", "--verify", "--short=9", (at.split() or ["?"])[0] + "^{commit}"], root).strip()
     except RuntimeError:
@@ -2645,24 +2672,28 @@ def rebase_hook_lines_baseline(root, base_ref, files, head, union_tip, waiver, u
     if _is_ancestor(root, u, o):
         return 1, "refusing --rebase-to %s: already in the history of the baseline's commit %s; nothing to rebase" % (u, o)
     b = git(["merge-base", o, u], root).strip()[:9]
-    mo, mu, mb = measure(o), measure(u), measure(b)
-    errs = ["%s: %s" % (r, e) for r, m in ((o, mo), (u, mu), (b, mb)) for e in m["errors"]]
+    if b == o:
+        return 1, ("refusing --rebase-to %s: merge-base(%s, %s) == %s (baseline commit is already an ancestor of union tip; "
+                   "ratchet or seed instead)" % (u, o, u, o))
+    mo, mu, mb, mh = measure(o), measure(u), measure(b), measure(h)
+    errs = ["%s: %s" % (r, e) for r, m in ((o, mo), (u, mu), (b, mb), (h, mh)) for e in m["errors"]]
     if errs:
         return 2, "refusing --rebase-to without a verdict at every measured commit: " + "; ".join(errs)
 
     def comb(key, fallback_files=False):
         out = {}
-        for f in sorted(set(mo[key]) | set(mu[key]) | set(mb[key])):
+        for f in sorted(set(mo[key]) | set(mu[key]) | set(mb[key]) | set(mh[key])):
             def val(m):
                 return m[key].get(f, m["files"].get(f, 0) if fallback_files else 0)
-            n = val(mo) + val(mu) - val(mb)
+            n = min(val(mo) + val(mu) - val(mb), val(mh))
             if n > 0:
                 out[f] = n
         return out
 
     files_c, tu_c = comb("files"), comb("tu")
     combined_c = {f: n for f, n in comb("combined", True).items() if f in tu_c}
-    totals = {k: max(0, mo["totals"].get(k, 0) + mu["totals"].get(k, 0) - mb["totals"].get(k, 0))
+    totals = {k: max(0, min(mo["totals"].get(k, 0) + mu["totals"].get(k, 0) - mb["totals"].get(k, 0),
+                            mh["totals"].get(k, 0)))
               for k in list(H2_BUCKETS) + ["renderer"]}
     changed = []
     for key, new in (("h2", files_c), ("tu", tu_c), ("combined", combined_c)):
@@ -2672,9 +2703,9 @@ def rebase_hook_lines_baseline(root, base_ref, files, head, union_tip, waiver, u
                 changed.append("%s %s %d -> %d" % (f, key, prev.get(f, 0), new.get(f, 0)))
     today = datetime.date.today().isoformat()
     updates = list(old.get("_updates") or [])
-    updates.insert(0, "%s %s: REBASE onto union tip %s (landed in %s) from %s, merge base %s: ceilings = M(%s) + M(%s) - "
-                      "M(%s), tu measure %d, never measured at HEAD (%s)%s" %
-                   (today, waiver, u, landed[0], o, b, o, u, b, TU_MEASURE_VERSION, h,
+    updates.insert(0, "%s %s: REBASE onto union tip %s (landed in %s) from %s, merge base %s: ceilings = min(M(%s) + M(%s) - "
+                      "M(%s), M(%s)), tu measure %d%s" %
+                   (today, waiver, u, landed[0], o, b, o, u, b, h, TU_MEASURE_VERSION,
                     (": " + "; ".join(changed)) if changed else ": no ceiling changed"))
     doc = dict(old)
     doc.update({"version": H2_METRIC_VERSION, "metric": "H2", "tu_measure": TU_MEASURE_VERSION, "base_ref": base_ref,

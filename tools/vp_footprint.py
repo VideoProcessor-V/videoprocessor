@@ -532,32 +532,39 @@ def lex(text):
     return "".join(out)
 
 
-def live_includes(text, path=None):
-    """The #include names of `text` OUTSIDE every preprocessor conditional (G-CC2 MUST-A: an include under `#if 0`,
-    `#ifdef NEVER` or any other condition is not proof that a VP-V translation unit compiles the file), read from the
-    lexed text (G-CC4 MUST-B 1: an include in a comment or a raw string is not an include). The one exception is a
-    classic include guard (G-CC4 MUST-B 2), and only in a header (`path` a .h / .hpp / .inl; no path = no guard):
-    `#ifndef X` / `#define X` as the first two directives, the matching `#endif` as the last directive, and X not a
-    macro the compiler predefines. In a .cpp every conditional is dead."""
+def header_guard_macro(text, path=None):
+    """If `path` is a header with a classic `#ifndef GUARD` / `#define GUARD` ... `#endif` guard (not a compiler-predefined
+    macro), return (guard_line_index, GUARD); else (None, None)."""
+    if path is None or not path.lower().endswith(HEADER_EXT):
+        return None, None
     lines = lex(text).splitlines()
     directives = [i for i, ln in enumerate(lines) if ln.lstrip().startswith("#")]
-    guard = None
-    if path is not None and path.lower().endswith(HEADER_EXT) and len(directives) >= 3:
-        m1 = GUARD_IFNDEF_RE.match(lines[directives[0]])
-        m2 = DEFINE_NAME_RE.match(lines[directives[1]])
-        if m1 and m2 and m1.group(1) == m2.group(1) and m1.group(1) not in PREDEFINED_MACROS:
-            depth, match = 0, None
-            for i in directives:
-                if COND_OPEN_RE.match(lines[i]):
-                    depth += 1
-                elif COND_END_RE.match(lines[i]):
-                    depth -= 1
-                    if depth == 0:
-                        match = i
-                        break
-            if match == directives[-1]:
-                guard = directives[0]
+    if len(directives) < 3:
+        return None, None
+    m1 = GUARD_IFNDEF_RE.match(lines[directives[0]])
+    m2 = DEFINE_NAME_RE.match(lines[directives[1]])
+    if m1 and m2 and m1.group(1) == m2.group(1) and m1.group(1) not in PREDEFINED_MACROS:
+        depth, match = 0, None
+        for i in directives:
+            if COND_OPEN_RE.match(lines[i]):
+                depth += 1
+            elif COND_END_RE.match(lines[i]):
+                depth -= 1
+                if depth == 0:
+                    match = i
+                    break
+        if match == directives[-1]:
+            return directives[0], m1.group(1)
+    return None, None
+
+
+def live_includes_with_defines(text, path=None):
+    """Pairs `(include_name, frozenset_of_macros_defined_before_it)` for every live #include of `text` (SHOULD-E: allows
+    detecting an include killed by pre-defining its header guard macro)."""
+    lines = lex(text).splitlines()
+    guard, _ = header_guard_macro(text, path)
     out = []
+    defined = set()
     depth = 0
     for i, ln in enumerate(lines):
         if COND_OPEN_RE.match(ln):
@@ -569,10 +576,28 @@ def live_includes(text, path=None):
                 depth -= 1
             continue
         if depth == 0:
+            dm = DEFINE_NAME_RE.match(ln)
+            if dm:
+                defined.add(dm.group(1))
+                continue
+            um = re.match(r"^\s*#\s*undef\s+([A-Za-z_]\w*)\b", ln)
+            if um:
+                defined.discard(um.group(1))
+                continue
             m = INCLUDE_RE.match(ln)
             if m:
-                out.append(m.group(1))
+                out.append((m.group(1), frozenset(defined)))
     return out
+
+
+def live_includes(text, path=None):
+    """The #include names of `text` OUTSIDE every preprocessor conditional (G-CC2 MUST-A: an include under `#if 0`,
+    `#ifdef NEVER` or any other condition is not proof that a VP-V translation unit compiles the file), read from the
+    lexed text (G-CC4 MUST-B 1: an include in a comment or a raw string is not an include). The one exception is a
+    classic include guard (G-CC4 MUST-B 2), and only in a header (`path` a .h / .hpp / .inl; no path = no guard):
+    `#ifndef X` / `#define X` as the first two directives, the matching `#endif` as the last directive, and X not a
+    macro the compiler predefines. In a .cpp every conditional is dead."""
+    return [name for name, _ in live_includes_with_defines(text, path)]
 
 
 _COND_CMP_RE = re.compile(r"^'([^']*)'\s*(==|!=)\s*'([^']*)'$")
@@ -643,15 +668,63 @@ def _parse_build_xml(text):
         return None
 
 
+_SLN_PROJ_RE = re.compile(r'^Project\("[^"]+"\)\s*=\s*"[^"]+"\s*,\s*"([^"]+\.vcxproj)"\s*,\s*"(\{[^}]+\})"', re.I)
+_SLN_BUILD_X64_RE = re.compile(r'^\s*(\{[^}]+\})\.Release\|x64\.Build\.0\s*=', re.I)
+
+
+def _sln_release_x64_projects(sln_text, sln_dir):
+    """Projects in `VideoProcessor.sln` built under Release|x64 (SHOULD-E)."""
+    guid_to_path = {}
+    built = set()
+    for ln in sln_text.splitlines():
+        m = _SLN_PROJ_RE.match(ln.strip())
+        if m:
+            p = m.group(1).replace("\\", "/")
+            if sln_dir:
+                p = posixpath.join(sln_dir, p)
+            guid_to_path[m.group(2).upper()] = posixpath.normpath(p)
+            continue
+        mb = _SLN_BUILD_X64_RE.match(ln)
+        if mb:
+            built.add(mb.group(1).upper())
+    if not built:
+        return set(guid_to_path.values())
+    return {p for g, p in guid_to_path.items() if g in built}
+
+
+def build_preprocessor_defines(build_texts):
+    """Macro names defined in `<PreprocessorDefinitions>` of x64 Release build files (SHOULD-E)."""
+    defs = set()
+    for bf, text in (build_texts or {}).items():
+        if not bf.lower().endswith((".vcxproj", ".props", ".targets")):
+            continue
+        root = _parse_build_xml(text or "")
+        if root is None:
+            continue
+        this_dir = posixpath.dirname(bf)
+        proj_name = posixpath.basename(bf).rsplit(".", 1)[0]
+        for el in root.iter():
+            if _ms_local(el.tag) != "PreprocessorDefinitions":
+                continue
+            if eval_condition(el.get("Condition"), this_dir, proj_name, this_dir, lambda p: p in build_texts) is False:
+                continue
+            for tok in (el.text or "").split(";"):
+                tok = tok.strip()
+                if not tok or tok.startswith("%(") or tok.startswith("$("):
+                    continue
+                name = tok.split("=", 1)[0].strip()
+                if re.match(r"^[A-Za-z_]\w*$", name):
+                    defs.add(name)
+    return defs
+
+
 def build_listed_sources(build_texts, files):
     """The repo files of `files` that a real build compiles as `<ClCompile Include=...>` (G-CC2 MUST-A: a .cpp no project
-    compiles proves nothing). `build_texts` = {path: text} of the tree's .vcxproj / .props / .targets files.
-    G-CC4 MUST-B 3: only items a .vcxproj compiles count: items of the .vcxproj itself or of a file it imports
-    (`<Import Project=...>`, resolved, recursively), in the x64 Release build. An item, its ItemGroup or the Import
-    whose Condition is false or cannot be decided (eval_condition) does not count, nor an item with an
-    ExcludedFromBuild child that is (or may be) true in that build. A stray .props that no project imports compiles
-    nothing. An item path is taken relative to the project's folder, else the build file's own folder, else matched by
-    its path below the leading `..` segments; an item with another MSBuild property or a wildcard is ignored."""
+    compiles proves nothing). `build_texts` = {path: text} of the tree's .vcxproj / .props / .targets / .sln files.
+    G-CC4 MUST-B 3 & SHOULD-E: only items a .vcxproj compiles count: items of the .vcxproj itself or of a file it imports
+    (`<Import Project=...>`, resolved, recursively), in the x64 Release build. When VideoProcessor.sln is present, only
+    .vcxproj projects built in Release|x64 are scanned. Honors ExcludedFromBuild child AND attribute, `<ClCompile Remove=...>`,
+    and `<ItemDefinitionGroup><ClCompile><ExcludedFromBuild>true`."""
     files = set(files)
     known = dict(build_texts or {})
     out = set()
@@ -676,11 +749,23 @@ def build_listed_sources(build_texts, files):
             cands.append(hits[0])
         return cands
 
+    sln_projects = None
+    for p, txt in known.items():
+        if posixpath.basename(p).lower() == "videoprocessor.sln":
+            sln_projects = {x.lower() for x in _sln_release_x64_projects(txt or "", posixpath.dirname(p))}
+            break
+
     for proj in sorted(p for p in known if p.lower().endswith(".vcxproj")):
+        if sln_projects is not None and proj.lower() not in sln_projects:
+            continue
         project_dir = posixpath.dirname(proj)
         project_name = posixpath.basename(proj)[:-len(".vcxproj")]
         seen = set()
         stack = [proj]
+        proj_included = set()
+        proj_removed = set()
+        default_excluded = False
+        explicit_unexcluded = set()
         while stack:
             bf = stack.pop()
             if bf in seen:
@@ -708,19 +793,50 @@ def build_listed_sources(build_texts, files):
                     target = posixpath.normpath(target)
                     if target in known:
                         stack.append(target)
+                elif tag == "ItemDefinitionGroup":
+                    if ev(el.get("Condition")) is False:
+                        continue
+                    for child in el:
+                        if _ms_local(child.tag) != "ClCompile":
+                            continue
+                        if ev(child.get("Condition")) is False:
+                            continue
+                        for meta in child:
+                            if _ms_local(meta.tag) == "ExcludedFromBuild":
+                                if (meta.text or "").strip().lower() != "false" and ev(meta.get("Condition")) is not False:
+                                    default_excluded = True
                 elif tag == "ItemGroup":
                     if ev(el.get("Condition")) is not True:
                         continue
                     for item in el:
-                        if _ms_local(item.tag) != "ClCompile" or not item.get("Include"):
+                        if _ms_local(item.tag) != "ClCompile":
+                            continue
+                        if item.get("Remove"):
+                            if ev(item.get("Condition")) is not False:
+                                for rem in item.get("Remove").split(";"):
+                                    for cand in item_targets(rem, this_dir, project_dir):
+                                        if cand in files:
+                                            proj_removed.add(cand)
+                                            break
+                            continue
+                        if not item.get("Include"):
                             continue
                         if ev(item.get("Condition")) is not True:
                             continue
                         excluded = False
+                        explicit_false = False
+                        attr_ex = item.get("ExcludedFromBuild")
+                        if attr_ex is not None:
+                            if attr_ex.strip().lower() == "false":
+                                explicit_false = True
+                            else:
+                                excluded = True
                         for meta in item:
                             if _ms_local(meta.tag) != "ExcludedFromBuild":
                                 continue
                             if (meta.text or "").strip().lower() == "false":
+                                if ev(meta.get("Condition")) is True:
+                                    explicit_false = True
                                 continue
                             if ev(meta.get("Condition")) is not False:
                                 excluded = True
@@ -729,8 +845,13 @@ def build_listed_sources(build_texts, files):
                         for inc in item.get("Include").split(";"):
                             for cand in item_targets(inc, this_dir, project_dir):
                                 if cand in files:
-                                    out.add(cand)
+                                    proj_included.add(cand)
+                                    if explicit_false:
+                                        explicit_unexcluded.add(cand)
                                     break
+        if default_excluded:
+            proj_included &= explicit_unexcluded
+        out |= (proj_included - proj_removed)
     return out
 
 
@@ -805,12 +926,15 @@ def defines_bill_members(text, bill_classes):
     return False
 
 
-def shared_vp_headers(sources, read, bill_tree, bill_classes=None):
+def shared_vp_headers(sources, read, bill_tree, bill_classes=None, preproc_defs=None):
     """Every VP-authored file a VP-authored production .cpp reaches through LIVE #includes (recursively; see
     live_includes): these compile in VP-V's own translation units too (shared interface headers), so the `tu` measure
     does not count them. The caller passes only sources a build file compiles (build_listed_sources). A file that
-    defines members of a Bill-owned class (defines_bill_members) is never shared, whatever includes it."""
+    defines members of a Bill-owned class (defines_bill_members) is never shared, whatever includes it.
+    SHOULD-E: an include whose target header guard macro is already #defined before the include or in
+    PreprocessorDefinitions is treated as dead."""
     classes = bill_classes if bill_classes is not None else {"Impl"}
+    gdefs = set(preproc_defs or ())
     seen = set()
     visited = set()
     stack = []
@@ -820,9 +944,12 @@ def shared_vp_headers(sources, read, bill_tree, bill_classes=None):
             stack.append((s, t))
     while stack:
         q, t = stack.pop()
-        for name in live_includes(t, q):
+        for name, prior_defs in live_includes_with_defines(t, q):
             r, u = resolve_include(name, q, read)
             if r is None or r in visited or not is_vp_authored(r, bill_tree):
+                continue
+            _, gmacro = header_guard_macro(u, r)
+            if gmacro and (gmacro in prior_defs or gmacro in gdefs):
                 continue
             visited.add(r)
             if not defines_bill_members(u, classes):
@@ -852,64 +979,110 @@ _ASSIGN_RE = re.compile(r"(?<![=!<>+\-*/%&|^])=(?!=)")
 _FUNC_HEAD_END_RE = re.compile(r"(?:\)\s*(?:const|noexcept(?:\s*\([^()]*\))?|override|final|volatile|mutable|&&|&|\s)*"
                                r"(?:->\s*[\w:<>,*&\s]+)?|\)\s*:.*|\btry|\belse|\bdo)\s*$")
 _CLASS_HEAD_RE = re.compile(r"^(?:template\s*<[^()]*>\s*)?(?:class|struct|union|enum(?:\s+class|\s+struct)?)\b[^()=]*$")
-_STRUCTURE_RE = re.compile(r"^(?:[{}]+;?|public\s*:|private\s*:|protected\s*:|(?:inline\s+)?namespace\b[^;()=]*|"
-                           r"extern\s*\"\s*\"\s*\{?|template\s*<[^()]*>)$")
+_BARE_CLASS_HEAD_RE = re.compile(r"^(?:class|struct|union)\b[^()=]*$")
+_BARE_ENUM_HEAD_RE = re.compile(r"^enum(?:\s+(?:class|struct))?\b[^()=]*$")
+_NS_HEAD_RE = re.compile(r"^(?:(?:inline\s+)?namespace(?:\s+[A-Za-z_][\w:]*)?|extern\s*\"[^\"]*\")$")
+_STRUCTURE_RE = re.compile(r"^(?:[}]+;?|public\s*:|private\s*:|protected\s*:|(?:inline\s+)?namespace\b[^;()=]*|"
+                           r"extern\s*\"[^\"]*\"\s*\{?|template\s*<[^()]*>)$")
 _body_cache = {}
 
 
+def _strip_leading_templates(h):
+    """Strip any leading `template<...>` prefix(es) with balanced angle brackets."""
+    s = h.strip()
+    while True:
+        m = re.match(r"^template\s*<", s)
+        if not m:
+            return s
+        depth, i = 0, m.end() - 1
+        while i < len(s):
+            if s[i] == "<":
+                depth += 1
+            elif s[i] == ">":
+                depth -= 1
+                if depth == 0:
+                    s = s[i + 1:].strip()
+                    break
+            i += 1
+        else:
+            return s
+
+
 def _brace_kind(header, parent):
-    """The kind of a `{` from the text since the last `;` / `{` / `}`: function, init, enum, class or ns."""
+    """MUST-C (CC-gate-5): the kind of a `{` from the text since the last `;` / `{` / `}`:
+    - `ns` ONLY for `namespace` or `extern "<lit>"` directly followed by `{`
+    - `enum` ONLY when head after last `template<...>` matches enum head
+    - `class` ONLY when head after last `template<...>` matches `_BARE_CLASS_HEAD_RE` (no `=`)
+    - fail closed: every unknown head is `function`."""
     if parent in ("function", "init"):
         return parent
     h = header.strip()
-    if re.search(r"\bnamespace\b", h) or re.match(r'^extern\s*"', h):
+    if _NS_HEAD_RE.match(h):
         return "ns"
-    if _FUNC_HEAD_END_RE.search(h) and not re.search(r"\b(?:class|struct|union|enum)\b[^()]*$", h):
-        return "function"
-    if re.search(r"\benum\b", h):
+    tail = _strip_leading_templates(h)
+    if _BARE_ENUM_HEAD_RE.match(tail) and not _ASSIGN_RE.search(tail):
         return "enum"
-    if re.search(r"\b(?:class|struct|union)\b", h) and not _ASSIGN_RE.search(h):
+    if _BARE_CLASS_HEAD_RE.match(tail) and not _ASSIGN_RE.search(tail):
         return "class"
-    return "init"
+    return "function"
 
 
 def header_body_lines(text):
-    """G-CC4 / V-GEM (2be3cebf4): the lines of a VP-V header that are NOT declaration-only: every line inside a function
-    or lambda body or an initializer, a line that opens a function body, and a namespace-scope variable definition
-    (`= ...;` / brace initializer). Declarations (prototypes, fields, forward declarations, type aliases, class and
-    namespace heads, access labels, enum bodies, `= default` / `= delete`) are exempt. A header that a VP-V .cpp also
-    compiles (shared) counts only these lines in a Bill includer's tu: its declarations compile anywhere, its bodies
-    compile in Bill's TU too. Unknown shapes count (fail closed)."""
+    """G-CC4 / V-GEM (2be3cebf4) + MUST-C (CC-gate-5): the lines of a VP-V header that are NOT declaration-only: every
+    line inside a function or lambda body or an initializer, a line (including a lone `{`) that opens a function body,
+    every line of a function-like `#define` or multi-line `#define` continuation (object-like or function-like), and a
+    namespace-scope variable definition (`= ...;` / brace initializer). Declarations (prototypes, fields, forward
+    declarations, type aliases, class and namespace heads, access labels, enum bodies, `= default` / `= delete`) are
+    exempt. Unknown shapes count (fail closed)."""
     if text in _body_cache:
         return _body_cache[text]
     lines = lex(text).splitlines()
     stack, header, n = [], [], 0
     pp_cont = False
+    define_cont = False
     for ln in lines:
         kind = stack[-1] if stack else "ns"
         s = ln.strip()
-        directive = pp_cont or s.startswith("#")
-        pp_cont = directive and ln.rstrip().endswith("\\")
+        was_pp_cont = pp_cont
+        was_define_cont = define_cont
+        directive = was_pp_cont or s.startswith("#")
+        continues = directive and ln.rstrip().endswith("\\")
+        pp_cont = continues
         if directive:
-            if re.match(r"^#\s*define\s+\w+\(", s) or (pp_cont and kind in ("function", "init")):
-                n += 1   # a function-like macro body is code
+            if was_define_cont:
+                n += 1   # MUST-C: every continuation line of #define (object-like or function-like) counts
+                define_cont = continues
+            elif not was_pp_cont and re.match(r"^#\s*define\b", s):
+                is_fn_macro = bool(re.match(r"^#\s*define\s+\w+\(", s))
+                define_cont = continues
+                if is_fn_macro or continues:
+                    n += 1   # function-like macro or multi-line #define head counts
+            else:
+                define_cont = False
+                if was_pp_cont and kind in ("function", "init"):
+                    n += 1
             continue
+        define_cont = False
         if s:
             if kind in ("function", "init"):
                 n += 1
             elif kind == "enum":
                 pass
             else:
-                decl = (_STRUCTURE_RE.match(s) or _CLASS_HEAD_RE.match(s) or s.startswith(("using ", "typedef ", "friend ",
-                        "static_assert", "template <", "template<")) and _DECL_END_RE.search(s))
-                if not decl and _DECL_END_RE.search(s) and "{" not in s:
-                    # a declaration statement; at namespace scope an initializer makes it a variable definition
-                    decl = not (kind == "ns" and _ASSIGN_RE.search(s)) or re.search(r"=\s*(?:default|delete|0)\s*;\s*$", s)
-                if not decl and kind == "class" and _DECL_END_RE.search(s) and "{" not in s and "(" not in s:
-                    decl = True   # a field with a default member initializer
-                if not decl and _CLASS_HEAD_RE.match(s.rstrip(";").split("{")[0].strip() or "x") and "(" not in s and \
-                        not _ASSIGN_RE.search(s):
-                    decl = True   # `struct Api { int a; };` on one line
+                if s == "{":
+                    # MUST-C: a lone `{` counts when it opens a function/init body; structural only for ns/class/enum.
+                    decl = _brace_kind("".join(header), kind) in ("ns", "class", "enum")
+                else:
+                    decl = (_STRUCTURE_RE.match(s) or _CLASS_HEAD_RE.match(s) or s.startswith(("using ", "typedef ", "friend ",
+                            "static_assert", "template <", "template<")) and _DECL_END_RE.search(s))
+                    if not decl and _DECL_END_RE.search(s) and "{" not in s:
+                        # a declaration statement; at namespace scope an initializer makes it a variable definition
+                        decl = not (kind == "ns" and _ASSIGN_RE.search(s)) or re.search(r"=\s*(?:default|delete|0)\s*;\s*$", s)
+                    if not decl and kind == "class" and _DECL_END_RE.search(s) and "{" not in s and "(" not in s:
+                        decl = True   # a field with a default member initializer
+                    if not decl and _CLASS_HEAD_RE.match(s.rstrip(";").split("{")[0].strip() or "x") and "(" not in s and \
+                            not _ASSIGN_RE.search(s):
+                        decl = True   # `struct Api { int a; };` on one line
                 if not decl:
                     n += 1
         for c in ln:
@@ -1475,8 +1648,8 @@ def h2_selftest():
     bodies = ("namespace Vpv\n{\n\tinline int Twice(int x)\n\t{\n\t\treturn 2 * x;\n\t}\n\tinline void One() {}\n"
               "\tstruct S\n\t{\n\t\tint Get() const { return v; }\n\t\tint v = 0;\n\t};\n\tinline const int kTable[] = {\n\t\t1,\n\t\t2,\n\t};\n"
               "\tinline int g = 5;\n\ttemplate <class T> T Id(T t)\n\t{\n\t\treturn t;\n\t}\n}\n")
-    # Twice: head, return, } = 3 (a lone `{` is structure); One 1; Get 1; kTable head + 2 values + }; = 4; g 1; Id 3
-    assert header_body_lines(bodies) == 13, header_body_lines(bodies)
+    # MUST-C: lone `{` opening a function body counts: Twice 4 (head, {, return, }); One 1; Get 1; kTable 4; g 1; Id 4 = 15
+    assert header_body_lines(bodies) == 15, header_body_lines(bodies)
     # MUTATION: a new VP-V .cpp that includes a body-heavy header a Bill TU uses must NOT lower tu
     files["src/VP-V/host/Heavy.h"] = bodies
     before = tu_row("src/A.cpp", [1], read, bill_tree, set(), "#include <VP-V/host/Heavy.h>\n")[0]
@@ -1484,12 +1657,12 @@ def h2_selftest():
     shared_heavy = shared_vp_headers(["src/VP-V/host/HeavyUser.cpp"], read, bill_tree)
     assert "src/VP-V/host/Heavy.h" in shared_heavy
     after = tu_row("src/A.cpp", [1], read, bill_tree, shared_heavy, "#include <VP-V/host/Heavy.h>\n")[0]
-    assert (before, after) == (_nonblank(bodies), 13), (before, after)
+    assert (before, after) == (_nonblank(bodies), 15), (before, after)
     # ... and the walk goes on through a shared header: what it includes still compiles in Bill's TU
     files["src/VP-V/host/Outer.h"] = "#include \"Heavy.h\"\nstruct Outer;\n"
     files["src/VP-V/host/OuterUser.cpp"] = "#include \"Outer.h\"\n"
     sh = shared_vp_headers(["src/VP-V/host/OuterUser.cpp"], read, bill_tree)
-    assert tu_row("src/A.cpp", [1], read, bill_tree, sh, "#include <VP-V/host/Outer.h>\n")[0] == 13
+    assert tu_row("src/A.cpp", [1], read, bill_tree, sh, "#include <VP-V/host/Outer.h>\n")[0] == 15
     # a nested VP include is counted once; a system header is skipped; a computed one fails closed
     files["src/VP-V/host/Outer.inl"] = "a\n#include <VP-V/host/Body.h>\n#include <windows.h>\n"
     t = tu_row("src/A.cpp", [1, 2], read, bill_tree, set(), "#include <VP-V/host/Outer.inl>\n#include <VP-V/host/Body.h>\n")

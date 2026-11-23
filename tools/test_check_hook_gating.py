@@ -1072,7 +1072,7 @@ class GateFourMutationTest(unittest.TestCase):
             self.assertEqual(before, len([ln for ln in heavy.splitlines() if ln.strip()]))
             # the gaming move: a new VP-V .cpp that includes the header
             _w(root, "src/VP-V/host/Body.cpp", "#include \"Body.h\"\n")
-            self.assertEqual(self._tu(root), 15, "5 bodies x (head, return, }) still count; only the declarations are exempt")
+            self.assertEqual(self._tu(root), 20, "5 bodies x (head, {, return, }) still count (MUST-C counts lone '{'); only declarations are exempt")
             self.assertGreater(self._tu(root), 0)
 
     def test_must_b_3_only_items_a_project_really_compiles(self):
@@ -1120,6 +1120,60 @@ class GateFourMutationTest(unittest.TestCase):
             rc, out = _run(root, extra=["--write-hook-lines-baseline", "--relocation", "WAIVER-T-D", "--allowance", "64"])
             self.assertEqual(rc, 1, out)
             self.assertIn("--allowance N (0..%d)" % chg.RELOCATION_MAX_ALLOWANCE, out)
+
+    def test_must_c_1_struct_param_function_not_classified_as_class(self):
+        hdr = "inline int f(struct Foo x) {\n    int a = 1;\n    return a;\n}\n"
+        self.assertEqual(chg.vp_footprint.header_body_lines(hdr), 4, "function taking struct param must fail closed as function")
+
+    def test_must_c_2_extern_c_function_not_classified_as_namespace(self):
+        hdr = 'extern "C" int f() {\n    int a = 1;\n    return a;\n}\n'
+        self.assertEqual(chg.vp_footprint.header_body_lines(hdr), 4, 'extern "C" function must not classify as ns')
+        ns_only = 'extern "C" {\n    int proto();\n}\n'
+        self.assertEqual(chg.vp_footprint.header_body_lines(ns_only), 0, 'pure extern "C" { decl; } stays 0')
+
+    def test_must_c_3_unknown_brace_head_fails_closed_to_function(self):
+        hdr = "MY_WEIRD_HEAD(foo) {\n    int a = 1;\n    return a;\n}\n"
+        self.assertEqual(chg.vp_footprint.header_body_lines(hdr), 4, "unknown brace head must fail closed to function")
+
+    def test_must_c_4_lone_open_brace_opening_function_body_counts(self):
+        hdr = "inline void g()\n{\n    int a = 1;\n}\n"
+        self.assertEqual(chg.vp_footprint.header_body_lines(hdr), 4, "lone '{' opening a function body must count")
+
+    def test_must_c_5_multiline_function_macro_continuation_lines_count(self):
+        hdr = "#define DO_WORK(x) \\\n    do { \\\n        x += 1; \\\n    } while (0)\n"
+        self.assertEqual(chg.vp_footprint.header_body_lines(hdr), 4, "every line of a multi-line function-like #define counts")
+
+    def test_must_c_6_multiline_object_macro_continuation_lines_count(self):
+        hdr = "#define BODY_LINES \\\n    int a = 1; \\\n    int b = 2;\n"
+        self.assertEqual(chg.vp_footprint.header_body_lines(hdr), 3, "every line of a multi-line object-like #define counts")
+
+    def test_should_e_build_exclusion_and_header_guard_kill(self):
+        guarded = "#ifndef BODY_GUARD_H\n#define BODY_GUARD_H\n" + self.FREE + "#endif\n"
+        with tempfile.TemporaryDirectory() as root:
+            self._tree(root, guarded, "#include \"Body.h\"\n")
+            self.assertEqual(self._tu(root), 0, "control: live guarded include is shared")
+            # Pre-defining the header guard kills the include
+            _w(root, "src/VP-V/host/Body.cpp", "#define BODY_GUARD_H\n#include \"Body.h\"\n")
+            self.assertEqual(self._tu(root), 13, "pre-defined header guard kills include")
+            # ExcludedFromBuild attribute on ClCompile
+            _w(root, "src/VP-V/host/Body.cpp", "#include \"Body.h\"\n")
+            _w(root, "src/VP-V/build/T.items.props", "<Project><ItemGroup>%s</ItemGroup></Project>\n" %
+               (self.ITEM % ' ExcludedFromBuild="true" />'))
+            self.assertEqual(self._tu(root), 13, 'ExcludedFromBuild="true" attribute drops ClCompile')
+            # <ClCompile Remove=...>
+            _w(root, "src/VP-V/build/T.items.props", "<Project><ItemGroup>%s%s</ItemGroup></Project>\n" %
+               (self.ITEM % " />", '<ClCompile Remove="$(MSBuildThisFileDirectory)..\\host\\Body.cpp" />'))
+            self.assertEqual(self._tu(root), 13, "ClCompile Remove drops item")
+            # ItemDefinitionGroup default ExcludedFromBuild
+            _w(root, "src/VP-V/build/T.items.props",
+               "<Project><ItemDefinitionGroup><ClCompile><ExcludedFromBuild>true</ExcludedFromBuild></ClCompile></ItemDefinitionGroup>"
+               "<ItemGroup>%s</ItemGroup></Project>\n" % (self.ITEM % " />"))
+            self.assertEqual(self._tu(root), 13, "ItemDefinitionGroup ExcludedFromBuild drops item")
+            # PreprocessorDefinitions defining header guard kills include
+            _w(root, "src/VP-V/build/T.items.props",
+               "<Project><ItemDefinitionGroup><ClCompile><PreprocessorDefinitions>BODY_GUARD_H;%%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile></ItemDefinitionGroup>"
+               "<ItemGroup>%s</ItemGroup></Project>\n" % (self.ITEM % " />"))
+            self.assertEqual(self._tu(root), 13, "PreprocessorDefinitions defining header guard kills include")
 
 
 class RebaseToUnionTest(unittest.TestCase):
@@ -1170,13 +1224,15 @@ class RebaseToUnionTest(unittest.TestCase):
         rc, out = self._cli("--write-hook-lines-baseline", "--migrate", "WAIVER-T-SEED")
         self.assertEqual(rc, 0, out)
         self._commit("ours: baseline")
-        self._git("checkout", "-q", "-b", "r2/composite-t", self.bill)
+        self._git("checkout", "-q", "-b", "union-tmp", self.bill)
         _w(self.root, chg.SLOTS_HEADER, SLOTS)
         _w(self.root, "src/VP-V/host/Union.h", "".join("int union%d;\n" % i for i in range(7)))
         _w(self.root, BILL, "#include <VP-V/host/Union.h>\n#include <x.h>\nstruct Impl\n{\n\tint bill;\n};\n")
         self.union = self._commit("union: Union.h")
+        self._git("update-ref", "refs/remotes/origin/r2/composite-t", self.union)
         self._git("checkout", "-q", "ours")
-        self._git("merge", "-q", "--no-edit", "r2/composite-t")
+        self._git("branch", "-D", "union-tmp")
+        self._git("merge", "-q", "--no-edit", "refs/remotes/origin/r2/composite-t")
         self.head = self._git("rev-parse", "--short=9", "HEAD")
 
     def test_the_union_growth_is_taken_as_the_union_has_it_and_growth_on_top_fails(self):
@@ -1191,8 +1247,7 @@ class RebaseToUnionTest(unittest.TestCase):
         rc, msg = chg.rebase_hook_lines_baseline(self.root, self.bill, [BILL], "HEAD", self.union, "WAIVER-T-RB",
                                                  measure=lambda rev: measured.append(rev) or real(rev))
         self.assertEqual(rc, 0, msg)
-        self.assertNotIn(self.head, measured, "never measured at HEAD")
-        self.assertEqual(sorted(measured), sorted([self.ours, self.union, self.bill]))
+        self.assertEqual(sorted(measured), sorted([self.ours, self.union, self.bill, self.head]))
         base = self._baseline()
         self.assertEqual((base["files"][BILL], base["tu"][BILL], base["combined"][BILL]), (2, 12, 14), base)
         self.assertEqual(base["rebase"]["union"], self.union)
@@ -1228,10 +1283,12 @@ class RebaseToUnionTest(unittest.TestCase):
         self.assertEqual(rc, 1, msg)
         self.assertIn("not a landed union tip", msg)
         # not an ancestor of HEAD
-        self._git("checkout", "-q", "-b", "r2/composite-later", self.union)
+        self._git("checkout", "-q", "-b", "later-tmp", self.union)
         _w(self.root, "src/VP-V/host/Later.h", "int later;\n")
         later = self._commit("union later")
+        self._git("update-ref", "refs/remotes/origin/r2/composite-later", later)
         self._git("checkout", "-q", "ours")
+        self._git("branch", "-D", "later-tmp")
         rc, msg = rb(later)
         self.assertEqual(rc, 1, msg)
         self.assertIn("not an ancestor", msg)
@@ -1244,6 +1301,58 @@ class RebaseToUnionTest(unittest.TestCase):
         rc, msg = rb(self.bill)
         self.assertEqual(rc, 1, msg)
         self.assertIn("nothing to rebase", msg)
+
+    def test_must_d_1_cap_rebased_ceiling_at_m_head_when_merge_shrank(self):
+        self._repo()
+        # Shrink Ours.h from 5 -> 3 on HEAD so M(HEAD) = 10 < M(O)+M(U)-M(B) = 12: ceiling must cap at 10 (no free slack).
+        _w(self.root, "src/VP-V/host/Ours.h", "".join("int ours%d;\n" % i for i in range(3)))
+        self._commit("shrink Ours.h before rebase")
+        rc, msg = chg.rebase_hook_lines_baseline(self.root, self.bill, [BILL], "HEAD", self.union, "WAIVER-T-CAP")
+        self.assertEqual(rc, 0, msg)
+        base = self._baseline()
+        self.assertEqual(base["tu"][BILL], 10, "MUST-D: ceiling must be capped at min(M(O)+M(U)-M(B), M(HEAD))")
+
+    def test_must_d_2_refuse_merge_base_eq_o_and_working_tree_measured_at(self):
+        self._repo()
+        # (a) measured_at == "(working tree)" must be refused cleanly
+        bl_path = os.path.join(self.root, *chg.HOOK_LINES_PATH.split("/"))
+        doc = self._baseline()
+        doc["measured_at"] = "(working tree)"
+        _w(self.root, chg.HOOK_LINES_PATH, json.dumps(doc))
+        rc, msg = chg.rebase_hook_lines_baseline(self.root, self.bill, [BILL], "HEAD", self.union, "WAIVER-T-WT")
+        self.assertEqual(rc, 1, msg)
+        self.assertIn("working tree", msg)
+        # (b) merge-base(O, U) == O (O is an ancestor of U) must be refused
+        doc["measured_at"] = self.bill
+        _w(self.root, chg.HOOK_LINES_PATH, json.dumps(doc))
+        rc, msg = chg.rebase_hook_lines_baseline(self.root, self.bill, [BILL], "HEAD", self.union, "WAIVER-T-MB")
+        self.assertEqual(rc, 1, msg)
+        self.assertIn("merge-base", msg)
+
+    def test_must_d_3_refuse_local_union_branch_and_non_first_parent_commit(self):
+        self._repo()
+        # (a) Local branch refs/heads/r2/composite-local must NOT satisfy _union_refs
+        self._git("checkout", "-q", "-b", "r2/composite-local", self.bill)
+        _w(self.root, "src/VP-V/host/LocalFake.h", "int fake;\n")
+        local_fake = self._commit("local fake composite")
+        self._git("checkout", "-q", "ours")
+        self._git("merge", "-q", "--no-edit", "r2/composite-local")
+        rc, msg = chg.rebase_hook_lines_baseline(self.root, self.bill, [BILL], "HEAD", local_fake, "WAIVER-T-LOC")
+        self.assertEqual(rc, 1, msg)
+        self.assertIn("not a landed union tip", msg)
+        # (b) A side-branch commit merged into refs/remotes/origin/r2/composite-t is NOT on --first-parent -> refused
+        self._git("checkout", "-q", "-b", "side-in-union", self.bill)
+        _w(self.root, "src/VP-V/host/SideInUnion.h", "int side_in_union;\n")
+        side_commit = self._commit("side commit")
+        self._git("checkout", "-q", "-b", "union-m", "refs/remotes/origin/r2/composite-t")
+        self._git("merge", "-q", "--no-ff", "--no-edit", "side-in-union")
+        merged_union = self._git("rev-parse", "--short=9", "HEAD")
+        self._git("update-ref", "refs/remotes/origin/r2/composite-t", merged_union)
+        self._git("checkout", "-q", "ours")
+        self._git("merge", "-q", "--no-edit", "refs/remotes/origin/r2/composite-t")
+        rc, msg = chg.rebase_hook_lines_baseline(self.root, self.bill, [BILL], "HEAD", side_commit, "WAIVER-T-FP")
+        self.assertEqual(rc, 1, msg)
+        self.assertIn("not a landed union tip", msg)
 
 
 class HonestH2MetricTest(unittest.TestCase):
