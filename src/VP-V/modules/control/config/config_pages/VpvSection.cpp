@@ -41,6 +41,7 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <set>
@@ -574,13 +575,20 @@ namespace Vpv
 			std::weak_ptr<LockState> lock;
 		};
 
+		std::atomic<int> g_liveSectionStateCount{ 0 };
+
 		// Shared state of one VP-V page.
-		struct State
+		struct State : std::enable_shared_from_this<State>
 		{
+			State() { g_liveSectionStateCount.fetch_add(1, std::memory_order_relaxed); }
+			~State() { g_liveSectionStateCount.fetch_sub(1, std::memory_order_relaxed); }
+			State(const State&) = delete;
+			State& operator=(const State&) = delete;
+
 			Host host;
 			QString defaultProfile = kDefaultProfile;   // the first renderer profile (file order picks the default)
 			QString profile = kDefaultProfile;
-			std::vector<std::function<void()>> refreshers;
+			std::vector<std::function<void(const std::shared_ptr<State>&)>> refreshers;
 			bool refreshing = false;
 			QWidget* root = nullptr;
 			QPointer<QListWidget> upstreamList;          // the Rendering page's profile list (the picker follows it)
@@ -635,7 +643,8 @@ namespace Vpv
 			{
 				if (refreshing) return;
 				refreshing = true;
-				for (const auto& r : refreshers) r();
+				const auto self = shared_from_this();
+				for (const auto& r : refreshers) r(self);
 				refreshing = false;
 			}
 		};
@@ -814,7 +823,7 @@ namespace Vpv
 				state->RefreshAll();
 			});
 			const std::string k = toggle.key;
-			state->refreshers.push_back([state, combo, k]()
+			state->refreshers.push_back([combo, k](const std::shared_ptr<State>& state)
 			{
 				const QString own = QString::fromStdString(state->Own(k));
 				int index = 0;
@@ -872,7 +881,7 @@ namespace Vpv
 				state->RefreshAll();
 			});
 			const std::string k = spec.key;
-			state->refreshers.push_back([state, edit, k]()
+			state->refreshers.push_back([edit, k](const std::shared_ptr<State>& state)
 			{
 				const QSignalBlocker blocker(edit);
 				edit->setText(QString::fromStdString(state->Own(k)));
@@ -1331,7 +1340,7 @@ namespace Vpv
 					}
 				}
 			}
-			state->refreshers.push_back([state, lock, unit]()
+			state->refreshers.push_back([lock, unit](const std::shared_ptr<State>& state)
 			{
 				// Custom follows the values: on a profile (re)load both ways (ticked when they differ from the
 				// master's, unticked when they sit exactly on it); otherwise it only ticks itself, so a box the
@@ -1451,7 +1460,7 @@ namespace Vpv
 				});
 			}
 
-			state->refreshers.push_back([state, model, overlay, boxes, camSection]()
+			state->refreshers.push_back([model, overlay, boxes, camSection](const std::shared_ptr<State>& state)
 			{
 				const auto get = [&](const QString& section, const QString& key)
 				{
@@ -1602,7 +1611,7 @@ namespace Vpv
 					if (tier >= 0) apply(tier);
 				});
 				QObject::connect(t.defaults, &QPushButton::clicked, t.defaults, [apply, defaultTier]() { if (defaultTier >= 0) apply(defaultTier); });
-				state->refreshers.push_back([state, u, t]()
+				state->refreshers.push_back([u, t](const std::shared_ptr<State>& state)
 				{
 					const int match = MatchTier(TierTable(), *u, state->MakeGetter());
 					if (match >= 0)
@@ -1666,7 +1675,7 @@ namespace Vpv
 				delay->setObjectName(ObjectName(QStringLiteral("input.delay")));
 				delay->setTextFormat(Qt::RichText);
 				delayCard.Add(delay);
-				state->refreshers.push_back([state, delay]() { delay->setText(DelaySummary(state->host, TierTable())); });
+				state->refreshers.push_back([delay](const std::shared_ptr<State>& state) { delay->setText(DelaySummary(state->host, TierTable())); });
 			}
 			if (unit.more && *unit.more)
 			{
@@ -1972,7 +1981,7 @@ namespace Vpv
 			});
 			layout->addStretch();
 
-			state->refreshers.push_back([state, lutStage, entranceOnce, merged, drain, ditherNeed, analysis, resync, hdrInference, order, slotsOff, section]()
+			state->refreshers.push_back([lutStage, entranceOnce, merged, drain, ditherNeed, analysis, resync, hdrInference, order, slotsOff, section](const std::shared_ptr<State>& state)
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
@@ -2171,7 +2180,7 @@ namespace Vpv
 			layout->addStretch();
 			struct CachedRetirement { QPointer<QWidget> control; QString where; QString plain; };
 			auto cachedRetirements = std::make_shared<std::vector<CachedRetirement>>();
-			state->refreshers.push_back([state, groupWidgets, cachedRetirements]()
+			state->refreshers.push_back([groupWidgets, cachedRetirements](const std::shared_ptr<State>& state)
 			{
 				const Table& t = TierTable();
 				if (cachedRetirements->empty())
@@ -2659,7 +2668,7 @@ namespace Vpv
 			speedForm->setContentsMargins(0, 0, 0, 0);
 			speedValues.Add(speedRows);
 			static const char* kSpeedKeys[] = { "rate_gain_up", "rate_gain_down", "recovery_rate_gain" };
-			QList<QDoubleSpinBox*> speedSpins;
+			QList<QPointer<QDoubleSpinBox>> speedSpins;
 			for (const char* key : kSpeedKeys)
 				for (QWidget* f : PrefixedRowFields(root, prefix, Q(key), idx)) MoveRow(f, speedForm, false);
 			// The explanation of the values goes with them (Main keeps only the preset).
@@ -2754,31 +2763,46 @@ namespace Vpv
 						: root->findChild<QToolButton*>(prefix + key + QStringLiteral(".reset"));
 					if (reset) groupResets->emplace_back(reset);
 				}
-			auto apply = [groups, fixBoxes, values, fixes, source, enabled, advancedLedCard, speedsCard, speedValues, speedRows,
-				speedNote, speedCustom, profileFile]()
+			QPointer<QCheckBox> valuesPtr(values);
+			QPointer<QCheckBox> fixesPtr(fixes);
+			QPointer<QComboBox> sourcePtr(source);
+			QPointer<QCheckBox> enabledPtr(enabled);
+			QPointer<QWidget> advancedLedCardPtr(advancedLedCard);
+			QPointer<QWidget> speedsCardPtr(speedsCard);
+			QPointer<QFrame> speedFramePtr(speedValues.frame);
+			QPointer<QWidget> speedRowsPtr(speedRows);
+			QPointer<QLabel> speedNotePtr(speedNote);
+			QPointer<QCheckBox> speedCustomPtr(speedCustom);
+			QPointer<QLineEdit> profileFilePtr(profileFile);
+			auto apply = [groups, fixBoxes, valuesPtr, fixesPtr, sourcePtr, enabledPtr, advancedLedCardPtr, speedsCardPtr,
+				speedFramePtr, speedRowsPtr, speedNotePtr, speedCustomPtr, profileFilePtr]()
 			{
-				const bool driveOn = !enabled || enabled->isChecked();
-				const bool custom = values->isChecked();
+				if (!valuesPtr || !fixesPtr || !speedCustomPtr) return;
+				const bool driveOn = !enabledPtr || enabledPtr->isChecked();
+				const bool custom = valuesPtr->isChecked();
 				// Where the greyed values come from: the LED profile file when one is chosen, else the script's.
-				const QString file = profileFile ? profileFile->text().trimmed() : QString();
+				const QString file = profileFilePtr ? profileFilePtr->text().trimmed() : QString();
 				const QString from = file.isEmpty() ? QStringLiteral("your script's built-in values") :
 					QStringLiteral("the LED profile file %1").arg(QFileInfo(file).fileName());
-				const QString chosen = source ? source->currentData().toString() : QString();
+				const QString chosen = sourcePtr ? sourcePtr->currentData().toString() : QString();
 				// The group cards follow the Advanced LED card (shown for VP's own sources, greyed with the drive off).
-				const bool groupsShown = !advancedLedCard || !advancedLedCard->isHidden();
+				const bool groupsShown = !advancedLedCardPtr || !advancedLedCardPtr->isHidden();
 				for (Group& g : *groups)
 				{
 					if (!g.card) continue;
 					g.card->setVisible(groupsShown);
 					g.card->setEnabled(driveOn);
 					const bool modeOk = !g.mode || chosen == Q(g.mode);
-					g.rows->setEnabled(custom && modeOk);
-					g.note->setText(!modeOk ? QStringLiteral("Used only in %1 mode.").arg(std::string(g.mode) == "compensate" ?
-						QStringLiteral("Compensate") : QStringLiteral("Script")) :
-						!custom ? QStringLiteral("Set by %1 (LED profile). Tick Custom in the Advanced LED card to change.").arg(from) : QString());
-					g.note->setVisible(!g.note->text().isEmpty());
+					if (g.rows) g.rows->setEnabled(custom && modeOk);
+					if (g.note)
+					{
+						g.note->setText(!modeOk ? QStringLiteral("Used only in %1 mode.").arg(std::string(g.mode) == "compensate" ?
+							QStringLiteral("Compensate") : QStringLiteral("Script")) :
+							!custom ? QStringLiteral("Set by %1 (LED profile). Tick Custom in the Advanced LED card to change.").arg(from) : QString());
+						g.note->setVisible(!g.note->text().isEmpty());
+					}
 				}
-				const bool fixesCustom = fixes->isChecked();
+				const bool fixesCustom = fixesPtr->isChecked();
 				for (const QPointer<QCheckBox>& bp : *fixBoxes)
 					if (QCheckBox* box = bp.data())
 					{
@@ -2789,17 +2813,24 @@ namespace Vpv
 								"it.\n\n") + box->property("vpvFixTip").toString());
 					}
 				// LED speeds values follow their card on Main (Compensate only) and the preset until Custom.
-				speedValues.frame->setVisible(!speedsCard || !speedsCard->isHidden());
-				speedValues.frame->setEnabled(driveOn);
-				speedRows->setEnabled(speedCustom->isChecked());
-				speedNote->setText(speedCustom->isChecked() ? QString() :
-					QStringLiteral("Set by the LED speeds preset (Main). Tick Custom to change these by hand."));
-				speedNote->setVisible(!speedNote->text().isEmpty());
+				if (speedFramePtr)
+				{
+					speedFramePtr->setVisible(!speedsCardPtr || !speedsCardPtr->isHidden());
+					speedFramePtr->setEnabled(driveOn);
+				}
+				if (speedRowsPtr) speedRowsPtr->setEnabled(speedCustomPtr->isChecked());
+				if (speedNotePtr)
+				{
+					speedNotePtr->setText(speedCustomPtr->isChecked() ? QString() :
+						QStringLiteral("Set by the LED speeds preset (Main). Tick Custom to change these by hand."));
+					speedNotePtr->setVisible(!speedNotePtr->text().isEmpty());
+				}
 			};
 			// Custom follows the saved values, both ways (audit MEDIUM 3): any field set (its Reset is enabled) /
 			// any fix off / any speed not "preset". Run now, and again whenever the LED profile changes.
-			auto recompute = [groupResets, fixBoxes, values, fixes, speedCustom, speedSpins, apply]()
+			auto recompute = [groupResets, fixBoxes, valuesPtr, fixesPtr, speedCustomPtr, speedSpins, apply]()
 			{
+				if (!valuesPtr || !fixesPtr || !speedCustomPtr) return;
 				bool anySet = false;
 				for (const QPointer<QToolButton>& rp : *groupResets)
 					if (QToolButton* reset = rp.data())
@@ -2808,11 +2839,12 @@ namespace Vpv
 				for (const QPointer<QCheckBox>& bp : *fixBoxes)
 					if (QCheckBox* box = bp.data()) anyFixOff = anyFixOff || !box->isChecked();
 				bool anySpeed = false;
-				for (QDoubleSpinBox* spin : speedSpins) anySpeed = anySpeed || spin->value() > spin->minimum();
-				const QSignalBlocker a(values), b(fixes), c(speedCustom);
-				values->setChecked(anySet);
-				fixes->setChecked(anyFixOff);
-				speedCustom->setChecked(anySpeed);
+				for (const QPointer<QDoubleSpinBox>& sp : speedSpins)
+					if (QDoubleSpinBox* spin = sp.data()) anySpeed = anySpeed || spin->value() > spin->minimum();
+				const QSignalBlocker a(valuesPtr.data()), b(fixesPtr.data()), c(speedCustomPtr.data());
+				valuesPtr->setChecked(anySet);
+				fixesPtr->setChecked(anyFixOff);
+				speedCustomPtr->setChecked(anySpeed);
 				apply();
 			};
 			recompute();
@@ -2837,7 +2869,8 @@ namespace Vpv
 			QObject::connect(speedCustom, &QCheckBox::toggled, speedCustom, [speedSpins, apply](bool on)
 			{
 				if (!on)
-					for (QDoubleSpinBox* spin : speedSpins) spin->setValue(spin->minimum());   // "preset": the page removes the key
+					for (const QPointer<QDoubleSpinBox>& sp : speedSpins)
+						if (QDoubleSpinBox* spin = sp.data()) spin->setValue(spin->minimum());   // "preset": the page removes the key
 				apply();
 			});
 			if (source)
@@ -2846,18 +2879,18 @@ namespace Vpv
 				QObject::connect(enabled, &QCheckBox::toggled, values, [apply](bool) { apply(); });
 			// A profile file chosen or the built-in one restored: the values (and where they come from) change.
 			if (profileFile)
-				QObject::connect(profileFile, &QLineEdit::textChanged, values, [recompute](const QString&)
+				QObject::connect(profileFile, &QLineEdit::textChanged, values, [valuesPtr, recompute](const QString&)
 				{
-					QTimer::singleShot(0, [recompute]() { recompute(); });
+					if (valuesPtr) QTimer::singleShot(0, valuesPtr.data(), [recompute]() { recompute(); });
 				});
 			for (const char* part : { "profile_browse", "profile_builtin" })
 			{
 				auto* button = idx ? idx->FindFirst<QPushButton>(root, prefix + Q(part))
 					: root->findChild<QPushButton*>(prefix + Q(part));
 				if (button)
-					QObject::connect(button, &QPushButton::clicked, values, [recompute]()
+					QObject::connect(button, &QPushButton::clicked, values, [valuesPtr, recompute]()
 					{
-						QTimer::singleShot(0, [recompute]() { recompute(); });
+						if (valuesPtr) QTimer::singleShot(0, valuesPtr.data(), [recompute]() { recompute(); });
 					});
 			}
 
@@ -2898,48 +2931,72 @@ namespace Vpv
 			const Controls turnControls = collect(prefix, { "ftb_turn_step" });
 			const Controls compensateControls = collect(projectorPrefix, { "cntr_max_usable", "dmd_clip_cntr" });
 			QWidget* whiteClips = compensateControls.size() == 2 ? compensateControls[1].data() : nullptr;
-			QFormLayout* responseForm = whiteClips && whiteClips->parentWidget() ? qobject_cast<QFormLayout*>(whiteClips->parentWidget()->layout()) : nullptr;
-			auto refreshReasons = [=]()
+			QPointer<QFormLayout> responseFormPtr(whiteClips && whiteClips->parentWidget()
+				? qobject_cast<QFormLayout*>(whiteClips->parentWidget()->layout()) : nullptr);
+			std::weak_ptr<State> weakState(state);
+			QPointer<QLabel> offNotePtr(offNote);
+			QPointer<QCheckBox> adaptiveBoxPtr(adaptiveBox);
+			QPointer<QComboBox> boostChoicePtr(boostChoice);
+			QPointer<QCheckBox> experimentBoxPtr(experimentBox);
+			QPointer<QComboBox> experimentMethodPtr(experimentMethod);
+			QPointer<QLabel> behaviourReasonsPtr(behaviourReasons);
+			QPointer<QWidget> cardConnectionPtr(cardConnection);
+			QPointer<QWidget> cardResponsePtr(cardResponse);
+			QPointer<QWidget> cardProfilePtr(cardProfile);
+			QPointer<QWidget> cardAssistPtr(cardAssist);
+			QPointer<QWidget> cardSpeedsPtr(cardSpeeds);
+			QPointer<QWidget> cardAdvancedProjectorPtr(cardAdvancedProjector);
+			QPointer<QWidget> cardExperimentPtr(cardExperiment);
+			auto refreshReasons = [weakState, enabledPtr, sourcePtr, offNotePtr, driveOffControls, liftControls,
+				boostControls, experimentControls, turnControls, compensateControls, responseFormPtr,
+				adaptiveBoxPtr, boostChoicePtr, experimentBoxPtr, experimentMethodPtr, behaviourReasonsPtr,
+				cardConnectionPtr, cardResponsePtr, cardProfilePtr, cardAssistPtr, cardSpeedsPtr,
+				cardAdvancedProjectorPtr, cardExperimentPtr]()
 			{
-				const bool original = state && !state->vpvOn;
-				const bool driveOn = !enabled || enabled->isChecked();
-				const QString chosen = source ? source->currentData().toString() : QString();
+				const auto st = weakState.lock();
+				const bool original = st && !st->vpvOn;
+				const bool driveOn = !enabledPtr || enabledPtr->isChecked();
+				const QString chosen = sourcePtr ? sourcePtr->currentData().toString() : QString();
 				const bool compensate = chosen == QStringLiteral("compensate");
-				offNote->setText(original ? QString() : QStringLiteral("Dynamic Drive is off, so the settings below are greyed. Tick "
-					"\"Dynamic Drive on\" at the top of Main to use them."));
-				offNote->setVisible(!original && !driveOn);
+				if (offNotePtr)
+				{
+					offNotePtr->setText(original ? QString() : QStringLiteral("Dynamic Drive is off, so the settings below are greyed. Tick "
+						"\"Dynamic Drive on\" at the top of Main to use them."));
+					offNotePtr->setVisible(!original && !driveOn);
+				}
 				const QString offWhy = QStringLiteral("Greyed: Dynamic Drive is off (the tick box at the top of Main).");
 				for (const QPointer<QWidget>& w : driveOffControls) SetGreyReason(w, driveOn ? QString() : offWhy);
-				for (QWidget* card : { cardConnection, cardResponse, cardProfile, cardAssist, cardSpeeds, cardAdvancedProjector, cardExperiment })
+				for (const QPointer<QWidget>& card : { cardConnectionPtr, cardResponsePtr, cardProfilePtr, cardAssistPtr,
+					cardSpeedsPtr, cardAdvancedProjectorPtr, cardExperimentPtr })
 					SetGreyReason(card, driveOn ? QString() : offWhy);
 				// The LED profile and the speeds preset stay on Main (owner 2026-10-25); a command source that does not
 				// use them greys them with the reason instead of hiding them.
 				const bool ownSource = compensate || chosen == QStringLiteral("internal_script");
-				if (cardProfile)
+				if (cardProfilePtr)
 				{
-					cardProfile->setVisible(true);
-					cardProfile->setEnabled(driveOn && ownSource);
-					SetGreyReason(cardProfile, !driveOn ? offWhy : ownSource ? QString() :
+					cardProfilePtr->setVisible(true);
+					cardProfilePtr->setEnabled(driveOn && ownSource);
+					SetGreyReason(cardProfilePtr, !driveOn ? offWhy : ownSource ? QString() :
 						QStringLiteral("Greyed: used only with VP's copy of your script or Compensate (choose one above)."));
 				}
-				if (cardSpeeds)
+				if (cardSpeedsPtr)
 				{
-					cardSpeeds->setVisible(true);
-					cardSpeeds->setEnabled(driveOn && compensate);
-					SetGreyReason(cardSpeeds, !driveOn ? offWhy : compensate ? QString() :
+					cardSpeedsPtr->setVisible(true);
+					cardSpeedsPtr->setEnabled(driveOn && compensate);
+					SetGreyReason(cardSpeedsPtr, !driveOn ? offWhy : compensate ? QString() :
 						QStringLiteral("Greyed: used only with the Compensate command source (choose it above)."));
 				}
-				const bool adaptiveOn = !adaptiveBox || adaptiveBox->isChecked();
+				const bool adaptiveOn = !adaptiveBoxPtr || adaptiveBoxPtr->isChecked();
 				const QString liftWhy = QStringLiteral("Greyed: used only when Adaptive gamma is on (tick it above).");
 				for (const QPointer<QWidget>& w : liftControls) SetGreyReason(w, adaptiveOn ? QString() : liftWhy);
-				const QString boost = boostChoice ? boostChoice->currentData().toString() : QString();
+				const QString boost = boostChoicePtr ? boostChoicePtr->currentData().toString() : QString();
 				const bool boostOn = !boost.isEmpty() && boost != QStringLiteral("off");
 				const QString boostWhy = QStringLiteral("Greyed: used only when the Gamma boost is on (choose 2.4 above).");
 				for (const QPointer<QWidget>& w : boostControls) SetGreyReason(w, boostOn ? QString() : boostWhy);
-				const bool experimentOn = !experimentBox || experimentBox->isChecked();
+				const bool experimentOn = !experimentBoxPtr || experimentBoxPtr->isChecked();
 				const QString experimentWhy = QStringLiteral("Greyed: tick \"Experimental: deeper fade to black\" first.");
 				for (const QPointer<QWidget>& w : experimentControls) SetGreyReason(w, experimentOn ? QString() : experimentWhy);
-				const bool turns = experimentMethod && experimentMethod->currentData().toString() == QStringLiteral("turns");
+				const bool turns = experimentMethodPtr && experimentMethodPtr->currentData().toString() == QStringLiteral("turns");
 				for (const QPointer<QWidget>& w : turnControls)
 					SetGreyReason(w, !experimentOn ? experimentWhy : turns ? QString() :
 						QStringLiteral("Greyed: used only when the colours take turns (choose that Method)."));
@@ -2948,17 +3005,17 @@ namespace Vpv
 				for (const QPointer<QWidget>& w : compensateControls)
 					if (w)
 					{
-						if (responseForm) responseForm->setRowVisible(w, true);
+						if (responseFormPtr) responseFormPtr->setRowVisible(w, true);
 						w->setEnabled(compensate);
 						SetGreyReason(w, compensate ? QString() : compensateWhy);
 					}
 				QStringList reasons;
 				if (!adaptiveOn) reasons << QStringLiteral("Shadow lift is greyed: it needs Adaptive gamma, which is off.");
 				if (!boostOn) reasons << QStringLiteral("The gamma boost's dark-protection values are greyed: the Gamma boost is Off.");
-				if (behaviourReasons)
+				if (behaviourReasonsPtr)
 				{
-					behaviourReasons->setText(reasons.join(QLatin1Char(' ')));
-					behaviourReasons->setVisible(!reasons.isEmpty());
+					behaviourReasonsPtr->setText(reasons.join(QLatin1Char(' ')));
+					behaviourReasonsPtr->setVisible(!reasons.isEmpty());
 				}
 			};
 			refreshReasons();
@@ -2974,9 +3031,18 @@ namespace Vpv
 			// The Original pathway switch and anything else that changes while the page is shown.
 			auto* reasonTimer = new QTimer(pages);
 			reasonTimer->setInterval(1000);
-			QObject::connect(reasonTimer, &QTimer::timeout, pages, [pages, refreshReasons]() { if (pages->isVisible()) refreshReasons(); });
+			QPointer<QWidget> pagesPtr(pages);
+			QObject::connect(reasonTimer, &QTimer::timeout, pages, [pagesPtr, reasonTimer, refreshReasons]()
+			{
+				if (!pagesPtr || !pagesPtr->window() || pagesPtr->window() == pagesPtr)
+				{
+					reasonTimer->stop();
+					return;
+				}
+				if (pagesPtr->isVisible()) refreshReasons();
+			});
 			reasonTimer->start();
-			if (state) state->refreshers.push_back(refreshReasons);
+			if (state) state->refreshers.push_back([refreshReasons](const std::shared_ptr<State>&) { refreshReasons(); });
 			return pages;
 		}
 
@@ -3116,6 +3182,11 @@ namespace Vpv
 		return v.compare(QStringLiteral("on"), Qt::CaseInsensitive) != 0;
 	}
 
+	int LiveSectionStateCount()
+	{
+		return g_liveSectionStateCount.load(std::memory_order_relaxed);
+	}
+
 	void ApplyManagedState(const Host& host, bool vpvOn)
 	{
 		ApplyManagedIn(host, host.upstreamRoot, vpvOn);
@@ -3155,6 +3226,17 @@ namespace Vpv
 		root->setProperty("vpvSection", true);
 		state->root = root;
 		state->rowFollower = new RowFollowerManager(root);
+		std::weak_ptr<State> weakSectionState(state);
+		QObject::connect(root, &QObject::destroyed, [weakSectionState](QObject*)
+		{
+			if (auto s = weakSectionState.lock())
+			{
+				s->refreshers.clear();
+				s->own.clear();
+				s->fieldNotes.clear();
+				s->host = {};
+			}
+		});
 		auto* layout = new QVBoxLayout(root);
 		layout->setContentsMargins(0, 0, 0, 0);
 
@@ -3318,7 +3400,7 @@ namespace Vpv
 					precisionNote->setObjectName(ObjectName(QStringLiteral("full_precision.note")));
 					precisionNote->setProperty("vpvPrecisionNote", true);
 					precisionForm->addRow(precisionNote);
-					state->refreshers.push_back([state, precisionNote]()
+					state->refreshers.push_back([precisionNote](const std::shared_ptr<State>& state)
 					{
 						std::string v = state->Get("fbo_float32");
 						if (v.empty()) v = TierTable().Default("fbo_float32");
@@ -3354,7 +3436,7 @@ namespace Vpv
 		{
 			if (state->globalChosen >= 0) applyGlobal(state->globalChosen);
 		});
-		state->refreshers.push_back([state, global, chips]()
+		state->refreshers.push_back([global, chips](const std::shared_ptr<State>& state)
 		{
 			const int g = MatchGlobal(TierTable(), state->MakeGetter());
 			// The units' own tiers, as chips (usability audit 2026-10-24).
@@ -3425,11 +3507,23 @@ namespace Vpv
 		timer->setInterval(1000);
 		// Also re-reads the tiers while the page is shown: a moved upstream row edits the document
 		// directly, so a tier name may need to change to Custom (or back).
-		QObject::connect(timer, &QTimer::timeout, fallbacks, [mirror, state, root]()
+		QPointer<QWidget> rootPtr(root);
+		QObject::connect(timer, &QTimer::timeout, fallbacks, [mirror, weakSectionState, rootPtr, timer]()
 		{
-			if (!root->isVisible()) return;
+			if (!rootPtr || !rootPtr->window() || rootPtr->window() == rootPtr)
+			{
+				timer->stop();
+				return;
+			}
+			if (!rootPtr->isVisible()) return;
+			const auto s = weakSectionState.lock();
+			if (!s)
+			{
+				timer->stop();
+				return;
+			}
 			mirror();
-			state->RefreshAll();
+			s->RefreshAll();
 		});
 		timer->start();
 
@@ -3456,7 +3550,7 @@ namespace Vpv
 		auto tasteResolved = std::make_shared<bool>(false);
 		auto tasteBox = std::make_shared<QPointer<QWidget>>();
 		auto tasteSlider = std::make_shared<QPointer<QSlider>>();
-		state->refreshers.push_back([state, tasteResolved, tasteBox, tasteSlider]()
+		state->refreshers.push_back([tasteResolved, tasteBox, tasteSlider](const std::shared_ptr<State>& state)
 		{
 			if (!*tasteResolved && state->root)
 			{
@@ -3492,7 +3586,7 @@ namespace Vpv
 			}
 		});
 		// The per-setting "Set by" lines, last: they read what the locks above decided.
-		state->refreshers.push_back([state]() { RefreshFieldNotes(state); });
+		state->refreshers.push_back([](const std::shared_ptr<State>& state) { RefreshFieldNotes(state); });
 		FitWidth(root);
 		if (drivePage)
 		{
