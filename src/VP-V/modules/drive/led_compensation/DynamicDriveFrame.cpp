@@ -277,6 +277,12 @@ namespace LedDrive
 		p.veil = gain.veil;
 		p.wtwPassthrough = wtwPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0;
 		p.btbPassthrough = btbPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0;
+		// GEM-LED-EXTRANGE-HOST: full-range output encodes [0, 1] directly (clamping excursions prevents
+		// per-channel encode clipping / hue tilt); limited-range output keeps exact SDI/HDMI legal
+		// extended codes [4, 1019] over [64, 940] -> [-60/876, 955/876] (unchanged defaults).
+		const bool outputFullRange = pl_color_levels_guess(&target.repr) == PL_COLOR_LEVELS_FULL;
+		p.extendedFloor = outputFullRange ? 0.0 : (-60.0 / 876.0);
+		p.extendedCeiling = outputFullRange ? 1.0 : (955.0 / 876.0);
 		frameCompensationIdentity = p.gain == 1.0 && p.boost == 1.0 && !(p.shadowLift * p.veil > 0.0);
 	}
 

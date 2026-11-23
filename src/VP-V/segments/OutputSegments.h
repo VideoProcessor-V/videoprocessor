@@ -57,6 +57,9 @@ namespace OutputSegments
 	{
 		double gain = 1, knee = 0.08, gainDomain = 0, eotf = 2.2, boost = 1, boostKnee = 0, boostKneeWidth = 0.05;
 		double shadowLift = 0, veil = 0, wtwPassthrough = 1, btbPassthrough = 1;
+		// GEM-LED-EXTRANGE-HOST: exact 10-bit limited SDI/HDMI extended code bounds [4, 1019] over [64, 940]
+		// -> [(4-64)/876, (1019-64)/876] = [-60/876, 955/876]; full-range targets set [0.0, 1.0].
+		double extendedFloor = -60.0 / 876.0, extendedCeiling = 955.0 / 876.0;
 	};
 
 	// What the host decided for this frame (the decisions, logging and fallbacks stay in the host

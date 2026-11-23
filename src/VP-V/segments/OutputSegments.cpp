@@ -136,6 +136,8 @@ namespace OutputSegments
 				SetHookParameter(hooks[i], "veil", c.veil);
 				SetHookParameter(hooks[i], "wtw_passthrough", c.wtwPassthrough);
 				SetHookParameter(hooks[i], "btb_passthrough", c.btbPassthrough);
+				SetHookParameter(hooks[i], "extended_floor", c.extendedFloor);
+				SetHookParameter(hooks[i], "extended_ceiling", c.extendedCeiling);
 			}
 			counts.ledCompensation = hooks.size() - start;
 			note(start, Id::DriveLedCompensation);
