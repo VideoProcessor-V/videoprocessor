@@ -30,5 +30,8 @@
     <ClCompile Include="..\VP-V\modules\motion\estimation\MotionAheadProducer.cpp"/>
     <!-- AnalysisLumaSource.cpp includes the Lib pch (MFC, DirectShow): not compilable here; the test stub implements what the producer calls. -->
     <ClCompile Include="..\VP-V\tests\beta_gpu\AnalysisLumaSourceTestStub.cpp"/>
+    <!-- C5-BETALINK parity with VideoProcessor-BetaTestsHost.items.props: DejudderWarp.cpp calls VpFrameAnalysis::P1Gpu::BuildPyramidInto. -->
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\lane\P1GpuFill.cpp"/>
+    <ClCompile Include="..\VP-V\core\hub\ExtensionHub.cpp"/>
   </ItemGroup>
 </Project>
