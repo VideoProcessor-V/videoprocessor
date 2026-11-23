@@ -5,6 +5,7 @@
 #include <DisplayRefreshRatePolicy.h>
 
 #include <vprenderer/AlphaCadenceCorrectionPolicy.h>
+#include <VP-V/core/OnePole.h>
 #include <GeneralRateLog.h>
 
 #include <algorithm>
@@ -92,5 +93,5 @@ double AlphaCadenceCorrectionPolicy::FilterAlpha(double rateHz, bool timingFixes
 {
 	if (!timingFixes || !CaptureRateBounds::Accepts(rateHz))
 		return RATE_FILTER_ALPHA;
-	return 1.0 - std::exp(-1.0 / (rateHz * RATE_FILTER_SECONDS));
+	return OnePole::AlphaPerFrame(RATE_FILTER_SECONDS, rateHz);
 }
