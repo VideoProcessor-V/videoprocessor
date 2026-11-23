@@ -96,6 +96,32 @@ namespace VideoProcessorTest
 	TEST_CLASS(OriginalPathwayGateTests)
 	{
 	public:
+		// GEM-031 (Gemini's test, config-schema MUST-1, owner Q4): on the Original pathway a saved one of Bill's five
+		// chroma filters stays (no override); unset "auto" and the VP-only values become bicubic; no host value = bicubic.
+		TEST_METHOD(OriginalChromaKeepsBillsFiltersAndForcesBicubicOtherwise)
+		{
+			for (const char* bill : { "ewa_lanczossharp", "ewa_lanczos", "lanczos", "bicubic", "bilinear" })
+			{
+				const std::string value = bill;
+				Assert::IsTrue(OriginalPathway::IsBillChromaFilter(value), L"one of Bill's filters is not recognised");
+				Assert::IsNull(OriginalPathway::ChromaOverride(&value), L"Bill's saved chroma filter is overridden");
+			}
+			for (const char* vp : { "auto", "catmull_rom", "upscaler", "" })
+			{
+				const std::string value = vp;
+				Assert::IsFalse(OriginalPathway::IsBillChromaFilter(value), L"a VP-only chroma value counted as Bill's");
+				const char* forced = OriginalPathway::ChromaOverride(&value);
+				Assert::IsNotNull(forced, L"a VP-only chroma value reaches the Original pathway");
+				Assert::AreEqual(std::string("bicubic"), std::string(forced));
+			}
+			Assert::AreEqual(std::string("bicubic"), std::string(OriginalPathway::ChromaOverride(nullptr)), L"no host value: bicubic");
+			// The table still names bicubic as the Original value (the override and the table agree).
+			std::string tableValue;
+			for (const OriginalPathway::Override& o : OriginalPathway::Overrides())
+				if (std::string(o.key) == "chroma_upscaler") tableValue = o.value;
+			Assert::AreEqual(std::string("bicubic"), tableValue);
+		}
+
 		// The hub keeps one pathway fact per host: set at SettingsApplied (code != 0) after the modules saw the call (a
 		// module's own handler reads the PREVIOUS fact), dropped with the host; no fact = VP-V.
 		TEST_METHOD(TheHubRecordsThePathwayAtSettingsAppliedAfterTheModulesSawIt)

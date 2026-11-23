@@ -45,6 +45,23 @@ import master_settings_common as C  # noqa: E402
 
 ORG_REL = "src/VP-V/modules/control/config/config_pages/VpvOrganisation.h"
 CE_REL = "src/VideoProcessor-Config/ConfigEditorWindow.cpp"
+# The section-building code: Bill's page, plus the VP-V files the hook relocations moved section bodies into
+# (Gemini relocations 1-4, 22bd18f1f / 0153c6bac / ec003d7ff / d33ff578f: VpvRenderingProfileSections.cpp).
+SECTION_SOURCES = (CE_REL, "src/VP-V/modules/control/config/config_pages/VpvRenderingProfileSections.cpp")
+
+
+def section_source_spans(root):
+    """{section id: (lines of the file that builds it, first, last)} over SECTION_SOURCES (the first file wins)."""
+    out = {}
+    for rel in SECTION_SOURCES:
+        if not os.path.isfile(os.path.join(root, *rel.split("/"))):
+            continue
+        lines = read(root, rel).splitlines()
+        for sid, (first, last) in section_spans(lines).items():
+            out.setdefault(sid, (lines, first, last))
+    return out
+
+
 RETIREMENT_UNIT = "retirement"
 RETIREMENT_NAME = "Proposed retirement"
 ENFORCED_UNITS = ("motion", "input", "colour", "repair", "scaling", "output", RETIREMENT_UNIT)
@@ -174,13 +191,13 @@ def build_table(root, known_keys):
     # keys built inside a whole Section by Bill's page: the section's source span
     ce_path = os.path.join(root, *CE_REL.split("/"))
     if os.path.isfile(ce_path):
-        lines = read(root, CE_REL).splitlines()
-        spans = section_spans(lines)
+        spans = section_source_spans(root)
         for sid, card in section_card.items():
             if sid not in spans:
-                errors.append("%s: section '%s' (card %s/%s) not found in %s" % (ORG_REL, sid, card["unit"], card["id"], CE_REL))
+                errors.append("%s: section '%s' (card %s/%s) not found in %s" % (ORG_REL, sid, card["unit"], card["id"],
+                                                                              " or ".join(SECTION_SOURCES)))
                 continue
-            first, last = spans[sid]
+            lines, first, last = spans[sid]
             for n, ln in enumerate(lines[first:last]):
                 # a later `form = <other form>;` hands the rest of the span to another page/section
                 if n and re.match(r'\s*form\s*=\s*(?!addCollapsibleSection)', ln):
@@ -285,14 +302,13 @@ def analyse(root):
     # 5. the Fixes under test container: every VP key inside it is placed on a card or listed as staying
     ce_path = os.path.join(root, *CE_REL.split("/"))
     if os.path.isfile(ce_path):
-        lines = read(root, CE_REL).splitlines()
-        span = section_spans(lines).get(FIXES_CONTAINER_ID)
+        span = section_source_spans(root).get(FIXES_CONTAINER_ID)
         if span is None:
-            issues["error"].append("%s: container '%s' not found (P8-4 check)" % (CE_REL, FIXES_CONTAINER_ID))
+            issues["error"].append("%s: container '%s' not found (P8-4 check)" % (" or ".join(SECTION_SOURCES), FIXES_CONTAINER_ID))
         else:
             known = set(code) | {r["key"] for r in rows}
             inside = set()
-            for ln in lines[span[0]:span[1]]:
+            for ln in span[0][span[1]:span[2]]:
                 for tok in re.findall(r'"([a-z][a-z0-9_]*)"', ln):
                     if tok in known and "_" in tok:
                         inside.add(tok)

@@ -1662,11 +1662,20 @@ def untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_us
 H2_METRIC_VERSION = 2
 # The tu measure's own version (G-CC2 MUST-A): 2 = shared headers only through LIVE includes (not under #if / #ifdef)
 # from VP-V .cpp files a build file lists as ClCompile, and never a file defining members of a Bill-owned class. A
-# baseline seeded with an older tu measure is re-seeded by a named migration (--migrate WAIVER-<ID>).
-TU_MEASURE_VERSION = 2
+# baseline seeded with an older tu measure is re-seeded by a named migration (--migrate WAIVER-<ID>) or a union-base
+# rebase (--rebase-to). 3 (G-CC4 MUST-B) = the same on LEXED text (no include, class or member in a comment or a
+# string), a guard only in a header on a macro the compiler does not predefine, sources only from items a .vcxproj
+# really compiles in x64 Release (imports resolved; false / undecidable conditions and ExcludedFromBuild drop an
+# item), no decoy-class exemption, macro qualifiers expanded; and (V-GEM, Gemini 2be3cebf4) a shared header is exempt
+# only for its declaration-only lines (vp_footprint.header_body_lines): its bodies count in every Bill includer's tu,
+# and the walk continues through it.
+TU_MEASURE_VERSION = 3
 # The most a named RELOCATION may let one includer's combined h2 + tu grow (G-CC2 SHOULD-B; bookkeeping lines:
-# a declaration and an include per moved definition): --allowance N, 0 <= N <= this.
-RELOCATION_MAX_ALLOWANCE = 64
+# a declaration and an include per moved definition): --allowance N, 0 <= N <= this. G-CC4 SHOULD-D: 8, and a
+# relocation needs a real h2 drop in every includer whose tu rises.
+RELOCATION_MAX_ALLOWANCE = 8
+# --rebase-to: a landed union tip is an ancestor of (or equal to) a branch matching one of these (--union-ref adds one)
+UNION_REF_PATTERNS = ("r2/composite*",)
 DOC_EXT = (".md", ".txt", ".html", ".htm", ".rst")
 H2_BUCKETS = ("production", "tests", "project")
 RENDERER_FILES = ("src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
@@ -1732,11 +1741,12 @@ def h2_rows(tree, root, base_ref, diff, no_git, only):
 def _shared_headers(tree, read, bill_tree, root=None, no_git=False):
     """The VP-authored files a VP-authored production .cpp reaches through live includes (vp_footprint.shared_vp_headers):
     not part of tu. G-CC2 MUST-A: only a .cpp that a build file lists as ClCompile counts as a source, and a file
-    defining members of a Bill-owned class is never shared."""
+    defining members of a Bill-owned class is never shared. G-CC4 MUST-B 3: only items a .vcxproj really compiles in
+    x64 Release (its own and its resolved imports')."""
     vp = [f for f in tree.code_files() if vp_footprint.is_vp_authored(f, bill_tree)]
     tree.prefetch(vp)
     compiled = [f for f in vp if vp_footprint.is_compiled_vp_source(f, bill_tree)]
-    listed = vp_footprint.build_listed_sources(_build_texts(tree, root, no_git, (".vcxproj", ".props")), compiled)
+    listed = vp_footprint.build_listed_sources(_build_texts(tree, root, no_git, (".vcxproj", ".props", ".targets")), compiled)
     tree.prefetch([p for p in (bill_tree or ()) if p.startswith("src/") and p.lower().endswith((".h", ".hpp"))])
     classes = vp_footprint.bill_class_names(read, bill_tree)
     return vp_footprint.shared_vp_headers(sorted(listed), read, bill_tree, classes)
@@ -1984,10 +1994,11 @@ def load_h2_baseline(tree, no_git=False):
         return base, ("%s has no tu / combined ceilings (G-CC1 (7)): seed them with --write-hook-lines-baseline --migrate "
                       "WAIVER-<ID>" % HOOK_LINES_PATH)
     if base.get("tu_measure") != TU_MEASURE_VERSION:
-        return base, ("%s was seeded with tu measure %s, the checker measures tu %d (G-CC2 MUST-A: live includes from "
-                      "build-listed VP-V .cpp files only, no Bill-member files): re-seed tu / combined with "
-                      "--write-hook-lines-baseline --migrate WAIVER-<ID>" % (HOOK_LINES_PATH, base.get("tu_measure", 1),
-                                                                            TU_MEASURE_VERSION))
+        return base, ("%s was seeded with tu measure %s, the checker measures tu %d (G-CC2 MUST-A / G-CC4 MUST-B: live "
+                      "includes of the lexed text from VP-V .cpp files a .vcxproj really compiles, no Bill-member files): "
+                      "re-seed tu / combined with --write-hook-lines-baseline --migrate WAIVER-<ID>, or on a union merge "
+                      "--rebase-to <union tip> --waiver WAIVER-<ID>" % (HOOK_LINES_PATH, base.get("tu_measure", 1),
+                                                                        TU_MEASURE_VERSION))
     return base, None
 
 
@@ -2470,6 +2481,12 @@ def selftest():
         assert rc == 1 and "beyond its allowance 2" in out and "tu +20" in out, out
         rc, out = cli(root, "--write-hook-lines-baseline", "--relocation", "WAIVER-T-GROW", "--allowance", str(RELOCATION_MAX_ALLOWANCE + 1))
         assert rc == 1 and "--allowance" in out, out
+        assert RELOCATION_MAX_ALLOWANCE <= 8, "G-CC4 SHOULD-D: a small cap"
+        # MUTATION (G-CC4 SHOULD-D): one new body (tu +1, combined +1, h2 +0) inside allowance 1 passed as a
+        # "relocation" before 1d; with no h2 drop it is refused
+        w(root, "src/VP-V/host/Body.h", "".join("void Impl::f%d() {}\n" % i for i in range(11)))
+        rc, out = cli(root, "--write-hook-lines-baseline", "--relocation", "WAIVER-T-GROW", "--allowance", "1")
+        assert rc == 1 and "real h2 drop" in out and "tu +1, h2 +0" in out, out
         w(root, "src/VP-V/host/Body.h", "".join("void Impl::f%d() {}\n" % i for i in range(10)))
         assert cli(root)[0] == 0
         # MUTATION (G-CC2 MUST-A): a dummy VP-V .cpp with the include switched off (`#if 0`) does not make the moved
@@ -2486,6 +2503,8 @@ def selftest():
         # ... nor a live include from a build-listed .cpp: Body.h defines members of Bill's Impl, never shared
         w(root, "src/VP-V/build/T.items.props", '<Project><ItemGroup><ClCompile Include="$(MSBuildThisFileDirectory)..\\host\\Body.cpp" />'
                                                  '</ItemGroup></Project>\n')
+        # G-CC4 MUST-B 3: the .props counts only through a project that imports it
+        w(root, "src/T/T.vcxproj", '<Project><Import Project="$(MSBuildThisFileDirectory)..\\VP-V\\build\\T.items.props" /></Project>\n')
         rc, out = cli(root)
         assert rc == 0 and "< ceiling 10" not in out, out
         # a genuine interface header that a build-listed VP-V .cpp includes live is shared (not tu)
@@ -2495,6 +2514,49 @@ def selftest():
                       "#include <VP-V/host/Api.h>\n")
         res = run(root, DEFAULT_BASE, [bill], no_git=True)["site_checks"]["hook_lines"]
         assert res["tu"] == {bill: 10}, res["tu"]
+        # MUTATIONS (G-CC4 MUST-B, the gate-4 gamed rows end to end): each made a moved body "shared" (tu 0) before 1d
+        tu_now = lambda: run(root, DEFAULT_BASE, [bill], no_git=True)["site_checks"]["hook_lines"]["tu"].get(bill)
+        w(root, "src/VP-V/host/Free.h", "".join("void free%d();\n" % i for i in range(10)))
+        moved_bill = ("struct Impl\n{\n\tPipelineSlots::Registry pipelineSlots;\n};\n#include <VP-V/host/Body.h>\n"
+                      "#include <VP-V/host/Api.h>\n#include <VP-V/host/Free.h>\n")
+        w(root, bill, moved_bill)
+        assert tu_now() == 20, "control: Free.h is not shared"
+        w(root, "src/VP-V/host/Body.cpp", "#include \"Api.h\"\n#include \"Free.h\"\n")
+        assert tu_now() == 10, "control: a live include of a free-function header from a compiled .cpp is shared"
+        for cpp in ("/*\n#include \"Free.h\"\n*/\n", "// x \\\n#include \"Free.h\"\n",
+                    "const char* s = R\"(\n#include \"Free.h\"\n)\";\n",
+                    "#ifndef _WIN32\n#define _WIN32\n#include \"Free.h\"\n#endif\n",
+                    "#ifndef BODY_CPP\n#define BODY_CPP\n#include \"Free.h\"\n#endif\n"):   # a guard in a .cpp is no guard
+            w(root, "src/VP-V/host/Body.cpp", "#include \"Api.h\"\n" + cpp)
+            assert tu_now() == 20, cpp
+        w(root, "src/VP-V/host/Body.cpp", "#include \"Api.h\"\n#include \"Free.h\"\n")
+        props = lambda body: w(root, "src/VP-V/build/T.items.props", "<Project>" + body + "</Project>\n")
+        item = '<ClCompile Include="$(MSBuildThisFileDirectory)..\\host\\Body.cpp"%s'
+        for body in ('<ItemGroup Condition="false">' + item % " />" + "</ItemGroup>",
+                     '<ItemGroup>' + item % ' Condition="false" />' + "</ItemGroup>",
+                     '<ItemGroup>' + item % "><ExcludedFromBuild>true</ExcludedFromBuild></ClCompile>" + "</ItemGroup>"):
+            props(body)
+            assert tu_now() == 21, body   # Api.h is no longer shared either
+        props('<ItemGroup>' + item % " />" + "</ItemGroup>")
+        os.remove(os.path.join(root, "src", "T", "T.vcxproj"))
+        assert tu_now() == 21, "a stray .props that no project imports compiles nothing"
+        w(root, "src/T/T.vcxproj", '<Project><Import Project="$(MSBuildThisFileDirectory)..\\VP-V\\build\\T.items.props" /></Project>\n')
+        assert tu_now() == 10
+        # decoys of the Bill class name and macro qualifiers never make Bill-member bodies shared
+        w(root, "src/VP-V/host/Body.cpp", "#include \"Api.h\"\n#include \"Free.h\"\n#include \"Body.h\"\n")
+        impl10 = "".join("void Impl::f%d() {}\n" % i for i in range(10))
+        for decoy, body in (("namespace Decoy {\nstruct Impl {};\n}\n", impl10), ("#if 0\nstruct Impl {};\n#endif\n", impl10),
+                            ("/*\nstruct Impl {};\n*/\n", impl10), ("struct Impl\n;\n", impl10),
+                            ("#define VPV_I Impl\n", impl10.replace("Impl::", "VPV_I::"))):
+            w(root, "src/VP-V/host/Body.h", decoy + body)
+            n = len([ln for ln in (decoy + body).splitlines() if ln.strip()])
+            assert tu_now() == n, (decoy, tu_now(), n)
+        w(root, "src/VP-V/host/Body.h", impl10)
+        w(root, "src/VP-V/host/Body.cpp", "#include \"Api.h\"\n")
+        os.remove(os.path.join(root, "src", "VP-V", "host", "Free.h"))
+        w(root, bill, "struct Impl\n{\n\tPipelineSlots::Registry pipelineSlots;\n};\n#include <VP-V/host/Body.h>\n"
+                      "#include <VP-V/host/Api.h>\n")
+        assert tu_now() == 10
         # MUTATION (G-CC2 SHOULD-A): grow h2, swap in a v1 baseline and --migrate: refused while the hook-budget
         # h2_ceiling holds (before the fix: exit 0, the baseline written at the grown value)
         w(root, bill, "struct Impl\n{\n\tPipelineSlots::Registry pipelineSlots;\n};\n#include <VP-V/host/Body.h>\n")
@@ -2515,6 +2577,128 @@ def selftest():
         assert rc == 1 and "h2 7 > ceiling 5" in out, out
     print("selftest OK")
     return 0
+
+
+def _union_refs(root, extra=None):
+    """Local and remote-tracking branches that name a landed union line (UNION_REF_PATTERNS + `extra`)."""
+    pats = list(UNION_REF_PATTERNS) + ([extra] if extra else [])
+    args = ["for-each-ref", "--format=%(refname:short)"]
+    for p in pats:
+        args += ["refs/heads/" + p, "refs/remotes/*/" + p]
+    try:
+        return [r for r in git(args, root).splitlines() if r.strip()]
+    except RuntimeError:
+        return []
+
+
+def _is_ancestor(root, a, b):
+    try:
+        git(["merge-base", "--is-ancestor", a, b], root)
+        return True
+    except RuntimeError:
+        return False
+
+
+def rebase_hook_lines_baseline(root, base_ref, files, head, union_tip, waiver, union_ref=None, measure=None):
+    """--write-hook-lines-baseline --rebase-to <union tip> --waiver WAIVER-<ID> (A20-CC ruling, union-base mode).
+
+    A train merges a landed union tip U (a composite, audited and gated on its own line) into the line whose ceilings
+    the baseline holds (measured at O = its `measured_at`). The union's own growth must be accepted exactly as U has it,
+    and nothing else. The new ceilings are therefore measured at landed commits only, NEVER at HEAD:
+
+        ceiling = M(O) + M(U) - M(B)      B = merge-base(O, U), per file / includer / bucket, floored at 0
+
+    i.e. our line's measure plus exactly what the union changed since the common base. Everything the line adds on top
+    of O, and the merge itself, stays gated by the ordinary check at HEAD. Refused unless: U is an ancestor of `head`
+    and of a union branch (UNION_REF_PATTERNS / `union_ref`); O is a commit and an ancestor of `head`; U is not
+    already in O's history (then there is nothing to rebase: ratchet instead); the baseline is not itself an
+    unratcheted rebase. Returns (rc, message)."""
+    measure = measure or (lambda rev: run(root, base_ref, files, False, False, rev, None)["site_checks"]["hook_lines"])
+    if not re.match(r"^WAIVER-[A-Za-z0-9_.\-]+$", waiver or ""):
+        return 1, "refusing --rebase-to without --waiver WAIVER-<ID>"
+    try:
+        u = git(["rev-parse", "--verify", "--short=9", union_tip + "^{commit}"], root).strip()
+        h = git(["rev-parse", "--verify", "--short=9", head + "^{commit}"], root).strip()
+    except RuntimeError as e:
+        return 2, "refusing --rebase-to: %s" % e
+    if not _is_ancestor(root, u, h):
+        return 1, "refusing --rebase-to %s: not an ancestor of %s" % (u, h)
+    landed = [r for r in _union_refs(root, union_ref) if _is_ancestor(root, u, r)]
+    if not landed:
+        return 1, ("refusing --rebase-to %s: not a landed union tip (no branch matching %s contains it)" %
+                   (u, ", ".join(list(UNION_REF_PATTERNS) + ([union_ref] if union_ref else []))))
+    bl_path = os.path.join(root, *HOOK_LINES_PATH.split("/"))
+    try:
+        old = vp_footprint.read_json(bl_path)
+    except (OSError, ValueError):
+        return 2, "refusing --rebase-to: %s is missing or not JSON (seed it first)" % HOOK_LINES_PATH
+    at = str(old.get("measured_at") or "")
+    if old.get("rebase"):
+        return 1, ("refusing --rebase-to: the baseline is an unratcheted rebase (%s); ratchet it at a commit first "
+                   "(--write-hook-lines-baseline)" % at)
+    try:
+        o = git(["rev-parse", "--verify", "--short=9", (at.split() or ["?"])[0] + "^{commit}"], root).strip()
+    except RuntimeError:
+        return 2, "refusing --rebase-to: the baseline's measured_at (%r) is not a commit" % at
+    if not _is_ancestor(root, o, h):
+        return 1, "refusing --rebase-to: the baseline's commit %s is not an ancestor of %s" % (o, h)
+    if _is_ancestor(root, u, o):
+        return 1, "refusing --rebase-to %s: already in the history of the baseline's commit %s; nothing to rebase" % (u, o)
+    b = git(["merge-base", o, u], root).strip()[:9]
+    mo, mu, mb = measure(o), measure(u), measure(b)
+    errs = ["%s: %s" % (r, e) for r, m in ((o, mo), (u, mu), (b, mb)) for e in m["errors"]]
+    if errs:
+        return 2, "refusing --rebase-to without a verdict at every measured commit: " + "; ".join(errs)
+
+    def comb(key, fallback_files=False):
+        out = {}
+        for f in sorted(set(mo[key]) | set(mu[key]) | set(mb[key])):
+            def val(m):
+                return m[key].get(f, m["files"].get(f, 0) if fallback_files else 0)
+            n = val(mo) + val(mu) - val(mb)
+            if n > 0:
+                out[f] = n
+        return out
+
+    files_c, tu_c = comb("files"), comb("tu")
+    combined_c = {f: n for f, n in comb("combined", True).items() if f in tu_c}
+    totals = {k: max(0, mo["totals"].get(k, 0) + mu["totals"].get(k, 0) - mb["totals"].get(k, 0))
+              for k in list(H2_BUCKETS) + ["renderer"]}
+    changed = []
+    for key, new in (("h2", files_c), ("tu", tu_c), ("combined", combined_c)):
+        prev = old.get("files" if key == "h2" else key) or {}
+        for f in sorted(set(prev) | set(new)):
+            if prev.get(f, 0) != new.get(f, 0):
+                changed.append("%s %s %d -> %d" % (f, key, prev.get(f, 0), new.get(f, 0)))
+    today = datetime.date.today().isoformat()
+    updates = list(old.get("_updates") or [])
+    updates.insert(0, "%s %s: REBASE onto union tip %s (landed in %s) from %s, merge base %s: ceilings = M(%s) + M(%s) - "
+                      "M(%s), tu measure %d, never measured at HEAD (%s)%s" %
+                   (today, waiver, u, landed[0], o, b, o, u, b, TU_MEASURE_VERSION, h,
+                    (": " + "; ".join(changed)) if changed else ": no ceiling changed"))
+    doc = dict(old)
+    doc.update({"version": H2_METRIC_VERSION, "metric": "H2", "tu_measure": TU_MEASURE_VERSION, "base_ref": base_ref,
+                "measured_at": "%s + %s - %s (rebase)" % (o, u, b),
+                "rebase": {"ours": o, "union": u, "merge_base": b, "landed_in": landed[0], "waiver": waiver, "head": h},
+                "total": sum(totals[k] for k in H2_BUCKETS),
+                "totals": dict({k: totals[k] for k in H2_BUCKETS}, renderer_information=totals["renderer"]),
+                "files": files_c, "tu": tu_c, "combined": combined_c, "_updates": updates})
+    with open(bl_path, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(doc, fh, indent=1)
+        fh.write("\n")
+    bpath = os.path.join(root, *BUDGET_PATH.split("/"))
+    try:
+        bdoc = vp_footprint.read_json(bpath)
+    except (OSError, ValueError):
+        bdoc = None
+    if bdoc is not None:
+        bdoc["h2_ceiling"] = dict(sorted(files_c.items()))
+        with open(bpath, "w", encoding="utf-8") as fh:
+            json.dump(bdoc, fh, indent=1)
+            fh.write("\n")
+    return 0, ("wrote %s: REBASE onto %s from %s (merge base %s), H2 %d (%s), tu %d; %d ceilings changed" %
+               (HOOK_LINES_PATH, u, o, b, doc["total"], ", ".join("%s %d" % (k, totals[k]) for k in H2_BUCKETS),
+                sum(tu_c.values()), len(changed)))
 
 
 def main(argv=None):
@@ -2540,10 +2724,25 @@ def main(argv=None):
                                                              "rise (a named RELOCATION, G-CC1 (7)); recorded in _updates")
     ap.add_argument("--allowance", type=int, metavar="N", help="with --relocation: the most one includer's combined h2 + tu may "
                                                               "grow, and tu may rise beyond the h2 it took away (0..%d; G-CC2 "
-                                                              "SHOULD-B)" % RELOCATION_MAX_ALLOWANCE)
+                                                              "SHOULD-B; G-CC4 SHOULD-D: only with a real h2 drop)" %
+                                                              RELOCATION_MAX_ALLOWANCE)
+    ap.add_argument("--rebase-to", metavar="SHA", help="with --write-hook-lines-baseline and --waiver: re-measure the ceilings "
+                                                       "for a train that merged this landed union tip: M(baseline commit) + "
+                                                       "M(SHA) - M(merge base), never at HEAD (rebase_hook_lines_baseline)")
+    ap.add_argument("--waiver", metavar="WAIVER-ID", help="with --rebase-to: the waiver id recorded in _updates")
+    ap.add_argument("--union-ref", metavar="PATTERN", help="with --rebase-to: another branch pattern that names a landed "
+                                                           "union line (default %s)" % ", ".join(UNION_REF_PATTERNS))
     args = ap.parse_args(argv)
     if args.selftest:
         return selftest()
+    if args.rebase_to:
+        if not args.write_hook_lines_baseline or args.no_git or args.migrate or args.relocation:
+            print("--rebase-to needs --write-hook-lines-baseline, git mode, and no --migrate / --relocation")
+            return 2
+        rc, msg = rebase_hook_lines_baseline(args.root, args.base_ref, args.files, args.rev or "HEAD", args.rebase_to,
+                                             args.waiver, args.union_ref)
+        print(msg)
+        return rc
     res = run(args.root, args.base_ref, args.files, args.no_git, args.fail_untagged, args.rev, args.since)
     if args.write_hook_lines_baseline:
         hl = res["site_checks"]["hook_lines"]
@@ -2616,11 +2815,13 @@ def main(argv=None):
                 if d_tu <= 0 and d_comb <= 0:
                     continue
                 deltas.append("%s tu %+d, h2 %+d, combined %+d" % (f, d_tu, -h2_drop, d_comb))
-                if d_comb > args.allowance or d_tu > h2_drop + args.allowance:
+                # G-CC4 SHOULD-D: a tu rise is a relocation only where the includer's h2 really fell
+                if d_comb > args.allowance or d_tu > h2_drop + args.allowance or (d_tu > 0 and h2_drop <= 0):
                     beyond.append(deltas[-1])
             if beyond:
-                print("refusing a RELOCATION beyond its allowance %d (combined growth <= N and tu rise <= h2 drop + N per "
-                      "includer, G-CC2 SHOULD-B): %s" % (args.allowance, "; ".join(beyond)))
+                print("refusing a RELOCATION beyond its allowance %d (combined growth <= N, tu rise <= h2 drop + N and a "
+                      "real h2 drop per includer whose tu rises, G-CC2 SHOULD-B / G-CC4 SHOULD-D): %s" %
+                      (args.allowance, "; ".join(beyond)))
                 return 1
             updates.insert(0, "%s %s: RELOCATION allowance %d at %s: %s" % (today, args.relocation, args.allowance, sha,
                                                                          "; ".join(deltas)))

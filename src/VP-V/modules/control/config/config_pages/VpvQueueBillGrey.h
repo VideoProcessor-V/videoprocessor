@@ -15,7 +15,8 @@
 //     - Bill's "Target frames" is greyed while the Target delay (target_latency_ms) is above 0 (the delay
 //       is turned into frames per source rate; the frames value is only the fallback).
 //   Original pathway: nothing of Bill's is greyed or changed (his page is his); VP-V's own queue controls
-//     (low-latency path, Target delay, look-ahead Auto) are greyed because the Original pathway ignores them.
+//     (low-latency path, Target delay with its By frames / By time choice, look-ahead Auto) are greyed because
+//     the Original pathway ignores them (the card sits on the VP-V page's Input unit, GEM-049).
 // The grey uses the "derivedSetting" property so the editor's profile reload keeps it. UI thread only; C++17.
 
 #include <VP-V/modules/control/config/config_pages/VpvDitherChoiceSet.h>
@@ -105,6 +106,8 @@ namespace Vpv
 
 			if (name == TargetDelayName())
 			{
+				// GEM-032: the By frames / By time choice writes target_latency_ms, so it is off with it.
+				OffInOriginal(FindQueueWidget(widget, QStringLiteral("config.queue.target_mode")), original);
 				auto* spin = qobject_cast<QSpinBox*>(widget);
 				if (!spin) return;
 				spin->setProperty("vpvQueueOriginal", original);

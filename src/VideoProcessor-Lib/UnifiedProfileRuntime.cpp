@@ -1224,8 +1224,8 @@ namespace UnifiedProfileRuntime
 					DisplayRuleExpression::ParseNumber(cadence, sourceHz);
 			}
 			// VPV-HOOK
-			// P14: the VP-V look-ahead / general_rate_fixes rule lives in the control\config module.
-			const Vpv::ProfileQueueAdvice::Advice advice = Vpv::ProfileQueueAdvice::Compute(setting, sourceHz);
+			const bool originalPathway = Vpv::ProfileQueueAdvice::BillQueueOnOriginal(m_configuration.get(), queue);   // P14, GEM-032/034: the VP-V queue rules live in control\config
+			const Vpv::ProfileQueueAdvice::Advice advice = Vpv::ProfileQueueAdvice::Compute(setting, sourceHz, originalPathway);
 			lookAheadQueueFrames = advice.lookAheadQueueFrames;
 			generalRateFixes = advice.generalRateFixes;
 			// VPV-HOOK-END

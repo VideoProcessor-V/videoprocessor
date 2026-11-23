@@ -42,7 +42,8 @@ namespace Vpv
 						break;
 					case RE::SettingsPhase::PostLoad:
 					{
-						const VpvRendererSettings::Overrides decided = VpvRendererSettings::PostLoad(Mutable(c.settings), c.flag);
+						const VpvRendererSettings::Overrides decided = VpvRendererSettings::PostLoad(Mutable(c.settings), c.flag,
+							static_cast<const std::string*>(c.other));   // GEM-031: the host's chroma_upscaler
 						if (RE::SettingsOverrides* out = static_cast<RE::SettingsOverrides*>(c.result))
 						{
 							out->hasPresentEveryVsync = true;

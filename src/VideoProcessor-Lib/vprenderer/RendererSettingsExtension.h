@@ -54,7 +54,7 @@ namespace RendererSettingsHooks
 		RE::SettingsLoadContext c; c.phase = RE::SettingsPhase::ReadGlobal; c.config = &config; c.settings = &extension;
 		RE::SettingsLoad(c);
 		RE::SettingsOverrides overrides;
-		c.phase = RE::SettingsPhase::PostLoad; c.flag = settings.presentEveryVsync; c.result = &overrides;
+		c.phase = RE::SettingsPhase::PostLoad; c.flag = settings.presentEveryVsync; c.other = &settings.chromaUpscaler; c.result = &overrides;
 		RE::SettingsLoad(c);
 		if (overrides.hasPresentEveryVsync) settings.presentEveryVsync = overrides.presentEveryVsync;
 		if (overrides.chromaUpscaler) settings.chromaUpscaler = overrides.chromaUpscaler;

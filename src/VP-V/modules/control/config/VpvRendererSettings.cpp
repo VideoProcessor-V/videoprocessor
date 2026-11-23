@@ -12,6 +12,7 @@
 #include <vprenderer/DejudderWarp.h>
 #include <RendererConfigView.h>
 #include <RetiredSettings.h>
+#include <VP-V/core/OriginalPathway.h>
 #include <VP-V/core/SlotSwitchSettings.h>
 #include <VP-V/modules/colour/appearance/AmbientConfig.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
@@ -1007,13 +1008,15 @@ namespace VpvRendererSettings
 	// ---- PostLoad: the Original pathway overlay, the slot switches, the presentation owner ----
 	void ApplyOriginal(VpvRenderer::Fields& settings);   // below
 
-	Overrides PostLoad(VpvRenderer::Fields& settings, bool presentEveryVsyncRequested)
+	Overrides PostLoad(VpvRenderer::Fields& settings, bool presentEveryVsyncRequested, const std::string* hostChromaUpscaler)
 	{
 		Overrides overrides;
 		if (settings.pipelineOriginalPathway)
 		{
 			ApplyOriginal(settings);
-			overrides.chromaUpscaler = "bicubic";                 // key=chroma_upscaler (a host field, so returned)
+			// GEM-031 (config-schema MUST-1, owner Q4): a saved one of Bill's five filters stays (his program
+			// uses it); unset / VP-only values become bicubic. No host value given: bicubic, as before.
+			overrides.chromaUpscaler = OriginalPathway::ChromaOverride(hostChromaUpscaler);   // key=chroma_upscaler (a host field, so returned)
 		}
 		// CF-1 P3 / FIX1 MUST 1-2: calibration_lut_stage auto (the default) -> vp while a VP colour step that must follow
 		// the LUT runs: dm_trims (dv_trims on, dv_display_mapping vp, the slot not in pipeline_slots_off) or appearance

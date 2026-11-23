@@ -37,8 +37,10 @@ namespace VpvRendererSettings
 	void ReadGlobal(const ConfigFile& config, VpvRenderer::Fields& settings);
 
 	// The Original pathway overlay, the slot switches and the presentation owner; presentEveryVsyncRequested
-	// is the host's own present_every_vsync before the decision.
-	Overrides PostLoad(VpvRenderer::Fields& settings, bool presentEveryVsyncRequested);
+	// is the host's own present_every_vsync before the decision; hostChromaUpscaler is the host's chroma_upscaler
+	// (GEM-031: on the Original pathway one of Bill's five filters is kept; nullptr = unknown, bicubic).
+	Overrides PostLoad(VpvRenderer::Fields& settings, bool presentEveryVsyncRequested,
+		const std::string* hostChromaUpscaler = nullptr);
 
 	// deband_vp_exclusive: the host's automatic deband yields to VP-V's debander when that runs (deband_vp
 	// auto / on) with its grain guard; an explicit deband_strength or deband stays. `S` is the host settings.

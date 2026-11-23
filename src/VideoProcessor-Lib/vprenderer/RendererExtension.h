@@ -78,7 +78,7 @@ namespace RendererExtension
 		const std::string* section = nullptr;
 		const std::string* rule = nullptr;
 		void* settings = nullptr; // the host's settings object
-		const void* other = nullptr;
+		const void* other = nullptr; // Fingerprint / Delta / CopyLive: the other settings; PostLoad: the host's chroma_upscaler (std::string)
 		std::string* out = nullptr; // fingerprint text sink
 		std::vector<const char*>* changed = nullptr;
 		bool includeLive = false;
