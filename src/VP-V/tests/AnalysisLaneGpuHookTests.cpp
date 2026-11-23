@@ -12,6 +12,7 @@
 
 #include <VP-V/core/AnalysisLane.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuJobs.h>
+#include <VP-V/modules/input/source_analysis/lane/LaneGpuLightKernel.h>
 
 #include <algorithm>
 #include <atomic>
@@ -321,6 +322,50 @@ namespace AnalysisLaneGpuHookTestsNs
 			Assert::IsFalse(gate(2), L"P12(1) still pending: wait");
 			r.lane.RunDeferredLive(1);
 			Assert::IsTrue(gate(2), L"P12(1) recorded: go");
+		}
+
+		// W23-4p (G6): once Entrance drives RunDeferredLive (g6LiveDriven == true), Pending maps to
+		// LightPrevState::Pending without counting as downgraded, so LightLevelBeginGate holds P12(N) for P12(N-1).
+		// In-test negative control: on the EXACT SAME Pending read, legacy g6LiveDriven == false downgrades Pending
+		// to None, increments pendingReadAsNone, and lets LightLevelBeginGate proceed prematurely.
+		TEST_METHOD(LightPrevStateMapsPendingWhenG6LiveDriven)
+		{
+			using VpLaneProducts::LightPrevState;
+			using VpLaneProducts::LightPrevStateOf;
+			using VpLaneProducts::LightLevelBeginGate;
+			using PR = AnalysisLane::ProductRead;
+
+			// Negative control: legacy mode (g6LiveDriven = false) downgrades Pending -> None and counts it.
+			{
+				std::atomic<uint64_t> downgraded{ 0 };
+				const LightPrevState legacy = LightPrevStateOf(PR::Pending, downgraded, false);
+				Assert::IsTrue(legacy == LightPrevState::None, L"Negative control: non-G6 mode must downgrade Pending -> None");
+				Assert::AreEqual(uint64_t(1), downgraded.load(), L"Negative control: downgrade must be counted");
+				std::string why;
+				Assert::IsTrue(LightLevelBeginGate(2, [&](uint64_t) { return LightPrevStateOf(PR::Pending, false); }, &why),
+					L"Negative control: without G6 live-driven flag, begin gate does not wait for Pending P12(N-1)");
+			}
+
+			// G6 live-driven mode (g6LiveDriven = true): preserves Pending, counts 0 downgrades, gate holds P12(N).
+			{
+				std::atomic<uint64_t> downgraded{ 0 };
+				const LightPrevState g6 = LightPrevStateOf(PR::Pending, downgraded, true);
+				Assert::IsTrue(g6 == LightPrevState::Pending, L"G6 mode must preserve Pending");
+				Assert::AreEqual(uint64_t(0), downgraded.load(), L"G6 mode must not count Pending as downgraded");
+				std::string why;
+				Assert::IsFalse(LightLevelBeginGate(2, [&](uint64_t) { return LightPrevStateOf(PR::Pending, true); }, &why),
+					L"G6 mode begin gate must wait while P12(N-1) is Pending");
+				Assert::AreEqual(std::string("waits for P12(N-1)"), why);
+			}
+
+			// All non-Pending states map identically in both modes.
+			for (const bool driven : { false, true })
+			{
+				Assert::IsTrue(LightPrevStateOf(PR::Ring, driven) == LightPrevState::Ring);
+				Assert::IsTrue(LightPrevStateOf(PR::Live, driven) == LightPrevState::Live);
+				Assert::IsTrue(LightPrevStateOf(PR::Failed, driven) == LightPrevState::Failed);
+				Assert::IsTrue(LightPrevStateOf(PR::None, driven) == LightPrevState::None);
+			}
 		}
 	};
 }

@@ -3910,5 +3910,85 @@ namespace SkeletonModuleTestsNs
 				Assert::IsTrue(rig.sk.LaneOf(rig.Host()) == nullptr || rig.sk.LaneOf(rig.Host())->ShadowOnly(), L"withdrawn: shadow again");
 			}
 		}
+
+		// W23-4p (G-T1): a raising consumer that needs GPU products (P10/P11/P12, e.g. dither_need) demands GPU
+		// dispatch even when analysis_lane=off (visibly reporting skeleton_gpu_device without a pl_gpu and adding
+		// P10/P11/P12 to the graph), while LED-only P4 raising demand keeps zero GPU demand (in-test negative control).
+		TEST_METHOD(GpuRaisingConsumerDemandsGpuWhileLedOnlyDoesNot)
+		{
+			auto gpuConsumers = []()
+			{
+				VpSkeleton::ConsumerDecl d;
+				d.id = 0x0620;
+				d.name = "output.dither (dither need live)";
+				VpSkeleton::AddConsume(d, VpSkeleton::kP10GrainSplit, 0);
+				VpSkeleton::AddConsume(d, VpSkeleton::kP11RegionBlockStats, 0);
+				VpSkeleton::AddConsume(d, VpSkeleton::kP12LightLevel, 0);
+				return std::vector<VpSkeleton::ConsumerDecl>(1, d);
+			};
+
+			Rig rig(Lane("off"));
+			VpFrameAnalysis::Host store;
+			store.Owner(rig.Host()).Configure(false);
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);   // null pl_gpu in CPU unit test
+			rig.Life(RE::Lifecycle::SettingsApplied, 0);
+			int64_t seq = 1;
+
+			// In-test negative control: LED-only P4 raising demand must NOT demand GPU products or skeleton_gpu_device.
+			int led = 0;
+			DemandOf(rig)->SetRaisingExternalDemand(rig.Host(), &led, LedConsumers(), {}, "LED drive");
+			for (int i = 0; i < 4; ++i) rig.Frame(seq++);
+			Assert::IsNotNull(rig.sk.LaneOf(rig.Host()));
+			Assert::IsFalse(rig.sk.LaneOf(rig.Host())->State()->graph.Has(VpSkeleton::kP10GrainSplit),
+				L"Negative control: LED-only raise must not pull P10 into graph");
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_gpu_device"),
+				L"Negative control: LED-only raise must not report skeleton_gpu_device");
+			DemandOf(rig)->ClearExternalDemand(rig.Host(), &led);
+			rig.Frame(seq++);
+			Assert::IsNull(rig.sk.LaneOf(rig.Host()), L"LED withdrawal returns off lane to off");
+
+			// GPU raising demand (dither need): raises lane with P10/P11/P12 AND demands GPU dispatcher.
+			int dn = 0;
+			DemandOf(rig)->SetRaisingExternalDemand(rig.Host(), &dn, gpuConsumers(), {}, "dither need");
+			for (int i = 0; i < 4; ++i) rig.Frame(seq++);
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			Assert::IsNotNull(lane, L"GPU raising demand must turn on an off lane");
+			Assert::AreEqual(std::string("dither need"), rig.sk.RaiseReasonOf(rig.Host()));
+			Assert::IsTrue(lane->State()->graph.Has(VpSkeleton::kP10GrainSplit) &&
+				lane->State()->graph.Has(VpSkeleton::kP11RegionBlockStats) &&
+				lane->State()->graph.Has(VpSkeleton::kP12LightLevel),
+				L"GPU raising consumer must place P10/P11/P12 in the lane graph");
+			Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_gpu_device"),
+				L"GPU raising demand without pl_gpu must visibly engage skeleton_gpu_device (proving GPU dispatcher was demanded)");
+
+			// Original pathway MUST suppress GPU raising demand completely.
+			rig.Life(RE::Lifecycle::SettingsApplied, 1);
+			rig.Frame(seq++);
+			Assert::IsNull(rig.sk.LaneOf(rig.Host()), L"Original pathway must never raise GPU lane");
+			Assert::IsTrue(rig.Lines(RE::StatusKind::Lines).empty());
+			rig.Life(RE::Lifecycle::SettingsApplied, 0);
+
+			// Withdrawal tears everything down cleanly.
+			DemandOf(rig)->ClearExternalDemand(rig.Host(), &dn);
+			rig.Frame(seq++);
+			Assert::IsNull(rig.sk.LaneOf(rig.Host()), L"withdrawing GPU raising demand returns lane to configured off");
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_gpu_device"));
+		}
+
+		// W23-4p: ReadDitherNeedGpuInputs without a live GPU dispatcher / Entrance fill returns a clean empty snapshot.
+		TEST_METHOD(ReadDitherNeedGpuInputsWithoutDeviceReturnsEmptyCleanly)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			rig.Frame(1);
+			const Vpv::Skeleton::DitherNeedGpuInputs gi = DemandOf(rig)->ReadDitherNeedGpuInputs(rig.Host(), 1);
+			Assert::IsFalse(gi.haveGrain);
+			Assert::IsFalse(gi.haveEvidence);
+			Assert::IsNull(gi.gsBlocks);
+			for (size_t i = 0; i < Vpv::Skeleton::DitherNeedGpuInputs::kPrecursors; ++i)
+				Assert::IsNull(gi.precursors[i]);
+		}
 	};
 }

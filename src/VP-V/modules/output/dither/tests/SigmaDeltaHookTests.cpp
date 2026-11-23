@@ -9,13 +9,24 @@
 #include <VP-V/modules/output/dither/SigmaDeltaDomain.h>
 #include <VP-V/modules/output/dither/DitherNeedGlsl.h>
 #include <VP-V/modules/output/dither/DitherNeedGpu.h>
+#include <VP-V/modules/output/dither/SigmaDeltaVectors.h>
+#include <VP-V/modules/output/dither/OutputEncodingRepair.h>
+#include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
+#include <VP-V/segments/OutputSegments.h>
+#include <VP-V/core/VramUsers.h>
+#include <VP-V/core/hub/HubQuery.h>
+#include <VP-V/modules/control/skeleton/SkeletonModule.h>
+#include <VP-V/modules/input/signal/ResyncExtension.h>
+#include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include "DitherNeedGolden.generated.h"
 #include "DitherNeedWarpModel.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <map>
 #include <string>
 #include <vector>
@@ -2319,6 +2330,412 @@ if (g.y == 0 && g.x < DN_N) {
 			}
 			Assert::IsTrue(applied, L"Apply must bind the product");
 			Assert::IsTrue(bound != base, L"a bound non-zero map must change the codes (the test would be vacuous)");
+		}
+
+		// W23-4p (G-T1) live end-to-end adversarial test: SkeletonModule (analysis_lane=off) + G6 FramePhase::Entrance
+		// (RunDeferredLive) -> ReadDitherNeedGpuInputs -> OutputFinishSegment::RunDitherNeedGpu -> BlockPass::Step ->
+		// HookGuard::Apply + NextVectorGuard::AttachRelease + VramUsers (kUserDitherNeed) + ReleaseGpu teardown.
+		// In-test negative control: on the EXACT SAME live setup without Entrance/RunDeferredLive, RunDitherNeedGpu
+		// visibly declines with kNoGrain/kNoPrecursors and FallbackCatalog::DitherNeed engaged.
+		BEGIN_TEST_METHOD_ATTRIBUTE(LiveEndToEndG6EntranceDrivesDitherNeedGpuBlockPassAndRelease)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(LiveEndToEndG6EntranceDrivesDitherNeedGpuBlockPassAndRelease)
+		{
+			namespace RE = RendererExtension;
+			namespace Tap = VpFrameAnalysis::SourceFrameTap;
+			using Vpv::Skeleton::SkeletonModule;
+			using Vpv::Resync::ResyncExtension;
+
+			struct TempCfg
+			{
+				std::string path;
+				explicit TempCfg(const std::string& text)
+				{
+					static std::atomic<int> counter{ 0 };
+					char dir[MAX_PATH] = {};
+					GetTempPathA(MAX_PATH, dir);
+					path = std::string(dir) + "vp-dn-live-test-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(counter++) + ".cfg";
+					std::ofstream out(path, std::ios::binary | std::ios::trunc);
+					out << text;
+				}
+				~TempCfg() { std::remove(path.c_str()); }
+				Vpv::Skeleton::ConfigLoader Loader() const
+				{
+					const std::string p = path;
+					return [p](ConfigFile& c) { return c.Load(p, ConfigFile::ReadPolicy::Fresh); };
+				}
+			};
+			struct FakeHost
+			{
+				VpResync::Shadow resync;
+				VpResync::Drive resyncDrive;
+				Vpv::Resync::HostBinding binding{ this, resync, resyncDrive };
+			};
+			struct HubQueryScope
+			{
+				static SkeletonModule*& Target() { static SkeletonModule* s = nullptr; return s; }
+				static void* Dispatch(const char* iid) { return Target() ? Target()->Query(iid) : nullptr; }
+				Vpv::Hub::QueryFn prev;
+				explicit HubQueryScope(SkeletonModule* sk)
+				{
+					Target() = sk;
+					prev = Vpv::Hub::QuerySlot().exchange(&Dispatch, std::memory_order_acq_rel);
+				}
+				~HubQueryScope()
+				{
+					Vpv::Hub::QuerySlot().store(prev, std::memory_order_release);
+					Target() = nullptr;
+				}
+			};
+			auto vramHeldFor = [](uint16_t id) -> uint64_t
+			{
+				const VpSkeleton::VramUsers::Snapshot snap = VpSkeleton::VramUsers::Instance().Take();
+				for (const auto& kv : snap.heldById)
+					if (kv.first == id) return kv.second;
+				return 0;
+			};
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+
+			// Configure analysis_lane = off so ONLY consumer-driven GPU raising demand from dither_need activates it.
+			TempCfg cfg("[vpv.skeleton]\nanalysis_lane=off\n");
+			std::atomic<uint64_t> clockUs{ 1000 };
+			SkeletonModule sk(cfg.Loader(), [&]() { return clockUs.fetch_add(100) + 100; });
+			sk.SetWorkerThreadsForTesting(false);
+			ResyncExtension resync;
+			FakeHost hostObj;
+			const void* host = &hostObj;
+			HubQueryScope hubScope(&sk);
+
+			// Provide generous card VRAM budget so the skeleton admits GPU products on WARP/test device.
+			VpSkeleton::CardProfile card;
+			card.vramBudgetBytes = 1ull << 30;
+			card.systemRamFreeBytes = 1ull << 30;
+			card.uploadGBps = 10.0;
+			card.computeScale = 1.0;
+			sk.SetCardForTesting(card);
+
+			auto sendLife = [&](RE::Lifecycle kind, int code = 0, pl_gpu g = nullptr)
+			{
+				RE::LifecycleFacts f;
+				f.host = host; f.kind = kind; f.code = code; f.gpu = g;
+				sk.OnLifecycle(f);
+			};
+			{
+				RE::LifecycleFacts rf;
+				rf.host = host; rf.kind = RE::Lifecycle::SettingsApplied; rf.subject = "on";
+				resync.OnLifecycle(rf);
+			}
+			sendLife(RE::Lifecycle::GpuCreated, 0, gpu);
+			sendLife(RE::Lifecycle::SettingsApplied, 0, gpu);
+
+			OutputEncodingRepair::Hook repair;
+			OcclusionMask::Hook mask;
+			OutputSegments::OutputFinishSegment finish(repair, mask);
+
+			// Build a clean grain-free banding-prone 10-bit luma ramp (64x48) so dither_need is needed and raised.
+			constexpr uint32_t kW = 64, kH = 48;
+			std::vector<uint16_t> luma(kW * kH);
+			for (uint32_t y = 0; y < kH; ++y)
+				for (uint32_t x = 0; x < kW; ++x)
+					luma[y * kW + x] = static_cast<uint16_t>(120u + (x * 160u) / kW);
+			auto deliverLuma = [&](uint64_t seq)
+			{
+				VpSkeleton::SourceFrameView v;
+				v.seq = seq;
+				v.luma = luma.data();
+				v.width = kW;
+				v.height = kH;
+				v.strideSamples = kW;
+				v.msbShift = 6;
+				Tap::Deliver(host, v);
+			};
+			auto ingress = [&](int64_t seq)
+			{
+				RE::IngressContext c;
+				c.host = host; c.seq = seq; c.queueGeneration = 1; c.stateKey = 0x2000; c.formatKey = 7;
+				c.frameCounter = seq; c.timestamp = seq * 1000; c.ticksPerSecond = 24000; c.measuredRateHz = 24.0;
+				resync.OnIngress(c);
+			};
+			auto makeReq = [&](uint64_t seq, bool requireBind)
+			{
+				OutputSegments::DitherNeedGpuRequest req;
+				req.requested = true;
+				req.originalPathway = false;
+				req.sigmaDeltaActive = true;
+				req.domainSupported = true;
+				req.nlsActive = false;
+				req.overrideInputs = false;   // MUST read real live P10/P11 from SkeletonModule!
+				req.requireBind = requireBind;
+				req.colorBits = 8;
+				req.gpu = gpu;
+				req.host = host;
+				req.sourceSequence = seq;
+				req.dtSeconds = 1.0 / 24.0;
+				req.aBase = 0.15;
+				req.sourceCrop = { 0.0f, 0.0f, static_cast<float>(kW), static_cast<float>(kH) };
+				req.targetCrop = { 0.0f, 0.0f, static_cast<float>(kW), static_cast<float>(kH) };
+				req.lightSettings = LightLevel::Read([](const std::string&, std::string&) { return false; });
+				req.lightContext.kind = LightLevel::Context::HdrToSdr;
+				req.lightContext.sourcePeakNits = 1000.0;
+				return req;
+			};
+
+			// ---- IN-TEST NEGATIVE CONTROL ("Prove the Hazard Is Real") ----
+			// Before G6 Entrance drives RunDeferredLive, RunDitherNeedGpu on the live host registers raising
+			// external demand ("dither need"), yet MUST visibly decline with kNoGrain | kNoPrecursors and
+			// FallbackCatalog::DitherNeed engaged (never silently claim On!).
+			{
+				const DitherNeedSeam::Outcome unready = finish.RunDitherNeedGpu(makeReq(1, false), nullptr, 0);
+				Assert::IsTrue(finish.DitherNeedDemandActive(), L"dither_need=auto must declare raising external demand");
+				Assert::AreEqual(std::string("dither need"), sk.RaiseReasonOf(host), L"skeleton must see raising reason 'dither need'");
+				Assert::IsTrue(unready.result == DitherNeed::Result::Unavailable, L"Negative control: without G6 live fill, outcome must be Unavailable");
+				Assert::IsFalse(unready.extraAllowed);
+				Assert::IsTrue((unready.missing & DitherNeed::kNoGrain) != 0 && (unready.missing & DitherNeed::kNoPrecursors) != 0,
+					L"Negative control: missing P10 grain and P11 precursors must be explicitly named");
+				Assert::IsTrue(unready.fallback.engaged && unready.fallback.id == "dither need",
+					L"Negative control: FallbackCatalog::DitherNeed must engage");
+				Assert::IsNull(finish.DitherNeedCurrent(), L"Negative control: no product bound/current when inputs absent");
+				Assert::AreEqual(static_cast<uint64_t>(1), finish.DitherNeedCounters().framesUnavailable);
+			}
+
+			// ---- LIVE G6 ENTRANCE PATH ----
+			// Drive Begin + Entrance for frames 1..3 so the raised lane builds its GPU dispatcher (even with
+			// analysis_lane=off) and FramePhase::Entrance executes RunDeferredLive(seq) in topological order!
+			uint64_t liveSeq = 0;
+			for (int64_t s = 1; s <= 3; ++s)
+			{
+				clockUs.fetch_add(40000);
+				ingress(s);
+				if (s == 1) deliverLuma(1);
+				deliverLuma(static_cast<uint64_t>(s) + 1);
+				RE::FrameContext beg;
+				beg.host = host; beg.phase = RE::FramePhase::Begin; beg.seq = s; beg.captureRateHz = 24.0;
+				resync.OnFrame(beg);
+				sk.OnFrame(beg);
+				if (VpSkeleton::AnalysisLane* lane = sk.LaneOf(host))
+				{
+					int steps = 0;
+					while (lane->StepWorker(VpSkeleton::Backend::Cpu, 0) && ++steps < 10000) {}
+				}
+				RE::FrameContext ent;
+				ent.host = host; ent.phase = RE::FramePhase::Entrance; ent.seq = s; ent.captureRateHz = 24.0;
+				sk.OnFrame(ent);
+				const Vpv::Skeleton::DitherNeedGpuInputs gi = sk.ReadDitherNeedGpuInputs(host, static_cast<uint64_t>(s));
+				if (gi.haveGrain && gi.haveEvidence)
+				{
+					liveSeq = static_cast<uint64_t>(s);
+					break;
+				}
+				RE::FrameContext aft;
+				aft.host = host; aft.phase = RE::FramePhase::AfterRender; aft.seq = s;
+				sk.OnFrame(aft);
+			}
+			Assert::IsNotNull(sk.GpuDispatcherFor(host),
+				L"GPU raising demand from dither_need must create SkeletonGpuDispatcher even when analysis_lane=off");
+			Assert::IsNotNull(sk.LaneOf(host));
+			Assert::IsTrue(sk.LaneOf(host)->DeferredTotals().run > 0,
+				L"FramePhase::Entrance must drive AnalysisLane::RunDeferredLive");
+			Assert::IsTrue(liveSeq > 0, L"G6 Entrance must populate live P10/P11 GPU products readable via ReadDitherNeedGpuInputs");
+			const Vpv::Skeleton::DitherNeedGpuInputs liveIn = sk.ReadDitherNeedGpuInputs(host, liveSeq);
+			Assert::IsNotNull(liveIn.gsBlocks, L"live P10 blocks texture must be non-null");
+			for (size_t i = 0; i < Vpv::Skeleton::DitherNeedGpuInputs::kPrecursors; ++i)
+				Assert::IsNotNull(liveIn.precursors[i], L"every live P11 precursor texture must be non-null");
+
+			// Run live OutputFinishSegment::RunDitherNeedGpu with requireBind = false (verifies BlockPass::Step on WARP/7.360 & 377).
+			{
+				const DitherNeedSeam::Outcome live = finish.RunDitherNeedGpu(makeReq(liveSeq, false), nullptr, 0);
+				Assert::IsTrue(live.result == DitherNeed::Result::On && live.extraAllowed,
+					(L"Live G6 inputs must drive RunDitherNeedGpu to On: " + DnWide(live.status) + L" / " + DnWide(finish.DitherNeedLastError())).c_str());
+				Assert::IsFalse(live.fallback.engaged, L"FallbackCatalog::DitherNeed must release when live pass succeeds");
+				Assert::IsNotNull(finish.DitherNeedCurrent(), L"BlockPass::Current() must be non-null after live pass");
+				Assert::IsTrue(finish.DitherNeedVramBytes() > 0, L"DitherNeedVramBytes must report allocated ping-pong + LUT textures");
+				Assert::AreEqual(static_cast<uint64_t>(finish.DitherNeedVramBytes()), vramHeldFor(VpSkeleton::kUserDitherNeed),
+					L"VramUsers must declare exact kUserDitherNeed VRAM bytes");
+				Assert::AreEqual(static_cast<uint64_t>(1), finish.DitherNeedCounters().framesOn);
+			}
+
+			// Verify HookGuard::Apply + NextVectorGuard::AttachRelease path with a real parsed sigma-delta hook.
+			{
+				const std::string sdSrc = LoadBundledShader("Temporal sigma-delta.glsl");
+				Assert::IsFalse(sdSrc.empty(), L"Temporal sigma-delta.glsl not found");
+				const pl_hook* sdHook = pl_mpv_user_shader_parse(gpu, sdSrc.data(), sdSrc.size());
+				Assert::IsNotNull(sdHook, L"Temporal sigma-delta.glsl failed to parse");
+				const pl_hook* hookArr[1] = { sdHook };
+				bool releaseAttached = false;
+				SigmaDeltaVectors::NextVectorGuard nextVecGuard;
+				const DitherNeedSeam::Outcome boundOut = finish.RunDitherNeedGpu(makeReq(liveSeq, true), hookArr, 1,
+					[&](std::function<void()> fn)
+					{
+						releaseAttached = true;
+						nextVecGuard.AttachRelease(std::move(fn));
+					});
+				if (!DwHaveSetTexture())
+				{
+					// Standard 7.360: MUST visibly decline with kNoSetTexture (never silent!).
+					Assert::IsTrue(boundOut.result == DitherNeed::Result::Unavailable && !boundOut.extraAllowed);
+					Assert::IsTrue((boundOut.missing & DitherNeed::kNoSetTexture) != 0);
+					Assert::IsTrue(boundOut.fallback.engaged && boundOut.fallback.reason.find("set_texture") != std::string::npos);
+					Assert::IsFalse(releaseAttached, L"must not attach release when Apply declined");
+				}
+				else
+				{
+					Assert::IsTrue(boundOut.result == DitherNeed::Result::On && boundOut.extraAllowed);
+					Assert::IsTrue(releaseAttached, L"NextVectorGuard::AttachRelease must receive HookGuard unbind callback");
+					nextVecGuard.Release();
+				}
+				pl_mpv_user_shader_destroy(&sdHook);
+			}
+
+			// Complete frame & verify ReleaseGpu withdraws VRAM + external demand cleanly BEFORE pl_gpu teardown (Rule 2).
+			{
+				RE::FrameContext aft;
+				aft.host = host; aft.phase = RE::FramePhase::AfterRender; aft.seq = static_cast<int64_t>(liveSeq);
+				sk.OnFrame(aft);
+			}
+			finish.ReleaseGpu(gpu);
+			Assert::AreEqual(size_t{ 0 }, finish.DitherNeedVramBytes(), L"ReleaseGpu must free all VRAM");
+			Assert::IsFalse(finish.DitherNeedDemandActive(), L"ReleaseGpu must withdraw raising external demand");
+			Assert::AreEqual(uint64_t{ 0 }, vramHeldFor(VpSkeleton::kUserDitherNeed), L"ReleaseGpu must withdraw kUserDitherNeed from VramUsers");
+			sendLife(RE::Lifecycle::GpuReleased, 0, nullptr);
+		}
+
+		// W23-4p adversarial WARP test: dither_need=off & Original pathway zero-work identity, BlockPass::VramBytes()
+		// persistence after Invalidate() until Release(gpu) (GEM-030), live NLS guard decline & recovery (GEM-224),
+		// and degenerate crop fail-closed rejection on OutputFinishSegment::RunDitherNeedGpu.
+		BEGIN_TEST_METHOD_ATTRIBUTE(LiveOutputFinishOffOriginalNlsAndBlockPassVramAfterInvalidate)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(LiveOutputFinishOffOriginalNlsAndBlockPassVramAfterInvalidate)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			Assert::IsNotNull(dispatch);
+
+			DnFixture fx;
+			fx.Make(0);
+			DwFrameTex ft;
+			ft.Make(gpu, fx);
+			const LightLevel::Lut lut = DnFixture::GoldenLut();
+			const std::vector<float> lt = LightLevel::PackTexels(lut), ot = LightLevel::PackOutputTexels(lut);
+			pl_tex lutTex = DwRgba32f(gpu, LightLevel::kLutSize, 1, lt.data());
+			pl_tex lutOutTex = DwRgba32f(gpu, LightLevel::kLutSize, 1, ot.data());
+
+			// 1. GEM-030: BlockPass::VramBytes() MUST remain > 0 after Invalidate() while textures stay allocated,
+			//    and drop to 0 ONLY after Release(gpu).
+			{
+				DitherNeed::Gpu::BlockPass pass;
+				Assert::AreEqual(size_t{ 0 }, pass.VramBytes(), L"fresh BlockPass holds 0 VRAM");
+				DitherNeed::FrameArgs fa = DnArgs(fx.grid, 1.0 / 60.0, false, "vram-fp");
+				fa.needed = true;
+				const DitherNeed::Gpu::Args a = DwArgs(ft, fx, lutTex, lutOutTex, fa);
+				const DitherNeed::Gpu::BlockPass::StepResult st = pass.Step(gpu, dispatch, a, fa, false);
+				DwCheck(st.ran && pass.Current() != nullptr, "initial BlockPass::Step must succeed: " + pass.LastError());
+				const size_t expectedBytes = static_cast<size_t>(2) * fx.grid.Count() * 16u;
+				Assert::AreEqual(expectedBytes, pass.VramBytes(), L"ping-pong rgba32f VRAM bytes after Step");
+				pass.Invalidate();
+				Assert::IsNull(pass.Current(), L"Invalidate must clear Current()");
+				Assert::AreEqual(expectedBytes, pass.VramBytes(),
+					L"GEM-030: VramBytes() must still report allocated ping-pong textures after Invalidate()");
+				pass.Release(gpu);
+				Assert::AreEqual(size_t{ 0 }, pass.VramBytes(), L"VramBytes() must drop to 0 only after Release(gpu)");
+			}
+
+			// 2. OutputFinishSegment: off & Original pathway zero-work identity (zero VRAM, zero demand, zero counters).
+			OutputEncodingRepair::Hook repair;
+			OcclusionMask::Hook mask;
+			OutputSegments::OutputFinishSegment finish(repair, mask);
+
+			auto makeOverrideReq = [&](bool requested, bool original, bool nlsActive)
+			{
+				OutputSegments::DitherNeedGpuRequest req;
+				req.requested = requested;
+				req.originalPathway = original;
+				req.sigmaDeltaActive = true;
+				req.domainSupported = true;
+				req.nlsActive = nlsActive;
+				req.overrideInputs = true;
+				req.requireBind = false;
+				req.colorBits = 8;
+				req.gpu = gpu;
+				req.dtSeconds = 1.0 / 24.0;
+				req.aBase = 0.15;
+				req.sourceCrop = { 0.0f, 0.0f, static_cast<float>(fx.grid.w), static_cast<float>(fx.grid.h) };
+				req.targetCrop = { 0.0f, 0.0f, static_cast<float>(fx.grid.w), static_cast<float>(fx.grid.h) };
+				req.lightSettings = LightLevel::Read([](const std::string&, std::string&) { return false; });
+				req.lightContext.kind = LightLevel::Context::HdrToSdr;
+				req.lightContext.sourcePeakNits = 1000.0;
+				req.overrideGsBlocks = ft.gs;
+				for (size_t i = 0; i < RegionEvidence::kPrecursorTextures; ++i)
+					req.overridePrecursors[i] = ft.pre[i];
+				req.overrideGrid = fx.grid;
+				return req;
+			};
+
+			// dither_need=off: zero pass, zero VRAM, zero demand, zero counters.
+			{
+				const DitherNeedSeam::Outcome off = finish.RunDitherNeedGpu(makeOverrideReq(false, false, false), nullptr, 0);
+				Assert::IsTrue(off.result == DitherNeed::Result::Off && !off.active && !off.extraAllowed && !off.fallback.engaged);
+				Assert::IsTrue(off.status.empty());
+				Assert::IsNull(finish.DitherNeedCurrent());
+				Assert::AreEqual(size_t{ 0 }, finish.DitherNeedVramBytes(), L"off must allocate 0 VRAM");
+				Assert::IsFalse(finish.DitherNeedDemandActive());
+			}
+			// Original pathway even with dither_need=auto requested: zero pass, zero VRAM, zero demand, zero counters.
+			{
+				const DitherNeedSeam::Outcome orig = finish.RunDitherNeedGpu(makeOverrideReq(true, true, false), nullptr, 0);
+				Assert::IsTrue(orig.result == DitherNeed::Result::Off && !orig.active && !orig.extraAllowed && !orig.fallback.engaged);
+				Assert::IsTrue(orig.status.empty());
+				Assert::IsNull(finish.DitherNeedCurrent());
+				Assert::AreEqual(size_t{ 0 }, finish.DitherNeedVramBytes(), L"Original pathway must allocate 0 VRAM");
+				Assert::IsFalse(finish.DitherNeedDemandActive());
+				const DitherNeedSeam::Counters& c = finish.DitherNeedCounters();
+				Assert::AreEqual(uint64_t{ 0 }, c.framesOn + c.framesNotNeeded + c.framesUnavailable + c.framesStale + c.framesNlsDeclined + c.framesClassicalQuality,
+					L"off and Original must increment zero counters");
+			}
+
+			// 3. Healthy -> NLS decline (GEM-224) -> automatic recovery -> degenerate crop fail-closed.
+			{
+				const DitherNeedSeam::Outcome on = finish.RunDitherNeedGpu(makeOverrideReq(true, false, false), nullptr, 0);
+				Assert::IsTrue(on.result == DitherNeed::Result::On && on.extraAllowed && !on.fallback.engaged);
+				Assert::IsNotNull(finish.DitherNeedCurrent());
+				const size_t vramWhileOn = finish.DitherNeedVramBytes();
+				Assert::IsTrue(vramWhileOn > 0);
+
+				const DitherNeedSeam::Outcome nls = finish.RunDitherNeedGpu(makeOverrideReq(true, false, true), nullptr, 0);
+				Assert::IsTrue(nls.result == DitherNeed::Result::Unavailable && !nls.extraAllowed);
+				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kNonLinearStretch), nls.missing);
+				Assert::IsTrue(nls.fallback.engaged && nls.fallback.reason.find("non-linear stretch active") != std::string::npos);
+				Assert::IsNull(finish.DitherNeedCurrent(), L"NLS decline must invalidate BlockPass");
+				Assert::AreEqual(uint64_t{ 1 }, finish.DitherNeedCounters().framesNlsDeclined);
+				Assert::AreEqual(vramWhileOn, finish.DitherNeedVramBytes(),
+					L"GEM-030: allocated VRAM remains reported during NLS invalidate until ReleaseGpu");
+
+				const DitherNeedSeam::Outcome rec = finish.RunDitherNeedGpu(makeOverrideReq(true, false, false), nullptr, 0);
+				Assert::IsTrue(rec.result == DitherNeed::Result::On && rec.extraAllowed && rec.decision.reset && !rec.fallback.engaged);
+				Assert::IsNotNull(finish.DitherNeedCurrent());
+
+				// Degenerate target crop -> fail closed visibly (kPassFailed).
+				OutputSegments::DitherNeedGpuRequest badCrop = makeOverrideReq(true, false, false);
+				badCrop.targetCrop = { 10.0f, 10.0f, 10.0f, 100.0f };   // dstW == 0
+				const DitherNeedSeam::Outcome badOut = finish.RunDitherNeedGpu(badCrop, nullptr, 0);
+				Assert::IsTrue(badOut.result == DitherNeed::Result::Unavailable && !badOut.extraAllowed);
+				Assert::IsTrue((badOut.missing & DitherNeed::kPassFailed) != 0);
+				Assert::IsTrue(badOut.fallback.engaged);
+				Assert::IsNull(finish.DitherNeedCurrent());
+			}
+
+			finish.ReleaseGpu(gpu);
+			Assert::AreEqual(size_t{ 0 }, finish.DitherNeedVramBytes(), L"ReleaseGpu frees all VRAM");
+			ft.Destroy(gpu);
+			pl_tex_destroy(gpu, &lutTex);
+			pl_tex_destroy(gpu, &lutOutTex);
+			pl_dispatch_destroy(&dispatch);
 		}
 	};
 
