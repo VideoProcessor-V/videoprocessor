@@ -17,20 +17,24 @@ namespace CameraLink
 		constexpr size_t kFieldMarks = 256;
 	}
 
-	bool CameraLane::Build(uint32_t width, uint32_t height, bool labels, std::shared_ptr<VpIndicator::Indicator> indicator)
+	bool CameraLane::Build(uint32_t width, uint32_t height, bool labels, std::shared_ptr<VpIndicator::Indicator> indicator,
+		bool smoothed, uint8_t laneLead)
 	{
 		Clear();
 		VpSkeleton::GraphSettings gs;
 		gs.dims.width = width;
 		gs.dims.height = height;
 		gs.renderAhead = kSealLag;   // the rings hold history + 1 + kSealLag frames: nothing is reclaimed before its seal
-		gs.laneLead = 2;
+		gs.laneLead = laneLead;
 		gs.queueDepth = 16;
 		gs.lookAheadWalk = 0;
 		gs.ofaPresent = false;       // P2 resolves to the matcher pair P2m (the camera never starts an optical-flow engine)
 		// The same declarations the skeleton lane receives as the camera's external demand (CameraExtension).
+		CameraDemandInput demand = LiveCameraDemand(labels);
+		if (smoothed)
+			demand.active[static_cast<int>(CameraConsumer::DejudderWarp)] = true;   // K9-1: pulls kP9CameraSmoothed (reduced to P7 when lead < 2)
 		std::vector<VpSkeleton::ConsumerDecl> consumers;
-		DeclareCameraConsumers(LiveCameraDemand(labels), consumers);
+		DeclareCameraConsumers(demand, consumers);
 		std::shared_ptr<State> st = std::make_shared<State>();
 		st->graph = VpSkeleton::BuildGraph(VpSkeleton::SkeletonProducts(), consumers, gs);
 		if (!st->graph.valid)
@@ -66,9 +70,14 @@ namespace CameraLink
 				return false;
 			}
 		}
+		const VpSkeleton::Node* p9 = st->table->NodeOf(VpSkeleton::kP9CameraSmoothed);
+		if (p9)
+			st->p9Bytes.reset(new VpSkeleton::CpuBuffers(*p9));
 		st->indicator = std::move(indicator);
 		st->generation = m_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
 		m_labels = labels && st->table->NodeOf(VpSkeleton::kP8CameraLabels) != nullptr;
+		m_smoothed = smoothed && p9 != nullptr;
+		m_effectiveLead = m_smoothed ? static_cast<int>(p9->declaredLead < laneLead ? p9->declaredLead : laneLead) : 0;
 		std::atomic_store(&m_state, st);
 		m_width = width;
 		m_height = height;
@@ -88,6 +97,8 @@ namespace CameraLink
 		m_error.clear();
 		m_width = m_height = 0;
 		m_labels = false;
+		m_smoothed = false;
+		m_effectiveLead = 0;
 		m_started = false;
 		m_lastSeq = 0;
 		m_nextToSeal = 0;
@@ -111,7 +122,8 @@ namespace CameraLink
 		l.hold = st;
 		l.table = st->table.get();
 		l.bytes = bytesProduct == VpSkeleton::kP7CameraFit ? st->p7Bytes.get()
-			: (bytesProduct == VpSkeleton::kCameraFitField ? st->fieldBytes.get() : nullptr);
+			: (bytesProduct == VpSkeleton::kCameraFitField ? st->fieldBytes.get()
+			: (bytesProduct == VpSkeleton::kP9CameraSmoothed ? st->p9Bytes.get() : nullptr));
 		l.indicator = st->indicator.get();
 		l.generation = st->generation;
 		return l;

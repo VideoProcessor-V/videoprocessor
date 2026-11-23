@@ -18,6 +18,7 @@
 namespace CameraLink
 {
 	constexpr const char* kCameraQueryId = "vpv.camera.v1";
+	constexpr const char* kCameraDirectoryQueryId = "vpv.camera.dir.v1";
 
 	// What a consumer gets for P8 of one frame: the label texture (GPU) when available. available == false means the
 	// consumer runs with enabled = 0 (today's values), shown under the camera status.
@@ -61,6 +62,15 @@ namespace CameraLink
 		// The newest published record for `seq` regardless of the seal (diagnostics, the governor's skip confirmation, the context
 		// provider's flow resample).
 		virtual std::shared_ptr<const CameraModel::CameraMotion> CausalRecord(uint64_t seq) const = 0;
+		// K9-1 (P9): the smoothed camera record for `seq` over N +- k (k = min(kMaxCameraLead, laneLead)); when the queue / lead
+		// is 0 or look-ahead neighbours have not arrived yet, returns the causal P7 record with `*smoothedOut = false` (or null when
+		// absent). Default (fakes): causal record, not smoothed.
+		virtual std::shared_ptr<const CameraModel::CameraMotion> SmoothedRecord(uint64_t seq, bool* smoothedOut = nullptr) const
+		{
+			if (smoothedOut)
+				*smoothedOut = false;
+			return CausalRecord(seq);
+		}
 		// K4 at d = 0: camera(N) for the matcher's pair of N, READY IN TIME or null with the miss cause (refs 93-prep-cam-d0 section 1):
 		// published on time into the on-time target (the mark), a committed on-time pool entry, an AHEAD field (a seed record is never
 		// on time), and with check == Full also the P2 epoch, the stamp honoured at the publish and the seal verdict (render thread).
@@ -83,5 +93,14 @@ namespace CameraLink
 		virtual bool LabelsFor(uint64_t seq, CameraConsumer c, CameraLabelsView& out) = 0;
 		// The guidance frame for the pair about to be searched (K4); null = refused or all switches off.
 		virtual std::shared_ptr<const CameraModel::GuidanceFrame> GuideFor(uint64_t seq) = 0;
+	};
+
+	// Per-host directory returned by ExtensionHub::Query(kCameraDirectoryQueryId), matching the
+	// IVectorEngineDirectory / IDejudderDirectory pattern (render thread only).
+	class ICameraLinkDirectory
+	{
+	public:
+		virtual ~ICameraLinkDirectory() {}
+		virtual ICameraLink* LinkFor(const void* host) const = 0;
 	};
 }

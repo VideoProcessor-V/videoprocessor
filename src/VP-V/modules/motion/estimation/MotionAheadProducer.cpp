@@ -232,6 +232,17 @@ namespace MotionAhead
 		};
 		// Rows in parallel (4K RGB at 60 frames: several ms per frame on one core).
 		auto rows = [&](int fromY, int toY) {
+			if (planar16)
+			{
+				// R6 (0a): fused bit-identical planar-16 (P010/P210) 2x2 decimation (zero intermediate row copies).
+				for (int y = fromY; y < toY; ++y)
+				{
+					const uint16_t* row0 = reinterpret_cast<const uint16_t*>(source.data + static_cast<size_t>(VpUnit::HalfLuma::Tap0(y, h)) * source.rowBytes);
+					const uint16_t* row1 = reinterpret_cast<const uint16_t*>(source.data + static_cast<size_t>(VpUnit::HalfLuma::Tap1(y, h)) * source.rowBytes);
+					R6::FusedPlanar16HalfLuma8Row(row0, row1, w, halfW, &out[static_cast<size_t>(y) * halfW]);
+				}
+				return;
+			}
 			std::vector<uint16_t> r0(static_cast<size_t>(w)), r1(static_cast<size_t>(w));
 			for (int y = fromY; y < toY; ++y)
 			{
@@ -277,6 +288,14 @@ namespace MotionAhead
 		{
 			hintsCamera.store(true, std::memory_order_release);
 			DebugLog::Log("Motion ahead: NVOF temporal hints ON for the camera fit (VP_NVOF_TEMPORAL_HINTS=1, diagnostic opt-in)");
+		}
+		// R6 (0a): async extras overlap is OFF by default; VP_R6_ASYNC_EXTRAS=1 enables it for 4K throughput evaluation.
+		char r6Val[8] = {};
+		const DWORD r6N = GetEnvironmentVariableA("VP_R6_ASYNC_EXTRAS", r6Val, static_cast<DWORD>(sizeof(r6Val)));
+		if (r6N == 1 && r6Val[0] == '1')
+		{
+			r6AsyncExtras.store(true, std::memory_order_release);
+			DebugLog::Log("Motion ahead: R6 async extras overlap ON (VP_R6_ASYNC_EXTRAS=1, diagnostic opt-in)");
 		}
 	}
 
@@ -624,6 +643,7 @@ namespace MotionAhead
 		wake.notify_all();
 		if (worker.joinable()) worker.join();
 		StopPipelineThreads();
+		r6ExtrasWorker.Stop();   // R6: drain and join any in-flight overlapped extras before releasing slot/engine
 		running = false;
 		// The engine first (it unregisters its textures), then the textures, then the device.
 		ReleaseEngine();
@@ -997,6 +1017,7 @@ namespace MotionAhead
 			stagingRing.MarkDiscardedOtherThan(job.generation);
 			backQueue.SetActiveGeneration(job.generation);
 			backQueue.WaitIdle();
+			r6ExtrasWorker.Flush();   // R6: preserve strict generation boundary ordering before SetGeneration clears the slot
 			slot->SetGeneration(job.generation);
 			publishGate.SetGeneration(job.generation);
 			havePrevious = false;

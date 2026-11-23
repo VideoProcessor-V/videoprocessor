@@ -73,4 +73,31 @@ namespace CameraModel
 	// `state` (state is updated for every call with computed == true, so call it once per fitted pair, in order).
 	DynTextureResult DetectDynamicTexture(const DynTextureConfig& cfg, const PairInput& in, const Params& model, DynTextureState& state,
 		double resolvedPrecPx = 0);
+
+	// CE-WATER-C1 (default OFF in Config::waterBlockExclude): per-block dynamic-texture / water incoherence
+	// exclusion from the GlobalModelFit inlier set. Unlike DetectDynamicTexture (which demotes a whole frame),
+	// this scores each block locally against its 4-neighbours and (when available) its advected previous-pair
+	// raw vector, so water / foliage blocks are excluded before RANSAC while rigid background / sky / pans remain.
+	struct DynTextureExcludeConfig
+	{
+		double spatialSigmas = 3.0;         // disagreement threshold = max(spatialSigmas * precPx, rel * max(|va|, |vb|))
+		double rel = 0.25;                  // relative tolerance so clean zooms / rotations are never flagged
+		double minSpatialIncoh = 0.5;       // fraction of valid 4-neighbours disagreeing with the block (with temporal confirm)
+		double coldSpatialIncoh = 0.75;     // stricter fraction on pair 1 when no previous field exists yet
+		int minValidNeighbours = 2;         // minimum valid 4-neighbours (3 when cold-start without temporal history)
+	};
+
+	struct WaterExcludeStats
+	{
+		int evaluated = 0;
+		int excluded = 0;
+	};
+
+	// Writes per-block mask (size gridW * gridH; 1 = incoherent dynamic-texture / water block, 0 = keep).
+	// Pure, deterministic, O(blocks). Does not mutate `prevState`.
+	WaterExcludeStats ComputeWaterExclusionMask(const DynTextureExcludeConfig& cfg, const PairInput& in,
+		const DynTextureState& prevState, double precPx, std::vector<uint8_t>& maskOut);
+
+	// Stores this pair's raw forward vector field into `state.prev` for the next pair's temporal water-exclusion check.
+	void RecordRawFieldForWaterExclusion(const PairInput& in, DynTextureState& state);
 }

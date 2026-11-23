@@ -242,7 +242,7 @@ namespace CameraModel
 
 		inline int Quadrant(double x, double y) { return (x >= 0 ? 1 : 0) + (y >= 0 ? 2 : 0); }
 
-		bool BuildField(const PairInput& in, const Config& c, Field& f)
+		bool BuildField(const PairInput& in, const Config& c, Field& f, const std::vector<uint8_t>* waterMask = nullptr)
 		{
 			if (in.gridW <= 0 || in.gridH <= 0 || in.picture.Empty() || !(in.blockSize > 0) || !(in.pairSeconds > 0)
 				|| in.fwdX == nullptr || in.fwdY == nullptr || in.fwdTrust == nullptr)
@@ -314,6 +314,7 @@ namespace CameraModel
 				const int rowBase = by * in.gridW;
 				uint8_t* const exRow = f.excluded.data() + rowBase;
 				const uint8_t* const guardRow = in.textGuard != nullptr ? in.textGuard + rowBase : nullptr;
+				const uint8_t* const waterRow = (waterMask != nullptr && waterMask->size() == static_cast<size_t>(nb)) ? waterMask->data() + rowBase : nullptr;
 				const float* const trustRow = in.fwdTrust + rowBase;
 				const int* const cc = colCell.data();
 				int* const bestP = best.data();
@@ -322,6 +323,8 @@ namespace CameraModel
 				{
 					if (guardRow != nullptr && guardRow[bx] == 1)
 						continue;                              // excluded stays 1
+					if (waterRow != nullptr && waterRow[bx] != 0)
+						continue;                              // CE-WATER-C1: excluded incoherent water / dynamic-texture block
 					exRow[bx] = 0;
 					const float tr = trustRow[bx];
 					if (!(tr > 0.0f))
@@ -976,8 +979,17 @@ namespace CameraModel
 					f.excluded.swap(F.m_scratchExcluded);
 				}
 			} scratchGuard(F, f);
-			if (!BuildField(in, c, f))
+			const std::vector<uint8_t>* waterMask = nullptr;
+			double waterExcludedShare = 0.0;
+			if (c.waterBlockExclude)
+			{
+				const WaterExcludeStats ws = ComputeWaterExclusionMask(c.waterExcludeCfg, in, F.m_waterPrev, PairPrecision(in), F.m_scratchWaterMask);
+				waterExcludedShare = ws.evaluated > 0 ? static_cast<double>(ws.excluded) / static_cast<double>(ws.evaluated) : 0.0;
+				waterMask = &F.m_scratchWaterMask;
+			}
+			if (!BuildField(in, c, f, waterMask))
 				return rec;
+			rec.signals.waterExcludedShare = waterExcludedShare;
 			CM_PROF_MARK(0);
 			const int N = static_cast<int>(f.s.size());
 			rec.samples = static_cast<uint32_t>(N);
@@ -1586,6 +1598,7 @@ namespace CameraModel
 				BuildCand(f, c, in, cellsTotal, refined, *cam);
 			}
 			Finish(F, in, c, f, temporalRead, *cam, ambiguity, rec);
+			rec.signals.waterExcludedShare = waterExcludedShare;
 			rec.finalRefineCells = fullCells;
 			if (c.twoLayer)
 			{
@@ -1879,6 +1892,7 @@ namespace CameraModel
 		m_seedPending = false;
 		m_tl = TwoLayerState();
 		m_dyn.Reset();
+		m_waterPrev.Reset();
 	}
 
 	CameraMotion Fitter::Fit(const PairInput& in)
@@ -1926,6 +1940,7 @@ namespace CameraModel
 				m_havePrevious = false;
 				m_previous = CameraMotion();
 				m_temporal.Reset();
+				m_waterPrev.Reset();
 				if (m_config.objects)
 					m_objects.Reset();
 				m_seedPending = false;
@@ -1967,6 +1982,7 @@ namespace CameraModel
 			if (in.flash)
 			{
 				m_dyn.Reset();   // the pair after a flash has a different intensity field
+				m_waterPrev.Reset();
 				rec.valid = false;
 				rec.reason = Reason::Flash;
 				rec.confidence = 0;
@@ -2039,6 +2055,8 @@ namespace CameraModel
 			}
 			if (m_config.dynTexture && !fit.valid)
 				m_dyn.Reset();   // an invalid pair breaks the sequence: the next pair has no previous residual field to compare against
+			if (m_config.waterBlockExclude)
+				RecordRawFieldForWaterExclusion(in, m_waterPrev);
 			if (fit.valid)
 			{
 				m_previous = fit;

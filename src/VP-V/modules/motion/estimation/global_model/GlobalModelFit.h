@@ -134,6 +134,10 @@ namespace CameraModel
 		// reported Ambiguous with verdictFlags & kVerdictDynamicTexture and a confidence below 0.5, never usable.
 		bool dynTexture = false;
 		DynTextureConfig dynTextureCfg;
+		// CE-WATER-C1 (default OFF): per-block dynamic-texture / water incoherence exclusion from the fitter's sample /
+		// inlier set. false = records are byte-identical to the fitter without it (m_waterPrev is never touched).
+		bool waterBlockExclude = false;
+		DynTextureExcludeConfig waterExcludeCfg;
 		// Static-camera hypothesis (R1-STATIC). false = records are byte-identical to the fitter without it (nothing is
 		// evaluated). true: a valid, usable-reason, non-identity fit whose border ring is explained by the identity model at
 		// least as well as by the fit (and mostly) is reported Ambiguous with verdictFlags & kVerdictStaticCamera and a
@@ -188,6 +192,8 @@ namespace CameraModel
 		PhotometricRefiner m_photometric;           // scratch + counters of the R3 refine (PairInput::photometric)
 		std::vector<uint8_t> m_photoLabel;          // per-block camera label handed to the refine as its inlier mask (scratch)
 		DynTextureState m_dyn;                      // previous pair's residual field (Config::dynTexture)
+		DynTextureState m_waterPrev;                // CE-WATER-C1: previous pair's raw vectors (Config::waterBlockExclude)
+		std::vector<uint8_t> m_scratchWaterMask;    // CE-WATER-C1: reused per-block water mask scratch
 		// Reused buffers (cost only; never part of the output). Fresh multi-100 KB allocations every pair
 		// cost hundreds of first-touch page faults, so the per-block record and the per-pair scratch are
 		// recycled. A pooled BlockData is rewritten only when no record still holds it (use_count == 1);

@@ -16,6 +16,8 @@
     "src/VP-V/modules/repair/grain_split/tests/GrainLevelRepeatFactsTests.cpp",
     "src/VP-V/modules/repair/grain_split/GrainCameraRefine.h",
     "src/VP-V/modules/repair/grain_split/tests/GrainCameraRefineTests.cpp",
+    "src/VP-V/modules/repair/grain_split/ResidualCameraAlign.h",
+    "src/VP-V/modules/repair/grain_split/tests/ResidualCameraAlignTests.cpp",
     "src/VP-V/modules/repair/grain_split/GrainSplitGpu.h",
     "src/VP-V/modules/repair/grain_split/GrainSplitGpu.cpp",
     "src/VP-V/modules/repair/grain_split/GrainSplitVariantOwner.h",

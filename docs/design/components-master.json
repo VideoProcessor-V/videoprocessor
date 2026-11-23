@@ -383,6 +383,8 @@
         "src/VP-V/modules/motion/estimation/MotionEngineIdle.h",
         "src/VP-V/modules/motion/estimation/MotionAheadProducer.h",
         "src/VP-V/modules/motion/estimation/MotionAheadWalk.h",
+        "src/VP-V/modules/motion/estimation/R6LumaPass.h",
+        "src/VP-V/modules/motion/estimation/R6PipelineOverlap.h",
         "src/VP-V/modules/motion/estimation/VectorEngineFallbackSync.h",
         "src/VP-V/modules/motion/estimation/global_model/CameraMotion.h",
         "src/VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h",
@@ -505,6 +507,8 @@
         "src/VP-V/modules/motion/estimation/global_model/link/GuidanceAdapter.h",
         "src/VP-V/modules/motion/estimation/global_model/link/CameraLane.cpp",
         "src/VP-V/modules/motion/estimation/global_model/link/CameraLane.h",
+        "src/VP-V/modules/motion/estimation/global_model/link/CameraSmoother.cpp",
+        "src/VP-V/modules/motion/estimation/global_model/link/CameraSmoother.h",
         "src/VP-V/modules/motion/estimation/global_model/link/GuidanceContext.h",
         "src/VP-V/modules/motion/estimation/global_model/link/GuidanceGate.h",
         "src/VP-V/modules/motion/estimation/global_model/link/GuidanceGovernor.h",
@@ -531,6 +535,9 @@
         "src/VP-V/modules/motion/estimation/tests/CameraConsumerBindingTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/P8FillRuleTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/CameraPhaseInterpTests.cpp",
+        "src/VP-V/modules/motion/estimation/tests/CameraSmootherTests.cpp",
+        "src/VP-V/modules/motion/estimation/tests/WaterBlockExclusionTests.cpp",
+        "src/VP-V/modules/motion/estimation/tests/R6ThroughputTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/GuidanceSchedulingTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/GuideProductTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/GuidanceGovernorTests.cpp",
@@ -1007,7 +1014,9 @@
         "src/VP-V/modules/motion/consumers/DejudderExtrasPresent.h",
         "src/VP-V/modules/motion/consumers/DejudderExtrasPresent.cpp",
         "src/VP-V/modules/motion/consumers/MotionHostHelpers.h",
-        "src/VP-V/modules/motion/consumers/MotionHostHelpers.cpp"
+        "src/VP-V/modules/motion/consumers/MotionHostHelpers.cpp",
+        "src/VP-V/modules/motion/consumers/DejudderCameraBindings.h",
+        "src/VP-V/modules/motion/consumers/tests/DejudderCameraBindingsTests.cpp"
       ],
       "components": {
         "files": {

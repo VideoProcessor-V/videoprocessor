@@ -134,11 +134,13 @@ static double g_dt[4] = { -1, -1, -1, -1 };
 // Static-camera hypothesis overrides (tuning): minShare, margin, ringFraction. Negative = Config default.
 static double g_sc[3] = { -1, -1, -1 };
 static bool g_static = false;
+static bool g_waterExclude = false;
 
 static Config MakeConfig(bool phase1, bool twoLayer = false, bool dynTexture = false)
 {
 	Config c;
 	c.staticCamera = g_static;
+	c.waterBlockExclude = g_waterExclude;
 	if (g_sc[0] >= 0) c.staticCfg.minStaticShare = g_sc[0];
 	if (g_sc[1] >= 0) c.staticCfg.margin = g_sc[1];
 	if (g_sc[2] >= 0) c.staticCfg.ringFraction = g_sc[2];
@@ -215,6 +217,7 @@ static bool Parse(int argc, char** argv, Args& a)
 		else if (s == "--phase1") a.phase1 = true;
 		else if (s == "--two-layer") a.twoLayer = true;
 		else if (s == "--dyn-texture") a.dynTexture = true;
+		else if (s == "--water-exclude") g_waterExclude = true;
 		else if (s == "--static-camera") g_static = true;
 		else if (s == "--sc-share") g_sc[0] = atof(next());
 		else if (s == "--sc-margin") g_sc[1] = atof(next());

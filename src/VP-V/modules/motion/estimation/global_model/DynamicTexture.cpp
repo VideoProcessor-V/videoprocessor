@@ -189,4 +189,159 @@ namespace CameraModel
 			state.Reset();   // too few trusted blocks: the history is stale for the next pair
 		return out;
 	}
+
+	WaterExcludeStats ComputeWaterExclusionMask(const DynTextureExcludeConfig& cfg, const PairInput& in,
+		const DynTextureState& prevState, double precPx, std::vector<uint8_t>& maskOut)
+	{
+		WaterExcludeStats stats;
+		const int gw = in.gridW, gh = in.gridH;
+		if (gw <= 0 || gh <= 0 || in.picture.Empty() || !(in.blockSize > 0) ||
+			in.fwdX == nullptr || in.fwdY == nullptr || in.fwdTrust == nullptr)
+		{
+			maskOut.clear();
+			return stats;
+		}
+		const size_t nb = static_cast<size_t>(gw) * static_cast<size_t>(gh);
+		maskOut.assign(nb, 0);
+		const double prec = precPx > 0 ? precPx : (in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0);
+		const double absThr = cfg.spatialSigmas * prec;
+		const bool prevOk = prevState.have && prevState.gridW == gw && prevState.gridH == gh &&
+			prevState.picture == in.picture && prevState.seconds > 0 && in.pairSeconds > 0 &&
+			prevState.prev.valid.size() == nb;
+		const double k = prevOk ? in.pairSeconds / prevState.seconds : 1.0;
+
+		auto blockValid = [&](int bx, int by) -> bool {
+			if (bx < 0 || bx >= gw || by < 0 || by >= gh)
+				return false;
+			const double cx = (bx + 0.5) * in.blockSize, cy = (by + 0.5) * in.blockSize;
+			if (cx < in.picture.left || cx >= in.picture.right || cy < in.picture.top || cy >= in.picture.bottom)
+				return false;
+			const size_t b = static_cast<size_t>(by) * static_cast<size_t>(gw) + static_cast<size_t>(bx);
+			if (in.textGuard != nullptr && in.textGuard[b] == 1)
+				return false;
+			const float tr = in.fwdTrust[b];
+			return tr > 0.0f && IsFiniteBits(tr) && IsFiniteBits(in.fwdX[b]) && IsFiniteBits(in.fwdY[b]);
+		};
+
+		const int dx4[4] = { -1, 1, 0, 0 };
+		const int dy4[4] = { 0, 0, -1, 1 };
+		for (int by = 0; by < gh; ++by)
+		{
+			for (int bx = 0; bx < gw; ++bx)
+			{
+				if (!blockValid(bx, by))
+					continue;
+				++stats.evaluated;
+				const size_t b = static_cast<size_t>(by) * static_cast<size_t>(gw) + static_cast<size_t>(bx);
+				const double vx = in.fwdX[b], vy = in.fwdY[b];
+				const double vm = Len(vx, vy);
+
+				int validN = 0, incohN = 0;
+				for (int n = 0; n < 4; ++n)
+				{
+					const int nx = bx + dx4[n], ny = by + dy4[n];
+					if (!blockValid(nx, ny))
+						continue;
+					++validN;
+					const size_t nbIdx = static_cast<size_t>(ny) * static_cast<size_t>(gw) + static_cast<size_t>(nx);
+					const double nvx = in.fwdX[nbIdx], nvy = in.fwdY[nbIdx];
+					const double thr = std::max(absThr, cfg.rel * std::max(vm, Len(nvx, nvy)));
+					if (Len(vx - nvx, vy - nvy) > thr)
+						++incohN;
+				}
+				if (validN < cfg.minValidNeighbours)
+					continue;
+				const double spatialFrac = static_cast<double>(incohN) / static_cast<double>(validN);
+
+				// Check temporal coherence against the advected previous-pair vector when history exists.
+				bool haveTemporal = false;
+				bool temporalIncoh = false;
+				if (prevOk)
+				{
+					const double cx = (bx + 0.5) * in.blockSize, cy = (by + 0.5) * in.blockSize;
+					const double sx = (cx - vx / k) / in.blockSize - 0.5;
+					const double sy = (cy - vy / k) / in.blockSize - 0.5;
+					if (IsFiniteBits(sx) && IsFiniteBits(sy) && sx > -0.5 && sy > -0.5 && sx < gw - 0.5 && sy < gh - 0.5)
+					{
+						const int px0 = static_cast<int>(std::floor(sx + 0.5));
+						const int py0 = static_cast<int>(std::floor(sy + 0.5));
+						if (px0 >= 0 && px0 < gw && py0 >= 0 && py0 < gh)
+						{
+							const size_t pb = static_cast<size_t>(py0) * static_cast<size_t>(gw) + static_cast<size_t>(px0);
+							if (prevState.prev.valid[pb] != 0)
+							{
+								haveTemporal = true;
+								const double qx = prevState.prev.vx[pb] * k, qy = prevState.prev.vy[pb] * k;
+								const double thr = std::max(absThr, cfg.rel * std::max(vm, Len(qx, qy)));
+								temporalIncoh = Len(vx - qx, vy - qy) > thr;
+							}
+						}
+					}
+				}
+
+				const bool drop = haveTemporal
+					? (spatialFrac >= cfg.minSpatialIncoh && temporalIncoh)
+					: (validN >= std::max(cfg.minValidNeighbours, 3) && spatialFrac >= cfg.coldSpatialIncoh);
+				if (drop)
+				{
+					maskOut[b] = 1;
+					++stats.excluded;
+				}
+			}
+		}
+		return stats;
+	}
+
+	void RecordRawFieldForWaterExclusion(const PairInput& in, DynTextureState& state)
+	{
+		const int gw = in.gridW, gh = in.gridH;
+		if (gw <= 0 || gh <= 0 || in.picture.Empty() || !(in.blockSize > 0) || !(in.pairSeconds > 0) ||
+			in.fwdX == nullptr || in.fwdY == nullptr || in.fwdTrust == nullptr)
+		{
+			state.Reset();
+			return;
+		}
+		const size_t nb = static_cast<size_t>(gw) * static_cast<size_t>(gh);
+		if (state.prev.valid.size() != nb)
+		{
+			state.prev.vx.assign(nb, 0.0f);
+			state.prev.vy.assign(nb, 0.0f);
+			state.prev.valid.assign(nb, 0);
+		}
+		else
+			std::fill(state.prev.valid.begin(), state.prev.valid.end(), static_cast<uint8_t>(0));
+		int validCount = 0;
+		for (int by = 0; by < gh; ++by)
+		{
+			const double cy = (by + 0.5) * in.blockSize;
+			if (cy < in.picture.top || cy >= in.picture.bottom)
+				continue;
+			for (int bx = 0; bx < gw; ++bx)
+			{
+				const double cx = (bx + 0.5) * in.blockSize;
+				if (cx < in.picture.left || cx >= in.picture.right)
+					continue;
+				const size_t b = static_cast<size_t>(by) * static_cast<size_t>(gw) + static_cast<size_t>(bx);
+				if (in.textGuard != nullptr && in.textGuard[b] == 1)
+					continue;
+				const float tr = in.fwdTrust[b];
+				if (!(tr > 0.0f) || !IsFiniteBits(tr) || !IsFiniteBits(in.fwdX[b]) || !IsFiniteBits(in.fwdY[b]))
+					continue;
+				state.prev.vx[b] = in.fwdX[b];
+				state.prev.vy[b] = in.fwdY[b];
+				state.prev.valid[b] = 1;
+				++validCount;
+			}
+		}
+		if (validCount > 0)
+		{
+			state.have = true;
+			state.gridW = gw;
+			state.gridH = gh;
+			state.picture = in.picture;
+			state.seconds = in.pairSeconds;
+		}
+		else
+			state.Reset();
+	}
 }

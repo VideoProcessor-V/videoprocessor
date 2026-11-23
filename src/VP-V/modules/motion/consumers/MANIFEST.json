@@ -51,7 +51,9 @@
     "src/VP-V/modules/motion/consumers/DejudderExtrasPresent.h",
     "src/VP-V/modules/motion/consumers/DejudderExtrasPresent.cpp",
     "src/VP-V/modules/motion/consumers/MotionHostHelpers.h",
-    "src/VP-V/modules/motion/consumers/MotionHostHelpers.cpp"
+    "src/VP-V/modules/motion/consumers/MotionHostHelpers.cpp",
+    "src/VP-V/modules/motion/consumers/DejudderCameraBindings.h",
+    "src/VP-V/modules/motion/consumers/tests/DejudderCameraBindingsTests.cpp"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/DejudderAhead.h",
