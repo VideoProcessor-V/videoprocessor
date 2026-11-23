@@ -761,6 +761,56 @@ public:
         }
     }
 
+    // Render: release every render-held slot with frame seq <= upToSeq (backlog-flush / skipped-retire recovery).
+    // Preserves Release()'s exact state transitions, releaseValue monotonicity, liveOwner_ cleanup, and memory
+    // ordering without counting orderErrors on already-free or newer slots. Returns the count of slots released.
+    uint32_t ReleaseThrough(uint64_t upToSeq, uint64_t releaseValue = 0)
+    {
+        const uint64_t limit = upToSeq > kSlotSeqMask - ring_ ? kSlotSeqMask : Biased(upToSeq);
+        uint32_t released = 0;
+        for (size_t i = 0; i < ring_; ++i) {
+            Slot& s = slots_[i];
+            for (;;) {
+                uint64_t raw = s.word.load(std::memory_order_acquire);
+                const SlotWord w = Unpack(raw);
+                if (w.seq < ring_ || w.seq > limit)
+                    break;
+                SlotWord next = w;
+                bool renderHeld = true;
+                switch (w.state) {
+                case SlotState::Sealed:
+                case SlotState::Live:
+                case SlotState::Rejected:
+                    if (releaseValue > s.releaseValue.load(std::memory_order_relaxed))
+                        s.releaseValue.store(releaseValue, std::memory_order_relaxed);
+                    next.state = SlotState::Released;
+                    break;
+                case SlotState::LiveLaneOwned:
+                case SlotState::RejectedLaneOwned:
+                    next.state = SlotState::ReleasedLaneOwned;
+                    break;
+                default:
+                    renderHeld = false;
+                    break;
+                }
+                if (!renderHeld)
+                    break;
+                next.prov = Provenance::None;
+                // seq_cst: a lane PinRef either sees this release (and fails) or BeginLive sees its pin.
+                if (!s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_seq_cst,
+                                                    std::memory_order_acquire))
+                    continue;
+                if (s.liveIndex >= 0 && liveOwner_[size_t(s.liveIndex)] == w.seq) {
+                    liveOwner_[size_t(s.liveIndex)] = 0;
+                    s.liveIndex = -1;
+                }
+                ++released;
+                break;
+            }
+        }
+        return released;
+    }
+
     // Render: frame `seq` will never be rendered (dropped): free its slot for the lane.
     bool Discard(uint64_t seq)
     {

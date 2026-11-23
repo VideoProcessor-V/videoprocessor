@@ -395,6 +395,7 @@ struct LaneState {
     std::vector<uint64_t> lateSeen;                   // per node index (render thread)
     std::vector<uint64_t> missSeen;                   // per node index (render thread)
     uint64_t firstSeq = 0;                            // the first frame this graph serves
+    uint64_t nextExpectedRetire = 0;                  // next frame seq expected to retire or drop in order (render thread)
     uint64_t generation = 0;                          // 1,2,3...: one per built state (LaneLease staleness check)
     std::string capsMismatch;                         // non-empty: the real plan's history caps differ from the trial's
 
@@ -592,8 +593,14 @@ public:
     // Registered producers (tests / diagnostics): how many, and whether this exact object is one of them. Read-only; no behaviour reads them.
     size_t ProducerCount() const { return producers_.size(); }
     bool HasProducer(const ILaneProducer* p) const { return std::find(producers_.begin(), producers_.end(), p) != producers_.end(); }
-    // LaneWorkerThreads tells the lane whether its threads run (setup-order assertion only).
-    void SetWorkersRunning(bool running) { workersRunning_.store(running ? 1 : 0, std::memory_order_release); }
+    // LaneWorkerThreads tells the lane whether its threads run (setup-order assertion and async CPU worker lead).
+    void SetWorkersRunning(bool running)
+    {
+        workersRunning_.store(running ? 1 : 0, std::memory_order_release);
+        const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
+        if (st && st->runner)
+            st->runner->SetAsyncCpuWorkers(running);
+    }
     void SetGpuDispatcher(IGpuDispatcher* d) { dispatcher_ = d; }
     void SetLiveFill(LiveFill fill) { liveFill_ = std::move(fill); }
     void RegisterCpuLiveCompute(ProductId id, CpuLiveCompute fn) { cpuLive_[id] = std::move(fn); }
@@ -1024,6 +1031,7 @@ public:
             CarryCpuFrom(*cur, *st, fromSeq);
         NotifyNewest(*st);
         std::atomic_store(&state_, st);
+        st->runner->SetAsyncCpuWorkers(workersRunning_.load(std::memory_order_acquire) != 0);
         if (cur) {   // frames stored in the old ring while the swap happened
             if (mayCarryCpu)
                 CarryCpuFrom(*cur, *st, fromSeq);
@@ -1350,6 +1358,7 @@ public:
         const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
         if (!st)
             return;
+        st->nextExpectedRetire = (std::max)(st->nextExpectedRetire, seq + 1u);
         // B3 X1: with a lagged-seal product (graph K = maxSealLag > 0) every release and the source drop run K frames later: a
         // frame and its ancestors stay until the final seal at N + K (the rings were sized + K). K = 0: today.
         const uint64_t K = st->graph.maxSealLag;
@@ -1357,7 +1366,7 @@ public:
             const uint64_t h = uint64_t(st->table->NodeAt(i).history) + K;
             // A frame that left its history before this graph's first frame was never in this table.
             if (seq >= h && seq - h >= st->firstSeq)
-                st->table->At(i).Release(seq - h, releaseFenceValue);
+                st->table->At(i).ReleaseThrough(seq - h, releaseFenceValue);
         }
         if (seq >= K)
             st->ring->Drop(seq - K);   // the ring's copy (and its host plane hold) ends with the frame; a running job keeps its own
@@ -1372,6 +1381,15 @@ public:
         const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
         if (!st || seq < st->firstSeq)
             return;
+        if (seq == st->nextExpectedRetire) {
+            st->nextExpectedRetire = seq + 1u;
+            const uint64_t K = st->graph.maxSealLag;
+            for (size_t i = 0; i < st->table->Count(); ++i) {
+                const uint64_t h = uint64_t(st->table->NodeAt(i).history) + K;
+                if (seq >= h && seq - h >= st->firstSeq)
+                    st->table->At(i).ReleaseThrough(seq - h, 0);
+            }
+        }
         for (size_t i = 0; i < st->table->Count(); ++i)
             st->table->At(i).Discard(seq);
         st->ring->Drop(seq);
@@ -1858,6 +1876,7 @@ private:
         std::shared_ptr<LaneState> st = std::make_shared<LaneState>();
         st->graph = owner_.Current();
         st->firstSeq = fromSeq;
+        st->nextExpectedRetire = fromSeq;
         st->generation = stateGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1u;
         st->ring.reset(new LaneSourceRing(std::max<size_t>(st->graph.framesInFlight, 4u)));
         st->table.reset(new SlotTable(st->graph));
@@ -1933,6 +1952,7 @@ private:
             st->runner->SetLaned(n.id, laned);
             st->table->At(i).SetLaneGranted(laned);
         }
+        st->runner->SetAsyncCpuWorkers(workersRunning_.load(std::memory_order_acquire) != 0);
         st->runner->SetSkipBefore(workerSkipBefore != 0 ? workerSkipBefore : fromSeq);
 
         // Worker order: tier, then topological, per backend.
@@ -2189,7 +2209,8 @@ private:
         if (!cfg_)
             return;
         const SavedConfig c = *cfg_;
-        Configure(settings_, c.reg, c.consumers, c.gs, c.card, c.tier, seq, c.hostDet);
+        const uint64_t skipBefore = workersRunning_.load(std::memory_order_acquire) != 0 ? (seq + 1u) : seq;
+        Configure(settings_, c.reg, c.consumers, c.gs, c.card, c.tier, seq, c.hostDet, skipBefore);
         ++rebindRebuilds_;
         // The rebuild re-derived the regulator for the new graph: a storm hold in force must floor it at
         // T0 again in THIS frame (OnSealed applied it to the previous graph's regulator before the rebuild).
