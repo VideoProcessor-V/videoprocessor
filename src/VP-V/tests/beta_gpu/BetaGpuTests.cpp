@@ -68,30 +68,6 @@ namespace
 		std::cout.flush();
 	}
 
-	// The Beta entry points are plain functions (also built into the console exe, which has no CppUnitTest), so these mirror
-	// HardwarePrerequisites::Required(Kind::Gpu / Kind::Footage) instead of including it: VP_TEST_REQUIRE_ALL=1 makes every kind of
-	// missing precondition fail (TQ-MC-S15a/S15b).
-	bool BetaEnvIsOne(const char* name)
-	{
-		char* v = nullptr;
-		size_t n = 0;
-		const bool on = _dupenv_s(&v, &n, name) == 0 && v && std::string(v) == "1";
-		std::free(v);
-		return on;
-	}
-	bool BetaRequireAll() { return BetaEnvIsOne("VP_TEST_REQUIRE_ALL"); }
-	bool BetaRequireGpu() { return BetaRequireAll() || BetaEnvIsOne("VP_TEST_REQUIRE_GPU"); }
-	bool BetaRequireFootage() { return BetaRequireAll() || BetaEnvIsOne("VP_TEST_REQUIRE_FOOTAGE"); }
-
-	// A report mode explicitly asked for (VP_TEST_QUALITY, _DEJUDDER_QUALITY, _DITHER_COMPARE, _REAL_FOOTAGE) whose input is missing:
-	// logs the fixed marker "SKIP-NO-FOOTAGE <report>: <why>" (not executed for check_trx_coverage) and returns to the caller, or
-	// FAILS under VP_TEST_REQUIRE_FOOTAGE=1 / VP_TEST_REQUIRE_ALL=1. The report modes already exit with kBetaReportModeExitCode.
-	void BetaMissingFootage(const std::string& report, const std::string& why)
-	{
-		std::cout << "SKIP-NO-FOOTAGE " << report << ": " << why << "\n";
-		Check(!BetaRequireFootage(), report + ": " + why + " (VP_TEST_REQUIRE_FOOTAGE=1 or VP_TEST_REQUIRE_ALL=1: a missing clip fails)");
-	}
-
 	struct Pixel { int r, g, b; };
 
 	// The Beta entry points are plain functions (also built into the console exe, which has no CppUnitTest), so these mirror
