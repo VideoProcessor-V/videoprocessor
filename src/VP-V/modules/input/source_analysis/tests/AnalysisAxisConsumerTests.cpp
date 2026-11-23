@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // S-2a consumer identity: the consumers that moved onto the shared analysis axis (AnalysisAxis10.h) keep their ten-bit
-// results bit for bit (SourceStats histogram and percentiles, LedLookahead's table), the LightLevel fetch carries
+// results bit for bit (SourceStats histogram, and since unit v2 its percentiles are the exact samples; LedLookahead's table), the LightLevel fetch carries
 // 12-bit fractions on the same axis, and sigma-delta stays 8/10-bit (owner 2026-11-14 08:30: 12-bit is the DV tunnel,
 // non-DV stays 10-bit + sigma-delta). CPU only; new file, no existing test edited.
 #include "pch.h"
@@ -30,10 +30,11 @@ namespace Tests
 	TEST_CLASS(AnalysisAxisConsumerTests)
 	{
 	public:
-		TEST_METHOD(SourceStatsKeepsTheLegacyBinAndCentreLaw)
+		TEST_METHOD(SourceStatsKeepsTheBinLawAndExactPercentiles)
 		{
-			// A ten-bit-origin plane (code << 6) and a 12-bit plane (code12 << 4) through ComputeRecord; the histogram and the
-			// percentile centres equal the legacy `s >> 6` / `(bin << 6) | 32` computed independently here.
+			// A ten-bit-origin plane (code << 6) and a 12-bit plane (code12 << 4) through ComputeRecord; the histogram equals
+			// the legacy `s >> 6` bins, and (unit v2, 2026-11-21 precision fix) each percentile is the exact sample value of
+			// that rank, computed independently here by sorting (v1 returned the bin centre `(bin << 6) | 32`).
 			const uint32_t hw = 64, hh = 32;
 			std::vector<uint16_t> half(hw * hh);
 			uint32_t seed = 4242u;
@@ -52,20 +53,20 @@ namespace Tests
 				std::vector<uint32_t> bins(1024, 0u);
 				for (const uint16_t s : half) ++bins[s >> 6];
 				for (uint32_t b = 0; b < 1024; ++b) Assert::AreEqual(bins[b], rec.hist[b]);
-				auto legacy = [&](uint64_t target)
-				{
-					uint64_t run = 0;
-					for (uint32_t b = 0; b < 1024; ++b)
-					{
-						run += bins[b];
-						if (run >= target) return (b << 6) | 32u;
-					}
-					return (1023u << 6) | 32u;
-				};
+				std::vector<uint16_t> sorted(half);
+				std::sort(sorted.begin(), sorted.end());
+				// The target-th smallest sample (1-based rank): the smallest value whose cumulative count reaches the target.
+				auto exact = [&](uint64_t target) { return static_cast<uint32_t>(sorted[static_cast<size_t>(target - 1u)]); };
 				const uint64_t n = static_cast<uint64_t>(hw) * hh;
-				Assert::AreEqual(legacy((n + 99u) / 100u), rec.p01);
-				Assert::AreEqual(legacy((n + 1u) / 2u), rec.p50);
-				Assert::AreEqual(legacy((n * 99u + 99u) / 100u), rec.p99);
+				Assert::AreEqual(exact((n + 99u) / 100u), rec.p01);
+				Assert::AreEqual(exact((n + 1u) / 2u), rec.p50);
+				Assert::AreEqual(exact((n * 99u + 99u) / 100u), rec.p99);
+				if (plane == 1)
+				{
+					// The 12-bit plane really exercises the fraction: at least one percentile is off its v1 bin centre.
+					const bool offCentre = (rec.p01 & 63u) != 32u || (rec.p50 & 63u) != 32u || (rec.p99 & 63u) != 32u;
+					Assert::IsTrue(offCentre, L"12-bit percentiles carry their own fraction");
+				}
 			}
 		}
 

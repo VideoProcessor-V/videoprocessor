@@ -108,7 +108,8 @@ The one law of the P4 source-stats record (doc 62, section 1.2 U6): `SourceStats
 `kExpectedStatsUnit`). Moved unchanged from `LaneCpuProducts.h`; the lane names (`SourceStatsRecord`, `StatsAccumulator`,
 `ComputeSourceStats`, ...) are aliases of it. v2 (U7-accuracy) appends the cell grid; every v1 field keeps its offset and law.
 
-- Record (8 KB): 1024-bin histogram (top 10 bits of the 16-bit half plane), mean, min/max, p1/p50/p99 (bin centre), evidence rect
+- Record (8 KB): 1024-bin histogram (one bin per whole axis code, summed from the accumulator's full-resolution 65536-value Q6
+  histogram), mean, min/max, p1/p50/p99 (v2: the exact Q6 sample value; v1 was the 10-bit bin centre), evidence rect
   (rows/cols above p1 + (p99 - p1) / 16; NOT Bill's active picture, that is U8), grain (median 8x8 block RMS second difference),
   and (v2) the 32 x 18 cell means of the half plane (`cells`, `gridFound` = 0 under 32 x 18): the structure input of U7's cut law.
 - Shared small laws: `FirstBinReaching` (percentile / p99.9 scan), `HistBin10` (N-bin histogram of 10-bit codes), `Histogram10`,

@@ -70,6 +70,33 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(N2.classify_line("v = flags >> 2;"), [])
         self.assertNotIn(bytes([8]), open(N2.__file__, "rb").read())
 
+    def test_axis_fraction_shift_on_a_q6_sample_is_a_hit(self):
+        # CHK-SHIFT-AXISFRAC (lead17 c4-s2a-fix G6): the S-2a floor `q6 >> kAxisFractionBits` was invisible because
+        # neither `q6` nor the axis constant was a sample word
+        src = ("constexpr int kAxisFractionBits = 6;\n"
+               "inline uint32_t Floor10FromQ6(uint32_t q6) { return q6 >> kAxisFractionBits; }\n"
+               "inline uint32_t Bin(uint32_t s) { const uint32_t bin = s >> kAxisFractionBits; return bin; }\n"
+               "inline uint32_t Ns(uint32_t s) { return s >> AnalysisDomain::kAxisFractionBits; }\n")
+        hits = N2.scan_text("a.h", src, {})
+        self.assertEqual([(h["line"], h["pattern"]) for h in hits], [(2, "shift"), (3, "shift"), (4, "shift")])
+        self.assertEqual(N2.classify_line("v = q6 >> 6;"), ["shift"])
+        self.assertEqual(N2.classify_line("v = valueQ6 >> 4;"), ["shift"])
+        self.assertEqual(N2.classify_line("v = axisCode >> 2;"), ["shift"])
+        # the other widths and the left shift stay quiet; a plain flag shift is still not a sample
+        self.assertEqual(N2.classify_line("v = q6 >> 3;"), [])
+        self.assertEqual(N2.classify_line("v = q6 << kAxisFractionBits;", {"kAxisFractionBits"}), [])
+        self.assertEqual(N2.classify_line("v = flags >> 4;"), [])
+
+    def test_axis_fraction_shift_planted_in_a_tree_grows_the_file(self):
+        with tempfile.TemporaryDirectory() as r:
+            _w(r, "src/VP-V/a/AnalysisAxis10.h", "constexpr int kAxisFractionBits = 6;\n")
+            _w(r, "src/VP-V/a/Use.h", "inline uint32_t F(uint32_t q6) { return q6; }\n")
+            self.assertEqual(_run(r, "--write-baseline")[0], 0)
+            _w(r, "src/VP-V/a/Use.h", "inline uint32_t F(uint32_t q6) { return q6 >> kAxisFractionBits; }\n")
+            rc, out = _run(r)
+            self.assertEqual(rc, 1)
+            self.assertIn("GREW src/VP-V/a/Use.h", out)
+
     def test_u8(self):
         self.assertEqual(N2.classify_line("std::vector<uint8_t> pixelBuf;"), ["u8"])
         self.assertEqual(N2.classify_line("std::vector<uint8_t> blob;"), [])

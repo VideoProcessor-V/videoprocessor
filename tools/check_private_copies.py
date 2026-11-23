@@ -69,7 +69,8 @@ SITES = [
               _M + "motion/estimation/global_model/link/CameraLabelProducer.h"]},
     {"id": "D5", "product": "kP13SourceRing", "refs": "122 s9 D5",
      "what": "producer CPU luma decode (code >> 6) / GPU row upload shift",
-     "re": r">>\s*6\b|<<\s*(view\.)?(msbShift|shift)\b",
+     # CHK-SHIFT-AXISFRAC: `>> kAxisFractionBits` (AnalysisAxis10.h, = 6) is the same decode as `>> 6`
+     "re": r">>\s*6\b|>>\s*(?:[\w:]*::)?kAxisFractionBits\b|<<\s*(view\.)?(msbShift|shift)\b",
      # gate-15c-D5 (b), lead 2 ruling: a private MSB-align shift anywhere outside the one owner law (LaneInterfaces.h MsbAlign)
      # is D5~moved. Not `>>\s*6\b` (UTF-8 in nets/NetJson.h, the EngineLumaGpu.hlsl owner unit).
      "wide": r"<<\s*(\w+(\.|->))?msbShift\b",

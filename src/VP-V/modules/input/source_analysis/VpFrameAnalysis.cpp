@@ -26,6 +26,30 @@ namespace VpFrameAnalysis
 				return static_cast<uint16_t>(code);
 			return static_cast<uint16_t>(FrameAnalysis::kHistogramBins - 1);
 		}
+
+		constexpr uint32_t kQ6PerCode = 1u << Vpv::AnalysisDomain::kAxisFractionBits;    // 64
+		constexpr uint32_t kQ6Values = FrameAnalysis::kHistogramBins * kQ6PerCode;       // 65536: every 16-bit value
+
+		// A whole-code map (0..1023 -> 0..1023) carried onto the Q6 axis: value c x 64 + f maps to
+		// map(c) x 64 + (map(c + 1) - map(c)) x f, i.e. linear between the whole codes and exact at each of them
+		// (f = 0 gives map(c) x 64, the ten-bit result). Integer, no narrowing: the fraction f is carried.
+		template <class Map>
+		void BuildQ6Map(std::vector<uint16_t>& out, Map map)
+		{
+			out.assign(kQ6Values, 0);
+			const int top = static_cast<int>(FrameAnalysis::kHistogramBins) - 1;
+			for (int code = 0; code <= top; ++code)
+			{
+				const int lo = static_cast<int>(map(code));
+				const int hi = static_cast<int>(map(code < top ? code + 1 : code));
+				for (int f = 0; f < static_cast<int>(kQ6PerCode); ++f)
+				{
+					const int v = lo * static_cast<int>(kQ6PerCode) + (hi - lo) * f;
+					out[static_cast<size_t>(code) * kQ6PerCode + static_cast<size_t>(f)] =
+						static_cast<uint16_t>((std::max)(0, (std::min)(static_cast<int>(kQ6Values) - 1, v)));
+				}
+			}
+		}
 	}
 
 	// 15c C6: the range question (CodesFullRange), the studio map, the need for a plane and the plane's decode are the
@@ -81,47 +105,75 @@ namespace VpFrameAnalysis
 			source.sharedLuma = AcquirePlane();
 	}
 
-	const uint16_t* LumaRowReader::Row(int y, int x0, int count)
+	const uint16_t* LumaRowReader::RowQ6(int y, int x0, int count)
 	{
 		if (count <= 0 || x0 < 0 || y < 0 || y >= m_source.height || count > m_source.width - x0)
 			return nullptr;
-		if (const uint16_t* shared = m_source.SharedLumaRow(y))
-			return shared + x0;
-		m_buffer.resize(static_cast<size_t>(count));
 		if (const uint16_t* plane = m_source.LumaPlaneRow(y))
 		{
-			// The lanes' upper ten bits, mapped as Sample() maps them (PlaneLuma).
+			// The lanes are on the 16-bit lane scale = Q6. P010 / P210 are ten-bit containers: their low six bits are padding
+			// (zero by the format; gate cb-chk r1 SHOULD 1), so they are masked off and never read as a fraction. Only the
+			// decoded DV plane (12-bit codes, code12 << 4) carries real fraction bits.
+			const bool tenBitLanes = m_source.format != AnalysisLumaFormat::DecodedDolbyVision422;
+			const uint16_t laneMask = tenBitLanes ? static_cast<uint16_t>(0xFFC0u) : static_cast<uint16_t>(0xFFFFu);
+			// A limited plane that needs no decode (NeedsDecode false) with real fraction bits is read in place.
+			if (!NeedsDecode(m_source) && !tenBitLanes)
+				return plane + x0;
+			m_buffer.resize(static_cast<size_t>(count));
+			if (!NeedsDecode(m_source))
+			{
+				for (int i = 0; i < count; ++i)
+					m_buffer[static_cast<size_t>(i)] = static_cast<uint16_t>(plane[x0 + i] & laneMask);
+				return m_buffer.data();
+			}
+			// Full range: Sample()'s remap (PlaneLuma, the source's own law) carried onto the Q6 axis.
+			if (m_planeQ6.empty())
+				BuildQ6Map(m_planeQ6, [this](int code) { return m_source.PlaneLuma(static_cast<uint16_t>(code)); });
 			for (int i = 0; i < count; ++i)
-				m_buffer[static_cast<size_t>(i)] = m_source.PlaneLuma(static_cast<uint16_t>(Vpv::AnalysisDomain::Floor10FromQ6(plane[x0 + i])));
+				m_buffer[static_cast<size_t>(i)] = m_planeQ6[plane[x0 + i] & laneMask];
 			return m_buffer.data();
 		}
-		if (m_source.SampleLumaRow(x0, y, count, m_buffer.data()))
-			return m_buffer.data();
-		for (int i = 0; i < count; ++i)
+		// The ten-bit sources (Sample().luma): the shared plane, the row decoder, else the per-pixel sampler. Carried as
+		// code x 64, the exact Q6 of a whole axis code (AnalysisAxis10.h: Q6 = code << 6 for a 10-bit code).
+		m_buffer.resize(static_cast<size_t>(count));
+		const uint16_t* codes = m_source.SharedLumaRow(y);
+		if (codes)
+			codes += x0;
+		else
 		{
-			AnalysisLumaSample sample;
-			if (!m_source.Sample(x0 + i, y, sample))
-				return nullptr;
-			m_buffer[static_cast<size_t>(i)] = sample.luma;
+			if (!m_source.SampleLumaRow(x0, y, count, m_buffer.data()))
+				for (int i = 0; i < count; ++i)
+				{
+					AnalysisLumaSample sample;
+					if (!m_source.Sample(x0 + i, y, sample))
+						return nullptr;
+					m_buffer[static_cast<size_t>(i)] = sample.luma;
+				}
+			codes = m_buffer.data();
 		}
+		for (int i = 0; i < count; ++i)
+			m_buffer[static_cast<size_t>(i)] = static_cast<uint16_t>((codes[i] & Vpv::AnalysisDomain::kAxisMax)
+				<< Vpv::AnalysisDomain::kAxisFractionBits);
 		return m_buffer.data();
 	}
 
 	Reducer::Reducer(const FrameAnalysis::Rect& picture, const std::array<uint16_t, 1024>& studio)
-		: m_picture(picture), m_studio(studio)
+		: m_picture(picture)
 	{
+		BuildQ6Map(m_studioQ6, [&studio](int code) { return studio[static_cast<size_t>(code)]; });
+		m_q6Histogram.assign(kQ6Values, 0u);
 	}
 
-	void Reducer::AddRow(int y, const uint16_t* codes)
+	void Reducer::AddRowQ6(int y, const uint16_t* q6)
 	{
-		if (!codes || y < m_picture.top || y >= m_picture.bottom || m_picture.Empty())
+		if (!q6 || y < m_picture.top || y >= m_picture.bottom || m_picture.Empty())
 			return;
 		const int width = m_picture.Width();
 		for (int i = 0; i < width; ++i)
 		{
-			const uint16_t code = m_studio[codes[i] & 0x3ff];
-			++m_histogram[code];
-			m_sum += code;
+			const uint32_t v = m_studioQ6[q6[i]];
+			++m_q6Histogram[v];
+			m_sumQ6 += v;
 		}
 		m_samples += static_cast<uint64_t>(width);
 	}
@@ -130,29 +182,45 @@ namespace VpFrameAnalysis
 	{
 		Measured out;
 		FrameAnalysis::LumaStats& luma = out.luma;
-		luma.histogram = m_histogram;
+		// The Store's histogram: one bin per whole studio code, the total of its 64 Q6 values.
+		std::array<uint32_t, FrameAnalysis::kHistogramBins>& histogram = luma.histogram;
+		for (size_t code = 0; code < histogram.size(); ++code)
+		{
+			uint32_t total = 0;
+			const uint32_t* q = m_q6Histogram.data() + code * kQ6PerCode;
+			for (uint32_t f = 0; f < kQ6PerCode; ++f)
+				total += q[f];
+			histogram[code] = total;
+		}
 		luma.samples = m_samples;
 		if (m_samples > 0)
 		{
-			luma.mean = static_cast<double>(m_sum) / static_cast<double>(m_samples);
+			// Exact on the Q6 axis (/ 64 is exact, so a ten-bit-origin picture gives the code-domain mean bit for bit).
+			luma.mean = static_cast<double>(m_sumQ6) / static_cast<double>(m_samples) / static_cast<double>(kQ6PerCode);
 			luma.apl = (luma.mean - FrameAnalysis::kStudioBlack) /
 				(FrameAnalysis::kStudioWhite - FrameAnalysis::kStudioBlack);
 			int first = 0, last = FrameAnalysis::kHistogramBins - 1;
-			while (first < last && !m_histogram[first]) ++first;
-			while (last > first && !m_histogram[last]) --last;
+			while (first < last && !histogram[first]) ++first;
+			while (last > first && !histogram[last]) --last;
 			luma.minimum = static_cast<uint16_t>(first);
 			luma.maximum = static_cast<uint16_t>(last);
-			luma.p1 = Percentile(m_histogram, m_samples, 0.01);
-			luma.p50 = Percentile(m_histogram, m_samples, 0.50);
-			luma.p99 = Percentile(m_histogram, m_samples, 0.99);
+			luma.p1 = Percentile(histogram, m_samples, 0.01);
+			luma.p50 = Percentile(histogram, m_samples, 0.50);
+			luma.p99 = Percentile(histogram, m_samples, 0.99);
+			// The shares compare the exact Q6 value with each threshold's 10-bit meaning (64.0, 940.0, 81.0, 1019.0).
+			const uint32_t blackQ6 = static_cast<uint32_t>(FrameAnalysis::kStudioBlack) * kQ6PerCode;
+			const uint32_t whiteQ6 = static_cast<uint32_t>(FrameAnalysis::kStudioWhite) * kQ6PerCode;
+			const uint32_t nearBlackQ6 = static_cast<uint32_t>(FrameAnalysis::kNearBlackMax) * kQ6PerCode;
+			const uint32_t clippedQ6 = static_cast<uint32_t>(FrameAnalysis::kClippedMin) * kQ6PerCode;
 			uint64_t btb = 0, wtw = 0, nearBlack = 0, clipped = 0;
-			for (int code = 0; code < FrameAnalysis::kHistogramBins; ++code)
+			for (uint32_t v = 0; v < kQ6Values; ++v)
 			{
-				const uint64_t count = m_histogram[code];
-				if (code < FrameAnalysis::kStudioBlack) btb += count;
-				if (code > FrameAnalysis::kStudioWhite) wtw += count;
-				if (code <= FrameAnalysis::kNearBlackMax) nearBlack += count;
-				if (code >= FrameAnalysis::kClippedMin) clipped += count;
+				const uint64_t count = m_q6Histogram[v];
+				if (count == 0) continue;
+				if (v < blackQ6) btb += count;
+				if (v > whiteQ6) wtw += count;
+				if (v <= nearBlackQ6) nearBlack += count;
+				if (v >= clippedQ6) clipped += count;
 			}
 			const double total = static_cast<double>(m_samples);
 			out.range.btb = btb / total;
@@ -178,9 +246,9 @@ namespace VpFrameAnalysis
 		LumaRowReader reader(source);
 		for (int y = picture.top; y < picture.bottom; ++y)
 		{
-			const uint16_t* row = reader.Row(y, picture.left, picture.Width());
+			const uint16_t* row = reader.RowQ6(y, picture.left, picture.Width());
 			if (!row) return false;
-			reducer.AddRow(y, row);
+			reducer.AddRowQ6(y, row);
 		}
 		out = reducer.Finish();
 		return true;

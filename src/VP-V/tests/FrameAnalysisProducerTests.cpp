@@ -3,7 +3,7 @@
 
 // WP-23 producer (src/VP-V/modules/input/source_analysis/VpFrameAnalysis.*): the single shared
 // luma decode equals Sample().luma at every pixel for every format; the reductions equal a plain
-// reference over Sample() (histogram exact, means within 1e-6 relative) incl. BTB/WTW codes; the
+// reference over Sample() plus the plane lanes' Q6 fraction (histogram exact, means within 1e-6 relative) incl. BTB/WTW; the
 // range model (one studio mapping); the async producer (records
 // late until published, drop-oldest when behind with a visible reason, repeats). CPU only.
 
@@ -27,11 +27,14 @@ namespace FrameAnalysisProducerTestsNs
 		return kind == Kind::P010 || kind == Kind::P210;
 	}
 
-	// The reference: every pixel of `picture` through Sample(), mapped with the studio map.
+	// The reference: every pixel of `picture` through Sample(), mapped with the studio map. 2026-11-21 precision fix: a pixel
+	// of a 16-bit plane format also carries its lane's fraction (lane % 64), Sample()'s whole-code map (PlaneLuma) and the
+	// studio map taken linear between whole codes on the Q6 axis (exact at whole codes, so ten-bit lanes are unchanged).
 	VpFrameAnalysis::Measured Reference(const AnalysisLumaSource& source, const Rect& picture)
 	{
 		VpFrameAnalysis::Measured out;
 		const auto studio = VpFrameAnalysis::StudioLumaMap(source);
+		auto lerp = [](int lo, int hi, uint32_t f) { return static_cast<uint32_t>(lo * 64 + (hi - lo) * static_cast<int>(f)); };
 		double sum = 0.0;
 		uint64_t n = 0, btb = 0, wtw = 0;
 		for (int y = picture.top; y < picture.bottom; ++y)
@@ -39,12 +42,24 @@ namespace FrameAnalysisProducerTestsNs
 			{
 				AnalysisLumaSample sample;
 				Assert::IsTrue(source.Sample(x, y, sample));
-				const uint16_t code = studio[sample.luma];
-				++out.luma.histogram[code];
-				sum += code;
+				uint32_t q6 = static_cast<uint32_t>(sample.luma) * 64u;
+				if (const uint16_t* lanes = source.LumaPlaneRow(y))
+				{
+					// P010 / P210 are ten-bit containers (padding bits carry no fraction); decoded DV lanes are 12-bit.
+					const bool dv = source.format == AnalysisLumaFormat::DecodedDolbyVision422;
+					const uint32_t lane = lanes[x], c = lane / 64u, f = dv ? lane % 64u : 0u;
+					const int lo = source.PlaneLuma(static_cast<uint16_t>(c));
+					const int hi = source.PlaneLuma(static_cast<uint16_t>(c < 1023u ? c + 1u : c));
+					Assert::AreEqual(static_cast<int>(sample.luma), lo, L"Sample() is the whole-code value of the lane");
+					q6 = lerp(lo, hi, f);
+				}
+				const uint32_t c2 = q6 / 64u, f2 = q6 % 64u;
+				const uint32_t v = lerp(studio[c2], studio[c2 < 1023u ? c2 + 1u : c2], f2);
+				++out.luma.histogram[v / 64u];
+				sum += v / 64.0;
 				++n;
-				btb += code < 64 ? 1 : 0;
-				wtw += code > 940 ? 1 : 0;
+				btb += v < 64u * 64u ? 1 : 0;
+				wtw += v > 940u * 64u ? 1 : 0;
 			}
 		out.luma.samples = n;
 		out.luma.mean = sum / n;
@@ -303,6 +318,72 @@ namespace FrameAnalysisProducerTestsNs
 			}
 		}
 
+		// 2026-11-21 precision fix: a 16-bit plane lane with fraction bits (a 12-bit source: code12 << 4) keeps them on the
+		// Q6 axis. Thresholds keep their 10-bit meaning (81.25 is above near-black 81.0; 940.5 is above white 940.0).
+		static void FillLanes(Frame& frame, uint16_t lane)
+		{
+			std::vector<uint8_t>& data = *frame.bytes;
+			for (int y = 0; y < kHeight; ++y)
+				for (int x = 0; x < kWidth; ++x)
+					Put16(&data[static_cast<size_t>(y) * frame.source.rowBytes + static_cast<size_t>(x) * 2], lane);
+		}
+
+		// A limited 12-bit plane: the P210 layout declared as the decoded DV plane (code12 << 4 lanes; same 4:2:2 layout).
+		static Frame TwelveBitPlane()
+		{
+			Frame frame = Make(Kind::P210, 0);
+			frame.source.format = AnalysisLumaFormat::DecodedDolbyVision422;
+			return frame;
+		}
+
+		TEST_METHOD(TwelveBitPlaneKeepsItsFractionOnTheAxis)
+		{
+			Frame frame = TwelveBitPlane();
+			Assert::IsTrue(frame.source.IsValid(), L"decoded DV plane (precondition)");
+			Assert::IsFalse(VpFrameAnalysis::SamplerCodesAreFullRange(frame.source), L"identity studio map (precondition)");
+			Assert::IsFalse(VpFrameAnalysis::NeedsDecode(frame.source), L"limited plane: lanes read in place (precondition)");
+			const uint64_t n = static_cast<uint64_t>(kWidth) * kHeight;
+			const Rect all{ 0, 0, kWidth, kHeight };
+			VpFrameAnalysis::Measured m;
+
+			FillLanes(frame, static_cast<uint16_t>((81u << 6) | 16u));   // 81.25 on the axis
+			Assert::IsTrue(VpFrameAnalysis::Reduce(frame.source, all, m));
+			Assert::AreEqual(81.25, m.luma.mean, 0.0, L"v1: 81.0");
+			Assert::AreEqual((81.25 - 64.0) / (940.0 - 64.0), m.luma.apl, 1e-15);
+			Assert::AreEqual(0.0, m.range.nearBlack, 0.0, L"81.25 > 81.0: not near black (v1: 1.0)");
+			Assert::AreEqual(0.0, m.range.btb, 0.0);
+			Assert::AreEqual(0.0, m.range.wtw, 0.0);
+			Assert::AreEqual(static_cast<uint32_t>(n), m.luma.histogram[81], L"the Store bin is the whole studio code");
+			Assert::AreEqual(81, static_cast<int>(m.luma.minimum));
+			Assert::AreEqual(81, static_cast<int>(m.luma.p50));
+			Assert::AreEqual(81, static_cast<int>(m.luma.maximum));
+
+			FillLanes(frame, static_cast<uint16_t>((940u << 6) | 32u));  // 940.5
+			Assert::IsTrue(VpFrameAnalysis::Reduce(frame.source, all, m));
+			Assert::AreEqual(940.5, m.luma.mean, 0.0, L"v1: 940.0");
+			Assert::AreEqual(1.0, m.range.wtw, 0.0, L"940.5 > 940.0: whiter than white (v1: 0.0)");
+			Assert::AreEqual(0.0, m.range.clipped, 0.0, L"below 1019.0");
+			Assert::AreEqual(static_cast<uint32_t>(n), m.luma.histogram[940]);
+
+			FillLanes(frame, static_cast<uint16_t>((1018u << 6) | 48u)); // 1018.75 (12-bit code 4075): below clipped 1019.0
+			Assert::IsTrue(VpFrameAnalysis::Reduce(frame.source, all, m));
+			Assert::AreEqual(0.0, m.range.clipped, 0.0);
+			Assert::AreEqual(1018.75, m.luma.mean, 0.0);
+		}
+
+		// Gate cb-chk r1 SHOULD 1: P010 / P210 are ten-bit containers; junk in the six padding bits never becomes a fraction.
+		TEST_METHOD(TenBitPlanePaddingBitsAreIgnored)
+		{
+			for (Kind kind : { Kind::P010, Kind::P210 })
+			{
+				Frame frame = Make(kind, 0);
+				FillLanes(frame, static_cast<uint16_t>((81u << 6) | 37u));   // code 81 + junk 37 in the padding
+				VpFrameAnalysis::Measured m;
+				Assert::IsTrue(VpFrameAnalysis::Reduce(frame.source, Rect{ 0, 0, kWidth, kHeight }, m), KindName(kind));
+				Assert::AreEqual(81.0, m.luma.mean, 0.0, KindName(kind));
+				Assert::AreEqual(1.0, m.range.nearBlack, 0.0, L"code 81 is near black; the padding is not a fraction");
+			}
+		}
 		TEST_METHOD(ProducerPublishesAsynchronously)
 		{
 			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));

@@ -332,9 +332,10 @@ namespace SharedUnitsW1TestsNs2
 			}
 		}
 
-		TEST_METHOD(LaneStatsRecordPercentilesAreBinCentres)
+		TEST_METHOD(LaneStatsRecordPercentilesAreExactSamples)
 		{
-			// 1000 samples, a flat ramp over 16-bit codes: p50 sits at the centre of the bin holding sample 500
+			// 1000 samples, a flat ramp over 16-bit codes. Unit v2 (2026-11-21 precision fix): p50 IS sample 500, the ramp's
+			// half[499] (v1: the centre of the bin holding it, (half[499] >> 6) << 6 | 32); p01 / p99 are samples 10 / 990.
 			std::vector<uint16_t> half(1000);
 			for (size_t i = 0; i < half.size(); ++i)
 				half[i] = static_cast<uint16_t>(i * 65);
@@ -343,9 +344,81 @@ namespace SharedUnitsW1TestsNs2
 			VpUnit::SourceStats::Record r;
 			Assert::IsTrue(VpUnit::SourceStats::ReadRecord(out.data(), out.size(), &r));
 			Assert::AreEqual(1000u, r.pixelCount);
-			Assert::AreEqual(uint32_t((half[499] >> 6) << 6 | 32u), r.p50);
+			Assert::AreEqual(uint32_t(half[499]), r.p50);      // 32435
+			Assert::AreEqual(uint32_t(half[9]), r.p01);        // 585: target (1000 + 99) / 100 = 10
+			Assert::AreEqual(uint32_t(half[989]), r.p99);      // 64285: target (99000 + 99) / 100 = 990
 			Assert::IsTrue(r.p01 < r.p50 && r.p50 < r.p99);
 			Assert::IsFalse(VpUnit::SourceStats::ComputeRecord(half.data(), 40, 25, out.data(), 16), L"too small a buffer");
+		}
+
+		// 2026-11-21 precision fix (unit v2): two 12-bit codes inside ONE ten-bit bin keep their own values.
+		TEST_METHOD(LaneStatsTwelveBitPercentilesAreExact)
+		{
+			Assert::AreEqual(2u, VpUnit::SourceStats::kUnitVersion, L"the percentile law changed: unit v2");
+			// 12-bit codes 1001 and 1003 as lane words (code12 << 4): 16016 and 16048, both in ten-bit bin 250 (16000..16063).
+			const std::vector<uint16_t> half = { 16016, 16016, 16048, 16048 };
+			std::vector<uint8_t> out(VpUnit::SourceStats::kRecordBytes, 0);
+			Assert::IsTrue(VpUnit::SourceStats::ComputeRecord(half.data(), 4, 1, out.data(), out.size()));
+			VpUnit::SourceStats::Record r;
+			Assert::IsTrue(VpUnit::SourceStats::ReadRecord(out.data(), out.size(), &r));
+			Assert::AreEqual(4u, r.hist[250], L"the record bin law is unchanged: both codes in bin 250");
+			Assert::AreEqual(4u, r.pixelCount);
+			Assert::AreEqual(16032u, r.mean);
+			Assert::AreEqual(16016u, r.minCode);
+			Assert::AreEqual(16048u, r.maxCode);
+			// Targets: p01 (4 + 99) / 100 = 1, p50 (4 + 1) / 2 = 2, p99 (396 + 99) / 100 = 4. v1 gave 16032 (the bin centre) for all three.
+			Assert::AreEqual(16016u, r.p01);
+			Assert::AreEqual(16016u, r.p50);
+			Assert::AreEqual(16048u, r.p99);
+		}
+
+		// Gate cb-chk r1 MUST 1: the evidence rect keeps its v1 (ten-bit) rule. An 8 x 10 half plane of ten-bit-origin 2x2
+		// means (multiples of 16): rows 0-1 bar 4096 (code 64), rows 2-7 picture 32000 (code 500), rows 8-9 a lighter bar 5856
+		// (91.5). v1 rect threshold: bin centres 4128 and 32032, 4128 + 27904 / 16 = 5872, so the 5856 rows are NOT evidence.
+		// With exact p1 / p99 the threshold would be 4096 + 1744 = 5840 and those rows would count (y1 10).
+		TEST_METHOD(LaneStatsRectKeepsTheTenBitRule)
+		{
+			const uint32_t hw = 8, hh = 10;
+			std::vector<uint16_t> half(static_cast<size_t>(hw) * hh);
+			for (uint32_t y = 0; y < hh; ++y)
+				for (uint32_t x = 0; x < hw; ++x)
+					half[static_cast<size_t>(y) * hw + x] = static_cast<uint16_t>(y < 2u ? 4096u : (y < 8u ? 32000u : 5856u));
+			std::vector<uint8_t> out(VpUnit::SourceStats::kRecordBytes, 0);
+			Assert::IsTrue(VpUnit::SourceStats::ComputeRecord(half.data(), hw, hh, out.data(), out.size()));
+			VpUnit::SourceStats::Record r;
+			Assert::IsTrue(VpUnit::SourceStats::ReadRecord(out.data(), out.size(), &r));
+			Assert::AreEqual(1u, r.rectFound);
+			Assert::AreEqual(0u, r.rectX0);
+			Assert::AreEqual(8u, r.rectX1);
+			Assert::AreEqual(2u, r.rectY0);
+			Assert::AreEqual(8u, r.rectY1, L"the 5856 bar rows stay below the v1 threshold 5872");
+			// The published percentiles are exact (unit v2): targets 1, 40, 80.
+			Assert::AreEqual(4096u, r.p01);
+			Assert::AreEqual(32000u, r.p50);
+			Assert::AreEqual(32000u, r.p99);
+		}
+
+		// Exact percentiles always lie inside the samples' own range (v1's bin centre could exceed maxCode or undercut minCode).
+		TEST_METHOD(LaneStatsPercentilesLieWithinMinAndMax)
+		{
+			std::mt19937 rng(20261121);
+			for (int rep = 0; rep < 20; ++rep)
+			{
+				const uint32_t hw = 16 + static_cast<uint32_t>(rng() % 48), hh = 9 + static_cast<uint32_t>(rng() % 27);
+				const uint32_t base = static_cast<uint32_t>(rng() % 3000);
+				std::vector<uint16_t> half(static_cast<size_t>(hw) * hh);
+				for (uint16_t& s : half)
+					s = static_cast<uint16_t>((base + rng() % (1u + static_cast<uint32_t>(rep) * 50u)) << 4);   // 12-bit codes, lane words
+				std::vector<uint8_t> out(VpUnit::SourceStats::kRecordBytes, 0);
+				Assert::IsTrue(VpUnit::SourceStats::ComputeRecord(half.data(), hw, hh, out.data(), out.size()));
+				VpUnit::SourceStats::Record r;
+				Assert::IsTrue(VpUnit::SourceStats::ReadRecord(out.data(), out.size(), &r));
+				Assert::IsTrue(r.minCode <= r.p01 && r.p01 <= r.p50 && r.p50 <= r.p99 && r.p99 <= r.maxCode);
+				uint64_t total = 0;
+				for (uint32_t b = 0; b < VpUnit::SourceStats::kHistBins; ++b)
+					total += r.hist[b];
+				Assert::AreEqual(static_cast<uint64_t>(hw) * hh, total, L"the record bins total every sample");
+			}
 		}
 
 		TEST_METHOD(HistBin10MatchesTheVetoBinLawAndTheLaneShift)

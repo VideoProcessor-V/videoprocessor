@@ -342,6 +342,16 @@ class Synthetic(unittest.TestCase):
                                         "live matcher field (repair/deband/Other.cpp)"))                     # (c) other file
         self.assertFalse(self._view_tree(2, "kP3AnalysisField", "ViewIsActual", f, use, note))               # (d)
 
+    def test_d5_axis_fraction_shift_counts_like_the_literal(self):
+        # CHK-SHIFT-AXISFRAC: `>> kAxisFractionBits` (= 6) is the same producer decode as `>> 6`
+        vfa = M + "input/source_analysis/VpFrameAnalysis.cpp"
+        for line in ("v = plane[x] >> kAxisFractionBits;", "v = plane[x] >> Vpv::AnalysisDomain::kAxisFractionBits;",
+                     "v = plane[x] >> 6;"):
+            root = make_tree({vfa: line})
+            self.assertEqual([h["site"] for h in N1.scan(root) if h["site"] == "D5"], ["D5"], line)
+        root = make_tree({vfa: "v = plane[x] >> kAxisFractionBitsMax; w = plane[x] << kAxisFractionBits;"})
+        self.assertFalse([h for h in N1.scan(root) if h["site"] == "D5"])
+
     def test_bad_root_is_exit_2(self):
         self.assertEqual(N1.main(["--root", tempfile.mkdtemp()]), 2)
 

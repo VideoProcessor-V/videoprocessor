@@ -41,7 +41,10 @@ CHECKER_GLOBS = ["tools/check_*.py", "tools/run_compliance.py", "tools/complianc
 PY_TEST_RX = re.compile(r"^tools/(?:.+/)?test_[^/]+\.py$")
 PY_SELFTEST_RX = re.compile(r"\bassert\b|\bassert[A-Z]\w*\s*\(|\bselftest\b")
 BASELINE_GLOBS = ["tools/*baseline*.json", "docs/audit/*baseline*.json", "docs/audit/*budget*.json",
-                  "tools/*budget*.json", "docs/audit/waiver-ledger.json"]
+                  "tools/*budget*.json", "docs/audit/waiver-ledger.json",
+                  # HOOKGATE-CHECKER-HOLES (4): the hook approvals and the hook-site manifest admit Bill-file sites
+                  # exactly like a budget does, so adding to either needs a WAIVER trailer too
+                  "docs/audit/hook-approvals.json", "docs/audit/hook-sites.json"]
 # Ledger of commits whose waiver was gated but not written in the required trailer form (R14-108). A commit counts as
 # ledger-waived only if its sha is listed AND its gate_record file exists under the gate root (VP_GATE_ROOT or --gate-root).
 LEDGER_PATH = "docs/audit/waiver-ledger.json"

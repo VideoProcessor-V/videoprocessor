@@ -48,6 +48,15 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual(T.judge([F("tools/x-baseline.json", rem=["1"])], "m")[0], [])
         self.assertTrue(T.judge([F("tools/x-baseline.json", add=["2"], rem=["1"])], "m")[0])
 
+    def test_hook_approvals_and_manifest_are_baselines(self):
+        # HOOKGATE-CHECKER-HOLES (4): a new approval row or manifest site admits a Bill-file hook like a budget rise
+        for p in ("docs/audit/hook-approvals.json", "docs/audit/hook-sites.json"):
+            self.assertEqual(T.classify(p), "baseline", p)
+            self.assertTrue(T.judge([F(p, add=['"id": "HA-9"'])], "m")[0], p)
+            self.assertEqual(T.judge([F(p, add=['"id": "HA-9"'])], "m\n\nWAIVER-HA9: reason")[0], [], p)
+            self.assertEqual(T.judge([F(p, rem=['"id": "HA-1"'])], "m")[0], [], p)
+        self.assertEqual(T.classify("docs/audit/hook-notes.json"), "other")
+
     def test_allowlist_line_in_other_file(self):
         self.assertTrue(T.judge([F("src/a.cpp", add=["// ALLOW_SITES += 1"])], "m")[0])
         self.assertEqual(T.judge([F("src/a.cpp", add=["int x;"])], "m")[0], [])

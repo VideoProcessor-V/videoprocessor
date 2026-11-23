@@ -113,17 +113,23 @@ namespace VpFrameAnalysis
 		std::atomic<uint64_t> m_unread{ 0 };
 	};
 
-	// Sample().luma for [x0, x0 + count) of row y, in the sampler's domain: the shared plane, the
-	// 16-bit plane read in place, the row decoder, or the per-pixel sampler (in that order).
+	// Sample().luma for [x0, x0 + count) of row y, in the sampler's domain, as Q6 (the 10-bit analysis axis x 64,
+	// AnalysisAxis10.h; 2026-11-21 precision fix: nothing is floored to ten bits here). In this order:
+	//   the 16-bit plane formats (P010 / P210 / decoded DV): the lanes ARE Q6. A limited decoded-DV lane is read in place
+	//     (a 12-bit lane keeps its two fraction bits); P010 / P210 lanes are ten-bit containers, so their six padding bits
+	//     are masked off (0xFFC0) and never read as a fraction; a full-range plane maps through PlaneLuma, interpolated between the whole codes (exact at
+	//     every whole code, so a ten-bit-origin lane gives PlaneLuma(code) x 64, the value Sample() gives);
+	//   the shared plane, the row decoder, or the per-pixel sampler: 10-bit Sample() codes, carried exactly as code x 64.
 	class LumaRowReader
 	{
 	public:
 		explicit LumaRowReader(const AnalysisLumaSource& source) : m_source(source) {}
-		const uint16_t* Row(int y, int x0, int count);
+		const uint16_t* RowQ6(int y, int x0, int count);
 
 	private:
 		const AnalysisLumaSource& m_source;
 		std::vector<uint16_t> m_buffer;
+		std::vector<uint16_t> m_planeQ6;   // full-range plane: lane Q6 -> Sample()'s domain in Q6 (built on first use)
 	};
 
 	// ---- Reductions (CPU path and the tests' reference) ----
@@ -136,18 +142,21 @@ namespace VpFrameAnalysis
 	class Reducer
 	{
 	public:
-		// `studio` maps the sampler's codes to studio codes (StudioLumaMap).
+		// `studio` maps the sampler's codes to studio codes (StudioLumaMap); the reducer applies it on the Q6 axis,
+		// interpolated between whole codes (exact at every whole code).
 		Reducer(const FrameAnalysis::Rect& picture, const std::array<uint16_t, 1024>& studio);
-		// Row y's sampler codes for [picture.left, picture.right). Rows outside are ignored.
-		void AddRow(int y, const uint16_t* codes);
+		// Row y's sampler values as Q6 (LumaRowReader::RowQ6) for [picture.left, picture.right). Rows outside are ignored.
+		// Mean / APL, BTB / WTW / near-black / clipped shares and the grain variance use the exact Q6 value; the record's
+		// histogram and its integer minimum / percentiles / maximum are whole studio codes (the Store contract).
+		void AddRowQ6(int y, const uint16_t* q6);
 		Measured Finish();
 
 	private:
 		FrameAnalysis::Rect m_picture;
-		std::array<uint16_t, 1024> m_studio;
-		std::array<uint32_t, FrameAnalysis::kHistogramBins> m_histogram{};
+		std::vector<uint16_t> m_studioQ6;     // sampler Q6 -> studio Q6 (65536 entries)
+		std::vector<uint32_t> m_q6Histogram;  // studio Q6 counts (65536 entries)
 		uint64_t m_samples = 0;
-		uint64_t m_sum = 0;
+		uint64_t m_sumQ6 = 0;
 	};
 
 	// The whole picture in one call (tests, CPU fallback). False when the source cannot be read.

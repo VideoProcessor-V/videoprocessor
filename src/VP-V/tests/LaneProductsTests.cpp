@@ -346,8 +346,8 @@ namespace LaneProductsTestsNs
 				sum += rec.hist[i];
 			Assert::IsTrue(sum == 32u * 32u && rec.pixelCount == 1024u, L"histogram sums to the half pixels");
 			Assert::IsTrue(rec.mean == 40000u && rec.minCode == 40000u && rec.maxCode == 40000u, L"flat mean/min/max");
-			const uint32_t centre = ((40000u >> 6) << 6) | 32u;
-			Assert::IsTrue(rec.p01 == centre && rec.p50 == centre && rec.p99 == centre, L"flat percentiles");
+			// Unit v2 (2026-11-21 precision fix): the exact sample value. v1 gave the bin centre 40032, above maxCode 40000.
+			Assert::IsTrue(rec.p01 == 40000u && rec.p50 == 40000u && rec.p99 == 40000u, L"flat percentiles");
 			Assert::IsTrue(rec.grain == 0u, L"flat frame has no grain");
 			Assert::IsTrue(rec.rectFound == 0u && rec.rectX1 == 32u && rec.rectY1 == 32u, L"no evidence: whole plane");
 			for (size_t i = sizeof(SourceStatsRecord); i < a.size(); ++i)

@@ -15,7 +15,7 @@
 //
 // TWO decode laws, because the two legacy 12 -> 10 reductions differ and a 10-bit consumer must not move:
 //   Shift  (YCbCr planes, the DV tunnel tap): code << (16 - bits). 12-bit I is `code12 << 4` = the lane value the unpack
-//          returns (Intensity() >> 0), so the legacy `>> 6` ten-bit tap is Floor10FromQ6 of it, exactly.
+//          returns (Intensity() >> 0); the legacy `>> 6` ten-bit tap is its whole axis code (Q6 / 64, floor).
 //   Scale  (12-bit RGB, R12B / R12L): code * 1023 / codeMaximum with Q6 resolution; the legacy ten-bit code
 //          (CDeckLinkRGBToP010 / AnalysisLumaSource Round12To10) is Round12To10 below, which this header owns a twin of.
 // Both are exact for codeMaximum 1023 (Q6 = code * 64).
@@ -68,15 +68,12 @@ namespace Vpv { namespace AnalysisDomain
 
 	inline float Q6ToAxis10(uint32_t q6) { return static_cast<float>(q6) * (1.0f / 64.0f); }
 
-	// The whole axis code of a Q6 sample (the legacy ten-bit decision value): the `>> 6` every private decode used.
-	inline uint32_t Floor10FromQ6(uint32_t q6) { return q6 >> kAxisFractionBits; }
-
-	// Histogram bin of a Q6 sample (one bin per axis code, clamped) and the Q6 centre of a bin (P4 percentiles).
-	inline uint32_t HistBinFromQ6(uint32_t q6)
-	{
-		const uint32_t bin = q6 >> kAxisFractionBits;
-		return bin < kAxisBins ? bin : kAxisBins - 1u;
-	}
+	// 2026-11-21 precision fix (check_precision CHK-SHIFT-AXISFRAC): the unit has no Q6 -> ten-bit floor any more.
+	// Floor10FromQ6 and HistBinFromQ6 were removed; their consumers keep the fraction:
+	//  - VpFrameAnalysis reads Q6 rows (LumaRowReader::RowQ6) and reduces on the Q6 axis;
+	//  - SourceStats (P4) keeps a full-resolution Q6 histogram, and its percentiles are exact Q6 values.
+	// The Q6 centre of a whole-code bin (a representative value of a 1024-bin record bin): the P4 evidence-rect rule's
+	// p1 / p99 (SourceStats RectPercentile, the v1 rect law kept bit for bit).
 	inline uint32_t BinCenterQ6(uint32_t bin) { return (bin << kAxisFractionBits) | (1u << (kAxisFractionBits - 1)); }
 
 	// The legacy integer 12 -> 10 reduction of 12-bit RGB (Bill's Round12To10, AnalysisLumaSource.cpp; Original keeps

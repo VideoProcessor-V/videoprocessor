@@ -345,6 +345,25 @@ Chain tests:
   sources reach the plane through Sample()'s 10-bit law exactly as before; the 12-bit packed-DV view (`SourceViewOf12`, msbShift 4)
   is untouched; nothing is narrowed. Cost: none added (the same loop, moved; header-inline).
 - The matcher L1/L2 pyramid is a VARIANT of P1 (kP1HalfLuma GPU form, axes code unit + scale), not a new product: one product, one owner, the matcher a reader (refs/129 L-B4; COORDINATOR 2026-11-15 12:56 EST, `refs/owner-decisions-2026-11-07.md:823`: prerequisites "matcher L1/L2 pyramid product L-B4" scheduled ahead of C8-10; OWNER 2026-11-15 13:17 EST, same file :826: L-B4 motion-input remainder a MUST-HAVE this reset). Its R16F storage in 8-bit codes is the owner-made matcher precision variant LEAD 8 allowed (Sat 2026-11-14 05:16 EST, same file :670 (d): "R16F 8-bit codes only as an owner-made precision variant for the matcher if bit-identity needs it"): analysis data, never pixels; the canonical P1 GPU forms stay R16 unorm / R32F (12-bit safe, :668). The level texts are MOVED from the matcher byte-identical (BBP-B B1), so the variant reproduces today's matcher planes; the fade-corrected B stays the matcher's named exception (an edit-for-matching derivative of B). Plan: `lead18/coreplan-B-prereq-P2global-pyramid.md` section (b), 2026-11-15 18:22 UTC.
+- Precision fix (2026-11-21 13:xx UTC, A20-CB fix lane; coordinator directive "fix in source, do not baseline"; check_precision
+  CHK-SHIFT-AXISFRAC hits AnalysisAxis10.h:72/:77): the unit has no Q6 -> ten-bit floor any more (`Floor10FromQ6` and
+  `HistBinFromQ6` were removed).
+  - `VpFrameAnalysis` reads Q6 rows (`LumaRowReader::RowQ6`): 16-bit plane lanes in place, a full-range plane through `PlaneLuma`
+    interpolated between whole codes, and ten-bit Sample() codes as code x 64. The Reducer applies the studio map on the Q6 axis.
+    Mean / APL, the BTB / WTW / near-black / clipped shares use the exact value.
+  - The Store's histogram and its integer min / percentiles / max stay whole studio codes. That is the core `FrameAnalysis::LumaStats`
+    contract; widening it is a core interface change and was not made here.
+  - `SourceStats` (P4, unit v2) keeps a full-resolution Q6 histogram: the record percentiles are exact Q6 values, and the 1024
+    record bins are their totals.
+  - Ten-bit-origin input gives bit-identical FrameAnalysis results, because every scale step is a power of two. P4 percentiles
+    move by at most 32 Q6 (half a code) for every source.
+  - Cost (estimate, not measured): two 65536-entry tables and a 256 KB histogram per reduction (about 0.2 ms CPU per frame on the
+    worker thread), and a 256 KB histogram per P4 accumulator.
+  - Gate r1 follow-up (2026-11-21, review-cb-chk-r1.md):
+    - The P4 evidence rect keeps its v1 rule bit for bit for every input (MUST 1). Its p1 / p99 are the centres of the record
+      bins (`RectPercentile`). "Exact p1 + 32" would not reproduce v1, because half-plane values are 2x2 means, i.e. multiples of 16.
+    - P010 / P210 lanes are ten-bit containers. Their six low padding bits are masked off (0xFFC0), so a producer that leaves junk
+      there cannot move a FrameAnalysis value (SHOULD 1). Only the decoded DV plane carries 12-bit fraction bits.
 
 ## Known issues / open items
 

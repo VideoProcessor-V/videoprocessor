@@ -92,7 +92,7 @@ namespace DvTunnelTapLaw
 	}
 
 	// S-2a: the tap on the unit's analysis axis (Q6 = 10-bit axis * 64): the 12-bit tap carries two fraction bits, and
-	// Floor10FromQ6 of it is the legacy ten-bit value. Same number as Tap16 by the shared shift law (pinned by the tests).
+	// its whole axis code (Q6 / 64, floor) is the legacy ten-bit value. Same number as Tap16 by the shared shift law (pinned by the tests).
 	inline uint32_t TapAxisQ6(uint16_t tap12)
 	{
 		return Vpv::AnalysisDomain::AxisQ6(tap12, Vpv::AnalysisDomain::CodeMaximum(kBits));
