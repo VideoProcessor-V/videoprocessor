@@ -104,8 +104,8 @@ feat/dv-l8 (merge 1) put VP logic into Bill's `CR210DolbyVisionTunnelFormatter.c
 L10 parse calls, the bounded DM hold (`DvMetadataHold::Tracker`, the static / black transitions
 and their log lines) and a VP-V include in his header. They move into
 `src/VP-V/modules/input/signal/DvTunnelMetadataExtension.h` behind
-`video_frame_formatter/DolbyVisionMetadataExtension.h` (committed; UPSTREAMABLE, no VP-V
-dependency; no extension = his formatter's behaviour).
+`src/VP-V/modules/input/signal/DolbyVisionMetadataExtension.h` (moved with
+`VpvDolbyVisionTunnelFormatter` under OQ1(a); no extension = the formatter's base behaviour).
 
 Two patches, in this order:
 
