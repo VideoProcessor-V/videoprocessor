@@ -126,7 +126,7 @@ if (-not $vstest) { throw "vstest.console.exe not found" }
 $trx = Join-Path $OutDir "chain-gate.trx"
 Remove-Item $trx -ErrorAction SilentlyContinue
 $saved = @{}
-foreach ($k in "VP_TEST_GPU", "VP_TEST_ADAPTER", "VP_TEST_REQUIRE_GPU", "VP_TEST_REQUIRE_HARDWARE", "VP_TEST_HARNESS_ONSCREEN", "VP_TEST_HARNESS_FULLSCREEN", "VP_DELAY_GATE_STRICT", "VP_TEST_BASELINE_RENDERER_DLL", "VP_TEST_FILTER_CLIP", "VP_TEST_REQUIRE_FOOTAGE", "VP_TEST_REQUIRE_CORPUS", "VP_TEST_REQUIRE_BENCH", "VP_TEST_BENCH") {
+foreach ($k in "VP_TEST_GPU", "VP_TEST_ADAPTER", "VP_TEST_REQUIRE_GPU", "VP_TEST_REQUIRE_HARDWARE", "VP_TEST_HARNESS_ONSCREEN", "VP_TEST_HARNESS_FULLSCREEN", "VP_DELAY_GATE_STRICT", "VP_TEST_BASELINE_RENDERER_DLL", "VP_TEST_FILTER_CLIP", "VP_TEST_REQUIRE_FOOTAGE", "VP_TEST_REQUIRE_CORPUS", "VP_TEST_REQUIRE_BENCH", "VP_TEST_BENCH", "VP_MV_BENCH_ONDEMAND_FRAMES", "VP_TEST_LED_CORRELATION") {
     $saved[$k] = [Environment]::GetEnvironmentVariable($k)
 }
 # WARNING when the primary display is not on the render adapter: timing tests are then invalid (2026-11-01:
@@ -162,6 +162,11 @@ foreach ($job in $dedicatedJobs) {
         [Environment]::SetEnvironmentVariable($kv[0], $kv[1])
     }
 }
+# TQ-X2 dedicated lane defaults (saved/restored above; never override caller-supplied env):
+# - Bench: OnDemandServedShareAndStallPerMode requires VP_MV_BENCH_ONDEMAND_FRAMES > 0 (16 frames = 2^4 sample window).
+# - Footage: enable LedScriptCorrelationTests when VP_TEST_REAL_FOOTAGE is supplied.
+if ($Bench -and -not $env:VP_MV_BENCH_ONDEMAND_FRAMES) { $env:VP_MV_BENCH_ONDEMAND_FRAMES = "16" }
+if ($Footage -and $env:VP_TEST_REAL_FOOTAGE -and -not $env:VP_TEST_LED_CORRELATION) { $env:VP_TEST_LED_CORRELATION = "1" }
 if ($OnScreen) { $env:VP_TEST_HARNESS_ONSCREEN = "1" }
 if ($Fullscreen) { $env:VP_TEST_HARNESS_FULLSCREEN = $Fullscreen }
 try {

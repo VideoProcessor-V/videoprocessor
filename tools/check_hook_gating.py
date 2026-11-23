@@ -1312,10 +1312,19 @@ def _expiry_ids(expiry):
     return [expiry] if isinstance(expiry, str) else list(expiry)
 
 
+# CC-HOOKGATING-BETATESTS: Bill's BetaTests binary hosts gated // VPV-HOOK sites (BetaParametersTests.cpp);
+# include it alongside production files in site_checks and untagged_vp_references (Original-pathway guarding stays production-only).
+BETA_TESTS_PREFIX = "src/VideoProcessor-BetaTests/"
+
+
+def _site_gated(row):
+    return row.get("bucket") == "production" or (row.get("file") or "").startswith(BETA_TESTS_PREFIX)
+
+
 def site_checks(tree, per_file, root=None, rev=None, no_git=True):
     """Manifest / budget / approvals / expiry: returns a dict with the counts and the failures."""
     sites = [s for r in per_file for s in r.get("sites", [])]
-    prod = {r["file"] for r in per_file if r["bucket"] == "production"}
+    prod = {r["file"] for r in per_file if _site_gated(r)}
     manifest = load_json(tree, MANIFEST_PATH)
     budget = load_json(tree, BUDGET_PATH)
     approvals = load_json(tree, APPROVALS_PATH) or {"approvals": []}
@@ -1616,10 +1625,10 @@ def norm_line(line):
 
 
 def untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_used=None):
-    """Added lines (since_added: file -> line numbers) of Bill-owned PRODUCTION files that are not hook lines and
+    """Added lines (since_added: file -> line numbers) of Bill-owned PRODUCTION (and BetaTests) files that are not hook lines and
     name a VP-V symbol (vp_symbols minus bill_identifiers). Returns [{file, line, text, symbols}]."""
     wanted = [(r["file"], since_added.get(r["file"])) for r in per_file
-              if r.get("bucket") == "production" and not r.get("hook_file") and since_added.get(r["file"])]
+              if _site_gated(r) and not r.get("hook_file") and since_added.get(r["file"])]
     if not wanted:
         return []
     syms = vp_symbols(tree)

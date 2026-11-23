@@ -49,6 +49,9 @@ BASELINE_GLOBS = ["tools/*baseline*.json", "docs/audit/*baseline*.json", "docs/a
 # ledger-waived only if its sha is listed AND its gate_record file exists under the gate root (VP_GATE_ROOT or --gate-root).
 LEDGER_PATH = "docs/audit/waiver-ledger.json"
 DEFAULT_GATE_ROOT = "D:/codex/vp-handover"
+# GATE-BILLFILE-CHECK: Bill baseline ref (upstream commit outside src/VP-V/).
+DEFAULT_BILL_REF = "a591ad3b5"
+BILL_TEST_PREFIXES = ("src/VideoProcessor-Test/", "src/VideoProcessor-ConfigTests/", "src/VideoProcessor-BetaTests/")
 ALLOW_RX = re.compile(r"ALLOW_SITES|CoverageAllowList|known_false_positive|\bALLOW\s*=|\"allow\w*\"\s*:")
 
 
@@ -79,17 +82,36 @@ def has_waiver(message):
     return bool(WAIVER_RX.search(message))
 
 
-def judge(files, message):
+def is_guarded_bill_file(path, status, bill_files):
+    """GATE-BILLFILE-CHECK: True when `path` is a Bill-owned file (at a591ad3b5 outside src/VP-V/) whose edit
+    requires an explicit WAIVER trailer here: any non-src Bill file (e.g. tools/, docs/, root scripts),
+    any Bill test file (never exempted by 'test-adding only'), or any deleted Bill file."""
+    if not bill_files or path not in bill_files:
+        return False
+    if status.startswith("D"):
+        return True
+    if not path.startswith("src/"):
+        return True
+    if classify(path) == "test" or path.startswith(BILL_TEST_PREFIXES):
+        return True
+    return False
+
+
+def judge(files, message, bill_files=None):
     """files: [{path, status, added:[lines], removed:[lines]}]. Returns (violations, notes, waived)."""
     viol, notes = [], []
     for f in files:
         cls = classify(f["path"])
         add, rem = f["added"], f["removed"]
+        bill_hit = is_guarded_bill_file(f["path"], f["status"], bill_files)
+        if bill_hit:
+            viol.append(("bill_file", f["path"], "Bill-owned file modified/deleted outside src/VP-V/"))
         if cls == "test":
             if f["status"].startswith("D"):
                 viol.append(("test", f["path"], "deleted"))
             elif f["status"].startswith("A") or (add and not rem):
-                notes.append("test-adding only: " + f["path"])
+                if not bill_hit:
+                    notes.append("test-adding only: " + f["path"])
             elif add or rem:
                 viol.append(("test", f["path"], "%d line(s) removed/edited" % len(rem)))
         elif cls == "checker":
@@ -253,9 +275,24 @@ def gate_check(gate_root, record, sha):
     return False, "gate file has no GRANT verdict line naming %s" % key
 
 
-def scan(root, rng, ledger=None, gate_root=None):
+def load_bill_tree(root, bill_ref=DEFAULT_BILL_REF, explicit=False):
+    """Set of paths present at `bill_ref` outside src/VP-V/. When `explicit` is False (default ref on a synthetic
+    test repository that lacks upstream history), returns an empty set if the ref does not exist."""
+    if not bill_ref:
+        return set()
+    try:
+        raw = git(root, "ls-tree", "-r", "--name-only", bill_ref)
+    except RuntimeError:
+        if explicit:
+            raise
+        return set()
+    return {p for p in raw.splitlines() if p and not p.startswith("src/VP-V/")}
+
+
+def scan(root, rng, ledger=None, gate_root=None, bill_ref=DEFAULT_BILL_REF, bill_ref_explicit=False):
     ledger = ledger or []
     gate_root = gate_root or os.environ.get("VP_GATE_ROOT") or DEFAULT_GATE_ROOT
+    bill_tree = load_bill_tree(root, bill_ref, explicit=bill_ref_explicit)
     results = []
     shas = git(root, "rev-list", "--no-merges", "--reverse", rng).split()
     msgs = {sha: git(root, "show", "-s", "--format=%B", sha) for sha in shas}
@@ -264,7 +301,9 @@ def scan(root, rng, ledger=None, gate_root=None):
         msg = msgs[sha]
         if any(sha.startswith(w) for w in late) and not has_waiver(msg):
             msg += "\nWAIVER-LATE: waived by a later 'Waives:' commit"
-        viol, notes, waived = judge(commit_files(root, sha), msg)
+        files = commit_files(root, sha)
+        bill_touched = [{"status": f["status"], "path": f["path"]} for f in files if f["path"] in bill_tree]
+        viol, notes, waived = judge(files, msg, bill_files=bill_tree)
         subject = msg.strip().splitlines()[0][:80] if msg.strip() else ""
         ledger_waived = False
         if viol:
@@ -277,7 +316,7 @@ def scan(root, rng, ledger=None, gate_root=None):
                 else:
                     notes.append("ledger entry %s has MISSING gate record %r (%s): still flagged" % (ent.get("waiver_id", "?"), ent.get("gate_record"), why))
         results.append({"sha": sha[:9], "subject": subject, "violations": viol, "notes": notes, "waived": waived,
-                        "ledger_waived": ledger_waived})
+                        "ledger_waived": ledger_waived, "bill_files": bill_touched})
     return results
 
 
@@ -334,6 +373,19 @@ def selftest_failures():
     check("python selftest weakened is flagged", [v[0] for v in judge(st_weaken, "m")[0]] == ["selftest"])
     check("python selftest weakened is waived by WAIVER", judge(st_weaken, "m\n\nWAIVER-T3: ok\n")[0] == [] and judge(st_weaken, "m\n\nWAIVER-T3: ok\n")[2])
     check("pairwise.py edit is flagged as checker", [v[0] for v in judge([f("tools/vpv_tests/pairwise.py", added=["x = 1"])], "m")[0]] == ["checker"])
+    # GATE-BILLFILE-CHECK selftest cases
+    bill_set = {"tools/test_libplacebo_variants.py", "src/VideoProcessor-BetaTests/BetaParametersTests.cpp",
+                "src/VideoProcessor-Lib/Foo.cpp"}
+    check("bill tools test add-only is flagged as bill_file",
+          [v[0] for v in judge([f("tools/test_libplacebo_variants.py", added=["# hi"])], "m", bill_files=bill_set)[0]] == ["bill_file"])
+    check("bill BetaTests add-only is flagged as bill_file",
+          [v[0] for v in judge([f("src/VideoProcessor-BetaTests/BetaParametersTests.cpp", added=["// x"])], "m", bill_files=bill_set)[0]] == ["bill_file"])
+    check("bill src deletion is flagged as bill_file",
+          [v[0] for v in judge([f("src/VideoProcessor-Lib/Foo.cpp", status="D")], "m", bill_files=bill_set)[0]] == ["bill_file"])
+    check("vpv test file absent from bill_set is not flagged as bill_file",
+          judge([f("tools/test_vpv_libplacebo_variants.py", added=["# hi"])], "m", bill_files=bill_set)[0] == [])
+    check("bill_file violation is waived by WAIVER trailer",
+          judge([f("tools/test_libplacebo_variants.py", added=["# hi"])], "m\n\nWAIVER-BILLFILE-1: ok\n", bill_files=bill_set)[0] == [])
     viol, notes, waived = judge([f("tools/check_x.py", added=["a"])], "t\n\nWAIVER-T1: ok\n")
     check("a WAIVER trailer waives and says so", viol == [] and waived and any("WAIVER present" in n for n in notes))
     check("a waiver on a clean commit is not 'waived'", judge([f("src/VP-V/core/X.h", added=["a"])], "t\n\nWAIVER-T1: ok\n")[2] is False)
@@ -396,6 +448,7 @@ def main(argv=None):
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--gate-root", default=None, help="folder that holds the ledger's gate_record files (default VP_GATE_ROOT or %s)" % DEFAULT_GATE_ROOT)
     ap.add_argument("--ledger", default=None, help="ledger file to use instead of <root>/%s" % LEDGER_PATH)
+    ap.add_argument("--bill-ref", default=None, help="Bill baseline ref for GATE-BILLFILE-CHECK (default %s; empty disables)" % DEFAULT_BILL_REF)
     a = ap.parse_args(argv)
     if a.selftest:
         failed = selftest_failures()
@@ -409,17 +462,25 @@ def main(argv=None):
             if a.strict:
                 raise RuntimeError("--ledger is refused under --strict: the ledger is read from the range tip commit")
             print("ledger: %s (NOT the committed ledger)" % a.ledger)
-        res = scan(a.root, rng, load_ledger(a.root, tip_of(rng), a.ledger), a.gate_root)
+        bill_ref = DEFAULT_BILL_REF if a.bill_ref is None else a.bill_ref
+        res = scan(a.root, rng, load_ledger(a.root, tip_of(rng), a.ledger), a.gate_root,
+                   bill_ref=bill_ref, bill_ref_explicit=a.bill_ref is not None)
     except RuntimeError as e:
         print("check_test_tamper: error: %s" % e)
         return 2
     bad = [r for r in res if r["violations"]]
+    bill_inventory = [{"sha": r["sha"], "status": bf["status"], "path": bf["path"]}
+                      for r in res for bf in r.get("bill_files", [])]
     if a.json:
-        print(json.dumps({"range": rng, "commits": len(res), "flagged": len(bad), "results": res}, indent=1))
+        print(json.dumps({"range": rng, "commits": len(res), "flagged": len(bad),
+                          "bill_files": bill_inventory, "results": res}, indent=1))
     else:
         nled = sum(1 for r in res if r["ledger_waived"])
         print("test tamper: range %s, %d commit(s), %d flagged, %d waived (%d by trailer), ledger-waived %d" % (
             rng, len(res), len(bad), sum(1 for r in res if r["waived"]), sum(1 for r in res if r["waived"] and not r["ledger_waived"]), nled))
+        print("bill-files in range: %d" % len(bill_inventory))
+        for bf in bill_inventory:
+            print("  bill-file %s %s %s" % (bf["sha"], bf["status"], bf["path"]))
         for r in res:
             for n in r["notes"]:
                 print("  note %s %s" % (r["sha"], n))

@@ -35,7 +35,7 @@ def clause(entry, negate):
     if kind in ('class', 'classPrefix'):
         return f'FullyQualifiedName{bang}~{value}'
     if kind == 'method':
-        return f'Name{bang}~{value.split("::")[-1]}'
+        return f'Name{bang}={value.split("::")[-1]}'
     return f'Name{bang}~{value}'
 
 
@@ -64,7 +64,7 @@ def clauses(manifest, negate, cats=None):
                 out.append(c)
     bang = '!' if negate else ''
     for n in attribute_names(manifest, cats):
-        out.append(f'Name{bang}~{n}')
+        out.append(f'Name{bang}={n}')
     return out
 
 
