@@ -218,6 +218,22 @@ bool ConfigEditorWindow::foldLegacyInputPolicy()
 			migratedLegacyInputPolicy = true;
 		}
 	}
+	// ADR-0023 global [vpv] keys stored in legacy [vprenderer] must migrate to [vpv]
+	// BEFORE createProfilePage("vprenderer") renames [vprenderer] -> [vprenderer.profile_1].
+	// Preserve [vpv]-over-[vprenderer] precedence and leave non-global keys untouched.
+	for (const auto& setting : document_->SectionSettings("vprenderer"))
+	{
+		const std::string normalizedKey = ConfigFile::NormalizeName(setting.first);
+		if (!RendererProfileConfig::ProfileSchemaHooks::IsKnownGlobalKey("vpv", normalizedKey))
+			continue;
+		if (!setting.second.empty() && document_->Get("vpv", normalizedKey.c_str()).empty())
+		{
+			document_->AddSection("vpv");
+			document_->SetKnown("vpv", normalizedKey.c_str(), setting.second);
+		}
+		document_->RemoveKnown("vprenderer", normalizedKey.c_str());
+		migratedLegacyInputPolicy = true;
+	}
 	// Removing an empty header is a visible migration (hunt 2, L9): the
 	// presence of [vprenderer] alone selects the [general] validation.
 	for (const char* emptied : { "vprenderer.input", "vprenderer" })
