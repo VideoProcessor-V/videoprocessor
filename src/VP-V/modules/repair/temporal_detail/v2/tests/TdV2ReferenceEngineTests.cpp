@@ -15,7 +15,8 @@
 //   8. Hard cell-boundary isolation (Overlay, local focusChange, DynamicTexture): 0.000 bleed within 1-8 px (with negative control)
 //   9. Transform-identified 8x8 DCT on non-multiple-of-8 active frame: STRICT/CELL + bounded remainder strips + genuine 2-iter POCS
 //  10. Adversarial OOB / div-by-zero / non-finite / silent-fallback traps + resolution-change carry reset
-//  11. Scene cut and non-finite receivedY/cleanY reset cleanly with zero ghosting. CPU only.
+//  11. Scene cut and non-finite receivedY/cleanY reset cleanly with zero ghosting
+//  12. Subtle non-rigid face / eyelid-lip 1-2 px micro-deformation inside Still 16x16 cell preserved without wax smearing. CPU only.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -1711,6 +1712,170 @@ namespace Tests
 				Assert::IsTrue(cleanNanRes.nonFiniteCells > 0);
 				Assert::IsFalse(eng.HasCarry(), L"Non-finite cleanY must reset carry cleanly");
 				Assert::IsTrue(regCleanNan.IsActive(StandInKind::NonFiniteClosure));
+			}
+
+			// =========================================================================
+			// 12. Subtle Non-Rigid Face / Micro-Deformation Protection (Owner Request):
+			//     1-2 px eyelid/lip shift inside a Still (vx=vy=0) 16x16 portrait skin
+			//     cell is preserved with zero wax/plastic smearing across transform-
+			//     unknown CELL and 8x8 STRICT/CELL, while surrounding still skin noise
+			//     is genuinely repaired and naive temporal averaging severely smears it.
+			// =========================================================================
+			TEST_METHOD(SubtleFaceMicroMotionPreservedWithoutWaxSmearing)
+			{
+				const int w = 64;
+				const int h = 64;
+				const int cellPx = 16;
+				const int cw = w / cellPx;
+				const int ch = h / cellPx;
+
+				// Build a realistic 10-bit portrait skin patch with cheek shading + subtle natural skin texture,
+				// plus a crisp eyelid/lip crease + catchlight highlight localized inside Still cell (2, 2) [32..48)^2.
+				// In prevPeak & nextPeak the crease sits at y0 = 39.0; in the current frame it shifts by +2.0 px to y0 = 41.0
+				// (simulating subtle blinking / speaking non-rigid micro-motion where 16x16 block ME reports vx=vy=0).
+				auto renderPortrait = [&](double eyelidShiftY) -> TdV2Plane
+				{
+					TdV2Plane p(w, h, 0.0);
+					for (int y = 0; y < h; ++y)
+					{
+						for (int x = 0; x < w; ++x)
+						{
+							const double dx = static_cast<double>(x) - 32.0;
+							const double dy = static_cast<double>(y) - 32.0;
+							// Smooth skin shading + subtle organic skin-pore micro-texture.
+							const double shading = 470.0 + 42.0 * std::cos(2.0 * kPi * dx / 96.0) * std::cos(2.0 * kPi * dy / 88.0);
+							const double skinTex = 9.0 * std::sin(2.0 * kPi * (x / 7.3 + y / 9.1) + 0.3)
+							                     + 7.0 * std::cos(2.0 * kPi * (x / 5.1 - y / 6.7) + 1.4);
+							double val = shading + skinTex;
+
+							// Horizontal eyelid/lip crease + subtle upper highlight strictly inside x in [34, 46), y in [34, 46).
+							if (x >= 34 && x < 46)
+							{
+								const double cx = static_cast<double>(x) - 39.5;
+								const double arch = 0.04 * cx * cx; // gentle natural eyelid/lip curvature
+								const double centerY = 39.0 + eyelidShiftY + arch;
+								const double distCrease = static_cast<double>(y) - centerY;
+								const double distHighlight = static_cast<double>(y) - (centerY - 1.6);
+								const double horizTaper = std::exp(-0.5 * (cx / 4.2) * (cx / 4.2));
+								val -= 175.0 * horizTaper * std::exp(-0.5 * (distCrease / 0.75) * (distCrease / 0.75));
+								val +=  65.0 * horizTaper * std::exp(-0.5 * (distHighlight / 0.75) * (distHighlight / 0.75));
+							}
+							p.at(x, y) = val;
+						}
+					}
+					return p;
+				};
+
+				const TdV2Plane refMaster = renderPortrait(0.0);
+				const TdV2Plane curMaster = renderPortrait(2.0); // 2-px non-rigid eyelid/lip shift!
+
+				// Independent noisy coded observations (non-oracle: cur has valley coding noise, peaks have light noise).
+				const TdV2Plane curReceived = AddCodingError(curMaster, 7.0, 1201u, 0.15);
+				const TdV2Plane prevPeak = AddCodingError(refMaster, 1.2, 1202u, 0.0);
+				const TdV2Plane nextPeak = AddCodingError(refMaster, 1.2, 1203u, 0.0);
+
+				// Block motion estimator sees a still head: vx = vy = 0, RegionMotionClass::Still on ALL 16x16 cells!
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				// Region masks:
+				//  - microRect: shifted eyelid/lip crease inside Still cell (2, 2)
+				//  - skinRect: surrounding un-shifted textured skin region (cells (0,0), (1,0), (0,1), (1,1))
+				const ActiveRect microRect{ 34, 37, 46, 45 };
+				const ActiveRect skinRect{ 2, 2, 30, 30 };
+
+				// Local vertical edge-contrast energy along the shifted eyelid/lip crease (measures sharpness vs wax smearing).
+				auto verticalEdgeContrast = [](const TdV2Plane& p, const ActiveRect& r) -> double
+				{
+					double sumAbsGrad = 0.0;
+					size_t n = 0;
+					for (int y = r.y0; y < r.y1 - 1; ++y)
+					{
+						for (int x = r.x0; x < r.x1; ++x)
+						{
+							sumAbsGrad += std::fabs(p.at(x, y + 1) - p.at(x, y));
+							++n;
+						}
+					}
+					return n > 0 ? (sumAbsGrad / static_cast<double>(n)) : 0.0;
+				};
+
+				const double gtMicroContrast = verticalEdgeContrast(curMaster, microRect);
+				Assert::IsTrue(gtMicroContrast > 25.0, L"Synthetic eyelid/lip crease must have strong ground-truth edge contrast");
+
+				const double curSkinRmse = std::sqrt(PlaneMse(curReceived, curMaster, skinRect));
+				const double curMicroRmse = std::sqrt(PlaneMse(curReceived, curMaster, microRect));
+
+				// ---- MANDATORY IN-TEST NEGATIVE CONTROL (Rule 3): Unprotected temporal average (cur + prev + next) / 3
+				//      on the EXACT SAME still-face input severely smears & ghosts the shifted 2-px eyelid/lip! ----
+				TdV2Plane naiveAvg(w, h, 0.0);
+				for (size_t i = 0; i < naiveAvg.v.size(); ++i)
+					naiveAvg.v[i] = (curReceived.v[i] + prevPeak.v[i] + nextPeak.v[i]) / 3.0;
+
+				const double naiveMicroRmse = std::sqrt(PlaneMse(naiveAvg, curMaster, microRect));
+				const double naiveContrastRatio = verticalEdgeContrast(naiveAvg, microRect) / gtMicroContrast;
+				Assert::IsTrue(naiveMicroRmse > 25.0,
+					L"Negative control failed: unprotected temporal average must severely smear shifted eyelid/lip (RMSE > 25)");
+				Assert::IsTrue(naiveContrastRatio < 0.60,
+					L"Negative control failed: unprotected temporal average must lose >40% of shifted eyelid/lip edge contrast");
+
+				// ---- Run TD v2 across ALL THREE quantization-constrained paths on the EXACT SAME input ----
+				struct FaceModeCase
+				{
+					bool transform8x8;
+					ResidualMode resMode;
+					const wchar_t* label;
+				};
+				const FaceModeCase modeCases[3] = {
+					{ false, ResidualMode::Cell,   L"TransformUnknown-CELL" },
+					{ true,  ResidualMode::Strict, L"8x8DCT-STRICT" },
+					{ true,  ResidualMode::Cell,   L"8x8DCT-CELL" }
+				};
+
+				for (const FaceModeCase& mc : modeCases)
+				{
+					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					cfg.residualMode = mc.resMode;
+					cfg.cellProjIterations = 2;
+					TdV2ReferenceEngine eng(cfg);
+					StandInRegistry reg;
+
+					FrameProcessInput in;
+					in.seq = 120;
+					in.receivedY = curReceived;
+					in.hasCleanSplit = true;
+					in.cleanY = curReceived;
+					in.activeRect = ActiveRect::Full(w, h);
+					in.prevPeak = { &prevPeak, &stillMf, false };
+					in.nextPeak = { &nextPeak, &stillMf, false };
+					in.hasStepPrior = true;
+					in.estimatedStepDelta = 12.0;
+					in.deadZonePhi = kDeadZonePhiInter;
+					in.zeroCoeffFraction = 0.35;
+					in.transformIdentified8x8 = mc.transform8x8;
+
+					const FrameProcessResult res = eng.ProcessFrame(in, &reg);
+					AssertAllFinite(res.outputY, L"Face micro-motion outputY must be 100% finite");
+
+					const double tdMicroRmse = std::sqrt(PlaneMse(res.outputY, curMaster, microRect));
+					const double tdSkinRmse = std::sqrt(PlaneMse(res.outputY, curMaster, skinRect));
+					const double tdContrastRatio = verticalEdgeContrast(res.outputY, microRect) / gtMicroContrast;
+
+					// 1. Non-vacuity: TD v2 genuinely cleans coding noise on the surrounding still skin region!
+					Assert::IsTrue(tdSkinRmse < curSkinRmse * 0.88,
+						(std::wstring(mc.label) + L": TD v2 must genuinely reduce still-skin coding noise (non-vacuous)").c_str());
+
+					// 2. Micro-deformation preservation: NO wax/plastic smearing on the shifted 2-px eyelid/lip!
+					//    - RMSE stays dramatically below naive temporal smear (< 0.45x naive RMSE) and near received noise floor,
+					//    - Local vertical edge contrast retains >= 85% of independent current ground truth (vs < 60% naive).
+					Assert::IsTrue(tdMicroRmse < naiveMicroRmse * 0.45,
+						(std::wstring(mc.label) + L": TD v2 micro-motion RMSE must be < 0.45x naive temporal smear").c_str());
+					Assert::IsTrue(tdMicroRmse <= curMicroRmse + 4.0,
+						(std::wstring(mc.label) + L": TD v2 must not introduce heavy smear beyond received noise on shifted eyelid/lip").c_str());
+					Assert::IsTrue(tdContrastRatio >= 0.85,
+						(std::wstring(mc.label) + L": TD v2 must preserve >= 85% of shifted eyelid/lip edge contrast (zero wax smearing)").c_str());
+					Assert::IsTrue(tdContrastRatio > naiveContrastRatio + 0.25,
+						(std::wstring(mc.label) + L": TD v2 edge contrast must decisively beat unprotected temporal average").c_str());
+				}
 			}
 		};
 	}
