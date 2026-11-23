@@ -721,4 +721,37 @@ namespace VpFrameAnalysis
 			m_processed.fetch_add(1, std::memory_order_relaxed);
 		}
 	}
+
+	SourceResolutionMonitor::CodedLumaSampler MakeLookAheadSampler(uint64_t sequence, const AnalysisLumaSource& luma,
+		const void* host, LookAheadTap12State& state)
+	{
+		SourceResolutionMonitor::CodedLumaSampler tap;
+		if (luma.format == AnalysisLumaFormat::PackedDolbyVision422)
+		{
+			// Rule 1: the frame's ONE 12-bit decode (VpFrameAnalysis::Process at arrival, kept by ShareViewOf12) is read when it is
+			// still held. Otherwise the walk reads its own sparse samples through the same law (SourceTap12): that read is counted
+			// as a private site of the tap12 unit (ComputeOnce report), never uncounted. Resolved on the first sample only, so a
+			// frame the monitor skips (already looked at) is neither looked up nor counted.
+			tap.codeMaximum = static_cast<uint32_t>(DvTunnelTapLaw::kLevels - 1);
+			tap.read = [&luma, &state, sequence, host](int x, int y) {
+				if (state.how == 0)
+				{
+					state.how = FindSharedViewOf12(sequence, luma, state.shared, host) ? 1 : 2;
+					if (state.how == 2)
+						VPV_COMPUTE_ONCE_PRIVATE_AT("analysis.tap12", sequence, "source-look-ahead samples");
+				}
+				if (state.how == 1)
+					return x >= 0 && y >= 0 && x < static_cast<int>(state.shared.width) && y < static_cast<int>(state.shared.height) ?
+						static_cast<int>(state.shared.luma[static_cast<size_t>(y) * state.shared.strideSamples + static_cast<size_t>(x)]) : 0;
+				uint16_t code12 = 0;
+				return DvTunnelTapLaw::SourceTap12(luma, x, y, code12) ? static_cast<int>(code12) : 0;
+			};
+			return tap;
+		}
+		tap.read = [&luma](int x, int y) {
+			uint16_t code = 0;   // WP-23: the shared decode when ready
+			return luma.SampleLuma(x, y, code) ? static_cast<int>(code) : 0;
+		};
+		return tap;
+	}
 }

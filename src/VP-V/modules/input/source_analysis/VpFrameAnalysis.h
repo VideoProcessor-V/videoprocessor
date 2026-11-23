@@ -28,6 +28,7 @@
 #include <AnalysisLumaSource.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/LaneInterfaces.h>
+#include <VP-V/modules/input/source_analysis/CodedLumaSampler.h>
 
 #include <array>
 #include <atomic>
@@ -201,6 +202,16 @@ namespace VpFrameAnalysis
 	// two hosts never read or clear each other's views. nullptr = the unowned set (tests, ownerless callers).
 	bool ShareViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view, const void* host = nullptr);
 	bool FindSharedViewOf12(uint64_t seq, const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view, const void* host = nullptr);
+
+	// W21-2: build the source-resolution look-ahead sampler for a prepared frame (12-bit shared/fallback tap for packed DV, 10-bit
+	// otherwise). Compiled in VpFrameAnalysis.cpp so SourceAheadWalk.h stays thin in LibplaceboVideoRenderer's TU.
+	struct LookAheadTap12State
+	{
+		VpSkeleton::SourceFrameView shared;
+		int how = 0;   // 0 = no sample read yet, 1 = the shared 12-bit decode, 2 = own samples (counted)
+	};
+	SourceResolutionMonitor::CodedLumaSampler MakeLookAheadSampler(uint64_t sequence, const AnalysisLumaSource& luma,
+		const void* host, LookAheadTap12State& state);
 
 	// ---- The producer ----
 	struct Job
