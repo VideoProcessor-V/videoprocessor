@@ -3,12 +3,12 @@
   "labels": {
     "kSourceIdentity": "P14", "kSourceGeometry": "P14g", "kCodingEvidence": "P16",
     "kQualityPattern": "P15", "kQualityPatternCausal": "P15c", "kRefinedField": "P3r",
-    "kP10gGrainLevel": "P10g"
+    "kP10gGrainLevel": "P10g", "kCameraFitField": "P7f"
   },
   "lanes": {
     "kP1HalfLuma": "L-B4", "kP2VectorPair": "L-B4", "kP2mMatcherPair": "L-B4", "kP3AnalysisField": "L-B4",
     "kP4SourceStats": "L-B4", "kP9CameraSmoothed": "L-B4",
-    "kP7CameraFit": "L-B6", "kP8CameraLabels": "L-B6", "kP7gCameraGuide": "L-B6",
+    "kP7CameraFit": "L-B6", "kCameraFitField": "L-B6", "kP8CameraLabels": "L-B6", "kP7gCameraGuide": "L-B6",
     "kP10GrainSplit": "L-B2", "kP10cGrainSplitChroma": "L-B2", "kTdBlocks": "L-B2", "kTdMemory": "L-B2",
     "kTdAnchorPass": "L-B2", "kTdAnchorRefs": "L-B2", "kTdDelta": "L-B2", "kTdMaps": "L-B2", "kTdTrailSummary": "L-B2",
     "kP11RegionBlockStats": "L-B5", "kP12LightLevel": "L-B5",
@@ -25,6 +25,7 @@
     "kP4SourceStats": {"files": ["input/source_analysis/lane/LaneCpuProducts.h"]},
     "kP5MonitorTiles": {"files": ["input/source_analysis/SourceResolutionMonitor.h"]},
     "kP7CameraFit": {"files": ["motion/estimation/global_model/link/CameraExtension.cpp", "motion/estimation/global_model/link/CameraFitWorker.cpp"]},
+    "kCameraFitField": {"files": ["motion/estimation/global_model/link/CameraFitWorker.cpp"]},
     "kP8CameraLabels": {"files": ["motion/estimation/global_model/link/CameraLabelFill.cpp"]},
     "kP9CameraSmoothed": {"files": ["motion/estimation/global_model/link/CameraLinkCore.cpp"]},
     "kP7gCameraGuide": {"files": ["motion/estimation/global_model/link/GuideLaneJob.cpp"]},

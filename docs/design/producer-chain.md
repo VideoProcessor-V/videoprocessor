@@ -21,7 +21,7 @@ Counts: R 12, X 7, N 12, NP 33.
 | **P7** p7_camera_fit | L-B6 | CameraExtension.cpp<br>CameraFitWorker.cpp | P4 | X | outside-acquire: CameraExtension.cpp:161; CameraExtension.cpp:204; CameraExtension.cpp:221 |
 |  |  |  | P2 (undeclared) | X | outside-acquire: CameraExtension.cpp:239; CameraExtension.cpp:475; CameraExtension.cpp:628 / undeclared external view: P2 via FlowOf (decision G-A3, ProductFlags ExternalView) |
 | **P8** p8_camera_labels | L-B6 | CameraLabelFill.cpp | P7 | X | partial: CameraLabelFill.cpp:106; CameraLabelFill.cpp:236 |
-|  |  |  | p7f_camera_fit_field | R | CameraLabelFill.cpp:42; CameraLabelFill.cpp:68 |
+|  |  |  | P7f | R | CameraLabelFill.cpp:42; CameraLabelFill.cpp:68 |
 | **P9** p9_camera_smoothed (variants, short-queue P7) | L-B4 | CameraLinkCore.cpp | P7 lead2 | X | outside-acquire: CameraLinkCore.cpp:362; CameraLinkCore.cpp:484; CameraLinkCore.cpp:780 |
 | **P10** grain.split | L-B2 | SkeletonGpuDispatcher.cpp<br>LaneGpuProducts.cpp<br>GrainSplitVariantOwner.h | P4 | R | SkeletonGpuDispatcher.cpp:499; SkeletonGpuDispatcher.cpp:574 / shared dispatcher read; its picture feeds the ownsTap (P10) tap build |
 |  |  |  | P13 | R | GrainSplitVariantOwner.h:165 / INTERIM (interim: declared as an input of the P10/P11 GPU passes, but they read the tap plane, not the P13 source-ring view; owner D5 lane (P13-MOVE / CP-A1-D5-P10-CPU-DECODE, refs/128 item 2); documentation tag only: producer_chain.py schedule() does not read it, and slice d (102b JPROD-HELD-SLICES) makes the scheduler ignore it; Registry::Validate still orders on the declaration (P13 has no inputs, so the order is unchanged)); flag ViewIsActual: C9b |
@@ -47,7 +47,7 @@ Counts: R 12, X 7, N 12, NP 33.
 |  |  |  | td.memory lag1 | NP | no production producer |
 | **P14** p14_source_identity | - | SourceIdPipeline.h | P5 | R | SourceIdPipeline.h:126; SourceIdPipeline.h:214 / type-token match only: FrameInput.classical is a monitor snapshot copied by the call site, not an Acquire |
 | **P14g** source_geometry | - | SourceGeometryProduct.h | P5 | N | flag ViewIsActual: C9b |
-| **p7f_camera_fit_field** p7f_camera_fit_field | - | - | (no inputs) | - | |
+| **P7f** p7f_camera_fit_field | L-B6 | CameraFitWorker.cpp | (no inputs) | - | |
 | **band_memo** band_memo | L-B3 | BandMemoFill.h | P1 | N |  |
 | **edge_map** edge_map | L-B5 | EdgeMapFill.h | P13 | R | EdgeMapFill.h:98; EdgeMapFill.h:148 |
 | **P10g** grain.level | L-B2 | GrainLevelGpu.h | P10 | R | GrainLevelGpu.h:205 |
@@ -90,7 +90,6 @@ Each carries an owner lane or a 102b trigger (A1c: NP is allowed with a trigger,
 | **P10c** grain.split.chroma | L-B2 | L-B2; ProductCatalog flag Reserved, built with C10; 102b PRODUCER-NP-P10C (new row) |
 | **td.memory** td.memory | L-B2 | 102b PRODUCER-NP-TD (new row): TD engine phase 1 (doc 99 TD-P); lane L-B2 |
 | **td.anchor_pass** td.anchor_pass | L-B2 | 102b PRODUCER-NP-TD: TD engine phase 1; lane L-B2 |
-| **p7f_camera_fit_field** p7f_camera_fit_field | - | UNOWNED |
 | **P15** quality_pattern | L-B5 | 102b TD-CORE-P15 PRODUCER BUILD (trigger: R2-9 P15-DECL landed + TD phase 1); lane L-B5 |
 | **P15c** quality_pattern.causal | L-B5 | 102b TD-CORE-P15 PRODUCER BUILD (same job as P15); lane L-B5 |
 | **P3r** refined_field | - | 102b row 'P3r refined-field binding' (trigger: TD round, doc 99 phase TD-5 after P3b) |
@@ -114,5 +113,5 @@ Declared in Products.h but the producer does not read them yet. They still order
 
 Ordering edges are lag 0, lead 0, non-self (Registry::Validate's Kahn); lag > 0, lead and own-previous-frame edges are temporal. Acyclic: **yes**.
 
-Order: p7f_camera_fit_field(L0) , P0(L0) , P13(L0) , edge_map(L1) , P1(L0) , band_memo(L1) , P2(L1) , P2m(L1) , P3(L2) , P4(L1) , P10(L2) , P10c(L2) , P10g(L3) , P11(L3) , P16(L4) , P12(L4) , P5(L0) , P6(L3) , P7(L2) , P7g(L3) , P8(L3) , P9(L3) , P15(L5) , P15c(L5) , P3r(L4) , P14g(L1) , P14(L1) , td.anchor_pass(L4) , td.anchor_refs(L6) , td.blocks(L4) , td.delta(L5) , td.maps(L5) , td.memory(L5) , td.trail_summary(L5)
+Order: P7f(L0) , P0(L0) , P13(L0) , edge_map(L1) , P1(L0) , band_memo(L1) , P2(L1) , P2m(L1) , P3(L2) , P4(L1) , P10(L2) , P10c(L2) , P10g(L3) , P11(L3) , P16(L4) , P12(L4) , P5(L0) , P6(L3) , P7(L2) , P7g(L3) , P8(L3) , P9(L3) , P15(L5) , P15c(L5) , P3r(L4) , P14g(L1) , P14(L1) , td.anchor_pass(L4) , td.anchor_refs(L6) , td.blocks(L4) , td.delta(L5) , td.maps(L5) , td.memory(L5) , td.trail_summary(L5)
 

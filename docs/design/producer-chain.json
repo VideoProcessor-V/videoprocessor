@@ -1074,18 +1074,20 @@
   },
   {
    "id": "kCameraFitField",
-   "label": "p7f_camera_fit_field",
+   "label": "P7f",
    "token": "p7f_camera_fit_field",
    "name": "camera fit field",
    "backend": "Cpu",
    "variants": "Identical",
    "noOfaSubstitute": null,
    "shortQueueSubstitute": null,
-   "lane": "-",
-   "producer_files": [],
+   "lane": "L-B6",
+   "producer_files": [
+    "motion/estimation/global_model/link/CameraFitWorker.cpp"
+   ],
    "producer_text": "camera fit field (storage of P7's fit field, camera worker, published before P7)",
    "reserved": false,
-   "no_producer": true,
+   "no_producer": false,
    "no_producer_owner": "",
    "edges": []
   },
@@ -2126,9 +2128,7 @@
   "cycle_members": [],
   "acyclic": true
  },
- "unowned_no_producer": [
-  "kCameraFitField"
- ],
+ "unowned_no_producer": [],
  "test_only_references": [
   {
    "where": "modules/input/source_analysis/regions/RegionEvidence.h:570 ComputeGrain, :719 ComputeFrame",
