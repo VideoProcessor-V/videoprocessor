@@ -65,6 +65,8 @@ namespace SourceIdentity
 			IsolatedHalfNotch,           // Pitfall #1: 1/2 dips with quiet 3/8, 5/8, 7/8 comb => kClassRational
 			CombGridDetected,            // Pitfall #1: 8x8 codec-grid comb dips at odd k/8 => stays kClassK8
 			CombProbesUnavailable,       // Pitfall #1: missing comb probes => fail safe to kClassK8
+			NoHalfNotch,                 // Pitfall #1 (MEDIUM-5): flat native 4K (no 1/2 dip and no odd k/8 comb) => stays kClassK8
+			ZeroPhaseEnergy,             // LOW-4: zero second-difference energy across all phases (constant line)
 			NotHalfCandidate             // Candidate is not near N/2 => standard ClassifyLatent
 		};
 
@@ -84,6 +86,8 @@ namespace SourceIdentity
 			case EdgeStatsReason::IsolatedHalfNotch: return "isolated 1/2 notch (odd k/8 comb quiet)";
 			case EdgeStatsReason::CombGridDetected: return "8x8 codec-grid comb detected (kept in K8)";
 			case EdgeStatsReason::CombProbesUnavailable: return "comb probes unavailable (fail safe to K8)";
+			case EdgeStatsReason::NoHalfNotch: return "no significant 1/2 dip (kept in K8)";
+			case EdgeStatsReason::ZeroPhaseEnergy: return "abstain (zero second-difference energy across all phases)";
 			case EdgeStatsReason::NotHalfCandidate: return "not a 1/2 candidate (standard class)";
 			default: return "unknown";
 			}
@@ -175,6 +179,12 @@ namespace SourceIdentity
 				res.reason = EdgeStatsReason::InvalidInput;
 				return res;
 			}
+			// MEDIUM-1: verify backing vector holds all count * length samples before indexing lines.Line(li).
+			if (lines.data.size() / static_cast<size_t>(lines.length) < static_cast<size_t>(lines.count))
+			{
+				res.reason = EdgeStatsReason::InvalidInput;
+				return res;
+			}
 			const double theo = QuantizationFloorCodes(stepCodes);
 			res.theoreticalCodes = theo;
 
@@ -235,7 +245,8 @@ namespace SourceIdentity
 				return res;
 			}
 
-			const double q = ClampD(s.quietSegmentQuantile, 0.0, 0.5);
+			// LOW-8: guard against NaN in quietSegmentQuantile before clamping.
+			const double q = std::isfinite(s.quietSegmentQuantile) ? ClampD(s.quietSegmentQuantile, 0.0, 0.5) : (1.0 / 4.0);
 			const double quietSig = RobustStats::Quantile(segSigmas, q, RobustStats::RankRule::Interpolated, theo);
 			res.valid = true;
 			res.empiricalRawCodes = quietSig;
@@ -287,7 +298,7 @@ namespace SourceIdentity
 				res.reason = EdgeStatsReason::InvalidInput;
 				return res;
 			}
-			const double div = s.floorGuardDivisor > 1.0 ? s.floorGuardDivisor : 4.0;
+			const double div = (std::isfinite(s.floorGuardDivisor) && s.floorGuardDivisor > 1.0) ? s.floorGuardDivisor : 4.0;
 			// Strictly numerical minimum guard (1e-12) when caller passes floorCodes == 0.
 			const double eps = (std::max)(floorCodes / div, 1e-6);
 			const double eps2 = eps * eps;
@@ -295,6 +306,14 @@ namespace SourceIdentity
 
 			const double rawNum = residualCodes * residualCodes - floor2;
 			const double rawDen = baselineCodes * baselineCodes - floor2;
+			if (!std::isfinite(rawNum) || !std::isfinite(rawDen) || !std::isfinite(eps2))
+			{
+				// LOW-2: overflow to inf/NaN must fail cleanly with InvalidInput, never Ok.
+				res.valid = false;
+				res.dip = 0.0;
+				res.reason = EdgeStatsReason::InvalidInput;
+				return res;
+			}
 
 			double num = rawNum;
 			double den = rawDen;
@@ -311,6 +330,12 @@ namespace SourceIdentity
 
 			res.dip = 0.5 * std::log(num / den);
 			res.valid = std::isfinite(res.dip);
+			if (!res.valid)
+			{
+				res.dip = 0.0;
+				res.reason = EdgeStatsReason::InvalidInput;
+				return res;
+			}
 			if (res.clampedDenominator)
 				res.reason = EdgeStatsReason::BaselineBelowFloor;
 			else if (res.clampedNumerator)
@@ -415,7 +440,8 @@ namespace SourceIdentity
 				return res;
 			}
 
-			res.stat = RobustStats::TrimmedMeanOf(dips.data(), res.informativeSegments, ClampD(s.trimFraction, 0.0, 0.5));
+			const double trimSafe = std::isfinite(s.trimFraction) ? ClampD(s.trimFraction, 0.0, 0.5) : 0.2;
+			res.stat = RobustStats::TrimmedMeanOf(dips.data(), res.informativeSegments, trimSafe);
 			res.valid = std::isfinite(res.stat);
 			res.reason = res.valid ? EdgeStatsReason::Ok : EdgeStatsReason::InvalidInput;
 			return res;
@@ -482,8 +508,11 @@ namespace SourceIdentity
 				++res.totalInteriorPixels;
 				const double gL = std::fabs(line[i] - line[i - 1]);
 				const double gR = std::fabs(line[i + 1] - line[i]);
+				// LOW-3: require BOTH one-step differences finite before (std::max) so NaN in gR is never masked.
+				if (!std::isfinite(gL) || !std::isfinite(gR))
+					continue;
 				const double g = (std::max)(gL, gR);
-				if (!std::isfinite(g) || g < gradGate)
+				if (g < gradGate)
 					continue;
 				const double r = residual[i];
 				if (!std::isfinite(r))
@@ -548,7 +577,8 @@ namespace SourceIdentity
 				return res;
 			}
 			if (!std::isfinite(belowPower) || !std::isfinite(abovePower) || !std::isfinite(floorPowerPerBin) ||
-				!(belowPower > 0.0) || !(abovePower > 0.0) || floorPowerPerBin < 0.0)
+				!(belowPower > 0.0) || !(abovePower > 0.0) || floorPowerPerBin < 0.0 ||
+				std::isnan(refDetailDecades) || !std::isfinite(detailMarginDecades))
 			{
 				res.reason = EdgeStatsReason::InvalidInput;
 				return res;
@@ -603,7 +633,10 @@ namespace SourceIdentity
 				return res;
 			}
 			const size_t bins = powerBins.size();
-			if (ratio <= 0.0 || ratio >= 1.0 || bins < 33 || !std::isfinite(floorPowerPerBin) || floorPowerPerBin < 0.0)
+			// HIGH-4 + LOW-8: require finite ratio in (0, 1) BEFORE any cast/indexing!
+			if (!std::isfinite(ratio) || !(ratio > 0.0) || !(ratio < 1.0) || bins < 33 ||
+				!std::isfinite(floorPowerPerBin) || floorPowerPerBin < 0.0 ||
+				std::isnan(refDetailDecades) || !std::isfinite(detailMarginDecades))
 			{
 				res.reason = EdgeStatsReason::InvalidInput;
 				return res;
@@ -622,11 +655,14 @@ namespace SourceIdentity
 				return res;
 			}
 
+			// LOW-1: verbatim from SourceResolutionDetector.cpp:54-60 (BlockHarmonic):
+			// excludes multiples of 1/8 and 1/16 cycles/pixel AND +-1 Hann window side-lobes.
 			auto isBlockHarm = [&](int k) {
-				if (n < 64)
+				const int period = n / 16;
+				if (period < 2)
 					return false;
-				const int step8 = n / 8;
-				return step8 > 0 && (k % step8 == 0);
+				const int r = k % period;
+				return r == 0 || r == 1 || r == period - 1;
 			};
 
 			auto meanLinearBand = [&](int from, int to, double& outMean) {
@@ -701,8 +737,11 @@ namespace SourceIdentity
 				++sum.totalStencilSamples;
 				const double gL = std::fabs(line[k] - line[k - 1]);
 				const double gR = std::fabs(line[k + 1] - line[k]);
+				// LOW-3: require BOTH one-step differences finite before (std::max) so NaN in gR is never masked.
+				if (!std::isfinite(gL) || !std::isfinite(gR))
+					continue;
 				const double g = (std::max)(gL, gR);
-				if (std::isfinite(g) && g >= gradGate)
+				if (g >= gradGate)
 				{
 					mask[static_cast<size_t>(k)] = 1u;
 					++sum.activeEdgeSamples;
@@ -806,10 +845,19 @@ namespace SourceIdentity
 			res.pooledSecondDiffRms = std::sqrt(totalSq / static_cast<double>(totalCnt));
 			res.minPhaseSecondDiffRms = minRms;
 			res.maxPhaseSecondDiffRms = maxRms;
-			res.phaseContrastRatio = maxRms / (std::max)(minRms, 1e-12);
 			res.samplesUsed = totalCnt;
-			res.valid = true;
-			res.reason = EdgeStatsReason::Ok;
+			if (!(maxRms > 0.0))
+			{
+				// LOW-4: zero second-difference energy across all phases (constant/linear line): abstain visibly
+				// rather than emitting a bogus phaseContrastRatio == 0.0 (< 1.0).
+				res.valid = false;
+				res.phaseContrastRatio = 1.0;
+				res.reason = EdgeStatsReason::ZeroPhaseEnergy;
+				return res;
+			}
+			res.phaseContrastRatio = (std::max)(1.0, maxRms / (std::max)(minRms, 1e-12));
+			res.valid = std::isfinite(res.phaseContrastRatio);
+			res.reason = res.valid ? EdgeStatsReason::Ok : EdgeStatsReason::InvalidInput;
 			return res;
 		}
 
@@ -915,9 +963,20 @@ namespace SourceIdentity
 				return res;
 			}
 
-			// No significant dip at 1/2 => keep conservative K8 null.
+			// MEDIUM-5: distinguish an undominated odd comb dip (e.g. 3/8 or 5/8 active without 1/2 dominating)
+			// from flat native 4K (no 1/2 dip AND no odd k/8 comb at all): never mislabel flat native as a comb!
 			res.resolvedNullClass = kClassK8;
-			res.reason = EdgeStatsReason::CombGridDetected;
+			res.isIsolatedHalfNotch = false;
+			if (res.oddCombDipsPresent > 0)
+			{
+				res.isCodecGridComb = true;
+				res.reason = EdgeStatsReason::CombGridDetected;
+			}
+			else
+			{
+				res.isCodecGridComb = false;
+				res.reason = EdgeStatsReason::NoHalfNotch;
+			}
 			return res;
 		}
 	}

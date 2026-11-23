@@ -87,6 +87,8 @@ namespace SourceIdentity
 		{
 			None = 0,
 			Disabled,
+			InvalidInput,               // HIGH-3: non-finite or non-positive c1 / malformed floating input
+			MenuHoldActive,             // LOW-5: menu / overlay active while unlatched
 			WouldBeClassicalOnly,       // OD-1: classical proposed alone without qualifying chain corroboration
 			NonConventionalPair,        // R2: non-conventional or parked anamorphic geometry (e.g. 1440x1080, 1600x900)
 			HeldBackByBar,              // Evidence below entry/move bar
@@ -120,6 +122,8 @@ namespace SourceIdentity
 			{
 			case JointLatchReason::None: return "none";
 			case JointLatchReason::Disabled: return "joint latch disabled";
+			case JointLatchReason::InvalidInput: return "rejected (invalid input)";
+			case JointLatchReason::MenuHoldActive: return "holding (menu / overlay)";
 			case JointLatchReason::WouldBeClassicalOnly: return "would-be (classical only)";
 			case JointLatchReason::NonConventionalPair: return "held back (non-conventional or parked geometry)";
 			case JointLatchReason::HeldBackByBar: return "held back (below bar)";
@@ -273,6 +277,7 @@ namespace SourceIdentity
 			uint64_t releasesReset = 0;
 			uint64_t deferred = 0;
 			uint64_t deferCancelled = 0;
+			uint64_t invalidInputs = 0;
 		};
 
 		// ============================================================================================================
@@ -312,6 +317,8 @@ namespace SourceIdentity
 
 		inline bool IsIntegerHarmonicOf(double subRatio, double superRatio, double tol = Scaling::GeometrySet::kConventionTolerance)
 		{
+			if (!std::isfinite(subRatio) || !std::isfinite(superRatio) || !std::isfinite(tol))
+				return false;
 			if (!(subRatio > 0.0) || !(superRatio > subRatio))
 				return false;
 			const double mult = superRatio / subRatio;
@@ -329,34 +336,37 @@ namespace SourceIdentity
 			double ratioTol = Scaling::GeometrySet::kConventionTolerance)
 		{
 			HarmonicSelectionResult res;
-			std::vector<int> valid;
+			if (!std::isfinite(minCredit) || !std::isfinite(ratioTol) || ratioTol < 0.0)
+				return res;
+
+			// HIGH-3 + MEDIUM-3: require finite credit on BOTH axes before comparing, and separate clean candidates
+			// (!detailAbove) from candidates invalidated by genuine high-frequency detail above their Nyquist.
+			std::vector<int> cleanValid;
+			std::vector<int> detailAboveValid;
 			for (size_t i = 0; i < candidates.size(); ++i)
 			{
 				const HarmonicCandidate& c = candidates[i];
 				if (c.nx <= 0 || c.Nx <= 0 || c.ny <= 0 || c.Ny <= 0)
 					continue;
+				if (!std::isfinite(c.creditX) || !std::isfinite(c.creditY))
+					continue;
 				if (!Scaling::GeometrySet::AgreeingPair(c.nx, c.Nx, c.ny, c.Ny, rasterW, rasterH))
 					continue;
 				if ((std::min)(c.creditX, c.creditY) < minCredit)
 					continue;
-				valid.push_back(static_cast<int>(i));
+				if (c.detailAbove)
+					detailAboveValid.push_back(static_cast<int>(i));
+				else
+					cleanValid.push_back(static_cast<int>(i));
 			}
-			if (valid.empty())
-				return res;
 
-			if (valid.size() == 1)
+			if (cleanValid.empty())
 			{
-				const int idx = valid[0];
-				const HarmonicCandidate& c = candidates[static_cast<size_t>(idx)];
-				res.found = true;
-				res.selectedIndex = idx;
-				res.nx = c.nx; res.Nx = c.Nx; res.ny = c.ny; res.Ny = c.Ny;
-				res.reason = HarmonicSelectionReason::SingleConventionalCandidate;
+				if (!detailAboveValid.empty())
+					res.reason = HarmonicSelectionReason::RejectedSubHarmonicDetailAbove;
 				return res;
 			}
 
-			// First pick the baseline leader by highest min(creditX, creditY) (deterministic tie-break: smaller ratio).
-			int bestIdx = valid[0];
 			auto candScore = [&](int idx) {
 				const HarmonicCandidate& c = candidates[static_cast<size_t>(idx)];
 				return (std::min)(c.creditX, c.creditY);
@@ -366,28 +376,51 @@ namespace SourceIdentity
 				return (static_cast<double>(c.nx) / c.Nx) * (static_cast<double>(c.ny) / c.Ny);
 			};
 
-			for (size_t k = 1; k < valid.size(); ++k)
+			// Pick the baseline leader ONLY from clean (!detailAbove) candidates by highest min(creditX, creditY).
+			int bestIdx = cleanValid[0];
+			for (size_t k = 1; k < cleanValid.size(); ++k)
 			{
-				const int idx = valid[k];
+				const int idx = cleanValid[k];
 				const double sNew = candScore(idx);
 				const double sBest = candScore(bestIdx);
 				if (sNew > sBest + 1e-12 || (std::fabs(sNew - sBest) <= 1e-12 && candAreaRatio(idx) < candAreaRatio(bestIdx)))
 					bestIdx = idx;
 			}
 
-			// Check whether any smaller conventional candidate is an integer sub-harmonic of bestIdx.
-			// Track the smallest confirmed sub-harmonic (no detail_above + A roll-off confirmed + B credit >= minCredit).
-			int fundamentalIdx = -1;
-			bool sawDetailAboveSubHarmonic = false;
-			int aliasesExplained = 0;
-
 			const HarmonicCandidate& leader = candidates[static_cast<size_t>(bestIdx)];
 			const double leaderRx = static_cast<double>(leader.nx) / static_cast<double>(leader.Nx);
 			const double leaderRy = static_cast<double>(leader.ny) / static_cast<double>(leader.Ny);
 
-			for (size_t k = 0; k < valid.size(); ++k)
+			// Check if any detail_above candidate was a rejected sub-harmonic of the clean leader.
+			bool sawDetailAboveSubHarmonic = false;
+			for (size_t k = 0; k < detailAboveValid.size(); ++k)
 			{
-				const int idx = valid[k];
+				const HarmonicCandidate& sub = candidates[static_cast<size_t>(detailAboveValid[k])];
+				const double subRx = static_cast<double>(sub.nx) / static_cast<double>(sub.Nx);
+				const double subRy = static_cast<double>(sub.ny) / static_cast<double>(sub.Ny);
+				if (IsIntegerHarmonicOf(subRx, leaderRx, ratioTol) && IsIntegerHarmonicOf(subRy, leaderRy, ratioTol))
+					sawDetailAboveSubHarmonic = true;
+			}
+
+			if (cleanValid.size() == 1)
+			{
+				res.found = true;
+				res.selectedIndex = bestIdx;
+				res.nx = leader.nx; res.Nx = leader.Nx; res.ny = leader.ny; res.Ny = leader.Ny;
+				res.reason = sawDetailAboveSubHarmonic
+					? HarmonicSelectionReason::RejectedSubHarmonicDetailAbove
+					: HarmonicSelectionReason::SingleConventionalCandidate;
+				return res;
+			}
+
+			// Check whether any smaller clean conventional candidate is an integer sub-harmonic of bestIdx,
+			// confirmed by A roll-off (!detailAbove is already guaranteed by cleanValid).
+			int fundamentalIdx = -1;
+			int aliasesExplained = 0;
+
+			for (size_t k = 0; k < cleanValid.size(); ++k)
+			{
+				const int idx = cleanValid[k];
 				if (idx == bestIdx)
 					continue;
 				const HarmonicCandidate& sub = candidates[static_cast<size_t>(idx)];
@@ -395,11 +428,7 @@ namespace SourceIdentity
 				const double subRy = static_cast<double>(sub.ny) / static_cast<double>(sub.Ny);
 				if (IsIntegerHarmonicOf(subRx, leaderRx, ratioTol) && IsIntegerHarmonicOf(subRy, leaderRy, ratioTol))
 				{
-					if (sub.detailAbove)
-					{
-						sawDetailAboveSubHarmonic = true;
-					}
-					else if (sub.classicalRollOffConfirmed)
+					if (sub.classicalRollOffConfirmed)
 					{
 						if (fundamentalIdx < 0 || candAreaRatio(idx) < candAreaRatio(fundamentalIdx))
 							fundamentalIdx = idx;
@@ -408,12 +437,12 @@ namespace SourceIdentity
 				}
 			}
 
-			// Also check if bestIdx itself is already the smallest confirmed fundamental and has higher integer harmonics in valid.
-			if (fundamentalIdx < 0 && !leader.detailAbove && leader.classicalRollOffConfirmed)
+			// Also check if bestIdx itself is already the smallest confirmed fundamental and has higher integer harmonics in cleanValid.
+			if (fundamentalIdx < 0 && leader.classicalRollOffConfirmed)
 			{
-				for (size_t k = 0; k < valid.size(); ++k)
+				for (size_t k = 0; k < cleanValid.size(); ++k)
 				{
-					const int idx = valid[k];
+					const int idx = cleanValid[k];
 					if (idx == bestIdx)
 						continue;
 					const HarmonicCandidate& sup = candidates[static_cast<size_t>(idx)];
@@ -468,8 +497,9 @@ namespace SourceIdentity
 			double Bar(int64_t timeUs, double c1) const
 			{
 				const double stable = started_ ? static_cast<double>(timeUs - stableSinceUs_) / 1e6 : 0.0;
-				const double g = s_.growSec > 0.0 ? (stable - s_.graceSec) / s_.growSec : 0.0;
-				return c1 * (1.0 + ClampD(g, 0.0, s_.growMax));
+				const double g = (std::isfinite(s_.growSec) && s_.growSec > 0.0) ? (stable - s_.graceSec) / s_.growSec : 0.0;
+				const double gSafe = std::isfinite(g) ? ClampD(g, 0.0, s_.growMax) : 0.0;
+				return c1 * (1.0 + gSafe);
 			}
 
 			// Joint entry fraction j(t): grows linearly from jointFractionMin (0.5) to jointFractionMax (1.0)
@@ -477,7 +507,8 @@ namespace SourceIdentity
 			double JointFraction(int64_t timeUs) const
 			{
 				const double stable = started_ ? static_cast<double>(timeUs - stableSinceUs_) / 1e6 : 0.0;
-				const double frac = s_.growSec > 0.0 ? ClampD((stable - s_.graceSec) / s_.growSec, 0.0, 1.0) : 0.0;
+				const double raw = (std::isfinite(s_.growSec) && s_.growSec > 0.0) ? (stable - s_.graceSec) / s_.growSec : 0.0;
+				const double frac = std::isfinite(raw) ? ClampD(raw, 0.0, 1.0) : 0.0;
 				return s_.jointFractionMin + (s_.jointFractionMax - s_.jointFractionMin) * frac;
 			}
 
@@ -509,6 +540,14 @@ namespace SourceIdentity
 				if (!s_.enabled)
 				{
 					o.reason = JointLatchReason::Disabled;
+					return o;
+				}
+				// HIGH-3: validate c1 is finite and strictly positive before any threshold / bar / debt math.
+				if (!std::isfinite(in.c1) || !(in.c1 > 0.0))
+				{
+					++c_.invalidInputs;
+					o.reason = JointLatchReason::InvalidInput;
+					Fill(o);
 					return o;
 				}
 
@@ -558,10 +597,12 @@ namespace SourceIdentity
 					}
 					else
 					{
-						o.reason = JointLatchReason::ClassicalVoided;
+						// LOW-5: only report ClassicalVoided when a classical reading was actually voided.
+						o.reason = o.classicalVoided ? JointLatchReason::ClassicalVoided : JointLatchReason::MenuHoldActive;
 					}
 					stableSinceUs_ = t;
 					detailAboveActive_ = false;
+					detailAboveSinceUs_ = -1;
 					o.reasonBits |= kReasonMenuHold;
 					Fill(o);
 					return o;
@@ -637,12 +678,19 @@ namespace SourceIdentity
 				const double bar = Bar(t, in.c1);
 				const double jNeed = JointFraction(t) * in.c1;
 
+				// HIGH-3: guard every std::min / threshold comparison against NaN (IEEE std::min(10.0, NaN) == 10.0).
+				const bool chainLlrFinite = std::isfinite(in.chainLlrX) && std::isfinite(in.chainLlrY) && std::isfinite(bar);
+				const bool shotCreditFinite = std::isfinite(in.currentShotDwellSec) &&
+					std::isfinite(in.currentShotCreditX) && std::isfinite(in.currentShotCreditY) && std::isfinite(jNeed);
+
 				const bool chainAloneEligible = (s_.entryPolicy == JointEntryPolicy::ChainOrJoint) &&
 					chainConv &&
+					chainLlrFinite &&
 					in.chainShots >= s_.chainAloneMinShots &&
 					(std::min)(in.chainLlrX, in.chainLlrY) >= bar;
 
 				const bool jointEligible = classicalConv &&
+					shotCreditFinite &&
 					in.currentShotDwellSec >= s_.minShotDwellSec &&
 					(std::min)(in.currentShotCreditX, in.currentShotCreditY) >= jNeed;
 
@@ -722,15 +770,32 @@ namespace SourceIdentity
 				// Currently LATCHED: update chain credits, starvation clock, G1/G2 hard bound, and moves.
 				// ====================================================================================================
 				const double need = s_.confirmFraction * in.c1;
-				accX_ = (std::max)(-need, accX_ + in.gainX);
-				accY_ = (std::max)(-need, accY_ + in.gainY);
-				if (in.gainX > 0.0 && in.gainTimeX > newestX_)
-					newestX_ = in.gainTimeX;
-				if (in.gainY > 0.0 && in.gainTimeY > newestY_)
-					newestY_ = in.gainTimeY;
+				// HIGH-3: never let NaN gainX/gainY poison or silently reset accX_/accY_ to -need via std::max.
+				if (std::isfinite(in.gainX))
+				{
+					accX_ = (std::max)(-need, accX_ + in.gainX);
+					if (in.gainX > 0.0 && in.gainTimeX > newestX_)
+						newestX_ = in.gainTimeX;
+				}
+				else
+				{
+					++c_.invalidInputs;
+				}
+				if (std::isfinite(in.gainY))
+				{
+					accY_ = (std::max)(-need, accY_ + in.gainY);
+					if (in.gainY > 0.0 && in.gainTimeY > newestY_)
+						newestY_ = in.gainTimeY;
+				}
+				else
+				{
+					++c_.invalidInputs;
+				}
 
-				const bool chainConsistent = in.rawX > 0.0 || in.rawY > 0.0;
-				const bool classicalAgreesLatched = classicalConv && PairsMatch(
+				const bool chainConsistent = (std::isfinite(in.rawX) && in.rawX > 0.0) ||
+					(std::isfinite(in.rawY) && in.rawY > 0.0);
+				// LOW-5: a frame reporting detail_above contradicts the latched upscale and must NOT pause the 60 s clock.
+				const bool classicalAgreesLatched = classicalConv && !in.classicalDetailAbove && PairsMatch(
 					in.classicalNx, in.classicalNxDenom, in.classicalNy, in.classicalNyDenom,
 					lnx_, lNx_, lny_, lNy_);
 
@@ -820,14 +885,21 @@ namespace SourceIdentity
 					const double sinceConfSec = static_cast<double>(t - lastConfUs_) / 1e6;
 					if (sinceConfSec >= s_.hardBoundSec)
 					{
-						// OD-2 G2: May renew ONCE per bound ONLY on fresh joint re-proof at the full entry standard
-						// with B credit timestamp strictly after lastConfUs_.
+						// OD-2 G2 + HIGH-3 + MEDIUM-4: May renew ONCE per bound ONLY on fresh joint re-proof at the
+						// full entry standard, with finite credits and timestamp strictly in (lastConfUs_, t] AND
+						// earned at/after the bound OR within the current minShotDwellSec (3 s) window (never 119 s stale).
+						const int64_t boundUs = lastConfUs_ + static_cast<int64_t>(s_.hardBoundSec * 1e6);
+						const bool creditFreshForBound = in.currentShotNewestCreditUs > lastConfUs_ &&
+							in.currentShotNewestCreditUs <= t &&
+							(in.currentShotNewestCreditUs >= boundUs ||
+								static_cast<double>(t - in.currentShotNewestCreditUs) / 1e6 <= s_.minShotDwellSec);
 						const bool freshJointReproof = (s_.holdPolicy == JointHoldPolicy::G2_JointOncePerBound) &&
 							!g2RenewedThisBound_ &&
 							classicalAgreesLatched &&
+							shotCreditFinite &&
 							in.currentShotDwellSec >= s_.minShotDwellSec &&
 							(std::min)(in.currentShotCreditX, in.currentShotCreditY) >= jNeed &&
-							in.currentShotNewestCreditUs > lastConfUs_;
+							creditFreshForBound;
 
 						if (freshJointReproof)
 						{
@@ -913,9 +985,12 @@ namespace SourceIdentity
 
 			void StepDeferred(const JointLatchInput& in, int64_t t, JointLatchOutput& o)
 			{
-				// H3 strict invariant: check hard ceiling FIRST so total time from lastConfUs_ NEVER exceeds
-				// hardBoundSec + deferCeilingSec (180 s), even under adversarial cuts just before ceiling.
-				const bool pastCeiling = static_cast<double>(t - deferUs_) / 1e6 >= s_.deferCeilingSec;
+				// H3 strict invariant (HIGH-5): enforce BOTH deferral-relative ceiling (t - deferUs >= deferCeilingSec)
+				// AND total anchor-relative ceiling (t - lastConfUs >= hardBoundSec + deferCeilingSec = 180 s), so
+				// neither 5 s latched cadence overshoot nor eval gaps can ever push release past 180 s!
+				const bool pastDeferCeiling = static_cast<double>(t - deferUs_) / 1e6 >= s_.deferCeilingSec;
+				const bool pastHardTotalCeiling = static_cast<double>(t - lastConfUs_) / 1e6 >= (s_.hardBoundSec + s_.deferCeilingSec);
+				const bool pastCeiling = pastDeferCeiling || pastHardTotalCeiling;
 				if (pastCeiling)
 				{
 					++c_.releasesCeiling;

@@ -184,6 +184,7 @@ namespace SourceIdentity
 			uint64_t immediateReleases = 0;
 			uint64_t challengesOpened = 0;
 			uint64_t challengesCleared = 0;
+			uint64_t challengesResumedAfterUnconfirmed = 0;
 			uint64_t challengeReleases = 0;
 			uint64_t unconfirmedTimeouts = 0;
 			uint64_t bucketOverflowDrops = 0;
@@ -278,7 +279,19 @@ namespace SourceIdentity
 					o.actionFromTimeUs = markTimeUs_;
 					return o;
 				}
+				// HIGH-2: preserve an active step-down challenge across a spurious ABR mark so unconfirmed noise
+				// cannot silently wipe or reset the challenge deadline; if the new mark cancels unconfirmed, the
+				// original challenge (with its original challengeStartUs_) resumes seamlessly.
+				const bool hadChallenge = (state_ == StepMarkState::Challenging);
+				const int64_t prevChallengeStartUs = challengeStartUs_;
+				const int prevChallengeExtraSeen = challengeExtraSeen_;
 				ClearInternal();
+				if (hadChallenge)
+				{
+					savedChallengeActive_ = true;
+					savedChallengeStartUs_ = prevChallengeStartUs;
+					savedChallengeExtraSeen_ = prevChallengeExtraSeen;
+				}
 				state_ = StepMarkState::Pending;
 				markTimeUs_ = t0Us;
 				markRatioStep_ = ratioStep;
@@ -323,6 +336,8 @@ namespace SourceIdentity
 				}
 				if (!f.informative || f.voided)
 				{
+					// MEDIUM-2: a voided or uninformative frame breaks any consecutive-frame confirmation streak.
+					classicalStreak_ = 0;
 					o.state = state_;
 					o.blocksEntryOrMove = true;
 					o.pullNextEval = true;
@@ -344,7 +359,11 @@ namespace SourceIdentity
 					{
 						rx = static_cast<double>(f.nx) / static_cast<double>(f.Nx);
 						ry = static_cast<double>(f.ny) / static_cast<double>(f.Ny);
-						validDiff = !ctx.latched || DiffersFromLatch(rx, ry, ctx);
+						// MEDIUM-2: when unlatched with no known pre-step reference pair, a steady conventional
+						// reading does NOT confirm a step (prevents self-voiding an acquiring 1080p stream).
+						// Only confirm if latched (and differing from latched) OR an explicit pre-step reference
+						// pair was provided in ctx and this reading differs from it.
+						validDiff = (ctx.latched || HasReferencePair(ctx)) && DiffersFromReference(rx, ry, ctx);
 					}
 				}
 
@@ -409,9 +428,11 @@ namespace SourceIdentity
 					++pendingEvals_;
 
 					const bool chainDiffPair = rec.hasChainPair && rec.Nx > 0 && rec.Ny > 0 && rec.nx > 0 && rec.ny > 0 &&
-						(!ctx.latched || DiffersFromLatch(static_cast<double>(rec.nx) / rec.Nx, static_cast<double>(rec.ny) / rec.Ny, ctx));
+						(ctx.latched || HasReferencePair(ctx)) &&
+						DiffersFromReference(static_cast<double>(rec.nx) / rec.Nx, static_cast<double>(rec.ny) / rec.Ny, ctx);
 
-					if (rec.chainContradicts || rec.chainSeesNative || (ctx.latched && chainDiffPair))
+					// HIGH-1: rec.chainSeesNative only contradicts an active upscaled latch (never a steady native stream).
+					if (rec.chainContradicts || (ctx.latched && rec.chainSeesNative) || (ctx.latched && chainDiffPair))
 					{
 						double newRx = 1.0, newRy = 1.0;
 						if (!rec.chainSeesNative && rec.hasChainPair && rec.Nx > 0 && rec.Ny > 0 && rec.nx > 0 && rec.ny > 0)
@@ -438,7 +459,19 @@ namespace SourceIdentity
 						o.actionFromTimeUs = markTimeUs_;
 						o.bucket = bucket_;
 						++c_.unconfirmedTimeouts;
+						// HIGH-2: resume any active challenge that was interrupted by this spurious mark (unless
+						// the latch was already released or reconfirmed in the meantime).
+						const bool resumeChallenge = savedChallengeActive_ && ctx.latched && !latchReconfirmed;
+						const int64_t resumeStartUs = savedChallengeStartUs_;
+						const int resumeExtra = savedChallengeExtraSeen_;
 						ClearInternal();
+						if (resumeChallenge)
+						{
+							state_ = StepMarkState::Challenging;
+							challengeStartUs_ = resumeStartUs;
+							challengeExtraSeen_ = resumeExtra;
+							++c_.challengesResumedAfterUnconfirmed;
+						}
 						lastReason_ = StepMarkReason::UnconfirmedTimeout;
 						o.state = state_;
 						return o;
@@ -492,10 +525,15 @@ namespace SourceIdentity
 			}
 
 		private:
-			bool DiffersFromLatch(double rx, double ry, const StepMarkLatchContext& ctx) const
+			bool HasReferencePair(const StepMarkLatchContext& ctx) const
 			{
-				if (!ctx.latched || ctx.Nx <= 0 || ctx.Ny <= 0)
-					return true;
+				return ctx.nx > 0 && ctx.Nx > 0 && ctx.ny > 0 && ctx.Ny > 0;
+			}
+
+			bool DiffersFromReference(double rx, double ry, const StepMarkLatchContext& ctx) const
+			{
+				if (!HasReferencePair(ctx))
+					return false;
 				const double lrx = static_cast<double>(ctx.nx) / static_cast<double>(ctx.Nx);
 				const double lry = static_cast<double>(ctx.ny) / static_cast<double>(ctx.Ny);
 				return std::fabs(rx - lrx) > s_.ratioChangeTolerance * (std::max)(lrx, 1e-6) ||
@@ -578,6 +616,9 @@ namespace SourceIdentity
 				classicalStreakRy_ = 0.0;
 				challengeStartUs_ = -1;
 				challengeExtraSeen_ = 0;
+				savedChallengeActive_ = false;
+				savedChallengeStartUs_ = -1;
+				savedChallengeExtraSeen_ = 0;
 				bucket_.clear();
 			}
 
@@ -592,6 +633,9 @@ namespace SourceIdentity
 			double classicalStreakRx_ = 0.0, classicalStreakRy_ = 0.0;
 			int64_t challengeStartUs_ = -1;
 			int challengeExtraSeen_ = 0;
+			bool savedChallengeActive_ = false;
+			int64_t savedChallengeStartUs_ = -1;
+			int savedChallengeExtraSeen_ = 0;
 			std::vector<TentativeEvalRecord> bucket_;
 		};
 	}
