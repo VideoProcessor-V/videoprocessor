@@ -22,6 +22,7 @@
 #include <vprenderer/LibplaceboRendererPluginApi.h>
 #include <ConfigFile.h>
 #include <UnifiedProfileRuntime.h>
+#include <VP-V/core/RunningPathwayLatch.h>
 #include <VP-V/modules/input/queue_timing/QueueLookahead.h>
 
 #include <algorithm>
@@ -930,6 +931,13 @@ namespace
 				ConfigFile profileConfig;
 				std::string error;
 				UnifiedProfileRuntime::Runtime runtime;
+				// CC W4 B2: each run is a fresh "process": its own configuration latches the running pathway for its
+				// snapshot, and the latch is cleared again after it (the test DLL is one process for every run).
+				struct LatchReset
+				{
+					LatchReset() { Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kUnknown); }
+					~LatchReset() { Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kUnknown); }
+				} unlatched;
 				if (profileConfig.Load(configPath) && runtime.Initialize(profileConfig, {}, error))
 				{
 					const auto snapshot = runtime.GetSnapshot();

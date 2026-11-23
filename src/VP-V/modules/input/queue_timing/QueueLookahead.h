@@ -19,17 +19,10 @@ namespace QueueLookahead
     // The renderer's own bound on the active-picture look-ahead.
     constexpr size_t kMaxActivePictureLookahead = 8;
 
-    inline size_t ResolveActivePictureLookahead(bool configured, size_t value, bool lowLatencyPath,
-        size_t targetFrames, size_t queueSize, size_t maxFrames = kMaxActivePictureLookahead)
-    {
-        if (configured)
-            return (std::min)(value, maxFrames);
-        if (lowLatencyPath)
-            return 0;
-        const size_t fromTarget = targetFrames > 0 ? targetFrames - 1 : 0;
-        const size_t fromQueue = queueSize > 0 ? queueSize - 1 : 0;
-        return (std::min)((std::min)(fromTarget, fromQueue), maxFrames);
-    }
+    // Bodies in QueueLookahead.cpp (VideoProcessor-Lib; CC W4: Bill's TUs carry no VP-V code from it). Unset on the
+    // Original pathway the process runs (Vpv::RunningPathway) is Bill's 0: he has no automatic look-ahead (B1).
+    size_t ResolveActivePictureLookahead(bool configured, size_t value, bool lowLatencyPath,
+        size_t targetFrames, size_t queueSize, size_t maxFrames = kMaxActivePictureLookahead);
 
     // Bug hunt 3 F2: the frames the active-picture look-ahead needs the locked-film queue
     // to keep (LockedFilmQueueTarget's floor; 0 = no floor of its own). An explicit value

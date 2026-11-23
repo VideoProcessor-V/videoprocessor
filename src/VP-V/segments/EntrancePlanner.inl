@@ -32,6 +32,9 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		// gpu as before C1, and the entry Bill does not have is released (silent when it is not engaged).
 		frameQuiet.OriginalFrame(d3d11 ? d3d11->gpu : nullptr);
 		SyncFallback(FallbackCatalog::NativeReadback(0, 0));
+#if defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
+		renderParams.output_fbo_float32 = false;   // CC W4 MUST-6 / SHOULD-W4-2: before this frame's subtitle / NLS preparation copies renderParams
+#endif
 	}
 	else
 	{

@@ -677,31 +677,31 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 
 | Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
 |---|---|---|---|---|---|---|---|
-| `baud` | ambient | General > Room lights | - | - | 115200 | - | ORPHAN? |
+| `baud` | ambient | VP-V > On both pathways > Room lights | - | - | 115200 | - | ORPHAN? |
 | `capture_device` | general | General > Hardware | - | - | No capture devices discovered | - |  |
-| `capture_display_fixes` | general | General > General behavior | - | - | checked | - | retire A |
+| `capture_display_fixes` | general | VP-V > Input > Capture fixes (under test) | - | - | checked | - | retire A |
 | `capture_input` | general | General > Hardware | - | - | No inputs discovered | - |  |
 | `chroma_downsampling` | directshow.conversion | General > Hardware | - | - | Average | - |  |
 | `container_colorspace` | general | General > Input processing | - | - | Follow input | - |  |
 | `conversion_method` | directshow.conversion | General > Hardware | - | - | Auto | - |  |
-| `file_av_offset_ms` | general | General > File playback (VP Renderer filter) | - | - | 0 ms | - |  |
-| `file_led_holdover_ms` | general | General > File playback (VP Renderer filter) | - | - | 3000 ms | - |  |
+| `file_av_offset_ms` | general | VP-V > On both pathways > File playback (VP Renderer filter) | - | - | 0 ms | - |  |
+| `file_led_holdover_ms` | general | VP-V > On both pathways > File playback (VP Renderer filter) | - | - | 3000 ms | - |  |
 | `frame_offset` | directshow | General > Timing | - | - | 90 | - |  |
 | `fullscreen` | general | General > General behavior | - | - | unchecked | - |  |
 | `fullscreen_monitor_session_mode` | general | General > Renderer | - | - | Keep the existing displays | - |  |
 | `hdr_colorspace` | general | General > Input processing | - | - | Follow input | - |  |
 | `hdr_luminance` | general | General > Input processing | - | - | Follow input | - |  |
 | `hide_legacy_renderers` | general | General > Renderer | - | - | checked | - |  |
-| `hold_s` | ambient | General > Room lights | - | - | 5 | - | ORPHAN? |
-| `lux_dark` | ambient | General > Room lights | - | - | 8 | - | ORPHAN? |
-| `lux_lit` | ambient | General > Room lights | - | - | 20 | - | ORPHAN? |
-| `magewell_recover_faults` | general | General > General behavior | - | - | checked | - | retire A |
+| `hold_s` | ambient | VP-V > On both pathways > Room lights | - | - | 5 | - | ORPHAN? |
+| `lux_dark` | ambient | VP-V > On both pathways > Room lights | - | - | 8 | - | ORPHAN? |
+| `lux_lit` | ambient | VP-V > On both pathways > Room lights | - | - | 20 | - | ORPHAN? |
+| `magewell_recover_faults` | general | VP-V > On both pathways > Magewell fault recovery (under test) | - | - | checked | - | retire A |
 | `max_core_count` | directshow.conversion | General > Hardware | - | - | 1 | - |  |
 | `min_core_count` | directshow.conversion | General > Hardware | - | - | 1 | - |  |
-| `mode` | ambient | General > Room lights | - | - | Off | - |  |
+| `mode` | ambient | VP-V > On both pathways > Room lights | - | - | Off | - |  |
 | `noui` | general | General > General behavior | - | - | unchecked | - |  |
 | `persist_profile_selection` | general | General > General behavior | - | - | unchecked | - |  |
-| `port` | ambient | General > Room lights | - | - | COM5 | - | ORPHAN? |
+| `port` | ambient | VP-V > On both pathways > Room lights | - | - | COM5 | - | ORPHAN? |
 | `ppm` | directshow.ppm | General > Hardware | - | - | no correction | - |  |
 | `profile_change_display_seconds` | general | General > Renderer | - | - | 5 seconds | - |  |
 | `queue_auto_reset` | general | General > General behavior | - | - | checked | - |  |
@@ -715,7 +715,7 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `rgb_10bit_packing` | decklink | General > Hardware | - | - | AUTO: r210 | - |  |
 | `rgb_12bit_packing` | decklink | General > Hardware | - | - | AUTO: R12B | - |  |
 | `rgb_8bit_packing` | decklink | General > Hardware | - | - | AUTO: ARGB | - |  |
-| `room` | ambient | General > Room lights | - | - | Dark | - | ORPHAN? |
+| `room` | ambient | VP-V > On both pathways > Room lights | - | - | Dark | - | ORPHAN? |
 | `scale_osd` | general | General > Renderer | - | - | unchecked | - |  |
 | `scene_detect` | general | General > General behavior | - | - | unchecked | - |  |
 | `startminimized` | general | General > General behavior | - | - | unchecked | - |  |

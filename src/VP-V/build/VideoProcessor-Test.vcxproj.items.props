@@ -26,6 +26,7 @@
     <ClCompile Include="..\VP-V\tests\suite\LedIntentLimitsTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\MotionIntentTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\IntentInterpreterTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\RunningPathwayTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\H3TimingTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\FileSourceRuleVariableTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\FileHostTests.cpp" />
@@ -424,6 +425,10 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\control\config\VpvRendererSettings.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\scaling\rebase\SourceRebase.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -648,6 +653,7 @@
     <ClCompile Include="..\VP-V\tests\suite\DiagnosticHistoryTests.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\tests\DiagnosticsAdapterTests.cpp" />
     <ClCompile Include="..\VP-V\modules\control\config\tests\VpvProfileQueueAdviceTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\control\config\tests\VpvRendererSettingsPostLoadTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\StateReportTests.cpp" />
     <ClCompile Include="..\VP-V\tests\harness\RendererCaptureHarnessTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\VpScaleRenderMotionTests.cpp" />

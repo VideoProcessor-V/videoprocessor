@@ -3,7 +3,9 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/core/RunningPathwayLatch.h>
 #include <VP-V/modules/control/config/VpvProfileQueueAdvice.h>
+#include <VP-V/modules/motion/estimation/MotionAhead.h>   // the expected depths (the advice header declares only)
 #include <VP-V/modules/input/queue_timing/QueueLatency.h>
 #include <ConfigFile.h>
 #include <RendererProfileConfig.h>
@@ -58,6 +60,14 @@ namespace
 	const char* kQueueText =
 		"[general]\nrenderer: VP Renderer\n"
 		"[queue]\ntarget_frames: 3\ntarget_latency_ms: 267\nlow_latency_path: on\n";
+
+	// CC W4 B2: the snapshot builder latches the process's running pathway (Vpv::RunningPathway) from the first
+	// configuration it sees; the latch is process-wide in the test DLL, so each snapshot test starts and ends unlatched.
+	struct LatchReset
+	{
+		LatchReset() { Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kUnknown); }
+		~LatchReset() { Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kUnknown); }
+	};
 
 	std::shared_ptr<const UnifiedProfileRuntime::Snapshot> SnapshotOf(const std::string& text)
 	{
@@ -141,6 +151,7 @@ namespace VideoProcessorTest
 		// queue: 3 frames (target_latency_ms ignored), look-ahead 0 (not Auto), no low-latency path, no rate fixes.
 		TEST_METHOD(OriginalPathwaySnapshotIsBillsQueue)
 		{
+			LatchReset unlatched;   // CC W4 B2: this configuration is the first the (fresh) runtime latches
 			const auto original = SnapshotOf(std::string(kQueueText) + "[vpv]\npipeline_original_pathway: on\n");
 			const auto& q = original->queue;
 			Assert::IsTrue(q.hasTargetFrames && q.targetFrames == 3, L"Bill's target_frames changed");
@@ -164,6 +175,7 @@ namespace VideoProcessorTest
 		{
 			for (const char* pathway : { "", "[vpv]\npipeline_original_pathway: off\n" })
 			{
+				LatchReset unlatched;   // CC W4 B2: this configuration is the first the (fresh) runtime latches
 				const auto vp = SnapshotOf(std::string(kQueueText) + pathway);
 				const auto& q = vp->queue;
 				Assert::IsTrue(q.hasTargetLatencyMs && q.targetLatencyMs == 267, L"target_latency_ms lost on the VP pathway");
@@ -171,6 +183,39 @@ namespace VideoProcessorTest
 				Assert::IsFalse(q.hasActivePictureLookaheadFrames, L"the VP pathway's Auto look-ahead was replaced");
 				Assert::IsTrue(vp->generalRateFixes, L"general-rate fixes lost on the VP pathway");
 			}
+		}
+
+		// CC W4 B2: the queue follows the pathway the process RUNS (latched by the first snapshot), not a later
+		// configuration: once Original is latched, a VP-V configuration still gets Bill's queue (and no look-ahead
+		// depth / rate fixes); the latch is reported as Original.
+		TEST_METHOD(LatchedOriginalKeepsBillsQueueForALaterVpConfiguration)
+		{
+			LatchReset unlatched;
+			SnapshotOf(std::string(kQueueText) + "[vpv]\npipeline_original_pathway: on\n");
+			Assert::IsTrue(Vpv::RunningPathway::Original(), L"the first (Original) snapshot did not latch Original");
+			const auto later = SnapshotOf(std::string(kQueueText) + "[vpv]\npipeline_original_pathway: off\n");
+			const auto& q = later->queue;
+			Assert::IsTrue(q.hasTargetLatencyMs && q.targetLatencyMs == 0, L"a later VP-V configuration's target_latency_ms reached the Original process");
+			Assert::IsFalse(q.lowLatencyPath, L"a later VP-V configuration's low-latency path reached the Original process");
+			Assert::IsTrue(q.hasActivePictureLookaheadFrames && q.activePictureLookaheadFrames == 0, L"the Original process's unset look-ahead is not Bill's 0");
+			Assert::IsFalse(later->generalRateFixes, L"general-rate fixes in the Original process");
+			Assert::IsTrue(Vpv::RunningPathway::Original(), L"a later configuration changed the latch");
+		}
+
+		// CC W4 B2, the other way: once VP-V is latched, a later Original configuration keeps the VP queue keys
+		// (the switch applies at the next start, as the renderer reads it).
+		TEST_METHOD(LatchedVpKeepsTheVpQueueKeysForALaterOriginalConfiguration)
+		{
+			LatchReset unlatched;
+			SnapshotOf(std::string(kQueueText));
+			Assert::IsFalse(Vpv::RunningPathway::Original(), L"the first (VP-V) snapshot latched Original");
+			Assert::AreEqual(int(Vpv::RunningPathway::kVpv), Vpv::RunningPathway::Value().load(), L"the first snapshot did not latch VP-V");
+			const auto later = SnapshotOf(std::string(kQueueText) + "[vpv]\npipeline_original_pathway: on\n");
+			const auto& q = later->queue;
+			Assert::IsTrue(q.hasTargetLatencyMs && q.targetLatencyMs == 267, L"the VP-V process lost target_latency_ms to a later Original configuration");
+			Assert::IsTrue(q.lowLatencyPath, L"the VP-V process lost low_latency_path to a later Original configuration");
+			Assert::IsFalse(q.hasActivePictureLookaheadFrames, L"the VP-V process's Auto look-ahead was replaced");
+			Assert::IsTrue(later->generalRateFixes, L"the VP-V process lost general-rate fixes");
 		}
 	};
 }

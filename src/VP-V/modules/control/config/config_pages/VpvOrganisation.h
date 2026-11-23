@@ -193,7 +193,8 @@ namespace Vpv
 			{ "colour", "sdr", "SDR tone shape", "A gentle highlight knee for SDR sources.", false, false, {
 				{ K::Toggle, "sdr_tone_shape" } } },
 			{ "colour", "room", "Room-light adaptation (experimental)",
-				"Adjusts black and contrast to the room light the sensor measures.", false, false, {
+				"Adjusts black and contrast to the room light the sensor measures. The room and the light sensor are set on "
+				"this page's Room lights card (On both pathways, below the unit tabs).", false, false, {
 				{ K::Toggle, "ambient_adapt" } } },
 			{ "colour", "appearance", "Room and appearance (experimental)",
 				"Adapts the picture to the room and to the screen white (CAM16). While on it replaces the gamma boost and the saturation steps and takes over from room-light adaptation.", false, false, {

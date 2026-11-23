@@ -20,7 +20,7 @@ namespace CaptureDisplayFixes
 		static std::atomic<bool> on{ true };
 		return on;
 	}
-	inline bool Enabled() { return Flag().load(std::memory_order_relaxed); }
+	bool Enabled();   // GEM-221/MUST-8: the switch, off on Original (VP-V/modules/input/capture/CaptureDisplayFixes.cpp)
 	// True when the value changed.
 	inline bool Set(bool on) { return Flag().exchange(on, std::memory_order_relaxed) != on; }
 }
