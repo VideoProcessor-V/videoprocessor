@@ -419,6 +419,186 @@ GridFadeFit FitGridFadeAligned(const double refAligned[kGridH][kGridW], const do
     return fit;
 }
 
+GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const double curAligned[kGridH][kGridW],
+                                  double vx, double vy)
+{
+    constexpr int R = kLocalRadius;
+    constexpr int kIntH = kGridH - 2 * R;
+    constexpr int kIntW = kGridW - 2 * R;
+    constexpr int kIntN = kIntH * kIntW;
+    constexpr double kN = double(kIntN);
+    static_assert(kIntH == 14 && kIntW == 28, "FitMotionTolerantFade tiles assume 28x14 interior");
+
+    GridFadeFit fit;
+    fit.vx = vx;
+    fit.vy = vy;
+
+    // Part A: Order-statistic (quantile) OLS affine fit over sorted 28x14 = 392 interior cells
+    // (invariant under area-preserving non-rigid local motion; zero attenuation bias).
+    double rSorted[kIntN], cSorted[kIntN];
+    int idx = 0;
+    for (int y = R; y < kGridH - R; ++y)
+        for (int x = R; x < kGridW - R; ++x) {
+            rSorted[idx] = refAligned[y][x];
+            cSorted[idx] = curAligned[y][x];
+            ++idx;
+        }
+    std::sort(rSorted, rSorted + kIntN);
+    std::sort(cSorted, cSorted + kIntN);
+
+    double sx = 0.0, sy = 0.0;
+    for (int k = 0; k < kIntN; ++k) {
+        sx += rSorted[k];
+        sy += cSorted[k];
+    }
+    const double mx = sx / kN;
+    const double my = sy / kN;
+    double sxx = 0.0, sxy = 0.0;
+    for (int k = 0; k < kIntN; ++k) {
+        const double dx = rSorted[k] - mx;
+        sxx += dx * dx;
+        sxy += dx * (cSorted[k] - my);
+    }
+    if (sxx <= 1e-6)
+        return fit;
+
+    const double A = sxy / sxx;
+    const double c = my - A * mx;
+    fit.gain = A;
+    if (!(A > 0.0) || std::fabs(1.0 - A) <= kFadeRunMinGain)
+        return fit;
+
+    const double b = c / (1.0 - A);
+    fit.black = b;
+    if (!(b > double(kFadeMinBlack) && b < double(kFadeMaxBlack)) || !(mx > b && my > b))
+        return fit;
+
+    const double minCell = (std::min)(rSorted[0], cSorted[0]);
+    const double litFloor = (std::max)(b, minCell);
+    const int dir = A > 1.0 ? 1 : -1;
+    fit.dir = dir;
+
+    double sumIdSq = 0.0, sumFadeSq = 0.0;
+    int litCells = 0, sameSign = 0, oppSign = 0;
+    for (int k = 0; k < kIntN; ++k) {
+        if ((std::max)(rSorted[k], cSorted[k]) > litFloor + double(kFadeMinSpread)) {
+            ++litCells;
+            const double delta = cSorted[k] - rSorted[k];
+            const double res = cSorted[k] - (A * rSorted[k] + c);
+            sumIdSq += delta * delta;
+            sumFadeSq += res * res;
+            if (double(dir) * delta > kFadeCellStepEps)
+                ++sameSign;
+            else if (-double(dir) * delta > kFadeCellStepEps)
+                ++oppSign;
+        }
+    }
+    fit.litCells = litCells;
+    fit.sameSign = sameSign;
+    fit.oppSign = oppSign;
+    if (litCells <= 0)
+        return fit;
+
+    const double vId = sumIdSq / double(litCells);
+    const double vFade = sumFadeSq / double(litCells);
+    fit.eId = std::sqrt(vId);
+    fit.eFade = std::sqrt(vFade);
+    if (!(fit.eId > kFadeCellStepEps && vFade < kFadeResidualReduction * vId))
+        return fit;
+    if (double(sameSign) < kFadeSpatialConsensus * double(sameSign + oppSign))
+        return fit;
+    if (double(sameSign) < kFadeSpatialCoverage * double(litCells))
+        return fit;
+
+    // Part B: Exact 4x2 = 8 square 7x7 macro-tile spatial uniformity confirmation
+    // (cancels internal motion dipoles while rejecting local occlusions / boxes / localized graphics).
+    constexpr int kTileCols = 4;
+    constexpr int kTileRows = 2;
+    constexpr int kTileSize = 7;
+    constexpr int kNumTiles = kTileCols * kTileRows;
+    constexpr double kTileArea = double(kTileSize * kTileSize);
+    int tileLit = 0, tileSameEps = 0, tileOppEps = 0;
+    for (int tr = 0; tr < kTileRows; ++tr) {
+        for (int tc = 0; tc < kTileCols; ++tc) {
+            double sumR = 0.0, sumC = 0.0;
+            const int y0 = R + tr * kTileSize;
+            const int x0 = R + tc * kTileSize;
+            for (int dy = 0; dy < kTileSize; ++dy)
+                for (int dx = 0; dx < kTileSize; ++dx) {
+                    sumR += refAligned[y0 + dy][x0 + dx];
+                    sumC += curAligned[y0 + dy][x0 + dx];
+                }
+            const double refTile = sumR / kTileArea;
+            const double curTile = sumC / kTileArea;
+            if ((std::max)(refTile, curTile) > litFloor + double(kFadeMinSpread)) {
+                ++tileLit;
+                const double delta = curTile - refTile;
+                if (double(dir) * delta > kFadeCellStepEps)
+                    ++tileSameEps;
+                else if (-double(dir) * delta > kFadeCellStepEps)
+                    ++tileOppEps;
+            }
+        }
+    }
+    if (double(tileLit) < kFadeSpatialCoverage * double(kNumTiles))
+        return fit;
+    if (tileSameEps <= 0)
+        return fit;
+    if (double(tileSameEps) < kFadeSpatialConsensus * double(tileSameEps + tileOppEps))
+        return fit;
+    if (double(tileSameEps) < kFadeSpatialCoverage * double(tileLit))
+        return fit;
+
+    // Part C: Coarse 14x7 (2x2-pooled) scene-structure continuity >= kSameStructure (0.4).
+    // 2x2 sums are scale-invariant for Pearson correlation and avoid unrelated cuts with similar histograms.
+    constexpr int kPoolH = kIntH / 2;
+    constexpr int kPoolW = kIntW / 2;
+    constexpr int kPoolN = kPoolH * kPoolW;
+    double rp[kPoolN], cp[kPoolN];
+    double sumRp = 0.0, sumCp = 0.0;
+    int pIdx = 0;
+    for (int py = 0; py < kPoolH; ++py) {
+        const int y = R + 2 * py;
+        for (int px = 0; px < kPoolW; ++px) {
+            const int x = R + 2 * px;
+            const double rv = refAligned[y][x] + refAligned[y][x + 1] + refAligned[y + 1][x] + refAligned[y + 1][x + 1];
+            const double cv = curAligned[y][x] + curAligned[y][x + 1] + curAligned[y + 1][x] + curAligned[y + 1][x + 1];
+            rp[pIdx] = rv;
+            cp[pIdx] = cv;
+            sumRp += rv;
+            sumCp += cv;
+            ++pIdx;
+        }
+    }
+    const double mxP = sumRp / double(kPoolN);
+    const double myP = sumCp / double(kPoolN);
+    double sxxP = 0.0, syyP = 0.0, sxyP = 0.0;
+    for (int k = 0; k < kPoolN; ++k) {
+        const double dr = rp[k] - mxP;
+        const double dc = cp[k] - myP;
+        sxxP += dr * dr;
+        syyP += dc * dc;
+        sxyP += dr * dc;
+    }
+    const double denP = std::sqrt((sxxP > 0.0 ? sxxP : 0.0) * (syyP > 0.0 ? syyP : 0.0));
+    const double corr2x2 = denP > 1e-12 ? sxyP / denP : 0.0;
+    if (!(corr2x2 >= kSameStructure))
+        return fit;
+
+    fit.valid = true;
+    return fit;
+}
+
+bool HighlightScalingConsistent(uint32_t refP99P4, uint32_t curP99P4, double gain, double black, int dir)
+{
+    const double rp = double(refP99P4) * kGridScale;
+    const double cp = double(curP99P4) * kGridScale;
+    if (!(rp > black + double(kFadeMinSpread) && cp > black + double(kFadeMinSpread)))
+        return true;
+    const double aP99 = (cp - black) / (rp - black);
+    return double(dir) * (aP99 - 1.0) >= kFadeResidualReduction * std::fabs(1.0 - gain);
+}
+
 GridFadeFit FitGridFadeGrid(const double ref[kGridH][kGridW], const double cur[kGridH][kGridW], int searchRadius)
 {
     double refAligned[kGridH][kGridW], curAligned[kGridH][kGridW];
@@ -484,10 +664,12 @@ EventSignals ClassifyEvents(const SourceStats::Record& prev, const SourceStats::
                                                           outCache->vx, outCache->vy);
                     outCache->valid = true;
                     outCache->adjFitValid = true;
-                    e.fade = outCache->adjFit.valid && std::fabs(1.0 - outCache->adjFit.gain) < 1.0 / double(kFadeMaxDiv);
+                    e.fade = outCache->adjFit.valid && std::fabs(1.0 - outCache->adjFit.gain) < 1.0 / double(kFadeMaxDiv) &&
+                        HighlightScalingConsistent(prev.p99, cur.p99, outCache->adjFit.gain, outCache->adjFit.black, outCache->adjFit.dir);
                 } else {
                     const GridFadeFit fit = FitGridFadeGrid(gp.g, gc.g, kShiftRadius);
-                    e.fade = fit.valid && std::fabs(1.0 - fit.gain) < 1.0 / double(kFadeMaxDiv);
+                    e.fade = fit.valid && std::fabs(1.0 - fit.gain) < 1.0 / double(kFadeMaxDiv) &&
+                        HighlightScalingConsistent(prev.p99, cur.p99, fit.gain, fit.black, fit.dir);
                 }
             }
         }
@@ -621,26 +803,75 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
         if (hasGrid)
             CountCellStepSigns(prev.cells, cur.cells, &brightened, &darkened);
 
-        // (1) Active fade-out collapsing into flat/near-flat black (never triggers on a hard cut to a textured dark shot).
-        bool curFlatBlack = spreadCur <= kBlackSpreadP4;
-        if (!curFlatBlack && hasGrid) {
-            Grid gc;
-            GridOf(cur, &gc);
-            curFlatBlack = Flatness(gc) < kFlatF;
-        }
-        const bool activeFadeOutToBlack = run.direction < 0 && activeFade && dMean < 0 && curFlatBlack &&
-            cur.mean < kBlackMeanMaxP4 && aMean < kMaxFadeStepP4 && aMean * kFadeMaxDiv < contRef &&
-            CollapseToBlackOk();
-        if (activeFadeOutToBlack) {
-            ++run.pairs;
-            run.refSpread = (std::max)(run.refSpread, spread);
-            FadeRunEndAt(run, cur);
-            const double fk = PairFadeKeep(prev, cur);
-            if (frameKeep)
-                *frameKeep = fk;
-            run.keep *= fk;
-            ++run.fadePairs;
-            return true;
+        // (1) Active fade-out collapsing into flat/near-flat black, or continuing across near-black histogram quantization
+        // (time-reversal symmetry with black-origin fade-in below; never triggers on a hard cut to a different dark shot).
+        if (run.direction < 0 && activeFade && dMean < 0 && cur.mean < kBlackMeanMaxP4 &&
+            aMean < kMaxFadeStepP4 && aMean * kFadeMaxDiv < contRef) {
+            bool curFlatBlack = spreadCur <= kBlackSpreadP4;
+            if (!curFlatBlack && hasGrid) {
+                Grid gc;
+                GridOf(cur, &gc);
+                curFlatBlack = Flatness(gc) < kFlatF;
+            }
+            if (curFlatBlack && CollapseToBlackOk()) {
+                ++run.pairs;
+                run.refSpread = (std::max)(run.refSpread, spread);
+                FadeRunEndAt(run, cur);
+                const double fk = PairFadeKeep(prev, cur);
+                if (frameKeep)
+                    *frameKeep = fk;
+                run.keep *= fk;
+                ++run.fadePairs;
+                return true;
+            }
+            if (hasGrid && aSpread < kMaxFadeStepP4) {
+                GridFadeFit fadeOutFit;
+                bool fromBase = false;
+                if (run.baseGridValid) {
+                    fadeOutFit = FitGridFade(run.baseCells, cur.cells, kLocalRadius);
+                    if (fadeOutFit.valid && fadeOutFit.dir < 0 &&
+                        HighlightScalingConsistent(run.baseP99, cur.p99, fadeOutFit.gain, fadeOutFit.black, fadeOutFit.dir))
+                        fromBase = true;
+                    else
+                        fadeOutFit = GridFadeFit();
+                }
+                if (!fadeOutFit.valid) {
+                    double prevABuf[kGridH][kGridW], curABuf[kGridH][kGridW];
+                    double svx = 0.0, svy = 0.0;
+                    const double (*prevA)[kGridW] = prevABuf;
+                    const double (*curA)[kGridW] = curABuf;
+                    if (preAligned != nullptr && preAligned->valid) {
+                        prevA = preAligned->prevAligned;
+                        curA = preAligned->curAligned;
+                        svx = preAligned->vx;
+                        svy = preAligned->vy;
+                    } else {
+                        double prevG[kGridH][kGridW], curG[kGridH][kGridW];
+                        LoadGridCodes(prev.cells, prevG);
+                        LoadGridCodes(cur.cells, curG);
+                        AlignGrid(prevG, curG, kShiftRadius, prevABuf, curABuf, &svx, &svy);
+                    }
+                    const GridFadeFit adjOut = (preAligned != nullptr && preAligned->adjFitValid)
+                        ? preAligned->adjFit
+                        : FitGridFadeAligned(prevA, curA, svx, svy);
+                    if (adjOut.valid && adjOut.dir < 0 &&
+                        HighlightScalingConsistent(prev.p99, cur.p99, adjOut.gain, adjOut.black, adjOut.dir))
+                        fadeOutFit = adjOut;
+                }
+                if (fadeOutFit.valid) {
+                    const double k = (fromBase ? run.anchorKeep : run.keep) * (std::min)(fadeOutFit.gain, 1.0 / fadeOutFit.gain);
+                    if (k < run.keep) {
+                        ++run.pairs;
+                        run.refSpread = (std::max)(run.refSpread, spread);
+                        FadeRunEndAt(run, cur);
+                        if (frameKeep)
+                            *frameKeep = run.keep > 0.0 ? k / run.keep : 0.0;
+                        run.keep = k;
+                        ++run.fadePairs;
+                        return true;
+                    }
+                }
+            }
         }
 
         // (2) Black-origin fade-in continuation across near-black histogram bin quantization.
@@ -667,6 +898,8 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
                 const bool stepUp = StepBrightening(prevA, curA);
                 if (!run.baseGridValid && spreadPrev > kBlackSpreadP4) {
                     CopyCellsTo16(prev.cells, run.baseCells);
+                    run.baseMean = prev.mean;
+                    run.baseP99 = prev.p99;
                     run.baseGridValid = true;
                     run.midGridValid = false;
                     run.cumVx = 0.0;
@@ -776,12 +1009,13 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
 
         const bool fromBlack = spreadPrev <= kBlackSpreadP4 && prev.mean < kBlackMeanMaxP4 &&
             dMean > 0 && dP99 > 0 && aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4;
-        const bool jump = aMean * kFadeMaxDiv >= contRef && !(run.blackOrigin && dMean > 0 && aMean < kMaxFadeStepP4);
+        const bool jump = (aMean * kFadeMaxDiv >= contRef || aSpread * kFadeMaxDiv >= contRef) &&
+            !(run.blackOrigin && dMean > 0 && aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4);
         const bool continues = run.direction != 0 && !jump && (stepDir == run.direction || stepDir == 0);
 
         if (!continues) {
             run = FadeRun();
-            if (stepDir == 0 || (!fromBlack && aMean * kFadeMaxDiv >= int64_t(spread))) {
+            if (stepDir == 0 || (!fromBlack && (aMean * kFadeMaxDiv >= int64_t(spread) || aSpread * kFadeMaxDiv >= int64_t(spread)))) {
                 FadeRunEndAt(run, cur);
                 return false;
             }
@@ -829,12 +1063,15 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
                 if (run.midGridValid) {
                     for (int i = 0; i < kGridW * kGridH; ++i)
                         run.baseCells[i] = run.midCells[i];
+                    run.baseP99 = run.midP99;
                     run.anchorKeep = run.midAnchorKeep;
                     run.cumVx = run.midCumVx;
                     run.cumVy = run.midCumVy;
                     run.midGridValid = false;
                 } else {
                     CopyCellsTo16(prev.cells, run.baseCells);
+                    run.baseMean = prev.mean;
+                    run.baseP99 = prev.p99;
                     run.anchorKeep = run.keep;
                     run.cumVx = stepVx;
                     run.cumVy = stepVy;
@@ -842,6 +1079,7 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             }
             if (!run.midGridValid && (std::max)(std::fabs(run.cumVx), std::fabs(run.cumVy)) >= double(kShiftRadius)) {
                 CopyCellsTo16(cur.cells, run.midCells);
+                run.midP99 = cur.p99;
                 run.midGridValid = true;
                 run.midAnchorKeep = run.keep;
                 run.midCumVx = 0.0;
@@ -861,7 +1099,10 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
         }
 
         // Helper: verify that the current motion-aligned step (prev -> cur) is still moving in run.direction
-        // (supports sub-0.5-code slow fades and scrolling text while stopping immediately on static plateaus).
+        // (D4: symmetric-noise Bayes likelihood-ratio strict majority on above-LSB cells + all-lit majority;
+        //  D8: order-statistic OLS step slope must scale in run.direction).
+        bool stepSlopeChecked = false;
+        bool stepSlopeOk = true;
         auto StepStillMoving = [&](double black) -> bool {
             const bool stationary = (stepVx == 0.0 && stepVy == 0.0);
             if (stationary) {
@@ -871,6 +1112,40 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
                 if (stepMean * double(run.direction) <= 0.0)
                     return false;
             }
+            if (!stepSlopeChecked) {
+                stepSlopeChecked = true;
+                constexpr int kIntN = (kGridH - 2 * R) * (kGridW - 2 * R);
+                double pSorted[kIntN], cSorted[kIntN];
+                int sIdx = 0;
+                for (int y = R; y < kGridH - R; ++y)
+                    for (int x = R; x < kGridW - R; ++x) {
+                        pSorted[sIdx] = prevAligned[y][x];
+                        cSorted[sIdx] = curAligned[y][x];
+                        ++sIdx;
+                    }
+                std::sort(pSorted, pSorted + kIntN);
+                std::sort(cSorted, cSorted + kIntN);
+                double sxQ = 0.0, syQ = 0.0;
+                for (int k = 0; k < kIntN; ++k) {
+                    sxQ += pSorted[k];
+                    syQ += cSorted[k];
+                }
+                const double mxQ = sxQ / kN;
+                const double myQ = syQ / kN;
+                double sxxQ = 0.0, sxyQ = 0.0;
+                for (int k = 0; k < kIntN; ++k) {
+                    const double dx = pSorted[k] - mxQ;
+                    sxxQ += dx * dx;
+                    sxyQ += dx * (cSorted[k] - myQ);
+                }
+                if (sxxQ > 1e-6) {
+                    const double stepAQ = sxyQ / sxxQ;
+                    stepSlopeOk = double(run.direction) * (stepAQ - 1.0) > 0.0;
+                }
+            }
+            if (!stepSlopeOk)
+                return false;
+
             double minC = double(kFadeNoBlack);
             for (int y = R; y < kGridH - R; ++y)
                 for (int x = R; x < kGridW - R; ++x) {
@@ -895,51 +1170,67 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
                             ++sOppZero;
                     }
                 }
-            // Cumulative FitGridFade(base -> cur) already enforces strict kFadeSpatialConsensus (0.75) over all lit cells.
-            // On a single-frame step of a slow fade most cells step < kFadeCellStepEps (0.5 code), so require simple
-            // majority (kFadeSpatialCoverage = 0.5) on the sparse above-LSB subset to tolerate local subject motion.
+            if (!(sSameZero > sOppZero))
+                return false;
             if (sSameEps + sOppEps > 0)
-                return double(sSameEps) >= kFadeSpatialCoverage * double(sSameEps + sOppEps);
-            return sSameZero > 0 && double(sSameZero) >= kFadeSpatialConsensus * double(sSameZero + sOppZero);
+                return sSameEps > sOppEps;
+            return double(sSameZero) >= kFadeSpatialConsensus * double(sSameZero + sOppZero);
         };
 
         // 1. Cumulative spatial affine fit: baseCells -> cur.cells (searchRadius = kLocalRadius = 2).
+        // Align once, try rigid FitGridFadeAligned, then motion-tolerant FitMotionTolerantFade on the same aligned grids.
         if (run.baseGridValid) {
-            GridFadeFit fit = FitGridFade(run.baseCells, cur.cells, kLocalRadius);
-            if (fit.valid && fit.dir == run.direction && StepStillMoving(fit.black)) {
+            double baseG[kGridH][kGridW], curG[kGridH][kGridW];
+            double baseAligned[kGridH][kGridW], curBaseAligned[kGridH][kGridW];
+            LoadGridCodes(run.baseCells, baseG);
+            LoadGridCodes(cur.cells, curG);
+            double cumFitVx = 0.0, cumFitVy = 0.0;
+            AlignGrid(baseG, curG, kLocalRadius, baseAligned, curBaseAligned, &cumFitVx, &cumFitVy);
+            GridFadeFit fit = FitGridFadeAligned(baseAligned, curBaseAligned, cumFitVx, cumFitVy);
+            if (!(fit.valid && fit.dir == run.direction))
+                fit = FitMotionTolerantFade(baseAligned, curBaseAligned, cumFitVx, cumFitVy);
+            if (fit.valid && fit.dir == run.direction &&
+                HighlightScalingConsistent(run.baseP99, cur.p99, fit.gain, fit.black, fit.dir) &&
+                StepStillMoving(fit.black)) {
                 const double k = run.anchorKeep * (std::min)(fit.gain, 1.0 / fit.gain);
                 if (k < run.keep) {
                     if (frameKeep)
                         *frameKeep = run.keep > 0.0 ? k / run.keep : 0.0;
                     run.keep = k;
+                    ++run.fadePairs;
+                    if (midCapturedThisFrame)
+                        run.midAnchorKeep = run.keep;
+                    return true;
                 }
-                ++run.fadePairs;
-                if (midCapturedThisFrame)
-                    run.midAnchorKeep = run.keep;
-                return true;
             }
         }
 
         // 2. Rolling adjacent re-anchor for fast pan + fade (prev.cells -> cur.cells, searchRadius = kShiftRadius = 1).
         {
-            const GridFadeFit adjFit = (preAligned != nullptr && preAligned->adjFitValid)
+            GridFadeFit adjFit = (preAligned != nullptr && preAligned->adjFitValid)
                 ? preAligned->adjFit
                 : FitGridFadeAligned(prevAligned, curAligned, stepVx, stepVy);
-            if (adjFit.valid && adjFit.dir == run.direction && StepStillMoving(adjFit.black)) {
-                CopyCellsTo16(prev.cells, run.baseCells);
-                run.baseGridValid = true;
-                run.midGridValid = false;
-                run.cumVx = stepVx;
-                run.cumVy = stepVy;
-                run.anchorKeep = run.keep;
-                const double k = run.anchorKeep * (std::min)(adjFit.gain, 1.0 / adjFit.gain);
+            if (!(adjFit.valid && adjFit.dir == run.direction))
+                adjFit = FitMotionTolerantFade(prevAligned, curAligned, stepVx, stepVy);
+            if (adjFit.valid && adjFit.dir == run.direction &&
+                HighlightScalingConsistent(prev.p99, cur.p99, adjFit.gain, adjFit.black, adjFit.dir) &&
+                StepStillMoving(adjFit.black)) {
+                const double k = run.keep * (std::min)(adjFit.gain, 1.0 / adjFit.gain);
                 if (k < run.keep) {
+                    CopyCellsTo16(prev.cells, run.baseCells);
+                    run.baseMean = prev.mean;
+                    run.baseP99 = prev.p99;
+                    run.baseGridValid = true;
+                    run.midGridValid = false;
+                    run.cumVx = stepVx;
+                    run.cumVy = stepVy;
+                    run.anchorKeep = run.keep;
                     if (frameKeep)
                         *frameKeep = run.keep > 0.0 ? k / run.keep : 0.0;
                     run.keep = k;
+                    ++run.fadePairs;
+                    return true;
                 }
-                ++run.fadePairs;
-                return true;
             }
         }
 

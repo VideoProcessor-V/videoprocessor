@@ -95,6 +95,7 @@ namespace Vpv
 			// U7 v2: verdicts judged with frame seq + 1, verdicts given without it (provisional), tracker restarts (a seek, a gap, a
 			// renumbered frame) and earlier Vp groups rewritten when their confirmation arrived.
 			uint64_t confirmed = 0, provisional = 0, reprimes = 0, republished = 0;
+			uint64_t provisionalCutWithdrawn = 0;   // provisional cut verdicts (cutHere while !confirmed) that became !cut on confirmation
 			// Cuts delivered late (with a later frame's group) and, of them, more than one frame late (frame c + 1 had no group).
 			uint64_t late = 0, lateGap = 0;
 			uint64_t noGrid = 0;          // no-grid fallback verdicts (the v1 pair law), per tracker push (a re-prime pushes again)

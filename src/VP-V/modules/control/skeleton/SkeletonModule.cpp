@@ -471,6 +471,7 @@ namespace Vpv
 			std::string shownVetoOff;   // the cut veto state the cached status text was built for ("" = on)
 			bool shownNoGrid = false;   // the no-grid fallback state the cached status text was built for
 			uint64_t shownSceneRunMisses = 0;   // sceneRunRebuilt + sceneRunReduced the cached status text was built for
+			uint64_t shownProvisionalCutWithdrawn = 0;   // sceneProvisionalCutWithdrawn the cached status text was built for
 			uint8_t shownQueueWired = 0xFF;   // the queue-delivery state the cached status text was built for
 			Vpv::Skeleton::SlotBudgetFeed budgetFeed;   // S0: feeds spare.SetBudget once per source frame + Presenter::spareSlotMs (SlotBudgetFeed.h)
 			VpSkeleton::SpareHost spare;       // B3-Z Z2: the post-present spare slot, driven by R12 AfterPresent (OnAfterPresent)
@@ -528,6 +529,7 @@ namespace Vpv
 				bool deliveredOwn = false;            // this frame's own cut went out with its group (confirmed at its publish)
 				bool deliveredLate = false;           // this frame's own cut went out late, with a later frame's group
 				bool carriesLate = false;             // this frame's group carries an earlier frame's late cut (a re-fill keeps it)
+				bool provisionalCut = false;          // provisional verdict had v.cut == true (cleared on confirmation; counted if withdrawn)
 			};
 			static constexpr size_t kSceneVerdicts = 16;
 			std::unique_ptr<VpUnit::CutFadeJudge::CutTracker> sceneTracker;
@@ -535,6 +537,7 @@ namespace Vpv
 			uint64_t sceneTrackerNewest = 0, sceneTrackerNewestPrint = 0;
 			SceneVerdictSlot sceneVerdicts[kSceneVerdicts];
 			std::atomic<uint64_t> sceneConfirmed{ 0 }, sceneProvisional{ 0 }, sceneReprimes{ 0 }, sceneRepublished{ 0 };
+			std::atomic<uint64_t> sceneProvisionalCutWithdrawn{ 0 };
 			// Delivery (audit U7ACC MUST 3): cuts delivered late (with a later frame's group), of them more than one frame late (frame
 			// c + 1 had no group: dropped, unsealed or no record), and the newest frame a fill judged (the late search starts there).
 			std::atomic<uint64_t> sceneLate{ 0 }, sceneLateGap{ 0 };
@@ -654,6 +657,9 @@ namespace Vpv
 					SceneSlot& d = st.sceneVerdicts[v.seq % HostState::kSceneVerdicts];
 					if (d.used && d.seq == v.seq)
 					{
+						if (d.provisionalCut && !v.cut)
+							st.sceneProvisionalCutWithdrawn.fetch_add(1, std::memory_order_relaxed);
+						d.provisionalCut = false;   // counted exactly once, store-on or store-off
 						d.v = v;
 						if (done)
 							done->push_back(v.seq);
@@ -664,6 +670,7 @@ namespace Vpv
 				n.deliveredOwn = samePicture && n.deliveredOwn;   // the same picture again keeps its delivery
 				n.deliveredLate = samePicture && n.deliveredLate;
 				n.carriesLate = samePicture && n.carriesLate;
+				n.provisionalCut = false;
 				n.used = true;
 				n.seq = s;
 				n.print = print;
@@ -758,6 +765,7 @@ namespace Vpv
 				mine.seq = seq;
 				mine.print = print;
 				mine.v = v;
+				mine.provisionalCut = v.cut;
 				st.sceneProvisional.fetch_add(1, std::memory_order_relaxed);
 				return v;
 			}
@@ -2571,6 +2579,7 @@ namespace Vpv
 				c.provisional = st->sceneProvisional.load(std::memory_order_relaxed);
 				c.reprimes = st->sceneReprimes.load(std::memory_order_relaxed);
 				c.republished = st->sceneRepublished.load(std::memory_order_relaxed);
+				c.provisionalCutWithdrawn = st->sceneProvisionalCutWithdrawn.load(std::memory_order_relaxed);
 				c.late = st->sceneLate.load(std::memory_order_relaxed);
 				c.lateGap = st->sceneLateGap.load(std::memory_order_relaxed);
 				c.noGrid = st->sceneNoGrid.load(std::memory_order_relaxed);
@@ -3499,15 +3508,18 @@ namespace Vpv
 			const std::string vetoOff = SceneVetoOff(st.host);
 			const bool noGrid = st.sceneNoGrid.load(std::memory_order_relaxed) != 0;   // the no-grid decision engages at once too
 			const uint64_t sceneRunMisses = st.sceneRunRebuilt.load(std::memory_order_relaxed) + st.sceneRunReduced.load(std::memory_order_relaxed);
+			const uint64_t provisionalCutWithdrawn = st.sceneProvisionalCutWithdrawn.load(std::memory_order_relaxed);
 			const bool liveDriven = st.entranceLiveDriven.load(std::memory_order_acquire);
 			const bool due = st.frames <= kEarlyRefreshFrames || st.frames % kRefreshEvery == 1 || st.waiting != st.shownWaiting ||
 				hasBundle != st.shownBundle || queueWired != st.shownQueueWired || queueKey != st.shownQueueKey || vetoOff != st.shownVetoOff ||
-				noGrid != st.shownNoGrid || sceneRunMisses != st.shownSceneRunMisses || liveDriven != st.shownEntranceLiveDriven;
+				noGrid != st.shownNoGrid || sceneRunMisses != st.shownSceneRunMisses ||
+				provisionalCutWithdrawn != st.shownProvisionalCutWithdrawn || liveDriven != st.shownEntranceLiveDriven;
 			if (!due)
 				return;
 			st.shownVetoOff = vetoOff;
 			st.shownNoGrid = noGrid;
 			st.shownSceneRunMisses = sceneRunMisses;
+			st.shownProvisionalCutWithdrawn = provisionalCutWithdrawn;
 			st.shownEntranceLiveDriven = liveDriven;
 			st.shownQueueKey = queueKey;
 			st.shownQueueWired = queueWired;
@@ -3726,11 +3738,12 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					const std::string vetoState = vetoOff.empty() ? std::string("on") : "off (" + vetoOff + ")";
 					char sceneLine[1024] = {};
 					std::snprintf(sceneLine, sizeof(sceneLine),
-						"Skeleton scene: %llu verdict(s) confirmed with the next frame, %llu provisional, %llu tracker restart(s), %llu group(s) confirmed later; %llu cut(s) delivered late (%llu more than one frame late); %llu no-grid fallback verdict(s) (v1 pair law); vector cut veto %s, %llu vector pair(s) refused at confirmed cuts, %llu asked before their frame's verdict (%llu of them into a cut confirmed later) (all renderers and all vector readers, P2 CPU form included; a gap read asks each frame of its span)",
+						"Skeleton scene: %llu verdict(s) confirmed with the next frame, %llu provisional, %llu tracker restart(s), %llu group(s) confirmed later; %llu provisional cut(s) withdrawn on confirmation; %llu cut(s) delivered late (%llu more than one frame late); %llu no-grid fallback verdict(s) (v1 pair law); vector cut veto %s, %llu vector pair(s) refused at confirmed cuts, %llu asked before their frame's verdict (%llu of them into a cut confirmed later) (all renderers and all vector readers, P2 CPU form included; a gap read asks each frame of its span)",
 						static_cast<unsigned long long>(st.sceneConfirmed.load(std::memory_order_relaxed)),
 						static_cast<unsigned long long>(st.sceneProvisional.load(std::memory_order_relaxed)),
 						static_cast<unsigned long long>(st.sceneReprimes.load(std::memory_order_relaxed)),
 						static_cast<unsigned long long>(st.sceneRepublished.load(std::memory_order_relaxed)),
+						static_cast<unsigned long long>(provisionalCutWithdrawn),
 						static_cast<unsigned long long>(st.sceneLate.load(std::memory_order_relaxed)),
 						static_cast<unsigned long long>(st.sceneLateGap.load(std::memory_order_relaxed)),
 						static_cast<unsigned long long>(st.sceneNoGrid.load(std::memory_order_relaxed)),

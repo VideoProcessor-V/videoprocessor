@@ -28,7 +28,7 @@ namespace VpUnit
 namespace CutFadeJudge
 {
 // Bump on ANY change of a threshold, a rule above or the meaning of an output.
-constexpr uint32_t kUnitVersion = 4;
+constexpr uint32_t kUnitVersion = 5;
 
 constexpr double kCutHistFrac = 0.50;          // normalised L1 distance / 2 above this: a different picture
 constexpr double kCutPossibleHistFrac = 0.25;  // above this (or a continuity slip): a cut is possible
@@ -285,6 +285,15 @@ void AlignGrid(const double ref[kGridH][kGridW], const double cur[kGridH][kGridW
 
 GridFadeFit FitGridFadeAligned(const double refAligned[kGridH][kGridW], const double curAligned[kGridH][kGridW],
                                double vx, double vy);
+
+// Motion-tolerant order-statistic OLS + exact 4x2 square macro-tile uniformity + 14x7 2x2-pooled structure continuity
+// fallback over the already-aligned 28x14 interior (zero extra AlignGrid calls, zero new constants, zero heap allocations).
+GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const double curAligned[kGridH][kGridW],
+                                  double vx, double vy);
+
+// Verifies raw-pixel highlight p99 scales consistently with the cell-OLS fade gain about implied black
+// (rejects midtone flicker with pinned highlights; near-black p99 <= black + kFadeMinSpread passes to black-boundary rules).
+bool HighlightScalingConsistent(uint32_t refP99P4, uint32_t curP99P4, double gain, double black, int dir);
 
 GridFadeFit FitGridFadeGrid(const double ref[kGridH][kGridW], const double cur[kGridH][kGridW], int searchRadius);
 
@@ -607,7 +616,9 @@ private:
                             ++darkened;
                 if (darkened == 0 && !(ahead->scored && ahead->score.G == 0.0)) {
                     const GridFadeFit aheadFit = FitGridFadeGrid(k->grid.g, ahead->grid.g, kShiftRadius);
-                    if (aheadFit.valid && aheadFit.dir > 0) {
+                    // Duration-invariant emergence ratio from black (linear 2.0, BT.709 1.366, half-frame phase 1.258):
+                    // require gain >= 1 + 1/kFadeMaxDiv (1.25) so hard cuts into dim shots with gentle +5..15% lighting rise stay cuts.
+                    if (aheadFit.valid && aheadFit.dir > 0 && aheadFit.gain >= 1.0 + 1.0 / double(kFadeMaxDiv)) {
                         k->verdict = v;
                         return v;
                     }
@@ -738,7 +749,7 @@ inline FadeOut FadeFit(const FadeIn& in, const FadeParams& p = FadeParams())
     return o;
 }
 
-// ---- the multi-frame fade law (unit version 4) ---------------------------------------------------------------------------
+// ---- the multi-frame fade law (unit version 5) ---------------------------------------------------------------------------
 
 struct FadeRun {
     int32_t direction = 0;      // +1 the picture brightens, -1 it darkens, 0 no run
@@ -746,6 +757,7 @@ struct FadeRun {
     uint32_t fadePairs = 0;     // confirmed fade pairs inside the run
     uint32_t baseMean = 0;      // the run's anchor record: mean and p99 (P4 codes)
     uint32_t baseP99 = 0;
+    uint32_t midP99 = 0;        // p99 of the midCells anchor snapshot (kept in sync across pan leapfrogs)
     uint32_t blackBaseMean = 0; // original flat-black origin mean / p99 when blackOrigin is true
     uint32_t blackBaseP99 = 0;
     uint32_t refSpread = 0;     // the largest p99 - p01 inside the run
